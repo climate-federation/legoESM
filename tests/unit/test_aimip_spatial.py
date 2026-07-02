@@ -568,3 +568,26 @@ def test_aimip_nonspatial_rrtmgp_sfc_albedo_is_trainable():
     g = np.asarray(grads.raw_values["rrtmgp_sfc_albedo"])
     assert np.all(np.isfinite(g)), "non-finite gradient on the scalar rrtmgp_sfc_albedo"
     assert np.any(g != 0.0), "rrtmgp_sfc_albedo is a dead leaf in the non-spatial RRTMGP path"
+
+
+def test_spatial_baselines_from_params_maps_trained_scalars():
+    """Regression (codex): the spatial-field baselines must come from the
+    TRAINED scalar keys, alias-mapped to the field names. A raw ``as_dict``
+    pass-through left every baseline at the static f_0 -> trained scalars dead
+    + no trainable ocean-surface lever under ``spatial_surface=True``."""
+    from legoesm.training.aimip_params import (
+        AIMIPClassicalParams,
+        spatial_baselines_from_params,
+    )
+    from legoesm.training.aimip_spatial import _FIELD_SPECS
+
+    d = AIMIPClassicalParams.from_defaults().as_dict()
+    for rad, prefix in (("rrtmgp", "rrtmgp"), ("gray", "gray")):
+        b = spatial_baselines_from_params(d, rad)
+        # keys must EXACTLY match the spatial field names evaluate() looks up
+        assert set(b) == set(_FIELD_SPECS), (set(b), set(_FIELD_SPECS))
+        assert b["Cd_neutral"] is d["surface_Cd_neutral"]
+        assert b["Ch_neutral"] is d["surface_Ch_neutral"]
+        assert b["z0"] is d["surface_z0"]
+        assert b["sfc_albedo"] is d[f"{prefix}_sfc_albedo"]
+        assert b["sfc_emissivity"] is d[f"{prefix}_sfc_emissivity"]

@@ -558,6 +558,27 @@ def _canonical_scheme_defaults() -> dict[str, float]:
 # Spectral-PE physics builder for AIMIP classical
 # ----------------------------------------------------------------------
 
+def spatial_baselines_from_params(d: dict, radiation: str) -> dict:
+    """Map trained-scalar keys onto the spatial-surface FIELD names.
+
+    ``AIMIPSpatialSurfaceParams.evaluate(baselines=...)`` expects the field
+    names (``Cd_neutral``, ``Ch_neutral``, ``z0``, ``sfc_emissivity``,
+    ``sfc_albedo``); the trained scalars live under ``surface_*`` and the
+    radiation-scheme-specific ``{rrtmgp,gray}_sfc_*`` keys. The values are the
+    sigmoid-bounded TRACED leaves, so the scalar knobs receive gradient through
+    the spatial fields — and, because ocean columns fall back to the baseline,
+    they are the only trainable ocean-surface levers.
+    """
+    rad = "rrtmgp" if radiation == "rrtmgp" else "gray"
+    return {
+        "Cd_neutral": d["surface_Cd_neutral"],
+        "Ch_neutral": d["surface_Ch_neutral"],
+        "z0": d["surface_z0"],
+        "sfc_emissivity": d[f"{rad}_sfc_emissivity"],
+        "sfc_albedo": d[f"{rad}_sfc_albedo"],
+    }
+
+
 def make_aimip_classical_spectral_physics(
     params: AIMIPClassicalParams,
     grid,
@@ -635,7 +656,14 @@ def make_aimip_classical_spectral_physics(
     # short-circuits to False, preserving the global-scalar path.
     spatial_fields_col: dict[str, jax.Array] = {}
     if getattr(params, "spatial_surface", None) is not None and land_mask is not None:
-        baselines = params.as_dict()
+        # Alias-map the trained scalar keys onto the SPATIAL FIELD names
+        # (codex review): ``evaluate`` looks up ``Cd_neutral``/``sfc_albedo``
+        # etc. while ``as_dict`` carries ``surface_Cd_neutral`` /
+        # ``{rrtmgp,gray}_sfc_albedo``. Passing the raw dict left every
+        # baseline at the STATIC f_0 -> the trained scalars were DEAD under
+        # ``spatial_surface=True`` and (since ocean columns fall back to the
+        # baseline) the ocean surface exchange/albedo had NO trainable lever.
+        baselines = spatial_baselines_from_params(params.as_dict(), radiation)
         fields_2d = params.spatial_surface.evaluate(
             grid, land_mask=land_mask, baselines=baselines,
         )
