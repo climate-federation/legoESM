@@ -75,12 +75,34 @@ def test_validate_strict_accepts_spmd_checkpointing():
     cfg.validate_strict()
 
 
-def test_validate_strict_rejects_spmd_diagnostics():
+def test_validate_strict_accepts_spmd_diagnostics_perf_mode():
+    """cs_spmd step 5b: perf-mode diagnostics (scalar SPMD-global
+    reductions + root-gated flushes) are supported under spmd."""
     from legoesm.driver.config import OutputConfig
     cfg = _cfg(distributed=True, distributed_mode="spmd")
     cfg = cfg._replace(output=OutputConfig(
         output_dir="", diag_days=2, checkpoint_days=0))
-    with pytest.raises(ValueError, match="diag"):
+    cfg.validate_strict()
+
+
+def test_validate_strict_rejects_spmd_cmip_output():
+    """CMIP output forces the full collect() (materialises global arrays)
+    — still refused under spmd."""
+    from legoesm.driver.config import OutputConfig
+    cfg = _cfg(distributed=True, distributed_mode="spmd")
+    cfg = cfg._replace(output=OutputConfig(
+        output_dir="", diag_days=2, checkpoint_days=0, cmip_output=True))
+    with pytest.raises(ValueError, match="cmip"):
+        cfg.validate_strict()
+
+
+def test_validate_strict_rejects_spmd_perf_mode_never():
+    from legoesm.driver.config import OutputConfig
+    cfg = _cfg(distributed=True, distributed_mode="spmd")
+    cfg = cfg._replace(output=OutputConfig(
+        output_dir="", diag_days=2, checkpoint_days=0,
+        diagnostics_perf_mode="never"))
+    with pytest.raises(ValueError, match="perf"):
         cfg.validate_strict()
 
 
