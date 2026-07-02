@@ -88,6 +88,11 @@ def main():
     ap.add_argument("--last-year", type=int, default=2014)  # training period only
     ap.add_argument("--lr", type=float, default=3.0e-4)
     ap.add_argument("--w-drift", type=float, default=3.0)
+    ap.add_argument("--convection-scheme", type=str, default=None,
+                    help="Override aimip_convection (attribution 2026-07-02: "
+                         "untrained-edmf drives a +3.3 K/day column heating "
+                         "runaway; trained tiedtke is near-balanced AND has "
+                         "trainable leaves).")
     ap.add_argument("--rad-update-interval", type=int, default=36)
     args = ap.parse_args()
 
@@ -131,6 +136,11 @@ def main():
     )
 
     cfg = _merged_cfg(args.suite)
+    if args.convection_scheme:
+        # Single override point: make_aimip_* (loss + warm-up) AND the sizing
+        # PhysicsState all read cfg["aimip_convection"].
+        cfg["aimip_convection"] = args.convection_scheme
+        logger.info(f"convection override: {cfg['aimip_convection']}")
     from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
     from legoesm.training.losses import LossConfig
     from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig

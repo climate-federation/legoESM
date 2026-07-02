@@ -98,6 +98,10 @@ def main():
                     help="Exclude spin-up before this date from recorded output.")
     ap.add_argument("--member", type=int, default=0,
                     help="Ensemble member 0..4 = IC on the N-th successive ERA5 day.")
+    ap.add_argument("--convection-scheme", type=str, default=None,
+                    help="Override aimip_convection (attribution 2026-07-02: "
+                         "untrained-edmf drives a +3.3 K/day column heating "
+                         "runaway; trained tiedtke is near-balanced).")
     ap.add_argument("--rad-update-interval", type=int, default=36)
     ap.add_argument("--wall-limit-hours", type=float, default=0.0,
                     help="Stop cleanly after this many wall hours, write a "
@@ -153,6 +157,11 @@ def main():
     )
 
     cfg = _merged_cfg(args.suite)
+    if args.convection_scheme:
+        # Single override point: make_aimip_* AND the sizing PhysicsState both
+        # read cfg["aimip_convection"].
+        cfg["aimip_convection"] = args.convection_scheme
+        logger.info(f"convection override: {cfg['aimip_convection']}")
     spec_cfg = _build_spec_cfg(cfg)
     grid = create_gaussian_grid(spec_cfg.n_max, dealiasing="quadratic")
     sigma = create_sigma_coordinate(spec_cfg.n_levels, sigma_top=spec_cfg.sigma_top)
