@@ -70,27 +70,28 @@ TUNED_CH = 0.004425              # LandConfig.Ch_land / Cd_land bulk transfer
 # the PLANT btran water-stress thresholds theta_wp/theta_fc (distinct from the soil
 # van-Genuchten retention).  Full-grid: RMSE 3.13 K, bias +0.44, seasonal-amp RMS 4.05.
 # Selected via CLMSurfaceParamProvider(variant="multilayer"); slab unchanged.  (17 PFTs.)
-# 2026-07 recalibration (v3): 24-h ERA5, MINI-BATCH SGD over the FULL global land grid
-# (~5.4k cells), random 80/20 train/test split, with the CORRECTED albedo physics:
-# Niu-Yang (2007) tanh snow cover + trainable snow albedo (fresh/aged brightness, cover
-# scale, age decay) + CLM dry-soil brightening (deserts).  HELD-OUT (1087 never-trained
-# cells): skin-T RMSE 2.59 -> 2.32 K; albedo RMSE 0.113 -> 0.104, bias +0.027 -> +0.009.
-# Regional albedo bias vs the first tune: Antarctica -0.146 -> -0.067, NH>55 -0.060 ->
-# +0.012, Sahara -0.066 -> -0.027, Tibet -0.088 -> -0.069 (sub-grid permanent ice at 2deg).
+# 2026-07 recalibration (v4): 24-h ERA5, MINI-BATCH SGD over the FULL global land grid
+# (~5.4k cells), 80/20 train/test split, corrected albedo physics (Niu-Yang tanh snow
+# cover + trainable snow albedo + CLM dry-soil brightening) AND the per-cell CLM
+# soil-COLOUR bare-soil albedo (bright deserts).  HELD-OUT (1087 never-trained cells):
+# skin-T RMSE 2.63 -> 2.26 K, bias +0.53 -> +0.30 K; albedo RMSE 0.110 -> 0.104, bias
+# +0.011 -> +0.006.  Regional albedo bias vs the first tune: Antarctica -0.146 -> -0.061,
+# NH>55 -0.060 -> +0.019, Sahara -0.066 -> -0.007 (soil colour), Tibet -0.088 -> -0.106
+# (worse: the correct dark Tibetan soil now shows through the sub-grid-snow deficit).
 # (pft_ch is inert under MOST -> kept from the constant-Ch bake.)
-_TUNED_PFT_ALBEDO_MULTILAYER = (0.2913, 0.1167, 0.1288, 0.1396, 0.1416, 0.1470, 0.1610,
-                                0.1700, 0.1700, 0.1771, 0.1774, 0.1937, 0.1978, 0.1992,
-                                0.1977, 0.1741, 0.1800)
-_TUNED_PFT_EMISSIVITY_MULTILAYER = (0.9591, 0.9603, 0.9584, 0.9572, 0.9618, 0.9625,
-                                    0.9615, 0.9612, 0.9587, 0.9639, 0.9657, 0.9585,
-                                    0.9587, 0.9638, 0.9605, 0.9582, 0.9600)
-_TUNED_PFT_ROOT_DEPTH_MULTILAYER = (0.097, 2.086, 1.344, 1.271, 1.509, 1.785, 1.569, 1.561,
-                                    1.104, 0.696, 0.685, 0.720, 0.446, 0.526, 0.497, 0.472, 0.500)
+_TUNED_PFT_ALBEDO_MULTILAYER = (0.3000, 0.1191, 0.1288, 0.1376, 0.1393, 0.1468, 0.1598,
+                                0.1700, 0.1700, 0.1810, 0.1771, 0.1931, 0.1979, 0.2055,
+                                0.1995, 0.1805, 0.1800)
+_TUNED_PFT_EMISSIVITY_MULTILAYER = (0.9591, 0.9569, 0.9581, 0.9571, 0.9594, 0.9612,
+                                    0.9599, 0.9575, 0.9585, 0.9644, 0.9636, 0.9583,
+                                    0.9586, 0.9634, 0.9614, 0.9605, 0.9600)
+_TUNED_PFT_ROOT_DEPTH_MULTILAYER = (0.095, 1.929, 1.478, 1.448, 1.634, 1.678, 1.512, 1.423,
+                                    1.099, 0.723, 0.701, 0.703, 0.461, 0.521, 0.515, 0.506, 0.500)
 # per-PFT roughness length z0 [m] (drives the MOST surface exchange -> tall forests
 # rough ~1-2 m, grass/crop/bare smooth ~0.02-0.23 m).  Calibrated under MOST (the
 # coupled diurnal-surface default); the constant-bulk fallback ignores it.
-_TUNED_PFT_Z0_MULTILAYER = (0.0052, 1.1633, 0.8720, 0.9016, 1.8377, 1.4261, 1.9943, 1.2174,
-                            0.9667, 0.0706, 0.1214, 0.1265, 0.0374, 0.0256, 0.0380, 0.0814, 0.0600)
+_TUNED_PFT_Z0_MULTILAYER = (0.0051, 1.0405, 0.9045, 0.9886, 1.7948, 1.4540, 1.8456, 1.0617,
+                            0.9284, 0.0726, 0.1454, 0.1156, 0.0343, 0.0317, 0.0357, 0.0714, 0.0600)
 # per-PFT bulk heat/moisture exchange coefficient [-] (constant-bulk fallback only;
 # inert under the MOST default -> retained from the constant-Ch calibration).
 _TUNED_PFT_CH_MULTILAYER = (0.003113, 0.005482, 0.004555, 0.005126, 0.005625, 0.005629,
@@ -100,33 +101,36 @@ _TUNED_PFT_CH_MULTILAYER = (0.003113, 0.005482, 0.004555, 0.005126, 0.005625, 0.
 # (k_solid / C_solid from sand/clay, Oleson 2013): the per-cell texture sets the
 # spatial pattern, the per-PFT scale sets the magnitude.  k_scale ~0.2-0.5 brings the
 # physical mineral k (3-9 W/m/K) down to the effective seasonal-cycle value.
-_TUNED_PFT_KSCALE_MULTILAYER = (0.3495, 0.4079, 0.3427, 0.3277, 0.3822, 0.2631, 0.3332,
-                                0.3116, 0.3342, 0.2667, 0.2870, 0.3340, 0.3416, 0.2969,
-                                0.4150, 0.4143, 0.3500)
-_TUNED_PFT_CSCALE_MULTILAYER = (0.8458, 0.9457, 0.8414, 0.8459, 0.9799, 0.7271, 0.9059,
-                                0.7646, 0.8199, 0.7224, 0.8069, 0.8301, 0.8393, 0.8062,
-                                1.0050, 1.0115, 0.9000)
+_TUNED_PFT_KSCALE_MULTILAYER = (0.3196, 0.3772, 0.3737, 0.3409, 0.3421, 0.3169, 0.3724,
+                                0.3653, 0.3220, 0.2770, 0.2988, 0.3253, 0.3316, 0.2843,
+                                0.3360, 0.3067, 0.3500)
+_TUNED_PFT_CSCALE_MULTILAYER = (0.8843, 0.8574, 0.9185, 0.9487, 0.9196, 0.7587, 0.8861,
+                                0.8508, 0.8471, 0.7360, 0.8229, 0.8752, 0.8811, 0.7078,
+                                0.8789, 0.8299, 0.9000)
 # per-PFT PLANT btran water-stress thresholds (wilting / field capacity) [m3/m3]
-_TUNED_PFT_WP_MULTILAYER = (0.0844, 0.0983, 0.0845, 0.0852, 0.1362, 0.1087, 0.1376, 0.1106,
-                            0.1050, 0.1081, 0.0833, 0.0894, 0.0840, 0.0929, 0.0992, 0.0926, 0.1000)
-_TUNED_PFT_FC_MULTILAYER = (0.1713, 0.2539, 0.2093, 0.2087, 0.3376, 0.2735, 0.3411, 0.2785,
-                            0.2641, 0.2836, 0.2043, 0.2216, 0.2045, 0.2489, 0.2623, 0.2343, 0.2500)
-TUNED_GLACIER_ALBEDO_MULTILAYER = 0.7306    # snow-free ice-sheet base (raised: ERA5 ~0.85)
-TUNED_SNOW_ALBEDO_MAX_MULTILAYER = 0.7866
+_TUNED_PFT_WP_MULTILAYER = (0.0850, 0.0925, 0.0945, 0.0917, 0.1168, 0.1000, 0.1176, 0.1075,
+                            0.1045, 0.1000, 0.0847, 0.0845, 0.0861, 0.0883, 0.0878, 0.0830, 0.1000)
+_TUNED_PFT_FC_MULTILAYER = (0.1705, 0.2278, 0.2359, 0.2282, 0.2924, 0.2523, 0.2952, 0.2709,
+                            0.2625, 0.2666, 0.2021, 0.2063, 0.2153, 0.2199, 0.2221, 0.2150, 0.2500)
+TUNED_GLACIER_ALBEDO_MULTILAYER = 0.7203    # snow-free ice-sheet base (raised: ERA5 ~0.85)
+TUNED_SNOW_ALBEDO_MAX_MULTILAYER = 0.7964
 # aged-snow albedo floor, tanh snow-cover SWE half-scale [kg/m2], snow-albedo age
 # e-folding [days], and the CLM dry-soil albedo brightening (deserts) — the snow/soil
 # albedo processes the v3 recalibration made trainable to close the high-lat / ice-sheet
 # / desert albedo bias.  snow_dcrit is now the Niu-Yang tanh half-cover scale (NOT the
 # old linear full-cover depth).
-TUNED_SNOW_ALBEDO_MIN_MULTILAYER = 0.5163
-TUNED_SNOW_DCRIT_MULTILAYER = 18.9371
-TUNED_SNOW_TAU_DAYS_MULTILAYER = 3.4954
-TUNED_SOIL_DRY_BOOST_MULTILAYER = 0.0988
+TUNED_SNOW_ALBEDO_MIN_MULTILAYER = 0.5223
+TUNED_SNOW_DCRIT_MULTILAYER = 17.2850
+TUNED_SNOW_TAU_DAYS_MULTILAYER = 3.7417
+TUNED_SOIL_DRY_BOOST_MULTILAYER = 0.1247
+# scale on the per-cell CLM soil-COLOUR bare-soil albedo (~1 -> the raw MODIS-calibrated
+# soil colour is right; gives the model CLM's bright-desert skill).
+TUNED_SOIL_ALB_SCALE_MULTILAYER = 1.0397
 # deep-ice thermal-inertia boost on glacier cells (on top of pure-ice C=rho_ice*c_pi):
 # parameterises the large thermal mass of a deep ice sheet that the finite 3 m soil
 # column under-represents -> damps the polar seasonal over-amplitude.  Calibrated:
 # fixes the Antarctica seasonal-amplitude bias +2.62 -> -0.02 K.
-TUNED_GLACIER_CBOOST_MULTILAYER = 4.1178
+TUNED_GLACIER_CBOOST_MULTILAYER = 4.1471
 # scalar fallback Ch (PFT mean) for the rare no-grid path where the per-cell map
 # (clm_multilayer_ch) cannot be built; the per-cell value is used when a grid exists.
 TUNED_CH_MULTILAYER = float(np.mean(_TUNED_PFT_CH_MULTILAYER))
@@ -277,9 +281,11 @@ class CLMSurfaceParamProvider(eqx.Module):
     _glacier_albedo: float = eqx.field(static=True)   # snow-free ice base albedo
     plant_theta_wp: jax.Array = None  # (ncol,) PFT-weighted PLANT btran wilting (or None)
     plant_theta_fc: jax.Array = None  # (ncol,) PFT-weighted PLANT btran field cap (or None)
+    soil_albedo: jax.Array = None     # (ncol,) per-cell CLM soil-colour bare-soil albedo
+    _soil_alb_scale: float = eqx.field(static=True, default=1.0)   # tuned scale on it
 
     def __init__(self, pft_fractions, soil_theta_wp, soil_theta_fc, glacier_frac,
-                 tuned: bool = True, variant: str = "slab"):
+                 tuned: bool = True, variant: str = "slab", soil_albedo=None):
         self.pft_fractions = pft_fractions
         self.soil_theta_wp = soil_theta_wp
         self.soil_theta_fc = soil_theta_fc
@@ -287,6 +293,8 @@ class CLMSurfaceParamProvider(eqx.Module):
         self._glacier_albedo = TUNED_GLACIER_ALBEDO
         self.plant_theta_wp = None
         self.plant_theta_fc = None
+        self.soil_albedo = soil_albedo
+        self._soil_alb_scale = 1.0
         table = np.asarray(clm5_pft_table())
         if tuned:   # overwrite the calibrated per-PFT columns (physical bounds)
             if variant not in _VARIANT_TUNED:
@@ -305,6 +313,7 @@ class CLMSurfaceParamProvider(eqx.Module):
                 self.plant_theta_fc = pft_fractions @ jnp.asarray(_TUNED_PFT_FC_MULTILAYER)
                 # calibrated MOST roughness (drives the coupled diurnal exchange)
                 table[:, PARAM_NAMES.index("z0")] = _TUNED_PFT_Z0_MULTILAYER
+                self._soil_alb_scale = TUNED_SOIL_ALB_SCALE_MULTILAYER
         self.raw_table = jnp.asarray(table)
 
     def __call__(self) -> LandSurfaceParams:
@@ -318,6 +327,14 @@ class CLMSurfaceParamProvider(eqx.Module):
         else:
             params["theta_wp"] = self.soil_theta_wp
             params["theta_fc"] = self.soil_theta_fc
+        # Bare soil (PFT 0): use the per-cell CLM soil-COLOUR albedo (spatial desert/soil
+        # pattern) x the tuned scale, instead of the single per-PFT bare value — CLM's
+        # bright-desert skill, from the MODIS-calibrated soil colour.
+        if self.soil_albedo is not None:
+            bare = self.pft_fractions[:, 0]
+            alb0 = self.raw_table[0, PARAM_NAMES.index("albedo_veg")]
+            params["albedo_veg"] = (params["albedo_veg"] - bare * alb0
+                                    + bare * self.soil_albedo * self._soil_alb_scale)
         # Glacier / ice-sheet cells: blend the snow-free base albedo toward ice so
         # ice sheets stay bright when summer snow melts (the snow feedback layers on
         # top of this base) instead of exposing dark bare soil — the Greenland fix.
@@ -411,7 +428,8 @@ def clm_multilayer_setup(surface_map: dict, base_config=None, variant: str = "mu
     base = base_config if base_config is not None else MultiLayerLandConfig()
     provider = CLMSurfaceParamProvider(
         surface_map["pft_fractions"], surface_map["theta_wp"], surface_map["theta_fc"],
-        surface_map["glacier_frac"], variant=variant)
+        surface_map["glacier_frac"], variant=variant,
+        soil_albedo=surface_map.get("soil_albedo"))
     # Calibrated SNOW albedo (fresh/aged brightness + cover threshold + age decay) baked
     # ONCE here so every consumer (the AMIP segment model_driver, the CMIP coupled driver,
     # complexity) gets the full 2026-07 recalibration — clm_multilayer_setup is the single
