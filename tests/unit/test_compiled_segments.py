@@ -707,6 +707,11 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
         # Physics
         need_rad = jnp.bool_(True) if args["rad_update_steps"] <= 1 else \
             ((step_idx + 1) % args["rad_update_steps"]) == 0
+        # Per-step solar time — mirror _single_step's diurnal-cycle fix
+        # (advance the wall clock from the absolute step index).
+        from legoesm.forcing.time_utils import day_to_calendar
+        _abs_day = args["start_day"] + (step_idx + 1) * dt / 86400.0
+        _doy_step, _sod_step = day_to_calendar(_abs_day)
         # Stateful-physics carries (issue #413): pass active (non-None)
         # carries by keyword, mirroring _single_step.
         _phys_carry_in = {
@@ -721,8 +726,8 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             u_new, v_new,
             forcing.sst, forcing.sic,
             args["lat"], args["lon"],
-            forcing.day_of_year,
-            forcing.seconds_of_day,
+            _doy_step,
+            _sod_step,
             jnp.float32(dt),
             forcing.solar_weights,
             forcing.s_0,
@@ -985,6 +990,82 @@ class TestSegmentMeanAccumulators:
                       "sw_down_toa_accum", "sw_net_sfc_accum",
                       "lw_net_sfc_accum", "t_low_accum"):
             assert float(np.abs(np.asarray(getattr(carry, field))).max()) == 0.0
+
+
+class TestPerStepSolarTime:
+    """Diurnal-cycle fix: the compiled scan advances the solar wall clock
+    every step instead of freezing it at the segment time.
+
+    A probe mock writes each step's ``seconds_of_day`` into
+    ``held_sw_down_toa``; with rad_update_steps=1 the accumulator then holds
+    ``sum_i seconds_of_day(step i) * dt``.  A FROZEN clock (the bug) would
+    make every step identical, so the accumulator would equal
+    ``n * dt * seconds_of_day(step 0)`` — the test asserts it matches the
+    ADVANCING sum instead, which differs.
+    """
+
+    def _probe_args(self):
+        args = _make_segment_fn_args()
+
+        def _probe_step(need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
+                        sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
+                        *rest, **kwargs):
+            # Emit this step's seconds_of_day as the down-TOA "flux" so the
+            # accumulator records the solar clock actually seen each step.
+            shape_2d = p_s.shape
+            sod = jnp.broadcast_to(jnp.asarray(seconds_of_day, p_s.dtype), shape_2d)
+            phys_out = PhysicsOutput(
+                dT_dt=jnp.zeros(T.shape), dq_v_dt=jnp.zeros(T.shape),
+                dq_c_dt=jnp.zeros(T.shape), dq_r_dt=jnp.zeros(T.shape),
+                precip=jnp.zeros(shape_2d),
+                sw_net_sfc=jnp.zeros(shape_2d), lw_net_sfc=jnp.zeros(shape_2d),
+                sw_up_toa=jnp.zeros(shape_2d), lw_up_toa=jnp.zeros(shape_2d),
+                sw_down_toa=sod,
+                du_dt=jnp.zeros(T.shape), dv_dt=jnp.zeros(T.shape),
+                dq_i_dt=jnp.zeros(T.shape), dq_s_dt=jnp.zeros(T.shape),
+                dq_g_dt=jnp.zeros(T.shape), dN_c_dt=jnp.zeros(T.shape),
+                dN_r_dt=jnp.zeros(T.shape), dN_i_dt=jnp.zeros(T.shape),
+                conv_prog=conv_prog,
+            )
+            held_new = (jnp.zeros(T.shape), jnp.zeros(shape_2d),
+                        jnp.zeros(shape_2d), jnp.zeros(shape_2d),
+                        jnp.zeros(shape_2d), sod)   # held_sw_down_toa = sod
+            # T_land passes through unchanged (mirrors _mock_step_unified) so
+            # the carry pytree structure is preserved across the scan.
+            return phys_out, held_new, kwargs.get("T_land")
+
+        args["step_unified"] = _probe_step
+        args["start_day"] = 0.0
+        return args
+
+    def test_seconds_of_day_advances_within_segment(self):
+        args = self._probe_args()
+        run_segment = build_segment_fn(**args)
+        n = 5
+        carry = pack_carry(
+            _make_hydrostatic_state(),
+            q_v=jnp.ones((N_FACES, N, N, NLEV)) * 0.01,
+            q_c=jnp.zeros((N_FACES, N, N, NLEV)),
+            q_r=jnp.zeros((N_FACES, N, N, NLEV)),
+            held_dT_rad=jnp.zeros((N_FACES, N, N, NLEV)),
+            held_sw_net_sfc=jnp.zeros((N_FACES, N, N)),
+            held_lw_net_sfc=jnp.zeros((N_FACES, N, N)),
+            held_sw_up_toa=jnp.zeros((N_FACES, N, N)),
+            held_lw_up_toa=jnp.zeros((N_FACES, N, N)),
+            held_sw_down_toa=jnp.zeros((N_FACES, N, N)),
+            step_index=0,
+        )
+        result = run_segment(carry, n, _FORCING)
+
+        # Expected: sum over steps of seconds_of_day(step i) * dt, with
+        # seconds_of_day(step i) = ((i+1)*DT) % 86400 (start_day=0).
+        expect = sum((((i + 1) * DT) % 86400.0) * DT for i in range(n))
+        got = float(np.asarray(result.sw_down_toa_accum).flat[0])
+        np.testing.assert_allclose(got, expect, rtol=1e-6)
+
+        # And it must NOT equal the frozen-clock value (the bug).
+        frozen = n * DT * ((n * DT) % 86400.0)   # all steps at segment-end time
+        assert abs(got - frozen) > 1.0, "solar clock appears frozen per segment"
 
 
 class TestStatefulPhysicsCarry:
