@@ -34,10 +34,20 @@ DT = 60.0
 
 
 def _mesh():
-    from legoesm.parallel.mesh import create_device_mesh
+    # RAW (6, kt, kt) mesh with the factory's expected axis names, and the
+    # LOCAL halo backend pinned — the same setup the stage gate
+    # (test_tiled_fv3_hydrostatic_step) uses.  create_device_mesh(24) is
+    # NOT equivalent: it arms global device-config state that reroutes the
+    # serial reference's halo pads (measured: cc-angle x corner-wind shape
+    # clash in pad_halo_vector_4d, job 8688245).
+    import numpy as _np
+    from jax.sharding import Mesh
+    from legoesm.grids.halo import set_halo_backend
     if len(jax.devices()) < 6 * KT * KT:
         pytest.skip(f"needs {6*KT*KT} devices (XLA_FLAGS host device count)")
-    return create_device_mesh(n_devices=6 * KT * KT).mesh
+    set_halo_backend("local")
+    dev = _np.array(jax.devices()[: 6 * KT * KT]).reshape(6, KT, KT)
+    return Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
 
 
 def _model_and_state():
