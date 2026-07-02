@@ -86,6 +86,43 @@ def test_setup_wires_multilayer_land(monkeypatch, tmp_path):
                   & (np.asarray(st.theta_soil) <= 1.0))
 
 
+def test_setup_seeds_aridity_aware_soil_moisture(monkeypatch, tmp_path):
+    """issue #730: the seeded soil column tracks the IC near-surface RH, not the
+    legacy moisture-uniform 0.5*theta_sat.  Verifies the driver wires
+    q_v/p_s -> RH -> aridity_theta_init with the per-column CLM theta_wp/theta_fc."""
+    from legoesm.land import aridity_theta_init
+    from legoesm.thermo import saturation_mixing_ratio
+    _patch_land_loaders(monkeypatch)
+    driver = ModelDriver(_small_cfg(), output_dir=tmp_path)
+    driver.setup()
+
+    ad = driver.physics.adapter
+    T_low = ad.flatten_2d(driver.state.T.data[..., -1]).reshape(-1)
+    _qv = driver.q_v
+    q_v_low = ad.flatten_2d(getattr(_qv, "data", _qv)[..., -1]).reshape(-1)
+    p_s = ad.flatten_2d(
+        getattr(driver.state.p_s, "data", driver.state.p_s)).reshape(-1)
+    rh = np.asarray(q_v_low) / np.maximum(
+        np.asarray(saturation_mixing_ratio(jnp.asarray(T_low), jnp.asarray(p_s))), 1e-12)
+    # Use the SAME per-column thresholds the driver + tile beta read: the
+    # PFT-weighted plant btran theta_wp/theta_fc from clm_multilayer_setup (NOT
+    # the raw soil theta_wp/fc in the fake map -- clm_multilayer_setup overrides
+    # them with the tuned PFT btran values).
+    params = driver.physics.land_ml_params
+    wp = np.asarray(params.theta_wp); fc = np.asarray(params.theta_fc)
+    expected = np.asarray(aridity_theta_init(jnp.asarray(rh), jnp.asarray(wp), jnp.asarray(fc)))
+
+    theta = np.asarray(driver._land_ml_state.theta_soil)   # (ncol, nlayers)
+    # every layer seeded to the per-column aridity value (float32 state -> loose tol)
+    np.testing.assert_allclose(theta[:, 0], expected, rtol=2e-3, atol=2e-3)
+    for k in range(theta.shape[1]):
+        np.testing.assert_allclose(theta[:, k], theta[:, 0], rtol=1e-6)
+    # bounded to the per-column plant-available range, and NOT the legacy uniform
+    # 0.5*theta_sat seed (which is aridity-blind).
+    assert np.all((theta[:, 0] >= wp - 1e-4) & (theta[:, 0] <= fc + 1e-4))
+    assert not np.allclose(theta, 0.5 * np.asarray(driver.physics.land_ml_cfg.hydraulics.theta_sat))
+
+
 def _latlon_cfg():
     """Lat-lon (res8 -> 8x16=128 cols) twin of _small_cfg. Exercises the
     1-D-lat column construction in _setup_multilayer_land (the cubed-sphere
