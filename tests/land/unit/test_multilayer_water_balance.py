@@ -23,7 +23,8 @@ from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.config import MultiLayerLandConfig, RichardsConfig
 from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
-from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
+from legoesm.land.soil_hydraulics import (
+    SoilHydraulicsConfig, psi_from_theta, theta_from_psi, hydraulic_conductivity)
 from legoesm.land.richards import solve_richards
 from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
 
@@ -118,6 +119,48 @@ def test_evaporation_conserves_with_and_without_pond():
     evap = -5.0e-7  # net upward surface water flux [m/s], within column supply
     assert abs(_richards_residual(loam, evap, 0.0)) < 1.0e-3                 # dry surface
     assert abs(_richards_residual(loam, evap, 0.0, pond0_val=0.02)) < 1.0e-3  # standing pond
+
+
+def test_richards_drainage_reported_at_solver_debited_K():
+    """Reported subsurface drainage must be the K the last Picard iteration's rhs
+    actually DEBITED (the free-drainage bottom BC is explicit, evaluated at the
+    carry entering that iteration) — not K re-evaluated at psi_final.  The two
+    differ by O(last dpsi), and that mismatch showed up 1:1 as a spurious column
+    budget residual: on this draining wet column, drainage-at-psi_final leaves
+    ~6.1e-6 kg/m2/step while the solve-consistent report leaves ~4.6e-8 kg/m2
+    (only the last iteration's O(dpsi^2) linearization error remains).  The soil
+    STATE is untouched by the fix (bit-identical psi/theta/pond/runoff_surface,
+    probe-verified in x64 and float32); only the diagnostic moved."""
+    loam = SoilHydraulicsConfig()
+    theta_wet = float(loam.theta_sat) - 0.005
+
+    # (a) budget gate: draining wet column closes far below the pre-fix mismatch.
+    resid = _richards_residual(loam, 0.0, 0.0, theta_init=theta_wet)
+    assert abs(resid) < 5.0e-7, resid   # pre-fix (K at psi_final): ~6.1e-6 kg/m2
+
+    # (b) semantics pin: the reported drainage equals K at the carry ENTERING the
+    # last iteration — recoverable as the raw psi of a (max_iter-1) run, since the
+    # Picard body is deterministic (the layer-0 pond-deficit debit only touches the
+    # RETURNED theta, so recompute theta from psi).  And it must NOT be K(psi_final)
+    # (the old evaluation) on this still-draining column.
+    grid = _grid()
+    theta0 = jnp.full((1, 8), theta_wet)
+    psi0 = psi_from_theta(theta0, loam)
+    flux = jnp.zeros(1)
+    sink = jnp.zeros((1, 8))
+    pond0 = jnp.zeros(1)
+    out = solve_richards(psi0, theta0, grid, loam, RichardsConfig(max_iter=10),
+                         flux, sink, 3600.0, surface_water=pond0)
+    out_m1 = solve_richards(psi0, theta0, grid, loam, RichardsConfig(max_iter=9),
+                            flux, sink, 3600.0, surface_water=pond0)
+    K_carry = hydraulic_conductivity(
+        out_m1.psi_new, theta_from_psi(out_m1.psi_new, loam), loam)[:, -1]
+    K_final = hydraulic_conductivity(out.psi_new, out.theta_new, loam)[:, -1]
+    reported = np.asarray(out.runoff_subsurface) / _RHO   # [m/s]
+    np.testing.assert_allclose(reported, np.asarray(K_carry), rtol=1e-12, atol=0.0)
+    assert float(jnp.max(jnp.abs(out.runoff_subsurface / _RHO - K_final))) > 0.0, (
+        "vacuous pin: K(psi_final) coincides with the debited K on the "
+        "draining column; pick a wetter/faster-draining scenario")
 
 
 def test_stiff_clay_conserves_after_specific_storage_switch():

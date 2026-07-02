@@ -367,12 +367,18 @@ class TestRichardsNoPrematureRunoff(unittest.TestCase):
         # Near saturation — very little remaining capacity
         theta = jnp.full((ncol, nlayers), hconfig.theta_sat - 1e-3)
         psi = psi_from_theta(theta, hconfig)
-        # Iterate to convergence: this deliberately extreme forcing (saturated soil +
-        # 10x-K_sat rain into the stiff specific-storage cell) is a worst case for the
-        # fixed-iteration Picard — at the production default of 10 iters the soil rows
-        # leave ~3e-3 m of (convergence, NOT structural) residual; ~60 iters drives it
-        # to < 1e-4 m, demonstrating the scheme conserves exactly once converged.  The
-        # realistic-forcing gate (test_multilayer_water_balance) closes at 10 iters.
+        # Iterate well past the transient: this deliberately extreme forcing
+        # (saturated soil + 10x-K_sat rain into the stiff specific-storage cell)
+        # drives the fixed-iteration Picard into a small LIMIT CYCLE rather than
+        # convergence (max|dpsi| stalls at ~9e-2 m psi for any max_iter >= ~20),
+        # leaving a genuine ~3.4e-4 m residual: the last iteration's
+        # linearization error theta(psi+dpsi) - [theta + C*dpsi] — real
+        # (convergence, NOT structural) slack of the mixed form, not a flux-
+        # reporting error.  Before the drainage report was made solve-consistent
+        # (C13: report the K the last rhs debited, not K(psi_final)), this read
+        # as < 1e-4 m by ACCIDENTAL CANCELLATION between the psi_final-evaluated
+        # drainage and that linearization error.  The realistic-forcing gate
+        # (test_multilayer_water_balance) closes at the production 10 iters.
         rconfig = RichardsConfig(max_iter=60)
 
         # Very heavy rain — above K_sat, sustained long enough to exceed pond_max
@@ -393,7 +399,10 @@ class TestRichardsNoPrematureRunoff(unittest.TestCase):
         infil = jnp.sum((out.theta_new - theta) * grid.dz[None, :], axis=-1)
         runoff_m = (out.runoff_surface + out.runoff_subsurface) / constants.rho_water * dt
         resid = flux_top * dt - (infil + out.surface_water + runoff_m)
-        self.assertTrue(jnp.all(jnp.abs(resid) < 1e-4), f"resid={resid}")
+        # 5e-4 m bounds the limit-cycle linearization slack (~3.4e-4 m, see the
+        # rconfig note); a real flux leak under this forcing is O(1e-2) m
+        # (flux_top*dt ~ 0.104 m of rain).
+        self.assertTrue(jnp.all(jnp.abs(resid) < 5e-4), f"resid={resid}")
 
     def test_mass_conservation(self):
         """Total water in = change in storage + runoff_surface + runoff_sub."""
