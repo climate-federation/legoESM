@@ -6592,9 +6592,12 @@ class ModelDriver:
 
             # Incremental CMIP monthly flush — write completed months and
             # free their memory so long runs don't accumulate all months.
-            if (diag_interval > 0 and current_step % diag_interval == 0
-                    and (self._mpi_rank is None or self._mpi_rank == 0)):
-                self.diagnostics.flush_cmip_monthly(day)
+            # EVERY process pops (under multi-controller SPMD the non-root
+            # accumulators fill identically and would otherwise grow
+            # unbounded, codex round-10); only root writes.
+            if diag_interval > 0 and current_step % diag_interval == 0:
+                _is_root = self._mpi_rank is None or self._mpi_rank == 0
+                self.diagnostics.flush_cmip_monthly(day, write=_is_root)
 
         return self._finalize_run(
             run_status, t_jit, t_start,
