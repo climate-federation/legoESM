@@ -19,12 +19,21 @@ _SCRIPT = (Path(__file__).resolve().parents[2]
            / "scripts" / "validate" / "validate_driver_cs_spmd_parity.py")
 
 
+_LOAD_COUNT = [0]
+
+
 def _load():
-    spec = importlib.util.spec_from_file_location(
-        "_validate_cs_spmd_parity", _SCRIPT)
+    # Unique module name per load; never left behind in sys.modules
+    # (test pollution, codex Low).
+    _LOAD_COUNT[0] += 1
+    name = f"_validate_cs_spmd_parity_{_LOAD_COUNT[0]}"
+    spec = importlib.util.spec_from_file_location(name, _SCRIPT)
     mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
+    sys.modules[name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.modules.pop(name, None)
     return mod
 
 

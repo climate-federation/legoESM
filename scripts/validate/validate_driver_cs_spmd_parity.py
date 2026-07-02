@@ -126,6 +126,11 @@ def main(argv=None) -> int:
     workdir = f"{args.workdir}/{args.mode}"
     cfg = _build_config(workdir)
     cfg = cfg._replace(days=args.days, radiation=args.radiation)
+    if args.mode == "serial" and n_procs > 1:
+        # Every rank would race/clobber the same --out (codex Medium).
+        print("ERROR: --mode serial must run single-process "
+              f"(got {n_procs}); use --mode spmd under a launcher.")
+        return 2
     if args.mode == "spmd":
         if n_procs < 2:
             print("ERROR: --mode spmd needs a multi-process launch "
@@ -147,34 +152,41 @@ def main(argv=None) -> int:
         return 0
 
     # spmd: compare on process 0 (every rank ran the same gathers above).
+    # The compare is fully wrapped: an exception on rank 0 (missing /
+    # corrupt --ref, ...) must still reach the exit-code broadcast below,
+    # or the other ranks hang in broadcast_one_to_all (codex HIGH).
     rc = 0
     if io_rank:
-        ref = np.load(args.ref)
-        missing = sorted(set(ref.files) ^ set(state))
-        if missing:
-            print(f"FIELD-SET MISMATCH: {missing}")
-            rc = 1
-        for name in sorted(set(ref.files) & set(state)):
-            a, b = ref[name], state[name]
-            if a.shape != b.shape:
-                print(f"  {name}: SHAPE {a.shape} vs {b.shape}")
+        try:
+            ref = np.load(args.ref)
+            missing = sorted(set(ref.files) ^ set(state))
+            if missing:
+                print(f"FIELD-SET MISMATCH: {missing}")
                 rc = 1
-                continue
-            if a.size == 0:
-                continue
-            close = np.allclose(a, b, rtol=args.rtol, atol=args.atol)
-            diff = np.abs(a - b)
-            max_abs = float(np.max(diff)) if a.size else 0.0
-            loc = np.unravel_index(int(np.argmax(diff)), a.shape)
-            n_bad = int(np.sum(~np.isclose(a, b, rtol=args.rtol,
-                                           atol=args.atol)))
-            print(f"  {name}: max|Δ|={max_abs:.3e} at {loc} "
-                  f"({n_bad}/{a.size} pts differ) "
-                  f"{'OK' if close else 'FAIL'}")
-            if not close:
-                rc = 1
-        print(f"[spmd] parity {'PASS' if rc == 0 else 'FAIL'} "
-              f"(np={n_procs}, {len(state)} fields)")
+            for name in sorted(set(ref.files) & set(state)):
+                a, b = ref[name], state[name]
+                if a.shape != b.shape:
+                    print(f"  {name}: SHAPE {a.shape} vs {b.shape}")
+                    rc = 1
+                    continue
+                if a.size == 0:
+                    continue
+                close = np.allclose(a, b, rtol=args.rtol, atol=args.atol)
+                diff = np.abs(a - b)
+                max_abs = float(np.max(diff)) if a.size else 0.0
+                loc = np.unravel_index(int(np.argmax(diff)), a.shape)
+                n_bad = int(np.sum(~np.isclose(a, b, rtol=args.rtol,
+                                               atol=args.atol)))
+                print(f"  {name}: max|Δ|={max_abs:.3e} at {loc} "
+                      f"({n_bad}/{a.size} pts differ) "
+                      f"{'OK' if close else 'FAIL'}")
+                if not close:
+                    rc = 1
+            print(f"[spmd] parity {'PASS' if rc == 0 else 'FAIL'} "
+                  f"(np={n_procs}, {len(state)} fields)")
+        except Exception as e:
+            print(f"[spmd] compare ERROR on rank 0: {e!r}")
+            rc = 2
     # Every process exits with the same code (rank 0 decides).
     rc_arr = jax.numpy.asarray(float(rc))
     if jax.process_count() > 1:
