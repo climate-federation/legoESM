@@ -114,13 +114,23 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 
 def _load_matrix_module():
+    """Load the matrix-runner script WITHOUT permanent sys.path pollution
+    (codex round-12 Low): spec-load under a private module name; nothing
+    is inserted into sys.path and the bare name never enters sys.modules."""
+    import importlib.util
     import sys
     from pathlib import Path
-    script_dir = Path(__file__).resolve().parents[4] / "scripts" / "matrix"
-    if str(script_dir) not in sys.path:
-        sys.path.insert(0, str(script_dir))
-    import run_atmosphere_test_matrix as M
-    return M
+    script = (Path(__file__).resolve().parents[4]
+              / "scripts" / "matrix" / "run_atmosphere_test_matrix.py")
+    name = "_modons_matrix_catalog"
+    spec = importlib.util.spec_from_file_location(name, script)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.modules.pop(name, None)
+    return mod
 
 
 def test_matrix_registers_cube_and_latlon():
