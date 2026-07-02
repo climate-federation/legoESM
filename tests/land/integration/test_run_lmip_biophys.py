@@ -98,21 +98,28 @@ def _run_driver(mod, sd, out, extra_args=()):
     return mod.run(args)
 
 
-def test_cold_run_auto_saves_restart(tmp_path):
-    """A cold run always writes restart_end.npz next to lmip_biophys.nc."""
+def test_cold_run_auto_saves_timestamped_restart(tmp_path):
+    """A cold run always writes exactly one restart file named
+    restart_<YEAR>_d<DDD>h<HH>.npz next to lmip_biophys.nc."""
     mod = _load_driver()
     sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
     out = tmp_path / "cold"
     assert _run_driver(mod, sd, out) == 0
-    assert (out / "restart_end.npz").exists()
+    restarts = list(out.glob("restart_*.npz"))
+    assert len(restarts) == 1
+    # Model-time-stamped: 4 steps * 1 h = 4 h from doy 0 -> year_final=1920 d000 h04
+    assert restarts[0].name == "restart_1920_d000h04.npz"
 
     # Metadata survives the round-trip and records the run's config.
     from legoesm.land.restart import load_land_restart
-    _, meta = load_land_restart(out / "restart_end.npz",
+    _, meta = load_land_restart(restarts[0],
                                 expected_land_mode="multilayer",
                                 expected_ncol=32, expected_n_layers=None)
     assert meta["metadata"]["surface_scheme"] == "simple_seb"
     assert meta["n_steps_completed"] == 4
+    assert meta["metadata"]["year_final"] == 1920
+    assert meta["metadata"]["doy_final"] == 0
+    assert meta["metadata"]["hour_final"] == 4
 
 
 def test_warm_start_uses_loaded_state(tmp_path):
@@ -149,7 +156,9 @@ def test_warm_start_uses_loaded_state(tmp_path):
     # (a fresh cold start would have deep T at ~280 K, the T_init default in
     # init_multilayer_land_state).
     from legoesm.land.restart import load_land_restart
-    st_end, _ = load_land_restart(out / "restart_end.npz",
+    restarts = list(out.glob("restart_*.npz"))
+    assert len(restarts) == 1
+    st_end, _ = load_land_restart(restarts[0],
                                   expected_land_mode="multilayer",
                                   expected_ncol=32, expected_n_layers=None)
     T_deep = np.asarray(st_end.T_soil)[:, -1]                    # deepest layer

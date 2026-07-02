@@ -292,18 +292,33 @@ def run(args) -> int:
         print(f"(netcdf write skipped: {e})")
 
     # --- auto-save the end-of-run state as a chained-run seed (Phase C). ---
+    #
+    # Filename embeds the model time the state represents so a directory of
+    # end-states is an audit trail (chronological on `ls`).  Format:
+    #   restart_<YEAR>_d<DDD>h<HH>.npz   (noleap 365-day calendar)
+    # where YEAR = year_start + full_365-day-years elapsed, DDD is day-of-year
+    # in that year (0-364), HH is hour-of-day (0-23).
     if is_multilayer:
         try:
             t_end_s = float(model_times_s[-1] + dt)
+            days_since_start = t_end_s / _SEC_PER_DAY
+            year_offset = int(days_since_start // 365)
+            year_final = year_start + year_offset
+            doy_float = days_since_start - year_offset * 365.0
+            doy_int = int(doy_float)
+            hour_of_day = int(round((doy_float - doy_int) * 24.0)) % 24
+            restart_name = f"restart_{year_final:04d}_d{doy_int:03d}h{hour_of_day:02d}.npz"
             restart_meta = {
                 "grid_type": args.grid_type, "resolution": args.resolution,
                 "surface_scheme": args.surface_scheme, "bulk_scheme": args.bulk,
                 "year": year_start, "year_end": year_end, "dt": dt,
                 "n_steps": args.n_steps, "start_doy": args.start_doy,
                 "forcing": ("synthetic" if synthetic else "CRU-JRA"),
+                "year_final": year_final, "doy_final": doy_int,
+                "hour_final": hour_of_day,
             }
             rp = save_land_restart(
-                out_dir / "restart_end.npz", state,
+                out_dir / restart_name, state,
                 land_mode="multilayer", t_end_s=t_end_s,
                 n_steps_completed=args.n_steps, metadata=restart_meta)
             print(f"wrote {rp}")
@@ -355,9 +370,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--land-frac-min", type=float, default=0.5)
     ap.add_argument("--restart-from", default="",
                     help="load initial land state from this .npz (e.g. "
-                         "$SCRATCH/prev_run/restart_end.npz).  Cold start when "
-                         "empty.  End-of-run state is ALWAYS auto-saved to "
-                         "<output>/restart_end.npz for chaining.")
+                         "$SCRATCH/prev_run/restart_1921_d000h00.npz).  Cold "
+                         "start when empty.  End-of-run state is ALWAYS "
+                         "auto-saved to <output>/restart_<YEAR>_d<DDD>h<HH>.npz "
+                         "for chaining.")
     ap.add_argument("--output", default="lmip_biophys")
     return ap
 

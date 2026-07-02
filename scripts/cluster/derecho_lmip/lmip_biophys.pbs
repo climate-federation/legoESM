@@ -23,9 +23,11 @@
 #   YEAR_END=""                     — Phase B: end of contiguous multi-year span
 #                                     (empty = single-year YEAR).  Example: YEAR=1920,
 #                                     YEAR_END=1924 → 5-year spin-up.
-#   RESTART_FROM=""                 — Phase C: seed run from a prior restart_end.npz.
-#                                     Empty = cold start.  Every run auto-saves its
-#                                     end-state to <OUT_DIR>/restart_end.npz.
+#   RESTART_FROM=""                 — Phase C: seed run from a prior restart .npz.
+#                                     Empty = cold start.  Every run auto-saves
+#                                     its end-state to a model-time-stamped file:
+#                                     <OUT_DIR>/restart_<YEAR>_d<DDD>h<HH>.npz.
+#                                     Reads chronologically with `ls`.
 #   RESOLUTION=90                   — latlon N (N x 2N = 90 x 180 ~ 2 deg)
 #   DT=3600                         — timestep in seconds (1 h default; 1800 = 30 min)
 #   N_STEPS=240                     — number of land steps (240 * 1 h = 10 model days)

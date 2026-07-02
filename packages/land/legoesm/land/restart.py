@@ -2,16 +2,18 @@
 
 Saves and loads the full :class:`~legoesm.land.state.MultiLayerLandState` (and
 optional canopy 30-day EMA ``TgC``) as a compressed ``.npz`` so a long spin-up
-can span multiple queue submissions.  The auto-save at the end of every run
-makes chaining trivial::
+can span multiple queue submissions.  The driver auto-saves at the end of every
+run under a MODEL-TIME-STAMPED name (``restart_<YEAR>_d<DDD>h<HH>.npz``) so a
+directory of end-states is an audit trail (chronological on ``ls``) — no
+overwrites::
 
-    # first run: cold start, saves ``restart_end.npz``
+    # first run: cold start, saves e.g. ``restart_1921_d000h00.npz``
     python scripts/run/run_lmip_biophys.py --year 1920 --n-steps 8760 \\
         --output $SCRATCH/spinup_yr01
 
     # second run: warm start off the previous end-state
     python scripts/run/run_lmip_biophys.py --year 1921 --n-steps 8760 \\
-        --restart-from $SCRATCH/spinup_yr01/restart_end.npz \\
+        --restart-from $SCRATCH/spinup_yr01/restart_1921_d000h00.npz \\
         --output $SCRATCH/spinup_yr02
 
 Biophysics-only restarts (this branch's driver runs ``carbon.scheme="none"``).
