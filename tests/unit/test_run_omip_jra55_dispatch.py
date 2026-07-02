@@ -488,8 +488,14 @@ def test_setup_with_woa_enables_all_closure_features(tmp_path):
 
 
 def test_setup_without_woa_disables_closure_features(tmp_path):
-    """If WOA targets aren't passed, sponge/SSS/freeze are silently
-    disabled even when the --jra55-no-... flags aren't set."""
+    """If WOA targets aren't passed, sponge/SSS are silently disabled
+    even when the --jra55-no-... flags aren't set.
+
+    The freeze cap stays ON: since commit 2d343dfdc it no longer
+    depends on the sponge mask/WOA data — with no sponge it caps
+    globally over all ocean cells via the state's own land mask
+    (see ``_apply_freeze_cap`` and the ``_ocean_mask_2d`` block path).
+    """
     cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8)
     grid, z_coord, *_ = _make_tiny_latlon_setup(n_lat=4, n_lon=8)
     args = _argparse_namespace(jra55_cache=str(cache))
@@ -498,12 +504,14 @@ def test_setup_without_woa_disables_closure_features(tmp_path):
     )
     assert state["enable_sponge"] is False
     assert state["enable_sss_restoring"] is False
-    assert state["enable_freeze_cap"] is False
+    assert state["enable_freeze_cap"] is True
 
 
-def test_setup_freeze_cap_requires_sponge():
-    """Freeze cap is gated on the sponge mask — disabling sponge
-    auto-disables freeze cap."""
+def test_setup_freeze_cap_independent_of_sponge():
+    """Freeze cap is NOT gated on the sponge (commit 2d343dfdc):
+    disabling the sponge keeps the cap on, scoped globally over all
+    ocean cells instead of the sponge zone. Only --jra55-no-freeze-cap
+    (or --jra55-sea-ice, see the sea-ice setup test) turns it off."""
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -518,7 +526,7 @@ def test_setup_freeze_cap_requires_sponge():
             z_coord=z_coord, T_woa=T_woa, S_woa=S_woa,
         )
         assert state["enable_sponge"] is False
-        assert state["enable_freeze_cap"] is False
+        assert state["enable_freeze_cap"] is True
 
 
 def test_setup_can_disable_individual_features(tmp_path):

@@ -3529,6 +3529,9 @@ class LatLonCGridOceanModel:
                     eos_fn=_vmix_eos_fn,
                     tke_old=tke_old, dt_tke=dt_mom,
                     tke_source=tke_source, return_tke=True,
+                    # Column latitudes [deg] for the NEMO etau_htau_mode=
+                    # "latitude" penetration profile (unused otherwise).
+                    lat_deg=jnp.degrees(self.grid.lat),
                 )
                 if _post_mixing:
                     # Phase 1 only (Veros set_tke_diffusivities from the
@@ -3542,6 +3545,7 @@ class LatLonCGridOceanModel:
                     A_v_background=float(self.config.A_v),
                     K_v_background=float(self.config.K_v),
                     eos_fn=_vmix_eos_fn,
+                    lat_deg=jnp.degrees(self.grid.lat),
                 )
 
         # dz at cell centers (jacobian-corrected so the eta-stretched

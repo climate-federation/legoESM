@@ -29,6 +29,9 @@ References
 
 from __future__ import annotations
 
+import math
+import numbers
+
 import jax
 import jax.numpy as jnp
 
@@ -216,6 +219,7 @@ def compute_most_fluxes(
     gustiness_beta=1.25,
     return_2m=False,
     z_diag=2.0,
+    max_exchange_coeff=None,
 ):
     """Compute stability-dependent bulk fluxes via iterative MOST.
 
@@ -253,6 +257,22 @@ def compute_most_fluxes(
         Number of MOST iterations (default 5).
     charnock : float
         Charnock coefficient (COARE only, default 0.011).
+    max_exchange_coeff : float or None
+        Optional physical ceiling on the neutral-equivalent bulk transfer
+        coefficient ``C = κ²/(denom_m·denom_h)``.  ``None`` (default) leaves
+        the MOST log-law denominators floored at the standard ``0.5``
+        (``C ≤ κ²/0.25 ≈ 0.64``), i.e. BYTE-IDENTICAL to the prior behaviour
+        for every existing (ocean/atmosphere) caller.  When set to ``C_max``,
+        each denominator is instead floored at ``max(0.5, κ/√C_max)`` so the
+        implied ``C_d``, ``C_h`` and ``C_e`` cannot exceed ``C_max``.  This
+        caps ``u*``, ``θ*`` and ``q*`` CONSISTENTLY (the fluxes stay linear in
+        the T/q gradients, so a surface-energy-balance solve retains its
+        self-limiting feedback) and removes the extreme-instability cold-start
+        singularity where the floored ``0.5`` denominator lets a trivial
+        ~0.6 g/kg humidity gradient generate a spurious ~4900 W/m² latent
+        shock (``C_e≈0.64`` vs a physical ~3.4e-3).  Intended for the land
+        surface tile, whose stiff thin top layer at ``dt_rad`` is unstable to
+        that shock; ocean/atmosphere callers never approach the floor.
 
     Returns
     -------
@@ -290,6 +310,45 @@ def compute_most_fluxes(
     _vT_coef = 1.0 / constants.epsilon - 1.0
     T_v = T_atm * (1.0 + _vT_coef * q_atm)
 
+    # Log-law denominator floor. Default 0.5 (=> C ≤ κ²/0.25 ≈ 0.64, the
+    # historical behaviour, byte-identical for every existing caller). When a
+    # physical ceiling ``max_exchange_coeff`` is requested, floor each
+    # denominator at κ/√C_max so the implied C_d/C_h/C_e ≤ C_max — a static
+    # Python float, constant-folded, no retrace (feature-gating, not traced
+    # selection). See the ``max_exchange_coeff`` docstring entry.
+    if max_exchange_coeff is None:
+        _denom_floor = 0.5
+        _coeff_cap = None
+    else:
+        # Static feature-gate value (constant-folded). A traced/array scalar
+        # would break the Python ``max``/``if`` below, so require a real Python
+        # or numpy scalar and reject it loudly rather than silently mis-tracing.
+        # ``bool`` is a numbers.Real subclass — exclude it explicitly. Then
+        # guard finite > 0: C_max = 0 gives an infinite floor (silent zero
+        # fluxes) and C_max < 0 gives ``sqrt`` of a negative (NaN).
+        if isinstance(max_exchange_coeff, bool) or not isinstance(
+            max_exchange_coeff, numbers.Real
+        ):
+            raise TypeError(
+                "max_exchange_coeff must be a static real scalar or None, "
+                f"got {type(max_exchange_coeff).__name__}"
+            )
+        max_exchange_coeff = float(max_exchange_coeff)
+        if not (math.isfinite(max_exchange_coeff) and max_exchange_coeff > 0.0):
+            raise ValueError(
+                "max_exchange_coeff must be finite and > 0, "
+                f"got {max_exchange_coeff}"
+            )
+        _denom_floor = max(0.5, KAPPA / (max_exchange_coeff ** 0.5))
+        # Coefficient-space equivalent ceiling for the large_yeager branch,
+        # which forms rd/rh/re directly (u*=rd·U, θ*=rh·dT, q*=re·dq) and never
+        # touches the log-law denominators.  The log-law path caps the
+        # "rd-equivalent" κ/denom at κ/_denom_floor, so bounding rd, rh, re at
+        # the SAME value gives C_d=rd² , C_h=rd·rh , C_e=rd·re ≤ C_max
+        # identically.  = min(√C_max, 0.8) so it never tightens below the
+        # historical 0.5-floor behaviour.
+        _coeff_cap = KAPPA / _denom_floor
+
     # Initialize with neutral log-law profile
     z0 = jnp.full_like(wind_speed, z0_init)
     z0_t = z0 * 0.1
@@ -298,9 +357,9 @@ def compute_most_fluxes(
     ln_zu_z0 = jnp.log(z_u / jnp.maximum(z0, 1e-12))
     ln_zt_z0t = jnp.log(z_t / jnp.maximum(z0_t, 1e-12))
     ln_zq_z0q = jnp.log(z_q / jnp.maximum(z0_q, 1e-12))
-    u_star = KAPPA * wind_speed / jnp.maximum(ln_zu_z0, 0.5)
-    theta_star = KAPPA * dT / jnp.maximum(ln_zt_z0t, 0.5)
-    q_star_val = KAPPA * dq / jnp.maximum(ln_zq_z0q, 0.5)
+    u_star = KAPPA * wind_speed / jnp.maximum(ln_zu_z0, _denom_floor)
+    theta_star = KAPPA * dT / jnp.maximum(ln_zt_z0t, _denom_floor)
+    q_star_val = KAPPA * dq / jnp.maximum(ln_zq_z0q, _denom_floor)
 
     carry = (u_star, z0, z0_t, z0_q, theta_star, q_star_val)
     # The MOST iteration mixes the (possibly float32) input state with float64
@@ -422,6 +481,18 @@ def compute_most_fluxes(
                 1.0 + ren / KAPPA * (ln_zr_q - dpsi_h_q), 0.2
             )
 
+            # Optional transfer-coefficient ceiling (max_exchange_coeff). The LY
+            # coefficient-space path bypasses the log-law denominator floor, so
+            # apply the equivalent cap directly: rd, rh, re ≤ κ/_denom_floor
+            # bounds C_d=rd², C_h=rd·rh, C_e=rd·re ≤ C_max — the SAME guarantee
+            # the else-branch gets from _denom_floor. _coeff_cap is None (skip,
+            # byte-identical) unless a ceiling was requested. z0_new below reads
+            # the capped rd, so the roughness estimate stays consistent.
+            if _coeff_cap is not None:
+                rd = jnp.minimum(rd, _coeff_cap)
+                rh = jnp.minimum(rh, _coeff_cap)
+                re = jnp.minimum(re, _coeff_cap)
+
             # 5) Update scaling parameters directly from coefficients
             u_star_new = rd * U_eff
             theta_star_new = rh * dT
@@ -447,9 +518,9 @@ def compute_most_fluxes(
         ln_zt_z0t = jnp.log(z_t / jnp.maximum(z0_t_new, 1e-12))
         ln_zq_z0q = jnp.log(z_q / jnp.maximum(z0_q_new, 1e-12))
 
-        denom_m = jnp.maximum(ln_zu_z0 - psi_m_u, 0.5)
-        denom_h = jnp.maximum(ln_zt_z0t - psi_h_t, 0.5)
-        denom_q = jnp.maximum(ln_zq_z0q - psi_h_q, 0.5)
+        denom_m = jnp.maximum(ln_zu_z0 - psi_m_u, _denom_floor)
+        denom_h = jnp.maximum(ln_zt_z0t - psi_h_t, _denom_floor)
+        denom_q = jnp.maximum(ln_zq_z0q - psi_h_q, _denom_floor)
 
         u_star_new = KAPPA * U_eff / denom_m
         theta_star_new = KAPPA * dT / denom_h

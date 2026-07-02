@@ -506,7 +506,7 @@ def test_eke_n2_over_dzw_slot():
     cfg = VisbeckConfig()
 
     def run(n2_over_dzw):
-        sigma_bar, L, wet, intN, sigma = _eady_growth_and_length(
+        sigma_bar, L, wet, intN, sigma, _dzh = _eady_growth_and_length(
             rho, Sx, Sy, zc, J, f, cfg, RHO_0, n2_mode="adiabatic",
             n2_over_dzw=n2_over_dzw, T=T, S=S, p_cell=p, eos_fn=eos_fn)
         return np.asarray(sigma)[0, 0]

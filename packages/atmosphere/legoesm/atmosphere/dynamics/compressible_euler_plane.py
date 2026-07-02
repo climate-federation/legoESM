@@ -304,32 +304,93 @@ def _plane_volume_weight(
     return jnp.sum(weight_horizontal * height_coord.dz)
 
 
+def _plane_background_mass(
+    grid: PlaneGrid,
+    height_coord: HeightCoordinate,
+    terrain_metric: TerrainMetric,
+) -> jax.Array:
+    """State-independent part of :func:`compute_dry_mass_plane`:
+    ``sum(rho_ref * J * area_T * dz)``.
+
+    Bit-match invariant: this must equal
+    ``compute_dry_mass_plane(state, ...)`` BIT-EXACTLY when
+    ``state.rho_prime`` is identically zero and both are evaluated
+    eagerly. That holds because ``rho_ref + 0.0 == rho_ref`` exactly,
+    the elementwise products below use the same broadcast shapes and
+    left-to-right association as ``compute_dry_mass_plane``, and the
+    final ``jnp.sum`` reduces the same ``(ny, nx, nlev)`` array with
+    the same cached executable. The mass fixer's rest-state exactness
+    (``test_one_step_at_rest_with_mass_fixer``) relies on it.
+    """
+    weight_horizontal = (
+        terrain_metric.jacobian * grid.area_T
+    )[:, :, None]                              # (ny, nx, 1)
+    cell_mass = height_coord.rho_ref * weight_horizontal * height_coord.dz
+    return jnp.sum(cell_mass)
+
+
 def fix_mass_nonhydrostatic_plane(
     state: PlaneNonHydrostaticState,
     target_mass: jax.Array,
     grid: PlaneGrid,
     height_coord: HeightCoordinate,
     terrain_metric: TerrainMetric,
+    background_mass: jax.Array | None = None,
 ) -> PlaneNonHydrostaticState:
     """Restore dry mass to ``target_mass`` via a uniform additive
     correction to ``rho_prime``.
 
-    The correction is
+    The correction is computed in ANOMALY form, cancelling the
+    state-independent background integral ``B = sum(rho_ref * J *
+    area_T * dz)`` analytically instead of numerically:
 
-        delta = (target_mass - current_mass) / sum(J * area_T * dz)
+        delta = ((target_mass - B) - sum(rho' * J * area_T * dz))
+                / sum(J * area_T * dz)
         rho_prime' = rho_prime + delta
 
-    Adding a spatially uniform ``delta`` preserves every spatial
-    gradient of ``rho_prime`` used in the slow-tendency assembly, so
-    momentum / theta / w tendencies are unchanged by the fixer. This
-    matches the MPAS pattern in
+    This is algebraically identical to the naive
+    ``(target_mass - current_mass) / V`` (``current_mass = B +
+    anomaly``) but avoids subtracting two ~1e11-scale totals whose
+    true difference is near zero. The naive form is NOT exact at rest:
+    the traced ``current_mass`` reduce gets fused into the step graph
+    by XLA and can land 1 ulp away from the eagerly computed
+    ``target_mass``, injecting a spurious ``ulp(M)/V`` (~1e-16 kg/m³)
+    uniform shift into a bit-zero ``rho_prime`` every step (caught by
+    ``test_one_step_at_rest_with_mass_fixer``). In anomaly form the
+    only traced reduction sums ``rho' * w`` — exactly zero in any
+    fusion/reduction order when ``rho'`` is bit-zero — while
+    ``target_mass - B`` subtracts two eagerly computed scalars that
+    are bit-identical at rest (see :func:`_plane_background_mass`).
+    For ``B/2 <= target_mass <= 2B`` (always, since |rho'| << rho_ref)
+    the subtraction is exact by Sterbenz's lemma, so the anomaly form
+    is also strictly more accurate off rest. This refines the MPAS
+    pattern in
     :func:`compressible_euler_mpas.fix_mass_nonhydrostatic_mpas`.
+
+    ``background_mass`` lets the caller pass an EAGERLY precomputed
+    ``B`` (``PlaneCompressibleEulerModel`` computes it once in
+    ``__init__`` and threads it through ``_step_jit``). This matters
+    under ``jax.jit``: omnistaging stages even the all-constant
+    ``B`` reduce into the graph, and XLA's constant folding
+    (HloEvaluator) can accumulate in a different order than the eager
+    executable — measured 6 ulps of ``M`` on the 4x4x6 rest test —
+    reintroducing a spurious shift. An eagerly computed ``B`` is
+    embedded as a literal constant with its bits preserved. When
+    ``background_mass`` is ``None`` (eager utility callers, e.g. the
+    single-rank MPI short-circuit and unit tests), it is computed
+    inline, which is bit-safe outside a trace.
+
+    Sign convention: mass deficit (``current < target``) gives
+    ``delta > 0`` → ``rho'`` increases → mass increases by
+    ``delta * V = target - current``; the budget closes exactly.
 
     Differentiability
     -----------------
     The fixer is a pure additive correction with no ``jnp.where`` /
-    clip / branch, so ``jax.grad`` flows through cleanly. The global
-    sum is differentiable in JAX.
+    clip / branch, so ``jax.grad`` flows through cleanly. The anomaly
+    sum carries the same linear dependence on ``rho_prime`` as the
+    total-mass form (``d delta / d rho'[j,i,k] = -J*area_T*dz/V``),
+    so gradients are unchanged.
 
     Parameters
     ----------
@@ -345,9 +406,21 @@ def fix_mass_nonhydrostatic_plane(
     PlaneNonHydrostaticState
         Same state with ``rho_prime`` shifted by ``delta`` everywhere.
     """
-    current = compute_dry_mass_plane(state, grid, height_coord, terrain_metric)
+    # Static feature-gate style Python branch on a non-traced value
+    # (background_mass is either None or a concrete array — never a
+    # tracer in any caller).
+    if background_mass is None:
+        background_mass = _plane_background_mass(
+            grid, height_coord, terrain_metric,
+        )
+    weight_horizontal = (
+        terrain_metric.jacobian * grid.area_T
+    )[:, :, None]                              # (ny, nx, 1)
+    anomaly = jnp.sum(
+        state.rho_prime.data * weight_horizontal * height_coord.dz
+    )
     weighted_volume = _plane_volume_weight(grid, height_coord, terrain_metric)
-    delta = (target_mass - current) / weighted_volume
+    delta = ((target_mass - background_mass) - anomaly) / weighted_volume
     rho_p_new = state.rho_prime.data + delta
     return PlaneNonHydrostaticState(
         u=state.u,
@@ -2727,6 +2800,17 @@ class PlaneCompressibleEulerModel:
         self.terrain_metric = terrain_metric
         self.config = config
         self._target_mass: jax.Array | None = None
+        # Eagerly precomputed state-independent mass integral
+        # sum(rho_ref * J * area_T * dz). Computed HERE (outside any
+        # trace) so its bits match the eagerly computed target mass at
+        # rest; inside _step_jit it is embedded as a literal constant
+        # (an in-trace recompute would be const-folded by XLA with a
+        # different accumulation order — see
+        # fix_mass_nonhydrostatic_plane). Constant for the model's
+        # lifetime, so no reset needed (unlike _target_mass).
+        self._background_mass: jax.Array = _plane_background_mass(
+            grid, height_coord, terrain_metric,
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -3076,5 +3160,8 @@ class PlaneCompressibleEulerModel:
             state_new = fix_mass_nonhydrostatic_plane(
                 state_new, target_mass, self.grid, self.height_coord,
                 self.terrain_metric,
+                # Concrete eager constant read off the static ``self``
+                # at trace time — bit-preserved as a jaxpr literal.
+                background_mass=self._background_mass,
             )
         return state_new

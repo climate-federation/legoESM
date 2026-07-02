@@ -336,16 +336,44 @@ def solve_richards(
     # the fixed (non-converged) 10-iteration Picard, h_s_final can dip slightly
     # negative on Picard slack.  Clamping that to 0 would CREATE water (codex), so the
     # negative slack (the over-infiltration the pond could not actually supply) is
-    # returned to soil layer 0 below — pond_new + runoff*dt + soil_debit == h_s_final
-    # exactly, conserving regardless of Picard convergence.
+    # un-infiltrated from the soil column below — distributed across all layers by
+    # available water (theta - theta_r) so no layer is driven below theta_r.  In the
+    # normal case (avail_total >= pond_deficit) the full slack is removed, so
+    # pond_new + runoff*dt + soil_debit == h_s_final exactly, conserving regardless of
+    # Picard convergence; the degenerate all-at-theta_r remainder is a bounded
+    # O(slack) residual (see the distribution block below).
     h_pos = jnp.maximum(h_s_final, 0.0)
     pond_deficit = h_pos - h_s_final                        # = max(-h_s_final, 0) >= 0
     runoff_surface = jnp.maximum(h_pos - richards_config.pond_max, 0.0) / dt
     surface_water_new = jnp.minimum(h_pos, richards_config.pond_max)
-    # Un-infiltrate the (Picard-slack) over-draw so the pond clamp creates no water.
-    # O(slack) for realistic forcing; psi_final is left as-is (the O(slack) psi/theta
-    # mismatch at layer 0 re-equilibrates on the next step's Picard solve).
-    theta_final = theta_final.at[:, 0].add(-pond_deficit / dz[0])
+    # Un-infiltrate the (Picard-slack) over-draw so the pond clamp creates no
+    # water.  Distribute the debit across the WHOLE soil column, weighted by each
+    # layer's available water (theta - theta_r) and capped so NO layer is driven
+    # below theta_r.  The former ``theta_final.at[:,0].add(-pond_deficit/dz[0])``
+    # dumped the entire debit into the THIN top layer, whose tiny capacity
+    # (dz[0] ~ 2 cm) made a harsh cold-start slack drive theta_0 hugely NEGATIVE
+    # -> van-Genuchten psi/K blow up -> the surface q_sat/beta go garbage -> the
+    # coupled SEB / atmosphere NaN.  The deep column holds ample water, so in
+    # practice the FULL debit is removed (avail_total >> pond_deficit for a deep
+    # 3 m column), so this is EXACTLY as conservative as the old single-layer
+    # debit -- same total water removed, just spread -- to machine precision.
+    # Only in the degenerate case where EVERY layer is already at theta_r AND the
+    # Picard slack is large (essentially never) is the un-suppliable remainder
+    # (pond_deficit - avail_total) left in the soil as a bounded O(Picard-slack)
+    # mass residual rather than forced out: when a deficit exists (h_s_final < 0)
+    # the surface pond and overland runoff are ALREADY zero, so there is no
+    # reservoir to debit the remainder to, and pushing theta < theta_r is exactly
+    # the NaN this fix removes.  That bounded residual is a strict improvement
+    # over the old code (which drove theta far negative); tighten it -- if ever
+    # needed -- with a Picard convergence check / more iterations, not a
+    # non-physical theta clip.  psi_final is left as-is (the O(slack) psi/theta
+    # mismatch re-equilibrates on the next step's Picard solve, as before).
+    theta_r = hydro_config.theta_r
+    avail = jnp.maximum((theta_final - theta_r) * dz[None, :], 0.0)   # (ncol,nlayers) [m]
+    avail_total = jnp.sum(avail, axis=1)                             # (ncol,) [m]
+    debit_frac = jnp.minimum(
+        pond_deficit / jnp.maximum(avail_total, 1e-30), 1.0)         # (ncol,) in [0,1]
+    theta_final = theta_final - avail * debit_frac[:, None] / dz[None, :]
 
     # Subsurface runoff: gravitational drainage at bottom.  Evaluate K on the FULL
     # (ncol, nlayers) state, then slice the bottom layer — a layer-varying K_sat

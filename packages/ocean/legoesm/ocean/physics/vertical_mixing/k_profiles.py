@@ -52,6 +52,7 @@ def compute_vertical_K_profiles(
     dt_tke: float | None = None,
     tke_source=None,
     return_tke: bool = False,
+    lat_deg=None,
 ) -> (
     tuple[jnp.ndarray, jnp.ndarray]
     | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -149,7 +150,8 @@ def compute_vertical_K_profiles(
         K_vmix, A_vmix, tke_new = _vmix_K_profiles(
             state, z_coord, surface_forcing, vmix, physics_config.constants,
             eos_fn=eos_fn,
-            tke_old=tke_old, dt_tke=dt_tke, tke_source=tke_source)
+            tke_old=tke_old, dt_tke=dt_tke, tke_source=tke_source,
+            lat_deg=lat_deg)
         K_v_total = K_v_total + K_vmix
         A_v_total = A_v_total + A_vmix
 
@@ -254,7 +256,8 @@ def _surface_buoyancy_flux(surface_forcing, state, constants_config,
 
 def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                      constants_config=ConstantsConfig(), eos_fn=None,
-                     *, tke_old=None, dt_tke=None, tke_source=None):
+                     *, tke_old=None, dt_tke=None, tke_source=None,
+                     lat_deg=None):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
     For ``constant`` / ``richardson`` this duplicates only the K
@@ -420,6 +423,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 z_interface=z_coord.z_half_ref[1:-1],
                 external_source=tke_source,
                 dz_surface=dz_surface, boundary_cap=_mxl1_cap,
+                lat_deg=lat_deg,
             )
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
@@ -440,6 +444,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             # downward, interior interfaces drop the surface (k=0) + bottom.
             z_interface=z_coord.z_half_ref[1:-1],
             dz_surface=dz_surface, boundary_cap=_mxl1_cap,
+            lat_deg=lat_deg,
         )
         return tke_out.K_H, tke_out.K_M, None
 

@@ -49,6 +49,7 @@ from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     EPS,
     EPS_DIV as _EPS_DIV,
     compute_eke_kappa_gm,
+    compute_treguier_kappa_gm,
     compute_visbeck_kappa_gm,
     dm95_taper,
     dm95_taper_scalar,
@@ -1618,8 +1619,20 @@ def gm_redi_tracer_tendency_latlon(
 
     # GM coefficient. Precedence: prognostic-EKE override (computed by the step
     # from the evolving eddy-energy field) > Visbeck diagnostic > constant.
+    _treg = getattr(cfg, "treguier", None)
+    if _treg is not None and _treg.enabled and cfg.visbeck.enabled:
+        raise ValueError(
+            "GMRediConfig: visbeck.enabled and treguier.enabled are mutually "
+            "exclusive adaptive-kappa diagnostics — enable exactly one.")
     if kappa_gm_override is not None:
         kappa_GM = kappa_gm_override
+    elif _treg is not None and _treg.enabled:
+        # Treguier-1997 / NEMO nn_aei_ijk_t=21 adaptive κ (the oracle scaling).
+        if f_coriolis is None:
+            f_coriolis = jnp.broadcast_to(grid.f, mask.shape)
+        kappa_GM = compute_treguier_kappa_gm(
+            rho, S_x, S_y, z_coord, jacobian, f_coriolis, _treg,
+        )
     elif cfg.visbeck.enabled:
         if f_coriolis is None:
             # Use the grid's Coriolis field (f = 2·Ω·sin(lat), already built

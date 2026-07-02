@@ -82,8 +82,12 @@ def step_land(
     W_max = _get(lp, "W_max", config.W_max)
     C_soil = _get(lp, "C_soil", config.C_soil)
     d_soil = _get(lp, "d_soil", config.d_soil)
-    K_infiltration = _get(lp, "K_infiltration", config.K_infiltration)
-    infil_suction_boost = _get(lp, "infil_suction_boost", config.infil_suction_boost)
+    # Bucket-hydrology scalars are LandConfig fields, NOT part of the
+    # LandSurfaceParams spatial container (which is locked to the 12 PARAM_NAMES /
+    # PARAM_BOUNDS entries).  Read them straight from config — never via the spatial
+    # helper (a passed LandSurfaceParams has no such attribute).
+    K_infiltration = config.K_infiltration
+    infil_suction_boost = config.infil_suction_boost
 
     # Account for fresh snowfall that will survive this step when the
     # surface is below freezing.  Used both by the albedo block here
