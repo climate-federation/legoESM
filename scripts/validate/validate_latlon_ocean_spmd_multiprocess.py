@@ -106,7 +106,8 @@ def _build_model(tripole: bool, implicit_cn: bool = False):
     # conservation reduction (the eORCA025 smoke uses it); its in-step reductions
     # must route through the "spmd" psum backend, not batch_allreduce_mpi.  Default
     # explicit_substep exercises the substep-loop eta-floor reduction.
-    cfg = (LatLonCGridOceanConfig(barotropic_solver="implicit_cn")
+    # from_flat: barotropic_solver is nested post-#501 (config.barotropic.*).
+    cfg = (LatLonCGridOceanConfig.from_flat(barotropic_solver="implicit_cn")
            if implicit_cn else LatLonCGridOceanConfig())
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
     return model, grid, z_coord
