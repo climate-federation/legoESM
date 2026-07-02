@@ -382,8 +382,9 @@ def make_sharded_ocean_step(model, mesh):
     Build the ``N`` band geometries + band vertex masks host-side, stack their
     ARRAY fields into a replicated pytree, and index by
     ``jax.lax.axis_index("lat")`` in the ``shard_map`` body (the geometry SCALAR
-    fields stay static — see the module docstring).  ``dt`` is captured in the
-    closure (not a sharded argument).  ``check_vma=False`` (the JAX >= 0.8
+    fields stay static — see the module docstring).  ``dt`` is a TRACED
+    replicated operand (so the jit-cached compile survives a dt change).
+    ``check_vma=False`` (the JAX >= 0.8
     replication check) because the band halo intentionally reads neighbour-rank
     data (replication-unaware).
 
@@ -439,11 +440,7 @@ def make_sharded_ocean_step(model, mesh):
     # r+1's v_lower[0] = global v[e]; north band non-target receives 0).
     perm_north, _perm_south = latlon_band_perms(n_dev)
 
-    # ``dt`` is captured per-call (a 1-element list avoids re-closing over a
-    # stale dt if the returned step is reused with a different dt).
-    dt_closure = [None]
-
-    def _body(state_local, geom_stacks_local, vmask_stack_local,
+    def _body(state_local, geom_stacks_local, vmask_stack_local, dt,
               surface_forcing_local, freshwater_local):
         r = jax.lax.axis_index(axis)
 
@@ -483,7 +480,7 @@ def make_sharded_ocean_step(model, mesh):
         # the in-core wind-stress / heat / virtual-salt application (no halo / v
         # reconstruction needed; tau is interp_cell_to_{u,v}face INSIDE the step,
         # which routes through the armed SPMD band halo).
-        result = _step_body(model, state_band, dt_closure[0],
+        result = _step_body(model, state_band, dt,
                             grid=band_geom, vertex_mask=band_vmask,
                             surface_forcing=surface_forcing_local,
                             freshwater=freshwater_local)
@@ -492,38 +489,57 @@ def make_sharded_ocean_step(model, mesh):
                        for name in _V_STAGGERED_STATE_FIELDS}
         return result._replace(**out_updates)
 
+    # Build the JITTED shard_map ONCE per input STRUCTURE and cache it.
+    # ``jax.jit`` is LOAD-BEARING: a bare shard_map is NOT compilation-cached,
+    # so calling it re-traces + recompiles the (large, un-jitted) band step
+    # EVERY call — the exact 142 s/step pathology the atm lat-band step hit
+    # (fixed in fa2ce32b6); production ``--n-gpus`` would recompile per model
+    # step.  ``dt`` is a TRACED operand (not a closure constant) so a changing
+    # dt does not retrigger compilation.  The cache is keyed by the (state,
+    # forcing) treedefs because the shard_map in/out specs are built from the
+    # pytree structure (a run flips forcing None->pytree at most once).
+    _cache = {}
+
     def sharded_step(state, dt, surface_forcing=None, freshwater=None):
-        dt_closure[0] = dt
         # Lay out the forcing pytrees the same way the state cell fields are laid
         # out (P("lat")); None passes through as None (the un-forced step).
         sf_sharded = _shard_forcing(surface_forcing, mesh)
         fw_sharded = _shard_forcing(freshwater, mesh)
-        in_spec = jax.tree.map(_lat_spec, state)
-        geom_spec = jax.tree.map(lambda _x: P(), geom_stacks)
-        vmask_spec = P()
-        # Cell-shaped forcing leaves shard P("lat"); a None forcing is a None
-        # operand with a None spec (tree.map over None yields None — shard_map
-        # accepts a None operand/spec pair).  Build the specs FROM the (already
-        # device_put) sharded pytrees so the leaf structure matches per call.
-        sf_spec = jax.tree.map(_lat_spec, sf_sharded)
-        fw_spec = jax.tree.map(_lat_spec, fw_sharded)
-        # JAX >= 0.8 top-level shard_map takes ``check_vma`` (the replication
-        # check); the band halo reads neighbour-rank data so disable it (same as
-        # the validated PCG / halo-parity shard_maps).
-        fn = shard_map(
-            _body,
-            mesh=mesh,
-            in_specs=(in_spec, geom_spec, vmask_spec, sf_spec, fw_spec),
-            out_specs=in_spec,
-            check_vma=False,
-        )
-        # Arm the SPMD halo backend ONLY around the shard_map call, then RESTORE
-        # the previous backend (codex finding): leaving it globally armed makes a
+        key = (jax.tree.structure(state),
+               jax.tree.structure(sf_sharded),
+               jax.tree.structure(fw_sharded))
+        fn = _cache.get(key)
+        if fn is None:
+            in_spec = jax.tree.map(_lat_spec, state)
+            geom_spec = jax.tree.map(lambda _x: P(), geom_stacks)
+            vmask_spec = P()
+            # Cell-shaped forcing leaves shard P("lat"); a None forcing is a None
+            # operand with a None spec (tree.map over None yields None — shard_map
+            # accepts a None operand/spec pair).  Build the specs FROM the (already
+            # device_put) sharded pytrees so the leaf structure matches per call.
+            sf_spec = jax.tree.map(_lat_spec, sf_sharded)
+            fw_spec = jax.tree.map(_lat_spec, fw_sharded)
+            # JAX >= 0.8 top-level shard_map takes ``check_vma`` (the replication
+            # check); the band halo reads neighbour-rank data so disable it (same
+            # as the validated PCG / halo-parity shard_maps).  dt is a replicated
+            # scalar operand (P()).
+            fn = jax.jit(shard_map(
+                _body,
+                mesh=mesh,
+                in_specs=(in_spec, geom_spec, vmask_spec, P(),
+                          sf_spec, fw_spec),
+                out_specs=in_spec,
+                check_vma=False,
+            ))
+            _cache[key] = fn
+        # Arm the SPMD halo backend ONLY around the call, then RESTORE the
+        # previous backend (codex finding): leaving it globally armed makes a
         # later serial/full-domain ocean call take SPMD-only branches (axis_index /
         # ppermute / psum in pad_with_pole_bc_lat, conservation, eta_floor) OUTSIDE
-        # a shard_map -> crash. ``shard_map`` is rebuilt per call, so each call
-        # re-traces WITH the backend armed (baking the SPMD halo/reduction ops) ->
-        # the per-call arm/restore is correct and keeps the serial path untouched.
+        # a shard_map -> crash.  The FIRST call traces WITH the backend armed
+        # (baking the SPMD halo/reduction ops into the compiled program); later
+        # calls reuse the cached compile, for which the arming is a harmless
+        # no-op — same contract as the atm lat-band step.
         # Save+restore the FULL backend state (backend + MPI topology + SPMD mesh)
         # so a prior "mpi"/"spmd" backend is restored intact: activate_* clears the
         # MPI topology, and set_halo_backend("mpi") REQUIRES a topology (codex).
@@ -536,7 +552,8 @@ def make_sharded_ocean_step(model, mesh):
         _prev_mesh = get_spmd_mesh()
         activate_latlon_spmd_halo(mesh)
         try:
-            return fn(state, geom_stacks, vmask_stack, sf_sharded, fw_sharded)
+            return fn(state, geom_stacks, vmask_stack, jnp.asarray(dt),
+                      sf_sharded, fw_sharded)
         finally:
             set_spmd_mesh(_prev_mesh)
             set_halo_backend(_prev_backend, _prev_topo)
