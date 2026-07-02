@@ -156,12 +156,10 @@ def test_params_dest_exists():
 
 
 def test_params_bundle_routes_ice_coupler_land(tmp_path):
-    """The run_coupled --params application (atm scalar map + the
-    coupled/coupler/ice/lake bundle) routes an atm, ice, coupler, and land
-    parameter each into its component config — the exact split-and-bundle
-    contract run_coupled.main() implements (#691)."""
-    from typing import NamedTuple
-
+    """The PRODUCTION run_coupled --params application helper
+    (``apply_coupled_params``: atm scalar map + the coupled/coupler/ice/lake
+    bundle) routes an atm, ice, coupler, and land parameter each into its
+    component config — the exact split-and-bundle logic main() calls (#691)."""
     from legoesm.coupler.config import CouplerConfig
     from legoesm.coupler.lake.config import LakeConfig
     from legoesm.driver.config import (
@@ -170,11 +168,6 @@ def test_params_bundle_routes_ice_coupler_land(tmp_path):
         GridConfig,
     )
     from legoesm.driver.coupled_config import CoupledConfig
-    from legoesm.driver.run_config_yaml import (
-        apply_params_to_config,
-        build_atm_scalar_param_map,
-        load_params_config,
-    )
     from legoesm.ice.config import SeaIceConfig
     from legoesm.land.config import MultiLayerLandConfig
 
@@ -185,36 +178,55 @@ def test_params_bundle_routes_ice_coupler_land(tmp_path):
         "coupler.surface.ocean_albedo: 0.08\n"
         "land.multilayer.Cd_land: 3.0e-3\n"
     )
-    params = load_params_config(str(p))
-    amap = build_atm_scalar_param_map()
-    atm_params = {k: v for k, v in params.items() if k in amap}
-    rest_params = {k: v for k, v in params.items() if k not in amap}
-
     atm_config = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
         dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
         cloud_scheme="sundqvist",
     )
-    atm_config = apply_params_to_config(
-        atm_config, atm_params, driver="run_coupled", scalar_param_map=amap)
+    coupled_cfg = CoupledConfig(land_config=MultiLayerLandConfig())
+
+    (atm_config, coupled_cfg, coupler_config,
+     ice_config, lake_config) = mod.apply_coupled_params(
+        str(p), "analytical", atm_config, coupled_cfg, None)
+
     assert atm_config.cloud_q_c_diagnostic == 3.0e-4
+    assert ice_config.albedo_ice == 0.7
+    assert coupler_config.ocean_albedo == 0.08
+    assert coupled_cfg.land_config.Cd_land == 3.0e-3
+    assert isinstance(coupler_config, CouplerConfig)
+    assert isinstance(ice_config, SeaIceConfig)
+    assert isinstance(lake_config, LakeConfig)
 
-    class _Bundle(NamedTuple):
-        coupled: object
-        coupler: object
-        ice: object
-        lake: object
 
-    bundle = _Bundle(
-        coupled=CoupledConfig(land_config=MultiLayerLandConfig()),
-        coupler=CouplerConfig(),
-        ice=SeaIceConfig(),
-        lake=LakeConfig(),
+def test_params_atm_only_leaves_bundle_configs_none(tmp_path):
+    """Atmosphere-only --params never builds the coupler/ice/lake bundle:
+    ice/lake come back None (CoupledESMDriver builds its identical defaults),
+    and a caller-supplied coupler_config passes through unchanged."""
+    from legoesm.driver.config import (
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
     )
-    bundle = apply_params_to_config(bundle, rest_params, driver="run_coupled")
-    assert bundle.ice.albedo_ice == 0.7
-    assert bundle.coupler.ocean_albedo == 0.08
-    assert bundle.coupled.land_config.Cd_land == 3.0e-3
+    from legoesm.driver.coupled_config import CoupledConfig
+
+    p = tmp_path / "params.yaml"
+    p.write_text("atm.clouds.CloudConfig.q_c_diagnostic: 3.0e-4\n")
+    atm_config = ExperimentConfig(
+        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
+        dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+        cloud_scheme="sundqvist",
+    )
+    coupled_in = CoupledConfig()
+
+    (atm_config, coupled_out, coupler_config,
+     ice_config, lake_config) = mod.apply_coupled_params(
+        str(p), "clm", atm_config, coupled_in, None)
+
+    assert atm_config.cloud_q_c_diagnostic == 3.0e-4
+    assert coupled_out is coupled_in
+    assert coupler_config is None
+    assert ice_config is None
+    assert lake_config is None
 
 
 def test_params_clobber_guard():

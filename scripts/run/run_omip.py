@@ -45,6 +45,10 @@ import numpy as np
 # OMIP ran unconditional fp64).  x64 is enabled at import (above) so the
 # fp64/mixed accumulate+control roles stay exact regardless of mode;
 # apply_precision installs the per-module mixed overrides when requested.
+from legoesm.ocean.physics.lateral_mixing.config import (
+    GMRediConfig,
+    VisbeckConfig,
+)
 from legoesm.ocean.physics.vertical_mixing.config import (
     KPPConfig,
     VerticalMixingConfig,
@@ -81,6 +85,23 @@ ALL_RESULTS: list[dict] = []
 _VALID_VERTICAL_MIXING_SCHEMES = ("kpp", "tke", "catke", "richardson", "constant", "none")
 _DEFAULT_KPP_CONFIG = KPPConfig()
 
+# Production GM/Redi config for the realistic-bathymetry (ETOPO) lat-lon path,
+# hoisted from _create_setup so a --params calibration file can override its
+# tunables (kappa_GM/kappa_Redi/S_max, the Visbeck adaptive-kappa knobs, and
+# the Treguier-1997 adaptive-kappa cap aei0 — #691/#724 reachability audit).
+# Values are unchanged from the inline construction (byte-identical default).
+_DEFAULT_BATHY_GM_REDI = GMRediConfig(
+    kappa_GM=800.0,
+    kappa_Redi=800.0,
+    S_max=0.005,
+    visbeck=VisbeckConfig(
+        enabled=True,
+        alpha=0.015,
+        kappa_min=200.0,
+        kappa_max=2000.0,
+    ),
+)
+
 
 class OMIPRunConfig(NamedTuple):
     """CLI-resolved run controls that are not a single ocean model config."""
@@ -90,6 +111,11 @@ class OMIPRunConfig(NamedTuple):
     seed: int
     vertical_mixing: VerticalMixingConfig
     precision: str = "fp64"
+    # GM/Redi bundle threaded into _create_setup's realistic-bathymetry
+    # lat-lon path (inert on flat-bottom / other-grid runs; --no-gm-redi
+    # still disables it entirely).  Carried here so --params can reach
+    # GMRediConfig / VisbeckConfig / TreguierConfig (#691/#724).
+    gm_redi: GMRediConfig = _DEFAULT_BATHY_GM_REDI
 
 
 def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> bool:
@@ -540,6 +566,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   slope_foot_alpha: float = 0.0,
                   no_lat_scaling: bool = False,
                   no_gm_redi: bool = False,
+                  gm_redi: GMRediConfig | None = None,
                   implicit_vertical_mixing: bool = False,
                   vertical_mixing: VerticalMixingConfig | None = None,
                   forcing_mode: str = "restoring",
@@ -679,7 +706,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 OceanConvectionConfig, EnhancedDiffusionConfig,
             )
             from legoesm.ocean.physics.lateral_mixing.config import (
-                GMRediConfig, VisbeckConfig, LateralMixingConfig,
+                LateralMixingConfig,
             )
             bathy_physics = OceanPhysicsConfig(
                 vertical_mixing=vertical_mixing,
@@ -697,16 +724,11 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 # SW, so the physics SW module would double-count.
                 shortwave_penetration=None,
             )
-            bathy_gm_redi = GMRediConfig(
-                kappa_GM=800.0,
-                kappa_Redi=800.0,
-                S_max=0.005,
-                visbeck=VisbeckConfig(
-                    enabled=True,
-                    alpha=0.015,
-                    kappa_min=200.0,
-                    kappa_max=2000.0,
-                ),
+            # Hoisted to _DEFAULT_BATHY_GM_REDI (module level) so the --params
+            # calibration layer can override its tunables via OMIPRunConfig
+            # (#691/#724); values unchanged.
+            bathy_gm_redi = (
+                gm_redi if gm_redi is not None else _DEFAULT_BATHY_GM_REDI
             )
             _A_h = A_h_override if A_h_override is not None else 2.0e5
             _B_h = B_h_override if B_h_override is not None else 5.0e9
@@ -3232,6 +3254,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         slope_foot_alpha=args.slope_foot_alpha,
         no_lat_scaling=args.no_lat_scaling,
         no_gm_redi=getattr(args, "no_gm_redi", False),
+        gm_redi=run_config.gm_redi,
         implicit_vertical_mixing=getattr(
             args, "implicit_vertical_mixing", False),
         vertical_mixing=run_config.vertical_mixing,

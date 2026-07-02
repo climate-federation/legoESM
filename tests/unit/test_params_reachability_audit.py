@@ -23,7 +23,6 @@ red until the baseline shrinks.  This is the machine-enforced form of #691's
 from __future__ import annotations
 
 from collections import Counter
-from typing import NamedTuple
 
 from legoesm.driver.run_config_yaml import build_atm_scalar_param_map
 from legoesm.training.param_collector import build_registry
@@ -63,27 +62,21 @@ def _driver_key_sets():
     omip_keys = _routable_keys(omip_build(omip_args(["--grid", "latlon"])))
     lmip_keys = _routable_keys(lmip_build(lmip_args(["--lat", "0.0"])))
 
-    # run_coupled --params bundle (mirrors scripts/run/run_coupled.py): the
-    # coupled config + explicitly-passed coupler / sea-ice / lake configs.
-    # Coverage is the union over the user-selectable land variants (slab
-    # LandConfig default; MultiLayerLandConfig via --land-scheme multilayer).
-    from legoesm.coupler.config import CouplerConfig
-    from legoesm.coupler.lake.config import LakeConfig
+    # run_coupled --params bundle: the PRODUCTION routing bundle main()
+    # applies (scripts/run/run_coupled.py::build_params_bundle — the coupled
+    # config + explicitly-passed coupler / sea-ice / lake configs), so audit
+    # and driver cannot drift.  Coverage is the union over the user-selectable
+    # land variants (slab LandConfig default; MultiLayerLandConfig via
+    # --land-scheme multilayer).
     from legoesm.driver.coupled_config import CoupledConfig
-    from legoesm.ice.config import SeaIceConfig
     from legoesm.land.config import MultiLayerLandConfig
 
-    class _Bundle(NamedTuple):
-        coupled: object
-        coupler: object
-        ice: object
-        lake: object
+    from scripts.run.run_coupled import build_params_bundle
 
     coupled_keys: set = set()
     for cc in (CoupledConfig(),
                CoupledConfig(land_config=MultiLayerLandConfig())):
-        coupled_keys |= _routable_keys(
-            _Bundle(cc, CouplerConfig(), SeaIceConfig(), LakeConfig()))
+        coupled_keys |= _routable_keys(build_params_bundle(cc))
 
     return omip_keys, lmip_keys, coupled_keys
 

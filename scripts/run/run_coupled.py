@@ -25,6 +25,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 # Ensure the project root is on sys.path for test_cases imports
 _project_root = Path(__file__).resolve().parents[2]
@@ -98,6 +99,79 @@ def _check_params_clobber(params: dict, land_params: str) -> None:
                 "analytical to calibrate land via --params, or use "
                 "`run_lmip.py --params`."
             )
+
+
+class _CoupledParamsBundle(NamedTuple):
+    """--params routing bundle: every non-atmosphere component config
+    run_coupled passes explicitly to ``CoupledESMDriver``.  A single bundle
+    application keeps the loader's absent/ambiguous detection exact."""
+
+    coupled: object
+    coupler: object
+    ice: object
+    lake: object
+
+
+def build_params_bundle(coupled_cfg, coupler_config=None) -> _CoupledParamsBundle:
+    """The exact --params bundle ``apply_coupled_params`` routes into: the
+    coupled config plus the coupler / sea-ice / lake configs (defaults when
+    None — ``CoupledESMDriver`` builds the identical defaults, so a no-params
+    run is unchanged).  The reachability audit
+    (tests/unit/test_params_reachability_audit.py) walks THIS bundle, so the
+    audited routing surface cannot drift from what main() applies."""
+    from legoesm.coupler.config import CouplerConfig
+    from legoesm.coupler.lake.config import LakeConfig
+    from legoesm.ice.config import SeaIceConfig
+
+    return _CoupledParamsBundle(
+        coupled=coupled_cfg,
+        coupler=coupler_config or CouplerConfig(),
+        ice=SeaIceConfig(),
+        lake=LakeConfig(),
+    )
+
+
+def apply_coupled_params(params_path, land_params, atm_config, coupled_cfg,
+                         coupler_config):
+    """Apply the --params calibration layer (issue #691) across EVERY component
+    config this driver builds: atmosphere params route to the flattened
+    ExperimentConfig scalars (scalar map); land params route into the
+    coupled_cfg's nested land_config; coupler/ice/lake params route into the
+    coupler/sea-ice/lake configs (built here with their defaults and passed
+    explicitly — CoupledESMDriver builds the identical defaults when they are
+    None, so a no-params run is unchanged).
+
+    Returns ``(atm_config, coupled_cfg, coupler_config, ice_config,
+    lake_config)``; ice/lake stay ``None`` when no non-atmosphere params are
+    given.  Single source of truth for the split-and-bundle application:
+    ``main()`` calls this, and the unit tests exercise it directly
+    (tests/unit/test_run_coupled_config_yaml.py)."""
+    from legoesm.driver.run_config_yaml import (
+        apply_params_to_config,
+        build_atm_scalar_param_map,
+        load_params_config,
+    )
+
+    ice_config = None
+    lake_config = None
+    params = load_params_config(params_path)
+    _check_params_clobber(params, land_params)
+    amap = build_atm_scalar_param_map()
+    atm_params = {k: v for k, v in params.items() if k in amap}
+    rest_params = {k: v for k, v in params.items() if k not in amap}
+    if atm_params:
+        atm_config = apply_params_to_config(
+            atm_config, atm_params, driver="run_coupled",
+            scalar_param_map=amap)
+    if rest_params:
+        bundle = apply_params_to_config(
+            build_params_bundle(coupled_cfg, coupler_config),
+            rest_params, driver="run_coupled")
+        coupled_cfg = bundle.coupled
+        coupler_config = bundle.coupler
+        ice_config = bundle.ice
+        lake_config = bundle.lake
+    return atm_config, coupled_cfg, coupler_config, ice_config, lake_config
 
 
 def land_scheme_overrides(land_scheme: str) -> dict:
@@ -822,55 +896,16 @@ def main():
                     "ocean tile)", args.surface_bulk_scheme)
 
     # Apply the --params calibration layer (issue #691) across EVERY component
-    # config this driver builds: atmosphere params route to the flattened
-    # ExperimentConfig scalars (scalar map); land/ocean params route into the
-    # coupled_cfg's nested land_config/ocean_config; coupler/ice/lake params
-    # route into the coupler/sea-ice/lake configs (built here with their
-    # defaults and passed explicitly — CoupledESMDriver builds the identical
-    # defaults when they are None, so a no-params run is unchanged).  A single
-    # bundle application keeps the loader's absent/ambiguous detection exact.
+    # config this driver builds — see apply_coupled_params (the single source
+    # of truth for the atm-scalar-map / coupled-bundle split, exercised
+    # directly by the unit tests and the reachability audit).
     ice_config = None
     lake_config = None
     if getattr(args, "params", None):
-        from typing import NamedTuple as _NamedTuple
-
-        from legoesm.coupler.config import CouplerConfig
-        from legoesm.coupler.lake.config import LakeConfig
-        from legoesm.driver.run_config_yaml import (
-            apply_params_to_config,
-            build_atm_scalar_param_map,
-            load_params_config,
-        )
-        from legoesm.ice.config import SeaIceConfig
-
-        params = load_params_config(args.params)
-        _check_params_clobber(params, args.land_params)
-        amap = build_atm_scalar_param_map()
-        atm_params = {k: v for k, v in params.items() if k in amap}
-        rest_params = {k: v for k, v in params.items() if k not in amap}
-        if atm_params:
-            atm_config = apply_params_to_config(
-                atm_config, atm_params, driver="run_coupled",
-                scalar_param_map=amap)
-        if rest_params:
-            class _CoupledParamsBundle(_NamedTuple):
-                coupled: object
-                coupler: object
-                ice: object
-                lake: object
-
-            bundle = _CoupledParamsBundle(
-                coupled=coupled_cfg,
-                coupler=coupler_config or CouplerConfig(),
-                ice=SeaIceConfig(),
-                lake=LakeConfig(),
-            )
-            bundle = apply_params_to_config(
-                bundle, rest_params, driver="run_coupled")
-            coupled_cfg = bundle.coupled
-            coupler_config = bundle.coupler
-            ice_config = bundle.ice
-            lake_config = bundle.lake
+        (atm_config, coupled_cfg, coupler_config, ice_config,
+         lake_config) = apply_coupled_params(
+            args.params, args.land_params, atm_config, coupled_cfg,
+            coupler_config)
 
     driver = CoupledESMDriver(
         atm_config, coupled_cfg, coupler_config=coupler_config,
