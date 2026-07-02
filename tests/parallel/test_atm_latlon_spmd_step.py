@@ -388,15 +388,85 @@ def test_run_atm_latlon_spmd_segment_matches_serial(use_polar_filter):
 # each band's latitudes; column-local physics adds no cross-band coupling.
 # ==============================================================================
 
-def test_run_atm_latlon_spmd_segment_rejects_stateful_physics():
-    """Dispatch-hardening: a non-None phys_state (stateful PhysicsState carry) is
-    not yet SPMD-routed (flattened (ncol,) layout + stochastic PRNG split) ->
-    must raise, never silently mis-shard."""
-    model, c_state = _model_and_state(use_polar_filter=False)
-    hs0 = _hs_from_cgrid_state(model, c_state)
-    with pytest.raises(NotImplementedError, match="stateful physics carry"):
-        run_atm_latlon_spmd_segment(
-            model, None, hs0, 100.0, 1, phys_state=object())
+def _mk_phys_state(ncol, nlev):
+    """Minimal all-zeros PhysicsState with a nonzero deterministic tke seed."""
+    import jax as _jax
+    from legoesm.atmosphere.physics.physics_state import PhysicsState
+    return PhysicsState(
+        tke=jnp.full((ncol, nlev), 0.01),
+        conv_prog_profile=jnp.zeros((ncol, nlev)),
+        conv_stoch_state=jnp.zeros((ncol,)),
+        gwd_spectrum=jnp.zeros((ncol, 1, 1)),
+        prng_key=_jax.random.PRNGKey(0),
+        surface_T_sfc_override=jnp.full((ncol,), jnp.nan),
+        qke=jnp.zeros((ncol, nlev)),
+        clubb_moments=jnp.zeros((ncol, 15, nlev + 1)),
+        rad_heating=jnp.zeros((ncol, nlev)),
+    )
+
+
+def _stateful_hs_physics():
+    """A DETERMINISTIC, COLUMN-LOCAL stateful physics: Held-Suarez tendencies
+    scaled by a column tke factor, with tke relaxed toward the column
+    temperature — the carry both INFLUENCES the trajectory and EVOLVES, so
+    equivalence is non-vacuous in both directions.  Shapes derive from the
+    state itself (band or global), never from the grid statics."""
+    from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+
+    def _phys(hs, grid, sigma, ps):
+        tend = held_suarez_forcing_latlon(hs, grid, sigma)
+        nlat_loc, nlon, nlev = hs.T.data.shape
+        T_col = hs.T.data.reshape(nlat_loc * nlon, nlev)
+        tke_new = 0.9 * ps.tke + 0.1 * (T_col / 300.0)
+        factor = (1.0 + 1e-2 * jnp.mean(ps.tke, axis=-1)).reshape(
+            nlat_loc, nlon, 1)
+        tend = tend._replace(
+            dT_dt=tend.dT_dt.replace(data=tend.dT_dt.data * factor))
+        return tend, ps._replace(tke=tke_new)
+
+    _phys._requires_phys_state = True
+    return _phys
+
+
+def test_run_atm_latlon_spmd_segment_stateful_carry_matches_serial():
+    """Increment-1 gate: a DETERMINISTIC PhysicsState carry threads through
+    the SPMD segment — every (ncol, ...) leaf band-splits on dim 0 (lat-major
+    flatten) — and both the trajectory AND the carry-out match the
+    single-device twin through the same wrapper."""
+    mesh = _mesh()
+    serial, c_state = _model_and_state(use_polar_filter=False)
+    spmd_model, _ = _model_and_state(use_polar_filter=False)
+    hs0 = _hs_from_cgrid_state(serial, c_state)
+    dt, n_steps = 100.0, 3
+    phys = _stateful_hs_physics()
+    nlat, nlon, nlev = np.asarray(hs0.T.data).shape
+    ps0 = _mk_phys_state(nlat * nlon, nlev)
+
+    hs_s, ps_s = run_atm_latlon_spmd_segment(
+        serial, None, hs0, dt, n_steps, physics_fn=phys, phys_state=ps0)
+    hs_b, ps_b = run_atm_latlon_spmd_segment(
+        spmd_model, mesh, hs0, dt, n_steps, physics_fn=phys, phys_state=ps0)
+
+    # Non-vacuity 1: the carry actually changed (tke evolved from the seed).
+    assert float(np.max(np.abs(
+        np.asarray(ps_b.tke) - np.asarray(ps0.tke)))) > 1e-6
+    # Non-vacuity 2: the carry influenced the trajectory (vs stateless HS).
+    from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+    hs_nostate = run_atm_latlon_spmd_segment(
+        spmd_model, mesh, hs0, dt, n_steps,
+        physics_fn=held_suarez_forcing_latlon)
+    assert float(np.max(np.abs(
+        np.asarray(hs_b.T.data) - np.asarray(hs_nostate.T.data)))) > 1e-9
+
+    for field in ("u", "v", "T", "p_s"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(hs_b, field).data),
+            np.asarray(getattr(hs_s, field).data),
+            rtol=1e-6, atol=1e-9,
+            err_msg=f"stateful-carry SPMD diverged from serial in '{field}'")
+    np.testing.assert_allclose(
+        np.asarray(ps_b.tke), np.asarray(ps_s.tke), rtol=1e-6, atol=1e-12,
+        err_msg="PhysicsState.tke carry-out diverged under band decomposition")
 
 
 def test_run_atm_latlon_spmd_segment_rejects_tagged_stateful_physics_fn():

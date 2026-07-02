@@ -197,6 +197,15 @@ def make_physics(
             f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe', 'mpas'."
         )
     fn._requires_phys_state = physics_config_requires_phys_state(config)
+    # SPMD contract tag: stochastic convection draws (ncol_local,)-shaped
+    # AR1 innovations from the replicated per-step key, so band-local
+    # draws differ from the serial global draws — the lat-band SPMD step
+    # refuses a stochastic-tagged fn (deterministic carries thread fine).
+    from legoesm.atmosphere.physics.convection.integration import (
+        convection_scheme_traits as _cst,
+    )
+    fn._has_stochastic_physics = bool(
+        _cst(config.convection.scheme).is_stochastic)
     return fn
 
 

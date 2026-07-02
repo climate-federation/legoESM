@@ -204,33 +204,56 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
     ``interp_cell_to_vface_halo`` — so column-local physics is decomposition-
     invariant with NO collectives. The only global reductions in the step
     (``zero_mean_tendency``, the mass fixer) are already "lat"-psum-routed.
-    STATEFUL physics (a ``PhysicsState`` carry) is NOT yet SPMD-routed — the
-    carry is the flattened ``(ncol=n_lat*n_lon, ...)`` layout (needs a lat-major
-    reshape-aware shard) and stochastic schemes need a global-column-indexed PRNG
-    split; ``run_atm_latlon_spmd_segment`` rejects a non-None ``phys_state``.
+
+    STATEFUL physics: a DETERMINISTIC prognostic carry (tke/qke, convection
+    profiles, GWD spectrum) IS SPMD-routed — pass it per call:
+    ``step(c_state, dt, phys_state=ps) -> (c_state, ps)``.  Every
+    ``(ncol=n_lat*n_lon, ...)`` ``PhysicsState`` leaf band-splits on dim 0
+    (the ColumnAdapter flatten is a C-order lat-major reshape, so a
+    contiguous dim-0 shard is exactly the band's own columns); the
+    ``prng_key (2,)`` and other non-column leaves replicate.  STOCHASTIC
+    schemes are refused (``_has_stochastic_physics`` tag): their AR1 draws
+    are shaped ``(ncol_local,)`` from the replicated key, so band-local
+    draws would diverge from serial — the global-column-indexed PRNG split
+    is the follow-up increment.
     """
     from legoesm.parallel.latlon_spmd import (
         latlon_band_perms, reconstruct_vface_lower, to_vface_lower,
         spmd_pole_end_masks, activate_latlon_spmd_halo)
     from legoesm.parallel.shard_map_compat import shard_map
 
-    # Dispatch-hardening: the SPMD body calls _step_cgrid_impl / _step_cgrid
-    # DIRECTLY, bypassing model.step()'s refuse_unthreaded_stateful_physics
-    # guard. A STATEFUL (tagged) physics_fn handed here with no carry would
-    # silently reseed its PhysicsState every step (issue #405/#413). Since the
-    # SPMD path does not yet thread the carry, reject a tagged stateful physics_fn
-    # LOUDLY (covers both the mesh=None and the sharded paths below).
-    if physics_fn is not None:
-        from legoesm.timestepping.integration import (
-            refuse_unthreaded_stateful_physics)
-        refuse_unthreaded_stateful_physics(
-            physics_fn, None,
-            where="atm lat-band SPMD step (stateful PhysicsState carry not yet "
-                  "SPMD-routed)")
+    # Stochastic physics stays refused under SPMD (increment 2): the AR1
+    # innovations are drawn with (ncol_local,)-shaped calls from the
+    # REPLICATED per-step key, so band-local draws differ from the serial
+    # global draws — a decomposition-VARIANT trajectory, not a carry bug.
+    # Deterministic prognostic carries (tke/qke, conv profiles, GWD
+    # spectrum) thread exactly: the ColumnAdapter flatten is a C-order
+    # (lat-major) reshape, so a contiguous dim-0 shard of every
+    # ``(ncol, ...)`` PhysicsState leaf IS the band's own columns.
+    if physics_fn is not None and getattr(
+            physics_fn, "_has_stochastic_physics", False):
+        raise NotImplementedError(
+            "atm lat-band SPMD step: stochastic convection draws are "
+            "shaped (ncol_local,) from a replicated key — band-local "
+            "draws would diverge from the serial trajectory.  Disable "
+            "enable_stochastic under SPMD (global-column-indexed PRNG "
+            "split is the follow-up)."
+        )
+
+    # A stateful (tagged) physics_fn with NO carry would silently reseed
+    # its PhysicsState every step (issue #405/#413) — model.step()'s
+    # guard is bypassed here, so the returned step re-checks per call.
+    from legoesm.timestepping.integration import (
+        refuse_unthreaded_stateful_physics)
 
     if mesh is None:                       # single-device: plain C-grid step
-        return lambda c_state, dt: model._step_cgrid(
-            c_state, dt, physics_fn=physics_fn)[0]
+        def _serial_step(c_state, dt, phys_state=None):
+            refuse_unthreaded_stateful_physics(
+                physics_fn, phys_state, where="atm lat-band SPMD step")
+            out, ps_out = model._step_cgrid(
+                c_state, dt, physics_fn=physics_fn, phys_state=phys_state)
+            return out if phys_state is None else (out, ps_out)
+        return _serial_step
 
     n_dev = mesh.devices.size
     axis = mesh.axis_names[0]
@@ -294,6 +317,39 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
         )
         return out._replace(v=to_vface_lower(out.v))
 
+    def _body_with_carry(state_local, stacks_local, dt, ps_local):
+        # Stateful variant: the band's PhysicsState chunk (ncol_band =
+        # nl*n_lon leading dim — the C-order lat-major flatten makes a
+        # contiguous dim-0 shard exactly the band's own columns) is
+        # threaded into every RK stage and the carry-out returned.
+        r = jax.lax.axis_index(axis)
+        band_geom = template._replace(
+            **{name: stacks_local[name][r] for name in array_field_names})
+        pmask = (stacks_local["__polar_mask"][r]
+                 if "__polar_mask" in stacks_local else None)
+        pmaskv = (stacks_local["__polar_mask_v"][r]
+                  if "__polar_mask_v" in stacks_local else None)
+        v_full = reconstruct_vface_lower(state_local.v, axis, perm_north)
+        state_band = state_local._replace(v=v_full)
+        out, ps_out = model._step_cgrid_impl(
+            state_band, dt,
+            physics_fn=physics_fn, phys_state=ps_local,
+            grid=band_geom, sigma_coord=model.sigma_coord,
+            polar_mask=pmask, polar_mask_v=pmaskv,
+            pole_v_bc_masks=spmd_pole_end_masks(),
+        )
+        return out._replace(v=to_vface_lower(out.v)), ps_out
+
+    _ncol_global = int(grid.n_lat) * int(grid.n_lon)
+
+    def _ps_spec_leaf(leaf):
+        # (ncol, ...) leaves band-split on dim 0 (lat-major flatten);
+        # everything else (prng_key (2,), scalars) replicated.
+        if (hasattr(leaf, "ndim") and leaf.ndim >= 1
+                and leaf.shape[0] == _ncol_global):
+            return P("lat")
+        return P()
+
     # Build the JITTED shard_map ONCE and cache it. ``jax.jit`` is LOAD-BEARING:
     # a bare shard_map is NOT compilation-cached, so calling it re-traces +
     # recompiles the (large, un-jitted) band step EVERY call — a 32x64x10 nd=2
@@ -308,15 +364,27 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
     # the cut/pole branches.
     _cache = {}
 
-    def sharded_step(c_state, dt):
-        fn = _cache.get("fn")
+    def sharded_step(c_state, dt, phys_state=None):
+        refuse_unthreaded_stateful_physics(
+            physics_fn, phys_state, where="atm lat-band SPMD step")
+        key = ("fn", phys_state is None,
+               None if phys_state is None
+               else jax.tree_util.tree_structure(phys_state))
+        fn = _cache.get(key)
         if fn is None:
             in_spec = jax.tree.map(_lat_spec, c_state)
             stacks_spec = jax.tree.map(lambda _x: P(), stacks)  # all replicated
-            fn = jax.jit(shard_map(
-                _body, mesh=mesh, in_specs=(in_spec, stacks_spec, P()),
-                out_specs=in_spec, check_vma=False))
-            _cache["fn"] = fn
+            if phys_state is None:
+                fn = jax.jit(shard_map(
+                    _body, mesh=mesh, in_specs=(in_spec, stacks_spec, P()),
+                    out_specs=in_spec, check_vma=False))
+            else:
+                ps_spec = jax.tree.map(_ps_spec_leaf, phys_state)
+                fn = jax.jit(shard_map(
+                    _body_with_carry, mesh=mesh,
+                    in_specs=(in_spec, stacks_spec, P(), ps_spec),
+                    out_specs=(in_spec, ps_spec), check_vma=False))
+            _cache[key] = fn
         # Arm the SPMD band halo around the call ONLY; save+restore the FULL
         # backend state (a later serial/full-domain call must not take SPMD-only
         # branches outside a shard_map). The first call traces (baking the band
@@ -329,7 +397,9 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
         _prev_mesh = get_spmd_mesh()
         activate_latlon_spmd_halo(mesh)
         try:
-            return fn(c_state, stacks, jnp.asarray(dt))
+            if phys_state is None:
+                return fn(c_state, stacks, jnp.asarray(dt))
+            return fn(c_state, stacks, jnp.asarray(dt), phys_state)
         finally:
             set_spmd_mesh(_prev_mesh)
             set_halo_backend(_prev_backend, _prev_topo)
@@ -354,13 +424,13 @@ def run_atm_latlon_spmd_segment(model, mesh, hs_init, dt, n_steps,
     for dynamics + column-local physics; the limited-FV-PPM cut truncation
     bounded).
 
-    ``physics_fn`` (optional): a STATELESS, COLUMN-LOCAL physics closure (e.g.
-    Held-Suarez / any per-column parameterization). Evaluated per RK stage on the
-    band geometry; decomposition-invariant with no collectives. ``mesh=None``
-    runs the single-device step. STATEFUL physics (a ``PhysicsState`` carry) is
-    not yet SPMD-routed (see :func:`make_sharded_atm_latlon_step`) -> a non-None
-    ``phys_state`` raises ``NotImplementedError`` rather than silently
-    mis-sharding the flattened ``(ncol,)`` carry.
+    ``physics_fn`` (optional): a COLUMN-LOCAL physics closure (e.g.
+    Held-Suarez / any per-column parameterization). Evaluated per RK stage on
+    the band geometry; decomposition-invariant with no collectives.
+    ``mesh=None`` runs the single-device step. A DETERMINISTIC stateful
+    physics threads its ``PhysicsState`` via ``phys_state=`` (band-split
+    carry; see :func:`make_sharded_atm_latlon_step`); stochastic schemes are
+    refused there.
 
     Parameters
     ----------
@@ -369,27 +439,34 @@ def run_atm_latlon_spmd_segment(model, mesh, hs_init, dt, n_steps,
     hs_init : HydrostaticState        cell-centered, Field-wrapped.
     dt : float
     n_steps : int
-    physics_fn : callable | None      stateless column-local physics.
-    phys_state : None                 stateful carry is not yet SPMD-routed.
+    physics_fn : callable | None      column-local physics (stateless, or a
+                                      DETERMINISTIC stateful scheme with its
+                                      carry in ``phys_state``).
+    phys_state : PhysicsState | None  deterministic prognostic carry.  Its
+                                      ``(ncol, ...)`` leaves band-split on
+                                      dim 0 (the C-order lat-major flatten
+                                      makes a contiguous shard the band's
+                                      own columns); stochastic schemes are
+                                      refused (replicated-key draws are
+                                      decomposition-variant).
 
     Returns
     -------
-    HydrostaticState                  cell-centered, Field-wrapped.
+    HydrostaticState                       (``phys_state is None``), or
+    (HydrostaticState, PhysicsState)       with the threaded carry-out.
     """
     if n_steps < 1:
         raise ValueError(f"n_steps must be >= 1, got {n_steps}")
-    if phys_state is not None:
-        raise NotImplementedError(
-            "atm lat-band SPMD: a stateful physics carry (PhysicsState) is not "
-            "yet SPMD-routed — its flattened (ncol=n_lat*n_lon,) layout needs a "
-            "lat-major reshape-aware shard and stochastic schemes need a "
-            "global-column-indexed PRNG split. Pass a stateless physics_fn "
-            "(phys_state=None), or run dynamics-only.")
     step = make_sharded_atm_latlon_step(model, mesh, physics_fn=physics_fn)
     c_state = shard_hydrostatic_to_atm_latlon(hs_init, model.grid, mesh)
+    ps = phys_state
     for _ in range(n_steps):
-        c_state = step(c_state, dt)
-    return gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh)
+        if ps is None:
+            c_state = step(c_state, dt)
+        else:
+            c_state, ps = step(c_state, dt, phys_state=ps)
+    hs_out = gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh)
+    return hs_out if phys_state is None else (hs_out, ps)
 
 
 def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
