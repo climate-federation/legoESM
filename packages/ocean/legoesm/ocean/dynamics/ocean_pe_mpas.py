@@ -82,8 +82,11 @@ from legoesm.ocean.dynamics.ocean_tendency_common import (
     apply_freshwater_virtual_salt_top,
     apply_sponge_tracer_relaxation,
     iterate_eos_and_pressure_anomaly,
+    nemo_drag_r_from_speed_sq,
+    validate_bottom_drag_scheme,
 )
 from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+from legoesm import constants
 
 
 def mpas_ocean_baroclinic_tendencies(
@@ -640,7 +643,9 @@ def mpas_ocean_baroclinic_tendencies(
     # depth-mean enters F_slow_u (the barotropic forcing).  The
     # implicit vertical path in step() does NOT double-count —
     # it handles only vertical viscosity/diffusivity, not drag.
-    if config.bottom_drag_r > 0:
+    _drag_scheme = validate_bottom_drag_scheme(
+        str(getattr(config, "bottom_drag_scheme", "legacy")))
+    if config.bottom_drag_r > 0 or _drag_scheme != "legacy":
         H_BBL = getattr(config, "bottom_drag_bbl_thickness", 0.0)
         # Quadratic-with-floor drag (MOM6 DRAG_BG_VEL).  When
         # ``bottom_drag_bg_velocity > 0``, the effective drag coefficient
@@ -648,7 +653,40 @@ def mpas_ocean_baroclinic_tendencies(
         # Recovers linear ``r`` at |u|→0, quadratic ``Cd·|u|`` at high
         # speed.  u_bg=0 → bit-exact legacy linear drag.
         _u_bg = float(getattr(config, "bottom_drag_bg_velocity", 0.0))
-        if _u_bg > 0.0:
+        if _drag_scheme != "legacy":
+            # NEMO zdfdrg drag law (np_non_lin / np_loglayer) on the Voronoi
+            # mesh: r = Cd·√(|U|² + ke0) from the BOTTOM-cell FULL speed.
+            # |U|² at cells = 2·KE (Ringler discrete kinetic energy — the
+            # Voronoi analogue of NEMO's t-point 2-component average),
+            # averaged to the edge over cellsOnEdge (NEMO dynzdf's 2-point
+            # rCdU average).  The log-layer Cd uses the EDGE bottom
+            # thickness h_e (= min of the two adjacent cells — NEMO's
+            # e3u(mbku) equivalent; NEMO evaluates Cd at t-points then
+            # averages rCdU, an O(Δ)-equivalent placement).
+            if isinstance(z_coord, OceanPartialCellCoordinate):
+                _bot_c = jnp.maximum(z_coord.bottom_level, 0)[:, jnp.newaxis]
+                _ke_bot = jnp.take_along_axis(ke, _bot_c, axis=1)[:, 0]
+                _bot_e_r = jnp.maximum(
+                    compute_max_level_edge_bot(z_coord.bottom_level, mesh), 0,
+                )[:, jnp.newaxis]
+                _h_bot_e = jnp.take_along_axis(h_e_3d, _bot_e_r, axis=1)[:, 0]
+            else:
+                _ke_bot = ke[:, -1]
+                _h_bot_e = h_e_3d[:, -1]
+            _c1 = mesh.cellsOnEdge[0]
+            _c2 = mesh.cellsOnEdge[1]
+            # 0.5·(2·KE_c1 + 2·KE_c2) = KE_c1 + KE_c2  [m²/s²]
+            _speed_sq_e = _ke_bot[_c1] + _ke_bot[_c2]
+            _r_eff = nemo_drag_r_from_speed_sq(
+                _speed_sq_e, _h_bot_e,
+                scheme=_drag_scheme,
+                cd0=float(getattr(config, "bottom_drag_cd0", 1.0e-3)),
+                cd_max=float(getattr(config, "bottom_drag_cdmax", 0.1)),
+                z0=float(getattr(config, "bottom_drag_z0", 3.0e-3)),
+                ke0=float(getattr(config, "bottom_drag_ke0", 2.5e-3)),
+                von_karman=constants.kappa_von_karman,
+            )[:, jnp.newaxis]  # (nEdges, 1) — broadcasts over levels
+        elif _u_bg > 0.0:
             _Cd_eq = config.bottom_drag_r / _u_bg
             # Compute per-edge, per-level effective r from the speed at
             # each level (the drag sees the FULL velocity, not just bottom).

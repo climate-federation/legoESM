@@ -228,3 +228,57 @@ def test_example_params_file_loads_and_applies():
     cfg = build_config_from_args(parse_args(["--grid", "latlon"]))
     out = apply_params_to_config(cfg, load_params_config(str(p)), driver="run_omip")
     assert out.vertical_mixing.kpp.K_bg == 1.0e-5
+
+
+def test_iwm_flags_flow_to_config():
+    """--iwm* flags round-trip into VerticalMixingConfig.iwm (zdfiwm)."""
+    off = build_config_from_args(parse_args(["--grid", "latlon"]))
+    assert off.vertical_mixing.iwm.enabled is False
+    assert off.vertical_mixing.iwm.mevar is False
+    assert off.vertical_mixing.iwm.tsdiff is False
+
+    on = build_config_from_args(parse_args([
+        "--grid", "latlon",
+        "--iwm", "--iwm-mevar",
+        "--iwm-power-bot", "2e-4",
+        "--iwm-power-cri", "3e-4",
+        "--iwm-power-nsq", "4e-4",
+        "--iwm-power-sho", "5e-4",
+        "--iwm-scale-bot", "250.0",
+        "--iwm-scale-cri", "125.0",
+    ]))
+    iwm = on.vertical_mixing.iwm
+    assert iwm.enabled is True
+    assert iwm.mevar is True
+    assert iwm.tsdiff is False
+    assert iwm.power_bot_wm2 == 2e-4
+    assert iwm.power_cri_wm2 == 3e-4
+    assert iwm.power_nsq_wm2 == 4e-4
+    assert iwm.power_sho_wm2 == 5e-4
+    assert iwm.scale_bot_m == 250.0
+    assert iwm.scale_cri_m == 125.0
+
+
+def test_bottom_drag_scheme_flags_parse():
+    """--bottom-drag-scheme + NEMO zdfdrg parameter flags parse; the ORACLE
+    (ORCA1 namdrg_bot) values are the flag defaults."""
+    args = parse_args(["--grid", "latlon"])
+    assert args.bottom_drag_scheme == "legacy"
+    assert args.bottom_drag_cd0 == 1.0e-3
+    assert args.bottom_drag_cdmax == 0.1
+    assert args.bottom_drag_z0 == 3.0e-3
+    assert args.bottom_drag_ke0 == 2.5e-3
+
+    args = parse_args([
+        "--grid", "latlon",
+        "--bottom-drag-scheme", "nemo_loglayer",
+        "--bottom-drag-cd0", "2e-3",
+        "--bottom-drag-ke0", "1e-3",
+    ])
+    assert args.bottom_drag_scheme == "nemo_loglayer"
+    assert args.bottom_drag_cd0 == 2e-3
+    assert args.bottom_drag_ke0 == 1e-3
+
+    with pytest.raises(SystemExit):
+        parse_args(["--grid", "latlon",
+                    "--bottom-drag-scheme", "nemo_typo"])

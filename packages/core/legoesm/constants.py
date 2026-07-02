@@ -96,6 +96,11 @@ sigma_water = 0.0728            # Surface tension of the water-air interface [N/
 # Turbulence
 # ==============================================================================
 kappa_von_karman = 0.4          # Von Kármán constant for the log-law (Pope 2000)
+nu_ocean_molecular = 1.4e-6     # Molecular kinematic viscosity of seawater
+                                # [m^2/s] (~10 degC; NEMO phycst/zdfiwm ``rnu``)
+kappa_T_ocean_molecular = 1.4e-7  # Molecular thermal diffusivity of seawater
+                                  # [m^2/s] (= nu_ocean_molecular / Pr, Pr~10;
+                                  # NEMO zdfiwm lower bound on wave-driven Kz)
 
 
 # ==============================================================================

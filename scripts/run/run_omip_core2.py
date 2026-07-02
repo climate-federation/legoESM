@@ -334,7 +334,10 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   convection_K_conv=1.0, convection_K_bg=1e-5,
                   freeze_floor=None, ew_cyclic_overlap=None,
                   runoff_depth_spread_m=None, tracer_advection=None,
-                  mle=None, dz_ref_override=None):
+                  mle=None, dz_ref_override=None,
+                  bottom_drag_scheme=None, bottom_drag_cd0=None,
+                  bottom_drag_cdmax=None, bottom_drag_z0=None,
+                  bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -379,6 +382,11 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("n_barotropic_substeps", n_barotropic_substeps),
                               ("barotropic_time_filter", barotropic_time_filter),
                               ("bottom_drag_r", bottom_drag_r),
+                              ("bottom_drag_scheme", bottom_drag_scheme),
+                              ("bottom_drag_cd0", bottom_drag_cd0),
+                              ("bottom_drag_cdmax", bottom_drag_cdmax),
+                              ("bottom_drag_z0", bottom_drag_z0),
+                              ("bottom_drag_ke0", bottom_drag_ke0),
                               ("C_smag", C_smag), ("C_leith", C_leith),
                               ("C_smag_lap", C_smag_lap),
                               ("momentum_advection", momentum_advection),
@@ -408,7 +416,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
     # same physics_fn pipeline.  Default (both off) leaves the validated
     # faithful config untouched.
     _use_convection = bool(convection and convection != "none")
-    if _use_convection or mle is not None:
+    _use_iwm = iwm is not None and iwm.enabled
+    if _use_convection or mle is not None or _use_iwm:
         from legoesm.ocean.physics.combined import OceanPhysicsConfig
         from legoesm.ocean.physics.convection.config import (
             OceanConvectionConfig, EnhancedDiffusionConfig,
@@ -438,8 +447,16 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                 K_conv=convection_K_conv, K_bg=convection_K_bg,
             ),
         ) if _use_convection else OceanConvectionConfig(scheme="none")
+        _vm_cfg = VerticalMixingConfig(scheme="none")
+        if _use_iwm:
+            # zdfiwm rides the vertical-mixing config; scheme stays "none"
+            # (the tripole oracle has no closure scheme in the pipeline —
+            # backgrounds + convection EVD), the additive wave K enters in
+            # compute_vertical_K_profiles.  implicit_vertical_mixing is
+            # already forced True above.
+            _vm_cfg = _vm_cfg._replace(iwm=iwm)
         _ovr["physics"] = OceanPhysicsConfig(
-            vertical_mixing=VerticalMixingConfig(scheme="none"),
+            vertical_mixing=_vm_cfg,
             lateral_mixing=LateralMixingConfig(scheme="none"),
             surface_forcing=SurfaceForcingConfig(scheme="none"),
             bottom_drag=BottomDragConfig(scheme="none"),
@@ -457,7 +474,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         print(f"[setup] tripole physics ENABLED: "
               f"convection={convection if _use_convection else 'none'} "
               f"(K_conv={convection_K_conv} K_bg={convection_K_bg}) "
-              f"MLE={'ce=%g' % mle.ce if mle is not None else 'off'}")
+              f"MLE={'ce=%g' % mle.ce if mle is not None else 'off'} "
+              f"IWM={'on' if _use_iwm else 'off'}")
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -506,6 +524,24 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             z_coord, H_bathy, land_mask, smoothing_passes=bathy_smoothing_passes,
             min_levels=min_levels)
         model = LatLonCGridOceanModel(grid, z_coord, config)
+    if iwm is not None and iwm.enabled:
+        # FINAL model build with the zdfiwm maps (after every config /
+        # z_coord rebuild above).  On the eORCA1 tripole the forcing file
+        # is on the SAME mesh — the loader passes it through untouched.
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        _iwm_maps = None
+        if iwm_forcing_file:
+            from legoesm.ocean.iwm_forcing import load_iwm_forcing
+            _iwm_maps = load_iwm_forcing(
+                iwm_forcing_file, grid.lat_T, grid.lon_T,
+                land_mask=land_mask)
+        model = LatLonCGridOceanModel(grid, z_coord, config,
+                                      iwm_forcing=_iwm_maps)
+        print(f"[setup] tripole zdfiwm ENABLED "
+              f"(maps={'file:' + iwm_forcing_file if iwm_forcing_file else 'uniform fallback'}, "
+              f"mevar={iwm.mevar} tsdiff={iwm.tsdiff})")
     state = run_omip._init_rest_state(
         "tripole", grid, z_coord, H_max,
         H_bathy=jnp.asarray(H_bathy), land_mask=jnp.asarray(land_mask),
@@ -551,7 +587,10 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   polar_filter_max_wave_speed=None,
                   polar_filter_safety_factor=None,
                   runoff_depth_spread_m=None, tracer_advection=None,
-                  mle=None, dz_ref_override=None, mask_marginal_seas=False):
+                  mle=None, dz_ref_override=None, mask_marginal_seas=False,
+                  bottom_drag_scheme=None, bottom_drag_cd0=None,
+                  bottom_drag_cdmax=None, bottom_drag_z0=None,
+                  bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -580,6 +619,11 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("n_barotropic_substeps", n_barotropic_substeps),
                               ("barotropic_time_filter", barotropic_time_filter),
                               ("bottom_drag_r", bottom_drag_r),
+                              ("bottom_drag_scheme", bottom_drag_scheme),
+                              ("bottom_drag_cd0", bottom_drag_cd0),
+                              ("bottom_drag_cdmax", bottom_drag_cdmax),
+                              ("bottom_drag_z0", bottom_drag_z0),
+                              ("bottom_drag_ke0", bottom_drag_ke0),
                               ("C_smag", C_smag), ("C_leith", C_leith),
                               ("C_smag_lap", C_smag_lap),
                               ("momentum_advection", momentum_advection),
@@ -635,6 +679,18 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         config = config._replace(physics=config.physics._replace(mle=mle))
         model = LatLonCGridOceanModel(grid, z_coord, config)
         print(f"[setup] latlon MLE ENABLED: ce={mle.ce:g}")
+    if iwm is not None and iwm.enabled:
+        # zdfiwm rides the vertical-mixing config inside the EXISTING
+        # latlon-bathy physics (KPP + convection) — merge, don't replace
+        # (same doctrine as the MLE block above).  The maps + model
+        # rebuild happen below, after the land mask is known.
+        if config.physics is None:
+            raise ValueError(
+                "--iwm on latlon_bathy expected a physics config (KPP/"
+                "convection) but config.physics is None.")
+        _vm_iwm = config.physics.vertical_mixing._replace(iwm=iwm)
+        config = config._replace(
+            physics=config.physics._replace(vertical_mixing=_vm_iwm))
     e_mask, e_H = read_mesh_mask_bathy(mesh_path)
     ds = xr.open_dataset(mesh_path)
     src_lat = _squeeze2d(ds["gphit"].values)
@@ -672,6 +728,22 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
             z_coord, H_bathy, land_mask, smoothing_passes=bathy_smoothing_passes,
             min_levels=min_levels)
         model = LatLonCGridOceanModel(grid, z_coord, config)
+    if iwm is not None and iwm.enabled:
+        # FINAL model build with the zdfiwm maps (after every config /
+        # z_coord rebuild above, so nothing downstream drops them).
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        _iwm_maps = None
+        if iwm_forcing_file:
+            from legoesm.ocean.iwm_forcing import load_iwm_forcing
+            _iwm_maps = load_iwm_forcing(
+                iwm_forcing_file, tgt_lat, tgt_lon, land_mask=land_mask)
+        model = LatLonCGridOceanModel(grid, z_coord, config,
+                                      iwm_forcing=_iwm_maps)
+        print(f"[setup] latlon zdfiwm ENABLED "
+              f"(maps={'file:' + iwm_forcing_file if iwm_forcing_file else 'uniform fallback'}, "
+              f"mevar={iwm.mevar} tsdiff={iwm.tsdiff})")
     state = run_omip._init_rest_state(
         "latlon", grid, z_coord, H_max,
         H_bathy=jnp.asarray(H_bathy), land_mask=jnp.asarray(land_mask),
@@ -946,7 +1018,10 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      partial_cell=False, dz_ref_override=None,
                      n_barotropic_substeps=None,
                      barotropic_solver=None, freeze_floor=None,
-                     runoff_depth_spread_m=None, mle=None):
+                     runoff_depth_spread_m=None, mle=None,
+                     bottom_drag_scheme=None, bottom_drag_cd0=None,
+                     bottom_drag_cdmax=None, bottom_drag_z0=None,
+                     bottom_drag_ke0=None, iwm=None):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
     (the wired MPASOceanModel: KPP + GM/Redi + smc03 PGF + implicit-CN
@@ -982,11 +1057,20 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
         shortwave_penetration=None,
     )
     config = config._replace(physics=phys)
+    if iwm is not None and iwm.enabled:
+        raise SystemExit(
+            "--iwm is not wired on the MPAS vertical-mixing bridge yet "
+            "(lat-lon / tripole only)")
     _ovr = {k: v for k, v in (("A_h", A_h), ("B_h", B_h), ("K_bih", K_bih),
                               ("C_smag_lap", C_smag_lap), ("pgf_scheme", pgf_scheme),
                               ("bottom_drag_r", bottom_drag_r),
                               ("bottom_drag_bbl_thickness", bottom_drag_bbl_thickness),
                               ("bottom_drag_bg_velocity", bottom_drag_bg_velocity),
+                              ("bottom_drag_scheme", bottom_drag_scheme),
+                              ("bottom_drag_cd0", bottom_drag_cd0),
+                              ("bottom_drag_cdmax", bottom_drag_cdmax),
+                              ("bottom_drag_z0", bottom_drag_z0),
+                              ("bottom_drag_ke0", bottom_drag_ke0),
                               ("n_barotropic_substeps", n_barotropic_substeps),
                               ("barotropic_solver", barotropic_solver),
                               ("freeze_floor", freeze_floor),
@@ -2222,6 +2306,45 @@ def main() -> int:
     p.add_argument("--bottom-drag-r", type=float, default=None,
                    help="Linear bottom drag coefficient [m/s] (du/dt|drag=-r*u/h_bot). "
                         "tripole OMIP default is 0 (OFF); NEMO uses implicit quadratic drag.")
+    p.add_argument("--bottom-drag-scheme", type=str, default=None,
+                   choices=[None, "legacy", "nemo_quadratic", "nemo_loglayer"],
+                   help="Bottom-drag law: 'nemo_quadratic' = zdfdrg np_non_lin "
+                        "(the ORCA1 namelist: Cd0*sqrt(u^2+v^2+ke0) from the "
+                        "bottom-cell full speed), 'nemo_loglayer' = np_loglayer "
+                        "(Cd from clip((kappa/ln(0.5*e3t_bot/z0))^2, cd0, cdmax)). "
+                        "Default/legacy keeps the historical r/DRAG_BG_VEL path.")
+    p.add_argument("--bottom-drag-cd0", type=float, default=None,
+                   help="NEMO rn_Cd0 [-] (ORCA1: 1e-3; loglayer Cd minimum)")
+    p.add_argument("--bottom-drag-cdmax", type=float, default=None,
+                   help="NEMO rn_Cdmax [-] (ORCA1: 0.1; loglayer Cd cap)")
+    p.add_argument("--bottom-drag-z0", type=float, default=None,
+                   help="NEMO rn_z0 bottom roughness [m] (ORCA1: 3e-3)")
+    p.add_argument("--bottom-drag-ke0", type=float, default=None,
+                   help="NEMO rn_ke0 background bottom KE [m^2/s^2] (ORCA1: 2.5e-3)")
+    p.add_argument("--iwm", action="store_true",
+                   help="Internal wave-driven mixing (NEMO zdfiwm, de Lavergne "
+                        "2020; ORCA1: ln_zdfiwm=.true.).  lat-lon/tripole only.")
+    p.add_argument("--iwm-mevar", action="store_true",
+                   help="zdfiwm ln_mevar variable mixing efficiency (ORCA1: off)")
+    p.add_argument("--iwm-tsdiff", action="store_true",
+                   help="zdfiwm ln_tsdiff differential T/S mixing (ORCA1: off; "
+                        "raises — unsupported on the shared-K solve)")
+    p.add_argument("--iwm-forcing-file", type=str, default=None,
+                   help="de Lavergne power/decay maps (zdfiwm_forcing_TRA.nc "
+                        "layout; the ORCA1 INPUTS copy works).  Omit for the "
+                        "uniform constant-power fallback.")
+    p.add_argument("--iwm-power-bot", type=float, default=1.0e-10,
+                   help="Uniform-fallback abyssal-hill power [W/m^2]")
+    p.add_argument("--iwm-power-cri", type=float, default=1.0e-10,
+                   help="Uniform-fallback critical-slope power [W/m^2]")
+    p.add_argument("--iwm-power-nsq", type=float, default=1.0e-5,
+                   help="Uniform-fallback N^2-scaled power [W/m^2]")
+    p.add_argument("--iwm-power-sho", type=float, default=1.0e-10,
+                   help="Uniform-fallback shoaling power [W/m^2]")
+    p.add_argument("--iwm-scale-bot", type=float, default=100.0,
+                   help="Uniform-fallback abyssal-hill decay scale [m]")
+    p.add_argument("--iwm-scale-cri", type=float, default=100.0,
+                   help="Uniform-fallback critical-slope decay scale [m]")
     p.add_argument("--barotropic-solver", default=None, choices=[None,"explicit_substep","implicit_cn"],
                    help="Override barotropic solver. NEMO uses split-explicit forward-backward "
                         "(=explicit_substep here, with a dissipative cosine time filter); OMIP "
@@ -2663,6 +2786,10 @@ def main() -> int:
               f"(dz {_nemo_dz[0]:.2f}->{_nemo_dz[-1]:.1f} m, H_max "
               f"{args.H_max:.0f} m) -- matching NEMO ORCA1 L75.")
 
+    # zdfiwm CLI → IWMConfig (shared with run_omip; None when --iwm absent
+    # so the builders' iwm-block stays fully inert on legacy runs).
+    from scripts.run.run_omip import build_iwm_config_from_args as _build_iwm
+    _iwm_cfg = _build_iwm(args) if args.iwm else None
     if args.grid == "tripole":
         grid, z_coord, model, state, H_bathy = build_tripole(
             args.nlev, args.H_max, args.mesh,
@@ -2695,6 +2822,12 @@ def main() -> int:
             ew_cyclic_overlap=(True if args.ew_cyclic_overlap else None),
             tracer_advection=args.tracer_advection,
             mle=mle_cfg, dz_ref_override=_nemo_dz,
+            bottom_drag_scheme=args.bottom_drag_scheme,
+            bottom_drag_cd0=args.bottom_drag_cd0,
+            bottom_drag_cdmax=args.bottom_drag_cdmax,
+            bottom_drag_z0=args.bottom_drag_z0,
+            bottom_drag_ke0=args.bottom_drag_ke0,
+            iwm=_iwm_cfg, iwm_forcing_file=args.iwm_forcing_file,
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":
@@ -2729,6 +2862,12 @@ def main() -> int:
             freeze_floor=(True if args.freeze_floor else None),
             runoff_depth_spread_m=args.runoff_depth_spread_m,
             mle=mle_cfg, dz_ref_override=_nemo_dz,
+            bottom_drag_scheme=args.bottom_drag_scheme,
+            bottom_drag_cd0=args.bottom_drag_cd0,
+            bottom_drag_cdmax=args.bottom_drag_cdmax,
+            bottom_drag_z0=args.bottom_drag_z0,
+            bottom_drag_ke0=args.bottom_drag_ke0,
+            iwm=_iwm_cfg,
         )
         app_grid_type = "mpas"
     else:
@@ -2765,6 +2904,12 @@ def main() -> int:
             polar_filter_safety_factor=args.polar_filter_safety,
             mle=mle_cfg, dz_ref_override=_nemo_dz,
             mask_marginal_seas=args.mask_marginal_seas,
+            bottom_drag_scheme=args.bottom_drag_scheme,
+            bottom_drag_cd0=args.bottom_drag_cd0,
+            bottom_drag_cdmax=args.bottom_drag_cdmax,
+            bottom_drag_z0=args.bottom_drag_z0,
+            bottom_drag_ke0=args.bottom_drag_ke0,
+            iwm=_iwm_cfg, iwm_forcing_file=args.iwm_forcing_file,
         )
         app_grid_type = "latlon"
 

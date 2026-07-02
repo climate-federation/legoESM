@@ -698,6 +698,8 @@ class LatLonCGridOceanModel:
         grid: LatLonGrid,
         z_coord: OceanZStarCoordinate,
         config: LatLonCGridOceanConfig | None = None,
+        *,
+        iwm_forcing=None,
     ):
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
         # All downstream operators see the enriched geometry with per-cell
@@ -740,6 +742,31 @@ class LatLonCGridOceanModel:
                     "operator."
                 )
         self._cfl_checked = False
+        # Internal wave-driven mixing (zdfiwm) static 2-D forcing maps
+        # (IWMForcing of de Lavergne power/decay-scale fields on THIS
+        # grid), captured as closure constants by the jitted step.  None
+        # with iwm.enabled=True ⇒ the uniform constant-power fallback
+        # from the IWMConfig scalars.
+        self._iwm_forcing = iwm_forcing
+        _vmix_cfg_init = (self.config.physics.vertical_mixing
+                          if self.config.physics is not None else None)
+        if (iwm_forcing is not None
+                and (_vmix_cfg_init is None
+                     or getattr(_vmix_cfg_init, "iwm", None) is None
+                     or not _vmix_cfg_init.iwm.enabled)):
+            raise ValueError(
+                "iwm_forcing was supplied but "
+                "physics.vertical_mixing.iwm.enabled is not True — the maps "
+                "would be silently ignored.")
+        if (_vmix_cfg_init is not None
+                and getattr(_vmix_cfg_init, "iwm", None) is not None
+                and _vmix_cfg_init.iwm.enabled
+                and not getattr(self.config, "implicit_vertical_mixing", False)):
+            raise ValueError(
+                "vertical_mixing.iwm.enabled=True requires "
+                "implicit_vertical_mixing=True (zdfiwm contributes to the "
+                "implicit avt/avm profiles; the explicit path cannot apply "
+                "its momentum part).")
         # Static rigid-lid data (islands, basis, depths), built eagerly from the
         # first concrete state (host-side flood-fill).  None until built.
         self.rigid_lid_data = None
@@ -3484,6 +3511,17 @@ class LatLonCGridOceanModel:
                     "surface K_v/A_v on the tendencies): the post-mixing "
                     "TKE solve needs the phase-1 context from "
                     "compute_vertical_K_profiles.")
+            _phys_cfg = self.config.physics
+            if (_phys_cfg is not None
+                    and getattr(_phys_cfg.vertical_mixing, "iwm", None)
+                    is not None
+                    and _phys_cfg.vertical_mixing.iwm.enabled):
+                raise ValueError(
+                    "vertical_mixing.iwm.enabled=True cannot use the "
+                    "physics-provided K fast path (the zdfiwm contribution "
+                    "is added in compute_vertical_K_profiles only) — the "
+                    "physics function must not surface K_v/A_v on the "
+                    "tendencies when IWM is on.")
             state.T.data.shape[-1]
             dtype = state.T.data.dtype
             K_v_cell = K_v_phys + jnp.asarray(self.config.K_v, dtype=dtype)
@@ -3541,6 +3579,7 @@ class LatLonCGridOceanModel:
                     # Column latitudes [deg] for the NEMO etau_htau_mode=
                     # "latitude" penetration profile (unused otherwise).
                     lat_deg=jnp.degrees(self.grid.lat),
+                    iwm_fields=self._iwm_forcing,
                 )
                 if _post_mixing:
                     # Phase 1 only (Veros set_tke_diffusivities from the
@@ -3555,6 +3594,7 @@ class LatLonCGridOceanModel:
                     K_v_background=float(self.config.K_v),
                     eos_fn=_vmix_eos_fn,
                     lat_deg=jnp.degrees(self.grid.lat),
+                    iwm_fields=self._iwm_forcing,
                 )
 
         # dz at cell centers (jacobian-corrected so the eta-stretched

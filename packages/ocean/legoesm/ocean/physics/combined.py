@@ -151,6 +151,21 @@ def make_ocean_physics(
             "vertical_mixing.tidal.compute_tidal_diffusivity); enable it there, "
             "not in the physics-composition config."
         )
+    # zdfiwm rides the implicit K-profile path only (avm must enter the
+    # backward-Euler momentum solve).  On the implicit route the host model
+    # builds this composition with apply_vertical_diffusion=False and the
+    # wave K is added in compute_vertical_K_profiles — legitimate.  On the
+    # EXPLICIT route (apply_vertical_diffusion=True) nothing downstream
+    # consumes iwm, so reject rather than silently no-op (tidal rule).
+    if (apply_vertical_diffusion
+            and getattr(config.vertical_mixing, "iwm", None) is not None
+            and config.vertical_mixing.iwm.enabled):
+        raise NotImplementedError(
+            "VerticalMixingConfig.iwm.enabled=True is not consumed by the "
+            "EXPLICIT physics composition.  Internal wave-driven mixing is "
+            "applied inside compute_vertical_K_profiles and requires "
+            "implicit_vertical_mixing=True on the host model config."
+        )
 
     fns = []
 

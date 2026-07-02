@@ -208,6 +208,15 @@ class OceanConfig(NamedTuple):
     bottom_drag_r: float = 0.0
     bottom_drag_bg_velocity: float = 0.0
     bottom_drag_bbl_thickness: float = 0.0
+    # NEMO zdfdrg drag laws (mirror of DynBottomDragConfig; see there):
+    # "legacy" keeps the r/bg_velocity path bit-exact; "nemo_quadratic" /
+    # "nemo_loglayer" compute r = Cd·√(u²+v²+ke0) from the bottom-cell
+    # speed (loglayer: Cd = clip((κ/ln(½h_bot/z0))², cd0, cdmax)).
+    bottom_drag_scheme: str = "legacy"
+    bottom_drag_cd0: float = 1.0e-3     # NEMO rn_Cd0 [-]
+    bottom_drag_cdmax: float = 0.1      # NEMO rn_Cdmax [-]
+    bottom_drag_z0: float = 3.0e-3      # NEMO rn_z0 [m]
+    bottom_drag_ke0: float = 2.5e-3     # NEMO rn_ke0 [m²/s²]
     # smc03 PGF: use the 3-point 2nd-order backward bottom-cell density slope
     # (curvature-accurate under a pressure-dependent EOS) instead of the
     # O(dz)-biased one-sided slope.  Default False keeps the proven smc03 path
@@ -698,6 +707,23 @@ class DynBottomDragConfig(NamedTuple):
                                            # tau ∝ √(u²+v²+u_bg²) · u, with
                                            # the linear-in-u limit set to
                                            # bottom_drag_r at |u|→0.
+    # --- NEMO zdfdrg drag laws (nemo_5.0.1 zdfdrg.F90) ---
+    # "legacy" (default) = the historical r/bg_velocity/BBL path above,
+    # bit-exact.  "nemo_quadratic" (zdfdrg np_non_lin — the ORCA1
+    # namelist selection) and "nemo_loglayer" (np_loglayer) instead
+    # compute r = Cd·√(ū²+v̄²+ke0) from the BOTTOM-cell velocity at the
+    # tracer point (full speed, background KE in quadrature) with, for
+    # the log-layer, Cd = clip((κ/ln(½h_bot/z0))², cd0, cdmax).  The
+    # NEMO schemes ignore ``bottom_drag_r``/``bottom_drag_bg_velocity``
+    # and are enabled by the scheme string alone;
+    # ``bottom_drag_bbl_thickness`` still selects the K&E99 spread
+    # (NEMO applies drag to the bottom cell only: set it to 0 for
+    # strict NEMO behaviour).
+    bottom_drag_scheme: str = "legacy"
+    bottom_drag_cd0: float = 1.0e-3     # NEMO rn_Cd0 [-] (loglayer: Cd min)
+    bottom_drag_cdmax: float = 0.1      # NEMO rn_Cdmax [-] (loglayer Cd cap)
+    bottom_drag_z0: float = 3.0e-3      # NEMO rn_z0 [m] bottom roughness
+    bottom_drag_ke0: float = 2.5e-3     # NEMO rn_ke0 [m²/s²] background KE
 
 
 class BarotropicConfig(NamedTuple):

@@ -6,6 +6,9 @@ from typing import NamedTuple
 
 from legoesm import constants
 from legoesm.ocean.physics.vertical_mixing.tidal import TidalMixingConfig
+from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+    IWMConfig,
+)
 
 
 __param_spec__ = {
@@ -587,3 +590,13 @@ class VerticalMixingConfig(NamedTuple):
     # ``ocean.coupler.tidal_mixing_apply.apply_tidal_mixing_step`` so it cannot
     # silently no-op inside the physics composition.
     tidal: TidalMixingConfig = TidalMixingConfig()
+    # Internal wave-driven mixing (NEMO zdfiwm, de Lavergne 2020) is
+    # ADDITIVE like tidal, but — unlike tidal — it contributes to BOTH the
+    # tracer diffusivity and the momentum viscosity, so it is applied
+    # inside ``k_profiles.compute_vertical_K_profiles`` (the implicit
+    # vertical-mixing path), AFTER the primary closure — exactly NEMO's
+    # zdfphy ordering (zdf_tke, then zdf_iwm adds onto avt/avs/avm).
+    # ``make_vertical_mixing_physics`` / ``make_ocean_physics`` RAISE if
+    # ``iwm.enabled=True`` (the explicit-tendency path cannot honour it),
+    # mirroring the tidal guard above.  Default off ⇒ bit-exact legacy.
+    iwm: IWMConfig = IWMConfig()
