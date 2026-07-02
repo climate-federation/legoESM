@@ -110,6 +110,26 @@ def test_grid_leaves_face_sharded_scalars_untouched():
     assert out.sfc_lhflx_override is None
 
 
+def test_flat_column_major_o3_face_sharded():
+    """PRODUCTION shape: _precompute_external_forcing flattens the 3-D
+    radiation forcing to (ncol=6*n*n, nlev).  These must face-shard on
+    dim 0 (one face's columns per mesh slot) — the leading-6 rule alone
+    misses them (codex 2026-07-01)."""
+    dc = create_device_mesh(n_devices=6)
+    n, nlev = 4, 3
+    ncol = 6 * n * n
+    f = _forcing()._replace(
+        o3_vmr=jnp.full((ncol, nlev), 1e-6),
+        aerosol_od=jnp.zeros((ncol, nlev)),
+        aerosol_lw_od=jnp.zeros((ncol, nlev)),
+    )
+    out = shard_forcing(f, dc)
+    for name in ("o3_vmr", "aerosol_od", "aerosol_lw_od"):
+        assert _is_face_sharded(getattr(out, name), dc.mesh), name
+        np.testing.assert_array_equal(np.asarray(getattr(out, name)),
+                                      np.asarray(getattr(f, name)))
+
+
 def test_placeholder_o3_shape_gate():
     """A (0,) o3 placeholder (gray-radiation run) passes through unsharded
     (shard_pytree's leading-dim gate) without error."""

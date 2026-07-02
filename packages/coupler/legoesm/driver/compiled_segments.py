@@ -654,12 +654,33 @@ def shard_forcing(forcing: SegmentForcing, device_config) -> SegmentForcing:
         return forcing
     from legoesm.parallel.mesh import shard_pytree
 
+    # Production cubed-sphere packs the 3-D radiation forcing FLATTENED to
+    # ``(ncol=6*n*n, nlev)`` (``_precompute_external_forcing``), which the
+    # leading-6 ``shard_pytree`` rule cannot see (codex 2026-07-01 Medium).
+    # A flat face-major leaf shards ``P("face")`` on dim 0 — the exact
+    # layout the driver already commits for flat carry leaves (see
+    # ``_input_sharding``: "a flat [6*n*n, nlev] carry leaf the driver
+    # placed on P('face')").  ``ncol % 6 == 0`` chunks land exactly one
+    # face's columns per face-mesh slot; the face axis size divides 6 so
+    # divisibility always holds.  Gate: cubed-sphere only, named grid
+    # field, flat (shape[0] a positive non-6 multiple of 6).
+    _flat_face = None
+    if getattr(device_config, "grid_type", None) == "cubed_sphere" and \
+            getattr(device_config, "mesh", None) is not None:
+        from jax.sharding import NamedSharding, PartitionSpec
+        _flat_face = NamedSharding(device_config.mesh, PartitionSpec("face"))
+
     updates = {}
     for name in _GRID_SHAPED_FORCING_FIELDS:
         leaf = getattr(forcing, name)
         if leaf is None or not isinstance(leaf, (jax.Array, jnp.ndarray)):
             continue
-        updates[name] = shard_pytree(leaf, device_config)
+        if (_flat_face is not None and leaf.ndim >= 1
+                and leaf.shape[0] != 6 and leaf.shape[0] > 0
+                and leaf.shape[0] % 6 == 0):
+            updates[name] = jax.device_put(leaf, _flat_face)
+        else:
+            updates[name] = shard_pytree(leaf, device_config)
     return forcing._replace(**updates) if updates else forcing
 
 
