@@ -3080,8 +3080,15 @@ class ModelDriver:
             _state = _gather(_state)
             _q_v, _q_c, _q_r = _gather(_q_v), _gather(_q_c), _gather(_q_r)
             _carry_aux = _gather(_carry_aux)
-            if jax.process_index() != 0:
-                return
+            # NOTE: do NOT return on non-root here.  The zarr carry guards
+            # below are pure config/pytree checks that must raise
+            # IDENTICALLY on every process (codex HIGH: a rank-0-only
+            # raise after rank 1 already returned leaves rank 1 running
+            # toward the next collective — a hang).  Non-root returns just
+            # before the actual write instead.
+            _spmd_nonroot = jax.process_index() != 0
+        else:
+            _spmd_nonroot = False
 
         ckpt_path = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}.npz"
         backend = self.config.output.checkpoint_format if hasattr(self.config.output, 'checkpoint_format') else "npz"
@@ -3148,6 +3155,10 @@ class ModelDriver:
                 "checkpoint_format='npz' for stateful-physics runs."
             )
 
+        # Multi-controller SPMD: every process ran the collective gather
+        # and the (identical) guards above; only process 0 writes.
+        if _spmd_nonroot:
+            return
         save_restart(
             path=ckpt_path,
             state=_state,
