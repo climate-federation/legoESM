@@ -123,6 +123,8 @@ __param_spec__ = {
             "Ri_0": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
             "Ri_crit": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
             "ustar_speed_ratio": {"units": "1", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP u* surface-speed proxy (Large et al. 1994)", "shape": None},
+            "langmuir_coeff": {"units": "1", "bounds": (0.02, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP-Langmuir enhancement C_L (McWilliams & Sullivan 2000; Li et al. 2016 CVMix)", "shape": None},
+            "langmuir_number_default": {"units": "1", "bounds": (0.2, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "fully-developed-sea turbulent Langmuir number ~0.3 (Van Roekel et al. 2012)", "shape": None},
         },
     },
 }
@@ -458,6 +460,14 @@ class KPPConfig(NamedTuple):
     # u_star proxy ratio when wind stress is absent: u* ~ ratio*|U_surface|
     # (~sqrt(C_d) drag-like closure knob).
     ustar_speed_ratio: float = 0.01
+    # --- Langmuir turbulence (KPP-Langmuir wave-enhanced surface mixing) ---
+    # Langmuir circulations (wind + Stokes-drift shear) enhance surface
+    # boundary-layer mixing. Enhancement factor eps_L = sqrt(1 + C_L/La_t^2)
+    # (>= 1) on the KPP velocity scales, where La_t is the turbulent Langmuir
+    # number. Opt-in; default off is byte-identical to classical KPP.
+    enable_langmuir: bool = False    # opt-in Langmuir enhancement
+    langmuir_coeff: float = 0.08     # C_L in eps_L = sqrt(1 + C_L/La_t^2)
+    langmuir_number_default: float = 0.3  # fallback La_t when no Stokes-drift input
 
 
 class CATKEConfig(NamedTuple):
