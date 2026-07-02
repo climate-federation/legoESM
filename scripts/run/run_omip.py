@@ -2367,18 +2367,35 @@ def _check_finite(state, grid_type):
 # ===========================================================================
 
 
-# Single in-flight background restart writer (see _save_restart).
-_RESTART_WRITER: dict = {"thread": None}
+# Single in-flight background restart writer (see _save_restart).  The lock
+# protects the dict slots (two savers in one process must serialize); the
+# writer thread itself only takes the lock to store its error.
+_RESTART_WRITER: dict = {
+    "thread": None, "error": None, "lock": threading.Lock(),
+}
 
 
 def _join_restart_writer():
     """Block until the in-flight background restart write (if any) completes.
 
-    For consumers that must READ the restart file right after
-    :func:`_save_restart` returns (snapshot plotter, tests)."""
-    t = _RESTART_WRITER.get("thread")
+    RE-RAISES the writer's exception (ENOSPC / NFS error / failed
+    ``os.replace``) into the caller — an async checkpoint failure must not
+    be silently lost (codex HIGH).  Used by consumers that must READ the
+    restart file right after :func:`_save_restart` returns (snapshot
+    plotter, tests) and by :func:`_save_restart` itself before each new
+    write."""
+    with _RESTART_WRITER["lock"]:
+        t = _RESTART_WRITER["thread"]
     if t is not None:
         t.join()
+    with _RESTART_WRITER["lock"]:
+        err = _RESTART_WRITER["error"]
+        _RESTART_WRITER["error"] = None
+    if err is not None:
+        raise RuntimeError(
+            "background restart write failed (the checkpoint file was NOT "
+            "produced; the atomic .tmp+rename guarantees no truncated .npz "
+            "exists)") from err
 
 
 def _save_restart(state, day, step, output_dir, ice_state=None):
@@ -2386,8 +2403,11 @@ def _save_restart(state, day, step, output_dir, ice_state=None):
 
     The write is ASYNCHRONOUS (background thread, atomic tmp+rename) —
     the returned path may not exist for a few seconds; the previous
-    write is always joined before a new one starts, and the interpreter
-    joins the final write at exit.
+    write is always joined (errors re-raised) before a new one starts,
+    and an ordinary interpreter exit joins the final write.  Call from
+    ONE thread only (the host step loop): consecutive saves serialize
+    through the module-level writer slot, concurrent savers are not
+    supported.
 
     Mirrors ``scripts/run/global_overturning/run_global_overturning_*``
     so the same plotting helpers consume both runs without
@@ -2408,6 +2428,14 @@ def _save_restart(state, day, step, output_dir, ice_state=None):
         (default, no sea ice) writes the legacy ocean-only restart unchanged.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Join the PREVIOUS in-flight write BEFORE pulling the new payload to
+    # host: peak host memory stays ONE payload (pulling first would hold
+    # payload A in the still-running writer plus payload B here — an OOM
+    # exactly when the checkpoint cadence catches up to the compression
+    # time, codex HIGH), and a FAILED previous write re-raises into the
+    # loop here (parity with the old synchronous error behavior, one
+    # checkpoint late).
+    _join_restart_writer()
     payload = {
         "step": int(step),
         "time_days": float(day),
@@ -2428,26 +2456,28 @@ def _save_restart(state, day, step, output_dir, ice_state=None):
     # Async + atomic write.  The device->host pulls above are synchronous
     # (they snapshot the state), but the gzip+disk write (seconds to
     # minutes at eORCA-class sizes) runs on a background thread so the
-    # step loop resumes immediately.  Single-writer: join the previous
-    # in-flight write first (never two concurrent writes; bounds host
-    # memory to one extra payload).  Atomic: write ``<name>.npz.tmp``
-    # then ``os.replace`` — a walltime kill mid-write can never leave a
-    # truncated file that resume/chain launchers (glob ``restart_day*.npz``)
-    # would mistake for a valid restart.  Non-daemon thread: interpreter
-    # exit joins the final write, so the last checkpoint always completes.
-    prev = _RESTART_WRITER.get("thread")
-    if prev is not None:
-        prev.join()
+    # step loop resumes immediately.  Atomic: write ``<name>.npz.tmp``
+    # then ``os.replace`` — a kill mid-write can never leave a truncated
+    # file that resume/chain launchers (glob ``restart_day*.npz``) would
+    # mistake for a valid restart.  Non-daemon thread: an ORDINARY
+    # interpreter exit (incl. the wallclock sys.exit(0) path) joins the
+    # final write; a SIGKILL/scheduler hard kill can still lose the
+    # in-flight checkpoint, leaving only the harmless ``.tmp``.
 
     def _write(fname=fname, payload=payload):
-        tmp = fname.with_name(fname.name + ".tmp")
-        np.savez_compressed(tmp, **payload)
-        os.replace(tmp, fname)
+        try:
+            tmp = fname.with_name(fname.name + ".tmp")
+            np.savez_compressed(tmp, **payload)
+            os.replace(tmp, fname)
+        except BaseException as e:  # surfaced via _join_restart_writer
+            with _RESTART_WRITER["lock"]:
+                _RESTART_WRITER["error"] = e
 
-    t = threading.Thread(target=_write, name="omip-restart-writer",
-                         daemon=False)
-    t.start()
-    _RESTART_WRITER["thread"] = t
+    with _RESTART_WRITER["lock"]:
+        t = threading.Thread(target=_write, name="omip-restart-writer",
+                             daemon=False)
+        t.start()
+        _RESTART_WRITER["thread"] = t
     return fname
 
 

@@ -64,6 +64,26 @@ def test_save_restart_writes_expected_npz(tmp_path):
         assert key in data.files, f"missing {key} in restart"
 
 
+def test_save_restart_async_failure_is_reraised(tmp_path, monkeypatch):
+    """A failed background write (ENOSPC/NFS/...) must NOT be silently
+    lost: _join_restart_writer re-raises it (and the next _save_restart
+    would too, via its leading join)."""
+    grid, z_coord, _, _, _ = _make_tiny_latlon_setup(n_lat=4, n_lon=8)
+    state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
+
+    def _boom(*a, **k):
+        raise OSError("disk full (synthetic)")
+
+    monkeypatch.setattr(run_omip.np, "savez_compressed", _boom)
+    fname = run_omip._save_restart(state, day=1.0, step=1,
+                                   output_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="background restart write failed"):
+        run_omip._join_restart_writer()
+    assert not fname.exists()
+    # The error slot is consumed: a subsequent join is clean.
+    run_omip._join_restart_writer()
+
+
 def test_save_restart_filename_zero_pads_to_six_digits(tmp_path):
     grid, z_coord, _, _, _ = _make_tiny_latlon_setup(n_lat=4, n_lon=8)
     state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
@@ -184,6 +204,7 @@ def test_progress_plotter_runs_on_synthetic_restarts(tmp_path):
     for day in (0, 5, 10):
         run_omip._save_restart(state, day=float(day), step=day,
                                 output_dir=run_dir)
+    run_omip._join_restart_writer()   # async writer: join before the plotter reads
 
     plot_mod = _load_progress_plotter()
     rc = plot_mod.main(["--run-dir", str(run_dir)])
