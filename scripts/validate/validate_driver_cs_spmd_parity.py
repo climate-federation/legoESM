@@ -11,9 +11,17 @@ step 6): the SAME tiny cubed-sphere AMIP config is run
   final state (``multihost_utils.process_allgather``) and compares it to
   the ``--ref`` file.
 
-Exit 0 on parity within ``--rtol/--atol`` (defaults match the proven bench
-receipts: shard-local parity ~6.7e-10 @ 5 steps, job 8462928); non-zero,
-with a per-field max-abs-diff table, otherwise.
+Exit 0 on parity within ``--rtol/--atol``; non-zero, with a per-field
+max-abs-diff table (argmax location + differing-point count), otherwise.
+
+PARITY CONTRACT (matches the bench --cs-spmd receipts): the ppermute SPMD
+halo backend deviates from the serial local corner fill by ~1e-9 at
+isolated face-corner points (job 8462928: 6.7e-10 @ 5 steps; this gate,
+job 8684964: one u point + one v point at 1.86e-9 after 1 step, ALL other
+fields bit-exact).  That deterministic seed is chaos-amplified over long
+horizons (~1e-4 after a 144-step day at C8), so the GATE is short-horizon
+at the receipt tolerance — a 5-step lane with atol/rtol 5e-9.  Long lanes
+are informational.
 
 Run (compute node):
     JAX_PLATFORMS=cpu python scripts/validate/validate_driver_cs_spmd_parity.py \
