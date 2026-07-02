@@ -97,6 +97,75 @@ def test_init_unknown_template_reports_available(tmp_path):
         ])
 
 
+def test_machine_derecho_emits_pbs_headers_but_no_account(tmp_path):
+    """--machine derecho generates PBS directives in run.sh but must NEVER
+    include `-A` (project account) — that stays on the qsub line so run.sh is
+    portable across projects."""
+    sd = _write_smoke_surfdata(tmp_path)
+    out = tmp_path / "expt"
+    _run_init([
+        "biophysics/smoke_test",
+        "--name", "derecho_run",
+        "--output-dir", str(out),
+        "--machine", "derecho",
+        "-o", f"surfdata.path={sd}",
+    ])
+    run_sh = (out / "run.sh").read_text()
+
+    # PBS headers present
+    assert "#PBS -N lmip" in run_sh
+    assert "#PBS -l select=" in run_sh
+    assert "#PBS -l walltime=" in run_sh
+    assert "#PBS -q main" in run_sh
+    assert "#PBS -j oe" in run_sh
+
+    # Account NEVER emitted
+    assert "#PBS -A" not in run_sh
+    assert "-A UYAL" not in run_sh
+    assert "-A YOUR_ACCOUNT" not in run_sh          # not even a placeholder
+
+    # Env-setup block reached from configs/machines/derecho.yaml
+    assert "module load conda" in run_sh
+    assert "conda activate" in run_sh
+    assert 'export LEGOESM_PYTHON="$(which python)"' in run_sh
+
+    # experiment.tag records the profile
+    tag = configparser.ConfigParser()
+    tag.read(out / "experiment.tag")
+    assert tag["machine"]["profile"] == "derecho"
+
+
+def test_no_machine_flag_keeps_run_sh_plain(tmp_path):
+    """No --machine → NO PBS headers, NO env_setup — pure bash wrapper."""
+    sd = _write_smoke_surfdata(tmp_path)
+    out = tmp_path / "expt"
+    _run_init([
+        "biophysics/smoke_test",
+        "--name", "plain",
+        "--output-dir", str(out),
+        "-o", f"surfdata.path={sd}",
+    ])
+    run_sh = (out / "run.sh").read_text()
+    assert "#PBS" not in run_sh
+    assert "conda activate" not in run_sh
+    assert "module load" not in run_sh
+    tag = configparser.ConfigParser()
+    tag.read(out / "experiment.tag")
+    assert tag["machine"]["profile"] == "none"
+
+
+def test_unknown_machine_reports_available(tmp_path):
+    sd = _write_smoke_surfdata(tmp_path)
+    with pytest.raises(SystemExit, match="machine"):
+        _run_init([
+            "biophysics/smoke_test",
+            "--name", "bad",
+            "--output-dir", str(tmp_path / "x"),
+            "--machine", "nonexistent",
+            "-o", f"surfdata.path={sd}",
+        ])
+
+
 def test_init_dry_run_writes_nothing(tmp_path, capsys):
     sd = _write_smoke_surfdata(tmp_path)
     out = tmp_path / "expt"
