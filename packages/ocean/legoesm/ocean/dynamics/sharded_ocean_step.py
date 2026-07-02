@@ -352,8 +352,10 @@ def make_sharded_ocean_step(model, mesh):
     Build the ``N`` band geometries + band vertex masks host-side, stack their
     ARRAY fields into a replicated pytree, and index by
     ``jax.lax.axis_index("lat")`` in the ``shard_map`` body (the geometry SCALAR
-    fields stay static — see the module docstring).  ``dt`` is captured in the
-    closure (not a sharded argument).  ``check_vma=False`` (the JAX >= 0.8
+    fields stay static — see the module docstring).  ``dt`` is a TRACED,
+    replicated operand and the jitted ``shard_map`` is built once and cached
+    (a per-call rebuild re-traced the whole ocean step every call — see the
+    ``_cache`` note below).  ``check_vma=False`` (the JAX >= 0.8
     replication check) because the band halo intentionally reads neighbour-rank
     data (replication-unaware).
 
@@ -398,11 +400,7 @@ def make_sharded_ocean_step(model, mesh):
     # r+1's v_lower[0] = global v[e]; north band non-target receives 0).
     perm_north, _perm_south = latlon_band_perms(n_dev)
 
-    # ``dt`` is captured per-call (a 1-element list avoids re-closing over a
-    # stale dt if the returned step is reused with a different dt).
-    dt_closure = [None]
-
-    def _body(state_local, geom_stacks_local, vmask_stack_local):
+    def _body(state_local, geom_stacks_local, vmask_stack_local, dt):
         r = jax.lax.axis_index(axis)
 
         # Rebuild this band's geometry: index the stacked arrays at r, keep the
@@ -436,38 +434,52 @@ def make_sharded_ocean_step(model, mesh):
                      for name in _V_STAGGERED_STATE_FIELDS}
         state_band = state_local._replace(**v_updates)
 
-        result = _step_body(model, state_band, dt_closure[0],
+        result = _step_body(model, state_band, dt,
                             grid=band_geom, vertex_mask=band_vmask)
 
         out_updates = {name: _to_v_lower(getattr(result, name))
                        for name in _V_STAGGERED_STATE_FIELDS}
         return result._replace(**out_updates)
 
+    # Build the JITTED shard_map ONCE and cache it — the atm sibling's fix
+    # (make_sharded_atm_latlon_step, probe 8561202): a bare shard_map is NOT
+    # compilation-cached, so rebuilding it per call re-traced + recompiled the
+    # (large, un-jitted) ocean band step EVERY call (~80 s/step at 16x32x3 nd=4
+    # on CPU — host tracing, not compute; the bench's scaling number was
+    # meaningless). ``dt`` is a TRACED operand (was a mutated closure cell,
+    # which also forced the per-call rebuild) so a changing dt does not
+    # retrigger compilation.
+    _cache = {}
+
     def sharded_step(state, dt):
-        dt_closure[0] = dt
-        in_spec = jax.tree.map(_lat_spec, state)
-        geom_spec = jax.tree.map(lambda _x: P(), geom_stacks)
-        vmask_spec = P()
-        # JAX >= 0.8 top-level shard_map takes ``check_vma`` (the replication
-        # check); the band halo reads neighbour-rank data so disable it (same as
-        # the validated PCG / halo-parity shard_maps).
-        fn = shard_map(
-            _body,
-            mesh=mesh,
-            in_specs=(in_spec, geom_spec, vmask_spec),
-            out_specs=in_spec,
-            check_vma=False,
-        )
-        # Arm the SPMD halo backend ONLY around the shard_map call, then RESTORE
-        # the previous backend (codex finding): leaving it globally armed makes a
-        # later serial/full-domain ocean call take SPMD-only branches (axis_index /
-        # ppermute / psum in pad_with_pole_bc_lat, conservation, eta_floor) OUTSIDE
-        # a shard_map -> crash. ``shard_map`` is rebuilt per call, so each call
-        # re-traces WITH the backend armed (baking the SPMD halo/reduction ops) ->
-        # the per-call arm/restore is correct and keeps the serial path untouched.
-        # Save+restore the FULL backend state (backend + MPI topology + SPMD mesh)
-        # so a prior "mpi"/"spmd" backend is restored intact: activate_* clears the
-        # MPI topology, and set_halo_backend("mpi") REQUIRES a topology (codex).
+        fn = _cache.get("fn")
+        if fn is None:
+            in_spec = jax.tree.map(_lat_spec, state)
+            geom_spec = jax.tree.map(lambda _x: P(), geom_stacks)
+            vmask_spec = P()
+            # JAX >= 0.8 top-level shard_map takes ``check_vma`` (the
+            # replication check); the band halo reads neighbour-rank data so
+            # disable it (same as the validated PCG / halo-parity shard_maps).
+            fn = jax.jit(shard_map(
+                _body,
+                mesh=mesh,
+                in_specs=(in_spec, geom_spec, vmask_spec, P()),
+                out_specs=in_spec,
+                check_vma=False,
+            ))
+            _cache["fn"] = fn
+        # Arm the SPMD halo backend ONLY around the call, then RESTORE the
+        # previous backend (codex finding): leaving it globally armed makes a
+        # later serial/full-domain ocean call take SPMD-only branches
+        # (axis_index / ppermute / psum in pad_with_pole_bc_lat, conservation,
+        # eta_floor) OUTSIDE a shard_map -> crash. The FIRST call traces with
+        # the backend armed (baking the SPMD halo/reduction ops into the
+        # compiled program); later calls reuse the cached compile, and the
+        # arm/restore keeps any interleaved serial path untouched.
+        # Save+restore the FULL backend state (backend + MPI topology + SPMD
+        # mesh) so a prior "mpi"/"spmd" backend is restored intact: activate_*
+        # clears the MPI topology, and set_halo_backend("mpi") REQUIRES a
+        # topology (codex).
         from legoesm.grids.halo import (
             get_halo_backend, get_mpi_topology, get_spmd_mesh,
             set_halo_backend, set_spmd_mesh,
@@ -477,7 +489,7 @@ def make_sharded_ocean_step(model, mesh):
         _prev_mesh = get_spmd_mesh()
         activate_latlon_spmd_halo(mesh)
         try:
-            return fn(state, geom_stacks, vmask_stack)
+            return fn(state, geom_stacks, vmask_stack, jnp.asarray(dt))
         finally:
             set_spmd_mesh(_prev_mesh)
             set_halo_backend(_prev_backend, _prev_topo)
