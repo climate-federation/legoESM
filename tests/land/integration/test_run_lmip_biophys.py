@@ -45,6 +45,10 @@ def _write_surfdata(path, nlat=8, nlon=16, nlev=7):
     )
 
 
+_STEP_TAPE_CFG = str(Path(__file__).resolve().parents[3] /
+                    "configs" / "output" / "lmip_biophys_step_test.yaml")
+
+
 def test_biophys_driver_synthetic_smoke(tmp_path):
     mod = _load_driver()
     sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
@@ -53,25 +57,27 @@ def test_biophys_driver_synthetic_smoke(tmp_path):
         "--surfdata", str(sd),
         "--grid-type", "latlon", "--resolution", "4",
         "--surface-scheme", "simple_seb", "--land-mode", "multilayer",
-        "--bulk", "constant",               # constant Cd/Ch — hermetic pipeline smoke,
-                                            # not a MOST-vs-constant comparison
+        "--bulk", "constant",               # hermetic pipeline smoke, not MOST-vs-constant
         "--dt", "3600", "--n-steps", "4",
-        "--forcing-dir", "",                # force synthetic (hermetic, ignore any staged data/crujra)
+        "--forcing-dir", "",                # synthetic (hermetic)
+        "--output-config", _STEP_TAPE_CFG,  # per-step tape, preserves prior test shape
         "--output", str(out),
     ])
     rc = mod.run(args)
     assert rc == 0                                            # PASS (no NaN over land)
 
+    # Tape output lands at lmip_biophys.<tape_name>.nc; the step-test config
+    # has one tape named "h_step".
     import xarray as xr
-    ds = xr.open_dataset(out / "lmip_biophys.nc")
+    ds = xr.open_dataset(out / "lmip_biophys.h_step.nc")
     assert ds.sizes["time"] == 4
     assert ds.attrs["carbon"] == "none"                      # biophysics-only
-    # latlon output uses the (time, lat, lon) rectangular layout — never (time, ncol)
-    # (the driver reshape gate for latlon; non-rectangular grids keep ncol)
+    assert ds.attrs["tape_name"] == "h_step"
+    assert ds.attrs["tape_freq"] == "step"
+    # Latlon rectangular layout: (time, lat, lon) — never (time, ncol)
     assert ds["T_sfc"].dims == ("time", "lat", "lon")
     assert ds.sizes["lat"] == 4 and ds.sizes["lon"] == 8    # --resolution 4 -> 4 x 8
-    assert np.all(np.isfinite(ds["T_sfc"].values))           # all-land surfdata
-    # surface temperature stays physical under the (synthetic) forcing
+    assert np.all(np.isfinite(ds["T_sfc"].values))
     assert float(ds["T_sfc"].min()) > 200.0
     assert float(ds["T_sfc"].max()) < 360.0
 
@@ -92,6 +98,7 @@ def _run_driver(mod, sd, out, extra_args=()):
         "--bulk", "constant",
         "--dt", "3600", "--n-steps", "4",
         "--forcing-dir", "",
+        "--output-config", _STEP_TAPE_CFG,   # per-step tape for hermetic smoke
         "--output", str(out),
         *extra_args,
     ])

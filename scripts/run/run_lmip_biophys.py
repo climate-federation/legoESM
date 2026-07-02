@@ -53,6 +53,10 @@ from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_l
 from legoesm.land.slab_land import step_land
 from legoesm.land.boundary_data import init_land_surface_data, make_step_land_params_updater
 from legoesm.land.forcing import stage_forcing, stage_forcing_years
+from legoesm.land.output_tapes import (
+    accumulate_tape_step, build_slot_indices, finalize_tape,
+    init_tape_accumulator, load_output_config,
+)
 from legoesm.land.restart import load_land_restart, save_land_restart
 
 U_MIN = 1.0
@@ -196,27 +200,54 @@ def run(args) -> int:
 
     update_land_params = make_step_land_params_updater(gsd, config.surface_scheme)
 
-    # ----- scan body: state -> state' + diagnostics, scanning pre-staged forcing.
-    def _step_body(state, xs):
-        forcing_t, doy_t = xs
+    # ----- output tapes (CLM-style history streams; see output_tapes.py) -----
+    tape_specs = load_output_config(args.output_config or None)
+    tape_slots = {}                                # (slot_idx, n_slots, slot_times) per tape
+    tape_accums = {}
+    for tape in tape_specs:
+        slot_idx, n_slots, slot_times = build_slot_indices(model_times_s, tape.freq)
+        tape_slots[tape.name] = (jnp.asarray(slot_idx), n_slots, slot_times)
+        tape_accums[tape.name] = init_tape_accumulator(tape, n_slots, ncol)
+    print("tapes: " + " | ".join(
+        f"{t.name}(freq={t.freq},avg={t.average},vars={len(t.vars)})" for t in tape_specs))
+
+    _ZEROS = jnp.zeros(ncol)                       # slab-mode placeholder for multilayer-only vars
+
+    # ----- scan body: (state, tape_accums) -> next; no per-step output returned.
+    def _step_body(carry, xs):
+        state, accums = carry
+        forcing_t, doy_t, per_tape_slot = xs
         theta_top_t = (state.theta_soil[:, 0] if is_multilayer else jnp.full(ncol, 0.2))
         land_params_t, lai_diag = update_land_params(theta_top_t, doy_t)
         new_state, resp, _ = step_fn(state, forcing_t, config, U_MIN, dt,
                                      lat=lat_rad, land_params=land_params_t, doy=doy_t)
-        diag = (resp.T_sfc, resp.shflx, resp.lhflx, lai_diag, resp.albedo, doy_t)
+        # Available variables per step -> selected by each tape's spec.
+        values = {
+            "T_sfc": resp.T_sfc, "albedo": resp.albedo,
+            "shflx": resp.shflx, "lhflx": resp.lhflx,
+            "runoff": resp.freshwater_flux,
+            "precip": forcing_t.precip_total,
+            "LAI": lai_diag,
+        }
         if is_multilayer:
-            diag = diag + (new_state.theta_soil[:, 0], new_state.T_soil[:, 0],
-                           new_state.snow_depth)
-        return new_state, diag
+            values["T_soil_top"] = new_state.T_soil[:, 0]
+            values["theta_soil_top"] = new_state.theta_soil[:, 0]
+            values["snow_depth"] = new_state.snow_depth
+        else:
+            values["T_soil_top"] = _ZEROS
+            values["theta_soil_top"] = _ZEROS
+            values["snow_depth"] = _ZEROS
+        new_accums = {}
+        for tape in tape_specs:                    # unrolled at trace time
+            new_accums[tape.name] = accumulate_tape_step(
+                accums[tape.name], tape, per_tape_slot[tape.name],
+                {v: values[v] for v in tape.vars})
+        return (new_state, new_accums), None
 
     print(f"stepping {args.n_steps} timestep(s) (lax.scan) ...")
-    state, scan_out = jax.lax.scan(_step_body, state, (forcing_xs, doy_xs))
-
-    if is_multilayer:
-        (T_sfc_t, shflx_t, lhflx_t, LAI_t, alb_t, doy_t_arr,
-         theta_top_t, T_soil_top_t, snow_depth_t) = scan_out
-    else:
-        (T_sfc_t, shflx_t, lhflx_t, LAI_t, alb_t, doy_t_arr) = scan_out
+    slot_idx_xs = {name: t[0] for name, t in tape_slots.items()}
+    (state, tape_accums), _ = jax.lax.scan(
+        _step_body, (state, tape_accums), (forcing_xs, doy_xs, slot_idx_xs))
 
     # --- land mask + NaN-over-land validation (the smoke PASS/FAIL). ---
     def cover1d(a):
@@ -230,19 +261,20 @@ def run(args) -> int:
                          + cover1d(gsd.f_glacier))
     land = land_fraction >= args.land_frac_min
 
-    T_last = np.asarray(T_sfc_t[-1]).ravel()
-    sh_last = np.asarray(shflx_t[-1]).ravel()
-    lh_last = np.asarray(lhflx_t[-1]).ravel()
-    nan_land = int(np.isnan(T_last[land]).sum())
-    finite = np.all(np.isfinite(T_last[land])) and np.all(np.isfinite(sh_last[land]))
+    # --- PASS/FAIL: final soil top-layer T must be finite over land. ---
+    T_final = np.asarray(state.T_soil[:, 0] if is_multilayer else _ZEROS).ravel()
+    nan_land = int(np.isnan(T_final[land]).sum())
+    finite = np.all(np.isfinite(T_final[land]))
     status = "PASS" if (nan_land == 0 and finite) else "FAIL"
-    print(f"land cells: {int(land.sum())} | NaN T_sfc over land: {nan_land} -> {status}")
-    def rng(a):
-        a = a[land]
-        return f"[{np.nanmin(a):.2f}, {np.nanmax(a):.2f}]"
-    print(f"  T_sfc {rng(T_last)} K | SH {rng(sh_last)} W/m2 | LH {rng(lh_last)} W/m2")
+    print(f"land cells: {int(land.sum())} | NaN final T_soil_top over land: {nan_land} -> {status}")
+    if is_multilayer:
+        def rng(a):
+            return f"[{np.nanmin(a[land]):.2f}, {np.nanmax(a[land]):.2f}]"
+        print(f"  final T_soil_top {rng(T_final)} K | "
+              f"theta_top {rng(np.asarray(state.theta_soil[:, 0]))} | "
+              f"snow_depth {rng(np.asarray(state.snow_depth))} kg/m2")
 
-    # --- time-series NetCDF (per-step land diagnostics). ---
+    # --- per-tape NetCDF writers ---
     #
     # Latlon output uses the standard (time, lat, lon) rectangular layout, so
     # tools like ``xr.plot`` / ncview / panoply just work.  Non-rectangular
@@ -251,43 +283,43 @@ def run(args) -> int:
     lat_deg = np.rad2deg(np.asarray(lat_rad)); lon_deg = np.rad2deg(np.asarray(lon_rad))
     is_latlon = args.grid_type == "latlon"
     if is_latlon:
-        nlat, nlon = args.resolution, 2 * args.resolution   # matches create_latlon_grid
+        nlat, nlon = args.resolution, 2 * args.resolution
         assert nlat * nlon == ncol, f"latlon reshape mismatch: {nlat}*{nlon} != {ncol}"
-        lat_1d = lat_deg.reshape(nlat, nlon)[:, 0]          # unique lat per row
-        lon_1d = lon_deg.reshape(nlat, nlon)[0, :]          # unique lon per column
+        lat_1d = lat_deg.reshape(nlat, nlon)[:, 0]
+        lon_1d = lon_deg.reshape(nlat, nlon)[0, :]
+
     try:
         import xarray as xr
         masked = lambda a: np.where(land, np.asarray(a, np.float64), np.nan)
+        for tape in tape_specs:
+            finalized = finalize_tape(tape_accums[tape.name], tape)   # var -> (n_slots, ncol)
+            _, n_slots, slot_times = tape_slots[tape.name]
+            dims = ("time", "lat", "lon") if is_latlon else ("time", "ncol")
 
-        def pack(series):
-            """(n_steps, ncol) -> (n_steps, lat, lon) for latlon, else (n_steps, ncol)."""
-            arr = np.stack([masked(series[i]) for i in range(args.n_steps)])   # (time, ncol)
-            return arr.reshape(args.n_steps, nlat, nlon) if is_latlon else arr
+            def pack(arr):
+                arr2 = np.stack([masked(arr[i]) for i in range(n_slots)])
+                return arr2.reshape(n_slots, nlat, nlon) if is_latlon else arr2
 
-        dims = ("time", "lat", "lon") if is_latlon else ("time", "ncol")
-        ts = {"T_sfc": (dims, pack(T_sfc_t)),
-              "shflx": (dims, pack(shflx_t)),
-              "lhflx": (dims, pack(lhflx_t)),
-              "LAI":   (dims, pack(LAI_t))}
-        if is_multilayer:
-            ts["T_soil_top"] = (dims, pack(T_soil_top_t))
-            ts["snow_depth"] = (dims, pack(snow_depth_t))
-
-        coords = {"time": (("time",), np.asarray(doy_t_arr))}
-        if is_latlon:
-            coords.update({"lat": (("lat",), lat_1d), "lon": (("lon",), lon_1d)})
-        else:
-            coords.update({"lat": (("ncol",), lat_deg), "lon": (("ncol",), lon_deg)})
-
-        ds = xr.Dataset(
-            ts, coords=coords,
-            attrs={"forcing": "synthetic" if synthetic else f"CRU-JRA {args.year}",
-                   "dt": dt, "start_doy": args.start_doy, "grid_type": args.grid_type,
-                   "surface_scheme": args.surface_scheme, "carbon": config.carbon.scheme},
-        )
-        nc = out_dir / "lmip_biophys.nc"
-        ds.to_netcdf(nc)
-        print(f"wrote {nc} ({args.n_steps} steps, layout={'lat,lon' if is_latlon else 'ncol'})")
+            data_vars = {v: (dims, pack(finalized[v])) for v in tape.vars}
+            coords = {"time": (("time",), slot_times / _SEC_PER_DAY)}   # doy since year_start
+            if is_latlon:
+                coords.update({"lat": (("lat",), lat_1d), "lon": (("lon",), lon_1d)})
+            else:
+                coords.update({"lat": (("ncol",), lat_deg), "lon": (("ncol",), lon_deg)})
+            attrs = {
+                "forcing": "synthetic" if synthetic else f"CRU-JRA {year_start}"
+                           + (f"-{year_end}" if year_end > year_start else ""),
+                "dt": dt, "start_doy": args.start_doy,
+                "grid_type": args.grid_type, "surface_scheme": args.surface_scheme,
+                "carbon": config.carbon.scheme,
+                "tape_name": tape.name, "tape_freq": tape.freq, "tape_average": tape.average,
+                "time_units": "days since year_start Jan 1 (noleap)",
+            }
+            ds = xr.Dataset(data_vars, coords=coords, attrs=attrs)
+            nc = out_dir / f"lmip_biophys.{tape.name}.nc"
+            ds.to_netcdf(nc)
+            print(f"wrote {nc} ({n_slots} {tape.freq} slots, "
+                  f"layout={'lat,lon' if is_latlon else 'ncol'})")
     except Exception as e:  # noqa: BLE001
         print(f"(netcdf write skipped: {e})")
 
@@ -374,6 +406,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "start when empty.  End-of-run state is ALWAYS "
                          "auto-saved to <output>/restart_<YEAR>_d<DDD>h<HH>.npz "
                          "for chaining.")
+    ap.add_argument("--output-config", default="",
+                    help="YAML file declaring CLM-style history tapes "
+                         "(freq, average, vars).  Empty -> use the shipped "
+                         "default configs/output/lmip_biophys_default.yaml.")
     ap.add_argument("--output", default="lmip_biophys")
     return ap
 

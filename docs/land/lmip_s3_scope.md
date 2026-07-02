@@ -257,6 +257,26 @@ NEXT: run on Derecho against the glade CRU-JRA archive; codex review.
   1–5 years; longer spans need Phase C's restart-based per-year loop.
   Tests: `tests/land/forcing/test_multi_year.py` (5 pass: shape, cross-boundary
   continuity, single-year equivalence, argument validation).
+- **Phase D — CLM-style output history tapes (2026-07-01) ✅ DONE.**
+  New module `packages/land/legoesm/land/output_tapes.py` (~200 lines).  Each
+  tape is a `TapeSpec(name, freq, average, vars)` — freq ∈
+  {step, hourly, daily, monthly, annual}, average ∈ {mean, inst}.  Per-step
+  slot indices computed on the host; per-tape accumulators live inside the
+  `lax.scan` carry (scatter-add for mean, scatter-set for inst).  Each tape
+  produces its own NetCDF: `<output>.<tape_name>.nc` with a (time, lat, lon)
+  layout for latlon.  Configured via YAML:
+  * default: `configs/output/lmip_biophys_default.yaml` — monthly `h0`
+    time-mean fluxes + monthly `h_state` instantaneous soil snapshots;
+  * override with `--output-config path.yaml`.
+  Driver PASS/FAIL now checks final `T_soil_top` finiteness over land
+  (independent of any tape).  Tests: `tests/land/test_output_tapes.py`
+  (8 pass: default config loads, freq/average validation, slot indices for
+  step/hourly/monthly with year rollover, mean+inst accumulate/finalize).
+  Existing integration tests use a per-step tape config so their 4-slot
+  shape is preserved.  Sample smoke: 24×48 latlon, 4-step run writes
+  `lmip_biophys.h0.nc` (7 vars × 1 monthly slot) + `lmip_biophys.h_state.nc`
+  (3 vars × 1 monthly slot) + `restart_1920_d000h04.npz`.
+
 - **Phase C — Restart / checkpoint (2026-07-01) ✅ DONE.**
   New module `packages/land/legoesm/land/restart.py` (~140 lines):
   `save_land_restart(path, state, *, land_mode, t_end_s, n_steps_completed,
