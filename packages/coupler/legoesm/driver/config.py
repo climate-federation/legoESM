@@ -817,31 +817,14 @@ class ExperimentConfig(NamedTuple):
             # replica on EVERY process (collective process_allgather —
             # see ``_gather_spmd_tree_to_host``) and process 0 writes the
             # standard single-file restart.
-            # Diagnostics ARE supported in perf mode (step 5b):
-            # ``collect_lightweight``'s jnp reductions are SPMD-global on
-            # sharded arrays with replicated (addressable) scalar results,
-            # and every flush/save site is already root-gated via
-            # ``_mpi_rank = jax.process_index()``.  What still needs the
-            # single-process full ``collect()`` (np.asarray of the global
-            # fields — snapshots/profiles/monthly/CMIP) stays refused.
-            if self.output.diag_days > 0:
-                if self.output.cmip_output:
-                    errors.append(
-                        "distributed_mode='spmd' does not support "
-                        "cmip_output (it forces the full diagnostics "
-                        "collect(), which materialises non-fully-"
-                        "addressable global arrays); set "
-                        "cmip_output=False or diag_days=0"
-                    )
-                if getattr(self.output, "diagnostics_perf_mode",
-                           "auto") == "never":
-                    errors.append(
-                        "distributed_mode='spmd' requires the perf-mode "
-                        "diagnostics path (scalar SPMD-global "
-                        "reductions); diagnostics_perf_mode='never' "
-                        "would force the full collect() — use 'auto' "
-                        "or 'always'"
-                    )
+            # Diagnostics are FULLY supported (steps 5b+5c): perf mode
+            # runs ``collect_lightweight`` (SPMD-global jnp reductions,
+            # replicated scalar results); the full ``collect()``
+            # (snapshots/profiles/monthly/CMIP — cmip_output or
+            # diagnostics_perf_mode='never') gathers the sharded fields
+            # to host replicas on every process first.  All flush/save
+            # sites are root-gated via ``_mpi_rank = jax.process_index()``.
+            pass
         if self.enable_latlon_spmd:
             # Single-process multi-device lat-band path (NOT distributed_mode).
             if g.grid_type != "latlon":

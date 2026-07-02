@@ -1714,6 +1714,25 @@ class ModelDriver:
         if _latlon_mpi and perf_mode:
             perf_mode = False
 
+        # Multi-controller SPMD full collect (cmip_output or an explicit
+        # diagnostics_perf_mode='never'/'auto'-overridden request): gather
+        # the sharded state + every array kwarg to a host replica on EVERY
+        # process (process_allgather is collective), then run the standard
+        # single-process collect on each process — identical host inputs
+        # give identical accumulators on every rank, and the flush/save
+        # sites are already root-gated via _mpi_rank=process_index.
+        if (not perf_mode
+                and self.config.distributed
+                and getattr(self.config, "distributed_mode", "mpi") == "spmd"
+                and jax.process_count() > 1):
+            state = kwargs.get('state', self.state)
+            jax.block_until_ready(state.u.data)
+            kwargs['state'] = self._gather_spmd_tree_to_host(state)
+            for _k, _v in list(kwargs.items()):
+                if _k != 'state' and isinstance(_v, jax.Array):
+                    kwargs[_k] = self._gather_spmd_tree_to_host(_v)
+            return self.diagnostics.collect(**kwargs)
+
         if perf_mode:
             # Lightweight path: scalar reductions only, no gather.
             state = kwargs.get('state', self.state)
@@ -3185,10 +3204,19 @@ class ModelDriver:
 
     def _gather_spmd_tree_to_host(self, tree):
         """Gather every non-fully-addressable jax.Array leaf of *tree* to a
-        host-replicated numpy array (multi-controller SPMD; collective —
-        EVERY process must call this with the same tree).  Fully-addressable
-        leaves and non-array leaves pass through unchanged; pytree structure
-        (Fields, dicts, NamedTuples) is preserved."""
+        process-local REPLICATED jax array (multi-controller SPMD;
+        collective — EVERY process must call this with the same tree).
+        Fully-addressable leaves and non-array leaves pass through
+        unchanged; pytree structure (Fields, dicts, NamedTuples) is
+        preserved.
+
+        The gathered leaf is re-wrapped ``jnp.asarray`` (NOT left as
+        numpy): downstream consumers include jnp/``lax.scan`` code (the
+        energy tracker inside the full diagnostics ``collect()`` indexes
+        with traced integers — a numpy leaf there raises
+        ``TracerArrayConversionError``, smoke job 8687797) as well as
+        plain ``np.asarray`` writers, and a single-device jax array
+        serves both."""
         if tree is None:
             return None
         import numpy as _np
@@ -3196,7 +3224,8 @@ class ModelDriver:
 
         def _leaf(x):
             if isinstance(x, jax.Array) and not x.is_fully_addressable:
-                return _np.asarray(_mhu.process_allgather(x, tiled=True))
+                return jnp.asarray(
+                    _np.asarray(_mhu.process_allgather(x, tiled=True)))
             return x
 
         return jax.tree_util.tree_map(_leaf, tree)
@@ -6563,9 +6592,12 @@ class ModelDriver:
 
             # Incremental CMIP monthly flush — write completed months and
             # free their memory so long runs don't accumulate all months.
-            if (diag_interval > 0 and current_step % diag_interval == 0
-                    and (self._mpi_rank is None or self._mpi_rank == 0)):
-                self.diagnostics.flush_cmip_monthly(day)
+            # EVERY process pops (under multi-controller SPMD the non-root
+            # accumulators fill identically and would otherwise grow
+            # unbounded, codex round-10); only root writes.
+            if diag_interval > 0 and current_step % diag_interval == 0:
+                _is_root = self._mpi_rank is None or self._mpi_rank == 0
+                self.diagnostics.flush_cmip_monthly(day, write=_is_root)
 
         return self._finalize_run(
             run_status, t_jit, t_start,
