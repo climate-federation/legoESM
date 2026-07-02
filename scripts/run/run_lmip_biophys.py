@@ -53,6 +53,7 @@ from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_l
 from legoesm.land.slab_land import step_land
 from legoesm.land.boundary_data import init_land_surface_data, make_step_land_params_updater
 from legoesm.land.forcing import stage_forcing, stage_forcing_years
+from legoesm.land.restart import load_land_restart, save_land_restart
 
 U_MIN = 1.0
 _SEC_PER_DAY = 86400.0
@@ -178,8 +179,20 @@ def run(args) -> int:
             runoff=z(),
         )
     else:
-        state = init_multilayer_land_state(ncol, config, T_init=288.0)
-        state = state._replace(T_soil=jnp.broadcast_to(T0[:, None], state.T_soil.shape))
+        if args.restart_from:
+            # Warm start from a prior end-state — bypass the cold-init T_soil
+            # broadcast so the loaded profile survives verbatim.
+            state, restart_meta = load_land_restart(
+                args.restart_from,
+                expected_land_mode="multilayer",
+                expected_ncol=ncol,
+                expected_n_layers=config.soil_grid.n_layers)
+            print(f"restart: loaded state from {args.restart_from} "
+                  f"(t_end_s={restart_meta['t_end_s']:.1f}, "
+                  f"steps_completed={restart_meta['n_steps_completed']})")
+        else:
+            state = init_multilayer_land_state(ncol, config, T_init=288.0)
+            state = state._replace(T_soil=jnp.broadcast_to(T0[:, None], state.T_soil.shape))
 
     update_land_params = make_step_land_params_updater(gsd, config.surface_scheme)
 
@@ -278,6 +291,25 @@ def run(args) -> int:
     except Exception as e:  # noqa: BLE001
         print(f"(netcdf write skipped: {e})")
 
+    # --- auto-save the end-of-run state as a chained-run seed (Phase C). ---
+    if is_multilayer:
+        try:
+            t_end_s = float(model_times_s[-1] + dt)
+            restart_meta = {
+                "grid_type": args.grid_type, "resolution": args.resolution,
+                "surface_scheme": args.surface_scheme, "bulk_scheme": args.bulk,
+                "year": year_start, "year_end": year_end, "dt": dt,
+                "n_steps": args.n_steps, "start_doy": args.start_doy,
+                "forcing": ("synthetic" if synthetic else "CRU-JRA"),
+            }
+            rp = save_land_restart(
+                out_dir / "restart_end.npz", state,
+                land_mode="multilayer", t_end_s=t_end_s,
+                n_steps_completed=args.n_steps, metadata=restart_meta)
+            print(f"wrote {rp}")
+        except Exception as e:  # noqa: BLE001
+            print(f"(restart write skipped: {e})")
+
     return 0 if status == "PASS" else 1
 
 
@@ -321,6 +353,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--k-neighbors", type=int, default=4, help="forcing regrid IDW neighbours")
     ap.add_argument("--land-mask-file", default="")
     ap.add_argument("--land-frac-min", type=float, default=0.5)
+    ap.add_argument("--restart-from", default="",
+                    help="load initial land state from this .npz (e.g. "
+                         "$SCRATCH/prev_run/restart_end.npz).  Cold start when "
+                         "empty.  End-of-run state is ALWAYS auto-saved to "
+                         "<output>/restart_end.npz for chaining.")
     ap.add_argument("--output", default="lmip_biophys")
     return ap
 

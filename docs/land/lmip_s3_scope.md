@@ -257,10 +257,23 @@ NEXT: run on Derecho against the glade CRU-JRA archive; codex review.
   1–5 years; longer spans need Phase C's restart-based per-year loop.
   Tests: `tests/land/forcing/test_multi_year.py` (5 pass: shape, cross-boundary
   continuity, single-year equivalence, argument validation).
-- **Phase C — Restart / checkpoint.** Save/load full `MultiLayerLandState` as
-  `.npz`; `--restart-from`, auto end-of-run save; per-year scan loop for long
-  spin-up spans.  Enables true multi-decade spin-up across queue submissions
-  (WS-2 acceleration for `land-dev-followup`).
+- **Phase C — Restart / checkpoint (2026-07-01) ✅ DONE.**
+  New module `packages/land/legoesm/land/restart.py` (~140 lines):
+  `save_land_restart(path, state, *, land_mode, t_end_s, n_steps_completed,
+  metadata=None)` and `load_land_restart(path, *, expected_land_mode,
+  expected_ncol, expected_n_layers=None) -> (state, meta)`.  Version-tagged
+  `.npz` payload with an informational JSON metadata blob; loader refuses
+  land-mode / ncol / n_layers mismatches (rather than silently corrupting a
+  continuation run).  Driver: `--restart-from PATH` (cold start when empty);
+  end-of-run state is ALWAYS auto-saved to `<output>/restart_end.npz`.
+  Derecho PBS batch: new `RESTART_FROM` + `YEAR_END` `qsub -v` knobs.
+  Tests: `tests/land/test_restart.py` (6 pass: round-trip bit-identical, TgC
+  optional, land-mode / ncol / n-layers mismatch → ValueError, slab not
+  implemented) + `tests/land/integration/test_run_lmip_biophys.py` (10 total:
+  cold-run auto-saves restart_end.npz, warm start seeds deep soil at 250 K
+  and it survives 4 physics steps).
+  Slab (`LandState`) restart is a natural additive next step; carbon-pool
+  restart lands with DALEC enable (a subsequent workstream).
 - **WS-2 — Production driver + transient CO₂ + spin-up.** A real global
   multi-year land driver (merge `run_lmip_smoke`'s `lax.scan` global path with
   `run_lmip`'s restart/checkpoint), transient CO₂ series, and a soil-C

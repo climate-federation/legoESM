@@ -19,7 +19,13 @@
 #
 # Override knobs via qsub -v (all optional):
 #   LEGOESM_CONDA_ENV=legoesm-lmip  — conda env with jax + xarray + legoesm
-#   YEAR=1920                       — CRU-JRA year to force with
+#   YEAR=1920                       — CRU-JRA year to force with (start of range)
+#   YEAR_END=""                     — Phase B: end of contiguous multi-year span
+#                                     (empty = single-year YEAR).  Example: YEAR=1920,
+#                                     YEAR_END=1924 → 5-year spin-up.
+#   RESTART_FROM=""                 — Phase C: seed run from a prior restart_end.npz.
+#                                     Empty = cold start.  Every run auto-saves its
+#                                     end-state to <OUT_DIR>/restart_end.npz.
 #   RESOLUTION=90                   — latlon N (N x 2N = 90 x 180 ~ 2 deg)
 #   DT=3600                         — timestep in seconds (1 h default; 1800 = 30 min)
 #   N_STEPS=240                     — number of land steps (240 * 1 h = 10 model days)
@@ -47,6 +53,8 @@ N_STEPS="${N_STEPS:-240}"
 START_DOY="${START_DOY:-196}"
 SURFACE_SCHEME="${SURFACE_SCHEME:-two_leaf_canopy}"
 BULK="${BULK:-most}"
+YEAR_END="${YEAR_END:-}"                # multi-year forcing (Phase B)
+RESTART_FROM="${RESTART_FROM:-}"        # chained-run seed (Phase C)
 OUT_TAG="${OUT_TAG:-}"
 
 # Guardrail: 'simple_seb' + MOST is numerically unstable (T_sfc -> +/-inf), so
@@ -111,6 +119,9 @@ done
 # --- run ---
 export JAX_ENABLE_X64=1
 export PYTHONPATH="${PYTHONPATH:-}:$PWD"
+EXTRA_ARGS=()
+if [[ -n "$YEAR_END" ]];     then EXTRA_ARGS+=(--year-end "$YEAR_END"); fi
+if [[ -n "$RESTART_FROM" ]]; then EXTRA_ARGS+=(--restart-from "$RESTART_FROM"); fi
 python scripts/run/run_lmip_biophys.py \
     --surfdata "$SURFDATA" \
     --forcing-dir data/crujra \
@@ -119,7 +130,8 @@ python scripts/run/run_lmip_biophys.py \
     --surface-scheme "$SURFACE_SCHEME" \
     --bulk "$BULK" \
     --dt "$DT" --n-steps "$N_STEPS" \
-    --output "$OUT_DIR"
+    --output "$OUT_DIR" \
+    "${EXTRA_ARGS[@]}"
 
 echo "=================================================================="
 echo "output NetCDF: $OUT_DIR/lmip_biophys.nc"

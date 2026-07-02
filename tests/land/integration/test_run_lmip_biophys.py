@@ -82,3 +82,76 @@ def test_build_model_times_synthetic_starts_at_zero():
     assert t[0] == 0.0                                        # synthetic ignores start-doy
     t2 = mod.build_model_times(10.0, 3600.0, 5, synthetic=False)
     assert t2[0] == 10.0 * 86400.0                           # real forcing honours start-doy
+
+
+def _run_driver(mod, sd, out, extra_args=()):
+    args = mod.build_parser().parse_args([
+        "--surfdata", str(sd),
+        "--grid-type", "latlon", "--resolution", "4",
+        "--surface-scheme", "simple_seb", "--land-mode", "multilayer",
+        "--bulk", "constant",
+        "--dt", "3600", "--n-steps", "4",
+        "--forcing-dir", "",
+        "--output", str(out),
+        *extra_args,
+    ])
+    return mod.run(args)
+
+
+def test_cold_run_auto_saves_restart(tmp_path):
+    """A cold run always writes restart_end.npz next to lmip_biophys.nc."""
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    out = tmp_path / "cold"
+    assert _run_driver(mod, sd, out) == 0
+    assert (out / "restart_end.npz").exists()
+
+    # Metadata survives the round-trip and records the run's config.
+    from legoesm.land.restart import load_land_restart
+    _, meta = load_land_restart(out / "restart_end.npz",
+                                expected_land_mode="multilayer",
+                                expected_ncol=32, expected_n_layers=None)
+    assert meta["metadata"]["surface_scheme"] == "simple_seb"
+    assert meta["n_steps_completed"] == 4
+
+
+def test_warm_start_uses_loaded_state(tmp_path):
+    """When --restart-from is set, the driver's initial state IS the loaded
+    state — not the cold-init default.  Verified with a hand-crafted seed
+    at a distinctive T_soil (250 K uniform) that a cold start would never
+    reach in 4 h of physics under synthetic forcing (~285 K air)."""
+    import jax.numpy as jnp
+    from legoesm.land.restart import save_land_restart
+    from legoesm.land.state import MultiLayerLandState
+
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    ncol, nlay = 32, 8              # 4x8 latlon at --resolution 4
+    seed = MultiLayerLandState(
+        T_soil=jnp.full((ncol, nlay), 250.0),   # unmistakable cold column
+        psi_soil=jnp.full((ncol, nlay), -1.0),
+        theta_soil=jnp.full((ncol, nlay), 0.30),
+        runoff_surface=jnp.zeros(ncol),
+        runoff_subsurface=jnp.zeros(ncol),
+        snow_depth=jnp.zeros(ncol),
+        snow_age=jnp.zeros(ncol),
+    )
+    seed_path = tmp_path / "seed.npz"
+    save_land_restart(seed_path, seed, land_mode="multilayer",
+                      t_end_s=0.0, n_steps_completed=0)
+
+    out = tmp_path / "warm"
+    assert _run_driver(mod, sd, out,
+                       extra_args=("--restart-from", str(seed_path))) == 0
+
+    # Load the run's END-of-scan state (auto-saved).  Deep soil layers are
+    # thermally slow; after 4 h from a 250 K seed they must still be near 250 K
+    # (a fresh cold start would have deep T at ~280 K, the T_init default in
+    # init_multilayer_land_state).
+    from legoesm.land.restart import load_land_restart
+    st_end, _ = load_land_restart(out / "restart_end.npz",
+                                  expected_land_mode="multilayer",
+                                  expected_ncol=32, expected_n_layers=None)
+    T_deep = np.asarray(st_end.T_soil)[:, -1]                    # deepest layer
+    assert float(T_deep.mean()) < 255.0                          # near seed
+    assert float(T_deep.mean()) > 245.0
