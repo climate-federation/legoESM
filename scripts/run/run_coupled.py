@@ -446,6 +446,13 @@ def build_parser():
                              "DEFAULTS, so any explicit CLI flag still overrides "
                              "it. Keys are run_coupled argument dests; an unknown "
                              "key is a hard error (no silent typo'd override).")
+    parser.add_argument("--params", default=None,
+                        help="YAML calibration file of tuned parameters keyed by "
+                             "param_collector qualified name 'scheme_key.field' "
+                             "(e.g. atm.clouds.CloudConfig.q_c_diagnostic); "
+                             "validated against __param_spec__ bounds and applied "
+                             "to the flattened atmosphere ExperimentConfig scalar "
+                             "fields. Applied after --config/CLI. (issue #691)")
     parser.add_argument("--resume", action="store_true",
                         help="Resume from the latest checkpoint in --output "
                              "(atm checkpoint_day_NNNN.npz + coupled "
@@ -611,6 +618,17 @@ def main():
         start_year=args.start_year,
         n_devices=args.n_devices if args.n_devices is not None else "auto",
     )
+    # Apply the --params calibration layer to the flattened atmosphere
+    # ExperimentConfig scalar fields (issue #691).
+    if getattr(args, "params", None):
+        from legoesm.driver.run_config_yaml import (
+            apply_params_to_config,
+            build_atm_scalar_param_map,
+            load_params_config,
+        )
+        atm_config = apply_params_to_config(
+            atm_config, load_params_config(args.params), driver="run_coupled",
+            scalar_param_map=build_atm_scalar_param_map())
 
     # Build coupled config from preset with overrides.  The ocean_config is
     # ALWAYS overridden from --ocean so the coupled default is the two_layer
