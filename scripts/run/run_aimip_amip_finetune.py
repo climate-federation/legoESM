@@ -73,8 +73,16 @@ def main():
                     default="results/aimip_forcing/gaussian_forcing.npz")
     ap.add_argument("--curriculum", type=str, default="1:4,3:6,5:8",
                     help="rollout_days:epochs phases, short->long (NeuralGCM-style).")
-    ap.add_argument("--ema-decay", type=float, default=0.999,
-                    help="EMA of the params (ACE2 uses 0.999); EMA weights saved.")
+    def _ema_decay(v):
+        f = float(v)
+        if not (0.0 <= f < 1.0):
+            # d=1.0 would zero the bias-correction denominator (1 - d^t).
+            raise argparse.ArgumentTypeError("--ema-decay must be in [0, 1)")
+        return f
+
+    ap.add_argument("--ema-decay", type=_ema_decay, default=0.999,
+                    help="EMA of the params (ACE2 uses 0.999), in [0,1); "
+                         "bias-corrected at save. EMA weights saved.")
     ap.add_argument("--n-samples", type=int, default=6)
     ap.add_argument("--first-year", type=int, default=1979)
     ap.add_argument("--last-year", type=int, default=2014)  # training period only
