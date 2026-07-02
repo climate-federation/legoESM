@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -710,6 +711,334 @@ def test_jra55_step_with_closure_features_advances_without_nans(tiny_jra55_run_f
     for arr in (new_state.T.data, new_state.S.data, new_state.eta.data,
                 new_state.u.data, new_state.v.data):
         assert bool(jnp.all(jnp.isfinite(arr))), "non-finite state after step"
+
+
+# ============================================================================
+# F1 — cycled GPU-interp forcing clock (record window + scan-body clock)
+# ============================================================================
+
+class _ForcingProbeField(NamedTuple):
+    data: jnp.ndarray
+
+
+class _ForcingProbeState(NamedTuple):
+    T: _ForcingProbeField
+
+
+def _make_forcing_probe_model():
+    """Minimal stand-in for the ocean model inside the GPU-interp block fn.
+
+    ``_step_impl`` encodes the interpolated shortwave forcing it receives
+    into the carried state (``sf.sw_down`` is the raw interpolated
+    ``rsds`` — untouched by the ocean state), so the block's final state
+    exposes the LAST step's selected/interpolated forcing for assertion.
+    """
+    import types
+
+    def _step_impl(state_in, dt, freshwater=None, surface_forcing=None,
+                   sponge=None):
+        probe = surface_forcing.sw_down[..., None] * 1e-3
+        return _ForcingProbeState(
+            T=_ForcingProbeField(
+                data=jnp.broadcast_to(probe, state_in.T.data.shape),
+            ),
+        )
+
+    return types.SimpleNamespace(
+        config=types.SimpleNamespace(
+            barotropic=types.SimpleNamespace(maxvel_barotropic=0.0),
+        ),
+        _step_impl=_step_impl,
+    )
+
+
+def test_preload_raw_records_second_cycle_meta_and_indices(tmp_path):
+    """F1: in the SECOND repeat-year cycle the preloader must return the
+    CYCLED block-start day for the interpolation clock (raw day is kept
+    separately for solar zenith) and record days aligned with it."""
+    n_records = 16  # 2.0-day cache at 8 records/day
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8,
+                                  n_records=n_records)
+    js = {"cache_path": str(cache), "ref_year": 1958, "cycle": True}
+    dt = 5400.0          # 0.0625 day = half a 3-hourly record interval
+    start_step_idx = 41  # day 2.5625 -> cycled 0.5625 (second cycle)
+
+    raw_stack, _, meta = run_omip._preload_jra55_raw_records(
+        start_step_idx, 1, dt, js)
+
+    # Raw day preserved for the solar-zenith clock.
+    assert meta["block_start_day"] == pytest.approx(2.5625)
+    # Cycled forcing clock: 2.5625 mod 2.0.
+    assert meta["block_start_day_forcing"] == pytest.approx(0.5625)
+    days = np.asarray(meta["record_days"])
+    np.testing.assert_allclose(days, [0.5, 0.625])
+    # The forcing clock must be bracketed by the returned record days.
+    assert days[0] <= meta["block_start_day_forcing"] <= days[-1]
+    # Selected raw records are cache records 4 and 5.
+    ds = xr.open_zarr(str(cache), decode_times=False)
+    np.testing.assert_allclose(
+        np.asarray(raw_stack["tas"]), ds["tas"].isel(time=[4, 5]).values)
+
+
+def test_preload_raw_records_unwraps_record_days_across_cache_wrap(tmp_path):
+    """F1: a block straddling the repeat-year wrap gets MONOTONIC record
+    days (post-wrap entries shifted by +cache_length_days) so linear
+    interpolation stays correct across the boundary."""
+    n_records = 16  # 2.0-day cache
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8,
+                                  n_records=n_records)
+    js = {"cache_path": str(cache), "ref_year": 1958, "cycle": True}
+    dt = 5400.0
+    # Steps 63, 64: days 3.9375, 4.0 -> cycled 1.9375, 2.0 (straddles wrap).
+    raw_stack, _, meta = run_omip._preload_jra55_raw_records(63, 2, dt, js)
+
+    days = np.asarray(meta["record_days"])
+    assert np.all(np.diff(days) > 0), f"record_days not monotonic: {days}"
+    np.testing.assert_allclose(days, [1.875, 2.0, 2.125])
+    assert meta["block_start_day_forcing"] == pytest.approx(1.9375)
+    ds = xr.open_zarr(str(cache), decode_times=False)
+    np.testing.assert_allclose(
+        np.asarray(raw_stack["rsds"]),
+        ds["rsds"].isel(time=[15, 0, 1]).values)
+
+
+def test_slice_preloaded_records_second_cycle_matches_raw_preloader(tmp_path):
+    """F1: the in-RAM slicer must produce the same window/meta as the
+    Zarr preloader (float32 staging tolerance) in the second cycle."""
+    n_records = 16
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8,
+                                  n_records=n_records)
+    js = {"cache_path": str(cache), "ref_year": 1958, "cycle": True}
+    full = run_omip._preload_jra55_full_cache(js)
+
+    raw_a, _, meta_a = run_omip._slice_preloaded_records(
+        41, 4, 5400.0, js, *full)
+    raw_b, _, meta_b = run_omip._preload_jra55_raw_records(41, 4, 5400.0, js)
+
+    np.testing.assert_allclose(np.asarray(meta_a["record_days"]),
+                               np.asarray(meta_b["record_days"]))
+    assert (meta_a["block_start_day_forcing"]
+            == meta_b["block_start_day_forcing"])
+    assert meta_a["block_start_day"] == meta_b["block_start_day"]
+    for var in raw_b:
+        np.testing.assert_allclose(
+            np.asarray(raw_a[var]), np.asarray(raw_b[var]), rtol=1e-6)
+
+
+def test_gpu_interp_block_uses_cycled_forcing_clock_second_cycle(tmp_path):
+    """F1 end-to-end: the jitted interp scan body must select the
+    analytically expected bracketing records + alpha in the SECOND
+    repeat-year cycle.
+
+    Before the fix the RAW simulation day was compared against
+    cache-relative record_days, so ``i_lo`` clipped to the last slice
+    record and ``alpha`` clamped to 1 — every step read one stale
+    record instead of interpolating."""
+    n_lat, n_lon, n_records = 4, 8, 16  # 2.0-day cache
+    cache = _make_synthetic_cache(tmp_path, n_lat=n_lat, n_lon=n_lon,
+                                  n_records=n_records)
+    grid, *_ = _make_tiny_latlon_setup(n_lat=n_lat, n_lon=n_lon)
+    args = _argparse_namespace(jra55_cache=str(cache), jra55_cycle=True)
+    js = run_omip._setup_jra55_forcing_state(args, grid, "latlon")
+    js["enable_freeze_cap"] = False  # probe state carries no land mask
+
+    dt = 5400.0  # half a record interval
+    probe_model = _make_forcing_probe_model()
+    get_bfn = run_omip._build_jra55_block_fn_interp(probe_model, js, dt)
+    state0 = _ForcingProbeState(
+        T=_ForcingProbeField(data=jnp.zeros((n_lat, n_lon, 1))))
+    ds = xr.open_zarr(str(cache), decode_times=False)
+
+    # (a) Single-step block at raw day 2.5625 (cycled 0.5625): midway
+    # between records 4 (day 0.5) and 5 (day 0.625) -> alpha = 0.5.
+    raw_stack, runoff, meta = run_omip._preload_jra55_raw_records(
+        41, 1, dt, js)
+    final = get_bfn(1)(
+        state0, raw_stack, runoff, meta["record_days"],
+        jnp.float64(meta["block_start_day"]),
+        jnp.float64(meta["block_start_day_forcing"]),
+    )
+    probed_sw = np.asarray(final.T.data[..., 0]) * 1e3
+    expected = 0.5 * (ds["rsds"].isel(time=4).values
+                      + ds["rsds"].isel(time=5).values)
+    np.testing.assert_allclose(probed_sw, expected, rtol=1e-9)
+
+    # (b) Two-step block straddling the wrap (raw days 3.9375, 4.0):
+    # the final step lands exactly ON the wrap record -> rsds[0].
+    raw_stack, runoff, meta = run_omip._preload_jra55_raw_records(
+        63, 2, dt, js)
+    final = get_bfn(2)(
+        state0, raw_stack, runoff, meta["record_days"],
+        jnp.float64(meta["block_start_day"]),
+        jnp.float64(meta["block_start_day_forcing"]),
+    )
+    probed_sw = np.asarray(final.T.data[..., 0]) * 1e3
+    np.testing.assert_allclose(
+        probed_sw, ds["rsds"].isel(time=0).values, rtol=1e-9)
+
+
+def test_loop_gpu_interp_cycled_second_cycle_runs_finite(tmp_path):
+    """F1 integration: the block-scan loop on the GPU-interp path with
+    repeat-year cycling runs blocks entirely inside the SECOND cycle
+    (including the full-cache slicer) and stays finite."""
+    n_lat, n_lon = 4, 8
+    cache = _make_synthetic_cache(tmp_path, n_lat=n_lat, n_lon=n_lon,
+                                  n_records=16)  # 2-day cache
+    grid, z_coord, _, model, _ = _make_tiny_latlon_setup(
+        n_lat=n_lat, n_lon=n_lon)
+    state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
+    args = _argparse_namespace(jra55_cache=str(cache), jra55_cycle=True)
+    js = run_omip._setup_jra55_forcing_state(args, grid, "latlon")
+    js["_gpu_interp"] = True
+    # Global freeze cap needs the ocean mask (run_omip_single wires this).
+    js["_ocean_mask_2d"] = state.land_mask.data > 0.5
+    # dt=10800 s (3 h) -> 8 steps/day; the second cycle starts at step 16.
+    state_out, _, _, ok, _ = run_omip._run_omip_loop(
+        model, state, "latlon", grid, z_coord,
+        dt=10800.0, n_steps=20, diag_every=2, jra55_state=js,
+        checkpoint_days=None, checkpoint_dir=None, start_step=16,
+    )
+    assert ok
+    assert bool(jnp.all(jnp.isfinite(state_out.T.data)))
+
+
+# ============================================================================
+# F2 — non-cycled preloaders must raise past the cache end (no silent clamp)
+# ============================================================================
+
+def test_preload_raw_records_noncycle_past_cache_end_raises(tmp_path):
+    """F2: cycle=False + block past the cache end must raise IndexError
+    (matching the jra55_do loader's no-silent-synthetic contract), not
+    silently clamp to the last record."""
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8,
+                                  n_records=8)  # 1-day cache
+    js = {"cache_path": str(cache), "ref_year": 1958, "cycle": False}
+    with pytest.raises(IndexError, match="exceeds cache length"):
+        # start day 1.25 > 1.0-day cache.
+        run_omip._preload_jra55_raw_records(10, 4, 10800.0, js)
+
+
+def test_slice_preloaded_records_noncycle_past_cache_end_raises(tmp_path):
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8, n_records=8)
+    js = {"cache_path": str(cache), "ref_year": 1958, "cycle": False}
+    full = run_omip._preload_jra55_full_cache(js)
+    with pytest.raises(IndexError, match="exceeds cache length"):
+        run_omip._slice_preloaded_records(10, 4, 10800.0, js, *full)
+
+
+def test_preload_raw_records_noncycle_exact_last_record_ok(tmp_path):
+    """Loader parity: a block whose final step lands EXACTLY on the last
+    cache record needs no upper bracket beyond it and must NOT raise."""
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8, n_records=8)
+    js = {"cache_path": str(cache), "ref_year": 1958, "cycle": False}
+    # dt=10800 s (3 h): steps 0..7 -> last day 0.875 == final record.
+    _, _, meta = run_omip._preload_jra55_raw_records(0, 8, 10800.0, js)
+    days = np.asarray(meta["record_days"])
+    assert days[-1] == pytest.approx(0.875)
+    assert meta["block_start_day_forcing"] == meta["block_start_day"]
+
+
+# ============================================================================
+# F3 — --no-gpu-interp round trip (flag must reach the dispatch)
+# ============================================================================
+
+def test_cli_gpu_interp_flag_round_trip():
+    import sys as _sys
+    saved = _sys.argv
+    try:
+        _sys.argv = ["run_omip.py", "--grid", "latlon"]
+        assert run_omip.parse_args().gpu_interp is True
+        _sys.argv = ["run_omip.py", "--grid", "latlon", "--no-gpu-interp"]
+        assert run_omip.parse_args().gpu_interp is False
+    finally:
+        _sys.argv = saved
+
+
+class _LoopCapturedError(Exception):
+    """Sentinel: short-circuit run_omip_single at the time-loop boundary."""
+
+
+@pytest.mark.parametrize("extra_argv,expected", [
+    ([], True),
+    (["--no-gpu-interp"], False),
+])
+def test_no_gpu_interp_flag_reaches_jra55_dispatch(tmp_path, monkeypatch,
+                                                   extra_argv, expected):
+    """F3: run_omip_single must wire args.gpu_interp into
+    jra55_state['_gpu_interp'] (it was hardcoded True, making
+    --no-gpu-interp a silent no-op)."""
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8, n_records=8)
+    captured = {}
+
+    def _spy_loop(*a, **kw):
+        captured["jra55_state"] = kw.get("jra55_state")
+        raise _LoopCapturedError()
+
+    monkeypatch.setattr(run_omip, "_run_omip_loop", _spy_loop)
+
+    import sys as _sys
+    saved = _sys.argv
+    try:
+        _sys.argv = [
+            "run_omip.py", "--grid", "latlon", "--resolution", "4x8",
+            "--nlev", "4", "--dt", "10800", "--days", "1",
+            "--forcing-mode", "jra55_do_tropical",
+            "--jra55-cache", str(cache),
+            "--output", str(tmp_path / "out"),
+        ] + extra_argv
+        args = run_omip.parse_args()
+    finally:
+        _sys.argv = saved
+
+    with pytest.raises(_LoopCapturedError):
+        run_omip.run_omip_single("latlon", args)
+    assert captured["jra55_state"]["_gpu_interp"] is expected
+
+
+@pytest.mark.parametrize("gpu_interp,expected_calls", [
+    (False, {"cpu": 1, "gpu": 0}),
+    (True, {"cpu": 0, "gpu": 1}),
+])
+def test_loop_dispatch_honors_gpu_interp_flag(tmp_path, monkeypatch,
+                                              gpu_interp, expected_calls):
+    """F3: _gpu_interp=False must route to the CPU-interp block path
+    (_build_jra55_block_fn) and the run must complete finite — the CPU
+    path stays exercised, not just reachable."""
+    n_lat, n_lon = 4, 8
+    cache = _make_synthetic_cache(tmp_path, n_lat=n_lat, n_lon=n_lon,
+                                  n_records=16)
+    grid, z_coord, _, model, _ = _make_tiny_latlon_setup(
+        n_lat=n_lat, n_lon=n_lon)
+    state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
+    args = _argparse_namespace(jra55_cache=str(cache))
+    js = run_omip._setup_jra55_forcing_state(args, grid, "latlon")
+    js["_gpu_interp"] = gpu_interp
+    # Global freeze cap needs the ocean mask (run_omip_single wires this).
+    js["_ocean_mask_2d"] = state.land_mask.data > 0.5
+
+    calls = {"cpu": 0, "gpu": 0}
+    real_cpu = run_omip._build_jra55_block_fn
+    real_gpu = run_omip._build_jra55_block_fn_interp
+
+    def _spy_cpu(*a, **k):
+        calls["cpu"] += 1
+        return real_cpu(*a, **k)
+
+    def _spy_gpu(*a, **k):
+        calls["gpu"] += 1
+        return real_gpu(*a, **k)
+
+    monkeypatch.setattr(run_omip, "_build_jra55_block_fn", _spy_cpu)
+    monkeypatch.setattr(run_omip, "_build_jra55_block_fn_interp", _spy_gpu)
+
+    state_out, _, _, ok, _ = run_omip._run_omip_loop(
+        model, state, "latlon", grid, z_coord,
+        dt=10800.0, n_steps=4, diag_every=2, jra55_state=js,
+        checkpoint_days=None, checkpoint_dir=None,
+    )
+    assert ok
+    assert calls == expected_calls
+    assert bool(jnp.all(jnp.isfinite(state_out.T.data)))
 
 
 def test_jra55_step_runs_with_features_disabled(tmp_path):
