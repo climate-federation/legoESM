@@ -257,6 +257,28 @@ NEXT: run on Derecho against the glade CRU-JRA archive; codex review.
   1–5 years; longer spans need Phase C's restart-based per-year loop.
   Tests: `tests/land/forcing/test_multi_year.py` (5 pass: shape, cross-boundary
   continuity, single-year equivalence, argument validation).
+- **Phase E — Experiment templates + init_experiment (2026-07-01) ✅ DONE.**
+  Adopts the Le Sommer runners pattern in-repo: templated YAML experiments
+  instead of a Cambrian explosion of CLI flags.
+  * New library module `packages/land/legoesm/land/lmip_config.py` — schema
+    + validator + deep-merge overrides (`-o key.path=value`).
+  * New CLI `scripts/run/init_experiment.py <template> --name X
+    --output-dir Y [-o overrides…] [--dry-run]` writes a self-contained
+    experiment dir: `run.yaml` (intent), `config.yaml` (resolved),
+    `experiment.tag` (INI provenance — legoESM SHA/branch, Python/JAX
+    versions, hostname, config hash), `run.sh` (one-shot wrapper pinned
+    to the Python that was used to init; override via `$LEGOESM_PYTHON`).
+  * Templates: `templates/land/biophysics/{spinup_5year,smoke_test}.yaml`.
+  * Path fields (`surfdata.path`, `forcing.data_dir`, `restart.from`) are
+    absolutised against the init-time CWD so `config.yaml` is a
+    self-contained snapshot that survives being moved to `$SCRATCH`.
+  * `run_lmip_biophys.py` refactored to a minimal CLI: `--config PATH`,
+    `--output-dir DIR`, `--restart-from PATH` (optional; overrides
+    `config.restart.from` for chaining ergonomics).  All the physics /
+    grid / forcing / time / output knobs now live in the YAML.
+  * Tests (14 new + 8 unchanged = 60 total, all green): `test_lmip_config.py`
+    (10), `test_init_experiment.py` (4).
+
 - **Phase D — CLM-style output history tapes (2026-07-01) ✅ DONE.**
   New module `packages/land/legoesm/land/output_tapes.py` (~200 lines).  Each
   tape is a `TapeSpec(name, freq, average, vars)` — freq ∈

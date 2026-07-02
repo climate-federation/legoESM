@@ -45,25 +45,40 @@ def _write_surfdata(path, nlat=8, nlon=16, nlev=7):
     )
 
 
-_STEP_TAPE_CFG = str(Path(__file__).resolve().parents[3] /
-                    "configs" / "output" / "lmip_biophys_step_test.yaml")
+_SMOKE_TEMPLATE = _ROOT / "templates" / "land" / "biophysics" / "smoke_test.yaml"
+
+
+def _write_smoke_config(tmp_path, sd_path, extra_overrides=None):
+    """Materialise a smoke-test config.yaml on disk with surfdata pointing at
+    the synthetic surfdata file the test just wrote."""
+    import yaml
+    from legoesm.land.lmip_config import apply_overrides, validate_config
+    with open(_SMOKE_TEMPLATE) as f:
+        base = yaml.safe_load(f)
+    overrides = [f"surfdata.path={sd_path}"] + list(extra_overrides or ())
+    merged = apply_overrides(base, overrides)
+    cfg = validate_config(merged).raw
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    return cfg_path
+
+
+def _run_config(mod, cfg_path, out_dir, restart_from=""):
+    args = mod.build_parser().parse_args([
+        "--config", str(cfg_path),
+        "--output-dir", str(out_dir),
+        "--restart-from", restart_from,
+    ])
+    from legoesm.land.lmip_config import load_config
+    return mod.run(mod._args_from_config(load_config(cfg_path), args))
 
 
 def test_biophys_driver_synthetic_smoke(tmp_path):
     mod = _load_driver()
     sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
     out = tmp_path / "out"
-    args = mod.build_parser().parse_args([
-        "--surfdata", str(sd),
-        "--grid-type", "latlon", "--resolution", "4",
-        "--surface-scheme", "simple_seb", "--land-mode", "multilayer",
-        "--bulk", "constant",               # hermetic pipeline smoke, not MOST-vs-constant
-        "--dt", "3600", "--n-steps", "4",
-        "--forcing-dir", "",                # synthetic (hermetic)
-        "--output-config", _STEP_TAPE_CFG,  # per-step tape, preserves prior test shape
-        "--output", str(out),
-    ])
-    rc = mod.run(args)
+    cfg_path = _write_smoke_config(tmp_path, sd)
+    rc = _run_config(mod, cfg_path, out)
     assert rc == 0                                            # PASS (no NaN over land)
 
     # Tape output lands at lmip_biophys.<tape_name>.nc; the step-test config
@@ -90,41 +105,27 @@ def test_build_model_times_synthetic_starts_at_zero():
     assert t2[0] == 10.0 * 86400.0                           # real forcing honours start-doy
 
 
-def _run_driver(mod, sd, out, extra_args=()):
-    args = mod.build_parser().parse_args([
-        "--surfdata", str(sd),
-        "--grid-type", "latlon", "--resolution", "4",
-        "--surface-scheme", "simple_seb", "--land-mode", "multilayer",
-        "--bulk", "constant",
-        "--dt", "3600", "--n-steps", "4",
-        "--forcing-dir", "",
-        "--output-config", _STEP_TAPE_CFG,   # per-step tape for hermetic smoke
-        "--output", str(out),
-        *extra_args,
-    ])
-    return mod.run(args)
-
-
 def test_cold_run_auto_saves_timestamped_restart(tmp_path):
     """A cold run always writes exactly one restart file named
     restart_<YEAR>_d<DDD>h<HH>.npz next to lmip_biophys.nc."""
     mod = _load_driver()
     sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
     out = tmp_path / "cold"
-    assert _run_driver(mod, sd, out) == 0
+    cfg_path = _write_smoke_config(tmp_path, sd)
+    assert _run_config(mod, cfg_path, out) == 0
     restarts = list(out.glob("restart_*.npz"))
     assert len(restarts) == 1
-    # Model-time-stamped: 4 steps * 1 h = 4 h from doy 0 -> year_final=1920 d000 h04
-    assert restarts[0].name == "restart_1920_d000h04.npz"
+    # Model-time-stamped: 4 steps * 1 h = 4 h from doy 0 -> year_final=year_start d000 h04
+    # (smoke_test template uses year_start=2000)
+    assert restarts[0].name == "restart_2000_d000h04.npz"
 
-    # Metadata survives the round-trip and records the run's config.
     from legoesm.land.restart import load_land_restart
     _, meta = load_land_restart(restarts[0],
                                 expected_land_mode="multilayer",
                                 expected_ncol=32, expected_n_layers=None)
     assert meta["metadata"]["surface_scheme"] == "simple_seb"
     assert meta["n_steps_completed"] == 4
-    assert meta["metadata"]["year_final"] == 1920
+    assert meta["metadata"]["year_final"] == 2000
     assert meta["metadata"]["doy_final"] == 0
     assert meta["metadata"]["hour_final"] == 4
 
@@ -155,8 +156,8 @@ def test_warm_start_uses_loaded_state(tmp_path):
                       t_end_s=0.0, n_steps_completed=0)
 
     out = tmp_path / "warm"
-    assert _run_driver(mod, sd, out,
-                       extra_args=("--restart-from", str(seed_path))) == 0
+    cfg_path = _write_smoke_config(tmp_path, sd)
+    assert _run_config(mod, cfg_path, out, restart_from=str(seed_path)) == 0
 
     # Load the run's END-of-scan state (auto-saved).  Deep soil layers are
     # thermally slow; after 4 h from a 250 K seed they must still be near 250 K

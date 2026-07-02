@@ -1,0 +1,112 @@
+"""Tests for scripts/run/init_experiment.py — the template instantiator."""
+
+import configparser
+import importlib.util
+import subprocess
+from pathlib import Path
+
+import pytest
+import yaml
+
+_ROOT = Path(__file__).resolve().parents[2]
+_INIT = _ROOT / "scripts" / "run" / "init_experiment.py"
+
+
+def _load_init():
+    spec = importlib.util.spec_from_file_location("init_experiment", _INIT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _write_smoke_surfdata(tmp_path):
+    """Create a stand-in file so surfdata.path validates."""
+    p = tmp_path / "sd.nc"; p.write_text("stub")
+    return p
+
+
+def _run_init(argv):
+    """Run the init CLI in-process."""
+    import sys as _sys
+    saved = _sys.argv
+    _sys.argv = ["init_experiment.py"] + argv
+    try:
+        _load_init().main()
+    finally:
+        _sys.argv = saved
+
+
+def test_init_creates_expected_files(tmp_path):
+    sd = _write_smoke_surfdata(tmp_path)
+    out = tmp_path / "expt"
+    _run_init([
+        "biophysics/smoke_test",
+        "--name", "test_run",
+        "--output-dir", str(out),
+        "-o", f"surfdata.path={sd}",
+    ])
+    for f in ("run.yaml", "config.yaml", "experiment.tag", "run.sh"):
+        assert (out / f).exists(), f"missing {f}"
+
+    # run.yaml records the template + overrides
+    run_yaml = yaml.safe_load((out / "run.yaml").read_text())
+    assert run_yaml["template"] == "biophysics/smoke_test"
+    assert run_yaml["name"] == "test_run"
+    assert any("surfdata.path=" in o for o in run_yaml["overrides"])
+
+    # config.yaml is the resolved config; override took effect
+    cfg = yaml.safe_load((out / "config.yaml").read_text())
+    assert cfg["surfdata"]["path"] == str(sd)
+    assert cfg["forcing"]["source"] == "synthetic"
+
+    # experiment.tag records provenance
+    tag = configparser.ConfigParser()
+    tag.read(out / "experiment.tag")
+    assert tag["experiment"]["template"] == "biophysics/smoke_test"
+    assert tag["experiment"]["name"] == "test_run"
+    assert tag["legoESM"]["commit"]                       # non-empty (git or "unknown")
+    assert tag["reproducibility"]["config_hash"].startswith("sha256:")
+    assert tag["reproducibility"]["python_version"]
+
+    # run.sh is executable and points at the config
+    run_sh = (out / "run.sh").read_text()
+    assert "--config" in run_sh and "config.yaml" in run_sh
+    assert (out / "run.sh").stat().st_mode & 0o111
+
+
+def test_init_rejects_bad_override(tmp_path):
+    sd = _write_smoke_surfdata(tmp_path)
+    out = tmp_path / "expt"
+    with pytest.raises(ValueError, match="simple_seb"):    # config validator catches it
+        _run_init([
+            "biophysics/smoke_test",
+            "--name", "bad",
+            "--output-dir", str(out),
+            "-o", f"surfdata.path={sd}",
+            "-o", "physics.bulk_scheme=most",              # simple_seb + MOST = illegal
+        ])
+    assert not out.exists() or not (out / "config.yaml").exists()
+
+
+def test_init_unknown_template_reports_available(tmp_path):
+    with pytest.raises(SystemExit, match="template"):
+        _run_init([
+            "biophysics/nonexistent",
+            "--name", "x",
+            "--output-dir", str(tmp_path / "x"),
+        ])
+
+
+def test_init_dry_run_writes_nothing(tmp_path, capsys):
+    sd = _write_smoke_surfdata(tmp_path)
+    out = tmp_path / "expt"
+    _run_init([
+        "biophysics/smoke_test",
+        "--name", "dry",
+        "--output-dir", str(out),
+        "-o", f"surfdata.path={sd}",
+        "--dry-run",
+    ])
+    captured = capsys.readouterr().out
+    assert "surfdata" in captured                          # printed resolved config
+    assert not out.exists()                                 # nothing written
