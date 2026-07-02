@@ -381,6 +381,15 @@ def test_spectral_rollout_rad_gating_one_step():
         precip_accum=zero_2d,
         shflx_accum=zero_2d,
         lhflx_accum=zero_2d,
+        # TOA/sfc flux + near-surface-T accumulators added to SegmentCarry by
+        # the 2026-07 origin/main merge (CLAUDE.md: every direct SegmentCarry()
+        # construction must gain new fields).
+        sw_up_toa_accum=zero_2d,
+        lw_up_toa_accum=zero_2d,
+        sw_down_toa_accum=zero_2d,
+        sw_net_sfc_accum=zero_2d,
+        lw_net_sfc_accum=zero_2d,
+        t_low_accum=zero_2d,
     )
     ic_spectral = carry_to_spectral_state(fake_carry, grid)
     pe_config = SpectralPEConfig(
