@@ -230,8 +230,8 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
     # spectrum) thread exactly: the ColumnAdapter flatten is a C-order
     # (lat-major) reshape, so a contiguous dim-0 shard of every
     # ``(ncol, ...)`` PhysicsState leaf IS the band's own columns.
-    if physics_fn is not None and getattr(
-            physics_fn, "_has_stochastic_physics", False):
+    from legoesm.timestepping.integration import physics_has_stochastic
+    if physics_fn is not None and physics_has_stochastic(physics_fn):
         raise NotImplementedError(
             "atm lat-band SPMD step: stochastic convection draws are "
             "shaped (ncol_local,) from a replicated key — band-local "

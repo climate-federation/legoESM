@@ -388,6 +388,23 @@ def test_run_atm_latlon_spmd_segment_matches_serial(use_polar_filter):
 # each band's latitudes; column-local physics adds no cross-band coupling.
 # ==============================================================================
 
+def test_stochastic_physics_refused_even_when_wrapped():
+    """codex round-8 HIGH: the stochastic tag must survive functools
+    wrappers (partial / __wrapped__) — a wrapped stochastic physics must
+    not bypass the SPMD refusal and run decomposition-variant draws."""
+    import functools
+    model, _ = _model_and_state(use_polar_filter=False)
+
+    def _f(hs, grid, sigma, ps):  # never called
+        raise AssertionError("refusal must fire at factory time")
+    _f._has_stochastic_physics = True
+    _f._requires_phys_state = True
+
+    for fn in (_f, functools.partial(_f)):
+        with pytest.raises(NotImplementedError, match="stochastic"):
+            make_sharded_atm_latlon_step(model, None, physics_fn=fn)
+
+
 def _mk_phys_state(ncol, nlev):
     """Minimal all-zeros PhysicsState with a nonzero deterministic tke seed."""
     import jax as _jax
