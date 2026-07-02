@@ -137,6 +137,84 @@ def ice_base_pressure_dbar(
 
 
 # ==============================================================================
+# NEMO 'spe' prescribed melt (parametrised cavity, Mathiot et al. 2017)
+# ==============================================================================
+
+def isf_prescribed_melt_tendencies(
+    S: jnp.ndarray,
+    dz_live: jnp.ndarray,
+    wet_cell: jnp.ndarray,
+    fwf_kg_m2_s: jnp.ndarray,
+    zmin_m: jnp.ndarray,
+    zmax_m: jnp.ndarray,
+    *,
+    rho_0: float,
+    c_sw: float,
+    L_fus: float,
+    config: IceShelfConfig = IceShelfConfig(),
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """NEMO ISF 'spe' prescribed-melt tendencies (isfparmlt.F90 spe case).
+
+    Coordinate convention: depths positive DOWN, ``dz_live`` positive
+    thickness, fluxes positive INTO the ocean.  Per column with melt
+    ``fwf > 0`` [kg/m²/s], NEMO deposits over the depth band
+    ``[zmin, zmax]`` (parametrised cavity):
+
+    * ``pqoce = −fwf · L_fus`` — latent heat drawn from the band
+      (COOLING: melting consumes heat; a heat sink, negative into-ocean).
+    * ``pqhc  = +fwf · c_sw · T_frz`` — heat content of the melt water
+      entering AT the in-situ freezing temperature (°C; a negative
+      ``T_frz`` also cools).
+    * salinity: melt water is fresh — virtual-salt dilution
+      ``dS = −S · fwf/(ρ0·h)`` per band cell.
+    * volume: ``+fwf/ρ0`` [m/s] free-surface source (sea level RISES).
+
+    Each band cell k takes the overlap-weighted share ``w_k =
+    overlap_k / h_band`` of the column fluxes, so the column budget
+    closes exactly: ``ρ0·c_sw·Σ dT_k·h_k = pqoce + pqhc`` and
+    ``ρ0·Σ dS_k·h_k = −fwf·⟨S⟩_w`` (locked by tests).  ``T_frz`` is the
+    band-mean-salinity freezing point at the band mid-depth pressure via
+    the shared :func:`freezing_point_C` (NEMO evaluates eos_fzp on the
+    TBL average — the same construction).
+
+    Returns ``(dT_dt [°C/s], dS_dt [PSU/s], eta_dot [m/s])``; all zero
+    where ``fwf <= 0`` or the band has no wet overlap.
+    """
+    S = jnp.asarray(S)
+    dz = jnp.asarray(dz_live) * jnp.asarray(wet_cell)
+    fwf = jnp.maximum(jnp.asarray(fwf_kg_m2_s), 0.0)
+    zmin = jnp.asarray(zmin_m)[..., jnp.newaxis]
+    zmax = jnp.asarray(zmax_m)[..., jnp.newaxis]
+
+    # Interface depths (positive down) from the live thicknesses.
+    z_bot = jnp.cumsum(dz, axis=-1)
+    z_top = z_bot - dz
+    overlap = jnp.maximum(
+        jnp.minimum(z_bot, zmax) - jnp.maximum(z_top, zmin), 0.0)
+    h_band = jnp.sum(overlap, axis=-1, keepdims=True)
+    has_band = (h_band > 0.0) & (fwf[..., jnp.newaxis] > 0.0)
+    h_band_safe = jnp.where(h_band > 0.0, h_band, 1.0)
+    w = jnp.where(has_band, overlap / h_band_safe, 0.0)
+
+    # Band-mean salinity + band mid-depth → in-situ freezing point [°C].
+    S_band = jnp.sum(S * overlap, axis=-1, keepdims=True) / h_band_safe
+    z_cell_mid = 0.5 * (z_top + z_bot)
+    z_band_mid = jnp.sum(z_cell_mid * overlap, axis=-1,
+                         keepdims=True) / h_band_safe
+    T_frz = freezing_point_C(
+        S_band, ice_base_pressure_dbar(z_band_mid), config=config)
+
+    fwf3 = fwf[..., jnp.newaxis]
+    # Net into-ocean heat flux [W/m²]: heat content at T_frz MINUS latent.
+    q_net = fwf3 * (c_sw * T_frz - L_fus)
+    dz_safe = jnp.maximum(dz, 1.0e-10)
+    dT_dt = q_net * w / (rho_0 * c_sw * dz_safe)
+    dS_dt = -S * fwf3 * w / (rho_0 * dz_safe)
+    eta_dot = jnp.where(has_band[..., 0], fwf / rho_0, 0.0)
+    return dT_dt, dS_dt, eta_dot
+
+
+# ==============================================================================
 # Three-equation system (Holland & Jenkins 1999)
 # ==============================================================================
 

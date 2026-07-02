@@ -2349,6 +2349,17 @@ def main() -> int:
                         "ln_dm2dc, sbcdcy/Bernie 2007; ORCA1: .true.).  "
                         "Mean-preserving analytic modulation of the CORE-II "
                         "daily SW.  Host-loop only.")
+    p.add_argument("--isf", action="store_true",
+                   help="NEMO ISF 'spe' prescribed ice-shelf melt "
+                        "(ln_isfpar_mlt, cn_isfpar_mlt='spe'; ORCA1: on): "
+                        "monthly melt deposited over the [zmin,zmax] band "
+                        "with latent cooling + freezing-point heat content "
+                        "+ virtual-salt dilution + eta volume source.  "
+                        "Requires --isf-forcing-file.  Host-loop only.")
+    p.add_argument("--isf-forcing-file", type=str, default=None,
+                   help="NetCDF with sornfisf/sodepmin_isf/sodepmax_isf on "
+                        "the eORCA1 grid (the ORCA1 INPUTS "
+                        "runoff-icb_DaiTrenberth_Depoorter.nc).")
     p.add_argument("--iwm", action="store_true",
                    help="Internal wave-driven mixing (NEMO zdfiwm, de Lavergne "
                         "2020; ORCA1: ln_zdfiwm=.true.).  lat-lon/tripole only.")
@@ -3028,6 +3039,36 @@ def main() -> int:
         except Exception as _e:  # noqa: BLE001 — provenance best-effort
             print(f"[warn] visc_schedule sidecar not written: {_e}")
 
+    isf_forcing = None
+    if args.isf:
+        # NEMO ISF 'spe' prescribed melt: load the monthly Depoorter fields
+        # on the model tracer grid (eORCA1 passthrough on the tripole;
+        # nearest-wet + melt-total-preserving regrid elsewhere).
+        if app_grid_type not in ("tripole", "latlon"):
+            raise SystemExit(
+                "--isf is wired for tripole/latlon (host post-step apply); "
+                f"got {args.grid!r}")
+        if not args.isf_forcing_file:
+            raise SystemExit(
+                "--isf requires --isf-forcing-file (the NEMO "
+                "runoff-icb_DaiTrenberth_Depoorter.nc layout with sornfisf/"
+                "sodepmin_isf/sodepmax_isf)")
+        from legoesm.ocean.forcing.isf_spe import load_isf_spe_forcing
+        if app_grid_type == "tripole":
+            _isf_lat = np.degrees(np.asarray(grid.lat_T))
+            _isf_lon = np.degrees(np.asarray(grid.lon_T))
+        else:
+            _isf_lat = np.degrees(np.asarray(grid.lat))
+            _isf_lon = np.degrees(np.asarray(grid.lon))
+        isf_forcing = load_isf_spe_forcing(
+            args.isf_forcing_file, _isf_lat, _isf_lon,
+            land_mask=np.asarray(state.land_mask.data))
+        _isf_tot = [float((isf_forcing.fwf[m]
+                           * np.asarray(grid.area)).sum()) * 1e-9
+                    for m in range(12)]
+        print(f"[setup] ISF 'spe' melt loaded: monthly totals "
+              f"{min(_isf_tot):.3f}-{max(_isf_tot):.3f} mSv-scale "
+              f"(x1e6 kg/s), file={args.isf_forcing_file}")
     bbl_geom = None
     bbl_face_widths = None
     if args.bbl_adv:
@@ -3398,7 +3439,7 @@ def main() -> int:
         # (a pure momentum/heat tripole perf run, issue #354).
         if (args.emp_freshwater or args.runoff or args.sss_restore
                 or args.ice_albedo or args.ice_thermo or args.geothermal
-                or args.dm2dc):
+                or args.dm2dc or args.isf):
             raise SystemExit(
                 "[scan] --scan-block applies no surface salinity/albedo/ice forcing "
                 "or geothermal BC or diurnal SW (P - E / runoff / SSS restoring / "
@@ -3703,6 +3744,32 @@ def main() -> int:
                 _geo_cfg = _geo_cfg._replace(flux_wm2=args.geothermal_flux_wm2)
             state = apply_geothermal_step(
                 state, dz_live=_dz, wet_cell=_wet, dt=dt, config=_geo_cfg)
+        if isf_forcing is not None:
+            # NEMO ISF 'spe' prescribed melt (ln_isfpar_mlt, cn_isfpar_mlt=
+            # 'spe'): monthly Depoorter melt deposited over the per-column
+            # [zmin, zmax] band — latent cooling + melt heat content at the
+            # in-situ freezing point + virtual-salt dilution + eta volume
+            # source.  Host post-step apply, same geometry inputs as the
+            # geothermal BC above.
+            from legoesm.ocean.coupler.ice_shelf_apply import (
+                apply_isf_prescribed_melt_step,
+            )
+            from legoesm.ocean.vertical import compute_layer_thickness
+            _eta_arr = (state.eta.data if getattr(state, "eta", None)
+                        is not None
+                        else jnp.zeros_like(jnp.asarray(H_bathy)))
+            _dz_isf = compute_layer_thickness(
+                _eta_arr, jnp.asarray(H_bathy), z_coord)
+            _lm_isf = jnp.asarray(state.land_mask.data)[..., None] > 0.5
+            _wet_isf = ((_dz_isf > 1e-3) & _lm_isf).astype(_dz_isf.dtype)
+            _mi = _runoff_month_idx(step, dt)
+            state = apply_isf_prescribed_melt_step(
+                state,
+                fwf_kg_m2_s=jnp.asarray(isf_forcing.fwf[_mi]),
+                zmin_m=jnp.asarray(isf_forcing.zmin[_mi]),
+                zmax_m=jnp.asarray(isf_forcing.zmax[_mi]),
+                dz_live=_dz_isf, wet_cell=_wet_isf, dt=dt,
+                rho_0=float(model.config.rho_0))
         if bbl_geom is not None:
             # NEMO advective BBL (Campin-Goosse): dense shelf bottom water
             # descends the slope. Host post-step exchange, exactly tracer-

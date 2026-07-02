@@ -23,6 +23,10 @@ from __future__ import annotations
 
 import numpy as np
 
+from legoesm.ocean.forcing.curvilinear_regrid import (
+    NearestWetRegridder,
+    coords_match,
+)
 from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
     IWMForcing,
 )
@@ -31,14 +35,6 @@ _POWER_VARS = ("power_bot", "power_cri", "power_nsq", "power_sho")
 _SCALE_VARS = ("scale_bot", "scale_cri")
 # NEMO zdfiwm_init hard-coded pre-read decay-scale default [m]
 _SCALE_DEFAULT_M = 100.0
-
-
-def _unit_sphere(lon_deg, lat_deg):
-    lon = np.deg2rad(np.asarray(lon_deg, dtype=np.float64))
-    lat = np.deg2rad(np.asarray(lat_deg, dtype=np.float64))
-    return np.stack([np.cos(lat) * np.cos(lon),
-                     np.cos(lat) * np.sin(lon),
-                     np.sin(lat)], axis=-1)
 
 
 def read_iwm_file(path: str) -> dict:
@@ -108,18 +104,10 @@ def load_iwm_forcing(
         raise ValueError(
             f"lat_T {lat_T.shape} and lon_T {lon_T.shape} must match")
 
-    same_mesh = (
-        lat_T.shape == src_lat.shape
-        and float(np.max(np.abs(lat_T - src_lat))) < coord_match_tol_deg
-        and float(np.max(np.abs(
-            (lon_T - src_lon + 180.0) % 360.0 - 180.0))) < coord_match_tol_deg
-    )
-
-    if same_mesh:
+    if coords_match(src_lat, src_lon, lat_T, lon_T,
+                    tol_deg=coord_match_tol_deg):
         fields = {v: data[v] for v in _POWER_VARS + _SCALE_VARS}
     else:
-        from scipy.spatial import cKDTree
-
         # Wet source cells only (zero-power cells on land would bleed
         # zeros into coastal target cells; NEMO's own file is masked).
         src_wet = np.zeros(src_lat.shape, dtype=bool)
@@ -127,12 +115,8 @@ def load_iwm_forcing(
             src_wet |= data[v] > 0.0
         if not np.any(src_wet):
             raise ValueError(f"iwm forcing file {path!r} has no wet cells")
-        tree = cKDTree(_unit_sphere(src_lon[src_wet], src_lat[src_wet]))
-        _, idx = tree.query(
-            _unit_sphere(lon_T, lat_T).reshape(-1, 3), k=1)
-        fields = {}
-        for v in _POWER_VARS + _SCALE_VARS:
-            fields[v] = data[v][src_wet][idx].reshape(lat_T.shape)
+        regrid = NearestWetRegridder(src_lon, src_lat, src_wet, lon_T, lat_T)
+        fields = {v: regrid(data[v]) for v in _POWER_VARS + _SCALE_VARS}
         # Preserve each power map's global area integral (the TW totals).
         if source_area is None:
             src_w = np.cos(np.deg2rad(src_lat))
