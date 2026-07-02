@@ -744,6 +744,15 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
         q_c_upd = jnp.maximum(carry.q_c + dt * phys_out.dq_c_dt, 0.0)
         q_r_upd = jnp.maximum(carry.q_r + dt * phys_out.dq_r_dt, 0.0)
 
+        # Time-integrate radiative fluxes + lowest-level T (uses the
+        # PRE-sat-adjust T_upd, matching _single_step's accumulation point).
+        sw_net_sfc_accum = carry.sw_net_sfc_accum + held_new[1] * dt
+        lw_net_sfc_accum = carry.lw_net_sfc_accum + held_new[2] * dt
+        sw_up_toa_accum = carry.sw_up_toa_accum + held_new[3] * dt
+        lw_up_toa_accum = carry.lw_up_toa_accum + held_new[4] * dt
+        sw_down_toa_accum = carry.sw_down_toa_accum + held_new[5] * dt
+        t_low_accum = carry.t_low_accum + T_upd[..., -1] * dt
+
         # Saturation adjustment
         if do_sat_adjust:
             p_full = p_s_new[..., None] * sigma_full
@@ -787,6 +796,12 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             precip_accum=precip_accum,
             shflx_accum=carry.shflx_accum,
             lhflx_accum=carry.lhflx_accum,
+            sw_up_toa_accum=sw_up_toa_accum,
+            lw_up_toa_accum=lw_up_toa_accum,
+            sw_down_toa_accum=sw_down_toa_accum,
+            sw_net_sfc_accum=sw_net_sfc_accum,
+            lw_net_sfc_accum=lw_net_sfc_accum,
+            t_low_accum=t_low_accum,
             T_land=carry.T_land,
             # Stateful-physics carries (#413): replaced by the updated
             # values riding PhysicsOutput (None falls back to the input,

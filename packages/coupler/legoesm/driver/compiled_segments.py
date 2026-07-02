@@ -117,6 +117,29 @@ class SegmentCarry(NamedTuple):
         Accumulated sensible heat flux [W/m2 * s] over the segment.
     lhflx_accum : jax.Array
         Accumulated latent heat flux [W/m2 * s] over the segment.
+    sw_up_toa_accum, lw_up_toa_accum, sw_down_toa_accum : jax.Array
+        Time-integrated TOA radiative fluxes [W/m2 * s] over the segment
+        (sign conventions unchanged: ``*_up`` positive-up, ``*_down``
+        positive-down).  Each step adds ``held_flux * dt`` — a piecewise-
+        constant time integral at the radiation sub-cycle cadence — so
+        ``accum / segment_duration`` is the true segment-mean flux.
+        Motivation: CMOR Amon rsdt/rsut/rlut were previously written from
+        the segment-END instantaneous held fluxes, i.e. fixed-UTC snapshots
+        whose "monthly mean" carried a full day/night diurnal alias per
+        pixel (January rsdt: night hemisphere exactly 0, noon peak
+        ~1400 W/m2).  Reset to zero at every segment start, like
+        ``precip_accum``.
+    sw_net_sfc_accum, lw_net_sfc_accum : jax.Array
+        Time-integrated net surface radiative fluxes [W/m2 * s] over the
+        segment (same construction) so the energy-budget diagnostics see
+        segment-mean fluxes consistent with the TOA set.
+    t_low_accum : jax.Array
+        Time-integrated lowest-level air temperature [K * s] over the
+        segment; ``accum / segment_duration`` gives the segment-mean T_low
+        used for the CMOR ``tas`` field (previously a fixed-UTC snapshot
+        with a local-time bias of a few K over land).  Accumulated from the
+        post-physics temperature of each step (before the optional
+        saturation adjustment — an O(dt) lag, negligible over a segment).
     T_land : jax.Array or None
         Slab-land skin temperature [K].  ``None`` for ocean-only runs
         (the land tile is then inert).  Prognostic — advanced once per
@@ -166,6 +189,12 @@ class SegmentCarry(NamedTuple):
     precip_accum: jax.Array
     shflx_accum: jax.Array
     lhflx_accum: jax.Array
+    sw_up_toa_accum: jax.Array
+    lw_up_toa_accum: jax.Array
+    sw_down_toa_accum: jax.Array
+    sw_net_sfc_accum: jax.Array
+    lw_net_sfc_accum: jax.Array
+    t_low_accum: jax.Array
     T_land: jax.Array = None
     q_i: jax.Array = None
     q_s: jax.Array = None
@@ -211,6 +240,9 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                target_moisture=None, target_mass=None,
                max_cfl=None, precip_accum=None,
                shflx_accum=None, lhflx_accum=None,
+               sw_up_toa_accum=None, lw_up_toa_accum=None,
+               sw_down_toa_accum=None, sw_net_sfc_accum=None,
+               lw_net_sfc_accum=None, t_low_accum=None,
                T_land=None, q_i=None, q_s=None, q_g=None,
                N_c=None, N_r=None, N_i=None,
                tke=None, qke=None, gwd_spectrum=None,
@@ -254,6 +286,20 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         shflx_accum = jnp.zeros_like(state.p_s.data)
     if lhflx_accum is None:
         lhflx_accum = jnp.zeros_like(state.p_s.data)
+    # Segment-mean flux / T_low accumulators (CMOR diurnal-alias fix):
+    # always real arrays, reset to zero at every segment start.
+    if sw_up_toa_accum is None:
+        sw_up_toa_accum = jnp.zeros_like(state.p_s.data)
+    if lw_up_toa_accum is None:
+        lw_up_toa_accum = jnp.zeros_like(state.p_s.data)
+    if sw_down_toa_accum is None:
+        sw_down_toa_accum = jnp.zeros_like(state.p_s.data)
+    if sw_net_sfc_accum is None:
+        sw_net_sfc_accum = jnp.zeros_like(state.p_s.data)
+    if lw_net_sfc_accum is None:
+        lw_net_sfc_accum = jnp.zeros_like(state.p_s.data)
+    if t_low_accum is None:
+        t_low_accum = jnp.zeros_like(state.p_s.data)
     # Lagged convective-cloud precip: always a real array (like precip_accum /
     # T_land) so the hot loop has no None branch; read only when the convective
     # cloud feature is enabled.  Zeros at t=0 ⇒ no convective cloud on step 0.
@@ -295,6 +341,12 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         precip_accum=_promote(precip_accum, storage),
         shflx_accum=_promote(shflx_accum, storage),
         lhflx_accum=_promote(lhflx_accum, storage),
+        sw_up_toa_accum=_promote(sw_up_toa_accum, storage),
+        lw_up_toa_accum=_promote(lw_up_toa_accum, storage),
+        sw_down_toa_accum=_promote(sw_down_toa_accum, storage),
+        sw_net_sfc_accum=_promote(sw_net_sfc_accum, storage),
+        lw_net_sfc_accum=_promote(lw_net_sfc_accum, storage),
+        t_low_accum=_promote(t_low_accum, storage),
         T_land=_promote(T_land, storage),
         # Double-moment tracers: kept None for warm-rain runs (identical legacy
         # carry); promoted to storage dtype only when the caller supplies them.
@@ -334,6 +386,14 @@ def unpack_carry(carry, state_template):
     -------
     state, q_v, q_c, q_r, conv_prog, held_tuple, step_index, precip_accum,
     shflx_accum, lhflx_accum
+
+    Notes
+    -----
+    The segment-mean radiation / T_low accumulators (``sw_up_toa_accum``,
+    ``lw_up_toa_accum``, ``sw_down_toa_accum``, ``sw_net_sfc_accum``,
+    ``lw_net_sfc_accum``, ``t_low_accum``) are NOT part of this tuple —
+    read them directly off the carry (like ``q_i`` / ``tke``) to keep the
+    long-standing 10-tuple signature stable.
     """
     new_state = state_template._replace(
         u=state_template.u.replace(data=carry.u),
@@ -1114,6 +1174,23 @@ def build_segment_fn(
                 shflx_accum = carry.shflx_accum.at[_ofi].add(_sh * _dt)
                 lhflx_accum = carry.lhflx_accum.at[_ofi].add(_lh * _dt)
 
+                # Radiative fluxes + lowest-level T: time-integrate at owned
+                # indices (segment-mean diagnostics; CMOR diurnal-alias fix).
+                # held_new_local order: (dT_rad, sw_net_sfc, lw_net_sfc,
+                # sw_up_toa, lw_up_toa, sw_down_toa) — signs unchanged.
+                sw_net_sfc_accum = carry.sw_net_sfc_accum.at[_ofi].add(
+                    held_new_local[1] * _dt)
+                lw_net_sfc_accum = carry.lw_net_sfc_accum.at[_ofi].add(
+                    held_new_local[2] * _dt)
+                sw_up_toa_accum = carry.sw_up_toa_accum.at[_ofi].add(
+                    held_new_local[3] * _dt)
+                lw_up_toa_accum = carry.lw_up_toa_accum.at[_ofi].add(
+                    held_new_local[4] * _dt)
+                sw_down_toa_accum = carry.sw_down_toa_accum.at[_ofi].add(
+                    held_new_local[5] * _dt)
+                t_low_accum = carry.t_low_accum.at[_ofi].add(
+                    T_upd[_ofi][..., -1] * _dt)
+
                 # Slab-land temperature: update at owned indices
                 T_land_new = (
                     carry.T_land.at[_ofi].set(_T_land_local)
@@ -1230,6 +1307,17 @@ def build_segment_fn(
                 shflx_accum = carry.shflx_accum + _sh * _dt
                 lhflx_accum = carry.lhflx_accum + _lh * _dt
 
+                # --- Time-integrate radiative fluxes + lowest-level T ---
+                # (segment-mean diagnostics; CMOR diurnal-alias fix).
+                # held_new order: (dT_rad, sw_net_sfc, lw_net_sfc,
+                # sw_up_toa, lw_up_toa, sw_down_toa) — signs unchanged.
+                sw_net_sfc_accum = carry.sw_net_sfc_accum + held_new[1] * _dt
+                lw_net_sfc_accum = carry.lw_net_sfc_accum + held_new[2] * _dt
+                sw_up_toa_accum = carry.sw_up_toa_accum + held_new[3] * _dt
+                lw_up_toa_accum = carry.lw_up_toa_accum + held_new[4] * _dt
+                sw_down_toa_accum = carry.sw_down_toa_accum + held_new[5] * _dt
+                t_low_accum = carry.t_low_accum + T_upd[..., -1] * _dt
+
             # --- Saturation adjustment ---
             if do_sat_adjust:
                 p_full = p_s_new[..., None] * sigma_full
@@ -1294,6 +1382,17 @@ def build_segment_fn(
                 precip_accum=_match_dtype(precip_accum, carry.precip_accum),
                 shflx_accum=_match_dtype(shflx_accum, carry.shflx_accum),
                 lhflx_accum=_match_dtype(lhflx_accum, carry.lhflx_accum),
+                sw_up_toa_accum=_match_dtype(
+                    sw_up_toa_accum, carry.sw_up_toa_accum),
+                lw_up_toa_accum=_match_dtype(
+                    lw_up_toa_accum, carry.lw_up_toa_accum),
+                sw_down_toa_accum=_match_dtype(
+                    sw_down_toa_accum, carry.sw_down_toa_accum),
+                sw_net_sfc_accum=_match_dtype(
+                    sw_net_sfc_accum, carry.sw_net_sfc_accum),
+                lw_net_sfc_accum=_match_dtype(
+                    lw_net_sfc_accum, carry.lw_net_sfc_accum),
+                t_low_accum=_match_dtype(t_low_accum, carry.t_low_accum),
                 T_land=(None if carry.T_land is None
                         else _match_dtype(T_land_new, carry.T_land)),
                 q_i=(None if carry.q_i is None
