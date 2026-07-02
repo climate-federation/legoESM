@@ -343,8 +343,13 @@ class CoupledESMDriver:
             # config does not trip the model's "no additive A_h/C_smag with a
             # closure scheme" validation (codex LOW).
             lateral_friction_scheme="none",
-            C_smag_lap=3.0,
-            smag_cfl_safety=0.125,
+            # C_smag_lap / smag_cfl_safety were nested into
+            # LateralViscosityConfig (#661); nest explicitly like barotropic
+            # above.
+            lateral_viscosity=_oc.lateral_viscosity._replace(
+                C_smag_lap=3.0,
+                smag_cfl_safety=0.125,
+            ),
         )
 
         if cfg.ocean_dt_s <= 0.0:
