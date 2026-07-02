@@ -29,6 +29,7 @@ Physics sequence each time step:
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -579,6 +580,21 @@ def step_multilayer_land(
         # Land tile does not exchange salt with the ocean directly.
         salt_flux=jnp.zeros(ncol),
     )
+
+    # Carry-dtype stability: under JAX_ENABLE_X64=1 the soil-thermal / Richards
+    # solves promote intermediates to float64, so a new_state leaf (T_soil,
+    # theta_soil, snow_*) can come out float64 while the carried leaf is the
+    # storage dtype (e.g. float32).  lax.scan REQUIRES carry input/output dtypes to
+    # match PER LEAF, so cast every new_state leaf back to the corresponding
+    # INPUT-state leaf's dtype (the compute stays float64; only the STORED carry is
+    # coerced, like the atmospheric state).  The response (fluxes to the atmosphere)
+    # is NOT cast — it keeps its working precision.  is_leaf treats None as a leaf
+    # so an optional field (surface_water=None) is paired safely, not descended.
+    new_state = jax.tree.map(
+        lambda new, ref: (new.astype(ref.dtype)
+                          if hasattr(ref, "dtype") and hasattr(new, "astype")
+                          else new),
+        new_state, state, is_leaf=lambda x: x is None)
 
     return new_state, response, carbon_state_new
 

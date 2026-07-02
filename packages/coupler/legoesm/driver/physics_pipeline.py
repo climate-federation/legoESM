@@ -1737,7 +1737,10 @@ class PhysicsPipeline:
             # not yet the BL latent flux directly.  Full coupling = thread
             # q_sfc_land_col + z0_land_col into _tiled_surface_flux; deferred to a
             # validated follow-up (needs the CLM surfdata staged to run end-to-end).
-            T_land_new = ad.unflatten_2d(T_sfc_ml_col)
+            # Cast to the carried T_land dtype: the multilayer response T_sfc is at
+            # working precision (float64 under x64) but T_land rides the SegmentCarry
+            # at storage dtype (float32) — a lax.scan carry needs matching dtypes.
+            T_land_new = ad.unflatten_2d(T_sfc_ml_col).astype(T_land.dtype)
         # --- Slab-land skin temperature update (semi-implicit SEB) ---
         # ``beta_land`` (None unless the soil-water bucket is active)
         # soil-moisture-limits the land latent flux, so a dry bucket warms
