@@ -190,7 +190,11 @@ def _write_run_sh(path: Path, config_path: Path, output_dir: Path,
         "#   bash run.sh              # local\n\n"
         f"{env_block}"
         "set -euo pipefail\n"
-        'cd "$(dirname "$0")"\n'
+        "# PBS copies the batch script to a spool dir before running, so\n"
+        "# `dirname $0` points to the spool — not the submit dir.  Use\n"
+        "# PBS_O_WORKDIR (set by PBS to the qsub directory) when available;\n"
+        "# fall back to script's own dir for a plain `bash run.sh`.\n"
+        'cd "${PBS_O_WORKDIR:-$(dirname "$0")}"\n'
         "export JAX_ENABLE_X64=1\n"
         f'PYTHON_BIN="${{LEGOESM_PYTHON:-{sys.executable}}}"\n'
         f'"$PYTHON_BIN" "{driver}" \\\n'

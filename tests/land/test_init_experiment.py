@@ -222,6 +222,27 @@ def test_smoke_4deg_template_validates_and_inits(tmp_path):
     assert tape_names == ["monthly", "monthly_state"]
 
 
+def test_run_sh_uses_pbs_o_workdir_when_set(tmp_path):
+    """PBS copies the batch script to a spool dir before executing, so
+    `dirname $0` no longer points at the experiment directory.  The generated
+    run.sh must use $PBS_O_WORKDIR (which PBS sets to the qsub directory)
+    when it is set, and fall back to `dirname` only for local bash runs."""
+    sd = _write_smoke_surfdata(tmp_path)
+    out = tmp_path / "expt"
+    _run_init([
+        "biophysics/smoke_test",
+        "--name", "workdir_test",
+        "--output-dir", str(out),
+        "--machine", "derecho",
+        "-o", f"surfdata.path={sd}",
+    ])
+    run_sh = (out / "run.sh").read_text()
+    # $PBS_O_WORKDIR must be referenced with :-fallback to dirname $0
+    assert "cd \"${PBS_O_WORKDIR:-$(dirname \"$0\")}\"" in run_sh
+    # Naive dirname-only form must NOT appear (would silently break on PBS)
+    assert "cd \"$(dirname \"$0\")\"\n" not in run_sh
+
+
 def test_init_dry_run_writes_nothing(tmp_path, capsys):
     sd = _write_smoke_surfdata(tmp_path)
     out = tmp_path / "expt"
