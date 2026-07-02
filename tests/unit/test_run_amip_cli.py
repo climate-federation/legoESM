@@ -1141,6 +1141,32 @@ def test_config_yaml_explicit_cli_flag_overrides_file():
     assert cfg.convection == "bechtold"
 
 
+def test_params_flag_parses():
+    parser = build_arg_parser()
+    args = parser.parse_args(_AMIP_DUMMY_PATHS + ["--params", "x.yaml"])
+    assert args.params == "x.yaml"
+
+
+def test_params_calibration_applies_to_atm_experimentconfig(tmp_path):
+    """A --params calibration entry (registry qualified name) applies to the
+    flattened ExperimentConfig scalar via the atm scalar-param map — the same
+    path run_amip.main() takes (issue #691)."""
+    from legoesm.driver.run_config_yaml import (
+        apply_params_to_config,
+        build_atm_scalar_param_map,
+        load_params_config,
+    )
+    parser = build_arg_parser()
+    cfg = build_config_from_args(
+        _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser))
+    p = tmp_path / "params.yaml"
+    p.write_text("atm.clouds.CloudConfig.q_c_diagnostic: 3.0e-4\n")
+    out = apply_params_to_config(
+        cfg, load_params_config(str(p)), driver="run_amip",
+        scalar_param_map=build_atm_scalar_param_map())
+    assert out.cloud_q_c_diagnostic == 3.0e-4
+
+
 def test_aimip_louis_preserves_resolved_surface_scheme():
     """The AIMIP Louis injection must KEEP the run-resolved surface bulk_scheme +
     gustiness (coare3/300) rather than reverting to to_louis_config's default

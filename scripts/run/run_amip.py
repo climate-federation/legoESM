@@ -102,6 +102,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "overrides it. Keys are run_amip argument dests; an "
                              "unknown key is a hard error (no silent typo'd "
                              "override).")
+    parser.add_argument("--params", default=None,
+                        help="YAML calibration file of tuned parameters keyed by "
+                             "param_collector qualified name 'scheme_key.field' "
+                             "(e.g. atm.clouds.CloudConfig.q_c_diagnostic); "
+                             "validated against __param_spec__ bounds and applied "
+                             "to the flattened atmosphere ExperimentConfig scalar "
+                             "fields. Applied after --config/CLI. (issue #691)")
 
     # Forcing
     parser.add_argument("--dataset", type=str, default="analytical",
@@ -1574,6 +1581,17 @@ def main(argv: list[str] | None = None):
         pass
 
     config = build_config_from_args(args)
+    # Apply the --params calibration layer to the flattened atmosphere
+    # ExperimentConfig scalar fields (issue #691).
+    if getattr(args, "params", None):
+        from legoesm.driver.run_config_yaml import (
+            apply_params_to_config,
+            build_atm_scalar_param_map,
+            load_params_config,
+        )
+        config = apply_params_to_config(
+            config, load_params_config(args.params), driver="run_amip",
+            scalar_param_map=build_atm_scalar_param_map())
 
     from legoesm.driver.model_driver import ModelDriver
 
