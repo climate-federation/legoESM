@@ -110,6 +110,11 @@ def main(argv=None) -> int:
                         "[days] (cs_spmd step 5b gate: the scalar "
                         "SPMD-global collect must run and process 0 must "
                         "write the diagnostics file at finalize).")
+    p.add_argument("--full-collect", action="store_true",
+                   help="Force the FULL diagnostics collect "
+                        "(diagnostics_perf_mode='never'; cs_spmd step 5c "
+                        "gate: the sharded fields are gathered to host "
+                        "replicas on every process before collect()).")
     p.add_argument("--rtol", type=float, default=1e-9)
     p.add_argument("--atol", type=float, default=1e-9)
     args = p.parse_args(argv)
@@ -142,6 +147,9 @@ def main(argv=None) -> int:
     if args.diag_days > 0:
         cfg = cfg._replace(output=cfg.output._replace(
             diag_days=args.diag_days))
+    if args.full_collect:
+        cfg = cfg._replace(output=cfg.output._replace(
+            diagnostics_perf_mode="never"))
     if args.mode == "serial" and n_procs > 1:
         # Every rank would race/clobber the same --out (codex Medium).
         print("ERROR: --mode serial must run single-process "
