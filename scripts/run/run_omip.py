@@ -2456,7 +2456,8 @@ def _check_finite(state, grid_type):
 # ===========================================================================
 
 
-def _save_restart(state, day, step, output_dir, ice_state=None):
+def _save_restart(state, day, step, output_dir, ice_state=None,
+                  grid_type="latlon"):
     """Save a state restart in the global-overturning npz format.
 
     Mirrors ``scripts/run/global_overturning/run_global_overturning_*``
@@ -2476,12 +2477,23 @@ def _save_restart(state, day, step, output_dir, ice_state=None):
         fields are persisted under ``ice_<field>`` keys so a checkpoint/resume
         does NOT silently reset the ice pack to the zero cold start.  ``None``
         (default, no sea ice) writes the legacy ocean-only restart unchanged.
+    grid_type : str
+        The run's grid selection (one of ``GRID_TYPES``), stored in the npz
+        for provenance only — ``_load_restart`` reconstructs the pytree from
+        a template state and never reads it.  Historically this was
+        hardcoded to ``"latlon"``, mislabeling MPAS/tripole checkpoints;
+        ``_run_omip_loop`` now threads the actual grid type.
     """
+    if grid_type not in GRID_TYPES:
+        raise ValueError(
+            f"Unknown grid_type {grid_type!r} for restart provenance; "
+            f"expected one of {GRID_TYPES}."
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "step": int(step),
         "time_days": float(day),
-        "grid_type": "latlon",
+        "grid_type": grid_type,
     }
     for f in state._fields:
         obj = getattr(state, f)
@@ -2666,7 +2678,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         ):
             return
         fname = _save_restart(state, day, step, checkpoint_dir,
-                              ice_state=ice_state)
+                              ice_state=ice_state, grid_type=grid_type)
         if _snapshot_fn is not None:
             try:
                 _snapshot_fn(fname)
@@ -2898,7 +2910,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
 
             if (steps_per_ckpt is not None and
                     (step % steps_per_ckpt == 0 or step == n_steps)):
-                fname = _save_restart(state, day, step, checkpoint_dir, ice_state=ice_state)
+                fname = _save_restart(state, day, step, checkpoint_dir,
+                                      ice_state=ice_state, grid_type=grid_type)
                 if _snapshot_fn is not None:
                     try:
                         _snapshot_fn(fname)
@@ -2951,7 +2964,9 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 )
                 if (steps_per_ckpt is not None and
                         (step % steps_per_ckpt == 0 or step == n_steps)):
-                    fname = _save_restart(state, day, step, checkpoint_dir, ice_state=ice_state)
+                    fname = _save_restart(state, day, step, checkpoint_dir,
+                                          ice_state=ice_state,
+                                          grid_type=grid_type)
                     if _snapshot_fn is not None:
                         try:
                             _snapshot_fn(fname)
@@ -3075,7 +3090,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             steps_per_ckpt = max(1, int(round(checkpoint_days * 86400.0 / dt)))
             if step % steps_per_ckpt == 0 or step == n_steps:
                 fname = _save_restart(state, day_now, step, checkpoint_dir,
-                                      ice_state=ice_state)
+                                      ice_state=ice_state, grid_type=grid_type)
                 # Auto-generate snapshot plot alongside the restart.
                 if _snapshot_fn is not None:
                     try:
