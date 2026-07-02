@@ -2467,7 +2467,11 @@ def _save_restart(state, day, step, output_dir, ice_state=None):
     def _write(fname=fname, payload=payload):
         try:
             tmp = fname.with_name(fname.name + ".tmp")
-            np.savez_compressed(tmp, **payload)
+            # Pass an OPEN file handle: np.savez_compressed APPENDS ".npz"
+            # to a path that does not already end in it, which would write
+            # "<name>.npz.tmp.npz" and break the atomic rename.
+            with open(tmp, "wb") as fh:
+                np.savez_compressed(fh, **payload)
             os.replace(tmp, fname)
         except BaseException as e:  # surfaced via _join_restart_writer
             with _RESTART_WRITER["lock"]:
