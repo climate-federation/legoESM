@@ -3204,10 +3204,19 @@ class ModelDriver:
 
     def _gather_spmd_tree_to_host(self, tree):
         """Gather every non-fully-addressable jax.Array leaf of *tree* to a
-        host-replicated numpy array (multi-controller SPMD; collective —
-        EVERY process must call this with the same tree).  Fully-addressable
-        leaves and non-array leaves pass through unchanged; pytree structure
-        (Fields, dicts, NamedTuples) is preserved."""
+        process-local REPLICATED jax array (multi-controller SPMD;
+        collective — EVERY process must call this with the same tree).
+        Fully-addressable leaves and non-array leaves pass through
+        unchanged; pytree structure (Fields, dicts, NamedTuples) is
+        preserved.
+
+        The gathered leaf is re-wrapped ``jnp.asarray`` (NOT left as
+        numpy): downstream consumers include jnp/``lax.scan`` code (the
+        energy tracker inside the full diagnostics ``collect()`` indexes
+        with traced integers — a numpy leaf there raises
+        ``TracerArrayConversionError``, smoke job 8687797) as well as
+        plain ``np.asarray`` writers, and a single-device jax array
+        serves both."""
         if tree is None:
             return None
         import numpy as _np
@@ -3215,7 +3224,8 @@ class ModelDriver:
 
         def _leaf(x):
             if isinstance(x, jax.Array) and not x.is_fully_addressable:
-                return _np.asarray(_mhu.process_allgather(x, tiled=True))
+                return jnp.asarray(
+                    _np.asarray(_mhu.process_allgather(x, tiled=True)))
             return x
 
         return jax.tree_util.tree_map(_leaf, tree)
