@@ -291,8 +291,14 @@ def _build_test_matrix() -> list[TestCase]:
         # tests/test_cases/colliding_modons.py but their non-rotating run
         # paths are not yet wired (follow-up).
         if g in ("cubed_sphere", "latlon"):
+            # Full duration: cube runs the paper's ~100-day return-to-IC;
+            # latlon caps at 20 days — its pole-CFL dt (~13.7 s at 72x144)
+            # would make 100 days ~631k host-loop steps (codex round-12
+            # Medium), and the collision/exchange phase this case gates
+            # happens well inside 20 days.
             matrix.append(TestCase(
-                "shallow_water", "colliding_modons", g, res[g], "none", 100, 1,
+                "shallow_water", "colliding_modons", g, res[g], "none",
+                100 if g == "cubed_sphere" else 20, 1,
                 {"test_num": 8}))
 
     # --- Hydrostatic: all grids, sigma + hybrid ---
