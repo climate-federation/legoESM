@@ -81,10 +81,14 @@ def test_adapter_matches_serial_default_config():
     # field scales (T: 1 ulp = 2^-15 at ~250 K; p_s: 2 ulps at ~1e5 Pa)
     # arising from accumulation-order rounding under the f32 storage
     # policy, with the wind fields responding through the PGF (~1e-5 abs).
-    # These are rounding-point equivalences, not physics.  Bounds = ~10x
-    # the measured 3-step drift; a REAL term regression (e.g. the sponge,
-    # measured 5.6e-6 in u before it was added) exceeds them.
-    _atol = {"u": 5e-5, "v": 5e-5, "T": 3e-4, "p_s": 0.2}
+    # These are rounding-point equivalences, not physics.  Bounds = ~2-3x
+    # the measured 3-step rounding drift.  HONEST catch envelope: a term
+    # regression at the 2e-5-abs class (3 steps) fails here; FINER term
+    # regressions (the sponge class measured 5.6e-6 @3 steps) are below
+    # this gate's floor and are covered instead by the envelope refusals
+    # in make_tiled_cc_step + the bit-identity stage gates
+    # (test_tiled_fv3_hydrostatic_step) which run above f32 rounding.
+    _atol = {"u": 2e-5, "v": 2e-5, "T": 1e-4, "p_s": 0.06}
     for name in ("u", "v", "T", "p_s"):
         a = np.asarray(getattr(out, name).data)
         b = np.asarray(getattr(ref, name).data)
@@ -101,12 +105,28 @@ def test_adapter_matches_serial_default_config():
     ("damp_v", 0.02, "damp_v"),
     ("sponge_implicit", True, "implicit sponge"),
     ("implicit_grav_wave_damping", 0.5, "gravity-wave damping"),
+    ("time_integrator", "ssp_rk54", "time_integrator"),
+    ("div_damp_coeff", 1e6, "divergence damping"),
+    ("hyperdiff_coeff", 1e15, "hyperdiffusion"),
 ])
 def test_adapter_refuses_out_of_envelope(field, value, match):
     mesh = _mesh()
     model, _ = _model_and_state()
     model.config = model.config._replace(**{field: value})
     with pytest.raises(NotImplementedError, match=match):
+        make_tiled_cc_step(model, mesh, kt=KT, dt=DT)
+
+
+def test_adapter_refuses_inner_mass_fixer():
+    """The DEFAULT config (use_conservation_fixer=True, fix_mass=True)
+    must refuse loudly: the segment driver externalizes the fixer; a
+    direct default-config caller would silently lose the per-step
+    fix_ps_mass (codex round-13 HIGH #1)."""
+    mesh = _mesh()
+    model, _ = _model_and_state()
+    model.config = model.config._replace(
+        use_conservation_fixer=True, fix_mass=True)
+    with pytest.raises(NotImplementedError, match="mass fixer"):
         make_tiled_cc_step(model, mesh, kt=KT, dt=DT)
 
 

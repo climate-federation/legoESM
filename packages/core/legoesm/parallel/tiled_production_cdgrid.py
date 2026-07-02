@@ -1769,7 +1769,9 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
 
 def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
                                                   kt: int, nlev: int, *,
-                                                  p_floor: float):
+                                                  p_floor: float,
+                                                  sponge_sigma: float = 0.0,
+                                                  sponge_tau_sec: float = 0.0):
     """Full tiled ``fv3_hydrostatic_tendencies`` on a ``(6, kt, kt)`` mesh.
 
     Returns ``stage(u_d, v_d, T, p_s, phis) -> (du_d_dt, dv_d_dt, dT_dt,
@@ -1839,7 +1841,9 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
 
     # Single source of the tendency numerics (shared with the tiled STEP).
     _tile_tendency, _slice_metrics = _build_hydro_tile_tendency_fns(
-        coord, cdgrid, nl, nlev, p_floor, scalar_body, vector_body)
+        coord, cdgrid, nl, nlev, p_floor, scalar_body, vector_body,
+        sponge_rate=_sponge_rate_from_config(coord, sponge_sigma,
+                                             sponge_tau_sec))
 
     @partial(shard_map, mesh=mesh,
              in_specs=(fw, fw, fw, fo, fo)          # u_d, v_d, T, p_s, phis

@@ -93,16 +93,46 @@ def make_tiled_cc_step(model, mesh, kt: int, dt: float):
     # base cut must fail LOUDLY, never silently integrate different
     # numerics).  Defaults are all inside the envelope.
     _refuse(getattr(cdgrid.base, "duogrid", None) is not None, "duogrid")
-    _refuse(getattr(cfg, "damp_v", 0.0) > 0.0, "damp_v del-6 damping")
-    _refuse(getattr(cfg, "damp_v_d_con", 0.0) > 0.0, "damp_v_d_con heating")
-    _refuse(getattr(cfg, "div_damp_d_con", 0.0) > 0.0, "div_damp_d_con")
-    _refuse(getattr(cfg, "corner_div_damp_d_con", 0.0) > 0.0,
-            "corner_div_damp_d_con")
+    # The serial step honours config.time_integrator; the tiled stage is
+    # hardwired SSP-RK3 — only the names that dispatch to the SAME
+    # integrator are accepted (codex round-13 HIGH #2).
+    _refuse(getattr(cfg, "time_integrator", "ssp_rk3")
+            not in ("ssp_rk3", "ssp3", "rk3"),
+            f"time_integrator={getattr(cfg, 'time_integrator', None)!r} "
+            "(tiled step is SSP-RK3)")
+    # The inner mass fixer: the compiled-segment driver externalizes it
+    # (inner model runs fix_mass=False); a DIRECT default-config caller
+    # would silently lose the per-step fix_ps_mass (codex round-13 HIGH
+    # #1) — refuse so the caller must disable it explicitly.
+    _refuse(bool(getattr(cfg, "use_conservation_fixer", False))
+            and bool(getattr(cfg, "fix_mass", False)),
+            "the inner mass fixer (use_conservation_fixer+fix_mass; the "
+            "segment driver applies the target-anchored fixer OUTSIDE the "
+            "step — pass a config with fix_mass=False)")
+    # Every non-default tendency/damping term the tiled base cut omits
+    # (codex round-13 HIGH #3 — the tiled module's own scope note).
+    for _f, _lbl in (
+        ("damp_v", "damp_v del-6 damping"),
+        ("damp_v_d_con", "damp_v_d_con heating"),
+        ("div_damp_d_con", "div_damp_d_con"),
+        ("corner_div_damp_d_con", "corner_div_damp_d_con"),
+        ("div_damp_coeff", "divergence damping"),
+        ("corner_div_damp_d2_bg", "corner div damping (d2)"),
+        ("corner_div_damp_d4_bg", "corner div damping (d4)"),
+        ("A_h", "Laplacian viscosity A_h"),
+        ("smagorinsky_cs", "Smagorinsky viscosity"),
+        ("hyperdiff_coeff", "hyperdiffusion"),
+        ("hyperdiff_ps_coeff", "p_s hyperdiffusion"),
+        ("T_diss_coeff", "T dissipation"),
+        ("implicit_grav_wave_damping",
+         "implicit gravity-wave damping (the p_s damp + p_floor clamp "
+         "post-step)"),
+    ):
+        _refuse(getattr(cfg, _f, 0.0) > 0.0, _lbl)
     _refuse(bool(getattr(cfg, "sponge_implicit", False)),
             "the implicit sponge")
-    _refuse(getattr(cfg, "implicit_grav_wave_damping", 0.0) > 0.0,
-            "implicit gravity-wave damping (the p_s damp + p_floor clamp "
-            "post-step)")
+    _refuse(bool(getattr(cfg, "use_fv3_a2b_zeta_corner", False)),
+            "use_fv3_a2b_zeta_corner")
 
     n = int(model.grid.n)
     nlev = int(model.sigma_coord.n_levels)
@@ -116,14 +146,26 @@ def make_tiled_cc_step(model, mesh, kt: int, dt: float):
         sponge_tau_sec=float(getattr(cfg, "sponge_tau_sec", 0.0)),
     )
 
+    from legoesm.core.precision import cast_pytree
+
     def step(state):
         # Entry: the SAME rotation-aware cc→corner vector interp the serial
         # _step_cell_centre uses (a scalar interp would re-inject the
-        # cube-edge vorticity imprint).
+        # cube-edge vorticity imprint).  Runs in the STORAGE dtype, exactly
+        # like serial (the cast happens inside _step_fv3, i.e. AFTER this
+        # conversion).
         u_d, v_d = center_to_dgrid_vector(
             state.u.data, state.v.data, cdgrid)
-        u_d2, v_d2, T2, ps2 = tiled(
-            u_d, v_d, state.T.data, state.p_s.data, state.phis.data)
+        # Mirror the serial _step_fv3 entry cast EXACTLY: it casts the
+        # integrated state to the COMPUTE dtype before the RK3 core
+        # (primitive_eq_cdgrid:1378, cast_pytree(state, None, "compute")).
+        # Feeding the storage dtype (f64 under x64) into the tiled core
+        # instead accumulated a pure precision drift vs serial (~5.6e-6
+        # rel u over 3 steps, jobs 8689100/8693550).
+        u_d, v_d, T_in, ps_in, phis_in = cast_pytree(
+            (u_d, v_d, state.T.data, state.p_s.data, state.phis.data),
+            None, "compute")
+        u_d2, v_d2, T2, ps2 = tiled(u_d, v_d, T_in, ps_in, phis_in)
         # The tiled corner outputs carry the duplicated shared tile face
         # ((F, kt*(nl+1), kt*(nl+1), nlev)) — reassemble to true global
         # corners before the serial exit conversion.  cc outputs (T, p_s)
