@@ -112,6 +112,17 @@ def main():
     lon2, lat2 = np.meshgrid(lon1, lat1)
     g = lambda v: _to_grid(v, place, nlat, nlon)
 
+    # SWAP the albedo baseline to the ACTUAL CLM albedo (surfdata SOIL_COLOR -> CLM soil
+    # table + PCT_NAT_PFT -> CLM5 canopy albedos + snow climatology), NOT the legoESM
+    # model run with CLM params.  The actual-CLM field is annual-only, so the albedo row
+    # is annotated with the ANNUAL-MEAN spatial RMSE (both baseline and tuned) for a like-
+    # for-like comparison; the skin-T row keeps the space-time (monthly) RMSE.
+    from scripts.plot.plot_actual_clm_albedo import actual_clm_albedo
+    _, _, _, clm_ann, _, _, _ = actual_clm_albedo(args.npz)
+    A_def = clm_ann[place]
+    ann = lambda f: float(np.sqrt(np.sum(w * (f - A_era) ** 2) / np.sum(w)))
+    rmse[("A", 1)] = ann(A_def); rmse[("A", 2)] = ann(A_tun)
+
     # rows: (name, unit, cmap, (vmin,vmax), ERA5, default, tuned)
     rows = [
         ("skin temperature", "K", "turbo", (240, 305), T_era, T_def, T_tun),
@@ -121,8 +132,9 @@ def main():
     fig, axes = plt.subplots(2, 3, figsize=(15, 6.6), subplot_kw={"projection": proj})
     labels = "abcdefghi"
     var_of = {0: "T", 1: "A"}
+    mid_title = {0: "CLM5 default params", 1: "actual CLM (surfdata)"}
     for r, (name, unit, cmap, (vmn, vmx), era, dflt, tun) in enumerate(rows):
-        panels = [("ERA5", era), ("CLM5 default", dflt), ("tuned (this work)", tun)]
+        panels = [("ERA5", era), (mid_title[r], dflt), ("tuned (this work)", tun)]
         for c, (title, field) in enumerate(panels):
             ax = axes[r, c]
             fld = g(field)
@@ -133,8 +145,9 @@ def main():
             ax.set_global()
             u = f" [{unit}]" if unit else ""
             ttl = f"({labels[r * 3 + c]}) {title}"
-            if c > 0:                        # space-time RMSE vs ERA5 for the two models
-                ttl += f"   RMSE {rmse[(var_of[r], c)]:.2f}{(' K' if r == 0 else '')}"
+            if c > 0:                        # RMSE vs ERA5 (skin-T space-time; albedo annual)
+                val = rmse[(var_of[r], c)]
+                ttl += (f"   RMSE {val:.2f} K" if r == 0 else f"   RMSE {val:.3f}")
             ax.set_title(ttl, fontsize=10)
             if c == 2:
                 cb = fig.colorbar(m, ax=axes[r, :], fraction=0.018, pad=0.02,
