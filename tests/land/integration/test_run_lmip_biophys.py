@@ -105,6 +105,35 @@ def test_build_model_times_synthetic_starts_at_zero():
     assert t2[0] == 10.0 * 86400.0                           # real forcing honours start-doy
 
 
+def test_missing_forcing_year_fails_fast_not_synthetic(tmp_path):
+    """When --forcing-dir is set but a requested year's Solr file is missing,
+    the driver must EXIT with a clear error listing the missing files —
+    silent fallback to synthetic would OOM the device with fake data."""
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    out = tmp_path / "fail"
+
+    # Stage year 2000 only; ask for 2000-2002.  Years 2001, 2002 are missing.
+    fdir = tmp_path / "crujra"; fdir.mkdir()
+    prefix = "clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5"
+    # Create empty stub files for year 2000 so it "exists" (existence check is
+    # os.path.exists; content doesn't matter for the guardrail).
+    for stream in ("Solr", "Prec", "TPQWL"):
+        (fdir / f"{prefix}.{stream}.2000.nc").write_text("stub")
+
+    cfg_path = _write_smoke_config(tmp_path, sd, extra_overrides=[
+        f"forcing.data_dir={fdir}",
+        "forcing.source=cru_jra",
+        "forcing.year_start=2000",
+        "forcing.year_end=2002",
+        f"forcing.prefix={prefix}",
+    ])
+    rc = _run_config(mod, cfg_path, out)
+    assert rc == 2                                            # missing-forcing exit code
+    # No restart written — the run exited before physics started.
+    assert not list(out.glob("restart_*.npz"))
+
+
 def test_cold_run_auto_saves_timestamped_restart(tmp_path):
     """A cold run always writes exactly one restart file named
     restart_<YEAR>_d<DDD>h<HH>.npz next to lmip_biophys.nc."""

@@ -166,17 +166,34 @@ def run(args) -> int:
         raise SystemExit(f"--year-end ({year_end}) < --year ({year_start})")
     multi_year = year_end > year_start
 
-    # Detect real data by the FIRST year's Solr stream file (prefix + year),
-    # so a prefix/year mismatch warns loudly instead of silently falling back
-    # to synthetic.  Missing intermediate years still trigger a fail inside
-    # stage_forcing_years with a clear message.
-    solr_file = (Path(args.forcing_dir) / f"{args.prefix}.Solr.{year_start}{args.suffix}.nc"
-                 if args.forcing_dir else None)
-    synthetic = not (solr_file and solr_file.exists())
-    if args.forcing_dir and synthetic:
-        print(f"(CRU-JRA Solr file not found: {solr_file}; using synthetic forcing)")
-    if synthetic and args.start_doy != 0.0:
-        print("(synthetic forcing starts at day 0; --start-doy ignored)")
+    # Per-year forcing-file check.  When a data_dir is set, EVERY year in the
+    # range must have its Solr file staged.  Silent fallback to synthetic for
+    # a missing intermediate year would load a fake full-year climatology and
+    # blow up device memory (~30 GB on GPU for one year of 6h global fake
+    # forcing).  Fail fast with a clean list + the exact fix command.
+    if args.forcing_dir:
+        missing = []
+        for y in range(year_start, year_end + 1):
+            p = Path(args.forcing_dir) / f"{args.prefix}.Solr.{y}{args.suffix}.nc"
+            if not p.exists():
+                missing.append((y, p))
+        if missing:
+            print("ERROR: CRU-JRA forcing not staged for the requested years:",
+                  file=sys.stderr)
+            for y, p in missing:
+                print(f"  year {y}: missing {p}", file=sys.stderr)
+            print("\nStage them first from a login node (repo root):",
+                  file=sys.stderr)
+            for y, _ in missing:
+                print(f"  ./scripts/data/download_lmip_data.sh --year {y}",
+                      file=sys.stderr)
+            return 2
+        synthetic = False
+    else:
+        synthetic = True
+        if args.start_doy != 0.0:
+            print("(synthetic forcing starts at day 0; --start-doy ignored)")
+
     dt = float(args.dt)
     model_times_s = build_model_times(args.start_doy, dt, args.n_steps, synthetic=synthetic)
     forcing_desc = ("synthetic" if synthetic
@@ -185,19 +202,23 @@ def run(args) -> int:
     print(f"grid={args.grid_type} | {ncol} columns | surface={args.surface_scheme} | "
           f"carbon={config.carbon.scheme} | dt={dt:.0f}s | n_steps={args.n_steps} | "
           f"forcing={forcing_desc}")
+    # allow_synthetic=False when we have real data: any surprise missing file
+    # (permission error, corrupted symlink, etc.) surfaces immediately instead
+    # of silently substituting fake data.
+    allow_syn = synthetic
     if multi_year:
         forcing_xs = stage_forcing_years(
             lat_rad, lon_rad, model_times_s,
             year_start=year_start, year_end=year_end,
             data_dir=(None if synthetic else args.forcing_dir),
             prefix=args.prefix, suffix=args.suffix,
-            k_neighbors=args.k_neighbors, allow_synthetic=True)
+            k_neighbors=args.k_neighbors, allow_synthetic=allow_syn)
     else:
         forcing_xs = stage_forcing(
             lat_rad, lon_rad, model_times_s,
             year=year_start, data_dir=(None if synthetic else args.forcing_dir),
             prefix=args.prefix, suffix=args.suffix,
-            k_neighbors=args.k_neighbors, allow_synthetic=True)
+            k_neighbors=args.k_neighbors, allow_synthetic=allow_syn)
     doy_xs = jnp.asarray(model_times_s / _SEC_PER_DAY)
 
     # --- initial state (soil/skin T seeded from the first forcing step). ---
