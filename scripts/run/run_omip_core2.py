@@ -3587,11 +3587,15 @@ def main() -> int:
         # step here).  Perpetual 365-day calendar, day-of-year 1-based.
         _dm2dc_win = None
         if args.dm2dc:
-            _t_model = step * dt
-            _sec_of_day = _t_model % _SEC_PER_DAY
+            # NEMO time axis is defined at step MIDPOINTS (day.F90 seeds
+            # nsec_day at dt/2), so build the window from the mid-step
+            # time: step k integrates exactly [(k-1)dt, k dt] (codex r3
+            # #1 — the end-of-step time was half a step late).
+            _t_mid = (step - 0.5) * dt
+            _sec_of_day = _t_mid % _SEC_PER_DAY
             _t_lo = (_sec_of_day - 0.5 * dt) / _SEC_PER_DAY
             _dm2dc_win = (
-                int((_t_model / _SEC_PER_DAY) % 365.0) + 1,   # day_of_year
+                int((_t_mid / _SEC_PER_DAY) % 365.0) + 1,   # day_of_year
                 365.0,
                 _t_lo,
                 _t_lo + dt / _SEC_PER_DAY,

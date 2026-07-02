@@ -363,14 +363,26 @@ def apply_isf_prescribed_melt_step(
     global-mean of this real flux — leave them off (the OMIP CORE-II
     recipe does) or account for it in the freshwater-budget correction.
 
+    DEVIATIONS from NEMO (documented, tracked as follow-up): (a) NEMO
+    injects the melt VOLUME as a 3-D divergence source over the TBL
+    (isf_hdiv_mlt) — here the salinity effect is the standard
+    virtual-salt approximation of that volume route and the barotropic
+    part is a 2-D ``eta`` source; (b) NEMO's nn_fwb=1 freshwater-budget
+    correction includes −fwfisf_par — our surface-channel normalization
+    does not see this post-step flux (residual global freshening
+    ~4e-5 PSU/yr at the Depoorter total).
+
     ``fwf_kg_m2_s`` is the melt freshwater INTO the ocean (>= 0, NEMO
     ``sornfisf``); ``zmin_m``/``zmax_m`` the injection band [m, +down].
     """
     from legoesm.ocean.physics.ice_shelf import isf_prescribed_melt_tendencies
 
     rho0 = constants.rho_ocean if rho_0 is None else rho_0
-    cp = constants.c_sw if c_sw is None else c_sw
-    lf = float(constants.L_fus_nemo) if L_fus is None else L_fus
+    # NEMO isf constants (codex r3 #2): rcp (TEOS-10 heat capacity) and
+    # the ISF-SPECIFIC latent heat rLfusisf = 0.334e6 from isf_oce.F90
+    # (deliberately not phycst rLfus).
+    cp = float(constants.c_p_seawater) if c_sw is None else c_sw
+    lf = float(constants.L_fus_isf_nemo) if L_fus is None else L_fus
     cfg = IceShelfConfig() if config is None else config
 
     dT_dt, dS_dt, eta_dot = isf_prescribed_melt_tendencies(

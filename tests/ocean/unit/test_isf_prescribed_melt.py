@@ -21,9 +21,9 @@ import numpy as np
 import pytest
 
 from legoesm import constants
+from legoesm.ocean.eos import nemo_eos_fzp
 from legoesm.ocean.physics.ice_shelf import (
     IceShelfConfig,
-    freezing_point_C,
     isf_prescribed_melt_tendencies,
 )
 
@@ -37,8 +37,8 @@ def _x64():
 
 
 RHO0 = 1026.0
-CP = float(constants.c_sw)
-LF = float(constants.L_fus_nemo)
+CP = float(constants.c_p_seawater)      # NEMO rcp
+LF = float(constants.L_fus_isf_nemo)    # NEMO isf_oce rLfusisf
 
 
 def _column(nlev=8, H=1600.0):
@@ -46,6 +46,26 @@ def _column(nlev=8, H=1600.0):
     S = np.linspace(34.0, 34.8, nlev)
     wet = np.ones(nlev)
     return dz, S, wet
+
+
+def _isftbl_reference(dz, zmin, zmax):
+    """Scalar transliteration of isf_tbl_ktop + isf_tbl_lvl (isftbl.F90):
+    returns (weights w_k with sum = htbl, htbl)."""
+    z_bot = np.cumsum(dz)
+    z_top = z_bot - dz
+    col = z_bot[-1]
+    zmax_c = min(zmax, col)
+    ktop = int(np.sum(z_top <= zmin)) - 1          # cell containing zmin
+    zmin_snap = z_top[ktop]                        # snapped UP to its top
+    htbl = max(min(zmax_c - zmin_snap, col - zmin_snap), dz[ktop])
+    kbot = ktop + 1
+    while np.sum(dz[ktop:kbot]) < htbl - 1e-9:
+        kbot += 1
+    kbot -= 1
+    w = np.zeros_like(dz)
+    w[ktop:kbot] = dz[ktop:kbot]
+    w[kbot] = htbl - dz[ktop:kbot].sum()
+    return w, htbl
 
 
 def test_column_budgets_close():
@@ -57,31 +77,53 @@ def test_column_budgets_close():
         jnp.asarray(fwf), jnp.asarray(zmin), jnp.asarray(zmax),
         rho_0=RHO0, c_sw=CP, L_fus=LF)
     dT, dS = np.asarray(dT), np.asarray(dS)
-    # overlap weights (analytic: uniform dz=200, band [150,750])
+    # NEMO isftbl weights (zmin=150 in cell0 -> snap to 0; htbl=750;
+    # cells 0..2 full + 0.75 of cell 3)
+    w, htbl = _isftbl_reference(dz, zmin, zmax)
+    assert htbl == pytest.approx(750.0)
+    np.testing.assert_allclose(w, [200, 200, 200, 150, 0, 0, 0, 0])
     z_bot = np.cumsum(dz)
     z_top = z_bot - dz
-    overlap = np.clip(np.minimum(z_bot, zmax) - np.maximum(z_top, zmin),
-                      0.0, None)
-    h_band = overlap.sum()
-    S_band = float((S * overlap).sum() / h_band)
-    z_mid_band = float((0.5 * (z_top + z_bot) * overlap).sum() / h_band)
-    T_frz = float(freezing_point_C(
-        jnp.asarray(S_band), jnp.asarray(z_mid_band)))
+    tfrz_lvl = np.asarray(nemo_eos_fzp(
+        jnp.asarray(S), jnp.asarray(0.5 * (z_top + z_bot))))
+    T_frz = float((tfrz_lvl * w).sum() / htbl)
+    S_w = float((S * w).sum() / htbl)
     # heat budget
     np.testing.assert_allclose(
         RHO0 * CP * (dT * dz).sum(), fwf * (CP * T_frz - LF), rtol=1e-12)
     # salt budget
     np.testing.assert_allclose(
-        RHO0 * (dS * dz).sum(), -fwf * S_band, rtol=1e-12)
+        RHO0 * (dS * dz).sum(), -fwf * S_w, rtol=1e-12)
     # volume
     np.testing.assert_allclose(float(eta_dot), fwf / RHO0, rtol=1e-14)
-    # distribution: outside-band cells exactly zero, in-band ∝ overlap/h_k
-    outside = overlap == 0.0
+    # distribution: outside-TBL cells exactly zero; FULL cells share one
+    # uniform dT; the fractional bottom cell carries frac x that.
+    outside = w == 0.0
     assert np.all(dT[outside] == 0.0) and np.all(dS[outside] == 0.0)
-    # signs: latent dominates → cooling; dilution → freshening; eta rises.
+    np.testing.assert_allclose(dT[1], dT[0], rtol=1e-12)
+    np.testing.assert_allclose(dT[3], 0.75 * dT[0], rtol=1e-12)
+    # signs: latent dominates -> cooling; dilution -> freshening; eta rises.
     assert np.all(dT[~outside] < 0.0)
     assert np.all(dS[~outside] < 0.0)
     assert float(eta_dot) > 0.0
+
+
+def test_zmin_snaps_to_cell_top_interface():
+    """isf_tbl_ktop snaps zmin UP to the containing cell's top interface —
+    a mid-cell zmin=250 on dz=200 columns starts the TBL at 200 m with
+    cell 1 FULL (not geometrically overlapped)."""
+    dz, S, wet = _column()          # dz = 200 uniform, H = 1600
+    dT, _, _ = isf_prescribed_melt_tendencies(
+        jnp.asarray(S), jnp.asarray(dz), jnp.asarray(wet),
+        jnp.asarray(5.0e-4), jnp.asarray(250.0), jnp.asarray(750.0),
+        rho_0=RHO0, c_sw=CP, L_fus=LF)
+    dT = np.asarray(dT)
+    w, htbl = _isftbl_reference(dz, 250.0, 750.0)
+    assert htbl == pytest.approx(550.0)          # 750 - snapped 200
+    np.testing.assert_allclose(w, [0, 200, 200, 150, 0, 0, 0, 0])
+    assert dT[0] == 0.0
+    np.testing.assert_allclose(dT[2], dT[1], rtol=1e-12)
+    np.testing.assert_allclose(dT[3], 0.75 * dT[1], rtol=1e-12)
 
 
 def test_band_clamps_at_surface_and_seafloor():
