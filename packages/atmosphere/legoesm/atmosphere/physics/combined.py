@@ -197,6 +197,21 @@ def make_physics(
             f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe', 'mpas'."
         )
     fn._requires_phys_state = physics_config_requires_phys_state(config)
+    # SPMD contract tag: stochastic convection draws (ncol_local,)-shaped
+    # AR1 innovations from the replicated per-step key, so band-local
+    # draws differ from the serial global draws — the lat-band SPMD step
+    # refuses a stochastic-tagged fn (deterministic carries thread fine).
+    # Gate on the SAME predicate the convection bridge uses for its PRNG
+    # (traits.is_stochastic AND the scheme config's enable_stochastic):
+    # Bechtold with enable_stochastic=False is a deterministic profile
+    # carry and threads under SPMD (codex round-8 Medium).
+    from legoesm.atmosphere.physics.convection.integration import (
+        convection_scheme_traits as _cst,
+    )
+    _scheme_cfg = getattr(config.convection, config.convection.scheme, None)
+    fn._has_stochastic_physics = bool(
+        _cst(config.convection.scheme).is_stochastic
+        and getattr(_scheme_cfg, "enable_stochastic", False))
     return fn
 
 
