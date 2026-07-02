@@ -462,7 +462,9 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
         )
-        config = config._replace(**_ovr)
+        # #501/#661: _ovr carries FLAT names (A_h/C_smag_lap/barotropic_solver/
+        # bottom_drag_r/...) now nested in sub-configs; replace_flat routes them.
+        config = config.replace_flat(**_ovr)
         model = LatLonCGridOceanModel(grid, z_coord, config)
         print(f"[setup] tripole config override: {_ovr}")
     land_mask, H_bathy = read_mesh_mask_bathy(mesh_path)
@@ -612,7 +614,10 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
         )
-        config = config._replace(**_ovr)
+        # #501/#661: _ovr carries FLAT names now nested in sub-configs
+        # (lateral_viscosity/barotropic/bottom_drag/polar_filter); replace_flat
+        # routes them.
+        config = config.replace_flat(**_ovr)
         model = LatLonCGridOceanModel(grid, z_coord, config)
         print(f"[setup] latlon config override: {_ovr}")
     if mle is not None:
@@ -2781,7 +2786,10 @@ def main() -> int:
                 LatLonCGridOceanModel,
             )
             _yaml_cfg = ocean_adapter.to_ocean_config()
-            _ovr = {k: getattr(_yaml_cfg, k) for k in _explicit}
+            # #501/#661: ocean.* YAML keys are FLAT names; grouped members
+            # (A_h/C_smag_lap/barotropic_solver/...) live in nested sub-configs,
+            # so read via flat_get (getattr would AttributeError on them).
+            _ovr = {k: _yaml_cfg.flat_get(k) for k in _explicit}
             # The builders force implicit_vertical_mixing=True (the root-cause
             # fix; explicit KPP vertical viscosity is CFL-unstable at the NEMO
             # 75-level ~1 m top cell -> cold-start blowup). A YAML override must
@@ -2794,7 +2802,7 @@ def main() -> int:
                     "override (the OMIP builders force implicit) or use a coarse "
                     "vertical grid where the explicit-diffusion CFL is satisfied.")
             model = LatLonCGridOceanModel(
-                grid, z_coord, model.config._replace(**_ovr)
+                grid, z_coord, model.config.replace_flat(**_ovr)
             )
             print(f"[setup] --config {args.config} ocean override: {sorted(_ovr)}")
 
