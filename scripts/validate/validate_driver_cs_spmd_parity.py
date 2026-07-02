@@ -100,6 +100,11 @@ def main(argv=None) -> int:
     p.add_argument("--radiation", default="gray",
                    help="Radiation scheme (bisect lever: 'none' isolates "
                         "the dry dycore from the physics path).")
+    p.add_argument("--checkpoint-days", type=int, default=0,
+                   help="Enable checkpointing at this cadence [days] "
+                        "(cs_spmd step 5a gate: under --mode spmd the "
+                        "gathered root-only write must produce ONE "
+                        "loadable checkpoint_day_*.npz).")
     p.add_argument("--rtol", type=float, default=1e-9)
     p.add_argument("--atol", type=float, default=1e-9)
     args = p.parse_args(argv)
@@ -126,6 +131,9 @@ def main(argv=None) -> int:
     workdir = f"{args.workdir}/{args.mode}"
     cfg = _build_config(workdir)
     cfg = cfg._replace(days=args.days, radiation=args.radiation)
+    if args.checkpoint_days > 0:
+        cfg = cfg._replace(output=cfg.output._replace(
+            checkpoint_days=args.checkpoint_days))
     if args.mode == "serial" and n_procs > 1:
         # Every rank would race/clobber the same --out (codex Medium).
         print("ERROR: --mode serial must run single-process "
@@ -158,6 +166,20 @@ def main(argv=None) -> int:
     rc = 0
     if io_rank:
         try:
+            # cs_spmd step 5a gate: with checkpointing on, the gathered
+            # root-only write must have produced loadable single-file
+            # checkpoints (exactly one writer — process 0).
+            if args.checkpoint_days > 0:
+                from pathlib import Path as _Path
+                _ckpts = sorted(_Path(workdir).glob("checkpoint_day_*.npz"))
+                if not _ckpts:
+                    print("  checkpoint: NO checkpoint_day_*.npz written "
+                          f"under {workdir} FAIL")
+                    rc = 1
+                for _c in _ckpts:
+                    _d = np.load(_c, allow_pickle=True)
+                    print(f"  checkpoint: {_c.name} loadable "
+                          f"({len(_d.files)} keys) OK")
             ref = np.load(args.ref)
             missing = sorted(set(ref.files) ^ set(state))
             if missing:

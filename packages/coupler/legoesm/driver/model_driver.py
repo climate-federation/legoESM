@@ -3061,7 +3061,28 @@ class ModelDriver:
             MPI.COMM_WORLD.Barrier()
             return
 
-        # Single-process path
+        # Single-process path (also the multi-controller SPMD write tail:
+        # the state is gathered to a host replica first, process 0 writes).
+        _state, _q_v, _q_c, _q_r = self.state, self.q_v, self.q_c, self.q_r
+        _carry_aux = self._checkpoint_carry_aux()
+        if (self.config.distributed
+                and getattr(self.config, "distributed_mode", "mpi") == "spmd"
+                and jax.process_count() > 1):
+            # Multi-controller SPMD (cs_spmd step 5a): every process holds
+            # only its shard of the face-sharded global arrays, and every
+            # process runs this method in lockstep.  Gather each leaf to a
+            # host-replicated array on ALL processes (process_allgather is
+            # a COLLECTIVE — a rank-0-only gather would desync the
+            # program), then only process 0 falls through to the standard
+            # single-file write below.  Parity receipt for the gather
+            # pattern: validate_driver_cs_spmd_parity.py, job 8686550.
+            _gather = self._gather_spmd_tree_to_host
+            _state = _gather(_state)
+            _q_v, _q_c, _q_r = _gather(_q_v), _gather(_q_c), _gather(_q_r)
+            _carry_aux = _gather(_carry_aux)
+            if jax.process_index() != 0:
+                return
+
         ckpt_path = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}.npz"
         backend = self.config.output.checkpoint_format if hasattr(self.config.output, 'checkpoint_format') else "npz"
 
@@ -3129,17 +3150,35 @@ class ModelDriver:
 
         save_restart(
             path=ckpt_path,
-            state=self.state,
-            q_v=self.q_v,
+            state=_state,
+            q_v=_q_v,
             step=step,
             day=day,
             config=self.config,
-            q_c=self.q_c,
-            q_r=self.q_r,
-            carry_aux=self._checkpoint_carry_aux(),
+            q_c=_q_c,
+            q_r=_q_r,
+            carry_aux=_carry_aux,
             backend=backend,
         )
         logger.info(f"  Checkpoint: {ckpt_path.name}")
+
+    def _gather_spmd_tree_to_host(self, tree):
+        """Gather every non-fully-addressable jax.Array leaf of *tree* to a
+        host-replicated numpy array (multi-controller SPMD; collective —
+        EVERY process must call this with the same tree).  Fully-addressable
+        leaves and non-array leaves pass through unchanged; pytree structure
+        (Fields, dicts, NamedTuples) is preserved."""
+        if tree is None:
+            return None
+        import numpy as _np
+        from jax.experimental import multihost_utils as _mhu
+
+        def _leaf(x):
+            if isinstance(x, jax.Array) and not x.is_fully_addressable:
+                return _np.asarray(_mhu.process_allgather(x, tiled=True))
+            return x
+
+        return jax.tree_util.tree_map(_leaf, tree)
 
     def load_checkpoint(self, path: str | Path) -> tuple[int, float]:
         """Load state from a checkpoint using unified restart API.

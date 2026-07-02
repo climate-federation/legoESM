@@ -64,13 +64,15 @@ def test_bootstrap_rejects_unknown_mode():
         bootstrap(distributed_mode="bogus")
 
 
-def test_validate_strict_rejects_spmd_checkpointing():
+def test_validate_strict_accepts_spmd_checkpointing():
+    """cs_spmd step 5a: checkpointing is supported under spmd — the
+    save_checkpoint tail gathers the sharded state to a host replica on
+    every process and writes root-only.  validate_strict must accept it."""
     from legoesm.driver.config import OutputConfig
     cfg = _cfg(distributed=True, distributed_mode="spmd")
     cfg = cfg._replace(output=OutputConfig(
         output_dir="", diag_days=0, checkpoint_days=5))
-    with pytest.raises(ValueError, match="checkpoint"):
-        cfg.validate_strict()
+    cfg.validate_strict()
 
 
 def test_validate_strict_rejects_spmd_diagnostics():
