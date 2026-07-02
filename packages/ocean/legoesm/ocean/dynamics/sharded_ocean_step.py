@@ -370,9 +370,10 @@ def make_sharded_ocean_step(model, mesh):
     Parameters
     ----------
     model
-        ``LatLonCGridOceanModel`` (latlon geometry; tripole north-fold is a
-        follow-up — raises ``NotImplementedError`` if ``model.grid.fold`` is
-        active).
+        ``LatLonCGridOceanModel`` (regular lat-lon OR tripole: the north
+        fold is applied data-dependently on the north band via
+        ``north_fold_mask``/``apply_north_fold`` — gated by the tripole
+        SPMD equivalence suite).
     mesh
         A 1-D ``jax.sharding.Mesh`` with axis name ``"lat"`` (from
         ``legoesm.parallel.mesh.create_latlon_mesh(...).mesh``).

@@ -100,7 +100,8 @@ def main() -> int:
     # OMIP recipe: implicit_cn barotropic (fixed-iter PCG via force_pcg so the
     # single-rank run takes the SAME solver the SPMD OMIP path uses) + implicit
     # vertical mixing.  These are exactly the fp32-sensitive blocks under test.
-    cfg = LatLonCGridOceanConfig(
+    # from_flat: barotropic_* fields are nested post-#501.
+    cfg = LatLonCGridOceanConfig.from_flat(
         barotropic_solver="implicit_cn",
         barotropic_implicit_force_pcg=True,
         implicit_vertical_mixing=True,
