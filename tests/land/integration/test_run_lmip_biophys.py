@@ -66,6 +66,10 @@ def test_biophys_driver_synthetic_smoke(tmp_path):
     ds = xr.open_dataset(out / "lmip_biophys.nc")
     assert ds.sizes["time"] == 4
     assert ds.attrs["carbon"] == "none"                      # biophysics-only
+    # latlon output uses the (time, lat, lon) rectangular layout — never (time, ncol)
+    # (the driver reshape gate for latlon; non-rectangular grids keep ncol)
+    assert ds["T_sfc"].dims == ("time", "lat", "lon")
+    assert ds.sizes["lat"] == 4 and ds.sizes["lon"] == 8    # --resolution 4 -> 4 x 8
     assert np.all(np.isfinite(ds["T_sfc"].values))           # all-land surfdata
     # surface temperature stays physical under the (synthetic) forcing
     assert float(ds["T_sfc"].min()) > 200.0

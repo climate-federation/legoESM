@@ -210,32 +210,51 @@ def run(args) -> int:
     print(f"  T_sfc {rng(T_last)} K | SH {rng(sh_last)} W/m2 | LH {rng(lh_last)} W/m2")
 
     # --- time-series NetCDF (per-step land diagnostics). ---
+    #
+    # Latlon output uses the standard (time, lat, lon) rectangular layout, so
+    # tools like ``xr.plot`` / ncview / panoply just work.  Non-rectangular
+    # grids (cubed-sphere, MPAS Voronoi, gaussian) can't be reshape'd cleanly,
+    # so they fall back to (time, ncol) with lat/lon as coord vars on ncol.
     lat_deg = np.rad2deg(np.asarray(lat_rad)); lon_deg = np.rad2deg(np.asarray(lon_rad))
+    is_latlon = args.grid_type == "latlon"
+    if is_latlon:
+        nlat, nlon = args.resolution, 2 * args.resolution   # matches create_latlon_grid
+        assert nlat * nlon == ncol, f"latlon reshape mismatch: {nlat}*{nlon} != {ncol}"
+        lat_1d = lat_deg.reshape(nlat, nlon)[:, 0]          # unique lat per row
+        lon_1d = lon_deg.reshape(nlat, nlon)[0, :]          # unique lon per column
     try:
         import xarray as xr
         masked = lambda a: np.where(land, np.asarray(a, np.float64), np.nan)
-        ts = {
-            "T_sfc": (("time", "ncol"), np.stack([masked(T_sfc_t[i]) for i in range(args.n_steps)])),
-            "shflx": (("time", "ncol"), np.stack([masked(shflx_t[i]) for i in range(args.n_steps)])),
-            "lhflx": (("time", "ncol"), np.stack([masked(lhflx_t[i]) for i in range(args.n_steps)])),
-            "LAI":   (("time", "ncol"), np.stack([masked(LAI_t[i]) for i in range(args.n_steps)])),
-        }
+
+        def pack(series):
+            """(n_steps, ncol) -> (n_steps, lat, lon) for latlon, else (n_steps, ncol)."""
+            arr = np.stack([masked(series[i]) for i in range(args.n_steps)])   # (time, ncol)
+            return arr.reshape(args.n_steps, nlat, nlon) if is_latlon else arr
+
+        dims = ("time", "lat", "lon") if is_latlon else ("time", "ncol")
+        ts = {"T_sfc": (dims, pack(T_sfc_t)),
+              "shflx": (dims, pack(shflx_t)),
+              "lhflx": (dims, pack(lhflx_t)),
+              "LAI":   (dims, pack(LAI_t))}
         if is_multilayer:
-            ts["T_soil_top"] = (("time", "ncol"),
-                                np.stack([masked(T_soil_top_t[i]) for i in range(args.n_steps)]))
-            ts["snow_depth"] = (("time", "ncol"),
-                                np.stack([masked(snow_depth_t[i]) for i in range(args.n_steps)]))
+            ts["T_soil_top"] = (dims, pack(T_soil_top_t))
+            ts["snow_depth"] = (dims, pack(snow_depth_t))
+
+        coords = {"time": (("time",), np.asarray(doy_t_arr))}
+        if is_latlon:
+            coords.update({"lat": (("lat",), lat_1d), "lon": (("lon",), lon_1d)})
+        else:
+            coords.update({"lat": (("ncol",), lat_deg), "lon": (("ncol",), lon_deg)})
+
         ds = xr.Dataset(
-            ts,
-            coords={"time": (("time",), np.asarray(doy_t_arr)),
-                    "lat": (("ncol",), lat_deg), "lon": (("ncol",), lon_deg)},
+            ts, coords=coords,
             attrs={"forcing": "synthetic" if synthetic else f"CRU-JRA {args.year}",
                    "dt": dt, "start_doy": args.start_doy, "grid_type": args.grid_type,
                    "surface_scheme": args.surface_scheme, "carbon": config.carbon.scheme},
         )
         nc = out_dir / "lmip_biophys.nc"
         ds.to_netcdf(nc)
-        print(f"wrote {nc} ({args.n_steps} steps)")
+        print(f"wrote {nc} ({args.n_steps} steps, layout={'lat,lon' if is_latlon else 'ncol'})")
     except Exception as e:  # noqa: BLE001
         print(f"(netcdf write skipped: {e})")
 
