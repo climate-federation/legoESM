@@ -105,6 +105,24 @@ def test_build_model_times_synthetic_starts_at_zero():
     assert t2[0] == 10.0 * 86400.0                           # real forcing honours start-doy
 
 
+def test_oversize_forcing_estimate_fails_fast(tmp_path):
+    """Multi-year 2°-hourly runs at 16200 cols x 43800 steps × 14 fields ×
+    8 B ≈ 76 GiB won't fit on a single A100.  The driver must estimate this
+    upfront and refuse rather than let JAX OOM inside stage_forcing_years."""
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    out = tmp_path / "big"
+    # Grid override to a 2° size (90 x 180 = 16200 cols); many steps.  The
+    # estimate should trigger without any real forcing data (synthetic path).
+    cfg_path = _write_smoke_config(tmp_path, sd, extra_overrides=[
+        "grid.resolution=90",
+        "time.n_steps=43800",
+    ])
+    rc = _run_config(mod, cfg_path, out)
+    assert rc == 2                                            # over-budget
+    assert not list(out.glob("restart_*.npz"))
+
+
 def test_missing_forcing_year_fails_fast_not_synthetic(tmp_path):
     """When --forcing-dir is set but a requested year's Solr file is missing,
     the driver must EXIT with a clear error listing the missing files —

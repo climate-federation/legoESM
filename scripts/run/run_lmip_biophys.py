@@ -139,6 +139,37 @@ def run(args) -> int:
     lat_rad, lon_rad = grid_latlon_rad(grid)
     ncol = lat_rad.shape[0]
 
+    # Estimate the peak forcing pytree memory BEFORE doing anything expensive
+    # (surfdata init, forcing staging, JAX compilation).  The current
+    # stage_forcing_years path concatenates all requested years as one big
+    # pytree, so peak device memory ≈ this size and OOM inside the loader is a
+    # common failure mode.  Fail fast with a concrete size + suggested fix if
+    # we exceed a soft budget (24 GiB — comfortable on a 40 GB A100).
+    _ATM_TO_SURFACE_N_FIELDS = 14                # T, q, p, wind, sw, lw, precip, snow, cos_z, ρ, CO2, ...
+    _BYTES_PER_ELEM = 8                           # float64
+    est_bytes = args.n_steps * ncol * _ATM_TO_SURFACE_N_FIELDS * _BYTES_PER_ELEM
+    est_gib = est_bytes / (1024 ** 3)
+    _FORCING_BUDGET_GIB = 24.0
+    if est_gib > _FORCING_BUDGET_GIB:
+        print(f"ERROR: estimated forcing pytree ({est_gib:.1f} GiB) exceeds the "
+              f"soft budget ({_FORCING_BUDGET_GIB} GiB).", file=sys.stderr)
+        print(f"  n_steps={args.n_steps} x ncol={ncol} x "
+              f"~{_ATM_TO_SURFACE_N_FIELDS} fields x {_BYTES_PER_ELEM} B\n",
+              file=sys.stderr)
+        print("Current stage_forcing_years concatenates all years before the "
+              "scan, so peak device memory ≈ this size.  Options:", file=sys.stderr)
+        print("  - Split into single-year chained runs (Phase C restart):",
+              file=sys.stderr)
+        print("      forcing.year_end = forcing.year_start   (per experiment)",
+              file=sys.stderr)
+        print("      restart.from = <previous run's restart_*.npz>",
+              file=sys.stderr)
+        print("  - Use a coarser grid (biophysics/smoke_4deg template)",
+              file=sys.stderr)
+        print("  - Run on CPU with more host RAM: qsub -l select=…:mem=128GB",
+              file=sys.stderr)
+        return 2
+
     # --- land config: SAME as run_lmip_smoke (carbon stays at its default
     #     "none"); --surface-scheme picks two-leaf canopy or SimpleSEB. ---
     surf = (CanopyConfig(max_iters=50, tol=1e-2)
@@ -202,6 +233,10 @@ def run(args) -> int:
     print(f"grid={args.grid_type} | {ncol} columns | surface={args.surface_scheme} | "
           f"carbon={config.carbon.scheme} | dt={dt:.0f}s | n_steps={args.n_steps} | "
           f"forcing={forcing_desc}")
+
+    # (Forcing-pytree memory estimate moved up before init_land_surface_data
+    # so we fail fast when the requested size can't fit — see block above.)
+    print(f"forcing pytree estimate: {est_gib:.1f} GiB")
     # allow_synthetic=False when we have real data: any surprise missing file
     # (permission error, corrupted symlink, etc.) surfaces immediately instead
     # of silently substituting fake data.
