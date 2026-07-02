@@ -5777,6 +5777,10 @@ class ModelDriver:
             o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
             ghg_vmr=ctx["ghg_vmr"],
         )
+        # SPMD: commit grid-shaped forcing leaves to the state's sharding
+        # (no-op single-device / mpi4jax-distributed) — see shard_forcing.
+        from legoesm.driver.compiled_segments import shard_forcing
+        forcing = shard_forcing(forcing, self._device_config)
         return run_segment.raw, carry0, forcing
 
     # ==================================================================
@@ -5794,6 +5798,7 @@ class ModelDriver:
         from legoesm.driver.compiled_segments import (
             pack_carry, unpack_carry,
             compute_segment_length, build_segment_fn, pack_forcing,
+            shard_forcing,
         )
 
         ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
@@ -6092,6 +6097,9 @@ class ModelDriver:
                 sfc_shflx_override=_sfc_shflx_ovr,
                 sfc_lhflx_override=_sfc_lhflx_ovr,
             )
+            # SPMD: commit grid-shaped forcing leaves to the state's
+            # sharding (no-op single-device / mpi4jax-distributed).
+            forcing = shard_forcing(forcing, self._device_config)
 
             # Pack state into carry
             carry = pack_carry(
