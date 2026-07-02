@@ -250,6 +250,41 @@ def _assert_flat_terrain(
 # --------------------------------------------------------------------- #
 
 
+def _plane_horizontal_weight(
+    grid: PlaneGrid,
+    terrain_metric: TerrainMetric,
+) -> jax.Array:
+    """Shared fixer weight ``(J * area_T)[:, :, None]`` of shape
+    ``(ny, nx, 1)``.
+
+    Single source of the mass-fixer weight expression so every mass
+    integral below multiplies bit-identical factors in the same order.
+    """
+    return (terrain_metric.jacobian * grid.area_T)[:, :, None]
+
+
+def _plane_weighted_mass_sum(
+    rho_like: jax.Array,
+    grid: PlaneGrid,
+    height_coord: HeightCoordinate,
+    terrain_metric: TerrainMetric,
+) -> jax.Array:
+    """``sum(rho_like * J * area_T * dz)`` — the mass-fixer integral.
+
+    ``rho_like`` broadcasts against ``(ny, nx, 1)``; either ``(nlev,)``
+    (a reference profile) or ``(ny, nx, nlev)`` (a density field).
+    The products associate left-to-right (``(rho_like * w_h) * dz``)
+    and the final ``jnp.sum`` reduces one ``(ny, nx, nlev)`` array, so
+    every caller — :func:`compute_dry_mass_plane`,
+    :func:`_plane_background_mass`, and the anomaly sum in
+    :func:`fix_mass_nonhydrostatic_plane` — accumulates in exactly the
+    same order. The mass fixer's rest-state bit-exactness relies on
+    this shared op order (see :func:`_plane_background_mass`).
+    """
+    weight_horizontal = _plane_horizontal_weight(grid, terrain_metric)
+    return jnp.sum(rho_like * weight_horizontal * height_coord.dz)
+
+
 def compute_dry_mass_plane(
     state: PlaneNonHydrostaticState,
     grid: PlaneGrid,
@@ -285,11 +320,9 @@ def compute_dry_mass_plane(
     """
     rho_p = state.rho_prime.data
     rho_total = height_coord.rho_ref + rho_p   # broadcast (nlev,) → (ny,nx,nlev)
-    weight_horizontal = (
-        terrain_metric.jacobian * grid.area_T
-    )[:, :, None]                              # (ny, nx, 1)
-    cell_mass = rho_total * weight_horizontal * height_coord.dz
-    return jnp.sum(cell_mass)
+    return _plane_weighted_mass_sum(
+        rho_total, grid, height_coord, terrain_metric,
+    )
 
 
 def _plane_volume_weight(
@@ -298,9 +331,7 @@ def _plane_volume_weight(
     terrain_metric: TerrainMetric,
 ) -> jax.Array:
     """Total weighted volume ``sum(J * area_T * dz)`` used by the fixer."""
-    weight_horizontal = (
-        terrain_metric.jacobian * grid.area_T
-    )[:, :, None]
+    weight_horizontal = _plane_horizontal_weight(grid, terrain_metric)
     return jnp.sum(weight_horizontal * height_coord.dz)
 
 
@@ -315,18 +346,16 @@ def _plane_background_mass(
     Bit-match invariant: this must equal
     ``compute_dry_mass_plane(state, ...)`` BIT-EXACTLY when
     ``state.rho_prime`` is identically zero and both are evaluated
-    eagerly. That holds because ``rho_ref + 0.0 == rho_ref`` exactly,
-    the elementwise products below use the same broadcast shapes and
-    left-to-right association as ``compute_dry_mass_plane``, and the
-    final ``jnp.sum`` reduces the same ``(ny, nx, nlev)`` array with
-    the same cached executable. The mass fixer's rest-state exactness
+    eagerly. That holds because ``rho_ref + 0.0 == rho_ref`` exactly
+    and both route through the SAME :func:`_plane_weighted_mass_sum`
+    (same broadcast shapes, same left-to-right association, same
+    final ``jnp.sum`` over ``(ny, nx, nlev)``, same cached
+    executable). The mass fixer's rest-state exactness
     (``test_one_step_at_rest_with_mass_fixer``) relies on it.
     """
-    weight_horizontal = (
-        terrain_metric.jacobian * grid.area_T
-    )[:, :, None]                              # (ny, nx, 1)
-    cell_mass = height_coord.rho_ref * weight_horizontal * height_coord.dz
-    return jnp.sum(cell_mass)
+    return _plane_weighted_mass_sum(
+        height_coord.rho_ref, grid, height_coord, terrain_metric,
+    )
 
 
 def fix_mass_nonhydrostatic_plane(
@@ -413,11 +442,8 @@ def fix_mass_nonhydrostatic_plane(
         background_mass = _plane_background_mass(
             grid, height_coord, terrain_metric,
         )
-    weight_horizontal = (
-        terrain_metric.jacobian * grid.area_T
-    )[:, :, None]                              # (ny, nx, 1)
-    anomaly = jnp.sum(
-        state.rho_prime.data * weight_horizontal * height_coord.dz
+    anomaly = _plane_weighted_mass_sum(
+        state.rho_prime.data, grid, height_coord, terrain_metric,
     )
     weighted_volume = _plane_volume_weight(grid, height_coord, terrain_metric)
     delta = ((target_mass - background_mass) - anomaly) / weighted_volume
@@ -2807,9 +2833,14 @@ class PlaneCompressibleEulerModel:
         # (an in-trace recompute would be const-folded by XLA with a
         # different accumulation order — see
         # fix_mass_nonhydrostatic_plane). Constant for the model's
-        # lifetime, so no reset needed (unlike _target_mass).
-        self._background_mass: jax.Array = _plane_background_mass(
-            grid, height_coord, terrain_metric,
+        # lifetime, so no reset needed (unlike _target_mass). Only the
+        # fix_mass branch of _step_jit reads it, so skip the device
+        # reduction when the fixer is off (static config value —
+        # feature-gate Python `if`, not jnp.where). The fixer itself
+        # tolerates None (computes inline), so this never traps.
+        self._background_mass: jax.Array | None = (
+            _plane_background_mass(grid, height_coord, terrain_metric)
+            if config.fix_mass else None
         )
 
     # ------------------------------------------------------------------

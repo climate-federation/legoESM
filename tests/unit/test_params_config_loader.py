@@ -233,6 +233,22 @@ def test_atm_scalar_map_has_no_under_claim():
                                          "microphysics": "kessler"},
          lambda pipe, field: getattr(pipe.convection_config, field, None)),
     ]
+    # Companion drift-guard: the family list scanned below must exactly match
+    # the config classes present in the verified allowlist map.  The selector /
+    # prefix / reader triple is per-family knowledge that CANNOT be derived
+    # from the resolver (threading is scattered hand-written getattr code in
+    # physics_pipeline), so when a future resolver threads a NEW scheme
+    # family's scalars, extend BOTH _ATM_SCALAR_PARAM_MAP and this `schemes`
+    # list — this assertion goes red until both agree.
+    reg_by_qname = {m.qualified_name: m for m in build_registry()}
+    map_classes = {reg_by_qname[q].config_class for q in amap}
+    scanned_classes = {cls for cls, _, _, _ in schemes}
+    assert map_classes == scanned_classes, (
+        f"_ATM_SCALAR_PARAM_MAP covers config classes {sorted(map_classes)} but "
+        f"this under-claim scan covers {sorted(scanned_classes)} — extend the "
+        "schemes list (selector + prefix + reader) so newly-threaded families "
+        "are scanned too."
+    )
     ec_lower = {f.lower(): f for f in ec_fields}
     for cls, prefix, sel, reader in schemes:
         params = [m for m in build_registry()

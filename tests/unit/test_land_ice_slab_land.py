@@ -427,3 +427,71 @@ class TestPostStepAlbedoBaseMap:
             state, forcing, config, U_min=1.0, dt=DT, lat=lat, land_params=None,
         )
         assert not jnp.allclose(resp.albedo, 0.40, atol=1e-6)
+
+
+class TestScanCarryDtypeStability:
+    """Mirror of the multilayer scan-carry dtype fix (commit 49e9fa41e): under
+    JAX_ENABLE_X64 float64 forcing/lat promote the slab updates to float64
+    while the carried leaves keep the storage dtype (float32 in the SOTA
+    runs).  ``SurfaceState`` (land + carbon) is a ``lax.scan`` carry, which
+    REQUIRES input/output dtypes to match PER LEAF — so ``step_land`` must
+    cast every returned state/carbon leaf back to the INPUT leaf's dtype."""
+
+    @staticmethod
+    def _f32_state() -> LandState:
+        def f32_field(val, name):
+            return Field(data=jnp.full(SHAPE, val, dtype=jnp.float32),
+                         name=name, dims=DIMS, units="")
+        return LandState(
+            T_soil=f32_field(280.0, "T_soil"),
+            W_bucket=f32_field(50.0, "W_bucket"),
+            snow_depth=f32_field(1.0, "snow_depth"),  # snow branches active
+            snow_age=f32_field(0.0, "snow_age"),
+            runoff=jnp.zeros(SHAPE, dtype=jnp.float32),
+        )
+
+    def test_state_and_carbon_dtype_stable_under_x64(self):
+        from legoesm.land.carbon.carbon_cycle import init_carbon_state
+        from legoesm.land.carbon.config import CarbonConfig
+
+        state = self._f32_state()
+        # x64 forcing (module autouse fixture enables x64; make_forcing is f64)
+        # with snowfall so the snow/sublimation paths are exercised too.
+        forcing = make_forcing(precip_total=1e-4, precip_snow=5e-5)
+        config = LandConfig(snow_albedo_feedback=True,
+                            carbon=CarbonConfig(scheme="differland"))
+        carbon = init_carbon_state(SHAPE, config.carbon)
+        carbon = jax.tree.map(lambda a: a.astype(jnp.float32), carbon)
+        lat = jnp.zeros(SHAPE, dtype=jnp.float64)
+
+        new_state, _resp, carbon_new = step_land(
+            state, forcing, config, U_min=1.0, dt=DT, lat=lat,
+            carbon_state=carbon,
+        )
+        mismatched = [
+            f"land.{f}" for f in state._fields
+            if getattr(
+                getattr(new_state, f), "data", getattr(new_state, f)
+            ).dtype != getattr(
+                getattr(state, f), "data", getattr(state, f)
+            ).dtype
+        ] + [
+            f"carbon.{f}" for f in carbon._fields
+            if getattr(carbon_new, f).dtype != getattr(carbon, f).dtype
+        ]
+        assert mismatched == [], (
+            f"leaves changed dtype under x64 (scan-carry unsafe): {mismatched}"
+        )
+
+    def test_legacy_none_runoff_input_still_steps(self):
+        """A legacy caller passes ``runoff=None`` (the LandState default); the
+        dtype-pinning tree.map must pair the populated output runoff with the
+        None input safely (is_leaf) and leave it uncast."""
+        state = self._f32_state()._replace(runoff=None)
+        forcing = make_forcing()
+        new_state, _resp, _ = step_land(
+            state, forcing, LandConfig(), U_min=1.0, dt=DT,
+        )
+        assert new_state.runoff is not None
+        assert new_state.T_soil.data.dtype == jnp.float32
+        assert bool(jnp.all(jnp.isfinite(new_state.runoff)))

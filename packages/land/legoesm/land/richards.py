@@ -193,7 +193,7 @@ def solve_richards(
     psi_m = psi  # iterate
 
     def picard_body(m, carry):
-        h_s_m, psi_m, theta_m = carry
+        h_s_m, psi_m, theta_m, _ = carry  # 4th slot: K_bot diagnostic (write-only)
 
         # Recompute hydraulic properties at current iterate
         K_m = hydraulic_conductivity(psi_m, theta_m, hydro_config)  # (ncol, nlayers)
@@ -302,7 +302,15 @@ def solve_richards(
         # storage variable switch makes the clip unnecessary.
         theta_new = theta_from_psi(psi_new, hydro_config)
 
-        return h_s_new, psi_new, theta_new
+        # Carry the bottom-layer K THIS iteration's rhs debited (the explicit
+        # free-drainage flux -K_m[:,-1]/dz[-1] above).  After the loop, the last
+        # value is the drainage the solve actually removed from the column —
+        # reporting K(psi_final) instead disagrees with the debit by O(dpsi of
+        # the last Picard iteration) and leaves a spurious budget residual
+        # (in - out - dstorage != 0 by exactly that mismatch).  K_m is already
+        # evaluated on the FULL (ncol, nlayers) state, so layer-varying K_sat
+        # configs pair the bottom psi with the RIGHT layer's K_sat.
+        return h_s_new, psi_new, theta_new, K_m[:, -1]
 
     theta_m_init = theta_from_psi(psi_m, hydro_config)
 
@@ -320,11 +328,17 @@ def solve_richards(
     # uniform float64 / true float32 run.
     _work_dtype = jnp.result_type(
         psi_m, theta_n, theta_m_init, dz, dz_if, flux_top, _Ksat, h_s0, sink)
-    h_s_final, psi_final, theta_final = jax.lax.fori_loop(
+    _psi_c0 = psi_m.astype(_work_dtype)
+    _theta_c0 = theta_m_init.astype(_work_dtype)
+    # Seed for the K_bot diagnostic carry: K at the initial state, computed from
+    # the ALREADY-CAST carry so its dtype matches the loop body's K_m[:, -1]
+    # output (carry input/output dtypes must agree).  Overwritten on the first
+    # iteration; only reachable as-is for the degenerate max_iter=0.
+    _K_bot0 = hydraulic_conductivity(_psi_c0, _theta_c0, hydro_config)[:, -1]
+    h_s_final, psi_final, theta_final, K_bot_solve = jax.lax.fori_loop(
         0, richards_config.max_iter,
         picard_body,
-        (h_s0.astype(_work_dtype), psi_m.astype(_work_dtype),
-         theta_m_init.astype(_work_dtype)),
+        (h_s0.astype(_work_dtype), _psi_c0, _theta_c0, _K_bot0),
     )
     # Fixed iteration count (no convergence check; always equals max_iter)
     n_iter_final = jnp.full(ncol, float(richards_config.max_iter))
@@ -375,14 +389,16 @@ def solve_richards(
         pond_deficit / jnp.maximum(avail_total, 1e-30), 1.0)         # (ncol,) in [0,1]
     theta_final = theta_final - avail * debit_frac[:, None] / dz[None, :]
 
-    # Subsurface runoff: gravitational drainage at bottom.  Evaluate K on the FULL
-    # (ncol, nlayers) state, then slice the bottom layer — a layer-varying K_sat
-    # ((nlayers,) or (ncol,nlayers)) cannot broadcast against a sliced (ncol,1) input,
-    # and slicing first would pair the bottom psi with the WRONG layer's K_sat (codex).
-    # Bit-identical for scalar / (ncol,1) configs; correct for layer-varying ones.
+    # Subsurface runoff: gravitational drainage at bottom, reported at the SAME
+    # K the last Picard iteration's rhs debited (K_bot_solve, carried out of the
+    # loop) — NOT re-evaluated at psi_final.  The bottom BC is explicit in the
+    # solve, so the water actually removed from the column is K at the carry
+    # ENTERING the last iteration; re-evaluating at psi_final disagreed with
+    # that debit by O(last dpsi) and left a matching spurious residual in the
+    # column budget (in - out - dstorage).  With this, the only budget residual
+    # is the last iteration's O(dpsi^2) linearization error (probe-verified).
     if richards_config.bottom_bc == "free_drainage":
-        K_bot = hydraulic_conductivity(psi_final, theta_final, hydro_config)[:, -1]
-        runoff_subsurface = K_bot  # [m/s]
+        runoff_subsurface = K_bot_solve  # [m/s]
     else:
         runoff_subsurface = jnp.zeros_like(flux_top)  # dtype-matched (codex)
 
