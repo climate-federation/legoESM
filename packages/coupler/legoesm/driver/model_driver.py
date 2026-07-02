@@ -1791,6 +1791,7 @@ class ModelDriver:
                         'sst', 'sic', 'precip_total',
                         'sw_up_toa', 'lw_up_toa', 'sw_net_sfc', 'lw_net_sfc',
                         'sw_down_toa', 'shflx', 'lhflx', 'lat_deg_grid',
+                        't_low_mean',
                     ):
                         if kwargs.get(_tname) is not None:
                             kwargs[_tname] = _g(kwargs[_tname])
@@ -1827,6 +1828,19 @@ class ModelDriver:
 
                     # Gather tracers (all ranks participate)
                     for tname in ('q_v', 'q_c', 'q_r', 'q_i', 'q_s', 'q_g'):
+                        arr = kwargs.get(tname)
+                        if arr is not None:
+                            kwargs[tname] = gather(arr[_ofi], self._layout, root_only=True)
+
+                    # Gather the segment-accumulated 2-D diagnostics too:
+                    # these are accumulated at OWNED faces only
+                    # (``.at[_ofi].add`` in the segment scan), so without
+                    # this gather rank 0 would write zeros / stale values
+                    # on its five non-owned faces into the timeseries and
+                    # CMOR output.  All ranks must participate (collective).
+                    for tname in ('precip_total', 'shflx', 'lhflx',
+                                  'sw_up_toa', 'lw_up_toa', 'sw_net_sfc',
+                                  'lw_net_sfc', 'sw_down_toa', 't_low_mean'):
                         arr = kwargs.get(tname)
                         if arr is not None:
                             kwargs[tname] = gather(arr[_ofi], self._layout, root_only=True)
@@ -5882,6 +5896,20 @@ class ModelDriver:
                 "forcing_update_days or enable diagnostics for a finer "
                 "cadence.", cfg.dataset, _fb_days,
             )
+        if cfg.output.cmip_output and cfg.output.diag_days > 1:
+            # Amon monthly means are safe at any cadence (fluxes/T_low are
+            # time-integrated inside the segment scan), but the CMIP ``day``
+            # table is fed one sample per diagnostic interval: at
+            # diag_days=N>1 each written "day" is really an N-day-apart
+            # sample and tasmin/tasmax degenerate to that sample.
+            logger.warning(
+                "CMIP day-table output with diag_days=%.3g > 1: daily "
+                "fields are sampled every %.3g days and tasmin/tasmax are "
+                "NOT true daily extremes.  Amon monthly means are "
+                "unaffected (segment-accumulated).  Set diag_days=1 for "
+                "meaningful day-table output.",
+                cfg.output.diag_days, cfg.output.diag_days,
+            )
         n_steps_remaining = n_steps_total - start_step
         n_segments = (n_steps_remaining + segment_length - 1) // segment_length
 
@@ -6130,6 +6158,14 @@ class ModelDriver:
                 target_moisture=_target_moisture,
                 target_mass=_target_mass,
                 precip_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                # Segment-mean flux / T_low accumulators (CMOR diurnal-alias
+                # fix): reset to zero at every segment start like precip.
+                sw_up_toa_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                lw_up_toa_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                sw_down_toa_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                sw_net_sfc_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                lw_net_sfc_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                t_low_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 # Persist the lagged convective-cloud precip ACROSS segment
                 # boundaries (radiation runs before convection; without this the
                 # lag would reset to zeros at step 0 of every segment).  Only the
@@ -6373,6 +6409,20 @@ class ModelDriver:
                 seg_precip_rate = seg_precip / _seg_dur
                 seg_shflx_rate = seg_shflx / _seg_dur  # W/m²
                 seg_lhflx_rate = seg_lhflx / _seg_dur  # W/m²
+                # Segment-MEAN radiative fluxes / T_low (time integrals from
+                # the carry / segment duration) instead of the segment-end
+                # instantaneous held_* values: the held snapshots put a full
+                # day/night diurnal alias into every CMOR Amon "monthly mean"
+                # (fixed-UTC sampling) and mixed instantaneous fluxes into
+                # the energy budget. _dm_carry = ensemble mean under
+                # ensembles, the plain carry otherwise (accums averaged
+                # member-wise, consistent with seg_precip).
+                seg_sw_up_toa = _dm_carry.sw_up_toa_accum / _seg_dur
+                seg_lw_up_toa = _dm_carry.lw_up_toa_accum / _seg_dur
+                seg_sw_down_toa = _dm_carry.sw_down_toa_accum / _seg_dur
+                seg_sw_net_sfc = _dm_carry.sw_net_sfc_accum / _seg_dur
+                seg_lw_net_sfc = _dm_carry.lw_net_sfc_accum / _seg_dur
+                seg_t_low_mean = _dm_carry.t_low_accum / _seg_dur
 
                 diag_info = self._sync_and_collect_diagnostics(
                     elapsed_day=elapsed_day,
@@ -6385,15 +6435,16 @@ class ModelDriver:
                     sst=sst,
                     sic=sic,
                     precip_total=seg_precip_rate,
-                    sw_up_toa=held_sw_up_toa,
-                    lw_up_toa=held_lw_up_toa,
-                    sw_net_sfc=held_sw_net_sfc,
-                    lw_net_sfc=held_lw_net_sfc,
-                    sw_down_toa=held_sw_down_toa,
+                    sw_up_toa=seg_sw_up_toa,
+                    lw_up_toa=seg_lw_up_toa,
+                    sw_net_sfc=seg_sw_net_sfc,
+                    lw_net_sfc=seg_lw_net_sfc,
+                    sw_down_toa=seg_sw_down_toa,
                     T_ice=cfg.T_ice,
                     lat_deg_grid=lat_deg_grid,
                     shflx=seg_shflx_rate,
                     lhflx=seg_lhflx_rate,
+                    t_low_mean=seg_t_low_mean,
                     q_s=self.tracers.get("q_s") if isinstance(self.tracers, dict) else None,
                     q_g=self.tracers.get("q_g") if isinstance(self.tracers, dict) else None,
                 )

@@ -139,6 +139,12 @@ class TestEnsembleDiagnosticCollector:
             precip_accum=jnp.zeros(s2),
             shflx_accum=jnp.zeros(s2),
             lhflx_accum=jnp.zeros(s2),
+            sw_up_toa_accum=jnp.zeros(s2),
+            lw_up_toa_accum=jnp.zeros(s2),
+            sw_down_toa_accum=jnp.zeros(s2),
+            sw_net_sfc_accum=jnp.zeros(s2),
+            lw_net_sfc_accum=jnp.zeros(s2),
+            t_low_accum=jnp.zeros(s2),
             T_land=jnp.zeros(s2),
         )
 
