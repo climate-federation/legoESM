@@ -186,7 +186,7 @@ _CASE_FAMILIES: dict[str, frozenset[str]] = {
     "williamson6":        frozenset({"sw", "hughes"}),
     "cosine_bell":        frozenset({"sw", "hughes"}),
     "cosine_bell_a0":     frozenset({"sw"}),  # issue 504 alpha=0 diagnostic (not in curated hughes set)
-    "colliding_modons":   frozenset({"sw"}),  # issue 521 Lin et al. (2017), cubed_sphere only
+    "colliding_modons":   frozenset({"sw"}),  # issue 521 Lin et al. (2017), cube + latlon
     # Hydrostatic dry
     "baroclinic":         frozenset({"hydro", "hughes"}),  # canonical J-W
     "rotated_baroclinic": frozenset({"hydro", "dcmip2008", "hughes"}),
@@ -283,10 +283,14 @@ def _build_test_matrix() -> list[TestCase]:
                 {"test_num": 6}))
         # Colliding modons (#521, Lin et al. 2017) — non-rotating two-soliton
         # collision; wired for cubed_sphere (FV3 case 8) via the edge-midpoint
-        # analytic init.  Full return-to-IC is ~100 days; quick smoke = 2 days.
-        # Other grids: IC helpers exist in tests/test_cases/colliding_modons.py
-        # but the non-rotating run path is not yet wired (follow-up).
-        if g == "cubed_sphere":
+        # analytic init, and for latlon (C-grid) via the face-midpoint
+        # analytic init (the W6 pattern — winds depend on lon AND lat; the
+        # non-rotating grid comes from ``create_latlon_grid(omega=0)``).
+        # Full return-to-IC is ~100 days; quick smoke = 2 days.
+        # ico/spectral: IC helpers exist in
+        # tests/test_cases/colliding_modons.py but their non-rotating run
+        # paths are not yet wired (follow-up).
+        if g in ("cubed_sphere", "latlon"):
             matrix.append(TestCase(
                 "shallow_water", "colliding_modons", g, res[g], "none", 100, 1,
                 {"test_num": 8}))
@@ -2499,13 +2503,21 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             williamson_test2_exact_cgrid, compute_error_norms_cgrid)
 
         n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
-        grid = create_latlon_grid(n_lat, n_lon)
+        # Colliding modons (#521) is NON-ROTATING: f derives from the grid's
+        # omega, so a zero-omega grid gives f = 0 everywhere (mirrors the
+        # cube branch's create_cubed_sphere(n, omega=0.0)).
+        grid = (create_latlon_grid(n_lat, n_lon, omega=0.0) if test_num == 8
+                else create_latlon_grid(n_lat, n_lon))
         # CFL-safe dt for gravity waves near poles
         import math as _m
         from legoesm import constants as _consts_grav
         _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
             _m.pi / 2 - grid.dlat / 2)
-        _c_grav = _m.sqrt(_consts_grav.g * 3000.0)
+        # Gravity-wave speed from the case's actual depth: the modons run
+        # on h0 = 5000 m (sqrt(g*5000) ~ 221 m/s), the Williamson cases
+        # on ~3000 m equivalent.
+        _c_grav = _m.sqrt(_consts_grav.g * (5000.0 if test_num == 8
+                                            else 3000.0))
         dt = min(300.0, 0.5 * _dx_pole / _c_grav)
         # A_h must respect diffusion CFL: A_h*dt/dx_pole^2 < 0.5
         _A_h_max = 0.4 * _dx_pole**2 / dt
@@ -2547,6 +2559,36 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             state = CGridLatLonShallowWaterState(
                 h=_w6.h.data, u=_u_east_uface, v=_v_north_vface,
                 h_s=jnp.zeros_like(_w6.h.data),
+            )
+        elif test_num == 8:
+            # Colliding modons (#521): two zonal Gaussian bursts, constant
+            # depth, NON-ROTATING (omega=0 grid above).  Same face-midpoint
+            # analytic wind init as W6 (winds depend on lon AND lat), via
+            # _modon_winds_geo; v_north is identically zero (pole-safe).
+            from tests.test_cases.colliding_modons import (
+                colliding_modons_latlon, _modon_winds_geo,
+            )
+            _cm = colliding_modons_latlon(grid)
+            _R = grid.radius
+            # u at lon-faces (n_lat, n_lon+1): wrap-periodic.
+            _lon_f_1d = grid.lon - 0.5 * grid.dlon
+            _lon_f_full = jnp.concatenate(
+                [_lon_f_1d, _lon_f_1d[0:1] + 2.0 * jnp.pi]
+            )
+            _u_east_uface, _ = _modon_winds_geo(
+                _lon_f_full[None, :], grid.lat[:, None], _R,
+            )
+            # v at lat-faces (n_lat+1, n_lon): identically zero for the
+            # purely-zonal modon winds.
+            _lat_f_1d = jnp.linspace(
+                -0.5 * jnp.pi, 0.5 * jnp.pi, grid.n_lat + 1
+            )
+            _, _v_north_vface = _modon_winds_geo(
+                grid.lon[None, :], _lat_f_1d[:, None], _R,
+            )
+            state = CGridLatLonShallowWaterState(
+                h=_cm.h.data, u=_u_east_uface, v=_v_north_vface,
+                h_s=jnp.zeros_like(_cm.h.data),
             )
         else:
             state = (williamson_test2_cgrid(grid) if test_num == 2
