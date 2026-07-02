@@ -70,6 +70,22 @@ _SURFACE_LIN_DT_K = 0.1
 # numerics safety cap, not a tunable climate parameter.
 _MAX_LAND_EXCHANGE_COEFF = 0.02
 
+# Physical floor on the CONDENSATION (negative) latent flux [W/m2] for the
+# multilayer land surface energy balance. WHY (issue #730): at cold start a
+# cold/dry surface under moister advected air can produce a spurious ~-3000 W/m2
+# condensation flux (vs real frost/dew ~O(10-100) W/m2), which the surface energy
+# balance then balances at an unphysical hot skin temperature and drives the thin
+# (~2 cm) top soil layer to a runaway (verified in-run: land skin 224 -> 1156 K
+# -> NaN in the coupled AMIP run WITHOUT this floor). Flooring the condensation
+# at -150 W/m2 -- safely ABOVE any real frost/dew magnitude, so climatologically
+# near-inert (it binds only on the pathological cold-start columns) -- removes the
+# spurious shock: the coupled C12 5-day then runs STABLY and PHYSICALLY (land skin
+# bounded [227,328] K, atmosphere [191,306] K, no NaN). Only CONDENSATION
+# (negative lhflx) is floored; evaporation (positive) and sensible heat stay
+# uncapped so the SEB keeps its self-limiting feedback. A numerics safety floor
+# (peer to _MAX_LAND_EXCHANGE_COEFF), not a climate-tuning knob; None disables it.
+_LAND_CONDENSATION_FLOOR_W = -150.0
+
 
 def step_multilayer_land(
     state: MultiLayerLandState,
@@ -250,6 +266,10 @@ def step_multilayer_land(
             config.Cd_land, config.Ch_land,
             L_latent=L_eff,
         )
+
+    if _LAND_CONDENSATION_FLOOR_W is not None:
+        # Bound the (negative) cold-start condensation shock; evaporation stays free.
+        lhflx = jnp.maximum(lhflx, _LAND_CONDENSATION_FLOOR_W)
 
     # --- Surface albedo (snow-mass dependent) ---
     # Use the SAME effective snow mass as the bulk-flux phase decision
@@ -455,6 +475,10 @@ def step_multilayer_land(
             config.Cd_land, config.Ch_land,
             L_latent=L_eff,
         )
+    if _LAND_CONDENSATION_FLOOR_W is not None:
+        # Consistency with the floored main flux (so the FD conductance slope is
+        # the slope of the FLOORED flux, keeping the semi-implicit lambda valid).
+        lhflx_lin = jnp.maximum(lhflx_lin, _LAND_CONDENSATION_FLOOR_W)
     lambda_lw = 4.0 * emissivity * constants.sigma_sb * T_sfc ** 3
     lambda_sh = jnp.maximum((shflx_lin - shflx) / _SURFACE_LIN_DT_K, 0.0)
     # Realised-evaporation fraction in [0, 1]: the latent flux entering the soil

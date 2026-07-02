@@ -252,6 +252,7 @@ def kpp_vertical_mixing(
     apply_diffusion: bool = True,
     dt: float | None = None,
     eos_fn=None,
+    u_stokes: jnp.ndarray | None = None,
 ) -> VerticalMixingOutput:
     """Apply LMD94-style KPP vertical mixing.
 
@@ -341,6 +342,39 @@ def kpp_vertical_mixing(
     w_m, w_s = _kpp_velocity_scales(
         u_star, B_f, d, h_bl[..., jnp.newaxis], cfg, eps,
     )
+
+    # --- Langmuir turbulence enhancement (KPP-Langmuir) ---
+    # Langmuir circulations (wind + Stokes-drift shear) enhance surface
+    # boundary-layer mixing.  Multiply the KPP velocity scales by the
+    # enhancement factor eps_L = sqrt(1 + C_L / La_t^2) >= 1, where La_t =
+    # sqrt(u* / u_s0) is the turbulent Langmuir number (McWilliams & Sullivan
+    # 2000; Li et al. 2016 CVMix).  With a surface Stokes-drift input
+    # ``u_stokes`` (from a wave model / forcing) La_t is spatially resolved;
+    # without one it falls back to the fully-developed-sea value
+    # ``langmuir_number_default`` (~0.3, Van Roekel et al. 2012) — a uniform
+    # enhancement where wind mixing dominates.  eps_L >= 1 always (C_L, La_t >
+    # 0) so this only ENHANCES mixing, never reduces it; it scales the BL
+    # diffusivity K = h*w*G (conservation of the implicit solve is unaffected).
+    # Gated on the static config bool (feature gating); default off leaves
+    # w_m / w_s byte-identical to classical KPP.  The bulk-Richardson MLD
+    # diagnosis (V_t^2) is intentionally NOT enhanced here — Langmuir
+    # boundary-layer deepening is a documented refinement.
+    if cfg.enable_langmuir:
+        if u_stokes is not None:
+            la_t = jnp.sqrt(u_star / jnp.maximum(u_stokes, 1e-4))  # coeff-ok: Stokes floor [m/s]
+        else:
+            la_t = jnp.full_like(u_star, cfg.langmuir_number_default)
+        # Floor the radicand at 1.0 so eps_L >= 1 for ANY config value (a
+        # traced-safe safety floor: Langmuir must ENHANCE, never reduce, mixing,
+        # and it avoids a NaN sqrt if langmuir_coeff is set negative).  Both
+        # langmuir params are tunable (tier 2) so they may be traced — a Python
+        # branch/raise would break the training trace; the floor is a no-op for
+        # the spec-bounded positive range.
+        eps_langmuir = jnp.sqrt(jnp.maximum(
+            1.0, 1.0 + cfg.langmuir_coeff / jnp.maximum(la_t, 1e-3) ** 2  # coeff-ok: La_t floor
+        ))[..., jnp.newaxis]
+        w_m = w_m * eps_langmuir
+        w_s = w_s * eps_langmuir
 
     # --- BL viscosity (momentum, w_m) and diffusivity (scalar, w_s) ---
     K_bl_m_full = jnp.minimum(h_bl[..., jnp.newaxis] * w_m * G, cfg.K_max)

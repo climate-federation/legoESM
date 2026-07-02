@@ -868,6 +868,15 @@ class LatLonCGridOceanModel:
         builder raises ``TracerArrayConversionError`` — re-raised with an
         actionable message.
         """
+        # Fail fast BEFORE building anything: build_rigid_lid_data runs the
+        # global streamfunction-basis solves + island line integrals, which are
+        # single-rank only (rank-local CG dots, domain-wide jnp.sum).  This path
+        # is reached EAGERLY from seed_scan_carry (integrate/integrate_scan), so
+        # the guard fires before the jitted scan on those entry points.
+        from legoesm.ocean.dynamics.rigid_lid_latlon_cgrid import (
+            assert_rigid_lid_single_rank,
+        )
+        assert_rigid_lid_single_rank()
         if self.rigid_lid_data is not None:
             return self.rigid_lid_data
         from legoesm.ocean.dynamics.rigid_lid_islands import build_rigid_lid_data
@@ -3900,6 +3909,17 @@ class LatLonCGridOceanModel:
         LatLonCGridOceanState
         """
         self._ensure_vertex_mask(state)
+        if self.config.barotropic.barotropic_solver == "rigid_lid":
+            # Eager fail-fast (host-side, before the jitted body): the rigid-lid
+            # streamfunction solve is single-rank only.  The in-body guard runs
+            # at TRACE time only, so without this eager check a distributed run
+            # could reuse a serially-traced compiled _step_jitted.  Cheap host
+            # predicate; also covers integrate()/step_checked (both call step)
+            # and integrate_scan's jax.eval_shape(self.step, ...) probe.
+            from legoesm.ocean.dynamics.rigid_lid_latlon_cgrid import (
+                assert_rigid_lid_single_rank,
+            )
+            assert_rigid_lid_single_rank()
         return self._step_jitted(
             state, dt, freshwater, surface_forcing, sponge,
             grid=grid, vertex_mask=vertex_mask)

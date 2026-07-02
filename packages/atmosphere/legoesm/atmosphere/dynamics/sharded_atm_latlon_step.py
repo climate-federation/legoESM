@@ -74,11 +74,20 @@ def gather_state_atm_latlon(
     """Inverse of :func:`shard_state_atm_latlon`: replicate every leaf and
     rebuild the full ``(n_lat+1, ...)`` ``v`` by re-appending the zero north
     pole-wall face. Bit-comparable to the single-device state (whose top v-face
-    is the pole wall == 0)."""
+    is the pole wall == 0).
+
+    Multi-controller (route-B ``jax.distributed``, mesh spanning processes):
+    replication routes through a jit-compiled identity instead of
+    ``device_put`` (see :func:`legoesm.parallel.latlon_spmd.replicate_leaf`,
+    the primitive shared with the ocean gather); the single-process path is
+    byte-unchanged."""
+    from legoesm.parallel.latlon_spmd import replicate_leaf
+
     rep = NamedSharding(mesh, P())
+    _mp = jax.process_count() > 1
 
     def _get(arr):
-        return jax.device_put(arr, rep)
+        return replicate_leaf(arr, rep, multiprocess=_mp)
 
     v_lower = _get(state.v)
     v_full = jnp.concatenate([v_lower, jnp.zeros_like(v_lower[:1])], axis=0)

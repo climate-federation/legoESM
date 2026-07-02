@@ -143,6 +143,9 @@ def build_vertical_mixing_config_from_args(
             K_bg=args.kpp_k_bg,
             K_conv=args.kpp_k_conv,
             A_bg=args.kpp_a_bg,
+            enable_langmuir=args.langmuir,
+            langmuir_coeff=args.langmuir_coeff,
+            langmuir_number_default=args.langmuir_number_default,
         ),
     )
 
@@ -325,6 +328,15 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--kpp-ri-crit", type=float,
                    default=_DEFAULT_KPP_CONFIG.Ri_crit,
                    help="KPP critical bulk Richardson number")
+    p.add_argument("--langmuir", action="store_true",
+                   help="Enable KPP-Langmuir wave-enhanced surface mixing "
+                        "(eps_L = sqrt(1 + C_L/La_t^2) on the KPP velocity scales).")
+    p.add_argument("--langmuir-coeff", type=float,
+                   default=_DEFAULT_KPP_CONFIG.langmuir_coeff,
+                   help="KPP-Langmuir enhancement coefficient C_L")
+    p.add_argument("--langmuir-number-default", type=float,
+                   default=_DEFAULT_KPP_CONFIG.langmuir_number_default,
+                   help="Fallback turbulent Langmuir number (no Stokes-drift input)")
     p.add_argument("--kpp-k-max", type=float,
                    default=_DEFAULT_KPP_CONFIG.K_max,
                    help="KPP maximum diffusivity [m^2/s]")
@@ -1686,6 +1698,98 @@ def _preload_jra55_full_cache(jra55_state):
     return all_records, record_days, cache_length_days
 
 
+def _jra55_block_record_window(start_step_idx, n_steps, dt,
+                               n_cache_records, cycle):
+    """Compute the cache-record window bracketing one scan block.
+
+    Shared by ``_slice_preloaded_records`` and
+    ``_preload_jra55_raw_records`` so the wrap/clock arithmetic exists
+    exactly once.
+
+    Returns ``(indices, record_days, start_day, start_day_forcing)``:
+
+    - ``indices``: list of cache record indices (wrap-aware in cycle
+      mode: a block straddling the repeat-year boundary reads the tail
+      of the cache followed by the head of the next cycle).
+    - ``record_days``: ``(n,)`` fractional days of each selected record
+      on the *forcing clock*.  Monotonic: records read from the front of
+      the cache after a repeat-year wrap get ``+ cache_length_days`` so
+      linear interpolation stays correct across the wrap boundary.
+    - ``start_day``: RAW simulation day of the block's first step — the
+      solar-zenith / spinup-ramp clock.
+    - ``start_day_forcing``: block-start day on the forcing clock —
+      equal to ``start_day`` when not cycling, else ``start_day mod
+      cache_length_days`` (aligned with ``record_days``).
+
+    Raises ``IndexError`` when ``cycle=False`` and the block needs a
+    record past the cache end — same contract/message style as
+    ``legoesm.forcing.jra55_do.load_jra55_slice`` (no silent synthetic
+    forcing from a clamped stale record).
+    """
+    from legoesm.forcing.jra55_do import RECORDS_PER_DAY
+
+    cache_length_days = n_cache_records / RECORDS_PER_DAY
+    start_day = start_step_idx * dt / 86400.0
+    end_day = (start_step_idx + n_steps - 1) * dt / 86400.0
+
+    if cycle:
+        start_day_f = start_day % cache_length_days
+        # Continuous forcing clock within the block: do NOT re-mod the
+        # end — a block straddling the wrap keeps increasing past
+        # cache_length_days and reads unwrapped record_days.
+        end_day_f = start_day_f + (end_day - start_day)
+        if end_day - start_day >= cache_length_days:
+            raise ValueError(
+                f"forcing block spans {end_day - start_day:.3f} days >= "
+                f"the full cache cycle ({cache_length_days:.3f} days); "
+                "reduce the block size (diag_every)."
+            )
+    else:
+        start_day_f = start_day
+        end_day_f = end_day
+
+    i_first = int(np.floor(start_day_f * RECORDS_PER_DAY))
+    i_last = int(np.floor(end_day_f * RECORDS_PER_DAY)) + 1  # upper bracket
+
+    if not cycle:
+        # The upper bracket is genuinely needed only when the final step
+        # falls strictly inside an inter-record interval (matches
+        # _floor_indices_and_alpha's alpha==0 shortcut in jra55_do).
+        end_pos = end_day_f * RECORDS_PER_DAY
+        i_hi_needed = int(np.floor(end_pos))
+        if end_pos > i_hi_needed:
+            i_hi_needed += 1
+        if i_hi_needed >= n_cache_records:
+            raise IndexError(
+                f"day={end_day_f} (cache slot {i_hi_needed}) exceeds "
+                f"cache length {n_cache_records}"
+            )
+        i_last = min(i_last, n_cache_records - 1)
+        indices = list(range(i_first, i_last + 1))
+        wrap_at = None
+    elif i_last >= n_cache_records:
+        # Repeat-year wrap: tail of the cache + head of the next cycle.
+        i_last_wrapped = i_last - n_cache_records
+        if i_last_wrapped >= n_cache_records:
+            raise ValueError(
+                f"forcing block wraps the {cache_length_days:.3f}-day "
+                "cache more than once; reduce the block size "
+                "(diag_every)."
+            )
+        indices = (list(range(i_first, n_cache_records))
+                   + list(range(0, i_last_wrapped + 1)))
+        wrap_at = n_cache_records - i_first
+    else:
+        indices = list(range(i_first, i_last + 1))
+        wrap_at = None
+
+    record_days_np = np.asarray(indices, dtype=np.float64) / RECORDS_PER_DAY
+    if wrap_at is not None:
+        record_days_np[wrap_at:] += cache_length_days
+    record_days = jnp.asarray(record_days_np)
+    return indices, record_days, start_day, start_day_f
+
+
 def _slice_preloaded_records(start_step_idx, n_steps, dt, jra55_state,
                              all_records, all_record_days, cache_length_days):
     """Slice bracketing records from the pre-loaded cache for one block.
@@ -1693,37 +1797,20 @@ def _slice_preloaded_records(start_step_idx, n_steps, dt, jra55_state,
     Same interface as ``_preload_jra55_raw_records`` but reads from
     in-memory arrays instead of Zarr.
     """
-    from legoesm.forcing.jra55_do import RECORDS_PER_DAY
-
     cycle = jra55_state.get("cycle", False)
-    n_cache_records = all_record_days.shape[0]
+    n_cache_records = int(all_record_days.shape[0])
 
-    start_day = start_step_idx * dt / 86400.0
-    end_day = (start_step_idx + n_steps - 1) * dt / 86400.0
-
-    if cycle:
-        start_day_c = start_day % cache_length_days
-        end_day_c = end_day % cache_length_days
-    else:
-        start_day_c = start_day
-        end_day_c = end_day
-
-    i_first = int(np.floor(start_day_c * RECORDS_PER_DAY))
-    i_last = int(np.floor(end_day_c * RECORDS_PER_DAY)) + 1
-    i_last = min(i_last, n_cache_records - 1)
-
-    if cycle and i_last < i_first:
-        indices = list(range(i_first, n_cache_records)) + list(range(0, i_last + 1))
-    else:
-        indices = list(range(i_first, i_last + 1))
+    indices, record_days, start_day, start_day_f = (
+        _jra55_block_record_window(
+            start_step_idx, n_steps, dt, n_cache_records, cycle))
 
     raw_stack = {var: all_records[var][jnp.array(indices)] for var in all_records}
     runoff_stack = raw_stack["friver"]
-    record_days = all_record_days[jnp.array(indices)]
 
     record_meta = {
         "record_days": record_days,
         "block_start_day": float(start_day),
+        "block_start_day_forcing": float(start_day_f),
         "dt": float(dt),
         "n_steps": int(n_steps),
         "cache_length_days": float(cache_length_days),
@@ -1751,8 +1838,11 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
       prra, prsn)
     - ``runoff_stack``: ``(n_records, n_lat, n_lon)`` friver
     - ``record_meta``: dict with ``record_days`` (fractional day of each
-      record), ``block_start_day``, ``dt``, ``n_steps`` — enough for the
-      scan body to compute interpolation weights
+      record on the forcing clock, unwrapped across the repeat-year
+      boundary), ``block_start_day`` (RAW simulation day — solar-zenith
+      clock), ``block_start_day_forcing`` (cycled forcing clock aligned
+      with ``record_days``), ``dt``, ``n_steps`` — enough for the scan
+      body to compute interpolation weights
     """
     import xarray as xr
     from legoesm.forcing.jra55_do import (
@@ -1767,29 +1857,10 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
     n_cache_records = int(ds.attrs["n_records"])
     cache_length_days = n_cache_records / RECORDS_PER_DAY
 
-    # Find the range of 3-hourly record indices needed.
-    start_day = start_step_idx * dt / 86400.0
-    end_day = (start_step_idx + n_steps - 1) * dt / 86400.0
-
-    if cycle:
-        start_day_c = start_day % cache_length_days
-        end_day_c = end_day % cache_length_days
-    else:
-        start_day_c = start_day
-        end_day_c = end_day
-
-    i_first = int(np.floor(start_day_c * RECORDS_PER_DAY))
-    i_last = int(np.floor(end_day_c * RECORDS_PER_DAY)) + 1  # +1 for upper bracket
-    i_last = min(i_last, n_cache_records - 1)
-
-    # Handle wrap-around for cycling
-    if cycle and i_last < i_first:
-        # Block spans the cache boundary — read both pieces
-        indices = list(range(i_first, n_cache_records)) + list(range(0, i_last + 1))
-    else:
-        indices = list(range(i_first, i_last + 1))
-
-    n_records = len(indices)
+    # Find the range of 3-hourly record indices needed (wrap-aware).
+    indices, record_days, start_day, start_day_f = (
+        _jra55_block_record_window(
+            start_step_idx, n_steps, dt, n_cache_records, cycle))
 
     # Bulk-read each variable
     var_data = {}
@@ -1798,11 +1869,6 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
         var_data[var] = jnp.asarray(slab, dtype=jnp.float64)
 
     ds.close()
-
-    # Record fractional days (for interpolation inside scan)
-    record_days = jnp.asarray(
-        [idx / RECORDS_PER_DAY for idx in indices], dtype=jnp.float64,
-    )
 
     raw_stack = {var: var_data[var] for var in JRA55_VARIABLES}
 
@@ -1822,6 +1888,7 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
     record_meta = {
         "record_days": record_days,          # (n_records,) fractional days
         "block_start_day": float(start_day),
+        "block_start_day_forcing": float(start_day_f),
         "dt": float(dt),
         "n_steps": int(n_steps),
         "cache_length_days": float(cache_length_days),
@@ -2080,12 +2147,16 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
     lat_2d = jra55_state["lat_2d"]
     lon_2d = jra55_state["lon_2d"]
     _rpd = float(RECORDS_PER_DAY)
+    # Static (compile-time) repeat-year-forcing flag.  Selects which clock
+    # drives the solar-zenith insolation geometry (see the scan body).
+    cycle = bool(jra55_state.get("cycle", False))
 
     def _make_block_fn(n_steps_block):
         """Create a JIT-compiled block function for a fixed block size."""
         @jax.jit
         def block_fn(state, raw_stack, runoff_records, record_days,
-                     block_start_day, ice_state=None):
+                     block_start_day, block_start_day_forcing,
+                     ice_state=None):
             dt_days = dt / 86400.0
 
             def step_body(carry, idx):
@@ -2093,12 +2164,26 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
                     state_in, ice_in = carry
                 else:
                     state_in = carry
-                # Current fractional day
+                # Two clocks (see the insolation + ramp notes below):
+                # - ``day``: RAW simulation day (elapsed run time).  Always
+                #   drives the spinup ramp; drives the solar-zenith clock only
+                #   when NOT cycling (cycle=False ⇒ day_f == day).
+                # - ``day_f``: forcing clock — the CYCLED block-start day
+                #   (aligned with ``record_days``, which the preloaders
+                #   unwrap across the repeat-year cache boundary).  Drives the
+                #   JRA55 record interpolation, and — when cycle=True — the
+                #   solar-zenith insolation clock, so the prescribed rsds and
+                #   the computed zenith stay phase-locked.  Using the raw day
+                #   for interpolation broke every cycle after the first:
+                #   ``day - record_days[0]`` was off by k*cache_length,
+                #   i_lo clipped to the last slice record, and each step
+                #   read one stale record.
                 day = block_start_day + idx * dt_days
+                day_f = block_start_day_forcing + idx * dt_days
 
                 # Find bracketing records: record_days is sorted,
                 # find floor position relative to the first record.
-                local_pos = day * _rpd - record_days[0] * _rpd
+                local_pos = day_f * _rpd - record_days[0] * _rpd
                 i_lo = jnp.clip(
                     jnp.floor(local_pos).astype(jnp.int32),
                     0, record_days.shape[0] - 2,
@@ -2108,7 +2193,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
                 day_hi = record_days[i_hi]
                 alpha = jnp.clip(
                     jnp.where(day_hi > day_lo,
-                              (day - day_lo) / (day_hi - day_lo), 0.0),
+                              (day_f - day_lo) / (day_hi - day_lo), 0.0),
                     0.0, 1.0,
                 )
 
@@ -2131,8 +2216,25 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
                 # match jra55_to_atm_surface / _shared.virtual_temperature.
                 T_v = tas * (1.0 + (1.0 / _const.epsilon - 1.0) * huss)
                 rho_a = psl / (_const.R_d * T_v)
-                doy = jnp.mod(day, 365.0) + 1.0
-                hour = jnp.mod(day, 1.0) * 24.0
+                # Insolation clock (day-of-year + diurnal hour), which sets the
+                # solar zenith and hence zenith-dependent surface albedo:
+                #   - cycle=True (repeat-year forcing): use the CYCLED forcing
+                #     clock ``day_f`` so the solar geometry stays phase-locked
+                #     to the repeated rsds/rlds records.  Using the RAW ``day``
+                #     drifts the seasonal doy (and, for a non-integer cache
+                #     length, the diurnal hour) whenever the cache length is
+                #     not a whole multiple of 365 days (e.g. a 366-day
+                #     leap-year RYF cache), biasing the surface albedo.
+                #   - cycle=False: ``day_f == day`` (no wrap), so this is
+                #     byte-identical to the raw-day clock — the common
+                #     non-cycled path is unchanged.
+                # The SPINUP RAMP (below) intentionally stays on the RAW
+                # ``day``: it is a function of elapsed run time, not forcing
+                # time.  ``cycle`` is a static Python bool (compile-time
+                # feature gate), so this branch is resolved at trace time.
+                day_insol = day_f if cycle else day
+                doy = jnp.mod(day_insol, 365.0) + 1.0
+                hour = jnp.mod(day_insol, 1.0) * 24.0
                 cos_z = cos_zenith_angle(lat_2d, lon_2d, doy, hour)
 
                 atm = AtmToSurface(
@@ -2390,7 +2492,8 @@ def _check_finite(state, grid_type):
 # ===========================================================================
 
 
-def _save_restart(state, day, step, output_dir, ice_state=None):
+def _save_restart(state, day, step, output_dir, ice_state=None,
+                  grid_type="latlon"):
     """Save a state restart in the global-overturning npz format.
 
     Mirrors ``scripts/run/global_overturning/run_global_overturning_*``
@@ -2410,12 +2513,26 @@ def _save_restart(state, day, step, output_dir, ice_state=None):
         fields are persisted under ``ice_<field>`` keys so a checkpoint/resume
         does NOT silently reset the ice pack to the zero cold start.  ``None``
         (default, no sea ice) writes the legacy ocean-only restart unchanged.
+    grid_type : str
+        The run's grid selection (one of ``GRID_TYPES``), stored in the npz
+        for provenance AND validated on load: ``_load_restart`` compares it
+        against the resuming run's grid_type and refuses a cross-grid restart
+        (an MPAS checkpoint reconstructed from a latlon template can pass
+        shape checks by coincidence yet be physically meaningless).
+        Historically this was hardcoded to ``"latlon"``, mislabeling
+        MPAS/tripole checkpoints; ``_run_omip_loop`` now threads the actual
+        grid type.
     """
+    if grid_type not in GRID_TYPES:
+        raise ValueError(
+            f"Unknown grid_type {grid_type!r} for restart provenance; "
+            f"expected one of {GRID_TYPES}."
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "step": int(step),
         "time_days": float(day),
-        "grid_type": "latlon",
+        "grid_type": grid_type,
     }
     for f in state._fields:
         obj = getattr(state, f)
@@ -2458,7 +2575,7 @@ def _load_ice_restart(restart_path, ice_template):
     return ice_template._replace(**replacements)
 
 
-def _load_restart(restart_path, template_state):
+def _load_restart(restart_path, template_state, grid_type=None):
     """Load a restart npz and populate the state from a template.
 
     The template state (from ``_init_rest_state``) provides the pytree
@@ -2473,6 +2590,15 @@ def _load_restart(restart_path, template_state):
     template_state : ocean state
         A freshly initialized state with correct grid, masks, and
         z-coordinate.
+    grid_type : str or None
+        The resuming run's grid selection.  When supplied (not ``None``) and
+        the restart npz carries a ``grid_type`` key, a mismatch is a hard
+        error — reconstructing an MPAS restart from a latlon template (or
+        vice-versa) can pass per-field shape checks by coincidence yet be
+        physically meaningless.  Legacy restarts written before the
+        ``grid_type`` key existed lack it and keep the prior best-effort
+        behavior (no check).  ``None`` (a bare positional call) skips the
+        guard entirely.
 
     Returns
     -------
@@ -2486,6 +2612,20 @@ def _load_restart(restart_path, template_state):
     data = np.load(restart_path)
     restart_day = float(data["time_days"])
     restart_step = int(data["step"])
+
+    # Provenance guard: refuse a cross-grid restart.  Only enforced when the
+    # caller supplies the run's grid_type AND the npz records one (legacy
+    # restarts predate the key and fall through unchanged).
+    if grid_type is not None and "grid_type" in data:
+        saved_grid_type = str(data["grid_type"])
+        if saved_grid_type != grid_type:
+            raise ValueError(
+                f"Restart grid_type {saved_grid_type!r} does not match the "
+                f"run's grid_type {grid_type!r} ({restart_path}); loading a "
+                "restart across grids reconstructs the pytree from the wrong "
+                "template.  Re-run on the matching grid or regenerate the "
+                "restart."
+            )
 
     replacements = {}
     for f in template_state._fields:
@@ -2600,7 +2740,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         ):
             return
         fname = _save_restart(state, day, step, checkpoint_dir,
-                              ice_state=ice_state)
+                              ice_state=ice_state, grid_type=grid_type)
         if _snapshot_fn is not None:
             try:
                 _snapshot_fn(fname)
@@ -2704,6 +2844,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                         state, raw_stack, runoff_records,
                         record_meta["record_days"],
                         jnp.float64(record_meta["block_start_day"]),
+                        jnp.float64(record_meta["block_start_day_forcing"]),
                         ice_state,
                     )
                 else:
@@ -2711,6 +2852,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                         state, raw_stack, runoff_records,
                         record_meta["record_days"],
                         jnp.float64(record_meta["block_start_day"]),
+                        jnp.float64(record_meta["block_start_day_forcing"]),
                     )
             else:
                 if _ice_on:
@@ -2830,7 +2972,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
 
             if (steps_per_ckpt is not None and
                     (step % steps_per_ckpt == 0 or step == n_steps)):
-                fname = _save_restart(state, day, step, checkpoint_dir, ice_state=ice_state)
+                fname = _save_restart(state, day, step, checkpoint_dir,
+                                      ice_state=ice_state, grid_type=grid_type)
                 if _snapshot_fn is not None:
                     try:
                         _snapshot_fn(fname)
@@ -2883,7 +3026,9 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 )
                 if (steps_per_ckpt is not None and
                         (step % steps_per_ckpt == 0 or step == n_steps)):
-                    fname = _save_restart(state, day, step, checkpoint_dir, ice_state=ice_state)
+                    fname = _save_restart(state, day, step, checkpoint_dir,
+                                          ice_state=ice_state,
+                                          grid_type=grid_type)
                     if _snapshot_fn is not None:
                         try:
                             _snapshot_fn(fname)
@@ -3007,7 +3152,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             steps_per_ckpt = max(1, int(round(checkpoint_days * 86400.0 / dt)))
             if step % steps_per_ckpt == 0 or step == n_steps:
                 fname = _save_restart(state, day_now, step, checkpoint_dir,
-                                      ice_state=ice_state)
+                                      ice_state=ice_state, grid_type=grid_type)
                 # Auto-generate snapshot plot alongside the restart.
                 if _snapshot_fn is not None:
                     try:
@@ -3753,7 +3898,7 @@ def run_omip_single(grid_type: str, args) -> dict:
               f"{float(S_woa_masked[state.land_mask.data > 0.5].max()):.1f}] PSU")
     if args.restart is not None:
         state, restart_day, restart_step = _load_restart(
-            args.restart, state,
+            args.restart, state, grid_type=grid_type,
         )
         start_step = restart_step
         print(f"  Restart: loaded day {restart_day:.1f} (step {restart_step}) "
@@ -3775,9 +3920,11 @@ def run_omip_single(grid_type: str, args) -> dict:
         )
         # Provide the ocean mask for global freeze-cap when no sponge.
         jra55_state["_ocean_mask_2d"] = state.land_mask.data > 0.5
-        # GPU-interp path: use lax.scan block for all grids (MPAS
-        # regridding is handled in _preload_jra55_raw_records).
-        jra55_state["_gpu_interp"] = True
+        # GPU-interp path (default): interpolation inside the lax.scan
+        # block for all grids (MPAS regridding is handled in
+        # _preload_jra55_raw_records).  --no-gpu-interp routes to the
+        # CPU-interp block path (_build_jra55_block_fn).
+        jra55_state["_gpu_interp"] = bool(args.gpu_interp)
         # Restart: restore the prognostic sea-ice state so a checkpointed
         # --jra55-sea-ice run does NOT resume on the zero cold-start ice.  An
         # old ocean-only restart (no ice_* keys) returns None -> cold start
