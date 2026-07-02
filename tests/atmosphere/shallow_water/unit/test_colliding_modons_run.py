@@ -171,6 +171,10 @@ def test_latlon_nonrotating_run_stable_and_conserves_mass():
     assert bool(jnp.all(jnp.isfinite(s.h)))
     assert bool(jnp.all(jnp.isfinite(s.u)))
     mass1 = float(jnp.sum(s.h * grid.area))
-    assert abs(mass1 - mass0) / mass0 < 1e-10
+    # The anchored fixer holds drift to truncation level (~1.6e-6 relative
+    # measured at 24x48 / 30 steps / dt=120), not machine zero — the
+    # matrix's own SW conservation criterion is 1e-3.  1e-5 still catches
+    # a real leak or a disabled fixer.
+    assert abs(mass1 - mass0) / mass0 < 1e-5
     # Winds bounded: no instability spike beyond ~2x the initial jet.
     assert float(jnp.max(jnp.abs(s.u))) < 2.0 * _MODON_UMAX

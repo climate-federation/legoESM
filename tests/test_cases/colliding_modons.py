@@ -64,9 +64,14 @@ def _modon_winds_geo(
     """
     r1 = great_circle_distance(lon, lat, _MODON_LON1, _MODON_LAT0, radius)
     r2 = great_circle_distance(lon, lat, _MODON_LON2, _MODON_LAT0, radius)
+    # Sign convention = the FV3 reference in issue #521: burst #1 at
+    # lon=pi/2 is WESTERLY (+u_east, ``u += utmp``), burst #2 at 3*pi/2 is
+    # EASTERLY (-u_east, ``u -= utmp``).  This is also what the pinning
+    # tests (test_winds_peak_at_centres...) and the docstring assert;
+    # commit ba28d8b2b briefly inverted it (tests went red on merge).
     u_east = (
-        u_max * jnp.exp(-(r2 / r0) ** 2)
-        - u_max * jnp.exp(-(r1 / r0) ** 2)
+        u_max * jnp.exp(-(r1 / r0) ** 2)
+        - u_max * jnp.exp(-(r2 / r0) ** 2)
     )
     v_north = jnp.zeros_like(u_east)
     return u_east, v_north
