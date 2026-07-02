@@ -17,6 +17,7 @@ from legoesm.land.forcing.cru_jra import (
     read_crujra_year,
     regrid_forcing,
     stage_forcing,
+    stage_forcing_years,
     synthetic_land_forcing,
 )
 from legoesm.land.forcing.solar import cos_solar_zenith
@@ -35,5 +36,6 @@ __all__ = [
     "read_crujra_year",
     "regrid_forcing",
     "stage_forcing",
+    "stage_forcing_years",
     "synthetic_land_forcing",
 ]

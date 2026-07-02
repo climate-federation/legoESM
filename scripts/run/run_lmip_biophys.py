@@ -52,7 +52,7 @@ from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
 from legoesm.land.slab_land import step_land
 from legoesm.land.boundary_data import init_land_surface_data, make_step_land_params_updater
-from legoesm.land.forcing import stage_forcing
+from legoesm.land.forcing import stage_forcing, stage_forcing_years
 
 U_MIN = 1.0
 _SEC_PER_DAY = 86400.0
@@ -122,10 +122,19 @@ def run(args) -> int:
         args.surfdata, grid, base_cfg, args.start_doy)
 
     # --- CRU-JRA forcing: load -> regrid -> disaggregate to the model steps. ---
-    # Detect real data by the actual Solr stream file (prefix + year), not just
-    # the directory, so a prefix/year mismatch warns loudly instead of silently
-    # falling back to synthetic.
-    solr_file = (Path(args.forcing_dir) / f"{args.prefix}.Solr.{args.year}{args.suffix}.nc"
+    # Year range: --year-end defaults to --year (single-year, backward-compat).
+    # A larger --year-end triggers multi-year contiguous forcing.
+    year_start = int(args.year)
+    year_end = int(args.year_end) if args.year_end is not None else year_start
+    if year_end < year_start:
+        raise SystemExit(f"--year-end ({year_end}) < --year ({year_start})")
+    multi_year = year_end > year_start
+
+    # Detect real data by the FIRST year's Solr stream file (prefix + year),
+    # so a prefix/year mismatch warns loudly instead of silently falling back
+    # to synthetic.  Missing intermediate years still trigger a fail inside
+    # stage_forcing_years with a clear message.
+    solr_file = (Path(args.forcing_dir) / f"{args.prefix}.Solr.{year_start}{args.suffix}.nc"
                  if args.forcing_dir else None)
     synthetic = not (solr_file and solr_file.exists())
     if args.forcing_dir and synthetic:
@@ -134,14 +143,25 @@ def run(args) -> int:
         print("(synthetic forcing starts at day 0; --start-doy ignored)")
     dt = float(args.dt)
     model_times_s = build_model_times(args.start_doy, dt, args.n_steps, synthetic=synthetic)
+    forcing_desc = ("synthetic" if synthetic
+                    else f"CRU-JRA {year_start}"
+                    + (f"-{year_end}" if multi_year else ""))
     print(f"grid={args.grid_type} | {ncol} columns | surface={args.surface_scheme} | "
           f"carbon={config.carbon.scheme} | dt={dt:.0f}s | n_steps={args.n_steps} | "
-          f"forcing={'synthetic' if synthetic else 'CRU-JRA ' + str(args.year)}")
-    forcing_xs = stage_forcing(
-        lat_rad, lon_rad, model_times_s,
-        year=args.year, data_dir=(None if synthetic else args.forcing_dir),
-        prefix=args.prefix, suffix=args.suffix,
-        k_neighbors=args.k_neighbors, allow_synthetic=True)
+          f"forcing={forcing_desc}")
+    if multi_year:
+        forcing_xs = stage_forcing_years(
+            lat_rad, lon_rad, model_times_s,
+            year_start=year_start, year_end=year_end,
+            data_dir=(None if synthetic else args.forcing_dir),
+            prefix=args.prefix, suffix=args.suffix,
+            k_neighbors=args.k_neighbors, allow_synthetic=True)
+    else:
+        forcing_xs = stage_forcing(
+            lat_rad, lon_rad, model_times_s,
+            year=year_start, data_dir=(None if synthetic else args.forcing_dir),
+            prefix=args.prefix, suffix=args.suffix,
+            k_neighbors=args.k_neighbors, allow_synthetic=True)
     doy_xs = jnp.asarray(model_times_s / _SEC_PER_DAY)
 
     # --- initial state (soil/skin T seeded from the first forcing step). ---
@@ -285,7 +305,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "(<prefix>.{Solr,Prec,TPQWL}.<year><suffix>.nc)")
     ap.add_argument("--suffix", default="",
                     help="optional filename suffix after the year (CLM naming variants)")
-    ap.add_argument("--year", type=int, default=1920, help="CRU-JRA forcing year")
+    ap.add_argument("--year", type=int, default=1920,
+                    help="CRU-JRA forcing year (single-year default; "
+                         "start of the range if --year-end is set)")
+    ap.add_argument("--year-end", type=int, default=None,
+                    help="if set, drive with a CONTIGUOUS multi-year range "
+                         "[--year, --year-end] instead of a single year "
+                         "(model_times_s continues across boundaries; noleap "
+                         "calendar; sub-6h discontinuity at 12/31 -> 1/1 for "
+                         "linearly-interpolated channels)")
     ap.add_argument("--start-doy", type=float, default=0.0,
                     help="start day-of-year (real forcing); ignored for synthetic")
     ap.add_argument("--dt", type=float, default=3600.0, help="timestep [s] (1h default; 1800 for 30min)")

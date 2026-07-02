@@ -245,6 +245,22 @@ NEXT: run on Derecho against the glade CRU-JRA archive; codex review.
 
 ## 7. Deferred workstreams (post-WS-1, to be re-scoped)
 
+- **Phase B — Multi-year contiguous CRU-JRA (2026-07-01) ✅ DONE.**
+  New library entry `stage_forcing_years(lat, lon, model_times_s, *, year_start,
+  year_end, ...)` loops per year (single-year `stage_forcing` internals), each
+  year regridded + disaggregated independently, then concatenated along the time
+  axis into a scan-ready `AtmToSurface (n_steps_total, ncol)`.  Driver exposes
+  `--year-end` (backward-compat: default = `--year` → single-year).  Small
+  sub-6-hourly discontinuity at 12/31 → 1/1 for linearly-interpolated channels
+  is documented; SW respects zenith-weighting on each side; precip uses
+  constant-hold on each side.  Memory: ~1.5 GB per year at 2° hourly; fine for
+  1–5 years; longer spans need Phase C's restart-based per-year loop.
+  Tests: `tests/land/forcing/test_multi_year.py` (5 pass: shape, cross-boundary
+  continuity, single-year equivalence, argument validation).
+- **Phase C — Restart / checkpoint.** Save/load full `MultiLayerLandState` as
+  `.npz`; `--restart-from`, auto end-of-run save; per-year scan loop for long
+  spin-up spans.  Enables true multi-decade spin-up across queue submissions
+  (WS-2 acceleration for `land-dev-followup`).
 - **WS-2 — Production driver + transient CO₂ + spin-up.** A real global
   multi-year land driver (merge `run_lmip_smoke`'s `lax.scan` global path with
   `run_lmip`'s restart/checkpoint), transient CO₂ series, and a soil-C

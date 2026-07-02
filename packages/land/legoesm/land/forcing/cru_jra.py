@@ -46,6 +46,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import NamedTuple, Optional, Sequence
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -639,6 +640,77 @@ def stage_forcing(
     )
 
 
+def stage_forcing_years(
+    lat_rad,
+    lon_rad,
+    model_times_s,
+    *,
+    year_start: int,
+    year_end: int,
+    data_dir=None,
+    prefix: str = CRUJRA_FILE_PREFIX,
+    suffix: str = "",
+    k_neighbors: int = 4,
+    co2_ppmv: float = _DEFAULT_CO2_PPMV,
+    snow_ramp_k: float = _SNOW_RAIN_RAMP_K,
+    freq_hours: int = CRUJRA_FREQ_HOURS,
+    allow_synthetic: bool = True,
+    dtype=jnp.float64,
+) -> AtmToSurface:
+    """Contiguous multi-year forcing (year_start .. year_end, inclusive).
+
+    ``model_times_s`` is the model's continuous time axis, expressed as seconds
+    since Jan 1, 00:00 of ``year_start`` (a noleap 365-day calendar — matches
+    CRU-JRA / CLM datm).  Each calendar year Y in the range is loaded, regridded,
+    and disaggregated INDEPENDENTLY via :func:`stage_forcing`, then the per-year
+    slices are concatenated along the leading (time) axis into one scan-ready
+    :class:`AtmToSurface` ``(n_steps_total, ncol)``.
+
+    Because each year's disaggregation resets at 6-h stamps, a tiny sub-6-hourly
+    discontinuity is possible at the 12/31 → 1/1 boundary for the linearly-
+    interpolated channels (T, q, p, wind, LW).  Precipitation (constant-hold)
+    and SW (zenith-weighted, energy-conserving) each respect their own 6-h
+    intervals on either side of the boundary.  Fine for spin-up runs; for
+    scientific analysis of year-boundary weather, use single-year runs.
+
+    **Memory:** the returned pytree is fully materialised.  At 2° latlon with
+    hourly steps, one year is ~1.5 GB; 5 years is ~7.5 GB.  For longer spans
+    the driver should switch to per-year restart-based looping (Phase C).
+    """
+    if year_end < year_start:
+        raise ValueError(f"year_end={year_end} < year_start={year_start}")
+    tq = np.asarray(model_times_s, dtype=np.float64)
+    sec_per_year = _SEC_PER_DAY * 365.0                       # noleap
+
+    per_year_atm = []
+    for k, year in enumerate(range(year_start, year_end + 1)):
+        t_lo = k * sec_per_year
+        t_hi = (k + 1) * sec_per_year
+        mask = (tq >= t_lo) & (tq < t_hi)
+        if not mask.any():
+            continue
+        # local time within this year (each stage_forcing call expects times in
+        # its own [0, sec_per_year) frame).
+        tq_local = tq[mask] - t_lo
+        atm_local = stage_forcing(
+            lat_rad, lon_rad, tq_local,
+            year=year, data_dir=data_dir, prefix=prefix, suffix=suffix,
+            k_neighbors=k_neighbors, co2_ppmv=co2_ppmv,
+            snow_ramp_k=snow_ramp_k, freq_hours=freq_hours,
+            allow_synthetic=allow_synthetic, dtype=dtype,
+        )
+        per_year_atm.append(atm_local)
+
+    if not per_year_atm:
+        raise ValueError(
+            f"no model times fell within years [{year_start}, {year_end}] "
+            f"(model_times_s spans [{tq.min():.1f}, {tq.max():.1f}] s)"
+        )
+    if len(per_year_atm) == 1:
+        return per_year_atm[0]
+    return jax.tree.map(lambda *xs: jnp.concatenate(xs, axis=0), *per_year_atm)
+
+
 __all__ = [
     "CRUJRA_NLON",
     "CRUJRA_NLAT",
@@ -654,4 +726,5 @@ __all__ = [
     "forcing_to_atm_surface",
     "disaggregate_forcing",
     "stage_forcing",
+    "stage_forcing_years",
 ]
