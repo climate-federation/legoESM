@@ -81,28 +81,33 @@ if [ -n "${PHYSICS:-}" ];   then EXTRA_VARS="${EXTRA_VARS},PHYSICS=${PHYSICS}"; 
 # the cube pair (Phase 2) keeps its current single-precision behaviour.
 PRECISIONS="${PRECISIONS:-${PRECISION:-float32 float64}}"
 
-# Multi-node GPU sweep (icosahedral + latlon).  NODES>1 overrides the GPU job's
-# `select=` to span N nodes (4 A100/node); scaling_gpu.sh's default GPU_RANKS
-# (1 2 4 8 16 ...) then self-caps to the granted TOTAL_GPUS = NODES*4, so the
-# A100 curve runs past one node.  Allowed for the two grids with a genuine
-# domain decomposition: icosahedral (MPAS cell partition) and latlon (lat-band /
-# 2-D pencil make_latlon_mpi_step, wired in #659).  cubed-sphere is a <=6-GPU
-# single-node face shard and spectral has no MPI path, so both stay rejected
-# (#641/#660).  CPU side is unchanged (full-node 1..128 rank sweep, one node).
-# NOTE: multi-node latlon (>4 GPU) is newly enabled and NOT yet validated on real
-# hardware (#660) -- confirm MPI==serial (cells/rank halves, matched SYPD) on the
-# first run before trusting the curve.
+# Multi-node sweep (icosahedral + latlon, BOTH backends).  NODES>1 overrides
+# the per-job `select=` header to span N nodes:
+#   GPU: N nodes x 4 A100/node = 4N GPUs (scaling_gpu.sh's rank ladder self-caps
+#        to the granted TOTAL_GPUS)
+#   CPU: N nodes x 128 EPYC cores/node = 128N cores (scaling_cpu.sh's rank
+#        ladder auto-extends past 128 to `_CORES = wc -l $PBS_NODEFILE`)
+# Allowed for the two grids with a genuine domain decomposition: icosahedral
+# (MPAS cell partition) and latlon (lat-band / 2-D pencil make_latlon_mpi_step,
+# wired in #659).  cubed-sphere is a <=6-shard single-node face decomposition
+# and spectral has no MPI path, so both stay rejected (#641/#660) on either
+# backend.  NOTE: multi-node latlon GPU (>4 GPU) is newly enabled and NOT yet
+# validated on real hardware (#660) -- confirm MPI==serial (cells/rank halves,
+# matched SYPD) on the first run before trusting the curve.
 NODES="${NODES:-1}"
 GPU_SELECT=()
+CPU_SELECT=()
 if [ "${NODES}" -gt 1 ]; then
     case "$GRID" in
         icosahedral|latlon) ;;   # genuine domain decomposition -> multi-node OK
         *)
-            echo "ERROR: NODES>1 (multi-node GPU) supported only for icosahedral|latlon; got '$GRID' (cubed-sphere=<=6-GPU single-node face shard, spectral=no MPI; see #641/#660)." >&2
+            echo "ERROR: NODES>1 supported only for icosahedral|latlon; got '$GRID' (cubed-sphere=<=6-shard single-node face decomposition, spectral=no MPI; see #641/#660)." >&2
             exit 2 ;;
     esac
     GPU_SELECT=(-l "select=${NODES}:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB")
+    CPU_SELECT=(-l "select=${NODES}:ncpus=128:mpiprocs=128:mem=200GB")
     echo "=== multi-node GPU: ${NODES} nodes x 4 A100 = $((NODES * 4)) GPUs (${GRID}) ==="
+    echo "=== multi-node CPU: ${NODES} nodes x 128 EPYC = $((NODES * 128)) cores (${GRID}) ==="
 fi
 
 submit() {  # submit "<label>" <qsub args...>
@@ -139,7 +144,7 @@ emit_noncube() {
             if [ "$bk" = gpu ]; then
                 submit "gpu ${GRID} weak prec=${prec}" ${GPU_SELECT[@]+"${GPU_SELECT[@]}"} -v "$vars" "$script"
             else
-                submit "cpu ${GRID} weak prec=${prec}" -v "$vars" "$script"
+                submit "cpu ${GRID} weak prec=${prec}" ${CPU_SELECT[@]+"${CPU_SELECT[@]}"} -v "$vars" "$script"
             fi
         fi
         # STRONG: one job per (resolution, precision)
@@ -149,7 +154,7 @@ emit_noncube() {
             if [ "$bk" = gpu ]; then
                 submit "gpu ${GRID} strong res=${R} prec=${prec}" ${GPU_SELECT[@]+"${GPU_SELECT[@]}"} -v "$vars" "$script"
             else
-                submit "cpu ${GRID} strong res=${R} prec=${prec}" -v "$vars" "$script"
+                submit "cpu ${GRID} strong res=${R} prec=${prec}" ${CPU_SELECT[@]+"${CPU_SELECT[@]}"} -v "$vars" "$script"
             fi
         done
     done

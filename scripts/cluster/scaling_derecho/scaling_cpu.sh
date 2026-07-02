@@ -61,20 +61,37 @@ if [ "${_CORES:-0}" -lt 2 ] 2>/dev/null; then
 fi
 EXTRA=""
 THREADS=1                              # pure-MPI default: one thread per rank
+# Derecho main-node CPU count (EPYC 128 cores/node).  Used to spread MPI ranks
+# across nodes via --ppn on multi-node jobs; `_CORES` already covers ALL nodes
+# because it's read from PBS_NODEFILE, so cores_per_node stays a compile-time
+# constant tied to the queue's hardware.
+_CORES_PER_NODE="${LEGOESM_CORES_PER_NODE:-128}"
+# Power-of-two rank ladder capped at `_CORES` = TOTAL cores across all requested
+# nodes.  On a single node (_CORES=128) this reproduces the historical
+# "1 2 4 8 16 32 64 128" ladder; NODES=16 auto-extends to "... 256 512 1024 2048"
+# without any hand-edit here or in submit_scaling.sh.
+_rank_ladder() {
+    local max="$1" out=1 n=1
+    while [ "$n" -lt "$max" ]; do
+        n=$(( n * 2 ))
+        [ "$n" -le "$max" ] && out="$out $n"
+    done
+    echo "$out"
+}
 case "$GRID" in
   cubed-sphere)
     echo "ERROR: cubed-sphere uses cube_scaling_cpu.sh (6-face scatter)." >&2
     exit 2 ;;
   latlon)
-    RANKS="${RANKS:-1 2 4 8 16 32 64 128}"   # rank ladder up to the full node
-    EXTRA="--latlon-2d"                       # 2-D pencil: low halo at high ranks
+    RANKS="${RANKS:-$(_rank_ladder "$_CORES")}"   # rank ladder up to $_CORES
+    EXTRA="--latlon-2d"                            # 2-D pencil: low halo at high ranks
     RESOLUTIONS="${RESOLUTIONS:-128 256}" ;;
   icosahedral)
-    RANKS="${RANKS:-1 2 4 8 16 32 64 128}"   # MPAS partitions; powers of 2
+    RANKS="${RANKS:-$(_rank_ladder "$_CORES")}"   # MPAS partitions; powers of 2
     RESOLUTIONS="${RESOLUTIONS:-6 7 8}" ;;
   spectral)
-    RANKS="1"                                 # no MPI -> single point...
-    THREADS="${THREADS_SPECTRAL:-$_CORES}"    # ...fill the node with XLA threads
+    RANKS="1"                                      # no MPI -> single point...
+    THREADS="${THREADS_SPECTRAL:-$_CORES_PER_NODE}"  # ...fill ONE node with XLA threads (multi-node NA)
     RESOLUTIONS="${RESOLUTIONS:-85 170}" ;;
   *)
     echo "ERROR: unknown GRID='$GRID' (latlon | icosahedral | spectral)" >&2
@@ -95,8 +112,10 @@ CAMP="${CAMP:-$SCRATCH/legoesm_scaling/${GRID}_cpu_${STAMP}}"
 mkdir -p "$CAMP"
 [ -n "${PBS_O_WORKDIR:-}" ] && exec > >(tee -a "$CAMP/run.log") 2>&1
 
+_NODES_ALLOC=$(( _CORES / _CORES_PER_NODE ))
+[ "$_NODES_ALLOC" -lt 1 ] && _NODES_ALLOC=1
 echo "=== $GRID CPU scaling: modes=[$MODES] prec=[$PRECISIONS] ranks=[$RANKS] x ${THREADS} thr  res=[$RESOLUTIONS] ==="
-echo "    physics=$PHYSICS cores=$_CORES  outdir=$CAMP"
+echo "    physics=$PHYSICS cores=$_CORES nodes~=$_NODES_ALLOC (ppn=$_CORES_PER_NODE)  outdir=$CAMP"
 
 rc_all=0
 for PREC in $PRECISIONS; do
@@ -110,8 +129,14 @@ for PREC in $PRECISIONS; do
         echo "--- $GRID $MODE $PREC res=$R N=$N: needs $(( N * THREADS )) > $_CORES cores -- SKIP ---"
         continue
       fi
-      echo "--- $GRID $MODE $PREC res=$R ranks=$N ---"
-      mpiexec -n "$N" \
+      # Spread ranks across nodes: --ppn = min(N, cores/node).  Single-node
+      # runs are unaffected (mpiexec ignores --ppn > N).  Multi-node runs
+      # (NODES>1 in submit_scaling.sh) NEED it — without --ppn cray-mpich packs
+      # every rank onto the first node, gives the queue a 128-rank ceiling, and
+      # silently discards the extra nodes' cores.
+      _MPI_PPN=$(( N < _CORES_PER_NODE ? N : _CORES_PER_NODE ))
+      echo "--- $GRID $MODE $PREC res=$R ranks=$N ppn=$_MPI_PPN ---"
+      mpiexec -n "$N" --ppn "$_MPI_PPN" \
           "$PY" scripts/bench/run_cpu_mpi_scaling.py \
           --grid "$GRID" --mode "$MODE" --resolution "$R" \
           --physics "$PHYSICS" --precision "$PREC" \
