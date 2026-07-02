@@ -265,8 +265,9 @@ NEXT: run on Derecho against the glade CRU-JRA archive; codex review.
   `lax.scan` carry (scatter-add for mean, scatter-set for inst).  Each tape
   produces its own NetCDF: `<output>.<tape_name>.nc` with a (time, lat, lon)
   layout for latlon.  Configured via YAML:
-  * default: `configs/output/lmip_biophys_default.yaml` — monthly `h0`
-    time-mean fluxes + monthly `h_state` instantaneous soil snapshots;
+  * default: `configs/output/lmip_biophys_default.yaml` — monthly `monthly`
+    time-mean fluxes + monthly `monthly_state` instantaneous soil snapshots
+    (filenames: `<output>.monthly.nc` and `<output>.monthly_state.nc`);
   * override with `--output-config path.yaml`.
   Driver PASS/FAIL now checks final `T_soil_top` finiteness over land
   (independent of any tape).  Tests: `tests/land/test_output_tapes.py`
@@ -274,8 +275,9 @@ NEXT: run on Derecho against the glade CRU-JRA archive; codex review.
   step/hourly/monthly with year rollover, mean+inst accumulate/finalize).
   Existing integration tests use a per-step tape config so their 4-slot
   shape is preserved.  Sample smoke: 24×48 latlon, 4-step run writes
-  `lmip_biophys.h0.nc` (7 vars × 1 monthly slot) + `lmip_biophys.h_state.nc`
-  (3 vars × 1 monthly slot) + `restart_1920_d000h04.npz`.
+  `lmip_biophys.monthly.nc` (7 vars × 1 monthly slot) +
+  `lmip_biophys.monthly_state.nc` (3 vars × 1 monthly slot) +
+  `restart_1920_d000h04.npz`.
 
 - **Phase C — Restart / checkpoint (2026-07-01) ✅ DONE.**
   New module `packages/land/legoesm/land/restart.py` (~140 lines):

@@ -67,12 +67,12 @@ def test_biophys_driver_synthetic_smoke(tmp_path):
     assert rc == 0                                            # PASS (no NaN over land)
 
     # Tape output lands at lmip_biophys.<tape_name>.nc; the step-test config
-    # has one tape named "h_step".
+    # has one tape named "step".
     import xarray as xr
-    ds = xr.open_dataset(out / "lmip_biophys.h_step.nc")
+    ds = xr.open_dataset(out / "lmip_biophys.step.nc")
     assert ds.sizes["time"] == 4
     assert ds.attrs["carbon"] == "none"                      # biophysics-only
-    assert ds.attrs["tape_name"] == "h_step"
+    assert ds.attrs["tape_name"] == "step"
     assert ds.attrs["tape_freq"] == "step"
     # Latlon rectangular layout: (time, lat, lon) — never (time, ncol)
     assert ds["T_sfc"].dims == ("time", "lat", "lon")

@@ -3,7 +3,7 @@
 # short 4-step smoke tests.
 
 tapes:
-  - name: h_step
+  - name: step
     freq: step
     average: inst
     vars:

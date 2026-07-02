@@ -19,8 +19,9 @@
 # average: mean (arithmetic mean over interval) | inst (last value in interval)
 
 tapes:
-  # h0 — primary monthly time-mean tape (fluxes + LAI + precip + runoff)
-  - name: h0
+  # Primary monthly time-mean tape (fluxes + LAI + precip + runoff).
+  # Filename: <output>.monthly.nc
+  - name: monthly
     freq: monthly
     average: mean
     vars:
@@ -32,8 +33,9 @@ tapes:
       - runoff
       - precip
 
-  # h_state — monthly INSTANTANEOUS soil state snapshot (end-of-month values)
-  - name: h_state
+  # Monthly INSTANTANEOUS soil state snapshot (end-of-month values).
+  # Filename: <output>.monthly_state.nc
+  - name: monthly_state
     freq: monthly
     average: inst
     vars:
