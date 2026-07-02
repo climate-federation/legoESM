@@ -282,3 +282,34 @@ def test_bottom_drag_scheme_flags_parse():
     with pytest.raises(SystemExit):
         parse_args(["--grid", "latlon",
                     "--bottom-drag-scheme", "nemo_typo"])
+
+
+def test_iwm_override_installs_physics_on_flat_latlon():
+    """codex r2 #1: --iwm on the flat-bottom lat-lon path (config.physics is
+    None) must NOT silently no-op — the override helper installs a minimal
+    physics pipeline carrying the IWM rider, forces the implicit vertical
+    solve, and forces the NEMO zdfiwm_init molecular backgrounds."""
+    import jax
+    jax.config.update("jax_enable_x64", True)
+    from legoesm import constants
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from scripts.run.run_omip import _apply_drag_iwm_overrides
+
+    args = parse_args(["--grid", "latlon", "--iwm"])
+    grid = create_latlon_grid(n_lat=6, n_lon=8)
+    z = create_ocean_z_star(n_levels=4, H_max=2000.0)
+    config = LatLonCGridOceanConfig.from_flat()   # physics=None (flat path)
+    model = LatLonCGridOceanModel(grid, z, config)
+    config2, model2 = _apply_drag_iwm_overrides(
+        args, "latlon", grid, z, config, model)
+    assert config2.physics is not None
+    assert config2.physics.vertical_mixing.iwm.enabled is True
+    assert config2.implicit_vertical_mixing is True
+    assert config2.A_v == constants.nu_ocean_molecular
+    assert config2.K_v == 1.0e-10
+    assert model2._iwm_forcing is None            # uniform fallback mode

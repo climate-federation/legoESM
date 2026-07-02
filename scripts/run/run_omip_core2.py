@@ -2344,6 +2344,11 @@ def main() -> int:
                    help="NEMO rn_z0 bottom roughness [m] (ORCA1: 3e-3)")
     p.add_argument("--bottom-drag-ke0", type=float, default=None,
                    help="NEMO rn_ke0 background bottom KE [m^2/s^2] (ORCA1: 2.5e-3)")
+    p.add_argument("--dm2dc", action="store_true",
+                   help="Diurnal cycle on the daily-mean shortwave (NEMO "
+                        "ln_dm2dc, sbcdcy/Bernie 2007; ORCA1: .true.).  "
+                        "Mean-preserving analytic modulation of the CORE-II "
+                        "daily SW.  Host-loop only.")
     p.add_argument("--iwm", action="store_true",
                    help="Internal wave-driven mixing (NEMO zdfiwm, de Lavergne "
                         "2020; ORCA1: ln_zdfiwm=.true.).  lat-lon/tripole only.")
@@ -2970,7 +2975,11 @@ def main() -> int:
                     "override (the OMIP builders force implicit) or use a coarse "
                     "vertical grid where the explicit-diffusion CFL is satisfied.")
             model = LatLonCGridOceanModel(
-                grid, z_coord, model.config.replace_flat(**_ovr)
+                grid, z_coord, model.config.replace_flat(**_ovr),
+                # Preserve the zdfiwm maps through the YAML rebuild (codex
+                # r2 #2: dropping them silently reverts file-map IWM to the
+                # uniform fallback).
+                iwm_forcing=getattr(model, "_iwm_forcing", None),
             )
             print(f"[setup] --config {args.config} ocean override: {sorted(_ovr)}")
 
@@ -3388,15 +3397,16 @@ def main() -> int:
         # reachable only with --no-emp AND no --runoff/--sss-restore/--ice-albedo
         # (a pure momentum/heat tripole perf run, issue #354).
         if (args.emp_freshwater or args.runoff or args.sss_restore
-                or args.ice_albedo or args.ice_thermo or args.geothermal):
+                or args.ice_albedo or args.ice_thermo or args.geothermal
+                or args.dm2dc):
             raise SystemExit(
                 "[scan] --scan-block applies no surface salinity/albedo/ice forcing "
-                "or geothermal BC (P - E / runoff / SSS restoring / ice-albedo / "
-                "ice-thermo / geothermal are host-loop only), so it cannot run a "
-                "faithful integration.  Use the host Python loop (omit "
-                "--scan-block), or drop "
-                "--runoff/--sss-restore/--ice-albedo/--ice-thermo/--geothermal and "
-                "pass --no-emp for the momentum/heat-only scan path.")
+                "or geothermal BC or diurnal SW (P - E / runoff / SSS restoring / "
+                "ice-albedo / ice-thermo / geothermal / dm2dc are host-loop only), "
+                "so it cannot run a faithful integration.  Use the host Python "
+                "loop (omit --scan-block), or drop "
+                "--runoff/--sss-restore/--ice-albedo/--ice-thermo/--geothermal/"
+                "--dm2dc and pass --no-emp for the momentum/heat-only scan path.")
         from legoesm.ocean.coupler.omip2_applicator import (
             build_core2_forcing_device_stack, build_omip2_scan_block_fn,
         )
@@ -3488,7 +3498,9 @@ def main() -> int:
                         import LatLonCGridOceanModel
                     model = LatLonCGridOceanModel(
                         grid, z_coord,
-                        model.config._replace(lateral_viscosity=model.config.lateral_viscosity._replace(A_h=_ah, C_smag_lap=_cs)))
+                        model.config._replace(lateral_viscosity=model.config.lateral_viscosity._replace(A_h=_ah, C_smag_lap=_cs)),
+                        # keep the zdfiwm maps through the mid-run rebuild
+                        iwm_forcing=getattr(model, "_iwm_forcing", None))
                 print(f"[visc-schedule] day {(step-1)*dt/86400.0:.1f}: "
                       f"A_h={_ah:g} C_smag_lap={_cs:g} "
                       f"(segment {visc_seg_idx + 1}/{len(visc_schedule)})",
@@ -3525,11 +3537,26 @@ def main() -> int:
             _ice_alb = jnp.clip(
                 _lc0 * jnp.asarray(state.land_mask.data, _lc0.dtype), 0.0, 1.0)
             _under_ice = True
+        # NEMO ln_dm2dc window for THIS step: NEMO zlo = (nsec_day - dt/2)/rday,
+        # zup = zlo + dt/rday (nn_fsbc-equivalent = 1: forcing rebuilt every
+        # step here).  Perpetual 365-day calendar, day-of-year 1-based.
+        _dm2dc_win = None
+        if args.dm2dc:
+            _t_model = step * dt
+            _sec_of_day = _t_model % _SEC_PER_DAY
+            _t_lo = (_sec_of_day - 0.5 * dt) / _SEC_PER_DAY
+            _dm2dc_win = (
+                int((_t_model / _SEC_PER_DAY) % 365.0) + 1,   # day_of_year
+                365.0,
+                _t_lo,
+                _t_lo + dt / _SEC_PER_DAY,
+            )
         sf = compute_omip2_surface_forcing(
             state, forcing=forcing, idx_t=it,
             grid=grid, grid_type=app_grid_type,
             ice_albedo=_ice_alb,
             under_ice=_under_ice, tau_ice_sw=args.ice_thermo_sw_trans,
+            dm2dc_window=_dm2dc_win,
         )
         if ramp < 1.0:
             sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,

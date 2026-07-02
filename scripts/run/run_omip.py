@@ -214,6 +214,46 @@ def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
             config = config.replace_flat(**drag_flat)
         iwm_forcing = None
         if want_iwm:
+            # Make sure the IWM config ACTUALLY reaches the implicit
+            # K-profile solve (codex r2 #1: the flat-bottom lat-lon path
+            # ships config.physics=None, so without this --iwm would be a
+            # silent no-op — k_profiles never sees vertical_mixing.iwm).
+            _iwm_cfg = build_iwm_config_from_args(args)
+            _phys = config.physics
+            if _phys is None:
+                from legoesm.ocean.physics.combined import OceanPhysicsConfig
+                from legoesm.ocean.physics.vertical_mixing.config import (
+                    VerticalMixingConfig,
+                )
+                from legoesm.ocean.physics.lateral_mixing.config import (
+                    LateralMixingConfig,
+                )
+                from legoesm.ocean.physics.surface_forcing.config import (
+                    SurfaceForcingConfig,
+                )
+                from legoesm.ocean.physics.convection.config import (
+                    OceanConvectionConfig,
+                )
+                # Minimal pipeline: every module inert except the IWM rider
+                # (the flat path's diffusion stays config-based).
+                _phys = OceanPhysicsConfig(
+                    vertical_mixing=VerticalMixingConfig(
+                        scheme="none", iwm=_iwm_cfg),
+                    lateral_mixing=LateralMixingConfig(scheme="none"),
+                    surface_forcing=SurfaceForcingConfig(scheme="none"),
+                    convection=OceanConvectionConfig(scheme="none"),
+                    shortwave_penetration=None,
+                )
+            else:
+                _phys = _phys._replace(
+                    vertical_mixing=_phys.vertical_mixing._replace(
+                        iwm=_iwm_cfg))
+            config = config._replace(physics=_phys)
+            # zdfiwm contributes through the implicit avt/avm profiles.
+            if not getattr(config, "implicit_vertical_mixing", False):
+                config = config.replace_flat(implicit_vertical_mixing=True)
+                print("[setup] zdfiwm: implicit_vertical_mixing forced ON "
+                      "(the wave avm/avt enter the backward-Euler solve)")
             # NEMO zdfiwm_init FORCES the model backgrounds to molecular
             # values (avmb = rnu = 1.4e-6 m²/s, avtb = 1e-10 m²/s): the
             # wave field IS the interior background.  Mirror that so the
