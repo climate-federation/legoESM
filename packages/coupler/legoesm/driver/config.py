@@ -816,18 +816,32 @@ class ExperimentConfig(NamedTuple):
             # ``save_checkpoint`` gathers the face-sharded state to a host
             # replica on EVERY process (collective process_allgather —
             # see ``_gather_spmd_tree_to_host``) and process 0 writes the
-            # standard single-file restart.  The DIAGNOSTICS writer stays
-            # milestone-1-refused: its accumulators / plotters still
-            # assume a single process or an mpi4jax topology (every
-            # process would hit the same output path, or device_get a
-            # non-fully-addressable global array).
+            # standard single-file restart.
+            # Diagnostics ARE supported in perf mode (step 5b):
+            # ``collect_lightweight``'s jnp reductions are SPMD-global on
+            # sharded arrays with replicated (addressable) scalar results,
+            # and every flush/save site is already root-gated via
+            # ``_mpi_rank = jax.process_index()``.  What still needs the
+            # single-process full ``collect()`` (np.asarray of the global
+            # fields — snapshots/profiles/monthly/CMIP) stays refused.
             if self.output.diag_days > 0:
-                errors.append(
-                    "distributed_mode='spmd' does not support the "
-                    "diagnostics writer yet (output.diag_days="
-                    f"{self.output.diag_days}); set diag_days=0 — "
-                    "gathered root-only diagnostics are a follow-up"
-                )
+                if self.output.cmip_output:
+                    errors.append(
+                        "distributed_mode='spmd' does not support "
+                        "cmip_output (it forces the full diagnostics "
+                        "collect(), which materialises non-fully-"
+                        "addressable global arrays); set "
+                        "cmip_output=False or diag_days=0"
+                    )
+                if getattr(self.output, "diagnostics_perf_mode",
+                           "auto") == "never":
+                    errors.append(
+                        "distributed_mode='spmd' requires the perf-mode "
+                        "diagnostics path (scalar SPMD-global "
+                        "reductions); diagnostics_perf_mode='never' "
+                        "would force the full collect() — use 'auto' "
+                        "or 'always'"
+                    )
         if self.enable_latlon_spmd:
             # Single-process multi-device lat-band path (NOT distributed_mode).
             if g.grid_type != "latlon":

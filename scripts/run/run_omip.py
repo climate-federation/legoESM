@@ -2653,6 +2653,12 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             return
         fname = _save_restart(state, day, step, checkpoint_dir,
                               ice_state=ice_state)
+        # This is the LAST checkpoint before exit: join the async writer
+        # and re-raise a failed write NOW.  Without this, the writer
+        # thread swallows the exception and the job exits 0 with a
+        # missing restart — the chain launcher would then resume from an
+        # older (or no) checkpoint (codex audit HIGH, 2026-07-02).
+        _join_restart_writer()
         if _snapshot_fn is not None:
             try:
                 _snapshot_fn(fname)
@@ -4014,6 +4020,11 @@ def run_omip_single(grid_type: str, args) -> dict:
             state.S.data.dtype) if args.nudge_woa_tau > 0 and S_woa is not None else None,
         snapshot_fn=_snapshot_fn,
     )
+    # Surface a failed FINAL async restart write while the run can still
+    # report it (the writer thread swallows exceptions; _save_restart only
+    # re-raises them one checkpoint later — there is no later checkpoint
+    # for the last one; codex audit HIGH, 2026-07-02).
+    _join_restart_writer()
 
     status = "PASS" if ok else "FAIL"
     icon = "  " if ok else "**"

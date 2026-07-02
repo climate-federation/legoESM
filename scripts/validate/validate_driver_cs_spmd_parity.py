@@ -105,6 +105,11 @@ def main(argv=None) -> int:
                         "(cs_spmd step 5a gate: under --mode spmd the "
                         "gathered root-only write must produce ONE "
                         "loadable checkpoint_day_*.npz).")
+    p.add_argument("--diag-days", type=int, default=0,
+                   help="Enable perf-mode diagnostics at this cadence "
+                        "[days] (cs_spmd step 5b gate: the scalar "
+                        "SPMD-global collect must run and process 0 must "
+                        "write the diagnostics file at finalize).")
     p.add_argument("--rtol", type=float, default=1e-9)
     p.add_argument("--atol", type=float, default=1e-9)
     args = p.parse_args(argv)
@@ -134,6 +139,9 @@ def main(argv=None) -> int:
     if args.checkpoint_days > 0:
         cfg = cfg._replace(output=cfg.output._replace(
             checkpoint_days=args.checkpoint_days))
+    if args.diag_days > 0:
+        cfg = cfg._replace(output=cfg.output._replace(
+            diag_days=args.diag_days))
     if args.mode == "serial" and n_procs > 1:
         # Every rank would race/clobber the same --out (codex Medium).
         print("ERROR: --mode serial must run single-process "
@@ -180,6 +188,19 @@ def main(argv=None) -> int:
                     _d = np.load(_c, allow_pickle=True)
                     print(f"  checkpoint: {_c.name} loadable "
                           f"({len(_d.files)} keys) OK")
+            if args.diag_days > 0:
+                from pathlib import Path as _Path
+                # DiagnosticCollector.save writes timeseries.npz under the
+                # run dir at finalize (root-gated).  Zero artifacts means
+                # the perf-mode path silently wrote nothing.
+                _diags = [p_ for pat in ("timeseries*.npz", "diagnostics*")
+                          for p_ in _Path(workdir).glob(pat) if p_.is_file()]
+                if not _diags:
+                    print("  diagnostics: NO diagnostics* file written "
+                          f"under {workdir} FAIL")
+                    rc = 1
+                else:
+                    print(f"  diagnostics: {[p_.name for p_ in _diags]} OK")
             ref = np.load(args.ref)
             missing = sorted(set(ref.files) ^ set(state))
             if missing:
