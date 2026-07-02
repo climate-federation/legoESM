@@ -284,6 +284,13 @@ class DINOConfig:
     C_d_bottom: float = 1.0e-3     # quadratic drag coefficient
     bottom_drag_bg_velocity: float = 0.1   # u_bg [m/s] for MOM6 quadratic-with-floor form
     bottom_drag_bbl_thickness: float = 50.0  # BBL thickness [m] for distributed drag
+    # NEMO zdfdrg drag law: "legacy" keeps the historical MOM6 form above
+    # (bit-exact); "nemo_quadratic" is the DINO reference's ACTUAL namdrg
+    # selection (ln_non_lin: r = Cd0*sqrt(u^2+v^2+ke0) with Cd0 = C_d_bottom
+    # and the namelist_ref ke0 = 2.5e-3 m^2/s^2); "nemo_loglayer" = the
+    # zdfdrg np_loglayer option.  Threaded to the model config's
+    # bottom_drag_scheme on BOTH the lat-lon and MPAS DINO paths.
+    bottom_drag_scheme: str = "legacy"
     n_barotropic_substeps: int = 30   # baroclinic-to-barotropic step ratio
 
     # ------------------------------------------------------------------
@@ -1263,6 +1270,8 @@ def dino_lat_lon_model_config(
         bottom_drag_r=bottom_drag_r,
         bottom_drag_bg_velocity=cfg.bottom_drag_bg_velocity,
         bottom_drag_bbl_thickness=cfg.bottom_drag_bbl_thickness,
+        bottom_drag_scheme=cfg.bottom_drag_scheme,
+        bottom_drag_cd0=cfg.C_d_bottom,
         n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_solver=cfg.barotropic_solver,
         barotropic_implicit_theta_eta=cfg.barotropic_implicit_theta_eta,
@@ -1381,6 +1390,8 @@ def dino_mpas_model_config(
         bottom_drag_r=bottom_drag_r,
         bottom_drag_bg_velocity=cfg.bottom_drag_bg_velocity,
         bottom_drag_bbl_thickness=cfg.bottom_drag_bbl_thickness,
+        bottom_drag_scheme=cfg.bottom_drag_scheme,
+        bottom_drag_cd0=cfg.C_d_bottom,
         n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_solver=cfg.barotropic_solver,
         tracer_advection=cfg.tracer_advection,

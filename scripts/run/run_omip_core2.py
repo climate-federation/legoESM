@@ -3039,6 +3039,10 @@ def main() -> int:
         except Exception as _e:  # noqa: BLE001 — provenance best-effort
             print(f"[warn] visc_schedule sidecar not written: {_e}")
 
+    if args.dm2dc and app_grid_type not in ("tripole", "latlon"):
+        raise SystemExit(
+            "--dm2dc is wired for tripole/latlon (the applicator needs the "
+            f"2-D tracer lon/lat); got {args.grid!r}")
     isf_forcing = None
     if args.isf:
         # NEMO ISF 'spe' prescribed melt: load the monthly Depoorter fields
