@@ -122,3 +122,29 @@ $LEGOESM_CLIMATEEVAL_PYTHON scripts/validate/run_amip_climateeval.py \
     --data-root-dir "$LEGOESM_CLIMATEEVAL_DATA_ROOT" \
     --output-dir /scratch/you/amip_run
 ```
+
+## CMOR output sampling semantics (what the monthly means actually are)
+
+Diagnostics are collected once per `diag_days` at the segment boundary
+(a fixed UTC time of day). What each CMOR field is made of:
+
+- **True time means** (accumulated every model step inside the compiled
+  segment, immune to the diagnostic cadence): `pr`, `hfss`, `hfls`,
+  `rsdt`, `rsut`, `rlut`, and `tas` (segment-mean lowest-level T with the
+  instantaneous MOST 2 m stability offset). Before this fix the radiation
+  fields and `tas` were fixed-UTC snapshots — January `rsdt` had the
+  night hemisphere at exactly 0 and a ~1400 W/m² noon peak, so per-pixel
+  monthly radiation maps carried a full diurnal alias. Zonal and global
+  means were unaffected (longitude sampling averages local time), which
+  is why the defect passed budget checks.
+- **Snapshot samples at the diagnostic cadence** (documented limitation):
+  `psl`, `prw`, `ta`, `ua`, `va`, `hus`, `clt`, `clivi`, `clwvi`, `tos`,
+  `siconc`, and the clear-sky fluxes. At `diag_days=5` a monthly mean is
+  ~6 fixed-UTC samples — no first-order diurnal alias for most of these,
+  but expect weather-sampling noise (and mild alias for the cloud
+  fields). Accumulating the 3-D fields per step would grow the scan carry
+  by `nlev`× per field and is deferred until a use case needs it.
+- **The CMIP `day` table degenerates whenever `diag_days > 1`**: each
+  written "day" is really one sample every `diag_days` days and
+  `tasmin`/`tasmax` are not daily extremes. The driver logs a warning;
+  set `diag_days=1` if you need day-table output.

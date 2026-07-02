@@ -579,6 +579,7 @@ class DiagnosticCollector:
         q_i=None,
         q_s=None,
         q_g=None,
+        t_low_mean=None,
     ) -> None:
         """Collect diagnostics at a diagnostic interval.
 
@@ -599,9 +600,23 @@ class DiagnosticCollector:
         sw_up_toa, lw_up_toa : jax.Array
         sw_net_sfc, lw_net_sfc : jax.Array
         sw_down_toa : jax.Array
+            Radiative fluxes.  The compiled-segment driver passes SEGMENT
+            MEANS (time integrals from the carry accumulators / segment
+            duration) so the CMOR monthly means, timeseries and energy
+            budget are free of the fixed-UTC diurnal snapshot alias; the
+            per-step (debug) driver still passes instantaneous values.
         T_ice : float
         lat_deg_grid : array, optional
             Latitude in degrees for monthly means.
+        t_low_mean : array, optional
+            Segment-mean lowest-level air temperature [K].  When given, the
+            CMOR ``tas`` uses it in place of the instantaneous lowest-level
+            temperature: ``tas = tas_2m(instant) + (t_low_mean - T_low)``,
+            i.e. the instantaneous MOST 2 m stability offset applied to the
+            segment-mean temperature (removes the dominant fixed-UTC
+            diurnal alias over land; the residual alias of the stability
+            offset itself is small).  ``None`` (default) keeps the legacy
+            instantaneous ``tas``.
         """
         # Fuse 12 diagnostic reductions into one ``jnp.stack`` +
         # ``np.asarray`` host transfer.  Each ``float(jnp.X(...))``
@@ -808,6 +823,12 @@ class DiagnosticCollector:
             # level down to 2 m (CMIP tas convention).  Falls back to the
             # lowest level if the surface-layer inputs are unavailable.
             tas_field = self._tas_2m(state, q_v, sst, sic, T_ice)
+            if t_low_mean is not None:
+                # Segment-mean tas: instantaneous 2 m stability offset on the
+                # segment-mean lowest-level T (see the ``t_low_mean`` doc).
+                tas_field = tas_field + (
+                    np.asarray(t_low_mean) - np.asarray(state.T.data[..., -1])
+                )
             r = self._regrid_to_latlon_2d(tas_field)
             if r is not None:
                 fields_2d['tas'] = r
