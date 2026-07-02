@@ -170,6 +170,40 @@ def test_params_routes_kpp_override_into_config():
     assert getattr(out.vertical_mixing.kpp, m.field) == val
 
 
+def test_params_routes_treguier_aei0_into_config():
+    """#724: the Treguier-1997 adaptive-GM cap (ocean.lat.treguier.aei0) routes
+    into the built OMIPRunConfig's nested GMRediConfig.treguier — the config
+    _create_setup threads into the realistic-bathymetry lat-lon path."""
+    from legoesm.driver.run_config_yaml import apply_params_to_config
+    cfg = build_config_from_args(parse_args(["--grid", "latlon"]))
+    out = apply_params_to_config(
+        cfg, {"ocean.lat.treguier.aei0": 1800.0}, driver="run_omip")
+    assert out.gm_redi.treguier.aei0 == 1800.0
+    # Sibling GM/Redi + Visbeck tunables ride the same nested config.
+    out2 = apply_params_to_config(
+        cfg,
+        {"ocean.lat.gm_redi.kappa_GM": 900.0,
+         "ocean.lat.visbeck.alpha": 0.02},
+        driver="run_omip")
+    assert out2.gm_redi.kappa_GM == 900.0
+    assert out2.gm_redi.visbeck.alpha == 0.02
+
+
+def test_gm_redi_default_matches_production_bathy_values():
+    """Hoisting bathy_gm_redi out of _create_setup must not change the
+    production ETOPO-bathymetry defaults (byte-identical run)."""
+    cfg = build_config_from_args(parse_args(["--grid", "latlon"]))
+    assert cfg.gm_redi.kappa_GM == 800.0
+    assert cfg.gm_redi.kappa_Redi == 800.0
+    assert cfg.gm_redi.S_max == 0.005
+    assert cfg.gm_redi.visbeck.enabled is True
+    assert cfg.gm_redi.visbeck.alpha == 0.015
+    assert cfg.gm_redi.visbeck.kappa_min == 200.0
+    assert cfg.gm_redi.visbeck.kappa_max == 2000.0
+    # Treguier stays at its disabled default (mutually exclusive with visbeck).
+    assert cfg.gm_redi.treguier.enabled is False
+
+
 def test_example_params_file_loads_and_applies():
     """The committed config/omip/params_example.yaml is a valid calibration
     file (every key in the registry, in bounds, routable)."""

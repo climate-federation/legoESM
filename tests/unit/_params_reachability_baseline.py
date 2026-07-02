@@ -1,16 +1,10 @@
 """Shrink-only baseline for the --params reachability audit (issue #691).
 
 Every tier-1/2 ``__param_spec__`` parameter here is NOT settable via the
-``--params`` qualified-name loader in any of its component's run drivers
-(scheme *Config built with defaults inside the driver/pipeline, or an
-ExperimentConfig scalar that exists but the pipeline never threads).  The
-audit test asserts the computed uncovered set EQUALS this baseline; shrink
-it as parameters are wired through (never grow silently).
-
-Notable conscious exclusions: the IDEALIZED gray-radiation scheme
-(``atm.rad.GrayRadiationConfig.*``) is not production (rrtmgp is); its few
-threaded params are set via ``--config`` scalars (tau_equator, tau_pole,
-albedo_ocean), not the qualified-name ``--params`` map.
+``--params`` qualified-name loader in any of its component's run drivers.  The
+audit test asserts the computed uncovered set EQUALS this baseline; shrink it as
+parameters are wired through (never grow silently).  Idealized gray-radiation
+params are a documented conscious exclusion (--config-only).
 """
 
 UNREACHABLE_PARAMS = frozenset({
@@ -372,11 +366,6 @@ UNREACHABLE_PARAMS = frozenset({
     'ocean.conv.enhanced_diffusion.K_conv',
     # ocean: FluxFeedbackConfig (1)
     'ocean.sf.flux_feedback.tau_restore_s',
-    # ocean: GMRediConfig (4)
-    'ocean.lat.gm_redi.S_max',
-    'ocean.lat.gm_redi.kappa_GM',
-    'ocean.lat.gm_redi.kappa_Redi',
-    'ocean.lat.gm_redi.surface_complement_depth',
     # ocean: GeometricConfig (13)
     'ocean.eke.geometric.alpha',
     'ocean.eke.geometric.c_eps_geometric',
@@ -417,11 +406,4 @@ UNREACHABLE_PARAMS = frozenset({
     # ocean: ShortwavePenetrationConfig (2)
     'ocean.sw_penetration.rgb_ir_extinction_m',
     'ocean.sw_penetration.rgb_ir_fraction',
-    # ocean: VisbeckConfig (6)
-    'ocean.lat.visbeck.L_fixed',
-    'ocean.lat.visbeck.L_max',
-    'ocean.lat.visbeck.L_min',
-    'ocean.lat.visbeck.alpha',
-    'ocean.lat.visbeck.kappa_max',
-    'ocean.lat.visbeck.kappa_min',
 })
