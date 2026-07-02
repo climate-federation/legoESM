@@ -105,18 +105,57 @@ def test_build_model_times_synthetic_starts_at_zero():
     assert t2[0] == 10.0 * 86400.0                           # real forcing honours start-doy
 
 
+def test_chunked_scan_straddles_year_boundary(tmp_path):
+    """Straddle a year boundary with hourly steps (last 4h of year 0 → first
+    4h of year 1).  The chunked-scan loop runs twice, threads state, and
+    produces a 2-slot annual tape with real physics on both slots."""
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    out = tmp_path / "straddle"
+    # 8760 hourly steps = 1 exact year; add 4 more → year 1 gets 4 steps.
+    N_STEPS = 8764
+    cfg_path = _write_smoke_config(tmp_path, sd, extra_overrides=[
+        "forcing.year_end=2001",
+        "time.dt=3600.0",
+        f"time.n_steps={N_STEPS}",
+        "output.tapes=[{name: annual, freq: annual, average: mean, "
+        "vars: [T_sfc]}]",
+    ])
+    # rc may be 1 (some tiny synthetic cells drift) — we're testing the
+    # chunked-scan MECHANISM, not physics.  What matters:
+    rc = _run_config(mod, cfg_path, out)
+    assert rc in (0, 1)                                   # completed either way
+
+    import xarray as xr
+    ds = xr.open_dataset(out / "lmip_biophys.annual.nc")
+    assert ds.sizes["time"] == 2                          # year 0 + year 1 chunks
+    T = ds["T_sfc"].values
+    # Both slots must have SOME finite T (proves state threaded into the
+    # second chunk and the second lax.scan produced real numbers).
+    assert np.isfinite(T[0]).sum() > 0
+    assert np.isfinite(T[1]).sum() > 0
+
+    # Restart filename encodes total model time elapsed: 8764 h = 1 year + 4 h
+    # → year 2001, doy 0, hour 4.  Proves the chunked loop bookkept time
+    # correctly across the boundary.
+    restarts = list(out.glob("restart_*.npz"))
+    assert len(restarts) == 1
+    assert restarts[0].name == "restart_2001_d000h04.npz"
+
+
 def test_oversize_forcing_estimate_fails_fast(tmp_path):
-    """Multi-year 2°-hourly runs at 16200 cols x 43800 steps × 14 fields ×
-    8 B ≈ 76 GiB won't fit on a single A100.  The driver must estimate this
-    upfront and refuse rather than let JAX OOM inside stage_forcing_years."""
+    """Per-year forcing must fit in the soft budget (24 GiB).  Chunked scan
+    caps peak memory at ONE year, so it's the year-size that matters — but
+    even one year at a tiny dt on a 2° grid can blow the budget."""
     mod = _load_driver()
     sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
     out = tmp_path / "big"
-    # Grid override to a 2° size (90 x 180 = 16200 cols); many steps.  The
-    # estimate should trigger without any real forcing data (synthetic path).
+    # 2° grid (16200 cols) + very small dt (100 s) -> ~315k steps per year
+    # -> ~ 465 GiB per-year forcing.  Well over the 24 GiB budget.
     cfg_path = _write_smoke_config(tmp_path, sd, extra_overrides=[
         "grid.resolution=90",
-        "time.n_steps=43800",
+        "time.n_steps=315360",
+        "time.dt=100",
     ])
     rc = _run_config(mod, cfg_path, out)
     assert rc == 2                                            # over-budget

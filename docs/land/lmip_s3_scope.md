@@ -257,6 +257,27 @@ NEXT: run on Derecho against the glade CRU-JRA archive; codex review.
   1–5 years; longer spans need Phase C's restart-based per-year loop.
   Tests: `tests/land/forcing/test_multi_year.py` (5 pass: shape, cross-boundary
   continuity, single-year equivalence, argument validation).
+- **Phase F — Chunked scan (per-year forcing + scan) (2026-07-02) ✅ DONE.**
+  Replaces the multi-year "concatenate everything then one big lax.scan"
+  design that OOM'd on GPU (~76 GiB pytree at 2° × 5 yr × hourly) with a
+  Python loop over years: stage one year's forcing, one `lax.scan` for that
+  year's steps, thread state + tape accumulators across the boundary.
+  * Peak device memory drops from N × per-year to 1 × per-year (~16 GiB float64
+    at 2° hourly).  A single-A100 5-year run now fits, no restart chaining
+    needed for memory reasons.
+  * Tape accumulators are sized for the full run and threaded across chunks;
+    slot indices are globally consistent (`build_slot_indices` returns global
+    slots), so a monthly tape gets the right time axis spanning all years.
+  * The memory guardrail was reformulated as PER-YEAR (was per-run) so the
+    error message is now `per-year forcing pytree (X GiB) exceeds budget`.
+  * JAX caches the scan compilation on shape+function; year 2+ reuses year 1's
+    compiled artifact (partial-year edges may trigger one recompile).
+  * Test: `test_chunked_scan_straddles_year_boundary` runs 8764 hourly steps
+    across year_end=year_start+1, verifies 2 annual tape slots exist with
+    finite values, and the timestamped restart is exactly
+    `restart_2001_d000h04.npz` — proving state was correctly threaded and
+    time bookkeeping survived the chunk boundary.  41 tests total, all green.
+
 - **Phase E — Experiment templates + init_experiment (2026-07-01) ✅ DONE.**
   Adopts the Le Sommer runners pattern in-repo: templated YAML experiments
   instead of a Cambrian explosion of CLI flags.

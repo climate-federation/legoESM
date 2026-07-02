@@ -139,34 +139,28 @@ def run(args) -> int:
     lat_rad, lon_rad = grid_latlon_rad(grid)
     ncol = lat_rad.shape[0]
 
-    # Estimate the peak forcing pytree memory BEFORE doing anything expensive
-    # (surfdata init, forcing staging, JAX compilation).  The current
-    # stage_forcing_years path concatenates all requested years as one big
-    # pytree, so peak device memory ≈ this size and OOM inside the loader is a
-    # common failure mode.  Fail fast with a concrete size + suggested fix if
-    # we exceed a soft budget (24 GiB — comfortable on a 40 GB A100).
+    # Estimate the PEAK forcing pytree memory (ONE year at a time — chunked
+    # scan runs per-year).  Fail fast with a concrete size + suggested fix if
+    # a single year's forcing wouldn't fit in a soft budget (24 GiB —
+    # comfortable on a 40 GB A100).  1 year of hourly at 2° ≈ 16 GiB float64.
     _ATM_TO_SURFACE_N_FIELDS = 14                # T, q, p, wind, sw, lw, precip, snow, cos_z, ρ, CO2, ...
     _BYTES_PER_ELEM = 8                           # float64
-    est_bytes = args.n_steps * ncol * _ATM_TO_SURFACE_N_FIELDS * _BYTES_PER_ELEM
+    _STEPS_PER_YEAR_MAX = int(365.0 * 86400.0 / max(float(args.dt), 1.0))
+    peak_year_steps = min(int(args.n_steps), _STEPS_PER_YEAR_MAX)
+    est_bytes = peak_year_steps * ncol * _ATM_TO_SURFACE_N_FIELDS * _BYTES_PER_ELEM
     est_gib = est_bytes / (1024 ** 3)
     _FORCING_BUDGET_GIB = 24.0
     if est_gib > _FORCING_BUDGET_GIB:
-        print(f"ERROR: estimated forcing pytree ({est_gib:.1f} GiB) exceeds the "
+        print(f"ERROR: per-year forcing pytree ({est_gib:.1f} GiB) exceeds the "
               f"soft budget ({_FORCING_BUDGET_GIB} GiB).", file=sys.stderr)
-        print(f"  n_steps={args.n_steps} x ncol={ncol} x "
+        print(f"  peak_year_steps={peak_year_steps} x ncol={ncol} x "
               f"~{_ATM_TO_SURFACE_N_FIELDS} fields x {_BYTES_PER_ELEM} B\n",
               file=sys.stderr)
-        print("Current stage_forcing_years concatenates all years before the "
-              "scan, so peak device memory ≈ this size.  Options:", file=sys.stderr)
-        print("  - Split into single-year chained runs (Phase C restart):",
+        print("Options:", file=sys.stderr)
+        print("  - Coarser grid (e.g. biophysics/smoke_4deg template)",
               file=sys.stderr)
-        print("      forcing.year_end = forcing.year_start   (per experiment)",
-              file=sys.stderr)
-        print("      restart.from = <previous run's restart_*.npz>",
-              file=sys.stderr)
-        print("  - Use a coarser grid (biophysics/smoke_4deg template)",
-              file=sys.stderr)
-        print("  - Run on CPU with more host RAM: qsub -l select=…:mem=128GB",
+        print("  - Larger dt (fewer steps per year)", file=sys.stderr)
+        print("  - CPU with more host RAM: qsub -l select=…:mem=128GB",
               file=sys.stderr)
         return 2
 
@@ -234,30 +228,35 @@ def run(args) -> int:
           f"carbon={config.carbon.scheme} | dt={dt:.0f}s | n_steps={args.n_steps} | "
           f"forcing={forcing_desc}")
 
-    # (Forcing-pytree memory estimate moved up before init_land_surface_data
-    # so we fail fast when the requested size can't fit — see block above.)
-    print(f"forcing pytree estimate: {est_gib:.1f} GiB")
-    # allow_synthetic=False when we have real data: any surprise missing file
-    # (permission error, corrupted symlink, etc.) surfaces immediately instead
-    # of silently substituting fake data.
-    allow_syn = synthetic
-    if multi_year:
-        forcing_xs = stage_forcing_years(
-            lat_rad, lon_rad, model_times_s,
-            year_start=year_start, year_end=year_end,
-            data_dir=(None if synthetic else args.forcing_dir),
-            prefix=args.prefix, suffix=args.suffix,
-            k_neighbors=args.k_neighbors, allow_synthetic=allow_syn)
-    else:
-        forcing_xs = stage_forcing(
-            lat_rad, lon_rad, model_times_s,
-            year=year_start, data_dir=(None if synthetic else args.forcing_dir),
-            prefix=args.prefix, suffix=args.suffix,
-            k_neighbors=args.k_neighbors, allow_synthetic=allow_syn)
-    doy_xs = jnp.asarray(model_times_s / _SEC_PER_DAY)
+    # Precompute per-year masks over model_times_s.  We stage forcing +
+    # scan ONE YEAR AT A TIME in a Python loop below, so peak device memory
+    # is one year's forcing pytree — not all N years concatenated (which
+    # OOM'd the A100 at 5-yr × 2° hourly).
+    tq = np.asarray(model_times_s, dtype=np.float64)
+    _SEC_PER_YEAR = _SEC_PER_DAY * 365.0                    # noleap
+    year_masks = []                                          # list[(year, mask)]
+    for k, y in enumerate(range(year_start, year_end + 1)):
+        t_lo, t_hi = k * _SEC_PER_YEAR, (k + 1) * _SEC_PER_YEAR
+        mask = (tq >= t_lo) & (tq < t_hi)
+        if mask.any():
+            year_masks.append((y, mask))
+    if not year_masks:
+        raise SystemExit(
+            f"no model times fall within years [{year_start}, {year_end}]")
 
-    # --- initial state (soil/skin T seeded from the first forcing step). ---
-    T0 = forcing_xs.T_lowest[0]
+    # T0 seed for cold-start soil temperature: stage just the first year's
+    # first step (one AtmToSurface slice, ~100 KB) and extract T_lowest[0].
+    # --restart-from overrides this anyway.
+    allow_syn = synthetic
+    _first_year, _first_mask = year_masks[0]
+    _tq0_local = tq[_first_mask][:1]                          # already relative to year_start
+    _seed_forcing = stage_forcing(
+        lat_rad, lon_rad, _tq0_local,
+        year=_first_year, data_dir=(None if synthetic else args.forcing_dir),
+        prefix=args.prefix, suffix=args.suffix,
+        k_neighbors=args.k_neighbors, allow_synthetic=allow_syn)
+    T0 = _seed_forcing.T_lowest[0]
+    del _seed_forcing                                          # free before real staging
     if args.land_mode == "slab":
         from legoesm.core.field import Field
         from legoesm.land.state import LandState
@@ -339,10 +338,37 @@ def run(args) -> int:
                 {v: values[v] for v in tape.vars})
         return (new_state, new_accums), None
 
-    print(f"stepping {args.n_steps} timestep(s) (lax.scan) ...")
-    slot_idx_xs = {name: t[0] for name, t in tape_slots.items()}
-    (state, tape_accums), _ = jax.lax.scan(
-        _step_body, (state, tape_accums), (forcing_xs, doy_xs, slot_idx_xs))
+    # ----- CHUNKED SCAN: stage forcing + lax.scan one year at a time.  --------
+    # Tape accumulators are sized for the WHOLE run and threaded across chunks;
+    # slot indices are already global (build_slot_indices returns indices into
+    # the whole run's slot count), so slicing by year_mask keeps the accumulation
+    # naturally aligned.  Peak forcing memory = ONE year (not N × N years).
+    # JAX caches the scan compilation on shape+function, so year 2+ reuse the
+    # compiled artifact from year 1 (partial-year edges may recompile once).
+    # Global slot indices — computed once, sliced per year.
+    slot_idx_global = {name: t[0] for name, t in tape_slots.items()}
+    total_steps = int(sum(m.sum() for _, m in year_masks))
+    print(f"stepping {total_steps} timestep(s) across {len(year_masks)} year chunk(s) "
+          f"(lax.scan per year) ...")
+
+    for k, (year, mask) in enumerate(year_masks):
+        # Year-local model times: the year's forcing clock resets to 0 at Jan 1.
+        tq_year = tq[mask]
+        n_step_year = tq_year.size
+        tq_local = tq_year - k * _SEC_PER_YEAR
+        forcing_year = stage_forcing(
+            lat_rad, lon_rad, tq_local,
+            year=year, data_dir=(None if synthetic else args.forcing_dir),
+            prefix=args.prefix, suffix=args.suffix,
+            k_neighbors=args.k_neighbors, allow_synthetic=allow_syn)
+        doy_year = jnp.asarray(tq_year / _SEC_PER_DAY)
+        # Slice each tape's GLOBAL slot indices to just this year's steps.
+        slot_year_xs = {name: idx[mask] for name, idx in slot_idx_global.items()}
+        print(f"  year {year} ({n_step_year} steps) ...")
+        (state, tape_accums), _ = jax.lax.scan(
+            _step_body, (state, tape_accums),
+            (forcing_year, doy_year, slot_year_xs))
+        del forcing_year, doy_year, slot_year_xs               # free before next year
 
     # --- land mask + NaN-over-land validation (the smoke PASS/FAIL). ---
     def cover1d(a):
