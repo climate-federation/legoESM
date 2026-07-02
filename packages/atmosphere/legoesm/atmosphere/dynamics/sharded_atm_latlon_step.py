@@ -222,23 +222,15 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
         spmd_pole_end_masks, activate_latlon_spmd_halo)
     from legoesm.parallel.shard_map_compat import shard_map
 
-    # Stochastic physics stays refused under SPMD (increment 2): the AR1
-    # innovations are drawn with (ncol_local,)-shaped calls from the
-    # REPLICATED per-step key, so band-local draws differ from the serial
-    # global draws — a decomposition-VARIANT trajectory, not a carry bug.
+    # Stochastic physics is SPMD-safe since increment 2: the Bechtold AR1
+    # innovation folds the per-step sub-key with each column's GLOBAL id
+    # (``PhysicsState.col_index`` — band-split with the carry, so every
+    # shard holds its own global ids) and the replicated master key splits
+    # identically on every band — the draw is decomposition-INVARIANT.
     # Deterministic prognostic carries (tke/qke, conv profiles, GWD
     # spectrum) thread exactly: the ColumnAdapter flatten is a C-order
     # (lat-major) reshape, so a contiguous dim-0 shard of every
     # ``(ncol, ...)`` PhysicsState leaf IS the band's own columns.
-    from legoesm.timestepping.integration import physics_has_stochastic
-    if physics_fn is not None and physics_has_stochastic(physics_fn):
-        raise NotImplementedError(
-            "atm lat-band SPMD step: stochastic convection draws are "
-            "shaped (ncol_local,) from a replicated key — band-local "
-            "draws would diverge from the serial trajectory.  Disable "
-            "enable_stochastic under SPMD (global-column-indexed PRNG "
-            "split is the follow-up)."
-        )
 
     # A stateful (tagged) physics_fn with NO carry would silently reseed
     # its PhysicsState every step (issue #405/#413) — model.step()'s

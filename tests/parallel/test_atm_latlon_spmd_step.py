@@ -388,23 +388,6 @@ def test_run_atm_latlon_spmd_segment_matches_serial(use_polar_filter):
 # each band's latitudes; column-local physics adds no cross-band coupling.
 # ==============================================================================
 
-def test_stochastic_physics_refused_even_when_wrapped():
-    """codex round-8 HIGH: the stochastic tag must survive functools
-    wrappers (partial / __wrapped__) — a wrapped stochastic physics must
-    not bypass the SPMD refusal and run decomposition-variant draws."""
-    import functools
-    model, _ = _model_and_state(use_polar_filter=False)
-
-    def _f(hs, grid, sigma, ps):  # never called
-        raise AssertionError("refusal must fire at factory time")
-    _f._has_stochastic_physics = True
-    _f._requires_phys_state = True
-
-    for fn in (_f, functools.partial(_f)):
-        with pytest.raises(NotImplementedError, match="stochastic"):
-            make_sharded_atm_latlon_step(model, None, physics_fn=fn)
-
-
 def _mk_phys_state(ncol, nlev):
     """Minimal all-zeros PhysicsState with a nonzero deterministic tke seed."""
     import jax as _jax
@@ -419,7 +402,65 @@ def _mk_phys_state(ncol, nlev):
         qke=jnp.zeros((ncol, nlev)),
         clubb_moments=jnp.zeros((ncol, 15, nlev + 1)),
         rad_heating=jnp.zeros((ncol, nlev)),
+        col_index=jnp.arange(ncol, dtype=jnp.int32),
     )
+
+
+def test_stochastic_draw_is_decomposition_invariant():
+    """A1 increment 2: a stochastic per-column draw (fold_in with the
+    GLOBAL col_index carried in PhysicsState) must produce the SAME
+    trajectory and carry-out under 4-band SPMD as the serial twin —
+    stochastic physics is no longer refused, it is invariant."""
+    import jax as _jax
+    mesh = _mesh()
+    serial, c_state = _model_and_state(use_polar_filter=False)
+    spmd_model, _ = _model_and_state(use_polar_filter=False)
+    hs0 = _hs_from_cgrid_state(serial, c_state)
+    dt, n_steps = 100.0, 3
+    nlat, nlon, nlev = np.asarray(hs0.T.data).shape
+    ps0 = _mk_phys_state(nlat * nlon, nlev)
+
+    def _stoch_phys(hs, grid, sigma, ps):
+        # Mirrors the Bechtold invariant-draw pattern: per-GLOBAL-column
+        # fold of a per-step sub-key, AR1 carry in conv_stoch_state, and
+        # a T tendency scaled by the noise — trajectory-coupled.
+        from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+        tend = held_suarez_forcing_latlon(hs, grid, sigma)
+        nlat_loc, nlon_loc, _ = hs.T.data.shape
+        sub, master_new = _jax.random.split(ps.prng_key, 2)
+        eps = _jax.vmap(
+            lambda i: _jax.random.normal(_jax.random.fold_in(sub, i))
+        )(ps.col_index)
+        stoch_new = 0.8 * ps.conv_stoch_state + 0.2 * eps
+        factor = (1.0 + 1e-3 * stoch_new).reshape(nlat_loc, nlon_loc, 1)
+        tend = tend._replace(
+            dT_dt=tend.dT_dt.replace(data=tend.dT_dt.data * factor))
+        return tend, ps._replace(conv_stoch_state=stoch_new,
+                                 prng_key=master_new)
+
+    _stoch_phys._requires_phys_state = True
+
+    hs_s, ps_s = run_atm_latlon_spmd_segment(
+        serial, None, hs0, dt, n_steps,
+        physics_fn=_stoch_phys, phys_state=ps0)
+    hs_b, ps_b = run_atm_latlon_spmd_segment(
+        spmd_model, mesh, hs0, dt, n_steps,
+        physics_fn=_stoch_phys, phys_state=ps0)
+
+    # Non-vacuity: the noise actually perturbed the AR1 carry.
+    assert float(np.max(np.abs(np.asarray(ps_b.conv_stoch_state)))) > 1e-6
+
+    for field in ("u", "v", "T", "p_s"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(hs_b, field).data),
+            np.asarray(getattr(hs_s, field).data),
+            rtol=1e-6, atol=1e-9,
+            err_msg=f"stochastic SPMD diverged from serial in '{field}' — "
+                    "the per-global-column draw is decomposition-variant")
+    np.testing.assert_allclose(
+        np.asarray(ps_b.conv_stoch_state), np.asarray(ps_s.conv_stoch_state),
+        rtol=1e-6, atol=1e-12,
+        err_msg="AR1 stochastic carry diverged under band decomposition")
 
 
 def _stateful_hs_physics():
