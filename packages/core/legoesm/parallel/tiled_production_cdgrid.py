@@ -1556,8 +1556,21 @@ def make_tiled_center_to_dgrid_vector_stage_2d(mesh, cdgrid, n: int, kt: int,
 # sponge, no physics, non-duogrid, use_fv3_a2b_zeta_corner=False.
 # ===========================================================================
 
+def _sponge_rate_from_config(coord, sponge_sigma: float,
+                              sponge_tau_sec: float):
+    """(nlev,) Rayleigh-sponge rate mirroring serial step 13, or ``None``
+    when the sponge is off (either knob <= 0) — the byte-identical default
+    for every pre-existing stage gate."""
+    if sponge_tau_sec <= 0.0 or sponge_sigma <= 0.0:
+        return None
+    sigma_full = coord.sigma_full
+    frac = jnp.clip((sponge_sigma - sigma_full) / sponge_sigma, 0.0, 1.0)
+    return frac ** 2 / sponge_tau_sec
+
+
 def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
-                                   p_floor: float, scalar_body, vector_body):
+                                   p_floor: float, scalar_body, vector_body,
+                                   sponge_rate=None):
     """Build the SHARED per-tile hydrostatic tendency + metric-slicer closures
     used by BOTH ``make_tiled_fv3_hydrostatic_tendencies_stage_2d`` (called once)
     and ``make_tiled_fv3_hydrostatic_step_stage_2d`` (called once per SSP-RK3
@@ -1681,6 +1694,19 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
                         + vav_pad[:, :-1, 1:, :] + vav_pad[:, 1:, 1:, :])
         du_d_dt = du_d_dt + vau_d
         dv_d_dt = dv_d_dt + vav_d
+
+        # ---- Upper-atmosphere Rayleigh sponge (D-grid, tile-local) ----
+        # Mirrors serial fv3_hydrostatic_tendencies step 13 exactly:
+        # ``d(u,v)/dt -= rate(sigma) * (u,v)`` with the (nlev,)-shaped rate
+        # precomputed at factory build.  ``None`` (the default, and every
+        # pre-existing stage gate) is byte-identical to the prior body;
+        # the production adapter passes the model config's sponge so the
+        # tiled step twins the DEFAULT serial step (sponge is default-ON:
+        # sponge_tau_sec=3600, sponge_sigma=0.15 — measured 6.2e-6 u drift
+        # without it, job 8689100).
+        if sponge_rate is not None:
+            du_d_dt = du_d_dt - sponge_rate * u_d_t
+            dv_d_dt = dv_d_dt - sponge_rate * v_d_t
 
         # ---- THERMO dT/dt: horiz_adv + adiabatic + vert_adv_T ----
         dT_dx = gradient_x_3d_core(T_pad, dx_t)
@@ -1893,7 +1919,9 @@ def _ssp_rk3_tile_step(s0, F, dt):
 
 def make_tiled_fv3_hydrostatic_step_stage_2d(mesh, cdgrid, coord, n: int,
                                             kt: int, nlev: int, *,
-                                            p_floor: float, dt: float):
+                                            p_floor: float, dt: float,
+                                            sponge_sigma: float = 0.0,
+                                            sponge_tau_sec: float = 0.0):
     """Full tiled SSP-RK3 STEP on a ``(6, kt, kt)`` mesh.
 
     Returns ``step(u_d, v_d, T, p_s, phis) -> (u_d, v_d, T, p_s)`` advanced one
@@ -1954,7 +1982,9 @@ def make_tiled_fv3_hydrostatic_step_stage_2d(mesh, cdgrid, coord, n: int,
 
     # Shared tendency numerics (same builder as the tendency stage — no dup).
     _tile_tendency, _slice_metrics = _build_hydro_tile_tendency_fns(
-        coord, cdgrid, nl, nlev, p_floor, scalar_body, vector_body)
+        coord, cdgrid, nl, nlev, p_floor, scalar_body, vector_body,
+        sponge_rate=_sponge_rate_from_config(coord, sponge_sigma,
+                                             sponge_tau_sec))
 
     fo = P("face", None, None)
     fw = P("face", None, None, None)
@@ -2013,7 +2043,9 @@ def make_tiled_fv3_hydrostatic_step_stage_2d(mesh, cdgrid, coord, n: int,
 def make_tiled_fv3_hydrostatic_moist_step_stage_2d(mesh, cdgrid, coord, n: int,
                                                   kt: int, nlev: int, *,
                                                   p_floor: float, dt: float,
-                                                  column_physics_fn):
+                                                  column_physics_fn,
+                                            sponge_sigma: float = 0.0,
+                                            sponge_tau_sec: float = 0.0):
     """Full tiled MOIST SSP-RK3 STEP on a ``(6, kt, kt)`` mesh — increment 4, the
     cube-MOIST np>6 capstone.
 
@@ -2085,7 +2117,9 @@ def make_tiled_fv3_hydrostatic_moist_step_stage_2d(mesh, cdgrid, coord, n: int,
     vector_body = make_tiled_pad_vector_body(
         mesh, ndim=4, halo=1, with_offsets=True)
     _tile_tendency, _slice_metrics = _build_hydro_tile_tendency_fns(
-        coord, cdgrid, nl, nlev, p_floor, scalar_body, vector_body)
+        coord, cdgrid, nl, nlev, p_floor, scalar_body, vector_body,
+        sponge_rate=_sponge_rate_from_config(coord, sponge_sigma,
+                                             sponge_tau_sec))
 
     fo = P("face", None, None)
     fw = P("face", None, None, None)

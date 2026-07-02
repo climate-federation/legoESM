@@ -109,6 +109,11 @@ def make_tiled_cc_step(model, mesh, kt: int, dt: float):
     tiled = make_tiled_fv3_hydrostatic_step_stage_2d(
         mesh, cdgrid, model.sigma_coord, n, kt, nlev,
         p_floor=float(cfg.p_floor), dt=float(dt),
+        # The (default-ON) non-implicit Rayleigh sponge: the serial
+        # tendencies apply it in-tendency (step 13); the tiled bodies take
+        # it from these knobs (measured 6.2e-6 u drift without, job 8689100).
+        sponge_sigma=float(getattr(cfg, "sponge_sigma", 0.0)),
+        sponge_tau_sec=float(getattr(cfg, "sponge_tau_sec", 0.0)),
     )
 
     def step(state):
