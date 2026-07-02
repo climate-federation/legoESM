@@ -374,7 +374,21 @@ halos are **host-staged**: cross-node GPU-direct currently aborts on Derecho's
 CXI fabric (`cxil_map` / OFI `injectdata`; `scaling_gpu.sh` auto-selects
 `MPI4JAX_USE_CUDA_MPI=0` for `NODES>1`), so multi-node points are correct but a
 **lower bound** on inter-node scaling — footnote them. See
-`docs/performance/multinode_gpu_direct_cxi.md`. **Run a 2-node canary first** so
+`docs/performance/multinode_gpu_direct_cxi.md`.
+
+> **The mpi4jax-free alternative (cubed-sphere, 2026-07):** the production
+> driver now runs true multi-node cubed-sphere via
+> `run_amip.py --distributed --distributed-mode spmd` — multi-controller
+> `jax.distributed` + NCCL collectives, no mpi4jax anywhere, so the CXI
+> GPU-direct abort does not apply (NCCL has its own Slingshot path via
+> `aws-ofi-nccl`). Parity receipt: 2-process bit-exact vs single-controller
+> over a full day incl. checkpoint writes (jobs 8686550/8687224; gate
+> `scripts/validate/validate_driver_cs_spmd_parity.py`). Launch with
+> `mpiexec --ppn 4 -n <NODES*4>` (any launcher that sets PMI env);
+> diagnostics writer must stay off (`diag_days=0`, milestone). This is the
+> path to benchmark AGAINST the host-staged mpi4jax lower bound.
+
+**Run a 2-node canary first** so
 any problem surfaces on one cheap job, not the whole sweep:
 
 ```bash
