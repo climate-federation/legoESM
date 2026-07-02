@@ -543,6 +543,11 @@ class ExperimentConfig(NamedTuple):
     # stl1-4, swvl1-4, sd on a regular lat-lon grid.  Ignored when
     # use_multilayer_land is False.
     era5_land_ic_path: str = ""
+    # Pre-staged CLM surfdata NetCDF (PFT/texture/glacier maps) for the multilayer
+    # land.  Empty => download from UCAR to /tmp (fails on compute nodes with no
+    # outbound internet, so stage the file and set this).  Ignored unless
+    # use_multilayer_land is True.
+    clm_surfdata_path: str = ""
 
     # Diagnostic T-based ice partition.  At every radiation call the
     # grid-mean cloud water q_c is split into liquid + ice via
@@ -951,11 +956,27 @@ class ExperimentConfig(NamedTuple):
                 f"turbulence='louis' (the kernel that consumes the injected "
                 f"tiled surface flux); got turbulence={self.turbulence!r}."
             )
-        if self.surface_tiled and not (self.slab_land_active or self.land_mask_path):
+        if self.surface_tiled and not (self.slab_land_active
+                                       or self.land_mask_path
+                                       or self.use_multilayer_land):
             errors.append(
                 "surface_tiled=True requires an active land tile "
-                "(--slab-land-active or a land-mask file); otherwise there is no "
-                "land tile to give its own surface scheme."
+                "(--slab-land-active, --use-multilayer-land, or a land-mask file); "
+                "otherwise there is no land tile to give its own surface scheme. "
+                "use_multilayer_land is an active tile whose land fraction comes "
+                "from --topography (elevation-derived f_land) when no mask is given."
+            )
+        # ...but the multilayer tile can only get f_land from topography — a FLAT
+        # topography gives f_land==0 everywhere (no land), which would silently
+        # no-op the requested land tile.  Require real topography OR an explicit
+        # mask when multilayer is the sole land-tile signal.
+        if (self.surface_tiled and self.use_multilayer_land
+                and not self.slab_land_active and not self.land_mask_path
+                and self.topography == "flat"):
+            errors.append(
+                "use_multilayer_land + surface_tiled with topography='flat' and no "
+                "land-mask file has NO land (elevation-derived f_land is 0 "
+                "everywhere) — pass a real --topography or a --land-mask-file."
             )
         if not (self.surface_z0_land > 0.0):
             errors.append(
@@ -1001,11 +1022,15 @@ class ExperimentConfig(NamedTuple):
                 f"[0, 1]; got {self.land_bucket_w_init_frac!r}."
             )
         # Stomatal soil-water limitation needs the bucket to supply beta_soil.
-        if self.land_stomatal_beta and not self.land_soil_bucket:
+        if (self.land_stomatal_beta and not self.land_soil_bucket
+                and not self.use_multilayer_land):
             errors.append(
                 "land_stomatal_beta=True requires land_soil_bucket=True "
                 "(the bucket supplies the soil availability beta_soil that the "
-                "Jarvis stomatal model down-regulates)."
+                "Jarvis stomatal model down-regulates) — UNLESS use_multilayer_land "
+                "is set, in which case the Richards multilayer soil supplies the "
+                "root-zone moisture availability instead (the stomata are threaded "
+                "into MultiLayerLandConfig.stomata, PR #715)."
             )
         # Optional cloud-tuning override bounds (mirror CloudConfig.__param_spec__
         # so an out-of-range knob fails early, not deep in the cloud diagnosis).

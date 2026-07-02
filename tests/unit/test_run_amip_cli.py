@@ -37,6 +37,22 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_clm_surfdata_path_flows_to_config():
+    """--clm-surfdata-path round-trips into ExperimentConfig (empty default =>
+    UCAR download; a set path lets a compute node with no internet use a staged
+    surfdata NetCDF for the multilayer land)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.clm_surfdata_path == ""
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--clm-surfdata-path", "/data/clm_surfdata.nc",
+    ]), parser))
+    assert cfg.clm_surfdata_path == "/data/clm_surfdata.nc"
+
+
 def test_snow_albedo_feedback_flag_flows_to_config():
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
@@ -1040,16 +1056,45 @@ _AMIP_DUMMY_PATHS = [
 ]
 
 
-def test_config_yaml_loads_all_keys_are_valid_dests():
-    """Every key in the authoritative AMIP config is a real run_amip dest — a
-    typo'd / dropped override is a hard error (dispatch-hardening)."""
+def _amip_config_yamls():
+    """Every shipped config/amip/*.yaml — so a typo'd key in ANY of them (not just
+    amip_production) is caught, incl. amip_sota.yaml and future configs."""
+    return sorted((_repo_root() / "config" / "amip").glob("*.yaml"))
+
+
+@pytest.mark.parametrize("cfg_file", _amip_config_yamls(),
+                         ids=lambda p: p.name)
+def test_config_yaml_loads_all_keys_are_valid_dests(cfg_file):
+    """Every key in each shipped AMIP config is a real run_amip dest — a typo'd /
+    dropped override is a hard error (dispatch-hardening)."""
     from legoesm.driver.run_config_yaml import load_yaml_config
-    cfg_file = _repo_root() / "config" / "amip" / "amip_production.yaml"
     parser = build_arg_parser()
     defaults = load_yaml_config(str(cfg_file), parser)  # raises on unknown key
     assert defaults  # non-empty
     valid_dests = {a.dest for a in parser._actions}
     assert set(defaults).issubset(valid_dests)
+
+
+def test_amip_sota_config_builds_valid_experiment_config():
+    """config/amip/amip_sota.yaml (SOTA: multilayer land + aerosol_ccn +
+    conv-cloud-off) builds a valid ExperimentConfig — the SOTA knobs are consistent
+    (e.g. multilayer land waives the slab-bucket requirement for stomata; aerosol_ccn
+    has morrison + external aerosol)."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    cfg_file = _repo_root() / "config" / "amip" / "amip_sota.yaml"
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
+    args = _postprocess_args(parser.parse_args(
+        _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc",
+                             "--land-mask-file", "/dummy/lsm.nc"]), parser)
+    cfg = build_config_from_args(args)
+    cfg.validate_strict()  # raises if the SOTA combo is inconsistent
+    assert cfg.use_multilayer_land is True
+    # --aerosol-ccn threads into ExperimentConfig.nc_from_aerosol (specified-Nc from
+    # the Andreae AOT->CCN inversion), enabling the 1st+2nd aerosol indirect effect.
+    assert cfg.nc_from_aerosol is True
+    assert cfg.convective_cloud is False
+    assert cfg.convection == "sbm"
 
 
 def test_config_yaml_round_trips_authoritative_values():
@@ -1094,6 +1139,32 @@ def test_config_yaml_explicit_cli_flag_overrides_file():
         parser.parse_args(_AMIP_DUMMY_PATHS + ["--convection", "bechtold"]), parser)
     cfg = build_config_from_args(args)
     assert cfg.convection == "bechtold"
+
+
+def test_params_flag_parses():
+    parser = build_arg_parser()
+    args = parser.parse_args(_AMIP_DUMMY_PATHS + ["--params", "x.yaml"])
+    assert args.params == "x.yaml"
+
+
+def test_params_calibration_applies_to_atm_experimentconfig(tmp_path):
+    """A --params calibration entry (registry qualified name) applies to the
+    flattened ExperimentConfig scalar via the atm scalar-param map — the same
+    path run_amip.main() takes (issue #691)."""
+    from legoesm.driver.run_config_yaml import (
+        apply_params_to_config,
+        build_atm_scalar_param_map,
+        load_params_config,
+    )
+    parser = build_arg_parser()
+    cfg = build_config_from_args(
+        _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser))
+    p = tmp_path / "params.yaml"
+    p.write_text("atm.clouds.CloudConfig.q_c_diagnostic: 3.0e-4\n")
+    out = apply_params_to_config(
+        cfg, load_params_config(str(p)), driver="run_amip",
+        scalar_param_map=build_atm_scalar_param_map())
+    assert out.cloud_q_c_diagnostic == 3.0e-4
 
 
 def test_aimip_louis_preserves_resolved_surface_scheme():

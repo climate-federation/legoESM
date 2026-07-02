@@ -1,0 +1,16 @@
+# Example LMIP calibration params (issue #691) — the CALIBRATION layer.
+#
+#   run_lmip.py --config config/lmip/lmip_example.yaml \
+#               --params config/lmip/params_example.yaml
+#
+# FORMAT: param_collector qualified name "scheme_key.field": value.  Every key is
+# validated against that scheme's __param_spec__ (existence + bounds) and spliced
+# into the matching nested land *Config; a typo'd / out-of-bounds / not-in-this-
+# run parameter is a hard error.  Applied AFTER --config/CLI.
+#
+# run_lmip's config tree nests the land *Config NamedTuples (MultiLayerLandConfig
+# and its soil-thermal / hydraulics / carbon / stomata sub-configs), so many land
+# parameters are reachable here by qualified name.
+
+# --- land surface exchange (bulk drag coefficient) ---
+land.multilayer.Cd_land: 3.0e-3
