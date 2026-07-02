@@ -247,7 +247,9 @@ def main():
         # ACE2-style stability signal; grows with rollout length so the
         # curriculum's longer phases penalise the radiative runaway harder).
         drift = (_gm_surf_T_state(pred) - _gm_surf_T_carry(tgt_carry)) ** 2
-        return state_loss + args.w_drift * drift
+        # aux breakdown so the log shows the STABILITY signal (drift term)
+        # separately from forecast skill (state term).
+        return state_loss + args.w_drift * drift, (state_loss, drift)
 
     # Pre-warm the RRTMGP optics-table cache OUTSIDE filter_jit with CONCRETE
     # params: the NetCDF gas-optics load is module-cached by static file paths,
@@ -282,7 +284,11 @@ def main():
     opt_state = opt.init(eqx.filter(params0, eqx.is_inexact_array))
     params = params0
     # EMA on the inexact-array leaves only (static leaves recombined at save).
-    ema_arrays = eqx.filter(params0, eqx.is_inexact_array)
+    # Initialised at params0 -> BIAS-CORRECTED at save (see below); the raw
+    # running EMA over a short fine-tune is ~params0 (degenerate).
+    p0_arrays = eqx.filter(params0, eqx.is_inexact_array)
+    ema_arrays = p0_arrays
+    ema_steps = 0
     _, static = eqx.partition(params0, eqx.is_inexact_array)
 
     broke = False
@@ -297,14 +303,17 @@ def main():
         @eqx.filter_jit
         def sample_vg(params, sample, _n=n_steps_phase):
             return eqx.filter_value_and_grad(
-                lambda p: _sample_loss(p, sample, _n)
+                lambda p: _sample_loss(p, sample, _n), has_aux=True,
             )(params)
 
         for epoch in range(ep):
-            tot_loss, acc = 0.0, None
+            tot_loss = tot_state = tot_drift = 0.0
+            acc = None
             for sample in samples:
-                loss_s, g = sample_vg(params, sample)  # memory = 1 sample
+                (loss_s, (sl, dr)), g = sample_vg(params, sample)  # 1 sample in mem
                 tot_loss += float(loss_s)
+                tot_state += float(sl)
+                tot_drift += float(dr)
                 acc = g if acc is None else jax.tree_util.tree_map(
                     lambda a, b: a + b, acc, g,
                 )
@@ -319,18 +328,35 @@ def main():
                 lambda e, c: args.ema_decay * e + (1.0 - args.ema_decay) * c,
                 ema_arrays, cur,
             )
+            ema_steps += 1
             avg_loss = tot_loss / n
-            logger.info(f"  [rd={rd}d] epoch {epoch:3d}: loss={avg_loss:.6f}")
+            logger.info(
+                f"  [rd={rd}d] epoch {epoch:3d}: loss={avg_loss:.6f} "
+                f"(state={tot_state / n:.6f} "
+                f"drift={tot_drift / n:.6f} [K^2 @lead])"
+            )
             if not np.isfinite(avg_loss):
                 logger.error("non-finite loss; stopping")
                 broke = True
                 break
 
     args.out_ckpt.parent.mkdir(parents=True, exist_ok=True)
-    ema_params = eqx.combine(ema_arrays, static)  # EMA weights = more stable
+    # Bias-corrected EMA: with EMA_t = d^t p0 + (1-d) sum d^(t-i) p_i, the
+    # p0-anchored estimate of the recent-parameter average is
+    # (EMA_t - d^t p0) / (1 - d^t). Without this a short fine-tune's raw EMA
+    # is ~params0 (0.999^11 -> 99% initial weight — found on the PoC run).
+    if ema_steps > 0:
+        d_t = float(args.ema_decay) ** ema_steps
+        ema_arrays = jax.tree_util.tree_map(
+            lambda e, p0: (e - d_t * p0) / (1.0 - d_t), ema_arrays, p0_arrays,
+        )
+    ema_params = eqx.combine(ema_arrays, static)
     save_checkpoint(ema_params, args.out_ckpt)
     save_checkpoint(params, args.out_ckpt.with_name(args.out_ckpt.stem + "_raw.eqx"))
-    logger.info(f"Wrote fine-tuned params (EMA): {args.out_ckpt}")
+    logger.info(
+        f"Wrote fine-tuned params (bias-corrected EMA over {ema_steps} steps): "
+        f"{args.out_ckpt}"
+    )
 
 
 if __name__ == "__main__":
