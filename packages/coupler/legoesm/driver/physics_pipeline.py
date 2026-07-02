@@ -1720,10 +1720,27 @@ class PhysicsPipeline:
             # (column space) + the lagged precip; the slab T_land rides through.
             precip_col = (ad.flatten_2d(conv_precip)
                           if conv_precip is not None else None)
-            land_ml_new, _, _ = self._step_multilayer_land_tile(
+            land_ml_new, T_sfc_ml_col, _ = self._step_multilayer_land_tile(
                 land_ml, rad_out.sw_flux_down[:, -1], rad_out.lw_flux_down[:, -1],
                 T, p_s, q_v, u, v, precip_col, dt)
-            T_land_new = T_land
+            # Couple the multilayer land SKIN TEMPERATURE back to T_land so the
+            # atmospheric BL surface fluxes (tiled _tiled_surface_flux / the non-
+            # tiled T_sfc blend) see the EVOLVING Richards soil column.  Previously
+            # T_land rode through frozen -> the multilayer land drove ONLY radiation
+            # (albedo/LW), never the turbulent-flux boundary, so use_multilayer_land
+            # was a passive passenger in AMIP.  Land-fraction blending downstream
+            # masks this to land cells (ocean uses SST), matching the slab path.
+            # FOLLOW-UP (tracked): the tile also returns q_surface + per-cell z0
+            # (resp.q_surface/resp.z0) which the atmospheric land flux does NOT yet
+            # consume (it recomputes q_sfc from slab beta_land + uses the scalar
+            # surface_z0_land).  So the multilayer HYDROLOGY/stomata drive T_sfc but
+            # not yet the BL latent flux directly.  Full coupling = thread
+            # q_sfc_land_col + z0_land_col into _tiled_surface_flux; deferred to a
+            # validated follow-up (needs the CLM surfdata staged to run end-to-end).
+            # Cast to the carried T_land dtype: the multilayer response T_sfc is at
+            # working precision (float64 under x64) but T_land rides the SegmentCarry
+            # at storage dtype (float32) — a lax.scan carry needs matching dtypes.
+            T_land_new = ad.unflatten_2d(T_sfc_ml_col).astype(T_land.dtype)
         # --- Slab-land skin temperature update (semi-implicit SEB) ---
         # ``beta_land`` (None unless the soil-water bucket is active)
         # soil-moisture-limits the land latent flux, so a dry bucket warms

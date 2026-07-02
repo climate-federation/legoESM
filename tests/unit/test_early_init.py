@@ -47,3 +47,22 @@ def test_returns_before_importing_jax(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", _guarded_import)
     assert early_init.maybe_init_jax_distributed() is False
+
+
+def test_already_initialized_is_noop_without_jax_probe(monkeypatch):
+    # #693: idempotency must NOT probe jax.process_count() (that inits the XLA
+    # backend, breaking jax.distributed.initialize). When _INITIALIZED is set,
+    # return False without importing jax/mpi4py even under a multi-task env.
+    monkeypatch.setenv("SLURM_NTASKS", "4")
+    monkeypatch.setattr(early_init, "_INITIALIZED", True)
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _guarded_import(name, *args, **kwargs):
+        if name in ("jax", "mpi4py") or name.startswith(("jax.", "mpi4py.")):
+            raise AssertionError(f"idempotent path must not import {name!r}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _guarded_import)
+    assert early_init.maybe_init_jax_distributed() is False

@@ -13,8 +13,8 @@ import copy
 from pathlib import Path
 
 from scripts.validate.run_amip_climateeval import (
-    DEFAULT_SUITES,
     build_arg_parser,
+    cmor_nc_paths,
     era5_only_suite_def,
     suite_db_path,
 )
@@ -90,17 +90,32 @@ def test_era5_only_suite_def_shared_alias_list_is_mutated_once():
 def test_build_arg_parser_defaults():
     parser = build_arg_parser()
     args = parser.parse_args([
-        "--cmor-dir", "/tmp/cmor/Amon",
+        "--cmor-dir", "/tmp/cmor",
         "--data-root-dir", "/tmp/climateeval_data",
         "--output-dir", "/tmp/run",
     ])
-    assert args.cmor_dir == "/tmp/cmor/Amon"
-    # default = the combined Tier1+Tier2 suite list
-    assert args.suites == list(DEFAULT_SUITES)
+    assert args.cmor_dir == "/tmp/cmor"
+    # default (unset) = empty -> main() discovers + runs ALL bundled suites
+    assert args.suites == []
     assert args.model_id == "legoESM-1-0"
     assert args.report_name == "climateeval_report.html"
     assert args.fail_on_missing_data is False
     assert args.download_missing_data is False
+
+
+def test_cmor_nc_paths(tmp_path):
+    cmor = tmp_path / "cmor"
+    # monthly tables + fx populated; day/ present but must be EXCLUDED
+    for table, fname in [("Amon", "tas.nc"), ("Omon", "tos.nc"),
+                         ("SImon", "siconc.nc"), ("fx", "areacella.nc"),
+                         ("day", "tas_day.nc")]:
+        d = cmor / table
+        d.mkdir(parents=True)
+        (d / fname).write_text("")
+    got = {p.parent.name for p in cmor_nc_paths(cmor)}
+    assert got == {"Amon", "Omon", "SImon", "fx"}          # day excluded
+    # pointed directly at a table dir -> loads that table's files (back-compat)
+    assert [p.name for p in cmor_nc_paths(cmor / "Amon")] == ["tas.nc"]
 
 
 def test_build_arg_parser_multiple_suites_flow_through():

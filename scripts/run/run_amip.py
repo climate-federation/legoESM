@@ -102,6 +102,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "overrides it. Keys are run_amip argument dests; an "
                              "unknown key is a hard error (no silent typo'd "
                              "override).")
+    parser.add_argument("--params", default=None,
+                        help="YAML calibration file of tuned parameters keyed by "
+                             "param_collector qualified name 'scheme_key.field' "
+                             "(e.g. atm.clouds.CloudConfig.q_c_diagnostic); "
+                             "validated against __param_spec__ bounds and applied "
+                             "to the flattened atmosphere ExperimentConfig scalar "
+                             "fields. Applied after --config/CLI. (issue #691)")
 
     # Forcing
     parser.add_argument("--dataset", type=str, default="analytical",
@@ -473,9 +480,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # run_coupled so AMIP can run with the SAME tuned slab parameters. Defaults
     # (constant / 0 / None / off) keep the prior AMIP behaviour byte-identical.
     parser.add_argument("--surface-bulk-scheme", type=str, default="constant",
-                        choices=["constant", "most", "coare3", "large_yeager"],
+                        choices=["constant", "coare3", "large_yeager"],
                         help="Surface-layer bulk-flux scheme (coare3 = COARE 3.0 "
-                             "MOST with convective gustiness; the tuned slab value).")
+                             "MOST with convective gustiness; the tuned slab value). "
+                             "Matches ExperimentConfig.validate_strict — 'most' is "
+                             "not an accepted AMIP surface scheme (coare3 is the "
+                             "MOST-with-gustiness variant).")
     parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi", type=float,
                         default=0.0,
                         help="COARE convective-gustiness BL depth z_i [m] (0=off; "
@@ -622,6 +632,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--multilayer-soil-depth", type=float,
                         default=_EXPERIMENT_DEFAULTS.multilayer_soil_depth,
                         help="Total soil-column depth [m] for --use-multilayer-land.")
+    parser.add_argument("--clm-surfdata-path", type=str,
+                        default=_EXPERIMENT_DEFAULTS.clm_surfdata_path,
+                        help="Pre-staged CLM surfdata NetCDF (PFT/texture/glacier) "
+                             "for --use-multilayer-land. Required on compute nodes "
+                             "with no outbound internet (empty => download from UCAR "
+                             "to /tmp, which fails there).")
     parser.add_argument("--subgrid-orography-file", type=str, default="",
                         help="Subgrid orographic stddev NetCDF (ICON-extpar "
                              "SSO_STDH on a regular lat-lon grid). When set with "
@@ -764,11 +780,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--evaluation-suite", dest="evaluation_suites", nargs="+",
         default=list(_EVALUATION_DEFAULTS.suites),
-        help="One or more ClimateEval suite names, rendered into a single "
-             f"combined report (default: {' '.join(_EVALUATION_DEFAULTS.suites)}). "
-             "Available suites: Tier1_sanity_checks, Tier1_consistency_checks, "
-             "Tier1_ecs, Tier2_atmosphere_monthly, Tier2_atmosphere_subdaily, "
-             "Tier2_ocean_monthly.")
+        help="ClimateEval suite names to render into a single combined report. "
+             "Default (unset) = ALL bundled suites (every tier); a suite whose "
+             "data is missing/inapplicable is skipped + reported, not fatal. "
+             "Restrict with e.g. --evaluation-suite Tier2_atmosphere_monthly.")
     parser.add_argument(
         "--evaluation-model-id", dest="evaluation_model_id", type=str,
         default=_EVALUATION_DEFAULTS.model_id,
@@ -1021,6 +1036,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         use_multilayer_land=args.use_multilayer_land,
         multilayer_n_layers=args.multilayer_n_layers,
         multilayer_soil_depth=args.multilayer_soil_depth,
+        clm_surfdata_path=args.clm_surfdata_path,
         albedo_land_path=args.albedo_land_file,
         albedo_land_month=args.albedo_land_month,
         subgrid_orography_path=args.subgrid_orography_file,
@@ -1583,6 +1599,17 @@ def main(argv: list[str] | None = None):
         pass
 
     config = build_config_from_args(args)
+    # Apply the --params calibration layer to the flattened atmosphere
+    # ExperimentConfig scalar fields (issue #691).
+    if getattr(args, "params", None):
+        from legoesm.driver.run_config_yaml import (
+            apply_params_to_config,
+            build_atm_scalar_param_map,
+            load_params_config,
+        )
+        config = apply_params_to_config(
+            config, load_params_config(args.params), driver="run_amip",
+            scalar_param_map=build_atm_scalar_param_map())
 
     from legoesm.driver.model_driver import ModelDriver
 

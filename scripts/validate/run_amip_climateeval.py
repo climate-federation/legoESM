@@ -8,13 +8,13 @@ never imported into the legoESM/JAX process. See
 
 Runs one or more ClimateEval suites against the same CMOR tree and renders
 them into a SINGLE combined portable HTML report (plus one ``.ddb`` per
-suite). Default suites: ``Tier1_sanity_checks`` (global-mean range checks,
-no reference data) + ``Tier2_atmosphere_monthly`` (ERA5 spatial skill).
+suite). With no ``--suite``, runs ALL bundled suites (every tier); a suite
+whose reference / model data is missing is **skipped and reported**, not
+fatal, so the report always contains whatever could be scored.
 
 Usage:
     <climateeval-env>/bin/python scripts/validate/run_amip_climateeval.py \\
-        --cmor-dir /scratch/.../amip_run/cmor/Amon \\
-        --suite Tier1_sanity_checks Tier2_atmosphere_monthly \\
+        --cmor-dir /scratch/.../amip_run/cmor \\
         --model-id legoESM-1-0 \\
         --data-root-dir /work/bd1179/b309141/climateeval_input \\
         --output-dir /scratch/.../amip_run
@@ -29,10 +29,13 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-# Default suites rendered into the combined report. Tier1 = global-mean
-# range checks (no reference data needed); Tier2 = ERA5 spatial skill.
-DEFAULT_SUITES = ("Tier1_sanity_checks", "Tier2_atmosphere_monthly")
 DEFAULT_REPORT_NAME = "climateeval_report.html"
+
+# CMOR MIP tables loaded for scoring: the monthly tables (atmosphere / ocean /
+# sea-ice / land / Emon) + the fixed fields. ``day`` and sub-daily tables are
+# EXCLUDED so a daily ``tas`` doesn't collide with the monthly ``tas`` a monthly
+# suite expects. Loading Omon/SImon lets the ocean / sea-ice suites score.
+_MONTHLY_CMOR_TABLES = ("Amon", "Omon", "SImon", "Lmon", "Emon", "fx")
 
 
 def era5_only_suite_def(suite_def: list[Any]) -> list[Any]:
@@ -67,15 +70,32 @@ def suite_db_path(output_dir: Path, suite: str) -> Path:
     return output_dir / f"climateeval_{suite}.ddb"
 
 
+def cmor_nc_paths(cmor_dir: Path) -> list[Path]:
+    """Resolve the CMOR ``*.nc`` files to load.
+
+    If ``cmor_dir`` holds ``*.nc`` directly (e.g. a single ``…/cmor/Amon``
+    table), load those (back-compat). Otherwise treat it as the ``cmor``
+    root and load the monthly MIP tables + fx (see ``_MONTHLY_CMOR_TABLES``);
+    ``day``/sub-daily tables are excluded to avoid frequency collisions.
+    """
+    direct = sorted(cmor_dir.glob("*.nc"))
+    if direct:
+        return direct
+    return sorted(
+        p for table in _MONTHLY_CMOR_TABLES for p in (cmor_dir / table).glob("*.nc")
+    )
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cmor-dir", required=True,
-                         help="Directory of CMOR Amon *.nc files to load.")
-    parser.add_argument("--suite", dest="suites", nargs="+",
-                         default=list(DEFAULT_SUITES),
-                         help="One or more ClimateEval suite names, rendered "
-                              "into a single combined report "
-                              f"(default: {' '.join(DEFAULT_SUITES)}).")
+                         help="CMOR output root (…/cmor) or a single MIP-table "
+                              "directory (…/cmor/Amon).")
+    parser.add_argument("--suite", dest="suites", nargs="+", default=[],
+                         help="ClimateEval suite names to render into a single "
+                              "combined report. Default (empty) = ALL bundled "
+                              "suites; a suite missing its data is skipped + "
+                              "reported, not fatal.")
     parser.add_argument("--model-id", default="legoESM-1-0")
     parser.add_argument("--experiment-id", default="amip")
     parser.add_argument("--variant-id", default="r1i1p1f1")
@@ -112,9 +132,9 @@ def main(argv: list[str] | None = None) -> int:
     from climateeval.suites import Suite
 
     cmor_dir = Path(args.cmor_dir)
-    paths = sorted(cmor_dir.glob("*.nc"))
+    paths = cmor_nc_paths(cmor_dir)
     if not paths:
-        print(f"ERROR: no .nc files found in {cmor_dir}", file=sys.stderr)
+        print(f"ERROR: no .nc files found under {cmor_dir}", file=sys.stderr)
         return 1
     print(f"Loading {len(paths)} CMOR files from {cmor_dir}")
     with warnings.catch_warnings():
@@ -139,31 +159,49 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # No --suite -> run ALL bundled suites (every tier), sorted for stable order.
+    suites = args.suites or sorted(p.stem for p in suite_dir.glob("*.yml"))
+
     db_paths: list[Path] = []
-    for suite in args.suites:
-        with (suite_dir / f"{suite}.yml").open() as f:
-            suite_def = era5_only_suite_def(yaml.safe_load(f))
-        tmp_yml = Path(tempfile.mktemp(suffix=".yml"))
-        with tmp_yml.open("w") as f:
-            yaml.dump(suite_def, f)
+    skipped: list[str] = []
+    for suite in suites:
         db_path = suite_db_path(output_dir, suite)
         if db_path.is_file():
             db_path.unlink()
+        tmp_yml = Path(tempfile.mktemp(suffix=".yml"))
         try:
+            with (suite_dir / f"{suite}.yml").open() as f:
+                suite_def = era5_only_suite_def(yaml.safe_load(f))
+            with tmp_yml.open("w") as f:
+                yaml.dump(suite_def, f)
             Suite(
                 tmp_yml,
                 diagnostic_kwargs=diagnostic_kwargs,
                 variable_kwargs=variable_kwargs,
             ).get_database(cubes, data_info, database_resource=f"duckdb://{db_path}")
+        except Exception as exc:  # missing data / inapplicable suite -> skip + report
+            db_path.unlink(missing_ok=True)
+            skipped.append(f"{suite}: {type(exc).__name__}: {exc}")
+            print(f"SKIPPED suite {suite}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            continue
         finally:
             tmp_yml.unlink(missing_ok=True)
         print(f"Database written to {db_path}")
         db_paths.append(db_path)
 
-    # Single combined report over all suites (one tab per suite/diagnostic).
+    if skipped:
+        print(f"Skipped {len(skipped)}/{len(suites)} suite(s):")
+        for s in skipped:
+            print(f"  - {s}")
+    if not db_paths:
+        print("ERROR: no suite produced a database (all skipped)", file=sys.stderr)
+        return 1
+
+    # Single combined report over the suites that scored.
     html_path = output_dir / args.report_name
     serve(db_paths, model_name=args.model_id, save_html=html_path)
-    print(f"HTML report written to {html_path}")
+    print(f"Report covers {len(db_paths)}/{len(suites)} suites; "
+          f"HTML report written to {html_path}")
     return 0
 
 
