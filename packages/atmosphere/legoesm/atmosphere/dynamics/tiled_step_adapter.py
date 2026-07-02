@@ -25,6 +25,27 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 
+def dedup_tiled_corners(t, kt: int, nl: int):
+    """Reassemble a tiled corner-staggered output to true global corners.
+
+    The tiled step returns corner fields BLOCK-CONCATENATED per tile —
+    tile ``(ti, tj)`` occupies rows ``[ti*(nl+1):(ti+1)*(nl+1)]`` and holds
+    global corners ``[ti*nl : ti*nl + nl+1]`` — so adjacent tiles carry a
+    DUPLICATED shared face (gathered shape ``(F, kt*(nl+1), kt*(nl+1),
+    ...)``).  Adjacent tiles compute that shared face bit-identically (the
+    capstone gate pins the overlap at ~1e-10), so deduplication is a pure
+    slice-drop of each non-first block's first row/col:
+    ``(F, kt*(nl+1), ...) -> (F, kt*nl + 1, ...) = (F, n+1, ...)``.
+    """
+    blk = nl + 1
+    rows = [t[:, 0:blk]] + [t[:, i * blk + 1:(i + 1) * blk]
+                            for i in range(1, kt)]
+    t = jnp.concatenate(rows, axis=1)
+    cols = [t[:, :, 0:blk]] + [t[:, :, i * blk + 1:(i + 1) * blk]
+                               for i in range(1, kt)]
+    return jnp.concatenate(cols, axis=2)
+
+
 def _refuse(cond: bool, what: str) -> None:
     if cond:
         raise NotImplementedError(
@@ -98,6 +119,13 @@ def make_tiled_cc_step(model, mesh, kt: int, dt: float):
             state.u.data, state.v.data, cdgrid)
         u_d2, v_d2, T2, ps2 = tiled(
             u_d, v_d, state.T.data, state.p_s.data, state.phis.data)
+        # The tiled corner outputs carry the duplicated shared tile face
+        # ((F, kt*(nl+1), kt*(nl+1), nlev)) — reassemble to true global
+        # corners before the serial exit conversion.  cc outputs (T, p_s)
+        # partition exactly (no dedup).
+        nl = n // kt
+        u_d2 = dedup_tiled_corners(u_d2, kt, nl)
+        v_d2 = dedup_tiled_corners(v_d2, kt, nl)
         fv3_new = FV3HydrostaticState(
             u_d=state.u.replace(data=u_d2, name="u_d"),
             v_d=state.v.replace(data=v_d2, name="v_d"),

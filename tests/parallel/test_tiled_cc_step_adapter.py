@@ -98,3 +98,24 @@ def test_adapter_refuses_out_of_envelope(field, value, match):
     model.config = model.config._replace(**{field: value})
     with pytest.raises(NotImplementedError, match=match):
         make_tiled_cc_step(model, mesh, kt=KT, dt=DT)
+
+
+def test_dedup_tiled_corners_synthetic():
+    """Block-concatenated tiled corners (with the duplicated shared face)
+    reassemble to the exact global corner array."""
+    from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+        dedup_tiled_corners,
+    )
+    kt, nl = 2, 4
+    n = kt * nl
+    g = jnp.arange(6 * (n + 1) * (n + 1) * 2, dtype=jnp.float64).reshape(
+        6, n + 1, n + 1, 2)
+    blk = nl + 1
+    # Build the tiled layout: tile (ti,tj) = global [ti*nl:ti*nl+blk] block.
+    rows = jnp.concatenate(
+        [g[:, ti * nl: ti * nl + blk] for ti in range(kt)], axis=1)
+    tiled = jnp.concatenate(
+        [rows[:, :, tj * nl: tj * nl + blk] for tj in range(kt)], axis=2)
+    assert tiled.shape == (6, kt * blk, kt * blk, 2)
+    out = dedup_tiled_corners(tiled, kt, nl)
+    np.testing.assert_array_equal(np.asarray(out), np.asarray(g))
