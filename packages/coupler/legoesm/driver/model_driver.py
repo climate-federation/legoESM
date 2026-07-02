@@ -4240,6 +4240,20 @@ class ModelDriver:
         _phys_state = init_physics_state(
             _ncol_phys, _nlev_phys, phys_cfg, dtype=_seed_dtype,
         )
+        # MPAS cell-partition MPI (codex round-9 HIGH): the seed above uses
+        # rank-LOCAL ncol, so ``col_index`` would be ``arange(local)`` on
+        # EVERY rank — duplicate global identities across ranks make the
+        # stochastic per-column fold decomposition-VARIANT (the exact bug
+        # class A1 increment 2 fixed for lat-band SPMD).  The partition's
+        # ``local_cells`` are the (owned+halo) GLOBAL cell ids in local
+        # order; halo columns get their true owner's id, so their draws
+        # match the owning rank (halo values are overwritten by the
+        # exchange regardless).
+        if self._voronoi_layout is not None:
+            _phys_state = _phys_state._replace(
+                col_index=jnp.asarray(
+                    self._voronoi_layout.partition.local_cells,
+                    dtype=jnp.int32))
         # Checkpoint restore (#413): the MPAS load path stashes the
         # persisted PhysicsState fields in carry_aux under
         # ``physstate_<field>``.  Overlay them onto the fresh seed and
@@ -4301,8 +4315,15 @@ class ModelDriver:
                 and not k[len("physstate_"):].startswith("meta_")
             }
             if _any_physstate:
+                # ``col_index`` is exempt from the completeness contract:
+                # it is CONSTANT derivable identity data (arange(ncol),
+                # never evolved), added 2026-07 — checkpoints written
+                # before then legitimately lack it, and the fresh seed's
+                # arange is byte-identical to what the save would have
+                # stored.  Every EVOLVING field stays mandatory.
                 _missing = [f for f in _phys_state._fields
-                            if f not in _present_fields]
+                            if f not in _present_fields
+                            and f != "col_index"]
                 if _missing:
                     raise ValueError(
                         "MPAS restart physics-state carry is INCOMPLETE: "

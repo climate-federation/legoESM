@@ -35,34 +35,6 @@ def physics_requires_phys_state(physics_fn) -> bool:
     return False
 
 
-def physics_has_stochastic(physics_fn) -> bool:
-    """True if *physics_fn* (or a partial / ``functools.wraps`` wrapper of
-    it) is tagged ``_has_stochastic_physics`` — a ``combined.make_physics``
-    output whose convection scheme actually draws stochastic innovations
-    (``traits.is_stochastic`` AND ``enable_stochastic``).
-
-    Mirrors :func:`physics_requires_phys_state`'s unwrap walk: a
-    ``functools.partial`` or ``@functools.wraps`` wrapper strips the direct
-    attribute, so a plain ``getattr`` would let a wrapped stochastic
-    physics bypass the lat-band SPMD refusal and run decomposition-variant
-    band-local draws (codex round-8 HIGH).  Hand-written closures must
-    propagate the tag explicitly, same as ``_requires_phys_state``.
-    """
-    seen = 0
-    fn = physics_fn
-    while fn is not None and seen < 16:
-        if getattr(fn, "_has_stochastic_physics", False):
-            return True
-        if isinstance(fn, functools.partial):
-            fn = fn.func
-        elif getattr(fn, "__wrapped__", None) is not None:
-            fn = fn.__wrapped__
-        else:
-            return False
-        seen += 1
-    return False
-
-
 def refuse_unthreaded_stateful_physics(physics_fn, phys_state, *, where):
     """Refuse a stateful physics_fn handed to a per-step entry without
     its ``PhysicsState`` carry.
