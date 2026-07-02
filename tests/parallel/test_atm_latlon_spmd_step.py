@@ -57,6 +57,7 @@ from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
     _build_band_grids_atm,
     _atm_grid_array_field_names,
     _lat_spec,
+    _replicate_leaf,
 )
 from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
     cgrid_to_hydrostatic,
@@ -269,6 +270,30 @@ def test_atm_latlon_spmd_step_matches_serial(use_polar_filter):
                 f"the FV-PPM cut-truncation bound — a real band-decomposition "
                 f"bug (Coriolis/v-face interp at cuts, band geometry, mass "
                 f"denominator, or v-face reconstruction)."))
+
+
+def test_replicate_leaf_multiprocess_branch_matches_device_put():
+    """The multi-controller gather branch (jit-compiled identity with
+    replicated out_shardings) must produce the SAME replicated array as the
+    single-process device_put branch — on values, sharding, and for both a
+    lat-sharded and an already-replicated input. This exercises the
+    ``multiprocess=True`` code path for real on a single process (where both
+    mechanisms are legal), so the route-B gather cannot silently diverge."""
+    from jax.sharding import NamedSharding, PartitionSpec as P
+    mesh = _mesh()
+    rep = NamedSharding(mesh, P())
+    rng = np.random.default_rng(7)
+    full = jnp.asarray(rng.standard_normal((N_LAT, N_LON, NLEV)))
+    sharded = jax.device_put(full, NamedSharding(mesh, P("lat", None, None)))
+
+    for arr in (sharded, jax.device_put(full, rep)):
+        a = _replicate_leaf(arr, rep, multiprocess=False)
+        b = _replicate_leaf(arr, rep, multiprocess=True)
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(full))
+        assert b.sharding.is_fully_replicated, (
+            "multiprocess replicate branch did not produce a fully "
+            "replicated sharding")
 
 
 def test_make_sharded_atm_step_rejects_anchor_mass():
