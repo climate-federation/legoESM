@@ -147,3 +147,97 @@ def test_config_sets_defaults_cli_overrides():
     assert args.surface_bulk_scheme == "coare3"   # from the base via include
     assert args.ocean == "two_layer"              # from the run config
     assert args.days == 90                        # explicit CLI overrides config
+
+
+# --- issue #691: --params calibration across every coupled component --------
+
+def test_params_dest_exists():
+    assert "params" in _dests()
+
+
+def test_params_bundle_routes_ice_coupler_land(tmp_path):
+    """The run_coupled --params application (atm scalar map + the
+    coupled/coupler/ice/lake bundle) routes an atm, ice, coupler, and land
+    parameter each into its component config — the exact split-and-bundle
+    contract run_coupled.main() implements (#691)."""
+    from typing import NamedTuple
+
+    from legoesm.coupler.config import CouplerConfig
+    from legoesm.coupler.lake.config import LakeConfig
+    from legoesm.driver.config import (
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+    )
+    from legoesm.driver.coupled_config import CoupledConfig
+    from legoesm.driver.run_config_yaml import (
+        apply_params_to_config,
+        build_atm_scalar_param_map,
+        load_params_config,
+    )
+    from legoesm.ice.config import SeaIceConfig
+    from legoesm.land.config import MultiLayerLandConfig
+
+    p = tmp_path / "params.yaml"
+    p.write_text(
+        "atm.clouds.CloudConfig.q_c_diagnostic: 3.0e-4\n"
+        "ice.sea_ice.albedo_ice: 0.7\n"
+        "coupler.surface.ocean_albedo: 0.08\n"
+        "land.multilayer.Cd_land: 3.0e-3\n"
+    )
+    params = load_params_config(str(p))
+    amap = build_atm_scalar_param_map()
+    atm_params = {k: v for k, v in params.items() if k in amap}
+    rest_params = {k: v for k, v in params.items() if k not in amap}
+
+    atm_config = ExperimentConfig(
+        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
+        dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+        cloud_scheme="sundqvist",
+    )
+    atm_config = apply_params_to_config(
+        atm_config, atm_params, driver="run_coupled", scalar_param_map=amap)
+    assert atm_config.cloud_q_c_diagnostic == 3.0e-4
+
+    class _Bundle(NamedTuple):
+        coupled: object
+        coupler: object
+        ice: object
+        lake: object
+
+    bundle = _Bundle(
+        coupled=CoupledConfig(land_config=MultiLayerLandConfig()),
+        coupler=CouplerConfig(),
+        ice=SeaIceConfig(),
+        lake=LakeConfig(),
+    )
+    bundle = apply_params_to_config(bundle, rest_params, driver="run_coupled")
+    assert bundle.ice.albedo_ice == 0.7
+    assert bundle.coupler.ocean_albedo == 0.08
+    assert bundle.coupled.land_config.Cd_land == 3.0e-3
+
+
+def test_params_clobber_guard():
+    """--params overrides that a coupled setup() step would silently overwrite
+    are refused loudly, pointing at the effective path (#691 codex audit)."""
+    # ocean: rebuilt from mesh/preset -> route to run_omip.
+    with pytest.raises(SystemExit, match="run_omip.py --params"):
+        mod._check_params_clobber({"ocean.vm.kpp.Ri_crit": 0.3}, "analytical")
+    # land carbon: rebuilt in setup regardless of land path -> route to run_lmip.
+    with pytest.raises(SystemExit, match="run_lmip.py --params"):
+        mod._check_params_clobber({"land.carbon.tor_wood": 1.0e-4}, "analytical")
+    # CLM land path (default): ALL config-level land params overridden by the
+    # reference maps + per-PFT provider -> refuse every land.* param.
+    for qname in ("land.multilayer.Cd_land", "land.soil_thermal.Q_geothermal",
+                  "land.stomata.g1_med", "land.multilayer.z0_land"):
+        with pytest.raises(SystemExit, match="--land-params clm"):
+            mod._check_params_clobber({qname: 1.0}, "clm")
+    # analytical land params: non-carbon land honored (config-level land used).
+    mod._check_params_clobber({"land.multilayer.Cd_land": 3.0e-3}, "analytical")
+    mod._check_params_clobber({"land.soil_thermal.Q_geothermal": 0.05}, "analytical")
+    mod._check_params_clobber({"land.stomata.g1_med": 4.0}, "analytical")
+    # atmosphere / sea-ice / coupler params always pass (run_coupled owns them).
+    mod._check_params_clobber(
+        {"ice.sea_ice.albedo_ice": 0.7,
+         "coupler.surface.ocean_albedo": 0.08,
+         "atm.clouds.CloudConfig.q_c_diagnostic": 3.0e-4}, "clm")
