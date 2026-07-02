@@ -47,6 +47,8 @@ __param_spec__ = {
         },
         "params": {
             "Prandtl_tke0": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
+            "lc_coeff": {"units": "1", "bounds": (0.05, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "NEMO zdftke rn_lc / Axell 2002 Langmuir cells", "shape": None},
+            "etau_frac": {"units": "1", "bounds": (0.01, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "NEMO zdftke rn_efr sub-ML TKE penetration", "shape": None},
             "alpha_tke": {"units": "1", "bounds": (9.9, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
             "bg_diff_scale": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Bryan-Lewis (1979) background-diffusivity amplitude", "shape": None},
             "c_eps": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
@@ -338,6 +340,31 @@ class TKEConfig(NamedTuple):
     #   convective K_M). This is the Veros ACC default.
     prandtl_mode: str = "unit"
     Prandtl_tke0: float = 10.0           # constant Prandtl number (Veros Prandtl_tke0)
+    # ----- NEMO zdftke surface terms (Langmuir + sub-ML TKE penetration) -----
+    # Faithful ports of NEMO 5.0.1 ``zdftke.F90``. BOTH are ON in NEMO's
+    # ``namelist_ref`` defaults, hence active in the DINO and ORCA1 oracles;
+    # both default OFF here (bit-identical legacy) and are enabled by the
+    # NEMO-faithful recipes (DINO).
+    # ``lc``: Langmuir-circulation TKE source (Axell 2002; NEMO ln_lc).
+    #   Stokes drift from the surface stress (Axell Eq. 44 via |τ| =
+    #   ρ_air·C_d·U₁₀²): ½W_lc² = ½·0.016²·|τ|/(ρ_air·C_d); LC depth h_lc
+    #   from the cumulative-PE criterion (Axell Eq. 47, zdftke.F90:338-356);
+    #   source u_s³·(lc_coeff·sin(πz/h_lc))³/h_lc added to the TKE RHS at
+    #   interfaces shallower than h_lc (zdftke.F90:358-370).
+    # ``etau_mode``: penetration of surface TKE below the mixed layer due to
+    #   near-inertial waves (NEMO nn_etau): "none" (=0, default) |
+    #   "below_ml" (=1): e(k) += etau_frac·e_sfc·exp(-z/h_tau) with
+    #   e_sfc = max(emin0, ebb·|τ|/ρ0) (zdftke.F90:265,492-496); applied
+    #   AFTER the TKE solve, BEFORE the K_M/K_H computation (NEMO step
+    #   order: tke_tke ends with etau, then tke_avn computes the K's).
+    # ``etau_htau_mode``: h_tau profile (NEMO nn_htau): "constant10m" (=0,
+    #   10 m everywhere — the namelist_ref/DINO default) | "latitude" (=1,
+    #   max(0.5, min(30, 45·|sin φ|)) m — requires ``lat_deg`` threading).
+    lc: bool = False
+    lc_coeff: float = 0.15               # NEMO rn_lc — LC vertical-velocity coefficient
+    etau_mode: str = "none"              # "none" | "below_ml"  (NEMO nn_etau 0/1)
+    etau_frac: float = 0.05              # NEMO rn_efr — fraction of surface TKE penetrating
+    etau_htau_mode: str = "constant10m"  # "constant10m" | "latitude" (NEMO nn_htau 0/1)
     # ----- Prognostic TKE carry (Veros enable_tke PROGNOSTIC form) -----
     # ``prognostic=False`` (default, BIT-IDENTICAL): the Mode-B quasi-steady
     #   diagnostic chain runs in ``compute_vertical_K_profiles`` — ``tke_old=None``

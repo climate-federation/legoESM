@@ -204,10 +204,10 @@ def test_adiabatic_intNdz_smaller():
     z_coord, jac, f, beta, T, S, rho, p_cell, eos_fn = _column(H_max=5000.0)
     S_x, S_y = _slopes(rho, z_coord, jac)
     cfg = VisbeckConfig(enabled=True, use_rossby_radius=True)
-    _, _, _, int_N_insitu, _ = _eady_growth_and_length(
+    _, _, _, int_N_insitu, _, _dzh = _eady_growth_and_length(
         rho, S_x, S_y, z_coord, jac, f, cfg, n2_mode="insitu",
     )
-    _, _, _, int_N_adia, _ = _eady_growth_and_length(
+    _, _, _, int_N_adia, _, _dzh = _eady_growth_and_length(
         rho, S_x, S_y, z_coord, jac, f, cfg, n2_mode="adiabatic",
         T=T, S=S, p_cell=p_cell, eos_fn=eos_fn,
     )

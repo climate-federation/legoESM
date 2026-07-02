@@ -597,6 +597,11 @@ def gm_redi_tracer_tendency_mpas(
     )
 
     # GM coefficient.
+    if getattr(cfg, "treguier", None) is not None and cfg.treguier.enabled:
+        raise NotImplementedError(
+            "GMRediConfig.treguier (NEMO nn_aei_ijk_t=21 adaptive kappa) is "
+            "implemented on the lat-lon C-grid path only; the MPAS GM/Redi "
+            "would silently fall back. Use visbeck or constant kappa_GM here.")
     if cfg.visbeck.enabled:
         if f_coriolis is None:
             f_coriolis = 2.0 * constants.Omega * jnp.sin(mesh.latCell)

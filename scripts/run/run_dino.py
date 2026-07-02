@@ -123,6 +123,27 @@ def _parse_args():
              "1.2e-4) to run TKE at the unstable paper viscosity.",
     )
     p.add_argument(
+        "--evd-momentum", choices=("on", "off"), default=None,
+        help="Enhanced vertical diffusion on MOMENTUM (DINOConfig."
+             "evd_on_momentum; NEMO nn_evdm=1, the DINO namelist setting). "
+             "Default on (paper-faithful); effective only for --vmix "
+             "tke/constant (kpp carries its own convective viscosity — the "
+             "combination is rejected). Lat-lon only; MPAS is tracer-only.",
+    )
+    p.add_argument(
+        "--gm-kappa-scheme", choices=("visbeck", "treguier"), default=None,
+        help="Adaptive kappa_GM scaling (DINOConfig.gm_kappa_scheme): "
+             "'visbeck' (Visbeck 1997, historical default) or 'treguier' "
+             "(Treguier 1997 / NEMO nn_aei_ijk_t=21 — the DINO oracle "
+             "scaling, cap aei0=rn_Ue*rn_Le=3000 m2/s). Lat-lon only.",
+    )
+    p.add_argument(
+        "--treguier-aei0", type=float, default=None,
+        help="Treguier kappa cap aei0 [m2/s] (DINOConfig.treguier_aei0, "
+             "default 3000 = the DINO namelist rn_Ue*rn_Le). Ignored unless "
+             "--gm-kappa-scheme treguier.",
+    )
+    p.add_argument(
         "--days", type=float, default=10.0,
         help="Total simulated duration in days (default 10; capped at "
              "365 by local-machine policy — see plan).",
@@ -320,6 +341,13 @@ def main():
     if args.tke_momentum_visc_bg is not None:
         cfg = dataclasses.replace(
             cfg, tke_momentum_visc_bg=args.tke_momentum_visc_bg)
+    if args.evd_momentum is not None:
+        cfg = dataclasses.replace(
+            cfg, evd_on_momentum=(args.evd_momentum == "on"))
+    if args.gm_kappa_scheme is not None:
+        cfg = dataclasses.replace(cfg, gm_kappa_scheme=args.gm_kappa_scheme)
+    if args.treguier_aei0 is not None:
+        cfg = dataclasses.replace(cfg, treguier_aei0=args.treguier_aei0)
     if args.mpas_eq_visc_boost is not None:
         cfg = dataclasses.replace(
             cfg, mpas_equatorial_visc_boost=args.mpas_eq_visc_boost)
