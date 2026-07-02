@@ -56,6 +56,20 @@ from legoesm.surface_albedo import land_albedo as compute_land_albedo
 # to stay well above bulk-flux round-off.
 _SURFACE_LIN_DT_K = 0.1
 
+# Physical ceiling on the neutral-equivalent bulk transfer coefficient for the
+# MOST land-surface fluxes. Passed to compute_most_fluxes(max_exchange_coeff=)
+# so the log-law denominators are floored at κ/√C_max instead of the default
+# 0.5. WHY: the default floor lets C_e reach κ²/0.25 ≈ 0.64 at extreme
+# cold-start instability, turning a trivial ~0.6 g/kg humidity gradient into a
+# spurious ~4900 W/m² latent-heat shock that drives the stiff thin top soil
+# layer NaN (dt-independent — it is the coefficient, not the integrator). A
+# ceiling of 0.02 is a generous strong-instability upper bound (well above the
+# ~3.4e-3 neutral value and the O(1e-2) reached at moderate land instability),
+# so it binds ONLY on the pathological cold-start columns and is
+# climatologically inert (byte-identical) once the surface has spun up — a
+# numerics safety cap, not a tunable climate parameter.
+_MAX_LAND_EXCHANGE_COEFF = 0.02
+
 
 def step_multilayer_land(
     state: MultiLayerLandState,
@@ -226,6 +240,7 @@ def step_multilayer_land(
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
             L_latent=L_eff,
+            max_exchange_coeff=_MAX_LAND_EXCHANGE_COEFF,
         )
     else:
         tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
@@ -430,6 +445,7 @@ def step_multilayer_land(
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
             L_latent=L_eff,
+            max_exchange_coeff=_MAX_LAND_EXCHANGE_COEFF,
         )
     else:
         _, _, shflx_lin, lhflx_lin = simple_bulk_fluxes(
