@@ -45,6 +45,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.thermo import saturation_mixing_ratio
+from legoesm.forcing.time_utils import day_to_calendar
 
 logger = logging.getLogger(__name__)
 
@@ -969,6 +970,24 @@ def build_segment_fn(
             else:
                 need_rad = ((step_idx + 1) % rad_update_steps) == 0
 
+            # --- Per-step solar time (diurnal-cycle fix) ---
+            # forcing.day_of_year / forcing.seconds_of_day are packed ONCE per
+            # segment (at the segment-end wall clock).  Using them for the solar
+            # zenith froze the sun for the whole segment: with whole-day segments
+            # the segment-end time is always the same wall clock (midnight UTC for
+            # 5-day segments started at day 0) so the compiled path had NO diurnal
+            # cycle and a permanently mis-placed sun — unlike the per-step
+            # reference driver, which recomputes day_to_calendar every step.
+            # Recover the diurnal cycle by advancing the wall clock from the
+            # ABSOLUTE step index (``step_idx`` is the absolute counter, carried
+            # across segments).  ``(step_idx + 1)`` = end-of-step time, matching
+            # the per-step driver's ``day = START_DAY + (step + 1) * DT``.  Only
+            # the SOLAR position (declination + hour angle) uses this; the
+            # seasonal forcing (SST / O3 / aerosol / GHG) stays per-segment
+            # (those ride separate arrays, unaffected by these two scalars).
+            _abs_day = start_day + (step_idx + 1) * _dt / 86400.0
+            _doy_step, _sod_step = day_to_calendar(_abs_day)
+
             if owned_face_ids is not None:
                 # MPI replicated dynamics: physics on owned faces only.
                 # Dynamics state is full (6, n, n, ...) but physics inputs
@@ -1005,7 +1024,7 @@ def build_segment_fn(
                     carry.conv_prog,
                     u_new[_ofi], v_new[_ofi],
                     forcing.sst, forcing.sic, lat, lon,
-                    forcing.day_of_year, forcing.seconds_of_day, _dt,
+                    _doy_step, _sod_step, _dt,
                     forcing.solar_weights, forcing.s_0,
                     forcing.o3_vmr, forcing.aerosol_od,
                     carry.held_dT_rad[_ofi], carry.held_sw_net_sfc[_ofi],
@@ -1134,7 +1153,7 @@ def build_segment_fn(
                     carry.q_v, carry.q_c, carry.q_r, carry.conv_prog,
                     u_new, v_new,
                     forcing.sst, forcing.sic, lat, lon,
-                    forcing.day_of_year, forcing.seconds_of_day, _dt,
+                    _doy_step, _sod_step, _dt,
                     forcing.solar_weights, forcing.s_0,
                     forcing.o3_vmr, forcing.aerosol_od,
                     carry.held_dT_rad, carry.held_sw_net_sfc, carry.held_lw_net_sfc,
@@ -1438,6 +1457,15 @@ def build_segment_fn(
         # values dynamic).
         _ghg_vmr_override = ghg_array_to_dict(forcing.ghg_vmr, _ghg_keys)
 
+        # Per-step solar time (diurnal-cycle fix) — mirror ``_single_step``.
+        # The unfused radiation refresh recomputes held fluxes for the upcoming
+        # no-rad cycle; use the current absolute step's wall clock so the
+        # zenith advances across cycles instead of being pinned at the
+        # segment-end time.  ``carry.step_index`` is the absolute step counter
+        # after the preceding no-rad scan.
+        _abs_day = start_day + (carry.step_index + 1) * _dt / 86400.0
+        _doy_step, _sod_step = day_to_calendar(_abs_day)
+
         if owned_face_ids is not None:
             _ofi = owned_face_ids
             _T_land_in = (carry.T_land[_ofi]
@@ -1458,7 +1486,7 @@ def build_segment_fn(
                 pipeline.compute_radiation_core(
                     carry.T[_ofi], carry.p_s[_ofi], carry.q_v[_ofi],
                     forcing.sst, forcing.sic, lat, lon,
-                    forcing.day_of_year, forcing.seconds_of_day,
+                    _doy_step, _sod_step,
                     forcing.solar_weights, forcing.s_0,
                     forcing.o3_vmr, forcing.aerosol_od,
                     aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
@@ -1495,7 +1523,7 @@ def build_segment_fn(
                 pipeline.compute_radiation_core(
                     carry.T, carry.p_s, carry.q_v,
                     forcing.sst, forcing.sic, lat, lon,
-                    forcing.day_of_year, forcing.seconds_of_day,
+                    _doy_step, _sod_step,
                     forcing.solar_weights, forcing.s_0,
                     forcing.o3_vmr, forcing.aerosol_od,
                     aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
