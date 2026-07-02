@@ -4,7 +4,7 @@
 
 One unified inventory of every ocean case (idealized + oracle-comparison, no distinction): what it tests, whether a true oracle exists in another model, and — per recipe — whether legoESM reproduces it. One experiment run under many recipes = many result rows (below) / many filled cells (matrix), NOT many cases. Holes (`⬜ todo`) are the roadmap; `⛔ blocked` cites the issue. The **tests** column is a physics summary so duplicate/overlapping cases are visible (use it to retire repeats).
 
-**27 cases, 30 case×recipe results** — ✅ verified: 3, ⛔ blocked: 1, 🟡 partial: 1, ⬜ todo: 25
+**27 cases, 30 case×recipe results** — ✅ verified: 3, 🟡 partial: 2, ⬜ todo: 25
 
 **by reference kind** — 🔬 oracle: 10, 📐 analytic: 7, 📄 published: 8, —: 2
 
@@ -17,8 +17,8 @@ Reference kind = truth strength: 🔬 oracle (runnable model + data) · 📐 ana
 | `baroclinic_adjustment` | stratified baroclinic instability; eddy growth + inverse cascade (unforced) | 🔬 oracle: Oceananigans WENOVectorInvariant(9)+ImplicitFreeSurface | latlon_cgrid (β-plane) | `oceananigans_v1 (+power_law)` | ✅ verified | EKE 0.86×, cascade k_e 5.11 vs 5.19, stable 40 d, no backstop — PR #672 |
 | `barotropic_gyre` | wind-driven barotropic gyre spin-up (steady, laminar window) | 🔬 oracle: Oceananigans ImplicitFreeSurface gyre | latlon_cgrid | `oceananigans_v1` | ✅ verified | surface-u pattern corr 0.93 days 1–20 (kinematic wind-stress unit fix) |
 | `internal_tide` | tidal flow over topography; internal-tide generation (Flat-y, free surface) | 🔬 oracle: Oceananigans internal_tide | latlon_cgrid (meridionally_flat) | `oceananigans_v1 (meridionally_flat+upwind3)` | ✅ verified | corr ≥0.6 through ~2 days; dispersion cleared by upwind3 — #576 |
-| `silvestri_jet_forced` | forced (τ=50 d restoring) eddy-resolving baroclinic jet; Silvestri 2024 §5 | 🔬 oracle: Oceananigans Silvestri 2024 §5 | latlon_cgrid (spherical channel) | `oceananigans_v1 (+power_law)` | ⛔ blocked | over-energizes ~7× under sustained restoring (eddy-mean equilibration) — issue #673 |
 | `bickley_jet` | single-layer Bickley-jet barotropic instability; vortex roll-up (eddy dissipation) | 🔬 oracle: Oceananigans WENOVectorInvariant | latlon_cgrid (unit sphere) | `oceananigans_v1` | 🟡 partial | tracks oracle to t6 (corr 0.97) then under-dissipates; enstrophy ~1.2–1.9× late |
+| `silvestri_jet_forced` | forced (τ=50 d restoring) eddy-resolving baroclinic jet; Silvestri 2024 §5 | 🔬 oracle: Oceananigans §5 (generate_oceananigans_silvestri_s5_reference.jl, 200 d) | latlon_cgrid (spherical channel) | `oceananigans_v1 (+power_law)` | 🟡 partial | #673's '7× over-energization' was a PHANTOM — the oracle saturates at 1.40 m/s, not 0.10 (its day-55 mid-growth value misread as saturation); legoESM's 200-d amplitude (0.8–1.6 m/s) sits ON the oracle band; growth-curve/EKE trajectory comparison vs the new reference pending |
 | `acc_channel` | ACC-like re-entrant channel with ridge; eddy saturation + transport | 🔬 oracle: Veros ACC | latlon_cgrid | `veros_faithful_v1` | ⬜ todo | extensive Veros ACC work exists — re-confirm via scorecard (also intended: mpas) |
 | `advection_gyre` | passive-tracer advection in a wind-driven gyre | 🔬 oracle: MITgcm tutorial_advection_in_gyre | latlon_cgrid | `mitgcm_v1` | ⬜ todo | comparison driver exists; not re-assessed |
 | `baroclinic_gyre` | wind-driven regional gyre with surface restoring + thermal wind | — _(idealized — none)_ | latlon_regional | `default_wright_v1` | ⬜ todo | matrix-covered (also: mpas_regional) |
@@ -55,8 +55,8 @@ Legend: ✅ verified · 🟩 works · 🟡 partial · ⛔ blocked · ⬜ todo ·
 | `baroclinic_adjustment` @ latlon_cgrid (β-plane) | ✅ |  |  |  |  |  |  |  |  |  |  |  |
 | `barotropic_gyre` @ latlon_cgrid |  | ✅ |  |  |  |  |  |  |  |  |  |  |
 | `internal_tide` @ latlon_cgrid (meridionally_flat) |  |  | ✅ |  |  |  |  |  |  |  |  |  |
-| `silvestri_jet_forced` @ latlon_cgrid (spherical channel) | ⛔ |  |  |  |  |  |  |  |  |  |  |  |
 | `bickley_jet` @ latlon_cgrid (unit sphere) |  | 🟡 |  |  |  |  |  |  |  |  |  |  |
+| `silvestri_jet_forced` @ latlon_cgrid (spherical channel) | 🟡 |  |  |  |  |  |  |  |  |  |  |  |
 | `acc_channel` @ latlon_cgrid |  |  |  | ⬜ |  |  |  |  |  |  |  |  |
 | `advection_gyre` @ latlon_cgrid |  |  |  |  | ⬜ |  |  |  |  |  |  |  |
 | `baroclinic_gyre` @ latlon_regional |  |  |  |  |  |  |  |  | ⬜ |  |  |  |

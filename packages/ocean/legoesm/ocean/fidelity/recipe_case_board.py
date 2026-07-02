@@ -74,9 +74,13 @@ CASES: tuple[dict, ...] = (
     dict(case="silvestri_jet_forced",
          aliases=("silvestri_baroclinic_jet", "silvestri", "oceananigans_silvestri_s5"),
          tests="forced (τ=50 d restoring) eddy-resolving baroclinic jet; Silvestri 2024 §5",
-         ref_kind=ORACLE, ref="Oceananigans Silvestri 2024 §5",
-         results=[_r("latlon_cgrid (spherical channel)", "oceananigans_v1 (+power_law)", BLOCKED,
-                     "over-energizes ~7× under sustained restoring (eddy-mean equilibration) — issue #673")]),
+         ref_kind=ORACLE,
+         ref="Oceananigans §5 (generate_oceananigans_silvestri_s5_reference.jl, 200 d)",
+         results=[_r("latlon_cgrid (spherical channel)", "oceananigans_v1 (+power_law)", PARTIAL,
+                     "#673's '7× over-energization' was a PHANTOM — the oracle saturates at 1.40 m/s, "
+                     "not 0.10 (its day-55 mid-growth value misread as saturation); legoESM's 200-d "
+                     "amplitude (0.8–1.6 m/s) sits ON the oracle band; growth-curve/EKE trajectory "
+                     "comparison vs the new reference pending")]),
     dict(case="barotropic_gyre",
          aliases=("oceananigans_barotropic_gyre",),
          tests="wind-driven barotropic gyre spin-up (steady, laminar window)",

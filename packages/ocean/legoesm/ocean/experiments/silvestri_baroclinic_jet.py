@@ -35,21 +35,22 @@ architecture (NO in-substep barotropic Coriolis):
     Oceananigans' AB2-extrapolated ``Gᵁ`` — this keeps the barotropic eta–U geostrophic
     balance (without it the SSH drifts and blows ~day 38).
 
-SCOPE / KNOWN LIMITATION (honest):  This Coriolis fix removes the EARLY barotropic
-failures (the d38 SSH drift and the d54 2Δx null mode).  W9V then tracks the oracle to
-~day 50 and survives the 80-day target at ``barotropic_diffusion_alpha=0`` (NO
-SSH-diffusion / viscosity backstop) — validated to 80 d by
-``scripts/tmp/_silvestri_eps_validate.py``.  BUT a SEPARATE, filter-independent
-eddy-scale instability remains: once the eddy field reaches the oracle's saturation
-amplitude (~0.10 m/s) around day 55, legoESM fails to equilibrate and runs away to
-blow-up at ~day 90 (cosine) / ~day 104 (power_law) — both filters diverge at day 55, so
-this is NOT a barotropic-Coriolis or time-filter issue.  The oracle saturates at
-~0.10 m/s and runs indefinitely; legoESM reaches ~0.7 m/s by day 80 (7× over-energetic,
-mid-runaway).  This residual is the documented WENO-momentum / eddy-equilibration
-problem (interior 2Δx under-dissipation / inverse-cascade arrest), a separate effort.
-The no-closure WENO/UP3 schemes are correctly more energetic than the closure SM2/QG2
-through the tracked window.  For a stable long run, use a small ``barotropic_diffusion_
-alpha`` (oracle amplitude at ~0.005) until the eddy-equilibration fix lands.
+SCOPE (corrected 2026-07-02 — the "7× over-energization" was a PHANTOM):  This
+Coriolis fix removes the EARLY barotropic failures (the d38 SSH drift and the d54
+2Δx null mode); the later ~d90 blow-up was closed separately by
+``weno_vertadv_full_velocity`` + a faithful dt (≤ ~450 s or adaptive) — W9V then
+survives 200 d at ``barotropic_diffusion_alpha=0``, max|u| 0.8–1.6 m/s.  The
+long-standing claim that "the oracle saturates at ~0.10 m/s so legoESM is 7×
+over-energetic" was WRONG: the first-ever 200-day run of the real §5 oracle
+(``scripts/data/generate_oceananigans_silvestri_s5_reference.jl``, Oceananigans
+0.110.4, W9V no-closure, zonal-mean b-restoring) saturates at **max|u| = 1.40 m/s**
+(day 150–200 mean; 1.2–1.7 band).  The 0.10 was the oracle's day-55 MID-GROWTH
+value (measured 0.102 at d55; it keeps growing 0.45@d80 → 0.72@d100 → 1.09@d120 →
+plateau) misread as saturation.  legoESM's 200-d amplitude sits ON the oracle band;
+the remaining fidelity question is a growth-curve/EKE-trajectory comparison against
+the reference NetCDF (issue #673, reframed), not an equilibration failure.  Note the
+oracle is a CARTESIAN β-plane (Lx=16°·R·cos50) restoring ⟨b⟩ only, while this module
+is a spherical channel restoring ⟨T,S,u,v⟩ — reconcile when comparing trajectories.
 """
 
 from __future__ import annotations
