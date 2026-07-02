@@ -201,6 +201,35 @@ def test_nsq_sho_power_integral_exact_and_cri_bot_telescoping():
         assert integral > 0.25 * power, (comp, integral)
 
 
+def test_raw_negative_n2_matches_f90_floor_behavior():
+    """NEMO uses the RAW rn2 in the Reb denominator (max(1e-20, nu*rn2));
+    a statically UNSTABLE interface (rn2 < 0) hits the floor and saturates
+    at k_max where local power is nonzero.  The port must reproduce that
+    for signed N² input (codex r1 #6)."""
+    gdept, e3w, N2 = _wet_column(nlev=10, H=3000.0, seed=5)
+    H = float(gdept[-1] + 0.5 * (gdept[-1] - gdept[-2]))
+    N2 = N2.copy()
+    N2[4] = -2.0e-6                       # signed, statically unstable
+    maps = dict(ebot=1e-3, ecri=1e-3, ensq=1e-3, esho=1e-3,
+                hbot=150.0, hcri_inv=1.0 / 100.0)
+    K_ref, ratio_ref = _f90_zdf_iwm_reference(
+        maps["ebot"], maps["ecri"], maps["ensq"], maps["esho"],
+        maps["hbot"], maps["hcri_inv"], gdept, e3w, H, N2,
+        mevar=True, tsdiff=True)
+    ones = jnp.ones(())
+    forcing = IWMForcing(ebot=maps["ebot"] * ones, ecri=maps["ecri"] * ones,
+                         ensq=maps["ensq"] * ones, esho=maps["esho"] * ones,
+                         hbot=maps["hbot"] * ones,
+                         hcri_inv=maps["hcri_inv"] * ones)
+    cfg = IWMConfig(enabled=True, mevar=True, tsdiff=True)
+    K, ratio = compute_iwm_diffusivity(
+        forcing, jnp.asarray(gdept), jnp.asarray(e3w), jnp.asarray(H),
+        jnp.asarray(N2), cfg=cfg, rho_0=RHO0)
+    np.testing.assert_allclose(np.asarray(K), K_ref, rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(ratio), ratio_ref, rtol=1e-6)
+    assert float(K[4]) == pytest.approx(cfg.k_max)
+
+
 def test_bounds_and_unstable_interface_saturates():
     gdept, e3w, N2 = _wet_column(nlev=10, H=3000.0, seed=2)
     H = float(gdept[-1] + 0.5 * (gdept[-1] - gdept[-2]))

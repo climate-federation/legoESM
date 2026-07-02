@@ -72,15 +72,35 @@ class TestLoglayerCd:
             von_karman=K_VK))
         assert cd == pytest.approx(CD0)
 
-    def test_subroughness_thickness_finite_and_capped(self):
-        # h/2 <= z0 would blow up ln(); the e·z0 floor keeps it finite and
-        # the physically-correct fully-rough cdmax applies.
-        for h in [0.0, 1.0e-4, 2.0 * Z0]:
-            cd = float(nemo_loglayer_cd(
-                jnp.asarray(h), z0=Z0, cd_min=CD0, cd_max=CDMAX,
-                von_karman=K_VK))
-            assert np.isfinite(cd)
-            assert cd == pytest.approx(CDMAX)
+    def test_subroughness_pole_finite_and_capped(self):
+        # ½h = z0 is the raw expression's log = 0 pole (raw → +inf, which
+        # the F90 clip maps to cdmax); the clamp must reproduce exactly
+        # that, finitely.  h = 0 (dry) stays finite too (cd0 after clip).
+        cd_pole = float(nemo_loglayer_cd(
+            jnp.asarray(2.0 * Z0), z0=Z0, cd_min=CD0, cd_max=CDMAX,
+            von_karman=K_VK))
+        assert np.isfinite(cd_pole) and cd_pole == pytest.approx(CDMAX)
+        cd_dry = float(nemo_loglayer_cd(
+            jnp.asarray(0.0), z0=Z0, cd_min=CD0, cd_max=CDMAX,
+            von_karman=K_VK))
+        assert np.isfinite(cd_dry) and cd_dry == pytest.approx(CD0)
+
+    def test_guard_is_f90_exact_wherever_raw_is_finite(self):
+        """codex r1 #4: the guards must be output-equivalent to NEMO's raw
+        LOG expression + clip at every finite-raw thickness — INCLUDING
+        the sub-roughness ½h < z0 side, where the raw formula's ln < 0
+        gives interior Cd values (clipped to cd0 for very thin h), NOT a
+        fully-rough cap."""
+        h = np.concatenate([
+            np.geomspace(1e-8, 2.0 * Z0 * 0.999, 50),      # ln < 0 side
+            np.geomspace(2.0 * Z0 * 1.001, 1.0e6, 60),     # ln > 0 side
+        ])
+        raw_ln = np.log(0.5 * h / Z0)
+        raw_cd = np.clip((K_VK / raw_ln) ** 2, CD0, CDMAX)
+        guarded = np.asarray(nemo_loglayer_cd(
+            jnp.asarray(h), z0=Z0, cd_min=CD0, cd_max=CDMAX,
+            von_karman=K_VK))
+        np.testing.assert_allclose(guarded, raw_cd, rtol=1e-12)
 
 
 class TestEffectiveR:
@@ -244,6 +264,77 @@ def test_latlon_legacy_scheme_bit_identical_formula():
 def test_latlon_unknown_scheme_raises():
     with pytest.raises(ValueError, match="bottom_drag_scheme"):
         _tendencies_botdrag("nemo_quadratc")  # typo
+
+
+def test_latlon_partial_cell_nonuniform_matches_nemo_reference():
+    """Sloping partial-cell bathymetry + nonuniform flow: the lat-lon NEMO
+    branch must equal a direct NEMO-style reference — per-COLUMN rCdU from
+    that column's own bottom velocity/thickness (zdf_drg_nonlin at
+    t-points), then dynzdf's 2-point face average, applied at the face's
+    bottom level (mbku = shallower neighbour) over the face thickness.
+    Catches input-averaging / gather mistakes that uniform flow hides."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        latlon_cgrid_ocean_baroclinic_tendencies,
+    )
+    from legoesm.ocean.vertical import (
+        create_ocean_z_star, create_partial_cell_coordinate,
+    )
+
+    grid = create_latlon_grid(n_lat=6, n_lon=8)
+    z0c = create_ocean_z_star(n_levels=5, H_max=3000.0)
+    rng = np.random.default_rng(11)
+    H_bathy = rng.uniform(400.0, 2900.0, size=(6, 8))
+    z = create_partial_cell_coordinate(z0c, jnp.asarray(H_bathy))
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z0c, T_water_init_C=10.0, T_deep=10.0, S_uniform=35.0,
+        H_bathy_override=jnp.asarray(H_bathy))
+    u = rng.uniform(-0.3, 0.3, size=state.u.data.shape)
+    v = rng.uniform(-0.3, 0.3, size=state.v.data.shape)
+    state = state._replace(
+        u=state.u.replace(data=jnp.asarray(u)),
+        v=state.v.replace(data=jnp.asarray(v)),
+    )
+    config = LatLonCGridOceanConfig.from_flat(
+        A_h=0.0, A_v=0.0, K_h=0.0, K_v=0.0,
+        bottom_drag_scheme="nemo_loglayer")
+    _, diag = latlon_cgrid_ocean_baroclinic_tendencies(
+        state, grid, z, config, diagnose_momentum=True)
+    du = np.asarray(diag.botdrag_u.data)
+
+    # ---- NEMO-style numpy reference ----
+    from legoesm.ocean.vertical import (
+        compute_ocean_jacobian, compute_layer_thickness,
+    )
+    J = np.asarray(compute_ocean_jacobian(
+        state.eta.data, state.H_bathy.data, z))
+    h_k = np.asarray(compute_layer_thickness(
+        state.eta.data, state.H_bathy.data, z))
+    bl = np.asarray(z.bottom_level)
+    u_c = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
+    v_c = 0.5 * (v[:-1, :, :] + v[1:, :, :])
+    n_lat, n_lon = 6, 8
+    r_t = np.zeros((n_lat, n_lon))
+    for j in range(n_lat):
+        for i in range(n_lon):
+            k = max(bl[j, i], 0)
+            cd = (K_VK / np.log(0.5 * h_k[j, i, k] / Z0)) ** 2
+            cd = min(max(CD0, cd), CDMAX)
+            r_t[j, i] = cd * np.sqrt(
+                u_c[j, i, k] ** 2 + v_c[j, i, k] ** 2 + KE0)
+    # interior u-face l couples cells l-1, l (periodic construction)
+    for j in range(1, n_lat - 1):
+        for l in range(1, n_lon):
+            r_face = 0.5 * (r_t[j, l - 1] + r_t[j, l])
+            kf = min(bl[j, l - 1], bl[j, l])
+            # face thickness at the bottom level (partial-aware min h)
+            h_u = min(h_k[j, l - 1, kf], h_k[j, l, kf])
+            expect = -r_face * u[j, l, kf] / max(h_u, 1e-10)
+            np.testing.assert_allclose(
+                du[j, l, kf], expect, rtol=2e-5,
+                err_msg=f"face ({j},{l}) level {kf}")
 
 
 def test_config_defaults_are_legacy_everywhere():

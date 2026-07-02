@@ -455,6 +455,15 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             # compute_vertical_K_profiles.  implicit_vertical_mixing is
             # already forced True above.
             _vm_cfg = _vm_cfg._replace(iwm=iwm)
+            # NEMO zdfiwm_init FORCES the model backgrounds to molecular
+            # values (avmb = rnu = 1.4e-6 m²/s, avtb = 1e-10 m²/s): the wave
+            # field IS the interior background.  Mirror that (codex r1 #2) —
+            # keeping the OMIP A_v/K_v floors would double-count backgrounds.
+            from legoesm import constants as _const
+            _ovr["A_v"] = _const.nu_ocean_molecular
+            _ovr["K_v"] = 1.0e-10   # NEMO avtb with ln_zdfiwm
+            print("[setup] zdfiwm: model backgrounds forced to molecular "
+                  f"(A_v={_ovr['A_v']:g}, K_v={_ovr['K_v']:g}) per zdfiwm_init")
         _ovr["physics"] = OceanPhysicsConfig(
             vertical_mixing=_vm_cfg,
             lateral_mixing=LateralMixingConfig(scheme="none"),
@@ -534,8 +543,12 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         _iwm_maps = None
         if iwm_forcing_file:
             from legoesm.ocean.iwm_forcing import load_iwm_forcing
+            # grid.lat_T/lon_T are stored in RADIANS on the tripole grid;
+            # the loader expects degrees (matches the eORCA nav_lat/nav_lon).
             _iwm_maps = load_iwm_forcing(
-                iwm_forcing_file, grid.lat_T, grid.lon_T,
+                iwm_forcing_file,
+                np.degrees(np.asarray(grid.lat_T)),
+                np.degrees(np.asarray(grid.lon_T)),
                 land_mask=land_mask)
         model = LatLonCGridOceanModel(grid, z_coord, config,
                                       iwm_forcing=_iwm_maps)
@@ -691,6 +704,16 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         _vm_iwm = config.physics.vertical_mixing._replace(iwm=iwm)
         config = config._replace(
             physics=config.physics._replace(vertical_mixing=_vm_iwm))
+        # NEMO zdfiwm_init FORCES the model backgrounds to molecular values
+        # (avmb = rnu = 1.4e-6 m²/s, avtb = 1e-10 m²/s): the wave field IS
+        # the interior background (codex r1 #2).  KPP's own scheme
+        # backgrounds (K_bg/A_bg) remain user-tunable via --kpp-k-bg /
+        # --kpp-a-bg for the NEMO-faithful configuration.
+        from legoesm import constants as _const
+        config = config.replace_flat(
+            A_v=_const.nu_ocean_molecular, K_v=1.0e-10)
+        print("[setup] zdfiwm: model backgrounds forced to molecular "
+              f"(A_v={_const.nu_ocean_molecular:g}, K_v=1e-10) per zdfiwm_init")
     e_mask, e_H = read_mesh_mask_bathy(mesh_path)
     ds = xr.open_dataset(mesh_path)
     src_lat = _squeeze2d(ds["gphit"].values)

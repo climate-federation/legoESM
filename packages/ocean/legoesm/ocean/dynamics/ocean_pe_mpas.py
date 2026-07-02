@@ -655,37 +655,35 @@ def mpas_ocean_baroclinic_tendencies(
         _u_bg = float(getattr(config, "bottom_drag_bg_velocity", 0.0))
         if _drag_scheme != "legacy":
             # NEMO zdfdrg drag law (np_non_lin / np_loglayer) on the Voronoi
-            # mesh: r = Cd·√(|U|² + ke0) from the BOTTOM-cell FULL speed.
-            # |U|² at cells = 2·KE (Ringler discrete kinetic energy — the
-            # Voronoi analogue of NEMO's t-point 2-component average),
-            # averaged to the edge over cellsOnEdge (NEMO dynzdf's 2-point
-            # rCdU average).  The log-layer Cd uses the EDGE bottom
-            # thickness h_e (= min of the two adjacent cells — NEMO's
-            # e3u(mbku) equivalent; NEMO evaluates Cd at t-points then
-            # averages rCdU, an O(Δ)-equivalent placement).
+            # mesh, with NEMO's exact operator placement: rCdU is evaluated
+            # PER CELL (t-point analogue) from that cell's own bottom speed
+            # and bottom thickness — |U|² = 2·KE (Ringler discrete kinetic
+            # energy, the Voronoi analogue of the t-point 2-component
+            # average) and h = the cell's bottom thickness (e3t(mbkt)) —
+            # and the resulting coefficient is THEN 2-point averaged to the
+            # edge over cellsOnEdge (NEMO dynzdf's rCdU face average).
+            # Averaging the inputs instead would not commute with the
+            # nonlinear Cd(h)·√(s²+ke0) on slopes (codex r1 #3).
             if isinstance(z_coord, OceanPartialCellCoordinate):
                 _bot_c = jnp.maximum(z_coord.bottom_level, 0)[:, jnp.newaxis]
                 _ke_bot = jnp.take_along_axis(ke, _bot_c, axis=1)[:, 0]
-                _bot_e_r = jnp.maximum(
-                    compute_max_level_edge_bot(z_coord.bottom_level, mesh), 0,
-                )[:, jnp.newaxis]
-                _h_bot_e = jnp.take_along_axis(h_e_3d, _bot_e_r, axis=1)[:, 0]
+                _h_bot_c = jnp.take_along_axis(h_k, _bot_c, axis=1)[:, 0]
             else:
                 _ke_bot = ke[:, -1]
-                _h_bot_e = h_e_3d[:, -1]
-            _c1 = mesh.cellsOnEdge[0]
-            _c2 = mesh.cellsOnEdge[1]
-            # 0.5·(2·KE_c1 + 2·KE_c2) = KE_c1 + KE_c2  [m²/s²]
-            _speed_sq_e = _ke_bot[_c1] + _ke_bot[_c2]
-            _r_eff = nemo_drag_r_from_speed_sq(
-                _speed_sq_e, _h_bot_e,
+                _h_bot_c = h_k[:, -1]
+            _r_cell = nemo_drag_r_from_speed_sq(
+                2.0 * _ke_bot, _h_bot_c,
                 scheme=_drag_scheme,
                 cd0=float(getattr(config, "bottom_drag_cd0", 1.0e-3)),
                 cd_max=float(getattr(config, "bottom_drag_cdmax", 0.1)),
                 z0=float(getattr(config, "bottom_drag_z0", 3.0e-3)),
                 ke0=float(getattr(config, "bottom_drag_ke0", 2.5e-3)),
                 von_karman=constants.kappa_von_karman,
-            )[:, jnp.newaxis]  # (nEdges, 1) — broadcasts over levels
+            )
+            _c1 = mesh.cellsOnEdge[0]
+            _c2 = mesh.cellsOnEdge[1]
+            _r_eff = (0.5 * (_r_cell[_c1] + _r_cell[_c2])
+                      )[:, jnp.newaxis]  # (nEdges, 1) — broadcasts over levels
         elif _u_bg > 0.0:
             _Cd_eq = config.bottom_drag_r / _u_bg
             # Compute per-edge, per-level effective r from the speed at

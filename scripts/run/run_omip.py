@@ -213,15 +213,28 @@ def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
         if drag_flat:
             config = config.replace_flat(**drag_flat)
         iwm_forcing = None
+        if want_iwm:
+            # NEMO zdfiwm_init FORCES the model backgrounds to molecular
+            # values (avmb = rnu = 1.4e-6 m²/s, avtb = 1e-10 m²/s): the
+            # wave field IS the interior background.  Mirror that so the
+            # OMIP A_v/K_v floors don't double-count (codex r1 #2).
+            from legoesm import constants as _const
+            config = config.replace_flat(
+                A_v=_const.nu_ocean_molecular, K_v=1.0e-10)
+            print("[setup] zdfiwm: model backgrounds forced to molecular "
+                  f"(A_v={_const.nu_ocean_molecular:g}, K_v=1e-10) per "
+                  "zdfiwm_init")
         if want_iwm and args.iwm_forcing_file:
-            import jax.numpy as jnp
+            import numpy as _np
             from legoesm.ocean.iwm_forcing import load_iwm_forcing
             lat_T = getattr(grid, "lat_T", None)
-            if lat_T is not None:                     # tripole (degrees, 2-D)
-                lon_T = grid.lon_T
+            if lat_T is not None:
+                # tripole: lat_T/lon_T are stored in RADIANS (2-D)
+                lat_T = _np.degrees(_np.asarray(lat_T))
+                lon_T = _np.degrees(_np.asarray(grid.lon_T))
             else:                                     # regular lat-lon (radians)
-                lat_T = jnp.degrees(grid.lat)
-                lon_T = jnp.degrees(grid.lon)
+                lat_T = _np.degrees(_np.asarray(grid.lat))
+                lon_T = _np.degrees(_np.asarray(grid.lon))
             iwm_forcing = load_iwm_forcing(
                 args.iwm_forcing_file, lat_T, lon_T)
             print(f"[setup] zdfiwm forcing maps loaded from "
