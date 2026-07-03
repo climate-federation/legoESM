@@ -81,8 +81,10 @@ else
     echo "ERROR: hwloc headers not found (searched env vars, pkg-config, and" >&2
     echo "       /opt/cray/pe/hwloc, /glade/u/apps, /usr)." >&2
     echo "       Fix: 'module load hwloc' (try 'module spider hwloc' for the" >&2
-    echo "       exact name), or set HWLOC_HOME=<prefix> (a dir containing" >&2
-    echo "       include/hwloc.h), then rerun." >&2
+    echo "       exact name); if there is no module (e.g. Derecho), install it" >&2
+    echo "       into your conda env -- 'conda install -c conda-forge hwloc' --" >&2
+    echo "       and rerun with HWLOC_HOME=\$CONDA_PREFIX.  Or set HWLOC_HOME to" >&2
+    echo "       any prefix containing include/hwloc.h." >&2
     exit 1
 fi
 
