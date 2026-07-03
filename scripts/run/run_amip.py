@@ -1317,6 +1317,46 @@ def _check_run_state_finite(driver) -> tuple[bool, str | None]:
     return True, None
 
 
+def _sync_finite_verdict_across_ranks(driver, state_ok, bad_field):
+    """Make the post-run finiteness verdict identical on every rank.
+
+    Under mpi4jax topologies ``driver.state`` is the RANK-LOCAL partition, so
+    ``_check_run_state_finite`` can disagree across ranks (NaN on one band
+    only).  A divergent verdict means divergent ``sys.exit`` — one rank dies
+    while root prints "Complete".  Reduce with logical-AND and surface the
+    first bad field name from any rank.
+
+    Multi-controller SPMD (``distributed_mode='spmd'``) needs no reduction:
+    the state is globally sharded and jnp reductions are SPMD-global, so the
+    verdict is process-identical by construction (mirrors the segment-boundary
+    stability check in ``ModelDriver``); mpi4py there would be a second
+    control plane beside jax.distributed.
+    """
+    _dc = getattr(driver, "_device_config", None)
+    if (driver._mpi_rank is None or _dc is None
+            or not getattr(_dc, "is_distributed", False)):
+        return state_ok, bad_field
+    from mpi4py import MPI
+
+    state_ok = bool(MPI.COMM_WORLD.allreduce(bool(state_ok), op=MPI.LAND))
+    bad_fields = MPI.COMM_WORLD.allgather(bad_field)
+    bad_field = next((f for f in bad_fields if f is not None), None)
+    return state_ok, bad_field
+
+
+def _resolve_run_exit(run_status: str, state_ok: bool) -> int:
+    """Combine the two independent failure signals into one exit code.
+
+    0 only when the driver status is ``COMPLETED`` (via the shared
+    ``status_to_exit_code`` contract) AND the final-state NaN/Inf sweep is
+    clean; 1 otherwise, so a SLURM ``afterok`` chain stops instead of
+    restarting from garbage.
+    """
+    if status_to_exit_code(run_status) != 0:
+        return 1
+    return 0 if state_ok else 1
+
+
 def _apply_aimip_classical_overrides(
     args: argparse.Namespace,
 ) -> argparse.Namespace:
@@ -1703,10 +1743,18 @@ def main(argv: list[str] | None = None):
         n_profile_days = args.profile * args.dt / 86400.0
         driver.config = driver.config._replace(days=int(n_profile_days + 1))
         with jax.profiler.trace(profile_dir):
-            driver.run(start_step=start_step, start_day=start_day)
+            profile_status = driver.run(start_step=start_step,
+                                        start_day=start_day)
         if _is_root:
             print(f"Profile saved to {profile_dir}")
             print("View with: tensorboard --logdir " + profile_dir)
+        # Same status→exit-code contract as the production path below: a
+        # profiled blowup must not exit 0 either.
+        if status_to_exit_code(profile_status) != 0:
+            if _is_root:
+                print(f"FAIL: profiled run did not complete cleanly "
+                      f"(status={profile_status!r}).", file=sys.stderr)
+            sys.exit(1)
         return
 
     if _is_root:
@@ -1726,11 +1774,15 @@ def main(argv: list[str] | None = None):
     #  2. a final NaN/Inf sweep (iter-100) of the primary fields (T, u, v, p_s)
     #     — catches a non-finite state a segment-boundary probe could miss.
     #
-    # ``status_to_exit_code`` is the shared status→exit-code contract; the exit
-    # is unconditional (all ranks) because the BLOWUP verdict is global.
-    state_ok, bad_field = _check_run_state_finite(driver)
+    # ``status_to_exit_code`` is the shared status→exit-code contract.  The
+    # BLOWUP verdict is already rank-identical (root checks, mpi4py bcasts —
+    # see the segment-boundary stability check in ``ModelDriver``); the
+    # finiteness sweep is rank-LOCAL under mpi4jax, so it is reduced across
+    # ranks before the verdict so every rank exits identically.
+    state_ok, bad_field = _sync_finite_verdict_across_ranks(
+        driver, *_check_run_state_finite(driver))
     status_code = status_to_exit_code(run_status)
-    run_failed = (status_code != 0) or (not state_ok)
+    run_failed = _resolve_run_exit(run_status, state_ok) != 0
     if _is_root:
         if not run_failed:
             print(f"Complete. Output: {driver.output_dir}")

@@ -5892,7 +5892,13 @@ class ModelDriver:
         # checkpoint (written at the actual elapsed day) remains the restart
         # point for a blown-up run.
         if checkpoint_interval > 0 and run_status == "COMPLETED":
-            self.save_checkpoint(n_steps_total, START_DAY + N_DAYS)
+            # Route through the coupled checkpoint callback when one is set
+            # (mirrors the periodic path): a coupled run must persist the FULL
+            # coupled state (atm + ocean + surface + CO2) at the final day too,
+            # or ``run_coupled --resume`` finds the atmosphere checkpoint but
+            # no ``coupled_day_*.npz`` and silently resumes with a stale ocean.
+            _ckpt = getattr(self, "_checkpoint_callback", None) or self.save_checkpoint
+            _ckpt(n_steps_total, START_DAY + N_DAYS)
 
         # Issue #275 fix A lifecycle: restore the halo backend captured
         # at activation time so subsequent drivers / tests in the same
