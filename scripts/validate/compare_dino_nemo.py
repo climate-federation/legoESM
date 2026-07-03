@@ -108,7 +108,7 @@ def _dino_geometry(nlev: int):
          if cfg.vertical_coordinate == "masked_zco"
          else create_dino_z_star(cfg))
     lat = np.degrees(np.asarray(grid.lat))
-    return cfg, grid, lat, np.asarray(z.dz_ref)
+    return cfg, grid, lat, z
 
 
 def _lego_acc_sv(lg, dz, cfg, grid):
@@ -123,7 +123,8 @@ def _lego_acc_sv(lg, dz, cfg, grid):
     u = np.asarray(lg["u"])
     if not np.isfinite(u).all():
         return float("nan")
-    h_partial = partial_cell_thickness(np.asarray(lg["H_bathy"]), dz)
+    h_partial = partial_cell_thickness(
+        np.asarray(lg["H_bathy"]), np.asarray(dz))
     psi_Sv = np.asarray(barotropic_streamfunction(
         u, h_partial, np.asarray(lg["land_mask"]), grid))
     lat_deg = np.degrees(np.asarray(grid.lat))
@@ -159,9 +160,21 @@ def main():
     args = _parse()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     _probe = _load_lego(args.legoesm_dir, 0)
-    cfg, grid, lat, dz = _dino_geometry(int(_probe["T"].shape[-1]))
-    depth_c = np.cumsum(dz) - 0.5 * dz
+    cfg, grid, lat, z = _dino_geometry(int(_probe["T"].shape[-1]))
+    dz = np.asarray(z.dz_ref)
+    nlev = int(dz.size)
+    # cell-centre depths from the coordinate's own t-depths (ANALYTIC
+    # mi96 ladder on the masked-zco grid — NOT interface midpoints;
+    # codex r4 HIGH #2)
+    depth_c = np.abs(np.asarray(z.z_full_ref))
     nemo = _load_nemo(args.nemo_gridt, args.nemo_gridu)
+    # NEMO jpk counts a permanently-masked dummy bottom level: trim
+    # every 3-D field + the depth axis to the legoESM wet level count
+    # so sections/profiles align (z is the FIRST axis of the nc arrays).
+    for k in ("T", "S", "e3t", "u", "e3u"):
+        if k in nemo and nemo[k] is not None and nemo[k].ndim == 4:
+            nemo[k] = nemo[k][:, :nlev]
+    nemo["deptht"] = nemo["deptht"][:nlev]
     nemo_lat1d = nemo["lat2d"][:, 0]
     m = args.month
 

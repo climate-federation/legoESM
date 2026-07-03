@@ -20,13 +20,18 @@ cdn = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(cdn)
 
 
-def test_writes_all_figures(tmp_path, monkeypatch):
+@pytest.mark.parametrize("vertical", ["zstar", "masked_zco"])
+def test_writes_all_figures(tmp_path, monkeypatch, vertical):
+    import dataclasses
+
     from legoesm.ocean.experiments.dino import (
         DINOConfig, create_dino_z_star, dino_lat_lon_grid,
+        dino_lat_lon_vertical,
     )
-    cfg = DINOConfig()
+    cfg = dataclasses.replace(DINOConfig(), vertical_coordinate=vertical)
     grid = dino_lat_lon_grid(cfg, n_lon=50)
-    z = create_dino_z_star(cfg)
+    z = (dino_lat_lon_vertical(grid, cfg) if vertical == "masked_zco"
+         else create_dino_z_star(cfg))
     n_lat, n_lon, nlev = grid.n_lat, 50, z.n_levels
     rng = np.random.default_rng(0)
 
@@ -48,7 +53,12 @@ def test_writes_all_figures(tmp_path, monkeypatch):
 
     lat1d = np.degrees(np.asarray(grid.lat))
     lat199 = np.concatenate([lat1d, [lat1d[-1] + 1.0]])
-    depth = np.cumsum(np.asarray(z.dz_ref)) - 0.5 * np.asarray(z.dz_ref)
+    # NEMO files carry jpk = wet+1 levels (dummy bottom) in the
+    # masked-zco convention; match the legacy count otherwise.
+    nlev_nemo = nlev + 1 if vertical == "masked_zco" else nlev
+    dz_n = np.concatenate([np.asarray(z.dz_ref),
+                           np.asarray(z.dz_ref)[-1:]])[:nlev_nemo]
+    depth = np.cumsum(dz_n) - 0.5 * dz_n
     nt, nx = 3, n_lon + 2
     lat2d = np.repeat(lat199[:, None], nx, axis=1)
     gridt = tmp_path / "grid_T.nc"
@@ -57,7 +67,7 @@ def test_writes_all_figures(tmp_path, monkeypatch):
                          (gridu, ("uoce", "e3u"))):
         with netCDF4.Dataset(path, "w") as ds:
             ds.createDimension("time_counter", nt)
-            ds.createDimension("deptht", nlev)
+            ds.createDimension("deptht", nlev_nemo)
             ds.createDimension("y", 199)
             ds.createDimension("x", nx)
             v = ds.createVariable("nav_lat", "f8", ("y", "x")); v[:] = lat2d
@@ -67,10 +77,10 @@ def test_writes_all_figures(tmp_path, monkeypatch):
                     name, "f8", ("time_counter", "deptht", "y", "x"))
                 if name.startswith("e3"):
                     v[:] = np.broadcast_to(
-                        np.asarray(z.dz_ref)[None, :, None, None],
-                        (nt, nlev, 199, nx))
+                        dz_n[None, :, None, None],
+                        (nt, nlev_nemo, 199, nx))
                 else:
-                    v[:] = rng.uniform(1, 20, (nt, nlev, 199, nx))
+                    v[:] = rng.uniform(1, 20, (nt, nlev_nemo, 199, nx))
 
     out = tmp_path / "figs"
     monkeypatch.setattr(sys, "argv", [
