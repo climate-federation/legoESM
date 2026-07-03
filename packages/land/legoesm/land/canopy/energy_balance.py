@@ -22,7 +22,11 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_vapor_pressure
+from legoesm.thermo import (
+    saturation_vapor_pressure_aerk,
+    d_saturation_vapor_pressure_aerk,
+    dd_saturation_vapor_pressure_aerk,
+)
 from legoesm.land.canopy.stomatal import ball_berry_gs, medlyn_gs
 
 # Module-local constants.
@@ -32,16 +36,13 @@ _Ps0   = 101325.0    # IUPAC STP pressure [Pa] used in the mol → m/s
                      # unit conversion factor 0.446; distinct from
                      # ``constants.p_ref`` (1e5 Pa hydrostatic reference).
 
-# Magnus/Tetens saturation-curve coefficients, matching the curve used by
-# ``legoesm.thermo.saturation_vapor_pressure`` (exponential slope 17.67,
-# offset 243.5 degC).  thermo exposes e_s but not its derivatives, which the
-# canopy PM/EB linearisation needs.  Deriving des/dT here from the SAME
-# coefficients keeps the derivative consistent with the curve — a mismatched
-# parameterisation makes the PM closure humidity-dependently wrong.
-# des/dT = e_s * (B*C) / (Tc + C)^2 ;  Tc in degC.
-_MAGNUS_B    = 17.67           # exponential slope [-]
-_MAGNUS_C    = 243.5           # offset [degC]
-_DESDT_COEFF = _MAGNUS_B * _MAGNUS_C   # des/dT prefactor [degC]
+# Saturation vapour pressure and its first/second temperature derivatives come
+# from the shared ``legoesm.thermo`` Alduchov-Eskridge (1996) AERK water + AERKi
+# ice blend (``*_aerk``), matching the DifferBESS two-big-leaf canopy oracle.
+# Using the curve's OWN analytic derivatives keeps des/dT, d2es/dT2 consistent
+# with e_s (a mismatched parameterisation makes the PM closure humidity-dependently
+# wrong) and gives a proper over-ice branch below freezing (the over-water Magnus
+# over-estimates e_s by ~10-60 % at -10..-50 degC).
 
 
 # ---------------------------------------------------------------------------
@@ -52,14 +53,15 @@ _DESDT_COEFF = _MAGNUS_B * _MAGNUS_C   # des/dT prefactor [degC]
 def saturation_specific_humidity(T: jax.Array, p: jax.Array) -> jax.Array:
     """Saturation specific humidity [kg kg-1] from T [K] and p [Pa].
 
-    Uses ``legoesm.thermo.saturation_vapor_pressure`` for the Tetens
-    formula (CLAUDE.md: never inline Tetens).  The specific-humidity
+    Uses the shared ``legoesm.thermo`` AERK water+ice saturation curve
+    (``saturation_vapor_pressure_aerk``; CLAUDE.md: never inline Tetens),
+    matching the canopy's other ``e_s`` evaluations.  The specific-humidity
     denominator ``p - (1 - ε) e_s`` differs from the mixing-ratio
     denominator in ``thermo.saturation_mixing_ratio`` — this function
     returns **specific** humidity, which is what the canopy air and
     leaf boundary layers carry throughout the two-leaf closure.
     """
-    e_s = saturation_vapor_pressure(T)
+    e_s = saturation_vapor_pressure_aerk(T)
     return constants.epsilon * e_s / (p - (1.0 - constants.epsilon) * e_s)
 
 
@@ -84,23 +86,17 @@ def canopy_met_variables(
     """
     # Vapour pressure from specific humidity
     e_c  = q_c * Ps / (constants.epsilon + (1.0 - constants.epsilon) * q_c)
-    # Saturation vapour pressure (Tetens — shared helper).
     TcC  = Tc - constants.T_freeze
-    es_c = saturation_vapor_pressure(Tc)
+    # Saturation vapour pressure + its analytic derivatives from the shared AERK
+    # water+ice curve (one consistent curve; over-ice below freezing).  ddesTc
+    # uses the saturation curve only (no actual vapour pressure) — the historical
+    # PM ``e_c``-instead-of-``e_s`` second-derivative bug is fixed at the source.
+    es_c   = saturation_vapor_pressure_aerk(Tc)
+    desTc  = d_saturation_vapor_pressure_aerk(Tc)    # des/dT  [Pa K-1]
+    ddesTc = dd_saturation_vapor_pressure_aerk(Tc)   # d²es/dT² [Pa K-2]
 
     VPD_c = es_c - e_c
     RH_c  = jnp.clip(e_c / jnp.maximum(es_c, 1e-6), 0.0, 1.0)
-
-    # First derivative des/dT [Pa K-1] — analytical derivative of the SAME
-    # Tetens curve used by ``saturation_vapor_pressure`` (slope 17.67, offset
-    # 243.5).  Kept local because ``legoesm.thermo`` does not expose des/dT.
-    desTc  = es_c * _DESDT_COEFF * (TcC + _MAGNUS_C) ** (-2)
-    # Second derivative d²es/dT² [Pa K-2].  Uses es_c (saturation), NOT e_c:
-    # the saturation curve and its derivatives depend on T only.
-    ddesTc = _DESDT_COEFF * (
-        desTc  * (TcC + _MAGNUS_C) ** (-2)
-        + (-2.0) * es_c * (TcC + _MAGNUS_C) ** (-3)
-    )
 
     # Latent heat (temperature-corrected) and psychrometric constant
     lam   = constants.L_v - 2.361e3 * TcC
@@ -228,11 +224,20 @@ def leaf_energy_balance_bt(
     -------
     Rn, LE, H, Tf_new, gs, Ci
     """
-    rs, gs, Ci = _compute_gs_and_ci(
+    _rs, gs, Ci = _compute_gs_and_ci(
         An, RH_c, VPD_c, Ca, Tf, Ps, m, b0, stomatal_model)
 
     Rn = ASW + ALW
-    LE = lam * rhoa * (q_f - q_c) / jnp.maximum(Rb + rs, 1e-6)
+    # Series leaf latent-heat conductance written directly in gs (= 1/rs):
+    #   g_lh = 1/(Rb + rs) = gs / (gs*Rb + 1)
+    # This is algebraically identical to ``num / (Rb + 1/gs)`` but its
+    # reverse/forward-mode AD uses the product rule, so the Jacobian stays
+    # finite as the stomata close (gs -> 0, g_lh -> 0 with d g_lh/d gs -> 1)
+    # instead of the quotient form's Inf/Inf blow-up.  The denominator
+    # (gs*Rb + 1) >= 1, so no small-denominator guard is needed.  (DifferBESS
+    # Apr-13 conductance refactor.)
+    g_lh = gs / (gs * Rb + 1.0)
+    LE = lam * rhoa * (q_f - q_c) * g_lh
 
     # LE sign is not constrained here: negative LE = dew formation on the
     # leaf, positive LE = transpiration + evaporation.  The DifferBESS
@@ -331,7 +336,7 @@ def soil_energy_balance_bt(
     Cp: jax.Array,
     rah_soil: jax.Array,
     raw_soil: jax.Array,
-    Rsoil: jax.Array,
+    fStress: jax.Array,
     ASW_soil: jax.Array,
     ALW_soil: jax.Array,
 ) -> tuple[jax.Array, ...]:
@@ -345,8 +350,10 @@ def soil_energy_balance_bt(
     boundary condition to ``solve_soil_thermal`` in the caller (the same
     pattern as ``multilayer_land.py``).
 
-    ``Rsoil`` is the soil-dryness surface resistance
-    ``raw_below · (1/fStress_soil - 1)`` added in series with ``raw_soil``.
+    ``fStress`` (soil evaporation efficiency in [0, 1]) scales the
+    below-canopy aerodynamic conductance to give the soil evaporation
+    conductance ``fStress / raw_soil`` — equivalent to a dryness resistance
+    ``raw_soil · (1/fStress - 1)`` in series with ``raw_soil``.
 
     Returns
     -------
@@ -355,7 +362,16 @@ def soil_energy_balance_bt(
     Rn = ASW_soil + ALW_soil
     # Direct bulk-transfer turbulent fluxes — Ts is prescribed so no
     # root-finding for soil T is needed.
-    LE = lam * rhoa * (q_s - q_c) / jnp.maximum(raw_soil + Rsoil, 1e-6)
+    # Soil latent-heat conductance written as the soil-evaporation efficiency
+    # ``fStress`` times the below-canopy aerodynamic conductance:
+    #   g_soil = fStress / raw_soil   (algebraically 1/(raw_soil + Rsoil) with
+    #   the dryness resistance Rsoil = raw_soil*(1/fStress - 1)).  Expressing
+    #   fStress as a multiplier — rather than forming Rsoil ~ 1/fStress — keeps
+    #   the AD Jacobian finite as the soil dries (fStress -> 0: LE -> 0 with
+    #   d LE / d fStress = num/raw_soil), instead of the quotient form's
+    #   Inf/Inf at fStress = 0 (DifferBESS Apr-13 conductance refactor).
+    g_soil = fStress / jnp.maximum(raw_soil, 1e-9)
+    LE = lam * rhoa * (q_s - q_c) * g_soil
     H  = rhoa * Cp * (Ts - Tc) / jnp.maximum(rah_soil, 1e-6)
     # G closes the surface energy budget as a residual — positive into soil.
     G  = Rn - LE - H
@@ -377,7 +393,7 @@ def soil_energy_balance_pm(
     Cp: jax.Array,
     rah_soil: jax.Array,
     raw_soil: jax.Array,
-    Rsoil: jax.Array,
+    fStress: jax.Array,
     ASW_soil: jax.Array,
     ALW_soil: jax.Array,
 ) -> tuple[jax.Array, ...]:
@@ -395,7 +411,16 @@ def soil_energy_balance_pm(
     Rn_soil, LE_soil, H_soil, G
     """
     Rn = ASW_soil + ALW_soil
-    LE = lam * rhoa * (q_s - q_c) / jnp.maximum(raw_soil + Rsoil, 1e-6)
+    # Soil latent-heat conductance written as the soil-evaporation efficiency
+    # ``fStress`` times the below-canopy aerodynamic conductance:
+    #   g_soil = fStress / raw_soil   (algebraically 1/(raw_soil + Rsoil) with
+    #   the dryness resistance Rsoil = raw_soil*(1/fStress - 1)).  Expressing
+    #   fStress as a multiplier — rather than forming Rsoil ~ 1/fStress — keeps
+    #   the AD Jacobian finite as the soil dries (fStress -> 0: LE -> 0 with
+    #   d LE / d fStress = num/raw_soil), instead of the quotient form's
+    #   Inf/Inf at fStress = 0 (DifferBESS Apr-13 conductance refactor).
+    g_soil = fStress / jnp.maximum(raw_soil, 1e-9)
+    LE = lam * rhoa * (q_s - q_c) * g_soil
     H  = rhoa * Cp * (Ts - Tc) / jnp.maximum(rah_soil, 1e-6)
     G  = Rn - LE - H
     return Rn, LE, H, G
@@ -420,7 +445,7 @@ def canopy_air_update(
     raw_above: jax.Array,
     rah_below: jax.Array,
     raw_below: jax.Array,
-    Rsoil: jax.Array,
+    fStress: jax.Array,
     Ps: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
     """Update canopy air temperature Tc and specific humidity q_c.
@@ -438,12 +463,15 @@ def canopy_air_update(
     ch_sh  = 1.0 / jnp.maximum(Rb_Sh,     1e-9)
     ch_g   = 1.0 / jnp.maximum(rah_below, 1e-9)
 
-    gs_Sun_safe = jnp.maximum(gs_Sun, 1e-9)
-    gs_Sh_safe  = jnp.maximum(gs_Sh,  1e-9)
     cw_a   = 1.0 / jnp.maximum(raw_above, 1e-9)
-    cw_sun = 1.0 / (Rb_Sun + 1.0 / gs_Sun_safe)
-    cw_sh  = 1.0 / (Rb_Sh  + 1.0 / gs_Sh_safe)
-    cw_g   = 1.0 / jnp.maximum(raw_below + Rsoil, 1e-9)
+    # Leaf water conductances in gs-form gs/(gs*Rb + 1) (= 1/(Rb + 1/gs)) so
+    # the AD Jacobian stays finite as the stomata close (gs -> 0) — no 1/gs
+    # intermediate.  Soil conductance = fStress / raw_below (the soil
+    # evaporation efficiency times the below-canopy aerodynamic conductance),
+    # finite as the soil dries.  See the leaf/soil energy-balance notes.
+    cw_sun = gs_Sun / (gs_Sun * Rb_Sun + 1.0)
+    cw_sh  = gs_Sh  / (gs_Sh  * Rb_Sh  + 1.0)
+    cw_g   = fStress / jnp.maximum(raw_below, 1e-9)
 
     q_f_Sun = saturation_specific_humidity(Tf_Sun, Ps)
     q_f_Sh  = saturation_specific_humidity(Tf_Sh,  Ps)

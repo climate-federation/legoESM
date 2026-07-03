@@ -22,6 +22,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.driver.component_factory import create_land_component
 from legoesm.land.canopy import CanopyConfig, CanopyLandParams
@@ -82,6 +83,35 @@ def test_daytime_fluxes_and_gpp():
     assert 270.0 < float(response.T_sfc[0]) < 330.0
     assert 0.0 <= float(response.albedo[0]) <= 1.0
     assert cstate is None
+
+
+def test_canopy_reports_aerodynamic_tc_and_radiometric_trad():
+    """Canopy TileResponse carries TWO distinct surface temperatures:
+    ``T_sfc`` = aerodynamic canopy air-space temp Tc (sensible-heat coupling),
+    ``T_rad`` = LW-derived radiometric temp.  They differ for a sunlit cell."""
+    ncol = 2
+    cfg = _make_canopy_config()
+    state = init_multilayer_land_state(ncol, cfg, T_init=290.0)
+    forcing = _make_forcing(ncol, sw_down=820.0, cos_zenith=0.9)
+
+    _, response, _ = step_multilayer_land(
+        state, forcing, cfg, U_min=1.0, dt=1800.0,
+        lat=jnp.zeros(ncol), doy=180.0)
+
+    assert response.T_rad is not None
+    assert jnp.all(jnp.isfinite(response.T_sfc))
+    assert jnp.all(jnp.isfinite(response.T_rad))
+    # Two genuinely distinct temperatures over a vegetated, sunlit cell.
+    assert float(jnp.abs(response.T_sfc[0] - response.T_rad[0])) > 0.05
+    # Aerodynamic Tc is a physically reasonable surface temperature.
+    assert 270.0 < float(response.T_sfc[0]) < 330.0
+    # Reported lw_up is the canopy's conservative LW_out (consistent with the
+    # radiometric T_rad / eps_col), NOT a recomputation from the top-soil temp:
+    # eps*sigma*T_rad^4 + (1-eps)*La == LW_out exactly.
+    lw_out_expected = (
+        response.emissivity * constants.sigma_sb * response.T_rad ** 4
+        + (1.0 - response.emissivity) * forcing.lw_down)
+    assert jnp.allclose(response.lw_up, lw_out_expected, rtol=1e-5, atol=1e-3)
 
 
 def test_nighttime_zero_gpp():

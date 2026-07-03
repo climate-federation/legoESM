@@ -116,6 +116,16 @@ class TileResponse(NamedTuple):
     # zeros.  Always a populated array — pytree-uniform with
     # ``freshwater_flux``.
     salt_flux: jax.Array
+    # Radiative (emission-equivalent) skin temperature [K] for the LW boundary:
+    # the temperature T such that ``emissivity * sigma * T_rad^4`` equals THIS
+    # tile's actual upward LW emission.  For most tiles this is just the skin
+    # temperature, so it defaults to ``None`` and the blender falls back to
+    # ``T_sfc``.  The two-leaf canopy is the exception: it emits with the canopy
+    # column temperature ``surface_out.T_surface`` (so ``eps_col*sigma*T_rad^4 =
+    # LW_emit``) while reporting ``T_sfc = T_soil`` for the (linear) sensible-heat
+    # path — so it MUST set ``T_rad`` explicitly, else the tile blend would use
+    # the soil temperature and break LW conservation for vegetated cells.
+    T_rad: jax.Array | None = None
 
 
 class SurfaceToAtm(NamedTuple):
@@ -123,6 +133,17 @@ class SurfaceToAtm(NamedTuple):
     T_sfc: jax.Array
     albedo: jax.Array
     emissivity: jax.Array
+    # Radiative-equivalent surface temperature for the LW boundary.  Area-
+    # averaging T_sfc and emissivity INDEPENDENTLY does not conserve the upward
+    # LW flux of mixed land/ocean/ice cells (T^4 and eps*T^4 are nonlinear), so
+    # the tile blender derives T_rad from the area-weighted EMISSION FLUX:
+    # T_rad = (sum_i f_i*eps_i*sigma*T_i^4 / (eps_grid*sigma))^(1/4), with
+    # eps_grid = sum_i f_i*eps_i (= ``emissivity``).  The atmosphere LW boundary
+    # eps_grid*sigma*T_rad^4 + (1-eps_grid)*La then equals sum_i f_i*lw_up_i
+    # EXACTLY.  Equals T_sfc for single-tile (pure) cells.  ``T_sfc`` stays the
+    # area-weighted skin temperature for the (linear) sensible-heat / diagnostics
+    # paths; only radiation uses T_rad.
+    T_rad: jax.Array
     z0: jax.Array
     q_surface: jax.Array
     shflx: jax.Array

@@ -14,9 +14,10 @@ All functions are pure JAX, JIT-compatible, and differentiable.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
-from typing import NamedTuple
 
 from legoesm import constants
 
@@ -44,10 +45,19 @@ class CanopySWOutput(NamedTuple):
 
 class CanopyLWOutput(NamedTuple):
     """Outputs of the longwave radiative transfer calculation."""
-    ALW_Sun: jax.Array   # Net absorbed LW by sunlit leaves [W m-2]
-    ALW_Sh: jax.Array    # Net absorbed LW by shaded leaves [W m-2]
-    ALW_Soil: jax.Array  # Net absorbed LW by soil [W m-2]
-    Ls: jax.Array        # Upward LW emitted by soil [W m-2]
+    ALW_Sun: jax.Array     # Net absorbed LW by sunlit leaves [W m-2 ground]
+    ALW_Sh: jax.Array      # Net absorbed LW by shaded leaves [W m-2 ground]
+    ALW_Soil: jax.Array    # Net absorbed LW by soil [W m-2 ground]
+    Ls: jax.Array          # Upward LW emitted by soil [W m-2]
+    Lcanopy_up: jax.Array  # Kernel-weighted canopy LW emitted upward (= S_up) [W m-2 ground]
+    gap_LW: jax.Array      # LW gap fraction exp(-kd L_eff) [-]
+    LW_out: jax.Array      # Total top-of-canopy upward LW escaping to atmosphere
+                           # (S_up + t_c*U_g + r_c*La) [W m-2 ground]; conservative
+                           # land->atmosphere flux
+    eps_col: jax.Array     # Atmosphere-equivalent column LW emissivity 1 - R_col,
+                           # R_col = dLW_out/dLa = r_c + t_c^2*rho/(1-rho*r_c) [-]
+    LW_emit: jax.Array     # Emission-only upward LW = LW_out - R_col*La [W m-2 ground];
+                           # eps_col*sigma*T^4 + (1-eps_col)*La = LW_out exactly
 
 
 # ---------------------------------------------------------------------------
@@ -333,9 +343,9 @@ def canopy_shortwave_rt(
 @jax.jit
 def canopy_longwave_rt(
     LAI: jax.Array,
+    CI: jax.Array,
     SZA: jax.Array,
     Ts: jax.Array,
-    Tf_mean: jax.Array,
     Tf_Sun: jax.Array,
     Tf_Sh: jax.Array,
     La: jax.Array,
@@ -344,14 +354,44 @@ def canopy_longwave_rt(
 ) -> CanopyLWOutput:
     """Absorbed longwave radiation by sunlit/shaded leaves and soil.
 
-    Uses the Beer-law extinction approach from Ryu et al. (2011).
+    Two-big-leaf longwave transfer with Beer-law extinction against the
+    **effective LAI** ``L_eff = LAI * CI`` (clumping correction, consistent
+    with the shortwave routine), following Ryu et al. (2011) / CABLE / CLM.
+
+    Sunlit and shaded leaves absorb sky and soil longwave through separate
+    depth-weighted two-stream kernels (``W_*_sky``, ``W_*_soil``) and emit
+    with their own temperature.  By Kirchhoff / detailed balance the same
+    kernels weight the canopy emission reaching the soil:
+
+        canopy LW reaching soil = W_sun_soil * Lf_Sun + W_sh_soil * Lf_Sh
+
+    which is exact (under the kd kernel) when ``Tf_Sun != Tf_Sh`` and reduces
+    to the bulk ``W_tot * Lf`` form in the isothermal limit.  This replaces
+    the earlier ``(1 - exp(-kd LAI)) (Ls + La - 2 Lf_Sh)`` shaded form, whose
+    ``2 Lf_Sh`` self-emission term spuriously warmed shaded leaves when
+    ``Tf_Sun > Tf_Sh`` over hot soil.  The canopy is always fully coupled to
+    the soil (no decoupling option).
+
+    Conservative gray-body emissivity (β = 1/2 isotropic leaf scatter): each
+    surface ABSORBS ``eps * incident`` (Kirchhoff: absorptivity = emissivity)
+    and REFLECTS ``(1 - eps)``.  The diffuse canopy stream splits into absorbed
+    ``a_c = eps_f * W_tot``, back-scattered ``r_c = (1-eps_f) W_tot / 2`` and
+    transmitted ``t_c`` (``a_c + r_c + t_c = 1``), and the canopy<->ground
+    interreflection is summed in closed form ``1/(1 - rho * r_c)`` (one division;
+    ``rho * r_c <= 6e-4`` for physical eps).  This is EXACTLY energy-conserving
+    (``ALW_Sun + ALW_Sh + ALW_Soil = La - LW_out``) and gives zero net flux at
+    isothermal equilibrium for ANY eps_f, eps_s; it reduces exactly to the
+    previous near-black scheme at eps_f = eps_s = 1 (then r_c = 0, t_c = gap_LW).
+    ``LW_out`` is the true top-of-canopy upward LW (emission + reflection) for the
+    coupler and the LST diagnostic.  Ported from DifferBESS; full derivation in
+    docs/canopy_longwave_graybody_conservation.md §5.
 
     Parameters
     ----------
-    LAI     : (ncol,) leaf area index [m2/m2]
+    LAI     : (ncol,) leaf area index [m2/m2] (one-sided, nominal)
+    CI      : (ncol,) clumping index [-]; effective LAI for radiation = LAI*CI
     SZA     : (ncol,) solar zenith angle [degrees]
     Ts      : (ncol,) soil surface temperature [K]
-    Tf_mean : (ncol,) mean foliage temperature [K] (area-weighted average)
     Tf_Sun  : (ncol,) sunlit leaf temperature [K]
     Tf_Sh   : (ncol,) shaded leaf temperature [K]
     La      : (ncol,) incoming atmospheric longwave [W m-2]
@@ -360,48 +400,123 @@ def canopy_longwave_rt(
 
     Returns
     -------
-    CanopyLWOutput NamedTuple.
+    CanopyLWOutput NamedTuple (fluxes per unit ground area [W m-2 ground]).
     """
     SZA_clamped = jnp.clip(SZA, 0.0, 89.0)
     cos_sza     = jnp.cos(jnp.radians(SZA_clamped))
 
     # Extinction coefficients (Ryu et al. 2011 Table A1)
-    kb = 0.5 / jnp.maximum(cos_sza, 0.01)
-    kd = 0.78
+    kb = 0.5 / jnp.maximum(cos_sza, 0.01)   # direct-beam
+    kd = 0.78                                # diffuse
 
-    # Stefan-Boltzmann emitted fluxes
-    Ls    = epss * constants.sigma_sb * Ts**4
+    # Effective LAI for radiation (clumping correction): clumped canopies
+    # have larger gap fractions, so LW transmission uses L_eff, not LAI.
+    L_eff    = LAI * CI
+    kd_L_eff = kd * L_eff
+
+    # Stefan-Boltzmann emitted flux densities (per unit one-sided leaf face)
+    Ls     = epss * constants.sigma_sb * Ts**4
     Lf_Sun = epsf * constants.sigma_sb * Tf_Sun**4
     Lf_Sh  = epsf * constants.sigma_sb * Tf_Sh**4
-    Lf     = epsf * constants.sigma_sb * Tf_mean**4
 
-    kd_LAI = kd * LAI
+    # Total one-sided diffuse-LW canopy interception weight.
+    W_tot = 1.0 - jnp.exp(-kd_L_eff)
 
-    # ``kd - kb`` is negative for SZA > ~50° (kb > 0.78) and positive below.
-    # The earlier ``max(kd - kb, 1e-6)`` was a safety against division by
-    # zero when ``kd == kb`` (SZA ≈ 50°), but it silently clipped any
-    # negative denominator to +1e-6 — which flips the sign and amplifies
-    # the sunlit LW term by ~1e6 at night (SZA → 90°, kb → 50).  This
-    # was the root cause of nocturnal Newton divergence for dense canopies.
-    # Use a sign-preserving guard that only intervenes at |kd - kb| < 1e-6.
-    kdb = kd - kb
-    kdb_safe = jnp.where(jnp.abs(kdb) < 1e-6, 1e-6, kdb)
+    # Sunlit absorption weights (per unit ground area, dimensionless):
+    #   sky-origin : kd * int_0^L exp(-(kb+kd)x) dx
+    #                  = kd (1 - exp(-(kb+kd) L_eff)) / (kb + kd)
+    #   soil-origin: kd * int_0^L exp(-kb x) exp(-kd (L-x)) dx
+    #                  = kd (exp(-kb L_eff) - exp(-kd L_eff)) / (kd - kb)
+    #                  (kb -> kd limit is L_eff * exp(-kd L_eff))
+    W_sun_sky = kd * (1.0 - jnp.exp(-(kb + kd) * L_eff)) / (kb + kd)
 
-    # Net absorbed LW by sunlit leaves
-    ALW_Sun = (
-        (Ls - Lf_Sun) * kd * (jnp.exp(-kd_LAI) - jnp.exp(-kb * LAI)) / kdb_safe
-        + kd * (La - Lf_Sun) * (1.0 - jnp.exp(-(kb + kd) * LAI)) / (kd + kb)
-    )
+    # The soil-origin integral has a removable singularity at kb = kd
+    # (SZA ~ 50°).  Write it via the relative exponential
+    #   ratio_soil = (exp(-kb L) - exp(-kd L)) / (kd - kb)
+    #              = exp(-kd L) * L * exprel((kd-kb) L),
+    #   exprel(y) = (exp(y) - 1) / y,   exprel(0) = 1,
+    # which is finite and SMOOTH through kb = kd.  A near-zero Taylor branch
+    # (exprel ≈ 1 + y/2) keeps both the value and its kb/SZA derivative correct
+    # there (the earlier constant-limit guard zeroed the kb derivative inside
+    # the window), with a guarded denominator so AD never sees 0/0.
+    y       = (kd - kb) * L_eff
+    y_safe  = jnp.where(jnp.abs(y) < 1.0e-6, 1.0, y)
+    exprel  = jnp.where(jnp.abs(y) < 1.0e-6, 1.0 + 0.5 * y, jnp.expm1(y) / y_safe)
+    W_sun_soil = kd * jnp.exp(-kd_L_eff) * L_eff * exprel
 
-    # Net absorbed LW by shaded leaves
-    ALW_Sh = (1.0 - jnp.exp(-kd_LAI)) * (Ls + La - 2.0 * Lf_Sh) - ALW_Sun
+    # Shaded weights are the residual interception weights.
+    W_sh_sky  = W_tot - W_sun_sky
+    W_sh_soil = W_tot - W_sun_soil
 
-    # Net absorbed LW by soil
-    ALW_Soil = (1.0 - jnp.exp(-kd_LAI)) * Lf + jnp.exp(-kd_LAI) * La - Ls
+    # Guard tiny negative roundoff outside [0, W_tot].
+    W_sun_sky  = jnp.clip(W_sun_sky,  0.0, W_tot)
+    W_sun_soil = jnp.clip(W_sun_soil, 0.0, W_tot)
+    W_sh_sky   = jnp.clip(W_sh_sky,   0.0, W_tot)
+    W_sh_soil  = jnp.clip(W_sh_soil,  0.0, W_tot)
+
+    gap_LW = jnp.exp(-kd_L_eff)
+
+    # ---- Conservative gray-body two-leaf longwave (β = 1/2 isotropic) ----
+    # Keeps the physical leaf/soil emissivities εf, εs < 1.  Each surface absorbs
+    # ε·incident (Kirchhoff) and reflects (1−ε); the diffuse canopy stream splits
+    # into absorbed ``a_c``, back-scattered ``r_c`` (canopy LW reflectance) and
+    # transmitted ``t_c``, with ``a_c + r_c + t_c = 1``.  The canopy↔ground
+    # interreflection is summed in closed form ``1/(1 − ρ·r_c)`` (one division,
+    # ρ·r_c ≤ 6e-4 for physical ε, so the denominator stays ≈1).  This is exactly
+    # conservative (``ΣALW = La − LW_out``), zero-net at isothermal equilibrium for
+    # any εf, εs, and reduces EXACTLY to the previous near-black scheme at
+    # εf=εs=1 (then r_c=0, t_c=gap_LW).  Ported from DifferBESS
+    # CanopyLongwaveRadiation; see docs/canopy_longwave_graybody_conservation.md §5.
+    a_c = epsf * W_tot                          # absorbed (absorptivity = εf)
+    r_c = 0.5 * (1.0 - epsf) * W_tot            # back-scattered (β = 1/2)
+    t_c = gap_LW + 0.5 * (1.0 - epsf) * W_tot   # transmitted (gap + forward-scatter)
+    rho = 1.0 - epss                            # ground LW reflectance
+
+    # Per-class canopy emission to the sky / ground hemispheres (``Lf`` already
+    # carries εf, so ``S_up`` ≡ εf·(W_sun_sky·B_Sun + W_sh_sky·B_Sh)).
+    S_up   = W_sun_sky  * Lf_Sun + W_sh_sky  * Lf_Sh
+    S_down = W_sun_soil * Lf_Sun + W_sh_soil * Lf_Sh
+
+    # Closed-form canopy↔ground interreflection (note εs·B_g ≡ Ls):
+    S_d = t_c * La + S_down                       # primary downward source
+    U_g = (Ls + rho * S_d) / (1.0 - rho * r_c)    # upward LW leaving the ground
+    D_g = S_d + r_c * U_g                          # downward LW onto the ground
+
+    # Net absorbed LW per leaf class: absorb εf of the sky stream (above) and of
+    # the ground upwelling U_g (below); emit εf·B to both hemispheres.
+    ALW_Sun = epsf * (W_sun_sky * La + W_sun_soil * U_g) - (W_sun_sky + W_sun_soil) * Lf_Sun
+    ALW_Sh  = epsf * (W_sh_sky  * La + W_sh_soil  * U_g) - (W_sh_sky  + W_sh_soil ) * Lf_Sh
+    ALW_Soil = epss * D_g - Ls                    # ≡ εs·(D_g − B_g)
+
+    # Top-of-canopy upward LW escaping to the atmosphere: canopy up-emission +
+    # ground upwelling transmitted out + sky reflected off the canopy top.
+    LW_out = S_up + t_c * U_g + r_c * La
+
+    # Atmosphere-equivalent column representation so the coupler's property-
+    # coupling LW boundary ``eps*sigma*T^4 + (1-eps)*La`` reproduces this LW_out
+    # EXACTLY.  The column LW reflectance R_col = dLW_out/dLa is the fraction of
+    # incident sky LW the canopy+ground column reflects back up — canopy back-
+    # scatter r_c PLUS sky LW transmitted to the ground, reflected, and
+    # re-transmitted out through the multiple-reflection chain
+    # t_c^2*rho/(1-rho*r_c) (differentiate U_g w.r.t. La: dU_g/dLa = rho*t_c/
+    # (1-rho*r_c)).  The remaining LW_out - R_col*La is the La-independent
+    # emission of the column.  Then eps_col*sigma*T_emit^4 + (1-eps_col)*La
+    # = LW_emit + R_col*La = LW_out for any eps_f, eps_s, LAI.
+    R_col   = r_c + t_c * t_c * rho / (1.0 - rho * r_c)
+    eps_col = 1.0 - R_col
+    LW_emit = LW_out - R_col * La
+
+    # Back-compat: kernel-weighted canopy up-emission (≡ S_up).
+    Lcanopy_up = S_up
 
     return CanopyLWOutput(
         ALW_Sun=ALW_Sun,
         ALW_Sh=ALW_Sh,
         ALW_Soil=ALW_Soil,
         Ls=Ls,
+        Lcanopy_up=Lcanopy_up,
+        gap_LW=gap_LW,
+        LW_out=LW_out,
+        eps_col=eps_col,
+        LW_emit=LW_emit,
     )

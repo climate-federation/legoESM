@@ -28,7 +28,11 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
-from legoesm.land.canopy.config import CanopyConfig
+from legoesm.land.canopy.config import (
+    CanopyConfig,
+    VCMAX25_C3_DEFAULT,
+    VCMAX25_C4_DEFAULT,
+)
 from legoesm.land.canopy.radiative_transfer import (
     split_sw_components, canopy_shortwave_rt,
 )
@@ -211,8 +215,11 @@ def compute_two_leaf_canopy_fluxes(
     FNonVeg    = _get(lp, "FNonVeg",  jnp.zeros(ncol))
     CI         = _get(lp, "CI",       jnp.full(ncol, 0.75))
     kn         = _get(lp, "kn",       jnp.full(ncol, 0.3))
-    Vc3_leaf   = _get(lp, "Vcmax25_C3_leaf", jnp.full(ncol, 60.0))
-    Vc4_leaf   = _get(lp, "Vcmax25_C4_leaf", jnp.full(ncol, 40.0))
+    # No-PFT fallback Vcmax25: DBF-temperate (C3) / mean C4 grass+crop (C4),
+    # not a flat 60/40.  A driver should pre-assign per-column Vcmax25 from
+    # ``lookup_vcmax25(pft, climate)`` (canopy.config) when PFTs are known.
+    Vc3_leaf   = _get(lp, "Vcmax25_C3_leaf", jnp.full(ncol, VCMAX25_C3_DEFAULT))
+    Vc4_leaf   = _get(lp, "Vcmax25_C4_leaf", jnp.full(ncol, VCMAX25_C4_DEFAULT))
     m_C3       = _get(lp, "m_C3",     jnp.full(ncol, 9.0))
     m_C4       = _get(lp, "m_C4",     jnp.full(ncol, 4.0))
     b0_C3      = _get(lp, "b0_C3",    jnp.full(ncol, 0.01))
@@ -224,6 +231,10 @@ def compute_two_leaf_canopy_fluxes(
     ALB_NIR    = _get(lp, "ALB_NIR",  jnp.full(ncol, 0.2))
     rz0m       = _get(lp, "rz0m",     jnp.full(ncol, 0.055))
     rd         = _get(lp, "rd",       jnp.full(ncol, 0.67))
+    # Characteristic leaf width [m]; None (field absent or unset) -> 0.025 m
+    # (Schuepp 1993 midrange), matching PFT_LEAF_WIDTH's default leaf class.
+    _d_leaf_in = _get(lp, "d_leaf", None)
+    d_leaf = jnp.full(ncol, 0.025) if _d_leaf_in is None else _d_leaf_in
     emissivity_per_col = _get(
         lp, "emissivity", jnp.full(ncol, land_config.emissivity_land))
 
@@ -307,6 +318,7 @@ def compute_two_leaf_canopy_fluxes(
             m=m_mix, b0=b0_mix, alf=alf, TgC=TgC,
             fC4=fC4, fStress_soil=fStress_soil,
             ur=wind_speed, CI=CI, z0m=z0m, displa=displa, z0=z_ref,
+            cv=_bcast(cc.cv), d_leaf=d_leaf,
         )
 
     def _solve_one_col(x0, bun):
@@ -335,8 +347,10 @@ def compute_two_leaf_canopy_fluxes(
         Ts_bc_k = (1.0 - omega) * Ts_bc_k + omega * Ts_thermal
 
     # ---- Converged state ----
+    # State vector order: [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c].
     Tf_Sun = x_final[:, 0]
     Tf_Sh  = x_final[:, 1]
+    Tc_cvg = x_final[:, 4]   # canopy air-space temperature (aerodynamic node)
     Ts_cvg = Ts_bc_k
 
     fSun    = sw_rt.fSun
@@ -378,21 +392,27 @@ def compute_two_leaf_canopy_fluxes(
         jnp.broadcast_to(jnp.asarray(land_config.albedo_land), T_soil_top.shape),
         alpha_canopy)
 
-    # ---- Emission-weighted surface T from canopy LW ----
-    a_soil = jnp.exp(-0.78 * LAI)
-    a_sun  = fSun * (1.0 - a_soil)
-    a_sh   = (1.0 - fSun) * (1.0 - a_soil)
-    Lw_up = (a_sun  * cc.epsf * constants.sigma_sb * Tf_Sun**4
-           + a_sh   * cc.epsf * constants.sigma_sb * Tf_Sh**4
-           + a_soil * cc.epss * constants.sigma_sb * Ts_cvg**4)
-    eps_eff = a_sun * cc.epsf + a_sh * cc.epsf + a_soil * cc.epss
-    T_surface = (Lw_up / jnp.maximum(eps_eff * constants.sigma_sb, 1e-12))**0.25
+    # ---- Surface emissivity + radiometric temperature (atmosphere-equivalent) ----
+    # The conservative ``canopy_longwave_rt`` exports the column LW emissivity
+    # ``eps_col = 1 - R_col`` (R_col = column LW reflectance) and the emission-only
+    # upward flux ``LW_emit``, chosen so the atmosphere's property-coupling LW
+    # boundary ``eps_col*sigma*T_surface^4 + (1-eps_col)*La`` reproduces the
+    # canopy's conservative ``LW_out`` EXACTLY (verified to ~1e-13 W/m2 across
+    # LAI/emissivities).  These are the physically-correct surface radiative
+    # properties: the coupler tile-blends ``eps_eff`` (the column emissivity) and
+    # ``T_surface`` and threads them into RRTMGP as the dynamic surface emissivity
+    # + skin temperature, so the land->atmosphere LW boundary carries no static-
+    # emissivity mismatch.  The raw upward flux is still ``lw_up = LW_out`` with
+    # ``lw_net = La - LW_out``.
+    LW_out_col = fluxes_per_col["LW_out"]
+    eps_eff    = fluxes_per_col["eps_col"]
+    LW_emit    = fluxes_per_col["LW_emit"]
+    T_surface = (LW_emit / jnp.maximum(eps_eff * constants.sigma_sb, 1e-12)) ** 0.25
 
-    # Downstream expects SW_net and LW_net: SW_net = (1-α) SW_down,
-    # LW_net = ε (LW_down - σ T_surface^4).
+    # SW_net and the (conservative) external LW_net = La − LW_out.
     sw_net = (1.0 - alpha_canopy) * forcing.sw_down
-    lw_net = eps_eff * forcing.lw_down - eps_eff * constants.sigma_sb * T_surface**4
-    lw_up_out = Lw_up  # Emission-weighted upward LW (already multiplied by eps_eff).
+    lw_net = forcing.lw_down - LW_out_col
+    lw_up_out = LW_out_col   # true top-of-canopy upward LW (emission + reflection)
 
     # External (boundary-condition) radiation balance — what a downstream
     # observer sees from forcing + canopy-mean emission T.
@@ -431,6 +451,7 @@ def compute_two_leaf_canopy_fluxes(
         gpp=GPP,
         Tf_Sun=Tf_Sun,
         Tf_Sh=Tf_Sh,
+        T_canopy_air=Tc_cvg,
         gs_Sun=gs_Sun,
         gs_Sh=gs_Sh,
         n_iters=n_iters,
