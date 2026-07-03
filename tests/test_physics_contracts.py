@@ -105,6 +105,12 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/fast_sbm/grid.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/output.py",
+        # Shared microphysics primitive libraries (NOT single-tendency schemes):
+        # _warm_rain = saturation-adjustment / autoconversion / accretion / rain-
+        # evap helpers reused by Kessler/SB/Morrison/Thompson/P3; _thompson_snow =
+        # Thompson-2008 snow process functions used by thompson.py. Like _shared.py.
+        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/_thompson_snow.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/particles.py",
@@ -190,19 +196,10 @@ EXCLUDED: frozenset[str] = frozenset(
 # Scheme modules not yet carrying a contract (iter 2026-06-09). SHRINK-ONLY.
 CONTRACT_TODO: frozenset[str] = frozenset(
     {
-        # Atmosphere microphysics schemes not yet annotated (the other 43 atm
-        # scheme modules were annotated 2026-07-02; convection/_plume.py and
-        # convection/_triggers.py moved to EXCLUDED as shared primitive
-        # libraries). SHRINK-ONLY.
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/_thompson_snow.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/kessler.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/ml_emulator.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/p3.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/seifert_beheng.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/sundqvist.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/thompson.py",
+        # (All atmosphere physics scheme modules now carry __physics_contract__
+        # as of 2026-07-02. Shared primitive libraries were moved to EXCLUDED:
+        # convection/_plume.py, convection/_triggers.py,
+        # microphysics/_warm_rain.py, microphysics/_thompson_snow.py.)
         # Ocean shared-core holdouts (NOT single-tendency schemes; the concrete
         # grid schemes carry the __physics_contract__). The 24 ocean scheme
         # modules formerly listed here were annotated 2026-07-02 (shrink-only).
