@@ -1311,7 +1311,9 @@ class ModelDriver:
                 self.physics.land_stomatal_beta = _stomatal
                 if _stomatal:
                     from legoesm.land.carbon.stomata import StomataConfig
-                    self.physics.stomata_config = StomataConfig()
+                    self.physics.stomata_config = StomataConfig(
+                        gs_max=self.config.land_gs_max,
+                    )
                 # Prognostic snow + snow-albedo feedback on the slab tile.
                 self.physics.snow_albedo_feedback = bool(
                     getattr(self.config, "snow_albedo_feedback", False))
@@ -1412,7 +1414,10 @@ class ModelDriver:
             ),
             bulk_scheme="most",
             snow_albedo_feedback=self.config.snow_albedo_feedback,
-            stomata=StomataConfig(enabled=self.config.land_stomatal_beta),
+            stomata=StomataConfig(
+                enabled=self.config.land_stomatal_beta,
+                gs_max=self.config.land_gs_max,
+            ),
         )
         params, cfg = clm_multilayer_setup(surface_map, base_config=base)
 
@@ -1760,10 +1765,17 @@ class ModelDriver:
             elif pm_flag == "never":
                 perf_mode = False
             elif pm_flag == "auto":
-                # auto: use perf_mode when running distributed MPI
+                # auto: use perf_mode when running distributed MPI, and
+                # ALWAYS under multi-controller SPMD (cs_spmd step 5b):
+                # collect_lightweight's jnp reductions are SPMD-global on
+                # the face-sharded arrays and their replicated scalar
+                # results are fully addressable on every process, while
+                # the full collect() would np.asarray non-fully-
+                # addressable global arrays (crash).
                 perf_mode = (
-                    self._device_config is not None
-                    and self._device_config.is_distributed
+                    (self._device_config is not None
+                     and self._device_config.is_distributed)
+                    or self._is_spmd_multiprocess()
                 )
             else:
                 raise ValueError(
@@ -1795,6 +1807,22 @@ class ModelDriver:
         )
         if _latlon_mpi and perf_mode:
             perf_mode = False
+
+        # Multi-controller SPMD full collect (cmip_output or an explicit
+        # diagnostics_perf_mode='never'/'auto'-overridden request): gather
+        # the sharded state + every array kwarg to a host replica on EVERY
+        # process (process_allgather is collective), then run the standard
+        # single-process collect on each process — identical host inputs
+        # give identical accumulators on every rank, and the flush/save
+        # sites are already root-gated via _mpi_rank=process_index.
+        if not perf_mode and self._is_spmd_multiprocess():
+            state = kwargs.get('state', self.state)
+            jax.block_until_ready(state.u.data)
+            kwargs['state'] = self._gather_spmd_tree_to_host(state)
+            for _k, _v in list(kwargs.items()):
+                if _k != 'state' and isinstance(_v, jax.Array):
+                    kwargs[_k] = self._gather_spmd_tree_to_host(_v)
+            return self.diagnostics.collect(**kwargs)
 
         if perf_mode:
             # Lightweight path: scalar reductions only, no gather.
@@ -3167,7 +3195,33 @@ class ModelDriver:
             MPI.COMM_WORLD.Barrier()
             return
 
-        # Single-process path
+        # Single-process path (also the multi-controller SPMD write tail:
+        # the state is gathered to a host replica first, process 0 writes).
+        _state, _q_v, _q_c, _q_r = self.state, self.q_v, self.q_c, self.q_r
+        _carry_aux = self._checkpoint_carry_aux()
+        if self._is_spmd_multiprocess():
+            # Multi-controller SPMD (cs_spmd step 5a): every process holds
+            # only its shard of the face-sharded global arrays, and every
+            # process runs this method in lockstep.  Gather each leaf to a
+            # host-replicated array on ALL processes (process_allgather is
+            # a COLLECTIVE — a rank-0-only gather would desync the
+            # program), then only process 0 falls through to the standard
+            # single-file write below.  Parity receipt for the gather
+            # pattern: validate_driver_cs_spmd_parity.py, job 8686550.
+            _gather = self._gather_spmd_tree_to_host
+            _state = _gather(_state)
+            _q_v, _q_c, _q_r = _gather(_q_v), _gather(_q_c), _gather(_q_r)
+            _carry_aux = _gather(_carry_aux)
+            # NOTE: do NOT return on non-root here.  The zarr carry guards
+            # below are pure config/pytree checks that must raise
+            # IDENTICALLY on every process (codex HIGH: a rank-0-only
+            # raise after rank 1 already returned leaves rank 1 running
+            # toward the next collective — a hang).  Non-root returns just
+            # before the actual write instead.
+            _spmd_nonroot = jax.process_index() != 0
+        else:
+            _spmd_nonroot = False
+
         ckpt_path = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}.npz"
         backend = self.config.output.checkpoint_format if hasattr(self.config.output, 'checkpoint_format') else "npz"
 
@@ -3233,19 +3287,99 @@ class ModelDriver:
                 "checkpoint_format='npz' for stateful-physics runs."
             )
 
-        save_restart(
-            path=ckpt_path,
-            state=self.state,
-            q_v=self.q_v,
-            step=step,
-            day=day,
-            config=self.config,
-            q_c=self.q_c,
-            q_r=self.q_r,
-            carry_aux=self._checkpoint_carry_aux(),
-            backend=backend,
-        )
-        logger.info(f"  Checkpoint: {ckpt_path.name}")
+        # Multi-controller SPMD: every process ran the collective gather
+        # and the (identical) guards above; only process 0 writes.  The
+        # write itself is wrapped so a root-only I/O failure reaches every
+        # process via the rendezvous below (codex HIGH: otherwise non-root
+        # returned here and hung on the run loop's next collective while
+        # root died).
+        _write_err: Exception | None = None
+        if not _spmd_nonroot:
+            try:
+                save_restart(
+                    path=ckpt_path,
+                    state=_state,
+                    q_v=_q_v,
+                    step=step,
+                    day=day,
+                    config=self.config,
+                    q_c=_q_c,
+                    q_r=_q_r,
+                    carry_aux=_carry_aux,
+                    backend=backend,
+                )
+                logger.info(f"  Checkpoint: {ckpt_path.name}")
+            except Exception as e:
+                _write_err = e
+        self._spmd_barrier_on_root_error(_write_err)
+
+    def _is_spmd_multiprocess(self) -> bool:
+        """True iff this run is multi-controller SPMD across >1 process
+        (distributed_mode='spmd' under a real multi-process launch) — the
+        regime where output writes are root-gated and every gather is a
+        collective."""
+        return (self.config.distributed
+                and getattr(self.config, "distributed_mode", "mpi") == "spmd"
+                and jax.process_count() > 1)
+
+    def _spmd_barrier_on_root_error(self, err: Exception | None) -> None:
+        """Rendezvous all SPMD processes on the success of a ROOT-ONLY write.
+
+        Root-gated I/O (diagnostics.save / save_results / the checkpoint
+        save_restart tail) runs on process 0 only.  Without a rendezvous, a
+        root-only exception kills process 0 while the other processes sail
+        into the NEXT collective (segment scan, process_allgather) and hang
+        until walltime (codex 2026-07-03 HIGH).  Every process calls this
+        with its local error (non-root: None); the root flag is broadcast
+        and EVERY process raises when root failed.  No-op outside
+        multi-process SPMD (single process / mpi4jax keep their native
+        exception flow)."""
+        if not self._is_spmd_multiprocess():
+            if err is not None:
+                raise err
+            return
+        from jax.experimental import multihost_utils as _mhu
+        # allgather+max (not broadcast_one_to_all): symmetric — ANY
+        # process's failure surfaces on every process, not just root's.
+        _flags = _mhu.process_allgather(
+            jnp.asarray(0.0 if err is None else 1.0))
+        if err is not None:
+            raise err
+        if float(jnp.max(_flags)) != 0.0:
+            raise RuntimeError(
+                "multi-controller SPMD: another process failed during a "
+                "root-gated output write (see its traceback); aborting "
+                "this process in lockstep instead of hanging on the next "
+                "collective."
+            )
+
+    def _gather_spmd_tree_to_host(self, tree):
+        """Gather every non-fully-addressable jax.Array leaf of *tree* to a
+        process-local REPLICATED jax array (multi-controller SPMD;
+        collective — EVERY process must call this with the same tree).
+        Fully-addressable leaves and non-array leaves pass through
+        unchanged; pytree structure (Fields, dicts, NamedTuples) is
+        preserved.
+
+        The gathered leaf is re-wrapped ``jnp.asarray`` (NOT left as
+        numpy): downstream consumers include jnp/``lax.scan`` code (the
+        energy tracker inside the full diagnostics ``collect()`` indexes
+        with traced integers — a numpy leaf there raises
+        ``TracerArrayConversionError``, smoke job 8687797) as well as
+        plain ``np.asarray`` writers, and a single-device jax array
+        serves both."""
+        if tree is None:
+            return None
+        import numpy as _np
+        from jax.experimental import multihost_utils as _mhu
+
+        def _leaf(x):
+            if isinstance(x, jax.Array) and not x.is_fully_addressable:
+                return jnp.asarray(
+                    _np.asarray(_mhu.process_allgather(x, tiled=True)))
+            return x
+
+        return jax.tree_util.tree_map(_leaf, tree)
 
     def load_checkpoint(self, path: str | Path) -> tuple[int, float]:
         """Load state from a checkpoint using unified restart API.
@@ -4324,9 +4458,29 @@ class ModelDriver:
                 if k.startswith("physstate_")
                 and not k[len("physstate_"):].startswith("meta_")
             }
+            # Schema-growth migration (grow-only allowlist): PhysicsState
+            # fields ADDED after a checkpoint format was in production.  A
+            # checkpoint written by an older build legitimately lacks these;
+            # they seed from the fresh init (zeros) instead of tripping the
+            # completeness gate below.  Only fields whose zero-seed is the
+            # correct pre-feature state may be listed (aerosol_number: the
+            # prognostic-aerosol tracer is opt-in and zero before the feature
+            # existed).  Any OTHER missing field is still a partial/corrupted
+            # carry and must fail loudly (issue #405/#413).
+            _NEW_OPTIONAL_PS_FIELDS = frozenset({"aerosol_number"})
             if _any_physstate:
                 _missing = [f for f in _phys_state._fields
                             if f not in _present_fields]
+                _new_missing = [f for f in _missing
+                                if f in _NEW_OPTIONAL_PS_FIELDS]
+                _missing = [f for f in _missing
+                            if f not in _NEW_OPTIONAL_PS_FIELDS]
+                if _new_missing:
+                    logger.info(
+                        "  MPAS restart checkpoint predates PhysicsState "
+                        "field(s) %s — seeding them fresh (zeros); all other "
+                        "physics memory is restored.", sorted(_new_missing),
+                    )
                 if _missing:
                     raise ValueError(
                         "MPAS restart physics-state carry is INCOMPLETE: "
@@ -5714,13 +5868,46 @@ class ModelDriver:
         logger.info(f"Done: {total_wall:.1f}s wall time, status={run_status}")
 
         _is_root = (self._mpi_rank is None or self._mpi_rank == 0)
+        # Root-only writes are wrapped so a root failure surfaces on EVERY
+        # SPMD process BEFORE the final save_checkpoint (whose spmd tail
+        # opens with a collective gather — a dead root there is a hang,
+        # codex HIGH).  No-op (native raise) outside multi-process SPMD.
+        _finalize_err: Exception | None = None
         if _is_root:
-            self.diagnostics.save(self._output_dir)
-            self.save_results(run_status, t_jit, total_wall)
-            logger.info(self.diagnostics.print_summary())
+            try:
+                self.diagnostics.save(self._output_dir)
+                self.save_results(run_status, t_jit, total_wall)
+                logger.info(self.diagnostics.print_summary())
+            except Exception as e:
+                _finalize_err = e
+        self._spmd_barrier_on_root_error(_finalize_err)
 
-        if checkpoint_interval > 0:
-            self.save_checkpoint(n_steps_total, START_DAY + N_DAYS)
+        # Only a CLEAN run yields a restartable final checkpoint.  A BLOWUP
+        # leaves the state finite-but-unphysical, and labelling that garbage
+        # with the TARGET day (``START_DAY + N_DAYS``) let a SLURM ``afterok``
+        # chain restart from it and skip straight to "done" — the 3-yr-chain
+        # false-completion (blew up at day 515, wrote ``checkpoint_day_1095``).
+        # Mirror the spectral / MPAS paths, which already gate their final
+        # checkpoint on ``run_status == "COMPLETED"``.  The last PERIODIC
+        # checkpoint (written at the actual elapsed day) remains the restart
+        # point for a blown-up run.
+        if checkpoint_interval > 0 and run_status == "COMPLETED":
+            # Route through the coupled checkpoint callback when one is set
+            # (mirrors the periodic path): a coupled run must persist the FULL
+            # coupled state (atm + ocean + surface + CO2) at the final day too,
+            # or ``run_coupled --resume`` finds the atmosphere checkpoint but
+            # no ``coupled_day_*.npz`` and silently resumes with a stale ocean.
+            # Single-rank only: the coupled tail (CoupledESMDriver.
+            # save_checkpoint) writes rank-LOCAL ocean/surface pytrees with no
+            # gather, so under mpi4jax every rank would race the same npz with
+            # its own slice.  Under MPI keep the atmosphere save, which IS
+            # collective-safe (gathers internally, root writes) — the
+            # coupled-MPI full-state final checkpoint is a pre-existing gap
+            # shared with the periodic path.
+            _ckpt = ((getattr(self, "_checkpoint_callback", None)
+                      if self._mpi_rank is None else None)
+                     or self.save_checkpoint)
+            _ckpt(n_steps_total, START_DAY + N_DAYS)
 
         # Issue #275 fix A lifecycle: restore the halo backend captured
         # at activation time so subsequent drivers / tests in the same
@@ -5854,6 +6041,10 @@ class ModelDriver:
             o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
             ghg_vmr=ctx["ghg_vmr"],
         )
+        # SPMD: commit grid-shaped forcing leaves to the state's sharding
+        # (no-op single-device / mpi4jax-distributed) — see shard_forcing.
+        from legoesm.driver.compiled_segments import shard_forcing
+        forcing = shard_forcing(forcing, self._device_config)
         return run_segment.raw, carry0, forcing
 
     # ==================================================================
@@ -5871,6 +6062,7 @@ class ModelDriver:
         from legoesm.driver.compiled_segments import (
             pack_carry, unpack_carry,
             compute_segment_length, build_segment_fn, pack_forcing,
+            shard_forcing,
         )
 
         ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
@@ -6185,6 +6377,9 @@ class ModelDriver:
                 sfc_shflx_override=_sfc_shflx_ovr,
                 sfc_lhflx_override=_sfc_lhflx_ovr,
             )
+            # SPMD: commit grid-shaped forcing leaves to the state's
+            # sharding (no-op single-device / mpi4jax-distributed).
+            forcing = shard_forcing(forcing, self._device_config)
 
             # Pack state into carry
             carry = pack_carry(
@@ -6590,9 +6785,12 @@ class ModelDriver:
 
             # Incremental CMIP monthly flush — write completed months and
             # free their memory so long runs don't accumulate all months.
-            if (diag_interval > 0 and current_step % diag_interval == 0
-                    and (self._mpi_rank is None or self._mpi_rank == 0)):
-                self.diagnostics.flush_cmip_monthly(day)
+            # EVERY process pops (under multi-controller SPMD the non-root
+            # accumulators fill identically and would otherwise grow
+            # unbounded, codex round-10); only root writes.
+            if diag_interval > 0 and current_step % diag_interval == 0:
+                _is_root = self._mpi_rank is None or self._mpi_rank == 0
+                self.diagnostics.flush_cmip_monthly(day, write=_is_root)
 
         return self._finalize_run(
             run_status, t_jit, t_start,

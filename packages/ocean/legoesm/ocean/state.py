@@ -1043,6 +1043,16 @@ class PolarFilterConfig(NamedTuple):
     polar_filter_safety_factor: float = 0.85
 
 
+# Deferred to break the state <-> physics import cycle: importing
+# ``legoesm.ocean.physics.tidal_forcing`` runs ``ocean/physics/__init__`` ->
+# ``combined`` -> ``from legoesm.ocean.state import OceanState, OceanSurfaceForcing,
+# OceanTendencies``. Those three (the ONLY state symbols the physics package
+# imports) are all defined ABOVE, so by this point the cycle resolves cleanly —
+# whereas a top-of-file import would fault (state mid-init). Needed at class-def
+# time for the ``tidal_forcing`` default below.
+from legoesm.ocean.physics.tidal_forcing import TidalForcingConfig  # noqa: E402
+
+
 class LatLonCGridOceanConfig(NamedTuple):
     """Configuration for the lat-lon C-grid FV ocean model.
 
@@ -1661,6 +1671,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # ``halo_latlon.set_meridionally_flat`` (the grid-operators backend flag, same
     # pattern as the halo backend) at construction.  Default False ⇒ BIT-IDENTICAL.
     meridionally_flat: bool = False
+    # --- Astronomical (equilibrium) tidal forcing (OPT-IN barotropic body force) ---
+    # Nested opt-in config (like `physics`/`gm_redi`): default-disabled instance =>
+    # BIT-IDENTICAL. Consumed by ocean.physics.tidal_forcing.apply_tidal_forcing in
+    # the barotropic momentum step (see that module's wiring note). Appended at the
+    # NamedTuple tail so positional construction for legacy callers is preserved.
+    tidal_forcing: TidalForcingConfig = TidalForcingConfig()
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

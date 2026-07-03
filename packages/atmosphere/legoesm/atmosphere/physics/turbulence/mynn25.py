@@ -62,6 +62,46 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion_theta,
 )
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "Mellor-Yamada-Nakanishi-Niino level-2.5 (MYNN-2.5) turbulence "
+        "closure: prognostic qke = q^2 = 2*TKE with a master length scale and "
+        "algebraic level-2.5 stability functions SM, SH set eddy diffusivities "
+        "Km, Kh that mix momentum, heat (theta-space) and moisture."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
+        "qke": "m^2/s^2 (q^2 = 2*TKE)",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "T_sfc": "K", "q_sfc": "kg/kg", "rho": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "Km": "m^2/s", "Kh": "m^2/s", "shflx": "W/m^2", "lhflx": "W/m^2",
+        "ustar": "m/s", "h_pbl": "m", "qke_new": "m^2/s^2",
+    },
+    "sign_convention": (
+        "Down-gradient eddy diffusion, Km = L*q*SM >= 0, Kh = L*q*SH >= 0; "
+        "stability functions increase mixing when unstable and suppress it "
+        "when stable. The column budget is OPEN: the surface flux (shflx > 0 "
+        "upward, lhflx > 0 upward/moistening) is the bottom boundary condition "
+        "and a Dirichlet qke_sfc = B1^(2/3)*u*^2 is imposed at the surface; "
+        "top is zero-flux; z increases upward."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Nakanishi & Niino (2009), J. Meteor. Soc. Japan 87, 895-912; "
+        "Mellor & Yamada (1982), Rev. Geophys. 20, 851-875"
+    ),
+    "idealized_test": (
+        "jax_scm oracle parity on GABLS1 / Wangara / Ekman; rest state with "
+        "zero surface flux and a neutral column -> near-zero interior "
+        "tendency; Km, Kh >= 0; qke stays >= floor."
+    ),
+}
+
 
 _QKE_FLOOR = 1e-10        # m²/s²; floor on qke to keep sqrt finite
 _L_FLOOR = 1.0            # m; floor on master length scale

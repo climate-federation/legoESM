@@ -111,6 +111,46 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 
+__physics_contract__ = {
+    "summary": (
+        "Prognostic TKE vertical mixing (Gaspar 1990 / Burchard 2002, Veros "
+        "enable_tke): advance a turbulent-kinetic-energy budget (shear + "
+        "buoyancy production, dissipation, TKE diffusion) with "
+        "Bougeault-Lacarrere mixing lengths, then set K_M = c_k*l_k*sqrt(2e) "
+        "and K_H = K_M/Pr."
+    ),
+    "inputs": {
+        "u_cell": "m/s", "v_cell": "m/s", "T_cell": "degC", "S_cell": "psu",
+        "rho_cell": "kg/m^3", "dz_half": "m", "tke_old": "m^2/s^2",
+        "tau_x_surface": "N/m^2", "tau_y_surface": "N/m^2", "dt": "s",
+    },
+    "outputs": {
+        "K_M": "m^2/s", "K_H": "m^2/s", "tke_new": "m^2/s^2",
+    },
+    "sign_convention": (
+        "TKE e >= tke_background >= 0; K_M, K_H >= 0; shear production P_s >= 0, "
+        "dissipation eps >= 0 (a sink), buoyancy work P_b = -K_H*N^2 (a source "
+        "when N^2<0); surface TKE flux (|tau|/rho_0)^{3/2} injected as a flux BC "
+        "at the top interface; z positive up. The TKE budget has genuine "
+        "sources/sinks so nothing is conserved; K_M/K_H close the momentum and "
+        "tracer budgets in the solver."
+    ),
+    # Prognostic-TKE diffusivity producer (like CATKE); dissipative budget, so
+    # nothing is conserved by the closure itself.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Gaspar, P. et al. (1990), JGR 95, 16179-16193; Burchard, H. (2002); "
+        "Bougeault & Lacarrere (1989), MWR 117, 1872-1890"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_tke_closure.py + "
+        "tests/ocean/unit/test_tke_prognostic.py — wind-forced surface layer "
+        "builds TKE and K_M; a stratified quiescent column decays toward "
+        "background TKE; Kato-Phillips mixed-layer deepening."
+    ),
+}
+
 _EPS = float(jnp.finfo(jnp.float32).eps)
 
 # --- NEMO zdftke surface-term constants (NEMO 5.0.1 src/OCE/ZDF/zdftke.F90) ---

@@ -65,6 +65,48 @@ _RHO_FLOOR = 0.1
 _COOPER_EXP_CAP = 80.0
 _VT_CLIP_RAIN = 20.0
 
+__physics_contract__ = {
+    "summary": (
+        "P3 (Predicted Particle Properties; Morrison & Milbrandt 2015) ice "
+        "microphysics: a single free ice category with prognostic rime mass and "
+        "rime volume (evolving density/fall speed) plus Seifert-Beheng warm "
+        "rain; sedimentation to surface precipitation."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",
+        "hydrometeors.q_r": "kg/kg", "hydrometeors.q_i": "kg/kg",
+        "hydrometeors.q_s": "kg/kg (P3 rime mass q_rim)",
+        "hydrometeors.q_g": "m^3/kg_air (P3 rime volume B_rim)",
+        "hydrometeors.N_c": "1/m^3", "hydrometeors.N_r": "1/m^3",
+        "hydrometeors.N_i": "1/kg", "p_full": "Pa", "rho": "kg/m^3",
+        "dz": "m", "dt": "s",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_dt": "kg/kg/s",
+        "dq_r_dt": "kg/kg/s", "dq_i_dt": "kg/kg/s",
+        "dq_s_dt": "kg/kg/s (rime mass q_rim)",
+        "dq_g_dt": "m^3/kg_air/s (rime volume B_rim)",
+        "dN_c_dt": "1/(m^3 s)", "dN_r_dt": "1/(m^3 s)", "dN_i_dt": "1/(kg s)",
+        "precipitation": "kg/m^2/s",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. Latent heating dT_dt uses L_v/L_s/L_f, "
+        "consistent with each phase-change rate. The free ice category's rime "
+        "mass/volume evolve its density and fall speed; SURFACE PRECIPITATION "
+        "(>= 0) removes water, so column moisture is NOT conserved -- no "
+        "contract-level conservation is claimed. Masses and numbers stay >= 0."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": "Morrison & Milbrandt (2015), J. Atmos. Sci. 72, 287-311",
+    "idealized_test": (
+        "tests/unit/test_rce_ice_microphysics.py — riming raises the ice "
+        "category's rime fraction (density/fall speed increase); ice/rain reach "
+        "the surface; latent heating tracks phase changes; masses/numbers >= 0."
+    ),
+}
+
+
 def p3_microphysics(
     T: jax.Array,
     q_v: jax.Array,

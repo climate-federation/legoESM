@@ -44,6 +44,46 @@ _MIN_TAU_FOR_LW_SRC = 1e-4
 # Minimum value of the k parameter used in the transmittance.
 _K_MIN = 1e-2
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "Monochromatic (single-g-point) two-stream RTE kernel: Meador-Weaver "
+        "reflectance/transmittance and Planck/solar cell sources, plus the "
+        "vertical adding-doubling transport recurrence to up/down/net fluxes."
+    ),
+    "inputs": {
+        "optical_depth": "1 (layer optical depth tau)",
+        "ssa": "1 (single-scattering albedo)",
+        "asymmetry_factor": "1", "zenith": "rad",
+        "toa_flux": "W/m^2", "planck_src": "W/m^2",
+        "sfc_src": "W/m^2", "sfc_emissivity": "1", "sfc_albedo": "1",
+    },
+    "outputs": {
+        "flux_up": "W/m^2", "flux_down": "W/m^2", "flux_net": "W/m^2",
+        "r_diff": "1 (diffuse reflectance)",
+        "t_diff": "1 (diffuse transmittance)",
+    },
+    "sign_convention": (
+        "fluxes positive in their named direction (flux_up upward, flux_down "
+        "downward); flux_net = flux_up - flux_down (positive-up); optical depth "
+        "tau>=0, 0<=ssa<=1, |g|<=1; reflectance and transmittance in [0,1] with "
+        "r+t+absorptance=1 per layer (energy-consistent). The column budget is "
+        "OPEN (Planck emission and solar/surface sources), so nothing is "
+        "conserved as a closed budget."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Meador & Weaver (1980), J. Atmos. Sci. 37, 630-643 (two-stream "
+        "reflectance/transmittance); Fu et al. (1997) LW diffusivity secant."
+    ),
+    "idealized_test": (
+        "tests/unit/test_two_stream_top_flux.py: conservative scattering "
+        "(ssa=1) gives reflectance+transmittance ~ 1; a purely absorbing layer "
+        "(ssa=0) transmits exp(-D*tau)."
+    ),
+}
+
 
 def _shift_up(f: Array) -> Array:
   """output_i = f_{i-1}."""
