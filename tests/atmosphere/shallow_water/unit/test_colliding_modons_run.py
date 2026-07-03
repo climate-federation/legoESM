@@ -23,12 +23,19 @@ if not jax.config.read("jax_enable_x64"):
         allow_module_level=True,
     )
 
+from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    FV3EdgeShallowWaterModel,
+    iter1009_dual_target_config,
+)
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-    FV3EdgeShallowWaterModel, iter1009_dual_target_config)
+
 from tests.test_cases.colliding_modons import (
-    colliding_modons_cdgrid, _modon_winds_geo, _MODON_UMAX, _MODON_H0)
+    _MODON_H0,
+    _MODON_UMAX,
+    _modon_winds_geo,
+    colliding_modons_cdgrid,
+)
 
 
 def _u_east(lon, lat, radius):
@@ -47,7 +54,7 @@ def fp64_policy():
     relative conservation at ~1e-7 (the 1e-10 pins here need fp64).
     Restored after the test so no policy leaks across the session.
     """
-    from legoesm.core.precision import get_policy, set_policy, PrecisionPolicy
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
     prev = get_policy()
     set_policy(PrecisionPolicy.fp64())
@@ -172,13 +179,17 @@ def test_latlon_nonrotating_run_stable_and_conserves_mass(fp64_policy):
     """Short prognostic latlon C-grid modons run: non-rotating grid (f=0),
     finite fields, area-weighted mass conserved, and the flow stays
     equator-centred (winds do not blow up)."""
-    from legoesm.grids.latlon import create_latlon_grid
     from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
-        CGridLatLonShallowWaterModel, CGridLatLonShallowWaterConfig,
+        CGridLatLonShallowWaterConfig,
+        CGridLatLonShallowWaterModel,
         CGridLatLonShallowWaterState,
     )
+    from legoesm.grids.latlon import create_latlon_grid
+
     from tests.test_cases.colliding_modons import (
-        colliding_modons_latlon, _modon_winds_geo, _MODON_UMAX,
+        _MODON_UMAX,
+        _modon_winds_geo,
+        colliding_modons_latlon,
     )
 
     grid = create_latlon_grid(24, 48, omega=0.0)
@@ -222,12 +233,15 @@ def test_mpas_nonrotating_run_stable_and_conserves_mass(fp64_policy):
     """Short prognostic MPAS modons run on an omega=0 Voronoi mesh:
     Coriolis identically zero, finite fields, mass conserved, winds
     bounded."""
-    from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.atmosphere.dynamics.shallow_water_mpas import (
-        MPASShallowWaterModel, MPASShallowWaterConfig,
+        MPASShallowWaterConfig,
+        MPASShallowWaterModel,
     )
+    from legoesm.grids.voronoi import create_voronoi_mesh
+
     from tests.test_cases.colliding_modons import (
-        colliding_modons_mpas, _MODON_UMAX,
+        _MODON_UMAX,
+        colliding_modons_mpas,
     )
 
     mesh = create_voronoi_mesh(3, omega=0.0)   # 642 cells: fast CI size
@@ -268,15 +282,21 @@ def test_spectral_nonrotating_run_stable_and_conserves_mass(fp64_policy):
     """Short prognostic spectral modons run on an omega=0 Gaussian grid:
     f = 0, finite spectral state, mean geopotential (mass) conserved,
     physical winds bounded."""
-    from legoesm import constants
-    from legoesm.grids.gaussian import (
-        create_gaussian_grid, sh_synthesis, uv_from_vordiv,
-    )
     from legoesm.atmosphere.dynamics.spectral_sw import (
-        SpectralShallowWaterModel, SpectralSWConfig,
+        SpectralShallowWaterModel,
+        SpectralSWConfig,
     )
+    from legoesm.grids.gaussian import (
+        create_gaussian_grid,
+        sh_synthesis,
+        uv_from_vordiv,
+    )
+
+    from legoesm import constants
     from tests.test_cases.colliding_modons import (
-        colliding_modons_spectral, _MODON_UMAX, _MODON_H0,
+        _MODON_H0,
+        _MODON_UMAX,
+        colliding_modons_spectral,
     )
 
     grid = create_gaussian_grid(21, omega=0.0)

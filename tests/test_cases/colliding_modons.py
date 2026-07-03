@@ -31,11 +31,11 @@ functions only set the prognostic fields, not the Coriolis parameter.
 from __future__ import annotations
 
 import jax.numpy as jnp
-
-from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.state import MPASShallowWaterState, ShallowWaterState
 from legoesm.grids.cubed_sphere import great_circle_distance
+
+from legoesm import constants
 
 # --- FV3 case-8 soliton defaults (test_cases.F90) ---
 _MODON_UMAX = 50.0         # peak jet speed Umax [m/s]
