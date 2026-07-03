@@ -172,8 +172,10 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
     Returns
     -------
     dict with ``pft_fractions`` (ncol, 17), ``theta_wp`` / ``theta_fc`` (ncol,),
-    ``texture_index`` (ncol,), and the per-column VG arrays
-    (``theta_sat``/``alpha_vg``/``n_vg``/``K_sat``/``theta_r``).
+    ``texture_index`` (ncol,), the per-column VG arrays
+    (``theta_sat``/``alpha_vg``/``n_vg``/``K_sat``/``theta_r``), and ``lai`` (ncol,)
+    — the prescribed per-cell LAI climatology (or ``None`` if the surfdata lacks
+    ``MONTHLY_LAI``/``PCT_CFT``).
     """
     import xarray as xr
     ds = xr.open_dataset(path)
@@ -185,19 +187,31 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
     pct_crop = ds["PCT_CROP"].values              # (nlat, nlon), % of gridcell
     pct_glacier = ds["PCT_GLACIER"].values        # (nlat, nlon), % of gridcell (ice sheet)
     n_nat = pct_nat.shape[0]
-    # Per-PFT leaf area index climatology: CLM MONTHLY_LAI is (12, n_pft, nlat, nlon);
-    # take the annual mean per PFT so the two-leaf canopy gets a realistic spatial LAI
-    # (PFT-weighted per cell in CLMSurfaceParamProvider) instead of a uniform scalar.
-    monthly_lai = (
-        ds["MONTHLY_LAI"].values.mean(axis=0)     # (n_pft, nlat, nlon)
-        if "MONTHLY_LAI" in ds else None
-    )
-    if monthly_lai is not None and monthly_lai.shape[0] != _N_PFT:
-        # The PFT axis of MONTHLY_LAI must align with the pft_fractions columns
-        # (same CLM5 17-PFT ordering); a mismatch would silently mis-weight LAI.
-        raise ValueError(
-            f"MONTHLY_LAI has {monthly_lai.shape[0]} PFTs, expected {_N_PFT} "
-            "aligned with pft_fractions (CLM5 17-PFT ordering).")
+    # --- Spatial LAI climatology (REUSE the canonical CLM5 crop-split reader) ---
+    # The two-leaf canopy needs a per-cell LAI; rather than re-read MONTHLY_LAI and
+    # PFT-weight with a bespoke (crop_c3-only) cover map, reuse the ONE canonical
+    # PCT_CFT-aware 17-PFT weight reconstruction shared with read_clm5_cover_veg
+    # (surface_data.sources.clm5_surfdata) so crop cells get the correct c3/c4 split.
+    # The per-cell LAI is the grid-cell-mean over that 17-PFT cover of the annual-mean
+    # per-PFT MONTHLY_LAI; bare/lake/glacier cover carries LAI~0 so barren cells end
+    # up ~0 (no spurious over-shading canopy).  Gated on MONTHLY_LAI + PCT_CFT being
+    # present: a minimal/synthetic surfdata lacking them yields None -> the canopy
+    # falls back to its scalar default.  Weighting on the native grid then
+    # nearest-regridding the scalar is identical to per-PFT-regrid-then-weight.
+    lai_native = None
+    if "MONTHLY_LAI" in ds and "PCT_CFT" in ds:
+        from legoesm.land.surface_data.sources.clm5_surfdata import (
+            reconstruct_clm5_pft_frac)
+        lai_annual = np.asarray(
+            ds["MONTHLY_LAI"].values, dtype=np.float64).mean(axis=0)  # (n_pft, nlat, nlon)
+        if lai_annual.shape[0] != _N_PFT:
+            raise ValueError(
+                f"MONTHLY_LAI has {lai_annual.shape[0]} PFTs, expected {_N_PFT} "
+                "(CLM5 17-PFT ordering aligned with the reconstructed cover).")
+        pft_frac_pct = reconstruct_clm5_pft_frac(   # (n_pft, nlat, nlon) % of gridcell
+            pct_natveg, pct_crop, pct_nat, ds["PCT_CFT"].values)
+        lai_native = np.sum(
+            (pft_frac_pct / 100.0) * lai_annual, axis=0)   # (nlat, nlon) grid-cell mean
     # root-zone mean sand/clay (top layers)
     sand = ds["PCT_SAND"].values[:_ROOTZONE_LAYERS].mean(0)   # (nlat, nlon)
     clay = ds["PCT_CLAY"].values[:_ROOTZONE_LAYERS].mean(0)
@@ -209,10 +223,8 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
     glac_c = _nearest_regrid(slat, slon, pct_glacier, tgt_lat_deg, tgt_lon_deg)
     sand_c = _nearest_regrid(slat, slon, sand, tgt_lat_deg, tgt_lon_deg)
     clay_c = _nearest_regrid(slat, slon, clay, tgt_lat_deg, tgt_lon_deg)
-    lai_pft_c = (
-        _nearest_regrid(slat, slon, monthly_lai, tgt_lat_deg, tgt_lon_deg)  # (n_pft, ncol)
-        if monthly_lai is not None else None
-    )
+    lai_c = (_nearest_regrid(slat, slon, lai_native, tgt_lat_deg, tgt_lon_deg)
+             if lai_native is not None else None)              # (ncol,) or None
     ncol = natveg_c.shape[0]
 
     # PFT fractions over the 17 CLM5 classes: natural PFTs 0..n_nat-1 weighted by
@@ -232,9 +244,9 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
                 glacier_frac=jnp.asarray(np.clip(glac_c / 100.0, 0.0, 1.0)),
                 # per-cell %sand/%clay (root-zone mean) -> per-cell soil thermal props
                 pct_sand=jnp.asarray(sand_c), pct_clay=jnp.asarray(clay_c),
-                # per-PFT annual-mean LAI on the target columns (None if the surfdata
-                # lacks MONTHLY_LAI) -> PFT-weighted to a per-cell LAI in the provider
-                lai_pft=(jnp.asarray(lai_pft_c) if lai_pft_c is not None else None),
+                # per-cell prescribed LAI climatology on the target columns (None if
+                # the surfdata lacks MONTHLY_LAI/PCT_CFT) -> LandSurfaceParams.LAI
+                lai=(jnp.asarray(lai_c) if lai_c is not None else None),
                 theta_wp=wp, theta_fc=fc, **{k: vg[k] for k in vg})
 
 
@@ -252,10 +264,10 @@ class CLMSurfaceParamProvider(eqx.Module):
     _glacier_albedo: float = eqx.field(static=True)   # snow-free ice base albedo
     plant_theta_wp: jax.Array = None  # (ncol,) PFT-weighted PLANT btran wilting (or None)
     plant_theta_fc: jax.Array = None  # (ncol,) PFT-weighted PLANT btran field cap (or None)
-    lai_pft: jax.Array = None         # (n_pft, ncol) per-PFT annual-mean LAI (or None)
+    lai: jax.Array = None             # (ncol,) prescribed per-cell LAI climatology (or None)
 
     def __init__(self, pft_fractions, soil_theta_wp, soil_theta_fc, glacier_frac,
-                 tuned: bool = True, variant: str = "slab", lai_pft=None):
+                 tuned: bool = True, variant: str = "slab", lai=None):
         self.pft_fractions = pft_fractions
         self.soil_theta_wp = soil_theta_wp
         self.soil_theta_fc = soil_theta_fc
@@ -263,7 +275,7 @@ class CLMSurfaceParamProvider(eqx.Module):
         self._glacier_albedo = TUNED_GLACIER_ALBEDO
         self.plant_theta_wp = None
         self.plant_theta_fc = None
-        self.lai_pft = lai_pft
+        self.lai = lai
         table = np.asarray(clm5_pft_table())
         if tuned:   # overwrite the calibrated per-PFT columns (physical bounds)
             if variant not in _VARIANT_TUNED:
@@ -300,16 +312,12 @@ class CLMSurfaceParamProvider(eqx.Module):
         # top of this base) instead of exposing dark bare soil — the Greenland fix.
         fg = self.glacier_frac
         params["albedo_veg"] = (1.0 - fg) * params["albedo_veg"] + fg * self._glacier_albedo
-        # Per-cell prescribed LAI = PFT-weighted per-PFT climatology (barren/glacier
-        # PFTs carry LAI~0, so the two-leaf canopy no longer over-shades bare land).
-        if self.lai_pft is not None:
-            # pft_fractions (ncol, n_pft) * lai_pft.T (ncol, n_pft) -> sum over PFT.
-            assert self.lai_pft.shape == (self.pft_fractions.shape[1],
-                                          self.pft_fractions.shape[0]), (
-                f"lai_pft {self.lai_pft.shape} must be (n_pft, ncol) = "
-                f"{(self.pft_fractions.shape[1], self.pft_fractions.shape[0])}")
-            params["LAI"] = jnp.maximum(
-                jnp.sum(self.pft_fractions * self.lai_pft.T, axis=1), 0.0)
+        # Prescribed per-cell LAI climatology (PFT-weighted CLM MONTHLY_LAI with the
+        # crop c3/c4 split; barren/glacier cells ~0) -> the two-leaf canopy reads this
+        # instead of a spurious uniform LAI.  None-safe: LAI stays None for a surfdata
+        # without MONTHLY_LAI (the canopy then uses its scalar default).
+        if self.lai is not None:
+            params["LAI"] = jnp.maximum(jnp.asarray(self.lai), 0.0)
         return LandSurfaceParams(**params)
 
 
@@ -379,8 +387,7 @@ def clm_surface_provider(tgt_lat_deg, tgt_lon_deg, surfdata_path: str | None = N
     path = surfdata_path or download_clm_surfdata()
     m = load_clm_surface(path, tgt_lat_deg, tgt_lon_deg)
     return CLMSurfaceParamProvider(m["pft_fractions"], m["theta_wp"], m["theta_fc"],
-                                   m["glacier_frac"], variant=variant,
-                                   lai_pft=m.get("lai_pft"))
+                                   m["glacier_frac"], variant=variant, lai=m.get("lai"))
 
 
 def clm_multilayer_setup(surface_map: dict, base_config=None, variant: str = "multilayer"):
@@ -399,8 +406,7 @@ def clm_multilayer_setup(surface_map: dict, base_config=None, variant: str = "mu
     base = base_config if base_config is not None else MultiLayerLandConfig()
     provider = CLMSurfaceParamProvider(
         surface_map["pft_fractions"], surface_map["theta_wp"], surface_map["theta_fc"],
-        surface_map["glacier_frac"], variant=variant,
-        lai_pft=surface_map.get("lai_pft"))
+        surface_map["glacier_frac"], variant=variant, lai=surface_map.get("lai"))
     cfg = base._replace(
         hydraulics=clm_hydraulics_config(surface_map),
         thermal=clm_multilayer_thermal_config(surface_map))

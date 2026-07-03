@@ -58,6 +58,47 @@ class CLM5SurfdataConfig(NamedTuple):
     year: int = 2015                     # stamp for the (stationary, single) slice
 
 
+def reconstruct_clm5_pft_frac(natveg, crop, nat_pft, cft):
+    """CLM landunit cover → 17-PFT weight [% of gridcell], ``CLM5_PFT_NAMES`` order.
+
+    CLM stores cover in *landunits*: natural-veg (``PCT_NATVEG``) split over
+    ``natpft=15`` fractions (``PCT_NAT_PFT``), and crop (``PCT_CROP``) split over
+    ``cft=2`` fractions (``PCT_CFT``).  ``MONTHLY_LAI`` (and any per-PFT quantity)
+    lives on the combined ``lsmpft=17`` = 15 natural + 2 crop axis, so the aligned
+    per-gridcell weight is::
+
+        w[0:15]  = (PCT_NATVEG/100) * PCT_NAT_PFT     # natural PFTs (bare at index 0)
+        w[15:17] = (PCT_CROP/100)   * PCT_CFT         # crops (c3, c4)
+
+    Parameters
+    ----------
+    natveg, crop : (lat, lon) — gridcell natural-veg / crop cover [percent].
+    nat_pft : (15, lat, lon) — natural-PFT split within natveg [percent].
+    cft : (2, lat, lon) — crop-functional-type split within crop [percent].
+
+    Returns
+    -------
+    (17, lat, lon) percent-of-gridcell weight (sums to ``PCT_NATVEG+PCT_CROP``
+    where vegetated).  Host-side; not traced.  This is the single canonical
+    landunit→PFT reconstruction — reused by :func:`read_clm5_cover_veg` and by the
+    coupled-AMIP LAI loader (``legoesm.land.clm_surface_map``); do not re-derive.
+    """
+    from legoesm.land.surface_params import N_PFT_CLM5
+
+    natveg = np.asarray(natveg, dtype=np.float64)
+    crop = np.asarray(crop, dtype=np.float64)
+    nat_pft = np.asarray(nat_pft, dtype=np.float64)
+    cft = np.asarray(cft, dtype=np.float64)
+    nat_w = (natveg[None, :, :] / 100.0) * nat_pft          # (15, lat, lon)
+    crop_w = (crop[None, :, :] / 100.0) * cft               # (2, lat, lon)
+    pft_frac = np.concatenate([nat_w, crop_w], axis=0)      # (17, lat, lon) %
+    if pft_frac.shape[0] != N_PFT_CLM5:
+        raise ValueError(
+            f"reconstructed {pft_frac.shape[0]} PFTs, expected {N_PFT_CLM5}; "
+            f"check natpft({nat_pft.shape[0]})+cft({cft.shape[0]}).")
+    return pft_frac
+
+
 def read_clm5_cover_veg(
     path: str | None = None,
     config: CLM5SurfdataConfig = CLM5SurfdataConfig(),
@@ -74,7 +115,7 @@ def read_clm5_cover_veg(
     returned — v1 takes soil from HWSD.
     """
     import xarray as xr  # noqa: F401
-    from legoesm.land.surface_params import CLM5_PFT_NAMES, N_PFT_CLM5
+    from legoesm.land.surface_params import CLM5_PFT_NAMES
 
     ds = dataset if dataset is not None else xr.open_dataset(path, decode_times=False)
     try:
@@ -89,15 +130,9 @@ def read_clm5_cover_veg(
         nat_pft = arr(config.nat_pft_var)        # (natpft, lat, lon) % within natveg
         cft = arr(config.cft_var)                # (cft, lat, lon) % within crop
 
-        # 17-PFT weight as percent of gridcell, aligned to CLM5_PFT_NAMES order.
-        nat_w = (natveg[None, :, :] / 100.0) * nat_pft          # (15, lat, lon)
-        crop_w = (crop[None, :, :] / 100.0) * cft               # (2, lat, lon)
-        pft_frac = np.concatenate([nat_w, crop_w], axis=0)      # (17, lat, lon) %
-        if pft_frac.shape[0] != N_PFT_CLM5:
-            raise ValueError(
-                f"reconstructed {pft_frac.shape[0]} PFTs, expected {N_PFT_CLM5}; "
-                f"check natpft({nat_pft.shape[0]})+cft({cft.shape[0]}) in {path!r}."
-            )
+        # 17-PFT weight as percent of gridcell, aligned to CLM5_PFT_NAMES order
+        # (single canonical reconstruction — shared with the coupled-AMIP LAI loader).
+        pft_frac = reconstruct_clm5_pft_frac(natveg, crop, nat_pft, cft)  # (17, lat, lon) %
 
         # Monthly veg already on lsmpft=17 (time, lsmpft, lat, lon).
         veg = {k: arr(v) for k, v in (
