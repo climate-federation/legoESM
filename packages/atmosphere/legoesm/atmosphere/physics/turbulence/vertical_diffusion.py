@@ -106,6 +106,18 @@ def implicit_vertical_diffusion(
     ncol, nlev = phi.shape
     dtype = phi.dtype
     dt = jnp.asarray(dt, dtype=dtype)
+    # Coerce every coefficient input to the diffused field's working ``dtype``. They may
+    # arrive WIDER than ``phi`` — e.g. a per-column ``C_K`` diagnosed in float64 by the
+    # LES-informed correction loop (→ a float64 ``K_half``), or float64 grid metrics —
+    # feeding a float32 finite-volume run. Without this the tridiagonal-coefficient
+    # scatters implicitly downcast float64→float32, a JAX FutureWarning that will become
+    # an error. Behavior-preserving: the coefficients were already built in ``dtype``, so
+    # the implicit downcast happened anyway — this only makes it explicit + consistent.
+    K_half = jnp.asarray(K_half, dtype=dtype)
+    rho = jnp.asarray(rho, dtype=dtype)
+    dz = jnp.asarray(dz, dtype=dtype)
+    dz_half = jnp.asarray(dz_half, dtype=dtype)
+    surface_flux = jnp.asarray(surface_flux, dtype=dtype)
 
     # Interface density for the flux ρ_half K_half dφ/dz on half-levels.
     rho_half = 0.5 * (rho[:, :-1] + rho[:, 1:])

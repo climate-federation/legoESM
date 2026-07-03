@@ -1,8 +1,14 @@
 """Stomatal / carbon dispatch utilities.
 
-Shared by both the slab land and multi-layer land models.
-Computes the effective moisture availability beta, with optional
-stomatal conductance and carbon coupling.
+Shared by the slab land and multi-layer land models when running with
+the **SimpleSEB** surface scheme.  Computes an effective moisture
+availability ``beta`` — starting from the bucket / root-zone-weighted
+soil beta — and optionally down-regulates it via Jarvis (carbon off)
+or coupled Leuning Farquhar + Ball-Berry / Medlyn (carbon on).
+
+The TwoLeafCanopy surface scheme bypasses this module and uses its own
+Newton closure in ``canopy/solver.py`` — it does not need a beta proxy
+because LE is computed directly from leaf ↔ canopy-air humidity gradients.
 """
 
 from __future__ import annotations
@@ -31,7 +37,8 @@ def compute_effective_beta(
 
     When stomatal conductance is disabled, returns ``beta_soil`` directly.
     When enabled with the differland carbon scheme, uses the coupled
-    Farquhar-stomata solver.  Otherwise falls back to the Jarvis model.
+    Leuning Farquhar-stomata solver.  Otherwise falls back to the Jarvis
+    multiplicative model.
 
     Parameters
     ----------
@@ -41,7 +48,7 @@ def compute_effective_beta(
         Atmospheric forcing fields (provides sw_down, co2_ppmv,
         q_lowest, p_surface).
     beta_soil : jnp.ndarray
-        Bucket/soil moisture beta [0-1].
+        Bucket / root-zone soil moisture beta [0-1].
     config : LandConfig or MultiLayerLandConfig
         Land configuration (must have ``stomata`` and ``carbon`` attributes).
     carbon_state : CarbonState or None
@@ -58,7 +65,7 @@ def compute_effective_beta(
     (beta, gpp_farq)
         Effective moisture factor [0-1] and Farquhar GPP [gC/m2/s] or None.
     """
-    # Override stomatal / carbon config fields with spatial arrays if provided
+    # Override stomatal / carbon config fields with spatial arrays if provided.
     if land_params is not None:
         _stomata = config.stomata._replace(
             Vc_max25=land_params.Vc_max25,

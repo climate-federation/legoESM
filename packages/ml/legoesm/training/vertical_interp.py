@@ -26,8 +26,10 @@ def interp_pressure_to_sigma(
     plev_Pa: jax.Array,
     p_s: jax.Array,
     sigma_full: jax.Array,
+    *,
+    p_full: jax.Array | None = None,
 ) -> jax.Array:
-    """Interpolate a 3D field from pressure levels to sigma levels.
+    """Interpolate a 3D field from pressure levels to the model's FULL-level pressures.
 
     Parameters
     ----------
@@ -40,14 +42,23 @@ def interp_pressure_to_sigma(
         Surface pressure in Pa.
     sigma_full : array, shape (n_model_lev,)
         Model sigma values at full levels (top-to-bottom: small→large).
+    p_full : array, shape (..., n_model_lev), optional
+        The model's ACTUAL full-level pressures.  Default (``None``) uses pure-sigma
+        ``p = sigma_full · p_s``; pass ``coordinate.pressure_at_full(p_s)`` for a HYBRID
+        coordinate (``p = A·p_ref + B·p_s``) so the field lands on the model's TRUE levels
+        — otherwise a hybrid model's reference is interpolated to the wrong (pure-sigma)
+        pressures, mismatched with the model's levels (iter 339, completing the iter-337/338
+        hybrid-coordinate fix).  For pure-sigma the two agree exactly.
 
     Returns
     -------
     array, shape (..., n_model_lev)
-        Field interpolated to model sigma levels.
+        Field interpolated to the model full levels.
     """
-    # Target pressures: p_target[k] = sigma[k] * p_s
-    p_target = p_s[..., None] * sigma_full  # (..., n_model_lev)
+    if p_full is None:
+        p_target = p_s[..., None] * sigma_full  # pure-sigma: p_target[k] = sigma[k] * p_s
+    else:
+        p_target = jnp.asarray(p_full)
     return _interp_in_logp(field_plev, plev_Pa, p_target)
 
 

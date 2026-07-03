@@ -823,6 +823,7 @@ def create_land_component(config: ExperimentConfig, grid, *, land_config=None):
     from legoesm.land import (
         LandConfig, MultiLayerLandConfig,
         step_land, step_multilayer_land,
+        TwoLeafCanopyConfig,
     )
 
     if land_config is None:
@@ -847,11 +848,16 @@ def create_land_component(config: ExperimentConfig, grid, *, land_config=None):
             )
 
     if isinstance(land_config, MultiLayerLandConfig):
-        logger.info("Land: multilayer model (n_layers=%d)", land_config.soil_grid.n_layers)
+        scheme_name = type(land_config.surface_scheme).__name__
+        logger.info(
+            "Land: multilayer model (n_layers=%d, surface_scheme=%s)",
+            land_config.soil_grid.n_layers, scheme_name,
+        )
         return step_multilayer_land
 
     if isinstance(land_config, LandConfig):
-        logger.info("Land: slab model")
+        scheme_name = type(land_config.surface_scheme).__name__
+        logger.info("Land: slab model (surface_scheme=%s)", scheme_name)
         return step_land
 
     raise TypeError(

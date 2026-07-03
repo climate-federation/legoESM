@@ -164,6 +164,9 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
+        # MPI plumbing: slices a deployed per-column override to a rank's tile,
+        # not a single-tendency physics scheme.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/override_sharding.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",
         "packages/ocean/legoesm/ocean/physics/bottom_drag/__init__.py",
         "packages/ocean/legoesm/ocean/physics/bottom_drag/config.py",

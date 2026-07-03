@@ -11,6 +11,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.core.precision import resolve_dtype
 from legoesm.core.coupling_fields import SurfaceToAtm
 
@@ -25,6 +26,12 @@ def _tiny(dtype=None):
 class FluxAccumulator(NamedTuple):
     """Accumulated surface->atm fluxes, weighted by sub-step dt."""
     sum_T_sfc: jax.Array
+    # dt-weighted surface EMISSION FLUX  eps * sigma * T_rad^4  [W/m^2 * s].
+    # Accumulated in FLUX space (NOT as mean T_rad) so the window-mean LW
+    # boundary is exact: averaging T_rad and emissivity independently would give
+    # mean(eps)*sigma*mean(T_rad)^4 != mean(eps*sigma*T_rad^4) for varying
+    # substeps.  mean_accumulator reconstructs T_rad from this and sum_emissivity.
+    sum_emit: jax.Array
     sum_albedo: jax.Array
     sum_emissivity: jax.Array
     sum_z0: jax.Array
@@ -56,7 +63,7 @@ def reset_accumulator(
     """Zero-initialize accumulator for given spatial shape."""
     z = jnp.zeros(shape, dtype=dtype)
     return FluxAccumulator(
-        sum_T_sfc=z, sum_albedo=z, sum_emissivity=z,
+        sum_T_sfc=z, sum_emit=z, sum_albedo=z, sum_emissivity=z,
         sum_z0=z, sum_q_surface=z,
         sum_shflx=z, sum_lhflx=z,
         sum_tau_x=z, sum_tau_y=z, sum_lw_up=z,
@@ -83,6 +90,8 @@ def accumulate(
     dt_arr = jnp.asarray(dt, dtype=acc.total_dt.dtype)
     return FluxAccumulator(
         sum_T_sfc=acc.sum_T_sfc + dt_arr * sfc.T_sfc,
+        sum_emit=acc.sum_emit + dt_arr * (
+            sfc.emissivity * constants.sigma_sb * sfc.T_rad ** 4),
         sum_albedo=acc.sum_albedo + dt_arr * sfc.albedo,
         sum_emissivity=acc.sum_emissivity + dt_arr * sfc.emissivity,
         sum_z0=acc.sum_z0 + dt_arr * sfc.z0,
@@ -120,6 +129,13 @@ def mean_accumulator(acc: FluxAccumulator) -> SurfaceToAtm:
     inv_dt = 1.0 / jnp.clip(acc.total_dt, _tiny(acc.total_dt.dtype), None)
     return SurfaceToAtm(
         T_sfc=acc.sum_T_sfc * inv_dt,
+        # Reconstruct the window-mean radiative-equivalent T from the dt-weighted
+        # EMISSION FLUX and emissivity:  mean_eps * sigma * T_rad^4 == mean(emit).
+        # (Averaging T_rad directly would break the paired LW-flux invariant for
+        # varying substeps.)  inv_dt cancels in the ratio.
+        T_rad=(acc.sum_emit / jnp.maximum(
+            acc.sum_emissivity * constants.sigma_sb,
+            _tiny(acc.total_dt.dtype))) ** 0.25,
         albedo=acc.sum_albedo * inv_dt,
         emissivity=acc.sum_emissivity * inv_dt,
         z0=acc.sum_z0 * inv_dt,
@@ -153,6 +169,8 @@ def accumulator_from_flux(
     dt_arr = jnp.asarray(dt, dtype=dtype if dtype is not None else sfc.T_sfc.dtype)
     return FluxAccumulator(
         sum_T_sfc=dt_arr * sfc.T_sfc,
+        sum_emit=dt_arr * (
+            sfc.emissivity * constants.sigma_sb * sfc.T_rad ** 4),
         sum_albedo=dt_arr * sfc.albedo,
         sum_emissivity=dt_arr * sfc.emissivity,
         sum_z0=dt_arr * sfc.z0,

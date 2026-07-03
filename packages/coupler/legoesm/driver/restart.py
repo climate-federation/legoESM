@@ -747,11 +747,65 @@ def load_restart(
     Returns
     -------
     tuple
-        ``(state, q_v, step, day, loaded_config, diag_accumulators, q_c, q_r, metadata)``
-        where *metadata* is a :class:`RestartMetadata` (or ``None`` if the
+        ``(state, q_v, step, day, loaded_config, diag_accumulators, q_c, q_r,
+        metadata, carry_aux)`` where *metadata* is a :class:`RestartMetadata` (or ``None`` if the
         companion ``.meta.json`` is absent).
     """
     path = Path(path)
+
+    # 0. Spectral checkpoint (iter 92): a discretization='spectral' run's
+    #    ``ModelDriver.save_checkpoint`` writes the five ``*_hat`` coefficient arrays
+    #    + a ``spectral_layout`` marker via ``np.savez`` — NOT the grid layout
+    #    ``load_checkpoint_auto`` reads.  Reconstruct the ``SpectralHydrostaticState``
+    #    directly (the SAME canonical helper the in-driver restart uses, template=None
+    #    ⇒ plain Field coefficients) so an offline caller (the one-shot compare CLI,
+    #    which then synthesizes grid winds via ``grid_winds_from_spectral``) can load
+    #    it.  The spectral save carries no config / diag / q_c/q_r / carry_aux and no
+    #    companion ``.meta.json`` → those are ``None``; q_v is the grid-space tracer.
+    if path.is_file() and path.suffix == ".npz":
+        with np.load(path) as d:
+            if "spectral_layout" in d.files:
+                from legoesm.atmosphere.dynamics.spectral_pe import (
+                    reconstruct_spectral_state_from_npz,
+                )
+                # strict (default): validate the coefficient shapes against the
+                # configured grid (n_sh = grid.lap) + sigma (nlev) BEFORE
+                # reconstructing — the template=None path can't, and the downstream
+                # spectral→grid synthesis would otherwise fail with a less clear
+                # error.  Skipped only when grid/sigma are absent (unit harness); a
+                # SUPPLIED non-spectral grid (no .lap) is a config error → raise
+                # rather than silently skip (Codex iter 92).
+                if strict and grid is not None and sigma is not None:
+                    lap = getattr(grid, "lap", None)
+                    if lap is None:
+                        raise ValueError(
+                            f"spectral checkpoint loaded with a non-spectral grid "
+                            f"({type(grid).__name__} has no .lap) — --grid-type must "
+                            "be spectral/gaussian for a spectral restart."
+                        )
+                    n_sh = int(np.asarray(lap).shape[0])
+                    nlev = int(np.asarray(sigma.sigma_full).shape[0])
+                    expected = {
+                        "vor_hat": (n_sh, nlev), "div_hat": (n_sh, nlev),
+                        "T_hat": (n_sh, nlev), "lnps_hat": (n_sh,),
+                        "phis_hat": (n_sh,),
+                    }
+                    for nm, sh in expected.items():
+                        got = tuple(np.asarray(d[nm]).shape)
+                        if got != sh:
+                            raise ValueError(
+                                f"spectral restart {nm} shape {got} != expected {sh} "
+                                f"for the configured grid (n_sh={n_sh}) + sigma "
+                                f"(nlev={nlev}); --grid-type/--resolution/--nlev must "
+                                "match the run."
+                            )
+                state, step, day = reconstruct_spectral_state_from_npz(d)
+                q_v = (
+                    state.tracers["q_v"].data
+                    if state.tracers is not None and "q_v" in state.tracers
+                    else None
+                )
+                return state, q_v, step, day, None, None, None, None, None, None
 
     # 1. Delegate to auto-detecting loader (handles both .npz and .zarr).
     #    load_checkpoint_auto returns ExperimentConfig regardless of
