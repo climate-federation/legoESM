@@ -1788,7 +1788,6 @@ def make_voronoi_sharded_step(
         raise ValueError("dev_config.voronoi_dims must be set for Voronoi grids")
     nCells, nEdges, _nVerts = voronoi_dims
     jax_mesh = dev_config.mesh
-    face_sharding = dev_config.face_sharding
 
     cells_per = nCells // n_dev
     edges_per = nEdges // n_dev
@@ -2067,7 +2066,13 @@ def make_voronoi_sharded_step(
     # Pre-compute mass conservation constants (avoid per-step allreduce)
     # ------------------------------------------------------------------
     if cfg.fix_mass:
-        _area_for_mass = jax.device_put(global_mesh.areaCell, face_sharding)
+        # REPLICATED, not face_sharding: the jitted step CLOSES OVER this
+        # array, and under multi-controller (jax.distributed) closing over a
+        # device-sharded array spans non-addressable devices and raises at
+        # trace time.  A fully-replicated closure constant is legal on both
+        # single- and multi-controller; GSPMD still multiplies each device's
+        # p_s shard by its local slice (no extra comm) before the allreduce.
+        _area_for_mass = jax.device_put(global_mesh.areaCell, rep_sharding)
         _total_area = float(jnp.sum(global_mesh.areaCell))
 
     # ------------------------------------------------------------------
@@ -2193,6 +2198,37 @@ def make_voronoi_sharded_step(
         return fn(state, dt)
 
     return _voronoi_step
+
+
+def gather_voronoi_state_spmd(state, dev_config: DeviceConfig):
+    """Gather a device-sharded Voronoi state to fully-replicated arrays.
+
+    The multi-controller counterpart of a plain ``jax.device_get``: under
+    ``jax.distributed`` each process only holds its addressable shards, so
+    host reads of a ``P("device")``-sharded leaf raise.  Re-laying every
+    array leaf onto ``dev_config.replicated_sharding`` (via
+    :func:`legoesm.parallel.latlon_spmd.replicate_leaf` — a jitted identity
+    with replicated ``out_shardings``, an all-gather under GSPMD) makes the
+    full global value addressable on every process for I/O / gates.
+
+    Single-DEVICE configs (``dev_config.mesh is None``, the
+    ``create_voronoi_device_mesh(n_devices=1)`` shape) pass through
+    unchanged.  Multi-device single-PROCESS configs take the plain
+    ``device_put`` branch of ``replicate_leaf`` (cheap, no collective).
+    """
+    if dev_config.mesh is None or dev_config.replicated_sharding is None:
+        return state
+    from legoesm.parallel.latlon_spmd import replicate_leaf
+
+    rep = dev_config.replicated_sharding
+    multi = jax.process_count() > 1
+
+    def _gather_leaf(leaf):
+        if not isinstance(leaf, jax.Array):
+            return leaf
+        return replicate_leaf(leaf, rep, multiprocess=multi)
+
+    return jax.tree.map(_gather_leaf, state)
 
 
 # ======================================================================
