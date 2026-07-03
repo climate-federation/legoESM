@@ -138,6 +138,11 @@ def _parse_args():
              "scaling, cap aei0=rn_Ue*rn_Le=3000 m2/s). Lat-lon only.",
     )
     p.add_argument(
+        "--allow-multiyear", action="store_true",
+        help="Opt out of the 1-year local-machine cap on --days (use inside "
+             "SLURM GPU jobs; the multi-year DINO_R1 comparison runs).",
+    )
+    p.add_argument(
         "--preset", choices=("r1_exact",), default=None,
         help="Config preset: 'r1_exact' = the DINO_R1 exactness preset "
              "(dino_r1_exact_config: S-EOS, TKE, nemo_quadratic drag, EIV "
@@ -341,11 +346,14 @@ def main():
             stacklevel=2,
         )
 
-    # Local-machine policy: cap at 1 yr (decision logged in plan)
-    if args.days > 365.0:
+    # Local-machine policy: cap at 1 yr (decision logged in plan).
+    # --allow-multiyear is the explicit opt-out for GPU/SLURM jobs (the
+    # multi-year DINO_R1 comparison runs).
+    if args.days > 365.0 and not args.allow_multiyear:
         raise SystemExit(
             f"--days={args.days} exceeds the 1-year local-machine cap. "
-            "Long spin-ups should run on a GPU machine — see plan."
+            "Long spin-ups should run on a GPU machine (pass "
+            "--allow-multiyear inside a SLURM job) — see plan."
         )
 
     if getattr(args, "preset", None) == "r1_exact":

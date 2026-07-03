@@ -220,3 +220,13 @@ def test_r1_exact_preset_flows_to_model_config():
     assert mc.gm_redi is None                    # EIV off
     assert mc.lateral_viscosity.A_h_floor == 0.0
     assert mc.lateral_viscosity.A_h_eq_boost == 1.0
+
+
+def test_allow_multiyear_flag(monkeypatch):
+    """--days > 365 requires --allow-multiyear (GPU/SLURM opt-out)."""
+    monkeypatch.setattr(sys, "argv", ["run_dino.py", "--days", "720"])
+    args = rd._parse_args()
+    assert args.days == 720 and args.allow_multiyear is False
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino.py", "--days", "720", "--allow-multiyear"])
+    assert rd._parse_args().allow_multiyear is True
