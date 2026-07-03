@@ -406,4 +406,25 @@ UNREACHABLE_PARAMS = frozenset({
     # ocean: ShortwavePenetrationConfig (2)
     'ocean.sw_penetration.rgb_ir_extinction_m',
     'ocean.sw_penetration.rgb_ir_fraction',
+    # ocean: TidalForcingConfig (3) — CONSCIOUS entry (equilibrium-tide forcing).
+    # These ARE settable via YAML (ocean.tidal_forcing.{love_factor,beta_sal,
+    # amplitude_scale}, built into a TidalForcingConfig by config.py). They are
+    # not yet on run_omip's curated OMIPRunConfig --params surface; wiring
+    # tidal_forcing onto OMIPRunConfig (+ a --tidal-forcing flag) is the follow-up
+    # that shrinks these three away.
+    'ocean.tidal_forcing.amplitude_scale',
+    'ocean.tidal_forcing.beta_sal',
+    'ocean.tidal_forcing.love_factor',
+    # atm: aerosol activation / prognostic aerosol (5) — CONSCIOUS entry.
+    # ActivationConfig hangs off MorrisonConfig.activation (reachable
+    # programmatically, wired into microphysics/integration.py) but is not yet
+    # on the AMIP flattened-scalar --params surface; PrognosticAerosolConfig is
+    # a tested driver hook not yet stepped by any production driver.  Wiring
+    # ActivationConfig onto the AMIP scalar map (+ the prognostic-aerosol
+    # driver hook) is the follow-up that shrinks these five away.
+    'atm.aerosol.ActivationConfig.w_char_m_s',
+    'atm.aerosol.PrognosticAerosolConfig.dry_dep_velocity_m_s',
+    'atm.aerosol.PrognosticAerosolConfig.emission_number_flux_m2_s',
+    'atm.aerosol.PrognosticAerosolConfig.so2_oxidation_timescale_s',
+    'atm.aerosol.PrognosticAerosolConfig.wet_scavenging_coeff_m2_kg',
 })

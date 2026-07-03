@@ -61,6 +61,62 @@ from legoesm.atmosphere.physics.convection._plume import (
 __all__ = ("tiedtke_convection",)
 
 
+__physics_contract__ = {
+    "summary": (
+        "Tiedtke (1989) bulk mass-flux convection: three-class (deep/mid/"
+        "shallow) soft blend, RH-triggered downdraft, a per-level M_u(k) "
+        "prognostic carry, and optional Gregory-97 convective momentum "
+        "transport. Uses the shared subsidence+detrainment kernel; condensate "
+        "handed to microphysics. Smooth (differentiable)."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa",
+        "u": "m/s", "v": "m/s",
+        "conv_prog_profile": "kg/m^2/s (previous-step updraft mass-flux profile M_u(k))",
+        "dt": "s",
+        "moisture_convergence": "kg/kg/s (large-scale dq/dt|dyn for the deep closure; optional)",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "dq_c_conv_dt": "kg/kg/s (detrained cloud-water source to microphysics, >=0)",
+        "cape": "J/kg", "convective_mask": "1 (0-1 activation)",
+        "du_dt_conv": "m/s^2 (CMT; None if disabled)",
+        "dv_dt_conv": "m/s^2 (CMT; None if disabled)",
+        "dq_r_conv_dt": "kg/kg/s (convective rain source when precip_efficiency>0; else None)",
+        "conv_prog_profile_new": "kg/m^2/s (implicit-Euler-relaxed M_u(k))",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. Convection warms aloft and dries where the "
+        "updraft detrains; dq_c_conv_dt, dq_r_conv_dt >= 0 are SOURCES to "
+        "microphysics (precip deferred). Compensating subsidence + detrainment "
+        "APPROXIMATELY conserve column moist static energy and total water "
+        "(exact only in the opt-in implicit_flux solve; truncation-order in the "
+        "default advective solve); the downdraft "
+        "rain-evaporation is energy-consistent (dT=-L_v/c_pd*dq_v) and "
+        "column-water conserving (net column d(q_v+q_c)=0). Optional "
+        "Gregory-97 CMT redistributes momentum vertically (transport-dominant; "
+        "its pressure-gradient term is not exactly momentum-conserving, so "
+        "momentum is not claimed)."
+    ),
+    # The DEFAULT public path uses the shared mass-flux kernel's advective
+    # subsidence solve, conservative only to TRUNCATION ORDER (exact only in
+    # the opt-in implicit_flux path), so no contract-level conservation is
+    # guaranteed; the column budget is closed downstream.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Tiedtke (1989), Mon. Wea. Rev. 117, 1779-1800; "
+        "Gregory et al. (1997), Q. J. R. Meteorol. Soc. 123, 1153-1183"
+    ),
+    "idealized_test": (
+        "tests/unit/test_tiedtke.py; CAPE<=threshold -> zero tendency; a deep "
+        "conditionally-unstable column -> deep-class heating aloft + drying "
+        "with a positive dq_c source; the downdraft branch conserves column "
+        "water; CMT populated only when enable_cmt=True."
+    ),
+}
+
+
 def tiedtke_convection(
     T: jax.Array,
     q_v: jax.Array,

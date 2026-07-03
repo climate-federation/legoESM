@@ -47,6 +47,46 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 
+__physics_contract__ = {
+    "summary": (
+        "Prognostic eddy-kinetic-energy closures (Eden & Greatbatch 2008 and "
+        "the Mak/Marshall GEOMETRIC extension): evolve an eddy-energy field E "
+        "under production (GM mean-APE -> EKE, P = kappa_GM*sigma^2), "
+        "dissipation (eps = c_eps*E^{3/2}/L) and transport, and set a "
+        "prognostic GM coefficient kappa_GM = c_k*L*sqrt(E)."
+    ),
+    "inputs": {
+        "E": "m^2/s^2 (eddy kinetic energy)", "sigma": "1/s (Eady growth rate)",
+        "L": "m (mixing length)", "cfg.c_k": "1", "cfg.c_eps": "1",
+    },
+    "outputs": {
+        "kappa_GM": "m^2/s", "dE_dt_local": "m^2/s^3",
+    },
+    "sign_convention": (
+        "E >= 0, kappa_GM >= 0 (clamped <= kappa_gm_max); production "
+        "P = kappa_GM*sigma^2 >= 0 (a source; sigma = N|S| is the Eady growth "
+        "rate), dissipation eps = c_eps*E^{3/2}/L >= 0 (a sink); advection + "
+        "isopycnal diffusion of E are applied separately. The EKE budget has "
+        "genuine sources/sinks -> nothing is conserved here; kappa_GM feeds the "
+        "GM/Redi tracer redistribution."
+    ),
+    # Prognostic eddy-energy reservoir + coefficient producer; source/sink
+    # budget, so nothing conserved by the closure itself.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Eden, C. & Greatbatch, R. J. (2008), Ocean Modelling 20, 223-239; "
+        "Marshall et al. (2012); Mak et al. (2022) GEOMETRIC; Torres et al. "
+        "(2025) JAMES, doi:10.1029/2025MS005394"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_eke.py + tests/ocean/unit/test_eke_source.py — "
+        "kappa_GM grows with sqrt(E); when production balances dissipation E "
+        "reaches a steady state; E floored at 0 keeps the sqrt gradient finite."
+    ),
+}
+
+
 __param_spec__ = {
     "GeometricConfig": {
         "scheme_key": "ocean.eke.geometric",

@@ -721,6 +721,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "bucket ramp: beta=min(beta_soil, beta_canopy), closing "
                              "stomata in low light / high VPD. Requires "
                              "--land-soil-bucket.")
+    parser.add_argument("--land-gs-max", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_gs_max,
+                        dest="land_gs_max",
+                        help="Global maximum stomatal (canopy) conductance "
+                             "[mol/m2/s] (StomataConfig.gs_max). Land-ET "
+                             "calibration knob: gs = gs_max * f(PAR,T,VPD,soil), "
+                             "so lowering it raises canopy resistance and pulls "
+                             "land evapotranspiration below potential (issue "
+                             "#730). Only active with --land-stomatal-beta. "
+                             f"Default {_EXPERIMENT_DEFAULTS.land_gs_max} "
+                             "(byte-identical when unchanged).")
     parser.add_argument("--snow-albedo-feedback", action="store_true",
                         default=False, dest="snow_albedo_feedback",
                         help="Prognostic snow + snow-albedo feedback on the "
@@ -859,6 +870,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Distributed / MPI
     parser.add_argument("--distributed", action="store_true", default=False,
                         help="Enable MPI distributed execution (auto-detected from environment)")
+    parser.add_argument(
+        "--distributed-mode", choices=("mpi", "spmd"),
+        default=_EXPERIMENT_DEFAULTS.distributed_mode,
+        help=("How multi-process runs federate (read with --distributed). "
+              "'mpi' = mpi4jax halo backend (replicated cubed-sphere faces / "
+              "lat-lon band / Voronoi cells; legacy default). 'spmd' = "
+              "multi-controller jax.distributed: ONE global device mesh, true "
+              "cubed-sphere domain decomposition (cubed-sphere only). "
+              "Checkpointing + diagnostics run via gathered root-only "
+              "writers. Parity receipt: 2-proc bit-exact vs "
+              "single-controller, job 8686550; gate "
+              "scripts/validate/validate_driver_cs_spmd_parity.py."))
     parser.add_argument(
         "--enable-latlon-spmd", action="store_true", default=False,
         help=("Single-process multi-device lat-BAND SPMD for the lat-lon C-grid "
@@ -1042,6 +1065,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_infil_suction_boost=args.land_infil_suction_boost,
         land_infiltration_excess=args.land_infiltration_excess,
         land_stomatal_beta=args.land_stomatal_beta,
+        land_gs_max=args.land_gs_max,
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         dynamic_albedo=args.dynamic_albedo,
@@ -1071,6 +1095,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         precision=args.precision,
         gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
+        distributed_mode=args.distributed_mode,
         shard_radiation_columns=args.shard_radiation_columns,
         allow_level_fallback=args.allow_level_fallback,
         ensemble_size=args.ensemble_size,

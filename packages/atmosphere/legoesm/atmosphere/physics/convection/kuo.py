@@ -83,6 +83,53 @@ from legoesm.atmosphere.physics.convection._triggers import smooth_step
 __all__ = ("kuo_convection",)
 
 
+__physics_contract__ = {
+    "summary": (
+        "Kuo (1965) convection driven by large-scale moisture convergence: "
+        "the converged moisture is redistributed into convective heating and "
+        "moistening (optional Kuo-Anthes 1977 partition); quiescent when no "
+        "convergence is supplied. Smooth (differentiable) gates."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa", "dt": "s",
+        "moisture_convergence": "kg/kg/s (large-scale dq/dt|dyn source; None -> quiescent)",
+        "w_grid": "m/s (resolved ascent for the w_lcl>0 gate; optional)",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "dq_c_conv_dt": "kg/kg/s (convective cloud-water source to microphysics, >=0)",
+        "cape": "J/kg", "convective_mask": "1 (0-1 activation)",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. Where a column is buoyant with positive "
+        "convergence, convection warms toward the cloud profile (tc>T) and "
+        "moistens (qvc>qv), and explicitly REMOVES the consumed large-scale "
+        "tendency (-ptenq). Latent heating is tied to condensation by the "
+        "column's own alpha=L_v/c_p (c_p*dT = L_v*dq_c), so column "
+        "enthalpy+latent (moist static energy) is conserved; atmospheric "
+        "moisture is NOT conserved (source-driven by external convergence; "
+        "condensate handed to microphysics)."
+    ),
+    # Source-driven: the scheme consumes/removes an EXTERNAL large-scale
+    # moisture-convergence tendency and can uniformly rescale tendencies with a
+    # positivity limiter, so this is not closed-column energy conservation ->
+    # no contract-level conservation claimed.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Kuo (1965), J. Atmos. Sci. 22, 40-63; "
+        "Anthes (1977), Mon. Wea. Rev. 105, 270-286"
+    ),
+    "idealized_test": (
+        "tests/unit/test_kuo_oracle_faithful.py; moisture_convergence=None -> "
+        "zero tendencies (quiescent single column); a conditionally-unstable "
+        "column with positive large-scale convergence -> heating + moistening "
+        "with a positive cloud-water source and convective_mask>0; a "
+        "forward-Euler step keeps q_v>=0."
+    ),
+}
+
+
 # Virtual-temperature coefficient ``T_v = T·(1 + _VT_COEFF·q_v − q_c)``,
 # derived from constants (``R_v/R_d − 1 = 1/ε − 1 ≈ 0.608``) rather than
 # the bare 0.608 literal the oracle hard-codes (Codex review-1 finding #6).

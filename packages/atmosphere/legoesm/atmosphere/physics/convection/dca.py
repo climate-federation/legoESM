@@ -78,6 +78,44 @@ from legoesm.atmosphere.physics.convection.mass_flux import (
 )
 from legoesm.atmosphere.physics._shared import safe_divide
 
+__physics_contract__ = {
+    "summary": (
+        "Deep convective adjustment (variant dispatch): Manabe-Smagorinsky-"
+        "Strickler (1965) pairwise moist-adiabatic adjustment or the "
+        "Ahmed-Neelin-Adames (2020) lower-tropospheric-buoyancy precipitation "
+        "closure; both relax the column toward neutrality and convert the "
+        "dried vapor to cloud water."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa", "dt": "s",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_conv_dt": "kg/kg/s",
+        "cape": "J/kg (B_L in m/s^2 for the ahmed_neelin variant)",
+        "convective_mask": "1 (0-1 convective indicator)",
+    },
+    "sign_convention": (
+        "Warms and dries where it stabilizes (dT_dt>0, dq_v_dt<0 in the "
+        "convecting layer); the condensed vapor becomes cloud water "
+        "(dq_c_conv_dt>=0, handed to microphysics); column moist static "
+        "energy is conserved per adjusted pair/level (c_pd*dT_dt + "
+        "L_v*dq_v_dt integrates to 0) and column total water is closed "
+        "(integral of dq_v_dt + dq_c_conv_dt = 0); surface at the last "
+        "vertical index."
+    ),
+    "conserves": ["energy", "moisture"],
+    "differentiable": True,
+    "reference": (
+        "Manabe, Smagorinsky & Strickler (1965), Mon. Wea. Rev. 93, 769-798; "
+        "Ahmed, Adames & Neelin (2020), J. Atmos. Sci. 77, 2163-2186"
+    ),
+    "idealized_test": (
+        "A super-adiabatic saturated column relaxes toward moist-adiabatic "
+        "neutrality with column moist static energy conserved and total water "
+        "(vapor+cloud) closed; a stable / rest column yields zero tendency."
+    ),
+}
+
 
 def _adjust_one_iteration(
     T: jax.Array,

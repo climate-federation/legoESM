@@ -44,6 +44,40 @@ import numpy as np
 
 from legoesm import constants
 
+__physics_contract__ = {
+    "summary": (
+        "Jayne & St-Laurent (2001) internal-tide diapycnal mixing: a "
+        "bottom-intensified diffusivity K = Gamma*q*E_BT*F(z)/(rho_0*N^2) from a "
+        "prescribed barotropic-to-baroclinic tidal-energy conversion and an "
+        "exponential near-bottom vertical structure."
+    ),
+    "inputs": {
+        "E_BT_W_per_m2": "W/m^2", "layer_depths_m": "m", "h_partial_m": "m",
+        "H_bathy_m": "m", "N_squared": "1/s^2",
+    },
+    "outputs": {"K_tidal": "m^2/s"},
+    "sign_convention": (
+        "K_tidal >= 0; strong stratification (large N^2) reduces K; the vertical "
+        "structure F(z) is bottom-intensified and normalised so its column "
+        "integral partitions E_BT exactly; capped at K_max with NO background "
+        "floor (the caller adds background kappa on top); zero where E_BT=0 or "
+        "the column is dry; depths positive downward."
+    ),
+    # Pure diffusivity producer: nothing conserved; the budget closes in the
+    # diffusion solver.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Jayne, S. R. & St-Laurent, L. C. (2001), GRL 28(5), 811-814; "
+        "Simmons et al. (2004), Ocean Modelling 6, 245-263"
+    ),
+    "idealized_test": (
+        "tests/unit/test_tidal_mixing.py — K peaks near the seafloor and decays "
+        "upward with scale h_decay; E_BT=0 or a dry column gives zero K; larger "
+        "N^2 lowers K."
+    ),
+}
+
 
 # St Laurent (2002) tidal-mixing scheme reference defaults.
 _STLAURENT_RMS_ROUGHNESS_M = 250.0

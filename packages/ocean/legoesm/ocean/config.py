@@ -169,10 +169,16 @@ def _nested_ocean_entry_types() -> dict:
     from legoesm.ocean.eos import LinearEOSConfig
     from legoesm.ocean.physics.combined import OceanPhysicsConfig
     from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    from legoesm.ocean.physics.tidal_forcing import TidalForcingConfig
     return {
         "eos_linear": LinearEOSConfig,
         "gm_redi": GMRediConfig,
         "physics": OceanPhysicsConfig,
+        # Astronomical (equilibrium) tidal forcing: a nested entry point (its
+        # `enabled`/`love_factor`/… member names are too generic to flatten onto
+        # the ocean.* namespace) so `ocean.tidal_forcing: {enabled: true, …}`
+        # builds a real TidalForcingConfig instead of passing a raw dict through.
+        "tidal_forcing": TidalForcingConfig,
     }
 
 

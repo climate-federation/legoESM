@@ -124,6 +124,42 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
 
 from legoesm import constants
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "CLUBB-lite reduced higher-order turbulence closure: one prognostic "
+        "moment wp2 (w'^2) sets a TKE-like mixing scale for down-gradient eddy "
+        "diffusivities Km, Kh that mix u, v, T (in theta-space), q_v implicitly."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
+        "tke": "m^2/s^2 (carries wp2 = w'^2)",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "T_sfc": "K", "q_sfc": "kg/kg", "rho": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "Km": "m^2/s", "Kh": "m^2/s", "shflx": "W/m^2", "lhflx": "W/m^2",
+        "ustar": "m/s", "h_pbl": "m", "tke_new": "m^2/s^2 (updated wp2)",
+    },
+    "sign_convention": (
+        "Down-gradient eddy diffusion, Km >= 0, Kh = Km/Pr_t >= 0; the "
+        "tendencies relax the mean state toward a well-mixed profile. The "
+        "column budget is OPEN: the surface flux (shflx > 0 upward, lhflx > 0 "
+        "upward/moistening) is injected as the bottom boundary condition and "
+        "the top is zero-flux; z increases upward."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Golaz, Larson & Cotton (2002), J. Atmos. Sci. 59, 3540-3551; "
+        "Larson & Golaz (2005), J. Atmos. Sci. 62, 3620-3649"
+    ),
+    "idealized_test": (
+        "rest state with zero surface flux and a well-mixed neutral column -> "
+        "near-zero interior tendency; Km, Kh >= 0; wp2 stays >= tke_min."
+    ),
+}
 
 def clubb_eddy_diffusivity(
     C_K: jax.Array,

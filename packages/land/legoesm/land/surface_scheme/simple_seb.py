@@ -150,6 +150,15 @@ def compute_simple_seb_fluxes(
     L_eff = jnp.where(has_snow, constants.L_s, constants.L_v)
 
     # --- Bulk fluxes ---
+    # Dispatch hardening (restores the guard lost when this dispatch moved
+    # out of step_multilayer_land in the surface-scheme refactor): an unknown
+    # bulk_scheme must raise, not silently run the constant-coefficient else.
+    _valid_bulk = ("constant", "most", "coare3", "large_yeager")
+    if land_config.bulk_scheme not in _valid_bulk:
+        raise ValueError(
+            f"Unknown bulk_scheme {land_config.bulk_scheme!r}; "
+            f"expected one of {_valid_bulk}."
+        )
     rho = forcing.rho_lowest
     if land_config.bulk_scheme in ("most", "coare3", "large_yeager"):
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(

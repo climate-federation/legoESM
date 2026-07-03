@@ -63,6 +63,55 @@ from legoesm.atmosphere.physics.convection._plume import (
 __all__ = ("kain_fritsch_convection",)
 
 
+__physics_contract__ = {
+    "summary": (
+        "Kain-Fritsch bulk mass-flux deep/shallow convection: a "
+        "boundary-layer-triggered entraining-detraining plume with CONDLOAD "
+        "precipitation fallout and an RH-controlled downdraft; smooth "
+        "(differentiable) trigger and deep/shallow blend."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa",
+        "w_grid": "m/s (resolved grid-scale vertical velocity)",
+        "conv_prog_profile": "kg/m^2/s (cloud-base mass-flux carry, packed at [:, -1])",
+        "dt": "s",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "dq_c_conv_dt": "kg/kg/s (detrained non-precipitating cloud-water source to microphysics, >=0)",
+        "cape": "J/kg", "convective_mask": "1 (0-1 activation)",
+        "conv_prog_profile_new": "kg/m^2/s (updated cloud-base mass-flux carry)",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. Convection warms aloft and dries the "
+        "sub-cloud/lower layers where it stabilizes a conditionally-unstable "
+        "column; dq_c_conv_dt >= 0. CONDLOAD fallout PRECIPITATES condensate "
+        "out of the column (partly re-evaporated by the RH-controlled "
+        "downdraft, dT=-L_v/c_pd*dq_v), so atmospheric total water is NOT "
+        "conserved; column moist static energy is conserved to closure "
+        "accuracy (latent heat of the precipitated water is retained as "
+        "sensible heating)."
+    ),
+    # Environmental tendencies come from the non-conservative default mass-flux
+    # kernel and CONDLOAD fallout leaves the column with only partial downdraft
+    # re-evaporation, so column energy holds only to CLOSURE ACCURACY, not at
+    # contract level -> no conservation claimed.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Kain & Fritsch (1990), J. Atmos. Sci. 47, 2784-2802; "
+        "Kain (2004), J. Appl. Meteor. 43, 170-181"
+    ),
+    "idealized_test": (
+        "tests/unit/test_kain_fritsch.py; neutral column (CAPE=0, no "
+        "grid-scale ascent) -> ~zero tendency; a conditionally-unstable column "
+        "with resolved ascent -> heating aloft, sub-cloud drying, positive "
+        "convective_mask; mask -> 0 when the cloud is too shallow and "
+        "enable_shallow=False."
+    ),
+}
+
+
 # Kain-Fritsch updraft-radius ramp smoothing widths (fixed).
 _KF_SHARPNESS_M = 200.0
 _KF_RAMP_WIDTH = 0.05

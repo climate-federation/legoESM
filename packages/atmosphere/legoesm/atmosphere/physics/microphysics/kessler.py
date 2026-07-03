@@ -37,6 +37,42 @@ from legoesm.atmosphere.physics.microphysics.output import (
 _KESSLER_ACCR_EXP = 0.875
 _RHO_FLOOR = 0.1
 
+__physics_contract__ = {
+    "summary": (
+        "Kessler (1969) single-moment warm-rain microphysics: saturation "
+        "adjustment (cloud condensation/evaporation), cloud->rain "
+        "autoconversion, accretion, rain evaporation and rain sedimentation to "
+        "surface precipitation."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",
+        "hydrometeors.q_r": "kg/kg", "p_full": "Pa", "rho": "kg/m^3",
+        "dz": "m", "dt": "s",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_dt": "kg/kg/s",
+        "dq_r_dt": "kg/kg/s", "precipitation": "kg/m^2/s",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. Latent heating dT_dt is consistent with the "
+        "vapour<->liquid phase-change rate via L_v (condensation warms, "
+        "evaporation cools). Water is redistributed vapour<->cloud<->rain; "
+        "SURFACE PRECIPITATION (>= 0) removes water from the column, so column "
+        "moisture is NOT conserved and the falling condensate carries enthalpy "
+        "out -- no contract-level conservation is claimed. Mixing ratios >= 0."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": "Kessler (1969), Meteorol. Monogr. 10(32), Amer. Meteorol. Soc.",
+    "idealized_test": (
+        "tests/unit/test_physics_microphysics.py — supersaturated air condenses "
+        "with L_v heating; cloud above the autoconversion threshold makes rain "
+        "+ surface precip; subsaturated rain evaporates; mixing ratios stay "
+        ">= 0; differentiable wrt T, q_v."
+    ),
+}
+
+
 def kessler_microphysics(
     T: jax.Array,
     q_v: jax.Array,

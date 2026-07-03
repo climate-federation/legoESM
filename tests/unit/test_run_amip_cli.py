@@ -65,6 +65,32 @@ def test_snow_albedo_feedback_flag_flows_to_config():
     assert cfg_on.snow_albedo_feedback is True
 
 
+def test_land_gs_max_flag_flows_to_config():
+    """--land-gs-max round-trips into ExperimentConfig (the global stomatal
+    canopy-conductance calibration knob for land ET, issue #730). Default 0.3
+    matches StomataConfig.gs_max; a lower value raises canopy resistance."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_gs_max == 0.3
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-gs-max", "0.15",
+    ]), parser))
+    assert cfg.land_gs_max == 0.15
+
+
+def test_land_gs_max_validate_strict_rejects_nonpositive_or_nonfinite():
+    """validate_strict() rejects a non-positive / non-finite gs_max — such a
+    value would zero or NaN the entire land latent-heat flux."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    for bad in (0.0, -0.1, float("nan")):
+        with pytest.raises(ValueError, match="land_gs_max"):
+            cfg._replace(land_gs_max=bad).validate_strict()
+
+
 def test_orbital_insolation_flag_flows_to_config():
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
@@ -1458,3 +1484,28 @@ def test_cloud_sensitivity_flags_rejected_on_mpas_spectral():
     _validate_cloud_sensitivity_flags(
         parser.parse_args(["--dataset", "analytical", "--cloud-p-xr", "0.7"]),
         parser)
+
+
+def test_distributed_mode_flag_flows_to_config():
+    """--distributed-mode {mpi,spmd} round-trips into ExperimentConfig
+    (production cs_spmd is config-file-only without this flag)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.distributed_mode == "mpi"
+
+    cfg_spmd = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--distributed", "--distributed-mode", "spmd",
+    ]), parser))
+    assert cfg_spmd.distributed is True
+    assert cfg_spmd.distributed_mode == "spmd"
+    # spmd is a validate_strict-legal combination on the default cube grid;
+    # checkpoints + diagnostics are ALSO legal now (cs_spmd steps 5a-5c).
+    cfg_spmd._replace(output=cfg_spmd.output._replace(
+        diag_days=0, checkpoint_days=0)).validate_strict()
+
+    # Unknown mode is an argparse-level refusal (choices).
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--dataset", "analytical",
+                           "--distributed-mode", "bogus"])

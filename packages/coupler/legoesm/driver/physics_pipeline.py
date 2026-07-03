@@ -2593,9 +2593,11 @@ def _resolve_turbulence(config):
     # coefficients — the fix for anemic evaporation over a calm warm ocean.
     sbs = getattr(config, "surface_bulk_scheme", "constant")
     gzi = getattr(config, "surface_gustiness_zi", None)
+    sss_scheme = getattr(config, "surface_stability_scheme", "dyer1974")
     if (turb_config is not None
             and getattr(turb_config, "surface", None) is not None
-            and (sbs != "constant" or gzi is not None)):
+            and (sbs != "constant" or gzi is not None
+                 or sss_scheme != "dyer1974")):
         surf = turb_config.surface
         if sbs != "constant":
             surf = surf._replace(bulk_scheme=sbs)
@@ -2603,6 +2605,12 @@ def _resolve_turbulence(config):
             # COARE convective-gustiness BL depth (only effective with a MOST
             # bulk_scheme); the diagnosed fix for the calm-warm-ocean low hfls.
             surf = surf._replace(gustiness_w_zi=gzi)
+        if sss_scheme != "dyer1974":
+            # Stable-regime MOST functions: keep the atmosphere surface layer
+            # on the SAME stable functions as the coupler ocean tile (both
+            # driven by the one --surface-stability-scheme flag) so the
+            # interface cannot split Dyer-vs-SHEBA across its two sides.
+            surf = surf._replace(stability_scheme=sss_scheme)
         turb_config = turb_config._replace(surface=surf)
     return turb_fn, turb_config
 

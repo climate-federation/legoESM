@@ -20,6 +20,46 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py). This
+# core computes the scale-dependent dynamic Smagorinsky coefficient C_s^2; the
+# public physical-quantity entry is ``lasd_cs2``.
+__physics_contract__ = {
+    "summary": (
+        "Bou-Zeid-Meneveau-Parlange (2005) Lagrangian scale-dependent dynamic "
+        "SGS: solves the Germano identity at 2-delta and 4-delta test filters "
+        "for the scale-dependence parameter beta and returns the locally "
+        "averaged Smagorinsky coefficient C_s^2(x,y,z) for a plane LES."
+    ),
+    "inputs": {
+        "uc": "m/s", "vc": "m/s", "wc": "m/s",
+        "S11": "1/s", "S22": "1/s", "S33": "1/s",
+        "S12": "1/s", "S13": "1/s", "S23": "1/s",
+        "Smag": "1/s (resolved strain-rate magnitude |S|)",
+        "delta": "m (grid filter width per level)",
+        "cs_max": "1 (upper clip on C_s)",
+    },
+    "outputs": {
+        "cs2": "1 (dimensionless Smagorinsky coefficient C_s^2 field)",
+    },
+    "sign_convention": (
+        "C_s^2 >= 0: masked to 0 where the Germano denominator MM ~ 0, where "
+        "C_s^2 < 0, or where C_s^2 > cs_max^2 (backscatter/invalid clipped). "
+        "The caller forms the down-gradient eddy viscosity nu_t = "
+        "C_s^2 * delta^2 * |S| >= 0. Returns a coefficient, not a tendency."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Bou-Zeid, Meneveau & Parlange (2005), Phys. Fluids 17, 025105; "
+        "Lilly (1992) dynamic-SGS error functional; jax-alfa LASDD oracle"
+    ),
+    "idealized_test": (
+        "jax-alfa DynamicSGS_LASDD_SM.LASDD parity on a horizontally-periodic "
+        "LES plane; C_s^2 in [0, cs_max^2]; zero where MM ~ 0; beta defaults "
+        "to 1 when the quintic has no real root in (0, 5)."
+    ),
+}
+
 _TFR = 2.0   # test-filter ratio (FGR=1): level-1 = 2Δ, level-2 = 4Δ
 
 

@@ -57,6 +57,40 @@ if TYPE_CHECKING:
     from legoesm.ocean.vertical import OceanZStarCoordinate
 
 
+__physics_contract__ = {
+    "summary": (
+        "GM/Redi isopycnal mixing on the MPAS Voronoi mesh (centred small-slope "
+        "scheme): density -> isoneutral slopes -> optional Visbeck kappa -> "
+        "adiabatic eddy advection + isoneutral diffusion tendencies for T and S "
+        "via edge fluxes and a cell divergence."
+    ),
+    "inputs": {
+        "T": "degC", "S": "psu", "eta": "m", "H_bathy": "m",
+        "cfg.kappa_GM": "m^2/s", "cfg.kappa_Redi": "m^2/s",
+    },
+    "outputs": {"dT_dt": "degC/s", "dS_dt": "psu/s"},
+    "sign_convention": (
+        "kappa_GM, kappa_Redi >= 0; slopes DM95-tapered; GM skew flux adiabatic "
+        "+ Redi along-isopycnal down-gradient; edge fluxes summed into a cell "
+        "divergence so the cell-area/volume-integrated tracer is conserved; "
+        "edge/land masks give no-flux boundaries; z positive up. (The triad "
+        "slope-limited path raises NotImplementedError.)"
+    ),
+    # Adiabatic tracer redistribution: conserves cell-volume-integrated tracer.
+    "conserves": ["tracer"],
+    "differentiable": True,
+    "reference": (
+        "Griffies (1998) JPO 28, 831-841; Gent & McWilliams (1990); Redi "
+        "(1982); MPAS-Ocean (Ringler et al. 2013, Ocean Modelling 69)"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_gm_redi_mpas.py — the centred MPAS tendency "
+        "matches the lat-lon C-grid path on an equivalent slope and conserves "
+        "cell-area-integrated T, S; the triads path raises NotImplementedError."
+    ),
+}
+
+
 _PLAN = "docs/ocean/experiments/gm_redi_mpas_plan.md"
 
 
