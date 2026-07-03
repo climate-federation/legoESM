@@ -2193,11 +2193,23 @@ class ModelDriver:
             manifest_file = self._output_dir / RUN_MANIFEST_FILENAME
             if not manifest_file.exists():
                 return
+            state, tracers, carry = self.state, self.tracers, self._carry_aux
+            if self._is_spmd_multiprocess():
+                # Sharded leaves span non-addressable devices — hashing them
+                # raises (2x3-GPU smoke 26037824: "Could not record final
+                # state digest"). Gather to a replicated host copy first.
+                # COLLECTIVE: run() calls this on every process, and the
+                # manifest-exists gate above is a shared-filesystem path, so
+                # all processes reach the gather together; only process 0
+                # then writes.
+                state = self._gather_spmd_tree_to_host(state)
+                tracers = self._gather_spmd_tree_to_host(tracers)
+                carry = self._gather_spmd_tree_to_host(carry)
+                if jax.process_index() != 0:
+                    return
             # Backend-agnostic digest of the full final state (prognostic state +
             # tracers + carry), so spectral/MPAS layouts are covered too.
-            digest = pytree_state_digest(
-                self.state, self.tracers, self._carry_aux
-            )
+            digest = pytree_state_digest(state, tracers, carry)
             record_state_digest(manifest_file, digest)
         except Exception as exc:  # pragma: no cover - provenance best-effort
             logger.warning(f"Could not record final state digest: {exc}")
