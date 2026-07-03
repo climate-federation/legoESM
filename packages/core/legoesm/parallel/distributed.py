@@ -80,7 +80,7 @@ def _require_mpi4py():
 
 def initialize_jax_distributed_multiprocess(
     *,
-    coordinator_port: int = _JAX_DIST_COORDINATOR_PORT,
+    coordinator_port: int | None = None,
     local_device_ids=None,
 ):
     """Initialize the ``jax.distributed`` runtime for a multi-PROCESS run, deriving
@@ -163,6 +163,14 @@ def initialize_jax_distributed_multiprocess(
     my_hostname = socket.gethostname()
     all_hostnames = comm.allgather(my_hostname)
     coordinator_address = all_hostnames[0]
+    if coordinator_port is None:
+        # Env override / crc32(job-id)-derived / legacy fixed port: two jobs
+        # sharing a node must not collide on the rendezvous socket
+        # (EADDRINUSE on the second job's rank 0).
+        from legoesm.parallel.early_init import resolve_coordinator_port
+
+        coordinator_port = resolve_coordinator_port(
+            default=_JAX_DIST_COORDINATOR_PORT)
     coordinator_bind = f"{coordinator_address}:{coordinator_port}"
 
     # Per-process LOCAL device id(s).  On a multi-GPU node with one process per

@@ -68,5 +68,19 @@ export UCX_TLS="${UCX_TLS:-rc,cuda_copy,cuda_ipc,gdr_copy,sm,self}"
 export UCX_MEMTYPE_CACHE="${UCX_MEMTYPE_CACHE:-n}"
 export UCX_RNDV_SCHEME="${UCX_RNDV_SCHEME:-put_zcopy}"
 
+# --- NCCL over InfiniBand (route-B: jax.distributed multi-node lanes) --------
+# NCCL (shard_map/ppermute collectives under jax.distributed) uses its own
+# IB-verbs stack — independent of the UCX/MPI settings above; the two configs
+# coexist. Bootstrap ring runs over IPoIB: verify the interface name once with
+# `ip addr` on a gpu node (a wrong NCCL_SOCKET_IFNAME is the #1 cause of
+# multi-node NCCL bootstrap timeouts on IB clusters).
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-ib0}"
+export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-0}"
+# Prefix-match BOTH HCAs (mlx5_0/mlx5_1 — one per socket on Levante nodes).
+export NCCL_IB_HCA="${NCCL_IB_HCA:-mlx5}"
+# GPUDirect RDMA when NIC and GPU share a NUMA/PCIe root.
+export NCCL_NET_GDR_LEVEL="${NCCL_NET_GDR_LEVEL:-PHB}"
+export NCCL_CROSS_NIC="${NCCL_CROSS_NIC:-1}"
+
 export TMPDIR="${TMPDIR:-$SCRATCH/tmp}"
 mkdir -p "$TMPDIR" 2>/dev/null || true

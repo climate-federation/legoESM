@@ -318,14 +318,19 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
     _cache = {}
 
     def sharded_step(c_state, dt):
-        fn = _cache.get("fn")
+        # Cache key = the state's pytree STRUCTURE: in_specs/out_specs derive
+        # from it, so a structure change (optional field None <-> Field) must
+        # rebuild the shard_map rather than reuse stale specs (codex finding,
+        # ocean-twin parity).
+        key = jax.tree.structure(c_state)
+        fn = _cache.get(key)
         if fn is None:
             in_spec = jax.tree.map(_lat_spec, c_state)
             stacks_spec = jax.tree.map(lambda _x: P(), stacks)  # all replicated
             fn = jax.jit(shard_map(
                 _body, mesh=mesh, in_specs=(in_spec, stacks_spec, P()),
                 out_specs=in_spec, check_vma=False))
-            _cache["fn"] = fn
+            _cache[key] = fn
         # Arm the SPMD band halo around the call ONLY; save+restore the FULL
         # backend state (a later serial/full-domain call must not take SPMD-only
         # branches outside a shard_map). The first call traces (baking the band

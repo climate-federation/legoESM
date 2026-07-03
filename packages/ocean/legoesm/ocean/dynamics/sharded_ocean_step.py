@@ -452,7 +452,12 @@ def make_sharded_ocean_step(model, mesh):
     _cache = {}
 
     def sharded_step(state, dt):
-        fn = _cache.get("fn")
+        # Cache key = the state's pytree STRUCTURE: in_specs/out_specs are
+        # derived from it, so a later call with a different structure (an
+        # optional field flipping None <-> Field) must rebuild the shard_map
+        # rather than reuse stale specs (codex finding).
+        key = jax.tree.structure(state)
+        fn = _cache.get(key)
         if fn is None:
             in_spec = jax.tree.map(_lat_spec, state)
             geom_spec = jax.tree.map(lambda _x: P(), geom_stacks)
@@ -467,7 +472,7 @@ def make_sharded_ocean_step(model, mesh):
                 out_specs=in_spec,
                 check_vma=False,
             ))
-            _cache["fn"] = fn
+            _cache[key] = fn
         # Arm the SPMD halo backend ONLY around the call, then RESTORE the
         # previous backend (codex finding): leaving it globally armed makes a
         # later serial/full-domain ocean call take SPMD-only branches

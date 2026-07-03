@@ -40,10 +40,28 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
+from pathlib import Path
 
 import jax
 import numpy as np
+
+# Sibling-script import (ocean_invariants / conservation helpers reuse —
+# same pattern as bench_ocean_mpi_scaling's own cross-script imports).
+sys.path.insert(0, str(Path(__file__).parent))
+
+# SPMD full-step parity tolerances — the FLOATING-POINT RE-ASSOCIATION floor
+# of the sharded split-explicit barotropic (ppermute/psum reduction-order
+# change over the ~30-substep loop, pole-amplified), NOT a bug margin; a real
+# missing-halo regression shows up at O(1e-3+) at the band cuts.  Values
+# mirror the equivalence gate (tests/parallel/test_latlon_ocean_spmd_step.py,
+# 3 steps: atol 2e-4); the floor grows with steps, hence the smoke cap.
+SPMD_PARITY_TOLS = {  # precision -> (rtol, atol)
+    "float64": (1.0e-3, 2.0e-4),
+    "float32": (1.0e-2, 2.0e-3),
+}
+SPMD_PARITY_MAX_STEPS = 8
 
 
 def build_model_and_state(n_lat, n_lon, nlev, seed=0):
@@ -110,6 +128,21 @@ def main() -> int:
     p.add_argument("--dt", type=float, default=600.0)
     p.add_argument("--out", type=str,
                    default="results/a1/ocean_spmd_scaling.jsonl")
+    p.add_argument(
+        "--parity-gate", action="store_true",
+        help="Correctness gate: compare the gathered sharded trajectory "
+             "against the single-device trajectory at the sharded "
+             "split-explicit re-association-floor tolerances (smoke windows "
+             "only; the floor grows with steps).")
+    p.add_argument(
+        "--check-conservation", action="store_true",
+        help="Gate global area/eta/heat/salt drift over the run "
+             "(pre-shard global state vs gathered final state; exits "
+             "nonzero on breach).")
+    p.add_argument(
+        "--cons-rtol", type=float, default=None,
+        help="Conservation tolerance (default: 1e-9 f64 / 1e-4 f32; the "
+             "raw scheme drifts ~1e-8/step — calibrate to the window).")
     p.add_argument("--multicontroller", action="store_true",
                    help="Route-B multi-controller: jax.distributed.initialize "
                         "per process, ('lat',) mesh over the GLOBAL device set "
@@ -134,15 +167,28 @@ def main() -> int:
 
     if args.multicontroller:
         # MUST run before any other JAX use (backend init). SLURM auto-detects;
-        # mpiexec/OpenMPI needs the explicit coordinator + OMPI env vars.
+        # mpiexec needs the explicit coordinator + launcher env vars (OpenMPI
+        # OMPI_*, or Cray PALS PMI_* on Derecho).
         if args.coordinator is not None:
-            n_procs = int(os.environ["OMPI_COMM_WORLD_SIZE"])
-            proc_id = int(os.environ["OMPI_COMM_WORLD_RANK"])
+            n_procs = int(os.environ.get(
+                "OMPI_COMM_WORLD_SIZE", os.environ.get("PMI_SIZE", "0")))
+            proc_id = int(os.environ.get(
+                "OMPI_COMM_WORLD_RANK", os.environ.get("PMI_RANK", "-1")))
+            if n_procs < 1 or proc_id < 0:
+                raise SystemExit(
+                    "--coordinator given but no launcher rank env found "
+                    "(OMPI_COMM_WORLD_SIZE/RANK or PMI_SIZE/PMI_RANK).")
             jax.distributed.initialize(
                 coordinator_address=args.coordinator,
                 num_processes=n_procs, process_id=proc_id)
         else:
-            jax.distributed.initialize()
+            # Environment-routed: SLURM/OMPI -> bare auto-detect; PALS/PMI
+            # (Derecho mpiexec) -> mpi4py bootstrap. Real init failures
+            # re-raise loudly.
+            from legoesm.parallel.early_init import (
+                init_jax_distributed_with_fallback,
+            )
+            init_jax_distributed_with_fallback()
 
     from legoesm.ocean.dynamics.sharded_ocean_step import (
         make_sharded_ocean_step,
@@ -165,10 +211,31 @@ def main() -> int:
     if n_lat % nd != 0:
         raise SystemExit(f"n_lat {n_lat} not divisible by n_devices {nd}")
 
+    if args.parity_gate and args.steps > SPMD_PARITY_MAX_STEPS:
+        raise SystemExit(
+            f"--parity-gate is a smoke gate (re-association floor grows "
+            f"with steps); --steps {args.steps} > {SPMD_PARITY_MAX_STEPS} "
+            f"cap.")
+
     model, s0 = build_model_and_state(n_lat, args.n_lon, args.nlev)
     # Prime the build-once vertex-mask cache from the CONCRETE state so the
     # wrapper can build the per-band vertex masks host-side.
     model._ensure_vertex_mask(s0)
+
+    # Parity reference: the plain single-device trajectory, computed BEFORE
+    # any sharding (deterministic identical build on every process).
+    serial_final = None
+    if args.parity_gate:
+        _s = s0
+        for _ in range(args.steps):
+            _s = model.step(_s, args.dt)
+        _block(_s)
+        serial_final = _s
+
+    inv_before = None
+    if args.check_conservation:
+        from bench_ocean_mpi_scaling import ocean_invariants
+        inv_before = ocean_invariants(model, s0, n_ranks=1)
 
     if nd == 1:
         mesh = None
@@ -180,6 +247,11 @@ def main() -> int:
         step = make_sharded_ocean_step(model, mesh)
         s = shard_state_latlon(s0, mesh)
 
+    # Multi-controller: align every process around the timed loop.
+    if jax.process_count() > 1:
+        from jax.experimental import multihost_utils
+        multihost_utils.sync_global_devices("ocean_latlon_spmd_bench_start")
+
     # Per-step timing: step 0 includes compile; record each step so re-trace
     # (every step slow) is visible vs steady-state (steps 1.. fast).
     per_step_ms = []
@@ -188,6 +260,55 @@ def main() -> int:
         s = step(s, args.dt)
         _block(s)
         per_step_ms.append((time.perf_counter() - t0) * 1e3)
+
+    if jax.process_count() > 1:
+        from jax.experimental import multihost_utils
+        multihost_utils.sync_global_devices("ocean_latlon_spmd_bench_end")
+
+    # --- Correctness gates (before any timing is reported) -----------------
+    if args.parity_gate or args.check_conservation:
+        from legoesm.ocean.dynamics.sharded_ocean_step import (
+            gather_state_latlon,
+        )
+        final_global = (gather_state_latlon(s, mesh) if mesh is not None
+                        else s)
+        prec = "float64" if jax.config.jax_enable_x64 else "float32"
+        rank0 = jax.process_index() == 0
+        if args.check_conservation:
+            from bench_ocean_mpi_scaling import (
+                CONS_RTOL_DEFAULTS,
+                conservation_breaches,
+                ocean_invariants,
+                print_conservation,
+            )
+            inv_after = ocean_invariants(model, final_global, n_ranks=1)
+            tol = (args.cons_rtol if args.cons_rtol is not None
+                   else CONS_RTOL_DEFAULTS[prec])
+            if rank0:
+                print_conservation(f"{args.steps} steps", inv_before,
+                                   inv_after, tol)
+            if conservation_breaches(inv_before, inv_after, tol):
+                if rank0:
+                    print("ERROR: conservation gate BREACHED.", flush=True)
+                return 4
+        if args.parity_gate:
+            rtol, atol = SPMD_PARITY_TOLS[prec]
+            ok = True
+            for name in ("T", "S", "eta", "u", "v"):
+                want = np.asarray(getattr(serial_final, name).data)
+                got = np.asarray(getattr(final_global, name).data)
+                field_ok = bool(np.allclose(got, want, rtol=rtol, atol=atol))
+                ok &= field_ok
+                if rank0:
+                    mx = (float(np.max(np.abs(got - want)))
+                          if want.size else 0.0)
+                    print(f"    parity {name:>4s}: max|diff|={mx:.3e} "
+                          f"{'OK' if field_ok else 'MISMATCH'}", flush=True)
+            if not ok:
+                if rank0:
+                    print("ERROR: SPMD parity gate MISMATCH vs the "
+                          "single-device reference.", flush=True)
+                return 5
 
     steady = per_step_ms[args.warmup:]
     med = float(np.median(steady))
