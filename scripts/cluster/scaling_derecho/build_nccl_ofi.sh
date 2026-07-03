@@ -74,19 +74,46 @@ _find_hwloc() {
     done
     return 1
 }
+# Source-build fallback: Derecho has NO hwloc module and its conda mirror lacks
+# the package, so when detection fails we vendor a local hwloc (tiny, ~2 min,
+# only a C compiler needed) rather than dead-ending the build.  Emits ONLY the
+# install prefix on stdout (build output -> log); HWLOC_BUILD_PREFIX/HWLOC_VER
+# override.
+_build_hwloc() {
+    local ver="${HWLOC_VER:-2.11.2}" mm pfx wd url log
+    mm="${ver%.*}"                                  # 2.11.2 -> 2.11 (release dir)
+    pfx="${HWLOC_BUILD_PREFIX:-/glade/work/$USER/nccl-ofi/hwloc-$ver}"
+    [ -f "$pfx/include/hwloc.h" ] && { echo "$pfx"; return 0; }   # reuse prior build
+    wd="${TMPDIR:-/tmp}/hwloc-build.$$"
+    url="https://download.open-mpi.org/release/hwloc/v$mm/hwloc-$ver.tar.gz"
+    log="/glade/work/$USER/nccl-ofi/hwloc-build.log"
+    mkdir -p "$wd" "$(dirname "$log")" || return 1
+    (
+        cd "$wd" &&
+        { curl -fsSL "$url" -o h.tgz || wget -qO h.tgz "$url"; } &&
+        tar xzf h.tgz && cd "hwloc-$ver" &&
+        ./configure --prefix="$pfx" && make -j8 && make install
+    ) >"$log" 2>&1 || return 1
+    rm -rf "$wd"
+    [ -f "$pfx/include/hwloc.h" ] && { echo "$pfx"; return 0; }
+    return 1
+}
+
 if HWLOC_HOME="$(_find_hwloc)"; then
-    HWLOC_FLAG="--with-hwloc=$HWLOC_HOME"
-    echo "HWLOC_HOME=$HWLOC_HOME"
+    echo "HWLOC_HOME=$HWLOC_HOME (found on system)"
 else
-    echo "ERROR: hwloc headers not found (searched env vars, pkg-config, and" >&2
-    echo "       /opt/cray/pe/hwloc, /glade/u/apps, /usr)." >&2
-    echo "       Fix: 'module load hwloc' (try 'module spider hwloc' for the" >&2
-    echo "       exact name); if there is no module (e.g. Derecho), install it" >&2
-    echo "       into your conda env -- 'conda install -c conda-forge hwloc' --" >&2
-    echo "       and rerun with HWLOC_HOME=\$CONDA_PREFIX.  Or set HWLOC_HOME to" >&2
-    echo "       any prefix containing include/hwloc.h." >&2
-    exit 1
+    echo "hwloc not found (no module, not on the include path) -> building a local"
+    echo "copy from source (~2 min; log: /glade/work/$USER/nccl-ofi/hwloc-build.log)..."
+    if ! HWLOC_HOME="$(_build_hwloc)"; then
+        echo "ERROR: hwloc not found and the source build failed -- see" >&2
+        echo "       /glade/work/$USER/nccl-ofi/hwloc-build.log.  Or provide hwloc" >&2
+        echo "       yourself and rerun with HWLOC_HOME=<prefix> (a dir containing" >&2
+        echo "       include/hwloc.h)." >&2
+        exit 1
+    fi
+    echo "HWLOC_HOME=$HWLOC_HOME (built from source)"
 fi
+HWLOC_FLAG="--with-hwloc=$HWLOC_HOME"
 
 # --- Fetch + pick tag -----------------------------------------------------
 SRC="${TMPDIR:-/tmp}/aws-ofi-nccl-src.$$"
