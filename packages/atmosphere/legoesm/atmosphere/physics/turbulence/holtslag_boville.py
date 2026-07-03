@@ -64,6 +64,47 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
 )
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "Holtslag-Boville (1993) nonlocal K-profile PBL turbulence: a "
+        "bulk-Richardson PBL height sets a nonlocal eddy-diffusivity profile "
+        "with a countergradient heat-transport term, blended with a "
+        "free-atmosphere local-Ri diffusivity; differentiable E3SM-HB port."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "T_sfc": "K", "q_sfc": "kg/kg", "rho": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "Km": "m^2/s", "Kh": "m^2/s", "shflx": "W/m^2", "lhflx": "W/m^2",
+        "ustar": "m/s", "h_pbl": "m",
+    },
+    "sign_convention": (
+        "Down-gradient nonlocal K-profile (Km, Kh >= 0) plus a positive "
+        "countergradient gamma that drives an upward theta flux (warming the "
+        "layers below the flux convergence). The column budget is OPEN: the "
+        "surface flux (shflx > 0 upward, lhflx > 0 upward/moistening) is the "
+        "bottom boundary condition, top is zero-flux; z increases upward. "
+        "Heat is diffused in theta-space, so column enthalpy is NOT conserved "
+        "(mass-weighted theta is) -- an accepted deviation from the DSE oracle."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Holtslag & Boville (1993), J. Climate 6, 1825-1842; "
+        "E3SM/CAM hb_diff.F90 + pbl_utils.F90 oracle"
+    ),
+    "idealized_test": (
+        "no surface flux + neutral column -> zero countergradient, "
+        "K -> free-atmosphere floor, near-zero interior tendency; unstable "
+        "surface buoyancy flux -> deeper h_pbl and positive gamma; oracle "
+        "parity vs E3SM hb_diff within a stated tolerance."
+    ),
+}
+
 _ONET = 1.0 / 3.0  # 1/3 power in the MO gradient expressions (oracle ``onet``)
 
 

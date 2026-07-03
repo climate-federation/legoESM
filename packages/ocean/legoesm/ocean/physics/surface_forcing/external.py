@@ -59,6 +59,45 @@ from legoesm.ocean.physics.surface_forcing._shared import (
 )
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 
+__physics_contract__ = {
+    "summary": (
+        "External (coupler-provided) surface forcing: apply an "
+        "OceanSurfaceForcing struct's wind stress, net heat, freshwater and "
+        "salt fluxes to the top ocean layer through the physics-function path "
+        "(cubed-sphere two-way coupling)."
+    ),
+    "inputs": {
+        "tau_x": "N/m^2", "tau_y": "N/m^2", "q_net": "W/m^2",
+        "freshwater": "kg/m^2/s", "salt_flux": "kg/m^2/s", "S": "psu",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "degC/s", "dS_dt": "psu/s",
+        "Q_net": "W/m^2", "tau_x": "N/m^2", "tau_y": "N/m^2",
+    },
+    "sign_convention": (
+        "Top-layer boundary sources (NOT interior-conservative); ATMOSPHERE "
+        "stress convention — ocean reaction = -tau, so a stress passed as "
+        "-stress accelerates the ocean in the stress direction (OPPOSITE the "
+        "prescribed scheme's +tau); q_net > 0 goes INTO the ocean (warming); "
+        "freshwater > 0 freshens via a virtual salt flux at fixed volume (no eta "
+        "source); real salt > 0 salinifies; z positive up. Unknown scheme "
+        "raises ValueError."
+    ),
+    # Coupler-provided surface boundary source/sink; not interior-conservative.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Standard z-coordinate / rigid-lid surface flux boundary conditions "
+        "(virtual-salt freshwater closure); Griffies (2004)"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_surface_forcing_sign_convention.py + "
+        "tests/ocean/unit/test_surface_forcing_flux_feedback.py — a positive "
+        "q_net warms the surface layer; a -tau input accelerates the ocean "
+        "along the stress; freshwater freshens; an unknown scheme raises."
+    ),
+}
+
 
 def external_surface_forcing(
     u: jnp.ndarray,

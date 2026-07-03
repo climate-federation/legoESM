@@ -250,6 +250,22 @@ def _aerosol_ccn_active(config: PhysicsConfig) -> bool:
     )
 
 
+def _aerosol_activation_config(config: PhysicsConfig):
+    """The selected microphysics scheme's ``ActivationConfig`` (or None).
+
+    Threaded into the radiation factory alongside ``nc_from_aerosol`` so the
+    radiation cloud-optics droplet number runs the SAME proxy|arg activation
+    dispatch as the microphysics N_c fill — one droplet number per step for
+    both indirect effects.  None (schemes without the field / default) keeps
+    the radiation fill on the default proxy, byte-identical to before.
+    """
+    if not _aerosol_ccn_active(config):
+        return None
+    mc = config.microphysics
+    sc = getattr(mc, getattr(mc, "scheme", "none"), None)
+    return getattr(sc, "activation", None)
+
+
 def _attach_lifecycle_hooks(physics_fn, tagged_fns):
     """Attach reset_state / set_time / set_T_sfc_override propagation hooks.
 
@@ -307,11 +323,13 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     # cloud-optics droplet number (Twomey r_eff) matches the microphysics
     # fill.  False (default) keeps both paths byte-identical.
     _nc_from_aerosol = _aerosol_ccn_active(config)
+    _activation_cfg = _aerosol_activation_config(config)
     if config.radiation.scheme != "none":
         tagged_fns.append((
             make_radiation_physics(
                 config.radiation, model_type, column_mesh=column_mesh,
                 nc_from_aerosol=_nc_from_aerosol,
+                activation_config=_activation_cfg,
             ),
             False,
             None,

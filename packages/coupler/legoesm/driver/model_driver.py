@@ -4458,9 +4458,29 @@ class ModelDriver:
                 if k.startswith("physstate_")
                 and not k[len("physstate_"):].startswith("meta_")
             }
+            # Schema-growth migration (grow-only allowlist): PhysicsState
+            # fields ADDED after a checkpoint format was in production.  A
+            # checkpoint written by an older build legitimately lacks these;
+            # they seed from the fresh init (zeros) instead of tripping the
+            # completeness gate below.  Only fields whose zero-seed is the
+            # correct pre-feature state may be listed (aerosol_number: the
+            # prognostic-aerosol tracer is opt-in and zero before the feature
+            # existed).  Any OTHER missing field is still a partial/corrupted
+            # carry and must fail loudly (issue #405/#413).
+            _NEW_OPTIONAL_PS_FIELDS = frozenset({"aerosol_number"})
             if _any_physstate:
                 _missing = [f for f in _phys_state._fields
                             if f not in _present_fields]
+                _new_missing = [f for f in _missing
+                                if f in _NEW_OPTIONAL_PS_FIELDS]
+                _missing = [f for f in _missing
+                            if f not in _NEW_OPTIONAL_PS_FIELDS]
+                if _new_missing:
+                    logger.info(
+                        "  MPAS restart checkpoint predates PhysicsState "
+                        "field(s) %s — seeding them fresh (zeros); all other "
+                        "physics memory is restored.", sorted(_new_missing),
+                    )
                 if _missing:
                     raise ValueError(
                         "MPAS restart physics-state carry is INCOMPLETE: "

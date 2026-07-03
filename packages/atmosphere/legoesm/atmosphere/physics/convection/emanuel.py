@@ -64,6 +64,43 @@ from legoesm.atmosphere.physics.convection._emanuel_mixing import (
 __all__ = ("emanuel_convection",)
 
 
+__physics_contract__ = {
+    "summary": (
+        "Emanuel (1991) buoyancy-sorting convection with a prognostic "
+        "cloud-base mass flux (DTMA sub-cloud quasi-equilibrium closure); "
+        "returns convective T/q_v/q_c tendencies plus the updated CBMF carry."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa",
+        "conv_prog_profile": "kg/m^2/s (prognostic CBMF carry in slot -1)",
+        "dt": "s",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_conv_dt": "kg/kg/s",
+        "cape": "J/kg", "convective_mask": "1 (0-1 CAPE-trigger indicator)",
+        "conv_prog_profile_new": "kg/m^2/s (updated prognostic CBMF carry)",
+    },
+    "sign_convention": (
+        "Warms and dries the convecting layer (dT_dt>0, dq_v_dt<0); the "
+        "condensed vapor becomes non-negative cloud water (dq_c_conv_dt>=0) "
+        "handed to microphysics; a final ENTS pass enforces column vapor-side "
+        "moist-enthalpy closure (c_pd*dT_dt + L_v*dq_v_dt integrates to 0 over "
+        "the convective layer); total water is closed in the legacy surrogate "
+        "path but the genuine mixer sheds a precipitating fraction; the "
+        "prognostic cloud-base mass flux is >=0; surface at the last vertical "
+        "index."
+    ),
+    "conserves": ["energy"],
+    "differentiable": True,
+    "reference": "Emanuel (1991), J. Atmos. Sci. 48, 2313-2335",
+    "idealized_test": (
+        "Validated against the convect43c.f oracle (.physics-validator/"
+        "emanuel) for RCE realism; a rest / no-CAPE column produces ~zero "
+        "tendency and holds the prognostic CBMF at zero."
+    ),
+}
+
+
 # Cloud-base mass-flux relaxation coefficient (Emanuel closure).
 _CBMF_RELAX = 0.1
 

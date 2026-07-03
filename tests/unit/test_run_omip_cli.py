@@ -60,6 +60,19 @@ def test_jra55_sea_ice_flag_parses():
     assert parse_args(["--grid", "latlon", "--jra55-sea-ice"]).jra55_sea_ice is True
 
 
+def test_surface_stability_scheme_flag_round_trip():
+    """--surface-stability-scheme parses, defaults byte-identically to
+    dyer1974, and rejects unknown names (dispatch hardening at argparse)."""
+    assert (parse_args(["--grid", "latlon"]).surface_stability_scheme
+            == "dyer1974")
+    assert (parse_args(["--grid", "latlon", "--surface-stability-scheme",
+                        "grachev2007_sheba"]).surface_stability_scheme
+            == "grachev2007_sheba")
+    with pytest.raises(SystemExit):
+        parse_args(["--grid", "latlon",
+                    "--surface-stability-scheme", "dyer1975"])
+
+
 def test_precision_default_is_fp64_backward_compatible():
     """OMIP ran unconditional fp64 before the flag; the default MUST stay
     fp64 so existing runs are numerically unchanged."""

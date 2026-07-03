@@ -107,6 +107,51 @@ __all__ = (
 )
 
 
+__physics_contract__ = {
+    "summary": (
+        "Genuine Emanuel (1991 / CONVECT v4.3c) episodic-mixing buoyancy "
+        "sort: builds the (i,j) SIJ/ELIJ/MENT mixing matrix and assembles the "
+        "environmental temperature/vapor/cloud-water tendencies from the "
+        "detrained mass fluxes."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa",
+        "M_b": "kg/m^2/s (cloud-base mass flux, oracle CBMF)",
+        "c_l": "J/kg/K (effective liquid-water heat capacity)",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_conv_dt": "kg/kg/s",
+        "ment": "kg/m^2/s ((i,j) mixing matrix, diagnostic)",
+        "m_profile": "kg/m^2/s (per-level updraught mixing mass flux)",
+        "convective_layer_mask": "1 (0-1 convective-layer mask)",
+    },
+    "sign_convention": (
+        "Heats and moistens/dries the environment by mass-flux convergence of "
+        "the buoyancy-sort spectrum; the detrained in-cloud condensate is a "
+        "non-negative cloud-water source (dq_c_conv_dt>=0) handed to "
+        "microphysics, while the precipitating fraction EP*CLW leaves the "
+        "column; the buoyancy sort mixes at APPROXIMATELY constant moist static "
+        "energy here -- exact column-energy conservation is enforced by the "
+        "caller emanuel.py's explicit enthalpy-closure pass, not by this helper; "
+        "surface at the last vertical index."
+    ),
+    # Helper only: standalone energy conservation is NOT guaranteed here -- the
+    # explicit enthalpy-closure pass is applied by the caller (emanuel.py), so
+    # this shared mixer claims no contract-level conservation on its own.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Emanuel (1991), J. Atmos. Sci. 48, 2313-2335 (CONVECT v4.3c "
+        "convect43c.f SIJ/ELIJ/MENT)"
+    ),
+    "idealized_test": (
+        "MENT(i,j) and the FT/FQ tendencies track the compiled convect43c.f "
+        "oracle (.physics-validator/emanuel/oracle/compare_mixing.py); a rest "
+        "/ no-CAPE column produces ~zero tendency."
+    ),
+}
+
+
 # --- pspec autoblock
 _MSE_SEARCH_SCALE_PA = 2000.0
 _EMANUEL_CHI_A = 1669.0

@@ -60,6 +60,43 @@ from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
 from legoesm.ocean.physics.lateral_mixing.output import LateralMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
 
+__physics_contract__ = {
+    "summary": (
+        "GM/Redi isopycnal mixing on the lat-lon Arakawa C-grid (Griffies 1998 "
+        "skew-flux tensor): per-tracer adiabatic eddy advection + isoneutral "
+        "diffusion via a single divergence of the combined face fluxes, with "
+        "DM95 tapering, optional Visbeck kappa, and land face-mask / Neumann-"
+        "fill treatment."
+    ),
+    "inputs": {
+        "q": "degC or psu (tracer)", "S_x": "1 (isopycnal slope)",
+        "S_y": "1 (isopycnal slope)", "mask": "1 (1=ocean)",
+        "u_mask": "1 (u-face)", "v_mask": "1 (v-face)",
+        "jacobian": "1 (z-star dimensionless)",
+        "kappa_GM": "m^2/s", "kappa_Redi": "m^2/s",
+    },
+    "outputs": {"dq_dt": "degC/s or psu/s (tracer tendency)"},
+    "sign_convention": (
+        "kappa_GM, kappa_Redi >= 0; isopycnal slopes S_x,S_y tapered (DM95); GM "
+        "skew flux adiabatic + Redi along-isopycnal down-gradient; fluxes are "
+        "combined at faces and passed through ONE divergence_cgrid so the "
+        "(mask-weighted) volume integral of the tracer is conserved; land faces "
+        "carry no flux; z positive up."
+    ),
+    # Adiabatic tracer redistribution: conserves volume-integrated tracer.
+    "conserves": ["tracer"],
+    "differentiable": True,
+    "reference": (
+        "Griffies (1998) JPO 28, 831-841; Danabasoglu & McWilliams (1995) "
+        "J. Climate 8, 2967-2987; Visbeck et al. (1997) JPO 27, 381-402"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_gm_redi_latlon_cgrid.py — sloping isopycnals "
+        "give a slope-flattening tendency conserving the volume-integrated "
+        "tracer; zero slope gives zero tendency; land faces carry no flux."
+    ),
+}
+
 # Division-guard epsilon (shared _gm_redi_common.EPS_DIV = 1e-10, #518 item 11):
 # larger than float32 machine eps to prevent intermediate blow-up in the
 # backward pass (see plan §7, AD safety).

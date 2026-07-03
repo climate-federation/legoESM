@@ -12,6 +12,44 @@ from legoesm.ocean.physics.convection.config import PlumeConfig
 from legoesm.ocean.physics.convection.output import OceanConvectionOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
+__physics_contract__ = {
+    "summary": (
+        "Entraining mass-flux convective plume: a surface-triggered plume "
+        "descends while entraining ambient water, and its detrainment plus "
+        "compensating subsidence redistribute heat and salt vertically (no "
+        "momentum mixing)."
+    ),
+    "inputs": {
+        "T": "degC", "S": "psu", "rho": "kg/m^3", "p_hydro": "Pa",
+        "jacobian": "1 (z-star dimensionless)",
+        "cfg.epsilon": "1/m (entrainment rate)", "cfg.T_excess": "K",
+    },
+    "outputs": {
+        "dT_dt": "degC/s", "dS_dt": "psu/s", "convection_flag": "1 (active)",
+    },
+    "sign_convention": (
+        "The plume is active where the parcel is denser than ambient (buoyant "
+        "descent under surface destabilisation); a vertical REDISTRIBUTION only "
+        "— an explicit surface-cell correction subtracts the column integral so "
+        "the dz-weighted column integral of T and S is conserved to machine "
+        "precision (no surface/floor flux); no momentum tendency; dry columns "
+        "masked to zero; z positive up."
+    ),
+    # Adiabatic vertical redistribution with an exact column-integral
+    # correction: conserves column-integrated heat (energy) and salt.
+    "conserves": ["energy", "salt"],
+    "differentiable": True,
+    "reference": (
+        "Entraining mass-flux plume convection; Paluszkiewicz & Romea (1997), "
+        "Dyn. Atmos. Oceans 26, 95-130"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_plume_convection.py — a surface-cooled unstable "
+        "column convects and the dz-weighted column integral of T, S is "
+        "conserved to machine precision; a stable column gives zero tendency."
+    ),
+}
+
 
 def plume_convection(
     T: jnp.ndarray,

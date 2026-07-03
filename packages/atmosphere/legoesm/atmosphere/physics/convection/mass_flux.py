@@ -66,6 +66,55 @@ from legoesm.atmosphere.physics.convection.config import (
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 
 
+__physics_contract__ = {
+    "summary": (
+        "Prognostic bulk mass-flux convection: Arakawa-Wu (M_c x fixed "
+        "sinusoidal profile) and a simplified single-updraft EDMF "
+        "(M_u = rho*a_u*w_u). Both apply the shared compensating-subsidence + "
+        "detrainment kernel; detrained condensate is handed to microphysics "
+        "(precip deferred). Smooth (differentiable)."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa",
+        "M_c": "kg/m^2/s (Arakawa-Wu prognostic mass flux) or a_u = updraft area fraction [1] (EDMF)",
+        "dt": "s",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "dq_c_conv_dt": "kg/kg/s (detrained cloud-water source to microphysics, >=0)",
+        "cape": "J/kg", "convective_mask": "1 (0-1 activation)",
+        "M_c_new": "kg/m^2/s (Arakawa-Wu) or a_u_new = updraft area fraction [1] (EDMF) — relaxed prognostic",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. M_profile>=0 is the UPWARD updraft mass "
+        "flux; the compensating environmental subsidence (-M/rho) warms/dries "
+        "where the updraft detrains and stabilizes the column. "
+        "dq_c_conv_dt >= 0 is a cloud-water SOURCE to microphysics (condensate "
+        "is NOT precipitated here). Compensating subsidence + detrainment "
+        "conserve column moist static energy (h=c_p*T+g*z+L_v*q_v) and total "
+        "water: exactly (machine precision) in the conservative implicit_flux "
+        "solve, to truncation order in the default advective solve."
+    ),
+    # The DEFAULT public path uses the advective subsidence solve, which
+    # conserves MSE + total water only to TRUNCATION ORDER (exact only in the
+    # opt-in implicit_flux solve), so no contract-level conservation is
+    # guaranteed; the column budget is closed downstream.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Arakawa & Wu (2013), J. Atmos. Sci. 70, 1977-1992; "
+        "Siebesma et al. (2007), J. Atmos. Sci. 64, 1230-1248; "
+        "Tiedtke (1989), Mon. Wea. Rev. 117, 1779-1800"
+    ),
+    "idealized_test": (
+        "tests/unit/test_physics_convection.py; a dry (low-RH) column produces "
+        "no convective cloud water (test_no_cloud_water_in_dry_column); CAPE=0 "
+        "-> zero convective_mask; the flux-form transport conserves column MSE "
+        "and total water (implicit_flux to machine precision)."
+    ),
+}
+
+
 # =============================================================================
 # Shared helpers — used by both the Arakawa-Wu and simplified EDMF paths.
 # =============================================================================
