@@ -25,6 +25,24 @@ References
   341-364. doi:10.1007/s00382-008-0441-3.
 - Businger, J. A., et al. (1971). Flux-profile relationships in the
   atmospheric surface layer. J. Atmos. Sci., 28, 181-189.
+- Dyer, A. J. (1974). A review of flux-profile relationships. Boundary-Layer
+  Meteorol., 7, 363-372.
+- Beljaars, A. C. M., & Holtslag, A. A. M. (1991). Flux parameterization over
+  land surfaces for atmospheric models. J. Appl. Meteorol., 30, 327-341.
+- Grachev, A. A., Andreas, E. L., Fairall, C. W., Guest, P. S., & Persson,
+  P. O. G. (2007). SHEBA flux-profile relationships in the stable atmospheric
+  boundary layer. Boundary-Layer Meteorol., 124, 315-333.
+  doi:10.1007/s10546-007-9177-6.
+- Gryanik, V. M., Lupkes, C., Grachev, A., & Sidorenko, D. (2020). New modified
+  and extended stability functions for the stable boundary layer based on SHEBA
+  and parametrizations of bulk transfer coefficients for climate models.
+  J. Atmos. Sci., 77, 2687-2716. doi:10.1175/JAS-D-19-0255.1.
+
+The stable-regime (zeta>0) similarity functions are selectable via the
+``stability_scheme`` argument to :func:`psi_m` / :func:`psi_h` /
+:func:`compute_most_fluxes`; the unstable branch stays Businger-Dyer for every
+scheme. Coefficient values cross-checked against CliMA ``SurfaceFluxes.jl``
+(``UniversalFunctions``).
 """
 
 from __future__ import annotations
@@ -48,6 +66,62 @@ NU_AIR = constants.nu_air  # kinematic viscosity of air [m²/s]
 #   "coare3"       — COARE 3.0
 #   "large_yeager" — Large & Yeager 2009 (OMIP)
 _VALID_BULK_SCHEMES = ("constant", "most", "coare3", "large_yeager")
+
+
+# ============================================================================
+# Stable-regime stability-function coefficients (empirical fits)
+# ============================================================================
+# ``stability_scheme`` selects the STABLE-branch (zeta = z/L > 0) Monin-Obukhov
+# similarity functions psi_m, psi_h. The UNSTABLE branch (zeta < 0) stays
+# Businger-Dyer for every scheme. These are EMPIRICAL fit coefficients (not
+# physical constants), tabulated here as module-level named constants -- not
+# inline literals -- each under its published-reference provenance block. Values
+# cross-checked against CliMA SurfaceFluxes.jl (UniversalFunctions / ClimaParams).
+_VALID_STABILITY_SCHEMES = (
+    "dyer1974",
+    "beljaars_holtslag1991",
+    "grachev2007_sheba",
+    "gryanik2020",
+)
+
+# --- Dyer (1974) linear stable functions ---
+# psi_m(zeta) = psi_h(zeta) = -beta*zeta (the historical default). Dyer (1974).
+_DYER_STABLE_BETA = 5.0
+
+# --- Beljaars & Holtslag (1991) stable functions ---
+#   psi_m(zeta) = -(a*zeta + b*(zeta - c/d)*exp(-d*zeta) + b*c/d)
+#   psi_h(zeta) = -((1 + 2a*zeta/3)^{3/2} + b*(zeta - c/d)*exp(-d*zeta) + b*c/d - 1)
+_BH91_A = 1.0
+_BH91_B = 0.667
+_BH91_C = 5.0
+_BH91_D = 0.35
+
+# --- Grachev et al. (2007) SHEBA stable functions ---
+# Momentum = their Eq. 12 (x = (1+zeta)^{1/3}, B_m = (1/b_m - 1)^{1/3});
+# heat = their Eq. 13 (B_h = (c_h^2 - 4)^{1/2}); b_m = a_m/6.5. Rational/log-
+# arctan fits valid to very large zeta (Arctic sea-ice / strongly-stable SBL).
+_GRACHEV_A_M = 5.0
+_GRACHEV_B_M = 5.0 / 6.5  # = 0.7692307692307693
+_GRACHEV_A_H = 5.0
+_GRACHEV_B_H = 5.0
+_GRACHEV_C_H = 3.0
+_GRACHEV_PR0 = 0.98       # neutral turbulent Prandtl number (scales psi_h)
+
+# --- Gryanik et al. (2020) modified SHEBA stable functions ---
+#   psi_m(zeta) = -3*(a_m/b_m)*((1 + b_m*zeta)^{1/3} - 1)
+#   psi_h(zeta) = -Pr0*(a_h/b_h)*ln(1 + b_h*zeta)
+_GRYANIK_A_M = 5.0
+_GRYANIK_B_M = 0.3
+_GRYANIK_A_H = 5.0
+_GRYANIK_B_H = 0.4
+_GRYANIK_PR0 = 0.98
+
+# Safety floor for the base of the Beljaars-Holtslag psi_h ^{3/2} power. In the
+# valid domain (zeta > 0) the base 1 + 2a*zeta/3 >= 1, so the floor is inert; it
+# only guards a direct out-of-domain (zeta <= 0) call from a NaN value/gradient
+# (fractional power of a non-positive base) -- the "clamp the base before the
+# power" AD-safety rule.
+_BH91_PSIH_BASE_FLOOR = 1e-6
 
 
 def apply_gustiness(u: jax.Array, v: jax.Array, gustiness: float) -> jax.Array:
@@ -110,6 +184,22 @@ def validate_bulk_scheme(scheme: str) -> None:
         )
 
 
+def validate_stability_scheme(stability_scheme: str) -> None:
+    """Raise ``ValueError`` on an unknown stable-regime stability scheme.
+
+    ``stability_scheme`` selects the STABLE-branch (zeta > 0) ``psi_m``/``psi_h``
+    forms; it is a static Python string resolved at trace time, so this validates
+    at function entry -- never inside a traced / ``jit`` body. Dispatch-hardening
+    (CLAUDE.md): a typo'd name must fail LOUDLY rather than silently fall through
+    to a default branch and run the wrong surface-layer physics.
+    """
+    if stability_scheme not in _VALID_STABILITY_SCHEMES:
+        raise ValueError(
+            f"Unknown stability_scheme {stability_scheme!r}; expected one of "
+            f"{_VALID_STABILITY_SCHEMES}."
+        )
+
+
 def large_yeager_neutral_cd(wind, *, nemo_parity: bool = False):
     """Large & Yeager (2009) Eq. 6 neutral 10-m drag coefficient ``C_DN``.
 
@@ -144,21 +234,110 @@ def large_yeager_neutral_cd(wind, *, nemo_parity: bool = False):
 
 
 # ============================================================================
-# Stability functions (Businger-Dyer)
+# Stability functions (Businger-Dyer unstable; selectable stable regime)
 # ============================================================================
+# Convention: zeta = z/L is the Monin-Obukhov stability parameter (L the Obukhov
+# length); zeta < 0 unstable, zeta > 0 stable. Every psi satisfies psi(0) = 0
+# and, in the stable regime, decreases monotonically (more negative) with
+# increasing zeta -- a more-stable column raises the log-law denominator
+# ``ln(z/z0) - psi`` and thereby REDUCES the drag/exchange coefficient and the
+# surface fluxes (the physically-required stable-regime suppression).
+#
+# The private ``_<scheme>_psi_{m,h}`` helpers below evaluate ONLY the stable
+# branch and are always called with a strictly-positive ``zeta_pos`` (floored at
+# 1e-10 by :func:`psi_m` / :func:`psi_h`), so no fractional power / log / cbrt
+# ever sees a non-positive argument. Together with the ``jnp.where`` split this
+# keeps the masked (inactive) branch finite in BOTH value and gradient -- the
+# classic AD-safe double-branch construction.
 
-def psi_m(zeta):
-    """MOST momentum stability function.
 
-    Unstable (ζ < 0): Businger-Dyer
-        ψ_m = 2 ln((1+x)/2) + ln((1+x²)/2) − 2 arctan(x) + π/2
-        where x = (1 − 16ζ)^{1/4}
-    Stable (ζ > 0): Dyer (1974)
-        ψ_m = −5ζ
+def _gryanik_psi_m(zeta_pos):
+    """Gryanik et al. (2020) stable momentum psi_m(zeta), zeta = zeta_pos > 0."""
+    a_m, b_m = _GRYANIK_A_M, _GRYANIK_B_M
+    return -3.0 * (a_m / b_m) * (jnp.cbrt(1.0 + b_m * zeta_pos) - 1.0)
 
-    Uses safe branching (min/max on inputs) to avoid NaN gradients
-    in the inactive branch.
+
+def _gryanik_psi_h(zeta_pos):
+    """Gryanik et al. (2020) stable heat psi_h(zeta), zeta > 0."""
+    a_h, b_h = _GRYANIK_A_H, _GRYANIK_B_H
+    return -_GRYANIK_PR0 * (a_h / b_h) * jnp.log1p(b_h * zeta_pos)
+
+
+def _beljaars_holtslag_psi_m(zeta_pos):
+    """Beljaars & Holtslag (1991) stable momentum psi_m(zeta), zeta > 0."""
+    a, b, c, d = _BH91_A, _BH91_B, _BH91_C, _BH91_D
+    return -(
+        a * zeta_pos
+        + b * (zeta_pos - c / d) * jnp.exp(-d * zeta_pos)
+        + b * c / d
+    )
+
+
+def _beljaars_holtslag_psi_h(zeta_pos):
+    """Beljaars & Holtslag (1991) stable heat psi_h(zeta), zeta > 0."""
+    a, b, c, d = _BH91_A, _BH91_B, _BH91_C, _BH91_D
+    # Clamp the ^{3/2} base to a positive floor BEFORE the power (AD-safety):
+    # in-domain (zeta > 0) the base 1 + 2a*zeta/3 >= 1 so the floor is inert.
+    base = jnp.maximum(1.0 + (2.0 / 3.0) * a * zeta_pos, _BH91_PSIH_BASE_FLOOR)
+    return -(
+        base ** 1.5
+        + b * (zeta_pos - c / d) * jnp.exp(-d * zeta_pos)
+        + b * c / d
+        - 1.0
+    )
+
+
+def _grachev_psi_m(zeta_pos):
+    """Grachev et al. (2007) SHEBA stable momentum psi_m(zeta), zeta > 0 (Eq. 12)."""
+    a_m, b_m = _GRACHEV_A_M, _GRACHEV_B_M
+    # Compile-time scalar constants via ``math`` (weakly-typed Python floats, so
+    # they never promote the traced float32 ``zeta_pos`` state to float64).
+    B_m = (1.0 / b_m - 1.0) ** (1.0 / 3.0)
+    sqrt3 = math.sqrt(3.0)
+    one_plus_Bm = 1.0 + B_m
+    quad_den = 1.0 - B_m + B_m * B_m
+    atan_ref = math.atan((2.0 - B_m) / (sqrt3 * B_m))
+    x = jnp.cbrt(1.0 + zeta_pos)  # (1 + zeta)^{1/3}
+    linear = -3.0 * (a_m / b_m) * (x - 1.0)
+    log_1 = 2.0 * jnp.log((x + B_m) / one_plus_Bm)
+    log_2 = -jnp.log((x * x - x * B_m + B_m * B_m) / quad_den)
+    atan_1 = jnp.arctan((2.0 * x - B_m) / (sqrt3 * B_m))
+    bracket = log_1 + log_2 + 2.0 * sqrt3 * (atan_1 - atan_ref)
+    return linear + (a_m * B_m) / (2.0 * b_m) * bracket
+
+
+def _grachev_psi_h(zeta_pos):
+    """Grachev et al. (2007) SHEBA stable heat psi_h(zeta), zeta > 0 (Eq. 13)."""
+    a_h, b_h, c_h = _GRACHEV_A_H, _GRACHEV_B_H, _GRACHEV_C_H
+    B_h = math.sqrt(c_h * c_h - 4.0)  # = sqrt(5); compile-time constant
+    coeff = a_h / B_h - (b_h * c_h) / (2.0 * B_h)
+    log_ref = math.log((c_h - B_h) / (c_h + B_h))
+    fractional_logs = jnp.log(
+        (2.0 * zeta_pos + c_h - B_h) / (2.0 * zeta_pos + c_h + B_h)
+    ) - log_ref
+    quadratic_log = (b_h / 2.0) * jnp.log1p(c_h * zeta_pos + zeta_pos * zeta_pos)
+    return _GRACHEV_PR0 * (-coeff * fractional_logs - quadratic_log)
+
+
+def psi_m(zeta, stability_scheme="dyer1974"):
+    """MOST momentum stability function psi_m(zeta).
+
+    Convention zeta = z/L (>0 stable). Unstable (zeta < 0) is Businger-Dyer for
+    every scheme:
+        psi_m = 2 ln((1+x)/2) + ln((1+x^2)/2) - 2 arctan(x) + pi/2,
+        with x = (1 - 16 zeta)^{1/4}.
+    Stable (zeta > 0) is selected by ``stability_scheme``:
+
+    - ``"dyer1974"``             : psi_m = -5 zeta (default; historical linear form)
+    - ``"beljaars_holtslag1991"``: Beljaars & Holtslag (1991)
+    - ``"grachev2007_sheba"``    : Grachev et al. (2007) SHEBA (Arctic/strong-stable)
+    - ``"gryanik2020"``          : Gryanik et al. (2020) modified SHEBA
+
+    Safe double-branch construction: the unstable expression is evaluated on
+    ``zeta_neg <= -1e-10`` and the stable expression on ``zeta_pos >= 1e-10`` so
+    the masked branch never produces a NaN value or gradient under ``jnp.where``.
     """
+    validate_stability_scheme(stability_scheme)
     zeta_c = jnp.clip(zeta, -10.0, 10.0)
     # Safe inputs: each branch only sees valid arguments
     zeta_neg = jnp.minimum(zeta_c, -1e-10)
@@ -171,26 +350,56 @@ def psi_m(zeta):
         - 2.0 * jnp.arctan(x)
         + jnp.pi / 2.0
     )
-    stable = -5.0 * zeta_pos
+
+    # Stable branch: static ``stability_scheme`` -> Python dispatch (only the
+    # selected expression is traced), not ``jnp.where`` (which would trace all).
+    if stability_scheme == "dyer1974":
+        stable = -_DYER_STABLE_BETA * zeta_pos
+    elif stability_scheme == "beljaars_holtslag1991":
+        stable = _beljaars_holtslag_psi_m(zeta_pos)
+    elif stability_scheme == "grachev2007_sheba":
+        stable = _grachev_psi_m(zeta_pos)
+    elif stability_scheme == "gryanik2020":
+        stable = _gryanik_psi_m(zeta_pos)
+    else:  # unreachable: validate_stability_scheme already guarded at entry
+        raise ValueError(
+            f"Unknown stability_scheme {stability_scheme!r}; expected one of "
+            f"{_VALID_STABILITY_SCHEMES}."
+        )
 
     return jnp.where(zeta_c < 0.0, unstable, stable)
 
 
-def psi_h(zeta):
-    """MOST heat/moisture stability function.
+def psi_h(zeta, stability_scheme="dyer1974"):
+    """MOST heat/moisture stability function psi_h(zeta).
 
-    Unstable (ζ < 0): Businger-Dyer
-        ψ_h = 2 ln((1+y)/2)  where y = (1 − 16ζ)^{1/2}
-    Stable (ζ > 0): Dyer (1974)
-        ψ_h = −5ζ
+    Convention zeta = z/L (>0 stable). Unstable (zeta < 0) is Businger-Dyer for
+    every scheme:
+        psi_h = 2 ln((1+y)/2),  y = (1 - 16 zeta)^{1/2}.
+    Stable (zeta > 0) is selected by ``stability_scheme`` (same options as
+    :func:`psi_m`; ``"dyer1974"`` default reproduces the historical -5 zeta).
     """
+    validate_stability_scheme(stability_scheme)
     zeta_c = jnp.clip(zeta, -10.0, 10.0)
     zeta_neg = jnp.minimum(zeta_c, -1e-10)
     zeta_pos = jnp.maximum(zeta_c, 1e-10)
 
     y = jnp.sqrt(1.0 - 16.0 * zeta_neg)
     unstable = 2.0 * jnp.log((1.0 + y) / 2.0)
-    stable = -5.0 * zeta_pos
+
+    if stability_scheme == "dyer1974":
+        stable = -_DYER_STABLE_BETA * zeta_pos
+    elif stability_scheme == "beljaars_holtslag1991":
+        stable = _beljaars_holtslag_psi_h(zeta_pos)
+    elif stability_scheme == "grachev2007_sheba":
+        stable = _grachev_psi_h(zeta_pos)
+    elif stability_scheme == "gryanik2020":
+        stable = _gryanik_psi_h(zeta_pos)
+    else:  # unreachable: validate_stability_scheme already guarded at entry
+        raise ValueError(
+            f"Unknown stability_scheme {stability_scheme!r}; expected one of "
+            f"{_VALID_STABILITY_SCHEMES}."
+        )
 
     return jnp.where(zeta_c < 0.0, unstable, stable)
 
@@ -220,6 +429,7 @@ def compute_most_fluxes(
     return_2m=False,
     z_diag=2.0,
     max_exchange_coeff=None,
+    stability_scheme="dyer1974",
 ):
     """Compute stability-dependent bulk fluxes via iterative MOST.
 
@@ -273,6 +483,15 @@ def compute_most_fluxes(
         shock (``C_e≈0.64`` vs a physical ~3.4e-3).  Intended for the land
         surface tile, whose stiff thin top layer at ``dt_rad`` is unstable to
         that shock; ocean/atmosphere callers never approach the floor.
+    stability_scheme : str
+        Stable-regime (zeta > 0) similarity functions ``psi_m``/``psi_h``.
+        ``"dyer1974"`` (default) is the historical linear ``-5 zeta`` and is
+        BYTE-IDENTICAL to the prior behaviour for every existing caller. The
+        non-linear alternatives ``"beljaars_holtslag1991"``,
+        ``"grachev2007_sheba"`` and ``"gryanik2020"`` do not collapse the fluxes
+        to zero under strong stability (Arctic sea-ice / nocturnal SBL). The
+        unstable branch (zeta < 0) stays Businger-Dyer regardless. Validated at
+        function entry (a typo raises ``ValueError``).
 
     Returns
     -------
@@ -292,6 +511,9 @@ def compute_most_fluxes(
     # wrong air-sea physics. ``coare3``/``large_yeager`` take dedicated
     # branches; ``constant``/``most`` are the (valid) fixed-roughness else path.
     validate_bulk_scheme(scheme)
+    # ``stability_scheme`` selects the STABLE-branch psi_m/psi_h; also a static
+    # string, so validate it once here rather than inside the traced loop body.
+    validate_stability_scheme(stability_scheme)
 
     # Resolve scalar reference heights. ``z_ref`` is the wind/momentum
     # height (always = z_u in the formulas below); z_t, z_q default to
@@ -415,9 +637,9 @@ def compute_most_fluxes(
         zeta_u = jnp.clip(z_u * inv_L, -10.0, 10.0)
         zeta_t = jnp.clip(z_t * inv_L, -10.0, 10.0)
         zeta_q = jnp.clip(z_q * inv_L, -10.0, 10.0)
-        psi_m_u = psi_m(zeta_u)
-        psi_h_t = psi_h(zeta_t)
-        psi_h_q = psi_h(zeta_q)
+        psi_m_u = psi_m(zeta_u, stability_scheme)
+        psi_h_t = psi_h(zeta_t, stability_scheme)
+        psi_h_q = psi_h(zeta_q, stability_scheme)
 
         # --- Roughness update (Python if resolved at trace time) ---
         if scheme == "coare3":
@@ -465,8 +687,8 @@ def compute_most_fluxes(
             ln_zr_t = jnp.log(z_t / 10.0)
             ln_zr_q = jnp.log(z_q / 10.0)
             zeta_10 = jnp.clip(10.0 * inv_L, -10.0, 10.0)
-            psi_m_10 = psi_m(zeta_10)
-            psi_h_10 = psi_h(zeta_10)
+            psi_m_10 = psi_m(zeta_10, stability_scheme)
+            psi_h_10 = psi_h(zeta_10, stability_scheme)
             dpsi_m = psi_m_u - psi_m_10
             dpsi_h_t = psi_h_t - psi_h_10
             dpsi_h_q = psi_h_q - psi_h_10
@@ -556,7 +778,9 @@ def compute_most_fluxes(
         theta_v_star = theta_star + _vT_coef * T_atm * q_star_val
         inv_L = -KAPPA * G * theta_v_star / (u_star_safe ** 2 * T_v)
         zeta_d = jnp.clip(z_diag * inv_L, -10.0, 10.0)
-        denom_d = jnp.log(z_diag / jnp.maximum(z0_t, 1e-12)) - psi_h(zeta_d)
+        denom_d = jnp.log(z_diag / jnp.maximum(z0_t, 1e-12)) - psi_h(
+            zeta_d, stability_scheme
+        )
         T_2m = T_sfc - (theta_star / KAPPA) * denom_d
         # Guard against profile extrapolation outside [T_atm, T_sfc].
         lo = jnp.minimum(T_atm, T_sfc)

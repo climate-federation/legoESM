@@ -84,7 +84,7 @@ class CouplerConfig(NamedTuple):
     co2_ppmv_default: float = 400.0   # Default CO2 concentration
     Cd_ocean: float = 1.5e-3          # Ocean drag coefficient
     Ch_ocean: float = 1.5e-3          # Ocean heat transfer coefficient
-    bulk_scheme: str = "constant"     # "constant", "coare3", "large_yeager"
+    bulk_scheme: str = "constant"     # "constant", "most", "coare3", "large_yeager"
     z_ref: float = 10.0               # Wind reference height [m]
     # Air temperature / specific humidity reference heights. Default to
     # z_ref for legacy single-height callers (lake, idealized adapter,
