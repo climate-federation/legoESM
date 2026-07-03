@@ -435,3 +435,15 @@ def test_yaml_nested_config_builds_tidal_forcing_config():
             "grid": {"type": "latlon_cgrid", "n_lat": 8, "n_lon": 16},
             "ocean": {"tidal_forcing": {"enabld": True}},  # typo
         }).to_ocean_config()
+
+
+def test_wire_enabled_step_without_time_raises():
+    """Dispatch hardening: tidal_forcing.enabled + a bare step(state, dt)
+    (no t_seconds — the production-driver calling pattern) must raise
+    loudly instead of running a silently tide-free simulation."""
+    state, model = _tide_basin(TidalForcingConfig(enabled=True))
+    with pytest.raises(ValueError, match="t_seconds"):
+        model.step(state, _WIRE_DT)
+    # With the time supplied the same call steps fine.
+    out = model.step(state, _WIRE_DT, t_seconds=jnp.asarray(0.0))
+    assert jnp.all(jnp.isfinite(out.eta.data))

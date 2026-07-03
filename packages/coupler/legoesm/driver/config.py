@@ -453,6 +453,14 @@ class ExperimentConfig(NamedTuple):
     # (the persistent tropical hfls<<Earth / R_TOA imbalance lever).  Threaded
     # into the atmosphere SurfaceLayerConfig + the slab SimpleOceanConfig.
     surface_gustiness_zi: float | None = None
+    # Stable-regime (zeta>0) MOST similarity functions for the MOST-family
+    # surface bulk schemes.  Threaded into BOTH the atmosphere
+    # SurfaceLayerConfig and the coupler ocean tile (CouplerConfig) by
+    # run_coupled so the two sides of the interface always use the SAME
+    # stable functions ("dyer1974" default = byte-identical -5*zeta;
+    # "grachev2007_sheba"/"gryanik2020" = SHEBA Arctic forms;
+    # "beljaars_holtslag1991").
+    surface_stability_scheme: str = "dyer1974"
     # Tiled (mosaic) surface fluxes: when True, the atmosphere surface
     # turbulent flux is computed SEPARATELY per surface tile and area-weighted
     # — ``surface_bulk_scheme`` (e.g. coare3) runs on the OCEAN tile, the
@@ -953,6 +961,13 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"surface_bulk_scheme must be one of {_valid_surface_bulk}, "
                 f"got {self.surface_bulk_scheme!r}"
+            )
+        _valid_stability = ("dyer1974", "beljaars_holtslag1991",
+                            "grachev2007_sheba", "gryanik2020")
+        if self.surface_stability_scheme not in _valid_stability:
+            errors.append(
+                f"surface_stability_scheme must be one of {_valid_stability}, "
+                f"got {self.surface_stability_scheme!r}"
             )
         # A non-"constant" surface scheme upgrades the ATMOSPHERE surface layer
         # (via _resolve_turbulence on the turbulence config).  With

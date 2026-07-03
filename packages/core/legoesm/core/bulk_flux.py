@@ -105,7 +105,12 @@ _GRACHEV_B_M = 5.0 / 6.5  # = 0.7692307692307693
 _GRACHEV_A_H = 5.0
 _GRACHEV_B_H = 5.0
 _GRACHEV_C_H = 3.0
-_GRACHEV_PR0 = 0.98       # neutral turbulent Prandtl number (scales psi_h)
+# Grachev et al. (2007) Eq. 13 assumes phi_h(0) = 1 — there is NO neutral-
+# Prandtl prefactor in the paper (d psi_h/d zeta|0+ = -a_h = -5), and CliMA
+# SurfaceFluxes.jl likewise pins Pr_0 = 1.0 for Grachev (CreateParametersExt:
+# "the formulation assumes phi_h(0) = 1.0").  Pr0 = 0.98 belongs to the
+# Gryanik et al. (2020) modification only (see _GRYANIK_PR0 below).
+_GRACHEV_PR0 = 1.0        # neutral turbulent Prandtl number (paper + CliMA)
 
 # --- Gryanik et al. (2020) modified SHEBA stable functions ---
 #   psi_m(zeta) = -3*(a_m/b_m)*((1 + b_m*zeta)^{1/3} - 1)

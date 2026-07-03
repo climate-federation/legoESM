@@ -415,4 +415,16 @@ UNREACHABLE_PARAMS = frozenset({
     'ocean.tidal_forcing.amplitude_scale',
     'ocean.tidal_forcing.beta_sal',
     'ocean.tidal_forcing.love_factor',
+    # atm: aerosol activation / prognostic aerosol (5) — CONSCIOUS entry.
+    # ActivationConfig hangs off MorrisonConfig.activation (reachable
+    # programmatically, wired into microphysics/integration.py) but is not yet
+    # on the AMIP flattened-scalar --params surface; PrognosticAerosolConfig is
+    # a tested driver hook not yet stepped by any production driver.  Wiring
+    # ActivationConfig onto the AMIP scalar map (+ the prognostic-aerosol
+    # driver hook) is the follow-up that shrinks these five away.
+    'atm.aerosol.ActivationConfig.w_char_m_s',
+    'atm.aerosol.PrognosticAerosolConfig.dry_dep_velocity_m_s',
+    'atm.aerosol.PrognosticAerosolConfig.emission_number_flux_m2_s',
+    'atm.aerosol.PrognosticAerosolConfig.so2_oxidation_timescale_s',
+    'atm.aerosol.PrognosticAerosolConfig.wet_scavenging_coeff_m2_kg',
 })

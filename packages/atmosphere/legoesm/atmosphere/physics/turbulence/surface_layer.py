@@ -121,6 +121,7 @@ def compute_surface_fluxes(
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
             gustiness_w_zi=getattr(config, "gustiness_w_zi", 0.0),
+            stability_scheme=getattr(config, "stability_scheme", "dyer1974"),
         )
         return tau_x, tau_y, shflx, lhflx, ustar
 
@@ -225,6 +226,7 @@ def _single_tile_flux(
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
             gustiness_w_zi=getattr(config, "gustiness_w_zi", 0.0),
+            stability_scheme=getattr(config, "stability_scheme", "dyer1974"),
         )
 
     # Constant neutral coefficients.

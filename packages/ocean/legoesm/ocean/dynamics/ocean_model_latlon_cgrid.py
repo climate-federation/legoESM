@@ -3990,6 +3990,23 @@ class LatLonCGridOceanModel:
                 assert_rigid_lid_single_rank,
             )
             assert_rigid_lid_single_rank()
+        # Eager fail-fast (dispatch hardening): an ENABLED equilibrium tide
+        # with no model time supplied would otherwise be a SILENT no-op (the
+        # in-body gate is ``enabled and t_seconds is not None``) — a driver
+        # stepping via bare ``step(state, dt)`` would run a tide-free
+        # simulation while the config says tides are on.  integrate()/
+        # integrate_scan() thread t automatically; direct steppers must pass
+        # ``t_seconds`` (elapsed model seconds; t=0 = constituent epoch).
+        _tf = getattr(self.config, "tidal_forcing", None)
+        if _tf is not None and _tf.enabled and t_seconds is None:
+            raise ValueError(
+                "tidal_forcing.enabled=True but step() was called without "
+                "t_seconds — the equilibrium tide needs the elapsed model "
+                "time and would otherwise be SILENTLY inert.  Pass "
+                "t_seconds=<elapsed seconds device scalar> to step()/"
+                "step_checked(), or drive the run via integrate()/"
+                "integrate_scan() which thread it automatically."
+            )
         return self._step_jitted(
             state, dt, freshwater, surface_forcing, sponge,
             grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds)
@@ -5131,10 +5148,17 @@ class LatLonCGridOceanModel:
         than the Euler fallback of 1.0.  At typical CFL values
         (≤ 0.3) this is stable.
         """
-        state = self.seed_scan_carry(state, dt)
-
         _tf = getattr(self.config, "tidal_forcing", None)
-        if _tf is not None and _tf.enabled:
+        _tide_on = _tf is not None and _tf.enabled
+        # seed_scan_carry probes the step via jax.eval_shape — with the tide
+        # on it must probe the SAME (t-threaded) signature, both so the shape
+        # discovery follows the tide-on trace and so the step()'s eager
+        # enabled-but-no-time guard does not trip inside the probe.
+        state = (self.seed_scan_carry(state, dt,
+                                      t_seconds=jnp.asarray(t0_seconds))
+                 if _tide_on else self.seed_scan_carry(state, dt))
+
+        if _tide_on:
             # Feed the traced per-step elapsed model time through xs (NOT a scan
             # carry change) so the equilibrium tide advances each step; grads
             # flow back to t and the config amplitudes. t=0 <-> the constituents'

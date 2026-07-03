@@ -266,3 +266,83 @@ def test_coupler_ocean_accepts_most():
 
     grad = jax.grad(coupler_loss)(sst)
     assert bool(jnp.all(jnp.isfinite(grad)))
+
+
+def test_coupler_stability_scheme_threads_to_fluxes():
+    """CouplerConfig.stability_scheme reaches compute_most_fluxes: under a
+    STABLE column (cold SST) the SHEBA stable functions give a different
+    sensible-heat flux than the Dyer default, and an unknown name raises."""
+    pytest.importorskip("legoesm.land.multilayer_land")
+    from legoesm.coupler.config import CouplerConfig
+    from legoesm.coupler.coupler import ocean_tile_response
+    from legoesm.core.coupling_fields import AtmToSurface
+
+    shape = (2, 3)
+
+    def full(v):
+        return jnp.full(shape, v)
+
+    forcing = AtmToSurface(
+        sw_down=full(200.0), lw_down=full(300.0),
+        precip_total=jnp.zeros(shape), precip_snow=jnp.zeros(shape),
+        T_lowest=full(290.0), q_lowest=full(0.008),
+        u_lowest=full(3.0), v_lowest=full(0.5),
+        p_lowest=full(95000.0), p_surface=full(101325.0),
+        rho_lowest=full(1.2), cos_zenith=full(0.5),
+        co2_ppmv=jnp.asarray(400.0),
+        has_radiation=jnp.asarray(1.0), has_precipitation=jnp.asarray(1.0),
+    )
+    sst = full(283.0)  # strongly stable: warm air over cold water
+    zeros = jnp.zeros(shape)
+
+    def shflx(stability):
+        cfg = CouplerConfig(bulk_scheme="most", bulk_n_iter=6,
+                            stability_scheme=stability)
+        return np.asarray(
+            ocean_tile_response(forcing, sst, zeros, zeros, cfg).shflx)
+
+    dyer = shflx("dyer1974")
+    sheba = shflx("grachev2007_sheba")
+    assert np.all(np.isfinite(dyer)) and np.all(np.isfinite(sheba))
+    assert not np.allclose(dyer, sheba), (
+        "stability_scheme did not reach the coupler MOST fluxes")
+    with pytest.raises(ValueError):
+        shflx("dyer1975")
+
+
+def test_sea_ice_stability_scheme_threads_to_fluxes():
+    """SeaIceConfig.stability_scheme reaches the air-ice MOST fluxes (the
+    Arctic/SHEBA use case): scheme choice changes the stable-column flux."""
+    pytest.importorskip("legoesm.ice.sea_ice")
+    from legoesm.core.coupling_fields import AtmToSurface
+    from legoesm.ice.config import SeaIceConfig
+    from legoesm.ice.sea_ice import _bulk_flux_dispatch
+
+    shape = (2, 3)
+
+    def full(v):
+        return jnp.full(shape, v)
+
+    forcing = AtmToSurface(
+        sw_down=full(50.0), lw_down=full(200.0),
+        precip_total=jnp.zeros(shape), precip_snow=jnp.zeros(shape),
+        T_lowest=full(268.0), q_lowest=full(0.002),
+        u_lowest=full(4.0), v_lowest=full(0.5),
+        p_lowest=full(100000.0), p_surface=full(101325.0),
+        rho_lowest=full(1.35), cos_zenith=full(0.2),
+        co2_ppmv=jnp.asarray(400.0),
+        has_radiation=jnp.asarray(1.0), has_precipitation=jnp.asarray(1.0),
+    )
+    T_ice = full(263.0)  # ice colder than air: stable surface layer
+
+    def shflx(stability):
+        cfg = SeaIceConfig(bulk_scheme="most", bulk_n_iter=6,
+                           stability_scheme=stability)
+        _, _, sh, _ = _bulk_flux_dispatch(T_ice, forcing, cfg, U_min=0.5)
+        return np.asarray(sh)
+
+    dyer = shflx("dyer1974")
+    gryanik = shflx("gryanik2020")
+    assert np.all(np.isfinite(dyer)) and np.all(np.isfinite(gryanik))
+    assert not np.allclose(dyer, gryanik), (
+        "stability_scheme did not reach the sea-ice MOST fluxes")

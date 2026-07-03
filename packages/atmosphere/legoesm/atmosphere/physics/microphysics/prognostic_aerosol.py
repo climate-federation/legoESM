@@ -135,30 +135,14 @@ __param_spec__ = {
                 "reference": "precipitation wet-scavenging coefficient",
                 "shape": None,
             },
-            "mode_r_g_um": {
-                "units": "um", "bounds": (1.0e-2, 5.0e-1),
-                "tunable_tier": 3, "transform": "sigmoid",
-                "category": "aerosol_activation",
-                "reference": "prognostic accumulation-mode geometric radius",
-                "shape": None,
-            },
-            "mode_sigma_g": {
-                "units": "1", "bounds": (1.2, 2.5),
-                "tunable_tier": 3, "transform": "sigmoid",
-                "category": "aerosol_activation",
-                "reference": "prognostic accumulation-mode geometric std",
-                "shape": None,
-            },
-            "mode_kappa": {
-                "units": "1", "bounds": (1.0e-2, 1.2),
-                "tunable_tier": 3, "transform": "sigmoid",
-                "category": "aerosol_activation",
-                "reference": "prognostic accumulation-mode hygroscopicity",
-                "shape": None,
-            },
         },
     },
 }
+# NOTE: the lognormal SHAPE of the mode the prognostic number drives is owned
+# by ``ActivationConfig`` (mode_r_g_um / mode_sigma_g / mode_kappa, mode 0) in
+# ``arg_activation.py`` — the SINGLE owner ``arg_cdnc_from_config`` actually
+# reads.  Duplicate copies here were removed (they were consumed by nothing,
+# so tuning them was a trained no-op).
 
 # --- AD / numerics floors -------------------------------------------------
 _DZ_FLOOR_M = 1.0               # layer-thickness floor [m] (E/dz, v_dep/dz)
@@ -184,10 +168,10 @@ class PrognosticAerosolConfig(NamedTuple):
     wet_scavenging_coeff_m2_kg : float
         Wet-scavenging coefficient [m^2/kg] on the precip rate [kg/m^2/s]
         (SINK, all levels).
-    mode_r_g_um, mode_sigma_g, mode_kappa : float
-        Assumed lognormal shape of the prognostic accumulation mode used when
-        the prognostic number drives ARG activation: geometric-mean dry radius
-        [um], geometric std [-] and kappa-Koehler hygroscopicity [-].
+
+    The lognormal SHAPE of the mode this number drives (geometric radius,
+    std, hygroscopicity) is owned by ``ActivationConfig`` mode 0 — see
+    :mod:`.arg_activation` — not duplicated here.
     """
 
     enabled: bool = False
@@ -195,9 +179,6 @@ class PrognosticAerosolConfig(NamedTuple):
     dry_dep_velocity_m_s: float = 1.0e-3
     so2_oxidation_timescale_s: float = 8.64e4
     wet_scavenging_coeff_m2_kg: float = 1.0
-    mode_r_g_um: float = 0.05
-    mode_sigma_g: float = 2.0
-    mode_kappa: float = 0.6
 
 
 def _sources_and_sink_rate(

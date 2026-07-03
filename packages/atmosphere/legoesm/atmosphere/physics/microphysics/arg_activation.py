@@ -60,6 +60,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics.microphysics._warm_rain import kelvin_coefficient
 from legoesm.thermo import saturation_vapor_pressure
 
 __physics_contract__ = {
@@ -201,11 +202,12 @@ def _broadcast_mode(mode_1d: jnp.ndarray, field: jnp.ndarray) -> jnp.ndarray:
 def kohler_curvature_A(T: jnp.ndarray) -> jnp.ndarray:
     """Koehler curvature (Kelvin) length ``A = 2 sigma_w/(rho_w R_v T)`` [m].
 
-    Uses the specific gas constant of water vapour ``R_v = R/M_w`` so no molar
-    mass is needed (equivalent to CliMA ``2 sigma M_w/(rho_w R T)``).
+    Thin alias for the SINGLE canonical :func:`.._warm_rain.kelvin_coefficient`
+    (also used by fast-SBM nucleation, oracle AKOE) so the Kelvin term cannot
+    drift between activation schemes.  Uses the specific gas constant of water
+    vapour ``R_v = R/M_w`` (equivalent to CliMA ``2 sigma M_w/(rho_w R T)``).
     """
-    return (2.0 * constants.sigma_water
-            / (constants.rho_water * constants.R_v * T))
+    return kelvin_coefficient(T)
 
 
 def mode_critical_supersaturation(
@@ -232,6 +234,14 @@ def condensation_growth_coeff_G(
     exactly once).  ``D_v`` = water-vapour diffusivity in air, ``k_a`` =
     thermal conductivity of air, ``e_s`` = saturation vapour pressure over
     liquid.
+
+    RELATED IMPLEMENTATIONS (same F_D+F_K denominator, different refinements
+    — kept separate DELIBERATELY, do not silently unify without a benchmark):
+    ``fast_sbm/diffusional_growth.py`` uses a T,p-dependent ``D_v`` (oracle
+    D_MY; ~2x this constant value at 500 hPa) + ventilation, and
+    ``sdm/condensation.py`` adds the Fukuta-Walter Knudsen correction.  ARG2000
+    (and CliMA CloudMicrophysics) use the constant-coefficient form below,
+    faithful to the published closed-form S_max derivation.
     """
     vapor_term = constants.rho_water * constants.R_v * T / (e_s * constants.D_vapor)
     thermal_term = (constants.rho_water * constants.L_v / (constants.k_air * T)
@@ -418,10 +428,33 @@ def arg_cdnc_from_config(
         return arg_cdnc(w_arr, T, p, number, r_g, sigma_g, kappa)
 
     # Prognostic single-mode feed: number is a per-cell field [1/m^3]; the
-    # remaining modes (if any) are dropped and the prognostic mode inherits the
-    # config mode-0 shape (guaranteed present by the mode validation above).
-    # vmap the per-cell single-mode activation.
+    # prognostic mode inherits the config mode-0 shape (guaranteed present by
+    # the mode validation above).  vmap the per-cell single-mode activation.
+    #
+    # Dispatch hardening: the prognostic feed supports SINGLE-mode configs
+    # only in this pass — silently dropping configured coarse/Aitken modes
+    # from the S_max competition would be a silent physics change (a coarse
+    # mode measurably suppresses accumulation-mode activation), so a
+    # multi-mode config + prognostic feed must fail loudly.
+    if n_modes > 1:
+        raise NotImplementedError(
+            "Prognostic aerosol_number feed supports a SINGLE configured "
+            f"lognormal mode, got {n_modes} modes in ActivationConfig. "
+            "Multi-mode competition with a prognostic mode-0 number is not "
+            "yet implemented; drop the extra modes explicitly or disable the "
+            "prognostic feed."
+        )
     number_field = jnp.asarray(aerosol_number, dtype=T.dtype)
+    # Layout guard: the flatten+vmap below validates only the total element
+    # count, so a transposed (nlev, ncol) field would silently misassociate
+    # aerosol with the wrong grid cells.  Shapes are static — enforce exact
+    # agreement with the thermodynamic fields at trace time.
+    if number_field.shape != T.shape:
+        raise ValueError(
+            f"aerosol_number shape {number_field.shape} must exactly match "
+            f"the T/p field shape {T.shape} (same layout, no transposition — "
+            "element count alone is not checked downstream)."
+        )
     r_g0 = r_g[:1]
     sigma0 = sigma_g[:1]
     kappa0 = kappa[:1]
