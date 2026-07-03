@@ -64,22 +64,39 @@ def test_bootstrap_rejects_unknown_mode():
         bootstrap(distributed_mode="bogus")
 
 
-def test_validate_strict_rejects_spmd_checkpointing():
+def test_validate_strict_accepts_spmd_checkpointing():
+    """cs_spmd step 5a: checkpointing is supported under spmd — the
+    save_checkpoint tail gathers the sharded state to a host replica on
+    every process and writes root-only.  validate_strict must accept it."""
     from legoesm.driver.config import OutputConfig
     cfg = _cfg(distributed=True, distributed_mode="spmd")
     cfg = cfg._replace(output=OutputConfig(
         output_dir="", diag_days=0, checkpoint_days=5))
-    with pytest.raises(ValueError, match="checkpoint"):
-        cfg.validate_strict()
+    cfg.validate_strict()
 
 
-def test_validate_strict_rejects_spmd_diagnostics():
+def test_validate_strict_accepts_spmd_diagnostics_perf_mode():
+    """cs_spmd step 5b: perf-mode diagnostics (scalar SPMD-global
+    reductions + root-gated flushes) are supported under spmd."""
     from legoesm.driver.config import OutputConfig
     cfg = _cfg(distributed=True, distributed_mode="spmd")
     cfg = cfg._replace(output=OutputConfig(
         output_dir="", diag_days=2, checkpoint_days=0))
-    with pytest.raises(ValueError, match="diag"):
-        cfg.validate_strict()
+    cfg.validate_strict()
+
+
+def test_validate_strict_accepts_spmd_full_collect():
+    """cs_spmd step 5c: the full collect() gathers sharded fields to host
+    replicas on every process, so cmip_output and
+    diagnostics_perf_mode='never' are both legal under spmd now."""
+    from legoesm.driver.config import OutputConfig
+    cfg = _cfg(distributed=True, distributed_mode="spmd")
+    cfg._replace(output=OutputConfig(
+        output_dir="", diag_days=2, checkpoint_days=0,
+        cmip_output=True)).validate_strict()
+    cfg._replace(output=OutputConfig(
+        output_dir="", diag_days=2, checkpoint_days=0,
+        diagnostics_perf_mode="never")).validate_strict()
 
 
 def test_setup_devices_spmd_rejects_n_devices_mismatch():
