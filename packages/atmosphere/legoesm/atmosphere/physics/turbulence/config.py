@@ -248,6 +248,12 @@ class SurfaceLayerConfig(NamedTuple):
     # 0 = off (byte-identical), ~600 = enable the w* free-convection gust over a
     # calm warm ocean.  Only effective with bulk_scheme coare3/large_yeager.
     gustiness_w_zi: float = 0.0
+    # Stable-regime (zeta>0) MOST similarity functions for the MOST-family
+    # bulk schemes: "dyer1974" (default, historical -5*zeta) |
+    # "beljaars_holtslag1991" | "grachev2007_sheba" | "gryanik2020".
+    # Threaded together with the coupler ocean tile by run_coupled so the
+    # interface cannot split; unknown -> ValueError at dispatch.
+    stability_scheme: str = "dyer1974"
 
 
 class SmagorinskyConfig(NamedTuple):

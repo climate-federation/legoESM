@@ -26,6 +26,45 @@ from legoesm.ocean.physics.vertical_mixing.config import RichardsonVerticalMixin
 from legoesm.ocean.physics.vertical_mixing.output import VerticalMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
+__physics_contract__ = {
+    "summary": (
+        "Pacanowski & Philander (1981) Richardson-number dependent vertical "
+        "mixing: nu = nu0/(1+alpha*Ri)^n + nu_b, kappa = nu/(1+alpha*Ri) + "
+        "kappa_b (POP/E3SM convention), yielding an effective Ri-growing "
+        "Prandtl number."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "degC", "S": "psu",
+        "rho": "kg/m^3", "jacobian": "1 (z-star dimensionless)",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "degC/s", "dS_dt": "psu/s",
+        "K_v": "m^2/s", "A_v": "m^2/s",
+    },
+    "sign_convention": (
+        "A_v (=nu) and K_v (=kappa) >= 0 and DECREASE monotonically with the "
+        "gradient Richardson number Ri = N^2/S^2 (unstable Ri<0 clipped to "
+        "maximum mixing); z positive up. By default (apply_diffusion=True) it "
+        "applies flux-form vertical diffusion with a no-flux interior BC "
+        "(surface stress/flux applied separately), so it conserves the "
+        "column-integrated quantity; in apply_diffusion=False mode it produces "
+        "the Ri-dependent K_v/A_v only."
+    ),
+    # Default path (apply_diffusion=True) applies conservative flux-form vertical
+    # diffusion (no-flux interior BC), so it conserves column-integrated heat
+    # (energy), salt and momentum — like constant.py. Profile mode produces
+    # K_v/A_v only (conserves nothing, but applies nothing either).
+    "conserves": ["energy", "salt", "momentum"],
+    "differentiable": True,
+    "reference": "Pacanowski, R. C. & Philander, S. G. H. (1981), JPO 11, 1443-1451",
+    "idealized_test": (
+        "tests/unit/test_physics_ocean.py + "
+        "tests/ocean/unit/test_richardson_number_helper.py — strong "
+        "stratification / large Ri reduces K toward background; an unstable "
+        "column (Ri<0) gives maximal K."
+    ),
+}
+
 _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 
 

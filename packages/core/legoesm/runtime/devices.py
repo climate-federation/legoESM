@@ -99,8 +99,16 @@ def setup_devices(
                     f"n_devices={n_devices} conflicts.  Use "
                     f"n_devices='auto' or match the global count."
                 )
+            # allow_level_fallback passes through (codex audit MAJOR,
+            # 2026-07-02): a 4-process/4-GPU cs_spmd launch with the
+            # flag must route to the level mesh like the single-process
+            # path, not die on the invalid explicit 4-device face mesh.
+            # (The SPMD halo backend activation is face-gated and simply
+            # stays local for a level mesh — correct: level sharding
+            # replicates the horizontal stencil.)
             return _mesh.create_device_mesh(
                 n_devices=len(gdev), devices=gdev,
+                allow_level_fallback=allow_level_fallback,
             )
         if grid_type == "latlon":
             # Lat-lon band MPI: build a LatLonBandLayout and activate

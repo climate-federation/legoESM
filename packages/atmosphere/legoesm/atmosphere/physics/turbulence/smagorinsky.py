@@ -34,6 +34,44 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
 )
 
 
+__physics_contract__ = {
+    "summary": (
+        "Smagorinsky-Lilly strain-dependent eddy-viscosity turbulence: "
+        "K_m = (C_s l)^2 |S| sqrt(max(0, 1 - Ri/Pr_t)), K_h = K_m/Pr_t, "
+        "applied by implicit vertical diffusion with surface-flux boundary "
+        "conditions."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "T_sfc": "K", "q_sfc": "kg/kg", "rho": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "Km": "m^2/s", "Kh": "m^2/s", "shflx": "W/m^2", "lhflx": "W/m^2",
+        "ustar": "m/s", "h_pbl": "m",
+    },
+    "sign_convention": (
+        "Down-gradient mixing: du_dt ~ (1/rho) d/dz(rho Km du/dz); Km, Kh >= 0 "
+        "and vanish where Ri >= Pr_t (Lilly stable cutoff). shflx, lhflx are "
+        "positive UPWARD from the surface and are injected as the lower "
+        "boundary condition (a source/sink), so the resolved column budget is "
+        "NOT closed. z increases upward; level index -1 is the surface."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Smagorinsky (1963), Mon. Wea. Rev. 91, 99-164; "
+        "Lilly (1962), Tellus 14, 148-172"
+    ),
+    "idealized_test": (
+        "tests/atmosphere/hydrostatic/unit/test_turbulence.py: a strongly "
+        "stable column (Ri >= Pr_t) shuts mixing off (Km -> 0); with zero "
+        "surface flux a neutral column gives ~zero tendencies."
+    ),
+}
+
+
 def smagorinsky_turbulence(
     u: jax.Array,
     v: jax.Array,

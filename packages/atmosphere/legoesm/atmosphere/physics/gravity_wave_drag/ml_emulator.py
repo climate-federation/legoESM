@@ -16,6 +16,44 @@ import equinox as eqx
 from legoesm import constants
 from legoesm.atmosphere.physics.gravity_wave_drag.config import GWDMLEmulatorConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
+
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "Neural (Equinox MLP) gravity-wave-drag emulator: maps per-level "
+        "(u, v, T, log p, z, sin/cos lat) to per-level GWD wind and "
+        "temperature tendencies; a learned surrogate, not a physical closure."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "rho": "kg/m^3", "lat": "rad", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "eps_gwd": "W/m^2",
+    },
+    "sign_convention": (
+        "Signs are LEARNED, not enforced: du_dt/dv_dt/dT_dt are direct network "
+        "outputs (residual-scaled by _GWD_OUTPUT_SCALE when use_residual). "
+        "eps_gwd = -sum(rho*(u*du_dt+v*dv_dt)*dz) is a diagnostic of the mean-"
+        "flow KE change and is NOT constrained to match dT_dt, so an untrained "
+        "or mis-trained model can add momentum/energy (eps_gwd<0)."
+    ),
+    # Learned emulator: no hard conservation guarantee. dT_dt is an independent
+    # network output (not the KE->heat tie-back), so energy is not conserved by
+    # construction; over-claiming any conserved quantity would be wrong.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Learned Equinox-MLP GWD surrogate (legoESM); architecture per "
+        "microphysics/ml_emulator.py (no external physical reference)"
+    ),
+    "idealized_test": (
+        "tests/atmosphere/hydrostatic/unit/test_gravity_wave_drag.py: untrained "
+        "residual-scaled model -> O(1e-2) tendencies with correct shapes; "
+        "fully differentiable (jax.grad through the eqx MLP)"
+    ),
+}
 # Raw-NN-output scaling to physical tendency magnitude (emulator default).
 _GWD_OUTPUT_SCALE = 0.01
 

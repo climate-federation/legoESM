@@ -38,6 +38,51 @@ from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
 from legoesm.ocean.physics.vertical_mixing.output import VerticalMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
+__physics_contract__ = {
+    "summary": (
+        "LMD94 K-Profile Parameterization: diagnose the boundary-layer depth "
+        "from a bulk Richardson criterion, set K_v/A_v in the boundary layer "
+        "from similarity velocity scales and a cubic shape function, add "
+        "non-local (counter-gradient) tracer transport for convective columns, "
+        "and Ri-dependent interior mixing below."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "degC", "S": "psu", "rho": "kg/m^3",
+        "eta": "m", "jacobian": "1 (z-star dimensionless)",
+        "tau_x": "N/m^2", "tau_y": "N/m^2", "B_f": "m^2/s^3",
+        "Q_sfc_T": "degC m/s", "Q_sfc_S": "psu m/s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "degC/s", "dS_dt": "psu/s",
+        "K_v": "m^2/s", "A_v": "m^2/s",
+    },
+    "sign_convention": (
+        "Diffusivities K_v, A_v >= 0; B_f>0 is destabilising (convective) and "
+        "wind/buoyancy forcing set the boundary-layer depth; the down-gradient "
+        "diffusion and the non-local (counter-gradient) transport it applies "
+        "are flux-form redistributions (the non-local flux vanishes at the "
+        "surface and BL base), with surface fluxes applied separately; z "
+        "positive up. The non-local (counter-gradient) tracer tendencies are "
+        "ALWAYS applied; the local down-gradient diffusion is applied when "
+        "apply_diffusion=True, otherwise the K_v/A_v profiles are handed to the "
+        "implicit solver (which applies them conservatively)."
+    ),
+    # Both the always-applied non-local transport (vanishing at the surface and
+    # BL base) and the flux-form local diffusion (no-flux interior BC, surface
+    # fluxes separate) are conservative redistributions, so the scheme conserves
+    # column-integrated heat (energy), salt and momentum whether the local
+    # diffusion is applied here or deferred to the implicit solver.
+    "conserves": ["energy", "salt", "momentum"],
+    "differentiable": True,
+    "reference": "Large, McWilliams & Doney (1994), Rev. Geophys. 32, 363-403",
+    "idealized_test": (
+        "tests/ocean/unit/test_kpp_langmuir.py + "
+        "tests/ocean/unit/test_vmix_k_profiles_direct.py — wind/convective "
+        "forcing deepens the boundary layer and enhances K within it; a "
+        "stratified rest column gives near-background K."
+    ),
+}
+
 _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 
 

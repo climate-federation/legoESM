@@ -65,6 +65,43 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
 )
 from legoesm.core.operators_voronoi import vector_laplacian_del2_3d
 
+__physics_contract__ = {
+    "summary": (
+        "Jansen & Held (2014) deterministic energy backscatter: a negative "
+        "(anti-diffusive) Laplacian viscosity du/dt = -nu_bs*grad^2(u) "
+        "(nu_bs = c_bs*Delta*sqrt(E) >= 0) re-injects resolved kinetic energy "
+        "drawn from a prognostic subgrid-KE reservoir E."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "E": "m^2/s^2 (subgrid KE reservoir)",
+        "cfg.c_bs": "1 (dimensionless)",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "E_new": "m^2/s^2",
+    },
+    "sign_convention": (
+        "nu_bs >= 0 but applied with the OPPOSITE sign to diffusion (negative "
+        "Laplacian), so the tendency INJECTS resolved KE (growth ~ +nu_bs*k^2) "
+        "and dissipates enstrophy; the reservoir E evolves as (resolved viscous "
+        "dissipation source) - (backscatter sink) - (linear damping), clamped "
+        "to [E_min, E_max]. Does NOT conserve resolved KE (energy is drawn FROM "
+        "the subgrid reservoir); energetic consistency holds only over the full "
+        "dissipation<->reservoir<->backscatter cycle."
+    ),
+    # Negative viscosity INJECTS resolved KE — not a conservative operator.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Jansen, M. F. & Held, I. M. (2014), Ocean Modelling 80, 36-48, "
+        "doi:10.1016/j.ocemod.2014.06.002; Bachman (2019), Ocean Modelling 136"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_backscatter.py — the momentum tendency INCREASES "
+        "resolved KE (sum u.du_dt.area >= 0) for E>0; E=0 or disabled gives zero "
+        "tendency; the reservoir stays within [E_min, E_max]."
+    ),
+}
+
 _EPS = float(jnp.finfo(jnp.float32).eps)
 
 

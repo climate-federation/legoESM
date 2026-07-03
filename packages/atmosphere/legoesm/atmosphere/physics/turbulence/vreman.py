@@ -28,6 +28,36 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+__physics_contract__ = {
+    "summary": (
+        "Vreman (2004) algebraic sub-grid eddy viscosity from the nine "
+        "resolved velocity gradients: nu_t = c sqrt(max(Bbeta,0)/(a_ij a_ij)), "
+        "with per-direction filter widths for anisotropic grids."
+    ),
+    "inputs": {
+        "a11": "1/s", "a12": "1/s", "a13": "1/s",
+        "a21": "1/s", "a22": "1/s", "a23": "1/s",
+        "a31": "1/s", "a32": "1/s", "a33": "1/s",
+        "dx": "m", "dy": "m", "dz": "m",
+        "c_vreman": "1", "nu_floor": "m^2/s",
+    },
+    "outputs": {"nu_t": "m^2/s"},
+    "sign_convention": (
+        "Diagnostic eddy viscosity only (no tendency). nu_t >= nu_floor >= 0 "
+        "by construction and -> nu_floor wherever the flow is laminar or "
+        "two-dimensional (only one non-zero gradient direction, e.g. a "
+        "well-resolved 1-D shear)."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": "Vreman (2004), Phys. Fluids 16, 3670, doi:10.1063/1.1785131",
+    "idealized_test": (
+        "tests/unit/test_vreman_sgs_plane.py: a pure 1-D shear (single "
+        "non-zero gradient direction) gives nu_t = nu_floor; nu_t >= nu_floor "
+        "always; the gradient stays finite at rest (arg=0)."
+    ),
+}
+
 _EPS = 1.0e-30
 
 

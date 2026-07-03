@@ -45,6 +45,42 @@ class MicrophysicsEmulator(eqx.Module):
         return self.layers[-1](x)
 
 
+__physics_contract__ = {
+    "summary": (
+        "Learned (Equinox-MLP) microphysics emulator: predicts the column "
+        "microphysical tendencies + surface precipitation from the thermo/"
+        "hydrometeor state, as a fast differentiable surrogate for a bulk "
+        "scheme."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",
+        "hydrometeors.q_r": "kg/kg", "hydrometeors.q_i": "kg/kg",
+        "p_full": "Pa", "rho": "kg/m^3", "dz": "m", "dt": "s",
+        "model": "trained MicrophysicsEmulator (Equinox module, passed explicitly)",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_dt": "kg/kg/s",
+        "dq_r_dt": "kg/kg/s", "dq_i_dt": "kg/kg/s", "dq_s_dt": "kg/kg/s",
+        "precipitation": "kg/m^2/s",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. The tendencies emulate a bulk microphysics "
+        "scheme (dT_dt latent heating, precipitation >= 0 via a softplus head). "
+        "Being a LEARNED surrogate it enforces NO hard conservation -- no "
+        "contract-level conservation is claimed; positivity of precip is "
+        "structural, other outputs are unconstrained."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": "Learned microphysics emulator (Equinox MLP); cf. Rasp, Pritchard & Gentine (2018), PNAS 115, 9684-9689",
+    "idealized_test": (
+        "tests/unit/test_physics_microphysics.py — the emulator returns finite "
+        "MicrophysicsOutput tendencies with non-negative surface precipitation "
+        "and is differentiable wrt the input state."
+    ),
+}
+
+
 def ml_microphysics(
     T: jax.Array,
     q_v: jax.Array,

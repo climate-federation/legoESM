@@ -25,6 +25,43 @@ import jax.numpy as jnp
 
 from legoesm import constants
 
+__physics_contract__ = {
+    "summary": (
+        "Implicit (backward-Euler) flux-form vertical diffusion of a column "
+        "scalar via the Thomas tridiagonal algorithm; no-flux top boundary "
+        "and a prescribed surface-flux bottom boundary. A theta variant "
+        "diffuses potential temperature so a dry adiabat stays neutral."
+    ),
+    "inputs": {
+        "phi": "same as diffused field (m/s, K, or kg/kg)",
+        "K_half": "m^2/s", "rho": "kg/m^3", "dz": "m", "dz_half": "m",
+        "dt": "s",
+        "surface_flux": "phi_unit*kg/m^2/s (= rho K dphi/dz, positive upward)",
+    },
+    "outputs": {"phi_new": "same as phi (diffused field)"},
+    "sign_convention": (
+        "Down-gradient: flux F = rho K dphi/dz on interfaces, tendency "
+        "dphi/dt = (1/rho) dF/dz. The top interface is no-flux; the bottom "
+        "receives the PRESCRIBED surface_flux (positive upward = a source "
+        "when nonzero). z increases upward; level index 0 is the top, -1 the "
+        "surface. With surface_flux=0 the mass-weighted column integral "
+        "Sum(rho dz phi) is conserved to machine precision (flux form); the "
+        "theta variant conserves the mass-weighted column theta but NOT "
+        "column enthalpy (Exner varies with height)."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Thomas (1949) tridiagonal algorithm; backward-Euler flux-form "
+        "vertical diffusion (Richtmyer & Morton 1967)"
+    ),
+    "idealized_test": (
+        "surface_flux=0 -> Sum(rho dz phi) conserved to machine precision "
+        "(no-flux top+bottom, flux form); constant-K diffusion relaxes an "
+        "arbitrary profile toward the mass-weighted column mean."
+    ),
+}
+
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 
 
