@@ -85,3 +85,13 @@ IB-cluster bootstrap timeouts (verify with `ip addr` on a gpu node).
 Account: export `SBATCH_ACCOUNT=<project>` (or pass `sbatch -A <project>`) —
 SLURM directives cannot expand env vars.
 
+
+## 2026-07 lane E: icosahedral/MPAS multicontroller
+
+`gpu_multinode_scaling.sbatch` gained lane E (`RUN_MPAS=1`, default on):
+icosahedral MPAS PE over `jax.distributed` + NCCL via
+`scripts/bench/bench_mpas_spmd_scaling.py` (cell-partition reorder +
+ppermute halos), 6 tasks = 2 nodes x 3 GPUs (`nCells = 10*4^L + 2` splits
+evenly for 1/2/3/6). Subdiv-4 parity+conservation smoke gates the timed
+`ICO_LEVEL` (default L7) case. Federation gate:
+`tests/parallel/test_mpas_spmd_multicontroller_selfspawn.py`.
