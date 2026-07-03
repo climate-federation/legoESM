@@ -78,14 +78,18 @@ def test_bench_bypasses_ref_out_contract(tmp_path, capsys):
     with the device message, never the missing-arg message)."""
     import os
     mod = _load()
+    # Force the device guard so the test NEVER proceeds into a real
+    # driver build, even in an environment exposing >= 24 devices
+    # (codex round-17 Medium — environment-dependent unit test).
+    mod.N_DEVICES = 10**6
     try:
         for mode in ("untiled", "tiled"):
             rc = mod.main(["--mode", mode, "--bench",
                            "--workdir", str(tmp_path)])
             out = capsys.readouterr().out
             assert "requires --" not in out
-            if rc == 2:
-                assert "devices" in out  # device guard, not arg contract
+            assert rc == 2
+            assert "devices" in out  # device guard, not arg contract
     finally:
         # main() sets the experimental opt-in env for tiled mode.
         os.environ.pop("LEGOESM_TILED_DYCORE_EXPERIMENTAL", None)
