@@ -2180,6 +2180,12 @@ class ModelDriver:
                 "mass fixer (conservation_fixer + fix_mass) or set "
                 "zero_mean_ps_tendency=False."
             )
+        logger.info(
+            "Tiled dycore step ROUTED into the compiled segment "
+            "(P4 increment 1b, experimental): kt=%d, dt=%.1f s, "
+            "mesh axes %s.", int(kt_i), float(dt),
+            getattr(dc.mesh, "axis_names", None),
+        )
         return make_tiled_cc_step(_m, dc.mesh, kt=int(kt_i), dt=float(dt))
 
     def _bootstrap_runtime(self) -> None:
@@ -2520,21 +2526,34 @@ class ModelDriver:
         if getattr(dc, "tiling", (1, 1)) != (1, 1):
             # Sub-face tiling (>6 devices — the production GPU strong-
             # scaling regime).  The tiled ppermute EXCHANGE layer is
-            # parity-proven (cubesphere_exchange, 24-proc), but it is
-            # NOT yet wired into the production dycore STEP (the
-            # tile-aware operator stage is the P4 milestone; the dycore
-            # still slices full-face arrays).  So activating it here
-            # would be wrong — but SILENTLY keeping the local backend
-            # hides that a tiled run gets degraded (non-SPMD) halos.
-            # Warn loudly instead of returning silently (codex P1,
-            # 2026-06-13).
+            # parity-proven (cubesphere_exchange, 24-proc), but this
+            # SPMD halo backend is NOT the tiled step's exchange path
+            # (the tiled stage carries its own in-stage shard_map halos)
+            # — so it stays off either way.  What changes is the
+            # DYNAMICS routing: with enable_tiled_dycore the compiled
+            # segment runs the tiled D-grid core (P4 increment 1b,
+            # experimental); without it the run stays on the GSPMD-auto
+            # sliced step, which will NOT strong-scale past 6 devices.
+            # Warn/inform loudly instead of returning silently (codex
+            # P1, 2026-06-13; message split when the flag landed).
+            if getattr(self.config, "enable_tiled_dycore", False):
+                logger.info(
+                    "Sub-face tiling %s (%d devices): tiled dycore "
+                    "step ACTIVE (enable_tiled_dycore, P4 increment "
+                    "1b — experimental); the tiled stage uses its own "
+                    "in-stage halos (the ppermute SPMD backend stays "
+                    "off).",
+                    dc.tiling, dc.n_devices,
+                )
+                return
             logger.warning(
                 "SPMD halo backend NOT activated for sub-face tiling "
-                "%s (%d devices): the tiled dycore STEP is unwired "
-                "(P4 milestone) — this run uses the LOCAL halo backend "
+                "%s (%d devices): enable_tiled_dycore is OFF, so this "
+                "run uses the GSPMD-auto sliced step with LOCAL halos "
                 "and will NOT strong-scale past 6 devices.  Use "
-                "face-only sharding (1/2/3/6 devices) or multi-node "
-                "1-process-per-node SPMD for production strong scaling.",
+                "face-only sharding (1/2/3/6 devices), multi-node "
+                "1-process-per-node SPMD, or the (experimental) "
+                "--enable-tiled-dycore path for sub-face scaling.",
                 dc.tiling, dc.n_devices,
             )
             return
