@@ -87,6 +87,17 @@ class NEMOModelRecipeConfig:
     bottom_drag_cd: float = 2.5e-3
     bottom_drag_bg_velocity: float = 0.1
     bottom_drag_bbl_thickness: float = 100.0
+    # NEMO zdfdrg drag law ("legacy" = the historical MOM6-style
+    # quadratic-with-floor above, baseline-preserving default;
+    # "nemo_quadratic" = zdfdrg np_non_lin, the ORCA1 namelist selection
+    # (namdrg ln_non_lin, rn_Cd0=1e-3, rn_ke0=2.5e-3);
+    # "nemo_loglayer" = np_loglayer with rn_z0/rn_Cdmax).  The NEMO
+    # schemes ignore bottom_drag_cd/bottom_drag_bg_velocity.
+    bottom_drag_scheme: str = "legacy"
+    bottom_drag_cd0: float = 1.0e-3     # NEMO rn_Cd0 [-]
+    bottom_drag_cdmax: float = 0.1      # NEMO rn_Cdmax [-]
+    bottom_drag_z0: float = 3.0e-3      # NEMO rn_z0 [m]
+    bottom_drag_ke0: float = 2.5e-3     # NEMO rn_ke0 [m²/s²]
 
     gm_redi: bool = True
     kappa_GM: float = 600.0
@@ -270,6 +281,11 @@ def nemo_lat_lon_model_config(
         bottom_drag_r=bottom_drag_r,
         bottom_drag_bg_velocity=cfg.bottom_drag_bg_velocity,
         bottom_drag_bbl_thickness=cfg.bottom_drag_bbl_thickness,
+        bottom_drag_scheme=cfg.bottom_drag_scheme,
+        bottom_drag_cd0=cfg.bottom_drag_cd0,
+        bottom_drag_cdmax=cfg.bottom_drag_cdmax,
+        bottom_drag_z0=cfg.bottom_drag_z0,
+        bottom_drag_ke0=cfg.bottom_drag_ke0,
         gm_redi=gm_redi_cfg,
         physics=_nemo_physics_config(cfg),
         normalize_freshwater=cfg.normalize_freshwater,

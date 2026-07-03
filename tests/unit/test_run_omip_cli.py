@@ -33,6 +33,19 @@ def test_issue484_new_omip_flags_flow_to_config():
     assert cfg.vertical_mixing.kpp.A_bg == 2e-4
 
 
+def test_langmuir_flag_flows_to_config():
+    """--langmuir toggles KPPConfig.enable_langmuir (default off)."""
+    off = build_config_from_args(parse_args(["--grid", "latlon"]))
+    assert off.vertical_mixing.kpp.enable_langmuir is False
+    on = build_config_from_args(parse_args([
+        "--grid", "latlon", "--langmuir",
+        "--langmuir-coeff", "0.12", "--langmuir-number-default", "0.25",
+    ]))
+    assert on.vertical_mixing.kpp.enable_langmuir is True
+    assert on.vertical_mixing.kpp.langmuir_coeff == 0.12
+    assert on.vertical_mixing.kpp.langmuir_number_default == 0.25
+
+
 def test_default_nlev_is_40_for_climate_fidelity():
     """The default ocean vertical resolution is L40 (climate-usable minimum;
     SOTA OMIP models use ~60-75).  Pass --nlev to override."""
@@ -215,3 +228,88 @@ def test_example_params_file_loads_and_applies():
     cfg = build_config_from_args(parse_args(["--grid", "latlon"]))
     out = apply_params_to_config(cfg, load_params_config(str(p)), driver="run_omip")
     assert out.vertical_mixing.kpp.K_bg == 1.0e-5
+
+
+def test_iwm_flags_flow_to_config():
+    """--iwm* flags round-trip into VerticalMixingConfig.iwm (zdfiwm)."""
+    off = build_config_from_args(parse_args(["--grid", "latlon"]))
+    assert off.vertical_mixing.iwm.enabled is False
+    assert off.vertical_mixing.iwm.mevar is False
+    assert off.vertical_mixing.iwm.tsdiff is False
+
+    on = build_config_from_args(parse_args([
+        "--grid", "latlon",
+        "--iwm", "--iwm-mevar",
+        "--iwm-power-bot", "2e-4",
+        "--iwm-power-cri", "3e-4",
+        "--iwm-power-nsq", "4e-4",
+        "--iwm-power-sho", "5e-4",
+        "--iwm-scale-bot", "250.0",
+        "--iwm-scale-cri", "125.0",
+    ]))
+    iwm = on.vertical_mixing.iwm
+    assert iwm.enabled is True
+    assert iwm.mevar is True
+    assert iwm.tsdiff is False
+    assert iwm.power_bot_wm2 == 2e-4
+    assert iwm.power_cri_wm2 == 3e-4
+    assert iwm.power_nsq_wm2 == 4e-4
+    assert iwm.power_sho_wm2 == 5e-4
+    assert iwm.scale_bot_m == 250.0
+    assert iwm.scale_cri_m == 125.0
+
+
+def test_bottom_drag_scheme_flags_parse():
+    """--bottom-drag-scheme + NEMO zdfdrg parameter flags parse; the ORACLE
+    (ORCA1 namdrg_bot) values are the flag defaults."""
+    args = parse_args(["--grid", "latlon"])
+    assert args.bottom_drag_scheme == "legacy"
+    assert args.bottom_drag_cd0 == 1.0e-3
+    assert args.bottom_drag_cdmax == 0.1
+    assert args.bottom_drag_z0 == 3.0e-3
+    assert args.bottom_drag_ke0 == 2.5e-3
+
+    args = parse_args([
+        "--grid", "latlon",
+        "--bottom-drag-scheme", "nemo_loglayer",
+        "--bottom-drag-cd0", "2e-3",
+        "--bottom-drag-ke0", "1e-3",
+    ])
+    assert args.bottom_drag_scheme == "nemo_loglayer"
+    assert args.bottom_drag_cd0 == 2e-3
+    assert args.bottom_drag_ke0 == 1e-3
+
+    with pytest.raises(SystemExit):
+        parse_args(["--grid", "latlon",
+                    "--bottom-drag-scheme", "nemo_typo"])
+
+
+def test_iwm_override_installs_physics_on_flat_latlon():
+    """codex r2 #1: --iwm on the flat-bottom lat-lon path (config.physics is
+    None) must NOT silently no-op — the override helper installs a minimal
+    physics pipeline carrying the IWM rider, forces the implicit vertical
+    solve, and forces the NEMO zdfiwm_init molecular backgrounds."""
+    import jax
+    jax.config.update("jax_enable_x64", True)
+    from legoesm import constants
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from scripts.run.run_omip import _apply_drag_iwm_overrides
+
+    args = parse_args(["--grid", "latlon", "--iwm"])
+    grid = create_latlon_grid(n_lat=6, n_lon=8)
+    z = create_ocean_z_star(n_levels=4, H_max=2000.0)
+    config = LatLonCGridOceanConfig.from_flat()   # physics=None (flat path)
+    model = LatLonCGridOceanModel(grid, z, config)
+    config2, model2 = _apply_drag_iwm_overrides(
+        args, "latlon", grid, z, config, model)
+    assert config2.physics is not None
+    assert config2.physics.vertical_mixing.iwm.enabled is True
+    assert config2.implicit_vertical_mixing is True
+    assert config2.A_v == constants.nu_ocean_molecular
+    assert config2.K_v == 1.0e-10
+    assert model2._iwm_forcing is None            # uniform fallback mode

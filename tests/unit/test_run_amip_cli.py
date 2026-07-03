@@ -344,8 +344,9 @@ def test_surface_tiled_defaults_off():
     assert cfg.surface_tiled is False
 
 
-def test_surface_tiled_requires_louis_rejected():
-    """--surface-tiled with a non-louis scheme fails strict validation."""
+def test_surface_tiled_unsupported_turbulence_rejected():
+    """--surface-tiled with a scheme that cannot consume the injected tiled
+    surface_flux tuple (e.g. holtslag_boville) fails strict validation."""
     parser = build_arg_parser()
     args = parser.parse_args([
         "--dataset", "analytical",
@@ -357,6 +358,25 @@ def test_surface_tiled_requires_louis_rejected():
     cfg = build_config_from_args(args)
     with pytest.raises(ValueError, match="surface_tiled.*louis"):
         cfg.validate_strict()
+
+
+@pytest.mark.parametrize("scheme", ["louis", "clubb_lite", "clubb"])
+def test_surface_tiled_accepts_flux_consuming_schemes(scheme):
+    """--surface-tiled validates with EVERY kernel that accepts the injected
+    tiled surface_flux=(tau_x, tau_y, shflx, lhflx, ustar) BC: louis and the
+    CLUBB family (clubb routes it through clubb_step's kinematic interface)."""
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--turbulence", scheme,
+        "--surface-bulk-scheme", "coare3",
+        "--slab-land-active",
+        "--surface-tiled",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.turbulence == scheme
+    assert cfg.validate_strict() is None
 
 
 def test_soil_bucket_flags_flow_to_config():

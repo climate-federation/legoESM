@@ -397,6 +397,7 @@ def build_case(
     preconditioner: str = "jacobi",
     fixed_iters: int = 60,
     force_pcg: bool = False,
+    wet_balance: bool = False,
 ):
     """Build (model, state, total_cells, layout) for one benchmark case.
 
@@ -436,9 +437,33 @@ def build_case(
             slice_zcoord_to_band,
         )
 
+        band_boundaries = None
+        if wet_balance:
+            # Wet-cell-aware bands: boundaries equalize OCEAN cells per band
+            # instead of rows, so land-heavy bands stop idling at every
+            # collective. Deterministic host computation from the GLOBAL mask
+            # (available on every rank before the layout is armed).
+            import numpy as np
+
+            from legoesm.parallel.latlon_mpi import wet_band_boundaries
+            wet_rows = np.asarray(state_global.land_mask.data).sum(axis=1)
+            band_boundaries = wet_band_boundaries(
+                wet_rows, n_ranks, min_rows=MIN_ROWS_PER_RANK)
+
         layout = initialize_distributed_latlon(
             global_n_lat=n_lat, global_n_lon=n_lon,
+            band_boundaries=band_boundaries,
         )
+        if wet_balance and layout.rank == 0:
+            rows = np.diff(band_boundaries)
+            wet_per_band = [
+                float(np.asarray(state_global.land_mask.data)
+                      [band_boundaries[r]:band_boundaries[r + 1]].sum())
+                for r in range(n_ranks)
+            ]
+            print(f"[wet-balance] boundaries={list(band_boundaries)} "
+                  f"rows/band={rows.tolist()} wet-cells/band="
+                  f"{[int(x) for x in wet_per_band]}", flush=True)
         # (3) Band geometry + band vertical coordinate (z* carries no
         # per-cell arrays -> slice_zcoord_to_band is a pass-through, but
         # keeps this build correct if partial cells are enabled later).
@@ -2031,6 +2056,14 @@ def build_parser() -> argparse.ArgumentParser:
              "`mpirun -np 2 ... --device gpu` on a 2-GPU node.",
     )
     p.add_argument(
+        "--wet-balance", action="store_true",
+        help="Wet-cell-aware latitude bands: band boundaries equalize OCEAN "
+             "cells per rank (wet_band_boundaries on the global land_mask) "
+             "instead of row counts, so land-heavy bands stop idling. "
+             "MPI-band path only (n_ranks > 1); every rank computes the "
+             "identical boundaries from the identical global mask.",
+    )
+    p.add_argument(
         "--baro-solver", choices=list(BARO_SOLVER_CHOICES),
         default="implicit_cn",
         help="Barotropic solver. implicit_cn matches the serial "
@@ -2285,6 +2318,7 @@ def main() -> int:
         preconditioner=args.preconditioner,
         fixed_iters=int(args.pcg_fixed_iters),
         force_pcg=args.force_pcg,
+        wet_balance=args.wet_balance,
     )
     cells_per_rank = total_cells // n_ranks
 

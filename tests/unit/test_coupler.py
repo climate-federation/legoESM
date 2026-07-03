@@ -108,11 +108,13 @@ def test_coupling_fields_shapes():
     # and ``surface_mass_flux`` (F3) slots in the Physical_Consistency
     # cycle for tile-blended water, ice→ocean heat, ice→ocean stress
     # reaction, and phase-aware moisture mass closure.
-    sfc = SurfaceToAtm(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
-    assert len(sfc) == 21  # 19 (salt_flux) → 20 (river_runoff_flux) → 21 (ice_lake_freshwater_flux)
+    sfc = SurfaceToAtm(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
+    # merged union: T_rad (HEAD, radiative-equiv skin T) + river_runoff_flux +
+    # ice_lake_freshwater_flux (origin/main) → 22 fields (salt_flux is #20).
+    assert len(sfc) == 22
 
     tile = TileResponse(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
-    assert len(tile) == 19
+    assert len(tile) == 20  # 19 + T_rad (optional emission-equiv skin T, default None)
 
 
 # ==============================================================================
@@ -787,6 +789,74 @@ def test_blending_is_area_weighted():
     assert jnp.allclose(blended.T_sfc, expected, atol=1e-6)
 
 
+def test_tile_blend_lw_flux_conservation():
+    """Flux-conserving tile blend: the atmosphere LW boundary reproduces the
+    area-weighted sum of per-tile lw_up for MIXED cells.
+
+        eps_grid*sigma*T_rad^4 + (1-eps_grid)*La  ==  sum_i f_i * lw_up_i
+
+    Independently area-averaging T_sfc and emissivity (the previous behaviour)
+    fails this because T^4 and eps*T^4 are nonlinear.  ``T_rad`` is derived from
+    the area-weighted EMISSION FLUX so the identity holds exactly.
+
+    Critically the LAND tile here emits at the canopy temperature T_rad while
+    reporting T_sfc = soil temperature (the real two-leaf canopy convention), so
+    the blend MUST use each tile's T_rad — not T_sfc — or it is non-conserving
+    exactly for vegetated cells.
+    """
+    from legoesm import constants
+    sb = constants.sigma_sb
+    La = 320.0
+    z = jnp.zeros(SHAPE)
+
+    def _resp(T, eps, T_rad=None):
+        # lw_up emitted at the EMISSION temperature (T_rad if the tile decouples
+        # its radiative temperature from its skin/soil temperature, else T_sfc).
+        T_emit = T if T_rad is None else T_rad
+        return TileResponse(
+            T_sfc=jnp.full(SHAPE, T), albedo=z,
+            emissivity=jnp.full(SHAPE, eps), z0=z, q_surface=z,
+            shflx=z, lhflx=z, tau_x=z, tau_y=z,
+            lw_up=jnp.full(SHAPE, eps * sb * T_emit ** 4 + (1.0 - eps) * La),
+            u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z,
+            freshwater_flux=z, ocean_heat_extraction=z,
+            ocean_stress_x=z, ocean_stress_y=z,
+            surface_mass_flux=z, salt_flux=z,
+            T_rad=None if T_rad is None else jnp.full(SHAPE, T_rad),
+        )
+
+    fracs = TileFractions(
+        f_ocean=jnp.full(SHAPE, 0.4), f_ice=jnp.full(SHAPE, 0.2),
+        f_land=jnp.full(SHAPE, 0.3), f_lake=jnp.full(SHAPE, 0.1),
+    )
+    # Mixed coastal/MIZ cell.  LAND/canopy: T_sfc=295 (soil) but emits at
+    # T_rad=289 (canopy column) — the case that breaks a T_sfc-based blend.
+    blended = blend_tiles(
+        _resp(305.0, 0.97),                       # ocean (T_rad = T_sfc)
+        _resp(255.0, 0.97),                       # ice
+        _resp(295.0, 0.96, T_rad=289.0),          # land/canopy: soil != canopy T
+        _resp(288.0, 0.98),                       # lake
+        fracs,
+    )
+
+    # Property-coupling boundary RRTMGP forms from the blended (eps_grid, T_rad).
+    boundary = (blended.emissivity * sb * blended.T_rad ** 4
+                + (1.0 - blended.emissivity) * La)
+    # Must equal the coupler's own area-weighted blended upward LW.
+    assert jnp.allclose(boundary, blended.lw_up, atol=1e-6)
+    # T_rad genuinely differs from the naive area-weighted T_sfc (non-vacuous).
+    assert not jnp.allclose(blended.T_rad, blended.T_sfc, atol=1e-2)
+
+    # Pure CANOPY cell: the grid T_rad must collapse to the canopy EMISSION
+    # temperature (289), NOT the reported soil T_sfc (295) — the exact bug.
+    pure = TileFractions(
+        f_ocean=z, f_ice=z, f_land=jnp.ones(SHAPE), f_lake=z)
+    bp = blend_tiles(_resp(305.0, 0.97), _resp(255.0, 0.97),
+                     _resp(295.0, 0.96, T_rad=289.0), _resp(288.0, 0.98), pure)
+    assert jnp.allclose(bp.T_rad, 289.0, atol=1e-6)
+    assert jnp.allclose(bp.T_sfc, 295.0, atol=1e-6)
+
+
 # ==============================================================================
 # Test accumulator
 # ==============================================================================
@@ -806,6 +876,7 @@ def test_accumulator_mean():
     # Step 1: shflx=10, dt=100
     sfc1 = SurfaceToAtm(
         T_sfc=jnp.full(SHAPE, 280.0),
+        T_rad=jnp.full(SHAPE, 280.0),
         albedo=z, emissivity=z, z0=z, q_surface=z,
         shflx=jnp.full(SHAPE, 10.0), lhflx=z,
         tau_x=z, tau_y=z, lw_up=z,
@@ -826,6 +897,43 @@ def test_accumulator_mean():
     # Expected: (10*100 + 30*300) / 400 = 10000/400 = 25
     assert jnp.allclose(result.shflx, 25.0, atol=1e-6)
     assert jnp.allclose(result.T_sfc, 280.0, atol=1e-6)
+
+
+def test_accumulator_lw_flux_conservation_varying_substeps():
+    """Window-mean RRTMGP LW boundary == dt-weighted mean surface EMISSION even
+    when T_rad AND emissivity vary across substeps.
+
+    The accumulator stores the emission flux ``eps*sigma*T_rad^4`` and
+    reconstructs ``T_rad`` at flush, so ``mean_eps*sigma*mean_T_rad^4`` equals
+    ``mean(eps*sigma*T_rad^4)``.  Averaging T_rad and eps INDEPENDENTLY (the
+    naive form) breaks this because both T^4 and eps*T^4 are nonlinear.
+    """
+    from legoesm import constants
+    sb = constants.sigma_sb
+    z = jnp.zeros(SHAPE)
+
+    def _sfc(T_rad, eps):
+        return SurfaceToAtm(
+            T_sfc=jnp.full(SHAPE, 300.0), T_rad=jnp.full(SHAPE, T_rad), albedo=z,
+            emissivity=jnp.full(SHAPE, eps), z0=z, q_surface=z, shflx=z, lhflx=z,
+            tau_x=z, tau_y=z, lw_up=z, u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z,
+            freshwater_flux=z, ocean_heat_extraction=z, ocean_stress_x=z,
+            ocean_stress_y=z, surface_mass_flux=z, salt_flux=z,
+            river_runoff_flux=z, ice_lake_freshwater_flux=z)
+
+    acc = reset_accumulator(SHAPE)
+    acc = accumulate(acc, _sfc(310.0, 0.95), 100.0)   # substep 1
+    acc = accumulate(acc, _sfc(280.0, 0.99), 300.0)   # substep 2: different T+eps
+    m = mean_accumulator(acc)
+
+    emit_recon = m.emissivity * sb * m.T_rad ** 4
+    emit_true = (100.0 * 0.95 * sb * 310.0 ** 4
+                 + 300.0 * 0.99 * sb * 280.0 ** 4) / 400.0
+    assert jnp.allclose(emit_recon, emit_true, atol=1e-6)
+    # Non-vacuous: the naive independent-mean form differs by ~3.5 W/m2.
+    t_naive = (100.0 * 310.0 + 300.0 * 280.0) / 400.0
+    e_naive = (100.0 * 0.95 + 300.0 * 0.99) / 400.0
+    assert not jnp.allclose(e_naive * sb * t_naive ** 4, emit_true, atol=1.0)
 
 
 # ==============================================================================

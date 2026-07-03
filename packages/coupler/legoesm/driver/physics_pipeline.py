@@ -19,7 +19,10 @@ logger = logging.getLogger(__name__)
 
 from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity
-from legoesm.forcing.surface_utils import blend_surface_temperature
+from legoesm.forcing.surface_utils import (
+    blend_surface_property,
+    blend_surface_temperature,
+)
 from legoesm.core.grid_adapters import make_adapter
 from legoesm.core.physics_output import PhysicsOutput  # shared tendency pytree (moved to core)
 
@@ -293,6 +296,29 @@ class PhysicsPipeline:
         """
         return self.f_land * land_field + (1.0 - self.f_land) * ocean_field
 
+    def static_surface_emissivity(self, sic, *, land_active):
+        """Surface LW emissivity blend radiation emits with absent an override.
+
+        Mirrors the ocean/ice (+ optional land) blend formed in
+        ``compute_radiation_core`` so the coupled drivers can invert the held
+        ``lw_net_sfc`` back to gross ``lw_down`` with the SAME emissivity field
+        radiation actually used — not a constant ocean/ice approximation (which
+        ignores the configured ``emissivity_*`` values and the land tile, biasing
+        the reconstructed surface forcing).
+
+        Parameters
+        ----------
+        sic : array
+            Sea-ice concentration [0, 1].
+        land_active : bool
+            Whether the land tile contributes (``f_land`` set AND a land skin
+            temperature present); matches ``compute_radiation_core``'s gate.
+        """
+        emissivity = blend_surface_property(
+            sic, self.emissivity_ice, self.emissivity_ocean)
+        if land_active and self.f_land is not None:
+            emissivity = self._blend_land(emissivity, self.emissivity_land)
+        return emissivity
     def _land_surface_bulk(self, T_low, u_low, v_low, p_s):
         """Lowest-level air density [kg/m^3] and wind speed [m/s] for the
         land surface bulk fluxes.
@@ -1186,7 +1212,8 @@ class PhysicsPipeline:
             # PER TILE (ocean bulk scheme on ocean, land Monin-Obukhov on
             # land) and inject it as the BL bottom boundary condition, rather
             # than running one scheme on the blended surface temperature.
-            # Gated to the louis scheme by ExperimentConfig.validate_strict.
+            # Restricted to the kernels that accept the injected ``surface_flux``
+            # tuple (louis / clubb_lite / clubb) by ExperimentConfig.validate_strict.
             # ``beta_land`` (None unless the soil-water bucket is active)
             # soil-moisture-limits the land tile's latent flux.
             if (self.surface_tiled and self.f_land is not None
@@ -1424,6 +1451,7 @@ class PhysicsPipeline:
                                u=None, v=None, dt=None, T_land=None,
                                sfc_albedo_override=None,
                                sfc_T_override=None,
+                               sfc_emissivity_override=None,
                                conv_precip=None, land_ml=None, w_land=None,
                                snow=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
@@ -1440,8 +1468,6 @@ class PhysicsPipeline:
         surface energy balance.  Otherwise ``T_land`` is returned
         unchanged and the surface is pure ocean/ice.
         """
-        from legoesm.forcing.surface_utils import blend_surface_property
-
         _albedo_ice = self.albedo_ice if albedo_ice is None else albedo_ice
         _albedo_ocean = self.albedo_ocean if albedo_ocean is None else albedo_ocean
 
@@ -1528,6 +1554,14 @@ class PhysicsPipeline:
             albedo = sfc_albedo_override
         if sfc_T_override is not None:
             T_sfc = sfc_T_override
+        # Dynamic surface emissivity (tile-blended, incl. the canopy's LAI-
+        # dependent eps_eff) replaces the static blend so the LW boundary
+        # ``eps·σ·T_sfc⁴ + (1−eps)·La`` uses the SAME emissivity the land tile
+        # used to form its conservative ``LW_out`` / ``T_surface`` — closing the
+        # land→atmosphere LW consistency gap.  ``None`` ⇒ static blend (AMIP /
+        # uncoupled), byte-identical.
+        if sfc_emissivity_override is not None:
+            emissivity = sfc_emissivity_override
 
         p_full = p_s[..., None] * self.sigma_full
         p_half = p_s[..., None] * self.sigma_half
@@ -1835,6 +1869,7 @@ class PhysicsPipeline:
                          N_c=None, N_r=None, N_i=None,
                          sfc_albedo_override=None,
                          sfc_T_override=None,
+                         sfc_emissivity_override=None,
                          sfc_shflx_override=None,
                          sfc_lhflx_override=None,
                          tke=None, qke=None, gwd_spectrum=None,
@@ -1851,10 +1886,10 @@ class PhysicsPipeline:
                  C_H, C_E, albedo_ice, albedo_ocean,
                  ghg_vmr_override, T_land,
                  q_i, q_s, q_g, N_c, N_r, N_i,
-                 sfc_albedo_override, sfc_T_override,
+                 sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                  sfc_shflx_override, sfc_lhflx_override,
-                 tke, qke, gwd_spectrum, conv_precip, land_ml, w_land,
-                 snow) = args
+                 tke, qke, gwd_spectrum,
+                 conv_precip, land_ml, w_land, snow) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa, T_land_new, land_ml_new) = \
@@ -1871,6 +1906,7 @@ class PhysicsPipeline:
                         u=u, v=v, dt=dt, T_land=T_land,
                         sfc_albedo_override=sfc_albedo_override,
                         sfc_T_override=sfc_T_override,
+                        sfc_emissivity_override=sfc_emissivity_override,
                         conv_precip=conv_precip, land_ml=land_ml, w_land=w_land,
                         snow=snow,
                     )
@@ -1922,10 +1958,10 @@ class PhysicsPipeline:
                  C_H, C_E, albedo_ice, albedo_ocean,
                  ghg_vmr_override, T_land,
                  q_i, q_s, q_g, N_c, N_r, N_i,
-                 sfc_albedo_override, sfc_T_override,
+                 sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                  sfc_shflx_override, sfc_lhflx_override,
-                 tke, qke, gwd_spectrum, conv_precip, land_ml, w_land,
-                 snow) = args
+                 tke, qke, gwd_spectrum,
+                 conv_precip, land_ml, w_land, snow) = args
                 del conv_precip  # radiation-only input; unused on the no-rad path
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -1973,10 +2009,10 @@ class PhysicsPipeline:
                     C_H, C_E, albedo_ice, albedo_ocean,
                     ghg_vmr_override, T_land,
                     q_i, q_s, q_g, N_c, N_r, N_i,
-                    sfc_albedo_override, sfc_T_override,
+                    sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                     sfc_shflx_override, sfc_lhflx_override,
-                    tke, qke, gwd_spectrum, conv_precip, land_ml, w_land,
-                    snow)
+                    tke, qke, gwd_spectrum,
+                    conv_precip, land_ml, w_land, snow)
 
             # Issue #316 fix: when the caller knows at build time which
             # branch to take, skip the cond — keeps only the live branch
@@ -2098,6 +2134,17 @@ def _build_gray_radiation_fn(config):
         # solver sees the same surface as the energy budget — previously
         # gray used only the static ``config.sfc_albedo`` and the
         # blended albedo was silently dropped (audit 2026-06-10).
+        #
+        # NOTE — ``emis_col`` (the blended / coupler-dynamic surface emissivity,
+        # incl. the canopy eps_eff) is INTENTIONALLY NOT forwarded here.  Gray
+        # radiation keeps its idealized black-surface convention
+        # (``GrayRadiationConfig.sfc_emissivity = 1.0``, the Held-Suarez /
+        # Frierson default).  Only RRTMGP honours the dynamic surface emissivity
+        # (``solve_columns(sfc_emissivity=emis_col)``); threading it into gray
+        # would shift every idealized gray run's surface LW by ~3-5 %.  This is a
+        # deliberate scheme divergence from the albedo handling above, not the
+        # same silently-dropped bug (user decision 2026-06-21).
+        del emis_col
         return gray_radiation(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, lat=lat_col,

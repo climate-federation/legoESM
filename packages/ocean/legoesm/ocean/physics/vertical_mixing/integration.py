@@ -58,6 +58,24 @@ def make_vertical_mixing_physics(
             "K_tidal field from vertical_mixing.tidal.compute_tidal_diffusivity); "
             "enable it there, not in the physics-composition config."
         )
+    # Internal wave-driven mixing (zdfiwm) is NOT applied by the
+    # explicit-tendency composition: it is added inside
+    # k_profiles.compute_vertical_K_profiles (the implicit vertical-mixing
+    # path), the only place its avm contribution can enter the
+    # backward-Euler momentum solve.  With apply_diffusion=True (the
+    # explicit route) nothing downstream consumes it → reject so it cannot
+    # silently no-op; with apply_diffusion=False (the implicit route) the
+    # host model's K-profile solve is the consumer — legitimate.
+    if (apply_diffusion
+            and getattr(config, "iwm", None) is not None
+            and config.iwm.enabled):
+        raise NotImplementedError(
+            "VerticalMixingConfig.iwm.enabled=True is not consumed by the "
+            "EXPLICIT vertical-mixing composition.  Internal wave-driven "
+            "mixing is applied inside compute_vertical_K_profiles and "
+            "requires implicit_vertical_mixing=True on the host model "
+            "config."
+        )
 
     if scheme == "none":
         return make_none_physics_fn()

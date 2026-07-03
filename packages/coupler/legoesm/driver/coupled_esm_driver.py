@@ -1012,7 +1012,19 @@ class CoupledESMDriver:
         from legoesm.forcing.surface_utils import (
             blend_surface_property,
             blend_surface_temperature,
+            surface_temperature_for_lw_boundary,
         )
+
+        # Only correlated-k schemes (RRTMGP/RRTMG) honour the PAIRED dynamic
+        # (T_rad, eps_grid) surface boundary, so they get the flux-conserving
+        # radiative-equivalent temperature + dynamic emissivity.  Gray/none use
+        # an idealized black surface (eps=1) and ignore the dynamic emissivity;
+        # handing them T_rad (which is defined WITH eps_grid via
+        # eps_grid*sigma*T_rad^4 = blended emission) would make sigma*T_rad^4
+        # over-emit by 1/eps_grid, so they keep the area-weighted skin
+        # temperature instead.  See physics_pipeline gray radiation_fn.
+        _conservative_lw = getattr(
+            self.atm_config, "radiation", "gray") in ("rrtmgp", "rrtmg")
 
         def _seed_blend(day):
             # Same static blend the atmosphere radiation would use, as
@@ -1023,17 +1035,54 @@ class CoupledESMDriver:
                 sic, acfg.albedo_ice, acfg.albedo_ocean,
             )
             T = blend_surface_temperature(sst, sic, acfg.T_ice)
-            return alb, T
+            if not _conservative_lw:
+                # Gray/none never take an emissivity override (eps=1); return
+                # None so the override leaf is CONSISTENTLY None across seed and
+                # response — matching ``_coupled_get_sfc_override`` so no
+                # None->array pytree transition / recompile occurs.
+                return alb, T, None
+            # Seed a GRID-SHAPED emissivity — NOT None.  A None->array transition
+            # at the first coupler response would change the SegmentForcing pytree
+            # structure (None has no leaf, an array does) and force a recompile,
+            # violating the no-recompile invariant.  Use the EXACT static blend
+            # the radiation pipeline emits with (ocean/ice/land, configured
+            # emissivity_* values) so the seeded boundary that radiation uses
+            # before the first response is the SAME emissivity the lw_net_sfc
+            # inversion reconstructs with (otherwise land cells bias the initial
+            # lw_down).
+            _phys = self._atm.physics
+            eps = _phys.static_surface_emissivity(
+                sic, land_active=_phys.f_land is not None)
+            return alb, T, eps
 
         def _coupled_get_sfc_override(day):
             r = self._last_sfc_response
             if r is None or getattr(r, "albedo", None) is None:
                 return _seed_blend(day)
-            return r.albedo, r.T_sfc
+            if not _conservative_lw:
+                # Gray/none emit as an idealized BLACK surface (eps = 1) and
+                # cannot honour the canopy's eps_col, so feed them a black-surface
+                # BRIGHTNESS temperature derived from the full upward flux
+                # (sigma*T_bb^4 = LW_out).  Feeding T_rad would emit
+                # sigma*T_rad^4 = LW_emit/eps_col and overstate canopy emission by
+                # ~1/eps_col.  No emissivity override (gray keeps eps = 1).  NOT
+                # the aerodynamic/sensible-heat T_sfc (the canopy air-space Tc).
+                T_bb = surface_temperature_for_lw_boundary(
+                    "gray", T_rad=getattr(r, "T_rad", r.T_sfc), lw_up=r.lw_up)
+                return r.albedo, T_bb, None
+            eps = getattr(r, "emissivity", None)
+            if eps is None:
+                # Keep the override leaf a constant-shape array (no recompile).
+                eps = _seed_blend(day)[2]
+            # RRTMGP/RRTMG: the radiative-equivalent T_rad + dynamic eps_grid
+            # (flux-conserving tile blend) make eps*sigma*T_rad^4 + (1-eps)*La
+            # equal the area-weighted sum of tile lw_up exactly for mixed cells.
+            return r.albedo, getattr(r, "T_rad", r.T_sfc), eps
 
         self._atm.get_sfc_override = _coupled_get_sfc_override
         logger.info(
-            "  Surface-radiation feedback: dynamic albedo + skin T -> radiation"
+            "  Surface-radiation feedback: dynamic albedo + skin T + emissivity"
+            " -> radiation"
         )
 
     def _override_sfc_fluxes(self):
@@ -1155,7 +1204,11 @@ class CoupledESMDriver:
     def _build_atm_forcing(self, day: float):
         """Build AtmToSurface from atmosphere state and physics."""
         from legoesm.core.coupling_fields import AtmToSurface
-        from legoesm.forcing.surface_utils import blend_surface_temperature
+        from legoesm.forcing.surface_utils import (
+            blend_surface_temperature,
+            surface_emissivity_for_lw_inversion,
+            surface_temperature_for_lw_boundary,
+        )
 
         state = self._atm.state
         q_v = self._atm.q_v
@@ -1200,22 +1253,38 @@ class CoupledESMDriver:
             and _resp is not None
             and getattr(_resp, "albedo", None) is not None
         )
+        # Invert the held lw_net_sfc back to gross lw_down with the SAME (eps, T)
+        # pair radiation EMITTED the boundary with, or the round trip leaks an
+        # O(1 W/m^2) surface-energy bias.  Temperature: RRTMGP/RRTMG use the
+        # radiative-equivalent T_rad; gray/none use a black-surface brightness
+        # temperature (sigma*T_bb^4 = LW_out) — NOT the aerodynamic/sensible-heat
+        # T_sfc (the canopy air-space Tc over vegetated cells).
+        _radiation = getattr(self.atm_config, "radiation", "gray")
         if _dyn_sfc:
             albedo_eff = _resp.albedo
-            T_sfc = _resp.T_sfc
+            T_sfc = surface_temperature_for_lw_boundary(
+                _radiation, T_rad=getattr(_resp, "T_rad", _resp.T_sfc),
+                lw_up=_resp.lw_up)
         else:
             albedo_eff = blend_surface_property(
                 sic, acfg.albedo_ice, acfg.albedo_ocean,
             )
             T_sfc = blend_surface_temperature(sst, sic, acfg.T_ice)
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
-        # Surface emissivity: blend canonical ocean/ice emissivity by sea-ice
-        # fraction (same blend as albedo, matching earth_system_driver). The
-        # old ``getattr(coupled_cfg, "surface_emissivity", ...)`` referenced a
-        # field ``CoupledDriverConfig`` never defines, so it silently pinned
-        # emissivity to the ocean value and ignored the ice fraction.
-        eps_sfc = blend_surface_property(
-            sic, constants.emissivity_ice, constants.emissivity_ocean,
+        # Emissivity matching the emission:
+        #   * RRTMGP/RRTMG + dynamic feedback -> the coupler's tile-blended eps_col
+        #     (incl. the canopy's LAI-dependent eps_eff);
+        #   * RRTMGP/RRTMG static / pre-first-response -> the EXACT ocean/ice/land
+        #     emissivity blend the radiation pipeline emitted with (configured
+        #     emissivity_* values, not a constant ocean/ice approximation);
+        #   * gray/none -> an idealized black surface (eps = 1.0).
+        _phys = self._atm.physics
+        eps_sfc = surface_emissivity_for_lw_inversion(
+            _radiation,
+            dynamic_emissivity=(
+                getattr(_resp, "emissivity", None) if _dyn_sfc else None),
+            static_sfc_emissivity=_phys.static_surface_emissivity(
+                sic, land_active=_phys.f_land is not None),
         )
         lw_up_sfc = eps_sfc * constants.sigma_sb * T_sfc ** 4
         lw_down = (lw_net_sfc + lw_up_sfc) / jnp.maximum(eps_sfc, 0.01)
