@@ -8,7 +8,7 @@ by construction. (The same rules live in `CLAUDE.md` for AI-assisted work.)
 ## Development setup
 
 ```bash
-git clone https://github.com/gentine/legoESM
+git clone https://github.com/climate-federation/legoESM
 cd legoESM
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
@@ -54,7 +54,7 @@ These are the invariants every change must preserve.
    existing one and extend it. No thin re-export wrappers
    (`X_utils.py` re-exporting `X.py`).
 5. **AI-guardrail harness (Domain Architect vs Syntax Engine).** See
-   `docs/ai_guardrails/domain_architect_vs_syntax_engine.md`. The human pins the
+   `docs/architecture/ai_guardrails/domain_architect_vs_syntax_engine.md`. The human pins the
    *logic* (units/signs/conserved-qty/valid-sets/references); mechanical gates
    make any violation fail loudly. These are ratchets — extend, never weaken;
    `*_TODO`/budget lists only shrink:

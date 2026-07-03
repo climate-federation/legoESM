@@ -149,9 +149,9 @@ def coalescence_step(
     scaling = jnp.full((L,), 0.5 * n * (n - 1) / L, dtype=dtype)
     valid_pair = jnp.ones((L,), dtype=dtype)
     if cfg.collision_mode == "deterministic":
-        return _coalescence_step_pairs_deterministic(
+        return coalescence_step_pairs_deterministic(
             state, ia, ib, valid_pair, scaling, V_cell, rho, p, T, dt, cfg)
-    return _coalescence_step_pairs(
+    return coalescence_step_pairs(
         state, ia, ib, valid_pair, scaling, V_cell, rho, p, T, dt, k_gamma, cfg)
 
 
@@ -218,7 +218,7 @@ def _pair_kernel_probability_inputs(
             act_pair, P)
 
 
-def _coalescence_step_pairs(
+def coalescence_step_pairs(
     state: SuperDropletState,
     ia: jax.Array,
     ib: jax.Array,
@@ -308,7 +308,7 @@ def _coalescence_step_pairs(
     return state._replace(multiplicity=xi, radius=R, solute_mass=s, active=active)
 
 
-def _coalescence_step_pairs_deterministic(
+def coalescence_step_pairs_deterministic(
     state: SuperDropletState,
     ia: jax.Array,
     ib: jax.Array,

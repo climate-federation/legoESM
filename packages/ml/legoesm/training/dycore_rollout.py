@@ -15,11 +15,11 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-
 from legoesm.driver.compiled_segments import (
     SegmentCarry,
     SegmentForcing,
 )
+from legoesm.training.checkpoint_schedule import VALID_STORAGE, offload_policy
 
 
 class RolloutConfig(NamedTuple):
@@ -27,8 +27,13 @@ class RolloutConfig(NamedTuple):
     n_days: int = 1
     dt: float = 600.0             # timestep [s]
     segment_steps: int = 144      # steps per segment (= 1 day at dt=600)
-    save_every_n_segments: int = 1  # save state every N segments for loss
     gradient_checkpoint: bool = True
+    # Adjoint-memory schedule for the per-segment checkpoint.  Only "none" and
+    # "uniform" are valid here because this rollout returns the full per-segment
+    # trajectory (saved_states); for "binomial" endpoint-loss rollouts use
+    # legoesm.training.checkpoint_schedule.checkpointed_loop directly.
+    checkpoint_schedule: str = "uniform"
+    storage: str = "recompute"   # "recompute" | "host" (offload matmul residuals)
 
 
 class RolloutOutput(NamedTuple):
@@ -47,8 +52,9 @@ def differentiable_rollout(
     """Run a multi-day differentiable rollout through the compiled dycore.
 
     Chains ``config.n_days`` segments together using ``jax.lax.scan``.
-    Each segment runs ``config.segment_steps`` time steps.  Intermediate
-    states are saved at intervals for multi-day loss computation.
+    Each segment runs ``config.segment_steps`` time steps.  EVERY segment's
+    state is stacked into ``saved_states`` for multi-day loss computation
+    (one save per day; there is no save stride).
 
     Gradient checkpointing is applied per segment so that the memory
     cost is O(segment_steps) rather than O(total_steps).
@@ -83,10 +89,39 @@ def differentiable_rollout(
         mean_T = jnp.mean(new_carry.T, axis=tuple(range(new_carry.T.ndim - 1)))
         return new_carry, (new_carry, mean_T)
 
-    # Wrap with gradient checkpointing if requested
+    # Validate the CONFIGURED schedule before deriving the effective one, so a
+    # typo or 'binomial' is rejected even when gradient_checkpoint is False (which
+    # would otherwise coerce it to "none" and hide the bad value).
+    if config.checkpoint_schedule not in ("none", "uniform"):
+        raise ValueError(
+            f"RolloutConfig.checkpoint_schedule={config.checkpoint_schedule!r} is not "
+            "supported by differentiable_rollout (it returns the full per-segment "
+            "trajectory); use legoesm.training.checkpoint_schedule.checkpointed_loop "
+            "for 'binomial' endpoint-loss rollouts."
+        )
+    # Effective schedule is "none" when gradient_checkpoint is off, else configured.
+    schedule = config.checkpoint_schedule if config.gradient_checkpoint else "none"
+    if config.storage not in VALID_STORAGE:
+        raise ValueError(
+            f"unknown storage {config.storage!r}; expected one of {VALID_STORAGE}"
+        )
+    # Host offload only modifies an ACTIVE checkpoint.  If checkpointing is
+    # disabled (schedule "none") a non-default storage is contradictory — reject
+    # it rather than silently re-enabling jax.checkpoint behind gradient_checkpoint=False.
+    if schedule == "none" and config.storage != "recompute":
+        raise ValueError(
+            f"RolloutConfig.storage={config.storage!r} requires gradient "
+            "checkpointing; set gradient_checkpoint=True and "
+            "checkpoint_schedule='uniform'."
+        )
     step_fn = _one_segment
-    if config.gradient_checkpoint:
-        step_fn = jax.checkpoint(_one_segment, prevent_cse=False)
+    if schedule == "uniform":
+        policy = offload_policy(config.storage)  # None for recompute, offload for host
+        step_fn = (
+            jax.checkpoint(_one_segment, prevent_cse=False, policy=policy)
+            if policy is not None
+            else jax.checkpoint(_one_segment, prevent_cse=False)
+        )
 
     final_carry, (all_carries, all_mean_T) = jax.lax.scan(
         step_fn, initial_carry, jnp.arange(n_segments),

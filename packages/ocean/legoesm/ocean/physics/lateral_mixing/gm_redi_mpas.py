@@ -1,9 +1,10 @@
-"""GM/Redi isopycnal mixing on the MPAS Voronoi mesh — API skeleton.
+"""GM/Redi isopycnal mixing on the MPAS Voronoi mesh.
 
-**Status (2026-04-28):** This module defines the public API for the
-MPAS port of GM/Redi but does not yet implement it.  Calling any
-function below raises ``NotImplementedError`` with a pointer to the
-implementation plan at ``docs/ocean_experiments/gm_redi_mpas_plan.md``.
+**Status:** The centered GM/Redi scheme is implemented —
+``compute_isopycnal_slopes_mpas``, ``gm_redi_tracer_tendency_centered_mpas``
+and ``gm_redi_tracer_tendency_mpas`` are live.  Only the TRIAD slope-limited
+path is still pending and raises ``NotImplementedError`` with a pointer to
+the implementation plan at ``docs/ocean/experiments/gm_redi_mpas_plan.md``.
 
 The signatures mirror ``gm_redi_tracer_tendency_latlon`` in
 ``gm_redi_latlon_cgrid.py`` so the dycore hook in
@@ -42,6 +43,7 @@ from legoesm.ocean.dynamics.ocean_tendency_common import (
 )
 from legoesm.ocean.eos import make_eos_fn, rho_0 as _RHO_0
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+    EPS_DIV as _EPS_DIV,
     compute_visbeck_kappa_gm,
     dm95_taper_scalar,
     validate_adjoint_stabilization,
@@ -55,9 +57,7 @@ if TYPE_CHECKING:
     from legoesm.ocean.vertical import OceanZStarCoordinate
 
 
-_PLAN = "docs/ocean_experiments/gm_redi_mpas_plan.md"
-
-_EPS_DIV = 1e-30
+_PLAN = "docs/ocean/experiments/gm_redi_mpas_plan.md"
 
 
 def _not_implemented(name: str) -> None:
@@ -148,7 +148,7 @@ def compute_isopycnal_slopes_mpas(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Edge-normal isopycnal slope at interior interfaces (Phase 1).
 
-    Implements Option (A) from ``docs/ocean_experiments/gm_redi_mpas_plan.md``:
+    Implements Option (A) from ``docs/ocean/experiments/gm_redi_mpas_plan.md``:
     a single scalar slope along each edge's own normal, no cell-centred
     reconstruction.
 
@@ -373,6 +373,11 @@ def gm_redi_tracer_tendency_centered_mpas(
     else:
         kappa_GM_edge_b = kappa_GM_edge
 
+    # The diagonal term ``kappa_Redi * dq_dn_half`` is UNTAPERED (the DM95 taper
+    # enters only through the tapered slope ``S_n`` in the off-diagonal term), so
+    # — as on the cubed-sphere path — the mixed-layer horizontal diffusivity is
+    # always kappa_Redi: the Ferrari (2008) surface complement is inherent here,
+    # not a separate term (see gm_redi.validate_cubed_sphere_gm_redi_config).
     F_n_half = (
         kappa_Redi * dq_dn_half
         + (kappa_Redi - kappa_GM_edge_b) * S_n * dq_dz_edge

@@ -35,7 +35,7 @@ The mixing length ``L`` is selectable (``EKEConfig.mixing_length_scheme``):
 l_min)`` — legoESM's pre-``eke_len`` behaviour; ``"rhines"`` reproduces Veros's
 Rhines-limited ``eke_len = max(l_min, min(eke_cross·L_rossby, eke_crhin·L_rhines))``
 from the deformation radius (``eke_deformation_radius``) and the eddy-energy Rhines
-scale (``eke_rhines_length``). See ``docs/ocean_fidelity/eke_len_build_spec.md``.
+scale (``eke_rhines_length``). See ``docs/ocean/fidelity/eke_len_build_spec.md``.
 
 Defaults match Veros ACC (``eke_c_k=0.4``, ``eke_c_eps=0.5``, ``eke_lmin=100``).
 """
@@ -58,15 +58,15 @@ __param_spec__ = {
             "alpha": {"units": "1", "bounds": (0.0132, 0.12), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
             "c_eps_geometric": {"units": "1", "bounds": (0.00726, 0.066), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
             "gamma_n": {"units": "1", "bounds": (0.1155, 1.05), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
-            "kappa_e": {"units": "1", "bounds": (165.0, 1500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
-            "kappa_gm_max": {"units": "1", "bounds": (4950.0, 45000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
-            "kappa_gm_min": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
-            "kappa_n_max": {"units": "1", "bounds": (4950.0, 45000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
-            "kappa_n_min": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
-            "kappa_u": {"units": "1", "bounds": (495.0, 4500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
-            "l_mix_max": {"units": "1", "bounds": (13200.0, 120000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
-            "r_d_max": {"units": "1", "bounds": (13200.0, 120000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
-            "r_d_min": {"units": "1", "bounds": (660.0, 6000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "kappa_e": {"units": "m^2/s", "bounds": (165.0, 1500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "kappa_gm_max": {"units": "m^2/s", "bounds": (4950.0, 45000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "kappa_gm_min": {"units": "m^2/s", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "kappa_n_max": {"units": "m^2/s", "bounds": (4950.0, 45000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "kappa_n_min": {"units": "m^2/s", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "kappa_u": {"units": "m^2/s", "bounds": (495.0, 4500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "l_mix_max": {"units": "m", "bounds": (13200.0, 120000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "r_d_max": {"units": "m", "bounds": (13200.0, 120000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "r_d_min": {"units": "m", "bounds": (660.0, 6000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
             "rossby_factor": {"units": "1", "bounds": (0.132, 1.2), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
         },
     },
@@ -82,8 +82,8 @@ __param_spec__ = {
             "c_k": {"units": "1", "bounds": (0.132, 1.2), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "prognostic EKE", "shape": None},
             "eke_crhin": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "prognostic EKE", "shape": None},
             "eke_cross": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "prognostic EKE", "shape": None},
-            "k_iso": {"units": "1", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "prognostic EKE", "shape": None},
-            "kappa_gm_max": {"units": "1", "bounds": (3300.0, 30000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "prognostic EKE", "shape": None},
+            "k_iso": {"units": "m^2/s", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "prognostic EKE", "shape": None},
+            "kappa_gm_max": {"units": "m^2/s", "bounds": (3300.0, 30000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "prognostic EKE", "shape": None},
         },
     },
 }

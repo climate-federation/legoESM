@@ -618,7 +618,7 @@ class TestLatLonCGridOceanModelWithFreshwater:
 
     def test_step_no_freshwater(self, ll_grid, ll_z_coord, ll_state0):
         """Model step without freshwater should work as before."""
-        config = LatLonCGridOceanConfig(
+        config = LatLonCGridOceanConfig.from_flat(
             A_h=1e3, n_barotropic_substeps=5,
             use_conservation_fixer=False,
             freshwater_closure="none",
@@ -630,7 +630,7 @@ class TestLatLonCGridOceanModelWithFreshwater:
 
     def test_step_with_zero_freshwater(self, ll_grid, ll_z_coord, ll_state0):
         """Step with zero freshwater = step without freshwater."""
-        config = LatLonCGridOceanConfig(
+        config = LatLonCGridOceanConfig.from_flat(
             A_h=1e3, n_barotropic_substeps=5,
             use_conservation_fixer=False,
         )
@@ -649,7 +649,7 @@ class TestLatLonCGridOceanModelWithFreshwater:
 
     def test_step_with_precip_raises_eta(self, ll_grid, ll_z_coord, ll_state0):
         """Precipitation should raise the free surface."""
-        config = LatLonCGridOceanConfig(
+        config = LatLonCGridOceanConfig.from_flat(
             A_h=1e3, n_barotropic_substeps=5,
             use_conservation_fixer=False,
         )
@@ -674,7 +674,7 @@ class TestLatLonCGridOceanModelWithFreshwater:
 
     def test_step_with_precip_decreases_S(self, ll_grid, ll_z_coord, ll_state0):
         """Precipitation should decrease top-layer salinity via virtual salt flux."""
-        config = LatLonCGridOceanConfig(
+        config = LatLonCGridOceanConfig.from_flat(
             A_h=1e3, n_barotropic_substeps=5,
             use_conservation_fixer=False,
         )
@@ -699,7 +699,7 @@ class TestLatLonCGridOceanModelWithFreshwater:
 
     def test_step_with_evap_increases_S(self, ll_grid, ll_z_coord, ll_state0):
         """Evaporation should increase top-layer salinity."""
-        config = LatLonCGridOceanConfig(
+        config = LatLonCGridOceanConfig.from_flat(
             A_h=1e3, n_barotropic_substeps=5,
             use_conservation_fixer=False,
         )
@@ -724,7 +724,7 @@ class TestLatLonCGridOceanModelWithFreshwater:
 
     def test_multi_step_stability(self, ll_grid, ll_z_coord, ll_state0):
         """10 steps with moderate freshwater should remain stable."""
-        config = LatLonCGridOceanConfig(
+        config = LatLonCGridOceanConfig.from_flat(
             A_h=1e3, n_barotropic_substeps=5,
             use_conservation_fixer=True,
         )
@@ -752,7 +752,7 @@ class TestLatLonCGridOceanModelWithFreshwater:
         self, ll_grid, ll_z_coord, ll_state0,
     ):
         """With freshwater_closure='none', forcing should be ignored."""
-        config_none = LatLonCGridOceanConfig(
+        config_none = LatLonCGridOceanConfig.from_flat(
             A_h=1e3, n_barotropic_substeps=5,
             use_conservation_fixer=False,
             freshwater_closure="none",
@@ -848,7 +848,7 @@ class TestCouplerAdapter:
             cos_zenith=z, co2_ppmv=z, has_radiation=z, has_precipitation=ones,
         )
         sfc = SurfaceToAtm(
-            T_sfc=z, albedo=z, emissivity=z, z0=z,
+            T_sfc=z, T_rad=z, albedo=z, emissivity=z, z0=z,
             q_surface=z, shflx=z,
             lhflx=ones * 100.0,  # 100 W/m2
             tau_x=z, tau_y=z, lw_up=z,
@@ -861,6 +861,8 @@ class TestCouplerAdapter:
             ocean_stress_x=z, ocean_stress_y=z,
             surface_mass_flux=ones * 100.0 / constants.L_v,
             salt_flux=z,
+            river_runoff_flux=z,
+            ice_lake_freshwater_flux=z,
         )
         mask = ones
 
@@ -1006,7 +1008,7 @@ class TestLatLonSaltNormalizationWiring:
             restoring=jnp.zeros((nlat, nlon)))
 
         def step(normalize):
-            cfg = LatLonCGridOceanConfig(
+            cfg = LatLonCGridOceanConfig.from_flat(
                 freshwater_closure="virtual_salt_flux", normalize_freshwater=normalize)
             return LatLonCGridOceanModel(grid, z, cfg).step(st, 600.0, freshwater=fw)
 

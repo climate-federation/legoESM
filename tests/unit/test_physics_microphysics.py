@@ -97,6 +97,33 @@ def _call_scheme(name, T, q_v, hydro, p_full, p_half, rho, dz, dt=300.0):
         raise ValueError(f"Unknown scheme: {name}")
 
 
+# ============================================================================
+# Dispatch hardening — Thompson snow_scheme must raise on an unknown value
+# ============================================================================
+
+def test_thompson_unknown_snow_scheme_raises():
+    """A typo in ``snow_scheme`` must raise, not silently fall back to the
+    bulk power-law fall speed (which also leaves Thompson-2008 snow
+    deposition disabled — a silent physics change)."""
+    T, q_v, hydro, p_full, p_half, rho, dz = _make_column()
+    with pytest.raises(ValueError, match="Unknown snow_scheme"):
+        thompson_microphysics(
+            T, q_v, hydro, p_full, p_half, rho, dz, 300.0,
+            config=ThompsonConfig(snow_scheme="thompson_2008"),  # typo
+        )
+
+
+@pytest.mark.parametrize("snow_scheme", ["thompson2008", "bulk_qpower"])
+def test_thompson_valid_snow_scheme_runs(snow_scheme):
+    """Both supported snow schemes produce finite output."""
+    T, q_v, hydro, p_full, p_half, rho, dz = _make_column()
+    out = thompson_microphysics(
+        T, q_v, hydro, p_full, p_half, rho, dz, 300.0,
+        config=ThompsonConfig(snow_scheme=snow_scheme),
+    )
+    assert jnp.all(jnp.isfinite(out.dq_s_dt))
+
+
 ALL_SCHEMES = ["kessler", "sundqvist", "seifert_beheng", "morrison", "thompson", "p3"]
 
 

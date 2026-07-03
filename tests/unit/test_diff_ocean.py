@@ -63,6 +63,68 @@ class TestCubedSphereOcean:
 
 
 # ============================================================================
+# 3b  Ocean dynamics — lat-lon C-grid
+# ============================================================================
+
+class TestLatLonOcean:
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+
+        nlev = 3
+        grid = create_latlon_grid(n_lat=8, n_lon=16)
+        z_coord = create_ocean_z_star(nlev, H_max=500.0)
+        config = LatLonCGridOceanConfig.from_flat(
+            use_conservation_fixer=False,
+            enable_runtime_checks=False,
+            n_barotropic_substeps=2,
+            differentiable_barotropic=True,  # use lax.scan for AD
+        )
+        self.model = LatLonCGridOceanModel(grid, z_coord, config)
+        # land_lat_threshold beyond the grid's max |lat| keeps the whole
+        # domain wet (no land cells) so the gradient is dense.
+        self.state = rest_state_latlon_cgrid_ocean(
+            grid, z_coord, land_lat_threshold=90.0
+        )
+        self.dt = 300.0
+
+    def test_grad_wrt_T(self):
+        model, state, dt = self.model, self.state, self.dt
+
+        def loss(T_data):
+            s = state._replace(T=state.T.replace(data=T_data))
+            out = model.step(s, dt)
+            return jnp.sum(out.T.data ** 2)
+
+        grad = jax.grad(loss)(state.T.data)
+        assert_gradient_ok(grad, "LatLon Ocean single step w.r.t. T")
+
+    def test_grad_3_steps(self):
+        """Multi-step gradient accumulation through the lat-lon C-grid model."""
+        model, state, dt = self.model, self.state, self.dt
+
+        def loss(T_data):
+            s = state._replace(T=state.T.replace(data=T_data))
+
+            def body(carry, _):
+                # Call _step_impl inside scan to avoid nested-JIT boundary.
+                return model._step_impl(carry, dt), None
+
+            s_final, _ = jax.lax.scan(body, s, None, length=3)
+            return jnp.sum(s_final.T.data ** 2)
+
+        grad = jax.grad(loss)(state.T.data)
+        assert_gradient_ok(grad, "LatLon Ocean 3 steps w.r.t. T")
+
+
+# ============================================================================
 # 3c  Ocean dynamics — MPAS
 # ============================================================================
 

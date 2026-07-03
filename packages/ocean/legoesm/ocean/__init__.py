@@ -97,6 +97,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "LatLonCGridOceanTendencies": ("legoesm.ocean.state", "LatLonCGridOceanTendencies"),
     "LatLonCGridOceanConfig": ("legoesm.ocean.state", "LatLonCGridOceanConfig"),
     "rest_state_latlon_cgrid_ocean": ("legoesm.ocean.init_latlon_cgrid", "rest_state_latlon_cgrid_ocean"),
+    # NEMO eORCA tripole geometry + WOA IC loaders
+    "read_mesh_mask_bathy": ("legoesm.ocean.init_tripole", "read_mesh_mask_bathy"),
+    "compute_woa_3d": ("legoesm.ocean.init_tripole", "compute_woa_3d"),
+    "squeeze_nemo_field_2d": ("legoesm.ocean.init_tripole", "squeeze_nemo_field_2d"),
     # Bathymetry
     "BathymetryConfig": ("legoesm.ocean.bathymetry", "BathymetryConfig"),
     "CRITICAL_STRAITS": ("legoesm.ocean.bathymetry", "CRITICAL_STRAITS"),
@@ -172,6 +176,10 @@ __all__ = [
     "LatLonCGridOceanTendencies",
     "LatLonCGridOceanConfig",
     "rest_state_latlon_cgrid_ocean",
+    # NEMO eORCA tripole geometry + WOA IC loaders
+    "read_mesh_mask_bathy",
+    "compute_woa_3d",
+    "squeeze_nemo_field_2d",
     # Freshwater
     "FreshwaterForcing",
     "zero_freshwater",

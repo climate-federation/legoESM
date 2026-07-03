@@ -1,0 +1,22 @@
+# legoESM experiment template — EVP rheology convergence (dynamics).
+#
+# Names the `evp_convergence` sea-ice matrix case via `setup:` (#388).
+experiment:
+  tier: tier2
+  complexity: dynamics
+  extent: global
+  maturity: structurally_validated
+  description: >
+    Elastic-Viscous-Plastic (EVP) rheology convergence: the subcycled EVP
+    momentum solve converges to the VP stress state — a sea-ice dynamics
+    (Hunke-Dukowicz) benchmark on the cubed sphere.
+  data: []
+  conservation_gates: []
+model:
+  name: "sea-ice-evp-convergence"
+  type: sea_ice_only
+setup:
+  name: evp_convergence
+  grid: cubed_sphere
+output:
+  path: output/sea_ice/evp_convergence/

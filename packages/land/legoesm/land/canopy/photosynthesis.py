@@ -1,11 +1,36 @@
-"""C3 and C4 Farquhar photosynthesis for the two-leaf canopy model.
+"""Canonical Farquhar-von Caemmerer-Berry (FvCB) photosynthesis for the two-leaf canopy.
 
-C3: Farquhar et al. (1980) with colimitation (DePury & Farquhar 1997).
-    Temperature response with growth-temperature acclimation (Leuning 2002).
-C4: Simplified C4 model with Q10 temperature response.
+Implements the canonical FvCB C3 + C4 equations (Bonan, "Climate Change and
+Terrestrial Ecosystem Modeling" 2019, ch. 11; cross-checked against the CLM5
+photosynthesis tech note §2.9).  Ported from DifferBESS
+``process/Photosynthesis_FvCB.py``.
+
+C3 differs from the earlier BESS-v2 P-model path that legoESM forked in three
+structural ways:
+
+1. **Jmax-bounded electron transport** (Bonan eq. 11.21-11.24): a Jmax-limited
+   ``J`` (smaller root of the electron-transport quadratic) replaces the
+   unbounded ``alf * APAR * (Pi - Gamma*) / (Pi + 2 Gamma*)`` and the
+   ``JS = Vcmax/2`` placeholder.
+2. **Kattge & Knorr (2007) acclimation** (Bonan eq. 11.62-11.64): peaked
+   Arrhenius for *both* Vcmax and Jmax, with ``Jmax25/Vcmax25`` itself
+   acclimated to growth temperature.
+3. **Dark respiration** follows Tjoelker (2001) + Atkin (2008) with
+   ``Rd0 = 0.015 * Vcmax25`` — the *25 degC* value.  This removes the previous
+   double counting where ``Rd = 0.015 * Vcmax(T) * rd_response(T)`` applied the
+   temperature response twice (inflating Rd by ~1.9x at 35 degC).
+
+C4 follows Collatz (1992) / SiB2 / Bonan §11.7 with CLM5-aligned constants
+(high-T deactivation at 313.15 K, low-T slope 0.2, ``Rd25 = 0.025 * Vcmax25``,
+quantum yield ``alpha = 0.05``).
+
+Public entry points (``c3_photosynthesis``, ``c4_photosynthesis``,
+``photosynthesis``, ``vcmax_temperature_response``) keep the legoESM signatures
+so the solver / bundle call sites are unchanged; ``alf`` and ``Ps`` are accepted
+for parity but unused by the canonical C3 (which uses the PSII quantum yield and
+keeps Ci in mole-fraction units throughout).
 
 All functions are pure JAX, JIT-compatible, and differentiable.
-Source: adapted from DifferBESS/process/Photosynthesis.py (Ryu et al.).
 """
 
 from __future__ import annotations
@@ -13,81 +38,152 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
+
+
+# --- gas constant / reference temperatures ---
+_R = 8.314          # [J K-1 mol-1] universal gas constant
+_T_REF = 298.15     # [K] reference temperature (25 degC)
+_T0_C = 25.0        # [degC] reference for dark respiration
+
+# --- quadratic curvatures (CLM5 default / Sellers 1996b / Bonan ch. 11) ---
+_THETA_J = 0.7         # electron-transport quadratic
+_THETA_CJA_C3 = 0.98   # C3 stage-1 colimitation (Ac + Aj)  (Bonan eq. 11.33)
+_THETA_IP_C3 = 0.95    # C3 stage-2 colimitation (Ai + Ap)
+_THETA_CJA_C4 = 0.80   # C4 stage-1 colimitation
+_THETA_IP_C4 = 0.95    # C4 stage-2 colimitation
+
+# --- C3 photosystem (Bonan eq. 11.23, CLM5 §2.9) ---
+_PHI_PSII = 0.85       # PSII quantum yield
+
+# --- Bernacchi (2001) Rubisco kinetics at 25 degC ---
+_KC25 = 404.9      # [umol mol-1] Michaelis constant for CO2
+_KO25 = 278.4      # [mmol mol-1] Michaelis constant for O2
+_GS25 = 42.75      # [umol mol-1] CO2 compensation point Gamma_star at 25 degC
+_OI = 209.0        # [mmol mol-1] intercellular O2 (atmospheric)
+
+# --- activation/deactivation energies [J mol-1] (Bernacchi 2001 + Kattge & Knorr 2007) ---
+_HA_KC = 79430.0
+_HA_KO = 36380.0
+_HA_GS = 37830.0
+_HA_VCMAX = 72000.0    # Kattge & Knorr 2007 (CLM5 Table 2.9.2)
+_HA_JMAX = 50000.0     # Kattge & Knorr 2007 (CLM5 Table 2.9.2)
+_HD_VCMAX = 200000.0
+_HD_JMAX = 200000.0
+
+# --- Tjoelker (2001) + Atkin (2008) dark respiration (Bonan eq. 11.65-11.67) ---
+_RD0_VCMAX_FRAC_C3 = 0.015   # Rd0 / Vcmax25 (basal rate at 25 degC)
+_Q10_INTERCEPT = 3.22
+_Q10_SLOPE = 0.046
+_ATKIN_SLOPE = 0.00794
+
+# --- C4 kinetics (Bonan eq. 11.72-11.74; CLM5 §2.9.5) ---
+_Q10_C4 = 2.0
+_S1_C4 = 0.3
+_S2_C4 = 313.15    # [K] high-T deactivation onset (40 degC; CLM5)
+_S3_C4 = 0.2       # low-T inhibition slope
+_S4_C4 = 288.15    # [K]
+_S5_C4 = 1.3
+_S6_C4 = 328.15    # [K] high-T respiration cutoff
+_ALPHA_C4 = 0.05       # quantum yield E (Bonan §11.7; CLM5)
+_KP25_FRAC = 0.02      # kp25 / Vcmax25 (PEP carboxylase)
+_RD25_FRAC_C4 = 0.025  # Rd25 / Vcmax25 (CLM5 §2.9.5)
+
+# --- clip ranges (numerical / calibration safety) ---
+_TGC_LO = 11.0     # [degC] Kattge & Knorr 2007 acclimation calibration range
+_TGC_HI = 35.0
+_TF_C_LO = 5.0     # [degC] instantaneous-T clip keeping Tjoelker Q10 > 0
+_TF_C_HI = 45.0
+
 
 # ---------------------------------------------------------------------------
-# Temperature acclimation helpers
+# Temperature-response helpers
 # ---------------------------------------------------------------------------
 
-def _compute_vcmax_deltaS(TgC: jax.Array) -> jax.Array:
-    """Entropy parameter for Vcmax temperature response (Leuning 2002).
+def _arrhenius(Tf: jax.Array, dHa: float) -> jax.Array:
+    """Arrhenius temperature response (Bonan eq. 11.34), normalised to 1 at 25 degC."""
+    return jnp.exp(dHa / (_T_REF * _R) * (1.0 - _T_REF / Tf))
 
-    Parameters
-    ----------
-    TgC : growth temperature [°C], clipped to [11, 35]
 
-    Returns
-    -------
-    DeltaS [kJ mol-1 K-1]
+def _arrhenius_peaked(Tf: jax.Array, dHa: float, dHd: float, dS: jax.Array) -> jax.Array:
+    """Peaked Arrhenius (Bonan eq. 11.34 * 11.36), normalised to 1 at 25 degC."""
+    f = _arrhenius(Tf, dHa)
+    num = 1.0 + jnp.exp((_T_REF * dS - dHd) / (_T_REF * _R))
+    den = 1.0 + jnp.exp((Tf * dS - dHd) / (Tf * _R))
+    return f * num / den
+
+
+def _smaller_root_quadratic(theta: float, A: jax.Array, B: jax.Array,
+                            eps: float = 1e-12) -> jax.Array:
+    """Smaller root of ``theta x^2 - (A + B) x + A B = 0``.
+
+    Used for the electron-transport quadratic (theta=Theta_j, A=I_PSII, B=Jmax)
+    and for the two colimitation stages.  ``eps`` guards the sqrt against tiny
+    negative arguments from floating-point cancellation when A~0 or B~0.
     """
-    TgC_clip = jnp.clip(TgC, 11.0, 35.0)
-    return (-1.07 * TgC_clip + 668.39) / 1000.0
+    s = A + B
+    disc = s * s - 4.0 * theta * A * B
+    return (s - jnp.sqrt(jnp.maximum(disc, eps))) / (2.0 * theta)
+
+
+def _delta_s_vcmax(TgC_a: jax.Array) -> jax.Array:
+    """Vcmax entropy term (Bonan eq. 11.62, Kattge & Knorr 2007). [J K-1 mol-1]"""
+    return 668.39 - 1.07 * TgC_a
+
+
+def _delta_s_jmax(TgC_a: jax.Array) -> jax.Array:
+    """Jmax entropy term (Bonan eq. 11.63, Kattge & Knorr 2007). [J K-1 mol-1]"""
+    return 659.70 - 0.75 * TgC_a
+
+
+def _jmax25_over_vcmax25(TgC_a: jax.Array) -> jax.Array:
+    """Acclimated Jmax25/Vcmax25 ratio (Bonan eq. 11.64, Kattge & Knorr 2007)."""
+    return 2.59 - 0.035 * TgC_a
+
+
+def _q10_tjoelker(Tf: jax.Array) -> jax.Array:
+    """Variable Q10 for dark respiration (Bonan eq. 11.66, Tjoelker 2001).
+
+    Tf clipped to [5, 45] degC keeps Q10 strictly positive (Q10 > 1.15 at
+    45 degC) and avoids runaway exponentials at extreme leaf temperatures.
+    """
+    T_C = jnp.clip(Tf - constants.T_freeze, _TF_C_LO, _TF_C_HI)
+    return _Q10_INTERCEPT - _Q10_SLOPE * T_C
+
+
+def _rd_atkin(Tf: jax.Array, TgC_a: jax.Array, Vcmax25: jax.Array) -> jax.Array:
+    """Dark respiration (Bonan eq. 11.67, Atkin 2008). [umol m-2 s-1]
+
+    Basal ``Rd0 = 0.015 * Vcmax25`` (the 25 degC value — NOT Vcmax(T), which
+    would double-count the temperature response).  The growth-adjust term lowers
+    the basal rate with warmer growth temperature (Atkin 2008); the Q10 term
+    gives the instantaneous response (Tjoelker 2001 variable Q10).  Equals
+    ``0.015 * Vcmax25`` exactly at Tf = 25 degC, TgC = 25 degC.
+    """
+    T_C = jnp.clip(Tf - constants.T_freeze, _TF_C_LO, _TF_C_HI)
+    Q10 = _q10_tjoelker(Tf)
+    growth_adjust = jnp.power(10.0, -_ATKIN_SLOPE * (TgC_a - _T0_C))
+    instantaneous = jnp.power(Q10, (T_C - _T0_C) / 10.0)
+    Rd0 = _RD0_VCMAX_FRAC_C3 * Vcmax25
+    return growth_adjust * Rd0 * instantaneous
 
 
 def vcmax_temperature_response(Tf: jax.Array, TgC: jax.Array) -> jax.Array:
-    """Normalised Vcmax temperature response with growth-temperature acclimation.
+    """Normalised Vcmax temperature response (Kattge & Knorr 2007 peaked Arrhenius).
 
-    Leuning (2002) formulation.  Returns the scaling factor f(T) such that
-    Vcmax(T) = f(T) * Vcmax25.
-
-    Parameters
-    ----------
-    Tf  : leaf temperature [K]
-    TgC : 30-day mean growth temperature [°C]
-
-    Returns
-    -------
-    f : dimensionless scaling factor
-    """
-    Ha  = 72.0    # activation energy [kJ mol-1]
-    Hd  = 200.0   # deactivation energy [kJ mol-1]
-    R   = 0.008314  # gas constant [kJ mol-1 K-1]
-    T0  = 298.15   # reference temperature [K]
-
-    f_up = jnp.exp(Ha * (Tf - T0) / (T0 * R * Tf))
-    DeltaS = _compute_vcmax_deltaS(TgC)
-    f_down = (
-        (1.0 + jnp.exp((T0 * DeltaS - Hd) / (T0 * R)))
-        / (1.0 + jnp.exp((Tf * DeltaS - Hd) / (Tf * R)))
-    )
-    return f_up * f_down
-
-
-def rd_temperature_response(Tf: jax.Array, TgC: jax.Array) -> jax.Array:
-    """Normalised dark respiration temperature response with acclimation.
+    Returns f(T) such that ``Vcmax(T) = f(T) * Vcmax25``; f == 1 at 25 degC.
 
     Parameters
     ----------
     Tf  : leaf temperature [K]
-    TgC : 30-day mean growth temperature [°C]
-
-    Returns
-    -------
-    f : dimensionless scaling factor
+    TgC : growth temperature [degC] (clipped to the K&K calibration range)
     """
-    TgC_clip = jnp.clip(TgC, 11.0, 35.0)
-    TaC = Tf - 273.15
-    # Floor Q10 at 1.2 (not 1e-3): at Tf ≳ 43°C the linear formula
-    # gives Q10 < 1.2, and Q10^((Tf-25)/10) then contaminates the
-    # Jacobian with near-singular derivatives when combined with the
-    # acclimation factor. 1.2 is still physically reasonable for
-    # dark-respiration Q10 at the upper end of the vegetated range.
-    Q10 = jnp.maximum(3.22 - 0.046 * TaC, 1.2)
-    item = (Tf - 298.15) / 10.0
-    return (10.0 ** (-0.00794 * (TgC_clip - 25.0))) * (Q10 ** item)
+    TgC_a = jnp.clip(TgC, _TGC_LO, _TGC_HI)
+    return _arrhenius_peaked(Tf, _HA_VCMAX, _HD_VCMAX, _delta_s_vcmax(TgC_a))
 
 
 # ---------------------------------------------------------------------------
-# C3 photosynthesis (Farquhar et al. 1980, DePury & Farquhar 1997)
+# C3 photosynthesis (canonical FvCB; Bonan ch. 11 / CLM5 §2.9)
 # ---------------------------------------------------------------------------
 
 @jax.jit
@@ -100,62 +196,69 @@ def c3_photosynthesis(
     alf: jax.Array,
     TgC: jax.Array,
 ) -> jax.Array:
-    """Net assimilation rate for C3 photosynthesis.
+    """Net assimilation rate for canonical FvCB C3 photosynthesis.
 
     Parameters
     ----------
-    Tf     : leaf temperature [K]
-    Ci     : intercellular CO2 concentration [μmol mol-1]
-    APAR   : absorbed PAR [μmol m-2 s-1]
-    Vcmax25: maximum carboxylation rate at 25°C [μmol m-2 s-1]
-    Ps     : atmospheric pressure [Pa]
-    alf    : quantum yield for electron transport [mol CO2 mol photons-1]
-    TgC    : 30-day mean growth temperature [°C]
+    Tf      : leaf temperature [K]
+    Ci      : intercellular CO2 mole fraction [umol mol-1]
+    APAR    : absorbed PAR [umol m-2 s-1]
+    Vcmax25 : maximum carboxylation rate at 25 degC [umol m-2 s-1]
+    Ps      : surface pressure [Pa] — accepted for parity, unused (mole-fraction Ci)
+    alf     : legacy electron-transport quantum yield — accepted for parity, unused
+              (FvCB uses the PSII quantum yield _PHI_PSII)
+    TgC     : growth temperature [degC] for Kattge & Knorr acclimation
 
     Returns
     -------
-    An : net assimilation rate [μmol m-2 s-1] (non-negative)
+    An : net assimilation rate [umol m-2 s-1], clamped to >= 0
     """
-    R = 8.314e-3  # [kJ K-1 mol-1]
+    del Ps, alf  # signature parity; FvCB uses _PHI_PSII and mole-fraction Ci
 
-    # Partial pressures [Pa]
-    O   = Ps * 0.21
-    KC  = jnp.exp(38.05 - 79.43 / (R * Tf)) * 1e-6 * Ps   # Michaelis for CO2
-    KO  = jnp.exp(20.30 - 36.38 / (R * Tf)) * 1e-3 * Ps   # Michaelis for O2
-    GS  = jnp.exp(19.02 - 37.83 / (R * Tf)) * 1e-6 * Ps   # CO2 compensation point
-    K   = KC * (1.0 + O / KO)
-    Pi  = Ci * 1e-6 * Ps  # intercellular CO2 partial pressure [Pa]
+    # Acclimation only valid for TgC in [11, 35] degC; clip to the boundary
+    # acclimation state outside (avoid unphysical Kattge & Knorr extrapolation).
+    TgC_a = jnp.clip(TgC, _TGC_LO, _TGC_HI)
 
-    # Temperature-dependent Vcmax and Rd
-    Vcmax = vcmax_temperature_response(Tf, TgC) * Vcmax25
-    Rd_o  = 0.015 * Vcmax
-    Rd    = Rd_o * rd_temperature_response(Tf, TgC)
+    # Acclimation (Kattge & Knorr 2007)
+    dS_v = _delta_s_vcmax(TgC_a)
+    dS_j = _delta_s_jmax(TgC_a)
+    Jmax25 = _jmax25_over_vcmax25(TgC_a) * Vcmax25
 
-    # Three limiting rates
-    JC = Vcmax * (Pi - GS) / (Pi + K)
-    JE = alf   * APAR * (Pi - GS) / (Pi + 2.0 * GS)
-    JS = Vcmax / 2.0
+    # Instantaneous T-response of kinetic constants and capacities
+    Kc = _KC25 * _arrhenius(Tf, _HA_KC)
+    Ko = _KO25 * _arrhenius(Tf, _HA_KO)
+    GammaStar = _GS25 * _arrhenius(Tf, _HA_GS)
+    Vcmax = Vcmax25 * _arrhenius_peaked(Tf, _HA_VCMAX, _HD_VCMAX, dS_v)
+    Jmax = Jmax25 * _arrhenius_peaked(Tf, _HA_JMAX, _HD_JMAX, dS_j)
 
-    # Colimitation JC–JE (DePury & Farquhar 1997)
-    a1  = 0.98
-    b1  = -(JC + JE)
-    c1  = JC * JE
-    disc1 = jnp.maximum(b1**2 - 4.0 * a1 * c1, 1e-20)
-    JCE = (-b1 + jnp.sign(b1) * jnp.sqrt(disc1)) / (2.0 * a1)
+    # Dark respiration (Tjoelker + Atkin), basal at 0.015 * Vcmax25
+    Rd = _rd_atkin(Tf, TgC_a, Vcmax25)
 
-    # Colimitation JCE–JS
-    a2  = 0.95
-    b2  = -(JCE + JS)
-    c2  = JCE * JS
-    disc2 = jnp.maximum(b2**2 - 4.0 * a2 * c2, 1e-20)
-    JCES = (-b2 + jnp.sign(b2) * jnp.sqrt(disc2)) / (2.0 * a2)
+    # Electron transport: smaller root of theta_j J^2 - (I + Jmax) J + I Jmax = 0
+    I_PSII = 0.5 * _PHI_PSII * APAR
+    J = _smaller_root_quadratic(_THETA_J, I_PSII, Jmax)
 
-    An = jnp.maximum(JCES - Rd, 0.0)
-    return An
+    # Limited rates (Bonan eq. 11.28, 11.29, 11.32)
+    Ci_safe = jnp.maximum(Ci, 1e-3)  # avoid div-by-zero at zero CO2
+    Ac = Vcmax * (Ci_safe - GammaStar) / (Ci_safe + Kc * (1.0 + _OI / Ko))
+    Aj = (J / 4.0) * (Ci_safe - GammaStar) / (Ci_safe + 2.0 * GammaStar)
+    Ap = 0.5 * Vcmax
+
+    # When Ci < Gamma*, Ac and Aj go negative; floor at 0 to keep the
+    # smaller-root quadratic well-conditioned.  Net A is then driven by -Rd.
+    Ac = jnp.maximum(Ac, 0.0)
+    Aj = jnp.maximum(Aj, 0.0)
+
+    # Co-limitation (Bonan eq. 11.33 / CLM5 eq. 2.9.8)
+    Ai = _smaller_root_quadratic(_THETA_CJA_C3, Ac, Aj)
+    A = _smaller_root_quadratic(_THETA_IP_C3, Ai, Ap)
+
+    An = A - Rd
+    return jnp.where(An < 0.0, 0.0, An)
 
 
 # ---------------------------------------------------------------------------
-# C4 photosynthesis
+# C4 photosynthesis (Collatz 1992 / SiB2 / Bonan §11.7; CLM5-aligned)
 # ---------------------------------------------------------------------------
 
 @jax.jit
@@ -165,54 +268,45 @@ def c4_photosynthesis(
     APAR: jax.Array,
     Vcmax25: jax.Array,
 ) -> jax.Array:
-    """Net assimilation rate for C4 photosynthesis.
+    """Net assimilation rate for canonical FvCB C4 photosynthesis.
 
     Parameters
     ----------
-    Tf     : leaf temperature [K]
-    Ci     : intercellular CO2 concentration [μmol mol-1]
-    APAR   : absorbed PAR [μmol m-2 s-1]
-    Vcmax25: maximum carboxylation rate at 25°C [μmol m-2 s-1]
+    Tf      : leaf temperature [K]
+    Ci      : intercellular CO2 mole fraction [umol mol-1]
+    APAR    : absorbed PAR [umol m-2 s-1]
+    Vcmax25 : maximum carboxylation rate at 25 degC [umol m-2 s-1]
 
     Returns
     -------
-    An : net assimilation rate [μmol m-2 s-1] (non-negative)
+    An : net assimilation rate [umol m-2 s-1], clamped to >= 0
     """
-    item = (Tf - 298.15) / 10.0
-    Q10  = 2.0
+    item = (Tf - _T_REF) / 10.0
+    q10_pow = jnp.power(_Q10_C4, item)
 
-    kp25 = 0.02 * Vcmax25
-    k    = kp25 * Q10 ** item   # PEP carboxylase efficiency
+    Vcmax_o = Vcmax25 * q10_pow
+    fH = 1.0 + jnp.exp(_S1_C4 * (Tf - _S2_C4))
+    fL = 1.0 + jnp.exp(_S3_C4 * (_S4_C4 - Tf))
+    Vcmax = Vcmax_o / (fH * fL)
 
-    Vcmax_o = Vcmax25 * Q10 ** item
-    Vcmax   = Vcmax_o / ((1.0 + jnp.exp(0.3 * (286.15 - Tf)))
-                         * (1.0 + jnp.exp(0.3 * (Tf - 309.15))))
-    Rd_o = 0.8 * Q10 ** item
-    Rd   = Rd_o / (1.0 + jnp.exp(1.3 * (Tf - 328.15)))
+    Rd25 = _RD25_FRAC_C4 * Vcmax25
+    Rd = Rd25 * q10_pow / (1.0 + jnp.exp(_S5_C4 * (Tf - _S6_C4)))
 
-    # Three limiting rates
-    alf_c4 = 0.067   # quantum yield for C4
-    Je = Vcmax
-    Ji = alf_c4 * APAR
-    ci = Ci * 1e-6
-    Jc = ci * k * 1e6
+    kp25 = _KP25_FRAC * Vcmax25
+    kp = kp25 * q10_pow
 
-    # Colimitation Je–Ji
-    a1   = 0.80
-    b1   = -(Je + Ji)
-    c1   = Je * Ji
-    disc1 = jnp.maximum(b1**2 - 4.0 * a1 * c1, 1e-20)
-    Jei  = (-b1 + jnp.sign(b1) * jnp.sqrt(disc1)) / (2.0 * a1)
+    # Limited rates (Bonan eq. 11.69-11.71).  kp [mol m-2 s-1] * Ci [umol mol-1]
+    # * 1e-6 [mol/umol] -> mol m-2 s-1, then * 1e6 to umol m-2 s-1: the two
+    # unit factors cancel, so Ap = kp * Ci directly.
+    Ac = Vcmax
+    Aj = _ALPHA_C4 * APAR
+    Ap = kp * Ci
 
-    # Colimitation Jei–Jc
-    a2   = 0.95
-    b2   = -(Jei + Jc)
-    c2   = Jei * Jc
-    disc2 = jnp.maximum(b2**2 - 4.0 * a2 * c2, 1e-20)
-    Jeic = (-b2 + jnp.sign(b2) * jnp.sqrt(disc2)) / (2.0 * a2)
+    Ai = _smaller_root_quadratic(_THETA_CJA_C4, Ac, Aj)
+    A = _smaller_root_quadratic(_THETA_IP_C4, Ai, Ap)
 
-    An = jnp.maximum(Jeic - Rd, 0.0)
-    return An
+    An = A - Rd
+    return jnp.where(An < 0.0, 0.0, An)
 
 
 # ---------------------------------------------------------------------------
@@ -238,19 +332,60 @@ def photosynthesis(
 
     Parameters
     ----------
-    Tf, Ci, APAR : leaf temperature [K], intercellular CO2 [μmol/mol],
-                   absorbed PAR [μmol m-2 s-1]
-    Vcmax25_C3, Vcmax25_C4 : canopy-integrated Vcmax25 [μmol m-2 s-1]
-    fC4     : C4 area fraction [0–1] — traced value, not branched
-    Ps      : atmospheric pressure [Pa]
-    alf     : quantum yield [mol CO2 mol photons-1] (used for C3)
-    TgC     : 30-day mean growth temperature [°C]
+    Tf, Ci, APAR : leaf temperature [K], intercellular CO2 [umol/mol],
+                   absorbed PAR [umol m-2 s-1]
+    Vcmax25_C3, Vcmax25_C4 : canopy-integrated Vcmax25 [umol m-2 s-1]
+    fC4     : C4 area fraction [0-1] — traced value, not branched
+    Ps      : surface pressure [Pa] — parity only (unused by FvCB C3)
+    alf     : legacy quantum yield — parity only (unused by FvCB C3)
+    TgC     : growth temperature [degC] for acclimation
 
     Returns
     -------
-    An : net assimilation rate [μmol m-2 s-1]
+    An : net assimilation rate [umol m-2 s-1]
     """
     An_C3 = c3_photosynthesis(Tf, Ci, APAR, Vcmax25_C3, Ps, alf, TgC)
     An_C4 = c4_photosynthesis(Tf, Ci, APAR, Vcmax25_C4)
     # Continuous weighted average — fully differentiable wrt fC4
     return (1.0 - fC4) * An_C3 + fC4 * An_C4
+
+
+__physics_contract__ = {
+    "summary": (
+        "Canonical Farquhar-von Caemmerer-Berry (FvCB) C3 + C4 leaf "
+        "photosynthesis for the two-big-leaf canopy (Bonan 2019 ch. 11; CLM5 "
+        "§2.9). C3 uses a Jmax-bounded electron-transport rate and Kattge & "
+        "Knorr (2007) peaked-Arrhenius acclimation of both Vcmax and Jmax "
+        "(Jmax25/Vcmax25 = 2.59 - 0.035*TgC). Dark respiration follows Tjoelker "
+        "(2001) + Atkin (2008) with Rd0 = 0.015*Vcmax25 (the 25 degC value, no "
+        "double counting of the Vcmax T-response). C4 follows Collatz (1992)/"
+        "SiB2 with CLM5 constants. Mixed canopies blend C3/C4 continuously by "
+        "fC4. ported from DifferBESS process/Photosynthesis_FvCB.py."
+    ),
+    "inputs": {
+        "Tf": "K", "Ci": "umol/mol", "APAR": "umol/m^2/s",
+        "Vcmax25": "umol/m^2/s", "TgC": "degC", "fC4": "1",
+    },
+    "outputs": {"An": "umol/m^2/s"},
+    "sign_convention": (
+        "An >= 0 (gross assimilation minus dark respiration, floored at 0). "
+        "Light- (Aj), Rubisco- (Ac) and product- (Ap) limited rates are each "
+        ">= 0; net An is gross A minus Rd."
+    ),
+    "conserves": [],  # leaf-level rate, not a conservation law
+    "differentiable": True,
+    "reference": (
+        "Farquhar, von Caemmerer & Berry (1980) Planta 149 78-90; Bernacchi+ "
+        "(2001) Plant Cell Environ. 24 253-259; Kattge & Knorr (2007) Plant "
+        "Cell Environ. 30 1176-1190; Tjoelker+ (2001) Glob. Change Biol. 7 "
+        "223-230; Atkin+ (2008); Collatz+ (1992) Aust. J. Plant Physiol. 19 "
+        "519-538; Bonan (2019) ch. 11; CLM5 tech note §2.9."
+    ),
+    "idealized_test": (
+        "tests/land/unit/test_canopy_photosynthesis.py: An > 0 at light- and "
+        "CO2-saturated 25 degC; An == 0 in the dark; Vcmax response peaks near "
+        "25-30 degC; Rd0 == 0.015*Vcmax25 at 25 degC (no double count); "
+        "Jmax25/Vcmax25 acclimation ratio; CLM5 C4 constants; high-APAR "
+        "saturation (Jmax bound); finite grad wrt Vcmax25."
+    ),
+}

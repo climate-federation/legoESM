@@ -31,6 +31,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import NamedTuple
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -61,6 +62,7 @@ from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
 from legoesm.land.richards import RichardsConfig
 from legoesm.land.carbon.config import CarbonConfig
+from legoesm.land.carbon.carbon_cycle import init_carbon_state
 from legoesm.land.multilayer_land import (
     step_multilayer_land,
     init_multilayer_land_state,
@@ -77,6 +79,22 @@ from legoesm.land.surface_params import (
 
 U_MIN = 1.0  # m/s — wind speed floor
 _SECS_PER_DAY = 86400.0
+_DEFAULT_LAND_CONFIG = MultiLayerLandConfig()
+_VALID_CARBON_SCHEMES = ("none", "differland", "seasonal")
+
+
+class LMIPRunConfig(NamedTuple):
+    """CLI-resolved LMIP config and run controls."""
+
+    land: MultiLayerLandConfig
+    max_wallclock_seconds: float
+    restart_buffer_seconds: float
+    seed: int
+
+
+def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> bool:
+    """True when the loop should checkpoint and exit before wallclock expiry."""
+    return max_s > 0.0 and elapsed_s >= (max_s - buffer_s)
 
 
 # ===========================================================================
@@ -85,63 +103,9 @@ _SECS_PER_DAY = 86400.0
 # Keys: theta_r, theta_sat, alpha_vg [1/m], n_vg, K_sat [m/s]
 # ===========================================================================
 
-_SOIL_TEXTURE_PRESETS: dict[str, dict] = {
-    "sand": dict(
-        theta_r=0.045, theta_sat=0.430,
-        alpha_vg=14.5, n_vg=2.68,
-        K_sat=8.25e-5,
-    ),
-    "loamy_sand": dict(
-        theta_r=0.057, theta_sat=0.410,
-        alpha_vg=12.4, n_vg=2.28,
-        K_sat=4.05e-5,
-    ),
-    "sandy_loam": dict(
-        theta_r=0.065, theta_sat=0.410,
-        alpha_vg=7.5, n_vg=1.89,
-        K_sat=1.22e-5,
-    ),
-    "loam": dict(
-        theta_r=0.078, theta_sat=0.430,
-        alpha_vg=3.6, n_vg=1.56,
-        K_sat=2.89e-6,
-    ),
-    "silt_loam": dict(
-        theta_r=0.067, theta_sat=0.450,
-        alpha_vg=2.0, n_vg=1.41,
-        K_sat=1.25e-6,
-    ),
-    "sandy_clay_loam": dict(
-        theta_r=0.100, theta_sat=0.390,
-        alpha_vg=5.9, n_vg=1.48,
-        K_sat=3.64e-6,
-    ),
-    "clay_loam": dict(
-        theta_r=0.095, theta_sat=0.410,
-        alpha_vg=1.9, n_vg=1.31,
-        K_sat=7.22e-7,
-    ),
-    "silty_clay_loam": dict(
-        theta_r=0.089, theta_sat=0.430,
-        alpha_vg=1.0, n_vg=1.23,
-        K_sat=1.94e-7,
-    ),
-    "sandy_clay": dict(
-        theta_r=0.100, theta_sat=0.380,
-        alpha_vg=2.7, n_vg=1.23,
-        K_sat=3.33e-6,
-    ),
-    "silty_clay": dict(
-        theta_r=0.070, theta_sat=0.360,
-        alpha_vg=0.5, n_vg=1.09,
-        K_sat=5.56e-8,
-    ),
-    "clay": dict(
-        theta_r=0.068, theta_sat=0.380,
-        alpha_vg=0.8, n_vg=1.09,
-        K_sat=5.56e-8,
-    ),
-}
+# USDA texture van-Genuchten presets (Carsel & Parrish 1988) — shared with the
+# global CLM reference-soil-map provider (no duplicated soil constants).
+from legoesm.land.soil_texture import SOIL_TEXTURE_VG as _SOIL_TEXTURE_PRESETS
 
 
 # ===========================================================================
@@ -162,6 +126,57 @@ def _get_pft_row(veg_type: str) -> dict:
     idx = CLM5_PFT_NAMES.index(veg_type)
     row = _CLM5_PFT_TABLE_RAW[idx]
     return {name: val for name, val in zip(PARAM_NAMES, row)}
+
+
+def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
+    """Resolve LMIP CLI arguments into the land config and run controls."""
+    texture_kwargs = _SOIL_TEXTURE_PRESETS[args.soil_texture]
+    pft_row = _get_pft_row(args.veg_type)
+    land = MultiLayerLandConfig(
+        albedo_land=pft_row["albedo_veg"],
+        emissivity_land=pft_row["emissivity"],
+        z0_land=(
+            args.z0_land
+            if args.z0_land is not None
+            else pft_row["z0"]
+        ),
+        Cd_land=(
+            args.cd_land
+            if args.cd_land is not None
+            else _DEFAULT_LAND_CONFIG.Cd_land
+        ),
+        Ch_land=(
+            args.ch_land
+            if args.ch_land is not None
+            else _DEFAULT_LAND_CONFIG.Ch_land
+        ),
+        beta_min=(
+            args.beta_min
+            if args.beta_min is not None
+            else _DEFAULT_LAND_CONFIG.beta_min
+        ),
+        bulk_scheme=args.bulk_scheme,
+        root_depth=pft_row["root_depth"],
+        theta_wp=pft_row["theta_wp"],
+        theta_fc=pft_row["theta_fc"],
+        snow_albedo_feedback=args.snow_albedo_feedback,
+        soil_grid=SoilGridConfig(
+            n_layers=args.n_layers,
+            total_depth=args.soil_depth,
+            # Keep the historical LMIP top-layer thickness.
+            growth_factor=1.5,
+        ),
+        hydraulics=SoilHydraulicsConfig(**texture_kwargs),
+        thermal=SoilThermalConfig(),
+        richards=RichardsConfig(),
+        carbon=CarbonConfig(scheme=args.carbon_scheme),
+    )
+    return LMIPRunConfig(
+        land=land,
+        max_wallclock_seconds=args.max_wallclock_seconds,
+        restart_buffer_seconds=args.restart_buffer_seconds,
+        seed=args.seed,
+    )
 
 
 # ===========================================================================
@@ -422,18 +437,27 @@ def _save_restart(
     step: int,
     day: float,
     state,
+    carbon_state=None,
 ) -> None:
     """Save a restart checkpoint as .npz."""
-    np.savez_compressed(
-        str(restart_path),
-        step=np.array(step, dtype=np.int64),
-        day=np.array(day, dtype=np.float64),
-        T_soil=np.asarray(state.T_soil),
-        theta_soil=np.asarray(state.theta_soil),
-        psi_soil=np.asarray(state.psi_soil),
-        snow_depth=np.asarray(state.snow_depth),
-        snow_age=np.asarray(state.snow_age),
-    )
+    payload = {
+        "step": np.array(step, dtype=np.int64),
+        "day": np.array(day, dtype=np.float64),
+        "T_soil": np.asarray(state.T_soil),
+        "theta_soil": np.asarray(state.theta_soil),
+        "psi_soil": np.asarray(state.psi_soil),
+        "snow_depth": np.asarray(state.snow_depth),
+        "snow_age": np.asarray(state.snow_age),
+        "surface_water": np.asarray(
+            state.surface_water if state.surface_water is not None
+            else np.zeros_like(np.asarray(state.snow_depth))),
+    }
+    if carbon_state is not None:
+        for field in carbon_state._fields:
+            payload[f"carbon_{field}"] = np.asarray(
+                getattr(carbon_state, field)
+            )
+    np.savez_compressed(str(restart_path), **payload)
 
 
 def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
@@ -448,23 +472,49 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
         runoff_subsurface=jnp.zeros(1),
         snow_depth=jnp.asarray(data["snow_depth"]),
         snow_age=jnp.asarray(data["snow_age"]),
+        # Backward-compat: old checkpoints predate surface ponding -> start dry.
+        surface_water=jnp.asarray(data["surface_water"]) if "surface_water" in data
+        else jnp.zeros_like(jnp.asarray(data["snow_depth"])),
     )
     start_step = int(data["step"])
     start_day = float(data["day"])
-    return state, start_step, start_day
+    carbon_state = None
+    if config.carbon.scheme == "differland":
+        carbon_fields = [
+            "C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som",
+        ]
+        if all(f"carbon_{field}" in data for field in carbon_fields):
+            from legoesm.land.carbon.config import CarbonState
+            carbon_state = CarbonState(**{
+                field: jnp.asarray(data[f"carbon_{field}"])
+                for field in carbon_fields
+            })
+        else:
+            carbon_state = init_carbon_state(
+                tuple(state.T_soil.shape[:-1]), config.carbon
+            )
+    return state, carbon_state, start_step, start_day
 
 
 # ===========================================================================
 # Main driver
 # ===========================================================================
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Offline single-point multilayer land spin-up (LMIP)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--lat", type=float, required=True,
-                   help="Latitude [deg]")
+    p.add_argument("--config", type=str, default=None,
+                   help="YAML config file supplying argument defaults (keys are "
+                        "argument dests; explicit CLI flags still override). "
+                        "See config/lmip/*.yaml. (issue #691)")
+    p.add_argument("--require-config", action="store_true",
+                   help="Strict mode: fail unless a --config file is given, so "
+                        "the run is fully specified by a committed config (no "
+                        "hidden parser defaults). (issue #691)")
+    p.add_argument("--lat", type=float, default=None,
+                   help="Latitude [deg] (required — via CLI or the --config file)")
     p.add_argument("--lon", type=float, default=0.0,
                    help="Longitude [deg] (used for local solar hour angle)")
     p.add_argument("--days", type=int, default=3650,
@@ -493,6 +543,12 @@ def _parse_args() -> argparse.Namespace:
                    help="Output directory")
     p.add_argument("--checkpoint-days", type=int, default=100,
                    help="Save restart every N days")
+    p.add_argument("--max-wallclock-seconds", type=float, default=0.0,
+                   help="Wallclock budget [s] for clean checkpoint+exit")
+    p.add_argument("--restart-buffer-seconds", type=float, default=600.0,
+                   help="Wallclock buffer [s] reserved for restart writes")
+    p.add_argument("--seed", type=int, default=0,
+                   help="Master RNG seed for reproducibility metadata")
     p.add_argument("--diag-interval", type=int, default=1,
                    help="Save diagnostics every N days")
     p.add_argument("--start-day", type=float, default=0.0,
@@ -501,7 +557,43 @@ def _parse_args() -> argparse.Namespace:
                    help="Path to .npz restart file to resume from")
     p.add_argument("--precip-rate", type=float, default=2e-5,
                    help="Constant precipitation rate [kg/m2/s]")
-    return p.parse_args()
+    p.add_argument("--cd-land", type=float, default=None,
+                   help="Land drag coefficient for the constant bulk scheme")
+    p.add_argument("--ch-land", type=float, default=None,
+                   help="Land heat transfer coefficient")
+    p.add_argument("--z0-land", type=float, default=None,
+                   help="Override PFT roughness length [m]")
+    p.add_argument("--beta-min", type=float, default=None,
+                   help="Minimum soil moisture availability")
+    p.add_argument("--carbon-scheme", default="none",
+                   choices=_VALID_CARBON_SCHEMES,
+                   help="Land carbon cycle scheme")
+    p.add_argument("--snow-albedo-feedback",
+                   action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="Enable/disable snow albedo feedback")
+    # Two-pass parse so a --config file supplies defaults that explicit CLI
+    # flags still override (precedence: CLI > config file > parser default).
+    # Shared loader (single source of truth) — same mechanism as run_amip /
+    # run_coupled (issue #691).
+    pre, _ = p.parse_known_args(argv)
+    if pre.config is not None:
+        from legoesm.driver.run_config_yaml import load_yaml_config
+        p.set_defaults(**load_yaml_config(
+            pre.config, p,
+            example_keys="'lat', 'lon', 'days', 'dt', 'soil_texture', "
+                         "'veg_type', 'carbon_scheme'"))
+    args = p.parse_args(argv)
+    if getattr(args, "require_config", False):
+        from legoesm.driver.run_config_yaml import require_config
+        require_config(args.config, driver="run_lmip")
+    # --lat is mandatory but may come from CLI or the config file (so it can be
+    # config-driven); enforce it after both sources are merged.
+    if args.lat is None:
+        raise SystemExit(
+            "run_lmip: --lat is required (pass --lat or set 'lat:' in --config)."
+        )
+    return args
 
 
 def main() -> None:
@@ -515,35 +607,8 @@ def main() -> None:
     lon_rad = float(args.lon * jnp.pi / 180.0)
     lat_jnp = jnp.asarray([lat_rad])   # shape (1,) for snow_albedo_feedback
 
-    # --- Soil hydraulics config from texture preset ---
-    texture_kwargs = _SOIL_TEXTURE_PRESETS[args.soil_texture]
-
-    # --- PFT parameters ---
-    pft_row = _get_pft_row(args.veg_type)
-
-    # --- Build MultiLayerLandConfig ---
-    config = MultiLayerLandConfig(
-        albedo_land=pft_row["albedo_veg"],
-        emissivity_land=pft_row["emissivity"],
-        z0_land=pft_row["z0"],
-        bulk_scheme=args.bulk_scheme,
-        root_depth=pft_row["root_depth"],
-        theta_wp=pft_row["theta_wp"],
-        theta_fc=pft_row["theta_fc"],
-        snow_albedo_feedback=True,
-        soil_grid=SoilGridConfig(
-            n_layers=args.n_layers,
-            total_depth=args.soil_depth,
-            # growth_factor=1.5 gives a ~2.6 cm top layer for n=10, depth=3 m,
-            # preventing extreme diurnal T swings in the thin surface layer.
-            # (Default growth_factor=2.0 gives ~3 mm, too thin for practical use.)
-            growth_factor=1.5,
-        ),
-        hydraulics=SoilHydraulicsConfig(**texture_kwargs),
-        thermal=SoilThermalConfig(),
-        richards=RichardsConfig(),
-        carbon=CarbonConfig(scheme="none"),
-    )
+    run_config = build_config_from_args(args)
+    config = run_config.land
 
     dt = args.dt
     n_total_steps = int(args.days * _SECS_PER_DAY / dt)
@@ -555,12 +620,17 @@ def main() -> None:
     # --- Initialise state ---
     if args.restart_from is not None:
         print(f"Loading restart from {args.restart_from}")
-        state, start_step, start_day_abs = _load_restart(
+        state, carbon_state, start_step, start_day_abs = _load_restart(
             Path(args.restart_from), config
         )
         print(f"  Resumed at step {start_step}, day {start_day_abs:.2f}")
     else:
         state = init_multilayer_land_state(1, config, T_init=args.t_init)
+        carbon_state = (
+            init_carbon_state((1,), config.carbon)
+            if config.carbon.scheme == "differland"
+            else None
+        )
         start_step = 0
         start_day_abs = 0.0
 
@@ -568,10 +638,10 @@ def main() -> None:
     # Config, lat, dt captured in closure (compile-time constants per CLAUDE.md).
     # doy is a traced argument (changes every step → prevents recompile).
     @jax.jit
-    def _step(state, forcing, doy):
+    def _step(state, carbon_state, forcing, doy):
         return step_multilayer_land(
             state, forcing, config, U_MIN, dt,
-            lat=lat_jnp, carbon_state=None, doy=doy,
+            lat=lat_jnp, carbon_state=carbon_state, doy=doy,
         )
 
     # --- Diagnostic accumulators (daily means) ---
@@ -612,6 +682,32 @@ def main() -> None:
     status = "PASS"
     error_msg = ""
 
+    def _flush_buffered_diagnostics() -> None:
+        if len(diag_days) == 0:
+            return
+        _append_netcdf(
+            nc_path,
+            days=np.array(diag_days),
+            T_soil=np.stack(diag_T_soil),
+            theta_soil=np.stack(diag_theta_soil),
+            psi_soil=np.stack(diag_psi_soil),
+            snow_depth=np.array(diag_snow_depth),
+            shflx=np.array(diag_shflx),
+            lhflx=np.array(diag_lhflx),
+            runoff_surface=np.array(diag_runoff_sfc),
+            runoff_subsurface=np.array(diag_runoff_sub),
+            attrs=nc_attrs,
+        )
+        diag_days.clear()
+        diag_T_soil.clear()
+        diag_theta_soil.clear()
+        diag_psi_soil.clear()
+        diag_snow_depth.clear()
+        diag_shflx.clear()
+        diag_lhflx.clear()
+        diag_runoff_sfc.clear()
+        diag_runoff_sub.clear()
+
     try:
         for global_step in range(start_step, start_step + n_total_steps):
             step_in_run = global_step - start_step
@@ -627,7 +723,9 @@ def main() -> None:
                 precip_rate=args.precip_rate,
             )
 
-            state, response, _ = _step(state, forcing, jnp.asarray(doy))
+            state, response, carbon_state = _step(
+                state, carbon_state, forcing, jnp.asarray(doy)
+            )
 
             # Accumulate
             T_soil_acc += np.asarray(state.T_soil[0])
@@ -671,32 +769,13 @@ def main() -> None:
 
                 # Checkpoint: flush diagnostics + save restart
                 if day_idx % args.checkpoint_days == 0:
-                    if len(diag_days) > 0:
-                        _append_netcdf(
-                            nc_path,
-                            days=np.array(diag_days),
-                            T_soil=np.stack(diag_T_soil),
-                            theta_soil=np.stack(diag_theta_soil),
-                            psi_soil=np.stack(diag_psi_soil),
-                            snow_depth=np.array(diag_snow_depth),
-                            shflx=np.array(diag_shflx),
-                            lhflx=np.array(diag_lhflx),
-                            runoff_surface=np.array(diag_runoff_sfc),
-                            runoff_subsurface=np.array(diag_runoff_sub),
-                            attrs=nc_attrs,
-                        )
-                        diag_days.clear()
-                        diag_T_soil.clear()
-                        diag_theta_soil.clear()
-                        diag_psi_soil.clear()
-                        diag_snow_depth.clear()
-                        diag_shflx.clear()
-                        diag_lhflx.clear()
-                        diag_runoff_sfc.clear()
-                        diag_runoff_sub.clear()
+                    _flush_buffered_diagnostics()
 
                     restart_path = out_dir / f"restart_day{int(abs_day):06d}.npz"
-                    _save_restart(restart_path, global_step + 1, abs_day, state)
+                    _save_restart(
+                        restart_path, global_step + 1, abs_day, state,
+                        carbon_state,
+                    )
                     elapsed = time.time() - t_wall_start
                     print(
                         f"  day {abs_day:7.1f} / {args.days:d}  "
@@ -707,21 +786,28 @@ def main() -> None:
                         flush=True,
                     )
 
+                if _wallclock_exhausted(
+                    time.time() - t_wall_start,
+                    run_config.max_wallclock_seconds,
+                    run_config.restart_buffer_seconds,
+                ):
+                    _flush_buffered_diagnostics()
+                    restart_path = out_dir / f"restart_day{int(abs_day):06d}.npz"
+                    _save_restart(
+                        restart_path, global_step + 1, abs_day, state,
+                        carbon_state,
+                    )
+                    print(
+                        f"  Wallclock budget "
+                        f"{run_config.max_wallclock_seconds:.0f}s nearly "
+                        f"reached at day {abs_day:.2f}; restart saved: "
+                        f"{restart_path.name}.",
+                        flush=True,
+                    )
+                    sys.exit(0)
+
         # --- Flush remaining diagnostics ---
-        if len(diag_days) > 0:
-            _append_netcdf(
-                nc_path,
-                days=np.array(diag_days),
-                T_soil=np.stack(diag_T_soil),
-                theta_soil=np.stack(diag_theta_soil),
-                psi_soil=np.stack(diag_psi_soil),
-                snow_depth=np.array(diag_snow_depth),
-                shflx=np.array(diag_shflx),
-                lhflx=np.array(diag_lhflx),
-                runoff_surface=np.array(diag_runoff_sfc),
-                runoff_subsurface=np.array(diag_runoff_sub),
-                attrs=nc_attrs,
-            )
+        _flush_buffered_diagnostics()
 
         # --- Validation: check for NaN in final state ---
         final_T = np.asarray(state.T_soil)
@@ -747,7 +833,7 @@ def main() -> None:
     # --- Save final restart ---
     final_restart = out_dir / "restart_final.npz"
     _save_restart(final_restart, start_step + n_total_steps,
-                  start_day_abs + args.days, state)
+                  start_day_abs + args.days, state, carbon_state)
 
     # --- Summary JSON ---
     wall_time = time.time() - t_wall_start
@@ -766,6 +852,13 @@ def main() -> None:
         "n_layers": args.n_layers,
         "soil_depth_m": args.soil_depth,
         "bulk_scheme": args.bulk_scheme,
+        "seed": run_config.seed,
+        "Cd_land": config.Cd_land,
+        "Ch_land": config.Ch_land,
+        "z0_land": config.z0_land,
+        "beta_min": config.beta_min,
+        "snow_albedo_feedback": config.snow_albedo_feedback,
+        "carbon_scheme": config.carbon.scheme,
         "t_init_K": args.t_init,
         "start_day": args.start_day,
         "final_T_soil_K": final_T_arr[0].tolist(),

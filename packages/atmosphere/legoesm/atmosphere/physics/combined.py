@@ -9,8 +9,8 @@ can be independently enabled/disabled via its ``scheme`` field (set to
 Gravity wave drag is included as a first-class component on equal
 footing with the other parameterizations; the supported schemes are
 ``"rayleigh"``, ``"lindzen"``, ``"mcfarlane"``, ``"hines"``,
-``"prognostic_spectral"``, ``"ml_emulator"``, and ``"none"`` (see
-``GravityWaveDragConfig``).
+``"prognostic_spectral"``, ``"e3sm_cam"``, ``"ml_emulator"``, and
+``"none"`` (see ``GravityWaveDragConfig``).
 
 The combined function accepts an optional ``phys_state`` (``PhysicsState``)
 argument.  When provided, prognostic physics variables (TKE, convective
@@ -88,18 +88,23 @@ class PhysicsConfig(NamedTuple):
     Fields
     ------
     radiation : RadiationConfig
-        Radiation configuration (schemes: "gray", "rrtmgp").
+        Radiation configuration (schemes: "gray", "rrtmgp", "none").
     convection : ConvectionConfig
-        Convection configuration (schemes: "sbm", "dca", "none").
+        Convection configuration (schemes: "sbm", "dca", "kuo",
+        "mass_flux", "edmf", "zhang_mcfarlane", "kain_fritsch",
+        "emanuel", "tiedtke", "bechtold", "none").
     turbulence : TurbulenceConfig
         Turbulence configuration (schemes: "smagorinsky", "louis",
-        "tke", "clubb_lite", "none").
+        "tke", "mynn25", "clubb_lite", "clubb", "holtslag_boville",
+        "ysu", "edmf", "none").
     microphysics : MicrophysicsConfig
         Microphysics configuration (schemes: "kessler", "sundqvist",
-        "seifert_beheng", "morrison", "thompson", "ml_emulator", "none").
+        "seifert_beheng", "morrison", "thompson", "p3", "sdm",
+        "fast_sbm", "ml_emulator", "none").
     gravity_wave_drag : GravityWaveDragConfig
         Gravity wave drag configuration (schemes: "rayleigh", "lindzen",
-        "mcfarlane", "hines", "prognostic_spectral", "ml_emulator", "none").
+        "mcfarlane", "hines", "prognostic_spectral", "e3sm_cam",
+        "ml_emulator", "none").
     """
     radiation: RadiationConfig = RadiationConfig()
     convection: ConvectionConfig = ConvectionConfig()
@@ -115,6 +120,7 @@ def make_physics(
     column_mesh=None,
     sfc_albedo_override=None,
     sfc_emissivity_override=None,
+    need_rad: bool = True,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
 
@@ -138,6 +144,16 @@ def make_physics(
         face-divisibility (e.g. 4-GPU node) still keeps every device
         busy on the radiation hot path.  Default ``None`` preserves
         bit-exact behavior.
+    need_rad : bool, optional
+        Radiation sub-cycle selector (hydrostatic / MPAS paths only).
+        ``True`` (default) builds the full-physics variant that solves
+        radiation every call AND caches the resulting heating tendency in
+        ``PhysicsState.rad_heating``.  ``False`` builds the held-radiation
+        variant that SKIPS the RRTMGP/gray solve and re-uses the cached
+        ``rad_heating`` instead — the driver alternates the two by
+        ``step % rad_update_steps`` to run radiation on a coarse (e.g.
+        1-hour) cadence (CESM/E3SM standard) while every other module runs
+        every step.  When radiation is ``scheme="none"`` the flag is inert.
 
     Returns
     -------
@@ -162,7 +178,8 @@ def make_physics(
             f"model_type='spectral_pe', got {model_type!r}."
         )
     if model_type == "hydrostatic":
-        fn = _make_hydrostatic_combined(config, dt, column_mesh=column_mesh)
+        fn = _make_hydrostatic_combined(
+            config, dt, column_mesh=column_mesh, need_rad=need_rad)
     elif model_type == "nonhydrostatic":
         fn = _make_nonhydrostatic_combined(config, dt)
     elif model_type == "spectral_pe":
@@ -172,7 +189,8 @@ def make_physics(
             sfc_emissivity_override=sfc_emissivity_override,
         )
     elif model_type == "mpas":
-        fn = _make_mpas_combined(config, dt, column_mesh=column_mesh)
+        fn = _make_mpas_combined(
+            config, dt, column_mesh=column_mesh, need_rad=need_rad)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -212,13 +230,67 @@ def physics_config_requires_phys_state(config: PhysicsConfig) -> bool:
     )
 
 
+def _aerosol_ccn_active(config: PhysicsConfig) -> bool:
+    """True when the microphysics selects the aerosol-CCN specified-Nc fill.
+
+    The ``nc_from_aerosol`` switch lives on the per-scheme microphysics
+    sub-config (currently Morrison) and is only meaningful in specified-Nc
+    mode (``predict_Nc=False``).  The combined-physics builder reads it here
+    to keep the radiation cloud-optics droplet number consistent with the
+    microphysics fill (both diagnose N_c from ``forcing["aerosol_od"]``).
+    """
+    mc = config.microphysics
+    scheme = getattr(mc, "scheme", "none")
+    if scheme == "none":
+        return False
+    sc = getattr(mc, scheme, None)
+    return bool(
+        getattr(sc, "nc_from_aerosol", False)
+        and not getattr(sc, "predict_Nc", False)
+    )
+
+
+def _attach_lifecycle_hooks(physics_fn, tagged_fns):
+    """Attach reset_state / set_time / set_T_sfc_override propagation hooks.
+
+    Each hook forwards to every sub-physics fn in ``tagged_fns`` that
+    advertises the matching attribute (radiation honours all three;
+    turbulence reads T_sfc from PhysicsState).  Shared by the hydrostatic,
+    non-hydrostatic and spectral combined builders — pure Python attribute
+    wiring that runs outside JIT/AD.  Returns ``physics_fn`` for chaining.
+    """
+    def reset_state():
+        for fn, _, _ in tagged_fns:
+            reset_fn = getattr(fn, "reset_state", None)
+            if callable(reset_fn):
+                reset_fn()
+
+    def set_time(day_of_year: float, seconds_of_day: float):
+        for fn, _, _ in tagged_fns:
+            st = getattr(fn, "set_time", None)
+            if callable(st):
+                st(day_of_year, seconds_of_day)
+
+    def set_T_sfc_override(value):
+        for fn, _, _ in tagged_fns:
+            st = getattr(fn, "set_T_sfc_override", None)
+            if callable(st):
+                st(value)
+
+    physics_fn.reset_state = reset_state
+    physics_fn.set_time = set_time
+    physics_fn.set_T_sfc_override = set_T_sfc_override
+    return physics_fn
+
+
 # ======================================================================
 # Hydrostatic
 # ======================================================================
 
 def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                model_type: str = "hydrostatic",
-                               column_mesh=None) -> Callable:
+                               column_mesh=None,
+                               need_rad: bool = True) -> Callable:
     """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
 
     Uses the unified ``HydrostaticTendencies`` with optional ``dv_dt``.
@@ -229,10 +301,17 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     per-column radiation kernel runs sharded across the mesh.
     """
     tagged_fns = []
+    # Aerosol-CCN specified-Nc coupling: the microphysics factory self-
+    # detects the switch from its own sub-config, but the radiation factory
+    # has no microphysics config, so the flag is threaded explicitly so its
+    # cloud-optics droplet number (Twomey r_eff) matches the microphysics
+    # fill.  False (default) keeps both paths byte-identical.
+    _nc_from_aerosol = _aerosol_ccn_active(config)
     if config.radiation.scheme != "none":
         tagged_fns.append((
             make_radiation_physics(
                 config.radiation, model_type, column_mesh=column_mesh,
+                nc_from_aerosol=_nc_from_aerosol,
             ),
             False,
             None,
@@ -259,35 +338,47 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     if config.gravity_wave_drag.scheme != "none":
         tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, model_type, dt), True, "gwd_spectrum"))
 
-    def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
-        has_v = state.v is not None
+    # Radiation sub-cycle plumbing.  Radiation is always ``tagged_fns[0]``
+    # when configured (appended first above), so in the accumulator below
+    # ``first.dT_dt`` IS the radiative heating contribution — that is what
+    # the full-physics variant caches into ``PhysicsState.rad_heating`` and
+    # the held-radiation variant (``need_rad=False``) re-uses.
+    # ``_non_rad_fns`` is the module list with radiation removed.
+    _has_rad = config.radiation.scheme != "none"
+    _non_rad_fns = tagged_fns[1:] if _has_rad else tagged_fns
 
-        if not tagged_fns:
-            _sd = state.T.data.dtype
-            dims_T = state.T.dims
-            dims_ps = state.p_s.dims
-            dv_dt_zero = None
-            if has_v:
-                dv_dt_zero = Field(
-                    data=jnp.zeros_like(state.v.data), name="dv_dt_phys",
-                    dims=state.v.dims, units="m/s^2",
-                )
-            zero_tend = HydrostaticTendencies(
-                du_dt=Field(data=jnp.zeros_like(state.u.data), name="du_dt_phys",
-                            dims=state.u.dims, units="m/s^2"),
-                dT_dt=Field(data=jnp.zeros_like(state.T.data), name="dT_dt_phys",
-                            dims=dims_T, units="K/s"),
-                dp_s_dt=Field(data=jnp.zeros_like(state.p_s.data), name="dp_s_dt_phys",
-                              dims=dims_ps, units="Pa/s"),
-                dphis_dt=Field(data=jnp.zeros_like(state.p_s.data), name="dphis_dt_phys",
-                               dims=dims_ps, units="m^2/s^3"),
-                dv_dt=dv_dt_zero,
+    def _zero_tendencies(state, has_v):
+        dims_T = state.T.dims
+        dims_ps = state.p_s.dims
+        dv_dt_zero = None
+        if has_v:
+            dv_dt_zero = Field(
+                data=jnp.zeros_like(state.v.data), name="dv_dt_phys",
+                dims=state.v.dims, units="m/s^2",
             )
-            return zero_tend, None
+        return HydrostaticTendencies(
+            du_dt=Field(data=jnp.zeros_like(state.u.data), name="du_dt_phys",
+                        dims=state.u.dims, units="m/s^2"),
+            dT_dt=Field(data=jnp.zeros_like(state.T.data), name="dT_dt_phys",
+                        dims=dims_T, units="K/s"),
+            dp_s_dt=Field(data=jnp.zeros_like(state.p_s.data), name="dp_s_dt_phys",
+                          dims=dims_ps, units="Pa/s"),
+            dphis_dt=Field(data=jnp.zeros_like(state.p_s.data), name="dphis_dt_phys",
+                           dims=dims_ps, units="m^2/s^3"),
+            dv_dt=dv_dt_zero,
+        )
 
+    def _accumulate(fns, state, grid, sigma_coord, phys_state, forcing):
+        """Sum the tendencies of every module in ``fns`` (non-empty list).
+
+        Returns ``(du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
+        combined_tracer_tends, phys_updates, first)``.  ``first`` is the
+        first module's tendency object — used both for ``Field`` templates
+        and (when ``fns`` leads with radiation) to read the radiative
+        heating contribution ``first.dT_dt``.
+        """
         phys_updates = {}
-
-        fn0, accepts_ps, field_name = tagged_fns[0]
+        fn0, accepts_ps, field_name = fns[0]
         if accepts_ps:
             if getattr(fn0, "_wants_forcing", False):
                 first, field_val = fn0(state, grid, sigma_coord,
@@ -319,7 +410,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             for k, v in first.tracer_tendencies.items():
                 combined_tracer_tends[k] = v.data
 
-        for fn, accepts_ps, field_name in tagged_fns[1:]:
+        for fn, accepts_ps, field_name in fns[1:]:
             if accepts_ps:
                 if getattr(fn, "_wants_forcing", False):
                     t, field_val = fn(state, grid, sigma_coord,
@@ -355,6 +446,11 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                     else:
                         combined_tracer_tends[k] = v.data
 
+        return (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
+                combined_tracer_tends, phys_updates, first)
+
+    def _build_combined(first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
+                        combined_tracer_tends):
         # Build tracer_tendencies dict with Field wrappers
         tracer_tends_out = None
         if combined_tracer_tends:
@@ -363,12 +459,10 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                          dims=first.dT_dt.dims, units="kg/kg/s")
                 for k, v in combined_tracer_tends.items()
             }
-
         combined_dv_dt = None
         if first.dv_dt is not None:
             combined_dv_dt = first.dv_dt.replace(data=dv_dt)
-
-        combined = HydrostaticTendencies(
+        return HydrostaticTendencies(
             du_dt=first.du_dt.replace(data=du_dt),
             dT_dt=first.dT_dt.replace(data=dT_dt),
             dp_s_dt=first.dp_s_dt.replace(data=dp_s_dt),
@@ -376,40 +470,69 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             dv_dt=combined_dv_dt,
             tracer_tendencies=tracer_tends_out,
         )
+
+    def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
+        has_v = state.v is not None
+
+        # ---- Held-radiation sub-cycle variant (need_rad=False) ----
+        # Skip the RRTMGP/gray solve; add the cached heating from the most
+        # recent radiation step (``phys_state.rad_heating``).  The driver
+        # alternates this variant with the full one by ``step %
+        # rad_update_steps``; step 0 of every sub-cycle is a full step, so
+        # the cache is always populated before a held step reads it.
+        if (not need_rad) and _has_rad:
+            cached_rad = (phys_state.rad_heating
+                          if phys_state is not None else None)
+            if not _non_rad_fns:
+                # Radiation was the only active module: held heating only.
+                zt = _zero_tendencies(state, has_v)
+                dT = zt.dT_dt.data
+                if cached_rad is not None:
+                    # cached_rad is column-shaped (ncol, nlev); restore the
+                    # native layout to add to the native tendency data.
+                    dT = dT + cached_rad.reshape(dT.shape)
+                return zt._replace(dT_dt=zt.dT_dt.replace(data=dT)), phys_state
+            (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
+             combined_tracer_tends, phys_updates, first) = _accumulate(
+                _non_rad_fns, state, grid, sigma_coord, phys_state, forcing)
+            if cached_rad is not None:
+                # cached_rad is column-shaped (ncol, nlev); restore native layout.
+                dT_dt = dT_dt + cached_rad.reshape(dT_dt.shape)
+            combined = _build_combined(
+                first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
+                combined_tracer_tends)
+            # rad_heating is carried UNCHANGED (not in phys_updates).
+            phys_state_out = update_physics_state(phys_state, phys_updates)
+            return combined, phys_state_out
+
+        # ---- Full-physics variant (radiation solved this step) ----
+        if not tagged_fns:
+            return _zero_tendencies(state, has_v), None
+        (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
+         combined_tracer_tends, phys_updates, first) = _accumulate(
+            tagged_fns, state, grid, sigma_coord, phys_state, forcing)
+        # Cache the radiative heating contribution for the held sub-cycle
+        # steps.  Radiation is tagged_fns[0], so ``first.dT_dt`` is exactly
+        # its contribution before any other module is summed.
+        if _has_rad and phys_state is not None:
+            # PhysicsState carries are COLUMN-shaped (ncol, nlev) — that is how
+            # init_physics_state seeds rad_heating (and every other carry).  The
+            # radiation tendency Field data is in the model's NATIVE layout: 2D
+            # (ncol, nlev) for MPAS but 4D (face, x, y, nlev) for hydrostatic/SCM.
+            # Storing the native array would flip the lax.scan carry shape
+            # 2D->4D after step 0 (the SCM/hydrostatic radiation-substep bug);
+            # flatten the horizontal axes to the canonical column shape so the
+            # carry type is stable for ALL models (no-op for MPAS).  The held
+            # consumers below reshape it back to native before adding.
+            _rad = first.dT_dt.data
+            phys_updates["rad_heating"] = _rad.reshape(-1, _rad.shape[-1])
+        combined = _build_combined(
+            first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
+            combined_tracer_tends)
         phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 
-    def reset_state():
-        for fn, _, _ in tagged_fns:
-            reset_fn = getattr(fn, "reset_state", None)
-            if callable(reset_fn):
-                reset_fn()
-
-    def set_time(day_of_year: float, seconds_of_day: float):
-        """Propagate time to all sub-physics modules (e.g. radiation)."""
-        for fn, _, _ in tagged_fns:
-            st = getattr(fn, "set_time", None)
-            if callable(st):
-                st(day_of_year, seconds_of_day)
-
-    def set_T_sfc_override(value):
-        """Propagate prescribed-T_sfc override to sub-physics that honour
-        the hook (currently radiation; turbulence reads from PhysicsState).
-
-        Called by the single-column driver when
-        ``SCMForcing(prescribe="T_s")`` so the radiative surface
-        boundary stays in sync with turbulence's bulk-flux boundary
-        (Phase B v2 codex iter-2 finding).
-        """
-        for fn, _, _ in tagged_fns:
-            st = getattr(fn, "set_T_sfc_override", None)
-            if callable(st):
-                st(value)
-
-    physics_fn.reset_state = reset_state
-    physics_fn.set_time = set_time
-    physics_fn.set_T_sfc_override = set_T_sfc_override
-    return physics_fn
+    return _attach_lifecycle_hooks(physics_fn, tagged_fns)
 
 
 # ======================================================================
@@ -519,30 +642,7 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
         phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 
-    def reset_state():
-        for fn, _, _ in tagged_fns:
-            reset_fn = getattr(fn, "reset_state", None)
-            if callable(reset_fn):
-                reset_fn()
-
-    def set_time(day_of_year: float, seconds_of_day: float):
-        for fn, _, _ in tagged_fns:
-            st = getattr(fn, "set_time", None)
-            if callable(st):
-                st(day_of_year, seconds_of_day)
-
-    def set_T_sfc_override(value):
-        """Propagate prescribed-T_sfc override to sub-physics radiation
-        modules (SCM Phase B v2)."""
-        for fn, _, _ in tagged_fns:
-            st = getattr(fn, "set_T_sfc_override", None)
-            if callable(st):
-                st(value)
-
-    physics_fn.reset_state = reset_state
-    physics_fn.set_time = set_time
-    physics_fn.set_T_sfc_override = set_T_sfc_override
-    return physics_fn
+    return _attach_lifecycle_hooks(physics_fn, tagged_fns)
 
 
 # ======================================================================
@@ -709,29 +809,7 @@ def _make_spectral_pe_combined(
         phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 
-    def reset_state():
-        for fn, _, _ in tagged_fns:
-            reset_fn = getattr(fn, "reset_state", None)
-            if callable(reset_fn):
-                reset_fn()
-
-    def set_time(day_of_year: float, seconds_of_day: float):
-        for fn, _, _ in tagged_fns:
-            st = getattr(fn, "set_time", None)
-            if callable(st):
-                st(day_of_year, seconds_of_day)
-
-    def set_T_sfc_override(value):
-        """Propagate prescribed-T_sfc override to sub-physics radiation
-        modules (SCM Phase B v2)."""
-        for fn, _, _ in tagged_fns:
-            st = getattr(fn, "set_T_sfc_override", None)
-            if callable(st):
-                st(value)
-
-    physics_fn.reset_state = reset_state
-    physics_fn.set_time = set_time
-    physics_fn.set_T_sfc_override = set_T_sfc_override
+    physics_fn = _attach_lifecycle_hooks(physics_fn, tagged_fns)
     # Marker: the combined fn consumes a per-step traced ``forcing``
     # dict when any sub-physics advertises ``_wants_forcing`` (currently
     # the spectral_pe radiation factory: T_sfc/o3_vmr/aerosol_od/ghg_vmr).
@@ -746,7 +824,8 @@ def _make_spectral_pe_combined(
 # ======================================================================
 
 def _make_mpas_combined(config: PhysicsConfig, dt: float,
-                        column_mesh=None) -> Callable:
+                        column_mesh=None, need_rad: bool = True) -> Callable:
     return _make_hydrostatic_combined(
         config, dt, model_type="mpas", column_mesh=column_mesh,
+        need_rad=need_rad,
     )

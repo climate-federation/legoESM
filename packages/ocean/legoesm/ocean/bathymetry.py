@@ -134,7 +134,7 @@ class BathymetryConfig(NamedTuple):
     Arctic singular-point + tiny-dx high-latitude regime is hard to
     keep stable + damped simultaneously, especially with cos²(lat)
     A_h scaling that *reduces* damping at high latitudes.  See
-    ``docs/ocean_experiments/realistic_geometry_topology_fixes.md``.
+    ``docs/ocean/experiments/realistic_geometry_topology_fixes.md``.
     When None, no cap is applied (preserves bit-exact regression)."""
     south_cap_lat: float | None = None
     """Southern polar cap latitude [deg].  When set, all ocean cells
@@ -332,7 +332,7 @@ def _derive_ocean_fraction(
 # ============================================================================
 
 
-def _laplacian_smooth_2d(arr: np.ndarray, passes: int, is_cubed: bool) -> np.ndarray:
+def laplacian_smooth_2d(arr: np.ndarray, passes: int, is_cubed: bool) -> np.ndarray:
     """Laplacian smoothing for cubed-sphere (6,n,n) or Gaussian (nlat,nlon) fields.
 
     Each pass replaces: result = 0.5*original + 0.5*neighbor_average.
@@ -374,7 +374,7 @@ def _laplacian_smooth_2d(arr: np.ndarray, passes: int, is_cubed: bool) -> np.nda
     return result
 
 
-def _laplacian_smooth_voronoi(
+def laplacian_smooth_voronoi(
     arr: np.ndarray,
     cells_on_cell: np.ndarray,
     n_edges_on_cell: np.ndarray,
@@ -420,7 +420,7 @@ def _laplacian_smooth_voronoi(
 # ============================================================================
 
 
-def _r_factor_max(H_bathy, ocean_mask):
+def compute_max_r_factor(H_bathy, ocean_mask):
     """Maximum r-factor over ocean-ocean neighbour pairs (4-connected).
 
     r = |H_i - H_j| / max(H_i, H_j).  Periodic in longitude (axis=1)
@@ -635,7 +635,7 @@ def apply_meo_r_factor_cap(
     factor = 1.0 - r_factor_max  # H_shallow >= H_deep * factor
 
     H_initial = H.copy()
-    initial_r = _r_factor_max(H, ocean)
+    initial_r = compute_max_r_factor(H, ocean)
 
     iterations = 0
     for it in range(max_iter):
@@ -661,7 +661,7 @@ def apply_meo_r_factor_cap(
         if delta_max < tol:
             break
 
-    final_r = _r_factor_max(H, ocean)
+    final_r = compute_max_r_factor(H, ocean)
     # Volume change (per unit area; this is in units of m, i.e. mean depth change)
     vol_change = float(np.sum(np.where(ocean, H - H_initial, 0.0)))
     vol_initial = float(np.sum(np.where(ocean, H_initial, 0.0)))
@@ -1078,7 +1078,7 @@ def load_bathymetry_cubed_sphere(
     )
 
     # Smoothing on cubed-sphere topology
-    depth = _laplacian_smooth_2d(depth, cfg.smoothing_passes, is_cubed=True)
+    depth = laplacian_smooth_2d(depth, cfg.smoothing_passes, is_cubed=True)
 
     # Re-enforce minimum depth after smoothing
     ocean_mask = np.where(depth < cfg.H_min, 0.0, ocean_mask)
@@ -1146,7 +1146,7 @@ def load_bathymetry_mpas(
     # Smoothing on Voronoi mesh topology
     cells_on_cell = np.asarray(mesh.cellsOnCell)
     n_edges_on_cell = np.asarray(mesh.nEdgesOnCell)
-    depth = _laplacian_smooth_voronoi(
+    depth = laplacian_smooth_voronoi(
         depth, cells_on_cell, n_edges_on_cell, cfg.smoothing_passes,
     )
 
@@ -1221,7 +1221,7 @@ def load_bathymetry_latlon_cgrid(
     depth = np.where(ocean_mask > 0.5, depth, 0.0)
 
     # Smoothing on regular lat-lon (periodic in longitude, walls at poles).
-    depth = _laplacian_smooth_2d(depth, cfg.smoothing_passes, is_cubed=False)
+    depth = laplacian_smooth_2d(depth, cfg.smoothing_passes, is_cubed=False)
 
     # Re-enforce minimum depth after smoothing.
     ocean_mask = np.where(depth < cfg.H_min, 0.0, ocean_mask)
@@ -1279,7 +1279,7 @@ def load_bathymetry_gaussian(
     depth = np.where(ocean_mask > 0.5, depth, 0.0)
 
     # Smoothing on Gaussian grid
-    depth = _laplacian_smooth_2d(depth, cfg.smoothing_passes, is_cubed=False)
+    depth = laplacian_smooth_2d(depth, cfg.smoothing_passes, is_cubed=False)
 
     # Re-enforce minimum depth after smoothing
     ocean_mask = np.where(depth < cfg.H_min, 0.0, ocean_mask)

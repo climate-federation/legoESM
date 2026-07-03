@@ -16,7 +16,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.config import RayleighConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py and
-# docs/ai_guardrails/domain_architect_vs_syntax_engine.md). The architect pins
+# docs/architecture/ai_guardrails/domain_architect_vs_syntax_engine.md). The architect pins
 # units/signs/conservation/reference; the body must honour it.
 __physics_contract__ = {
     "summary": (

@@ -9,7 +9,7 @@ cell-centred bulk metrics, and reports the relative delta.
 
 Cube blowup-prone experiments (lock_exchange, overflow, eady_*) are
 intentionally NOT covered here — see
-``docs/ocean_fidelity/phase_b1_cube_bottom_drag.md`` for the deferred
+``docs/ocean/fidelity/phase_b1_cube_bottom_drag.md`` for the deferred
 cube face-seam baroclinic-instability item.
 
 Usage::
@@ -18,7 +18,7 @@ Usage::
         scripts/validate/ocean_fidelity/compare_legoesm_cube_vs_latlon.py
 
 Add ``--tolerance 0.05`` to tighten the 10% default gate or
-``--write-report docs/ocean_fidelity/cube_vs_latlon_<sha>.md`` to
+``--write-report docs/ocean/fidelity/cube_vs_latlon_<sha>.md`` to
 emit a Markdown report.
 """
 

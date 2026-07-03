@@ -56,10 +56,20 @@ def _bulk_stats(state, z_coord, grid):
     h = _layer_thickness_np(state, z_coord)               # (n_lat, n_lon, nlev)
     lat = np.degrees(np.asarray(grid.lat))
 
-    # ACC (Drake) transport from the barotropic streamfunction [Sv].
+    # ACC transport from the barotropic streamfunction [Sv]. Veros reports the
+    # FULL-DOMAIN ψ range (max−min over the whole field) — the same convention
+    # the sibling global free-run diagnostics use (``psi_range_sv``). The earlier
+    # Drake-band restriction under-reads by ~70 Sv on the IDENTICAL flow (it read
+    # 186.7 where the gauge-free full-domain ψ matches Veros at 258.3 vs 255.7 Sv,
+    # 1.010×; see #431), so report the full-domain range as the primary,
+    # Veros-comparable number and keep the band-limited Drake figure separately
+    # labelled.
     psi = np.asarray(barotropic_streamfunction(u, h, mask, grid))   # (n_lat, n_lon) [Sv]
+    acc_T = float(psi.max() - psi.min())
     band = (lat >= _ACC_DRAKE_LAT_S) & (lat <= _ACC_DRAKE_LAT_N)
-    acc_T = float(psi[band, :].max() - psi[band, :].min()) if band.any() else float("nan")
+    acc_T_drake_band = (
+        float(psi[band, :].max() - psi[band, :].min()) if band.any() else float("nan")
+    )
 
     # Total kinetic energy [J] via the shared energy budget.
     eb = compute_energy_budget(state, z_coord, grid_type="latlon", grid=grid)
@@ -77,6 +87,7 @@ def _bulk_stats(state, z_coord, grid):
 
     return {
         "ACC_transport_Sv": acc_T,
+        "ACC_transport_drake_band_Sv": acc_T_drake_band,
         "total_KE_J": KE,
         "vol_mean_T_C": vol_mean_T,
         "T_min_C": float(Tw.min()) if Tw.size else float("nan"),
@@ -105,12 +116,12 @@ def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
         # Dissipation-audit knob: Veros applies -r_bot·u (a RATE, 1e-5/s) at the
         # bottom cell with NO /dz; legoESM applies -r·u/h_bot. To match Veros's
         # ~28h drag, r ≈ r_bot·h_bot ≈ 1e-5·276 ≈ 2.8e-3 (flat-bottom ACC).
-        cfg = cfg._replace(bottom_drag_r=bottom_drag_r)
+        cfg = cfg._replace(bottom_drag=cfg.bottom_drag._replace(bottom_drag_r=bottom_drag_r))
     if barotropic_solver is not None:
         # Rigid-lid fidelity: match Veros's barotropic FORMULATION (streamfunction
         # rather than the legoESM split-explicit free surface). The dissipation
         # audit isolated the barotropic formulation as the genuine ACC gap.
-        cfg = cfg._replace(barotropic_solver=barotropic_solver)
+        cfg = cfg._replace(barotropic=cfg.barotropic._replace(barotropic_solver=barotropic_solver))
     if dt_mom_ratio is not None:
         # Veros dt_mom≠dt_tracer asynchronous stepping (#44 Stage B): the `dt`
         # passed here IS dt_tracer (the clock); momentum + barotropic + implicit
@@ -159,7 +170,7 @@ def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
     # Rigid-lid: pre-build the static island/depth data (host-side flood-fill)
     # and seed the streamfunction carry (ψ, dψ, dψ_prev, dpsin, dpsin_prev) to
     # zero so the jitted scan keeps a constant pytree (None -> array would crash).
-    if cfg.barotropic_solver == "rigid_lid" and state.psi is None:
+    if cfg.barotropic.barotropic_solver == "rigid_lid" and state.psi is None:
         rl = model._ensure_rigid_lid_data(state)
         _zV = jnp.zeros((recipe.grid.n_lat + 1, recipe.grid.n_lon + 1),
                         dtype=state.u.data.dtype)
@@ -214,7 +225,7 @@ def _run_veros_bridged(years, template_state):
 
 _KNOWN_DIFFERENCES = """\
 Known model-formulation differences (the deltas below should be read in this
-context; see docs/ocean_fidelity/oracle_recipe_strategy.md §8):
+context; see docs/ocean/fidelity/oracle_recipe_strategy.md §8):
   0. Bottom drag: now FAITHFULLY mapped (dissipation audit, 2026-05-29). Veros applies
      r_bot=1e-5 as a RATE on the bottom cell (no /dz); legoESM uses -r*u/h_bot, so the
      recipe now sets bottom_drag_r=r_bot*h_bot~2.76e-3 (the prior r=1e-5 was ~276x too
@@ -305,7 +316,7 @@ def main() -> int:
     set_policy(PrecisionPolicy.fp64())
     try:
         _oi = args.outer_integrator or "recipe default (forward_euler)"
-        _bs = args.barotropic_solver or "recipe default (free surface)"
+        _bs = args.barotropic.barotropic_solver or "recipe default (free surface)"
         _dr = f"dt_mom={args.dt/args.dt_mom_ratio:.0f}s (ratio {args.dt_mom_ratio:g})" \
             if args.dt_mom_ratio else "dt_mom=dt_tracer (synchronous)"
         print(f"== legoESM ACC free run: {years*_DAYS_PER_YEAR:.0f} days, "
@@ -314,7 +325,7 @@ def main() -> int:
         lego_state, recipe = _run_legoesm(
             years, args.dt, outer_integrator=args.outer_integrator,
             bottom_drag_r=args.bottom_drag_r,
-            barotropic_solver=args.barotropic_solver,
+            barotropic_solver=args.barotropic.barotropic_solver,
             dt_mom_ratio=args.dt_mom_ratio,
             momentum_friction_additive=args.momentum_friction_additive)
         lego = _bulk_stats(lego_state, recipe.z_coord, recipe.grid)

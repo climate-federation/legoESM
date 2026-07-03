@@ -1,0 +1,50 @@
+# Canonical coupled CMIP run — full prognostic 3D ocean (LatLonCGridOceanModel)
+# from realistic WOA18 initial conditions.
+#
+#   run_coupled.py --config config/cmip/cmip_ocean_3D.yaml
+#
+# The dynamic-ocean twin of config/cmip/cmip_ocean_slab.yaml: it inherits the
+# SAME tuned atmosphere + air-sea physics from cmip_tuned_physics.yaml; only the
+# ocean differs (a stepped 3D primitive-equation ocean from WOA18 T/S, vs a
+# thermodynamic slab).  Reproduces the run that solved the 3D-ocean cold-collapse
+# and reaches a stable, realistic spin-up.
+#
+# The cold-collapse fix = WOA surface T/S Newtonian restoring (the tau below): a
+# free 3D ocean from realistic WOA T/S cold-collapses when the dry cold-start
+# atmosphere radiates away the warm ocean heat faster than it re-equilibrates;
+# the restoring holds the surface near observed climatology while the atmosphere
+# spins up.  Requires --grid latlon (the 3D ocean co-locates with the atm grid).
+#
+# Precedence: an explicit CLI flag > this file > the included base > parser default.
+
+include: cmip_tuned_physics.yaml
+
+# --- run orchestration (identical to the slab twin) ---
+preset: slab_richards
+grid: latlon
+resolution: 24
+nlev: 20
+dt: 300.0
+ic: standard
+days: 240
+diag_days: 10                  # atm<->ocean coupling cadence (<=10 d for stability)
+
+# --- ocean: prognostic 3D from WOA18 IC + surface restoring (the stabilizer) ---
+ocean: dynamic
+ocean_ic: woa                  # WOA18 T/S initial condition (data/woa18/)
+ocean_nlev: 20
+ocean_dt: 300.0                # ocean sub-step [s]
+# TUNED restoring timescales (the cold-collapse fix): SST drift -92 -> +25 K/yr,
+# R_TOA -54 -> -10 W/m2.  Units: days; sensible range ~1-365 d.  Haney (1971)
+# Newtonian surface T/S relaxation — a driver-level coupled spin-up
+# flux-correction (CoupledConfig.ocean_restore_*), NOT a physics-scheme closure,
+# so it lives here in config rather than the physics __param_spec__ system
+# (which is deliberately scheme-only; see tests/test_param_specs.py scope).
+ocean_restore_sst_tau_days: 5.0
+ocean_restore_sss_tau_days: 30.0
+
+# --- CMOR output (historical-1850 forcing) ---
+experiment: historical
+start_year: 1850
+cmip_output: true
+cmip_resolution_deg: 5.0

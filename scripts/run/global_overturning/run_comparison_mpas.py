@@ -2,7 +2,7 @@
 """MPAS side of the MPAS-vs-LatLon comparison experiment.
 
 Matched configuration with run_comparison_latlon.py — see
-docs/ocean_experiments/mpas_vs_latlon_comparison_plan.md for full details.
+docs/ocean/experiments/mpas_vs_latlon_comparison_plan.md for full details.
 
 Key settings (shared with lat-lon):
   - ETOPO bathymetry, H_max=5500, H_min=10, smooth=2, MEO r=0.2, snap=30%

@@ -158,7 +158,6 @@ def bechtold_convection(
     )  # (ncol, nlev, 4)
     _pbl_sums = jnp.sum(_pbl_sum_stack, axis=-2)  # (ncol, 4)
     pbl_norm_val = _pbl_sums[..., 0].clip(1e-6, None)
-    pbl_norm_val[..., None]  # (ncol, 1) — preserve keepdims shape
     T_pbl = _pbl_sums[..., 1] / pbl_norm_val
     q_pbl = _pbl_sums[..., 2] / pbl_norm_val
     # Mass-weighted PBL pressure for the LCL launch level when the
@@ -176,8 +175,31 @@ def bechtold_convection(
     T_parcel = T_parcel_source + config.parcel_dT
     q_parcel = q_parcel_source + config.parcel_dq
 
-    T_moist = compute_moist_adiabat(T_parcel, p_full)
-    cape_pbl = compute_cape(T, T_moist, p_full, p_half)
+    # Launch the moist adiabat HUMIDITY-AWARE and from the correct pressure
+    # origin (the over-firing fix; mirrors the Kain-Fritsch / Zhang-McFarlane
+    # treatment).  Bechtold was the only convection scheme still using the
+    # legacy saturated-from-base, dry-temperature CAPE that "spuriously
+    # inflates CAPE and fires deep convection in dry columns".
+    # ``compute_moist_adiabat`` starts its dry leg from the surface full-level
+    # pressure ``p_base``, but the parcel lives at ``p_parcel_source``
+    # (PBL-mean or base); translate the parcel temperature to its
+    # surface-pressure dry-adiabatic equivalent (preserving theta, so the LCL
+    # and the moist leg above it are unchanged) and pass ``q_v_base=q_parcel``
+    # so the sub-LCL leg is DRY adiabatic, not saturated.  A SINGLE adiabat is
+    # used for CAPE, LFC and LNB (a second separate scan tripped an XLA CPU
+    # compile abort); consistency is the physically correct choice anyway.
+    T_parcel_at_sfc = (
+        T_parcel * (p_base / jnp.maximum(p_parcel_source, 1.0)) ** constants.kappa
+    )
+    T_moist = compute_moist_adiabat(T_parcel_at_sfc, p_full, q_v_base=q_parcel)
+    # Virtual-temperature CAPE: parcel vapour (capped at saturation along the
+    # ascent) and environment vapour, so buoyancy uses virtual T, not dry T.
+    q_sat_parcel = saturation_mixing_ratio(T_moist, p_full)
+    q_v_parcel = jnp.minimum(q_parcel[:, None], q_sat_parcel)
+    cape_pbl = compute_cape(
+        T, T_moist, p_full, p_half,
+        q_v_env=q_v, q_v_parcel=q_v_parcel,
+    )
 
     cape_weight = cape_trigger(
         cape_pbl, config.cape_threshold, config.cape_sharpness,
@@ -223,8 +245,12 @@ def bechtold_convection(
     # gracefully reduces to pure PBL-CAPE when MC is unavailable
     # (zero-filled by the bridge for spectral PE and other dycores
     # without an MC diagnostic).
-    # Dimensionally-correct PBL-CAPE closure (Kain 2004 §3 form):
+    # Generic CAPE-relaxation closure SURROGATE (dimensionally consistent):
     #     M_b = rho_BL * (CAPE_pbl - threshold)+ / (g * tau_bl)   [kg/m^2/s]
+    # NOTE: this is NOT the Bechtold (2014) PCAPE/tau buoyancy-sorting closure,
+    # nor a closed-form Kain (2004) expression (KF removes CAPE by *iterating*
+    # M_b over TIMEC).  It is a first-order CAPE-consumption surrogate; the
+    # ``g/rho_BL`` factor stands in for the ZM cloud-work-function sensitivity.
     # The earlier formula omitted ``rho_BL`` and ``g``; magnitude was
     # masked operationally only by ``M_b_max``.
     rho_BL = p_full[:, -1] / (constants.R_d * jnp.maximum(T[:, -1], 1.0))
@@ -357,10 +383,37 @@ def bechtold_convection(
     # Codex finding).
     dt_over_tau = dt / jnp.maximum(config.tau_M_u_relax, 1e-30)
     M_u_new = (conv_prog_profile + dt_over_tau * plume.M_u) / (1.0 + dt_over_tau)
-    # Cap M_u_new at config.M_b_max so every downstream use (kernel
-    # tendencies, dq_c_conv_raw, downdraft trigger, CMT, carry update)
-    # sees the same bounded value.
-    M_u_new = jnp.clip(M_u_new, 0.0, config.M_b_max)
+    # Launch-aware mass-flux cap (root-cause fix for the stable-column
+    # spurious-heating runaway — validator codex review round-2).  Bechtold's
+    # IFS entrainment ``ε`` far exceeds its detrainment ``δ``, so the plume
+    # ``M_u = M_b·exp(∫(ε−δ)dz)`` exponentiates by many orders of magnitude.  On
+    # a stable / zero-CAPE column the CAPE trigger makes the launch mass flux
+    # ``M_b`` ~ ``cape_weight·… ≈ 0``, BUT the exponential growth then drives
+    # ``M_u`` straight into a *constant* ``M_b_max`` clip — ERASING the
+    # launch-time ``cape_weight`` gate and spuriously heating a quiescent column
+    # by ~3900 W/m².  Capping ``M_u_new`` by a launch-aware bound that scales
+    # with the CAPE trigger preserves the launch gate through the downstream
+    # transport: a genuinely-convecting column (``cape_weight → 1``) keeps the
+    # full legacy ``M_b_max`` bound (BYTE-IDENTICAL when ``cape_weight == 1``, so
+    # the closed column-MSE budget on a convecting column is untouched), while a
+    # zero-CAPE column is capped far below ``M_b_max`` and stays quiescent.
+    #
+    # The trigger ``cape_weight = smooth_step(CAPE − threshold, sharpness)`` does
+    # NOT decay all the way to 0 for a strongly sub-threshold column — it floors
+    # at ~9e-4 on the validator stable-dry column — and a 9e-4·M_b_max ≈ 4.6e-5
+    # kg/m²/s residual mass flux still drives ~4.6 W/m² of spurious heating
+    # (above the <1 W/m² quiescence bar) because the dead plume's ``(T_u − T)``
+    # is large.  Squaring the trigger (``cape_weight²·M_b_max``) collapses that
+    # soft floor (9e-4 → 8e-7) so the sub-threshold column genuinely quiesces
+    # (stable-dry heating 3929 → ~4e-3 W/m²) while leaving a fully-triggered
+    # column (``cape_weight = 1 ⇒ 1² = 1``) on the exact legacy ``M_b_max`` cap.
+    # ``cape_weight ∈ [0, 1]`` and the square are smooth, so the cap *bound* is
+    # differentiable; the surrounding ``jnp.clip`` keeps the SAME piecewise AD
+    # behaviour as the legacy constant cap (zero gradient through a clipped
+    # value, full gradient through the active bound).  ``cape_weight²·M_b_max ≤
+    # M_b_max`` keeps the literature peak as the hard upper bound.
+    M_u_cap = (cape_weight ** 2)[:, None] * config.M_b_max
+    M_u_new = jnp.clip(M_u_new, 0.0, M_u_cap)
 
     # -- Environmental tendencies (using relaxed M_u) ---------------------
     # The detrainment rate that feeds the *environmental* tendencies
@@ -382,6 +435,10 @@ def bechtold_convection(
         T, q_v, p_full,
         plume.T_u, plume.q_u, plume.q_c_u, M_u_new,
         z, rho, dlt_profile, M_u_max=config.M_b_max,
+        subsidence_solve=config.subsidence_solve,
+        p_half=p_half,
+        dt=dt,
+        theta_implicit=config.theta_implicit,
     )
     rho_safe = jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
     p_gate_qc = stratosphere_mass_flux_gate(p_full)

@@ -91,9 +91,6 @@ if _PROJECT_ROOT not in sys.path:
 import jax
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.runtime.backend import ensure_metal_or_fallback
-ensure_metal_or_fallback()
-
 import jax.numpy as jnp
 import numpy as np
 
@@ -104,6 +101,7 @@ import matplotlib.pyplot as plt
 from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.diagnostics.conservation_drift import compute_relative_drift
+from legoesm.experiments.matrix.namelist import write_case_namelist
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.state import (
@@ -1604,7 +1602,6 @@ def main():
         return
 
     output_base = Path(args.output)
-    output_base.mkdir(parents=True, exist_ok=True)
 
     # Filter matrix
     cases = TEST_MATRIX
@@ -1617,8 +1614,22 @@ def main():
         cases = [tc for tc in cases if tc.grid_type == args.grid]
 
     if not cases:
+        # ``--test`` is an EXACT case selector (the form emitted by a sea-ice
+        # `setup:` template via legoesm.core.setup_selector); matching nothing
+        # is a hard error rather than a silent no-op so a typo'd selector or a
+        # (case, grid) that is not instantiated fails loudly.
+        if args.test:
+            raise SystemExit(
+                f"ERROR: no sea-ice test case matches --test {args.test!r}"
+                + (f" --grid {args.grid!r}" if args.grid else "")
+                + ". Run `--list` to see valid (case, grid) pairs."
+            )
         print("No test cases match the filter. Use --list to see all cases.")
         return
+
+    # Create the output dir only AFTER confirming there is work — a typo'd
+    # --test selector must not leave an empty results directory behind.
+    output_base.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'='*80}")
     print(f"  Sea Ice Test Matrix  |  {len(cases)} cases  |  "
@@ -1634,6 +1645,13 @@ def main():
             continue
 
         outdir = output_base / tc.output_path
+        # Per-case namelist parameter file (#682): the resolved case config,
+        # written up-front so it is present even if the run later fails.
+        write_case_namelist(
+            outdir, tc,
+            title=f"sea-ice test-case namelist: {tc.output_path}",
+            extra={"quick": bool(args.quick)},
+        )
         t0 = time.time()
         try:
             status, notes = runner(tc, outdir, args.quick)

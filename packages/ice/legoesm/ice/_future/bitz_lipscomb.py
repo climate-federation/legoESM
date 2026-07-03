@@ -63,7 +63,14 @@ __all__ = (
 # capacity) so those terms stay finite and differentiable as T → 0⁻.
 _T_FLOOR_C = 1.0e-2          # [°C]
 _K_MIN = 0.1                 # conductivity floor [W/m/K]
-_DISC_FLOOR = 1.0            # quadratic-discriminant floor [(J/kg)²-scale]
+# Quadratic-discriminant AD-SAFETY floor.  ``sqrt(0)`` has an INFINITE
+# reverse-mode derivative, so the discriminant is floored to a small POSITIVE
+# value before ``sqrt`` to keep ``ice_temperature_from_enthalpy`` differentiable
+# (``jnp.maximum`` zeroes the gradient inside the clamp region).  1.0 is
+# negligible vs the physical discriminant scale (~L_f² ~ 1e11 (J/kg)², perturbing
+# T by < 1e-6 K) and only activates for a degenerate / roundoff-negative
+# discriminant — do NOT lower it to 0 (that reintroduces the sqrt(0) AD blowup).
+_DISC_FLOOR = 1.0
 
 
 def _neg_temp_c(T_K):

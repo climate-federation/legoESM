@@ -7,7 +7,7 @@ integrates for 10 sim-years using ``barotropic_solver = 'implicit_cn'``
 from step 1 — so the resulting state has no chequerboard inherited
 from the old explicit-substep solver.  This restart is then the clean
 IC for the 1-yr verification run that decides whether Crit 1.2/1.3 of
-``docs/issues/barotropic_mode_noise.md`` pass.
+``docs/dev-notes/issues/barotropic_mode_noise.md`` pass.
 
 Inner stepping uses the same lax.scan + JIT pattern as
 ``_drake_momentum_budget_runner.py`` (Follow-up D), without the
@@ -41,10 +41,9 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 from legoesm.ocean.vertical import create_ocean_z_star
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
-from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.experiments.global_overturning import (
     GlobalOverturningConfig, create_initial_conditions, create_forcings,
-    create_eos_config, create_gm_redi_config,
+    create_eos_config, create_gm_redi_config, global_overturning_model_config,
 )
 
 
@@ -97,19 +96,14 @@ def main():
     physics = create_forcings("latlon", grid, config)
     eos_config = create_eos_config(config)
     gm_redi_cfg = create_gm_redi_config(config)
-    ocean_config = LatLonCGridOceanConfig(
-        n_barotropic_substeps=30,                 # unused by implicit solver
-        physics=physics,
-        A_h=config.A_h, A_v=config.A_v, K_v=config.K_v,
-        bottom_drag_r=config.bottom_drag_coeff,
-        eos="linear", eos_linear=eos_config,
-        gm_redi=gm_redi_cfg,
-        barotropic_solver="implicit_cn",
+    ocean_config = global_overturning_model_config(
+        config, physics=physics, eos_config=eos_config, gm_redi_cfg=gm_redi_cfg,
+        barotropic_solver="implicit_cn",       # n_barotropic_substeps unused
     )
 
     print(f"=== Follow-up A: 10-year fresh spinup with implicit solver ===")
     print(f"  Output: {OUTPUT_DIR}")
-    print(f"  barotropic_solver = {ocean_config.barotropic_solver}")
+    print(f"  barotropic_solver = {ocean_config.barotropic.barotropic_solver}")
     print(f"  Grid: 36×72 (5°), 20 levels, H_max={config.H_max} m")
     print(f"  dt = {dt} s, n_steps = {n_steps:,} ({total_years} sim-yr)")
     print(f"  Block size: {block_size} steps  ({n_steps // block_size} blocks)")

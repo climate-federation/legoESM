@@ -371,7 +371,7 @@ def apply_value_threshold(
     in the "Stommel Gyre Tracer" section, and the Overflow /
     Lock-Exchange ``pe_rel_final < 0`` sign check in their
     respective Validation Thresholds blocks (see
-    ``docs/ocean_experiments_reference.md``; iter-131 codex
+    ``docs/dev-notes/ocean_experiments_reference.md``; iter-131 codex
     iter-130-followup LOW-2: removed stale line numbers).
 
     iter-129 (codex iter-128-followup LOW-1/3/MEDIUM-1):

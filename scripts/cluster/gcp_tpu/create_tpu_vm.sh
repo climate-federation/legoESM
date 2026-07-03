@@ -5,7 +5,7 @@
 # or v5e-8 (v5litepod-8) — i.e. 8 chips in ONE host, pure SPMD (no multi-host,
 # no MPI).  The cubed-sphere FV3 workload uses 6 of the 8 chips (true face
 # sharding; 8 does not divide the 6-face layout — see
-# docs/scaling/scaling_tpu.md).
+# docs/performance/scaling/scaling_tpu.md).
 #
 # All settings are overridable via environment variables.  ACCELERATOR_TYPE
 # and RUNTIME_VERSION change over TPU generations — verify current values:

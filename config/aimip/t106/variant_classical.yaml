@@ -12,12 +12,14 @@
 
 aimip_variant: "classical"
 
-# Scheme selection — validated by ExperimentConfig.validate_strict.
-convection: "tiedtke"
-turbulence: "louis"
-gravity_wave_drag: "mcfarlane"
-cloud_scheme: "xu_randall"
-microphysics: "none"
+# Scheme selection — run_aimip reads these via the ``aimip_*`` keys
+# (cfg.get("aimip_convection"), ...). Bare keys (convection:, turbulence:, ...)
+# are NOT consumed by run_aimip and were silently ignored.
+aimip_convection: "tiedtke"
+aimip_turbulence: "louis"
+aimip_gwd: "mcfarlane"
+aimip_cloud: "xu_randall"
+aimip_microphysics: "none"
 radiation: "gray"          # Base scheme tag (informational).  The actual
                            # radiation backend used by AIMIPClassicalParams
                            # is controlled by ``aimip_radiation`` in the

@@ -19,6 +19,7 @@ from legoesm.diagnostics.total_energy_pe import (
     compute_total_energy_pe,
     te_drift_pe,
 )
+from legoesm.diagnostics.cloud_overlap import maximum_random_overlap
 from legoesm.diagnostics.column_integrals import (
     column_d_ext_field,
     column_mass_weighted_mean,
@@ -35,6 +36,8 @@ from legoesm.diagnostics.conservation_drift import (
 from legoesm.diagnostics.energy_budget import (
     EnergyBudget,
     EnergyBudgetTracker,
+    area_weighted_mean,
+    area_weighted_profile,
     column_dry_static_energy,
     column_moist_static_energy,
     surface_energy_flux,

@@ -88,7 +88,7 @@ def _basin(coriolis_scheme="matsuno_split", outer_integrator="ab2",
     lat = np.degrees(np.asarray(grid.lat))
     T = np.asarray(state.T.data) + 4.0 * np.tanh(lat / 15.0)[:, None, None]
     state = state._replace(T=state.T.replace(data=jnp.asarray(T)))
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, bottom_drag_r=1.0e-3, implicit_vertical_mixing=True,
         enable_runtime_checks=False, barotropic_solver=barotropic_solver,
         outer_integrator=outer_integrator,
@@ -362,7 +362,7 @@ def test_check_coriolis_stability_warns_out_of_margin():
     grid = create_latlon_grid(_N_LAT, _N_LON)
     z = create_ocean_z_star(n_levels=4, H_max=4000.0)
     dt = 43200.0  # dt_tracer; dt_mom = dt / dt_mom_ratio
-    cfg_e = LatLonCGridOceanConfig(
+    cfg_e = LatLonCGridOceanConfig.from_flat(
         coriolis_scheme="explicit_ab2", outer_integrator="ab2",
         barotropic_solver="rigid_lid", implicit_vertical_mixing=True,
         dt_mom_ratio=9.0)
@@ -445,7 +445,7 @@ def _construct(coriolis_scheme, outer_integrator="ab2",
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     grid = create_latlon_grid(_N_LAT, _N_LON)
     z = create_ocean_z_star(n_levels=4, H_max=4000.0)
-    return LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig(
+    return LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig.from_flat(
         coriolis_scheme=coriolis_scheme, outer_integrator=outer_integrator,
         barotropic_solver=barotropic_solver, implicit_vertical_mixing=True))
 
@@ -460,10 +460,23 @@ def test_explicit_ab2_requires_ab2_outer():
         _construct("explicit_ab2", outer_integrator="forward_euler")
 
 
-def test_explicit_ab2_requires_rigid_lid():
-    with pytest.raises(ValueError, match='requires barotropic_solver="rigid_lid"'):
+def test_explicit_ab2_accepts_implicit_solvers():
+    """explicit_ab2 routes the planetary Coriolis to the barotropic mode via the
+    AB2-extrapolated slow forcing F_slow, with the solver's own f×U_bt gated off —
+    so it is valid with the rigid lid AND with the implicit / split-explicit free
+    surfaces (the Oceananigans-fidelity internal_tide recipe uses implicit_cn).
+    (Relaxed from the original rigid-lid-only requirement; an OUT-OF-SET solver
+    still raises, exercised by test_explicit_ab2_rejects_unknown_solver.)"""
+    for bsolver in ("rigid_lid", "implicit_cn", "implicit_unsplit",
+                    "explicit_substep"):
         _construct("explicit_ab2", outer_integrator="ab2",
-                   barotropic_solver="implicit_cn")
+                   barotropic_solver=bsolver)
+
+
+def test_explicit_ab2_rejects_unknown_solver():
+    with pytest.raises(ValueError, match="barotropic_solver"):
+        _construct("explicit_ab2", outer_integrator="ab2",
+                   barotropic_solver="not_a_real_solver")
 
 
 def test_default_accepts_any_solver():

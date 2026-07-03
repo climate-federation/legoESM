@@ -80,7 +80,7 @@ __physics_contract__ = {
     ),
 }
 
-# 1e-30 m: numeric floor keeping r_crit / logs finite at s→0.
+# 1e-12: dimensionless supersaturation floor keeping r_crit ∝ s^(-2/3) finite at s→0
 _S_FLOOR = 1.0e-12
 
 

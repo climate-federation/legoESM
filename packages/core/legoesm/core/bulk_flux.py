@@ -47,6 +47,48 @@ NU_AIR = constants.nu_air  # kinematic viscosity of air [m²/s]
 _VALID_BULK_SCHEMES = ("constant", "most", "coare3", "large_yeager")
 
 
+def apply_gustiness(u: jax.Array, v: jax.Array, gustiness: float) -> jax.Array:
+    """Effective surface wind with a sub-grid convective gustiness floor.
+
+    ``|U|_eff = sqrt(u^2 + v^2 + u_gust^2)``.  The resolved grid-mean wind misses
+    sub-grid wind variability — boundary-layer convective gustiness — which in
+    calm/convective regions (the tropics, where the mean wind is light but deep
+    convection drives gusts) is the dominant contributor to the air-sea latent
+    and sensible flux.  Omitting it (or using a ~1 m/s numerical floor) yields
+    ~1/3 of the realistic surface evaporation at light winds, starving the
+    hydrological cycle (measured: coupled hfls ~35 vs ~80 W/m^2 at a 1.9 m/s
+    mean surface wind).  Same algebraic form as the numerical wind floor
+    ``sqrt(u^2+v^2+U_min^2)`` — a larger, physically-motivated ``u_gust``
+    subsumes it.
+
+    The floor lives INSIDE the single ``sqrt`` (not a two-stage
+    ``sqrt(sqrt(u^2+v^2)^2 + g^2)``): with ``gustiness > 0`` the argument is
+    strictly positive everywhere, so the gradient is finite even at exact calm
+    wind ``u = v = 0`` (a bare ``sqrt(u^2+v^2)`` would give a NaN gradient
+    there).  AD-safe for the differentiable coupler.
+
+    Parameters
+    ----------
+    u, v : array
+        Resolved grid-mean surface wind components [m/s].  A caller holding only
+        the wind SPEED magnitude ``s`` passes ``apply_gustiness(s, 0.0, gust)``
+        (``sqrt(s^2 + gust^2)``), which is equally AD-safe.
+    gustiness : float
+        Gustiness floor ``u_gust`` [m/s] (~5 m/s, Wing 2018 RCEMIP1).
+
+    Returns
+    -------
+    array
+        Effective wind speed for the bulk flux [m/s].
+
+    References
+    ----------
+    - Beljaars (1995), QJRMS 121, 255-270 — convective gustiness in bulk fluxes.
+    - Wing et al. (2018), GMD 11, 793-813 — RCEMIP1 5 m/s gustiness floor.
+    """
+    return jnp.sqrt(u ** 2 + v ** 2 + gustiness ** 2)
+
+
 def validate_bulk_scheme(scheme: str) -> None:
     """Raise ``ValueError`` on an unknown bulk-flux scheme name.
 
@@ -170,6 +212,10 @@ def compute_most_fluxes(
     n_iter=5,
     charnock=0.011,
     L_latent=None,
+    gustiness_w_zi=0.0,
+    gustiness_beta=1.25,
+    return_2m=False,
+    z_diag=2.0,
 ):
     """Compute stability-dependent bulk fluxes via iterative MOST.
 
@@ -219,6 +265,14 @@ def compute_most_fluxes(
     ustar : array
         Friction velocity [m/s].
     """
+    # Dispatch hardening (CLAUDE.md): ``scheme`` is a static Python string
+    # resolved at trace time. Validate it at function entry so a typo'd name
+    # (e.g. ``"coar3"``) fails LOUDLY instead of silently falling through the
+    # ``else`` branch below to the constant-roughness MOST path and running the
+    # wrong air-sea physics. ``coare3``/``large_yeager`` take dedicated
+    # branches; ``constant``/``most`` are the (valid) fixed-roughness else path.
+    validate_bulk_scheme(scheme)
+
     # Resolve scalar reference heights. ``z_ref`` is the wind/momentum
     # height (always = z_u in the formulas below); z_t, z_q default to
     # z_ref so that single-height callers (lake, idealized adapter,
@@ -249,6 +303,13 @@ def compute_most_fluxes(
     q_star_val = KAPPA * dq / jnp.maximum(ln_zq_z0q, 0.5)
 
     carry = (u_star, z0, z0_t, z0_q, theta_star, q_star_val)
+    # The MOST iteration mixes the (possibly float32) input state with float64
+    # physical constants (G, NU_AIR, c_pd via the virtual-T coefficient), so a
+    # carry leaf would silently promote float32 -> float64 mid-loop and trip
+    # ``fori_loop``'s equal-types invariant.  This only bites the float32
+    # atmosphere coupled path; the OMIP ocean path runs float64 so the re-casts
+    # below are no-ops (byte-identical).  Pin each leaf back to its input dtype.
+    _carry_dtypes = tuple(c.dtype for c in carry)
 
     def body_fn(i, carry):
         u_star, z0, z0_t, z0_q, theta_star, q_star_val = carry
@@ -256,6 +317,21 @@ def compute_most_fluxes(
 
         # Virtual potential temperature scale (1/ε − 1 ≈ 0.6078)
         theta_v_star = theta_star + _vT_coef * T_atm * q_star_val
+
+        # COARE 3.0 convective gustiness (opt-in; gustiness_w_zi=0 => off =>
+        # byte-identical, so the OMIP/forward-default paths are unchanged).  Over
+        # a calm but convectively-unstable warm ocean the mean wind alone gives
+        # an anemic flux (the tropical hfls ~45 vs ~120 W/m² bias); the
+        # free-convection velocity scale w* = (g·z_i·<w'θv'>/θv)^(1/3) adds a
+        # sub-grid gust U_eff = sqrt(|U|² + (β·w*)²) (Fairall et al. 2003,
+        # β~1.25, z_i = BL depth ~600 m).  <w'θv'> = u*·θv* (kinematic, upward
+        # +; unstable only).
+        if gustiness_w_zi > 0.0:
+            wpthvp = jnp.maximum(u_star_safe * theta_v_star, 0.0)
+            wstar = jnp.cbrt(G * gustiness_w_zi * wpthvp / T_v)
+            U_eff = jnp.sqrt(wind_speed ** 2 + (gustiness_beta * wstar) ** 2)
+        else:
+            U_eff = wind_speed
 
         # Inverse Obukhov length: 1/L = −κ g θ_v* / (u*² T_v).
         #
@@ -347,7 +423,7 @@ def compute_most_fluxes(
             )
 
             # 5) Update scaling parameters directly from coefficients
-            u_star_new = rd * wind_speed
+            u_star_new = rd * U_eff
             theta_star_new = rh * dT
             q_star_new = re * dq
 
@@ -375,14 +451,19 @@ def compute_most_fluxes(
         denom_h = jnp.maximum(ln_zt_z0t - psi_h_t, 0.5)
         denom_q = jnp.maximum(ln_zq_z0q - psi_h_q, 0.5)
 
-        u_star_new = KAPPA * wind_speed / denom_m
+        u_star_new = KAPPA * U_eff / denom_m
         theta_star_new = KAPPA * dT / denom_h
         q_star_new = KAPPA * dq / denom_q
 
         return (u_star_new, z0_new, z0_t_new, z0_q_new,
                 theta_star_new, q_star_new)
 
-    carry = jax.lax.fori_loop(0, n_iter, body_fn, carry)
+    def _body_fn_dtype_stable(i, carry):
+        out = body_fn(i, carry)
+        return tuple(jnp.asarray(o).astype(d)
+                     for o, d in zip(out, _carry_dtypes))
+
+    carry = jax.lax.fori_loop(0, n_iter, _body_fn_dtype_stable, carry)
     u_star, z0, z0_t, z0_q, theta_star, q_star_val = carry
 
     # Fluxes from scaling parameters
@@ -391,6 +472,26 @@ def compute_most_fluxes(
     tau_y = -rho * u_star ** 2 * v_rel / wind_speed
     shflx = rho * constants.c_pd * u_star * theta_star
     lhflx = rho * _L * u_star * q_star_val
+
+    if return_2m:
+        # Air temperature at the diagnostic height (default 2 m) from the
+        # converged MOST similarity profile: T(z) = T_sfc − (θ*/κ)·[ln(z/z0t) −
+        # ψ_h(z/L)], which reduces to T_atm at z=z_t.  Over a warm ocean the
+        # lowest model level (~100 m at nlev=20) reads colder than 2 m, so the
+        # raw lowest-level "tas" exaggerates the cold/air-sea-gap bias — this
+        # gives the physically correct CMIP 2 m value.  Recompute 1/L from the
+        # converged scales (the iteration carries scales, not L).
+        u_star_safe = jnp.maximum(u_star, 1e-6)
+        theta_v_star = theta_star + _vT_coef * T_atm * q_star_val
+        inv_L = -KAPPA * G * theta_v_star / (u_star_safe ** 2 * T_v)
+        zeta_d = jnp.clip(z_diag * inv_L, -10.0, 10.0)
+        denom_d = jnp.log(z_diag / jnp.maximum(z0_t, 1e-12)) - psi_h(zeta_d)
+        T_2m = T_sfc - (theta_star / KAPPA) * denom_d
+        # Guard against profile extrapolation outside [T_atm, T_sfc].
+        lo = jnp.minimum(T_atm, T_sfc)
+        hi = jnp.maximum(T_atm, T_sfc)
+        T_2m = jnp.clip(T_2m, lo, hi)
+        return tau_x, tau_y, shflx, lhflx, u_star, T_2m
 
     return tau_x, tau_y, shflx, lhflx, u_star
 
@@ -567,7 +668,11 @@ def compute_sam_oceflx_fluxes(
             * (t_star / theta_atm + q_star / (1.0 / eps_v + q_atm))
             / jnp.maximum(u_star ** 2, 1e-12)
         )
-        hol = jnp.sign(hol) * jnp.minimum(jnp.abs(hol), 10.0)
+        # jnp.clip (not sign*min(abs)) clamps hol to [-10, 10] with the SAME
+        # forward values but a SMOOTH, nonzero gradient in (-10, 10): the old
+        # sign*min(abs) form has a zero-gradient flat spot at hol=0 (neutral)
+        # that severs d(flux)/d(state) sensitivity there under jax.grad.
+        hol = jnp.clip(hol, -10.0, 10.0)
         stable = jnp.where(hol >= 0.0, 1.0, 0.0)
         xsq = jnp.maximum(jnp.sqrt(jnp.abs(1.0 - 16.0 * hol)), 1.0)
         xqq = jnp.sqrt(xsq)

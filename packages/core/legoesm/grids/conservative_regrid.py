@@ -114,6 +114,52 @@ def _check_edges(edges: np.ndarray, name: str) -> None:
         raise ValueError(f"{name} must be strictly monotonically increasing")
 
 
+def cell_edges_1d(
+    centers: np.ndarray,
+    periodic_lon: bool = False,
+) -> np.ndarray:
+    """Cell-face edges (radians) from uniformly-spaced 1-D cell centres (radians).
+
+    Canonical helper for building the edge arrays that
+    :func:`compute_overlap_weights` consumes.  Assumes uniform spacing
+    (``dc = centers[1] - centers[0]``); interior edges are the midpoints and
+    the two boundary edges are half-cell extrapolations.
+
+    Parameters
+    ----------
+    centers : 1-D array
+        Cell-centre coordinates in **radians**.
+    periodic_lon : bool
+        If True, force the last edge to be exactly ``first_edge + 2*pi`` so the
+        longitude axis spans the full circle.  This prevents the conservative
+        regrid from under-weighting the seam column when the last centre is
+        slightly less than ``2*pi - dc/2`` (the radian analogue of the
+        +360 deg wrap used by the JRA55-do / OMIP forcing loaders).
+
+    Notes
+    -----
+    Two legacy degree-based private copies still exist
+    (``forcing/jra55_do.py:_grid_edges_from_centers`` and
+    ``ocean/coupler/omip2_applicator.py:_edges_from_centers_deg``); the latter's
+    ``periodic`` flag is a no-op and it instead pads the source with ghost
+    columns, so they are NOT drop-in replaceable by this helper without changing
+    their behaviour — unify them in a dedicated, separately-validated PR rather
+    than here.  For latitude prefer a grid's pole-clamped v-face coordinates
+    (e.g. ``LatLonGrid.lat_v``) over this helper, which would otherwise
+    extrapolate the first/last edge past +/-pi/2.
+    """
+    c = np.asarray(centers, dtype=np.float64)
+    if c.size < 2:
+        raise ValueError("Need >= 2 cell centres to infer edges")
+    dc = float(c[1] - c[0])
+    edges = np.empty(c.size + 1, dtype=np.float64)
+    edges[:-1] = c - 0.5 * dc
+    edges[-1] = c[-1] + 0.5 * dc
+    if periodic_lon:
+        edges[-1] = edges[0] + 2.0 * np.pi
+    return edges
+
+
 def compute_overlap_weights(
     src_lat_edges: np.ndarray,
     src_lon_edges: np.ndarray,
@@ -260,26 +306,32 @@ def apply_conservative_regrid(
     Parameters
     ----------
     field : jax.Array
-        Source field with last two axes equal to ``weights.src_shape``,
-        i.e. shape ``(*leading, n_src_lat, n_src_lon)``.  Leading axes
-        (e.g. time) are vmap-broadcast.
+        Source field whose TRAILING axes equal ``weights.src_shape`` — rank 1
+        ``(nCells,)`` (unstructured/MPAS), rank 2 ``(n_src_lat, n_src_lon)``
+        (lat-lon), or rank 3 ``(6, n, n)`` (cubed-sphere).  Any remaining leading
+        axes (levels, tracers, ensemble) are vmap-broadcast.
     weights : ConservativeRegridWeights
-        From :func:`compute_overlap_weights`.
+        From :func:`compute_overlap_weights` (lat-lon) or an unstructured weight
+        generator (e.g. ``conservative_regrid_unstructured``).
 
     Returns
     -------
     jax.Array
-        Regridded field with shape ``(*leading, n_dst_lat, n_dst_lon)``.
+        Regridded field with shape ``(*leading, *weights.dst_shape)``.
     """
-    if field.shape[-2:] != weights.src_shape:
+    # ``src_shape`` may be rank 1 (unstructured/MPAS, ``(nCells,)``), rank 2
+    # (regular lat-lon), or rank 3 (cubed-sphere, ``(6, n, n)``).  Match the
+    # trailing axes against it and vmap over any remaining leading axes.
+    nd = len(weights.src_shape)
+    if tuple(field.shape[-nd:]) != tuple(weights.src_shape):
         raise ValueError(
-            f"field last-2 shape {field.shape[-2:]} does not match "
+            f"field trailing shape {field.shape[-nd:]} does not match "
             f"weights.src_shape {weights.src_shape}"
         )
-    if field.ndim == 2:
+    if field.ndim == nd:
         return _apply_2d(field, weights)
     # Generic ND: flatten leading axes, vmap, unflatten.
-    leading = field.shape[:-2]
-    flat = field.reshape((-1,) + weights.src_shape)
+    leading = field.shape[:-nd]
+    flat = field.reshape((-1,) + tuple(weights.src_shape))
     out = jax.vmap(_apply_2d, in_axes=(0, None))(flat, weights)
-    return out.reshape(leading + weights.dst_shape)
+    return out.reshape(leading + tuple(weights.dst_shape))

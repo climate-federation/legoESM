@@ -45,12 +45,12 @@ def pieces():
 
 
 def test_default_is_euler(pieces):
-    assert LatLonCGridOceanConfig().momentum_time_integrator == "euler"
+    assert LatLonCGridOceanConfig.from_flat().momentum_time_integrator == "euler"
 
 
 def test_invalid_rejected(pieces):
     grid, z_coord, _ = pieces
-    cfg = LatLonCGridOceanConfig(momentum_time_integrator="midpoint")
+    cfg = LatLonCGridOceanConfig.from_flat(momentum_time_integrator="midpoint")
     with pytest.raises(ValueError, match="momentum_time_integrator"):
         LatLonCGridOceanModel(grid, z_coord, cfg)
 
@@ -58,7 +58,7 @@ def test_invalid_rejected(pieces):
 def test_rk3_finite_output(pieces):
     grid, z_coord, state = pieces
     model = LatLonCGridOceanModel(
-        grid, z_coord, LatLonCGridOceanConfig(momentum_time_integrator="rk3"))
+        grid, z_coord, LatLonCGridOceanConfig.from_flat(momentum_time_integrator="rk3"))
     s = state
     for _ in range(5):
         s = model.step(s, dt=600.0)
@@ -70,9 +70,9 @@ def test_rk3_finite_output(pieces):
 def test_euler_default_bit_exact(pieces):
     # default (euler) must reproduce an explicit euler config bit-for-bit
     grid, z_coord, state = pieces
-    base = LatLonCGridOceanModel(grid, z_coord, LatLonCGridOceanConfig())
+    base = LatLonCGridOceanModel(grid, z_coord, LatLonCGridOceanConfig.from_flat())
     eul = LatLonCGridOceanModel(
-        grid, z_coord, LatLonCGridOceanConfig(momentum_time_integrator="euler"))
+        grid, z_coord, LatLonCGridOceanConfig.from_flat(momentum_time_integrator="euler"))
     sb = base.step(state, dt=600.0)
     se = eul.step(state, dt=600.0)
     np.testing.assert_array_equal(np.asarray(sb.u.data), np.asarray(se.u.data))
@@ -82,9 +82,9 @@ def test_euler_default_bit_exact(pieces):
 def test_rk3_differs_from_euler(pieces):
     # rk3 must actually change the momentum update (not silently == euler)
     grid, z_coord, state = pieces
-    eul = LatLonCGridOceanModel(grid, z_coord, LatLonCGridOceanConfig())
+    eul = LatLonCGridOceanModel(grid, z_coord, LatLonCGridOceanConfig.from_flat())
     rk3 = LatLonCGridOceanModel(
-        grid, z_coord, LatLonCGridOceanConfig(momentum_time_integrator="rk3"))
+        grid, z_coord, LatLonCGridOceanConfig.from_flat(momentum_time_integrator="rk3"))
     se = eul.step(state, dt=600.0)
     sr = rk3.step(state, dt=600.0)
     # RK3 differs from euler at O(dt^2); on a gentle idealized case the

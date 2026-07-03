@@ -61,6 +61,21 @@ def vorticity_3d(
     return (d_vort_x - d_vort_y) / (2.0 * grid.area[..., None])
 
 
+def gradient_x_3d_core(padded: jax.Array, dx: jax.Array) -> jax.Array:
+    """Centred cc x-gradient from a 1-cell-padded field and the cc ``dx`` metric.
+
+    ``padded`` (F, m+2, m+2, nlev) — the field haloed by one cell; ``dx``
+    (F, m, m) the cell-centre x-spacing.  Returns d(field)/dx (F, m, m, nlev).
+
+    Factored out of :func:`gradient_x_3d` so the SAME centred-difference stencil
+    serves both the global op (``dx = grid.dx``, full face extent) and the tiled
+    production stage (``dx`` = per-tile slice of ``grid.dx``).  The tiled sub-face
+    shard_map gradient is therefore bit-identical to the global op with no
+    duplicated stencil arithmetic (CLAUDE.md: no re-derived numerics).
+    """
+    return (padded[:, 2:, 1:-1, :] - padded[:, :-2, 1:-1, :]) / dx[..., None]
+
+
 def gradient_x_3d(
     field_3d: jax.Array, grid: CubedSphereGrid,
     padded: jax.Array | None = None,
@@ -83,7 +98,17 @@ def gradient_x_3d(
         dg = getattr(grid, 'duogrid', None)
         offsets = None if dg is not None else grid.halo_interp_offsets
         padded = pad_halo_4d(field_3d, interp_offsets=offsets, duogrid=dg)
-    return (padded[:, 2:, 1:-1, :] - padded[:, :-2, 1:-1, :]) / grid.dx[..., None]
+    return gradient_x_3d_core(padded, grid.dx)
+
+
+def gradient_y_3d_core(padded: jax.Array, dy: jax.Array) -> jax.Array:
+    """Centred cc y-gradient from a 1-cell-padded field and the cc ``dy`` metric.
+
+    ``padded`` (F, m+2, m+2, nlev); ``dy`` (F, m, m).  Returns d(field)/dy
+    (F, m, m, nlev).  The y-axis companion of :func:`gradient_x_3d_core` —
+    shared by the global :func:`gradient_y_3d` and the tiled production stage.
+    """
+    return (padded[:, 1:-1, 2:, :] - padded[:, 1:-1, :-2, :]) / dy[..., None]
 
 
 def gradient_y_3d(
@@ -108,7 +133,7 @@ def gradient_y_3d(
         dg = getattr(grid, 'duogrid', None)
         offsets = None if dg is not None else grid.halo_interp_offsets
         padded = pad_halo_4d(field_3d, interp_offsets=offsets, duogrid=dg)
-    return (padded[:, 1:-1, 2:, :] - padded[:, 1:-1, :-2, :]) / grid.dy[..., None]
+    return gradient_y_3d_core(padded, grid.dy)
 
 
 def divergence_3d(

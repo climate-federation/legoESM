@@ -14,37 +14,83 @@ __param_spec__ = {
         "excluded": {
         },
         "params": {
-            "A_v": {"units": "1", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "constant vertical mixing", "shape": None},
-            "K_v": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "constant vertical mixing", "shape": None},
+            "A_v": {"units": "m^2/s", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "constant vertical mixing", "shape": None},
+            "K_v": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "constant vertical mixing", "shape": None},
         },
     },
     "RichardsonVerticalMixingConfig": {
         "scheme_key": "ocean.vm.richardson",
         "excluded": {
+            "Pr_t": "dead field: the Pr-Ri scaling is built into the K formula; richardson.py only warns when Pr_t != default and never reads it — phantom trainable",
         },
         "params": {
-            "A_bg": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
-            "K_0": {"units": "1", "bounds": (0.00165, 0.015), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
-            "K_bg": {"units": "1", "bounds": (3.3e-06, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
-            "Pr_t": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
+            "A_bg": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
+            "K_0": {"units": "m^2/s", "bounds": (0.00165, 0.015), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
+            "K_bg": {"units": "m^2/s", "bounds": (3.3e-06, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
             "alpha": {"units": "1", "bounds": (1.65, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
         },
     },
     "TKEConfig": {
         "scheme_key": "ocean.vm.tke",
         "excluded": {
+            "bg_diff_amp": "Bryan-Lewis 1979 fixed published arctan offset",
+            "bg_diff_arctan_coeff": "Bryan-Lewis 1979 fixed published arctan amplitude",
+            "bg_diff_depth_m": "Bryan-Lewis 1979 fixed published transition depth",
+            "bg_diff_width_m": "Bryan-Lewis 1979 fixed published transition width",
             "kappaH_min": "numerics: floor/cap",
             "kappaM_max": "numerics: floor/cap",
             "kappaM_min": "numerics: floor/cap",
             "mxl_min": "numerics: floor/cap",
+            "prandtl_ri_coeff": "Galperin/Veros fixed Pr-Ri slope (6.6)",
             "tke_background": "numerics: floor/cap",
             "tke_surface_min": "numerics: floor/cap",
         },
         "params": {
             "Prandtl_tke0": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
             "alpha_tke": {"units": "1", "bounds": (9.9, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
+            "bg_diff_scale": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Bryan-Lewis (1979) background-diffusivity amplitude", "shape": None},
             "c_eps": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
             "c_k": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
+        },
+    },
+    "CATKEConfig": {
+        "scheme_key": "ocean.vm.catke",
+        "excluded": {
+            "c_entr_u": "calibrated to 0 (momentum entrainment-penetration length disabled in Wagner 2025)",
+            "c_entr_e": "calibrated to 0 (TKE entrainment-penetration length disabled in Wagner 2025)",
+            "c_entr_diss": "calibrated to 0 (dissipation entrainment-penetration length disabled)",
+            "minimum_tke": "numerics: floor",
+            "minimum_convective_buoyancy_flux": "numerics: regulariser floor",
+            "negative_tke_damping_time_s": "numerics: negative-TKE damping timescale (iteration-coupled)",
+            "maximum_viscosity": "numerics: cap",
+            "maximum_tracer_diffusivity": "numerics: cap",
+            "maximum_tke_diffusivity": "numerics: cap",
+        },
+        "params": {
+            "c_surface_shear": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) mixing length", "shape": None},
+            "c_bottom_shear": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) mixing length", "shape": None},
+            "c_ri_lower": {"units": "1", "bounds": (0.05, 0.7), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) stability function", "shape": None},
+            "c_ri_width": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) stability function", "shape": None},
+            "c_sheared_plume": {"units": "1", "bounds": (0.1, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) convective length", "shape": None},
+            "c_hi_u": {"units": "1", "bounds": (0.05, 0.8), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) momentum length", "shape": None},
+            "c_lo_u": {"units": "1", "bounds": (0.1, 1.2), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) momentum length", "shape": None},
+            "c_un_u": {"units": "1", "bounds": (0.1, 1.2), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) momentum length", "shape": None},
+            "c_hi_c": {"units": "1", "bounds": (0.02, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) tracer length", "shape": None},
+            "c_lo_c": {"units": "1", "bounds": (0.1, 1.2), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) tracer length", "shape": None},
+            "c_un_c": {"units": "1", "bounds": (0.1, 1.8), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) tracer length", "shape": None},
+            "c_hi_e": {"units": "1", "bounds": (0.1, 1.8), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) TKE length", "shape": None},
+            "c_lo_e": {"units": "1", "bounds": (2.0, 24.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) TKE length", "shape": None},
+            "c_un_e": {"units": "1", "bounds": (0.4, 4.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) TKE length", "shape": None},
+            "c_conv_u": {"units": "1", "bounds": (1.0, 12.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) convective length", "shape": None},
+            "c_conv_c": {"units": "1", "bounds": (1.0, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) convective length", "shape": None},
+            "c_entr_c": {"units": "1", "bounds": (0.02, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) entrainment length", "shape": None},
+            "c_conv_e": {"units": "1", "bounds": (1.0, 12.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) convective length", "shape": None},
+            "c_hi_diss": {"units": "1", "bounds": (0.1, 1.8), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) dissipation length", "shape": None},
+            "c_lo_diss": {"units": "1", "bounds": (0.5, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) dissipation length", "shape": None},
+            "c_un_diss": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) dissipation length", "shape": None},
+            "c_conv_diss": {"units": "1", "bounds": (1.0, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) dissipation length", "shape": None},
+            "c_w_ustar": {"units": "1", "bounds": (1.0, 8.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) surface TKE flux", "shape": None},
+            "c_w_conv": {"units": "1", "bounds": (0.1, 1.2), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "CATKE (Wagner 2025) surface TKE flux", "shape": None},
         },
     },
     "KPPConfig": {
@@ -57,6 +103,8 @@ __param_spec__ = {
             "c_b": "Large 1994 fixed nondim constant",
             "c_m": "Large 1994 fixed nondim constant",
             "c_s": "Large 1994 fixed nondim constant",
+            "businger_stable_coeff": "Businger-Dyer 1971 fixed MOST stability-function constant",
+            "businger_unstable_coeff": "Businger-Dyer 1971 fixed MOST stability-function constant",
             "cfl_cap_dt_s": "numerics: solver/CFL/smoothing parameter",
             "crossing_sharpness": "numerics: solver/CFL/smoothing parameter",
             "crossing_threshold": "numerics: solver/CFL/smoothing parameter",
@@ -67,13 +115,14 @@ __param_spec__ = {
             "zeta_s_abs": "Large 1994 fixed nondim constant",
         },
         "params": {
-            "A_bg": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
-            "K_0_shear": {"units": "1", "bounds": (0.00165, 0.015), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
-            "K_bg": {"units": "1", "bounds": (3.3e-06, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
-            "K_conv": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
-            "K_max": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "A_bg": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "K_0_shear": {"units": "m^2/s", "bounds": (0.00165, 0.015), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "K_bg": {"units": "m^2/s", "bounds": (3.3e-06, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "K_conv": {"units": "m^2/s", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "K_max": {"units": "m^2/s", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
             "Ri_0": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
             "Ri_crit": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "ustar_speed_ratio": {"units": "1", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP u* surface-speed proxy (Large et al. 1994)", "shape": None},
         },
     },
 }
@@ -140,6 +189,13 @@ class TKEConfig(NamedTuple):
     kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
     kappaH_min: float = 2.0e-5
     enable_kappaH_profile: bool = True
+    # --- Galperin Pr-Ri + Bryan-Lewis (1979) bg-diffusivity profile (#518 §10) ---
+    prandtl_ri_coeff: float = 6.6        # Galperin/Veros fixed Pr = max(1, min(10, 6.6*Ri)) slope
+    bg_diff_amp: float = 0.8             # Bryan-Lewis arctan offset (published fit)
+    bg_diff_arctan_coeff: float = 1.05   # Bryan-Lewis arctan amplitude (published fit)
+    bg_diff_depth_m: float = 2500.0      # Bryan-Lewis transition depth [m] (published fit)
+    bg_diff_width_m: float = 222.2       # Bryan-Lewis transition width [m] (published fit)
+    bg_diff_scale: float = 1.0e-4        # abyssal tracer-diffusivity floor amplitude [m^2/s]
     tke_surface_min: float = 1.0e-4      # surface TKE floor [m^2/s^2]
     tke_background: float = 1.0e-6       # interior TKE floor [m^2/s^2]
     # ----- Static-stability N^2 mode (deep-ocean ventilation / convection) -----
@@ -392,15 +448,97 @@ class KPPConfig(NamedTuple):
     # value smaller than the real dt over-damps; larger risks instability.
     # Default 300.0 preserves the historical hard-coded estimate.
     cfl_cap_dt_s: float = 300.0
+    # --- Monin-Obukhov similarity (Businger-Dyer) + u* proxy (#518 item 10) ---
+    # Businger-Dyer MOST stability-function constants (Businger et al. 1971,
+    # used by LMD94): the unstable (1 + 16|zeta|) and stable (1 + 5*zeta)
+    # coefficients in the weakly-(un)stable velocity scales.  Fixed published
+    # constants (like a_m/c_m above) — excluded from training.
+    businger_unstable_coeff: float = 16.0   # (1 + 16|zeta|)^{1/4,1/2} weakly-unstable scale
+    businger_stable_coeff: float = 5.0      # 1/(1 + 5*zeta) stable suppression
+    # u_star proxy ratio when wind stress is absent: u* ~ ratio*|U_surface|
+    # (~sqrt(C_d) drag-like closure knob).
+    ustar_speed_ratio: float = 0.01
+
+
+class CATKEConfig(NamedTuple):
+    """CATKE: Convective-Adjustment Turbulent-Kinetic-Energy vertical mixing.
+
+    One-equation prognostic-TKE closure (Wagner et al. 2025, JAMES,
+    doi:10.1029/2024MS004522), calibrated to a suite of large-eddy
+    simulations. Distinct from :class:`TKEConfig` (Gaspar/Burchard): CATKE
+    derives a DYNAMIC convective mixing length (Deardorff ``w*^3/Jb`` scaling
+    — predicting both convective-layer depth AND timescale) and blends three
+    Richardson-number regimes (high/low/negative Ri) with SEPARATE coefficients
+    for momentum (u), tracers (c) and TKE (e).
+
+    Diffusivities at interfaces:  ``K_X = l_X * w*`` with ``w* = sqrt(max(e, e_min))``.
+    Mixing length:  ``l_X = min(H, max(sigma_X * l_stable, l_convective_X))`` with
+
+        l_stable     = min(c_surface_shear*depth, c_bottom_shear*hab, w*/sqrt(N^2+))
+        sigma_X(Ri)  = scale(Ri; c_un_X, c_lo_X, c_hi_X, c_ri_lower, c_ri_width)
+        l_convective = c_conv_X * w*^3/(Jb+Jb_eps) * (1 - c_sheared_plume*Ri_f)  [convecting]
+                     = c_entr_X * Jb/(w* N^2 + Jb_eps)                           [entraining]
+
+    Dissipation:  ``eps = e * sqrt(|e|) / l_D`` (l_D uses the ``c_*_diss`` regime
+    coefficients: ``l_stable / sigma_D`` max'd with the convective length).
+    Surface TKE flux:  ``Q_e = -c_w_ustar*u*^3 - c_w_conv*wConv^3``.
+
+    Field names map 1:1 to Oceananigans ``CATKEMixingLength`` / ``CATKEEquation``
+    (Cˢ→c_surface_shear, Cᶜc→c_conv_c, CʰⁱD→c_hi_diss, ...); defaults are the
+    LES-calibrated values from Wagner et al. (2025).
+    """
+    # --- stable (shear) mixing length: surface/bottom + stratification ---
+    c_surface_shear: float = 1.131       # Cˢ  surface-distance coefficient
+    c_bottom_shear: float = 0.28         # Cᵇ  bottom-distance coefficient
+    c_ri_lower: float = 0.254            # CRi⁰ stability-function lower Ri
+    c_ri_width: float = 1.02             # CRiᵟ stability-function width
+    c_sheared_plume: float = 0.505       # Cˢᵖ sheared-convective-plume coefficient
+    # --- per-variable shear-length coefficients (high / low / negative Ri) ---
+    c_hi_u: float = 0.242                # Cʰⁱu momentum, high Ri
+    c_lo_u: float = 0.361                # Cˡᵒu momentum, low Ri
+    c_un_u: float = 0.370                # Cᵘⁿu momentum, negative Ri
+    c_hi_c: float = 0.098                # Cʰⁱc tracers, high Ri
+    c_lo_c: float = 0.369               # Cˡᵒc tracers, low Ri
+    c_un_c: float = 0.572                # Cᵘⁿc tracers, negative Ri
+    c_hi_e: float = 0.548                # Cʰⁱe TKE, high Ri
+    c_lo_e: float = 7.863                # Cˡᵒe TKE, low Ri
+    c_un_e: float = 1.447                # Cᵘⁿe TKE, negative Ri
+    # --- per-variable convective / entrainment length coefficients ---
+    c_conv_u: float = 3.705              # Cᶜu  momentum convective length
+    c_entr_u: float = 0.0                # Cᵉu  momentum entrainment length
+    c_conv_c: float = 4.793              # Cᶜc  tracer convective length
+    c_entr_c: float = 0.112              # Cᵉc  tracer entrainment length
+    c_conv_e: float = 3.642              # Cᶜe  TKE convective length
+    c_entr_e: float = 0.0                # Cᵉe  TKE entrainment length
+    # --- dissipation length (CATKEEquation) ---
+    c_hi_diss: float = 0.579             # CʰⁱD dissipation, high Ri
+    c_lo_diss: float = 1.604             # CˡᵒD dissipation, low Ri
+    c_un_diss: float = 0.923             # CᵘⁿD dissipation, negative Ri
+    c_conv_diss: float = 3.254           # CᶜD  dissipation convective length
+    c_entr_diss: float = 0.0             # CᵉD  dissipation entrainment length
+    # --- surface TKE flux ---
+    c_w_ustar: float = 3.179             # Cᵂu★ shear-driven surface TKE flux
+    c_w_conv: float = 0.383              # CᵂwΔ convective surface TKE flux
+    # --- numerics floors / caps (NOT trainable) ---
+    minimum_tke: float = 1.0e-9                     # e floor for w* background mixing
+    minimum_convective_buoyancy_flux: float = 1.0e-11  # Jb_eps regulariser
+    negative_tke_damping_time_s: float = 60.0       # damp spurious negative TKE
+    # Diffusivity caps default to inf (= no clip), matching Oceananigans
+    # CATKEVerticalDiffusivity; the unconditionally-stable implicit vertical
+    # solve tolerates large K.  Set a finite value to clip if desired.
+    maximum_viscosity: float = float("inf")           # K_u cap [m^2/s]
+    maximum_tracer_diffusivity: float = float("inf")  # K_c cap [m^2/s]
+    maximum_tke_diffusivity: float = float("inf")     # K_e cap [m^2/s]
 
 
 class VerticalMixingConfig(NamedTuple):
     """Top-level vertical mixing configuration."""
-    scheme: str = "constant"  # "constant", "richardson", "kpp", "tke", "none"
+    scheme: str = "constant"  # "constant", "richardson", "kpp", "tke", "catke", "none"
     constant: ConstantVerticalMixingConfig = ConstantVerticalMixingConfig()
     richardson: RichardsonVerticalMixingConfig = RichardsonVerticalMixingConfig()
     kpp: KPPConfig = KPPConfig()
     tke: TKEConfig = TKEConfig()
+    catke: CATKEConfig = CATKEConfig()
     # Tidal mixing is ADDITIVE: when ``tidal.enabled=True`` the
     # caller computes a ``K_tidal(x, y, z)`` field via
     # :func:`legoesm.ocean.physics.vertical_mixing.tidal.compute_tidal_diffusivity`

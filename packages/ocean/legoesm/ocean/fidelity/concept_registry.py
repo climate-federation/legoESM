@@ -7,7 +7,7 @@ A single machine-readable map from each physical concept the ocean code uses to:
   - units + status.
 
 Why this exists (per the gap->block / dedup doctrine in
-``docs/ocean_fidelity/oracle_recipe_strategy.md`` §3 rule I + §9):
+``docs/ocean/fidelity/oracle_recipe_strategy.md`` §3 rule I + §9):
 
 1. **Recognition across oracles.** Different production models name the same
    quantity differently (Veros ``kappaM`` = legoESM ``A_v``; Veros ``r_bot`` =
@@ -33,7 +33,7 @@ from typing import NamedTuple
 
 # Oracle keys used in ``oracle_aliases``. Keep this closed so the consistency
 # test can validate every mapping references a known oracle.
-KNOWN_ORACLES = frozenset({"veros", "mom6", "mitgcm", "nemo"})
+KNOWN_ORACLES = frozenset({"veros", "mom6", "mitgcm", "nemo", "oceananigans"})
 
 # Status vocabulary:
 #   "canonical"        — settled canonical name; aliases are clear debt.
@@ -90,9 +90,10 @@ CONCEPTS: tuple[ConceptDef, ...] = (
         units="K",
         status="entrenched",
         aliases=("T_surface", "Ts"),
-        note="CLAUDE.md open debt: T_sfc (184) vs T_surface (~15) vs Ts. "
-             "Coupler/land/ice carry T_surface. Dedicated cleanup PR — not "
-             "ratcheted here.",
+        note="T_sfc is now the only surface-temperature identifier in source: "
+             "T_surface has been fully migrated out (0 identifier sites; one "
+             "stray comment remains), and `Ts` persists only as SCM-accumulator "
+             "locals. Aliases retained for provenance; not ratcheted here.",
     ),
     ConceptDef(
         concept="Seawater specific heat capacity",
@@ -100,7 +101,7 @@ CONCEPTS: tuple[ConceptDef, ...] = (
         units="J/(kg K)",
         status="canonical",
         aliases=("c_ocean", "c_p"),
-        oracle_aliases=(("veros", "cp_0"),),
+        oracle_aliases=(("veros", "cp_0"), ("mitgcm", "HeatCapacity_Cp")),
         ratchet=False,  # c_p/c_ocean are context-dependent (budgets.py uses c_p
                         # as a param correctly defaulting to c_sw; slab-ocean
                         # c_ocean is a domain field) -> human/agent review, not
@@ -119,7 +120,7 @@ CONCEPTS: tuple[ConceptDef, ...] = (
         units="kg/m^3",
         status="canonical",
         aliases=("rho_ocean", "rho_ref"),
-        oracle_aliases=(("veros", "rho_0"),),
+        oracle_aliases=(("veros", "rho_0"), ("mitgcm", "rhoConst")),
         note="constants.rho_ocean is the module constant; config field is "
              "rho_0; LinearEOSConfig.rho_ref is the EOS reference. All ~1024-"
              "1025. Distinct roles -> not ratcheted; documented for the bridge.",
@@ -130,7 +131,7 @@ CONCEPTS: tuple[ConceptDef, ...] = (
         units="m/s",
         status="canonical",
         aliases=("bottom_drag_coeff",),
-        oracle_aliases=(("veros", "r_bot"),),
+        oracle_aliases=(("veros", "r_bot"), ("mitgcm", "bottomDragLinear")),
         ratchet=True,
         note="state.py field is bottom_drag_r; experiment configs declare "
              "bottom_drag_coeff and map it at build time. New MODEL/config code "
@@ -141,36 +142,43 @@ CONCEPTS: tuple[ConceptDef, ...] = (
         canonical="A_v",
         units="m^2/s",
         status="fidelity-scoped",
-        oracle_aliases=(("veros", "kappaM"), ("veros", "kappaM_min")),
+        oracle_aliases=(
+            ("veros", "kappaM"), ("veros", "kappaM_min"), ("mitgcm", "viscAr"),
+        ),
         note="legoESM uses A_v (momentum) / K_v (tracer); Veros TKE uses "
-             "kappaM/kappaH (and *_min floors). The recipe maps Veros's "
-             "kappaM_min -> TKEConfig.kappaM_min; no legoESM-core collision.",
+             "kappaM/kappaH (and *_min floors); MITgcm uses viscAr (the 'r' = "
+             "vertical/radial axis). The recipe maps Veros's kappaM_min -> "
+             "TKEConfig.kappaM_min; no legoESM-core collision.",
     ),
     ConceptDef(
         concept="Vertical tracer diffusivity (background/fallback)",
         canonical="K_v",
         units="m^2/s",
         status="fidelity-scoped",
-        oracle_aliases=(("veros", "kappaH"), ("veros", "kappaH_min")),
-        note="See A_v. Veros's tracer-side floor is kappaH_min.",
+        oracle_aliases=(
+            ("veros", "kappaH"), ("veros", "kappaH_min"), ("mitgcm", "diffKrT"),
+        ),
+        note="See A_v. Veros's tracer-side floor is kappaH_min; MITgcm's "
+             "vertical tracer diffusivity is diffKrT.",
     ),
     ConceptDef(
         concept="Gent-McWilliams (thickness) diffusivity",
         canonical="kappa_GM",
         units="m^2/s",
         status="fidelity-scoped",
-        oracle_aliases=(("veros", "K_gm_0"),),
-        note="legoESM GMRediConfig.kappa_GM; Veros K_gm_0. Distinct from the "
-             "Redi (isoneutral) diffusivity below — do not conflate.",
+        oracle_aliases=(("veros", "K_gm_0"), ("mitgcm", "GM_background_K")),
+        note="legoESM GMRediConfig.kappa_GM; Veros K_gm_0; MITgcm pkg/gmredi "
+             "GM_background_K. Distinct from the Redi (isoneutral) diffusivity "
+             "below — do not conflate.",
     ),
     ConceptDef(
         concept="Redi (isoneutral) diffusivity",
         canonical="kappa_Redi",
         units="m^2/s",
         status="fidelity-scoped",
-        oracle_aliases=(("veros", "K_iso_0"),),
-        note="legoESM GMRediConfig.kappa_Redi; Veros K_iso_0. Distinct from the "
-             "GM (thickness) diffusivity above.",
+        oracle_aliases=(("veros", "K_iso_0"), ("mitgcm", "GM_isopycK")),
+        note="legoESM GMRediConfig.kappa_Redi; Veros K_iso_0; MITgcm pkg/gmredi "
+             "GM_isopycK. Distinct from the GM (thickness) diffusivity above.",
     ),
     ConceptDef(
         concept="Tracer/momentum relaxation timescale",
@@ -182,6 +190,76 @@ CONCEPTS: tuple[ConceptDef, ...] = (
              "experiments/phillips_two_layer.py tau_relax = DAYS. New code MUST "
              "carry a _s / _days suffix. Human-review (an identifier scan "
              "cannot tell the units), so not auto-ratcheted.",
+    ),
+    # --- Prognostic state variables (the oracle->legoESM bridge vocabulary). --
+    # These let a state bridge call ``oracle_to_canonical("mitgcm")`` to map a
+    # snapshot's field names onto LatLonCGridOceanState fields, instead of each
+    # bridge hardcoding its own name table. fidelity-scoped: the legoESM names
+    # ARE the canonical state-field identifiers, so no core collision.
+    ConceptDef(
+        concept="Zonal velocity (C-grid u-face)",
+        canonical="u",
+        units="m/s",
+        status="fidelity-scoped",
+        oracle_aliases=(("veros", "u"), ("mitgcm", "U"), ("mitgcm", "uVel"),
+                        ("oceananigans", "u")),
+        note="LatLonCGridOceanState.u. Veros 'u' sits at the EAST T-cell face; "
+             "MITgcm 'U' (UVEL) sits at the WEST face — the bridge owns that "
+             "half-cell convention, verified by equivariance tests.",
+    ),
+    ConceptDef(
+        concept="Meridional velocity (C-grid v-face)",
+        canonical="v",
+        units="m/s",
+        status="fidelity-scoped",
+        oracle_aliases=(("veros", "v"), ("mitgcm", "V"), ("mitgcm", "vVel"),
+                        ("oceananigans", "v")),
+        note="LatLonCGridOceanState.v. MITgcm 'V' (VVEL) sits at the SOUTH face.",
+    ),
+    ConceptDef(
+        concept="Vertical velocity",
+        canonical="w",
+        units="m/s",
+        status="fidelity-scoped",
+        oracle_aliases=(("veros", "w"), ("mitgcm", "W"), ("mitgcm", "wVel"),
+                        ("oceananigans", "w")),
+        note="LatLonCGridOceanState.w (diagnostic on most configs).",
+    ),
+    ConceptDef(
+        concept="Potential temperature",
+        canonical="T",
+        units="degC",
+        status="fidelity-scoped",
+        oracle_aliases=(("veros", "temp"), ("mitgcm", "Theta"), ("mitgcm", "T")),
+        note="LatLonCGridOceanState.T. MITgcm dumps potential temperature as "
+             "'T'/'Theta' (THETA); Veros names it 'temp'. Both degC.",
+    ),
+    ConceptDef(
+        concept="Salinity",
+        canonical="S",
+        units="g/kg",
+        status="fidelity-scoped",
+        oracle_aliases=(("veros", "salt"), ("mitgcm", "S"), ("mitgcm", "Salt")),
+        note="LatLonCGridOceanState.S. MITgcm 'S'/'Salt' (SALT); Veros 'salt'.",
+    ),
+    ConceptDef(
+        concept="Free-surface height anomaly",
+        canonical="eta",
+        units="m",
+        status="fidelity-scoped",
+        oracle_aliases=(("mitgcm", "Eta"), ("mitgcm", "ETAN"),
+                        ("oceananigans", "eta"), ("oceananigans", "η")),
+        note="LatLonCGridOceanState.eta. MITgcm implicit free surface 'Eta'/"
+             "'ETAN'. Veros has no direct eta (barotropic psi); left unmapped.",
+    ),
+    ConceptDef(
+        concept="Horizontal (Laplacian) viscosity",
+        canonical="A_h",
+        units="m^2/s",
+        status="fidelity-scoped",
+        oracle_aliases=(("veros", "A_h"), ("mitgcm", "viscAh")),
+        note="legoESM A_h; Veros A_h; MITgcm viscAh. Lateral Laplacian momentum "
+             "viscosity (sets the Munk layer width delta_M=(A_h/beta)^(1/3)).",
     ),
     ConceptDef(
         concept="Water heat capacity (land/lake)",

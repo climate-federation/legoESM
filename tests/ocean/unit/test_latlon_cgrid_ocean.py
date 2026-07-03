@@ -49,7 +49,7 @@ def state(grid, z_coord):
 
 @pytest.fixture
 def config():
-    return LatLonCGridOceanConfig()
+    return LatLonCGridOceanConfig.from_flat()
 
 
 # =========================================================================
@@ -254,7 +254,7 @@ class TestCGridOceanModel:
         A-grid models develop checkerboard noise from the 2*dx null space.
         The C-grid should remain quiet.
         """
-        cfg = LatLonCGridOceanConfig(A_h=1e4, K_h=1e3, A_v=1e-3, K_v=1e-4)
+        cfg = LatLonCGridOceanConfig.from_flat(A_h=1e4, K_h=1e3, A_v=1e-3, K_v=1e-4)
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         s = state
         for _ in range(10):
@@ -276,7 +276,7 @@ class TestCGridOceanModel:
         global volume integral is preserved to numerical precision
         regardless of bathymetry complexity.
         """
-        cfg = LatLonCGridOceanConfig()
+        cfg = LatLonCGridOceanConfig.from_flat()
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         area = grid.area
         mask = state.land_mask.data
@@ -295,7 +295,7 @@ class TestCGridOceanModel:
     def test_eta_drift_correction_can_be_disabled(self, grid, z_coord, state):
         """Backwards-compat: ``fix_eta_drift=False`` restores the legacy
         path so existing regression baselines can opt out."""
-        cfg = LatLonCGridOceanConfig(fix_eta_drift=False)
+        cfg = LatLonCGridOceanConfig.from_flat(fix_eta_drift=False)
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         s = model.step(state, 3600.0)
         # Just check that the disabled path runs and produces finite eta.
@@ -330,7 +330,7 @@ class TestCGridOceanModel:
             H_max=H_max,
             H_bathy_override=H_bathy,
         )
-        cfg = LatLonCGridOceanConfig()
+        cfg = LatLonCGridOceanConfig.from_flat()
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         area = grid.area
         mask = state.land_mask.data
@@ -355,7 +355,7 @@ class TestCGridOceanModel:
         """The explicit substepping barotropic solver does not project
         the global mean internally — the end-of-step fix must catch
         any leak it introduces."""
-        cfg = LatLonCGridOceanConfig(barotropic_solver="explicit_substep")
+        cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="explicit_substep")
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         area = grid.area
         mask = state.land_mask.data
@@ -386,7 +386,7 @@ class TestCGridOceanModel:
         fw = FreshwaterForcing(
             precip=precip, evap=z2, runoff=z2, ice_fw=z2, restoring=z2,
         )
-        cfg = LatLonCGridOceanConfig(freshwater_closure="virtual_salt_flux")
+        cfg = LatLonCGridOceanConfig.from_flat(freshwater_closure="virtual_salt_flux")
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         area = grid.area
         mask = state.land_mask.data
@@ -413,10 +413,10 @@ class TestCGridOceanModel:
         — verify that toggling ``fix_eta_drift`` on vs off gives
         bit-close eta fields on a single step where no real leak
         exists."""
-        cfg_on = LatLonCGridOceanConfig(
+        cfg_on = LatLonCGridOceanConfig.from_flat(
             barotropic_solver="implicit_cn", fix_eta_drift=True,
         )
-        cfg_off = LatLonCGridOceanConfig(
+        cfg_off = LatLonCGridOceanConfig.from_flat(
             barotropic_solver="implicit_cn", fix_eta_drift=False,
         )
         s_on = LatLonCGridOceanModel(grid, z_coord, cfg_on).step(state, 3600.0)
@@ -439,7 +439,7 @@ class TestCGridOceanModel:
         """
         from legoesm.ocean.vertical import compute_layer_thickness
 
-        cfg = LatLonCGridOceanConfig()
+        cfg = LatLonCGridOceanConfig.from_flat()
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         s = model.step(state, 3600.0)
         h_k = compute_layer_thickness(
@@ -487,7 +487,7 @@ class TestCGridOceanModel:
             eta=state.eta.replace(data=eta_pert),
         )
 
-        cfg = LatLonCGridOceanConfig(
+        cfg = LatLonCGridOceanConfig.from_flat(
             A_h=1e4, K_h=1e3, n_barotropic_substeps=60,
         )
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
@@ -530,8 +530,8 @@ class TestPR261ConfigDispatch:
     dispatch knobs (`A_h_merid`, `B_h_lat_scaling`)."""
 
     def test_A_h_merid_branch_active(self, grid, z_coord, state):
-        cfg = LatLonCGridOceanConfig(A_h_merid=5.0e4)
-        assert cfg.A_h_merid > 0.0
+        cfg = LatLonCGridOceanConfig.from_flat(A_h_merid=5.0e4)
+        assert cfg.lateral_viscosity.A_h_merid > 0.0
         tend = latlon_cgrid_ocean_baroclinic_tendencies(
             state, grid, z_coord, cfg,
         )
@@ -539,18 +539,18 @@ class TestPR261ConfigDispatch:
         assert jnp.all(jnp.isfinite(tend.dv_dt.data))
 
     def test_A_h_merid_default_inactive(self, grid, z_coord, state):
-        cfg = LatLonCGridOceanConfig()
-        assert cfg.A_h_merid == 0.0
+        cfg = LatLonCGridOceanConfig.from_flat()
+        assert cfg.lateral_viscosity.A_h_merid == 0.0
 
     def test_B_h_lat_scaling_on(self, grid, z_coord, state):
-        cfg = LatLonCGridOceanConfig(B_h=1.0e10, B_h_lat_scaling=True)
+        cfg = LatLonCGridOceanConfig.from_flat(B_h=1.0e10, B_h_lat_scaling=True)
         tend = latlon_cgrid_ocean_baroclinic_tendencies(
             state, grid, z_coord, cfg,
         )
         assert jnp.all(jnp.isfinite(tend.du_dt.data))
 
     def test_B_h_lat_scaling_off(self, grid, z_coord, state):
-        cfg = LatLonCGridOceanConfig(B_h=1.0e10, B_h_lat_scaling=False)
+        cfg = LatLonCGridOceanConfig.from_flat(B_h=1.0e10, B_h_lat_scaling=False)
         tend = latlon_cgrid_ocean_baroclinic_tendencies(
             state, grid, z_coord, cfg,
         )
@@ -592,7 +592,7 @@ class TestSmagCFLCap:
         return st._replace(u=st.u.replace(data=u))
 
     def test_cap_off_by_default(self):
-        assert LatLonCGridOceanConfig().smag_cfl_safety == 0.0
+        assert LatLonCGridOceanConfig.from_flat().lateral_viscosity.smag_cfl_safety == 0.0
 
     def test_cap_bounds_and_reduces_smag(self, grid, z_coord):
         dt = 75.0
@@ -600,11 +600,11 @@ class TestSmagCFLCap:
         st = self._sharp_jet(grid, z_coord)
         t_un = latlon_cgrid_ocean_baroclinic_tendencies(
             st, grid, z_coord,
-            LatLonCGridOceanConfig(C_smag_lap=C, smag_cfl_safety=0.0), dt=dt,
+            LatLonCGridOceanConfig.from_flat(C_smag_lap=C, smag_cfl_safety=0.0), dt=dt,
         )
         t_cap = latlon_cgrid_ocean_baroclinic_tendencies(
             st, grid, z_coord,
-            LatLonCGridOceanConfig(C_smag_lap=C, smag_cfl_safety=0.125), dt=dt,
+            LatLonCGridOceanConfig.from_flat(C_smag_lap=C, smag_cfl_safety=0.125), dt=dt,
         )
         # Capped tendency stays finite and viscous-Courant-bounded.
         assert bool(jnp.all(jnp.isfinite(t_cap.du_dt.data)))

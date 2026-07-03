@@ -70,6 +70,27 @@ def pad_ns_zero_multi(*fields: jnp.ndarray) -> tuple:
     return pad_with_pole_bc_lat_multi(fields, halo=1)
 
 
+def _vface_cos_lat_core(grid) -> jnp.ndarray:
+    """Raw ``cos(lat_v)`` at the ``n_lat+1`` v-face midpoints (#515 consolidation).
+
+    The single source for the regular-branch v-face zonal-metric cosine shared by
+    ``divergence_cgrid`` and ``gradient_curl_to_v``: pad ``grid.lat`` with the
+    halo-aware pole/cut BC (``pad_with_pole_bc_lat`` — at an interior MPI band cut
+    the ghost row is the neighbour rank's true edge latitude via the AD-safe
+    sendrecv), take the v-face midpoint latitude, return its cosine.  Callers apply
+    their OWN pole step (``zero_polar_lat_ends`` vs a ``1e-30`` floor) and the
+    ``R*dlon`` scaling.  Kept on the STORED ``grid.lat`` dtype (NOT
+    ``result_type``-cast — unlike the ocean ``vface_zonal_cos_lat``) so the core
+    path stays byte-identical to the former inline recompute.
+    """
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+    lat_pad = pad_with_pole_bc_lat(
+        grid.lat, halo=1, south_value=0.0, north_value=0.0,
+    )
+    lat_v = 0.5 * (lat_pad[:-1] + lat_pad[1:])  # (n_lat+1,)
+    return jnp.cos(lat_v)
+
+
 def is_tripolar(grid) -> bool:
     """Return True if ``grid`` carries an active tripolar fold descriptor.
 
@@ -101,6 +122,45 @@ def fold_is_local(grid) -> bool:
     """
     fold = getattr(grid, "fold", None)
     return fold is not None and bool(fold.is_active) and fold.fold_j >= 0
+
+
+def _has_2d_vface_metric(grid) -> bool:
+    """True if ``grid`` carries an explicit 2D stored v-face zonal metric.
+
+    Rich ``LatLonCGridGeometry`` (tripolar, spherical/Mercator, beta-plane)
+    builds ``dx_v`` of shape ``(n_lat+1, n_lon)`` at construction; the lean
+    ``LatLonGrid`` lacks the field entirely.
+    """
+    dxv = getattr(grid, "dx_v", None)
+    return dxv is not None and getattr(dxv, "ndim", 0) == 2
+
+
+def reads_stored_vface_metric(grid) -> bool:
+    """True if the v-face zonal length metric must be READ from the grid's
+    stored ``dx_v`` rather than recomputed as ``R*cos(grid.lat_v)*dlon``.
+
+    Generalizes :func:`is_tripolar` (#514/#515): the recompute reconstructs the
+    metric from ``cos(grid.lat)``, which is WRONG on a Cartesian **beta-plane**
+    (whose stored metric is the uniform ``dx_m`` but whose pseudo-lat is a
+    nonzero ``y_c/radius``) and merely redundant on a spherical rich geometry
+    (whose stored ``dx_v`` is bit-identical to the recompute in the core).
+
+    Reads stored when the grid carries an explicit 2D ``dx_v`` (any rich
+    geometry) EXCEPT under a meridionally-periodic (y-reentrant) topology,
+    where the pole v-faces must be wrap-padded (recomputed via
+    ``pad_with_pole_bc_lat``), not the stored closed-domain pole-zeros.
+    Tripolar always reads stored (its fold metric is never recomputable).
+
+    Resolves statically: ``grid`` is a trace-time constant and
+    ``get_meridionally_periodic()`` is a concrete module bool, so the calling
+    ``if`` is a compile-time branch (the sanctioned feature-gating pattern),
+    never traced control flow.
+    """
+    if is_tripolar(grid):
+        return True
+    from legoesm.grids.halo_latlon import get_meridionally_periodic
+
+    return _has_2d_vface_metric(grid) and not get_meridionally_periodic()
 
 
 def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
@@ -170,6 +230,45 @@ def pad_ns_vector_v(interior: jnp.ndarray, grid) -> jnp.ndarray:
     return padded
 
 
+def pad_lon_cgrid(f: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
+    """Periodic LONGITUDE halo for a C-grid field, backend-dispatched.
+
+    Adds ``halo`` ghost columns on each lon side so a compact zonal stencil
+    spans longitude partition cuts.  Backend dispatch:
+
+    * local / band / SPMD-lat / non-2-D MPI — every rank owns the full
+      longitude circle, so the wrap is LOCAL: ``jnp.pad(mode="wrap")``.
+    * 2-D pencil (``LatLon2DLayout``) — longitude is split, so the wrap
+      becomes an MPI ring exchange with the W/E neighbour
+      (:func:`legoesm.parallel.latlon_mpi.exchange_halo_lon`).
+
+    BIT-IDENTICAL at ``proc_lon == 1`` (``exchange_halo_lon``'s single-member
+    ring is the same local wrap), so the cell→face / vertex operators that
+    pad-then-stencil through this helper stay byte-for-byte unchanged on the
+    serial / band / SPMD paths and only gain the true neighbour columns under
+    a genuine longitude split.  AD-safe (the exchange uses the shared
+    sendrecv VJP).  ``f`` may be 2-D ``(n_lat, n_lon[_local], ...)`` or 3-D;
+    the lon axis is axis 1.
+    """
+    if halo <= 0:
+        return f
+    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
+    if get_halo_backend() == "mpi":
+        topology = get_mpi_topology()
+        from legoesm.parallel.latlon_mpi import (
+            LatLon2DLayout, exchange_halo_lon,
+        )
+        if isinstance(topology, LatLon2DLayout):
+            return exchange_halo_lon(
+                f, topology.west_rank, topology.east_rank,
+                topology.rank, halo=halo,
+            )
+    # Local periodic wrap (lon = axis 1); single Pad HLO.
+    pad = [(0, 0)] * f.ndim
+    pad[1] = (halo, halo)
+    return jnp.pad(f, tuple(pad), mode="wrap")
+
+
 def interp_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
     """Interpolate a cell-center field to u-face (lon interface) positions.
 
@@ -184,8 +283,13 @@ def interp_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
     -------
     f_u : (n_lat, n_lon+1, ...) at u-faces.
     """
-    f_u = 0.5 * (jnp.roll(f, 1, axis=1) + f)
-    return jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
+    # Pad-then-average: a lon halo (local wrap, or the 2-D ring exchange) +
+    # the 2-pt face average over the padded cells.  Bit-identical to the
+    # former ``0.5*(roll(f,1)+f)`` + wrap-column concat at proc_lon==1, and
+    # spans lon partition cuts under a 2-D split.  Output face j = mean of
+    # the two cells sharing it; n_lon+1 faces (the last the periodic closure).
+    f_pad = pad_lon_cgrid(f, halo=1)
+    return 0.5 * (f_pad[:, :-1] + f_pad[:, 1:])
 
 
 def interp_cell_to_vface(f: jnp.ndarray, grid=None) -> jnp.ndarray:
@@ -241,8 +345,17 @@ def get_band_mpi_cut_layout():
     if get_halo_backend() != "mpi":
         return None
     topology = get_mpi_topology()
-    from legoesm.parallel.latlon_mpi import LatLonBandLayout
-    if isinstance(topology, LatLonBandLayout) and (
+    from legoesm.parallel.latlon_mpi import (
+        LatLon2DLayout, LatLonBandLayout,
+    )
+    # Band AND 2-D pencil expose the same pole-terminated lat-LINE
+    # semantics (``south_rank``/``north_rank is None`` at the physical
+    # poles), so the pole-touch test is identical.  Recognising the 2-D
+    # layout here is what makes ``lat_ends_are_poles`` /
+    # ``interp_cell_to_vface_halo`` correct on a ``proc_lat>1`` pencil rank
+    # — without it an interior lat-cut rank would clamp its band edge to a
+    # physical pole (e.g. curl_vertex's sin clamp), corrupting metrics.
+    if isinstance(topology, (LatLonBandLayout, LatLon2DLayout)) and (
         topology.south_rank is not None
         or topology.north_rank is not None
     ):
@@ -314,23 +427,41 @@ def interp_cell_to_vface_halo(
     f_v : (n_lat_local + 1, n_lon, ...) at v-faces.
     """
     band = get_band_mpi_cut_layout()
-    if band is not None:
+    # Single-program SPMD twin (the lat-band shard_map backend, for which
+    # ``get_band_mpi_cut_layout()`` is None): the cross-cut interior faces need
+    # the same neighbour-row average, but the pole edge-copy must be restored
+    # only at the PHYSICAL pole bands, selected DATA-dependently per band.
+    # ``None`` for serial/MPI/cube (those keep their static branch — additive).
+    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+    spmd_pm = spmd_pole_end_masks()
+    if band is not None or spmd_pm is not None:
         from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
-        # Interior cuts: neighbour row via AD-safe sendrecv.  A
-        # pole-touching end gets a constant-0 ghost row here that
-        # is immediately overridden by the legacy edge copy below,
-        # so the constant never reaches the output.  ``f_pad`` may be
-        # supplied pre-padded by a caller that fused this exchange
-        # with others (must be exactly this pad call's output).
+        # Interior cuts: neighbour row via the backend-aware pad (AD-safe MPI
+        # sendrecv / SPMD lat-band ppermute).  A pole-touching end gets a
+        # constant-0 ghost row here that is immediately overridden by the
+        # legacy edge copy below, so the constant never reaches the output.
+        # ``f_pad`` may be supplied pre-padded by a caller that fused this
+        # exchange with others (must be exactly this pad call's output).
         if f_pad is None:
             f_pad = pad_with_pole_bc_lat(
                 f, halo=1, south_value=0.0, north_value=0.0,
             )
         f_v = 0.5 * (f_pad[:-1] + f_pad[1:])  # (n_lat_local+1, ...)
-        if band.south_rank is None:
-            f_v = jnp.concatenate([f[0:1], f_v[1:]], axis=0)
-        if band.north_rank is None:
-            f_v = jnp.concatenate([f_v[:-1], f[-1:]], axis=0)
+        if spmd_pm is not None:
+            # SPMD: restore the legacy pole edge-copy at the south / north pole
+            # bands only (interior cuts keep the cross-cut average). south then
+            # north, sequenced so a single band reproduces serial at both ends.
+            south_m, north_m = spmd_pm
+            f_v = jnp.where(
+                south_m, jnp.concatenate([f[0:1], f_v[1:]], axis=0), f_v)
+            f_v = jnp.where(
+                north_m, jnp.concatenate([f_v[:-1], f[-1:]], axis=0), f_v)
+        else:
+            # MPI: static per-rank pole answer (None ⟺ this rank owns the pole).
+            if band.south_rank is None:
+                f_v = jnp.concatenate([f[0:1], f_v[1:]], axis=0)
+            if band.north_rank is None:
+                f_v = jnp.concatenate([f_v[:-1], f[-1:]], axis=0)
         return f_v
     return interp_cell_to_vface(f)
 
@@ -439,15 +570,14 @@ def gradient_x_cgrid(
     # Face j sits between cell (j-1) mod n_lon (west) and cell j (east),
     # matching the divergence convention (cell j: west=face j, east=face j+1).
     # Gradient at face j: (f[j] - f[(j-1) mod n_lon]) / dx
-    f_west = jnp.roll(f, 1, axis=1)   # f[:, (j-1) % n_lon]
-    df = f - f_west  # shape (n_lat, n_lon, ...)
-
-    # Wrap: face at j=n_lon equals face at j=0
-    df_wrap = df[..., 0:1] if f.ndim == 2 else df[:, 0:1, :]
-    if f.ndim == 2:
-        df_full = jnp.concatenate([df, df_wrap], axis=1)
-    else:
-        df_full = jnp.concatenate([df, df_wrap], axis=1)
+    # Pad-then-diff: a lon halo (local wrap, or the 2-D ring exchange) then
+    # the compact zonal difference over the padded cells.  df_full[j] =
+    # f[j] - f[j-1] at u-face j; n_lon+1 faces (the last the periodic
+    # closure).  ndim-agnostic (lon = axis 1).  Bit-identical to the former
+    # ``roll(f,1)`` + wrap-column concat at proc_lon==1, and spans lon
+    # partition cuts under a 2-D split.
+    f_pad = pad_lon_cgrid(f, halo=1)
+    df_full = f_pad[:, 1:] - f_pad[:, :-1]
 
     # dx at u-point.  On a regular lat-lon grid (dlat > 0), use the
     # legacy 1D path for bit-exact backward compat.  On a tripolar
@@ -502,10 +632,16 @@ def gradient_y_cgrid(
     # ends (== the historical south=0 / pole pad), and the fold overwrite
     # reproduces the old tripolar north row.
     from legoesm.grids.halo_latlon import (
+        get_meridionally_flat,
         pad_halo_latlon,
         pad_halo_latlon_3d,
         zero_polar_lat_ends,
     )
+    # Oceananigans `Flat`-y topology: δy ≡ 0 (no meridional gradient ever).
+    if get_meridionally_flat():
+        n_lat = f.shape[0]
+        out_shape = (n_lat + 1,) + f.shape[1:]
+        return jnp.zeros(out_shape, dtype=f.dtype)
     if f.ndim == 2:
         f_padded = pad_halo_latlon(f, halo=1)
         # Strip the lon halo — gradient_y only needs the lat halo.
@@ -634,11 +770,12 @@ def divergence_cgrid(
         net_zonal = (u_east - u_west) * face_dy  # preserve arithmetic order
 
     # --- Meridional face length (zonal extent of v-face) ---
-    # On a regular lat-lon grid this is the 1D array
-    # R*cos(lat_v)*dlon; on a tripolar grid (dlat==0 sentinel) it
-    # is the 2D array grid.dx_v.
-    if is_tripolar(grid):
-        face_dx = grid.dx_v  # (n_lat+1, n_lon) — 2D for tripolar
+    # On a lean lat-lon grid this is the 1D array R*cos(lat_v)*dlon; a rich
+    # geometry that carries an explicit 2D stored metric (tripolar, beta-plane,
+    # spherical) reads grid.dx_v directly (#514) — the recompute reconstructs
+    # cos(grid.lat_v), which is WRONG on a Cartesian beta-plane.
+    if reads_stored_vface_metric(grid):
+        face_dx = grid.dx_v  # (n_lat+1, n_lon) — 2D stored metric
     else:
         # v-face latitudes at ALL n_lat+1 local faces, cell-pad-first:
         # pad the CELL-CENTRE latitudes by one row through the
@@ -652,15 +789,8 @@ def divergence_cgrid(
         # exactly 0 (no flux through the pole), which also discards the
         # pole-side constant ghost; bit-identical to the historical
         # jnp.pad(cos_interior, (1, 1)) on the local backend.
-        from legoesm.grids.halo_latlon import (
-            pad_with_pole_bc_lat,
-            zero_polar_lat_ends,
-        )
-        lat_pad = pad_with_pole_bc_lat(
-            grid.lat, halo=1, south_value=0.0, north_value=0.0,
-        )
-        lat_v = 0.5 * (lat_pad[:-1] + lat_pad[1:])  # (n_lat+1,)
-        cos_lat_v = zero_polar_lat_ends(jnp.cos(lat_v))
+        from legoesm.grids.halo_latlon import zero_polar_lat_ends
+        cos_lat_v = zero_polar_lat_ends(_vface_cos_lat_core(grid))
         face_dx = grid.radius * cos_lat_v * grid.dlon  # (n_lat+1,)
 
     # North face flux - south face flux
@@ -682,6 +812,12 @@ def divergence_cgrid(
         else:
             net_merid = (v_north * fd[1:, :, jnp.newaxis]
                          - v_south * fd[:-1, :, jnp.newaxis])
+
+    # Oceananigans `Flat`-y topology: the meridional flux divergence is 0
+    # (δy(Ay·v) ≡ 0), so η responds only to the zonal transport divergence.
+    from legoesm.grids.halo_latlon import get_meridionally_flat
+    if get_meridionally_flat():
+        net_merid = jnp.zeros_like(net_zonal)
 
     # Cell area
     area = grid.area  # (n_lat, n_lon)
@@ -725,9 +861,13 @@ def laplacian_cgrid(
     grad_y = gradient_y_cgrid(f, grid)  # (n_lat+1, n_lon[, nlev])
 
     if mask is not None:
-        # Zero gradient at land-ocean boundaries
-        u_mask = mask * jnp.roll(mask, 1, axis=1)
-        u_mask = jnp.concatenate([u_mask, u_mask[:, 0:1]], axis=1)
+        # Zero gradient at land-ocean boundaries.  u-face j is active iff both
+        # adjacent cells (j-1, j) are wet — pad-then-product over the lon halo
+        # (local wrap / 2-D ring) so the west cell at j=0 is the true neighbour
+        # under a 2-D split.  Bit-identical to ``mask*roll(mask,1)`` + wrap
+        # concat at proc_lon==1; n_lon+1 faces (last = periodic closure).
+        mask_pad = pad_lon_cgrid(mask, halo=1)
+        u_mask = mask_pad[:, 1:] * mask_pad[:, :-1]
         # Boundary: wall BC on regular lat-lon; fold on tripolar.
         v_mask_interior = mask[:-1] * mask[1:]
         v_mask = pad_ns_scalar(v_mask_interior, grid)
@@ -813,37 +953,77 @@ def curl_vertex_cgrid(
             south_value=-math.pi / 2.0, north_value=math.pi / 2.0,
         )
         sin_ext = jnp.sin(lat_ext_q)
-        south_is_pole_q, north_is_pole_q = lat_ends_are_poles()
-        if south_is_pole_q:
-            sin_ext = jnp.concatenate(
-                [jnp.full((1,), -1.0, dtype=sin_ext.dtype), sin_ext[1:]],
-            )
-        if north_is_pole_q:
-            sin_ext = jnp.concatenate(
-                [sin_ext[:-1], jnp.full((1,), 1.0, dtype=sin_ext.dtype)],
-            )
+        # Restore the EXACT pole sin (±1.0) at PHYSICAL poles.  Under the
+        # single-program SPMD backend ``lat_ends_are_poles()`` is (True, True) on
+        # every band, so the static ``if`` would clamp every band's INTERIOR cut
+        # (the SPMD-blind bug) — select the clamp DATA-dependently per band via
+        # ``axis_index`` there (function-scope import: core -> parallel).
+        from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+        _spmd_pm = spmd_pole_end_masks()
+        sin_ext_s = jnp.concatenate(
+            [jnp.full((1,), -1.0, dtype=sin_ext.dtype), sin_ext[1:]])
+        sin_ext_n = jnp.concatenate(
+            [sin_ext[:-1], jnp.full((1,), 1.0, dtype=sin_ext.dtype)])
+        if _spmd_pm is not None:
+            south_mask, north_mask = _spmd_pm
+            sin_ext = jnp.where(south_mask, sin_ext_s, sin_ext)
+            sin_ext = jnp.where(north_mask, sin_ext_n, sin_ext)
+        else:
+            south_is_pole_q, north_is_pole_q = lat_ends_are_poles()
+            if south_is_pole_q:
+                sin_ext = sin_ext_s
+            if north_is_pole_q:
+                sin_ext = sin_ext_n
         A_vertex_full = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
+        # Prefer the grid's STORED dual-cell area when present (the C-grid ocean
+        # geometries carry ``area_q``).  On a spherical lat-lon grid the stored
+        # ``area_q`` is computed by the SAME ``R²·dlon·|Δsin(lat)|`` formula
+        # (create_latlon_cgrid_geometry: "Matches curl_vertex_cgrid") and agrees
+        # with the recompute above to ~1e-7 relative — NOT bit-exact: ``area_q`` is
+        # built in float64 while this recompute does ``sin(grid.lat)`` on the stored
+        # float32 ``lat``, losing precision in ``Δsin`` near the equator.  Reading
+        # ``area_q`` is thus a small ACCURACY IMPROVEMENT on spherical grids (any
+        # curl/vorticity regression pinned tighter than ~1e-7 will shift).  On the
+        # CARTESIAN beta-plane the recompute COLLAPSES
+        # to ~0 in the interior — the pseudo-``lat`` is pinned to 0 for the
+        # divergence/gradient metric consistency, so ``Δsin(lat)=0`` and the
+        # ``safe_A`` pole guard then divides by 1.0, blowing the vorticity (and the
+        # vector Laplacian/biharmonic) up ~1e8×.  The stored ``area_q = dx·dy`` is
+        # correct there.  The bare ``LatLonGrid`` (atmos dycore, plane tests) has no
+        # ``area_q`` -> recompute unchanged.
+        if hasattr(grid, "area_q"):
+            A_vertex_full = jnp.abs(grid.area_q[:, 0]).astype(A_vertex_full.dtype)  # noqa: N806
         dy_edge = R * dlat
         _tripolar_curl = False
 
-    # v contribution: circulation from v-edges (east minus west).
-    v_east = v
-    v_west = jnp.roll(v, 1, axis=1)
+    # v contribution: circulation from v-edges (east minus west).  Each
+    # branch builds the full n_lon+1 vertex-column ``dv_circ_full`` HERE (no
+    # shared wrap-column append later), so the regular path can pad-then-diff
+    # through the lon halo and span 2-D longitude partition cuts.
     if _tripolar_curl:
-        # Per-face dy: v_east * dy_east - v_west * dy_west
+        # Tripolar per-face dy.  Local roll + wrap-column append (the
+        # tripolar cap's 2-D-lon-split fold is a separate follow-up; this is
+        # correct at proc_lon==1 / band, as before).
+        v_west = jnp.roll(v, 1, axis=1)
         dy_east = dy_v_2d
         dy_west = jnp.roll(dy_v_2d, 1, axis=1)
         if is_3d:
             dy_east = dy_east[:, :, jnp.newaxis]
             dy_west = dy_west[:, :, jnp.newaxis]
-        dv_circ = v_east * dy_east - v_west * dy_west
+        dv_circ = v * dy_east - v_west * dy_west
+        dv_circ_full = jnp.concatenate([dv_circ, dv_circ[:, 0:1]], axis=1)
     else:
         # Meridional edge length at vertex rows: variable-dy safe.
         dy_h = grid.dy * 0.5                              # (n_lat,) cell heights
         dy_edge_interior = 0.5 * (dy_h[1:] + dy_h[:-1])    # (n_lat-1,)
         dy_edge = jnp.pad(dy_edge_interior, (1, 1), mode='edge')  # (n_lat+1,)
         bcast_lat = (slice(None),) + (jnp.newaxis,) * (v.ndim - 1)
-        dv_circ = (v_east - v_west) * dy_edge[bcast_lat]
+        # Pad-then-diff: a lon halo (local wrap / 2-D ring exchange) then the
+        # compact vertex difference (v[j]-v[j-1]) over padded v => n_lon+1
+        # vertex columns directly.  Bit-identical to ``roll(v,1)`` + wrap-
+        # column concat at proc_lon==1; spans lon cuts under a 2-D split.
+        v_pad = pad_lon_cgrid(v, halo=1)
+        dv_circ_full = (v_pad[:, 1:] - v_pad[:, :-1]) * dy_edge[bcast_lat]
 
     # u contribution: u[i-1, j]*dx[i-1] - u[i, j]*dx[i].
     # Pad with zeros at poles along the lat axis (axis 0).  Wall BC
@@ -899,9 +1079,9 @@ def curl_vertex_cgrid(
         bcast = (slice(None),) + (jnp.newaxis,) * (u.ndim - 1)
         du_circ = (u_south * dx_south[bcast] - u_north * dx_north[bcast])
 
-    # Append periodic wrap column to dv_circ.
-    dv_circ_full = jnp.concatenate([dv_circ, dv_circ[:, 0:1]], axis=1)
-
+    # ``dv_circ_full`` (n_lon+1 vertex columns) is built per-branch in the v
+    # contribution above (pad-then-diff for the regular path, roll + wrap
+    # append for tripolar), so no shared wrap-column append is needed here.
     circ = du_circ + dv_circ_full
 
     # Vorticity at ALL local vertex rows.  ``circ`` already spans the
@@ -1005,7 +1185,7 @@ def gradient_curl_to_v(
     face row on the rank that owns the tripolar seam — bit-identical to
     the old ``pad_ns_scalar`` output on the local backend.
     """
-    if is_tripolar(grid):
+    if reads_stored_vface_metric(grid):
         # Full 2D dx_v at ALL n_lat+1 v-faces.  The band slice already
         # carries the exact global metric at partition-cut rows
         # ([s:e+1]).  Floor the denominator like gradient_y_cgrid
@@ -1021,14 +1201,9 @@ def gradient_curl_to_v(
         # divergence_cgrid): at an interior MPI band cut the ghost row
         # is the neighbour's true edge cell latitude via the AD-safe
         # sendrecv, so the end faces divide by the exact serial metric.
-        from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
         R = grid.radius
         dlon = grid.dlon
-        lat_pad = pad_with_pole_bc_lat(
-            grid.lat, halo=1, south_value=0.0, north_value=0.0,
-        )
-        lat_v = 0.5 * (lat_pad[:-1] + lat_pad[1:])  # (n_lat+1,)
-        cos_lat_v = jnp.cos(lat_v)
+        cos_lat_v = _vface_cos_lat_core(grid)
         # Floor only guards the ghost-derived pole entries (overwritten
         # below); interior/cut faces are O(1e5 m) — bit-identical.
         dx_v = jnp.maximum(R * cos_lat_v * dlon, 1e-30)  # (n_lat+1,)
@@ -1181,12 +1356,17 @@ def compute_vertex_mask(land_mask: jnp.ndarray, grid=None) -> jnp.ndarray:
     # mask are m_pad[i] / m_pad[i+1].
     m_pad = pad_with_pole_bc_lat(
         land_mask, halo=1, south_value=0.0, north_value=0.0,
-    )  # (n_lat+2, n_lon)
-    m_sw_pad = jnp.roll(m_pad, 1, axis=1)  # m_pad[:, j-1]
-    full = m_pad[:-1] * m_pad[1:] * m_sw_pad[:-1] * m_sw_pad[1:]
-
-    # Append periodic wrap column
-    full = jnp.concatenate([full, full[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1)
+    )  # (n_lat+2, n_lon[_local])
+    # LON halo on the lat-padded mask (local wrap / 2-D ring), then the
+    # 4-cell vertex product over padded cells.  ``east``/``west`` are the
+    # cell (j) / cell (j-1) columns at each vertex; vertex (i,j) = product of
+    # the four surrounding cells.  Builds the full n_lon+1 vertex columns
+    # directly (no wrap-column append) — bit-identical to ``roll(m_pad,1)`` +
+    # wrap concat at proc_lon==1; spans lon partition cuts under a 2-D split.
+    m_pad_lon = pad_lon_cgrid(m_pad, halo=1)  # (n_lat+2, n_lon_local+2)
+    east = m_pad_lon[:, 1:]                    # cell j   at each vertex column
+    west = m_pad_lon[:, :-1]                   # cell j-1 at each vertex column
+    full = east[:-1] * east[1:] * west[:-1] * west[1:]  # (n_lat+1, n_lon+1)
 
     # Wall BC at the physical pole vertex rows only (backend-aware).
     full = zero_polar_lat_ends(full)

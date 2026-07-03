@@ -52,6 +52,67 @@ class TracerTransportConfig(NamedTuple):
     time_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
 
 
+def advective_tracer_tendency(q, u, v, grid, vertical_fn, *, hyperdiff_coeff=0.0):
+    """Advective-form tracer tendency on the cubed sphere, batched over tracers.
+
+    The SHARED cubed-sphere tracer-advection core: the moisture/tracer transport
+    numerics live in ONE place, reused by the prescribed-wind
+    :class:`TracerTransportModel` (:func:`tracer_tendencies`) AND the FV3
+    hydrostatic dycore's moist tracer transport (``fv3_hydrostatic_tendencies``).
+    Advective (not flux) form, consistent with how the FV3 hydrostatic core
+    transports temperature.
+
+    Parameters
+    ----------
+    q : jax.Array, shape ``(6, n, n, nlev, n_tracers)``
+        Tracer mixing ratios, packed along a trailing tracer axis.
+    u, v : jax.Array, shape ``(6, n, n, nlev)``
+        Cell-centre grid-aligned wind components (shared by all tracers).
+    grid : CubedSphereGrid
+    vertical_fn : callable
+        Per-tracer vertical advection of a single ``(6, n, n, nlev)`` field with
+        the caller's vertical velocity bound, e.g.
+        ``lambda q1: vertical_advection(q1, sigma_dot, sigma_coord)`` (sigma) or
+        ``lambda q1: vertical_advection_hybrid(q1, mass_flux, p_s, sigma_coord)``
+        (hybrid).  ``vmap``-ped over the trailing tracer axis here.
+    hyperdiff_coeff : float, optional
+        Biharmonic hyperdiffusion coefficient (>0 enables it); shares the single
+        batched halo pad with the gradient stencils.
+
+    Returns
+    -------
+    jax.Array, shape ``(6, n, n, nlev, n_tracers)``
+        ``-(u·∇x q + v·∇y q) + vertical + hyperdiff``.  The tracer axis is folded
+        into the level axis so the cubed-sphere halo + gradient/hyperdiff
+        stencils run in a SINGLE ``pad_halo_4d`` exchange instead of one per
+        tracer (multi-GPU MPI exchange dominates these per-level operators).
+    """
+    n_tracers = q.shape[-1]
+    nlev = q.shape[-2]
+    q_flat = q.reshape(*q.shape[:3], nlev * n_tracers)  # (6, n, n, nlev*n_tracers)
+
+    # Pre-pad q_flat ONCE and feed it to gradient_x_3d / gradient_y_3d (and the
+    # hyperdiffusion inner Laplacian) via ``padded=`` — halves the halo cost.
+    _dg = getattr(grid, "duogrid", None)
+    _offsets = None if _dg is not None else grid.halo_interp_offsets
+    q_pad = pad_halo_4d(q_flat, interp_offsets=_offsets, duogrid=_dg)
+
+    dq_dx = gradient_x_3d(q_flat, grid, padded=q_pad).reshape(*q.shape)
+    dq_dy = gradient_y_3d(q_flat, grid, padded=q_pad).reshape(*q.shape)
+    horiz = -(u[..., None] * dq_dx + v[..., None] * dq_dy)
+
+    if hyperdiff_coeff > 0:
+        horiz = horiz + hyperdiffusion_3d(
+            q_flat, grid, hyperdiff_coeff, padded=q_pad,
+        ).reshape(*q.shape)
+
+    # Vertical advection — local stencil along the level axis, no halo cost.
+    # vmap over the trailing tracer axis (vertical velocity captured in the
+    # closure) so JAX emits a single batched kernel.
+    vert = jax.vmap(vertical_fn, in_axes=-1, out_axes=-1)(q)
+    return horiz + vert
+
+
 def tracer_tendencies(
     state: TracerState,
     grid: CubedSphereGrid,
@@ -86,51 +147,21 @@ def tracer_tendencies(
     """
     t = state.time.data  # scalar time
     q = state.tracers.data  # (6, n, n, nlev, n_tracers)
-    n_tracers = q.shape[-1]
 
     # Get prescribed winds at current time
     u, v, sigma_dot = wind_fn(t, grid, sigma_coord)  # (6,n,n,nlev), (6,n,n,nlev+1)
 
-    # Fold the tracer axis into the level axis so the cubed-sphere halo+stencil
-    # operators (``gradient_x_3d``, ``gradient_y_3d``, ``hyperdiffusion_3d``)
-    # process all tracers in a single ``pad_halo_4d`` call instead of issuing
-    # one halo exchange per tracer under vmap.  Multi-GPU MPI exchange dominates
-    # the cost of these per-level operators, so collapsing n_tracers separate
-    # exchanges into one is a substantial savings under multi-GPU sharding.
-    nlev = q.shape[-2]
-    q_flat = q.reshape(*q.shape[:3], nlev * n_tracers)  # (6, n, n, nlev*n_tracers)
-
-    # Pre-pad ``q_flat`` once and feed it to both gradient_x_3d and
-    # gradient_y_3d via ``padded=``.  Halves the gradient halo cost
-    # (1 MPI exchange instead of 2 on the same input).  The pad is
-    # also reused inside ``hyperdiffusion_3d``'s inner Laplacian when
-    # hyperdiffusion is enabled.
-    _dg_q = getattr(grid, 'duogrid', None)
-    _offsets_q = None if _dg_q is not None else grid.halo_interp_offsets
-    _q_flat_pad = pad_halo_4d(q_flat, interp_offsets=_offsets_q, duogrid=_dg_q)
-
-    dq_dx_flat = gradient_x_3d(q_flat, grid, padded=_q_flat_pad)
-    dq_dy_flat = gradient_y_3d(q_flat, grid, padded=_q_flat_pad)
-    dq_dx = dq_dx_flat.reshape(*q.shape)  # (6, n, n, nlev, n_tracers)
-    dq_dy = dq_dy_flat.reshape(*q.shape)
-    horiz_adv = -(u[..., None] * dq_dx + v[..., None] * dq_dy)
-
-    if config.hyperdiff_coeff > 0:
-        hyper_flat = hyperdiffusion_3d(
-            q_flat, grid, config.hyperdiff_coeff, padded=_q_flat_pad,
-        )
-        horiz_adv = horiz_adv + hyper_flat.reshape(*q.shape)
-
-    # Vertical advection — local stencil along axis -1, no halo cost.  Use
-    # ``jax.vmap`` over the tracer axis (with sigma_dot/sigma_coord captured
-    # in the closure) so JAX produces a single batched kernel rather than
-    # n_tracers unrolled stencils.
+    # Delegate to the SHARED cubed-sphere advective-tracer core (one batched
+    # halo pad for the horizontal stencils; per-tracer vertical advection with
+    # the prescribed sigma_dot bound).  Same numerics now used by the FV3
+    # hydrostatic dycore's moist tracer transport.
     def _vert_adv_one(q_one):
         return vertical_advection(q_one, sigma_dot, sigma_coord)
 
-    vert_adv = jax.vmap(_vert_adv_one, in_axes=-1, out_axes=-1)(q)
-
-    dq_dt = horiz_adv + vert_adv  # (6, n, n, nlev, n_tracers)
+    dq_dt = advective_tracer_tendency(
+        q, u, v, grid, _vert_adv_one,
+        hyperdiff_coeff=config.hyperdiff_coeff,
+    )  # (6, n, n, nlev, n_tracers)
 
     # Return same pytree structure as state
     return TracerState(

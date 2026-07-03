@@ -285,6 +285,41 @@ def test_scheme_slot_contract():
         assert _PLANE_MIN_TRACER_SLOTS[scheme] == 9, scheme
 
 
+def test_ice_condensate_reaches_rrtmgp_iwp():
+    """Morrison-style ice (q_i>0) must reach RRTMGP as a NONZERO ice water path,
+    and the ice number (N_i) must drive the M2005 effective radius rather than
+    the constant fallback.  This locks the q_ice -> IWP -> rrtmgp end of the
+    chain (the array-slot grid tests assert n_ice, not q_ice/IWP)."""
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+        compute_cloud_properties,
+    )
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    from legoesm import constants
+
+    ncol, nlev = 4, 6
+    T = jnp.full((ncol, nlev), 250.0)        # below freezing: ice regime
+    p = jnp.full((ncol, nlev), 5.0e4)
+    q_v = jnp.full((ncol, nlev), 1.0e-4)
+    dp = jnp.full((ncol, nlev), 1.0e4)
+    q_i = jnp.full((ncol, nlev), 5.0e-4)
+    cfg = CloudConfig(scheme="sundqvist")
+
+    # q_i with NO number -> IWP nonzero (= q_i*dp/g), constant-fallback r_eff.
+    kw0 = compute_cloud_properties(
+        T=T, p_full=p, q_v=q_v, dp=dp, config=cfg, q_ice=q_i).to_rrtmg_kwargs()
+    assert float(jnp.min(kw0["cloud_path_ice"])) > 0.0
+    exp_iwp = 5.0e-4 * 1.0e4 / constants.g
+    assert float(jnp.max(kw0["cloud_path_ice"])) == pytest.approx(exp_iwp, rel=1e-6)
+
+    # Adding the ice NUMBER changes the ice effective radius (M2005 PSD active).
+    kw1 = compute_cloud_properties(
+        T=T, p_full=p, q_v=q_v, dp=dp, config=cfg, q_ice=q_i,
+        n_ice=jnp.full((ncol, nlev), 1.0e5)).to_rrtmg_kwargs()
+    assert bool(jnp.all(jnp.isfinite(kw1["cloud_r_eff_ice"])))
+    assert float(jnp.max(jnp.abs(
+        kw1["cloud_r_eff_ice"] - kw0["cloud_r_eff_ice"]))) > 0.0
+
+
 def test_number_extraction_ad_connected(monkeypatch):
     """The slot-6/8 extraction must be AD-connected (not a stop-gradient): with
     a backend whose heating depends on n_cloud, grad of the radiation tendency

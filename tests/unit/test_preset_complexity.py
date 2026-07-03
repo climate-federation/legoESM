@@ -54,3 +54,21 @@ def test_ocean_config_is_accepted_by_make_ocean(level) -> None:
     assert callable(make_ocean(cfg.ocean_config))
     # ocean_mode is the decorative log label, kept in the documented domain
     assert cfg.ocean_mode in ("slab", "two_layer")
+
+
+def test_snow_albedo_feedback_override_on_slab_and_multilayer() -> None:
+    """run_coupled --snow-albedo-feedback enables the lat-varying veg + snow
+    land albedo by ``_replace`` on the preset's land_config (the fix for the
+    too-dark snow-covered land albedo).  Verify it works for BOTH the slab
+    bucket (LandConfig) and the multilayer (MultiLayerLandConfig) land."""
+    from legoesm.driver.coupled_config import PRESETS
+
+    for preset_name in ("slab_simple", "slab_richards"):
+        cfg = PRESETS[preset_name]()
+        # presets ship with the feedback OFF (constant 0.2 land albedo)
+        assert cfg.land_config.snow_albedo_feedback is False
+        # the run_coupled flag flips it on without touching land_mode
+        cfg_on = cfg._replace(
+            land_config=cfg.land_config._replace(snow_albedo_feedback=True))
+        assert cfg_on.land_config.snow_albedo_feedback is True
+        assert cfg_on.land_mode == cfg.land_mode

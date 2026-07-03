@@ -36,8 +36,40 @@ import jax.numpy as jnp
 
 from legoesm import constants
 
-# NEMO tramle.F90 vertical-structure factor 5/21.
+# --- Fox-Kemper MLE fixed constants (NEMO 5.0.1 TRA/tramle.F90) ---
+# Vertical-structure factor 5/21 in mu(z) = (1-zeta^2)(1 + 5/21 zeta^2).
 _R5_21 = 5.0 / 21.0
+# Reference horizontal scale in the nn_mle=1 coefficient
+# rc_f = rn_ce / (RC_F_LENGTH_SCALE_M * f0); NEMO hard-codes 5 km (= "5.e3").
+# Not a tunable knob (it is the fixed normalising length of the FK closure); the
+# efficiency rn_ce (MLEConfig.ce) is the tunable scaling.
+_RC_F_LENGTH_SCALE_M = 5.0e3
+# Default MLE-MLD density threshold rn_rho_c_mle [kg/m^3] (ORCA1 RUN_REF: 0.01).
+# Mirrors MLEConfig.rho_c_mle so the standalone helper's signature default is a
+# named reference (the Config field is the single source of truth at call sites).
+_RHO_C_MLE_DEFAULT = 0.01
+
+__param_spec__ = {
+    "MLEConfig": {
+        "scheme_key": "ocean.lat.mle",
+        "excluded": {
+            # Measurement/closure conventions of the FK MLD criterion (a fixed
+            # reference latitude, density-threshold and reference depth define the
+            # diagnostic — not free training knobs; changing them changes WHICH
+            # mixed layer is detected, not the eddy efficiency).
+            "lat_ref_deg": "convention: fixed reference latitude for constant f0 (nn_mle=1)",
+            "rho_c_mle": "convention: MLE-MLD density criterion (defines the diagnosed ML)",
+            "ref_depth_m": "convention: reference depth for the MLD density criterion",
+            # Numerics guards: grid-scale cap and the optional bolus-CFL clamp.
+            "max_grid_scale_m": "numerics: min(111 km, e1u) grid-scale cap",
+            "bolus_cfl_cap": "numerics: optional |w_mle| Courant clamp (0 = off = oracle)",
+        },
+        "params": {
+            # The single FK efficiency knob (NEMO rn_ce); typical 0.06-0.08.
+            "ce": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Fox-Kemper, Ferrari & Hallberg (2008)", "shape": None},
+        },
+    },
+}
 
 
 class MLEConfig(NamedTuple):
@@ -96,7 +128,33 @@ def mle_coefficient(ce: float, lat_ref_deg: float) -> float:
     # here triggers ConcretizationTypeError under jit; math.sin keeps it a plain
     # Python float.
     f0 = 2.0 * float(constants.Omega) * math.sin(math.radians(lat))
-    return float(ce) / (5.0e3 * f0)
+    return float(ce) / (_RC_F_LENGTH_SCALE_M * f0)
+
+
+def mle_streamfunction_magnitude(
+    rc_f: float,
+    H_face: jnp.ndarray,
+    face_width: jnp.ndarray,
+    dbm_face: jnp.ndarray,
+    cap: jnp.ndarray,
+) -> jnp.ndarray:
+    """NEMO nn_mle=1 face streamfunction MAGNITUDE [m^3/s] (#518 item 9).
+
+    ``psim = rc_f · H_face² · face_width · dbm_face · cap``
+
+    The single grid-agnostic product shared by the lat-lon ``psim_u`` / ``psim_v``
+    and the MPAS ``psim_e``.  Each grid passes its OWN face operands:
+
+    * lat-lon u-face: ``face_width = e2u``, ``dbm_face = (bm_E-bm_W)/e1u``,
+      ``cap = min(max_grid_scale_m, e1u)`` (and the v-face analogue).
+    * MPAS edge:     ``face_width = dvEdge``, ``dbm_face = (bm[c2]-bm[c1])/dcEdge``,
+      ``cap = min(max_grid_scale_m, dcEdge)``.
+
+    The multiply is the same left-to-right ``rc_f * H * H * width * dbm * cap``
+    order as every original site, so the result is byte-identical.  ``H_face`` is
+    the face mixed-layer depth [m]; the square keeps the FK scaling.
+    """
+    return rc_f * H_face * H_face * face_width * dbm_face * cap
 
 
 def mle_vertical_structure(gdepw_over_H: jnp.ndarray) -> jnp.ndarray:
@@ -117,7 +175,7 @@ def mle_mld_and_buoyancy(
     wet_cell: jnp.ndarray,
     *,
     z_centers: jnp.ndarray,
-    rho_c_mle: float = 0.01,
+    rho_c_mle: float = _RHO_C_MLE_DEFAULT,
     ref_depth_m: float = 10.0,
     rho0: float = constants.rho_ocean,
     grav: float = constants.g,

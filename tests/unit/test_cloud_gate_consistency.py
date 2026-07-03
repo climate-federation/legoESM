@@ -13,9 +13,13 @@ droplet-number coupling bug pinned in ``test_radiation_number_coupling``):
    clouds, and the AIMIP config builder derives ``include_clouds`` from
    ``cloud_scheme`` so its default actually couples clouds to radiation.
 
-2. ``PhysicsPipeline(dynamic_albedo=True)`` was a silent no-op —
-   ``compute_radiation_core`` never reads the flag, so a user enabling it
-   silently got the constant ocean/ice albedo.  It now fails loudly.
+2. ``PhysicsPipeline(dynamic_albedo=True)`` was once a silent no-op —
+   ``compute_radiation_core`` never read the flag, so a user enabling it
+   silently got the constant ocean/ice albedo.  It is now WIRED: the
+   radiation closure computes the Briegleb (1992) zenith-dependent ocean
+   albedo (``if self.dynamic_albedo:`` → ``legoesm.surface_albedo.
+   ocean_albedo``).  The guard test now verifies the flag constructs and is
+   carried (not that it raises).
 """
 from __future__ import annotations
 
@@ -105,21 +109,29 @@ class TestAIMIPDerivesCloudGate:
 
 
 class TestDynamicAlbedoGuard:
-    def test_dynamic_albedo_true_raises(self):
-        """Enabling the unwired flag must fail loudly, not silently no-op."""
+    def test_dynamic_albedo_true_constructs_and_is_carried(self):
+        """dynamic_albedo=True is now WIRED (Briegleb 1992 ocean albedo in the
+        radiation closure), so it must construct and carry the flag — NOT a
+        silent no-op and NOT a raise."""
         from legoesm.driver.physics_pipeline import PhysicsPipeline
 
-        with pytest.raises(NotImplementedError, match="dynamic_albedo"):
-            PhysicsPipeline(
-                adapter=None,
-                sigma_full=None,
-                sigma_half=None,
-                dsigma=None,
-                convection_fn=None,
-                convection_config=None,
-                radiation_fn=None,
-                dynamic_albedo=True,
-            )
+        pipe = PhysicsPipeline(
+            adapter=None,
+            sigma_full=None,
+            sigma_half=None,
+            dsigma=None,
+            convection_fn=None,
+            convection_config=None,
+            radiation_fn=None,
+            dynamic_albedo=True,
+        )
+        assert pipe.dynamic_albedo is True
+        # The wiring proof: the pipeline source reads the flag to select the
+        # zenith-dependent ocean albedo (guards against a future silent no-op).
+        import inspect
+        src = inspect.getsource(PhysicsPipeline)
+        assert "if self.dynamic_albedo:" in src
+        assert "ocean_albedo" in src
 
     def test_dynamic_albedo_false_constructs(self):
         """The default (False) path must still build without error."""

@@ -49,9 +49,6 @@ if _PROJECT_ROOT not in sys.path:
 import jax
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.runtime.backend import ensure_metal_or_fallback
-ensure_metal_or_fallback()
-
 import jax.numpy as jnp
 import numpy as np
 from scipy.spatial import cKDTree
@@ -181,13 +178,15 @@ class TestCase:
 #       prerequisites and the DCMIP 2025 NH cases (which are partial
 #       coverage of the canonical DCMIP 2012 set, see catalog).
 #
-# See ``docs/dycore_validation_catalog.md`` for the canonical inventory.
+# See ``docs/validation/dycore_validation_catalog.md`` for the canonical inventory.
 _CASE_FAMILIES: dict[str, frozenset[str]] = {
     # Williamson SW (W1=cosine_bell, W2, W5 wired pre-M1; W6 added M1.a)
     "williamson2":        frozenset({"sw", "hughes"}),
     "williamson5":        frozenset({"sw", "hughes"}),
     "williamson6":        frozenset({"sw", "hughes"}),
     "cosine_bell":        frozenset({"sw", "hughes"}),
+    "cosine_bell_a0":     frozenset({"sw"}),  # issue 504 alpha=0 diagnostic (not in curated hughes set)
+    "colliding_modons":   frozenset({"sw"}),  # issue 521 Lin et al. (2017), cubed_sphere only
     # Hydrostatic dry
     "baroclinic":         frozenset({"hydro", "hughes"}),  # canonical J-W
     "rotated_baroclinic": frozenset({"hydro", "dcmip2008", "hughes"}),
@@ -256,6 +255,11 @@ def _build_test_matrix() -> list[TestCase]:
             ("williamson2", 5, 1, {"test_num": 2}),
             ("williamson5", 15, 1, {"test_num": 5}),
             ("cosine_bell", 12, 1, {}),
+            # issue 504: alpha=0 advects the bell zonally along the equator,
+            # crossing only cube-face EDGES (not corners) — isolates whether
+            # the cube distortion originates in the corner regions.  Matches
+            # the FV3 test_cases.F90 namelist default ``alpha = 0.0``.
+            ("cosine_bell_a0", 12, 1, {"alpha": 0.0}),
         ]:
             matrix.append(TestCase(
                 "shallow_water", case, g, res[g], "none", dur, quick, dict(kw)))
@@ -265,7 +269,7 @@ def _build_test_matrix() -> list[TestCase]:
         # analytic edge-/face-midpoint wind init at non-trivial lon/lat
         # offsets (W6 winds depend on both lon and lat, unlike W2/W5),
         # so they are deferred to M1.b.  See
-        # ``docs/dycore_validation_catalog.md``.
+        # ``docs/validation/dycore_validation_catalog.md``.
         # new_test_dycores iter-24: extend W6 to cube (cubed_sphere)
         # via the edge-midpoint analytic init wired in run_shallow_water.
         # new_test_dycores iter-25: also extend W6 to lat-lon (C-grid)
@@ -277,6 +281,15 @@ def _build_test_matrix() -> list[TestCase]:
             matrix.append(TestCase(
                 "shallow_water", "williamson6", g, res[g], "none", 14, 1,
                 {"test_num": 6}))
+        # Colliding modons (#521, Lin et al. 2017) — non-rotating two-soliton
+        # collision; wired for cubed_sphere (FV3 case 8) via the edge-midpoint
+        # analytic init.  Full return-to-IC is ~100 days; quick smoke = 2 days.
+        # Other grids: IC helpers exist in tests/test_cases/colliding_modons.py
+        # but the non-rotating run path is not yet wired (follow-up).
+        if g == "cubed_sphere":
+            matrix.append(TestCase(
+                "shallow_water", "colliding_modons", g, res[g], "none", 100, 1,
+                {"test_num": 8}))
 
     # --- Hydrostatic: all grids, sigma + hybrid ---
     for g in GRID_TYPES:
@@ -570,6 +583,7 @@ from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
     cdgrid_div_damp_cube as _div_damp_cube,
     cdgrid_hyperdiff_cube as _hyperdiff_cube,
 )
+from legoesm.experiments.matrix.namelist import write_case_namelist
 
 
 def _hyperdiff_ico(mesh) -> float:
@@ -2244,7 +2258,11 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             williamson_test2_exact, compute_error_norms)
 
         n = int(tc.resolution[1:])
-        grid = create_cubed_sphere(n)
+        # Colliding modons (#521, FV3 case 8) run on a NON-ROTATING planet
+        # (f=0); every other SW case is rotating.  The cdgrid infers omega
+        # from base.f, so a base grid with omega=0 yields f=0 throughout.
+        grid = (create_cubed_sphere(n, omega=0.0) if test_num == 8
+                else create_cubed_sphere(n))
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 300.0
         # Iter-760: switch to Fortran-faithful del-n vorticity damping
@@ -2297,7 +2315,10 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # while latlon W6 14-day is stable.  Override the iter-1030
         # calibration to higher div_damp + damp_v on W6 only.  W2/W5
         # untouched (still pinned at iter-1030 dual-target).
-        if test_num in (2, 5, 6):
+        if test_num in (2, 5, 6, 8):
+            # Colliding modons (8) are strongly nonlinear and need the same
+            # div-damp + biharmonic hyperdiff backstop as the long-duration
+            # propagating-wave cases.
             # iter-31: cube W6 (Rossby-Haurwitz wave-4) 14-day blows up
             # at day 9 with the iter1009 baseline (hyperdiff=0).
             # iter-33: cube W5 (mountain) 15-day blows up at day 14.58
@@ -2375,6 +2396,25 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             u_d = (cdgrid.cos_angle_edge_x * u_east_x
                    + cdgrid.sin_angle_edge_x * v_north_x)
             u_east_y, v_north_y = _w6_winds_geo(
+                cdgrid.lon_edge_y, cdgrid.lat_edge_y, R,
+            )
+            v_d = (-cdgrid.sin_angle_edge_y * u_east_y
+                   + cdgrid.cos_angle_edge_y * v_north_y)
+        elif test_num == 8:
+            # Colliding modons (#521): two zonal Gaussian bursts, constant
+            # depth, NON-ROTATING.  Same edge-midpoint analytic init as W6
+            # (winds depend on lon AND lat), via _modon_winds_geo.
+            from tests.test_cases.colliding_modons import (
+                colliding_modons, _modon_winds_geo,
+            )
+            sw = colliding_modons(grid)
+            R = grid.radius
+            u_east_x, v_north_x = _modon_winds_geo(
+                cdgrid.lon_edge_x, cdgrid.lat_edge_x, R,
+            )
+            u_d = (cdgrid.cos_angle_edge_x * u_east_x
+                   + cdgrid.sin_angle_edge_x * v_north_x)
+            u_east_y, v_north_y = _modon_winds_geo(
                 cdgrid.lon_edge_y, cdgrid.lat_edge_y, R,
             )
             v_d = (-cdgrid.sin_angle_edge_y * u_east_y
@@ -2793,6 +2833,19 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         "notes": notes,
         "wall_time": f"{wall:.1f}s"},  # iter-29: enable iter-28 GPU efficiency table on SW
         diag=diag)  # iter-98: surface BLOWUP info if any
+    # Issue 506: hydrostatic surface pressure diagnostic for the Rossby-
+    # Haurwitz wave (Case 6).  In the single-layer SW system p_s is the
+    # weight of the fluid column, p_s = rho_air * g * (h + h_s); the RH wave
+    # has flat topography (h_s = 0) so p_s = rho_air * g * h.  Saved only for
+    # W6 (the comparison consumer); W2/W5 panels never request it.
+    if test_num == 6:
+        # ``constants`` is rebound as a function-local later in
+        # run_shallow_water, so reference it via a dedicated import here.
+        from legoesm import constants as _consts
+        for _snap in snapshots.values():
+            if "height" in _snap:
+                _snap["p_s"] = (_consts.rho_air * _consts.g
+                                * np.asarray(_snap["height"], dtype=np.float64))
     _save_case_diagnostics(
         output_dir, f"SW Williamson {test_num} {tc.resolution}", dt,
         diag, snapshots, coord_kind, lon_deg, lat_deg,
@@ -2801,6 +2854,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             ("v", "Meridional wind v (m/s)", "RdBu_r"),
             ("wind_speed", "Wind speed (m/s)", "magma"),
             ("height", "Fluid depth h (m)", "viridis"),
+            # Rendered only when present in the snapshot (W6); see above.
+            ("p_s", "Surface pressure (Pa)", "viridis"),
         ],
         mass_key="mean_height", energy_key="max_wind",
         scalar_units={"mean_height": "m", "max_wind": "m/s"})
@@ -2821,7 +2876,11 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
     field evolves.  After 12 days the bell returns to its initial position
     and error norms are computed against the initial condition.
 
-    Flow angle beta = pi/4 sends the bell over the cubed-sphere corners.
+    Flow angle ``alpha`` (run_kwargs, default pi/4) sets the rotation axis.
+    alpha=pi/4 sends the bell diagonally OVER the cubed-sphere corners (the
+    hardest orientation); alpha=0 advects it zonally along the equator,
+    crossing only face EDGES (issue 504 isolation diagnostic, matching the
+    FV3 ``test_cases.F90`` namelist default ``alpha = 0.0``).
     """
     from tests.test_cases.cosine_bell import (
         cosine_bell_cubesphere, cosine_bell_latlon,
@@ -2829,7 +2888,14 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         cosine_bell_error_norms, cosine_bell_exact,
     )
 
-    beta = jnp.pi / 4.0  # Southeastward flow over corners
+    # Rotation axis angle (FV3 ``alpha``; PL07 ``beta``).  Threaded from the
+    # matrix run_kwargs so the alpha=0 edge-crossing variant (issue 504) and
+    # the default alpha=pi/4 corner-crossing case share one runner.
+    beta = float(tc.run_kwargs.get("alpha", jnp.pi / 4.0))
+    # Optional duogrid (Mouallem et al. 2023) cross-face halo for the cube
+    # transport path — exposes the FV3-faithful 4th-order corner treatment
+    # for A/B comparison against the default edge-pad path (issue 504).
+    _cb_use_duogrid = bool(tc.run_kwargs.get("use_duogrid", False))
 
     # The cosine bell peak is ~1000 m, so use a larger blowup threshold.
     _CB_BLOWUP = 5000.0
@@ -2842,7 +2908,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
             CDGridShallowWaterConfig)
 
         n = int(tc.resolution[1:])
-        grid = create_cubed_sphere(n)
+        grid = create_cubed_sphere(n, use_duogrid=_cb_use_duogrid)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 1800.0
         # NOTE (iter-760b): config is DECLARATION-ONLY for this test.
@@ -2866,73 +2932,43 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         h_init = state.h.copy()
         model.set_initial_mass(state)
 
-        # FV3-faithful transport: d2a2c_vect for contravariant velocities,
-        # then Lin-Rood split transport with Courant-number PPM.
-        from legoesm.core.fv3_sw_core import d2a2c_vect
-        from legoesm.core.fv_tp_2d import transport_step
+        # issue 504 FIX: free-stream-preserving transport.  The earlier
+        # d2a2c_vect -> transport_step path reconstructs the contravariant
+        # winds (ut, vt) and forms the mass flux as ut*dy*sin_sg; that chain
+        # is NOT geometric-conservation-law (GCL) consistent at the cube
+        # face-boundary seam, so a NON-divergent wind acquires spurious
+        # area-flux divergence (27x worse at the 8 cube vertices).  That
+        # spurious source/sink fragmented the bell whenever it crossed a
+        # corner (alpha=pi/4: L2=0.93, 11 deg trajectory drift; free-stream
+        # h=1 -> max|h-1|=0.52 over 2 days).
+        #
+        # Instead build the transport mass flux as the EXACT discrete curl of
+        # the rotation streamfunction at cube corners (FV3 test_cases.F90
+        # wind_field=0).  The discrete divergence telescopes to machine zero
+        # for ANY psi, so free-stream is preserved (h=1 -> 3.7e-7) and the
+        # bell stays coherent: alpha=pi/4 L2 0.93 -> 0.13 (beats ico 0.62 /
+        # spectral 0.38), drift 11 deg -> 0.3 deg; alpha=0 0.19 -> 0.12.
+        # hord=10 + n_sub=6 retained (limiter family / temporal-error tuning,
+        # iter-58/59); the GCL fix is orthogonal to those.
+        from legoesm.core.fv_tp_2d import (
+            streamfunction_mass_fluxes, streamfunction_transport_step)
+        from tests.test_cases.cosine_bell import rotation_streamfunction
 
-        # Pre-compute contravariant velocities (winds are frozen)
-        _ua, _va, _uc, _vc, ut, vt = d2a2c_vect(
-            state.u_d, state.v_d, cdgrid)
-
-        # Pre-compute initial mass for conservation fixer (fp64 acc)
+        _psi_corner = rotation_streamfunction(
+            cdgrid.lon_corner, cdgrid.lat_corner, grid.radius, beta)
         _mass_target = _area_weighted_sum(state.h, grid.area)
-
-        # new_test_dycores iter-58: hord=10 (PPM with monotonicity
-        # via pert_ppm iv=0 + slope limiter) + Fortran-faithful
-        # xppm boundary cube-edge formulas — together reduce cube
-        # CB 12-day L2 from 1.09 to 0.93 (14% improvement) without
-        # affecting mass conservation.  iter-26's hord sweep at
-        # 1-day quick found hord=12 marginally best, but at 12-day
-        # the accumulated dissipation favours hord=10's slightly
-        # weaker limiter.  Confirms PPM transport accuracy is the
-        # CB structural gap (per iter-51 resolution-independence
-        # finding) — the limiter family choice tunes within that
-        # structural plateau.
-        #
-        # iter-59: temporal substepping — split dt=1800s into
-        # _CB_CUBE_N_SUB=6 sub-steps (dt_sub=300s) per outer step.
-        # The cube CB path used single-stage forward-Euler PPM
-        # transport (O(dt) phase error) while the latlon CB path
-        # uses SSP-RK3 (O(dt^3)).  At outer dt=1800s the temporal
-        # truncation error contributes a measurable share of the
-        # cube 12-day L2 gap.  n_sub=6 closes ~7% more L2 on top
-        # of iter-58: cube CB 12-day L2 0.931 → 0.865 (probe
-        # _probe_iter59_substep.py).  Linf flat at 0.867.  Mass
-        # drift unchanged (3.5e-8 vs 3.6e-8).  Saturation slope
-        # is shallow past n_sub=6 (n_sub=12 only buys another
-        # 1.6%) so we stop here.  Cube CB wall time grows ~6×
-        # (~3.2s → ~20s); still tiny vs matrix budget.
-        #
-        # iter-61/62 cross-grid audit (apples-to-apples 12-day):
-        #   latlon (72×144): L2=0.133, drift=2.07e-8, PASS
-        #   ico (ico5):       L2=0.620, drift=1.58e-6, PASS
-        #   spectral (T21):   L2=0.382, drift=2.16e-16, PASS
-        #   cube (C36):       L2=0.865, drift=1.28e-9, PASS
-        # True cross-grid L2 ratios: cube/latlon = 6.5×,
-        # cube/ico = 1.4×, cube/spectral = 2.3× — far closer than
-        # the previously documented "45× / 38× / 35×" claims (which
-        # had been computed against stale 1-day latlon results).
-        # All 4 grids now PASS at 12-day apples-to-apples.  Cube
-        # is the L2 outlier but BEST at mass conservation among
-        # the finite-volume grids.  iter-61 spatial decomposition
-        # probe (_probe_iter61_cb_error_map.py): 99 % of residual
-        # cube L2 lives in panel-INTERIOR cells of the single face
-        # holding the bell at t=12d; panel-edge cells contribute
-        # ~0.0003.  Residual is bulk PPM limiter dissipation, NOT
-        # panel-coupling.
         _CB_CUBE_N_SUB = 6
 
         @jax.jit
         def step_fn(s, dt_):
             dt_sub = dt_ / _CB_CUBE_N_SUB
+            # Frozen winds -> fluxes depend only on dt_sub (cheap to rebuild).
+            fluxes = streamfunction_mass_fluxes(cdgrid, _psi_corner, dt_sub)
 
             def _body(h, _):
-                return transport_step(
-                    h, ut, vt, dt_sub, cdgrid,
-                    mass_target=_mass_target,
-                    hord=10,
-                    apply_fortran_xppm_boundary=True), None
+                return streamfunction_transport_step(
+                    h, fluxes, cdgrid, mass_target=_mass_target,
+                    hord=10, apply_fortran_xppm_boundary=True), None
 
             h_new, _ = jax.lax.scan(_body, s.h, None,
                                     length=_CB_CUBE_N_SUB)
@@ -2965,7 +3001,8 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
-            CGridLatLonShallowWaterState, cell_to_cgrid_winds)
+            CGridLatLonShallowWaterState)
+        from legoesm.grids.operators_latlon_cgrid import cell_to_cgrid_winds
         from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
         from legoesm.timestepping.dispatch import dispatch_integrator
 
@@ -5695,7 +5732,9 @@ RUNNERS: dict[str, Callable] = {
     "williamson2": run_shallow_water,
     "williamson5": run_shallow_water,
     "williamson6": run_shallow_water,                # M1.a (mpas + spectral)
+    "colliding_modons": run_shallow_water,           # issue 521 (Lin et al. 2017, cubed_sphere)
     "cosine_bell": run_cosine_bell,
+    "cosine_bell_a0": run_cosine_bell,               # issue 504 (alpha=0 edge-crossing)
     "held_suarez": run_held_suarez,
     "held_suarez_topo": run_held_suarez,             # M1.a (HS over topo)
     "baroclinic": run_baroclinic,
@@ -5741,7 +5780,21 @@ ATMOSPHERE_COMPARISON_FIELDS: dict[str, list[dict]] = {
     "williamson2": [
         {"field": "height",     "vmin": None,  "vmax": None,  "cmap": "viridis", "units": "m"},
         {"field": "u",          "vmin": -50,   "vmax": 50,    "cmap": "RdBu_r",  "units": "m/s"},
+        # Meridional wind v (issue 505): exact W2 v is ZERO everywhere, so any
+        # nonzero signal is pure grid-imprint error — the canonical cube-edge
+        # artifact diagnostic (see CLAUDE.md "Visual verify").  Autoscale so
+        # the (tiny) cross-grid drift is visible on a shared colorbar.
+        {"field": "v",          "vmin": None,  "vmax": None,  "cmap": "RdBu_r",  "units": "m/s"},
         {"field": "wind_speed", "vmin": 0,     "vmax": 50,    "cmap": "viridis", "units": "m/s"},
+    ],
+    # Williamson 6: Rossby-Haurwitz wave-4 — should retain 4-fold
+    # longitudinal symmetry over long integration.  Surface pressure
+    # p_s = rho_air*g*(h+h_s) added per issue 506 alongside height and
+    # wind speed (autoscale height/p_s so symmetry breakdown is visible).
+    "williamson6": [
+        {"field": "height",     "vmin": None,  "vmax": None,  "cmap": "viridis", "units": "m"},
+        {"field": "wind_speed", "vmin": 0,     "vmax": None,  "cmap": "viridis", "units": "m/s"},
+        {"field": "p_s",        "vmin": None,  "vmax": None,  "cmap": "viridis", "units": "Pa"},
     ],
     # Williamson 5: flow over an isolated mountain — height develops a
     # standing-wave pattern downstream, ~5400 ± 500 m.
@@ -5750,8 +5803,24 @@ ATMOSPHERE_COMPARISON_FIELDS: dict[str, list[dict]] = {
         {"field": "u",          "vmin": -30,   "vmax": 60,    "cmap": "RdBu_r",  "units": "m/s"},
         {"field": "wind_speed", "vmin": 0,     "vmax": 60,    "cmap": "viridis", "units": "m/s"},
     ],
+    # Colliding modons (issue 521): two zonal Gaussian jets roll up into
+    # counter-rotating dipoles that collide and depart.  Zonal wind shows the
+    # westerly/easterly bursts; autoscale height/wind so the collision is
+    # visible.  (Relative vorticity — the cleanest modon signature — is a
+    # follow-up diagnostic; the cube extract_fn currently emits u/v/speed/h.)
+    "colliding_modons": [
+        {"field": "u",          "vmin": -50,   "vmax": 50,    "cmap": "RdBu_r",  "units": "m/s"},
+        {"field": "v",          "vmin": None,  "vmax": None,  "cmap": "RdBu_r",  "units": "m/s"},
+        {"field": "wind_speed", "vmin": 0,     "vmax": None,  "cmap": "viridis", "units": "m/s"},
+        {"field": "height",     "vmin": None,  "vmax": None,  "cmap": "viridis", "units": "m"},
+    ],
     # Cosine-bell tracer: height field passively advects.
     "cosine_bell": [
+        {"field": "height",     "vmin": None,  "vmax": None,  "cmap": "viridis", "units": "m"},
+        {"field": "wind_speed", "vmin": 0,     "vmax": 50,    "cmap": "viridis", "units": "m/s"},
+    ],
+    # Cosine-bell, alpha=0 (equatorial, edge-crossing) — issue 504 isolation.
+    "cosine_bell_a0": [
         {"field": "height",     "vmin": None,  "vmax": None,  "cmap": "viridis", "units": "m"},
         {"field": "wind_speed", "vmin": 0,     "vmax": 50,    "cmap": "viridis", "units": "m/s"},
     ],
@@ -7351,7 +7420,14 @@ def filter_tests(tests: list[TestCase], args) -> list[TestCase]:
     if args.grid != "all":
         filtered = [t for t in filtered if t.grid_type == args.grid]
     if args.test:
-        filtered = [t for t in filtered if args.test in t.case]
+        # ``=name`` selects the case by EXACT match (the form emitted by an
+        # atmosphere ``setup:`` template via legoesm.core.setup_selector); a
+        # bare ``--test name`` keeps the legacy substring filter.
+        if args.test.startswith("="):
+            exact = args.test[1:]
+            filtered = [t for t in filtered if t.case == exact]
+        else:
+            filtered = [t for t in filtered if args.test in t.case]
     return filtered
 
 
@@ -7429,6 +7505,19 @@ def main():
     _RES_DIR_WARNED.clear()
 
     tests = filter_tests(TEST_MATRIX, args)
+    # Global match count BEFORE any MPI slicing — the exact-selector guard
+    # below keys off this so every rank makes the SAME decision.
+    _n_matched_global = len(tests)
+
+    # An EXACT case selector (``--test =name``, emitted by a setup: template)
+    # that matches NOTHING is a hard error in EVERY mode — checked here, before
+    # the --list / --cross-grid-plots-only / run early returns, so none of them
+    # can silently swallow a typo'd exact selector.
+    if _n_matched_global == 0 and str(getattr(args, "test", "") or "").startswith("="):
+        raise SystemExit(
+            f"ERROR: no atmosphere test case matches --test {args.test!r} "
+            f"--grid {args.grid!r}. Run `--list` to see valid (case, grid) pairs."
+        )
 
     # MPI case-split: each rank takes a disjoint slice of the filtered
     # test list.  Cases write to distinct directories so no I/O
@@ -7525,8 +7614,16 @@ def main():
         return
 
     if not tests:
-        print("No tests match the given filters.")
-        return
+        # (An exact ``--test =name`` selector matching nothing globally already
+        # raised above.)  A bare/`all` filter matching nothing is a graceful
+        # no-op; under MPI a per-rank empty SLICE with global matches > 0 must
+        # NOT return (that would deadlock ranks holding work at the barrier).
+        if _n_matched_global == 0:
+            print("No tests match the given filters.")
+            return
+        if mpi_comm is not None:
+            print(f"[rank {mpi_rank}/{mpi_size}] no cases assigned; "
+                  "continuing to barrier")
 
     if args.resolution:
         # iter-95 fix: ``--resolution N`` (integer) was previously
@@ -7599,6 +7696,14 @@ def main():
         else:
             days = tc.duration_days
         out_dir = output_base / tc.output_path
+        # Per-case namelist parameter file (#682): the resolved case config,
+        # written up-front so it is present even if the run later fails.
+        write_case_namelist(
+            out_dir, tc,
+            title=f"atmosphere test-case namelist: {tc.output_path}",
+            extra={"radiation": args.radiation, "days_run": days,
+                   "quick": bool(args.quick)},
+        )
 
         label = f"{tc.equation_set}/{tc.case}/{tc.grid_type}"
         print(f"\n[{i}/{len(tests)}] {label} ({tc.resolution}, "

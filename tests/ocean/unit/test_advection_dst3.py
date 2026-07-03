@@ -451,3 +451,131 @@ class TestDST3VsTVD:
         # DST-3 should be at least somewhat less diffusive
         assert err_dst3 <= err_tvd * 1.1, (
             f"DST-3 error {err_dst3} not better than TVD {err_tvd}")
+
+
+
+class TestDST3DirectionSymmetry:
+    """Findings #1/#2: the DST-3 smoothness-ratio numerator for NEGATIVE flow
+    must be ``(donor - upup)`` (matching the vertical sibling + the positive-flow
+    branch), NOT the negated ``(upup - donor)``.  The negation made van_leer
+    psi -> 0 for u<0 / v<0 only, collapsing the scheme to 1st-order/over-diffusive
+    in one direction -> direction-asymmetric diffusion.
+
+    The defining property is the REFLECTION-EQUIVARIANCE of pure advection: for an
+    ARBITRARY tracer ``f`` and any velocity ``U``,
+
+        Advect_{-U}(f) == Reflect( Advect_{+U}( Reflect(f) ) ),
+
+    where ``Reflect`` flips the advected axis.  A scheme that is 3rd-order for
+    one sign but 1st-order for the other violates this well above round-off.
+    """
+
+    def _make_grid(self, n_lat=12, n_lon=40):
+        from legoesm.grids.latlon import create_latlon_grid
+        return create_latlon_grid(n_lat=n_lat, n_lon=n_lon, radius=constants.R_earth)
+
+    def test_zonal_left_right_symmetric(self):
+        """Reflection-equivariance of dst3_to_u_points under longitude flip +
+        flow-sign flip, on an ARBITRARY periodic tracer.  Breaks if the u<0
+        ratio numerator is negated (finding #1)."""
+        from legoesm.ocean.advection import dst3_to_u_points
+        grid = self._make_grid()
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        nlev = 1
+        key = jax.random.PRNGKey(11)
+        prof = jax.random.uniform(key, (n_lon,), minval=1.0, maxval=4.0)
+        f = jnp.broadcast_to(prof[jnp.newaxis, :, jnp.newaxis],
+                             (n_lat, n_lon, nlev))
+        h_u = jnp.full((n_lat, n_lon + 1, nlev), 100.0)
+        u_mag = 0.4
+        dt = 300.0
+
+        def faces(fin, sign):
+            # interior cell mass flux (n_lon), wrapped to n_lon+1 faces
+            mf_int = jnp.full((n_lat, n_lon, nlev), sign * u_mag * 100.0)
+            mf = jnp.concatenate([mf_int, mf_int[:, :1, :]], axis=1)
+            return dst3_to_u_points(fin, mf, h_u, grid, dt)
+
+        # Reflect a CELL field in longitude (cell j -> cell -j mod n_lon).
+        def refl_cell(x):
+            return jnp.roll(jnp.flip(x, axis=1), 1, axis=1)
+
+        # +U faces give cell-face values f_face[j] at face j-1/2.  The reflected
+        # -U problem's INTERIOR cell-face divergence must equal the reflection of
+        # the +U one.  Compare the per-cell flux divergence (face j - face j+1),
+        # which is the actual advective tendency and is reflection-equivariant.
+        def tendency(fin, sign):
+            fu = faces(fin, sign)
+            U = sign * u_mag * 100.0
+            flux = U * fu                      # (n_lat, n_lon+1, nlev)
+            return flux[:, :-1, :] - flux[:, 1:, :]   # per-cell divergence proxy
+
+        tend_minus = tendency(f, -1.0)
+        tend_plus_refl = refl_cell(tendency(refl_cell(f), +1.0))
+        max_asym = float(jnp.max(jnp.abs(tend_minus - tend_plus_refl)))
+        amp = float(jnp.max(jnp.abs(tend_minus)) + 1e-30)
+        assert max_asym < 1e-9 * max(amp, 1.0), (
+            f"zonal DST-3 reflection asymmetry {max_asym:.3e} (amp {amp:.3e}) "
+            "-> negative-flow ratio numerator is wrong (finding #1)")
+
+    def test_meridional_north_south_symmetric(self):
+        """Reflection-equivariance of dst3_to_v_points under latitude flip +
+        flow-sign flip, on an ARBITRARY tracer.  Breaks if the v<0 ratio
+        numerator is negated (finding #2)."""
+        from legoesm.ocean.advection import dst3_to_v_points
+        grid = self._make_grid()
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        nlev = 1
+        key = jax.random.PRNGKey(7)
+        prof = jax.random.uniform(key, (n_lat,), minval=1.0, maxval=4.0)
+        f = jnp.broadcast_to(prof[:, jnp.newaxis, jnp.newaxis],
+                             (n_lat, n_lon, nlev))
+        h_v = jnp.full((n_lat + 1, n_lon, nlev), 100.0)
+        v_mag = 0.3
+
+        def faces(fin, sign):
+            mf_v = jnp.full((n_lat + 1, n_lon, nlev), sign * v_mag * 100.0)
+            mf_v = mf_v.at[0].set(0.0).at[-1].set(0.0)  # wall BC at poles
+            return dst3_to_v_points(fin, mf_v, h_v, grid, dt=300.0)
+
+        # Per-cell meridional flux divergence (reflection-equivariant tendency).
+        def tendency(fin, sign):
+            fv = faces(fin, sign)
+            V = sign * v_mag * 100.0
+            flux = V * fv                       # (n_lat+1, n_lon, nlev)
+            return flux[:-1, :, :] - flux[1:, :, :]   # (n_lat, n_lon, nlev)
+
+        refl_cell = lambda x: jnp.flip(x, axis=0)   # cell k -> cell n_lat-1-k
+        tend_minus = tendency(f, -1.0)
+        tend_plus_refl = refl_cell(tendency(refl_cell(f), +1.0))
+        # Interior cells only (near-pole faces fall back to 1st-order both ways,
+        # which is itself symmetric, but keep the strict check on the interior).
+        interior = slice(2, n_lat - 2)
+        max_asym = float(jnp.max(jnp.abs(
+            tend_minus[interior] - tend_plus_refl[interior])))
+        amp = float(jnp.max(jnp.abs(tend_minus[interior])) + 1e-30)
+        assert max_asym < 1e-9 * max(amp, 1.0), (
+            f"meridional DST-3 reflection asymmetry {max_asym:.3e} -> negative-"
+            "flow ratio numerator is wrong (finding #2)")
+
+
+class TestWENOVerticalTieConvention:
+    """Finding #5: the WENO vertical upwind tie must split on ``w_int > 0`` (tie
+    at w==0 -> donor-above), matching the dst3/ppm/fct vertical convention which
+    all use ``w_int > 0.0``.  (At w==0 the flux is zero, so this only fixes a
+    consistent convention; the test pins it against the dst3 sibling.)"""
+
+    def test_zero_w_matches_dst3_zero_flux(self):
+        from legoesm.ocean.advection import (
+            flux_form_vertical_tracer_advection_weno5,
+            flux_form_vertical_tracer_advection_dst3,
+        )
+        nlev = 6
+        field = jnp.array([1.0, 2.0, 4.0, 3.0, 2.5, 1.0])
+        w_half = jnp.zeros(nlev + 1)
+        h_k = jnp.full(nlev, 100.0)
+        weno = flux_form_vertical_tracer_advection_weno5(field, w_half, h_k, 300.0)
+        dst3 = flux_form_vertical_tracer_advection_dst3(field, w_half, h_k, 300.0)
+        # Both must give exactly zero flux divergence at w==0.
+        assert jnp.allclose(weno, 0.0, atol=1e-14)
+        assert jnp.allclose(dst3, 0.0, atol=1e-14)

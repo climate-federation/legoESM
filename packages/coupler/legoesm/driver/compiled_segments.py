@@ -49,6 +49,26 @@ from legoesm.thermo import saturation_mixing_ratio
 logger = logging.getLogger(__name__)
 
 
+# Auto-enable jax.checkpoint (rematerialization) for segments longer than this
+# many steps when ``gradient_checkpoint`` is left at its default ``None``.
+_CKPT_AUTO_STEPS = 50
+
+
+def _resolve_checkpoint(gradient_checkpoint: bool | None, n_steps: int) -> bool:
+    """Resolve the gradient-checkpoint policy for a segment of ``n_steps``.
+
+    An explicit ``True``/``False`` always wins; ``None`` (the default) auto-
+    enables rematerialization for segments longer than ``_CKPT_AUTO_STEPS`` —
+    the documented contract that was previously absent, so ``None`` silently
+    disabled checkpointing and a long reverse-mode-AD segment could OOM exactly
+    where the docstring promised protection. ``n_steps`` is the static scan
+    length, so this is a compile-time decision.
+    """
+    if gradient_checkpoint is None:
+        return n_steps > _CKPT_AUTO_STEPS
+    return gradient_checkpoint
+
+
 # ======================================================================
 # Segment carry — all mutable arrays for the hot loop
 # ======================================================================
@@ -155,6 +175,32 @@ class SegmentCarry(NamedTuple):
     tke: jax.Array = None
     qke: jax.Array = None
     gwd_spectrum: jax.Array = None
+    conv_precip_prev: jax.Array = None
+    # Lagged (previous-step) total precip [kg/m²/s] driving the opt-in
+    # convective cloud-fraction source.  Radiation runs BEFORE convection in
+    # the step, so this carries last step's precip to this step's cloud
+    # diagnosis.  ``None`` (warm-rain / convective_cloud off) ⇒ byte-identical
+    # legacy carry; pack_carry seeds a zeros array for production runs so the
+    # feature can read it when ``PhysicsPipeline._cloud_convective`` is set.
+    land_ml: object = None
+    # Optional MULTILAYER (Richards) land state (a MultiLayerLandState pytree) when
+    # the differentiable forward runs the multilayer coupler tile instead of the
+    # embedded slab.  ``None`` (the default) ⇒ slab path, byte-identical legacy carry;
+    # when present it is advanced in place of the scalar ``T_land`` and supplies the
+    # land surface temperature (``T_soil[:, 0]``) to the surface blend.
+    w_land: jax.Array = None
+    # Prognostic slab-land soil water [kg/m²] (Manabe bucket).  ``None``
+    # unless the soil-water bucket is active (``PhysicsPipeline.
+    # land_soil_bucket``) ⇒ byte-identical legacy carry.  Advanced each
+    # physics step in ``physics_step_no_rad`` (precip source, beta-limited
+    # land evaporation sink); sets the land evaporation efficiency beta that
+    # limits land latent heat.  Threaded exactly like ``T_land``.
+    snow: jax.Array = None
+    # Prognostic slab-land snow water equivalent [kg/m²].  ``None`` unless
+    # snow-albedo feedback is active (``PhysicsPipeline.snow_albedo_feedback``)
+    # ⇒ byte-identical legacy carry.  Advanced each physics step in
+    # ``physics_step_no_rad`` (snowfall source, degree-day melt); brightens the
+    # land albedo.  Threaded exactly like ``w_land``.
 
 
 def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
@@ -167,6 +213,8 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                T_land=None, q_i=None, q_s=None, q_g=None,
                N_c=None, N_r=None, N_i=None,
                tke=None, qke=None, gwd_spectrum=None,
+               conv_precip_prev=None,
+               land_ml=None, w_land=None, snow=None,
                conv_prog_nlev=None):
     """Pack driver state into a SegmentCarry for the compiled kernel.
 
@@ -205,6 +253,11 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         shflx_accum = jnp.zeros_like(state.p_s.data)
     if lhflx_accum is None:
         lhflx_accum = jnp.zeros_like(state.p_s.data)
+    # Lagged convective-cloud precip: always a real array (like precip_accum /
+    # T_land) so the hot loop has no None branch; read only when the convective
+    # cloud feature is enabled.  Zeros at t=0 ⇒ no convective cloud on step 0.
+    if conv_precip_prev is None:
+        conv_precip_prev = jnp.zeros_like(state.p_s.data)
     if conv_prog is None:
         if conv_prog_nlev is not None:
             conv_prog = jnp.zeros(
@@ -256,6 +309,14 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         qke=None if qke is None else _promote(qke, storage),
         gwd_spectrum=(None if gwd_spectrum is None
                       else _promote(gwd_spectrum, storage)),
+        conv_precip_prev=_promote(conv_precip_prev, storage),
+        land_ml=land_ml,   # pytree (MultiLayerLandState) or None — not a scalar field
+        # Soil-water bucket: None unless the bucket is active (identical
+        # legacy carry); the land tile reads it only when active.
+        w_land=None if w_land is None else _promote(w_land, storage),
+        # Snow water equiv.: None unless snow-albedo feedback is active
+        # (identical legacy carry).
+        snow=None if snow is None else _promote(snow, storage),
     )
 
 
@@ -407,6 +468,14 @@ class SegmentForcing(NamedTuple):
     s_0: jax.Array
     o3_vmr: jax.Array
     aerosol_od: jax.Array
+    # Per-layer LONGWAVE aerosol absorption optical depth (volcanic
+    # stratospheric, gap #9).  Mirrors ``aerosol_od`` (the SHORTWAVE
+    # extinction).  Always a concrete array of the SAME shape as
+    # ``aerosol_od`` (materialised to zeros by :func:`pack_forcing` when
+    # the caller passes None) so the JIT pytree is stable and a run with
+    # no volcanic LW aerosol is byte-identical (zeros LW od is a no-op in
+    # the RRTMGP solver, same as None).
+    aerosol_lw_od: jax.Array
     ghg_vmr: jax.Array  # shape (n_species,); empty (0,) when inactive
     # Coupler-provided dynamic surface overrides — the tile-blended surface
     # albedo / skin temperature fed back each segment by a coupled driver
@@ -417,6 +486,22 @@ class SegmentForcing(NamedTuple):
     # is created at import and the pytree carries no spurious empty leaf.
     sfc_albedo_override: jax.Array | None = None
     sfc_T_override: jax.Array | None = None
+    sfc_emissivity_override: jax.Array | None = None
+    # Coupler-provided SHARED surface turbulent heat fluxes — the tile-blended
+    # sensible / latent heat flux [W/m2, positive UP = surface→atmosphere] the
+    # coupler computed for this segment (its bulk scheme, q_sfc = 0.98·q_sat
+    # mixing ratio, ocean-tile C_H/C_E).  When present, the atmosphere's surface
+    # tendency consumes THESE fluxes (the bottom-level T/q kick in
+    # physics_step_no_rad) instead of recomputing its own bulk SH/LH, so the
+    # heat + water leaving the atmosphere equals what the coupler feeds the
+    # ocean — the air-sea budget closes (single authoritative flux calc on both
+    # sides).  ``None`` for AMIP / standalone / uncoupled runs ⇒ the atmosphere
+    # computes its own bulk fluxes (byte-identical to the pre-shared-flux
+    # behaviour).  Grid-shaped, like sst/sic.  Kept None (not a (0,)
+    # placeholder) so no module-scope device op is created at import and the
+    # pytree carries no spurious empty leaf.
+    sfc_shflx_override: jax.Array | None = None
+    sfc_lhflx_override: jax.Array | None = None
 
 
 # Canonical GHG species ordering for the ghg_vmr array.
@@ -455,9 +540,13 @@ def ghg_array_to_dict(ghg_arr: jax.Array, ghg_keys: tuple[str, ...]) -> dict | N
 def pack_forcing(
     sst, sic, day_of_year, seconds_of_day,
     solar_weights, s_0, o3_vmr, aerosol_od,
+    aerosol_lw_od=None,
     ghg_vmr=None,
     sfc_albedo_override=None,
     sfc_T_override=None,
+    sfc_emissivity_override=None,
+    sfc_shflx_override=None,
+    sfc_lhflx_override=None,
 ) -> SegmentForcing:
     """Pack per-segment forcing into a SegmentForcing pytree.
 
@@ -466,11 +555,24 @@ def pack_forcing(
     ghg_vmr : dict, jax.Array, or None
         GHG volume mixing ratios.  Accepts a dict (auto-converted via
         :func:`ghg_dict_to_array`), a pre-packed array, or None.
+    sfc_albedo_override, sfc_T_override, sfc_emissivity_override : jax.Array or None
+        Coupler-provided tile-blended surface albedo / skin temperature /
+        emissivity for this segment (grid-shaped, like sst/sic).  ``None``
+        (default) leaves the radiation's static internal blend untouched —
+        byte-identical for AMIP / standalone runs.  The emissivity override
+        carries the canopy's LAI-dependent eps_eff so the atmospheric LW
+        boundary uses the same emissivity the land tile formed its LW_out with.
     sfc_albedo_override, sfc_T_override : jax.Array or None
         Coupler-provided tile-blended surface albedo / skin temperature for
         this segment (grid-shaped, like sst/sic).  ``None`` (default) leaves
         the radiation's static internal blend untouched — byte-identical for
         AMIP / standalone runs.
+    sfc_shflx_override, sfc_lhflx_override : jax.Array or None
+        Coupler-provided tile-blended sensible / latent heat flux [W/m2,
+        positive UP] for this segment (grid-shaped, like sst/sic).  ``None``
+        (default) leaves the atmosphere computing its own bulk surface fluxes —
+        byte-identical for AMIP / standalone runs.  When present the atmosphere
+        surface tendency consumes these instead, closing the air-sea budget.
     """
     if ghg_vmr is None:
         _ghg = jnp.zeros(0)
@@ -478,6 +580,16 @@ def pack_forcing(
         _ghg = ghg_dict_to_array(ghg_vmr)
     else:
         _ghg = jnp.asarray(ghg_vmr)
+    # LONGWAVE volcanic aerosol absorption optical depth (gap #9).  Default
+    # to zeros of the SAME shape as ``aerosol_od`` when None so the
+    # SegmentForcing pytree leaf is always a concrete fixed-shape array
+    # (no JIT retrace) and a run without volcanic LW aerosol is
+    # byte-identical (zeros LW od is a RRTMGP no-op).
+    _aer_od = jnp.asarray(aerosol_od)
+    if aerosol_lw_od is None:
+        _aer_lw_od = jnp.zeros_like(_aer_od)
+    else:
+        _aer_lw_od = jnp.asarray(aerosol_lw_od)
     return SegmentForcing(
         sst=jnp.asarray(sst),
         sic=jnp.asarray(sic),
@@ -486,7 +598,8 @@ def pack_forcing(
         solar_weights=jnp.asarray(solar_weights),
         s_0=jnp.asarray(s_0),
         o3_vmr=jnp.asarray(o3_vmr),
-        aerosol_od=jnp.asarray(aerosol_od),
+        aerosol_od=_aer_od,
+        aerosol_lw_od=_aer_lw_od,
         ghg_vmr=_ghg,
         sfc_albedo_override=(
             None if sfc_albedo_override is None
@@ -494,6 +607,18 @@ def pack_forcing(
         ),
         sfc_T_override=(
             None if sfc_T_override is None else jnp.asarray(sfc_T_override)
+        ),
+        sfc_emissivity_override=(
+            None if sfc_emissivity_override is None
+            else jnp.asarray(sfc_emissivity_override)
+        ),
+        sfc_shflx_override=(
+            None if sfc_shflx_override is None
+            else jnp.asarray(sfc_shflx_override)
+        ),
+        sfc_lhflx_override=(
+            None if sfc_lhflx_override is None
+            else jnp.asarray(sfc_lhflx_override)
         ),
     )
 
@@ -529,6 +654,8 @@ def build_segment_fn(
     hs_newtonian_relax=None,
     step_unified_no_rad=None,
     device_config=None,
+    energy_consistent_moisture_clip: bool = False,
+    pipeline=None,
 ):
     """Build a compiled segment function.
 
@@ -623,6 +750,27 @@ def build_segment_fn(
         behaviour is byte-identical to the legacy path: donating JIT
         kernels, and ``.raw`` stays the non-JIT, non-donating function
         that the training drivers differentiate through.
+    energy_consistent_moisture_clip : bool, optional
+        Issue #323.  When ``True``, the per-step ``max(q_v, 0)`` floor on
+        the physics tracer update also removes the latent heat tied to the
+        clipped (un-removed) vapour sink, so the floor conserves moist
+        static energy ``c_pd*T + L_v*q_v`` instead of injecting spurious
+        condensation heat.  This targets the kessler+sbm wind blow-up
+        (the combined vapour sink can exceed the available ``q_v`` under
+        organised convection; the existing floor truncates the sink but
+        keeps the full latent heating).  Default ``False`` =>
+        bit-identical to the legacy path.
+    pipeline : PhysicsPipeline or None, optional
+        The physics pipeline.  Only consumed by the optional "un-fused
+        radiation" host path (``ExperimentConfig.unfused_radiation`` —
+        PRODUCTION ``_run_compiled`` only): it lets the returned object
+        expose ``run_norad_scan`` (a host-callable jit of a pure no-rad
+        ``rad_update_steps``-length scan) and ``run_rad`` (a
+        host-callable jit of ``pipeline.compute_radiation_core``) so
+        rrtmgp and the dynamics+physics scan compile as TWO SEPARATE
+        XLA executables instead of one inlined ~3h graph.  ``None``
+        (default) leaves both attributes ``None`` and changes nothing —
+        the legacy fused ``run_segment`` path is byte-identical.
 
     Returns
     -------
@@ -630,7 +778,10 @@ def build_segment_fn(
         ``run_segment(carry: SegmentCarry, n_steps: int,
         forcing: SegmentForcing) -> SegmentCarry``
     """
-    from legoesm.core.conservation import fix_moisture_hydrostatic, fix_ps_mass_target
+    from legoesm.core.conservation import (
+        fix_moisture_hydrostatic, fix_ps_mass_target,
+        energy_consistent_moisture_floor,
+    )
     from legoesm.core.cfl import estimate_min_dx_cubed_sphere
 
     # Precompute minimum grid spacing for CFL monitoring
@@ -765,6 +916,10 @@ def build_segment_fn(
                 _ofi = owned_face_ids
                 _T_land_in = (carry.T_land[_ofi]
                               if carry.T_land is not None else None)
+                _w_land_in = (carry.w_land[_ofi]
+                              if carry.w_land is not None else None)
+                _snow_in = (carry.snow[_ofi]
+                            if carry.snow is not None else None)
                 # Double-moment tracers (None for warm-rain) → number-aware
                 # radiation r_eff. Passed by KEYWORD so the neural/SFNO
                 # step_unified wrappers (which parse the positional tail by
@@ -801,9 +956,16 @@ def build_segment_fn(
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
+                    aerosol_lw_od=forcing.aerosol_lw_od,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
-                    T_land=_T_land_in, **_dm_in,
+                    sfc_emissivity_override=forcing.sfc_emissivity_override,
+                    sfc_shflx_override=forcing.sfc_shflx_override,
+                    sfc_lhflx_override=forcing.sfc_lhflx_override,
+                    T_land=_T_land_in, land_ml=carry.land_ml,
+                    conv_precip=carry.conv_precip_prev[_ofi],
+                    w_land=_w_land_in, snow=_snow_in,
+                    **_dm_in,
                 )
                 phys_out, held_new_local = _ret[0], _ret[1]
                 # 3rd value = slab-land skin T (#325); legacy 2-tuple
@@ -816,10 +978,20 @@ def build_segment_fn(
                 if hs_newtonian_relax is not None:
                     _phys_dT = _phys_dT + hs_newtonian_relax(
                         T_new[_ofi], p_s_new[_ofi], lat[_ofi])
-                T_upd = T_new.at[_ofi].set(T_new[_ofi] + _dt * _phys_dT)
-                q_v_upd = carry.q_v.at[_ofi].set(
-                    jnp.maximum(carry.q_v[_ofi] + _dt * phys_out.dq_v_dt, 0.0)
-                )
+                _T_owned = T_new[_ofi] + _dt * _phys_dT
+                _qv_raw = carry.q_v[_ofi] + _dt * phys_out.dq_v_dt
+                if energy_consistent_moisture_clip:
+                    # Issue #323: keep the q_v floor moist-static-energy
+                    # neutral (remove the latent heat of the clipped vapour
+                    # sink) instead of injecting spurious condensation heat
+                    # -> the kessler+sbm wind blow-up.  Default off =>
+                    # bit-identical (plain ``max(q_v, 0)`` below).
+                    _qv_owned, _T_owned = energy_consistent_moisture_floor(
+                        _qv_raw, _T_owned)
+                else:
+                    _qv_owned = jnp.maximum(_qv_raw, 0.0)
+                T_upd = T_new.at[_ofi].set(_T_owned)
+                q_v_upd = carry.q_v.at[_ofi].set(_qv_owned)
                 q_c_upd = carry.q_c.at[_ofi].set(
                     jnp.maximum(carry.q_c[_ofi] + _dt * phys_out.dq_c_dt, 0.0)
                 )
@@ -853,6 +1025,9 @@ def build_segment_fn(
                 # Precip: update at owned indices
                 precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new[_ofi])
                 precip_accum = carry.precip_accum.at[_ofi].add(precip_step * _dt)
+                # Lag this step's total precip for next step's convective cloud.
+                conv_precip_prev_new = carry.conv_precip_prev.at[_ofi].set(
+                    precip_step)
 
                 # Surface heat fluxes: accumulate at owned indices
                 _sh = phys_out.shflx if phys_out.shflx is not None else jnp.zeros_like(p_s_new[_ofi])
@@ -864,6 +1039,27 @@ def build_segment_fn(
                 T_land_new = (
                     carry.T_land.at[_ofi].set(_T_land_local)
                     if carry.T_land is not None else None
+                )
+                # multilayer land tile is single-rank only (calibration) -> carry the
+                # state through unchanged on the MPI/owned-face path.
+                land_ml_new = carry.land_ml
+                # Soil-water bucket: w_land_new rides PhysicsOutput
+                # (advanced in physics_step_no_rad), scattered at owned
+                # indices.  Carried through unchanged for legacy wrappers
+                # that don't populate it.
+                w_land_new = (
+                    carry.w_land.at[_ofi].set(phys_out.w_land)
+                    if (carry.w_land is not None
+                        and phys_out.w_land is not None)
+                    else carry.w_land
+                )
+                # Snow water equiv.: rides PhysicsOutput, scattered at owned
+                # indices (mirror w_land).
+                snow_new = (
+                    carry.snow.at[_ofi].set(phys_out.snow)
+                    if (carry.snow is not None
+                        and phys_out.snow is not None)
+                    else carry.snow
                 )
             else:
                 _dm_in = {}
@@ -888,9 +1084,16 @@ def build_segment_fn(
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
+                    aerosol_lw_od=forcing.aerosol_lw_od,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
-                    T_land=carry.T_land, **_dm_in,
+                    sfc_emissivity_override=forcing.sfc_emissivity_override,
+                    sfc_shflx_override=forcing.sfc_shflx_override,
+                    sfc_lhflx_override=forcing.sfc_lhflx_override,
+                    T_land=carry.T_land, land_ml=carry.land_ml,
+                    conv_precip=carry.conv_precip_prev,
+                    w_land=carry.w_land, snow=carry.snow,
+                    **_dm_in,
                 )
                 phys_out, held_new = _ret[0], _ret[1]
                 # ``step_unified`` returns a 3rd value (the slab-land skin
@@ -898,13 +1101,32 @@ def build_segment_fn(
                 # 2-tuple wrappers (neural / SFNO training) leave the land
                 # tile inert by carrying ``T_land`` through unchanged.
                 T_land_new = _ret[2] if len(_ret) > 2 else carry.T_land
+                # optional 4th value: the advanced MULTILAYER land state (when the
+                # multilayer tile is active); else carry the (None / unused) state on.
+                land_ml_new = _ret[3] if len(_ret) > 3 else carry.land_ml
+                # Soil-water bucket rides PhysicsOutput (advanced in
+                # physics_step_no_rad); carried through for legacy wrappers.
+                w_land_new = (phys_out.w_land
+                              if phys_out.w_land is not None
+                              else carry.w_land)
+                snow_new = (phys_out.snow
+                            if phys_out.snow is not None
+                            else carry.snow)
 
                 # --- State update ---
                 _phys_dT_dt = phys_out.dT_dt
                 if hs_newtonian_relax is not None:
                     _phys_dT_dt = _phys_dT_dt + hs_newtonian_relax(T_new, p_s_new, lat)
                 T_upd = T_new + _dt * _phys_dT_dt
-                q_v_upd = jnp.maximum(carry.q_v + _dt * phys_out.dq_v_dt, 0.0)
+                _qv_raw = carry.q_v + _dt * phys_out.dq_v_dt
+                if energy_consistent_moisture_clip:
+                    # Issue #323: see owned-face branch — keep the q_v floor
+                    # moist-static-energy neutral by removing the latent heat
+                    # of the clipped (un-removed) vapour sink.
+                    q_v_upd, T_upd = energy_consistent_moisture_floor(
+                        _qv_raw, T_upd)
+                else:
+                    q_v_upd = jnp.maximum(_qv_raw, 0.0)
                 q_c_upd = jnp.maximum(carry.q_c + _dt * phys_out.dq_c_dt, 0.0)
                 q_r_upd = jnp.maximum(carry.q_r + _dt * phys_out.dq_r_dt, 0.0)
                 def _dm_upd(fld, tend):
@@ -921,6 +1143,8 @@ def build_segment_fn(
                 # --- Accumulate precipitation ---
                 precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new)
                 precip_accum = carry.precip_accum + precip_step * _dt
+                # Lag this step's total precip for next step's convective cloud.
+                conv_precip_prev_new = precip_step
 
                 # --- Accumulate surface heat fluxes ---
                 _sh = phys_out.shflx if phys_out.shflx is not None else jnp.zeros_like(p_s_new)
@@ -1019,6 +1243,13 @@ def build_segment_fn(
                                   if phys_out.gwd_spectrum is not None
                                   else carry.gwd_spectrum,
                                   carry.gwd_spectrum)),
+                conv_precip_prev=_match_dtype(
+                    conv_precip_prev_new, carry.conv_precip_prev),
+                land_ml=land_ml_new,
+                w_land=(None if carry.w_land is None
+                        else _match_dtype(w_land_new, carry.w_land)),
+                snow=(None if carry.snow is None
+                      else _match_dtype(snow_new, carry.snow)),
             )
             return new_carry, None
         return _single_step
@@ -1045,7 +1276,7 @@ def build_segment_fn(
         """
         body_rad = _make_single_step(forcing, step_fn=step_unified)
         body_no_rad = _make_single_step(forcing, step_fn=step_unified_no_rad)
-        if gradient_checkpoint:
+        if _resolve_checkpoint(gradient_checkpoint, n_steps):
             body_rad = jax.checkpoint(body_rad, prevent_cse=False)
             body_no_rad = jax.checkpoint(body_no_rad, prevent_cse=False)
 
@@ -1071,10 +1302,167 @@ def build_segment_fn(
         ``n_steps`` does not divide evenly by ``rad_update_steps``.
         """
         _step_fn = _make_single_step(forcing)
-        if gradient_checkpoint:
+        if _resolve_checkpoint(gradient_checkpoint, n_steps):
             _step_fn = jax.checkpoint(_step_fn, prevent_cse=False)
         final_carry, _ = jax.lax.scan(_step_fn, carry, None, length=n_steps)
         return final_carry
+
+    # ------------------------------------------------------------------
+    # Un-fused radiation host kernels (ExperimentConfig.unfused_radiation;
+    # PRODUCTION ``_run_compiled`` ONLY).  A ``jax.jit`` placed INSIDE a
+    # ``lax.scan`` body is INLINED by XLA into ONE giant executable — so
+    # even the cond-free ``_run_subcycled`` above still inlines the rrtmgp
+    # branch and pays the ~3h XLA compile.  Lifting the radiation-cycle
+    # loop to the HOST (Python) makes the no-rad dynamics+physics scan and
+    # the rrtmgp radiation compile as TWO SEPARATE executables.  These two
+    # functions are the host-callable halves; the driver alternates them
+    # (``run_norad_scan`` × ``run_rad``) once per radiation cycle.  Both
+    # are gated OFF by default: built only when ``step_unified_no_rad`` and
+    # ``pipeline`` are supplied AND ``rad_update_steps > 1``.
+    # ------------------------------------------------------------------
+    _unfused_available = (
+        step_unified_no_rad is not None
+        and pipeline is not None
+        and rad_update_steps > 1
+    )
+
+    def _run_norad_scan(carry: SegmentCarry,
+                        forcing: SegmentForcing) -> SegmentCarry:
+        """Advance exactly ``rad_update_steps`` no-rad steps as ONE scan.
+
+        Pure dynamics+physics with HELD radiation (``step_unified_no_rad``
+        — no fresh rrtmgp call), so this HLO contains NO rrtmgp.  Identical
+        per-step body to ``_run_subcycled``'s ``body_no_rad``; only the
+        compile boundary differs (host-level, not inlined in an outer
+        scan).
+        """
+        body_no_rad = _make_single_step(forcing, step_fn=step_unified_no_rad)
+        # This unfused no-rad scan has length rad_update_steps (called once per
+        # radiation cycle); resolve the checkpoint policy against THAT length so
+        # a long rad_update_steps still auto-checkpoints under default None.
+        if _resolve_checkpoint(gradient_checkpoint, rad_update_steps):
+            body_no_rad = jax.checkpoint(body_no_rad, prevent_cse=False)
+        final_carry, _ = jax.lax.scan(
+            body_no_rad, carry, None, length=rad_update_steps,
+        )
+        return final_carry
+
+    def _run_rad(carry: SegmentCarry,
+                 forcing: SegmentForcing) -> SegmentCarry:
+        """Recompute FRESH held radiation + T_land from the carry state.
+
+        Radiation ONLY (no dynamics/physics), so this HLO is rrtmgp-only.
+        Calls the SAME ``pipeline.compute_radiation_core`` the fused
+        ``_rad_branch`` calls (physics_pipeline.py), threading ``forcing``
+        identically (so ``sfc_albedo_override`` / ``sfc_T_override`` /
+        column-shard handling is byte-identical), and writes the 6 held
+        flux fields + ``T_land`` back at owned indices.  Every other carry
+        field passes through unchanged — the post-cycle dynamics+physics
+        state is untouched here.
+
+        Owned-face extract/write-back MIRROR ``_make_single_step``
+        (compiled_segments.py): on the MPI replicated-dynamics path
+        physics/radiation operate on owned columns only and write back at
+        ``owned_face_ids``; on the single-rank path the whole grid is
+        owned.
+        """
+        # Reconstruct GHG VMR dict from the forcing array + static keys,
+        # exactly as ``_make_single_step`` does (keys captured in closure;
+        # values dynamic).
+        _ghg_vmr_override = ghg_array_to_dict(forcing.ghg_vmr, _ghg_keys)
+
+        if owned_face_ids is not None:
+            _ofi = owned_face_ids
+            _T_land_in = (carry.T_land[_ofi]
+                          if carry.T_land is not None else None)
+            _w_land_in = (carry.w_land[_ofi]
+                          if carry.w_land is not None else None)
+            _snow_in = (carry.snow[_ofi]
+                        if carry.snow is not None else None)
+
+            def _own(fld):
+                return None if fld is None else fld[_ofi]
+
+            # 8th return (multilayer land state) is unused on the MPI owned-face
+            # path: multilayer land is single-rank only, so land_ml_new is carried
+            # separately (= carry.land_ml) above; discard the radiation-core value.
+            (dT_dt_rad, sw_net_sfc, lw_net_sfc,
+             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new_local, _) = \
+                pipeline.compute_radiation_core(
+                    carry.T[_ofi], carry.p_s[_ofi], carry.q_v[_ofi],
+                    forcing.sst, forcing.sic, lat, lon,
+                    forcing.day_of_year, forcing.seconds_of_day,
+                    forcing.solar_weights, forcing.s_0,
+                    forcing.o3_vmr, forcing.aerosol_od,
+                    aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
+                    tau_equator=_tau_equator, tau_pole=_tau_pole,
+                    albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
+                    ghg_vmr_override=_ghg_vmr_override,
+                    q_c=_own(carry.q_c), q_i=_own(carry.q_i),
+                    N_c=_own(carry.N_c), N_i=_own(carry.N_i),
+                    cloud_scheme=pipeline._cloud_scheme,
+                    u=carry.u[_ofi], v=carry.v[_ofi], dt=_dt,
+                    T_land=_T_land_in, land_ml=carry.land_ml,
+                    sfc_albedo_override=forcing.sfc_albedo_override,
+                    sfc_T_override=forcing.sfc_T_override,
+                    conv_precip=_own(carry.conv_precip_prev),
+                    w_land=_w_land_in, snow=_snow_in,
+                )
+            held_new = (
+                carry.held_dT_rad.at[_ofi].set(dT_dt_rad),
+                carry.held_sw_net_sfc.at[_ofi].set(sw_net_sfc),
+                carry.held_lw_net_sfc.at[_ofi].set(lw_net_sfc),
+                carry.held_sw_up_toa.at[_ofi].set(sw_up_toa),
+                carry.held_lw_up_toa.at[_ofi].set(lw_up_toa),
+                carry.held_sw_down_toa.at[_ofi].set(sw_down_toa),
+            )
+            T_land_new = (
+                carry.T_land.at[_ofi].set(T_land_new_local)
+                if carry.T_land is not None else None
+            )
+        else:
+            # 8th return (multilayer land state) unused on this MPI path — land_ml
+            # is single-rank only and carried separately (see land_ml_new above).
+            (dT_dt_rad, sw_net_sfc, lw_net_sfc,
+             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new, _) = \
+                pipeline.compute_radiation_core(
+                    carry.T, carry.p_s, carry.q_v,
+                    forcing.sst, forcing.sic, lat, lon,
+                    forcing.day_of_year, forcing.seconds_of_day,
+                    forcing.solar_weights, forcing.s_0,
+                    forcing.o3_vmr, forcing.aerosol_od,
+                    aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
+                    tau_equator=_tau_equator, tau_pole=_tau_pole,
+                    albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
+                    ghg_vmr_override=_ghg_vmr_override,
+                    q_c=carry.q_c, q_i=carry.q_i,
+                    N_c=carry.N_c, N_i=carry.N_i,
+                    cloud_scheme=pipeline._cloud_scheme,
+                    u=carry.u, v=carry.v, dt=_dt,
+                    T_land=carry.T_land, land_ml=carry.land_ml,
+                    sfc_albedo_override=forcing.sfc_albedo_override,
+                    sfc_T_override=forcing.sfc_T_override,
+                    conv_precip=carry.conv_precip_prev,
+                    w_land=carry.w_land, snow=carry.snow,
+                )
+            held_new = (
+                dT_dt_rad, sw_net_sfc, lw_net_sfc,
+                sw_up_toa, lw_up_toa, sw_down_toa,
+            )
+
+        # Write ONLY the 6 held fields + T_land back (matched to the
+        # carry's storage dtype, like the fused write-back); every other
+        # field is the unchanged post-cycle state.
+        return carry._replace(
+            held_dT_rad=_match_dtype(held_new[0], carry.held_dT_rad),
+            held_sw_net_sfc=_match_dtype(held_new[1], carry.held_sw_net_sfc),
+            held_lw_net_sfc=_match_dtype(held_new[2], carry.held_lw_net_sfc),
+            held_sw_up_toa=_match_dtype(held_new[3], carry.held_sw_up_toa),
+            held_lw_up_toa=_match_dtype(held_new[4], carry.held_lw_up_toa),
+            held_sw_down_toa=_match_dtype(held_new[5], carry.held_sw_down_toa),
+            T_land=(None if carry.T_land is None
+                    else _match_dtype(T_land_new, carry.T_land)),
+        )
 
     @partial(jax.jit, static_argnums=(1,), donate_argnums=(0,))
     def _run_subcycled_jit(carry: SegmentCarry, n_steps: int,
@@ -1085,6 +1473,21 @@ def build_segment_fn(
     def _run_single_jit(carry: SegmentCarry, n_steps: int,
                         forcing: SegmentForcing) -> SegmentCarry:
         return _run_single(carry, n_steps, forcing)
+
+    # Non-sharded production jits for the un-fused host kernels.  No static
+    # ``n_steps`` arg (the scan length is the closure-captured
+    # ``rad_update_steps``), donate the carry like the fused kernels.  Only
+    # built when ``_unfused_available`` (else the attributes stay None).
+    if _unfused_available:
+        @partial(jax.jit, donate_argnums=(0,))
+        def _run_norad_scan_jit(carry: SegmentCarry,
+                                forcing: SegmentForcing) -> SegmentCarry:
+            return _run_norad_scan(carry, forcing)
+
+        @partial(jax.jit, donate_argnums=(0,))
+        def _run_rad_jit(carry: SegmentCarry,
+                         forcing: SegmentForcing) -> SegmentCarry:
+            return _run_rad(carry, forcing)
 
     def _use_subcycle(carry: SegmentCarry, n_steps: int) -> bool:
         """Decide whether the subcycled scan path is valid for this call.
@@ -1349,8 +1752,23 @@ def build_segment_fn(
         )
         fn = _sharded_jit_cache.get(key)
         if fn is None:
-            target = _run_subcycled if kind == "subcycled" else _run_single
-            jit_kwargs: dict = dict(static_argnums=(1,))
+            # The "norad_scan" / "rad" host kinds (un-fused radiation) take
+            # ``(carry, forcing)`` with NO static ``n_steps`` arg, so they
+            # skip ``static_argnums``; the legacy "single" / "subcycled"
+            # scan kinds take ``(carry, n_steps_static, forcing)``.  Either
+            # way the DYNAMIC args are exactly ``(carry, forcing)``, so the
+            # 2-tuple in/out shardings below bind identically.
+            _targets = {
+                "subcycled": _run_subcycled,
+                "single": _run_single,
+                "norad_scan": _run_norad_scan,
+                "rad": _run_rad,
+            }
+            target = _targets[kind]
+            _has_static_nsteps = kind in ("single", "subcycled")
+            jit_kwargs: dict = (
+                dict(static_argnums=(1,)) if _has_static_nsteps else {}
+            )
             if pin:
                 # NOTE: with ``static_argnums`` JAX matches
                 # ``in_shardings`` against the tree of DYNAMIC args
@@ -1358,7 +1776,9 @@ def build_segment_fn(
                 # uses ``tree_without_statics``) — hence a 2-tuple for
                 # the ``(carry, n_steps_static, forcing)`` signature.
                 # A 3-tuple with a placeholder for ``n_steps`` raises
-                # "wrong length ... for an args tuple of length 2".
+                # "wrong length ... for an args tuple of length 2".  The
+                # ``(carry, forcing)`` host kinds already have exactly
+                # those two dynamic args, so the SAME 2-tuple applies.
                 # Every array leaf carries a concrete ``NamedSharding``
                 # (its committed layout if on this mesh, else replicated
                 # ``P()``); structural ``None`` marks only the non-array
@@ -1366,7 +1786,9 @@ def build_segment_fn(
                 # ``create_output_shardings`` produced, so the
                 # in_shardings tree binds 1:1 to the argument leaves.
                 # ``out_shardings`` == the carry's input layout because
-                # the scan body preserves carry shape (no resize/repack).
+                # the scan/rad body preserves carry shape (no resize/
+                # repack — ``run_rad`` writes the held fields + T_land
+                # in place at owned indices).
                 jit_kwargs["in_shardings"] = (
                     _sharding_tree(carry), _sharding_tree(forcing),
                 )
@@ -1445,11 +1867,47 @@ def build_segment_fn(
             )
         return _run_single(carry, n_steps, forcing)
 
+    # Host-callable un-fused-radiation entry points (PRODUCTION
+    # ``_run_compiled`` only; default OFF).  Each is its OWN compiled
+    # executable: ``run_norad_scan`` is a pure no-rad dynamics+physics
+    # scan (no rrtmgp in its HLO); ``run_rad`` is rrtmgp-only.  They route
+    # through the SAME ``_get_sharded_jit`` machinery as the fused kernels
+    # so SPMD in/out shardings match the upstream-sharded carry (reading
+    # ``.sharding`` off the committed carry/forcing — never re-derived).
+    # Attached only when ``_unfused_available`` so the legacy path (and
+    # any caller that does not supply ``pipeline`` / ``step_unified_no_rad``
+    # / ``rad_update_steps>1``) sees ``None`` and the byte-identical fused
+    # ``run_segment`` is used instead.
+    _run_norad_scan_public = None
+    _run_rad_public = None
+    if _unfused_available:
+        def _run_norad_scan_public(carry: SegmentCarry,           # noqa: F811
+                                   forcing: SegmentForcing) -> SegmentCarry:
+            """Advance ``rad_update_steps`` no-rad steps (compiled, host)."""
+            if _sharding_active:
+                return _get_sharded_jit("norad_scan", True, carry, forcing)(
+                    carry, forcing,
+                )
+            return _run_norad_scan_jit(carry, forcing)
+
+        def _run_rad_public(carry: SegmentCarry,                  # noqa: F811
+                            forcing: SegmentForcing) -> SegmentCarry:
+            """Recompute fresh held radiation + T_land (compiled, host)."""
+            if _sharding_active:
+                return _get_sharded_jit("rad", True, carry, forcing)(
+                    carry, forcing,
+                )
+            return _run_rad_jit(carry, forcing)
+
     # Attach both variants; default is the JIT version for inference.
     # The sharded-wrapper cache is exposed for tests/introspection
     # (e.g. asserting "no wrapper rebuild per segment").
     run_segment_jit.raw = run_segment
     run_segment_jit._sharded_jit_cache = _sharded_jit_cache
+    # Un-fused-radiation host kernels (None unless built); the driver only
+    # uses them when ``ExperimentConfig.unfused_radiation`` is set.
+    run_segment_jit.run_norad_scan = _run_norad_scan_public
+    run_segment_jit.run_rad = _run_rad_public
     return run_segment_jit
 
 

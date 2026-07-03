@@ -16,6 +16,7 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.core.state import MPASShallowWaterState
+from legoesm.core.precision import get_policy
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm import constants
 
@@ -71,11 +72,15 @@ def williamson_test2_mpas(mesh: VoronoiMesh) -> MPASShallowWaterState:
 
     u_edge = _project_velocity_to_edges(u_east_cell, v_north_cell, mesh)
 
+    # Thread the precision-policy storage dtype (see williamson_test5_mpas).
+    _dtype = get_policy().storage
     return MPASShallowWaterState(
-        h=Field(data=h_data, name="h", dims=("nCells",), units="m"),
-        u=Field(data=u_edge, name="u", dims=("nEdges",), units="m/s",
-                staggering="edge"),
-        h_s=Field(data=h_s_data, name="h_s", dims=("nCells",), units="m"),
+        h=Field(data=h_data.astype(_dtype), name="h", dims=("nCells",),
+                units="m"),
+        u=Field(data=u_edge.astype(_dtype), name="u", dims=("nEdges",),
+                units="m/s", staggering="edge"),
+        h_s=Field(data=h_s_data.astype(_dtype), name="h_s", dims=("nCells",),
+                  units="m"),
     )
 
 
@@ -121,11 +126,19 @@ def williamson_test5_mpas(mesh: VoronoiMesh) -> MPASShallowWaterState:
     v_north_cell = jnp.zeros_like(lat)
     u_edge = _project_velocity_to_edges(u_east_cell, v_north_cell, mesh)
 
+    # Thread the precision-policy storage dtype through the state (the mesh
+    # coords are float32, so the arithmetic above yields float32 regardless of
+    # policy). Mirrors held_suarez_init_mpas: under PrecisionPolicy.fp64() the
+    # state must be fp64 so it agrees with the fp64 mass-fixer tendency inside a
+    # scan carry; under the default fp32 policy this is a no-op.
+    _dtype = get_policy().storage
     return MPASShallowWaterState(
-        h=Field(data=h_data, name="h", dims=("nCells",), units="m"),
-        u=Field(data=u_edge, name="u", dims=("nEdges",), units="m/s",
-                staggering="edge"),
-        h_s=Field(data=h_s_data, name="h_s", dims=("nCells",), units="m"),
+        h=Field(data=h_data.astype(_dtype), name="h", dims=("nCells",),
+                units="m"),
+        u=Field(data=u_edge.astype(_dtype), name="u", dims=("nEdges",),
+                units="m/s", staggering="edge"),
+        h_s=Field(data=h_s_data.astype(_dtype), name="h_s", dims=("nCells",),
+                  units="m"),
     )
 
 
@@ -183,11 +196,15 @@ def williamson_test6_mpas(mesh: VoronoiMesh) -> MPASShallowWaterState:
     u_edge = _project_velocity_to_edges(u_east_cell, v_north_cell, mesh)
     h_s_data = jnp.zeros_like(h_data)
 
+    # Thread the precision-policy storage dtype (see williamson_test5_mpas).
+    _dtype = get_policy().storage
     return MPASShallowWaterState(
-        h=Field(data=h_data, name="h", dims=("nCells",), units="m"),
-        u=Field(data=u_edge, name="u", dims=("nEdges",), units="m/s",
-                staggering="edge"),
-        h_s=Field(data=h_s_data, name="h_s", dims=("nCells",), units="m"),
+        h=Field(data=h_data.astype(_dtype), name="h", dims=("nCells",),
+                units="m"),
+        u=Field(data=u_edge.astype(_dtype), name="u", dims=("nEdges",),
+                units="m/s", staggering="edge"),
+        h_s=Field(data=h_s_data.astype(_dtype), name="h_s", dims=("nCells",),
+                  units="m"),
     )
 
 

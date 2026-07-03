@@ -215,6 +215,7 @@ def _compute_relative_abundance_interpolant(
   # entry that would otherwise produce ``inf/NaN`` in this ratio and
   # propagate through the reverse-mode AD path.  See iter-5 commit for the
   # analogous fix on ``combined_vmr``.
+  # coeff-ok: floor never hit — shipped tables have vmr_ref >= 1e-10 >> eps.
   vmr_ref_ratio = vmr_ref[0] / jnp.maximum(vmr_ref[1], _VMR_SAFE_DIV_EPS)
   combined_vmr = vmr_for_interp[0] + vmr_ref_ratio * vmr_for_interp[1]
   # Consistent with how the RRTM absorption coefficient tables are designed, the
@@ -329,7 +330,15 @@ def compute_major_optical_depth(
       molecules
       / _M2_TO_CM2_FACTOR
       * optics_utils.interpolate(
-          lookup_gas_optics.kmajor[..., igpt],
+          # ``optimization_barrier`` keeps XLA from CONSTANT-FOLDING the
+          # per-g-point slice/gather of the (large, compile-time-constant)
+          # k-distribution table into the kernel: without it XLA bakes folded
+          # table kernels that overflow the CPU LLVM-JIT executable code region
+          # (``Failed to materialize symbols`` / ``Cannot allocate memory``)
+          # and make GPU/TPU compile pathologically slow.  The barrier is the
+          # IDENTITY at runtime (answer-preserving) and turns the table read
+          # into a cheap RUNTIME gather on all backends.
+          jax.lax.optimization_barrier(lookup_gas_optics.kmajor)[..., igpt],
           interpolant_fns=interpolant_fn_dict,
       )
   )
@@ -379,7 +388,7 @@ def _compute_minor_optical_depth(
     idx_scaling_gas = lookup.idx_scaling_gases_lower
     scale_by_complement = lookup.lower_scale_by_complement
     minor_gpt_shift = lookup.minor_lower_gpt_shift
-    kminor = lookup.kminor_lower
+    kminor = jax.lax.optimization_barrier(lookup.kminor_lower)
   else:
     minor_absorber_intervals = lookup.n_minor_absrb_upper
     minor_bnd_start = lookup.minor_upper_bnd_start
@@ -389,7 +398,7 @@ def _compute_minor_optical_depth(
     idx_scaling_gas = lookup.idx_scaling_gases_upper
     scale_by_complement = lookup.upper_scale_by_complement
     minor_gpt_shift = lookup.minor_upper_gpt_shift
-    kminor = lookup.kminor_upper
+    kminor = jax.lax.optimization_barrier(lookup.kminor_upper)
 
   ibnd = lookup.g_point_to_bnd[igpt]
   loc_in_bnd = igpt - lookup.bnd_lims_gpt[ibnd, 0]
@@ -594,11 +603,13 @@ def compute_rayleigh_optical_depth(
   interpolant_fns = collections.OrderedDict(
       (('t', lambda: temperature_interpolant), ('m', mix_interpolant_fn))
   )
+  # optimization_barrier: prevent XLA constant-folding the per-g-point Rayleigh
+  # table slices (see compute_major_optical_depth) — identity at runtime.
   rayl_tau_lower = optics_utils.interpolate(
-      lkp.rayl_lower[..., igpt], interpolant_fns
+      jax.lax.optimization_barrier(lkp.rayl_lower)[..., igpt], interpolant_fns
   )
   rayl_tau_upper = optics_utils.interpolate(
-      lkp.rayl_upper[..., igpt], interpolant_fns
+      jax.lax.optimization_barrier(lkp.rayl_upper)[..., igpt], interpolant_fns
   )
   if vmr_fields is not None and lkp.idx_h2o in vmr_fields:
     factor = 1.0 + vmr_fields[lkp.idx_h2o]
@@ -667,7 +678,8 @@ def compute_planck_fraction(
 
   # 3-D interpolation of the Planck fraction.
   return optics_utils.interpolate(
-      lookup.planck_fraction[..., igpt], interpolants_fns
+      jax.lax.optimization_barrier(lookup.planck_fraction)[..., igpt],
+      interpolants_fns
   )
 
 
@@ -705,6 +717,6 @@ def compute_planck_sources(
       t_for_planck, lookup.t_planck
   )
   return planck_fraction * optics_utils.interpolate(
-      lookup.totplnk[ibnd, :],
+      jax.lax.optimization_barrier(lookup.totplnk)[ibnd, :],
       collections.OrderedDict({'t': lambda: interpolant}),
   )

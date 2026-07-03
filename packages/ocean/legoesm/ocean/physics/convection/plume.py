@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 import jax
 import jax.numpy as jnp
 
@@ -19,6 +21,7 @@ def plume_convection(
     z_coord: OceanZStarCoordinate,
     jacobian: jnp.ndarray,
     cfg: PlumeConfig,
+    eos_fn: Callable | None = None,
 ) -> OceanConvectionOutput:
     """Apply entraining mass-flux plume convection.
 
@@ -26,15 +29,24 @@ def plume_convection(
     ----------
     T, S : array (6, n, n, nlev)
     rho : array (6, n, n, nlev)
+        Ambient in-situ density — MUST be computed with the same EOS as
+        ``eos_fn`` so the parcel/ambient buoyancy comparison is consistent.
     p_hydro : array (6, n, n, nlev)
     z_coord : OceanZStarCoordinate
     jacobian : array (6, n, n)
     cfg : PlumeConfig
+    eos_fn : callable or None
+        EOS ``fn(T, S, p) -> rho`` for the plume-parcel density. If None,
+        uses ``wright_eos`` (#518: every other physics module threads
+        ``eos_fn``; do not hardcode an EOS that can disagree with the
+        ambient ``rho`` passed in).
 
     Returns
     -------
     OceanConvectionOutput
     """
+    if eos_fn is None:
+        eos_fn = wright_eos
     nlev = T.shape[-1]
     # Carry/output dtype: promote across the state arrays *and* the config
     # params that enter the scan carry + tendencies.  This (a) keeps the
@@ -57,10 +69,15 @@ def plume_convection(
     # Detect unstable surface: rho(k=0) > rho(k=1)
     surface_unstable = rho[..., 0] > rho[..., 1]  # (6, n, n)
 
-    # Initialize plume properties at surface.  Cast to the state dtype so a
-    # float64-traced ``cfg.T_excess`` (under ``jax.grad``) cannot promote the
-    # scan-carry init relative to the in-loop carry (see scan_fn dtype note).
-    T_plume_init = (T[..., 0] + cfg.T_excess).astype(dtype)
+    # Initialize plume properties at surface.  This is a DOWNWARD (sinking)
+    # ocean convective plume, so the source parcel must be *denser* than the
+    # surface water that feeds it — i.e. COLDER by ``cfg.T_excess`` (a
+    # destabilizing magnitude), not warmer.  A positive (warm) perturbation
+    # would make the parcel lighter and oppose sinking.  Cast to the state
+    # dtype so a float64-traced ``cfg.T_excess`` (under ``jax.grad``) cannot
+    # promote the scan-carry init relative to the in-loop carry (see scan_fn
+    # dtype note).
+    T_plume_init = (T[..., 0] - cfg.T_excess).astype(dtype)
     S_plume_init = S[..., 0].astype(dtype)
 
     # Descend plume using scan over levels (starting from level 1)
@@ -88,7 +105,7 @@ def plume_convection(
         S_plume = ((1.0 - entrain) * S_plume + entrain * S[..., k]).astype(dtype)
 
         # Buoyancy check
-        rho_plume = wright_eos(T_plume, S_plume, p_hydro[..., k])
+        rho_plume = eos_fn(T_plume, S_plume, p_hydro[..., k])
         delta_rho = rho_plume - rho[..., k]
 
         # Plume is active where it's denser than environment (sinking):

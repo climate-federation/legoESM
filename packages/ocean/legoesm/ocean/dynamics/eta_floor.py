@@ -20,7 +20,30 @@ def _global_sum_pair(a: jnp.ndarray, b: jnp.ndarray) -> tuple[jnp.ndarray, jnp.n
     two scalars and reducing once halves that to 180 — and the dominant
     barotropic-loop cost on multi-GPU runs is precisely this MPI
     latency, not bandwidth.
+
+    SPMD (single-controller lat-band shard_map, route-B multi-GPU — no mpi4jax):
+    ``a`` / ``b`` are PARTIAL sums over this device's latitude band and MUST be
+    reduced across the ``"lat"`` mesh axis with ``jax.lax.psum`` — checked FIRST
+    because ``is_multi_process()`` is FALSE under one process, so the MPI gate
+    below would return each band's PARTIAL ``(mass_added, above_area)`` and the
+    per-substep eta mass-redistribution correction (``mass_added/above_area``)
+    would be per-band-WRONG (the dominant SPMD-equivalence error: this fires
+    ``n_iter`` × per substep × per step even at the default
+    ``barotropic_local_subcycle_clamp=False``).  Keyed on the ``"lat"`` axis BY
+    NAME so a coupled cube-atm SPMD mesh falls through (ocean fields are never
+    cube-sharded).  ``psum`` is self-transposing ⇒ AD-safe.  Inert for serial /
+    MPI / cube.
     """
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    if get_halo_backend() == "spmd":
+        mesh = get_spmd_mesh()
+        if mesh is None:
+            raise RuntimeError(
+                "_global_sum_pair: halo backend is 'spmd' but no SPMD mesh is "
+                "set; arm it via activate_latlon_spmd_halo(mesh).")
+        if "lat" in tuple(mesh.axis_names):
+            import jax
+            return jax.lax.psum(a, "lat"), jax.lax.psum(b, "lat")
     if is_multi_process():
         a_g, b_g = batch_allreduce_mpi([a, b], op="sum")
         return a_g, b_g

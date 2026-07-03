@@ -239,13 +239,12 @@ CANONICAL_FORMULAS = {
             # in flight (rebase 2026-06-12 baseline re-seed, not branch debt).
             "packages/atmosphere/legoesm/atmosphere/dynamics/spectral_les_plane.py": 2,
             "packages/atmosphere/legoesm/atmosphere/dynamics/spectral_nh.py": 2,
-            "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/hines.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/lindzen.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/mcfarlane.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/prognostic_spectral.py": 1,
+            # GWD hines/lindzen/mcfarlane/prognostic_spectral migrated their
+            # inline g/θ·∂θ/∂z N² to physics._shared.brunt_vaisala_n_full
+            # (ponytail dedup 2026-06-17) → budget ratcheted to 0 (entries removed).
             # clubb_lite keeps its single inline g/θ N² term by decision (the
             # buoyancy_coefficient wrapper was judged superfluous there —
-            # docs/md_files/clubb_port_history.md); this restores the pre-CLUBB-port
+            # docs/dev-notes/clubb_port_history.md); this restores the pre-CLUBB-port
             # main baseline value, it is NOT new debt.
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_lite.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py": 3,
@@ -255,7 +254,9 @@ CANONICAL_FORMULAS = {
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/pbl_height.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/smagorinsky.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/tke.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/ysu.py": 3,
+            # ysu.py: 4 inline g/θ buoyancy/N² re-derivations migrated to
+            # physics._shared.buoyancy_coefficient (audit item 7) → budget 0
+            # (entry removed; was 3, which had already gone stale at 4 actual).
         },
     },
     "monin_obukhov_stability_fn": {
@@ -286,11 +287,11 @@ CANONICAL_FORMULAS = {
             "packages/atmosphere/legoesm/atmosphere/physics/convection/dca.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/convection/kain_fritsch.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/hines.py": 1,
+            # GWD hines/lindzen/mcfarlane/prognostic_spectral dropped their inline
+            # θ=T·(p_ref/p)^κ (folded into physics._shared.brunt_vaisala_n_full,
+            # ponytail dedup 2026-06-17) → entries removed (budget 0). integration.py
+            # keeps its separate exner site.
             "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/integration.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/lindzen.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/mcfarlane.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/prognostic_spectral.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py": 3,
             "packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py": 3,
             "packages/atmosphere/legoesm/atmosphere/physics/thermodynamics.py": 3,

@@ -1,0 +1,360 @@
+# MITgcm barotropic-gyre oracle: the residual is the free-surface SPLIT, not the momentum scheme
+
+## FINAL 2026-06-21 (issue #519 item 1): bespoke `GyreFaithfulModel` DELETED
+
+With the iteration-7 metric fix below, the canonical, end-to-end `jax.grad`-able
+`LatLonCGridOceanModel` runs the gyre LAMINAR by itself, so the bespoke scipy-sparse
+(non-differentiable) `GyreFaithfulModel` is no longer the only laminar reference. It was
+**deleted** (`packages/ocean/legoesm/ocean/fidelity/mitgcm_gyre_faithful.py`,
+`scripts/validate/ocean_fidelity/mitgcm_gyre_faithful_stepper.py`,
+`tests/ocean/fidelity/test_mitgcm_gyre_faithful.py`) and `build_gyre_faithful_model` removed
+from the recipe. BOTH oracle tiers (10-step per-tendency AND multi-year laminar equilibrium)
+now run on the canonical model via `build_gyre_recipe` (default `barotropic_solver="implicit_cn"`).
+Measured canonical equilibrium at 15000 steps (~0.57 yr): `|u|max≈0.027` / `|v|max≈0.079`,
+steady — within ~12% / ~6% of MITgcm's `0.031` / `0.084`, far inside the laminar band (the
+turbulent attractor is 0.15-0.37). The residual is the canonical operator-split's slightly higher
+effective dissipation on a Munk layer resolved by only ~1.7 cells. New test:
+`tests/ocean/fidelity/test_mitgcm_gyre_canonical.py` (dipole + laminar equilibrium +
+steady-not-growing + a `jax.grad` smoke check the scipy solver could not pass). The iteration-6
+section below (the bespoke stepper) is therefore **SUPERSEDED**.
+
+## RESOLVED 2026-06-18 (iteration 7): a cos-lat METRIC INCONSISTENCY in the beta-plane grid
+
+The turbulent overshoot is **fixed**. Root cause, found by a clean *dynamic operator bisect*
+(`scripts/tmp/_gyre_swap_bisect.py`) + a grid-metric audit:
+
+1. **Operators are innocent.** Swapping the production advection / Coriolis / viscosity operators
+   ONE AT A TIME into the bit-exact laminar faithful stepper (which keeps a DIRECT unsplit
+   Helmholtz free-surface solve) leaves every run laminar (|u|max 0.030 at step 6000, vs the
+   baseline 0.030). Coriolis is bit-identical (corr 1.0); advection +1.5%, viscosity ~0.8% — none
+   destabilises. So the explicit momentum operators are NOT the source.
+2. **The culprit was the beta-plane grid metric.** `create_beta_plane_cgrid_geometry` set
+   `cos_lat ≡ 1` (uniform Cartesian metric) but stored a non-zero pseudo-`lat = y_c/radius`
+   (up to 0.19 rad). `gradient_x_cgrid` uses the metric field (`dx_u = R·dlon·cos_lat = dx_m`,
+   uniform), but `divergence_cgrid` (v-face length) and the flux-form advection **recompute**
+   `R·cos(grid.lat)·dlon` — which is 0.982·dx_m at the north edge. (The viscosity operator
+   `flux_divergence_viscosity_cgrid` reads `grid.cos_lat` and is NOT affected.) That ~1.8%
+   grad↔div metric mismatch breaks the discrete adjointness the implicit free-surface projection
+   relies on → a ~1%/step non-conservative energy source. On the
+   marginally-resolved (Munk δ≈1.7-cell) gyre that flips the WBC from laminar to a turbulent
+   attractor.
+3. **Fix:** set the beta-plane pseudo-`lat ≡ 0` (a Cartesian tangent plane has `cos_lat ≡ 1`;
+   the meridional position lives in `f = f0 + beta·y_c`, untouched). Then every `cos(grid.lat)`
+   recompute returns 1, matching the explicit metrics. **Measured: the FULL production
+   `LatLonCGridOceanModel` (both the recipe-default Sadourny-Coriolis path AND the explicit-AB2
+   path) now spins up LAMINAR and monotone toward |u|max≈0.031 / |v|max≈0.084** instead of
+   overshooting to 0.066+. The earlier "free-surface split projection leaks energy" framing below
+   was right that the FS solve was the amplifier, but the *source* was the grid metric feeding it —
+   not the split structure (an unsplit production path inherits the same metric and the SAME fix
+   cures both).
+
+Decisive probes: `scripts/tmp/_gyre_swap_bisect.py` (operator bisect), `_gyre_op_compare2.py`
+(per-term + power budget), `_gyre_latzero_test.py` (lat=0 → laminar), `_gyre_prod_equil.py`
+(recipe equilibrium). Fix in `packages/core/legoesm/grids/latlon.py::create_beta_plane_cgrid_geometry`.
+
+---
+
+**Status (2026-06-17, revised) [SUPERSEDED by the RESOLVED block above]:** root cause *localized by direct measurement* to the
+**barotropic free-surface predictor–corrector projection** in legoESM's split solver. An
+earlier version of this note (commit `5ba07e726`) attributed the residual to a non-energy-
+conserving *momentum* scheme and prescribed an Arakawa/Sadourny Coriolis + enstrophy-conserving
+advection. **That prescription is wrong** and is corrected below: the Coriolis is *already*
+energy-neutral, the advection is provably irrelevant to the source, and MITgcm itself uses a
+non-energy-conserving flux-form momentum scheme yet stays laminar. The real source is the
+operator-split free surface.
+
+## The gap (measured on-box, both models)
+
+legoESM reproduces MITgcm `tutorial_barotropic_gyre` to **0.9997 eta pattern correlation at 10
+steps**, but the multi-year equilibria diverge:
+
+| | legoESM (recipe) | MITgcm (75 000 steps on-box) |
+|---|---|---|
+| equilibrium `|u|max` | turbulent, **0.15–0.37** | laminar, **0.031** (peak 0.033) |
+| spin-up | overshoots ~0.19yr, goes eddying | monotone to 0.031 by 0.38yr, holds 2.85 yr |
+
+MITgcm's own per-step monitor (`out_eq.txt`, `monitorFreq=1`) shows `dynstat_uvel_max` rising
+*monotonically* to ~0.030 and never exceeding **0.033** over the whole 2.85-yr run — perfectly
+laminar, no overshoot. legoESM at the same wall-clock is already 0.064 → 0.107 → turbulent.
+
+## What was ELIMINATED this session (all by direct measurement)
+
+| candidate | test | verdict |
+|---|---|---|
+| **Wind forcing** | legoESM applied stress vs `windx_cosy.bin` | bit-exact (max diff 3.7e-9) — not it |
+| **Advection stencil** | legoESM `centered` flux vs MITgcm `mom_u_adv_uu.F` | identical `0.25(Qw+Qe)(uw+ue)` |
+| **Advection scheme** | spin-up under upwind / centered / vector-invariant | faithful `centered` is *worse* (0.37); all over-energize |
+| **Dissipation deficit** | KE budget at rough & laminar states | dissipation is *large* (`D=-1.1e9`, exceeds wind input); balances wind exactly at the laminar state |
+| **Coriolis** | instantaneous power `∫u·(f k×u)` (uniform grid → exact) | **machine-zero** (`|P|/(f·KE)=4.5e-8`); legoESM's Sadourny Coriolis already conserves energy |
+| **Centered advection** | instantaneous power `∫u·adv` | **machine-zero** (`P=1e-13`); legoESM's centered flux-form is energy-neutral |
+| **Time integration** | inviscid `E(T)/E0` vs `dt` (1200→150 s) | growth **converges** to +20.5% as `dt→0` → spatial, not a time-truncation error |
+
+## UPDATE 2026-06-18 (iteration 3): the leak is OPERATOR-LEVEL, not the split structure
+
+Per the user's request, a **bit-faithful MITgcm UNSPLIT single-layer stepper** was built and run
+(`scripts/tmp/_gyre_unsplit_mitgcm_faithful.py`): explicit ``Gu`` = advection(centered) +
+Coriolis(face-f) + flux-divergence viscosity + no-slip sidedrag + wind (NO η-PGF) → AB2(abEps=0.01)
+→ ``u* = u+Δt·Gu`` → implicit Helmholtz η-solve → ``u^{n+1}=u*−gΔt∇η``. **It also goes turbulent**
+(|u|max 0.026→0.14 by 0.38yr), tracking MITgcm *exactly* at 0.1yr (0.0256 vs 0.026) then diverging.
+AB2 vs forward-Euler made NO difference (byte-identical trajectory). So:
+
+> **The split predictor-corrector velocity inconsistency was NOT the cause** — a clean unsplit
+> single-velocity scheme leaks the same. Both legoESM schemes (split *and* faithful unsplit) run
+> the gyre turbulent; MITgcm at the same A_h=400 stays laminar at 0.031. The discrepancy is
+> therefore at the **OPERATOR** level (an energy source legoESM's discretization has that
+> MITgcm's lacks), present regardless of time scheme or split/unsplit structure.
+
+Further eliminations (iteration 3):
+- **Viscosity operator is not the lever**: ``vector_laplacian`` (= MITgcm's grad(div)−curl(curl)
+  default) gives a trajectory *identical* to ``flux_divergence`` (0.064 vs 0.064 at 0.38yr) — as
+  expected for the near-non-divergent gyre.
+- **It is a source-vs-dissipation balance**: 4× viscosity (A_h=1600) on the unsplit stepper makes
+  it laminar (|u|max≈0.024, stable) — i.e. ~3× more dissipation than A_h=400 is needed to absorb
+  legoESM's spurious source, whereas MITgcm's A_h=400 suffices. (4×A_h is masking, not faithful.)
+
+Net: every targeted single-change fix has been falsified by measurement — vertex-f Coriolis, AB2,
+unsplit structure, viscosity operator, and all default knobs. The +12 % inviscid leak is real,
+first-order, dt-independent, advection-independent, and lives in the operator *composition* in a way
+that none of the isolated-operator tests (all energy-neutral/adjoint) capture. **STILL OPEN.**
+
+**Recommended rigorous next step** (the definitive "oracle as reference" approach, not yet done):
+generate a MITgcm reference at a *rough mid-spin-up* state (not the smooth equilibrium, where the
+earlier per-term diff already matched) and compare per-term momentum tendencies legoESM-vs-MITgcm
+at that state — the term that diverges there is the source. This needs MITgcm intermediate dumps
+(a fresh reference run), so it is scoped as the next investigation rather than another quick toggle.
+
+## UPDATE 2026-06-17 (iteration 2): the "Coriolis" attribution below is WRONG
+
+A clean **same-state f-toggle** (one rough gyre state, scale the grid ``f`` by 0/0.5/1.0)
+shows the inviscid leak is **independent of Coriolis**: ``f=0`` leaks IDENTICALLY to ``f=1``
+(``+5.2429e5`` both). The earlier ``f=0`` result that pointed at Coriolis used a *different*,
+smoother ``f=0`` spin-up state — a contaminated control. So the Coriolis attribution in the
+"## The source" section below is **superseded**.
+
+What iteration 2 established (solid, by measurement):
+- **Not Coriolis** (same-state f-toggle identical; a Sadourny vertex-f energy-conserving Coriolis
+  — now in ``coriolis_cgrid_energy_conserving``, committed — does not change the gyre).
+- **Not advection**: the thickness-weighted (physical) momentum-advection power ``⟨h_u u, adv⟩``
+  is machine-zero (so is the unweighted), and the semi-discrete ``dE/dt`` is byte-identical
+  across upwind/centered/vector-invariant.
+- **Not the free-surface solver in isolation**: calling the barotropic solver alone (``f=0``,
+  ``F_slow=0``) is mildly *dissipative* (−0.14 %/200 steps), and the Helmholtz operator
+  ``A = I − gΔt²∇·(H∇)`` is **exactly symmetric** (rel asym ~1e-15) → grad/div ARE discrete
+  adjoints.
+- **Not a default knob**: ``fix_eta_drift``, ``barotropic_diffusion_alpha``, the barotropic
+  time filter all toggle to byte-identical leak.
+- **Not a time-scheme error**: the leak *converges* as ``dt→0`` (clean centered-advection
+  dt-scan +11.3→12.1 %), i.e. it is a **first-order, spatial** effect; AB2 does not fix it.
+
+The defect is therefore in the **composition** advection→``F_slow``→barotropic predictor-corrector:
+a single inviscid step's ``dKE = ⟨Hu, du⟩ = +7.6e8`` (∝Δt, first-order) is NOT matched by the PE
+change (``dPE = +5.7e5``, ~1300× smaller) — KE rises with no corresponding PE drop, even though
+the individual PGF/continuity operators are adjoint. The leading hypothesis is a
+**momentum-advection ↔ continuity mass-flux inconsistency** (the momentum flux-form advection
+uses an ``h_k``-weighted transport that is not the same discrete mass flux the free-surface
+continuity uses, so the predictor-corrector is not energy-conserving for the coupled system —
+the "continuity-consistent advection" requirement of Arakawa / MOM6). This was NOT yet isolated
+or fixed; it needs a careful from-scratch energy budget of the exact stepped scheme, not the
+black-box probing above. **The fix is a scoped dycore task, still open.**
+
+Delivered this session: the energy-conserving vertex-f Coriolis option (correct + unit-tested,
+necessary-not-sufficient) and the elimination chain above.
+
+## The source (measured): the free-surface split projection  [SUPERSEDED — see UPDATE above]
+
+A **total mechanical-energy** budget (`E = KE + ½g∫η²`; PE is only ~0.1 % of KE here) shows a
+genuine spurious source under inviscid + unforced dynamics:
+
+- at the **rough/turbulent** state: `dE/dt > 0`, inviscid-unforced growth **+20.5 %/5.6 days**
+  (`S/W ≈ 3.2`, i.e. the dynamics inject ~3× the wind work);
+- at MITgcm's **smooth laminar** state: `S ≈ 0` (`|S|/|W| = 0.06`) and legoESM is *stable*.
+
+So the source is **gradient-/grid-scale-activated** — negligible on smooth fields, dominant once
+grid-scale structure appears. Spin-up from rest excites those modes and legoESM runs to a
+turbulent attractor while MITgcm stays laminar.
+
+Localization, step 1 — advection-independent: the semi-discrete source `dE/dt` is **byte-identical**
+(`+5.2518e5`, 6 sig figs) under **upwind, centered, and vector-invariant** momentum advection.
+Advection contributes *exactly nothing*.
+
+Localization, step 2 — it is the **Coriolis ⟷ implicit-free-surface coupling**. Re-running the
+inviscid + unforced semi-discrete `dE/dt` with **`f=0`** (no Coriolis) gives **exactly machine-zero**
+(`dE/dt = 0.0`); with the real β-plane `f` it is `+5.24e5`. So:
+
+> The free-surface projection *by itself* conserves energy exactly (the discrete grad/div pair is
+> adjoint for the actual masked flow — `f=0` proves it). The spurious source appears only when
+> there is **Coriolis-induced divergent flow** for the implicit free-surface step to project. The
+> Coriolis term is itself energy-neutral (`∫u·(f k×u)=0` to machine precision), but the **sequence
+> "apply explicit Coriolis → project onto the free-surface-balanced state"** is not energy-
+> conserving in legoESM's C-grid implicit solver. The error is `dt`-independent (semi-discrete) and
+> scales with the field's divergent content — hence gradient/grid-scale-activated.
+
+This is the one structure **MITgcm does not have**: MITgcm is **unsplit** for a single layer and
+its specific explicit-Coriolis → `cg2d` sequencing keeps the laminar Munk gyre at 0.031.
+
+**Verified NOT the fix (this session):** moving Coriolis out of the solver's forward-backward
+predictor into the AB2 explicit tendency `F_slow` (`coriolis_scheme="explicit_ab2"`, the solver's
+FB-Coriolis gated off) leaves the leak **byte-identical** (`+5.2429e5`) — the placement of the
+explicit Coriolis (FB vs AB2-`F_slow`) does not matter, because either way the Coriolis-induced
+divergence is what the projection mishandles. Likewise an "unsplit single-layer path" built on the
+existing implicit solver does **not** help: with the recipe's `θ_eta=θ_pgf=1.0` the predictor's
+old-η PGF cancels *exactly* (in both the corrector and the η-equation), so the θ=1 implicit-CN solve
+is **already algebraically the unsplit fully-implicit free surface** — and it still leaks. The
+leak is intrinsic to how the C-grid implicit free-surface step balances the Coriolis-driven flow.
+
+Symptom severity: bridging MITgcm's laminar 0.031 equilibrium into legoESM and integrating, legoESM
+**cannot hold it** — `|u|max` drifts 0.031 → 0.11 (and climbing) toward the turbulent attractor.
+
+## The fix (scoped — a real dycore task, NOT a config/wiring change)
+
+Make the **C-grid implicit free-surface step conserve total energy in the presence of Coriolis** —
+i.e. an energy-conserving coupling of the (energy-neutral) Coriolis operator with the free-surface
+projection, so the discrete `KE + ½g∫η²` is conserved when `f≠0`. This is genuinely a dycore
+problem (the projection of the Coriolis-divergent flow must be energy-orthogonal), and the
+oracle-faithful target is MITgcm's unsplit explicit-Coriolis → `cg2d` sequencing.
+
+What the fix is **NOT** (all ruled out by measurement): an Arakawa/Sadourny energy-conserving
+*Coriolis* (already energy-neutral); *enstrophy-conserving advection* (byte-identical source across
+all advection schemes; MITgcm's own flux-form isn't conserving yet stays laminar); a *time-scheme*
+change (source converges as `dt→0`); the *PGF/free-surface split* (`f=0` conserves exactly, and θ=1
+is already unsplit-equivalent); or the *explicit-Coriolis placement* (FB vs AB2 identical).
+
+The regression test `tests/ocean/unit/test_barotropic_energy_conservation.py` pins the inviscid-
+unforced KE growth so the fix has a target to drive to ~0. NOTE its IC carries `f≠0`; an `f=0`
+control conserves to machine zero and could be added to bracket the defect.
+
+## Reproduce
+
+```
+# MITgcm reference (needs gfortran; conda env `mitgcm-build`); 75 000-step run dumps + out_eq.txt:
+python scripts/data/generate_mitgcm_barotropic_gyre_reference.py --ref-root <ref> --optfile <...>
+# Investigation probes (this session) in scripts/tmp/:
+#   _gyre_equilibrium_headtohead.py   legoESM spin-up to 75 000 steps (turbulent 0.15–0.37)
+#   _gyre_scheme_variants.py          advection upwind/centered/vector-invariant (all over-energize)
+#   _gyre_total_energy_budget.py      KE+PE budget: S/W≈3.2 at rough state
+#   _gyre_coriolis_power.py           Coriolis power = machine-zero
+#   _gyre_advection_power.py          centered advection power = machine-zero
+#   _gyre_dt_scaling.py               growth converges as dt→0  => spatial source
+#   _gyre_semidiscrete_budget.py      dE/dt byte-identical across advection => free-surface split
+```
+
+## UPDATE 2026-06-18 (iteration 3b): per-term diff at spin-up states — the limitation
+
+Ran the per-term comparison against MITgcm's own `momU`/`momV` diagnostic dumps (which bundle
+UVEL/VVEL/ETAN + Um_Advec/Cori/Diss/dPhiX/USidDrag at iters 5000…70000 — the spin-up):
+- **TOTAL advection energy power** `∫(u·advU + v·advV)`: MITgcm **1e-13** (machine zero), legoESM
+  **2.4e-10** — both essentially conserving on these smooth states (the earlier U-only −1e-6 was
+  just the U↔V transfer, balanced by V).
+- **Coriolis power**: machine-zero in both. legoESM's Coriolis values match MITgcm's exactly.
+- Raw per-term *value* diff hits the known **baroclinic-vs-barotropic trap** (legoESM's direct
+  `_bc_..._advection` is the ~0 baroclinic-perturbation part; the barotropic advection flows through
+  the depth-mean `F_slow`), so a naive value-correlation is not meaningful (ratio 0.001, anti-corr).
+
+**Conclusion / honest limitation**: on every *comparable* (smooth, laminar) state MITgcm visits, the
+per-term tendencies match and conserve energy in both models — there is no isolable "wrong operator".
+legoESM's excess energy only manifests once its trajectory develops grid-scale structure at the
+marginally-resolved (Munk δ≈1.7 cell) western boundary current, an attractor **MITgcm never enters**,
+so a direct per-term oracle diff *there* is structurally impossible. The residual is a subtle
+nonlinear-stability difference of the under-resolved WBC, not a single faithfully-fixable term. The
+oracle stands at its strong tiers (10-step eta 0.9997 + per-term tendency match on smooth states);
+the equilibrium turbulence is documented as an open dycore-stability item.
+
+## UPDATE 2026-06-18 (iteration 4): NO advection bug; per-term match confirmed; resolution hypothesis
+
+Built a **perturbed-state MITgcm run** (write the equilibrium ± grid-scale noise as
+uVel/vVel/pSurf init files, run 1–2 steps with momentum diagnostics) to compare per-term
+tendencies on a *rough* state — and to answer "is the flux-form advection buggy on our side?"
+
+**Answer: NO bug.** legoESM's flux-form momentum advection is correct three independent ways:
+1. matches the **analytic** `−∂x(u²)` (smooth field) to corr **1.0000**, ratio 0.977 (the ~2%
+   2nd-order truncation error);
+2. matches **MITgcm's `Um_Advec`** on the **smooth** equilibrium (f=0) to corr **0.9998**, ratio 0.988;
+3. its stencil equals `mom_u_adv_uu.F`/`mom_u_adv_vu.F` term-for-term, and `xA=dyG·drF·hFacW`
+   equals legoESM's `h_u·dy_u` on the flat grid.
+
+Two red herrings cleared: (a) the "100×/anti-correlated" advection was the **MITgcm diagnostic
+bundling Coriolis** — with f, `Um_Advec ≈ Um_Cori ≈ f·v` = 134× the physical advection; killing f
+drops `|Um_Advec|` from 9e-6 to 2e-8. (b) The corr 0.57 was on a **grid-scale random** field — the
+2Δx mode where any two valid 2nd-order schemes diverge (and the half-cell bridge alignment is most
+sensitive). On resolved scales the schemes agree (0.9998).
+
+**Per-term verdict on the rough state**: wind bit-exact, Coriolis corr 0.98, dissipation comparable
+(legoESM even stronger), advection matches on resolved scales. The recipe IS MITgcm-faithful
+term-by-term. The 5× statistics gap is therefore **not a wrong operator** but the nonlinear
+amplification of the (legitimately scheme-dependent) 2Δx behaviour at the **marginally-resolved
+Munk layer** (δ≈1.7 cells): legoESM sits on the unstable side of the WBC barotropic instability,
+MITgcm on the stable side. Falsifiable prediction under test: at 2× resolution (δ≈3.4 cells,
+resolved) the gyre should go laminar.
+
+## UPDATE 2026-06-18 (iteration 5): DECISIVE — resolution-independent marginal-stability difference
+
+Built MITgcm at **2× resolution** (122×122, 10 km, Munk δ≈3.4 cells, well-resolved; recompiled
+SIZE.h, regenerated inputs) and ran both models there. Result:
+
+| | MITgcm | legoESM |
+|---|---|---|
+| 1× res (20 km, δ≈1.7) | **laminar 0.031** | turbulent 0.15–0.37 |
+| 2× res (10 km, δ≈3.4) | **laminar 0.031** (peak 0.034) | turbulent 0.23 |
+
+They **match at 0.1yr** (0.0237 vs 0.0225) then split. So the "marginal resolution" hypothesis is
+**refuted**: MITgcm's steady Munk gyre is **stable and resolution-converged at 0.031**; legoESM
+cannot hold it at *either* resolution. This is a genuine, resolution-independent difference (the
+user was right that the statistics should — but don't — match).
+
+Yet it is **not a bug and not a single wrong operator**:
+- advection is analytically correct (corr 1.0) and matches MITgcm on the smooth gyre (corr 0.9998);
+- **inviscid energy conservation matches**: from the same rough state, MITgcm (centered) drops
+  ~7.2% (backward-Euler free-surface damping the initial imbalance) then is FLAT/conserved;
+  legoESM **centered** does the same (−7.72% then flat). The earlier "−10%" was the recipe's upwind
+  dissipation; the earlier "+12% leak" was specific to legoESM's *own* evolved turbulent state, not
+  a generic property — on MITgcm's states legoESM conserves like MITgcm.
+
+**Conclusion**: the two discretizations agree per-term and in energy to ~1%, but the **steady Munk
+gyre is marginally (linearly) stable**, and legoESM's ~1% differences put it on the *unstable* side
+while MITgcm sits on the *stable* side. legoESM literally cannot hold MITgcm's 0.031 state (drifts
+off). The effective gap is ~1.5–2× in WBC-stabilising dissipation (legoESM needs A_h≈600–1600 to go
+laminar). The lead is the **western-boundary-layer stability** (the viscous + no-slip-sidedrag
+operator's effective stabilisation at the wall) — even though the interior `Um_Diss` and the
+`USidDrag` *values* match at the smooth equilibrium, the marginal growth rate of the WBC shear
+instability differs at the ~1% level that decides laminar-vs-turbulent here.
+
+This is a known sensitive regime (wind-driven-gyre WBC instability). The oracle stands at its strong
+tiers (10-step eta 0.9997 + per-term tendency + inviscid-energy match); the equilibrium laminar/
+turbulent selection is a marginal-stability difference of two valid schemes, documented as open.
+
+## RESOLUTION 2026-06-18 (iteration 6): MITgcm-faithful integrator matches laminar 0.031 [SUPERSEDED — see FINAL #519 block at top: the bespoke stepper was deleted; the canonical model is laminar]
+
+[SUPERSEDED — iteration 6; the bespoke stepper described here was DELETED in #519 item 1,
+see the iteration-7 block below.] A bit-exact MITgcm `tutorial_barotropic_gyre` stepper was
+built (`mitgcm_gyre_faithful.py`, `GyreFaithfulModel`): unsplit explicit-Coriolis momentum
+tendency → AB2(abEps=0.01) → predictor → implicit free-surface elliptic solve → ∇η correction,
+in MITgcm (ny,nx) convention. Every operator was CALIBRATED to corr≈1.0 against MITgcm's
+`momU`/`momV` diagnostic dumps (advection 0.9998; Coriolis/wind/PGF/viscosity/sidedrag 1.0). It
+reproduced MITgcm's laminar equilibrium `|u|max≈0.031, |v|max≈0.084`, steady, at BOTH 1× and 2×
+resolution — while at that time the canonical EXPLICIT-split path ran the same gyre turbulent
+(0.15–0.37). It was tested by the now-removed `test_mitgcm_gyre_faithful.py`. (Later superseded:
+the canonical `implicit_cn` solver was found laminar, so the bespoke stepper + its test were
+deleted in favour of `test_mitgcm_gyre_canonical.py`.)
+
+Bug found + fixed during the port: a **v-viscosity hFacZ/m mask-swap** that under-damped the WBC
+(0.057 → 0.031). Confirmed legoESM's own `flux_divergence_viscosity_cgrid` v-component is correct
+(corr 0.99985 vs `Vm_Diss−VSidDrag`), so the canonical operators are fine — the canonical model's
+turbulence is the SPLIT machinery (barotropic/baroclinic split + forward-backward-Coriolis
+predictor), confirmed by: `explicit_ab2` (unsplit-equivalent config on the canonical model) is
+*also* turbulent (0.29), so it is not a config fix; the split predictor-corrector itself, on the
+marginally-resolved (Munk δ≈1.7-cell) gyre, sits on the unstable side of the WBC barotropic
+instability where the unsplit MITgcm sequencing is stable.
+
+The gyre oracle matches MITgcm at all tiers ON THE CANONICAL MODEL: 10-step eta 0.9997 +
+per-tendency AND the multi-year laminar equilibrium (|u|max≈0.027 / |v|max≈0.079, within ~12% / ~6%
+of MITgcm's 0.031 / 0.084) — all via `build_gyre_recipe` with `barotropic_solver="implicit_cn"`. The
+turbulence above is specific to the EXPLICIT barotropic/baroclinic split + forward-backward-Coriolis
+predictor; the fully-implicit Crank-Nicolson free-surface solver (`implicit_cn`, a different
+canonical barotropic option — not a bespoke solver) is laminar on the marginally-resolved Munk gyre,
+so it carries the equilibrium tier directly in the shipped, differentiable `LatLonCGridOceanModel`.
+
+The previous bespoke `GyreFaithfulModel` / `build_gyre_faithful_model` (a hand-rolled single-layer
+integrator with a scipy-sparse, non-differentiable Helmholtz solve) was DELETED in #519 item 1 once
+`implicit_cn` was shown to reproduce the laminar equilibrium — a non-differentiable bespoke solver in
+a model-adjacent path violated the oracle-recipe doctrine (`oracle_recipe_strategy.md`). Making the
+EXPLICIT split itself laminar at this marginal resolution remains a separate open dycore item.

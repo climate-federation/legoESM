@@ -169,7 +169,7 @@ def _zero_dynamics_config(
     n_barotropic_substeps: int = 10,
 ) -> LatLonCGridOceanConfig:
     """Config with every dissipation / dispersion knob disabled."""
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         A_h=A_h,
         A_h_lat_scaling=False,
         A_h_eq_boost=1.0,
@@ -846,7 +846,10 @@ class TestWaveConvergence:
             )
             # Tighten PCG tolerance so it doesn't floor the
             # convergence rate at fine resolution.
-            config = config._replace(
+            # #501: the implicit-PCG knobs moved into the nested BarotropicConfig;
+            # replace_flat routes these flat names into it (plain _replace would
+            # reject them as unknown top-level fields).
+            config = config.replace_flat(
                 barotropic_implicit_pcg_tol=1.0e-13,
                 barotropic_implicit_pcg_maxiter=400,
             )

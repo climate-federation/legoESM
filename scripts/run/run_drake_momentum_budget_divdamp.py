@@ -4,7 +4,7 @@
 Identical to ``run_drake_momentum_budget.py`` (the baseline run that
 produced the chequerboard smoking gun) but with
 ``barotropic_div_damp = 0.1`` (was 0).  Tests the hypothesis from
-``docs/issues/barotropic_mode_noise.md`` Stage 0.
+``docs/dev-notes/issues/barotropic_mode_noise.md`` Stage 0.
 
 Output: ``results/ocean/momentum_budget_online_divdamp/``
 """
@@ -21,10 +21,9 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 from legoesm.ocean.vertical import create_ocean_z_star
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
-from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.experiments.global_overturning import (
     GlobalOverturningConfig, create_initial_conditions, create_forcings,
-    create_eos_config, create_gm_redi_config,
+    create_eos_config, create_gm_redi_config, global_overturning_model_config,
 )
 
 from _drake_momentum_budget_runner import (
@@ -53,17 +52,12 @@ def main():
     physics = create_forcings("latlon", grid, config)
     eos_config = create_eos_config(config)
     gm_redi_cfg = create_gm_redi_config(config)
-    ocean_config = LatLonCGridOceanConfig(
-        n_barotropic_substeps=30,
-        physics=physics,
-        A_h=config.A_h, A_v=config.A_v, K_v=config.K_v,
-        bottom_drag_r=config.bottom_drag_coeff,
-        eos="linear", eos_linear=eos_config,
-        gm_redi=gm_redi_cfg,
+    ocean_config = global_overturning_model_config(
+        config, physics=physics, eos_config=eos_config, gm_redi_cfg=gm_redi_cfg,
         # ---- THE TEST KNOB ----
         barotropic_div_damp=0.1,
     )
-    print(f"barotropic_div_damp = {ocean_config.barotropic_div_damp}")
+    print(f"barotropic_div_damp = {ocean_config.barotropic.barotropic_div_damp}")
     model = LatLonCGridOceanModel(grid, z_coord, ocean_config)
 
     template = create_initial_conditions("latlon", grid, z_coord, config)

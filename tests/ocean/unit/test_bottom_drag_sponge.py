@@ -154,10 +154,12 @@ class TestBottomDrag:
     def test_latlon_config_has_bottom_drag_r(self):
         """LatLonCGridOceanConfig has bottom_drag_r field."""
         from legoesm.ocean.state import LatLonCGridOceanConfig
-        c = LatLonCGridOceanConfig()
-        assert c.bottom_drag_r == 0.0
-        c2 = LatLonCGridOceanConfig(bottom_drag_r=1e-4)
-        assert c2.bottom_drag_r == 1e-4
+        c = LatLonCGridOceanConfig.from_flat()
+        # #501: bottom_drag_r moved into the nested DynBottomDragConfig; the flat
+        # from_flat kwarg still routes there.
+        assert c.bottom_drag.bottom_drag_r == 0.0
+        c2 = LatLonCGridOceanConfig.from_flat(bottom_drag_r=1e-4)
+        assert c2.bottom_drag.bottom_drag_r == 1e-4
 
     def test_sponge_import(self):
         """SpongeForcing is importable from ocean.sponge."""

@@ -27,6 +27,7 @@ _SW_PENETRATION_FRACTION = 0.94
 def make_mpas_ocean_physics(
     config,
     implicit_vertical_mixing: bool = False,
+    eos_fn=None,
 ) -> Callable:
     """Build a combined physics function for MPAS ocean.
 
@@ -39,6 +40,12 @@ def make_mpas_ocean_physics(
         implicit solver in ``MPASOceanModel.step()`` instead.  Wind,
         restoring, and other physics are still applied as explicit
         tendencies.
+    eos_fn : callable or None
+        Model-selected EOS ``(T, S, p) -> rho`` for the explicit KPP /
+        convective-adjustment density diagnostics.  ``None`` ⇒ Wright
+        default (bit-identical legacy).  Threaded so a non-Wright EOS
+        (e.g. ``nemo_seos``) drives the mixing decision consistently with
+        the baroclinic dycore instead of silently via Wright.
 
     Returns
     -------
@@ -58,18 +65,79 @@ def make_mpas_ocean_physics(
         from legoesm.ocean.physics.vertical_mixing.mpas_integration import (
             make_kpp_physics_mpas,
         )
-        _kpp_fn = make_kpp_physics_mpas(vm_config)
+        _kpp_fn = make_kpp_physics_mpas(vm_config, eos_fn=eos_fn)
     else:
         _kpp_fn = None
 
-    # Warn about unsupported physics schemes that would be silently ignored.
+    # CATKE is a prognostic-TKE closure wired ONLY for the lat-lon C-grid
+    # dynamics step (it carries OceanState.tke + needs the implicit solve);
+    # on MPAS it would silently become a no-op (kpp_fn=None below).  Fail
+    # closed rather than silently mis-run (dispatch discipline; codex review).
+    if vm_config is not None and vm_scheme == "catke":
+        raise ValueError(
+            "vertical_mixing.scheme='catke' is not supported on the MPAS "
+            "ocean (CATKE is wired for the lat-lon C-grid only) and would "
+            "silently no-op here. Use 'kpp', or run CATKE on the lat-lon "
+            "C-grid."
+        )
+
+    # Bail loudly on a vertical_mixing scheme whose K-PROFILE the MPAS factory
+    # does not wire in and would SILENTLY DROP (finding #4).  Supported here:
+    #   - "kpp"      : K-profile applied (above);
+    #   - "none"     : no scheme K-profile;
+    #   - "constant" : the DEFAULT — MPAS gets constant background viscosity /
+    #                  diffusivity from ``MPASOceanConfig.A_v``/``K_v`` through the
+    #                  implicit vertical solver (ocean_model_mpas.step), NOT through
+    #                  this physics K-profile, so accepting it is correct (no silent
+    #                  drop of a scheme-specific profile).
+    # "richardson"/"tke" DO compute a scheme-specific K-profile that MPAS would
+    # silently ignore, and "catke" is rejected above — so reject those (and any
+    # typo) rather than warn-and-drop, matching the sibling surface_forcing
+    # (NotImplementedError) and convection guards (dispatch discipline; CLAUDE.md
+    # "Dispatch").  ``vm_scheme`` is the static config value -> raising at factory
+    # build time is jit-safe.
+    if vm_config is not None and vm_scheme not in ("none", "kpp", "constant"):
+        raise NotImplementedError(
+            f"MPAS ocean physics does not implement vertical_mixing scheme "
+            f"{vm_scheme!r} (its K-profile would be silently ignored). Supported "
+            "on MPAS: {'none', 'kpp', 'constant'} ('constant' via the "
+            "MPASOceanConfig.A_v/K_v background + implicit solver).  'catke' is "
+            "rejected separately; 'richardson'/'tke' are wired for the lat-lon "
+            "C-grid only."
+        )
+
+    # ``constant`` on MPAS is honoured via ``MPASOceanConfig.A_v``/``K_v`` (the
+    # implicit solver background), NOT via ``VerticalMixingConfig.constant``.  The
+    # DEFAULT ConstantVerticalMixingConfig (A_v=1e-3, K_v=1e-4) MATCHES the MPAS
+    # background defaults, so the default path is exact.  But a user who sets a
+    # NON-DEFAULT ``constant.A_v``/``constant.K_v`` here would have it SILENTLY
+    # ignored on MPAS (footgun; codex review #3) — raise so they set the values
+    # on ``MPASOceanConfig`` instead (static config value -> jit-safe at build).
+    if vm_config is not None and vm_scheme == "constant":
+        _const = getattr(vm_config, "constant", None)
+        if _const is not None:
+            _default_const = type(_const)()
+            if (_const.A_v != _default_const.A_v
+                    or _const.K_v != _default_const.K_v):
+                raise NotImplementedError(
+                    "MPAS ocean honours constant vertical mixing through "
+                    "MPASOceanConfig.A_v/K_v (the implicit-solver background), "
+                    "not VerticalMixingConfig.constant.  A non-default "
+                    f"constant.A_v={_const.A_v!r}/K_v={_const.K_v!r} would be "
+                    "silently ignored on MPAS — set MPASOceanConfig.A_v/K_v "
+                    "instead (the default constant config IS consumed and need "
+                    "not be changed)."
+                )
+
+    # Warn about the remaining physics schemes that would be silently ignored on
+    # MPAS (lateral mixing / shortwave penetration are not yet wired in here).
     # ``convection`` is handled explicitly below (supports "enhanced_diffusion").
-    # ``vertical_mixing="kpp"`` is now supported (above); other schemes
-    # (constant, richardson) are not yet wired in.
+    # NB: ``vertical_mixing.scheme="constant"`` is accepted above — MPAS applies a
+    # constant background A_v/K_v via ``MPASOceanConfig.A_v``/``K_v`` (its own
+    # field), not via ``vertical_mixing.constant``; that subtlety belongs to the
+    # MPAS step, not this factory (which has no MPASOceanConfig to compare).
     import warnings
     _unsupported = []
-    if vm_config is not None and vm_scheme not in ("none", "kpp"):
-        _unsupported.append(f"vertical_mixing={vm_scheme!r}")
     for attr in ("lateral_mixing", "shortwave_penetration"):
         sub = getattr(config, attr, None)
         if sub is not None and getattr(sub, "scheme", "none") != "none":
@@ -315,12 +383,14 @@ def make_mpas_ocean_physics(
             )
             from legoesm.ocean.eos import compute_ocean_rho
             cfg_c = conv_config.enhanced_diffusion
-            # Match the lat-lon convection integration: use the default
-            # (Wright) EOS for the ρ used in the static-stability check,
-            # even when the dycore is configured with linear EOS.  This
-            # is a known approximation — the EOS choice only affects the
-            # static-stability ranking, not the dycore tendencies.
-            rho = compute_ocean_rho(state, z_coord, jacobian)
+            # Static-stability ρ for the convective-adjustment check uses the
+            # model-selected EOS (``eos_fn``; ``None`` ⇒ Wright default),
+            # matching the lat-lon convection integration which threads its
+            # ``_vmix_eos_fn`` (ocean_model_latlon_cgrid.py).  This matters for
+            # a depth-dependent (thermobaric) EOS such as ``nemo_seos``, where
+            # the stability ranking — not just the dycore tendencies — depends
+            # on the EOS; using Wright there would mis-rank N²<0 convection.
+            rho = compute_ocean_rho(state, z_coord, jacobian, eos_fn=eos_fn)
             # Tracer-only on MPAS: the convective **momentum** viscosity
             # (cfg_c.nu_conv / convective_νz) is intentionally NOT applied
             # here.  MPAS carries edge-normal velocity (nEdges) whose

@@ -104,7 +104,7 @@ def compute_cs_to_gauss_weights(
 
     return RegridWeights(
         src_indices=jnp.array(indices, dtype=jnp.int32),
-        weights=jnp.array(weights, dtype=jnp.float32),
+        weights=jnp.array(weights, dtype=jnp.float64),
         target_shape=target_shape,
         src_flat_size=src_flat_size,
     )
@@ -154,7 +154,7 @@ def compute_gauss_to_cs_weights(
 
     return RegridWeights(
         src_indices=jnp.array(indices, dtype=jnp.int32),
-        weights=jnp.array(weights, dtype=jnp.float32),
+        weights=jnp.array(weights, dtype=jnp.float64),
         target_shape=target_shape,
         src_flat_size=src_flat_size,
     )
@@ -215,7 +215,7 @@ def compute_latlon_to_voronoi_weights(
 
     return RegridWeights(
         src_indices=jnp.array(indices, dtype=jnp.int32),
-        weights=jnp.array(weights, dtype=jnp.float32),
+        weights=jnp.array(weights, dtype=jnp.float64),
         target_shape=(n_target,),
         src_flat_size=src_flat_size,
     )
@@ -242,7 +242,6 @@ def regrid_scalar(
     """
     # Flatten spatial dimensions
     spatial_size = regrid_weights.src_flat_size
-    field.shape[len(field.shape) - (field.size // spatial_size):]
 
     # Handle different source shapes
     if field.size == spatial_size:
@@ -256,7 +255,16 @@ def regrid_scalar(
         extra_dims = flat.shape[1:]
 
     indices = regrid_weights.src_indices    # (n_target, k)
-    weights = regrid_weights.weights        # (n_target, k)
+    # Weights are stored fp64. For a FLOATING field, downcast to the field dtype
+    # so an fp64 field keeps full-precision gradients through the IDW sum while
+    # an fp32 field stays fp32 (no fp64 footprint at run time). For a NON-floating
+    # field (int/bool mask, categorical), keep the float weights so the fractional
+    # IDW weights are not truncated to 0/1 — the product then promotes the result
+    # to float, exactly as before this change.
+    if jnp.issubdtype(field.dtype, jnp.floating):
+        weights = regrid_weights.weights.astype(field.dtype)    # (n_target, k)
+    else:
+        weights = regrid_weights.weights                        # (n_target, k)
 
     if len(extra_dims) == 0:
         # Simple scalar: (n_target,)
@@ -348,26 +356,32 @@ _CONNECTIVITY = {
 }
 
 
-def _pad_field_for_regrid(field: np.ndarray, n: int) -> np.ndarray:
-    """Create (6, n+2, n+2) padded field with neighbor boundary cells.
+def _pad_faces_for_regrid(field: np.ndarray, *, strip_inset: int) -> np.ndarray:
+    """Pad a ``(6, m, m)`` per-face field into ``(6, m+2, m+2)`` with the
+    neighbouring faces' boundary cells (CONNECTIVITY reversal-aware); the
+    four corners are the mean of the two adjacent halo values.
 
-    Copies the outermost row/column of each neighbouring face into the
-    halo ring, respecting the CONNECTIVITY reversal flags.  Corners are
-    filled by averaging the two adjacent halo values.
+    ``strip_inset`` selects which neighbour row/column is copied into the
+    halo ring: ``0`` = the shared-boundary cell (cell-centre regrid), ``1``
+    = one gnomonic cell inside it (D-grid corner data, whose index-0/-n
+    points sit ON the shared boundary).  Output is sized off
+    ``field.shape`` so it serves both the ``(6,n,n)`` and ``(6,n+1,n+1)``
+    layouts.
     """
-    padded = np.zeros((6, n + 2, n + 2), dtype=field.dtype)
+    m = field.shape[1]
+    padded = np.zeros((6, m + 2, m + 2), dtype=field.dtype)
     padded[:, 1:-1, 1:-1] = field
 
-    def _get_nbr_strip(f: int, edge: int) -> np.ndarray:
-        if edge == _WEST:   return field[f, 0, :]
-        if edge == _EAST:   return field[f, -1, :]
-        if edge == _SOUTH:  return field[f, :, 0]
-        return field[f, :, -1]  # NORTH
+    def _nbr_strip(f: int, edge: int) -> np.ndarray:
+        if edge == _WEST:   return field[f, strip_inset, :]
+        if edge == _EAST:   return field[f, -1 - strip_inset, :]
+        if edge == _SOUTH:  return field[f, :, strip_inset]
+        return field[f, :, -1 - strip_inset]  # NORTH
 
     for face in range(6):
         for edge in (_WEST, _EAST, _SOUTH, _NORTH):
             nbr_face, nbr_edge, rev = _CONNECTIVITY[face][edge]
-            strip = _get_nbr_strip(nbr_face, nbr_edge)
+            strip = _nbr_strip(nbr_face, nbr_edge)
             if rev:
                 strip = strip[::-1]
             if edge == _WEST:
@@ -387,6 +401,15 @@ def _pad_field_for_regrid(field: np.ndarray, n: int) -> np.ndarray:
         padded[face, -1, -1] = 0.5 * (padded[face, -1, -2] + padded[face, -2, -1])
 
     return padded
+
+
+def _pad_field_for_regrid(field: np.ndarray, n: int) -> np.ndarray:
+    """Create (6, n+2, n+2) padded field with neighbor boundary cells.
+
+    Copies the outermost row/column of each neighbouring face into the
+    halo ring (see :func:`_pad_faces_for_regrid`).
+    """
+    return _pad_faces_for_regrid(field, strip_inset=0)
 
 
 class CubedSphereToLatLonWeights(NamedTuple):
@@ -590,42 +613,11 @@ def _pad_corner_field_for_regrid(field: np.ndarray, n: int) -> np.ndarray:
     """Pad (6, n+1, n+1) D-grid corner data → (6, n+3, n+3).
 
     Corner indices 0 and n sit ON the face boundary (shared with the
-    neighbouring face).  The halo copies the *second-from-boundary*
-    corner on the neighbour, which is one gnomonic cell-spacing inside
-    the adjacent face.
+    neighbouring face), so the halo copies the *second-from-boundary*
+    corner on the neighbour (``strip_inset=1``); see
+    :func:`_pad_faces_for_regrid`.
     """
-    padded = np.zeros((6, n + 3, n + 3), dtype=field.dtype)
-    padded[:, 1:-1, 1:-1] = field
-
-    def _nbr_strip(f: int, edge: int) -> np.ndarray:
-        """Return the corner strip one step inside from the shared boundary."""
-        if edge == _WEST:   return field[f, 1, :]
-        if edge == _EAST:   return field[f, -2, :]
-        if edge == _SOUTH:  return field[f, :, 1]
-        return field[f, :, -2]
-
-    for face in range(6):
-        for edge in (_WEST, _EAST, _SOUTH, _NORTH):
-            nbr_face, nbr_edge, rev = _CONNECTIVITY[face][edge]
-            strip = _nbr_strip(nbr_face, nbr_edge)
-            if rev:
-                strip = strip[::-1]
-            if edge == _WEST:
-                padded[face, 0, 1:-1] = strip
-            elif edge == _EAST:
-                padded[face, -1, 1:-1] = strip
-            elif edge == _SOUTH:
-                padded[face, 1:-1, 0] = strip
-            else:
-                padded[face, 1:-1, -1] = strip
-
-    for face in range(6):
-        padded[face, 0, 0] = 0.5 * (padded[face, 0, 1] + padded[face, 1, 0])
-        padded[face, 0, -1] = 0.5 * (padded[face, 0, -2] + padded[face, 1, -1])
-        padded[face, -1, 0] = 0.5 * (padded[face, -1, 1] + padded[face, -2, 0])
-        padded[face, -1, -1] = 0.5 * (padded[face, -1, -2] + padded[face, -2, -1])
-
-    return padded
+    return _pad_faces_for_regrid(field, strip_inset=1)
 
 
 def apply_cubedsphere_corners_to_latlon(
@@ -890,3 +882,110 @@ def regrid_faces_to_latlon(
         field_ll = np.sum(val[idx] * w, axis=1).reshape(lon2d.shape)
 
     return lon_cent, lat_cent, field_ll
+
+
+def regrid_scalar_nan_aware(
+    field: jnp.ndarray,
+    regrid_weights: RegridWeights,
+) -> jnp.ndarray:
+    """NaN-aware version of :func:`regrid_scalar` (KD-tree IDW).
+
+    Missing source cells (``NaN``) are dropped from each target's neighbour set
+    and the inverse-distance weights renormalised over the valid neighbours, so a
+    target becomes ``NaN`` only when *all* its neighbours are missing.  For
+    land-only source data (ocean = NaN) this stops ocean NaN bleeding into coastal
+    target cells — the same role conservative regridding plays for regular
+    lat-lon, but for arbitrary (cubed-sphere / MPAS) targets via point neighbours.
+    """
+    spatial_size = regrid_weights.src_flat_size
+    if field.size == spatial_size:
+        flat = field.ravel(); extra_dims = ()
+    else:
+        n_trailing = field.size // spatial_size
+        flat = field.reshape(spatial_size, n_trailing); extra_dims = flat.shape[1:]
+
+    idx = regrid_weights.src_indices               # (n_target, k)
+    w = regrid_weights.weights                     # (n_target, k)
+    gathered = flat[idx]                            # (..., k[, n_extra])
+    if len(extra_dims) == 0:
+        valid = jnp.isfinite(gathered)             # (n_target, k)
+        wv = w * valid
+        num = jnp.sum(jnp.where(valid, gathered, 0.0) * wv, axis=-1)
+        den = jnp.sum(wv, axis=-1)
+        res = jnp.where(den > 0.0, num / jnp.where(den > 0.0, den, 1.0), jnp.nan)
+        return res.reshape(regrid_weights.target_shape)
+    else:
+        valid = jnp.isfinite(gathered)             # (n_target, k, n_extra)
+        wv = w[..., None] * valid
+        num = jnp.sum(jnp.where(valid, gathered, 0.0) * wv, axis=-2)
+        den = jnp.sum(wv, axis=-2)
+        res = jnp.where(den > 0.0, num / jnp.where(den > 0.0, den, 1.0), jnp.nan)
+        return res.reshape(regrid_weights.target_shape + extra_dims)
+
+
+
+def _cell_edges(centers):
+    """Cell edges (n+1) from 1-D cell centres (works for ascending or descending)."""
+    c = np.asarray(centers, dtype=np.float64)
+    mid = 0.5 * (c[:-1] + c[1:])
+    return np.concatenate([[2.0 * c[0] - mid[0]], mid, [2.0 * c[-1] - mid[-1]]])
+
+
+def _overlap_matrix(src_edges, tgt_edges, periodic_span=None):
+    """``(n_tgt, n_src)`` overlap length of each target cell with each source cell.
+
+    Cells are taken as ``[min(edge_i, edge_{i+1}), max(...)]`` so the result is
+    orientation-independent.  ``periodic_span`` (e.g. 360 for longitude) adds the
+    wrapped overlaps so cells straddling the seam are handled.
+    """
+    s_lo = np.minimum(src_edges[:-1], src_edges[1:]); s_hi = np.maximum(src_edges[:-1], src_edges[1:])
+    t_lo = np.minimum(tgt_edges[:-1], tgt_edges[1:]); t_hi = np.maximum(tgt_edges[:-1], tgt_edges[1:])
+
+    def _ov(shift):
+        lo = np.maximum(t_lo[:, None], s_lo[None, :] + shift)
+        hi = np.minimum(t_hi[:, None], s_hi[None, :] + shift)
+        return np.clip(hi - lo, 0.0, None)
+
+    if periodic_span:
+        return _ov(0.0) + _ov(periodic_span) + _ov(-periodic_span)
+    return _ov(0.0)
+
+
+def conservative_regrid_latlon(field, src_lat, src_lon, tgt_lat, tgt_lon):
+    """First-order **conservative**, NaN-aware regrid between regular lat-lon grids.
+
+    Each target cell value is the source-cell-area-weighted mean over the source
+    cells it overlaps, using ``sin(lat)`` (true area) for the latitude weight and
+    periodic longitude overlap.  **NaN-aware**: missing source cells (e.g. ocean)
+    are dropped and the weights renormalised over the valid overlap, so NaNs never
+    bleed into a partially-covered (coastal) target cell — a target is NaN only
+    when *all* its overlapping source cells are missing.  Conserves the
+    area-integral over the valid region.
+
+    Parameters
+    ----------
+    field : array ``(n_src_lat, n_src_lon)`` or ``(n_src_lat, n_src_lon, L)``
+    src_lat, src_lon, tgt_lat, tgt_lon : 1-D cell centres [deg]
+
+    Returns
+    -------
+    array ``(n_tgt_lat, n_tgt_lon[, L])``
+    """
+    field = np.asarray(field, dtype=np.float64)
+    has_layers = field.ndim == 3
+    v = field if has_layers else field[:, :, None]            # (ns_lat, ns_lon, L)
+
+    # Latitude weight uses sin(lat) (true cell-area measure); longitude is periodic.
+    w_lat = _overlap_matrix(np.sin(np.deg2rad(_cell_edges(src_lat))),
+                            np.sin(np.deg2rad(_cell_edges(tgt_lat))))   # (n_tgt_lat, n_src_lat)
+    w_lon = _overlap_matrix(_cell_edges(src_lon), _cell_edges(tgt_lon),
+                            periodic_span=360.0)                        # (n_tgt_lon, n_src_lon)
+
+    valid = np.isfinite(v).astype(np.float64)
+    fv = np.where(valid > 0, v, 0.0)
+    # contract source lat then source lon (separable -> cheap)
+    num = np.einsum("bj,aj L -> ab L", w_lon, np.einsum("as,sj L -> aj L", w_lat, fv))
+    den = np.einsum("bj,aj L -> ab L", w_lon, np.einsum("as,sj L -> aj L", w_lat, valid))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = np.where(den > 0.0, num / np.maximum(den, 1e-300), np.nan)
+    return out if has_layers else out[:, :, 0]

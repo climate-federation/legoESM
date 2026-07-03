@@ -47,12 +47,14 @@ _YEAR_S = 365.0 * _SEC_PER_DAY
 _MESH = "data/grids/eORCA1.2_mesh_mask.nc"
 
 
-def _squeeze2d(a: np.ndarray) -> np.ndarray:
-    """Drop leading singleton (t, z) dims from a NEMO mesh field -> 2-D (y, x)."""
-    a = np.asarray(a)
-    while a.ndim > 2:
-        a = a[0]
-    return a
+# NEMO eORCA geometry + WOA IC loaders now live in the ocean package so the
+# coupled-ESM driver (Phase-2 tripole coupler) can build the SAME validated
+# cold-start without importing from scripts/ (a layering violation).
+from legoesm.ocean.init_tripole import (  # noqa: E402
+    read_mesh_mask_bathy,
+    compute_woa_3d,
+    squeeze_nemo_field_2d as _squeeze2d,
+)
 
 
 def _ew_overlap_fill(a: np.ndarray) -> np.ndarray:
@@ -70,160 +72,6 @@ def _ew_overlap_fill(a: np.ndarray) -> np.ndarray:
     return a
 
 
-def read_mesh_mask_bathy(mesh_path: str):
-    """Derive the 2-D ocean land mask and total bathymetric depth from NEMO's
-    own eORCA1 mesh_mask -- the most faithful geometry for the comparison.
-
-    Returns
-    -------
-    land_mask : (n_lat, n_lon) float64, 1 = ocean, 0 = land  (tmaskutil)
-    H_bathy   : (n_lat, n_lon) float64, total wet-column depth [m]
-                (sum_k e3t_0 * tmask)
-    """
-    import xarray as xr
-    ds = xr.open_dataset(mesh_path)
-    # Surface ocean/land mask (1 = ocean). Prefer the 2-D util mask.
-    if "tmaskutil" in ds:
-        land_mask = _squeeze2d(ds["tmaskutil"].values).astype(np.float64)
-    else:
-        land_mask = _squeeze2d(ds["tmask"].values).astype(np.float64)
-    # Total wet-column depth = sum over z of e3t_0 where tmask is wet.
-    e3t = np.asarray(ds["e3t_0"].values)            # (t,z,y,x) or (z,y,x)
-    tmask = np.asarray(ds["tmask"].values)
-    while e3t.ndim > 3:
-        e3t = e3t[0]
-    while tmask.ndim > 3:
-        tmask = tmask[0]
-    H_bathy = (e3t * tmask).sum(axis=0).astype(np.float64)   # (y, x)
-    # Guard: dry columns get 0 depth (they are land via land_mask anyway).
-    return land_mask, H_bathy
-
-
-def compute_woa_3d(grid, z_coord, woa_t, woa_s, H_bathy, land_mask):
-    """WOA18 T,S interpolated to the model grid (°C / PSU), masked below the
-    local seafloor (``bathymetry_depth``) and zeroed on land. Used both as the
-    WOA initial condition and as the nudging target. Shared so the two paths
-    cannot diverge."""
-    from legoesm.ocean.init_woa import init_ocean_from_woa
-    from legoesm.ocean.vertical import OceanPartialCellCoordinate
-    _is_pc = isinstance(z_coord, OceanPartialCellCoordinate)
-    # For a partial-cell coord, do NOT pass bathymetry_depth: init_ocean_from_woa
-    # masks levels by ``|z_full_ref| > bathymetry_depth`` (reference full-cell
-    # centres), which deep-fills ACTIVE bottom partial cells whose reference
-    # centre lies below the snapped bathymetry — corrupting the IC at the exact
-    # topographic-step region this coord stabilises (codex adversarial-review).
-    # Instead keep interpolated WOA at every reference level and mask only the
-    # genuinely-inactive (below-seafloor) cells with ``~z_coord.is_active`` below.
-    T_woa, S_woa = init_ocean_from_woa(
-        grid, z_coord, woa_t, woa_s,
-        bathymetry_depth=(None if _is_pc else np.maximum(np.asarray(H_bathy), 1.0)),
-    )
-    T_woa = np.array(T_woa, dtype=np.float64)   # writable copy (not a view)
-    S_woa = np.array(S_woa, dtype=np.float64)
-    m2 = np.asarray(land_mask) > 0.5
-    # NEMO's ocean mask (tmaskutil) includes cells WOA has NO data for (WOA-land
-    # / outside coverage / marginal seas), where init_ocean_from_woa leaves
-    # S~0. Those S=0 cells sit next to real S~35 ocean -> ~40-PSU horizontal
-    # jumps -> a spurious O(10 m/s) baroclinic PGF on step 1 -> blowup (root
-    # cause of the "WOA cold-start instability"). Flood-fill every such ocean
-    # cell (surface S < 1 PSU) from its nearest valid-WOA ocean column.
-    bad = m2 & (S_woa[..., 0] < 1.0)
-    if bad.any():
-        from scipy.spatial import cKDTree
-        valid = m2 & ~bad
-        # Multi-donor INVERSE-DISTANCE blend (k=8) instead of a wholesale
-        # nearest-COLUMN copy.  A single-donor copy leaves a 1-cell T/S step
-        # at EVERY depth (incl. the deep k15) along the flood-fill seam; from
-        # rest that step is a spurious baroclinic-PGF seed that vertadv pumps
-        # to the surface -> the Brazil-Malvinas-region cold-start runaway
-        # (mechanism workflow wshsnjjm3).  Blending the 8 nearest valid
-        # columns by inverse distance smooths the seam.
-        nlev = T_woa.shape[-1]
-        if land_mask.ndim == 2:
-            # 2-D structured grid (latlon/tripole): index-distance kNN (UNCHANGED
-            # — keeps the validated tripole/latlon IC bit-for-bit).
-            jj, ii = np.where(valid)
-            jb, ib = np.where(bad)
-            kdt = cKDTree(np.c_[jj, ii])
-            K = int(min(8, len(jj)))
-            dist, idx = kdt.query(np.c_[jb, ib], k=K)
-            if K == 1:
-                dist = dist[:, None]; idx = idx[:, None]
-            w = 1.0 / np.maximum(dist, 1e-6)          # (n_bad, K)
-            w = w / w.sum(axis=1, keepdims=True)
-            T_don = T_woa[jj[idx], ii[idx], :]        # (n_bad, K, nlev)
-            S_don = S_woa[jj[idx], ii[idx], :]
-            T_woa[jb, ib, :] = np.einsum("nk,nkl->nl", w, T_don)
-            S_woa[jb, ib, :] = np.einsum("nk,nkl->nl", w, S_don)
-        else:
-            # N-D horizontal layout (cube (6,n,n)): index distance is meaningless
-            # across faces, so use GREAT-CIRCLE distance on the grid's own
-            # lat/lon (radians) between valid and bad columns. Flatten the
-            # horizontal dims; donors are the nearest valid columns by chord.
-            horiz = bad.shape
-            Tf = T_woa.reshape(-1, nlev); Sf = S_woa.reshape(-1, nlev)
-            vflat = valid.ravel(); bflat = bad.ravel()
-            # Cube exposes .lat/.lon; MPAS VoronoiMesh exposes .latCell/.lonCell
-            # (radians).  Same grid-type dispatch as init_ocean_from_woa.
-            latr = np.asarray(getattr(grid, "lat",
-                                      getattr(grid, "latCell", None))).ravel()
-            lonr = np.asarray(getattr(grid, "lon",
-                                      getattr(grid, "lonCell", None))).ravel()
-            cl = np.cos(latr)
-            xyz = np.stack([cl * np.cos(lonr), cl * np.sin(lonr),
-                            np.sin(latr)], axis=-1)
-            vidx = np.where(vflat)[0]                  # global flat idx of valids
-            kdt = cKDTree(xyz[vidx])
-            K = int(min(8, vidx.size))
-            dist, idx = kdt.query(xyz[bflat], k=K)
-            if K == 1:
-                dist = dist[:, None]; idx = idx[:, None]
-            w = 1.0 / np.maximum(dist, 1e-9)
-            w = w / w.sum(axis=1, keepdims=True)
-            T_don = Tf[vidx[idx], :]                   # (n_bad, K, nlev)
-            S_don = Sf[vidx[idx], :]
-            Tf[bflat] = np.einsum("nk,nkl->nl", w, T_don)
-            Sf[bflat] = np.einsum("nk,nkl->nl", w, S_don)
-            T_woa = Tf.reshape(*horiz, nlev)
-            S_woa = Sf.reshape(*horiz, nlev)
-        print(f"[setup] flood-filled {int(bad.sum())} NEMO-ocean cells "
-              f"lacking WOA data (S<1) via inverse-distance blend of {K} "
-              f"nearest valid columns (smooths the seam)")
-    # Re-apply the RECEIVER bathymetry deep-fill (codex C1): a donor column
-    # copied above may carry levels below the receiver's own seafloor; replace
-    # every level deeper than the local H_bathy with the deep-ocean fill, so the
-    # filled columns match init_ocean_from_woa's bathymetry_depth treatment and
-    # do not reintroduce a hidden below-seafloor T/S bias. Idempotent for the
-    # original (already-filled) columns.
-    from legoesm import constants as _const
-    T_fill = float(getattr(_const, "T_deep_ocean_ref_C", 1.5))
-    S_fill = float(getattr(_const, "S_deep_ocean_ref_psu", 34.7))
-    if _is_pc:
-        # Partial-cell coord: ``is_active`` already accounts for the active
-        # bottom PARTIAL cell. Using the reference full-cell centres
-        # (cumsum(dz_ref)) here would mark active bottom partial cells whose
-        # thickness is < 50% of dz_ref as below-seafloor and overwrite their
-        # real WOA T/S with deep fill — corrupting the IC/nudge target at the
-        # exact topographic-step region this coord is meant to stabilise
-        # (codex adversarial-review). Use the coord's own active mask.
-        below = ~np.asarray(z_coord.is_active)
-    else:
-        dz = np.asarray(z_coord.dz_ref, dtype=np.float64)
-        z_cen = np.cumsum(dz) - 0.5 * dz                  # (nlev,) cell-centre depths
-        # Broadcast z_cen against ANY horizontal layout: cube H_bathy is (6,n,n)
-        # (ndim 3), MPAS is (nCells,) (ndim 1).  reshape z_cen to (1,...,1,nlev)
-        # so z_cen[...] > H_bathy[...,None] gives (*horiz, nlev) for both — the
-        # old (None,None,:) hardcoded a 2-D horizontal and mis-broadcast on the
-        # 1-D MPAS layout (silent IC corruption).
-        Hb = np.asarray(H_bathy)
-        z_cen_b = z_cen.reshape((1,) * Hb.ndim + (-1,))
-        below = z_cen_b > Hb[..., None]
-    T_woa = np.where(below, T_fill, T_woa)
-    S_woa = np.where(below, S_fill, S_woa)
-    m3 = m2[..., None]
-    return T_woa * m3, S_woa * m3
-
-
 def smooth_woa_ts(state, grid, passes):
     """Horizontal Laplacian smoothing of the WOA T,S initial condition over
     OCEAN cells, per level.  Removes the spurious grid-scale / over-sharp
@@ -232,9 +80,9 @@ def smooth_woa_ts(state, grid, passes):
     cold-start cannot carry them.  The dynamics ARE stable on a smooth
     stratification (uniform-strat rest test), so smoothing the IC toward that
     regime is the natural conditioning."""
-    from legoesm.ocean.bathymetry import _laplacian_smooth_2d
+    from legoesm.ocean.bathymetry import laplacian_smooth_2d
     mask = np.asarray(state.land_mask.data) > 0.5
-    # Cube horizontal fields are (6, n, n) -> _laplacian_smooth_2d needs the
+    # Cube horizontal fields are (6, n, n) -> laplacian_smooth_2d needs the
     # cube-topology stencil (cross-face neighbours); 2-D grids are (n_lat, n_lon).
     is_cubed = (mask.ndim == 3)
     T = np.array(state.T.data, dtype=np.float64)
@@ -245,7 +93,7 @@ def smooth_woa_ts(state, grid, passes):
             orig_k = arr[..., k].copy()
             cur = arr[..., k]
             for _ in range(int(passes)):
-                sm = np.asarray(_laplacian_smooth_2d(cur, 1, is_cubed=is_cubed))
+                sm = np.asarray(laplacian_smooth_2d(cur, 1, is_cubed=is_cubed))
                 cur = np.where(mask, sm, orig_k)
             arr[..., k] = cur
     print(f"[setup] WOA T,S horizontal smoothing: {passes} Laplacian passes/level "
@@ -416,17 +264,17 @@ def make_partial_cell(z_coord, H_bathy, land_mask, thin_threshold=0.3,
     lm0 = np.asarray(land_mask, dtype=np.float64)
 
     if smoothing_passes and smoothing_passes > 0:
-        from legoesm.ocean.bathymetry import _laplacian_smooth_2d, _r_factor_max
+        from legoesm.ocean.bathymetry import laplacian_smooth_2d, compute_max_r_factor
         ocean = lm0 > 0.5
-        r_before = float(_r_factor_max(H_np, lm0))
+        r_before = float(compute_max_r_factor(H_np, lm0))
         H_s = H_np.copy()
         # Smooth ocean cells only; hold land fixed and re-impose it each
         # pass so the smoother never bleeds land depths into the ocean.
         for _ in range(int(smoothing_passes)):
-            H_sm = np.asarray(_laplacian_smooth_2d(H_s, 1, is_cubed=False))
+            H_sm = np.asarray(laplacian_smooth_2d(H_s, 1, is_cubed=False))
             H_s = np.where(ocean, H_sm, H_np)
         H_np = np.where(ocean, H_s, H_np)
-        r_after = float(_r_factor_max(H_np, lm0))
+        r_after = float(compute_max_r_factor(H_np, lm0))
         print(f"[setup] bathymetry smoothing: {smoothing_passes} Laplacian "
               f"passes, max r-factor {r_before:.3f} -> {r_after:.3f}")
 
@@ -486,7 +334,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   convection_K_conv=1.0, convection_K_bg=1e-5,
                   freeze_floor=None, ew_cyclic_overlap=None,
                   runoff_depth_spread_m=None, tracer_advection=None,
-                  mle=None):
+                  mle=None, dz_ref_override=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -515,6 +363,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         "tripole", resolution, nlev, H_max,
         physics_preset="full", water_type="II",
         forcing_mode="jra55_do_tropical",
+        dz_ref_override=dz_ref_override,
     )
     # Optional dycore-stability overrides (for WOA cold-start tuning): rebuild
     # the config + model from run_omip's validated tripole base, changing only
@@ -544,6 +393,12 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("runoff_depth_spread_m", runoff_depth_spread_m),
                               ("tracer_advection", tracer_advection),
                               ) if v is not None}
+    # IMPLICIT vertical mixing (NEMO ln_zdf*, MOM6 CVMix, MPAS all do this; the
+    # config default is True). _create_setup()'s arg default is False (explicit) --
+    # at the NEMO 75-level grid the explicit KPP vertical-viscosity CFL blows the
+    # cold-start (see the same fix in build_latlon_bathy). Force it on uniformly so
+    # the tripole matches latlon/mpas; the convection block below is then redundant.
+    _ovr["implicit_vertical_mixing"] = True
     # Grid-agnostic convective adjustment (Oceananigans-style enhanced
     # vertical diffusivity where N^2 < 0) and/or the Fox-Kemper MLE
     # restratification.  The tripole base config ships physics=None; opting in
@@ -694,7 +549,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   polar_filter_max_wave_speed=None,
                   polar_filter_safety_factor=None,
                   runoff_depth_spread_m=None, tracer_advection=None,
-                  mle=None):
+                  mle=None, dz_ref_override=None, mask_marginal_seas=False):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -712,6 +567,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         "latlon", res, nlev, H_max, physics_preset="full", water_type="II",
         use_bathymetry=True, pgf_scheme=pgf_scheme,
         A_h_override=A_h, B_h_override=B_h,
+        dz_ref_override=dz_ref_override,
     )
     _ovr = {k: v for k, v in (("K_bih", K_bih),
                               ("ke_gradient_scheme", ke_gradient_scheme),
@@ -742,6 +598,16 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("polar_filter_safety_factor",
                                polar_filter_safety_factor),
                               ) if v is not None}
+    # IMPLICIT vertical mixing of momentum + tracers (NEMO ln_zdf*, MOM6, and
+    # tripole all do this; the LatLonCGridOceanConfig default is True). The lat-lon
+    # _create_setup() arg default is False (explicit), which silently reproduces
+    # the historical explicit-diffusion path: at the NEMO 75-level grid the ~1 m
+    # surface cell makes the explicit KPP vertical-viscosity CFL A_v*dt/dz_0^2
+    # ~ O(1)>>limit, so the physics momentum tendency (`phys_u`, momentum-diag job
+    # 8487918) blows the cold-start in ~2 steps at the Kuroshio. The backward-Euler
+    # implicit solve is unconditionally stable -> force it on for the OMIP latlon
+    # path (20-level happened to stay under the explicit CFL; 75-level does not).
+    _ovr["implicit_vertical_mixing"] = True
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -774,6 +640,19 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         e_H, src_lat, src_lon, e_mask, tgt_lat, tgt_lon, max_deg=3.0,
     )
     land_mask = (ocean_ll > 0.5).astype(np.float64)
+    # Mask the poorly-resolved semi-enclosed / endorheic seas BEFORE the
+    # partial-cell + model build so the derived u/v face masks stay consistent.
+    # On the regular lat-lon grid the IDW regrid reconnects basins through 1-cell
+    # straits and inflates their depth; their brackish/hypersaline WOA T/S then
+    # makes a sharp 1-cell front whose baroclinic PGF blows the cold-start at
+    # high vertical resolution (diag 8486173: the Caspian, 47.5N/48E lev6,
+    # max|u| 0.3->450 m/s in 2 steps). The same mechanism is why the cube masks
+    # them. Caveated: these basins are excluded from the open-ocean comparison.
+    if mask_marginal_seas:
+        # tgt_lat/tgt_lon are 1-D (n_lat,)/(n_lon,) for the regular grid; the
+        # box test needs 2-D fields matching land_mask (the cube passes 2-D).
+        _lon2d, _lat2d = np.meshgrid(tgt_lon, tgt_lat)   # both (n_lat, n_lon)
+        land_mask = _apply_marginal_sea_mask(land_mask, _lat2d, _lon2d)
     H_bathy = np.where(land_mask > 0.5, np.maximum(H_ll, 50.0), 0.0)
     if flat_bottom:
         H_bathy = np.where(land_mask > 0.5, H_max, 0.0)
@@ -825,6 +704,16 @@ def _apply_marginal_sea_mask(land_mask, lat_deg, lon_deg):
         (23.0, 31.0, 47.0, 57.0),    # Persian Gulf
         (53.0, 66.0, 10.0, 30.0),    # Baltic
         (51.0, 64.0, 265.0, 285.0),  # Hudson Bay
+        (34.0, 50.0, 45.0, 56.0),    # Caspian Sea (endorheic; IDW regrid
+                                     # inflates its ~6 m depth to ~184 m and the
+                                     # brackish WOA T/S makes a sharp 1-cell
+                                     # front -> a baroclinic-PGF cold-start
+                                     # blowup at 75-level, lat-lon 8486173. Box
+                                     # padded to 50N/56E: the IDW spreads the
+                                     # basin past its 47N/54E geographic edge
+                                     # (ignition at 48.5N/51E, job 8486227).)
+        (43.0, 48.0, 57.0, 62.0),    # Aral Sea (endorheic)
+        (41.0, 49.0, 268.0, 285.0),  # Great Lakes (inland; no-op if WOA-land)
     ]
     n_before = int(out.sum())
     for lat0, lat1, lon0, lon1 in boxes:
@@ -889,7 +778,7 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
     fv3sw barotropic + face-edge-stability A_h/K_h) and the OMIP-2 applicator
     (grid_type='cubed_sphere'). NOTE: the cube OceanModel still has the documented
-    PGF-over-bathy instability (docs/ocean_experiments/cubed_sphere_pgf_stability.md)
+    PGF-over-bathy instability (docs/ocean/experiments/cubed_sphere_pgf_stability.md)
     that FC + elevated diffusion only delay; this builder is the harness to drive
     the dycore fix, not a finished faithful path."""
     from scripts.run import run_omip
@@ -997,15 +886,15 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     # cells (land held fixed, seam-correct via is_cubed=True) shrink it directly —
     # the proven NEMO/ROMS technique for exactly this seed.
     if bathy_smoothing_passes and bathy_smoothing_passes > 0:
-        from legoesm.ocean.bathymetry import _laplacian_smooth_2d, _r_factor_max
+        from legoesm.ocean.bathymetry import laplacian_smooth_2d, compute_max_r_factor
         ocean = land_mask > 0.5
-        r_before = float(_r_factor_max(H_bathy, land_mask))
+        r_before = float(compute_max_r_factor(H_bathy, land_mask))
         H_s = H_bathy.copy()
         for _ in range(int(bathy_smoothing_passes)):
-            H_sm = np.asarray(_laplacian_smooth_2d(H_s, 1, is_cubed=True))
+            H_sm = np.asarray(laplacian_smooth_2d(H_s, 1, is_cubed=True))
             H_s = np.where(ocean, H_sm, H_bathy)
         H_bathy = np.where(ocean, np.maximum(H_s, 50.0), H_bathy)
-        r_after = float(_r_factor_max(H_bathy, land_mask))
+        r_after = float(compute_max_r_factor(H_bathy, land_mask))
         print(f"[setup] cube bathymetry smoothing: {bathy_smoothing_passes} "
               f"Laplacian passes, max r-factor {r_before:.3f} -> {r_after:.3f}")
     # Partial bottom cells: fold the regridded bathymetry into the vertical
@@ -1049,7 +938,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      A_h=None, B_h=None, K_bih=None, C_smag_lap=None,
                      pgf_scheme=None, bottom_drag_r=None,
                      bottom_drag_bbl_thickness=None, bottom_drag_bg_velocity=None,
-                     partial_cell=False, n_barotropic_substeps=None,
+                     partial_cell=False, dz_ref_override=None,
+                     n_barotropic_substeps=None,
                      barotropic_solver=None, freeze_floor=None,
                      runoff_depth_spread_m=None, mle=None):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
@@ -1075,6 +965,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
     mesh, z_coord, config, _model0, _ = run_omip._create_setup(
         "mpas", f"ico{level}", nlev, H_max,
         physics_preset="full", water_type="II",
+        dz_ref_override=dz_ref_override,
     )
     # Faithful EXTERNAL surface-forcing contract: the CORE-II tau/q_net from
     # compute_omip2_surface_forcing is deposited by mpas_physics (it negates +
@@ -1177,6 +1068,30 @@ _SICONC_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/
 _CHL_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/"
            "INPUTS/orca1_inputs/data_repository/input_fields/"
            "merged_ESACCI_BIOMER4V1R1_CHL_REG05.nc")
+# NEMO ORCA1 domain_cfg: source of the reference 75-level column (e3t_1d) for
+# --nemo-vertical, so legoESM matches NEMO's vertical resolution.
+_NEMO_DOMAIN_CFG = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/"
+                    "ORCA1/INPUTS/orca1_inputs/data_repository/input_fields/"
+                    "domain_cfg.nc")
+
+
+def _load_nemo_e3t_1d(path: str):
+    """Read NEMO's 1-D reference layer thicknesses ``e3t_1d`` [m] (length jpk).
+
+    Falls back to differencing ``gdepw_1d`` (interface depths) if ``e3t_1d`` is
+    absent.  Returns a 1-D float64 NumPy array (top -> bottom), all > 0."""
+    import xarray as xr
+    ds = xr.open_dataset(path, decode_times=False)
+    if "e3t_1d" in ds:
+        dz = np.asarray(ds["e3t_1d"].values, dtype=np.float64).ravel()
+    elif "gdepw_1d" in ds:
+        w = np.asarray(ds["gdepw_1d"].values, dtype=np.float64).ravel()
+        dz = np.diff(np.concatenate([w, w[-1:] + (w[-1] - w[-2])]))
+    else:
+        raise KeyError(f"{path}: no e3t_1d or gdepw_1d for --nemo-vertical")
+    if dz.ndim != 1 or dz.size < 2 or not np.all(dz > 0):
+        raise ValueError(f"{path}: bad e3t_1d (shape {dz.shape}, must be 1-D >0)")
+    return dz
 # NEMO ORCA1 RUN_REF MONTHLY ocean grid_T (`tos` = SST [degC]) -> used to give the
 # annual-mean siconc a SEASONAL cycle (--ice-albedo-seasonal): NEMO sea ice sits
 # at the freezing point, so where the monthly SST is at/below freezing NEMO has
@@ -1185,6 +1100,34 @@ _CHL_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/"
 # faithful seasonal proxy available without a NEMO re-run.
 _TOS_MONTHLY_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/"
                    "ORCA1/EXP00/RUN_REF/ORCA1_1m_20000101_20041231_grid_T.nc")
+
+
+def _load_nemo_cell_area_m2(path=_NEMO_DOMAIN_CFG):
+    """NEMO ORCA1 horizontal T-cell area ``e1t*e2t`` [m^2] from ``domain_cfg``
+    (shape ``(jpj, jpi)`` == the Dai-Trenberth runoff grid).  This is the EXACT
+    NEMO metric used to area-weight the runoff SOURCE integral for conservation.
+    Deliberately NOT a gradient-of-lat/lon approximation: a centred ``np.gradient``
+    of longitude across the +/-180 seam sees an O(360 deg) jump that wrapping the
+    averaged derivative cannot undo, inflating dateline river-cell areas and the
+    source total to ~2.95 Sv vs NEMO's true ~1.27 Sv (codex review).  The TARGET
+    grids carry their own exact ``.area``/``.areaCell``."""
+    import xarray as xr
+    ds = xr.open_dataset(path, decode_times=False)
+    e1t = _squeeze2d(np.asarray(ds["e1t"].values, dtype=np.float64))
+    e2t = _squeeze2d(np.asarray(ds["e2t"].values, dtype=np.float64))
+    return e1t * e2t
+
+
+def _area_conservative_scale(field, cell_area, wet_mask, target_integral):
+    """Scale a per-area flux ``field`` [X/m^2] so its area-integral over the wet
+    cells equals ``target_integral`` [X]: returns ``field * target/current``.
+    No-op (returns ``field`` unchanged) when the current integral is <= 0 (an
+    all-zero / all-dry field has nothing to scale)."""
+    field = np.asarray(field, dtype=np.float64)
+    cur = float((field * np.asarray(cell_area) * np.asarray(wet_mask)).sum())
+    if cur > 0.0:
+        return field * (float(target_integral) / cur)
+    return field
 
 
 def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
@@ -1196,7 +1139,8 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
     made SSS only informational). Curvilinear -> model grid via the same IDW used
     for bathy; eORCA1 nav_lat/lon are the runoff file's own coords."""
     import xarray as xr
-    from legoesm.ocean.bathymetry import _laplacian_smooth_2d
+    from legoesm.ocean.bathymetry import (
+        laplacian_smooth_2d, laplacian_smooth_voronoi)
     ds = xr.open_dataset(_RUNOFF_NC, decode_times=False)
     src_lat = _squeeze2d(ds["nav_lat"].values)
     src_lon = _squeeze2d(ds["nav_lon"].values)
@@ -1207,8 +1151,8 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
     # SOURCE = the DISCHARGE cells only (annual runoff > 0): a coastal river-mouth
     # field is sparse, so IDW from ALL cells (incl. zeros) would dilute the discharge
     # to ~0. Routing only from nonzero cells spreads each river to the nearest model
-    # coastal cells (codex HIGH). Approximately freshwater-conserving (places the
-    # discharge density at the coast); exact area-integral conservation is a refinement.
+    # coastal cells (codex HIGH). Exact area-integral conservation is enforced
+    # below by the area-weighted renorm (every grid receives the same source total).
     annual = total.sum(axis=0)
     src_valid = annual > 0.0
     out = np.zeros((12,) + tuple(np.asarray(lat2d_deg).shape), dtype=np.float64)
@@ -1216,6 +1160,16 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
     ocean = None
     if land_mask is not None:
         ocean = np.asarray(land_mask) > 0.5
+    # Area-conservation inputs: SOURCE cell areas = NEMO's exact e1t*e2t from
+    # domain_cfg (the runoff grid's metric), TARGET cell areas from the model grid
+    # (``areaCell`` on the MPAS VoronoiMesh, ``.area`` on the C-grid families).
+    # Both [m^2]; A_tgt.shape == lat2d_deg.shape == out[m].shape.
+    A_src = _load_nemo_cell_area_m2()
+    if A_src.shape != total.shape[1:]:
+        raise ValueError(
+            f"runoff source area {A_src.shape} != runoff field {total.shape[1:]}: "
+            f"domain_cfg e1t/e2t must match the Dai-Trenberth grid")
+    A_tgt = np.asarray(grid.areaCell if hasattr(grid, "areaCell") else grid.area)
     for m in range(12):
         # k=4 (NOT k=1: _regrid_curv_to_points assumes 2-D kNN -> k=1 crashes, codex HIGH)
         Rm, _ = _regrid_curv_to_points(
@@ -1225,20 +1179,48 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
         # COASTAL SPREAD (codex conservation flag + SSS-quality): the NN/IDW
         # regrid concentrates each river in ~1 model cell -> over-fresh spots that
         # hurt SSS. Spread over a coastal band via ocean-masked averaging, then
-        # renormalise to preserve the per-month ocean SUM (sum-conserving; exact
-        # area-weighted conservation needs the eORCA1 cell areas, a further refinement).
+        # the area-conservative renorm below restores the exact source total.
+        # MPAS uses the Voronoi-topology smoother (cellsOnCell neighbour-average);
+        # the structured laplacian_smooth_2d does NOT apply to an unstructured mesh
+        # (the reason MPAS was previously left UN-spread -> big rivers like the
+        # Amazon/Arctic over-concentrated in the ~4 IDW cells -> local -2 to -3 PSU
+        # over-freshening; lat-lon/cube were smoothed but MPAS was not).
         if ocean is not None and spread_passes > 0:
-            s0 = float((Rm * ocean).sum())
+            _is_voronoi = (grid_type == "mpas")
+            _coc = np.asarray(grid.cellsOnCell) if _is_voronoi else None
+            _nec = np.asarray(grid.nEdgesOnCell) if _is_voronoi else None
             for _ in range(int(spread_passes)):
-                sm = np.asarray(_laplacian_smooth_2d(Rm, 1, is_cubed=is_cubed))
+                if _is_voronoi:
+                    sm = np.asarray(laplacian_smooth_voronoi(Rm, _coc, _nec, 1))
+                else:
+                    sm = np.asarray(laplacian_smooth_2d(Rm, 1, is_cubed=is_cubed))
                 Rm = np.where(ocean, sm, 0.0)
-            s1 = float((Rm * ocean).sum())
-            if s1 > 0.0:
-                Rm = Rm * (s0 / s1)        # restore the ocean sum
+        # AREA-CONSERVATIVE renorm (replaces the old cell-SUM renorm and now runs
+        # on EVERY grid incl. MPAS spread_passes=0): scale the regridded runoff so
+        # its area-integral equals the source month total [kg/s], i.e. NEMO's
+        # Dai-Trenberth global freshwater input.  This makes MPAS and tripole
+        # receive the SAME total -> removes the grid-dependent surface fresh bias
+        # (MPAS was -0.50 PSU vs tripole -0.12 from a non-conservative regrid).
+        F_src = float((total[m] * A_src).sum())            # kg/s into ocean
+        wet = ocean if ocean is not None else np.ones(Rm.shape, dtype=bool)
+        if F_src > 0.0 and float((Rm * A_tgt * wet).sum()) <= 0.0:
+            warnings.warn(                                 # codex LOW: don't silently skip
+                f"runoff month {m}: source {F_src:.3e} kg/s but the regridded "
+                f"target integral is <=0 (no wet target cell received runoff -- "
+                f"check land_mask / IDW max_deg) -> month NOT conserved",
+                RuntimeWarning)
+        Rm = _area_conservative_scale(Rm, A_tgt, wet, F_src)
         out[m] = Rm
+    # Annual-mean conserved total on BOTH the source and the (renormed) target,
+    # in Sv of freshwater (1 Sv = 1e9 kg/s) -> they should match to ~rounding,
+    # and be grid-INDEPENDENT (the whole point of the renorm).
+    _wet = ocean if ocean is not None else np.ones(out.shape[1:], dtype=bool)
+    _src_Sv = float((total.mean(axis=0) * A_src).sum()) / 1.0e9
+    _tgt_Sv = float((out.mean(axis=0) * A_tgt * _wet).sum()) / 1.0e9
     print(f"[setup] runoff: Dai-Trenberth (river+isf+icb) from {int(src_valid.sum())} "
           f"discharge cells, 12 months, {spread_passes} spread passes, "
-          f"max {out.max():.2e} kg/m^2/s")
+          f"max {out.max():.2e} kg/m^2/s | conserved total src={_src_Sv:.4f} Sv "
+          f"-> target={_tgt_Sv:.4f} Sv (area-weighted, grid-independent)")
     return out
 
 
@@ -1551,6 +1533,210 @@ def _grid_lat2d_deg(grid, grid_type):
     return lat2d, lon2d
 
 
+# ===========================================================================
+# Prognostic sea-ice coupling (REUSES legoesm.ice.step_sea_ice — the REAL
+# model — instead of the freeze-floor / prescribed-siconc / relaxation
+# surrogates).  Pure integration glue: it samples the CORE-II forcing with the
+# SAME sampler the momentum/heat path uses (sample_omip2_forcing), feeds the
+# canonical step_sea_ice, and routes the returned TileResponse into the
+# EXISTING OceanSurfaceForcing (salt_flux + q_net) and FreshwaterForcing
+# (ice_fw) channels.  No new sea-ice physics; no new ocean salt/FW applicator.
+# ===========================================================================
+
+def _ice_state_spatial_shape(grid, app_grid_type):
+    """Spatial shape of a per-cell ice field on the ocean grid.
+
+    MPAS Voronoi -> ``(nCells,)``; lat-lon / tripole C-grid -> ``(n_lat, n_lon)``
+    (the ocean T-point shape).  Matches ``_base_spatial_ndim`` in
+    ``legoesm.ice.sea_ice`` so ``init_dynamic_ice_state(shape)`` builds a
+    single-category state with the right rank for ``step_sea_ice``.
+    """
+    if app_grid_type == "mpas":
+        return (int(np.asarray(grid.latCell).shape[0]),)
+    if app_grid_type == "tripole":
+        return tuple(int(s) for s in np.asarray(grid.lat_T).shape)
+    if app_grid_type == "latlon":
+        return (int(np.asarray(grid.lat).shape[0]),
+                int(np.asarray(grid.lon).shape[0]))
+    raise ValueError(
+        f"--prognostic-sea-ice: unsupported grid_type {app_grid_type!r} for the "
+        "ice-state spatial shape (supported: mpas, tripole, latlon).")
+
+
+def _surface_currents(state, grid, app_grid_type):
+    """Top-level ocean currents (u_east, v_north) at T points / cells [m/s].
+
+    Reused as ``ocean_u`` / ``ocean_v`` for ``step_sea_ice``.  MPAS stores the
+    edge-normal ``u`` (nEdges, nlev); reconstruct cell-centred (u, v) with the
+    canonical Perot ``reconstruct_cell_velocity`` (init_mpas).  The C-grid
+    families (latlon / tripole) store cell-centred ``u`` / ``v`` faces; take the
+    surface level directly on the T-shape they already carry — the ice model only
+    needs an O(0.1 m/s) drift reference for the ocean-ice drag, so the face value
+    at the matching index is an adequate cell-centre proxy (and avoids a bespoke
+    face->centre average)."""
+    if app_grid_type == "mpas":
+        from legoesm.ocean.init_mpas import reconstruct_cell_velocity
+        u_sfc, v_sfc = reconstruct_cell_velocity(state.u.data[:, 0], grid)
+        return u_sfc, v_sfc
+    # latlon / tripole C-grid: u on EW faces (n_lat, n_lon+1), v on NS faces
+    # (n_lat+1, n_lon); crop to the T shape (n_lat, n_lon) at the surface level.
+    n_lat = int(np.asarray(grid.lat_T if app_grid_type == "tripole"
+                           else grid.lat).shape[0]) if app_grid_type != "latlon" \
+        else int(np.asarray(grid.lat).shape[0])
+    u_face = state.u.data[..., 0]
+    v_face = state.v.data[..., 0]
+    u_sfc = u_face[:, :-1]                      # drop the periodic wrap column
+    v_sfc = 0.5 * (v_face[:-1, :] + v_face[1:, :])
+    return u_sfc, v_sfc
+
+
+def _build_atm_to_surface_core2(forc, ramp=1.0):
+    """Build an :class:`AtmToSurface` from the CORE-II fields ALREADY sampled
+    onto the ocean grid by :func:`sample_omip2_forcing`.
+
+    Field mapping (CORE-II -> AtmToSurface), units preserved:
+      u10        -> u_lowest          [m/s]
+      v10        -> v_lowest          [m/s]
+      T_air [K]  -> T_lowest          [K]   (CORE-II air T is already Kelvin)
+      q_air      -> q_lowest          [kg/kg]
+      sw_down    -> sw_down           [W/m2]
+      lw_down    -> lw_down           [W/m2]
+      precip     -> precip_total      [kg/m2/s]
+      snow       -> precip_snow       [kg/m2/s] (0 when the cache lacks snow)
+      slp        -> p_surface=p_lowest[Pa]      (standard atm when slp absent)
+    ``rho_lowest`` is moist-air density p/(R_d*T_v) — the SAME form
+    ``coupler.surface_exchange.extract_atm_to_surface`` uses.  ``cos_zenith`` /
+    ``co2_ppmv`` are inert for the ice model (it has its own SW/albedo path), so
+    they are populated as zeros / a default and never read.  ``has_radiation`` /
+    ``has_precipitation`` = 1 (CORE-II provides both)."""
+    from legoesm.core.coupling_fields import AtmToSurface
+    from legoesm import constants
+
+    def _arr(name):
+        return jnp.asarray(np.asarray(forc[name], dtype=np.float64))
+
+    u10 = _arr("u10"); v10 = _arr("v10")
+    T_air = _arr("T_air"); q_air = _arr("q_air")
+    sw = _arr("sw_down") * float(ramp)
+    lw = _arr("lw_down") * float(ramp)
+    precip = _arr("precip") * float(ramp)
+    snow_np = forc.get("snow")
+    precip_snow = (jnp.asarray(np.asarray(snow_np, dtype=np.float64)) * float(ramp)
+                   if snow_np is not None else jnp.zeros_like(precip))
+    slp_np = forc.get("slp")
+    p_sfc = (jnp.asarray(np.asarray(slp_np, dtype=np.float64))
+             if slp_np is not None
+             else jnp.full_like(u10, float(constants.p_atm_std)))
+    # Moist-air density at the lowest level (p / (R_d * T_v)).
+    T_v = T_air * (1.0 + (1.0 / float(constants.epsilon) - 1.0) * q_air)
+    rho = p_sfc / (float(constants.R_d) * T_v)
+    zero = jnp.zeros_like(u10)
+    # has_radiation / has_precipitation are scalar flags (matching the canonical
+    # extract_atm_to_surface); the ice model broadcasts them against the field
+    # dtype.  cos_zenith / co2_ppmv are inert for the ice model (its own SW /
+    # albedo path) -> zero array / scalar default, never read.
+    return AtmToSurface(
+        sw_down=sw, lw_down=lw, precip_total=precip, precip_snow=precip_snow,
+        T_lowest=T_air, q_lowest=q_air, u_lowest=u10, v_lowest=v10,
+        p_lowest=p_sfc, p_surface=p_sfc, rho_lowest=rho,
+        cos_zenith=zero, co2_ppmv=jnp.asarray(0.0),
+        has_radiation=jnp.asarray(1.0), has_precipitation=jnp.asarray(1.0),
+    )
+
+
+def _route_ice_response_to_ocean(sf, fw, resp, ocean_mask, ice_conc):
+    """Route a sea-ice :class:`TileResponse` into the EXISTING ocean forcing
+    channels (NO new applicator).  Returns ``(sf, fw)`` updated.
+
+    * ``resp.salt_flux`` [kg(salt)/m2/s, + INTO ocean] -> ``sf.salt_flux``.  The
+      ocean cores apply it in-core (ocean_pe_mpas.py salt_flux_salinity_tendency
+      / physics/surface_forcing/external.py) under scheme in {none, external}.
+    * ``resp.ocean_heat_extraction`` [W/m2, + = ocean LOSES heat] -> SUBTRACT
+      from ``sf.q_net`` (q_net is + INTO ocean), so basal-melt + lead-freeze
+      latent draw cools the ocean column.
+    * ``resp.freshwater_flux`` [kg/m2/s, + INTO ocean] -> ``fw.ice_fw`` (the ice
+      melt/freeze freshwater the FreshwaterForcing channel already carries;
+      ``net_freshwater_flux`` sums P - E + R + ice_fw, so it is NOT double-counted
+      with P - E).
+    * ``resp.ocean_stress_x/y`` [Pa, + = force ON the ocean] -> ADD into
+      ``sf.tau_x/tau_y`` weighted by the ice concentration.  Per the EXISTING F11
+      convention (``coupler.ocean_forcing``: ``tau = -f_ice*ocean_stress``), the
+      core applies ``-tau`` as the ocean reaction, so a per-cell ``-conc*stress``
+      delivers ``+conc*stress`` force on the ocean — the ice's drag back-reaction
+      ADDED to the open-water CORE-II wind stress already on ``sf``.
+
+    ``ocean_mask`` (1=ocean, 0=land) zeroes every ice->ocean flux on land/dry
+    columns so spurious land-ice budgets never reach the ocean (the cores mask
+    too, but masking here keeps the diagnostics + tau honest).  All masking uses
+    EXISTING fields; the salt is applied ONLY via ``sf.salt_flux`` (the in-core
+    path) and NEVER additionally as a manual state update — single application,
+    no double count.
+
+    The ice freshwater is delivered ONLY via ``fw.ice_fw`` (NOT also
+    ``sf.freshwater``): on the latlon/MPAS faithful path the runner passes
+    ``model.step(..., freshwater=fw)`` and leaves ``sf.freshwater`` unset on
+    purpose — the ``external`` surface-forcing scheme applies ``sf.freshwater``
+    AND ``sf.salt_flux`` as virtual+real salt, so additionally setting
+    ``sf.freshwater`` here would DOUBLE-APPLY the ice freshwater (once in-core via
+    ``fw``, once via ``external.py``).  This matches the EXISTING P-E-R routing
+    (``fw``-only on latlon/MPAS), so the KPP buoyancy treatment of ice freshwater
+    is identical to that of P-E-R — consistent, not a regression.
+    """
+    m = jnp.asarray(ocean_mask, dtype=sf.q_net.dtype)
+    conc = jnp.asarray(ice_conc, dtype=sf.q_net.dtype)
+    salt = jnp.asarray(resp.salt_flux, dtype=sf.q_net.dtype) * m
+    heat = jnp.asarray(resp.ocean_heat_extraction, dtype=sf.q_net.dtype) * m
+    # Ice back-reaction stress (atmosphere convention so the core's -tau
+    # consumer applies +conc*stress force on the ocean), masked + area-weighted.
+    tau_x_ice = -conc * jnp.asarray(resp.ocean_stress_x, dtype=sf.q_net.dtype) * m
+    tau_y_ice = -conc * jnp.asarray(resp.ocean_stress_y, dtype=sf.q_net.dtype) * m
+    sf = sf._replace(
+        salt_flux=salt,
+        q_net=sf.q_net - heat,
+        tau_x=(sf.tau_x + tau_x_ice) if sf.tau_x is not None else tau_x_ice,
+        tau_y=(sf.tau_y + tau_y_ice) if sf.tau_y is not None else tau_y_ice,
+    )
+    if fw is not None:
+        ice_fw = jnp.asarray(resp.freshwater_flux, dtype=fw.precip.dtype) \
+            * jnp.asarray(ocean_mask, dtype=fw.precip.dtype)
+        fw = fw._replace(ice_fw=ice_fw)
+    return sf, fw
+
+
+def _prognostic_ice_diag(ice_state, resp, grid, app_grid_type, ocean_mask):
+    """One-line verifiable summary over OCEAN cells: ice AREA [10^6 km2], mean
+    concentration, max thickness, and the area-mean salt flux over ice-covered
+    cells.
+
+    ``grid.area`` is the per-cell area [m2] on all three supported grids
+    (VoronoiMesh exposes it as ``areaCell``; the C-grid families as the
+    ``.area`` property).  ``ocean_mask`` restricts the summary to wet cells so a
+    spurious land-ice growth (masked out of the ocean budget) does not inflate
+    the reported area."""
+    conc = np.asarray(ice_state.concentration.data, dtype=np.float64)
+    h = np.asarray(ice_state.h_ice.data, dtype=np.float64)
+    if conc.ndim > h.ndim:  # safety (single-category here)
+        conc = conc.sum(axis=-1)
+    m = np.asarray(ocean_mask, dtype=np.float64) > 0.5
+    conc = np.where(m, conc, 0.0)
+    h = np.where(m, h, 0.0)
+    # VoronoiMesh exposes cell area as ``areaCell``; the C-grid families as the
+    # ``.area`` property (see docstring) -- pick whichever this grid has.
+    _area = getattr(grid, "area", None)
+    if _area is None:
+        _area = grid.areaCell
+    area = np.asarray(_area, dtype=np.float64)
+    ice_area_m2 = float(np.sum(conc * area))
+    icy = conc > 1.0e-3
+    salt = np.asarray(resp.salt_flux, dtype=np.float64)
+    salt_mean = float(salt[icy].mean()) if icy.any() else 0.0
+    return (f"ice_area={ice_area_m2 / 1.0e12:.3f}e6 km2 "
+            f"mean_conc={float(conc[conc > 0].mean()) if (conc > 0).any() else 0.0:.3f} "
+            f"max_h={float(h.max()):.3f} m "
+            f"mean_salt_flux(icy)={salt_mean:.3e} kg/m2/s "
+            f"icy_cells={int(icy.sum())}")
+
+
 def _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir):
     """AMOC@26N [Sv] from the LIVE state (h reconstructed in-run via
     compute_layer_thickness — the snapshot lacks eta/z_coord).  Reuses the
@@ -1579,6 +1765,113 @@ def _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir):
             f"amoc26N_Sv {amoc:.4f}\n")
     except Exception as e:  # diagnostic must never crash the run
         print(f"[transports] AMOC@26N diag skipped: {type(e).__name__}: {e}")
+
+
+def _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir):
+    """Barotropic streamfunction (gyres) + AMOC overturning streamfunction
+    (Atlantic, lat-depth) + global MOC, at run-end for ALL simulations. Reuses
+    the tested ``diagnostics_streamfunction.{barotropic_streamfunction,
+    moc_streamfunction}`` (lat-lon C-grid: latlon/tripole). Saves a .npz of the
+    fields and PNG maps. Pure NumPy at run-end; never crashes the run.
+
+    MPAS (VoronoiMesh) has no structured lat-lon streamfunction operator here;
+    its AMOC@26N scalar is reported by ``_amoc26n_diag`` -- the field maps are
+    skipped (noted) until an unstructured-grid streamfunction is wired."""
+    if app_grid_type == "mpas" or getattr(state, "v", None) is None:
+        print("[transports] BSF/AMOC field maps skipped (no structured C-grid "
+              "v-faces on this grid); AMOC@26N scalar is in transports.txt.")
+        return
+    try:
+        from legoesm.ocean.vertical import compute_layer_thickness
+        from legoesm.ocean.diagnostics_streamfunction import (
+            barotropic_streamfunction, moc_streamfunction,
+        )
+        u = np.asarray(state.u.data)
+        v = np.asarray(state.v.data)
+        eta = np.asarray(state.eta.data)
+        Hb = np.asarray(state.H_bathy.data)
+        mask = np.asarray(state.land_mask.data)
+        h = np.asarray(compute_layer_thickness(state.eta.data,
+                                               state.H_bathy.data, z_coord))
+        # Barotropic streamfunction (gyres), [Sv], (n_lat, n_lon).
+        bsf = np.asarray(barotropic_streamfunction(u, h, mask, grid))
+        # AMOC = Atlantic-masked overturning; also the GLOBAL MOC. moc returns
+        # (n_lat+1, nlev) [Sv] on v-faces. Atlantic band -75..15 E matches
+        # compute_amoc_from_state. Use the 2-D T-grid longitude (tripole fold),
+        # not the legacy 1-D first-row grid.lon (codex review).
+        _lon = getattr(grid, "lon_T", None)
+        if _lon is None:
+            _lon = getattr(grid, "lon2d", None)
+        if _lon is None:
+            _lon = grid.lon
+        lon2d = np.rad2deg(np.asarray(_lon))
+        _lonw = (((lon2d + 180.0) % 360.0) - 180.0)
+        lon_band = (_lonw >= -75.0) & (_lonw <= 15.0)
+        if lon_band.ndim == 1:
+            lon_band = np.broadcast_to(lon_band, mask.shape)
+        atl_mask = mask * lon_band.astype(mask.dtype)
+        amoc = np.asarray(moc_streamfunction(v, h, eta, Hb, atl_mask, grid))
+        gmoc = np.asarray(moc_streamfunction(v, h, eta, Hb, mask, grid))
+        lat2d = np.rad2deg(np.asarray(grid.lat))
+        # v-FACE latitudes (n_lat+1) for the MOC fields, not the T-row centres
+        # (codex review). From grid.lat_v if present, else T-row midpoints +
+        # extrapolated end faces.
+        _latv = getattr(grid, "lat_v", None)
+        if _latv is not None:
+            _lv2 = np.rad2deg(np.asarray(_latv))
+            lat_v = _lv2.mean(axis=-1) if _lv2.ndim > 1 else _lv2
+        else:
+            rc = lat2d.mean(axis=-1) if lat2d.ndim > 1 else lat2d   # (n_lat,)
+            mid = 0.5 * (rc[:-1] + rc[1:])
+            lat_v = np.concatenate([[2 * rc[0] - mid[0]], mid,
+                                    [2 * rc[-1] - mid[-1]]])         # (n_lat+1,)
+        lat_v = np.asarray(lat_v)[:amoc.shape[0]]
+        z_cen = (np.abs(np.asarray(z_coord.z_full_ref))
+                 if getattr(z_coord, "z_full_ref", None) is not None
+                 else np.arange(amoc.shape[1], dtype=float))
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            Path(out_dir) / "bsf_amoc.npz", bsf=bsf, amoc=amoc, gmoc=gmoc,
+            lat_v=lat_v, z_center=z_cen,
+            lat_T=lat2d, lon_T=lon2d, land_mask=mask)
+
+        def _sx(a, f):  # finite-safe extremum (avoid all-NaN RuntimeWarning)
+            return float(f(a)) if np.isfinite(a).any() else float("nan")
+        # NADW cell = positive max; AABW = negative min. Print signed extrema.
+        print(f"[transports] BSF [{_sx(bsf, np.nanmin):.1f},"
+              f"{_sx(bsf, np.nanmax):.1f}] Sv; AMOC psi "
+              f"[{_sx(amoc, np.nanmin):.1f},{_sx(amoc, np.nanmax):.1f}] Sv "
+              f"(NADW=max); global-MOC [{_sx(gmoc, np.nanmin):.1f},"
+              f"{_sx(gmoc, np.nanmax):.1f}] Sv -> bsf_amoc.npz")
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            # AMOC lat-depth section (x = v-face latitude, y = depth).
+            fig, ax = plt.subplots(1, 2, figsize=(13, 4.5))
+            lv = np.linspace(-30, 30, 31)
+            c0 = ax[0].contourf(lat_v, -z_cen[:amoc.shape[1]],
+                                amoc[:lat_v.size].T, levels=lv,
+                                cmap="RdBu_r", extend="both")
+            ax[0].set_title("AMOC overturning [Sv] (Atlantic)")
+            ax[0].set_xlabel("latitude"); ax[0].set_ylabel("depth [m]")
+            plt.colorbar(c0, ax=ax[0])
+            # BSF map.
+            bsf_p = bsf[:, :lon2d.shape[-1]] if bsf.shape[-1] != lon2d.shape[-1] \
+                else bsf
+            c1 = ax[1].pcolormesh(np.where(mask > 0.5, bsf_p, np.nan),
+                                  cmap="RdBu_r", vmin=-60, vmax=60)
+            ax[1].set_title("Barotropic streamfunction [Sv]")
+            ax[1].set_xlabel("i"); ax[1].set_ylabel("j")
+            plt.colorbar(c1, ax=ax[1])
+            fig.tight_layout()
+            fig.savefig(Path(out_dir) / "bsf_amoc.png", dpi=110)
+            plt.close(fig)
+            print(f"[transports] saved {Path(out_dir) / 'bsf_amoc.png'}")
+        except Exception as pe:
+            print(f"[transports] BSF/AMOC plot skipped: {type(pe).__name__}: {pe}")
+    except Exception as e:
+        print(f"[transports] BSF/AMOC diag skipped: {type(e).__name__}: {e}")
 
 
 def _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir):
@@ -1672,6 +1965,44 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None):
     np.savez_compressed(out_dir / f"snapshot_{tag}.npz", **save_kw)
 
 
+def _dump_momentum_terms(model, state, sf, dt, lat2d, lon2d, tag=""):
+    """DEBUG: per-term momentum-tendency breakdown (which term drives a
+    cold-start blowup). Uses the lat-lon C-grid model's public
+    ``tendencies_with_diagnostics`` (closure-tested); a no-op on grids without
+    it (mpas/cube). Prints each term's global-max |tendency| + its location,
+    sorted descending so the dominant (blowup) term is first."""
+    if not hasattr(model, "tendencies_with_diagnostics"):
+        print(f"[mom-diag{tag}] no per-term diagnostics on this model", flush=True)
+        return
+    try:
+        _tend, diag = model.tendencies_with_diagnostics(
+            state, surface_forcing=sf, dt=dt)
+    except Exception as exc:                       # debug probe: never abort the run
+        print(f"[mom-diag{tag}] diagnostics failed: {exc!r}", flush=True)
+        return
+    lat = np.asarray(lat2d)
+    lon = np.asarray(lon2d)
+    rows = []
+    for name in diag._fields:
+        if not (name.endswith("_u") or name.endswith("_v")):
+            continue
+        a = np.asarray(getattr(diag, name).data)
+        aa = np.where(np.isfinite(a), np.abs(a), 0.0)
+        if aa.size == 0:
+            continue
+        idx = np.unravel_index(int(np.argmax(aa)), a.shape)
+        ii = min(int(idx[0]), lat.shape[0] - 1)
+        jj = min(int(idx[1]), lat.shape[1] - 1)
+        lev = int(idx[2]) if a.ndim >= 3 else -1
+        rows.append((float(aa.max()), name, float(lat[ii, jj]),
+                     float(lon[ii, jj]), lev))
+    print(f"[mom-diag{tag}] per-term |tendency| global-max (m/s^2), "
+          "largest first:", flush=True)
+    for mx, name, la, lo, lev in sorted(rows, reverse=True):
+        print(f"    {name:18s} {mx:.4e} @ ({la:+.1f},{lo:.0f}) lev{lev}",
+              flush=True)
+
+
 def _cli_flags_given(argv=None) -> set:
     """The set of argparse ``dest`` names the user passed explicitly on the CLI.
 
@@ -1714,8 +2045,22 @@ def main() -> int:
                    help="Short 10-day benchmark run (reports steps/s).")
     p.add_argument("--dt", type=float, default=3600.0,
                    help="Timestep [s] (default 3600 = NEMO ORCA1).")
-    p.add_argument("--nlev", type=int, default=20)
+    p.add_argument("--nlev", type=int, default=40,
+                   help="Ocean vertical levels for the tanh z* default grid "
+                        "(default 40, climate-usable minimum). For full NEMO "
+                        "ORCA1 fidelity use --nemo-vertical (L75, overrides "
+                        "--nlev).")
     p.add_argument("--H-max", type=float, default=5500.0)
+    p.add_argument("--nemo-vertical", action="store_true",
+                   help="Match NEMO ORCA1's vertical grid: build z_coord from "
+                        "NEMO's reference layer thicknesses e3t_1d (75 levels, "
+                        "~1 m surface -> ~204 m deep, Madec-Imbard L75) instead "
+                        "of the default tanh 20-level stretch. Overrides --nlev / "
+                        "--H-max to the NEMO column (better-resolved thermocline "
+                        "+ MLD, directly comparable to NEMO).")
+    p.add_argument("--nemo-vertical-file", type=str, default=None,
+                   help="NetCDF with e3t_1d for --nemo-vertical (default: the "
+                        "ORCA1 domain_cfg).")
     p.add_argument("--mesh", type=str, default=_MESH)
     p.add_argument("--grid", type=str, default="tripole",
                    choices=["tripole", "latlon_bathy", "cubed_sphere", "mpas"],
@@ -1790,6 +2135,14 @@ def main() -> int:
                         "(Med/Black/Red/Gulf/Baltic/Hudson) to land — their sub-grid "
                         "sills seed the cold-start PGF blowup (caveated, like the "
                         "latlon Arctic).")
+    p.add_argument("--mask-marginal-seas", action="store_true",
+                   help="lat-lon: mask the poorly-resolved semi-enclosed / "
+                        "endorheic seas (Med/Black/Red/Gulf/Baltic/Hudson/Caspian/"
+                        "Aral/Great Lakes) to land. On the regular grid the IDW "
+                        "regrid reconnects them through 1-cell straits and inflates "
+                        "their depth; the brackish/hypersaline WOA T/S then seeds a "
+                        "sharp-front baroclinic-PGF cold-start blowup at NEMO "
+                        "75-level (the Caspian, 47.5N/48E). Caveated open-ocean run.")
     p.add_argument("--woa-init", action="store_true",
                    help="Initialise T/S from WOA18 (faithful IC) vs rest state.")
     p.add_argument("--woa-t", type=str, default="data/woa18/woa18_decav_t00_01.nc")
@@ -1884,6 +2237,29 @@ def main() -> int:
                         "prognostic ice, so high-lat (esp. Arctic) cells over-cool "
                         "3-5 C below NEMO (LIM ice caps SST). NEMO-faithful; removes "
                         "~half the Arctic SST RMSE. Off = bit-exact legacy.")
+    p.add_argument("--prognostic-sea-ice", action="store_true",
+                   help="Wire legoESM's REAL prognostic sea-ice model "
+                        "(legoesm.ice.step_sea_ice: thermo + dynamics + brine) into "
+                        "the run, REPLACING the freeze-floor / prescribed-siconc / "
+                        "ice-thermo-relaxation surrogates.  The ice tile's brine-"
+                        "rejection salt flux + melt/freeze freshwater + ocean heat "
+                        "extraction are routed into the EXISTING surface_forcing "
+                        "(salt_flux, q_net) and freshwater (ice_fw) channels — so "
+                        "sea-ice salt/FW export balances Arctic river runoff (the "
+                        "missing reservoir behind the Arctic SSS crash).  Cold start "
+                        "(zero ice; spins up).  Requires --woa-init and a grid that "
+                        "supports ice dynamics (mpas primary; tripole / latlon).  "
+                        "Mutually exclusive with the ice surrogates.")
+    p.add_argument("--prognostic-ice-dynamics", default="mevp",
+                   choices=["mevp", "evp", "free_drift"],
+                   help="Sea-ice rheology for --prognostic-sea-ice (default mevp). "
+                        "'mevp'/'evp' need the grid strain-rate operators; falls "
+                        "back to 'free_drift' automatically if the grid lacks them "
+                        "(NOT 'none' — that gives no ice drift/export).")
+    p.add_argument("--prognostic-ice-salinity", type=float, default=None,
+                   help="Bulk salinity of newly-frozen lead/basal ice [PSU] for the "
+                        "--prognostic-sea-ice brine closure (BrineConfig.S_ice_new; "
+                        "default constants.S_ice_bulk_default ~4 PSU).")
     p.add_argument("--visc-schedule", type=str, default=None,
                    help="Piecewise viscosity schedule 'day:A_h:C_smag_lap,...'"
                         " e.g. '0:1e5:3.0,90:5e4:1.0,180:2e4:0.33' — start at "
@@ -1908,6 +2284,15 @@ def main() -> int:
                         "single surface cell — fixes the too-fresh/too-shallow "
                         "Amazon-type plume. Column-integral salt unchanged. "
                         "Default None = legacy top-cell (bit-exact).")
+    p.add_argument("--runoff-spread-passes", type=int, default=None,
+                   help="HORIZONTAL coastal-spread passes for the regridded "
+                        "runoff (ocean-masked neighbour-average; Voronoi-topology "
+                        "on MPAS, structured laplacian elsewhere). Default None = "
+                        "8 on MPAS (big rivers over-concentrate in ~4 IDW cells; "
+                        "spread-passes sensitivity-tuned), "
+                        "2 on lat-lon/cube. The area-conservative renorm keeps the "
+                        "global total exact. Distinct from --runoff-depth-spread-m "
+                        "(VERTICAL spread).")
     p.add_argument("--river-mouth-restoring-gate", action="store_true",
                    help="Disable SSS restoring at river-mouth cells (runoff > "
                         "threshold), like NEMO sbcssr's (1-2*rnfmsk) damping "
@@ -2059,6 +2444,11 @@ def main() -> int:
                         "instead of the default ~/.cache/.../core2_nyf. Set via "
                         "--config forcing.path. See issue #376.")
     p.add_argument("--diag-every-days", type=float, default=30.0)
+    p.add_argument("--diag-momentum-step", type=int, default=-1,
+                   help="DEBUG (lat-lon/tripole): at every step <= this, dump the "
+                        "per-term momentum-tendency breakdown (PGF/Coriolis/advection/"
+                        "viscosity/...) global-max + location, to pin the term driving "
+                        "a cold-start blowup. -1=off.")
     p.add_argument("--scan-block", type=int, default=0,
                    help="Issue #354: wrap the time loop in jax.lax.scan, "
                         "fusing this many steps per block (CORE-II forcing "
@@ -2101,6 +2491,17 @@ def main() -> int:
     p.add_argument("--mle-ce", type=float, default=0.06,
                    help="MLE efficiency coefficient rn_ce (NEMO ORCA1 0.06; "
                         "typical 0.06-0.08). For --mle.")
+    p.add_argument("--geothermal", action="store_true",
+                   help="Geothermal bottom heat-flux boundary condition (NEMO "
+                        "ln_trabbc, Emile-Geay & Madec 2009): warm the deepest "
+                        "wet cell of each column by the seafloor heat flux. "
+                        "Grid-agnostic. Tiny + abyssal -- structural NEMO "
+                        "faithfulness, NOT a surface-SST lever on spin-up "
+                        "timescales. Default off.")
+    p.add_argument("--geothermal-flux-wm2", type=float, default=None,
+                   help="Constant seafloor geothermal heat flux [W/m^2] for "
+                        "--geothermal. Default = GeothermalConfig default "
+                        "(NEMO rn_geoflx_cst).")
     p.add_argument("--div-damp-2", type=float, default=None,
                    help="2nd-order divergence damping [m^2/s] -- suppresses "
                         "grid-scale divergent (checkerboard) modes at small "
@@ -2139,6 +2540,39 @@ def main() -> int:
         if not (float(args.ice_thermo_tau_days) > 0.0):
             raise ValueError("--ice-thermo-tau-days must be > 0 (freezing-relaxation "
                              f"timescale [days]); got {args.ice_thermo_tau_days}.")
+
+    if args.prognostic_sea_ice:
+        # The REAL prognostic ice model REPLACES the surrogates — never combine
+        # (double counting / inconsistent SST clamps).  Fail loud.
+        _ice_surrogates = [
+            ("--freeze-floor", args.freeze_floor),
+            ("--ice-thermo", args.ice_thermo),
+            ("--ice-albedo", args.ice_albedo),
+            ("--ice-albedo-seasonal", args.ice_albedo_seasonal),
+        ]
+        _on = [name for name, val in _ice_surrogates if val]
+        if _on:
+            raise ValueError(
+                "--prognostic-sea-ice is mutually exclusive with the sea-ice "
+                f"surrogates {_on}: the prognostic model replaces the freeze-floor "
+                "T clamp, the prescribed-siconc SW albedo, and the ice-thermo "
+                "freezing relaxation (combining them would double-count the ice "
+                "boundary).  Drop the surrogate flag(s).")
+        if not args.woa_init:
+            raise ValueError(
+                "--prognostic-sea-ice requires --woa-init: the brine salt budget "
+                "and freezing point need a realistic high-latitude T/S, not the "
+                "idealised rest state.")
+        if args.grid == "cubed_sphere":
+            raise ValueError(
+                "--prognostic-sea-ice is not wired for --grid cubed_sphere (parked "
+                "grid; the OMIP runner does not pass freshwater= on the cube path). "
+                "Use --grid mpas (primary), tripole, or latlon_bathy.")
+        if int(args.scan_block) > 0:
+            raise ValueError(
+                "--prognostic-sea-ice cannot run under --scan-block: the ice step "
+                "pulls ocean SST to the host each step (like SSS restoring / "
+                "ice-thermo), so it is host-loop only. Set --scan-block 0.")
 
     from legoesm.core.precision import PrecisionPolicy, set_policy
     set_policy(PrecisionPolicy.fp64())
@@ -2205,6 +2639,25 @@ def main() -> int:
         from legoesm.ocean.physics.lateral_mixing.mle import MLEConfig
         mle_cfg = MLEConfig(ce=args.mle_ce)
         print(f"[setup] Fox-Kemper MLE requested: ce={args.mle_ce:g}")
+
+    # --nemo-vertical: replace the default 20-level tanh z* with NEMO ORCA1's
+    # 75-level reference column (e3t_1d) so vertical gradients (thermocline, MLD)
+    # are resolved comparably to NEMO. Overrides --nlev/--H-max to the NEMO column.
+    _nemo_dz = None
+    if args.nemo_vertical:
+        if args.grid == "cubed_sphere":
+            raise ValueError(
+                "--nemo-vertical is not wired for --grid cubed_sphere (parked "
+                "grid; build_cubed_sphere does not thread dz_ref_override). Use "
+                "tripole, latlon_bathy, or mpas.")
+        _vfile = args.nemo_vertical_file or _NEMO_DOMAIN_CFG
+        _nemo_dz = _load_nemo_e3t_1d(_vfile)
+        args.nlev = int(_nemo_dz.size)
+        args.H_max = float(_nemo_dz.sum())
+        print(f"[setup] --nemo-vertical: {args.nlev} levels from {_vfile} "
+              f"(dz {_nemo_dz[0]:.2f}->{_nemo_dz[-1]:.1f} m, H_max "
+              f"{args.H_max:.0f} m) -- matching NEMO ORCA1 L75.")
+
     if args.grid == "tripole":
         grid, z_coord, model, state, H_bathy = build_tripole(
             args.nlev, args.H_max, args.mesh,
@@ -2236,7 +2689,7 @@ def main() -> int:
             convection_K_bg=args.convection_K_bg,
             ew_cyclic_overlap=(True if args.ew_cyclic_overlap else None),
             tracer_advection=args.tracer_advection,
-            mle=mle_cfg,
+            mle=mle_cfg, dz_ref_override=_nemo_dz,
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":
@@ -2270,7 +2723,7 @@ def main() -> int:
             flat_bottom=args.flat_bottom, partial_cell=args.partial_cell,
             freeze_floor=(True if args.freeze_floor else None),
             runoff_depth_spread_m=args.runoff_depth_spread_m,
-            mle=mle_cfg,
+            mle=mle_cfg, dz_ref_override=_nemo_dz,
         )
         app_grid_type = "mpas"
     else:
@@ -2305,7 +2758,8 @@ def main() -> int:
             polar_filter_cutoff_lat_deg=args.polar_filter_cutoff_lat,
             polar_filter_max_wave_speed=args.polar_filter_max_wave_speed,
             polar_filter_safety_factor=args.polar_filter_safety,
-            mle=mle_cfg,
+            mle=mle_cfg, dz_ref_override=_nemo_dz,
+            mask_marginal_seas=args.mask_marginal_seas,
         )
         app_grid_type = "latlon"
 
@@ -2328,6 +2782,17 @@ def main() -> int:
             )
             _yaml_cfg = ocean_adapter.to_ocean_config()
             _ovr = {k: getattr(_yaml_cfg, k) for k in _explicit}
+            # The builders force implicit_vertical_mixing=True (the root-cause
+            # fix; explicit KPP vertical viscosity is CFL-unstable at the NEMO
+            # 75-level ~1 m top cell -> cold-start blowup). A YAML override must
+            # not silently revert that to the explicit path. (codex review)
+            if _ovr.get("implicit_vertical_mixing") is False:
+                raise ValueError(
+                    "--config ocean.implicit_vertical_mixing=false is rejected: "
+                    "explicit vertical mixing is CFL-unstable at a NEMO-vertical "
+                    "(~1 m surface) grid and blows the cold-start. Remove the "
+                    "override (the OMIP builders force implicit) or use a coarse "
+                    "vertical grid where the explicit-diffusion CFL is satisfied.")
             model = LatLonCGridOceanModel(
                 grid, z_coord, model.config._replace(**_ovr)
             )
@@ -2468,7 +2933,7 @@ def main() -> int:
         if args.grid == "mpas":
             raise ValueError(
                 "--woa-smoothing-passes is not available for mpas: smooth_woa_ts "
-                "uses the structured 2-D _laplacian_smooth_2d; a Voronoi "
+                "uses the structured 2-D laplacian_smooth_2d; a Voronoi "
                 "connectivity smoother (cellsOnCell) is future work.")
         state = smooth_woa_ts(state, grid, args.woa_smoothing_passes)
 
@@ -2501,10 +2966,24 @@ def main() -> int:
     if args.runoff:
         if app_grid_type == "cubed_sphere":
             raise ValueError("--runoff: not wired for the cube (parked grid).")
-        # MPAS uses the 1-D apply_runoff_step_mpas + spread_passes=0 (the
-        # _laplacian_smooth_2d coastal-spread is structured-only; the IDW k=4
-        # regrid already spreads each river to the nearest cells).
-        _spread = 0 if app_grid_type == "mpas" else 2
+        # Coastal-spread passes: MPAS uses the Voronoi-topology smoother in
+        # load_runoff_monthly (cellsOnCell neighbour-average), so it gets the SAME
+        # spreading the structured grids always had.  MPAS needs MORE passes than
+        # lat-lon: the IDW k=4 regrid concentrates each river into ~4 Voronoi cells,
+        # so un-spread the Amazon/Arctic over-freshen their mouths by -2 to -3 PSU
+        # (regional SSS-band diagnostic).  A spread-passes SENSITIVITY (ico6 day-90,
+        # SSS bias vs NEMO) is MONOTONE with no downside to the open Pacific/Southern
+        # Ocean: Amazon basin -1.04 (sp2) -> -0.70 (sp4) -> -0.335 (sp8); global SSS
+        # rmse 1.046 -> 1.01 -> 0.990.  8 still leaves the basin NEGATIVE (the real
+        # plume is preserved, not washed out); beyond ~8 the gain plateaus and risks
+        # over-diffusing the plume, so 8 is the default.  The area-conservative
+        # renorm keeps the global total exact regardless.
+        if args.runoff_spread_passes is not None and int(args.runoff_spread_passes) < 0:
+            raise SystemExit(
+                "--runoff-spread-passes must be >= 0 "
+                f"(got {args.runoff_spread_passes})")
+        _spread = int(args.runoff_spread_passes) if args.runoff_spread_passes is not None \
+            else (8 if app_grid_type == "mpas" else 2)
         runoff_monthly = load_runoff_monthly(
             grid, app_grid_type, lat2d, lon2d, args.mesh,
             land_mask=np.asarray(state.land_mask.data), spread_passes=_spread)
@@ -2550,6 +3029,59 @@ def main() -> int:
     )
     n_rec = int(forcing.u10.shape[0])
     print(f"[setup] grid {lat2d.shape}, forcing records {n_rec}, dt={args.dt}s")
+
+    # Prognostic sea-ice (--prognostic-sea-ice): build the canonical SeaIceConfig
+    # + a zero-ice cold-start state on the OCEAN grid.  The REAL model
+    # (legoesm.ice.step_sea_ice) is stepped each loop iteration and its
+    # brine/melt/heat response is routed into the existing ocean channels.
+    ice_config = None
+    ice_state = None
+    if args.prognostic_sea_ice:
+        from legoesm.ice import (
+            SeaIceConfig, init_dynamic_ice_state, step_sea_ice,
+            grid_supports_ice_dynamics,
+        )
+        from legoesm.ice.config import BrineConfig
+        # Free-drift fallback if the grid lacks strain-rate/transport operators
+        # (NOT 'none', which yields no drift/export).
+        _ice_dyn = args.prognostic_ice_dynamics
+        # NOTE: the tripole grid object is a LatLonCGridGeometry, which
+        # grid_supports_ice_dynamics() does NOT recognise (it matches LatLonGrid
+        # / VoronoiMesh / CubedSphereGrid).  So tripole degrades to free_drift +
+        # transport='none'.  The brine SALT flux + melt/freeze FRESHWATER + ocean
+        # HEAT extraction (the channels that balance Arctic runoff) are produced
+        # by the thermodynamics regardless of the rheology, so export is PRESERVED
+        # under free_drift — only the velocity-driven tracer advection / ridging
+        # are dropped.  MPAS (VoronoiMesh) is the primary, fully-supported target.
+        _supports = grid_supports_ice_dynamics(grid)
+        if not _supports and _ice_dyn in ("mevp", "evp"):
+            print(f"[setup] prognostic ice: grid {type(grid).__name__} lacks "
+                  f"strain-rate/transport ops -> dynamics {_ice_dyn!r} -> "
+                  "'free_drift', transport 'none' (brine salt + melt freshwater + "
+                  "ocean-heat export PRESERVED; tracer advection/ridging dropped). "
+                  "Use --grid mpas for full mEVP + transport.")
+            _ice_dyn = "free_drift"
+        _transport = "advect" if _supports else "none"
+        _brine = BrineConfig(enabled=True)
+        if args.prognostic_ice_salinity is not None:
+            _brine = _brine._replace(S_ice_new=float(args.prognostic_ice_salinity))
+        ice_config = SeaIceConfig(
+            dynamics=_ice_dyn,
+            transport=_transport,
+            brine=_brine,            # brine-rejection salt flux -> ocean salt_flux
+        )
+        ice_shape = _ice_state_spatial_shape(grid, app_grid_type)
+        # Zero-ice cold start (h=0, concentration=0); spins up from the forcing.
+        ice_state = init_dynamic_ice_state(ice_shape, S_ice_init=0.0)
+        ice_state = ice_state._replace(
+            concentration=ice_state.concentration.replace(
+                data=jnp.zeros_like(ice_state.concentration.data)))
+        from legoesm import constants as _ice_const
+        _ice_T_freeze = float(_ice_const.T_freeze)   # degC ocean T -> K for ice
+        print(f"[setup] PROGNOSTIC SEA ICE: step_sea_ice dynamics={_ice_dyn!r} "
+              f"transport={_transport!r} brine=ON (S_ice_new="
+              f"{_brine.S_ice_new:.1f} PSU) on {app_grid_type} shape {ice_shape}; "
+              "salt_flux+ice_fw+heat -> existing surface/freshwater channels.")
 
     dt = float(args.dt)
     ramp_s = float(args.forcing_ramp_days) * _SEC_PER_DAY
@@ -2680,14 +3212,15 @@ def main() -> int:
         # reachable only with --no-emp AND no --runoff/--sss-restore/--ice-albedo
         # (a pure momentum/heat tripole perf run, issue #354).
         if (args.emp_freshwater or args.runoff or args.sss_restore
-                or args.ice_albedo or args.ice_thermo):
+                or args.ice_albedo or args.ice_thermo or args.geothermal):
             raise SystemExit(
                 "[scan] --scan-block applies no surface salinity/albedo/ice forcing "
-                "(P - E / runoff / SSS restoring / ice-albedo / ice-thermo are "
-                "host-loop only), so it cannot run a faithful integration.  Use the "
-                "host Python loop (omit --scan-block), or drop "
-                "--runoff/--sss-restore/--ice-albedo/--ice-thermo and pass --no-emp "
-                "for the momentum/heat-only scan path.")
+                "or geothermal BC (P - E / runoff / SSS restoring / ice-albedo / "
+                "ice-thermo / geothermal are host-loop only), so it cannot run a "
+                "faithful integration.  Use the host Python loop (omit "
+                "--scan-block), or drop "
+                "--runoff/--sss-restore/--ice-albedo/--ice-thermo/--geothermal and "
+                "pass --no-emp for the momentum/heat-only scan path.")
         from legoesm.ocean.coupler.omip2_applicator import (
             build_core2_forcing_device_stack, build_omip2_scan_block_fn,
         )
@@ -2747,6 +3280,7 @@ def main() -> int:
         _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord)
         _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
         _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir)
+        _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir)
         _mht_diag(state, grid, z_coord, app_grid_type, out_dir)
         _record_final_state_digest(manifest_path, state)
         _csv.close()
@@ -2772,13 +3306,13 @@ def main() -> int:
         if visc_schedule and visc_seg_idx < len(visc_schedule):
             _day0, _ah, _cs = visc_schedule[visc_seg_idx]
             if (step - 1) * dt >= _day0 * 86400.0:
-                if (_ah, _cs) != (float(model.config.A_h),
-                                  float(model.config.C_smag_lap)):
+                if (_ah, _cs) != (float(model.config.lateral_viscosity.A_h),
+                                  float(model.config.lateral_viscosity.C_smag_lap)):
                     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid \
                         import LatLonCGridOceanModel
                     model = LatLonCGridOceanModel(
                         grid, z_coord,
-                        model.config._replace(A_h=_ah, C_smag_lap=_cs))
+                        model.config._replace(lateral_viscosity=model.config.lateral_viscosity._replace(A_h=_ah, C_smag_lap=_cs)))
                 print(f"[visc-schedule] day {(step-1)*dt/86400.0:.1f}: "
                       f"A_h={_ah:g} C_smag_lap={_cs:g} "
                       f"(segment {visc_seg_idx + 1}/{len(visc_schedule)})",
@@ -2795,11 +3329,31 @@ def main() -> int:
         # --sss-restore is set), so the albedo is gated on --ice-albedo explicitly
         # to keep an SSS-only run's heat budget unchanged (codex HIGH).
         _sic = _siconc_at_step(siconc_clim, step, dt, siconc_monthly)
+        # Open-water surface-flux attenuation under sea ice.  Two paths feed the
+        # EXISTING under-ice mechanism (_ice_surface_heat: cut under-ice SW to
+        # tau_ice_sw, suppress open-ocean turbulent+LW by (1-conc)):
+        #  * --ice-thermo  -> the PRESCRIBED NEMO siconc surrogate (legacy).
+        #  * --prognostic-sea-ice -> the LIVE (ocean-masked) prognostic ice
+        #    concentration (beginning-of-step), so ice-covered cells do NOT also
+        #    receive the full open-water q_net/SW on top of the ice tile's basal/
+        #    lead heat extraction (codex MED: would otherwise double-heat under
+        #    ice).  The ice tile's ocean_heat_extraction is then added in the
+        #    routing below -> open-water-fraction flux + ice basal draw, the
+        #    physically-correct split.
+        _ice_alb = _sic if (args.ice_albedo or args.ice_thermo) else None
+        _under_ice = args.ice_thermo
+        if ice_config is not None:
+            _lc0 = ice_state.concentration.data
+            if _lc0.ndim > np.asarray(state.land_mask.data).ndim:
+                _lc0 = jnp.sum(_lc0, axis=-1)
+            _ice_alb = jnp.clip(
+                _lc0 * jnp.asarray(state.land_mask.data, _lc0.dtype), 0.0, 1.0)
+            _under_ice = True
         sf = compute_omip2_surface_forcing(
             state, forcing=forcing, idx_t=it,
             grid=grid, grid_type=app_grid_type,
-            ice_albedo=(_sic if (args.ice_albedo or args.ice_thermo) else None),
-            under_ice=args.ice_thermo, tau_ice_sw=args.ice_thermo_sw_trans,
+            ice_albedo=_ice_alb,
+            under_ice=_under_ice, tau_ice_sw=args.ice_thermo_sw_trans,
         )
         if ramp < 1.0:
             sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
@@ -2809,6 +3363,12 @@ def main() -> int:
         # fixed optical climatology, independent of the dynamical spin-up ramp.
         if chl_clim is not None:
             sf = sf._replace(chl=chl_clim[_runoff_month_idx(step, dt)])
+        # DEBUG: per-term momentum-tendency breakdown at the onset steps (pin the
+        # term driving the lat-lon 75-level cold-start blowup). sf is finalised for
+        # momentum here (freshwater below only affects salinity).
+        if args.diag_momentum_step >= 0 and step <= args.diag_momentum_step:
+            _dump_momentum_terms(model, state, sf, dt, lat2d, lon2d,
+                                 tag=f" step{step}")
         # Surface freshwater (atmospheric P - E + optional Dai-Trenberth runoff)
         # is delivered through the IN-CORE channel
         # ``model.step(..., freshwater=FreshwaterForcing)``: the dynamics core
@@ -2821,6 +3381,22 @@ def main() -> int:
         _R = (runoff_monthly[_runoff_month_idx(step, dt)]
               if runoff_monthly is not None else None)
         _want_fw = args.emp_freshwater or (_R is not None)
+        # Prognostic sea ice: step the REAL model on the SAME CORE-II forcing
+        # (sampled with the SAME sampler the heat/momentum path uses), then route
+        # its brine-salt / melt-freshwater / ocean-heat response into the
+        # EXISTING surface_forcing (salt_flux, q_net) + freshwater (ice_fw)
+        # channels.  Carry the new ice state.  (Validated host-loop only; the cube
+        # path is rejected upstream, so this only runs in the else branch below.)
+        ice_resp = None
+        if ice_config is not None:
+            from legoesm.ocean.coupler import sample_omip2_forcing
+            forc_ice = sample_omip2_forcing(forcing, it, grid, app_grid_type)
+            atm_ice = _build_atm_to_surface_core2(forc_ice, ramp=ramp)
+            sst_K = jnp.asarray(state.T.data)[..., 0] + _ice_T_freeze
+            ocn_u, ocn_v = _surface_currents(state, grid, app_grid_type)
+            ice_state, ice_resp = step_sea_ice(
+                ice_state, atm_ice, sst_K, ocn_u, ocn_v,
+                ice_config, U_min=0.0, dt=dt, grid=grid)
         if app_grid_type == "cubed_sphere":
             # CUBE is PARKED (cold-start blowup). Its 'external' physics applies
             # surface_forcing.freshwater ONCE as a virtual salt with the LOCAL
@@ -2838,17 +3414,37 @@ def main() -> int:
             state = model.step(state, dt, surface_forcing=sf)
         else:
             fw = None
-            if _want_fw:
+            # Build the freshwater struct if EITHER the atmospheric P-E/runoff is
+            # wanted OR the prognostic ice needs an ``ice_fw`` carrier (zero P-E-R
+            # in that case, so only the ice melt/freeze freshwater is delivered).
+            if _want_fw or ice_resp is not None:
                 fw = compute_omip2_freshwater_forcing(
                     state, forcing=forcing, idx_t=it, grid=grid,
                     grid_type=app_grid_type, runoff_R=_R,
                     emp=args.emp_freshwater, ramp=ramp)
+            if ice_resp is not None:
+                _ice_conc = ice_state.concentration.data
+                if _ice_conc.ndim > np.asarray(state.land_mask.data).ndim:
+                    _ice_conc = jnp.sum(_ice_conc, axis=-1)  # multi-cat (n/a here)
+                sf, fw = _route_ice_response_to_ocean(
+                    sf, fw, ice_resp, state.land_mask.data, _ice_conc)
             state = model.step(state, dt, surface_forcing=sf, freshwater=fw)
         if sss_restore_cfg is not None:
             # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS restoring
             # under sea ice).  Feed the SAME prescribed siconc the albedo uses
             # (``_sic``; None only if neither --ice-albedo nor a siconc field is
             # available, in which case the restoring is ungated as before).
+            # With --prognostic-sea-ice the prescribed NEMO siconc is no longer
+            # the truth — gate the restoring on the LIVE (ocean-masked) prognostic
+            # ice concentration instead, via the SAME ``ice_concentration=``
+            # parameter (codex MED): prescribed and live ice must not disagree in
+            # the salt-restoring path.
+            _sss_ice = _sic
+            if ice_resp is not None:
+                _lc = ice_state.concentration.data
+                if _lc.ndim > np.asarray(state.land_mask.data).ndim:
+                    _lc = jnp.sum(_lc, axis=-1)
+                _sss_ice = _lc * jnp.asarray(state.land_mask.data, _lc.dtype)
             # River-mouth gate (NEMO sbcssr (1-2*rnfmsk)): pass the per-cell
             # runoff so restoring is OFF at river mouths and does not fight
             # the plume toward coarse WOA (Amazon artifact). Gated by flag.
@@ -2856,13 +3452,13 @@ def main() -> int:
             if app_grid_type == "mpas":
                 from legoesm.ocean.coupler.sss_apply import apply_sss_restoring_step_mpas
                 state = apply_sss_restoring_step_mpas(
-                    state, S_target=sss_restore_target, ice_concentration=_sic,
+                    state, S_target=sss_restore_target, ice_concentration=_sss_ice,
                     config=sss_restore_cfg, mesh=grid, dt=dt,
                     river_runoff=_R_gate)
             else:
                 from legoesm.ocean.coupler.sss_apply import apply_sss_restoring_step
                 state = apply_sss_restoring_step(
-                    state, S_target=sss_restore_target, ice_concentration=_sic,
+                    state, S_target=sss_restore_target, ice_concentration=_sss_ice,
                     config=sss_restore_cfg, grid=grid, z_coord=z_coord, dt=dt,
                     lat2d_deg=lat2d, lon2d_deg=lon2d,
                     river_runoff=_R_gate)
@@ -2880,6 +3476,30 @@ def main() -> int:
             state = state._replace(
                 T=Field(jnp.asarray(Tn), name=state.T.name,
                         dims=state.T.dims, units=state.T.units))
+        if args.geothermal:
+            # Geothermal bottom heat-flux BC (NEMO ln_trabbc): warm the deepest
+            # wet cell of each column by the seafloor heat flux Q_geo. Live
+            # partial-cell thickness from compute_layer_thickness (true h_k);
+            # wet = h_k > 1e-3 m (below-seafloor rock cells carry h_k = 0). Grid-
+            # agnostic (..., nlev) host post-step update, like the SSS/ice-thermo
+            # paths. Explicit + unconditionally stable (no inter-level coupling).
+            from legoesm.ocean.coupler import apply_geothermal_step
+            from legoesm.ocean.physics.geothermal import GeothermalConfig
+            from legoesm.ocean.vertical import compute_layer_thickness
+            _eta = getattr(state, "eta", None)
+            _eta_arr = (state.eta.data if _eta is not None
+                        else jnp.zeros_like(jnp.asarray(H_bathy)))
+            _dz = compute_layer_thickness(_eta_arr, jnp.asarray(H_bathy), z_coord)
+            # Wet = positive live thickness AND ocean (the 2-D land mask): on a
+            # pure-z* grid a land column with nonzero eta has dz>0 but must NOT
+            # be geothermally heated (codex). land_mask is (...,) -> broadcast.
+            _lm = jnp.asarray(state.land_mask.data)[..., None] > 0.5
+            _wet = ((_dz > 1e-3) & _lm).astype(_dz.dtype)
+            _geo_cfg = GeothermalConfig(enabled=True)
+            if args.geothermal_flux_wm2 is not None:
+                _geo_cfg = _geo_cfg._replace(flux_wm2=args.geothermal_flux_wm2)
+            state = apply_geothermal_step(
+                state, dz_live=_dz, wet_cell=_wet, dt=dt, config=_geo_cfg)
         if bbl_geom is not None:
             # NEMO advective BBL (Campin-Goosse): dense shelf bottom water
             # descends the slope. Host post-step exchange, exactly tracer-
@@ -2924,6 +3544,11 @@ def main() -> int:
             print(f"[diag] step {step} (day {day:.0f}): {d} | {rate:.2f} steps/s",
                   flush=True)
             _log_diag_csv(step, day, d, rate)
+            if ice_resp is not None:
+                _ice_diag = _prognostic_ice_diag(ice_state, ice_resp, grid,
+                                                 app_grid_type,
+                                                 state.land_mask.data)
+                print(f"[ice]  step {step}: {_ice_diag}", flush=True)
             if not d["finite"]:
                 print("[ABORT] non-finite state", flush=True)
                 _save_snapshot(out_dir, f"blowup_step{step}", state, lat2d, lon2d)
@@ -2942,6 +3567,7 @@ def main() -> int:
     _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord)
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir)
+    _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir)
     _mht_diag(state, grid, z_coord, app_grid_type, out_dir)
     _record_final_state_digest(manifest_path, state)
     _csv.close()

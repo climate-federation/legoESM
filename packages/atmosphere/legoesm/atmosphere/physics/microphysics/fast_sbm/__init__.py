@@ -2,7 +2,7 @@
 
 Eulerian bin microphysics on a mass-doubling grid (33 liquid bins,
 43 aerosol bins), built incrementally against the WRF/HUCM oracle.
-See ``docs/specs/bin_microphysics.md`` for the port plan and status.
+See ``docs/science/specs/bin_microphysics.md`` for the port plan and status.
 """
 
 from legoesm.atmosphere.physics.microphysics.fast_sbm.config import (

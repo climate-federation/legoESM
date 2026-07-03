@@ -225,6 +225,38 @@ class Test3h_Lu:
 
 
 # ===================================================================
+# 3i  moisture_capacity dispatch hardening (PR A finding, land)
+# ===================================================================
+
+
+class TestMoistureCapacityDispatch:
+    """``moisture_capacity`` previously ran the Brooks-Corey finite-difference C
+    via a bare ``else:`` for ANY curve name, so a typo silently selected it
+    while the three sibling dispatchers raise. The branch is now explicit and
+    unknown names raise (matches theta_from_psi / psi_from_theta / K)."""
+
+    def test_brooks_corey_branch_runs(self):
+        cfg = SoilHydraulicsConfig(retention_curve="brooks_corey")
+        psi = jnp.linspace(-100.0, -0.1, 50)
+        theta = theta_from_psi(psi, cfg)
+        C = moisture_capacity(psi, theta, cfg)
+        assert jnp.all(jnp.isfinite(C))
+
+    def test_default_van_genuchten_returns_finite(self):
+        psi = jnp.linspace(-100.0, -0.1, 50)
+        theta = theta_from_psi(psi, CONFIG)
+        C = moisture_capacity(psi, theta, CONFIG)
+        assert jnp.all(jnp.isfinite(C))
+
+    def test_unknown_curve_raises(self):
+        cfg = SoilHydraulicsConfig(retention_curve="van_genuchtne")  # typo
+        psi = jnp.array([-1.0])
+        theta = jnp.array([0.3])
+        with pytest.raises(ValueError, match="(?i)unknown retention curve"):
+            moisture_capacity(psi, theta, cfg)
+
+
+# ===================================================================
 # 3i  Cross-model comparison at saturation
 # ===================================================================
 

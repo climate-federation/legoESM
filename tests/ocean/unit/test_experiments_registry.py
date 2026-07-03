@@ -51,12 +51,28 @@ def test_every_registered_experiment_has_config_class():
         )
 
 
-def test_no_orphan_modules_in_package():
-    """Every .py module under experiments/ must be registered.
+# Shared helpers / registries that live under experiments/ but are NOT
+# registrable experiments (no EXPERIMENT_CONFIG): they are imported by name by
+# the experiment modules and other consumers, so they are intentionally not in
+# AVAILABLE_EXPERIMENTS.  Keep this list tight — a real experiment must be
+# registered, not exempted here.
+NON_EXPERIMENT_MODULES = {
+    "recipe_map",               # name → experiment-builder dispatch table
+    "silvestri_schemes",        # momentum-scheme selector for the jet case
+    "silvestri_baroclinic_jet",  # builder used via recipe_map (no EXPERIMENT_CONFIG)
+    "silvestri_turbulence_2d",  # 2-D turbulence driver helper
+    "idealized_ic",             # shared analytic-IC primitives (#519 item 3)
+}
 
-    A module that lands in ``src/legoesm/ocean/experiments/`` but is not added
-    to ``AVAILABLE_EXPERIMENTS`` is the exact bit-rot mode that bit
-    ``eady_uniform`` for months; this test catches a recurrence.
+
+def test_no_orphan_modules_in_package():
+    """Every .py module under experiments/ must be registered OR be a declared
+    shared helper.
+
+    A module that lands in ``experiments/`` but is neither in
+    ``AVAILABLE_EXPERIMENTS`` nor in ``NON_EXPERIMENT_MODULES`` is the exact
+    bit-rot mode that bit ``eady_uniform`` for months; this test catches a
+    recurrence.
     """
     package_modules = {
         info.name
@@ -64,10 +80,11 @@ def test_no_orphan_modules_in_package():
         if not info.name.startswith("_")
     }
     registered = set(experiments.AVAILABLE_EXPERIMENTS)
-    orphans = package_modules - registered
+    orphans = package_modules - registered - NON_EXPERIMENT_MODULES
     assert not orphans, (
         f"modules under experiments/ are not in AVAILABLE_EXPERIMENTS: "
-        f"{sorted(orphans)}. Add them to __init__.py."
+        f"{sorted(orphans)}. Register them in __init__.py, or add a genuine "
+        f"shared helper to NON_EXPERIMENT_MODULES."
     )
 
 

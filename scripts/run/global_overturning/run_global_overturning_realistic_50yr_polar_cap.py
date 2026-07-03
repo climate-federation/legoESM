@@ -57,13 +57,13 @@ from legoesm.ocean.vertical import (
     compute_centroid_depth,
 )
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.experiments.global_overturning import (
     GlobalOverturningConfig,
     create_forcings,
     create_eos_config,
     create_gm_redi_config,
+    global_overturning_model_config,
 )
 
 
@@ -233,19 +233,13 @@ def main():
     eos_config = create_eos_config(config)
     gm_redi_cfg = create_gm_redi_config(config)
 
-    ocean_config = LatLonCGridOceanConfig(
-        n_barotropic_substeps=30,
-        physics=physics,
+    ocean_config = global_overturning_model_config(
+        config, physics=physics, eos_config=eos_config, gm_redi_cfg=gm_redi_cfg,
+        # OMIP dissipation stack + partial-cell dycore (A_h from module consts)
         A_h=A_H_GLOBAL,
         A_h_lat_scaling=A_H_LAT_SCALING,    # <-- new
         B_h=5.0e9,
-        A_v=config.A_v,
-        K_v=config.K_v,
-        bottom_drag_r=config.bottom_drag_coeff,
         bottom_drag_bbl_thickness=100.0,
-        eos="linear",
-        eos_linear=eos_config,
-        gm_redi=gm_redi_cfg,
         pgf_scheme="adcroft",   # AC + h_actual; previously "smc03"
                                 # (bit-equivalent on lat-lon, simpler;
                                 # see plan-doc §8d)
@@ -259,8 +253,8 @@ def main():
     print(f"  Coord:                 partial cells (z* + h_partial)")
     print(f"  PGF scheme:            {ocean_config.pgf_scheme}")
     print(f"  Momentum advection:    {ocean_config.momentum_advection} (AL81)")
-    print(f"  Barotropic solver:     {ocean_config.barotropic_solver}")
-    print(f"  Bottom drag:           r = {ocean_config.bottom_drag_r:.1e} 1/s")
+    print(f"  Barotropic solver:     {ocean_config.barotropic.barotropic_solver}")
+    print(f"  Bottom drag:           r = {ocean_config.bottom_drag.bottom_drag_r:.1e} 1/s")
     print(f"  B_h biharmonic:        {ocean_config.B_h:.1e} m⁴/s  (cos⁴ scaled)")
     print(f"  A_h Laplacian:         {ocean_config.A_h:.1e} m²/s  "
           f"(A_h_lat_scaling={ocean_config.A_h_lat_scaling}; cos²-scaled)")
@@ -402,7 +396,7 @@ def main():
         f.write(f"pgf_scheme = smc03\n")
         f.write(f"momentum_advection = vector_invariant (AL81)\n")
         f.write(f"barotropic_solver = implicit_cn\n")
-        f.write(f"bottom_drag_r = {ocean_config.bottom_drag_r}\n")
+        f.write(f"bottom_drag_r = {ocean_config.bottom_drag.bottom_drag_r}\n")
         f.write(f"B_h = {ocean_config.B_h}\n")
         f.write(f"A_h = {ocean_config.A_h}, A_h_lat_scaling = {ocean_config.A_h_lat_scaling}\n")
         f.write(f"K_GM = {gm_redi_cfg.kappa_GM}, K_Redi = {gm_redi_cfg.kappa_Redi}\n")

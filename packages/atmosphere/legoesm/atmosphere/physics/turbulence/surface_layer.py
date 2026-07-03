@@ -13,11 +13,17 @@ heat fluxes using neutral drag and transfer coefficients.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
-from legoesm.core.bulk_flux import compute_most_fluxes, validate_bulk_scheme
+from legoesm.core.bulk_flux import (
+    compute_most_fluxes,
+    simple_bulk_fluxes,
+    validate_bulk_scheme,
+)
 
 
 def compute_surface_fluxes(
@@ -76,6 +82,7 @@ def compute_surface_fluxes(
             z0_init=config.z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
+            gustiness_w_zi=getattr(config, "gustiness_w_zi", 0.0),
         )
         return tau_x, tau_y, shflx, lhflx, ustar
 
@@ -98,5 +105,173 @@ def compute_surface_fluxes(
     tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
         u, v, T, q_v, T_sfc, q_sfc, rho, wind_speed, Cd, Ch,
     )
+
+    return tau_x, tau_y, shflx, lhflx, ustar
+
+
+class SurfaceTileSpec(NamedTuple):
+    """Per-tile, per-column surface STATE for a mosaic (tiled) surface.
+
+    Each grid column is treated as an area-weighted mosaic of open ocean,
+    sea ice, and land.  Turbulent fluxes are computed SEPARATELY on each
+    tile — each with its own surface temperature, saturation humidity, and
+    (separately supplied) bulk scheme/roughness — then AREA-WEIGHTED (flux
+    aggregation).  This is the physically-correct tiled-surface approach:
+    it lets the ocean air-sea scheme (COARE 3.0 — Charnock wave roughness +
+    convective gustiness) run on the ocean tile while the FIXED-ROUGHNESS
+    land Monin-Obukhov scheme (``"most"``) runs on the land tile — instead
+    of blending the surface TEMPERATURES first and applying a single
+    (wrong-over-land) scheme to the blend.
+
+    This struct holds ONLY traced arrays so it is a clean JAX pytree; the
+    per-tile :class:`SurfaceLayerConfig` objects (which carry the static
+    ``bulk_scheme`` string) are passed SEPARATELY to
+    :func:`compute_tiled_surface_fluxes` as static arguments — mirroring
+    how :func:`compute_surface_fluxes` takes its ``config`` apart from the
+    arrays, and keeping the string out of the trace.
+
+    Fractions are per column and must partition unity
+    (``frac_ocean + frac_ice + frac_land = 1``); a tile with zero fraction
+    contributes nothing to the blend but is still evaluated, so shapes stay
+    static and there is no data-dependent control flow (JIT/AD safe).
+
+    Fields
+    ------
+    frac_ocean, frac_ice, frac_land : jax.Array
+        Open-ocean / sea-ice / land area fractions, shape ``(ncol,)``.
+    T_ocean, T_ice, T_land : jax.Array
+        Per-tile surface temperatures [K], shape ``(ncol,)``.
+    q_sfc_ocean, q_sfc_ice, q_sfc_land : jax.Array
+        Per-tile surface saturation specific humidities [kg/kg]
+        (the ocean value already carries any saline reduction factor),
+        shape ``(ncol,)``.
+    """
+
+    frac_ocean: jax.Array
+    frac_ice: jax.Array
+    frac_land: jax.Array
+    T_ocean: jax.Array
+    T_ice: jax.Array
+    T_land: jax.Array
+    q_sfc_ocean: jax.Array
+    q_sfc_ice: jax.Array
+    q_sfc_land: jax.Array
+
+
+def _single_tile_flux(
+    u: jax.Array,
+    v: jax.Array,
+    T: jax.Array,
+    q_v: jax.Array,
+    T_sfc: jax.Array,
+    q_sfc: jax.Array,
+    rho: jax.Array,
+    config: SurfaceLayerConfig,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Single-tile surface flux with correct fixed-roughness MOST routing.
+
+    Like :func:`compute_surface_fluxes`, but routes the fixed-roughness
+    land Monin-Obukhov scheme (``"most"``) to the iterative
+    :func:`compute_most_fluxes` as well — :func:`compute_surface_fluxes`
+    only reaches that path for the ocean schemes (``coare3`` /
+    ``large_yeager``) and silently treats ``"most"`` as constant, which
+    would ignore the land roughness ``z0``.  Reuses the same core bulk
+    routines (no re-derived flux numerics).
+    """
+    validate_bulk_scheme(config.bulk_scheme)
+    if config.bulk_scheme in ("most", "coare3", "large_yeager"):
+        return compute_most_fluxes(
+            u, v, T, q_v, T_sfc, q_sfc, rho,
+            z_ref=config.z_ref,
+            z0_init=config.z0,
+            scheme=config.bulk_scheme,
+            n_iter=config.bulk_n_iter,
+            gustiness_w_zi=getattr(config, "gustiness_w_zi", 0.0),
+        )
+
+    # Constant neutral coefficients.
+    wind_speed = jnp.sqrt(u ** 2 + v ** 2 + 1e-4)  # coeff-ok: wind-speed floor [m^2/s^2]
+    ustar = jnp.sqrt(config.Cd_neutral) * wind_speed
+    tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
+        u, v, T, q_v, T_sfc, q_sfc, rho, wind_speed,
+        config.Cd_neutral, config.Ch_neutral,
+    )
+    return tau_x, tau_y, shflx, lhflx, ustar
+
+
+def compute_tiled_surface_fluxes(
+    u: jax.Array,
+    v: jax.Array,
+    T: jax.Array,
+    q_v: jax.Array,
+    rho: jax.Array,
+    tiles: SurfaceTileSpec,
+    config_ocean: SurfaceLayerConfig,
+    config_ice: SurfaceLayerConfig,
+    config_land: SurfaceLayerConfig,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Area-weighted (mosaic) surface fluxes over ocean / ice / land tiles.
+
+    Computes the turbulent surface fluxes SEPARATELY on each tile (each
+    with its own surface temperature and saturation humidity from
+    ``tiles`` and its own bulk scheme/roughness from the ``config_*``
+    arguments) and AREA-WEIGHTS them.  The lowest-level atmospheric state
+    (``u, v, T, q_v, rho``) is shared across tiles — only the surface
+    boundary differs.
+
+    Stress and sensible/latent heat fluxes aggregate LINEARLY by area
+    fraction (flux conservation over a heterogeneous cell).  The blended
+    friction velocity is recovered from the blended stress magnitude
+    (``u* = sqrt(|tau| / rho)``) so it is consistent with the aggregated
+    momentum flux rather than an ad-hoc average of the per-tile ``u*``.
+
+    Parameters
+    ----------
+    u, v, T, q_v, rho : jax.Array
+        Lowest-level zonal/meridional wind [m/s], temperature [K], water
+        vapour specific humidity [kg/kg], and air density [kg/m^3], each
+        shape ``(ncol,)``.
+    tiles : SurfaceTileSpec
+        Per-tile fractions, surface temperatures, and saturation
+        humidities (traced arrays).
+    config_ocean, config_ice, config_land : SurfaceLayerConfig
+        Per-tile bulk scheme + roughness — STATIC (the ``bulk_scheme``
+        string is resolved at trace time).  Typically ``coare3`` for the
+        ocean, ``constant`` for ice, and ``most`` (with a land roughness
+        ``z0``) for land.
+
+    Returns
+    -------
+    tau_x, tau_y, shflx, lhflx, ustar : jax.Array
+        Blended surface zonal/meridional stress [Pa], sensible and latent
+        heat fluxes [W/m^2] (positive upward), and friction velocity
+        [m/s], each shape ``(ncol,)``.
+    """
+    f_ocean = _single_tile_flux(
+        u, v, T, q_v, tiles.T_ocean, tiles.q_sfc_ocean, rho, config_ocean,
+    )
+    f_ice = _single_tile_flux(
+        u, v, T, q_v, tiles.T_ice, tiles.q_sfc_ice, rho, config_ice,
+    )
+    f_land = _single_tile_flux(
+        u, v, T, q_v, tiles.T_land, tiles.q_sfc_land, rho, config_land,
+    )
+
+    def _blend(idx: int) -> jax.Array:
+        return (
+            tiles.frac_ocean * f_ocean[idx]
+            + tiles.frac_ice * f_ice[idx]
+            + tiles.frac_land * f_land[idx]
+        )
+
+    tau_x = _blend(0)
+    tau_y = _blend(1)
+    shflx = _blend(2)
+    lhflx = _blend(3)
+
+    # Friction velocity consistent with the AGGREGATED momentum flux
+    # (|tau| = rho * u*^2), not a raw average of per-tile u*.
+    tau_mag = jnp.sqrt(tau_x ** 2 + tau_y ** 2)
+    ustar = jnp.sqrt(tau_mag / jnp.maximum(rho, 1e-6))  # coeff-ok: density floor [kg/m^3]
 
     return tau_x, tau_y, shflx, lhflx, ustar

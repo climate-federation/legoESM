@@ -69,6 +69,14 @@ from legoesm import constants
 import logging
 
 
+# --- FV3 dynamical-core constants (GFDL FV3 sw_core.F90 / fv_arrays.F90) ---
+# ``cnst_0p20`` is FV3's fixed adaptive-divergence-damping (Smagorinsky)
+# coefficient ceiling: damp = da_min * max(d2_bg, min(0.20, dddmp*|div|*dt)).
+# It is a published FV3 constant, NOT a tunable scheme knob (the tunable knobs
+# are the ``*_d2_bg`` / ``*_dddmp`` config fields multiplied against it).
+_FV3_CNST_0P20: float = 0.20
+
+
 class CDGridCompressibleEulerConfig(NamedTuple):
     """Config for C-D grid NH CE. Lin 2004, Putman & Lin 2007. No Hollingsworth-Kallberg."""
     g: float = constants.g
@@ -435,7 +443,7 @@ def cdgrid_compressible_euler_slow_tendencies(
             _adaptive_coeff = _da_min_c * jnp.maximum(
                 _d2_bg,
                 jnp.minimum(
-                    0.20, config.div_damp_dddmp * _div_abs_corner,
+                    _FV3_CNST_0P20, config.div_damp_dddmp * _div_abs_corner,
                 ),
             )
             _du_d_dt_dd = _adaptive_coeff * ddiv_dx
@@ -614,7 +622,7 @@ def cdgrid_compressible_euler_slow_tendencies(
         _damp_corner = _da_min_c * jnp.maximum(
             config.corner_div_damp_d2_bg,
             jnp.minimum(
-                0.20, config.corner_div_damp_dddmp * _delpc_abs * _dt_approx,
+                _FV3_CNST_0P20, config.corner_div_damp_dddmp * _delpc_abs * _dt_approx,
             ),
         )                                                  # (6, n+1, n+1, nlev)
         _damp_corner = _apply_top_sponge_damp_boost(
@@ -655,7 +663,7 @@ def cdgrid_compressible_euler_slow_tendencies(
             _smag_vort = jnp.abs(_dt_approx) * _smag_root    # (6, n+1, n+1, nlev)
             _damp_corner = _da_min_c * jnp.maximum(
                 config.corner_div_damp_d2_bg,
-                jnp.minimum(0.20, config.corner_div_damp_dddmp * _smag_vort),
+                jnp.minimum(_FV3_CNST_0P20, config.corner_div_damp_dddmp * _smag_vort),
             )                                                # (6, n+1, n+1, nlev)
             _damp_corner = _apply_top_sponge_damp_boost(
                 _damp_corner, _da_min_c, config,

@@ -809,6 +809,19 @@ def gw_drag_prof(
         # piln difference is piln[k+1]-piln[k].
         ubmc2 = jnp.maximum(ubmc ** 2, cfg.ubmc2mn)
         mi = ni_k / (2.0 * kwv * ubmc2) * (alpha_k + ni_k ** 2 / ubmc2 * d)
+        # Sign convention: ``mi`` is Im(m), the wave-damping rate; it must be
+        # >= 0 so the damping factor exp(-2*mi*...) NEVER amplifies stress
+        # upward.  DEFENSIVE floor: ``mi ∝ (alpha + ni^2/ubmc2 * d)`` and in
+        # the orographic path ``d = max(dback, dscal*dsat)`` with ``dscal<=1``,
+        # so the negative ``-alpha`` inside ``dsat`` is scaled down before being
+        # added back to ``+alpha`` and ``mi`` stays >= 0 for every reachable
+        # ``(alpha, dback)`` (an empirical sweep confirmed the floor does not
+        # bind here).  It guards a HYPOTHETICAL inverted-diffusivity config
+        # where ``d`` is forced so negative that ``ni^2/ubmc2 * d < -alpha``,
+        # which would make ``exp(-2*mi*...) > 1`` (anti-dissipative); the unit
+        # test ``test_gwd_damping_factor_never_amplifies_stress`` exercises that
+        # forced regime.  Floor at 0 so the column is always a momentum sink.
+        mi = jnp.maximum(mi, 0.0)
         wrk = -2.0 * mi * rog * t[:, k][:, None] * (
             piln[:, k + 1][:, None] - piln[:, k][:, None]
         )

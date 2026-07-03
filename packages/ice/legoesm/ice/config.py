@@ -187,7 +187,6 @@ class SnowConfig(NamedTuple):
     k_snow: float = constants.k_snow
     c_snow: float = constants.c_snow
     h_snow_min: float = 1.0e-4         # Min snow depth for active conductivity [m]
-    snow_to_ice_density: float = constants.rho_ice / constants.rho_snow
     flooding: bool = True              # Enable snow-ice (white-ice) flooding
     sublim_partition: float = 1.0      # Fraction of sublimation mass drawn from snow
                                         # (1.0 = sublimate snow first, then ice)
@@ -222,7 +221,7 @@ class RidgingConfig(NamedTuple):
     categories.  Participation by category follows an exponential
     function of category mean thickness; ridge thickness range follows
     the Hibler / Lipscomb formula  H_min = 2*h_part,  H_max =
-    sqrt(H_star * h_part).
+    min(mu_rdg * sqrt(h_part), H_star).
     """
     enabled: bool = False
     e_star: float = 0.36               # Participation e-folding thickness [m]
@@ -334,7 +333,7 @@ class SeaIceConfig(NamedTuple):
     temp_dependent_albedo: bool = False
     ice_albedo: IceAlbedoConfig = IceAlbedoConfig()
     # --- Dynamics ---
-    dynamics: str = "none"          # "none", "free_drift", or "evp"
+    dynamics: str = "none"          # "none", "free_drift", "evp", or "mevp"
     differentiable_dynamics: bool = False  # scan vs fori_loop for EVP
     # --- EVP rheology parameters ---
     N_evp: int = 120                # EVP subcycle count

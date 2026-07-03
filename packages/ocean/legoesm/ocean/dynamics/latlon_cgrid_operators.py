@@ -34,6 +34,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     pad_ns_zero,
     pad_ns_zero_multi,
     is_tripolar,
+    reads_stored_vface_metric,
     fold_is_local,
     lat_ends_are_poles,  # noqa: F401 — re-export for ocean dynamics call sites
     pad_ns_scalar,
@@ -124,28 +125,23 @@ def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
     return padded
 
 
-def interp_u_to_vface_4pt(u: jnp.ndarray, grid) -> jnp.ndarray:
-    """Sadourny 4-point average of a u-face field onto v-faces.
-
-    ``u`` is ``(n_lat, n_lon+1, ...)`` (u-faces incl. the periodic wrap
-    column); returns ``(n_lat+1, n_lon, ...)`` at v-faces.  Interior v-faces
-    are the plain 4-point cell-corner average; the south/north boundary rows
-    come from :func:`pad_ns_vector_u` (zero at physical walls — those v-faces
-    are wall-masked downstream — and the fold (sign·perm) row on tripolar).
-
-    This is the shared helper referenced by the Matsuno Coriolis backward
-    step in ``ocean_model_latlon_cgrid.py`` (commit ``98f9b779`` switched the
-    call site to this name but its definition never landed — restored here
-    with the HISTORICAL interior-average-then-pad semantics, bit-identical to
-    the pre-``98f9b779`` step in every serial case incl. the tripolar fold).
-    TODO(MPI band partition): the intended improvement is cell-pad-FIRST so a
-    partition-cut v-face averages the neighbour rank's true u row instead of
-    the zero refill; needs the halo-exchange row plumbed in here.
-    """
-    interior = 0.25 * (
-        u[:-1, :-1] + u[:-1, 1:] + u[1:, :-1] + u[1:, 1:]
-    )
-    return pad_ns_vector_u(interior, grid)
+# ``interp_u_to_vface_4pt`` is the backend-dispatched CELL-PAD-FIRST core
+# operator imported from ``legoesm.grids.operators_latlon_cgrid`` above (line ~44).
+# An older interior-average-then-``pad_ns_vector_u`` redefinition used to shadow it
+# here; it was SPMD-blind — at a lat-band partition cut it averaged only the
+# rank-LOCAL interior v-faces and then refilled the cut row from the neighbour's
+# ADJACENT interior face (one row off), so the two bands sharing a v-face disagreed
+# (eORCA025 SPMD equivalence: barotropic V_bar diverged ~8e-4 at the cut rows
+# whose ``f_v`` is non-zero — the equator cut was masked by ``f_v≈0``).  The core
+# version pads ``u`` over latitude FIRST (``pad_with_pole_bc_lat`` -> local jnp.pad
+# / MPI-or-SPMD neighbour row) THEN averages, so every band-cut v-face uses the
+# true neighbour-band u row.  It is bit-identical to the old interior-then-pad form
+# for SERIAL / full-domain + physical-boundary behavior (its docstring proves the
+# pole-wall + local tripolar-fold rows match ``pad_ns_vector_u`` exactly); at an
+# MPI/SPMD interior band cut it is DELIBERATELY different (the one-row-off stale
+# value is the bug being fixed).  De-duplicated to the single canonical operator
+# (no shadowing copy) so the barotropic solver + Matsuno Coriolis backward step
+# share the SPMD-correct interpolation.
 
 
 def pad_ns_vector_pair(
@@ -461,6 +457,104 @@ def coriolis_cgrid(
     return cor_u, cor_v
 
 
+def _vertex_coriolis(grid: LatLonGrid) -> jnp.ndarray:
+    """Planetary Coriolis ``f`` at C-grid VERTICES (corners), shape
+    ``(n_lat+1, n_lon+1)``.
+
+    On a lat-lon grid ``f`` depends only on latitude, and the vertex latitude
+    equals the v-face latitude, so the vertex ``f`` is ``grid.f_v`` extended by
+    one periodic-wrap column.  This is the single shared ``f`` value that makes
+    the C-grid Coriolis energy-conserving on a β-plane (see
+    :func:`coriolis_cgrid_energy_conserving`).
+    """
+    if hasattr(grid, "f_v"):
+        f_v = grid.f_v  # (n_lat+1, n_lon)
+    else:
+        f_cell = grid.f
+        f_v_int = 0.5 * (f_cell[:-1] + f_cell[1:])
+        f_v = jnp.concatenate([f_cell[0:1], f_v_int, f_cell[-1:]], axis=0)
+    return jnp.concatenate([f_v, f_v[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1)
+
+
+def coriolis_cgrid_energy_conserving(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    *,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """ENERGY-CONSERVING C-grid Coriolis (Sadourny 1975) using VERTEX ``f``.
+
+    The default :func:`coriolis_cgrid` evaluates ``f`` at u-points (``f_u``) for
+    the ``f·v→u`` term and at v-points (``f_v``) for the ``-f·u→v`` term.  On a
+    β-plane these are DIFFERENT values (``f`` varies with latitude), so the two
+    terms do not cancel in the discrete kinetic-energy budget
+    ``Σ u·(f·v) − Σ v·(f·u) ≠ 0`` and the scheme spuriously injects/removes
+    energy (measured ``~1e-6·f·KE`` on grid-scale fields; the root cause of the
+    MITgcm barotropic-gyre oracle residual — see
+    ``docs/ocean/fidelity/mitgcm_gyre_energy_conservation.md``).
+
+    This variant uses the SINGLE ``f`` value at the VERTEX shared by each
+    (u-point, v-point) pair, so the paired contributions
+    ``0.25·f_vertex·u·v`` appear identically in ``cor_u`` and ``cor_v`` and
+    cancel exactly in the energy sum (verified machine-zero power on random
+    β-plane fields).  On an f-plane (``f`` constant) it reduces to the same
+    answer as :func:`coriolis_cgrid`.
+
+    ``cor_u`` depends only on ``v`` and ``cor_v`` only on ``u`` — so a
+    forward-backward caller can compute ``cor_u`` from ``v_old`` and ``cor_v``
+    from the updated ``u_pred`` by two calls (or by passing the right field).
+
+    Shapes match :func:`coriolis_cgrid`: ``u`` is ``(n_lat, n_lon+1[, nlev])``,
+    ``v`` is ``(n_lat+1, n_lon[, nlev])``.
+    """
+    if is_tripolar(grid):
+        raise NotImplementedError(
+            "coriolis_cgrid_energy_conserving is not yet implemented on tripolar "
+            "grids (vertex f + fold-seam averaging needs the 2D metric handling "
+            "of coriolis_cgrid). Use coriolis_energy_conserving=False there."
+        )
+    is_3d = u.ndim == 3
+    f_q = _vertex_coriolis(grid)                       # (n_lat+1, n_lon+1)
+    if is_3d:
+        f_q = f_q[..., jnp.newaxis]
+
+    # --- cor_u at u-points (n_lat, n_lon+1): + f·v averaged with vertex f ---
+    # South/north vertices of u-row i are vertex rows i and i+1.
+    fq_s = f_q[:-1]                                     # (n_lat, n_lon+1[,1])
+    fq_n = f_q[1:]
+    v_west = jnp.roll(v, 1, axis=1)                     # v(:, j-1)
+
+    def _lon_face(a):  # (rows, n_lon[,nlev]) cell field -> (rows, n_lon+1) face
+        return jnp.concatenate([a, a[:, 0:1]], axis=1)
+
+    vs_w = _lon_face(v_west[:-1]); vs_e = _lon_face(v[:-1])   # south (v row i)
+    vn_w = _lon_face(v_west[1:]);  vn_e = _lon_face(v[1:])    # north (v row i+1)
+    cor_u = 0.25 * (fq_s * (vs_w + vs_e) + fq_n * (vn_w + vn_e))
+
+    # --- cor_v at v-points (n_lat+1, n_lon): - f·u averaged with vertex f ---
+    # West/east vertices of v-col j are vertex cols j and j+1.
+    fq_w = f_q[:, :-1]                                  # (n_lat+1, n_lon[,1])
+    fq_e = f_q[:, 1:]
+    u_east = jnp.roll(u, -1, axis=1)                    # u(:, J+1)
+
+    def _lat_sum(a):  # sum u-rows i-1 and i at v-face row i; walls at the ends
+        return jnp.concatenate([a[0:1], a[:-1] + a[1:], a[-1:]], axis=0)
+
+    u_w = u[:, :-1]                                     # west-face col J=j
+    u_e = u_east[:, :-1]                                # east-face col J=j+1
+    cor_v = -0.25 * (fq_w * _lat_sum(u_w) + fq_e * _lat_sum(u_e))
+
+    if u_mask is not None:
+        um = u_mask[..., jnp.newaxis] if is_3d and u_mask.ndim == 2 else u_mask
+        cor_u = cor_u * um
+    if v_mask is not None:
+        vm = v_mask[..., jnp.newaxis] if is_3d and v_mask.ndim == 2 else v_mask
+        cor_v = cor_v * vm
+    return cor_u, cor_v
+
+
 # =============================================================================
 # =============================================================================
 # Laplacian for C-grid scalar fields (at cell centers)
@@ -581,12 +675,7 @@ def vertex_area_cgrid(grid: LatLonGrid) -> jnp.ndarray:
         n_lon1 = A_int.shape[1]
         zero_row = jnp.zeros((1, n_lon1), dtype=A_int.dtype)
         return jnp.concatenate([zero_row, A_int, zero_row], axis=0)
-    R = grid.radius
-    dlon = grid.dlon
-    lat = grid.lat
-    sin_lat = jnp.sin(lat)
-    sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
-    A_lat = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])   # (n_lat+1,)
+    A_lat = _vertex_dual_area_interior(grid.lat, grid.radius, grid.dlon)  # (n_lat+1,)
     # Interior rows carry area; pole rows (wall BC) zero — consistent with
     # curl_vertex_cgrid computing vorticity only on interior rows.
     A_lat = A_lat.at[0].set(0.0).at[-1].set(0.0)
@@ -1002,6 +1091,96 @@ def flux_divergence_viscosity_cgrid(
     return visc_u, visc_v, kdiss_h_cell
 
 
+def no_slip_sidedrag_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid,
+    A_h: float,
+    *,
+    u_mask: jnp.ndarray,
+    v_mask: jnp.ndarray,
+    mask: jnp.ndarray | None = None,
+    vertex_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    r"""MITgcm no-slip lateral side-drag (``mom_u_sidedrag`` / ``mom_v_sidedrag``).
+
+    The free-slip lateral-viscosity operators (``vector_laplacian_cgrid`` /
+    ``flux_divergence_viscosity_cgrid``) zero the viscous flux across a wall face,
+    i.e. impose ``∂(tangential u)/∂n = 0`` (free-slip). MITgcm's default
+    ``no_slip_sides=.TRUE.`` instead imposes zero tangential velocity at the wall,
+    which adds a drag body force from the wall stress (``mom_u_sidedrag.F``)::
+
+        G^u_drag = -(2/Δy) A_h u   at u-cells touching a meridional (N/S) wall
+        G^v_drag = -(2/Δx) A_h v   at v-cells touching a zonal     (E/W) wall
+
+    Discretely (``sideDragFactor=2``), per CLOSED side
+    ``closed = hFacW − hFacZ = face_open·(1 − vertex_open)``::
+
+        du_drag[j,i] = -(closedS + closedN) · 2 A_h u[j,i] / dy_u[j,i]²
+        dv_drag[j,i] = -(closedW + closedE) · 2 A_h v[j,i] / dx_v[j,i]²
+
+    with the wall corners from :func:`compute_vertex_mask` (vertex ``(J,I)``
+    touches cells ``(J-1,I-1),(J-1,I),(J,I-1),(J,I)``): u-point ``(j,i)`` has south
+    vertex ``vmask[j,i]`` / north ``vmask[j+1,i]``; v-point ``(j,i)`` has west
+    ``vmask[j,i]`` / east ``vmask[j,i+1]``. This is the wall-tangential viscous
+    stress ``A_h·(u−0)/(Δy/2)`` distributed over the cell width ``Δy``. **This is
+    ADDED to** (not a replacement for) the free-slip flux operator, exactly as
+    MITgcm adds ``MOM_U_SIDEDRAG`` on top of ``MOM_U_DEL2U``.
+
+    Exact for uniform-Cartesian grids (the beta-plane oracle regime, where
+    ``dy_u``/``dx_v`` are constant and ``rAw = dx·dy``). Returns ``(du_drag,
+    dv_drag)`` at the u-/v-faces, masked.
+
+    Boundary note: :func:`compute_vertex_mask` zeros the north/south polar vertex
+    rows (the standard pole wall BC), so a meridional domain boundary is treated
+    as a wall and its edge u-row receives the side-drag even with no explicit
+    land — correct for a bounded/closed basin (the gyre), but a y-periodic domain
+    should keep ``lateral_side_bc="free_slip"``.
+    """
+    if not (hasattr(grid, "dy_u") and hasattr(grid, "dx_v")):
+        raise ValueError(
+            "no_slip_sidedrag_cgrid requires a LatLonCGridGeometry with dy_u/dx_v "
+            "metric fields (call ensure_geometry on the grid first)."
+        )
+    if mask is None and vertex_mask is None:
+        raise ValueError("no_slip_sidedrag_cgrid needs either mask or vertex_mask")
+    vmask = vertex_mask if vertex_mask is not None else compute_vertex_mask(mask, grid=grid)
+    vmask = vmask.astype(u.dtype)
+
+    is_3d = u.ndim == 3
+
+    def _b(a, like):
+        return a[..., jnp.newaxis] if (is_3d and a.ndim == like.ndim - 1) else a
+
+    # --- u side-drag: closed N/S sides (a meridional wall above/below) ---
+    v_south = vmask[:-1, :]      # (n_lat, n_lon+1): south vertex of u-point (j,i)
+    v_north = vmask[1:, :]       # (n_lat, n_lon+1): north vertex
+    closed_s = u_mask * (1.0 - v_south)
+    closed_n = u_mask * (1.0 - v_north)
+    # Guard 1/Δ² against zero-length faces (e.g. the polar boundary v-faces on a
+    # spherical grid where dx_v = R·cos(lat_v)·dlon → 0): those faces are masked
+    # out (closed/u_mask = 0) so the drag is zero there, but an unguarded 1/0=inf
+    # times the 0 mask is NaN.  On uniform-metric grids (beta-plane) Δ>0 so this
+    # is bit-identical.
+    _dy_u = grid.dy_u.astype(u.dtype)
+    inv_dy2_u = jnp.where(_dy_u > 0.0, 1.0 / (_dy_u ** 2), 0.0)
+    du_drag = -(2.0 * A_h) * _b(closed_s + closed_n, u) * u * _b(inv_dy2_u, u)
+    du_drag = du_drag * _b(u_mask, du_drag)
+
+    # --- v side-drag: closed E/W sides (a zonal wall to left/right) ---
+    v_west = vmask[:, :-1]       # (n_lat+1, n_lon): west vertex of v-point (j,i)
+    v_east = vmask[:, 1:]        # (n_lat+1, n_lon): east vertex
+    closed_w = v_mask * (1.0 - v_west)
+    closed_e = v_mask * (1.0 - v_east)
+    # Guard against zero-length v-faces (polar boundary: dx_v → 0); see the u note.
+    _dx_v = grid.dx_v.astype(v.dtype)
+    inv_dx2_v = jnp.where(_dx_v > 0.0, 1.0 / (_dx_v ** 2), 0.0)
+    dv_drag = -(2.0 * A_h) * _b(closed_w + closed_e, v) * v * _b(inv_dx2_v, v)
+    dv_drag = dv_drag * _b(v_mask, dv_drag)
+
+    return du_drag, dv_drag
+
+
 def vector_bilaplacian_cgrid(
     u: jnp.ndarray,
     v: jnp.ndarray,
@@ -1041,6 +1220,149 @@ def vector_bilaplacian_cgrid(
     return bilap_u, bilap_v
 
 
+def flux_divergence_bilaplacian_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    *,
+    cos_power: int = 0,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    r"""COMPONENT-WISE biharmonic ``∇⁴(u, v)`` = ``∇²(∇²(u, v))`` per component.
+
+    Applies the component harmonic friction :func:`flux_divergence_viscosity_cgrid`
+    (with unit coefficient) TWICE — the scale-selective analogue of the harmonic
+    ``flux_divergence`` Laplacian, and the FAITHFUL form of MITgcm's ``viscA4``
+    biharmonic (``useStrainTensionVisc=.FALSE.`` ⇒ a per-component ``del4``, NOT
+    the vector ``grad(div) − curl(curl)`` biharmonic of
+    :func:`vector_bilaplacian_cgrid`).  The biharmonic tendency is
+    ``∂ₜu = −B_h·∇⁴u`` (same sign convention as ``vector_bilaplacian_cgrid``).
+
+    WHY a separate operator: the vector biharmonic's ``grad(div)``/``curl(curl)``
+    composition is ill-scaled on a uniform-Cartesian / near-degenerate (1-column)
+    C-grid — it returns a value ~``dx⁴`` too large (an unphysical ``O(u)`` instead
+    of ``O(u/dx⁴)``) and blows the integration up within a few steps, whereas this
+    component form telescopes a clean 5-point ``∇²`` twice and stays at the correct
+    ``u/dx⁴`` scale (front_relax baroclinic oracle).
+
+    Reuses ``flux_divergence_viscosity_cgrid`` verbatim (its metric, masking, and
+    cos-scaling), so momentum conservation + free-slip wall handling are inherited.
+    """
+    lap_u, lap_v, _ = flux_divergence_viscosity_cgrid(
+        u, v, grid, 1.0, cos_power=cos_power,
+        mask=mask, u_mask=u_mask, v_mask=v_mask,
+    )
+    bilap_u, bilap_v, _ = flux_divergence_viscosity_cgrid(
+        lap_u, lap_v, grid, 1.0, cos_power=cos_power,
+        mask=mask, u_mask=u_mask, v_mask=v_mask,
+    )
+    return bilap_u, bilap_v
+
+
+def _vertex_dual_area_interior(lat, radius, dlon):
+    """Raw vertex dual-cell area ``R**2 * dlon * |Δsin(lat)|`` of shape
+    ``(n_lat+1,)`` (#515 consolidation).
+
+    The single source for the interior of the regular (non-tripolar) lat-lon
+    vertex/q-cell area, previously recomputed verbatim in ``vertex_area_cgrid``,
+    ``strain_rate_cgrid`` and the Smagorinsky ``A_vertex`` floor.  Callers keep
+    their OWN pole handling (zero pole rows vs a ``1e-30`` floor) and pass an
+    appropriately-typed ``lat`` (stored dtype, or ``result_type(float)`` for the
+    #516 working-precision path), so each extraction is byte-identical to the
+    former inline recompute.
+    """
+    sin_lat = jnp.sin(lat)
+    sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
+    return radius**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
+
+
+def vface_zonal_cos_lat(grid: LatLonGrid) -> jnp.ndarray:
+    """Canonical ``cos(lat_v)`` at the ``n_lat+1`` v-face latitudes (#516).
+
+    The zonal length of a v-face is ``dx_v = R·cos(lat_v)·dlon``.  This
+    is the ONE source for that ``cos(lat_v)`` across every regular
+    (non-tripolar) lat-lon C-grid operator that recomputes a v-face
+    zonal metric — the strain/stress adjoint pair, the cell-divergence,
+    the velocity-divergence split (w-divergence) and the flux-form
+    momentum advection — so they share an identical discretisation and
+    the discrete adjointness / mass-consistency invariants hold to
+    machine precision on a non-uniform-dlat (Mercator/stretched) grid.
+
+    Construction (bit-matches the canonical core ``divergence_cgrid``):
+
+    * interior faces ``j = 1 … n_lat-1`` →
+      ``cos(0.5·(lat[j-1] + lat[j]))``  (cos-OF-interface, NOT the
+      mean-of-cos ``0.5·(cos lat[j-1] + cos lat[j])`` — they differ at
+      O(dlat²) on a stretched grid because ``cos(½(a+b)) ≠
+      ½(cos a + cos b)``);
+    * the two polar walls ``j = 0`` and ``j = n_lat`` → EXACTLY ``0``
+      (transport metric: no meridional flux through the pole wall).
+
+    The construction reuses the SAME backend-dispatched lat padding
+    (:func:`pad_with_pole_bc_lat`) and pole-zeroing
+    (:func:`zero_polar_lat_ends`) the core divergence uses, so under MPI
+    an interior partition cut keeps the neighbour-sendrecv'd face metric
+    (only a rank that OWNS a pole zeros that end) and the result is
+    bit-identical to ``divergence_cgrid``'s v-face metric.
+
+    NOTE — pole convention.  This metric is exactly ``0`` at the poles.
+    Operators that DIVIDE by a v-face-related dual area at the poles
+    (``strain_rate_cgrid`` / ``stress_divergence_cgrid`` divide by the
+    vertex dual area) must keep their own ``1e-10``-clamped denominator
+    to stay finite — they use this helper ONLY for the adjoint-pair-
+    critical v-face zonal *length* (a pure multiplicative weight, never a
+    divisor), and v ≡ 0 at the polar walls regardless.
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+        Regular or Mercator lat-lon grid (the tripolar branch reads the
+        stored 2-D ``grid.dx_v`` instead and never calls this helper).
+
+    Returns
+    -------
+    cos_lat_v : (n_lat+1,)
+        cos(lat) at the v-face latitudes; interior cos-of-interface, the
+        two polar walls exactly ``0``.
+    """
+    from legoesm.grids.halo_latlon import (
+        pad_with_pole_bc_lat,
+        zero_polar_lat_ends,
+    )
+    if reads_stored_vface_metric(grid):
+        # Rich geometry with an explicit stored v-face metric (#514): READ it
+        # instead of recomputing cos(grid.lat_v).  On a Cartesian beta-plane the
+        # recompute is WRONG (the pseudo-lat is a nonzero y_c/radius while the
+        # stored dx_v is the uniform dx_m); on a spherical rich geometry it is
+        # merely redundant.  dx_v is lon-uniform for every geometry that reaches
+        # this helper (tripolar reads the 2D dx_v directly and never calls here),
+        # so column 0 carries the full metric.  cos(lat_v) = dx_v / (R*dlon):
+        # beta-plane -> exactly 1 (R*dlon == dx_m sentinel).  zero_polar_lat_ends
+        # enforces this helper's poles==0 CONTRACT (the beta-plane stored dx_v is
+        # a uniform dx_m at every row, NOT pole-zeroed; spherical stored dx_v is
+        # already 0 there so the clamp is a no-op) — stress/viscosity divide by
+        # this at the walls and rely on the zero.
+        cos_lat_v = grid.dx_v[:, 0] / (grid.radius * grid.dlon)
+        return zero_polar_lat_ends(
+            jnp.asarray(cos_lat_v, dtype=jnp.result_type(float))
+        )
+    # Compute the interface latitudes in the working float precision
+    # (float64 under JAX_ENABLE_X64, else float32).  ``grid.lat`` is
+    # stored float32, but ``cos(½(lat[j-1]+lat[j]))`` is the
+    # adjoint-/mass-critical metric — evaluating it at the model's
+    # working precision keeps the four sites that share this helper
+    # consistent to machine precision (the single-precision cos-of-
+    # interface only agrees to ~1e-7, breaking the x64 invariants).
+    lat = jnp.asarray(grid.lat, dtype=jnp.result_type(float))
+    lat_pad = pad_with_pole_bc_lat(
+        lat, halo=1, south_value=0.0, north_value=0.0,
+    )
+    lat_v = 0.5 * (lat_pad[:-1] + lat_pad[1:])          # (n_lat+1,)
+    return zero_polar_lat_ends(jnp.cos(lat_v))          # (n_lat+1,)
+
+
 def _cos_lat_uv(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarray]:
     """cos(lat) on u- and v-face latitudes for a lat-lon C-grid.
 
@@ -1059,15 +1381,30 @@ def _cos_lat_uv(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarray]:
     cos_u : (n_lat,)
         cos(lat) at u-face latitudes.
     cos_v : (n_lat+1,)
-        cos(lat) at v-face latitudes.
+        cos(lat) at v-face latitudes.  The INTERIOR faces are the
+        canonical single-source :func:`vface_zonal_cos_lat` (cos-of-
+        interface), NOT the legacy mean-of-cos — see #516: routing every
+        recompute through one helper restores strain↔stress adjointness
+        and div↔advection mass-consistency on non-uniform-dlat grids.
+        The two POLAR-WALL faces keep the historical non-zero
+        cell-centre value ``cos_u[0]`` / ``cos_u[-1]`` because this
+        ``cos_v`` is also used as a DIVISOR by
+        :func:`flux_divergence_viscosity_cgrid` (``1/(cos_v·R·dlon)``
+        spherical metric prefactor); the canonical helper's exact-zero
+        pole would make that ``0/0 → NaN``.  The pole rows of those
+        viscous tendencies are walls (zeroed) regardless, so the
+        boundary value is a finite safety placeholder, not a physical
+        flux — and the gate test compares only the INTERIOR faces.
     """
     cos_u = grid.cos_lat                                  # (n_lat,)
-    cos_v_interior = 0.5 * (cos_u[:-1] + cos_u[1:])       # (n_lat-1,)
+    cos_v_canon = vface_zonal_cos_lat(grid)              # (n_lat+1,), poles 0
+    # Replace the exact-zero polar walls with the historical non-zero
+    # cell-centre cosine so divisor uses stay finite (interior unchanged).
     cos_v = jnp.concatenate([
-        cos_u[:1],                                        # south boundary ≈ cos(lat[0])
-        cos_v_interior,
-        cos_u[-1:],                                       # north boundary ≈ cos(lat[-1])
-    ])                                                    # (n_lat+1,)
+        cos_u[:1],
+        cos_v_canon[1:-1],
+        cos_u[-1:],
+    ])
     return cos_u, cos_v
 
 
@@ -1425,23 +1762,35 @@ def strain_rate_cgrid(
         v_south = v_eff[:-1]
         dv_dy = v_north * _bcast2d(face_dx[1:]) - v_south * _bcast2d(face_dx[:-1])
     else:
-        face_dy = grid.dy * 0.5  # (n_lat,)
+        # #516: evaluate the regular-grid metrics in the model's working
+        # float precision (float64 under JAX_ENABLE_X64).  ``grid.dy`` /
+        # ``grid.cos_lat`` / ``grid.area`` are stored float32, which
+        # injects ~1e-7 noise that breaks the strain↔stress adjoint
+        # identity at x64 tolerance — promote so strain and its exact
+        # transpose ``stress_divergence_cgrid`` share bit-identical
+        # metrics.
+        _fdtype = jnp.result_type(float)
+        face_dy = jnp.asarray(grid.dy, dtype=_fdtype) * 0.5  # (n_lat,)
         u_east = u_eff[:, 1:]
         u_west = u_eff[:, :-1]
         du_dx = (u_east - u_west) * face_dy[lat_bcast]
 
-        lat_interior = 0.5 * (lat[:-1] + lat[1:])
-        cos_lat_v = jnp.pad(
-            jnp.maximum(jnp.cos(lat_interior), 1e-10),
-            (1, 1), constant_values=1e-10,
-        )
-        face_dx = R * cos_lat_v * dlon  # (n_lat+1,)
+        # #516: single-source v-face zonal LENGTH (canonical cos-of-
+        # interface, poles 0).  This is a pure multiplicative weight on
+        # v (never a divisor) so the exact-0 polar value is fine and v≡0
+        # at the walls anyway; the vertex dual area below keeps its own
+        # 1e-10 clamp (it DIVIDES).  Sharing this exact array with
+        # stress_divergence_cgrid is what makes the adjoint pair hold.
+        face_dx = R * vface_zonal_cos_lat(grid) * dlon  # (n_lat+1,)
         v_north = v_eff[1:]
         v_south = v_eff[:-1]
         dv_dy = (v_north * face_dx[1:][lat_bcast]
                  - v_south * face_dx[:-1][lat_bcast])
 
-    area = grid.area  # (n_lat, n_lon)
+    if is_tripolar(grid):
+        area = grid.area  # (n_lat, n_lon)
+    else:
+        area = jnp.asarray(grid.area, dtype=jnp.result_type(float))
     D_T = (du_dx - dv_dy) / _bcast2d(area)
     if mask is not None:
         D_T = D_T * _bcast2d(mask)
@@ -1474,13 +1823,15 @@ def strain_rate_cgrid(
 
         D_S = (dv_circ_full + du_circ) / _bcast2d(A_vertex)
     else:
-        sin_lat = jnp.sin(lat)
-        sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
-        A_vertex = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
-        A_vertex = jnp.maximum(A_vertex, 1e-30)
+        # #516: working-precision metrics (see the D_T branch).
+        _fdtype = jnp.result_type(float)
+        lat_f = jnp.asarray(lat, dtype=_fdtype)
+        cos_lat_f = jnp.asarray(cos_lat, dtype=_fdtype)
+        A_vertex = jnp.maximum(
+            _vertex_dual_area_interior(lat_f, R, dlon), 1e-30)
 
-        dx_cell = R * cos_lat * dlon
-        dy_h = grid.dy * 0.5
+        dx_cell = R * cos_lat_f * dlon
+        dy_h = jnp.asarray(grid.dy, dtype=_fdtype) * 0.5
         dy_edge_interior = 0.5 * (dy_h[1:] + dy_h[:-1])
         dy_edge = jnp.pad(dy_edge_interior, (1, 1), mode='edge')
 
@@ -1620,6 +1971,42 @@ def stress_divergence_cgrid(
     def _bcast(m):
         return m[..., jnp.newaxis] if is_3d else m
 
+    if not normalize:
+        # #516 exact-adjoint mode.  ``normalize=False`` must return the
+        # BIT-EXACT discrete matrix transpose of ``strain_rate_cgrid``
+        # (so ``<strain(u,v), T> = <(u,v), stress_div(T)>`` to machine
+        # precision — the #516 adjoint gate).  Rather than re-derive the
+        # transpose stencils by hand (a subtle sign/metric exercise that
+        # only holds in the area-WEIGHTED energy product, not the plain
+        # one the gate uses), obtain the exact transpose from JAX's
+        # linear transpose of the (linear) strain operator.  This is the
+        # true matrix transpose by construction, AD-safe, and shares
+        # strain's promoted float64 metrics and unified v-face length, so
+        # it is exact on Mercator.  ``normalize=True`` (the production
+        # energy-stable viscous path) keeps its hand-written, energy-
+        # normalised stencils below — UNCHANGED.
+        u_like = jnp.zeros(
+            stress_h.shape[:1] + (stress_h.shape[1] + 1,) + stress_h.shape[2:],
+            dtype=jnp.result_type(stress_h, float),
+        )
+        v_like = jnp.zeros(
+            (stress_q.shape[0],) + (stress_q.shape[1] - 1,) + stress_q.shape[2:],
+            dtype=jnp.result_type(stress_q, float),
+        )
+
+        def _strain_lin(u_in, v_in):
+            return strain_rate_cgrid(
+                u_in, v_in, grid, u_mask=u_mask, v_mask=v_mask,
+            )
+
+        # The strain operator applies the face masks to its INPUTS, so
+        # the linear transpose already emits the matching output-side
+        # masking — no extra mask multiply is needed (and would be
+        # redundant since the masks are idempotent 0/1 fields).
+        transpose_fn = jax.linear_transpose(_strain_lin, u_like, v_like)
+        tend_u, tend_v = transpose_fn((stress_h, stress_q))
+        return tend_u, tend_v
+
     if is_tripolar(grid):
         # Tripolar: full 2D metrics — must match strain_rate_cgrid's
         # 2D path so the adjoint identity holds.
@@ -1664,20 +2051,30 @@ def stress_divergence_cgrid(
     else:
         R = grid.radius
         dlon = grid.dlon
-        lat = grid.lat
-        cos_lat = grid.cos_lat
+        # #516: working-precision metrics (float64 under x64) — MUST
+        # bit-match ``strain_rate_cgrid``'s promoted metrics for the
+        # discrete adjoint pair to hold at x64 tolerance; the stored
+        # float32 grid fields inject ~1e-7 noise.
+        _fdtype = jnp.result_type(float)
+        lat = jnp.asarray(grid.lat, dtype=_fdtype)
+        cos_lat = jnp.asarray(grid.cos_lat, dtype=_fdtype)
         lat_bcast = (slice(None),) + (jnp.newaxis,) * (stress_h.ndim - 1)
 
-        dy_h = grid.dy * 0.5
+        dy_h = jnp.asarray(grid.dy, dtype=_fdtype) * 0.5
         dy_edge_interior = 0.5 * (dy_h[1:] + dy_h[:-1])
         dy_edge = jnp.pad(dy_edge_interior, (1, 1), mode='edge')
         dx_cell = R * cos_lat * dlon
-        lat_interior = 0.5 * (lat[:-1] + lat[1:])
-        cos_lat_v = jnp.pad(
-            jnp.maximum(jnp.cos(lat_interior), 1e-10),
-            (1, 1), constant_values=1e-10,
-        )
-        dx_v = R * cos_lat_v * dlon
+        # #516: single-source v-face zonal LENGTH (canonical cos-of-
+        # interface, poles 0) — MUST be the SAME array strain_rate_cgrid
+        # uses in dv_dy for the discrete adjoint pair to hold to machine
+        # precision.  It enters ``tend_v_DT`` only at the interior faces
+        # ``dx_v[1:-1]`` (a pure multiplicative weight), so the exact-0
+        # polar value is fine here.  The vertex dual-area DENOMINATOR
+        # below keeps the legacy 1e-10 clamp so the normalised tendency
+        # stays finite at the (v≡0) polar walls.
+        dx_v = R * vface_zonal_cos_lat(grid) * dlon
+        cos_lat_v_clamped = jnp.maximum(vface_zonal_cos_lat(grid), 1e-10)
+        dx_v_area = R * cos_lat_v_clamped * dlon
 
         sh_west = jnp.roll(stress_h, 1, axis=1)
         dsh = stress_h - sh_west
@@ -1699,7 +2096,7 @@ def stress_divergence_cgrid(
         tend_v = tend_v_DT + tend_v_DS
 
         area_u_dual = dy_h * dx_cell
-        area_v_dual = dy_edge * dx_v
+        area_v_dual = dy_edge * dx_v_area
         area_u_dual = jnp.maximum(area_u_dual, 1e-30)
         area_v_dual = jnp.maximum(area_v_dual, 1e-30)
 
@@ -1805,13 +2202,42 @@ def viscous_tendency_cgrid(
     stress_h = _bcast_coef(A_h) * D_T
     stress_q = _bcast_coef(A_q) * D_S
 
-    # 3. Stress divergence (already 3D-native; normalize controls area
-    # normalization)
-    tend_u, tend_v = stress_divergence_cgrid(
-        stress_h, stress_q, grid,
-        u_mask=u_mask, v_mask=v_mask, normalize=normalize)
+    # 3. Stress divergence.
+    #
+    # #516.  ``stress_divergence_cgrid(normalize=False)`` now returns the
+    # EXACT discrete transpose of the (area-normalised) PUBLIC
+    # ``strain_rate_cgrid`` — i.e. ``Sᵀ_norm = L_rawᵀ ∘ diag(1/area)`` —
+    # so the #516 adjoint gate ``<strain(u),T> = <u, stress_div(T)>``
+    # holds to machine precision.
+    #
+    # The biharmonic / backscatter first pass instead needs the
+    # historical UN-normalised RAW stress-divergence ``-L_rawᵀ(stress)``
+    # (the MOM6 velocity-like intermediate, units m/s — NOT the extra
+    # ``1/area`` the normalised transpose carries).  Recover it exactly
+    # from the normalised transpose using ``L_rawᵀ(s) = Sᵀ_norm(s·area)``
+    # (the strain normalises D_T by the cell area and D_S by the vertex
+    # dual area, so pre-multiplying the stresses by those SAME areas
+    # cancels the ``1/area`` baked into ``Sᵀ_norm``), then negate for the
+    # dissipative sign the callers subtract.  ``normalize=True`` (the
+    # energy-stable viscous tendency, the default) is UNCHANGED.
+    if normalize:
+        tend_u, tend_v = stress_divergence_cgrid(
+            stress_h, stress_q, grid,
+            u_mask=u_mask, v_mask=v_mask, normalize=True)
+        return tend_u, tend_v
 
-    return tend_u, tend_v
+    # normalize=False — RAW (un-normalised) negative adjoint.
+    _fdtype = jnp.result_type(float)
+    area_cell = jnp.asarray(grid.area, dtype=_fdtype)        # (n_lat, n_lon)
+    A_vertex = vertex_area_1d(grid).astype(_fdtype)          # (n_lat+1,)
+    lat_bcast = (slice(None),) + (jnp.newaxis,) * (stress_q.ndim - 1)
+    stress_h_raw = stress_h * (
+        area_cell[..., jnp.newaxis] if is_3d else area_cell)
+    stress_q_raw = stress_q * A_vertex[lat_bcast]
+    tend_u, tend_v = stress_divergence_cgrid(
+        stress_h_raw, stress_q_raw, grid,
+        u_mask=u_mask, v_mask=v_mask, normalize=False)
+    return -tend_u, -tend_v
 
 
 def vertex_area_1d(grid: LatLonGrid) -> jnp.ndarray:
@@ -1823,14 +2249,7 @@ def vertex_area_1d(grid: LatLonGrid) -> jnp.ndarray:
         Area of each vertex dual cell.  Pole rows are set to a small
         positive floor (1e-30) to avoid division by zero.
     """
-    R = grid.radius
-    dlon = grid.dlon
-    lat = grid.lat
-    sin_lat = jnp.sin(lat)
-    # Single Pad HLO op (constant_values=(-1, 1)) replaces alloc-2-
-    # singletons + concatenate-of-three.
-    sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
-    A_v = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
+    A_v = _vertex_dual_area_interior(grid.lat, grid.radius, grid.dlon)
     return jnp.maximum(A_v, 1e-30)
 
 
@@ -1990,6 +2409,88 @@ def smagorinsky_biharmonic_tendency_cgrid(
     return tend_u, tend_v
 
 
+def om4p25_lateral_friction_tendency_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid,
+    *,
+    C2: float = 0.15,
+    Cu2: float = 0.01,
+    C4: float = 0.06,
+    Cu4: float = 0.01,
+    deformation_radius: jnp.ndarray | float = 6.75e3,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """OM4p25 lateral-friction closure (GFDL OM4.0, Adcroft et al. 2019) — the
+    Silvestri et al. 2024 "SM2" comparison case. A Laplacian + biharmonic
+    combination where each viscosity is the MAX of a flow-adaptive Smagorinsky
+    term and a static grid-scale term (paper Appendix A, Eqs A5-A8):
+
+        nu2 = max(C2·Δ²·|D|, Cu2·Δ)·F          (Laplacian   [m²/s])
+        nu4 = max(C4·Δ⁴·|D|, Cu4·Δ³)            (biharmonic  [m⁴/s])
+        F   = 1 / (1 + 0.25·(L_d/Δ)⁴)            (deformation-radius taper)
+
+    with |D| = sqrt(D_T² + D_S²) the strain-rate magnitude (D_T = ∂ₓu−∂ᵧv,
+    D_S = ∂ₓv+∂ᵧu), Δ = sqrt(cell area), and L_d the first-baroclinic
+    deformation radius. F reduces the LAPLACIAN where the deformation radius is
+    well resolved (large L_d/Δ); it does not taper the biharmonic.
+
+    Both viscosities are applied through the energy-stable stress-tensor
+    operator (``viscous_tendency_cgrid``, the exact discrete adjoint of the
+    strain rate), so dissipation is guaranteed for the non-negative spatially-
+    varying coefficients. The biharmonic uses the two-pass form
+    ``L_c(L_1(u))`` whose effective coefficient is ``c·Δ²``; to realise
+    ``nu4`` the second-pass coefficient is ``c4 = nu4/Δ² = max(C4·Δ²·|D|, Cu4·Δ)``.
+
+    Coefficient defaults are the OM4p25 values: C2=0.15, Cu2=0.01, C4=0.06,
+    Cu4=0.01. ``deformation_radius`` is a scalar (or h-point field) in metres;
+    for the idealised baroclinic jet it is ~uniform (~6.75 km). A spatially-
+    varying L_d from the local N² is a faithfulness refinement.
+
+    Returns ``(tend_u, tend_v)`` already combining Laplacian (added) and
+    biharmonic (subtracted); the caller ADDS these to du/dt.
+    """
+    # Δ²·|D| at h- and q-points via the Smagorinsky helpers with unit
+    # coefficient (smagorinsky_viscosity_cgrid returns (C·Δ)²·|D| = Δ²·|D| at C=1).
+    S_h = smagorinsky_viscosity_cgrid(
+        u, v, grid, 1.0, mask=mask, u_mask=u_mask, v_mask=v_mask)   # Δ_h²·|D|_h
+    D_T, D_S = strain_rate_cgrid(
+        u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
+    S_q = smagorinsky_viscosity_q_cgrid(D_T, D_S, grid, 1.0, mask=mask)  # Δ_q²·|D|_q
+
+    Delta_h = jnp.sqrt(grid.area)
+    if S_h.ndim == 3:
+        Delta_h = Delta_h[..., jnp.newaxis]
+    Delta_q = jnp.sqrt(vertex_area_1d(grid))
+    bcast = (slice(None),) + (jnp.newaxis,) * (S_q.ndim - 1)
+    Delta_q = Delta_q[bcast]
+
+    def _taper(Delta):
+        # F = 1/(1 + 0.25·(L_d/Δ)⁴): small where L_d >> Δ (resolved eddies).
+        Rh = deformation_radius / jnp.maximum(Delta, 1.0e-12)
+        return 1.0 / (1.0 + 0.25 * Rh ** 4)
+
+    nu2_h = jnp.maximum(C2 * S_h, Cu2 * Delta_h) * _taper(Delta_h)
+    nu2_q = jnp.maximum(C2 * S_q, Cu2 * Delta_q) * _taper(Delta_q)
+    c4_h = jnp.maximum(C4 * S_h, Cu4 * Delta_h)
+    c4_q = jnp.maximum(C4 * S_q, Cu4 * Delta_q)
+
+    # Laplacian (added directly — energy-dissipative for nu2 >= 0).
+    lap_u, lap_v = viscous_tendency_cgrid(
+        u, v, grid, nu2_h, nu2_q, mask=mask, u_mask=u_mask, v_mask=v_mask)
+    # Biharmonic two-pass (subtracted): u_star = unit-coeff stress-divergence,
+    # then c4-weighted stress-divergence → effective nu4·∇⁴u.
+    u_star, v_star = viscous_tendency_cgrid(
+        u, v, grid, 1.0, 1.0, mask=mask, u_mask=u_mask, v_mask=v_mask,
+        normalize=False)
+    bih_u, bih_v = viscous_tendency_cgrid(
+        u_star, v_star, grid, c4_h, c4_q,
+        mask=mask, u_mask=u_mask, v_mask=v_mask)
+    return lap_u - bih_u, lap_v - bih_v
+
+
 # =============================================================================
 # Leith viscosity (Leith 1996; Fox-Kemper & Menemenlis 2008)
 # =============================================================================
@@ -2012,57 +2513,40 @@ def smagorinsky_biharmonic_tendency_cgrid(
 # ``leith_biharmonic_tendency_cgrid`` below gives the Leith-biharmonic
 # operator ∇²(A_L ∇²u) with effective coefficient (C_L)³ Δ⁵ |∇ζ|.
 
-def _grad_zeta_mag_h(zeta_q: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
-    """|∇ζ| at cell centres from ζ at vertices.
+def _grad_vertex_vec_h(zeta_q: jnp.ndarray, grid: "LatLonGrid") -> tuple:
+    """∇ of a VERTEX field, as the (∂ₓ, ∂ᵧ) vector at cell centres [1/(m·s)].
 
-    Parameters
-    ----------
-    zeta_q : (n_lat+1, n_lon+1, ...) relative vorticity at vertices.
-    grid : LatLonGrid.
-
-    Returns
-    -------
-    grad_mag : (n_lat, n_lon, ...) with units 1/(m·s).
+    ``zeta_q`` : (n_lat+1, n_lon+1, ...) at vertices → (gx, gy) each
+    (n_lat, n_lon, ...) at cell centres.
     """
     R = grid.radius
     dlon = grid.dlon
     cos_lat = grid.cos_lat
-
     if zeta_q.ndim == 3:
         cos_lat_b = cos_lat[:, jnp.newaxis, jnp.newaxis]
         dy_h_b = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]
     else:
         cos_lat_b = cos_lat[:, jnp.newaxis]
         dy_h_b = (grid.dy * 0.5)[:, jnp.newaxis]
-
-    # Cell-centre spacings.  cos_lat evaluated at cell-centre latitudes.
-    dx_h = R * cos_lat_b * dlon                           # (n_lat,1[,1])
-    dy_h = dy_h_b                                         # (n_lat,1[,1])
-
-    # ∂ζ/∂x at (i,j): average of north/south vertex-pair zonal differences.
+    dx_h = R * cos_lat_b * dlon
     dz_dx = 0.5 * ((zeta_q[:-1, 1:] - zeta_q[:-1, :-1])
                    + (zeta_q[1:, 1:] - zeta_q[1:, :-1])) / dx_h
-    # ∂ζ/∂y at (i,j): average of west/east vertex-pair meridional differences.
     dz_dy = 0.5 * ((zeta_q[1:, :-1] - zeta_q[:-1, :-1])
-                   + (zeta_q[1:, 1:] - zeta_q[:-1, 1:])) / dy_h
+                   + (zeta_q[1:, 1:] - zeta_q[:-1, 1:])) / dy_h_b
+    return dz_dx, dz_dy
 
-    return jnp.sqrt(dz_dx ** 2 + dz_dy ** 2 + 1e-30)
+
+def _grad_zeta_mag_h(zeta_q: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
+    """|∇ζ| at cell centres from ζ at vertices (magnitude of ``_grad_vertex_vec_h``)."""
+    gx, gy = _grad_vertex_vec_h(zeta_q, grid)
+    return jnp.sqrt(gx ** 2 + gy ** 2 + 1e-30)
 
 
-def _grad_div_mag_h(div_h: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
-    """|∇δ| at cell centres from δ at cell centres (periodic in lon).
+def _grad_cell_vec_h(div_h: jnp.ndarray, grid: "LatLonGrid") -> tuple:
+    """∇ of a CELL-CENTRE field, as the (∂ₓ, ∂ᵧ) vector at cell centres.
 
-    Uses centred differences with periodic wrap in longitude and one-sided
-    reflection at the poles (so the magnitude remains non-negative).
-
-    Parameters
-    ----------
-    div_h : (n_lat, n_lon, ...) horizontal divergence at cell centres.
-    grid : LatLonGrid.
-
-    Returns
-    -------
-    grad_mag : (n_lat, n_lon, ...) with units 1/(m·s).
+    Centred differences with periodic wrap in longitude and one-sided diffs at
+    the pole rows. ``div_h`` : (n_lat, n_lon, ...) → (gx, gy) same shape.
     """
     R = grid.radius
     dlon = grid.dlon
@@ -2100,7 +2584,13 @@ def _grad_div_mag_h(div_h: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
     dd_dy_north = (div_h[-1:] - div_h[-2:-1]) / dy_v_north
     dd_dy = jnp.concatenate([dd_dy_south, dd_dy_interior, dd_dy_north], axis=0)
 
-    return jnp.sqrt(dd_dx ** 2 + dd_dy ** 2 + 1e-30)
+    return dd_dx, dd_dy
+
+
+def _grad_div_mag_h(div_h: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
+    """|∇δ| at cell centres (magnitude of ``_grad_cell_vec_h``)."""
+    gx, gy = _grad_cell_vec_h(div_h, grid)
+    return jnp.sqrt(gx ** 2 + gy ** 2 + 1e-30)
 
 
 def leith_viscosity_cgrid(
@@ -2340,6 +2830,159 @@ def leith_biharmonic_tendency_cgrid(
     return tend_u, tend_v
 
 
+def qg_leith_viscosity_tendency_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: "LatLonGrid",
+    *,
+    C_qgleith: float = 2.0,
+    buoyancy: jnp.ndarray | None = None,
+    h_k: jnp.ndarray | None = None,
+    deformation_radius: jnp.ndarray | float | None = None,
+    velocity_scale: float = 1.0,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """QG-Leith eddy viscosity (Silvestri et al. 2024 "QG2" / Bachman et al.
+    2017). With ``buoyancy``+``h_k`` supplied it is the FULL QG2 (baroclinic
+    stretching + Bu/Ro bound, see below); without them it is the BAROTROPIC
+    approximation (∇Q = ∇(ζ+f), bounds inert — label "QG-Leith (barotropic)").
+    A HARMONIC (Laplacian) viscosity scaling with the potential-vorticity gradient:
+
+        nu = (C·Δ/π)³ · sqrt(|∇Q|² + |∇δ|²)
+
+    with Q = ζ + f the absolute (barotropic) potential vorticity (ζ = relative
+    vorticity at vertices, f = planetary vorticity), δ = ∇·u the horizontal
+    divergence, Δ = sqrt(cell area), and C the dimensionless coefficient
+    (paper QG2: C=2). Applied through the energy-stable stress-tensor operator
+    ``viscous_tendency_cgrid`` (exact strain adjoint → guaranteed dissipation).
+
+    This is the paper's QG counterpart to the 2D Leith closure (Appendix A1/A2,
+    ν=(CΔ/π)³|∇q|): it differs from legoESM's existing ``C_leith`` operator in
+    three faithful ways — (1) HARMONIC not biharmonic, (2) ABSOLUTE-vorticity
+    PV gradient ∇(ζ+f) not relative ∇ζ, (3) the /π³ paper normalisation.
+
+    FULL QG2 (B5b): when ``buoyancy`` (b at cell centres) + ``h_k`` (layer
+    thicknesses) are supplied (3D), the baroclinic stretching term is added —
+    ∇q₁ = ∇(ζ+f) + ∂_z(f/N²·∇b) (Eq A3) — and the Bachman grid-Burger /
+    grid-Rossby min-bound is applied: |∇Q| = min(|∇q₁|, |∇q|(1+1/Bu),
+    |∇q|(1+1/Ro²)) with Bu=Δ²/L_d², Ro=V/(|f|Δ). Without buoyancy the operator
+    falls back to the BAROTROPIC ∇(ζ+f) (the bounds are inert — see
+    ``bound_qg_pv_gradient``); that path must be labeled "QG-Leith (barotropic)".
+    Returns (tend_u, tend_v) to be ADDED to du/dt.
+    """
+    is_3d = u.ndim == 3
+    _um = u_mask[..., jnp.newaxis] if (u_mask is not None and is_3d) else u_mask
+    _vm = v_mask[..., jnp.newaxis] if (v_mask is not None and is_3d) else v_mask
+    u_eff = u if _um is None else u * _um
+    v_eff = v if _vm is None else v * _vm
+
+    # Absolute vorticity Q = ζ + f at vertices.
+    zeta_q = curl_vertex_cgrid(u_eff, v_eff, grid)              # (n_lat+1,n_lon+1,...)
+    lat = grid.lat
+    lat_v = jnp.concatenate([lat[:1], 0.5 * (lat[:-1] + lat[1:]), lat[-1:]])
+    f_v = 2.0 * constants.Omega * jnp.sin(lat_v)               # (n_lat+1,)
+    f_v = f_v[:, jnp.newaxis] if zeta_q.ndim == 2 else f_v[:, jnp.newaxis, jnp.newaxis]
+    absvort_q = zeta_q + f_v
+
+    qx, qy = _grad_vertex_vec_h(absvort_q, grid)               # vector ∇(ζ+f)
+    grad_Q = jnp.sqrt(qx ** 2 + qy ** 2 + 1e-30)               # |∇(ζ+f)|_h
+    div_h = divergence_cgrid(u_eff, v_eff, grid, u_mask=u_mask, v_mask=v_mask)
+    grad_div = _grad_div_mag_h(div_h, grid)                     # |∇δ|_h
+
+    # FULL QG2 (B5b): add the baroclinic stretching ∇q₁ = ∇(ζ+f) + ∂_z(f/N²∇b)
+    # and apply the Bachman grid-Burger / grid-Rossby min-bound. Active only when
+    # the buoyancy field is supplied (else the barotropic ∇(ζ+f) is used and the
+    # bounds are inert — see `bound_qg_pv_gradient`).
+    if buoyancy is not None and h_k is not None and is_3d:
+        f_h = (2.0 * constants.Omega * jnp.sin(grid.lat))[:, jnp.newaxis, jnp.newaxis]
+        sx, sy = qg_pv_stretching_vec(buoyancy, h_k, f_h, grid)
+        grad_q1 = jnp.sqrt((qx + sx) ** 2 + (qy + sy) ** 2 + 1e-30)
+        Delta_bu = jnp.sqrt(grid.area)[..., jnp.newaxis]
+        Ld = (deformation_radius if deformation_radius is not None else 6.75e3)
+        Bu = (Delta_bu / jnp.maximum(jnp.asarray(Ld), 1e-30)) ** 2     # Δ²/L_d²
+        f_abs = jnp.maximum(jnp.abs(f_h), 1e-12)
+        Ro = velocity_scale / (f_abs * Delta_bu)
+        grad_Q = bound_qg_pv_gradient(grad_Q, grad_q1, Bu, Ro)
+
+    norm = jnp.sqrt(grad_Q ** 2 + grad_div ** 2 + 1e-30)
+
+    Delta = jnp.sqrt(grid.area)
+    if is_3d:
+        Delta = Delta[..., jnp.newaxis]
+    nu_h = (C_qgleith * Delta / jnp.pi) ** 3 * norm            # [m²/s] at h-points
+    if mask is not None:
+        m = mask[..., jnp.newaxis] if is_3d else mask
+        nu_h = nu_h * m
+
+    # q-point viscosity: 4-point average of nu_h to vertices (energy-stable for
+    # any nu_q >= 0; direct-at-q is a refinement).
+    nu_roll = jnp.roll(nu_h, 1, axis=1)
+    nu_q_int = 0.25 * (nu_h[:-1] + nu_h[1:] + nu_roll[:-1] + nu_roll[1:])
+    nu_q = pad_ns_scalar(nu_q_int, grid)
+    nu_q = jnp.concatenate([nu_q, nu_q[:, 0:1]], axis=1)
+    nu_q = jnp.maximum(nu_q, 0.0)
+
+    return viscous_tendency_cgrid(
+        u, v, grid, nu_h, nu_q, mask=mask, u_mask=u_mask, v_mask=v_mask)
+
+
+def bound_qg_pv_gradient(grad_q, grad_q_stretch, Bu, Ro):
+    """Bachman et al. (2017) QG-Leith PV-gradient bound (Silvestri Eq A2-A3):
+
+        |∇Q| = min( |∇q + stretch|, |∇q|·(1+1/Bu), |∇q|·(1+1/Ro²) )
+
+    where ``grad_q`` = |∇(ζ+f)|, ``grad_q_stretch`` = |∇q + ∂_z(f/N²∇b)| (the
+    full QGPV gradient magnitude incl. baroclinic stretching), ``Bu`` = grid
+    Burger number Δ²/L_d², ``Ro`` = grid Rossby number V/(|f|Δ). The grid-Burger
+    bound caps the gradient where the deformation radius is under-resolved; the
+    grid-Rossby bound caps it where the flow is strongly ageostrophic; the
+    closure reverts to 2D Leith where QG does not hold. Used by the full-QG2
+    path of ``qg_leith_viscosity_tendency_cgrid`` when buoyancy is supplied."""
+    gq2 = grad_q * (1.0 + 1.0 / jnp.maximum(Bu, 1e-30))
+    gq3 = grad_q * (1.0 + 1.0 / jnp.maximum(Ro ** 2, 1e-30))
+    return jnp.minimum(jnp.minimum(grad_q_stretch, gq2), gq3)
+
+
+def _ddz_centre(X: jnp.ndarray, h: jnp.ndarray) -> jnp.ndarray:
+    """∂X/∂z at cell centres (z increases UPWARD; level index increases DOWNWARD),
+    centred in the interior + one-sided at the surface/bottom. ``X``, ``h`` are
+    (..., nlev). The vertical centre-to-centre distance uses the layer thicknesses.
+    """
+    # Interior k=1..nlev-2: distance centre[k-1]→centre[k+1] = ½h[k-1]+h[k]+½h[k+1].
+    dz_int = 0.5 * h[..., :-2] + h[..., 1:-1] + 0.5 * h[..., 2:]
+    ddz_int = (X[..., :-2] - X[..., 2:]) / jnp.maximum(dz_int, 1e-12)
+    dz_top = jnp.maximum(0.5 * (h[..., 0] + h[..., 1]), 1e-12)
+    ddz_top = ((X[..., 0] - X[..., 1]) / dz_top)[..., jnp.newaxis]
+    dz_bot = jnp.maximum(0.5 * (h[..., -2] + h[..., -1]), 1e-12)
+    ddz_bot = ((X[..., -2] - X[..., -1]) / dz_bot)[..., jnp.newaxis]
+    return jnp.concatenate([ddz_top, ddz_int, ddz_bot], axis=-1)
+
+
+def qg_pv_stretching_vec(buoyancy: jnp.ndarray, h_k: jnp.ndarray,
+                         f_h: jnp.ndarray, grid: "LatLonGrid",
+                         n2_min: float = 1e-9) -> tuple:
+    """Baroclinic QGPV stretching vector ∂_z(f/N²·∇b) at cell centres (Bachman
+    et al. 2017 / Silvestri Eq A3 ∇q₁ stretching term).
+
+    ``buoyancy`` b and ``h_k`` (layer thicknesses) are (n_lat, n_lon, nlev) at
+    cell centres; ``f_h`` is the Coriolis parameter (n_lat, n_lon) or (n_lat, 1).
+    Returns (sx, sy) each (n_lat, n_lon, nlev). N² = ∂b/∂z.
+
+    Where the column is statically UNSTABLE or near-neutral (N² ≤ n2_min), the
+    QG stretching is undefined; the contribution is set to ZERO there rather than
+    dividing by a tiny floor (which would inflate f/N²·∇b by orders of magnitude
+    and spuriously spike the viscosity). n2_min is a physical floor (~1e-9 s⁻²).
+    """
+    bx, by = _grad_cell_vec_h(buoyancy, grid)            # horizontal ∇b
+    N2 = _ddz_centre(buoyancy, h_k)
+    f = f_h[..., jnp.newaxis] if f_h.ndim == 2 else f_h
+    # f/N² only where stably stratified; 0 elsewhere (no spurious floored spike).
+    inv = jnp.where(N2 > n2_min, f / jnp.where(N2 > n2_min, N2, 1.0), 0.0)
+    return _ddz_centre(inv * bx, h_k), _ddz_centre(inv * by, h_k)
+
+
 def neumann_fill_vertex(
     f: jnp.ndarray,
     vtx_mask: jnp.ndarray,
@@ -2392,6 +3035,11 @@ def neumann_fill_vertex(
 
     from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
     south_is_pole, north_is_pole = lat_ends_are_poles()
+    # Under SPMD the static (south/north)_is_pole are (True, True) on every band,
+    # so the per-pass Neumann edge-clamp would fire at every band's INTERIOR cut
+    # (SPMD-blind) — select it DATA-dependently per band via ``axis_index``.
+    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+    _spmd_pm = spmd_pole_end_masks()
 
     for _ in range(n_passes):
         # N/S neighbours.  Vertex rows are DUPLICATED at an MPI band
@@ -2423,12 +3071,23 @@ def neumann_fill_vertex(
         m_s = jnp.concatenate([m_pad[1:2], m[:-1]], axis=0)
         f_n = jnp.concatenate([filled[1:], f_pad[-1:]], axis=0)
         m_n = jnp.concatenate([m[1:], m_pad[-1:]], axis=0)
-        if south_is_pole:
-            f_s = jnp.concatenate([filled[0:1], f_s[1:]], axis=0)
-            m_s = jnp.concatenate([m[0:1], m_s[1:]], axis=0)
-        if north_is_pole:
-            f_n = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
-            m_n = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
+        if _spmd_pm is not None:
+            south_mask, north_mask = _spmd_pm
+            f_s = jnp.where(south_mask,
+                            jnp.concatenate([filled[0:1], f_s[1:]], axis=0), f_s)
+            m_s = jnp.where(south_mask,
+                            jnp.concatenate([m[0:1], m_s[1:]], axis=0), m_s)
+            f_n = jnp.where(north_mask,
+                            jnp.concatenate([f_n[:-1], filled[-1:]], axis=0), f_n)
+            m_n = jnp.where(north_mask,
+                            jnp.concatenate([m_n[:-1], m[-1:]], axis=0), m_n)
+        else:
+            if south_is_pole:
+                f_s = jnp.concatenate([filled[0:1], f_s[1:]], axis=0)
+                m_s = jnp.concatenate([m[0:1], m_s[1:]], axis=0)
+            if north_is_pole:
+                f_n = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
+                m_n = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
 
         # E/W neighbours: periodic on core columns 0..n_lon-1, then wrap.
         # Column n_lon duplicates column 0, so rolling the full array
@@ -2516,6 +3175,15 @@ def compute_face_masks_3d(
     # v-face i is between cell i-1 (south) and cell i (north).
     # Fold face kept as wall (zero) -- see compute_face_masks comment.
     v_mask_interior = a[:-1] * a[1:]
+    # Meridionally-periodic (y-re-entrant) mode: boundary v-faces wrap (wet iff
+    # the wrap-adjacent cells are wet at that level), not walls. Default OFF =
+    # bit-identical. See compute_face_masks.
+    from legoesm.grids.halo_latlon import (
+        get_meridionally_flat, get_meridionally_periodic)
+    if get_meridionally_periodic() or get_meridionally_flat():
+        wrap = a[-1:] * a[0:1]
+        v_mask = jnp.concatenate([wrap, v_mask_interior, wrap], axis=0)
+        return u_mask, v_mask
     south = jnp.zeros_like(a[:1])
     north = jnp.zeros_like(south)
     v_mask = jnp.concatenate([south, v_mask_interior, north], axis=0)
@@ -2705,6 +3373,7 @@ def density_jacobian_pgf_smc03_x(
     is_active: jnp.ndarray,
     grid: LatLonGrid,
     g: float,
+    bottom_slope_2nd_order: bool = False,
 ) -> jnp.ndarray:
     """Density-Jacobian PGF at u-faces (S&M03 §4) — zonal direction.
 
@@ -2729,7 +3398,7 @@ def density_jacobian_pgf_smc03_x(
        *below* the shallower column's seafloor when its partial cell is thin
        (``h < dz/3``), producing an asymmetric seafloor clamp and a spurious
        ~10⁶ Pa/face pressure gradient — the C1 bug that drove the BH-seamount
-       blowup (see ``docs/ocean_experiments/pgf_smc03_code_review.md``).
+       blowup (see ``docs/ocean/experiments/pgf_smc03_code_review.md``).
        ``min`` matches the Adcroft & Campin 2004 /
        ``partial_cell_pgf_correction_x`` convention
        (``face_ref = jnp.minimum(centroid_east, centroid_west)``).
@@ -2748,7 +3417,10 @@ def density_jacobian_pgf_smc03_x(
     """
     # Per-column geometry and slopes.
     z_centroid = jnp.cumsum(h_partial, axis=-1) - 0.5 * h_partial
-    sigma = reconstruct_harmonic_slopes(rho_per_cell, z_centroid, is_active)
+    sigma = reconstruct_harmonic_slopes(
+        rho_per_cell, z_centroid, is_active,
+        bottom_slope_2nd_order=bottom_slope_2nd_order,
+    )
 
     # West-neighbour rolls (column j-1 at u-face j).
     rho_W = jnp.roll(rho_per_cell, 1, axis=1)
@@ -2798,6 +3470,7 @@ def density_jacobian_pgf_smc03_y(
     is_active: jnp.ndarray,
     grid: LatLonGrid,
     g: float,
+    bottom_slope_2nd_order: bool = False,
 ) -> jnp.ndarray:
     """Density-Jacobian PGF at v-faces (S&M03 §4) — meridional direction.
 
@@ -2810,7 +3483,10 @@ def density_jacobian_pgf_smc03_y(
     Output shape: ``(n_lat+1, n_lon, nlev)``.
     """
     z_centroid = jnp.cumsum(h_partial, axis=-1) - 0.5 * h_partial
-    sigma = reconstruct_harmonic_slopes(rho_per_cell, z_centroid, is_active)
+    sigma = reconstruct_harmonic_slopes(
+        rho_per_cell, z_centroid, is_active,
+        bottom_slope_2nd_order=bottom_slope_2nd_order,
+    )
 
     # Cell-pad-first (PR357 Bug-2 pattern; see ``interp_to_v_points``): pad
     # the CELL columns so the v-face PGF at a partition cut is built from the
@@ -3274,6 +3950,16 @@ def compute_face_masks(
 
     # v-face i is between cell i and cell i+1.
     v_mask_interior = land_mask[:-1] * land_mask[1:]
+    # Meridionally-periodic (y-re-entrant channel) mode: the south boundary
+    # v-face (between cell N-1 and cell 0, wrapping) and the identical north
+    # boundary v-face are WET when both wrap-adjacent cells are wet -- NOT walls.
+    # Default OFF -> the historical hard-walled N/S v-faces (bit-identical).
+    from legoesm.grids.halo_latlon import (
+        get_meridionally_flat, get_meridionally_periodic)
+    if get_meridionally_periodic() or get_meridionally_flat():
+        wrap = (land_mask[-1:] * land_mask[0:1]).astype(land_mask.dtype)
+        v_mask = jnp.concatenate([wrap, v_mask_interior, wrap], axis=0)
+        return u_mask, v_mask
     south = jnp.zeros((1, land_mask.shape[1]), dtype=land_mask.dtype)
     # The fold face is kept as a wall (zero) until a proper halo
     # exchange architecture (Option B) is implemented.  Opening the

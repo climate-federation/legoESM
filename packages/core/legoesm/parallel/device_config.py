@@ -1,6 +1,6 @@
 """Device configuration and hardware-aware optimization.
 
-Auto-detects available accelerators (CPU, GPU, TPU, Metal) and configures
+Auto-detects available accelerators (CPU, GPU, TPU, Apple MPS) and configures
 JAX for optimal performance on each platform.  Provides a unified interface
 for device-specific settings including:
 
@@ -39,7 +39,7 @@ class HardwareConfig(NamedTuple):
     Attributes
     ----------
     backend : str
-        One of ``'cpu'``, ``'gpu'``, ``'tpu'``, ``'metal'``.
+        One of ``'cpu'``, ``'gpu'``, ``'tpu'``, ``'mps'``.
     device_count : int
         Total number of devices visible to this process.
     devices_per_host : int
@@ -66,8 +66,10 @@ class HardwareConfig(NamedTuple):
     recommended_batch_size: int
 
 
-# Backends that lack float64/complex128 support.
-_NO_F64_BACKENDS = frozenset({"metal"})
+# Backends that lack float64/complex128 support.  ``mps`` is the Apple GPU
+# (jax-mps / MLX, float32-only); ``metal`` is kept as the legacy Apple-GPU
+# platform alias so a stale backend string can never bypass the no-f64 guard.
+_NO_F64_BACKENDS = frozenset({"mps", "metal"})
 
 # Known GPU memory sizes (GB) by platform string.
 # NVIDIA GPUs.
@@ -126,7 +128,7 @@ def _estimate_device_memory(backend: str, devices: list) -> float:
         # Default for unknown GPU.
         return 16.0
 
-    if backend == "metal":
+    if backend == "mps":
         # Apple Silicon unified memory; conservatively assume half
         # of system RAM is available for GPU.
         return 8.0
@@ -256,7 +258,7 @@ def configure_jax_for_device(config: HardwareConfig) -> None:
         _configure_tpu(config)
     elif backend == "gpu":
         _configure_gpu(config)
-    elif backend == "metal":
+    elif backend == "mps":
         _configure_metal(config)
     else:
         _configure_cpu(config)
@@ -340,11 +342,11 @@ def _configure_gpu(config: HardwareConfig) -> None:
 
 
 def _configure_metal(config: HardwareConfig) -> None:
-    """Apply Metal-specific JAX configuration.
+    """Apply Apple MPS (jax-mps / MLX)-specific JAX configuration.
 
-    Metal does not support float64; spectral solvers are routed to CPU
-    automatically.  We enable multi-threading for CPU fallback operations
-    to ensure the spectral transforms (which run on CPU) use all cores.
+    MPS does not support float64; spectral solvers are routed to CPU
+    automatically.  We enable multi-threading for CPU operations to
+    ensure the spectral transforms (which run on CPU) use all cores.
     """
     _enable_cpu_multithreading()
 
@@ -396,7 +398,7 @@ def get_optimal_dtype(
     config : HardwareConfig
         Output of :func:`detect_devices`.
     precision : str
-        ``'half'`` — bfloat16 on TPU, float16 on GPU, float32 on CPU/Metal.
+        ``'half'`` — bfloat16 on TPU, float16 on GPU, float32 on CPU/MPS.
         ``'single'`` — float32 everywhere.
         ``'double'`` — float64 on backends that support it, float32 otherwise.
 
@@ -412,7 +414,7 @@ def get_optimal_dtype(
         elif backend == "gpu":
             return jnp.float16
         else:
-            # CPU and Metal: float16/bfloat16 are emulated, not faster.
+            # CPU and MPS: float16/bfloat16 are emulated, not faster.
             return jnp.float32
 
     elif precision == "double":
@@ -451,7 +453,7 @@ def mixed_precision_policy(config: HardwareConfig) -> MixedPrecisionPolicy:
     TPU:   compute in bfloat16, params/output in float32.
     GPU:   compute in float32, params/output in float32.
            (float16 with loss scaling is left to user-level code.)
-    Metal: all float32 (no float64, no fast float16 path).
+    MPS:   all float32 (no float64, no fast float16 path).
     CPU:   all float32 (no hardware acceleration for reduced precision).
 
     Parameters
@@ -472,7 +474,7 @@ def mixed_precision_policy(config: HardwareConfig) -> MixedPrecisionPolicy:
             output_dtype=jnp.float32,
         )
 
-    # GPU, Metal, CPU: float32 across the board.
+    # GPU, MPS, CPU: float32 across the board.
     return MixedPrecisionPolicy(
         compute_dtype=jnp.float32,
         param_dtype=jnp.float32,

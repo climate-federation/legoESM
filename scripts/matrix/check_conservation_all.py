@@ -471,7 +471,7 @@ def probe_ocean_latlon(n_steps=20, dt=600.0, with_fixers=False):
     grid = create_latlon_grid(n_lat=36, radius=constants.R_earth, omega=constants.Omega)
     z = create_ocean_z_star(8, H_max=4000.0)
     state = rest_state_latlon_cgrid_ocean(grid, z)
-    config = LatLonCGridOceanConfig(use_conservation_fixer=with_fixers)
+    config = LatLonCGridOceanConfig.from_flat(use_conservation_fixer=with_fixers)
     model = LatLonCGridOceanModel(grid, z, config)
     area = grid.area
 

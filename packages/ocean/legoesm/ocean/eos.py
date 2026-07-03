@@ -73,6 +73,7 @@ def wright_eos(
     T: jnp.ndarray,
     S: jnp.ndarray,
     p: jnp.ndarray,
+    compute_dtype: "jnp.dtype | None" = None,
 ) -> jnp.ndarray:
     """Compute in-situ density from Wright (1997) EOS.
 
@@ -108,7 +109,14 @@ def wright_eos(
     # Promote to the EOS compute dtype (float64 in mixed mode) for
     # intermediate polynomial evaluation.  On backends that lack float64
     # (e.g. Metal), resolve_dtype silently returns float32.
-    hi = resolve_dtype("equation_of_state", "compute")
+    # ``compute_dtype`` (opt-in mixed-precision baroclinic lever) overrides the
+    # policy compute dtype — e.g. float32 for the f32-EOS path — and is honoured
+    # over the policy; the density ANOMALY rho'~O(1) formed downstream keeps this
+    # precision-safe (offline experiment 8520588: PGF relRMS ~8e-5).  ``orig_dtype``
+    # is still restored on return, so the STATE stays f64 (only the polynomial
+    # runs in compute_dtype).
+    hi = compute_dtype if compute_dtype is not None else resolve_dtype(
+        "equation_of_state", "compute")
     T = T.astype(hi)
     S = S.astype(hi)
     p = p.astype(hi)
@@ -384,6 +392,95 @@ def linear_eos(
     array : In-situ density [kg/m³].
     """
     return rho_ref * (1.0 - alpha_T * (T - T_ref) + beta_S * (S - S_ref))
+
+
+# ==============================================================================
+# NEMO "simplified" EOS (S-EOS / np_seos), Roquet et al. (2015), Ocean
+# Modelling 90, 29-43; NEMO ``src/OCE/TRA/eosbn2.F90`` (np_seos branch).
+#
+# A polynomial in (potential temperature, practical salinity, depth) that
+# retains the leading thermobaric + cabbeling nonlinearities of the full
+# TEOS-10/EOS-80 forms while staying cheap and tunable.  Density anomaly:
+#
+#   zt = T - T0 ;  zs = S - S0 ;  zh = depth [m, positive down]
+#   zn = - a0 (1 + ½ λ1 zt + μ1 zh) zt        (temperature, thermobaric μ1)
+#        + b0 (1 - ½ λ2 zs - μ2 zh) zs        (salinity,    thermobaric μ2)
+#        - nu  zt zs                          (cabbeling)
+#   ρ  = ρ0 + zn
+#
+# Defaults are the Kamm et al. (2025) DINO coefficients (their Table /
+# DINO ``namelist_cfg`` &nameos): a0=0.165, b0=0.76554, λ1=0.06,
+# λ2=μ2=ν=0, μ1=1.4970e-4, T0=10 °C, S0=35 PSU, ρ0=1026 kg/m³ — i.e. a
+# linear-in-S, weakly-nonlinear-in-T state with a thermobaric term, used
+# as the NEMO oracle for the DINO ACC thermocline comparison.
+# ==============================================================================
+
+class NemoSEOSConfig(NamedTuple):
+    """Coefficients for the NEMO simplified EOS (Roquet et al. 2015).
+
+    ρ = ρ0 - a0(1 + ½λ1·zt + μ1·zh)·zt + b0(1 - ½λ2·zs - μ2·zh)·zs - ν·zt·zs
+    with zt = T - T0, zs = S - S0, zh = depth [m].
+
+    Defaults are the Kamm et al. (2025) DINO configuration.
+    """
+    rho0: float = 1026.0       # Reference (Boussinesq) density [kg/m³]
+    a0: float = 0.165          # Thermal contraction coefficient [kg/m³/K]
+    b0: float = 0.76554        # Haline contraction coefficient [kg/m³/PSU]
+    lambda1: float = 0.06      # T·T (cabbeling-in-T) coefficient [1/K]
+    lambda2: float = 0.0       # S·S (cabbeling-in-S) coefficient [1/PSU]
+    mu1: float = 1.4970e-4     # T thermobaric coefficient [1/m]
+    mu2: float = 0.0           # S thermobaric coefficient [1/m]
+    nu: float = 0.0            # T·S cabbeling coefficient [kg/m³/K/PSU]
+    T0: float = 10.0           # Reference temperature [°C]
+    S0: float = 35.0           # Reference salinity [PSU]
+
+
+def nemo_seos_eos(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p: jnp.ndarray,
+    cfg: NemoSEOSConfig | None = None,
+) -> jnp.ndarray:
+    """In-situ density from the NEMO simplified EOS (Roquet et al. 2015).
+
+    Mirrors NEMO ``eosbn2.F90`` (``np_seos``): the density anomaly ``zn``
+    is added to ``ρ0`` (NEMO stores ``prd = zn / ρ0``; ``ρ = ρ0(1+prd) =
+    ρ0 + zn``).  Depth enters via the Boussinesq hydrostatic relation
+    ``zh = p / (ρ0·g)`` (NEMO uses ``gdept`` in metres).
+
+    Pressure-vs-depth note: ``p`` is the SAME 3rd argument every legoESM EOS
+    takes — the dycore's hydrostatic pressure ``p = ∫ρg dz`` (positive,
+    increasing downward, eta-free in the baroclinic PGF path).  ``zh =
+    p/(ρ0·g)`` is therefore the Boussinesq reconstruction of geometric depth;
+    it equals NEMO's ``gdept`` to ``O(ρ'/ρ0) ≈ 0.3 %`` (the in-situ vs
+    reference-density difference).  For the DINO thermobaric term that ~12 m
+    depth error at 4000 m perturbs ``zn`` by ``~3e-3 kg/m³`` — negligible vs
+    the ~1 kg/m³ density signal, and in the physically correct direction (real
+    pressure, not geometric depth, sets compressibility).  This matches how
+    ``wright``/``unesco80``/``veros_*`` already consume ``p``.
+
+    Parameters
+    ----------
+    T : array — Potential temperature [°C].
+    S : array — Practical salinity [PSU].
+    p : array — Pressure [Pa]; depth recovered as ``p/(ρ0·g)``.
+    cfg : NemoSEOSConfig — Coefficients (defaults to the DINO set).
+
+    Returns
+    -------
+    array : In-situ density [kg/m³].
+    """
+    if cfg is None:
+        cfg = NemoSEOSConfig()
+    zt = T - cfg.T0
+    zs = S - cfg.S0
+    zh = p / (cfg.rho0 * constants.g)   # Boussinesq depth [m, positive down]
+    zn = (
+        -cfg.a0 * (1.0 + 0.5 * cfg.lambda1 * zt + cfg.mu1 * zh) * zt
+        + cfg.b0 * (1.0 - 0.5 * cfg.lambda2 * zs - cfg.mu2 * zh) * zs
+        - cfg.nu * zt * zs
+    )
+    return cfg.rho0 + zn
 
 
 # ==============================================================================
@@ -1465,12 +1562,31 @@ def veros_gsw_int_drhodTS_dynamic_enthalpy(
 # by both make_eos_fn (unknown-scheme ValueError) and config validators
 # (fail-fast at construction) so the valid set is never duplicated.
 VALID_EOS_SCHEMES = frozenset(
-    {"wright", "linear", "unesco80", "veros_nonlin2", "veros_nonlin3",
-     "veros_gsw"}
+    {"wright", "linear", "nemo_seos", "unesco80", "veros_nonlin2",
+     "veros_nonlin3", "veros_gsw"}
 )
 
 
+def _eos_compute_dtype_adapter(base_fn):
+    """Wrap an EOS ``(T,S,p)->rho`` that computes in its INPUT dtype so it also
+    accepts the ``compute_dtype`` kwarg (the opt-in f32-EOS lever): cast inputs to
+    ``compute_dtype``, run the polynomial, then restore the input dtype so the
+    STATE stays f64.  ``wright_eos`` instead honours ``compute_dtype`` natively
+    (it force-promotes to the precision-policy dtype, which input-casting alone
+    cannot override).  ``compute_dtype=None`` -> byte-identical to the bare EOS."""
+    def _wrapped(T, S, p, compute_dtype=None):
+        if compute_dtype is None:
+            return base_fn(T, S, p)
+        orig = jnp.result_type(T)
+        return base_fn(
+            T.astype(compute_dtype), S.astype(compute_dtype),
+            p.astype(compute_dtype),
+        ).astype(orig)
+    return _wrapped
+
+
 def make_eos_fn(eos="wright", eos_linear=None,
+                eos_nemo_seos: NemoSEOSConfig | None = None,
                 eos_veros_nonlin2: VerosNonlin2Config | None = None,
                 eos_veros_nonlin3: VerosNonlin3Config | None = None,
                 eos_veros_gsw: VerosGswConfig | None = None):
@@ -1479,7 +1595,10 @@ def make_eos_fn(eos="wright", eos_linear=None,
     Parameters
     ----------
     eos : str
-        ``"wright"`` (default, Wright 1997), ``"linear"``, or
+        ``"wright"`` (default, Wright 1997), ``"linear"``,
+        ``"nemo_seos"`` (NEMO simplified EOS, Roquet et al. 2015 —
+        the DINO oracle EOS, defaults to the Kamm et al. 2025
+        coefficients), or
         ``"unesco80"`` (UNESCO 1980 polynomial — close approximation
         to Veros's ``eq_of_state_type=3`` JM95 form, within ~0.001 kg/m³
         at typical ocean T/S; bit-exact Veros parity requires reading
@@ -1490,11 +1609,22 @@ def make_eos_fn(eos="wright", eos_linear=None,
     eos_linear : LinearEOSConfig or None
         Parameters for linear EOS.  Ignored unless *eos* is ``"linear"``.
         If ``None`` and *eos* is ``"linear"``, default parameters are used.
+    eos_nemo_seos : NemoSEOSConfig or None
+        Coefficients for the NEMO simplified EOS.  Ignored unless *eos*
+        is ``"nemo_seos"``.  If ``None``, the DINO defaults are used.
 
     Returns
     -------
     Callable[[array, array, array], array]
     """
+    # All returned callables accept ``fn(T, S, p, compute_dtype=None)`` — wright
+    # honours compute_dtype natively (it force-promotes via the policy); the
+    # input-dtype variants are wrapped by _eos_compute_dtype_adapter.  Default
+    # (compute_dtype=None) is byte-identical to the bare EOS.  NOTE: variants that
+    # internally re-promote to the policy dtype (``unesco80``, ``veros_*``) accept
+    # compute_dtype but it is a NO-OP for them (they keep policy precision — safe,
+    # just no f32 speedup); the validated f32 lever is the production default
+    # ``wright`` (and the genuinely input-dtype ``linear``).
     if eos == "wright":
         return wright_eos
     elif eos == "linear":
@@ -1505,24 +1635,29 @@ def make_eos_fn(eos="wright", eos_linear=None,
                 rho_ref=cfg.rho_ref, alpha_T=cfg.alpha_T,
                 beta_S=cfg.beta_S, T_ref=cfg.T_ref, S_ref=cfg.S_ref,
             )
-        return _linear
+        return _eos_compute_dtype_adapter(_linear)
+    elif eos == "nemo_seos":
+        cfg = eos_nemo_seos if eos_nemo_seos is not None else NemoSEOSConfig()
+        def _nemo_seos(T, S, p):
+            return nemo_seos_eos(T, S, p, cfg=cfg)
+        return _eos_compute_dtype_adapter(_nemo_seos)
     elif eos == "unesco80":
-        return unesco80_eos
+        return _eos_compute_dtype_adapter(unesco80_eos)
     elif eos == "veros_nonlin2":
         cfg = eos_veros_nonlin2 if eos_veros_nonlin2 is not None else VerosNonlin2Config()
         def _veros_nl2(T, S, p):
             return veros_nonlin2_eos(T, S, p, cfg=cfg)
-        return _veros_nl2
+        return _eos_compute_dtype_adapter(_veros_nl2)
     elif eos == "veros_nonlin3":
         cfg = eos_veros_nonlin3 if eos_veros_nonlin3 is not None else VerosNonlin3Config()
         def _veros_nl3(T, S, p):
             return veros_nonlin3_eos(T, S, p, cfg=cfg)
-        return _veros_nl3
+        return _eos_compute_dtype_adapter(_veros_nl3)
     elif eos == "veros_gsw":
         cfg = eos_veros_gsw if eos_veros_gsw is not None else VerosGswConfig()
         def _veros_gsw(T, S, p):
             return veros_gsw_eos(T, S, p, cfg=cfg)
-        return _veros_gsw
+        return _eos_compute_dtype_adapter(_veros_gsw)
     else:
         raise ValueError(
             f"Unknown EOS scheme: {eos!r}. Valid schemes: "

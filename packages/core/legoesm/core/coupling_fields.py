@@ -116,6 +116,16 @@ class TileResponse(NamedTuple):
     # zeros.  Always a populated array — pytree-uniform with
     # ``freshwater_flux``.
     salt_flux: jax.Array
+    # Radiative (emission-equivalent) skin temperature [K] for the LW boundary:
+    # the temperature T such that ``emissivity * sigma * T_rad^4`` equals THIS
+    # tile's actual upward LW emission.  For most tiles this is just the skin
+    # temperature, so it defaults to ``None`` and the blender falls back to
+    # ``T_sfc``.  The two-leaf canopy is the exception: it emits with the canopy
+    # column temperature ``surface_out.T_surface`` (so ``eps_col*sigma*T_rad^4 =
+    # LW_emit``) while reporting ``T_sfc = T_soil`` for the (linear) sensible-heat
+    # path — so it MUST set ``T_rad`` explicitly, else the tile blend would use
+    # the soil temperature and break LW conservation for vegetated cells.
+    T_rad: jax.Array | None = None
 
 
 class SurfaceToAtm(NamedTuple):
@@ -123,6 +133,17 @@ class SurfaceToAtm(NamedTuple):
     T_sfc: jax.Array
     albedo: jax.Array
     emissivity: jax.Array
+    # Radiative-equivalent surface temperature for the LW boundary.  Area-
+    # averaging T_sfc and emissivity INDEPENDENTLY does not conserve the upward
+    # LW flux of mixed land/ocean/ice cells (T^4 and eps*T^4 are nonlinear), so
+    # the tile blender derives T_rad from the area-weighted EMISSION FLUX:
+    # T_rad = (sum_i f_i*eps_i*sigma*T_i^4 / (eps_grid*sigma))^(1/4), with
+    # eps_grid = sum_i f_i*eps_i (= ``emissivity``).  The atmosphere LW boundary
+    # eps_grid*sigma*T_rad^4 + (1-eps_grid)*La then equals sum_i f_i*lw_up_i
+    # EXACTLY.  Equals T_sfc for single-tile (pure) cells.  ``T_sfc`` stays the
+    # area-weighted skin temperature for the (linear) sensible-heat / diagnostics
+    # paths; only radiation uses T_rad.
+    T_rad: jax.Array
     z0: jax.Array
     q_surface: jax.Array
     shflx: jax.Array
@@ -152,3 +173,23 @@ class SurfaceToAtm(NamedTuple):
     # Tile-blended salt mass flux to ocean [kg(salt)/m²/s, positive
     # = INTO ocean].  See ``TileResponse.salt_flux``.
     salt_flux: jax.Array
+    # River runoff sub-component of ``freshwater_flux`` [kg/m²/s, positive
+    # = INTO ocean] = ``f_land * land.freshwater_flux`` only.  Kept SEPARATE
+    # because a dynamic ocean depth-spreads river runoff over the top
+    # ``runoff_depth_spread_m`` metres (NEMO ``rn_dep_max``) while ocean P-E,
+    # ice melt and lake P-E stay at the top cell.  It is a subset of
+    # ``freshwater_flux`` (NOT additive) — the surface (top-cell) freshwater is
+    # ``freshwater_flux - river_runoff_flux``.  Zero for tiles/runs without land.
+    # APPENDED at the struct end so the positional pytree ABI of the prior 19
+    # fields is unchanged.
+    river_runoff_flux: jax.Array
+    # Surface (top-cell) NON-ocean freshwater sub-component of ``freshwater_flux``
+    # [kg/m²/s, +INTO ocean] = ice melt/freeze (f_water-weighted, F11) + lake P-E
+    # (f_lake-weighted).  Kept SEPARATE from ``river_runoff_flux`` because these
+    # are surface fluxes (NOT depth-spread) and SEPARATE from the ocean P-E so a
+    # consumer can keep ocean P-E CURRENT (it depends on the current SST) while
+    # lagging the land/ice/lake exchange one coupling sub-step.  Together
+    # ``river_runoff_flux + ice_lake_freshwater_flux`` is the full non-ocean
+    # freshwater = ``freshwater_flux - f_ocean*(ocean P-E)``; both are zero for an
+    # aquaplanet (no land/ice/lake tile).
+    ice_lake_freshwater_flux: jax.Array

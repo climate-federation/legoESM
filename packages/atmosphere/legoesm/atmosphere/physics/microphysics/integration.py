@@ -190,10 +190,24 @@ def _make_hydrostatic_microphysics(
     is_ml = scheme_name == "ml_emulator"
     _ml_model_cache = [None]
 
+    # Aerosol-CCN specified droplet number (Andreae 2009 AOD->CCN): active
+    # only for a specified-Nc scheme (predict_Nc=False) that exposes the
+    # ``nc_from_aerosol`` switch (currently Morrison).  When active the
+    # per-step traced ``forcing["aerosol_od"]`` fills ``hydrometeors.N_c``
+    # so the warm-rain KK2000 ``Nc^-1.79`` autoconversion (second indirect
+    # effect) sees the aerosol-driven number instead of the constant Nc_0 —
+    # the same fill the coupled (cube/lat-lon) physics_pipeline does.  This
+    # is the MPAS / hydrostatic combined-physics half of that wiring.
+    _nc_from_aerosol = bool(
+        getattr(scheme_config, "nc_from_aerosol", False)
+        and not getattr(scheme_config, "predict_Nc", False)
+    )
+
     def physics_fn(
         state: HydrostaticState,
         grid,
         sigma_coord: SigmaCoordinate,
+        forcing=None,
     ) -> HydrostaticTendencies:
         T = state.T.data
         p_s = state.p_s.data
@@ -282,6 +296,30 @@ def _make_hydrostatic_microphysics(
             N_i=_get_tracer("N_i"),
         )
 
+        # Aerosol-CCN specified-Nc fill.  Override the (dead-zeros, never
+        # evolved under predict_Nc=False) N_c carry with the per-column
+        # Andreae (2009) AOD->CCN diagnostic.  The override is unconditional
+        # on the N_c carry VALUE (the moisture registry always allocates an
+        # N_c slot for Morrison), mirroring the coupled physics_pipeline.
+        # Fail fast at trace time if the coupling is configured but no
+        # aerosol field was threaded — silently feeding zero N_c (-> Nc_0
+        # fallback) is exactly the silent no-op the cube path guards against.
+        if _nc_from_aerosol:
+            _aer_od = forcing.get("aerosol_od") if forcing is not None else None
+            if _aer_od is None:
+                raise ValueError(
+                    "nc_from_aerosol=True but no 'aerosol_od' was passed to "
+                    "the microphysics physics_fn via forcing — enable "
+                    "external aerosol forcing (--aerosol-forcing external) "
+                    "or disable --aerosol-ccn."
+                )
+            from legoesm.atmosphere.physics.microphysics.aerosol_activation import (  # noqa: E501
+                specified_nc_field,
+            )
+            hydrometeors = hydrometeors._replace(
+                N_c=specified_nc_field(jnp.asarray(_aer_od), (ncol, nlev)),
+            )
+
         if is_ml:
             if _ml_model_cache[0] is None:
                 key = jax.random.PRNGKey(scheme_config.seed)
@@ -318,6 +356,27 @@ def _make_hydrostatic_microphysics(
                          name="dq_g_dt_micro", dims=dims_3d, units="kg/kg/s"),
         }
 
+        # Double-moment number-concentration tendencies.  Emitted only for the
+        # prognostic number tracers the dycore actually carries (mirrors the
+        # _get_tracer input side); single-moment runs carry none, so the keys
+        # are absent.  Previously dropped here, so morrison/seifert_beheng/
+        # thompson number concentrations were never advected on the hydrostatic
+        # dycore even though the backend computes their tendencies (the
+        # nonhydrostatic/plane/MPAS/spectral adapters all propagate them).
+        # Units follow MicrophysicsOutput: N_c/N_r are per-VOLUME [1/(m^3 s)]
+        # (Seifert-Beheng), N_i is per-MASS [1/(kg s)] (Morrison/Thompson).
+        _num_tends = {
+            "N_c": (micro_out.dN_c_dt, "1/(m^3 s)"),
+            "N_r": (micro_out.dN_r_dt, "1/(m^3 s)"),
+            "N_i": (micro_out.dN_i_dt, "1/(kg s)"),
+        }
+        for _nname, (_ntend, _nunits) in _num_tends.items():
+            if state.tracers is not None and _nname in state.tracers:
+                tracer_tends[_nname] = Field(
+                    data=_ntend.reshape(shape_3d),
+                    name=f"d{_nname}_dt_micro", dims=dims_3d, units=_nunits,
+                )
+
         return HydrostaticTendencies(
             du_dt=Field(
                 data=jnp.zeros(u_shape, dtype=_state_dtype),
@@ -334,6 +393,13 @@ def _make_hydrostatic_microphysics(
         _ml_model_cache[0] = None
 
     physics_fn.reset_state = reset_state
+    # Advertise the per-step traced ``forcing`` dependency to the
+    # combined-physics accumulator ONLY when the aerosol-CCN fill is active
+    # (it reads ``forcing["aerosol_od"]``).  Left unset otherwise so a run
+    # without --aerosol-ccn is byte-identical (the accumulator calls the fn
+    # with the legacy 3-arg signature).
+    if _nc_from_aerosol:
+        physics_fn._wants_forcing = True
     return physics_fn
 
 

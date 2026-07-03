@@ -42,9 +42,9 @@ _GridT = Union[CubedSphereGrid, LatLonGrid]
 
 
 def ocean_global_sum(local_value):
-    """MPI-aware global sum for scalar or vector reductions.
+    """MPI- AND SPMD-aware global sum for scalar or vector reductions.
 
-    NOTE: this gates only on ``is_distributed()`` (the mpi4jax/sharded flag),
+    NOTE: the MPI gate keys on ``is_distributed()`` (the mpi4jax/sharded flag),
     whereas the MPAS twin :func:`legoesm.parallel.reductions.global_sum_if_distributed`
     also reduces when ``jax.process_count() > 1`` (JAX multi-host).  Under the
     ocean's actual MPI usage the two are identical (``is_distributed`` is set,
@@ -53,7 +53,32 @@ def ocean_global_sum(local_value):
     canonical helper is deliberately deferred until that path can be validated
     (single-rank vs MPI vs sharded), to avoid a silent reduction-semantics change
     in the conservation fixers.
+
+    SPMD (single-controller lat-band shard_map, route-B multi-GPU — no mpi4jax):
+    under the armed SPMD halo backend ``local_value`` is a PARTIAL sum over this
+    device's latitude band and MUST be reduced across the ``"lat"`` mesh axis
+    with ``jax.lax.psum`` — checked FIRST because ``is_distributed()`` is FALSE
+    for the SPMD ``DeviceConfig`` (it keeps ``is_distributed=False``), so the MPI
+    gate below would otherwise return each band's partial sum as the "global"
+    total and the conservation/eta-drift fixers (``fix_eta_drift``,
+    ``fix_volume``/``fix_heat``/``fix_salt``) would apply a per-band-wrong
+    correction (the same class of bug as the barotropic PCG's
+    ``_global_dot_batch``).  Keyed on the ``"lat"`` axis BY NAME so a coupled
+    cube-atm SPMD mesh (``("face", …)``, also backend=="spmd") falls through to
+    the MPI/local logic — ocean fields are never cube-sharded.  ``psum`` is
+    self-transposing ⇒ AD-safe, like ``allreduce(SUM)`` (CLAUDE.md).  The branch
+    is inert for the serial, MPI, and cube paths.
     """
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    if get_halo_backend() == "spmd":
+        mesh = get_spmd_mesh()
+        if mesh is None:
+            raise RuntimeError(
+                "ocean_global_sum: halo backend is 'spmd' but no SPMD mesh is "
+                "set; arm it via activate_latlon_spmd_halo(mesh).")
+        if "lat" in tuple(mesh.axis_names):
+            import jax
+            return jax.lax.psum(local_value, "lat")
     if is_distributed():
         return global_sum_mpi(local_value)
     return local_value
@@ -83,168 +108,6 @@ def _ocean_volume_sum(field_3d, h_k, mask, grid):
     h_k_acc = cast(h_k, _M, "accumulate")
     integrand = jnp.sum(field_acc * h_k_acc, axis=-1)  # depth-integrated (6,n,n)
     return _ocean_area_sum(integrand, mask, grid)
-
-
-def fix_volume_ocean(
-    state_new: _OceanStateT,
-    state_old: _OceanStateT,
-    grid: _GridT,
-    min_water_column_m: float | None = None,
-) -> _OceanStateT:
-    """Fix volume conservation via uniform eta correction.
-
-    Ensures global integral of eta * area is preserved.
-    """
-    _M = "ocean_diagnostics"
-    mask = state_old.land_mask.data
-    mask_acc = cast(mask, _M, "accumulate")
-    area_acc = cast(grid.area, _M, "accumulate")
-    weighted_area = mask_acc * area_acc
-    local_terms = jnp.stack([
-        jnp.sum(cast(state_old.eta.data, _M, "accumulate") * weighted_area),
-        jnp.sum(cast(state_new.eta.data, _M, "accumulate") * weighted_area),
-        jnp.sum(weighted_area),
-    ])
-    vol_old, vol_new, ocean_area = ocean_global_sum(local_terms)
-
-    correction = (vol_old - vol_new) / jnp.maximum(ocean_area, 1.0)
-    eta_candidate = state_new.eta.data + correction * mask
-    if min_water_column_m is not None:
-        if min_water_column_m <= 0.0:
-            raise ValueError(
-                f"min_water_column_m must be > 0, got {min_water_column_m!r}",
-            )
-        eta_floor = (
-            jnp.asarray(min_water_column_m, dtype=eta_candidate.dtype)
-            - state_new.H_bathy.data
-        )
-        eta_candidate = jnp.maximum(eta_candidate, eta_floor) * mask
-    eta_fixed = state_new.eta.replace(
-        data=eta_candidate,
-    )
-    return state_new._replace(eta=eta_fixed)
-
-
-def fix_heat_ocean(
-    state_new: _OceanStateT,
-    state_old: _OceanStateT,
-    grid: _GridT,
-    z_coord: OceanZStarCoordinate,
-    min_water_column_m: float | None = None,
-) -> _OceanStateT:
-    """Fix heat conservation via uniform T correction.
-
-    Ensures global integral of T * h_k * area is preserved.
-    """
-    _M = "ocean_diagnostics"
-    mask = state_old.land_mask.data
-
-    if min_water_column_m is not None and min_water_column_m <= 0.0:
-        raise ValueError(
-            f"min_water_column_m must be > 0, got {min_water_column_m!r}",
-        )
-
-    h_k_old = compute_layer_thickness(
-        state_old.eta.data,
-        state_old.H_bathy.data,
-        z_coord,
-        min_water_column_m=min_water_column_m,
-    )
-    h_k_new = compute_layer_thickness(
-        state_new.eta.data,
-        state_new.H_bathy.data,
-        z_coord,
-        min_water_column_m=min_water_column_m,
-    )
-
-    mask_acc = cast(mask, _M, "accumulate")
-    area_acc = cast(grid.area, _M, "accumulate")
-    weighted_area = mask_acc * area_acc
-    h_k_old_acc = cast(h_k_old, _M, "accumulate")
-    h_k_new_acc = cast(h_k_new, _M, "accumulate")
-    T_old_acc = cast(state_old.T.data, _M, "accumulate")
-    T_new_acc = cast(state_new.T.data, _M, "accumulate")
-    # Three column reductions share the level axis; stack their
-    # integrands and reduce once.  Then the area-weighted outer sum
-    # collapses to one ``jnp.sum`` over the horizontal axes.
-    _heat_inner = jnp.sum(
-        jnp.stack(
-            [T_old_acc * h_k_old_acc, T_new_acc * h_k_new_acc, h_k_new_acc],
-            axis=-1,
-        ),
-        axis=-2,
-    )
-    local_terms = jnp.sum(
-        _heat_inner * weighted_area[..., None],
-        axis=tuple(range(weighted_area.ndim)),
-    )
-    heat_old, heat_new, ocean_volume = ocean_global_sum(local_terms)
-    correction = (heat_old - heat_new) / jnp.maximum(ocean_volume, 1.0)
-
-    T_fixed = state_new.T.replace(
-        data=state_new.T.data + correction.astype(state_new.T.data.dtype) * mask[..., jnp.newaxis],
-    )
-    return state_new._replace(T=T_fixed)
-
-
-def fix_salt_ocean(
-    state_new: _OceanStateT,
-    state_old: _OceanStateT,
-    grid: _GridT,
-    z_coord: OceanZStarCoordinate,
-    min_water_column_m: float | None = None,
-) -> _OceanStateT:
-    """Fix salt conservation via uniform S correction.
-
-    Ensures global integral of S * h_k * area is preserved.
-    """
-    _M = "ocean_diagnostics"
-    mask = state_old.land_mask.data
-
-    if min_water_column_m is not None and min_water_column_m <= 0.0:
-        raise ValueError(
-            f"min_water_column_m must be > 0, got {min_water_column_m!r}",
-        )
-
-    h_k_old = compute_layer_thickness(
-        state_old.eta.data,
-        state_old.H_bathy.data,
-        z_coord,
-        min_water_column_m=min_water_column_m,
-    )
-    h_k_new = compute_layer_thickness(
-        state_new.eta.data,
-        state_new.H_bathy.data,
-        z_coord,
-        min_water_column_m=min_water_column_m,
-    )
-
-    mask_acc = cast(mask, _M, "accumulate")
-    area_acc = cast(grid.area, _M, "accumulate")
-    weighted_area = mask_acc * area_acc
-    h_k_old_acc = cast(h_k_old, _M, "accumulate")
-    h_k_new_acc = cast(h_k_new, _M, "accumulate")
-    S_old_acc = cast(state_old.S.data, _M, "accumulate")
-    S_new_acc = cast(state_new.S.data, _M, "accumulate")
-    # Same 3-into-1 fusion as the heat fixer.
-    _salt_inner = jnp.sum(
-        jnp.stack(
-            [S_old_acc * h_k_old_acc, S_new_acc * h_k_new_acc, h_k_new_acc],
-            axis=-1,
-        ),
-        axis=-2,
-    )
-    local_terms = jnp.sum(
-        _salt_inner * weighted_area[..., None],
-        axis=tuple(range(weighted_area.ndim)),
-    )
-    salt_old, salt_new, ocean_volume = ocean_global_sum(local_terms)
-    correction = (salt_old - salt_new) / jnp.maximum(ocean_volume, 1.0)
-
-    S_fixed = state_new.S.replace(
-        data=state_new.S.data + correction.astype(state_new.S.data.dtype) * mask[..., jnp.newaxis],
-    )
-    return state_new._replace(S=S_fixed)
 
 
 def conservation_fixer_core(

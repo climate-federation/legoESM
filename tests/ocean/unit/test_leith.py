@@ -92,11 +92,11 @@ class TestLeithConfig:
     """The two ocean configs must expose C_leith and C_leith_modified."""
 
     def test_latlon_config_has_leith_fields_default_off(self):
-        cfg = LatLonCGridOceanConfig()
-        assert hasattr(cfg, "C_leith")
-        assert hasattr(cfg, "C_leith_modified")
-        assert cfg.C_leith == 0.0
-        assert cfg.C_leith_modified is False
+        cfg = LatLonCGridOceanConfig.from_flat()
+        assert "C_leith" in cfg.flat_fields()  # #501: nested
+        assert "C_leith_modified" in cfg.flat_fields()  # #501: nested
+        assert cfg.lateral_viscosity.C_leith == 0.0
+        assert cfg.lateral_viscosity.C_leith_modified is False
 
     def test_mpas_config_has_leith_fields_default_off(self):
         cfg = MPASOceanConfig()
@@ -106,9 +106,9 @@ class TestLeithConfig:
         assert cfg.C_leith_modified is False
 
     def test_latlon_config_accepts_leith_override(self):
-        cfg = LatLonCGridOceanConfig(C_leith=1.5, C_leith_modified=True)
-        assert cfg.C_leith == 1.5
-        assert cfg.C_leith_modified is True
+        cfg = LatLonCGridOceanConfig.from_flat(C_leith=1.5, C_leith_modified=True)
+        assert cfg.lateral_viscosity.C_leith == 1.5
+        assert cfg.lateral_viscosity.C_leith_modified is True
 
 
 # ============================================================================

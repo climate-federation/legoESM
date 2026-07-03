@@ -15,7 +15,10 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from legoesm.land.canopy import photosynthesis as photo
 from legoesm.land.canopy.photosynthesis import (
+    _jmax25_over_vcmax25,
+    _rd_atkin,
     c3_photosynthesis,
     c4_photosynthesis,
     photosynthesis,
@@ -82,3 +85,53 @@ def test_photosynthesis_differentiable():
     g = jax.grad(loss)(jnp.array(60.0))
     assert jnp.isfinite(g)
     assert float(g) > 0.0  # more Vcmax => more An
+
+
+# ---------------------------------------------------------------------------
+# Canonical-FvCB structural checks (the ported DifferBESS bug fixes)
+# ---------------------------------------------------------------------------
+
+def test_rd25_equals_basal_fraction_no_double_count():
+    """Rd at 25 degC / TgC=25 == 0.015 * Vcmax25 (the double-count fix).
+
+    The old path used Rd = 0.015 * Vcmax(T) * rd_response(T), applying the
+    temperature response twice.  The canonical form bases Rd on Vcmax25 and a
+    response normalised to 1 at the reference state.
+    """
+    Vcmax25 = jnp.array(60.0)
+    Rd = _rd_atkin(jnp.array(298.15), jnp.array(25.0), Vcmax25)
+    assert jnp.allclose(Rd, 0.015 * Vcmax25, rtol=1e-6)
+
+
+def test_jmax_acclimation_ratio_kattge_knorr():
+    """Jmax25/Vcmax25 follows Kattge & Knorr 2007: 2.59 - 0.035*TgC."""
+    for tgc in (11.0, 20.0, 35.0):
+        ratio = _jmax25_over_vcmax25(jnp.array(tgc))
+        assert jnp.allclose(ratio, 2.59 - 0.035 * tgc, rtol=1e-6)
+    # cooler growth temperature => higher Jmax:Vcmax ratio
+    assert float(_jmax25_over_vcmax25(jnp.array(11.0))) > \
+        float(_jmax25_over_vcmax25(jnp.array(35.0)))
+
+
+def test_c4_uses_clm5_constants():
+    """C4 kinetics carry the CLM5-aligned constants (the b5e19e8/85bed3b fix)."""
+    assert photo._S2_C4 == 313.15      # high-T deactivation onset (was 309.15)
+    assert photo._S3_C4 == 0.2         # low-T inhibition slope (was 0.3)
+    assert photo._RD25_FRAC_C4 == 0.025  # Rd25/Vcmax25 (was fixed 0.8)
+    assert photo._ALPHA_C4 == 0.05     # quantum yield (was 0.067)
+
+
+def test_c3_electron_transport_jmax_bounded():
+    """At very high APAR the light-limited rate saturates (Jmax bound).
+
+    The old JE = alf*APAR grew without bound; the canonical Jmax-limited J
+    saturates, so doubling already-saturating light barely changes An.
+    """
+    base = dict(Tf=jnp.array(298.15), Ci=jnp.array(280.0),
+                Vcmax25=jnp.array(60.0), Ps=jnp.array(101325.0),
+                alf=jnp.array(0.3), TgC=jnp.array(20.0))
+    An_2000 = float(c3_photosynthesis(APAR=jnp.array(2000.0), **base))
+    An_4000 = float(c3_photosynthesis(APAR=jnp.array(4000.0), **base))
+    # Saturating: a 2x light increase yields < 5% more assimilation.
+    assert An_4000 >= An_2000
+    assert (An_4000 - An_2000) / An_2000 < 0.05

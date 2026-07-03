@@ -83,10 +83,13 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.core.field import Field
 from legoesm.grids.latlon import LatLonGrid, create_regional_latlon_grid
 from legoesm.ocean.constants_config import VEROS_CONSTANTS_CONFIG
-from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+from legoesm.ocean.fidelity.veros_global_common import (
+    build_veros_global_state,
+    veros_area_t_generic,
+)
+from legoesm.ocean.fidelity.veros_stepping import veros_faithful_stepping
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
@@ -422,8 +425,7 @@ def veros_area_t(yt_deg: np.ndarray,
                  ) -> np.ndarray:
     """Veros T-cell area column weights ``dxt·dyt·cost`` [m²] for the 4° grid
     (per-latitude; broadcast over x).  ``degtom = R_earth·π/180``."""
-    degtom = r_earth * np.pi / 180.0
-    return (DXT_DEG * degtom) * (DYT_DEG * degtom) * np.cos(np.deg2rad(yt_deg))
+    return veros_area_t_generic(yt_deg, DXT_DEG, DYT_DEG, r_earth)
 
 
 def get_periodic_interval_weights(time_s):
@@ -466,41 +468,12 @@ def build_global_4deg_state(
     seed at zero (Veros's zero-initialised eke_diss_iw / dtke[taum1]),
     keeping the ``lax.scan`` carry pytree constant.
     """
-    state = rest_state_latlon_cgrid_ocean(
-        grid, z_coord,
-        S_uniform=35.0, H_max=H_MAX,
-        land_mask_override=jnp.asarray(land_mask),
-        H_bathy_override=jnp.asarray(H_bathy),
+    return build_veros_global_state(
+        grid, z_coord, land_mask, H_bathy,
+        tke_config=GLOBAL4_TKE_CONFIG,
+        eke_config=GLOBAL4_EKE_CONFIG,
+        T_init=T_init, S_init=S_init,
     )
-    is_active = jnp.asarray(z_coord.is_active, dtype=state.T.data.dtype)
-    if T_init is not None:
-        state = state._replace(
-            T=state.T.replace(data=jnp.asarray(T_init) * is_active))
-    if S_init is not None:
-        state = state._replace(
-            S=state.S.replace(data=jnp.asarray(S_init) * is_active))
-
-    lm = state.land_mask.data
-    dtype = state.T.data.dtype
-    wet3 = (lm[:, :, jnp.newaxis] > 0.5) * jnp.ones((1, 1, NZ - 1), dtype=dtype)
-
-    # Prognostic TKE + its superbee-advection AB2 history.
-    tke0 = GLOBAL4_TKE_CONFIG.tke_background * wet3
-    state = state._replace(
-        tke=Field(data=tke0, name="tke", dims=("lat", "lon", "level"),
-                  units="m^2/s^2"),
-        dtke=Field(data=jnp.zeros_like(tke0), name="dtke",
-                   dims=("lat", "lon", "level"), units="m^2/s^3"),
-    )
-    # Prognostic 3-D EKE + the eke_diss carry (TKE source_eke_diss reads it).
-    eke0 = GLOBAL4_EKE_CONFIG.e_min * wet3
-    state = state._replace(
-        eke=Field(data=eke0, name="eke", dims=("lat", "lon", "level"),
-                  units="m^2/s^2"),
-        eke_diss=Field(data=jnp.zeros_like(eke0), name="eke_diss",
-                       dims=("lat", "lon", "level"), units="m^2/s^3"),
-    )
-    return state
 
 
 # ---------------------------------------------------------------------------
@@ -540,7 +513,7 @@ def build_global_4deg_model_config() -> LatLonCGridOceanConfig:
     (same Veros core ⇒ same options; see the module docstring 'DOCUMENTED
     CHOICE') with the global_4deg parameter deltas (A_h, GM/Redi, dt ratio,
     gsw EOS, zero bottom drag)."""
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         g=VEROS_CONSTANTS_CONFIG.g,
         rho_0=VEROS_CONSTANTS_CONFIG.rho_0,
         constants=VEROS_CONSTANTS_CONFIG,
@@ -561,12 +534,10 @@ def build_global_4deg_model_config() -> LatLonCGridOceanConfig:
         gm_redi=GLOBAL4_GM_REDI_CONFIG,
         surface_forcing_implicit=True,              # Veros source placement
         # ---- Veros-faithful time stepping (matched-ACC stack, baked in) ----
-        outer_integrator="ab2",
-        ab2_scope="advective",
-        barotropic_solver="rigid_lid",
-        dt_mom_ratio=DT_MOM_RATIO,                  # 48 (dt arg IS dt_tracer)
-        momentum_friction_additive=True,
-        coriolis_scheme="explicit_ab2",             # |f|·dt_mom ≈ 0.26 @78°
+        # Shared bundle via veros_stepping.veros_faithful_stepping (#433);
+        # dt_mom_ratio=DT_MOM_RATIO=48 (dt arg IS dt_tracer; |f|·dt_mom ≈ 0.26 @78°).
+        **veros_faithful_stepping(with_surface_forcing=True,
+                                  dt_mom_ratio=DT_MOM_RATIO),
         physics=build_global_4deg_physics_config(),
     )
 

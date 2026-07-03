@@ -138,6 +138,19 @@ class SFNOPrimitiveEquationModel:
                 "to a tendency. Use mode='state_update', or supply dedicated "
                 "tendency-output stats (not yet wired)."
             )
+
+        # Mirror the U-Cast PE bridge guard: these flags are advertised but
+        # NOT wired in ``_apply_conservation`` (moisture is a spectral tracer
+        # that would need synthesis, clipping/correction and re-analysis, which
+        # reintroduces Gibbs ringing — left as a follow-up).  Refuse loudly
+        # rather than silently ignore a requested correction.
+        if self.config.correct_moisture_budget or self.config.clip_q:
+            raise NotImplementedError(
+                "correct_moisture_budget / clip_q are not yet wired in the "
+                "SFNO PE bridge (moisture is a spectral tracer needing "
+                "synthesis, correction and re-analysis). Leave both False; "
+                "correct_mass is applied."
+            )
         # ``use_normalization`` without stats would silently skip (de)normalisation
         # (see ``_step_state_update`` / ``_sfno_tendency``), so a normalised
         # checkpoint could run on raw PE channels and emit wrongly-scaled states.
@@ -189,7 +202,7 @@ class SFNOPrimitiveEquationModel:
             )
 
         # Post-hoc conservation corrections
-        if self.config.correct_mass or self.config.correct_moisture_budget:
+        if self.config.correct_mass:
             new_state = self._apply_conservation(new_state, state)
 
         return new_state
@@ -242,7 +255,7 @@ class SFNOPrimitiveEquationModel:
                 lambda s, t: s + dt * t, new_state, phys_tend
             )
 
-        if self.config.correct_mass or self.config.correct_moisture_budget:
+        if self.config.correct_mass:
             new_state = self._apply_conservation(new_state, state)
 
         return new_state
@@ -310,7 +323,7 @@ class SFNOPrimitiveEquationModel:
         — left as a follow-up.  ``correct_moisture_budget`` / ``clip_q`` default
         to ``False`` so the configuration is truthful.
         """
-        if not (self.config.correct_mass or self.config.correct_moisture_budget):
+        if not self.config.correct_mass:
             return new_state
 
         grid = self.grid
@@ -321,13 +334,12 @@ class SFNOPrimitiveEquationModel:
         p_s_new = jnp.exp(lnps_new)
         p_s_old = jnp.exp(lnps_old)
 
-        if self.config.correct_mass:
-            p_s_new = correct_dry_air_mass(p_s_new, p_s_old, grid)
-            lnps_new = jnp.log(jnp.maximum(p_s_new, 1.0))
-            lnps_hat = sh_analysis(grid, lnps_new.astype(jnp.float64))
-            new_state = new_state._replace(
-                lnps_hat=new_state.lnps_hat.replace(data=lnps_hat)
-            )
+        p_s_new = correct_dry_air_mass(p_s_new, p_s_old, grid)
+        lnps_new = jnp.log(jnp.maximum(p_s_new, 1.0))
+        lnps_hat = sh_analysis(grid, lnps_new.astype(jnp.float64))
+        new_state = new_state._replace(
+            lnps_hat=new_state.lnps_hat.replace(data=lnps_hat)
+        )
 
         return new_state
 

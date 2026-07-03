@@ -1,0 +1,11 @@
+# DINO MPAS regional Voronoi — original clean 90-day run (10-day snapshots),
+# the first stable MPAS deliverable after the mesh-gen + equatorial fixes.
+# Reproduce: JAX_ENABLE_X64=1 python scripts/run/run_dino.py \
+#                --config scripts/experiment/dino/prev_mpas_90d.yaml
+grid: mpas
+days: 90
+snapshot_every_days: 10
+mpas_resolution_km: 97.0
+mpas_eq_visc_boost: 8.0
+vmix: kpp                 # original deliverable used KPP (pre-TKE-switch)
+output_dir: results/dino_mpas_90d_boost8

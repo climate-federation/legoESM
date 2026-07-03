@@ -66,37 +66,6 @@ def make_small_planet_cubed_sphere(
     )
 
 
-def make_small_planet_latlon(
-    n_lat: int,
-    n_lon: int | None = None,
-    factor: float = DEFAULT_SCALE_FACTOR,
-    **kwargs,
-):
-    """Lat-lon grid with R/Ω scaled by ``factor``."""
-    from legoesm.grids.latlon import create_latlon_grid
-    return create_latlon_grid(
-        n_lat, n_lon,
-        radius=scaled_radius(factor),
-        omega=scaled_omega(factor),
-        **kwargs,
-    )
-
-
-def make_small_planet_voronoi(
-    subdivision_level: int,
-    factor: float = DEFAULT_SCALE_FACTOR,
-    **kwargs,
-):
-    """MPAS Voronoi mesh with R/Ω scaled by ``factor``."""
-    from legoesm.grids.voronoi import create_voronoi_mesh
-    return create_voronoi_mesh(
-        subdivision_level,
-        radius=scaled_radius(factor),
-        omega=scaled_omega(factor),
-        **kwargs,
-    )
-
-
 def make_small_planet_gaussian(
     n_max: int,
     factor: float = DEFAULT_SCALE_FACTOR,

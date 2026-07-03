@@ -20,9 +20,36 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
+# Ocean fp64 policy: production ocean runs use it, which makes ``create_latlon_grid``
+# store float64 metrics.  Without it the grid keeps float32 metrics and the two
+# v-face-metric paths drift at the float32 level (``vface_zonal_cos_lat`` upcasts
+# to float64, the inline coupling-pieces ``jnp.cos`` stays float32 → ~1e-8), making
+# the bit-consistency check below spuriously fail.  Under fp64 they agree to ~5e-16.
+from legoesm.core.precision import (  # noqa: E402
+    PrecisionPolicy,
+    get_policy,
+    set_policy,
+)
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _fp64_precision_policy():
+    """Pin the legoESM precision policy to fp64 per test, restoring on teardown.
+
+    The metrics/coupling consistency check needs fp64 (see the module comment).
+    Set it via a RESTORING fixture rather than at module import so the global
+    policy does not leak into sibling modules sharing the xdist worker.
+    """
+    _prev = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        yield
+    finally:
+        set_policy(_prev)
 
 from legoesm.timestepping.tridiagonal import cyclic_thomas_batched
 from legoesm.grids.latlon import create_latlon_grid
@@ -159,7 +186,7 @@ def test_unknown_preconditioner_refuses():
     from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
         _select_preconditioner,
     )
-    assert (LatLonCGridOceanConfig().barotropic_implicit_preconditioner
+    assert (LatLonCGridOceanConfig.from_flat().barotropic.barotropic_implicit_preconditioner
             == "jacobi")
     grid, H_u, H_v, coeff, mask, _, _ = _setup(coastal=False)
     inv_diag = _helmholtz_inv_diag(H_u, H_v, coeff, grid, mask)

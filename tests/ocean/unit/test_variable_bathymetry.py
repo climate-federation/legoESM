@@ -176,7 +176,7 @@ class TestStepBathymetryRestState:
         )
         # All ocean (no land mask), uniform T(z) and S → density depends
         # only on z → no horizontal pressure gradient anywhere → du/dt = 0.
-        cfg = LatLonCGridOceanConfig()
+        cfg = LatLonCGridOceanConfig.from_flat()
         tend = latlon_cgrid_ocean_baroclinic_tendencies(
             state, grid, z_coord, cfg,
         )
@@ -198,7 +198,7 @@ class TestStepBathymetryRestState:
         )
         # Use implicit-CN solver to avoid chequerboard and barotropic
         # substepping artefacts (the validated production path).
-        cfg = LatLonCGridOceanConfig(barotropic_solver="implicit_cn")
+        cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="implicit_cn")
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         s = state
         for _ in range(24):  # 24 × 3600 s = 1 sim-day
@@ -289,7 +289,7 @@ class TestSmoothBathymetryTracerConservation:
             state.S.data, h0, grid.area,
         )
         # Step
-        cfg = LatLonCGridOceanConfig(barotropic_solver="implicit_cn")
+        cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="implicit_cn")
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         s = state
         for _ in range(24):
@@ -326,7 +326,7 @@ class TestSmoothBathymetryTracerConservation:
             H_bathy_override=H_bathy,
         )
         col0 = state.eta.data + state.H_bathy.data
-        cfg = LatLonCGridOceanConfig(barotropic_solver="implicit_cn")
+        cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="implicit_cn")
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         s = state
         for _ in range(6):

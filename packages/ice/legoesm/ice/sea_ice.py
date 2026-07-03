@@ -63,7 +63,7 @@ from legoesm.ice.state import (
 from legoesm.surface_albedo import ice_albedo as compute_ice_albedo
 
 
-def _grid_supports_ice_dynamics(grid) -> bool:
+def grid_supports_ice_dynamics(grid) -> bool:
     """True when ``grid`` has implemented sea-ice dynamics/transport ops.
 
     Sea-ice dynamics (EVP/mEVP via ``strain_rates`` + ``stress_divergence``)
@@ -74,11 +74,19 @@ def _grid_supports_ice_dynamics(grid) -> bool:
     would otherwise crash with an ``AttributeError`` deep inside the EVP /
     FV kernels.  Function-scoped imports keep ``legoesm.ice`` importable in
     isolation (no eager ``legoesm.grids`` dependency at module load).
+
+    Public so an external coupler driver can pick a supported dynamics scheme
+    (or fall back to ``free_drift``) before calling :func:`step_sea_ice`.
     """
     from legoesm.grids.cubed_sphere import CubedSphereGrid
     from legoesm.grids.latlon import LatLonGrid
     from legoesm.grids.voronoi import VoronoiMesh
     return isinstance(grid, (CubedSphereGrid, LatLonGrid, VoronoiMesh))
+
+
+# Backward-compatible private alias (internal call sites below + any importer
+# predating the public promotion).
+_grid_supports_ice_dynamics = grid_supports_ice_dynamics
 
 
 def _base_spatial_ndim(grid):
@@ -206,6 +214,11 @@ def step_sea_ice(
         raise ValueError(
             f"dynamics={config.dynamics!r} requires a grid argument. "
             "Pass grid=<CubedSphereGrid> to step_sea_ice()."
+        )
+    if config.transport not in ("none", "advect"):
+        raise ValueError(
+            f"Unknown sea-ice transport scheme: {config.transport!r}. "
+            "Expected one of: 'none', 'advect'."
         )
     if config.transport == "advect" and grid is None:
         raise ValueError(
@@ -1625,12 +1638,21 @@ def _thermo_v2(
     sw_absorbed = sw_result.sw_absorbed_surface
     sw_penetrated = sw_result.sw_penetrated
 
-    # Longwave net.
+    # Longwave net (gray-radiation surface BC; positive = into surface).
+    # Upward LW = thermal emission + reflected downwelling:
+    #   lw_up = e*sigma*T^4 + (1-e)*lw_down.
+    # Net LW at the skin is the full downwelling minus the full upwelling,
+    #   lw_net = lw_down - lw_up = e*lw_down - e*sigma*T^4,
+    # i.e. (absorbed downwelling) - (emitted).  Writing it as
+    #   e*lw_down - lw_up
+    # double-removes the reflected (1-e)*lw_down term (already inside lw_up),
+    # under-counting lw_net by (1-e)*lw_down (~8 W/m^2 at e=0.97).  This
+    # matches core.surface_radiation_fluxes used by _thermo_single.
     lw_up = (
         config.emissivity_ice * constants.sigma_sb * T_ice ** 4
         + (1.0 - config.emissivity_ice) * forcing.lw_down
     )
-    lw_net = config.emissivity_ice * forcing.lw_down - lw_up
+    lw_net = forcing.lw_down - lw_up
     # Q_sfc is the net heat available at the surface skin.
     Q_sfc = sw_absorbed + lw_net - shflx - lhflx
 
@@ -1685,9 +1707,19 @@ def _thermo_v2(
     # energy is under-counted by the conductive term and heat is lost.
     excess_W = jnp.maximum(T_trial - config.T_melt_surface, 0.0) * (cap_dt + K_cond)
     energy_for_melt = excess_W * dt  # [J/m²]
-    h_snow_after_melt, h_after_melt, snow_melt_m, ice_melt_m = consume_from_snow_then_ice(
+    (
+        h_snow_after_melt, h_after_melt, snow_melt_m, ice_melt_m,
+        surface_melt_unconsumed_J,
+    ) = consume_from_snow_then_ice(
         energy_for_melt, h_snow, h, config.snow.rho_snow, config.rho_ice, config.L_f,
     )
+    # Surplus surface-melt energy left after the column fully ablated [J/m^2,
+    # per-ice-area].  It must warm the ocean mixed layer (finding #6): convert
+    # to a per-grid-cell flux and CREDIT the ocean below (negative contribution
+    # to ocean_heat_extraction, whose +sign means ocean LOSES heat to the ice).
+    # Weighted by the INPUT ``conc`` (the same ice-area snapshot used for
+    # ``F_ocean * conc`` and the penetrated-SW channel).
+    surface_melt_ocean_gain = surface_melt_unconsumed_J / dt * conc  # [W/m^2]
 
     # 6. Basal exchange (ocean side).  After clipping ``h`` at zero
     #    we recover the *actual* basal mass change so the FW + salt
@@ -2060,6 +2092,10 @@ def _thermo_v2(
     ocean_heat_extraction = (
         F_ocean * conc * ocean_heat_scale
         + delta_V_lead_freeze * config.rho_ice * config.L_f / dt
+        # Surplus surface-melt heat from a melt-out step warms the ocean
+        # (ocean GAINS -> NEGATIVE extraction); previously this energy was
+        # dropped on the floor (finding #6).
+        - surface_melt_ocean_gain
     )
 
     # Pack diagnostics for the caller.
@@ -2350,6 +2386,12 @@ def _step_dynamic_v2(
         # any concentration history without a 1/conc normalisation (F11).
         sum_conc_pre = jnp.sum(conc_pre, axis=-1, keepdims=False)
         sum_conc_post = jnp.sum(conc, axis=-1, keepdims=False)
+        # ``sum_conc_safe`` (== max(pre, post)) is the LATENT basis only: it
+        # matches the single-cat ``conc_basis`` contract so resp.lhflx *
+        # max(pre,post) == L_s * sublim_mass_total identically across paths
+        # (sublim_mass_total is on the INPUT-conc basis).  The SH/STRESS
+        # numerators are kept per-grid-cell and divided by ``conc_agg`` at the
+        # response build (findings #9 + #4), NOT by this latent basis.
         sum_conc_safe = jnp.maximum(
             jnp.maximum(sum_conc_pre, sum_conc_post), 1e-30,
         )
@@ -2366,11 +2408,20 @@ def _step_dynamic_v2(
         sw_pen_total = jnp.sum(jnp.stack(sw_pen_list, axis=-1), axis=-1)
         ocean_heat_total = ocean_heat_total - sw_pen_total
 
-        # Atmosphere-coupler fluxes stay PER-ICE-TILE (blend_tiles re-multiplies
-        # by the post-step ``f_ice``): the atmosphere sees the instantaneous
-        # surface, so the post-step fraction is the right weight.  Stored
-        # already concentration-weighted, then normalised by the ice fraction.
-        shflx_resp = jnp.sum(jnp.stack(shflx_aggsum_components, axis=-1), axis=-1) / sum_conc_safe
+        # Atmosphere-coupler SH / stress: keep the PER-GRID-CELL numerators
+        # (Sum_k flux_k * conc_post_k) here and defer the per-ice-tile division
+        # to the response build, where it is divided by ``conc_agg`` -- the SAME
+        # aggregated concentration ``f_ice`` later multiplies by.  This makes the
+        # delivered flux ``shflx_resp * f_ice`` recover the per-cell total
+        # EXACTLY even when ITD remap / ridging change the aggregate area between
+        # the thermo step and the response (findings #9 + #4).  ``sum_conc_post``
+        # equals ``conc_agg`` only when no area-changing ridging fires.
+        shflx_pergrid_num = jnp.sum(
+            jnp.stack(shflx_aggsum_components, axis=-1), axis=-1)
+        tau_x_pergrid_num = jnp.sum(
+            jnp.stack(tau_x_components, axis=-1), axis=-1)
+        tau_y_pergrid_num = jnp.sum(
+            jnp.stack(tau_y_components, axis=-1), axis=-1)
         # LATENT: derive the per-ice-area latent from the REALIZED sublimation
         # MASS (same INPUT-conc basis as ``sublim_mass_total``), NOT from the
         # post-thermo conc-weighted result["lhflx"] -- otherwise melt/retreat/
@@ -2378,8 +2429,6 @@ def _step_dynamic_v2(
         # resp.lhflx*sum_conc == L_s*sublim_mass_total (codex).  This keeps the
         # atmosphere latent ENERGY paired to the moisture MASS on one basis.
         lhflx_resp = constants.L_s * sublim_mass_total / sum_conc_safe
-        tau_x_resp = jnp.sum(jnp.stack(tau_x_components, axis=-1), axis=-1) / sum_conc_safe
-        tau_y_resp = jnp.sum(jnp.stack(tau_y_components, axis=-1), axis=-1) / sum_conc_safe
 
     else:
         result = _thermo_v2(
@@ -2528,6 +2577,14 @@ def _step_dynamic_v2(
     # ---- 7. Build response ----
     if is_multicat:
         h_agg, T_agg, conc_agg = aggregate_state(h, T_ice, conc)
+        # Per-ice-tile SH / stress: divide the per-grid-cell numerators by the
+        # FINAL aggregated concentration (the one ``f_ice`` multiplies by), so
+        # ``resp * f_ice`` recovers the per-cell total exactly even after ITD
+        # remap / ridging changed the aggregate area (findings #9 + #4).
+        conc_agg_safe = jnp.maximum(conc_agg, 1e-30)
+        shflx_resp = shflx_pergrid_num / conc_agg_safe
+        tau_x_resp = tau_x_pergrid_num / conc_agg_safe
+        tau_y_resp = tau_y_pergrid_num / conc_agg_safe
     else:
         h_agg, T_agg, conc_agg = h, T_ice, conc
 
@@ -2536,17 +2593,35 @@ def _step_dynamic_v2(
         config.emissivity_ice * constants.sigma_sb * T_agg ** 4
         + (1.0 - config.emissivity_ice) * forcing.lw_down
     )
-    # Aggregate albedo (use compute_ice_sw on aggregated state for
-    # diagnostic — matches what the atmosphere will see).
-    sw_agg = compute_ice_sw(
-        forcing.sw_down, T_agg, h_agg,
-        jnp.sum(h_snow * conc, axis=-1) / jnp.maximum(conc_agg, 1e-12) if is_multicat else h_snow,
-        jnp.sum(pond_area * conc, axis=-1) / jnp.maximum(conc_agg, 1e-12) if is_multicat else pond_area,
-        jnp.sum(pond_depth * conc, axis=-1) / jnp.maximum(conc_agg, 1e-12) if is_multicat else pond_depth,
-        scheme=config.shortwave_scheme,
-        albedo_const=config.albedo_ice,
-    )
-    alpha_resp = sw_agg.albedo_eff
+    # Tile albedo the atmosphere sees.  ``maykut_untersteiner`` and
+    # ``delta_eddington`` are NONLINEAR in thickness / snow / pond state, so
+    # evaluating the albedo on the AREA-AGGREGATED state (α(mean state)) is NOT
+    # the area-mean albedo (mean(α_k)) in multi-category mode — a thin+thick mix
+    # biased the tile albedo by tens of W/m² (e.g. 0.5/0.5 area, h=[0.05, 2.0]:
+    # MU 0.700 vs the correct 0.461 → ~72 W/m² at SW=300; codex finding).
+    # Compute the SW kernel PER CATEGORY and area-weight the resulting albedo so
+    # the coupler's f_ice blend receives the physically correct mean reflectance.
+    # The ``constant`` scheme is linear in state so per-cat == aggregate (the
+    # weighted mean of a constant is the constant); this fix is exact for it too.
+    if is_multicat:
+        sw_cat = compute_ice_sw(
+            forcing.sw_down[..., None], T_ice, h,
+            h_snow, pond_area, pond_depth,
+            scheme=config.shortwave_scheme,
+            albedo_const=config.albedo_ice,
+        )
+        alpha_resp = (
+            jnp.sum(sw_cat.albedo_eff * conc, axis=-1)
+            / jnp.maximum(conc_agg, 1e-12)
+        )
+    else:
+        sw_agg = compute_ice_sw(
+            forcing.sw_down, T_agg, h_agg,
+            h_snow, pond_area, pond_depth,
+            scheme=config.shortwave_scheme,
+            albedo_const=config.albedo_ice,
+        )
+        alpha_resp = sw_agg.albedo_eff
 
     # Ice → ocean back-reaction stress.  Per-ice-tile (no ``* conc_agg``):
     # blend_tiles applies the single area weight ``f_ice``.  F11.

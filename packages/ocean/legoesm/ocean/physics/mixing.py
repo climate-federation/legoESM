@@ -21,6 +21,46 @@ from legoesm.ocean.vertical import OceanZStarCoordinate
 # Default explicit-diffusion CFL safety factor (numerics).
 _CFL_SAFETY_DEFAULT = 0.45
 
+
+def flux_divergence_zero_flux(
+    flux: jnp.ndarray,
+    dz_safe: jnp.ndarray,
+) -> jnp.ndarray:
+    """Vertical flux divergence at full levels with zero-flux boundary
+    conditions at the surface and bottom (#518 item 4).
+
+    ``dq/dt[k] = (F[k-1/2] - F[k+1/2]) / dz[k]`` with ``F = 0`` above the
+    surface and below the seafloor.  This is the SINGLE divergence core shared
+    by the three ``K·dq/dz`` vertical zero-flux diffusion stencils:
+
+    * ``vertical_diffusion`` (scalar coeff) and
+    * ``vertical_diffusion_variable_K`` (array K) — both here in ``mixing.py``;
+    * ``mpas_integration._vertical_diffusion_edge_partial`` (actual edge
+      thicknesses).
+
+    ``lateral_mixing._gm_redi_common.vertical_flux_divergence`` is NOT routed
+    here: its flux is a rotated GM/Redi tensor flux (not ``K·dq/dz``) AND it
+    builds the surface ghost via ``jnp.pad`` (``0 - F[0]``), which differs from
+    the three diffusion sites' explicit ``-F[0]`` by a sign-of-zero when
+    ``F[0]`` is exactly ``+0.0`` — so merging it would break byte identity.
+
+    The dry-cell floor is the CALLER's responsibility: each site computes its
+    own ``dz_safe`` (``where(dz>0, dz, 1.0)`` for the z* sites, ``max(h_e, 1.0)``
+    for the partial-cell edge site) and passes the already-floored thickness
+    here, so the divergence is byte-identical to each original inline triad.
+
+    ``flux`` is the interior-interface flux (shape ``(..., nlev-1)``);
+    ``dz_safe`` is the full-level thickness (shape ``(..., nlev)``).  The
+    explicit ``concatenate([top, interior, bottom])`` triad is reproduced
+    bit-for-bit (``top = -flux[..., :1]``, NOT a padded ``0 - flux[0]``, to
+    preserve the surface sign-of-zero).
+    """
+    top = -flux[..., :1] / dz_safe[..., :1]
+    interior = (flux[..., :-1] - flux[..., 1:]) / dz_safe[..., 1:-1]
+    bottom = flux[..., -1:] / dz_safe[..., -1:]
+    return jnp.concatenate([top, interior, bottom], axis=-1)
+
+
 def laplacian_viscosity_3d(
     field_3d: jnp.ndarray,
     grid: CubedSphereGrid,
@@ -139,13 +179,9 @@ def vertical_diffusion(
     df_dz = (field_safe[..., :-1] - field_safe[..., 1:]) / dz_half_safe
     flux = coeff_eff * df_dz  # (..., nlev-1)
 
-    # Tendency at full levels: d(flux)/dz with zero-flux BCs.
-    # Using concatenate avoids scatter updates (better JIT lowering and
-    # no mixed-dtype scatter edge cases on strict x64 runs).
-    top = -flux[..., :1] / dz_safe[..., :1]  # surface: flux_above = 0
-    interior = (flux[..., :-1] - flux[..., 1:]) / dz_safe[..., 1:-1]
-    bottom = flux[..., -1:] / dz_safe[..., -1:]  # bottom: flux_below = 0
-    tend = jnp.concatenate([top, interior, bottom], axis=-1)
+    # Tendency at full levels: d(flux)/dz with zero-flux BCs (shared kernel,
+    # #518 item 4).  ``dz_safe`` carries this site's where(dz>0, dz, 1.0) floor.
+    tend = flux_divergence_zero_flux(flux, dz_safe)
     return jnp.where(dz > 0.0, tend, 0.0)
 
 
@@ -226,8 +262,7 @@ def vertical_diffusion_variable_K(
     df_dz = (field_safe[..., :-1] - field_safe[..., 1:]) / dz_half_safe
     flux = K_half * df_dz  # (..., nlev-1)
 
-    top = -flux[..., :1] / dz_safe[..., :1]
-    interior = (flux[..., :-1] - flux[..., 1:]) / dz_safe[..., 1:-1]
-    bottom = flux[..., -1:] / dz_safe[..., -1:]
-    tend = jnp.concatenate([top, interior, bottom], axis=-1)
+    # Zero-flux divergence (shared kernel, #518 item 4); dz_safe carries this
+    # site's where(dz>0, dz, 1.0) floor.
+    tend = flux_divergence_zero_flux(flux, dz_safe)
     return jnp.where(dz > 0.0, tend, 0.0)

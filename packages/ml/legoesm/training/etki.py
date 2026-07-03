@@ -1,7 +1,7 @@
 """Ensemble Transform Kalman Inversion (ETKI) — minimal in-repo optimizer.
 
 The gradient-free calibration method of the GEOMETRIC campaign
-(``docs/planning/geometric_calibration_campaign.md`` §5.2): Iglesias et al.
+(``docs/dev-notes/planning/geometric_calibration_campaign.md`` §5.2): Iglesias et al.
 (2013) Ensemble Kalman Inversion in the transform variant of Huang et al.
 (2022), exactly as used by Perezhogin, Adcroft & Zanna (arXiv:2604.06398,
 their Eqs. 4-7). API mirrors ``EnsembleKalmanProcesses.jl`` (ensemble in,

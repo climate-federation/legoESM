@@ -204,8 +204,14 @@ class TrainablePhysicsParams(eqx.Module):
                     dtype=param_dtype,
                 )
             elif c.transform == "softplus":
+                # Overflow-safe inverse softplus: log(exp(y)-1) = y + log1p(-exp(-y)).
+                # The naive ``float(log(exp(default)-1))`` overflows to inf for
+                # default >~ 700 (even in fp64) — large timescales / lengths /
+                # concentrations — seeding the trained leaf with inf. Mirrors
+                # ``param_collector._seed_raw``.
+                y = max(float(default), 1e-6)
                 raw[c.name] = jnp.array(
-                    float(jnp.log(jnp.exp(default) - 1.0)),
+                    y + float(jnp.log1p(-jnp.exp(-y))),
                     dtype=param_dtype,
                 )
             else:

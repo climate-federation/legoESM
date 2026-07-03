@@ -114,7 +114,12 @@ _EMANUEL_CHI_B = 122.0
 _LCL_SIGMOID_WIDTH_PA = 200.0
 _DBO_ENTRAIN_COEFF = 2.0e-4
 _STRICT_INDEX_SHARPNESS = 20.0
+# Cloud-base mass-flux scale [kg/m^2/s] for the smooth "convecting column"
+# activation indicator ``σ(M_b / scale)`` (~1 when M_b>0).  Numerics smoothing
+# width, not a tunable closure; M_b magnitudes are O(0.01-0.1) kg/m^2/s.
+_MB_ACTIVE_SCALE_KG_M2_S = 1.0e-3
 _EPMAX_DEFAULT = 0.999
+_TETENS_MIN_VALID_K = 180.0
 
 class EmanuelMixingOutput(NamedTuple):
     """Output of :func:`emanuel_mixing_tendencies` (surface-LAST).
@@ -135,6 +140,11 @@ class EmanuelMixingOutput(NamedTuple):
     m_profile : jax.Array, shape (ncol, nlev)
         Per-level updraught mixing mass flux M(i) [kg/m^2/s],
         surface-FIRST, for diagnostics.
+    convective_layer_mask : jax.Array, shape (ncol, nlev)
+        Smooth pressure-mass mask for the Emanuel conservation pass,
+        surface-LAST.  It is one from the source layer through ``INB`` and
+        zero above cloud top, matching CONVECT's ``DO I=1,INB`` enthalpy
+        correction loop.
     """
 
     dT_dt: jax.Array
@@ -142,6 +152,7 @@ class EmanuelMixingOutput(NamedTuple):
     dq_c_conv_dt: jax.Array
     ment: jax.Array
     m_profile: jax.Array
+    convective_layer_mask: jax.Array
 
 
 def _safe_ratio(num, den, floor):
@@ -193,7 +204,12 @@ def _oracle_qsat(T, p):
     gradient alive near ``es → p`` (mirrors ``saturation_mixing_ratio``).
     """
     eps = constants.epsilon
-    es = saturation_vapor_pressure(T)
+    # The Emanuel TLIFT Newton solve can generate very cold parcel guesses
+    # in inactive upper-column branches.  Tetens has a pole near 29.65 K;
+    # clipping to the standard atmospheric low-temperature floor keeps those
+    # inactive diagnostics finite without changing physical tropospheric levels.
+    T_safe = jnp.maximum(T, _TETENS_MIN_VALID_K)
+    es = saturation_vapor_pressure(T_safe)
     denom = jax.nn.softplus(p - es * (1.0 - eps) - 1.0) + 1.0
     return eps * es / denom
 
@@ -848,10 +864,13 @@ def emanuel_mixing_tendencies(
     # Zero out tendencies outside the convecting column (where M_b≈0 the
     # whole matrix is ≈0, so this is automatic; we add an explicit gate on
     # the in-cloud + sub-cloud region for safety).
-    active_col = jax.nn.sigmoid(M_b / 1e-3)[:, None]  # ~1 when M_b>0; coeff-ok: activation smoothing
+    active_col = jax.nn.sigmoid(M_b / _MB_ACTIVE_SCALE_KG_M2_S)[:, None]  # ~1 when M_b>0
     ft = ft * active_col
     fq = fq * active_col
     dqc = dqc * active_col
+    ents_mask = jax.nn.sigmoid(
+        level_window_sharpness * (inb_frac - levels)
+    ) * active_col
 
     # ---- Reverse back to surface-LAST and return -----------------------
     return EmanuelMixingOutput(
@@ -860,4 +879,5 @@ def emanuel_mixing_tendencies(
         dq_c_conv_dt=dqc[:, ::-1],
         ment=MENT,            # surface-first (i,j) for diagnostics
         m_profile=m_i,        # surface-first
+        convective_layer_mask=ents_mask[:, ::-1],
     )

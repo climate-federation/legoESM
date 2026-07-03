@@ -38,6 +38,8 @@ References
 
 from __future__ import annotations
 
+import os
+
 import jax
 import jax.numpy as jnp
 
@@ -48,6 +50,40 @@ from legoesm.timestepping.tridiagonal import (
 )
 
 _EPS = float(jnp.finfo(jnp.float32).eps)  # ~1.19e-7
+
+
+def _vmix_f32_solve_enabled(dtype) -> bool:
+    """Mixed-precision opt-in (``LEGOESM_VMIX_F32_SOLVE=1``): run the
+    backward-Euler vertical-diffusion Thomas solve in f32 WORK precision while
+    keeping the f64 STATE — the codex / Oceananigans / NeuralGCM "f32 work,
+    f64 state/reductions" pattern.  The implicit ``(1 - dt·∂zK∂z)`` matrix is
+    diagonally dominant; its 2-norm condition is ``≈1+4r`` with the diffusion
+    number ``r = dt·K/dz²`` (codex emulation: rel/mass err ``~6e-7`` at hourly
+    dt with stiff ``K=0.1, dz=1`` ``r≈360 cond≈1.4e3``; degrades to ``~9e-5`` at
+    ``dt=86400`` ``cond≈3.4e4`` — DD does NOT by itself prove well-conditioned at
+    large dt, so f32 is acceptable at sub-daily ocean dt but the column-mass
+    correction below makes conservation exact regardless).  GPU-only BENEFIT
+    (RTX8000 f64 = 1/32 f32 throughput); on CPU/x86 f32 is a measured SLOWDOWN
+    (dtype churn, job 8500033), so OPT-IN, default OFF, f64-state-gated.  Covers
+    the single + pair (shared-factor T+S) paths; the BATCHED variant
+    (``LEGOESM_VMIX_BATCHED=1``) is NOT covered — f32 has no effect there."""
+    return (dtype == jnp.float64
+            and os.environ.get("LEGOESM_VMIX_F32_SOLVE", "0") == "1")
+
+
+def _restore_column_mass(x: jax.Array, field: jax.Array,
+                         dz: jax.Array) -> jax.Array:
+    """f64 column-mean conservation correction after an f32 WORK solve.
+
+    The f32 Thomas solve leaves a tiny (``~1e-6`` relative) ``dz``-weighted
+    mass residual that the cast-back to f64 does NOT remove (codex finding 3).
+    Add the uniform per-column shift that restores ``Σ(x·dz) == Σ(field·dz)``
+    exactly in f64 (the diffusion has zero-flux BCs, so the column integral is
+    invariant).  Cheap (one f64 column sum) and mass-exact; the shift is
+    ``~1e-6`` of the field so it is physically negligible.  All inputs f64."""
+    w = jnp.broadcast_to(dz, x.shape)
+    deficit = jnp.sum((field - x) * w, axis=-1, keepdims=True)
+    return x + deficit / jnp.sum(w, axis=-1, keepdims=True)
 
 
 def implicit_vertical_diffusion_ocean(
@@ -108,6 +144,11 @@ def implicit_vertical_diffusion_ocean(
         return field
 
     a, b, c, d = _build_implicit_tridiag(field, K, dz, dz_half, dt)
+    if _vmix_f32_solve_enabled(field.dtype):
+        f32 = jnp.float32
+        x = thomas_solve(a.astype(f32), b.astype(f32), c.astype(f32),
+                         d.astype(f32)).astype(field.dtype)
+        return _restore_column_mass(x, field, dz)
     return thomas_solve(a, b, c, d)
 
 
@@ -150,6 +191,19 @@ def implicit_vertical_diffusion_ocean_pair(
         return field_1, field_2
 
     a, b, c, d1 = _build_implicit_tridiag(field_1, K, dz, dz_half, dt)
+    # BOTH fields must be f64 (codex finding 1): keying only off field_1 would
+    # force a f32 field_2 through the f32-work path, violating the helper's
+    # "no-op if state already f32" contract + the shared-solver mixed-dtype
+    # faithfulness tests.
+    if (_vmix_f32_solve_enabled(field_1.dtype)
+            and field_2.dtype == jnp.float64):
+        f32 = jnp.float32
+        x1, x2 = thomas_solve_shared(
+            a.astype(f32), b.astype(f32), c.astype(f32),
+            (d1.astype(f32), field_2.astype(f32)))
+        x1 = _restore_column_mass(x1.astype(field_1.dtype), field_1, dz)
+        x2 = _restore_column_mass(x2.astype(field_2.dtype), field_2, dz)
+        return x1, x2
     x1, x2 = thomas_solve_shared(a, b, c, (d1, field_2))
     return x1, x2
 

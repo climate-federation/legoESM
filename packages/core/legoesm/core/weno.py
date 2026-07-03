@@ -283,7 +283,6 @@ def _compute_betas_right(f: list, k: int, beta_table: tuple) -> list:
 
 def _reconstruct_left(coeffs: tuple, f: list) -> list:
     """Left-biased reconstructions. Sub-stencil r uses f[r:r+k]."""
-    len(coeffs[0])
     return [sum(c * f[r + j] for j, c in enumerate(cs))
             for r, cs in enumerate(coeffs)]
 
@@ -334,6 +333,26 @@ def _weno_z_core(f: list, order: int, epsilon: float) -> tuple:
 #  Public API
 # ===================================================================
 
+def _weno_z_shifted(f: list, order: int, epsilon: float) -> tuple:
+    """Run :func:`_weno_z_core`, common-shifting the stencil by its central value
+    in FLOAT32 for numerical conditioning.
+
+    The reconstruction is affine-consistent (each sub-stencil's coefficients sum to
+    1) and the smoothness indicators β depend only on DIFFERENCES, so subtracting a
+    per-point constant ``ref`` from every stencil value and adding it back to the
+    reconstructions is EXACT (shift-invariant). For a large-mean / small-fluctuation
+    field (e.g. θ≈265 K with O(0.1 K) eddies) the raw-value squared differences in β
+    catastrophically cancel in float32 → NaN; forming β from O(fluctuation) values
+    fixes it. Applied ONLY in float32 so the float64 path stays BIT-IDENTICAL (no
+    regression); float64 has the precision to not need it."""
+    if jnp.result_type(f[0]) == jnp.float32:
+        ref = f[len(f) // 2]                       # central stencil value (per point)
+        fc = [x - ref for x in f]
+        fp, fm = _weno_z_core(fc, order, epsilon)
+        return fp + ref, fm + ref
+    return _weno_z_core(f, order, epsilon)
+
+
 def weno5_z(
     stencil: list | tuple,
     epsilon: float | None = None,
@@ -351,13 +370,16 @@ def weno5_z(
     -------
     (f_plus, f_minus) : tuple of arrays
         Left-biased and right-biased reconstructions at face i+1/2.
+
+    Float32 is common-shifted by the central stencil value for conditioning (exact;
+    see :func:`_weno_z_shifted`); float64 is bit-identical to the unshifted core.
     """
     f = list(stencil)
     if len(f) != 6:
         raise ValueError(f"WENO5 requires 6 stencil values, got {len(f)}")
     if epsilon is None:
         epsilon = _default_eps(f[0])
-    return _weno_z_core(f, 5, epsilon)
+    return _weno_z_shifted(f, 5, epsilon)
 
 
 def weno7_z(
@@ -383,7 +405,7 @@ def weno7_z(
         raise ValueError(f"WENO7 requires 8 stencil values, got {len(f)}")
     if epsilon is None:
         epsilon = _default_eps(f[0])
-    return _weno_z_core(f, 7, epsilon)
+    return _weno_z_shifted(f, 7, epsilon)
 
 
 def weno9_z(
@@ -409,7 +431,7 @@ def weno9_z(
         raise ValueError(f"WENO9 requires 10 stencil values, got {len(f)}")
     if epsilon is None:
         epsilon = _default_eps(f[0])
-    return _weno_z_core(f, 9, epsilon)
+    return _weno_z_shifted(f, 9, epsilon)
 
 
 # ===================================================================
@@ -475,6 +497,78 @@ def weno_reconstruct_split(
     return f_plus, f_minus
 
 
+def weno_reconstruct_split2(
+    phi_stencil: list | tuple,
+    psi1_stencil: list | tuple,
+    psi2_stencil: list | tuple,
+    order: int = 5,
+    epsilon: float | None = None,
+) -> tuple:
+    """Dual-smoothness WENO-Z reconstruction {phi; (psi1, psi2)} matching
+    Oceananigans' ``VelocityStencil`` (weno_interpolants.jl ``beta_sum``).
+
+    Computes the smoothness betas from *both* psi1 and psi2 (typically the
+    two velocity components interpolated to the reconstruction nodes),
+    AVERAGES the betas per sub-stencil ``β = (β₁ + β₂) / 2``, forms ONE
+    weight set, and does ONE reconstruction of *phi*.
+
+    This is the faithful form of Silvestri et al. (2024) Eq. 43.  It is
+    NOT the same as averaging two independent reconstructions
+    ``0.5·(recon(β₁) + recon(β₂))`` — because the WENO-Z weights are
+    nonlinear in β, ``ω((β₁+β₂)/2) ≠ (ω(β₁)+ω(β₂))/2``.  Averaging the
+    reconstructions dilutes the implicit dissipation when one component is
+    rough (2Δx) but the other smooth, letting the grid mode grow; averaging
+    the betas (this function) preserves the upwind dissipation.
+
+    Parameters
+    ----------
+    phi_stencil : sequence of arrays
+        Stencil values of the field to reconstruct (e.g. vorticity ζ).
+    psi1_stencil, psi2_stencil : sequence of arrays
+        Stencil values of the two smoothness fields.  Same length as phi.
+    order : {5, 7, 9}
+    epsilon : float, optional
+
+    Returns
+    -------
+    (f_plus, f_minus) : tuple of arrays
+        Left-biased and right-biased reconstructions of *phi* at i+1/2.
+    """
+    phi = list(phi_stencil)
+    psi1 = list(psi1_stencil)
+    psi2 = list(psi2_stencil)
+    if order not in _CONFIGS:
+        raise ValueError(f"Unsupported WENO order {order}; must be 5, 7, or 9")
+    recon_l, recon_r, beta_l_tab, beta_r_tab, copt, k = _CONFIGS[order]
+    expected_len = 2 * k
+    for name, seq in (("phi", phi), ("psi1", psi1), ("psi2", psi2)):
+        if len(seq) != expected_len:
+            raise ValueError(
+                f"WENO{order} requires {expected_len} {name} stencil values, "
+                f"got {len(seq)}")
+    if epsilon is None:
+        epsilon = _default_eps(phi[0])
+
+    # Betas from each smoothness field, then per-sub-stencil average
+    # (Oceananigans beta_sum: (β₁ + β₂)/2).
+    betas_l_1 = _compute_betas_left(psi1, k, beta_l_tab)
+    betas_l_2 = _compute_betas_left(psi2, k, beta_l_tab)
+    betas_r_1 = _compute_betas_right(psi1, k, beta_r_tab)
+    betas_r_2 = _compute_betas_right(psi2, k, beta_r_tab)
+    betas_l = [0.5 * (b1 + b2) for b1, b2 in zip(betas_l_1, betas_l_2)]
+    betas_r = [0.5 * (b1 + b2) for b1, b2 in zip(betas_r_1, betas_r_2)]
+
+    w_l = _weno_z_weights(betas_l, copt, _tau_z(betas_l), epsilon)
+    w_r = _weno_z_weights(betas_r, copt, _tau_z(betas_r), epsilon)
+
+    rec_l = _reconstruct_left(recon_l, phi)
+    rec_r = _reconstruct_right(recon_r, phi, k)
+
+    f_plus = sum(w * r for w, r in zip(w_l, rec_l))
+    f_minus = sum(w * r for w, r in zip(w_r, rec_r))
+    return f_plus, f_minus
+
+
 # ===================================================================
 #  Convenience: upwind flux from left/right reconstructions
 # ===================================================================
@@ -522,10 +616,13 @@ def point_to_cellavg_periodic(f, axis, order=6):
         Point values at cell centers.
     axis : int
         Axis along which to apply the conversion (periodic).
-    order : {4, 6}
+    order : {4, 6, 8}
         Accuracy order of the conversion.
         4: 3-point stencil (sufficient for WENO3)
-        6: 5-point stencil (sufficient for WENO5/7)
+        6: 5-point stencil (sufficient for WENO5)
+        8: 7-point stencil (sufficient for WENO7/9 — needed so the W9V
+           reconstruction is not bottlenecked to 6th order; Silvestri et al.
+           2024 W9V-vs-W5V effective-resolution distinction depends on it)
 
     Returns
     -------
@@ -539,7 +636,7 @@ def point_to_cellavg_periodic(f, axis, order=6):
         # 3-point: f_avg = (11/12)*f + (1/24)*(f_{-1} + f_{+1})
         # Matches moments p=0,2; 4th-order accurate.
         return (11.0 / 12.0) * f + (1.0 / 24.0) * (fm1 + fp1)
-    else:
+    elif order <= 6:
         # 5-point: f_avg = (863/960)*f + (77/1440)*(f_{±1}) - (17/5760)*(f_{±2})
         # Matches moments p=0,2,4; 6th-order accurate.
         fm2 = jnp.roll(f, 2, axis=axis)
@@ -547,6 +644,19 @@ def point_to_cellavg_periodic(f, axis, order=6):
         return ((863.0 / 960.0) * f
                 + (77.0 / 1440.0) * (fm1 + fp1)
                 - (17.0 / 5760.0) * (fm2 + fp2))
+    else:
+        # 7-point: matches even moments p=0,2,4,6; 8th-order accurate.
+        # Symmetric coeffs solved from the cell-average Taylor moments and
+        # verified exact for polynomials up to degree 7:
+        #   c0=215641/241920, c1=6361/107520, c2=-281/53760, c3=367/967680.
+        fm2 = jnp.roll(f, 2, axis=axis)
+        fp2 = jnp.roll(f, -2, axis=axis)
+        fm3 = jnp.roll(f, 3, axis=axis)
+        fp3 = jnp.roll(f, -3, axis=axis)
+        return ((215641.0 / 241920.0) * f
+                + (6361.0 / 107520.0) * (fm1 + fp1)
+                - (281.0 / 53760.0) * (fm2 + fp2)
+                + (367.0 / 967680.0) * (fm3 + fp3))
 
 
 def point_to_cellavg_bounded(f, axis, order=6):
@@ -562,7 +672,7 @@ def point_to_cellavg_bounded(f, axis, order=6):
         Point values at cell centers.
     axis : int
         Axis along which to apply the conversion (bounded).
-    order : {4, 6}
+    order : {4, 6, 8}
         Accuracy order of the conversion in the interior.
 
     Returns
@@ -571,7 +681,7 @@ def point_to_cellavg_bounded(f, axis, order=6):
         Cell-average values (same shape as f).
     """
     n = f.shape[axis]
-    pad_width = {4: 1, 6: 2}.get(order, 2)
+    pad_width = {4: 1, 6: 2, 8: 3}.get(order, 3)
 
     def _pad_neumann(arr, width):
         slc_lo = [slice(None)] * arr.ndim

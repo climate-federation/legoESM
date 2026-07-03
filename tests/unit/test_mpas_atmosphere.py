@@ -178,6 +178,15 @@ class TestMPASHydrostaticPE(unittest.TestCase):
         self.assertLess(float(jnp.max(jnp.abs(tend.du_dt.data))), 1e-3)
         self.assertLess(float(jnp.max(jnp.abs(tend.dp_s_dt.data))), 1e-1)
 
+    def test_unknown_pv_scheme_raises(self):
+        """A typo in ``pv_scheme`` must raise, not silently select the
+        energy-conserving PV flux."""
+        bad = self.config._replace(pv_scheme="bogus")
+        with self.assertRaisesRegex(ValueError, "Unknown pv_scheme"):
+            mpas_hydrostatic_tendencies(
+                self.state_pert, self.mesh, self.sigma, bad,
+            )
+
     def test_model_step(self):
         """Model.step() produces finite state."""
         model = MPASPrimitiveEquationModel(
@@ -611,6 +620,16 @@ class TestMPASNonHydrostaticCE(unittest.TestCase):
         self.assertTrue(jnp.all(jnp.isfinite(tend.dw_dt.data)))
         self.assertTrue(jnp.all(jnp.isfinite(tend.dtheta_prime_dt.data)))
         self.assertTrue(jnp.all(jnp.isfinite(tend.drho_prime_dt.data)))
+
+    def test_unknown_pv_scheme_raises(self):
+        """A typo in ``pv_scheme`` must raise, not silently select the
+        energy-conserving PV flux."""
+        bad = self.config._replace(pv_scheme="bogus")
+        with self.assertRaisesRegex(ValueError, "Unknown pv_scheme"):
+            mpas_compressible_euler_slow_tendencies(
+                self.state_pert, self.mesh, self.height_coord,
+                self.terrain_metric, bad,
+            )
 
     def test_model_step(self):
         """Model.step() produces finite state."""

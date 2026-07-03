@@ -59,8 +59,8 @@ __param_spec__ = {
         },
         "params": {
             "Gamma": {"units": "1", "bounds": (0.066, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "St Laurent (2002) tidal mixing", "shape": None},
-            "K_max": {"units": "1", "bounds": (0.00165, 0.015), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "St Laurent (2002) tidal mixing", "shape": None},
-            "h_decay_m": {"units": "1", "bounds": (165.0, 1500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "St Laurent (2002) tidal mixing", "shape": None},
+            "K_max": {"units": "m^2/s", "bounds": (0.00165, 0.015), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "St Laurent (2002) tidal mixing", "shape": None},
+            "h_decay_m": {"units": "m", "bounds": (165.0, 1500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "St Laurent (2002) tidal mixing", "shape": None},
             "q_local": {"units": "1", "bounds": (0.11, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "St Laurent (2002) tidal mixing", "shape": None},
         },
     },

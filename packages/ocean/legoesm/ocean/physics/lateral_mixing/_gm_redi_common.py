@@ -21,6 +21,19 @@ from legoesm.ocean.vertical import OceanZStarCoordinate
 
 EPS = float(jnp.finfo(jnp.float32).eps)  # ~1.19e-7
 
+# Division / stable-stratification guard shared by ALL four GM/Redi + MLE
+# variants (#518 item 11).  Used as ``1/max(x, EPS_DIV)`` and the negative
+# stratification floor ``min(drho/dz, -EPS_DIV)``.  Unified to 1e-10 (the value
+# the validated lat-lon GM/Redi + both MLE paths already used): it bounds the
+# reciprocal at 1e10 so the fp64 backward pass cannot overflow into pathological
+# gradients, and it is the stable-strat slope floor those paths are tuned to.
+# This REPLACES gm_redi_mpas's prior 1e-30 (a copy-paste drift — its own code
+# comment said it "mirrors lat-lon convention", yet lat-lon is 1e-10; the 1e-30
+# stratification floor let near-neutral MPAS columns build ~1e10x larger raw
+# slopes than lat-lon before tapering).  NOT byte-identical for gm_redi_mpas by
+# design — this is the bugfix the issue asks for.
+EPS_DIV = 1e-10
+
 
 # ---------------------------------------------------------------------------
 # DM95 slope tapering
@@ -180,7 +193,12 @@ def vertical_flux_divergence(
     -------
     tendency : array (..., nlev)
     """
-    # Single Pad HLO op (replaces alloc-zeros + concatenate of three).
+    # NOT routed through ``mixing.flux_divergence_zero_flux`` (#518 item 4): the
+    # GM/Redi flux ``F_z`` is a rotated isoneutral tensor flux (off-diagonal
+    # S_x·dq/dx terms), NOT a simple K·dq/dz, AND this site builds the surface
+    # ghost via ``jnp.pad`` (``0 - F_z[0]``), which differs from the diffusion
+    # sites' explicit ``-F_z[0]`` by a sign-of-zero when ``F_z[0]`` is +0.0.
+    # Keeping the original pad form preserves byte identity here.
     pad_axes = ((0, 0),) * (F_z.ndim - 1)
     F_z_ext = jnp.pad(F_z, (*pad_axes, (1, 1)))
     return (F_z_ext[..., :-1] - F_z_ext[..., 1:]) / jnp.maximum(dz_actual, eps)

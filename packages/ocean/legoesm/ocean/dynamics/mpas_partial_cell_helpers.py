@@ -1,7 +1,7 @@
 """Topography-aware metric helpers for MPAS partial bottom cells.
 
 P2 of the MPAS realistic-geometry plan (see
-``docs/ocean_experiments/realistic_geometry_mpas_plan.md``). These
+``docs/ocean/experiments/realistic_geometry_mpas_plan.md``). These
 helpers give the partial-cell versions of the continuity, momentum,
 and PV-flux operators their per-edge / per-vertex thickness inputs
 and active-cell masks.
@@ -396,7 +396,7 @@ def density_jacobian_pgf_smc03_mpas(
     References
     ----------
     Shchepetkin & McWilliams (2003), JGR Oceans 108(C9), §4.
-    See ``docs/ocean_experiments/density_jacobian_pgf_mpas.md`` for
+    See ``docs/ocean/experiments/density_jacobian_pgf_mpas.md`` for
     the port design and validation phases.
     """
     # Local import — avoid pulling SMC03 into this module's import

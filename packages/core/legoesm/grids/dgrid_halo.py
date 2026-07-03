@@ -634,7 +634,6 @@ def pad_halo_dgrid_vector_4d_replicated_mpi(u_d_full, v_d_full, topology):
             f"Expected 6 faces; got u {tuple(u_d_full.shape)}, "
             f"v {tuple(v_d_full.shape)}"
         )
-    u_d_full.shape[1]
     # Slice to owned faces.
     idx = jnp.asarray(list(topology.local_face_ids), dtype=jnp.int32)
     u_local = u_d_full[idx]

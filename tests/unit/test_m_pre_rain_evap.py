@@ -156,6 +156,29 @@ def test_nsubr_removes_rain_number_during_evaporation():
     assert delta == pytest.approx(-evap * N_r / q_r, rel=1e-6)
 
 
+def test_bulk_rain_evap_scheme_runs():
+    """The legacy ``rain_evap_scheme="bulk"`` branch (number-blind
+    ``evap_coeff·subsat·q_r^0.525``) must still evaluate to a finite,
+    evaporative (dq_v >= 0 in subsaturated air) tendency — it is the
+    non-default dispatch branch and was previously unexercised."""
+    qsat = float(saturation_mixing_ratio(jnp.asarray(290.0), jnp.asarray(9.0e4)))
+    z = jnp.zeros((1, 1))
+    hm = HydrometeorState(
+        q_c=z, q_r=jnp.full((1, 1), 1.0e-3), q_i=z, q_s=z, q_g=z,
+        N_c=z, N_r=jnp.full((1, 1), 1.0e4), N_i=z,
+    )
+    out = morrison_microphysics(
+        jnp.full((1, 1), 290.0), jnp.full((1, 1), 0.8 * qsat), hm,
+        jnp.full((1, 1), 9.0e4), jnp.full((1, 2), 9.0e4),
+        jnp.full((1, 1), 1.08), jnp.full((1, 1), 300.0), 20.0,
+        MorrisonConfig(rain_evap_scheme="bulk"),
+    )
+    assert jnp.all(jnp.isfinite(out.dq_v_dt))
+    assert jnp.all(jnp.isfinite(out.dq_r_dt))
+    # Subsaturated air over rain ⇒ net vapour source (rain evaporates).
+    assert float(out.dq_v_dt[0, 0]) >= 0.0
+
+
 def test_unknown_rain_evap_scheme_raises():
     """The morrison dispatcher rejects an unknown scheme."""
     qsat = float(saturation_mixing_ratio(jnp.asarray(290.0), jnp.asarray(9.0e4)))

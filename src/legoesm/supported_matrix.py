@@ -92,6 +92,13 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.atmosphere.dynamics.compressible_euler_mpas",
     ),
 
+    # -- U-cast (unstructured-cast hydrostatic primitive equations) --
+    SolverEntry(
+        "atmosphere", "hydrostatic", "u_cast",
+        "ucast_primitive_equations", "UCastPrimitiveEquationModel",
+        "legoesm.atmosphere.dynamics.ucast_pe",
+    ),
+
     # -- Lat-lon C-grid (FV) --
     SolverEntry(
         "atmosphere", "shallow_water", "latlon_cgrid",
@@ -143,7 +150,7 @@ OCEAN_MATRIX: tuple[SolverEntry, ...] = (
     # NOTE: spectral ocean is unsupported — land boundary handling in
     # spectral space causes Gibbs ringing and unreliable masking.
     # Kept for reference; not included in the ocean test matrix.
-    # See https://github.com/gentine/legoESM/issues/99
+    # See https://github.com/climate-federation/legoESM/issues/99
     SolverEntry(
         "ocean", "hydrostatic", "spectral_gaussian",
         "spectral", "SpectralOceanModel",
@@ -169,99 +176,6 @@ OCEAN_MATRIX: tuple[SolverEntry, ...] = (
 
 SUPPORTED_MATRIX = ATMOSPHERE_MATRIX + OCEAN_MATRIX
 
-
-# =====================================================================
-# Alias → canonical mapping (atmosphere)
-# =====================================================================
-
-#: Names that silently resolve to a canonical solver.  Each key is a
-#: (location, alias_name) and the value is (canonical_name, reason).
-ATMOSPHERE_DEPRECATED_ALIASES: dict[str, tuple[str, str]] = {
-    # --- Class names ---
-    "ShallowWaterModel": (
-        "CDGridShallowWaterModel",
-        "Use CDGridShallowWaterModel explicitly.",
-    ),
-    "PrimitiveEquationModel": (
-        "CDGridPrimitiveEquationModel",
-        "Use CDGridPrimitiveEquationModel explicitly.",
-    ),
-    "PrimitiveEquationConfig": (
-        "CDGridPrimitiveEquationConfig",
-        "Use CDGridPrimitiveEquationConfig explicitly.",
-    ),
-    "CompressibleEulerModel": (
-        "CDGridCompressibleEulerModel",
-        "Use CDGridCompressibleEulerModel explicitly.",
-    ),
-    "FVShallowWaterModel": (
-        "CDGridShallowWaterModel",
-        "The FV cubed-sphere solver is CDGridShallowWaterModel.",
-    ),
-    "FVPrimitiveEquationModel": (
-        "CDGridPrimitiveEquationModel",
-        "The FV cubed-sphere solver is CDGridPrimitiveEquationModel.",
-    ),
-    "FVCompressibleEulerModel": (
-        "CDGridCompressibleEulerModel",
-        "The FV cubed-sphere solver is CDGridCompressibleEulerModel.",
-    ),
-    "FVPrimitiveEquationConfig": (
-        "CDGridPrimitiveEquationConfig",
-        "The FV cubed-sphere config is CDGridPrimitiveEquationConfig.",
-    ),
-    "FVCompressibleEulerConfig": (
-        "CDGridCompressibleEulerConfig",
-        "The FV cubed-sphere config is CDGridCompressibleEulerConfig.",
-    ),
-    "CGShallowWaterCubedModel": (
-        "CDGridShallowWaterModel",
-        "The C-grid cubed-sphere solver is CDGridShallowWaterModel.",
-    ),
-    "CGPrimitiveEquationModel": (
-        "CDGridPrimitiveEquationModel",
-        "The C-grid cubed-sphere solver is CDGridPrimitiveEquationModel.",
-    ),
-    "CGCompressibleEulerModel": (
-        "CDGridCompressibleEulerModel",
-        "The C-grid cubed-sphere solver is CDGridCompressibleEulerModel.",
-    ),
-    # --- Tendency functions ---
-    "shallow_water_tendencies": (
-        "cdgrid_shallow_water_tendencies",
-        "Use cdgrid_shallow_water_tendencies explicitly.",
-    ),
-    "hydrostatic_tendencies": (
-        "cdgrid_hydrostatic_tendencies",
-        "Use cdgrid_hydrostatic_tendencies explicitly.",
-    ),
-    "compressible_euler_slow_tendencies": (
-        "cdgrid_compressible_euler_slow_tendencies",
-        "Use cdgrid_compressible_euler_slow_tendencies explicitly.",
-    ),
-    "fv_shallow_water_tendencies": (
-        "cdgrid_shallow_water_tendencies",
-        "The FV cubed-sphere tendency function is cdgrid_shallow_water_tendencies.",
-    ),
-    "fv_hydrostatic_tendencies": (
-        "cdgrid_hydrostatic_tendencies",
-        "The FV cubed-sphere tendency function is cdgrid_hydrostatic_tendencies.",
-    ),
-    "fv_compressible_euler_slow_tendencies": (
-        "cdgrid_compressible_euler_slow_tendencies",
-        "The FV cubed-sphere tendency function is cdgrid_compressible_euler_slow_tendencies.",
-    ),
-}
-
-
-#: Discretization names that map to the same implementation.
-#: "centered" and "finite_volume" are grid-dependent: they resolve
-#: to "cdgrid" on cubed-sphere grids and "latlon_cgrid" on lat-lon
-#: grids.  The default (without grid context) is "cdgrid".
-#: "cgrid" is a true deprecated alias that always means "cdgrid".
-ATMOSPHERE_DEPRECATED_DISCRETIZATIONS: dict[str, str] = {
-    "cgrid": "cdgrid",
-}
 
 #: Flat solver names that are aliases.
 ATMOSPHERE_DEPRECATED_SOLVER_NAMES: dict[str, str] = {

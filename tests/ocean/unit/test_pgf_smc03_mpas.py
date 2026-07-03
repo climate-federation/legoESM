@@ -21,7 +21,7 @@ Phases mirror the lat-lon ``test_pgf_smc03_phase3.py`` suite:
    ρ is z-independent, SMC03 PGF is exactly zero (matches the
    centered-PGF rest state on z-star).
 
-See ``docs/ocean_experiments/density_jacobian_pgf_mpas.md`` for the
+See ``docs/ocean/experiments/density_jacobian_pgf_mpas.md`` for the
 port plan.
 """
 from __future__ import annotations

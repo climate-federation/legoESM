@@ -29,7 +29,7 @@ class RuntimeConfig(NamedTuple):
     Attributes
     ----------
     backend : str
-        Lowercase backend name (``"cpu"``, ``"gpu"``, ``"tpu"``, ``"metal"``).
+        Lowercase backend name (``"cpu"``, ``"gpu"``, ``"tpu"``, ``"mps"``).
     x64 : bool
         Whether JAX x64 mode is active.
     precision : object

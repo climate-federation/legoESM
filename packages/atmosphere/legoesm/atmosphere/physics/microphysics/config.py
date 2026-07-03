@@ -90,6 +90,8 @@ __param_spec__ = {
             "nuc_T_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_rh_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "subgrid_rh_crit": "physics-fidelity sub-grid closure: in-cloud cf critical RH, mirrors the cloud scheme (no tunable knob)",
+            "subgrid_cf_min": "numerics: cloud-fraction floor capping the in-cloud enhancement (AD/numeric safety)",
         },
         "params": {
             # --- Warm rain (Seifert-Beheng + KK2000) ---
@@ -380,6 +382,21 @@ class MorrisonConfig(NamedTuple):
     # microphysics link (Twomey r_eff + KK2000 Nc^-1.79 lifetime
     # effects).  Ignored when predict_Nc=True.
     nc_from_aerosol: bool = False
+    # Sub-grid in-cloud autoconversion/accretion (Morrison & Gettelman 2008;
+    # Boutle et al. 2014).  Warm-rain rates are strongly non-linear in cloud
+    # water (KK2000 PRC ∝ q_c^2.47), so evaluating them on the GRID-MEAN q_c
+    # systematically UNDER-produces drizzle in partly-filled boxes.  When True,
+    # autoconversion + accretion are evaluated on the IN-CLOUD water q_c/cf and
+    # the resulting tendency is scaled back by the cloud fraction cf — i.e. the
+    # standard "all warm rain happens in the cloudy fraction" closure, giving an
+    # enhancement cf^(1−2.47)=cf^−1.47 (autoconv) / cf^−1.30 (accretion).  cf is
+    # the Sundqvist √-form from the local RH (subgrid_rh_crit, mirroring the
+    # cloud scheme), floored at subgrid_cf_min for AD/numeric safety.  This is a
+    # physics-fidelity correction (no tunable knob), default False to preserve
+    # bit-reproducibility of existing runs.
+    subgrid_autoconversion: bool = False
+    subgrid_rh_crit: float = 0.7     # critical RH for the in-cloud cf (Sundqvist)
+    subgrid_cf_min: float = 0.1      # cf floor (caps enhancement at cf_min^-1.47)
     # Warm rain (Seifert-Beheng knobs; consumed only when
     # warm_rain_scheme="seifert_beheng")
     k_au: float = 6e2
@@ -845,7 +862,7 @@ class MicrophysicsConfig(NamedTuple):
         Fast spectral-bin microphysics (WRF FSBM-2 port). The column path
         reconstructs the 33-bin liquid spectrum from bulk (q_c, q_r, N_r)
         and runs oracle condensation + Bott coalescence per step (see
-        ``docs/specs/bin_microphysics.md``).
+        ``docs/science/specs/bin_microphysics.md``).
     ml_emulator : MicrophysicsMLEmulatorConfig
     """
     scheme: str = "none"
@@ -858,3 +875,57 @@ class MicrophysicsConfig(NamedTuple):
     sdm: SDMConfig = SDMConfig()
     fast_sbm: FastSBMConfig = FastSBMConfig()
     ml_emulator: MicrophysicsMLEmulatorConfig = MicrophysicsMLEmulatorConfig()
+
+
+def apply_microphysics_experiment_flags(
+    scheme_config,
+    scheme: str,
+    *,
+    nc_from_aerosol: bool = False,
+    subgrid_autoconversion: bool = False,
+):
+    """Thread ExperimentConfig-level microphysics switches onto a per-scheme
+    sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
+
+    Both switches are warm-rain closures currently implemented only by
+    Morrison's ``effective_Nc`` (specified-Nc aerosol mode) and in-cloud
+    autoconversion.  This single helper is shared by the coupled
+    (``physics_pipeline._resolve_microphysics``) and the combined-physics /
+    MPAS (``model_driver._run_mpas``) paths so the gating + fail-loud
+    validation is written ONCE — a scheme that would silently ignore the
+    flag raises instead, on either path (no duplicated dispatch).
+
+    Parameters
+    ----------
+    scheme_config : NamedTuple
+        The active per-scheme sub-config (e.g. ``MorrisonConfig``).
+    scheme : str
+        Scheme name, used only in the error message.
+    nc_from_aerosol, subgrid_autoconversion : bool
+        ExperimentConfig switches; when True the matching field is set on
+        ``scheme_config`` (raising if the field is absent).
+
+    Returns
+    -------
+    NamedTuple
+        ``scheme_config`` with the requested flags applied (a new instance;
+        unchanged when both switches are False).
+    """
+    fields = getattr(scheme_config, "_fields", ())
+    if nc_from_aerosol:
+        if "nc_from_aerosol" not in fields:
+            raise ValueError(
+                f"nc_from_aerosol=True is not supported by the {scheme!r} "
+                "microphysics scheme (no specified-Nc aerosol mode); use "
+                "--microphysics morrison or drop --aerosol-ccn."
+            )
+        scheme_config = scheme_config._replace(nc_from_aerosol=True)
+    if subgrid_autoconversion:
+        if "subgrid_autoconversion" not in fields:
+            raise ValueError(
+                f"subgrid_autoconversion=True is not supported by the "
+                f"{scheme!r} microphysics scheme; use --microphysics morrison "
+                "or drop --subgrid-autoconversion."
+            )
+        scheme_config = scheme_config._replace(subgrid_autoconversion=True)
+    return scheme_config

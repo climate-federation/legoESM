@@ -29,6 +29,69 @@ from legoesm.diagnostics.column_integrals import column_water_vapor
 
 
 # ======================================================================
+# Area-weighted global means
+# ======================================================================
+
+def area_weighted_mean(field: jax.Array, area: jax.Array | None) -> jax.Array:
+    """Area-weighted global mean of a horizontal (optionally layered) field.
+
+    ``jnp.mean`` weights every grid cell equally.  On a lat-lon grid the
+    polar rows then count as much as the equatorial rows despite each cell
+    spanning ``~cos(lat)`` less area, biasing every global-mean diagnostic
+    toward the cold, ice-covered high latitudes.  On a 24-band coupled run
+    this pulled ``<rsdt>`` to ~281 W/m² (the true area-weighted value is the
+    energy-conserving ``S_0/4`` = 340 W/m²) and manufactured a ``<R_TOA>`` ≈
+    −36 W/m² "cold drift" where the area-weighted TOA budget is near balance.
+    Weight each cell by its true area instead.
+
+    Parameters
+    ----------
+    field : array
+        Field whose leading axes are the horizontal grid (shape matching
+        ``area``).  Any trailing axes (e.g. vertical levels) are averaged
+        uniformly first, reproducing ``jnp.mean`` semantics in those axes.
+    area : array or None
+        Per-cell area with the field's horizontal shape (``grid.grid_area``;
+        lat-lon ``(n_lat, n_lon)``, cube ``(6, n, n)``).  Need not be
+        normalized.  ``None`` falls back to an unweighted ``jnp.mean`` — cube
+        cells are ~equal area, and legacy callers / tests stay byte-identical.
+    """
+    if area is None:
+        return jnp.mean(field)
+    nh = area.ndim
+    # Defensive: a field whose horizontal axes don't match ``area`` (e.g. an
+    # ocean field on a different grid than the atmosphere's area) falls back
+    # to an unweighted mean rather than broadcasting silently.
+    if field.ndim < nh or tuple(field.shape[:nh]) != tuple(area.shape):
+        return jnp.mean(field)
+    if field.ndim > nh:
+        field = jnp.mean(field, axis=tuple(range(nh, field.ndim)))
+    return jnp.sum(field * area) / jnp.sum(area)
+
+
+def area_weighted_profile(field: jax.Array, area: jax.Array | None) -> jax.Array:
+    """Area-weighted horizontal mean retaining the trailing (vertical) axis.
+
+    Companion to :func:`area_weighted_mean` for level-resolved profiles.
+    ``field`` has horizontal leading axes matching ``area`` plus one trailing
+    level axis; returns the area-weighted mean over the horizontal axes only,
+    shape ``(nlev,)``.  ``area=None`` falls back to an unweighted horizontal
+    mean (``jnp.mean`` over all-but-last axis).
+    """
+    spatial_axes = tuple(range(field.ndim - 1))
+    if area is None:
+        return jnp.mean(field, axis=spatial_axes)
+    nh = area.ndim
+    # Same defensive guard as ``area_weighted_mean``: a field whose horizontal
+    # axes don't match ``area`` (wrong grid, or no trailing level axis) falls
+    # back to a plain horizontal mean rather than broadcasting silently.
+    if field.ndim <= nh or tuple(field.shape[:nh]) != tuple(area.shape):
+        return jnp.mean(field, axis=spatial_axes)
+    w = area[..., None]
+    return jnp.sum(field * w, axis=spatial_axes) / jnp.sum(area)
+
+
+# ======================================================================
 # Column Energy
 # ======================================================================
 
@@ -231,7 +294,14 @@ def toa_net_radiation_from_output(rad_out, shape_2d: tuple[int, ...]) -> jax.Arr
     shape_2d : tuple
         Spatial shape to reshape to (e.g., (6, n, n)).
     """
-    sw_down_toa = rad_out.sw_flux_down[:, 0].reshape(shape_2d)
+    # Incoming SW = the prescribed TOA insolation (#620), not the clamped
+    # top-halo `sw_flux_down[:, 0]` (the `_replace_top_flux` BUG-B guard caps
+    # it ~15% low, biasing R_TOA).  Fall back to the halo when a radiation_fn
+    # does not populate `toa_insolation` (e.g. the no-radiation stub).
+    sw_down_toa = (
+        rad_out.toa_insolation if rad_out.toa_insolation is not None
+        else rad_out.sw_flux_down[:, 0]
+    ).reshape(shape_2d)
     sw_up_toa = rad_out.sw_flux_up[:, 0].reshape(shape_2d)
     lw_up_toa = rad_out.lw_flux_up[:, 0].reshape(shape_2d)
     return toa_net_radiation(sw_down_toa, sw_up_toa, lw_up_toa)
@@ -338,6 +408,7 @@ class EnergyBudgetTracker:
         sw_net_sfc: jax.Array,
         lw_net_sfc: jax.Array,
         elapsed_seconds: float,
+        area_weights: jax.Array | None = None,
     ) -> EnergyBudget:
         """Compute and record energy budget at current time.
 
@@ -377,12 +448,12 @@ class EnergyBudgetTracker:
             T, q_v, u, v, phis, p_s, dsigma, sigma_full,
         )
         _h = np.asarray(jnp.stack([
-            jnp.mean(E),
-            jnp.mean(sw_down_toa),
-            jnp.mean(sw_up_toa),
-            jnp.mean(lw_up_toa),
-            jnp.mean(sw_net_sfc),
-            jnp.mean(lw_net_sfc),
+            area_weighted_mean(E, area_weights),
+            area_weighted_mean(sw_down_toa, area_weights),
+            area_weighted_mean(sw_up_toa, area_weights),
+            area_weighted_mean(lw_up_toa, area_weights),
+            area_weighted_mean(sw_net_sfc, area_weights),
+            area_weighted_mean(lw_net_sfc, area_weights),
         ]))
         mean_E = float(_h[0])
         mean_sw_down_toa = float(_h[1])
@@ -535,6 +606,7 @@ class MoistureBudgetTracker:
         dsigma: jax.Array,
         precip: jax.Array,
         elapsed_seconds: float,
+        area_weights: jax.Array | None = None,
     ) -> MoistureBudget:
         """Compute and record moisture budget at current time.
 
@@ -558,7 +630,10 @@ class MoistureBudgetTracker:
         W = column_water_vapor(q_v, p_s, dsigma)
         # Fuse the column-water-vapor + precipitation means into one
         # host transfer.
-        _h = np.asarray(jnp.stack([jnp.mean(W), jnp.mean(precip)]))
+        _h = np.asarray(jnp.stack([
+            area_weighted_mean(W, area_weights),
+            area_weighted_mean(precip, area_weights),
+        ]))
         mean_W = float(_h[0])
         mean_P = float(_h[1]) * 86400.0  # kg/m²/s → mm/day
 

@@ -674,3 +674,213 @@ def init_ocean_from_woa(
         T_out, S_out = _analytical_woa_profiles(lat_deg, z_coord)
 
     return jnp.array(T_out), jnp.array(S_out)
+
+
+def woa_ocean_mask(
+    grid,
+    T_path: str | Path,
+    *,
+    T_var: str | None = None,
+    monthly_layout: str = "concatenated",
+    ocean_fraction_threshold: float = 0.5,
+) -> np.ndarray:
+    """Derive a realistic ``(1=ocean, 0=land)`` wet mask from WOA18 surface T.
+
+    A grid cell is OCEAN where the area-weighted bilinear regrid of the WOA18
+    surface-temperature *valid-data fraction* (1 over ocean, 0 over WOA's land
+    fill) reaches ``ocean_fraction_threshold``, and LAND otherwise.  Using the
+    regridded fraction (rather than the NaN-aware T itself) gives a crisp,
+    threshold-controlled coastline on coarse target grids instead of flooding
+    every coastal cell to ocean.
+
+    This is the single source of truth for the realistic coupled run's wet
+    domain: the same mask initialises the ocean ``land_mask`` AND the
+    atmosphere ``f_land`` (``= 1 - ocean_mask``) on the shared lat-lon grid, so
+    the surface/ocean wet masks agree EXACTLY — no atmosphere flux leaks onto
+    an ocean-masked cell (codex Phase-1 HIGH).  Only the lat-lon grid is
+    supported because the prognostic 3D ocean is lat-lon-only.
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+        Must expose ``lat2d`` / ``lon2d`` (radians).
+    T_path : path
+        WOA18 temperature NetCDF/Zarr (the ``t_an`` annual field, or a
+        monthly product — only the surface level, time index 0, is read).
+    T_var : str or None
+        Override the temperature variable name (default ``"t_an"``).
+    monthly_layout : str
+        Accepted for signature parity with :func:`load_woa18`; the surface
+        mask only ever reads time index 0, so the layout does not change the
+        result.
+    ocean_fraction_threshold : float, default 0.5
+        Regridded ocean-fraction cutoff for classifying a cell as ocean.
+
+    Returns
+    -------
+    ocean_mask : np.ndarray, shape (n_lat, n_lon), float64
+        ``1.0`` over ocean, ``0.0`` over land.  Caller casts to the active
+        precision policy (e.g. via ``rest_state_latlon_cgrid_ocean``).
+
+    Notes
+    -----
+    Marginal/enclosed seas present in WOA (Caspian, Black, etc.) are classified
+    as ocean here; for a coupled run that has previously destabilised the
+    barotropic solver (see the OMIP ``--mask-marginal-seas`` note), so a
+    follow-up may want to prune them.  Left in for a first realistic run.
+    """
+    if monthly_layout not in ("concatenated", "single_file_per_month"):
+        raise ValueError(
+            f"monthly_layout must be 'concatenated' or "
+            f"'single_file_per_month'; got {monthly_layout!r}."
+        )
+    if not (0.0 < ocean_fraction_threshold <= 1.0):
+        raise ValueError(
+            "ocean_fraction_threshold must be in (0, 1]; got "
+            f"{ocean_fraction_threshold}."
+        )
+    lat2d = getattr(grid, "lat2d", None)
+    lon2d = getattr(grid, "lon2d", None)
+    if lat2d is None or lon2d is None:
+        raise TypeError(
+            "woa_ocean_mask requires a lat-lon grid exposing lat2d/lon2d "
+            f"(radians); got {type(grid).__name__}."
+        )
+    lat_deg = np.asarray(lat2d) * (180.0 / np.pi)
+    lon_deg = np.asarray(lon2d) * (180.0 / np.pi)
+
+    t_name = T_var if T_var is not None else "t_an"
+    ds = _open_woa_dataset(T_path)
+    if t_name not in ds.data_vars:
+        avail = list(ds.data_vars)
+        ds.close()
+        raise ValueError(
+            f"WOA T file {str(T_path)!r} has no variable {t_name!r}; "
+            f"available data vars: {avail}.  Pass the correct T_var."
+        )
+    # Select the surface level of the first time slice by DIMENSION NAME
+    # (robust to transposed / preprocessed files): time->0, the depth axis
+    # (the dim that is not lat/lon/time)->0, then order as (lat, lon).
+    da = ds[t_name]
+    isel = {}
+    if "time" in da.dims:
+        isel["time"] = 0
+    depth_dim = next(
+        (d for d in da.dims if d not in ("lat", "lon", "time")), None)
+    if depth_dim is not None:
+        isel[depth_dim] = 0
+    da_surf = da.isel(**isel)
+    if {"lat", "lon"}.issubset(da_surf.dims):
+        da_surf = da_surf.transpose("lat", "lon")
+    T_surf = np.asarray(da_surf.values)  # (n_lat_woa, n_lon_woa)
+    lat_woa = np.array(ds["lat"].values)
+    lon_woa = np.array(ds["lon"].values)
+    ds.close()
+    if T_surf.ndim != 2:
+        raise ValueError(
+            f"WOA surface T from {str(T_path)!r} is {T_surf.ndim}-D after "
+            f"selecting time/depth (var dims {da.dims}); expected 2-D "
+            "(lat, lon).")
+
+    # Ocean-fraction source field: 1 where WOA has valid surface T (ocean),
+    # 0 where NaN (land fill).  Regrid with the (NaN-free) bilinear operator
+    # and threshold.  Trailing singleton dim so _bilinear_2d's trailing-dim
+    # broadcasting applies.
+    ocean_src = (~np.isnan(T_surf)).astype(np.float64)[..., None]
+    frac = _bilinear_2d(lat_deg, lon_deg, lat_woa, lon_woa, ocean_src)[..., 0]
+    # Cells with no valid bracketing source (frac is NaN) are land.
+    frac = np.where(np.isnan(frac), 0.0, frac)
+    ocean_mask = (frac >= ocean_fraction_threshold).astype(np.float64)
+    return ocean_mask
+
+
+def woa_ocean_bathymetry(
+    grid,
+    T_path: str | Path,
+    *,
+    H_max: float = 5500.0,
+    min_depth_m: float = 200.0,
+    T_var: str | None = None,
+    ocean_fraction_threshold: float = 0.5,
+) -> np.ndarray:
+    """Derive a realistic per-column bathymetry [m] from WOA18 temperature.
+
+    For each model column the depth is the DEEPEST WOA standard level that is
+    still ocean (valid T) after the NaN-aware bilinear regrid of the per-level
+    valid-data fraction, clamped to ``[min_depth_m, H_max]``.  Land columns
+    (surface fraction below threshold) get ``0``.
+
+    A realistic (varying) bathymetry — instead of a flat ``H_max`` everywhere —
+    is REQUIRED for a stable WOA cold start: the flat bottom extends the WOA
+    abyssal-fill density into a spurious deep column and (with the plain z-star
+    coord) gates off the smc03 partial-cell pressure-gradient correction.  Feed
+    the result through :func:`make_partial_cell_latlon` (smoothing + thin-cell
+    snap) before building the ocean coordinate.
+
+    Parameters
+    ----------
+    grid : LatLonGrid (lat2d/lon2d in radians).
+    T_path : WOA18 temperature file.
+    H_max : maximum depth clamp [m].
+    min_depth_m : minimum wet-column depth [m] (shallow shelves are floored
+        here; ``make_partial_cell_latlon(min_levels=...)`` later masks columns
+        with too few active levels).
+    T_var : override temperature variable name (default ``"t_an"``).
+    ocean_fraction_threshold : ocean cutoff for the per-level regrid.
+
+    Returns
+    -------
+    H_bathy : np.ndarray (n_lat, n_lon), float64 — depth [m], 0 over land.
+    """
+    if not (0.0 < ocean_fraction_threshold <= 1.0):
+        raise ValueError(
+            f"ocean_fraction_threshold must be in (0, 1]; got "
+            f"{ocean_fraction_threshold}.")
+    if not (0.0 < min_depth_m < H_max):
+        raise ValueError(
+            f"min_depth_m must be in (0, H_max={H_max}); got {min_depth_m}.")
+    lat2d = getattr(grid, "lat2d", None)
+    lon2d = getattr(grid, "lon2d", None)
+    if lat2d is None or lon2d is None:
+        raise TypeError(
+            "woa_ocean_bathymetry requires a lat-lon grid exposing lat2d/lon2d.")
+    lat_deg = np.asarray(lat2d) * (180.0 / np.pi)
+    lon_deg = np.asarray(lon2d) * (180.0 / np.pi)
+
+    t_name = T_var if T_var is not None else "t_an"
+    ds = _open_woa_dataset(T_path)
+    if t_name not in ds.data_vars:
+        avail = list(ds.data_vars)
+        ds.close()
+        raise ValueError(
+            f"WOA T file {str(T_path)!r} has no variable {t_name!r}; "
+            f"available: {avail}.")
+    da = ds[t_name]
+    isel = {}
+    if "time" in da.dims:
+        isel["time"] = 0
+    depth_dim = next(
+        (d for d in da.dims if d not in ("lat", "lon", "time")), None)
+    if depth_dim is None:
+        ds.close()
+        raise ValueError(
+            f"WOA T variable has no depth dim (dims {da.dims}).")
+    da3 = da.isel(**isel).transpose(depth_dim, "lat", "lon")
+    T3 = np.asarray(da3.values)                       # (n_depth, lat, lon)
+    lat_woa = np.array(ds["lat"].values)
+    lon_woa = np.array(ds["lon"].values)
+    ds.close()
+
+    n_depth = T3.shape[0]
+    depths = WOA_DEPTHS[:n_depth]
+    # Ocean fraction per WOA level, regridded to the model grid.
+    valid = (~np.isnan(T3)).astype(np.float64)        # (depth, lat, lon)
+    valid_lld = np.moveaxis(valid, 0, -1)             # (lat, lon, depth)
+    fr = _bilinear_2d(lat_deg, lon_deg, lat_woa, lon_woa, valid_lld)
+    fr = np.where(np.isnan(fr), 0.0, fr)
+    ocean_at_depth = fr >= ocean_fraction_threshold   # (n_lat, n_lon, n_depth)
+    # Deepest ocean depth per column (0 if no ocean at any level).
+    H = np.where(ocean_at_depth, depths[None, None, :], 0.0).max(axis=-1)
+    wet = H > 0.0
+    H = np.where(wet, np.clip(H, min_depth_m, H_max), 0.0)
+    return H.astype(np.float64)

@@ -1,0 +1,33 @@
+# Canonical coupled CMIP run — SLAB (two-layer) ocean.
+#
+#   run_coupled.py --config config/cmip/cmip_ocean_slab.yaml
+#
+# Inherits the tuned ("trained") atmosphere + air-sea physics from
+# cmip_tuned_physics.yaml (the single source of truth for the converged values);
+# this file adds only the run orchestration + the ocean choice.  The two-layer
+# slab (mixed + deep restoring layer) is the cheap, stable, energy-balanced
+# Earth-like reference (R_TOA ~-0.7 W/m2 at 180 d); the dynamic-3D-ocean twin is
+# config/cmip/cmip_ocean_3D.yaml (same physics base, only the ocean differs).
+#
+# Precedence: an explicit CLI flag > this file > the included base > parser default.
+
+include: cmip_tuned_physics.yaml
+
+# --- run orchestration ---
+preset: slab_richards          # Richards multilayer soil -> water-limited ET
+grid: latlon
+resolution: 24
+nlev: 20
+dt: 300.0
+ic: standard
+days: 240
+diag_days: 10                  # atm<->ocean coupling cadence
+
+# --- ocean: two-layer thermodynamic slab ---
+ocean: two_layer
+
+# --- CMOR output (historical-1850 forcing) ---
+experiment: historical
+start_year: 1850
+cmip_output: true
+cmip_resolution_deg: 5.0

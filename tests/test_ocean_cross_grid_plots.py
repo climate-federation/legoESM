@@ -1930,7 +1930,7 @@ class TestIter123OceanDriftTolerance:
         assert tol == 1e-8, (
             f"iter-128: modular geostrophic tolerance must be "
             f"1e-8 (tighter than doc's 1e-3 — see "
-            f"docs/ocean_experiments_reference.md:419).  "
+            f"docs/dev-notes/ocean_experiments_reference.md:419).  "
             f"Got {tol}.")
         assert 'label="T"' in body
 
@@ -1959,7 +1959,7 @@ class TestIter123OceanDriftTolerance:
         tol = float(m2.group(1))
         assert tol == 1e-2, (
             f"iter-128: modular overflow T tolerance must be "
-            f"1e-2 (matches docs/ocean_experiments_reference.md:625). "
+            f"1e-2 (matches docs/dev-notes/ocean_experiments_reference.md:625). "
             f"Got {tol}.")
 
     # ====== iter-129: codex iter-128-followup MEDIUM-1/2 + LOW-1/2/3/4 ======
@@ -2080,7 +2080,7 @@ class TestIter123OceanDriftTolerance:
         """iter-129 codex iter-128-followup MEDIUM-2: monolithic
         run_lock_exchange must apply the same ``pe_rel_final < 0``
         sign gate as Overflow (per
-        docs/ocean_experiments_reference.md:575).
+        docs/dev-notes/ocean_experiments_reference.md:575).
         """
         from pathlib import Path
         path = (Path(__file__).resolve().parent.parent
@@ -2942,7 +2942,7 @@ class TestIter123OceanDriftTolerance:
 
     def test_iter133_barotropic_wave_gates(self):
         """iter-133 self-review based on
-        docs/ocean_experiments_reference.md 'Barotropic Wave'
+        docs/dev-notes/ocean_experiments_reference.md 'Barotropic Wave'
         Validation Thresholds: gates eta_conservation
         (range), mean_eta_drift < 1e-4 m,
         min_final_amplitude > 0.1 m.
@@ -2981,7 +2981,7 @@ class TestIter123OceanDriftTolerance:
 
     def test_iter133_barotropic_gyre_gates(self):
         """iter-133 self-review based on
-        docs/ocean_experiments_reference.md 'Barotropic Gyre'
+        docs/dev-notes/ocean_experiments_reference.md 'Barotropic Gyre'
         Validation Thresholds: gates max_speed_final with an upper
         bound of 0.5 m/s and a lower bound defaulting to 0.05 m/s
         (the monolithic runner may lower it per-case via
@@ -3648,7 +3648,7 @@ class TestIter123OceanDriftTolerance:
         """
         from pathlib import Path
         doc = (Path(__file__).resolve().parent.parent
-               / "docs" / "md_files" / "ocean_experiments_reference.md")
+               / "docs" / "dev-notes" / "ocean_experiments_reference.md")
         text = doc.read_text()
         # Find the geostrophic_adjustment validation thresholds
         # section.

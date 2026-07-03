@@ -544,6 +544,21 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type):
     )
 
 
+def sample_omip2_forcing(forcing, idx_t, grid, grid_type):
+    """Public wrapper for :func:`_sample_omip2_forcing`.
+
+    Returns the CORE-II / JRA forcing channels (``u10``, ``v10``, ``T_air`` [K],
+    ``q_air``, ``sw_down``, ``lw_down``, ``precip``, and the optional ``snow`` /
+    ``slp``) spatially sampled onto the model grid for one time record — the
+    SAME sampling :func:`compute_omip2_surface_forcing` and
+    :func:`compute_omip2_freshwater_forcing` consume.  Exposed so an external
+    coupler driver (e.g. the prognostic sea-ice glue in
+    ``scripts/run/run_omip_core2.py``) can populate an ``AtmToSurface`` from the
+    identical sampled fields rather than re-deriving the regrid (cross-module
+    callers must not import the private ``_sample_omip2_forcing``)."""
+    return _sample_omip2_forcing(forcing, idx_t, grid, grid_type)
+
+
 def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
                                      grid, grid_type: str,
                                      runoff_R=None,

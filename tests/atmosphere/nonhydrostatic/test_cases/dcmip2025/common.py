@@ -17,108 +17,13 @@ from legoesm.grids.cubed_sphere import (
     apply_small_earth_scaling,
 )
 
-
-# ==============================================================================
-# Reference atmosphere profiles
-# ==============================================================================
-
-def isothermal_theta_ref(T0: float = 300.0):
-    """Return theta_0(z) for an isothermal atmosphere.
-
-    For T=const, theta(z) = T * (p0/p)^kappa increases with height.
-    We compute theta from T and the hydrostatic pressure profile.
-
-    For simplicity, we return a function that computes theta at each z
-    using the isothermal scale height: p(z) = p0 * exp(-z/H_s),
-    H_s = R_d * T0 / g.
-    """
-    R_d = constants.R_d
-    g = constants.g
-    p_0 = constants.p_ref
-    kappa = constants.kappa
-
-    def theta_fn(z):
-        H_s = R_d * T0 / g
-        p = p_0 * jnp.exp(-z / H_s)
-        return T0 * (p_0 / p) ** kappa
-
-    return theta_fn
-
-
-def piecewise_lapse_theta_ref(
-    T_s: float = 300.0,
-    lapse_tropo: float = -5.0e-3,
-    lapse_strato: float = 5.0e-3,
-    z_tropopause: float = 20000.0,
-):
-    """Return theta_0(z) for a piecewise linear temperature profile.
-
-    Parameters
-    ----------
-    T_s : float
-        Surface temperature [K].
-    lapse_tropo : float
-        Tropospheric lapse rate [K/m] (negative for decreasing T).
-    lapse_strato : float
-        Stratospheric lapse rate [K/m] (positive for increasing T).
-    z_tropopause : float
-        Tropopause height [m].
-
-    Returns
-    -------
-    callable
-        Function theta_0(z) -> potential temperature at height z.
-    """
-    R_d = constants.R_d
-    g = constants.g
-    p_0 = constants.p_ref
-    kappa = constants.kappa
-    c_p = constants.c_pd
-
-    def theta_fn(z):
-        # Temperature profile
-        T_trop = T_s + lapse_tropo * jnp.minimum(z, z_tropopause)
-        T_above = T_trop + lapse_strato * jnp.maximum(z - z_tropopause, 0.0)
-        # Use stratospheric profile only above tropopause
-        T = jnp.where(z <= z_tropopause, T_s + lapse_tropo * z, T_above)
-
-        # Pressure from hydrostatic integration (approximate)
-        # For piecewise linear T, we integrate dp/dz = -rho*g = -p*g/(R_d*T)
-        # Below tropopause: if T = T_s + gamma*z, then
-        #   p = p_0 * (T/T_s)^(-g/(R_d*gamma))
-        # Above tropopause: isothermal-like with different lapse rate
-
-        # Tropospheric pressure
-        T_ratio = jnp.clip(T_s + lapse_tropo * jnp.minimum(z, z_tropopause), 100.0, None) / T_s
-        exponent_tropo = -g / (R_d * lapse_tropo)
-        p_tropo = p_0 * T_ratio ** exponent_tropo
-
-        # At tropopause
-        T_at_trop = T_s + lapse_tropo * z_tropopause
-        T_ratio_trop = jnp.clip(T_at_trop, 100.0, None) / T_s
-        p_at_trop = p_0 * T_ratio_trop ** exponent_tropo
-
-        # Stratospheric pressure (above tropopause)
-        dz_above = jnp.maximum(z - z_tropopause, 0.0)
-        T_strato = T_at_trop + lapse_strato * dz_above
-        # Handle potential zero lapse rate
-        safe_lapse = jnp.where(
-            jnp.abs(lapse_strato) > 1e-10,
-            lapse_strato,
-            1e-10,
-        )
-        exponent_strato = -g / (R_d * safe_lapse)
-        T_ratio_strato = jnp.clip(T_strato, 100.0, None) / jnp.clip(T_at_trop, 100.0, None)
-        p_strato = p_at_trop * T_ratio_strato ** exponent_strato
-
-        p = jnp.where(z <= z_tropopause, p_tropo, p_strato)
-
-        # Potential temperature
-        theta = T * (p_0 / p) ** kappa
-
-        return theta
-
-    return theta_fn
+# Reference-atmosphere theta_0(z) profiles now live in the package (audit item
+# 9: production spectral-NH initializers must not import from tests).  Re-export
+# them here so existing test imports keep working with a single source of truth.
+from legoesm.atmosphere.dynamics.dcmip2025_ic import (  # noqa: F401
+    isothermal_theta_ref,
+    piecewise_lapse_theta_ref,
+)
 
 
 # ==============================================================================

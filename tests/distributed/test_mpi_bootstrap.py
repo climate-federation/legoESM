@@ -95,7 +95,7 @@ class TestDeviceConfig:
     def test_backend_valid(self):
         """Backend should be a known accelerator string."""
         config = get_active_config()
-        assert config.backend in ("CPU", "GPU", "TPU", "METAL")
+        assert config.backend in ("CPU", "GPU", "TPU", "MPS")
 
     def test_n_devices_positive(self):
         """At least one device should be available."""

@@ -25,7 +25,7 @@ via `mpi4jax`. Apple Silicon users who want the spectral solver must set
 Install from a clone (development install — the supported path today):
 
 ```bash
-git clone https://github.com/gentine/legoESM.git
+git clone https://github.com/climate-federation/legoESM.git
 cd legoESM
 python -m venv .venv
 source .venv/bin/activate
@@ -36,7 +36,7 @@ Optional extras:
 
 ```bash
 pip install -e ".[ml,mesh,viz,data]"               # neural cores, MPAS meshes, plotting, data IO
-pip install "mpi4py>=4.1,<5" "mpi4jax>=0.8,<0.9"   # multi-node MPI runs
+pip install "mpi4py>=4.1,<5" "mpi4jax>=0.9,<0.10"   # multi-node MPI runs
 pip install -e ".[docs]"                           # build this documentation site
 ```
 
@@ -46,7 +46,7 @@ Sanity check:
 .venv/bin/python -c "import legoesm, jax; print('jax', jax.__version__, 'backend', jax.default_backend())"
 ```
 
-See [Getting started](getting_started.md) for the full top-to-bottom walkthrough.
+See [Getting started](user-guide/getting_started.md) for the full top-to-bottom walkthrough.
 
 ## Quick start
 
@@ -89,7 +89,7 @@ Grids are shared between components: lat-lon FV, spectral Gaussian, cubed-sphere
 (FV3-faithful), MPAS/Voronoi (TRiSK), and SFNO all feed both the atmosphere and the
 ocean.
 
-See [Composability & architecture](composability.md) for how to instantiate each
+See [Composability & architecture](architecture/composability.md) for how to instantiate each
 axis (grids, regional/idealized extent, the SCM/LES/CRM/shallow-water/3-D complexity
 ladder), a high-level tour of the packages, and the research → operational
 (AMIP/OMIP/CMIP) progression.
@@ -119,38 +119,38 @@ Zenodo-linked release mints the DOI. Full details on the [References](references
 :caption: Getting started
 
 Home <self>
-getting_started
-wizard
-composability
+user-guide/getting_started
+user-guide/wizard
+architecture/composability
 ```
 
 ```{toctree}
 :hidden:
 :caption: Examples
 
-scm
-amip
-ml_physics_parameterization
+user-guide/scm
+user-guide/amip
+science/ml_physics_parameterization
 ```
 
 ```{toctree}
 :hidden:
 :caption: Validation & performance
 
-dycore_validation_catalog
-PHYSICS_PARAMETERIZATION_TESTS
-cmip_readiness
-TESTING
-REAL_HARDWARE_SCALING
+validation/dycore_validation_catalog
+validation/PHYSICS_PARAMETERIZATION_TESTS
+validation/cmip_readiness
+validation/TESTING
+performance/REAL_HARDWARE_SCALING
 ```
 
 ```{toctree}
 :hidden:
 :caption: Architecture & development
 
-DISTRIBUTED_ARCHITECTURE
-developers
-api
+architecture/DISTRIBUTED_ARCHITECTURE
+user-guide/developers
+user-guide/api
 ```
 
 ```{toctree}

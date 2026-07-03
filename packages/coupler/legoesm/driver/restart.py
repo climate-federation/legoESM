@@ -278,7 +278,7 @@ def _meta_path(checkpoint_path: Path) -> Path:
 #
 # Bit-identical replay holds per platform/precision/backend; the caveats (GPU
 # reduction order, JIT cache, fp32 vs x64) are catalogued in
-# docs/portability_gpu_mpi_precision.md ("Nondeterminism sources").
+# docs/architecture/portability_gpu_mpi_precision.md ("Nondeterminism sources").
 
 # Version policy: bump ONLY on a breaking shape change (removed/renamed field,
 # changed meaning). validate_run_manifest requires the EXACT version, so a bump
@@ -658,7 +658,7 @@ def save_restart(
             q_r=q_r,
             diag_accumulators=diag_accumulators,
         )
-    else:
+    elif backend == "npz":
         save_checkpoint(
             path,
             state,
@@ -671,9 +671,22 @@ def save_restart(
             q_r=q_r,
             carry_aux=carry_aux,
         )
+    else:
+        raise ValueError(
+            f"Unknown checkpoint backend {backend!r}; expected 'npz' or 'zarr'."
+        )
 
-    # 2. Compute integrity hashes
-    state_arrays = _state_arrays_from_checkpoint_args(state, q_v, q_c, q_r)
+    # 2. Compute integrity hashes.
+    # Cast to storage_dtype before hashing so the digest matches what
+    # load_checkpoint produces (it casts every array to storage_dtype on
+    # reload, so a mixed-precision state would otherwise produce a
+    # different hash on save vs load).
+    from legoesm.core.precision import get_policy
+    _sd = get_policy().storage
+    state_arrays = {
+        k: np.asarray(v, dtype=_sd)
+        for k, v in _state_arrays_from_checkpoint_args(state, q_v, q_c, q_r).items()
+    }
     digest = compute_state_digest(state_arrays)
     cfg_hash = compute_config_hash(config)
 
@@ -817,8 +830,13 @@ def _validate_metadata(
             f"{metadata.nlev} but loaded state has nlev={loaded_nlev}."
         )
 
-    # State digest verification
-    state_arrays = _state_arrays_from_checkpoint_args(state, q_v, q_c, q_r)
+    # State digest verification. Cast to storage_dtype to match save_restart.
+    from legoesm.core.precision import get_policy
+    _sd = get_policy().storage
+    state_arrays = {
+        k: np.asarray(v, dtype=_sd)
+        for k, v in _state_arrays_from_checkpoint_args(state, q_v, q_c, q_r).items()
+    }
     current_digest = compute_state_digest(state_arrays)
     if current_digest != metadata.state_digest:
         raise ValueError(

@@ -14,9 +14,18 @@ momentum tendency is the *negative* (sign-flipped) biharmonic Laplacian
 
     ∂u/∂t|_bs = + ∇²(ν_bs ∇² u)
 
-where the coefficient is driven by the local eddy-energy level:
+where the coefficient is driven by the local eddy-energy level.  The exact
+power of Δ is PER-PATH because the two grids use different discrete
+operators, so ``c_bs`` is NOT interchangeable between them:
 
-    ν_bs(x, y) = c_bs · Δ² · √E(x, y),   ν_bs ≥ 0.
+    lat-lon C-grid (``_A_bs_h_cgrid``):  ν_bs = c_bs · Δ¹ · √E   [m²/s]
+        — the strain-based two-pass stress divergence absorbs the extra
+          Δ², yielding biharmonic-scaling tendencies from a Δ¹ coefficient.
+    MPAS Voronoi (``_A_bs_h_mpas``):     ν₄  = c_bs · Δ³ · √E   [m⁴/s]
+        — a clean double vector-Laplacian ∇²(A·∇²u) needs an explicit
+          biharmonic viscosity (see the per-path note ~L248).
+
+    ν_bs ≥ 0,   Δ = √area (length [m]),   √E [m/s].
 
 The "+" sign (as opposed to the "-" used by the Smagorinsky biharmonic)
 makes this an *anti*-biharmonic that injects energy into the resolved
@@ -56,10 +65,10 @@ __param_spec__ = {
             "E_min": "default 0 = disabled/off (enable via config, not training)",
         },
         "params": {
-            "E_max": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Jansen-Held energy backscatter", "shape": None},
+            "E_max": {"units": "m^2/s^2", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Jansen-Held energy backscatter", "shape": None},
             "c_bs": {"units": "1", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Jansen-Held energy backscatter", "shape": None},
             "efficiency": {"units": "1", "bounds": (0.3, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Jansen-Held energy backscatter", "shape": None},
-            "tau_relax_days": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Jansen-Held energy backscatter", "shape": None},
+            "tau_relax_days": {"units": "days", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Jansen-Held energy backscatter", "shape": None},
         },
     },
 }
@@ -245,14 +254,23 @@ def backscatter_tendency_mpas(
     else:
         E_edge = 0.5 * (E_cell[c1] + E_cell[c2])         # (nEdges, nlev)
 
-    # Geometric-mean edge length — already a length (m), not area.
-    # Units: ``√(E_edge)`` [m/s] × ``delta_edge`` [m] = ``m²/s``
-    # (harmonic viscosity), which the biharmonic two-pass operator
-    # consumes.
-    delta_edge = jnp.sqrt(mesh.dcEdge * mesh.dvEdge)
-    Delta = delta_edge[:, jnp.newaxis]
-    A_bs = cfg.c_bs * Delta * jnp.sqrt(
-        jnp.maximum(E_edge, 0.0) + 1e-30)                # (nEdges, nlev)
+    # This MPAS path applies a CLEAN double vector-Laplacian ∇²(A·∇²u)
+    # (vector_laplacian_del2_3d twice).  Since ∇² carries units [1/m²], the
+    # biharmonic operator ∇²(A·∇²u) is dimensionally a momentum tendency
+    # [u/s] only when A is a BIHARMONIC viscosity [m⁴/s].  The previous form
+    # used a harmonic-viscosity coefficient (Δ·√E = [m²/s]), leaving the
+    # tendency short by one grid-area factor (1/m²).  Use the standard
+    # Jansen et al. (2015) biharmonic backscatter viscosity
+    #   ν₄ = c_bs · Δ³ · √E ,  Δ = √(dcEdge·dvEdge) [m]  ⇒  [m³]·[m/s] = [m⁴/s].
+    # (The lat-lon C-grid path uses a strain-based two-pass whose discrete
+    # operators absorb the extra Δ², so it remains consistent with a Δ¹
+    # coefficient — the two grids need different coefficient powers because
+    # they use different discrete operators.  ``c_bs`` is therefore NOT
+    # interchangeable between the two paths and must be recalibrated for MPAS.)
+    delta_edge = jnp.sqrt(mesh.dcEdge * mesh.dvEdge)     # Δ [m]
+    Delta3 = (delta_edge ** 3)[:, jnp.newaxis]           # Δ³ [m³]
+    A_bs = cfg.c_bs * Delta3 * jnp.sqrt(
+        jnp.maximum(E_edge, 0.0) + 1e-30)                # (nEdges, nlev) [m⁴/s]
 
     del2_u = vector_laplacian_del2_3d(u_edge_3d, mesh)
     intermediate = A_bs * del2_u

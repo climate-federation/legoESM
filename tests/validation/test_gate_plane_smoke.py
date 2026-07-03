@@ -24,12 +24,16 @@ if str(_SCRIPTS) not in sys.path:
 
 import run_gate_plane  # noqa: E402
 
-_GSAM_GATE = ("/home/gentine/Documents/Code/gSAM/gsam1.8.7/gSAM1.8.7/"
-              "CASES/GATE_IDEAL")
+from legoesm.atmosphere.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
+
+# Repo-local cache (scripts/data/fetch_les_forcing.py) or external
+# LEGOESM_GSAM_ROOT; skip if neither has the deck.
+_GSAM_GATE = resolve_sam_case_dir("GATE_IDEAL")
 
 
 @pytest.mark.skipif(not os.path.isdir(_GSAM_GATE),
-                    reason="gSAM CASES/GATE_IDEAL not present")
+                    reason="GATE_IDEAL deck not present "
+                           "(run scripts/data/fetch_les_forcing.py)")
 def test_gate_ideal_runs_stable_and_conserving():
     # nlev=64 + dt=2s: the SAM-faithful STRETCHED grid (dz_sfc=50 m near the
     # surface, VGRID) needs the finer dt for CFL and enough levels for a gentle

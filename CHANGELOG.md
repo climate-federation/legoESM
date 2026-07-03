@@ -14,16 +14,16 @@ All notable changes to legoESM. Format roughly follows
   (`forward_euler`, `rk2`, `rk4`). Integrator/physics compatibility
   is validated at `SingleColumnModel.create` time; stateful
   throttled convection schemes are gated to `forward_euler`. Issue
-  [#277](https://github.com/gentine/legoESM/issues/277).
+  [#277](https://github.com/climate-federation/legoESM/issues/277).
 - **RK3 tracer step** for transport convergence: 1st → 3rd order in
   time.
 - **Williamson CLI** emits both PlateCarree u/v and native D-grid
   winds for plotting. Issue
-  [#274](https://github.com/gentine/legoESM/issues/274).
+  [#274](https://github.com/climate-federation/legoESM/issues/274).
 - **Term-by-term analytic atmosphere SW tests + plotter**;
   CFL-aware numerical-convergence tests + plotters.
 - **Williamson C2 cube-edge artifacts at C48** fixed. Issue
-  [#269](https://github.com/gentine/legoESM/issues/269).
+  [#269](https://github.com/climate-federation/legoESM/issues/269).
 - **Stratosphere mass-flux gate** added to convection schemes to
   prevent TOA T spikes (>400 K) in lat-lon FV RCE.
 
@@ -42,7 +42,7 @@ All notable changes to legoESM. Format roughly follows
   projection.
 - **OMIP-2 SSS restoring** + WOA SSS climatology loader; wired
   through the `FreshwaterForcing` channel. Issue
-  [#266](https://github.com/gentine/legoESM/issues/266).
+  [#266](https://github.com/climate-federation/legoESM/issues/266).
 - **AMOC@26.5°N diagnostic** for centennial spin-up; **multi-decade
   ocean spin-up library** (`ocean.spinup`) with RPE / volume / heat
   / salt drift tracking, declarative `ConvergenceCriteria`, Bryan–
@@ -50,7 +50,7 @@ All notable changes to legoESM. Format roughly follows
 - **Mass-conservation projection** in implicit barotropic solvers
   (lat-lon and MPAS).
 - **Veros peer-comparison harness** (`ocean/fidelity/`): DINO and
-  Eady adapters, regridder, and reports under `docs/ocean_fidelity/`.
+  Eady adapters, regridder, and reports under `docs/ocean/fidelity/`.
 - **Cross-grid metric consistency**: ocean matrix 57/57 PASS
   across lat-lon, tripolar, cubed-sphere, MPAS Voronoi.
 - **Ocean dissipation suite**: biharmonic Smagorinsky (#189),
@@ -99,12 +99,12 @@ All notable changes to legoESM. Format roughly follows
 ### Infrastructure / performance
 
 - **Persistent JAX JIT cache** enabled by default. Issue
-  [#273](https://github.com/gentine/legoESM/issues/273). Override
+  [#273](https://github.com/climate-federation/legoESM/issues/273). Override
   with `LEGOESM_JAX_CACHE_DIR=/path/to/cache`, disable with
   `LEGOESM_JAX_CACHE_DISABLE=1`.
 - **SPMD halo backend** activated in the AMIP production profile
   for multi-device runs. Issue
-  [#275](https://github.com/gentine/legoESM/issues/275).
+  [#275](https://github.com/climate-federation/legoESM/issues/275).
 - **MPI compatibility guardrails** in `legoesm.parallel.reductions`:
   hard-error for `mpi4jax<0.8`; warn for JAX / mpi4jax outside the
   tested range. Promote to hard error via
@@ -130,14 +130,14 @@ All notable changes to legoESM. Format roughly follows
 
 ### Documentation
 
-- New: [docs/getting_started.md](docs/getting_started.md) —
+- New: [docs/user-guide/getting_started.md](docs/user-guide/getting_started.md) —
   beginner onboarding.
-- New: [docs/scm.md](docs/scm.md) — single-column model.
+- New: [docs/user-guide/scm.md](docs/user-guide/scm.md) — single-column model.
 - New: this CHANGELOG.
 - Updated: [README.md](README.md),
-  [docs/cmip_readiness.md](docs/cmip_readiness.md),
-  [docs/md_files/ocean_experiments_reference.md](docs/md_files/ocean_experiments_reference.md),
-  [docs/REAL_HARDWARE_SCALING.md](docs/REAL_HARDWARE_SCALING.md).
+  [docs/validation/cmip_readiness.md](docs/validation/cmip_readiness.md),
+  [docs/dev-notes/ocean_experiments_reference.md](docs/dev-notes/ocean_experiments_reference.md),
+  [docs/performance/REAL_HARDWARE_SCALING.md](docs/performance/REAL_HARDWARE_SCALING.md).
 
 ---
 

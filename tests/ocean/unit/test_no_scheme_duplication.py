@@ -1,7 +1,7 @@
 """Enforcement test for ocean dynamics scheme consolidation (#214).
 
 Verifies that the shared helpers introduced under
-``src/legoesm/ocean/dynamics/`` are actually used by the grid-specific
+``legoesm/ocean/dynamics/`` are actually used by the grid-specific
 ``ocean_pe_*`` and ``barotropic_*`` files instead of being silently
 duplicated again the next time someone fixes a bug.
 
@@ -24,7 +24,7 @@ import pytest
 
 from tests.legoesm_paths import legoesm_source_path
 
-DYN = legoesm_source_path("ocean/dynamics")
+DYN = legoesm_source_path("ocean/dynamics/ocean_tendency_common.py").parent
 
 # Files that previously held duplicated logic and now should delegate
 # to the common modules.

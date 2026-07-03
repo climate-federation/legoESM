@@ -153,7 +153,7 @@ def _run_one_ah(A_h, grid, z_coord_base, H_bathy, ocean_mask, gm_redi_cfg,
         grid, z_coord_base, H_bathy, ocean_mask, config,
     )
 
-    ocean_config = LatLonCGridOceanConfig(
+    ocean_config = LatLonCGridOceanConfig.from_flat(
         n_barotropic_substeps=30,
         physics=physics,
         A_h=A_h,                           # <-- swept

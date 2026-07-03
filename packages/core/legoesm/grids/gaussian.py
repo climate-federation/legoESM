@@ -78,6 +78,125 @@ def _maybe_chunk_trailing(
 
 
 # =============================================================================
+# Batched-GEMM Legendre step (scaling review 2026-06-13 lever #2; OPT-IN)
+# =============================================================================
+# The default 3-D analysis/synthesis Legendre step is a broadcast-multiply +
+# ``jnp.sum`` / ``segment_sum`` over the gathered ``(n_lat, n_sh, nlev)``
+# intermediate — memory-bound, never a tensor-core GEMM.  Reformulated here as
+# a batched ``dot_general`` over the zonal wavenumber ``m`` (contract latitude,
+# free (n, nlev)).  Mathematically identical (same products + reduction, only
+# the summation grouping changes) → parity to fp round-off; AD-safe.  OPT-IN
+# via ``LEGOESM_SH_GEMM`` because the win needs fp64 tensor cores (Ampere+);
+# on Turing/CPU the default reduce is competitive (design:
+# docs/performance/scaling/sh_gemm_design_2026-06-13.md).
+
+
+def _sh_gemm_enabled() -> bool:
+    """True when the opt-in batched-GEMM Legendre path is requested.
+
+    Read at trace time (static Python bool) so the branch never doubles the
+    trace and stays AD-compatible — same discipline as
+    :func:`_sh_chunk_size`.  Case-insensitive so ``False``/``FALSE``/``No``
+    do NOT accidentally enable the opt-in path (codex 2026-06-13)."""
+    return os.environ.get("LEGOESM_SH_GEMM", "0").strip().lower() not in (
+        "0", "", "false", "no", "off")
+
+
+def _sh_gemm_bf16_enabled() -> bool:
+    """True when the SH-GEMM Legendre contraction should run in bfloat16.
+
+    Sub-mode of ``LEGOESM_SH_GEMM`` (no effect unless the GEMM path is also
+    enabled): casts the Legendre matmul operands to bf16 with fp32 accumulate
+    — the MXU/tensor-core reduced-precision throughput path on Ampere+/TPU.
+    Read at trace time (static Python bool), same discipline as
+    :func:`_sh_gemm_enabled`.
+
+    FORWARD / INFERENCE-ONLY: bf16 yields ~3-decimal-digit gradients, so this
+    must NOT be enabled on the differentiable-training path. The FFT stays
+    complex128 and the semi-implicit solve is untouched — only the Legendre
+    contraction is reduced-precision."""
+    return os.environ.get("LEGOESM_SH_GEMM_BF16", "0").strip().lower() not in (
+        "0", "", "false", "no", "off")
+
+
+def _legendre_contract(
+    spec: str, mat_real: jax.Array, field: jax.Array, compute_bf16: bool,
+) -> jax.Array:
+    """``jnp.einsum(spec, mat_real, field)`` with an optional bf16 compute path.
+
+    ``mat_real`` is a REAL Legendre matrix; ``field`` may be real or complex.
+    When ``compute_bf16`` is False this is byte-for-byte the default einsum (so
+    the non-bf16 GEMM path stays bit-identical to the legacy reduction). When
+    True, operands are cast to bfloat16 and accumulated in float32 (the
+    ``preferred_element_type``); a complex ``field`` is contracted as two real
+    matmuls (W·(a+ib) = W·a + i·W·b, the Legendre matrix being real) so bf16
+    never has to represent a complex value. The result is upcast back to the
+    field's dtype."""
+    if not compute_bf16:
+        return jnp.einsum(spec, mat_real, field)
+    m16 = mat_real.astype(jnp.bfloat16)
+    if jnp.iscomplexobj(field):
+        re = jnp.einsum(spec, m16, field.real.astype(jnp.bfloat16),
+                        preferred_element_type=jnp.float32)
+        im = jnp.einsum(spec, m16, field.imag.astype(jnp.bfloat16),
+                        preferred_element_type=jnp.float32)
+        return (re + 1j * im).astype(field.dtype)
+    return jnp.einsum(spec, m16, field.astype(jnp.bfloat16),
+                      preferred_element_type=jnp.float32).astype(field.dtype)
+
+
+def _flat_to_bym(
+    mat: jax.Array, ms: jax.Array, ls: jax.Array, n_max: int,
+) -> jax.Array:
+    """Scatter a flat ``(n_lat, n_sh)`` SH matrix to the dense ``(m, n, lat)``
+    block layout ``(n_max+1, n_max+1, n_lat)`` (zero where ``n < m``).
+
+    ``out[ms[k], ls[k], :] = mat[:, k]`` so for triangular truncation
+    ``out[m, n, lat] == mat[lat, _sh_idx(n, m)]``.  Built on demand from the
+    grid's existing Legendre matrices (no new pytree fields)."""
+    n_lat = mat.shape[0]
+    out = jnp.zeros((n_max + 1, n_max + 1, n_lat), dtype=mat.dtype)
+    return out.at[ms, ls, :].set(mat.T)
+
+
+def _analysis_legendre_gemm(
+    W: jax.Array, f_m: jax.Array, ms: jax.Array, ls: jax.Array, n_max: int,
+) -> jax.Array:
+    """Batched-GEMM Legendre analysis contraction.
+
+    ``W`` is a weighted Legendre matrix ``(n_lat, n_sh)`` (wPnm / wPnm_oc2 /
+    wDnm); ``f_m`` is the per-latitude Fourier field ``(n_lat, n_max+1, nlev)``
+    (m-indexed, NO gather).  Returns ``coeffs`` ``(n_sh, nlev)`` =
+    ``Σ_lat W[lat,k]·f_m[lat, m(k)]`` — identical to
+    ``Σ_lat W[:,k,None]·f_m[:,m(k)]`` but via one batched ``dot_general`` over
+    m.  Caller applies the ``2π`` prefactor (matching the legacy kernels)."""
+    W_bym = _flat_to_bym(W, ms, ls, n_max)            # (m, n, lat)
+    coeffs_bym = _legendre_contract(
+        "mnl,lmv->mnv", W_bym, f_m, _sh_gemm_bf16_enabled())  # (m, n, nlev)
+    return coeffs_bym[ms, ls, :]                       # (n_sh, nlev)
+
+
+def _synthesis_legendre_gemm(
+    P: jax.Array, coeffs: jax.Array, ms: jax.Array, ls: jax.Array,
+    n_max: int,
+) -> jax.Array:
+    """Batched-GEMM Legendre synthesis contraction (inverse of
+    :func:`_analysis_legendre_gemm`).
+
+    ``P`` is a Legendre matrix ``(n_lat, n_sh)`` (Pnm / Hnm); ``coeffs`` is
+    ``(n_sh, nlev)``.  Returns ``f_m`` ``(n_lat, n_max+1, nlev)`` =
+    ``Σ_{n>=m} P[lat, k(n,m)]·coeffs[k(n,m)]`` grouped by m — identical to the
+    legacy ``segment_sum`` by ``ms`` but via one batched ``dot_general``."""
+    nlev = coeffs.shape[-1]
+    P_bym = _flat_to_bym(P, ms, ls, n_max)            # (m, n, lat)
+    coeffs_bym = jnp.zeros(
+        (n_max + 1, n_max + 1, nlev), dtype=coeffs.dtype,
+    ).at[ms, ls, :].set(coeffs)                        # (m, n, nlev)
+    return _legendre_contract(
+        "mnl,mnv->lmv", P_bym, coeffs_bym, _sh_gemm_bf16_enabled())  # (n_lat,n_max+1,nlev)
+
+
+# =============================================================================
 # Grid definition
 # =============================================================================
 
@@ -259,18 +378,19 @@ def create_gaussian_grid(
     from legoesm.runtime.backend import check_spectral_backend, get_backend
     backend = get_backend()
 
-    # On Metal we can still run spectral dynamics by hosting grid/transforms on
-    # CPU and routing the spectral model there. Keep strict x64 requirement.
-    if backend == "metal":
+    # On the Apple GPU (mps) backend we can still run spectral dynamics by
+    # hosting grid/transforms on CPU and routing the spectral model there.
+    # Keep strict x64 requirement.
+    if backend == "mps":
         if not jax.config.jax_enable_x64:
             raise ValueError(
-                "Gaussian spectral grid on Metal requires JAX_ENABLE_X64=True "
-                "for CPU spectral fallback."
+                "Gaussian spectral grid on Apple GPU (mps) requires "
+                "JAX_ENABLE_X64=True for CPU spectral fallback."
             )
         if not allow_unsupported_backend:
             warnings.warn(
-                "Metal backend detected. Creating Gaussian spectral grid on CPU "
-                "for spectral fallback.",
+                "Apple GPU (mps) backend detected. Creating Gaussian spectral "
+                "grid on CPU for spectral fallback.",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -341,7 +461,7 @@ def create_gaussian_grid(
     lon2d_np, lat2d_np = np.meshgrid(lon_np, lat_np)
     f_np = 2.0 * float(omega) * sin_lat_np[:, None] * np.ones((1, n_lon))
 
-    target_device = jax.devices("cpu")[0] if backend == "metal" else None
+    target_device = jax.devices("cpu")[0] if backend == "mps" else None
 
     def _to_jax(array, dtype):
         np_arr = np.asarray(array, dtype=dtype)
@@ -781,6 +901,55 @@ def spectral_hyperdiffusion(
     return damping * coeffs
 
 
+def dealiasing_mask(grid: GaussianGrid, fraction: float = 0.667) -> jax.Array:
+    """Orszag 2/3-rule de-aliasing mask for spectral nonlinear products.
+
+    Returns a real ``(n_sh,)`` multiplier that is ``1.0`` for every
+    spherical-harmonic coefficient with total wavenumber
+    ``n <= floor(fraction * n_max)`` and ``0.0`` above it.  Multiplying a
+    spectral *tendency* (or a transformed nonlinear product) by this mask
+    discards the upper ``1 - fraction`` band of wavenumbers, which is
+    where the quadratic/cubic products fold spurious aliased power back
+    into the resolved spectrum on a triangular-truncation Gaussian grid.
+
+    The default ``fraction = 2/3`` is the Orszag (1971) rule: a quadratic
+    nonlinearity ``a*b`` of two fields truncated at ``n_max`` produces
+    content up to ``2*n_max``; retaining only ``n <= (2/3)*n_max`` of each
+    factor guarantees the aliased part (``n > n_max`` folded down) lands
+    above the retained band and is removed.
+
+    This is the single canonical de-aliasing mechanism shared by every
+    spectral dycore (``spectral_pe``, ``spectral_nh``, ``spectral_sw``);
+    do not re-derive the ``ls <= n_cut`` truncation inline.
+
+    Parameters
+    ----------
+    grid : GaussianGrid
+        Carries ``ls`` (total wavenumber ``n`` per SH index) and the
+        triangular truncation ``n_max``.
+    fraction : float
+        Retained fraction of the spectrum.  ``2/3`` (default) is the
+        standard Orszag rule for quadratic nonlinearities.  Values
+        ``<= 0`` return an all-ones mask (de-aliasing disabled), so a
+        caller can gate the feature on a single config float without a
+        Python ``if`` around the multiply.
+
+    Returns
+    -------
+    (n_sh,) float64 array of 1.0 / 0.0.
+
+    References
+    ----------
+    - Orszag, S. A. (1971): On the elimination of aliasing in
+      finite-difference schemes by filtering high-wavenumber components.
+      J. Atmos. Sci., 28, 1074.
+    """
+    if fraction <= 0.0:
+        return jnp.ones((grid.n_sh,), dtype=jnp.float64)
+    n_cut = int(fraction * grid.n_max)
+    return jnp.where(grid.ls <= n_cut, 1.0, 0.0).astype(jnp.float64)
+
+
 # =============================================================================
 # 3D (level-wise) transform wrappers via vmap
 # =============================================================================
@@ -805,25 +974,58 @@ def sh_analysis_3d(grid: GaussianGrid, field_3d: jax.Array) -> jax.Array:
     -------
     (n_sh, nlev) complex array.
     """
+    # Value (unweighted Pnm) analysis is exactly the ``weight = wPnm`` case
+    # of the shared weighted kernel, which carries both the legacy latitude
+    # sum and the opt-in ``LEGOESM_SH_GEMM`` ``dot_general`` path.  One
+    # analysis core for the value / oc2 / dmu variants (no duplicated
+    # Legendre numerics); trailing-axis chunking handled inside.
+    return _sh_analysis_weighted_3d(grid, field_3d, grid.wPnm)
+
+
+def _synthesis_3d_with_matrix(
+    grid: GaussianGrid, coeffs_3d: jax.Array, P_matrix: jax.Array,
+) -> jax.Array:
+    """Shared batched inverse SH synthesis for a given Legendre matrix.
+
+    ``P_matrix`` selects the transform: ``grid.Pnm`` → value synthesis
+    (:func:`sh_synthesis_3d`); ``grid.Hnm`` → θ-derivative synthesis
+    (:func:`sh_synthesis_H_3d`).  Both the legacy ``segment_sum`` path and
+    the opt-in ``LEGOESM_SH_GEMM`` ``dot_general`` path
+    (:func:`_synthesis_legendre_gemm`) live here ONCE, so the two public
+    variants share a single body — no duplicated Legendre numerics.
+    Trailing-axis chunking via ``LEGOESM_SH_CHUNK_SIZE`` (iter 4).
+    """
+    n_lat = grid.n_lat
     n_lon = grid.n_lon
     n_max = grid.n_max
-    ms = grid.ms
+    ms = grid.ms  # (n_sh,)
 
-    def _kernel(field):
-        # FFT along longitude (axis 1) → (n_lat, n_lon//2+1, n_batch).
-        f_hat_lon = jnp.fft.rfft(field, axis=1) / n_lon
-        f_m = f_hat_lon[:, :n_max + 1, :]              # (n_lat, n_max+1, n_batch)
-        f_m_gathered = f_m[:, ms, :]                    # (n_lat, n_sh, n_batch)
-        # Sum over latitudes; ``wPnm`` is (n_lat, n_sh) — broadcast.
-        return 2.0 * jnp.pi * jnp.sum(
-            grid.wPnm[:, :, None] * f_m_gathered, axis=0,
+    def _kernel(coeffs):
+        if _sh_gemm_enabled():
+            f_m = _synthesis_legendre_gemm(
+                P_matrix, coeffs, grid.ms, grid.ls, n_max)  # (n_lat,n_max+1,nlev)
+        else:
+            # contributions: (n_lat, n_sh, nlev_chunk) — P_matrix broadcasts.
+            contributions = P_matrix[..., None] * coeffs[None, :, :]
+            # segment_sum operates on the leading axis; permute
+            # (n_sh, n_lat, n_batch), group, then permute back to
+            # (n_lat, n_max+1, n_batch).
+            f_m = jnp.swapaxes(
+                jax.ops.segment_sum(
+                    jnp.swapaxes(contributions, 0, 1),
+                    ms,
+                    num_segments=n_max + 1,
+                ),
+                0, 1,
+            )
+        nlev_chunk = coeffs.shape[-1]
+        f_hat_full = jnp.zeros(
+            (n_lat, n_lon // 2 + 1, nlev_chunk), dtype=jnp.complex128,
         )
+        f_hat_full = f_hat_full.at[:, :n_max + 1, :].set(f_m)
+        return jnp.fft.irfft(f_hat_full * n_lon, n=n_lon, axis=1).real
 
-    # field_3d has trailing axis = level (axis -1 == 2); the kernel
-    # output's trailing axis is also level (axis -1 == 1 for output
-    # shape (n_sh, nlev)) so chunking on axis -1 of the input chunks
-    # the kernel's output too.  Concatenate along the same axis.
-    return _maybe_chunk_trailing(_kernel, field_3d, _sh_chunk_size(), axis=-1)
+    return _maybe_chunk_trailing(_kernel, coeffs_3d, _sh_chunk_size(), axis=-1)
 
 
 def sh_synthesis_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
@@ -846,33 +1048,7 @@ def sh_synthesis_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
     -------
     (n_lat, n_lon, nlev) real array.
     """
-    n_lat = grid.n_lat
-    n_lon = grid.n_lon
-    n_max = grid.n_max
-    ms = grid.ms  # (n_sh,)
-
-    def _kernel(coeffs):
-        # contributions: (n_lat, n_sh, nlev_chunk) — Pnm broadcasts.
-        contributions = grid.Pnm[..., None] * coeffs[None, :, :]
-        # segment_sum operates on the leading axis; permute
-        # (n_sh, n_lat, n_batch), group, then permute back to
-        # (n_lat, n_max+1, n_batch).
-        f_m = jnp.swapaxes(
-            jax.ops.segment_sum(
-                jnp.swapaxes(contributions, 0, 1),
-                ms,
-                num_segments=n_max + 1,
-            ),
-            0, 1,
-        )
-        nlev_chunk = coeffs.shape[-1]
-        f_hat_full = jnp.zeros(
-            (n_lat, n_lon // 2 + 1, nlev_chunk), dtype=jnp.complex128,
-        )
-        f_hat_full = f_hat_full.at[:, :n_max + 1, :].set(f_m)
-        return jnp.fft.irfft(f_hat_full * n_lon, n=n_lon, axis=1).real
-
-    return _maybe_chunk_trailing(_kernel, coeffs_3d, _sh_chunk_size(), axis=-1)
+    return _synthesis_3d_with_matrix(grid, coeffs_3d, grid.Pnm)
 
 
 def sh_synthesis_H_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
@@ -884,30 +1060,45 @@ def sh_synthesis_H_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
 
     Memory: trailing-axis chunking via ``LEGOESM_SH_CHUNK_SIZE`` —
     see :func:`_maybe_chunk_trailing` (iter 4).
+
+    Routes through the shared :func:`_synthesis_3d_with_matrix` core with
+    ``grid.Hnm`` (the θ-derivative Legendre matrix), so it inherits the
+    opt-in ``LEGOESM_SH_GEMM`` ``dot_general`` path identically to
+    :func:`sh_synthesis_3d`.
     """
-    n_lat = grid.n_lat
-    n_lon = grid.n_lon
+    return _synthesis_3d_with_matrix(grid, coeffs_3d, grid.Hnm)
+
+
+def _sh_analysis_weighted_3d(
+    grid: GaussianGrid, field_3d: jax.Array, weight_matrix: jax.Array,
+) -> jax.Array:
+    """Batched forward SH analysis weighted by ``weight_matrix`` (n_lat, n_sh).
+
+    rfft over longitude → slice m≤n_max → ``2π·Σ_lat (weight·f_m)``,
+    trailing-axis chunked.  THE shared analysis core for every scalar
+    forward variant — value (``wPnm``, via :func:`sh_analysis_3d`), ``oc2``
+    (``wPnm_oc2``, 1/cos²) and ``dmu`` (``wDnm``, dPnm/dμ) — carrying BOTH
+    the legacy latitude sum and the opt-in ``LEGOESM_SH_GEMM``
+    ``dot_general`` path (:func:`_analysis_legendre_gemm`).  The only
+    difference between the variants is ``weight_matrix``; the Legendre
+    numerics live in one place.
+    """
     n_max = grid.n_max
-    ms = grid.ms
 
-    def _kernel(coeffs):
-        contributions = grid.Hnm[..., None] * coeffs[None, :, :]
-        f_m = jnp.swapaxes(
-            jax.ops.segment_sum(
-                jnp.swapaxes(contributions, 0, 1),
-                ms,
-                num_segments=n_max + 1,
-            ),
-            0, 1,
+    def _kernel(field):
+        f_hat_lon = jnp.fft.rfft(field, axis=1) / grid.n_lon
+        f_m = f_hat_lon[:, :n_max + 1, :]               # (n_lat, n_max+1, n_batch)
+        if _sh_gemm_enabled():
+            # m-indexed GEMM contraction — no gather (matches the legacy
+            # output to ~1e-12 in f64; see tests/unit/test_sh_gemm.py).
+            return 2.0 * jnp.pi * _analysis_legendre_gemm(
+                weight_matrix, f_m, grid.ms, grid.ls, n_max)
+        f_m_gathered = f_m[:, grid.ms, :]
+        return 2.0 * jnp.pi * jnp.sum(
+            weight_matrix[:, :, None] * f_m_gathered, axis=0,
         )
-        nlev_chunk = coeffs.shape[-1]
-        f_hat_full = jnp.zeros(
-            (n_lat, n_lon // 2 + 1, nlev_chunk), dtype=jnp.complex128,
-        )
-        f_hat_full = f_hat_full.at[:, :n_max + 1, :].set(f_m)
-        return jnp.fft.irfft(f_hat_full * n_lon, n=n_lon, axis=1).real
 
-    return _maybe_chunk_trailing(_kernel, coeffs_3d, _sh_chunk_size(), axis=-1)
+    return _maybe_chunk_trailing(_kernel, field_3d, _sh_chunk_size(), axis=-1)
 
 
 def sh_analysis_oc2_3d(
@@ -920,17 +1111,7 @@ def sh_analysis_oc2_3d(
     the trailing level axis.  Trailing-axis chunking via
     ``LEGOESM_SH_CHUNK_SIZE`` (iter 4).
     """
-    n_max = grid.n_max
-
-    def _kernel(field):
-        f_hat_lon = jnp.fft.rfft(field, axis=1) / grid.n_lon
-        f_m = f_hat_lon[:, :n_max + 1, :]
-        f_m_gathered = f_m[:, grid.ms, :]
-        return 2.0 * jnp.pi * jnp.sum(
-            grid.wPnm_oc2[:, :, None] * f_m_gathered, axis=0,
-        )
-
-    return _maybe_chunk_trailing(_kernel, field_3d, _sh_chunk_size(), axis=-1)
+    return _sh_analysis_weighted_3d(grid, field_3d, grid.wPnm_oc2)
 
 
 def sh_analysis_dmu_3d(
@@ -942,17 +1123,7 @@ def sh_analysis_dmu_3d(
     the trailing level axis.  Trailing-axis chunking via
     ``LEGOESM_SH_CHUNK_SIZE`` (iter 4).
     """
-    n_max = grid.n_max
-
-    def _kernel(field):
-        f_hat_lon = jnp.fft.rfft(field, axis=1) / grid.n_lon
-        f_m = f_hat_lon[:, :n_max + 1, :]
-        f_m_gathered = f_m[:, grid.ms, :]
-        return 2.0 * jnp.pi * jnp.sum(
-            grid.wDnm[:, :, None] * f_m_gathered, axis=0,
-        )
-
-    return _maybe_chunk_trailing(_kernel, field_3d, _sh_chunk_size(), axis=-1)
+    return _sh_analysis_weighted_3d(grid, field_3d, grid.wDnm)
 
 
 def sh_analysis_oc2_dmu_3d(
@@ -983,10 +1154,18 @@ def sh_analysis_oc2_dmu_3d(
     n_max = grid.n_max
     f_hat_lon = jnp.fft.rfft(field_3d, axis=1) / grid.n_lon
     f_m = f_hat_lon[:, :n_max + 1, :]
-    f_m_gathered = f_m[:, grid.ms, :]
     twoπ = 2.0 * jnp.pi
-    oc2 = twoπ * jnp.sum(grid.wPnm_oc2[:, :, None] * f_m_gathered, axis=0)
-    dmu = twoπ * jnp.sum(grid.wDnm[:, :, None] * f_m_gathered, axis=0)
+    if _sh_gemm_enabled():
+        # One shared FFT, two GEMM contractions (no gather) — matches the
+        # two standalone GEMM analyses and the legacy fused output.
+        oc2 = twoπ * _analysis_legendre_gemm(
+            grid.wPnm_oc2, f_m, grid.ms, grid.ls, n_max)
+        dmu = twoπ * _analysis_legendre_gemm(
+            grid.wDnm, f_m, grid.ms, grid.ls, n_max)
+    else:
+        f_m_gathered = f_m[:, grid.ms, :]
+        oc2 = twoπ * jnp.sum(grid.wPnm_oc2[:, :, None] * f_m_gathered, axis=0)
+        dmu = twoπ * jnp.sum(grid.wDnm[:, :, None] * f_m_gathered, axis=0)
     return oc2, dmu
 
 

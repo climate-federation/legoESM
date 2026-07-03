@@ -90,6 +90,66 @@ class TestCDGridShallowWater:
 
 
 # ============================================================================
+# 1a  Shallow Water — lat-lon C-grid (8x16)
+# ============================================================================
+
+class TestLatLonShallowWater:
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+            CGridLatLonShallowWaterModel, CGridLatLonShallowWaterConfig,
+            williamson_test2_cgrid,
+        )
+        n_lat, n_lon = 8, 16
+        grid = create_latlon_grid(n_lat, n_lon)
+        # Disable mass fixer: the anchored fixer snapshots a *static* fp64
+        # target on the first (un-traced) step, captured as a constant
+        # inside jax.grad — keep the loss an honest function of h.
+        config = CGridLatLonShallowWaterConfig(fix_mass=False)
+        self.model = CGridLatLonShallowWaterModel(grid, config)
+        self.dt = 60.0
+        # Williamson-2 balanced state + Gaussian perturbation in h.
+        # The grid/initial state are built at the policy storage dtype
+        # (fp32 under the default policy); ``step`` casts to compute
+        # (fp64 with x64) and back, so for a multi-step ``lax.scan`` the
+        # initial carry must already carry the dtype ``step`` returns or
+        # the scan carry-type check fails.  Promote the whole state.
+        state = williamson_test2_cgrid(grid)
+        key = jax.random.PRNGKey(1)
+        h0 = state.h + 5.0 * jax.random.normal(key, state.h.shape)
+        state = state._replace(h=h0)
+        self.state = jax.tree_util.tree_map(
+            lambda a: a.astype(jnp.float64), state,
+        )
+
+    def test_grad_single_step(self):
+        model, state, dt = self.model, self.state, self.dt
+
+        def loss(h_data):
+            s = state._replace(h=h_data)
+            out = model.step(s, dt)
+            return jnp.sum(out.h ** 2)
+
+        grad = jax.grad(loss)(state.h)
+        assert_gradient_ok(grad, "LatLon SW single step")
+
+    def test_grad_5_steps(self):
+        model, state, dt = self.model, self.state, self.dt
+
+        def loss(h_data):
+            s = state._replace(h=h_data)
+            def body(carry, _):
+                return model.step(carry, dt), None
+            s_final, _ = jax.lax.scan(body, s, None, length=5)
+            return jnp.sum(s_final.h ** 2)
+
+        grad = jax.grad(loss)(state.h)
+        assert_gradient_ok(grad, "LatLon SW 5 steps")
+
+
+# ============================================================================
 # 1a  Shallow Water — spectral (T5)
 # ============================================================================
 
@@ -264,6 +324,68 @@ class TestCDGridPE:
 
 
 # ============================================================================
+# 1b  Hydrostatic PE — lat-lon C-grid (8x16, 5 levels)
+# ============================================================================
+
+class TestLatLonPE:
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        import math
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+            CGridLatLonPrimitiveEquationModel,
+            CGridLatLonPrimitiveEquationConfig,
+            hydrostatic_to_cgrid,
+        )
+        from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+
+        n_lat, n_lon, nlev = 8, 16, 5
+        grid = create_latlon_grid(n_lat, n_lon)
+        sigma = create_sigma_coordinate(nlev)
+        dx_pole = float(grid.radius) * grid.dlon * math.cos(
+            math.pi / 2 - grid.dlat / 2
+        )
+        self.dt = min(120.0, 0.5 * dx_pole / 300.0)
+        # fix_mass off for AD honesty (anchored fixer captures a static
+        # target that would otherwise distort gradients).
+        config = CGridLatLonPrimitiveEquationConfig(fix_mass=False)
+        self.model = CGridLatLonPrimitiveEquationModel(
+            grid, sigma, config, dt=self.dt,
+        )
+        # Held-Suarez initial condition on the native C-grid layout
+        # (T has horizontal + vertical structure) — raw arrays.
+        self.state = hydrostatic_to_cgrid(
+            held_suarez_init_latlon(grid, sigma), grid,
+        )
+
+    def test_grad_single_step(self):
+        model, state, dt = self.model, self.state, self.dt
+
+        def loss(T_data):
+            s = state._replace(T=T_data)
+            out = model.step(s, dt)
+            return jnp.sum(out.T ** 2)
+
+        grad = jax.grad(loss)(state.T)
+        assert_gradient_ok(grad, "LatLon PE single step")
+
+    def test_grad_3_steps(self):
+        model, state, dt = self.model, self.state, self.dt
+
+        def loss(T_data):
+            s = state._replace(T=T_data)
+            def body(carry, _):
+                return model.step(carry, dt), None
+            s_final, _ = jax.lax.scan(body, s, None, length=3)
+            return jnp.sum(s_final.T ** 2)
+
+        grad = jax.grad(loss)(state.T)
+        assert_gradient_ok(grad, "LatLon PE 3 steps")
+
+
+# ============================================================================
 # 1c  Nonhydrostatic Compressible Euler — CD-grid (C4, 5 levels)
 # ============================================================================
 
@@ -311,6 +433,20 @@ class TestCompressibleEuler:
 
         grad = jax.grad(loss)(state.theta_prime.data)
         assert_gradient_ok(grad, "CompEuler single step")
+
+    def test_grad_3_steps(self):
+        model, state, dt = self.model, self.state, self.dt
+
+        def loss(theta_data):
+            s = state._replace(
+                theta_prime=state.theta_prime.replace(data=theta_data))
+            def body(carry, _):
+                return model.step(carry, dt), None
+            s_final, _ = jax.lax.scan(body, s, None, length=3)
+            return jnp.sum(s_final.theta_prime.data ** 2)
+
+        grad = jax.grad(loss)(state.theta_prime.data)
+        assert_gradient_ok(grad, "CompEuler 3 steps")
 
 
 # ============================================================================
@@ -367,3 +503,17 @@ class TestSpectralPE:
 
         grad = jax.grad(loss)(state.T_hat.data.real)
         assert_gradient_ok(grad, "Spectral PE single step")
+
+    def test_grad_3_steps(self):
+        model, state, dt = self.model, self.state, self.dt
+
+        def loss(T_real):
+            T_hat_new = T_real + 1j * state.T_hat.data.imag
+            s = state._replace(T_hat=state.T_hat.replace(data=T_hat_new))
+            def body(carry, _):
+                return model.step(carry, dt), None
+            s_final, _ = jax.lax.scan(body, s, None, length=3)
+            return jnp.sum(jnp.abs(s_final.T_hat.data) ** 2)
+
+        grad = jax.grad(loss)(state.T_hat.data.real)
+        assert_gradient_ok(grad, "Spectral PE 3 steps")

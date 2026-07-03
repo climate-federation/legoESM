@@ -164,6 +164,37 @@ from run_levante_gpu_scaling import (  # noqa: E402
     write_json,
 )
 
+
+def _configure_jax_gpu(precision: str) -> None:
+    """Pin THIS MPI rank to one local GPU and run JAX on cuda.
+
+    The ocean lat-lon multi-GPU path: each rank owns a latitude band on its
+    OWN GPU; halos cross the PCIe pair via the same mpi4jax sendrecv as the
+    CPU path.  Must run BEFORE any JAX import (sets CUDA_VISIBLE_DEVICES +
+    JAX_PLATFORMS).  Local rank from the MPI launcher env (OpenMPI / SLURM).
+    """
+    local = (os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
+             or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK"))
+    if local is None:
+        # SLURM_LOCALID is exported even in a plain sbatch step (ntasks=1, no
+        # srun); pinning on it THERE hides all but GPU 0 from a single-process
+        # multi-GPU run (the documented silent eff=0.5 bug, jobs 8454397/
+        # 8454737). Only honor it for a genuine multi-task launch (codex
+        # capstone LOW).
+        slid = os.environ.get("SLURM_LOCALID")
+        nt = os.environ.get("SLURM_NTASKS", "1")
+        if slid is not None and nt.isdigit() and int(nt) > 1:
+            local = slid
+    if local is None:
+        local = "0"
+    os.environ["CUDA_VISIBLE_DEVICES"] = local   # one GPU visible per rank
+    os.environ["JAX_PLATFORMS"] = "cuda"
+    if precision == "float64":
+        os.environ["JAX_ENABLE_X64"] = "1"
+    # Do NOT preallocate the whole GPU (two ranks share a node; each takes
+    # its own device but the allocator must not grab 90% up front).
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
 # Benchmark-excitation parameters (NOT physics tunables): a small
 # deterministic, mask-aware perturbation of the rest state so the timed
 # step exercises non-trivial dynamics (gravity waves + advection) and
@@ -306,6 +337,7 @@ def _build_global_problem(
     n_lat: int, n_lon: int, nlev: int, baro_solver: str,
     *, force_pcg: bool = False, pcg_variant: str = "standard",
     preconditioner: str = "jacobi", fixed_iters: int = 60,
+    cheby_degree: int = 4,
 ):
     """Global grid + z-coordinate + config + perturbed global IC.
 
@@ -328,13 +360,26 @@ def _build_global_problem(
 
     grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
     z_coord = create_ocean_z_star(n_levels=nlev)
-    config = LatLonCGridOceanConfig(
+    import os as _os
+    config = LatLonCGridOceanConfig.from_flat(
         barotropic_solver=baro_solver,
         barotropic_implicit_force_pcg=force_pcg,
         barotropic_implicit_pcg_variant=pcg_variant,
         barotropic_implicit_preconditioner=preconditioner,
         barotropic_implicit_pcg_fixed_iters=fixed_iters,
+        # SOTA-local split-explicit barotropic lever (explicit_substep only):
+        # LEGOESM_BARO_LOCAL_CLAMP=1 -> per-substep eta-floor clamp local,
+        # global redistribute once/step (cuts ~3*n_substeps subcycle allreduces
+        # to 3). Measures the multi-node strong-scaling gain vs the legacy
+        # per-substep-redistribute path.
+        barotropic_local_subcycle_clamp=(
+            _os.environ.get("LEGOESM_BARO_LOCAL_CLAMP", "0") == "1"),
     )
+    # chebyshev degree: the config has no degree field (the factory reads
+    # getattr(config, "barotropic_chebyshev_degree", 4)); the bench uses the
+    # default degree-4 path (no shared-config change). cheby_degree kept in
+    # the signature for callers that set the attr explicitly.
+    _ = cheby_degree
     state_global = rest_state_latlon_cgrid_ocean(grid, z_coord)
     state_global = _perturb_state(state_global, grid)
     return grid, z_coord, config, state_global
@@ -351,6 +396,7 @@ def build_case(
     pcg_variant: str = "standard",
     preconditioner: str = "jacobi",
     fixed_iters: int = 60,
+    force_pcg: bool = False,
 ):
     """Build (model, state, total_cells, layout) for one benchmark case.
 
@@ -367,9 +413,15 @@ def build_case(
     _ensure_precision(precision)
 
     # (1) Global grid + IC with the LOCAL halo backend.
+    # ``force_pcg`` forces the fixed-M PCG even at a SINGLE rank so a 1-vs-N
+    # strong-scaling ratio compares the SAME barotropic solver both sides
+    # (else np=1 stock jax.scipy CG vs np>=2 fixed-M PCG is apples-to-oranges
+    # — codex route-A review Q5).  At n_ranks>1 the is_distributed dispatch
+    # already uses the PCG, so this only changes the np=1 baseline.
     grid, z_coord, config, state_global = _build_global_problem(
         n_lat, n_lon, nlev, baro_solver, pcg_variant=pcg_variant,
         preconditioner=preconditioner, fixed_iters=fixed_iters,
+        force_pcg=force_pcg,
     )
 
     total_cells = n_lat * n_lon * nlev
@@ -985,7 +1037,7 @@ def _make_phase_advancers(model, dt: float):
         from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
             barotropic_substeps_latlon_cgrid,
         )
-        n_sub = config.n_barotropic_substeps
+        n_sub = config.barotropic.n_barotropic_substeps
         dt_s = dt_mom / n_sub
         state_new, _ = barotropic_substeps_latlon_cgrid(
             state, dt_s, n_sub, grid, z_coord, config,
@@ -1006,8 +1058,8 @@ def _make_phase_advancers(model, dt: float):
                   "(EOS+PGF+momadv+w); no global reduction"),
         ),
     }
-    if config.barotropic_solver == "implicit_cn":
-        M = int(config.barotropic_implicit_pcg_fixed_iters)
+    if config.barotropic.barotropic_solver == "implicit_cn":
+        M = int(config.barotropic.barotropic_implicit_pcg_fixed_iters)
         # Predictor + RHS-divergence halos (config/shape-fixed, value-
         # independent); 2*M in-loop allreduces from the distributed PCG.
         specs["barotropic"] = PhaseSpec(
@@ -1022,7 +1074,7 @@ def _make_phase_advancers(model, dt: float):
                   f"regardless of resolution — the weak-scaling lever vs "
                   f"explicit_substep)"),
         )
-    elif config.barotropic_solver == "explicit_substep":
+    elif config.barotropic.barotropic_solver == "explicit_substep":
         # Codex finding 3 (+ re-review): do not hide the explicit-substep
         # barotropic block in the residual, and count its reductions
         # CORRECTLY.  Each of the n_sub substeps runs the eta-floor
@@ -1050,8 +1102,8 @@ def _make_phase_advancers(model, dt: float):
         _fi = int(
             _inspect.signature(_cr).parameters["n_iter"].default
         )
-        n_sub = int(config.n_barotropic_substeps)
-        _alpha_on = float(getattr(config, "barotropic_diffusion_alpha", 0.0)) > 0.0
+        n_sub = int(config.barotropic.n_barotropic_substeps)
+        _alpha_on = float(getattr(config.barotropic, "barotropic_diffusion_alpha", 0.0)) > 0.0
         _red_per_sub = _fi * (2 if _alpha_on else 1)
         _halo_per_sub = 4 + (2 if _alpha_on else 0)
         specs["barotropic"] = PhaseSpec(
@@ -1067,7 +1119,7 @@ def _make_phase_advancers(model, dt: float):
                   f"avoids; NOT directly comparable to the 2*M PCG-dots "
                   f"integer)"),
         )
-    elif config.barotropic_solver == "rigid_lid":
+    elif config.barotropic.barotropic_solver == "rigid_lid":
         # rigid_lid needs the host-side island flood-fill (rl_data built
         # from the concrete state via _ensure_rigid_lid_data) + a CG solve
         # whose iteration count is residual-dependent — not cleanly
@@ -1622,7 +1674,7 @@ def _uninstrumented_active_blocks(config, freshwater) -> list[str]:
             "freshwater virtual-salt block (~:1617-1665; this bench passes "
             "freshwater=None, so normally inactive)"
         )
-    if getattr(config, "use_polar_filter", False):
+    if config.polar_filter.use_polar_filter:
         active.append("use_polar_filter (post-step Fourier filter)")
     if getattr(config, "freeze_floor", False):
         active.append("freeze_floor (post-step SST clamp)")
@@ -1703,11 +1755,11 @@ def profile_phases(
     # Barotropic reduction-latency FLOOR (config-derived, timing-free):
     # 2*M allreduces/step * per-allreduce latency.  M is the fixed PCG
     # iteration count; only meaningful on the distributed implicit_cn path.
-    M = int(model.config.barotropic_implicit_pcg_fixed_iters)
+    M = int(model.config.barotropic.barotropic_implicit_pcg_fixed_iters)
     allreduce_count = 2 * M
     baro_latency_floor_ms = (
         allreduce_count * allreduce_latency_us / 1000.0
-        if (n_ranks > 1 and model.config.barotropic_solver == "implicit_cn")
+        if (n_ranks > 1 and model.config.barotropic.barotropic_solver == "implicit_cn")
         else 0.0
     )
 
@@ -1971,6 +2023,14 @@ def build_parser() -> argparse.ArgumentParser:
              "any JAX import / model build.",
     )
     p.add_argument(
+        "--device", choices=["cpu", "gpu"], default="cpu",
+        help="cpu (default): CPU-MPI, 1 thread/rank. gpu: each MPI rank "
+             "pins to ONE local GPU (CUDA_VISIBLE_DEVICES=local-rank) and "
+             "runs JAX on cuda — the ocean lat-lon multi-GPU path "
+             "(mpi4jax halos over the PCIe pair). Launch e.g. "
+             "`mpirun -np 2 ... --device gpu` on a 2-GPU node.",
+    )
+    p.add_argument(
         "--baro-solver", choices=list(BARO_SOLVER_CHOICES),
         default="implicit_cn",
         help="Barotropic solver. implicit_cn matches the serial "
@@ -1999,17 +2059,29 @@ def build_parser() -> argparse.ArgumentParser:
              "per solve) — the multi-node weak-scaling lever.",
     )
     p.add_argument(
-        "--preconditioner", choices=["jacobi", "zonal_line"],
+        "--preconditioner",
+        choices=["jacobi", "zonal_line", "chebyshev", "multigrid"],
         default="jacobi",
-        help="Implicit-CN PCG preconditioner: 'jacobi' (legacy) or "
+        help="Implicit-CN PCG preconditioner: 'jacobi' (legacy), "
              "'zonal_line' (exact periodic-tridiagonal row solves; "
-             "comm-free under band MPI; M-sweep 8473872: equal "
-             "residual at ~M/3 — pair with --pcg-fixed-iters).",
+             "comm-free under band MPI; M-sweep 8473872: equal residual at "
+             "~M/3) or 'chebyshev' (degree-4 polynomial of A; cuts outer M "
+             "with NO per-iter reduction but +4 matvec-halos/iter; conv "
+             "8486241: reaches jacobi-M60 accuracy at ~M40 = 80 vs 120 "
+             "reductions — pair with --pcg-fixed-iters; wins only where "
+             "allreduce log-N latency > halo, i.e. high rank counts).",
     )
     p.add_argument(
         "--pcg-fixed-iters", type=int, default=60,
         help="Fixed-M for the distributed implicit-CN PCG (the "
              "reduction count per solve is 2M+1 / M+1 by variant).",
+    )
+    p.add_argument(
+        "--force-pcg", action="store_true",
+        help="Force the fixed-M PCG even at a SINGLE rank, so a 1-vs-N "
+             "strong-scaling ratio uses the SAME barotropic solver both "
+             "sides (else np=1 stock jax.scipy CG vs np>=2 fixed-M PCG is "
+             "apples-to-oranges). No effect at n_ranks>1 (PCG already used).",
     )
     p.add_argument(
         "--profile-phases", action="store_true",
@@ -2109,8 +2181,11 @@ def main() -> int:
             "LatLonCGridOceanModel.step MPI-vs-serial parity case first."
         )
 
-    # --- Configure JAX for CPU BEFORE any JAX import ---
-    _configure_jax_cpu(args.precision)
+    # --- Configure JAX BEFORE any JAX import (CPU or per-rank GPU) ---
+    if args.device == "gpu":
+        _configure_jax_gpu(args.precision)
+    else:
+        _configure_jax_cpu(args.precision)
 
     # --- MPI init ---
     rank, n_ranks = _init_mpi()
@@ -2209,6 +2284,7 @@ def main() -> int:
         pcg_variant=args.pcg_variant,
         preconditioner=args.preconditioner,
         fixed_iters=int(args.pcg_fixed_iters),
+        force_pcg=args.force_pcg,
     )
     cells_per_rank = total_cells // n_ranks
 

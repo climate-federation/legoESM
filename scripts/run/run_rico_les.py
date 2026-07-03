@@ -66,12 +66,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import les_record  # noqa: E402
 import run_bomex_les as bx  # noqa: E402  (shared forcing/profiles machinery)
 
-import os as _os  # noqa: E402
+from legoesm.atmosphere.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 
-_GSAM_ROOT = _os.environ.get(
-    "LEGOESM_GSAM_ROOT", "/home/gentine/Documents/Code/gSAM/gsam1.8.7/gSAM1.8.7"
-)
-_DEFAULT_CASE = f"{_GSAM_ROOT}/CASES/RICO"
+# Default case dir: external LEGOESM_GSAM_ROOT if set, else the repo-local
+# cache (scripts/data/fetch_les_forcing.py); --case-dir overrides. See
+# resolve_sam_case_dir.
+_DEFAULT_CASE = resolve_sam_case_dir("RICO")
 _FCOR = 0.451e-4                      # CASES/RICO/prm fcor (18°N)
 # van Zanten et al. 2011 bulk exchange coefficients (at the 20 m level).
 _C_H = 0.001094

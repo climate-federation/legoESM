@@ -14,6 +14,8 @@ days). A ``gregorian`` extension hook is reserved in the API.
 
 from __future__ import annotations
 
+import math
+
 # Noleap (365-day) calendar tables.  Fixed module-level constants so
 # helpers below stay pure arithmetic.
 NOLEAP_DAYS_PER_MONTH: tuple[int, ...] = (
@@ -26,6 +28,21 @@ NOLEAP_DAYS_PER_YEAR: int = sum(NOLEAP_DAYS_PER_MONTH)  # 365
 NOLEAP_MONTH_STARTS: tuple[int, ...] = (
     0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365,
 )
+
+
+def daily_forcing_bucket(day: float) -> int:
+    """Daily bucket (containing day boundary) for fractional ``day``.
+
+    Floor, NOT ``int()``: truncation-toward-zero puts a negative
+    fractional day (pre-reference epochs, restart chains crossing
+    day 0) in the wrong bucket — ``int(-0.5) == 0`` but the containing
+    day boundary is ``-1``.  Driver run loops sample daily forcing
+    (seasonal SST, ozone, aerosol) at ``float(bucket)``, the CANONICAL
+    day boundary, so a restart link whose first step lands mid-day
+    sees exactly the same forcing as the uninterrupted run
+    (FIX_RESTART_TIME bit-exact restart continuation).
+    """
+    return math.floor(day)
 
 
 def day_to_calendar(day: float) -> tuple[float, float]:

@@ -22,7 +22,7 @@ no test-matrix integration. The output directory is self-contained
 (NPZ snapshots + a JSON config dump) so it can be moved to a GPU
 machine for production runs.
 
-See ``docs/md_files/ocean_experiments_reference.md`` for a 1-minute
+See ``docs/dev-notes/ocean_experiments_reference.md`` for a 1-minute
 orientation and the full scientific configuration, decisions log, and
 stability investigation.
 """
@@ -63,6 +63,13 @@ def _parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
+        "--config", type=Path, default=None,
+        help="YAML file of run parameters (keys = the long flag names with "
+             "dashes->underscores, e.g. grid, days, mpas_eq_visc_boost). Loaded "
+             "as DEFAULTS so any explicit CLI flag still overrides it. Use the "
+             "committed scripts/experiment/dino/*.yaml to reproduce a run.",
+    )
+    p.add_argument(
         "--grid", choices=("latlon", "mpas"), default="latlon",
         help="Horizontal grid: 'latlon' (Mercator) or 'mpas' (regional "
              "Voronoi with periodic_x=True + seam wall).",
@@ -81,6 +88,39 @@ def _parse_args():
              "(Theoretical area-equivalent is ~82 km but the regional "
              "Voronoi generator has quantization gaps below ~85 km; "
              "97 km is the closest working value to 9900-cell match.)",
+    )
+    p.add_argument(
+        "--mpas-eq-visc-boost", type=float, default=None,
+        help="MPAS-only equatorial A_h boost factor (DINOConfig."
+             "mpas_equatorial_visc_boost, default 8.0). Boosts lateral "
+             "viscosity near the equator (tight Gaussian, sigma=5deg) to "
+             "constrain the forced f->0 equatorial jet that otherwise runs "
+             "away on the implicit-CN MPAS path; ignored on lat-lon.",
+    )
+    p.add_argument(
+        "--vmix", choices=("kpp", "tke", "constant"), default=None,
+        help="Vertical-mixing closure (DINOConfig.vmix_scheme): 'kpp' "
+             "(multi-year-stable default), 'tke' (paper's NEMO scheme — the "
+             "default 5e-4 momentum floor fixes the day-39 instability so it "
+             "runs to ~day 226, but a 2nd viscosity-insensitive SW-corner mode "
+             "NaNs it ~day 230; multi-year needs kpp), or 'constant' "
+             "(background-only; also NaNs ~day 230). Both grids.",
+    )
+    p.add_argument(
+        "--eos", choices=("wright", "nemo_seos"), default=None,
+        help="Equation of state (DINOConfig.eos): 'wright' (legoESM default, "
+             "Wright 1997 full nonlinear EOS) or 'nemo_seos' (the paper/NEMO "
+             "simplified S-EOS, Roquet et al. 2015, with the DINO coefficients "
+             "— the oracle EOS for the thermocline comparison). Both grids.",
+    )
+    p.add_argument(
+        "--tke-momentum-visc-bg", type=float, default=None,
+        help="TKE-only background vertical viscosity FLOOR [m²/s] "
+             "(DINOConfig.tke_momentum_visc_bg, default 5e-4 = 4× the paper "
+             "1.2e-4). Damps the SW channel-corner surface-momentum instability "
+             "that NaNs our TKE at the paper value; applied (max with A_v_bg) "
+             "only when --vmix tke. kpp/constant ignore it. Lower it (e.g. "
+             "1.2e-4) to run TKE at the unstable paper viscosity.",
     )
     p.add_argument(
         "--days", type=float, default=10.0,
@@ -110,6 +150,27 @@ def _parse_args():
         "--physics-off", action="store_true",
         help="Disable KPP / GM-Redi / convection — dycore only.",
     )
+    # Two-pass: if --config is given, load the YAML as argparse DEFAULTS, then
+    # re-parse so any explicit CLI flag overrides the file. Unknown YAML keys
+    # are rejected (typo guard) — only argparse dests are accepted.
+    args, _ = p.parse_known_args()
+    if args.config is not None:
+        import yaml
+        with open(args.config) as f:
+            cfg = yaml.safe_load(f) or {}
+        valid = {a.dest for a in p._actions} - {"help"}
+        unknown = set(cfg) - valid
+        if unknown:
+            raise SystemExit(
+                f"--config {args.config}: unknown key(s) {sorted(unknown)}; "
+                f"valid keys are {sorted(valid - {'config'})}")
+        # set_defaults bypasses each action's ``type=``, so coerce Path-typed
+        # keys (e.g. output_dir) from their YAML string form ourselves.
+        path_dests = {a.dest for a in p._actions if a.type is Path}
+        for k in list(cfg):
+            if k in path_dests and cfg[k] is not None:
+                cfg[k] = Path(cfg[k])
+        p.set_defaults(**cfg)
     return p.parse_args()
 
 
@@ -212,7 +273,12 @@ def _save_run_metadata(args, cfg: DINOConfig, grid, z, output_dir: Path,
     }
     metadata["config"]["wind_tau_lats_deg"] = list(cfg.wind_tau_lats_deg)
     metadata["config"]["wind_tau_values"] = list(cfg.wind_tau_values)
-    metadata["args"]["output_dir"] = str(metadata["args"]["output_dir"])
+    # JSON-serialize every Path-valued arg (output_dir, --config, ...), not just
+    # output_dir — a new Path flag must not break the metadata dump.
+    metadata["args"] = {
+        k: (str(v) if isinstance(v, Path) else v)
+        for k, v in metadata["args"].items()
+    }
     with open(output_dir / "run_metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
 
@@ -247,6 +313,16 @@ def main():
     cfg = DINOConfig()
     if args.dt is not None:
         cfg = dataclasses.replace(cfg, dt=args.dt)
+    if args.vmix is not None:
+        cfg = dataclasses.replace(cfg, vmix_scheme=args.vmix)
+    if args.eos is not None:
+        cfg = dataclasses.replace(cfg, eos=args.eos)
+    if args.tke_momentum_visc_bg is not None:
+        cfg = dataclasses.replace(
+            cfg, tke_momentum_visc_bg=args.tke_momentum_visc_bg)
+    if args.mpas_eq_visc_boost is not None:
+        cfg = dataclasses.replace(
+            cfg, mpas_equatorial_visc_boost=args.mpas_eq_visc_boost)
     dt = cfg.dt
     grid_kind = args.grid
 

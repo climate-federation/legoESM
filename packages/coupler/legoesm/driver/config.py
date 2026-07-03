@@ -13,6 +13,7 @@ Provides the **canonical runtime configuration** for legoESM:
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import NamedTuple
 
@@ -25,6 +26,20 @@ from legoesm import constants
 # existing AMIP configs).
 AIMIP_VARIANTS: tuple[str, ...] = (
     "", "classical", "column_nn", "sfno_physics", "sfno_full",
+)
+
+
+# Canonical convection-scheme set.  Single source of truth — imported by
+# ``scripts/run/run_amip.py`` for its ``--convection`` CLI ``choices`` and
+# used by the ``validate_strict`` membership check below.  Mirrors the
+# ``integration.py`` / ``physics_pipeline`` convection factory sets, so a
+# scheme added to the pipeline must be added here (and the CLI picks it up
+# automatically — no second list to drift, which is exactly the bug this
+# constant prevents: ``--convection tiedtke`` was rejected by a stale CLI
+# ``choices`` while ``validate_strict`` accepted it).
+VALID_CONVECTION_SCHEMES: tuple[str, ...] = (
+    "none", "sbm", "dca", "kuo", "mass_flux", "edmf",
+    "zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold",
 )
 
 
@@ -49,6 +64,7 @@ class GridConfig(NamedTuple):
     vertical_coord: str = "hybrid"   # sigma, hybrid
     p_top_Pa: float = 200.0
     stretching: float = 2.0
+    use_duogrid: bool = False        # enable FV3 Duo-Grid halo (required for MPI multi-node)
 
 
 # Canonical name for the SCVT Voronoi mesh + TRiSK discretization.
@@ -93,6 +109,13 @@ class DycoreConfig(NamedTuple):
     dt: float = 600.0
     hyperdiff_scale: float = 1.0
     div_damp_scale: float = 1.0
+    # Scale on the 2nd-order Laplacian viscosity A_h (see compute_diffusion).
+    # The legacy A_h=0.05*dx^2/dt over-damped resolved baroclinic eddies on a
+    # ~5 h timescale (faster than their ~1-2 day growth), suppressing the
+    # midlatitude jets / storm tracks (dry Held-Suarez jet 2.9 vs spectral
+    # 37 m/s).  a_h_scale=0 relies on the scale-selective 4th-order hyperdiff
+    # alone for grid-noise control.
+    a_h_scale: float = 1.0
     conservation_fixer: bool = True
     fix_mass: bool = True
     # Issue #273 Phase 3: Hoskins–Simmons FV3 D-grid implicit
@@ -168,6 +191,22 @@ class OutputConfig(NamedTuple):
     checkpoint_format: str = "npz"  # npz, zarr
     diagnostics_perf_mode: str = "auto"  # auto, always, never
     cmip_resolution_deg: float = 5.0  # lat-lon grid spacing for CMIP output [degrees]
+    # Wallclock-aware mid-job checkpointing for long (century-scale) HPC chains.
+    # ``max_wallclock_seconds=0`` disables it (default); set it to the SLURM
+    # ``--time`` budget so the run checkpoints and exits cleanly with
+    # ``restart_buffer_seconds`` to spare, letting a dependency chain resume.
+    max_wallclock_seconds: float = 0.0
+    restart_buffer_seconds: float = 600.0
+
+
+# Single source of truth for the valid microphysics scheme literals — consumed
+# by ExperimentConfig.validate_strict AND by run-driver CLI ``choices=`` so the
+# CLI allowlist cannot drift from the config validation (e.g. omitting an
+# advertised scheme like ``ml_emulator``).
+VALID_MICROPHYSICS = (
+    "none", "kessler", "sundqvist", "seifert_beheng",
+    "morrison", "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
+)
 
 
 class ExperimentConfig(NamedTuple):
@@ -202,7 +241,22 @@ class ExperimentConfig(NamedTuple):
     # Radiation
     radiation: str = "gray"
     rad_update_steps: int = 1
+    # Un-fuse radiation from the compiled-segment scan (issue: ~3h XLA
+    # compile).  Static Python gate (NOT trainable); default OFF keeps
+    # every existing run byte-identical.  When True AND
+    # ``rad_update_steps > 1`` the PRODUCTION ``_run_compiled`` path lifts
+    # the radiation-cycle loop from XLA to the host so rrtmgp and the
+    # dynamics+physics scan compile as TWO SEPARATE executables (a jit
+    # placed inside a ``lax.scan`` is inlined by XLA, not a distinct
+    # compile unit — only a host-level jit is its own executable).
+    unfused_radiation: bool = False
     diurnal_cycle: bool = False
+    # Realistic (Berger 1978) orbital insolation for AMIP-II / CMIP.  When
+    # True the radiation uses the present-day orbital declination and scales
+    # TOA insolation by the Earth-Sun distance factor (a/r)^2 (eccentricity
+    # perihelion/aphelion asymmetry, ~+/-3.4%).  Default False keeps the
+    # circular-orbit approximation for idealized/aquaplanet runs.
+    orbital_insolation: bool = False
     # RRTMGP column recurrence implementation:
     #   False = Python for-loop (fully unrolled XLA graph, GPU-friendly default)
     #   True  = jax.lax.scan (smaller graph, often slower per step on GPU but
@@ -220,6 +274,13 @@ class ExperimentConfig(NamedTuple):
     # parallel blocks of this size via vmap — FORWARD/inference only, ~6x faster
     # radiation on GPU; ~16-32 recovers most parallelism while bounding memory.
     rrtmgp_gpoint_batch_size: int = 0
+    # G-point checkpointing in the RRTMGP two-stream scan (see
+    # ``RRTMGPConfig.gpoint_checkpoint``).  True (default) = ``jax.checkpoint``
+    # with ``prevent_cse=True`` per g-point — memory-frugal, REQUIRED for
+    # reverse-mode AD / training.  False = plain ``lax.scan`` (no prevent_cse):
+    # smaller compiled footprint / faster cold compile for FORWARD/inference
+    # runs, used to relieve the XLA-CPU LLVM-JIT code-region pressure.
+    rrtmgp_gpoint_checkpoint: bool = True
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0
@@ -243,24 +304,151 @@ class ExperimentConfig(NamedTuple):
     aerosol_reference_aod: float = 0.03
     volcanic_aerosol_file: str = ""
     volcanic_aerosol_scale: float = 1.0
+    # Volcanic stratospheric LONGWAVE aerosol (gap #9): when True, ALSO
+    # load the ``ext_earth`` LW band from ``volcanic_aerosol_file`` and
+    # thread it into RRTMGP as the LW absorption optical depth.  Default
+    # OFF ⇒ no LW aerosol (byte-identical; zeros LW od is a solver no-op).
+    volcanic_aerosol_lw: bool = False
 
     # Clouds & Microphysics
     cloud_scheme: str = "none"
+    cloud_rh_crit_bl: float = 0.7
+    cloud_sigma_bl: float = 1.0
+    # Opt-in convective (cumulus) cloud-fraction source (Slingo 1987).  The
+    # RH-based stratiform cloud schemes give ~0 cloud where an adjustment
+    # convection scheme (sbm) holds the column subsaturated, so the convecting
+    # tropics radiate surface LW to space (~4.5 K coupled cold bias).  When
+    # True, the convective precip rate drives a bounded cumulus cover in the
+    # cloud diagnosis (see CloudConfig.convective_cloud).  Default False =>
+    # byte-identical to the validated stratiform-only path.
+    convective_cloud: bool = False
+    # Optional cloud-tuning overrides for the diagnostic stratiform/convective
+    # cloud (None => CloudConfig defaults => byte-identical).  Exposed so a
+    # coupled run can trade SW (planetary albedo) vs LW (greenhouse / surface
+    # LW_down) without editing CloudConfig in source:
+    #   cloud_rh_crit        — Sundqvist critical RH; HIGHER => less stratiform
+    #                          cloud (lower albedo).  Bounds (0.5, 0.99).
+    #   cloud_q_c_diagnostic — diagnostic in-cloud condensate [kg/kg]; LOWER =>
+    #                          optically THINNER cloud (lower albedo, still
+    #                          LW-active).  Bounds (5e-5, 1e-3).
+    #   cloud_conv_cloud_max — convective (Slingo) cover cap.  Bounds (0.1, 1.0).
+    # These are the SW/LW knob for the coare3 moisture-driven albedo overshoot.
+    cloud_rh_crit: float | None = None
+    cloud_q_c_diagnostic: float | None = None
+    #   cloud_p_xr / cloud_alpha_xr — Xu-Randall cloud-fraction sensitivity
+    #   knobs; HIGHER p_xr / LOWER alpha_xr => fraction stays fractional as
+    #   moisture rises (flattens the overcast runaway).
+    cloud_p_xr: float | None = None
+    cloud_alpha_xr: float | None = None
+    cloud_conv_cloud_max: float | None = None
     microphysics: str = "none"
+    # Number of microphysics sub-steps inside one dynamics step.  Morrison's
+    # double-moment product terms (q_c·q_r, q_i·q_c) run away at the
+    # ~600s dynamics step; 10 sub-steps (60s each) keep it bounded.
+    # Sundqvist / Kessler stay at 1 (no behaviour change).
+    micro_substeps: int = 1
     # Aerosol-CCN coupling: diagnose the specified cloud-droplet number
     # from the prescribed aerosol optical depth (Andreae 2009 AOT–CCN
     # inversion) instead of the scheme's constant Nc_0.  Requires
     # aerosol_forcing="external" and a specified-Nc double-moment
     # microphysics (morrison); validated in build_physics_pipeline.
     nc_from_aerosol: bool = False
+    # Sub-grid in-cloud warm-rain closure (#613): evaluate the non-linear
+    # Morrison KK2000 autoconversion/accretion on in-cloud q_c (q_c / cloud
+    # fraction), then scale back — recovers the drizzle that grid-mean rates
+    # under-produce in partly-filled boxes at coarse resolution (raises precip
+    # AND drains suspended cloud water -> lower LWP).  Morrison only; validated
+    # in build_physics_pipeline.
+    subgrid_autoconversion: bool = False
+
+    # Sub-grid in-cloud autoconversion/accretion (Morrison & Gettelman 2008):
+    # evaluate warm-rain rates on in-cloud q_c/cf and scale by cf so the
+    # non-linear KK2000 rate is not under-fed by the grid-mean.  Requires
+    # morrison microphysics.  Physics-fidelity correction (no tunable knob).
+    subgrid_autoconversion: bool = False
+
+    # Tiedtke convective precipitation efficiency [0,1] (Tiedtke 1989 in-
+    # updraft precipitation).  >0 diverts that fraction of convective
+    # condensate to rain (sediments via microphysics, invisible to radiation)
+    # instead of detraining it all as suspended cloud.  0 = off (legacy).
+    # Observed deep-convective CPE ~0.5-0.9.  Tiedtke-only (guarded in
+    # _resolve_convection).
+    convective_precip_efficiency: float = 0.0
+
+    # Tiedtke plume buoyancy-death memory: when True the entraining plume,
+    # once it exhausts its cumulative buoyancy budget, stays dead instead of
+    # reviving above an inversion (the default False lets a plume killed by
+    # negative buoyancy resume nonzero M_u aloft — physically questionable,
+    # and the cause of convective detrainment heating reaching the ~100 hPa
+    # tropical cold point).  Tiedtke-only (guarded in physics_pipeline).
+    convective_buoyancy_death_memory: bool = False
 
     # Convection / Turbulence / GWD
-    convection: str = "sbm"            # sbm, dca, kuo, mass_flux, edmf, none
+    convection: str = "sbm"            # sbm, dca, kuo, mass_flux, edmf, zhang_mcfarlane, none
     turbulence: str = "none"           # smagorinsky, louis, tke, none
+    # Surface-layer bulk-flux algorithm (SurfaceLayerConfig.bulk_scheme):
+    # "constant" (neutral coefficients; DEFAULT, byte-identical) | "coare3" |
+    # "large_yeager".  The constant scheme has NO convective-gustiness term, so
+    # evaporation over a calm, convectively-unstable warm tropical ocean is
+    # anemic (cold/dry surface-air bias).  The stability-dependent MOST schemes
+    # add the free-convection velocity scale w*.  For interface energy
+    # consistency the coupler ocean tile (CouplerConfig.bulk_scheme) MUST use the
+    # same scheme — run_coupled wires both together.
+    surface_bulk_scheme: str = "constant"
+    # COARE 3.0 convective-gustiness BL depth z_i [m] for the MOST surface
+    # fluxes (coare3/large_yeager): 0/None = off (byte-identical), ~600 = enable
+    # the w* free-convection gust that lets a calm warm ocean evaporate
+    # (the persistent tropical hfls<<Earth / R_TOA imbalance lever).  Threaded
+    # into the atmosphere SurfaceLayerConfig + the slab SimpleOceanConfig.
+    surface_gustiness_zi: float | None = None
+    # Tiled (mosaic) surface fluxes: when True, the atmosphere surface
+    # turbulent flux is computed SEPARATELY per surface tile and area-weighted
+    # — ``surface_bulk_scheme`` (e.g. coare3) runs on the OCEAN tile, the
+    # fixed-roughness land Monin-Obukhov scheme ("most", roughness
+    # ``surface_z0_land``) runs on the LAND tile, and sea ice uses constant
+    # coefficients — instead of applying one scheme to the blended surface
+    # temperature (which runs the ocean air-sea scheme over land: the bm_v3
+    # land-tile energy blowup).  Requires an active land tile + the louis
+    # turbulence scheme (the only kernel that accepts the injected tiled flux).
+    surface_tiled: bool = False
+    surface_z0_land: float = 0.1       # land roughness length [m] for the tiled land MOST scheme
+    # Prognostic soil-water bucket (Manabe 1969) for the slab-land tile: the
+    # land evaporation efficiency beta = beta_min + (1-beta_min)*W/W_max
+    # limits land latent heat by soil wetness (no longer a saturated swamp
+    # everywhere).  Requires an active land tile.  ``w_land`` (soil water,
+    # restart-persisted) advances from precip (source) and beta-limited land
+    # evaporation (sink) with overflow runoff.  Same beta ramp as
+    # legoesm.land.slab_land.  Off → byte-identical saturated-surface path.
+    land_soil_bucket: bool = False
+    land_bucket_w_max: float = 150.0      # soil-water bucket capacity [kg/m^2]
+    land_beta_min: float = 0.1            # min moisture availability (dry soil)
+    land_bucket_w_init_frac: float = 0.5  # initial soil water as fraction of W_max
+    # Bucket runoff partition: Green-Ampt infiltration excess (Hortonian) +
+    # saturation excess (Dunne).  Shared with legoesm.land.slab_land.
+    land_K_infiltration: float = 1.0e-5     # saturated infiltration capacity K_s [m/s]
+    land_infil_suction_boost: float = 2.0   # Green-Ampt suction enhancement psi_f/L_f [-]
+    land_infiltration_excess: bool = True   # enable Hortonian infiltration-excess runoff
+    # Route the soil-water availability through the SHARED land Jarvis (1976)
+    # stomatal model (legoesm.land.carbon.stomata) instead of the bare bucket
+    # ramp: beta = min(beta_soil, beta_canopy), the canopy term closing
+    # stomata in low light / high VPD.  Requires land_soil_bucket (which
+    # supplies beta_soil).  Off → soil-only bucket beta (byte-identical).
+    land_stomatal_beta: bool = False
+    # Prognostic snow + snow-albedo feedback on the AMIP slab-land tile: snow
+    # water (SWE) accumulates from snowfall and melts (degree-day), brightening
+    # the land albedo (snow ~0.5-0.8 vs vegetation ~0.15) — the positive
+    # snow-albedo feedback SOTA AMIP land has.  Requires an active land tile.
+    # Off (default) ⇒ static vegetation albedo (byte-identical legacy path).
+    snow_albedo_feedback: bool = False
     gravity_wave_drag: str = "none"    # rayleigh, lindzen, mcfarlane, hines, prognostic_spectral, e3sm_cam, ml_emulator, none
 
     # Conservation
     fix_moisture: bool = False
+    # Issue #323: make the per-step ``max(q_v, 0)`` floor on the physics
+    # tracer update moist-static-energy-conserving (remove the latent heat
+    # of the clipped vapour sink).  Opt-in for the kessler+sbm wind blow-up;
+    # default off => bit-identical.
+    energy_consistent_moisture_clip: bool = False
 
     # Topography
     topography: str = "flat"
@@ -270,6 +458,76 @@ class ExperimentConfig(NamedTuple):
     # the land fraction is taken from this file and the slab-land tile
     # is activated; empty → ocean-only surface.
     land_mask_path: str = ""
+    # Optional land-surface-albedo NetCDF (e.g. ICON-extpar ALB on a
+    # regular lat-lon grid).  When set AND ``land_mask_path`` is set, the
+    # static land albedo field replaces the latitude-band fallback used
+    # in ``ModelDriver._create_physics``.  ``albedo_land_month`` (1-12)
+    # picks a single month from a monthly climatology; 0 → annual mean.
+    albedo_land_path: str = ""
+    albedo_land_month: int = 0
+    # Optional subgrid orographic stddev NetCDF (ICON-extpar ``SSO_STDH`` on a
+    # regular lat-lon grid, e.g. ``extpar_sso_latlon_0p25deg.nc``).  When set
+    # AND an orographic GWD scheme (``mcfarlane`` / ``lindzen``) is active, the
+    # per-column launch height ``h_topo`` is taken from this field (real
+    # mountains, ~0 over ocean) instead of the scalar ``McFarlaneConfig.h_topo``
+    # = 500 m everywhere.  Empty → scalar fallback (legacy behaviour).
+    subgrid_orography_path: str = ""
+    # Slab-land surface-energy-balance knobs.  Only relevant when the
+    # land tile is active (``land_mask_path`` set).
+    #   C_land           : effective heat capacity [J/m^2/K]
+    #   emissivity_land  : LW emissivity
+    #   beta_land        : soil-moisture evaporation factor in [0, 1]
+    #                      (1 = wet surface; calibration default in
+    #                      Phase 1 — left tunable)
+    C_land: float = 2.0e5
+    emissivity_land: float = 0.96
+    beta_land: float = 1.0
+
+    # Multilayer land surface (Phase L1).  When True, replaces the slab
+    # _step_slab_land call with step_multilayer_land from legoesm.land,
+    # which carries a prognostic (T_soil, theta_soil, psi_soil, snow)
+    # state per column.  Requires land_mask_path to also be set.  The
+    # slab knobs (C_land, emissivity_land, beta_land) become unused and
+    # the multilayer config below takes over.
+    use_multilayer_land: bool = False
+    multilayer_n_layers: int = 10        # soil discretization
+    multilayer_soil_depth: float = 3.0   # m
+    multilayer_soil_texture: str = "loam"  # van-Genuchten preset
+    # Strategy B: hydrate MultiLayerLandState from an ERA5 land NetCDF
+    # at IC time instead of the strategy-A uniform 0.5*theta_sat fill.
+    # Build with probes/preprocess_era5_land_ic.sh; expects variables
+    # stl1-4, swvl1-4, sd on a regular lat-lon grid.  Ignored when
+    # use_multilayer_land is False.
+    era5_land_ic_path: str = ""
+
+    # Diagnostic T-based ice partition.  At every radiation call the
+    # grid-mean cloud water q_c is split into liquid + ice via
+    # f_ice(T) = clip((T_warm - T) / (T_warm - T_cold), 0, 1), and the
+    # ice portion is fed to RRTMGP so cirrus has radiative effect.  This
+    # is NOT a prognostic ice scheme (no Bergeron, no sedimentation —
+    # just a radiative diagnostic; see Phase 2 of cloud-micro plan).
+    #   cloud_T_warm  : liquid-only above this T [K] (default freezing pt)
+    #   cloud_T_cold  : ice-only below this T  [K] (default homog. ice
+    #                   nucleation, -38 C)
+    #   cloud_r_eff_ice : ice effective radius [m]
+    cloud_T_warm: float = constants.T_freeze
+    cloud_T_cold: float = 235.15
+    cloud_r_eff_ice: float = 30.0e-6
+
+    # Land/ocean cloud droplet effective radius (Phase 3 of cloud-micro plan).
+    # Land has ~3x higher CDNC than ocean, giving ~30% smaller r_eff and
+    # brighter clouds.  Compute the per-column r_eff as a linear blend
+    # weighted by f_land (the land-fraction field) inside
+    # compute_radiation_core.  Replaces cloud_r_eff_liq in the AMIP active
+    # tunable set; the single-value field is kept for backward-compat with
+    # no-land runs (f_land = 0 → blend equals cloud_r_eff_liq_ocean).
+    cloud_r_eff_liq_ocean: float = 10.0e-6
+    cloud_r_eff_liq_land: float = 7.0e-6
+    # Activate the slab-land SEB tile without loading a separate LSM file.
+    # Useful when --topography already provides a good f_land (ETOPO) and
+    # no separate mask file is available.  Ignored when land_mask_path is set
+    # (the file path already implies activation).
+    slab_land_active: bool = False
 
     # Surface
     T_init: float = 300.0
@@ -278,7 +536,11 @@ class ExperimentConfig(NamedTuple):
     carbon_cycle: str = "none"
 
     # Initial conditions
-    ic: str = "default"   # "default" (uniform T_init), "standard" (lapse-rate + equator-pole gradient), or "era5"
+    #   "default"  — isothermal held_suarez_init at T_init (e.g. 300 K)
+    #   "standard" — realistic lapse-rate profile (held_suarez_init with the
+    #                temperature replaced by a standard atmosphere)
+    #   "era5"     — ERA5 reanalysis snapshot (requires ic_path)
+    ic: str = "default"
     ic_path: str = ""     # ERA5 Zarr path when ic="era5"
 
     # CMIP
@@ -298,9 +560,66 @@ class ExperimentConfig(NamedTuple):
     emissivity_ice: float = 0.95
     tau_equator: float = 7.2
     tau_pole: float = 1.8
+    tau_moist_coeff: float = 0.0115        # gray-rad moisture LW optical depth [m²/kg]
+    # Additional gray-radiation knobs (GrayRadiationConfig fields), exposed on
+    # ExperimentConfig so the calibration can tune them.  They are threaded to
+    # the gray radiation kernel as a `gray_cfg_overrides` dict; sfc_emissivity
+    # (above) is the fifth gray knob and is reused as-is.
+    linear_frac: float = 0.2               # linear vs sigma^4 LW weighting
+    lw_diff_factor: float = 1.66           # LW diffusivity factor D
+    sw_tau_0: float = 0.22                 # SW optical-depth scale
+    sw_exponent: float = 2.0               # SW optical-depth vertical exponent
     sbm_tau_c: float = 7200.0
     sbm_RH_ref: float = 0.7
     sbm_cape_threshold: float = 70.0
+    sundqvist_auto_rate: float = 1e-3      # Sundqvist autoconversion rate [1/s]
+    sundqvist_evap_coeff: float = 5e-4     # Sundqvist sub-cloud rain evaporation coeff
+    cloud_r_eff_liq: float = 10.0e-6       # cloud droplet effective radius [m]
+    # Convection / microphysics / turbulence / GWD scheme knobs exposed for
+    # calibration (AIMIP commit 0c747d4).  These mirror the scheme-config
+    # defaults; the calibration threads them to the schemes as a
+    # `physics_cfg_overrides` dict-of-dicts (keys: micro/conv/turb/gwd).
+    sundqvist_sigmoid_sharpness: float = 20.0   # SundqvistConfig.sigmoid_sharpness
+    sbm_T_min_convect: float = 200.0            # SBMConfig.T_min_convect [K]
+    louis_l_mix_max: float = 100.0              # LouisConfig.l_mix_max [m]
+    louis_Ck: float = 0.4                       # LouisConfig.Ck
+    louis_Ri_crit: float = 0.25                 # LouisConfig.Ri_crit
+    louis_b_louis: float = 5.0                  # LouisConfig.b_louis
+    louis_c_louis: float = 16.6                 # LouisConfig.c_louis
+    louis_d_louis: float = 5.0                  # LouisConfig.d_louis
+    louis_z0: float = 1.0e-4                    # SurfaceLayerConfig.z0 [m]
+    louis_Ch_neutral: float = 1.5e-3            # SurfaceLayerConfig.Ch_neutral
+    louis_Cd_neutral: float = 1.5e-3            # SurfaceLayerConfig.Cd_neutral
+    mcfarlane_k_wave: float = 6.283185307e-5    # McFarlaneConfig.k_wave [1/m]
+    mcfarlane_N_ref: float = 0.01               # McFarlaneConfig.N_ref [1/s]
+    mcfarlane_directional_spread: float = 1.0   # McFarlaneConfig.directional_spread
+    mcfarlane_tau_max: float = 10.0             # McFarlaneConfig.tau_max [Pa]
+    # Morrison ice-microphysics tunables (active when microphysics='morrison'
+    # — silently filtered out by hasattr when Sundqvist/Kessler is active).
+    morrison_bergeron_rate: float = 1e-3        # MorrisonConfig.bergeron_rate [1/s]
+    morrison_rime_coeff: float = 1.0            # MorrisonConfig.rime_coeff
+    morrison_dep_coeff: float = 1e-8            # MorrisonConfig.dep_coeff
+                                                 # (Morrison-2005 q_i^(1/3)·N_i^(2/3) form)
+    morrison_agg_coeff: float = 1e-3            # MorrisonConfig.agg_coeff [1/s]
+    morrison_k_au: float = 6e2                  # MorrisonConfig.k_au [1/(kg*s)]
+    # SBM convective precip efficiency: fraction of column-net drying that
+    # precipitates directly as rain (rest is detrained as condensate).
+    sbm_precip_efficiency: float = 0.5          # SBMConfig.precip_efficiency
+    # Morrison phase-aware saturation_adjustment (P7).  Default False to
+    # preserve legacy calibration baselines; set True to let condensation
+    # target q_sat_ice at T < phase_T_cold (235 K), routing cold-T
+    # condensate directly to q_i with the matching L_s release.
+    morrison_phase_aware_sat_adj: bool = False
+    # Cirrus cf branch (CloudConfig RH_i ramp).  Linear from cf=0 at
+    # rh_ice_crit to cf=1 at rh_ice_sat; max with warm Sundqvist cf.
+    cloud_rh_ice_crit: float = 0.95             # CloudConfig.rh_ice_crit
+    cloud_rh_ice_sat: float = 1.30              # CloudConfig.rh_ice_sat
+    # Bechtold deep-convection CAPE trigger threshold [J/kg].  Deep convection
+    # fires only above this CAPE; lowering it lets convection trigger more
+    # readily at coarse resolution (where CAPE is under-resolved), which is
+    # the lever for the AMIP convective-precipitation deficit.  Default matches
+    # BechtoldConfig.cape_threshold (byte-identical when unset).
+    bechtold_cape_threshold: float = 70.0
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -377,6 +696,17 @@ class ExperimentConfig(NamedTuple):
     # face-compatible count.  Pair with ``shard_radiation_columns``
     # for the full 4-GPU unblock.  Default off.
     allow_level_fallback: bool = False
+    # A1 (lat-lon SPMD): opt-in single-process multi-device lat-BAND
+    # decomposition for the lat-lon C-grid hydrostatic dycore (the atm twin
+    # of the ocean lat-band SPMD step).  Routes ModelDriver.run() to the
+    # dedicated ``_run_compiled_latlon_spmd`` segment loop
+    # (``run_atm_latlon_spmd``).  DISTINCT from ``distributed_mode='spmd'``
+    # (that is the multi-controller cubed-sphere path); this is the
+    # single-process ``n_devices>1`` path and never arms mpi4jax.  Requires
+    # grid.grid_type='latlon', n_lat % n_devices == 0, and DYNAMICS-ONLY or a
+    # STATELESS physics (Held-Suarez / per-column); a stateful PhysicsState
+    # carry is not yet SPMD-routed.  Default off preserves all existing paths.
+    enable_latlon_spmd: bool = False
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -460,6 +790,24 @@ class ExperimentConfig(NamedTuple):
                     f"{self.output.diag_days}); set diag_days=0 — "
                     "gathered root-only diagnostics are a follow-up"
                 )
+        if self.enable_latlon_spmd:
+            # Single-process multi-device lat-band path (NOT distributed_mode).
+            if g.grid_type != "latlon":
+                errors.append(
+                    "enable_latlon_spmd=True requires grid.grid_type='latlon' "
+                    f"(got {g.grid_type!r}): the lat-band decomposition is the "
+                    "lat-lon C-grid twin of the ocean SPMD step"
+                )
+            if self.distributed:
+                errors.append(
+                    "enable_latlon_spmd=True is the SINGLE-PROCESS multi-device "
+                    "path and is mutually exclusive with distributed=True "
+                    "(MPI / multi-controller); use one or the other"
+                )
+            # The n_lat % n_devices divisibility constraint is checked at
+            # runtime in ModelDriver._latlon_spmd_mesh against the BUILT
+            # LatLonGrid (GridConfig carries only ``resolution``, not the
+            # derived n_lat/n_lon), so a wrong device count fails LOUDLY there.
         if self.days <= 0:
             errors.append(f"days must be > 0, got {self.days}")
         if self.seed < 0:
@@ -472,6 +820,11 @@ class ExperimentConfig(NamedTuple):
         if self.sbm_cape_threshold < 0:
             errors.append(
                 f"sbm_cape_threshold must be >= 0, got {self.sbm_cape_threshold}"
+            )
+        if self.bechtold_cape_threshold < 0:
+            errors.append(
+                f"bechtold_cape_threshold must be >= 0, got "
+                f"{self.bechtold_cape_threshold}"
             )
         if self.physics_parameterization not in ("none", "ml"):
             errors.append(
@@ -503,21 +856,14 @@ class ExperimentConfig(NamedTuple):
                 f"cloud_scheme must be one of {_valid_cloud_schemes}, "
                 f"got {self.cloud_scheme!r}"
             )
-        _valid_microphysics = (
-            "none", "kessler", "sundqvist", "seifert_beheng",
-            "morrison", "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
-        )
-        if self.microphysics not in _valid_microphysics:
+        if self.microphysics not in VALID_MICROPHYSICS:
             errors.append(
-                f"microphysics must be one of {_valid_microphysics}, "
+                f"microphysics must be one of {VALID_MICROPHYSICS}, "
                 f"got {self.microphysics!r}"
             )
         # Physics-scheme membership (mirror the integration.py factory sets so
         # a typo fails here, not only at JIT-compile inside integration.py).
-        _valid_convection = (
-            "sbm", "dca", "kuo", "mass_flux", "edmf", "zhang_mcfarlane",
-            "kain_fritsch", "emanuel", "tiedtke", "bechtold", "none",
-        )
+        _valid_convection = VALID_CONVECTION_SCHEMES
         if self.convection not in _valid_convection:
             errors.append(
                 f"convection must be one of {_valid_convection}, "
@@ -532,14 +878,137 @@ class ExperimentConfig(NamedTuple):
                 f"turbulence must be one of {_valid_turbulence}, "
                 f"got {self.turbulence!r}"
             )
+        _valid_surface_bulk = ("constant", "coare3", "large_yeager")
+        if self.surface_bulk_scheme not in _valid_surface_bulk:
+            errors.append(
+                f"surface_bulk_scheme must be one of {_valid_surface_bulk}, "
+                f"got {self.surface_bulk_scheme!r}"
+            )
+        # A non-"constant" surface scheme upgrades the ATMOSPHERE surface layer
+        # (via _resolve_turbulence on the turbulence config).  With
+        # turbulence="none" there is no SurfaceLayerConfig to update, so the
+        # atmosphere would silently stay on its fallback fluxes while the
+        # ocean/coupler tiles switch to MOST — an inconsistent interface.  Reject
+        # loudly (codex review HIGH#2).
+        if self.surface_bulk_scheme != "constant" and self.turbulence == "none":
+            errors.append(
+                f"surface_bulk_scheme={self.surface_bulk_scheme!r} requires a "
+                f"turbulence scheme (turbulence != 'none') so the atmosphere "
+                f"surface layer uses the same bulk-flux algorithm as the ocean "
+                f"tile; got turbulence='none'."
+            )
+        # Tiled (mosaic) surface fluxes inject a per-tile flux as the louis BL
+        # bottom boundary condition; only the louis kernel accepts it, so reject
+        # the combination loudly rather than silently ignoring the request
+        # (dispatch hardening).
+        if self.surface_tiled and self.turbulence != "louis":
+            errors.append(
+                f"surface_tiled=True is currently supported only with "
+                f"turbulence='louis' (the kernel that consumes the injected "
+                f"tiled surface flux); got turbulence={self.turbulence!r}."
+            )
+        if self.surface_tiled and not (self.slab_land_active or self.land_mask_path):
+            errors.append(
+                "surface_tiled=True requires an active land tile "
+                "(--slab-land-active or a land-mask file); otherwise there is no "
+                "land tile to give its own surface scheme."
+            )
+        if not (self.surface_z0_land > 0.0):
+            errors.append(
+                f"surface_z0_land must be a positive roughness length [m]; "
+                f"got {self.surface_z0_land!r}."
+            )
+        # Prognostic soil-water bucket: needs an active land tile to step,
+        # and physically-bounded parameters.
+        if self.land_soil_bucket and not (
+                self.slab_land_active or self.land_mask_path):
+            errors.append(
+                "land_soil_bucket=True requires an active land tile "
+                "(--slab-land-active or a land-mask file); there is no land "
+                "surface to carry soil water otherwise."
+            )
+        # NaN-safe guards: ``NaN > 0`` / ``NaN < 0`` are both False, so a bare
+        # comparison would let a NaN slip through and poison the infiltration cap.
+        if not (math.isfinite(self.land_K_infiltration)
+                and self.land_K_infiltration > 0.0):
+            errors.append(
+                f"land_K_infiltration must be a positive, finite saturated "
+                f"infiltration capacity [m/s]; got {self.land_K_infiltration!r}."
+            )
+        if not (math.isfinite(self.land_infil_suction_boost)
+                and self.land_infil_suction_boost >= 0.0):
+            errors.append(
+                f"land_infil_suction_boost (Green-Ampt psi_f/L_f) must be finite "
+                f"and >= 0; got {self.land_infil_suction_boost!r}."
+            )
+        if not (self.land_bucket_w_max > 0.0):
+            errors.append(
+                f"land_bucket_w_max must be a positive bucket capacity "
+                f"[kg/m^2]; got {self.land_bucket_w_max!r}."
+            )
+        if not (0.0 < self.land_beta_min <= 1.0):
+            errors.append(
+                f"land_beta_min (min soil-moisture availability) must be in "
+                f"(0, 1]; got {self.land_beta_min!r}."
+            )
+        if not (0.0 <= self.land_bucket_w_init_frac <= 1.0):
+            errors.append(
+                f"land_bucket_w_init_frac (initial fill fraction) must be in "
+                f"[0, 1]; got {self.land_bucket_w_init_frac!r}."
+            )
+        # Stomatal soil-water limitation needs the bucket to supply beta_soil.
+        if self.land_stomatal_beta and not self.land_soil_bucket:
+            errors.append(
+                "land_stomatal_beta=True requires land_soil_bucket=True "
+                "(the bucket supplies the soil availability beta_soil that the "
+                "Jarvis stomatal model down-regulates)."
+            )
+        # Optional cloud-tuning override bounds (mirror CloudConfig.__param_spec__
+        # so an out-of-range knob fails early, not deep in the cloud diagnosis).
+        for _f, _lo, _hi in (
+            ("cloud_rh_crit", 0.5, 0.99),
+            ("cloud_q_c_diagnostic", 5.0e-5, 1.0e-3),
+            ("cloud_conv_cloud_max", 0.1, 1.0),
+            ("cloud_p_xr", 0.05, 1.0),
+            ("cloud_alpha_xr", 10.0, 1000.0),
+        ):
+            _v = getattr(self, _f)
+            if _v is not None and not (_lo <= _v <= _hi):
+                errors.append(
+                    f"{_f}={_v!r} out of range [{_lo}, {_hi}]"
+                )
         _valid_gwd = (
             "rayleigh", "lindzen", "mcfarlane", "hines",
             "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",
         )
-        if self.gravity_wave_drag not in _valid_gwd:
+        # A ``+``-joined string (e.g. ``hines+mcfarlane``) composes multiple
+        # GWD sources whose tendencies are summed — orographic (mcfarlane) and
+        # non-orographic (hines) parameterize distinct wave sources and are run
+        # together in CMIP-class GCMs.  ``prognostic_spectral`` / ``e3sm_cam``
+        # carry per-step state and are not composable here.
+        _gwd_parts = self.gravity_wave_drag.split("+")
+        _composable = ("rayleigh", "lindzen", "mcfarlane", "hines")
+        if len(_gwd_parts) > 1:
+            bad = [p for p in _gwd_parts if p not in _composable]
+            if bad:
+                errors.append(
+                    f"composite gravity_wave_drag parts must each be one of "
+                    f"{_composable}, got invalid {bad} in "
+                    f"{self.gravity_wave_drag!r}"
+                )
+        elif self.gravity_wave_drag not in _valid_gwd:
             errors.append(
-                f"gravity_wave_drag must be one of {_valid_gwd}, "
+                f"gravity_wave_drag must be one of {_valid_gwd} "
+                f"(or a '+'-joined composite of {_composable}), "
                 f"got {self.gravity_wave_drag!r}"
+            )
+        # Checkpoint serialization format (mirror the io/restart writer set so a
+        # typo fails here instead of silently writing the wrong format).
+        _valid_checkpoint_format = ("npz", "zarr")
+        if self.output.checkpoint_format not in _valid_checkpoint_format:
+            errors.append(
+                f"checkpoint_format must be one of {_valid_checkpoint_format}, "
+                f"got {self.output.checkpoint_format!r}"
             )
         # Reject unsupported coupled/ESM modes with actionable errors.
         if self.carbon_cycle != "none":
@@ -555,23 +1024,27 @@ class ExperimentConfig(NamedTuple):
             errors.append("ic='era5' requires ic_path to be set")
         if self.ic == "standard":
             # The standard-atmosphere IC overrides a grid-space temperature
-            # Field AND a geographic (eastward) thermal-wind jet.  On lat-lon
-            # the A-grid u IS geographic-east, so the assignment is direct and
-            # correct.  Other grids need extra handling not yet wired:
-            #   * cubed_sphere: u/v are cube-LOCAL vector components — the
-            #     geographic jet must be rotated by the grid angle first;
+            # Field AND (lat-lon only) a geographic (eastward) thermal-wind jet.
+            #   * lat-lon: the A-grid u IS geographic-east, so the realistic T/
+            #     p_s AND the balanced jet are assigned directly.
+            #   * cubed_sphere: the realistic T / p_s overlay is grid-agnostic
+            #     and IS applied; the balanced jet is SKIPPED (u/v are cube-LOCAL
+            #     components that would need a per-cell grid-angle rotation) — a
+            #     coupled climate spin-up grows its own circulation from the T
+            #     gradient (no balanced-jet IC needed, unlike a baroclinic-wave
+            #     test).  See ModelDriver._apply_standard_atmosphere_ic.
+            # Still not wired (fail early, before setup):
             #   * gaussian/spectral: temperature lives in spectral space (T_hat),
             #     no grid-space T Field;
             #   * mpas: not wired.
-            # Restrict to lat-lon here so the advertised IC is exactly the
-            # implemented+validated one — fail early, before setup.
             _gt_std = normalize_grid_type(self.grid.grid_type)
-            if _gt_std != "latlon":
+            if _gt_std not in ("latlon", "cubed_sphere"):
                 errors.append(
-                    f"ic='standard' is currently implemented only for "
-                    f"grid_type='latlon'; got grid_type={self.grid.grid_type!r} "
+                    f"ic='standard' is implemented for grid_type "
+                    f"'latlon' and 'cubed_sphere'; got "
+                    f"grid_type={self.grid.grid_type!r} "
                     f"(discretization={self.dycore.discretization!r}). "
-                    f"Use ic='default', or ic='era5' for cubed_sphere/spectral."
+                    f"Use ic='default', or ic='era5' for spectral/mpas."
                 )
             # T_init is the equator surface temperature; the pole is
             # T_init - 40 K (StandardAtmosphereConfig.equator_pole_delta_K). A
@@ -662,6 +1135,12 @@ class ExperimentConfig(NamedTuple):
                 "column unstable.  Disable --fix-moisture or replace it "
                 "with a fix_total_water path that tracks precipitation."
             )
+        _valid_perf_modes = ("auto", "always", "never")
+        if self.output.diagnostics_perf_mode not in _valid_perf_modes:
+            raise ValueError(
+                f"diagnostics_perf_mode must be one of {_valid_perf_modes}, "
+                f"got {self.output.diagnostics_perf_mode!r}"
+            )
         if (self.output.cmip_output
                 and self.output.diagnostics_perf_mode == "always"):
             warns.append(
@@ -738,6 +1217,7 @@ class ExperimentConfig(NamedTuple):
             sic_scale=amip_cfg.sic_scale,
             radiation=amip_cfg.radiation,
             rad_update_steps=amip_cfg.rad_update_steps,
+            unfused_radiation=getattr(amip_cfg, 'unfused_radiation', False),
             diurnal_cycle=amip_cfg.diurnal_cycle,
             co2_ppmv=amip_cfg.co2_ppmv,
             ch4_ppbv=amip_cfg.ch4_ppbv,
@@ -758,16 +1238,36 @@ class ExperimentConfig(NamedTuple):
             aerosol_reference_aod=getattr(amip_cfg, 'aerosol_reference_aod', 0.03),
             volcanic_aerosol_file=getattr(amip_cfg, 'volcanic_aerosol_file', ''),
             volcanic_aerosol_scale=getattr(amip_cfg, 'volcanic_aerosol_scale', 1.0),
+            volcanic_aerosol_lw=getattr(amip_cfg, 'volcanic_aerosol_lw', False),
             cloud_scheme=amip_cfg.cloud_scheme,
+            cloud_rh_crit_bl=getattr(amip_cfg, 'cloud_rh_crit_bl', 0.7),
+            cloud_sigma_bl=getattr(amip_cfg, 'cloud_sigma_bl', 1.0),
             microphysics=amip_cfg.microphysics,
             convection=getattr(amip_cfg, 'convection', 'sbm'),
             turbulence=getattr(amip_cfg, 'turbulence', 'none'),
             gravity_wave_drag=getattr(amip_cfg, 'gravity_wave_drag', 'none'),
             fix_moisture=getattr(amip_cfg, 'fix_moisture', False),
+            energy_consistent_moisture_clip=getattr(
+                amip_cfg, 'energy_consistent_moisture_clip', False),
             topography=amip_cfg.topography,
             topo_smoothing=amip_cfg.topo_smoothing,
             topo_edge_blend=amip_cfg.topo_edge_blend,
             land_mask_path=getattr(amip_cfg, 'land_mask_path', ''),
+            albedo_land_path=getattr(amip_cfg, 'albedo_land_path', ''),
+            albedo_land_month=getattr(amip_cfg, 'albedo_land_month', 0),
+            C_land=getattr(amip_cfg, 'C_land', 2.0e5),
+            emissivity_land=getattr(amip_cfg, 'emissivity_land', 0.96),
+            beta_land=getattr(amip_cfg, 'beta_land', 1.0),
+            use_multilayer_land=getattr(amip_cfg, 'use_multilayer_land', False),
+            multilayer_n_layers=getattr(amip_cfg, 'multilayer_n_layers', 10),
+            multilayer_soil_depth=getattr(amip_cfg, 'multilayer_soil_depth', 3.0),
+            multilayer_soil_texture=getattr(amip_cfg, 'multilayer_soil_texture', 'loam'),
+            era5_land_ic_path=getattr(amip_cfg, 'era5_land_ic_path', ''),
+            cloud_T_warm=getattr(amip_cfg, 'cloud_T_warm', constants.T_freeze),
+            cloud_T_cold=getattr(amip_cfg, 'cloud_T_cold', 235.15),
+            cloud_r_eff_ice=getattr(amip_cfg, 'cloud_r_eff_ice', 30.0e-6),
+            cloud_r_eff_liq_ocean=getattr(amip_cfg, 'cloud_r_eff_liq_ocean', 10.0e-6),
+            cloud_r_eff_liq_land=getattr(amip_cfg, 'cloud_r_eff_liq_land', 7.0e-6),
             T_init=amip_cfg.T_init,
             rh_init=amip_cfg.rh_init,
             dynamic_albedo=amip_cfg.dynamic_albedo,
@@ -783,9 +1283,35 @@ class ExperimentConfig(NamedTuple):
             emissivity_ice=amip_cfg.emissivity_ice,
             tau_equator=amip_cfg.tau_equator,
             tau_pole=amip_cfg.tau_pole,
+            tau_moist_coeff=getattr(amip_cfg, 'tau_moist_coeff', 0.0115),
+            linear_frac=getattr(amip_cfg, 'linear_frac', 0.2),
+            lw_diff_factor=getattr(amip_cfg, 'lw_diff_factor', 1.66),
+            sw_tau_0=getattr(amip_cfg, 'sw_tau_0', 0.22),
+            sw_exponent=getattr(amip_cfg, 'sw_exponent', 2.0),
+            sundqvist_auto_rate=getattr(amip_cfg, 'sundqvist_auto_rate', 1e-3),
+            sundqvist_evap_coeff=getattr(amip_cfg, 'sundqvist_evap_coeff', 5e-4),
+            cloud_rh_crit=getattr(amip_cfg, 'cloud_rh_crit', 0.7),
+            cloud_r_eff_liq=getattr(amip_cfg, 'cloud_r_eff_liq', 10.0e-6),
+            sundqvist_sigmoid_sharpness=getattr(amip_cfg, 'sundqvist_sigmoid_sharpness', 20.0),
+            sbm_T_min_convect=getattr(amip_cfg, 'sbm_T_min_convect', 200.0),
+            louis_l_mix_max=getattr(amip_cfg, 'louis_l_mix_max', 100.0),
+            louis_Ck=getattr(amip_cfg, 'louis_Ck', 0.4),
+            louis_Ri_crit=getattr(amip_cfg, 'louis_Ri_crit', 0.25),
+            louis_b_louis=getattr(amip_cfg, 'louis_b_louis', 5.0),
+            louis_c_louis=getattr(amip_cfg, 'louis_c_louis', 16.6),
+            louis_d_louis=getattr(amip_cfg, 'louis_d_louis', 5.0),
+            louis_z0=getattr(amip_cfg, 'louis_z0', 1.0e-4),
+            louis_Ch_neutral=getattr(amip_cfg, 'louis_Ch_neutral', 1.5e-3),
+            louis_Cd_neutral=getattr(amip_cfg, 'louis_Cd_neutral', 1.5e-3),
+            mcfarlane_k_wave=getattr(amip_cfg, 'mcfarlane_k_wave', 6.283185307e-5),
+            mcfarlane_N_ref=getattr(amip_cfg, 'mcfarlane_N_ref', 0.01),
+            mcfarlane_directional_spread=getattr(amip_cfg, 'mcfarlane_directional_spread', 1.0),
+            mcfarlane_tau_max=getattr(amip_cfg, 'mcfarlane_tau_max', 10.0),
             sbm_tau_c=amip_cfg.sbm_tau_c,
             sbm_RH_ref=amip_cfg.sbm_RH_ref,
             sbm_cape_threshold=getattr(amip_cfg, 'sbm_cape_threshold', 70.0),
+            bechtold_cape_threshold=getattr(
+                amip_cfg, 'bechtold_cape_threshold', 70.0),
             sigma_b=amip_cfg.sigma_b,
             k_BL_max_per_day=amip_cfg.k_BL_max_per_day,
             k_free_per_day=amip_cfg.k_free_per_day,
@@ -868,6 +1394,7 @@ class ExperimentConfig(NamedTuple):
             turbulence=self.turbulence,
             gravity_wave_drag=self.gravity_wave_drag,
             fix_moisture=self.fix_moisture,
+            energy_consistent_moisture_clip=self.energy_consistent_moisture_clip,
             topography=self.topography,
             topo_smoothing=self.topo_smoothing,
             topo_edge_blend=self.topo_edge_blend,
@@ -886,9 +1413,34 @@ class ExperimentConfig(NamedTuple):
             emissivity_ice=self.emissivity_ice,
             tau_equator=self.tau_equator,
             tau_pole=self.tau_pole,
+            tau_moist_coeff=getattr(self, 'tau_moist_coeff', 0.0115),
+            linear_frac=getattr(self, 'linear_frac', 0.2),
+            lw_diff_factor=getattr(self, 'lw_diff_factor', 1.66),
+            sw_tau_0=getattr(self, 'sw_tau_0', 0.22),
+            sw_exponent=getattr(self, 'sw_exponent', 2.0),
+            sundqvist_auto_rate=getattr(self, 'sundqvist_auto_rate', 1e-3),
+            sundqvist_evap_coeff=getattr(self, 'sundqvist_evap_coeff', 5e-4),
+            cloud_rh_crit=getattr(self, 'cloud_rh_crit', 0.7),
+            cloud_r_eff_liq=getattr(self, 'cloud_r_eff_liq', 10.0e-6),
+            sundqvist_sigmoid_sharpness=getattr(self, 'sundqvist_sigmoid_sharpness', 20.0),
+            sbm_T_min_convect=getattr(self, 'sbm_T_min_convect', 200.0),
+            louis_l_mix_max=getattr(self, 'louis_l_mix_max', 100.0),
+            louis_Ck=getattr(self, 'louis_Ck', 0.4),
+            louis_Ri_crit=getattr(self, 'louis_Ri_crit', 0.25),
+            louis_b_louis=getattr(self, 'louis_b_louis', 5.0),
+            louis_c_louis=getattr(self, 'louis_c_louis', 16.6),
+            louis_d_louis=getattr(self, 'louis_d_louis', 5.0),
+            louis_z0=getattr(self, 'louis_z0', 1.0e-4),
+            louis_Ch_neutral=getattr(self, 'louis_Ch_neutral', 1.5e-3),
+            louis_Cd_neutral=getattr(self, 'louis_Cd_neutral', 1.5e-3),
+            mcfarlane_k_wave=getattr(self, 'mcfarlane_k_wave', 6.283185307e-5),
+            mcfarlane_N_ref=getattr(self, 'mcfarlane_N_ref', 0.01),
+            mcfarlane_directional_spread=getattr(self, 'mcfarlane_directional_spread', 1.0),
+            mcfarlane_tau_max=getattr(self, 'mcfarlane_tau_max', 10.0),
             sbm_tau_c=self.sbm_tau_c,
             sbm_RH_ref=self.sbm_RH_ref,
             sbm_cape_threshold=self.sbm_cape_threshold,
+            bechtold_cape_threshold=self.bechtold_cape_threshold,
             sigma_b=self.sigma_b,
             k_BL_max_per_day=self.k_BL_max_per_day,
             k_free_per_day=self.k_free_per_day,

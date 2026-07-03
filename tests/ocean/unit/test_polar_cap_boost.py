@@ -69,7 +69,12 @@ class TestPolarCapBoost:
         )
         lat_deg = np.degrees(np.asarray(g.lat))
         idx_80n = int(np.argmin(np.abs(lat_deg - 80.0)))
-        idx_80s = int(np.argmin(np.abs(lat_deg + 80.0)))
+        # Use the EXACT equator mirror index (the grid is symmetric:
+        # lat == -lat[::-1]).  ``argmin(|lat + 80|)`` is brittle: 80.0 falls
+        # exactly between the 79.5/80.5 cell centres, so under a float64 grid the
+        # tie breaks to a NON-mirror southern cell (80.5°S vs the northern
+        # 79.5°N), spuriously failing — float32 rounding had hidden the tie.
+        idx_80s = g.n_lat - 1 - idx_80n
         assert jnp.isclose(bu[idx_80n], bu[idx_80s], rtol=1e-3)
 
 

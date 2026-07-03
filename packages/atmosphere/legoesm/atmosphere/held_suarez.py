@@ -559,6 +559,14 @@ def held_suarez_forcing_mpas(
     )
 
 
+# NB: Held-Suarez is NOT tagged column-local.  Its Rayleigh friction is
+# column-local in the sigma branch, but the HYBRID-coordinate branch computes
+# the edge sigma from adjacent CELL pressures (p_full[c0]/p_full[c1],
+# p_s[c0]/p_s[c1]) — for an owned edge whose neighbor cell is a halo, that needs
+# fresh halo p_s.  Skipping the pre-physics halo exchange would use stale halo
+# values for owned-edge wind (codex review).  So we keep the exchange for HS.
+
+
 def held_suarez_init_mpas(
     mesh,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
@@ -599,17 +607,23 @@ def held_suarez_init_mpas(
     nEdges = mesh.nEdges
     nlev = sigma_coord.n_levels
 
-    # Surface geopotential
+    # Surface geopotential. Thread the precision-policy storage dtype through
+    # EVERY field (matching held_suarez_init / _latlon) so a mixed-precision
+    # policy does not leave the MPAS HS state's dtypes disagreeing with the
+    # policy storage (which reproduces the float64-config-through-float32-state
+    # scan-carry mismatch).
     if phis is None:
-        phis_data = jnp.zeros((nCells,))
+        phis_data = jnp.zeros((nCells,), dtype=_dtype)
     else:
-        phis_data = phis
+        phis_data = jnp.asarray(phis, dtype=_dtype)
 
     # Surface pressure (hydrostatic adjustment for topography)
-    p_s_data = p_s_init * jnp.exp(-phis_data / (constants.R_d * T_init))
+    p_s_data = (
+        p_s_init * jnp.exp(-phis_data / (constants.R_d * T_init))
+    ).astype(_dtype)
 
     # Temperature: uniform with small perturbation at lowest level
-    T_data = jnp.full((nCells, nlev), T_init)
+    T_data = jnp.full((nCells, nlev), T_init, dtype=_dtype)
     key = jax.random.PRNGKey(seed)
     perturbation = jax.random.normal(key, (nCells,), dtype=_dtype) * jnp.asarray(
         perturbation_amplitude, dtype=_dtype
@@ -617,7 +631,7 @@ def held_suarez_init_mpas(
     T_data = T_data.at[:, -1].add(perturbation)
 
     # Velocity: at rest
-    u_data = jnp.zeros((nEdges, nlev))
+    u_data = jnp.zeros((nEdges, nlev), dtype=_dtype)
 
     return MPASHydrostaticState(
         u=Field(data=u_data, name="u", dims=("nEdges", "level"), units="m/s"),

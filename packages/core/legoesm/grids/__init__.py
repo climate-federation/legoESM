@@ -14,6 +14,7 @@ from legoesm.grids.latlon import (
     LatLonCGridGeometry,
     FoldDescriptor,
     create_latlon_geometry,
+    create_beta_plane_cgrid_geometry,
     ensure_geometry,
     create_mercator_grid,
     create_regional_latlon_grid,
@@ -66,6 +67,8 @@ from legoesm.grids.topography import (
     schaer_mountain,
     land_mask_from_topography,
     phis_from_topography,
+    smooth_phis_cubed_sphere,
+    smooth_phis_gaussian,
     TopographyConfig,
     load_real_topography,
 )

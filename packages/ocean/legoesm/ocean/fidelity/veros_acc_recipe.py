@@ -34,6 +34,7 @@ import numpy as np
 from legoesm import constants
 from legoesm.grids.latlon import LatLonGrid, create_regional_latlon_grid
 from legoesm.ocean.constants_config import VEROS_CONSTANTS_CONFIG
+from legoesm.ocean.fidelity.veros_stepping import veros_faithful_stepping
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
@@ -41,7 +42,7 @@ from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 from legoesm.ocean.physics.lateral_mixing.config import (
     GMRediConfig, LateralMixingConfig,
 )
-from legoesm.ocean.physics.lateral_mixing.eke import EKEConfig
+from legoesm.ocean.physics.lateral_mixing.eke import EKEConfig, GeometricConfig
 from legoesm.core.field import Field
 from legoesm.ocean.physics.surface_forcing.config import (
     RestoringConfig, SurfaceForcingConfig,
@@ -336,6 +337,62 @@ _ACC_NO_SALT_RESTORE_TAU_S = 1.0e30
 
 
 # ---------------------------------------------------------------------------
+# The Veros <-> legoESM WIRING DIAGRAM (oracle-card audit trail)
+# ---------------------------------------------------------------------------
+# (Veros option / numeric, legoESM config field, chosen block + faithfulness note).
+# Mirrors ``NEMO_BLOCK_MAPPING`` (nemo_recipe.py) so every ocean oracle card carries
+# the same auditable map a user reads to see which legoESM block each production
+# numeric corresponds to.  The dycore-identity rows (those whose middle column is a
+# bare top-level ``LatLonCGridOceanConfig`` scheme field) are MACHINE-CHECKED against
+# the ``veros_faithful_v1`` catalog entry by tests/ocean/fidelity/
+# test_veros_block_mapping.py -> the card and the catalog cannot silently diverge.
+VEROS_BLOCK_MAPPING: tuple[tuple[str, str, str], ...] = (
+    ("constants", "ConstantsConfig",
+     "VEROS_CONSTANTS_CONFIG (Veros base constants; derived recomputed)"),
+    ("EOS", "eos",
+     "veros_nonlin2 (Veros 2nd-order nonlinear EOS, linearised-about-state)"),
+    ("momentum advection", "momentum_advection",
+     "flux_form (Veros 2nd-order centered flux-form momentum)"),
+    ("momentum flux reconstruction", "momentum_flux_scheme",
+     "centered (Veros 2nd-order)"),
+    ("tracer advection", "tracer_advection",
+     "centered (Veros 2nd-order centered tracer advection)"),
+    ("pressure gradient", "pgf_scheme",
+     "adcroft (Veros energy-conserving FD hydrostatic PGF)"),
+    ("KE gradient", "ke_gradient_scheme",
+     "centered (flux-form path; Veros adds the explicit KE gradient)"),
+    ("free surface / barotropic", "barotropic_solver",
+     "rigid_lid (Veros streamfunction/rigid-lid external mode)"),
+    ("Coriolis", "coriolis_scheme",
+     "explicit_ab2 (Veros planetary f x u in the AB2-extrapolated tendency)"),
+    ("time integration", "outer_integrator",
+     "ab2 (Veros Adams-Bashforth-2 for momentum + tracers)"),
+    ("AB2 dissipation scope", "ab2_scope",
+     "advective (Veros AB2-extrapolates advection only; mixing stays explicit)"),
+    ("tracer time integration", "tracer_time_integrator",
+     "euler (Veros forward-Euler tracer step under AB2 advection)"),
+    ("momentum friction placement", "momentum_friction_additive",
+     "True (Veros adds lateral+vertical friction as a separate additive tendency)"),
+    ("implicit vertical mixing", "implicit_vertical_mixing",
+     "True (Veros implicit backward-Euler vertical mixing)"),
+    ("implicit-vmix dzw slot", "implicit_vmix_dzw_slot",
+     "True (Veros dzw spacing in the implicit tridiagonal vertical operator)"),
+    ("lateral viscosity operator", "lateral_viscosity_operator",
+     "flux_divergence (Veros per-component harmonic friction)"),
+    ("vertical momentum advection", "vertical_momentum_scheme",
+     "centered_full (Veros centered vertical momentum flux)"),
+    ("lateral viscosity coefficient", "A_h",
+     "acc_A_h (Veros enable_noslip_lateral=False harmonic A_h)"),
+    ("vertical mixing closure", "physics.vertical_mixing",
+     "ACC_TKE_CONFIG (Veros prognostic TKE closure)"),
+    ("GM/Redi eddy parameterisation", "gm_redi",
+     "ACC_GM_REDI_CONFIG (Veros GM + Redi isoneutral, dm95 taper)"),
+    ("bottom drag", "bottom_drag_r",
+     "R_BOT (Veros linear bottom drag r * |u|)"),
+)
+
+
+# ---------------------------------------------------------------------------
 # Grid / vertical coordinate / bathymetry
 # ---------------------------------------------------------------------------
 
@@ -509,11 +566,25 @@ def build_acc_state(grid: LatLonGrid,
             eke0 = (eke_cfg.e_min * lm)[:, :, jnp.newaxis] * jnp.ones(
                 (1, 1, nlev - 1), dtype=lm.dtype)
             eke_dims = ("lat", "lon", "level")
+            eke_units = "m^2/s^2"            # specific eddy energy (W-grid)
         else:
-            eke0 = eke_cfg.e_min * lm
             eke_dims = ("lat", "lon")
+            if eke_cfg.closure == "geometric":
+                # GEOMETRIC prognoses the depth-INTEGRATED ∫E dz [m^3/s^2]. Honor
+                # the closure's OWN documented cold-start ∫E dz = e0_per_depth·H
+                # (GeometricConfig, Torres et al. 2025 Appendix E), NOT the
+                # Eden-Greatbatch specific-energy floor e_min [m^2/s^2]. Flat-bottom
+                # ACC ⇒ H = H_max on wet columns. The step writes units "m^3/s^2"
+                # (ocean_model_latlon_cgrid.py:1950); Field.units is static pytree
+                # metadata, so a seed/step mismatch breaks the jax.lax.scan
+                # constant-carry on the FIRST step.
+                eke0 = eke_cfg.geometric.e0_per_depth * H_max * lm
+                eke_units = "m^3/s^2"
+            else:
+                eke0 = eke_cfg.e_min * lm
+                eke_units = "m^2/s^2"
         state = state._replace(
-            eke=Field(data=eke0, name="eke", dims=eke_dims, units="m^2/s^2"))
+            eke=Field(data=eke0, name="eke", dims=eke_dims, units=eke_units))
         # eke_diss (Veros eke_diss_iw): the 3-D EKE step writes this every step;
         # seed it to zero so the None -> Field transition never happens mid-scan
         # (constant-pytree carry). Only the 3-D EKE path produces it.
@@ -717,6 +788,7 @@ def build_acc_physics_config(grid: LatLonGrid | None = None, *,
 
 def build_acc_model_config(grid: LatLonGrid | None = None, *,
                            with_surface_forcing: bool = False,
+                           gm_redi: GMRediConfig = ACC_GM_REDI_CONFIG,
                            ) -> LatLonCGridOceanConfig:
     """Veros ACC dynamics: harmonic lateral viscosity with cos(lat)
     scaling, linear bottom drag, implicit vertical viscosity,
@@ -724,7 +796,7 @@ def build_acc_model_config(grid: LatLonGrid | None = None, *,
 
     ``with_surface_forcing`` (free-run) threads through to the physics config to
     activate T* restoring; default ``False`` is the frozen-state-probe config."""
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         # All physical constants pinned to Veros via config (G-C4): g/rho_0 are
         # read by the PE core, the ConstantsConfig by the de-mirrored physics,
         # and R_earth feeds acc_A_h — pinned purely through config.
@@ -810,7 +882,10 @@ def build_acc_model_config(grid: LatLonGrid | None = None, *,
         # GM/Redi is a TOP-LEVEL (dynamics) field on the lat-lon C-grid — this
         # is what the model actually reads (ocean_model_latlon_cgrid.py:998).
         # Setting it only in physics.lateral_mixing left GM/Redi inactive.
-        gm_redi=ACC_GM_REDI_CONFIG,
+        # ``gm_redi`` defaults to the Eden-Greatbatch ACC config; the GEOMETRIC
+        # calibration twin (Stage 0) passes a GMRediConfig whose ``.eke`` carries
+        # ``closure="geometric"`` (see ``build_acc_recipe(eke_override=...)``).
+        gm_redi=gm_redi,
         # Veros applies the surface TRACER forcing (forc_temp_surface restoring)
         # IMPLICITLY — it enters the backward-Euler vertical-mixing tridiagonal
         # RHS at weight 1.0 (core/thermodynamics.py), NOT as an AB2-extrapolated
@@ -849,20 +924,37 @@ def build_acc_model_config(grid: LatLonGrid | None = None, *,
         #   ab2_scope="advective"         ↔ dissipative tendencies at weight
         #                                   1.0 (solve_stream.py placement)
         #   momentum_friction_additive=True ↔ explicit additive du_mix
-        outer_integrator="ab2" if with_surface_forcing else "forward_euler",
-        dt_mom_ratio=9.0 if with_surface_forcing else 1.0,
-        barotropic_solver=("rigid_lid" if with_surface_forcing
-                           else "explicit_substep"),
-        coriolis_scheme=("explicit_ab2" if with_surface_forcing
-                         else "matsuno_split"),
-        ab2_scope="advective" if with_surface_forcing else "total",
-        momentum_friction_additive=with_surface_forcing,
+        # implicit_vmix_dzw_slot ↔ Veros dzw divisor of the implicit T/S +
+        # friction solves (#428): the ACC z-coordinate is u_centered, so the
+        # dz_half_ref·J slot differs from the midpoint reconstruction. The whole
+        # bundle is gated on with_surface_forcing — the frozen-state probe keeps
+        # legoESM defaults and stays bit-identical. Shared across all 5 Veros
+        # recipes via veros_stepping.veros_faithful_stepping (#433).
+        **veros_faithful_stepping(with_surface_forcing=with_surface_forcing,
+                                  dt_mom_ratio=9.0),
         physics=build_acc_physics_config(
             grid, with_surface_forcing=with_surface_forcing),
     )
 
 
-def build_acc_recipe(*, with_surface_forcing: bool = False) -> ACCRecipe:
+def geometric_eke_config(geom: GeometricConfig = GeometricConfig()) -> EKEConfig:
+    """Clean GEOMETRIC EKE closure config for the calibration twin (Stage 0).
+
+    The Eden-Greatbatch ACC config (:data:`ACC_GM_REDI_CONFIG`.eke) sets a stack
+    of EG-only flags (``eke_3d=True``, ``isopycnal_diffusion=True``,
+    ``gm_source_mode="realized_signed"``, ``source_kdiss_h``/``kdiss_h_flux_form``)
+    that the GEOMETRIC closure's cross-validation REJECTS (eke.py:730-763) — its
+    source terms (B_C, B_T) and Redi coupling (kappa_n) are self-contained. So the
+    twin uses a fresh ``EKEConfig`` carrying ONLY ``closure="geometric"`` + the
+    ``GeometricConfig`` (Torres et al. 2025); every other field stays at its
+    EKEConfig default. The depth-INTEGRATED 2-D budget requires ``eke_3d=False``
+    (the default), which routes the initial-state seeding (build_acc_state:504-516)
+    to the 2-D ``(lat, lon)`` eke field the geometric step consumes."""
+    return EKEConfig(closure="geometric", geometric=geom)
+
+
+def build_acc_recipe(*, with_surface_forcing: bool = False,
+                     eke_override: EKEConfig | None = None) -> ACCRecipe:
     """One-stop constructor. Use as::
 
         from legoesm.ocean.fidelity.veros_acc_recipe import build_acc_recipe
@@ -880,15 +972,25 @@ def build_acc_recipe(*, with_surface_forcing: bool = False) -> ACCRecipe:
     as ``recipe.wind_forcing`` (pass to ``model.step(..., surface_forcing=
     recipe.wind_forcing)``). Default ``False`` is the frozen-state-probe recipe
     (no forcing), so the committed tier-2 tendency comparison is unchanged.
+
+    ``eke_override`` swaps the EKE closure config in ``model_config.gm_redi.eke``
+    (e.g. :func:`geometric_eke_config` for the GEOMETRIC calibration twin). It is
+    threaded into BOTH the model config (so the step runs the chosen closure) AND
+    ``build_acc_state`` (so the initial eke field is seeded with the matching
+    shape — 2-D for geometric/``eke_3d=False``, 3-D for Eden-Greatbatch). ``None``
+    keeps the Eden-Greatbatch ACC default, leaving the historical call
+    ``build_acc_recipe()`` bit-identical.
     """
     grid = build_acc_grid()
     z_coord = build_acc_z_coord()
     land_mask = build_acc_land_mask(grid)
-    initial_state = build_acc_state(grid, z_coord)
+    gm_redi = (ACC_GM_REDI_CONFIG if eke_override is None
+               else ACC_GM_REDI_CONFIG._replace(eke=eke_override))
+    initial_state = build_acc_state(grid, z_coord, gm_redi=gm_redi)
     wind_forcing = build_acc_wind_stress(grid) if with_surface_forcing else None
     return ACCRecipe(
         model_config=build_acc_model_config(
-            grid, with_surface_forcing=with_surface_forcing),
+            grid, with_surface_forcing=with_surface_forcing, gm_redi=gm_redi),
         physics_config=build_acc_physics_config(
             grid, with_surface_forcing=with_surface_forcing),
         grid=grid,
@@ -911,6 +1013,7 @@ __all__ = (
     "NZ",
     "R_BOT",
     "T_RESTORING_DAYS",
+    "VEROS_BLOCK_MAPPING",
     "X_ORIGIN_DEG",
     "Y_ORIGIN_DEG",
     "acc_A_h",
@@ -924,4 +1027,5 @@ __all__ = (
     "build_acc_t_star",
     "build_acc_wind_stress",
     "build_acc_z_coord",
+    "geometric_eke_config",
 )

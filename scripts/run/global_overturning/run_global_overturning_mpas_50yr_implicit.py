@@ -17,7 +17,7 @@ constraints, NOT knobs):
     3D CFL.  Smoke-test the largest stable dt before the long run.
   - GM/Redi slope_scheme = "centered" (lat-lon 50yr used default
     "triads"; MPAS triads is Phase 5 of the GM/Redi MPAS plan, not yet
-    implemented).  Eady validation (docs/ocean_experiments/gm_redi_mpas_plan.md)
+    implemented).  Eady validation (docs/ocean/experiments/gm_redi_mpas_plan.md)
     found centered acceptable on weak-forcing physics, but expect more
     spurious diapycnal mixing in the deep ocean over 50 yr.
 
@@ -54,10 +54,10 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 from legoesm.ocean.vertical import create_ocean_z_star
 from legoesm.grids.voronoi import create_voronoi_mesh
 from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
-from legoesm.ocean.mpas_config import MPASOceanConfig
 from legoesm.ocean.experiments.global_overturning import (
     GlobalOverturningConfig, create_initial_conditions, create_forcings,
     create_eos_config, create_gm_redi_config,
+    global_overturning_mpas_model_config,
 )
 
 
@@ -137,17 +137,10 @@ def main():
 
     a_h_used = max(config.A_h, MPAS_A_H_FLOOR)
 
-    ocean_config = MPASOceanConfig(
-        n_barotropic_substeps=30,                      # unused under implicit_cn
-        physics=physics,
-        A_h=a_h_used,
-        A_v=config.A_v,
-        K_v=config.K_v,
-        bottom_drag_r=config.bottom_drag_coeff,
-        eos="linear",
-        eos_linear=eos_config,
-        gm_redi=gm_redi_cfg,
-        barotropic_solver="implicit_cn",
+    ocean_config = global_overturning_mpas_model_config(
+        config, physics=physics, eos_config=eos_config, gm_redi_cfg=gm_redi_cfg,
+        A_h=a_h_used,                                  # lifted to MPAS A_h floor
+        barotropic_solver="implicit_cn",              # n_barotropic_substeps unused
     )
 
     n_steps = int(total_years * 365.0 * 86400 / dt)
@@ -170,8 +163,8 @@ def main():
           f"α={config.visbeck_alpha}, κ∈[{config.visbeck_kappa_min:.0f},"
           f"{config.visbeck_kappa_max:.0f}])")
     print(f"  Convection: enhanced_diffusion (K_conv=1.0)")
-    print(f"  Barotropic: implicit_cn θ={ocean_config.barotropic_implicit_theta_eta} "
-          f"(PCG tol={ocean_config.barotropic_implicit_pcg_tol:.0e})")
+    print(f"  Barotropic: implicit_cn θ={ocean_config.barotropic.barotropic_implicit_theta_eta} "
+          f"(PCG tol={ocean_config.barotropic.barotropic_implicit_pcg_tol:.0e})")
     print(f"  Restart cadence: every {args.restart_every_years} yr")
     print()
 

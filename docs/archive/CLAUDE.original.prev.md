@@ -95,7 +95,7 @@
 - Ocean test matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py`
 - AMIP production: `.venv/bin/python scripts/run/run_amip.py`
 - Dycore progression suite: `.venv/bin/python tests/validation/run_dycore_progression_suite.py`
-- GPU/MPI scaling benchmark: `.venv/bin/python scripts/bench/run_levante_gpu_scaling.py --grid cubed-sphere --mode strong` (see `docs/REAL_HARDWARE_SCALING.md`)
+- GPU/MPI scaling benchmark: `.venv/bin/python scripts/bench/run_levante_gpu_scaling.py --grid cubed-sphere --mode strong` (see `docs/performance/REAL_HARDWARE_SCALING.md`)
 - MPI distributed tests: `mpirun -np 2 .venv/bin/python -m pytest tests/distributed/`
 - MPI differentiability tests: `mpirun -np 2 .venv/bin/python -m pytest tests/distributed/test_mpi_differentiability.py`
 
@@ -114,7 +114,7 @@
 - Do not add deprecated backward-compatibility wrappers. If an API changes, update call sites directly.
 - Do not add thin dispatch-only wrappers (e.g., `X_utils.py` that just re-exports a function from `X.py`). Inline the call at each site or factor the helper into the canonical module. (Modules with real branching/dispatch logic across multiple callers — like `land/stomata_utils.py` — are legitimate and not "thin wrappers".)
 - Grid-specific variants are legitimate when they have genuinely different numerics. Copy-paste with only indexing changes is forbidden — factor shared logic into a common function.
-- **Never commit anything from `docs/references/`.** This directory is a local-only stash for research PDFs (papers, technical reports, multi-MB figures) consulted while planning. It must not enter the git history under any circumstances — not the PDFs themselves, not extracts, not derivative summary files placed in that folder. Read freely; cite by filename or DOI in commit messages and design docs; place any extracted notes elsewhere (`docs/ocean_experiments/`, etc.). When staging files, use explicit paths — never `git add .` or `git add -A` in this repo, since `docs/references/` is not currently enforced by `.gitignore`.
+- **Never commit anything from `docs/references/`.** This directory is a local-only stash for research PDFs (papers, technical reports, multi-MB figures) consulted while planning. It must not enter the git history under any circumstances — not the PDFs themselves, not extracts, not derivative summary files placed in that folder. Read freely; cite by filename or DOI in commit messages and design docs; place any extracted notes elsewhere (`docs/ocean/experiments/`, etc.). When staging files, use explicit paths — never `git add .` or `git add -A` in this repo, since `docs/references/` is not currently enforced by `.gitignore`.
 - Run the slopbuster agent (`/slopbuster audit all` or `/slopbuster review`) periodically, especially before releases.
 
 ## Constant and Parameter Discipline (audit-enforced)

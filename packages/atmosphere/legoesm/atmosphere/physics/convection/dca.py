@@ -72,6 +72,7 @@ from legoesm.atmosphere.physics.convection.config import (
     DCAConfig,
 )
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics.convection._triggers import cape_trigger
 from legoesm.atmosphere.physics.convection.mass_flux import (
     stratosphere_mass_flux_gate,
 )
@@ -314,9 +315,9 @@ def _manabe_dca_convection(
     cape = compute_cape(T, T_adj, p_full, p_half)
 
     # Gate tendencies by CAPE: only adjust where CAPE exceeds threshold.
-    # Smooth sigmoid gating preserves differentiability.
-    cape_gate = jax.nn.sigmoid(
-        config.cape_sharpness * (cape - config.cape_threshold)
+    # cape_trigger == sigmoid(sharpness * (CAPE - threshold)) — differentiable.
+    cape_gate = cape_trigger(
+        cape, config.cape_threshold, config.cape_sharpness
     )  # (ncol,)
 
     # Convert to tendencies, gated by CAPE (a per-column scalar, so it

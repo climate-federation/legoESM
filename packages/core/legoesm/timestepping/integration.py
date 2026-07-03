@@ -3,7 +3,6 @@
 import functools
 
 import jax
-import jax.numpy as jnp
 
 
 def physics_requires_phys_state(physics_fn) -> bool:
@@ -174,4 +173,4 @@ class IntegrationMixin:
         def scan_fn(s, _):
             new_s = self.step(s, dt)
             return new_s, new_s
-        return jax.lax.scan(scan_fn, state, jnp.arange(n_steps))
+        return jax.lax.scan(scan_fn, state, xs=None, length=n_steps)

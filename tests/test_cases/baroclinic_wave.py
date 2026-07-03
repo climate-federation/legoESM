@@ -295,6 +295,8 @@ def baroclinic_wave_init(
     grid,
     sigma_coord: SigmaCoordinate,
     perturbed: bool = True,
+    moist: bool = False,
+    rh_init: float = 0.7,
 ) -> HydrostaticState:
     """Create initial conditions for the baroclinic wave test on a cubed-sphere grid.
 
@@ -311,6 +313,15 @@ def baroclinic_wave_init(
     perturbed : bool
         If True, add the exponential perturbation to trigger instability.
         If False, return only the steady-state (balanced) initial conditions.
+    moist : bool
+        If True, attach ``q_v``/``q_c``/``q_r`` tracers for a *moist*
+        baroclinic wave, using the same RH-tapered profile as
+        :func:`baroclinic_wave_init_mpas` / ``_spectral``
+        (``rh_init · q_sat(T,p) · σ²``, capped at saturation; ``q_c=q_r=0``)
+        so the balanced moist state is identical across grids.  Dry mass /
+        temperature / wind are unchanged (moisture added passively at t=0).
+    rh_init : float
+        Surface relative humidity for the ``q_v`` taper when ``moist=True``.
 
     Returns
     -------
@@ -374,6 +385,24 @@ def baroclinic_wave_init(
     dims_3d = ("face", "x", "y", "level")
     dims_2d = ("face", "x", "y")
 
+    tracers = None
+    if moist:
+        # Same RH-tapered q_v init as baroclinic_wave_init_mpas / _spectral:
+        # q_v = rh · q_sat(T, p) · σ², capped at saturation; q_c=q_r=0.
+        # Sigma coordinate ⇒ p_full = p_s · σ_full.
+        from legoesm.thermo import saturation_mixing_ratio
+
+        p_full = p_s[..., None] * sigma_full[None, None, None, :]  # (6,n,n,nlev)
+        q_sat = saturation_mixing_ratio(T_3d, p_full)
+        q_v_data = jnp.minimum(
+            rh_init * q_sat * sigma_full[None, None, None, :] ** 2, q_sat)
+        q_zero = jnp.zeros((6, n, n, nlev))
+        tracers = {
+            "q_v": Field(data=q_v_data, name="q_v", dims=dims_3d, units="kg/kg"),
+            "q_c": Field(data=q_zero, name="q_c", dims=dims_3d, units="kg/kg"),
+            "q_r": Field(data=q_zero, name="q_r", dims=dims_3d, units="kg/kg"),
+        }
+
     return HydrostaticState(
         u=Field(data=u_grid, name="u", dims=dims_3d, units="m/s"),
         v=Field(data=v_grid, name="v", dims=dims_3d, units="m/s"),
@@ -381,6 +410,7 @@ def baroclinic_wave_init(
         p_s=Field(data=p_s, name="p_s", dims=dims_2d, units="Pa"),
         phis=Field(data=jnp.zeros((6, n, n)),
                    name="phis", dims=dims_2d, units="m^2/s^2"),
+        tracers=tracers,
     )
 
 
@@ -392,12 +422,18 @@ def baroclinic_wave_init_latlon(
     grid,
     sigma_coord: SigmaCoordinate,
     perturbed: bool = True,
+    moist: bool = False,
+    rh_init: float = 0.7,
 ) -> HydrostaticState:
     """Create baroclinic wave initial conditions for a lat-lon grid.
 
     Same physics as :func:`baroclinic_wave_init` but for lat-lon grids
     where ``grid.lat`` is 1-D ``(n_lat,)`` and ``grid.lon`` is 1-D
     ``(n_lon,)``.  No wind rotation is needed (grid axes = geographic).
+
+    ``moist=True`` attaches the same RH-tapered ``q_v``/``q_c``/``q_r``
+    tracers as :func:`baroclinic_wave_init` (``rh_init · q_sat(T,p) · σ²``,
+    capped at saturation; ``q_c=q_r=0``) for a moist baroclinic wave.
     """
     nlev = sigma_coord.n_levels
     # Build 2D coordinate arrays from 1D lat/lon
@@ -427,6 +463,24 @@ def baroclinic_wave_init_latlon(
 
     dims_3d = ("lat", "lon", "level")
     dims_2d = ("lat", "lon")
+
+    tracers = None
+    if moist:
+        # Same RH-tapered q_v init as baroclinic_wave_init / _mpas / _spectral:
+        # q_v = rh · q_sat(T, p) · σ², capped at saturation; q_c=q_r=0.
+        from legoesm.thermo import saturation_mixing_ratio
+
+        p_full = p_s[..., None] * sigma_full[None, None, :]  # (n_lat,n_lon,nlev)
+        q_sat = saturation_mixing_ratio(T_3d, p_full)
+        q_v_data = jnp.minimum(
+            rh_init * q_sat * sigma_full[None, None, :] ** 2, q_sat)
+        q_zero = jnp.zeros((n_lat, n_lon, nlev))
+        tracers = {
+            "q_v": Field(data=q_v_data, name="q_v", dims=dims_3d, units="kg/kg"),
+            "q_c": Field(data=q_zero, name="q_c", dims=dims_3d, units="kg/kg"),
+            "q_r": Field(data=q_zero, name="q_r", dims=dims_3d, units="kg/kg"),
+        }
+
     return HydrostaticState(
         u=Field(data=u_3d, name="u", dims=dims_3d, units="m/s"),
         v=Field(data=v_3d, name="v", dims=dims_3d, units="m/s"),
@@ -434,6 +488,7 @@ def baroclinic_wave_init_latlon(
         p_s=Field(data=p_s, name="p_s", dims=dims_2d, units="Pa"),
         phis=Field(data=jnp.zeros((n_lat, n_lon)),
                    name="phis", dims=dims_2d, units="m^2/s^2"),
+        tracers=tracers,
     )
 
 
@@ -445,6 +500,8 @@ def baroclinic_wave_init_mpas(
     mesh,
     sigma_coord,
     perturbed: bool = True,
+    moist: bool = False,
+    rh_init: float = 0.7,
 ):
     """Initialize Jablonowski-Williamson baroclinic wave on MPAS mesh.
 
@@ -459,6 +516,17 @@ def baroclinic_wave_init_mpas(
     sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
     perturbed : bool
         If True, add the exponential perturbation to trigger instability.
+    moist : bool
+        If True, attach ``q_v``/``q_c``/``q_r`` tracers for a *moist*
+        baroclinic wave (the dycore then advects them and a Kessler
+        ``physics_fn`` condenses/precipitates).  ``q_v`` follows the same
+        RH-tapered profile used by ``ModelDriver`` for all grids
+        (``rh_init · q_sat(T,p) · σ²``, capped at saturation); ``q_c`` and
+        ``q_r`` start at zero.  Dry mass / temperature / wind are unchanged
+        (the moisture is added passively at t=0).
+    rh_init : float
+        Surface relative humidity used for the ``q_v`` taper when
+        ``moist=True``.
 
     Returns
     -------
@@ -509,11 +577,33 @@ def baroclinic_wave_init_mpas(
     # Surface geopotential: flat
     phis_data = jnp.zeros((nCells,))
 
+    tracers = None
+    if moist:
+        # Shared RH-tapered q_v init (identical formula to ModelDriver's
+        # all-grid moist initialization): q_v = rh · q_sat(T, p) · σ²,
+        # capped at saturation; q_c = q_r = 0.  Sigma coordinate ⇒
+        # p_full = p_s · σ_full.
+        from legoesm.thermo import saturation_mixing_ratio
+
+        p_full = p_s_data[:, None] * sigma_full[None, :]  # (nCells, nlev)
+        q_sat = saturation_mixing_ratio(T_data, p_full)
+        q_v_data = jnp.minimum(rh_init * q_sat * sigma_full[None, :] ** 2, q_sat)
+        q_zero = jnp.zeros((nCells, nlev))
+        tracers = {
+            "q_v": Field(data=q_v_data, name="q_v",
+                         dims=("nCells", "level"), units="kg/kg"),
+            "q_c": Field(data=q_zero, name="q_c",
+                         dims=("nCells", "level"), units="kg/kg"),
+            "q_r": Field(data=q_zero, name="q_r",
+                         dims=("nCells", "level"), units="kg/kg"),
+        }
+
     return MPASHydrostaticState(
         u=Field(data=u_data, name="u", dims=("nEdges", "level"), units="m/s"),
         T=Field(data=T_data, name="T", dims=("nCells", "level"), units="K"),
         p_s=Field(data=p_s_data, name="p_s", dims=("nCells",), units="Pa"),
         phis=Field(data=phis_data, name="phis", dims=("nCells",), units="m^2/s^2"),
+        tracers=tracers,
     )
 
 
@@ -525,6 +615,8 @@ def baroclinic_wave_init_spectral(
     grid,
     sigma_coord: SigmaCoordinate,
     perturbed: bool = True,
+    moist: bool = False,
+    rh_init: float = 0.7,
 ):
     """Initialize Jablonowski-Williamson baroclinic wave in spectral space.
 
@@ -539,6 +631,14 @@ def baroclinic_wave_init_spectral(
         Vertical sigma coordinate.
     perturbed : bool
         If True, add the exponential perturbation to trigger instability.
+    moist : bool
+        If True, attach grid-space ``q_v``/``q_c``/``q_r`` tracers for a moist
+        baroclinic wave (passive at t=0; ``make_kessler_forcing_spectral``
+        condenses/precipitates). ``q_v`` uses the same RH-tapered formula as the
+        MPAS / cubed-sphere moist init: ``q_v = rh · q_sat(T, p) · σ²`` capped at
+        saturation; ``q_c = q_r = 0``.
+    rh_init : float
+        Surface relative humidity for the ``q_v`` taper when ``moist=True``.
 
     Returns
     -------
@@ -635,10 +735,32 @@ def baroclinic_wave_init_spectral(
     dims_3d = ("spectral", "level")
     dims_2d = ("spectral",)
 
+    # Moist tracers: same RH-tapered q_v init as baroclinic_wave_init_mpas (and
+    # the cubed-sphere / lat-lon moist inits) so the balanced state is identical
+    # across grids. q_v = rh · q_sat(T, p) · σ², capped at saturation; q_c=q_r=0.
+    # Grid-space, passive at t=0; make_kessler_forcing_spectral drives the
+    # condensation/precipitation. p is hydrostatic on the uniform p_s=P0 column.
+    tracers = None
+    if moist:
+        from legoesm.thermo import saturation_mixing_ratio
+
+        p_full = jnp.asarray(sigma_full, dtype=jnp.float64)[None, None, :] * P0
+        q_sat = saturation_mixing_ratio(T_jax, p_full)
+        sigma2 = jnp.asarray(sigma_full, dtype=jnp.float64)[None, None, :] ** 2
+        q_v_data = jnp.minimum(rh_init * q_sat * sigma2, q_sat)
+        q_zero = jnp.zeros_like(q_v_data)
+        tdims = ("lat", "lon", "level")
+        tracers = {
+            "q_v": Field(data=q_v_data, name="q_v", dims=tdims, units="kg/kg"),
+            "q_c": Field(data=q_zero, name="q_c", dims=tdims, units="kg/kg"),
+            "q_r": Field(data=q_zero, name="q_r", dims=tdims, units="kg/kg"),
+        }
+
     return SpectralHydrostaticState(
         vor_hat=Field(data=vor_hat, name="vor_hat", dims=dims_3d, units="1/s"),
         div_hat=Field(data=div_hat, name="div_hat", dims=dims_3d, units="1/s"),
         T_hat=Field(data=T_hat, name="T_hat", dims=dims_3d, units="K"),
         lnps_hat=Field(data=lnps_hat, name="lnps_hat", dims=dims_2d, units=""),
         phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
+        tracers=tracers,
     )

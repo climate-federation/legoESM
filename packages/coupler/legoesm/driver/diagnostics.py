@@ -10,10 +10,13 @@ from pathlib import Path
 import numpy as np
 import jax.numpy as jnp
 
+from legoesm.diagnostics.cloud_overlap import maximum_random_overlap
 from legoesm.diagnostics.column_integrals import column_water_vapor
 from legoesm.diagnostics.energy_budget import (
     EnergyBudgetTracker,
     MoistureBudgetTracker,
+    area_weighted_mean,
+    area_weighted_profile,
 )
 from legoesm.diagnostics.monthly_means import MonthlyAccumulator
 from legoesm.forcing.surface_utils import blend_surface_temperature
@@ -169,11 +172,25 @@ class DiagnosticCollector:
         output_dir: str | Path = "",
         cmip_resolution_deg: float = 5.0,
         start_year: int = 1979,
+        cloud_config=None,
     ):
         self.nlev = nlev
         self.sigma_full = sigma_full
         self.dsigma = dsigma
         self.clear_sky_diag = clear_sky_diag
+        # Cloud config (``atmosphere.physics.clouds.CloudConfig`` or ``None``)
+        # for the total-cloud-cover ``clt`` diagnostic — the SAME scheme
+        # selection radiation uses, so ``clt`` reflects the model's actual
+        # fractional cloud fraction (issue #689).  ``None`` (cloud scheme
+        # 'none') => ``clt`` is not published.
+        self._cloud_config = cloud_config
+
+        # Per-cell horizontal area weights for global-mean diagnostics.
+        # ``None`` => unweighted ``jnp.mean`` (legacy behaviour); the driver
+        # calls ``set_area_weights(grid.grid_area)`` so lat-lon polar rows do
+        # not over-weight every <R_TOA>/<SST>/<CWV> global mean (see
+        # ``area_weighted_mean``).
+        self._area_w = None
 
         # Time-series storage
         self.times: list[float] = []
@@ -189,8 +206,15 @@ class DiagnosticCollector:
         self.sw_net_sfc: list[float] = []
         self.lw_net_sfc: list[float] = []
         self.dry_mass: list[float] = []
+        self.rsdt: list[float] = []
+        self.hfss: list[float] = []
+        self.hfls: list[float] = []
         self.profiles_T: list[np.ndarray] = []
         self.profiles_qv: list[np.ndarray] = []
+
+        # Grid rotation angle for cubed-sphere wind rotation to geographic
+        # components.  Set via set_wind_rotation_angle(); None for other grids.
+        self._wind_rotation_angle: np.ndarray | None = None
 
         # Energy budget tracker
         self.energy_tracker = EnergyBudgetTracker()
@@ -270,6 +294,22 @@ class DiagnosticCollector:
         if n_days not in self.snapshot_days:
             self.snapshot_days.add(n_days)
         self.snapshots: dict[int, dict[str, np.ndarray]] = {}
+
+    def set_area_weights(self, area) -> None:
+        """Register per-cell horizontal areas for area-weighted global means.
+
+        Parameters
+        ----------
+        area : array or None
+            Per-cell area on the native horizontal grid (``grid.grid_area``:
+            lat-lon ``(n_lat, n_lon)``, cube ``(6, n, n)``).  Passing ``None``
+            (or a grid that lacks ``grid_area``) keeps the legacy unweighted
+            ``jnp.mean``.  Without this the polar rows of a lat-lon grid count
+            equally with the equatorial rows despite spanning ``~cos(lat)``
+            less area, biasing <R_TOA>, <SST>, <CWV> and friends toward the
+            cold high latitudes.
+        """
+        self._area_w = None if area is None else jnp.asarray(area)
 
     def set_cmip_grid_info(self, grid_type: str, grid=None, start_year: int = 1):
         """Configure CMIP output grid and regridding weights.
@@ -352,6 +392,20 @@ class DiagnosticCollector:
             self._fixed_phis = np.asarray(phis)
         if land_fraction is not None:
             self._fixed_land_fraction = np.asarray(land_fraction)
+
+    def set_wind_rotation_angle(self, angle) -> None:
+        """Register the grid-to-geographic wind rotation angle.
+
+        Parameters
+        ----------
+        angle : array
+            Grid rotation angle [rad] on the native model grid.
+            For cubed-sphere, shape is (6, n, n).  Stored as a NumPy
+            array so the diagnostics path has no JAX dependency at
+            save time.  Used to rotate panel-local (u, v) to geographic
+            (east, north) before computing zonal-mean profile_u.
+        """
+        self._wind_rotation_angle = np.asarray(angle)
 
     def _regrid_to_latlon_2d(self, field) -> np.ndarray | None:
         """Regrid a 2-D field to the CMIP lat-lon grid.
@@ -472,6 +526,34 @@ class DiagnosticCollector:
         alpha = np.clip((log_pt - lp_lo) / denom, 0.0, 1.0)
         return f_lo + alpha * (f_hi - f_lo)
 
+    def _tas_2m(self, state, q_v, sst, sic, T_ice):
+        """2 m air temperature for CMIP ``tas`` from the MOST surface-layer
+        similarity profile (interpolate the lowest model level down to 2 m).
+        Returns the lowest-level T when the surface inputs (SST / sigma) are
+        unavailable — e.g. a prescribed-SST run that does not pass SST here."""
+        T_low = state.T.data[..., -1]
+        if sst is None or self.sigma_full is None:
+            return T_low
+        import jax.numpy as jnp
+        from legoesm import constants
+        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.core.bulk_flux import compute_most_fluxes
+        u_low = state.u.data[..., -1]
+        v_low = state.v.data[..., -1]
+        q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
+        p_s = state.p_s.data
+        p_low = p_s * jnp.asarray(self.sigma_full)[-1]
+        rho_low = p_low / (constants.R_d * T_low)
+        T_sfc = blend_surface_temperature(sst, sic, T_ice)
+        q_sfc = saturation_mixing_ratio(T_sfc, p_s)
+        # coare3 similarity profile (the recommended config's scheme); the 2 m
+        # value is set by stability, so gustiness is irrelevant here.
+        *_, T_2m = compute_most_fluxes(
+            u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
+            scheme="coare3", return_2m=True,
+        )
+        return T_2m
+
     def collect(
         self,
         elapsed_day: float,
@@ -492,6 +574,11 @@ class DiagnosticCollector:
         lat_deg_grid=None,
         shflx=None,
         lhflx=None,
+        sw_up_toa_clr=None,
+        lw_up_toa_clr=None,
+        q_i=None,
+        q_s=None,
+        q_g=None,
     ) -> None:
         """Collect diagnostics at a diagnostic interval.
 
@@ -503,6 +590,9 @@ class DiagnosticCollector:
             Absolute simulation day.
         state : HydrostaticState
         q_v, q_c, q_r : jax.Array
+        q_i : jax.Array, optional
+            Cloud-ice mixing ratio [kg/kg]; ``None`` for warm-rain-only
+            microphysics (e.g. kessler) that carries no ice tracer.
         sst, sic : jax.Array
         precip_total : jax.Array
             Total precipitation [kg/m2/s].
@@ -524,19 +614,27 @@ class DiagnosticCollector:
         else:
             wind_term = jnp.max(jnp.abs(state.u.data))
         cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma)
+        _aw = self._area_w
+        # Build a zero-padded sentinel for optional fields (shflx, lhflx,
+        # sw_down_toa) so they can be fused into the single device→host
+        # transfer.  Using jnp.zeros(()) keeps the scalar shape uniform.
+        _zero = jnp.zeros((), dtype=state.T.data.dtype)
         _stats = jnp.stack([
-            jnp.mean(sst),
-            jnp.mean(sic),
-            jnp.mean(state.T.data),
-            jnp.mean(state.T.data[..., -1]),
+            area_weighted_mean(sst, _aw),
+            area_weighted_mean(sic, _aw),
+            area_weighted_mean(state.T.data, _aw),
+            area_weighted_mean(state.T.data[..., -1], _aw),
             wind_term,
-            jnp.mean(precip_total),
-            jnp.mean(cwv),
-            jnp.mean(sw_up_toa),
-            jnp.mean(lw_up_toa),
-            jnp.mean(state.p_s.data),
-            jnp.mean(sw_net_sfc),
-            jnp.mean(lw_net_sfc),
+            area_weighted_mean(precip_total, _aw),
+            area_weighted_mean(cwv, _aw),
+            area_weighted_mean(sw_up_toa, _aw),
+            area_weighted_mean(lw_up_toa, _aw),
+            area_weighted_mean(state.p_s.data, _aw),
+            area_weighted_mean(sw_net_sfc, _aw),
+            area_weighted_mean(lw_net_sfc, _aw),
+            area_weighted_mean(sw_down_toa, _aw) if sw_down_toa is not None else _zero,
+            area_weighted_mean(shflx, _aw) if shflx is not None else _zero,
+            area_weighted_mean(lhflx, _aw) if lhflx is not None else _zero,
         ])
         _stats_host = np.asarray(_stats)
         mean_sst = float(_stats_host[0])
@@ -551,6 +649,9 @@ class DiagnosticCollector:
         mean_ps = float(_stats_host[9])
         mean_sw_sfc = float(_stats_host[10])
         mean_lw_sfc = float(_stats_host[11])
+        mean_rsdt = float(_stats_host[12]) if sw_down_toa is not None else float('nan')
+        mean_hfss = float(_stats_host[13]) if shflx is not None else float('nan')
+        mean_hfls = float(_stats_host[14]) if lhflx is not None else float('nan')
 
         self.times.append(elapsed_day)
         self.sst.append(mean_sst)
@@ -565,16 +666,18 @@ class DiagnosticCollector:
         self.sw_net_sfc.append(mean_sw_sfc)
         self.lw_net_sfc.append(mean_lw_sfc)
         self.dry_mass.append(mean_ps)
+        self.rsdt.append(mean_rsdt)
+        self.hfss.append(mean_hfss)
+        self.hfls.append(mean_hfls)
 
         # Mean over all spatial axes except the last (vertical).
         # Cubed-sphere: (6,n,n,nlev) → mean over (0,1,2) → (nlev,)
         # Lat-lon:      (nlat,nlon,nlev) → mean over (0,1) → (nlev,)
         # Stacked into one ``np.asarray`` host transfer (same dtype as
         # T) so the two profile means share a single device→host sync.
-        spatial_axes = tuple(range(state.T.data.ndim - 1))
         _profiles_host = np.asarray(jnp.stack([
-            jnp.mean(state.T.data, axis=spatial_axes),
-            jnp.mean(q_v, axis=spatial_axes).astype(state.T.data.dtype),
+            area_weighted_profile(state.T.data, self._area_w),
+            area_weighted_profile(q_v, self._area_w).astype(state.T.data.dtype),
         ]))
         self.profiles_T.append(_profiles_host[0])
         self.profiles_qv.append(_profiles_host[1] * 1000.0)
@@ -597,6 +700,10 @@ class DiagnosticCollector:
                 'wind': np.asarray(
                     jnp.sqrt(state.u.data[..., -1] ** 2 + state.v.data[..., -1] ** 2)
                 ),
+                'hfls': (np.asarray(lhflx) if lhflx is not None
+                         else np.zeros_like(np.asarray(sst))),
+                'hfss': (np.asarray(shflx) if shflx is not None
+                         else np.zeros_like(np.asarray(sst))),
             }
 
         # Energy budget
@@ -607,16 +714,19 @@ class DiagnosticCollector:
             self.dsigma, self.sigma_full,
             sw_down_toa, sw_up_toa, lw_up_toa, sw_net_sfc, lw_net_sfc,
             elapsed_seconds=elapsed_s,
+            area_weights=self._area_w,
         )
 
         # Moisture budget
         self.moisture_tracker.update(
             q_v, state.p_s.data, self.dsigma,
             precip_total, elapsed_seconds=elapsed_s,
+            area_weights=self._area_w,
         )
 
         # Monthly means
         if self.monthly_means and self.monthly_accum is not None and lat_deg_grid is not None:
+            from legoesm import constants as _c
             doy, _ = day_to_calendar(day)
             year = int(day // 365.0)
             fields_2d = {
@@ -627,18 +737,62 @@ class DiagnosticCollector:
                 'sw_net_sfc': np.asarray(sw_net_sfc),
                 'lw_net_sfc': np.asarray(lw_net_sfc),
             }
+            # rsdt: TOA incoming SW [W/m²] — available unconditionally
+            if sw_down_toa is not None:
+                fields_2d['rsdt'] = np.asarray(sw_down_toa)
+            # hfss / hfls: surface heat fluxes [W/m²]
+            if shflx is not None:
+                fields_2d['hfss'] = np.asarray(shflx)
+            if lhflx is not None:
+                fields_2d['hfls'] = np.asarray(lhflx)
+            # psl: sea-level pressure via hypsometric equation
+            # p_sl = p_s * exp(phis / (R_d * T_lowest))
+            # Reuse the T_low array already materialised above.
+            _phis_np = np.asarray(state.phis.data)
+            _ps_np = np.asarray(state.p_s.data)
+            fields_2d['psl'] = _ps_np * np.exp(
+                _phis_np / (_c.R_d * np.maximum(fields_2d['T_low'], _c.T_min_atmosphere))
+            )
             self.monthly_accum.add_2d(doy, year, fields_2d, lat_deg_grid)
-            self.monthly_accum.add_3d(doy, year, {
+            # profile_u: use geographic eastward wind when rotation angle is
+            # available (cubed-sphere).  Panel-local u averaged over latitude
+            # bands produces sign cancellations across cube faces.
+            # Rotation: u_east = cos(angle)*u_grid - sin(angle)*v_grid
+            # (pure NumPy — no JAX dependency in this diagnostic path).
+            if (self._wind_rotation_angle is not None
+                    and hasattr(state, 'v') and state.v is not None):
+                _angle = self._wind_rotation_angle
+                # Angle is (6,n,n); winds are (6,n,n,nlev) — broadcast vertically
+                _cos_a = np.cos(_angle)[..., np.newaxis]
+                _sin_a = np.sin(_angle)[..., np.newaxis]
+                _u_np = np.asarray(state.u.data)
+                _v_np = np.asarray(state.v.data)
+                _u_for_profile = _cos_a * _u_np - _sin_a * _v_np
+            else:
+                _u_for_profile = np.asarray(state.u.data)
+            fields_3d = {
                 'T': np.asarray(state.T.data),
-                'u': np.asarray(state.u.data),
+                'u': _u_for_profile,
                 'q_v': np.asarray(q_v) * 1000.0,
-            }, lat_deg_grid)
+            }
+            # Cloud-water profiles (g/kg). Guarded: kessler carries q_c but
+            # no q_i (None); morrison carries both. Only emit a field when
+            # its tracer is present so warm-rain runs don't fabricate a
+            # zero q_i profile.
+            if q_c is not None:
+                fields_3d['q_c'] = np.asarray(q_c) * 1000.0
+            if q_i is not None:
+                fields_3d['q_i'] = np.asarray(q_i) * 1000.0
+            self.monthly_accum.add_3d(doy, year, fields_3d, lat_deg_grid)
             self.monthly_accum.add_scalar(doy, year, {
                 'T_atm': mean_T,
                 'T_low': mean_T_low,
                 'precip': mean_precip,
                 'sw_up_toa': mean_sw_toa,
                 'lw_up_toa': mean_lw_toa,
+                'rsdt': mean_rsdt,
+                'hfss': mean_hfss,
+                'hfls': mean_hfls,
             })
 
         # Spatial monthly accumulation for CMIP output
@@ -648,10 +802,14 @@ class DiagnosticCollector:
             doy, _ = day_to_calendar(day)
             year = int(day // 365.0)
             fields_2d = {}
-            r = self._regrid_to_latlon_2d(state.T.data[..., -1])
+            # tas: 2 m air temperature.  The lowest model level (~100 m at
+            # nlev=20) reads colder than 2 m over a warm surface, so use the
+            # MOST surface-layer similarity profile to interpolate the lowest
+            # level down to 2 m (CMIP tas convention).  Falls back to the
+            # lowest level if the surface-layer inputs are unavailable.
+            tas_field = self._tas_2m(state, q_v, sst, sic, T_ice)
+            r = self._regrid_to_latlon_2d(tas_field)
             if r is not None:
-                # tas: lowest model level T as proxy for 2 m air temperature.
-                # True 2 m diagnostic requires a surface-layer scheme.
                 fields_2d['tas'] = r
             r = self._regrid_to_latlon_2d(precip_total)
             if r is not None:
@@ -662,6 +820,17 @@ class DiagnosticCollector:
             r = self._regrid_to_latlon_2d(lw_up_toa)
             if r is not None:
                 fields_2d['rlut'] = r
+            # Clear-sky TOA outgoing fluxes (Phase 1 of cloud-micro plan):
+            # populated by RRTMGP when do_clear_sky=True; zeros otherwise.
+            # SW_CRE = rsut - rsutcs, LW_CRE = rlutcs - rlut.
+            if sw_up_toa_clr is not None:
+                r = self._regrid_to_latlon_2d(sw_up_toa_clr)
+                if r is not None:
+                    fields_2d['rsutcs'] = r
+            if lw_up_toa_clr is not None:
+                r = self._regrid_to_latlon_2d(lw_up_toa_clr)
+                if r is not None:
+                    fields_2d['rlutcs'] = r
             r = self._regrid_to_latlon_2d(state.p_s.data)
             if r is not None:
                 fields_2d['ps'] = r
@@ -671,6 +840,23 @@ class DiagnosticCollector:
             if r is not None:
                 fields_2d['rsdt'] = r
 
+            # tos / siconc: sea-surface temperature [K] (CMOR Omon) and
+            # sea-ice area fraction [%] (CMOR SImon).  sst/sic already arrive
+            # on the model grid (prescribed for AMIP; from the coupler /
+            # get_sst_sic override for a coupled run), so the same regridder
+            # used for atmosphere fields applies.  tos is in K (matching the
+            # repo CMOR table units), so no conversion; siconc is fraction*100.
+            # NOTE: emitted UNMASKED.  The coupled driver is slab-ocean today
+            # (no land/sea mask is in collect()'s scope), so these are not yet
+            # masked to "where sea" per the CMOR cell_methods.  Mask them when a
+            # prognostic ocean + land mask is wired through the coupled driver.
+            r = self._regrid_to_latlon_2d(sst)
+            if r is not None:
+                fields_2d['tos'] = r
+            r = self._regrid_to_latlon_2d(np.asarray(sic) * 100.0)
+            if r is not None:
+                fields_2d['siconc'] = r
+
             # NOTE: rsds/rlds (surface downwelling) are NOT computed here.
             # The runtime only provides sw_net_sfc/lw_net_sfc (net fluxes),
             # which are not equal to the downwelling component.  Publishing
@@ -678,10 +864,95 @@ class DiagnosticCollector:
             # incorrect.  These variables will be added when the physics
             # pipeline exposes separate downwelling surface fluxes.
 
-            # NOTE: clt (total cloud cover) is NOT computed here.  The
-            # available binary column cloud mask (q_c > threshold → 100%)
-            # does not represent cloud area fraction as defined by CMIP.
-            # A proper cloud overlap / random-maximum scheme is needed.
+            # Cloud-ice path (clivi), condensed-water path (clwvi) and total
+            # cloud cover (clt).  CMIP convention: clivi = column-integrated
+            # FROZEN condensate (cloud ice + snow + graupel); clwvi = TOTAL
+            # condensed water (liquid + frozen).  Morrison carries prognostic
+            # q_i/q_s/q_g, so sum the frozen species into the ice path and add
+            # them to the condensate path — earlier code hardcoded clivi=0
+            # (a warm-rain-era placeholder) which threw away all model ice.
+            # clt is a random-overlap approximation of a soft layer cloud
+            # fraction (sigmoid on total condensate) — useful for spatial
+            # diagnosis of cloud-deficit regions, not a max-random overlap scheme.
+            if q_c is not None:
+                lwp_field = np.asarray(
+                    column_water_vapor(q_c, state.p_s.data, self.dsigma)
+                )
+                # Frozen condensate path: sum whichever ice species are present
+                # (None for warm-rain microphysics → contributes nothing).
+                q_frozen = None
+                for q_frz in (q_i, q_s, q_g):
+                    if q_frz is not None:
+                        q_frozen = q_frz if q_frozen is None else q_frozen + q_frz
+                if q_frozen is not None:
+                    iwp_field = np.asarray(
+                        column_water_vapor(q_frozen, state.p_s.data, self.dsigma)
+                    )
+                else:
+                    iwp_field = np.zeros_like(lwp_field)
+                r_lwp = self._regrid_to_latlon_2d(lwp_field)
+                r_iwp = self._regrid_to_latlon_2d(iwp_field)
+                if r_lwp is not None and r_iwp is not None:
+                    fields_2d['clivi'] = r_iwp
+                    fields_2d['clwvi'] = r_lwp + r_iwp  # liquid + frozen
+
+                # Total cloud cover (clt, CMIP %) from the MODEL's fractional
+                # layer cloud fraction — the SAME sundqvist/xu_randall/resolved
+                # scheme radiation uses, via the shared ``compute_cloud_properties``
+                # — reduced by MAXIMUM-RANDOM vertical overlap.  This replaces the
+                # retired near-binary condensate mask (sigmoid sharpness 1e6 on a
+                # 1 mg/kg threshold + pure random overlap) that saturated clt to
+                # ~100% wherever a column held any trace of condensate (issue #689).
+                # Diagnostics-only; no cloud-fraction numerics are re-derived (the
+                # shared function is called).  The ``_cloud_config`` is built with
+                # ``convective_cloud=False`` (see ModelDriver._create_diagnostics),
+                # so this is the model's STRATIFORM cloud cover — the opt-in
+                # convective radiative-tuning add-on is intentionally not counted.
+                if self._cloud_config is not None:
+                    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+                        compute_cloud_properties,
+                    )
+                    # Flatten the horizontal dims to the (ncol, nlev) column
+                    # layout compute_cloud_properties documents, then reshape the
+                    # scalar overlap result back — C-order round-trips exactly, so
+                    # cells map back for the downstream regridder.  Works for
+                    # cubed-sphere (6,n,n,nlev) and lat-lon (nlat,nlon,nlev).
+                    T_data = state.T.data
+                    horiz_shape = T_data.shape[:-1]
+                    nlev = T_data.shape[-1]
+                    ncol = int(np.prod(horiz_shape)) if horiz_shape else 1
+                    # p_full = sigma_full * p_s, dp = dsigma * p_s (the sigma
+                    # pressures the collector's other column diagnostics assume).
+                    p_s_col = jnp.reshape(state.p_s.data, (ncol, 1))
+                    p_full = p_s_col * self.sigma_full
+                    dp = p_s_col * self.dsigma
+                    # Cloud fraction takes CLOUD ice q_i only (matching the
+                    # radiation call, physics_pipeline ``q_ice=q_i_col``) — NOT
+                    # the precipitating q_i+q_s+q_g used for the clivi ice PATH
+                    # above, which would over-count condensate for the
+                    # condensate-dependent schemes (xu_randall/resolved).
+                    q_ice_col = (
+                        None if q_i is None
+                        else jnp.reshape(q_i, (ncol, nlev))
+                    )
+                    cloud_props = compute_cloud_properties(
+                        jnp.reshape(T_data, (ncol, nlev)),
+                        p_full,
+                        jnp.reshape(q_v, (ncol, nlev)),
+                        dp,
+                        self._cloud_config,
+                        q_cloud=jnp.reshape(q_c, (ncol, nlev)),
+                        q_ice=q_ice_col,
+                    )
+                    clt_field = np.asarray(
+                        jnp.reshape(
+                            maximum_random_overlap(cloud_props.cloud_fraction),
+                            horiz_shape,
+                        )
+                    ) * 100.0  # CMIP units: %
+                    r_clt = self._regrid_to_latlon_2d(clt_field)
+                    if r_clt is not None:
+                        fields_2d['clt'] = r_clt
 
             # psl: sea-level pressure via hypsometric equation
             # p_sl = p_s * exp(phis / (R_d * T_lowest))
@@ -691,7 +962,7 @@ class DiagnosticCollector:
             T_lowest = np.asarray(state.T.data[..., -1])
             phis = np.asarray(state.phis.data)
             p_s_np = np.asarray(state.p_s.data)
-            T_lowest_safe = np.maximum(T_lowest, 200.0)  # avoid div-by-zero
+            T_lowest_safe = np.maximum(T_lowest, _c.T_min_atmosphere)
             psl = p_s_np * np.exp(phis / (_c.R_d * T_lowest_safe))
             r = self._regrid_to_latlon_2d(psl)
             if r is not None:
@@ -797,10 +1068,12 @@ class DiagnosticCollector:
         """Collect only scalar reduction diagnostics (no host materialization).
 
         This is the performance-mode alternative to :meth:`collect`.
-        It computes global means and max-wind via ``jnp.mean``/``jnp.max``
-        which work correctly on SPMD-sharded arrays (JAX handles
-        cross-device reductions internally).  No ``np.asarray()`` calls,
-        no snapshot capture, no profile extraction, no monthly means.
+        It computes global means via ``area_weighted_mean`` (cell-area
+        weighted when ``set_area_weights`` was called, else a plain
+        ``jnp.mean``) and max-wind via ``jnp.max``; both work correctly on
+        SPMD-sharded arrays (JAX handles cross-device reductions
+        internally).  No ``np.asarray()`` calls, no snapshot capture, no
+        profile extraction, no monthly means.
 
         Use this for scaling benchmarks where diagnostic overhead must
         not dominate wall-clock time.
@@ -817,19 +1090,20 @@ class DiagnosticCollector:
         else:
             wind_term = jnp.max(jnp.abs(state.u.data))
         cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma)
+        _aw = self._area_w
         _stats = jnp.stack([
-            jnp.mean(sst),
-            jnp.mean(sic),
-            jnp.mean(state.T.data),
-            jnp.mean(state.T.data[..., -1]),
+            area_weighted_mean(sst, _aw),
+            area_weighted_mean(sic, _aw),
+            area_weighted_mean(state.T.data, _aw),
+            area_weighted_mean(state.T.data[..., -1], _aw),
             wind_term,
-            jnp.mean(precip_total),
-            jnp.mean(cwv),
-            jnp.mean(sw_up_toa),
-            jnp.mean(lw_up_toa),
-            jnp.mean(state.p_s.data),
-            jnp.mean(sw_net_sfc),
-            jnp.mean(lw_net_sfc),
+            area_weighted_mean(precip_total, _aw),
+            area_weighted_mean(cwv, _aw),
+            area_weighted_mean(sw_up_toa, _aw),
+            area_weighted_mean(lw_up_toa, _aw),
+            area_weighted_mean(state.p_s.data, _aw),
+            area_weighted_mean(sw_net_sfc, _aw),
+            area_weighted_mean(lw_net_sfc, _aw),
         ])
         _h = np.asarray(_stats)
         mean_sst = float(_h[0])
@@ -859,6 +1133,11 @@ class DiagnosticCollector:
         self.sw_net_sfc.append(mean_sw_sfc)
         self.lw_net_sfc.append(mean_lw_sfc)
         self.dry_mass.append(mean_ps)
+        # rsdt/hfss/hfls not available in lightweight mode — fill with NaN
+        # so timeseries arrays stay aligned across flush chunks.
+        self.rsdt.append(float('nan'))
+        self.hfss.append(float('nan'))
+        self.hfls.append(float('nan'))
 
         return {
             'mean_sst': mean_sst,
@@ -906,6 +1185,9 @@ class DiagnosticCollector:
             sw_net_sfc=np.array(self.sw_net_sfc),
             lw_net_sfc=np.array(self.lw_net_sfc),
             dry_mass_ps=np.array(self.dry_mass),
+            rsdt=np.array(self.rsdt),
+            hfss=np.array(self.hfss),
+            hfls=np.array(self.hfls),
             profiles_T=np.array(self.profiles_T) if self.profiles_T else np.array([]),
             profiles_qv=np.array(self.profiles_qv) if self.profiles_qv else np.array([]),
         )
@@ -932,6 +1214,9 @@ class DiagnosticCollector:
         self.sw_net_sfc.clear()
         self.lw_net_sfc.clear()
         self.dry_mass.clear()
+        self.rsdt.clear()
+        self.hfss.clear()
+        self.hfls.clear()
         self.profiles_T.clear()
         self.profiles_qv.clear()
 
@@ -988,6 +1273,9 @@ class DiagnosticCollector:
             sw_net_sfc=np.array(self.sw_net_sfc),
             lw_net_sfc=np.array(self.lw_net_sfc),
             dry_mass_ps=np.array(self.dry_mass),
+            rsdt=np.array(self.rsdt),
+            hfss=np.array(self.hfss),
+            hfls=np.array(self.hfls),
             sigma=sigma,
             profiles_T=np.array(self.profiles_T) if self.profiles_T else np.array([]),
             profiles_qv=np.array(self.profiles_qv) if self.profiles_qv else np.array([]),
@@ -1175,7 +1463,9 @@ class DiagnosticCollector:
                     continue
                 nlev = field_slice.shape[2]
                 plev = np.sort(CMIP6_PLEV19)[:nlev] if nlev <= len(CMIP6_PLEV19) else None
-                field_plev = np.transpose(field_slice, (2, 0, 1))
+                # _make_plev_da sorts plev descending (highest pressure first).
+                # Flip the pressure axis so data[0] aligns with plev[0]=max pressure.
+                field_plev = np.transpose(field_slice, (2, 0, 1))[::-1]
                 try:
                     self.cf_writer.write_field(
                         var_name=var_name,

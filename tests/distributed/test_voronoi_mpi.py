@@ -58,18 +58,18 @@ def _get_mpi_info():
 
 # Serial-vs-MPI equivalence + mass conservation go through the GLOBAL ALLREDUCE
 # (mass fixer / global_sum_mpi), which drifts ~1e-9 vs serial under a jax/mpi4jax
-# stack outside legoESM's tested range — no mpi4jax release supports jax>=0.10.1
-# yet (the point-to-point halo tests below stay bit-correct).  xfail those two
-# on an incompatible stack so they are not spurious reds, while still REQUIRING a
-# pass once a tested stack (jax<0.10 + mpi4jax<0.9, or a future FFI mpi4jax) is
-# installed -- the condition flips off automatically then.
+# stack outside legoESM's tested range (the point-to-point halo tests below stay
+# bit-correct).  xfail those two on an incompatible stack so they are not spurious
+# reds, while still REQUIRING a pass once a tested stack (mpi4jax >= 0.9, the FFI
+# rewrite, on jax 0.9 or 0.10) is installed -- the condition flips off
+# automatically then.
 from legoesm.parallel.reductions import mpi_stack_outside_tested_range
 
 _xfail_mpi_stack = pytest.mark.xfail(
     mpi_stack_outside_tested_range(),
     reason="jax/mpi4jax outside legoESM's tested MPI range: the global-allreduce "
            "path drifts ~1e-9 vs serial under the incompatible custom-call ABI "
-           "(halo exchange stays bit-correct). Install jax<0.10 + mpi4jax<0.9.",
+           "(halo exchange stays bit-correct). Install mpi4jax >= 0.9 (the FFI rewrite).",
     strict=False,
     run=True,
 )
@@ -164,6 +164,52 @@ class TestHaloExchange:
         np.testing.assert_allclose(
             exchanged, expected, atol=1e-14,
             err_msg=f"Rank {rank}: edge halo mismatch")
+
+    def test_repeated_same_entity_exchange_no_cross_match(self, mesh):
+        """Two cell exchanges between the same pair must not cross-match.
+
+        The rank-free halo tags (cell == tag 0 for BOTH calls) rely on order,
+        not the tag, to separate two same-entity exchanges between one pair:
+        SPMD program order + mpi4jax's ordered effect + MPI non-overtaking.
+        This pins that the production MPAS step's double cell exchange (T+p_s,
+        then tracers) cannot silently receive the wrong buffer.  The two fields
+        share the SAME shape, so a tag cross-match would be SILENT (no size
+        error) -- only the value check below would catch it.
+        """
+        _skip_if_no_mpi()
+        rank, n_ranks = _get_mpi_info()
+
+        from legoesm.parallel.voronoi_partition import (
+            partition_cells_geometric,
+            scatter_to_local,
+        )
+        cell_owner = partition_cells_geometric(mesh, n_ranks)
+        layout = make_voronoi_partition_layout(
+            mesh, rank, n_ranks, cell_owner=cell_owner)
+
+        # Two DISTINCT global cell fields, identical shape (disjoint value
+        # ranges so a cross-match cannot accidentally look correct).
+        field_a = jnp.arange(mesh.nCells, dtype=jnp.float64)
+        field_b = -(jnp.arange(mesh.nCells, dtype=jnp.float64) + 1.0)
+        a_local = scatter_to_local(field_a, layout.partition, "cell")
+        b_local = scatter_to_local(field_b, layout.partition, "cell")
+
+        # BOTH exchanges in ONE compiled function, same order on every rank --
+        # the composed-step case the rank-free tag scheme depends on.
+        @jax.jit
+        def _two_cell_exchanges(a, b):
+            a_ex = layout.halo_exchange.exchange_cell_field(a)
+            b_ex = layout.halo_exchange.exchange_cell_field(b)
+            return a_ex, b_ex
+
+        a_ex, b_ex = _two_cell_exchanges(a_local, b_local)
+
+        np.testing.assert_allclose(
+            a_ex, field_a[layout.partition.local_cells], atol=1e-14,
+            err_msg=f"Rank {rank}: first cell exchange cross-matched")
+        np.testing.assert_allclose(
+            b_ex, field_b[layout.partition.local_cells], atol=1e-14,
+            err_msg=f"Rank {rank}: second cell exchange cross-matched")
 
 
 class TestScatterGather:

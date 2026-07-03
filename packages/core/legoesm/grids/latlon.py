@@ -1506,3 +1506,190 @@ def create_latlon_geometry(
         dlon=float(dlon),
         dlat=float(dlat),
     )
+
+
+def create_beta_plane_cgrid_geometry(
+    n_lat: int,
+    n_lon: int,
+    *,
+    dx_m: float,
+    dy_m: float | None = None,
+    f0: float,
+    beta: float,
+    y_origin_m: float = 0.0,
+    x_origin_m: float = 0.0,
+    radius: float = constants.R_earth,
+    cartesian_pseudo_lat: bool = False,
+    dtype=None,
+) -> LatLonCGridGeometry:
+    r"""Cartesian **beta-plane** C-grid geometry (an f/beta-plane closed box).
+
+    A first-class non-spherical option for the lat-lon C-grid ocean model: the
+    horizontal metric is uniform Cartesian (constant ``dx_m`` x ``dy_m``, no
+    ``cos(lat)`` convergence) and the Coriolis parameter is the beta-plane
+    ``f(y) = f0 + beta * y``, evaluated **directly at each stagger point** from
+    its own ``y`` — matching MITgcm's ``ini_cori.F`` (``fCori = f0 + beta*y_c`` at
+    mass/u points, ``fCoriG = f0 + beta*y_g`` at the v/vorticity interfaces),
+    rather than averaging cell-centre ``f`` to the faces. This is what makes a
+    legoESM run able to reproduce a Cartesian beta-plane oracle (e.g. MITgcm
+    ``tutorial_barotropic_gyre``) to per-step tendency tolerance.
+
+    Coordinates: ``y_c[j] = y_origin_m + (j + 1/2) dy`` (cell centres),
+    ``y_g[j] = y_origin_m + j dy`` (v-face / corner interfaces). ``f0`` is the
+    Coriolis value at ``y = 0`` (NOT at the domain centre), matching MITgcm; set
+    ``y_origin_m`` to the southern edge so the absolute ``y`` matches the oracle.
+
+    Boundary scope: the barotropic solvers wall the northernmost and
+    southernmost v-faces (``_zero_polar_lat_ends``), so this geometry is for a
+    **meridionally CLOSED** domain (basin / re-entrant-in-x channel). A domain
+    periodic in *y* is NOT supported.  Pass ``cartesian_pseudo_lat=True`` to pin
+    the pseudo-``lat`` at **0** (a Cartesian tangent plane has ``cos_lat ≡ 1``):
+    operators that recompute ``cos(grid.lat)`` for a metric (``divergence_cgrid``
+    v-face length, flux-form advection) then stay EXACTLY equal to the uniform
+    ``dx_m`` the explicit metrics promise — a
+    non-zero ``y_c/radius`` pseudo-lat leaves a ``1−cos(y_c/radius)`` (~1.8% at
+    ``|y_c|/radius=0.19``) grad/div metric mismatch that makes the IMPLICIT free
+    surface non-conservative and (on the marginally-resolved gyre) flips the WBC
+    turbulent.  The meridional position is carried by ``f = f0 + beta·y_c``, not
+    the pseudo-lat.
+
+    Parameters
+    ----------
+    n_lat, n_lon : int
+        Cell counts (meridional, zonal).
+    dx_m : float
+        Zonal cell width [m].
+    dy_m : float, optional
+        Meridional cell height [m]; defaults to ``dx_m`` (square cells).
+    f0 : float
+        Coriolis parameter at ``y = 0`` [s^-1].
+    beta : float
+        Meridional gradient ``df/dy`` [m^-1 s^-1]. ``beta = 0`` gives an f-plane.
+    y_origin_m, x_origin_m : float
+        Southern / western edge coordinates [m].
+    radius : float
+        Nominal sphere radius [m]; does NOT enter the (explicit) Cartesian
+        metrics — only seeds the legacy pseudo-``lat``/``lon`` and the
+        ``dlon``/``dlat`` consistency sentinels (``radius * dlon = dx_m``).
+    cartesian_pseudo_lat : bool
+        **OBSOLETE for the metric since #514** — the C-grid operators now READ the
+        stored uniform ``dx_v`` (== ``dx_m``) instead of recomputing
+        ``cos(grid.lat_v)``, so the pseudo-lat no longer enters any v-face metric
+        and ``True``/``False`` give identical dynamics.  Historically ``True``
+        pinned the pseudo-``lat`` to 0 so the (then-recomputing) operators agreed
+        with the ``cos_lat=1`` metric fields, which the energy-conserving IMPLICIT
+        free surface relied on (the MITgcm gyre recipe; see the Boundary-scope
+        note).  Retained only for the cosmetic ``grid.lat`` value and the
+        non-adjointness-critical secondary readers (adaptive-Smag CFL ceiling,
+        polar-filter labelling).  Default ``False`` keeps the natural
+        ``lat = y_c/radius``.
+
+    Returns
+    -------
+    LatLonCGridGeometry
+        Consumed directly by the ocean model (``ensure_geometry`` passes it
+        through). ``cos_lat = 1``, rotation angles zero, fold inactive.
+    """
+    if dtype is None:
+        dtype = jnp.zeros(()).dtype  # float64 if x64 enabled, else float32
+    dy_m = float(dx_m) if dy_m is None else float(dy_m)
+    dx_m = float(dx_m)
+
+    def _c(a):
+        return a.astype(dtype) if hasattr(a, "astype") else a
+
+    # Stagger-point y-coordinates: centres (y_c) and lat-interfaces (y_g).
+    # Computed in float64 then cast (via _c) to the storage dtype: y can be
+    # O(1e6 m) while dy is O(1e4 m), so f32 coordinate arithmetic would lose
+    # ~2 digits in beta*y. f64-then-cast is strictly more accurate than an
+    # inline f32 recompute and keeps f bit-stable across the x64 flag.
+    j = jnp.arange(n_lat, dtype=jnp.float64)
+    y_c = y_origin_m + (j + 0.5) * dy_m            # (n_lat,)
+    y_g = y_origin_m + jnp.arange(n_lat + 1, dtype=jnp.float64) * dy_m  # (n_lat+1,)
+    x_c = x_origin_m + (jnp.arange(n_lon, dtype=jnp.float64) + 0.5) * dx_m  # (n_lon,)
+
+    # Coriolis directly from each point's y (MITgcm fCori/fCoriG convention).
+    f_t_1d = f0 + beta * y_c                        # (n_lat,)
+    f_v_1d = f0 + beta * y_g                        # (n_lat+1,)
+    ones_t = jnp.ones((n_lat, n_lon), dtype=dtype)
+    f_t = _c(f_t_1d[:, None]) * ones_t
+    f_u = _c(f_t_1d[:, None]) * jnp.ones((n_lat, n_lon + 1), dtype=dtype)
+    f_v = _c(f_v_1d[:, None]) * jnp.ones((n_lat + 1, n_lon), dtype=dtype)
+
+    # Uniform Cartesian metrics (no cos(lat) convergence).
+    dx_t = jnp.full((n_lat, n_lon), dx_m, dtype=dtype)
+    dy_t = jnp.full((n_lat, n_lon), dy_m, dtype=dtype)
+    area_t = jnp.full((n_lat, n_lon), dx_m * dy_m, dtype=dtype)
+    total_area = jnp.asarray(n_lat * n_lon * dx_m * dy_m, dtype=dtype)
+    dx_u = jnp.full((n_lat, n_lon + 1), dx_m, dtype=dtype)
+    dy_u = jnp.full((n_lat, n_lon + 1), dy_m, dtype=dtype)
+    dx_v = jnp.full((n_lat + 1, n_lon), dx_m, dtype=dtype)
+    dy_v = jnp.full((n_lat + 1, n_lon), dy_m, dtype=dtype)
+    area_q = jnp.full((n_lat + 1, n_lon + 1), dx_m * dy_m, dtype=dtype)
+
+    # No grid rotation (i-axis == east), Cartesian -> cos_lat == 1.
+    cos_alpha_u = jnp.ones((n_lat, n_lon + 1), dtype=dtype)
+    sin_alpha_u = jnp.zeros((n_lat, n_lon + 1), dtype=dtype)
+    cos_alpha_v = jnp.ones((n_lat + 1, n_lon), dtype=dtype)
+    sin_alpha_v = jnp.zeros((n_lat + 1, n_lon), dtype=dtype)
+
+    # Pseudo-coordinates for diagnostics / polar-filter labelling.
+    #
+    # ``cartesian_pseudo_lat=True`` pins ``lat ≡ 0``.  Two C-grid operators
+    # (``divergence_cgrid``'s v-face length ``R·cos(lat_v)·dlon`` and the flux-form
+    # momentum advection's ``cos(lat_v)`` transport metric) RECOMPUTE
+    # ``cos(grid.lat)`` instead of reading the ``cos_lat=1`` metric field, so a
+    # non-zero ``y_c/radius`` pseudo-lat injects a ``1−cos(y_c/radius)`` (≈1.8% at
+    # ``|y_c|/radius=0.19``) mismatch between the zonal GRADIENT metric
+    # (``dx_u = R·dlon·cos_lat = dx_m``) and the DIVERGENCE v-face metric —
+    # breaking the discrete grad/div adjointness the IMPLICIT free-surface
+    # projection relies on.  On the marginally-resolved (Munk δ≈1.7-cell)
+    # wind-driven gyre that ~1% non-conservative leak flips the western-boundary
+    # current from laminar to a turbulent attractor (MITgcm tutorial_barotropic_gyre
+    # stays at |u|max≈0.031; with a non-zero pseudo-lat legoESM overshoots to
+    # 0.066+).  A Cartesian tangent plane has cos_lat≡1, so lat≡0 is the
+    # self-consistent value; the meridional position lives in ``f = f0 + beta·y_c``.
+    #
+    # DEFAULT False keeps the legacy ``lat = y_c/radius`` for backward
+    # compatibility.  (A prior latent issue — the explicit-substep barotropic
+    # solver / any vorticity-based operator blew up on a consistent-metric
+    # beta-plane because ``curl_vertex_cgrid`` recomputed the vertex area as
+    # ``R²·dlon·|Δsin(lat)|``, which collapses to 0 when ``lat≡0`` — was ROOT-CAUSED
+    # and FIXED by having the curl read the grid's stored ``area_q``; ``lat=0`` is
+    # now safe for every solver.)  Opt in (the MITgcm gyre + front_relax recipes
+    # do) for the metric-consistent implicit free-surface fidelity path.
+    lat_1d = jnp.zeros_like(y_c) if cartesian_pseudo_lat else (y_c / radius)
+    lon_1d = x_c / radius
+    lat_t = _c(lat_1d[:, None]) * jnp.ones((n_lat, n_lon), dtype=dtype)
+    lon_t = _c(lon_1d[None, :]) * jnp.ones((n_lat, n_lon), dtype=dtype)
+
+    return LatLonCGridGeometry(
+        n_lat=n_lat,
+        n_lon=n_lon,
+        radius=float(radius),
+        lat_T=lat_t,
+        lon_T=lon_t,
+        dx_T=dx_t,
+        dy_T=dy_t,
+        area_T=area_t,
+        total_area=total_area,
+        dx_u=dx_u,
+        dy_u=dy_u,
+        dx_v=dx_v,
+        dy_v=dy_v,
+        area_q=area_q,
+        f_T=f_t,
+        f_u=f_u,
+        f_v=f_v,
+        cos_alpha_u=cos_alpha_u,
+        sin_alpha_u=sin_alpha_u,
+        cos_alpha_v=cos_alpha_v,
+        sin_alpha_v=sin_alpha_v,
+        fold=_inactive_fold(n_lon),
+        cos_lat=jnp.ones((n_lat,), dtype=dtype),
+        sin_lat=jnp.zeros((n_lat,), dtype=dtype),
+        lat=_c(lat_1d),
+        lon=_c(lon_1d),
+        dlon=float(dx_m / radius),
+        dlat=float(dy_m / radius),
+    )

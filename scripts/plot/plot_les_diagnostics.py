@@ -62,6 +62,8 @@ _CASE_TITLE = {
     "wangara": "Wangara convective boundary layer",
     "neutral": "Neutral boundary layer",
 }
+_QUIVER_MIN_GRID_POINTS = 24
+_QUIVER_TARGET_ARROWS = 14
 
 
 def _sym_limit(arr, pct=99.0):
@@ -124,15 +126,17 @@ def plot_snapshot(npz_path: Path, out_png: Path | None = None) -> Path:
         im = None
         for c in range(nh):
             ax = axes[r][c]
+            interpolation = "nearest" if key == "qc" else "bilinear"
             im = ax.imshow(fld[c], origin="lower", extent=extent, cmap=cmap,
                            vmin=vmin, vmax=vmax, aspect="equal",
-                           interpolation="bilinear", rasterized=True)
+                           interpolation=interpolation, rasterized=True)
             if r == 0:
                 ax.set_title(f"z = {heights[c]:.0f} m"
                              + ("  (surface)" if c == 0 else ""), fontsize=9)
-            if key == "spd":                      # wind quiver on the |U| row
+            if key == "spd" and min(fld[c].shape) >= _QUIVER_MIN_GRID_POINTS:
+                # Avoid dot-like quiver artifacts on very coarse LES panels.
                 ny, nx = fld[c].shape
-                step = max(1, nx // 14)
+                step = max(2, nx // _QUIVER_TARGET_ARROWS)
                 xs = np.linspace(0, Lx, nx)[::step]
                 ys = np.linspace(0, Ly, ny)[::step]
                 ax.quiver(*np.meshgrid(xs, ys),

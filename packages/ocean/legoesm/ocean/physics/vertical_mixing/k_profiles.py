@@ -29,13 +29,14 @@ import jax.numpy as jnp
 from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.eos import (
     compute_ocean_rho as _compute_rho,
-    thermal_expansion_coeff,
-    haline_contraction_coeff,
 )
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate, compute_ocean_jacobian,
 )
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+from legoesm.ocean.physics.vertical_mixing._shared import (
+    surface_buoyancy_flux,
+)
 
 
 def compute_vertical_K_profiles(
@@ -169,7 +170,8 @@ def compute_vertical_K_profiles(
                 "KPP own convective momentum, or choose a non-KPP "
                 "vertical_mixing scheme."
             )
-        K_conv, A_conv = _enhanced_diffusion_K(state, z_coord, conv)
+        K_conv, A_conv = _enhanced_diffusion_K(state, z_coord, conv,
+                                               eos_fn=eos_fn)
         # Convection enhances tracer diffusivity (convective_κz).
         K_v_total = K_v_total + K_conv
         # Momentum gets the independent convective viscosity (convective_νz
@@ -211,6 +213,43 @@ def compute_vertical_K_profiles(
 # ---------------------------------------------------------------------------
 # Per-scheme K computation helpers (interior interface shape).
 # ---------------------------------------------------------------------------
+
+
+def _surface_buoyancy_flux(surface_forcing, state, constants_config,
+                           eos_fn=None):
+    """Surface buoyancy flux ``B_f`` [m^2/s^3] (>0 destabilising) + the
+    kinematic surface T / S fluxes, from the surface heat (``q_net``) +
+    freshwater / salt forcing and the EOS thermal-expansion / haline-contraction
+    coefficients.
+
+    ``eos_fn`` (``None`` ⇒ Wright, bit-identical) sets the surface α/β so a
+    non-Wright EOS (e.g. ``nemo_seos``) drives the boundary-layer buoyancy
+    forcing consistently with the interior ρ/N² used by KPP/CATKE.
+
+    Shared by the KPP boundary-layer diagnosis and the CATKE convective length
+    so the surface buoyancy forcing lives in ONE place (same sign convention:
+    surface cooling / brine rejection -> ``B_f > 0`` -> convection).
+
+    Returns ``(B_f, Q_sfc_T, Q_sfc_S)``; each may be ``None`` when its forcing
+    channel is absent (``B_f`` is ``None`` only when BOTH heat and
+    freshwater/salt are absent).
+    """
+    sf = surface_forcing
+    q_net = getattr(sf, "q_net", None) if sf else None
+    fw = getattr(sf, "freshwater", None) if sf else None
+    salt = getattr(sf, "salt_flux", None) if sf else None
+    # Grid-agnostic kernel (#518 item 1).  Lat-lon convention: the real
+    # salt-mass flux feeds BOTH the surface buoyancy and the non-local
+    # Q_sfc_S (``real_salt_in_qs=True``).
+    return surface_buoyancy_flux(
+        q_net, fw, salt,
+        state.T.data[..., 0], state.S.data[..., 0],
+        g=constants_config.g,
+        rho_0=constants_config.rho_0,
+        c_sw=constants_config.c_sw,
+        real_salt_in_qs=True,
+        eos_fn=eos_fn,
+    )
 
 
 def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
@@ -404,6 +443,65 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         )
         return tke_out.K_H, tke_out.K_M, None
 
+    if scheme == "catke":
+        from legoesm.ocean.physics.vertical_mixing.catke import (
+            catke_vertical_mixing,
+        )
+        catke_cfg = vmix_cfg.catke
+        # CATKE is ALWAYS prognostic (one backward-Euler TKE step per model
+        # step, dt = dt_mom; the updated TKE is carried on the state).
+        if dt_tke is None:
+            raise ValueError(
+                "CATKE (vertical_mixing.scheme='catke') is prognostic and "
+                "requires dt_tke (the momentum timestep dt_mom) to be passed to "
+                "compute_vertical_K_profiles."
+            )
+        # Cell-centre velocities (interp from C-grid faces if needed).
+        u_data = state.u.data
+        v_data = state.v.data
+        T_data = state.T.data
+        S_data = state.S.data
+        if u_data.shape[1] != T_data.shape[1]:
+            u_data = 0.5 * (u_data[:, :-1, :] + u_data[:, 1:, :])
+            v_data = 0.5 * (v_data[:-1, :, :] + v_data[1:, :, :])
+        dz_half = jnp.broadcast_to(
+            z_coord.dz_half_ref * J[..., jnp.newaxis],
+            T_data.shape[:-1] + (z_coord.n_levels - 1,),
+        )
+        # Interface geometry from the reference coordinate (interior interfaces,
+        # length nlev-1). Depth below surface (>0) and height above the bottom.
+        depth_iface = -z_coord.z_half_ref[1:-1]
+        H_col = state.H_bathy.data
+        hab_iface = jnp.maximum(H_col[..., jnp.newaxis] - depth_iface, 0.0)
+        # Surface buoyancy flux Jb (shared helper) + friction velocity u_star.
+        Jb, _, _ = _surface_buoyancy_flux(
+            surface_forcing, state, constants_config, eos_fn=eos_fn)
+        if Jb is None:
+            Jb = jnp.zeros(T_data.shape[:-1], dtype=T_data.dtype)
+        tau_x = getattr(surface_forcing, "tau_x", None) if surface_forcing else None
+        tau_y = getattr(surface_forcing, "tau_y", None) if surface_forcing else None
+        if tau_x is None and tau_y is None:
+            u_star = jnp.zeros(T_data.shape[:-1], dtype=T_data.dtype)
+        else:
+            tx = tau_x if tau_x is not None else jnp.zeros_like(T_data[..., 0])
+            ty = tau_y if tau_y is not None else jnp.zeros_like(T_data[..., 0])
+            u_star = jnp.sqrt(
+                jnp.sqrt(tx * tx + ty * ty) / constants_config.rho_0)
+        _seed = tke_old
+        if _seed is None:
+            _seed = jnp.full(
+                T_data.shape[:-1] + (z_coord.n_levels - 1,),
+                catke_cfg.minimum_tke, dtype=T_data.dtype,
+            )
+        K_u, K_c, tke_new = catke_vertical_mixing(
+            u_data, v_data, T_data, S_data, rho, dz_half,
+            depth_iface, hab_iface, H_col,
+            tke_old=_seed, Jb=Jb, u_star=u_star, dt=dt_tke, cfg=catke_cfg,
+            rho_0=constants_config.rho_0, g=constants_config.g,
+        )
+        # Return (K_v = tracer = K_c, A_v = momentum = K_u, tke_new).
+        return K_c, K_u, tke_new
+
     if scheme == "kpp":
         from legoesm.ocean.physics.vertical_mixing.kpp import (
             kpp_vertical_mixing,
@@ -413,66 +511,58 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         # matches the depth used in the explicit physics call.
         tau_x = getattr(surface_forcing, "tau_x", None) if surface_forcing else None
         tau_y = getattr(surface_forcing, "tau_y", None) if surface_forcing else None
-        q_net = getattr(surface_forcing, "q_net", None) if surface_forcing else None
-        fw = getattr(surface_forcing, "freshwater", None) if surface_forcing else None
-        salt = getattr(surface_forcing, "salt_flux", None) if surface_forcing else None
-
-        Q_sfc_T = None
-        B_f = None
-        if q_net is not None:
-            Q_sfc_T = q_net / (constants_config.rho_0 * constants_config.c_sw)
-            T_sfc = state.T.data[..., 0]
-            S_sfc = state.S.data[..., 0]
-            p_sfc = jnp.zeros_like(T_sfc)
-            alpha = thermal_expansion_coeff(T_sfc, S_sfc, p_sfc)
-            B_f = -constants_config.g * alpha * Q_sfc_T
-
-        Q_sfc_S = None
-        if fw is not None or salt is not None:
-            S_sfc = state.S.data[..., 0]
-            T_sfc = state.T.data[..., 0]
-            p_sfc = jnp.zeros_like(T_sfc)
-            beta = haline_contraction_coeff(T_sfc, S_sfc, p_sfc)
-            # Kinematic surface salt flux [PSU·m/s]: freshwater dilution
-            # (-S*fw/rho, fw>0 in -> stabilizing) PLUS a REAL salt-mass flux
-            # (+salt*1e3/rho, salt>0 in -> destabilizing brine rejection).
-            Q_sfc_S = jnp.zeros_like(S_sfc)
-            if fw is not None:
-                Q_sfc_S = Q_sfc_S - S_sfc * fw / constants_config.rho_0
-            if salt is not None:
-                Q_sfc_S = Q_sfc_S + salt * 1.0e3 / constants_config.rho_0
-            B_salt = constants_config.g * beta * Q_sfc_S
-            B_f = B_salt if B_f is None else (B_f + B_salt)
+        # Surface buoyancy flux + kinematic T/S fluxes (shared with CATKE).
+        B_f, Q_sfc_T, Q_sfc_S = _surface_buoyancy_flux(
+            surface_forcing, state, constants_config, eos_fn=eos_fn)
 
         out = kpp_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             rho, state.eta.data, z_coord, J, vmix_cfg.kpp,
             tau_x=tau_x, tau_y=tau_y, B_f=B_f,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
-            apply_diffusion=False,
+            apply_diffusion=False, eos_fn=eos_fn,
         )
         return out.K_v, out.A_v, None
 
-    # "none" — handled by the caller, but be defensive.
-    nlev = state.T.data.shape[-1]
-    shape = state.T.data.shape[:-1] + (nlev - 1,)
-    dtype = state.T.data.dtype
-    return jnp.zeros(shape, dtype=dtype), jnp.zeros(shape, dtype=dtype), None
+    if scheme == "none":
+        # No background closure here (handled by the caller); zero K_v/A_v.
+        nlev = state.T.data.shape[-1]
+        shape = state.T.data.shape[:-1] + (nlev - 1,)
+        dtype = state.T.data.dtype
+        return jnp.zeros(shape, dtype=dtype), jnp.zeros(shape, dtype=dtype), None
+
+    # Dispatch hardening: an unknown scheme must NOT silently fall through to a
+    # zero-mixing "be defensive" return (that disables vertical mixing on a typo,
+    # masking the error).  ``scheme`` is the static config value, so raising at
+    # function entry is jit-safe (this is the same defense used by the sibling
+    # factories — see CLAUDE.md "Dispatch").
+    raise ValueError(
+        f"unknown vertical_mixing.scheme={scheme!r}; expected one of "
+        "{'none', 'constant', 'richardson', 'tke', 'catke', 'kpp'}"
+    )
 
 
-def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig):
+def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
+                          eos_fn=None):
     """``(K_v, A_v)`` fields used by the ``enhanced_diffusion`` scheme.
 
     Returns the convective tracer diffusivity (``convective_κz``) and the
     independent momentum viscosity (``convective_νz``) at interfaces,
     bit-identical to the explicit ``enhanced_diffusion_convection`` path.
+
+    ``eos_fn`` (optional) overrides the density EOS used for the convective
+    N² trigger so it matches the dynamical core — the SAME contract the
+    vmix branch honours.  ``None`` -> Wright 1997 (bit-identical legacy).
+    Without threading it here the documented "convective trigger consistent
+    with the dynamical core" promise of :func:`compute_vertical_K_profiles`
+    was silently violated for non-Wright EOSs (codex review, finding #3).
     """
     from legoesm.ocean.physics.convection.enhanced_diffusion import (
         convective_K_A_flag,
     )
     cfg = conv_cfg.enhanced_diffusion
     J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
-    rho = _compute_rho(state, z_coord, J)
+    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
     # Shared, AD-safe helper — bit-for-bit identical to the explicit
     # ``enhanced_diffusion_convection`` path (no duplicated numerics).
     # Returns the full K / A (including the scheme's own backgrounds);

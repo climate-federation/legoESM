@@ -1,6 +1,6 @@
 """MPAS realistic-bathymetry GO spinup on ico4 with ETOPO.
 
-P6 of ``docs/ocean_experiments/realistic_geometry_mpas_plan.md`` —
+P6 of ``docs/ocean/experiments/realistic_geometry_mpas_plan.md`` —
 the headline validation experiment.  Loads ETOPO bathymetry onto a
 Voronoi mesh, applies MEO r-factor smoothing, builds the
 partial-cell coordinate, and integrates a wind-driven GO spinup
@@ -124,7 +124,7 @@ def run(args):
           f"{float(jnp.max(H_bathy)):.0f}] m")
 
     cfg = MPASOceanConfig(
-        barotropic_solver=args.barotropic_solver,
+        barotropic_solver=args.barotropic.barotropic_solver,
         A_h=args.A_h, A_v=args.A_v, K_v=1.0e-4, K_h=args.K_h,
         B_h=args.B_h, C_smag=args.C_smag,
         K_zeta_bih=args.k_zeta_bih,
@@ -152,7 +152,7 @@ def run(args):
         #     PGF; the real partial-cell PGF (per ROMS/CROCO/NEMO).
         #     This is the path the lat-lon equivalent used to reach
         #     100-yr stable spinups.  See
-        #     ``docs/ocean_experiments/density_jacobian_pgf_mpas.md``.
+        #     ``docs/ocean/experiments/density_jacobian_pgf_mpas.md``.
         pgf_scheme=args.pgf_scheme,
         pv_scheme="enstrophy",
         tracer_advection="upwind",

@@ -128,6 +128,21 @@ def _rotation_winds_geo(lon, lat, radius, beta):
     return u_east, v_north
 
 
+def rotation_streamfunction(lon, lat, radius, beta):
+    """Velocity streamfunction [m^2/s] of the solid-body rotation wind.
+
+    ``(u_east, v_north) = (-1/R dpsi/dlat, 1/(R cos lat) dpsi/dlon)`` is the
+    curl of this ``psi``; it matches :func:`_rotation_winds_geo` exactly.  This
+    is the FV3 ``test_cases.F90`` wind_field=0 streamfunction (with
+    ``Ubar = u0``) and is used to build a discretely divergence-free transport
+    mass flux on the cube (issue 504; see
+    ``fv_tp_2d.streamfunction_mass_fluxes``).
+    """
+    u0 = 2.0 * jnp.pi * radius / _PERIOD
+    return -u0 * radius * (jnp.sin(lat) * jnp.cos(beta)
+                           - jnp.cos(lon) * jnp.cos(lat) * jnp.sin(beta))
+
+
 # =========================================================================
 # Cubed-sphere (FV3 C-D grid)
 # =========================================================================

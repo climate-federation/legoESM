@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm import constants
 from legoesm.atmosphere.physics._shared import safe_divide
@@ -124,17 +125,22 @@ _VZ_B = (-3.18657, 0.9926960, -1.53193e-3, -0.987059e-3,
 _VZ_C = (-5.00015, 5.23778, -2.04914, 0.475294, -0.542819e-1, 0.238449e-2)
 
 # --- Hall (1980) collision-efficiency table (SCALE-SDM / ERF transcription) ---
+# Stored as NumPy arrays, NOT jnp: a module-top jnp.array allocates a JAX device
+# array at import time (forbidden by test_no_module_top_jax_alloc — crashes the
+# import chain on the experimental Metal backend).  Each is consumed below via
+# ``.astype(r_l.dtype)`` (NumPy accepts the JAX dtype) and device-put lazily when
+# it first enters a jnp computation.
 # Collector (larger) radii [um]:
-_HALL_R0_UM = jnp.array(
+_HALL_R0_UM = np.array(
     [6.0, 8.0, 10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 70.0,
      100.0, 150.0, 200.0, 300.0])
 # Radius ratios r_small/r_large [-]:
-_HALL_RAT = jnp.array(
+_HALL_RAT = np.array(
     [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
      0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00])
 # Efficiency E[ratio, r_large] (21 x 15). Values > 1 at large ratio/radius are
 # the wake-capture enhancement in the original table.
-_HALL_ECOLL = jnp.array([
+_HALL_ECOLL = np.array([
     [0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010],
     [0.0030, 0.0030, 0.0030, 0.0040, 0.0050, 0.0050, 0.0050, 0.0100, 0.1000, 0.0500, 0.2000, 0.5000, 0.7700, 0.8700, 0.9700],
     [0.0070, 0.0070, 0.0070, 0.0080, 0.0090, 0.0100, 0.0100, 0.0700, 0.4000, 0.4300, 0.5800, 0.7900, 0.9300, 0.9600, 1.0000],

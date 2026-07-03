@@ -150,6 +150,67 @@ class TestDiffusionCoeffs:
         assert diff.hyperdiff == 0.0
         assert diff.div_damp == 0.0
 
+    def test_compute_diffusion_is_pure_no_warning(self, caplog):
+        """compute_diffusion itself never warns — the guard lives at dispatch."""
+        import logging
+        grid = _make_cubed_sphere_grid()
+        with caplog.at_level(logging.WARNING):
+            compute_diffusion(grid, DycoreConfig(dt=600.0, hyperdiff_scale=1e9))
+        assert not any("max stable" in r.message for r in caplog.records)
+
+
+# =========================================================================
+# 2b. Diffusive-CFL guard (warn-only, solver-aware)
+# =========================================================================
+
+class TestDiffusiveCFLGuard:
+    """warn_if_diffusion_unstable fires only for solvers that use the coeff."""
+
+    def test_explicit_solver_warns_on_oversized_hyperdiff(self, caplog):
+        import logging
+        from legoesm.driver.component_factory import warn_if_diffusion_unstable
+        grid = _make_cubed_sphere_grid()
+        diff = compute_diffusion(grid, DycoreConfig(dt=600.0, hyperdiff_scale=1e5))
+        with caplog.at_level(logging.WARNING):
+            warn_if_diffusion_unstable("cdgrid_shallow_water", diff, grid, 600.0)
+        assert any("hyperdiff" in r.message and "max stable" in r.message
+                   for r in caplog.records)
+
+    def test_default_coeffs_do_not_warn(self, caplog):
+        import logging
+        from legoesm.driver.component_factory import warn_if_diffusion_unstable
+        grid = _make_cubed_sphere_grid()
+        diff = compute_diffusion(grid, DycoreConfig(dt=600.0))  # tuned defaults
+        with caplog.at_level(logging.WARNING):
+            warn_if_diffusion_unstable("cdgrid_primitive_equations", diff, grid, 600.0)
+        assert not any("max stable" in r.message for r in caplog.records)
+
+    def test_spectral_solver_does_not_cry_wolf(self, caplog):
+        """Spectral recomputes its own implicit hyperdiff → no warn even for an
+        absurd FV diff.hyperdiff (codex issue: warn only on consumed coeffs)."""
+        import logging
+        from legoesm.driver.component_factory import warn_if_diffusion_unstable
+        grid = _make_cubed_sphere_grid()
+        diff = compute_diffusion(grid, DycoreConfig(dt=600.0, hyperdiff_scale=1e9))
+        with caplog.at_level(logging.WARNING):
+            warn_if_diffusion_unstable("spectral_primitive_equations", diff, grid, 600.0)
+        assert not any("max stable" in r.message for r in caplog.records)
+
+    def test_divdamp_only_checked_for_primitive_equations(self, caplog):
+        import logging
+        from legoesm.driver.component_factory import warn_if_diffusion_unstable
+        grid = _make_cubed_sphere_grid()
+        diff = compute_diffusion(grid, DycoreConfig(dt=600.0, div_damp_scale=1e9))
+        # Shallow water never forwards div_damp → silent.
+        with caplog.at_level(logging.WARNING):
+            warn_if_diffusion_unstable("cdgrid_shallow_water", diff, grid, 600.0)
+        assert not any("div_damp" in r.message for r in caplog.records)
+        caplog.clear()
+        # Primitive equations forwards div_damp → warns.
+        with caplog.at_level(logging.WARNING):
+            warn_if_diffusion_unstable("cdgrid_primitive_equations", diff, grid, 600.0)
+        assert any("div_damp" in r.message for r in caplog.records)
+
 
 # =========================================================================
 # 3. Unsupported combinations fail fast

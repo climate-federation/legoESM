@@ -1222,7 +1222,7 @@ class TestAmipToMatrixFormat:
 
     def _import_converter(self):
         import importlib.util
-        path = _SCRIPT_DIR / "_amip_to_matrix_format.py"
+        path = _SCRIPT_DIR.parent / "run" / "_amip_to_matrix_format.py"
         spec = importlib.util.spec_from_file_location(
             "_amip_to_matrix_format", path,
         )
@@ -4623,24 +4623,50 @@ class TestHeldSuarezMassDriftTolerance:
             "``HELD_SUAREZ_MASS_DRIFT_TOL`` and gate PASS on "
             "``mass_drift <= tol``."
         )
-        # The tolerance must be tight enough to catch gross
-        # violations (anything >= 1.0 = 100% drift) but loose
-        # enough to allow current latlon/spectral 1e-4.
-        # Parse the literal.
+        # The tolerance must be tight enough to catch gross violations
+        # (anything >= 1.0 = 100% drift) while remaining an active,
+        # positive gate.  iter-30 hoisted the dycore mass-drift PASS
+        # ceiling to a single module constant ``_DYCORE_MASS_DRIFT_TOL``
+        # and iter-23 tightened it to 1e-6 (every grid sits at ~1e-15 in
+        # this test path, so the original iter-117 1e-2 example became 13
+        # orders too loose).  ``run_held_suarez`` now references that
+        # constant BY NAME:
+        #     HELD_SUAREZ_MASS_DRIFT_TOL = _DYCORE_MASS_DRIFT_TOL
+        # so capture the RHS token and resolve a numeric literal either
+        # directly OR one hop through a module-level ``<name> = <literal>``.
         m = re.search(
-            r"HELD_SUAREZ_MASS_DRIFT_TOL\s*=\s*([\de.\-]+)",
+            r"HELD_SUAREZ_MASS_DRIFT_TOL\s*=\s*(\S+)",
             code_only,
         )
         assert m is not None, (
-            "iter-117: ``HELD_SUAREZ_MASS_DRIFT_TOL`` must "
-            "be defined as a literal."
+            "iter-117: ``HELD_SUAREZ_MASS_DRIFT_TOL`` must be assigned "
+            "(a numeric literal or a module-constant reference)."
         )
-        tol = float(m.group(1))
-        assert 1e-4 < tol < 1.0, (
-            f"iter-117: tolerance must be tight enough to "
-            f"catch gross violations (< 1.0) but loose enough "
-            f"to allow current latlon/spectral 1e-4 (> 1e-4).  "
-            f"Got {tol:.0e}."
+        rhs = m.group(1).rstrip(",")
+        _LIT = re.compile(r"^[-+]?[0-9.]+(?:[eE][-+]?[0-9]+)?$")
+        if _LIT.match(rhs):
+            tol = float(rhs)
+        else:
+            mod_src = inspect.getsource(M)
+            mm = re.search(
+                rf"^{re.escape(rhs)}\s*=\s*"
+                r"([-+]?[0-9.]+(?:[eE][-+]?[0-9]+)?)\s*$",
+                mod_src,
+                flags=re.MULTILINE,
+            )
+            assert mm is not None, (
+                f"iter-117: ``HELD_SUAREZ_MASS_DRIFT_TOL = {rhs}`` "
+                f"references a module constant that does not resolve to "
+                f"a numeric literal ``{rhs} = <number>`` at module scope."
+            )
+            tol = float(mm.group(1))
+        # Active conservation gate: positive (gate is live) and < 1.0
+        # (catches gross violations).  Production centralizes this at
+        # ``_DYCORE_MASS_DRIFT_TOL`` = 1e-6.
+        assert 0.0 < tol < 1.0, (
+            f"iter-117: mass-drift tolerance must be an active gate "
+            f"(> 0) that catches gross violations (< 1.0).  Got "
+            f"{tol:.0e}."
         )
 
     def test_apply_mass_drift_tolerance_fails_nan(self):
@@ -5024,3 +5050,85 @@ class TestHeldSuarezMassDriftTolerance:
         pytest.skip(
             "iter-117 manual smoke — see docstring for cmd."
         )
+
+
+# ---------------------------------------------------------------------------
+# Issues 504 / 505 / 506: SW comparison-panel + alpha=0 wiring
+# ---------------------------------------------------------------------------
+
+class TestIssue505MeridionalWind:
+    def test_williamson2_comparison_includes_v(self):
+        """Issue 505: the W2 cross-grid comparison must compare the
+        meridional wind v (exact W2 v is zero, so v IS the cube-imprint
+        diagnostic) alongside height / u / wind_speed."""
+        fields = [f["field"] for f in M.ATMOSPHERE_COMPARISON_FIELDS["williamson2"]]
+        assert "v" in fields, fields
+        for required in ("height", "u", "wind_speed"):
+            assert required in fields, (required, fields)
+
+
+class TestIssue504CosineBellAlpha:
+    def test_alpha0_case_registered_on_all_grids(self):
+        """Issue 504: the alpha=0 (edge-crossing) cosine-bell variant is a
+        real matrix case on every grid, so ``--test cosine_bell_a0`` selects
+        something rather than silently no-op'ing."""
+        mat = M._build_test_matrix()
+        a0 = [t for t in mat if t.case == "cosine_bell_a0"]
+        grids = sorted(t.grid_type for t in a0)
+        assert grids == ["cubed_sphere", "icosahedral", "latlon", "spectral"], grids
+        for t in a0:
+            assert t.run_kwargs.get("alpha") == 0.0, t.run_kwargs
+
+    def test_alpha0_case_has_runner_and_comparison(self):
+        assert M.RUNNERS.get("cosine_bell_a0") is M.run_cosine_bell
+        assert "cosine_bell_a0" in M.ATMOSPHERE_COMPARISON_FIELDS
+
+    def test_default_cosine_bell_unchanged(self):
+        """The default cosine_bell case keeps empty run_kwargs (alpha
+        defaults to pi/4 inside the runner) — no behaviour change."""
+        mat = M._build_test_matrix()
+        cb = [t for t in mat if t.case == "cosine_bell"]
+        assert cb and all("alpha" not in t.run_kwargs for t in cb)
+
+
+class TestIssue506SurfacePressure:
+    def test_williamson6_comparison_includes_ps(self):
+        """Issue 506: W6 cross-grid comparison gains a surface-pressure
+        panel alongside height + wind_speed."""
+        assert "williamson6" in M.ATMOSPHERE_COMPARISON_FIELDS
+        fields = [f["field"] for f in M.ATMOSPHERE_COMPARISON_FIELDS["williamson6"]]
+        assert "p_s" in fields, fields
+        for required in ("height", "wind_speed"):
+            assert required in fields, (required, fields)
+
+    def test_ps_definition_is_rho_g_h_from_constants(self):
+        """p_s = rho_air * g * (h + h_s) — pin the hydrostatic definition
+        against the shared constants (no hardcoded density), mirroring the
+        injection formula in ``run_shallow_water``."""
+        from legoesm import constants
+        h = np.array([8000.0, 9000.0, 10000.0])
+        expected = constants.rho_air * constants.g * h  # h_s = 0 for RH wave
+        got = constants.rho_air * constants.g * np.asarray(h, dtype=np.float64)
+        np.testing.assert_allclose(got, expected, rtol=0, atol=0)
+
+    def test_w6_runner_actually_saves_ps(self, tmp_path):
+        """Integration guard (codex P2): the formula test above can't catch
+        ``run_shallow_water`` failing to inject/save ``p_s`` for W6.  Run a
+        tiny W6 cube case and assert the saved snapshot NPZ contains ``p_s``
+        equal to rho_air*g*height (h_s=0 for the Rossby-Haurwitz wave)."""
+        import matplotlib
+        matplotlib.use("Agg")
+        from legoesm import constants
+        tc = M.TestCase(
+            "shallow_water", "williamson6", "cubed_sphere", "C24", "none",
+            0.02, 0.02, {"test_num": 6})
+        status, _wall, _notes = M.run_shallow_water(tc, tmp_path, 0.02)
+        assert status == "PASS", status
+        npz = tmp_path / "snapshots_latlon.npz"
+        assert npz.exists(), "W6 snapshot NPZ not written"
+        d = np.load(npz)
+        assert "p_s" in d.files, d.files
+        ps, h = d["p_s"], d["height"]
+        m = np.isfinite(ps) & np.isfinite(h) & (h > 1.0)
+        ratio = float(np.median(ps[m] / h[m]))
+        assert abs(ratio - constants.rho_air * constants.g) < 1e-3, ratio
