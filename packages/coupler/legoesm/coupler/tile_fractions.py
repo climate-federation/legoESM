@@ -92,13 +92,39 @@ def blend_tiles(
         # per-tile-area and keep their own fractions.
         return fo * o + f_water * i + fl * l + fk * k
 
+    # Radiative-equivalent skin temperature for the LW boundary.  Blend the
+    # per-tile EMISSION FLUX eps_i*sigma*T_rad_i^4 (NOT T_sfc_i), then invert with
+    # eps_grid = sum_i f_i*eps_i so the atmosphere boundary
+    # eps_grid*sigma*T_rad^4 + (1-eps_grid)*La equals sum_i f_i*lw_up_i EXACTLY.
+    # Area-averaging T and eps independently is not LW-flux-conserving for mixed
+    # cells (T^4 and eps*T^4 are nonlinear); T_rad == T_sfc for single-tile cells.
+    # ``T_rad_i`` is each tile's emission-equivalent temperature: for most tiles
+    # the skin temperature, but for the two-leaf canopy the canopy column
+    # temperature (T_sfc there is the SOIL temperature, used only for sensible
+    # heat) — so we MUST use the tile's ``T_rad`` when present, not ``T_sfc``.
+    _sb = constants.sigma_sb
+
+    def _T_rad(r):
+        tr = getattr(r, "T_rad", None)
+        return r.T_sfc if tr is None else tr
+
+    eps_grid = _blend(ocean_resp.emissivity, ice_resp.emissivity,
+                      land_resp.emissivity, lake_resp.emissivity)
+    lw_emit_grid = _blend(
+        ocean_resp.emissivity * _sb * _T_rad(ocean_resp) ** 4,
+        ice_resp.emissivity * _sb * _T_rad(ice_resp) ** 4,
+        land_resp.emissivity * _sb * _T_rad(land_resp) ** 4,
+        lake_resp.emissivity * _sb * _T_rad(lake_resp) ** 4,
+    )
+    T_rad = (lw_emit_grid / jnp.maximum(eps_grid * _sb, 1.0e-12)) ** 0.25
+
     return SurfaceToAtm(
         T_sfc=_blend(ocean_resp.T_sfc, ice_resp.T_sfc,
                          land_resp.T_sfc, lake_resp.T_sfc),
+        T_rad=T_rad,
         albedo=_blend(ocean_resp.albedo, ice_resp.albedo,
                       land_resp.albedo, lake_resp.albedo),
-        emissivity=_blend(ocean_resp.emissivity, ice_resp.emissivity,
-                          land_resp.emissivity, lake_resp.emissivity),
+        emissivity=eps_grid,
         z0=_blend(ocean_resp.z0, ice_resp.z0,
                   land_resp.z0, lake_resp.z0),
         q_surface=_blend(ocean_resp.q_surface, ice_resp.q_surface,

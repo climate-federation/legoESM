@@ -9,15 +9,15 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.regridding import (
     CubedSphereToLatLonWeights,
     apply_cubedsphere_to_latlon,
     apply_cubedsphere_to_latlon_3d,
     compute_cubedsphere_to_latlon_weights,
+    compute_latlon_to_cs_weights,
+    regrid_scalar,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -204,6 +204,80 @@ def test_uniform_field_exact():
 # ---------------------------------------------------------------------------
 # Test: weights structure is valid
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Test: REGULAR lat-lon -> cubed-sphere weights (compute_latlon_to_cs_weights)
+# ---------------------------------------------------------------------------
+
+class TestLatLonToCubedSphere:
+    """Regression for the ERA5 -> cubed-sphere regrid bug (iter 109).
+
+    ``era5_to_cubedsphere_carry`` previously built the KD-tree weights from a
+    GAUSSIAN PROXY of the (uniform lat-lon) ERA5 grid.  The proxy's quadrature
+    latitudes do not coincide with a uniform lat-lon grid and its latitude COUNT
+    generally differs, so the flat ``src_indices`` gathered the WRONG ERA5 cells
+    (pulling near-antipodal latitudes — a ``T = lat`` field showed max ~154 deg
+    error).  ``compute_latlon_to_cs_weights`` builds weights from the ACTUAL
+    source nodes; the same field now reproduces each CS cell's latitude to within
+    the grid-resolution + IDW-smoothing residual (a couple of degrees).
+    """
+
+    @staticmethod
+    def _uniform_latlon_deg(n_lat: int = 73, n_lon: int = 144):
+        # ERA5-like uniform grid: lat 90 -> -90 (descending), lon 0..360 (excl).
+        lat_deg = np.linspace(90.0, -90.0, n_lat)
+        lon_deg = np.linspace(0.0, 360.0, n_lon, endpoint=False)
+        return lat_deg, lon_deg
+
+    def test_temperature_equals_lat_reproduces_cell_latitude(self):
+        """A field equal to source latitude regrids to each CS cell's own
+        latitude — the exact check that exposed the proxy bug (was ~154 deg)."""
+        grid = create_cubed_sphere(8)
+        lat_deg, lon_deg = self._uniform_latlon_deg()
+        weights = compute_latlon_to_cs_weights(
+            np.deg2rad(lat_deg), np.deg2rad(lon_deg), grid
+        )
+        # Source field T[i, j] = lat_deg[i] (C-order flatten: lat slowest).
+        field = np.broadcast_to(
+            lat_deg[:, None], (lat_deg.size, lon_deg.size)
+        ).astype(np.float32)
+        out = np.asarray(regrid_scalar(field, weights))   # (6, n, n)
+        cell_lat_deg = np.rad2deg(np.asarray(grid.lat))
+        err = np.abs(out - cell_lat_deg)
+        # Resolution (C8 cells ~11 deg) + IDW smoothing residual only; the proxy
+        # bug produced max ~154 deg / mean ~69 deg here.
+        assert err.max() < 6.0, f"max |T_cs - cell_lat| = {err.max():.2f} deg"
+        assert err.mean() < 3.0, f"mean = {err.mean():.2f} deg"
+
+    def test_uniform_field_preserved(self):
+        """A constant lat-lon field maps to the same constant on the CS grid
+        (IDW weights sum to 1 per target)."""
+        grid = create_cubed_sphere(8)
+        lat_deg, lon_deg = self._uniform_latlon_deg()
+        weights = compute_latlon_to_cs_weights(
+            np.deg2rad(lat_deg), np.deg2rad(lon_deg), grid
+        )
+        field = np.full((lat_deg.size, lon_deg.size), 42.0, dtype=np.float32)
+        out = np.asarray(regrid_scalar(field, weights))
+        np.testing.assert_allclose(out, 42.0, rtol=1e-5)
+
+    def test_weights_structure(self):
+        """Indices reference the SOURCE grid (not a proxy of different size),
+        weights are convex, target matches the CS shape."""
+        grid = create_cubed_sphere(8)
+        lat_deg, lon_deg = self._uniform_latlon_deg(n_lat=37, n_lon=72)
+        weights = compute_latlon_to_cs_weights(
+            np.deg2rad(lat_deg), np.deg2rad(lon_deg), grid
+        )
+        src_size = lat_deg.size * lon_deg.size
+        assert weights.src_flat_size == src_size
+        assert int(np.asarray(weights.src_indices).max()) < src_size
+        assert int(np.asarray(weights.src_indices).min()) >= 0
+        assert weights.target_shape == tuple(int(s) for s in grid.lat.shape)
+        w = np.asarray(weights.weights)
+        np.testing.assert_allclose(w.sum(axis=-1), 1.0, rtol=1e-6)
+        assert (w >= 0.0).all()
+
 
 def test_weights_valid():
     """Sanity-check weight indices and values."""

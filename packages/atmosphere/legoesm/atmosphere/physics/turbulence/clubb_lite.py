@@ -17,15 +17,23 @@ handled downstream by the Sundqvist / Xu-Randall cloud scheme.
 
 Budget (full levels, semi-implicit dissipation) — AS ACTUALLY INTEGRATED:
 
-  d(wp2)/dt = Km*S^2 - Kh*N^2 - C_eps*sqrt(wp2)/l + diff(wp2)
+  d(wp2)/dt = Km*S^2 - Kh*N^2 - C_eps*wp2^(3/2)/l + diff(wp2)
+
+The sink is written ``C_eps*wp2^(3/2)/l`` because the semi-implicit update
+``wp2_new = (wp2 + dt*P)/(1 + dt*diss_wp2)`` with ``diss_wp2 = C_eps*sqrt(wp2)/l``
+is the discretisation of ``d(wp2)/dt = P - diss_wp2*wp2 = P - C_eps*wp2^(3/2)/l``;
+the linearised rate ``diss_wp2`` multiplies ``wp2``, so the budget term carries
+the full ``wp2^(3/2)`` power (see ``c_eps_from_budget`` in
+``dynamics/les_closure_diagnosis.py``, the exact inverse of this balance).
 
 NOTE on faithfulness: the canonical CLUBB w'^2 *variance* budget carries a
 factor of 2 on the production terms, a buoyancy production
 ``2*(g/theta_v)*w'theta_v'`` and a ``C1*wp2/tau`` dissipation.  This lite
 version instead integrates a TKE-scaled magnitude: shear production
 ``Km*S^2`` (no factor 2), a down-gradient buoyancy surrogate ``-Kh*N^2``
-(in place of ``2*(g/theta_v)*w'theta_v'``), and a ``C_eps*sqrt(wp2)/l``
-dissipation.  ``wp2`` is therefore a TKE-like scale used only to set the
+(in place of ``2*(g/theta_v)*w'theta_v'``), and a ``C_eps*wp2^(3/2)/l``
+dissipation (linearised rate ``C_eps*sqrt(wp2)/l`` times ``wp2``).  ``wp2`` is
+therefore a TKE-like scale used only to set the
 mixing time scale and the down-gradient diffusivities, NOT a strict second
 moment.  (The ``CLUBBLiteConfig`` C1/C4/C5 fields are legacy and unused by
 this reduced budget.)
@@ -98,6 +106,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 from legoesm.atmosphere.physics._shared import (
+    broadcast_column_param,
     exner_function,
     mixing_length,
     virtual_temperature,
@@ -114,6 +123,77 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
 )
 
 from legoesm import constants
+
+
+def clubb_eddy_diffusivity(
+    C_K: jax.Array,
+    l_mix: jax.Array,
+    sqrt_wp2: jax.Array,
+) -> jax.Array:
+    """The CLUBB-lite down-gradient momentum diffusivity ``K_m = C_K · ℓ · √wp2``.
+
+    This is the SINGLE definition of the forward eddy-diffusivity closure: the integrator
+    (:func:`clubb_lite_turbulence`) builds ``K_m`` from it, and it is the EXACT inverse of the
+    LES diagnosis ``C_K = K_m/(ℓ·√wp2)``
+    (:func:`legoesm.atmosphere.dynamics.les_closure_diagnosis.clubb_coefficient_from_diffusivity`).
+    Factored out so the forward/inverse round-trip is pinned against the closure the model
+    ACTUALLY integrates (a change to this form is then caught by the round-trip test, not
+    silently de-synced from the diagnosis — which would break OSSE parameter recovery).
+
+    ``C_K`` may be a scalar (production) OR a per-column ``(ncol,)`` field (the LES-informed
+    eddy-diffusivity correction); ``broadcast_column_param`` keeps the scalar path
+    byte-identical and reshapes a per-column field to broadcast over the vertical.  All inputs
+    are pure arrays — JAX-traced, differentiable, no side effects.
+    """
+    return broadcast_column_param(C_K, l_mix) * l_mix * sqrt_wp2
+
+
+def clubb_heat_diffusivity(
+    K_m: jax.Array,
+    Pr_t: jax.Array,
+    l_mix: jax.Array,
+) -> jax.Array:
+    """The CLUBB-lite heat/scalar diffusivity ``K_h = K_m / Pr_t`` (turbulent Prandtl number).
+
+    The SINGLE forward definition the integrator builds ``K_h`` from; the EXACT inverse of the
+    LES diagnosis ``Pr_t = K_m/K_h``
+    (:func:`legoesm.atmosphere.dynamics.les_closure_diagnosis.prandtl_number_from_diffusivities`).
+    ``Pr_t`` may be a scalar (production) OR a per-column ``(ncol,)`` field (the LES-informed
+    correction); ``l_mix`` supplies the column-broadcast shape only.  Pure / differentiable.
+    """
+    return K_m / broadcast_column_param(Pr_t, l_mix)
+
+
+def clubb_wp2_production(
+    K_m: jax.Array,
+    K_h: jax.Array,
+    S2: jax.Array,
+    N2: jax.Array,
+) -> jax.Array:
+    """Net ``w'²`` production ``P = K_m·S² − K_h·N²`` (down-gradient shear minus buoyancy
+    destruction) — the SINGLE forward definition the integrator's ``wp2`` budget balances, and
+    the production the LES diagnosis inverts in
+    :func:`legoesm.atmosphere.dynamics.les_closure_diagnosis.c_eps_from_budget`
+    (``C_eps = P·ℓ/wp2^{3/2}``).  Co-located inputs; pure / differentiable.
+    """
+    return K_m * S2 - K_h * N2
+
+
+def clubb_wp2_dissipation_rate(
+    C_eps: jax.Array,
+    sqrt_wp2: jax.Array,
+    l_mix_safe: jax.Array,
+) -> jax.Array:
+    """The CLUBB-lite ``w'²`` dissipation RATE ``C_eps·√wp2/ℓ`` (so the dissipation TERM is
+    ``rate·wp2 = C_eps·wp2^{3/2}/ℓ``).  The SINGLE forward definition the integrator's
+    semi-implicit ``wp2`` update uses; at steady state (neglecting transport) it balances the
+    production, the relation the LES diagnosis inverts
+    (:func:`legoesm.atmosphere.dynamics.les_closure_diagnosis.c_eps_from_budget`).  ``C_eps``
+    may be a scalar OR a per-column ``(ncol,)`` field; ``l_mix_safe`` is the floored mixing
+    length (the integrator clips ℓ ≥ 1 m before the division).  Pure / differentiable.
+    """
+    return broadcast_column_param(C_eps, l_mix_safe) * sqrt_wp2 / l_mix_safe
+
 
 # ---------------------------------------------------------------------------
 # Main entry point
@@ -212,8 +292,15 @@ def clubb_lite_turbulence(
     # — see comment block below).
 
     # ===== Eddy diffusivities =====
-    Km_full = config.C_K * l_mix * sqrt_wp2  # (ncol, nlev)
-    Kh_full = Km_full / config.Pr_t
+    # ``C_K`` may be a scalar (production) OR a per-column ``(ncol,)`` field
+    # (the LES-informed eddy-diffusivity correction); broadcast_column_param
+    # keeps the scalar path byte-identical and reshapes a per-column field to
+    # broadcast over the vertical axis. See docs/COMPARE_REANALYSIS.md.
+    Km_full = clubb_eddy_diffusivity(config.C_K, l_mix, sqrt_wp2)  # (ncol, nlev)
+    # ``Pr_t`` likewise may be a scalar (production, byte-identical) OR a
+    # per-column LES-informed correction (the turbulent Prandtl number
+    # Pr_t = K_m/K_h diagnosed from the LES); broadcast it over the vertical too.
+    Kh_full = clubb_heat_diffusivity(Km_full, config.Pr_t, l_mix)
 
     Km_half = 0.5 * (Km_full[:, :-1] + Km_full[:, 1:])  # (ncol, nlev-1)
     Kh_half = 0.5 * (Kh_full[:, :-1] + Kh_full[:, 1:])
@@ -253,12 +340,15 @@ def clubb_lite_turbulence(
     # ===== Moment budgets (semi-implicit) =====
 
     # --- w'^2 budget ---
-    # Production: shear + buoyancy
-    shear_prod = Km_full * S2
-    buoy_prod = -Kh_full * N2  # buoyancy production (>0 when unstable)
+    # Net production P = K_m·S² − K_h·N² (shear minus buoyancy destruction); the
+    # diagnosis inverts EXACTLY this form (c_eps_from_budget).
+    net_prod = clubb_wp2_production(Km_full, Kh_full, S2, N2)
 
-    # Dissipation coefficient: C1/tau (semi-implicit)
-    diss_wp2 = config.C_eps * sqrt_wp2 / l_mix_safe
+    # Dissipation coefficient: C1/tau (semi-implicit). ``C_eps`` may be a scalar
+    # (production, byte-identical) OR a per-column LES-informed correction (it sets
+    # the GCM's equilibrium wp2 so it tracks the LES w'² — closing the C_K
+    # wp2-identification gap); broadcast it over the vertical like C_K / Pr_t.
+    diss_wp2 = clubb_wp2_dissipation_rate(config.C_eps, sqrt_wp2, l_mix_safe)
 
     # Diffuse wp2.  Pin the surface_flux dtype to the input dtype so the
     # tridiagonal solve does not silently promote the column path to f64.
@@ -268,7 +358,7 @@ def clubb_lite_turbulence(
     )
 
     # Semi-implicit update
-    wp2_new = (wp2_diffused + dt * (shear_prod + buoy_prod)) / (
+    wp2_new = (wp2_diffused + dt * net_prod) / (
         1.0 + dt * diss_wp2
     )
     wp2_new = jnp.maximum(wp2_new, config.tke_min)

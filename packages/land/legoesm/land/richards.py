@@ -35,6 +35,7 @@ from legoesm.land.soil_grid import SoilGrid
 from legoesm.land.soil_hydraulics import (
     SoilHydraulicsConfig,
     theta_from_psi,
+    psi_from_theta,
     hydraulic_conductivity,
     moisture_capacity,
     interblock_K,
@@ -53,6 +54,38 @@ __param_spec__ = {
         },
     },
 }
+
+# --- numerics: explicit-flux CFL limiter (Courant 1928) ---
+# Courant-number safety factor for the explicit gravity-drainage / infiltration
+# fluxes.  The stability bound is K*dt/dz <= 1; we cap at 0.9 of it to leave a
+# margin against the geometric-mean interface K and the fixed-iteration Picard.
+# Applied identically to the interior interface K (K_half), the surface
+# infiltration conductivity (_Ksat) and the free-drainage bottom flux (K_bot).
+_CFL_SAFETY = 0.9
+
+# --- numerics: dry-side effective-saturation floor (Richards degeneracy guard) ---
+# As a layer dries toward theta_r the matric potential psi -> -inf and BOTH the
+# moisture capacity C(psi)=dtheta/dpsi AND the conductivity K(psi) collapse to ~0.
+# The Picard tridiagonal diagonal (C/dt + interface conductances) then degenerates,
+# so dpsi = rhs/diag explodes and the Thomas solve returns NaN — reachable whenever a
+# top layer is driven to theta_r under sustained ET with no infiltration (a dry-season
+# / desert column).  Clamp psi each Picard iterate at the matric potential of a small
+# effective saturation Se = _SE_DRY_FLOOR, i.e. bound the ARTIFICIAL retained water at
+# _SE_DRY_FLOOR*(theta_sat - theta_r) ~ 3e-5 m3/m3 INDEPENDENT of the retention-curve
+# shape.  A FIXED psi floor is NOT shape-robust: for a low-n_vg soil psi = -1e7 still
+# maps to Se ~ 0.4 (O(0.1) spurious water); flooring on Se instead pins the water error
+# regardless of (alpha, n) — the psi floor at Se is computed once per solve from the
+# (possibly per-column) hydraulics via psi_from_theta.  CLM (smpmin) / Noah-MP use the
+# analogous guard.  Only ever binds below wilting; the wet side (psi >= 0) is untouched.
+_SE_DRY_FLOOR = 1.0e-4
+# For a near-flat retention curve (n_vg -> 1) the psi at Se=_SE_DRY_FLOOR is astronomic
+# (~ -1e80): FINITE in float64 but OVERFLOWS to -inf in float32, which would make
+# jnp.maximum(psi, -inf) == psi and defeat the guard for a float32 land state (codex).
+# Cap the floor magnitude at a value that is representable in BOTH precisions (|.| <<
+# float32 max 3.4e38) and far below any realistic dry psi (~ -1e10), so it never binds
+# for a normal soil but keeps the floor finite (and the guard effective) for the flat-
+# curve edge — at the cost of a larger, still bounded, water error there (~1e-2).
+_PSI_FLOOR_MIN = -1.0e30
 
 
 class RichardsConfig(NamedTuple):
@@ -124,6 +157,15 @@ def solve_richards(
 
     theta_n = theta  # θ at time level n (saved for mass conservation)
 
+    # Depth-decay of saturated conductivity (Niu et al. 2005): K_sat(z) =
+    # K_sat * exp(-z/k_sat_decay_m), applied per layer to the WHOLE K(theta) curve
+    # to impede drainage OUT OF the root zone.  0.0 = disabled (uniform K, exact
+    # backward-compat).  Static Python gate on the config float (feature switch).
+    if hydro_config.k_sat_decay_m > 0.0:
+        _kdecay = jnp.exp(-grid.z_node / hydro_config.k_sat_decay_m)   # (nlayers,)
+    else:
+        _kdecay = jnp.ones_like(grid.z_node)
+
     # --- Coupled surface ponding cell (ParFlow/CliMA overland store) ---
     # A surface water store h_s [m] is solved IMPLICITLY together with the soil
     # column.  The surface<->soil flux is an internal Darcy face flux
@@ -143,7 +185,20 @@ def solve_richards(
     # full (ncol, nlayers) state exactly as hydraulic_conductivity does, then take
     # layer 0 — this handles scalar, (ncol,1), (ncol,nlayers) and (nlayers,) configs
     # identically and never mis-maps layer variation onto columns (codex).
-    _Ksat = jnp.broadcast_to(hydro_config.K_sat, theta.shape)[:, 0]   # (ncol,)
+    _Ksat = jnp.broadcast_to(hydro_config.K_sat, theta.shape)[:, 0] * _kdecay[0]  # (ncol,)
+    # CFL cap on the surface infiltration conductivity (stability at high K_sat).
+    # The Robin infiltration q01 = _Ksat*((h_s-psi0)/half0 + 1) drives the layer-0
+    # Schur update EXPLICITLY (rhs_0 += q01/dz0) and its linearized conductance
+    # _Kc = _Ksat/half0 sets the surface coupling; with _Ksat >> dz0/dt (a sandy
+    # K_sat ~ 4e-5 m/s at a 30-min step) that explicit source moves more than one
+    # top cell of water per iteration and psi_0/theta_0 diverge via the unbounded
+    # specific-storage term.  Cap _Ksat at the resolvable rate 0.9*dz0/dt — the same
+    # CFL bound applied to the interior grav flux (K_half) below and the bottom
+    # drainage (K_bot).  No-op for loam (K_sat ~ 3e-6 << dz0/dt); the water the
+    # capped surface cannot infiltrate stays as ponding and leaves as overland
+    # runoff in the post-Picard split, so mass is conserved.  z convention: dz>0
+    # downward, q01>0 downward into the soil.
+    _Ksat = jnp.minimum(_Ksat, _CFL_SAFETY * dz[0] / dt)
     _Kc = _Ksat / _half0                                    # surface conductance [1/s]
     _pond_max = richards_config.pond_max
     # Default zero pond carries flux_top's dtype so it never widens _work_dtype on its
@@ -192,15 +247,39 @@ def solve_richards(
     # --- Picard iteration ---
     psi_m = psi  # iterate
 
+    # Config-aware dry-side psi floor (see _SE_DRY_FLOOR): matric potential at
+    # Se = _SE_DRY_FLOOR for the active retention curve + (possibly per-column)
+    # hydraulics, computed ONCE.  jnp.maximum(psi, _psi_dry_floor) then bounds the
+    # dry limit with a water error <= _SE_DRY_FLOOR*(theta_sat-theta_r) for ANY (alpha, n).
+    _psi_dry_floor = psi_from_theta(
+        hydro_config.theta_r
+        + _SE_DRY_FLOOR * (hydro_config.theta_sat - hydro_config.theta_r),
+        hydro_config)
+    # Keep the floor FINITE in the working precision (float32 overflows the flat-curve
+    # psi to -inf, defeating the guard — see _PSI_FLOOR_MIN).  Never binds for a normal
+    # soil (floor ~ -1e6 >> -1e30).
+    _psi_dry_floor = jnp.maximum(_psi_dry_floor, _PSI_FLOOR_MIN)
+
     def picard_body(m, carry):
         h_s_m, psi_m, theta_m, _ = carry  # 4th slot: K_bot diagnostic (write-only)
 
         # Recompute hydraulic properties at current iterate
-        K_m = hydraulic_conductivity(psi_m, theta_m, hydro_config)  # (ncol, nlayers)
+        K_m = hydraulic_conductivity(psi_m, theta_m, hydro_config) * _kdecay[None, :]  # (ncol, nlayers)
         C_m = moisture_capacity(psi_m, theta_m, hydro_config)       # (ncol, nlayers)
 
         # Interblock conductivity (geometric mean)
         K_half = interblock_K(K_m[:, :-1], K_m[:, 1:])  # (ncol, nlayers-1)
+
+        # CFL flux limiter (stability at high K_sat).  The gravity-drainage flux
+        # is applied EXPLICITLY (grav_flux term in the rhs below), so it must not
+        # move more than one cell of water per step: K_half * dt / dz <= 1.  For a
+        # 30-min step a high-K sandy soil (K_sat ~ 4e-5 m/s >> dz/dt) violates this
+        # and psi/theta run away via the UNBOUNDED specific-storage term (theta =
+        # theta_sat + S_s*theta_sat*psi has no upper clip).  Cap the interface
+        # conductivity at 0.9*min(dz_adjacent)/dt.  No-op for low-K soils
+        # (loam K_sat ~ 3e-6 << dz/dt); mass-conserving (the excess drainage is
+        # simply deferred to the next step, not discarded).
+        K_half = jnp.minimum(K_half, _CFL_SAFETY * jnp.minimum(dz[:-1], dz[1:]) / dt)
 
         # Build tridiagonal system: [C/dt + A] * dpsi = rhs
         # A is the diffusion operator from Darcy's law
@@ -275,8 +354,12 @@ def solve_richards(
 
         # Bottom BC
         if richards_config.bottom_bc == "free_drainage":
-            # Gravitational flux only: q_bottom = K_N (downward)
-            K_bot = K_m[:, -1]
+            # Gravitational flux only: q_bottom = K_N (downward, z>0 down).  Applied
+            # EXPLICITLY (rhs term), so CFL-cap it at the resolvable rate 0.9*dz_N/dt
+            # exactly as the interior grav flux and the surface infiltration above.
+            # dz_N is the thick bottom layer, so this rarely bites, but keeps every
+            # explicit K path bounded so a high-K profile cannot drain > one cell/step.
+            K_bot = jnp.minimum(K_m[:, -1], _CFL_SAFETY * dz[-1] / dt)
             rhs = rhs.at[:, -1].add(-K_bot / dz[-1])
         # zero_flux: no additional term (natural BC)
 
@@ -292,9 +375,12 @@ def solve_richards(
         dh_s = (-R_s_m + Kc_m * dpsi[:, 0]) / D_s_m
         h_s_new = h_s_m + dh_s
 
-        # Update psi and theta unconditionally.  Converged columns get
-        # near-zero dpsi, so extra iterations are effectively no-ops.
-        psi_new = psi_m + dpsi
+        # Update psi and theta unconditionally.  Converged columns get near-zero
+        # dpsi, so extra iterations are effectively no-ops.  Clamp psi at the config-
+        # aware dry-side floor (_psi_dry_floor, see _SE_DRY_FLOOR): a fully-dried
+        # layer (C, K -> 0) would otherwise drive dpsi -> ±inf and NaN the Thomas
+        # solve.  maximum() leaves the whole normal + wet range untouched.
+        psi_new = jnp.maximum(psi_m + dpsi, _psi_dry_floor)
         # No theta clip: theta_from_psi is bounded below at theta_r by the van-
         # Genuchten asymptote, and ABOVE theta_sat it is the physical elastic /
         # ponding storage (theta_sat + S_s*theta_sat*psi).  Clipping to theta_sat
@@ -302,15 +388,18 @@ def solve_richards(
         # storage variable switch makes the clip unnecessary.
         theta_new = theta_from_psi(psi_new, hydro_config)
 
-        # Carry the bottom-layer K THIS iteration's rhs debited (the explicit
-        # free-drainage flux -K_m[:,-1]/dz[-1] above).  After the loop, the last
-        # value is the drainage the solve actually removed from the column —
-        # reporting K(psi_final) instead disagrees with the debit by O(dpsi of
-        # the last Picard iteration) and leaves a spurious budget residual
-        # (in - out - dstorage != 0 by exactly that mismatch).  K_m is already
-        # evaluated on the FULL (ncol, nlayers) state, so layer-varying K_sat
-        # configs pair the bottom psi with the RIGHT layer's K_sat.
-        return h_s_new, psi_new, theta_new, K_m[:, -1]
+        # Carry the bottom-layer K THIS iteration's rhs actually DEBITED: the
+        # CFL-capped free-drainage flux jnp.minimum(K_m[:,-1], 0.9*dz_N/dt) — the
+        # SAME expression the free-drainage bottom BC used above — NOT the raw
+        # K_m[:,-1].  After the loop the last value is the drainage the solve
+        # removed from the column; carrying the uncapped K (or re-evaluating at
+        # psi_final) would over-report when the CFL cap binds and leave a spurious
+        # budget residual (in - out - dstorage != 0).  K_m is evaluated on the FULL
+        # (ncol, nlayers) state, so layer-varying K_sat configs pair the bottom psi
+        # with the RIGHT layer's K_sat.  (Capped value is inert for the zero_flux BC,
+        # whose runoff_subsurface is 0 regardless.)
+        return h_s_new, psi_new, theta_new, jnp.minimum(
+            K_m[:, -1], _CFL_SAFETY * dz[-1] / dt)
 
     theta_m_init = theta_from_psi(psi_m, hydro_config)
 
@@ -330,11 +419,14 @@ def solve_richards(
         psi_m, theta_n, theta_m_init, dz, dz_if, flux_top, _Ksat, h_s0, sink)
     _psi_c0 = psi_m.astype(_work_dtype)
     _theta_c0 = theta_m_init.astype(_work_dtype)
-    # Seed for the K_bot diagnostic carry: K at the initial state, computed from
-    # the ALREADY-CAST carry so its dtype matches the loop body's K_m[:, -1]
-    # output (carry input/output dtypes must agree).  Overwritten on the first
-    # iteration; only reachable as-is for the degenerate max_iter=0.
-    _K_bot0 = hydraulic_conductivity(_psi_c0, _theta_c0, hydro_config)[:, -1]
+    # Seed for the K_bot diagnostic carry: the bottom-layer drainage K at the
+    # initial state, mirroring the loop body's carried expression EXACTLY (kdecay
+    # applied, then CFL-capped) so its dtype matches the loop output (carry
+    # input/output dtypes must agree).  Overwritten on the first iteration; only
+    # reachable as-is for the degenerate max_iter=0.
+    _K_bot0 = jnp.minimum(
+        hydraulic_conductivity(_psi_c0, _theta_c0, hydro_config)[:, -1] * _kdecay[-1],
+        _CFL_SAFETY * dz[-1] / dt)
     h_s_final, psi_final, theta_final, K_bot_solve = jax.lax.fori_loop(
         0, richards_config.max_iter,
         picard_body,
@@ -398,6 +490,12 @@ def solve_richards(
     # column budget (in - out - dstorage).  With this, the only budget residual
     # is the last iteration's O(dpsi^2) linearization error (probe-verified).
     if richards_config.bottom_bc == "free_drainage":
+        # Report the drainage the solve ACTUALLY debited: K_bot_solve is the
+        # bottom-layer K carried out of the last Picard iteration — kdecay applied
+        # AND CFL-capped, i.e. the SAME value the rhs bottom-BC debit used — so the
+        # column water budget closes to O(dpsi^2).  Re-evaluating K at psi_final
+        # would disagree with the debit by O(last dpsi) and leak (see the docstring
+        # above + test_richards_drainage_reported_at_solver_debited_K).
         runoff_subsurface = K_bot_solve  # [m/s]
     else:
         runoff_subsurface = jnp.zeros_like(flux_top)  # dtype-matched (codex)

@@ -15,10 +15,10 @@ import logging
 from pathlib import Path
 
 import jax.numpy as jnp
+from legoesm.driver.config import ExperimentConfig
+from legoesm.driver.model_driver import ModelDriver
 
 from legoesm import constants
-from legoesm.driver.model_driver import ModelDriver
-from legoesm.driver.config import ExperimentConfig
 
 logger = logging.getLogger("legoesm.driver.earth_system")
 
@@ -68,11 +68,11 @@ class EarthSystemDriver:
         self._atm.setup()
 
         # 2. Coupler setup
-        from legoesm.coupler.coupler import make_coupler, init_surface_state
         from legoesm.coupler.config import CouplerConfig, TileConfig
-        from legoesm.land.config import LandConfig
-        from legoesm.ice.config import SeaIceConfig
+        from legoesm.coupler.coupler import init_surface_state, make_coupler
         from legoesm.coupler.lake.config import LakeConfig
+        from legoesm.ice.config import SeaIceConfig
+        from legoesm.land.config import LandConfig
 
         self._coupler_cfg = self._coupler_config or CouplerConfig()
         land_cfg = self._land_config or LandConfig()
@@ -144,16 +144,28 @@ class EarthSystemDriver:
         # fall back to the static blend before the first coupler step.
         cfg = self.config
         sst, sic = self._atm.get_sst_sic(day)
-        from legoesm.forcing.surface_utils import blend_surface_property
+        from legoesm.forcing.surface_utils import (
+            blend_surface_property,
+            surface_emissivity_for_lw_inversion,
+            surface_temperature_for_lw_boundary,
+        )
         # _last_sfc_response is only set after the first coupler step; this
         # reconstruction runs before it on segment 0.
         _resp = getattr(self, "_last_sfc_response", None)
         _dyn_sfc = (
             _resp is not None and getattr(_resp, "albedo", None) is not None
         )
+        # ALL radiation forms the LW boundary with the LW-derived T_rad: RRTMGP/
+        # RRTMG with the paired (T_rad, eps_grid); gray/none as a black surface at
+        # a brightness temperature.  Invert lw_net with the SAME (eps, T) radiation
+        # emitted with — NOT the aerodynamic/sensible-heat T_sfc (the canopy
+        # air-space temp Tc over vegetated cells).
+        _radiation = getattr(self.config, "radiation", "gray")
         if _dyn_sfc:
             albedo_eff = _resp.albedo
-            T_sfc = _resp.T_sfc
+            T_sfc = surface_temperature_for_lw_boundary(
+                _radiation, T_rad=getattr(_resp, "T_rad", _resp.T_sfc),
+                lw_up=_resp.lw_up)
         else:
             albedo_eff = blend_surface_property(
                 sic,
@@ -162,10 +174,19 @@ class EarthSystemDriver:
             )
             T_sfc = blend_surface_temperature(sst, sic, cfg.T_ice)
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
-        # Surface emissivity from canonical constants, blended ocean/ice over sea-ice
-        # fraction (same blend as albedo above) — not a magic 0.96 literal.
-        eps_sfc = blend_surface_property(
-            sic, constants.emissivity_ice, constants.emissivity_ocean)
+        # Emissivity matching the emission: RRTMGP/RRTMG + feedback -> the
+        # tile-blended eps_col; RRTMGP/RRTMG static -> the EXACT ocean/ice/land
+        # emissivity blend the radiation pipeline emitted with (configured
+        # emissivity_* values, not a constant ocean/ice approximation); gray/none
+        # -> an idealized black surface (eps = 1.0).
+        _phys = self._atm.physics
+        eps_sfc = surface_emissivity_for_lw_inversion(
+            _radiation,
+            dynamic_emissivity=(
+                getattr(_resp, "emissivity", None) if _dyn_sfc else None),
+            static_sfc_emissivity=_phys.static_surface_emissivity(
+                sic, land_active=_phys.f_land is not None),
+        )
         lw_up_sfc = eps_sfc * constants.sigma_sb * T_sfc ** 4
         lw_down = (lw_net_sfc + lw_up_sfc) / jnp.maximum(eps_sfc, 0.01)
 
@@ -179,9 +200,12 @@ class EarthSystemDriver:
         snow_frac = snow_fraction(T_low, constants.T_freeze)
         precip_snow = precip_total * snow_frac
 
-        # Cosine zenith: daily-mean approximation cos_zen = Q / S_0
-        from legoesm.forcing.time_utils import day_to_calendar
-        doy, _ = day_to_calendar(day)
+        # Cosine zenith: daily-mean approximation cos_zen = Q / S_0.  Route the day-of-year
+        # through the atmosphere's seasonal insolation seam (iter 449/462) so the surface
+        # insolation runs the SAME season as the atmosphere (config.insolation_start_doy) —
+        # offset 0 (default) == day_to_calendar(day), byte-identical. Mirrors CoupledESMDriver
+        # (iter 461); else the surface saw JANUARY insolation while the atmosphere did not.
+        doy, _ = self._atm._calendar_for_radiation(day)
         lat = self._atm._grid_lat
         if lat is not None:
             from legoesm.atmosphere.physics.radiation.solar import (
@@ -228,8 +252,9 @@ class EarthSystemDriver:
         # Get ocean SST for ice coupling
         sst, _ = self._atm.get_sst_sic(day)
 
-        from legoesm.forcing.time_utils import day_to_calendar
-        doy, _ = day_to_calendar(day)
+        # Same seasonal insolation seam as the atmosphere (iter 449/462) for the surface
+        # step's day-of-year; offset 0 (default) => identical.
+        doy, _ = self._atm._calendar_for_radiation(day)
 
         self._sfc_state, sfc_response = self._step_surface(
             self._sfc_state,
@@ -264,15 +289,45 @@ class EarthSystemDriver:
         # permanently False), so the surface feedback silently never happened —
         # radiation kept using the frozen config albedo / skin temperature.
         # The real channel is ``ModelDriver.get_sfc_override``, which threads
-        # the (albedo, T_sfc) pair into radiation as a traced SegmentForcing
-        # (no recompile, AD-safe — mirrors the SST/SIC feedback).
+        # the (albedo, T_sfc, emissivity) triple into radiation as a traced
+        # SegmentForcing (no recompile, AD-safe — mirrors the SST/SIC feedback).
+        # The emissivity carries the land tile's LAI-dependent eps_eff so the
+        # atmospheric LW boundary matches the emissivity the land used to form
+        # its conservative LW_out.
         self._last_sfc_response = sfc_response
+
+        from legoesm.forcing.surface_utils import (
+            surface_temperature_for_lw_boundary,
+        )
 
         def _get_sfc_override(day, _self=self):
             r = _self._last_sfc_response
             if r is None or getattr(r, "albedo", None) is None:
-                return None, None
-            return r.albedo, r.T_sfc
+                # Before the first coupler response, return NO override so the
+                # radiation keeps its OWN internal land/ocean/ice blend — a
+                # static ocean/ice seed here would run segment-zero land cells
+                # with ocean/ice radiative properties.  The resulting one-time
+                # seg0->seg1 None->array recompile is benign (one extra compile,
+                # not a per-segment retrace).
+                return None, None, None
+            _cons = getattr(
+                _self.config, "radiation", "gray") in ("rrtmgp", "rrtmg")
+            if not _cons:
+                # Gray/none emit as an idealized BLACK surface (eps = 1) and
+                # cannot honour the canopy's eps_col, so feed them a black-surface
+                # BRIGHTNESS temperature from the full upward flux
+                # (sigma*T_bb^4 = LW_out).  Feeding T_rad would emit
+                # sigma*T_rad^4 = LW_emit/eps_col and overstate canopy emission by
+                # ~1/eps_col.  No emissivity override (gray keeps eps = 1).  NOT
+                # the aerodynamic/sensible-heat T_sfc (the canopy air-space Tc).
+                T_bb = surface_temperature_for_lw_boundary(
+                    "gray", T_rad=getattr(r, "T_rad", r.T_sfc), lw_up=r.lw_up)
+                return r.albedo, T_bb, None
+            # RRTMGP/RRTMG: the tile-blended (albedo, T_rad, emissivity) flow in.
+            # T_rad (radiative-equivalent skin T) + dynamic eps_grid make the LW
+            # boundary eps*sigma*T^4 + (1-eps)*La reproduce the area-weighted sum
+            # of tile lw_up exactly for mixed land/ocean/ice cells.
+            return r.albedo, getattr(r, "T_rad", r.T_sfc), getattr(r, "emissivity", None)
 
         driver.get_sfc_override = _get_sfc_override
 

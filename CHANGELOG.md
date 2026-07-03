@@ -7,6 +7,20 @@ All notable changes to legoESM. Format roughly follows
 
 ### Atmosphere
 
+- **LES-informed compare-to-reanalysis correction**
+  (`legoesm.training.{compare_reanalysis,correction_loop,...}`,
+  `scripts/run/run_correction_campaign.py`,
+  `docs/compare_reanalysis_runbook.md`): an offline, differentiable loop that
+  runs AMIP/CMIP → time-means → compares to ERA5 → ranks the worst columns →
+  spins off a plane LES (all four grids) → diagnoses a `clubb_lite` closure
+  coefficient (C_K / Pr_t / C_eps, single or simultaneous) → re-runs keeping
+  only bias-improving rounds (monotonic gate). The corrected per-column field
+  deploys back into a fresh production run (runtime `turbulence_override`,
+  grid-fingerprint-verified) or, via the environment kernel, onto any grid by
+  environmental similarity. Distributed (MPAS) via a partition-invariant global
+  top-k reducer; a perfect-model OSSE gives a controlled go/no-go. Turnkey
+  operator path: setup/deploy preflights, a self-requeuing SLURM launcher, and
+  a verified, drift-guarded runbook. See `docs/COMPARE_REANALYSIS.md`.
 - **Single-column model (SCM)** (`legoesm.atmosphere.scm`,
   `scripts/run_scm_test_matrix.py`): dycore-free driver that reuses the full
   physics factory. Includes a swap-matrix sweep crossing every

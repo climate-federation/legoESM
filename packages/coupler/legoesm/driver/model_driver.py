@@ -35,6 +35,7 @@ from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.physics_pipeline import (
     build_physics_pipeline,
     required_microphysics_tracer_slots,
+    turbulence_config_for,
     validate_microphysics_tracer_slots,
 )
 from legoesm.driver.diagnostics import DiagnosticCollector
@@ -137,6 +138,17 @@ class ModelDriver:
             context="ModelDriver tracer registry",
         )
         self.get_sst_sic = None
+        # Seasonal insolation offset (days): align model day 0 to
+        # config.insolation_start_doy for the radiation day_of_year ONLY, so an
+        # AMIP run from a non-January ERA5 date can run the matching solar season
+        # without shifting start_day (which the relative-indexed SST forcing
+        # depends on). None => 0.0 => legacy (day 0 -> Jan 1). Static Python
+        # float: the calendar is computed host-side per step, so this is a
+        # constant, never a traced leaf. See config.insolation_start_doy.
+        _insol_doy = getattr(config, "insolation_start_doy", None)
+        self._insolation_day_offset: float = (
+            0.0 if _insol_doy is None else float(_insol_doy) - 1.0
+        )
         # Optional per-segment surface-property feedback hook.  A coupled
         # driver sets this to a callable ``day -> (sfc_albedo, sfc_T)`` (each
         # grid-shaped or None) returning the coupler's tile-blended dynamic
@@ -386,6 +398,52 @@ class ModelDriver:
         self._write_run_manifest()
         self._save_config()
         self._setup_parallel()
+
+    def static_topography_phis(self):
+        """The model's STATIC surface geopotential ``phis = g·z_s`` on the model
+        grid, built WITHOUT running the full :meth:`setup` — NO filesystem writes
+        (no output dir, run manifest, or ``experiment_config.json``).
+
+        Runs only the minimal construction chain ``validate_strict → runtime
+        bootstrap → grid → topography`` needed to populate the topography field;
+        it does NOT build the dycore, state, physics, or parallel halos.  This
+        exposes the model's OWN orographic field cheaply — e.g. as the CONSISTENT
+        ``phis`` source for the orographic LES-forcing term — so a launch-time
+        probe need not write a phantom run directory.
+
+        Idempotent: returns the already-built field if :meth:`setup` (or a prior
+        call) ran.  A flat model yields ``jnp.zeros(grid_shape_2d)`` (the caller
+        decides whether all-zero means "no orography").
+
+        NOTE: not purely side-effect-free — ``_bootstrap_runtime`` sets the global
+        precision/runtime singleton (the same one the subsequent run uses), so the
+        probe MUST be built from the SAME config that drives the run.
+        """
+        if self._phis_data is None:
+            self.config.validate_strict()
+            self._bootstrap_runtime()
+            self._create_grid()
+            self._create_topography()
+        return self._phis_data
+
+    def static_land_fraction(self):
+        """The model's STATIC land fraction on the model grid, built WITHOUT the full
+        :meth:`setup` — the same minimal construction chain as
+        :meth:`static_topography_phis` (``_create_topography`` populates BOTH ``phis``
+        and ``f_land`` in every branch: flat → zeros, idealised → from topography, real
+        → loaded, ``land_mask_path`` → from file).
+
+        Exposes the model's OWN land/sea distribution cheaply so a launch-time probe can
+        build an OCEAN-only ranking mask (:func:`legoesm.training.compare_reanalysis.
+        ocean_valid_mask`) WITHOUT writing a phantom run directory.  Grid-shaped — flatten
+        ROW-MAJOR to the worst-column column order.  An aquaplanet/flat model yields an
+        all-zero field (all ocean).  Same runtime-singleton caveat as
+        :meth:`static_topography_phis` (build from the SAME config that drives the run).
+        """
+        # static_topography_phis runs the chain that sets BOTH _phis_data and _f_land,
+        # guarded on _phis_data; after it returns, _f_land is populated too.
+        self.static_topography_phis()
+        return self._f_land
 
     def _create_grid(self) -> None:
         """Create horizontal grid and vertical coordinate."""
@@ -3390,47 +3448,15 @@ class ModelDriver:
                     f"spectral checkpoint not found (or is a directory): "
                     f"{path}"
                 )
-            import jax.numpy as jnp
-            from legoesm.core.field import Field
-            d = np.load(path)
-            if "spectral_layout" not in d:
-                raise ValueError(
-                    f"{path} is not a spectral checkpoint (missing the "
-                    "spectral_layout marker) — it cannot restore a "
-                    "discretization='spectral' run."
-                )
-            s = self.state
-            new_fields = {}
-            for _name in ("vor_hat", "div_hat", "T_hat", "lnps_hat",
-                          "phis_hat"):
-                _cur = getattr(s, _name)
-                _arr = d[_name]
-                if _arr.shape != _cur.data.shape:
-                    raise ValueError(
-                        f"spectral checkpoint {_name} shape {_arr.shape} "
-                        f"!= configured state {_cur.data.shape} "
-                        f"(resolution/nlev mismatch): {path}"
-                    )
-                new_fields[_name] = _cur.replace(data=jnp.asarray(_arr))
-            tracers = None
-            if "tracer_names" in d:
-                if s.tracers is None:
-                    raise ValueError(
-                        f"spectral checkpoint {path} carries tracers "
-                        f"{[str(n) for n in d['tracer_names']]} but the "
-                        "configured run has none — refusing to silently "
-                        "drop water."
-                    )
-                tracers = {}
-                for _k in (str(n) for n in d["tracer_names"]):
-                    _cur_t = s.tracers[_k]
-                    tracers[_k] = _cur_t.replace(
-                        data=jnp.asarray(d[f"trc_{_k}"]))
-            elif s.tracers is not None:
-                tracers = s.tracers
-            self.state = s._replace(tracers=tracers, **new_fields)
-            step = int(d["step"])
-            day = float(d["day"])
+            from legoesm.atmosphere.dynamics.spectral_pe import (
+                reconstruct_spectral_state_from_npz,
+            )
+            # Shared reconstruction (template=self.state ⇒ reuse the configured Field
+            # metadata + validate shapes + refuse to drop water); the standalone
+            # ``load_restart`` uses the SAME helper with template=None (iter 92).
+            with np.load(path) as d:
+                self.state, step, day = reconstruct_spectral_state_from_npz(
+                    d, template=self.state)
             logger.info(
                 f"  Loaded spectral checkpoint: step={step}, day={day:.2f}")
             self._loaded_checkpoint_step_day = (step, day)
@@ -3781,6 +3807,27 @@ class ModelDriver:
         cwv = (g_sum_cwv / g_n_cells) if cwv_field is not None else float("nan")
         return mean_T, mean_ps, g_max_u, g_T_min, g_T_max, g_finite, cwv
 
+    def _insolation_day(self, day):
+        """Model ``day`` shifted by the static seasonal insolation offset
+        (``_insolation_day_offset``, from ``config.insolation_start_doy``). The
+        ONE place the offset is applied, consumed by BOTH insolation mechanisms:
+        the ``day_to_calendar`` day_of_year (rrtmgp/forcing-dict path, via
+        :meth:`_calendar_for_radiation`) AND the gray-radiation
+        ``daily_mean_insolation`` solar declination. Decoupled from the
+        relative-indexed SST forcing (which keeps the un-shifted ``day``).
+        Offset 0.0 (``insolation_start_doy is None``) => identical to ``day``.
+        """
+        return day + self._insolation_day_offset
+
+    def _calendar_for_radiation(self, day):
+        """``day_to_calendar`` for the radiation insolation day_of_year/seconds,
+        applying the seasonal offset (:meth:`_insolation_day`). The integer-day
+        offset (the whole-day-of-year case) shifts ``day_of_year`` while leaving
+        ``seconds_of_day`` (the diurnal phase) unchanged; offset 0.0 =>
+        byte-identical to ``day_to_calendar(day)``.
+        """
+        return day_to_calendar(self._insolation_day(day))
+
     def _run_mpas(self, start_step: int = 0, start_day: float | None = None) -> str:
         """Run MPAS model with the unified physics pipeline.
 
@@ -3933,7 +3980,7 @@ class ModelDriver:
                 ozone=OzoneProfileConfig(source=cfg.ozone_source),
             ),
             convection=ConvectionConfig(scheme=cfg.convection),
-            turbulence=TurbulenceConfig(scheme=cfg.turbulence),
+            turbulence=turbulence_config_for(cfg),
             microphysics=_micro_cfg,
             gravity_wave_drag=GravityWaveDragConfig(scheme=cfg.gravity_wave_drag),
         )
@@ -4357,10 +4404,7 @@ class ModelDriver:
             )
 
         _forcing_daily: dict = {}
-        from legoesm.forcing.time_utils import (
-            daily_forcing_bucket,
-            day_to_calendar,
-        )
+        from legoesm.forcing.time_utils import daily_forcing_bucket
         for step in range(n_steps_total):
             if _sst_forcing or _ext_forcing:
                 _force_day = START_DAY + step * DT / 86400.0
@@ -4411,7 +4455,7 @@ class ModelDriver:
                 # whole run would see the insolation of the initial day —
                 # no seasonal or diurnal cycle.  Scalars only; the heavier
                 # daily fields above are reused between updates.
-                _doy, _sod = day_to_calendar(_force_day)
+                _doy, _sod = self._calendar_for_radiation(_force_day)
                 _forcing = dict(_forcing_daily)
                 _forcing["day_of_year"] = jnp.asarray(_doy)
                 _forcing["seconds_of_day"] = jnp.asarray(_sod)
@@ -4753,8 +4797,9 @@ class ModelDriver:
             if forcing_data is not None and "insol" in forcing_data:
                 insol = forcing_data["insol"]
             else:
-                insol = daily_mean_insolation(lat_col, current_day, S_0,
-                                              orbit=_orbit_params)
+                insol = daily_mean_insolation(
+                    lat_col, self._insolation_day(current_day), S_0,
+                    orbit=_orbit_params)
             rad_out = gray_radiation(
                 T=T_col, p_full=p_full_col, p_half=p_half_col,
                 sfc_temperature=T_sfc_col, lat=lat_col,
@@ -4824,9 +4869,6 @@ class ModelDriver:
             from legoesm.atmosphere.physics.convection.config import (
                 ConvectionConfig,
             )
-            from legoesm.atmosphere.physics.turbulence.config import (
-                TurbulenceConfig,
-            )
             from legoesm.atmosphere.physics.microphysics.config import (
                 MicrophysicsConfig,
             )
@@ -4867,7 +4909,7 @@ class ModelDriver:
                     ozone=OzoneProfileConfig(source=cfg.ozone_source),
                 ),
                 convection=ConvectionConfig(scheme=cfg.convection),
-                turbulence=TurbulenceConfig(scheme=cfg.turbulence),
+                turbulence=turbulence_config_for(cfg),
                 microphysics=MicrophysicsConfig(scheme=cfg.microphysics),
                 gravity_wave_drag=GravityWaveDragConfig(
                     scheme=cfg.gravity_wave_drag),
@@ -4932,8 +4974,6 @@ class ModelDriver:
         t_start = time.time()
         _ext_daily: dict = {}
         _last_ext_day = None
-        if _full_physics:
-            from legoesm.forcing.time_utils import day_to_calendar
         for step in range(start_step, n_steps_total):
             self._current_day = START_DAY + (step + 1) * DT / 86400.0
 
@@ -4969,7 +5009,7 @@ class ModelDriver:
                             k: jnp.asarray(v) for k, v in _ghg.items()
                         }
                     _last_ext_day = _fd_int
-                _doy, _sod = day_to_calendar(self._current_day)
+                _doy, _sod = self._calendar_for_radiation(self._current_day)
                 forcing_data = {
                     "T_sfc": _T_sfc_step,
                     "day_of_year": jnp.asarray(_doy),
@@ -4979,9 +5019,9 @@ class ModelDriver:
             else:
                 # Legacy dry gray path: traced SST/SIC + daily-mean insol
                 sst_step, sic_step = self.get_sst_sic(self._current_day)
-                insol_step = daily_mean_insolation(_lat_col_loop,
-                                                   self._current_day, S_0,
-                                                   orbit=_orbit_params)
+                insol_step = daily_mean_insolation(
+                    _lat_col_loop, self._insolation_day(self._current_day), S_0,
+                    orbit=_orbit_params)
                 forcing_data = {
                     "day": jnp.asarray(self._current_day),
                     "sst": sst_step,
@@ -6075,7 +6115,7 @@ class ModelDriver:
             seg_steps = min(segment_length, n_steps_total - current_step)
             seg_end_step = current_step + seg_steps
             day = START_DAY + seg_end_step * DT / 86400.0
-            day_of_year, seconds_of_day = day_to_calendar(day)
+            day_of_year, seconds_of_day = self._calendar_for_radiation(day)
             sst, sic = self.get_sst_sic(day)
 
             # Re-sample time-varying external forcing at every segment
@@ -6118,9 +6158,10 @@ class ModelDriver:
 
             # Coupler-provided dynamic surface albedo / skin temperature for
             # this segment (None unless a coupled driver wired the feedback).
-            _sfc_albedo_ovr, _sfc_T_ovr = (None, None)
+            _sfc_albedo_ovr, _sfc_T_ovr, _sfc_emis_ovr = (None, None, None)
             if self.get_sfc_override is not None:
-                _sfc_albedo_ovr, _sfc_T_ovr = self.get_sfc_override(day)
+                _sfc_albedo_ovr, _sfc_T_ovr, _sfc_emis_ovr = \
+                    self.get_sfc_override(day)
 
             # Coupler-provided SHARED surface SH/LH fluxes for this segment
             # (None unless a coupled driver wired the shared-flux feedback).
@@ -6140,6 +6181,7 @@ class ModelDriver:
                 ghg_vmr=ghg_vmr,
                 sfc_albedo_override=_sfc_albedo_ovr,
                 sfc_T_override=_sfc_T_ovr,
+                sfc_emissivity_override=_sfc_emis_ovr,
                 sfc_shflx_override=_sfc_shflx_ovr,
                 sfc_lhflx_override=_sfc_lhflx_ovr,
             )
@@ -6662,7 +6704,7 @@ class ModelDriver:
         # --- JIT warmup ---
         t_jit_start = time.time()
         day = START_DAY + (start_step + 1) * DT / 86400.0
-        day_of_year, seconds_of_day = day_to_calendar(day)
+        day_of_year, seconds_of_day = self._calendar_for_radiation(day)
         sst, sic = self.get_sst_sic(day)
 
         # Warmup radiation cadence (FIX_RESTART_TIME iteration-2 codex
@@ -6819,7 +6861,7 @@ class ModelDriver:
 
         for step in range(start_step + 1, n_steps_total):
             day = START_DAY + (step + 1) * DT / 86400.0
-            day_of_year, seconds_of_day = day_to_calendar(day)
+            day_of_year, seconds_of_day = self._calendar_for_radiation(day)
 
             sst, sic = self.get_sst_sic(day)
 

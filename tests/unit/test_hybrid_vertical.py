@@ -33,6 +33,7 @@ from legoesm.grids.vertical import (
     compute_geopotential_hybrid,
     compute_sigma_dot,
     compute_mass_flux_hybrid,
+    compute_mass_flux_from_cumsum,
     vertical_advection,
     vertical_advection_hybrid,
     compute_pressure_velocity,
@@ -264,6 +265,66 @@ class TestHybridMassFlux:
         # mass_flux = p_s * sigma_dot for pure sigma
         expected = p_s[..., None] * sigma_dot
         np.testing.assert_allclose(mass_flux, expected, rtol=1e-3, atol=1e-5)
+
+
+class TestMassFluxFromCumsum:
+    """Direct tests for the factored-out hybrid mass-flux boundary closure."""
+
+    def test_matches_compute_mass_flux_hybrid_bit_for_bit(self):
+        """compute_mass_flux_hybrid == manual cumsum + the shared closure (the dedup)."""
+        coord = make_hybrid_levels(NLEV)
+        key = jax.random.PRNGKey(7)
+        div = jax.random.normal(key, (6, 4, 4, NLEV)) * 1e-5
+        p_s = jnp.full((6, 4, 4), P_REF)
+        F_ref, _ = compute_mass_flux_hybrid(div, p_s, coord)
+        # Rebuild via the public helper from the SAME advective div_dp.
+        dp = dp_from_hybrid(coord, p_s)
+        cumsum_div = jnp.cumsum(div * dp, axis=-1)
+        F_helper = compute_mass_flux_from_cumsum(
+            cumsum_div, cumsum_div[..., -1:], coord)
+        # The refactor must be byte-identical, not merely close.
+        np.testing.assert_array_equal(np.asarray(F_helper), np.asarray(F_ref))
+
+    def test_boundary_conditions(self):
+        """F = 0 at top + surface for any cumsum; shape is nlev+1."""
+        coord = make_hybrid_levels(NLEV)
+        cumsum_div = jnp.cumsum(jnp.ones((6, 4, 4, NLEV)) * 1e-5, axis=-1)
+        F = compute_mass_flux_from_cumsum(cumsum_div, cumsum_div[..., -1:], coord)
+        assert F.shape == (6, 4, 4, NLEV + 1)
+        np.testing.assert_allclose(F[..., 0], 0.0, atol=1e-20)
+        np.testing.assert_allclose(F[..., -1], 0.0, atol=1e-10)
+
+    def test_caller_chooses_div_convention(self):
+        """The closure is pure over its cumsum: a flux-form cumsum that differs
+        from the advective one (grad(p_s) != 0) yields a different, valid flux."""
+        coord = make_hybrid_levels(NLEV)
+        key = jax.random.PRNGKey(11)
+        cumsum_adv = jnp.cumsum(jax.random.normal(key, (5, NLEV)) * 1e-5, axis=-1)
+        # A distinct "flux-form" cumsum (the v*grad(dp) term shifts it).
+        cumsum_flux = cumsum_adv + 1e-6 * jnp.arange(NLEV)
+        F_adv = compute_mass_flux_from_cumsum(cumsum_adv, cumsum_adv[..., -1:], coord)
+        F_flux = compute_mass_flux_from_cumsum(cumsum_flux, cumsum_flux[..., -1:], coord)
+        assert not np.allclose(np.asarray(F_adv), np.asarray(F_flux))
+        for F in (F_adv, F_flux):  # both still satisfy the boundaries
+            np.testing.assert_allclose(np.asarray(F)[..., 0], 0.0, atol=1e-20)
+            np.testing.assert_allclose(np.asarray(F)[..., -1], 0.0, atol=1e-10)
+
+    def test_differentiable_and_vmappable(self):
+        """Pure-JAX: jit+grad through the closure and vmap over leading dims."""
+        coord = make_hybrid_levels(NLEV)
+        cumsum_div = jnp.cumsum(jnp.ones((3, NLEV)) * 1e-5, axis=-1)
+
+        def _scalar(c):
+            F = compute_mass_flux_from_cumsum(c, c[..., -1:], coord)
+            return jnp.sum(F ** 2)
+
+        g = jax.jit(jax.grad(_scalar))(cumsum_div)
+        assert g.shape == cumsum_div.shape
+        assert np.all(np.isfinite(np.asarray(g)))
+        F_vmap = jax.vmap(
+            lambda c: compute_mass_flux_from_cumsum(c, c[..., -1:], coord)
+        )(cumsum_div)
+        assert F_vmap.shape == (3, NLEV + 1)
 
 
 class TestHybridVerticalAdvection:

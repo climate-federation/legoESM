@@ -1,0 +1,307 @@
+"""Host-side builders: ``GlobalSurfaceData`` -> per-column land-model inputs.
+
+This is the consumer-side counterpart to the producer in
+:mod:`legoesm.land.surface_data`.  Turns a regridded
+:class:`~legoesm.land.global_surface_data.GlobalSurfaceData` (NetCDF read +
+regridded to the model grid at simulation start) into the per-column arrays
+the multilayer-land + two-leaf-canopy model consumes for a global run:
+
+  - :func:`build_canopy_params` -> :class:`CanopyLandParams` (LAI, canopy height,
+    soil-colour background albedo, PFT photosynthesis/aerodynamic params, C4
+    flag), one value per column from the **dominant PFT**;
+  - :func:`build_soil_hydraulics` -> a per-(col, layer) :class:`SoilHydraulicsConfig`
+    (Cosby pedotransfer from the surfdata's depth-remapped sand/clay profile),
+    with a per-cell fallback texture where HWSD has no soil (sand seas / ice);
+  - :func:`surface_data_param_provider` -> a differentiable
+    :class:`SurfaceDataParamProvider` wrapping the existing
+    :class:`PFTParamProvider` for the SimpleSEB / slab path.
+
+The simulation-start entry is :func:`init_land_surface_data`, which loads
+the surfdata, regrids it to the model grid, attaches the texture-derived
+hydraulics to a multilayer config, and returns the per-scheme land_params.
+
+The canopy PFT tables (:data:`PFT_VCMAX25_C3` etc.) are keyed by biome type
+(ENF/EBF/.../GRA/CRO) with three climate-zone columns ordered
+``[boreal, temperate, tropical]``; CLM5's 17 PFTs carry the climate zone in the
+name, so ``_CLM5_TO_BIOME`` in :mod:`._internals` maps each CLM5 PFT to
+``(biome, zone_index, is_c4)``.  Host-side; not traced.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import jax
+import jax.numpy as jnp
+import equinox as eqx
+
+from legoesm.land.surface_params import LandSurfaceParams
+from legoesm.land.param_providers import PFTParamProvider
+from legoesm.land.canopy.config import CanopyLandParams
+from legoesm.land.soil_albedo import soil_albedo, soil_albedo_broadband
+from legoesm.land.pedotransfer import cosby_hydraulic_params
+from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
+from legoesm.land.global_surface_data import interp_monthly
+
+from legoesm.land.boundary_data._internals import (
+    _CI_DEFAULT, _KN_DEFAULT, _ALF_DEFAULT,
+    _M_C3, _M_C4, _B0_C3, _B0_C4,
+    _TGC_DEFAULT_C, _HC_MIN_M,
+    _EMISS_VEG, _RZ0M_BARE,
+    _GLACIER_ALB_VIS, _GLACIER_ALB_NIR, _GLACIER_ALBEDO_DEFAULT,
+    _FALLBACK_SAND_PCT, _FALLBACK_CLAY_PCT,
+    _THETA_TOP_DEFAULT,
+    _pft_lookup_arrays,
+    _cover1d,
+)
+
+
+# ===========================================================================
+# Coverage / mask inspectors
+# ===========================================================================
+def dominant_pft_index(gsd) -> np.ndarray:
+    """Dominant PFT index per column from the (year-mean) ``pft_frac``."""
+    mean_frac = np.asarray(jnp.mean(gsd.pft_frac, axis=0))   # (ncol, npft)
+    return np.argmax(mean_frac, axis=-1)                     # (ncol,)
+
+
+def glacier_mask(gsd) -> np.ndarray:
+    """Boolean ``(ncol,)``: columns where glacier is the dominant surface type.
+
+    Greenland / Antarctica / mountain ice: ``f_glacier`` exceeds both the
+    soil/veg (``f_land``) and lake fractions.  These are treated as ice surfaces
+    (no vegetation, high albedo), not bare soil.
+    """
+    f_g = _cover1d(gsd.f_glacier)
+    return (f_g > _cover1d(gsd.f_land)) & (f_g > _cover1d(gsd.f_lake)) & (f_g > 0.0)
+
+
+# ===========================================================================
+# Canopy path: GlobalSurfaceData -> CanopyLandParams
+# ===========================================================================
+def build_canopy_params(
+    gsd,
+    day_of_year: float,
+    theta_top: jnp.ndarray,
+    *,
+    tgc_C: float = _TGC_DEFAULT_C,
+    glacier_alb_vis: float = _GLACIER_ALB_VIS,
+    glacier_alb_nir: float = _GLACIER_ALB_NIR,
+) -> CanopyLandParams:
+    """Per-column :class:`CanopyLandParams` from surface data at ``day_of_year``.
+
+    ``theta_top`` (ncol,) is the top-layer volumetric water content (for the
+    moisture-dependent soil background albedo).  Vegetation structure (LAI,
+    canopy height) is the dominant PFT's value; photosynthesis/aerodynamic params
+    come from the PFT biome tables; ``ALB_VIS``/``ALB_NIR`` are the soil-colour
+    background albedo.
+
+    Glacier-dominant columns (:func:`glacier_mask`) are set to a bare **ice
+    surface**: no vegetation (LAI=0, FNonVeg=1) and a high snow/ice albedo
+    (``glacier_alb_vis``/``glacier_alb_nir``) instead of the soil background.
+    """
+    dom = dominant_pft_index(gsd)                            # (ncol,)
+    ncol = dom.shape[0]
+    lut = _pft_lookup_arrays()
+
+    # LAI / canopy height of the dominant PFT at this day-of-year.
+    lai_m = np.asarray(interp_monthly(gsd.lai_monthly, jnp.asarray(float(day_of_year))))
+    htop_m = np.asarray(interp_monthly(gsd.htop_monthly, jnp.asarray(float(day_of_year))))
+    cols = np.arange(ncol)
+    LAI = lai_m[cols, dom]
+    hc_surf = htop_m[cols, dom]
+    hc_default = lut["hc"][dom]
+    hc = np.where(np.isfinite(hc_surf) & (hc_surf > 0.0), hc_surf, hc_default)
+
+    is_veg = lut["is_veg"][dom]
+    LAI = np.where(is_veg > 0.0, np.nan_to_num(LAI, nan=0.0), 0.0)
+
+    _av, _an = soil_albedo(jnp.asarray(np.asarray(gsd.soil_color)), jnp.asarray(theta_top))
+    alb_vis, alb_nir = np.asarray(_av), np.asarray(_an)
+
+    # Glacier columns: ice surface — no vegetation, high snow/ice albedo.
+    ice = glacier_mask(gsd)
+    is_veg = np.where(ice, 0.0, is_veg)
+    LAI = np.where(ice, 0.0, LAI)
+    alb_vis = np.where(ice, glacier_alb_vis, alb_vis)
+    alb_nir = np.where(ice, glacier_alb_nir, alb_nir)
+
+    full = lambda v: jnp.full(ncol, v)
+    return CanopyLandParams(
+        LAI=jnp.asarray(LAI),
+        hc=jnp.asarray(np.maximum(hc, _HC_MIN_M)),
+        fC4=jnp.asarray(lut["fc4"][dom]),
+        FNonVeg=jnp.asarray(1.0 - is_veg),       # bare-dominant columns -> non-veg
+        CI=full(_CI_DEFAULT), kn=full(_KN_DEFAULT),
+        Vcmax25_C3_leaf=jnp.asarray(lut["vc3"][dom]),
+        Vcmax25_C4_leaf=jnp.asarray(lut["vc4"][dom]),
+        m_C3=full(_M_C3), m_C4=full(_M_C4), b0_C3=full(_B0_C3), b0_C4=full(_B0_C4),
+        alf=full(_ALF_DEFAULT), TgC=full(float(tgc_C)),
+        ALB_VIS=jnp.asarray(alb_vis), ALB_NIR=jnp.asarray(alb_nir),
+        emissivity=full(_EMISS_VEG),
+        rz0m=jnp.asarray(np.where(is_veg > 0.0, lut["rz0m"][dom], _RZ0M_BARE)),
+        rd=jnp.asarray(np.where(is_veg > 0.0, lut["rd"][dom], 0.0)),
+    )
+
+
+# ===========================================================================
+# Soil hydraulics: per-(col, layer) Clapp-Hornberger via Cosby pedotransfer
+# ===========================================================================
+def build_soil_hydraulics(
+    gsd,
+    *,
+    fallback_sand_pct: float = _FALLBACK_SAND_PCT,   # sand where HWSD has no soil
+    fallback_clay_pct: float = _FALLBACK_CLAY_PCT,
+    base: SoilHydraulicsConfig = SoilHydraulicsConfig(),
+) -> SoilHydraulicsConfig:
+    """Per-(col, layer) Clapp-Hornberger :class:`SoilHydraulicsConfig` (Cosby).
+
+    Runs the Cosby (1984) pedotransfer per (col, layer) using the surfdata
+    texture profile, which the loader already remapped to the model's
+    :class:`SoilGrid` via :func:`_remap_soil_layers`.  Hydraulic params come
+    back as ``(ncol, n_layer)`` arrays that align cell-for-cell with the
+    Richards solver's soil state — ``slice_layer`` picks the right layer for
+    single-layer call sites (``K_top`` / ``K_bot``).  Any (col, layer) where
+    HWSD has no soil (NaN) falls back to ``fallback_*`` (a sandy default) in
+    just that cell, so a column with partial coverage keeps its real layers.
+    """
+    sand = np.asarray(gsd.sand_frac) * 100.0                 # (ncol, n_layer) percent
+    clay = np.asarray(gsd.clay_frac) * 100.0
+    bad = ~np.isfinite(sand) | ~np.isfinite(clay)
+    sand = np.where(bad, fallback_sand_pct, sand)
+    clay = np.where(bad, fallback_clay_pct, clay)
+
+    p = cosby_hydraulic_params(jnp.asarray(sand), jnp.asarray(clay))  # (ncol, n_layer)
+    return base._replace(
+        retention_curve="clapp_hornberger",
+        theta_sat=jnp.asarray(p.theta_sat), psi_sat=jnp.asarray(p.psi_sat),
+        b_ch=jnp.asarray(p.b_ch), K_sat=jnp.asarray(p.K_sat), theta_r=0.0,
+    )
+
+
+# ===========================================================================
+# SEB / slab path: GlobalSurfaceData -> SurfaceDataParamProvider -> LandSurfaceParams
+# ===========================================================================
+# The SLAB / multilayer-SimpleSEB schemes consume a ``LandSurfaceParams``
+# produced through the land/dev *param-provider* architecture
+# (``legoesm.land.param_providers``), NOT a bespoke adapter.  The surface-data
+# path is a thin provider that COMPOSES the existing differentiable
+# ``PFTParamProvider`` (CLM5 table weighted by surfdata PFT fractions; the table
+# stays trainable) and overrides only ``albedo_veg`` with the surfdata-derived
+# value (soil-colour background blended with the PFT veg albedo, glacier ice).
+
+
+class SurfaceDataParamProvider(eqx.Module):
+    """``LandSurfaceParams`` provider backed by regridded surface data.
+
+    Wraps a :class:`~legoesm.land.param_providers.PFTParamProvider` (so the CLM5
+    parameter table remains trainable and gradients flow exactly as for the
+    prescribed-PFT path) and applies a surfdata ``albedo_veg`` override:
+    the soil-colour background blended with the PFT veg albedo by canopy cover
+    ``1-exp(-0.5*LAI)``, with glacier-dominant columns set to ice albedo.
+
+    Observational arrays (``soil_bg``, ``f_veg``, ``is_glacier``) are
+    ``stop_gradient``-ed in ``__call__`` — they are boundary data, not knobs —
+    mirroring how ``PFTParamProvider`` treats ``pft_fractions``.  ``__call__``
+    accepts an optional ``features`` arg (ignored) so it is drop-in compatible
+    with the coupler's ``land_param_provider(features)`` call site.
+    """
+    pft_provider: PFTParamProvider
+    soil_bg: jax.Array              # (ncol,) broadband soil-colour albedo
+    f_veg: jax.Array               # (ncol,) canopy cover fraction 1-exp(-0.5*LAI)
+    is_glacier: jax.Array          # (ncol,) 1.0 where glacier-dominant
+    glacier_albedo: float = eqx.field(static=True)
+
+    def __call__(self, features=None) -> LandSurfaceParams:
+        lp = self.pft_provider()
+        soil_bg = jax.lax.stop_gradient(self.soil_bg)
+        f_veg = jax.lax.stop_gradient(self.f_veg)
+        is_glacier = jax.lax.stop_gradient(self.is_glacier)
+        alb = lp.albedo_veg * f_veg + soil_bg * (1.0 - f_veg)
+        alb = jnp.where(is_glacier > 0.0, self.glacier_albedo, alb)
+        return lp._replace(albedo_veg=alb)
+
+
+def surface_data_param_provider(
+    gsd,
+    day_of_year: float,
+    theta_top: jnp.ndarray,
+    *,
+    glacier_albedo: float = _GLACIER_ALBEDO_DEFAULT,
+) -> SurfaceDataParamProvider:
+    """Build a :class:`SurfaceDataParamProvider` from regridded surface data.
+
+    PFT weights are the (year-mean) ``pft_frac`` (uncovered columns -> zero; the
+    mask-reconciliation pass :func:`fill_land_param_gaps` handles them).  The
+    canopy-cover LAI for the albedo blend is the PFT-weighted column LAI, so it is
+    consistent with the PFT-weighted parameters.
+    """
+    fracs = np.nan_to_num(np.asarray(jnp.mean(gsd.pft_frac, axis=0)), nan=0.0)  # (ncol,npft)
+    # Zero-cover columns (no PFT info: ocean/ice/desert gaps) -> bare soil (PFT 0),
+    # matching the dominant-PFT fallback (argmax of all-zeros = bare_soil) so they
+    # get the valid bare-soil table row (nonzero C_soil/W_max) instead of an
+    # all-zero ``fracs @ table`` row that would divide-by-zero in the surface step.
+    zero_cover = fracs.sum(axis=-1) < 1e-6
+    fracs[zero_cover, :] = 0.0
+    fracs[zero_cover, 0] = 1.0
+    pft_provider = PFTParamProvider.from_defaults(jnp.asarray(fracs))
+
+    lai_m = np.asarray(interp_monthly(gsd.lai_monthly, jnp.asarray(float(day_of_year))))
+    lai_col = np.nan_to_num(np.sum(lai_m * fracs, axis=-1), nan=0.0)            # (ncol,)
+    soil_bg = np.asarray(
+        soil_albedo_broadband(jnp.asarray(np.asarray(gsd.soil_color)), jnp.asarray(theta_top)))
+    f_veg = 1.0 - np.exp(-0.5 * lai_col)
+    return SurfaceDataParamProvider(
+        pft_provider=pft_provider,
+        soil_bg=jnp.asarray(soil_bg),
+        f_veg=jnp.asarray(f_veg),
+        is_glacier=jnp.asarray(glacier_mask(gsd).astype(float)),
+        glacier_albedo=float(glacier_albedo),
+    )
+
+
+# ===========================================================================
+# Scheme-agnostic dispatcher + simulation-start entry
+# ===========================================================================
+def surface_data_to_land_params(gsd, surface_scheme, day_of_year, theta_top):
+    """Dispatch to the right per-column land-params object for ``surface_scheme``.
+
+    ``TwoLeafCanopyConfig`` -> :class:`CanopyLandParams` (built directly — land/dev
+    has no canopy provider).  ``SimpleSEBConfig`` (slab or multilayer) ->
+    :class:`LandSurfaceParams` materialized from :class:`SurfaceDataParamProvider`.
+    For coupler use, prefer :func:`surface_data_param_provider` and pass the
+    provider to ``make_coupler(land_param_provider=...)``.  (clm-ml is an external
+    plugin with its own input contract; feed it ``gsd`` directly.)
+    """
+    from legoesm.land.canopy import CanopyConfig
+    if isinstance(surface_scheme, CanopyConfig):
+        return build_canopy_params(gsd, day_of_year, theta_top)
+    return surface_data_param_provider(gsd, day_of_year, theta_top)()
+
+
+def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *, theta_top=None):
+    """Load the surfdata, regrid to ``grid``, and adapt to ``land_config``'s scheme.
+
+    The single entry a driver calls at simulation start.  Returns
+    ``(land_config, land_params, gsd)``: for a multilayer config the returned
+    config also carries the per-(col, layer) Cosby soil hydraulics derived from
+    the surfdata via :func:`build_soil_hydraulics` (params are ``(ncol, n_layer)``
+    arrays that align with the model's soil state cell-for-cell).
+    ``theta_top`` (top-layer wetness for the soil-colour albedo) defaults to a
+    nominal 0.2 when no state exists yet.
+    """
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.global_surface_data import get_surfdata_preset, load_global_surface_data
+
+    cfg_sd = get_surfdata_preset("legoesm_surfdata")._replace(surf_path=surfdata_path)
+    gsd = load_global_surface_data(cfg_sd, grid)
+    ncol = int(np.asarray(gsd.soil_color).shape[0])
+    if theta_top is None:
+        theta_top = jnp.full(ncol, _THETA_TOP_DEFAULT)
+
+    if isinstance(land_config, MultiLayerLandConfig):
+        land_config = land_config._replace(
+            hydraulics=build_soil_hydraulics(gsd, base=land_config.hydraulics))
+
+    land_params = surface_data_to_land_params(
+        gsd, land_config.surface_scheme, day_of_year, theta_top)
+    return land_config, land_params, gsd
