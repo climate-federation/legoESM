@@ -153,8 +153,16 @@ def _pbs_headers(machine: dict) -> str:
     """Emit PBS directive block from a machine profile.  NEVER emits `#PBS -A`
     (project account) — the user supplies that on the qsub line so run.sh stays
     portable across projects/users."""
-    if machine.get("scheduler") != "pbs":
+    # Dispatch hardening: only an explicit 'local' (or absent) scheduler means
+    # "no directives".  An unrecognized scheduler (typo, 'slurm', 'PBS') must
+    # RAISE — otherwise it silently emits a header-less run.sh that the user
+    # submits to run inline on the login node.
+    sched = machine.get("scheduler", "local")
+    if sched in ("local", "", None):
         return ""
+    if sched != "pbs":
+        raise ValueError(
+            f"unknown machine scheduler {sched!r} (expected 'pbs' or 'local')")
     p = machine.get("pbs", {})
     lines = ["# --- PBS directives (submit with `qsub -A <ACCT> run.sh`) ---"]
     for key, flag in (("job_name", "-N"), ("queue", "-q"), ("join", "-j")):

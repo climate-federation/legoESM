@@ -36,6 +36,19 @@ def _run_init(argv):
         _sys.argv = saved
 
 
+def test_pbs_headers_raises_on_unknown_scheduler():
+    # 'local'/absent -> no directives; a typo or unsupported scheduler must RAISE
+    # rather than emit a header-less run.sh the user submits to run on the login
+    # node (dispatch hardening).
+    mod = _load_init()
+    assert mod._pbs_headers({}) == ""                        # absent -> local
+    assert mod._pbs_headers({"scheduler": "local"}) == ""
+    with pytest.raises(ValueError, match="scheduler"):
+        mod._pbs_headers({"scheduler": "slurm"})
+    with pytest.raises(ValueError, match="scheduler"):
+        mod._pbs_headers({"scheduler": "PBS"})               # case typo != 'pbs'
+
+
 def test_init_creates_expected_files(tmp_path):
     sd = _write_smoke_surfdata(tmp_path)
     out = tmp_path / "expt"

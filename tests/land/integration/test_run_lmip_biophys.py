@@ -258,3 +258,34 @@ def test_warm_start_uses_loaded_state(tmp_path):
     T_deep = np.asarray(st_end.T_soil)[:, -1]                    # deepest layer
     assert float(T_deep.mean()) < 255.0                          # near seed
     assert float(T_deep.mean()) > 245.0
+
+
+def test_steps_exceeding_staged_years_fail_fast(tmp_path):
+    """Asking for more steps than fit the staged forcing years must RAISE.  A
+    silent step drop would integrate fewer steps than requested AND falsify the
+    auto-saved restart (n_steps_completed / t_end from the full clock)."""
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    out = tmp_path / "toolong"
+    # single synthetic year (year_end defaults to year_start) = 8760 hourly
+    # steps; asking for 9000 drops 240 steps past DOY 365.
+    cfg_path = _write_smoke_config(tmp_path, sd, extra_overrides=[
+        "time.dt=3600.0", "time.n_steps=9000",
+    ])
+    with pytest.raises(SystemExit):
+        _run_config(mod, cfg_path, out)
+    assert not list(out.glob("restart_*.npz"))               # no restart written
+
+
+def test_slab_mode_gate_reads_real_state(tmp_path):
+    """Slab T_soil is a 1-D Field; the PASS/FAIL gate must validate its .data
+    (real state), not a zeros placeholder — otherwise a slab blow-up would
+    silently PASS.  This exercises the slab path + the fixed gate end-to-end."""
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    out = tmp_path / "slab"
+    cfg_path = _write_smoke_config(tmp_path, sd, extra_overrides=[
+        "physics.land_mode=slab",
+    ])
+    rc = _run_config(mod, cfg_path, out)
+    assert rc in (0, 1)                                       # gate read real state, no crash

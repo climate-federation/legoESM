@@ -166,16 +166,29 @@ def run(args) -> int:
 
     # --- land config: SAME as run_lmip_smoke (carbon stays at its default
     #     "none"); --surface-scheme picks two-leaf canopy or SimpleSEB. ---
-    surf = (CanopyConfig(max_iters=50, tol=1e-2)
-            if args.surface_scheme == "two_leaf_canopy" else SimpleSEBConfig())
+    # Explicit dispatch — raise on an unknown selector rather than silently
+    # defaulting (dispatch hardening; validate_config also restricts these, so
+    # this is the defense that catches a NEW scheme wired in without touching
+    # the driver).
+    if args.surface_scheme == "two_leaf_canopy":
+        surf = CanopyConfig(max_iters=50, tol=1e-2)
+    elif args.surface_scheme == "simple_seb":
+        surf = SimpleSEBConfig()
+    else:
+        raise ValueError(
+            f"unknown surface_scheme {args.surface_scheme!r} "
+            "(expected 'two_leaf_canopy' or 'simple_seb')")
     if args.land_mode == "multilayer":
         base_cfg = MultiLayerLandConfig(
             surface_scheme=surf, soil_grid=SoilGridConfig(),
             bulk_scheme=args.bulk, snow_albedo_feedback=True)
         step_fn = step_multilayer_land
-    else:
+    elif args.land_mode == "slab":
         base_cfg = LandConfig(surface_scheme=surf)
         step_fn = step_land
+    else:
+        raise ValueError(
+            f"unknown land_mode {args.land_mode!r} (expected 'multilayer' or 'slab')")
     base_cfg = resolve_land_config(args.land_mode, base_cfg)
     is_multilayer = (args.land_mode == "multilayer")
 
@@ -348,6 +361,18 @@ def run(args) -> int:
     # Global slot indices — computed once, sliced per year.
     slot_idx_global = {name: t[0] for name, t in tape_slots.items()}
     total_steps = int(sum(m.sum() for _, m in year_masks))
+    # Every requested step MUST fall inside a staged forcing year.  A step whose
+    # time lands past the last year's window would be silently DROPPED (fewer
+    # steps integrated than asked), and the auto-saved restart still records
+    # n_steps_completed=n_steps / t_end from the FULL clock -> a chained warm
+    # start would resume at the wrong model time.  Fail fast instead.
+    if total_steps != int(args.n_steps):
+        raise SystemExit(
+            f"{int(args.n_steps) - total_steps} of {args.n_steps} model steps fall "
+            f"outside the forcing years [{year_start}, {year_end}] "
+            f"({total_steps} would be integrated).  Extend --year-end, or reduce "
+            f"--n-steps / --dt so the run fits the staged years "
+            f"(1 noleap year = {int(_SEC_PER_YEAR / dt)} steps at dt={dt:.0f}s).")
     print(f"stepping {total_steps} timestep(s) across {len(year_masks)} year chunk(s) "
           f"(lax.scan per year) ...")
 
@@ -383,7 +408,11 @@ def run(args) -> int:
     land = land_fraction >= args.land_frac_min
 
     # --- PASS/FAIL: final soil top-layer T must be finite over land. ---
-    T_final = np.asarray(state.T_soil[:, 0] if is_multilayer else _ZEROS).ravel()
+    # Multilayer T_soil is a raw (ncol, n_layers) array; slab T_soil is a 1-D
+    # Field (.data holds the (ncol,) array).  Validate the REAL slab state, not a
+    # zeros placeholder — otherwise a slab NaN blow-up would silently PASS.
+    T_final = np.asarray(
+        state.T_soil[:, 0] if is_multilayer else state.T_soil.data).ravel()
     nan_land = int(np.isnan(T_final[land]).sum())
     finite = np.all(np.isfinite(T_final[land]))
     status = "PASS" if (nan_land == 0 and finite) else "FAIL"

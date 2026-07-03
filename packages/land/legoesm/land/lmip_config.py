@@ -120,6 +120,19 @@ def validate_config(data: dict) -> LMIPConfig:
     forcing.setdefault("prefix", _DEFAULT_PREFIX)
     forcing.setdefault("suffix", "")
     forcing.setdefault("k_neighbors", 4)
+    # source must agree with data_dir: the driver decides real-vs-synthetic from
+    # data_dir non-emptiness, so a mismatch would silently run the OTHER forcing
+    # than declared (source='cru_jra' + empty data_dir -> silent synthetic).
+    _data_dir = str(forcing.get("data_dir") or "")
+    if forcing["source"] == "cru_jra" and not _data_dir:
+        raise ValueError(
+            "forcing.source='cru_jra' requires a non-empty forcing.data_dir "
+            "(the staged CRU-JRA directory); use source='synthetic' for a "
+            "no-data smoke run.")
+    if forcing["source"] == "synthetic" and _data_dir:
+        raise ValueError(
+            f"forcing.source='synthetic' must not set forcing.data_dir "
+            f"(got {_data_dir!r}); use source='cru_jra' to run real forcing.")
 
     req("surfdata", ("path",))
     surfdata = data["surfdata"]

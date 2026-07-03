@@ -103,3 +103,35 @@ def test_accumulate_inst_takes_last_value():
             {"v": jnp.full(ncol, val)})
     out = finalize_tape(carry, tape)
     np.testing.assert_allclose(out["v"][0], 30.0)                  # LAST value survives
+
+
+def test_slot_indices_no_phantom_leading_slots_at_nonzero_start():
+    # A run starting at DOY 196 must NOT emit ~196 leading zero-filled daily
+    # records: slots are rebased to the first occupied slot, and slot_times stay
+    # in the true year_start frame (first slot centred on DOY 196.5).
+    day = 86400.0
+    t = 196.0 * day + np.arange(0, 3 * day, 3600.0)     # 3 days hourly from DOY 196
+    slot_idx, n_slots, slot_times = build_slot_indices(t, "daily")
+    assert n_slots == 3                                  # 3 real days, not 199
+    assert int(np.asarray(slot_idx).min()) == 0          # rebased to slot 0
+    assert slot_times[0] / day == pytest.approx(196.5)   # true first-day time preserved
+
+
+def test_slot_indices_start_at_zero_unchanged():
+    # Backward-compat: a run starting at slot 0 is byte-identical to before.
+    day = 86400.0
+    t = np.arange(0, 2 * day, 3600.0)
+    slot_idx, n_slots, slot_times = build_slot_indices(t, "daily")
+    assert n_slots == 2
+    assert int(np.asarray(slot_idx).min()) == 0
+    assert slot_times[0] / day == pytest.approx(0.5)
+
+
+def test_slot_indices_monthly_nonzero_start_rebased():
+    # Monthly tape starting mid-year: first slot is the start month, not January.
+    day = 86400.0
+    t = 196.0 * day + np.arange(0, 40 * day, day)        # ~40 days from mid-July
+    slot_idx, n_slots, slot_times = build_slot_indices(t, "monthly")
+    assert int(np.asarray(slot_idx).min()) == 0
+    assert n_slots <= 3                                   # spans ~2 months, no Jan..Jun phantoms
+    assert slot_times[0] / day > 180.0                   # first slot is mid-year, not Jan

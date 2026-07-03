@@ -50,6 +50,31 @@ def test_simple_seb_plus_most_rejected_at_config_time():
         validate_config(bad)
 
 
+def test_source_cru_jra_requires_data_dir():
+    # source and data_dir must agree — the driver picks real-vs-synthetic from
+    # data_dir, so source='cru_jra' with an empty data_dir would silently run
+    # synthetic forcing instead of the reanalysis the user asked for.
+    bad = _minimal()
+    bad["forcing"]["source"] = "cru_jra"          # but no data_dir
+    with pytest.raises(ValueError, match="data_dir"):
+        validate_config(bad)
+
+
+def test_source_synthetic_rejects_data_dir():
+    bad = _minimal()
+    bad["forcing"]["data_dir"] = "/glade/forcing"  # contradicts source='synthetic'
+    with pytest.raises(ValueError, match="synthetic"):
+        validate_config(bad)
+
+
+def test_source_cru_jra_with_data_dir_ok():
+    good = _minimal()
+    good["forcing"]["source"] = "cru_jra"
+    good["forcing"]["data_dir"] = "/glade/forcing"
+    cfg = validate_config(good)
+    assert cfg.forcing["source"] == "cru_jra"
+
+
 def test_year_end_before_year_start_rejected():
     bad = _minimal()
     bad["forcing"]["year_start"] = 2005

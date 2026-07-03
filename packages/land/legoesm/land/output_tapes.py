@@ -115,40 +115,50 @@ def build_slot_indices(
         n = t.size
         return np.arange(n, dtype=np.int32), n, t
 
+    # For binned frequencies the slot index is ABSOLUTE (counted from year_start
+    # Jan 1), so a run that does not start at slot 0 -- any --start-doy > 0 or a
+    # restart continuation -- must be OFFSET by the first occupied slot.  Without
+    # this, slots [0, first) are never written, and finalize_tape divides them by
+    # max(count,1)=1 -> phantom leading records of 0.0 that silently pollute any
+    # time-mean over the tape.  ``_offset_slots`` returns (slot_idx-rebased,
+    # n_slots, absolute-slot-ids) so slot_times stay in the true year_start frame.
+    def _offset_slots(abs_idx):
+        lo = int(abs_idx.min())
+        rebased = (abs_idx - lo).astype(np.int32)
+        n = int(rebased.max()) + 1
+        return rebased, n, np.arange(lo, lo + n)
+
     if freq == "hourly":
-        slot_idx = (t / _SEC_PER_HOUR).astype(np.int32)
-        n_slots = int(slot_idx.max()) + 1
-        slot_times = (np.arange(n_slots) + 0.5) * _SEC_PER_HOUR
+        slot_idx, n_slots, abs_slots = _offset_slots((t / _SEC_PER_HOUR).astype(np.int64))
+        slot_times = (abs_slots + 0.5) * _SEC_PER_HOUR
         return slot_idx, n_slots, slot_times
 
     if freq == "daily":
-        slot_idx = (t / _SEC_PER_DAY).astype(np.int32)
-        n_slots = int(slot_idx.max()) + 1
-        slot_times = (np.arange(n_slots) + 0.5) * _SEC_PER_DAY
+        slot_idx, n_slots, abs_slots = _offset_slots((t / _SEC_PER_DAY).astype(np.int64))
+        slot_times = (abs_slots + 0.5) * _SEC_PER_DAY
         return slot_idx, n_slots, slot_times
 
     if freq == "monthly":
         doy_total = t / _SEC_PER_DAY
-        year_offset = (doy_total / _DAYS_PER_YEAR).astype(np.int32)
+        year_offset = (doy_total / _DAYS_PER_YEAR).astype(np.int64)
         doy_in_year = doy_total - year_offset * _DAYS_PER_YEAR
         # searchsorted returns 1..12; subtract 1 for 0-indexed month.
         month = np.searchsorted(_MONTH_START_DOY, doy_in_year, side="right") - 1
         month = np.clip(month, 0, 11)
-        slot_idx = (year_offset * 12 + month).astype(np.int32)
-        n_slots = int(slot_idx.max()) + 1
-        # midpoint doy per slot
+        slot_idx, n_slots, abs_slots = _offset_slots(year_offset * 12 + month)
+        # midpoint doy per ABSOLUTE slot id (year*12+month)
         month_len = np.diff(np.concatenate(
             [_MONTH_START_DOY, np.array([_DAYS_PER_YEAR], dtype=np.int32)]))
-        slot_month = np.arange(n_slots) % 12
-        slot_year = np.arange(n_slots) // 12
+        slot_month = abs_slots % 12
+        slot_year = abs_slots // 12
         mid_doy = _MONTH_START_DOY[slot_month] + month_len[slot_month] / 2.0
         slot_times = (slot_year * _DAYS_PER_YEAR + mid_doy) * _SEC_PER_DAY
         return slot_idx, n_slots, slot_times
 
     if freq == "annual":
-        slot_idx = ((t / _SEC_PER_DAY) / _DAYS_PER_YEAR).astype(np.int32)
-        n_slots = int(slot_idx.max()) + 1
-        slot_times = (np.arange(n_slots) + 0.5) * _DAYS_PER_YEAR * _SEC_PER_DAY
+        slot_idx, n_slots, abs_slots = _offset_slots(
+            ((t / _SEC_PER_DAY) / _DAYS_PER_YEAR).astype(np.int64))
+        slot_times = (abs_slots + 0.5) * _DAYS_PER_YEAR * _SEC_PER_DAY
         return slot_idx, n_slots, slot_times
 
     raise ValueError(f"unknown freq {freq!r} (allowed: {_VALID_FREQ})")
