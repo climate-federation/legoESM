@@ -61,15 +61,16 @@ _FIVE_STEPS_DAYS = 5 * 600.0 / 86400.0
 _DEFAULT_TOL = {"u": 5e-5, "v": 5e-5, "T": 2.5e-4, "p_s": 0.15}
 
 
-def _build_config(workdir: str):
+def _build_config(workdir: str, resolution: int = 8, nlev: int = 4):
     """Tiny C8/L4 dry-ish gray config INSIDE the tiled base-cut envelope —
-    identical for both modes except ``enable_tiled_dycore``."""
+    identical for both modes except ``enable_tiled_dycore``.  ``resolution``
+    scales the bench sizes (C48 = production-ish per-tile work)."""
     from legoesm.driver.config import (
         ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
     )
     return ExperimentConfig(
         grid=GridConfig(
-            grid_type="cubed_sphere", resolution=8, nlev=4,
+            grid_type="cubed_sphere", resolution=resolution, nlev=nlev,
             vertical_coord="hybrid", p_top_Pa=200.0, stretching=2.0,
         ),
         dycore=DycoreConfig(
@@ -139,14 +140,26 @@ def main(argv=None) -> int:
                         "u=1e-4 p_s=0.3 (defaults: "
                         + " ".join(f"{k}={v:g}"
                                    for k, v in _DEFAULT_TOL.items()) + ").")
+    p.add_argument("--resolution", type=int, default=8,
+                   help="Cube face resolution N (default 8; must divide "
+                        "by kt=2). C48 approximates production per-tile "
+                        "work for the np24 bench.")
+    p.add_argument("--nlev", type=int, default=4,
+                   help="Vertical levels (default 4).")
+    p.add_argument("--bench", action="store_true",
+                   help="Timing-only run: no reference write/compare "
+                        "(parity gates are calibrated for the 5-step "
+                        "horizon; bench horizons exceed them). Use the "
+                        "printed wall receipt with two-duration "
+                        "subtraction.")
     args = p.parse_args(argv)
 
     # Argument contract FIRST — fail before the (expensive) driver setup.
-    if args.mode == "untiled" and not args.out:
-        print("ERROR: --mode untiled requires --out")
+    if args.mode == "untiled" and not args.out and not args.bench:
+        print("ERROR: --mode untiled requires --out (or --bench)")
         return 2
-    if args.mode == "tiled" and not args.ref:
-        print("ERROR: --mode tiled requires --ref")
+    if args.mode == "tiled" and not args.ref and not args.bench:
+        print("ERROR: --mode tiled requires --ref (or --bench)")
         return 2
     tol = _parse_tols(args.tol)
 
@@ -172,8 +185,13 @@ def main(argv=None) -> int:
               f"{N_DEVICES}); got {len(jax.devices())}.")
         return 2
 
+    if args.resolution % 2 != 0 or args.resolution < 4:
+        print(f"ERROR: --resolution must be even and >= 4 (kt=2 tiling); "
+              f"got {args.resolution}")
+        return 2
     workdir = f"{args.workdir}/{args.mode}"
-    cfg = _build_config(workdir)
+    cfg = _build_config(workdir, resolution=args.resolution,
+                        nlev=args.nlev)
     cfg = cfg._replace(days=args.days,
                        enable_tiled_dycore=(args.mode == "tiled"))
     cfg.validate_strict()
@@ -181,7 +199,23 @@ def main(argv=None) -> int:
     from legoesm.driver.model_driver import ModelDriver
     driver = ModelDriver(cfg, output_dir=workdir)
     driver.setup()
+    import time as _time
+    _t0 = _time.perf_counter()
     driver.run()
+    _wall = _time.perf_counter() - _t0
+    # Post-setup dt: the driver CFL-clamps dt internally at higher
+    # resolutions — step counts must use the dt that actually ran.
+    _dt_eff = float(driver.config.dycore.dt)
+    _steps = args.days * 86400.0 / _dt_eff
+    # Two-duration subtraction receipt: run the SAME mode at two --days
+    # values; (wall2-wall1)/(steps2-steps1) cancels compile + setup (the
+    # persistent XLA cache makes both runs compile-warm anyway).
+    print(f"[{args.mode}] run wall {_wall:.2f} s over {_steps:.0f} steps "
+          f"(naive {1e3 * _wall / max(_steps, 1):.0f} ms/step incl. "
+          "compile — use two-duration subtraction)")
+
+    if args.bench:
+        return 0
 
     state = _final_state_arrays(driver)
 
