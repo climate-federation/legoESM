@@ -219,7 +219,11 @@ def test_r1_exact_preset_flows_to_model_config():
     assert mc.bottom_drag.bottom_drag_scheme == "nemo_quadratic"
     assert mc.bottom_drag.bottom_drag_cd0 == cfg.C_d_bottom
     assert mc.tracer_advection == "fct2"
-    assert mc.gm_redi is None                    # EIV off
+    # EIV off but iso-neutral Redi-only ON (ln_traldf_iso + msc):
+    assert mc.gm_redi is not None
+    assert mc.gm_redi.kappa_GM == 0.0            # no bolus transport
+    assert mc.gm_redi.implicit_K33 is True       # MSC
+    assert mc.K_h == 0.0                         # no iso-level double-count
     assert mc.lateral_viscosity.A_h_floor == 0.0
     assert mc.lateral_viscosity.A_h_eq_boost == 1.0
 

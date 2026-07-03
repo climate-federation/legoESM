@@ -253,6 +253,13 @@ class DINOConfig:
     visbeck_kappa_max: float = 2000.0     # κ_GM ceiling [m²/s]
     redi_S_max: float = 0.005             # Redi slope tapering threshold
     gm_redi_slope_scheme: str = "triads"  # Griffies 1998 triads (matches NEMO iso-neutral)
+    # Lateral TRACER mixing direction: "geopotential" (legacy — iso-level
+    # Laplacian K_h = ½·U_T·Δ) or "isoneutral" (NEMO ln_traldf_iso: Redi
+    # iso-neutral Laplacian with kappa = ½·U_d·Δ(φ) row-scaled, slope cap
+    # rn_slpmax via redi_S_max, EIV-independent — use_gm_redi stays the
+    # EIV switch; K_h is zeroed to avoid double-counting; the vertical
+    # diagonal K33 is solved IMPLICITLY = NEMO ln_traldf_msc).
+    lateral_tracer_mixing: str = "geopotential"
 
     # ------------------------------------------------------------------
     # Lateral mixing of momentum (geopotential / iso-level Laplacian;
@@ -394,7 +401,12 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
       avm0 = 1.2e-4 exactly; the 5e-4 floor is a legoESM stabilizer)
     * ``bottom_drag_scheme="nemo_quadratic"`` — zdfdrg ln_non_lin (#738)
     * ``use_gm_redi=False``          — ln_ldfeiv = .false. (NO eddy-induced
-      velocity at R1; iso-neutral diffusion arrives with the MSC item)
+      velocity at R1)
+    * ``lateral_tracer_mixing="isoneutral"``, ``redi_S_max=0.01`` —
+      ln_traldf_iso Redi-only Laplacian (kappa = ½·U_d·Δ(φ) row-scaled,
+      K_h zeroed) with the vertical diagonal K33 solved implicitly
+      (= ln_traldf_msc).  Remaining deviation: NEMO CAPS the slope at
+      rn_slpmax + ML ramp; we DM95-taper kappa around S_max
     * ``A_h_floor=0``, ``A_h_eq_boost=1`` — legoESM stabilizers OFF (the
       oracle viscosity is exactly ahm = Uv·Δ/2, no floor, no boost)
     * ``tracer_advection="fct2"`` — NEMO traadv_fct with nn_fct_h =
@@ -407,7 +419,7 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
     receives NEMO's taum incl. the x1.3 westerly boost).
 
     Fields that REMAIN approximate after this preset (later ladder steps,
-    tracked in the audit doc): hpg_sco jacobian (adcroft here),
+    tracked in the audit doc):
     centred split-explicit barotropic (implicit_cn here), iso-neutral+MSC
     lateral diffusion, and the MLF leapfrog integrator.
 
@@ -425,6 +437,8 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
         tracer_advection="fct2",
         vertical_coordinate="masked_zco",
         pgf_quadrature="nemo_trapezoid",
+        lateral_tracer_mixing="isoneutral",
+        redi_S_max=0.01,               # rn_slpmax
         forcing_annual_cycle=True,
         wind_through_step=True,
     )
@@ -1439,28 +1453,68 @@ def dino_lat_lon_model_config(
             f"unknown DINOConfig.gm_kappa_scheme {cfg.gm_kappa_scheme!r}; "
             "expected 'visbeck' or 'treguier'")
     from legoesm.ocean.physics.lateral_mixing.config import TreguierConfig
-    gm_redi_cfg = GMRediConfig(
-        # Placeholders; ignored at runtime because an adaptive κ is enabled.
-        # Anchored to visbeck_kappa_min so the static value is non-
-        # degenerate if the adaptive path is ever mis-wired.
-        kappa_GM=cfg.visbeck_kappa_min,
-        kappa_Redi=cfg.visbeck_kappa_min,
-        S_max=cfg.redi_S_max,
-        slope_scheme=cfg.gm_redi_slope_scheme,
-        # Exactly ONE adaptive-κ diagnostic on (the GM/Redi dispatch raises
-        # if both are enabled): "visbeck" (historical) or "treguier" (the
-        # NEMO nn_aei_ijk_t=21 oracle scaling, cap aei0 = rn_Ue·rn_Le).
-        visbeck=VisbeckConfig(
-            enabled=(cfg.gm_kappa_scheme == "visbeck"),
-            alpha=cfg.visbeck_alpha,
-            kappa_min=cfg.visbeck_kappa_min,
-            kappa_max=cfg.visbeck_kappa_max,
-        ),
-        treguier=TreguierConfig(
-            enabled=(cfg.gm_kappa_scheme == "treguier"),
-            aei0=cfg.treguier_aei0,
-        ),
-    ) if cfg.use_gm_redi else None
+    if cfg.lateral_tracer_mixing not in ("geopotential", "isoneutral"):
+        raise ValueError(
+            f"unknown DINOConfig.lateral_tracer_mixing "
+            f"{cfg.lateral_tracer_mixing!r}; expected 'geopotential' or "
+            "'isoneutral'")
+    if cfg.lateral_tracer_mixing == "isoneutral":
+        # NEMO ln_traldf_iso (+ ln_traldf_msc): Redi-ONLY iso-neutral
+        # Laplacian.  kappa_Redi = aht = ½·U_T·Δx(φ) — the equator value
+        # here, row-scaled by cos φ via kappa_redi_lat_scaling (the same
+        # Mercator scaling A_h uses).  EIV stays a SEPARATE switch
+        # (use_gm_redi): at R1 it is off, so kappa_GM=0 and both adaptive
+        # κ diagnostics are disabled.  implicit_K33=True = the MSC
+        # (vertical diagonal of the rotated operator solved backward-
+        # Euler).  slope_density="neutral" builds slopes from locally-
+        # referenced ∂ρ/∂T,∂ρ/∂S like NEMO's neutral slopes.
+        # REMAINING DEVIATION (documented, audit row 8): NEMO caps the
+        # SLOPE at rn_slpmax and ramps it inside the ML; our DM95 tanh
+        # TAPERS kappa to zero around S_max instead.
+        if cfg.use_gm_redi:
+            raise ValueError(
+                "DINOConfig: lateral_tracer_mixing='isoneutral' with "
+                "use_gm_redi=True (EIV) is not wired yet — the R1 oracle "
+                "runs EIV off; add the combined branch when the "
+                "eddy-permitting recipes need it.")
+        # Equator aht = ½·U_T·R·dλ = K_h_base (the SAME coefficient the
+        # legacy iso-level K_h used); per-row cos φ applied by the model
+        # via kappa_redi_lat_scaling.
+        gm_redi_cfg = GMRediConfig(
+            kappa_GM=0.0,
+            kappa_Redi=float(K_h_base),
+            kappa_redi_lat_scaling=True,
+            S_max=cfg.redi_S_max,
+            slope_scheme=cfg.gm_redi_slope_scheme,
+            slope_density="neutral",
+            implicit_K33=True,
+            visbeck=VisbeckConfig(enabled=False),
+            treguier=TreguierConfig(enabled=False),
+        )
+    else:
+        gm_redi_cfg = GMRediConfig(
+            # Placeholders; ignored at runtime because an adaptive κ is
+            # enabled.  Anchored to visbeck_kappa_min so the static value
+            # is non-degenerate if the adaptive path is ever mis-wired.
+            kappa_GM=cfg.visbeck_kappa_min,
+            kappa_Redi=cfg.visbeck_kappa_min,
+            S_max=cfg.redi_S_max,
+            slope_scheme=cfg.gm_redi_slope_scheme,
+            # Exactly ONE adaptive-κ diagnostic on (the GM/Redi dispatch
+            # raises if both are enabled): "visbeck" (historical) or
+            # "treguier" (the NEMO nn_aei_ijk_t=21 oracle scaling, cap
+            # aei0 = rn_Ue·rn_Le).
+            visbeck=VisbeckConfig(
+                enabled=(cfg.gm_kappa_scheme == "visbeck"),
+                alpha=cfg.visbeck_alpha,
+                kappa_min=cfg.visbeck_kappa_min,
+                kappa_max=cfg.visbeck_kappa_max,
+            ),
+            treguier=TreguierConfig(
+                enabled=(cfg.gm_kappa_scheme == "treguier"),
+                aei0=cfg.treguier_aei0,
+            ),
+        ) if cfg.use_gm_redi else None
 
     physics_cfg = None
     if physics:
@@ -1508,7 +1562,8 @@ def dino_lat_lon_model_config(
         rho_0=cfg.rho_0,
         A_h=A_h_base,
         A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B
-        K_h=K_h_base,
+        K_h=(0.0 if cfg.lateral_tracer_mixing == "isoneutral"
+             else K_h_base),   # iso-neutral replaces iso-level diffusion
         A_v=cfg.A_v_bg_effective,   # TKE: 4× floor at the SW-corner stabilizer
         K_v=cfg.K_v_bg,
         bottom_drag_r=bottom_drag_r,

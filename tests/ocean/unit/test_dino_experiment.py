@@ -929,3 +929,93 @@ class TestMaskedZco:
                                   vertical_coordinate="masked_zco")
         with pytest.raises(ValueError, match="lat-lon only"):
             dino_mpas_model_config(None, cfg, physics=False)
+
+
+class TestIsoneutralRediOnly:
+    """lateral_tracer_mixing='isoneutral' — NEMO ln_traldf_iso(+msc)."""
+
+    def _preset_model_cfg(self):
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            dino_lat_lon_grid, dino_lat_lon_model_config,
+            dino_r1_exact_config,
+        )
+        cfg = dino_r1_exact_config()
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
+        return cfg, g, mc
+
+    def test_preset_builds_redi_only(self):
+        cfg, g, mc = self._preset_model_cfg()
+        gm = mc.gm_redi
+        assert gm is not None
+        assert gm.kappa_GM == 0.0
+        assert gm.kappa_Redi > 0.0
+        assert gm.kappa_redi_lat_scaling is True
+        assert gm.S_max == 0.01
+        assert gm.slope_density == "neutral"
+        assert gm.implicit_K33 is True
+        assert not gm.visbeck.enabled and not gm.treguier.enabled
+        assert mc.K_h == 0.0                    # no iso-level double-count
+        # kappa_Redi equals the legacy K_h coefficient (½·U_T·R·dλ)
+        import numpy as _np
+
+        from legoesm import constants as _c
+        expect = 0.5 * cfg.U_T * _c.R_earth * float(_np.asarray(g.dlon))
+        assert gm.kappa_Redi == pytest.approx(expect, rel=1e-12)
+
+    def test_legacy_default_unchanged(self):
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid, dino_lat_lon_model_config,
+        )
+        cfg = DINOConfig()          # geopotential + use_gm_redi=True
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
+        assert mc.K_h > 0.0
+        assert mc.gm_redi.visbeck.enabled       # historical adaptive path
+        assert mc.gm_redi.kappa_redi_lat_scaling is False
+
+    def test_unknown_mixing_raises(self):
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid, dino_lat_lon_model_config,
+        )
+        cfg = dataclasses.replace(DINOConfig(),
+                                  lateral_tracer_mixing="epineutral")
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        with pytest.raises(ValueError, match="lateral_tracer_mixing"):
+            dino_lat_lon_model_config(g, cfg, physics=True)
+
+    def test_iso_plus_eiv_rejected(self):
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid, dino_lat_lon_model_config,
+        )
+        cfg = dataclasses.replace(
+            DINOConfig(), lateral_tracer_mixing="isoneutral",
+            use_gm_redi=True)
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        with pytest.raises(ValueError, match="EIV"):
+            dino_lat_lon_model_config(g, cfg, physics=True)
+
+    def test_static_kappa_override_row_scaling(self):
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            _static_kappa_redi_override,
+        )
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        g = dino_lat_lon_grid(DINOConfig(), n_lon=12)
+        gm_on = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
+        arr = _static_kappa_redi_override(gm_on, g)
+        assert arr.shape == (g.n_lat, 12)
+        lat = np.asarray(g.lat)
+        # grid.lat is stored float32 -> f32-appropriate tolerance
+        np.testing.assert_allclose(
+            np.asarray(arr)[:, 0], 100.0 * np.cos(lat), rtol=1e-6)
+        gm_off = GMRediConfig(kappa_Redi=100.0)
+        assert _static_kappa_redi_override(gm_off, g) is None

@@ -670,6 +670,25 @@ def _eke_av_at_interior_wfaces(A_v_phys, A_v_bg, nlev, prefix_shape):
     )
 
 
+def _static_kappa_redi_override(gm_cfg, grid):
+    """Per-column kappa_Redi override for kappa_redi_lat_scaling.
+
+    NEMO nn_aht_ijk_t=20 on a Mercator grid: aht(φ) = ½·U_d·Δx(φ)
+    ∝ cos φ, with ``gm_cfg.kappa_Redi`` the equator value.  Returns a
+    (n_lat, n_lon) array (the kernels' 2-D per-column kappa form) or
+    ``None`` when the flag is off — the scalar paths stay bit-identical.
+    Runtime closures (EKE / Treguier / Visbeck kappa fields) overwrite
+    this where they apply; the flag is meant for the static
+    Redi-only recipe (DINO R1) where no adaptive κ is active.
+    """
+    if not bool(getattr(gm_cfg, "kappa_redi_lat_scaling", False)):
+        return None
+    cos_lat = jnp.cos(jnp.asarray(grid.lat))              # (n_lat,)
+    n_lon = int(getattr(grid, "n_lon"))
+    return (gm_cfg.kappa_Redi * cos_lat)[:, None] * jnp.ones(
+        (1, n_lon), dtype=cos_lat.dtype)
+
+
 class LatLonCGridOceanModel:
     """Boussinesq hydrostatic ocean model on a C-grid latitude-longitude grid.
 
@@ -2374,7 +2393,7 @@ class LatLonCGridOceanModel:
         if self.config.gm_redi is not None:
             gm_cfg = self.config.gm_redi
             kappa_gm_override = None
-            kappa_redi_override = None
+            kappa_redi_override = _static_kappa_redi_override(gm_cfg, _grid)
             eke_new = None
             eke_diss_new = None
             # Prognostic-EKE GM closure (Eden-Greatbatch): kappa_GM = c_k·L·√E
@@ -4689,6 +4708,7 @@ class LatLonCGridOceanModel:
         k33_iso = None
         if self.config.gm_redi is not None:
             gm_cfg = self.config.gm_redi
+            _kri_static = _static_kappa_redi_override(gm_cfg, _grid)
             _gm_dj = None
             if gm_cfg.implicit_K33:
                 _gm_dj = gm_redi_density_and_jacobian(
@@ -4702,6 +4722,7 @@ class LatLonCGridOceanModel:
                 eos_linear=self.config.eos_linear, mask=cmask,
                 u_mask=u_mask, v_mask=v_mask,
                 rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+                kappa_redi_override=_kri_static,
                 density_jacobian=_gm_dj)
             dT_n = dT_n + dt * dT_gm    # noqa: N806
             dS_n = dS_n + dt * dS_gm    # noqa: N806
@@ -4711,6 +4732,7 @@ class LatLonCGridOceanModel:
                     _grid, self.z_coord, gm_cfg, eos=self.config.eos,
                     eos_linear=self.config.eos_linear, mask=cmask,
                     rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+                    kappa_redi_override=_kri_static,
                     density_jacobian=_gm_dj)
         du_p = (state.u_incr_prev.data if state.u_incr_prev is not None
                 else jnp.zeros_like(du_n))

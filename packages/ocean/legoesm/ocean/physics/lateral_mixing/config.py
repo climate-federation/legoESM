@@ -244,6 +244,12 @@ class GMRediConfig(NamedTuple):
                                       # KPP boundary-layer depth when available).
                                       # Only active for slope_scheme="centered".
     surface_complement_depth: float = 100.0  # Depth [m] of the surface layer
+    # NEMO nn_aht_ijk_t=20 grid-size scaling: the effective kappa_Redi is
+    # cfg.kappa_Redi * cos(lat) per row (Mercator dx ∝ cos φ, so
+    # aht(φ) = ½·U_d·Δx(φ) with cfg.kappa_Redi = the EQUATOR value
+    # ½·U_d·R·dλ).  Applied by the lat-lon model as a per-column
+    # kappa_redi_override; scalar-kappa paths (MPAS/cube) reject it.
+    kappa_redi_lat_scaling: bool = False
     # --- Veros-faithful isoneutral options (oracle-matching; default off) ---
     implicit_K33: bool = False
     # ^ When True, the vertical isoneutral diagonal K_33 = kappa_Redi·S² (the
