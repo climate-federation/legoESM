@@ -122,6 +122,14 @@ class PhysicsState(NamedTuple):
     qke: jnp.ndarray
     clubb_moments: jnp.ndarray
     rad_heating: jnp.ndarray
+    # GLOBAL column ids, shape (ncol,) int32 — the decomposition-invariant
+    # identity for per-column stochastic draws (Bechtold AR1 folds the
+    # per-step sub-key with each column's GLOBAL id).  Sharding-aware by
+    # construction: a lat-band SPMD shard receives its own contiguous
+    # chunk, so a physical column draws the SAME innovation regardless of
+    # the decomposition.  Constant data (never updated by sub-physics);
+    # re-derivable as arange(ncol) — restart loaders may default it.
+    col_index: jnp.ndarray
 
 
 def init_physics_state(
@@ -261,6 +269,7 @@ def init_physics_state(
         qke=qke,
         clubb_moments=clubb_moments,
         rad_heating=rad_heating,
+        col_index=jnp.arange(ncol, dtype=jnp.int32),
     )
 
 
@@ -303,4 +312,5 @@ def update_physics_state(phys_state, updates):
         qke=updates.get("qke", phys_state.qke),
         clubb_moments=updates.get("clubb_moments", phys_state.clubb_moments),
         rad_heating=updates.get("rad_heating", phys_state.rad_heating),
+        col_index=phys_state.col_index,   # constant identity, never updated
     )

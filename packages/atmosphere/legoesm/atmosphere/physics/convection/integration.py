@@ -533,6 +533,11 @@ def _make_hydrostatic_convection(
                     prng_key=bechtold_key,
                     dt=dt, config=scheme_config,
                     moisture_convergence=mc_col,
+                    # GLOBAL column ids for the decomposition-invariant
+                    # per-column draw (a lat-band SPMD shard's carry chunk
+                    # holds its own global ids); None => leaf arange.
+                    col_index=(getattr(phys_state, "col_index", None)
+                               if phys_state is not None else None),
                 )
                 # Multi-field carry update — return as dict so the
                 # orchestrator can ``update`` both PhysicsState slots.
@@ -912,6 +917,11 @@ def _make_nonhydrostatic_convection(
                     prng_key=bechtold_key,
                     dt=dt, config=scheme_config,
                     moisture_convergence=mc_col,
+                    # GLOBAL column ids for the decomposition-invariant
+                    # per-column draw (a lat-band SPMD shard's carry chunk
+                    # holds its own global ids); None => leaf arange.
+                    col_index=(getattr(phys_state, "col_index", None)
+                               if phys_state is not None else None),
                 )
                 conv_prog_out = {
                     "conv_prog_profile": prog_new_profile,
@@ -1237,6 +1247,11 @@ def _make_spectral_pe_convection(
                     prng_key=bechtold_key,
                     dt=dt, config=scheme_config,
                     moisture_convergence=mc_col,
+                    # GLOBAL column ids for the decomposition-invariant
+                    # per-column draw (a lat-band SPMD shard's carry chunk
+                    # holds its own global ids); None => leaf arange.
+                    col_index=(getattr(phys_state, "col_index", None)
+                               if phys_state is not None else None),
                 )
                 conv_prog_out = {
                     "conv_prog_profile": prog_new_profile,

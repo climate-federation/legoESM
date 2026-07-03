@@ -43,6 +43,18 @@ _NORM_WIND_M_S = 30.0
 _NORM_SOLAR_W_M2 = 1400.0
 _DEFAULT_HIDDEN_DIM = 256
 _DEFAULT_RESIDUAL_SCALE = 0.01
+# Radiation fluxes are O(100 W/m^2), not per-second tendencies, so the flux
+# head outputs use a separate physical scale: raw network output (O(1)) x
+# this maps to W/m^2.  Untrained -> ~0 (stable); training drives toward ERA5.
+_DEFAULT_FLUX_OUTPUT_SCALE = 100.0
+# Tendency-head SATURATION cap (in raw-output units).  The tendency head is a
+# raw linear map x residual_scale; left unbounded, training grows its weights
+# until a single step's tendency tips the multi-step moist rollout past CFL
+# (saturation latent-heat feedback) into inf/nan — the NN-variant training
+# blow-up.  tanh(raw/cap)*cap keeps the head ~linear and ~0 at init (untrained
+# rollout = pure dynamics) but caps |tendency| at residual_scale*cap, removing
+# the blow-up at its source while staying smoothly differentiable.
+_DEFAULT_TENDENCY_CAP = 5.0
 
 
 
@@ -138,9 +150,13 @@ class NeuralPhysics(eqx.Module):
     key : jax.Array
         PRNG key for weight initialization.
     residual_scale : float
-        Multiplicative scale applied to the raw network output.
+        Multiplicative scale applied to the raw tendency + precip outputs.
         Defaults to 0.01 so that an untrained network produces
         near-zero tendencies, preventing instability.
+    flux_output_scale : float
+        Separate scale for the 5 radiation-flux outputs (W/m^2), which are
+        O(100), not per-second rates.  Defaults to 100 so the flux head can
+        reach observed magnitudes while untrained output stays ~0.
     """
 
     layers: list
@@ -148,6 +164,8 @@ class NeuralPhysics(eqx.Module):
     n_input: int = eqx.field(static=True)
     n_output: int = eqx.field(static=True)
     residual_scale: float = eqx.field(static=True)
+    flux_output_scale: float = eqx.field(static=True)
+    tendency_cap: float = eqx.field(static=True)
 
     def __init__(
         self,
@@ -157,11 +175,15 @@ class NeuralPhysics(eqx.Module):
         *,
         key: jax.Array,
         residual_scale: float = _DEFAULT_RESIDUAL_SCALE,
+        flux_output_scale: float = _DEFAULT_FLUX_OUTPUT_SCALE,
+        tendency_cap: float = _DEFAULT_TENDENCY_CAP,
     ):
         self.nlev = nlev
         self.n_input = nlev * 4 + 2   # T, u, v, q_v per level + p_s + solar
         self.n_output = nlev * 4 + 6   # tendencies per level + 6 surface fluxes
         self.residual_scale = residual_scale
+        self.flux_output_scale = flux_output_scale
+        self.tendency_cap = tendency_cap
 
         keys = jax.random.split(key, n_layers + 1)
         dims = [self.n_input] + [hidden_dim] * n_layers + [self.n_output]
@@ -185,7 +207,17 @@ class NeuralPhysics(eqx.Module):
         """
         for layer in self.layers[:-1]:
             x = jax.nn.gelu(layer(x))
-        return self.layers[-1](x) * self.residual_scale
+        raw = self.layers[-1](x)
+        # Tendencies (4*nlev) + precip are per-second rates -> residual_scale,
+        # tanh-BOUNDED so a trained weight blow-up can never push a single
+        # step's tendency past CFL into an inf/nan moist rollout (the NN-variant
+        # training crash). The 5 radiation fluxes (sw_net_sfc, lw_net_sfc,
+        # sw_up_toa, lw_up_toa, sw_down_toa) are O(100 W/m^2) ->
+        # flux_output_scale (they do not drive the state, so left unbounded).
+        n_rate = self.nlev * 4 + 1  # tendencies + precip
+        cap = self.tendency_cap
+        rate = self.residual_scale * cap * jnp.tanh(raw[:n_rate] / cap)
+        return jnp.concatenate([rate, raw[n_rate:] * self.flux_output_scale])
 
 
 # ======================================================================
@@ -351,10 +383,19 @@ def make_neural_step_unified(
             )
         )
 
-        # Pass held radiation through unchanged (neural net subsumes rad)
+        # Flux head: write the network's predicted TOA/surface radiation
+        # fluxes into held_* so the radiation-flux loss supervises them (the
+        # NN learns to radiate like ERA5 -> generalizes to a new climate).
+        # held_dT_rad stays at its IC value (0): the NN's dT_dt is the TOTAL
+        # tendency and already includes radiative heating, so applying a
+        # separate held_dT_rad would double-count.  sw_down_toa (insolation)
+        # is an external forcing, not predicted -> passthrough.
+        del held_sw_net_sfc, held_lw_net_sfc, held_sw_up_toa, held_lw_up_toa
         held_new = (
-            held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-            held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+            held_dT_rad,
+            phys_out.sw_net_sfc, phys_out.lw_net_sfc,
+            phys_out.sw_up_toa, phys_out.lw_up_toa,
+            held_sw_down_toa,
         )
         return phys_out, held_new
 

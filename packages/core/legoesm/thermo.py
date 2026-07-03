@@ -45,7 +45,21 @@ def saturation_vapor_pressure(T: jax.Array) -> jax.Array:
     jax.Array
         Saturation vapor pressure [Pa].
     """
-    T_c = T - constants.T_freeze
+    # AD-safe temperature floor.  The Tetens denominator is
+    # ``T_c + 243.5 = T - 29.65 K``; as ``T → 29.65 K`` from below the
+    # exponent → +∞ and ``exp`` OVERFLOWS to inf.  The forward is often
+    # masked downstream (the smooth cap in ``saturation_mixing_ratio``
+    # clamps q_sat to 1), but the REVERSE-mode gradient then hits
+    # ``0 × inf`` and the whole adjoint goes non-finite — this silently
+    # NaN'd carry-based differentiable training whenever a single
+    # pathological surface/atmos cell dipped toward the singularity
+    # (AIMIP, job 8533906: ``inf encountered in exp``).  Clip to 150 K
+    # (far below any real atmospheric/surface temperature, so the forward
+    # is bit-identical everywhere it matters; the clip's zero gradient
+    # below the floor × the finite e_sat'(150 K) gives a finite gradient
+    # there instead of inf).  satcurve-ok: identical Tetens curve for
+    # T ≥ 150 K; this is an AD floor, not a new saturation formula.
+    T_c = jnp.clip(T, 150.0, None) - constants.T_freeze
     return 611.2 * jnp.exp(17.67 * T_c / (T_c + 243.5))
 
 

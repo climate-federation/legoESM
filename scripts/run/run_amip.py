@@ -860,6 +860,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--distributed", action="store_true", default=False,
                         help="Enable MPI distributed execution (auto-detected from environment)")
     parser.add_argument(
+        "--distributed-mode", choices=("mpi", "spmd"),
+        default=_EXPERIMENT_DEFAULTS.distributed_mode,
+        help=("How multi-process runs federate (read with --distributed). "
+              "'mpi' = mpi4jax halo backend (replicated cubed-sphere faces / "
+              "lat-lon band / Voronoi cells; legacy default). 'spmd' = "
+              "multi-controller jax.distributed: ONE global device mesh, true "
+              "cubed-sphere domain decomposition (cubed-sphere only; "
+              "diagnostics + checkpoints must be off — milestone-1). Parity "
+              "receipt: 2-proc bit-exact vs single-controller, job 8686550; "
+              "gate scripts/validate/validate_driver_cs_spmd_parity.py."))
+    parser.add_argument(
         "--enable-latlon-spmd", action="store_true", default=False,
         help=("Single-process multi-device lat-BAND SPMD for the lat-lon C-grid "
               "dycore (A1). Requires --grid-type latlon, n_lat %% n_devices == 0, "
@@ -1071,6 +1082,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         precision=args.precision,
         gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
+        distributed_mode=args.distributed_mode,
         shard_radiation_columns=args.shard_radiation_columns,
         allow_level_fallback=args.allow_level_fallback,
         ensemble_size=args.ensemble_size,
@@ -1515,6 +1527,12 @@ def _require_full_physics_for_amip(args, parser) -> None:
 
 
 def main(argv: list[str] | None = None):
+    # Persistent cross-process XLA compile cache (RRTMGP cold-compile ~2600 s,
+    # otherwise re-paid every launch).  Idempotent; before any jit.  run_amip
+    # does not go through bootstrap()/configure_backend(), so wire it directly.
+    from legoesm.runtime.backend import enable_persistent_compile_cache
+    enable_persistent_compile_cache()
+
     parser = build_arg_parser()
 
     # Two-pass parse so a --config file supplies defaults that explicit CLI

@@ -394,3 +394,40 @@ def test_implicit_theta_blend_conserves():
         C = _col_int(constants.L_v * dqc, dp)
         rel = jnp.abs(H + Q + C) / (jnp.abs(H) + jnp.abs(Q) + jnp.abs(C) + 1e-10)
         assert jnp.all(rel < 1e-9), f"theta={theta} MSE residual {rel}"
+
+
+def test_stochastic_draw_chunk_invariance():
+    """A1 increment 2 leaf gate: the per-GLOBAL-column fold_in draw makes
+    the stochastic AR1 update decomposition-invariant — running the leaf
+    on a contiguous CHUNK of columns (with that chunk's global col_index)
+    must reproduce exactly the corresponding slice of the full-domain
+    run.  The legacy bulk normal(key, (ncol,)) draw fails this."""
+    import jax
+
+    T, q, pf, ph, u, v = _column()
+    ncol, nlev = T.shape
+    assert ncol >= 2, "need >=2 columns to split"
+    cpp = jnp.zeros((ncol, nlev))
+    stoch0 = jnp.linspace(-0.5, 0.5, ncol)
+    key = jax.random.PRNGKey(7)
+    cfg = BechtoldConfig(enable_stochastic=True, enable_cmt=False)
+    ids = jnp.arange(ncol, dtype=jnp.int32)
+
+    def _run(sl):
+        _, _, stoch_new = bechtold_convection(
+            T=T[sl], q_v=q[sl], p_full=pf[sl], p_half=ph[sl],
+            u=u[sl], v=v[sl],
+            conv_prog_profile=cpp[sl], conv_stoch_state=stoch0[sl],
+            prng_key=key, dt=1800.0, config=cfg,
+            moisture_convergence=jnp.zeros_like(T[sl]),
+            col_index=ids[sl],
+        )
+        return np.asarray(stoch_new)
+
+    full = _run(slice(None))
+    half = ncol // 2
+    np.testing.assert_array_equal(full[:half], _run(slice(0, half)))
+    np.testing.assert_array_equal(full[half:], _run(slice(half, ncol)))
+    # Non-vacuity: the innovation actually moved the AR1 state.
+    assert float(np.max(np.abs(full - np.asarray(
+        jnp.exp(-1800.0 / cfg.stochastic_decorrelation) * stoch0)))) > 1e-8

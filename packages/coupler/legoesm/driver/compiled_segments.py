@@ -671,6 +671,80 @@ def pack_forcing(
     )
 
 
+# The SegmentForcing fields that are GRID-shaped (face-plane on cubed-sphere,
+# (n_lat, n_lon, ...) on lat-lon) and therefore shard like the state.  By
+# NAME, not by shape: a shape heuristic would silently face-shard any
+# incidental leading-6 leaf (e.g. ``ghg_vmr`` the day a 6th species joins
+# GHG_SPECIES_ORDER).  Scalars (day_of_year, seconds_of_day, s_0) and small
+# vectors (ghg_vmr) stay uncommitted -> the segment JIT pins them replicated.
+_GRID_SHAPED_FORCING_FIELDS = (
+    "sst", "sic", "solar_weights", "o3_vmr", "aerosol_od", "aerosol_lw_od",
+    "sfc_albedo_override", "sfc_T_override",
+    "sfc_shflx_override", "sfc_lhflx_override",
+)
+
+
+def shard_forcing(forcing: SegmentForcing, device_config) -> SegmentForcing:
+    """Commit the grid-shaped ``SegmentForcing`` leaves to the SAME device
+    layout as the sharded state (SPMD sharding step 3 of the production
+    cs_spmd design — ginsburg plan addendum 6).
+
+    ``run_segment``'s sharded JIT wrapper honours a committed
+    ``NamedSharding`` on the build-time mesh per leaf and pins anything
+    else REPLICATED (``_input_sharding``).  Replicated forcing means every
+    device receives the FULL global forcing array at each segment
+    boundary (host->device bandwidth and memory x n_devices) and GSPMD
+    re-slices it against the face-sharded state inside the step.
+    Committing the grid-shaped leaves with the state's own sharding rules
+    (:func:`legoesm.parallel.mesh.shard_pytree` — face-first on
+    cubed-sphere, lat-axis on lat-lon, tiling-aware) makes the transfer
+    and memory per device ``1/n_devices`` and removes the reshard.
+
+    No-ops (returns ``forcing`` unchanged) when: ``device_config`` is
+    ``None`` (byte-identical single-device contract), the mesh has no
+    face sharding (single device), or the run is mpi4jax-distributed
+    (``is_distributed`` — forcing there is rank-local, never device-mesh
+    sharded).  ``None`` optional fields and non-grid leaves pass through
+    untouched; a grid-NAMED leaf whose shape does not match the grid rule
+    (e.g. the ``(0,)`` o3 placeholder) is left alone by ``shard_pytree``'s
+    shape gate.
+    """
+    if device_config is None or getattr(device_config, "is_distributed", False):
+        return forcing
+    if getattr(device_config, "face_sharding", None) is None:
+        return forcing
+    from legoesm.parallel.mesh import shard_pytree
+
+    # Production cubed-sphere packs the 3-D radiation forcing FLATTENED to
+    # ``(ncol=6*n*n, nlev)`` (``_precompute_external_forcing``), which the
+    # leading-6 ``shard_pytree`` rule cannot see (codex 2026-07-01 Medium).
+    # A flat face-major leaf shards ``P("face")`` on dim 0 — the exact
+    # layout the driver already commits for flat carry leaves (see
+    # ``_input_sharding``: "a flat [6*n*n, nlev] carry leaf the driver
+    # placed on P('face')").  ``ncol % 6 == 0`` chunks land exactly one
+    # face's columns per face-mesh slot; the face axis size divides 6 so
+    # divisibility always holds.  Gate: cubed-sphere only, named grid
+    # field, flat (shape[0] a positive non-6 multiple of 6).
+    _flat_face = None
+    if getattr(device_config, "grid_type", None) == "cubed_sphere" and \
+            getattr(device_config, "mesh", None) is not None:
+        from jax.sharding import NamedSharding, PartitionSpec
+        _flat_face = NamedSharding(device_config.mesh, PartitionSpec("face"))
+
+    updates = {}
+    for name in _GRID_SHAPED_FORCING_FIELDS:
+        leaf = getattr(forcing, name)
+        if leaf is None or not isinstance(leaf, (jax.Array, jnp.ndarray)):
+            continue
+        if (_flat_face is not None and leaf.ndim >= 1
+                and leaf.shape[0] != 6 and leaf.shape[0] > 0
+                and leaf.shape[0] % 6 == 0):
+            updates[name] = jax.device_put(leaf, _flat_face)
+        else:
+            updates[name] = shard_pytree(leaf, device_config)
+    return forcing._replace(**updates) if updates else forcing
+
+
 def build_segment_fn(
     model,
     step_unified,
@@ -831,6 +905,20 @@ def build_segment_fn(
         energy_consistent_moisture_floor,
     )
     from legoesm.core.cfl import estimate_min_dx_cubed_sphere
+
+    # Per-step solar clock precision (codex round-11 Low): the in-scan
+    # ``_abs_day``/``day_to_calendar`` arithmetic is TRACED — without x64
+    # it runs in float32, and ``seconds_of_day`` quantizes (~8 s ulp at
+    # day ~1000), silently degrading the solar zenith on long runs.
+    # Production sets JAX_ENABLE_X64; warn loudly when it is off.
+    if not jax.config.jax_enable_x64:
+        logger.warning(
+            "build_segment_fn: JAX x64 is DISABLED — the per-step solar "
+            "clock (diurnal cycle, #720) computes day/seconds-of-day in "
+            "float32 inside the compiled scan; multi-year runs will "
+            "accumulate solar-time quantization (~8 s at day 1000). Set "
+            "JAX_ENABLE_X64=1 (production default) for exact solar time."
+        )
 
     # Precompute minimum grid spacing for CFL monitoring
     if hasattr(grid, 'n'):
@@ -1261,10 +1349,18 @@ def build_segment_fn(
                 )
 
             # --- Moisture smoothing ---
-            q_v_upd = jnp.maximum(
-                q_v_upd + _dt * hyperdiffusion_3d(q_v_upd, grid, qv_smooth_coeff),
-                0.0,
-            )
+            # ``qv_smooth_coeff`` is a static (closure-const) Python float.
+            # Skip the hyperdiffusion call entirely when it is 0 (no
+            # smoothing): the ×0 result is identical, and this avoids
+            # invoking the cubed-sphere compact Laplacian
+            # (``grid.halo_interp_offsets``) on grids that lack it (lat-lon
+            # / Gaussian).  Feature-gating exception (CLAUDE.md): a Python
+            # ``if`` on a static value, NOT a traced ``jnp.where``.
+            if qv_smooth_coeff:
+                q_v_upd = q_v_upd + _dt * hyperdiffusion_3d(
+                    q_v_upd, grid, qv_smooth_coeff
+                )
+            q_v_upd = jnp.maximum(q_v_upd, 0.0)
 
             # --- Rayleigh friction ---
             u_upd = u_new * _fric_decay
@@ -1476,11 +1572,15 @@ def build_segment_fn(
 
         # Per-step solar time (diurnal-cycle fix) — mirror ``_single_step``.
         # The unfused radiation refresh recomputes held fluxes for the upcoming
-        # no-rad cycle; use the current absolute step's wall clock so the
-        # zenith advances across cycles instead of being pinned at the
-        # segment-end time.  ``carry.step_index`` is the absolute step counter
-        # after the preceding no-rad scan.
-        _abs_day = start_day + (carry.step_index + 1) * _dt / 86400.0
+        # no-rad cycle; use the CYCLE-BOUNDARY wall clock so the zenith
+        # advances across cycles instead of being pinned at the segment-end
+        # time.  ``carry.step_index`` here counts COMPLETED steps (the
+        # preceding no-rad scan already incremented it), so the boundary time
+        # is ``step_index * dt`` — matching the fused subcycle, whose fresh
+        # radiation is computed IN the last cycle step at ``(step_idx+1)*dt``
+        # = the same boundary.  ``+1`` would sample one dt into the future
+        # (codex round-11 Medium).
+        _abs_day = start_day + carry.step_index * _dt / 86400.0
         _doy_step, _sod_step = day_to_calendar(_abs_day)
 
         if owned_face_ids is not None:

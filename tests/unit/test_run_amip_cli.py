@@ -1458,3 +1458,29 @@ def test_cloud_sensitivity_flags_rejected_on_mpas_spectral():
     _validate_cloud_sensitivity_flags(
         parser.parse_args(["--dataset", "analytical", "--cloud-p-xr", "0.7"]),
         parser)
+
+
+def test_distributed_mode_flag_flows_to_config():
+    """--distributed-mode {mpi,spmd} round-trips into ExperimentConfig
+    (production cs_spmd is config-file-only without this flag)."""
+    import pytest
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.distributed_mode == "mpi"
+
+    cfg_spmd = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--distributed", "--distributed-mode", "spmd",
+    ]), parser))
+    assert cfg_spmd.distributed is True
+    assert cfg_spmd.distributed_mode == "spmd"
+    # spmd is a validate_strict-legal combination on the default cube grid
+    # with diagnostics/checkpoints off.
+    cfg_spmd._replace(output=cfg_spmd.output._replace(
+        diag_days=0, checkpoint_days=0)).validate_strict()
+
+    # Unknown mode is an argparse-level refusal (choices).
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--dataset", "analytical",
+                           "--distributed-mode", "bogus"])

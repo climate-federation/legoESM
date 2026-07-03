@@ -131,7 +131,11 @@ def _build_spectral_config(cfg: dict[str, Any]):
 
     return NeuralGCMSpectralConfig(
         n_max=int(cfg["n_max"]),
-        n_levels=int(cfg["nlev"]),
+        # Config key drift (nlev vs n_levels, CLAUDE.md naming debt): a merge
+        # left this read as "nlev" while the AIMIP configs declare "n_levels",
+        # so the spectral suite KeyError'd at step 0 (the v10 T63 ~2K path was
+        # fully blocked). Accept either key.
+        n_levels=int(cfg["nlev"] if "nlev" in cfg else cfg["n_levels"]),
         dt=float(cfg["dt"]),
         pe_config=SpectralPEConfig(
             hyperdiff_coeff=2.5e15,
@@ -305,7 +309,13 @@ def _train_aimip_classical(
         # autoregressive path.  Surface geopotential is static across
         # snapshots so any of them works; unwrap when needed.
         ref_carry = target_carries[0]
-        if isinstance(ref_carry, tuple):
+        # A multi-step target is a PLAIN tuple of carries; a single-step
+        # target is ONE SegmentCarry — itself a NamedTuple (tuple subclass),
+        # so isinstance(.., tuple) is True for BOTH and would unwrap a single
+        # carry to its first FIELD (an array) -> `.phis` AttributeError. This
+        # broke the single-step v10 T63 path when multi-step was added.
+        # ``type(..) is tuple`` matches the plain tuple only.
+        if type(ref_carry) is tuple:
             ref_carry = ref_carry[0]
         from legoesm.training.aimip_spatial import land_mask_from_phis
         land_mask = land_mask_from_phis(
@@ -475,7 +485,7 @@ def _evaluate_variant(
         eval_land_mask = None
         if bool(cfg.get("aimip_spatial_surface", False)) and target_carries:
             ref_carry = target_carries[0]
-            if isinstance(ref_carry, tuple):
+            if type(ref_carry) is tuple:   # plain tuple=multi-step; carry NamedTuple is not
                 ref_carry = ref_carry[0]
             from legoesm.training.aimip_spatial import land_mask_from_phis
             eval_land_mask = land_mask_from_phis(
@@ -569,8 +579,10 @@ def _evaluate_variant(
 
     for ic, target in zip(ic_states, target_carries):
         # Multi-step training => loader returns a tuple of K target
-        # carries.  Eval only scores against the longest lead.
-        if isinstance(target, tuple):
+        # carries.  Eval only scores against the longest lead.  A single
+        # SegmentCarry is a NamedTuple (tuple subclass), so use type(..) is
+        # tuple — isinstance would unwrap a single carry to its last FIELD.
+        if type(target) is tuple:
             target = target[-1]
         if eval_full_emulator_rollout is not None:
             pred = eval_full_emulator_rollout(ic)
@@ -777,8 +789,12 @@ def main():
             "eval_metrics_train_period": eval_metrics_train,
             "checkpoint": str(ckpt_path),
         }
+        # ``loss_history`` is empty on an eval-only resume (all epochs already
+        # done, start_epoch == n_epochs -> zero training iterations); guard the
+        # [-1] so the scorecard write below still runs (e.g. scorecard regen).
+        last_train_loss = loss_history[-1] if loss_history else float("nan")
         logger.info(
-            f"{variant}: train_loss[-1]={loss_history[-1]:.6f}, "
+            f"{variant}: train_loss[-1]={last_train_loss:.6f}, "
             f"test_loss={eval_metrics_test['loss']['mean']:.6f}, "
             f"test RMSE T={eval_metrics_test['rmse']['T']['mean']:.3f}K "
             f"T_sfc={eval_metrics_test['rmse']['T_sfc']['mean']:.3f}K | "

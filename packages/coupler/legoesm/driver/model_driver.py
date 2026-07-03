@@ -190,6 +190,9 @@ class ModelDriver:
         self._grid_global = None  # global grid preserved under band/cell MPI
         self._physics_lat = None  # rank-local lat for physics
         self._physics_lon = None  # rank-local lon for physics
+        # Global owned-cell count for the MPAS diag (partition-static:
+        # allreduced ONCE on first use by _mpas_global_diag, then cached).
+        self._mpas_g_n_cells = None
 
         # SPMD halo backend lifecycle.  When the driver activates the
         # explicit SPMD halo backend for multi-GPU single-node cubed-
@@ -1702,10 +1705,20 @@ class ModelDriver:
             elif pm_flag == "never":
                 perf_mode = False
             elif pm_flag == "auto":
-                # auto: use perf_mode when running distributed MPI
+                # auto: use perf_mode when running distributed MPI, and
+                # ALWAYS under multi-controller SPMD (cs_spmd step 5b):
+                # collect_lightweight's jnp reductions are SPMD-global on
+                # the face-sharded arrays and their replicated scalar
+                # results are fully addressable on every process, while
+                # the full collect() would np.asarray non-fully-
+                # addressable global arrays (crash).
                 perf_mode = (
-                    self._device_config is not None
-                    and self._device_config.is_distributed
+                    (self._device_config is not None
+                     and self._device_config.is_distributed)
+                    or (self.config.distributed
+                        and getattr(self.config, "distributed_mode",
+                                    "mpi") == "spmd"
+                        and jax.process_count() > 1)
                 )
             else:
                 raise ValueError(
@@ -1737,6 +1750,25 @@ class ModelDriver:
         )
         if _latlon_mpi and perf_mode:
             perf_mode = False
+
+        # Multi-controller SPMD full collect (cmip_output or an explicit
+        # diagnostics_perf_mode='never'/'auto'-overridden request): gather
+        # the sharded state + every array kwarg to a host replica on EVERY
+        # process (process_allgather is collective), then run the standard
+        # single-process collect on each process — identical host inputs
+        # give identical accumulators on every rank, and the flush/save
+        # sites are already root-gated via _mpi_rank=process_index.
+        if (not perf_mode
+                and self.config.distributed
+                and getattr(self.config, "distributed_mode", "mpi") == "spmd"
+                and jax.process_count() > 1):
+            state = kwargs.get('state', self.state)
+            jax.block_until_ready(state.u.data)
+            kwargs['state'] = self._gather_spmd_tree_to_host(state)
+            for _k, _v in list(kwargs.items()):
+                if _k != 'state' and isinstance(_v, jax.Array):
+                    kwargs[_k] = self._gather_spmd_tree_to_host(_v)
+            return self.diagnostics.collect(**kwargs)
 
         if perf_mode:
             # Lightweight path: scalar reductions only, no gather.
@@ -3109,7 +3141,35 @@ class ModelDriver:
             MPI.COMM_WORLD.Barrier()
             return
 
-        # Single-process path
+        # Single-process path (also the multi-controller SPMD write tail:
+        # the state is gathered to a host replica first, process 0 writes).
+        _state, _q_v, _q_c, _q_r = self.state, self.q_v, self.q_c, self.q_r
+        _carry_aux = self._checkpoint_carry_aux()
+        if (self.config.distributed
+                and getattr(self.config, "distributed_mode", "mpi") == "spmd"
+                and jax.process_count() > 1):
+            # Multi-controller SPMD (cs_spmd step 5a): every process holds
+            # only its shard of the face-sharded global arrays, and every
+            # process runs this method in lockstep.  Gather each leaf to a
+            # host-replicated array on ALL processes (process_allgather is
+            # a COLLECTIVE — a rank-0-only gather would desync the
+            # program), then only process 0 falls through to the standard
+            # single-file write below.  Parity receipt for the gather
+            # pattern: validate_driver_cs_spmd_parity.py, job 8686550.
+            _gather = self._gather_spmd_tree_to_host
+            _state = _gather(_state)
+            _q_v, _q_c, _q_r = _gather(_q_v), _gather(_q_c), _gather(_q_r)
+            _carry_aux = _gather(_carry_aux)
+            # NOTE: do NOT return on non-root here.  The zarr carry guards
+            # below are pure config/pytree checks that must raise
+            # IDENTICALLY on every process (codex HIGH: a rank-0-only
+            # raise after rank 1 already returned leaves rank 1 running
+            # toward the next collective — a hang).  Non-root returns just
+            # before the actual write instead.
+            _spmd_nonroot = jax.process_index() != 0
+        else:
+            _spmd_nonroot = False
+
         ckpt_path = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}.npz"
         backend = self.config.output.checkpoint_format if hasattr(self.config.output, 'checkpoint_format') else "npz"
 
@@ -3175,19 +3235,51 @@ class ModelDriver:
                 "checkpoint_format='npz' for stateful-physics runs."
             )
 
+        # Multi-controller SPMD: every process ran the collective gather
+        # and the (identical) guards above; only process 0 writes.
+        if _spmd_nonroot:
+            return
         save_restart(
             path=ckpt_path,
-            state=self.state,
-            q_v=self.q_v,
+            state=_state,
+            q_v=_q_v,
             step=step,
             day=day,
             config=self.config,
-            q_c=self.q_c,
-            q_r=self.q_r,
-            carry_aux=self._checkpoint_carry_aux(),
+            q_c=_q_c,
+            q_r=_q_r,
+            carry_aux=_carry_aux,
             backend=backend,
         )
         logger.info(f"  Checkpoint: {ckpt_path.name}")
+
+    def _gather_spmd_tree_to_host(self, tree):
+        """Gather every non-fully-addressable jax.Array leaf of *tree* to a
+        process-local REPLICATED jax array (multi-controller SPMD;
+        collective — EVERY process must call this with the same tree).
+        Fully-addressable leaves and non-array leaves pass through
+        unchanged; pytree structure (Fields, dicts, NamedTuples) is
+        preserved.
+
+        The gathered leaf is re-wrapped ``jnp.asarray`` (NOT left as
+        numpy): downstream consumers include jnp/``lax.scan`` code (the
+        energy tracker inside the full diagnostics ``collect()`` indexes
+        with traced integers — a numpy leaf there raises
+        ``TracerArrayConversionError``, smoke job 8687797) as well as
+        plain ``np.asarray`` writers, and a single-device jax array
+        serves both."""
+        if tree is None:
+            return None
+        import numpy as _np
+        from jax.experimental import multihost_utils as _mhu
+
+        def _leaf(x):
+            if isinstance(x, jax.Array) and not x.is_fully_addressable:
+                return jnp.asarray(
+                    _np.asarray(_mhu.process_allgather(x, tiled=True)))
+            return x
+
+        return jax.tree_util.tree_map(_leaf, tree)
 
     def load_checkpoint(self, path: str | Path) -> tuple[int, float]:
         """Load state from a checkpoint using unified restart API.
@@ -3766,16 +3858,27 @@ class ModelDriver:
             T_min_l, T_max_l, finite_l.astype(T_data.dtype),
             cwv_sum_l.astype(T_data.dtype),
         ]))
-        n_owned = int(vl.partition.n_owned_cells)
         comm = _MPI.COMM_WORLD
-        g_sum_T = comm.allreduce(float(_loc[0]), op=_MPI.SUM)
-        g_sum_ps = comm.allreduce(float(_loc[1]), op=_MPI.SUM)
-        g_max_u = comm.allreduce(float(_loc[2]), op=_MPI.MAX)
-        g_T_min = comm.allreduce(float(_loc[3]), op=_MPI.MIN)
-        g_T_max = comm.allreduce(float(_loc[4]), op=_MPI.MAX)
-        g_finite = comm.allreduce(bool(_loc[5] > 0.5), op=_MPI.LAND)
-        g_sum_cwv = comm.allreduce(float(_loc[6]), op=_MPI.SUM)
-        g_n_cells = comm.allreduce(n_owned, op=_MPI.SUM)
+        # THREE batched buffer allreduces instead of eight scalar pickle
+        # rounds (each scalar ``comm.allreduce`` is its own latency-bound
+        # collective; at multi-node rank counts the per-diag latency is
+        # 8x a single round for no reason).  The finite flag (as a float)
+        # rides the MIN batch: all-ranks-finite  <=>  min(finite) == 1.
+        _sums = np.array([_loc[0], _loc[1], _loc[6]], dtype=np.float64)
+        _maxs = np.array([_loc[2], _loc[4]], dtype=np.float64)
+        _mins = np.array([_loc[3], _loc[5]], dtype=np.float64)
+        comm.Allreduce(_MPI.IN_PLACE, _sums, op=_MPI.SUM)
+        comm.Allreduce(_MPI.IN_PLACE, _maxs, op=_MPI.MAX)
+        comm.Allreduce(_MPI.IN_PLACE, _mins, op=_MPI.MIN)
+        g_sum_T, g_sum_ps, g_sum_cwv = (float(v) for v in _sums)
+        g_max_u, g_T_max = (float(v) for v in _maxs)
+        g_T_min, g_finite_min = (float(v) for v in _mins)
+        g_finite = bool(g_finite_min > 0.5)
+        # Owned-cell count is partition-static: allreduce ONCE and cache.
+        if self._mpas_g_n_cells is None:
+            self._mpas_g_n_cells = comm.allreduce(
+                int(vl.partition.n_owned_cells), op=_MPI.SUM)
+        g_n_cells = self._mpas_g_n_cells
         mean_T = g_sum_T / (g_n_cells * nlev)
         mean_ps = g_sum_ps / g_n_cells
         cwv = (g_sum_cwv / g_n_cells) if cwv_field is not None else float("nan")
@@ -4217,6 +4320,20 @@ class ModelDriver:
         _phys_state = init_physics_state(
             _ncol_phys, _nlev_phys, phys_cfg, dtype=_seed_dtype,
         )
+        # MPAS cell-partition MPI (codex round-9 HIGH): the seed above uses
+        # rank-LOCAL ncol, so ``col_index`` would be ``arange(local)`` on
+        # EVERY rank — duplicate global identities across ranks make the
+        # stochastic per-column fold decomposition-VARIANT (the exact bug
+        # class A1 increment 2 fixed for lat-band SPMD).  The partition's
+        # ``local_cells`` are the (owned+halo) GLOBAL cell ids in local
+        # order; halo columns get their true owner's id, so their draws
+        # match the owning rank (halo values are overwritten by the
+        # exchange regardless).
+        if self._voronoi_layout is not None:
+            _phys_state = _phys_state._replace(
+                col_index=jnp.asarray(
+                    self._voronoi_layout.partition.local_cells,
+                    dtype=jnp.int32))
         # Checkpoint restore (#413): the MPAS load path stashes the
         # persisted PhysicsState fields in carry_aux under
         # ``physstate_<field>``.  Overlay them onto the fresh seed and
@@ -4278,8 +4395,15 @@ class ModelDriver:
                 and not k[len("physstate_"):].startswith("meta_")
             }
             if _any_physstate:
+                # ``col_index`` is exempt from the completeness contract:
+                # it is CONSTANT derivable identity data (arange(ncol),
+                # never evolved), added 2026-07 — checkpoints written
+                # before then legitimately lack it, and the fresh seed's
+                # arange is byte-identical to what the save would have
+                # stored.  Every EVOLVING field stays mandatory.
                 _missing = [f for f in _phys_state._fields
-                            if f not in _present_fields]
+                            if f not in _present_fields
+                            and f != "col_index"]
                 if _missing:
                     raise ValueError(
                         "MPAS restart physics-state carry is INCOMPLETE: "
@@ -5814,6 +5938,10 @@ class ModelDriver:
             o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
             ghg_vmr=ctx["ghg_vmr"],
         )
+        # SPMD: commit grid-shaped forcing leaves to the state's sharding
+        # (no-op single-device / mpi4jax-distributed) — see shard_forcing.
+        from legoesm.driver.compiled_segments import shard_forcing
+        forcing = shard_forcing(forcing, self._device_config)
         return run_segment.raw, carry0, forcing
 
     # ==================================================================
@@ -5831,6 +5959,7 @@ class ModelDriver:
         from legoesm.driver.compiled_segments import (
             pack_carry, unpack_carry,
             compute_segment_length, build_segment_fn, pack_forcing,
+            shard_forcing,
         )
 
         ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
@@ -6143,6 +6272,9 @@ class ModelDriver:
                 sfc_shflx_override=_sfc_shflx_ovr,
                 sfc_lhflx_override=_sfc_lhflx_ovr,
             )
+            # SPMD: commit grid-shaped forcing leaves to the state's
+            # sharding (no-op single-device / mpi4jax-distributed).
+            forcing = shard_forcing(forcing, self._device_config)
 
             # Pack state into carry
             carry = pack_carry(
@@ -6548,9 +6680,12 @@ class ModelDriver:
 
             # Incremental CMIP monthly flush — write completed months and
             # free their memory so long runs don't accumulate all months.
-            if (diag_interval > 0 and current_step % diag_interval == 0
-                    and (self._mpi_rank is None or self._mpi_rank == 0)):
-                self.diagnostics.flush_cmip_monthly(day)
+            # EVERY process pops (under multi-controller SPMD the non-root
+            # accumulators fill identically and would otherwise grow
+            # unbounded, codex round-10); only root writes.
+            if diag_interval > 0 and current_step % diag_interval == 0:
+                _is_root = self._mpi_rank is None or self._mpi_rank == 0
+                self.diagnostics.flush_cmip_monthly(day, write=_is_root)
 
         return self._finalize_run(
             run_status, t_jit, t_start,

@@ -164,7 +164,9 @@ def _ocean_turbulent_fluxes(
         shflx = rho * constants.c_pd * config.Ch_ocean * wind * (T_sfc - forcing.T_lowest)
         lhflx = rho * constants.L_v * config.Ch_ocean * wind * (q_sfc - forcing.q_lowest)
         return shflx, lhflx
-    if config.bulk_scheme in ("coare3", "large_yeager"):
+    if config.bulk_scheme in ("most", "coare3", "large_yeager"):
+        # "most" = generic iterative MOST with fixed roughness (no Charnock);
+        # "coare3"/"large_yeager" = ocean-specific stability-dependent MOST.
         from legoesm.core.bulk_flux import compute_most_fluxes
         _tx, _ty, shflx, lhflx, _ust = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
@@ -175,7 +177,7 @@ def _ocean_turbulent_fluxes(
         return shflx, lhflx
     raise ValueError(
         f"Unknown SimpleOceanConfig.bulk_scheme {config.bulk_scheme!r}; "
-        f"expected 'constant', 'coare3', or 'large_yeager'."
+        f"expected 'constant', 'most', 'coare3', or 'large_yeager'."
     )
 
 

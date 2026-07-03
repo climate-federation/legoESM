@@ -460,18 +460,30 @@ def kuo_convection(
     zint_q_safe = _safe(zint_q)
 
     # --- Closure tendencies ---
+    # CONSERVATION (truth tier): the redistribution terms (cvgu/zint·…) MUST be
+    # applied over the SAME mask used to NORMALISE them — ``icond2`` (the
+    # icond==2 cloud layer that defines cvgu/zint) — so that
+    # Σ_icond2 ratio·(…) = ratio·zint = cvgu exactly.  The previous code applied
+    # them over ``active`` (= icond2·sign(ptenq)>0), giving
+    # ratio·Σ_active = cvgu·(zint_active/zint) ≠ cvgu whenever divergence
+    # (ptenq≤0) levels lie inside the cloud — a spurious column source/sink with
+    # truncated heating aloft.  The LOCAL moisture-convergence REMOVAL (−ptenq)
+    # stays gated on ``active`` (convection only consumes converged moisture
+    # where it converges; it integrates to −cvgu).  Then the column total-water
+    # tendency Σ(dq_v + dq_c)·dp/g closes to 0: −cvgu (drying) + ratio·zint_q
+    # (moistening) + ratio·zint_t/alpha (condensation→cloud water) = −cvgu + cvgu.
     if config.partition == "kuo1965":
         # dt/dt = cvgu/zint·(tc−t); dq/dt = −ptenq + cvgu/zint·(qvc−qv).
         ratio = (cvgu / zint_safe)[:, None]
-        dT_dt = active * ratio * (tc - T)
-        dq_v_dt = active * (-ptenq + ratio * (qvc - q_v))
+        dT_dt = icond2 * ratio * (tc - T)
+        dq_v_dt = active * (-ptenq) + icond2 * ratio * (qvc - q_v)
     elif config.partition == "anthes":
         # Kuo-Anthes (1977): heating gets (1−bkuo), moistening gets bkuo.
         bk = bkuo[:, None]
         rt_t = (cvgu / zint_t_safe)[:, None]
         rt_q = (cvgu / zint_q_safe)[:, None]
-        dT_dt = active * alpha_env * (1.0 - bk) * rt_t * (tc - T)
-        dq_v_dt = active * (-ptenq + bk * rt_q * (qvc - q_v))
+        dT_dt = icond2 * alpha_env * (1.0 - bk) * rt_t * (tc - T)
+        dq_v_dt = active * (-ptenq) + icond2 * bk * rt_q * (qvc - q_v)
     else:
         raise ValueError(
             f"Unknown Kuo partition: {config.partition!r}. "

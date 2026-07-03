@@ -89,6 +89,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     curl_vertex_cgrid,
     pad_ns_zero,
     fold_is_local,
+    north_fold_mask,
+    apply_north_fold,
     smagorinsky_biharmonic_tendency_cgrid,
     om4p25_lateral_friction_tendency_cgrid,
     qg_leith_viscosity_tendency_cgrid,
@@ -226,7 +228,8 @@ def _finish_interp_to_v(
     from legoesm.grids.halo_latlon import zero_polar_lat_ends
     f_v = zero_polar_lat_ends(f_v)
     fold = getattr(grid, "fold", None) if grid is not None else None
-    if fold_is_local(grid):
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
         n_cols = f_v.shape[1]
         n_lon = fold.perm_T.shape[0]
         last_interior_vface = 0.5 * (f[-2:-1] + f[-1:])
@@ -235,7 +238,7 @@ def _finish_interp_to_v(
         else:
             core = last_interior_vface[:, :n_lon][:, fold.perm_T]
             north = jnp.concatenate([core, core[:, 0:1]], axis=1)
-        f_v = jnp.concatenate([f_v[:-1], north], axis=0)
+        f_v = apply_north_fold(f_v, north, grid, north_mask=nmask)
     return f_v
 
 
@@ -386,7 +389,11 @@ def tvd_to_v_points(
         south_mask, north_mask = _spmd_pm
         f_south2 = jnp.where(
             south_mask, f_south2.at[1].set(f_south[1]), f_south2)
-        if fold_is_local(grid):
+        # North 2nd-neighbour clamp: the fold PARTNER on a tripole (the SPMD
+        # band preserves perm_T), the f_north edge clamp on a regular grid.
+        # fold_is_local is False under SPMD, so key off north_fold_mask (tripole
+        # + SPMD armed) — else this would edge-clamp the tripole fold seam.
+        if fold_is_local(grid) or north_fold_mask(grid) is not None:
             _fn = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
         else:
             _fn = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
@@ -422,9 +429,10 @@ def tvd_to_v_points(
     #     exactly as pad_ns_scalar produced it (perm_T of the last
     #     interior face row).
     f_tvd = zero_polar_lat_ends(f_tvd)
-    if fold_is_local(grid):
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
         north = f_tvd[-2:-1][:, grid.fold.perm_T]
-        f_tvd = jnp.concatenate([f_tvd[:-1], north], axis=0)
+        f_tvd = apply_north_fold(f_tvd, north, grid, north_mask=nmask)
     return f_tvd
 
 
@@ -518,9 +526,10 @@ def upwind_to_v_points(
     # Wall BC at the physical pole faces only (backend-aware), then the
     # tripolar north fold row exactly as pad_ns_scalar produced it.
     f_v = zero_polar_lat_ends(f_v)
-    if fold_is_local(grid):
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
         north = f_v[-2:-1][:, grid.fold.perm_T]
-        f_v = jnp.concatenate([f_v[:-1], north], axis=0)
+        f_v = apply_north_fold(f_v, north, grid, north_mask=nmask)
     return f_v
 
 
@@ -548,7 +557,11 @@ def neumann_fill_cgrid(
         the last row.
     """
     fold = getattr(grid, "fold", None) if grid is not None else None
-    use_fold = fold is not None and fold.is_active and fold.fold_j >= 0
+    # is_active (not fold_j>=0): the SPMD branch below selects the fold on the
+    # north band via where(north_mask) and the serial/MPI branch gates it on
+    # north_is_pole, so use_fold need only mark "this is a tripole" — keying on
+    # fold_j>=0 (fold-local) would skip the fold on every SPMD band (fold_j=-1).
+    use_fold = fold is not None and bool(fold.is_active)
 
     from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
     south_is_pole, north_is_pole = lat_ends_are_poles()
@@ -1837,7 +1850,8 @@ def _bc_pv_flux(
     )                                                  # (n_lat+1, n_lon, nlev)
     # At the fold, the vertex connects 4 cells: two local (fold row) and two
     # fold-partner cells.  Overwrite the north row only on the owning rank.
-    if fold_is_local(grid):
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
         h_k_partner = h_k_active[-1:, fold.perm_T, :]
         h_sw_partner = h_sw_active[-1:, fold.perm_T, :]
@@ -1845,7 +1859,7 @@ def _bc_pv_flux(
             jnp.minimum(h_k_active[-1:], h_sw_active[-1:]),
             jnp.minimum(h_k_partner, h_sw_partner),
         )
-        h_vtx = jnp.concatenate([h_vtx[:-1], h_vtx_north], axis=0)
+        h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid, north_mask=nmask)
     h_vtx = jnp.concatenate(
         [h_vtx, h_vtx[:, 0:1, :]], axis=1,
     )  # (n_lat+1, n_lon+1, nlev)
@@ -1884,13 +1898,13 @@ def _bc_pv_flux(
     # pad_ns_vector_u (an MPI pad) while the else branch did a plain concat,
     # which deadlocked across ranks under the fold-active-everywhere invariant.
     from legoesm.ocean.dynamics.latlon_cgrid_operators import fold_row
-    fold_local = fold_is_local(grid)
+    nmask = north_fold_mask(grid)
     # Fu_ext padded in the fused exchange above; (n_lat+2, n_lon+1, nlev).
-    if fold_local:
+    if fold_is_local(grid) or nmask is not None:
         _f = grid.fold
         Fu_fold_row = fold_row(
             Fu[-1:], _f.perm_T, _f.vector_sign_u, _f.perm_T.shape[0])
-        Fu_ext = jnp.concatenate([Fu_ext[:-1], Fu_fold_row], axis=0)
+        Fu_ext = apply_north_fold(Fu_ext, Fu_fold_row, grid, north_mask=nmask)
     Fu_at_v = 0.25 * (Fu_ext[:-1, :-1, :] + Fu_ext[:-1, 1:, :]
                        + Fu_ext[1:, :-1, :] + Fu_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
 
@@ -1916,11 +1930,12 @@ def _bc_pv_flux(
     # on tripolar).  Uses total velocity for consistency with total-velocity
     # Sadourny EC PV flux and WENO upwinding (#160).
     # u_ext padded in the fused exchange above (halo at cuts, zero pole).
-    if fold_local:
+    # (``nmask`` computed at the Fu fold block above — same grid, same scope.)
+    if fold_is_local(grid) or nmask is not None:
         _f = grid.fold
         u_fold_row = fold_row(
             u[-1:], _f.perm_T, _f.vector_sign_u, _f.perm_T.shape[0])
-        u_ext = jnp.concatenate([u_ext[:-1], u_fold_row], axis=0)
+        u_ext = apply_north_fold(u_ext, u_fold_row, grid, north_mask=nmask)
     u_at_v = 0.25 * (u_ext[:-1, :-1, :] + u_ext[:-1, 1:, :]
                       + u_ext[1:, :-1, :] + u_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
 

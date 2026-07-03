@@ -818,27 +818,19 @@ class ExperimentConfig(NamedTuple):
                 "with jax.distributed collectives in one program"
             )
         if self.distributed and self.distributed_mode == "spmd":
-            # Milestone-1 limitation (codex review MAJOR): checkpoint and
-            # diagnostics writers assume a single process or an mpi4jax
-            # topology — under multi-controller SPMD every process would
-            # hit the same output path (concurrent clobber) or call
-            # device_get on non-fully-addressable global arrays.  Refuse
-            # LOUDLY until the gathered root-only writers are wired.
-            if self.output.checkpoint_days > 0:
-                errors.append(
-                    "distributed_mode='spmd' does not support "
-                    "checkpointing yet (output.checkpoint_days="
-                    f"{self.output.checkpoint_days}); set "
-                    "checkpoint_days=0 — gathered root-only restart "
-                    "writes are a follow-up"
-                )
-            if self.output.diag_days > 0:
-                errors.append(
-                    "distributed_mode='spmd' does not support the "
-                    "diagnostics writer yet (output.diag_days="
-                    f"{self.output.diag_days}); set diag_days=0 — "
-                    "gathered root-only diagnostics are a follow-up"
-                )
+            # Checkpointing IS supported (cs_spmd step 5a):
+            # ``save_checkpoint`` gathers the face-sharded state to a host
+            # replica on EVERY process (collective process_allgather —
+            # see ``_gather_spmd_tree_to_host``) and process 0 writes the
+            # standard single-file restart.
+            # Diagnostics are FULLY supported (steps 5b+5c): perf mode
+            # runs ``collect_lightweight`` (SPMD-global jnp reductions,
+            # replicated scalar results); the full ``collect()``
+            # (snapshots/profiles/monthly/CMIP — cmip_output or
+            # diagnostics_perf_mode='never') gathers the sharded fields
+            # to host replicas on every process first.  All flush/save
+            # sites are root-gated via ``_mpi_rank = jax.process_index()``.
+            pass
         if self.enable_latlon_spmd:
             # Single-process multi-device lat-band path (NOT distributed_mode).
             if g.grid_type != "latlon":

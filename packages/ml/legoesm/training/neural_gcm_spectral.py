@@ -772,6 +772,137 @@ def spectral_rollout(
     return final_state
 
 
+def spectral_amip_rollout(
+    initial_state: SpectralHydrostaticState,
+    non_rad_fn,
+    rad_fn,
+    grid: GaussianGrid,
+    sigma_coord: SigmaCoordinate,
+    pe_config: SpectralPEConfig,
+    dt: float,
+    n_steps: int,
+    *,
+    sst_col: jnp.ndarray,
+    sizing_phys_state,
+    day_of_year_base: jnp.ndarray | float = 0.0,
+    seconds_offset: jnp.ndarray | float = 0.0,
+    rad_update_interval: int = 36,
+    sponge_factor: jnp.ndarray | None = None,
+    spectral_filter: jnp.ndarray | None = None,
+    ghg_vmr: dict | None = None,
+    o3_vmr: jnp.ndarray | None = None,
+    use_checkpoint: bool = False,
+) -> SpectralHydrostaticState:
+    """Prescribed-SST AMIP rollout.
+
+    ``use_checkpoint=False`` (default) is inference (no autodiff). Set
+    ``use_checkpoint=True`` for the **stability fine-tune**: each step is
+    ``jax.checkpoint``-wrapped (nothing-saveable) so reverse-mode AD through a
+    multi-day prescribed-SST rollout fits in memory (the trained physics params
+    flow via ``non_rad_fn`` / ``rad_fn``).
+
+    Mirrors :func:`spectral_rollout`'s rad-gated path but injects a prescribed
+    sea-surface temperature ``sst_col`` (shape ``(ncol,)``) into BOTH surface
+    processes:
+
+    * surface-flux / turbulence — via ``phys_state.surface_T_sfc_override``
+      (``non_rad_fn`` reads it; this is what anchors near-surface air T to the
+      prescribed SST, the essence of the AMIP protocol); and
+    * radiation — via the per-step ``forcing['T_sfc']`` dict (``rad_fn``),
+      together with the seasonal + diurnal calendar
+      (``forcing['day_of_year'/'seconds_of_day']``) advanced from
+      ``day_of_year_base`` + ``seconds_offset`` by the scan step index.
+
+    ``sst_col``, ``day_of_year_base`` and ``seconds_offset`` are TRACED args, so
+    a single JIT'd segment is reused across every month of a multi-decade run
+    (SegmentForcing doctrine — no retrace when the monthly SST / calendar
+    changes). ``sizing_phys_state`` is a template :class:`PhysicsState` (correct
+    per-scheme carry shapes, zero-valued) built once by the caller with
+    ``init_physics_state``; the traced ``sst_col`` is injected as its
+    ``surface_T_sfc_override`` here. No gradient checkpointing (inference only),
+    so this is markedly cheaper per step than the training rollout.
+
+    ``non_rad_fn`` / ``rad_fn`` are the split-radiation pair returned by
+    ``make_aimip_classical_spectral_physics(..., split_rad=True)``; both forward
+    the optional ``phys_state`` / ``forcing`` kwargs used here.
+    """
+    integrator_name = pe_config.time_integrator
+    ms = grid.ms  # for sponge filter
+    tracer_filter = _compute_tracer_filter(grid, pe_config, spectral_filter, dt)
+
+    # Inject the (traced) prescribed SST as the surface-temperature anchor.
+    phys_state = sizing_phys_state._replace(surface_T_sfc_override=sst_col)
+    _doy0 = jnp.asarray(day_of_year_base, dtype=jnp.float64)
+    _off = jnp.asarray(seconds_offset, dtype=jnp.float64)
+
+    def _forcing_at(step_idx):
+        # Elapsed simulated time -> advancing day-of-year (seasonal insolation)
+        # + wrapped seconds-of-day (diurnal cycle).
+        t = step_idx.astype(jnp.float64) * dt + _off
+        fc = {
+            "T_sfc": sst_col,
+            "day_of_year": _doy0 + t / 86400.0,
+            "seconds_of_day": jnp.mod(t, 86400.0),
+        }
+        # Prescribed transient GHG + ozone (RRTMGP is a physical scheme: it needs
+        # the actual historical concentrations to produce the radiative-forcing
+        # trend; constant across the segment). Read by the radiation factory as
+        # ghg_vmr_override / o3_vmr_override.
+        if ghg_vmr is not None:
+            fc["ghg_vmr"] = ghg_vmr
+        if o3_vmr is not None:
+            fc["o3_vmr"] = o3_vmr
+        return fc
+
+    def step_fn(carry, step_idx):
+        state, cached_rad = carry
+        fc = _forcing_at(step_idx)
+        should_refresh = (step_idx % rad_update_interval) == 0
+        new_rad = jax.lax.cond(
+            should_refresh,
+            lambda _: rad_fn(state, grid, sigma_coord, forcing=fc),
+            lambda _: cached_rad,
+            operand=None,
+        )
+
+        def tendency_fn(s):
+            non_rad = non_rad_fn(
+                s, grid, sigma_coord, phys_state=phys_state, forcing=fc,
+            )
+            combined = _add_phys_tendencies(non_rad, new_rad)
+            return spectral_pe_tendencies(
+                s, grid, sigma_coord, pe_config, combined,
+            )
+
+        new_state = dispatch_integrator(state, tendency_fn, dt, integrator_name)
+        if sponge_factor is not None:
+            new_state = apply_sponge_filter(new_state, sponge_factor, ms)
+        if spectral_filter is not None:
+            new_state = apply_spectral_filter_to_state(new_state, spectral_filter)
+        if tracer_filter is not None and new_state.tracers is not None:
+            new_state = new_state._replace(
+                tracers=apply_filter_to_tracers(
+                    new_state.tracers, tracer_filter, grid,
+                )
+            )
+        return (new_state, new_rad), None
+
+    init_rad = rad_fn(
+        initial_state, grid, sigma_coord, forcing=_forcing_at(jnp.asarray(0)),
+    )
+    _step = (
+        jax.checkpoint(
+            step_fn, prevent_cse=True,
+            policy=jax.checkpoint_policies.nothing_saveable,
+        )
+        if use_checkpoint else step_fn
+    )
+    (final_state, _), _ = jax.lax.scan(
+        _step, (initial_state, init_rad), jnp.arange(n_steps),
+    )
+    return final_state
+
+
 # =============================================================================
 # Loss function
 # =============================================================================
@@ -827,7 +958,16 @@ def _spectral_state_loss_components(
     # Per-variable scale denominators — same convention as carry_mse
     # (iter-69 fix carried over to the spectral path so identical
     # LossConfigs behave consistently across spectral and grid losses).
-    if config.normalize_by_scale:
+    if getattr(config, "residual_normalize", False):
+        # ACE2-style residual normalization: scale by the std of the 6 h
+        # field CHANGE (tendency), not the full-field std — weights the
+        # predictable tendency. Used by the ACE2-loss preset.
+        # floor guards a misconfigured 0 residual scale (codex: no zero-div).
+        T_norm = max(config.T_resid_scale ** 2, 1e-30)
+        wind_norm = max(config.wind_resid_scale ** 2, 1e-30)
+        q_norm = max(config.q_resid_scale ** 2, 1e-30)
+        ps_norm = max(config.ps_resid_scale ** 2, 1e-30)
+    elif config.normalize_by_scale:
         T_norm = config.T_scale ** 2
         wind_norm = config.wind_scale ** 2
         q_norm = config.q_scale ** 2
@@ -893,9 +1033,19 @@ def _spectral_state_loss_components(
     # variance.  Weights ``w_crps_{T,u,v,ps}`` default to 0; setting
     # them non-zero combines an MAE + MSE objective in the NeuralGCM
     # style.
-    T_scale = config.T_scale if config.normalize_by_scale else 1.0
-    wind_scale = config.wind_scale if config.normalize_by_scale else 1.0
-    ps_scale = config.ps_scale if config.normalize_by_scale else 1.0
+    # CRPS scales honor residual_normalize too (codex: else the MAE terms
+    # would keep full-field scales while the MSE switched to residual —
+    # internally inconsistent if both are active).
+    if getattr(config, "residual_normalize", False):
+        T_scale = config.T_resid_scale
+        wind_scale = config.wind_resid_scale
+        ps_scale = config.ps_resid_scale
+    elif config.normalize_by_scale:
+        T_scale = config.T_scale
+        wind_scale = config.wind_scale
+        ps_scale = config.ps_scale
+    else:
+        T_scale = wind_scale = ps_scale = 1.0
     if config.w_crps_T > 0.0:
         crps_loss = crps_loss + config.w_crps_T * _area_weighted_mean_3d(jnp.abs(dT)) / T_scale
     if config.w_crps_u > 0.0:

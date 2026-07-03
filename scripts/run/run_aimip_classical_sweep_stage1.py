@@ -66,6 +66,9 @@ BASELINE = {
 # as their own variants.  Excludes "none" on convection because the
 # dynamics-only baseline is a degenerate case for an ESM physics
 # comparison.
+# NO "none" in any category — user directive: always keep ALL 5
+# parameterization categories ACTIVE; the sweep compares real schemes only
+# (radiation is fixed to RRTMGP, not a swept axis).
 SWEEP_SPACE = {
     "aimip_convection": [
         "sbm", "dca", "kuo", "mass_flux", "edmf",
@@ -73,14 +76,18 @@ SWEEP_SPACE = {
     ],  # 9 alternatives + baseline tiedtke
     "aimip_turbulence": [
         "tke", "smagorinsky", "clubb_lite",
-        "holtslag_boville", "ysu", "edmf", "none",
-    ],  # 7 alternatives + baseline louis
+        "holtslag_boville", "ysu", "edmf",
+    ],  # 6 alternatives + baseline louis
     "aimip_gwd": [
-        "lindzen", "rayleigh", "hines", "prognostic_spectral", "none",
-    ],  # 5 alternatives + baseline mcfarlane (skip ml_emulator)
+        "lindzen", "rayleigh", "hines", "prognostic_spectral",
+    ],  # 4 alternatives + baseline mcfarlane (skip ml_emulator)
     "aimip_microphysics": [
-        "kessler", "seifert_beheng", "morrison", "thompson", "none",
-    ],  # 5 alternatives + baseline sundqvist (skip ml_emulator)
+        "kessler", "seifert_beheng", "morrison", "thompson",
+    ],  # 4 alternatives + baseline sundqvist (skip ml_emulator)
+    "aimip_cloud": [
+        "sundqvist",
+    ],  # 1 alternative + baseline xu_randall ('resolved' needs explicit
+        # condensate micro -> invalid with the diagnostic sundqvist micro)
 }
 
 BASELINE_REL = Path("config/aimip/sweep/stage1/baseline_classical_t21_rrtmgp.yaml")
@@ -95,6 +102,7 @@ def _combo_name(dim: str, scheme: str) -> str:
         "aimip_turbulence": "turb",
         "aimip_gwd": "gwd",
         "aimip_microphysics": "micro",
+        "aimip_cloud": "cloud",
     }[dim]
     return f"combo_{short_dim}_{scheme}"
 
@@ -158,7 +166,10 @@ print(m['combos'][int(sys.argv[1])]['suite'])
 
 mkdir -p results/aimip_classical_sweep_stage1/slurm_logs
 
-export PYTHONPATH=/burg-archive/glab/users/pg2328/legoESM/src:${{PYTHONPATH:-}}
+# Post-merge layout is packages/* (PEP420 namespace), NOT src/. Source the
+# shared env helper so PYTHONPATH points at packages/* — the old hardcoded
+# src/ path silently broke every array task (ModuleNotFoundError: legoesm).
+source "$REPO_ROOT/scripts/cluster/scaling_ginsburg/_env.sh"
 export JAX_PLATFORMS=cuda
 export JAX_ENABLE_X64=1
 

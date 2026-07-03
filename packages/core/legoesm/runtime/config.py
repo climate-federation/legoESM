@@ -161,11 +161,20 @@ def bootstrap(
                 _nproc = int(_val)
                 break
         if _nproc > 1:
-            try:
-                _jax.distributed.initialize()
-            except RuntimeError as e:  # second bootstrap in-process
-                if "already" not in str(e).lower():
-                    raise
+            # Idempotent: an OUTER bootstrap (parallel.early_init /
+            # initialize_jax_distributed_multiprocess in a launcher
+            # script) may already have federated the processes.  Calling
+            # the argless initialize() again then raises "must be called
+            # before any JAX calls that might initialise the XLA
+            # backend" — which the old "already"-substring guard missed
+            # (cs_spmd smoke, job 8684810).  is_initialized() is the
+            # supported idempotency check.
+            if not _jax.distributed.is_initialized():
+                try:
+                    _jax.distributed.initialize()
+                except RuntimeError as e:  # second bootstrap in-process
+                    if "already" not in str(e).lower():
+                        raise
             if _jax.process_count() != _nproc:
                 raise RuntimeError(
                     f"bootstrap: distributed_mode='spmd' launched with "

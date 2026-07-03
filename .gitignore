@@ -126,6 +126,7 @@ docs/_build/
 *.sbatch
 *.out
 *.err
+.jax_cache_aimip/
 *.pyc
 
 # mc3d Mie scattering LUT — committed MODEL DATA (microhh mie_lut_broadband.nc
