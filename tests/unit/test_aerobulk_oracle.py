@@ -16,7 +16,8 @@ What is compared
 2. ``compute_most_fluxes(scheme='large_yeager')`` vs aerobulk ``ncar``
    (same LY09 physics), at 10/10 m and the OMIP-style 2/10 m height split.
 3. ``compute_most_fluxes(scheme='coare3')`` vs aerobulk ``coare3p0``
-   (gustiness enabled: COARE 3.0 always includes it; zi=600 m, beta=1.25).
+   (scheme-native gustiness default: COARE 3.0 includes it; zi=600 m,
+   beta=1.25 — the kernel default matches aerobulk).
 
 Convention alignment (harness glue, per the fidelity doctrine this lives
 in the TEST, not the model): NEMO-style Exner potential temperature, 0.98
@@ -226,8 +227,9 @@ def test_core_coare3_matches_aerobulk_coare3p0(oracle, heights):
         jnp.asarray(inp["u"]), jnp.asarray(inp["v"]), jnp.asarray(theta),
         jnp.asarray(inp["q_air"]), jnp.asarray(oracle["theta_s"]),
         jnp.asarray(oracle["ssq"]), jnp.asarray(rho), z_ref=10.0,
-        scheme="coare3", n_iter=5, L_latent=jnp.asarray(oracle["L_sst"]),
-        gustiness_w_zi=600.0, gustiness_beta=1.25, **kw)
+        # gustiness_w_zi left at None: the scheme-native coare3 default
+        # (600 m, beta 1.25) IS the aerobulk coare3p0 convention under test.
+        scheme="coare3", n_iter=5, L_latent=jnp.asarray(oracle["L_sst"]), **kw)
     tag = f"coare3p0_{heights}"
     m = oracle["core_mask"]
     _gate(f"coare3 {heights} tau_x", tau_x, -d[f"{tag}_taux"], _FLOOR_TAU,

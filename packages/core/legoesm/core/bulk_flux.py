@@ -275,6 +275,14 @@ _COARE_CHARNOCK_U_LO = 10.0   # [m/s] U_10N below which charnock stays at base
 _COARE_CHARNOCK_U_HI = 18.0   # [m/s] U_10N at/above which charnock = hi value
 _COARE_CHARNOCK_HI = 0.018    # charnock value at/above U_HI
 
+# --- Scheme-native gustiness / calm-wind conventions (AeroBulk parity) ---
+# COARE 3.0 has convective gustiness BUILT IN (aerobulk mod_blk_coare3p0:
+# zi0 = 600 m, Beta0 = 1.25) plus a 0.2 m/s bulk-wind floor; LY09/NEMO ncar
+# has NO gustiness but floors the bulk wind at 0.5 m/s.
+_COARE_GUSTINESS_ZI = 600.0   # [m] aerobulk coare3p0 zi0 (BL scale height)
+_COARE_UB_FLOOR = 0.2         # [m/s] aerobulk coare3p0 bulk-wind floor
+_LY_UB_FLOOR = 0.5            # [m/s] LY09 / NEMO sbcblk_algo_ncar wind floor
+
 
 # ============================================================================
 # Main MOST flux computation
@@ -296,7 +304,7 @@ def compute_most_fluxes(
     n_iter=5,
     charnock=0.011,
     L_latent=None,
-    gustiness_w_zi=0.0,
+    gustiness_w_zi=None,
     gustiness_beta=1.25,
     return_2m=False,
     z_diag=2.0,
@@ -337,6 +345,11 @@ def compute_most_fluxes(
         Number of MOST iterations (default 5).
     charnock : float
         Charnock coefficient (COARE only, default 0.011).
+    gustiness_w_zi : float or None
+        COARE convective-gustiness BL depth z_i [m].  None (default) =
+        scheme-native: 600 m for ``"coare3"`` (AeroBulk/Fairall 2003 —
+        gustiness is part of the algorithm), 0 (off) for the others.
+        Explicit 0.0 disables for any scheme.
 
     Returns
     -------
@@ -356,6 +369,13 @@ def compute_most_fluxes(
     # wrong air-sea physics. ``coare3``/``large_yeager`` take dedicated
     # branches; ``constant``/``most`` are the (valid) fixed-roughness else path.
     validate_bulk_scheme(scheme)
+
+    # Scheme-native gustiness default (AeroBulk/COARE parity, static Python
+    # resolved at trace time): COARE 3.0 includes convective gustiness as
+    # part of the algorithm (zi = 600 m), the other schemes do not.  Pass an
+    # explicit value (0.0 = off) to override.
+    if gustiness_w_zi is None:
+        gustiness_w_zi = _COARE_GUSTINESS_ZI if scheme == "coare3" else 0.0
 
     # Resolve scalar reference heights. ``z_ref`` is the wind/momentum
     # height (always = z_u in the formulas below); z_t, z_q default to
@@ -386,7 +406,11 @@ def compute_most_fluxes(
     theta_star = KAPPA * dT / jnp.maximum(ln_zt_z0t, 0.5)
     q_star_val = KAPPA * dq / jnp.maximum(ln_zq_z0q, 0.5)
 
-    carry = (u_star, z0, z0_t, z0_q, theta_star, q_star_val)
+    # U_eff (the bulk/effective wind incl. gustiness + scheme floor) rides in
+    # the carry so the post-loop stress normalization tau = rho u*^2 u/U_eff
+    # (AeroBulk semantics: tau = rho Cd Ub u) uses the CONVERGED value; with
+    # gustiness off and no floor binding, U_eff == wind_speed byte-identically.
+    carry = (u_star, z0, z0_t, z0_q, theta_star, q_star_val, wind_speed)
     # The MOST iteration mixes the (possibly float32) input state with float64
     # physical constants (G, NU_AIR, c_pd via the virtual-T coefficient), so a
     # carry leaf would silently promote float32 -> float64 mid-loop and trip
@@ -396,14 +420,15 @@ def compute_most_fluxes(
     _carry_dtypes = tuple(c.dtype for c in carry)
 
     def body_fn(i, carry):
-        u_star, z0, z0_t, z0_q, theta_star, q_star_val = carry
+        u_star, z0, z0_t, z0_q, theta_star, q_star_val, _ = carry
         u_star_safe = jnp.maximum(u_star, 1e-6)
 
         # Virtual potential temperature scale (1/ε − 1 ≈ 0.6078)
         theta_v_star = theta_star + _vT_coef * T_atm * q_star_val
 
-        # COARE 3.0 convective gustiness (opt-in; gustiness_w_zi=0 => off =>
-        # byte-identical, so the OMIP/forward-default paths are unchanged).  Over
+        # COARE 3.0 convective gustiness (scheme-native default: ON for
+        # coare3 with z_i = 600 m per AeroBulk/Fairall 2003, OFF otherwise;
+        # explicit gustiness_w_zi=0.0 disables).  Over
         # a calm but convectively-unstable warm ocean the mean wind alone gives
         # an anemic flux (the tropical hfls ~45 vs ~120 W/m² bias); the
         # free-convection velocity scale w* = (g·z_i·<w'θv'>/θv)^(1/3) adds a
@@ -412,10 +437,27 @@ def compute_most_fluxes(
         # +; unstable only).
         if gustiness_w_zi > 0.0:
             wpthvp = jnp.maximum(u_star_safe * theta_v_star, 0.0)
-            wstar = jnp.cbrt(G * gustiness_w_zi * wpthvp / T_v)
+            # cbrt(0) has an infinite derivative, so a stable column (buoyancy
+            # flux floored to exactly 0) would inject a NaN reverse-mode
+            # gradient into every trainable upstream (charnock, state).  Floor
+            # the cbrt argument at a tiny positive constant: the max() kink
+            # clamps the stable-side gradient to 0 (physically correct — no
+            # free convection when stable) and the primal offset is w* ~ 1e-8
+            # m/s, negligible next to the resolved wind.  (1e-24 <= 1e-6 safety
+            # floor, exempt from the inline-coeff ratchet.)
+            wstar = jnp.cbrt(
+                jnp.maximum(G * gustiness_w_zi * wpthvp / T_v, 1e-24)
+            )
             U_eff = jnp.sqrt(wind_speed ** 2 + (gustiness_beta * wstar) ** 2)
         else:
             U_eff = wind_speed
+
+        # Scheme-native calm-wind floors on the bulk (effective) wind, per
+        # the reference implementations (see module constants above).
+        if scheme == "coare3":
+            U_eff = jnp.maximum(U_eff, _COARE_UB_FLOOR)
+        elif scheme == "large_yeager":
+            U_eff = jnp.maximum(U_eff, _LY_UB_FLOOR)
 
         # Inverse Obukhov length: 1/L = −κ g θ_v* / (u*² T_v).
         #
@@ -543,7 +585,7 @@ def compute_most_fluxes(
             z0_q_new = z0_q  # not used in coefficient path
 
             return (u_star_new, z0_new, z0_t_new, z0_q_new,
-                    theta_star_new, q_star_new)
+                    theta_star_new, q_star_new, U_eff)
 
         else:
             z0_new = z0
@@ -565,7 +607,7 @@ def compute_most_fluxes(
         q_star_new = KAPPA * dq / denom_q
 
         return (u_star_new, z0_new, z0_t_new, z0_q_new,
-                theta_star_new, q_star_new)
+                theta_star_new, q_star_new, U_eff)
 
     def _body_fn_dtype_stable(i, carry):
         out = body_fn(i, carry)
@@ -573,12 +615,15 @@ def compute_most_fluxes(
                      for o, d in zip(out, _carry_dtypes))
 
     carry = jax.lax.fori_loop(0, n_iter, _body_fn_dtype_stable, carry)
-    u_star, z0, z0_t, z0_q, theta_star, q_star_val = carry
+    u_star, z0, z0_t, z0_q, theta_star, q_star_val, U_eff_final = carry
 
-    # Fluxes from scaling parameters
+    # Fluxes from scaling parameters.  Stress normalization: tau =
+    # -rho u*^2 u/U_eff == -rho Cd U_eff u (AeroBulk/COARE: one factor of the
+    # bulk wind incl. gust/floor, one raw wind component for direction and
+    # magnitude); reduces to u/|U| exactly when U_eff == wind_speed.
     _L = constants.L_v if L_latent is None else L_latent
-    tau_x = -rho * u_star ** 2 * u_rel / wind_speed
-    tau_y = -rho * u_star ** 2 * v_rel / wind_speed
+    tau_x = -rho * u_star ** 2 * u_rel / U_eff_final
+    tau_y = -rho * u_star ** 2 * v_rel / U_eff_final
     shflx = rho * constants.c_pd * u_star * theta_star
     lhflx = rho * _L * u_star * q_star_val
 

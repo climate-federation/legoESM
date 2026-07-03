@@ -192,9 +192,10 @@ def build_parser():
                         type=float, default=None,
                         help="COARE 3.0 convective-gustiness boundary-layer depth "
                              "z_i [m] for the MOST surface fluxes (needs "
-                             "--surface-bulk-scheme coare3/large_yeager). 0/unset "
-                             "= off (byte-identical); ~600 enables the w* "
-                             "free-convection gust so a calm warm ocean evaporates "
+                             "--surface-bulk-scheme coare3/large_yeager). Unset = "
+                             "scheme-native (coare3: 600 m per AeroBulk/Fairall "
+                             "2003; large_yeager/constant: off). 0 = force off. "
+                             "The w* gust lets a calm warm ocean evaporate "
                              "(fixes the persistent tropical hfls<<Earth / R_TOA "
                              "imbalance). Applied to the atmosphere surface layer "
                              "AND the slab ocean heat budget (kept consistent).")
@@ -681,14 +682,14 @@ def main():
             # Match the slab heat-budget turbulent fluxes to the atmosphere
             # surface layer (interface energy consistency); see SimpleOceanConfig.
             bulk_scheme=args.surface_bulk_scheme,
-            gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
+            gustiness_w_zi=args.surface_gustiness_zi,
         )
         overrides["ocean_mode"] = "two_layer"
     else:
         overrides["ocean_config"] = SimpleOceanConfig(
             mode=args.ocean, h_mix=args.ocean_h_mix,
             bulk_scheme=args.surface_bulk_scheme,
-            gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
+            gustiness_w_zi=args.surface_gustiness_zi,
         )
         # ocean_mode log label (fixed/slab -> "slab").
         overrides["ocean_mode"] = "slab"

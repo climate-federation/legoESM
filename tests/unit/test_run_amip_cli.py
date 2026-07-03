@@ -484,7 +484,9 @@ def test_tuned_slab_knobs_flow_to_config():
     d = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
     assert d.surface_bulk_scheme == "constant"
-    assert d.surface_gustiness_zi == 0.0
+    # None = scheme-native gustiness (coare3: 600 m AeroBulk default, others
+    # off).  With the default "constant" scheme this is still off.
+    assert d.surface_gustiness_zi is None
     assert d.cloud_q_c_diagnostic is None
     assert d.cloud_rh_crit is None
     assert d.convective_cloud is False
@@ -638,16 +640,19 @@ def test_q_c_diagnostic_threads_to_config():
     assert cfg.cloud_q_c_diagnostic == pytest.approx(3e-4)
 
 
-def test_gustiness_defaults_off():
-    """Gustiness and q_c_diagnostic disabled by default — opt-in only.
-    (--gustiness-zi default is 0.0 = off after the run_coupled-mirrored #647
-    knobs; cloud_q_c_diagnostic stays None = CloudConfig default.)"""
+def test_gustiness_defaults_scheme_native():
+    """--gustiness-zi unset = None = scheme-native (AeroBulk parity): off for
+    the default "constant" scheme, 600 m built-in for coare3; explicit 0
+    forces off.  cloud_q_c_diagnostic stays None = CloudConfig default."""
     parser = build_arg_parser()
     args = parser.parse_args(["--dataset", "analytical"])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
-    assert cfg.surface_gustiness_zi == 0.0
+    assert cfg.surface_gustiness_zi is None
     assert cfg.cloud_q_c_diagnostic is None
+    args0 = parser.parse_args(["--dataset", "analytical", "--gustiness-zi", "0"])
+    cfg0 = build_config_from_args(_postprocess_args(args0, parser))
+    assert cfg0.surface_gustiness_zi == 0.0
 
 
 def test_cloud_tuning_flags_thread_to_config():
