@@ -66,8 +66,12 @@ def _grid_and_z(run_dir: Path):
     if nlev == cfg.n_levels - 1:
         cfg = dataclasses.replace(cfg, vertical_coordinate="masked_zco")
         z = dino_lat_lon_vertical(grid, cfg)
-    else:
+    elif nlev in (None, cfg.n_levels):
         z = create_dino_z_star(cfg)
+    else:
+        raise SystemExit(
+            f"snapshots have {nlev} levels; expected {cfg.n_levels} "
+            f"(legacy z*) or {cfg.n_levels - 1} (masked_zco)")
     return cfg, grid, np.asarray(z.dz_ref)
 
 
