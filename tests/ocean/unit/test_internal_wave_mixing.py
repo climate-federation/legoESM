@@ -478,6 +478,40 @@ def test_model_rejects_orphan_iwm_forcing():
         LatLonCGridOceanModel(grid, z, cfg, iwm_forcing=maps)
 
 
+def test_model_fast_path_kpp_plus_iwm_adds_wave_K(grid_z_state):
+    """The physics-provided-K FAST path (KPP pipeline surfaces K_v/A_v on
+    the tendencies — the latlon_bathy driver configuration) must ADD the
+    zdfiwm contribution rather than reject it (faith_ll2 job 8781839
+    regression): one real step with KPP+IWM runs finite and differs from
+    KPP alone."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    grid, z, physics, CFG = _iwm_model_pieces(
+        _IWM_STRONG._replace(power_nsq_wm2=5.0e-3))
+    physics_kpp = physics._replace(
+        vertical_mixing=physics.vertical_mixing._replace(scheme="kpp"))
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0)
+    cfg_on = CFG.from_flat(A_h=0.0, A_v=0.0, K_h=0.0, K_v=0.0,
+                           physics=physics_kpp,
+                           implicit_vertical_mixing=True)
+    physics_off = physics_kpp._replace(
+        vertical_mixing=physics_kpp.vertical_mixing._replace(
+            iwm=IWMConfig(enabled=False)))
+    cfg_off = cfg_on._replace(physics=physics_off)
+    dt = 1800.0
+    s_on = LatLonCGridOceanModel(grid, z, cfg_on).step(state, dt)
+    s_off = LatLonCGridOceanModel(grid, z, cfg_off).step(state, dt)
+    assert bool(jnp.all(jnp.isfinite(s_on.T.data)))
+    dT = np.asarray(s_on.T.data) - np.asarray(s_off.T.data)
+    assert float(np.max(np.abs(dT))) > 0.0
+
+
 def test_model_step_with_iwm_runs_and_mixes(grid_z_state):
     """One real model step with IWM on: finite state, and the wave mixing
     measurably smooths the near-bottom stratification vs the same step
