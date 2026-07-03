@@ -1037,7 +1037,12 @@ def dino_masked_zco_coordinate(z_ref, H_bowl):
     from legoesm.ocean.vertical import create_partial_cell_coordinate
 
     abs_half = jnp.abs(jnp.asarray(z_ref.z_half_ref))       # (nlev+1,)
-    centers = 0.5 * (abs_half[:-1] + abs_half[1:])          # (nlev,)
+    # gdept(k) = the coordinate's own t-depths — ANALYTIC (mi96 zt=k+0.5)
+    # when the ladder was built with analytic_t_depths=True; NEMO's wet
+    # test uses pdept_1d, and midpoint surrogates put k_bot one level
+    # too shallow wherever H falls between the midpoint and the analytic
+    # centre (up to ~4.6 m apart on the DINO grid — codex r3 HIGH).
+    centers = jnp.abs(jnp.asarray(z_ref.z_full_ref))        # (nlev,)
     H = jnp.asarray(H_bowl)
     # NEMO rule: wet iff gdept(k) < H  (strict; usrdef_zgr WHERE clause)
     n_wet = jnp.sum(centers[None, None, :] < H[..., None], axis=-1)
@@ -1071,8 +1076,22 @@ def dino_lat_lon_vertical(grid, cfg: DINOConfig | None = None):
     if cfg.vertical_coordinate == "zstar":
         return z_ref
     if cfg.vertical_coordinate == "masked_zco":
+        # NEMO DINO_R1 ladder: jpk = cfg.n_levels counts INTERFACE
+        # indices (level jpk is a permanently-masked dummy), so the wet
+        # cell count is n_levels-1 = 35, and the t-depths are ANALYTIC
+        # (mi96_1d zt = k+0.5) — verified against the reference run's
+        # deptht to 1.5e-4 m (float32 file storage).  The legacy
+        # "zstar" path keeps the historical 36-cell midpoint ladder.
+        z_nemo = create_levy_stretched_z_star(
+            n_levels=cfg.n_levels - 1,
+            H_max=cfg.H_deep,
+            dz_min=cfg.dz_min,
+            k_th=float(cfg.k_th),
+            a_cr=cfg.a_cr,
+            analytic_t_depths=True,
+        )
         coord, _H_snap = dino_masked_zco_coordinate(
-            z_ref, dino_lat_lon_bowl(grid, cfg))
+            z_nemo, dino_lat_lon_bowl(grid, cfg))
         return coord
     raise ValueError(
         f"unknown DINOConfig.vertical_coordinate "

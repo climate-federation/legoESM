@@ -86,3 +86,44 @@ def test_unknown_quadrature_raises():
     rho = _RHO0 + np.zeros((2, 2, 4))
     with pytest.raises(ValueError, match="quadrature"):
         _run(rho, np.full(4, 50.0), "simpson")
+
+
+def test_t_depth_ladder_form():
+    """The t-depth-ladder e3w form equals the h-derived form for
+    midpoint centres, and follows the ladder when centres are analytic
+    (non-midpoint)."""
+    rng = np.random.default_rng(2)
+    nlev = 9
+    dz = np.geomspace(12.0, 300.0, nlev)
+    rho = _RHO0 + rng.normal(size=(2, 2, nlev))
+
+    w = np.concatenate([[0.0], np.cumsum(dz)])
+    t_mid = 0.5 * (w[:-1] + w[1:])
+
+    T = jnp.asarray(rho)
+    S = jnp.zeros_like(T)
+    mask = jnp.ones(T.shape[:-1])
+
+    def run(ladder):
+        _, _, p = iterate_eos_and_pressure_anomaly(
+            T, S, mask, lambda f: f, lambda T_, S_, p_: T_,
+            jnp.asarray(dz), _RHO0, _G,
+            quadrature="nemo_trapezoid",
+            trapezoid_t_depth_1d=(None if ladder is None
+                                  else jnp.asarray(ladder)))
+        return np.asarray(p)
+
+    np.testing.assert_allclose(run(t_mid), run(None), rtol=1e-12)
+
+    # analytic-like centres (shifted off the midpoints): F90 recurrence
+    # with e3w from the ladder
+    t_ana = t_mid + np.linspace(0.5, 3.0, nlev)
+    p_lad = run(t_ana)
+    rho_prime = rho - _RHO0
+    P = np.zeros_like(rho_prime)
+    P[..., 0] = 0.5 * _G * (2.0 * t_ana[0]) * rho_prime[..., 0]
+    for k in range(1, nlev):
+        P[..., k] = (P[..., k - 1]
+                     + 0.5 * _G * (t_ana[k] - t_ana[k - 1])
+                     * (rho_prime[..., k] + rho_prime[..., k - 1]))
+    np.testing.assert_allclose(p_lad, P, rtol=1e-12)

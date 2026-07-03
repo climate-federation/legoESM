@@ -1318,6 +1318,12 @@ def _bc_geometry_and_density(
                       if (isinstance(z_coord, OceanPartialCellCoordinate)
                           and _pgf_quadrature == "nemo_trapezoid")
                       else None),
+        # NEMO depth_to_e3 w-spacings from the coordinate's own t-depth
+        # ladder (analytic for the DINO masked-zco grid; algebraically
+        # the h-derived midpoint form otherwise).
+        trapezoid_t_depth_1d=(jnp.abs(z_coord.z_full_ref)
+                              if _pgf_quadrature == "nemo_trapezoid"
+                              else None),
     )
 
     p_prime_filled = neumann_fill_cgrid(p_prime, mask, grid=grid)

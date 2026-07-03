@@ -274,6 +274,7 @@ def create_levy_stretched_z_star(
     dz_min: float,
     k_th: float,
     a_cr: float,
+    analytic_t_depths: bool = False,
 ) -> OceanZStarCoordinate:
     """Construct a Lévy (2010) / Madec-Imbard (1996) stretched z* grid.
 
@@ -293,6 +294,15 @@ def create_levy_stretched_z_star(
     NEMO note on indexing: the formula's "K" in the literature is
     the interface count (= n_levels + 1), NOT the cell count.
     See Madec & Imbard 1996 / Lévy et al. 2010.
+
+    ``analytic_t_depths=False`` (default, bit-identical legacy): cell
+    centres are interface midpoints.  ``True``: cell centres are the
+    ANALYTIC stretching formula at k+0.5 — exactly NEMO's ``mi96_1d``
+    ``pdept_1d`` (zgr_lib.F90: ``zt = jk + 0.5``), which on a stretched
+    grid is NOT the interface midpoint (up to ~4.6 m difference on the
+    DINO 36-interface ladder).  NEMO jpk convention: NEMO's ``jpk``
+    counts INTERFACE indices (its level jpk is a permanently-masked
+    dummy), so a NEMO config with jpk=36 maps to ``n_levels=35`` here.
     """
     if n_levels < 2:
         raise ValueError(f"n_levels must be >= 2, got {n_levels!r}")
@@ -324,7 +334,17 @@ def create_levy_stretched_z_star(
     z_half_ref = jnp.asarray(z_half_list)
 
     dz_ref = z_half_ref[:-1] - z_half_ref[1:]
-    z_full_ref = 0.5 * (z_half_ref[:-1] + z_half_ref[1:])
+    if analytic_t_depths:
+        # NEMO mi96_1d pdept_1d: the SAME stretching formula at k+0.5
+        # (one centre per cell, k = 1..n_levels; NEMO's dummy jpk-th
+        # centre below the last interface is not represented).
+        t_pos = [
+            _levy_depth_at_k(k + 0.5, a0, a1, a2, float(k_th), a_cr)
+            for k in range(1, n_levels + 1)
+        ]
+        z_full_ref = jnp.asarray([-t for t in t_pos])
+    else:
+        z_full_ref = 0.5 * (z_half_ref[:-1] + z_half_ref[1:])
     dz_half_ref = z_full_ref[:-1] - z_full_ref[1:]
 
     return OceanZStarCoordinate(

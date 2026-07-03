@@ -80,6 +80,7 @@ def iterate_eos_and_pressure_anomaly(
     rho_ref_z_static: jnp.ndarray | None = None,
     allow_baroclinic_f32: bool = False,
     quadrature: str = "cell_integral",
+    trapezoid_t_depth_1d: jnp.ndarray | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Run the standard 2-pass EOS iteration and form ``p_prime``.
 
@@ -110,6 +111,12 @@ def iterate_eos_and_pressure_anomaly(
          when ``is_active_3d`` is provided.  The two rules agree on a
          UNIFORM grid; on stretched levels they differ per interface by
          ``(g/4)·(dz(k)−dz(k−1))·(ρ'(k−1)−ρ'(k))``.
+         ``trapezoid_t_depth_1d`` (positive t-depths, shape (nlev,)):
+         when given, the w-spacings come from the ACTUAL t-depth ladder
+         — ``e3w(1) = 2·gdept(1)``, ``e3w(k) = gdept(k)−gdept(k−1)`` —
+         exactly NEMO ``depth_to_e3``.  For interface-midpoint centres
+         this is algebraically identical to the h-derived form; for
+         analytic (mi96) centres it is the exact NEMO quadrature.
 
     Parameters
     ----------
@@ -249,10 +256,20 @@ def iterate_eos_and_pressure_anomaly(
         if is_active_3d is not None:
             rho_q = jnp.where(is_active_3d, rho_q, jnp.zeros_like(rho_q))
         pair = rho_q[..., 1:] + rho_q[..., :-1]          # (..., nlev-1)
-        h_b = jnp.broadcast_to(h_q, rho_q.shape)
-        e3w_int = 0.5 * (h_b[..., 1:] + h_b[..., :-1])   # (..., nlev-1)
-        inc = jnp.concatenate(
-            [h_b[..., :1] * rho_q[..., :1], e3w_int * pair], axis=-1)
+        if trapezoid_t_depth_1d is not None:
+            t_q = jnp.asarray(trapezoid_t_depth_1d,
+                              dtype=jnp.float64 if hi_precision_pressure
+                              else None)
+            e3w_int = t_q[1:] - t_q[:-1]                 # (nlev-1,)
+            e3w_1 = 2.0 * t_q[:1]                        # NEMO depth_to_e3
+            inc = jnp.concatenate(
+                [e3w_1 * rho_q[..., :1],
+                 jnp.broadcast_to(e3w_int, pair.shape) * pair], axis=-1)
+        else:
+            h_b = jnp.broadcast_to(h_q, rho_q.shape)
+            e3w_int = 0.5 * (h_b[..., 1:] + h_b[..., :-1])
+            inc = jnp.concatenate(
+                [h_b[..., :1] * rho_q[..., :1], e3w_int * pair], axis=-1)
         p_prime = (0.5 * g) * jnp.cumsum(inc, axis=-1)
         return rho, rho_prime, p_prime
 

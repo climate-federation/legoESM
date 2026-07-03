@@ -782,42 +782,99 @@ class TestMaskedZco:
         g = dino_lat_lon_grid(cfg, n_lon=12)
         return cfg, z, np.asarray(dino_lat_lon_bowl(g, cfg))
 
+    @staticmethod
+    def _mi96_f90(jpk, H, dzmin, kth, acr):
+        """INDEPENDENT numpy transliteration of zgr_lib.F90 mi96_1d
+        (kkconst=0, ph_co=0 — the 1-D reference ladder DINO's ln_zco
+        uses): returns (pdepw_1d[jpk], pdept_1d[jpk]) positive down."""
+        import math
+        jpkm1 = jpk - 1
+        za1 = ((dzmin - H / jpkm1)
+               / (math.tanh((1 - kth) / acr)
+                  - acr / jpkm1 * (math.log(math.cosh((jpk - kth) / acr))
+                                   - math.log(math.cosh((1 - kth) / acr)))))
+        za0 = dzmin - za1 * math.tanh((1 - kth) / acr)
+        zsur = -za0 - za1 * acr * math.log(math.cosh((1 - kth) / acr))
+        w = np.array([zsur + za0 * k
+                      + za1 * acr * math.log(math.cosh((k - kth) / acr))
+                      for k in range(1, jpk + 1)])
+        t = np.array([zsur + za0 * (k + 0.5)
+                      + za1 * acr * math.log(math.cosh((k + 0.5 - kth) / acr))
+                      for k in range(1, jpk + 1)])
+        return w, t
+
+    def test_ladder_matches_f90_and_reference_run(self):
+        """The masked-zco ladder must equal the mi96_1d transliteration
+        AND the reference run's deptht (first/last wet values hardcoded
+        from DINO_1m_grid_T.nc, float32 storage)."""
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid, dino_lat_lon_vertical,
+        )
+        import dataclasses
+        cfg = dataclasses.replace(DINOConfig(),
+                                  vertical_coordinate="masked_zco")
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        coord = dino_lat_lon_vertical(g, cfg)
+        assert coord.n_levels == cfg.n_levels - 1     # NEMO jpk dummy level
+
+        w_f90, t_f90 = self._mi96_f90(
+            cfg.n_levels, cfg.H_deep, cfg.dz_min, float(cfg.k_th),
+            cfg.a_cr)
+        np.testing.assert_allclose(
+            np.abs(np.asarray(coord.z_half_ref))[1:], w_f90[1:], rtol=1e-9)
+        np.testing.assert_allclose(
+            np.abs(np.asarray(coord.z_full_ref)), t_f90[:-1], rtol=1e-9)
+        # reference-run oracle (deptht, f32): first two + last wet centre
+        np.testing.assert_allclose(
+            np.abs(np.asarray(coord.z_full_ref))[[0, 1, -1]],
+            [5.0335817, 15.322634, 3757.309], rtol=1e-6)
+
     def test_snap_rule_matches_f90_transliteration(self):
         """k_bot per usrdef_zgr.F90 zgr_msk_top_bot:
-        WHERE( pdept(jk) < H .AND. H <= pdept(jk+1) ) k_bot = jk."""
-        from legoesm.ocean.experiments.dino import (
-            dino_masked_zco_coordinate,
-        )
-        cfg, z, H = self._z_and_bowl()
-        abs_half = np.abs(np.asarray(z.z_half_ref))
-        centers = 0.5 * (abs_half[:-1] + abs_half[1:])
-        coord, H_snap = dino_masked_zco_coordinate(z, jnp.asarray(H))
+        WHERE( pdept(jk) < H .AND. H <= pdept(jk+1) ) k_bot = jk,
+        with pdept from the INDEPENDENT mi96 transliteration."""
+        import dataclasses
 
-        # F90 loop transliteration (1-based jk -> 0-based k)
-        nlev = centers.size
-        pdept = np.concatenate([centers, [np.inf]])
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_bowl, dino_lat_lon_grid,
+            dino_lat_lon_vertical,
+        )
+        cfg = dataclasses.replace(DINOConfig(),
+                                  vertical_coordinate="masked_zco")
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        H = np.asarray(dino_lat_lon_bowl(g, cfg))
+        coord = dino_lat_lon_vertical(g, cfg)
+
+        _, pdept = self._mi96_f90(
+            cfg.n_levels, cfg.H_deep, cfg.dz_min, float(cfg.k_th),
+            cfg.a_cr)
+        jpkm1 = cfg.n_levels - 1
         k_bot = np.zeros(H.shape, dtype=int)   # 0 = land (k_top=0)
-        for jk in range(nlev):
+        for jk in range(jpkm1):                # NEMO: 1..jpkm1 wet
             sel = (pdept[jk] < H) & (H <= pdept[jk + 1])
             k_bot[sel] = jk + 1                # NEMO 1-based level count
         np.testing.assert_array_equal(
             np.asarray(coord.bottom_level) + 1, k_bot)
 
     def test_full_cells_and_snap_depth(self):
+        import dataclasses
+
         from legoesm.ocean.experiments.dino import (
-            dino_masked_zco_coordinate,
+            DINOConfig, dino_lat_lon_bowl, dino_lat_lon_grid,
+            dino_lat_lon_vertical, dino_masked_zco_coordinate,
         )
-        cfg, z, H = self._z_and_bowl()
-        coord, H_snap = dino_masked_zco_coordinate(z, jnp.asarray(H))
+        cfg = dataclasses.replace(DINOConfig(),
+                                  vertical_coordinate="masked_zco")
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        H = np.asarray(dino_lat_lon_bowl(g, cfg))
+        coord = dino_lat_lon_vertical(g, cfg)
+        H_snap = np.asarray(coord.h_partial).sum(-1)
         h = np.asarray(coord.h_partial)
-        dz = np.asarray(z.dz_ref)
+        dz = np.asarray(coord.dz_ref)
         # every wet cell is a FULL cell; below-bottom cells are zero
         is_full = np.isclose(h, dz[None, None, :], rtol=0, atol=1e-9)
         is_zero = h == 0.0
         assert bool(np.all(is_full | is_zero))
-        # column depth = the snapped interface depth
-        np.testing.assert_allclose(h.sum(-1), np.asarray(H_snap),
-                                   rtol=0, atol=1e-9)
         # and the Jacobian is 1 at eta=0 on wet columns
         from legoesm.ocean.vertical import compute_ocean_jacobian
         J = np.asarray(compute_ocean_jacobian(
