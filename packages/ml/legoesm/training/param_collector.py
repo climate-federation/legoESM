@@ -71,6 +71,8 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.atmosphere.physics.microphysics.sdm.config",
     "legoesm.atmosphere.physics.microphysics.fast_sbm.config",
     "legoesm.atmosphere.physics.microphysics.aerosol_activation",
+    "legoesm.atmosphere.physics.microphysics.arg_activation",
+    "legoesm.atmosphere.physics.microphysics.prognostic_aerosol",
     "legoesm.atmosphere.physics.turbulence.config",
     "legoesm.atmosphere.physics.turbulence.pbl_height",
     "legoesm.atmosphere.physics.radiation.config",

@@ -155,6 +155,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # 2026-06-10); the unknown-scheme raise itself is unchanged.
         ("packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/integration.py", "get_gwd_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/integration.py", "make_gwd_physics"),
+        # Aerosol -> cloud-droplet activation scheme selector (proxy vs ARG2000);
+        # a typo'd scheme must raise, not silently run different activation.
+        ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/arg_activation.py", "activated_nc_field"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py", "_get_microphysics_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py", "make_microphysics_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py", "morrison_microphysics"),
