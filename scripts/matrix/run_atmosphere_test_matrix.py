@@ -282,24 +282,22 @@ def _build_test_matrix() -> list[TestCase]:
                 "shallow_water", "williamson6", g, res[g], "none", 14, 1,
                 {"test_num": 6}))
         # Colliding modons (#521, Lin et al. 2017) — non-rotating two-soliton
-        # collision; wired for cubed_sphere (FV3 case 8) via the edge-midpoint
-        # analytic init, and for latlon (C-grid) via the face-midpoint
-        # analytic init (the W6 pattern — winds depend on lon AND lat; the
-        # non-rotating grid comes from ``create_latlon_grid(omega=0)``).
+        # collision, wired as a STANDARD case on ALL FOUR grids:
+        # cubed_sphere (FV3 case 8, edge-midpoint analytic init), latlon
+        # (C-grid face-midpoint init, the W6 pattern), icosahedral (MPAS
+        # edge-normal projection) and spectral (vor/div analysis of the
+        # analytic winds).  Every grid takes its non-rotating planet from
+        # the grid factory's ``omega=0`` (f derives from the grid omega).
         # Full return-to-IC is ~100 days; quick smoke = 2 days.
-        # ico/spectral: IC helpers exist in
-        # tests/test_cases/colliding_modons.py but their non-rotating run
-        # paths are not yet wired (follow-up).
-        if g in ("cubed_sphere", "latlon"):
-            # Full duration: cube runs the paper's ~100-day return-to-IC;
-            # latlon caps at 20 days — its pole-CFL dt (~13.7 s at 72x144)
-            # would make 100 days ~631k host-loop steps (codex round-12
-            # Medium), and the collision/exchange phase this case gates
-            # happens well inside 20 days.
-            matrix.append(TestCase(
-                "shallow_water", "colliding_modons", g, res[g], "none",
-                100 if g == "cubed_sphere" else 20, 1,
-                {"test_num": 8}))
+        # Full duration: cube/ico/spectral run the paper's ~100-day
+        # return-to-IC; latlon caps at 20 days — its pole-CFL dt (~13.7 s
+        # at 72x144) would make 100 days ~631k host-loop steps (codex
+        # round-12 Medium), and the collision/exchange phase this case
+        # gates happens well inside 20 days.
+        matrix.append(TestCase(
+            "shallow_water", "colliding_modons", g, res[g], "none",
+            20 if g == "latlon" else 100, 1,
+            {"test_num": 8}))
 
     # --- Hydrostatic: all grids, sigma + hybrid ---
     for g in GRID_TYPES:
@@ -1375,24 +1373,31 @@ def _get_cs_weights(n: int, n_lat: int = 181, n_lon: int = 360):
     return get_cubedsphere_to_latlon_weights(n, n_lon=n_lon, n_lat=n_lat)
 
 
-def _latlon_curl(u_ll: np.ndarray, v_ll: np.ndarray,
-                 radius: float) -> np.ndarray:
-    """Relative vorticity [1/s] on the common (181, 360) lat-lon canvas.
+def _latlon_curl(u_ll: np.ndarray, v_ll: np.ndarray, radius: float,
+                 lat_deg: np.ndarray | None = None,
+                 dlon_deg: float = 1.0,
+                 dlat_deg: float = 1.0) -> np.ndarray:
+    """Relative vorticity [1/s] from geographic winds on a lat-lon grid.
 
-    Spherical curl of geographic winds already regridded to the snapshot
-    canvas (lat -90..90 x 1 deg, lon -180..180 x 1 deg):
+    Spherical curl on a uniform lat-lon grid (default: the common
+    (181, 360) snapshot canvas, lat -90..90 x 1 deg, lon x 1 deg):
         zeta = (dv/dlon - d(u cos(lat))/dlat) / (R cos(lat)).
-    The two rows adjacent to each pole are zeroed — the 1/cos(lat) metric
-    is singular there and the centred gradient is meaningless.  Used for
-    the colliding-modons vorticity snapshots (#521); diagnostic only.
+    ``lat_deg``/``dlon_deg``/``dlat_deg`` override the row latitudes and
+    spacings for a NATIVE uniform lat-lon grid (e.g. the 72x144 C-grid
+    cell centres).  The two rows nearest each pole are zeroed — the
+    1/cos(lat) metric is singular there and the centred gradient is
+    meaningless.  Used for the colliding-modons vorticity snapshots
+    (#521); diagnostic only.
     """
     u = np.asarray(u_ll, dtype=np.float64)
     v = np.asarray(v_ll, dtype=np.float64)
-    lat1d = np.linspace(-90.0, 90.0, u.shape[0])
+    if lat_deg is None:
+        lat1d = np.linspace(-90.0, 90.0, u.shape[0])
+    else:
+        lat1d = np.asarray(lat_deg, dtype=np.float64).ravel()
     coslat = np.cos(np.radians(lat1d))[:, None]
-    d = np.radians(1.0)
-    dv_dlam = np.gradient(v, d, axis=1)
-    ducos_dphi = np.gradient(u * coslat, d, axis=0)
+    dv_dlam = np.gradient(v, np.radians(dlon_deg), axis=1)
+    ducos_dphi = np.gradient(u * coslat, np.radians(dlat_deg), axis=0)
     zeta = (dv_dlam - ducos_dphi) / (radius * np.maximum(coslat, 1e-3))
     zeta[:2, :] = 0.0
     zeta[-2:, :] = 0.0
@@ -2295,8 +2300,20 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # Colliding modons (#521, FV3 case 8) run on a NON-ROTATING planet
         # (f=0); every other SW case is rotating.  The cdgrid infers omega
         # from base.f, so a base grid with omega=0 yields f=0 throughout.
-        grid = (create_cubed_sphere(n, omega=0.0) if test_num == 8
-                else create_cubed_sphere(n))
+        #
+        # use_duogrid=True (#521 sweep, 2026-07-03): the modon IC is
+        # strongly UNBALANCED (constant depth + wind bursts) and its
+        # gravity-wave adjustment front crossing the cube face seams
+        # erupts into spurious vortex dipoles at modon amplitude with
+        # the default low-order halo interpolation (day-5 eruption at
+        # every equatorial face edge; rest state is clean at 1e-13, so
+        # the source is flow-triggered seam truncation).  The duogrid
+        # higher-order cross-face interpolation removes that eruption
+        # (day-10 max|u| 18 m/s vs 111 m/s, peak vorticity 0.7x vs 6.6x
+        # initial).  Williamson cases keep the production non-duogrid
+        # path (balanced flows; calibrated separately).
+        grid = (create_cubed_sphere(n, omega=0.0, use_duogrid=True)
+                if test_num == 8 else create_cubed_sphere(n))
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 300.0
         # Iter-760: switch to Fortran-faithful del-n vorticity damping
@@ -2349,10 +2366,29 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # while latlon W6 14-day is stable.  Override the iter-1030
         # calibration to higher div_damp + damp_v on W6 only.  W2/W5
         # untouched (still pinned at iter-1030 dual-target).
-        if test_num in (2, 5, 6, 8):
-            # Colliding modons (8) are strongly nonlinear and need the same
-            # div-damp + biharmonic hyperdiff backstop as the long-duration
-            # propagating-wave cases.
+        if test_num == 8:
+            # Colliding modons (#521): per-case damping from the
+            # 2026-07-03 sweep (duogrid grid above).  The W2/W5/W6
+            # calibration (damp_v=0.030 + 2x hyperdiff) erodes the
+            # vortex cores below the seam-noise floor by ~day 20, and
+            # weaker damping without duogrid erupts at the face seams
+            # (see the grid comment).  With duogrid, damp_v=0.010 +
+            # 0.5x hyperdiff keeps the dipoles coherent through
+            # collision + partner exchange while remaining stable for
+            # the full 100 days (zero-hyperdiff still blows up at
+            # ~day 40 — the enstrophy cascade needs the biharmonic
+            # sink).  Dedicated env knobs for sensitivity probes.
+            _m_dd = float(
+                os.environ.get("LEGOESM_SW_MODON_DIV_DAMP_FACTOR", "8.0"))
+            _m_dv = float(
+                os.environ.get("LEGOESM_SW_MODON_DAMP_V", "0.010"))
+            _m_hd = float(
+                os.environ.get("LEGOESM_SW_MODON_HYPERDIFF_FACTOR", "0.5"))
+            config = iter1009_dual_target_config(
+                n, div_damp_factor=_m_dd, damp_v=_m_dv,
+                hyperdiff_coeff=_m_hd * _hyperdiff_cube(n),
+            )
+        elif test_num in (2, 5, 6):
             # iter-31: cube W6 (Rossby-Haurwitz wave-4) 14-day blows up
             # at day 9 with the iter1009 baseline (hyperdiff=0).
             # iter-33: cube W5 (mountain) 15-day blows up at day 14.58
@@ -2648,9 +2684,19 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         def extract_fn(s):
             u = np.asarray(0.5 * (s.u[:, :-1] + s.u[:, 1:]), dtype=np.float64)
             v = np.asarray(0.5 * (s.v[:-1] + s.v[1:]), dtype=np.float64)
-            return {"u": u, "v": v,
-                    "wind_speed": np.sqrt(u ** 2 + v ** 2),
-                    "height": np.asarray(s.h, dtype=np.float64)}
+            out = {"u": u, "v": v,
+                   "wind_speed": np.sqrt(u ** 2 + v ** 2),
+                   "height": np.asarray(s.h, dtype=np.float64)}
+            # Relative vorticity (#521 cross-grid signature) — NATIVE
+            # shaped like u/v (the snapshot pipeline regrids it with the
+            # same latlon path; an already-regridded (181,360) array
+            # would be mis-regridded against the native coords).
+            out["vorticity"] = _latlon_curl(
+                u, v, float(grid.radius),
+                lat_deg=lat_deg,
+                dlon_deg=float(np.degrees(grid.dlon)),
+                dlat_deg=float(np.degrees(grid.dlat)))
+            return out
 
         key_array_fn = lambda s: s.h
         coord_kind = "latlon"
@@ -2667,7 +2713,13 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.ocean.init_mpas import reconstruct_cell_velocity
 
         level = int(tc.resolution.replace("ico", ""))
-        mesh = create_voronoi_mesh(level)
+        # Colliding modons (#521) run NON-ROTATING: fEdge/fVertex derive
+        # from the mesh omega, so an omega=0 mesh zeroes Coriolis
+        # everywhere (mirrors the cube/latlon omega=0 branches; the mesh
+        # cache key includes omega, so this never collides with the
+        # rotating Williamson meshes).
+        mesh = (create_voronoi_mesh(level, omega=0.0) if test_num == 8
+                else create_voronoi_mesh(level))
         dt = 300.0
         config = MPASShallowWaterConfig(
             nu_del4=_hyperdiff_ico(mesh), anchor_mass_to_initial=True,
@@ -2677,6 +2729,12 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             from tests.test_cases.williamson_extended import (
                 williamson_test6_mpas)
             init_fns = {6: williamson_test6_mpas}
+        elif test_num == 8:
+            # Colliding modons: geographic winds projected onto edge
+            # normals (same pattern as the Williamson MPAS ICs).
+            from tests.test_cases.colliding_modons import (
+                colliding_modons_mpas)
+            init_fns = {8: colliding_modons_mpas}
         else:
             init_fns = {2: williamson_test2_mpas, 5: williamson_test5_mpas}
         state = init_fns[test_num](mesh)
@@ -2702,14 +2760,19 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             u_e, v_n = reconstruct_cell_velocity(s.u.data, mesh)
             u = np.asarray(u_e, dtype=np.float64)
             v = np.asarray(v_n, dtype=np.float64)
+            u_ll = _bin_to_latlon(u, lon_cell, lat_cell)
+            v_ll = _bin_to_latlon(v, lon_cell, lat_cell)
             return {
-                "u": _bin_to_latlon(u, lon_cell, lat_cell),
-                "v": _bin_to_latlon(v, lon_cell, lat_cell),
+                "u": u_ll,
+                "v": v_ll,
                 "wind_speed": _bin_to_latlon(
                     np.sqrt(u ** 2 + v ** 2), lon_cell, lat_cell),
                 "height": _bin_to_latlon(
                     np.asarray(s.h.data, dtype=np.float64),
                     lon_cell, lat_cell),
+                # #521 cross-grid vorticity signature: the binned winds
+                # already live on the (181, 360) canvas.
+                "vorticity": _latlon_curl(u_ll, v_ll, float(mesh.radius)),
             }
 
         key_array_fn = lambda s: s.h.data
@@ -2727,19 +2790,31 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm import constants
 
         n_max = int(tc.resolution.replace("T", ""))
-        grid = create_gaussian_grid(n_max)
+        # Colliding modons (#521) run NON-ROTATING: the grid's planetary
+        # vorticity f = 2*omega*sin(lat) derives from the grid omega
+        # (mirrors the cube/latlon/ico omega=0 branches).
+        grid = (create_gaussian_grid(n_max, omega=0.0) if test_num == 8
+                else create_gaussian_grid(n_max))
         # CFL-safe dt for explicit SSP-RK3: gravity wave CFL ≈ 0.5
         import math
         _c_gw = math.sqrt(constants.g * 5960.0)  # shallow-water wave speed
         dt = min(600.0, 0.5 * grid.radius / (n_max * _c_gw))
         config = SpectralSWConfig(
-            spectral_filter_order=8 if test_num in (5, 6) else 0,
+            # Modons (8) get the same order-8 filter as W5/W6: the
+            # r0 = 750 km Gaussian jets are near the T21 grid scale, so
+            # unfiltered Gibbs ringing contaminates the vorticity field.
+            spectral_filter_order=8 if test_num in (5, 6, 8) else 0,
         )
         model = SpectralShallowWaterModel(grid, config)
         if test_num == 6:
             from tests.test_cases.williamson_extended import (
                 williamson_test6_spectral)
             state = williamson_test6_spectral(grid)
+            state = model.filter_initial_state(state)
+        elif test_num == 8:
+            from tests.test_cases.colliding_modons import (
+                colliding_modons_spectral)
+            state = colliding_modons_spectral(grid)
             state = model.filter_initial_state(state)
         elif test_num == 2:
             state = williamson_test2_spectral(grid)
@@ -2782,6 +2857,11 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 "v": v,
                 "wind_speed": np.sqrt(u ** 2 + v ** 2),
                 "height": phi / float(constants.g),
+                # #521 cross-grid vorticity: the spectral state carries
+                # relative vorticity natively — synthesize it exactly
+                # (no finite-difference curl needed).
+                "vorticity": np.asarray(
+                    sh_synthesis(grid, s.vor_hat.data), dtype=np.float64),
             }
 
         key_array_fn = lambda s: s.phi_hat.data
