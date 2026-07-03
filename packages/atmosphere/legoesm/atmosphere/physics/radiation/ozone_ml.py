@@ -45,6 +45,36 @@ import numpy as np
 
 from legoesm import constants
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "Machine-learning ozone: per-gridpoint ridge regression predicting the "
+        "ozone VMR column from the model temperature column (UKESM-trained), "
+        "interpolated to the model grid for use as the RRTMGP O3 absorber."
+    ),
+    "inputs": {
+        "T": "K", "lat": "rad", "lon": "rad", "p_full": "Pa",
+    },
+    "outputs": {"o3_vmr": "mol/mol (ozone volume mixing ratio)"},
+    "sign_convention": (
+        "o3_vmr>0 (floored at o3_floor); a positive mole fraction that peaks in "
+        "the stratosphere. Diagnoses an absorber field only (no source/sink "
+        "budget)."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Ma et al., machine-learning-ozone-parameterization (UKESM piControl/"
+        "4xCO2 ridge regression, CC-BY-4.0), "
+        "github.com/YYilingMa/machine-learning-ozone-parameterization"
+    ),
+    "idealized_test": (
+        "tests/atmosphere/hydrostatic/unit/test_ozone_ml.py: learned prediction "
+        "is differentiable wrt T (matmul+affine); lat/lon enter only as static "
+        "gather indices; output within observed stratospheric O3 range."
+    ),
+}
+
 
 class MLOzoneCoefficients(NamedTuple):
     """Pre-loaded ridge weights and training-grid descriptors.

@@ -36,6 +36,43 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
 )
 
 
+__physics_contract__ = {
+    "summary": (
+        "Prognostic-TKE (Mellor-Yamada level 2.5) turbulence: advances a "
+        "turbulent-kinetic-energy budget (shear production, buoyancy, "
+        "dissipation, diffusion), sets K_m = Ck l sqrt(TKE), K_h = K_m/Pr_t, "
+        "and applies implicit vertical diffusion with surface-flux BCs."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
+        "tke": "m^2/s^2", "p_full": "Pa", "p_half": "Pa",
+        "z_full": "m", "z_half": "m", "T_sfc": "K", "q_sfc": "kg/kg",
+        "rho": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "Km": "m^2/s", "Kh": "m^2/s", "shflx": "W/m^2", "lhflx": "W/m^2",
+        "ustar": "m/s", "h_pbl": "m", "tke_new": "m^2/s^2",
+    },
+    "sign_convention": (
+        "Down-gradient mixing: du_dt ~ (1/rho) d/dz(rho Km du/dz); Km, Kh >= 0; "
+        "TKE >= tke_min with shear production Km S^2 >= 0, buoyancy -Kh N^2 "
+        "(a sink in stable stratification), and dissipation Ce TKE^{3/2}/l "
+        ">= 0. shflx, lhflx positive UPWARD and injected as the lower boundary "
+        "condition (a source), so the resolved column budget is NOT closed. "
+        "z increases upward; level index -1 is the surface."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": "Mellor & Yamada (1982), Rev. Geophys. 20, 851-875",
+    "idealized_test": (
+        "tests/atmosphere/hydrostatic/unit/test_turbulence.py: TKE stays "
+        ">= tke_min; a neutral no-shear column has zero production and "
+        "buoyancy so TKE decays by dissipation; Km = Ck l sqrt(TKE) >= 0."
+    ),
+}
+
+
 def tke_turbulence(
     u: jax.Array,
     v: jax.Array,

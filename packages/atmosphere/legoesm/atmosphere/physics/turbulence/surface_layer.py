@@ -26,6 +26,44 @@ from legoesm.core.bulk_flux import (
 )
 
 
+__physics_contract__ = {
+    "summary": (
+        "Bulk-aerodynamic surface-layer fluxes of momentum, sensible heat, "
+        "and latent heat (constant neutral coefficients or iterative "
+        "Monin-Obukhov / COARE-3.0 / Large-Yeager), plus a tiled-surface "
+        "area-weighted aggregator."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
+        "T_sfc": "K", "q_sfc": "kg/kg", "rho": "kg/m^3",
+    },
+    "outputs": {
+        "tau_x": "Pa", "tau_y": "Pa", "shflx": "W/m^2",
+        "lhflx": "W/m^2", "ustar": "m/s",
+    },
+    "sign_convention": (
+        "Surface (bottom-boundary) fluxes are a SOURCE for the column, so "
+        "nothing is conserved here. Stress opposes the wind: "
+        "tau_x = -rho Cd |V| u. shflx = rho c_pd Ch |V| (T_sfc - T) and "
+        "lhflx = rho L_v Ch |V| (q_sfc - q_v) are POSITIVE UPWARD (out of the "
+        "surface into the atmosphere) when the surface is warmer / moister. "
+        "ustar >= 0."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Large & Yeager (2004), NCAR/TN-460+STR; "
+        "Fairall et al. (2003) COARE 3.0, J. Climate 16, 571-591"
+    ),
+    "idealized_test": (
+        "tests/unit/test_tiled_surface_fluxes.py and "
+        "tests/unit/test_les_surface_coupling_conservation.py: equilibrium "
+        "(u=v=0, T=T_sfc, q_v=q_sfc) -> zero fluxes; tiled fluxes aggregate "
+        "linearly by area fraction and ustar = sqrt(|tau|/rho)."
+    ),
+}
+
+
 def compute_surface_fluxes(
     u: jax.Array,
     v: jax.Array,
