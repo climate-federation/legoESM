@@ -203,6 +203,23 @@ def test_collect_ingests_routeb_spmd_jsonl(tmp_path):
     assert r8["mcells_per_s"] == pytest.approx(cells / 5.0e-3 / 1e6, rel=1e-3)
 
 
+def test_collect_routeb_cpu_jsonl_n_resource_in_cores(tmp_path):
+    # route-B CPU sweep is 1 process per full node (platform=cpu), so n_resource
+    # is expressed in CORES (n_devices * 128) -> the "CPU nodes" plot axis
+    # (cores/128) then reads node counts.
+    d = tmp_path / "routeb_cpu_x" / "atm_latlon_cpu"
+    cells = 256 * 512 * 26
+    rec = {"mode": "strong", "n_devices": 4, "n_lat": 256, "n_lon": 512, "nlev": 26,
+           "physics": "none", "platform": "cpu", "steady_median_ms": 50.0, "cells": cells}
+    _write_jsonl(d, "spmd_R256_N4.jsonl", [rec])
+    rows, _ = agg.collect(tmp_path)
+    r = next(r for r in rows if r["n_devices"] == 4)
+    assert r["backend"] == "CPU"
+    assert r["n_resource"] == 4 * 128 and r["n_cores"] == 4 * 128
+    assert r["sypd"] is None
+    assert r["mcells_per_s"] == pytest.approx(cells / 50.0e-3 / 1e6, rel=1e-3)
+
+
 def test_collect_routeb_ocean_jsonl_labeled_ocean(tmp_path):
     d = tmp_path / "routeb_sweep_x" / "ocean_latlon"
     rec = {"mode": "strong", "n_devices": 8, "n_lat": 288, "n_lon": 576, "nlev": 20,

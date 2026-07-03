@@ -1,0 +1,106 @@
+#!/bin/bash -l
+#PBS -N legoesm_routeb_gpu
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=4:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# Route-B (NCCL multi-controller) GPU THROUGHPUT sweep -- latlon only.
+#   GPU ladder N = 1 2 4 8 16 A100 (1 process/GPU, --ppn 4; 16 = 4 nodes)
+#   x RES_LIST resolutions, strong scaling.
+# The GPU half of the fair CPU-node-vs-A100 throughput comparison; pair with
+# routeb_cpu_sweep.pbs (same SPMD lat-band code path, 1..16 NODES).  Route B has
+# NO icosahedral path (latlon only); MPAS ico uses route A (submit_scaling.sh).
+#
+# THROUGHPUT-only: the SPMD bench times kernels (no dt), so the metric is
+# Mcells/s (SYPD is undefined).  Records are JSONL and flow through the SAME
+# finalize_scaling.sh -> aggregate_bcw_scaling.py -> plot pipeline.
+#
+# Needs aws-ofi-nccl for the fabric (build_nccl_ofi.sh -> LEGOESM_NCCL_OFI_LIB);
+# env = plain legoesm-gpu (mpi4py bootstrap only, NOT the route-A overlay).
+#
+# SUBMIT:
+#   qsub -v LEGOESM_NCCL_OFI_LIB=/glade/work/$USER/nccl-ofi/<tag>/lib \
+#        scripts/cluster/scaling_derecho/routeb_gpu_sweep.pbs
+#   # knobs: -v RES_LIST="128 256 512",NLEV=26,GPU_RANKS="1 2 4 8 16",OUTDIR=...
+# ===========================================================================
+set -uo pipefail
+
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+if   [ -f "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}/scripts/cluster/scaling_derecho"
+elif [ -f "${SUBMIT_DIR}/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}"
+else
+    echo "ERROR: cannot find _env.sh from PBS_O_WORKDIR=${SUBMIT_DIR}" >&2
+    exit 1
+fi
+export JAX_PLATFORMS=cuda
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
+# shellcheck source=_env.sh
+source "${SCRIPT_DIR}/_env.sh"          # provides nccl_env(), PY, REPO, SCRATCH
+cd "$REPO"
+
+MODE="${MODE:-strong}"
+RES_LIST="${RES_LIST:-128 256 512}"     # latlon n_lat resolutions (the 3 sizes)
+RES_LIST="${RES_LIST//,/ }"             # accept comma-separated (survives qsub -v)
+NLEV="${NLEV:-26}"
+N_WARMUP="${N_WARMUP:-3}"
+N_TIMING="${N_TIMING:-30}"
+GPU_RANKS="${GPU_RANKS:-1 2 4 8 16}"; GPU_RANKS="${GPU_RANKS//,/ }"
+
+# GPU cap = unique nodes x GPUs/node (PBS_NODEFILE is one line PER RANK; count
+# UNIQUE hosts -- a bare $NGPUS is the per-chunk value=4, see scaling_gpu.sh).
+_gpus_per_node="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU' || echo 0)"
+[ "${_gpus_per_node:-0}" -ge 1 ] 2>/dev/null || _gpus_per_node=4
+_n_nodes=1
+if [ -n "${PBS_NODEFILE:-}" ] && [ -r "${PBS_NODEFILE}" ]; then
+    _n_nodes="$(sort -u "$PBS_NODEFILE" 2>/dev/null | grep -c .)"
+fi
+[ "${_n_nodes:-0}" -ge 1 ] 2>/dev/null || _n_nodes=1
+TOTAL_GPUS="${LEGOESM_NGPUS:-$(( _n_nodes * _gpus_per_node ))}"
+[ "${TOTAL_GPUS:-0}" -ge 1 ] 2>/dev/null || TOTAL_GPUS=4
+
+STAMP="$(date +%Y%m%d_%H%M%S)"
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/routeb_gpu_${STAMP}}"
+mkdir -p "$OUTDIR"
+[ -n "${PBS_O_WORKDIR:-}" ] && exec > >(tee -a "$OUTDIR/run.log") 2>&1
+
+echo "=== route-B GPU sweep (latlon): mode=$MODE res=[$RES_LIST] gpus=[$GPU_RANKS] (cap=$TOTAL_GPUS) nlev=$NLEV ==="
+echo "    nodes=$_n_nodes  outdir=$OUTDIR"
+
+# rank -> local GPU pin (PALS exports PALS_LOCAL_RANKID; python auto-pin misses it).
+PIN='export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-${OMPI_COMM_WORLD_LOCAL_RANK:-0}}; exec "$@"'
+
+# Distinct coordinator port per launch (sequential inits on one port hit a
+# TIME_WAIT re-bind flake).  early_init.resolve_coordinator_port reads this.
+_port="${COORD_PORT_BASE:-29800}"
+
+rc_all=0
+for RES in $RES_LIST; do
+  for N in $GPU_RANKS; do
+    if [ "$N" -gt "$TOTAL_GPUS" ]; then
+        echo "--- SKIP res=$RES N=$N > cap=$TOTAL_GPUS ---"
+        continue
+    fi
+    PPN=$(( N < _gpus_per_node ? N : _gpus_per_node ))
+    export LEGOESM_COORDINATOR_PORT="$_port"; _port=$(( _port + 1 ))
+    echo "=== route-B GPU latlon res=$RES N=$N (ppn=$PPN, coord_port=$LEGOESM_COORDINATOR_PORT) ==="
+    (
+        nccl_env
+        mpiexec -n "$N" --ppn "$PPN" bash -c "$PIN" _ \
+            "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
+            --multicontroller --n-devices "$N" \
+            --mode "$MODE" --n-lat "$RES" --n-lon $((2 * RES)) --nlev "$NLEV" \
+            --steps $((N_WARMUP + N_TIMING)) --warmup "$N_WARMUP" \
+            --out "$OUTDIR/atm_latlon/spmd_R${RES}_N${N}.jsonl" < /dev/null
+    ) || { echo "route-B GPU res=$RES N=$N FAILED rc=$?"; rc_all=1; }
+  done
+done
+
+echo "=== DONE rc=$rc_all ===   route-B GPU curve JSONL under: $OUTDIR/atm_latlon/"
+echo "    aggregate + plot:  scripts/cluster/scaling_derecho/finalize_scaling.sh $OUTDIR"
+exit "$rc_all"

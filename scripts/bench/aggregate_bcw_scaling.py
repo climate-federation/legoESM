@@ -28,10 +28,17 @@ import argparse
 import csv
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
 from legoesm import constants
+
+# Route-B CPU SPMD sweep (routeb_cpu_sweep.pbs) runs ONE process per FULL node,
+# so its n_devices == node count.  This is the node's core count, used only to
+# place CPU route-B points on the cores-based "CPU nodes" plot axis (cores/128
+# -> node count).  Overridable for a non-128-core node.
+_SPMD_CPU_CORES_PER_NODE = int(os.environ.get("LEGOESM_SPMD_CPU_CORES_PER_NODE", "128"))
 
 FIELDS = [
     "component", "backend", "grid", "case", "precision", "mode",
@@ -162,6 +169,14 @@ def _row_from_spmd_record(rec: dict, source: Path) -> dict | None:
     ocean = "ocean" in str(source).lower()
     phys = rec.get("physics", "none")
     n_lat = rec.get("n_lat")
+    # x-axis resource: GPU -> A100 (=process) count; CPU route-B is 1 proc/full
+    # node, so express it in CORES (nd * cores/node) for the cores-based CPU axis.
+    if backend == "CPU":
+        n_cores = nd * _SPMD_CPU_CORES_PER_NODE
+        n_resource = n_cores
+    else:
+        n_cores = nd
+        n_resource = nd
     return {
         "component": "ocean" if ocean else "atm",
         "backend": backend,
@@ -171,8 +186,8 @@ def _row_from_spmd_record(rec: dict, source: Path) -> dict | None:
         "mode": rec.get("mode", "strong"),
         "n_devices": nd,
         "cpus_per_task": 1,
-        "n_cores": nd,
-        "n_resource": nd,                       # GPU: device (=process) count
+        "n_cores": n_cores,
+        "n_resource": n_resource,
         "fix_mass": rec.get("fix_mass", True),
         "resolution": n_lat,
         "resolution_km": round(resolution_km("latlon", n_lat), 3) if n_lat else "",
