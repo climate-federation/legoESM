@@ -260,6 +260,12 @@ class DINOConfig:
     # EIV switch; K_h is zeroed to avoid double-counting; the vertical
     # diagonal K33 is solved IMPLICITLY = NEMO ln_traldf_msc).
     lateral_tracer_mixing: str = "geopotential"
+    # Steep-slope handling for the isoneutral operator: "dm95_taper"
+    # (legacy — kappa tapers to 0 at steep slopes) or "nemo_cap" (NEMO
+    # ldfslp: slope capped at redi_S_max, taper 1 — keeps flattening
+    # steep fronts; the oracle semantic).  Only read when
+    # lateral_tracer_mixing="isoneutral".
+    redi_slope_limit: str = "dm95_taper"
 
     # ------------------------------------------------------------------
     # Lateral mixing of momentum (geopotential / iso-level Laplacian;
@@ -439,6 +445,7 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
         pgf_quadrature="nemo_trapezoid",
         lateral_tracer_mixing="isoneutral",
         redi_S_max=0.01,               # rn_slpmax
+        redi_slope_limit="nemo_cap",   # ldfslp cap semantics (not DM95)
         forcing_annual_cycle=True,
         wind_through_step=True,
     )
@@ -1487,6 +1494,7 @@ def dino_lat_lon_model_config(
             S_max=cfg.redi_S_max,
             slope_scheme=cfg.gm_redi_slope_scheme,
             slope_density="neutral",
+            slope_limit=cfg.redi_slope_limit,
             implicit_K33=True,
             visbeck=VisbeckConfig(enabled=False),
             treguier=TreguierConfig(enabled=False),

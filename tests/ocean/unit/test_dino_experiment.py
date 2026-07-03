@@ -1047,3 +1047,73 @@ class TestIsoneutralRediOnly:
 
 def _pytest_raises_valueerror(match):
     return pytest.raises(ValueError, match=match)
+
+
+class TestSlopeLimitNemoCap:
+    """slope_limit='nemo_cap': slope capped at S_max, taper == 1."""
+
+    def _w_triads(self, slope_limit):
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _w_triad_slopes_tapers,
+        )
+        rng = np.random.default_rng(3)
+        n_lat, n_lon, nlev = 4, 5, 6
+        drho_dx_u = jnp.asarray(rng.normal(size=(n_lat, n_lon + 1, nlev)))
+        drho_dy_v = jnp.asarray(rng.normal(size=(n_lat + 1, n_lon, nlev)))
+        # weak stratification -> raw slopes far beyond S_max
+        drho_dz_w = jnp.full((n_lat, n_lon, nlev - 1), -1e-3)
+        return _w_triad_slopes_tapers(
+            drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
+            S_max=0.01, taper_width_frac=0.1, slope_limit=slope_limit)
+
+    def test_cap_bounds_slopes_and_unit_tapers(self):
+        out = self._w_triads("nemo_cap")
+        slopes, tapers = out[:8], out[8:]
+        for sl in slopes:
+            assert float(jnp.abs(sl).max()) <= 0.01 + 1e-15
+        for tp in tapers:
+            np.testing.assert_array_equal(np.asarray(tp), 1.0)
+
+    def test_dm95_tapers_at_steep_slopes(self):
+        """dm95 mode: the taper suppresses the flux at steep slopes
+        (~0.5 at the in-situ clip point) — the behaviour nemo_cap
+        replaces with unit tapers."""
+        out = self._w_triads("dm95_taper")
+        tapers = out[8:]
+        assert float(jnp.stack(tapers).min()) <= 0.55
+        assert float(jnp.stack(tapers).max()) < 1.0
+
+    def test_unknown_slope_limit_raises(self):
+        with pytest.raises(ValueError, match="slope_limit"):
+            self._w_triads("gerdes")
+
+    def test_centered_scheme_rejects_cap(self):
+        from legoesm.ocean.experiments.dino import (
+            dino_lat_lon_grid, dino_lat_lon_state, dino_lat_lon_vertical,
+            dino_r1_exact_config,
+        )
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            gm_redi_tracer_tendency_latlon,
+        )
+        cfg = dino_r1_exact_config()
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        z = dino_lat_lon_vertical(g, cfg)
+        st = dino_lat_lon_state(g, z, cfg)
+        from legoesm.ocean.experiments.dino import dino_lat_lon_model_config
+        mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
+        gm_bad = mc.gm_redi._replace(slope_scheme="centered")
+        with pytest.raises(ValueError, match="nemo_cap"):
+            gm_redi_tracer_tendency_latlon(
+                st.T.data, st.S.data, st.eta.data, st.H_bathy.data,
+                g, z, gm_bad, eos=mc.eos)
+
+    def test_preset_selects_cap(self):
+        from legoesm.ocean.experiments.dino import (
+            dino_lat_lon_grid, dino_lat_lon_model_config,
+            dino_r1_exact_config,
+        )
+        cfg = dino_r1_exact_config()
+        assert cfg.redi_slope_limit == "nemo_cap"
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
+        assert mc.gm_redi.slope_limit == "nemo_cap"

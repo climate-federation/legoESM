@@ -244,6 +244,17 @@ class GMRediConfig(NamedTuple):
                                       # KPP boundary-layer depth when available).
                                       # Only active for slope_scheme="centered".
     surface_complement_depth: float = 100.0  # Depth [m] of the surface layer
+    # Steep-slope limiting of the isoneutral operator (triads only):
+    # "dm95_taper" (default, bit-identical) — Danabasoglu-McWilliams 95
+    # tanh taper sends kappa·taper -> 0 for |S| >> S_max (Veros
+    # convention; the flux DIES at steep slopes).  "nemo_cap" — NEMO
+    # ldfslp convention: the SLOPE is capped at ±S_max and the taper is
+    # 1, so the flux keeps diffusing ALONG the capped direction at
+    # steep fronts (rn_slpmax).  Physically different at fronts: the
+    # taper lets them steepen unchecked, the cap keeps flattening them.
+    # REMAINING NEMO deviation (documented): the ldfslp mixed-layer
+    # linear slope ramp toward the surface is not implemented yet.
+    slope_limit: str = "dm95_taper"
     # NEMO nn_aht_ijk_t=20 grid-size scaling: the effective kappa_Redi is
     # cfg.kappa_Redi * cos(lat) per row (Mercator dx ∝ cos φ, so
     # aht(φ) = ½·U_d·Δx(φ) with cfg.kappa_Redi = the EQUATOR value
