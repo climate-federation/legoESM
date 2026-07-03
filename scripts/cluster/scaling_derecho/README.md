@@ -463,3 +463,33 @@ column -s, -t < $OUT/all_tidy.csv | less -S    # grid, backend, n_resource, reso
       allocation — confirm with the interactive `qsub -I` in Step 1; adjust the
       `select=`/`gpu_type` line in `scaling_gpu.sh` / `cube_scaling_gpu.sh` if not.
 - [ ] `DRYRUN=1` preview looks right before the real submit.
+
+---
+
+## Ocean + multi-node GPU additions (2026-07)
+
+Alongside the cube pair above, three further jobs + a build script:
+
+| File | What |
+|---|---|
+| `ocean_gpu_scaling.pbs` | OCEAN weak+strong on one GPU node via `scripts/bench/bench_ocean_latlon_spmd_scaling.py` (full lat-lon C-grid step sharded over 1/2/4 A100; fail-fast `--parity-gate` + `--check-conservation` smoke first). Plain GPU env — no mpi4jax. |
+| `ocean_cpu_scaling.pbs` | OCEAN weak+strong CPU-MPI rank ladder (`bench_ocean_mpi_scaling.py`, `legoesm-mpi` env), with a 2-rank parity+conservation smoke. |
+| `gpu_multinode_scaling.pbs` | MULTI-NODE GPU lanes over jax.distributed + NCCL: A = cube `--cs-spmd` (6 GPU / 2 nodes), C = atm lat-lon `--multicontroller` (8 GPU), D = ocean `--multicontroller` (8 GPU); plus the optional route-A CUDA-aware mpi4jax lane (`RUN_ROUTEA=1`, needs the overlay env). |
+| `build_nccl_ofi.sh` | Login-node build of **aws-ofi-nccl** against Derecho's Cray libfabric (no NCCL build dep — the plugin vendors the net-API headers and is dlopen'd by the jax-wheel NCCL). |
+
+NCCL on Slingshot-11 has NO native CXI support: without the plugin the
+multi-node lanes fall back to TCP sockets over `hsn` (correct, 2-3x slower
+comm — loud warning, fine for shakeout). For production numbers:
+
+```bash
+bash scripts/cluster/scaling_derecho/build_nccl_ofi.sh
+qsub -v LEGOESM_NCCL_OFI_LIB=/glade/work/$USER/nccl-ofi/<tag>/lib \
+     scripts/cluster/scaling_derecho/gpu_multinode_scaling.pbs
+```
+
+Verify the first run's `NCCL_DEBUG=INFO` log prints
+`Using network AWS Libfabric` (not `Socket`). The NCCL lanes keep
+`MPICH_GPU_SUPPORT_ENABLED=0` (mixing GPU-aware cray-mpich and NCCL in one
+program risks deadlock); the route-A lane sets it to 1 — the two transports
+never share a process.
+

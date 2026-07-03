@@ -1249,12 +1249,20 @@ class DiagnosticCollector:
                 **{k: np.array(v) for k, v in moisture_data.items()},
             )
 
-    def flush_cmip_monthly(self, current_day: float) -> None:
+    def flush_cmip_monthly(self, current_day: float, *,
+                           write: bool = True) -> None:
         """Write completed CMIP months incrementally and free their memory.
 
         Call this periodically (e.g. at each diagnostic interval) during
         long runs.  Only months strictly before the current month are
         flushed; the in-progress month is kept for further accumulation.
+
+        ``write=False`` pops (frees) the completed months WITHOUT writing —
+        for multi-controller SPMD non-root processes, whose accumulators
+        fill identically to root's (every process runs the gathered full
+        ``collect()``) but must never touch the shared output files; without
+        the pop they would retain every completed month for the whole run
+        (codex round-10 Medium).
         """
         if self._spatial_monthly is None or self.cf_writer is None:
             return
@@ -1267,7 +1275,7 @@ class DiagnosticCollector:
             current_year, current_month,
         )
         months = data.get('months', [])
-        if not months:
+        if not months or not write:
             return
 
         self._write_cmip_data(data)

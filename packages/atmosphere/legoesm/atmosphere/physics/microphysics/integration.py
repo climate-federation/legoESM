@@ -305,19 +305,38 @@ def _make_hydrostatic_microphysics(
         # aerosol field was threaded — silently feeding zero N_c (-> Nc_0
         # fallback) is exactly the silent no-op the cube path guards against.
         if _nc_from_aerosol:
+            # Route through the activation DISPATCH: "proxy" (default) is
+            # byte-identical to the Andreae (2009) ``specified_nc_field``;
+            # "arg" switches to Abdul-Razzak & Ghan (2000) modal activation
+            # driven by the local (T, p) and a characteristic updraft.
+            from legoesm.atmosphere.physics.microphysics.arg_activation import (  # noqa: E501
+                ActivationConfig,
+                activated_nc_field,
+            )
+            _activation_cfg = getattr(
+                scheme_config, "activation", ActivationConfig())
             _aer_od = forcing.get("aerosol_od") if forcing is not None else None
-            if _aer_od is None:
+            # Optional PROGNOSTIC aerosol number [1/m^3]: when a driver stepping
+            # the prognostic-aerosol tracer places it in ``forcing`` it drives
+            # ARG activation instead of the prescribed config modes (Part-2 ->
+            # Part-1 feed). Ignored by the "proxy" scheme (=> byte-identical).
+            _aer_num = (
+                forcing.get("aerosol_number") if forcing is not None else None)
+            if _activation_cfg.scheme == "proxy" and _aer_od is None:
                 raise ValueError(
                     "nc_from_aerosol=True but no 'aerosol_od' was passed to "
                     "the microphysics physics_fn via forcing — enable "
                     "external aerosol forcing (--aerosol-forcing external) "
                     "or disable --aerosol-ccn."
                 )
-            from legoesm.atmosphere.physics.microphysics.aerosol_activation import (  # noqa: E501
-                specified_nc_field,
-            )
             hydrometeors = hydrometeors._replace(
-                N_c=specified_nc_field(jnp.asarray(_aer_od), (ncol, nlev)),
+                N_c=activated_nc_field(
+                    _activation_cfg, (ncol, nlev),
+                    aerosol_od=None if _aer_od is None else jnp.asarray(_aer_od),
+                    T=T_col, p=p_full_col,
+                    aerosol_number=(
+                        None if _aer_num is None else jnp.asarray(_aer_num)),
+                ),
             )
 
         if is_ml:

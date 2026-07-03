@@ -2084,6 +2084,51 @@ def compute_geopotential_hybrid(
     return Phi_full
 
 
+def compute_mass_flux_from_cumsum(
+    cumsum_mass_div: jax.Array,
+    D_total_p: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+) -> jax.Array:
+    """Half-level vertical mass flux from a precomputed cumulative mass-weighted divergence.
+
+    Single-sources the hybrid continuity integration + boundary closure::
+
+        F_{k+1/2} = (B_{k+1/2} - B_top) / B_range * D_total_p - cumsum_mass_div[k]
+
+    with ``F = 0`` at the top and (by construction, ``frac_B[-1]=1`` and
+    ``cumsum_mass_div[-1]=D_total_p``) at the surface.  Factored out of
+    :func:`compute_mass_flux_hybrid` so callers that ALREADY hold
+    ``cumsum(div_dp, axis=-1)`` — the C-grid dycore reuses it for ``dp_s_dt``
+    (iter-54) — share this ONE drop-last + ``(1,1)`` pad closure instead of
+    re-deriving the error-prone boundary handling.
+
+    The ``div_dp`` the cumsum is taken over is the CALLER's choice — the advective
+    ``div(v)*dp`` (this module's :func:`compute_mass_flux_hybrid`) or the exact
+    flux-form ``div(dp*v)`` (the C-grid dycore; the MPAS dycore has it in hand as
+    ``div_dp_3d_pre``) — so the flux convention stays a caller decision while the
+    closure is single-sourced (CLAUDE.md: no duplicate dycore numerics).
+
+    Parameters
+    ----------
+    cumsum_mass_div : jax.Array
+        ``cumsum(div_dp, axis=-1)`` — cumulative mass-weighted divergence, (..., nlev).
+    D_total_p : jax.Array
+        Column total ``cumsum_mass_div[..., -1:]``, (..., 1) [Pa/s].
+    coord : HybridSigmaPressureCoordinate
+
+    Returns
+    -------
+    jax.Array
+        Mass flux at half-levels, (..., nlev+1) [Pa/s]. ``F = 0`` at top + surface.
+    """
+    B_top = coord.B_half[0]
+    frac_B = (coord.B_half[1:] - B_top) / coord.B_range  # (nlev,)
+    mass_flux_inner = frac_B * D_total_p - cumsum_mass_div  # (..., nlev)
+    # Drop the (∼0) surface element + pad both ends with F=0 in one Pad HLO op.
+    pad_axes = ((0, 0),) * (mass_flux_inner.ndim - 1) + ((1, 1),)
+    return jnp.pad(mass_flux_inner[..., :-1], pad_axes)
+
+
 def compute_mass_flux_hybrid(
     div_3d: jax.Array,
     p_s: jax.Array,
@@ -2131,18 +2176,10 @@ def compute_mass_flux_hybrid(
     cumsum_div = jnp.cumsum(div_dp, axis=-1)  # (..., nlev)
     D_total_p = cumsum_div[..., -1:]  # (..., 1)
 
-    # Mass flux at interfaces 1..nlev
-    # F_{k+1/2} = (B_{k+1/2} - B_top) / B_range * D_total_p - cumsum_k
-    B_top = coord.B_half[0]
-    frac_B = (coord.B_half[1:] - B_top) / coord.B_range  # (nlev,)
-    mass_flux_inner = frac_B * D_total_p - cumsum_div  # (..., nlev)
-
-    # Prepend top (F=0) and force bottom boundary (zero by construction).
-    # Drop the (∼0) last element + pad with zeros on both ends in one
-    # ``jnp.pad`` — replaces alloc-zeros + concatenate + scatter (3 HLO
-    # ops) with slice + Pad (2 HLO ops).
-    pad_axes = ((0, 0),) * (mass_flux_inner.ndim - 1)
-    mass_flux = jnp.pad(mass_flux_inner[..., :-1], (*pad_axes, (1, 1)))
+    # Mass flux at interfaces via the shared integration + boundary closure
+    # (single-sourced so the C-grid / MPAS dycores reuse the SAME drop-last +
+    # (1,1) pad on their own — flux-form — ``div_dp``).
+    mass_flux = compute_mass_flux_from_cumsum(cumsum_div, D_total_p, coord)
 
     return mass_flux, D_total_p
 
