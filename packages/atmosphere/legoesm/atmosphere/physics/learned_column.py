@@ -156,8 +156,13 @@ def make_column_physics_fn(
         # model level, sic = 0, solar = S_0 (the historical constant input).
         t_lowest = T_col[:, -1]
         if forcing is not None:
+            # Sanitize the inactive branch BEFORE the select: jnp.where
+            # propagates NaN cotangents from the untaken branch in reverse
+            # mode (codex HIGH) — land-NaN T_sfc would poison the training
+            # gradient through the proxy path.
+            t_raw = jnp.nan_to_num(forcing["T_sfc"], nan=0.0)
             t_sfc_col = jnp.where(
-                jnp.isfinite(forcing["T_sfc"]), forcing["T_sfc"], t_lowest,
+                jnp.isfinite(forcing["T_sfc"]), t_raw, t_lowest,
             )
             sic_col = jnp.clip(
                 jnp.nan_to_num(forcing["sic"], nan=0.0), 0.0, 1.0,

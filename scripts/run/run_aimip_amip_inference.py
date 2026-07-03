@@ -299,7 +299,10 @@ def main():
                 SFNOConfig(
                     in_channels=spec.n_channels + N_SFNO_FORCING_CHANNELS,
                     out_channels=spec.n_channels,
-                    embed_dim=int(cfg.get("sfno_embed_dim", 64)),
+                    # Same fallbacks as run_aimip._build_spectral_config so a
+                    # suite that omits them still builds the architecture the
+                    # checkpoint was trained with (codex).
+                    embed_dim=int(cfg.get("sfno_embed_dim", 128)),
                     n_blocks=int(cfg.get("sfno_n_blocks", 4)),
                     mlp_expansion=int(cfg.get("sfno_mlp_expansion", 4)),
                     residual_prediction=False,
@@ -332,8 +335,10 @@ def main():
     _o3_cache: dict[tuple[int, int], jnp.ndarray] = {}  # current-month ozone
     day = start
 
+    # Variant-qualified default: classical/column_nn/sfno_physics runs in the
+    # same output dir must never deserialize each other's restart (codex).
     restart_base = args.restart_path or args.out.with_name(
-        f"amip_restart_r{args.member}"
+        f"amip_restart_{args.variant}_r{args.member}"
     )
     restart_eqx = Path(f"{restart_base}.eqx")
     restart_json = Path(f"{restart_base}.json")

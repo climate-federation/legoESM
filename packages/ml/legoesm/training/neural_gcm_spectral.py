@@ -421,12 +421,14 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
     # in_channels additionally carries the N_SFNO_FORCING_CHANNELS
     # forcing planes.
     nlev = (sfno.config.out_channels - 2) // 4
-    if sfno.config.in_channels != sfno.config.out_channels + N_SFNO_FORCING_CHANNELS:
+    if (sfno.config.in_channels != sfno.config.out_channels + N_SFNO_FORCING_CHANNELS
+            or (sfno.config.out_channels - 2) % 4 != 0
+            or nlev < 1):
         raise ValueError(
-            f"SFNO physics expects in_channels = out_channels + "
-            f"{N_SFNO_FORCING_CHANNELS} (state {sfno.config.out_channels} + "
-            f"forcing planes); got in={sfno.config.in_channels}, "
-            f"out={sfno.config.out_channels}."
+            f"SFNO physics expects out_channels = 4*nlev + 2 (PE state "
+            f"layout) and in_channels = out_channels + "
+            f"{N_SFNO_FORCING_CHANNELS} (forcing planes); got "
+            f"in={sfno.config.in_channels}, out={sfno.config.out_channels}."
         )
     in_scale = _channel_input_scale(nlev)
     out_scale = _channel_tendency_scale(nlev)
@@ -441,9 +443,16 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
         # over land / when no forcing is prescribed).
         t_lowest = packed[..., spec.T_slice][..., -1]
         if forcing is not None:
+            # Sanitize the inactive branch BEFORE the select: jnp.where
+            # propagates NaN cotangents from the untaken branch in reverse
+            # mode (codex HIGH) — land-NaN T_sfc would poison the training
+            # gradient through the proxy path.
+            t_raw = jnp.nan_to_num(
+                forcing["T_sfc"].reshape(n_lat, n_lon), nan=0.0,
+            )
             t_sfc = jnp.where(
                 jnp.isfinite(forcing["T_sfc"]).reshape(n_lat, n_lon),
-                forcing["T_sfc"].reshape(n_lat, n_lon), t_lowest,
+                t_raw, t_lowest,
             )
             sic = jnp.clip(
                 jnp.nan_to_num(forcing["sic"].reshape(n_lat, n_lon), nan=0.0),
@@ -718,17 +727,22 @@ def spectral_rollout(
 
         def _forcing_at(step_idx):
             # Elapsed simulated time -> advancing day-of-year (seasonal
-            # insolation) + wrapped seconds-of-day (diurnal phase).
-            # Mirrors spectral_amip_rollout._forcing_at.
+            # insolation, FRACTIONAL like spectral_amip_rollout so the
+            # declination is continuous within a day — codex) + wrapped
+            # seconds-of-day (diurnal phase).  day_of_year additionally
+            # wraps to [1, 366) so a year-end IC never exceeds
+            # cos_zenith_angle's documented 1-365 domain (the declination
+            # is 365-periodic, so the wrap is phase-preserving).
             t = (step_idx.astype(jnp.float64) * dt + _t_off
                  + jnp.asarray(forcing_base["seconds_of_day"], jnp.float64))
+            doy = (
+                jnp.asarray(forcing_base["day_of_year"], jnp.float64)
+                + t / 86400.0
+            )
             return {
                 "T_sfc": forcing_base["T_sfc"],
                 "sic": forcing_base["sic"],
-                "day_of_year": (
-                    jnp.asarray(forcing_base["day_of_year"], jnp.float64)
-                    + t // 86400.0
-                ),
+                "day_of_year": jnp.mod(doy - 1.0, 365.0) + 1.0,
                 "seconds_of_day": jnp.mod(t, 86400.0),
             }
 

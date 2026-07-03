@@ -384,10 +384,12 @@ def make_neural_step_unified(
         # AIMIP spectral path so one trained network serves both pipelines.
         # "Missing" = NaN OR non-positive (pipelines that have no SST pass
         # zeros rather than NaN; 0 K is never a physical temperature).
+        # nan_to_num BEFORE the select: jnp.where propagates NaN cotangents
+        # from the untaken branch in reverse mode (codex HIGH).
         sst_flat = adapter.flatten_2d(sst)
         t_sfc_flat = jnp.where(
             jnp.isfinite(sst_flat) & (sst_flat > 0.0),
-            sst_flat, T_col[:, -1],
+            jnp.nan_to_num(sst_flat, nan=0.0), T_col[:, -1],
         )
         sic_flat = jnp.clip(
             jnp.nan_to_num(adapter.flatten_2d(sic), nan=0.0), 0.0, 1.0,
