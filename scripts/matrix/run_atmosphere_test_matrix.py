@@ -1726,6 +1726,69 @@ def _save_conservation(output_dir: Path, case_name: str, diag: dict,
     plt.close(fig)
 
 
+def _save_snapshot_gifs(output_dir: Path, case_name: str, snapshots: dict,
+                        dt: float, field_specs: list[tuple[str, str, str]],
+                        coord_kind: str, lon_deg: np.ndarray,
+                        lat_deg: np.ndarray, frame_ms: int = 600):
+    """Animated GIF of each 2D field's snapshot evolution.
+
+    One frame per stored snapshot on the common regridded lat-lon canvas
+    (same ``_regrid_2d`` path as the ``snapshots_<field>.png`` mosaics,
+    so EVERY grid type gets the animation), with color limits fixed
+    across frames so the animation does not flicker.  Written as
+    ``animation_<field>.gif`` via Pillow.  Requested for the standard SW
+    cases (#521 colliding modons alongside Williamson / cosine bell) —
+    wired in the shared output path so every case carries it.
+    """
+    if not snapshots:
+        return
+    from PIL import Image
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    valid_steps = sorted(snapshots.keys())
+
+    for field_key, field_label, cmap in field_specs:
+        steps = [s for s in valid_steps if field_key in snapshots[s]]
+        if len(steps) < 2:
+            continue
+        regridded = [
+            _regrid_2d(
+                np.asarray(snapshots[s][field_key], dtype=np.float64),
+                lon_deg, lat_deg, coord_kind,
+            ) for s in steps
+        ]
+        all_vals = np.concatenate([r.ravel() for r in regridded])
+        all_vals = all_vals[np.isfinite(all_vals)]
+        if all_vals.size == 0:
+            continue
+        vmin, vmax = float(all_vals.min()), float(all_vals.max())
+        if vmin == vmax:
+            vmax = vmin + 1.0
+
+        frames = []
+        for step, arr in zip(steps, regridded):
+            fig, ax = plt.subplots(figsize=(7.2, 4.0), dpi=110)
+            im = ax.imshow(
+                arr, origin="lower", aspect="auto", cmap=cmap,
+                extent=[-180, 180, -90, 90], vmin=vmin, vmax=vmax)
+            day = step * dt / 86400.0
+            ax.set_title(f"{case_name} — {field_key}  t={day:.2f} d",
+                         fontsize=10)
+            ax.set_xlabel("Longitude")
+            ax.set_ylabel("Latitude")
+            fig.colorbar(im, ax=ax, label=field_label, shrink=0.9)
+            fig.tight_layout()
+            fig.canvas.draw()
+            rgba = np.asarray(fig.canvas.buffer_rgba())
+            frames.append(Image.fromarray(rgba[..., :3].copy()))
+            plt.close(fig)
+
+        frames[0].save(
+            output_dir / f"animation_{field_key}.gif",
+            save_all=True, append_images=frames[1:],
+            duration=frame_ms, loop=0)
+
+
 def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                          dt: float, field_specs: list[tuple[str, str, str]],
                          coord_kind: str, lon_deg: np.ndarray,
@@ -2164,6 +2227,9 @@ def _save_case_diagnostics(
         _save_conservation(output_dir, case_name, diag, mass_key, energy_key)
 
     _save_snapshot_plots(
+        output_dir, case_name, snapshots, dt, field_specs_2d,
+        coord_kind, lon_deg, lat_deg)
+    _save_snapshot_gifs(
         output_dir, case_name, snapshots, dt, field_specs_2d,
         coord_kind, lon_deg, lat_deg)
     # Native-grid rendering (cube faces, icosa cells, Gaussian lats).
