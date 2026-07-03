@@ -300,3 +300,28 @@ def test_qg_leith_with_nonzero_other_friction_rejected():
     bad = r.model_config._replace(lateral_friction_scheme="qg_leith", lateral_viscosity=r.model_config.lateral_viscosity._replace(A_h=1.0e4))
     with pytest.raises(ValueError, match="sole lateral friction"):
         LatLonCGridOceanModel(r.grid, r.z_coord, bad)
+
+
+def test_omega_zero_grid_drops_planetary_vorticity():
+    """The QG-Leith absolute vorticity must take f from the GRID's stored
+    omega (#521): on an omega=0 grid the beta contribution vanishes, so
+    the viscosity (and tendency) built from |grad(zeta+f)| differs from
+    the Earth-rotation grid for identical velocities.  The pre-fix code
+    hardcoded constants.Omega and made these bit-identical."""
+    import numpy as np
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        qg_leith_viscosity_tendency_cgrid,
+    )
+
+    g_earth = create_latlon_grid(16, 32)
+    g0 = create_latlon_grid(16, 32, omega=0.0)
+    rng = np.random.default_rng(3)
+    u = jnp.asarray(0.2 * rng.standard_normal((16, 33, 2)))
+    v = jnp.asarray(0.2 * rng.standard_normal((17, 32, 2)))
+    v = v.at[0].set(0.0).at[-1].set(0.0)
+
+    tu_e, tv_e = qg_leith_viscosity_tendency_cgrid(u, v, g_earth)
+    tu_0, tv_0 = qg_leith_viscosity_tendency_cgrid(u, v, g0)
+    assert not np.allclose(np.asarray(tu_e), np.asarray(tu_0))
+    assert not np.allclose(np.asarray(tv_e), np.asarray(tv_0))
