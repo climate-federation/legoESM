@@ -210,7 +210,12 @@ def compute_two_leaf_canopy_fluxes(
     if LAI_override is not None:
         LAI    = LAI_override
     else:
-        LAI    = _get(lp, "LAI",      jnp.full(ncol, 1.5))
+        # ``lp.LAI`` is now a real field on LandSurfaceParams (prescribed spatial
+        # climatology); it is None only for non-CLM setups that never populated it,
+        # in which case fall back to the scalar default (getattr alone would hand
+        # back the None and break the canopy math).
+        _lp_lai = _get(lp, "LAI",     None)
+        LAI    = jnp.full(ncol, 1.5) if _lp_lai is None else _lp_lai
     hc         = _get(lp, "hc",       jnp.full(ncol, 5.0))
     fC4        = _get(lp, "fC4",      jnp.zeros(ncol))
     FNonVeg    = _get(lp, "FNonVeg",  jnp.zeros(ncol))

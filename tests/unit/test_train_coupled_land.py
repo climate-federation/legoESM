@@ -49,6 +49,8 @@ def test_build_land_params_overrides_only_the_four_fields():
 
     changed = {"z0", "Vc_max25", "g1", "LCMA"}
     for f in base._fields:
+        if getattr(base, f) is None:
+            continue  # optional prescribed field (e.g. LAI) not set on this base
         same = np.allclose(np.asarray(getattr(lp, f)), np.asarray(getattr(base, f)))
         if f in changed:
             # overridden from the per-PFT trainable set (may coincide, but shape holds)
