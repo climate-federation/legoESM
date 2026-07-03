@@ -120,6 +120,11 @@ class OMIPRunConfig(NamedTuple):
     # still disables it entirely).  Carried here so --params can reach
     # GMRediConfig / VisbeckConfig / TreguierConfig (#691/#724).
     gm_redi: GMRediConfig = _DEFAULT_BATHY_GM_REDI
+    # Lat-band SPMD (single-controller multi-GPU) for the lat-lon restoring
+    # lane: wraps the loop's dynamics step in ``make_sharded_ocean_step``
+    # (the #751/#758-validated lane-D step).  0 devices = all local.
+    enable_latlon_spmd: bool = False
+    spmd_n_devices: int = 0
 
 
 def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> bool:
@@ -181,6 +186,8 @@ def build_config_from_args(args) -> OMIPRunConfig:
         seed=args.seed,
         vertical_mixing=build_vertical_mixing_config_from_args(args),
         precision=args.precision,
+        enable_latlon_spmd=getattr(args, "enable_latlon_spmd", False),
+        spmd_n_devices=getattr(args, "spmd_n_devices", 0),
     )
 
 
@@ -580,6 +587,23 @@ def parse_args(argv: list[str] | None = None):
                        "uses LY09 bulk fluxes from a pre-built JRA55-do cache "
                        "(see scripts/data/prepare_omip_forcing.py). Currently "
                        "supports only --grid latlon."
+                   ))
+    p.add_argument("--enable-latlon-spmd", action="store_true", default=False,
+                   help=(
+                       "Run the lat-lon RESTORING lane's dynamics step "
+                       "lat-band-SPMD across the local devices "
+                       "(make_sharded_ocean_step — the validated multi-GPU "
+                       "ocean lane). Single-controller only (one process; "
+                       "multi-node scaling lives in "
+                       "bench_ocean_latlon_spmd_scaling --multicontroller); "
+                       "requires --grid latlon, --forcing-mode restoring, "
+                       "and n_lat divisible by the device count. JRA55 "
+                       "lanes: follow-up."
+                   ))
+    p.add_argument("--spmd-n-devices", type=int, default=0,
+                   help=(
+                       "Device count for --enable-latlon-spmd "
+                       "(0 = all local devices)."
                    ))
     p.add_argument("--jra55-cache", type=str, default=None,
                    help=(
@@ -2858,13 +2882,18 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                    restart_buffer_seconds: float = 600.0,
                    start_step=0,
                    nudge_woa_tau=0.0, T_woa_3d=None, S_woa_3d=None,
-                   snapshot_fn=None):
+                   snapshot_fn=None, spmd_step=None, spmd_gather=None):
     """Run time loop with diagnostics.
 
     Two forcing paths, mutually exclusive:
 
     * **restoring** (default): plain ``model.step(state, dt)`` followed
       by Haney SST/SSS restoring when ``restoring_targets`` is set.
+      With ``spmd_step`` set (``--enable-latlon-spmd``), the dynamics
+      step runs through that lat-band-SPMD callable instead — the state
+      arrives sharded and every downstream op (restoring, finite checks,
+      diagnostics, restart saves) works on the sharded global arrays
+      transparently under the single-controller GSPMD runtime.
     * **jra55_do_tropical**: ``_jra55_step(...)`` per step using a
       pre-built JRA55-do cache (set ``jra55_state``); the model
       receives bulk-flux fields and structured freshwater forcing.
@@ -2894,6 +2923,11 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             "_run_omip_loop: jra55_state and restoring_targets are mutually "
             "exclusive — choose one forcing path."
         )
+    if spmd_step is not None and jra55_state is not None:
+        raise ValueError(
+            "spmd_step is restoring-lane only (the JRA55 block functions "
+            "call model._step_impl directly); run_omip_single refuses this "
+            "combination before the loop.")
     if checkpoint_days is not None and checkpoint_dir is None:
         raise ValueError(
             "_run_omip_loop: checkpoint_days requires checkpoint_dir."
@@ -2919,8 +2953,11 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     # ``blowup_info`` and is emitted in results.txt.
     blowup_info: dict | None = None
 
-    # Initial diagnostics
-    scalars = _extract_scalars(state, grid_type, grid, z_coord)
+    # Initial diagnostics (SPMD: gather the v_lower-carrying sharded state
+    # — _extract_scalars centers v and needs the full n_lat+1 rows)
+    scalars = _extract_scalars(
+        spmd_gather(state) if spmd_gather is not None else state,
+        grid_type, grid, z_coord)
     for k, v in scalars.items():
         diag.setdefault(k, []).append(v)
     diag["day"].append(0.0)
@@ -2935,6 +2972,15 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     # checkpoint/resume must not reset the ice pack to the cold start.
     ice_state = None
 
+    # SPMD (--enable-latlon-spmd): restart files must carry the FULL
+    # (n_lat+1) staggered v/v_mask, not the sharded v_lower layout — every
+    # save choke point goes through this gather-aware wrapper.
+    if spmd_gather is not None:
+        def save_restart(st, *a, **kw):
+            return _save_restart(spmd_gather(st), *a, **kw)
+    else:
+        save_restart = _save_restart
+
     def _maybe_wallclock_exit(state, step: int, day: float) -> None:
         if not _wallclock_exhausted(
             time.time() - t0,
@@ -2942,7 +2988,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             restart_buffer_seconds,
         ):
             return
-        fname = _save_restart(state, day, step, checkpoint_dir,
+        fname = save_restart(state, day, step, checkpoint_dir,
                               ice_state=ice_state, grid_type=grid_type)
         if _snapshot_fn is not None:
             try:
@@ -3175,7 +3221,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
 
             if (steps_per_ckpt is not None and
                     (step % steps_per_ckpt == 0 or step == n_steps)):
-                fname = _save_restart(state, day, step, checkpoint_dir,
+                fname = save_restart(state, day, step, checkpoint_dir,
                                       ice_state=ice_state, grid_type=grid_type)
                 if _snapshot_fn is not None:
                     try:
@@ -3229,7 +3275,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 )
                 if (steps_per_ckpt is not None and
                         (step % steps_per_ckpt == 0 or step == n_steps)):
-                    fname = _save_restart(state, day, step, checkpoint_dir,
+                    fname = save_restart(state, day, step, checkpoint_dir,
                                           ice_state=ice_state,
                                           grid_type=grid_type)
                     if _snapshot_fn is not None:
@@ -3254,8 +3300,10 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     ramp_days = float(restoring_ramp_days)
     restoring_ramp_steps = max(1, int(ramp_days * 86400.0 / dt)) if ramp_days > 0 else 1
 
+    _dyn_step = spmd_step if spmd_step is not None else model.step
+
     for i in range(start_step, n_steps):
-        state = model.step(state, dt)
+        state = _dyn_step(state, dt)
 
         # Apply SST/SSS restoring (grid-agnostic, after dynamics step)
         if restoring_targets is not None:
@@ -3332,7 +3380,11 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
 
         if step % diag_every == 0 or step == n_steps:
             day = step * dt / 86400.0
-            scalars = _extract_scalars(state, grid_type, grid, z_coord)
+            # SPMD: _extract_scalars centers v (needs the full n_lat+1
+            # staggered rows) — gather the v_lower-carrying sharded state
+            # at the diag cadence only.
+            _st_diag = spmd_gather(state) if spmd_gather is not None else state
+            scalars = _extract_scalars(_st_diag, grid_type, grid, z_coord)
             diag["day"].append(day)
             diag["step"].append(step)
             for k, v in scalars.items():
@@ -3354,7 +3406,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             day_now = step * dt / 86400.0
             steps_per_ckpt = max(1, int(round(checkpoint_days * 86400.0 / dt)))
             if step % steps_per_ckpt == 0 or step == n_steps:
-                fname = _save_restart(state, day_now, step, checkpoint_dir,
+                fname = save_restart(state, day_now, step, checkpoint_dir,
                                       ice_state=ice_state, grid_type=grid_type)
                 # Auto-generate snapshot plot alongside the restart.
                 if _snapshot_fn is not None:
@@ -4116,6 +4168,21 @@ def run_omip_single(grid_type: str, args) -> dict:
         print(f"  Restart: loaded day {restart_day:.1f} (step {restart_step}) "
               f"from {Path(args.restart).name}")
 
+    # --enable-latlon-spmd preconditions that are knowable from ARGS: refuse
+    # BEFORE the JRA55 forcing setup below builds caches/state (codex r1 #1)
+    # and before any device work; a negative device count would otherwise
+    # silently no-op through the `_nd or len(devices)` resolution (r1 #3).
+    if run_config.enable_latlon_spmd:
+        if args.forcing_mode != "restoring":
+            raise SystemExit(
+                f"--enable-latlon-spmd supports --forcing-mode restoring "
+                f"only (got {args.forcing_mode!r}; the JRA55 lanes are a "
+                f"follow-up).")
+        if run_config.spmd_n_devices < 0:
+            raise SystemExit(
+                f"--spmd-n-devices must be >= 0 "
+                f"(got {run_config.spmd_n_devices}).")
+
     # Forcing dispatch: 'restoring' (default) vs JRA55-do bulk fluxes.
     restoring_targets = None
     restoring_tau_s = None
@@ -4306,6 +4373,54 @@ def run_omip_single(grid_type: str, args) -> dict:
     else:
         ramp_days_eff = 0.0
 
+    # --- Lat-band SPMD (--enable-latlon-spmd): wrap the dynamics step in
+    # the validated multi-GPU sharded ocean step and shard the state.
+    # Single-controller only; restoring lane only (the JRA55 block
+    # functions call model._step_impl directly — follow-up).  Runs AFTER
+    # the restart load so a resumed state is sharded too.
+    spmd_step = None
+    spmd_gather = None
+    if run_config.enable_latlon_spmd:
+        if grid_type != "latlon":
+            raise SystemExit(
+                f"--enable-latlon-spmd requires --grid latlon "
+                f"(got {grid_type}).")
+        if jra55_state is not None:
+            raise SystemExit(
+                "--enable-latlon-spmd supports --forcing-mode restoring "
+                "only (the JRA55 lanes are a follow-up).")
+        if jax.process_count() > 1:
+            raise SystemExit(
+                "--enable-latlon-spmd is single-controller only; "
+                "multi-node ocean scaling runs via "
+                "bench_ocean_latlon_spmd_scaling --multicontroller.")
+        _nd = run_config.spmd_n_devices or len(jax.devices())
+        if _nd > 1:
+            if grid.n_lat % _nd != 0:
+                raise SystemExit(
+                    f"--enable-latlon-spmd: n_lat ({grid.n_lat}) not "
+                    f"divisible by the device count ({_nd}); pick "
+                    f"--spmd-n-devices dividing n_lat.")
+            from functools import partial
+
+            from legoesm.ocean.dynamics.sharded_ocean_step import (
+                gather_state_latlon,
+                make_sharded_ocean_step,
+                shard_state_latlon,
+            )
+            from legoesm.parallel.mesh import create_latlon_mesh
+            # Prime the build-once vertex-mask cache from the CONCRETE
+            # state so the wrapper can build per-band masks host-side.
+            model.prime_step_caches(state)
+            _dev = create_latlon_mesh(n_devices=_nd)
+            spmd_step = make_sharded_ocean_step(model, _dev.mesh)
+            spmd_gather = partial(gather_state_latlon, mesh=_dev.mesh)
+            state = shard_state_latlon(state, _dev.mesh)
+            print(f"  SPMD: lat-band sharded dynamics step over {_nd} "
+                  f"devices ({jax.default_backend()}).")
+        else:
+            print("  SPMD: single device visible — flag is a no-op.")
+
     # Run time loop
     state, diag, wall_time, ok, blowup_info = _run_omip_loop(
         model, state, grid_type, grid, z_coord,
@@ -4326,7 +4441,13 @@ def run_omip_single(grid_type: str, args) -> dict:
         S_woa_3d=(S_woa * state.land_mask.data[..., jnp.newaxis]).astype(
             state.S.data.dtype) if args.nudge_woa_tau > 0 and S_woa is not None else None,
         snapshot_fn=_snapshot_fn,
+        spmd_step=spmd_step,
+        spmd_gather=spmd_gather,
     )
+    if spmd_gather is not None:
+        # Downstream report/plot/save paths expect the full (n_lat+1)
+        # staggered v layout, not the sharded v_lower carry.
+        state = spmd_gather(state)
 
     status = "PASS" if ok else "FAIL"
     icon = "  " if ok else "**"
