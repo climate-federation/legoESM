@@ -1365,6 +1365,30 @@ def _get_cs_weights(n: int, n_lat: int = 181, n_lon: int = 360):
     return get_cubedsphere_to_latlon_weights(n, n_lon=n_lon, n_lat=n_lat)
 
 
+def _latlon_curl(u_ll: np.ndarray, v_ll: np.ndarray,
+                 radius: float) -> np.ndarray:
+    """Relative vorticity [1/s] on the common (181, 360) lat-lon canvas.
+
+    Spherical curl of geographic winds already regridded to the snapshot
+    canvas (lat -90..90 x 1 deg, lon -180..180 x 1 deg):
+        zeta = (dv/dlon - d(u cos(lat))/dlat) / (R cos(lat)).
+    The two rows adjacent to each pole are zeroed — the 1/cos(lat) metric
+    is singular there and the centred gradient is meaningless.  Used for
+    the colliding-modons vorticity snapshots (#521); diagnostic only.
+    """
+    u = np.asarray(u_ll, dtype=np.float64)
+    v = np.asarray(v_ll, dtype=np.float64)
+    lat1d = np.linspace(-90.0, 90.0, u.shape[0])
+    coslat = np.cos(np.radians(lat1d))[:, None]
+    d = np.radians(1.0)
+    dv_dlam = np.gradient(v, d, axis=1)
+    ducos_dphi = np.gradient(u * coslat, d, axis=0)
+    zeta = (dv_dlam - ducos_dphi) / (radius * np.maximum(coslat, 1e-3))
+    zeta[:2, :] = 0.0
+    zeta[-2:, :] = 0.0
+    return zeta
+
+
 def _regrid_latlon_to_181x360(arr: np.ndarray, lon_deg: np.ndarray,
                               lat_deg: np.ndarray) -> np.ndarray:
     """Regrid a native lat-lon field to the common (181, 360) [-180,180) canvas.
@@ -2482,6 +2506,12 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             return {"u": u_ll, "v": v_ll,
                     "wind_speed": np.sqrt(u_ll ** 2 + v_ll ** 2),
                     "height": np.asarray(s.h, dtype=np.float64),
+                    # Relative vorticity on the snapshot canvas — the
+                    # cleanest modon signature (#521); cheap for every
+                    # cube SW case, plotted where a case lists it in
+                    # COMPARISON_FIELDS.
+                    "vorticity": _latlon_curl(
+                        u_ll, v_ll, float(grid.radius)),
                     "u_cc_east": np.asarray(u_east, dtype=np.float64),
                     "v_cc_north": np.asarray(v_north, dtype=np.float64)}
 
@@ -5805,10 +5835,12 @@ ATMOSPHERE_COMPARISON_FIELDS: dict[str, list[dict]] = {
     ],
     # Colliding modons (issue 521): two zonal Gaussian jets roll up into
     # counter-rotating dipoles that collide and depart.  Zonal wind shows the
-    # westerly/easterly bursts; autoscale height/wind so the collision is
-    # visible.  (Relative vorticity — the cleanest modon signature — is a
-    # follow-up diagnostic; the cube extract_fn currently emits u/v/speed/h.)
+    # westerly/easterly bursts; relative vorticity (cube extract_fn via
+    # ``_latlon_curl``) is the cleanest modon signature — the field
+    # JosephMouallem's reference figures plot; snapshots land in
+    # ``results/.../snapshots_vorticity.png`` + ``snapshots_latlon.npz``.
     "colliding_modons": [
+        {"field": "vorticity",  "vmin": -3e-5, "vmax": 3e-5,  "cmap": "RdBu_r",  "units": "1/s"},
         {"field": "u",          "vmin": -50,   "vmax": 50,    "cmap": "RdBu_r",  "units": "m/s"},
         {"field": "v",          "vmin": None,  "vmax": None,  "cmap": "RdBu_r",  "units": "m/s"},
         {"field": "wind_speed", "vmin": 0,     "vmax": None,  "cmap": "viridis", "units": "m/s"},
