@@ -1186,7 +1186,8 @@ class PhysicsPipeline:
             # PER TILE (ocean bulk scheme on ocean, land Monin-Obukhov on
             # land) and inject it as the BL bottom boundary condition, rather
             # than running one scheme on the blended surface temperature.
-            # Gated to the louis scheme by ExperimentConfig.validate_strict.
+            # Restricted to the kernels that accept the injected ``surface_flux``
+            # tuple (louis / clubb_lite / clubb) by ExperimentConfig.validate_strict.
             # ``beta_land`` (None unless the soil-water bucket is active)
             # soil-moisture-limits the land tile's latent flux.
             if (self.surface_tiled and self.f_land is not None

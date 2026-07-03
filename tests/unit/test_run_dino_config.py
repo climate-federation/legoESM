@@ -156,3 +156,19 @@ def test_evd_momentum_replaces_config():
     assert cfg.evd_on_momentum is True      # NEMO nn_evdm=1 default
     cfg = dataclasses.replace(cfg, evd_on_momentum=False)
     assert cfg.evd_on_momentum is False
+
+
+def test_bottom_drag_scheme_flag_parses(monkeypatch):
+    """--bottom-drag-scheme parses (DINOConfig.bottom_drag_scheme wiring);
+    unknown values are rejected by argparse choices."""
+    monkeypatch.setattr(sys, "argv", ["run_dino.py"])
+    assert rd._parse_args().bottom_drag_scheme is None    # keep field default
+    monkeypatch.setattr(sys, "argv", [
+        "run_dino.py", "--bottom-drag-scheme", "nemo_quadratic"])
+    assert rd._parse_args().bottom_drag_scheme == "nemo_quadratic"
+    monkeypatch.setattr(sys, "argv", [
+        "run_dino.py", "--bottom-drag-scheme", "nemo_typo"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+    from legoesm.ocean.experiments.dino import DINOConfig
+    assert DINOConfig().bottom_drag_scheme == "legacy"

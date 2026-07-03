@@ -84,6 +84,10 @@ ALL_RESULTS: list[dict] = []
 
 _VALID_VERTICAL_MIXING_SCHEMES = ("kpp", "tke", "catke", "richardson", "constant", "none")
 _DEFAULT_KPP_CONFIG = KPPConfig()
+from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (  # noqa: E402
+    IWMConfig as _IWMConfig,
+)
+_DEFAULT_IWM_CONFIG = _IWMConfig()
 
 # Production GM/Redi config for the realistic-bathymetry (ETOPO) lat-lon path,
 # hoisted from _create_setup so a --params calibration file can override its
@@ -147,6 +151,25 @@ def build_vertical_mixing_config_from_args(
             langmuir_coeff=args.langmuir_coeff,
             langmuir_number_default=args.langmuir_number_default,
         ),
+        iwm=build_iwm_config_from_args(args),
+    )
+
+
+def build_iwm_config_from_args(args) -> "IWMConfig":
+    """Resolve the zdfiwm (de Lavergne 2020) CLI flags into IWMConfig."""
+    from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+        IWMConfig,
+    )
+    return IWMConfig(
+        enabled=bool(getattr(args, "iwm", False)),
+        mevar=bool(getattr(args, "iwm_mevar", False)),
+        tsdiff=bool(getattr(args, "iwm_tsdiff", False)),
+        power_bot_wm2=args.iwm_power_bot,
+        power_cri_wm2=args.iwm_power_cri,
+        power_nsq_wm2=args.iwm_power_nsq,
+        power_sho_wm2=args.iwm_power_sho,
+        scale_bot_m=args.iwm_scale_bot,
+        scale_cri_m=args.iwm_scale_cri,
     )
 
 
@@ -159,6 +182,122 @@ def build_config_from_args(args) -> OMIPRunConfig:
         vertical_mixing=build_vertical_mixing_config_from_args(args),
         precision=args.precision,
     )
+
+
+def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
+    """Post-``_create_setup`` application of the NEMO zdfdrg drag-law flags
+    and the zdfiwm forcing maps (mirrors the run_omip_core2 replace-flat +
+    model-rebuild pattern; a plain config edit needs the model rebuilt so
+    the jitted step captures it).
+
+    Returns ``(config, model)`` — unchanged (bit-identical objects) when
+    no NEMO drag scheme / IWM flag is active.
+    """
+    drag_flat = {}
+    if args.bottom_drag_scheme != "legacy":
+        drag_flat = dict(
+            bottom_drag_scheme=args.bottom_drag_scheme,
+            bottom_drag_cd0=args.bottom_drag_cd0,
+            bottom_drag_cdmax=args.bottom_drag_cdmax,
+            bottom_drag_z0=args.bottom_drag_z0,
+            bottom_drag_ke0=args.bottom_drag_ke0,
+        )
+    want_iwm = bool(getattr(args, "iwm", False))
+    if not drag_flat and not want_iwm:
+        return config, model
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    if isinstance(model, LatLonCGridOceanModel):
+        if drag_flat:
+            config = config.replace_flat(**drag_flat)
+        iwm_forcing = None
+        if want_iwm:
+            # Make sure the IWM config ACTUALLY reaches the implicit
+            # K-profile solve (codex r2 #1: the flat-bottom lat-lon path
+            # ships config.physics=None, so without this --iwm would be a
+            # silent no-op — k_profiles never sees vertical_mixing.iwm).
+            _iwm_cfg = build_iwm_config_from_args(args)
+            _phys = config.physics
+            if _phys is None:
+                from legoesm.ocean.physics.combined import OceanPhysicsConfig
+                from legoesm.ocean.physics.vertical_mixing.config import (
+                    VerticalMixingConfig,
+                )
+                from legoesm.ocean.physics.lateral_mixing.config import (
+                    LateralMixingConfig,
+                )
+                from legoesm.ocean.physics.surface_forcing.config import (
+                    SurfaceForcingConfig,
+                )
+                from legoesm.ocean.physics.convection.config import (
+                    OceanConvectionConfig,
+                )
+                # Minimal pipeline: every module inert except the IWM rider
+                # (the flat path's diffusion stays config-based).
+                _phys = OceanPhysicsConfig(
+                    vertical_mixing=VerticalMixingConfig(
+                        scheme="none", iwm=_iwm_cfg),
+                    lateral_mixing=LateralMixingConfig(scheme="none"),
+                    surface_forcing=SurfaceForcingConfig(scheme="none"),
+                    convection=OceanConvectionConfig(scheme="none"),
+                    shortwave_penetration=None,
+                )
+            else:
+                _phys = _phys._replace(
+                    vertical_mixing=_phys.vertical_mixing._replace(
+                        iwm=_iwm_cfg))
+            config = config._replace(physics=_phys)
+            # zdfiwm contributes through the implicit avt/avm profiles.
+            if not getattr(config, "implicit_vertical_mixing", False):
+                config = config.replace_flat(implicit_vertical_mixing=True)
+                print("[setup] zdfiwm: implicit_vertical_mixing forced ON "
+                      "(the wave avm/avt enter the backward-Euler solve)")
+            # NEMO zdfiwm_init FORCES the model backgrounds to molecular
+            # values (avmb = rnu = 1.4e-6 m²/s, avtb = 1e-10 m²/s): the
+            # wave field IS the interior background.  Mirror that so the
+            # OMIP A_v/K_v floors don't double-count (codex r1 #2).
+            from legoesm import constants as _const
+            config = config.replace_flat(
+                A_v=_const.nu_ocean_molecular, K_v=1.0e-10)
+            print("[setup] zdfiwm: model backgrounds forced to molecular "
+                  f"(A_v={_const.nu_ocean_molecular:g}, K_v=1e-10) per "
+                  "zdfiwm_init")
+        if want_iwm and args.iwm_forcing_file:
+            import numpy as _np
+            from legoesm.ocean.iwm_forcing import load_iwm_forcing
+            lat_T = getattr(grid, "lat_T", None)
+            if lat_T is not None:
+                # tripole: lat_T/lon_T are stored in RADIANS (2-D)
+                lat_T = _np.degrees(_np.asarray(lat_T))
+                lon_T = _np.degrees(_np.asarray(grid.lon_T))
+            else:                                     # regular lat-lon (radians)
+                lat_T = _np.degrees(_np.asarray(grid.lat))
+                lon_T = _np.degrees(_np.asarray(grid.lon))
+            iwm_forcing = load_iwm_forcing(
+                args.iwm_forcing_file, lat_T, lon_T)
+            print(f"[setup] zdfiwm forcing maps loaded from "
+                  f"{args.iwm_forcing_file}")
+        model = LatLonCGridOceanModel(
+            grid, z_coord, config, iwm_forcing=iwm_forcing)
+        return config, model
+
+    if want_iwm:
+        raise SystemExit(
+            f"--iwm is supported on the lat-lon / tripole grids only "
+            f"(the {grid_type} vertical-mixing bridge does not consume "
+            f"IWM yet)")
+    # Non-latlon models with flat drag fields (MPAS Voronoi, cubed-sphere):
+    # replace the flat NamedTuple fields and rebuild the same model class.
+    if not hasattr(config, "bottom_drag_scheme"):
+        raise SystemExit(
+            f"--bottom-drag-scheme={args.bottom_drag_scheme} is not "
+            f"supported on the {grid_type} grid (its ocean config has no "
+            f"bottom-drag law fields)")
+    config = config._replace(**drag_flat)
+    model = type(model)(grid, z_coord, config)
+    return config, model
 
 
 def apply_run_precision(args) -> None:
@@ -349,6 +488,55 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--kpp-a-bg", type=float,
                    default=_DEFAULT_KPP_CONFIG.A_bg,
                    help="KPP background viscosity [m^2/s]")
+    # --- internal wave-driven mixing (NEMO zdfiwm, de Lavergne 2020) ---
+    _IWM_DEF = _DEFAULT_IWM_CONFIG
+    p.add_argument("--iwm", action="store_true",
+                   help="Enable internal wave-driven mixing (NEMO zdfiwm; "
+                        "additive avt/avm through the implicit vertical "
+                        "solve; requires implicit vertical mixing).")
+    p.add_argument("--iwm-mevar", action="store_true",
+                   help="zdfiwm ln_mevar: variable mixing efficiency "
+                        "(ORCA1 oracle: off).")
+    p.add_argument("--iwm-tsdiff", action="store_true",
+                   help="zdfiwm ln_tsdiff: differential T/S mixing "
+                        "(unsupported on the shared-K solve; raises).")
+    p.add_argument("--iwm-forcing-file", type=str, default=None,
+                   help="NetCDF de Lavergne power/decay maps "
+                        "(zdfiwm_forcing_TRA.nc layout).  Omit for the "
+                        "uniform constant-power fallback.")
+    p.add_argument("--iwm-power-bot", type=float,
+                   default=_IWM_DEF.power_bot_wm2,
+                   help="Uniform-fallback abyssal-hill power [W/m^2]")
+    p.add_argument("--iwm-power-cri", type=float,
+                   default=_IWM_DEF.power_cri_wm2,
+                   help="Uniform-fallback critical-slope power [W/m^2]")
+    p.add_argument("--iwm-power-nsq", type=float,
+                   default=_IWM_DEF.power_nsq_wm2,
+                   help="Uniform-fallback N^2-scaled power [W/m^2]")
+    p.add_argument("--iwm-power-sho", type=float,
+                   default=_IWM_DEF.power_sho_wm2,
+                   help="Uniform-fallback shoaling power [W/m^2]")
+    p.add_argument("--iwm-scale-bot", type=float,
+                   default=_IWM_DEF.scale_bot_m,
+                   help="Uniform-fallback abyssal-hill decay scale [m]")
+    p.add_argument("--iwm-scale-cri", type=float,
+                   default=_IWM_DEF.scale_cri_m,
+                   help="Uniform-fallback critical-slope decay scale [m]")
+    # --- NEMO zdfdrg bottom-drag laws ---
+    p.add_argument("--bottom-drag-scheme", type=str, default="legacy",
+                   choices=["legacy", "nemo_quadratic", "nemo_loglayer"],
+                   help="Bottom-drag law: 'legacy' = historical MOM6-style "
+                        "r/DRAG_BG_VEL path; 'nemo_quadratic' = zdfdrg "
+                        "np_non_lin (the ORCA1 namelist); 'nemo_loglayer' "
+                        "= zdfdrg np_loglayer.")
+    p.add_argument("--bottom-drag-cd0", type=float, default=1.0e-3,
+                   help="NEMO rn_Cd0 [-] (loglayer: Cd minimum)")
+    p.add_argument("--bottom-drag-cdmax", type=float, default=0.1,
+                   help="NEMO rn_Cdmax [-] (loglayer Cd cap)")
+    p.add_argument("--bottom-drag-z0", type=float, default=3.0e-3,
+                   help="NEMO rn_z0 bottom roughness [m]")
+    p.add_argument("--bottom-drag-ke0", type=float, default=2.5e-3,
+                   help="NEMO rn_ke0 background bottom KE [m^2/s^2]")
     p.add_argument("--no-conservation-fixer", action="store_true")
     p.add_argument("--restoring-timescale", type=float, default=None,
                    help=(
@@ -3405,6 +3593,11 @@ def run_omip_single(grid_type: str, args) -> dict:
         vertical_mixing=run_config.vertical_mixing,
         forcing_mode=getattr(args, "forcing_mode", "restoring"),
     )
+    # NEMO zdfdrg drag-law + zdfiwm forcing-map overrides (no-op when the
+    # flags are at their legacy defaults; rebuilds the model so the jitted
+    # step captures the new config / maps).
+    config, model = _apply_drag_iwm_overrides(
+        args, grid_type, grid, z_coord, config, model)
 
     # --- Initialization strategy ---
     # Start from rest state with uniform T/S, then restore toward WOA
@@ -3730,7 +3923,9 @@ def run_omip_single(grid_type: str, args) -> dict:
               f"{n_snapped} cells snapped, {n_new_land} → land")
         z_coord_partial = create_partial_cell_coordinate(z_coord, H_bathy_init)
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
-        model = LatLonCGridOceanModel(grid, z_coord_partial, config)
+        model = LatLonCGridOceanModel(
+            grid, z_coord_partial, config,
+            iwm_forcing=getattr(model, "_iwm_forcing", None))
         # The scan body calls model._step_impl() (no inner JIT) so
         # partial-cell + lax.scan now works correctly.
 
@@ -3865,7 +4060,9 @@ def run_omip_single(grid_type: str, args) -> dict:
         # operators expect this z_coord to match the bathymetry).
         pc_coord = create_partial_cell_coordinate(z_coord, H_snap)
         z_coord = pc_coord
-        model = LatLonCGridOceanModel(grid, z_coord, config)
+        model = LatLonCGridOceanModel(
+            grid, z_coord, config,
+            iwm_forcing=getattr(model, "_iwm_forcing", None))
 
         # Rebuild the rest state with the real bathymetry + mask.
         # rest_state_latlon_cgrid_ocean enforces u_mask/v_mask

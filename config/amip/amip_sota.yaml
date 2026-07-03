@@ -57,7 +57,14 @@ multilayer_n_layers: 10
 multilayer_soil_depth: 3.0
 # clm_surfdata_path is a machine path — pass --clm-surfdata-path at runtime.
 snow_albedo_feedback: true  # threaded into the multilayer land (#715)
-land_stomatal_beta: true    # Jarvis stomata, threaded into the multilayer land (#715)
+# Jarvis/Farquhar interactive stomata (#715): DISABLED. On the multilayer soil it
+# over-transpires (effective beta stays near-potential in the moist root zone),
+# driving a large over-evaporation / moistening drift (C12/30d CWV 176 & R_TOA
+# -108 with it ON, vs a realistic CWV 30 & R_TOA -33 with it OFF -- isolated as
+# the drift cause, issue #730). With it off the multilayer uses the beta_soil
+# root-zone moisture-stress path, which is realistic. Re-enable once the stomatal
+# conductance (Vc_max25/g1/gs_max) is calibrated to be moisture-limited.
+land_stomatal_beta: false
 
 # --- Tiled surface + interactive land -----------------------------------------
 surface_bulk_scheme: coare3   # OCEAN tile (land tile uses MOST via #715)

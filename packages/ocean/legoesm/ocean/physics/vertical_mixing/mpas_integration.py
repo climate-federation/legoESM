@@ -255,6 +255,11 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callable
         returning (du_dt_edge, dT_dt_cell, dS_dt_cell, A_v_cell, K_v_cell).
         The model assembles these into MPASOceanTendencies.
     """
+    if getattr(config, "iwm", None) is not None and config.iwm.enabled:
+        raise NotImplementedError(
+            "VerticalMixingConfig.iwm.enabled=True is not wired on the MPAS "
+            "vertical-mixing bridge yet (lat-lon / tripole only) — reject "
+            "rather than silently drop the wave-driven mixing.")
     cfg = config.kpp
 
     def physics_fn(
@@ -416,6 +421,11 @@ def make_kpp_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
         ``profiles_fn(state, mesh, z_coord, surface_forcing=None)``
         returning ``(A_v_cells, K_v_cells)`` both shape (nCells, nlev-1).
     """
+    if getattr(config, "iwm", None) is not None and config.iwm.enabled:
+        raise NotImplementedError(
+            "VerticalMixingConfig.iwm.enabled=True is not wired on the MPAS "
+            "vertical-mixing bridge yet (lat-lon / tripole only) — reject "
+            "rather than silently drop the wave-driven mixing.")
     cfg = config.kpp
 
     def profiles_fn(

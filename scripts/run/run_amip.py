@@ -664,7 +664,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "land Monin-Obukhov scheme on the LAND tile, then "
                              "area-weight — instead of one scheme on the blended "
                              "surface (which runs the ocean scheme over land). "
-                             "Requires --slab-land-active and --turbulence louis.")
+                             "Requires --slab-land-active and --turbulence in "
+                             "{louis, clubb_lite, clubb} (the kernels that consume "
+                             "the injected tiled surface flux).")
     parser.add_argument("--surface-z0-land", type=float,
                         default=_EXPERIMENT_DEFAULTS.surface_z0_land,
                         dest="surface_z0_land",
