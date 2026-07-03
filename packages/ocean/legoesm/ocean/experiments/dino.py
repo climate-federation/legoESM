@@ -343,6 +343,57 @@ class DINOConfig:
         return self.A_v_bg
 
 
+def dino_r1_exact_config(**overrides) -> DINOConfig:
+    """DINO_R1 EXACTNESS preset (Level-1 campaign, step 1).
+
+    Flips every DINOConfig selection whose EXACT NEMO block already exists
+    onto the DINO_R1 oracle choice (tests/DINO_R1/EXP00/namelist_cfg — see
+    docs/ocean/fidelity/dino_l1_exactness_audit.md):
+
+    * ``eos="nemo_seos"``            — S-EOS, DINO coefficients (nameos)
+    * ``vmix_scheme="tke"``          — the oracle closure (namzdf); NOTE the
+      known multi-year SW-corner TKE instability (~d226 with the paper
+      backgrounds) is accepted here: exactness first, the harness measures
+      what the oracle-faithful configuration actually does
+    * ``tke_momentum_visc_bg=A_v_bg``— stabilizer floor OFF (oracle
+      avm0 = 1.2e-4 exactly; the 5e-4 floor is a legoESM stabilizer)
+    * ``bottom_drag_scheme="nemo_quadratic"`` — zdfdrg ln_non_lin (#738)
+    * ``use_gm_redi=False``          — ln_ldfeiv = .false. (NO eddy-induced
+      velocity at R1; iso-neutral diffusion arrives with the MSC item)
+    * ``A_h_floor=0``, ``A_h_eq_boost=1`` — legoESM stabilizers OFF (the
+      oracle viscosity is exactly ahm = Uv·Δ/2, no floor, no boost)
+    * ``tracer_advection="ppm_fct"`` — the Zalesak-FCT family (nearest
+      existing block to the oracle FCT2/2; the exact 2nd/2nd variant is a
+      later audit item)
+
+    Fields that REMAIN approximate after this preset (later ladder steps,
+    tracked in the audit doc): seasonal forcing cycle (annual-mean here),
+    FCT2/2, hpg_sco jacobian (adcroft here), centred split-explicit
+    barotropic (implicit_cn here), iso-neutral+MSC lateral diffusion, and
+    the MLF leapfrog integrator.
+
+    ``**overrides`` are applied on top (dataclasses.replace semantics).
+    """
+    import dataclasses as _dc
+
+    base = DINOConfig(
+        eos="nemo_seos",
+        vmix_scheme="tke",
+        bottom_drag_scheme="nemo_quadratic",
+        use_gm_redi=False,
+        A_h_floor=0.0,
+        A_h_eq_boost=1.0,
+        tracer_advection="ppm_fct",
+    )
+    # Stabilizer floor off: the oracle background viscosity is avm0 exactly.
+    base = _dc.replace(base, tke_momentum_visc_bg=base.A_v_bg)
+    if overrides:
+        base = _dc.replace(base, **overrides)
+    return base
+
+
+# ---------------------------------------------------------------------
+
 # ---------------------------------------------------------------------
 # Phase 2B — Analytical bathymetry (Appendix A; ported from
 # vopikamm/DINO@v0.2.0 MY_SRC/usrdef_zgr.F90)

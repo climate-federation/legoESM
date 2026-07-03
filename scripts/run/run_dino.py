@@ -138,6 +138,14 @@ def _parse_args():
              "scaling, cap aei0=rn_Ue*rn_Le=3000 m2/s). Lat-lon only.",
     )
     p.add_argument(
+        "--preset", choices=("r1_exact",), default=None,
+        help="Config preset: 'r1_exact' = the DINO_R1 exactness preset "
+             "(dino_r1_exact_config: S-EOS, TKE, nemo_quadratic drag, EIV "
+             "off, stabilizer floors off, ppm_fct — see "
+             "docs/ocean/fidelity/dino_l1_exactness_audit.md).  Individual "
+             "flags still override on top.",
+    )
+    p.add_argument(
         "--bottom-drag-scheme",
         choices=("legacy", "nemo_quadratic", "nemo_loglayer"), default=None,
         help="Bottom-drag law (DINOConfig.bottom_drag_scheme): 'legacy' = "
@@ -340,7 +348,11 @@ def main():
             "Long spin-ups should run on a GPU machine — see plan."
         )
 
-    cfg = DINOConfig()
+    if getattr(args, "preset", None) == "r1_exact":
+        from legoesm.ocean.experiments.dino import dino_r1_exact_config
+        cfg = dino_r1_exact_config()
+    else:
+        cfg = DINOConfig()
     if args.dt is not None:
         cfg = dataclasses.replace(cfg, dt=args.dt)
     if args.vmix is not None:
