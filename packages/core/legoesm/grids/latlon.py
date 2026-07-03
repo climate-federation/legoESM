@@ -91,8 +91,9 @@ class LatLonGrid(NamedTuple):
     # equator row (sin(lat) = 0), and hardcoding constants.Omega
     # silently kept omega=0 grids rotating (#521, codex 2026-07-03).
     # APPENDED at the NamedTuple end WITH a default so positional
-    # constructions and the pytree ABI of existing callers are
-    # unchanged (mirrors the ``radius: float`` scalar-leaf precedent).
+    # constructions keep working (mirrors the ``radius: float``
+    # scalar-leaf precedent).  NOTE: this does add one pytree leaf;
+    # no repo code pins the LatLonGrid leaf count (checked 2026-07-03).
     omega: float = constants.Omega
 
     # ------------------------------------------------------------------
