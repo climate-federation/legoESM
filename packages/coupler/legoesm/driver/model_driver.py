@@ -2098,12 +2098,17 @@ class ModelDriver:
         mesh when ``config.enable_tiled_dycore`` is on and the device
         layout is sub-face tiled; ``None`` (the default) leaves the
         compiled segment on ``_dynamics_model.step``.  The model copy
-        mirrors ``build_segment_fn``'s inner dynamics copy (fix_mass /
-        zero_mean_ps_tendency off — the segment applies the target-anchored
-        fixer OUTSIDE the dynamics), so the adapter's mass-fixer refusal
-        passes and the numerics match the untiled inner model exactly.
-        Flag-on with no tiled layout is a LOUD error, never a silent
-        untiled fallback.
+        mirrors ``build_segment_fn``'s inner dynamics copy under the SAME
+        predicate (outer ``cfg.dycore.fix_mass`` AND model-config
+        ``fix_mass`` -> disable inner fixer + per-stage zero-mean; the
+        segment applies the target-anchored fixer OUTSIDE the dynamics),
+        so the tiled numerics match the untiled inner model exactly; a
+        config whose EFFECTIVE inner model still applies per-stage
+        ``zero_mean_ps_tendency`` is refused (the tiled base cut omits
+        that term).  Flag-on with no tiled layout is a LOUD error, never
+        a silent untiled fallback, and the whole path is gated behind
+        ``LEGOESM_TILED_DYCORE_EXPERIMENTAL=1`` until the outer segment
+        sharding composition is device-validated (increment 1c).
         """
         if not getattr(self.config, "enable_tiled_dycore", False):
             return None
@@ -2120,20 +2125,61 @@ class ModelDriver:
         if kt_i != kt_j:
             raise ValueError(
                 f"enable_tiled_dycore: tiling must be square, got {dc.tiling}")
+        import os as _os
+        if _os.environ.get("LEGOESM_TILED_DYCORE_EXPERIMENTAL") != "1":
+            raise NotImplementedError(
+                "enable_tiled_dycore: the OUTER compiled-segment sharding "
+                "composition around the tiled core is not yet device-"
+                "validated (the segment currently runs with "
+                "device_config=None under sub-face tiling — codex round-14 "
+                "HIGH; increment 1c is the real-device full-segment parity "
+                "lane).  Set LEGOESM_TILED_DYCORE_EXPERIMENTAL=1 to run "
+                "anyway."
+            )
         import copy as _copy
         from legoesm.atmosphere.dynamics.tiled_step_adapter import (
             make_tiled_cc_step,
         )
         _m = _copy.copy(self.model)
         _mc = getattr(_m, "config", None)
-        if _mc is not None and hasattr(_mc, "_replace"):
-            _kw = {}
-            if hasattr(_mc, "fix_mass"):
-                _kw["fix_mass"] = False
+        # Mirror build_segment_fn's inner-copy predicate EXACTLY (codex
+        # round-14 Medium): the outer target-anchored fixer path
+        # (cfg.dycore.fix_mass True) disables the inner fixer + per-stage
+        # zero-mean; when the outer fixer is OFF the untiled inner model
+        # KEEPS zero_mean_ps_tendency active — a per-stage global-mean
+        # term the tiled base cut does not implement, so that case is
+        # refused rather than silently dropped.
+        _outer_fix_mass = bool(getattr(self.config.dycore, "fix_mass", False))
+        if (
+            _outer_fix_mass
+            and getattr(_mc, "fix_mass", False)
+            and hasattr(_mc, "_replace")
+        ):
+            _kw = {"fix_mass": False}
             if hasattr(_mc, "zero_mean_ps_tendency"):
                 _kw["zero_mean_ps_tendency"] = False
-            if _kw:
-                _m.config = _mc._replace(**_kw)
+            _m.config = _mc._replace(**_kw)
+            _mc = _m.config
+        # The EFFECTIVE inner model (post-mirror) must not apply the
+        # per-RK-stage zero-mean (gate in primitive_eq_cdgrid:
+        # ``zm and not (ucf and fm)``): the tiled base cut integrates the
+        # RAW dp_s/dt, and silently dropping the term would change the
+        # untiled-vs-tiled numerics.  (The tiled psum primitive
+        # ``make_tiled_zero_mean_tendency_stage_2d`` exists but is not
+        # wired into the step stage — increment 1c+.)
+        _zm_active = (
+            bool(getattr(_mc, "zero_mean_ps_tendency", False))
+            and not (bool(getattr(_mc, "use_conservation_fixer", False))
+                     and bool(getattr(_mc, "fix_mass", False)))
+        )
+        if _zm_active:
+            raise NotImplementedError(
+                "enable_tiled_dycore: this config leaves per-RK-stage "
+                "zero_mean_ps_tendency ACTIVE on the inner model, which "
+                "the tiled base cut does not implement — enable the outer "
+                "mass fixer (conservation_fixer + fix_mass) or set "
+                "zero_mean_ps_tendency=False."
+            )
         return make_tiled_cc_step(_m, dc.mesh, kt=int(kt_i), dt=float(dt))
 
     def _bootstrap_runtime(self) -> None:

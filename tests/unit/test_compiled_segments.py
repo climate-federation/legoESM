@@ -1868,9 +1868,9 @@ class TestTiledStepFnRouting:
     of the scan body — same cc HydrostaticState contract; everything else
     (physics mock, fixers, carry plumbing) untouched."""
 
-    def _run(self, tiled_step_fn):
+    def _run(self, tiled_step_fn, explicit_none=False):
         args = _make_segment_fn_args()
-        if tiled_step_fn is not None:
+        if tiled_step_fn is not None or explicit_none:
             args["tiled_step_fn"] = tiled_step_fn
         run_segment = build_segment_fn(**args)
         state = _make_hydrostatic_state()
@@ -1902,15 +1902,20 @@ class TestTiledStepFnRouting:
 
         out = self._run(_marker_step)
         base = self._run(None)
-        # 2 steps: marker adds 14 K; mock adds 2*dt/86400 K.
-        assert float(jnp.max(out.T - base.T)) > 13.0
+        # ONLY the dynamics core differs: tiled = 2*7 K, mock dynamics =
+        # 2*DT/86400 K, physics identical in both branches.  Pinning the
+        # elementwise difference to that exact value catches (a) the mock
+        # dynamics still running in the tiled branch and (b) the physics
+        # increment (2 * 1e-5 K/s * DT) being dropped from either branch —
+        # a >threshold check alone would not (codex round-14 Low).
+        expected = 14.0 - 2.0 * DT / 86400.0
+        np.testing.assert_allclose(
+            np.asarray(out.T - base.T), expected, atol=1e-3)
 
     def test_default_none_is_untouched(self):
-        """Omitting tiled_step_fn is byte-identical to the legacy body."""
+        """Passing tiled_step_fn=None EXPLICITLY is byte-identical to
+        omitting the kwarg (the legacy body)."""
         a = self._run(None)
-        args = _make_segment_fn_args()
-        args["tiled_step_fn"] = None
-        run_segment = build_segment_fn(**args)
-        # Same explicit-None construction: identical results.
-        b = self._run(None)
+        b = self._run(None, explicit_none=True)
         assert float(jnp.max(jnp.abs(a.T - b.T))) == 0.0
+        assert float(jnp.max(jnp.abs(a.p_s - b.p_s))) == 0.0
