@@ -209,10 +209,16 @@ def main(argv=None) -> int:
     _steps = args.days * 86400.0 / _dt_eff
     # Two-duration subtraction receipt: run the SAME mode at two --days
     # values; (wall2-wall1)/(steps2-steps1) cancels compile + setup (the
-    # persistent XLA cache makes both runs compile-warm anyway).
+    # persistent XLA cache makes both runs compile-warm anyway).  The
+    # subtracted number is an END-TO-END driver.run() per-step — it still
+    # includes per-SEGMENT host cadence (forcing repack, stability
+    # checks; the forcing_update_days fallback cadence), identical in
+    # both modes, so the tiled-vs-untiled CONTRAST is fair but the
+    # absolute value is not a pure step-kernel time (codex round-17 Low).
     print(f"[{args.mode}] run wall {_wall:.2f} s over {_steps:.0f} steps "
           f"(naive {1e3 * _wall / max(_steps, 1):.0f} ms/step incl. "
-          "compile — use two-duration subtraction)")
+          "compile — use two-duration subtraction; end-to-end, incl. "
+          "per-segment host cadence)")
 
     if args.bench:
         return 0
