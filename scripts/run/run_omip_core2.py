@@ -3423,13 +3423,22 @@ def main() -> int:
     # ------------------------------------------------------------------
     _tti = getattr(getattr(model, "config", None),
                    "tracer_time_integrator", "euler")
+    # Equilibrium tide disqualifies the scan-block path: its body steps via
+    # model._step_impl(...) with no t_seconds (bypassing step()'s eager
+    # enabled-but-no-time guard), so an enabled tide would be SILENTLY inert
+    # inside the scan.  Fall back to the host loop, which threads t.
+    _tf_scan = getattr(getattr(model, "config", None), "tidal_forcing", None)
+    _tide_enabled = _tf_scan is not None and _tf_scan.enabled
     use_scan = (int(args.scan_block) > 0 and app_grid_type == "tripole"
                 and nudge_tau_s == 0.0 and drag_tau_s == 0.0
                 and not args.sss_restore
+                and not _tide_enabled
                 and _tti != "ab2")
     if int(args.scan_block) > 0 and not use_scan:
         why = ("AB2 tracer time integrator (None->Field carry breaks "
                "lax.scan)" if _tti == "ab2"
+               else "tidal_forcing enabled (the scan body does not thread the "
+                    "model time the tide needs)" if _tide_enabled
                else "grid!=tripole or WOA-nudging / spin-up-drag / SSS-restoring "
                     "enabled (those need per-step host updates)")
         print(f"[scan] --scan-block ignored: {why}.", flush=True)
@@ -3524,8 +3533,17 @@ def main() -> int:
                   f"({args.years:.0f}yr -> {yr_est*args.years:.1f} h)")
         return 0
 
+    # Equilibrium-tide wiring: when ocean.tidal_forcing.enabled the model's
+    # step() REQUIRES the elapsed model time (it fail-fasts otherwise — the
+    # tide would be silently inert).  Thread t = (step-1)*dt as a device
+    # scalar (compiled once, no per-step retrace); tide-off passes None and
+    # the call is byte-identical to before.
+    _tf_cfg = getattr(model.config, "tidal_forcing", None)
+    _tide_on = _tf_cfg is not None and _tf_cfg.enabled
+
     for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
+        _t_sec = jnp.asarray((step - 1) * dt) if _tide_on else None
         ramp = min(1.0, (step * dt) / ramp_s) if ramp_s > 0 else 1.0
         # Piecewise viscosity schedule (--visc-schedule): at each segment
         # boundary rebuild config+model ONCE (one JIT recompile per segment)
@@ -3663,7 +3681,8 @@ def main() -> int:
                     grid_type=app_grid_type, runoff_R=_R,
                     emp=args.emp_freshwater, ramp=ramp)
                 sf = sf._replace(freshwater=net_freshwater_flux(fw))
-            state = model.step(state, dt, surface_forcing=sf)
+            state = model.step(state, dt, surface_forcing=sf,
+                               t_seconds=_t_sec)
         else:
             fw = None
             # Build the freshwater struct if EITHER the atmospheric P-E/runoff is
@@ -3680,7 +3699,8 @@ def main() -> int:
                     _ice_conc = jnp.sum(_ice_conc, axis=-1)  # multi-cat (n/a here)
                 sf, fw = _route_ice_response_to_ocean(
                     sf, fw, ice_resp, state.land_mask.data, _ice_conc)
-            state = model.step(state, dt, surface_forcing=sf, freshwater=fw)
+            state = model.step(state, dt, surface_forcing=sf, freshwater=fw,
+                               t_seconds=_t_sec)
         if sss_restore_cfg is not None:
             # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS restoring
             # under sea ice).  Feed the SAME prescribed siconc the albedo uses

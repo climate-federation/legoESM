@@ -36,6 +36,44 @@ _EARTH_OBLIQUITY_DEG = 23.45
 _SOLSTICE_OFFSET_DAYS = 80.0
 _DAYS_PER_YEAR = 365.0
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "Solar geometry / insolation: solar declination, cosine of the zenith "
+        "angle, exact daily-mean and perpetual-equinox TOA insolation, and the "
+        "Berger (1978) eccentric-orbit Earth-Sun distance factor."
+    ),
+    "inputs": {
+        "lat": "rad", "lon": "rad", "day_of_year": "day (1-365)",
+        "hour": "h (UTC, 0-24)", "S_0": "W/m^2", "obliquity": "degree",
+    },
+    "outputs": {
+        "insolation": "W/m^2 (TOA daily-mean / perpetual-equinox)",
+        "cos_zenith": "1 (cosine of solar zenith angle)",
+        "declination": "rad", "distance_factor": "1 ((a/r)^2)",
+        "daylight_fraction": "1",
+    },
+    "sign_convention": (
+        "insolation>=0 (polar night floored to 0); cos_zenith in [-1,1] "
+        "(negative = sun below the horizon); declination in "
+        "[-obliquity,+obliquity]; the Earth-Sun distance factor (a/r)^2>0 with "
+        "annual mean ~1. Diagnostic geometry only: nothing is added to or "
+        "removed from any budget."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Berger (1978), J. Atmos. Sci. 35, 2362-2367 (orbital elements); "
+        "Cooper (1969) declination; Frierson et al. (2006) equinox insolation."
+    ),
+    "idealized_test": (
+        "tests/unit/test_solar_orbital.py + "
+        "tests/unit/test_orbital_insolation_pipeline.py: equinox gives "
+        "Q=(S_0/pi)cos(lat); global-annual-mean (a/r)^2 = 1; AD-finite "
+        "gradients through the polar-day/night branch."
+    ),
+}
+
 
 class OrbitalParameters(NamedTuple):
     """Earth orbital elements for realistic (non-circular) insolation.

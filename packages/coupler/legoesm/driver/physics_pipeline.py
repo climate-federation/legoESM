@@ -2541,6 +2541,38 @@ def _resolve_microphysics(config):
 # Turbulence resolver
 # ---------------------------------------------------------------------------
 
+def turbulence_config_for(config):
+    """The ``TurbulenceConfig`` to build the turbulence kernel from.
+
+    The explicit ``config.turbulence_override`` if set (it must share
+    ``config.turbulence``'s scheme — enforced by
+    ``ExperimentConfig.validate_strict``), else the default
+    ``TurbulenceConfig(scheme=config.turbulence)``.  Single source of truth so
+    every dycore backend (FV ``_resolve_turbulence``, MPAS, spectral) honours an
+    injected override consistently (e.g. a corrected per-column
+    ``clubb_lite.C_K`` from the LES-informed correction loop).
+    """
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+
+    override = getattr(config, "turbulence_override", None)
+    if override is None:
+        return TurbulenceConfig(scheme=getattr(config, "turbulence", "none"))
+    # Under MPI a GLOBAL per-column override must be sliced to the rank's columns
+    # (else broadcast_column_param mismatches the rank-local l_mix). Deferred so the
+    # parallel layout machinery is only touched when an override is actually set;
+    # active_column_layout() is None in serial → a strict no-op (override verbatim),
+    # and resolves the layout across lat-lon / cubed-sphere / MPAS grid families.
+    from legoesm.atmosphere.physics.turbulence.override_sharding import (
+        active_column_layout,
+        localize_turbulence_override,
+    )
+
+    layout = active_column_layout()
+    if layout is None:
+        return override
+    return localize_turbulence_override(override, layout)
+
+
 def _resolve_turbulence(config):
     """Resolve turbulence kernel and config from ExperimentConfig.
 
@@ -2550,10 +2582,9 @@ def _resolve_turbulence(config):
     if scheme == "none":
         return None, None
 
-    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
     from legoesm.atmosphere.physics.turbulence.integration import get_turbulence_fn
 
-    tc = TurbulenceConfig(scheme=scheme)
+    tc = turbulence_config_for(config)
     _name, turb_fn, turb_config = get_turbulence_fn(tc)
     # Propagate the experiment-level surface bulk-flux algorithm into the
     # scheme's SurfaceLayerConfig.  Default "constant" => unchanged (byte-
@@ -2562,9 +2593,11 @@ def _resolve_turbulence(config):
     # coefficients — the fix for anemic evaporation over a calm warm ocean.
     sbs = getattr(config, "surface_bulk_scheme", "constant")
     gzi = getattr(config, "surface_gustiness_zi", None)
+    sss_scheme = getattr(config, "surface_stability_scheme", "dyer1974")
     if (turb_config is not None
             and getattr(turb_config, "surface", None) is not None
-            and (sbs != "constant" or gzi is not None)):
+            and (sbs != "constant" or gzi is not None
+                 or sss_scheme != "dyer1974")):
         surf = turb_config.surface
         if sbs != "constant":
             surf = surf._replace(bulk_scheme=sbs)
@@ -2572,6 +2605,12 @@ def _resolve_turbulence(config):
             # COARE convective-gustiness BL depth (only effective with a MOST
             # bulk_scheme); the diagnosed fix for the calm-warm-ocean low hfls.
             surf = surf._replace(gustiness_w_zi=gzi)
+        if sss_scheme != "dyer1974":
+            # Stable-regime MOST functions: keep the atmosphere surface layer
+            # on the SAME stable functions as the coupler ocean tile (both
+            # driven by the one --surface-stability-scheme flag) so the
+            # interface cannot split Dyer-vs-SHEBA across its two sides.
+            surf = surf._replace(stability_scheme=sss_scheme)
         turb_config = turb_config._replace(surface=surf)
     return turb_fn, turb_config
 

@@ -49,6 +49,39 @@ from legoesm.timestepping.tridiagonal import (
     thomas_solve_shared,
 )
 
+__physics_contract__ = {
+    "summary": (
+        "Backward-Euler implicit vertical diffusion of a generic column field: "
+        "(1 - dt*d_z K d_z) phi^{n+1} = phi^n solved with the Thomas algorithm, "
+        "with zero-flux top and bottom boundaries (unconditionally stable)."
+    ),
+    "inputs": {
+        "field": "generic phi (m/s for u,v; degC for T; psu for S)",
+        "K": "m^2/s", "dz": "m", "dz_half": "m", "dt": "s",
+    },
+    "outputs": {"field_new": "same units as input phi"},
+    "sign_convention": (
+        "K >= 0; z positive up; zero-flux top and bottom BC so the dz-weighted "
+        "column integral of phi is invariant (the optional f32 work-precision "
+        "path adds an explicit column-mean correction to keep it exact); "
+        "surface/bottom fluxes are applied externally, not here; single-level "
+        "columns are a no-op."
+    ),
+    # Generic-phi conservative solver: the same operator conserves the column
+    # integral of heat (energy) for T, salt for S, and momentum for u/v.
+    "conserves": ["tracer"],
+    "differentiable": True,
+    "reference": (
+        "Backward-Euler tridiagonal (Thomas 1949) implicit vertical diffusion; "
+        "MOM6 Technical Manual sec. 7 (implicit vertical viscosity)"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_implicit_solver.py — a step profile relaxes "
+        "toward the column mean with the dz-weighted column integral conserved "
+        "to machine precision; a single-level column returns unchanged."
+    ),
+}
+
 _EPS = float(jnp.finfo(jnp.float32).eps)  # ~1.19e-7
 
 

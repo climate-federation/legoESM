@@ -18,12 +18,12 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
-
-from legoesm import constants
-from legoesm.driver.model_driver import ModelDriver
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.coupled_config import CoupledConfig
 from legoesm.diagnostics.energy_budget import area_weighted_mean
+from legoesm.driver.model_driver import ModelDriver
+
+from legoesm import constants
 
 logger = logging.getLogger("legoesm.driver.coupled_esm")
 
@@ -185,6 +185,27 @@ class CoupledESMDriver:
     def output_dir(self) -> Path:
         return self._atm.output_dir
 
+    @property
+    def grid(self):
+        """The atmosphere grid (delegates to the atm driver).
+
+        Exposes the same public ``grid`` as :class:`ModelDriver` so a coupled
+        (CMIP) run is grid-introspectable like an atm-only run — e.g. the column
+        comparison reconstructs the MPAS cell wind from ``driver.grid`` (the
+        ``VoronoiMesh``) for both AMIP and CMIP.
+        """
+        return self._atm.grid
+
+    @property
+    def sigma(self):
+        """The atmosphere vertical coordinate (delegates to the atm driver).
+
+        Exposes the same public ``sigma`` as :class:`ModelDriver` so the column
+        comparison can synthesize the grid winds from a spectral CMIP state
+        (``spectral_pe_to_grid`` needs the grid + sigma) for both AMIP and CMIP.
+        """
+        return self._atm.sigma
+
     # ==================================================================
     # Setup
     # ==================================================================
@@ -222,8 +243,8 @@ class CoupledESMDriver:
 
     def _init_ocean(self):
         """Initialize the slab/two-layer ocean (on the ocean grid)."""
-        from legoesm.ocean.simple_ocean import make_ocean, init_slab_state
         from legoesm.coupler.grid_remap import make_grid_remapper, remap_field
+        from legoesm.ocean.simple_ocean import init_slab_state, make_ocean
 
         cfg = self.coupled_cfg
         # The ocean may live on a DIFFERENT grid than the atmosphere.  Build the
@@ -281,14 +302,15 @@ class CoupledESMDriver:
         'dynamic') on the shared lat-lon grid with the OMIP-validated stable
         cold-start stack.  See docs/ocean/coupled_3d_ocean_plan.md (Phase 1)."""
         from legoesm.grids.latlon import LatLonGrid
-        from legoesm.ocean.state import LatLonCGridOceanConfig
-        from legoesm.ocean.vertical import create_ocean_z_star
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
         )
         from legoesm.ocean.init_latlon_cgrid import (
-            rest_state_latlon_cgrid_ocean, idealized_bathymetry_latlon_cgrid,
+            idealized_bathymetry_latlon_cgrid,
+            rest_state_latlon_cgrid_ocean,
         )
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        from legoesm.ocean.vertical import create_ocean_z_star
 
         cfg = self.coupled_cfg
         # Accept EITHER a regular lat-lon ocean grid (co-located with the
@@ -638,12 +660,12 @@ class CoupledESMDriver:
 
     def _init_coupler(self):
         """Initialize coupler, land, ice, lake surface states."""
-        from legoesm.coupler.coupler import make_coupler, init_surface_state
-        from legoesm.coupler.config import CouplerConfig, TileConfig
-        from legoesm.land.config import LandConfig, MultiLayerLandConfig
-        from legoesm.ice.config import SeaIceConfig
-        from legoesm.coupler.lake.config import LakeConfig
         from legoesm.core.precision import get_policy
+        from legoesm.coupler.config import CouplerConfig, TileConfig
+        from legoesm.coupler.coupler import init_surface_state, make_coupler
+        from legoesm.coupler.lake.config import LakeConfig
+        from legoesm.ice.config import SeaIceConfig
+        from legoesm.land.config import LandConfig, MultiLayerLandConfig
 
         cfg = self.coupled_cfg
         shape_2d = self._atm.grid.grid_shape_2d
@@ -848,6 +870,7 @@ class CoupledESMDriver:
         ``land_param_source='clm'`` → CLM reference surfdata (real PFT map +
         reference soil); ``'analytical'`` → latitude-band PFT fractions."""
         import math
+
         from legoesm.land.param_providers import PFTParamProvider
 
         lat = self._atm._grid_lat
@@ -987,7 +1010,8 @@ class CoupledESMDriver:
             return
 
         from legoesm.forcing.surface_utils import (
-            blend_surface_property, blend_surface_temperature,
+            blend_surface_property,
+            blend_surface_temperature,
             surface_temperature_for_lw_boundary,
         )
 
@@ -1274,9 +1298,12 @@ class CoupledESMDriver:
         snow_frac = snow_fraction(T_low, constants.T_freeze)
         precip_snow = precip_total * snow_frac
 
-        # Cosine zenith
-        from legoesm.forcing.time_utils import day_to_calendar
-        doy, _ = day_to_calendar(day)
+        # Cosine zenith — route through the atmosphere's seasonal insolation seam (iter
+        # 449/461) so the coupler's ocean/surface insolation runs the SAME season as the
+        # atmosphere (config.insolation_start_doy); offset 0 (default) == day_to_calendar(day),
+        # byte-identical. Without this the coupled ocean surface saw JANUARY insolation while
+        # the atmosphere saw the aligned season — a physically inconsistent sun.
+        doy, _ = self._atm._calendar_for_radiation(day)
         lat = self._atm._grid_lat
         if lat is not None:
             from legoesm.atmosphere.physics.radiation.solar import (
@@ -1458,11 +1485,12 @@ class CoupledESMDriver:
         which is the cube-only channel).  Ice→ocean channels (freshwater_flux /
         ocean_heat_extraction / salt_flux / ice stress) are Phase 3 — an
         aquaplanet Phase-1 run has no ice tile."""
-        from legoesm.coupler.coupler import ocean_tile_response
         from legoesm.coupler.config import CouplerConfig
+        from legoesm.coupler.coupler import ocean_tile_response
         from legoesm.coupler.grid_remap import remap_field
-        from legoesm.ocean.state import OceanSurfaceForcing
         from legoesm.ocean.freshwater import FreshwaterForcing
+        from legoesm.ocean.state import OceanSurfaceForcing
+
         from legoesm import constants
 
         sst_K, u_o, v_o = self._ocean_surface_KuvC()
@@ -1582,8 +1610,6 @@ class CoupledESMDriver:
         so that the carbon cycle's forward-Euler integration remains
         stable and fluxes are physically consistent.
         """
-        from legoesm.forcing.time_utils import day_to_calendar
-
         coupling_dt = self.coupled_cfg.coupling_dt  # default 3600 s
         n_sub = max(1, int(round(dt_segment / coupling_dt)))
         sub_dt = dt_segment / n_sub
@@ -1608,7 +1634,9 @@ class CoupledESMDriver:
             u_sfc = remap_field(u_o, self._grid_remapper.o2a)
             v_sfc = remap_field(v_o, self._grid_remapper.o2a)
 
-            doy, _ = day_to_calendar(day)
+            # Same seasonal insolation seam as the atmosphere (iter 449/461) so the surface
+            # step's day-of-year matches the atmosphere's season; offset 0 => identical.
+            doy, _ = self._atm._calendar_for_radiation(day)
 
             self._sfc_state, sfc_response = self._step_surface(
                 self._sfc_state,
@@ -1692,13 +1720,31 @@ class CoupledESMDriver:
     # Run
     # ==================================================================
 
-    def run(self, start_step: int = 0, start_day: float | None = None) -> str:
-        """Run the coupled integration."""
+    def run(
+        self,
+        start_step: int = 0,
+        start_day: float | None = None,
+        segment_callback=None,
+    ) -> str:
+        """Run the coupled integration.
+
+        ``segment_callback(driver, day, dt_segment)`` is an OPTIONAL extra hook
+        invoked at each segment boundary AFTER the coupling step ``_segment_hook``
+        (so it sees the post-coupling state, e.g. the updated ocean SST) — used to
+        sample diagnostics such as the time-mean column state for ERA5 comparison.
+        ``None`` (default) is byte-identical to the plain coupled run.
+        """
         logger.info("Starting coupled ESM run")
+        if segment_callback is None:
+            hook = self._segment_hook
+        else:
+            def hook(driver, day, dt_segment):
+                self._segment_hook(driver, day, dt_segment)  # couple first
+                segment_callback(driver, day, dt_segment)    # then sample
         status = self._atm.run(
             start_step=start_step,
             start_day=start_day,
-            segment_callback=self._segment_hook,
+            segment_callback=hook,
             # Checkpoint the FULL coupled state (atm + ocean + surface + CO2),
             # not just the atmosphere, on periodic and wallclock-budget saves.
             checkpoint_callback=self.save_checkpoint,
@@ -1715,12 +1761,32 @@ class CoupledESMDriver:
         return self._atm.state
 
     @property
+    def q_v(self):
+        """Atmospheric specific humidity ``q_v`` (stored outside the dycore state)."""
+        return self._atm.q_v
+
+    @property
     def ocean_state(self):
         return self._ocean_state
 
     @property
     def surface_state(self):
         return self._sfc_state
+
+    def get_sst_sic(self, day):
+        """The coupled SST + SIC on the ATMOSPHERE grid (the same public signature as
+        :meth:`ModelDriver.get_sst_sic`).
+
+        Delegates to the atmosphere driver, whose ``get_sst_sic`` was overridden at setup
+        (:meth:`_override_sst`) to return the slab/dynamic-ocean SST remapped onto the
+        atmosphere grid via the coupler's ``o2a`` remapper — so it is atm-grid even when the
+        ocean runs on a DIFFERENT grid.  Exposed (like ``grid`` / ``sigma`` / ``state`` /
+        ``q_v``) so the column comparison reads the CMIP coupled SST on the atmosphere grid
+        (matching the atm columns) for BOTH AMIP and CMIP — unlike ``ocean_state.T_sfc``,
+        which is on the OCEAN grid and would mis-align the env tag when ``ocean_grid``
+        differs (cf. the ``column_state_from_hydrostatic`` sst_K grid guard, iter 329).
+        """
+        return self._atm.get_sst_sic(day)
 
     @property
     def diagnostics(self):

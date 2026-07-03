@@ -35,6 +35,47 @@ from legoesm import constants
 from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
 from legoesm.atmosphere.physics.radiation.output import RadiationOutput
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "Two-stream gray-radiation (Frierson): hemispheric-mean longwave with "
+        "latitude/moisture-dependent optical depth plus Beer-Lambert shortwave "
+        "absorption; returns LW+SW fluxes and radiative heating rates."
+    ),
+    "inputs": {
+        "T": "K", "p_full": "Pa", "p_half": "Pa", "sfc_temperature": "K",
+        "lat": "rad", "q_v": "kg/kg", "insolation": "W/m^2",
+        "sfc_albedo": "1 (surface shortwave albedo)",
+    },
+    "outputs": {
+        "lw_flux_up": "W/m^2", "lw_flux_down": "W/m^2",
+        "sw_flux_up": "W/m^2", "sw_flux_down": "W/m^2",
+        "heating_rate": "K/s", "lw_heating_rate": "K/s",
+        "sw_heating_rate": "K/s", "toa_insolation": "W/m^2",
+    },
+    "sign_convention": (
+        "heating_rate dT/dt>0 warms the layer; fluxes are positive in their "
+        "named direction (flux_up>=0 upward, flux_down>=0 downward); optical "
+        "depth tau>=0; the downward SW beam is attenuated Beer-Lambert and the "
+        "surface reflects sfc_albedo*F_down back up; insolation>=0. Radiation "
+        "computes heating/fluxes only: photons enter at TOA and leave at TOA and "
+        "the surface, so the column energy budget is OPEN (accounted, not "
+        "conserved)."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Frierson, Held & Zurita-Gotor (2006), J. Atmos. Sci. 63, 2548-2566; "
+        "O'Gorman & Schneider (2008), J. Climate 21, 3815-3832."
+    ),
+    "idealized_test": (
+        "tests/unit/test_physics_radiation.py + "
+        "tests/atmosphere/hydrostatic/unit/test_radiation.py: isothermal/grey "
+        "column gives radiative-equilibrium heating profiles; net-flux "
+        "divergence sets the sign of the heating rate."
+    ),
+}
+
 
 def _compute_lw_optical_depth(
     p_half: jnp.ndarray,

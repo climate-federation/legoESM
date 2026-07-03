@@ -15,6 +15,38 @@ import jax.numpy as jnp
 
 from legoesm.ocean.physics.surface_forcing.config import PrescribedForcingConfig
 
+__physics_contract__ = {
+    "summary": (
+        "Grid-agnostic analytic wind-stress profiles: map latitude to a "
+        "(tau_x, tau_y) surface wind-stress vector for idealized ocean forcing "
+        "(zonal jets, tropical easterlies, single/double-gyre and ACC-like "
+        "patterns) selected by config."
+    ),
+    "inputs": {
+        "lat": "rad", "cfg.tau_max": "N/m^2",
+    },
+    "outputs": {"tau_x": "N/m^2", "tau_y": "N/m^2"},
+    "sign_convention": (
+        "Returns the wind-stress vector [N/m^2] ON the ocean surface (a "
+        "momentum boundary flux the caller applies), NOT an interior tendency; "
+        "eastward tau_x > 0, northward tau_y > 0; the profile amplitude is set "
+        "by tau_max. Nothing is conserved here (it is a boundary-flux producer)."
+    ),
+    # Surface momentum-flux (stress) producer; the caller applies the source.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Idealized zonal wind-stress profiles; Bryan (1987) JPO 17, Munk (1950) "
+        "double-gyre / Southern-Ocean forcing"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_eps_div_and_wind_stress_convention.py — the "
+        "zonal-jet profile gives mid-latitude westerlies and tropical "
+        "easterlies; the sign matches the eastward tau_x > 0 convention; the "
+        "'constant' profile returns cfg.tau_x/tau_y."
+    ),
+}
+
 
 # Idealized analytic wind-stress profile constants (fixed scheme defaults).
 _TAU_MAX_NORM = 0.1

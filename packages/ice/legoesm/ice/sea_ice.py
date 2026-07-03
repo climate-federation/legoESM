@@ -404,6 +404,7 @@ def _bulk_flux_dispatch(
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
             L_latent=constants.L_s,
+            stability_scheme=config.stability_scheme,
         )
     else:
         tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(

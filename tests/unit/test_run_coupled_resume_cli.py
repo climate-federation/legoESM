@@ -37,6 +37,26 @@ def test_resume_flags_roundtrip():
     assert args.max_wallclock_hours == 11.5
 
 
+def test_surface_stability_scheme_flag_round_trip():
+    """--surface-stability-scheme round-trips; default dyer1974 is the
+    byte-identical historical stable branch; unknown names are rejected at
+    argparse (dispatch hardening); 'most' stays deliberately absent from
+    --surface-bulk-scheme (the atmosphere surface layer treats it as
+    constant, so offering it would split the interface)."""
+    import pytest
+
+    assert (mod.build_parser().parse_args([]).surface_stability_scheme
+            == "dyer1974")
+    args = mod.build_parser().parse_args(
+        ["--surface-stability-scheme", "gryanik2020"])
+    assert args.surface_stability_scheme == "gryanik2020"
+    with pytest.raises(SystemExit):
+        mod.build_parser().parse_args(
+            ["--surface-stability-scheme", "dyer1975"])
+    with pytest.raises(SystemExit):
+        mod.build_parser().parse_args(["--surface-bulk-scheme", "most"])
+
+
 def test_find_latest_checkpoint_picks_highest_day(tmp_path):
     """_find_latest_checkpoint returns the highest-day checkpoint (numeric, not
     lexicographic) and ignores non-matching files."""

@@ -444,11 +444,16 @@ def specific_humidity_to_mixing_ratio(
 ) -> jax.Array:
     """Convert specific humidity to water-vapor mixing ratio.
 
-    ``q`` is clipped below one so malformed input cannot divide by zero;
-    valid atmospheric values are unchanged.
+    ``q`` is clipped below one AND the denominator is explicitly floored so
+    malformed input cannot divide by zero; valid atmospheric values are
+    unchanged.  The explicit ``jnp.maximum(1 - q, floor)`` (matching
+    :func:`specific_humidity_tendency_to_mixing_ratio_tendency`) is required for
+    float32 inputs, where ``1 - 1e-12`` rounds to exactly ``1.0`` so the clip
+    alone would still divide by zero (→ ``inf``) at ``q ≥ 1``.
     """
     q = jnp.clip(jnp.asarray(specific_humidity), 0.0, 1.0 - denominator_floor)
-    return q / (1.0 - q)
+    denom = jnp.maximum(1.0 - q, denominator_floor)
+    return q / denom
 
 
 def specific_humidity_tendency_to_mixing_ratio_tendency(

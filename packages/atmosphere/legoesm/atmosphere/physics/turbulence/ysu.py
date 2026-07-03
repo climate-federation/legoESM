@@ -35,6 +35,48 @@ from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
 )
 
 
+__physics_contract__ = {
+    "summary": (
+        "YSU (Yonsei University) nonlocal K-profile PBL scheme: a convective "
+        "mixed-layer K-profile with a countergradient nonlocal heat flux and "
+        "an explicit Gaussian entrainment K at the PBL top, applied by "
+        "implicit vertical diffusion with surface-flux BCs."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "T_sfc": "K", "q_sfc": "kg/kg", "rho": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "Km": "m^2/s", "Kh": "m^2/s", "shflx": "W/m^2", "lhflx": "W/m^2",
+        "ustar": "m/s", "h_pbl": "m",
+    },
+    "sign_convention": (
+        "Nonlocal down-gradient mixing: heat flux F = -Kh (dtheta/dz - "
+        "gamma_c) with countergradient gamma_c >= 0 (upward heat transport in "
+        "the convective BL, gated to unstable surface forcing). Km, Kh >= 0; "
+        "an unstable surface heat flux (shflx > 0 upward) deepens h_pbl via a "
+        "thermal-excess parcel. shflx, lhflx positive UPWARD and injected as "
+        "the lower boundary condition (a source), so the column is NOT closed. "
+        "z increases upward; level index 0 is the top, -1 the surface."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Hong, Noh & Dudhia (2006), Mon. Wea. Rev. 134, 2318-2341; "
+        "Troen & Mahrt (1986), Boundary-Layer Meteorol. 37, 129-148"
+    ),
+    "idealized_test": (
+        "tests/atmosphere/hydrostatic/unit/test_atm_turb_gwd_validation.py "
+        "and test_turbulence.py: an unstable surface heat flux deepens h_pbl "
+        "(two-pass thermal excess); Km, Kh >= 0 with entrainment K localized "
+        "at the PBL top; the PBL top is found by smooth first-crossing "
+        "interpolation (differentiable, no hard index search)."
+    ),
+}
+
+
 def _crossing_pbl_height(Ri_b, z_full, ricr, sharpness):
     """Lowest height where the bulk Richardson number ``Ri_b`` first reaches
     ``ricr``, by smooth first-crossing interpolation (differentiable).

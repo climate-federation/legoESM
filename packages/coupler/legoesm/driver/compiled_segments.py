@@ -684,6 +684,80 @@ def pack_forcing(
     )
 
 
+# The SegmentForcing fields that are GRID-shaped (face-plane on cubed-sphere,
+# (n_lat, n_lon, ...) on lat-lon) and therefore shard like the state.  By
+# NAME, not by shape: a shape heuristic would silently face-shard any
+# incidental leading-6 leaf (e.g. ``ghg_vmr`` the day a 6th species joins
+# GHG_SPECIES_ORDER).  Scalars (day_of_year, seconds_of_day, s_0) and small
+# vectors (ghg_vmr) stay uncommitted -> the segment JIT pins them replicated.
+_GRID_SHAPED_FORCING_FIELDS = (
+    "sst", "sic", "solar_weights", "o3_vmr", "aerosol_od", "aerosol_lw_od",
+    "sfc_albedo_override", "sfc_T_override", "sfc_emissivity_override",
+    "sfc_shflx_override", "sfc_lhflx_override",
+)
+
+
+def shard_forcing(forcing: SegmentForcing, device_config) -> SegmentForcing:
+    """Commit the grid-shaped ``SegmentForcing`` leaves to the SAME device
+    layout as the sharded state (SPMD sharding step 3 of the production
+    cs_spmd design).
+
+    ``run_segment``'s sharded JIT wrapper honours a committed
+    ``NamedSharding`` on the build-time mesh per leaf and pins anything
+    else REPLICATED (``_input_sharding``).  Replicated forcing means every
+    device receives the FULL global forcing array at each segment
+    boundary (host->device bandwidth and memory x n_devices) and GSPMD
+    re-slices it against the face-sharded state inside the step.
+    Committing the grid-shaped leaves with the state's own sharding rules
+    (:func:`legoesm.parallel.mesh.shard_pytree` — face-first on
+    cubed-sphere, lat-axis on lat-lon, tiling-aware) makes the transfer
+    and memory per device ``1/n_devices`` and removes the reshard.
+
+    No-ops (returns ``forcing`` unchanged) when: ``device_config`` is
+    ``None`` (byte-identical single-device contract), the mesh has no
+    face sharding (single device), or the run is mpi4jax-distributed
+    (``is_distributed`` — forcing there is rank-local, never device-mesh
+    sharded).  ``None`` optional fields and non-grid leaves pass through
+    untouched; a grid-NAMED leaf whose shape does not match the grid rule
+    (e.g. the ``(0,)`` o3 placeholder) is left alone by ``shard_pytree``'s
+    shape gate.
+    """
+    if device_config is None or getattr(device_config, "is_distributed", False):
+        return forcing
+    if getattr(device_config, "face_sharding", None) is None:
+        return forcing
+    from legoesm.parallel.mesh import shard_pytree
+
+    # Production cubed-sphere packs the 3-D radiation forcing FLATTENED to
+    # ``(ncol=6*n*n, nlev)`` (``_precompute_external_forcing``), which the
+    # leading-6 ``shard_pytree`` rule cannot see (codex 2026-07-01 Medium).
+    # A flat face-major leaf shards ``P("face")`` on dim 0 — the exact
+    # layout the driver already commits for flat carry leaves (see
+    # ``_input_sharding``: "a flat [6*n*n, nlev] carry leaf the driver
+    # placed on P('face')").  ``ncol % 6 == 0`` chunks land exactly one
+    # face's columns per face-mesh slot; the face axis size divides 6 so
+    # divisibility always holds.  Gate: cubed-sphere only, named grid
+    # field, flat (shape[0] a positive non-6 multiple of 6).
+    _flat_face = None
+    if getattr(device_config, "grid_type", None) == "cubed_sphere" and \
+            getattr(device_config, "mesh", None) is not None:
+        from jax.sharding import NamedSharding, PartitionSpec
+        _flat_face = NamedSharding(device_config.mesh, PartitionSpec("face"))
+
+    updates = {}
+    for name in _GRID_SHAPED_FORCING_FIELDS:
+        leaf = getattr(forcing, name)
+        if leaf is None or not isinstance(leaf, (jax.Array, jnp.ndarray)):
+            continue
+        if (_flat_face is not None and leaf.ndim >= 1
+                and leaf.shape[0] != 6 and leaf.shape[0] > 0
+                and leaf.shape[0] % 6 == 0):
+            updates[name] = jax.device_put(leaf, _flat_face)
+        else:
+            updates[name] = shard_pytree(leaf, device_config)
+    return forcing._replace(**updates) if updates else forcing
+
+
 def build_segment_fn(
     model,
     step_unified,

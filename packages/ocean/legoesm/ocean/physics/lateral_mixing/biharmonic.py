@@ -14,6 +14,44 @@ from legoesm.ocean.dynamics.barotropic import fill_land_cells
 from legoesm.ocean.physics.lateral_mixing.config import BiharmonicConfig
 from legoesm.ocean.physics.lateral_mixing.output import LateralMixingOutput
 
+__physics_contract__ = {
+    "summary": (
+        "Biharmonic (grad^4) scale-selective lateral mixing: -B_h*grad^4(u,v) "
+        "with no-slip coastal masking and -B_h*grad^4(T,S) with a Neumann "
+        "coastal fill, damping grid-scale variance far more strongly than the "
+        "large scales."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "degC", "S": "psu",
+        "mask": "1 (1=ocean, 0=land)",
+        "cfg.B_h_momentum": "m^4/s", "cfg.B_h_tracer": "m^4/s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "degC/s", "dS_dt": "psu/s",
+    },
+    "sign_convention": (
+        "B_h >= 0; scale-selective hyperdiffusion (tendency ~ -B*k^4, a "
+        "grid-scale sink); grad^4 = grad^2(grad^2) is a double divergence so the "
+        "area integral of the diffused field is conserved (tracers via a "
+        "no-flux Neumann coastal fill, momentum divergence-form with no-slip "
+        "masking); horizontal only, no vertical flux."
+    ),
+    # Double-divergence hyperdiffusion conserves the area integral of the
+    # diffused heat (energy) and salt (no-flux Neumann tracer BC). Momentum is
+    # NOT conserved: no-slip coastal masking is a boundary stress sink.
+    "conserves": ["energy", "salt"],
+    "differentiable": True,
+    "reference": (
+        "Biharmonic (scale-selective) lateral mixing; Griffies et al. (2000), "
+        "Griffies (2004) Fundamentals of Ocean Climate Models"
+    ),
+    "idealized_test": (
+        "grid-scale noise is damped far faster than large-scale structure; a "
+        "uniform/linear field gives ~zero tendency; the area integral of T, S "
+        "is conserved."
+    ),
+}
+
 
 def biharmonic_lateral_mixing(
     u: jnp.ndarray,

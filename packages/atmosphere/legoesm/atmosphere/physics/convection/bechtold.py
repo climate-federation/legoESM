@@ -65,6 +65,55 @@ from legoesm.atmosphere.physics.convection._plume import (
 __all__ = ("bechtold_convection",)
 
 
+__physics_contract__ = {
+    "summary": (
+        "Bechtold/IFS mass-flux convection (Tiedtke 1989 skeleton + Bechtold "
+        "2008 PBL/departure-CAPE closure + optional 2014 AR1 stochastic "
+        "perturbation, RH-dependent downdraft, and Gregory-1997 convective "
+        "momentum transport)."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa",
+        "u": "m/s", "v": "m/s",
+        "conv_prog_profile": "kg/m^2/s (updraft mass-flux carry)",
+        "conv_stoch_state": "1 (AR1 noise state)", "dt": "s",
+        "moisture_convergence": "kg/kg/s (optional closure enhancement)",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_conv_dt": "kg/kg/s",
+        "cape": "J/kg", "convective_mask": "1 (0-1 convective indicator)",
+        "du_dt_conv": "m/s^2 (None unless CMT enabled)",
+        "dv_dt_conv": "m/s^2 (None unless CMT enabled)",
+        "conv_prog_profile_new": "kg/m^2/s (updated mass-flux carry)",
+        "conv_stoch_state_new": "1 (updated AR1 noise state)",
+    },
+    "sign_convention": (
+        "Warms and dries the convecting layer via compensating subsidence and "
+        "updraft transport (dT_dt, dq_v_dt); the condensed vapor becomes a "
+        "non-negative detrained cloud-water source (dq_c_conv_dt>=0) handed to "
+        "microphysics; the optional downdraft cools and moistens the sub-cloud "
+        "layer by rain evaporation; the optional CMT drag opposes the "
+        "cloud-relative wind shear; surface at the last vertical index. "
+        "Column enthalpy/total-water closure is delegated to the orchestrator "
+        "rebalance + microphysics (the shared mass-flux kernel is not "
+        "self-closing), so no hard conservation is claimed for the raw "
+        "tendencies."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Bechtold et al. (2008), QJRMS 134, 1337-1351; Bechtold et al. "
+        "(2014), J. Atmos. Sci. 71, 734-753; Tiedtke (1989), Mon. Wea. Rev. "
+        "117, 1779-1800"
+    ),
+    "idealized_test": (
+        "A CAPE-positive tropical sounding produces deep convective heating "
+        "that stabilizes the column; a stable / zero-CAPE column quiesces "
+        "(<1 W/m^2 spurious heating)."
+    ),
+}
+
+
 # --- pspec autoblock
 _BECHTOLD_RH_CAP = 1.3
 _BECHTOLD_RH_ENTR = 1.3

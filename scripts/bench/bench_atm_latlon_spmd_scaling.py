@@ -101,15 +101,28 @@ def main() -> int:
 
     if args.multicontroller:
         # MUST run before any other JAX use (backend init). SLURM auto-detects;
-        # mpiexec/OpenMPI needs the explicit coordinator + OMPI env vars.
+        # mpiexec needs the explicit coordinator + launcher env vars (OpenMPI
+        # OMPI_*, or Cray PALS PMI_* on Derecho).
         if args.coordinator is not None:
-            n_procs = int(os.environ["OMPI_COMM_WORLD_SIZE"])
-            proc_id = int(os.environ["OMPI_COMM_WORLD_RANK"])
+            n_procs = int(os.environ.get(
+                "OMPI_COMM_WORLD_SIZE", os.environ.get("PMI_SIZE", "0")))
+            proc_id = int(os.environ.get(
+                "OMPI_COMM_WORLD_RANK", os.environ.get("PMI_RANK", "-1")))
+            if n_procs < 1 or proc_id < 0:
+                raise SystemExit(
+                    "--coordinator given but no launcher rank env found "
+                    "(OMPI_COMM_WORLD_SIZE/RANK or PMI_SIZE/PMI_RANK).")
             jax.distributed.initialize(
                 coordinator_address=args.coordinator,
                 num_processes=n_procs, process_id=proc_id)
         else:
-            jax.distributed.initialize()
+            # Environment-routed: SLURM/OMPI -> bare auto-detect; PALS/PMI
+            # (Derecho mpiexec) -> mpi4py bootstrap. Real init failures
+            # re-raise loudly.
+            from legoesm.parallel.early_init import (
+                init_jax_distributed_with_fallback,
+            )
+            init_jax_distributed_with_fallback()
 
     from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
         make_sharded_atm_latlon_step, shard_state_atm_latlon)
@@ -146,6 +159,13 @@ def main() -> int:
         step = make_sharded_atm_latlon_step(model, mesh, physics_fn=physics_fn)
         c = shard_state_atm_latlon(c0, mesh)
 
+    # Multi-controller: align every process before the timed loop so per-step
+    # wall times aren't skewed by startup jitter (and once after, so no
+    # process exits while peers still hold collectives in flight).
+    if jax.process_count() > 1:
+        from jax.experimental import multihost_utils
+        multihost_utils.sync_global_devices("atm_latlon_spmd_bench_start")
+
     # Per-step timing: step 0 includes compile; record each step so re-trace
     # (every step slow) is visible vs steady-state (steps 1.. fast).
     per_step_ms = []
@@ -154,6 +174,10 @@ def main() -> int:
         c = step(c, args.dt)
         _block(c)
         per_step_ms.append((time.perf_counter() - t0) * 1e3)
+
+    if jax.process_count() > 1:
+        from jax.experimental import multihost_utils
+        multihost_utils.sync_global_devices("atm_latlon_spmd_bench_end")
 
     steady = per_step_ms[args.warmup:]
     med = float(np.median(steady))

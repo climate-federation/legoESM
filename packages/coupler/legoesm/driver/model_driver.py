@@ -35,6 +35,7 @@ from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.physics_pipeline import (
     build_physics_pipeline,
     required_microphysics_tracer_slots,
+    turbulence_config_for,
     validate_microphysics_tracer_slots,
 )
 from legoesm.driver.diagnostics import DiagnosticCollector
@@ -137,6 +138,17 @@ class ModelDriver:
             context="ModelDriver tracer registry",
         )
         self.get_sst_sic = None
+        # Seasonal insolation offset (days): align model day 0 to
+        # config.insolation_start_doy for the radiation day_of_year ONLY, so an
+        # AMIP run from a non-January ERA5 date can run the matching solar season
+        # without shifting start_day (which the relative-indexed SST forcing
+        # depends on). None => 0.0 => legacy (day 0 -> Jan 1). Static Python
+        # float: the calendar is computed host-side per step, so this is a
+        # constant, never a traced leaf. See config.insolation_start_doy.
+        _insol_doy = getattr(config, "insolation_start_doy", None)
+        self._insolation_day_offset: float = (
+            0.0 if _insol_doy is None else float(_insol_doy) - 1.0
+        )
         # Optional per-segment surface-property feedback hook.  A coupled
         # driver sets this to a callable ``day -> (sfc_albedo, sfc_T)`` (each
         # grid-shaped or None) returning the coupler's tile-blended dynamic
@@ -386,6 +398,52 @@ class ModelDriver:
         self._write_run_manifest()
         self._save_config()
         self._setup_parallel()
+
+    def static_topography_phis(self):
+        """The model's STATIC surface geopotential ``phis = g·z_s`` on the model
+        grid, built WITHOUT running the full :meth:`setup` — NO filesystem writes
+        (no output dir, run manifest, or ``experiment_config.json``).
+
+        Runs only the minimal construction chain ``validate_strict → runtime
+        bootstrap → grid → topography`` needed to populate the topography field;
+        it does NOT build the dycore, state, physics, or parallel halos.  This
+        exposes the model's OWN orographic field cheaply — e.g. as the CONSISTENT
+        ``phis`` source for the orographic LES-forcing term — so a launch-time
+        probe need not write a phantom run directory.
+
+        Idempotent: returns the already-built field if :meth:`setup` (or a prior
+        call) ran.  A flat model yields ``jnp.zeros(grid_shape_2d)`` (the caller
+        decides whether all-zero means "no orography").
+
+        NOTE: not purely side-effect-free — ``_bootstrap_runtime`` sets the global
+        precision/runtime singleton (the same one the subsequent run uses), so the
+        probe MUST be built from the SAME config that drives the run.
+        """
+        if self._phis_data is None:
+            self.config.validate_strict()
+            self._bootstrap_runtime()
+            self._create_grid()
+            self._create_topography()
+        return self._phis_data
+
+    def static_land_fraction(self):
+        """The model's STATIC land fraction on the model grid, built WITHOUT the full
+        :meth:`setup` — the same minimal construction chain as
+        :meth:`static_topography_phis` (``_create_topography`` populates BOTH ``phis``
+        and ``f_land`` in every branch: flat → zeros, idealised → from topography, real
+        → loaded, ``land_mask_path`` → from file).
+
+        Exposes the model's OWN land/sea distribution cheaply so a launch-time probe can
+        build an OCEAN-only ranking mask (:func:`legoesm.training.compare_reanalysis.
+        ocean_valid_mask`) WITHOUT writing a phantom run directory.  Grid-shaped — flatten
+        ROW-MAJOR to the worst-column column order.  An aquaplanet/flat model yields an
+        all-zero field (all ocean).  Same runtime-singleton caveat as
+        :meth:`static_topography_phis` (build from the SAME config that drives the run).
+        """
+        # static_topography_phis runs the chain that sets BOTH _phis_data and _f_land,
+        # guarded on _phis_data; after it returns, _f_land is populated too.
+        self.static_topography_phis()
+        return self._f_land
 
     def _create_grid(self) -> None:
         """Create horizontal grid and vertical coordinate."""
@@ -1253,7 +1311,9 @@ class ModelDriver:
                 self.physics.land_stomatal_beta = _stomatal
                 if _stomatal:
                     from legoesm.land.carbon.stomata import StomataConfig
-                    self.physics.stomata_config = StomataConfig()
+                    self.physics.stomata_config = StomataConfig(
+                        gs_max=self.config.land_gs_max,
+                    )
                 # Prognostic snow + snow-albedo feedback on the slab tile.
                 self.physics.snow_albedo_feedback = bool(
                     getattr(self.config, "snow_albedo_feedback", False))
@@ -1369,7 +1429,10 @@ class ModelDriver:
             ),
             bulk_scheme="most",
             snow_albedo_feedback=self.config.snow_albedo_feedback,
-            stomata=StomataConfig(enabled=self.config.land_stomatal_beta),
+            stomata=StomataConfig(
+                enabled=self.config.land_stomatal_beta,
+                gs_max=self.config.land_gs_max,
+            ),
         )
         params, cfg = clm_multilayer_setup(surface_map, base_config=base)
 
@@ -1748,10 +1811,17 @@ class ModelDriver:
             elif pm_flag == "never":
                 perf_mode = False
             elif pm_flag == "auto":
-                # auto: use perf_mode when running distributed MPI
+                # auto: use perf_mode when running distributed MPI, and
+                # ALWAYS under multi-controller SPMD (cs_spmd step 5b):
+                # collect_lightweight's jnp reductions are SPMD-global on
+                # the face-sharded arrays and their replicated scalar
+                # results are fully addressable on every process, while
+                # the full collect() would np.asarray non-fully-
+                # addressable global arrays (crash).
                 perf_mode = (
-                    self._device_config is not None
-                    and self._device_config.is_distributed
+                    (self._device_config is not None
+                     and self._device_config.is_distributed)
+                    or self._is_spmd_multiprocess()
                 )
             else:
                 raise ValueError(
@@ -1783,6 +1853,22 @@ class ModelDriver:
         )
         if _latlon_mpi and perf_mode:
             perf_mode = False
+
+        # Multi-controller SPMD full collect (cmip_output or an explicit
+        # diagnostics_perf_mode='never'/'auto'-overridden request): gather
+        # the sharded state + every array kwarg to a host replica on EVERY
+        # process (process_allgather is collective), then run the standard
+        # single-process collect on each process — identical host inputs
+        # give identical accumulators on every rank, and the flush/save
+        # sites are already root-gated via _mpi_rank=process_index.
+        if not perf_mode and self._is_spmd_multiprocess():
+            state = kwargs.get('state', self.state)
+            jax.block_until_ready(state.u.data)
+            kwargs['state'] = self._gather_spmd_tree_to_host(state)
+            for _k, _v in list(kwargs.items()):
+                if _k != 'state' and isinstance(_v, jax.Array):
+                    kwargs[_k] = self._gather_spmd_tree_to_host(_v)
+            return self.diagnostics.collect(**kwargs)
 
         if perf_mode:
             # Lightweight path: scalar reductions only, no gather.
@@ -3155,7 +3241,33 @@ class ModelDriver:
             MPI.COMM_WORLD.Barrier()
             return
 
-        # Single-process path
+        # Single-process path (also the multi-controller SPMD write tail:
+        # the state is gathered to a host replica first, process 0 writes).
+        _state, _q_v, _q_c, _q_r = self.state, self.q_v, self.q_c, self.q_r
+        _carry_aux = self._checkpoint_carry_aux()
+        if self._is_spmd_multiprocess():
+            # Multi-controller SPMD (cs_spmd step 5a): every process holds
+            # only its shard of the face-sharded global arrays, and every
+            # process runs this method in lockstep.  Gather each leaf to a
+            # host-replicated array on ALL processes (process_allgather is
+            # a COLLECTIVE — a rank-0-only gather would desync the
+            # program), then only process 0 falls through to the standard
+            # single-file write below.  Parity receipt for the gather
+            # pattern: validate_driver_cs_spmd_parity.py, job 8686550.
+            _gather = self._gather_spmd_tree_to_host
+            _state = _gather(_state)
+            _q_v, _q_c, _q_r = _gather(_q_v), _gather(_q_c), _gather(_q_r)
+            _carry_aux = _gather(_carry_aux)
+            # NOTE: do NOT return on non-root here.  The zarr carry guards
+            # below are pure config/pytree checks that must raise
+            # IDENTICALLY on every process (codex HIGH: a rank-0-only
+            # raise after rank 1 already returned leaves rank 1 running
+            # toward the next collective — a hang).  Non-root returns just
+            # before the actual write instead.
+            _spmd_nonroot = jax.process_index() != 0
+        else:
+            _spmd_nonroot = False
+
         ckpt_path = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}.npz"
         backend = self.config.output.checkpoint_format if hasattr(self.config.output, 'checkpoint_format') else "npz"
 
@@ -3221,19 +3333,99 @@ class ModelDriver:
                 "checkpoint_format='npz' for stateful-physics runs."
             )
 
-        save_restart(
-            path=ckpt_path,
-            state=self.state,
-            q_v=self.q_v,
-            step=step,
-            day=day,
-            config=self.config,
-            q_c=self.q_c,
-            q_r=self.q_r,
-            carry_aux=self._checkpoint_carry_aux(),
-            backend=backend,
-        )
-        logger.info(f"  Checkpoint: {ckpt_path.name}")
+        # Multi-controller SPMD: every process ran the collective gather
+        # and the (identical) guards above; only process 0 writes.  The
+        # write itself is wrapped so a root-only I/O failure reaches every
+        # process via the rendezvous below (codex HIGH: otherwise non-root
+        # returned here and hung on the run loop's next collective while
+        # root died).
+        _write_err: Exception | None = None
+        if not _spmd_nonroot:
+            try:
+                save_restart(
+                    path=ckpt_path,
+                    state=_state,
+                    q_v=_q_v,
+                    step=step,
+                    day=day,
+                    config=self.config,
+                    q_c=_q_c,
+                    q_r=_q_r,
+                    carry_aux=_carry_aux,
+                    backend=backend,
+                )
+                logger.info(f"  Checkpoint: {ckpt_path.name}")
+            except Exception as e:
+                _write_err = e
+        self._spmd_barrier_on_root_error(_write_err)
+
+    def _is_spmd_multiprocess(self) -> bool:
+        """True iff this run is multi-controller SPMD across >1 process
+        (distributed_mode='spmd' under a real multi-process launch) — the
+        regime where output writes are root-gated and every gather is a
+        collective."""
+        return (self.config.distributed
+                and getattr(self.config, "distributed_mode", "mpi") == "spmd"
+                and jax.process_count() > 1)
+
+    def _spmd_barrier_on_root_error(self, err: Exception | None) -> None:
+        """Rendezvous all SPMD processes on the success of a ROOT-ONLY write.
+
+        Root-gated I/O (diagnostics.save / save_results / the checkpoint
+        save_restart tail) runs on process 0 only.  Without a rendezvous, a
+        root-only exception kills process 0 while the other processes sail
+        into the NEXT collective (segment scan, process_allgather) and hang
+        until walltime (codex 2026-07-03 HIGH).  Every process calls this
+        with its local error (non-root: None); the root flag is broadcast
+        and EVERY process raises when root failed.  No-op outside
+        multi-process SPMD (single process / mpi4jax keep their native
+        exception flow)."""
+        if not self._is_spmd_multiprocess():
+            if err is not None:
+                raise err
+            return
+        from jax.experimental import multihost_utils as _mhu
+        # allgather+max (not broadcast_one_to_all): symmetric — ANY
+        # process's failure surfaces on every process, not just root's.
+        _flags = _mhu.process_allgather(
+            jnp.asarray(0.0 if err is None else 1.0))
+        if err is not None:
+            raise err
+        if float(jnp.max(_flags)) != 0.0:
+            raise RuntimeError(
+                "multi-controller SPMD: another process failed during a "
+                "root-gated output write (see its traceback); aborting "
+                "this process in lockstep instead of hanging on the next "
+                "collective."
+            )
+
+    def _gather_spmd_tree_to_host(self, tree):
+        """Gather every non-fully-addressable jax.Array leaf of *tree* to a
+        process-local REPLICATED jax array (multi-controller SPMD;
+        collective — EVERY process must call this with the same tree).
+        Fully-addressable leaves and non-array leaves pass through
+        unchanged; pytree structure (Fields, dicts, NamedTuples) is
+        preserved.
+
+        The gathered leaf is re-wrapped ``jnp.asarray`` (NOT left as
+        numpy): downstream consumers include jnp/``lax.scan`` code (the
+        energy tracker inside the full diagnostics ``collect()`` indexes
+        with traced integers — a numpy leaf there raises
+        ``TracerArrayConversionError``, smoke job 8687797) as well as
+        plain ``np.asarray`` writers, and a single-device jax array
+        serves both."""
+        if tree is None:
+            return None
+        import numpy as _np
+        from jax.experimental import multihost_utils as _mhu
+
+        def _leaf(x):
+            if isinstance(x, jax.Array) and not x.is_fully_addressable:
+                return jnp.asarray(
+                    _np.asarray(_mhu.process_allgather(x, tiled=True)))
+            return x
+
+        return jax.tree_util.tree_map(_leaf, tree)
 
     def load_checkpoint(self, path: str | Path) -> tuple[int, float]:
         """Load state from a checkpoint using unified restart API.
@@ -3436,47 +3628,15 @@ class ModelDriver:
                     f"spectral checkpoint not found (or is a directory): "
                     f"{path}"
                 )
-            import jax.numpy as jnp
-            from legoesm.core.field import Field
-            d = np.load(path)
-            if "spectral_layout" not in d:
-                raise ValueError(
-                    f"{path} is not a spectral checkpoint (missing the "
-                    "spectral_layout marker) — it cannot restore a "
-                    "discretization='spectral' run."
-                )
-            s = self.state
-            new_fields = {}
-            for _name in ("vor_hat", "div_hat", "T_hat", "lnps_hat",
-                          "phis_hat"):
-                _cur = getattr(s, _name)
-                _arr = d[_name]
-                if _arr.shape != _cur.data.shape:
-                    raise ValueError(
-                        f"spectral checkpoint {_name} shape {_arr.shape} "
-                        f"!= configured state {_cur.data.shape} "
-                        f"(resolution/nlev mismatch): {path}"
-                    )
-                new_fields[_name] = _cur.replace(data=jnp.asarray(_arr))
-            tracers = None
-            if "tracer_names" in d:
-                if s.tracers is None:
-                    raise ValueError(
-                        f"spectral checkpoint {path} carries tracers "
-                        f"{[str(n) for n in d['tracer_names']]} but the "
-                        "configured run has none — refusing to silently "
-                        "drop water."
-                    )
-                tracers = {}
-                for _k in (str(n) for n in d["tracer_names"]):
-                    _cur_t = s.tracers[_k]
-                    tracers[_k] = _cur_t.replace(
-                        data=jnp.asarray(d[f"trc_{_k}"]))
-            elif s.tracers is not None:
-                tracers = s.tracers
-            self.state = s._replace(tracers=tracers, **new_fields)
-            step = int(d["step"])
-            day = float(d["day"])
+            from legoesm.atmosphere.dynamics.spectral_pe import (
+                reconstruct_spectral_state_from_npz,
+            )
+            # Shared reconstruction (template=self.state ⇒ reuse the configured Field
+            # metadata + validate shapes + refuse to drop water); the standalone
+            # ``load_restart`` uses the SAME helper with template=None (iter 92).
+            with np.load(path) as d:
+                self.state, step, day = reconstruct_spectral_state_from_npz(
+                    d, template=self.state)
             logger.info(
                 f"  Loaded spectral checkpoint: step={step}, day={day:.2f}")
             self._loaded_checkpoint_step_day = (step, day)
@@ -3827,6 +3987,27 @@ class ModelDriver:
         cwv = (g_sum_cwv / g_n_cells) if cwv_field is not None else float("nan")
         return mean_T, mean_ps, g_max_u, g_T_min, g_T_max, g_finite, cwv
 
+    def _insolation_day(self, day):
+        """Model ``day`` shifted by the static seasonal insolation offset
+        (``_insolation_day_offset``, from ``config.insolation_start_doy``). The
+        ONE place the offset is applied, consumed by BOTH insolation mechanisms:
+        the ``day_to_calendar`` day_of_year (rrtmgp/forcing-dict path, via
+        :meth:`_calendar_for_radiation`) AND the gray-radiation
+        ``daily_mean_insolation`` solar declination. Decoupled from the
+        relative-indexed SST forcing (which keeps the un-shifted ``day``).
+        Offset 0.0 (``insolation_start_doy is None``) => identical to ``day``.
+        """
+        return day + self._insolation_day_offset
+
+    def _calendar_for_radiation(self, day):
+        """``day_to_calendar`` for the radiation insolation day_of_year/seconds,
+        applying the seasonal offset (:meth:`_insolation_day`). The integer-day
+        offset (the whole-day-of-year case) shifts ``day_of_year`` while leaving
+        ``seconds_of_day`` (the diurnal phase) unchanged; offset 0.0 =>
+        byte-identical to ``day_to_calendar(day)``.
+        """
+        return day_to_calendar(self._insolation_day(day))
+
     def _run_mpas(self, start_step: int = 0, start_day: float | None = None) -> str:
         """Run MPAS model with the unified physics pipeline.
 
@@ -3979,7 +4160,7 @@ class ModelDriver:
                 ozone=OzoneProfileConfig(source=cfg.ozone_source),
             ),
             convection=ConvectionConfig(scheme=cfg.convection),
-            turbulence=TurbulenceConfig(scheme=cfg.turbulence),
+            turbulence=turbulence_config_for(cfg),
             microphysics=_micro_cfg,
             gravity_wave_drag=GravityWaveDragConfig(scheme=cfg.gravity_wave_drag),
         )
@@ -4323,9 +4504,29 @@ class ModelDriver:
                 if k.startswith("physstate_")
                 and not k[len("physstate_"):].startswith("meta_")
             }
+            # Schema-growth migration (grow-only allowlist): PhysicsState
+            # fields ADDED after a checkpoint format was in production.  A
+            # checkpoint written by an older build legitimately lacks these;
+            # they seed from the fresh init (zeros) instead of tripping the
+            # completeness gate below.  Only fields whose zero-seed is the
+            # correct pre-feature state may be listed (aerosol_number: the
+            # prognostic-aerosol tracer is opt-in and zero before the feature
+            # existed).  Any OTHER missing field is still a partial/corrupted
+            # carry and must fail loudly (issue #405/#413).
+            _NEW_OPTIONAL_PS_FIELDS = frozenset({"aerosol_number"})
             if _any_physstate:
                 _missing = [f for f in _phys_state._fields
                             if f not in _present_fields]
+                _new_missing = [f for f in _missing
+                                if f in _NEW_OPTIONAL_PS_FIELDS]
+                _missing = [f for f in _missing
+                            if f not in _NEW_OPTIONAL_PS_FIELDS]
+                if _new_missing:
+                    logger.info(
+                        "  MPAS restart checkpoint predates PhysicsState "
+                        "field(s) %s — seeding them fresh (zeros); all other "
+                        "physics memory is restored.", sorted(_new_missing),
+                    )
                 if _missing:
                     raise ValueError(
                         "MPAS restart physics-state carry is INCOMPLETE: "
@@ -4403,10 +4604,7 @@ class ModelDriver:
             )
 
         _forcing_daily: dict = {}
-        from legoesm.forcing.time_utils import (
-            daily_forcing_bucket,
-            day_to_calendar,
-        )
+        from legoesm.forcing.time_utils import daily_forcing_bucket
         for step in range(n_steps_total):
             if _sst_forcing or _ext_forcing:
                 _force_day = START_DAY + step * DT / 86400.0
@@ -4457,7 +4655,7 @@ class ModelDriver:
                 # whole run would see the insolation of the initial day —
                 # no seasonal or diurnal cycle.  Scalars only; the heavier
                 # daily fields above are reused between updates.
-                _doy, _sod = day_to_calendar(_force_day)
+                _doy, _sod = self._calendar_for_radiation(_force_day)
                 _forcing = dict(_forcing_daily)
                 _forcing["day_of_year"] = jnp.asarray(_doy)
                 _forcing["seconds_of_day"] = jnp.asarray(_sod)
@@ -4799,8 +4997,9 @@ class ModelDriver:
             if forcing_data is not None and "insol" in forcing_data:
                 insol = forcing_data["insol"]
             else:
-                insol = daily_mean_insolation(lat_col, current_day, S_0,
-                                              orbit=_orbit_params)
+                insol = daily_mean_insolation(
+                    lat_col, self._insolation_day(current_day), S_0,
+                    orbit=_orbit_params)
             rad_out = gray_radiation(
                 T=T_col, p_full=p_full_col, p_half=p_half_col,
                 sfc_temperature=T_sfc_col, lat=lat_col,
@@ -4870,9 +5069,6 @@ class ModelDriver:
             from legoesm.atmosphere.physics.convection.config import (
                 ConvectionConfig,
             )
-            from legoesm.atmosphere.physics.turbulence.config import (
-                TurbulenceConfig,
-            )
             from legoesm.atmosphere.physics.microphysics.config import (
                 MicrophysicsConfig,
             )
@@ -4913,7 +5109,7 @@ class ModelDriver:
                     ozone=OzoneProfileConfig(source=cfg.ozone_source),
                 ),
                 convection=ConvectionConfig(scheme=cfg.convection),
-                turbulence=TurbulenceConfig(scheme=cfg.turbulence),
+                turbulence=turbulence_config_for(cfg),
                 microphysics=MicrophysicsConfig(scheme=cfg.microphysics),
                 gravity_wave_drag=GravityWaveDragConfig(
                     scheme=cfg.gravity_wave_drag),
@@ -4978,8 +5174,6 @@ class ModelDriver:
         t_start = time.time()
         _ext_daily: dict = {}
         _last_ext_day = None
-        if _full_physics:
-            from legoesm.forcing.time_utils import day_to_calendar
         for step in range(start_step, n_steps_total):
             self._current_day = START_DAY + (step + 1) * DT / 86400.0
 
@@ -5015,7 +5209,7 @@ class ModelDriver:
                             k: jnp.asarray(v) for k, v in _ghg.items()
                         }
                     _last_ext_day = _fd_int
-                _doy, _sod = day_to_calendar(self._current_day)
+                _doy, _sod = self._calendar_for_radiation(self._current_day)
                 forcing_data = {
                     "T_sfc": _T_sfc_step,
                     "day_of_year": jnp.asarray(_doy),
@@ -5025,9 +5219,9 @@ class ModelDriver:
             else:
                 # Legacy dry gray path: traced SST/SIC + daily-mean insol
                 sst_step, sic_step = self.get_sst_sic(self._current_day)
-                insol_step = daily_mean_insolation(_lat_col_loop,
-                                                   self._current_day, S_0,
-                                                   orbit=_orbit_params)
+                insol_step = daily_mean_insolation(
+                    _lat_col_loop, self._insolation_day(self._current_day), S_0,
+                    orbit=_orbit_params)
                 forcing_data = {
                     "day": jnp.asarray(self._current_day),
                     "sst": sst_step,
@@ -5720,10 +5914,19 @@ class ModelDriver:
         logger.info(f"Done: {total_wall:.1f}s wall time, status={run_status}")
 
         _is_root = (self._mpi_rank is None or self._mpi_rank == 0)
+        # Root-only writes are wrapped so a root failure surfaces on EVERY
+        # SPMD process BEFORE the final save_checkpoint (whose spmd tail
+        # opens with a collective gather — a dead root there is a hang,
+        # codex HIGH).  No-op (native raise) outside multi-process SPMD.
+        _finalize_err: Exception | None = None
         if _is_root:
-            self.diagnostics.save(self._output_dir)
-            self.save_results(run_status, t_jit, total_wall)
-            logger.info(self.diagnostics.print_summary())
+            try:
+                self.diagnostics.save(self._output_dir)
+                self.save_results(run_status, t_jit, total_wall)
+                logger.info(self.diagnostics.print_summary())
+            except Exception as e:
+                _finalize_err = e
+        self._spmd_barrier_on_root_error(_finalize_err)
 
         # Only a CLEAN run yields a restartable final checkpoint.  A BLOWUP
         # leaves the state finite-but-unphysical, and labelling that garbage
@@ -5735,7 +5938,22 @@ class ModelDriver:
         # checkpoint (written at the actual elapsed day) remains the restart
         # point for a blown-up run.
         if checkpoint_interval > 0 and run_status == "COMPLETED":
-            self.save_checkpoint(n_steps_total, START_DAY + N_DAYS)
+            # Route through the coupled checkpoint callback when one is set
+            # (mirrors the periodic path): a coupled run must persist the FULL
+            # coupled state (atm + ocean + surface + CO2) at the final day too,
+            # or ``run_coupled --resume`` finds the atmosphere checkpoint but
+            # no ``coupled_day_*.npz`` and silently resumes with a stale ocean.
+            # Single-rank only: the coupled tail (CoupledESMDriver.
+            # save_checkpoint) writes rank-LOCAL ocean/surface pytrees with no
+            # gather, so under mpi4jax every rank would race the same npz with
+            # its own slice.  Under MPI keep the atmosphere save, which IS
+            # collective-safe (gathers internally, root writes) — the
+            # coupled-MPI full-state final checkpoint is a pre-existing gap
+            # shared with the periodic path.
+            _ckpt = ((getattr(self, "_checkpoint_callback", None)
+                      if self._mpi_rank is None else None)
+                     or self.save_checkpoint)
+            _ckpt(n_steps_total, START_DAY + N_DAYS)
 
         # Issue #275 fix A lifecycle: restore the halo backend captured
         # at activation time so subsequent drivers / tests in the same
@@ -5869,6 +6087,10 @@ class ModelDriver:
             o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
             ghg_vmr=ctx["ghg_vmr"],
         )
+        # SPMD: commit grid-shaped forcing leaves to the state's sharding
+        # (no-op single-device / mpi4jax-distributed) — see shard_forcing.
+        from legoesm.driver.compiled_segments import shard_forcing
+        forcing = shard_forcing(forcing, self._device_config)
         return run_segment.raw, carry0, forcing
 
     # ==================================================================
@@ -5886,6 +6108,7 @@ class ModelDriver:
         from legoesm.driver.compiled_segments import (
             pack_carry, unpack_carry,
             compute_segment_length, build_segment_fn, pack_forcing,
+            shard_forcing,
         )
 
         ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
@@ -6130,7 +6353,7 @@ class ModelDriver:
             seg_steps = min(segment_length, n_steps_total - current_step)
             seg_end_step = current_step + seg_steps
             day = START_DAY + seg_end_step * DT / 86400.0
-            day_of_year, seconds_of_day = day_to_calendar(day)
+            day_of_year, seconds_of_day = self._calendar_for_radiation(day)
             sst, sic = self.get_sst_sic(day)
 
             # Re-sample time-varying external forcing at every segment
@@ -6200,6 +6423,9 @@ class ModelDriver:
                 sfc_shflx_override=_sfc_shflx_ovr,
                 sfc_lhflx_override=_sfc_lhflx_ovr,
             )
+            # SPMD: commit grid-shaped forcing leaves to the state's
+            # sharding (no-op single-device / mpi4jax-distributed).
+            forcing = shard_forcing(forcing, self._device_config)
 
             # Pack state into carry
             carry = pack_carry(
@@ -6605,9 +6831,12 @@ class ModelDriver:
 
             # Incremental CMIP monthly flush — write completed months and
             # free their memory so long runs don't accumulate all months.
-            if (diag_interval > 0 and current_step % diag_interval == 0
-                    and (self._mpi_rank is None or self._mpi_rank == 0)):
-                self.diagnostics.flush_cmip_monthly(day)
+            # EVERY process pops (under multi-controller SPMD the non-root
+            # accumulators fill identically and would otherwise grow
+            # unbounded, codex round-10); only root writes.
+            if diag_interval > 0 and current_step % diag_interval == 0:
+                _is_root = self._mpi_rank is None or self._mpi_rank == 0
+                self.diagnostics.flush_cmip_monthly(day, write=_is_root)
 
         return self._finalize_run(
             run_status, t_jit, t_start,
@@ -6719,7 +6948,7 @@ class ModelDriver:
         # --- JIT warmup ---
         t_jit_start = time.time()
         day = START_DAY + (start_step + 1) * DT / 86400.0
-        day_of_year, seconds_of_day = day_to_calendar(day)
+        day_of_year, seconds_of_day = self._calendar_for_radiation(day)
         sst, sic = self.get_sst_sic(day)
 
         # Warmup radiation cadence (FIX_RESTART_TIME iteration-2 codex
@@ -6876,7 +7105,7 @@ class ModelDriver:
 
         for step in range(start_step + 1, n_steps_total):
             day = START_DAY + (step + 1) * DT / 86400.0
-            day_of_year, seconds_of_day = day_to_calendar(day)
+            day_of_year, seconds_of_day = self._calendar_for_radiation(day)
 
             sst, sic = self.get_sst_sic(day)
 
