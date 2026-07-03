@@ -2373,17 +2373,22 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             # vortex cores below the seam-noise floor by ~day 20, and
             # weaker damping without duogrid erupts at the face seams
             # (see the grid comment).  With duogrid, damp_v=0.010 +
-            # 0.5x hyperdiff keeps the dipoles coherent through
-            # collision + partner exchange while remaining stable for
-            # the full 100 days (zero-hyperdiff still blows up at
-            # ~day 40 — the enstrophy cascade needs the biharmonic
-            # sink).  Dedicated env knobs for sensitivity probes.
+            # 1.0x hyperdiff is the sweep optimum: 0.5x survives the
+            # IC adjustment but still erupts at the corners during the
+            # stronger collision transient (~day 20; C48 max|u| 237 by
+            # day 30), while 1.0x runs the full 100 days cleanly
+            # (max|u| decaying 23->5 m/s, no eruption) and captures
+            # collision + partner exchange + poleward departure + the
+            # return leg.  Zero hyperdiff blows up at ~day 40 even
+            # with duogrid — the enstrophy cascade needs the
+            # biharmonic sink.  Dedicated env knobs for sensitivity
+            # probes.
             _m_dd = float(
                 os.environ.get("LEGOESM_SW_MODON_DIV_DAMP_FACTOR", "8.0"))
             _m_dv = float(
                 os.environ.get("LEGOESM_SW_MODON_DAMP_V", "0.010"))
             _m_hd = float(
-                os.environ.get("LEGOESM_SW_MODON_HYPERDIFF_FACTOR", "0.5"))
+                os.environ.get("LEGOESM_SW_MODON_HYPERDIFF_FACTOR", "1.0"))
             config = iter1009_dual_target_config(
                 n, div_damp_factor=_m_dd, damp_v=_m_dv,
                 hyperdiff_coeff=_m_hd * _hyperdiff_cube(n),
