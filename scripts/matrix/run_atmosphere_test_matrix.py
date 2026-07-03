@@ -1396,7 +1396,10 @@ def _latlon_curl(u_ll: np.ndarray, v_ll: np.ndarray, radius: float,
     else:
         lat1d = np.asarray(lat_deg, dtype=np.float64).ravel()
     coslat = np.cos(np.radians(lat1d))[:, None]
-    dv_dlam = np.gradient(v, np.radians(dlon_deg), axis=1)
+    # Longitude is periodic: wrap-pad one column each side so the
+    # dateline columns get a centred (not one-sided) derivative.
+    v_wrap = np.concatenate([v[:, -1:], v, v[:, :1]], axis=1)
+    dv_dlam = np.gradient(v_wrap, np.radians(dlon_deg), axis=1)[:, 1:-1]
     ducos_dphi = np.gradient(u * coslat, np.radians(dlat_deg), axis=0)
     zeta = (dv_dlam - ducos_dphi) / (radius * np.maximum(coslat, 1e-3))
     zeta[:2, :] = 0.0

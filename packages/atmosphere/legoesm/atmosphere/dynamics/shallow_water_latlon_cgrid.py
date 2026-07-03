@@ -35,6 +35,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.grids.operator_adapters import latlon_cgrid_operators
 from legoesm.grids.operators_latlon_cgrid import (
@@ -151,7 +152,28 @@ def absolute_vorticity_coriolis(
 
     # --- Planetary vorticity at vertices ---
     lat = grid.lat  # cell-center latitudes
-    twoOmega = 2.0 * constants.Omega
+    # Rotation rate from the GRID, not constants.Omega: a non-rotating
+    # grid (create_latlon_grid(..., omega=0.0) — the colliding-modons
+    # case, #521) must yield f_vert = 0, but the hardcoded
+    # constants.Omega silently kept the planet rotating regardless of
+    # the grid omega (codex 2026-07-03 HIGH).  LatLonGrid stores the
+    # field f = 2*omega*sin(lat), not the scalar, so recover it at
+    # trace time from the largest-|sin| local row (cell centres never
+    # sit on a pole; a band that reads the pole constants always owns
+    # near-pole rows, and the >=2-row band floor guarantees a row with
+    # sin(lat) != 0).  Snap to 2*constants.Omega within 1e-12 so every
+    # rotating caller (grid built with the default omega) stays
+    # BIT-identical — only genuinely non-Earth omegas take the
+    # recovered value.
+    _lat_np = np.asarray(lat)
+    _sin_np = np.sin(_lat_np)
+    _i = int(np.argmax(np.abs(_sin_np)))
+    _s = float(_sin_np[_i])
+    _two_omega = float(np.asarray(grid.f)[_i, 0]) / _s if _s != 0.0 else 0.0
+    _two_omega_earth = 2.0 * constants.Omega
+    if abs(_two_omega - _two_omega_earth) < 1e-12 * _two_omega_earth:
+        _two_omega = _two_omega_earth
+    twoOmega = _two_omega
     if _band is None and _spmd_pm is None:
         # Serial / single-rank: sin(±π/2) = ±1 exactly, so build f_vert directly
         # from the interior sin via Pad with constant_values = ±2Ω.  Single

@@ -137,42 +137,50 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# Lat-lon wiring (#521 follow-up): matrix catalog + non-rotating C-grid run
+# Lat-lon wiring (#521 follow-up): non-rotating C-grid run.  The catalog
+# gate (all four grids registered) lives in the NON-x64-gated
+# tests/unit/test_matrix_modon_catalog.py so default fp32 CI runs it
+# (codex 2026-07-03 Medium).
 # ---------------------------------------------------------------------------
 
-def _load_matrix_module():
-    """Load the matrix-runner script WITHOUT permanent sys.path pollution
-    (codex round-12 Low): spec-load under a private module name; nothing
-    is inserted into sys.path and the bare name never enters sys.modules."""
-    import importlib.util
-    import sys
-    from pathlib import Path
-    script = (Path(__file__).resolve().parents[4]
-              / "scripts" / "matrix" / "run_atmosphere_test_matrix.py")
-    name = "_modons_matrix_catalog"
-    spec = importlib.util.spec_from_file_location(name, script)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    try:
-        spec.loader.exec_module(mod)
-    finally:
-        sys.modules.pop(name, None)
-    return mod
 
+def test_latlon_coriolis_derives_from_grid_omega(fp64_policy):
+    """``absolute_vorticity_coriolis`` must take the rotation rate from
+    the GRID: an ``omega=0`` grid yields a Coriolis-free cross term.
 
-def test_matrix_registers_all_four_grids():
-    """Catalog-backed (name, grid) gate: ``--test colliding_modons`` must
-    select a REAL case on EVERY grid type (never a silent no-op) — the
-    case is a standard cross-grid SW test."""
-    M = _load_matrix_module()
-    mat = M._build_test_matrix()
-    cm = [t for t in mat if t.case == "colliding_modons"]
-    grids = sorted(t.grid_type for t in cm)
-    assert grids == ["cubed_sphere", "icosahedral", "latlon",
-                     "spectral"], grids
-    for t in cm:
-        assert t.run_kwargs.get("test_num") == 8, t.run_kwargs
-    assert M.RUNNERS.get("colliding_modons") is M.run_shallow_water
+    Regression pin for the codex 2026-07-03 HIGH: the planetary
+    vorticity was hardcoded ``2*constants.Omega``, so the lat-lon
+    colliding-modons path silently kept rotating despite the omega=0
+    grid.  For uniform zonal flow (v = 0) the v-acceleration is
+    ``-eta * u``: with omega=0 only the metric relative vorticity
+    ``u*tan(lat)/R`` remains (~1.5% of f at 45 deg), while the rotating
+    grid is f-dominated — a >20x separation the hardcoded version
+    collapses to equality.
+    """
+    from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+        absolute_vorticity_coriolis,
+    )
+    from legoesm.grids.latlon import create_latlon_grid
+
+    n_lat, n_lon = 24, 48
+    g0 = create_latlon_grid(n_lat, n_lon, omega=0.0)
+    g_earth = create_latlon_grid(n_lat, n_lon)
+    assert float(jnp.max(jnp.abs(g0.f))) == 0.0
+
+    u = jnp.full((n_lat, n_lon + 1), 10.0)
+    v = jnp.zeros((n_lat + 1, n_lon))
+    _, cv0 = absolute_vorticity_coriolis(u, v, g0)
+    _, cv_e = absolute_vorticity_coriolis(u, v, g_earth)
+
+    m0 = float(jnp.max(jnp.abs(cv0)))
+    m_e = float(jnp.max(jnp.abs(cv_e)))
+    assert m_e > 0.0
+    # Hardcoded-Omega regression collapses these to identical fields.
+    assert not np.allclose(np.asarray(cv0), np.asarray(cv_e))
+    # omega=0 leaves only the metric relative-vorticity contribution
+    # (max ~ u*tan(lat_top)/R at the 86-deg top row = ~8% of the
+    # f-dominated rotating value; the regression gives ratio 1.0).
+    assert m0 < 0.15 * m_e
 
 
 def test_latlon_nonrotating_run_stable_and_conserves_mass(fp64_policy):
