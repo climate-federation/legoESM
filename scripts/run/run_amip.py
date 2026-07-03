@@ -36,6 +36,7 @@ from legoesm.driver.config import (
     GridConfig,
     OutputConfig,
 )
+from legoesm.driver.run_status import status_to_exit_code
 
 _DYCORE_DEFAULTS = DycoreConfig()
 _OUTPUT_DEFAULTS = OutputConfig()
@@ -1685,25 +1686,35 @@ def main(argv: list[str] | None = None):
 
     if _is_root:
         print("Running...")
-    driver.run(start_step=start_step, start_day=start_day)
+    run_status = driver.run(start_step=start_step, start_day=start_day)
 
-    # iter-100: post-run finiteness check.  Pre-iter-100,
-    # ``run_amip.py`` had ZERO blowup detection (``grep -c
-    # isfinite`` = 0 in 450 lines).  A NaN-producing AMIP run
-    # would silently complete and print "Complete." while
-    # writing garbage to the output directory.  iter-98's audit
-    # of the OMIP/atmosphere-matrix BLOWUP-reporting bug flagged
-    # this as a separate gap; iter-100 closes it.
+    # Post-run FAILURE detection needs TWO independent signals — either one
+    # non-clean means exit 1 (so a SLURM ``afterok`` chain STOPS instead of
+    # restarting from garbage):
     #
-    # The check inspects the final ``driver.state`` for NaN/Inf
-    # in the primary atmospheric fields (T, u, v, p_s).  When
-    # non-finite, the run is flagged FAIL with a clear message
-    # and the script exits with code 1 so wrappers
-    # (``run_amip_cross_grid.sh``) can detect failure.
+    #  1. the driver's own run status.  ``check_stability`` flags a BLOWUP
+    #     (winds / T / p_s out of *physical* bounds) at a segment boundary and
+    #     returns e.g. ``"BLOWUP at day 515"``.  Those values are FINITE, so the
+    #     NaN/Inf sweep below never sees them — before this, ``driver.run()``'s
+    #     status was DISCARDED and a blown-up chain link printed "Complete" and
+    #     exited 0, letting the chain march on (the 3-yr-chain false-completion).
+    #  2. a final NaN/Inf sweep (iter-100) of the primary fields (T, u, v, p_s)
+    #     — catches a non-finite state a segment-boundary probe could miss.
+    #
+    # ``status_to_exit_code`` is the shared status→exit-code contract; the exit
+    # is unconditional (all ranks) because the BLOWUP verdict is global.
     state_ok, bad_field = _check_run_state_finite(driver)
+    status_code = status_to_exit_code(run_status)
+    run_failed = (status_code != 0) or (not state_ok)
     if _is_root:
-        if state_ok:
+        if not run_failed:
             print(f"Complete. Output: {driver.output_dir}")
+        elif status_code != 0:
+            print(
+                f"FAIL: run did not complete cleanly (status={run_status!r}).  "
+                f"Output (with garbage): {driver.output_dir}",
+                file=sys.stderr,
+            )
         else:
             print(
                 f"FAIL: final state contains NaN/Inf in field "
@@ -1711,7 +1722,8 @@ def main(argv: list[str] | None = None):
                 f"{driver.output_dir}",
                 file=sys.stderr,
             )
-            sys.exit(1)
+    if run_failed:
+        sys.exit(1)
 
     if args.plot and _is_root:
         # ``plot_amip`` lives under ``scripts/plot/`` (bucket layout; see
