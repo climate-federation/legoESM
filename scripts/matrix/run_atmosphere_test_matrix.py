@@ -3088,6 +3088,10 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             ("height", "Fluid depth h (m)", "viridis"),
             # Rendered only when present in the snapshot (W6); see above.
             ("p_s", "Surface pressure (Pa)", "viridis"),
+            # Rendered only when the extract emits it (all four grids do
+            # for colliding modons — the #521 signature field; the cube
+            # extract emits it for every SW case).
+            ("vorticity", "Relative vorticity (1/s)", "RdBu_r"),
         ],
         mass_key="mean_height", energy_key="max_wind",
         scalar_units={"mean_height": "m", "max_wind": "m/s"})

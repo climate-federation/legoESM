@@ -83,6 +83,18 @@ class LatLonGrid(NamedTuple):
     # for scalar CFL diagnostics. Operators must use ``dy`` (1D array)
     # for per-row cell heights, not ``dlat``.
 
+    # Planetary rotation rate [rad/s] — the scalar the ``f`` field was
+    # built from.  Stored so dynamics needing the VERTEX planetary
+    # vorticity (``absolute_vorticity_coriolis``) can rebuild
+    # 2*omega*sin(lat_vertex) exactly on ANY subdomain: recovering it
+    # from the local ``f`` rows fails on an MPI band that owns only the
+    # equator row (sin(lat) = 0), and hardcoding constants.Omega
+    # silently kept omega=0 grids rotating (#521, codex 2026-07-03).
+    # APPENDED at the NamedTuple end WITH a default so positional
+    # constructions and the pytree ABI of existing callers are
+    # unchanged (mirrors the ``radius: float`` scalar-leaf precedent).
+    omega: float = constants.Omega
+
     # ------------------------------------------------------------------
     # GridProtocol properties
     # ------------------------------------------------------------------
@@ -308,6 +320,7 @@ def build_uniform_latlon_grid_from_axes(
         total_area=total_area,
         dlon=float(dlon),
         dlat=float(dlat),
+        omega=float(omega),
     )
 
 
@@ -478,6 +491,7 @@ def create_regional_latlon_grid(
         total_area=total_area,
         dlon=float(dlon),
         dlat=float(dlat),
+        omega=float(omega),
     )
     return grid, wall_mask
 
@@ -672,6 +686,7 @@ def create_mercator_grid(
         total_area=total_area,
         dlon=float(dlon),
         dlat=float(dlat_repr),
+        omega=float(omega),
     )
 
 
@@ -906,6 +921,7 @@ def create_stretched_latlon_grid(
         total_area=total_area,
         dlon=float(dlon),
         dlat=float(dlat_repr),
+        omega=float(omega),
     )
     return grid, wall_mask
 
