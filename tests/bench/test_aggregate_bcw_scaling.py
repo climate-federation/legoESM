@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+# Import the collector module by file path (scripts/ is not an importable pkg).
+import importlib.util
 import json
 import math
 from pathlib import Path
 
 import pytest
-
-# Import the collector module by file path (scripts/ is not an importable pkg).
-import importlib.util
 
 _AGG = Path(__file__).resolve().parents[2] / "scripts" / "bench" / "aggregate_bcw_scaling.py"
 _spec = importlib.util.spec_from_file_location("aggregate_bcw_scaling", _AGG)
