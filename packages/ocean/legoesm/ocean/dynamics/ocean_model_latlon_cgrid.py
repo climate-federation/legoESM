@@ -3511,21 +3511,35 @@ class LatLonCGridOceanModel:
                     "surface K_v/A_v on the tendencies): the post-mixing "
                     "TKE solve needs the phase-1 context from "
                     "compute_vertical_K_profiles.")
+            state.T.data.shape[-1]
+            dtype = state.T.data.dtype
+            K_v_cell = K_v_phys + jnp.asarray(self.config.K_v, dtype=dtype)
+            A_v_cell = A_v_phys + jnp.asarray(self.config.A_v, dtype=dtype)
             _phys_cfg = self.config.physics
             if (_phys_cfg is not None
                     and getattr(_phys_cfg.vertical_mixing, "iwm", None)
                     is not None
                     and _phys_cfg.vertical_mixing.iwm.enabled):
-                raise ValueError(
-                    "vertical_mixing.iwm.enabled=True cannot use the "
-                    "physics-provided K fast path (the zdfiwm contribution "
-                    "is added in compute_vertical_K_profiles only) — the "
-                    "physics function must not surface K_v/A_v on the "
-                    "tendencies when IWM is on.")
-            state.T.data.shape[-1]
-            dtype = state.T.data.dtype
-            K_v_cell = K_v_phys + jnp.asarray(self.config.K_v, dtype=dtype)
-            A_v_cell = A_v_phys + jnp.asarray(self.config.A_v, dtype=dtype)
+                # zdfiwm on the physics-provided-K FAST path (KPP pipeline
+                # surfaces K_v/A_v on the tendencies): add the SAME additive
+                # wave-driven contribution compute_vertical_K_profiles would
+                # add on the fallback path (NEMO zdfphy order: closure first,
+                # zdf_iwm adds onto avt/avm).  The non-wet-interface zeroing
+                # below (_wet_if_vmix) masks it at the seafloor exactly like
+                # the fallback path's tail guard.
+                from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+                    _iwm_K_profile,
+                )
+                from legoesm.ocean.eos import make_eos_fn as _mk_eos
+                _K_iwm = _iwm_K_profile(
+                    state, self.z_coord, self.config.physics,
+                    _phys_cfg.vertical_mixing.iwm,
+                    eos_fn=_mk_eos(eos=self.config.eos,
+                                   eos_linear=self.config.eos_linear),
+                    iwm_fields=self._iwm_forcing,
+                ).astype(dtype)
+                K_v_cell = K_v_cell + _K_iwm
+                A_v_cell = A_v_cell + _K_iwm
         else:
             # Fallback: recompute K profiles (expensive for KPP).
             physics_config = self.config.physics
