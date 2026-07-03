@@ -138,6 +138,23 @@ def test_coupled_blowup_writes_no_final_checkpoint_either(tmp_path):
     fake.save_checkpoint.assert_not_called()
 
 
+def test_coupled_callback_bypassed_under_mpi(tmp_path):
+    """Under mpi4jax the coupled callback writes rank-local pytrees with no
+    gather (same-file race); the final checkpoint must fall back to the
+    collective-safe atmosphere ``save_checkpoint`` instead."""
+    fake = _make_fake_driver(tmp_path)
+    fake._mpi_rank = 0                        # any real rank, root included
+    coupled_ckpt = MagicMock()
+    fake._checkpoint_callback = coupled_ckpt
+    ModelDriver._finalize_run(
+        fake, run_status="COMPLETED",
+        t_jit=0.0, t_start=0.0, n_steps_total=17280,
+        START_DAY=0.0, N_DAYS=10.0, checkpoint_interval=17280,
+    )
+    coupled_ckpt.assert_not_called()
+    fake.save_checkpoint.assert_called_once_with(17280, 10.0)
+
+
 # --- run_amip post-run verdict: both signals must be clean ------------------
 
 def test_resolve_run_exit_contract():

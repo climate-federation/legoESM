@@ -5897,7 +5897,16 @@ class ModelDriver:
             # coupled state (atm + ocean + surface + CO2) at the final day too,
             # or ``run_coupled --resume`` finds the atmosphere checkpoint but
             # no ``coupled_day_*.npz`` and silently resumes with a stale ocean.
-            _ckpt = getattr(self, "_checkpoint_callback", None) or self.save_checkpoint
+            # Single-rank only: the coupled tail (CoupledESMDriver.
+            # save_checkpoint) writes rank-LOCAL ocean/surface pytrees with no
+            # gather, so under mpi4jax every rank would race the same npz with
+            # its own slice.  Under MPI keep the atmosphere save, which IS
+            # collective-safe (gathers internally, root writes) — the
+            # coupled-MPI full-state final checkpoint is a pre-existing gap
+            # shared with the periodic path.
+            _ckpt = ((getattr(self, "_checkpoint_callback", None)
+                      if self._mpi_rank is None else None)
+                     or self.save_checkpoint)
             _ckpt(n_steps_total, START_DAY + N_DAYS)
 
         # Issue #275 fix A lifecycle: restore the halo backend captured
