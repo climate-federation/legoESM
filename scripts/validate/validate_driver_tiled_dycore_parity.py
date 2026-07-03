@@ -150,6 +150,14 @@ def main(argv=None) -> int:
         return 2
     tol = _parse_tols(args.tol)
 
+    # INFO logging so the lane log carries the driver's routing receipts
+    # (the 'Tiled dycore step ROUTED ...' / 'tiled dycore step ACTIVE'
+    # lines) — the parity table alone proves numbers, not that the tiled
+    # path actually built.
+    import logging
+    logging.basicConfig(level=logging.INFO,
+                        format="%(levelname)s %(name)s: %(message)s")
+
     if args.mode == "tiled":
         # Deliberate opt-in: this lane IS the device validation the
         # experimental gate (codex round-14 HIGH) demands.
