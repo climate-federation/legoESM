@@ -1607,6 +1607,18 @@ class ModelDriver:
         else:
             p_s = self.state.p_s.data
             lat = self._grid_lat
+            # Multi-controller SPMD: ``p_s`` is GLOBALLY sharded across
+            # processes, but the external-forcing consumers downstream
+            # (``get_ozone_at_time`` & co) are host/NumPy interpolators —
+            # ``np.asarray`` on a process-spanning array raises "spans
+            # non-addressable devices".  Gather to a process-local replicated
+            # array (collective; every call site runs on all processes —
+            # context build + per-segment forcing refresh).  No-op for
+            # fully-addressable arrays, so serial / single-GPU / mpi4jax
+            # lanes are byte-unchanged.  First hit by the 2-node Levante
+            # receipt run (#693): the CPU parity smokes run gray radiation
+            # with no external forcing and never reach this path.
+            p_s = self._gather_spmd_tree_to_host(p_s)
         return p_s, lat
 
     def _precompute_external_forcing(self, day, p_s, lat):
