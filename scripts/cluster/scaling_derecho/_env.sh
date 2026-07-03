@@ -76,3 +76,35 @@ export FI_MR_CACHE_MONITOR="${FI_MR_CACHE_MONITOR:-userfaultfd}"
 # Scratch tmp (mirrors the user's reference Casper job script).
 export TMPDIR="${TMPDIR:-$SCRATCH/temp}"
 mkdir -p "$TMPDIR"
+
+# --- Shared NCCL-over-Slingshot env for every jax.distributed (route-B) lane --
+# Sourced by gpu_multinode_scaling.pbs and routeb_sweep.pbs.  Call it inside the
+# subshell that launches an mpiexec route-B (NCCL multi-controller) job.  This is
+# a function DEFINITION only -- it sets nothing until called, so sourcing it in
+# CPU / route-A jobs is a no-op.  NCCL owns the GPU traffic, so GPU-aware
+# cray-mpich stays OFF (mixing GPU-aware MPICH + NCCL in one app risks deadlock --
+# CSCS/ALCF guidance); mpi4py here is bootstrap-only (rank discovery for the PALS
+# fallback in init_jax_distributed_with_fallback).  aws-ofi-nccl (build via
+# build_nccl_ofi.sh -> LEGOESM_NCCL_OFI_LIB) drives the Cassini NICs
+# ("Using network AWS Libfabric"); without it NCCL loudly falls back to TCP
+# sockets over hsn (2-3x slower comm).
+nccl_env() {
+    export MPICH_GPU_SUPPORT_ENABLED=0
+    export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-hsn}"
+    export NCCL_CROSS_NIC="${NCCL_CROSS_NIC:-1}"
+    # send/recv (= ppermute halo) throughput knob on multi-NIC nodes.
+    export NCCL_NCHANNELS_PER_NET_PEER="${NCCL_NCHANNELS_PER_NET_PEER:-4}"
+    export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"   # first run: check the net line
+    if [ -n "${LEGOESM_NCCL_OFI_LIB:-}" ]; then
+        export LD_LIBRARY_PATH="${LEGOESM_NCCL_OFI_LIB}:${LD_LIBRARY_PATH:-}"
+        export NCCL_NET="AWS Libfabric"
+        echo "NCCL transport: aws-ofi-nccl from $LEGOESM_NCCL_OFI_LIB"
+    else
+        # No plugin: TCP-sockets-over-hsn fallback. Loud, not silent.
+        export NCCL_IB_DISABLE=1
+        export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"  # socket-path hang workaround
+        echo "WARNING: LEGOESM_NCCL_OFI_LIB unset -> NCCL on TCP sockets"
+        echo "         over hsn (2-3x slower comm). Build it with"
+        echo "         scripts/cluster/scaling_derecho/build_nccl_ofi.sh."
+    fi
+}
