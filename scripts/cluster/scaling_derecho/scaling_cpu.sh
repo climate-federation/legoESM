@@ -12,12 +12,14 @@
 # of the CPU-vs-A100 comparison.  Runs as a BATCH job or interactively.  Pair
 # with scaling_gpu.sh (the GPU strong-scaling sweep).
 #
-# latlon and icosahedral are genuinely domain-decomposed, so we sweep the MPI
-# rank ladder 1,2,4,...,128 (one rank per core, true decomposition) AT EACH
-# resolution -> a real strong-scaling curve up to the full node.  Spectral has
-# no MPI path (rank-1 only); it fills the node with XLA threads as a single
-# point.  Driver: run_cpu_mpi_scaling.py (mpi4jax, PALS-safe).  Cubed-sphere is
-# handled by cube_scaling_cpu.sh (face-scatter).
+# latlon and icosahedral are genuinely domain-decomposed.  STRONG scaling sweeps
+# by FULL NODE -- ranks 128, 256, 512, 1024, 2048 = 1,2,4,8,16 nodes (one rank
+# per core, all cores of each node) -- so the CPU curve is a full-node-vs-full-
+# A100-node comparison; sub-node core points are NOT swept.  WEAK scaling keeps
+# the fine per-core ladder (1,2,4,...) so the constant-cells-per-rank efficiency
+# curve stays resolved.  Spectral has no MPI path (rank-1 only); it fills the
+# node with XLA threads as a single point.  Driver: run_cpu_mpi_scaling.py
+# (mpi4jax, PALS-safe).  Cubed-sphere is handled by cube_scaling_cpu.sh.
 #
 # Driven by submit_scaling.sh (one job per resolution).  Direct:
 #   GRID=latlon RESOLUTIONS=256 ./scaling_cpu.sh
@@ -78,19 +80,37 @@ _rank_ladder() {
     done
     echo "$out"
 }
+# Full-NODE ladder for STRONG scaling: rank counts _CORES_PER_NODE, 2x, 4x, ...
+# (= 1,2,4,8,16 nodes) capped at the granted _CORES.  On a 16-node alloc this is
+# "128 256 512 1024 2048"; on a single node it is just "128" (the one full-node
+# point).  Sub-node core counts are deliberately omitted -- the CPU strong curve
+# is full-node granularity to mirror the full-A100-node GPU comparison.
+_node_ladder() {
+    local total="$1" ppn="$2" out="" n="$2"
+    while [ "$n" -le "$total" ]; do
+        out="${out:+$out }$n"
+        n=$(( n * 2 ))
+    done
+    [ -z "$out" ] && out="$total"   # alloc smaller than one node: use what we have
+    echo "$out"
+}
 case "$GRID" in
   cubed-sphere)
     echo "ERROR: cubed-sphere uses cube_scaling_cpu.sh (6-face scatter)." >&2
     exit 2 ;;
   latlon)
-    RANKS="${RANKS:-$(_rank_ladder "$_CORES")}"   # rank ladder up to $_CORES
+    # strong: full-node ladder; weak: fine per-core ladder.  RANKS=... overrides
+    # strong; WEAK_RANKS=... overrides weak.
+    STRONG_RANKS="${RANKS:-$(_node_ladder "$_CORES" "$_CORES_PER_NODE")}"
+    WEAK_RANKS="${WEAK_RANKS:-$(_rank_ladder "$_CORES")}"
     EXTRA="--latlon-2d"                            # 2-D pencil: low halo at high ranks
     RESOLUTIONS="${RESOLUTIONS:-128 256}" ;;
   icosahedral)
-    RANKS="${RANKS:-$(_rank_ladder "$_CORES")}"   # MPAS partitions; powers of 2
+    STRONG_RANKS="${RANKS:-$(_node_ladder "$_CORES" "$_CORES_PER_NODE")}"  # MPAS partition, full nodes
+    WEAK_RANKS="${WEAK_RANKS:-$(_rank_ladder "$_CORES")}"
     RESOLUTIONS="${RESOLUTIONS:-6 7 8}" ;;
   spectral)
-    RANKS="1"                                      # no MPI -> single point...
+    STRONG_RANKS="1"; WEAK_RANKS="1"               # no MPI -> single point...
     THREADS="${THREADS_SPECTRAL:-$_CORES_PER_NODE}"  # ...fill ONE node with XLA threads (multi-node NA)
     RESOLUTIONS="${RESOLUTIONS:-85 170}" ;;
   *)
@@ -114,7 +134,7 @@ mkdir -p "$CAMP"
 
 _NODES_ALLOC=$(( _CORES / _CORES_PER_NODE ))
 [ "$_NODES_ALLOC" -lt 1 ] && _NODES_ALLOC=1
-echo "=== $GRID CPU scaling: modes=[$MODES] prec=[$PRECISIONS] ranks=[$RANKS] x ${THREADS} thr  res=[$RESOLUTIONS] ==="
+echo "=== $GRID CPU scaling: modes=[$MODES] prec=[$PRECISIONS] strong_ranks=[$STRONG_RANKS] weak_ranks=[$WEAK_RANKS] x ${THREADS} thr  res=[$RESOLUTIONS] ==="
 echo "    physics=$PHYSICS cores=$_CORES nodes~=$_NODES_ALLOC (ppn=$_CORES_PER_NODE)  outdir=$CAMP"
 
 rc_all=0
@@ -122,9 +142,10 @@ for PREC in $PRECISIONS; do
  for MODE in $MODES; do
   # weak: resolution is auto-derived per rank count (--resolution 0 -> constant
   # cells/rank), so there is NO resolution sweep.  strong: explicit fixed sizes.
-  if [ "$MODE" = weak ]; then RES_LIST="0"; else RES_LIST="$RESOLUTIONS"; fi
+  if [ "$MODE" = weak ]; then RES_LIST="0"; RANK_LIST="$WEAK_RANKS"
+  else RES_LIST="$RESOLUTIONS"; RANK_LIST="$STRONG_RANKS"; fi
   for R in $RES_LIST; do
-    for N in $RANKS; do
+    for N in $RANK_LIST; do
       if [ "$(( N * THREADS ))" -gt "$_CORES" ]; then
         echo "--- $GRID $MODE $PREC res=$R N=$N: needs $(( N * THREADS )) > $_CORES cores -- SKIP ---"
         continue
