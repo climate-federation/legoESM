@@ -934,7 +934,7 @@ def create_stretched_latlon_grid(
 
 def ensure_geometry(
     grid,
-    omega: float = constants.Omega,
+    omega: float | None = None,
 ) -> "LatLonCGridGeometry":
     """Convert a ``LatLonGrid`` to ``LatLonCGridGeometry`` if needed.
 
@@ -948,9 +948,15 @@ def ensure_geometry(
     Parameters
     ----------
     grid : LatLonGrid or LatLonCGridGeometry
-    omega : float
-        Rotation rate [rad/s].  Only used when converting from
-        ``LatLonGrid`` (which does not store omega).
+    omega : float, optional
+        Rotation-rate override [rad/s]; only consulted when converting
+        from ``LatLonGrid``.  Default ``None`` takes the GRID's stored
+        omega (falling back to ``constants.Omega`` for grid-like
+        objects without the field), so a non-rotating
+        ``create_latlon_grid(..., omega=0.0)`` grid stays non-rotating
+        through the conversion — the previous ``constants.Omega``
+        default silently re-rotated it (#521, codex 2026-07-03
+        round-4 HIGH).
 
     Returns
     -------
@@ -961,6 +967,8 @@ def ensure_geometry(
     # Duck-type check: if it has dx_u, assume it's geometry-like
     if hasattr(grid, "dx_u") and hasattr(grid, "fold"):
         return grid  # type: ignore[return-value]
+    if omega is None:
+        omega = float(getattr(grid, "omega", constants.Omega))
     # Convert LatLonGrid -> LatLonCGridGeometry. Pass the input grid's
     # actual 1-D lat/lon arrays so regional / channel grids preserve
     # their bounds — otherwise create_latlon_geometry would silently
