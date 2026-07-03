@@ -369,9 +369,12 @@ def main():
             lt = lt - _base
         _mname = f"legoESM-{_variant}"
         if era5_year_map is not None:
+            # finite-only: one NaN year (e.g. a mid-chain partial CSV) must
+            # not turn the whole bias/RMSE into NaN (codex LOW).
             _diffs = np.asarray([
                 v - era5_year_map[int(y)]
-                for y, v in zip(ly, lt) if int(y) in era5_year_map
+                for y, v in zip(ly, lt)
+                if int(y) in era5_year_map and np.isfinite(v)
             ])
             if _diffs.size:
                 metrics[_mname] = {
