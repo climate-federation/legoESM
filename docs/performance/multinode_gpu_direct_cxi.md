@@ -5,7 +5,9 @@
 in the CXI inject path, fixed by NCAR's default-PE bump to 9.0.0. `scaling_gpu.sh`
 now gates the multi-node transport on `CRAY_MPICH_VERSION` (≥ 9 → GPU-direct,
 < 9 → host-staged fallback); single node is GPU-direct on any version. An explicit
-`MPI4JAX_USE_CUDA_MPI` always overrides the gate.
+`MPI4JAX_USE_CUDA_MPI` always overrides the gate. A second transport (route-B,
+NCCL multi-controller) also works cross-node but is socket-bound today — see the
+Route-B section below; **route-A on the CXI fabric is the production pick.**
 
 ## Root cause
 
@@ -114,3 +116,35 @@ mpiexec --ppn 4 -n 8 bash -c 'export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-0
 ```
 
 Passes on cray-mpich ≥ 9.0.0; aborts (`cxil_map`) on 8.1.32.
+
+## Route-B (NCCL multi-controller) — alternative transport, socket-bound
+
+The `jax.distributed` multi-controller path (route-B, `--multicontroller`) is a
+second cross-node GPU transport that bypasses mpi4jax/CXI-inject entirely — band
+`ppermute`/`psum` go over NCCL. The Derecho canary
+(`scripts/cluster/scaling_derecho/mc_nccl_canary.sh`, 2 nodes × 4 A100) **passes
+all stages** (2026-07-02, job 6625434): init + `psum` + `ppermute` ring + both
+atm/ocean parity gates + both full-step benches. So route-B **works cross-node**.
+
+**BUT NCCL runs on `NET/Socket` (TCP), not the fabric.** `NCCL_DEBUG=INFO` shows
+`Using network Socket` — NCCL probes `NET/IB` (RoCE), can't use it, and falls back
+to TCP over the hsn NICs. There is **no `aws-ofi-nccl` plugin** in the environment
+(none in `module avail`, none under `/opt/cray/pe/lib64` or the apps trees), so
+NCCL never reaches libfabric/CXI. Root reason: the `jax[cuda12]` wheel bundles its
+own `nvidia-nccl-cu12` with **no OFI plugin**.
+
+Consequence: route-B timings are a **lower bound** — for the latency-bound halo,
+TCP sockets (~tens of µs/msg) are far slower than CXI RDMA (~1–2 µs). Reference
+canary number: atm 256×512×30, 8 GPU → ~4.0 ms/step steady (10 s one-time
+compile), socket-bound.
+
+**Decision:** **route-A (cray-mpich ≥ 9.0.0 GPU-direct) is the production
+multi-node GPU transport** — it is on the CXI fabric and faster cross-node than
+socket-NCCL. Route-B is a validated, correct fallback but stays socket-bound until
+the plugin lands.
+
+**Follow-up to put route-B on the fabric:** obtain `aws-ofi-nccl` built against the
+CXI libfabric **and matched to the wheel's bundled NCCL version** (CISL request or
+self-build) → put `libnccl-net*.so` on `LD_LIBRARY_PATH` (optionally
+`NCCL_NET_PLUGIN=ofi`) → re-run `mc_nccl_canary.sh` → confirm the transport line
+flips to `NET/OFI`. Only then is route-B expected to beat route-A.
