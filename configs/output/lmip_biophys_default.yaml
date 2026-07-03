@@ -1,0 +1,44 @@
+# LMIP biophysics-only default output configuration.
+#
+# CLM-style history tapes: each entry generates a separate NetCDF
+#   <output>.<name>.nc
+# with its own time axis at the tape's frequency.
+#
+# Fields (defined by the run_lmip_biophys driver):
+#   T_sfc            - end-of-step surface skin temperature [K]
+#   albedo           - end-of-step surface albedo [0..1]
+#   shflx / lhflx    - step-averaged sensible / latent heat flux [W/m^2, up]
+#   runoff           - step-averaged total runoff (surf + subsurf) [kg/m^2/s]
+#   precip           - step-averaged total precipitation forcing [kg/m^2/s]
+#   LAI              - prescribed monthly LAI at the step's doy [m^2/m^2]
+#   T_soil_top       - end-of-step top-soil-layer temperature [K]
+#   theta_soil_top   - end-of-step top-soil-layer volumetric water content
+#   snow_depth       - end-of-step snow water equivalent [kg/m^2]
+#
+# freq:    step | hourly | daily | monthly | annual
+# average: mean (arithmetic mean over interval) | inst (last value in interval)
+
+tapes:
+  # Primary monthly time-mean tape (fluxes + LAI + precip + runoff).
+  # Filename: <output>.monthly.nc
+  - name: monthly
+    freq: monthly
+    average: mean
+    vars:
+      - T_sfc
+      - shflx
+      - lhflx
+      - albedo
+      - LAI
+      - runoff
+      - precip
+
+  # Monthly INSTANTANEOUS soil state snapshot (end-of-month values).
+  # Filename: <output>.monthly_state.nc
+  - name: monthly_state
+    freq: monthly
+    average: inst
+    vars:
+      - T_soil_top
+      - theta_soil_top
+      - snow_depth
