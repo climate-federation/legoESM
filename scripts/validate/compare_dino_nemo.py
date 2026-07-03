@@ -83,14 +83,30 @@ def _align_nemo_lat(nemo_field, nemo_lat1d, lego_lat1d):
     return nemo_field[..., idx, :]
 
 
-def _dino_geometry():
-    """legoESM DINO grid geometry (lat, dz_ref) from the experiment module."""
+def _dino_geometry(nlev: int):
+    """legoESM DINO grid geometry (lat, dz_ref) from the experiment module.
+
+    ``nlev`` comes from the run's snapshots: 35 = the NEMO-exact
+    masked-zco ladder (r1_exact preset — jpk convention, analytic
+    t-depths), 36 = the legacy z* midpoint ladder.
+    """
     from legoesm.ocean.experiments.dino import (
         DINOConfig, create_dino_z_star, dino_lat_lon_grid,
+        dino_lat_lon_vertical,
     )
+    import dataclasses
+
     cfg = DINOConfig()
+    if nlev == cfg.n_levels - 1:
+        cfg = dataclasses.replace(cfg, vertical_coordinate="masked_zco")
+    elif nlev != cfg.n_levels:
+        raise SystemExit(
+            f"snapshots have {nlev} levels; expected {cfg.n_levels} "
+            f"(legacy z*) or {cfg.n_levels - 1} (masked_zco)")
     grid = dino_lat_lon_grid(cfg, n_lon=50)
-    z = create_dino_z_star(cfg)
+    z = (dino_lat_lon_vertical(grid, cfg)
+         if cfg.vertical_coordinate == "masked_zco"
+         else create_dino_z_star(cfg))
     lat = np.degrees(np.asarray(grid.lat))
     return cfg, grid, lat, np.asarray(z.dz_ref)
 
@@ -142,7 +158,8 @@ def _mld_003(T, S, depth_c):
 def main():
     args = _parse()
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    cfg, grid, lat, dz = _dino_geometry()
+    _probe = _load_lego(args.legoesm_dir, 0)
+    cfg, grid, lat, dz = _dino_geometry(int(_probe["T"].shape[-1]))
     depth_c = np.cumsum(dz) - 0.5 * dz
     nemo = _load_nemo(args.nemo_gridt, args.nemo_gridu)
     nemo_lat1d = nemo["lat2d"][:, 0]

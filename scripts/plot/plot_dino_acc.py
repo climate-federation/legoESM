@@ -53,7 +53,21 @@ def _grid_and_z(run_dir: Path):
     n_lon = int(meta["args"].get("n_lon", 50))
     cfg = DINOConfig()
     grid = dino_lat_lon_grid(cfg, n_lon=n_lon)
-    z = create_dino_z_star(cfg)
+    # Level count from the first snapshot: 35 = the NEMO-exact
+    # masked-zco ladder (r1_exact preset), 36 = legacy z*.
+    import dataclasses
+
+    from legoesm.ocean.experiments.dino import dino_lat_lon_vertical
+    snaps = _snaps(run_dir)
+    nlev = None
+    if snaps:
+        with np.load(snaps[0]) as f0:
+            nlev = int(f0["T"].shape[-1])
+    if nlev == cfg.n_levels - 1:
+        cfg = dataclasses.replace(cfg, vertical_coordinate="masked_zco")
+        z = dino_lat_lon_vertical(grid, cfg)
+    else:
+        z = create_dino_z_star(cfg)
     return cfg, grid, np.asarray(z.dz_ref)
 
 
