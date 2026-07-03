@@ -503,3 +503,121 @@ class TestMPASSeamWall:
             assert (mask[seam_strip & outside_band] < 0.5).any()
         if (seam_strip & inside_band).any():
             assert (mask[seam_strip & inside_band] > 0.5).any()
+
+
+# ---------------------------------------------------------------------
+# Level-1 exactness: seasonal forcing (usrdef_sbc ln_ann_cyc) + salt flux
+# ---------------------------------------------------------------------
+
+class TestSeasonalForcing:
+    def test_seasonal_cosine_phases(self):
+        from legoesm.ocean.experiments.dino import dino_seasonal_cosines
+        day = 86400.0
+        # c1 peaks at 21 June (day 171 of the 360-day year), c2 at 21 July.
+        c1, c2 = dino_seasonal_cosines(171.0 * 24.0 * 3600.0)
+        assert float(c1) == pytest.approx(1.0, abs=1e-12)
+        c1_w, _ = dino_seasonal_cosines((171.0 + 180.0) * day)
+        assert float(c1_w) == pytest.approx(-1.0, abs=1e-12)
+        _, c2_p = dino_seasonal_cosines(201.0 * day)
+        assert float(c2_p) == pytest.approx(1.0, abs=1e-12)
+        # periodic over the 360-day year
+        c1_a, _ = dino_seasonal_cosines(10.0 * day)
+        c1_b, _ = dino_seasonal_cosines((10.0 + 360.0) * day)
+        assert float(c1_a) == pytest.approx(float(c1_b), abs=1e-12)
+
+    def test_T_star_seasonal_asymmetry_and_mean_consistency(self):
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_T_star_annual_mean, dino_T_star_seasonal,
+            dino_seasonal_cosines,
+        )
+        cfg = DINOConfig()
+        day = 86400.0
+        lat = jnp.array([-70.0, 0.0, 70.0])
+        # boundary swings: north amp 3.0, south amp 0.5 (oracle asymmetry)
+        T_jul = dino_T_star_seasonal(lat, 201.0 * day, cfg)   # c2 = +1
+        T_jan = dino_T_star_seasonal(lat, 21.0 * day, cfg)    # c2 = -1
+        assert float(T_jul[2] - T_jan[2]) == pytest.approx(2 * 3.0, abs=1e-9)
+        assert float(T_jan[0] - T_jul[0]) == pytest.approx(2 * 0.5, abs=1e-9)
+        # equator: profile=1 -> T* = T_eq, season-independent
+        assert float(T_jul[1]) == pytest.approx(float(T_jan[1]), abs=1e-12)
+        # zero-phase (c2=0) equals the annual-mean form
+        # c2 = 0 at day 201 - 90 = 111
+        t0 = 111.0 * day
+        _, c2 = dino_seasonal_cosines(t0)
+        assert abs(float(c2)) < 1e-9
+        np.testing.assert_allclose(
+            np.asarray(dino_T_star_seasonal(lat, t0, cfg)),
+            np.asarray(dino_T_star_annual_mean(lat, cfg)), rtol=1e-9)
+
+    def test_Q_sr_seasonal_mean_matches_annual_quadrature(self):
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_Q_sr_annual_mean, dino_Q_sr_seasonal,
+        )
+        cfg = DINOConfig()
+        lat = jnp.linspace(-70.0, 70.0, 15)
+        # daily samples at t = d days reproduce the annual-mean fn's
+        # quadrature EXACTLY (same discrete phases)
+        days = np.arange(1, 361, dtype=np.float64)
+        acc = np.zeros(15)
+        for d in days:
+            acc += np.asarray(dino_Q_sr_seasonal(lat, d * 86400.0, cfg))
+        np.testing.assert_allclose(
+            acc / 360.0, np.asarray(dino_Q_sr_annual_mean(lat, cfg)),
+            rtol=1e-10)
+        # polar night: high south lat in southern winter (c1=+1) -> 0
+        q = dino_Q_sr_seasonal(jnp.array([-70.0]), 171.0 * 86400.0, cfg)
+        assert float(q[0]) == 0.0
+
+    def test_apply_seasonal_requires_time_and_changes_forcing(self):
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, create_dino_z_star, dino_lat_lon_grid,
+            dino_lat_lon_state, dino_lat_lon_surface_forcing_arrays,
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg = dataclasses.replace(DINOConfig(), forcing_annual_cycle=True)
+        z = create_dino_z_star(cfg)
+        g = dino_lat_lon_grid(cfg, n_lon=8)
+        st = dino_lat_lon_state(g, z, cfg)
+        frc = dino_lat_lon_surface_forcing_arrays(g, cfg)
+        with pytest.raises(ValueError, match="t_seconds"):
+            apply_dino_lat_lon_surface_forcing(st, frc, z, cfg, 2700.0)
+        day = 86400.0
+        s_jun = apply_dino_lat_lon_surface_forcing(
+            st, frc, z, cfg, 2700.0, t_seconds=171.0 * day)
+        s_dec = apply_dino_lat_lon_surface_forcing(
+            st, frc, z, cfg, 2700.0, t_seconds=351.0 * day)
+        assert float(jnp.max(jnp.abs(s_jun.T.data - s_dec.T.data))) > 0.0
+        # flag OFF: t_seconds ignored -> bit-identical to the legacy call
+        cfg0 = dataclasses.replace(cfg, forcing_annual_cycle=False)
+        a = apply_dino_lat_lon_surface_forcing(
+            st, frc, z, cfg0, 2700.0, t_seconds=171.0 * day)
+        b = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg0, 2700.0)
+        np.testing.assert_array_equal(np.asarray(a.T.data),
+                                      np.asarray(b.T.data))
+
+    def test_mpas_apply_rejects_seasonal(self):
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, apply_dino_mpas_surface_forcing,
+        )
+        cfg = dataclasses.replace(DINOConfig(), forcing_annual_cycle=True)
+        with pytest.raises(NotImplementedError, match="lat-lon"):
+            apply_dino_mpas_surface_forcing(None, None, None, cfg, 2700.0)
+
+    def test_salt_and_heat_flux_coefficients_match_nemo(self):
+        """A_S == |rn_srp| and A_theta == |rn_trp|; the top-layer salinity
+        tendency equals NEMO's sfx/(rho0*e3t) with sfx = srp*(SSS-S*)."""
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_top_layer_S_tendency,
+        )
+        cfg = DINOConfig()
+        assert cfg.A_S == pytest.approx(3.858e-3)     # -rn_srp
+        assert cfg.A_theta == pytest.approx(40.0)     # -rn_trp
+        S, S_star, dz0 = 35.4, 35.0, 10.0
+        ours = float(dino_top_layer_S_tendency(
+            jnp.asarray(S), jnp.asarray(S_star), dz0, cfg))
+        srp = -3.858e-3
+        nemo = srp * (S - S_star) / (cfg.rho_0 * dz0)
+        assert ours == pytest.approx(nemo, rel=1e-12)
+        assert ours < 0.0    # SSS above target -> freshening flux (sign walk)

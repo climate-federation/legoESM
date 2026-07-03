@@ -133,6 +133,18 @@ class DINOConfig:
     T_star_eq: float = 27.0        # equatorial target T [°C]
     T_star_n_mean: float = 5.0     # northern boundary target T (annual mean of B3)
     T_star_s_mean: float = -0.5    # southern boundary target T (annual mean of B4)
+    # Seasonal T* amplitudes (usrdef_sbc.F90 case 4: T*_s = mean_s - amp_s*c2,
+    # T*_n = mean_n + amp_n*c2 with c2 the 21-July-phased cosine).  The
+    # oracle hard-codes 0.5 / 3.0 (asymmetric: mild southern, strong
+    # northern seasonal swing).
+    T_star_seasonal_amp_s: float = 0.5
+    T_star_seasonal_amp_n: float = 3.0
+    # Run the analytic forcing with the oracle's annual cycle (ln_ann_cyc):
+    # T* and Q_sr recomputed per step from the 360-day-year phases.  False
+    # (historical default) keeps the precomputed annual-mean arrays
+    # bit-exact.  Requires the caller to thread t_seconds into
+    # apply_dino_*_surface_forcing (run_dino does).
+    forcing_annual_cycle: bool = False
     S_star_eq: float = 37.25       # equatorial target S [g/kg]
     S_star_n: float = 35.0         # northern boundary target S [g/kg]
     S_star_s: float = 35.1         # southern boundary target S [g/kg]
@@ -384,6 +396,7 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
         A_h_floor=0.0,
         A_h_eq_boost=1.0,
         tracer_advection="ppm_fct",
+        forcing_annual_cycle=True,
     )
     # Stabilizer floor off: the oracle background viscosity is avm0 exactly.
     base = _dc.replace(base, tke_momentum_visc_bg=base.A_v_bg)
@@ -688,6 +701,63 @@ def dino_Q_sr_annual_mean(lat_deg, cfg: DINOConfig | None = None,
     arg = np.pi / 180.0 * (lat[None, ...] - decl_b)
     q = np.maximum(cfg.Q_sr_amp * np.cos(arg), 0.0)
     return jnp.asarray(q.mean(axis=0))
+
+
+def dino_seasonal_cosines(t_seconds, cfg: DINOConfig | None = None):
+    """Seasonal phase cosines (usrdef_sbc.F90 compute_day_of_year).
+
+    360-day year; ``c1`` peaks at 21 June (solar declination phase),
+    ``c2`` at 21 July (T* phase, one month lag)::
+
+        c1 = cos( (t - 21 Jun) / (half year) * pi )
+        c2 = cos( (t - 21 Jul) / (half year) * pi )
+
+    ``t_seconds`` is the model time with NEMO's convention (kt*dt, first
+    step ends at t = dt).  Pure jnp; traced-time safe.
+    """
+    year_h = 360.0 * 24.0
+    zt = jnp.mod(jnp.asarray(t_seconds) / 3600.0, year_h)
+    half = year_h / 2.0
+    c1 = jnp.cos((zt - 171.0 * 24.0) / half * jnp.pi)   # 21 June  (day 171)
+    c2 = jnp.cos((zt - 201.0 * 24.0) / half * jnp.pi)   # 21 July  (day 201)
+    return c1, c2
+
+
+def dino_T_star_seasonal(lat_deg, t_seconds, cfg: DINOConfig | None = None):
+    """Seasonal T*(lat, t) — usrdef_sbc case 4 with ln_ann_cyc.
+
+    Boundary values swing with the 21-July cosine, ASYMMETRICALLY
+    (oracle: south -0.5*c2, north +3.0*c2); the meridional profile is
+    the same Munday cosine as the annual-mean form.
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+    lat = jnp.asarray(lat_deg)
+    _, c2 = dino_seasonal_cosines(t_seconds, cfg)
+    T_s = cfg.T_star_s_mean - cfg.T_star_seasonal_amp_s * c2
+    T_n = cfg.T_star_n_mean + cfg.T_star_seasonal_amp_n * c2
+    T_star_ns = jnp.where(lat <= 0.0, T_s, T_n)
+    profile = jnp.cos(jnp.pi * lat / cfg.L_phi_deg)
+    return T_star_ns + (cfg.T_star_eq - T_star_ns) * profile
+
+
+def dino_Q_sr_seasonal(lat_deg, t_seconds, cfg: DINOConfig | None = None):
+    """Seasonal Q_sr(lat, t) — usrdef_sbc eq B5 with the annual cycle:
+
+        Q_sr = max( Q0 * cos( pi*(lat - 23.5*c1)/180 ), 0 )
+
+    The declination follows the 21-June cosine; the polar-night clip is
+    the max(., 0).  Annual mean of this field == dino_Q_sr_annual_mean
+    (same phase convention; locked by test).
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+    lat = jnp.asarray(lat_deg)
+    c1, _ = dino_seasonal_cosines(t_seconds, cfg)
+    decl = cfg.solar_declination_amp_deg * c1
+    arg = jnp.pi / 180.0 * (lat - decl)
+    return jnp.maximum(cfg.Q_sr_amp * jnp.cos(arg), 0.0)
+
 
 
 # ---------------------------------------------------------------------
@@ -1662,6 +1732,7 @@ def dino_lat_lon_surface_forcing_arrays(grid, cfg: DINOConfig | None = None):
 
     shape_2d = (grid.n_lat, grid.n_lon)
     return {
+        "lat_deg_1d": lat_1d,   # for the seasonal (annual-cycle) recompute
         "T_star_2d": jnp.broadcast_to(T_star_1d[:, None], shape_2d),
         "S_star_2d": jnp.broadcast_to(S_star_1d[:, None], shape_2d),
         "Q_sr_2d":   jnp.broadcast_to(Q_sr_1d[:, None], shape_2d),
@@ -1671,7 +1742,8 @@ def dino_lat_lon_surface_forcing_arrays(grid, cfg: DINOConfig | None = None):
     }
 
 
-def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt):
+def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
+                                        t_seconds=None):
     """Apply DINO surface forcing on the lat-lon Mercator grid.
 
     Components (paper eqs 7-10):
@@ -1696,13 +1768,31 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt):
     dz_0 = float(z_coord.dz_ref[0])
     cell_mask = state.land_mask.data
 
+    # Oracle annual cycle (ln_ann_cyc): T* and Q_sr are TIME-DEPENDENT —
+    # recompute from the 360-day-year phases at this step's model time.
+    # Fail loud if the caller did not thread t_seconds (a silent fallback
+    # to the annual-mean arrays would fake the seasonal run).
+    T_star_2d = forcing["T_star_2d"]
+    Q_sr_2d = forcing["Q_sr_2d"]
+    if getattr(cfg, "forcing_annual_cycle", False):
+        if t_seconds is None:
+            raise ValueError(
+                "DINOConfig.forcing_annual_cycle=True requires t_seconds "
+                "to be passed to apply_dino_lat_lon_surface_forcing")
+        _lat1 = forcing["lat_deg_1d"]
+        _shape = T_star_2d.shape
+        T_star_2d = jnp.broadcast_to(
+            dino_T_star_seasonal(_lat1, t_seconds, cfg)[:, None], _shape)
+        Q_sr_2d = jnp.broadcast_to(
+            dino_Q_sr_seasonal(_lat1, t_seconds, cfg)[:, None], _shape)
+
     # T/S restoring via the legoESM module with implicit=True. Paper
     # eq 8 split = subtract_qsr=True (Q_sr provided as sw_down).
     tau_T = tau_from_flux_coefficient(cfg.A_theta, cfg.rho_0, cfg.c_p, dz_0)
     tau_S = tau_from_flux_coefficient(cfg.A_S, cfg.rho_0, 1.0, dz_0)
     restoring_cfg = RestoringConfig(
         tau_T=tau_T, tau_S=tau_S,
-        T_star_array=forcing["T_star_2d"],
+        T_star_array=T_star_2d,
         S_star_array=forcing["S_star_2d"],
         subtract_qsr=True,
         implicit=True,
@@ -1710,7 +1800,7 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt):
     rest_out = restoring_surface_forcing(
         state.T.data, state.S.data, _LatLonGridShim(state, cell_mask),
         restoring_cfg,
-        sw_down=forcing["Q_sr_2d"], dt=dt,
+        sw_down=Q_sr_2d, dt=dt,
         rho_0=cfg.rho_0, c_p=cfg.c_p, dz_0=dz_0,
     )
 
@@ -1721,7 +1811,7 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt):
     jacobian = jnp.ones_like(state.eta.data)
     sw_cfg = ShortwavePenetrationConfig(water_type=cfg.jerlov_water_type)
     dT_dt_sw = shortwave_penetration_tendency(
-        sw_down=forcing["Q_sr_2d"],
+        sw_down=Q_sr_2d,
         z_coord_dz_ref=z_coord.dz_ref,
         z_coord_z_half_ref=z_coord.z_half_ref,
         jacobian=jacobian, config=sw_cfg,
@@ -1791,12 +1881,19 @@ def dino_mpas_surface_forcing_arrays(mesh, cfg: DINOConfig | None = None):
     }
 
 
-def apply_dino_mpas_surface_forcing(state, forcing, z_coord, cfg, dt):
+def apply_dino_mpas_surface_forcing(state, forcing, z_coord, cfg, dt,
+                                    t_seconds=None):
     """Apply DINO surface forcing on the MPAS regional mesh.
 
     Same physics as lat-lon (paper eqs 7-10) with edge-projected wind
     and 1D cell-indexed T*, S*, Q_sr.
     """
+    if getattr(cfg, "forcing_annual_cycle", False):
+        raise NotImplementedError(
+            "DINOConfig.forcing_annual_cycle=True is wired on the lat-lon "
+            "DINO path only (seasonal T*/Q_sr recompute); the MPAS apply "
+            "still uses the annual-mean arrays — reject rather than "
+            "silently run the wrong forcing.")
     dz_0 = float(z_coord.dz_ref[0])
     cell_mask = state.land_mask.data                  # (nCells,)
 

@@ -435,7 +435,10 @@ def main():
 
     for k in range(n_steps_total):
         if forcing is not None:
-            state = apply_forcing(state, forcing, z, cfg, dt)
+            # NEMO time convention: step k (0-based) ends at t=(k+1)*dt —
+            # drives the seasonal forcing phases when forcing_annual_cycle.
+            state = apply_forcing(state, forcing, z, cfg, dt,
+                                  t_seconds=(k + 1) * dt)
 
         state = model.step(state, dt=dt)
 
