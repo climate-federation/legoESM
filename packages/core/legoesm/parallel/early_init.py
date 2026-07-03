@@ -57,6 +57,46 @@ def resolve_coordinator_port(default: int = _LEGACY_COORDINATOR_PORT) -> int:
     return default
 
 
+def resolve_local_device_ids() -> list[int]:
+    """Local CUDA device index this process should claim, from the launcher env.
+
+    Two supported launch conventions (#693):
+
+    1. **One GPU visible per task** (``CUDA_VISIBLE_DEVICES`` pinned to a
+       single device by the job script): local index 0 IS the pinned GPU.
+    2. **All node GPUs visible to every task** (plain ``srun`` with a
+       job-level ``--gres`` allocation, no ``--gpu-bind``): pick by the
+       launcher's node-local rank (``SLURM_LOCALID`` /
+       ``OMPI_COMM_WORLD_LOCAL_RANK`` / ``PALS_LOCAL_RANKID``).
+
+    Convention 2 is the one that works with >1 GPU task per node: SLURM's
+    ``--gpu-bind`` isolates each task's GPU in its own cgroup, which blocks
+    the CUDA IPC that NCCL needs between on-node peers — every 2-node x
+    3-GPU smoke died with ``Cuda failure 101 'invalid device ordinal'``
+    inside ``ncclGroupEnd``/``ncclCommInitRankConfig`` (jobs 26030299,
+    26030422). Un-isolated GPUs + local-rank binding is the standard
+    JAX-on-SLURM recipe and what ``jax.distributed``'s own SLURM cluster
+    auto-detection does.
+
+    Falls back to ``[0]`` when no local-rank variable exists (serial or
+    unknown launcher: claim the first visible device, the historical
+    behaviour).
+    """
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is not None:
+        n_visible = len([d for d in visible.split(",") if d.strip()])
+        if n_visible == 1:
+            return [0]  # convention 1: the pinned GPU is local index 0
+    local_rank = (
+        os.environ.get("SLURM_LOCALID")
+        or os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
+        or os.environ.get("PALS_LOCAL_RANKID")
+    )
+    if local_rank is not None:
+        return [int(local_rank)]
+    return [0]
+
+
 def init_jax_distributed_with_fallback() -> None:
     """``jax.distributed.initialize()`` with a PBS/PALS-safe fallback.
 
@@ -71,9 +111,10 @@ def init_jax_distributed_with_fallback() -> None:
       local-rank variable); any failure re-raises loudly.
     - PALS/PMI-only env (Derecho ``mpiexec``): the mpi4py bootstrap
       (``cluster_detection_method="mpi4py"``, the documented ALCF Cray-EX
-      recipe) with ``local_device_ids=[0]`` — the repo's PALS job shims pin
-      ``CUDA_VISIBLE_DEVICES`` to ONE device per rank, so local index 0 is
-      the pinned GPU (the #693 device-binding convention).  Plain-MPI
+      recipe) with :func:`resolve_local_device_ids` — the repo's PALS job
+      shims pin ``CUDA_VISIBLE_DEVICES`` to ONE device per rank, so this
+      resolves to local index 0 (the #693 device-binding convention).
+      Plain-MPI
       bootstrap only; mpi4jax is never armed here, so the
       jax.distributed-vs-mpi4jax mixed-stack hazard does not apply.
 
@@ -107,7 +148,7 @@ def init_jax_distributed_with_fallback() -> None:
     if pals_only and importlib.util.find_spec("mpi4py") is not None:
         jax.distributed.initialize(
             cluster_detection_method="mpi4py",
-            local_device_ids=[0],
+            local_device_ids=resolve_local_device_ids(),
         )
         _INITIALIZED = True
         return
@@ -166,18 +207,18 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
     if coordinator_port is None:
         coordinator_port = resolve_coordinator_port()
     coordinator = f"{hosts[0]}:{coordinator_port}"
-    # local_device_ids=[0]: the repo's multi-node launch standard pins 1 GPU per
-    # task via SLURM `--gpu-bind=single:1`, so every process sees exactly one GPU
-    # as local index 0. Without this, jax auto-assigns device index by process
-    # rank (0,1,2,...) and the >1-task-per-node ranks fail with "no supported
-    # devices found for platform CUDA" (issue #693, confirmed C48 6-GPU/2-node).
-    # ponytail: assumes 1 GPU/task; a launch that exposes all GPUs to each task
-    # would instead need local_device_ids=[SLURM_LOCALID].
+    # Device binding derived from the launcher env (resolve_local_device_ids):
+    # [0] when the job script pins one GPU per task via CUDA_VISIBLE_DEVICES,
+    # [SLURM_LOCALID] when all node GPUs are visible to every task. The former
+    # hardcoded [0] broke >1-GPU-per-node launches (issue #693: either "no
+    # supported devices found for platform CUDA" under rank-indexed
+    # auto-assignment, or NCCL 'invalid device ordinal' under --gpu-bind cgroup
+    # isolation — jobs 26030299/26030422).
     jax.distributed.initialize(
         coordinator_address=coordinator,
         num_processes=size,
         process_id=rank,
-        local_device_ids=[0],
+        local_device_ids=resolve_local_device_ids(),
     )
     _INITIALIZED = True
     return True

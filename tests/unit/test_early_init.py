@@ -122,6 +122,54 @@ def test_port_pbs_jobid_honored(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# resolve_local_device_ids: device binding from the launcher env (#693).
+# ---------------------------------------------------------------------------
+
+_DEVICE_ENV_VARS = (
+    "CUDA_VISIBLE_DEVICES", "SLURM_LOCALID",
+    "OMPI_COMM_WORLD_LOCAL_RANK", "PALS_LOCAL_RANKID",
+)
+
+
+def _clear_device_env(monkeypatch):
+    for var in _DEVICE_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_device_ids_single_visible_gpu_is_index_zero(monkeypatch):
+    # Convention 1 (one GPU pinned per task): local index 0 regardless of
+    # the node-local rank — CUDA_VISIBLE_DEVICES renumbers from 0.
+    _clear_device_env(monkeypatch)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+    monkeypatch.setenv("SLURM_LOCALID", "2")
+    assert early_init.resolve_local_device_ids() == [0]
+
+
+def test_device_ids_multi_visible_uses_local_rank(monkeypatch):
+    # Convention 2 (all node GPUs visible, plain srun, no --gpu-bind): pick
+    # by SLURM_LOCALID. The hardcoded [0] here was the 2-node x 3-GPU NCCL
+    # 'invalid device ordinal' failure (jobs 26030299/26030422).
+    _clear_device_env(monkeypatch)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
+    monkeypatch.setenv("SLURM_LOCALID", "2")
+    assert early_init.resolve_local_device_ids() == [2]
+
+
+def test_device_ids_no_visible_env_uses_local_rank(monkeypatch):
+    # No CUDA_VISIBLE_DEVICES at all (cgroup-only or bare node): trust the
+    # launcher local rank.
+    _clear_device_env(monkeypatch)
+    monkeypatch.setenv("OMPI_COMM_WORLD_LOCAL_RANK", "1")
+    assert early_init.resolve_local_device_ids() == [1]
+
+
+def test_device_ids_no_env_falls_back_to_zero(monkeypatch):
+    # Serial / unknown launcher: historical behaviour, first visible device.
+    _clear_device_env(monkeypatch)
+    assert early_init.resolve_local_device_ids() == [0]
+
+
+# ---------------------------------------------------------------------------
 # init_jax_distributed_with_fallback: transport chosen by ENVIRONMENT.
 # ---------------------------------------------------------------------------
 
@@ -172,6 +220,7 @@ def test_fallback_pals_only_uses_mpi4py_bootstrap(monkeypatch):
 
         pytest.skip("mpi4py not installed")
     _clear_launcher_env(monkeypatch)
+    _clear_device_env(monkeypatch)
     monkeypatch.setenv("PALS_RANKID", "0")
     fake = _FakeDistributed()
     _with_fake_jax(monkeypatch, fake)
