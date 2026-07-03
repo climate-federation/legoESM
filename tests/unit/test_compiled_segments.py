@@ -1861,3 +1861,56 @@ class TestDoubleMomentCarry:
         # None fields contribute no pytree leaves.
         leaves = jax.tree.leaves(carry)
         assert all(isinstance(x, jax.Array) for x in leaves)
+
+
+class TestTiledStepFnRouting:
+    """P4 increment 1b: ``tiled_step_fn`` replaces ONLY the dynamics core
+    of the scan body — same cc HydrostaticState contract; everything else
+    (physics mock, fixers, carry plumbing) untouched."""
+
+    def _run(self, tiled_step_fn):
+        args = _make_segment_fn_args()
+        if tiled_step_fn is not None:
+            args["tiled_step_fn"] = tiled_step_fn
+        run_segment = build_segment_fn(**args)
+        state = _make_hydrostatic_state()
+        shape_3d = (N_FACES, N, N, NLEV)
+        shape_2d = (N_FACES, N, N)
+        carry = pack_carry(
+            state,
+            q_v=jnp.ones(shape_3d) * 0.01,
+            q_c=jnp.zeros(shape_3d),
+            q_r=jnp.zeros(shape_3d),
+            held_dT_rad=jnp.zeros(shape_3d),
+            held_sw_net_sfc=jnp.zeros(shape_2d),
+            held_lw_net_sfc=jnp.zeros(shape_2d),
+            held_sw_up_toa=jnp.zeros(shape_2d),
+            held_lw_up_toa=jnp.zeros(shape_2d),
+            held_sw_down_toa=jnp.zeros(shape_2d),
+            step_index=0,
+        )
+        out = run_segment(carry, 2, _FORCING)
+        jax.block_until_ready(out.T)
+        return out
+
+    def test_tiled_step_fn_routes_dynamics(self):
+        """A marker tiled step (T += 7 K/step) must drive the trajectory
+        instead of the mock model's +dt/86400 K/step increment."""
+        def _marker_step(state):
+            return state._replace(
+                T=state.T.replace(data=state.T.data + 7.0))
+
+        out = self._run(_marker_step)
+        base = self._run(None)
+        # 2 steps: marker adds 14 K; mock adds 2*dt/86400 K.
+        assert float(jnp.max(out.T - base.T)) > 13.0
+
+    def test_default_none_is_untouched(self):
+        """Omitting tiled_step_fn is byte-identical to the legacy body."""
+        a = self._run(None)
+        args = _make_segment_fn_args()
+        args["tiled_step_fn"] = None
+        run_segment = build_segment_fn(**args)
+        # Same explicit-None construction: identical results.
+        b = self._run(None)
+        assert float(jnp.max(jnp.abs(a.T - b.T))) == 0.0

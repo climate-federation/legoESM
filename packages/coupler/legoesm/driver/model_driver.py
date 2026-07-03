@@ -2090,6 +2090,52 @@ class ModelDriver:
         except Exception as exc:  # pragma: no cover - provenance best-effort
             logger.warning(f"Could not record final state digest: {exc}")
 
+
+    def _maybe_build_tiled_step(self, dt):
+        """Build the sub-face-tiled dynamics step (P4 increment 1b) or None.
+
+        Returns ``make_tiled_cc_step`` over this driver's model + device
+        mesh when ``config.enable_tiled_dycore`` is on and the device
+        layout is sub-face tiled; ``None`` (the default) leaves the
+        compiled segment on ``_dynamics_model.step``.  The model copy
+        mirrors ``build_segment_fn``'s inner dynamics copy (fix_mass /
+        zero_mean_ps_tendency off — the segment applies the target-anchored
+        fixer OUTSIDE the dynamics), so the adapter's mass-fixer refusal
+        passes and the numerics match the untiled inner model exactly.
+        Flag-on with no tiled layout is a LOUD error, never a silent
+        untiled fallback.
+        """
+        if not getattr(self.config, "enable_tiled_dycore", False):
+            return None
+        dc = self._device_config
+        if (dc is None or getattr(dc, "mesh", None) is None
+                or tuple(getattr(dc, "tiling", (1, 1))) == (1, 1)):
+            raise ValueError(
+                "enable_tiled_dycore=True requires a sub-face-tiled device "
+                "layout (n_devices = 6*kt^2 > 6); got "
+                f"tiling={getattr(dc, 'tiling', None)!r}. Disable the flag "
+                "or launch with a tiled device count."
+            )
+        kt_i, kt_j = dc.tiling
+        if kt_i != kt_j:
+            raise ValueError(
+                f"enable_tiled_dycore: tiling must be square, got {dc.tiling}")
+        import copy as _copy
+        from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+            make_tiled_cc_step,
+        )
+        _m = _copy.copy(self.model)
+        _mc = getattr(_m, "config", None)
+        if _mc is not None and hasattr(_mc, "_replace"):
+            _kw = {}
+            if hasattr(_mc, "fix_mass"):
+                _kw["fix_mass"] = False
+            if hasattr(_mc, "zero_mean_ps_tendency"):
+                _kw["zero_mean_ps_tendency"] = False
+            if _kw:
+                _m.config = _mc._replace(**_kw)
+        return make_tiled_cc_step(_m, dc.mesh, kt=int(kt_i), dt=float(dt))
+
     def _bootstrap_runtime(self) -> None:
         """Bootstrap the full runtime: precision, backend, devices, MPI.
 
@@ -5869,6 +5915,7 @@ class ModelDriver:
 
         run_segment = build_segment_fn(
             model=self.model,
+            tiled_step_fn=self._maybe_build_tiled_step(DT),
             step_unified=step_unified,
             step_unified_no_rad=None,
             grid=self.grid,
@@ -6126,6 +6173,7 @@ class ModelDriver:
 
         run_segment = build_segment_fn(
             model=self.model,
+            tiled_step_fn=self._maybe_build_tiled_step(DT),
             step_unified=step_unified,
             step_unified_no_rad=step_unified_no_rad,
             grid=self.grid,
@@ -6642,6 +6690,7 @@ class ModelDriver:
                     )
                     run_segment = build_segment_fn(
                         model=self.model, step_unified=step_unified,
+                        tiled_step_fn=self._maybe_build_tiled_step(DT),
                         step_unified_no_rad=step_unified_no_rad,
                         grid=self.grid, sigma_full=sigma_full, dsigma=dsigma,
                         dt=DT, rad_update_steps=RAD_UPDATE_STEPS,
