@@ -1019,3 +1019,31 @@ class TestIsoneutralRediOnly:
             np.asarray(arr)[:, 0], 100.0 * np.cos(lat), rtol=1e-6)
         gm_off = GMRediConfig(kappa_Redi=100.0)
         assert _static_kappa_redi_override(gm_off, g) is None
+
+    def test_mpas_builder_rejects_isoneutral(self):
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_mpas_model_config,
+        )
+        cfg = dataclasses.replace(DINOConfig(),
+                                  lateral_tracer_mixing="isoneutral",
+                                  use_gm_redi=False)
+        with _pytest_raises_valueerror("MPAS DINO path"):
+            dino_mpas_model_config(None, cfg, physics=False)
+
+    def test_lat_scaling_rejects_2d_latitudes(self):
+        from types import SimpleNamespace
+
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            _static_kappa_redi_override,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        gm = GMRediConfig(kappa_Redi=100.0, kappa_redi_lat_scaling=True)
+        fake = SimpleNamespace(lat=np.zeros((4, 5)), n_lon=5)
+        with pytest.raises(ValueError, match="1-D latitudes"):
+            _static_kappa_redi_override(gm, fake)
+
+
+def _pytest_raises_valueerror(match):
+    return pytest.raises(ValueError, match=match)

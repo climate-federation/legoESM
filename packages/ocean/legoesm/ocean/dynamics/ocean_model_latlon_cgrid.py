@@ -683,7 +683,14 @@ def _static_kappa_redi_override(gm_cfg, grid):
     """
     if not bool(getattr(gm_cfg, "kappa_redi_lat_scaling", False)):
         return None
-    cos_lat = jnp.cos(jnp.asarray(grid.lat))              # (n_lat,)
+    lat = jnp.asarray(grid.lat)
+    if lat.ndim != 1:
+        raise ValueError(
+            "GMRediConfig.kappa_redi_lat_scaling requires a regular grid "
+            "with 1-D latitudes (Mercator dx = R·dλ·cos φ); this grid's "
+            f"lat is {lat.ndim}-D (tripole/curvilinear) — supply the "
+            "kappa field via the runtime override instead.")
+    cos_lat = jnp.cos(lat)                                # (n_lat,)
     n_lon = int(getattr(grid, "n_lon"))
     return (gm_cfg.kappa_Redi * cos_lat)[:, None] * jnp.ones(
         (1, n_lon), dtype=cos_lat.dtype)

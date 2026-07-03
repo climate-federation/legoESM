@@ -1697,6 +1697,13 @@ def dino_mpas_model_config(
             "is not available on the MPAS DINO path (MPAS keeps its own "
             "column handling). The r1_exact preset is lat-lon only — "
             "override vertical_coordinate='zstar' to run on MPAS.")
+    if cfg.lateral_tracer_mixing != "geopotential":
+        raise ValueError(
+            f"DINOConfig.lateral_tracer_mixing="
+            f"{cfg.lateral_tracer_mixing!r} is not available on the MPAS "
+            "DINO path (the Redi-only iso-neutral recipe is wired for the "
+            "lat-lon C-grid). Override lateral_tracer_mixing="
+            "'geopotential' to run on MPAS.")
 
     # Representative cell size from mean cell area (m).
     cell_dx_m = float(jnp.sqrt(jnp.mean(mesh.areaCell)))
