@@ -1122,10 +1122,10 @@ def test_config_yaml_loads_all_keys_are_valid_dests(cfg_file):
 
 
 def test_amip_sota_config_builds_valid_experiment_config():
-    """config/amip/amip_sota.yaml (SOTA: multilayer land + aerosol_ccn +
-    conv-cloud-off) builds a valid ExperimentConfig — the SOTA knobs are consistent
-    (e.g. multilayer land waives the slab-bucket requirement for stomata; aerosol_ccn
-    has morrison + external aerosol)."""
+    """config/amip/amip_sota.yaml (SOTA: multilayer land + conv-cloud-off)
+    builds a valid ExperimentConfig — the SOTA knobs are consistent (e.g.
+    multilayer land waives the slab-bucket requirement for stomata; morrison +
+    external aerosol stay on as the aerosol_ccn prereqs)."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     cfg_file = _repo_root() / "config" / "amip" / "amip_sota.yaml"
     parser = build_arg_parser()
@@ -1136,9 +1136,13 @@ def test_amip_sota_config_builds_valid_experiment_config():
     cfg = build_config_from_args(args)
     cfg.validate_strict()  # raises if the SOTA combo is inconsistent
     assert cfg.use_multilayer_land is True
-    # --aerosol-ccn threads into ExperimentConfig.nc_from_aerosol (specified-Nc from
-    # the Andreae AOT->CCN inversion), enabling the 1st+2nd aerosol indirect effect.
-    assert cfg.nc_from_aerosol is True
+    # aerosol_ccn is DISABLED in the shipped SOTA config (#745): as wired the
+    # indirect effect is ~15x too strong (-24 W/m^2 vs IPCC -1 to -1.7); it
+    # returns after the Twomey/lifetime split + autoconv calibration (#730).
+    # The prereqs (morrison + external aerosol forcing) stay on.
+    assert cfg.nc_from_aerosol is False
+    assert cfg.microphysics == "morrison"
+    assert cfg.aerosol_forcing == "external"
     assert cfg.convective_cloud is False
     assert cfg.convection == "sbm"
 
