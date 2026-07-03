@@ -621,3 +621,126 @@ class TestSeasonalForcing:
         nemo = srp * (S - S_star) / (cfg.rho_0 * dz0)
         assert ours == pytest.approx(nemo, rel=1e-12)
         assert ours < 0.0    # SSS above target -> freshening flux (sign walk)
+
+
+class TestWindThroughStep:
+    def test_taum_boost_field(self):
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid, dino_lat_lon_surface_forcing_arrays,
+        )
+        cfg = DINOConfig()
+        g = dino_lat_lon_grid(cfg, n_lon=8)
+        frc = dino_lat_lon_surface_forcing_arrays(g, cfg)
+        tau = np.asarray(frc["tau_u_cell_2d"][:, 0])
+        taum = np.asarray(frc["taum_2d"][:, 0])
+        west = tau > 0.0
+        np.testing.assert_allclose(taum[west], 1.3 * np.abs(tau[west]),
+                                   rtol=1e-12)
+        np.testing.assert_allclose(taum[~west], np.abs(tau[~west]),
+                                   rtol=1e-12)
+        assert west.any() and (~west).any()
+
+    def test_tke_taum_override_changes_K(self):
+        from legoesm.ocean.physics.vertical_mixing.tke import (
+            tke_vertical_mixing,
+        )
+        from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+        nlev = 10
+        shape = (4, 3, nlev)
+        rng = np.random.default_rng(0)
+        T = jnp.asarray(20.0 - 15.0 * np.linspace(0, 1, nlev)[None, None, :]
+                        * np.ones(shape))
+        S = jnp.full(shape, 35.0)
+        u = jnp.zeros(shape); v = jnp.zeros(shape)
+        rho = jnp.asarray(1026.0 - 2.0 * np.linspace(0, 1, nlev))[None, None, :] * jnp.ones(shape)
+        dz_half = jnp.full(shape[:-1] + (nlev - 1,), 50.0)
+        tau = jnp.full(shape[:-1], 0.2)
+        out_plain = tke_vertical_mixing(
+            u, v, T, S, rho, dz_half, tke_old=None,
+            tau_x_surface=tau, tau_y_surface=jnp.zeros_like(tau),
+            dt=86400.0, cfg=TKEConfig(), rho_0=1026.0, g=9.80665,
+            n_iterations=2)
+        out_boost = tke_vertical_mixing(
+            u, v, T, S, rho, dz_half, tke_old=None,
+            tau_x_surface=tau, tau_y_surface=jnp.zeros_like(tau),
+            taum_surface=1.3 * tau,
+            dt=86400.0, cfg=TKEConfig(), rho_0=1026.0, g=9.80665,
+            n_iterations=2)
+        dK = float(jnp.max(jnp.abs(out_boost.K_H - out_plain.K_H)))
+        assert dK > 0.0    # boosted taum must strengthen the TKE input
+
+    def test_apply_skips_wind_when_through_step(self):
+        import dataclasses
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, create_dino_z_star, dino_lat_lon_grid,
+            dino_lat_lon_state, dino_lat_lon_surface_forcing_arrays,
+            apply_dino_lat_lon_surface_forcing,
+        )
+        cfg_off = DINOConfig()
+        cfg_on = dataclasses.replace(cfg_off, wind_through_step=True)
+        z = create_dino_z_star(cfg_off)
+        g = dino_lat_lon_grid(cfg_off, n_lon=8)
+        st = dino_lat_lon_state(g, z, cfg_off)
+        frc = dino_lat_lon_surface_forcing_arrays(g, cfg_off)
+        s_off = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg_off, 2700.0)
+        s_on = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg_on, 2700.0)
+        # flag ON: the applicator leaves u untouched (the step owns wind)
+        np.testing.assert_array_equal(np.asarray(s_on.u.data),
+                                      np.asarray(st.u.data))
+        assert float(jnp.max(jnp.abs(s_off.u.data - st.u.data))) > 0.0
+
+    def test_step_forcing_carries_wind_and_taum(self):
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid, dino_lat_lon_surface_forcing_arrays,
+            dino_step_surface_forcing,
+        )
+        cfg = DINOConfig()
+        g = dino_lat_lon_grid(cfg, n_lon=8)
+        frc = dino_lat_lon_surface_forcing_arrays(g, cfg)
+        sf = dino_step_surface_forcing(frc)
+        # atmospheric convention: the core applies -tau (ocean reaction)
+        np.testing.assert_array_equal(np.asarray(sf.tau_x),
+                                      -np.asarray(frc["tau_u_cell_2d"]))
+        np.testing.assert_array_equal(np.asarray(sf.taum),
+                                      np.asarray(frc["taum_2d"]))
+        assert sf.q_net is None and sf.sw_down is None
+
+    def test_model_step_applies_wind_from_rest(self):
+        import dataclasses
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, create_dino_z_star, dino_lat_lon_grid,
+            dino_lat_lon_state, dino_lat_lon_model_config,
+            dino_lat_lon_surface_forcing_arrays, dino_step_surface_forcing,
+        )
+        cfg = dataclasses.replace(DINOConfig(), wind_through_step=True)
+        z = create_dino_z_star(cfg)
+        g = dino_lat_lon_grid(cfg, n_lon=10)
+        st = dino_lat_lon_state(g, z, cfg)
+        model = LatLonCGridOceanModel(
+            g, z, dino_lat_lon_model_config(g, cfg, physics=True)[0])
+        sf = dino_step_surface_forcing(
+            dino_lat_lon_surface_forcing_arrays(g, cfg))
+        s1 = model.step(st, dt=cfg.dt, surface_forcing=sf)
+        u_top = np.asarray(s1.u.data[..., 0])
+        assert np.isfinite(u_top).all()
+        # westerlies (tau>0 around -45 lat) accelerate +u at the top layer
+        lat = np.degrees(np.asarray(g.lat))
+        j = int(np.argmin(np.abs(lat - (-45.0))))
+        assert u_top[j, 1:-1].mean() > 0.0
+
+
+def test_S_star_boundary_targets_match_oracle():
+    """codex catch (dino-s12 #1): rn_sstar_s=35.0, rn_sstar_n=35.1 — the
+    DINOConfig defaults had them SWAPPED.  Pin the boundary values (the
+    cos-profile term vanishes at |phi|=70 where cos(2*pi*70/140)=-1 makes
+    the profile factor 0; the Gaussian dip is negligible there)."""
+    from legoesm.ocean.experiments.dino import DINOConfig, dino_S_star
+    cfg = DINOConfig()
+    assert cfg.S_star_s == 35.0 and cfg.S_star_n == 35.1
+    s_s = float(dino_S_star(jnp.asarray(-70.0), cfg))
+    s_n = float(dino_S_star(jnp.asarray(70.0), cfg))
+    assert s_s == pytest.approx(35.0, abs=1e-6)
+    assert s_n == pytest.approx(35.1, abs=1e-6)

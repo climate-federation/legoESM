@@ -390,6 +390,9 @@ def main():
         forcing = (None if args.no_forcing
                    else dino_lat_lon_surface_forcing_arrays(grid, cfg))
         apply_forcing = apply_dino_lat_lon_surface_forcing
+        from legoesm.ocean.experiments.dino import dino_step_surface_forcing
+        sf_step = (dino_step_surface_forcing(forcing)
+                   if getattr(cfg, "wind_through_step", False) else None)
         grid_desc = f"{grid.n_lat}x{grid.n_lon} lat-lon Mercator"
     else:  # mpas
         grid = create_regional_voronoi_mesh(
@@ -406,6 +409,10 @@ def main():
         forcing = (None if args.no_forcing
                    else dino_mpas_surface_forcing_arrays(grid, cfg))
         apply_forcing = apply_dino_mpas_surface_forcing
+        if getattr(cfg, "wind_through_step", False):
+            raise SystemExit(
+                "wind_through_step is wired on the lat-lon DINO path only")
+        sf_step = None
         grid_desc = f"{grid.nCells} cells MPAS regional Voronoi"
 
     # Output directory
@@ -440,7 +447,10 @@ def main():
             state = apply_forcing(state, forcing, z, cfg, dt,
                                   t_seconds=(k + 1) * dt)
 
-        state = model.step(state, dt=dt)
+        state = model.step(
+            state, dt=dt,
+            surface_forcing=(sf_step if getattr(cfg, "wind_through_step",
+                                                False) else None))
 
         is_last = (k == n_steps_total - 1)
         if (k + 1) % snapshot_every_steps == 0 or is_last:

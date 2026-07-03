@@ -182,6 +182,12 @@ class OceanSurfaceForcing(NamedTuple):
     S_restore_target: object = None    # jnp.ndarray | None  [PSU]
     q_solar: object = None             # jnp.ndarray | None  [W/m²] (penetrative)
     S_restore_piston: object = None    # jnp.ndarray | None  [m/s] (per-cell SSS piston)
+    taum: object = None                # jnp.ndarray | None  [Pa] surface stress
+                                       # MODULUS override for the TKE surface
+                                       # input (NEMO taum channel — e.g. the
+                                       # DINO usrdef x1.3 westerly boost that
+                                       # feeds TKE but NOT the momentum
+                                       # stress).  None -> |(tau_x, tau_y)|.
 
 
 class OceanConfig(NamedTuple):

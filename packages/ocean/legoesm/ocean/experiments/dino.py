@@ -139,15 +139,25 @@ class DINOConfig:
     # northern seasonal swing).
     T_star_seasonal_amp_s: float = 0.5
     T_star_seasonal_amp_n: float = 3.0
+    # usrdef_sbc taum westerly boost ("Boost in westerlies for TKE"):
+    # taum = |utau| * 1.3 where utau > 0 — TKE surface input only.
+    taum_westerly_boost: float = 1.3
     # Run the analytic forcing with the oracle's annual cycle (ln_ann_cyc):
     # T* and Q_sr recomputed per step from the 360-day-year phases.  False
     # (historical default) keeps the precomputed annual-mean arrays
     # bit-exact.  Requires the caller to thread t_seconds into
     # apply_dino_*_surface_forcing (run_dino does).
     forcing_annual_cycle: bool = False
+    # Route the wind stress THROUGH model.step(surface_forcing=...) (the
+    # dynamics-core external-tau block) instead of the post-step Euler
+    # kick, so the TKE closure receives the surface stress (NEMO's taum
+    # channel, including the usrdef x1.3 westerly boost that feeds TKE
+    # but NOT the momentum).  False (default) keeps the historical
+    # post-step wind application bit-exact.
+    wind_through_step: bool = False
     S_star_eq: float = 37.25       # equatorial target S [g/kg]
-    S_star_n: float = 35.0         # northern boundary target S [g/kg]
-    S_star_s: float = 35.1         # southern boundary target S [g/kg]
+    S_star_n: float = 35.1         # northern boundary target S [g/kg]
+    S_star_s: float = 35.0         # southern boundary target S [g/kg]
     S_star_eq_dip_amp: float = 1.25       # equatorial Gaussian dip amplitude (eq B2)
     S_star_eq_dip_sigma_deg: float = 7.5  # equatorial Gaussian dip width [deg]
 
@@ -378,11 +388,15 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
       existing block to the oracle FCT2/2; the exact 2nd/2nd variant is a
       later audit item)
 
+    The preset also enables the oracle's seasonal forcing
+    (``forcing_annual_cycle=True`` — ln_ann_cyc) and routes the wind
+    through model.step (``wind_through_step=True`` — the TKE closure
+    receives NEMO's taum incl. the x1.3 westerly boost).
+
     Fields that REMAIN approximate after this preset (later ladder steps,
-    tracked in the audit doc): seasonal forcing cycle (annual-mean here),
-    FCT2/2, hpg_sco jacobian (adcroft here), centred split-explicit
-    barotropic (implicit_cn here), iso-neutral+MSC lateral diffusion, and
-    the MLF leapfrog integrator.
+    tracked in the audit doc): FCT2/2, hpg_sco jacobian (adcroft here),
+    centred split-explicit barotropic (implicit_cn here), iso-neutral+MSC
+    lateral diffusion, and the MLF leapfrog integrator.
 
     ``**overrides`` are applied on top (dataclasses.replace semantics).
     """
@@ -397,6 +411,7 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
         A_h_eq_boost=1.0,
         tracer_advection="ppm_fct",
         forcing_annual_cycle=True,
+        wind_through_step=True,
     )
     # Stabilizer floor off: the oracle background viscosity is avm0 exactly.
     base = _dc.replace(base, tke_momentum_visc_bg=base.A_v_bg)
@@ -1731,8 +1746,15 @@ def dino_lat_lon_surface_forcing_arrays(grid, cfg: DINOConfig | None = None):
     tau_u_1d = dino_wind_stress(lat_1d, cfg)     # (n_lat,)
 
     shape_2d = (grid.n_lat, grid.n_lon)
+    tau_u_cell_1d = dino_wind_stress(lat_1d, cfg)      # τ at CELL lats
+    # NEMO taum (usrdef_sbc:222-223): |τ|, boosted x1.3 in the westerlies
+    # (utau > 0) — the TKE surface input only, never the momentum stress.
+    taum_1d = jnp.abs(tau_u_cell_1d) * jnp.where(
+        tau_u_cell_1d > 0.0, cfg.taum_westerly_boost, 1.0)
     return {
         "lat_deg_1d": lat_1d,   # for the seasonal (annual-cycle) recompute
+        "tau_u_cell_2d": jnp.broadcast_to(tau_u_cell_1d[:, None], shape_2d),
+        "taum_2d": jnp.broadcast_to(taum_1d[:, None], shape_2d),
         "T_star_2d": jnp.broadcast_to(T_star_1d[:, None], shape_2d),
         "S_star_2d": jnp.broadcast_to(S_star_1d[:, None], shape_2d),
         "Q_sr_2d":   jnp.broadcast_to(Q_sr_1d[:, None], shape_2d),
@@ -1740,6 +1762,29 @@ def dino_lat_lon_surface_forcing_arrays(grid, cfg: DINOConfig | None = None):
             tau_u_1d[:, None], (grid.n_lat, grid.n_lon + 1)
         ),
     }
+
+
+def dino_step_surface_forcing(forcing):
+    """OceanSurfaceForcing for model.step() when ``wind_through_step``.
+
+    Carries ONLY the wind: ``tau_x`` (cell-centred zonal stress; the PE
+    external-tau block applies the ocean reaction and the top-layer
+    deposit) and ``taum`` (the NEMO stress-modulus channel with the
+    usrdef x1.3 westerly boost, consumed by the TKE surface input).
+    Heat/salt/SW stay on the analytic post-step applicator.
+    """
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    # SIGN CONVENTION: the PE external-tau block treats (tau_x, tau_y) in
+    # the ATMOSPHERIC convention and applies the OCEAN REACTION -tau (see
+    # compute_omip2_surface_forcing).  DINO's analytic tau is the stress ON
+    # the ocean (+0.2 Pa accelerates the ocean eastward), so negate here;
+    # taum is a modulus (sign-free).
+    return OceanSurfaceForcing(
+        tau_x=-forcing["tau_u_cell_2d"],
+        tau_y=jnp.zeros_like(forcing["tau_u_cell_2d"]),
+        taum=forcing["taum_2d"],
+    )
 
 
 def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
@@ -1825,12 +1870,17 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
     new_T = state.T.data + dt * (rest_out.dT_dt + dT_dt_sw) * mask3
     new_S = state.S.data + dt * rest_out.dS_dt * mask3
 
-    # u tendency at u-faces (eq 7)
-    u_top = state.u.data[..., 0]
-    du_dt_top = dino_top_layer_u_tendency(forcing["tau_u_face"], dz_0, cfg)
-    u_face_mask = state.u_mask.data
-    new_u_top = u_top + dt * du_dt_top * u_face_mask
-    new_u = state.u.data.at[..., 0].set(new_u_top)
+    # u tendency at u-faces (eq 7) — SKIPPED when the wind goes through
+    # model.step(surface_forcing=...) (wind_through_step: the dynamics-core
+    # external-tau block owns it; applying here too would double the wind).
+    if getattr(cfg, "wind_through_step", False):
+        new_u = state.u.data
+    else:
+        u_top = state.u.data[..., 0]
+        du_dt_top = dino_top_layer_u_tendency(forcing["tau_u_face"], dz_0, cfg)
+        u_face_mask = state.u_mask.data
+        new_u_top = u_top + dt * du_dt_top * u_face_mask
+        new_u = state.u.data.at[..., 0].set(new_u_top)
 
     return state._replace(
         T=Field(data=new_T, name=state.T.name, dims=state.T.dims, units=state.T.units),
