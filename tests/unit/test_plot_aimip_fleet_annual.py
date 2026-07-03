@@ -68,3 +68,19 @@ def test_subtract_baseline_empty_window_falls_back_to_full_mean():
     )
     anom = mod._subtract_baseline(da, 1979, 2014)
     assert float(anom.mean()) == pytest.approx(0.0, abs=1e-9)  # full-series mean removed
+
+
+def test_legoesm_variant_from_stem():
+    """Overlay CSVs are labelled by the variant parsed from the filename;
+    a non-conforming stem falls back to itself (still plotted)."""
+    mod = _load_mod()
+    assert mod._legoesm_variant_from_stem(
+        "legoesm_classical_amip_annual") == "classical"
+    assert mod._legoesm_variant_from_stem(
+        "legoesm_column_nn_amip_r0_annual") == "column_nn"
+    assert mod._legoesm_variant_from_stem(
+        "legoesm_sfno_physics_amip_annual") == "sfno_physics"
+    assert mod._legoesm_variant_from_stem("mystery_run") == "mystery_run"
+    # every known variant has a color
+    for v in ("classical", "column_nn", "sfno_physics"):
+        assert v in mod.LEGOESM_VARIANT_COLORS

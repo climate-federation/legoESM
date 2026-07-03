@@ -1,5 +1,6 @@
 base: config/aimip/aimip_era5.yaml
 cfg_overrides:
+  aimip_surface_forcing: true   # prescribed SST/sea-ice/insolation input features (IAV pathway)
   aimip_n_epochs: 12
   loss:
     residual_normalize: true
