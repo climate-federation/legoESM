@@ -1163,6 +1163,14 @@ class LatLonCGridGeometry(NamedTuple):
     dlon: float         # scalar longitude spacing (0.0 sentinel for tripole)
     dlat: float         # scalar latitude spacing (0.0 sentinel for tripole)
 
+    # Planetary rotation rate [rad/s] the f_T/f_u/f_v fields were built
+    # from — mirrors LatLonGrid.omega (#521) so operators that rebuild
+    # f at other staggers (e.g. QG-Leith vertex absolute vorticity) see
+    # the true rotation on the operational geometry path too.  APPENDED
+    # at the NamedTuple end with a default; band slicers use _replace
+    # and inherit it.
+    omega: float = constants.Omega
+
     # ------------------------------------------------------------------
     # GridProtocol properties
     # ------------------------------------------------------------------
@@ -1530,6 +1538,7 @@ def create_latlon_geometry(
         lon=_c(lon_1d),
         dlon=float(dlon),
         dlat=float(dlat),
+        omega=float(omega),
     )
 
 

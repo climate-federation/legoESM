@@ -142,3 +142,16 @@ class TestGridOmega:
         geom_o = ensure_geometry(create_latlon_grid(8),
                                  omega=constants.Omega)
         assert float(jnp.max(jnp.abs(geom_o.f_T))) > 0.0
+
+    def test_geometry_carries_omega_for_operators(self):
+        """The operational path (ensure_geometry -> LatLonCGridGeometry)
+        must expose the same omega scalar so stagger-rebuilding operators
+        (QG-Leith vertex absolute vorticity) see the true rotation
+        (codex 2026-07-03 round-6)."""
+        from legoesm.grids.latlon import ensure_geometry
+
+        geom0 = ensure_geometry(create_latlon_grid(8, omega=0.0))
+        assert geom0.omega == 0.0
+        geom_e = ensure_geometry(create_latlon_grid(8))
+        from legoesm import constants
+        assert geom_e.omega == constants.Omega
