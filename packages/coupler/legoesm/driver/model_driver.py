@@ -5725,7 +5725,16 @@ class ModelDriver:
             self.save_results(run_status, t_jit, total_wall)
             logger.info(self.diagnostics.print_summary())
 
-        if checkpoint_interval > 0:
+        # Only a CLEAN run yields a restartable final checkpoint.  A BLOWUP
+        # leaves the state finite-but-unphysical, and labelling that garbage
+        # with the TARGET day (``START_DAY + N_DAYS``) let a SLURM ``afterok``
+        # chain restart from it and skip straight to "done" — the 3-yr-chain
+        # false-completion (blew up at day 515, wrote ``checkpoint_day_1095``).
+        # Mirror the spectral / MPAS paths, which already gate their final
+        # checkpoint on ``run_status == "COMPLETED"``.  The last PERIODIC
+        # checkpoint (written at the actual elapsed day) remains the restart
+        # point for a blown-up run.
+        if checkpoint_interval > 0 and run_status == "COMPLETED":
             self.save_checkpoint(n_steps_total, START_DAY + N_DAYS)
 
         # Issue #275 fix A lifecycle: restore the halo backend captured
