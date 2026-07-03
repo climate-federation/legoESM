@@ -29,9 +29,11 @@ if [ -z "$OUT" ]; then
 fi
 shift || true
 # Resolutions: CLI args win, else $RES_LIST, else the default 3.  Passed to PBS
-# comma-joined so it survives `qsub -v` (the PBS translates commas back to spaces).
+# COLON-joined -- a comma is PBS's `-v` list delimiter, so a comma-joined value
+# would be misparsed as extra variable names ("cannot send environment").  The
+# PBS scripts translate ':' back to spaces.
 RES_LIST="${*:-${RES_LIST:-128 256 512}}"
-RES_CSV="$(echo "$RES_LIST" | tr ' ' ',')"
+RES_JOINED="$(echo "$RES_LIST" | tr ' ' ':')"
 [ "${DRYRUN:-0}" = "1" ] || mkdir -p "$OUT"
 
 if [ -z "${LEGOESM_NCCL_OFI_LIB:-}" ]; then
@@ -41,19 +43,25 @@ if [ -z "${LEGOESM_NCCL_OFI_LIB:-}" ]; then
 fi
 
 _sub() {  # _sub <label> <pbs> <-v vars>
-    local label="$1" pbs="$2" vars="$3"
+    local label="$1" pbs="$2" vars="$3" jid
     if [ "${DRYRUN:-0}" = "1" ]; then
         echo "[DRYRUN] ${label}: ${QSUB} -A ${PBS_ACCOUNT} -v ${vars} ${pbs}"
         return 0
     fi
-    echo "  submitted ${label}: $("${QSUB}" -A "${PBS_ACCOUNT}" -v "${vars}" "${pbs}")"
+    # Capture the job id; an empty result means qsub errored (e.g. a bad -v) --
+    # surface it LOUDLY instead of printing "submitted: <blank>".
+    if jid="$("${QSUB}" -A "${PBS_ACCOUNT}" -v "${vars}" "${pbs}")" && [ -n "$jid" ]; then
+        echo "  submitted ${label}: ${jid}"
+    else
+        echo "  !!! FAILED to submit ${label} (qsub error above; -v was: ${vars})" >&2
+    fi
 }
 
 echo "=== route-B CPU-vs-A100 throughput (latlon), res=[${RES_LIST}] -> ${OUT} ==="
 _sub "route-B CPU (1..16 nodes)" "${SCRIPT_DIR}/routeb_cpu_sweep.pbs" \
-     "RES_LIST=${RES_CSV},OUTDIR=${OUT}/routeb_cpu"
+     "RES_LIST=${RES_JOINED},OUTDIR=${OUT}/routeb_cpu"
 _sub "route-B GPU (1..16 A100)"  "${SCRIPT_DIR}/routeb_gpu_sweep.pbs" \
-     "RES_LIST=${RES_CSV},OUTDIR=${OUT}/routeb_gpu,LEGOESM_NCCL_OFI_LIB=${LEGOESM_NCCL_OFI_LIB:-}"
+     "RES_LIST=${RES_JOINED},OUTDIR=${OUT}/routeb_gpu,LEGOESM_NCCL_OFI_LIB=${LEGOESM_NCCL_OFI_LIB:-}"
 
 echo "=== when both finish:  scripts/cluster/scaling_derecho/finalize_scaling.sh ${OUT} ==="
 echo "    -> ${OUT}/all_tidy.csv + ${OUT}/plots/cpu_vs_gpu_scaling_latlon.png (Mcells/s panels)"

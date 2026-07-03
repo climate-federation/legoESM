@@ -46,7 +46,7 @@ cd "$REPO"
 
 MODE="${MODE:-strong}"
 RES_LIST="${RES_LIST:-128 256 512}"     # latlon n_lat resolutions (the 3 sizes)
-RES_LIST="${RES_LIST//,/ }"             # accept comma-separated (survives qsub -v)
+RES_LIST="${RES_LIST//[:,]/ }"          # accept colon/comma-separated (survives qsub -v)
 NLEV="${NLEV:-26}"
 N_WARMUP="${N_WARMUP:-3}"
 N_TIMING="${N_TIMING:-30}"
