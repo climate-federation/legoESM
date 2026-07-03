@@ -191,7 +191,15 @@ if [ "$RUN_ROUTEA" = "1" ]; then
     # Same sweep -> case machinery as gpu_moist_scaling.pbs (resolution
     # semantics are grid-specific; the sweep encodes them), rank ladder up
     # to the 8 GPUs of this 2-node allocation.
-    module load craype-accel-nvidia80 2>/dev/null || true
+    #
+    # Cross-node GPU-direct REQUIRES cray-mpich >= 9.0.0: 8.1.32 aborts the tiny
+    # device sendrecv on the CXI inject path ("cxil_map: write error" / OFI
+    # injectdata Invalid argument); 9.0.0 fixed it.  The bare `cray-mpich`
+    # module defaults to 8.1.32, so PIN 9.0.0 explicitly (matches scaling_gpu.sh).
+    # `craype-accel-nvidia80` no longer exists under that name on Derecho and was
+    # a silent no-op -- the CUDA GTL is a DT_NEEDED link in mpi4py.  See
+    # docs/performance/multinode_gpu_direct_cxi.md.
+    module load cray-mpich/9.0.0 2>/dev/null || module load cray-mpich 2>/dev/null || true
     export MPICH_GPU_SUPPORT_ENABLED=1
     export MPICH_OFI_NIC_POLICY="${MPICH_OFI_NIC_POLICY:-GPU}"
     export MPI4JAX_USE_CUDA_MPI=1
