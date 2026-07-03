@@ -142,7 +142,7 @@ overlay INTO the GPU env. The order below is battle-tested; the footguns
 
 ```bash
 conda activate legoesm-gpu
-module load gcc cray-mpich cuda    # cuda is REQUIRED so mpi4jax finds nvcc & builds its GPU ext
+module load gcc cray-mpich/9.0.0 cuda    # pin 9.0.0 (bare cray-mpich defaults to 8.1.32, which aborts cross-node GPU-direct); cuda so mpi4jax finds nvcc & builds its GPU ext
 cc --version                       # ncarcompilers wrapper around gcc 14.x (NOT Intel icx) -- correct on Derecho
 
 # (1) PURGE any generic/conda mpi4py first. A conda-forge mpi4py ships dual
@@ -182,17 +182,23 @@ Final check — federation AND GPU together, **inside a PBS allocation** (a
 login-node `mpiexec` errors with "No host list provided"):
 
 ```bash
-module load craype-accel-nvidia80          # CUDA GTL for GPU-aware sends
-export MPICH_GPU_SUPPORT_ENABLED=1
+export MPICH_GPU_SUPPORT_ENABLED=1         # CUDA GTL (libmpi_gtl_cuda) is a DT_NEEDED link in mpi4py -- no accel module needed
 mpiexec -n 2 python -c "from mpi4py import MPI; import jax; \
     print('rank', MPI.COMM_WORLD.Get_rank(), 'of', MPI.COMM_WORLD.Get_size(), jax.default_backend())"
 #   want: two lines, size 2, backend gpu  ==  route-A overlay fully working
 ```
 
+> **Do NOT `module load craype-accel-nvidia80`.** It no longer exists under that
+> name on Derecho (the load errors "unknown"); the CUDA GTL is linked into
+> `mpi4py` at build time, so `MPICH_GPU_SUPPORT_ENABLED=1` is all that's needed at
+> runtime. **Cross-node GPU-direct requires cray-mpich ≥ 9.0.0** — 8.1.32 aborts
+> the tiny device `sendrecv` on CXI (`cxil_map`/injectdata). See
+> `docs/performance/multinode_gpu_direct_cxi.md`.
+
 `scaling_gpu.sh` and `cube_scaling_gpu.sh` set `MPICH_GPU_SUPPORT_ENABLED=1`,
-the `craype-accel-nvidia80` module, and the `LD_LIBRARY_PATH` bridge themselves
-at runtime, so once the overlay env is built the jobs carry the right
-environment without the manual exports above.
+pin `cray-mpich/9.0.0`, and the `LD_LIBRARY_PATH` bridge themselves at runtime,
+so once the overlay env is built the jobs carry the right environment without the
+manual exports above.
 
 ### Slingshot fabric + GPU-direct halo (why a job "runs but doesn't scale")
 

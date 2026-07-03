@@ -46,15 +46,21 @@ export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
 source "${SCRIPT_DIR}/_env.sh"
 cd "$REPO"
 
-# Route-A runtime stack (README Step 1b): GNU cray-mpich (default 8.1.32) + cuda +
-# craype-accel-nvidia80.  The accel module sets CRAY_ACCEL_TARGET=nvidia80 and
-# engages cray-mpich's GPU-aware NIC path -- REQUIRED for CROSS-NODE GPU-direct.
-# Intra-node GPU-direct works without it (CUDA IPC, no NIC), which is why an
-# earlier "env delta" cleanup wrongly dropped it; but multi-node sendrecv aborts
-# with "cxil_map: write error" / OFI injectdata unless it is loaded (verified
-# 2026-06-29: 8-rank/2-node mpi4jax sendrecv PASSES with it, ABORTS without).
-# Do NOT drop it again.
-module load gcc cray-mpich cuda craype-accel-nvidia80 2>/dev/null || true
+# Route-A runtime stack (README Step 1b): GNU cray-mpich + cuda.  The CUDA GTL
+# (libmpi_gtl_cuda) that carries GPU device pointers over the NIC is linked INTO
+# mpi4py at build time (DT_NEEDED) -- no runtime accel module is needed.  The old
+# `craype-accel-nvidia80` load was a DEAD no-op: that module no longer exists under
+# that name on Derecho (`module load` errors, swallowed by `2>/dev/null`), and it
+# was never what made cross-node GPU-direct work.  What ACTUALLY gates cross-node
+# GPU-direct is the cray-mpich VERSION: 8.1.32 aborts the model's tiny device
+# sendrecv on CXI ("cxil_map: write error" / OFI injectdata Invalid argument);
+# 9.0.0 fixed the CXI inject path.  Pin 9.0.0 EXPLICITLY (the bare `cray-mpich`
+# module still defaults to 8.1.32) so libmpi + GTL + CRAY_MPICH_VERSION all agree;
+# fall back to the default module only if 9.0.0 is gone.  Verified 2026-07-02:
+# 8-rank/2-node icosahedral res7 PASSES GPU-direct on a coherent 9.0.0 stack.
+# See docs/performance/multinode_gpu_direct_cxi.md.
+module load gcc cuda 2>/dev/null || true
+module load cray-mpich/9.0.0 2>/dev/null || module load cray-mpich 2>/dev/null || true
 export MPICH_GPU_SUPPORT_ENABLED=1          # MPICH side: GPU-aware transfers on
 # mpi4jax side (MPI4JAX_USE_CUDA_MPI): GPU-direct halos vs host staging.  Defaulted
 # to GPU-direct for ALL node counts below; cross-node now works with the accel
@@ -95,27 +101,29 @@ TOTAL_GPUS="${LEGOESM_NGPUS:-$(( _n_nodes * _gpus_per_node ))}"
 [ "${TOTAL_GPUS:-0}" -ge 1 ] 2>/dev/null || TOTAL_GPUS=4
 echo "    GPU allocation: nodes=${_n_nodes} (PBS_NODEFILE lines=${_raw_lines}) x ${_gpus_per_node} GPU/node -> TOTAL_GPUS=${TOTAL_GPUS}"
 
-# mpi4jax transport, by node count.  Cross-node GPU-direct STILL aborts for the
-# real model on this fabric (`cxil_map` / OFI `injectdata`), even with
-# craype-accel-nvidia80 loaded (it swaps in the GPU-aware MPICH variant but does
-# not fix the abort) and #681's CXI tuning -- verified 2026-06-29 on a 2-node
-# latlon canary, n=8.  (A trivial eager mpi4jax sendrecv probe "passed" earlier
-# only because it host-staged, not exercising GPU-direct cross-node.)  So:
-#   single node -> GPU-direct (works); multi-node -> host-staged (completes,
-#   bit-identical, slower inter-node comm).  See
-#   docs/performance/multinode_gpu_direct_cxi.md.  Explicit value always wins.
-if [ -z "${_user_cuda_mpi:-}" ]; then
-    if [ "${_n_nodes}" -gt 1 ]; then
-        export MPI4JAX_USE_CUDA_MPI=0
-        echo "    transport: MPI4JAX_USE_CUDA_MPI=0 (host-staged -- multi-node;" \
-             "cross-node GPU-direct still aborts on CXI, accel_target=${CRAY_ACCEL_TARGET:-unset})"
-    else
-        export MPI4JAX_USE_CUDA_MPI=1
-        echo "    transport: MPI4JAX_USE_CUDA_MPI=1 (GPU-direct -- single node)"
-    fi
-else
+# mpi4jax transport, gated on cray-mpich VERSION (NOT node count).  cray-mpich
+# 8.1.32 aborts the real model's tiny cross-node device sendrecv on CXI
+# ("cxil_map: write error" / OFI injectdata Invalid argument); 9.0.0 fixed the
+# CXI inject path, so multi-node GPU-direct now works (verified 2026-07-02:
+# 8-rank/2-node icosahedral res7 PASSES with MPI4JAX_USE_CUDA_MPI=1 on a coherent
+# 9.0.0 stack).  Single node is GPU-direct on ANY version.  CRAY_MPICH_VERSION
+# reflects the LOADED module; we pinned 9.0.0 above, so it is truthful.  An
+# explicit MPI4JAX_USE_CUDA_MPI in the environment always wins.  See
+# docs/performance/multinode_gpu_direct_cxi.md.
+_mpich_major="${CRAY_MPICH_VERSION:-}"; _mpich_major="${_mpich_major%%.*}"
+[ "${_mpich_major:-0}" -ge 1 ] 2>/dev/null || _mpich_major=0
+if [ -n "${_user_cuda_mpi:-}" ]; then
     export MPI4JAX_USE_CUDA_MPI
-    echo "    transport: MPI4JAX_USE_CUDA_MPI=${MPI4JAX_USE_CUDA_MPI} (explicit override, accel_target=${CRAY_ACCEL_TARGET:-unset})"
+    echo "    transport: MPI4JAX_USE_CUDA_MPI=${MPI4JAX_USE_CUDA_MPI} (explicit override; cray-mpich ${CRAY_MPICH_VERSION:-unknown})"
+elif [ "${_n_nodes}" -le 1 ]; then
+    export MPI4JAX_USE_CUDA_MPI=1
+    echo "    transport: MPI4JAX_USE_CUDA_MPI=1 (GPU-direct -- single node)"
+elif [ "${_mpich_major}" -ge 9 ]; then
+    export MPI4JAX_USE_CUDA_MPI=1
+    echo "    transport: MPI4JAX_USE_CUDA_MPI=1 (GPU-direct -- multi-node, cray-mpich ${CRAY_MPICH_VERSION})"
+else
+    export MPI4JAX_USE_CUDA_MPI=0
+    echo "    transport: MPI4JAX_USE_CUDA_MPI=0 (host-staged -- multi-node on cray-mpich ${CRAY_MPICH_VERSION:-<9}; needs >=9.0.0 for cross-node GPU-direct)"
 fi
 case "$GRID" in
   cubed-sphere)
