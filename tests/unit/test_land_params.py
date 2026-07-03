@@ -62,13 +62,21 @@ def multilayer_config():
 # =====================================================================
 
 class TestLandSurfaceParams:
+    # LAI is a PRESCRIBED (climatology) per-cell field, not a trainable bounded
+    # param, so it is the one LandSurfaceParams field outside PARAM_NAMES/BOUNDS.
+    _NON_BOUNDED_FIELDS = {"LAI"}
+
     def test_namedtuple_fields(self):
-        assert len(LandSurfaceParams._fields) == N_PARAMS
+        # Every trainable param is a field, and the only non-bounded extra is LAI.
         for name in PARAM_NAMES:
             assert name in LandSurfaceParams._fields
+        assert (set(LandSurfaceParams._fields) - set(PARAM_NAMES)
+                == self._NON_BOUNDED_FIELDS)
 
     def test_param_bounds_complete(self):
         for name in LandSurfaceParams._fields:
+            if name in self._NON_BOUNDED_FIELDS:
+                continue  # prescribed metadata, not a trainable bounded param
             assert name in PARAM_BOUNDS, f"Missing bound for {name}"
             lo, hi = PARAM_BOUNDS[name]
             assert lo < hi, f"Invalid bounds for {name}: {lo} >= {hi}"

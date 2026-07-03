@@ -217,5 +217,29 @@ def test_clm_multilayer_setup_preserves_surface_snow_stomata(tmp_path):
     assert cfg.stomata.enabled is True, "stomata was reset (regression)"
 
 
+def test_clm_provider_pft_weights_spatial_lai():
+    """CLMSurfaceParamProvider maps per-PFT MONTHLY_LAI to a PFT-weighted per-cell
+    LAI so the two-leaf canopy gets a spatial climatology, NOT a uniform scalar:
+    a bare cell -> LAI ~ 0 (no spurious canopy), a forest cell -> the forest LAI."""
+    fr = np.zeros((2, _N_PFT)); fr[0, 0] = 1.0; fr[1, 4] = 1.0   # cell0 bare, cell1 PFT-4
+    lai_pft = np.zeros((_N_PFT, 2)); lai_pft[4, :] = 5.0          # PFT-4 -> LAI 5
+    prov = CLMSurfaceParamProvider(
+        jnp.asarray(fr), jnp.full(2, 0.1), jnp.full(2, 0.3), jnp.zeros(2),
+        variant="multilayer", lai_pft=jnp.asarray(lai_pft))
+    lai = np.asarray(prov().LAI)
+    assert lai.shape == (2,)
+    assert lai[0] < 0.01,      f"bare cell should have LAI~0, got {lai[0]}"
+    assert 4.5 < lai[1] < 5.5, f"forest cell should have LAI~5, got {lai[1]}"
+
+
+def test_clm_provider_lai_none_without_climatology():
+    """No lai_pft (surfdata lacks MONTHLY_LAI) -> LAI stays None; the two-leaf
+    canopy's None-safe read then falls back to its scalar default."""
+    prov = CLMSurfaceParamProvider(
+        jnp.full((2, _N_PFT), 1.0 / _N_PFT), jnp.full(2, 0.1), jnp.full(2, 0.3),
+        jnp.zeros(2), variant="multilayer")
+    assert prov().LAI is None
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
