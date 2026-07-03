@@ -1311,7 +1311,9 @@ class ModelDriver:
                 self.physics.land_stomatal_beta = _stomatal
                 if _stomatal:
                     from legoesm.land.carbon.stomata import StomataConfig
-                    self.physics.stomata_config = StomataConfig()
+                    self.physics.stomata_config = StomataConfig(
+                        gs_max=self.config.land_gs_max,
+                    )
                 # Prognostic snow + snow-albedo feedback on the slab tile.
                 self.physics.snow_albedo_feedback = bool(
                     getattr(self.config, "snow_albedo_feedback", False))
@@ -1412,7 +1414,10 @@ class ModelDriver:
             ),
             bulk_scheme="most",
             snow_albedo_feedback=self.config.snow_albedo_feedback,
-            stomata=StomataConfig(enabled=self.config.land_stomatal_beta),
+            stomata=StomataConfig(
+                enabled=self.config.land_stomatal_beta,
+                gs_max=self.config.land_gs_max,
+            ),
         )
         params, cfg = clm_multilayer_setup(surface_map, base_config=base)
 
