@@ -406,4 +406,13 @@ UNREACHABLE_PARAMS = frozenset({
     # ocean: ShortwavePenetrationConfig (2)
     'ocean.sw_penetration.rgb_ir_extinction_m',
     'ocean.sw_penetration.rgb_ir_fraction',
+    # ocean: TidalForcingConfig (3) — CONSCIOUS entry (equilibrium-tide forcing).
+    # These ARE settable via YAML (ocean.tidal_forcing.{love_factor,beta_sal,
+    # amplitude_scale}, built into a TidalForcingConfig by config.py). They are
+    # not yet on run_omip's curated OMIPRunConfig --params surface; wiring
+    # tidal_forcing onto OMIPRunConfig (+ a --tidal-forcing flag) is the follow-up
+    # that shrinks these three away.
+    'ocean.tidal_forcing.amplitude_scale',
+    'ocean.tidal_forcing.beta_sal',
+    'ocean.tidal_forcing.love_factor',
 })
