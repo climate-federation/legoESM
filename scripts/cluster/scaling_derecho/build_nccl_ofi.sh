@@ -53,12 +53,37 @@ echo "LIBFABRIC_HOME=$LIBFABRIC_HOME"
 
 # hwloc: required by the plugin's topology code.
 module load hwloc 2>/dev/null || true
-HWLOC_FLAG=""
-if [ -n "${HWLOC_HOME:-}" ]; then
+# hwloc is REQUIRED by aws-ofi-nccl, and NCAR/Cray modules rarely put its
+# headers on the default compiler include path -- so find a prefix that has
+# include/hwloc.h and pass --with-hwloc explicitly.  Order: env overrides
+# (incl. NCAR spack's NCAR_ROOT_HWLOC and Cray's CRAY_HWLOC_PREFIX_DIR) ->
+# pkg-config (what `module load hwloc` wires up on the spack stack) -> known
+# Cray / glade / system locations.
+_find_hwloc() {
+    local d
+    for d in "${HWLOC_HOME:-}" "${HWLOC_DIR:-}" "${HWLOC_ROOT:-}" \
+             "${NCAR_ROOT_HWLOC:-}" "${CRAY_HWLOC_PREFIX_DIR:-}"; do
+        [ -n "$d" ] && [ -f "$d/include/hwloc.h" ] && { echo "$d"; return 0; }
+    done
+    if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists hwloc 2>/dev/null; then
+        d="$(pkg-config --variable=prefix hwloc 2>/dev/null)"
+        [ -n "$d" ] && [ -f "$d/include/hwloc.h" ] && { echo "$d"; return 0; }
+    fi
+    for d in /opt/cray/pe/hwloc/*/ /glade/u/apps/*/*/hwloc/*/ /usr; do
+        [ -f "${d%/}/include/hwloc.h" ] && { echo "${d%/}"; return 0; }
+    done
+    return 1
+}
+if HWLOC_HOME="$(_find_hwloc)"; then
     HWLOC_FLAG="--with-hwloc=$HWLOC_HOME"
-elif ! echo '#include <hwloc.h>' | gcc -E - >/dev/null 2>&1; then
-    echo "WARNING: hwloc headers not on the default path; if configure fails,"
-    echo "         module load hwloc (or set HWLOC_HOME) and rerun."
+    echo "HWLOC_HOME=$HWLOC_HOME"
+else
+    echo "ERROR: hwloc headers not found (searched env vars, pkg-config, and" >&2
+    echo "       /opt/cray/pe/hwloc, /glade/u/apps, /usr)." >&2
+    echo "       Fix: 'module load hwloc' (try 'module spider hwloc' for the" >&2
+    echo "       exact name), or set HWLOC_HOME=<prefix> (a dir containing" >&2
+    echo "       include/hwloc.h), then rerun." >&2
+    exit 1
 fi
 
 # --- Fetch + pick tag -----------------------------------------------------
@@ -78,12 +103,15 @@ PREFIX="${PREFIX:-/glade/work/$USER/nccl-ofi/$AWS_OFI_TAG}"
 # Flags verified against v1.20.0 configure.ac (m4/check_pkg_{libfabric,
 # cuda,hwloc}.m4 + AC_ARG_ENABLE([tests])); there is deliberately NO
 # --with-nccl (see header note).
+# rpath hwloc + libfabric into the plugin so NCCL can dlopen libnccl-net.so at
+# RUNTIME (in the PBS job) without those modules loaded -> self-contained plugin.
 ./configure \
     --prefix="$PREFIX" \
     --with-libfabric="$LIBFABRIC_HOME" \
     --with-cuda="$CUDA_HOME" \
     $HWLOC_FLAG \
-    --disable-tests
+    --disable-tests \
+    LDFLAGS="-Wl,-rpath,$HWLOC_HOME/lib -Wl,-rpath,$LIBFABRIC_HOME/lib"
 make -j 8
 make install
 
