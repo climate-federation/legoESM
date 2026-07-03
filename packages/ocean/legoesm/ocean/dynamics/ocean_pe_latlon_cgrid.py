@@ -131,7 +131,7 @@ VALID_MOMENTUM_ADVECTION = frozenset(
 # the flux-form tendency dispatch (its else-raise) plus the SOM special case
 # handled in step().  Keep in sync if a tracer scheme is added.
 VALID_TRACER_ADVECTION = frozenset(
-    {"upwind", "centered", "tvd", "superbee", "ppm", "ppm_fct",
+    {"upwind", "centered", "tvd", "superbee", "ppm", "ppm_fct", "fct2",
      "dst3", "dst3_multidim", "weno5", "weno7", "som"}
 )
 # WENO vector-invariant momentum-advection literals (Silvestri et al. 2024).

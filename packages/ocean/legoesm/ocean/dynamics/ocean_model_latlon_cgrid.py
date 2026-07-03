@@ -159,10 +159,11 @@ def _compute_advection_flux_div(
         )
         tr = neumann_fill_cgrid(tr, recon_fill_mask, grid=grid)
 
-    if tracer_advection == "ppm_fct":
+    if tracer_advection in ("ppm_fct", "fct2"):
         from legoesm.ocean.advection import fct_tracer_advection
         div_hut, vert_flux_div = fct_tracer_advection(
             tr, mass_flux_u, mass_flux_v, w_baro, h_k_old, grid, dt,
+            high_order="ppm" if tracer_advection == "ppm_fct" else "centred2",
         )
     elif tracer_advection == "ppm":
         from legoesm.ocean.advection import (
@@ -1276,12 +1277,11 @@ class LatLonCGridOceanModel:
                 'barotropic_solver="explicit_substep" to apply it, or leave the filter '
                 'at its "cosine" default to silence this warning.',
                 stacklevel=3)
-        # Mirrors the flux-form tendency dispatch (its else-raise) plus the
-        # SOM special case handled in step(); keep in sync if a scheme is added.
-        _valid_tracer_adv = {
-            "upwind", "centered", "tvd", "superbee", "ppm", "ppm_fct",
-            "dst3", "dst3_multidim", "weno5", "weno7", "som",
-        }
+        # Single source: VALID_TRACER_ADVECTION mirrors the flux-form tendency
+        # dispatch (its else-raise) plus the SOM special case handled in step().
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            VALID_TRACER_ADVECTION as _valid_tracer_adv,
+        )
         if config.tracer_advection not in _valid_tracer_adv:
             raise ValueError(
                 f"tracer_advection must be one of {sorted(_valid_tracer_adv)}, "

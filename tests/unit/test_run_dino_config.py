@@ -186,7 +186,7 @@ def test_r1_exact_preset(monkeypatch):
     assert cfg.use_gm_redi is False                     # ln_ldfeiv=.false.
     assert cfg.A_h_floor == 0.0                         # no legoESM floor
     assert cfg.A_h_eq_boost == 1.0                      # no legoESM boost
-    assert cfg.tracer_advection == "ppm_fct"
+    assert cfg.tracer_advection == "fct2"
     assert cfg.forcing_annual_cycle is True          # ln_ann_cyc
     # stabilizer TKE viscosity floor OFF -> effective A_v == avm0 exactly
     assert cfg.tke_momentum_visc_bg == cfg.A_v_bg
@@ -216,7 +216,7 @@ def test_r1_exact_preset_flows_to_model_config():
     assert mc.eos == "nemo_seos"
     assert mc.bottom_drag.bottom_drag_scheme == "nemo_quadratic"
     assert mc.bottom_drag.bottom_drag_cd0 == cfg.C_d_bottom
-    assert mc.tracer_advection == "ppm_fct"
+    assert mc.tracer_advection == "fct2"
     assert mc.gm_redi is None                    # EIV off
     assert mc.lateral_viscosity.A_h_floor == 0.0
     assert mc.lateral_viscosity.A_h_eq_boost == 1.0

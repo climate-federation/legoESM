@@ -269,3 +269,106 @@ class TestDifferentiability:
         g = jax.grad(loss)(tracer)
         assert g.shape == tracer.shape
         assert bool(jnp.all(jnp.isfinite(g)))
+
+
+# ---------------------------------------------------------------------------
+# NEMO FCT 2nd/2nd variant (high_order="centred2")
+# ---------------------------------------------------------------------------
+
+class TestFct2Centred:
+    """NEMO traadv_fct nn_fct_h = nn_fct_v = 2: centred-2 high flux."""
+
+    def test_unknown_high_order_raises(self, grid_small, smooth_state):
+        tracer, mu, mv, w_half, h_k, dt = smooth_state
+        with pytest.raises(ValueError, match="high_order"):
+            fct_tracer_advection(
+                tracer, mu, mv, w_half, h_k, grid_small, dt,
+                high_order="quintic")
+
+    def test_centred_faces_exact_on_linear_field(self):
+        """0.5·(T_west+T_east) reproduces a zonally-linear field's face
+        values exactly (2nd-order centred is exact for degree-1)."""
+        from legoesm.ocean.advection import (
+            centred2_to_u_points, centred2_to_v_points,
+        )
+        n_lat, n_lon, nlev = 6, 8, 3
+        x = np.arange(n_lon, dtype=float)
+        f = jnp.broadcast_to(
+            jnp.asarray(x)[None, :, None], (n_lat, n_lon, nlev))
+        f_u = centred2_to_u_points(f)
+        assert f_u.shape == (n_lat, n_lon + 1, nlev)
+        # interior faces j=1..n_lon-1 sit between cells j-1, j -> x = j-1/2
+        expect_u = np.broadcast_to(
+            (x[:-1] + x[1:])[None, :, None] / 2.0, (n_lat, n_lon - 1, nlev))
+        np.testing.assert_allclose(
+            np.asarray(f_u)[:, 1:n_lon, :], expect_u, rtol=0, atol=1e-14)
+        # wrap face (0 == n_lon): mean of last + first cell
+        np.testing.assert_allclose(
+            np.asarray(f_u)[:, 0, :], (x[0] + x[-1]) / 2.0, atol=1e-14)
+        np.testing.assert_allclose(
+            np.asarray(f_u)[:, n_lon, :], (x[0] + x[-1]) / 2.0, atol=1e-14)
+
+        y = np.arange(n_lat, dtype=float)
+        g = jnp.broadcast_to(
+            jnp.asarray(y)[:, None, None], (n_lat, n_lon, nlev))
+        g_v = centred2_to_v_points(g)
+        assert g_v.shape == (n_lat + 1, n_lon, nlev)
+        expect_v = np.broadcast_to(
+            (y[:-1] + y[1:])[:, None, None] / 2.0, (n_lat - 1, n_lon, nlev))
+        np.testing.assert_allclose(
+            np.asarray(g_v)[1:n_lat, :, :], expect_v, atol=1e-14)
+        # wall faces copy the adjacent cell (flux is zero there anyway)
+        np.testing.assert_allclose(np.asarray(g_v)[0], y[0], atol=1e-14)
+        np.testing.assert_allclose(np.asarray(g_v)[n_lat], y[-1], atol=1e-14)
+
+    def test_fct2_conserves_on_periodic_channel(self, grid_small,
+                                                smooth_state):
+        tracer, mu, mv, w_half, h_k, dt = smooth_state
+        div_h, div_w = fct_tracer_advection(
+            tracer, mu, mv, w_half, h_k, grid_small, dt,
+            high_order="centred2")
+        area = grid_small.area[..., None]
+        assert abs(float(jnp.sum(-(div_h + div_w) * area))) < 1e-10
+
+    def test_fct2_no_new_extrema_after_one_step(self, grid_small,
+                                                smooth_state):
+        """Zalesak must bound the centred-2 flux (which CAN overshoot
+        unlimited) — one forward step creates no new extrema."""
+        tracer, mu, mv, w_half, h_k, dt = smooth_state
+        div_h, div_w = fct_tracer_advection(
+            tracer, mu, mv, w_half, h_k, grid_small, dt,
+            high_order="centred2")
+        updated = tracer + dt * (-(div_h + div_w) / h_k)
+        assert float(updated.max()) <= float(tracer.max()) + 1e-9
+        assert float(updated.min()) >= float(tracer.min()) - 1e-9
+
+    def test_fct2_differs_from_ppm_fct(self, grid_small, smooth_state):
+        """The two high-order variants are genuinely different schemes."""
+        tracer, mu, mv, w_half, h_k, dt = smooth_state
+        d_ppm, w_ppm = fct_tracer_advection(
+            tracer, mu, mv, w_half, h_k, grid_small, dt, high_order="ppm")
+        d_c2, w_c2 = fct_tracer_advection(
+            tracer, mu, mv, w_half, h_k, grid_small, dt,
+            high_order="centred2")
+        assert float(jnp.abs(d_ppm - d_c2).max()) > 0.0
+
+    def test_fct2_vertical_centred_flux(self, grid_small):
+        """With pure vertical velocity the interior high flux is the
+        centred interface mean, Zalesak-limited; conservation holds
+        column-wise (top/bottom fluxes zero)."""
+        n_lat, n_lon, nlev = grid_small.n_lat, grid_small.n_lon, 6
+        rng = np.random.default_rng(1)
+        tracer = jnp.asarray(
+            np.linspace(20.0, 4.0, nlev)[None, None, :]
+            + rng.normal(size=(n_lat, n_lon, nlev)) * 0.05)
+        mu = jnp.zeros((n_lat, n_lon + 1, nlev))
+        mv = jnp.zeros((n_lat + 1, n_lon, nlev))
+        w_half = jnp.zeros((n_lat, n_lon, nlev + 1))
+        w_half = w_half.at[..., 1:nlev].set(1e-4)
+        h_k = jnp.ones((n_lat, n_lon, nlev)) * 50.0
+        div_h, div_w = fct_tracer_advection(
+            tracer, mu, mv, w_half, h_k, grid_small, 100.0,
+            high_order="centred2")
+        assert float(jnp.abs(div_h).max()) == 0.0
+        col_sum = jnp.sum(div_w, axis=-1)
+        np.testing.assert_allclose(np.asarray(col_sum), 0.0, atol=1e-12)

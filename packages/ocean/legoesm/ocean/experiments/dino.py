@@ -384,9 +384,9 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
       velocity at R1; iso-neutral diffusion arrives with the MSC item)
     * ``A_h_floor=0``, ``A_h_eq_boost=1`` — legoESM stabilizers OFF (the
       oracle viscosity is exactly ahm = Uv·Δ/2, no floor, no boost)
-    * ``tracer_advection="ppm_fct"`` — the Zalesak-FCT family (nearest
-      existing block to the oracle FCT2/2; the exact 2nd/2nd variant is a
-      later audit item)
+    * ``tracer_advection="fct2"`` — NEMO traadv_fct with nn_fct_h =
+      nn_fct_v = 2 (2nd-order centred high flux + Zalesak), the oracle
+      selection
 
     The preset also enables the oracle's seasonal forcing
     (``forcing_annual_cycle=True`` — ln_ann_cyc) and routes the wind
@@ -394,7 +394,7 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
     receives NEMO's taum incl. the x1.3 westerly boost).
 
     Fields that REMAIN approximate after this preset (later ladder steps,
-    tracked in the audit doc): FCT2/2, hpg_sco jacobian (adcroft here),
+    tracked in the audit doc): hpg_sco jacobian (adcroft here),
     centred split-explicit barotropic (implicit_cn here), iso-neutral+MSC
     lateral diffusion, and the MLF leapfrog integrator.
 
@@ -409,7 +409,7 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
         use_gm_redi=False,
         A_h_floor=0.0,
         A_h_eq_boost=1.0,
-        tracer_advection="ppm_fct",
+        tracer_advection="fct2",
         forcing_annual_cycle=True,
         wind_through_step=True,
     )

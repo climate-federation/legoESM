@@ -1156,7 +1156,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     # False keeps the legacy raw-flux behaviour bit-exact. Volume is already
     # conserved separately via ``fix_eta_drift``.
     normalize_freshwater: bool = False
-    tracer_advection: str = "tvd"  # "upwind", "centered" (unlimited 2nd-order, Veros adv_flux_2nd), "tvd" (Van Leer), "superbee" (Sweby/Veros), "ppm_fct", "ppm", "dst3", "dst3_multidim", "som", "weno5", "weno7"
+    tracer_advection: str = "tvd"  # "upwind", "centered" (unlimited 2nd-order, Veros adv_flux_2nd), "tvd" (Van Leer), "superbee" (Sweby/Veros), "ppm_fct", "fct2" (NEMO traadv_fct 2nd/2nd), "ppm", "dst3", "dst3_multidim", "som", "weno5", "weno7"
     gm_redi: object = None         # GMRediConfig or None; enables GM/Redi lateral mixing
     physics: object = None
     eos: str = "wright"
