@@ -65,3 +65,36 @@ def test_spectral_amip_rollout_signature():
     for kw in ("sst_col", "sizing_phys_state", "day_of_year_base",
                "seconds_offset", "rad_update_interval"):
         assert kw in params, f"missing kwarg {kw}"
+
+
+def test_merged_cfg_selects_variant_overlay(tmp_path):
+    """--variant column_nn/sfno_physics must merge THAT variant's overlay
+    (and an unknown variant is a hard error, not a silent classical run)."""
+    mod = _load_driver()
+    base = tmp_path / "base.yaml"
+    base.write_text("n_max: 63\nn_levels: 8\ndt: 600.0\n")
+    (tmp_path / "variant_classical.yaml").write_text(
+        "aimip_convection: edmf\n")
+    (tmp_path / "variant_column_nn.yaml").write_text(
+        "nn_hidden_dim: 123\n")
+    (tmp_path / "variant_sfno_physics.yaml").write_text(
+        "sfno_embed_dim: 48\n")
+    suite = tmp_path / "suite.yaml"
+    suite.write_text(f"base: {base}\n")
+    assert mod._merged_cfg(suite, "column_nn")["nn_hidden_dim"] == 123
+    assert mod._merged_cfg(suite, "sfno_physics")["sfno_embed_dim"] == 48
+    assert mod._merged_cfg(suite, "classical")["aimip_convection"] == "edmf"
+    with pytest.raises(ValueError, match="variant"):
+        mod._merged_cfg(suite, "bogus")
+
+
+def test_nn_rollout_signature_contract():
+    """The NN-variant AMIP path drives spectral_rollout(forcing_base=...) and
+    physics factories that accept forcing — pin the keyword contracts."""
+    spec = importlib.util.find_spec("legoesm.training.neural_gcm_spectral")
+    if spec is None:
+        pytest.skip("legoesm not importable in this environment")
+    mod = importlib.import_module("legoesm.training.neural_gcm_spectral")
+    params = inspect.signature(mod.spectral_rollout).parameters
+    assert "forcing_base" in params
+    assert mod.N_SFNO_FORCING_CHANNELS == 3
