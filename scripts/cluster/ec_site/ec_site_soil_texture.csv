@@ -1,0 +1,15 @@
+site,lat,lon,sand_pct,clay_pct,usda_class,source
+US-MMS,39.3232,-86.4131,34.0,63.0,clay,BIF
+DE-Hai,51.0792,10.4522,18.5,28.9,silty_clay_loam,SoilGrids
+US-Oho,41.5545,-83.8438,58.5,23.1,sandy_clay_loam,SoilGrids
+FI-Hyy,61.8474,24.2948,56.3,5.4,sandy_loam,SoilGrids
+US-NR1,40.0329,-105.5464,52.7,13.8,sandy_loam,SoilGrids
+DE-Obe,50.7867,13.7213,37.8,15.6,loam,SoilGrids
+US-Var,38.4133,-120.9508,30.0,28.0,clay_loam,literature
+DE-Gri,50.95,13.5126,32.2,21.8,loam,SoilGrids
+US-Ne1,41.1651,-96.4766,11.0,37.0,silty_clay_loam,BIF
+DE-Geb,51.0997,10.9146,10.0,30.0,silty_clay_loam,literature
+US-Ton,38.4309,-120.966,42.0,25.0,loam,literature
+US-SRM,31.8214,-110.8661,79.4,9.4,loamy_sand,BIF
+US-Whs,31.7438,-110.0522,63.7,16.0,sandy_loam,literature
+FR-Pue,43.7413,3.5957,35.0,38.0,clay_loam,literature
