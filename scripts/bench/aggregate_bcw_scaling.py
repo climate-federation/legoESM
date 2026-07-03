@@ -136,6 +136,59 @@ def _row_from_json(d: dict, source: Path) -> dict | None:
     }
 
 
+def _row_from_spmd_record(rec: dict, source: Path) -> dict | None:
+    """Tidy row from a route-B SPMD bench JSONL record.
+
+    ``bench_atm_latlon_spmd_scaling.py`` / ``bench_ocean_latlon_spmd_scaling.py``
+    (the ``--multicontroller`` NCCL lanes, swept by ``routeb_sweep.pbs``) emit a
+    THROUGHPUT-only record: ``steady_median_ms`` + ``cells`` but NO ``sypd``/dt
+    (no timestep is simulated).  So ``mcells_per_s`` is computed here and ``sypd``
+    is left empty -- the plotter shows route B on the throughput panels only.
+    Component/case come from the source path (``ocean_*`` -> ocean).  Returns
+    ``None`` for any JSONL line that is not this schema.
+    """
+    nd, ms, cells = rec.get("n_devices"), rec.get("steady_median_ms"), rec.get("cells")
+    if nd is None or ms is None or cells is None:
+        return None
+    try:
+        nd, ms, cells = int(nd), float(ms), float(cells)
+    except (TypeError, ValueError):
+        return None
+    if ms <= 0 or cells <= 0:
+        return None
+    plat = str(rec.get("platform", "")).lower()
+    backend = ("GPU" if plat in ("gpu", "cuda", "rocm")
+               else "CPU" if plat == "cpu" else backend_from_path(source))
+    ocean = "ocean" in str(source).lower()
+    phys = rec.get("physics", "none")
+    n_lat = rec.get("n_lat")
+    return {
+        "component": "ocean" if ocean else "atm",
+        "backend": backend,
+        "grid": "latlon",
+        "case": "ocean" if ocean else _CASE.get(phys, phys),
+        "precision": rec.get("precision", ""),
+        "mode": rec.get("mode", "strong"),
+        "n_devices": nd,
+        "cpus_per_task": 1,
+        "n_cores": nd,
+        "n_resource": nd,                       # GPU: device (=process) count
+        "fix_mass": rec.get("fix_mass", True),
+        "resolution": n_lat,
+        "resolution_km": round(resolution_km("latlon", n_lat), 3) if n_lat else "",
+        "n_levels": rec.get("nlev", ""),
+        "sypd": None,                           # throughput-only bench (no dt)
+        "time_per_step_ms": ms,
+        "total_cells": cells,
+        "mcells_per_s": round(cells / (ms * 1e-3) / 1e6, 2),
+        "scaling_efficiency": None,
+        "dt_seconds": None,
+        "physics_level": phys,
+        "compile_time_s": (rec.get("compile_ms") or 0) / 1000.0,
+        "source": str(source),
+    }
+
+
 def _is_ocean_schema(d: dict) -> bool:
     """True only for the OCEAN nested report (mode starts 'ocean_').
 
@@ -250,14 +303,20 @@ def collect(roots) -> tuple[list[dict], int]:
     best: dict[tuple, dict] = {}
     dropped = 0
 
+    def _rank(row):
+        # Dedup ranks by SYPD when present (route A / ocean), else by throughput
+        # (route-B SPMD is sypd-less) -- keep the best of repeated measurements.
+        return row.get("sypd") if row.get("sypd") is not None else row.get("mcells_per_s")
+
     def _add(row):
         nonlocal dropped
-        if row is None or row.get("sypd") is None:
+        if row is None or _rank(row) is None:
             return
         k = _key(row)
         if k in best:
             dropped += 1
-            if row["sypd"] > best[k]["sypd"]:
+            prev = _rank(best[k])
+            if prev is None or _rank(row) > prev:
                 best[k] = row
         else:
             best[k] = row
@@ -293,6 +352,26 @@ def collect(roots) -> tuple[list[dict], int]:
                         _add(row)
             else:
                 _add(_row_from_json(d, jf))
+        # Route-B SPMD throughput records (bench_{atm,ocean}_latlon_spmd_scaling
+        # --multicontroller, swept by routeb_sweep.pbs) are JSONL, one record per
+        # line -- ingested so they plot through the same finalize pipeline.
+        for jf in sorted(rp.rglob("*.jsonl")):
+            if any(part.startswith(("val_", "_ab_")) for part in jf.parts):
+                continue
+            try:
+                text = jf.read_text()
+            except OSError:
+                continue
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(rec, dict):
+                    _add(_row_from_spmd_record(rec, jf))
     rows = sorted(
         best.values(),
         key=lambda r: (r["backend"], r["grid"], r["case"], r["precision"],

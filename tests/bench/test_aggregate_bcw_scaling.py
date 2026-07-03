@@ -170,3 +170,45 @@ def test_unknown_nested_schema_is_skipped_not_atm(tmp_path):
     _write(d, "strong_scaling.json", payload)
     rows, _ = agg.collect(tmp_path)
     assert rows == []                          # skipped, not flattened as atm
+
+
+def _write_jsonl(d: Path, name: str, recs: list[dict]) -> None:
+    (d / name).parent.mkdir(parents=True, exist_ok=True)
+    with (d / name).open("w") as f:
+        for r in recs:
+            f.write(json.dumps(r) + "\n")
+
+
+def test_collect_ingests_routeb_spmd_jsonl(tmp_path):
+    # route-B SPMD bench output is JSONL and THROUGHPUT-only (steady_median_ms +
+    # cells, no sypd); collect() must ingest it and compute mcells_per_s.
+    d = tmp_path / "routeb_sweep_x" / "atm_latlon"
+    cells = 512 * 1024 * 26
+    recs = [
+        {"mode": "strong", "n_devices": 8, "n_lat": 512, "n_lon": 1024, "nlev": 26,
+         "physics": "moist", "platform": "gpu", "multicontroller": True,
+         "compile_ms": 10000.0, "steady_median_ms": 5.0, "cells": cells},
+        {"mode": "strong", "n_devices": 4, "n_lat": 512, "n_lon": 1024, "nlev": 26,
+         "physics": "moist", "platform": "gpu", "multicontroller": True,
+         "compile_ms": 9000.0, "steady_median_ms": 9.0, "cells": cells},
+    ]
+    _write_jsonl(d, "spmd_N8.jsonl", recs)
+    rows, _ = agg.collect(tmp_path)
+    latlon = {r["n_devices"]: r for r in rows if r["grid"] == "latlon"}
+    assert set(latlon) == {4, 8}                       # both swept points ingested
+    r8 = latlon[8]
+    assert r8["backend"] == "GPU" and r8["resolution"] == 512
+    assert r8["sypd"] is None                          # throughput-only
+    assert r8["case"] == "moist"
+    assert r8["mcells_per_s"] == pytest.approx(cells / 5.0e-3 / 1e6, rel=1e-3)
+
+
+def test_collect_routeb_ocean_jsonl_labeled_ocean(tmp_path):
+    d = tmp_path / "routeb_sweep_x" / "ocean_latlon"
+    rec = {"mode": "strong", "n_devices": 8, "n_lat": 288, "n_lon": 576, "nlev": 20,
+           "platform": "gpu", "steady_median_ms": 33.0, "cells": 288 * 576 * 20}
+    _write_jsonl(d, "spmd_N8.jsonl", [rec])
+    rows, _ = agg.collect(tmp_path)
+    r = next(r for r in rows if r["n_devices"] == 8)
+    assert r["component"] == "ocean" and r["case"] == "ocean"
+    assert r["backend"] == "GPU" and r["sypd"] is None

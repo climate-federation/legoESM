@@ -129,6 +129,19 @@ def test_make_figures_one_png_per_grid(tmp_path):
     assert all(p.exists() for p in written)
 
 
+def test_make_figures_throughput_only_no_sypd(tmp_path):
+    # route-B SPMD rows are throughput-only (mcells_per_s present, sypd blank):
+    # the figure must still render (on the Mcells/s panels) rather than aborting
+    # on the "no SYPD" guard.
+    rows = [_row("latlon", "GPU", "512", str(n), "", str(mc))   # sypd=""
+            for n, mc in ((4, 200.0), (8, 380.0))]
+    csvp = tmp_path / "tidy.csv"
+    _write_csv(csvp, rows)
+    written = plot.make_figures(plot._read(csvp), tmp_path / "plots")
+    assert [p.name for p in written] == ["cpu_vs_gpu_scaling_latlon.png"]
+    assert written[0].exists()
+
+
 def test_make_figures_raises_on_no_usable_rows(tmp_path):
     csvp = tmp_path / "tidy.csv"
     _write_csv(csvp, [_row("latlon", "CPU", "128", "1", "0.0", "0")])

@@ -167,10 +167,13 @@ def make_figures(rows, out_dir: Path) -> list[Path]:
     by_grid = group(rows, "sypd")
     by_grid_mc = group(rows, "mcells_per_s")
     km_map = res_km(rows)
-    if not by_grid:
+    # Grids present under EITHER metric: route-B SPMD points are throughput-only
+    # (no SYPD), so keying solely on SYPD would drop them entirely.
+    all_grids = sorted(set(by_grid) | set(by_grid_mc))
+    if not all_grids:
         raise SystemExit(
-            "no CPU/GPU rows with a positive SYPD found — check the CSV / "
-            "--csv path (expected backends CPU and GPU and grid/resolution/"
+            "no CPU/GPU rows with a positive SYPD or Mcells/s found — check the "
+            "CSV / --csv path (expected backends CPU and GPU and grid/resolution/"
             "n_resource columns)")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -181,9 +184,9 @@ def make_figures(rows, out_dir: Path) -> list[Path]:
         (1, by_grid_mc, "throughput (Mcells/s)"),
     )
     written = []
-    for grid in sorted(by_grid):
-        by_res = by_grid[grid]
-        resolutions = sorted(by_res)
+    for grid in all_grids:
+        # Resolutions from EITHER metric (throughput-only route-B has no SYPD).
+        resolutions = sorted(set(by_grid.get(grid, {})) | set(by_grid_mc.get(grid, {})))
         # one colour per resolution, consistent across all four panels
         ncol = max(len(resolutions), 1)
         color = {res: cmap((i + 0.5) / ncol) for i, res in enumerate(resolutions)}
