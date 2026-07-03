@@ -201,6 +201,43 @@ def test_column_physics_nan_tsfc_falls_back_to_lowest_level():
     )
 
 
+def test_untrained_moisture_head_rollout_stays_finite():
+    """Regression (2026-07-03 column_nn retrain epoch-0 NaN): an UNTRAINED
+    net's q_v head must not blow up a 36-step (6 h) forced rollout.  The
+    rate head is temperature-calibrated; without _Q_HEAD_TENDENCY_FACTOR
+    the moisture tendency is O(1e-3 kg/kg/s) and q_v hits NaN by step 36."""
+    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.training.neural_gcm_spectral import (
+        carry_to_spectral_state, spectral_rollout,
+    )
+
+    nlev = 4
+    grid = create_gaussian_grid(n_max=10)
+    model = build_column_physics(nlev=nlev, hidden_dim=16, n_layers=2,
+                                 key=jax.random.PRNGKey(3))
+    fn = make_column_physics_fn(model, grid)
+    carry, sigma = _mini_spectral_state(grid, nlev)
+    state = carry_to_spectral_state(carry, grid)
+    ncol = len(grid.lat) * len(grid.lon)
+    forcing = {
+        "T_sfc": jnp.full((ncol,), 290.0, dtype=jnp.float64),
+        "sic": jnp.zeros((ncol,), dtype=jnp.float64),
+        "day_of_year": jnp.asarray(1.0),
+        "seconds_of_day": jnp.asarray(0.0),
+    }
+    pe = SpectralPEConfig(time_integrator="ssp_rk3")
+    out = spectral_rollout(state, fn, grid, sigma, pe, 600.0, 36,
+                           forcing_base=forcing)
+    qv = out.tracers["q_v"]
+    qv = qv.data if hasattr(qv, "data") else qv
+    assert bool(jnp.all(jnp.isfinite(qv))), "q_v went non-finite in 6 h"
+    # The head is capped at 5e-6 kg/kg/s -> 36*600s adds < 0.11 kg/kg even
+    # fully saturated; anything O(1) means the scale factor was lost.
+    assert float(jnp.abs(qv).max()) < 0.5
+    assert bool(jnp.all(jnp.isfinite(out.T_hat.data)))
+
+
 def test_column_physics_moisture_head_is_live():
     """The dq_v/dt head must reach the q_v tracer tendency (it was
     previously silently discarded — no moisture physics at all)."""

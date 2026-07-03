@@ -75,6 +75,16 @@ __physics_contract__ = {
 # Default neural-column architecture width + residual output scale (structural).
 _DEFAULT_HIDDEN_DIM = 256
 _DEFAULT_RESIDUAL_SCALE = 0.01
+# The NeuralPhysics rate head shares one residual_scale calibrated for
+# TEMPERATURE tendencies (K/s).  Moisture tendencies live ~3 orders lower
+# (SFNO per-channel scales: dT 1e-4 K/s vs dq 1e-7 kg/kg/s), so the q_v head
+# is multiplied by this factor before entering the tracer tendency.  Without
+# it an UNTRAINED head emits O(1e-3 kg/kg/s) and q_v explodes within a 6 h
+# rollout (probe 2026-07-03: q_v -> 4e2 by step 6, NaN by step 36 — the
+# column_nn retrain epoch-0 NaN).  1e-4 caps the head at
+# residual_scale*tendency_cap*1e-4 = 5e-6 kg/kg/s: ~5-50x typical physical
+# moisture tendencies, the same relative headroom the T head has.
+_Q_HEAD_TENDENCY_FACTOR = 1.0e-4
 
 
 
@@ -239,7 +249,10 @@ def make_column_physics_fn(
             # dq_v/dt from the moisture head (outputs nlev:2*nlev).  Before
             # this the head was silently discarded — the column NN had NO
             # moisture physics (no condensation sink / evaporation source).
-            dq_v_dt = y[:, nlev:2 * nlev].reshape(n_lat, n_lon, nlev)
+            # Rescaled to moisture magnitudes (_Q_HEAD_TENDENCY_FACTOR).
+            dq_v_dt = (
+                y[:, nlev:2 * nlev] * _Q_HEAD_TENDENCY_FACTOR
+            ).reshape(n_lat, n_lon, nlev)
             template = state.tracers["q_v"]
             if hasattr(template, "data") and hasattr(template, "replace"):
                 tracers_out["q_v"] = template.replace(
