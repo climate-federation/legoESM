@@ -128,6 +128,37 @@ class TestVerticalDiffusion:
         result = implicit_vertical_diffusion(phi, K_half, rho, dz, dz_half, 60.0, sflx)
         assert result.shape == (ncol, nlev)
 
+    def test_float64_inputs_coerced_to_field_dtype_no_warning(self):
+        """A float32 field with WIDER (float64) coefficients — e.g. a per-column C_K
+        diagnosed in float64 by the LES-informed correction loop feeding a float32 run —
+        stays in the field's dtype: the coefficients are coerced so the tridiagonal
+        scatters do NOT emit a float64→float32 JAX FutureWarning (a future error), and
+        the result is BIT-IDENTICAL to passing the same values already in float32."""
+        import warnings
+
+        import numpy as np
+
+        ncol, nlev = 4, 10
+        phi = jnp.ones((ncol, nlev), dtype=jnp.float32)
+        wide = dict(
+            K_half=jnp.full((ncol, nlev - 1), 12.0, dtype=jnp.float64),
+            rho=jnp.full((ncol, nlev), 1.2, dtype=jnp.float64),
+            dz=jnp.full((ncol, nlev), 900.0, dtype=jnp.float64),
+            dz_half=jnp.full((ncol, nlev - 1), 950.0, dtype=jnp.float64),
+            sflx=jnp.zeros(ncol, dtype=jnp.float64))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FutureWarning)    # the cast must silence it
+            out = implicit_vertical_diffusion(
+                phi, wide["K_half"], wide["rho"], wide["dz"], wide["dz_half"], 60.0,
+                wide["sflx"])
+        assert out.dtype == jnp.float32                      # stays in the field's dtype
+        # Behavior-preserving: identical to the same values supplied already in float32.
+        out_f32 = implicit_vertical_diffusion(
+            phi, wide["K_half"].astype(jnp.float32), wide["rho"].astype(jnp.float32),
+            wide["dz"].astype(jnp.float32), wide["dz_half"].astype(jnp.float32), 60.0,
+            wide["sflx"].astype(jnp.float32))
+        np.testing.assert_array_equal(np.asarray(out), np.asarray(out_f32))
+
     def test_conserves_column_integral(self):
         """With zero surface flux, column integral should be conserved."""
         ncol, nlev = 3, 8

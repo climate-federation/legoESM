@@ -16,7 +16,7 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from legoesm import constants
 
@@ -269,6 +269,14 @@ class ExperimentConfig(NamedTuple):
     # Integration
     days: int = 200
     start_day: float = 0.0
+    # Optional seasonal alignment for the radiation insolation ONLY (decoupled
+    # from the relative-indexed AMIP SST forcing). When set, model day 0 maps to
+    # this noleap day-of-year [1, 366) for the insolation day_of_year, so an
+    # AMIP run started from a non-January ERA5 date can run the matching solar
+    # season WITHOUT shifting start_day (which would push the relative SST out of
+    # range). None => legacy behavior: day 0 -> Jan 1 (day_to_calendar(0)).
+    # See docs/COMPARE_REANALYSIS.md (iter 449). CODEX PENDING (radiation path).
+    insolation_start_doy: float | None = None
 
     # Forcing
     dataset: str = "analytical"
@@ -757,6 +765,19 @@ class ExperimentConfig(NamedTuple):
     # carry is not yet SPMD-routed.  Default off preserves all existing paths.
     enable_latlon_spmd: bool = False
 
+    # Optional explicit turbulence scheme config (a
+    # ``atmosphere.physics.turbulence.config.TurbulenceConfig``) overriding the
+    # default ``TurbulenceConfig(scheme=turbulence)`` that the driver builds from
+    # the scheme STRING.  Lets a caller inject a refined / per-column scheme
+    # sub-config (e.g. a corrected per-column ``clubb_lite.C_K`` field from the
+    # LES-informed correction loop) WITHOUT a new driver signature.  Its
+    # ``.scheme`` MUST equal ``turbulence`` (it refines the same scheme, it does
+    # NOT switch schemes — validated in ``validate_strict``).  ``None`` (default)
+    # ⇒ the driver builds the default config, byte-identical to before.  Typed
+    # ``Any`` to avoid importing the atmosphere physics config into the driver
+    # config module.
+    turbulence_override: Any = None
+
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
 
@@ -1046,6 +1067,21 @@ class ExperimentConfig(NamedTuple):
                 errors.append(
                     f"{_f}={_v!r} out of range [{_lo}, {_hi}]"
                 )
+        if self.turbulence_override is not None:
+            from legoesm.atmosphere.physics.turbulence.config import (
+                TurbulenceConfig,
+            )
+            if not isinstance(self.turbulence_override, TurbulenceConfig):
+                errors.append(
+                    "turbulence_override must be a TurbulenceConfig, got "
+                    f"{type(self.turbulence_override).__name__}"
+                )
+            elif self.turbulence_override.scheme != self.turbulence:
+                errors.append(
+                    f"turbulence_override.scheme={self.turbulence_override.scheme!r} "
+                    f"must equal turbulence={self.turbulence!r} (an override refines "
+                    f"the same scheme's sub-config, it does not switch schemes)"
+                )
         _valid_gwd = (
             "rayleigh", "lindzen", "mcfarlane", "hines",
             "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",
@@ -1185,6 +1221,15 @@ class ExperimentConfig(NamedTuple):
                     "--evaluation-data-root-dir or the "
                     "LEGOESM_CLIMATEEVAL_DATA_ROOT environment variable. "
                     "See docs/user-guide/climateeval_evaluation.md."
+                )
+
+        # Seasonal insolation alignment (radiation-only; see the field doc).
+        if self.insolation_start_doy is not None:
+            _doy = self.insolation_start_doy
+            if not (isinstance(_doy, (int, float)) and 1.0 <= float(_doy) < 366.0):
+                errors.append(
+                    "insolation_start_doy must be None or a noleap day-of-year "
+                    f"in [1, 366), got {self.insolation_start_doy!r}"
                 )
 
         if errors:
@@ -1576,6 +1621,12 @@ def experiment_config_to_dict(config: ExperimentConfig) -> dict:
     positional list (NamedTuple is a tuple), losing field names.
     """
     d = config._asdict()
+    # ``turbulence_override`` is a RUNTIME-ONLY injection (it may carry a
+    # per-column JAX array C_K) — it is NOT persisted: the serialized config is
+    # the base config, and the override is re-applied in memory after load (the
+    # correction loop's build_driver). Drop it so it cannot be stringified +
+    # silently corrupted on round-trip.
+    d["turbulence_override"] = None
     for key in _SUB_CONFIGS:
         sub = d[key]
         if hasattr(sub, '_asdict'):
@@ -1629,6 +1680,9 @@ def config_to_dict(config) -> dict:
     ``forcing.amip_config`` for serialization (federation carve, Step 3).
     """
     d = config._asdict()
+    # Runtime-only injection — never serialized (see experiment_config_to_dict).
+    if "turbulence_override" in d:
+        d["turbulence_override"] = None
     for key, val in d.items():
         if hasattr(val, "_asdict"):
             d[key] = val._asdict()

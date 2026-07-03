@@ -15,10 +15,10 @@ import logging
 from pathlib import Path
 
 import jax.numpy as jnp
+from legoesm.driver.config import ExperimentConfig
+from legoesm.driver.model_driver import ModelDriver
 
 from legoesm import constants
-from legoesm.driver.model_driver import ModelDriver
-from legoesm.driver.config import ExperimentConfig
 
 logger = logging.getLogger("legoesm.driver.earth_system")
 
@@ -68,11 +68,11 @@ class EarthSystemDriver:
         self._atm.setup()
 
         # 2. Coupler setup
-        from legoesm.coupler.coupler import make_coupler, init_surface_state
         from legoesm.coupler.config import CouplerConfig, TileConfig
-        from legoesm.land.config import LandConfig
-        from legoesm.ice.config import SeaIceConfig
+        from legoesm.coupler.coupler import init_surface_state, make_coupler
         from legoesm.coupler.lake.config import LakeConfig
+        from legoesm.ice.config import SeaIceConfig
+        from legoesm.land.config import LandConfig
 
         self._coupler_cfg = self._coupler_config or CouplerConfig()
         land_cfg = self._land_config or LandConfig()
@@ -179,9 +179,12 @@ class EarthSystemDriver:
         snow_frac = snow_fraction(T_low, constants.T_freeze)
         precip_snow = precip_total * snow_frac
 
-        # Cosine zenith: daily-mean approximation cos_zen = Q / S_0
-        from legoesm.forcing.time_utils import day_to_calendar
-        doy, _ = day_to_calendar(day)
+        # Cosine zenith: daily-mean approximation cos_zen = Q / S_0.  Route the day-of-year
+        # through the atmosphere's seasonal insolation seam (iter 449/462) so the surface
+        # insolation runs the SAME season as the atmosphere (config.insolation_start_doy) —
+        # offset 0 (default) == day_to_calendar(day), byte-identical. Mirrors CoupledESMDriver
+        # (iter 461); else the surface saw JANUARY insolation while the atmosphere did not.
+        doy, _ = self._atm._calendar_for_radiation(day)
         lat = self._atm._grid_lat
         if lat is not None:
             from legoesm.atmosphere.physics.radiation.solar import (
@@ -228,8 +231,9 @@ class EarthSystemDriver:
         # Get ocean SST for ice coupling
         sst, _ = self._atm.get_sst_sic(day)
 
-        from legoesm.forcing.time_utils import day_to_calendar
-        doy, _ = day_to_calendar(day)
+        # Same seasonal insolation seam as the atmosphere (iter 449/462) for the surface
+        # step's day-of-year; offset 0 (default) => identical.
+        doy, _ = self._atm._calendar_for_radiation(day)
 
         self._sfc_state, sfc_response = self._step_surface(
             self._sfc_state,
