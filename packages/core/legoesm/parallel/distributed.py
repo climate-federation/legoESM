@@ -133,6 +133,16 @@ def initialize_jax_distributed_multiprocess(
             break
     if _launcher_size is not None and _launcher_size <= 1:
         return 0, 1
+    if _launcher_size is None:
+        # NO launcher env at all (codex Medium): overwhelmingly a plain
+        # ``python script.py`` — honour the documented no-optional-dep
+        # single-process contract when mpi4py is absent.  When mpi4py IS
+        # importable, still probe COMM_WORLD (an exotic launcher that
+        # exports none of the four vars gets correct rank discovery
+        # rather than a silent N-way replicated-serial run).
+        import importlib.util
+        if importlib.util.find_spec("mpi4py") is None:
+            return 0, 1
 
     MPI = _require_mpi4py()
     comm = MPI.COMM_WORLD

@@ -1770,10 +1770,7 @@ class ModelDriver:
                 perf_mode = (
                     (self._device_config is not None
                      and self._device_config.is_distributed)
-                    or (self.config.distributed
-                        and getattr(self.config, "distributed_mode",
-                                    "mpi") == "spmd"
-                        and jax.process_count() > 1)
+                    or self._is_spmd_multiprocess()
                 )
             else:
                 raise ValueError(
@@ -1813,10 +1810,7 @@ class ModelDriver:
         # single-process collect on each process — identical host inputs
         # give identical accumulators on every rank, and the flush/save
         # sites are already root-gated via _mpi_rank=process_index.
-        if (not perf_mode
-                and self.config.distributed
-                and getattr(self.config, "distributed_mode", "mpi") == "spmd"
-                and jax.process_count() > 1):
+        if not perf_mode and self._is_spmd_multiprocess():
             state = kwargs.get('state', self.state)
             jax.block_until_ready(state.u.data)
             kwargs['state'] = self._gather_spmd_tree_to_host(state)
@@ -3200,9 +3194,7 @@ class ModelDriver:
         # the state is gathered to a host replica first, process 0 writes).
         _state, _q_v, _q_c, _q_r = self.state, self.q_v, self.q_c, self.q_r
         _carry_aux = self._checkpoint_carry_aux()
-        if (self.config.distributed
-                and getattr(self.config, "distributed_mode", "mpi") == "spmd"
-                and jax.process_count() > 1):
+        if self._is_spmd_multiprocess():
             # Multi-controller SPMD (cs_spmd step 5a): every process holds
             # only its shard of the face-sharded global arrays, and every
             # process runs this method in lockstep.  Gather each leaf to a
@@ -3291,22 +3283,70 @@ class ModelDriver:
             )
 
         # Multi-controller SPMD: every process ran the collective gather
-        # and the (identical) guards above; only process 0 writes.
-        if _spmd_nonroot:
+        # and the (identical) guards above; only process 0 writes.  The
+        # write itself is wrapped so a root-only I/O failure reaches every
+        # process via the rendezvous below (codex HIGH: otherwise non-root
+        # returned here and hung on the run loop's next collective while
+        # root died).
+        _write_err: Exception | None = None
+        if not _spmd_nonroot:
+            try:
+                save_restart(
+                    path=ckpt_path,
+                    state=_state,
+                    q_v=_q_v,
+                    step=step,
+                    day=day,
+                    config=self.config,
+                    q_c=_q_c,
+                    q_r=_q_r,
+                    carry_aux=_carry_aux,
+                    backend=backend,
+                )
+                logger.info(f"  Checkpoint: {ckpt_path.name}")
+            except Exception as e:
+                _write_err = e
+        self._spmd_barrier_on_root_error(_write_err)
+
+    def _is_spmd_multiprocess(self) -> bool:
+        """True iff this run is multi-controller SPMD across >1 process
+        (distributed_mode='spmd' under a real multi-process launch) — the
+        regime where output writes are root-gated and every gather is a
+        collective."""
+        return (self.config.distributed
+                and getattr(self.config, "distributed_mode", "mpi") == "spmd"
+                and jax.process_count() > 1)
+
+    def _spmd_barrier_on_root_error(self, err: Exception | None) -> None:
+        """Rendezvous all SPMD processes on the success of a ROOT-ONLY write.
+
+        Root-gated I/O (diagnostics.save / save_results / the checkpoint
+        save_restart tail) runs on process 0 only.  Without a rendezvous, a
+        root-only exception kills process 0 while the other processes sail
+        into the NEXT collective (segment scan, process_allgather) and hang
+        until walltime (codex 2026-07-03 HIGH).  Every process calls this
+        with its local error (non-root: None); the root flag is broadcast
+        and EVERY process raises when root failed.  No-op outside
+        multi-process SPMD (single process / mpi4jax keep their native
+        exception flow)."""
+        if not self._is_spmd_multiprocess():
+            if err is not None:
+                raise err
             return
-        save_restart(
-            path=ckpt_path,
-            state=_state,
-            q_v=_q_v,
-            step=step,
-            day=day,
-            config=self.config,
-            q_c=_q_c,
-            q_r=_q_r,
-            carry_aux=_carry_aux,
-            backend=backend,
-        )
-        logger.info(f"  Checkpoint: {ckpt_path.name}")
+        from jax.experimental import multihost_utils as _mhu
+        # allgather+max (not broadcast_one_to_all): symmetric — ANY
+        # process's failure surfaces on every process, not just root's.
+        _flags = _mhu.process_allgather(
+            jnp.asarray(0.0 if err is None else 1.0))
+        if err is not None:
+            raise err
+        if float(jnp.max(_flags)) != 0.0:
+            raise RuntimeError(
+                "multi-controller SPMD: another process failed during a "
+                "root-gated output write (see its traceback); aborting "
+                "this process in lockstep instead of hanging on the next "
+                "collective."
+            )
 
     def _gather_spmd_tree_to_host(self, tree):
         """Gather every non-fully-addressable jax.Array leaf of *tree* to a
@@ -5803,10 +5843,19 @@ class ModelDriver:
         logger.info(f"Done: {total_wall:.1f}s wall time, status={run_status}")
 
         _is_root = (self._mpi_rank is None or self._mpi_rank == 0)
+        # Root-only writes are wrapped so a root failure surfaces on EVERY
+        # SPMD process BEFORE the final save_checkpoint (whose spmd tail
+        # opens with a collective gather — a dead root there is a hang,
+        # codex HIGH).  No-op (native raise) outside multi-process SPMD.
+        _finalize_err: Exception | None = None
         if _is_root:
-            self.diagnostics.save(self._output_dir)
-            self.save_results(run_status, t_jit, total_wall)
-            logger.info(self.diagnostics.print_summary())
+            try:
+                self.diagnostics.save(self._output_dir)
+                self.save_results(run_status, t_jit, total_wall)
+                logger.info(self.diagnostics.print_summary())
+            except Exception as e:
+                _finalize_err = e
+        self._spmd_barrier_on_root_error(_finalize_err)
 
         if checkpoint_interval > 0:
             self.save_checkpoint(n_steps_total, START_DAY + N_DAYS)
