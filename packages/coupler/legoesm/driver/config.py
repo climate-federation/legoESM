@@ -946,15 +946,19 @@ class ExperimentConfig(NamedTuple):
                 f"surface layer uses the same bulk-flux algorithm as the ocean "
                 f"tile; got turbulence='none'."
             )
-        # Tiled (mosaic) surface fluxes inject a per-tile flux as the louis BL
-        # bottom boundary condition; only the louis kernel accepts it, so reject
-        # the combination loudly rather than silently ignoring the request
-        # (dispatch hardening).
-        if self.surface_tiled and self.turbulence != "louis":
+        # Tiled (mosaic) surface fluxes inject a per-tile flux as the BL bottom
+        # boundary condition; only the kernels that accept the injected
+        # ``surface_flux=(tau_x, tau_y, shflx, lhflx, ustar)`` tuple can consume
+        # it (louis and the CLUBB family — clubb_lite / clubb, the latter routing
+        # the flux through clubb_step's kinematic prescribed-BC interface).
+        # Reject any other scheme loudly rather than silently ignoring the
+        # request (dispatch hardening).
+        _tiled_turbulence = ("louis", "clubb_lite", "clubb")
+        if self.surface_tiled and self.turbulence not in _tiled_turbulence:
             errors.append(
                 f"surface_tiled=True is currently supported only with "
-                f"turbulence='louis' (the kernel that consumes the injected "
-                f"tiled surface flux); got turbulence={self.turbulence!r}."
+                f"turbulence in {_tiled_turbulence} (the kernels that consume the "
+                f"injected tiled surface flux); got turbulence={self.turbulence!r}."
             )
         if self.surface_tiled and not (self.slab_land_active
                                        or self.land_mask_path

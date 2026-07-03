@@ -25,6 +25,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 # Ensure the project root is on sys.path for test_cases imports
 _project_root = Path(__file__).resolve().parents[2]
@@ -41,6 +42,136 @@ logging.basicConfig(
 logger = logging.getLogger("run_coupled")
 
 _LAND_SCHEMES = ("slab", "multilayer")
+
+def _check_params_clobber(params: dict, land_params: str) -> None:
+    """Refuse --params overrides that ``CoupledESMDriver.setup()`` would clobber.
+
+    The coupled driver REBUILDS several component sub-configs during setup from
+    external maps / scheme-forcing, discarding a ``--params`` override on them:
+
+    * the **ocean** config is rebuilt from the mesh/preset — calibrate the ocean
+      via ``run_omip.py --params`` (0 ocean params are coupled-only);
+    * the **land carbon** config is rebuilt regardless of the land path (carbon-
+      active + differland, and the multilayer diurnal-surface force-upgrade to
+      differland) — calibrate via ``run_lmip.py --params``;
+    * under ``--land-params clm`` (the default) the CLM reference surfdata maps
+      and the per-PFT parameter provider override essentially ALL config-level
+      land parameters (drag, soil hydraulics/thermal, surface + material fields),
+      so no ``land.*`` override is effective — pass ``--land-params analytical``
+      (or use ``run_lmip.py``) to calibrate land via ``--params``.
+
+    Refuse each loudly (dispatch-hardening), pointing at the effective path, so a
+    ``--params`` override is never silently dropped.  Everything run_coupled owns
+    and passes through unchanged — atmosphere scalars, sea-ice, coupler, and the
+    non-carbon land config under ``--land-params analytical`` — still applies.
+    """
+    if not params:
+        return
+    keys = set(params)
+
+    ocean = sorted(k for k in keys if k.split(".")[0] == "ocean")
+    if ocean:
+        raise SystemExit(
+            f"run_coupled --params: ocean parameter(s) {ocean} are not settable "
+            "here — the coupled driver rebuilds the ocean config from the "
+            "mesh/preset during setup.  Calibrate the ocean via "
+            "`run_omip.py --params`."
+        )
+
+    carbon = sorted(k for k in keys if k.startswith("land.carbon."))
+    if carbon:
+        raise SystemExit(
+            f"run_coupled --params: land carbon parameter(s) {carbon} are not "
+            "settable here — the coupled driver rebuilds the carbon config "
+            "during setup (carbon-active / differland, and the multilayer "
+            "diurnal-surface force-upgrade).  Calibrate land carbon via "
+            "`run_lmip.py --params`."
+        )
+
+    if land_params == "clm":
+        land = sorted(k for k in keys if k.split(".")[0] == "land")
+        if land:
+            raise SystemExit(
+                f"run_coupled --params: land parameter(s) {land} are not settable "
+                "under --land-params clm (the default) — the CLM reference "
+                "surfdata maps and the per-PFT parameter provider override the "
+                "config-level land parameters during setup.  Pass --land-params "
+                "analytical to calibrate land via --params, or use "
+                "`run_lmip.py --params`."
+            )
+
+
+class _CoupledParamsBundle(NamedTuple):
+    """--params routing bundle: every non-atmosphere component config
+    run_coupled passes explicitly to ``CoupledESMDriver``.  A single bundle
+    application keeps the loader's absent/ambiguous detection exact."""
+
+    coupled: object
+    coupler: object
+    ice: object
+    lake: object
+
+
+def build_params_bundle(coupled_cfg, coupler_config=None) -> _CoupledParamsBundle:
+    """The exact --params bundle ``apply_coupled_params`` routes into: the
+    coupled config plus the coupler / sea-ice / lake configs (defaults when
+    None — ``CoupledESMDriver`` builds the identical defaults, so a no-params
+    run is unchanged).  The reachability audit
+    (tests/unit/test_params_reachability_audit.py) walks THIS bundle, so the
+    audited routing surface cannot drift from what main() applies."""
+    from legoesm.coupler.config import CouplerConfig
+    from legoesm.coupler.lake.config import LakeConfig
+    from legoesm.ice.config import SeaIceConfig
+
+    return _CoupledParamsBundle(
+        coupled=coupled_cfg,
+        coupler=coupler_config or CouplerConfig(),
+        ice=SeaIceConfig(),
+        lake=LakeConfig(),
+    )
+
+
+def apply_coupled_params(params_path, land_params, atm_config, coupled_cfg,
+                         coupler_config):
+    """Apply the --params calibration layer (issue #691) across EVERY component
+    config this driver builds: atmosphere params route to the flattened
+    ExperimentConfig scalars (scalar map); land params route into the
+    coupled_cfg's nested land_config; coupler/ice/lake params route into the
+    coupler/sea-ice/lake configs (built here with their defaults and passed
+    explicitly — CoupledESMDriver builds the identical defaults when they are
+    None, so a no-params run is unchanged).
+
+    Returns ``(atm_config, coupled_cfg, coupler_config, ice_config,
+    lake_config)``; ice/lake stay ``None`` when no non-atmosphere params are
+    given.  Single source of truth for the split-and-bundle application:
+    ``main()`` calls this, and the unit tests exercise it directly
+    (tests/unit/test_run_coupled_config_yaml.py)."""
+    from legoesm.driver.run_config_yaml import (
+        apply_params_to_config,
+        build_atm_scalar_param_map,
+        load_params_config,
+    )
+
+    ice_config = None
+    lake_config = None
+    params = load_params_config(params_path)
+    _check_params_clobber(params, land_params)
+    amap = build_atm_scalar_param_map()
+    atm_params = {k: v for k, v in params.items() if k in amap}
+    rest_params = {k: v for k, v in params.items() if k not in amap}
+    if atm_params:
+        atm_config = apply_params_to_config(
+            atm_config, atm_params, driver="run_coupled",
+            scalar_param_map=amap)
+    if rest_params:
+        bundle = apply_params_to_config(
+            build_params_bundle(coupled_cfg, coupler_config),
+            rest_params, driver="run_coupled")
+        coupled_cfg = bundle.coupled
+        coupler_config = bundle.coupler
+        ice_config = bundle.ice
+        lake_config = bundle.lake
+    return atm_config, coupled_cfg, coupler_config, ice_config, lake_config
 
 
 def land_scheme_overrides(land_scheme: str) -> dict:
@@ -618,17 +749,9 @@ def main():
         start_year=args.start_year,
         n_devices=args.n_devices if args.n_devices is not None else "auto",
     )
-    # Apply the --params calibration layer to the flattened atmosphere
-    # ExperimentConfig scalar fields (issue #691).
-    if getattr(args, "params", None):
-        from legoesm.driver.run_config_yaml import (
-            apply_params_to_config,
-            build_atm_scalar_param_map,
-            load_params_config,
-        )
-        atm_config = apply_params_to_config(
-            atm_config, load_params_config(args.params), driver="run_coupled",
-            scalar_param_map=build_atm_scalar_param_map())
+    # (--params is applied AFTER coupled_cfg / coupler_config are built, just
+    # before driver construction, so it can reach every component's config —
+    # see the calibration block below; issue #691.)
 
     # Build coupled config from preset with overrides.  The ocean_config is
     # ALWAYS overridden from --ocean so the coupled default is the two_layer
@@ -772,8 +895,21 @@ def main():
         logger.info("  Surface bulk-flux scheme: %s (atmosphere + coupler "
                     "ocean tile)", args.surface_bulk_scheme)
 
+    # Apply the --params calibration layer (issue #691) across EVERY component
+    # config this driver builds — see apply_coupled_params (the single source
+    # of truth for the atm-scalar-map / coupled-bundle split, exercised
+    # directly by the unit tests and the reachability audit).
+    ice_config = None
+    lake_config = None
+    if getattr(args, "params", None):
+        (atm_config, coupled_cfg, coupler_config, ice_config,
+         lake_config) = apply_coupled_params(
+            args.params, args.land_params, atm_config, coupled_cfg,
+            coupler_config)
+
     driver = CoupledESMDriver(
         atm_config, coupled_cfg, coupler_config=coupler_config,
+        ice_config=ice_config, lake_config=lake_config,
         ocean_grid=ocean_grid_obj, output_dir=args.output,
     )
 

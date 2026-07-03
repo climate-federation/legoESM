@@ -1,0 +1,221 @@
+"""Strong/weak scaling bench for the lat-band SPMD lat-lon C-grid OCEAN step.
+
+The ocean FULL-STEP twin of ``bench_atm_latlon_spmd_scaling.py`` (which this
+mirrors flag-for-flag), closing the "no automated ocean full-step strong/weak
+harness" gap: ``bench_ocean_mpi_scaling.py`` is the route-A (mpi4jax) phase-
+split bench and ``bench_ocean_latlon_spmd_pcg.py`` times the barotropic PCG
+KERNEL only — neither times the composed production step
+(``make_sharded_ocean_step``: baroclinic + split-explicit barotropic +
+implicit vmix + tracers) under the lat-band SPMD backend.
+
+  strong: fixed (n_lat, n_lon, nlev), vary n_devices -> speedup = t(1)/t(n).
+  weak:   n_lat = nlat_per_dev * n_devices (fixed per-device rows) -> ideal flat.
+
+Device count is fixed at process start, so each n_devices runs as a SEPARATE
+process (one sbatch step per count); this script benches ONE n_devices and
+appends a JSON line. JAX_PLATFORMS=cpu with --xla_force_host_platform_device_count
+gives virtual CPU devices (communication-overhead characterization, NOT a real
+speedup); a real number needs one GPU per band. Run with JAX_ENABLE_X64=1 (the
+ocean step's validated precision lane).
+
+Multi-controller (route-B, ``--multicontroller``): identical contract to the
+atm bench — every process calls ``jax.distributed.initialize`` BEFORE any
+other JAX use, the ("lat",) mesh is built over the GLOBAL ``jax.devices()``,
+and the existing ``make_sharded_ocean_step`` band-ppermute halo + psum
+reductions (incl. the barotropic ``_global_sum_pair``) run unchanged across
+processes (NCCL on GPU / gloo on CPU). NO mpi4jax is armed in this mode (the
+documented mixed-stack deadlock hazard).
+
+Launch (cluster, one process per GPU):
+  srun -n 8 python bench_ocean_latlon_spmd_scaling.py --multicontroller \
+      --n-devices 8 ...            # SLURM: coordinator auto-detected
+  mpiexec -n 8 python ... --multicontroller --coordinator host0:9876
+CPU smoke (single process, virtual devices):
+  JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  JAX_ENABLE_X64=1 python scripts/bench/bench_ocean_latlon_spmd_scaling.py \
+      --n-lat 48 --n-lon 96 --nlev 10 --n-devices 4 --steps 4
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import time
+
+import jax
+import numpy as np
+
+
+def build_model_and_state(n_lat, n_lon, nlev, seed=0):
+    """Ocean model + gently perturbed rest state (flat 4000 m bottom).
+
+    The perturbation (small u/v/eta/T noise on the rest stratification)
+    exercises every term of the composed step — advection, Coriolis, PGF, the
+    split-explicit barotropic and implicit vmix — instead of the trivial rest
+    fixed point, mirroring the SPMD equivalence gate's IC recipe.
+    """
+    import jax.numpy as jnp
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+    z_coord = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
+    model = LatLonCGridOceanModel(grid, z_coord,
+                                  LatLonCGridOceanConfig.from_flat())
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+        H_max=4000.0)
+    rng = np.random.default_rng(seed)
+    # Project the velocity noise through the face masks: v_mask zeroes the pole
+    # WALL rows, so the nd=1 and nd>1 runs time the SAME initial state (the
+    # nd>1 shard drops v[n_lat] and reconstructs it as the pole-wall zero — a
+    # random value there would make strong-scaling ICs differ across device
+    # counts; codex).
+    u_mask = np.asarray(state.u_mask.data)[..., None]
+    v_mask = np.asarray(state.v_mask.data)[..., None]
+    u = 0.02 * rng.standard_normal((n_lat, n_lon + 1, nlev)) * u_mask
+    v = 0.02 * rng.standard_normal((n_lat + 1, n_lon, nlev)) * v_mask
+    eta = 0.005 * rng.standard_normal((n_lat, n_lon))
+    temp = (5.0 + 15.0 * np.exp(np.linspace(0, -4, nlev))[None, None, :]
+            + 0.05 * rng.standard_normal((n_lat, n_lon, nlev)))
+    state = state._replace(
+        u=state.u.replace(data=jnp.asarray(u)),
+        v=state.v.replace(data=jnp.asarray(v)),
+        eta=state.eta.replace(data=jnp.asarray(eta)),
+        T=state.T.replace(data=jnp.asarray(temp)))
+    return model, state
+
+
+def _block(state):
+    jax.block_until_ready([leaf for leaf in jax.tree.leaves(state)
+                           if leaf is not None])
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--n-lat", type=int, default=96)
+    p.add_argument("--n-lon", type=int, default=192)
+    p.add_argument("--nlev", type=int, default=20)
+    p.add_argument("--n-devices", type=int, required=True)
+    p.add_argument("--mode", choices=["strong", "weak"], default="strong")
+    p.add_argument("--nlat-per-dev", type=int, default=24,
+                   help="weak mode: lat rows per device")
+    p.add_argument("--steps", type=int, default=12)
+    p.add_argument("--warmup", type=int, default=2)
+    p.add_argument("--dt", type=float, default=600.0)
+    p.add_argument("--out", type=str,
+                   default="results/a1/ocean_spmd_scaling.jsonl")
+    p.add_argument("--multicontroller", action="store_true",
+                   help="Route-B multi-controller: jax.distributed.initialize "
+                        "per process, ('lat',) mesh over the GLOBAL device set "
+                        "(one process per GPU / per CPU-device group). NO "
+                        "mpi4jax. --n-devices must equal the global device "
+                        "count.")
+    p.add_argument("--coordinator", type=str, default=None,
+                   help="host:port for jax.distributed when auto-detection "
+                        "(SLURM) is unavailable; process count/id then come "
+                        "from OMPI_COMM_WORLD_SIZE/RANK.")
+    args = p.parse_args()
+
+    # Validate the timing window BEFORE any model/device work: an empty steady
+    # slice would make np.median NaN / np.min raise only AFTER the (expensive)
+    # benchmark already ran (codex).
+    if args.steps < 1:
+        raise SystemExit(f"--steps must be >= 1, got {args.steps}")
+    if not (0 <= args.warmup < args.steps):
+        raise SystemExit(
+            f"--warmup must satisfy 0 <= warmup < steps "
+            f"(got warmup={args.warmup}, steps={args.steps})")
+
+    if args.multicontroller:
+        # MUST run before any other JAX use (backend init). SLURM auto-detects;
+        # mpiexec/OpenMPI needs the explicit coordinator + OMPI env vars.
+        if args.coordinator is not None:
+            n_procs = int(os.environ["OMPI_COMM_WORLD_SIZE"])
+            proc_id = int(os.environ["OMPI_COMM_WORLD_RANK"])
+            jax.distributed.initialize(
+                coordinator_address=args.coordinator,
+                num_processes=n_procs, process_id=proc_id)
+        else:
+            jax.distributed.initialize()
+
+    from legoesm.ocean.dynamics.sharded_ocean_step import (
+        make_sharded_ocean_step,
+        shard_state_latlon,
+    )
+
+    nd = args.n_devices
+    avail = len(jax.devices())
+    if avail < nd:
+        raise SystemExit(f"need {nd} devices, have {avail} "
+                         f"(set --xla_force_host_platform_device_count)")
+    if args.multicontroller and nd != avail:
+        # A mesh over a strict subset would leave some processes' devices out
+        # of the program (non-addressable participation hazard). Route-B uses
+        # ALL global devices: one band per device across every process.
+        raise SystemExit(
+            f"--multicontroller: --n-devices ({nd}) must equal the GLOBAL "
+            f"device count ({avail} across {jax.process_count()} processes).")
+    n_lat = args.n_lat if args.mode == "strong" else args.nlat_per_dev * nd
+    if n_lat % nd != 0:
+        raise SystemExit(f"n_lat {n_lat} not divisible by n_devices {nd}")
+
+    model, s0 = build_model_and_state(n_lat, args.n_lon, args.nlev)
+    # Prime the build-once vertex-mask cache from the CONCRETE state so the
+    # wrapper can build the per-band vertex masks host-side.
+    model._ensure_vertex_mask(s0)
+
+    if nd == 1:
+        mesh = None
+        step = make_sharded_ocean_step(model, None)
+        s = s0
+    else:
+        mesh = jax.sharding.Mesh(np.array(jax.devices()[:nd]),
+                                 axis_names=("lat",))
+        step = make_sharded_ocean_step(model, mesh)
+        s = shard_state_latlon(s0, mesh)
+
+    # Per-step timing: step 0 includes compile; record each step so re-trace
+    # (every step slow) is visible vs steady-state (steps 1.. fast).
+    per_step_ms = []
+    for _ in range(args.steps):
+        t0 = time.perf_counter()
+        s = step(s, args.dt)
+        _block(s)
+        per_step_ms.append((time.perf_counter() - t0) * 1e3)
+
+    steady = per_step_ms[args.warmup:]
+    med = float(np.median(steady))
+    rec = dict(
+        component="ocean",
+        mode=args.mode, n_devices=nd, n_lat=n_lat, n_lon=args.n_lon,
+        nlev=args.nlev, steps=args.steps,
+        platform=jax.default_backend(),
+        n_processes=jax.process_count(),
+        multicontroller=bool(args.multicontroller),
+        compile_ms=round(per_step_ms[0], 1),
+        steady_median_ms=round(med, 2),
+        steady_min_ms=round(float(np.min(steady)), 2),
+        per_step_ms=[round(x, 1) for x in per_step_ms],
+        cells=n_lat * args.n_lon * args.nlev,
+    )
+    # Multi-controller: every process times the same program; process 0 owns
+    # the JSONL + stdout (others would duplicate/corrupt the append).
+    if jax.process_index() == 0:
+        os.makedirs(os.path.dirname(args.out), exist_ok=True)
+        with open(args.out, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+        print(json.dumps(rec))
+        print(f"[ocean nd={nd} {args.mode} {n_lat}x{args.n_lon}x{args.nlev}] "
+              f"compile={rec['compile_ms']}ms steady_median={med:.2f}ms/step "
+              f"(per-step: {rec['per_step_ms']})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

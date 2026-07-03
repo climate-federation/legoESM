@@ -127,3 +127,97 @@ class TestFlushToDisk:
         # Lists should be cleared after flush
         assert len(collector.times) == 0
         assert len(collector.T_atm) == 0
+
+
+class TestCollectTLowMean:
+    """CMOR ``tas`` uses the segment-mean lowest-level T when provided.
+
+    ``collect(..., t_low_mean=...)`` must shift the spatial-monthly ``tas``
+    field by exactly ``t_low_mean - T_low_instantaneous`` relative to a
+    collect without it (the instantaneous MOST 2 m offset is common to
+    both).  Guards the CMOR diurnal-alias fix at the collector level.
+    """
+
+    _NLAT, _NLON, _NLEV = 36, 72, 5
+
+    def _make_collector(self):
+        import jax.numpy as jnp
+
+        nlev = self._NLEV
+        # jnp (not np): collect() feeds these through the energy tracker's
+        # lax.scan, which indexes them with a traced level index.
+        sigma_full = jnp.linspace(0.1, 0.9, nlev)
+        dsigma = jnp.diff(jnp.linspace(0, 1, nlev + 1))
+        coll = DiagnosticCollector(
+            nlev=nlev,
+            sigma_full=sigma_full,
+            dsigma=dsigma,
+            monthly_means=True,
+            cmip_output=True,
+            n_days=30,
+            cmip_resolution_deg=5.0,   # 36 x 72 == native -> identity regrid
+        )
+
+        class _Grid:
+            lat = np.deg2rad(np.linspace(-87.5, 87.5, 36))
+            lon = np.deg2rad(np.linspace(2.5, 357.5, 72))
+
+        coll.set_cmip_grid_info("latlon", grid=_Grid(), start_year=1979)
+        return coll
+
+    def _collect(self, coll, t_low_mean=None):
+        import jax.numpy as jnp
+        from legoesm.core.field import Field
+        from legoesm.core.state import HydrostaticState
+
+        s3 = (self._NLAT, self._NLON, self._NLEV)
+        s2 = (self._NLAT, self._NLON)
+        T = jnp.full(s3, 280.0)
+        state = HydrostaticState(
+            u=Field(jnp.zeros(s3), name="u", dims=("lat", "lon", "level"), units="m/s"),
+            v=Field(jnp.zeros(s3), name="v", dims=("lat", "lon", "level"), units="m/s"),
+            T=Field(T, name="T", dims=("lat", "lon", "level"), units="K"),
+            p_s=Field(jnp.full(s2, 101325.0), name="p_s", dims=("lat", "lon"), units="Pa"),
+            phis=Field(jnp.zeros(s2), name="phis", dims=("lat", "lon"), units="m2/s2"),
+        )
+        coll.collect(
+            elapsed_day=5.0,
+            day=5.0,
+            state=state,
+            q_v=jnp.full(s3, 0.005),
+            q_c=jnp.zeros(s3),
+            q_r=jnp.zeros(s3),
+            sst=jnp.full(s2, 290.0),
+            sic=jnp.zeros(s2),
+            precip_total=jnp.zeros(s2),
+            sw_up_toa=jnp.full(s2, 100.0),
+            lw_up_toa=jnp.full(s2, 240.0),
+            sw_net_sfc=jnp.full(s2, 160.0),
+            lw_net_sfc=jnp.full(s2, -60.0),
+            sw_down_toa=jnp.full(s2, 340.0),
+            T_ice=271.35,
+            t_low_mean=t_low_mean,
+        )
+
+    def _monthly_tas_sum(self, coll):
+        (bucket,) = coll._spatial_monthly._data_2d.values()
+        arr, count = bucket["tas"]
+        assert count == 1
+        return np.asarray(arr)
+
+    def test_t_low_mean_shifts_cmor_tas(self):
+        import jax.numpy as jnp
+
+        coll_inst = self._make_collector()
+        self._collect(coll_inst, t_low_mean=None)
+        tas_inst = self._monthly_tas_sum(coll_inst)
+
+        offset = 5.0
+        coll_mean = self._make_collector()
+        self._collect(
+            coll_mean,
+            t_low_mean=jnp.full((self._NLAT, self._NLON), 280.0 + offset),
+        )
+        tas_mean = self._monthly_tas_sum(coll_mean)
+
+        np.testing.assert_allclose(tas_mean - tas_inst, offset, rtol=1e-6)

@@ -817,6 +817,193 @@ def bbl_distributed_drag_face_column(
     return -drag_r * u_field * overlap / (h_safe * h_bbl_eff)
 
 
+# --- NEMO zdfdrg non-linear bottom drag (np_non_lin / np_loglayer) -----------
+#
+# Shared, grid-agnostic core for the NEMO drag-law bottom friction
+# (nemo_5.0.1/src/OCE/ZDF/zdfdrg.F90).  The grid adapters average the
+# bottom-cell velocity components to the tracer point, call
+# :func:`nemo_effective_bottom_drag_r`, and average the resulting
+# coefficient back to the velocity faces (NEMO's dynzdf 2-point average
+# of ``rCdU_bot``).
+
+BOTTOM_DRAG_SCHEMES = ("legacy", "nemo_quadratic", "nemo_loglayer")
+
+
+def validate_bottom_drag_scheme(scheme: str) -> str:
+    """Fn-entry guard for the nested ``bottom_drag_scheme`` literal.
+
+    A nested dynamics-config field never reaches ``validate_strict``, so a
+    typo would silently run different physics — raise here instead (see
+    CLAUDE.md "Dispatch": nested scheme-Config dispatch raises too).
+    """
+    if scheme not in BOTTOM_DRAG_SCHEMES:
+        raise ValueError(
+            f"unknown bottom_drag_scheme={scheme!r}; expected one of "
+            f"{BOTTOM_DRAG_SCHEMES}"
+        )
+    return scheme
+
+
+def nemo_loglayer_cd(
+    h_bot: jnp.ndarray,
+    *,
+    z0: float,
+    cd_min: float,
+    cd_max: float,
+    von_karman: float,
+) -> jnp.ndarray:
+    """Log-layer drag coefficient ``Cd(h_bot)`` (zdfdrg.F90 np_loglayer).
+
+    NEMO (zdf_drg_nonlin, zdfdrg.F90:176-180)::
+
+        zzz = 0.5 * e3t(bottom)                 ! altitude above the boundary
+        zcd = ( vkarmn / LOG( zzz / z0 ) )**2
+        zcd = MIN( MAX( rn_Cd0, zcd ), rn_Cdmax )   ! rn_Cd0 <= Cd <= rn_Cdmax
+
+    i.e. the drag coefficient of a logarithmic boundary layer whose
+    velocity point sits half a bottom-cell above the seafloor, clipped
+    below by ``rn_Cd0`` (the quadratic-case coefficient acting as the
+    smooth-wall minimum) and above by ``rn_Cdmax``.
+
+    Numerical guards (F90-EXACT wherever the raw expression is finite —
+    codex r1 #4): NEMO evaluates the raw ``LOG`` and relies on the clip;
+    this port only (a) clamps the ``log = 0`` pole at ``½h = z0`` (raw
+    Cd → +inf there, which the clip already maps to ``cd_max`` — the
+    clamp reproduces exactly that limit), and (b) floors ``log`` at −30
+    (h below ~1e-10 m, i.e. only dry/masked cells) so reverse-mode AD
+    through masked columns stays finite.  For every representable wet
+    thickness the returned value equals ``clip((κ/ln(½h/z0))², cd0,
+    cdmax)`` bit-for-bit.
+
+    Parameters
+    ----------
+    h_bot : array
+        Bottom-cell thickness at the tracer point [m].
+    z0 : float
+        Bottom roughness length [m] (NEMO ``rn_z0``, ORCA1: 3e-3).
+    cd_min, cd_max : float
+        Clip bounds [-] (NEMO ``rn_Cd0`` = 1e-3, ``rn_Cdmax`` = 0.1).
+    von_karman : float
+        Von Kármán constant (``legoesm.constants.kappa_von_karman``).
+    """
+    ln_raw = jnp.log(jnp.maximum(0.5 * h_bot, jnp.exp(-30.0) * z0) / z0)
+    # log = 0 pole (½h = z0): raw Cd → +inf → the clip maps it to cd_max;
+    # substitute a tiny magnitude of the SAME sign structure so the
+    # division reproduces that limit without inf/NaN (AD-safe).
+    ln_safe = jnp.where(jnp.abs(ln_raw) < 1.0e-12, 1.0e-12, ln_raw)
+    cd = (von_karman / ln_safe) ** 2
+    return jnp.clip(cd, cd_min, cd_max)
+
+
+def nemo_effective_bottom_drag_r(
+    u_bot: jnp.ndarray,
+    v_bot: jnp.ndarray,
+    h_bot: jnp.ndarray,
+    *,
+    scheme: str,
+    cd0: float,
+    cd_max: float,
+    z0: float,
+    ke0: float,
+    von_karman: float,
+) -> jnp.ndarray:
+    """NEMO non-linear bottom-drag coefficient ``r = Cd·|U|`` at tracer points.
+
+    Transliterates ``zdf_drg_nonlin`` (zdfdrg.F90:171-191)::
+
+        ! np_loglayer:  zcd = clip( (vkarmn/LOG(0.5*e3t/z0))**2, Cd0, Cdmax )
+        ! np_non_lin:   zcd = Cd0
+        pCdU = - zcd * SQRT( 0.25*(zut**2 + zvt**2) + rn_ke0 )
+
+    where ``zut/zvt`` are 2x the tracer-point velocity components, so
+    ``0.25*(zut² + zvt²) = ū² + v̄²`` — the FULL speed at the tracer
+    point, with the background tidal kinetic energy ``rn_ke0`` [m²/s²]
+    combined in quadrature (NOT a max-floor: the NEMO form keeps the
+    drag quadratic through |U| → 0 with a smooth ``√ke0`` minimum
+    speed).
+
+    Sign convention: NEMO stores ``rCdU <= 0`` and applies it as an
+    implicit friction; legoESM's drag machinery uses a POSITIVE linear
+    coefficient ``r`` [m/s] with the minus sign applied in the tendency
+    (``du/dt = -r·u/h``).  This helper therefore returns ``+Cd·|U|``
+    (= ``-pCdU``), always >= 0.
+
+    Time-discretization note (deliberate deviation): ORCA1 runs
+    ``ln_drgimp = .true.`` — NEMO folds ``rCdU`` into the BACKWARD-EULER
+    vertical momentum matrix (dynzdf.F90).  legoESM applies the SAME
+    coefficient through its established explicit-tendency + ``F_slow``
+    path (single-owner drag doctrine, shared with every legacy scheme).
+    The discretization difference is O(dt·r/h) per step — ~5e-6 at OMIP
+    dt = 3600 s, r ~ 3e-4 m/s, h_bot ~ 200 m — and unconditionally
+    stable at those scales; the fidelity content of the port is the
+    COEFFICIENT.  An implicit placement would restructure the vertical
+    solve's bottom BC for all drag schemes and is tracked as follow-up.
+
+    Parameters
+    ----------
+    u_bot, v_bot : array
+        Bottom-cell velocity components AVERAGED TO THE TRACER POINT
+        [m/s] (the caller owns the grid-specific averaging).
+    h_bot : array
+        Bottom-cell thickness at the tracer point [m] (used by
+        ``nemo_loglayer`` only).
+    scheme : str
+        ``"nemo_quadratic"`` (zdfdrg np_non_lin) or ``"nemo_loglayer"``
+        (np_loglayer).  ``"legacy"`` is rejected — callers keep the
+        historical MOM6-style path for it and must not route here.
+    cd0, cd_max, z0, ke0 : float
+        NEMO ``rn_Cd0``, ``rn_Cdmax``, ``rn_z0``, ``rn_ke0`` (ORCA1:
+        1e-3, 0.1, 3e-3, 2.5e-3).
+    von_karman : float
+        Von Kármán constant.
+
+    Returns
+    -------
+    array, shape of ``u_bot``
+        ``r = Cd·√(ū² + v̄² + ke0)`` [m/s], >= 0, at tracer points.
+    """
+    return nemo_drag_r_from_speed_sq(
+        u_bot * u_bot + v_bot * v_bot, h_bot,
+        scheme=scheme, cd0=cd0, cd_max=cd_max, z0=z0, ke0=ke0,
+        von_karman=von_karman,
+    )
+
+
+def nemo_drag_r_from_speed_sq(
+    speed_sq: jnp.ndarray,
+    h_bot: jnp.ndarray,
+    *,
+    scheme: str,
+    cd0: float,
+    cd_max: float,
+    z0: float,
+    ke0: float,
+    von_karman: float,
+) -> jnp.ndarray:
+    """Speed-squared form of :func:`nemo_effective_bottom_drag_r`.
+
+    ``r = Cd · √(speed_sq + ke0)`` — the entry point for grids whose
+    natural bottom-speed diagnostic is already a squared speed (MPAS
+    Voronoi: 2x the Ringler discrete kinetic energy at cell centres)
+    rather than separate velocity components.  Same Cd selection and
+    sign convention as the component form (which delegates here).
+    """
+    validate_bottom_drag_scheme(scheme)
+    if scheme == "nemo_loglayer":
+        cd = nemo_loglayer_cd(
+            h_bot, z0=z0, cd_min=cd0, cd_max=cd_max, von_karman=von_karman,
+        )
+    elif scheme == "nemo_quadratic":
+        cd = cd0
+    else:
+        raise ValueError(
+            "nemo_drag_r_from_speed_sq handles the NEMO drag laws only; "
+            f"got scheme={scheme!r} (the 'legacy' path stays in the grid "
+            "adapters)."
+        )
+    return cd * jnp.sqrt(speed_sq + ke0)
+
+
 def masked_background_vmix_coefficient(
     background: jnp.ndarray | float,
     bottom_level: jnp.ndarray,

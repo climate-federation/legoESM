@@ -698,6 +698,8 @@ class LatLonCGridOceanModel:
         grid: LatLonGrid,
         z_coord: OceanZStarCoordinate,
         config: LatLonCGridOceanConfig | None = None,
+        *,
+        iwm_forcing=None,
     ):
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
         # All downstream operators see the enriched geometry with per-cell
@@ -740,6 +742,31 @@ class LatLonCGridOceanModel:
                     "operator."
                 )
         self._cfl_checked = False
+        # Internal wave-driven mixing (zdfiwm) static 2-D forcing maps
+        # (IWMForcing of de Lavergne power/decay-scale fields on THIS
+        # grid), captured as closure constants by the jitted step.  None
+        # with iwm.enabled=True ⇒ the uniform constant-power fallback
+        # from the IWMConfig scalars.
+        self._iwm_forcing = iwm_forcing
+        _vmix_cfg_init = (self.config.physics.vertical_mixing
+                          if self.config.physics is not None else None)
+        if (iwm_forcing is not None
+                and (_vmix_cfg_init is None
+                     or getattr(_vmix_cfg_init, "iwm", None) is None
+                     or not _vmix_cfg_init.iwm.enabled)):
+            raise ValueError(
+                "iwm_forcing was supplied but "
+                "physics.vertical_mixing.iwm.enabled is not True — the maps "
+                "would be silently ignored.")
+        if (_vmix_cfg_init is not None
+                and getattr(_vmix_cfg_init, "iwm", None) is not None
+                and _vmix_cfg_init.iwm.enabled
+                and not getattr(self.config, "implicit_vertical_mixing", False)):
+            raise ValueError(
+                "vertical_mixing.iwm.enabled=True requires "
+                "implicit_vertical_mixing=True (zdfiwm contributes to the "
+                "implicit avt/avm profiles; the explicit path cannot apply "
+                "its momentum part).")
         # Static rigid-lid data (islands, basis, depths), built eagerly from the
         # first concrete state (host-side flood-fill).  None until built.
         self.rigid_lid_data = None
@@ -868,6 +895,15 @@ class LatLonCGridOceanModel:
         builder raises ``TracerArrayConversionError`` — re-raised with an
         actionable message.
         """
+        # Fail fast BEFORE building anything: build_rigid_lid_data runs the
+        # global streamfunction-basis solves + island line integrals, which are
+        # single-rank only (rank-local CG dots, domain-wide jnp.sum).  This path
+        # is reached EAGERLY from seed_scan_carry (integrate/integrate_scan), so
+        # the guard fires before the jitted scan on those entry points.
+        from legoesm.ocean.dynamics.rigid_lid_latlon_cgrid import (
+            assert_rigid_lid_single_rank,
+        )
+        assert_rigid_lid_single_rank()
         if self.rigid_lid_data is not None:
             return self.rigid_lid_data
         from legoesm.ocean.dynamics.rigid_lid_islands import build_rigid_lid_data
@@ -3479,6 +3515,31 @@ class LatLonCGridOceanModel:
             dtype = state.T.data.dtype
             K_v_cell = K_v_phys + jnp.asarray(self.config.K_v, dtype=dtype)
             A_v_cell = A_v_phys + jnp.asarray(self.config.A_v, dtype=dtype)
+            _phys_cfg = self.config.physics
+            if (_phys_cfg is not None
+                    and getattr(_phys_cfg.vertical_mixing, "iwm", None)
+                    is not None
+                    and _phys_cfg.vertical_mixing.iwm.enabled):
+                # zdfiwm on the physics-provided-K FAST path (KPP pipeline
+                # surfaces K_v/A_v on the tendencies): add the SAME additive
+                # wave-driven contribution compute_vertical_K_profiles would
+                # add on the fallback path (NEMO zdfphy order: closure first,
+                # zdf_iwm adds onto avt/avm).  The non-wet-interface zeroing
+                # below (_wet_if_vmix) masks it at the seafloor exactly like
+                # the fallback path's tail guard.
+                from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+                    _iwm_K_profile,
+                )
+                from legoesm.ocean.eos import make_eos_fn as _mk_eos
+                _K_iwm = _iwm_K_profile(
+                    state, self.z_coord, self.config.physics,
+                    _phys_cfg.vertical_mixing.iwm,
+                    eos_fn=_mk_eos(eos=self.config.eos,
+                                   eos_linear=self.config.eos_linear),
+                    iwm_fields=self._iwm_forcing,
+                ).astype(dtype)
+                K_v_cell = K_v_cell + _K_iwm
+                A_v_cell = A_v_cell + _K_iwm
         else:
             # Fallback: recompute K profiles (expensive for KPP).
             physics_config = self.config.physics
@@ -3529,6 +3590,10 @@ class LatLonCGridOceanModel:
                     eos_fn=_vmix_eos_fn,
                     tke_old=tke_old, dt_tke=dt_mom,
                     tke_source=tke_source, return_tke=True,
+                    # Column latitudes [deg] for the NEMO etau_htau_mode=
+                    # "latitude" penetration profile (unused otherwise).
+                    lat_deg=jnp.degrees(self.grid.lat),
+                    iwm_fields=self._iwm_forcing,
                 )
                 if _post_mixing:
                     # Phase 1 only (Veros set_tke_diffusivities from the
@@ -3542,6 +3607,8 @@ class LatLonCGridOceanModel:
                     A_v_background=float(self.config.A_v),
                     K_v_background=float(self.config.K_v),
                     eos_fn=_vmix_eos_fn,
+                    lat_deg=jnp.degrees(self.grid.lat),
+                    iwm_fields=self._iwm_forcing,
                 )
 
         # dz at cell centers (jacobian-corrected so the eta-stretched
@@ -3896,6 +3963,17 @@ class LatLonCGridOceanModel:
         LatLonCGridOceanState
         """
         self._ensure_vertex_mask(state)
+        if self.config.barotropic.barotropic_solver == "rigid_lid":
+            # Eager fail-fast (host-side, before the jitted body): the rigid-lid
+            # streamfunction solve is single-rank only.  The in-body guard runs
+            # at TRACE time only, so without this eager check a distributed run
+            # could reuse a serially-traced compiled _step_jitted.  Cheap host
+            # predicate; also covers integrate()/step_checked (both call step)
+            # and integrate_scan's jax.eval_shape(self.step, ...) probe.
+            from legoesm.ocean.dynamics.rigid_lid_latlon_cgrid import (
+                assert_rigid_lid_single_rank,
+            )
+            assert_rigid_lid_single_rank()
         return self._step_jitted(
             state, dt, freshwater, surface_forcing, sponge,
             grid=grid, vertex_mask=vertex_mask)

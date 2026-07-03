@@ -330,11 +330,12 @@ class CoupledESMDriver:
         # (max|u| 21 m/s, eta 84 m in 2 h, NaN by 10 h; the OMIP latlon
         # cold-start recipe uses exactly --C-smag-lap 3.0 --smag-cfl-safety
         # 0.125; see omip_smag_cap_stabilizer).
-        ocfg = _oc._replace(
-            # barotropic_solver was nested into BarotropicConfig (#640); a direct
-            # _replace can't route the flat kwarg the way from_flat does, so nest
-            # it explicitly.
-            barotropic=_oc.barotropic._replace(barotropic_solver="implicit_cn"),
+        # replace_flat routes the flat names into their nested sub-configs
+        # (barotropic_solver -> BarotropicConfig #640; C_smag_lap /
+        # smag_cfl_safety -> LateralViscosityConfig #661) exactly like the
+        # hand-nested ``_replace`` it replaced — leaf-identical by probe.
+        ocfg = _oc.replace_flat(
+            barotropic_solver="implicit_cn",
             momentum_time_integrator="rk3",
             pgf_scheme="smc03",
             implicit_vertical_mixing=True,
@@ -1668,7 +1669,15 @@ class CoupledESMDriver:
     #       The v1 slab keys are unchanged, so a v1 slab checkpoint still
     #       restores under v2 (a stale-version restore only warns; it is the
     #       additive dynamic-ocean keys that a v1 reader would lack).
-    _CKPT_VERSION = 2
+    #   v3: + coupling-lag surface response (sfcresp_* = the SurfaceToAtm
+    #       ``_last_sfc_response`` lag buffer) + sst_mean_init (the SST-drift
+    #       reference), so a --resume run's first coupled sub-step delivers
+    #       the SAME lagged runoff / ice-lake-freshwater / CO2 fluxes as the
+    #       uninterrupted run and sst_drift_K stays referenced to the ORIGINAL
+    #       run start.  Additive: a v1/v2 checkpoint still restores; the lag
+    #       buffer / drift reference then fall back to the pre-v3 resume
+    #       behavior (explicit in load_coupled_checkpoint, not silent).
+    _CKPT_VERSION = 3
 
     def save_checkpoint(self, step: int, day: float) -> None:
         """Save atmosphere + ocean + surface + CO2 state."""
@@ -1711,6 +1720,23 @@ class CoupledESMDriver:
         # the pytree into a dict of named arrays for serialization.
         if self._sfc_state is not None:
             arrays.update(_flatten_pytree_to_npz(self._sfc_state, "sfc_"))
+
+        # Coupling-lag surface response (ckpt v3).  ``_last_sfc_response`` is
+        # the one-coupling-sub-step lag buffer the NEXT segment reads for the
+        # land-runoff / ice-lake-freshwater delivery, the CO2 tracer flux and
+        # the radiation skin-T/albedo channels; without it a --resume run's
+        # first coupled sub-step takes the prev-is-None zero-flux branch,
+        # dropping one sub-step of those fluxes vs the uninterrupted run.
+        if self._last_sfc_response is not None:
+            arrays.update(
+                _flatten_pytree_to_npz(self._last_sfc_response, "sfcresp_"))
+
+        # SST-drift reference (ckpt v3): the run-start SST mean, so the
+        # resumed sst_drift_K diagnostic stays referenced to the ORIGINAL run
+        # start rather than resetting at the restart point.
+        if self._sst_mean_init is not None:
+            arrays["sst_mean_init"] = np.asarray(
+                self._sst_mean_init, dtype=np.float64)
 
         if arrays:
             np.savez(coupled_path, **arrays)
@@ -1833,5 +1859,55 @@ class CoupledESMDriver:
         if self._sfc_state is not None:
             self._sfc_state, _ = _restore_pytree_from_npz(
                 self._sfc_state, data, "sfc_", coupled_path.name)
+
+        # Coupling-lag surface response (ckpt v3): restore the one-sub-step lag
+        # buffer so the first coupled sub-step after --resume delivers the SAME
+        # lagged runoff / ice-lake-freshwater / CO2 fluxes (and radiation
+        # skin-T/albedo channels) as the uninterrupted run.
+        if any(k.startswith("sfcresp_") for k in data.files):
+            from legoesm.core.coupling_fields import SurfaceToAtm
+            _struct = SurfaceToAtm(*([0] * len(SurfaceToAtm._fields)))
+            _paths = ["sfcresp_" + ".".join(str(p) for p in pp)
+                      for pp, _ in jax.tree_util.tree_leaves_with_path(_struct)]
+            expected = set(_paths)
+            saved_resp = {k for k in data.files if k.startswith("sfcresp_")}
+            if saved_resp == expected:
+                # Every SurfaceToAtm leaf lives on the atmosphere grid with
+                # the same 2D shape as p_s (cube (6,n,n) / lat-lon
+                # (nlat,nlon)) — that pins the current-run shape the restore
+                # helper validates against.  The dtype comes from each SAVED
+                # leaf, canonicalized by the current runtime (jnp.zeros
+                # downcasts float64 -> float32 when x64 is off), so a
+                # same-config resume restores the buffer BIT-IDENTICALLY (the
+                # coupler emits float64 under x64 even when the storage
+                # policy keeps p_s float32).
+                _shape = self._atm.state.p_s.data.shape
+                template = jax.tree_util.tree_unflatten(
+                    jax.tree_util.tree_structure(_struct),
+                    [jnp.zeros(_shape, dtype=jnp.zeros((), data[k].dtype).dtype)
+                     for k in _paths])
+                self._last_sfc_response, _ = _restore_pytree_from_npz(
+                    template, data, "sfcresp_", coupled_path.name, strict=True)
+            else:
+                # SurfaceToAtm changed shape (field append/removal) since the
+                # save.  A PARTIAL restore would silently zero some channels;
+                # fall back to a fresh (None) lag buffer instead — exactly the
+                # pre-v3 resume behavior (one zero-flux land/ice/CO2 sub-step),
+                # loudly.
+                logger.warning(
+                    f"Coupled checkpoint {coupled_path.name}: 'sfcresp_' "
+                    f"structure drift (SurfaceToAtm changed since the save); "
+                    f"falling back to a fresh coupling-lag buffer (pre-v3 "
+                    f"resume behavior: one zero-flux land/ice/CO2 sub-step).")
+        # else: pre-v3 checkpoint — no lag buffer saved.  Keep None: the first
+        # coupled sub-step after resume takes the prev-is-None zero-flux branch
+        # (exactly the pre-v3 resume behavior), then rebuilds the buffer.
+
+        # SST-drift reference (ckpt v3): keep sst_drift_K referenced to the
+        # ORIGINAL run start across --resume.
+        if "sst_mean_init" in data.files:
+            self._sst_mean_init = float(data["sst_mean_init"])
+        # else: pre-v3 checkpoint — keep None: the drift re-references at the
+        # restart point (the pre-v3 resume behavior), explicit not silent.
 
         logger.info(f"  Loaded coupled checkpoint: {coupled_path.name}")

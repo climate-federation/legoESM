@@ -57,7 +57,10 @@ from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     bbl_distributed_drag_face_column,
     iterate_eos_and_pressure_anomaly,
+    nemo_effective_bottom_drag_r,
+    validate_bottom_drag_scheme,
 )
+from legoesm import constants
 
 
 # ==============================================================================
@@ -122,10 +125,38 @@ def _bc_bottom_drag_cdgrid(du_dt, dv_dt, u_a, v_a, h_k, z_coord, config):
     r = config.bottom_drag_r
     u_bg = config.bottom_drag_bg_velocity
     H_BBL = config.bottom_drag_bbl_thickness
+    _scheme = validate_bottom_drag_scheme(
+        str(getattr(config, "bottom_drag_scheme", "legacy")))
     # MOM6 background-velocity floor (DRAG_BG_VEL): r_eff recovers the linear
     # ``r`` at |u| → 0 and scales as quadratic Cd·|u| at |u| ≫ u_bg.
     # u_bg = 0 → exact linear (bit-identical to the legacy single-cell form).
-    if u_bg > 0.0:
+    if _scheme != "legacy":
+        # NEMO zdfdrg drag law (np_non_lin / np_loglayer): r = Cd·|U| from
+        # the BOTTOM-cell speed with the background KE ke0 in quadrature.
+        # On the co-located cd grid the tracer point IS the velocity point,
+        # so the lat-lon t-point construction collapses to a direct
+        # cell-centre evaluation (no face averaging).
+        if isinstance(z_coord, OceanPartialCellCoordinate):
+            _bl = jnp.maximum(z_coord.bottom_level, 0)[..., jnp.newaxis]
+            u_bot = jnp.take_along_axis(u_a, _bl, axis=-1)[..., 0]
+            v_bot = jnp.take_along_axis(v_a, _bl, axis=-1)[..., 0]
+            h_bot = jnp.take_along_axis(h_k, _bl, axis=-1)[..., 0]
+        else:
+            u_bot = u_a[..., -1]
+            v_bot = v_a[..., -1]
+            h_bot = h_k[..., -1]
+        r_t = nemo_effective_bottom_drag_r(
+            u_bot, v_bot, h_bot,
+            scheme=_scheme,
+            cd0=float(config.bottom_drag_cd0),
+            cd_max=float(config.bottom_drag_cdmax),
+            z0=float(config.bottom_drag_z0),
+            ke0=float(config.bottom_drag_ke0),
+            von_karman=constants.kappa_von_karman,
+        )
+        r_eff_u = r_t[..., jnp.newaxis]
+        r_eff_v = r_t[..., jnp.newaxis]
+    elif u_bg > 0.0:
         # Co-located cell-centre velocities → the physical quadratic bottom
         # stress is the VECTOR form τ = -Cd·|u|·u (MOM6 BOTTOMDRAGLAW), one
         # coefficient from the SPEED magnitude shared by both components.  The
@@ -702,7 +733,10 @@ def ocean_baroclinic_tendencies_cdgrid(
     # scheme="none") — still gets it.  Gated by ``bottom_drag_r`` → off =
     # bit-exact.  ``u_a``/``v_a`` are already zeroed below seafloor (partial),
     # and the final active_3d gate keeps the rock inert.
-    if config.bottom_drag_r > 0:
+    if (config.bottom_drag_r > 0
+            or validate_bottom_drag_scheme(
+                str(getattr(config, "bottom_drag_scheme", "legacy")))
+            != "legacy"):
         du_dt, dv_dt = _bc_bottom_drag_cdgrid(
             du_dt, dv_dt, u_a, v_a, h_k, z_coord, config,
         )

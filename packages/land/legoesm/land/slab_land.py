@@ -17,6 +17,7 @@ Snow:
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -82,8 +83,12 @@ def step_land(
     W_max = _get(lp, "W_max", config.W_max)
     C_soil = _get(lp, "C_soil", config.C_soil)
     d_soil = _get(lp, "d_soil", config.d_soil)
-    K_infiltration = _get(lp, "K_infiltration", config.K_infiltration)
-    infil_suction_boost = _get(lp, "infil_suction_boost", config.infil_suction_boost)
+    # Bucket-hydrology scalars are LandConfig fields, NOT part of the
+    # LandSurfaceParams spatial container (which is locked to the 12 PARAM_NAMES /
+    # PARAM_BOUNDS entries).  Read them straight from config — never via the spatial
+    # helper (a passed LandSurfaceParams has no such attribute).
+    K_infiltration = config.K_infiltration
+    infil_suction_boost = config.infil_suction_boost
 
     # Account for fresh snowfall that will survive this step when the
     # surface is below freezing.  Used both by the albedo block here
@@ -345,5 +350,29 @@ def step_land(
         # Land tile does not exchange salt with the ocean directly.
         salt_flux=jnp.zeros_like(T_soil),
     )
+
+    # Carry-dtype stability (mirrors multilayer_land, commit 49e9fa41e): under
+    # JAX_ENABLE_X64 float64 forcing / land_params / lat promote the slab
+    # updates (T_soil, W_bucket, snow_*, runoff) and the carbon pools to
+    # float64 while the carried leaves keep the storage dtype (float32 in the
+    # SOTA runs).  lax.scan REQUIRES carry input/output dtypes to match PER
+    # LEAF (SurfaceState — land + carbon — is a scan carry; see
+    # coupler.init_surface_state), so cast every returned leaf back to the
+    # corresponding INPUT leaf's dtype.  Compute stays at working precision;
+    # only the STORED carry is coerced.  The response (fluxes to the
+    # atmosphere) is NOT cast.  is_leaf treats None as a leaf so an optional
+    # field (state.runoff=None on legacy callers) is paired safely, not
+    # descended.
+    def _pin_to_input_dtype(new, ref):
+        if hasattr(ref, "dtype") and hasattr(new, "astype"):
+            return new.astype(ref.dtype)
+        return new
+
+    new_state = jax.tree.map(_pin_to_input_dtype, new_state, state,
+                             is_leaf=lambda x: x is None)
+    if carbon_state is not None and carbon_state_new is not None:
+        carbon_state_new = jax.tree.map(
+            _pin_to_input_dtype, carbon_state_new, carbon_state,
+            is_leaf=lambda x: x is None)
 
     return new_state, response, carbon_state_new

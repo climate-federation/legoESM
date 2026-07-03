@@ -287,8 +287,17 @@ def initialize_distributed_latlon(
     global_n_lat: int,
     global_n_lon: int | None = None,
     fold=None,
+    band_boundaries: tuple[int, ...] | None = None,
 ):
     """Initialize the MPI halo backend for a latitude-band lat-lon run.
+
+    ``band_boundaries`` (optional): explicit band boundaries forwarded to
+    :func:`legoesm.parallel.latlon_mpi.make_latlon_band_layout` — use
+    :func:`legoesm.parallel.latlon_mpi.wet_band_boundaries` to balance WET
+    cells across bands instead of row counts (land-heavy bands otherwise
+    idle).  Every rank must pass the IDENTICAL boundaries (deterministic
+    host computation from the global mask).  ``None`` keeps the even row
+    split byte-identically.
 
     Parallel entry point to :func:`initialize_distributed` for the
     SCVT/cubed-sphere grids — separate because the lat-lon path
@@ -390,6 +399,40 @@ def initialize_distributed_latlon(
             )
             _active_topology = None
     if _active_topology is not None:
+        # A changed band-boundary request must not be served by a stale
+        # layout (codex): a long-lived process that armed even bands and
+        # later opts into wet-cell-balanced boundaries (or vice versa) would
+        # silently keep the OLD decomposition — every slicer/scatter reads
+        # lat_start/lat_end from the layout. Compare this rank's requested
+        # span against the active one; re-arm fresh on mismatch.
+        _r = _active_topology.rank
+        _n = _active_topology.n_ranks
+        if band_boundaries is not None:
+            # Validate BEFORE the span comparison: an invalid request
+            # (non-integral / overlong / bad span) must raise, never be
+            # silently served by a coincidentally-matching stale layout
+            # (codex round 2).
+            from legoesm.parallel.latlon_mpi import validate_band_boundaries
+            _b = validate_band_boundaries(band_boundaries, _n, global_n_lat)
+            _want_span = (_b[_r], _b[_r + 1])
+        else:
+            _base, _rem = divmod(global_n_lat, _n)
+            _s = (_r * (_base + 1) if _r < _rem
+                  else _rem * (_base + 1) + (_r - _rem) * _base)
+            _want_span = (_s, _s + _base + (1 if _r < _rem else 0))
+        if (_active_topology.lat_start,
+                _active_topology.lat_end) != _want_span:
+            warnings.warn(
+                "initialize_distributed_latlon() re-called with different "
+                f"band boundaries (rank {_r}: requested rows "
+                f"[{_want_span[0]}, {_want_span[1]}) vs active "
+                f"[{_active_topology.lat_start}, "
+                f"{_active_topology.lat_end})); replacing the active layout "
+                "and re-arming the MPI halo backend.",
+                RuntimeWarning, stacklevel=2,
+            )
+            _active_topology = None
+    if _active_topology is not None:
         active_fold = getattr(_active_topology, "fold", None)
         active_on = (active_fold is not None
                      and getattr(active_fold, "is_active", False))
@@ -451,6 +494,7 @@ def initialize_distributed_latlon(
         rank=rank, n_ranks=n_processes,
         n_lat=global_n_lat, n_lon=global_n_lon,
         fold=fold,
+        boundaries=band_boundaries,
     )
     _active_topology = layout
 

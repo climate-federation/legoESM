@@ -45,6 +45,10 @@ import numpy as np
 # OMIP ran unconditional fp64).  x64 is enabled at import (above) so the
 # fp64/mixed accumulate+control roles stay exact regardless of mode;
 # apply_precision installs the per-module mixed overrides when requested.
+from legoesm.ocean.physics.lateral_mixing.config import (
+    GMRediConfig,
+    VisbeckConfig,
+)
 from legoesm.ocean.physics.vertical_mixing.config import (
     KPPConfig,
     VerticalMixingConfig,
@@ -80,6 +84,27 @@ ALL_RESULTS: list[dict] = []
 
 _VALID_VERTICAL_MIXING_SCHEMES = ("kpp", "tke", "catke", "richardson", "constant", "none")
 _DEFAULT_KPP_CONFIG = KPPConfig()
+from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (  # noqa: E402
+    IWMConfig as _IWMConfig,
+)
+_DEFAULT_IWM_CONFIG = _IWMConfig()
+
+# Production GM/Redi config for the realistic-bathymetry (ETOPO) lat-lon path,
+# hoisted from _create_setup so a --params calibration file can override its
+# tunables (kappa_GM/kappa_Redi/S_max, the Visbeck adaptive-kappa knobs, and
+# the Treguier-1997 adaptive-kappa cap aei0 — #691/#724 reachability audit).
+# Values are unchanged from the inline construction (byte-identical default).
+_DEFAULT_BATHY_GM_REDI = GMRediConfig(
+    kappa_GM=800.0,
+    kappa_Redi=800.0,
+    S_max=0.005,
+    visbeck=VisbeckConfig(
+        enabled=True,
+        alpha=0.015,
+        kappa_min=200.0,
+        kappa_max=2000.0,
+    ),
+)
 
 
 class OMIPRunConfig(NamedTuple):
@@ -90,6 +115,11 @@ class OMIPRunConfig(NamedTuple):
     seed: int
     vertical_mixing: VerticalMixingConfig
     precision: str = "fp64"
+    # GM/Redi bundle threaded into _create_setup's realistic-bathymetry
+    # lat-lon path (inert on flat-bottom / other-grid runs; --no-gm-redi
+    # still disables it entirely).  Carried here so --params can reach
+    # GMRediConfig / VisbeckConfig / TreguierConfig (#691/#724).
+    gm_redi: GMRediConfig = _DEFAULT_BATHY_GM_REDI
 
 
 def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> bool:
@@ -117,7 +147,29 @@ def build_vertical_mixing_config_from_args(
             K_bg=args.kpp_k_bg,
             K_conv=args.kpp_k_conv,
             A_bg=args.kpp_a_bg,
+            enable_langmuir=args.langmuir,
+            langmuir_coeff=args.langmuir_coeff,
+            langmuir_number_default=args.langmuir_number_default,
         ),
+        iwm=build_iwm_config_from_args(args),
+    )
+
+
+def build_iwm_config_from_args(args) -> "IWMConfig":
+    """Resolve the zdfiwm (de Lavergne 2020) CLI flags into IWMConfig."""
+    from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+        IWMConfig,
+    )
+    return IWMConfig(
+        enabled=bool(getattr(args, "iwm", False)),
+        mevar=bool(getattr(args, "iwm_mevar", False)),
+        tsdiff=bool(getattr(args, "iwm_tsdiff", False)),
+        power_bot_wm2=args.iwm_power_bot,
+        power_cri_wm2=args.iwm_power_cri,
+        power_nsq_wm2=args.iwm_power_nsq,
+        power_sho_wm2=args.iwm_power_sho,
+        scale_bot_m=args.iwm_scale_bot,
+        scale_cri_m=args.iwm_scale_cri,
     )
 
 
@@ -130,6 +182,122 @@ def build_config_from_args(args) -> OMIPRunConfig:
         vertical_mixing=build_vertical_mixing_config_from_args(args),
         precision=args.precision,
     )
+
+
+def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
+    """Post-``_create_setup`` application of the NEMO zdfdrg drag-law flags
+    and the zdfiwm forcing maps (mirrors the run_omip_core2 replace-flat +
+    model-rebuild pattern; a plain config edit needs the model rebuilt so
+    the jitted step captures it).
+
+    Returns ``(config, model)`` — unchanged (bit-identical objects) when
+    no NEMO drag scheme / IWM flag is active.
+    """
+    drag_flat = {}
+    if args.bottom_drag_scheme != "legacy":
+        drag_flat = dict(
+            bottom_drag_scheme=args.bottom_drag_scheme,
+            bottom_drag_cd0=args.bottom_drag_cd0,
+            bottom_drag_cdmax=args.bottom_drag_cdmax,
+            bottom_drag_z0=args.bottom_drag_z0,
+            bottom_drag_ke0=args.bottom_drag_ke0,
+        )
+    want_iwm = bool(getattr(args, "iwm", False))
+    if not drag_flat and not want_iwm:
+        return config, model
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    if isinstance(model, LatLonCGridOceanModel):
+        if drag_flat:
+            config = config.replace_flat(**drag_flat)
+        iwm_forcing = None
+        if want_iwm:
+            # Make sure the IWM config ACTUALLY reaches the implicit
+            # K-profile solve (codex r2 #1: the flat-bottom lat-lon path
+            # ships config.physics=None, so without this --iwm would be a
+            # silent no-op — k_profiles never sees vertical_mixing.iwm).
+            _iwm_cfg = build_iwm_config_from_args(args)
+            _phys = config.physics
+            if _phys is None:
+                from legoesm.ocean.physics.combined import OceanPhysicsConfig
+                from legoesm.ocean.physics.vertical_mixing.config import (
+                    VerticalMixingConfig,
+                )
+                from legoesm.ocean.physics.lateral_mixing.config import (
+                    LateralMixingConfig,
+                )
+                from legoesm.ocean.physics.surface_forcing.config import (
+                    SurfaceForcingConfig,
+                )
+                from legoesm.ocean.physics.convection.config import (
+                    OceanConvectionConfig,
+                )
+                # Minimal pipeline: every module inert except the IWM rider
+                # (the flat path's diffusion stays config-based).
+                _phys = OceanPhysicsConfig(
+                    vertical_mixing=VerticalMixingConfig(
+                        scheme="none", iwm=_iwm_cfg),
+                    lateral_mixing=LateralMixingConfig(scheme="none"),
+                    surface_forcing=SurfaceForcingConfig(scheme="none"),
+                    convection=OceanConvectionConfig(scheme="none"),
+                    shortwave_penetration=None,
+                )
+            else:
+                _phys = _phys._replace(
+                    vertical_mixing=_phys.vertical_mixing._replace(
+                        iwm=_iwm_cfg))
+            config = config._replace(physics=_phys)
+            # zdfiwm contributes through the implicit avt/avm profiles.
+            if not getattr(config, "implicit_vertical_mixing", False):
+                config = config.replace_flat(implicit_vertical_mixing=True)
+                print("[setup] zdfiwm: implicit_vertical_mixing forced ON "
+                      "(the wave avm/avt enter the backward-Euler solve)")
+            # NEMO zdfiwm_init FORCES the model backgrounds to molecular
+            # values (avmb = rnu = 1.4e-6 m²/s, avtb = 1e-10 m²/s): the
+            # wave field IS the interior background.  Mirror that so the
+            # OMIP A_v/K_v floors don't double-count (codex r1 #2).
+            from legoesm import constants as _const
+            config = config.replace_flat(
+                A_v=_const.nu_ocean_molecular, K_v=1.0e-10)
+            print("[setup] zdfiwm: model backgrounds forced to molecular "
+                  f"(A_v={_const.nu_ocean_molecular:g}, K_v=1e-10) per "
+                  "zdfiwm_init")
+        if want_iwm and args.iwm_forcing_file:
+            import numpy as _np
+            from legoesm.ocean.iwm_forcing import load_iwm_forcing
+            lat_T = getattr(grid, "lat_T", None)
+            if lat_T is not None:
+                # tripole: lat_T/lon_T are stored in RADIANS (2-D)
+                lat_T = _np.degrees(_np.asarray(lat_T))
+                lon_T = _np.degrees(_np.asarray(grid.lon_T))
+            else:                                     # regular lat-lon (radians)
+                lat_T = _np.degrees(_np.asarray(grid.lat))
+                lon_T = _np.degrees(_np.asarray(grid.lon))
+            iwm_forcing = load_iwm_forcing(
+                args.iwm_forcing_file, lat_T, lon_T)
+            print(f"[setup] zdfiwm forcing maps loaded from "
+                  f"{args.iwm_forcing_file}")
+        model = LatLonCGridOceanModel(
+            grid, z_coord, config, iwm_forcing=iwm_forcing)
+        return config, model
+
+    if want_iwm:
+        raise SystemExit(
+            f"--iwm is supported on the lat-lon / tripole grids only "
+            f"(the {grid_type} vertical-mixing bridge does not consume "
+            f"IWM yet)")
+    # Non-latlon models with flat drag fields (MPAS Voronoi, cubed-sphere):
+    # replace the flat NamedTuple fields and rebuild the same model class.
+    if not hasattr(config, "bottom_drag_scheme"):
+        raise SystemExit(
+            f"--bottom-drag-scheme={args.bottom_drag_scheme} is not "
+            f"supported on the {grid_type} grid (its ocean config has no "
+            f"bottom-drag law fields)")
+    config = config._replace(**drag_flat)
+    model = type(model)(grid, z_coord, config)
+    return config, model
 
 
 def apply_run_precision(args) -> None:
@@ -299,6 +467,15 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--kpp-ri-crit", type=float,
                    default=_DEFAULT_KPP_CONFIG.Ri_crit,
                    help="KPP critical bulk Richardson number")
+    p.add_argument("--langmuir", action="store_true",
+                   help="Enable KPP-Langmuir wave-enhanced surface mixing "
+                        "(eps_L = sqrt(1 + C_L/La_t^2) on the KPP velocity scales).")
+    p.add_argument("--langmuir-coeff", type=float,
+                   default=_DEFAULT_KPP_CONFIG.langmuir_coeff,
+                   help="KPP-Langmuir enhancement coefficient C_L")
+    p.add_argument("--langmuir-number-default", type=float,
+                   default=_DEFAULT_KPP_CONFIG.langmuir_number_default,
+                   help="Fallback turbulent Langmuir number (no Stokes-drift input)")
     p.add_argument("--kpp-k-max", type=float,
                    default=_DEFAULT_KPP_CONFIG.K_max,
                    help="KPP maximum diffusivity [m^2/s]")
@@ -311,6 +488,55 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--kpp-a-bg", type=float,
                    default=_DEFAULT_KPP_CONFIG.A_bg,
                    help="KPP background viscosity [m^2/s]")
+    # --- internal wave-driven mixing (NEMO zdfiwm, de Lavergne 2020) ---
+    _IWM_DEF = _DEFAULT_IWM_CONFIG
+    p.add_argument("--iwm", action="store_true",
+                   help="Enable internal wave-driven mixing (NEMO zdfiwm; "
+                        "additive avt/avm through the implicit vertical "
+                        "solve; requires implicit vertical mixing).")
+    p.add_argument("--iwm-mevar", action="store_true",
+                   help="zdfiwm ln_mevar: variable mixing efficiency "
+                        "(ORCA1 oracle: off).")
+    p.add_argument("--iwm-tsdiff", action="store_true",
+                   help="zdfiwm ln_tsdiff: differential T/S mixing "
+                        "(unsupported on the shared-K solve; raises).")
+    p.add_argument("--iwm-forcing-file", type=str, default=None,
+                   help="NetCDF de Lavergne power/decay maps "
+                        "(zdfiwm_forcing_TRA.nc layout).  Omit for the "
+                        "uniform constant-power fallback.")
+    p.add_argument("--iwm-power-bot", type=float,
+                   default=_IWM_DEF.power_bot_wm2,
+                   help="Uniform-fallback abyssal-hill power [W/m^2]")
+    p.add_argument("--iwm-power-cri", type=float,
+                   default=_IWM_DEF.power_cri_wm2,
+                   help="Uniform-fallback critical-slope power [W/m^2]")
+    p.add_argument("--iwm-power-nsq", type=float,
+                   default=_IWM_DEF.power_nsq_wm2,
+                   help="Uniform-fallback N^2-scaled power [W/m^2]")
+    p.add_argument("--iwm-power-sho", type=float,
+                   default=_IWM_DEF.power_sho_wm2,
+                   help="Uniform-fallback shoaling power [W/m^2]")
+    p.add_argument("--iwm-scale-bot", type=float,
+                   default=_IWM_DEF.scale_bot_m,
+                   help="Uniform-fallback abyssal-hill decay scale [m]")
+    p.add_argument("--iwm-scale-cri", type=float,
+                   default=_IWM_DEF.scale_cri_m,
+                   help="Uniform-fallback critical-slope decay scale [m]")
+    # --- NEMO zdfdrg bottom-drag laws ---
+    p.add_argument("--bottom-drag-scheme", type=str, default="legacy",
+                   choices=["legacy", "nemo_quadratic", "nemo_loglayer"],
+                   help="Bottom-drag law: 'legacy' = historical MOM6-style "
+                        "r/DRAG_BG_VEL path; 'nemo_quadratic' = zdfdrg "
+                        "np_non_lin (the ORCA1 namelist); 'nemo_loglayer' "
+                        "= zdfdrg np_loglayer.")
+    p.add_argument("--bottom-drag-cd0", type=float, default=1.0e-3,
+                   help="NEMO rn_Cd0 [-] (loglayer: Cd minimum)")
+    p.add_argument("--bottom-drag-cdmax", type=float, default=0.1,
+                   help="NEMO rn_Cdmax [-] (loglayer Cd cap)")
+    p.add_argument("--bottom-drag-z0", type=float, default=3.0e-3,
+                   help="NEMO rn_z0 bottom roughness [m]")
+    p.add_argument("--bottom-drag-ke0", type=float, default=2.5e-3,
+                   help="NEMO rn_ke0 background bottom KE [m^2/s^2]")
     p.add_argument("--no-conservation-fixer", action="store_true")
     p.add_argument("--restoring-timescale", type=float, default=None,
                    help=(
@@ -540,6 +766,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   slope_foot_alpha: float = 0.0,
                   no_lat_scaling: bool = False,
                   no_gm_redi: bool = False,
+                  gm_redi: GMRediConfig | None = None,
                   implicit_vertical_mixing: bool = False,
                   vertical_mixing: VerticalMixingConfig | None = None,
                   forcing_mode: str = "restoring",
@@ -679,7 +906,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 OceanConvectionConfig, EnhancedDiffusionConfig,
             )
             from legoesm.ocean.physics.lateral_mixing.config import (
-                GMRediConfig, VisbeckConfig, LateralMixingConfig,
+                LateralMixingConfig,
             )
             bathy_physics = OceanPhysicsConfig(
                 vertical_mixing=vertical_mixing,
@@ -697,16 +924,11 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 # SW, so the physics SW module would double-count.
                 shortwave_penetration=None,
             )
-            bathy_gm_redi = GMRediConfig(
-                kappa_GM=800.0,
-                kappa_Redi=800.0,
-                S_max=0.005,
-                visbeck=VisbeckConfig(
-                    enabled=True,
-                    alpha=0.015,
-                    kappa_min=200.0,
-                    kappa_max=2000.0,
-                ),
+            # Hoisted to _DEFAULT_BATHY_GM_REDI (module level) so the --params
+            # calibration layer can override its tunables via OMIPRunConfig
+            # (#691/#724); values unchanged.
+            bathy_gm_redi = (
+                gm_redi if gm_redi is not None else _DEFAULT_BATHY_GM_REDI
             )
             _A_h = A_h_override if A_h_override is not None else 2.0e5
             _B_h = B_h_override if B_h_override is not None else 5.0e9
@@ -1664,6 +1886,98 @@ def _preload_jra55_full_cache(jra55_state):
     return all_records, record_days, cache_length_days
 
 
+def _jra55_block_record_window(start_step_idx, n_steps, dt,
+                               n_cache_records, cycle):
+    """Compute the cache-record window bracketing one scan block.
+
+    Shared by ``_slice_preloaded_records`` and
+    ``_preload_jra55_raw_records`` so the wrap/clock arithmetic exists
+    exactly once.
+
+    Returns ``(indices, record_days, start_day, start_day_forcing)``:
+
+    - ``indices``: list of cache record indices (wrap-aware in cycle
+      mode: a block straddling the repeat-year boundary reads the tail
+      of the cache followed by the head of the next cycle).
+    - ``record_days``: ``(n,)`` fractional days of each selected record
+      on the *forcing clock*.  Monotonic: records read from the front of
+      the cache after a repeat-year wrap get ``+ cache_length_days`` so
+      linear interpolation stays correct across the wrap boundary.
+    - ``start_day``: RAW simulation day of the block's first step — the
+      solar-zenith / spinup-ramp clock.
+    - ``start_day_forcing``: block-start day on the forcing clock —
+      equal to ``start_day`` when not cycling, else ``start_day mod
+      cache_length_days`` (aligned with ``record_days``).
+
+    Raises ``IndexError`` when ``cycle=False`` and the block needs a
+    record past the cache end — same contract/message style as
+    ``legoesm.forcing.jra55_do.load_jra55_slice`` (no silent synthetic
+    forcing from a clamped stale record).
+    """
+    from legoesm.forcing.jra55_do import RECORDS_PER_DAY
+
+    cache_length_days = n_cache_records / RECORDS_PER_DAY
+    start_day = start_step_idx * dt / 86400.0
+    end_day = (start_step_idx + n_steps - 1) * dt / 86400.0
+
+    if cycle:
+        start_day_f = start_day % cache_length_days
+        # Continuous forcing clock within the block: do NOT re-mod the
+        # end — a block straddling the wrap keeps increasing past
+        # cache_length_days and reads unwrapped record_days.
+        end_day_f = start_day_f + (end_day - start_day)
+        if end_day - start_day >= cache_length_days:
+            raise ValueError(
+                f"forcing block spans {end_day - start_day:.3f} days >= "
+                f"the full cache cycle ({cache_length_days:.3f} days); "
+                "reduce the block size (diag_every)."
+            )
+    else:
+        start_day_f = start_day
+        end_day_f = end_day
+
+    i_first = int(np.floor(start_day_f * RECORDS_PER_DAY))
+    i_last = int(np.floor(end_day_f * RECORDS_PER_DAY)) + 1  # upper bracket
+
+    if not cycle:
+        # The upper bracket is genuinely needed only when the final step
+        # falls strictly inside an inter-record interval (matches
+        # _floor_indices_and_alpha's alpha==0 shortcut in jra55_do).
+        end_pos = end_day_f * RECORDS_PER_DAY
+        i_hi_needed = int(np.floor(end_pos))
+        if end_pos > i_hi_needed:
+            i_hi_needed += 1
+        if i_hi_needed >= n_cache_records:
+            raise IndexError(
+                f"day={end_day_f} (cache slot {i_hi_needed}) exceeds "
+                f"cache length {n_cache_records}"
+            )
+        i_last = min(i_last, n_cache_records - 1)
+        indices = list(range(i_first, i_last + 1))
+        wrap_at = None
+    elif i_last >= n_cache_records:
+        # Repeat-year wrap: tail of the cache + head of the next cycle.
+        i_last_wrapped = i_last - n_cache_records
+        if i_last_wrapped >= n_cache_records:
+            raise ValueError(
+                f"forcing block wraps the {cache_length_days:.3f}-day "
+                "cache more than once; reduce the block size "
+                "(diag_every)."
+            )
+        indices = (list(range(i_first, n_cache_records))
+                   + list(range(0, i_last_wrapped + 1)))
+        wrap_at = n_cache_records - i_first
+    else:
+        indices = list(range(i_first, i_last + 1))
+        wrap_at = None
+
+    record_days_np = np.asarray(indices, dtype=np.float64) / RECORDS_PER_DAY
+    if wrap_at is not None:
+        record_days_np[wrap_at:] += cache_length_days
+    record_days = jnp.asarray(record_days_np)
+    return indices, record_days, start_day, start_day_f
+
+
 def _slice_preloaded_records(start_step_idx, n_steps, dt, jra55_state,
                              all_records, all_record_days, cache_length_days):
     """Slice bracketing records from the pre-loaded cache for one block.
@@ -1671,37 +1985,20 @@ def _slice_preloaded_records(start_step_idx, n_steps, dt, jra55_state,
     Same interface as ``_preload_jra55_raw_records`` but reads from
     in-memory arrays instead of Zarr.
     """
-    from legoesm.forcing.jra55_do import RECORDS_PER_DAY
-
     cycle = jra55_state.get("cycle", False)
-    n_cache_records = all_record_days.shape[0]
+    n_cache_records = int(all_record_days.shape[0])
 
-    start_day = start_step_idx * dt / 86400.0
-    end_day = (start_step_idx + n_steps - 1) * dt / 86400.0
-
-    if cycle:
-        start_day_c = start_day % cache_length_days
-        end_day_c = end_day % cache_length_days
-    else:
-        start_day_c = start_day
-        end_day_c = end_day
-
-    i_first = int(np.floor(start_day_c * RECORDS_PER_DAY))
-    i_last = int(np.floor(end_day_c * RECORDS_PER_DAY)) + 1
-    i_last = min(i_last, n_cache_records - 1)
-
-    if cycle and i_last < i_first:
-        indices = list(range(i_first, n_cache_records)) + list(range(0, i_last + 1))
-    else:
-        indices = list(range(i_first, i_last + 1))
+    indices, record_days, start_day, start_day_f = (
+        _jra55_block_record_window(
+            start_step_idx, n_steps, dt, n_cache_records, cycle))
 
     raw_stack = {var: all_records[var][jnp.array(indices)] for var in all_records}
     runoff_stack = raw_stack["friver"]
-    record_days = all_record_days[jnp.array(indices)]
 
     record_meta = {
         "record_days": record_days,
         "block_start_day": float(start_day),
+        "block_start_day_forcing": float(start_day_f),
         "dt": float(dt),
         "n_steps": int(n_steps),
         "cache_length_days": float(cache_length_days),
@@ -1729,8 +2026,11 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
       prra, prsn)
     - ``runoff_stack``: ``(n_records, n_lat, n_lon)`` friver
     - ``record_meta``: dict with ``record_days`` (fractional day of each
-      record), ``block_start_day``, ``dt``, ``n_steps`` — enough for the
-      scan body to compute interpolation weights
+      record on the forcing clock, unwrapped across the repeat-year
+      boundary), ``block_start_day`` (RAW simulation day — solar-zenith
+      clock), ``block_start_day_forcing`` (cycled forcing clock aligned
+      with ``record_days``), ``dt``, ``n_steps`` — enough for the scan
+      body to compute interpolation weights
     """
     import xarray as xr
     from legoesm.forcing.jra55_do import (
@@ -1745,29 +2045,10 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
     n_cache_records = int(ds.attrs["n_records"])
     cache_length_days = n_cache_records / RECORDS_PER_DAY
 
-    # Find the range of 3-hourly record indices needed.
-    start_day = start_step_idx * dt / 86400.0
-    end_day = (start_step_idx + n_steps - 1) * dt / 86400.0
-
-    if cycle:
-        start_day_c = start_day % cache_length_days
-        end_day_c = end_day % cache_length_days
-    else:
-        start_day_c = start_day
-        end_day_c = end_day
-
-    i_first = int(np.floor(start_day_c * RECORDS_PER_DAY))
-    i_last = int(np.floor(end_day_c * RECORDS_PER_DAY)) + 1  # +1 for upper bracket
-    i_last = min(i_last, n_cache_records - 1)
-
-    # Handle wrap-around for cycling
-    if cycle and i_last < i_first:
-        # Block spans the cache boundary — read both pieces
-        indices = list(range(i_first, n_cache_records)) + list(range(0, i_last + 1))
-    else:
-        indices = list(range(i_first, i_last + 1))
-
-    n_records = len(indices)
+    # Find the range of 3-hourly record indices needed (wrap-aware).
+    indices, record_days, start_day, start_day_f = (
+        _jra55_block_record_window(
+            start_step_idx, n_steps, dt, n_cache_records, cycle))
 
     # Bulk-read each variable
     var_data = {}
@@ -1776,11 +2057,6 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
         var_data[var] = jnp.asarray(slab, dtype=jnp.float64)
 
     ds.close()
-
-    # Record fractional days (for interpolation inside scan)
-    record_days = jnp.asarray(
-        [idx / RECORDS_PER_DAY for idx in indices], dtype=jnp.float64,
-    )
 
     raw_stack = {var: var_data[var] for var in JRA55_VARIABLES}
 
@@ -1800,6 +2076,7 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
     record_meta = {
         "record_days": record_days,          # (n_records,) fractional days
         "block_start_day": float(start_day),
+        "block_start_day_forcing": float(start_day_f),
         "dt": float(dt),
         "n_steps": int(n_steps),
         "cache_length_days": float(cache_length_days),
@@ -2058,12 +2335,16 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
     lat_2d = jra55_state["lat_2d"]
     lon_2d = jra55_state["lon_2d"]
     _rpd = float(RECORDS_PER_DAY)
+    # Static (compile-time) repeat-year-forcing flag.  Selects which clock
+    # drives the solar-zenith insolation geometry (see the scan body).
+    cycle = bool(jra55_state.get("cycle", False))
 
     def _make_block_fn(n_steps_block):
         """Create a JIT-compiled block function for a fixed block size."""
         @jax.jit
         def block_fn(state, raw_stack, runoff_records, record_days,
-                     block_start_day, ice_state=None):
+                     block_start_day, block_start_day_forcing,
+                     ice_state=None):
             dt_days = dt / 86400.0
 
             def step_body(carry, idx):
@@ -2071,12 +2352,26 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
                     state_in, ice_in = carry
                 else:
                     state_in = carry
-                # Current fractional day
+                # Two clocks (see the insolation + ramp notes below):
+                # - ``day``: RAW simulation day (elapsed run time).  Always
+                #   drives the spinup ramp; drives the solar-zenith clock only
+                #   when NOT cycling (cycle=False ⇒ day_f == day).
+                # - ``day_f``: forcing clock — the CYCLED block-start day
+                #   (aligned with ``record_days``, which the preloaders
+                #   unwrap across the repeat-year cache boundary).  Drives the
+                #   JRA55 record interpolation, and — when cycle=True — the
+                #   solar-zenith insolation clock, so the prescribed rsds and
+                #   the computed zenith stay phase-locked.  Using the raw day
+                #   for interpolation broke every cycle after the first:
+                #   ``day - record_days[0]`` was off by k*cache_length,
+                #   i_lo clipped to the last slice record, and each step
+                #   read one stale record.
                 day = block_start_day + idx * dt_days
+                day_f = block_start_day_forcing + idx * dt_days
 
                 # Find bracketing records: record_days is sorted,
                 # find floor position relative to the first record.
-                local_pos = day * _rpd - record_days[0] * _rpd
+                local_pos = day_f * _rpd - record_days[0] * _rpd
                 i_lo = jnp.clip(
                     jnp.floor(local_pos).astype(jnp.int32),
                     0, record_days.shape[0] - 2,
@@ -2086,7 +2381,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
                 day_hi = record_days[i_hi]
                 alpha = jnp.clip(
                     jnp.where(day_hi > day_lo,
-                              (day - day_lo) / (day_hi - day_lo), 0.0),
+                              (day_f - day_lo) / (day_hi - day_lo), 0.0),
                     0.0, 1.0,
                 )
 
@@ -2109,8 +2404,25 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
                 # match jra55_to_atm_surface / _shared.virtual_temperature.
                 T_v = tas * (1.0 + (1.0 / _const.epsilon - 1.0) * huss)
                 rho_a = psl / (_const.R_d * T_v)
-                doy = jnp.mod(day, 365.0) + 1.0
-                hour = jnp.mod(day, 1.0) * 24.0
+                # Insolation clock (day-of-year + diurnal hour), which sets the
+                # solar zenith and hence zenith-dependent surface albedo:
+                #   - cycle=True (repeat-year forcing): use the CYCLED forcing
+                #     clock ``day_f`` so the solar geometry stays phase-locked
+                #     to the repeated rsds/rlds records.  Using the RAW ``day``
+                #     drifts the seasonal doy (and, for a non-integer cache
+                #     length, the diurnal hour) whenever the cache length is
+                #     not a whole multiple of 365 days (e.g. a 366-day
+                #     leap-year RYF cache), biasing the surface albedo.
+                #   - cycle=False: ``day_f == day`` (no wrap), so this is
+                #     byte-identical to the raw-day clock — the common
+                #     non-cycled path is unchanged.
+                # The SPINUP RAMP (below) intentionally stays on the RAW
+                # ``day``: it is a function of elapsed run time, not forcing
+                # time.  ``cycle`` is a static Python bool (compile-time
+                # feature gate), so this branch is resolved at trace time.
+                day_insol = day_f if cycle else day
+                doy = jnp.mod(day_insol, 365.0) + 1.0
+                hour = jnp.mod(day_insol, 1.0) * 24.0
                 cos_z = cos_zenith_angle(lat_2d, lon_2d, doy, hour)
 
                 atm = AtmToSurface(
@@ -2368,7 +2680,8 @@ def _check_finite(state, grid_type):
 # ===========================================================================
 
 
-def _save_restart(state, day, step, output_dir, ice_state=None):
+def _save_restart(state, day, step, output_dir, ice_state=None,
+                  grid_type="latlon"):
     """Save a state restart in the global-overturning npz format.
 
     Mirrors ``scripts/run/global_overturning/run_global_overturning_*``
@@ -2388,12 +2701,26 @@ def _save_restart(state, day, step, output_dir, ice_state=None):
         fields are persisted under ``ice_<field>`` keys so a checkpoint/resume
         does NOT silently reset the ice pack to the zero cold start.  ``None``
         (default, no sea ice) writes the legacy ocean-only restart unchanged.
+    grid_type : str
+        The run's grid selection (one of ``GRID_TYPES``), stored in the npz
+        for provenance AND validated on load: ``_load_restart`` compares it
+        against the resuming run's grid_type and refuses a cross-grid restart
+        (an MPAS checkpoint reconstructed from a latlon template can pass
+        shape checks by coincidence yet be physically meaningless).
+        Historically this was hardcoded to ``"latlon"``, mislabeling
+        MPAS/tripole checkpoints; ``_run_omip_loop`` now threads the actual
+        grid type.
     """
+    if grid_type not in GRID_TYPES:
+        raise ValueError(
+            f"Unknown grid_type {grid_type!r} for restart provenance; "
+            f"expected one of {GRID_TYPES}."
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "step": int(step),
         "time_days": float(day),
-        "grid_type": "latlon",
+        "grid_type": grid_type,
     }
     for f in state._fields:
         obj = getattr(state, f)
@@ -2436,7 +2763,7 @@ def _load_ice_restart(restart_path, ice_template):
     return ice_template._replace(**replacements)
 
 
-def _load_restart(restart_path, template_state):
+def _load_restart(restart_path, template_state, grid_type=None):
     """Load a restart npz and populate the state from a template.
 
     The template state (from ``_init_rest_state``) provides the pytree
@@ -2451,6 +2778,15 @@ def _load_restart(restart_path, template_state):
     template_state : ocean state
         A freshly initialized state with correct grid, masks, and
         z-coordinate.
+    grid_type : str or None
+        The resuming run's grid selection.  When supplied (not ``None``) and
+        the restart npz carries a ``grid_type`` key, a mismatch is a hard
+        error — reconstructing an MPAS restart from a latlon template (or
+        vice-versa) can pass per-field shape checks by coincidence yet be
+        physically meaningless.  Legacy restarts written before the
+        ``grid_type`` key existed lack it and keep the prior best-effort
+        behavior (no check).  ``None`` (a bare positional call) skips the
+        guard entirely.
 
     Returns
     -------
@@ -2464,6 +2800,20 @@ def _load_restart(restart_path, template_state):
     data = np.load(restart_path)
     restart_day = float(data["time_days"])
     restart_step = int(data["step"])
+
+    # Provenance guard: refuse a cross-grid restart.  Only enforced when the
+    # caller supplies the run's grid_type AND the npz records one (legacy
+    # restarts predate the key and fall through unchanged).
+    if grid_type is not None and "grid_type" in data:
+        saved_grid_type = str(data["grid_type"])
+        if saved_grid_type != grid_type:
+            raise ValueError(
+                f"Restart grid_type {saved_grid_type!r} does not match the "
+                f"run's grid_type {grid_type!r} ({restart_path}); loading a "
+                "restart across grids reconstructs the pytree from the wrong "
+                "template.  Re-run on the matching grid or regenerate the "
+                "restart."
+            )
 
     replacements = {}
     for f in template_state._fields:
@@ -2578,7 +2928,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         ):
             return
         fname = _save_restart(state, day, step, checkpoint_dir,
-                              ice_state=ice_state)
+                              ice_state=ice_state, grid_type=grid_type)
         if _snapshot_fn is not None:
             try:
                 _snapshot_fn(fname)
@@ -2682,6 +3032,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                         state, raw_stack, runoff_records,
                         record_meta["record_days"],
                         jnp.float64(record_meta["block_start_day"]),
+                        jnp.float64(record_meta["block_start_day_forcing"]),
                         ice_state,
                     )
                 else:
@@ -2689,6 +3040,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                         state, raw_stack, runoff_records,
                         record_meta["record_days"],
                         jnp.float64(record_meta["block_start_day"]),
+                        jnp.float64(record_meta["block_start_day_forcing"]),
                     )
             else:
                 if _ice_on:
@@ -2808,7 +3160,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
 
             if (steps_per_ckpt is not None and
                     (step % steps_per_ckpt == 0 or step == n_steps)):
-                fname = _save_restart(state, day, step, checkpoint_dir, ice_state=ice_state)
+                fname = _save_restart(state, day, step, checkpoint_dir,
+                                      ice_state=ice_state, grid_type=grid_type)
                 if _snapshot_fn is not None:
                     try:
                         _snapshot_fn(fname)
@@ -2861,7 +3214,9 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 )
                 if (steps_per_ckpt is not None and
                         (step % steps_per_ckpt == 0 or step == n_steps)):
-                    fname = _save_restart(state, day, step, checkpoint_dir, ice_state=ice_state)
+                    fname = _save_restart(state, day, step, checkpoint_dir,
+                                          ice_state=ice_state,
+                                          grid_type=grid_type)
                     if _snapshot_fn is not None:
                         try:
                             _snapshot_fn(fname)
@@ -2985,7 +3340,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             steps_per_ckpt = max(1, int(round(checkpoint_days * 86400.0 / dt)))
             if step % steps_per_ckpt == 0 or step == n_steps:
                 fname = _save_restart(state, day_now, step, checkpoint_dir,
-                                      ice_state=ice_state)
+                                      ice_state=ice_state, grid_type=grid_type)
                 # Auto-generate snapshot plot alongside the restart.
                 if _snapshot_fn is not None:
                     try:
@@ -3232,11 +3587,17 @@ def run_omip_single(grid_type: str, args) -> dict:
         slope_foot_alpha=args.slope_foot_alpha,
         no_lat_scaling=args.no_lat_scaling,
         no_gm_redi=getattr(args, "no_gm_redi", False),
+        gm_redi=run_config.gm_redi,
         implicit_vertical_mixing=getattr(
             args, "implicit_vertical_mixing", False),
         vertical_mixing=run_config.vertical_mixing,
         forcing_mode=getattr(args, "forcing_mode", "restoring"),
     )
+    # NEMO zdfdrg drag-law + zdfiwm forcing-map overrides (no-op when the
+    # flags are at their legacy defaults; rebuilds the model so the jitted
+    # step captures the new config / maps).
+    config, model = _apply_drag_iwm_overrides(
+        args, grid_type, grid, z_coord, config, model)
 
     # --- Initialization strategy ---
     # Start from rest state with uniform T/S, then restore toward WOA
@@ -3562,7 +3923,9 @@ def run_omip_single(grid_type: str, args) -> dict:
               f"{n_snapped} cells snapped, {n_new_land} → land")
         z_coord_partial = create_partial_cell_coordinate(z_coord, H_bathy_init)
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
-        model = LatLonCGridOceanModel(grid, z_coord_partial, config)
+        model = LatLonCGridOceanModel(
+            grid, z_coord_partial, config,
+            iwm_forcing=getattr(model, "_iwm_forcing", None))
         # The scan body calls model._step_impl() (no inner JIT) so
         # partial-cell + lax.scan now works correctly.
 
@@ -3697,7 +4060,9 @@ def run_omip_single(grid_type: str, args) -> dict:
         # operators expect this z_coord to match the bathymetry).
         pc_coord = create_partial_cell_coordinate(z_coord, H_snap)
         z_coord = pc_coord
-        model = LatLonCGridOceanModel(grid, z_coord, config)
+        model = LatLonCGridOceanModel(
+            grid, z_coord, config,
+            iwm_forcing=getattr(model, "_iwm_forcing", None))
 
         # Rebuild the rest state with the real bathymetry + mask.
         # rest_state_latlon_cgrid_ocean enforces u_mask/v_mask
@@ -3730,7 +4095,7 @@ def run_omip_single(grid_type: str, args) -> dict:
               f"{float(S_woa_masked[state.land_mask.data > 0.5].max()):.1f}] PSU")
     if args.restart is not None:
         state, restart_day, restart_step = _load_restart(
-            args.restart, state,
+            args.restart, state, grid_type=grid_type,
         )
         start_step = restart_step
         print(f"  Restart: loaded day {restart_day:.1f} (step {restart_step}) "
@@ -3752,9 +4117,11 @@ def run_omip_single(grid_type: str, args) -> dict:
         )
         # Provide the ocean mask for global freeze-cap when no sponge.
         jra55_state["_ocean_mask_2d"] = state.land_mask.data > 0.5
-        # GPU-interp path: use lax.scan block for all grids (MPAS
-        # regridding is handled in _preload_jra55_raw_records).
-        jra55_state["_gpu_interp"] = True
+        # GPU-interp path (default): interpolation inside the lax.scan
+        # block for all grids (MPAS regridding is handled in
+        # _preload_jra55_raw_records).  --no-gpu-interp routes to the
+        # CPU-interp block path (_build_jra55_block_fn).
+        jra55_state["_gpu_interp"] = bool(args.gpu_interp)
         # Restart: restore the prognostic sea-ice state so a checkpointed
         # --jra55-sea-ice run does NOT resume on the zero cold-start ice.  An
         # old ocean-only restart (no ice_* keys) returns None -> cold start
