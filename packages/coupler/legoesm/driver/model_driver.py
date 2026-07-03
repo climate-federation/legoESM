@@ -2486,11 +2486,13 @@ class ModelDriver:
         Unsupported configurations are not activated.  Non-cubed-sphere
         grids, unsupported device counts, and no-mesh are skipped
         silently (they cannot benefit from the SPMD halo collectives).
-        Sub-face tiling (>6 devices) is skipped with a LOUD warning:
-        the tiled ppermute exchange exists but the tiled dycore STEP is
-        unwired (P4 milestone), so the run stays on the local backend
-        and will not strong-scale past 6 devices — surfaced, not
-        silent, so a tiled production run isn't quietly degraded.
+        Sub-face tiling (>6 devices) never activates THIS backend (the
+        tiled dycore stage carries its own in-stage shard_map halos) but
+        is surfaced loudly either way: an INFO receipt when
+        ``enable_tiled_dycore`` routes dynamics through the tiled stage
+        (P4 increment 1b, experimental), or a WARNING that the run
+        stays on the GSPMD-auto sliced step with local halos and will
+        not strong-scale past 6 devices — never a silent degrade.
 
         For supported configurations, activation must either succeed
         or fail loudly.  Both import failures and activation failures
@@ -2537,14 +2539,28 @@ class ModelDriver:
             # Warn/inform loudly instead of returning silently (codex
             # P1, 2026-06-13; message split when the flag landed).
             if getattr(self.config, "enable_tiled_dycore", False):
-                logger.info(
-                    "Sub-face tiling %s (%d devices): tiled dycore "
-                    "step ACTIVE (enable_tiled_dycore, P4 increment "
-                    "1b — experimental); the tiled stage uses its own "
-                    "in-stage halos (the ppermute SPMD backend stays "
-                    "off).",
-                    dc.tiling, dc.n_devices,
-                )
+                # The build-time env gate lives in _maybe_build_tiled_step
+                # (which runs later) — don't log an ACTIVE receipt for a
+                # run that gate will refuse (codex round-16 Low).
+                import os as _os
+                if (_os.environ.get("LEGOESM_TILED_DYCORE_EXPERIMENTAL")
+                        == "1"):
+                    logger.info(
+                        "Sub-face tiling %s (%d devices): tiled dycore "
+                        "step ACTIVE (enable_tiled_dycore, P4 increment "
+                        "1b — experimental); the tiled stage uses its "
+                        "own in-stage halos (the ppermute SPMD backend "
+                        "stays off).",
+                        dc.tiling, dc.n_devices,
+                    )
+                else:
+                    logger.warning(
+                        "Sub-face tiling %s (%d devices): "
+                        "enable_tiled_dycore is set but "
+                        "LEGOESM_TILED_DYCORE_EXPERIMENTAL=1 is not — "
+                        "the segment build will refuse loudly.",
+                        dc.tiling, dc.n_devices,
+                    )
                 return
             logger.warning(
                 "SPMD halo backend NOT activated for sub-face tiling "
