@@ -16,9 +16,15 @@ Protocol (not improvised):
 * Output = monthly global-mean near-surface (lowest sigma level, 2 m proxy) air
   temperature -> annual means for the fleet-figure overlay.
 
-Only the CLASSICAL variant is AMIP-capable (its surface-flux scheme anchors
-near-surface air T to the prescribed SST via ``surface_T_sfc_override``);
-column_nn / sfno replace physics and have no SST hook.
+All three AIMIP variants are AMIP-capable (``--variant``):
+* ``classical`` — the surface-flux scheme anchors near-surface air T to the
+  prescribed SST via ``surface_T_sfc_override``; transient GHG + ozone feed
+  RRTMGP.
+* ``column_nn`` / ``sfno_physics`` — the learned physics consumes the
+  prescribed SST / sea-ice / insolation directly as input features
+  (``physics_fn(..., forcing=...)``), the same forcing channel it was
+  trained with (``aimip_surface_forcing``); no GHG/ozone (no physical
+  radiation scheme to feed).
 
 Usage::
 
@@ -52,11 +58,19 @@ def _load_yaml(path: Path) -> dict:
         return yaml.safe_load(fh) or {}
 
 
-def _merged_cfg(suite_path: Path) -> dict:
+_VARIANTS = ("classical", "column_nn", "sfno_physics")
+
+
+def _merged_cfg(suite_path: Path, variant: str = "classical") -> dict:
+    if variant not in _VARIANTS:
+        raise ValueError(
+            f"Unknown AMIP inference variant {variant!r}; expected one of "
+            f"{_VARIANTS}."
+        )
     suite = _load_yaml(suite_path)
     base = _load_yaml(Path(suite["base"]))
     base.update(suite.get("cfg_overrides", {}) or {})
-    base.update(_load_yaml(suite_path.parent / "variant_classical.yaml"))
+    base.update(_load_yaml(suite_path.parent / f"variant_{variant}.yaml"))
     base.setdefault("nlev", base["n_levels"])  # naming debt: nlev vs n_levels
     return base
 
@@ -87,6 +101,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--ckpt", type=Path,
                     default=Path("results/aimip_ace2loss_assembled/classical/params.eqx"))
+    ap.add_argument("--variant", type=str, default="classical",
+                    choices=list(_VARIANTS),
+                    help="AIMIP variant to run: classical (physics), "
+                         "column_nn (per-column MLP physics), sfno_physics "
+                         "(SFNO physics). NN variants need a checkpoint "
+                         "trained WITH aimip_surface_forcing (T_sfc/sic/"
+                         "insolation input features).")
     ap.add_argument("--suite", type=Path, default=Path("config/aimip/ace2/suite.yaml"))
     ap.add_argument("--forcing-path", type=str, default=None,
                     help="AIMIP forcing .nc (default: aimip_amip_forcing.DEFAULT_AIMIP_FORCING)")
@@ -114,9 +135,14 @@ def main():
                     help="Base path for restart files (default: "
                          "<out-dir>/amip_restart_r<member>). If present at "
                          "startup, the run RESUMES from it.")
-    ap.add_argument("--out", type=Path,
-                    default=Path("results/aimip_fleet_paper/legoesm_classical_amip.csv"))
+    ap.add_argument("--out", type=Path, default=None,
+                    help="Monthly CSV path (default: results/aimip_fleet_paper/"
+                         "legoesm_<variant>_amip.csv).")
     args = ap.parse_args()
+    if args.out is None:
+        args.out = Path(
+            f"results/aimip_fleet_paper/legoesm_{args.variant}_amip.csv"
+        )
 
     logging.basicConfig(
         level=logging.INFO,
@@ -156,8 +182,13 @@ def main():
         carry_to_spectral_state, spectral_amip_rollout,
     )
 
-    cfg = _merged_cfg(args.suite)
+    cfg = _merged_cfg(args.suite, args.variant)
     if args.convection_scheme:
+        if args.variant != "classical":
+            raise SystemExit(
+                "--convection-scheme only applies to --variant classical "
+                "(NN variants replace the physics entirely)."
+            )
         # Single override point: make_aimip_* AND the sizing PhysicsState both
         # read cfg["aimip_convection"].
         cfg["aimip_convection"] = args.convection_scheme
@@ -190,33 +221,7 @@ def main():
     ic_carry = era5_to_spectral_carry(ic_slice, grid, sigma)
     state = carry_to_spectral_state(ic_carry, grid)
     land_mask = land_mask_from_phis(jnp.asarray(ic_carry.phis), smooth=True)
-    ds_o3 = open_arco_era5()           # historical ERA5 ozone (ARCO)
     sigma_full_np = np.asarray(sigma.sigma_full)
-
-    # --- trained classical model (spatial_surface=True per ace2 config) ---
-    template = AIMIPClassicalParams.from_defaults(spatial_surface=True)
-    params = load_checkpoint(template, args.ckpt)
-    non_rad_fn, rad_fn = make_aimip_classical_spectral_physics(
-        params, grid, dt,
-        radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
-        rad_update_interval_steps=args.rad_update_interval,
-        convection_scheme=str(cfg["aimip_convection"]),
-        turbulence_scheme=str(cfg["aimip_turbulence"]),
-        gwd_scheme=str(cfg["aimip_gwd"]),
-        microphysics_scheme=str(cfg["aimip_microphysics"]),
-        cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
-        land_mask=land_mask, split_rad=True,
-    )
-    sizing_ps = init_physics_state(
-        ncol, nlev,
-        PhysicsConfig(
-            radiation=RadiationConfig(scheme="none"),
-            convection=ConvectionConfig(scheme=str(cfg["aimip_convection"])),
-            turbulence=TurbulenceConfig(scheme=str(cfg["aimip_turbulence"])),
-            microphysics=MicrophysicsConfig(scheme=str(cfg["aimip_microphysics"])),
-            gravity_wave_drag=GravityWaveDragConfig(scheme=str(cfg["aimip_gwd"])),
-        ),
-    )
 
     pe = spec_cfg.pe_config
     sponge = (compute_sponge_factor(sigma.sigma_full, pe.sponge_sigma, pe.sponge_tau, dt)
@@ -225,13 +230,94 @@ def main():
                                      cutoff_fraction=pe.spectral_filter_strength)
              if pe.spectral_filter_strength > 0 else None)
 
-    seg = jax.jit(lambda st, sst_col, doy, ghg, o3: spectral_amip_rollout(
-        st, non_rad_fn, rad_fn, grid, sigma, pe, dt, n_steps_day,
-        sst_col=sst_col, sizing_phys_state=sizing_ps,
-        day_of_year_base=doy, seconds_offset=0.0,
-        rad_update_interval=args.rad_update_interval,
-        sponge_factor=sponge, spectral_filter=sfilt, ghg_vmr=ghg, o3_vmr=o3,
-    ))
+    ds_o3 = None
+    if args.variant == "classical":
+        ds_o3 = open_arco_era5()       # historical ERA5 ozone (ARCO)
+
+        # --- trained classical model (spatial_surface=True per ace2 config) ---
+        template = AIMIPClassicalParams.from_defaults(spatial_surface=True)
+        params = load_checkpoint(template, args.ckpt)
+        non_rad_fn, rad_fn = make_aimip_classical_spectral_physics(
+            params, grid, dt,
+            radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
+            rad_update_interval_steps=args.rad_update_interval,
+            convection_scheme=str(cfg["aimip_convection"]),
+            turbulence_scheme=str(cfg["aimip_turbulence"]),
+            gwd_scheme=str(cfg["aimip_gwd"]),
+            microphysics_scheme=str(cfg["aimip_microphysics"]),
+            cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
+            land_mask=land_mask, split_rad=True,
+        )
+        sizing_ps = init_physics_state(
+            ncol, nlev,
+            PhysicsConfig(
+                radiation=RadiationConfig(scheme="none"),
+                convection=ConvectionConfig(scheme=str(cfg["aimip_convection"])),
+                turbulence=TurbulenceConfig(scheme=str(cfg["aimip_turbulence"])),
+                microphysics=MicrophysicsConfig(scheme=str(cfg["aimip_microphysics"])),
+                gravity_wave_drag=GravityWaveDragConfig(scheme=str(cfg["aimip_gwd"])),
+            ),
+        )
+
+        seg = jax.jit(lambda st, sst_col, doy, ghg, o3: spectral_amip_rollout(
+            st, non_rad_fn, rad_fn, grid, sigma, pe, dt, n_steps_day,
+            sst_col=sst_col, sizing_phys_state=sizing_ps,
+            day_of_year_base=doy, seconds_offset=0.0,
+            rad_update_interval=args.rad_update_interval,
+            sponge_factor=sponge, spectral_filter=sfilt, ghg_vmr=ghg, o3_vmr=o3,
+        ))
+    else:
+        # --- trained learned-physics model (column_nn / sfno_physics) ---
+        # The prescribed SST/sea-ice + orbital calendar reach the network
+        # as INPUT FEATURES via spectral_rollout(forcing_base=...) — the
+        # same channel it was trained with (aimip_surface_forcing).
+        from legoesm.training.neural_gcm_spectral import spectral_rollout
+
+        if args.variant == "column_nn":
+            from legoesm.atmosphere.physics.learned_column import (
+                build_column_physics,
+            )
+            from legoesm.training.neural_gcm_spectral import (
+                make_column_mlp_spectral_physics,
+            )
+            nn_template = build_column_physics(
+                nlev=nlev,
+                hidden_dim=int(cfg.get("nn_hidden_dim", 256)),
+                n_layers=int(cfg.get("nn_n_layers", 4)),
+                key=jax.random.PRNGKey(int(cfg.get("nn_seed", 0))),
+            )
+            nn_model = load_checkpoint(nn_template, args.ckpt)
+            physics_fn = make_column_mlp_spectral_physics(nn_model, grid)
+        else:  # sfno_physics
+            from legoesm.ml.channel_packing import PE3DChannelSpec
+            from legoesm.ml.sfno import SFNO, SFNOConfig
+            from legoesm.training.neural_gcm_spectral import (
+                N_SFNO_FORCING_CHANNELS, make_sfno_spectral_physics,
+            )
+            spec = PE3DChannelSpec(nlev=nlev)
+            sfno_template = SFNO(
+                SFNOConfig(
+                    in_channels=spec.n_channels + N_SFNO_FORCING_CHANNELS,
+                    out_channels=spec.n_channels,
+                    embed_dim=int(cfg.get("sfno_embed_dim", 64)),
+                    n_blocks=int(cfg.get("sfno_n_blocks", 4)),
+                    mlp_expansion=int(cfg.get("sfno_mlp_expansion", 4)),
+                    residual_prediction=False,
+                ),
+                grid, key=jax.random.PRNGKey(int(cfg.get("sfno_seed", 0))),
+            )
+            sfno_model = load_checkpoint(sfno_template, args.ckpt)
+            physics_fn = make_sfno_spectral_physics(sfno_model, grid)
+
+        seg = jax.jit(lambda st, t_sfc_col, sic_col, doy: spectral_rollout(
+            st, physics_fn, grid, sigma, pe, dt, n_steps_day,
+            sponge, sfilt,
+            forcing_base={
+                "T_sfc": t_sfc_col, "sic": sic_col,
+                "day_of_year": doy,
+                "seconds_of_day": jnp.asarray(0.0, jnp.float64),
+            },
+        ))
     T_ice = float(constants.T_freeze_ocean)
 
     def _surf_T(s):
@@ -312,23 +398,33 @@ def main():
         sic_c = np.clip(interp_forcing_at(times_ns, sic_m, day_ns), 0.0, 1.0)
         t_sfc = np.asarray(blend_surface_temperature(sst_c, sic_c, T_ice))
         override = np.where(ocean, t_sfc, np.nan).astype(np.float64)
-        # Transient historical GHG for this year (physical RRTMGP needs it to
-        # produce the warming trend; traced scalars -> no retrace).
-        ghg = {k: jnp.asarray(float(v)) for k, v in ghg_vmr_at_year(day.year).items()}
-        # Transient historical ozone, refreshed monthly (ARCO read + regrid is
-        # the cost; ozone is a monthly field so once/month suffices).
-        key = (day.year, day.month)
-        if key not in _o3_cache:
-            _o3_cache.clear()  # keep only the current month
-            # plev->sigma interp uses the CURRENT surface pressure (p_s evolves
-            # over the multi-decade run; codex) — not the fixed IC p_s.
-            p_s_now = np.asarray(spectral_pe_to_grid(state, grid, sigma)["p_s"]).reshape(-1)
-            _o3_cache[key] = jnp.asarray(
-                ozone_vmr_at_date(ds_o3, day, grid, sigma_full_np, p_s_now)
-            )
-        state = seg(state, jnp.asarray(override),
-                    jnp.asarray(float(day.timetuple().tm_yday)), ghg,
-                    _o3_cache[key])
+        doy = jnp.asarray(float(day.timetuple().tm_yday))
+        if args.variant == "classical":
+            # Transient historical GHG for this year (physical RRTMGP needs it
+            # to produce the warming trend; traced scalars -> no retrace).
+            ghg = {k: jnp.asarray(float(v))
+                   for k, v in ghg_vmr_at_year(day.year).items()}
+            # Transient historical ozone, refreshed monthly (ARCO read + regrid
+            # is the cost; ozone is a monthly field so once/month suffices).
+            key = (day.year, day.month)
+            if key not in _o3_cache:
+                _o3_cache.clear()  # keep only the current month
+                # plev->sigma interp uses the CURRENT surface pressure (p_s
+                # evolves over the multi-decade run; codex) — not the fixed
+                # IC p_s.
+                p_s_now = np.asarray(
+                    spectral_pe_to_grid(state, grid, sigma)["p_s"]
+                ).reshape(-1)
+                _o3_cache[key] = jnp.asarray(
+                    ozone_vmr_at_date(ds_o3, day, grid, sigma_full_np, p_s_now)
+                )
+            state = seg(state, jnp.asarray(override), doy, ghg, _o3_cache[key])
+        else:
+            # NN variants: the same ocean-masked T_sfc (+ sea-ice) enters the
+            # network as input features; land cells (NaN) fall back to the
+            # lowest-level air-T proxy inside the physics fn.
+            sic_col = np.where(ocean, sic_c, 0.0).astype(np.float64)
+            state = seg(state, jnp.asarray(override), jnp.asarray(sic_col), doy)
         if day >= record_from:
             st = _surf_T(state)
             monthly.setdefault((day.year, day.month), []).append(st)

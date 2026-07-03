@@ -1,5 +1,8 @@
 # Shared environment for Ginsburg scaling jobs (sourced by sbatch scripts).
-REPO=/burg-archive/glab/users/pg2328/legoESM
+# LEGOESM_REPO overrides the checkout the job runs from (pinned worktrees —
+# the shared-checkout long-run hazard: concurrent sessions mutate model code
+# mid-run). Default = the historical shared tree.
+REPO="${LEGOESM_REPO:-/burg-archive/glab/users/pg2328/legoESM}"
 # Repo root FIRST so `import tests` (test_cases ICs reused by the benchmarks)
 # resolves regardless of the submitting shell's PYTHONPATH — do not rely on the
 # session default being inherited via --export=ALL.

@@ -253,7 +253,7 @@ def _compute_bias_for_variant(
             f"[{variant}] loading {period_name} windows "
             f"({len(years)} years × {n_days_per_year} days)..."
         )
-        ic_states, target_carries = load_training_data(
+        ic_states, target_carries, _ic_times = load_training_data(
             period_cfg, grid, sigma, cache_dir, windows=windows,
         )
 

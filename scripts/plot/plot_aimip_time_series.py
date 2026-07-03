@@ -279,7 +279,7 @@ def _era5_reference_series(
     period_cfg = spec_cfg._replace(
         n_train_days=n_days, windows=tuple(windows),
     )
-    ic_states, target_carries = load_training_data(
+    ic_states, target_carries, _ic_times = load_training_data(
         period_cfg, grid, sigma, cache_dir, windows=windows,
     )
     # IC0 spectral -> grid for day-0 anchor.

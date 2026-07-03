@@ -109,6 +109,27 @@ def _apply_smoke_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
 # Variant dispatch
 # ----------------------------------------------------------------------
 
+def _surface_forcing_cfg(cfg: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Resolve the prescribed-surface-forcing config for NN variants.
+
+    Returns ``(forcing_path, cache_path)``.  ``aimip_surface_forcing``
+    (default True) gates it; the cache is keyed by spectral truncation so
+    a T63 cache can never be silently reused at T106 (the loader also
+    hard-validates ncol).  Forcing is what gives column_nn / sfno_physics
+    a prescribed-SST (AMIP / interannual-variability) pathway.
+    """
+    if not bool(cfg.get("aimip_surface_forcing", True)):
+        return None, None
+    from legoesm.training.aimip_amip_forcing import DEFAULT_AIMIP_FORCING
+    path = str(cfg.get("aimip_forcing_path") or DEFAULT_AIMIP_FORCING)
+    n_max = int(cfg["n_max"])
+    cache = str(
+        cfg.get("aimip_forcing_cache")
+        or f"results/aimip_forcing/gaussian_forcing_T{n_max}.npz"
+    )
+    return path, cache
+
+
 def _build_spectral_config(cfg: dict[str, Any]):
     """Translate AIMIP YAML dict into NeuralGCMSpectralConfig."""
     from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
@@ -200,6 +221,7 @@ def _train_variant(
         from legoesm.training.neural_gcm_spectral import (
             train_column_mlp_spectral,
         )
+        forcing_path, forcing_cache = _surface_forcing_cfg(cfg)
         return train_column_mlp_spectral(
             config=spec_cfg,
             cache_dir=cache_dir,
@@ -207,17 +229,22 @@ def _train_variant(
             hidden_dim=int(cfg.get("nn_hidden_dim", 256)),
             n_layers=int(cfg.get("nn_n_layers", 4)),
             resume_from_dir=resume_from_dir,
+            surface_forcing_path=forcing_path,
+            forcing_cache_path=forcing_cache,
         )
 
     if variant == "sfno_physics":
         from legoesm.training.neural_gcm_spectral import (
             train_neural_gcm_spectral,
         )
+        forcing_path, forcing_cache = _surface_forcing_cfg(cfg)
         return train_neural_gcm_spectral(
             config=spec_cfg,
             cache_dir=cache_dir,
             seed=int(cfg.get("sfno_seed", 0)),
             resume_from_dir=resume_from_dir,
+            surface_forcing_path=forcing_path,
+            forcing_cache_path=forcing_cache,
         )
 
     if variant == "sfno_full":
@@ -289,7 +316,7 @@ def _train_aimip_classical(
 
     params, start_epoch = maybe_resume_model(params, resume_from_dir)
 
-    ic_states, target_carries = load_training_data(
+    ic_states, target_carries, _ic_times = load_training_data(
         spec_cfg, grid, sigma, cache_dir,
         windows=spec_cfg.windows,
     )
@@ -433,9 +460,23 @@ def _evaluate_variant(
     sigma = create_sigma_coordinate(
         spec_cfg.n_levels, sigma_top=spec_cfg.sigma_top,
     )
-    ic_states, target_carries = load_training_data(
+    ic_states, target_carries, eval_ic_times = load_training_data(
         eval_cfg, grid, sigma, cache_dir, windows=eval_cfg.windows,
     )
+    # NN variants trained WITH prescribed surface forcing must be
+    # evaluated with the same inputs (a forced network scored unforced
+    # would see out-of-distribution proxies and mis-rank the variants).
+    eval_forcings = None
+    if variant in ("column_nn", "sfno_physics"):
+        forcing_path, forcing_cache = _surface_forcing_cfg(cfg)
+        if forcing_path is not None:
+            from legoesm.training.aimip_amip_forcing import (
+                build_amip_sample_forcings,
+            )
+            eval_forcings = build_amip_sample_forcings(
+                eval_ic_times, grid, forcing_path=forcing_path,
+                cache_path=forcing_cache,
+            )
 
     pe_config = spec_cfg.pe_config
     sponge_factor = None
@@ -577,7 +618,7 @@ def _evaluate_variant(
 
     weights = jnp.asarray(grid.weights)
 
-    for ic, target in zip(ic_states, target_carries):
+    for sample_idx, (ic, target) in enumerate(zip(ic_states, target_carries)):
         # Multi-step training => loader returns a tuple of K target
         # carries.  Eval only scores against the longest lead.  A single
         # SegmentCarry is a NamedTuple (tuple subclass), so use type(..) is
@@ -600,6 +641,10 @@ def _evaluate_variant(
                 ic, physics_fn, grid, sigma, pe_config,
                 spec_cfg.dt, n_steps_eval,
                 sponge_factor, spectral_filter,
+                forcing_base=(
+                    eval_forcings[sample_idx]
+                    if eval_forcings is not None else None
+                ),
             )
         losses.append(float(
             spectral_state_vs_carry_loss(

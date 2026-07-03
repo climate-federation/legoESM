@@ -53,6 +53,82 @@ def test_ghg_vmr_at_year_historical_trend():
         assert k in g79 and 0.0 < g79[k] < 1.0e-3
 
 
+def test_build_amip_sample_forcings_blend_mask_and_calendar(monkeypatch):
+    """Per-sample forcing dicts: SST/ice blend over ocean, NaN over land,
+    sic zeroed over land, and correct day-of-year / seconds-of-day."""
+    m = _mod()
+    jnp = pytest.importorskip("jax.numpy")
+
+    class _Grid:
+        lat = np.deg2rad(np.array([-45.0, 45.0]))
+        lon = np.deg2rad(np.array([0.0, 180.0]))
+
+    ncol = 4
+    times_ns = np.array([
+        np.datetime64("1979-01-01").astype("datetime64[ns]").astype(np.int64),
+        np.datetime64("1979-03-01").astype("datetime64[ns]").astype(np.int64),
+    ])
+    sst = np.array([[290.0] * ncol, [294.0] * ncol])
+    sic = np.array([[0.0, 0.8, 0.0, 0.0]] * 2)
+    land = np.array([0.0, 0.0, 1.0, 1.0])  # cols 2,3 = land
+    monkeypatch.setattr(
+        m, "regrid_monthly_forcing_to_gaussian",
+        lambda path, grid, cache_path=None: (times_ns, sst, sic, land),
+    )
+
+    ic_times = [np.datetime64("1979-01-01T06:00")]
+    (fc,) = m.build_amip_sample_forcings(ic_times, _Grid(), forcing_path="x")
+
+    t_sfc = np.asarray(fc["T_sfc"])
+    assert np.isfinite(t_sfc[0])                    # open ocean: blended SST
+    assert np.all(np.isnan(t_sfc[2:]))              # land: NaN (proxy downstream)
+    # icy ocean cell blends toward T_freeze_ocean, so colder than open ocean
+    assert t_sfc[1] < t_sfc[0]
+    s = np.asarray(fc["sic"])
+    assert s[1] == pytest.approx(0.8)
+    assert np.all(s[2:] == 0.0)                     # land: sic zeroed
+    assert float(fc["day_of_year"]) == pytest.approx(1.0)
+    assert float(fc["seconds_of_day"]) == pytest.approx(6 * 3600.0)
+
+
+def test_build_amip_sample_forcings_rejects_none_time(monkeypatch):
+    """A None IC time (unreadable zarr time coord) must raise — silent
+    unforced training would produce a network with no SST response."""
+    m = _mod()
+    pytest.importorskip("jax.numpy")
+
+    class _Grid:
+        lat = np.deg2rad(np.array([0.0]))
+        lon = np.deg2rad(np.array([0.0]))
+
+    monkeypatch.setattr(
+        m, "regrid_monthly_forcing_to_gaussian",
+        lambda path, grid, cache_path=None: (
+            np.array([0], dtype=np.int64),
+            np.zeros((1, 1)), np.zeros((1, 1)), np.zeros(1),
+        ),
+    )
+    with pytest.raises(ValueError, match="IC time is None"):
+        m.build_amip_sample_forcings([None], _Grid(), forcing_path="x")
+
+
+def test_regrid_monthly_forcing_cache_rejects_wrong_grid(tmp_path):
+    """A cached forcing regridded at one truncation must NOT be silently
+    reused at another (T63 cache at T106 = garbage SST)."""
+    m = _mod()
+
+    class _Grid:  # ncol = 2
+        lat = np.deg2rad(np.array([0.0]))
+        lon = np.deg2rad(np.array([0.0, 180.0]))
+
+    cache = tmp_path / "forcing.npz"
+    np.savez(cache, times_ns=np.array([0], dtype=np.int64),
+             sst=np.zeros((1, 6)), sic=np.zeros((1, 6)), land=np.zeros(6))
+    with pytest.raises(ValueError, match="ncol"):
+        m.regrid_monthly_forcing_to_gaussian("unused.nc", _Grid(),
+                                             cache_path=str(cache))
+
+
 def test_regrid_field_2d_flips_descending_lat():
     m = _mod()
     pytest.importorskip("scipy")

@@ -167,7 +167,7 @@ def main():
     try:
         # ---- Train ----
         params = AIMIPClassicalParams.from_defaults()
-        train_ic, train_targ = load_training_data(
+        train_ic, train_targ, _ic_times = load_training_data(
             spec_cfg, grid, sigma, cache_dir, windows=spec_cfg.windows,
         )
         dt = spec_cfg.dt
@@ -197,7 +197,7 @@ def main():
             start_year=int(base.get("eval_year", 2017)),
             windows=eval_windows,
         )
-        ic_states, target_carries = load_training_data(
+        ic_states, target_carries, _ic_times = load_training_data(
             eval_cfg, grid, sigma, cache_dir, windows=eval_windows,
         )
 

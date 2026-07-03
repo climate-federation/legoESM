@@ -11,8 +11,14 @@ Architecture
 atmospheric column.  It is vmapped over the spatial dimensions at
 call time, so the network itself is defined for a single column.
 
-Input features per column (nlev * 4 + 2):
+Input features per column (nlev * 4 + 4):
     T, u, v, q_v at each level  +  p_s  +  solar forcing scalar
+    +  T_sfc (prescribed surface temperature: SST/sea-ice blend over
+    ocean, lowest-level air T proxy over land)  +  sea-ice fraction
+
+The two surface-forcing features are what give the learned physics a
+prescribed-SST (AMIP) pathway: without them the network cannot respond
+to interannual SST variability (AIMIP Phase-1 protocol).
 
 Output per column (nlev * 4 + 6):
     dT_dt, dq_v_dt, dq_c_dt, dq_r_dt at each level
@@ -179,7 +185,9 @@ class NeuralPhysics(eqx.Module):
         tendency_cap: float = _DEFAULT_TENDENCY_CAP,
     ):
         self.nlev = nlev
-        self.n_input = nlev * 4 + 2   # T, u, v, q_v per level + p_s + solar
+        # T, u, v, q_v per level + p_s + solar + T_sfc + sea-ice fraction.
+        # The last two are prescribed surface forcings (AMIP SST pathway).
+        self.n_input = nlev * 4 + 4
         self.n_output = nlev * 4 + 6   # tendencies per level + 6 surface fluxes
         self.residual_scale = residual_scale
         self.flux_output_scale = flux_output_scale
@@ -231,14 +239,22 @@ def pack_column_features(
     q_v: jax.Array,
     p_s: jax.Array,
     solar: jax.Array,
+    t_sfc: jax.Array,
+    sic: jax.Array,
 ) -> jax.Array:
-    """Pack column state into a flat feature vector.
+    """Pack column state + surface forcing into a flat feature vector.
 
     All inputs are for a single column:
         T, u, v, q_v : shape (nlev,)
-        p_s, solar    : scalars
+        p_s, solar, t_sfc, sic : scalars
 
-    Returns shape (nlev * 4 + 2,).
+    ``t_sfc`` is the prescribed surface temperature (SST/sea-ice blend
+    over ocean per the AMIP protocol; lowest-level air T proxy over
+    land) and ``sic`` the sea-ice fraction in [0, 1] (0 over land).
+    These give the learned physics its prescribed-SST response — the
+    interannual-variability pathway.
+
+    Returns shape (nlev * 4 + 4,).
     """
     # Normalize to O(1) for stable training
     return jnp.concatenate([
@@ -247,7 +263,9 @@ def pack_column_features(
         v / _NORM_WIND_M_S,
         q_v * 1e3,
         jnp.atleast_1d(p_s / constants.p_ref),
-        jnp.atleast_1d(solar / _NORM_SOLAR_W_M2)
+        jnp.atleast_1d(solar / _NORM_SOLAR_W_M2),
+        jnp.atleast_1d(t_sfc / _NORM_T_K),
+        jnp.atleast_1d(sic),
     ])
 
 
@@ -343,7 +361,7 @@ def make_neural_step_unified(
             held_lw_up_toa,
             held_sw_down_toa,
         ) = tail
-        del need_rad, sst, sic, lon, day_of_year, seconds_of_day, dt
+        del need_rad, dt
         del solar_weights, o3_vmr, aerosol_od, kwargs
         # Flatten to columns
         T_col = adapter.flatten_3d(T)           # (ncol, nlev)
@@ -352,12 +370,33 @@ def make_neural_step_unified(
         q_v_col = adapter.flatten_3d(q_v)       # (ncol, nlev)
         p_s_flat = adapter.flatten_2d(p_s)      # (ncol,)
 
-        # Solar forcing scalar per column (use s_0 as a uniform proxy)
-        solar_flat = jnp.broadcast_to(s_0, p_s_flat.shape)
+        # Real TOA insolation per column (seasonal + diurnal cycle) via the
+        # shared orbital helper — the NN's only time-of-year signal.
+        from legoesm.atmosphere.physics.radiation.solar import cos_zenith_angle
+        mu0 = cos_zenith_angle(
+            adapter.flatten_2d(lat), adapter.flatten_2d(lon),
+            day_of_year, seconds_of_day / 3600.0,
+        )
+        solar_flat = s_0 * jnp.maximum(mu0, 0.0)
+
+        # Prescribed surface forcing: SST where given (ocean), lowest-level
+        # air T proxy elsewhere (land / missing) — same convention as the
+        # AIMIP spectral path so one trained network serves both pipelines.
+        # "Missing" = NaN OR non-positive (pipelines that have no SST pass
+        # zeros rather than NaN; 0 K is never a physical temperature).
+        sst_flat = adapter.flatten_2d(sst)
+        t_sfc_flat = jnp.where(
+            jnp.isfinite(sst_flat) & (sst_flat > 0.0),
+            sst_flat, T_col[:, -1],
+        )
+        sic_flat = jnp.clip(
+            jnp.nan_to_num(adapter.flatten_2d(sic), nan=0.0), 0.0, 1.0,
+        )
 
         # Pack features per column: (ncol, n_input)
         features = jax.vmap(pack_column_features)(
             T_col, u_col, v_col, q_v_col, p_s_flat, solar_flat,
+            t_sfc_flat, sic_flat,
         )
 
         # Apply network per column: (ncol, n_output)
