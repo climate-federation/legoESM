@@ -726,10 +726,19 @@ class TestWindThroughStep:
         s1 = model.step(st, dt=cfg.dt, surface_forcing=sf)
         u_top = np.asarray(s1.u.data[..., 0])
         assert np.isfinite(u_top).all()
-        # westerlies (tau>0 around -45 lat) accelerate +u at the top layer
+        # westerlies (tau>0 around -45 lat) accelerate +u at the top layer,
+        # with the UNBOOSTED momentum stress: pin the magnitude against the
+        # analytic Euler kick tau*dt/(rho0*dz0) (RK3 staging + the implicit
+        # friction shave it somewhat; a x1.3 taum leak into momentum or a
+        # doubled application would leave the [0.5, 1.1] band).
         lat = np.degrees(np.asarray(g.lat))
         j = int(np.argmin(np.abs(lat - (-45.0))))
-        assert u_top[j, 1:-1].mean() > 0.0
+        got = u_top[j, 1:-1].mean()
+        tau_row = float(np.asarray(
+            dino_lat_lon_surface_forcing_arrays(g, cfg)["tau_u_cell_2d"])[j, 0])
+        expect = tau_row * cfg.dt / (cfg.rho_0 * float(z.dz_ref[0]))
+        assert got > 0.0
+        assert 0.5 * expect < got < 1.1 * expect, (got, expect)
 
 
 def test_S_star_boundary_targets_match_oracle():

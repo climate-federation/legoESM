@@ -391,8 +391,11 @@ def main():
                    else dino_lat_lon_surface_forcing_arrays(grid, cfg))
         apply_forcing = apply_dino_lat_lon_surface_forcing
         from legoesm.ocean.experiments.dino import dino_step_surface_forcing
-        sf_step = (dino_step_surface_forcing(forcing)
-                   if getattr(cfg, "wind_through_step", False) else None)
+        sf_step = (
+            dino_step_surface_forcing(forcing)
+            if forcing is not None
+            and getattr(cfg, "wind_through_step", False)
+            else None)
         grid_desc = f"{grid.n_lat}x{grid.n_lon} lat-lon Mercator"
     else:  # mpas
         grid = create_regional_voronoi_mesh(
