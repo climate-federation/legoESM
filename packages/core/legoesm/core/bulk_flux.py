@@ -192,6 +192,90 @@ def psi_h(zeta):
     return jnp.where(zeta_c < 0.0, unstable, stable)
 
 
+def psi_m_coare(zeta):
+    """COARE 3.0 momentum stability function (Fairall et al. 1996, 2003).
+
+    Unstable (ζ < 0): blend of the Kansas form and the free-convective
+    form of Fairall et al. (1996):
+        ψ_kansas: x = (1 − 15ζ)^{1/4} (standard Businger-Dyer shape)
+        ψ_conv:   y = (1 − 10.15ζ)^{1/3}
+                  ψ = 1.5 ln((1 + y + y²)/3) − √3 arctan((1 + 2y)/√3) + π/√3
+        blend:    f = ζ²/(1 + ζ²);  ψ = (1 − f) ψ_kansas + f ψ_conv
+    Stable (ζ > 0): COARE stable form
+        c = min(50, 0.35ζ)
+        ψ = −[(1 + ζ) + 0.6667 (ζ − 14.28) e^{−c} + 8.525]
+
+    Safe branching (min/max on inputs) keeps gradients NaN-free in the
+    inactive branch, matching :func:`psi_m`.
+    """
+    zeta_c = jnp.clip(zeta, -10.0, 10.0)
+    zeta_neg = jnp.minimum(zeta_c, -1e-10)
+    zeta_pos = jnp.maximum(zeta_c, 1e-10)
+
+    x = jnp.power(1.0 - 15.0 * zeta_neg, 0.25)
+    psi_k = (
+        2.0 * jnp.log((1.0 + x) / 2.0)
+        + jnp.log((1.0 + x ** 2) / 2.0)
+        - 2.0 * jnp.arctan(x)
+        + jnp.pi / 2.0
+    )
+    y = jnp.power(1.0 - 10.15 * zeta_neg, 1.0 / 3.0)
+    sqrt3 = jnp.sqrt(3.0)
+    psi_c = (
+        1.5 * jnp.log((1.0 + y + y ** 2) / 3.0)
+        - sqrt3 * jnp.arctan((1.0 + 2.0 * y) / sqrt3)
+        + jnp.pi / sqrt3
+    )
+    f = zeta_neg ** 2 / (1.0 + zeta_neg ** 2)
+    unstable = (1.0 - f) * psi_k + f * psi_c
+
+    c = jnp.minimum(50.0, 0.35 * zeta_pos)
+    stable = -(
+        (1.0 + zeta_pos)
+        + 0.6667 * (zeta_pos - 14.28) * jnp.exp(-c)
+        + 8.525
+    )
+    return jnp.where(zeta_c < 0.0, unstable, stable)
+
+
+def psi_h_coare(zeta):
+    """COARE 3.0 heat/moisture stability function (Fairall et al. 1996, 2003).
+
+    Unstable: Kansas ψ = 2 ln((1+x)/2), x = (1 − 15ζ)^{1/2}, blended with
+    the free-convective form (y = (1 − 34.15ζ)^{1/3}) via f = ζ²/(1+ζ²).
+    Stable: ψ = −[(1 + 2ζ/3)^{3/2} + 0.6667 (ζ − 14.28) e^{−c} + 8.525].
+    """
+    zeta_c = jnp.clip(zeta, -10.0, 10.0)
+    zeta_neg = jnp.minimum(zeta_c, -1e-10)
+    zeta_pos = jnp.maximum(zeta_c, 1e-10)
+
+    x = jnp.sqrt(1.0 - 15.0 * zeta_neg)
+    psi_k = 2.0 * jnp.log((1.0 + x) / 2.0)
+    y = jnp.power(1.0 - 34.15 * zeta_neg, 1.0 / 3.0)
+    sqrt3 = jnp.sqrt(3.0)
+    psi_c = (
+        1.5 * jnp.log((1.0 + y + y ** 2) / 3.0)
+        - sqrt3 * jnp.arctan((1.0 + 2.0 * y) / sqrt3)
+        + jnp.pi / sqrt3
+    )
+    f = zeta_neg ** 2 / (1.0 + zeta_neg ** 2)
+    unstable = (1.0 - f) * psi_k + f * psi_c
+
+    c = jnp.minimum(50.0, 0.35 * zeta_pos)
+    stable = -(
+        jnp.power(1.0 + 2.0 * zeta_pos / 3.0, 1.5)
+        + 0.6667 * (zeta_pos - 14.28) * jnp.exp(-c)
+        + 8.525
+    )
+    return jnp.where(zeta_c < 0.0, unstable, stable)
+
+
+# --- COARE 3.0 wind-dependent Charnock ramp (Fairall et al. 2003 §3c) ---
+_COARE_CHARNOCK_U_LO = 10.0   # [m/s] U_10N below which charnock stays at base
+_COARE_CHARNOCK_U_HI = 18.0   # [m/s] U_10N at/above which charnock = hi value
+_COARE_CHARNOCK_HI = 0.018    # charnock value at/above U_HI
+
+
 # ============================================================================
 # Main MOST flux computation
 # ============================================================================
@@ -356,15 +440,39 @@ def compute_most_fluxes(
         zeta_u = jnp.clip(z_u * inv_L, -10.0, 10.0)
         zeta_t = jnp.clip(z_t * inv_L, -10.0, 10.0)
         zeta_q = jnp.clip(z_q * inv_L, -10.0, 10.0)
-        psi_m_u = psi_m(zeta_u)
-        psi_h_t = psi_h(zeta_t)
-        psi_h_q = psi_h(zeta_q)
+        # Scheme-matched stability functions (static Python dispatch at trace
+        # time): COARE 3.0 uses the Fairall 1996/2003 Kansas + free-convective
+        # blend and the COARE stable form; large_yeager/constant/most keep
+        # Businger-Dyer/Dyer (which is what LY09 and NEMO's ncar use).
+        if scheme == "coare3":
+            psi_m_u = psi_m_coare(zeta_u)
+            psi_h_t = psi_h_coare(zeta_t)
+            psi_h_q = psi_h_coare(zeta_q)
+        else:
+            psi_m_u = psi_m(zeta_u)
+            psi_h_t = psi_h(zeta_t)
+            psi_h_q = psi_h(zeta_q)
 
         # --- Roughness update (Python if resolved at trace time) ---
         if scheme == "coare3":
-            # COARE 3.0: Charnock + smooth-flow regime
+            # COARE 3.0: wind-dependent Charnock + smooth-flow regime.
+            # Fairall et al. (2003) §3c ramp the Charnock parameter linearly
+            # from the base value at U_10N <= 10 m/s to 0.018 at >= 18 m/s;
+            # without it the high-wind drag is biased ~15% low (found by the
+            # aerobulk coare3p0 oracle).  ``charnock`` may be a traced
+            # trainable parameter, so use jnp ops throughout.
+            U_10N_c = u_star_safe / KAPPA * jnp.log(
+                10.0 / jnp.maximum(z0, 1e-12)
+            )
+            ramp = jnp.clip(
+                (U_10N_c - _COARE_CHARNOCK_U_LO)
+                / (_COARE_CHARNOCK_U_HI - _COARE_CHARNOCK_U_LO),
+                0.0, 1.0,
+            )
+            charnock_hi = jnp.maximum(_COARE_CHARNOCK_HI, charnock)
+            charnock_eff = charnock + ramp * (charnock_hi - charnock)
             z0_new = (
-                charnock * u_star_safe ** 2 / G
+                charnock_eff * u_star_safe ** 2 / G
                 + 0.11 * NU_AIR / u_star_safe
             )
             Re = u_star_safe * z0_new / NU_AIR
@@ -397,29 +505,30 @@ def compute_most_fluxes(
             rhn = CHN10 / rdn  # = ch_coeff
             ren = CEN10 / rdn  # = ce_coeff
 
-            # 4) Shift coefficients from 10 m to the appropriate
-            #    measurement height per variable (LY09 §3 / LY04 Eq. 9-11):
-            #    rd = rdn / (1 + rdn/κ · (ln(z_u/10) − Δψ_m))
-            #    rh = rhn / (1 + rhn/κ · (ln(z_t/10) − Δψ_h_t))
-            #    re = ren / (1 + ren/κ · (ln(z_q/10) − Δψ_h_q))
+            # 4) Shift the NEUTRAL 10-m coefficients to the measurement
+            #    height AND the actual stability (LY04 Eq. 9-11 / LY09 §3;
+            #    identical to NEMO sbcblk_algo_ncar):
+            #    rd = rdn / (1 + rdn/κ · (ln(z_u/10) − ψ_m(z_u/L)))
+            #    rh = rhn / (1 + rhn/κ · (ln(z_t/10) − ψ_h(z_t/L)))
+            #    re = ren / (1 + ren/κ · (ln(z_q/10) − ψ_h(z_q/L)))
+            #    The reference coefficient is neutral-10-m, so the stability
+            #    term is ψ(z/L) alone.  Subtracting ψ(10/L) here (the old
+            #    form) cancels the entire stability correction at z = 10 m
+            #    and silently runs near-neutral exchange in stable/unstable
+            #    air — caught by the aerobulk oracle (stable light-wind
+            #    fluxes were up to ~10x too large).
             ln_zr_u = jnp.log(z_u / 10.0)
             ln_zr_t = jnp.log(z_t / 10.0)
             ln_zr_q = jnp.log(z_q / 10.0)
-            zeta_10 = jnp.clip(10.0 * inv_L, -10.0, 10.0)
-            psi_m_10 = psi_m(zeta_10)
-            psi_h_10 = psi_h(zeta_10)
-            dpsi_m = psi_m_u - psi_m_10
-            dpsi_h_t = psi_h_t - psi_h_10
-            dpsi_h_q = psi_h_q - psi_h_10
 
             rd = rdn / jnp.maximum(
-                1.0 + rdn / KAPPA * (ln_zr_u - dpsi_m), 0.2
+                1.0 + rdn / KAPPA * (ln_zr_u - psi_m_u), 0.2
             )
             rh = rhn / jnp.maximum(
-                1.0 + rhn / KAPPA * (ln_zr_t - dpsi_h_t), 0.2
+                1.0 + rhn / KAPPA * (ln_zr_t - psi_h_t), 0.2
             )
             re = ren / jnp.maximum(
-                1.0 + ren / KAPPA * (ln_zr_q - dpsi_h_q), 0.2
+                1.0 + ren / KAPPA * (ln_zr_q - psi_h_q), 0.2
             )
 
             # 5) Update scaling parameters directly from coefficients
