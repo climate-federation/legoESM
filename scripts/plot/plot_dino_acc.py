@@ -57,17 +57,6 @@ def _grid_and_z(run_dir: Path):
     return cfg, grid, np.asarray(z.dz_ref)
 
 
-def _partial_cell_h(H_bathy, dz_ref):
-    """Partial-cell layer thickness (n_lat, n_lon, nlev) [m] from the bottom
-    depth + z* reference thicknesses: full dz above the floor, a clipped bottom
-    cell, zero below. The eta-driven z* stretch (~0.1% of the column) is
-    neglected for this depth-integrated transport diagnostic."""
-    z_bot = np.cumsum(dz_ref)                       # (nlev,) interface depths below surface
-    z_top = z_bot - dz_ref
-    H = np.asarray(H_bathy)[..., None]              # (n_lat, n_lon, 1)
-    return np.clip(np.minimum(z_bot, H) - z_top, 0.0, dz_ref)  # (n_lat, n_lon, nlev)
-
-
 def _snaps(run_dir: Path):
     return sorted((run_dir / "snapshots").glob("snapshot_*.npz"))
 
@@ -75,7 +64,9 @@ def _snaps(run_dir: Path):
 def main():
     args = _parse_args()
     cfg, grid, dz_ref = _grid_and_z(args.run_dir)
-    from legoesm.ocean.diagnostics_streamfunction import barotropic_streamfunction
+    from legoesm.ocean.diagnostics_streamfunction import (
+        barotropic_streamfunction, partial_cell_thickness,
+    )
     from legoesm.ocean.diagnostics_climate import acc_transport
     lat_deg = np.degrees(np.asarray(grid.lat))
     lon_deg = np.degrees(np.asarray(grid.lon))
@@ -90,7 +81,7 @@ def main():
             H_bathy = np.asarray(d["H_bathy"]); day = float(d["time_days"])
         if not np.isfinite(u).all():       # require ALL finite (skip blown snapshots)
             continue
-        h_partial = _partial_cell_h(H_bathy, dz_ref)
+        h_partial = partial_cell_thickness(H_bathy, dz_ref)
         psi_Sv = np.asarray(barotropic_streamfunction(u, h_partial, mask, grid))
         a = acc_transport(psi_Sv * _SV, lat_deg,
                           drake_lat_south=cfg.channel_lat_south_deg,

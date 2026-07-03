@@ -92,21 +92,28 @@ def _dino_geometry():
     grid = dino_lat_lon_grid(cfg, n_lon=50)
     z = create_dino_z_star(cfg)
     lat = np.degrees(np.asarray(grid.lat))
-    return cfg, lat, np.asarray(z.dz_ref)
+    return cfg, grid, lat, np.asarray(z.dz_ref)
 
 
-def _acc_sv(u_face, dz, lat1d, R=None):
-    """Zonal transport through one meridional section [Sv].
-
-    ``u_face`` (n_lat, nlev) at a fixed longitude face; dy from the local
-    Mercator latitude spacing.
+def _lego_acc_sv(lg, dz, cfg, grid):
+    """Drake-band ACC [Sv] via the canonical partial-cell-aware barotropic
+    streamfunction + ``acc_transport`` reduction (max−min of ψ in the
+    channel band) — the same method as ``scripts/plot/plot_dino_acc.py``.
     """
-    R = constants.R_earth if R is None else R
-    dphi = np.gradient(lat1d) * np.pi / 180.0
-    dy = R * dphi
-    wet = np.isfinite(u_face)
-    return float(np.nansum(np.where(wet, u_face, 0.0)
-                           * dz[None, :] * dy[:, None]) / 1e6)
+    from legoesm.ocean.diagnostics_climate import acc_transport
+    from legoesm.ocean.diagnostics_streamfunction import (
+        barotropic_streamfunction, partial_cell_thickness,
+    )
+    u = np.asarray(lg["u"])
+    if not np.isfinite(u).all():
+        return float("nan")
+    h_partial = partial_cell_thickness(np.asarray(lg["H_bathy"]), dz)
+    psi_Sv = np.asarray(barotropic_streamfunction(
+        u, h_partial, np.asarray(lg["land_mask"]), grid))
+    lat_deg = np.degrees(np.asarray(grid.lat))
+    return acc_transport(psi_Sv * 1e6, lat_deg,
+                         drake_lat_south=cfg.channel_lat_south_deg,
+                         drake_lat_north=cfg.channel_lat_north_deg).transport_Sv
 
 
 def _sigma0_seos(T, S):
@@ -135,7 +142,7 @@ def _mld_003(T, S, depth_c):
 def main():
     args = _parse()
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    cfg, lat, dz = _dino_geometry()
+    cfg, grid, lat, dz = _dino_geometry()
     depth_c = np.cumsum(dz) - 0.5 * dz
     nemo = _load_nemo(args.nemo_gridt, args.nemo_gridu)
     nemo_lat1d = nemo["lat2d"][:, 0]
@@ -215,7 +222,7 @@ def main():
     acc_l, acc_n, sst_l, sst_n, sss_l, sss_n = [], [], [], [], [], []
     for mm in months:
         lg = _load_lego(args.legoesm_dir, mm)
-        acc_l.append(_acc_sv(lg["u"][:, 0, :], dz, lat))
+        acc_l.append(_lego_acc_sv(lg, dz, cfg, grid))
         sst_l.append(float((np.where(mask, lg["T"][..., 0], 0.0) * w).sum() / wsum))
         sss_l.append(float((np.where(mask, lg["S"][..., 0], 0.0) * w).sum() / wsum))
         nu = _align_nemo_lat(nemo["u"][mm - 1], nemo_lat1d, lat)   # (z, y, x)
