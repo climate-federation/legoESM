@@ -385,3 +385,45 @@ class Test1h_WindFloor:
 
         assert jnp.allclose(resp.tau_x, 0.0, atol=1e-10), f"tau_x = {resp.tau_x}"
         assert jnp.allclose(resp.tau_y, 0.0, atol=1e-10), f"tau_y = {resp.tau_y}"
+
+
+class TestPostStepAlbedoBaseMap:
+    """PR A #9: the post-step albedo returned to the atmosphere must honor the
+    per-cell PFT base map (``base_albedo``) the same way the pre-step block does,
+    not silently revert to the latitude-band veg default over snow-free cells."""
+
+    def test_post_step_albedo_honors_pft_base_map(self):
+        import equinox as eqx
+        from legoesm.land.surface_params import default_land_surface_params
+
+        config = LandConfig(snow_albedo_feedback=True)
+        pft_albedo = 0.40  # deliberately != config.albedo_land (0.2 veg default)
+        lp0 = default_land_surface_params(SHAPE[0], config)
+        lp = eqx.tree_at(
+            lambda p: p.albedo_veg, lp0,
+            jnp.full(SHAPE, pft_albedo, dtype=jnp.float64),
+        )
+        state = make_state(snow_depth=0.0, snow_age=0.0)  # snow-free
+        forcing = make_forcing(precip_total=0.0, precip_snow=0.0)
+        lat = jnp.zeros(SHAPE, dtype=jnp.float64)
+
+        _, resp, _ = step_land(
+            state, forcing, config, U_min=1.0, dt=DT, lat=lat, land_params=lp,
+        )
+        # Snow-free + PFT base map => post-step albedo IS the map (blend weight 0).
+        assert jnp.allclose(resp.albedo, pft_albedo, atol=1e-6), (
+            f"post-step albedo {float(resp.albedo[0]):.3f} ignored the PFT base "
+            f"map {pft_albedo} (reverted to the veg-default lat band?)"
+        )
+
+    def test_post_step_albedo_differs_from_veg_default_without_map(self):
+        """Sanity that the assertion above is non-vacuous: with NO land_params
+        the snow-free post-step albedo is the veg-default band, NOT 0.40."""
+        config = LandConfig(snow_albedo_feedback=True)
+        state = make_state(snow_depth=0.0, snow_age=0.0)
+        forcing = make_forcing(precip_total=0.0, precip_snow=0.0)
+        lat = jnp.zeros(SHAPE, dtype=jnp.float64)
+        _, resp, _ = step_land(
+            state, forcing, config, U_min=1.0, dt=DT, lat=lat, land_params=None,
+        )
+        assert not jnp.allclose(resp.albedo, 0.40, atol=1e-6)

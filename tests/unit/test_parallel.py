@@ -491,7 +491,9 @@ class TestHaloDispatch:
 
     def test_mpi_requires_topology(self):
         """MPI backend without topology raises ValueError."""
-        with pytest.raises(ValueError, match="CommTopology is required"):
+        # The message was reworded to cover both cubed-sphere
+        # (CommTopology) and lat-lon (LatLonBandLayout) topologies.
+        with pytest.raises(ValueError, match="requires a topology"):
             set_halo_backend("mpi")
 
     def test_pad_halo_local_matches(self):
@@ -548,9 +550,9 @@ class TestMetalConfig:
     """Tests for Metal detection."""
 
     def test_metal_config_on_cpu(self):
-        """On non-Metal backends, is_metal=False."""
+        """On non-mps backends, is_metal=False."""
         config = get_metal_config()
-        if get_backend() != "METAL":
+        if get_backend() != "MPS":
             assert config.is_metal is False
             assert config.metal_device is None
 

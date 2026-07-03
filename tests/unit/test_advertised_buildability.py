@@ -40,7 +40,7 @@ MICROPHYSICS_LITERALS = (
     "morrison", "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
 )
 TURBULENCE_LITERALS = (
-    "smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
+    "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
     "holtslag_boville", "ysu", "edmf", "none",
 )
 GWD_LITERALS = (

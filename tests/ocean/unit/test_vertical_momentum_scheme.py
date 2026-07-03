@@ -77,7 +77,7 @@ def _basin(vertical_momentum_scheme="upwind_perturbation",
     lat = np.degrees(np.asarray(grid.lat))
     T = np.asarray(state.T.data) + 4.0 * np.tanh(lat / 15.0)[:, None, None]
     state = state._replace(T=state.T.replace(data=jnp.asarray(T)))
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, bottom_drag_r=1.0e-3, implicit_vertical_mixing=True,
         enable_runtime_checks=False, barotropic_solver="rigid_lid",
         outer_integrator=outer_integrator,
@@ -293,7 +293,7 @@ def test_unknown_literal_raises():
     grid = create_latlon_grid(_N_LAT, _N_LON)
     z = create_ocean_z_star(n_levels=4, H_max=4000.0)
     with pytest.raises(ValueError, match="vertical_momentum_scheme must be one of"):
-        LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig(
+        LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig.from_flat(
             vertical_momentum_scheme="centred"))   # typo
 
 
@@ -308,7 +308,7 @@ def test_centered_full_with_adaptive_implicit_rejected():
     grid = create_latlon_grid(_N_LAT, _N_LON)
     z = create_ocean_z_star(n_levels=4, H_max=4000.0)
     with pytest.raises(ValueError, match="incompatible with adaptive_implicit_vertadv"):
-        LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig(
+        LatLonCGridOceanModel(grid, z, LatLonCGridOceanConfig.from_flat(
             vertical_momentum_scheme="centered_full",
             adaptive_implicit_vertadv=True))
 

@@ -47,8 +47,20 @@ DEMIRRORED = (
 )
 
 
-def _src_root() -> pathlib.Path:
-    return pathlib.Path(legoesm.__file__).resolve().parent
+def _resolve_module(rel: str) -> pathlib.Path | None:
+    """Resolve a ``src/legoesm``-relative module path against the ``legoesm``
+    namespace package's ``__path__``.
+
+    ``legoesm`` is a federation NAMESPACE package: it has no ``__file__`` (it is
+    ``None``), and its source is split across several ``packages/<pkg>/legoesm``
+    roots exposed via ``__path__``. The de-mirrored ocean modules live under
+    ``packages/ocean/legoesm``, so we probe every ``__path__`` entry and return
+    the first that actually contains the module (or ``None`` if missing)."""
+    for root in legoesm.__path__:
+        path = pathlib.Path(root).resolve() / rel
+        if path.exists():
+            return path
+    return None
 
 
 def _scoped_constant_attrs(node: ast.AST) -> list[ast.Attribute]:
@@ -97,11 +109,10 @@ def test_demirrored_modules_have_no_scoped_constant_reads():
     """The de-mirrored ocean modules must read ConstantsConfig-scoped constants
     ONLY as function-parameter defaults. Any module-level mirror or inline body
     read is a regression of the G-C2/G-C4 de-mirroring."""
-    root = _src_root()
     violations: list[tuple[str, int, str]] = []
     for rel in DEMIRRORED:
-        path = root / rel
-        assert path.exists(), f"de-mirrored module missing: {rel}"
+        path = _resolve_module(rel)
+        assert path is not None, f"de-mirrored module missing: {rel}"
         violations += _violations_in_source(path.read_text(), rel)
 
     assert not violations, (

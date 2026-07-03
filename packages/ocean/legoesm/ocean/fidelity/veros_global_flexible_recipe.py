@@ -97,24 +97,8 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
-
-from legoesm.core.field import Field
 from legoesm.grids.latlon import LatLonGrid, create_stretched_latlon_grid
 from legoesm.ocean.constants_config import VEROS_CONSTANTS_CONFIG
-from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
-from legoesm.ocean.physics.combined import OceanPhysicsConfig
-from legoesm.ocean.physics.convection.config import OceanConvectionConfig
-from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
-from legoesm.ocean.physics.surface_forcing.config import (
-    FluxFeedbackConfig, SurfaceForcingConfig,
-)
-from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
-from legoesm.ocean.state import LatLonCGridOceanConfig, LatLonCGridOceanState
-from legoesm.ocean.vertical import (
-    OceanZStarCoordinate,
-    create_partial_cell_coordinate,
-)
 
 # Shared canonical blocks from the matched recipes (factored, not copied):
 # the ACCRecipe container, the global_4deg TKE/EKE/GM blocks this setup
@@ -129,7 +113,38 @@ from legoesm.ocean.fidelity.veros_global_4deg_recipe import (
     VEROS_GLOBAL4_CP0,
     get_periodic_interval_weights,
 )
+
+# Shared global-recipe builders (state seeding, GM/EKE delta, area weights).
+from legoesm.ocean.fidelity.veros_global_common import (
+    build_veros_global_state,
+    gm_redi_eke_isopycnal_on,
+    veros_area_t_generic,
+)
+
+# Shape-generic layout bridges, shared via fidelity.veros_layout (the 1deg
+# recipe's DEDUP NOTE); re-exported under the recipe's ``_flex`` names.
+from legoesm.ocean.fidelity.veros_layout import (
+    veros_xy_to_legoesm as veros_xy_to_legoesm_flex,
+)
+from legoesm.ocean.fidelity.veros_layout import (
+    veros_xyz_to_legoesm as veros_xyz_to_legoesm_flex,
+)
 from legoesm.ocean.fidelity.veros_state_bridge import veros_u_centered_z_centres
+from legoesm.ocean.fidelity.veros_stepping import veros_faithful_stepping
+from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+from legoesm.ocean.physics.combined import OceanPhysicsConfig
+from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+from legoesm.ocean.physics.surface_forcing.config import (
+    FluxFeedbackConfig,
+    SurfaceForcingConfig,
+)
+from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+from legoesm.ocean.state import LatLonCGridOceanConfig, LatLonCGridOceanState
+from legoesm.ocean.vertical import (
+    OceanZStarCoordinate,
+    create_partial_cell_coordinate,
+)
 
 __all__ = (
     "DT_MOM_RATIO",
@@ -332,7 +347,7 @@ def veros_interpolate(coords, var, interp_coords, kind: str = "linear",
     """``veros.tools.interpolate`` for the global_flexible uses (regular
     1-D coords, no missing_value): ``scipy.interpolate.interpn`` with NaN
     fill outside the hull, then nearest-value in-painting."""
-    import scipy.interpolate   # setup-time data prep only
+    import scipy.interpolate  # setup-time data prep only
 
     if len(coords) != len(interp_coords) or len(coords) != var.ndim:
         raise ValueError("Dimensions of coordinates and values do not match")
@@ -461,7 +476,7 @@ def prepare_global_flexible_topography(
     ≥ −1 m, shift the longitude axis to start at the model's western edge,
     nearest-interpolate (no fill) to the interior centres.  Returns
     ``z_interp`` (nx, ny)."""
-    import scipy.ndimage    # setup-time data prep only
+    import scipy.ndimage  # setup-time data prep only
 
     topo_z = np.minimum(np.asarray(topo_z, dtype=np.float64), 0.0)
     gaussian_sigma = (0.5 * len(topo_x) / nx, 0.5 * len(topo_y) / ny)
@@ -504,7 +519,7 @@ def replicate_veros_kbot_flexible(
     :func:`prepare_global_flexible_topography`.  Returns 1-based interior
     ``kbot`` (nx, ny); 0 = land.  Bit-target: the live oracle's ``vs.kbot``
     (asserted by the harness, the proven 4deg gate)."""
-    import scipy.ndimage    # setup-time data prep only
+    import scipy.ndimage  # setup-time data prep only
 
     nx, ny = z_interp_xy.shape
     dzt_veros = global_flexible_dzt_veros(nz)
@@ -554,26 +569,6 @@ def kbot_to_mask_and_h_bathy_flexible(
 # ---------------------------------------------------------------------------
 
 
-def veros_xyz_to_legoesm_flex(arr_xyz: np.ndarray,
-                              fill: float = 0.0) -> np.ndarray:
-    """(x, y, z) VEROS z-order (k=0 deepest) → legoESM (lat, lon, z) with
-    k=0 SURFACE, plus the two wall rows (shape-generic twin of the 4deg
-    bridge — sizes derived from the input)."""
-    nx, ny, nz = arr_xyz.shape
-    out = np.full((ny + 2, nx, nz), fill, dtype=np.float64)
-    out[1:-1, :, :] = np.transpose(arr_xyz, (1, 0, 2))[:, :, ::-1]
-    return out
-
-
-def veros_xy_to_legoesm_flex(arr_xy: np.ndarray,
-                             fill: float = 0.0) -> np.ndarray:
-    """(x, y) → legoESM (lat, lon) with wall rows (2-D forcing fields)."""
-    nx, ny = arr_xy.shape
-    out = np.full((ny + 2, nx), fill, dtype=np.float64)
-    out[1:-1, :] = arr_xy.T
-    return out
-
-
 def veros_mit_tau_shift(taux_xym: np.ndarray,
                         tauy_xym: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """The Veros set_forcing_kernel MIT-grid index shift
@@ -599,32 +594,20 @@ def veros_area_t_flexible(
 ) -> np.ndarray:
     """Veros T-cell area column weights ``dxt·dyt·cost`` [m²] on the
     STRETCHED grid (per-latitude row; broadcast over x)."""
-    degtom = r_earth * np.pi / 180.0
     dx_deg = 360.0 / nx
-    return (dx_deg * degtom) * (np.asarray(dyt_deg) * degtom) * np.cos(
-        np.deg2rad(np.asarray(yt_deg)))
+    return veros_area_t_generic(yt_deg, dx_deg, dyt_deg, r_earth)
 
 
 # ---------------------------------------------------------------------------
 # Physics configs (scoping §B; deltas vs global_4deg documented at each line)
 # ---------------------------------------------------------------------------
 
-# EKE: identical parameter block to global_4deg/ACC with the FLIP BACK:
-# enable_eke_isopycnal_diffusion=True in THIS setup (like ACC; the 4deg's
-# False was the settings default) ⇒ K_iso = K_gm (the Redi tracer
-# diffusivity follows the prognostic GM coefficient).
-GLOBAL_FLEX_EKE_CONFIG = GLOBAL4_EKE_CONFIG._replace(
-    isopycnal_diffusion=True,     # *** the flip back vs global_4deg ***
-)
-
-# GM/Redi: K_iso_0=1000, K_iso_steep=50, iso_dslope=iso_slopec=0.005 ⇒
-# S_max=5e-3, taper_width_frac=1.0 (established mapping S_max=iso_slopec,
-# frac=iso_dslope/iso_slopec).
-GLOBAL_FLEX_GM_REDI_CONFIG = GLOBAL4_GM_REDI_CONFIG._replace(
-    S_max=5.0e-3,                 # Veros iso_slopec   (4deg: 1e-3)
-    taper_width_frac=1.0,         # iso_dslope/iso_slopec (4deg: 4.0)
-    K_iso_steep=50.0,             # Veros K_iso_steep  (4deg: 1000)
-    eke=GLOBAL_FLEX_EKE_CONFIG,
+# EKE: identical parameter block to global_4deg/ACC with the FLIP BACK
+# (isopycnal_diffusion=True ⇒ K_iso = K_gm), plus the GM/Redi deltas
+# (S_max=5e-3, taper_width_frac=1.0, K_iso_steep=50).  This is the exact same
+# delta pair as global_1deg, shared via gm_redi_eke_isopycnal_on.
+GLOBAL_FLEX_GM_REDI_CONFIG, GLOBAL_FLEX_EKE_CONFIG = gm_redi_eke_isopycnal_on(
+    GLOBAL4_GM_REDI_CONFIG, GLOBAL4_EKE_CONFIG,
 )
 
 # TKE: the setup repeats the global_4deg block VERBATIM (c_k=0.1, c_eps=0.7,
@@ -650,40 +633,12 @@ def build_global_flexible_state(
     """Initial state: interpolated file T/S (legoESM order/shape) masked by
     the active cells, rest velocity, rigid-lid eta ≡ 0, TKE/EKE carry
     fields seeded (the 4deg seeding convention — see its docstring)."""
-    nz = z_coord.n_levels
-    state = rest_state_latlon_cgrid_ocean(
-        grid, z_coord,
-        S_uniform=35.0, H_max=float(z_coord.H_max),
-        land_mask_override=jnp.asarray(land_mask),
-        H_bathy_override=jnp.asarray(H_bathy),
+    return build_veros_global_state(
+        grid, z_coord, land_mask, H_bathy,
+        tke_config=GLOBAL_FLEX_TKE_CONFIG,
+        eke_config=GLOBAL_FLEX_EKE_CONFIG,
+        T_init=T_init, S_init=S_init,
     )
-    is_active = jnp.asarray(z_coord.is_active, dtype=state.T.data.dtype)
-    if T_init is not None:
-        state = state._replace(
-            T=state.T.replace(data=jnp.asarray(T_init) * is_active))
-    if S_init is not None:
-        state = state._replace(
-            S=state.S.replace(data=jnp.asarray(S_init) * is_active))
-
-    lm = state.land_mask.data
-    dtype = state.T.data.dtype
-    wet3 = (lm[:, :, jnp.newaxis] > 0.5) * jnp.ones((1, 1, nz - 1), dtype=dtype)
-
-    tke0 = GLOBAL_FLEX_TKE_CONFIG.tke_background * wet3
-    state = state._replace(
-        tke=Field(data=tke0, name="tke", dims=("lat", "lon", "level"),
-                  units="m^2/s^2"),
-        dtke=Field(data=jnp.zeros_like(tke0), name="dtke",
-                   dims=("lat", "lon", "level"), units="m^2/s^3"),
-    )
-    eke0 = GLOBAL_FLEX_EKE_CONFIG.e_min * wet3
-    state = state._replace(
-        eke=Field(data=eke0, name="eke", dims=("lat", "lon", "level"),
-                  units="m^2/s^2"),
-        eke_diss=Field(data=jnp.zeros_like(eke0), name="eke_diss",
-                       dims=("lat", "lon", "level"), units="m^2/s^3"),
-    )
-    return state
 
 
 # ---------------------------------------------------------------------------
@@ -725,7 +680,7 @@ def build_global_flexible_model_config() -> LatLonCGridOceanConfig:
     """global_flexible dynamics config — the matched-4deg faithful dycore
     stack (same Veros core ⇒ same options) with the setup's parameter
     deltas (A_h literal, GM/Redi block, the documented rescaled dt pair)."""
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         g=VEROS_CONSTANTS_CONFIG.g,
         rho_0=VEROS_CONSTANTS_CONFIG.rho_0,
         constants=VEROS_CONSTANTS_CONFIG,
@@ -743,12 +698,10 @@ def build_global_flexible_model_config() -> LatLonCGridOceanConfig:
         K_v=0.0,
         gm_redi=GLOBAL_FLEX_GM_REDI_CONFIG,
         surface_forcing_implicit=True,              # Veros source placement
-        outer_integrator="ab2",
-        ab2_scope="advective",
-        barotropic_solver="rigid_lid",
-        dt_mom_ratio=DT_MOM_RATIO,                  # 8 (dt arg IS dt_tracer)
-        momentum_friction_additive=True,
-        coriolis_scheme="explicit_ab2",             # |f|·dt_mom ≈ 0.25 @72°
+        # Shared bundle via veros_stepping.veros_faithful_stepping (#433);
+        # dt_mom_ratio=DT_MOM_RATIO=8 (dt arg IS dt_tracer; |f|·dt_mom ≈ 0.25 @72°).
+        **veros_faithful_stepping(with_surface_forcing=True,
+                                  dt_mom_ratio=DT_MOM_RATIO),
         physics=build_global_flexible_physics_config(),
     )
 

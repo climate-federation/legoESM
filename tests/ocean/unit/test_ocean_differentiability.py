@@ -128,7 +128,7 @@ class TestBottomDragDiff:
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord, H_max=500.0, land_lat_threshold=85.0,
         )
-        config = LatLonCGridOceanConfig(
+        config = LatLonCGridOceanConfig.from_flat(
             A_h=1000.0,
             K_h=0.0,
             A_v=0.0,
@@ -191,7 +191,7 @@ class TestBottomDragDiff:
         grid, z_coord, state, config, tend_fn = latlon_cgrid_setup
 
         # Config with no bottom drag
-        config_no_drag = config._replace(bottom_drag_r=0.0)
+        config_no_drag = config._replace(bottom_drag=config.bottom_drag._replace(bottom_drag_r=0.0))
 
         def loss(u_data, cfg):
             s = state._replace(u=state.u.replace(data=u_data))
@@ -229,7 +229,7 @@ class TestSpongeRelaxationDiff:
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord, H_max=500.0, land_lat_threshold=85.0,
         )
-        config = LatLonCGridOceanConfig(
+        config = LatLonCGridOceanConfig.from_flat(
             A_h=1000.0,
             K_h=0.0,
             A_v=0.0,
@@ -372,7 +372,7 @@ class TestBarotropicBottomDragDiff:
         )
 
         # Must use differentiable_barotropic=True to use lax.scan
-        config = LatLonCGridOceanConfig(
+        config = LatLonCGridOceanConfig.from_flat(
             A_h=1000.0,
             K_h=0.0,
             A_v=0.0,
@@ -390,12 +390,12 @@ class TestBarotropicBottomDragDiff:
         """Gradient of output eta w.r.t. input eta through barotropic loop."""
         grid, z_coord, state, config, baro_fn = baro_setup
         dt_baroclinic = 600.0
-        dt_s = dt_baroclinic / config.n_barotropic_substeps
+        dt_s = dt_baroclinic / config.barotropic.n_barotropic_substeps
 
         def loss(eta_data):
             s = state._replace(eta=state.eta.replace(data=eta_data))
             s_out, _transport = baro_fn(
-                s, dt_s, config.n_barotropic_substeps, grid, z_coord, config,
+                s, dt_s, config.barotropic.n_barotropic_substeps, grid, z_coord, config,
             )
             return jnp.sum(s_out.eta.data ** 2)
 
@@ -413,12 +413,12 @@ class TestBarotropicBottomDragDiff:
         """Gradient of output u w.r.t. input u through barotropic loop."""
         grid, z_coord, state, config, baro_fn = baro_setup
         dt_baroclinic = 600.0
-        dt_s = dt_baroclinic / config.n_barotropic_substeps
+        dt_s = dt_baroclinic / config.barotropic.n_barotropic_substeps
 
         def loss(u_data):
             s = state._replace(u=state.u.replace(data=u_data))
             s_out, _transport = baro_fn(
-                s, dt_s, config.n_barotropic_substeps, grid, z_coord, config,
+                s, dt_s, config.barotropic.n_barotropic_substeps, grid, z_coord, config,
             )
             return jnp.sum(s_out.u.data ** 2)
 
@@ -433,17 +433,34 @@ class TestBarotropicBottomDragDiff:
         )
 
     def test_bottom_drag_changes_barotropic_gradient(self, baro_setup):
-        """Bottom drag in barotropic solver contributes to the gradient."""
+        """Bottom drag reaches the differentiable barotropic mode through its
+        slow forcing.
+
+        Single-owner design (``barotropic_latlon_cgrid`` finding #6): the 3D
+        baroclinic tendency owns the bottom drag ``-r·u_bot/h_bot`` and carries
+        its depth-mean into the barotropic substeps via ``F_slow_u``/``F_slow_v``
+        — the substep itself NEVER re-applies ``config.bottom_drag_r`` (doing so
+        would double-count drag to ``≈2·r/H``).  So the drag's effect on the
+        barotropic gradient flows through that depth-mean velocity-dependent
+        forcing.  Reconstruct it here (``F_slow ∝ −r·u``) and confirm a nonzero
+        drag rate genuinely changes the barotropic Jacobian d(u_out)/d(u_in)."""
         grid, z_coord, state, config, baro_fn = baro_setup
         dt_baroclinic = 600.0
-        dt_s = dt_baroclinic / config.n_barotropic_substeps
+        dt_s = dt_baroclinic / config.barotropic.n_barotropic_substeps
 
-        config_no_drag = config._replace(bottom_drag_r=0.0)
+        config_no_drag = config._replace(
+            bottom_drag=config.bottom_drag._replace(bottom_drag_r=0.0))
 
         def loss(u_data, cfg):
             s = state._replace(u=state.u.replace(data=u_data))
+            # Depth-mean bottom-drag slow forcing the baroclinic tendency carries
+            # into the barotropic mode (velocity-dependent, single-owner path).
+            r = cfg.bottom_drag.bottom_drag_r
+            F_u = -r * jnp.mean(u_data, axis=-1) * s.u_mask.data
+            F_v = -r * jnp.mean(s.v.data, axis=-1) * s.v_mask.data
             s_out, _ = baro_fn(
-                s, dt_s, cfg.n_barotropic_substeps, grid, z_coord, cfg,
+                s, dt_s, cfg.barotropic.n_barotropic_substeps, grid, z_coord, cfg,
+                F_slow_u=F_u, F_slow_v=F_v,
             )
             return jnp.sum(s_out.u.data ** 2)
 
@@ -451,8 +468,8 @@ class TestBarotropicBottomDragDiff:
         grad_no_drag = jax.grad(loss)(state.u.data, config_no_drag)
         diff = float(jnp.max(jnp.abs(grad_drag - grad_no_drag)))
         assert diff > 1e-15, (
-            f"Bottom drag in barotropic solver has no effect on gradient. "
-            f"Max diff = {diff:.2e}"
+            f"Bottom-drag slow forcing has no effect on the barotropic "
+            f"gradient. Max diff = {diff:.2e}"
         )
 
     def test_fori_loop_barotropic_no_drag(self, baro_setup):
@@ -464,11 +481,11 @@ class TestBarotropicBottomDragDiff:
         """
         grid, z_coord, state, config, baro_fn = baro_setup
         dt_baroclinic = 600.0
-        config_fori = config._replace(differentiable_barotropic=False)
-        dt_s = dt_baroclinic / config_fori.n_barotropic_substeps
+        config_fori = config._replace(barotropic=config.barotropic._replace(differentiable_barotropic=False))
+        dt_s = dt_baroclinic / config_fori.barotropic.n_barotropic_substeps
 
         s_out, _transport = baro_fn(
-            state, dt_s, config_fori.n_barotropic_substeps, grid, z_coord, config_fori,
+            state, dt_s, config_fori.barotropic.n_barotropic_substeps, grid, z_coord, config_fori,
         )
         assert jnp.all(jnp.isfinite(s_out.eta.data)), "Non-finite eta from fori_loop"
 
@@ -534,7 +551,7 @@ if __name__ == "__main__":
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord, H_max=500.0, land_lat_threshold=85.0,
         )
-        cfg = LatLonCGridOceanConfig(
+        cfg = LatLonCGridOceanConfig.from_flat(
             A_h=1000.0, bottom_drag_r=1e-3, A_v=0.0, K_v=0.0, K_h=0.0,
             enable_runtime_checks=False, n_barotropic_substeps=2,
         )
@@ -575,7 +592,7 @@ if __name__ == "__main__":
         sponge = SpongeForcing(gamma=gamma, T_ref=T_ref, S_ref=S_ref)
 
         # reuse grid/z_coord/state from test 2
-        cfg_sp = LatLonCGridOceanConfig(
+        cfg_sp = LatLonCGridOceanConfig.from_flat(
             A_h=1000.0, bottom_drag_r=0.0, A_v=0.0, K_v=0.0, K_h=0.0,
             enable_runtime_checks=False, n_barotropic_substeps=2,
         )
@@ -626,7 +643,7 @@ if __name__ == "__main__":
             v=state.v.replace(data=state.v.data + v_pert),
             eta=state.eta.replace(data=state.eta.data + eta_pert),
         )
-        cfg_bt = LatLonCGridOceanConfig(
+        cfg_bt = LatLonCGridOceanConfig.from_flat(
             A_h=1000.0, bottom_drag_r=1e-3, n_barotropic_substeps=5,
             differentiable_barotropic=True, barotropic_diffusion_alpha=0.01,
             enable_runtime_checks=False, A_v=0.0, K_v=0.0, K_h=0.0,

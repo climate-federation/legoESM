@@ -13,7 +13,6 @@ __param_spec__ = {
         "scheme_key": "coupler.surface",
         "excluded": {
             "U_min": "numerics: minimum wind-speed floor for bulk fluxes [m/s]",
-            "blend_sharpness": "numerics: surface-tile blend sigmoid sharpness",
             "co2_ppmv_default": "forcing: default atmospheric CO2 [ppmv]",
             "coupling_dt": "numerics: coupling timestep [s]",
             "z_q_atm": "convention: humidity measurement reference height [m]",
@@ -46,6 +45,11 @@ __param_spec__ = {
                 "transform": "sigmoid", "category": "surface",
                 "reference": "open-ocean aerodynamic roughness length", "shape": None,
             },
+            "gustiness": {
+                "units": "m s-1", "bounds": (0.0, 10.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "surface",
+                "reference": "sub-grid convective gustiness floor (Wing 2018 RCEMIP1 / Beljaars 1995)", "shape": None,
+            },
         },
     },
 }
@@ -65,12 +69,19 @@ class TileConfig(NamedTuple):
 class CouplerConfig(NamedTuple):
     """Configuration for the surface coupler."""
     coupling_dt: float = 3600.0       # Coupling interval [s]
-    U_min: float = 1.0                # Minimum wind speed floor [m/s]
+    U_min: float = 1.0                # Numerical wind speed floor [m/s]
+    # Sub-grid convective gustiness floor [m/s] for the air-sea bulk fluxes:
+    # |U|_eff = sqrt(|U|^2 + gustiness^2).  DEFAULT 1.0: in an INTERACTIVE
+    # coupled ocean equilibrium evaporation is ENERGY-limited, so a large
+    # gustiness over-cools the slab (E transiently up -> SST cools -> q_sat down
+    # -> E settles lower; measured gustiness=5 -> SST drift -20 K/yr).  ~5 m/s
+    # (Wing 2018) is correct only for PRESCRIBED-SST (SCM/AMIP).  See the CAM
+    # surface-energy audit.
+    gustiness: float = 1.0
     ocean_albedo: float = 0.06        # Fallback constant ocean albedo
     ocean_emissivity: float = 0.97    # Default ocean emissivity
     ocean_z0: float = 1e-4            # Ocean roughness length [m]
     co2_ppmv_default: float = 400.0   # Default CO2 concentration
-    blend_sharpness: float = 20.0     # Sigmoid sharpness for tile blending
     Cd_ocean: float = 1.5e-3          # Ocean drag coefficient
     Ch_ocean: float = 1.5e-3          # Ocean heat transfer coefficient
     bulk_scheme: str = "constant"     # "constant", "coare3", "large_yeager"

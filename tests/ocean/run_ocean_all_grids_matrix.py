@@ -388,9 +388,12 @@ def main() -> int:
 
         def build_latlon_native_fv_cmd(_: float) -> list[str]:
             # Run the lat-lon FV ocean unit tests via pytest.
+            # The standalone test_latlon_ocean_fv.py / run_latlon_ocean_fv_suite.py
+            # were removed in a tests reorg; the native lat-lon C-grid finite-volume
+            # ocean suite now lives in test_latlon_cgrid_ocean.py.
             return [
                 args.python, "-m", "pytest",
-                "tests/ocean/unit/test_latlon_ocean_fv.py",
+                "tests/ocean/unit/test_latlon_cgrid_ocean.py",
                 "-v", "--tb=short",
                 f"--junitxml={out_dir / 'results.xml'}",
             ]
@@ -492,14 +495,14 @@ def main() -> int:
                 "native + remapped lat-lon diagnostics under lat_lon/projection_from_cube."
             ),
             "lat_lon_native_fv": (
-                "native finite-volume lat-lon branch runs tests/ocean/test_latlon_ocean.py "
-                "via tests/ocean/run_latlon_ocean_fv_suite.py."
+                "native finite-volume lat-lon branch runs "
+                "tests/ocean/unit/test_latlon_cgrid_ocean.py via pytest."
             ),
             "lat_lon_spectral_cases": (
                 "Native spectral lat-lon suite currently covers rest/wave/baroclinic cases."
             ),
             "icosahedral_cases": (
-                "MPAS suite currently follows tests/ocean/run_mpas_ocean_cases.py case set."
+                "MPAS suite currently follows tests/ocean/unit/test_mpas_ocean.py case set."
             ),
         },
         "config": {

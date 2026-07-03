@@ -59,6 +59,11 @@ _PAR_FRAC = 0.48   # Fraction of shortwave that is PAR
 _PAR_CONV = 4.6    # umol photons per J of PAR
 _MC = 12.0e-6      # g C per umol CO2
 
+# A-gs coupling fixed-point iteration COUNT. A loop count is never a config /
+# trainable leaf (loop-counts-never-trainable doctrine) — it stays a module
+# constant so it can never reach the trainable collector.
+_N_AGS_ITER_DEFAULT = 5
+
 
 # =====================================================================
 # Configuration
@@ -88,8 +93,8 @@ __param_spec__ = {
             "J_max25": {"units": "1", "bounds": (39.6, 360.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
             "K_PAR": {"units": "1", "bounds": (66.0, 600.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
             "Rd25": {"units": "1", "bounds": (0.495, 4.5), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
-            "T_opt_jarvis": {"units": "1", "bounds": (8.25, 75.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
-            "T_range_jarvis": {"units": "1", "bounds": (6.6, 60.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "T_opt_jarvis_C": {"units": "degC", "bounds": (8.25, 75.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None, "legacy_name": "T_opt_jarvis"},
+            "T_range_jarvis_C": {"units": "degC", "bounds": (6.6, 60.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None, "legacy_name": "T_range_jarvis"},
             "Vc_max25": {"units": "1", "bounds": (19.8, 180.0), "tunable_tier": 1, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
             "a_vpd": {"units": "1", "bounds": (0.0165, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
             "alpha_q": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
@@ -149,12 +154,16 @@ class StomataConfig(NamedTuple):
     # --- Jarvis (Jarvis 1976) ---
     gs_max: float = 0.3          # Maximum conductance [mol/m2/s]
     K_PAR: float = 200.0         # PAR half-saturation [W/m2]
-    T_opt_jarvis: float = 25.0   # Optimal temperature [deg C]
-    T_range_jarvis: float = 20.0 # Temperature range [deg C]
+    T_opt_jarvis_C: float = 25.0   # Optimal temperature [deg C]
+    T_range_jarvis_C: float = 20.0 # Temperature range [deg C]
     a_vpd: float = 0.05          # VPD sensitivity [1/hPa]
 
     # --- Solver ---
-    n_iter_ags: int = 5          # A-gs coupling iterations
+    # A-gs fixed-point iteration count. An int field, so it is never spec-
+    # eligible / trainable (the loop-count-never-trainable guarantee holds
+    # structurally); the default references the module constant. Kept as a
+    # config field for backward compatibility + per-call convergence tuning.
+    n_iter_ags: int = _N_AGS_ITER_DEFAULT
 
     # --- Other ---
     O2_conc: float = 209000.0    # Atmospheric O2 [umol/mol]
@@ -326,7 +335,7 @@ def jarvis_gs(
     f_PAR = PAR / (PAR + config.K_PAR + 1e-10)
 
     T_C = T - constants.T_freeze
-    dT = (T_C - config.T_opt_jarvis) / config.T_range_jarvis
+    dT = (T_C - config.T_opt_jarvis_C) / config.T_range_jarvis_C
     f_T = jnp.maximum(1.0 - dT ** 2, 0.0)
 
     # VPD response (linear decrease).
@@ -386,6 +395,12 @@ def coupled_farquhar_stomata(
     gs : Canopy stomatal conductance [mol H2O/m2/s].
     gpp : Gross primary production [gC/m2/s].
     """
+    if config.stomata_model not in ("ball_berry", "medlyn"):
+        raise ValueError(
+            f"Unknown stomata_model {config.stomata_model!r}; "
+            "expected one of: 'ball_berry', 'medlyn'."
+        )
+
     # PAR in umol photons/m2/s
     PAR_umol = _PAR_FRAC * sw_down * _PAR_CONV
 

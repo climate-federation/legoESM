@@ -40,88 +40,14 @@ from legoesm.thermo import saturation_mixing_ratio
 from legoesm import constants
 
 
-# Default parameters
-TC3_PARAMS = {
-    "small_earth_factor": 60.0,
-    "H": 20000.0,                     # Model top [m]
-    "n_levels": 40,
-    # Sounding parameters
-    "T_s": 302.0,                     # Surface temperature [K]
-    "T_tropopause": 213.0,            # Tropopause temperature [K]
-    "z_tropopause": 12000.0,          # Tropopause height [m]
-    "p_s": 1.0e5,                     # Surface pressure [Pa]
-    "RH_low": 0.95,                   # Surface relative humidity
-    "RH_high": 0.0,                   # Stratospheric relative humidity
-    "RH_transition_z": 8000.0,        # RH transition height [m]
-    # Wind shear
-    "U_s": 30.0,                      # Shear magnitude [m/s]
-    "z_s": 5000.0,                    # Shear layer height [m]
-    "U_c": 0.0,                       # Surface velocity [m/s]
-    # Bubbles
-    "n_bubbles": 9,
-    "bubble_dtheta": 3.0,             # Perturbation amplitude [K]
-    "bubble_rh": 5.0e3,               # Horizontal half-width [m]
-    "bubble_rz": 1500.0,              # Vertical half-width [m]
-    "bubble_zc": 1500.0,              # Bubble center height [m]
-    "bubble_spacing": 10.0e3,         # Spacing between bubbles [m]
-    "bubble_lon": jnp.pi,             # Bubble line longitude [rad]
-    # Sponge
-    "sponge_width": 5000.0,
-    "sponge_coeff": 0.05,
-}
-
-
-def _squall_line_sounding(z, params):
-    """Compute thermodynamic sounding for the squall line.
-
-    Returns temperature, potential temperature, and pressure at height z.
-    Uses a simple tropospheric lapse rate transitioning to isothermal
-    stratosphere.
-    """
-    T_s = params["T_s"]
-    T_tr = params["T_tropopause"]
-    z_tr = params["z_tropopause"]
-    p_s = params["p_s"]
-    g = constants.g
-    R_d = constants.R_d
-    kappa = constants.kappa
-    p_0 = constants.p_ref
-
-    # Lapse rate in troposphere
-    gamma = (T_s - T_tr) / z_tr
-
-    # Temperature profile
-    T_tropo = T_s - gamma * jnp.minimum(z, z_tr)
-    T = jnp.where(z <= z_tr, T_tropo, T_tr)
-
-    # Pressure from hydrostatic integration
-    # Tropospheric: p = p_s * (T/T_s)^(g/(R_d*gamma))
-    T_ratio = jnp.clip(T_tropo, 100.0, None) / T_s
-    exponent = g / (R_d * gamma)
-    p_tropo = p_s * T_ratio ** exponent
-
-    # At tropopause
-    T_at_tr = T_s - gamma * z_tr
-    p_at_tr = p_s * (jnp.clip(T_at_tr, 100.0, None) / T_s) ** exponent
-
-    # Stratospheric: isothermal
-    dz_above = jnp.maximum(z - z_tr, 0.0)
-    p_strato = p_at_tr * jnp.exp(-g * dz_above / (R_d * T_tr))
-
-    p = jnp.where(z <= z_tr, p_tropo, p_strato)
-
-    # Potential temperature
-    theta = T * (p_0 / p) ** kappa
-
-    return T, theta, p
-
-
-def _squall_line_theta_fn(params):
-    """Return theta_0(z) function for the squall line sounding."""
-    def theta_fn(z):
-        _, theta, _ = _squall_line_sounding(z, params)
-        return theta
-    return theta_fn
+# Default parameters + sounding now live in the package (audit item 9: no
+# production->tests import).  Re-export with the historical underscore names so
+# the in-file ``dcmip25_tc3_init`` and any external test imports keep working.
+from legoesm.atmosphere.dynamics.dcmip2025_ic import (  # noqa: E402,F401
+    TC3_PARAMS,
+    squall_line_sounding as _squall_line_sounding,
+    squall_line_theta_fn as _squall_line_theta_fn,
+)
 
 
 def dcmip25_tc3_init(

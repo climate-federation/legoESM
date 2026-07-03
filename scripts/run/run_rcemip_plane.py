@@ -222,6 +222,148 @@ def _make_surface_flux_physics(
     return physics_fn
 
 
+def _land_surface_flux_tendencies(
+    state, grid, height_coord, terrain_metric,
+    T_sfc: jax.Array, p_sfc: float, beta: float, wd: float = 0.0,
+):
+    """SAM bulk surface-flux tendencies for prognostic slab land.
+
+    This is the LAND-RCE counterpart of :func:`_make_surface_flux_physics`.
+    It keeps the same SAM ``oceflx`` transfer coefficients, but takes a
+    2-D prognostic skin temperature field and applies a fixed moisture
+    availability ``beta`` to the potential latent-heat flux.
+    """
+    del grid, terrain_metric
+    from legoesm.core.bulk_flux import (
+        compute_sam_oceflx_fluxes, sam_ocean_surface_q,
+    )
+
+    ny, nx, nlev = state.theta_prime.data.shape
+    n_tracers = state.tracers.data.shape[-1]
+    T_sfc = jnp.asarray(T_sfc, dtype=state.theta_prime.data.dtype)
+    if T_sfc.shape != (ny, nx):
+        raise ValueError(
+            f"land T_sfc shape {T_sfc.shape!r} must match horizontal grid "
+            f"{(ny, nx)!r}"
+        )
+    beta = jnp.clip(jnp.asarray(beta, dtype=T_sfc.dtype), 0.0, 1.0)
+
+    rho_0 = height_coord.rho_ref
+    theta_0 = height_coord.theta_ref
+    theta_total = theta_0 + state.theta_prime.data
+    rho_total = rho_0 + state.rho_prime.data
+
+    k_sfc = nlev - 1
+    u_lo = state.u.data[..., k_sfc]
+    v_lo = state.v.data[..., k_sfc]
+    rho_lo = rho_total[..., k_sfc]
+    theta_lo = theta_total[..., k_sfc]
+    pi_sfc = height_coord.exner_ref[k_sfc]
+    if n_tracers > 0:
+        q_lo = state.tracers.data[..., k_sfc, 0]
+    else:
+        q_lo = jnp.zeros_like(theta_lo)
+    z_bot = height_coord.z_full[k_sfc]
+
+    q_sfc_sat = sam_ocean_surface_q(T_sfc, p_sfc, salt_factor=1.0)
+    tau_x, tau_y, shflx, lhflx_potential, _ = compute_sam_oceflx_fluxes(
+        u_atm=u_lo, v_atm=v_lo, theta_atm=theta_lo, q_atm=q_lo,
+        T_sfc=T_sfc, q_sfc=q_sfc_sat,
+        rho=rho_lo, z_bot=z_bot, exner_sfc=pi_sfc, wd=wd,
+    )
+    lhflx = beta * lhflx_potential
+
+    dz_sfc = height_coord.dz[k_sfc]
+    du_sfc = tau_x / (rho_lo * dz_sfc)
+    dv_sfc = tau_y / (rho_lo * dz_sfc)
+    du_dt_data = jnp.zeros_like(state.u.data).at[..., k_sfc].set(du_sfc)
+    dv_dt_data = jnp.zeros_like(state.v.data).at[..., k_sfc].set(dv_sfc)
+
+    dT_sfc_air = shflx / (rho_lo * constants.c_pd * dz_sfc)
+    dtheta_sfc = dT_sfc_air / pi_sfc
+    dtheta_p_data = jnp.zeros_like(
+        state.theta_prime.data
+    ).at[..., k_sfc].set(dtheta_sfc)
+
+    dtracers_data = jnp.zeros_like(state.tracers.data)
+    if n_tracers > 0:
+        dq_sfc = lhflx / (rho_lo * constants.L_v * dz_sfc)
+        dtracers_data = dtracers_data.at[..., k_sfc, 0].add(dq_sfc)
+
+    tendencies = PlaneNonHydrostaticTendencies(
+        du_dt=state.u.replace(data=du_dt_data),
+        dv_dt=state.v.replace(data=dv_dt_data),
+        dw_dt=state.w.replace(data=jnp.zeros_like(state.w.data)),
+        dtheta_prime_dt=state.theta_prime.replace(data=dtheta_p_data),
+        drho_prime_dt=state.rho_prime.replace(
+            data=jnp.zeros_like(state.rho_prime.data)),
+        dphis_dt=state.phis.replace(data=jnp.zeros_like(state.phis.data)),
+        dtracers_dt=state.tracers.replace(data=dtracers_data),
+    )
+    diagnostics = {
+        "tau_x": tau_x,
+        "tau_y": tau_y,
+        "shflx": shflx,
+        "lhflx": lhflx,
+        "lhflx_potential": lhflx_potential,
+        "q_sfc_sat": q_sfc_sat,
+        "beta": jnp.full_like(T_sfc, beta),
+    }
+    return tendencies, diagnostics
+
+
+def _apply_plane_tendency_forward_euler(state, tend, dt: float):
+    """Apply a plane NH tendency as a host-side forward-Euler increment."""
+    return state._replace(
+        u=state.u.replace(data=state.u.data + dt * tend.du_dt.data),
+        v=state.v.replace(data=state.v.data + dt * tend.dv_dt.data),
+        w=state.w.replace(data=state.w.data + dt * tend.dw_dt.data),
+        theta_prime=state.theta_prime.replace(
+            data=state.theta_prime.data + dt * tend.dtheta_prime_dt.data),
+        rho_prime=state.rho_prime.replace(
+            data=state.rho_prime.data + dt * tend.drho_prime_dt.data),
+        phis=state.phis.replace(data=state.phis.data + dt * tend.dphis_dt.data),
+        tracers=state.tracers.replace(
+            data=state.tracers.data + dt * tend.dtracers_dt.data),
+    )
+
+
+def _update_land_slab_temperature(
+    T_sfc: jax.Array,
+    sw_down: jax.Array,
+    lw_down: jax.Array,
+    shflx: jax.Array,
+    lhflx: jax.Array,
+    dt: float,
+    heat_capacity: float,
+    albedo: float,
+    emissivity: float = 1.0,
+):
+    """Forward-Euler slab surface energy balance for LAND-RCE.
+
+    Positive turbulent fluxes are upward from the surface, so they cool the
+    slab:
+
+        C_slab dT_s/dt = SW_down (1 - alpha) + LW_down - eps sigma T_s^4
+                         - SH - LH
+    """
+    from legoesm.core.surface_energy import surface_radiation_fluxes
+
+    sw_net, lw_net, lw_up = surface_radiation_fluxes(
+        sw_down, lw_down, T_sfc, albedo, emissivity,
+    )
+    net = sw_net + lw_net - shflx - lhflx
+    T_new = T_sfc + dt * net / heat_capacity
+    diagnostics = {
+        "sw_net": sw_net,
+        "lw_net": lw_net,
+        "lw_up": lw_up,
+        "R_net": sw_net + lw_net,
+        "Q_slab": net,
+    }
+    return T_new, diagnostics
+
+
 # -------- Physics composer -------- #
 
 
@@ -284,6 +426,226 @@ def _plane_radiation_physics_with_sst(radiation_config, grid, T_sfc):
     # override in the same precision as T[..., -1] it replaces).
     rad_fn.set_T_sfc_override(jnp.full((ncol,), float(T_sfc), dtype=jnp.float64))
     return rad_fn
+
+
+def _radiation_surface_emissivity(radiation_config: RadiationConfig | None) -> float:
+    if radiation_config is None:
+        return 1.0
+    if radiation_config.scheme == "rrtmgp":
+        return float(radiation_config.rrtmgp.sfc_emissivity)
+    return float(radiation_config.gray.sfc_emissivity)
+
+
+def _with_land_radiation_surface(
+    radiation_config: RadiationConfig | None,
+    albedo: float,
+) -> RadiationConfig | None:
+    """Return a radiation config whose radiative surface is land-like."""
+    if radiation_config is None:
+        return None
+    if radiation_config.scheme == "rrtmgp":
+        return radiation_config._replace(
+            rrtmgp=radiation_config.rrtmgp._replace(
+                sfc_albedo=albedo,
+                sfc_albedo_direct=albedo,
+            )
+        )
+    return radiation_config._replace(
+        gray=radiation_config.gray._replace(sfc_albedo=albedo)
+    )
+
+
+def _make_land_radiation_refresh_fn(
+    radiation_config: RadiationConfig | None,
+    sfc_albedo: float,
+    sfc_emissivity: float,
+):
+    """Build a dynamic-T_s plane radiation refresh for land mode.
+
+    The returned callable takes ``(state, grid, hc, tm, T_sfc)`` and returns
+    ``(tendency, surface_flux_diagnostics)``.  It is intentionally separate
+    from the fixed-SST helper so the ocean path keeps using the existing static
+    radiation override.
+    """
+    if radiation_config is None:
+        return None
+
+    from legoesm.atmosphere.physics.radiation.integration import (
+        _call_radiation_backend,
+        _compute_insolation,
+        _get_grid_lat_lon,
+        _validate_cloud_gate,
+    )
+    from legoesm.atmosphere.physics.thermodynamics import (
+        pressure_from_eos,
+        reconstruct_half_level_pressure_hydrostatic,
+        sanitize_theta_rho,
+    )
+
+    _validate_cloud_gate(radiation_config)
+    rrtmgp_solver = None
+    ml_ozone_coefs = None
+    if radiation_config.scheme == "rrtmgp":
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        RRTMGP.preload(radiation_config.rrtmgp)
+        rrtmgp_solver = RRTMGP.from_legoesm_config(radiation_config.rrtmgp)
+        if radiation_config.ozone.source == "ml":
+            if not radiation_config.ozone.ml_weights_path:
+                raise ValueError(
+                    "OzoneProfileConfig.source='ml' requires ml_weights_path."
+                )
+            from legoesm.atmosphere.physics.radiation.ozone_ml import (
+                load_ml_ozone_coefficients,
+            )
+
+            ml_ozone_coefs = load_ml_ozone_coefficients(
+                radiation_config.ozone.ml_weights_path
+            )
+
+    def refresh_fn(state, grid, height_coord, terrain_metric, T_sfc):
+        theta_p = state.theta_prime.data
+        rho_p = state.rho_prime.data
+        theta_0 = height_coord.theta_ref
+        rho_0 = height_coord.rho_ref
+
+        theta_total, rho_total = sanitize_theta_rho(
+            theta_0 + theta_p, rho_0 + rho_p,
+        )
+        p = pressure_from_eos(rho_total, theta_total)
+        exner = (p / constants.p_ref) ** constants.kappa
+        T = theta_total * exner
+
+        nlev = height_coord.n_levels
+        shape_3d = theta_p.shape
+        shape_w = state.w.data.shape
+        shape_2d = state.phis.data.shape
+        ny, nx = shape_2d
+        ncol = ny * nx
+
+        p_half = reconstruct_half_level_pressure_hydrostatic(
+            p_full=p, rho_full=rho_total,
+            z_half=terrain_metric.z_half_3d,
+        )
+        T_sfc = jnp.asarray(T_sfc, dtype=T.dtype)
+        if T_sfc.shape != shape_2d:
+            raise ValueError(
+                f"land T_sfc shape {T_sfc.shape!r} must match {shape_2d!r}"
+            )
+
+        lat, lon = _get_grid_lat_lon(grid, shape_2d)
+        insol, cos_sza, f_day, eccf = _compute_insolation(
+            lat, radiation_config, lon=lon,
+        )
+
+        T_col = T.reshape(ncol, nlev)
+        p_full_col = p.reshape(ncol, nlev)
+        p_half_col = p_half.reshape(ncol, nlev + 1)
+        T_sfc_col = T_sfc.reshape(ncol)
+        lat_col = lat.reshape(ncol)
+        lon_col = lon.reshape(ncol)
+        insol_col = insol.reshape(ncol)
+        cos_sza_col = (
+            cos_sza.reshape(ncol) if cos_sza is not None else None
+        )
+        f_day_col = f_day.reshape(ncol) if f_day is not None else None
+
+        n_tracers = state.tracers.data.shape[-1]
+        if n_tracers > 0:
+            q_v = jnp.clip(state.tracers.data[..., 0], 0.0, None)
+        else:
+            q_v = jnp.zeros_like(T)
+        q_v_col = q_v.reshape(ncol, nlev)
+
+        q_cloud_col = None
+        q_ice_col = None
+        if n_tracers > 1:
+            q_cloud_col = jnp.clip(
+                state.tracers.data[..., 1], 0.0, None,
+            ).reshape(ncol, nlev)
+        if n_tracers > 3:
+            q_ice_col = jnp.clip(
+                state.tracers.data[..., 3], 0.0, None,
+            ).reshape(ncol, nlev)
+        n_cloud_col = None
+        n_ice_col = None
+        if n_tracers > 8:
+            n_cloud_col = jnp.clip(
+                state.tracers.data[..., 6], 0.0, None,
+            ).reshape(ncol, nlev)
+            n_ice_col = jnp.clip(
+                state.tracers.data[..., 8], 0.0, None,
+            ).reshape(ncol, nlev)
+
+        sfc_albedo_col = jnp.full(
+            (ncol,), sfc_albedo, dtype=T_sfc_col.dtype,
+        )
+        sfc_emissivity_col = jnp.full(
+            (ncol,), sfc_emissivity, dtype=T_sfc_col.dtype,
+        )
+        rad_out = _call_radiation_backend(
+            radiation_config=radiation_config,
+            eccf=eccf,
+            T=T_col, p_full=p_full_col, p_half=p_half_col,
+            sfc_temperature=T_sfc_col, lat=lat_col, q_v=q_v_col,
+            insolation=insol_col, cos_sza=cos_sza_col,
+            sfc_albedo_override=sfc_albedo_col,
+            sfc_emissivity_override=sfc_emissivity_col,
+            q_cloud=q_cloud_col, q_ice=q_ice_col,
+            n_cloud=n_cloud_col, n_ice=n_ice_col, f_day=f_day_col,
+            rrtmgp_solver=rrtmgp_solver, lon=lon_col,
+            ml_ozone_coefs=ml_ozone_coefs,
+        )
+
+        dT_dt = rad_out.heating_rate.reshape(shape_3d)
+        dtheta_prime_dt = dT_dt / jnp.clip(exner, 1e-6, None)
+        dims_3d = ("y", "x", "z")
+        dims_w = ("y", "x", "z_half")
+        dims_2d = ("y", "x")
+        dims_tr = ("y", "x", "z", "tracer")
+        _sd = T.dtype
+        _pd = state.phis.data.dtype
+
+        tendencies = PlaneNonHydrostaticTendencies(
+            du_dt=Field(
+                data=jnp.zeros(shape_3d, dtype=_sd), name="du_dt_rad_land",
+                dims=dims_3d, units="m/s^2",
+            ),
+            dv_dt=Field(
+                data=jnp.zeros(shape_3d, dtype=_sd), name="dv_dt_rad_land",
+                dims=dims_3d, units="m/s^2",
+            ),
+            dw_dt=Field(
+                data=jnp.zeros(shape_w, dtype=_sd), name="dw_dt_rad_land",
+                dims=dims_w, units="m/s^2",
+            ),
+            dtheta_prime_dt=Field(
+                data=dtheta_prime_dt, name="dtheta_prime_dt_rad_land",
+                dims=dims_3d, units="K/s",
+            ),
+            drho_prime_dt=Field(
+                data=jnp.zeros(shape_3d, dtype=_sd),
+                name="drho_prime_dt_rad_land",
+                dims=dims_3d, units="kg/m^3/s",
+            ),
+            dphis_dt=Field(
+                data=jnp.zeros(shape_2d, dtype=_pd), name="dphis_dt_rad_land",
+                dims=dims_2d, units="m^2/s^3",
+            ),
+            dtracers_dt=Field(
+                data=jnp.zeros_like(state.tracers.data),
+                name="dtracers_dt_rad_land", dims=dims_tr, units="1/s",
+            ),
+        )
+        surface_fluxes = {
+            "sw_down": rad_out.sw_flux_down[:, -1].reshape(shape_2d),
+            "lw_down": rad_out.lw_flux_down[:, -1].reshape(shape_2d),
+            "sw_up": rad_out.sw_flux_up[:, -1].reshape(shape_2d),
+            "lw_up": rad_out.lw_flux_up[:, -1].reshape(shape_2d),
+        }
+        return tendencies, surface_fluxes
+
+    return refresh_fn
 
 
 def make_rcemip_physics(
@@ -552,6 +914,50 @@ def _build_rcemip_initial_state(grid, height_coord, dtype=jnp.float64,
     )
 
 
+def _add_vortex_seed(state, grid, height_coord, vmax, rmax, ztop, dtype=jnp.float64):
+    """Superpose a weak CYCLONIC tangential-wind vortex at the domain centre — the
+    standard rotating-RCE tropical-cyclone intensification seed (a weak initial
+    vortex spins up via WISHE under an f-plane + warm SST).
+
+    Tangential-wind profile is a smooth modified-Rankine
+    ``V(r) = vmax · 2 r·rmax / (r² + rmax²)`` (0 at the centre, peak ``vmax`` at
+    ``r=rmax``, ~1/r decay outside), tapered ``cos²`` in height from full strength
+    at the surface to zero at ``ztop``. Cyclonic for f>0 (counter-clockwise):
+    ``u' = −V·Δy/r``, ``v' = +V·Δx/r``. WIND-ONLY seed (no warm core / pressure
+    perturbation imposed): a weak vortex is near-balanced and the dycore radiates
+    the small imbalance as inertia-gravity waves within ~1 h; the warm core then
+    develops self-consistently. θ', ρ', tracers untouched."""
+    u = np.asarray(state.u.data)
+    v = np.asarray(state.v.data)
+    ny, nx, nlev = u.shape
+    xc = np.asarray(grid.xc); yc = np.asarray(grid.yc)
+    x0 = 0.5 * (xc[0] + xc[-1]); y0 = 0.5 * (yc[0] + yc[-1])
+    dxr = (xc[None, :] - x0); dyr = (yc[:, None] - y0)          # (ny,nx)
+    r = np.sqrt(dxr ** 2 + dyr ** 2)
+    r_safe = np.where(r > 1.0, r, 1.0)
+    Vt = vmax * 2.0 * r * rmax / (r ** 2 + rmax ** 2)          # modified-Rankine
+    # RADIAL WINDOW: drive Vt→0 before the half-domain so the ~1/r tail does NOT
+    # reach the periodic boundary and self-interact with its image vortex (codex
+    # 2026-06-09). Flat to r0, cos² roll-off r0→r_cut, zero beyond. r_cut at 0.42·L
+    # (L=domain width) keeps a buffer to the L/2 seam.
+    L = float(xc[-1] - xc[0])
+    r_cut = 0.42 * L; r0 = 0.55 * r_cut
+    win = np.where(r <= r0, 1.0,
+                   np.where(r >= r_cut, 0.0,
+                            np.cos(0.5 * np.pi * (r - r0) / (r_cut - r0)) ** 2))
+    Vt = Vt * win
+    up = -Vt * dyr / r_safe                                     # cyclonic (NH f>0)
+    vp = +Vt * dxr / r_safe
+    z = np.asarray(height_coord.z_full)                        # (nlev,)
+    taper = np.where(z < ztop, np.cos(0.5 * np.pi * z / ztop) ** 2, 0.0)
+    u = u + (up[:, :, None] * taper[None, None, :]).astype(u.dtype)
+    v = v + (vp[:, :, None] * taper[None, None, :]).astype(v.dtype)
+    return state._replace(
+        u=state.u.replace(data=jnp.asarray(u, dtype=dtype)),
+        v=state.v.replace(data=jnp.asarray(v, dtype=dtype)),
+    )
+
+
 # RAD-2: perpetual fixed-zenith RCE insolation presets (S_0 [W/m²], cosθ).
 # Verified against the gSAM CASES namelists:
 #   "rcemip" — RCEMIP1/prm: doperpetual+dosolarconstant, solar_constant=551.58,
@@ -672,7 +1078,8 @@ def _build_microphysics_config(
     if scheme == "none":
         return None
     valid = ("kessler", "morrison", "sundqvist",
-             "seifert_beheng", "thompson", "p3", "ml_emulator")
+             "seifert_beheng", "thompson", "p3", "sdm", "fast_sbm",
+             "ml_emulator")
     if scheme not in valid:
         raise ValueError(
             f"Unknown --microphysics: {scheme!r}; "
@@ -739,6 +1146,23 @@ def parse_args():
     p.add_argument("--dt", type=float, default=6.0)
     p.add_argument("--steps", type=int, default=50)
     p.add_argument("--T-sfc", type=float, default=300.0)
+    p.add_argument("--land", action="store_true",
+                   help="Run RCEMIP-LAND slab RCE: prognostic surface "
+                        "temperature and beta-limited evaporation. Default is "
+                        "the fixed-SST ocean RCE.")
+    p.add_argument("--land-heat-capacity", type=float, default=5.0e5,
+                   help="LAND slab heat capacity C_slab [J/m^2/K]. Small "
+                        "values (2e5-1e6) give hour-to-day skin-temperature "
+                        "adjustment.")
+    p.add_argument("--land-albedo", type=float, default=0.20,
+                   help="LAND surface albedo used by radiation and the slab "
+                        "surface energy balance.")
+    p.add_argument("--land-beta", type=float, default=0.70,
+                   help="LAND moisture availability beta in [0,1], multiplying "
+                        "the potential latent-heat flux.")
+    p.add_argument("--land-T-init", type=float, default=None,
+                   help="Initial LAND slab surface temperature [K]. Default: "
+                        "use --T-sfc.")
     p.add_argument("--hyperdiff", type=float, default=1.0e6)
     p.add_argument("--smag-cs", type=float, default=0.19,
                    help="Smagorinsky Cs; SAM default 0.19 (dosmagor).")
@@ -936,8 +1360,8 @@ def parse_args():
                         "(legacy, full S_0).")
     p.add_argument("--microphysics",
                    choices=["kessler", "morrison", "sundqvist",
-                            "seifert_beheng", "thompson", "p3", "ml_emulator",
-                            "none"],
+                            "seifert_beheng", "thompson", "p3", "sdm",
+                            "fast_sbm", "ml_emulator", "none"],
                    default="kessler",
                    help="Microphysics scheme. 'none' skips the branch.")
     p.add_argument("--homogeneous-ice-nucleation",
@@ -992,11 +1416,44 @@ def parse_args():
                         "--restart-reset-condensate; avoids the unloaded-"
                         "updraft spin-up shock that runs Thompson away.")
     p.add_argument("--output", type=Path, default=Path("results/rcemip_plane"))
+    # --- f-plane rotation + tropical-cyclone vortex seed (rotating RCE) -------
+    p.add_argument("--coriolis-mode", choices=["none", "f_plane", "beta_plane"],
+                   default="none",
+                   help="Rotation: 'none' (RCEMIP default), 'f_plane' (constant f), "
+                        "'beta_plane' (f0+beta*y). f_plane is the tropical-cyclone "
+                        "setup (rotating RCE).")
+    p.add_argument("--f0", type=float, default=0.0,
+                   help="Coriolis parameter f [1/s]. Physical 20°N≈5e-5. For a "
+                        "small-domain in-session TC use ENHANCED f≈5e-4 (~10× 20°N) "
+                        "— shrinks the Rossby radius so a TC fits + spins up fast. "
+                        "0 disables.")
+    p.add_argument("--beta", type=float, default=0.0,
+                   help="beta-plane df/dy [1/s/m]; only used with beta_plane.")
+    p.add_argument("--vortex-seed-vmax", type=float, default=0.0,
+                   help="Seed a weak balanced cyclonic vortex of peak tangential "
+                        "wind VMAX [m/s] at domain centre (rotating-RCE TC "
+                        "intensification). 0 disables. Typical 12.")
+    p.add_argument("--vortex-seed-rmax", type=float, default=50.0e3,
+                   help="Radius of max wind of the seed vortex [m] (default 50 km; "
+                        "kept well inside the half-domain — the wind is radially "
+                        "windowed to zero before the periodic seam).")
+    p.add_argument("--vortex-seed-ztop", type=float, default=12.0e3,
+                   help="Vertical extent of the seed vortex [m]; wind tapers "
+                        "cos² from full at surface to 0 at ZTOP (default 12 km).")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+    if args.land:
+        if args.land_heat_capacity <= 0.0:
+            raise SystemExit("--land-heat-capacity must be positive.")
+        if not (0.0 <= args.land_albedo <= 1.0):
+            raise SystemExit("--land-albedo must be in [0, 1].")
+        if not (0.0 <= args.land_beta <= 1.0):
+            raise SystemExit("--land-beta must be in [0, 1].")
+        if args.radiation_interval < 1:
+            raise SystemExit("--radiation-interval must be >= 1 for --land.")
     args.output.mkdir(parents=True, exist_ok=True)
 
     print(f"RCEMIP1 plane: nx={args.nx} ny={args.ny} nlev={args.nlev}")
@@ -1006,6 +1463,11 @@ def main():
           f"smag_cs={args.smag_cs}, closure={args.turbulence_closure}"
           + (f" (DNS: nu={args.molecular_viscosity:.2e} m^2/s)"
              if args.turbulence_closure == "molecular" else ""))
+    if args.land:
+        _land_T0 = args.land_T_init if args.land_T_init is not None else args.T_sfc
+        print(f"  LAND RCE: T_s_init={_land_T0} K, "
+              f"C_slab={args.land_heat_capacity:.3e} J/m2/K, "
+              f"albedo={args.land_albedo:.3f}, beta={args.land_beta:.3f}")
     # codex iter-61: log the stability-critical acoustic config so the iter-61
     # substep_horizontal_acoustic default flip (DYCORE-ROBUST #82) is visible in
     # every run's metadata (it silently changes finite-amplitude stability).
@@ -1058,6 +1520,7 @@ def main():
     grid = create_plane_grid(
         nx=args.nx, ny=args.ny, nlev=args.nlev,
         dx=args.dx, dy=args.dx, dtype=dtype,
+        coriolis_mode=args.coriolis_mode, f0=args.f0, beta=args.beta,
     )
     # RCEMIP1 surface pressure (Wing 2018 = 1014.8 hPa). Passing p_sfc
     # switches compute_reference_state to the bottom-up hydrostatic BC
@@ -1114,7 +1577,7 @@ def main():
         horizontal_momentum_advection_scheme=args.momentum_advection,
         vertical_tracer_advection=args.vertical_tracer_advection,
         acoustic_theta_advection=args.acoustic_theta_advection,
-        use_coriolis=False,
+        use_coriolis=(args.coriolis_mode != "none"),
         fix_mass=True, anchor_mass_to_initial=True,
         smagorinsky_cs=args.smag_cs, smagorinsky_prandtl=1.0,
         smagorinsky_wall_damping=args.smag_wall_damping,  # False=SAM CRM; True=LES
@@ -1144,11 +1607,33 @@ def main():
         args.radiation, update_interval_steps=args.radiation_interval,
         clouds=args.clouds, insolation=args.insolation, t_sfc=args.T_sfc,
     )
+    if args.land:
+        radiation_config = _with_land_radiation_surface(
+            radiation_config, args.land_albedo,
+        )
     microphysics_config = _build_microphysics_config(
         args.microphysics, args.homogeneous_ice_nucleation)
     if args.no_physics:
         physics_fn = None
         rad_physics_fn = None
+    elif args.land:
+        # LAND mode carries radiation and surface fluxes as host-side
+        # forward-Euler slow increments with dynamic T_s.  Keep the dycore
+        # physics closure free of T_s so it does not re-JIT every slab step.
+        physics_fn, _ = split_rad_from_other_physics(
+            grid, hc, tm,
+            radiation_config=None,
+            microphysics_config=microphysics_config,
+            dt=args.dt, T_sfc=args.T_sfc, p_sfc=p_sfc_rcemip,
+            surface_flux=False,
+        )
+        rad_physics_fn = None
+        if radiation_config is not None:
+            sim_refresh_s = args.radiation_interval * args.dt
+            print(f"  LAND RADIATION GATED: refresh every "
+                  f"{args.radiation_interval} steps = {sim_refresh_s:.0f} s "
+                  "sim time; cached surface SW/LW force the slab between "
+                  "refreshes.")
     elif args.radiation_interval > 1 and radiation_config is not None:
         # Gated radiation: split heavy radiation from light per-step physics.
         # rad_tendency cached for radiation_interval outer steps, applied as
@@ -1201,7 +1686,8 @@ def main():
         # slot [9] = prognostic snow number, [10] = prognostic graupel number
         # ⇒ fully double-moment M2005 (snow + graupel).
         n_tracers = 11
-    elif args.microphysics in ("seifert_beheng", "p3", "thompson"):
+    elif args.microphysics in ("seifert_beheng", "p3", "thompson", "fast_sbm"):
+        # fast_sbm (FSBM-2): q_v,q_c,q_r + N_c,N_r live, ice slots zero ⇒ 9.
         n_tracers = 9
     else:
         n_tracers = 3
@@ -1225,6 +1711,24 @@ def main():
                 seed_numbers=args.restart_seed_numbers)
             print(f"  RESTART from {_rpath} at step {_start_step} "
                   f"(t={_t0:.0f}s, day {_t0/86400:.2f})")
+    if args.vortex_seed_vmax > 0.0:
+        state = _add_vortex_seed(
+            state, grid, hc, vmax=args.vortex_seed_vmax,
+            rmax=args.vortex_seed_rmax, ztop=args.vortex_seed_ztop, dtype=dtype)
+        print(f"  VORTEX SEED: cyclonic Vmax={args.vortex_seed_vmax} m/s @ "
+              f"r={args.vortex_seed_rmax/1e3:.0f} km, ztop={args.vortex_seed_ztop/1e3:.0f} km "
+              f"(f0={args.f0:.2e})")
+    land_T_sfc = None
+    land_emissivity = _radiation_surface_emissivity(radiation_config)
+    if args.land:
+        _land_T0 = args.land_T_init if args.land_T_init is not None else args.T_sfc
+        land_T_sfc = jnp.full(
+            (grid.ny, grid.nx), _land_T0, dtype=dtype,
+        )
+        if args.restart and args.land_T_init is None:
+            print("  LAND restart note: slab T_s is not stored in the "
+                  "atmospheric checkpoint; initializing it from --T-sfc. "
+                  "Use --land-T-init to prescribe restart skin temperature.")
     _ckpt_every = args.checkpoint_every if args.checkpoint_every > 0 else 0
     mass0 = float(compute_dry_mass_plane(state, grid, hc, tm))
 
@@ -1247,8 +1751,12 @@ def main():
               f"({args.snapshot_days} d); 3D dumps at steps "
               f"{sorted(_snap3d_steps)} (days {args.snapshot3d_days})")
 
-    print("\nstep    t [s]    max|w|     min(theta')   max(theta')   "
-          "max(q_v)   d(mass)")
+    if args.land:
+        print("\nstep    t [s]    max|w|     min(theta')   max(theta')   "
+              "max(q_v)   d(mass)    T_s[min/mean/max] Qs SH LH")
+    else:
+        print("\nstep    t [s]    max|w|     min(theta')   max(theta')   "
+              "max(q_v)   d(mass)")
 
     # Gated-radiation runtime state. rad_physics_fn is None when
     # radiation is either off or runs every step inside physics_fn.
@@ -1263,17 +1771,88 @@ def main():
     else:
         rad_jit = None
     cached_rad_tend = None
+    cached_land_rad_sfc = None
+    land_surface_diag = None
+    land_energy_diag = None
+    land_rad_refresh_jit = None
+    land_sfc_flux_jit = None
+    if args.land:
+        _zero_sfc = jnp.zeros_like(land_T_sfc)
+        cached_land_rad_sfc = {
+            "sw_down": _zero_sfc,
+            "lw_down": _zero_sfc,
+            "sw_up": _zero_sfc,
+            "lw_up": _zero_sfc,
+        }
+        land_surface_diag = {
+            "shflx": _zero_sfc,
+            "lhflx": _zero_sfc,
+            "lhflx_potential": _zero_sfc,
+        }
+        land_energy_diag = {
+            "sw_net": _zero_sfc,
+            "lw_net": _zero_sfc,
+            "lw_up": _zero_sfc,
+            "R_net": _zero_sfc,
+            "Q_slab": _zero_sfc,
+        }
+        if not args.no_physics:
+            _land_rad_refresh_fn = _make_land_radiation_refresh_fn(
+                radiation_config, args.land_albedo, land_emissivity,
+            )
+            if _land_rad_refresh_fn is not None:
+                def _land_rad_refresh_wrapper(s, T_s):
+                    return _land_rad_refresh_fn(s, grid, hc, tm, T_s)
+                land_rad_refresh_jit = jax.jit(_land_rad_refresh_wrapper)
+            if not args.no_surface_flux:
+                def _land_sfc_flux_wrapper(s, T_s):
+                    return _land_surface_flux_tendencies(
+                        s, grid, hc, tm, T_s,
+                        p_sfc=p_sfc_rcemip, beta=args.land_beta,
+                    )
+                land_sfc_flux_jit = jax.jit(_land_sfc_flux_wrapper)
 
     for i in range(_start_step, args.steps):
-        if rad_jit is not None and (
-            i % args.radiation_interval == 0 or cached_rad_tend is None
-        ):
-            cached_rad_tend = rad_jit(state)
-        if cached_rad_tend is not None:
-            state = apply_radiation_forward_euler(
-                state, cached_rad_tend, args.dt,
+        if args.land:
+            if land_rad_refresh_jit is not None and (
+                i % args.radiation_interval == 0 or cached_rad_tend is None
+            ):
+                cached_rad_tend, cached_land_rad_sfc = land_rad_refresh_jit(
+                    state, land_T_sfc,
+                )
+            if cached_rad_tend is not None:
+                state = apply_radiation_forward_euler(
+                    state, cached_rad_tend, args.dt,
+                )
+            if land_sfc_flux_jit is not None:
+                surface_tend, land_surface_diag = land_sfc_flux_jit(
+                    state, land_T_sfc,
+                )
+                state = _apply_plane_tendency_forward_euler(
+                    state, surface_tend, args.dt,
+                )
+            land_T_sfc, land_energy_diag = _update_land_slab_temperature(
+                land_T_sfc,
+                cached_land_rad_sfc["sw_down"],
+                cached_land_rad_sfc["lw_down"],
+                land_surface_diag["shflx"],
+                land_surface_diag["lhflx"],
+                args.dt,
+                args.land_heat_capacity,
+                args.land_albedo,
+                land_emissivity,
             )
-        state = model.step(state, dt=args.dt, physics_fn=physics_fn)
+            state = model.step(state, dt=args.dt, physics_fn=physics_fn)
+        else:
+            if rad_jit is not None and (
+                i % args.radiation_interval == 0 or cached_rad_tend is None
+            ):
+                cached_rad_tend = rad_jit(state)
+            if cached_rad_tend is not None:
+                state = apply_radiation_forward_euler(
+                    state, cached_rad_tend, args.dt,
+                )
+            state = model.step(state, dt=args.dt, physics_fn=physics_fn)
         if (i + 1) % args.print_every == 0 or i == 0:
             t = (i + 1) * args.dt
             max_w = float(jnp.max(jnp.abs(state.w.data)))
@@ -1284,9 +1863,19 @@ def main():
             min_tr = float(jnp.min(state.tracers.data))
             mass = float(compute_dry_mass_plane(state, grid, hc, tm))
             rel = abs(mass - mass0) / abs(mass0)
-            print(f"{i+1:5d}  {t:7.2f}  {max_w:9.3e}  {min_th:12.4e}  "
-                  f"{max_th:12.4e}  {max_qv:9.3e}  {rel:8.2e}  "
-                  f"rho'={max_rhop:.2e} minTr={min_tr:.2e}", flush=True)
+            line = (f"{i+1:5d}  {t:7.2f}  {max_w:9.3e}  "
+                    f"{min_th:12.4e}  {max_th:12.4e}  {max_qv:9.3e}  "
+                    f"{rel:8.2e}  rho'={max_rhop:.2e} minTr={min_tr:.2e}")
+            if args.land:
+                Ts_min = float(jnp.min(land_T_sfc))
+                Ts_mean = float(jnp.mean(land_T_sfc))
+                Ts_max = float(jnp.max(land_T_sfc))
+                q_slab = float(jnp.mean(land_energy_diag["Q_slab"]))
+                sh_mean = float(jnp.mean(land_surface_diag["shflx"]))
+                lh_mean = float(jnp.mean(land_surface_diag["lhflx"]))
+                line += (f"  T_s={Ts_min:.3f}/{Ts_mean:.3f}/{Ts_max:.3f}K"
+                         f" Qs={q_slab:.2f} SH={sh_mean:.2f} LH={lh_mean:.2f}")
+            print(line, flush=True)
             # Per-field NaN trace: report WHICH field fails first (the NaN may
             # originate in a tracer/rho' and only reach w a step later).
             _fld = {"u": state.u.data, "v": state.v.data, "w": state.w.data,
@@ -1308,9 +1897,12 @@ def main():
             )
         # Surface + 4-level field snapshots (rce_snapshot) and full-3D viz dumps.
         if _surf_every and (i + 1) % _surf_every == 0:
+            _surface_fields = (
+                {"T_s": land_T_sfc} if args.land else None
+            )
             rce_snapshot.save_surface_levels(
                 args.output, i + 1, (i + 1) * args.dt, state, grid, hc,
-                heights_m=_snap_heights)
+                heights_m=_snap_heights, surface_fields=_surface_fields)
         if (i + 1) in _snap3d_steps:
             rce_snapshot.save_3d(
                 args.output, i + 1, (i + 1) * args.dt, state, grid, hc)

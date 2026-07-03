@@ -48,6 +48,10 @@ c_snow = 2090.0                 # Specific heat of snow [J/(kg*K)] (≈ c_pi, CI
 k_ice_default = 2.04            # Thermal conductivity of pure ice [W/(m*K)]
 k_snow = 0.31                   # Thermal conductivity of dry snow [W/(m*K)] (CICE default)
 T_freeze = 273.15               # Freezing point of water [K]
+T_min_atmosphere = 200.0        # Lower-bound floor for atmospheric temperature [K]
+                                # Used as safety floor in hypsometric psl extrapolation
+                                # to avoid division by near-zero T in clear-sky columns.
+                                # Matches Held-Suarez T_MIN and DCMIP lower bounds.
 T_freeze_ocean = 271.35         # Freezing point of seawater [K] (~-1.8 C)
 S_ice_bulk_default = 4.0        # Default bulk ice salinity [g/kg or PSU] (CICE-style)
 S_ocean_ref = 34.7              # Reference ocean salinity [g/kg or PSU] (~WOA mean)
@@ -99,6 +103,15 @@ kappa_von_karman = 0.4          # Von Kármán constant for the log-law (Pope 20
 # ==============================================================================
 sigma_sb = 5.670374419e-8       # Stefan-Boltzmann constant [W/(m^2*K^4)]
 S_0 = 1361.0                    # Total solar irradiance [W/m^2]
+
+# Present-day (≈ year 2000) Earth orbital elements for the realistic
+# (AMIP-II / CMIP) insolation.  Berger (1978) convention as used by CESM
+# ``shr_orb_mod`` / climlab: the longitude of perihelion is measured from
+# the moving vernal equinox.  Used only when orbital insolation is enabled;
+# the idealized default keeps a circular orbit (eccentricity = 0).
+orbital_eccentricity = 0.016704         # [-] orbital eccentricity (year ~2000)
+orbital_obliquity_deg = 23.439          # [deg] obliquity of the ecliptic
+orbital_long_perihelion_deg = 282.895   # [deg] longitude of perihelion from VE
 
 # Broadband longwave emissivities (used as defaults when a tile config
 # does not specify its own).  Sea-water and most ice surfaces are

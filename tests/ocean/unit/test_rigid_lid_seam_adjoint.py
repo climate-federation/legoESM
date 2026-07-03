@@ -65,7 +65,7 @@ def _channel():
     v_int = (lm[:-1] * lm[1:]) > 0.5
     v_mask = np.concatenate([np.zeros((1, N_LON)), v_int, np.zeros((1, N_LON))],
                             axis=0).astype(float)
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig.from_flat()
     rl = build_rigid_lid_data(Hb, lm, u_mask, v_mask, cfg, grid, periodic_x=True)
     return grid, lm, u_mask, v_mask, cfg, rl
 
@@ -146,7 +146,7 @@ def test_forward_bit_identical_to_stock_cg():
     grid, lm, u_mask, v_mask, cfg, rl = _channel()
     rng = np.random.default_rng(2)
     rhs, x0 = _production_rhs_and_guess(grid, rl, rng)
-    kw = dict(tol=cfg.rigid_lid_cg_tol, maxiter=cfg.rigid_lid_cg_maxiter)
+    kw = dict(tol=cfg.barotropic.rigid_lid_cg_tol, maxiter=cfg.barotropic.rigid_lid_cg_maxiter)
     a = _stock_cg_solve(rhs, rl, grid, x0, **kw)
     b = solve_streamfunction_interior(rhs, rl, grid, x0, **kw)
     assert bool(jnp.all(a == b)), "forward changed (eager)"
@@ -163,7 +163,7 @@ def test_adjoint_ad_fd_exact_and_stock_biased():
     grid, lm, u_mask, v_mask, cfg, rl = _channel()
     rng = np.random.default_rng(3)
     rhs0, x0 = _production_rhs_and_guess(grid, rl, rng)
-    kw = dict(tol=cfg.rigid_lid_cg_tol, maxiter=cfg.rigid_lid_cg_maxiter)
+    kw = dict(tol=cfg.barotropic.rigid_lid_cg_tol, maxiter=cfg.barotropic.rigid_lid_cg_maxiter)
     scale = 1.0 / float(jnp.max(jnp.abs(
         solve_streamfunction_interior(rhs0, rl, grid, x0, **kw))))
 
@@ -196,7 +196,7 @@ def test_x0_cotangent_exactly_zero():
     grid, lm, u_mask, v_mask, cfg, rl = _channel()
     rng = np.random.default_rng(4)
     rhs0, x0 = _production_rhs_and_guess(grid, rl, rng)
-    kw = dict(tol=cfg.rigid_lid_cg_tol, maxiter=cfg.rigid_lid_cg_maxiter)
+    kw = dict(tol=cfg.barotropic.rigid_lid_cg_tol, maxiter=cfg.barotropic.rigid_lid_cg_maxiter)
 
     def J(x0v):
         d = solve_streamfunction_interior(rhs0, rl, grid, x0v, **kw)

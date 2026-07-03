@@ -108,7 +108,19 @@ def test_mass_conservation_latlon_pe():
 
 
 def test_mass_conservation_mpas_pe():
-    """MPAS PE: anchor_mass_to_initial + fp64 fixer."""
+    """MPAS PE: anchor_mass_to_initial + fp64 fixer.
+
+    Runs under an explicit ``PrecisionPolicy.fp64()`` (the documented
+    "fp64 floor" intent of this module). The MPAS PE dycore integrates
+    with ``ssp_rk54``, whose fixed-dtype scan carry rejects an fp64
+    tendency against an fp32 state (the cube/lat-lon PE paths tolerate
+    the mixed dtype, which is why only the MPAS PE tests need the policy
+    set explicitly). Without it the default fp32 storage policy makes the
+    anchored fixer emit an fp64 ``p_s`` against an fp32 state and the
+    integrator raises a dtype-mismatch TypeError. The 1.6e-16 drift below
+    was originally measured under fp64.
+    """
+    from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
@@ -117,24 +129,29 @@ def test_mass_conservation_mpas_pe():
     )
     from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
 
-    mesh = create_voronoi_mesh(4)
-    sigma = create_sigma_coordinate(10)
-    cfg = MPASPrimitiveEquationConfig(
-        fix_mass=True, anchor_mass_to_initial=True,
-    )
-    model = MPASPrimitiveEquationModel(mesh, sigma, cfg)
-    state = held_suarez_init_mpas(mesh, sigma)
+    saved = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        mesh = create_voronoi_mesh(4)
+        sigma = create_sigma_coordinate(10)
+        cfg = MPASPrimitiveEquationConfig(
+            fix_mass=True, anchor_mass_to_initial=True,
+        )
+        model = MPASPrimitiveEquationModel(mesh, sigma, cfg)
+        state = held_suarez_init_mpas(mesh, sigma)
 
-    def _mass(s):
-        return float(jnp.sum(
-            s.p_s.data.astype(jnp.float64)
-            * mesh.areaCell.astype(jnp.float64),
-        ))
+        def _mass(s):
+            return float(jnp.sum(
+                s.p_s.data.astype(jnp.float64)
+                * mesh.areaCell.astype(jnp.float64),
+            ))
 
-    m0 = _mass(state)
-    for _ in range(N_STEPS):
-        state = model.step(state, 200.0)
-    assert _rel_drift(m0, _mass(state)) < DRIFT_TOL
+        m0 = _mass(state)
+        for _ in range(N_STEPS):
+            state = model.step(state, 200.0)
+        assert _rel_drift(m0, _mass(state)) < DRIFT_TOL
+    finally:
+        set_policy(saved)
 
 
 def test_mass_conservation_spectral_pe():
@@ -313,7 +330,13 @@ def test_long_run_mass_conservation_mpas_pe():
     `_fix_mass_mpas_hydro` on a Voronoi mesh over the 100-step
     horizon.  Direct measurement: drift = 1.61e-16 on level-4
     Voronoi + 10 sigma levels.
+
+    Runs under an explicit ``PrecisionPolicy.fp64()`` for the same reason
+    as ``test_mass_conservation_mpas_pe``: the MPAS PE ``ssp_rk54``
+    integrator rejects an fp64 fixer tendency against an fp32 state, and
+    the 1.61e-16 floor above was measured under fp64.
     """
+    from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
@@ -321,24 +344,29 @@ def test_long_run_mass_conservation_mpas_pe():
     )
     from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
 
-    mesh = create_voronoi_mesh(4)
-    sigma = create_sigma_coordinate(10)
-    cfg = MPASPrimitiveEquationConfig(
-        fix_mass=True, anchor_mass_to_initial=True,
-    )
-    model = MPASPrimitiveEquationModel(mesh, sigma, cfg)
-    state = held_suarez_init_mpas(mesh, sigma)
+    saved = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        mesh = create_voronoi_mesh(4)
+        sigma = create_sigma_coordinate(10)
+        cfg = MPASPrimitiveEquationConfig(
+            fix_mass=True, anchor_mass_to_initial=True,
+        )
+        model = MPASPrimitiveEquationModel(mesh, sigma, cfg)
+        state = held_suarez_init_mpas(mesh, sigma)
 
-    def _mass(s):
-        return float(jnp.sum(
-            s.p_s.data.astype(jnp.float64)
-            * mesh.areaCell.astype(jnp.float64),
-        ))
+        def _mass(s):
+            return float(jnp.sum(
+                s.p_s.data.astype(jnp.float64)
+                * mesh.areaCell.astype(jnp.float64),
+            ))
 
-    m0 = _mass(state)
-    for _ in range(100):
-        state = model.step(state, 200.0)
-    drift = _rel_drift(m0, _mass(state))
-    assert drift < 1e-12, (
-        f"MPAS PE 100-step drift {drift:.2e} exceeds 1e-12"
-    )
+        m0 = _mass(state)
+        for _ in range(100):
+            state = model.step(state, 200.0)
+        drift = _rel_drift(m0, _mass(state))
+        assert drift < 1e-12, (
+            f"MPAS PE 100-step drift {drift:.2e} exceeds 1e-12"
+        )
+    finally:
+        set_policy(saved)

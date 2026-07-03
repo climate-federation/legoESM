@@ -580,18 +580,27 @@ def test_bechtold_orchestrator_with_radiation_merges_dict_correctly():
 def test_bechtold_mse_conservation_within_tolerance():
     """Column moist-static-energy budget closes to within tolerance.
 
-    Historically this was an xfail at ~92% residual: the plume mass
-    budget used one detrainment rate while the environmental-tendency
-    kernel used a different (unscaled) one, so detrained mass and
-    detrained T/q/q_c were accounted with inconsistent rates.  The
-    IFS-faithfulness fix (Codex adversarial review iter-1 HIGH #1) reuses
-    the SAME height-dependent ``dlt_profile = δ₀·(1.6 − RH)`` for both the
-    plume and the kernel, which closes the budget: the residual drops to
-    ~0.1 % at nlev=30 and ~21 % at the coarse nlev=16 used here (the
-    remainder is the leading-order discretization error of the
-    compensating-subsidence ``g/c_p`` gradient on a 16-level grid, which
-    shrinks as the grid refines).  The 0.30 guard catches any regression
-    that re-desynchronises the plume and kernel detrainment.
+    The DEFAULT advective compensating-subsidence ``(M/ρ)·∂φ/∂z`` does NOT
+    telescope on column integration — it leaves a ``(φ/ρ)·dM/dz`` residual
+    that leaks ~40 % of the column MSE budget at this coarse nlev=16 (the
+    leak shrinks with resolution but never vanishes; the advective
+    non-closure is the documented design gap pinned by
+    ``test_tier3_massflux_schemes_total_water_NOT_closed_in_scheme_KNOWN``).
+
+    The fix is the IMPLICIT (backward-Euler) CONSERVATIVE flux-form solve
+    (``subsidence_solve="implicit_flux"``;
+    mass_flux.apply_mass_flux_kernel_implicit_flux), which transports dry
+    static energy ``s = c_p T + g z`` and vapor ``q_v`` in flux form so the
+    column integrals telescope to the vanishing top/base boundary flux —
+    column MSE ``h = s + L_v q_v`` is conserved by the TRANSPORT to machine
+    precision, and the detrained condensate (matched by a vapor sink) keeps
+    the total-water budget closed.  On this nlev=16 column the residual
+    drops from ~40 % (advective) to ~4 % (the remainder is the downdraft's
+    condensate→vapor conversion, a separate MSE-neutral process; with the
+    downdraft off the transport conserves to ~1e-14).  The 0.10 guard
+    catches any regression that re-introduces a transport leak.  See
+    tests/unit/test_bechtold_implicit_flux.py for the machine-precision
+    kernel-level conservation, multi-step stability, and AD tests.
     """
     T, q, pf, ph, u, v = _column()
     ncol, nlev = T.shape
@@ -601,7 +610,10 @@ def test_bechtold_mse_conservation_within_tolerance():
         T=T, q_v=q, p_full=pf, p_half=ph, u=u, v=v,
         conv_prog_profile=cpp, conv_stoch_state=stoch, prng_key=None,
         dt=1800.0,
-        config=BechtoldConfig(enable_stochastic=False, enable_cmt=False),
+        config=BechtoldConfig(
+            enable_stochastic=False, enable_cmt=False,
+            subsidence_solve="implicit_flux",
+        ),
         moisture_convergence=jnp.zeros_like(T),
     )
     dp = ph[:, 1:] - ph[:, :-1]
@@ -609,6 +621,7 @@ def test_bechtold_mse_conservation_within_tolerance():
     Q = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
     C = float(jnp.sum(out.dq_c_conv_dt * dp / constants.g, axis=1).mean()) * constants.L_v
     rel = abs(H + Q + C) / (abs(H) + abs(Q) + abs(C) + 1e-10)
-    assert rel < 0.30, (
-        f"Bechtold MSE residual {H+Q+C:.1f} W/m^2 ({rel*100:.1f}% of total)"
+    assert rel < 0.10, (
+        f"Bechtold (implicit_flux) MSE residual {H+Q+C:.1f} W/m^2 "
+        f"({rel*100:.1f}% of total)"
     )

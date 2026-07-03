@@ -24,6 +24,7 @@ import jax
 
 from legoesm.timestepping.pytree_ops import pytree_axpy as _pytree_axpy
 from legoesm.timestepping.pytree_ops import pytree_linear_combination as _pytree_linear_combination
+from legoesm.timestepping.scan_loop import integrate_scan_generic
 
 State = TypeVar("State")
 
@@ -63,26 +64,11 @@ def integrate_scan(
     return_trajectory: bool = True,
 ) -> tuple[State, State | None]:
     """Integrate forward in time using jax.lax.scan with SSP-RK(4,3)."""
-    if return_trajectory:
-        step_fn = lambda s, _: _scan_step(s, tendency_fn, dt)
-    else:
-        step_fn = lambda s, _: _scan_step_no_output(s, tendency_fn, dt)
-
-    if checkpoint_interval > 0:
-        step_fn = jax.checkpoint(step_fn)
-
-    final_state, trajectory = jax.lax.scan(step_fn, state, xs=None, length=n_steps)
-    return final_state, trajectory
-
-
-def _scan_step(state, tendency_fn, dt):
-    """Single step for use inside jax.lax.scan (stores output)."""
-    new_state = ssp_rk34_step(state, tendency_fn, dt)
-    return new_state, new_state
-
-
-def _scan_step_no_output(state, tendency_fn, dt):
-    """Single step for use inside jax.lax.scan (no output stacking)."""
-    new_state = ssp_rk34_step(state, tendency_fn, dt)
-    return new_state, None
+    return integrate_scan_generic(
+        state,
+        lambda s: ssp_rk34_step(s, tendency_fn, dt),
+        n_steps,
+        checkpoint_interval,
+        return_trajectory,
+    )
 

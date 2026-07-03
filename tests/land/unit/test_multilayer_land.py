@@ -482,7 +482,13 @@ class TestRichards(unittest.TestCase):
         self.assertTrue(jnp.all(out.runoff_subsurface > 0))
 
     def test_theta_within_bounds(self):
-        """Theta should stay within [theta_r, theta_sat]."""
+        """Theta stays >= theta_r and <= the specific-storage ceiling.
+
+        Below saturation theta is bounded by theta_sat; AT/above saturation the
+        ParFlow/CliMA specific-storage switch lets theta rise elastically to
+        theta_sat*(1 + S_s*psi) for psi >= 0 (the compressible-storage term that
+        replaced the old non-conservative theta clip).  The ceiling is that exact
+        law, not theta_sat — a hard clip at theta_sat would destroy ponded water."""
         from legoesm.land.richards import RichardsConfig, solve_richards
         psi, theta, grid, hconfig = self._make_uniform_state(theta_val=0.15)
         ncol, nlayers = theta.shape
@@ -490,9 +496,10 @@ class TestRichards(unittest.TestCase):
         flux_top = jnp.full(ncol, 5e-5)
         sink = jnp.zeros((ncol, nlayers))
         out = solve_richards(psi, theta, grid, hconfig, rconfig,
-                             flux_top, sink, dt=1800.0)
+                             flux_top, sink, dt=1800.0, surface_water=jnp.zeros(ncol))
         self.assertTrue(jnp.all(out.theta_new >= hconfig.theta_r - 1e-10))
-        self.assertTrue(jnp.all(out.theta_new <= hconfig.theta_sat + 1e-10))
+        ceiling = hconfig.theta_sat * (1.0 + hconfig.S_s * jnp.maximum(out.psi_new, 0.0))
+        self.assertTrue(jnp.all(out.theta_new <= ceiling + 1e-10))
 
 
 # =========================================================================

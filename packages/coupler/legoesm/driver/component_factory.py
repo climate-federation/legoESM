@@ -118,6 +118,30 @@ class DiffusionCoeffs(NamedTuple):
     div_damp: float    # Divergence damping [m^2/s]
 
 
+def _grid_min_dx(grid) -> float:
+    """Minimum grid spacing [m] used to scale diffusion coefficients.
+
+    MPAS/Voronoi reports the cell-to-cell edge distance directly; lat-lon's
+    smallest cell is the pole cell (``min(dx)/2``).  Falls back to 1e5 m for
+    grids exposing neither attribute.
+    """
+    if hasattr(grid, 'dcEdge'):
+        # Voronoi/MPAS: dcEdge is the cell-to-cell distance along each edge
+        return float(jnp.min(jnp.asarray(grid.dcEdge)))
+    if hasattr(grid, 'dx'):
+        # Lat-lon: min(dx)/2 is the POLE-cell spacing.  This bounds the scalar
+        # Laplacian A_h to be CFL-stable at the pole (A_h = 0.05*dx_pole^2/dt);
+        # an equatorial-dx A_h is ~3000x larger and makes the EXPLICIT diffusion
+        # operator CFL-UNSTABLE at the pole (the polar filter truncates wave
+        # modes, not the diffusion stencil) -> immediate blow-up.  NOTE: this
+        # pole-bounded scalar A_h is too weak to damp midlatitude grid-scale
+        # noise at fine (<=2deg) resolution; a latitude-dependent viscosity
+        # (A_h ~ local dx^2) or biharmonic hyperdiffusion in the latlon_cgrid
+        # dycore is needed for stable 2deg global runs (TODO).
+        return float(jnp.min(jnp.asarray(grid.dx))) / 2.0
+    return 1e5
+
+
 def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
     """Compute physical diffusion coefficients from grid and config.
 
@@ -133,17 +157,19 @@ def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
     -------
     DiffusionCoeffs
     """
-    if hasattr(grid, 'dcEdge'):
-        # Voronoi/MPAS: dcEdge is the cell-to-cell distance along each edge
-        dx_min = float(jnp.min(jnp.asarray(grid.dcEdge)))
-    elif hasattr(grid, 'dx'):
-        dx_min = float(jnp.min(jnp.asarray(grid.dx))) / 2.0
-    else:
-        dx_min = 1e5
+    dx_min = _grid_min_dx(grid)
     DT = dc.dt
 
-    # Laplacian viscosity: CFL-safe Smagorinsky-like default
-    A_h = 0.05 * dx_min ** 2 / DT
+    # Laplacian viscosity (2nd-order, scale-NON-selective).  The earlier
+    # default 0.05*dx^2/DT was ~5-10x too strong: it damped a 3000 km
+    # baroclinic eddy in ~5 h (faster than its ~1-2 day growth), crushing the
+    # midlatitude eddy-driven jets and producing spurious equatorial
+    # super-rotation (dry Held-Suarez jet 2.9 vs spectral 37 m/s).  Reduced
+    # ~16x to a level whose eddy-scale (~4000 km) damping time is ~days while
+    # still damping 2*dx grid noise in a few hours; the scale-selective
+    # 4th-order hyperdiff below is the primary grid-noise control.  a_h_scale
+    # exposes it for tuning (0 = rely on hyperdiff alone).
+    A_h = dc.a_h_scale * 3.0e-3 * dx_min ** 2 / DT
 
     # Biharmonic: e-folding time for grid-scale noise
     tau_efold = 24.0 * 3600.0
@@ -154,6 +180,61 @@ def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
     div_damp = dc.div_damp_scale * c_grav * dx_min / (2.0 * 3.14159)
 
     return DiffusionCoeffs(A_h=A_h, hyperdiff=hyperdiff, div_damp=div_damp)
+
+
+# Solvers that apply the EXPLICIT biharmonic hyperdiff / divergence damping
+# (forward the raw ``diff.hyperdiff`` / ``diff.div_damp`` to a finite-volume
+# operator with no implicit/spectral inversion).  Spectral dycores recompute
+# their own implicit-stable hyperdiff (and zero the FV one); the plane dycore
+# zeroes hyperdiff; lat-lon clamps A_h itself — none belong here, so the guard
+# never cries wolf about a coefficient the selected solver discards.
+_EXPLICIT_HYPERDIFF_SOLVERS = frozenset({
+    "cdgrid_shallow_water",
+    "cdgrid_primitive_equations",
+    "cdgrid_compressible_euler",
+    "mpas_primitive_equations",
+})
+_EXPLICIT_DIVDAMP_SOLVERS = frozenset({"cdgrid_primitive_equations"})
+
+
+def warn_if_diffusion_unstable(solver_name: str, diff: DiffusionCoeffs,
+                               grid, dt: float) -> None:
+    """Warn (no clamp) if an explicit diffusion coeff exceeds the stable max.
+
+    Only the lat-lon C-grid clamps its Laplacian A_h; the biharmonic hyperdiff
+    and divergence damping reach the cubed-sphere / MPAS finite-volume dycores
+    with no runtime guard, so an over-large ``hyperdiff_scale`` / ``div_damp_scale``
+    (or ``dt``) blows up downstream as a silent NaN.  This converts that into a
+    clear init-time diagnostic.
+
+    The threshold is the model's OWN ``adaptive_hyperdiff_coeff(..., safety=1.0)``
+    — the largest coefficient legoESM considers stable for the grid+dt.  Using
+    that (rather than an idealized forward-Euler Cartesian bound) keeps the guard
+    consistent with the validated coefficient picker and the multi-stage SSP-RK
+    integrators these dycores use, so it fires only on gross over-specification,
+    not on marginal calibration (which depends on the integrator stability region
+    and cube metric and is validated empirically, not knowable at config time).
+    Coefficients are NOT clamped — that would silently alter the user's tuned
+    scale-selective damping.
+    """
+    from legoesm.core.cfl import adaptive_hyperdiff_coeff
+    dx_min = _grid_min_dx(grid)
+    checks = []
+    if solver_name in _EXPLICIT_HYPERDIFF_SOLVERS:
+        checks.append(("hyperdiff (biharmonic)", diff.hyperdiff, 4))
+    if solver_name in _EXPLICIT_DIVDAMP_SOLVERS:
+        checks.append(("div_damp", diff.div_damp, 2))
+    for name, coeff, order in checks:
+        coeff_max = adaptive_hyperdiff_coeff(dx_min, dt, order=order, safety=1.0)
+        if coeff > coeff_max:
+            logger.warning(
+                "Diffusion %s=%.3e for solver %s exceeds the max stable "
+                "coefficient %.3e (grid dx_min=%.1f m, dt=%.1f s) by %.1fx; "
+                "the run may go unstable. Reduce hyperdiff_scale/div_damp_scale "
+                "or dt.",
+                name, coeff, solver_name, coeff_max, dx_min, dt,
+                coeff / coeff_max,
+            )
 
 
 # =========================================================================
@@ -208,6 +289,7 @@ def create_atmosphere_dycore(
 
     solver_name = _DRIVER_SUPPORTED[key]
     diff = compute_diffusion(grid, dc)
+    warn_if_diffusion_unstable(solver_name, diff, grid, dc.dt)
 
     logger.info(
         "Atmosphere: model_type=%s, discretization=%s, grid=%s -> %s",
@@ -679,8 +761,19 @@ def create_ocean_component(
         # Guard the grid family with a clear message instead of an AttributeError
         # deep inside cdgrid construction (mirrors the resolve_model_complexity guard).
         from legoesm.driver.config import normalize_grid_type
-        _gt = normalize_grid_type(config.grid.grid_type)
-        if _gt not in _FULL_OCEAN_GRID_TYPES:
+        from legoesm.grids.cubed_sphere import CubedSphereGrid
+        # full_3d OceanModel is cubed-sphere-only (it calls
+        # create_cubed_sphere_cdgrid).  Detect the family from the GRID OBJECT,
+        # not ``config.grid`` — ``config`` is logging-only here and is legitimately
+        # ``None`` on the complexity-builder path (test_component_complexity passes
+        # config=None with a real grid).  Mirrors the isinstance(grid,
+        # CubedSphereGrid) convention used throughout ocean/atmosphere physics.
+        if not isinstance(grid, CubedSphereGrid):
+            _gt = (
+                normalize_grid_type(config.grid.grid_type)
+                if config is not None and getattr(config, "grid", None) is not None
+                else type(grid).__name__
+            )
             raise ValueError(
                 f"full_3d (OceanConfig) ocean is implemented only for grid_type in "
                 f"{sorted(_FULL_OCEAN_GRID_TYPES)} (the cubed-sphere OceanModel); got "

@@ -30,26 +30,14 @@ from legoesm.ocean.dynamics._flux_limiters import (
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     divergence_cgrid,
     is_tripolar,
+    vface_zonal_cos_lat,
 )
 
 # =============================================================================
 # Flux limiter — DST-3 uses Van Leer (less aggressive than Sweby, better
-# stability for DST-3 at low CFL). Centralized in ``_flux_limiters.py``.
+# stability for DST-3 at low CFL). Centralized in ``core.flux_limiters``;
+# Sweby (``_superbee_limiter``) imported above for the Veros-faithful path.
 # =============================================================================
-
-def _sweby_limiter(r: jnp.ndarray) -> jnp.ndarray:
-    """Sweby (superbee) flux limiter.
-
-    psi(r) = max(0, min(1, 2r), min(2, r))
-
-    Traces the upper boundary of the Sweby TVD region, providing
-    maximum anti-diffusion while maintaining monotonicity.
-    """
-    return jnp.maximum(
-        0.0,
-        jnp.maximum(jnp.minimum(1.0, 2.0 * r), jnp.minimum(2.0, r)),
-    )
-
 
 # Van Leer limiter is the canonical core kernel (redundancy audit) — import it
 # instead of re-deriving phi(r) = (r+|r|)/(1+|r|); aliased to the local private
@@ -159,13 +147,17 @@ def dst3_to_u_points(
     f_face_pos = jnp.clip(f_face_pos, jnp.minimum(f_jm1, f_j), jnp.maximum(f_jm1, f_j))
 
     # --- Negative flow (from cell j to cell j-1) ---
-    # Donor = f_j, Downstream = f_jm1, Upwind-of-donor = f_jp1
+    # Donor = f_j, Downstream = f_jm1, Upwind-of-donor (upup) = f_jp1
     delta_neg = f_jm1 - f_j              # local gradient (downstream - donor)
-    # Match TVD convention: r = (f_{j+1}-f_j) / (f_{j-1}-f_j)
-    # This makes negative flow default to upwind at smooth monotone fields,
-    # providing essential implicit diffusion for forward-Euler stability.
+    # Canonical DST-3 smoothness ratio (matches the vertical sibling
+    # ``flux_form_vertical_tracer_advection_dst3`` and the positive-flow branch
+    # above):  r = (donor - upup) / (downstream - donor).  On a smooth monotone
+    # field donor-upup == downstream-donor -> r=+1 -> psi(1)=1 -> full 3rd-order,
+    # SYMMETRIC with the u>0 branch.  The prior numerator (upup - donor) was
+    # negated, giving r=-1 -> van_leer(-1)=0 -> 1st-order/over-diffusive for u<0
+    # ONLY (direction-asymmetric diffusion).
     r_neg = grad_safe_ratio(
-        f_jp1 - f_j,
+        f_j - f_jp1,
         jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps),
         jnp.abs(delta_neg) > t_grad,
     )
@@ -273,11 +265,16 @@ def dst3_to_v_points(
     f_face_pos = jnp.clip(f_face_pos, jnp.minimum(f_south, f_north),
                            jnp.maximum(f_south, f_north))
 
-    # --- Negative flow (north to south): donor = f_north, downstream = f_south ---
-    delta_neg = f_south - f_north
-    # Match TVD convention for implicit diffusion stability
+    # --- Negative flow (north to south): donor = f_north, downstream = f_south,
+    #     upwind-of-donor (upup) = f_north2 ---
+    delta_neg = f_south - f_north        # downstream - donor
+    # Canonical DST-3 smoothness ratio (matches the vertical sibling and the
+    # positive-flow branch above):  r = (donor - upup) / (downstream - donor).
+    # The prior numerator (upup - donor) = (f_north2 - f_north) was negated,
+    # giving r=-1 on a smooth monotone field -> van_leer(-1)=0 -> 1st-order/
+    # over-diffusive for v<0 ONLY (direction-asymmetric diffusion).
     r_neg = grad_safe_ratio(
-        f_north2 - f_north,
+        f_north - f_north2,
         jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps),
         jnp.abs(delta_neg) > t_grad,
     )
@@ -1112,8 +1109,11 @@ def _flux_form_vertical_tracer_advection_weno(
     # Stencil is ordered top-to-bottom (increasing level index).
     # f_plus = left-biased (from above), f_minus = right-biased (from below).
     # Upward flow (w > 0): donor is below → use f_minus.
-    # Downward flow (w < 0): donor is above → use f_plus.
-    T_face = jnp.where(w_int >= 0, f_minus, f_plus)
+    # Downward flow (w <= 0): donor is above → use f_plus.
+    # Tie at w==0 -> f_plus (donor-above), matching the dst3/ppm/fct vertical
+    # convention (all split on ``w_int > 0.0``).  At w==0 the flux is zero
+    # regardless of the pick, so the choice only fixes a consistent convention.
+    T_face = jnp.where(w_int > 0, f_minus, f_plus)
 
     F_interior = w_int * T_face
 
@@ -1284,11 +1284,12 @@ def _zalesak_signsplit_face_alphas(
         dlon = grid.dlon
         # face_dy at h-points: cell-row meridional extent (1D, Mercator-safe).
         face_dy = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]  # (n_lat,1,1)
-        lat = grid.lat
-        lat_interior = 0.5 * (lat[:-1] + lat[1:])
-        face_dx = R_planet * dlon * jnp.pad(
-            jnp.cos(lat_interior), (1, 1),
-        )  # (n_lat+1,)
+        # #516: single-source v-face zonal cos(lat_v) (interior
+        # cos(0.5·(lat[j]+lat[j+1])), poles 0) — routes through the shared
+        # backend-aware helper so an MPI lat-band cut keeps the neighbour-rank
+        # metric instead of the old serial jnp.pad (which zeroed local band
+        # edges).  Bit-identical on serial.
+        face_dx = R_planet * dlon * vface_zonal_cos_lat(grid)  # (n_lat+1,)
         _is_2d_dy = False
         _is_2d_dx = False
     area = grid.area[..., jnp.newaxis]            # (n_lat, n_lon, 1)

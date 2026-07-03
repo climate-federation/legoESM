@@ -41,6 +41,28 @@ def test_voronoi_auto_dt_is_300s():
         )
 
 
+def test_voronoi_family_grids_auto_dt_is_300s():
+    """MPAS and the icosahedral grid are Voronoi-family unstructured meshes and
+    must share the voronoi-safe 300 s default — NOT silently fall through to the
+    structured cubed_sphere ladder (which returns an unsafe 600 s at low N).
+    Codebase-review PR A finding #7."""
+    for grid_type in ("mpas", "mpas_voronoi", "icosahedral"):
+        for N in (4, 24, 48):
+            assert auto_dt_rce(grid_type, N) == 300.0, (
+                f"{grid_type} at N={N} must default to the voronoi-safe 300 s; "
+                f"got {auto_dt_rce(grid_type, N)} (silent ladder fall-through?)"
+            )
+
+
+def test_unknown_grid_type_raises():
+    """An unknown grid_type must fail loudly, not silently use the ladder
+    (dispatch-hardening). Codebase-review PR A finding #7."""
+    with pytest.raises(ValueError, match="(?i)unknown grid_type"):
+        auto_dt_rce("octahedral_typo", 24)
+    with pytest.raises(ValueError, match="(?i)unknown grid_type"):
+        auto_dt_rce("cubed-sphere", 24)  # hyphen != underscore canonical name
+
+
 def test_cubed_sphere_auto_dt():
     assert auto_dt_rce("cubed_sphere", 24) == 600.0
     assert auto_dt_rce("cubed_sphere", 25) == 150.0  # iter-13: C25-48 needs 150

@@ -20,9 +20,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple
 
 from legoesm import constants
+from legoesm.atmosphere.physics.radiation.mc3d.config import MC3DRadiationConfig
 
 if TYPE_CHECKING:
     from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    from legoesm.atmosphere.physics.radiation.solar import OrbitalParameters
 
 
 # Machine-readable tunable/fixed split for the radiation scheme configs.
@@ -238,6 +240,17 @@ class RRTMGPConfig(NamedTuple):
     #         of ~16-32 recovers most of the parallelism while bounding peak
     #         memory at high resolution.  Default 0 = byte-for-byte legacy.
     gpoint_batch_size: int = 0
+    # Wrap the per-g-point scan step in jax.checkpoint(prevent_cse=True) for
+    # reverse-mode AD memory (recompute one g-point per backward step).  True =
+    # byte-for-byte legacy (required for high-res rrtmgp training).  Set False
+    # for FORWARD/inference: prevent_cse=True disables CSE and forces XLA to
+    # emit a distinct compiled body per g-point, inflating the executable code
+    # ~Ng-fold — that overflows the XLA-CPU LLVM-JIT contiguous executable
+    # region (rrtmgp CPU "Failed to materialize symbols") and bloats GPU/TPU
+    # compile.  A plain scan (False) compiles ONE reused body; answer-identical
+    # (no AD-memory benefit, which forward runs do not need).  Only applies to
+    # the scan path (gpoint_batch_size<=0).
+    gpoint_checkpoint: bool = True
     # Run the optics tables + RTE solve in float32 even when JAX x64 is on.
     # The dycore needs fp64, but radiation (a flux calculation) does not —
     # fp32 is ~2x faster on fp64-limited GPUs (e.g. RTX 8000, fp64 ≈ 1/32 of
@@ -342,6 +355,9 @@ class RadiationConfig(NamedTuple):
     scheme: str = "gray"
     gray: GrayRadiationConfig = GrayRadiationConfig()
     rrtmgp: RRTMGPConfig = RRTMGPConfig()
+    # "mc3d": 3D Monte-Carlo ray-traced shortwave (plane LES/CRM only) + gray
+    # longwave. See docs/specs/mc3d_raytracer.md. mc3d holds MC numerics.
+    mc3d: MC3DRadiationConfig = MC3DRadiationConfig()
     update_interval_steps: int = 1
     diurnal_cycle: bool = False
     ozone: OzoneProfileConfig = OzoneProfileConfig()
@@ -356,3 +372,9 @@ class RadiationConfig(NamedTuple):
     # circular import (clouds.config is a downstream consumer that
     # already imports from this module via the integration bridge).
     cloud_config: "CloudConfig | None" = None
+    # Realistic Earth orbit (Berger 1978) for AMIP-II / CMIP insolation.
+    # When set, ``_compute_insolation`` uses the orbital declination and
+    # scales the TOA flux by the Earth-Sun distance factor (a/r)^2 (the
+    # eccentricity-driven perihelion/aphelion asymmetry).  ``None`` (default)
+    # ⇒ circular orbit, so idealized/aquaplanet experiments are unchanged.
+    orbit: "OrbitalParameters | None" = None

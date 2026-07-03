@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -18,14 +19,24 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
-from legoesm.forcing.time_utils import day_to_calendar
+from legoesm.forcing.time_utils import daily_forcing_bucket, day_to_calendar
 
-from legoesm.core.conservation import compute_global_moisture, fix_moisture_hydrostatic
+from legoesm.core.conservation import (
+    compute_global_moisture, fix_moisture_hydrostatic,
+    energy_consistent_moisture_floor,
+)
 from legoesm.core.tracers import (
-    TracerRegistry, make_moisture_registry, make_full_moisture_registry, init_tracers,
+    TracerRegistry,
+    init_tracers,
+    make_full_moisture_registry,
+    make_moisture_registry,
 )
 from legoesm.driver.config import ExperimentConfig
-from legoesm.driver.physics_pipeline import build_physics_pipeline
+from legoesm.driver.physics_pipeline import (
+    build_physics_pipeline,
+    required_microphysics_tracer_slots,
+    validate_microphysics_tracer_slots,
+)
 from legoesm.driver.diagnostics import DiagnosticCollector
 from legoesm.driver.restart import save_restart, load_restart
 
@@ -58,6 +69,16 @@ def _meshes_compatible(a, b) -> bool:
         return ids_a == ids_b
     except Exception:  # noqa: BLE001 — opaque mesh objects must not crash
         return False
+
+
+def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> bool:
+    """True if the run should checkpoint and exit to fit the wallclock budget.
+
+    ``max_s <= 0`` disables the check.  Otherwise fire once the elapsed time is
+    within ``buffer_s`` of the budget, leaving time to write the checkpoint
+    before SLURM kills the job (so a dependency chain can resume).
+    """
+    return max_s > 0.0 and elapsed_s >= (max_s - buffer_s)
 
 
 class ModelDriver:
@@ -104,14 +125,17 @@ class ModelDriver:
         self.physics = None
         self.state = None
         self.tracers: dict[str, jax.Array] = {}
-        # Use full moisture registry for mixed-phase/two-moment microphysics
-        # (q_v,q_c,q_r,q_i,q_s,q_g,N_c,N_r,N_i). P3 reuses q_s→q_rim and
-        # q_g→B_rim but still needs the 9-slot layout.
-        _ice_schemes = {"morrison", "thompson", "seifert_beheng", "p3"}
-        if config.microphysics in _ice_schemes:
+        warm_registry = make_moisture_registry()
+        required_slots = required_microphysics_tracer_slots(config.microphysics)
+        if required_slots > warm_registry.n_tracers:
             self.tracer_registry: TracerRegistry = make_full_moisture_registry()
         else:
-            self.tracer_registry: TracerRegistry = make_moisture_registry()
+            self.tracer_registry: TracerRegistry = warm_registry
+        validate_microphysics_tracer_slots(
+            config.microphysics,
+            self.tracer_registry.n_tracers,
+            context="ModelDriver tracer registry",
+        )
         self.get_sst_sic = None
         # Optional per-segment surface-property feedback hook.  A coupled
         # driver sets this to a callable ``day -> (sfc_albedo, sfc_T)`` (each
@@ -120,9 +144,21 @@ class ModelDriver:
         # SegmentForcing so the sea-ice/ocean/land albedo + skin-T feedbacks
         # reach the atmosphere.  None (AMIP / standalone) ⇒ static blend.
         self.get_sfc_override = None
+        # Optional per-segment SHARED surface-flux feedback hook.  A coupled
+        # driver sets this to a callable ``day -> (sfc_shflx, sfc_lhflx)``
+        # (each grid-shaped [W/m2, +up] or None) returning the coupler's
+        # tile-blended sensible / latent heat flux; threaded into the surface
+        # tendency as traced SegmentForcing so the atmosphere consumes the SAME
+        # surface fluxes the coupler feeds the ocean (air-sea budget closure).
+        # None (AMIP / standalone) means the atmosphere computes its own bulk
+        # surface fluxes (byte-identical to the pre-shared-flux behaviour).
+        self.get_sfc_flux_override = None
         self.diagnostics = None
         self._phis_data = None
         self._f_land = None
+        # Prognostic multilayer (Richards) land state, carried in SegmentCarry.land_ml
+        # and persisted across segments.  None ⇒ slab-land (scalar T_land) path.
+        self._land_ml_state = None
         self._fric_decay = None
         self._qv_smooth_coeff = None
         self._hyperdiffusion_3d_fn = None
@@ -130,6 +166,14 @@ class ModelDriver:
         self._ensemble_size = 1
         self._device_config = None
         self._carry_aux: dict = {}  # held radiation + carry metadata for checkpoint
+        # (step, day) exactly as the last load_checkpoint returned them —
+        # lets the run loops distinguish the production restart convention
+        # (callers pass the CHECKPOINT day straight back into run()) from
+        # a caller-supplied EPOCH day (the legacy contract).  See the
+        # START_DAY normalization in _prepare_run_context / _run_spectral
+        # (FIX_RESTART_TIME).
+        self._loaded_checkpoint_step_day: tuple | None = None
+        self._last_checkpoint_step: int | None = None
 
         # MPI distributed state (populated by _setup_parallel)
         self._mpi_rank: int | None = None
@@ -288,6 +332,25 @@ class ModelDriver:
             return
         for key in [k for k in self._carry_aux if k.startswith("dmtr_")]:
             _tracers[key[len("dmtr_"):]] = self._carry_aux.pop(key)
+
+    def _validate_microphysics_tracer_state(
+        self,
+        *,
+        context: str = "ModelDriver tracer state",
+    ) -> int:
+        """Validate that the live tracer dict can hold scheme tendencies."""
+        tracers = getattr(self, "tracers", None)
+        have_slots = 0
+        if isinstance(tracers, dict):
+            for name in self.tracer_registry.names:
+                if tracers.get(name) is None:
+                    break
+                have_slots += 1
+        return validate_microphysics_tracer_slots(
+            self.config.microphysics,
+            have_slots,
+            context=context,
+        )
 
     def setup(self) -> None:
         """Initialize grid, dycore, physics, forcing, and state."""
@@ -674,18 +737,21 @@ class ModelDriver:
 
         cfg = self.config
         gt = cfg.grid.grid_type
-        # Lat-lon only: the A-grid u is geographic-east, so the balanced jet
-        # (a geographic eastward wind) is assigned directly.  Cubed-sphere u/v
-        # are cube-LOCAL components that would need a grid-angle rotation first,
-        # and spectral/MPAS need other handling — all rejected up front in
-        # ExperimentConfig.validate_strict, so this is defensive.
+        # Horizontal latitude in the state's native layout.  The realistic
+        # T / p_s overlay below is GRID-AGNOSTIC (standard_atmosphere_temperature
+        # accepts any lat shape); only the balanced zonal jet (step 5) is
+        # lat-lon-specific (the A-grid u is geographic-east) and is skipped on
+        # the cube.  spectral/MPAS are rejected in ExperimentConfig.validate_strict
+        # (no grid-space T Field), so the else here is defensive.
         if gt == "latlon":
             lat_h = self.grid.lat2d                   # (n_lat, n_lon)
+        elif gt == "cubed_sphere":
+            lat_h = self.grid.lat                     # (6, n, n) geographic lat [rad]
         else:
             raise NotImplementedError(
                 f"ic='standard' not yet wired for grid_type={gt!r} "
-                f"(discretization={cfg.dycore.discretization!r}); only 'latlon' "
-                "is supported. Use ic='default' or 'era5'."
+                f"(discretization={cfg.dycore.discretization!r}); 'latlon' and "
+                "'cubed_sphere' are supported. Use ic='default' or 'era5'."
             )
 
         sa_cfg = StandardAtmosphereConfig(T_sfc_equator_K=cfg.T_init)
@@ -734,14 +800,29 @@ class ModelDriver:
         #     temperature gradient does not launch a geostrophic-adjustment shock
         #     at startup.  v stays zero (the balance is zonal).  Reuses the grid's
         #     own radius/rotation (constants fallback per the audit rule).
-        radius = getattr(self.grid, "radius", constants.R_earth)
-        omega = getattr(self.grid, "omega", constants.Omega)
-        u_new = standard_atmosphere_zonal_wind(
-            lat_h, sigma_full, radius, omega, sa_cfg,
-        ).astype(self.state.u.data.dtype)
-        self.state = self.state._replace(
-            u=self.state.u.replace(data=jnp.broadcast_to(u_new, self.state.u.data.shape)),
-        )
+        #
+        #     LAT-LON ONLY: the A-grid u is geographic-east, so the balanced jet
+        #     is assigned directly.  On the cubed-sphere u/v are cube-LOCAL
+        #     components, so a geographic-east jet would need a per-cell
+        #     grid-angle rotation; a coupled CLIMATE spin-up grows its own
+        #     circulation from the realistic T gradient within a few days (damped
+        #     by hyperdiffusion), so the balanced-jet IC is not required (unlike a
+        #     baroclinic-wave test).  Keep the scaffold winds on the cube.
+        if gt == "latlon":
+            radius = getattr(self.grid, "radius", constants.R_earth)
+            omega = getattr(self.grid, "omega", constants.Omega)
+            u_new = standard_atmosphere_zonal_wind(
+                lat_h, sigma_full, radius, omega, sa_cfg,
+            ).astype(self.state.u.data.dtype)
+            self.state = self.state._replace(
+                u=self.state.u.replace(data=jnp.broadcast_to(u_new, self.state.u.data.shape)),
+            )
+        else:
+            logger.info(
+                "  ic='standard' on %s: applied realistic T + p_s; balanced "
+                "zonal jet skipped (cube-local winds need grid-angle rotation) "
+                "— circulation spins up from the T gradient.", gt,
+            )
 
     def _init_state(self) -> None:
         """Initialize atmospheric state and moisture."""
@@ -801,6 +882,9 @@ class ModelDriver:
 
         # Initialize all tracers via registry
         self.tracers = init_tracers(self.tracer_registry, shape_3d)
+        self._validate_microphysics_tracer_state(
+            context="ModelDriver initialized tracer state",
+        )
 
         # Moisture initialization (spectral and MPAS use dry physics)
         if hasattr(self.state, 'p_s') and hasattr(self.state.p_s, 'data'):
@@ -905,6 +989,7 @@ class ModelDriver:
                 era5_to_cubedsphere_carry,
                 era5_to_spectral_carry,
                 era5_to_latlon_carry,
+                era5_to_mpas_carry,
             )
             logger.info(
                 f"  IC: loading ERA5 from {cfg.ic_path} "
@@ -913,8 +998,14 @@ class ModelDriver:
             era5_slice = load_era5_ic(cfg.ic_path, cfg.start_year)
 
             if cfg.grid.grid_type == "cubed_sphere":
+                _target_phis = (
+                    self._phis_data
+                    if self._phis_data is not None and jnp.any(self._phis_data != 0)
+                    else None
+                )
                 carry = era5_to_cubedsphere_carry(
-                    era5_slice, self.grid, self.sigma
+                    era5_slice, self.grid, self.sigma,
+                    target_phis=_target_phis,
                 )
             elif cfg.dycore.discretization == "spectral":
                 carry = era5_to_spectral_carry(
@@ -924,38 +1015,103 @@ class ModelDriver:
                 carry = era5_to_latlon_carry(
                     era5_slice, self.grid, self.sigma
                 )
+            elif cfg.grid.grid_type == "mpas":
+                # MPAS carries the wind as the edge-normal component on mesh
+                # edges (no cell-centred v); era5_to_mpas_carry regrids ERA5
+                # to cells/edges and projects the winds via angleEdge.
+                carry = era5_to_mpas_carry(
+                    era5_slice, self.grid, self.sigma,
+                    smoothing_passes=cfg.topo_smoothing,
+                )
             else:
-                # MPAS Voronoi needs an edge-normal wind projection (ERA5
-                # cell-centred u/v -> mesh edge velocities) not yet
-                # implemented + validated; fail loudly rather than
-                # silently mis-initialise.  Use --ic default there until
-                # era5_to_mpas_carry lands.
                 raise NotImplementedError(
                     f"ERA5 IC not yet supported for "
                     f"grid_type={cfg.grid.grid_type!r} / "
                     f"discretization={cfg.dycore.discretization!r}. "
-                    "Supported: cubed_sphere, latlon, gaussian/spectral. "
-                    "For voronoi/mpas use --ic default (era5_to_mpas_carry "
-                    "is a tracked follow-up)."
+                    "Supported: cubed_sphere, latlon, mpas, gaussian/spectral."
                 )
 
-            self.state = self.state._replace(
-                u=self.state.u.replace(data=carry.u),
-                v=self.state.v.replace(data=carry.v),
-                T=self.state.T.replace(data=carry.T),
-                p_s=self.state.p_s.replace(data=carry.p_s),
-                phis=self.state.phis.replace(data=carry.phis),
-            )
-            self.tracers["q_v"] = jnp.asarray(carry.q_v)
+            if cfg.dycore.discretization == "spectral":
+                # The spectral state holds prognostics as SH coefficients,
+                # not grid-point Fields.  Forward-transform the grid-space
+                # ERA5 carry: (u, v) -> (vor_hat, div_hat) via the validated
+                # ``vordiv_from_uv_3d`` (inverse of the dycore's
+                # ``uv_from_vordiv_3d``); T/ln(p_s)/phis via ``sh_analysis``.
+                from legoesm.grids.gaussian import (
+                    vordiv_from_uv_3d, sh_analysis_3d, sh_analysis,
+                )
+                vor_hat, div_hat = vordiv_from_uv_3d(
+                    self.grid, carry.u, carry.v
+                )
+                T_hat = sh_analysis_3d(self.grid, carry.T)
+                lnps_hat = sh_analysis(self.grid, jnp.log(carry.p_s))
+                phis_hat = sh_analysis(self.grid, carry.phis)
+                self.state = self.state._replace(
+                    vor_hat=self.state.vor_hat.replace(data=vor_hat),
+                    div_hat=self.state.div_hat.replace(data=div_hat),
+                    T_hat=self.state.T_hat.replace(data=T_hat),
+                    lnps_hat=self.state.lnps_hat.replace(data=lnps_hat),
+                    phis_hat=self.state.phis_hat.replace(data=phis_hat),
+                )
+                self.tracers["q_v"] = jnp.asarray(carry.q_v)
+                # Re-attach the ERA5 q_v into the dycore-advected tracer
+                # state (the spectral moist-init block above seeded a
+                # rest-state q_v; override with ERA5).
+                if (self.state.tracers is not None
+                        and "q_v" in self.state.tracers):
+                    self.state = self.state._replace(tracers={
+                        **self.state.tracers,
+                        "q_v": self.state.tracers["q_v"].replace(
+                            data=jnp.asarray(carry.q_v)),
+                    })
+                # Stats from the grid-space reconstruction.
+                from legoesm.atmosphere.dynamics.spectral_pe import (
+                    spectral_pe_to_grid,
+                )
+                _fg = spectral_pe_to_grid(self.state, self.grid, self.sigma)
+                _stats_era5 = jnp.stack([
+                    jnp.mean(self.tracers["q_v"]),
+                    jnp.mean(column_water_vapor(
+                        self.tracers["q_v"], _fg['p_s'], self.sigma.dsigma,
+                    )),
+                    jnp.mean(_fg['T']),
+                ])
+            elif cfg.grid.grid_type == "mpas":
+                # MPAS state: edge-normal u (nEdges, nlev), no v; scalars at
+                # cells.  q_v lives in the dycore-advected tracer dict.
+                self.state = self.state._replace(
+                    u=self.state.u.replace(data=carry.u),
+                    T=self.state.T.replace(data=carry.T),
+                    p_s=self.state.p_s.replace(data=carry.p_s),
+                    phis=self.state.phis.replace(data=carry.phis),
+                )
+                self.tracers["q_v"] = jnp.asarray(carry.q_v)
+                _stats_era5 = jnp.stack([
+                    jnp.mean(self.tracers["q_v"]),
+                    jnp.mean(column_water_vapor(
+                        self.tracers["q_v"], self.state.p_s.data,
+                        self.sigma.dsigma,
+                    )),
+                    jnp.mean(self.state.T.data),
+                ])
+            else:
+                self.state = self.state._replace(
+                    u=self.state.u.replace(data=carry.u),
+                    v=self.state.v.replace(data=carry.v),
+                    T=self.state.T.replace(data=carry.T),
+                    p_s=self.state.p_s.replace(data=carry.p_s),
+                    phis=self.state.phis.replace(data=carry.phis),
+                )
+                self.tracers["q_v"] = jnp.asarray(carry.q_v)
 
-            _stats_era5 = jnp.stack([
-                jnp.mean(self.tracers["q_v"]),
-                jnp.mean(column_water_vapor(
-                    self.tracers["q_v"], self.state.p_s.data,
-                    self.sigma.dsigma,
-                )),
-                jnp.mean(self.state.T.data),
-            ])
+                _stats_era5 = jnp.stack([
+                    jnp.mean(self.tracers["q_v"]),
+                    jnp.mean(column_water_vapor(
+                        self.tracers["q_v"], self.state.p_s.data,
+                        self.sigma.dsigma,
+                    )),
+                    jnp.mean(self.state.T.data),
+                ])
             _h2 = np.asarray(_stats_era5)
             logger.info(
                 f"  State init (ERA5 {cfg.start_year}): "
@@ -963,6 +1119,15 @@ class ModelDriver:
                 f"q_v={_h2[0]*1000:.2f} g/kg, "
                 f"CWV={_h2[1]:.1f} kg/m2"
             )
+
+            # ERA5 phis is kept for dynamics — substituting ETOPO phis at t=0
+            # while keeping ERA5 winds creates a pressure-gradient imbalance
+            # (local delta can reach ~15 % p_s over Tibet/Andes) that drives
+            # a gravity wave transient exceeding CFL within the first day.
+            # ETOPO is used for CMOR orog and for f_land (passive surface tile);
+            # the dynamics run with the ERA5 orography that is consistent with
+            # the ERA5 initial wind field.  Proper ETOPO-in-dynamics requires
+            # building a balanced IC on ETOPO from the outset (future work).
 
     def _create_ensemble(self) -> None:
         """Create ensemble members if ensemble_size > 1.
@@ -1004,22 +1169,171 @@ class ModelDriver:
         conv_str = self.config.convection or "none"
         logger.info(f"  Physics: radiation={rad_str}, convection={conv_str}")
 
-        # Activate the slab-land surface tile when a land-sea mask was
-        # loaded in _create_topography.  f_land / albedo_land are static
-        # surface fields; the slab steps once per radiation sub-cycle.
-        if getattr(self.config, "land_mask_path", "") and self._f_land is not None:
+        # Activate land surface when f_land was loaded in _create_topography.
+        # Two modes, distinguished by whether an explicit --land-mask-file was
+        # given (full slab, slab_land_active=True) or only --topography was
+        # given (passive: albedo + T_sfc blend, T_land carried but not stepped).
+        _has_land = (
+            self._f_land is not None
+            and bool(jnp.any(self._f_land > 0))
+        )
+        if _has_land:
             from legoesm.surface_albedo import land_vegetation_albedo
             from legoesm.core.precision import get_policy
             _sd = get_policy().storage
             self.physics.f_land = self._f_land.astype(_sd)
-            self.physics.albedo_land = (
-                land_vegetation_albedo(self.grid.grid_lat).astype(_sd)
+            # Land albedo: a static NetCDF (e.g. ICON-extpar ALB) when
+            # ``albedo_land_path`` is set, else the latitude-vegetation
+            # default.  ``albedo_land_month`` (1-12) picks a month from a
+            # monthly climatology; 0 -> annual mean.
+            _alb_path = getattr(self.config, "albedo_land_path", "")
+            if _alb_path:
+                from legoesm.grids.topography import load_land_albedo
+                _alb_month = getattr(self.config, "albedo_land_month", 0) or None
+                self.physics.albedo_land = load_land_albedo(
+                    self.grid, _alb_path, month=_alb_month
+                ).astype(_sd)
+                logger.info(
+                    f"  Land albedo: {_alb_path} "
+                    f"(month={_alb_month or 'annual mean'}, "
+                    f"mean={float(jnp.mean(self.physics.albedo_land)):.3f})"
+                )
+            else:
+                self.physics.albedo_land = (
+                    land_vegetation_albedo(self.grid.grid_lat).astype(_sd)
+                )
+            _activate = bool(getattr(self.config, "land_mask_path", "")) or bool(
+                getattr(self.config, "slab_land_active", False)
             )
-            self.physics.rad_update_steps = self.config.rad_update_steps
-            logger.info(
-                f"  Land tile: ACTIVE (slab land, C_land="
-                f"{self.physics.C_land:.1e} J/m2/K)"
-            )
+            if _activate:
+                self.physics.slab_land_active = True
+                self.physics.rad_update_steps = self.config.rad_update_steps
+                # Tiled (mosaic) surface fluxes: ocean bulk scheme on the
+                # ocean tile, land Monin-Obukhov on the land tile (validated
+                # to require louis + an active land tile in validate_strict).
+                _tiled = bool(getattr(self.config, "surface_tiled", False))
+                self.physics.surface_tiled = _tiled
+                self.physics.surface_z0_land = float(
+                    getattr(self.config, "surface_z0_land", 0.1)
+                )
+                # Prognostic soil-water bucket: soil-moisture-limited land
+                # evaporation (beta) instead of a saturated wet surface.
+                _bucket = bool(getattr(self.config, "land_soil_bucket", False))
+                self.physics.land_soil_bucket = _bucket
+                self.physics.land_bucket_w_max = float(
+                    getattr(self.config, "land_bucket_w_max", 150.0)
+                )
+                self.physics.land_beta_min = float(
+                    getattr(self.config, "land_beta_min", 0.1)
+                )
+                self.physics.land_bucket_w_init_frac = float(
+                    getattr(self.config, "land_bucket_w_init_frac", 0.5)
+                )
+                # Bucket runoff partition (Green-Ampt infiltration + saturation excess)
+                self.physics.land_K_infiltration = float(
+                    getattr(self.config, "land_K_infiltration", 1.0e-5)
+                )
+                self.physics.land_infil_suction_boost = float(
+                    getattr(self.config, "land_infil_suction_boost", 2.0)
+                )
+                self.physics.land_infiltration_excess = bool(
+                    getattr(self.config, "land_infiltration_excess", True)
+                )
+                # Stomatal soil-water limitation: route beta_soil through the
+                # shared land Jarvis model (legoesm.land.carbon.stomata).
+                _stomatal = bool(getattr(self.config, "land_stomatal_beta", False))
+                self.physics.land_stomatal_beta = _stomatal
+                if _stomatal:
+                    from legoesm.land.carbon.stomata import StomataConfig
+                    self.physics.stomata_config = StomataConfig()
+                # Prognostic snow + snow-albedo feedback on the slab tile.
+                self.physics.snow_albedo_feedback = bool(
+                    getattr(self.config, "snow_albedo_feedback", False))
+                logger.info(
+                    f"  Land tile: ACTIVE (slab land, C_land="
+                    f"{self.physics.C_land:.1e} J/m2/K, "
+                    f"f_land mean={float(jnp.mean(self._f_land)):.3f}, "
+                    f"tiled_surface={_tiled}"
+                    + (f", z0_land={self.physics.surface_z0_land:g}m" if _tiled else "")
+                    + (f", soil_bucket(W_max={self.physics.land_bucket_w_max:g}"
+                       f" kg/m2, beta_min={self.physics.land_beta_min:g})"
+                       if _bucket else "")
+                    + (", stomatal_beta(Jarvis)" if _stomatal else "")
+                    + ")"
+                )
+            else:
+                logger.info(
+                    f"  Land tile: PASSIVE (albedo + T_sfc blend, "
+                    f"f_land mean={float(jnp.mean(self._f_land)):.3f}, "
+                    "T_land carried but not stepped)"
+                )
+
+            # MULTILAYER (Richards) override: when use_multilayer_land, the
+            # differentiable segment advances a per-column MultiLayerLandState
+            # (SegmentCarry.land_ml) in place of the scalar slab T_land, using the
+            # faithful CLM default (PFT veg params + reference-soil thermal/hydro).
+            # Reuses the land mask (f_land) loaded above; the slab knobs become
+            # unused (the land/ocean blend reads the multilayer surface T+albedo).
+            if getattr(self.config, "use_multilayer_land", False):
+                self._setup_multilayer_land(_sd)
+
+    def _setup_multilayer_land(self, storage_dtype) -> None:
+        """Activate the differentiable multilayer (Richards) land tile.
+
+        Loads the CLM reference surface map onto the model columns, builds the
+        per-column ``LandSurfaceParams`` + ``MultiLayerLandConfig`` (faithful CLM
+        default via :func:`clm_multilayer_setup`), wires them onto the physics
+        pipeline (``land_ml_*`` attrs consumed by ``compute_radiation_core``), and
+        seeds an initial ``MultiLayerLandState`` warm-started from the near-surface
+        air temperature (no tropical cold spin-up).  The state then rides
+        ``SegmentCarry.land_ml`` and persists across segments (see the run loop).
+
+        Raises if the CLM surfdata cannot be mapped — ``use_multilayer_land`` must
+        NOT silently degrade to the slab (that would run different land physics
+        silently, the issue-#405 bug class)."""
+        import numpy as _np
+        from legoesm.land import init_multilayer_land_state
+        from legoesm.land.clm_surface_map import (
+            load_clm_surface, download_clm_surfdata, clm_multilayer_setup,
+        )
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.soil_grid import SoilGridConfig
+
+        ad = self.physics.adapter
+        # column-order latitude / longitude.  grid.lat is geographic latitude in
+        # RADIANS, shape (6,n,n)/(nlat,nlon); flatten to (ncol,).  The CLM map
+        # regrids onto DEGREE coordinates; the land tile consumes radians.
+        lat_rad = _np.asarray(ad.flatten_2d(self.grid.lat)).reshape(-1)
+        lon_rad = _np.asarray(ad.flatten_2d(self.grid.lon)).reshape(-1)
+        lat_deg = _np.degrees(lat_rad)
+        lon_deg = _np.degrees(lon_rad)
+        # download_clm_surfdata caches to /tmp (one-time); load_clm_surface regrids
+        # the CLM reference surfdata onto the model columns.
+        surface_map = load_clm_surface(download_clm_surfdata(), lat_deg, lon_deg)
+
+        # Non-spatial defaults (soil grid depth/layers, Richards, carbon, stomata)
+        # from the config; clm_multilayer_setup overwrites only hydraulics/thermal.
+        base = MultiLayerLandConfig(
+            soil_grid=SoilGridConfig(
+                n_layers=self.config.multilayer_n_layers,
+                total_depth=self.config.multilayer_soil_depth,
+            ),
+        )
+        params, cfg = clm_multilayer_setup(surface_map, base_config=base)
+
+        self.physics.land_ml_cfg = cfg
+        self.physics.land_ml_params = params
+        self.physics.land_ml_lat = jnp.asarray(lat_rad, dtype=storage_dtype)
+        self.physics.land_ml_doy = 0.0
+
+        ncol = lat_deg.shape[0]
+        T_init = ad.flatten_2d(self.state.T.data[..., -1]).reshape(-1).astype(
+            storage_dtype)
+        self._land_ml_state = init_multilayer_land_state(ncol, cfg, T_init=T_init)
+        logger.info(
+            "  Land tile: MULTILAYER override ACTIVE (%d soil layers, %d columns)",
+            cfg.soil_grid.n_layers, ncol,
+        )
 
     def _setup_external_forcing(self) -> None:
         """Configure external forcing: solar, ozone, aerosol, GHG."""
@@ -1059,6 +1373,15 @@ class ModelDriver:
         # Aerosol external forcing
         self._aerosol_active = (cfg.radiation in ("rrtmg", "rrtmgp")
                                 and cfg.aerosol_forcing == "external")
+        # Volcanic stratospheric LONGWAVE aerosol (gap #9): active only on a
+        # gas-radiation scheme (gray ignores aerosol) with the LW switch and
+        # a volcanic file present.  Default OFF ⇒ no LW aerosol path.
+        self._aerosol_lw_active = (
+            cfg.radiation in ("rrtmg", "rrtmgp")
+            and bool(cfg.volcanic_aerosol_lw)
+            and bool(cfg.volcanic_aerosol_file)
+        )
+        self._aerosol_lw_od = None
         self._aerosol_config = AerosolConfig(
             enabled=self._aerosol_active,
             source="climatology", path=cfg.aerosol_file,
@@ -1067,6 +1390,12 @@ class ModelDriver:
             volcanic_enabled=bool(cfg.volcanic_aerosol_file),
             volcanic_path=cfg.volcanic_aerosol_file,
             volcanic_scale=cfg.volcanic_aerosol_scale,
+            # Volcanic stratospheric LONGWAVE aerosol (gap #9): only when
+            # the LW switch is set AND a volcanic file is present.  Default
+            # OFF ⇒ ``get_aerosol_lw_at_time`` returns None ⇒ zeros LW od
+            # ⇒ byte-identical (RRTMGP no-op).
+            volcanic_lw_enabled=(bool(cfg.volcanic_aerosol_lw)
+                                 and bool(cfg.volcanic_aerosol_file)),
             # Calendar anchor for the non-cyclic dispatch in
             # ``get_aerosol_at_time``.  Multi-year volcanic time-series
             # (e.g. 1850–2014 CMIP6 ``bc_aeropt_cmip6_volc_*``) are
@@ -1137,7 +1466,7 @@ class ModelDriver:
     def _precompute_external_forcing(self, day, p_s, lat):
         """Pre-compute ozone/aerosol/GHG fields outside JIT boundary."""
         from legoesm.forcing.external import (
-            get_ozone_at_time, get_aerosol_at_time,
+            get_ozone_at_time, get_aerosol_at_time, get_aerosol_lw_at_time,
             get_ghg_at_time, ghg_concentrations_to_vmr,
         )
         from legoesm.forcing.surface_utils import distribute_column_aod_to_layers
@@ -1182,6 +1511,25 @@ class ModelDriver:
                 jnp.asarray(aerosol_col), p_half_col,
             )
 
+        # Volcanic stratospheric LONGWAVE aerosol (gap #9): same (ncol,
+        # nlev) shape as ``aerosol_od``, default zeros so the SegmentForcing
+        # / forcing-dict leaf is a concrete fixed-shape array (no retrace)
+        # and a run without volcanic LW aerosol is byte-identical (zeros LW
+        # od is a RRTMGP no-op).  Distributed to layers by the SAME
+        # pressure-thickness helper used for the SW aerosol.  Stored as an
+        # instance attribute (NOT added to the 3-tuple return) so the five
+        # existing unpack call sites keep their arity.
+        aerosol_lw_od = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
+        if self._aerosol_lw_active:
+            aerosol_lw_col = get_aerosol_lw_at_time(
+                self._aerosol_config, day, lat_grid=lat_col,
+            )
+            if aerosol_lw_col is not None:
+                aerosol_lw_od = distribute_column_aod_to_layers(
+                    jnp.asarray(aerosol_lw_col), p_half_col,
+                )
+        self._aerosol_lw_od = aerosol_lw_od
+
         # GHG VMR override (None for gray radiation / constant forcing)
         ghg_vmr = None
         if self._ghg_active:
@@ -1208,10 +1556,48 @@ class ModelDriver:
                     "n2o_ppbv": n2o,
                 })
 
+        # Interactive carbon-radiation coupling (#3 / C4MIP): when the coupled
+        # driver runs a prognostic CO2 tracer it sets ``self._co2_vmr_override``
+        # (a global-mean CO2 mole fraction) each segment; inject it into the
+        # radiation GHG so emitted / absorbed CO2 actually changes radiative
+        # forcing.  Gated on a gas-radiation scheme (gray ignores GHG) and on the
+        # override being present, so fixed-CO2 runs are byte-identical.
+        co2_vmr_override = getattr(self, "_co2_vmr_override", None)
+        if (co2_vmr_override is not None
+                and cfg.radiation in ("rrtmg", "rrtmgp")):
+            ghg_vmr = {**(ghg_vmr or {}), "co2": co2_vmr_override}
+
         return o3_vmr, aerosol_od, ghg_vmr
 
     def _create_diagnostics(self) -> None:
         """Set up diagnostic collection."""
+        # Cloud config for the total-cloud-cover (clt) diagnostic.  Built via
+        # the SAME shared ``build_cloud_config`` the physics pipeline uses, from
+        # the same ``ExperimentConfig`` fields (``cloud_scheme`` +
+        # ``cloud_rh_crit`` / ``cloud_q_c_diagnostic``), so clt derives from the
+        # model's OWN large-scale/stratiform cloud fraction (issue #689).
+        #
+        # The opt-in ``convective_cloud`` add-on is deliberately NOT counted in
+        # clt: it is a bounded (cap 0.15) radiative-TUNING term combined by
+        # maximum overlap, not a physical cloud-AREA fraction, and matching it
+        # faithfully would require radiation's lagged, per-rank ``conv_precip``
+        # carry (not worth threading for a diagnostic — codex review).  Where a
+        # column actually convects the RH-based stratiform fraction is already
+        # high, so excluding the add-on changes clt little.  clt is therefore
+        # the model's stratiform cloud cover with maximum-random overlap.
+        # ``cloud_scheme == 'none'`` => ``None`` => clt not published.
+        _cloud_scheme = getattr(self.config, "cloud_scheme", "none")
+        diag_cloud_config = None
+        if _cloud_scheme != "none":
+            from legoesm.atmosphere.physics.clouds.config import (
+                build_cloud_config,
+            )
+            diag_cloud_config = build_cloud_config(
+                _cloud_scheme,
+                convective_cloud=False,  # stratiform-only clt (see above)
+                rh_crit=getattr(self.config, "cloud_rh_crit", None),
+                q_c_diagnostic=getattr(self.config, "cloud_q_c_diagnostic", None),
+            )
         self.diagnostics = DiagnosticCollector(
             nlev=self.config.grid.nlev,
             sigma_full=self.sigma.sigma_full,
@@ -1224,7 +1610,16 @@ class ModelDriver:
             output_dir=self._output_dir,
             cmip_resolution_deg=self.config.output.cmip_resolution_deg,
             start_year=self.config.start_year,
+            cloud_config=diag_cloud_config,
         )
+        # Register per-cell horizontal areas so every global-mean diagnostic
+        # (<R_TOA>, <SST>, <CWV>, ...) is area-weighted.  On a lat-lon grid an
+        # unweighted ``jnp.mean`` over-weights the polar rows (each cell counts
+        # equally despite spanning ~cos(lat) less area), which biased <rsdt> to
+        # ~281 W/m² and faked a -36 W/m² "cold drift" where the area-weighted
+        # TOA budget is near balance.  ``grid_area`` is grid-agnostic (lat-lon
+        # (n_lat,n_lon), cube (6,n,n)); grids without it keep the plain mean.
+        self.diagnostics.set_area_weights(getattr(self.grid, "grid_area", None))
         # Configure CMIP spatial regridding weights
         if self.config.output.cmip_output:
             self.diagnostics.set_cmip_grid_info(
@@ -1233,9 +1628,8 @@ class ModelDriver:
                 start_year=self.config.start_year,
             )
             # Register time-invariant fields for the CMIP6 ``fx`` file.
-            # Topography was set up earlier in ``_create_topography``; we
-            # materialize to host arrays so the accumulator owns no JAX
-            # references and the driver remains free to free device buffers.
+            # _phis_data is the ETOPO field; dynamics run with ERA5 phis but
+            # CMOR orog reports the ETOPO field (the intended mountain mask).
             self.diagnostics.set_fixed_fields(
                 phis=np.asarray(self._phis_data),
                 land_fraction=np.asarray(self._f_land),
@@ -1270,18 +1664,21 @@ class ModelDriver:
                 perf_mode = True
             elif pm_flag == "never":
                 perf_mode = False
-            else:
+            elif pm_flag == "auto":
                 # auto: use perf_mode when running distributed MPI
                 perf_mode = (
                     self._device_config is not None
                     and self._device_config.is_distributed
                 )
+            else:
+                raise ValueError(
+                    "diagnostics_perf_mode must be one of "
+                    f"('auto', 'always', 'never'), got {pm_flag!r}"
+                )
 
         # CMIP output requires full collect() for spatial/monthly
         # accumulation — perf mode skips those, producing zero files.
-        cmip_on = getattr(
-            getattr(self.config, 'output', None), 'cmip_output', False,
-        )
+        cmip_on = self.config.output.cmip_output
         if cmip_on and perf_mode:
             perf_mode = False
 
@@ -1353,7 +1750,8 @@ class ModelDriver:
                     ps_g = _g(state.p_s.data)
                     phis_g = _g(state.phis.data)
                     for _tname in (
-                        'q_v', 'q_c', 'q_r', 'sst', 'sic', 'precip_total',
+                        'q_v', 'q_c', 'q_r', 'q_i', 'q_s', 'q_g',
+                        'sst', 'sic', 'precip_total',
                         'sw_up_toa', 'lw_up_toa', 'sw_net_sfc', 'lw_net_sfc',
                         'sw_down_toa', 'shflx', 'lhflx', 'lat_deg_grid',
                     ):
@@ -1391,7 +1789,7 @@ class ModelDriver:
                         fields_global[name] = gather(arr, self._layout, root_only=True)
 
                     # Gather tracers (all ranks participate)
-                    for tname in ('q_v', 'q_c', 'q_r'):
+                    for tname in ('q_v', 'q_c', 'q_r', 'q_i', 'q_s', 'q_g'):
                         arr = kwargs.get(tname)
                         if arr is not None:
                             kwargs[tname] = gather(arr[_ofi], self._layout, root_only=True)
@@ -1803,7 +2201,8 @@ class ModelDriver:
                 layout = make_layout(topo.rank, topo.n_processes, n)
                 set_active_layout(layout)
 
-            if layout is not None:
+            from legoesm.parallel.layout import DistributedLayout
+            if isinstance(layout, DistributedLayout):
                 # Store MPI metadata for later phases
                 self._layout = layout
                 self._mpi_rank = topo.rank
@@ -2356,6 +2755,7 @@ class ModelDriver:
         canonical file.  For replicated state, only rank 0 writes and
         signals completion via a lightweight barrier.
         """
+        self._last_checkpoint_step = step
         elapsed_day = day - self.config.start_day
 
         # MPAS path: the Voronoi hydrostatic state is ``u`` (edge-normal,
@@ -2479,6 +2879,39 @@ class ModelDriver:
                     _save[f"trc_{_k}"] = np.asarray(trc_d[_k])
             np.savez(ckpt_path, **_save)
             logger.info(f"  Checkpoint: {ckpt_path.name} (mpas)")
+            return
+
+        # Spectral path (FIX_RESTART_TIME iteration 4): the spectral PE
+        # state is five complex coefficient Fields (vor/div/T/lnps/phis
+        # ``_hat``) + an optional grid-space tracers dict — the shared
+        # ``save_restart`` assumes the cube/lat-lon layout (reads
+        # ``state.v.data``, infers resolution from the T-shape) and
+        # cannot serialise it.  Write the coefficient arrays directly
+        # (npz handles complex128 natively) under the absolute-day
+        # filename the restart chain globs (MPAS convention).  The
+        # spectral loop refuses stateful physics and holds no
+        # held-radiation carry, so this payload is complete for
+        # bit-exact continuation.  Single-process only (spectral
+        # transforms are global; the path is never MPI-sharded).
+        if self.config.dycore.discretization == "spectral":
+            ckpt_path = (self._output_dir
+                         / f"checkpoint_day_{int(round(day)):04d}.npz")
+            s = self.state
+            _save = dict(
+                vor_hat=np.asarray(s.vor_hat.data),
+                div_hat=np.asarray(s.div_hat.data),
+                T_hat=np.asarray(s.T_hat.data),
+                lnps_hat=np.asarray(s.lnps_hat.data),
+                phis_hat=np.asarray(s.phis_hat.data),
+                step=np.asarray(int(step)), day=np.asarray(float(day)),
+                spectral_layout=np.asarray(1),
+            )
+            if s.tracers is not None:
+                _save["tracer_names"] = np.asarray(sorted(s.tracers.keys()))
+                for _k in s.tracers:
+                    _save[f"trc_{_k}"] = np.asarray(s.tracers[_k].data)
+            np.savez(ckpt_path, **_save)
+            logger.info(f"  Checkpoint: {ckpt_path.name} (spectral)")
             return
 
         # Distributed path
@@ -2891,6 +3324,65 @@ class ModelDriver:
             logger.info(f"  Loaded MPAS checkpoint: step={step}, day={day:.2f}"
                         + ("" if "tracer_names" not in d
                            else f", tracers={[str(n) for n in d['tracer_names']]}"))
+            self._loaded_checkpoint_step_day = (step, day)
+            return step, day
+
+        # Spectral path (FIX_RESTART_TIME iteration 4): mirror of the
+        # spectral branch in ``save_checkpoint``.  Reconstruct the
+        # ``SpectralHydrostaticState`` (five complex coefficient Fields
+        # + optional grid-space tracers) with Field metadata taken from
+        # the current state; the generic ``load_restart`` reads
+        # grid-layout fields and cannot deserialise it.
+        if self.config.dycore.discretization == "spectral":
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"spectral checkpoint not found (or is a directory): "
+                    f"{path}"
+                )
+            import jax.numpy as jnp
+            from legoesm.core.field import Field
+            d = np.load(path)
+            if "spectral_layout" not in d:
+                raise ValueError(
+                    f"{path} is not a spectral checkpoint (missing the "
+                    "spectral_layout marker) — it cannot restore a "
+                    "discretization='spectral' run."
+                )
+            s = self.state
+            new_fields = {}
+            for _name in ("vor_hat", "div_hat", "T_hat", "lnps_hat",
+                          "phis_hat"):
+                _cur = getattr(s, _name)
+                _arr = d[_name]
+                if _arr.shape != _cur.data.shape:
+                    raise ValueError(
+                        f"spectral checkpoint {_name} shape {_arr.shape} "
+                        f"!= configured state {_cur.data.shape} "
+                        f"(resolution/nlev mismatch): {path}"
+                    )
+                new_fields[_name] = _cur.replace(data=jnp.asarray(_arr))
+            tracers = None
+            if "tracer_names" in d:
+                if s.tracers is None:
+                    raise ValueError(
+                        f"spectral checkpoint {path} carries tracers "
+                        f"{[str(n) for n in d['tracer_names']]} but the "
+                        "configured run has none — refusing to silently "
+                        "drop water."
+                    )
+                tracers = {}
+                for _k in (str(n) for n in d["tracer_names"]):
+                    _cur_t = s.tracers[_k]
+                    tracers[_k] = _cur_t.replace(
+                        data=jnp.asarray(d[f"trc_{_k}"]))
+            elif s.tracers is not None:
+                tracers = s.tracers
+            self.state = s._replace(tracers=tracers, **new_fields)
+            step = int(d["step"])
+            day = float(d["day"])
+            logger.info(
+                f"  Loaded spectral checkpoint: step={step}, day={day:.2f}")
+            self._loaded_checkpoint_step_day = (step, day)
             return step, day
 
         # Distributed path: directory with per-rank .npz files
@@ -2944,6 +3436,7 @@ class ModelDriver:
                     f"  Loaded distributed restart: step={step}, day={day}, "
                     f"rank={topology.rank}"
                 )
+                self._loaded_checkpoint_step_day = (step, day)
                 return step, day
 
         # Lat-lon band MPI: rank 0 loads the global ``.npz`` against
@@ -3063,6 +3556,7 @@ class ModelDriver:
                     "per-rank distributed checkpoint format or run "
                     "single-process for stateful-physics lat-lon MPI runs."
                 )
+            self._loaded_checkpoint_step_day = (step, day)
             return step, day
 
         # Single-process path
@@ -3083,10 +3577,36 @@ class ModelDriver:
         if metadata:
             logger.info(f"  Loaded restart: step={step}, day={day}, "
                        f"digest={metadata.state_digest[:16]}...")
+        self._loaded_checkpoint_step_day = (step, day)
         return step, day
 
+    def _maybe_wallclock_exit(self, ckpt_fn, step: int, day: float) -> None:
+        """Checkpoint and ``exit(0)`` cleanly if the wallclock budget is nearly
+        spent, so a SLURM dependency chain resumes from this state.
+
+        Single-rank only: under MPI an independent per-rank ``sys.exit`` would
+        desync ranks (others block on the next collective), so a collective
+        decision (broadcast the flag) is required and is deferred — the run-start
+        warning notes it is inactive under MPI.
+        """
+        if self._mpi_world_size not in (None, 1):
+            return
+        max_wall = self.config.output.max_wallclock_seconds
+        if not _wallclock_exhausted(
+                time.time() - self._run_wallclock_start, max_wall,
+                self.config.output.restart_buffer_seconds):
+            return
+        logger.info(
+            f"Wallclock budget {max_wall:.0f}s nearly reached at day {day:.2f}; "
+            f"checkpointing and exiting cleanly for restart.")
+        if step != self._last_checkpoint_step:
+            ckpt_fn(step, day)
+        self.diagnostics.flush_to_disk(self._output_dir)
+        sys.exit(0)
+
     def run(self, start_step: int = 0, start_day: float | None = None,
-            compiled: bool = True, segment_callback=None) -> str:
+            compiled: bool = True, segment_callback=None,
+            checkpoint_callback=None) -> str:
         """Run the time integration.
 
         Parameters
@@ -3110,6 +3630,18 @@ class ModelDriver:
             Run status ("COMPLETED" or "BLOWUP at day ...").
         """
         self._segment_callback = segment_callback
+        # Checkpoint hook (a coupled driver passes its own save_checkpoint so
+        # the FULL coupled state — not just the atmosphere — is written on a
+        # periodic or wallclock-budget checkpoint).  Run-start wallclock anchor
+        # for the budget check.
+        self._checkpoint_callback = checkpoint_callback
+        self._run_wallclock_start = time.time()
+        if (self.config.output.max_wallclock_seconds > 0
+                and self._mpi_world_size not in (None, 1)):
+            logger.warning(
+                "max_wallclock_seconds is set but the run is MPI-sharded; "
+                "wallclock checkpoint-and-exit is single-rank only (a collective "
+                "exit is not yet implemented) and will NOT fire under MPI.")
         # Issue #275 fix A: ``try/finally`` here — not inside
         # ``_finalize_run`` — so that an exception thrown anywhere in
         # the time loop still triggers SPMD halo backend restoration.
@@ -3124,6 +3656,13 @@ class ModelDriver:
                 status = self._run_mpas(start_step, start_day)
             elif self.config.dycore.discretization == "spectral":
                 status = self._run_spectral(start_step, start_day)
+            elif (self.config.enable_latlon_spmd
+                    and self.config.grid.grid_type == "latlon"):
+                # Single-process multi-device lat-band SPMD (A1): a dedicated
+                # segment loop over the validated run_atm_latlon_spmd, distinct
+                # from the jitted compiled_segments scan (zero surgical risk to
+                # the shared hot loop).
+                status = self._run_compiled_latlon_spmd(start_step, start_day)
             elif compiled:
                 status = self._run_compiled(start_step, start_day)
             else:
@@ -3236,7 +3775,9 @@ class ModelDriver:
         from legoesm.atmosphere.physics.radiation.config import RadiationConfig
         from legoesm.atmosphere.physics.convection.config import ConvectionConfig
         from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
-        from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MicrophysicsConfig, apply_microphysics_experiment_flags,
+        )
         from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
         from legoesm.atmosphere.physics.radiation.config import (
             RRTMGPConfig, OzoneProfileConfig,
@@ -3295,6 +3836,28 @@ class ModelDriver:
         # an "AMIP" MPAS run radiated CLEAR-SKY regardless of --clouds.
         _cloud_scheme = (cfg.cloud_scheme
                          if _rad_scheme == "rrtmgp" else "none")
+        # Aerosol-CCN specified-Nc coupling (Andreae 2009 AOD->CCN) + sub-grid
+        # in-cloud autoconversion: thread both ExperimentConfig switches onto
+        # the selected microphysics sub-config through the SAME shared helper
+        # the coupled-path ``_resolve_microphysics`` uses, so the combined-
+        # physics microphysics + radiation factories diagnose N_c from the
+        # prescribed ``forcing["aerosol_od"]`` and the warm-rain closures match
+        # the cube/lat-lon path exactly.  The helper fails loudly on a scheme
+        # that lacks a requested switch (only Morrison implements them).  The
+        # external-aerosol-forcing requirement is enforced upstream by run_amip
+        # and by the factories' fail-fast (no aerosol_od => raise).
+        _micro_cfg = MicrophysicsConfig(scheme=cfg.microphysics)
+        _msub = getattr(_micro_cfg, cfg.microphysics, None)
+        if _msub is not None:
+            _micro_cfg = _micro_cfg._replace(**{
+                cfg.microphysics: apply_microphysics_experiment_flags(
+                    _msub, cfg.microphysics,
+                    nc_from_aerosol=cfg.nc_from_aerosol,
+                    subgrid_autoconversion=cfg.subgrid_autoconversion,
+                )
+            })
+        from legoesm.atmosphere.physics.radiation.solar import earth_orbit
+        _orbit_params = earth_orbit() if cfg.orbital_insolation else None
         phys_cfg = PhysicsConfig(
             radiation=RadiationConfig(
                 scheme=_rad_scheme if _rad_scheme != "none" else "none",
@@ -3306,9 +3869,12 @@ class ModelDriver:
                     include_clouds=(_cloud_scheme != "none"),
                     gpoint_batch_size=getattr(
                         cfg, "rrtmgp_gpoint_batch_size", 0),
+                    gpoint_checkpoint=getattr(
+                        cfg, "rrtmgp_gpoint_checkpoint", True),
                 ),
                 cloud_scheme=_cloud_scheme,
                 diurnal_cycle=cfg.diurnal_cycle,
+                orbit=_orbit_params,
                 # Ozone source (default "standard" matches the bare default; a
                 # non-standard --ozone-source now flows to MPAS rrtmgp).  The
                 # external CMIP6 ozone FILE arrives per-step via the traced
@@ -3317,7 +3883,7 @@ class ModelDriver:
             ),
             convection=ConvectionConfig(scheme=cfg.convection),
             turbulence=TurbulenceConfig(scheme=cfg.turbulence),
-            microphysics=MicrophysicsConfig(scheme=cfg.microphysics),
+            microphysics=_micro_cfg,
             gravity_wave_drag=GravityWaveDragConfig(scheme=cfg.gravity_wave_drag),
         )
         # Phase D perf: shard the per-column RRTMGP workload across all local
@@ -3364,6 +3930,35 @@ class ModelDriver:
             )
         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
                                   column_mesh=_column_mesh)
+
+        # ---- Radiation sub-cycle (issue #316, MPAS port) ----
+        # The MPAS physics_fn fuses radiation into ``model.step`` and ran the
+        # full RRTMGP solve EVERY timestep (e.g. 60×/hour at dt=60), which is
+        # the dominant cost and made the merged-dycore MPAS path unusably slow
+        # (L4 ~0.44 steps/s).  Build a SECOND variant (``need_rad=False``) that
+        # skips the RRTMGP/gray solve and re-uses the cached heating tendency
+        # (``PhysicsState.rad_heating``, written by the full variant); the step
+        # loop alternates the two by ``step % RAD_UPDATE_STEPS``.  At dt=60 /
+        # RAD_UPDATE_STEPS=60 that is a 1-hour radiation cadence — the
+        # CESM/E3SM standard the cubed-sphere path already validates — i.e.
+        # ~RAD_UPDATE_STEPS× fewer RRTMGP solves with no new physics knob.
+        # Only built when subcycling is active AND radiation is configured;
+        # the held variant compiles a separate (RRTMGP-free, much cheaper)
+        # ``model.step`` the first time it is used.
+        RAD_UPDATE_STEPS = max(1, int(cfg.rad_update_steps))
+        _subcycle_rad = RAD_UPDATE_STEPS > 1 and cfg.radiation != "none"
+        physics_fn_norad = (
+            make_physics(phys_cfg, model_type="mpas", dt=DT,
+                         column_mesh=_column_mesh, need_rad=False)
+            if _subcycle_rad else None
+        )
+        if _subcycle_rad:
+            logger.info(
+                "  Radiation sub-cycle: RRTMGP solved every "
+                f"{RAD_UPDATE_STEPS} steps (cadence "
+                f"{DT * RAD_UPDATE_STEPS / 3600.0:.2f} h); held heating reused "
+                "in between"
+            )
 
         # ---- AMIP surface boundary: anchor radiation to the prescribed SST -
         # Without this the MPAS hydrostatic radiation falls back to using the
@@ -3430,56 +4025,64 @@ class ModelDriver:
                 f"{float(jnp.max(_ts0)):.1f}] mean={float(jnp.mean(_ts0)):.1f} K"
             )
 
-        # Wrap with Held-Suarez forcing when enabled
+        # Wrap with Held-Suarez forcing when enabled.  Factored into a helper
+        # so the SAME wrap applies to BOTH radiation sub-cycle variants (the
+        # full ``physics_fn`` and the held ``physics_fn_norad``).
         if cfg.held_suarez_forcing:
             from legoesm.atmosphere.held_suarez import held_suarez_forcing_mpas
-            _rrtmgp_fn = physics_fn
-
-            def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
-                rrtmgp_result = _rrtmgp_fn(
-                    state, mesh, sigma_coord, phys_state=phys_state, forcing=forcing)
-                rrtmgp_tend = rrtmgp_result[0] if isinstance(rrtmgp_result, tuple) else rrtmgp_result
-                phys_state_out = rrtmgp_result[1] if isinstance(rrtmgp_result, tuple) else None
-                hs_tend = held_suarez_forcing_mpas(state, mesh, sigma_coord)
-                from legoesm.core.state import HydrostaticTendencies
-                summed = HydrostaticTendencies(
-                    du_dt=rrtmgp_tend.du_dt.replace(
-                        data=rrtmgp_tend.du_dt.data + hs_tend.du_dt.data),
-                    dT_dt=rrtmgp_tend.dT_dt.replace(
-                        data=rrtmgp_tend.dT_dt.data + hs_tend.dT_dt.data),
-                    dp_s_dt=rrtmgp_tend.dp_s_dt.replace(
-                        data=rrtmgp_tend.dp_s_dt.data + hs_tend.dp_s_dt.data),
-                    dphis_dt=rrtmgp_tend.dphis_dt.replace(
-                        data=rrtmgp_tend.dphis_dt.data + hs_tend.dphis_dt.data),
-                    tracer_tendencies=rrtmgp_tend.tracer_tendencies,
-                )
-                return summed, phys_state_out
-
-            if hasattr(_rrtmgp_fn, 'set_time'):
-                physics_fn.set_time = _rrtmgp_fn.set_time
-            if hasattr(_rrtmgp_fn, 'reset_state'):
-                physics_fn.reset_state = _rrtmgp_fn.reset_state
-            # Forward the surface-T override too (symmetry with set_time /
-            # reset_state).  The SST anchor is already baked into _rrtmgp_fn's
-            # closure before wrapping, but forwarding keeps the hook reachable
-            # on the wrapped fn so a later set_T_sfc_override call still lands.
-            if hasattr(_rrtmgp_fn, 'set_T_sfc_override'):
-                physics_fn.set_T_sfc_override = _rrtmgp_fn.set_T_sfc_override
-            # Carry the forcing-aware marker so the dispatcher/step still
-            # forwards the traced ``forcing`` (T_sfc) through the HS wrapper.
-            if getattr(_rrtmgp_fn, '_wants_forcing', False):
-                physics_fn._wants_forcing = True
-            # Propagate the stateful-carry tag (#413): this combine wrapper
-            # is a plain closure, so refuse_unthreaded_stateful_physics
-            # cannot unwrap it.  Forward the marker from the config (the
-            # source of truth) so the carry contract and the sharded /
-            # spectral refusals still see a stateful physics THROUGH this
-            # wrapper, not a deceptively diagnostic-looking callable.
+            from legoesm.core.state import HydrostaticTendencies
             from legoesm.atmosphere.physics.combined import (
                 physics_config_requires_phys_state,
             )
-            if physics_config_requires_phys_state(phys_cfg):
-                physics_fn._requires_phys_state = True
+
+            def _wrap_hs(_rrtmgp_fn):
+                def _hs_physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
+                    rrtmgp_result = _rrtmgp_fn(
+                        state, mesh, sigma_coord, phys_state=phys_state, forcing=forcing)
+                    rrtmgp_tend = rrtmgp_result[0] if isinstance(rrtmgp_result, tuple) else rrtmgp_result
+                    phys_state_out = rrtmgp_result[1] if isinstance(rrtmgp_result, tuple) else None
+                    hs_tend = held_suarez_forcing_mpas(state, mesh, sigma_coord)
+                    summed = HydrostaticTendencies(
+                        du_dt=rrtmgp_tend.du_dt.replace(
+                            data=rrtmgp_tend.du_dt.data + hs_tend.du_dt.data),
+                        dT_dt=rrtmgp_tend.dT_dt.replace(
+                            data=rrtmgp_tend.dT_dt.data + hs_tend.dT_dt.data),
+                        dp_s_dt=rrtmgp_tend.dp_s_dt.replace(
+                            data=rrtmgp_tend.dp_s_dt.data + hs_tend.dp_s_dt.data),
+                        dphis_dt=rrtmgp_tend.dphis_dt.replace(
+                            data=rrtmgp_tend.dphis_dt.data + hs_tend.dphis_dt.data),
+                        tracer_tendencies=rrtmgp_tend.tracer_tendencies,
+                    )
+                    return summed, phys_state_out
+
+                if hasattr(_rrtmgp_fn, 'set_time'):
+                    _hs_physics_fn.set_time = _rrtmgp_fn.set_time
+                if hasattr(_rrtmgp_fn, 'reset_state'):
+                    _hs_physics_fn.reset_state = _rrtmgp_fn.reset_state
+                # Forward the surface-T override too (symmetry with set_time /
+                # reset_state).  The SST anchor is already baked into
+                # _rrtmgp_fn's closure before wrapping, but forwarding keeps
+                # the hook reachable on the wrapped fn so a later
+                # set_T_sfc_override call still lands.
+                if hasattr(_rrtmgp_fn, 'set_T_sfc_override'):
+                    _hs_physics_fn.set_T_sfc_override = _rrtmgp_fn.set_T_sfc_override
+                # Carry the forcing-aware marker so the dispatcher/step still
+                # forwards the traced ``forcing`` (T_sfc) through the HS wrapper.
+                if getattr(_rrtmgp_fn, '_wants_forcing', False):
+                    _hs_physics_fn._wants_forcing = True
+                # Propagate the stateful-carry tag (#413): this combine wrapper
+                # is a plain closure, so refuse_unthreaded_stateful_physics
+                # cannot unwrap it.  Forward the marker from the config (the
+                # source of truth) so the carry contract and the sharded /
+                # spectral refusals still see a stateful physics THROUGH this
+                # wrapper, not a deceptively diagnostic-looking callable.
+                if physics_config_requires_phys_state(phys_cfg):
+                    _hs_physics_fn._requires_phys_state = True
+                return _hs_physics_fn
+
+            physics_fn = _wrap_hs(physics_fn)
+            if physics_fn_norad is not None:
+                physics_fn_norad = _wrap_hs(physics_fn_norad)
 
         run_status = "COMPLETED"
         logger.info(f"Starting MPAS: {n_steps_total} steps, {N_DAYS} days "
@@ -3529,6 +4132,15 @@ class ModelDriver:
             and (self._ozone_ext_active or self._aerosol_active
                  or self._ghg_active or bool(self._experiment))
         )
+        # Aerosol-CCN specified-Nc fill needs ``forcing["aerosol_od"]`` in the
+        # MICROPHYSICS step regardless of the radiation scheme (the second
+        # indirect / KK2000 ``Nc^-1.79`` effect is independent of how
+        # radiation is solved).  Without this an --aerosol-ccn run on gray
+        # radiation would never thread aerosol_od and the microphysics fill
+        # would raise its (then-misleading) fail-fast.  Requires a real
+        # aerosol source.
+        if cfg.nc_from_aerosol and self._aerosol_active:
+            _ext_forcing = True
         # Operator-split physics carry (prognostic TKE / convection state).
         # ``model.step`` stashes the OUT state on ``self.model._phys_state``;
         # feed it back next step.  SEEDED here (issue #405): starting from
@@ -3672,6 +4284,7 @@ class ModelDriver:
         # ``physics_fn`` and the traced ``forcing`` / ``phys_state`` carry are
         # threaded through unchanged.  Built once outside the loop.
         _mpi_step = None
+        _mpi_step_norad = None
         if self._voronoi_layout is not None:
             from legoesm.parallel.voronoi_mpi import make_voronoi_mpi_step
             _mpi_step = make_voronoi_mpi_step(
@@ -3679,28 +4292,63 @@ class ModelDriver:
                 config=self.model.config, physics_fn=physics_fn,
                 return_phys_state=True,
             )
+            # Radiation sub-cycle: a matching held-radiation MPI step so the
+            # cell-partition path also skips RRTMGP on the held steps.
+            if physics_fn_norad is not None:
+                _mpi_step_norad = make_voronoi_mpi_step(
+                    self.model, self._voronoi_layout, self.model.sigma_coord,
+                    config=self.model.config, physics_fn=physics_fn_norad,
+                    return_phys_state=True,
+                )
             logger.info(
                 "  MPAS MPI step active (rank %d/%d)",
                 self._voronoi_layout.rank, self._voronoi_layout.n_ranks,
             )
 
         _forcing_daily: dict = {}
-        from legoesm.forcing.time_utils import day_to_calendar
+        from legoesm.forcing.time_utils import (
+            daily_forcing_bucket,
+            day_to_calendar,
+        )
         for step in range(n_steps_total):
             if _sst_forcing or _ext_forcing:
                 _force_day = START_DAY + step * DT / 86400.0
-                _fd_int = int(_force_day)
+                # floor, not int() — see daily_forcing_bucket (negative
+                # fractional days land in the wrong bucket under
+                # truncation; day_to_calendar already handles negative
+                # days via modulo).
+                _fd_int = daily_forcing_bucket(_force_day)
                 if _fd_int != _last_force_day:
+                    # Sample the daily fields at the CANONICAL day boundary
+                    # (``float(_fd_int)``), NOT at the first step that
+                    # enters the day: a restart link's first step lands
+                    # mid-day, so sampling at ``_force_day`` gave a chained
+                    # run slightly different seasonal SST/ozone than the
+                    # straight run and broke bit-exact restart continuation
+                    # (FIX_RESTART_TIME; found by the restart validation
+                    # harness — T diverged ~1e-8 over 2 steps).  Runs
+                    # starting at integer days (all production configs) are
+                    # bit-identical to before.
+                    _force_day_canonical = float(_fd_int)
                     _forcing_daily = {}
                     if _sst_forcing:
-                        _forcing_daily["T_sfc"] = _compute_T_sfc(_force_day)
+                        _forcing_daily["T_sfc"] = _compute_T_sfc(
+                            _force_day_canonical)
                     if _ext_forcing:
                         _ext_p_s, _ext_lat = self._owned_p_s_and_lat()
                         _o3, _aer, _ghg = self._precompute_external_forcing(
-                            _force_day, _ext_p_s, jnp.asarray(_ext_lat),
+                            _force_day_canonical, _ext_p_s,
+                            jnp.asarray(_ext_lat),
                         )
                         _forcing_daily["o3_vmr"] = _o3
                         _forcing_daily["aerosol_od"] = _aer
+                        # Volcanic LONGWAVE aerosol (gap #9): set the key
+                        # only when the LW source is active (else omit ⇒
+                        # ``forcing.get("aerosol_lw_od")`` is None ⇒ RRTMGP
+                        # no-op ⇒ byte-identical).
+                        _aer_lw = getattr(self, "_aerosol_lw_od", None)
+                        if self._aerosol_lw_active and _aer_lw is not None:
+                            _forcing_daily["aerosol_lw_od"] = _aer_lw
                         if _ghg is not None:
                             _forcing_daily["ghg_vmr"] = {
                                 k: jnp.asarray(v) for k, v in _ghg.items()
@@ -3716,12 +4364,21 @@ class ModelDriver:
                 _forcing = dict(_forcing_daily)
                 _forcing["day_of_year"] = jnp.asarray(_doy)
                 _forcing["seconds_of_day"] = jnp.asarray(_sod)
+            # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
+            # always) and every RAD_UPDATE_STEPS-th step; reuse the held
+            # heating (PhysicsState.rad_heating) in between.  ``step`` is
+            # job-local, so the first step of every job/restart link re-solves
+            # radiation and repopulates the cache before any held step reads
+            # it.  When subcycling is off, every step is a full step.
+            _use_rad = (not _subcycle_rad) or (step % RAD_UPDATE_STEPS == 0)
             if _mpi_step is not None:
-                self.state, _phys_state = _mpi_step(
+                _mstep = _mpi_step if _use_rad else _mpi_step_norad
+                self.state, _phys_state = _mstep(
                     self.state, DT, _forcing, _phys_state)
             else:
+                _pfn = physics_fn if _use_rad else physics_fn_norad
                 self.state = self.model.step(
-                    self.state, DT, physics_fn=physics_fn, forcing=_forcing,
+                    self.state, DT, physics_fn=_pfn, forcing=_forcing,
                     phys_state=_phys_state)
                 _phys_state = self.model._phys_state
             # Keep the persisted-carry handle fresh for save_checkpoint
@@ -3829,7 +4486,10 @@ class ModelDriver:
                     logger.error(f"{run_status} (caught at checkpoint; not written)")
                     break
                 _ckpt_day = START_DAY + (step + 1) * DT / 86400.0
-                self.save_checkpoint(start_step + step + 1, _ckpt_day)
+                _ckpt = getattr(self, "_checkpoint_callback", None) or self.save_checkpoint
+                _ckpt(start_step + step + 1, _ckpt_day)
+                # Wallclock-aware clean exit for long HPC dependency chains.
+                self._maybe_wallclock_exit(_ckpt, start_step + step + 1, _ckpt_day)
 
         # Final checkpoint so the next chain link resumes from the exact end
         # state.  Skipped (a) on blow-up — state is non-finite — and (b) when
@@ -3926,7 +4586,15 @@ class ModelDriver:
         )
         from legoesm.atmosphere.physics.radiation.gray import gray_radiation
         from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
-        from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
+        from legoesm.atmosphere.physics.radiation.solar import (
+            daily_mean_insolation, earth_orbit,
+        )
+        # Realistic orbit (Berger 1978) for this legacy spectral dry-gray path;
+        # None ⇒ circular orbit (idealized runs unchanged).  gray daily-mean
+        # folds the (a/r)^2 factor into the returned insolation directly.
+        _orbit_params = (earth_orbit()
+                         if getattr(self.config, "orbital_insolation", False)
+                         else None)
         from legoesm.forcing.surface_utils import blend_surface_temperature
 
         cfg = self.config
@@ -3934,7 +4602,37 @@ class ModelDriver:
         N_DAYS = cfg.days
         n_steps_total = int(N_DAYS * 86400.0 / DT)
         DIAG_INTERVAL = int(cfg.output.diag_days * 86400.0 / DT) if cfg.output.diag_days > 0 else n_steps_total
+        # ``checkpoint_days`` → step cadence (FIX_RESTART_TIME iteration
+        # 4: the spectral loop historically wrote NO checkpoints, so a
+        # --spectral AMIP run silently ignored --checkpoint-days and
+        # --restart-from was impossible).  The cadence is on ABSOLUTE
+        # steps — this loop runs ``range(start_step, n_steps_total)`` —
+        # so straight and resumed runs checkpoint at identical steps by
+        # construction.  0 ⇒ no checkpointing (historical behavior).
+        CHECKPOINT_INTERVAL = (
+            int(cfg.output.checkpoint_days * 86400.0 / DT)
+            if cfg.output.checkpoint_days > 0 else 0
+        )
         START_DAY = start_day if start_day is not None else cfg.start_day
+        # Restart-time normalization (FIX_RESTART_TIME, ported from
+        # fix/persist-physics where it is production-validated): these
+        # loops index time as ``START_DAY + ABSOLUTE_step * DT/86400``,
+        # so START_DAY must be the EPOCH day (day at step 0).  Every
+        # production caller (run_amip --restart-from, the coupled
+        # drivers) passes the CHECKPOINT day from load_checkpoint — which
+        # double-counted the already-elapsed time and ran every restarted
+        # link with forcing shifted forward by the checkpoint day
+        # (seasonally wrong SST / calendar; the restarted segment saw
+        # day_of_year 4 instead of 3 in the validation harness).
+        # Normalize ONLY when the caller passes back EXACTLY what this
+        # driver's load_checkpoint returned (the recorded hint) — a
+        # caller passing its own (e.g. epoch) start_day keeps the legacy
+        # epoch semantics verbatim.  The MPAS loop keeps its own
+        # local-step + checkpoint-day contract.
+        if (start_day is not None and start_step > 0
+                and self._loaded_checkpoint_step_day
+                == (start_step, start_day)):
+            START_DAY = start_day - start_step * DT / 86400.0
         a = self.grid.radius
 
         # Rayleigh friction profile
@@ -4004,7 +4702,8 @@ class ModelDriver:
             if forcing_data is not None and "insol" in forcing_data:
                 insol = forcing_data["insol"]
             else:
-                insol = daily_mean_insolation(lat_col, current_day, S_0)
+                insol = daily_mean_insolation(lat_col, current_day, S_0,
+                                              orbit=_orbit_params)
             rad_out = gray_radiation(
                 T=T_col, p_full=p_full_col, p_half=p_half_col,
                 sfc_temperature=T_sfc_col, lat=lat_col,
@@ -4096,6 +4795,8 @@ class ModelDriver:
             # silently re-initialize their carry every step — refuse
             # loudly instead of degrading.
             self._refuse_stateful_physics_unthreaded(cfg)
+            from legoesm.atmosphere.physics.radiation.solar import earth_orbit
+            _orbit_params = earth_orbit() if cfg.orbital_insolation else None
             phys_cfg = PhysicsConfig(
                 radiation=RadiationConfig(
                     scheme=_rad_scheme,
@@ -4106,9 +4807,12 @@ class ModelDriver:
                         include_clouds=(_cloud_scheme != "none"),
                         gpoint_batch_size=getattr(
                             cfg, "rrtmgp_gpoint_batch_size", 0),
+                        gpoint_checkpoint=getattr(
+                            cfg, "rrtmgp_gpoint_checkpoint", True),
                     ),
                     cloud_scheme=_cloud_scheme,
                     diurnal_cycle=cfg.diurnal_cycle,
+                    orbit=_orbit_params,
                     ozone=OzoneProfileConfig(source=cfg.ozone_source),
                 ),
                 convection=ConvectionConfig(scheme=cfg.convection),
@@ -4192,14 +4896,23 @@ class ModelDriver:
                     sic_step = jnp.broadcast_to(sic_step[:, None], shape_2d)
                 _T_sfc_step = blend_surface_temperature(
                     sst_step, sic_step, T_ice).reshape(-1)
-                _fd_int = int(self._current_day)
+                _fd_int = daily_forcing_bucket(self._current_day)
                 if _ext_forcing and _fd_int != _last_ext_day:
                     _f_now = spectral_pe_to_grid(
                         self.state, self.grid, self.sigma)
+                    # Sample at the CANONICAL day boundary, not the first
+                    # step entering the day — a restart link's first step
+                    # lands mid-day (same bug class as the MPAS loop; see
+                    # daily_forcing_bucket / FIX_RESTART_TIME).
                     _o3, _aer, _ghg = self._precompute_external_forcing(
-                        self._current_day, _f_now['p_s'], _lat_2d_loop,
+                        float(_fd_int), _f_now['p_s'], _lat_2d_loop,
                     )
                     _ext_daily = {"o3_vmr": _o3, "aerosol_od": _aer}
+                    # Volcanic LONGWAVE aerosol (gap #9): only when active
+                    # (omitted ⇒ None ⇒ RRTMGP no-op ⇒ byte-identical).
+                    _aer_lw = getattr(self, "_aerosol_lw_od", None)
+                    if self._aerosol_lw_active and _aer_lw is not None:
+                        _ext_daily["aerosol_lw_od"] = _aer_lw
                     if _ghg is not None:
                         _ext_daily["ghg_vmr"] = {
                             k: jnp.asarray(v) for k, v in _ghg.items()
@@ -4215,7 +4928,9 @@ class ModelDriver:
             else:
                 # Legacy dry gray path: traced SST/SIC + daily-mean insol
                 sst_step, sic_step = self.get_sst_sic(self._current_day)
-                insol_step = daily_mean_insolation(_lat_col_loop, self._current_day, S_0)
+                insol_step = daily_mean_insolation(_lat_col_loop,
+                                                   self._current_day, S_0,
+                                                   orbit=_orbit_params)
                 forcing_data = {
                     "day": jnp.asarray(self._current_day),
                     "sst": sst_step,
@@ -4275,6 +4990,42 @@ class ModelDriver:
                     run_status = f"BLOWUP at day {elapsed_day:.1f}"
                     logger.error(run_status)
                     break
+
+            # Periodic checkpoint (FIX_RESTART_TIME iteration 4) —
+            # cadence on ABSOLUTE steps, independent of the diagnostic
+            # interval.  Guard finiteness FIRST (MPAS pattern): the
+            # checkpoint cadence need not align with the diagnostic
+            # cadence, so a NaN can occur between diagnostic steps —
+            # never persist a blown-up state (it would poison every
+            # subsequent chain link).
+            if (CHECKPOINT_INTERVAL > 0
+                    and (step + 1) % CHECKPOINT_INTERVAL == 0):
+                _s = self.state
+
+                def _all_finite_c(arr):
+                    # Complex coefficients: finite iff BOTH parts are.
+                    return (jnp.all(jnp.isfinite(arr.real))
+                            & jnp.all(jnp.isfinite(arr.imag)))
+
+                _finite = (_all_finite_c(_s.vor_hat.data)
+                           & _all_finite_c(_s.div_hat.data)
+                           & _all_finite_c(_s.T_hat.data)
+                           & _all_finite_c(_s.lnps_hat.data))
+                if not bool(_finite):
+                    run_status = (
+                        f"BLOWUP at day {self._current_day - START_DAY:.1f}")
+                    logger.error(
+                        f"{run_status} (caught at checkpoint; not written)")
+                    break
+                self.save_checkpoint(step + 1, self._current_day)
+
+        # Final checkpoint so the next chain link resumes from the exact
+        # end state — skipped on blow-up and when the last step already
+        # hit the periodic cadence (identical file).
+        if (CHECKPOINT_INTERVAL > 0 and run_status == "COMPLETED"
+                and n_steps_total % CHECKPOINT_INTERVAL != 0):
+            _final_day = START_DAY + n_steps_total * DT / 86400.0
+            self.save_checkpoint(n_steps_total, _final_day)
 
         elapsed = time.time() - t_start
         logger.info(f"Spectral run {run_status} in {elapsed:.1f}s")
@@ -4427,6 +5178,130 @@ class ModelDriver:
     # Shared run helpers (used by both compiled and per-step paths)
     # ==================================================================
 
+    def _latlon_spmd_mesh(self):
+        """Build the 1-D ``("lat",)`` device mesh for the single-process
+        multi-device lat-band SPMD run from ``config.n_devices`` (``"auto"`` =
+        all visible devices). Returns ``None`` for a single device (the
+        run_atm_latlon_spmd mesh=None single-device fallback)."""
+        import numpy as _np
+        nd_cfg = self.config.n_devices
+        devs = jax.devices()
+        nd = len(devs) if nd_cfg == "auto" else int(nd_cfg)
+        nd = max(1, min(nd, len(devs)))
+        if nd <= 1:
+            return None
+        n_lat = int(self.grid.n_lat)
+        if n_lat % nd != 0:
+            raise ValueError(
+                f"enable_latlon_spmd: n_lat ({n_lat}) not divisible by "
+                f"n_devices ({nd}) — pick n_devices among the divisors of "
+                f"{n_lat} so every lat band is uniform.")
+        return jax.sharding.Mesh(_np.array(devs[:nd]), axis_names=("lat",))
+
+    def _latlon_spmd_physics_fn(self):
+        """Select the STATELESS physics closure for the lat-band SPMD run, or
+        raise if the configured physics is the stateful unified pipeline (not
+        yet SPMD-routed). Supports Held-Suarez forcing and dynamics-only."""
+        cfg = self.config
+        if cfg.held_suarez_forcing:
+            from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
+            return held_suarez_forcing_latlon
+        active = {
+            name: val for name, val in (
+                ("radiation", cfg.radiation),
+                ("convection", cfg.convection),
+                ("turbulence", cfg.turbulence),
+                ("microphysics", cfg.microphysics),
+                ("gravity_wave_drag", cfg.gravity_wave_drag),
+                ("cloud_scheme", cfg.cloud_scheme),
+            ) if val not in (None, "none")
+        }
+        if not active:
+            return None                     # dynamics-only (dry)
+        raise NotImplementedError(
+            "enable_latlon_spmd supports dynamics-only (all parameterizations "
+            f"'none') or held_suarez_forcing=True; the stateful unified physics "
+            f"{active} is not yet SPMD-routed — its PhysicsState carry needs the "
+            "lat-major reshape-aware shard (see run_atm_latlon_spmd_segment). "
+            "Set those schemes to 'none' or use held_suarez_forcing=True.")
+
+    def _run_compiled_latlon_spmd(self, start_step: int = 0,
+                                  start_day: float | None = None) -> str:
+        """Single-process multi-device lat-band SPMD run for the lat-lon C-grid
+        hydrostatic atm (``config.enable_latlon_spmd``).
+
+        Integrates via ``run_atm_latlon_spmd`` — the Stage-5/7-validated lat-band
+        step + the HydrostaticState<->C-grid bridge — in segments, gathering a
+        cell-centered ``HydrostaticState`` per segment for the coupler callback +
+        a host-side NaN-blowup guard. A dedicated path, NOT the jitted
+        ``compiled_segments`` scan (zero surgical risk to the shared hot loop).
+
+        Supports DYNAMICS-ONLY or stateless Held-Suarez. Stateful physics and the
+        diagnostics/checkpoint writers are follow-ups (rejected loudly); a coupled
+        driver consumes the per-segment state via ``segment_callback``.
+        """
+        import time
+        from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+            run_atm_latlon_spmd)
+
+        cfg = self.config
+        physics_fn = self._latlon_spmd_physics_fn()      # None / HS / raise
+        if cfg.output.checkpoint_days > 0 or cfg.output.diag_days > 0:
+            raise NotImplementedError(
+                "enable_latlon_spmd does not yet support the diagnostics / "
+                "checkpoint writers (set diag_days=0, checkpoint_days=0); the "
+                "gathered root-only writers are a follow-up — use the "
+                "segment_callback hook for I/O.")
+        mesh = self._latlon_spmd_mesh()
+        DT = cfg.dycore.dt
+        n_steps_total = int(cfg.days * 86400.0 / DT)
+        START_DAY = start_day if start_day is not None else cfg.start_day
+        # Restart-time normalization (mirrors _run_spectral / _prepare_run_context):
+        # these loops index time as START_DAY + ABSOLUTE_step * DT/86400, so
+        # START_DAY must be the EPOCH day.  Normalize ONLY when the caller passes
+        # back EXACTLY what this driver's load_checkpoint returned (the recorded
+        # hint), so a caller that already passes an epoch start_day is unchanged.
+        if (start_day is not None and start_step > 0
+                and getattr(self, "_loaded_checkpoint_step_day", None)
+                == (start_step, start_day)):
+            START_DAY = start_day - start_step * DT / 86400.0
+        # One-day output/coupling cadence (no diagnostics writer here yet).
+        seg_len = max(1, int(86400.0 / DT))
+        n_run = n_steps_total - start_step
+        if n_run < 1:
+            return "COMPLETED"
+
+        logger.info(
+            "lat-lon SPMD run: %d steps, %s, physics=%s, mesh=%s",
+            n_run, f"{seg_len}-step segments",
+            ("held_suarez" if cfg.held_suarez_forcing
+             else ("dynamics-only" if physics_fn is None else "custom")),
+            (None if mesh is None else mesh.devices.size))
+
+        # ``step_done`` is the cumulative step count WITHIN this run (1-based from
+        # the run start); ``_prev`` tracks the previous boundary so the coupler
+        # gets the ACTUAL (possibly short final) segment length, and the day uses
+        # the ABSOLUTE step index ``start_step + step_done``.
+        _prev = [0]
+
+        def _on_segment(hs_global, step_done):
+            self.state = hs_global
+            seg_n = step_done - _prev[0]
+            _prev[0] = step_done
+            day = START_DAY + (start_step + step_done) * DT / 86400.0
+            self._current_day = day
+            if self._segment_callback is not None:
+                self._segment_callback(self, day, DT * seg_n)
+
+        t0 = time.time()
+        hs_final, status = run_atm_latlon_spmd(
+            self.model, mesh, self.state, DT, n_run,
+            segment_steps=seg_len, physics_fn=physics_fn,
+            on_segment=_on_segment)
+        self.state = hs_final
+        logger.info("lat-lon SPMD run: %s (%.1fs)", status, time.time() - t0)
+        return status
+
     def _prepare_run_context(self, start_step, start_day, restore_carry=False):
         """Prepare shared state for a run loop.
 
@@ -4440,6 +5315,25 @@ class ModelDriver:
         DT = cfg.dycore.dt
         N_DAYS = cfg.days
         START_DAY = start_day if start_day is not None else cfg.start_day
+        # Restart-time normalization (FIX_RESTART_TIME, ported from
+        # fix/persist-physics where it is production-validated): these
+        # loops index time as ``START_DAY + ABSOLUTE_step * DT/86400``,
+        # so START_DAY must be the EPOCH day (day at step 0).  Every
+        # production caller (run_amip --restart-from, the coupled
+        # drivers) passes the CHECKPOINT day from load_checkpoint — which
+        # double-counted the already-elapsed time and ran every restarted
+        # link with forcing shifted forward by the checkpoint day
+        # (seasonally wrong SST / calendar; the restarted segment saw
+        # day_of_year 4 instead of 3 in the validation harness).
+        # Normalize ONLY when the caller passes back EXACTLY what this
+        # driver's load_checkpoint returned (the recorded hint) — a
+        # caller passing its own (e.g. epoch) start_day keeps the legacy
+        # epoch semantics verbatim.  The MPAS loop keeps its own
+        # local-step + checkpoint-day contract.
+        if (start_day is not None and start_step > 0
+                and self._loaded_checkpoint_step_day
+                == (start_step, start_day)):
+            START_DAY = start_day - start_step * DT / 86400.0
         RAD_UPDATE_STEPS = cfg.rad_update_steps
 
         n_steps_total = int(N_DAYS * 86400 / DT)
@@ -4575,6 +5469,33 @@ class ModelDriver:
         else:
             T_land = None
 
+        # Prognostic soil-water bucket [kg/m^2] — restored from the
+        # checkpoint when available, otherwise seeded at a fraction of the
+        # bucket capacity.  ``None`` (no carry, byte-identical legacy path)
+        # unless the bucket is active.
+        if (self.physics is not None and self.physics.f_land is not None
+                and getattr(self.physics, "land_soil_bucket", False)):
+            _w_init = (self.physics.land_bucket_w_max
+                       * self.physics.land_bucket_w_init_frac)
+            w_land = _aux.get(
+                "w_land",
+                jnp.full_like(self.state.p_s.data.astype(_sd), _w_init),
+            )
+        else:
+            w_land = None
+
+        # Prognostic snow water equivalent [kg/m^2] (snow-albedo feedback) —
+        # restored from the checkpoint when available, else a zero cold start.
+        # ``None`` (byte-identical legacy path) unless the feedback is active.
+        if (self.physics is not None and self.physics.f_land is not None
+                and getattr(self.physics, "snow_albedo_feedback", False)):
+            snow = _aux.get(
+                "snow",
+                jnp.zeros_like(self.state.p_s.data.astype(_sd)),
+            )
+        else:
+            snow = None
+
         # Stateful-physics carries (issue #413): prognostic turbulent
         # energy (tke / qke) and the prognostic-spectral GWD wave-action
         # spectrum, seeded via the canonical ``init_physics_state`` and
@@ -4684,6 +5605,8 @@ class ModelDriver:
             "held_sw_down_toa": held_sw_down_toa,
             "conv_prog": conv_prog,
             "T_land": T_land,
+            "w_land": w_land,
+            "snow": snow,
             "tke": tke,
             "qke": qke,
             "gwd_spectrum": gwd_spectrum,
@@ -4714,6 +5637,133 @@ class ModelDriver:
         self._restore_halo_backend()
 
         return run_status
+
+    # ==================================================================
+    # Differentiable training entry (parameter calibration)
+    # ==================================================================
+
+    def build_training_segment(self, n_steps: int, day: float = 0.0):
+        """Build a DIFFERENTIABLE single-segment forward for parameter calibration.
+
+        Returns ``(run_segment_raw, carry0, forcing)``:
+          * ``run_segment_raw`` — the NON-JIT, non-donating ``.raw`` segment
+            (buffer donation conflicts with reverse-mode AD), composable inside
+            ``eqx.filter_value_and_grad`` / ``jax.grad``.
+          * ``carry0`` — the initial ``SegmentCarry`` (multilayer land seeded in
+            ``setup`` when ``use_multilayer_land``; rides ``carry0.land_ml``).
+          * ``forcing`` — the ``SegmentForcing`` for ``day`` (prescribed SST/SIC,
+            solar, ozone, aerosol).
+
+        The caller runs ``final = run_segment_raw(carry0, n_steps, forcing)``.
+        Trainable LAND params reach the tile by assigning a *traced*
+        ``LandSurfaceParams`` to ``self.physics.land_ml_params`` BEFORE the call
+        inside the loss closure — the segment reads that attribute at call time,
+        so gradients flow back to the params (no hot-loop refactor needed; see
+        ``scripts/run/train_coupled_land_era5.py``).  ``gradient_checkpoint`` is
+        forced on to bound the reverse-mode memory of the unrolled scan.
+
+        Reuses ``_prepare_run_context`` (the same step_unified / forcing / carry
+        seeds as ``_run_compiled``) so the training forward is byte-faithful to a
+        production segment.  Single-rank / single-device only (the carry has no
+        SPMD/MPI partition spec)."""
+        from legoesm.driver.compiled_segments import (
+            pack_carry, build_segment_fn, pack_forcing,
+        )
+        if (self._device_config is not None
+                and getattr(self._device_config, "is_distributed", False)):
+            raise NotImplementedError(
+                "build_training_segment is single-rank / single-device only "
+                "(the SegmentCarry has no partition spec for SPMD/MPI sharding)."
+            )
+
+        ctx = self._prepare_run_context(0, day, restore_carry=False)
+        cfg = self.config
+        DT = ctx["DT"]
+        _sd = ctx["_sd"]
+        _seg_lat = (self._physics_lat if self._physics_lat is not None
+                    else self._grid_lat)
+        _seg_lon = (self._physics_lon if self._physics_lon is not None
+                    else self._grid_lon)
+
+        # Un-jitted step (jit=False): a calibrator feeds a TRACED value into the
+        # pipeline via an attribute the step reads (e.g. land_ml_params); a jitted
+        # step would capture that tracer as a closure constant and leak it across
+        # value_and_grad calls.  The step is inlined into run_segment's lax.scan.
+        step_unified = self.physics.build_step_unified(
+            static_need_rad=True, jit=False)
+
+        run_segment = build_segment_fn(
+            model=self.model,
+            step_unified=step_unified,
+            step_unified_no_rad=None,
+            grid=self.grid,
+            sigma_full=ctx["sigma_full"], dsigma=ctx["dsigma"], dt=DT,
+            rad_update_steps=ctx["RAD_UPDATE_STEPS"],
+            microphysics=cfg.microphysics,
+            fix_moisture=cfg.fix_moisture, fix_mass=cfg.dycore.fix_mass,
+            fric_decay=self._fric_decay, qv_smooth_coeff=self._qv_smooth_coeff,
+            lat=_seg_lat, lon=_seg_lon, start_day=ctx["START_DAY"],
+            gradient_checkpoint=True,   # remat the scan -> bounded backward memory
+            hyperdiffusion_3d_fn=self._hyperdiffusion_3d_fn,
+            tau_equator=cfg.tau_equator, tau_pole=cfg.tau_pole,
+            sbm_tau_c=cfg.sbm_tau_c, sbm_RH_ref=cfg.sbm_RH_ref,
+            C_H=cfg.C_H, C_E=cfg.C_E,
+            albedo_ice=cfg.albedo_ice, albedo_ocean=cfg.albedo_ocean,
+            ghg_vmr_override=ctx["ghg_vmr"],
+            hs_newtonian_relax=self._hs_newtonian_relax,
+            energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
+            pipeline=self.physics,
+        )
+
+        # Conservation-fixer targets MUST come from the IC, not zero: fix_mass is on
+        # by default, so a zero dry-mass target would drain the atmosphere to NaN
+        # (mirrors the targets _run_compiled computes before the segment loop).
+        from legoesm.core.conservation import (
+            compute_global_moisture, global_area_sum,
+        )
+        target_mass = (global_area_sum(self.state.p_s.data, self.grid)
+                       if cfg.dycore.fix_mass else jnp.asarray(0.0))
+        target_moisture = (
+            compute_global_moisture(self.q_v, self.state.p_s.data,
+                                    ctx["dsigma"], self.grid)
+            if cfg.fix_moisture else jnp.asarray(0.0))
+
+        day_of_year, seconds_of_day = day_to_calendar(ctx["START_DAY"])
+        carry0 = pack_carry(
+            self.state, self.q_v, self.q_c, self.q_r,
+            conv_prog=ctx["conv_prog"],
+            held_dT_rad=ctx["held_dT_rad"],
+            held_sw_net_sfc=ctx["held_sw_net_sfc"],
+            held_lw_net_sfc=ctx["held_lw_net_sfc"],
+            held_sw_up_toa=ctx["held_sw_up_toa"],
+            held_lw_up_toa=ctx["held_lw_up_toa"],
+            held_sw_down_toa=ctx["held_sw_down_toa"],
+            step_index=0,
+            target_moisture=target_moisture, target_mass=target_mass,
+            precip_accum=jnp.zeros(ctx["shape_2d"], dtype=_sd),
+            T_land=ctx["T_land"], w_land=ctx["w_land"],
+            land_ml=self._land_ml_state,
+            tke=ctx["tke"], qke=ctx["qke"], gwd_spectrum=ctx["gwd_spectrum"],
+            **(
+                {k: self.tracers.get(k)
+                 for k in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")}
+                if isinstance(self.tracers, dict) else {}
+            ),
+        )
+
+        if self.get_sst_sic is not None:
+            sst, sic = self.get_sst_sic(day)
+        else:
+            sst = jnp.full(ctx["shape_2d"], 290.0, dtype=_sd)
+            sic = jnp.zeros(ctx["shape_2d"], dtype=_sd)
+        forcing = pack_forcing(
+            sst=jnp.asarray(sst), sic=jnp.asarray(sic),
+            day_of_year=day_of_year, seconds_of_day=seconds_of_day,
+            solar_weights=ctx["solar_weights"], s_0=ctx["current_s_0"],
+            o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
+            ghg_vmr=ctx["ghg_vmr"],
+        )
+        return run_segment.raw, carry0, forcing
 
     # ==================================================================
     # Compiled segment execution path
@@ -4762,6 +5812,8 @@ class ModelDriver:
         held_sw_down_toa = ctx["held_sw_down_toa"]
         conv_prog = ctx["conv_prog"]
         T_land = ctx["T_land"]
+        w_land = ctx["w_land"]
+        snow = ctx.get("snow")
         phys_tke = ctx["tke"]
         phys_qke = ctx["qke"]
         phys_gwd_spectrum = ctx["gwd_spectrum"]
@@ -4779,7 +5831,7 @@ class ModelDriver:
         # re-sampled ONLY at segment boundaries, so this knob is the
         # forcing cadence for cadence-less runs — warn when the dataset
         # is time-varying so the throttle is an explicit choice.
-        _fb_days = getattr(cfg, "forcing_update_days", 1.0)
+        _fb_days = cfg.forcing_update_days
         segment_length = compute_segment_length(
             diag_interval, checkpoint_interval, RAD_UPDATE_STEPS,
             fallback_interval=int(_fb_days * 86400 / DT),
@@ -4913,6 +5965,13 @@ class ModelDriver:
             owned_face_ids=self._owned_face_ids,
             hs_newtonian_relax=self._hs_newtonian_relax,
             device_config=_seg_device_config,
+            energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
+            # Un-fused-radiation host path (ExperimentConfig.unfused_radiation,
+            # default OFF): the pipeline lets build_segment_fn expose
+            # run_norad_scan / run_rad so rrtmgp and the no-rad scan compile
+            # as two separate executables.  Passing it is harmless when the
+            # flag is off (the attributes are simply never invoked).
+            pipeline=self.physics,
         )
 
         logger.info(
@@ -4923,6 +5982,23 @@ class ModelDriver:
         current_step = start_step
         t_jit = 0.0
         t_start = time.time()
+
+        # Multilayer (Richards) land is validated single-device / single-rank only:
+        # the prognostic land state rides the carry with no partition spec, so a
+        # device-mesh shard_pytree (SPMD) or multi-rank MPI scatter would mis-handle
+        # it.  Fail LOUDLY rather than silently degrade to the slab or shard a state
+        # that has no sharding contract (CLAUDE.md: no silent degrade under SPMD/MPI;
+        # mirrors the increment-1 single-rank scope of SegmentCarry.land_ml).
+        if (self._land_ml_state is not None
+                and self._device_config is not None
+                and getattr(self._device_config, "is_distributed", False)):
+            raise NotImplementedError(
+                "use_multilayer_land is not yet supported under distributed "
+                "execution (SPMD device mesh or multi-rank MPI): the multilayer "
+                "land state has no partition spec and is validated single-rank "
+                "only.  Run on a single device / single MPI rank, or use slab "
+                "land (use_multilayer_land=False) for distributed runs."
+            )
 
         # while (not ``range(n_segments)``): the adaptive-dt path halves
         # DT and recomputes ``n_steps_total``/``segment_length`` mid-run
@@ -4937,8 +6013,35 @@ class ModelDriver:
             day_of_year, seconds_of_day = day_to_calendar(day)
             sst, sic = self.get_sst_sic(day)
 
-            # Update external forcing at segment boundary (if radiation-aligned)
-            if RAD_UPDATE_STEPS > 1 and seg_idx > 0:
+            # Re-sample time-varying external forcing at every segment
+            # boundary so transient CMIP6 runs (historical / SSP: GHG, ozone,
+            # aerosol, solar all vary year-to-year — and ozone/aerosol vary
+            # seasonally within a year) track the calendar.
+            #
+            # Previously gated behind ``RAD_UPDATE_STEPS > 1`` — but that knob
+            # is the intra-run radiation sub-step CADENCE, orthogonal to forcing
+            # transience.  With the default ``rad_update_steps=1`` the branch was
+            # dead, so the compiled path froze ALL external forcing at the
+            # START_DAY precompute (~line 4662): a 1850-2014 historical run saw
+            # 1850 CO2 (and START_DAY's ozone season) for all 165 years.
+            # ``_precompute_external_forcing`` is host-side numpy interpolation
+            # (cheap, not in the JIT); the SegmentForcing leaves
+            # (s_0/ghg_vmr/o3_vmr/aerosol_od/solar_weights) are traced arrays of
+            # FIXED shape, so re-sampling changes only leaf *values* — no retrace.
+            # Byte-identical for truly-constant forcing (gray radiation, or
+            # constant GHG with no climatological ozone/aerosol); for runs with
+            # transient or climatological forcing it (correctly) now follows the
+            # calendar.  Matches the per-step path (_run_mpas / _run_spectral,
+            # ~line 5447) which already re-samples every radiation step.
+            #
+            # ``start_step > 0`` ALSO refreshes segment 0 of a RESUMED run
+            # (FIX_RESTART_TIME codex finding): the prepare-context values were
+            # sampled at the epoch START_DAY, but the straight run refreshed this
+            # (absolute) segment at its end day — without the refresh a restarted
+            # AMIP/CMIP run's first segment uses epoch-day ozone/aerosol/GHG/solar
+            # and diverges from the uninterrupted run.  Fresh runs (start_step ==
+            # 0) keep the START_DAY precompute for segment 0 unchanged.
+            if seg_idx > 0 or start_step > 0:
                 solar_now = get_solar_forcing_at_time(self._solar_config, day)
                 current_s_0 = float(solar_now["tsi"])
                 if self._use_solar_spectral:
@@ -4955,16 +6058,27 @@ class ModelDriver:
                 _sfc_albedo_ovr, _sfc_T_ovr, _sfc_emis_ovr = \
                     self.get_sfc_override(day)
 
+            # Coupler-provided SHARED surface SH/LH fluxes for this segment
+            # (None unless a coupled driver wired the shared-flux feedback).
+            # When present the atmosphere consumes these instead of its own
+            # bulk fluxes so the air-sea heat+water budget closes.
+            _sfc_shflx_ovr, _sfc_lhflx_ovr = (None, None)
+            if self.get_sfc_flux_override is not None:
+                _sfc_shflx_ovr, _sfc_lhflx_ovr = self.get_sfc_flux_override(day)
+
             # Pack per-segment forcing into a SegmentForcing pytree.
             forcing = pack_forcing(
                 sst=sst, sic=sic,
                 day_of_year=day_of_year, seconds_of_day=seconds_of_day,
                 solar_weights=solar_weights, s_0=current_s_0,
                 o3_vmr=o3_vmr, aerosol_od=aerosol_od,
+                aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
                 ghg_vmr=ghg_vmr,
                 sfc_albedo_override=_sfc_albedo_ovr,
                 sfc_T_override=_sfc_T_ovr,
                 sfc_emissivity_override=_sfc_emis_ovr,
+                sfc_shflx_override=_sfc_shflx_ovr,
+                sfc_lhflx_override=_sfc_lhflx_ovr,
             )
 
             # Pack state into carry
@@ -4981,7 +6095,22 @@ class ModelDriver:
                 target_moisture=_target_moisture,
                 target_mass=_target_mass,
                 precip_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                # Persist the lagged convective-cloud precip ACROSS segment
+                # boundaries (radiation runs before convection; without this the
+                # lag would reset to zeros at step 0 of every segment).  Only the
+                # single-member path is threaded (ensemble carries an extra axis
+                # pack_carry doesn't expect); ensemble runs are not the realism
+                # target, so they reset per segment.
+                conv_precip_prev=(getattr(self, "_conv_precip_prev", None)
+                                  if self._ensemble_size == 1 else None),
                 T_land=T_land,
+                # Prognostic multilayer land state (None ⇒ slab path, byte-identical
+                # carry).  Seeded in _setup_multilayer_land; the segment advances it
+                # and the readback below persists it across segment boundaries.
+                land_ml=(self._land_ml_state
+                         if self._ensemble_size == 1 else None),
+                w_land=w_land,
+                snow=snow,
                 tke=phys_tke,
                 qke=phys_qke,
                 gwd_spectrum=phys_gwd_spectrum,
@@ -5008,8 +6137,43 @@ class ModelDriver:
             # Execute compiled segment (vmap over ensemble if needed)
             if self._ensemble_size > 1:
                 carry = jax.vmap(run_segment, in_axes=(0, None, None))(carry, seg_steps, forcing)
+            elif (cfg.unfused_radiation
+                    and RAD_UPDATE_STEPS > 1
+                    and seg_steps % RAD_UPDATE_STEPS == 0
+                    and self._ensemble_size == 1
+                    and getattr(run_segment, "run_norad_scan", None) is not None
+                    and getattr(run_segment, "run_rad", None) is not None):
+                # Un-fused radiation (issue: ~3h XLA compile).  Lift the
+                # radiation-cycle loop from XLA to the HOST so rrtmgp and the
+                # no-rad dynamics+physics scan are TWO SEPARATE executables.
+                # Cadence: each outer cycle advances RAD_UPDATE_STEPS steps
+                # with the CURRENT held_*, THEN recomputes fresh held_*/T_land
+                # from the post-cycle state for the NEXT cycle.  Same absolute
+                # radiation update boundary as the fused subcycle (fresh
+                # radiation refreshed once per RAD_UPDATE_STEPS), but NOT
+                # step-for-step identical: the fused ``_run_subcycled`` applies
+                # the fresh radiation IN the last step of each cycle, whereas
+                # here every step of the cycle uses held radiation and the
+                # refresh lands at the cycle boundary.  This is the intended
+                # one-step phase shift (numerically equivalent to ~1e-6; same
+                # kernels, different compile boundary).
+                n_outer = seg_steps // RAD_UPDATE_STEPS
+                for _ic in range(n_outer):
+                    # advance RAD_UPDATE_STEPS no-rad steps w/ current held_*
+                    carry = run_segment.run_norad_scan(carry, forcing)
+                    # recompute fresh held_*/T_land from post-cycle state
+                    carry = run_segment.run_rad(carry, forcing)
             else:
-                carry = run_segment(carry, seg_steps, forcing)
+                carry = run_segment(carry, seg_steps, forcing)           # legacy fused path (byte-identical)
+
+            # Carry the lagged convective-cloud precip into the next segment
+            # (single-member only — see pack_carry above).
+            if self._ensemble_size == 1:
+                self._conv_precip_prev = carry.conv_precip_prev
+                # Persist the evolved multilayer land state across segments (the
+                # prognostic soil column — no-op when slab/None).
+                if self._land_ml_state is not None:
+                    self._land_ml_state = carry.land_ml
 
             if seg_idx == 0:
                 jax.block_until_ready(carry.u)
@@ -5044,6 +6208,52 @@ class ModelDriver:
             (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
              held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = held_tuple
 
+            if os.environ.get("LEGOESM_DEBUG_HELD"):
+                import numpy as _np
+                _h = lambda a: (round(float(_np.mean(_np.asarray(a))), 1),
+                                round(float(_np.min(_np.asarray(a))), 1),
+                                round(float(_np.max(_np.asarray(a))), 1))
+                logger.info(
+                    "DEBUG held@day%.1f (mean,min,max): sw_down_toa=%s "
+                    "lw_up_toa=%s", day, _h(held_sw_down_toa),
+                    _h(held_lw_up_toa))
+
+            # BUG-B state dump: when the held TOA SW goes super-physical, save the
+            # full radiation-input state so it can be replayed offline through
+            # compute_radiation_core (which produced this garbage) and bisected.
+            _dump_path = os.environ.get("LEGOESM_DUMP_RAD")
+            if _dump_path and not getattr(self, "_rad_dumped", False):
+                import numpy as _np
+                if float(_np.max(_np.asarray(held_sw_down_toa))) > 600.0:
+                    self._rad_dumped = True
+                    _tr = self.tracers if isinstance(self.tracers, dict) else {}
+                    _g = lambda x: (None if x is None else _np.asarray(x))
+                    _np.savez_compressed(
+                        _dump_path,
+                        T=_g(self.state.T.data), p_s=_g(self.state.p_s.data),
+                        u=_g(self.state.u.data), v=_g(self.state.v.data),
+                        q_v=_g(self.q_v), q_c=_g(self.q_c), q_r=_g(self.q_r),
+                        q_i=_g(_tr.get("q_i")), N_c=_g(_tr.get("N_c")),
+                        N_i=_g(_tr.get("N_i")),
+                        sst=_g(sst), sic=_g(sic),
+                        lat=_g(_seg_lat), lon=_g(_seg_lon),
+                        day_of_year=_np.asarray(forcing.day_of_year),
+                        seconds_of_day=_np.asarray(forcing.seconds_of_day),
+                        s_0=_np.asarray(forcing.s_0),
+                        solar_weights=_g(forcing.solar_weights),
+                        o3_vmr=_g(forcing.o3_vmr),
+                        aerosol_od=_g(forcing.aerosol_od),
+                        T_land=_g(getattr(carry, "T_land", None)),
+                        held_sw_down_toa=_g(held_sw_down_toa),
+                        held_sw_up_toa=_g(held_sw_up_toa),
+                        held_lw_up_toa=_g(held_lw_up_toa),
+                        day=_np.asarray(day),
+                    )
+                    logger.info("BUG-B: dumped corrupt-radiation state to %s "
+                                "at day %.1f (sw_down_toa max=%.1f)",
+                                _dump_path, day,
+                                float(_np.max(_np.asarray(held_sw_down_toa))))
+
             # Keep carry auxiliary fields for checkpoint persistence and coupling
             self._carry_aux = {
                 "held_dT_rad": held_dT_rad,
@@ -5064,6 +6274,13 @@ class ModelDriver:
             if carry.T_land is not None:
                 T_land = carry.T_land
                 self._carry_aux["T_land"] = T_land
+            # Soil-water bucket: carry to the next segment + checkpoint.
+            if carry.w_land is not None:
+                w_land = carry.w_land
+                self._carry_aux["w_land"] = w_land
+            if carry.snow is not None:
+                snow = carry.snow
+                self._carry_aux["snow"] = snow
             # Stateful-physics carries (issue #413): thread the FULL
             # (per-member under ensembles) fields to the next segment
             # and persist them via carry_aux (mirrors T_land).
@@ -5129,6 +6346,7 @@ class ModelDriver:
                     q_v=self.q_v,
                     q_c=self.q_c,
                     q_r=self.q_r,
+                    q_i=self.q_i,
                     sst=sst,
                     sic=sic,
                     precip_total=seg_precip_rate,
@@ -5141,6 +6359,8 @@ class ModelDriver:
                     lat_deg_grid=lat_deg_grid,
                     shflx=seg_shflx_rate,
                     lhflx=seg_lhflx_rate,
+                    q_s=self.tracers.get("q_s") if isinstance(self.tracers, dict) else None,
+                    q_g=self.tracers.get("q_g") if isinstance(self.tracers, dict) else None,
                 )
 
                 # CFL computed host-side from final segment state (not in hot loop)
@@ -5199,7 +6419,7 @@ class ModelDriver:
                     segment_length = compute_segment_length(
                         diag_interval, checkpoint_interval, RAD_UPDATE_STEPS,
                         fallback_interval=int(
-                            getattr(cfg, "forcing_update_days", 1.0)
+                            cfg.forcing_update_days
                             * 86400 / DT),
                     )
                     run_segment = build_segment_fn(
@@ -5221,11 +6441,18 @@ class ModelDriver:
                         owned_face_ids=self._owned_face_ids,
                         hs_newtonian_relax=self._hs_newtonian_relax,
                         device_config=_seg_device_config,
+                        energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
+                        pipeline=self.physics,
                     )
 
-            # Checkpoint
+            # Checkpoint (a coupled run routes this through its own
+            # save_checkpoint so the coupled state is written too).
+            _ckpt = getattr(self, "_checkpoint_callback", None) or self.save_checkpoint
             if checkpoint_interval > 0 and current_step % checkpoint_interval == 0:
-                self.save_checkpoint(current_step, day)
+                _ckpt(current_step, day)
+
+            # Wallclock-aware clean exit for long HPC dependency chains.
+            self._maybe_wallclock_exit(_ckpt, current_step, day)
 
             # Periodic diagnostic flush (every ~365 days) to cap memory — rank 0 only
             if (elapsed_day > 0 and int(elapsed_day) % 365 == 0
@@ -5311,6 +6538,9 @@ class ModelDriver:
         # T_sfc consistently with the compiled-segment path.  ``None``
         # when the land tile is inactive.
         T_land = ctx["T_land"]
+        # Soil-water bucket (None unless active): threaded like T_land.
+        w_land = ctx["w_land"]
+        snow = ctx.get("snow")
         # Stateful-physics carries (issue #413), mirroring the compiled
         # path: None for diagnostic schemes (zero overhead).
         phys_tke = ctx["tke"]
@@ -5349,15 +6579,58 @@ class ModelDriver:
         day_of_year, seconds_of_day = day_to_calendar(day)
         sst, sic = self.get_sst_sic(day)
 
+        # Warmup radiation cadence (FIX_RESTART_TIME iteration-2 codex
+        # finding, high): the warmup executes step ``start_step``, so a
+        # RESUMED run must use the SAME need_rad predicate as the main
+        # loop — the straight run's step ``start_step`` was held-only
+        # unless (start_step+1) hit the radiation cadence, and an
+        # unconditional radiation solve here both overwrites the
+        # checkpoint-restored held tendencies and samples forcing at the
+        # wrong time.  Fresh starts (start_step == 0) and resumes
+        # without restored held tendencies keep the historical
+        # always-radiate warmup (zero-initialized held fields would be
+        # worse than a recompute).
+        warmup_need_rad = (
+            start_step == 0
+            or RAD_UPDATE_STEPS <= 1
+            or (start_step + 1) % RAD_UPDATE_STEPS == 0
+            or "held_dT_rad" not in self._carry_aux
+        )
+        if warmup_need_rad and start_step > 0:
+            # Mirror the straight run's refresh at the top of this
+            # step's body: solar + external forcing sampled at
+            # day(start_step+1), not the prepare-context epoch values.
+            solar_now = get_solar_forcing_at_time(self._solar_config, day)
+            current_s_0 = float(solar_now["tsi"])
+            if self._use_solar_spectral:
+                solar_weights = jnp.asarray(
+                    solar_now["solar_fraction_by_gpt"])
+            _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
+            o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
+                day, _phys_p_s, _phys_lat,
+            )
+        _warmup_step_fn = (
+            step_unified
+            if warmup_need_rad or step_unified_no_rad is None
+            else step_unified_no_rad
+        )
+
         self.state = self.model.step_with_physics(self.state, DT)
 
         # Double-moment hydrometeor inputs (None unless the registry carries
         # them) so coupled radiation/microphysics see ice + droplet number.
         _dm_step_in = self._double_moment_step_inputs()
+        # step_unified returns a 4-tuple (issue: PR #650 added the 4th
+        # ``land_ml`` multilayer-land state). Thread it exactly as the
+        # compiled-segment path does (single-member only; ensemble carries
+        # an extra axis the tile doesn't expect) so the per-step driver
+        # advances the prognostic soil column instead of crashing on the
+        # arity mismatch.
         phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), T_land = \
-            step_unified(
-                jnp.bool_(True),
+                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), \
+            T_land, land_ml = \
+            _warmup_step_fn(
+                jnp.bool_(warmup_need_rad),
                 self.state.T.data, self.state.p_s.data,
                 self.q_v, self.q_c, self.q_r, conv_prog,
                 self.state.u.data, self.state.v.data,
@@ -5368,10 +6641,17 @@ class ModelDriver:
                 held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ghg_vmr_override=ghg_vmr,
-                T_land=T_land, **_dm_step_in,
+                aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
+                land_ml=(self._land_ml_state
+                         if self._ensemble_size == 1 else None),
+                T_land=T_land, w_land=w_land, snow=snow, **_dm_step_in,
                 **_phys_carry_step_inputs(),
             )
         conv_prog = phys_out.conv_prog
+        if phys_out.w_land is not None:
+            w_land = phys_out.w_land
+        if phys_out.snow is not None:
+            snow = phys_out.snow
         # Stash the FULL restart-relevant carry set at the warmup step
         # (codex rounds 4/6/8): a one-step run never enters the main
         # loop, and _finalize_run would otherwise checkpoint stale or
@@ -5388,6 +6668,14 @@ class ModelDriver:
         })
         if T_land is not None:
             self._carry_aux["T_land"] = T_land
+        if w_land is not None:
+            self._carry_aux["w_land"] = w_land
+        if snow is not None:
+            self._carry_aux["snow"] = snow
+        # Persist the evolved multilayer land state across the run (matches
+        # the compiled-segment writeback; no-op for slab/None or ensemble).
+        if self._ensemble_size == 1 and self._land_ml_state is not None:
+            self._land_ml_state = land_ml
         if phys_out.tke is not None:
             phys_tke = phys_out.tke
             self._carry_aux["tke"] = phys_tke
@@ -5403,7 +6691,14 @@ class ModelDriver:
         if self._hs_newtonian_relax is not None:
             new_T = new_T + DT * self._hs_newtonian_relax(
                 self.state.T.data, self.state.p_s.data, self._grid_lat)
-        self.q_v = jnp.maximum(self.q_v + DT * phys_out.dq_v_dt, 0.0)
+        # Issue #323: keep the q_v floor moist-static-energy neutral when the
+        # opt-in flag is set (mirror the compiled-segment path so the flag is
+        # not a silent no-op in the per-step driver).
+        _qv_raw = self.q_v + DT * phys_out.dq_v_dt
+        if self.config.energy_consistent_moisture_clip:
+            self.q_v, new_T = energy_consistent_moisture_floor(_qv_raw, new_T)
+        else:
+            self.q_v = jnp.maximum(_qv_raw, 0.0)
         self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
         self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
         self._apply_double_moment_tendencies(phys_out, DT)
@@ -5474,8 +6769,11 @@ class ModelDriver:
                 else step_unified_no_rad
             )
             _dm_step_in = self._double_moment_step_inputs()
+            # 4-tuple return (PR #650 land_ml); thread the multilayer-land
+            # state like the compiled-segment path (single-member only).
             phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), T_land = \
+                        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), \
+                T_land, land_ml = \
                 _step_fn(
                     need_rad_jax,
                     self.state.T.data, self.state.p_s.data,
@@ -5488,10 +6786,17 @@ class ModelDriver:
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     ghg_vmr_override=ghg_vmr,
-                    T_land=T_land, **_dm_step_in,
+                    aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
+                    land_ml=(self._land_ml_state
+                             if self._ensemble_size == 1 else None),
+                    T_land=T_land, w_land=w_land, snow=snow, **_dm_step_in,
                     **_phys_carry_step_inputs(),
                 )
             conv_prog = phys_out.conv_prog
+            if phys_out.w_land is not None:
+                w_land = phys_out.w_land
+            if phys_out.snow is not None:
+                snow = phys_out.snow
             # Persist the full restart-relevant set per step (codex
             # rounds 6/8): checkpoints can fire on any step, so the
             # held-radiation fields and every carry must be current —
@@ -5507,6 +6812,14 @@ class ModelDriver:
             })
             if T_land is not None:
                 self._carry_aux["T_land"] = T_land
+            if w_land is not None:
+                self._carry_aux["w_land"] = w_land
+            if snow is not None:
+                self._carry_aux["snow"] = snow
+            # Advance the prognostic multilayer land state per step (matches
+            # the compiled-segment writeback; no-op for slab/None or ensemble).
+            if self._ensemble_size == 1 and self._land_ml_state is not None:
+                self._land_ml_state = land_ml
             # Stateful-physics carries (issue #413): feed the updated
             # values back next step + persist for checkpoints.
             if phys_out.tke is not None:
@@ -5527,7 +6840,12 @@ class ModelDriver:
                 new_T = new_T + DT * self._hs_newtonian_relax(
                     self.state.T.data, self.state.p_s.data, self._grid_lat)
 
-            self.q_v = jnp.maximum(self.q_v + DT * phys_out.dq_v_dt, 0.0)
+            # Issue #323: energy-consistent q_v floor (see warmup path).
+            _qv_raw = self.q_v + DT * phys_out.dq_v_dt
+            if self.config.energy_consistent_moisture_clip:
+                self.q_v, new_T = energy_consistent_moisture_floor(_qv_raw, new_T)
+            else:
+                self.q_v = jnp.maximum(_qv_raw, 0.0)
             self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
             self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
 
@@ -5590,6 +6908,7 @@ class ModelDriver:
                     q_v=self.q_v,
                     q_c=self.q_c,
                     q_r=self.q_r,
+                    q_i=self.q_i,
                     sst=sst,
                     sic=sic,
                     precip_total=phys_out.precip + precip_ls,
@@ -5600,6 +6919,8 @@ class ModelDriver:
                     sw_down_toa=phys_out.sw_down_toa,
                     T_ice=cfg.T_ice,
                     lat_deg_grid=lat_deg_grid,
+                    q_s=self.tracers.get("q_s") if isinstance(self.tracers, dict) else None,
+                    q_g=self.tracers.get("q_g") if isinstance(self.tracers, dict) else None,
                 )
 
                 logger.info(f"  Day {elapsed_day:6.0f}: T={diag_info['mean_T']:.1f}K, "

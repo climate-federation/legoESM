@@ -318,7 +318,7 @@ class TestJarvis(unittest.TestCase):
         # be ≈ 1 each, but compute them exactly via the same formulas
         # used in jarvis_gs to keep the comparison bit-faithful.
         T_C = T - constants.T_freeze
-        dT_norm = (T_C - cfg.T_opt_jarvis) / cfg.T_range_jarvis
+        dT_norm = (T_C - cfg.T_opt_jarvis_C) / cfg.T_range_jarvis_C
         f_T = max(1.0 - dT_norm ** 2, 0.0)
         PAR_FRAC = 0.48  # _PAR_FRAC in stomata.py
         PAR = PAR_FRAC * 2000.0

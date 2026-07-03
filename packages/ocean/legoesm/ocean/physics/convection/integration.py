@@ -23,6 +23,7 @@ def make_convection_physics(
     config: OceanConvectionConfig,
     apply_diffusion: bool = True,
     emit_momentum_viscosity: bool = True,
+    eos_fn: Callable | None = None,
 ) -> Callable:
     """Create an ocean convection physics function.
 
@@ -58,16 +59,18 @@ def make_convection_physics(
         return _make_enhanced_diffusion(
             config, apply_diffusion=apply_diffusion,
             emit_momentum_viscosity=emit_momentum_viscosity,
+            eos_fn=eos_fn,
         )
     elif scheme == "plume":
-        return _make_plume(config)
+        return _make_plume(config, eos_fn=eos_fn)
     else:
         raise ValueError(f"Unknown ocean convection scheme: {scheme!r}")
 
 
 def _make_enhanced_diffusion(config: OceanConvectionConfig,
                              apply_diffusion: bool = True,
-                             emit_momentum_viscosity: bool = True) -> Callable:
+                             emit_momentum_viscosity: bool = True,
+                             eos_fn: Callable | None = None) -> Callable:
     cfg = config.enhanced_diffusion
 
     # Fail closed at construction: suppression (emit_momentum_viscosity=False)
@@ -89,7 +92,9 @@ def _make_enhanced_diffusion(config: OceanConvectionConfig,
                    z_coord: OceanZStarCoordinate,
                    surface_forcing=None) -> OceanTendencies:
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
-        rho = _compute_rho(state, z_coord, J)
+        # #518: use the threaded recipe EOS (None → wright, byte-identical)
+        # so the convective trigger/K profiles match the dynamics EOS.
+        rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
         # Suppress momentum mixing (no u/v) when KPP owns interior momentum
         # convection — avoids the A_v double-count flagged in the combiner
         # fast path.  Tracers (K_v) are unaffected.
@@ -149,16 +154,20 @@ def _make_enhanced_diffusion(config: OceanConvectionConfig,
     return physics_fn
 
 
-def _make_plume(config: OceanConvectionConfig) -> Callable:
+def _make_plume(config: OceanConvectionConfig, eos_fn: Callable | None = None) -> Callable:
     cfg = config.plume
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
                    z_coord: OceanZStarCoordinate,
                    surface_forcing=None) -> OceanTendencies:
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
-        rho, p_hydro = _compute_rho_and_pressure(state, z_coord, J)
+        # Ambient rho and plume-parcel rho MUST share one EOS (#518): pass
+        # the SAME eos_fn to both so the buoyancy comparison is consistent.
+        # eos_fn=None → wright in both, byte-identical to the legacy path.
+        rho, p_hydro = _compute_rho_and_pressure(state, z_coord, J, eos_fn=eos_fn)
         out = plume_convection(
             state.T.data, state.S.data, rho, p_hydro, z_coord, J, cfg,
+            eos_fn=eos_fn,
         )
         z3 = jnp.zeros_like(state.u.data)
         return wrap_ocean_tendencies(z3, z3, out.dT_dt, out.dS_dt, state)

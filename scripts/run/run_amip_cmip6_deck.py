@@ -36,7 +36,7 @@ To target a specific grid type::
     --grid-type {cubed_sphere,gaussian,latlon,voronoi}
 
 The script always passes ``--monthly-means`` so post-run validation
-tools (``scripts/validate_amip.py``) can read zonal-mean diagnostics.
+tools (``scripts/validate/validate_amip_run.py``) can read zonal-mean diagnostics.
 """
 
 from __future__ import annotations
@@ -183,10 +183,19 @@ def main(argv: list[str] | None = None) -> int:
     # Physics — defaults match a balanced CMIP6 AMIP stack
     parser.add_argument("--radiation", type=str, default="rrtmg")
     parser.add_argument("--rad-update-steps", type=int, default=6)
+    # Clear-sky diagnostic: a SECOND clear-sky RRTMG pass per radiation call
+    # (≈2× the radiation cost) needed for lwcre/swcre in ClimateEval Tier 2, but
+    # pure overhead for a run that does not score CRE.  ON by default (the
+    # production deck reports CRE); ``--no-clear-sky-diag`` drops the second pass
+    # for cheaper spin-up / perf runs (issue #434 cheap lever).
+    parser.add_argument("--clear-sky-diag", dest="clear_sky_diag",
+                        action="store_true", default=True)
+    parser.add_argument("--no-clear-sky-diag", dest="clear_sky_diag",
+                        action="store_false")
     parser.add_argument("--clouds", type=str, default="sundqvist")
     # Morrison double-moment (M2005/MG) is the production default: the
     # most faithful + best-validated microphysics in the repo (SAM-oracle
-    # validation in docs/md_files/CRM_faithful_SAM.md; RCEMIP-viable per
+    # validation in docs/dev-notes/CRM_faithful_SAM.md; RCEMIP-viable per
     # the microphysics-RCE campaign) with number-aware r_eff and the
     # aerosol-CCN coupling.  Sundqvist (the previous default) remains
     # the fast diagnostic fallback (--microphysics sundqvist).  Kessler
@@ -416,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:
         "--start-year", str(args.start_year),
         "--experiment", "amip",
         # Diagnostics
-        "--clear-sky-diag",
+        *(["--clear-sky-diag"] if args.clear_sky_diag else []),
     ]
     # Initial condition.  ``era5`` (the production default) gives
     # realistic winds + Earth-like moisture and avoids the uniform-IC

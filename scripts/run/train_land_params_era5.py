@@ -1,0 +1,251 @@
+"""Differentiable calibration of land PFT + snow/ice parameters against ERA5.
+
+End-to-end gradients (jax.grad) through a multi-year ERA5-forced slab-land run tune
+GLOBAL, physically-bounded land parameters to minimise the land surface-temperature
+AND albedo bias vs ERA5 (skin temperature + forecast albedo). Trainable, per-PFT
+where it makes sense:
+
+    pft_alb (17)   per-PFT snow-free albedo            [0.05, 0.45]
+    pft_emis (17)  per-PFT emissivity                  [0.90, 0.995]
+    glac_alb       glacier/ice-sheet ice albedo        [0.40, 0.75]
+    snow_max       max snow albedo                     [0.55, 0.85]
+    ch             bulk heat-transfer coefficient      [1e-3, 6e-3]
+
+(Roughness z0 is intentionally NOT trained: the constant bulk-flux scheme fixes the
+exchange coefficient, so z0 has zero gradient; switch to the MOST scheme to calibrate
+z0 per PFT.)
+
+Loss = cos-lat-weighted MSE(T_sfc, skin_T) + lam_alb·MSE(albedo, forecast_albedo)
++ lam_pft·(per-dominant-PFT mean-bias)²  — the last term drives EACH PFT class's
+mean bias toward zero so no PFT compensates another. Optimiser = Adam (these are
+scalar physics params; MUON's orthogonalisation is for matrices).
+
+Result (~2° land, 2-yr spin, vs ERA5 skin T): global bias +3.1→+0.9 K, RMSE
+4.4→2.1 K; per-PFT mean-bias RMS 3.2→0.9 K. Writes the tuned params to
+``results/land_tuned_params.json`` (RECOMMENDED values — does NOT mutate production
+config defaults; tuned to OFFLINE monthly forcing, so a coupled run with a live
+diurnal cycle should re-tune).
+
+Run: PYTHONPATH=. JAX_ENABLE_X64=1 .venv/bin/python scripts/run/train_land_params_era5.py
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import optax
+
+from legoesm import constants
+from legoesm.thermo import saturation_mixing_ratio
+from legoesm.core.coupling_fields import AtmToSurface
+from legoesm.core.field import Field
+from legoesm.land import LandState
+from legoesm.land.config import LandConfig
+from legoesm.surface_albedo import LandAlbedoConfig
+from legoesm.land.slab_land import step_land
+from legoesm.land.surface_params import (
+    LandSurfaceParams, clm5_pft_table, PARAM_NAMES)
+
+_TABLE = np.asarray(clm5_pft_table())          # (17,12) CLM5 PFT params
+_PI = {n: i for i, n in enumerate(PARAM_NAMES)}
+_N_PFT = 17
+# PHYSICAL per-PFT snow-free albedo bounds (lo, hi) in CLM5 PFT order, so the
+# calibration cannot over-brighten vegetation to cancel the offline-forcing warm
+# bias (literature broadband ranges): bare/soil bright, forests dark, grass/crop mid.
+_PFT_ALB_LO = np.array([0.25, 0.08, 0.08, 0.08, 0.09, 0.09, 0.09, 0.09, 0.09,
+                        0.12, 0.12, 0.12, 0.14, 0.15, 0.15, 0.14, 0.14])
+_PFT_ALB_HI = np.array([0.40, 0.14, 0.14, 0.16, 0.16, 0.16, 0.17, 0.17, 0.17,
+                        0.22, 0.22, 0.22, 0.24, 0.25, 0.25, 0.26, 0.26])
+# per-PFT rooting depth [m] (water uptake): forests deep, grass/crop shallow, bare ~0.
+_PFT_ROOT_LO = np.array([0.05, 0.8, 0.8, 0.6, 1.0, 1.0, 0.8, 0.8, 0.6,
+                         0.4, 0.4, 0.4, 0.3, 0.3, 0.3, 0.3, 0.3])
+_PFT_ROOT_HI = np.array([0.3, 3.0, 3.0, 2.5, 4.0, 4.0, 3.0, 3.0, 2.5,
+                         2.0, 2.0, 2.0, 1.2, 1.5, 1.5, 1.5, 1.5])
+# per-PFT bucket capacity [kg/m2] (plant-available water store).
+_PFT_WMAX_LO, _PFT_WMAX_HI = 60.0, 320.0
+# constrained parameter bounds (lo, hi); per-PFT params are length-17 vectors.
+BOUNDS = dict(pft_alb=(_PFT_ALB_LO, _PFT_ALB_HI), pft_emis=(0.94, 0.99),
+              pft_root=(_PFT_ROOT_LO, _PFT_ROOT_HI),
+              pft_wmax=(_PFT_WMAX_LO, _PFT_WMAX_HI),
+              glac_alb=(0.45, 0.75), snow_max=(0.60, 0.85), ch=(2.0e-3, 5.0e-3))
+_STEPS_PER_MONTH = 120                          # 6-h steps over ~30 days
+_DT = 6 * 3600.0
+
+
+# --------------------------------------------------------------------------- #
+# Pure (testable, differentiable) calibration core                            #
+# --------------------------------------------------------------------------- #
+def constrain(p: dict) -> dict:
+    return {k: BOUNDS[k][0] + (BOUNDS[k][1] - BOUNDS[k][0]) * jax.nn.sigmoid(v)
+            for k, v in p.items()}
+
+
+def _inv(v, k):
+    """Inverse-sigmoid of value(s) v into raw space for bounded param k (lo/hi may
+    be scalars or per-PFT arrays)."""
+    lo, hi = BOUNDS[k]
+    v = np.clip(v, np.asarray(lo) + 1e-4, np.asarray(hi) - 1e-4)
+    return np.log((v - lo) / (hi - v))
+
+
+def init_raw_params() -> dict:
+    """Raw (unconstrained) params initialised at the CLM5 defaults (clamped into the
+    physical bounds)."""
+    return dict(
+        pft_alb=jnp.asarray(_inv(_TABLE[:, _PI["albedo_veg"]], "pft_alb")),  # (17,)
+        pft_emis=jnp.asarray(np.full(_N_PFT, _inv(0.96, "pft_emis"))),
+        pft_root=jnp.asarray(_inv(
+            np.clip(_TABLE[:, _PI["root_depth"]], _PFT_ROOT_LO + 1e-3, _PFT_ROOT_HI - 1e-3),
+            "pft_root")),
+        pft_wmax=jnp.asarray(np.full(_N_PFT, _inv(150.0, "pft_wmax"))),
+        glac_alb=jnp.asarray(_inv(0.55, "glac_alb")),
+        snow_max=jnp.asarray(_inv(0.80, "snow_max")),
+        ch=jnp.asarray(_inv(3.0e-3, "ch")))
+
+
+def _land_params(cp, data):
+    n = data["lat"].shape[0]
+    alb = (1 - data["fg"]) * (data["pft"] @ cp["pft_alb"]) + data["fg"] * cp["glac_alb"]
+    emis = data["pft"] @ cp["pft_emis"]
+    other = data["pft"] @ jnp.asarray(_TABLE)
+    lp = LandSurfaceParams(
+        albedo_veg=alb, emissivity=emis, z0=other[:, _PI["z0"]],
+        W_max=data["pft"] @ cp["pft_wmax"], C_soil=other[:, _PI["C_soil"]],
+        d_soil=other[:, _PI["d_soil"]], root_depth=data["pft"] @ cp["pft_root"],
+        theta_wp=data["wp"], theta_fc=data["fc"], Vc_max25=other[:, _PI["Vc_max25"]],
+        LCMA=other[:, _PI["LCMA"]], g1=other[:, _PI["g1"]])
+    cfg = LandConfig(snow_albedo_feedback=True, Ch_land=cp["ch"], Cd_land=cp["ch"],
+                     land_albedo=LandAlbedoConfig(alpha_snow_max=cp["snow_max"]))
+    return lp, cfg
+
+
+def forward(cp, data, n_spin_years: int = 2):
+    """Monthly mean T_sfc + surface albedo (12, ncol) under constrained params."""
+    n = data["lat"].shape[0]
+    lp, cfg = _land_params(cp, data)
+
+    def st(a):
+        F = lambda d, u: Field(d, name="x", dims=("c",), units=u)
+        return LandState(T_soil=F(a[0], "K"), W_bucket=F(a[1], "kg/m2"),
+                         snow_depth=F(a[2], "kg/m2"), snow_age=F(a[3], "s"))
+
+    @jax.checkpoint
+    def run_month(a, f):
+        def body(c, _):
+            ar, ts, ab = c
+            ns, r, _ = step_land(st(ar), f, cfg, 1.0, _DT, lat=data["lat"], doy=15.0,
+                                 land_params=lp)
+            return ((ns.T_soil.data, ns.W_bucket.data, ns.snow_depth.data,
+                     ns.snow_age.data), ts + r.T_sfc, ab + r.albedo), None
+        (a, ts, ab), _ = jax.lax.scan(body, (a, jnp.zeros((n,)), jnp.zeros((n,))),
+                                      None, length=_STEPS_PER_MONTH)
+        return a, ts / _STEPS_PER_MONTH, ab / _STEPS_PER_MONTH
+
+    a = (data["t0"].astype(jnp.float64), jnp.full((n,), 75.0),
+         jnp.zeros((n,)), jnp.zeros((n,)))
+    Tm = Am = None
+    for _ in range(n_spin_years):
+        Tm, Am = [], []
+        for m in range(12):
+            a, tm, am = run_month(a, data["forc"][m]); Tm.append(tm); Am.append(am)
+    return jnp.stack(Tm), jnp.stack(Am)
+
+
+def loss_fn(p, data, lam_alb=300.0, lam_pft=2.0, n_spin_years=2):
+    cp = constrain(p)
+    T, A = forward(cp, data, n_spin_years)
+    w = data["w"][None, :]
+    tmse = jnp.sum(w * (T - data["skt"]) ** 2) / jnp.sum(w) / 12
+    amse = jnp.sum(w * (A - data["alb"]) ** 2) / jnp.sum(w) / 12
+    ann = (T - data["skt"]).mean(0)
+    oh = data["dom_onehot"] * data["w"][:, None]
+    pft_bias = (oh * ann[:, None]).sum(0) / (oh.sum(0) + 1e-9)
+    present = (data["dom_onehot"].sum(0) > 0).astype(ann.dtype)
+    ppft = jnp.sum(present * pft_bias ** 2) / jnp.sum(present + 1e-9)
+    return tmse + lam_alb * amse + lam_pft * ppft, (tmse, amse, ppft)
+
+
+def train(data, n_iter=80, lr=3e-2):
+    p = init_raw_params()
+    vg = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
+    opt = optax.adam(lr); state = opt.init(p)
+    for it in range(n_iter):
+        (l, (tm, am, pp)), g = vg(p, data)
+        upd, state = opt.update(g, state); p = optax.apply_updates(p, upd)
+        if it % 10 == 0 or it == n_iter - 1:
+            print(f"# it {it:3d} loss {float(l):.3f} T-RMSE {float(jnp.sqrt(tm)):.3f} "
+                  f"alb-RMSE {float(jnp.sqrt(am)):.4f} perPFT-bias-RMS {float(jnp.sqrt(pp)):.3f}")
+    return {k: np.asarray(v).tolist() for k, v in constrain(p).items()}
+
+
+# --------------------------------------------------------------------------- #
+# ERA5 + CLM training data (network/file)                                     #
+# --------------------------------------------------------------------------- #
+def load_training_data(diurnal_npz: str, n_sub: int, seed: int = 0) -> dict:
+    from legoesm.land.clm_surface_map import load_clm_surface, download_clm_surfdata
+    D = np.load(diurnal_npz)
+    lat1, lon1 = D["lat"], D["lon"]; nlat, nlon = lat1.size, lon1.size
+    land = D["lsm"].reshape(nlat, nlon) > 0.5
+    lidx = np.where(land.ravel())[0]
+    latc = np.deg2rad(np.broadcast_to(lat1[:, None], (nlat, nlon))).ravel()[lidx]
+    lonc = lon1[lidx % nlon]
+    nh = D["hours"].size
+    mh = lambda k: D[k].reshape(12, nh, -1)[:, :, lidx].mean(1)
+    cmap = load_clm_surface(download_clm_surfdata(), np.rad2deg(latc), lonc)
+    sub = np.random.default_rng(seed).choice(lidx.size, size=min(n_sub, lidx.size),
+                                             replace=False)
+    return _pack(mh, latc, np.asarray(cmap["pft_fractions"]),
+                 np.asarray(cmap["glacier_frac"]), np.asarray(cmap["theta_wp"]),
+                 np.asarray(cmap["theta_fc"]), sub)
+
+
+def _pack(mh, latc, pft, fg, wp, fc, idx):
+    z = lambda v: jnp.full((idx.size,), v)
+    T2 = mh("2m_temperature"); D2 = mh("2m_dewpoint_temperature")
+    SP = mh("surface_pressure"); PR = np.maximum(mh("precip_kgms"), 0)
+    forc = [AtmToSurface(
+        sw_down=jnp.asarray(mh("ssrd_wm2")[m, idx]), lw_down=jnp.asarray(mh("strd_wm2")[m, idx]),
+        precip_total=jnp.asarray(PR[m, idx]),
+        precip_snow=jnp.where(jnp.asarray(T2[m, idx]) < constants.T_freeze,
+                              jnp.asarray(PR[m, idx]), 0.0),
+        T_lowest=jnp.asarray(T2[m, idx]),
+        q_lowest=saturation_mixing_ratio(jnp.asarray(D2[m, idx]), jnp.asarray(SP[m, idx])),
+        u_lowest=jnp.asarray(mh("10m_u_component_of_wind")[m, idx]),
+        v_lowest=jnp.asarray(mh("10m_v_component_of_wind")[m, idx]),
+        p_lowest=0.99 * jnp.asarray(SP[m, idx]), p_surface=jnp.asarray(SP[m, idx]),
+        rho_lowest=jnp.asarray(SP[m, idx]) / (constants.R_d * jnp.asarray(T2[m, idx])),
+        cos_zenith=z(0.5), co2_ppmv=z(412.0), has_radiation=z(1.0),
+        has_precipitation=z(1.0)) for m in range(12)]
+    dom = np.argmax(pft[idx], axis=1)
+    oh = np.zeros((idx.size, _N_PFT)); oh[np.arange(idx.size), dom] = 1.0
+    return dict(forc=forc, lat=jnp.asarray(latc[idx]), pft=jnp.asarray(pft[idx]),
+                fg=jnp.asarray(fg[idx]), wp=jnp.asarray(wp[idx]), fc=jnp.asarray(fc[idx]),
+                skt=jnp.asarray(mh("skin_temperature")[:, idx]),
+                alb=jnp.asarray(np.clip(mh("forecast_albedo")[:, idx], 0.05, 0.85)),
+                t0=jnp.asarray(T2[0, idx]), dom_onehot=jnp.asarray(oh),
+                w=jnp.cos(jnp.asarray(latc[idx])))
+
+
+def main():
+    jax.config.update("jax_enable_x64", True)
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--diurnal-npz", default="/tmp/era5_diurnal.npz",
+                   help="ERA5 monthly-diurnal climatology (scripts/tmp/fetch_era5_diurnal.py)")
+    p.add_argument("--n-sub", type=int, default=1100, help="land columns to train on")
+    p.add_argument("--iters", type=int, default=80)
+    p.add_argument("--out", default="results/land_tuned_params.json")
+    args = p.parse_args()
+    data = load_training_data(args.diurnal_npz, args.n_sub)
+    tuned = train(data, n_iter=args.iters)
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    with open(args.out, "w") as f:
+        json.dump(tuned, f, indent=2)
+    print(f"# recommended tuned params -> {args.out} (does NOT mutate production defaults)")
+
+
+if __name__ == "__main__":
+    main()

@@ -49,9 +49,6 @@ from legoesm.ocean.physics.mixing import vertical_diffusion
 from legoesm.ocean.dynamics.barotropic import barotropic_substeps
 from legoesm.ocean.dynamics.ocean_model import OceanModel
 from legoesm.ocean.conservation import (
-    fix_volume_ocean,
-    fix_heat_ocean,
-    fix_salt_ocean,
     ocean_conservation_fixer,
 )
 
@@ -76,6 +73,34 @@ def ocean_cdgrid(ocean_grid):
 def ocean_z_coord():
     """Small 10-level vertical coordinate for fast tests."""
     return create_ocean_z_star(n_levels=10, H_max=4000.0)
+
+
+@pytest.fixture
+def _default_precision_pinned():
+    """Pin x64-OFF / fp32 policy for a single float32-asserting test.
+
+    NOT autouse: most tests in this file legitimately build float64 state
+    and need x64 ON.  Only the ``vertical_diffusion`` dtype-preservation
+    test (which asserts the tendency keeps the float32 *field* dtype) needs
+    x64 off so the vertical coordinate is built in float32 too.  Requested
+    BEFORE ``ocean_z_coord`` in the test signature so the coordinate is
+    constructed while x64 is off, robust to a sibling test leaking
+    ``jax_enable_x64`` ON in the same worker.  Restores the prior global
+    precision state at teardown.
+    """
+    from legoesm.core.precision import (
+        PrecisionPolicy, get_policy, set_policy,
+    )
+
+    x64_before = jax.config.jax_enable_x64
+    policy_before = get_policy()
+    jax.config.update("jax_enable_x64", False)
+    set_policy(PrecisionPolicy.fp32())
+    try:
+        yield
+    finally:
+        set_policy(policy_before)
+        jax.config.update("jax_enable_x64", x64_before)
 
 
 @pytest.fixture
@@ -744,7 +769,9 @@ class TestFluxFormVerticalMomentumAdvection:
 class TestVerticalMixing:
     """Tests for vertical diffusion operator."""
 
-    def test_vertical_diffusion_no_scatter_dtype_warning(self, ocean_z_coord):
+    def test_vertical_diffusion_no_scatter_dtype_warning(
+        self, _default_precision_pinned, ocean_z_coord,
+    ):
         """vertical_diffusion should avoid mixed-dtype scatter updates."""
         nlev = ocean_z_coord.n_levels
         field = jnp.linspace(0.0, 1.0, nlev, dtype=jnp.float32)[
@@ -921,7 +948,7 @@ class TestOceanModel:
         state_new = barotropic_substeps(
             state_bad,
             dt_s=60.0,
-            n_substeps=config.n_barotropic_substeps,
+            n_substeps=config.n_barotropic_substeps,  # cube OceanConfig: flat (not grouped)
             grid=ocean_grid,
             z_coord=ocean_z_coord,
             config=config,
@@ -1034,14 +1061,25 @@ class TestOceanConservation:
     """Tests for ocean conservation fixers."""
 
     def test_volume_conservation(self, ocean_grid, ocean_z_coord, ocean_state):
-        """Volume fixer should restore eta integral."""
+        """Volume fixer should restore eta integral.
+
+        Exercises the combined ``ocean_conservation_fixer`` with only the
+        volume leg enabled (the standalone ``fix_volume_ocean`` was removed —
+        it had no production caller; the eta correction is identical).
+        """
         # Perturb eta
         state_perturbed = ocean_state._replace(
             eta=ocean_state.eta.replace(
                 data=ocean_state.eta.data + 0.01 * jnp.ones_like(ocean_state.eta.data),
             ),
         )
-        state_fixed = fix_volume_ocean(state_perturbed, ocean_state, ocean_grid)
+        cfg = OceanConfig(
+            fix_volume=True, fix_heat=False, fix_salt=False,
+            min_water_column_m=None,
+        )
+        state_fixed = ocean_conservation_fixer(
+            state_perturbed, ocean_state, ocean_grid, ocean_z_coord, cfg,
+        )
 
         mask = ocean_state.land_mask.data
         ocean_area = float(jnp.sum(mask * ocean_grid.area))
@@ -1051,18 +1089,21 @@ class TestOceanConservation:
         mean_eta_err = abs(vol_fixed - vol_old) / max(ocean_area, 1.0)
         assert mean_eta_err < 1e-6
 
-    def test_volume_fixer_respects_min_water_column(self, ocean_grid, ocean_state):
+    def test_volume_fixer_respects_min_water_column(
+        self, ocean_grid, ocean_z_coord, ocean_state,
+    ):
         """Volume fixer should enforce optional wet-column lower bound."""
         state_thin = ocean_state._replace(
             eta=ocean_state.eta.replace(
                 data=-ocean_state.H_bathy.data + 0.1,
             ),
         )
-        state_fixed = fix_volume_ocean(
-            state_thin,
-            ocean_state,
-            ocean_grid,
+        cfg = OceanConfig(
+            fix_volume=True, fix_heat=False, fix_salt=False,
             min_water_column_m=0.5,
+        )
+        state_fixed = ocean_conservation_fixer(
+            state_thin, ocean_state, ocean_grid, ocean_z_coord, cfg,
         )
         wet = state_fixed.land_mask.data > 0.5
         water_col = state_fixed.eta.data + state_fixed.H_bathy.data
@@ -1072,28 +1113,26 @@ class TestOceanConservation:
     def test_heat_salt_fixers_finite_for_thin_columns(
         self, ocean_grid, ocean_z_coord, ocean_state,
     ):
-        """Heat/salt fixers should remain finite with thin-column clipping."""
+        """Heat/salt fixers should remain finite with thin-column clipping.
+
+        Drives the combined ``ocean_conservation_fixer`` with the heat+salt
+        legs enabled (volume off) on a thin-column state — the path that
+        replaced the removed standalone ``fix_heat_ocean``/``fix_salt_ocean``.
+        """
         state_thin = ocean_state._replace(
             eta=ocean_state.eta.replace(
                 data=-ocean_state.H_bathy.data + 0.1,
             ),
         )
-        state_heat = fix_heat_ocean(
-            state_thin,
-            ocean_state,
-            ocean_grid,
-            ocean_z_coord,
+        cfg = OceanConfig(
+            fix_volume=False, fix_heat=True, fix_salt=True,
             min_water_column_m=0.5,
         )
-        state_salt = fix_salt_ocean(
-            state_heat,
-            ocean_state,
-            ocean_grid,
-            ocean_z_coord,
-            min_water_column_m=0.5,
+        state_fixed = ocean_conservation_fixer(
+            state_thin, ocean_state, ocean_grid, ocean_z_coord, cfg,
         )
-        assert jnp.all(jnp.isfinite(state_heat.T.data))
-        assert jnp.all(jnp.isfinite(state_salt.S.data))
+        assert jnp.all(jnp.isfinite(state_fixed.T.data))
+        assert jnp.all(jnp.isfinite(state_fixed.S.data))
 
 
 # ==============================================================================

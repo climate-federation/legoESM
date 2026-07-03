@@ -567,6 +567,16 @@ def get_forcing_at_time(
     times = forcing.times
     ntime = times.shape[0]
 
+    # Single-record forcing (e.g. a climatological mean, or a 2D file promoted
+    # to shape (1, ...) by load_amip_forcing): no interpolation is possible, so
+    # return the single field. ``ntime`` is a static shape, so this Python
+    # branch is JIT-safe. Without it, the cyclic-wrap below leaves period==0 and
+    # ``clip(idx, 0, ntime-2) = clip(idx, 0, -1)`` returns idx=-1 with dt=0,
+    # blowing up the weight (~5e10) and producing ~0 K SST via FP cancellation
+    # for any requested day != times[0].
+    if ntime == 1:
+        return forcing.sst[0], jnp.clip(forcing.sic[0], 0.0, 1.0)
+
     # Wrap day cyclically so multi-year runs repeat the annual cycle
     # instead of clamping at the last record.
     period = times[-1] - times[0]

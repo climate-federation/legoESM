@@ -106,7 +106,7 @@ def _physics(tke_cfg):
 
 def _model(tke_cfg, *, bottom_drag_r=0.0):
     grid, z_coord = _grid_z()
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=1.0e4,
         K_v=0.0,
         implicit_vertical_mixing=True,
@@ -417,7 +417,7 @@ class TestPrognosticTKEUnderAB2:
 
     def _ab2_model(self, *, additive=False):
         grid, z_coord = _grid_z()
-        cfg = LatLonCGridOceanConfig(
+        cfg = LatLonCGridOceanConfig.from_flat(
             A_h=1.0e4, K_v=0.0,
             implicit_vertical_mixing=True,
             outer_integrator="ab2",
@@ -462,7 +462,7 @@ class TestPrognosticTKEUnderAB2:
         step runs with no tke on the state (bit-identity of the off path is
         locked by the existing AB2 regression suite)."""
         grid, z_coord = _grid_z()
-        cfg = LatLonCGridOceanConfig(
+        cfg = LatLonCGridOceanConfig.from_flat(
             A_h=1.0e4, K_v=0.0, implicit_vertical_mixing=True,
             outer_integrator="ab2",
             physics=_physics(TKEConfig(prognostic=False)),

@@ -214,8 +214,13 @@ def tiedtke_convection(
     # Cloud-base mass flux (per class, then blended).
     # ``M_b_deep`` is driven by column moisture convergence (kg/m^2/s units
     # — already dimensionally correct) and stays as-is.
-    # ``M_b_shallow`` and ``M_b_midlevel`` use the dimensionally-correct
-    # CAPE-relaxation closure (Kain 2004 §3 form):
+    # ``M_b_shallow`` and ``M_b_midlevel`` use a generic first-order
+    # CAPE-relaxation SURROGATE (NOT a published closure).  This is *not* the
+    # Zhang-McFarlane (1995) closure (CAPE consumed at a cloud-work-function /
+    # quasi-equilibrium rate) and *not* a Kain (2004) formula (Kain 2004 has no
+    # closed-form M_b — it iterates M_b to remove CAPE over TIMEC).  The
+    # ``g / rho_BL`` factor is a dimensional stand-in for that CAPE-consumption
+    # sensitivity, giving a kg/m^2/s mass flux:
     #     M_b = rho_BL * (CAPE - threshold)+ / (g * tau)   [kg/m^2/s]
     # The earlier formula omitted ``rho_BL`` and ``g``; magnitude was
     # masked operationally only by ``M_b_max``.
@@ -407,16 +412,34 @@ def tiedtke_convection(
         du_dt_conv = None
         dv_dt_conv = None
 
+    # -- In-updraft precipitation (convective precipitation efficiency) ---
+    # The plume detrains its FULL cloud water as suspended grid-scale cloud
+    # (dq_c_conv_dt), which loads the radiation and which microphysics cannot
+    # drain fast enough (source-buffered). Real convective updrafts convert a
+    # large fraction of their condensate to PRECIPITATION before detrainment.
+    # Divert that fraction (precip_efficiency) to RAIN (dq_r_conv_dt) — a
+    # precipitating species that sediments via microphysics and is invisible
+    # to radiation (which sees only q_c/q_i) — leaving (1-PE) as anvil cloud
+    # water. precip_efficiency=0 (default) ⇒ no split (legacy behaviour).
+    dq_c_pos = jnp.maximum(dq_c_conv_dt, 0.0)
+    if config.precip_efficiency > 0.0:
+        pe = jnp.clip(config.precip_efficiency, 0.0, 1.0)
+        dq_r_conv_dt = dq_c_pos * pe
+        dq_c_pos = dq_c_pos * (1.0 - pe)
+    else:
+        dq_r_conv_dt = None
+
     # -- Convective mask ---------------------------------------------------
     convective_mask = cape_weight * (deep_weight + shallow_weight + midlevel_weight)
 
     out = ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
-        dq_c_conv_dt=jnp.maximum(dq_c_conv_dt, 0.0),
+        dq_c_conv_dt=dq_c_pos,
         cape=cape,
         convective_mask=convective_mask,
         du_dt_conv=du_dt_conv,
         dv_dt_conv=dv_dt_conv,
+        dq_r_conv_dt=dq_r_conv_dt,
     )
     return out, M_u_new

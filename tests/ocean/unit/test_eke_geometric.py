@@ -532,7 +532,7 @@ def _channel(eke_cfg, n_steps=10, dt=1800.0, n_lat=12, n_lon=24, nlev=4):
     T = T + 2.0 * np.tanh(lat / 20.0)[:, None, None]
     state = state._replace(T=state.T.replace(data=jnp.asarray(T)))
     gm = GMRediConfig(kappa_GM=0.0, kappa_Redi=1.0e3, eke=eke_cfg)
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, bottom_drag_r=1.0e-3, implicit_vertical_mixing=True,
         n_barotropic_substeps=8, enable_runtime_checks=False, gm_redi=gm)
     model = LatLonCGridOceanModel(grid, z_coord, cfg)
@@ -559,7 +559,7 @@ def test_model_construction_rejects_unknown_closure():
     )
     grid = create_latlon_grid(8, 16)
     z = create_ocean_z_star(n_levels=3, H_max=4000.0)
-    cfg = LatLonCGridOceanConfig(gm_redi=GMRediConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(gm_redi=GMRediConfig(
         eke=EKEConfig(closure="geometricc")))
     with pytest.raises(ValueError, match="closure"):
         LatLonCGridOceanModel(grid, z, cfg)
@@ -629,7 +629,7 @@ def test_geometric_cold_start_without_eke_field():
     z = create_ocean_z_star(n_levels=3, H_max=4000.0)
     state = rest_state_latlon_cgrid_ocean(
         grid, z, H_max=4000.0, land_lat_threshold=85.0)
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.0e4, bottom_drag_r=1.0e-3, implicit_vertical_mixing=True,
         n_barotropic_substeps=8, enable_runtime_checks=False,
         gm_redi=GMRediConfig(kappa_GM=0.0, kappa_Redi=1.0e3, eke=eke_cfg))

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import math
 from typing import Any, NamedTuple
-import warnings
 
 import jax
 import jax.numpy as jnp
@@ -17,7 +16,9 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.core.precision import get_policy
-from legoesm.core.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
+from legoesm.core.bulk_flux import (
+    simple_bulk_fluxes, compute_most_fluxes, apply_gustiness,
+)
 from legoesm.land.multilayer_land import init_multilayer_land_state
 from legoesm.land.surface_params import reshape_params
 from legoesm.surface_albedo import ocean_albedo as compute_ocean_albedo
@@ -106,12 +107,6 @@ def _validate_coupler_config(config: CouplerConfig) -> None:
         raise ValueError(f"Cd_ocean must be >= 0, got {config.Cd_ocean!r}")
     if config.Ch_ocean < 0.0:
         raise ValueError(f"Ch_ocean must be >= 0, got {config.Ch_ocean!r}")
-    if config.blend_sharpness != CouplerConfig._field_defaults["blend_sharpness"]:
-        warnings.warn(
-            "CouplerConfig.blend_sharpness is currently unused in blend_tiles().",
-            RuntimeWarning,
-            stacklevel=2,
-        )
 
 
 def init_surface_state(
@@ -136,15 +131,23 @@ def init_surface_state(
     dims_2d = ("face", "x", "y")
     _sd = get_policy().storage
 
+    # ``T_soil_init`` may be a scalar (uniform; legacy default) OR a spatial
+    # array of shape ``shape`` (a warm start, e.g. the lat-varying near-surface
+    # air temperature) — removes the artificial tropical cold-soil spin-up of
+    # the uniform 280 K default.
+    _Tsi = jnp.asarray(T_soil_init)
     if isinstance(land_config, MultiLayerLandConfig):
         # For multi-layer land, ncol = product of spatial dims
         ncol = math.prod(shape)
+        T_init_col = T_soil_init if _Tsi.ndim == 0 else _Tsi.reshape(ncol)
         land = init_multilayer_land_state(
-            ncol, land_config, T_init=T_soil_init,
+            ncol, land_config, T_init=T_init_col,
         )
     else:
+        T_soil_data = (jnp.full(shape, T_soil_init, dtype=_sd) if _Tsi.ndim == 0
+                       else jnp.broadcast_to(_Tsi.astype(_sd), shape))
         land = LandState(
-            T_soil=Field(data=jnp.full(shape, T_soil_init, dtype=_sd),
+            T_soil=Field(data=T_soil_data,
                          name="T_soil", dims=dims_2d, units="K"),
             W_bucket=Field(data=jnp.full(shape, W_bucket_init, dtype=_sd),
                            name="W_bucket", dims=dims_2d, units="kg/m2"),
@@ -183,7 +186,12 @@ def init_surface_state(
                        name="Q_freeze", dims=dims_2d, units="W/m2"),
     )
 
-    acc = reset_accumulator(shape)
+    # Pin the accumulator leaves to the SAME storage precision as the rest of
+    # SurfaceState (``_sd`` above); without an explicit dtype the zeros follow
+    # the global x64 default, so under JAX_ENABLE_X64 the accumulator widens to
+    # f64 while land/ice/lake/carbon stay at the storage policy dtype -- a mixed
+    # pytree that triggers lax.scan carry-dtype warnings / promotion.
+    acc = reset_accumulator(shape, dtype=_sd)
 
     # Carbon pools (only for differland scheme)
     carbon = None
@@ -241,9 +249,12 @@ def ocean_tile_response(
             n_iter=config.bulk_n_iter,
         )
     else:
-        # Constant neutral coefficients (original behavior)
-        wind_speed = jnp.sqrt(
-            forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + config.U_min ** 2
+        # Constant neutral coefficients (original behavior).  Sub-grid
+        # convective gustiness floor (Wing 2018) on the effective wind so
+        # light-wind/convective columns evaporate realistically (the dry-column
+        # / weak-hydrological-cycle fix); subsumes the U_min numerical floor.
+        wind_speed = apply_gustiness(
+            forcing.u_lowest, forcing.v_lowest, config.gustiness,
         )
         tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
             forcing.u_lowest, forcing.v_lowest,

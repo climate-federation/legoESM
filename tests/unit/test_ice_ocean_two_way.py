@@ -22,7 +22,11 @@ from legoesm.ice.sea_ice import step_sea_ice
 from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.coupler.config import TileConfig
 from legoesm.coupler.tile_fractions import compute_tile_fractions
-from legoesm.coupler.ocean_forcing import ice_ocean_forcing_from_ice_response
+# F11 ice->ocean mapper — promoted out of coupler/_future (2026-06-30) when the
+# OMIP runner gained a prognostic sea-ice tile (its first production caller).
+from legoesm.coupler.ocean_forcing import (
+    ice_ocean_forcing_from_ice_response,
+)
 from legoesm import constants
 
 
@@ -50,7 +54,7 @@ def _ocean(nlat, nlon, n_levels=8):
     zc = create_ocean_z_star(n_levels=n_levels, H_max=4000.0,
                              dz_surface=10.0, dz_deep=500.0)
     ocean = rest_state_latlon_cgrid_ocean(grid, zc, S_uniform=35.0)
-    model = LatLonCGridOceanModel(grid, zc, config=LatLonCGridOceanConfig())
+    model = LatLonCGridOceanModel(grid, zc, config=LatLonCGridOceanConfig.from_flat())
     return grid, ocean, model
 
 
@@ -297,11 +301,15 @@ def test_latlon_rejects_external_scheme_to_avoid_double_apply():
     zc = create_ocean_z_star(n_levels=6, H_max=4000.0, dz_surface=10.0, dz_deep=500.0)
     ocean = rest_state_latlon_cgrid_ocean(grid, zc, S_uniform=35.0)
     base = OceanPhysicsConfig()
+    # lateral_mixing defaults to "harmonic" (cubed-sphere-only), which the
+    # lat-lon model rejects with a DIFFERENT guard; set it to "none" so this
+    # test actually reaches the surface_forcing="external" double-apply guard.
     bad_phys = OceanPhysicsConfig(
-        surface_forcing=type(base.surface_forcing)(scheme="external"))
+        surface_forcing=type(base.surface_forcing)(scheme="external"),
+        lateral_mixing=type(base.lateral_mixing)(scheme="none"))
     with pytest.raises(ValueError, match="external.*not supported on the"):
         LatLonCGridOceanModel(
-            grid, zc, config=LatLonCGridOceanConfig(physics=bad_phys))
+            grid, zc, config=LatLonCGridOceanConfig.from_flat(physics=bad_phys))
 
 
 def test_ice_stress_drives_currents_in_correct_direction():
@@ -349,7 +357,7 @@ def test_kpp_sees_ice_freshwater_buoyancy():
     )
     ocean = rest_state_latlon_cgrid_ocean(grid, zc, S_uniform=35.0)
     model = LatLonCGridOceanModel(
-        grid, zc, config=LatLonCGridOceanConfig(physics=physics))
+        grid, zc, config=LatLonCGridOceanConfig.from_flat(physics=physics))
     om = ocean.land_mask.data
     ice = _zero_tile(shape)._replace(
         freshwater_flux=jnp.where(om > 0.5, 2e-4, 0.0))   # melt
@@ -388,7 +396,7 @@ def test_kpp_sees_real_salt_buoyancy():
     )
     ocean = rest_state_latlon_cgrid_ocean(grid, zc, S_uniform=35.0)
     model = LatLonCGridOceanModel(
-        grid, zc, config=LatLonCGridOceanConfig(physics=physics))
+        grid, zc, config=LatLonCGridOceanConfig.from_flat(physics=physics))
     om = ocean.land_mask.data
     ice = _zero_tile(shape)._replace(
         salt_flux=jnp.where(om > 0.5, 1e-4, 0.0),     # brine into ocean

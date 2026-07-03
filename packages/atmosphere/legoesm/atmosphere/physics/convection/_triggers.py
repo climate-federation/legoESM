@@ -41,9 +41,6 @@ import jax.numpy as jnp
 
 __all__ = (
     "smooth_step",
-    "smooth_heaviside",
-    "smooth_max",
-    "smooth_min",
     "smooth_positive_part",
     "smooth_level_indicator",
     "smooth_lowest_crossing_index",
@@ -83,56 +80,14 @@ def smooth_step(x: jax.Array, sharpness: float = 1.0) -> jax.Array:
     return jax.nn.sigmoid(sharpness * x)
 
 
-def smooth_heaviside(x: jax.Array, sharpness: float = 1.0) -> jax.Array:
-    """Alias for :func:`smooth_step` for callers that prefer the
-    Heaviside name at trigger sites."""
-    return smooth_step(x, sharpness)
-
-
-def smooth_max(
-    a: jax.Array,
-    b: jax.Array,
-    sharpness: float = 1.0,
-) -> jax.Array:
-    """Differentiable upper bound on ``max(a, b)``.
-
-    Implements the log-sum-exp soft-max ::
-
-        smooth_max(a, b, s) = (1/s) * log(exp(s*a) + exp(s*b)).
-
-    Properties:
-
-    * ``smooth_max(a, b, s) >= max(a, b)`` for all finite ``s > 0``;
-      the inequality tightens to equality as ``s → ∞``.
-    * Symmetric in ``a`` and ``b``.
-    * Gradients are well-defined everywhere, including at ``a == b``.
-
-    Implemented with :func:`jax.numpy.logaddexp` for numerical
-    stability across magnitudes (avoids ``exp`` overflow).
-    """
-    return jnp.logaddexp(sharpness * a, sharpness * b) / sharpness
-
-
-def smooth_min(
-    a: jax.Array,
-    b: jax.Array,
-    sharpness: float = 1.0,
-) -> jax.Array:
-    """Differentiable lower bound on ``min(a, b)``.
-
-    ``smooth_min(a, b, s) = -smooth_max(-a, -b, s)``.
-    """
-    return -smooth_max(-a, -b, sharpness)
-
-
 def smooth_positive_part(
     x: jax.Array,
     sharpness: float = 1.0,
 ) -> jax.Array:
     """Differentiable approximation of ``max(x, 0)``.
 
-    Returns ``softplus(sharpness * x) / sharpness``, equivalent to
-    :func:`smooth_max` against zero.  The gradient at ``x = 0`` is
+    Returns ``softplus(sharpness * x) / sharpness`` — a differentiable
+    soft upper bound on ``max(x, 0)``.  The gradient at ``x = 0`` is
     ``0.5``, transitioning smoothly to ``1`` for ``x ≫ 0`` and ``0``
     for ``x ≪ 0``.
 

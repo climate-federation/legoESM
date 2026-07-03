@@ -231,35 +231,57 @@ def build(driver_nc: str, fullset_csv: str, out_nc: str) -> xr.Dataset:
         # NOT an observation).  This keeps provenance flags consistent with how
         # the reader will actually treat the written values.
         orig_obs = is_observed(dv, orig)
-
-        # Sanity: identical on the steps both have (same series, MDS retained).
-        # Require a MEANINGFUL overlap — with timestamps already aligned 1:1, a
-        # near-empty overlap means the value/unit check is vacuous, so refuse
-        # rather than silently substitute (no-overlap must NOT pass as maxdiff=0).
+        new_obs = is_observed(dv, new)
         both = orig_obs & np.isfinite(new)
         n_overlap = int(both.sum())
-        if n_overlap < _MIN_OVERLAP:
-            raise ValueError(
-                f"{dv}<-{fv}: only {n_overlap} finite overlap steps "
-                f"(< {_MIN_OVERLAP}); cannot verify units/alignment — refusing.")
-        maxdiff = float(np.abs(orig[both] - new[both]).max())
-        if maxdiff > 1e-6:
-            raise ValueError(
-                f"{dv}<-{fv}: maxdiff={maxdiff:.4g} on observed overlap; "
-                "units/alignment do not match — refusing to substitute.")
+        maxdiff = (float(np.abs(orig[both] - new[both]).max())
+                   if n_overlap >= _MIN_OVERLAP else None)
+
+        # Choose the AUTHORITATIVE series to write for this variable.
+        #   * MET FORCING (TA/VPD/SW_IN/LW_IN/PA): substitute the MDS product under a
+        #     STRICT units/alignment check — the driver value and ``_F_MDS`` are the
+        #     SAME quantity, so any observed-overlap maxdiff is a real error.  Keep
+        #     the driver observation where present; MDS-fill the gaps.
+        #   * SOIL fields (TS/SWC): the land model's TOP layer wants the SHALLOWEST
+        #     sensor ``_F_MDS_1``.  The driver's own field can be a DIFFERENT
+        #     DEFINITION — preprocess_v2 sets TS = mean(TS_F_MDS_1..3) (depth-
+        #     averaged) and SWC may come from CASM/satellite — so it will NOT match
+        #     ``_F_MDS_1`` and a maxdiff is EXPECTED, not a unit error.  Take the
+        #     shallowest ``_F_MDS_1`` as the authoritative top-layer field whenever it
+        #     carries enough real data; fall back to the driver's own field only if
+        #     that sensor is essentially empty.
+        if dv in _SOIL_FIELDS:
+            if int(new_obs.sum()) >= _MIN_OVERLAP:
+                if maxdiff is not None and maxdiff > 1e-6:
+                    print(f"  NOTE {dv}<-{fv}: shallowest sensor differs from the "
+                          f"driver's field by up to {maxdiff:.4g} (driver is depth-"
+                          f"averaged / non-in-situ); using the shallowest {fv} as the "
+                          "model's top-layer field.")
+                keep, keep_obs, fill_source = new, new_obs, new
+            else:
+                print(f"  NOTE {dv}: {fv} has < {_MIN_OVERLAP} observations; keeping "
+                      "the driver's own field and gap-filling it.")
+                keep, keep_obs, fill_source = orig, orig_obs, orig
+        else:
+            if n_overlap < _MIN_OVERLAP:
+                raise ValueError(
+                    f"{dv}<-{fv}: only {n_overlap} finite overlap steps "
+                    f"(< {_MIN_OVERLAP}); cannot verify units/alignment — refusing.")
+            if maxdiff > 1e-6:
+                raise ValueError(
+                    f"{dv}<-{fv}: maxdiff={maxdiff:.4g} on observed overlap; "
+                    "units/alignment do not match — refusing to substitute.")
+            keep, keep_obs, fill_source = orig, orig_obs, new
 
         filled_values, n_long, n_short = fill_gaps(
-            new, months, slots, n_slots, dt_seconds)
-        # NEVER overwrite a genuine driver observation: keep orig where OBSERVED
-        # (finite AND in-range), use the (MDS/climatology) fill elsewhere.  This
-        # makes the filled flag exact (not-observed <=> value came from a fill)
-        # and prevents a finite-but-invalid orig from being kept+mislabelled.
-        result = np.where(orig_obs, orig, filled_values)
+            fill_source, months, slots, n_slots, dt_seconds)
+        # Keep a genuine observation of the AUTHORITATIVE series where present; use
+        # the (MDS / climatology) fill elsewhere.  The filled flag is then exact
+        # (not-observed <=> the value came from a fill).
+        result = np.where(keep_obs, keep, filled_values)
         if not np.isfinite(result).all():
             raise ValueError(f"{dv}: residual NaN after fill")
-
-        # filled flag: 1 where the value is NOT a genuine measured observation.
-        filled_flag = (~orig_obs).astype(np.int8)
+        filled_flag = (~keep_obs).astype(np.int8)
         ds[dv] = (ds[dv].dims, result.reshape(ds[dv].shape))
         ds[f"{dv}_filled"] = (("time",), filled_flag)
         ds[f"{dv}_filled"].attrs = dict(

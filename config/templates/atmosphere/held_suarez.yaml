@@ -1,0 +1,24 @@
+# legoESM experiment template — Held-Suarez dry dynamical-core benchmark.
+#
+# Names the `held_suarez` idealized atmosphere matrix case via `setup:` (#388).
+# Routes (exact match) to:
+#   run_atmosphere_test_matrix.py --test =held_suarez --grid cubed_sphere
+experiment:
+  tier: tier2
+  complexity: hydrostatic
+  extent: global
+  maturity: structurally_validated
+  description: >
+    Held-Suarez (1994): Newtonian-relaxation + Rayleigh-friction forcing of the
+    dry hydrostatic primitive equations — the canonical long-run dynamical-core
+    climate benchmark (zonal-mean jets, eddy statistics).
+  data: []
+  conservation_gates: [mass, energy, aam]
+model:
+  name: "atmosphere-held-suarez"
+  type: atmosphere_only
+setup:
+  name: held_suarez
+  grid: cubed_sphere
+output:
+  path: output/atmosphere/held_suarez/

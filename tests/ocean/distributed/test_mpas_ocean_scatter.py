@@ -10,7 +10,7 @@ owned entities only — the composition must be the identity on every
 field.  The full distributed model STEP additionally needs per-RK-stage
 halo refreshes (the atmosphere's ``make_voronoi_mpi_step`` pattern) and
 is the scoped next milestone — see
-docs/scaling/ginsburg_mpi_gpu_scaling_plan.md.
+docs/performance/scaling/ginsburg_mpi_gpu_scaling_plan.md.
 """
 
 from __future__ import annotations

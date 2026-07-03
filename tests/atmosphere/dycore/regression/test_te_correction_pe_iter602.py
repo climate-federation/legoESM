@@ -79,3 +79,24 @@ def test_te_correction_pe_only_adjusts_T():
     assert jnp.array_equal(state_corr.phis.data, state_new.phis.data)
     # T changed
     assert not jnp.array_equal(state_corr.T.data, state_new.T.data)
+
+
+def test_te_correction_pe_is_jit_and_grad_safe():
+    """PR B #1: the correction's docstring claims 'Differentiable end-to-end'.
+    The old Newton loop used a host ``float()`` energy + a data-dependent
+    ``break``, so it could NOT be jit/grad'd. The fixed-iteration lax loop must
+    now compile under jit and yield finite reverse-mode gradients."""
+    grid, coord, state_old = _build_pe(T_delta=0.0)
+    _, _, state_new = _build_pe(T_delta=10.0)
+
+    jitted = jax.jit(lambda s: apply_te_correction_pe(state_old, s, grid, coord))
+    out = jitted(state_new)
+    assert jnp.all(jnp.isfinite(out.T.data))
+
+    def loss(T_new):
+        sn = state_new._replace(T=state_new.T.replace(data=T_new))
+        return jnp.sum(apply_te_correction_pe(state_old, sn, grid, coord).T.data)
+
+    g = jax.grad(loss)(state_new.T.data)
+    assert jnp.all(jnp.isfinite(g)), "grad through PE TE correction is non-finite"
+    assert float(jnp.max(jnp.abs(g))) > 0.0, "grad is identically zero"

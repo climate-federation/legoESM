@@ -43,7 +43,7 @@ def step_ponds(
     pond_to_ice_max_area: float,
     depth_to_area_ratio: float,
     snow_block_threshold: float = _POND_DEFAULTS.snow_block_threshold,
-    refreeze_width_K: float = 0.5,
+    refreeze_width_K: float = _POND_DEFAULTS.refreeze_width_K,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Advance pond area + depth one time step.
 
@@ -88,12 +88,15 @@ def step_ponds(
         Updated pond state.
     drain_to_ocean_m : array
         Pond water lost to drainage this step [m of liquid water
-        per unit grid-cell area] — caller routes to ocean
-        freshwater channel.
+        per unit ICE area] — pond state is stored relative to the
+        ice area (``V_pond = pond_area * pond_depth``), so this is
+        per-ice-area.  The caller multiplies by the ice concentration
+        ``conc`` before routing it to the ocean freshwater channel.
     refreeze_volume_m : array
         Pond water that refroze back into ice [m of liquid water
-        per unit grid-cell area] — caller adds to ice column as
-        white-ice gain (no FW exchange with ocean).
+        per unit ICE area] — caller converts it to an ice-thickness
+        gain on the per-ice-area column ``h`` (white-ice gain; no FW
+        exchange with the ocean).
     """
     # Input water this step.  Snow thicker than the configured
     # threshold blocks pond formation; thinner snow / deposition

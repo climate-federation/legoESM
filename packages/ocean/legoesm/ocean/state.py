@@ -435,6 +435,11 @@ class LatLonCGridOceanState(NamedTuple):
     S_incr_prev: object = None
     u_incr_prev: object = None
     v_incr_prev: object = None
+    # Previous-step barotropic slow forcing (depth-mean tendency) for the
+    # AB2 time-centering of F_slow (matches Oceananigans' AB2-extrapolated Gᵁ).
+    # Only used when barotropic_slow_forcing_ab2=True; None otherwise (default).
+    F_slow_u_prev: object = None
+    F_slow_v_prev: object = None
     # Rigid-lid barotropic streamfunction state (config.barotropic_solver ==
     # "rigid_lid").  ``psi`` is the vertex-point streamfunction [m^3/s], shape
     # (n_lat+1, n_lon+1).  ``dpsi``/``dpsi_prev`` are the interior streamfunction
@@ -591,7 +596,7 @@ class MomentumTendencyDiagnostics(NamedTuple):
     Naming convention: ``<term>_u`` and ``<term>_v`` for the u- and
     v-momentum contributions respectively.  The same pattern can be
     re-used for future tracer or energy budgets — see Phase 1.5 of
-    docs/ocean_experiments/global_overturning_plan.md.
+    docs/ocean/experiments/global_overturning_plan.md.
 
     Fields
     ------
@@ -664,63 +669,206 @@ class MomentumTendencyDiagnostics(NamedTuple):
     total_v: Field
 
 
-class LatLonCGridOceanConfig(NamedTuple):
-    """Configuration for the lat-lon C-grid FV ocean model.
+class OMp25Config(NamedTuple):
+    """OM4p25 lateral-friction closure coefficients (GFDL OM4.0, Adcroft et al.
+    2019; Silvestri et al. 2024 "SM2"). Laplacian + biharmonic, each the max of
+    a Smagorinsky term and a static grid-scale term, with the Laplacian tapered
+    by the deformation-radius factor F = 1/(1+0.25·(L_d/Δ)⁴). Defaults are the
+    published OM4p25 values."""
+    C2: float = 0.15      # Laplacian Smagorinsky coefficient
+    Cu2: float = 0.01     # Laplacian static-viscosity coefficient
+    C4: float = 0.06      # biharmonic Smagorinsky coefficient
+    Cu4: float = 0.01     # biharmonic static-viscosity coefficient
+    deformation_radius_m: float = 6.75e3  # L_d for the F taper [m]; ~uniform for
+    #   the idealised baroclinic jet. Spatially-varying L_d (from N²) is a refinement.
 
-    ~70 fields. This docstring is the *map* the flat field list lacks; the
-    fields group as:
 
-    - **Physical constants**: ``g``, ``rho_0``, ``constants`` (ConstantsConfig).
-    - **Lateral (harmonic) viscosity**: ``A_h`` + ``A_h_lat_scaling``,
-      ``A_h_cos_power``, ``A_h_floor``, ``A_h_eq_boost``/``A_h_eq_sigma_deg``,
-      ``A_h_merid``, ``A_h_cap_*``.
-    - **Biharmonic viscosity**: ``B_h`` + ``B_h_lat_scaling``, ``B_h_barotropic``.
-    - **Eddy-viscosity closures**: ``C_smag``, ``C_smag_lap``, ``C_leith``,
-      ``C_leith_modified``, ``slope_foot_*``.
-    - **Tracer diffusivity / vertical mixing**: ``K_h``, ``K_bih``, ``A_v``,
-      ``K_v``, ``implicit_vertical_mixing``.
-    - **Bottom drag**: ``bottom_drag_r`` + ``bottom_drag_bbl_thickness``,
-      ``bottom_drag_bg_velocity`` (physics-level BottomDragConfig is deprecated).
-    - **Barotropic solver**: ``barotropic_solver``, ``n_barotropic_substeps``,
-      ``bebt``, ``barotropic_div_damp``, ``barotropic_diffusion_*``,
-      ``maxvel_barotropic``, ``barotropic_time_filter``, ``barotropic_implicit_*``,
-      ``differentiable_barotropic``.
-    - **Numerics choices**: ``tracer_advection``, ``momentum_advection``,
-      ``ke_gradient_scheme``, ``weno_d_term``, ``pgf_scheme``,
-      ``tracer_time_integrator``/``ab2_epsilon``, ``hyperdiff_coeff``.
-    - **EOS / eddy param / physics**: ``eos`` (+ ``eos_linear``), ``gm_redi``,
-      ``physics`` (full OceanPhysicsConfig pipeline).
-    - **Conservation & freshwater**: ``use_conservation_fixer``,
-      ``fix_volume``/``fix_heat``/``fix_salt``, ``fix_eta_drift``,
-      ``freshwater_closure``, ``S_ref``.
-    - **Runtime invariant checks**: ``enable_runtime_checks`` + bounds
-      (``min_water_column_m``, ``max_abs_eta_m``, ``temperature_min/max_c``,
-      ``salinity_min/max_psu``).
+class DynBottomDragConfig(NamedTuple):
+    """Dynamics-level bottom-drag parameters (#501 config grouping).
 
-    Minimal run (everything else defaults to sane Earth values)::
-
-        cfg = LatLonCGridOceanConfig()       # constant A_v/K_v, no physics pipeline
-
-    Production-style::
-
-        cfg = LatLonCGridOceanConfig(
-            A_h=3e4, A_h_lat_scaling=True, B_h=1e10, C_smag=0.15,
-            bottom_drag_r=2.5e-3, implicit_vertical_mixing=True,
-            barotropic_solver="implicit", eos="wright",
-            physics=OceanPhysicsConfig(...),  # KPP/TKE + GM/Redi
-        )
-
-    Section headers below mark the contiguous top run of fields. The trailing
-    fields (from ``n_barotropic_substeps`` on) are kept in *chronological*
-    append order to preserve positional construction for legacy callers, so
-    they span several topics — use the group-map above to locate them, not the
-    physical field order.
+    Distinct from the deprecated physics-pathway ``BottomDragConfig``.  Field
+    names retain the ``bottom_drag_`` prefix so the flat YAML / legacy-kwarg
+    interface maps 1:1 through ``LatLonCGridOceanConfig.from_flat``.
     """
 
-    # --- Physical constants (defaults reference legoesm.constants; pin via
-    #     ConstantsConfig for a reference-model recipe) ---
-    g: float = constants.g
-    rho_0: float = constants.rho_ocean
+    bottom_drag_r: float = 0.0
+    bottom_drag_bbl_thickness: float = 0.0
+    bottom_drag_bg_velocity: float = 0.0  # MOM6 DRAG_BG_VEL [m/s]; when >0,
+                                           # drag is quadratic-with-floor:
+                                           # tau ∝ √(u²+v²+u_bg²) · u, with
+                                           # the linear-in-u limit set to
+                                           # bottom_drag_r at |u|→0.
+
+
+class BarotropicConfig(NamedTuple):
+    """Barotropic free-surface solver parameters (#501 config grouping).
+
+    The split-explicit substep loop, the implicit-CN PCG knobs, and the
+    rigid-lid streamfunction-solver knobs.  Field names retain their original
+    flat names so the YAML / legacy-kwarg interface maps 1:1 through
+    ``LatLonCGridOceanConfig.from_flat`` / ``flat_fields``.
+    """
+
+    n_barotropic_substeps: int = 30
+    barotropic_diffusion_alpha: float = 0.01
+    barotropic_diffusion_dt_ref: float = 60.0
+    barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
+    bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
+    maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled. MOM6 uses 6.0.
+    barotropic_time_filter: str = "cosine"  # "box", "cosine", or "power_law" (SM2005 ROMS/MOM6/Oceananigans extended-window filter; damps the 2dx barotropic Coriolis null mode)
+    differentiable_barotropic: bool = False
+    # SOTA-local split-explicit barotropic (MOM6/MPAS-Ocean style): when True the
+    # per-substep eta-floor clamp is LOCAL (jnp.maximum, NO allreduce) and the
+    # global mass-conserving redistribute runs ONCE per outer barotropic step on
+    # the time-averaged eta, instead of EVERY substep.  clamp_and_redistribute
+    # does n_iter=3 batched allreduces/call, so this cuts the barotropic SUBCYCLE
+    # from ~3*n_substeps allreduces/step (e.g. 90 at n_substeps=30; doubled if
+    # barotropic diffusion is active) to 3 -> a halo-only subcycle = the
+    # multi-node strong-scaling lever (the implicit_cn analogue is the
+    # 120-allreduce PCG wall).  NOTE: the outer-step fix_eta_drift fixer is a
+    # SEPARATE reduction, unaffected by this flag.  BIT-IDENTICAL to the
+    # per-substep-redistribute path whenever no cell hits eta_floor (deep ocean,
+    # no wetting/drying), since both the local jnp.maximum and the redistribute
+    # are then no-ops; differs only in active wetting/drying, where per-step (not
+    # per-substep) global mass correction is the SOTA-standard approximation
+    # (loses per-substep far-field sea-level compensation).  Default False.
+    barotropic_local_subcycle_clamp: bool = False
+    # AB2 time-centering of the barotropic slow forcing F_slow (matches the
+    # Oceananigans split-explicit Gᵁ = AB2-extrapolated depth-integral of the 3D
+    # tendency, vs legoESM's default current-time depth-mean).  Investigated for
+    # the §5 no-in-substep-Coriolis path's barotropic geostrophic balance
+    # (docs/dev-notes/issues/barotropic_mode_noise.md). Default False = bit-identical.
+    barotropic_slow_forcing_ab2: bool = False
+    # Barotropic solver selection (see docs/dev-notes/issues/barotropic_mode_noise.md).
+    # ``"explicit_substep"`` (default) → existing forward-backward substep
+    # loop with cosine/box time filter.
+    # ``"implicit_cn"`` → single-step Crank-Nicolson free surface, PCG
+    # Helmholtz solve.  Eliminates the chequerboard mode by construction;
+    # no substepping, no time filter, no divergence damping needed.
+    barotropic_solver: str = "explicit_substep"
+    # Implicit-solver knobs (only used when ``barotropic_solver = 'implicit_cn'``).
+    # 0.5 = pure Crank-Nicolson (2nd-order, no implicit damping); 1.0 =
+    # fully backward (1st-order, maximum damping).  0.55 is the standard
+    # MITgcm/MPAS-O choice — slightly past CN for chequerboard suppression
+    # while staying close to 2nd-order in time.
+    barotropic_implicit_theta_eta: float = 0.55
+    barotropic_implicit_theta_pgf: float = 0.55
+    barotropic_implicit_pcg_tol: float = 1.0e-10
+    barotropic_implicit_pcg_maxiter: int = 200
+    # Distributed (MPI) implicit-CN knobs.  Under MPI the stock
+    # ``jax.scipy`` CG deadlocks (rank-local dot products + a residual-
+    # dependent ``while_loop`` desynchronise the collective schedule), so
+    # the multi-rank path runs a HAND-ROLLED fixed-iteration PCG of
+    # exactly ``barotropic_implicit_pcg_fixed_iters`` iterations (static
+    # ``fori_loop`` => uniform collective schedule, no deadlock),
+    # UNROLLED and differentiated straight through (the halo
+    # ``_sendrecv_vjp`` + the ``allreduce(SUM)`` dots are AD-safe;
+    # ``custom_linear_solve`` is NOT used because it cannot transpose the
+    # MPI-halo ``custom_vjp`` — see barotropic_common's module note).  The
+    # single-rank path is UNCHANGED (still stock CG).  Default 60 is a
+    # conservative estimate for 1e-10 residual on a diagonally-dominant
+    # Helmholtz at 1°-¼°; it MUST be validated against the returned global
+    # residual (``barotropic_implicit_pcg_residual_tol``) for each deck —
+    # tripole-fold / coastal conditioning can require more.  See
+    # docs/ocean/experiments/distributed_barotropic_pcg.md.
+    barotropic_implicit_pcg_fixed_iters: int = 60
+    barotropic_implicit_pcg_residual_tol: float = 1.0e-10
+    # Force the fixed-iteration PCG even when not distributed.  Two uses:
+    # (1) solver-matched serial parity references — the np>=2 implicit_cn
+    # path ALWAYS runs the fixed-M PCG, so a serial reference using stock
+    # CG differs at the solver-residual level by construction (parity
+    # bisect job 8459362: identical "MISMATCH" across all halo knobs);
+    # (2) performance — the fixed-M PCG measured FASTER single-rank than
+    # stock CG (20.8 vs 24.6 ms, job 8458701).  Under a single process
+    # the PCG's global dots are plain local sums (``is_multi_process()``
+    # gate), so this is safe pre-arming inside an MPI job.
+    barotropic_implicit_force_pcg: bool = False
+    # Distributed-PCG body variant (only used on the fixed-M PCG path):
+    #   "standard"      — 2 sequentially-dependent reductions/iter.
+    #   "single_reduce" — Chronopoulos-Gear recurrences, ONE batched
+    #                     reduction/iter (M+1 vs 2M+1 per solve) — the
+    #                     multi-node weak-scaling lever (probe 8460255:
+    #                     np32 weak growth was allreduce-latency-bound).
+    # Equivalent in exact arithmetic; differs at round-off (solver-
+    # tolerance lane, not bit-exact).  Validated at solver dispatch
+    # (unknown ⇒ ValueError).  OPT-IN, NOT a default (regime-dependent,
+    # measured): single_reduce wins ONLY when the barotropic reductions
+    # dominate the step — small per-rank tiles / high rank counts /
+    # multi-node (LL12 rows/rank: +3-7% np2/4, job 8470723).  At a
+    # PRODUCTION tile (rows/rank=48, job 8475875) the barotropic solve
+    # is ~6-7% of the step (vmix dominates), so the variant is
+    # within-noise neutral — NOT worth flipping the default and risking
+    # the bit-repro lane.  Set it per deck when reduction-latency-bound.
+    barotropic_implicit_pcg_variant: str = "standard"
+    # Preconditioner for the implicit-CN Helmholtz PCG (validated at the
+    # solver entry; unknown ⇒ ValueError):
+    #   "jacobi"     — inverse diagonal (legacy default).
+    #   "zonal_line" — exact periodic-tridiagonal solves per latitude
+    #                  row (cyclic Thomas).  COMMUNICATION-FREE under
+    #                  band MPI (each rank owns full longitude rows) and
+    #                  inverts exactly the pole-tightened zonal
+    #                  couplings that dominate the lat-lon condition
+    #                  number — the EVP-block-preconditioner principle
+    #                  (CESM POP, GMD 9:4209: fewer latency-bound
+    #                  iterations for cheap local FLOPs).  W-self-adjoint
+    #                  by construction (single_reduce-compatible).
+    # OPT-IN, regime-dependent (measured, same caveat as the variant
+    # above): zonal_line + M=20 is +20-26% at small/reduction-bound
+    # tiles (LL12 ≤8/node, job 8475325) but ~neutral at a production
+    # tile (rows/rank=48, job 8475875) where the barotropic solve is
+    # only ~6-7% of the step AND the cyclic-Thomas's sequential
+    # per-iteration FLOPs offset the M=60→20 iteration cut when
+    # compute-bound.  Use it on reduction-latency-bound decks; the
+    # default stays "jacobi".
+    barotropic_implicit_preconditioner: str = "jacobi"
+    # Rigid-lid streamfunction solver knobs (only used when
+    # ``barotropic_solver = 'rigid_lid'``).  The rigid lid removes the free
+    # surface entirely: the depth-integrated flow is non-divergent and carried
+    # by a barotropic streamfunction ψ on vertex (corner) points, solved each
+    # step from the elliptic vorticity equation ∇·((1/H)∇)ψ = curl((1/H)∫F dz)
+    # (Veros core/external/solve_stream.py).  The column depth H is FIXED at the
+    # bathymetry (no eta dependence).  ψ is integrated with Adams-Bashforth-2
+    # reusing ``ab2_epsilon`` as the Veros AB_eps.  The elliptic solve is the
+    # AD-safe ``jax.scipy.sparse.linalg.cg`` (the operator is symmetric).  The
+    # net transport through multiply-connected/periodic-channel domains is set
+    # by the island line-integral constraints (see rigid_lid_islands.py).
+    rigid_lid_cg_tol: float = 1.0e-11
+    rigid_lid_cg_maxiter: int = 1000
+
+
+class RuntimeChecksConfig(NamedTuple):
+    """Runtime validity-bound parameters (#501 config grouping).
+
+    The sanity bounds checked by ``_assert_runtime_invariants`` (gated by
+    ``enable_runtime_checks``): the maximum |eta| and the tracer (T, S) min/max
+    bounds.  Field names are unchanged so the flat YAML / legacy-kwarg interface
+    maps 1:1 through ``LatLonCGridOceanConfig.from_flat``.
+
+    ``min_water_column_m`` is deliberately NOT grouped here: it is a physical
+    wet-cell thickness floor read by grid-agnostic shared code
+    (``ocean_conservation_fixer``, layer-thickness helpers) that also runs on the
+    cube ``OceanConfig`` path, so it stays a flat field to keep that read uniform
+    across config types.
+    """
+
+    enable_runtime_checks: bool = False
+    max_abs_eta_m: float = 1.0e4
+    temperature_min_c: float = -5.0
+    temperature_max_c: float = 45.0
+    salinity_min_psu: float = 0.0
+    salinity_max_psu: float = 50.0
+
+
+class LateralViscosityConfig(NamedTuple):
+    """Lateral momentum viscosity parameters (#501 config grouping).
+
+    Harmonic (Laplacian) ``A_h`` with latitude / equatorial shaping,
+    biharmonic ``B_h``, and the Smagorinsky eddy-viscosity coefficients —
+    the lateral momentum dissipation closure for the lat-lon C-grid ocean.
+    Field names are unchanged so the flat YAML / legacy-kwarg interface
+    maps 1:1 through ``LatLonCGridOceanConfig.from_flat``.  Includes the Leith
+    closure (``C_leith``) and the tripole polar-cap A_h boost (``A_h_cap_*``).
+    """
 
     # --- Lateral (harmonic Laplacian) viscosity ---
     A_h: float = 1.0e4
@@ -799,15 +947,134 @@ class LatLonCGridOceanConfig(NamedTuple):
                                     # the sharp jet (the WBC cold-start blowup).
                                     # ~0.125 (1/8) is a safe 2-D Laplacian cap.
 
-    # --- Bottom drag (dynamics-level; the physics-pathway BottomDragConfig is
-    #     deprecated — set drag here) ---
-    bottom_drag_r: float = 0.0
-    bottom_drag_bbl_thickness: float = 0.0
-    bottom_drag_bg_velocity: float = 0.0  # MOM6 DRAG_BG_VEL [m/s]; when >0,
-                                           # drag is quadratic-with-floor:
-                                           # tau ∝ √(u²+v²+u_bg²) · u, with
-                                           # the linear-in-u limit set to
-                                           # bottom_drag_r at |u|→0.
+
+    # Leith viscosity coefficient (Leith 1996).  When > 0 enables
+    # flow-adaptive biharmonic viscosity ``-∇²(A_L ∇²u)`` with
+    # ``A_L = (C_L · Δ)³ · |∇ζ|`` (or ``sqrt(|∇ζ|² + |∇δ|²)`` when
+    # ``C_leith_modified = True``).  Typical values: 1.0–2.0.  Appended
+    # at the END of the NamedTuple so existing positional call sites
+    # keep working.
+    C_leith: float = 0.0
+    C_leith_modified: bool = False
+
+    # --- Polar-cap viscosity boost (tripolar fold support) ---
+    # Appended at the end of the NamedTuple to preserve positional
+    # construction semantics for legacy callers.  When > 1, multiplies
+    # A_h by 1 + (boost − 1) · S(|lat| − cap_lat_deg) where S is a
+    # smooth tanh ramp of width ``A_h_cap_width_deg``.  Damps the
+    # bipolar-cap cascade on tripolar grids where the cos(lat) scaling
+    # drops to zero at the fold boundary but the deformed cap cells
+    # need stronger dissipation than ``A_h_floor`` alone provides.
+    # Typical ORCA1 production: 5–20.  Disabled by default (1.0) to
+    # preserve bit-exact regression on legacy lat-lon configs.
+    A_h_cap_boost: float = 1.0
+    # Latitude (°N) at which the polar-cap boost ramp begins.  For
+    # tripolar grids, set close to the ``fold_lat`` of the
+    # FoldDescriptor.  Typical 70–80°.
+    A_h_cap_lat_deg: float = 75.0
+    # Half-width of the polar-cap boost tanh transition [°]; default 5°.
+    A_h_cap_width_deg: float = 5.0
+
+class PolarFilterConfig(NamedTuple):
+    """Fourier polar-filter parameters (#501 config grouping).
+
+    The lat-lon pole CFL stabiliser (zonal Fourier-mode truncation poleward
+    of the cutoff).  Field names unchanged so the flat YAML / legacy-kwarg
+    interface maps 1:1 through ``LatLonCGridOceanConfig.from_flat``.
+    """
+
+    # --- Fourier polar filter (lat-lon pole CFL stabiliser) ----------------
+    # A global lat-lon ocean has converging meridians: dx = R*dlon*cos(lat) -> 0
+    # at the poles, so explicit advection/metric terms violate CFL near the pole
+    # and the cold-start blows up (~day 0.25) regardless of integrator.  When
+    # enabled, ``LatLonCGridOceanModel`` truncates the zonal Fourier modes that
+    # exceed the per-latitude CFL limit poleward of the cutoff (the existing
+    # ``grids.polar_filter``, already used by the atmosphere C-grid).  The filter
+    # is MASK-AWARE: land cells are filled with the per-latitude ocean zonal mean
+    # before the FFT and restored afterward, so continental zeros are not smeared
+    # into adjacent ocean (a naive zonal FFT would couple basins across land).
+    # The per-latitude WET-CELL zonal mean is restored after filtering: conserves
+    # the per-row ocean volume (eta) / zonal-mean flow (u) exactly, and tracer
+    # content exactly only where layer thickness is zonally uniform (approximately
+    # under partial cells / z*; a stability filter, not a flux operator).
+    # Off by default (bit-exact for tripole/regression configs).  NOTE: even
+    # mask-aware, a lat-lon grid cannot be fully faithful in the land-locked
+    # Arctic (basins still couple weakly across the pole) — that is why the
+    # faithful OMIP path uses the ORCA tripole; this is for the lat-lon grid's
+    # own stability + a tropics/mid-lat/SH comparison.
+    use_polar_filter: bool = False
+    polar_filter_cutoff_lat_deg: float = 60.0
+    # Max wave speed [m/s] setting the per-latitude CFL wavenumber cap (external
+    # gravity wave ~200-300 m/s; larger -> more aggressive truncation).
+    polar_filter_max_wave_speed: float = 300.0
+    # Fraction of the theoretical CFL wavenumber kept (<1 for margin).
+    polar_filter_safety_factor: float = 0.85
+
+
+class LatLonCGridOceanConfig(NamedTuple):
+    """Configuration for the lat-lon C-grid FV ocean model.
+
+    ~70 fields. This docstring is the *map* the flat field list lacks; the
+    fields group as:
+
+    - **Physical constants**: ``g``, ``rho_0``, ``constants`` (ConstantsConfig).
+    - **Lateral (harmonic) viscosity**: ``A_h`` + ``A_h_lat_scaling``,
+      ``A_h_cos_power``, ``A_h_floor``, ``A_h_eq_boost``/``A_h_eq_sigma_deg``,
+      ``A_h_merid``, ``A_h_cap_*``.
+    - **Biharmonic viscosity**: ``B_h`` + ``B_h_lat_scaling``, ``B_h_barotropic``.
+    - **Eddy-viscosity closures**: ``C_smag``, ``C_smag_lap``, ``C_leith``,
+      ``C_leith_modified``, ``slope_foot_*``.
+    - **Tracer diffusivity / vertical mixing**: ``K_h``, ``K_bih``, ``A_v``,
+      ``K_v``, ``implicit_vertical_mixing``.
+    - **Bottom drag**: ``bottom_drag_r`` + ``bottom_drag_bbl_thickness``,
+      ``bottom_drag_bg_velocity`` (physics-level BottomDragConfig is deprecated).
+    - **Barotropic solver**: ``barotropic_solver``, ``n_barotropic_substeps``,
+      ``bebt``, ``barotropic_div_damp``, ``barotropic_diffusion_*``,
+      ``maxvel_barotropic``, ``barotropic_time_filter``, ``barotropic_implicit_*``,
+      ``differentiable_barotropic``.
+    - **Numerics choices**: ``tracer_advection``, ``momentum_advection``,
+      ``ke_gradient_scheme``, ``weno_d_term``, ``pgf_scheme``,
+      ``tracer_time_integrator``/``ab2_epsilon``, ``hyperdiff_coeff``.
+    - **EOS / eddy param / physics**: ``eos`` (+ ``eos_linear``), ``gm_redi``,
+      ``physics`` (full OceanPhysicsConfig pipeline).
+    - **Conservation & freshwater**: ``use_conservation_fixer``,
+      ``fix_volume``/``fix_heat``/``fix_salt``, ``fix_eta_drift``,
+      ``freshwater_closure``, ``S_ref``.
+    - **Runtime invariant checks**: ``enable_runtime_checks`` + bounds
+      (``min_water_column_m``, ``max_abs_eta_m``, ``temperature_min/max_c``,
+      ``salinity_min/max_psu``).
+
+    Minimal run (everything else defaults to sane Earth values)::
+
+        cfg = LatLonCGridOceanConfig.from_flat()       # constant A_v/K_v, no physics pipeline
+
+    Production-style::
+
+        cfg = LatLonCGridOceanConfig.from_flat(
+            A_h=3e4, A_h_lat_scaling=True, B_h=1e10, C_smag=0.15,
+            bottom_drag_r=2.5e-3, implicit_vertical_mixing=True,
+            barotropic_solver="implicit", eos="wright",
+            physics=OceanPhysicsConfig(...),  # KPP/TKE + GM/Redi
+        )
+
+    Section headers below mark the contiguous top run of fields. The trailing
+    fields (from ``n_barotropic_substeps`` on) are kept in *chronological*
+    append order to preserve positional construction for legacy callers, so
+    they span several topics — use the group-map above to locate them, not the
+    physical field order.
+    """
+
+    # --- Physical constants (defaults reference legoesm.constants; pin via
+    #     ConstantsConfig for a reference-model recipe) ---
+    g: float = constants.g
+    rho_0: float = constants.rho_ocean
+
+    # --- Lateral viscosity (#501 grouped into LateralViscosityConfig) ---
+    lateral_viscosity: LateralViscosityConfig = LateralViscosityConfig()
+
+    # --- Bottom drag (dynamics-level; #501 grouped into DynBottomDragConfig;
+    #     the physics-pathway BottomDragConfig is deprecated — set drag here) ---
+    bottom_drag: DynBottomDragConfig = DynBottomDragConfig()
 
     # --- Tracer diffusivity & vertical mixing (A_v/K_v are constant fallbacks
     #     unless a physics vertical-mixing scheme / implicit_vertical_mixing
@@ -820,7 +1087,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     # === Chronological (positional-stability) tail — grouped in the docstring
     #     map, NOT by field order: barotropic solver, conservation, numerics
     #     choices, runtime-check bounds, polar-cap boost, EOS/physics, constants.
-    n_barotropic_substeps: int = 30
+    barotropic: BarotropicConfig = BarotropicConfig()
     hyperdiff_coeff: float = 0.0
     use_conservation_fixer: bool = False
     fix_volume: bool = True
@@ -837,20 +1104,8 @@ class LatLonCGridOceanConfig(NamedTuple):
     # practice.  Default-on for lat-lon C-grid; MPAS already conserves
     # to machine precision.
     fix_eta_drift: bool = True
-    barotropic_diffusion_alpha: float = 0.01
-    barotropic_diffusion_dt_ref: float = 60.0
-    barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
-    bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
-    maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled. MOM6 uses 6.0.
-    barotropic_time_filter: str = "cosine"  # "box" or "cosine" (shaped filter for time-averaging)
-    enable_runtime_checks: bool = False
     min_water_column_m: float = 0.5
-    max_abs_eta_m: float = 1.0e4
-    temperature_min_c: float = -5.0
-    temperature_max_c: float = 45.0
-    salinity_min_psu: float = 0.0
-    salinity_max_psu: float = 50.0
-    differentiable_barotropic: bool = False
+    runtime_checks: RuntimeChecksConfig = RuntimeChecksConfig()
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0          # Reference salinity for virtual salt flux [PSU]
     # When True, remove the area-mean of the net freshwater flux from the
@@ -864,14 +1119,6 @@ class LatLonCGridOceanConfig(NamedTuple):
     physics: object = None
     eos: str = "wright"
     eos_linear: object = None
-    # Leith viscosity coefficient (Leith 1996).  When > 0 enables
-    # flow-adaptive biharmonic viscosity ``-∇²(A_L ∇²u)`` with
-    # ``A_L = (C_L · Δ)³ · |∇ζ|`` (or ``sqrt(|∇ζ|² + |∇δ|²)`` when
-    # ``C_leith_modified = True``).  Typical values: 1.0–2.0.  Appended
-    # at the END of the NamedTuple so existing positional call sites
-    # keep working.
-    C_leith: float = 0.0
-    C_leith_modified: bool = False
     # Slope-foot viscosity enhancement (MOM6 OM4 KH_BG_2D analog).
     # When > 0, multiplies horizontal viscosity (A_h Laplacian, Smagorinsky,
     # Leith) in the bottom N levels by 1 + alpha · tanh(|∇H|/H/δ),
@@ -881,7 +1128,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     slope_foot_alpha: float = 0.0       # 0 = disabled; production: 3.0
     slope_foot_threshold: float = 0.1   # MOM6 default
     slope_foot_n_levels: int = 5        # bottom 5 levels
-    momentum_advection: str = "vector_invariant"  # "vector_invariant", "weno5", or "weno7"
+    momentum_advection: str = "vector_invariant"  # "vector_invariant", "weno5", "weno7", "weno9", "flux_form"
     # Kinetic-energy gradient scheme for the vector-invariant form.
     # ``"centered"`` (default; legacy bit-exact): legoESM's existing
     # ``KE = 0.5·((⟨u⟩ᵢ)² + (⟨v⟩ⱼ)²)`` form. The standard centered
@@ -897,101 +1144,79 @@ class LatLonCGridOceanConfig(NamedTuple):
                               # Implemented with proper split: matching-direction divergence
                               # is WENO-upwinded, cross-direction stays centered (Appendix C).
                               # Set False to disable the divergent-mode dissipation.
-    # Barotropic solver selection (see docs/issues/barotropic_mode_noise.md).
-    # ``"explicit_substep"`` (default) → existing forward-backward substep
-    # loop with cosine/box time filter.
-    # ``"implicit_cn"`` → single-step Crank-Nicolson free surface, PCG
-    # Helmholtz solve.  Eliminates the chequerboard mode by construction;
-    # no substepping, no time filter, no divergence damping needed.
-    barotropic_solver: str = "explicit_substep"
-    # Implicit-solver knobs (only used when ``barotropic_solver = 'implicit_cn'``).
-    # 0.5 = pure Crank-Nicolson (2nd-order, no implicit damping); 1.0 =
-    # fully backward (1st-order, maximum damping).  0.55 is the standard
-    # MITgcm/MPAS-O choice — slightly past CN for chequerboard suppression
-    # while staying close to 2nd-order in time.
-    barotropic_implicit_theta_eta: float = 0.55
-    barotropic_implicit_theta_pgf: float = 0.55
-    barotropic_implicit_pcg_tol: float = 1.0e-10
-    barotropic_implicit_pcg_maxiter: int = 200
-    # Distributed (MPI) implicit-CN knobs.  Under MPI the stock
-    # ``jax.scipy`` CG deadlocks (rank-local dot products + a residual-
-    # dependent ``while_loop`` desynchronise the collective schedule), so
-    # the multi-rank path runs a HAND-ROLLED fixed-iteration PCG of
-    # exactly ``barotropic_implicit_pcg_fixed_iters`` iterations (static
-    # ``fori_loop`` => uniform collective schedule, no deadlock),
-    # UNROLLED and differentiated straight through (the halo
-    # ``_sendrecv_vjp`` + the ``allreduce(SUM)`` dots are AD-safe;
-    # ``custom_linear_solve`` is NOT used because it cannot transpose the
-    # MPI-halo ``custom_vjp`` — see barotropic_common's module note).  The
-    # single-rank path is UNCHANGED (still stock CG).  Default 60 is a
-    # conservative estimate for 1e-10 residual on a diagonally-dominant
-    # Helmholtz at 1°-¼°; it MUST be validated against the returned global
-    # residual (``barotropic_implicit_pcg_residual_tol``) for each deck —
-    # tripole-fold / coastal conditioning can require more.  See
-    # docs/ocean_experiments/distributed_barotropic_pcg.md.
-    barotropic_implicit_pcg_fixed_iters: int = 60
-    barotropic_implicit_pcg_residual_tol: float = 1.0e-10
-    # Force the fixed-iteration PCG even when not distributed.  Two uses:
-    # (1) solver-matched serial parity references — the np>=2 implicit_cn
-    # path ALWAYS runs the fixed-M PCG, so a serial reference using stock
-    # CG differs at the solver-residual level by construction (parity
-    # bisect job 8459362: identical "MISMATCH" across all halo knobs);
-    # (2) performance — the fixed-M PCG measured FASTER single-rank than
-    # stock CG (20.8 vs 24.6 ms, job 8458701).  Under a single process
-    # the PCG's global dots are plain local sums (``is_multi_process()``
-    # gate), so this is safe pre-arming inside an MPI job.
-    barotropic_implicit_force_pcg: bool = False
-    # Distributed-PCG body variant (only used on the fixed-M PCG path):
-    #   "standard"      — 2 sequentially-dependent reductions/iter.
-    #   "single_reduce" — Chronopoulos-Gear recurrences, ONE batched
-    #                     reduction/iter (M+1 vs 2M+1 per solve) — the
-    #                     multi-node weak-scaling lever (probe 8460255:
-    #                     np32 weak growth was allreduce-latency-bound).
-    # Equivalent in exact arithmetic; differs at round-off (solver-
-    # tolerance lane, not bit-exact).  Validated at solver dispatch
-    # (unknown ⇒ ValueError).  OPT-IN, NOT a default (regime-dependent,
-    # measured): single_reduce wins ONLY when the barotropic reductions
-    # dominate the step — small per-rank tiles / high rank counts /
-    # multi-node (LL12 rows/rank: +3-7% np2/4, job 8470723).  At a
-    # PRODUCTION tile (rows/rank=48, job 8475875) the barotropic solve
-    # is ~6-7% of the step (vmix dominates), so the variant is
-    # within-noise neutral — NOT worth flipping the default and risking
-    # the bit-repro lane.  Set it per deck when reduction-latency-bound.
-    barotropic_implicit_pcg_variant: str = "standard"
-    # Preconditioner for the implicit-CN Helmholtz PCG (validated at the
-    # solver entry; unknown ⇒ ValueError):
-    #   "jacobi"     — inverse diagonal (legacy default).
-    #   "zonal_line" — exact periodic-tridiagonal solves per latitude
-    #                  row (cyclic Thomas).  COMMUNICATION-FREE under
-    #                  band MPI (each rank owns full longitude rows) and
-    #                  inverts exactly the pole-tightened zonal
-    #                  couplings that dominate the lat-lon condition
-    #                  number — the EVP-block-preconditioner principle
-    #                  (CESM POP, GMD 9:4209: fewer latency-bound
-    #                  iterations for cheap local FLOPs).  W-self-adjoint
-    #                  by construction (single_reduce-compatible).
-    # OPT-IN, regime-dependent (measured, same caveat as the variant
-    # above): zonal_line + M=20 is +20-26% at small/reduction-bound
-    # tiles (LL12 ≤8/node, job 8475325) but ~neutral at a production
-    # tile (rows/rank=48, job 8475875) where the barotropic solve is
-    # only ~6-7% of the step AND the cyclic-Thomas's sequential
-    # per-iteration FLOPs offset the M=60→20 iteration cut when
-    # compute-bound.  Use it on reduction-latency-bound decks; the
-    # default stays "jacobi".
-    barotropic_implicit_preconditioner: str = "jacobi"
-    # Rigid-lid streamfunction solver knobs (only used when
-    # ``barotropic_solver = 'rigid_lid'``).  The rigid lid removes the free
-    # surface entirely: the depth-integrated flow is non-divergent and carried
-    # by a barotropic streamfunction ψ on vertex (corner) points, solved each
-    # step from the elliptic vorticity equation ∇·((1/H)∇)ψ = curl((1/H)∫F dz)
-    # (Veros core/external/solve_stream.py).  The column depth H is FIXED at the
-    # bathymetry (no eta dependence).  ψ is integrated with Adams-Bashforth-2
-    # reusing ``ab2_epsilon`` as the Veros AB_eps.  The elliptic solve is the
-    # AD-safe ``jax.scipy.sparse.linalg.cg`` (the operator is symmetric).  The
-    # net transport through multiply-connected/periodic-channel domains is set
-    # by the island line-integral constraints (see rigid_lid_islands.py).
-    rigid_lid_cg_tol: float = 1.0e-11
-    rigid_lid_cg_maxiter: int = 1000
+    # WENO vector-invariant smoothness measure (Silvestri et al. 2024). Selects
+    # the "V" vs "D" scheme family for momentum_advection in {weno5,weno7,weno9}:
+    #   "split"    (default, = W*V, Oceananigans CrossAndSelfUpwinding): vorticity
+    #              uses VELOCITY smoothness {ζ;u} (Eq 43) and divergence uses the
+    #              FULL-divergence smoothness {δU; D} (Eq 45). Lower implicit
+    #              dissipation / higher effective resolution (the paper's W9V).
+    #   "standard" (= W*D, OnlySelfUpwinding): vorticity uses self-smoothness
+    #              {ζ;ζ} (Eq 37) and divergence uses self-smoothness {δU; δU}
+    #              (Eq 44). The paper notes the divergence choice "has a large
+    #              impact on the solution" (W9D is markedly more dissipative).
+    weno_smoothness: str = "split"
+    # DECOUPLED divergence-flux (D-term) smoothness, independent of the vorticity
+    # smoothness above. Oceananigans' WENOVectorInvariant uses TWO independent
+    # choices: ``vorticity_stencil`` (VelocityStencil, Eq 43 = our "split" vorticity)
+    # AND ``upwinding`` (OnlySelfUpwinding, Eq 44 = "standard"/self divergence) — a
+    # mix the single ``weno_smoothness`` flag cannot express ("split" forces the
+    # divergence to the more-aggressive Eq-45 full-divergence smoothness; "standard"
+    # forces the vorticity to self-smoothness). At marginal (eddy-permitting)
+    # resolution the Eq-45 divergence under-dissipates the 2dx grid mode and a
+    # baroclinic-eddy field runs away, while Oceananigans (Eq-44 self-divergence)
+    # saturates. ``None`` (default) = follow ``weno_smoothness`` for BOTH (bit-
+    # identical to the historical behaviour); set ``"standard"`` to get the faithful
+    # Oceananigans OnlySelfUpwinding divergence while keeping ``weno_smoothness=
+    # "split"`` VelocityStencil vorticity.
+    weno_divergence_smoothness: str | None = None
+    # Sadourny ENSTROPHY-CONSERVING metric weighting of the vorticity-flux transport
+    # velocity. Oceananigans' WENOVectorInvariant builds the transport at the u-point as
+    # v̂ = 0.25·Σ(Δx_v·v)/Δx_u (vector_invariant_advection.jl: ℑxᶠᵃᵃ(ℑyᵃᶜᵃ,Δx_q·v)·Δx⁻¹),
+    # a Δx (cos-lat) WEIGHTED average — the Sadourny form that conserves enstrophy at
+    # FINITE amplitude on a non-uniform metric. legoESM's default forms v_at_u / Fv_at_u
+    # as PLAIN 4-point averages (Δx-weighting dropped), which under-dissipates the
+    # finite-amplitude 2Δx grid mode (the §5 residual). True selects the faithful
+    # metric-weighted transport (and the matching Δy weighting on û for the v-equation);
+    # False (default) keeps the plain average (bit-identical to historical behaviour; a
+    # no-op on uniform-metric Cartesian grids where Δx_v ≡ Δx_u).
+    vortcor_enstrophy_metric: bool = False
+    # Reconstruct the RELATIVE VORTICITY ζ directly in the WENO vorticity flux (the
+    # Oceananigans WENOVectorInvariant form: flux = v̂·ζᴿ with ζᴿ = WENO(ζ₃ᶠᶠᶜ)), instead
+    # of legoESM's default POTENTIAL-vorticity form (reconstruct q=ζ/h, ×mass-flux h·v).
+    # The two are identical when h is uniform (η≈0, linear), but at FINITE amplitude η
+    # makes h vary and WENO(ζ/h)·(h·v) ≠ WENO(ζ)·v (the WENO is nonlinear over the
+    # h-varying stencil) — a candidate for the §5 finite-amplitude under-dissipation.
+    # Faithful ONLY on flat-bottom / no-partial-cell setups (the Oceananigans idealized
+    # cases): the q-form is retained by default because it conserves potential enstrophy
+    # on partial-cell topography (AL81 triad; real ETOPO). False (default) = q-form.
+    vortcor_reconstruct_zeta: bool = False
+    # WENO vertical momentum advection of the FULL velocity (matches Oceananigans, which
+    # advects the full horizontal momentum vertically) instead of legoESM's default
+    # baroclinic PERTURBATION u'=u−U_bar. The two differ by the flux-form redistribution
+    # −∂(w·U_bar)/∂z = U_bar·∇·u_h (depth-integral zero; U_bar is depth-independent so
+    # there is NO extra WENO dissipation, only this redistribution term legoESM omits).
+    # Candidate for the INTERIOR finite-amplitude baroclinic-eddy runaway (the §5 residual
+    # is at the front, NOT the walls). False (default) = perturbation (bit-identical).
+    weno_vertadv_full_velocity: bool = False
+    # GH #480: rate [1/s] of the N/S free-slip-wall 2dx-in-lon grid-mode filter,
+    # localised to the first/last 8 wall rows (zero in the interior). Default 0.0
+    # (OFF). Needed only for eddy-permitting channel runs with WENO vector-invariant
+    # momentum + free-slip walls (e.g. the Silvestri §5 jet), where the rotational
+    # 2dx wall mode is un-dissipatable by advection (no zonal velocity). NOT a
+    # domain viscosity/closure — a boundary Shapiro filter on the wall rows only.
+    wall_grid_filter_rate_s: float = 0.0
+    # GH #480 (faithful root fix): zero-gradient (Neumann) fill the tracer over
+    # land BEFORE the flux-form advection reconstruction, so the wide WENO
+    # stencil at the first wet faces sees a flat extension instead of the masked
+    # cold land cell (T=0).  The masked cold cell otherwise manufactures a
+    # spurious near-wall tracer front that a 2dx-in-lon v perturbation amplifies
+    # into an un-dissipatable grid mode at free-slip walls (the §5 eddy-permitting
+    # blow-up).  This is the physical no-flux insulating wall = Oceananigans'
+    # clean grid-edge wall; the wall-face flux stays zero (mass_flux_u/v), so
+    # wet-domain tracer is conserved and interior values are unchanged.  It is a
+    # strict no-op where there is no land (periodic/global aquaplanet).  Default
+    # ON: the masked cold-cell contamination is a bug for any masked-land run.
+    tracer_wall_neumann_fill: bool = True
     # Pressure-gradient force scheme on partial cells.  ``"adcroft"``
     # (default): existing centered-diff p_prime + Adcroft & Campin 2004
     # face-PGF correction.  ``"smc03"``: full Shchepetkin & McWilliams
@@ -999,7 +1224,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     # reconstruction — closes the BH partial-cell gap by avoiding the
     # single-level z-spike that the Adcroft correction produces and that
     # drives the 2Δz computational mode.  See
-    # docs/ocean_experiments/density_jacobian_pgf_plan.md.  Pure-z*
+    # docs/ocean/experiments/density_jacobian_pgf_plan.md.  Pure-z*
     # runs ignore this field (the existing path is identical).
     pgf_scheme: str = "adcroft"
     # Tracer time integration for the flux-form advection step.
@@ -1055,28 +1280,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # (`MPASOceanConfig`) also defaults True. The lat-lon default was
     # flipped from False to True on 2026-05-14 after a DINO forced run
     # at j=0,i=26 hit the explicit-CFL bound under KPP-driven cold
-    # restoring (see docs/ocean_experiments/dino_replication_plan.md
+    # restoring (see docs/ocean/experiments/dino_replication_plan.md
     # Finding 5). Set explicit ``implicit_vertical_mixing=False`` to
     # reproduce the historical explicit-diffusion behavior.
     implicit_vertical_mixing: bool = True
 
-    # --- Polar-cap viscosity boost (tripolar fold support) ---
-    # Appended at the end of the NamedTuple to preserve positional
-    # construction semantics for legacy callers.  When > 1, multiplies
-    # A_h by 1 + (boost − 1) · S(|lat| − cap_lat_deg) where S is a
-    # smooth tanh ramp of width ``A_h_cap_width_deg``.  Damps the
-    # bipolar-cap cascade on tripolar grids where the cos(lat) scaling
-    # drops to zero at the fold boundary but the deformed cap cells
-    # need stronger dissipation than ``A_h_floor`` alone provides.
-    # Typical ORCA1 production: 5–20.  Disabled by default (1.0) to
-    # preserve bit-exact regression on legacy lat-lon configs.
-    A_h_cap_boost: float = 1.0
-    # Latitude (°N) at which the polar-cap boost ramp begins.  For
-    # tripolar grids, set close to the ``fold_lat`` of the
-    # FoldDescriptor.  Typical 70–80°.
-    A_h_cap_lat_deg: float = 75.0
-    # Half-width of the polar-cap boost tanh transition [°]; default 5°.
-    A_h_cap_width_deg: float = 5.0
     # Ocean-scoped physical constants (Phase G, G-C1). Defaults reference
     # legoesm.constants (canonical Earth) -> zero behaviour change. A recipe
     # pins these to a reference model (e.g. Veros) via the public config API.
@@ -1134,6 +1342,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     vector operators). The ACC recipe opts in. Literal default -> safe after
     #     `constants`.
     lateral_viscosity_operator: str = "vector_laplacian"
+    # Lateral side boundary condition for the harmonic viscosity:
+    #   "free_slip" (default) — viscous flux zeroed at walls (∂u_tang/∂n = 0).
+    #   "no_slip"  — MITgcm no_slip_sides: adds the wall side-drag
+    #                -(2/Δy)·A_h·u (mom_u_sidedrag / mom_v_sidedrag, sideDragFactor=2).
+    lateral_side_bc: str = "free_slip"
     # Asynchronous ("distorted-physics") time stepping: dt_mom = dt / dt_mom_ratio.
     # The `dt` passed to step()/integrate_scan IS dt_tracer (the clock — Veros
     # advances vs.time by dt_tracer), and momentum + the barotropic solve + implicit
@@ -1214,32 +1427,8 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Freezing point of seawater in degC (model T is in degC).  Defaults to
     # ``T_freeze_ocean - T_freeze`` = -1.8 C (constants, not a literal).
     freeze_floor_temp_c: float = _T_FREEZE_OCEAN_C
-    # --- Fourier polar filter (lat-lon pole CFL stabiliser) ----------------
-    # A global lat-lon ocean has converging meridians: dx = R*dlon*cos(lat) -> 0
-    # at the poles, so explicit advection/metric terms violate CFL near the pole
-    # and the cold-start blows up (~day 0.25) regardless of integrator.  When
-    # enabled, ``LatLonCGridOceanModel`` truncates the zonal Fourier modes that
-    # exceed the per-latitude CFL limit poleward of the cutoff (the existing
-    # ``grids.polar_filter``, already used by the atmosphere C-grid).  The filter
-    # is MASK-AWARE: land cells are filled with the per-latitude ocean zonal mean
-    # before the FFT and restored afterward, so continental zeros are not smeared
-    # into adjacent ocean (a naive zonal FFT would couple basins across land).
-    # The per-latitude WET-CELL zonal mean is restored after filtering: conserves
-    # the per-row ocean volume (eta) / zonal-mean flow (u) exactly, and tracer
-    # content exactly only where layer thickness is zonally uniform (approximately
-    # under partial cells / z*; a stability filter, not a flux operator).
-    # Off by default (bit-exact for tripole/regression configs).  NOTE: even
-    # mask-aware, a lat-lon grid cannot be fully faithful in the land-locked
-    # Arctic (basins still couple weakly across the pole) — that is why the
-    # faithful OMIP path uses the ORCA tripole; this is for the lat-lon grid's
-    # own stability + a tropics/mid-lat/SH comparison.
-    use_polar_filter: bool = False
-    polar_filter_cutoff_lat_deg: float = 60.0
-    # Max wave speed [m/s] setting the per-latitude CFL wavenumber cap (external
-    # gravity wave ~200-300 m/s; larger -> more aggressive truncation).
-    polar_filter_max_wave_speed: float = 300.0
-    # Fraction of the theoretical CFL wavenumber kept (<1 for margin).
-    polar_filter_safety_factor: float = 0.85
+    # --- Fourier polar filter (#501 grouped into PolarFilterConfig) ---
+    polar_filter: PolarFilterConfig = PolarFilterConfig()
 
     # --- Additive momentum vertical-friction placement (Veros) ---
     # Veros computes the implicit vertical-friction increment du_mix from the
@@ -1304,6 +1493,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     # warns at 0.5 and 0.55. Default
     # "matsuno_split" ⇒ BIT-IDENTICAL for every existing config.
     coriolis_scheme: str = "matsuno_split"
+    # Energy-conserving (Sadourny vertex-f) C-grid Coriolis.  DEFAULT False keeps
+    # the existing face-f stencil (f_u·v→u, f_v·u→v) BYTE-IDENTICAL.  When True,
+    # both the barotropic-solver Coriolis and the Matsuno baroclinic sub-step use
+    # the single shared VERTEX f so Σu·cor_u+Σv·cor_v == 0 on a β-plane (the
+    # face-f form leaks ~1e-6·f·KE because f_u != f_v when f varies with lat —
+    # the MITgcm barotropic-gyre oracle residual; see
+    # docs/ocean/fidelity/mitgcm_gyre_energy_conservation.md).  On an f-plane the
+    # two forms agree.  Applies to matsuno_split + implicit_cn/rigid_lid.
+    coriolis_energy_conserving: bool = False
 
     # --- AB2 extrapolation scope (Veros-faithful dissipative placement) ---
     # Selects WHICH explicit tendencies the AB2 outer integrator extrapolates:
@@ -1385,3 +1583,136 @@ class LatLonCGridOceanConfig(NamedTuple):
     # validation).  Default False ⇒ the explicit stage-10c placement ⇒
     # BIT-IDENTICAL.
     sponge_forcing_implicit: bool = False
+    # Lateral-friction CLOSURE selector (independent of the A_h/B_h/C_smag/C_leith
+    # knobs above). "none" (default) → those knobs apply as usual. "om4p25" → the
+    # GFDL OM4p25 Laplacian+biharmonic max(Smag,static) closure (Silvestri "SM2");
+    # set the A_h/B_h/C_smag/C_leith knobs to 0 in that recipe so OM4p25 is the
+    # sole lateral friction. Coefficients live in ``omp25`` (OMp25Config).
+    lateral_friction_scheme: str = "none"
+    omp25: object = None   # OMp25Config or None (defaults to OMp25Config() when scheme="om4p25")
+    qg_leith_coeff: float = 2.0   # QG-Leith coefficient C (paper QG2 uses C=2); used when
+    #   lateral_friction_scheme="qg_leith". HARMONIC ν=(C·Δ/π)³·√(|∇Q|²+|∇δ|²).
+    # FULL QG2 (B5b): when True the baroclinic stretching term ∂_z(f/N²∇b) is added to the PV
+    # gradient (∇q₁) with the Bachman grid-Burger/grid-Rossby min-bound — the faithful paper QG2.
+    # Default False = BAROTROPIC ∇(ζ+f) (label "QG-Leith (barotropic)" in a comparison matrix).
+    qg_leith_stretching: bool = False
+    qg_leith_deformation_radius_m: float = 6.75e3   # L_d for the grid-Burger bound [m].
+    # --- Veros u_centered dzw slot for the implicit vertical-diffusion solves ---
+    # Selects the GRADIENT divisor (the center-to-center spacing) used by the
+    # backward-Euler tracer (T/S) and momentum-friction vertical-diffusion solves:
+    #   False (DEFAULT, BIT-IDENTICAL) — the midpoint reconstruction
+    #     ``build_dz_half(dz_cell) = 0.5(dz_k + dz_{k+1})``.
+    #   True (VEROS-FAITHFUL) — the coordinate's center-to-center spacing
+    #     ``z_coord.dz_half_ref · J`` (Jacobian-scaled like every other
+    #     thickness), i.e. Veros's ``dzw`` (thermodynamics.py:267
+    #     ``delta = dt·kappaH/dzw``; same divisor for friction).  On a u_centered
+    #     z-coordinate (the Veros-faithful ACC recipe) dz_half_ref alternates
+    #     around the midpoint value exactly as Veros's dzw does (face ratios up to
+    #     2.0 at the top face, ±10% below), so at IDENTICAL diffusivity the
+    #     discrete flux differs per level.  This is the missed twin of the B3 slot
+    #     fixes (N²/TKE/GM were moved to dz_half_ref·J; the implicit solves were
+    #     not).  On a midpoint z-star coordinate dz_half_ref == build_dz_half(dz_ref)
+    #     so the flag is a NO-OP there.  The CONTROL volume (dz_cell / dz_u / dz_v)
+    #     is unchanged — only the gradient slot moves.  Requires
+    #     ``implicit_vertical_mixing=True`` (rejected otherwise at config
+    #     validation).  Default False ⇒ BIT-IDENTICAL for every existing config.
+    implicit_vmix_dzw_slot: bool = False
+    # --- Meridionally-FLAT (Oceananigans `Flat`-y topology) ---
+    # When True, every meridional DIFFERENCE operator returns 0 — the faithful
+    # legoESM analog of an Oceananigans `topology=(…, Flat, …)` dimension
+    # (`δyᵃᶜᵃ(grid::Flat)=zero`).  v stays prognostic (so the Coriolis f×u→v
+    # rotation works) but no ∂/∂y ever exists, so (a) there is NO meridional
+    # pressure gradient → no closed-basin geostrophic locking of the barotropic
+    # mode, and (b) NO 2Δy mode can form.  This is the faithful 2-D x–z setting the
+    # Oceananigans internal_tide oracle uses; required to reproduce it (#576).
+    # ``LatLonCGridOceanModel`` pushes this to the process-global
+    # ``halo_latlon.set_meridionally_flat`` (the grid-operators backend flag, same
+    # pattern as the halo backend) at construction.  Default False ⇒ BIT-IDENTICAL.
+    meridionally_flat: bool = False
+
+    @classmethod
+    def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
+        """Construct from FLAT keyword args (the legacy / YAML field names),
+        distributing #501-grouped fields into their nested sub-configs.
+
+        The canonical nested constructor is the NamedTuple itself
+        (``LatLonCGridOceanConfig.from_flat(bottom_drag=DynBottomDragConfig(...), ...)``);
+        this is the back-compatible flat entry point that existing call sites and
+        the YAML loader use, so a caller can keep passing the flat
+        ``bottom_drag_r=...`` and it is routed into ``bottom_drag``.  An unknown
+        field raises (NamedTuple validates the residual kwargs) — typos stay
+        loud.  Passing a sub-config object directly (``bottom_drag=...``) is
+        also accepted (it falls through unchanged).
+        """
+        nested = {}
+        _bd = {k: flat.pop(k) for k in DynBottomDragConfig._fields if k in flat}
+        if _bd:
+            nested["bottom_drag"] = DynBottomDragConfig(**_bd)
+        _bt = {k: flat.pop(k) for k in BarotropicConfig._fields if k in flat}
+        if _bt:
+            nested["barotropic"] = BarotropicConfig(**_bt)
+        _rc = {k: flat.pop(k) for k in RuntimeChecksConfig._fields if k in flat}
+        if _rc:
+            nested["runtime_checks"] = RuntimeChecksConfig(**_rc)
+        _lv = {k: flat.pop(k) for k in LateralViscosityConfig._fields if k in flat}
+        if _lv:
+            nested["lateral_viscosity"] = LateralViscosityConfig(**_lv)
+        _pf = {k: flat.pop(k) for k in PolarFilterConfig._fields if k in flat}
+        if _pf:
+            nested["polar_filter"] = PolarFilterConfig(**_pf)
+        return cls(**nested, **flat)
+
+    @classmethod
+    def flat_fields(cls) -> frozenset:
+        """The accepted FLAT field names (#501): the top-level fields with each
+        grouped sub-config replaced by its member field names.  Drives both
+        :meth:`from_flat` distribution and the flat ``ocean.*`` YAML typo-check,
+        so the flat construction / YAML interface stays 1:1 with the pre-grouping
+        field set even though the storage is nested.  Extend per nested group.
+        """
+        names = set(cls._fields) - {"bottom_drag", "barotropic", "runtime_checks",
+                                    "lateral_viscosity", "polar_filter"}
+        names |= set(DynBottomDragConfig._fields)
+        names |= set(BarotropicConfig._fields)
+        names |= set(RuntimeChecksConfig._fields)
+        names |= set(LateralViscosityConfig._fields)
+        names |= set(PolarFilterConfig._fields)
+        return frozenset(names)
+
+    def flat_get(self, name: str):
+        """Read a field by its FLAT name (#501) — the read-side inverse of
+        :meth:`from_flat` / :meth:`flat_fields`.  Resolves the grouped members
+        through their nested sub-config, so reflective code that iterates flat
+        field names (recipe-card audits, parity loops) keeps working:
+        ``cfg.flat_get("barotropic_solver")`` == ``cfg.barotropic.barotropic_solver``.
+        """
+        if name in DynBottomDragConfig._fields:
+            return getattr(self.bottom_drag, name)
+        if name in BarotropicConfig._fields:
+            return getattr(self.barotropic, name)
+        if name in RuntimeChecksConfig._fields:
+            return getattr(self.runtime_checks, name)
+        if name in LateralViscosityConfig._fields:
+            return getattr(self.lateral_viscosity, name)
+        if name in PolarFilterConfig._fields:
+            return getattr(self.polar_filter, name)
+        return getattr(self, name)
+
+    def replace_flat(self, **overrides) -> "LatLonCGridOceanConfig":
+        """``_replace`` by FLAT field names (#501) — the ``_replace`` analog of
+        :meth:`from_flat`.  Distributes grouped overrides into their nested
+        sub-configs, so dict-splat override sites (recipe scheme presets, CLI
+        overrides) that pass flat names keep working:
+        ``cfg.replace_flat(A_h=0.0, barotropic_solver="rigid_lid")``.
+        """
+        nested = {}
+        for sub_name, sub_cls in (("bottom_drag", DynBottomDragConfig),
+                                  ("barotropic", BarotropicConfig),
+                                  ("runtime_checks", RuntimeChecksConfig),
+                                  ("lateral_viscosity", LateralViscosityConfig),
+                                  ("polar_filter", PolarFilterConfig)):
+            members = {k: overrides.pop(k) for k in list(overrides)
+                       if k in sub_cls._fields}
+            if members:
+                nested[sub_name] = getattr(self, sub_name)._replace(**members)
+        return self._replace(**nested, **overrides)

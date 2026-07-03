@@ -11,7 +11,10 @@ from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
 from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
 from legoesm.ocean.physics.lateral_mixing.harmonic import harmonic_lateral_mixing
 from legoesm.ocean.physics.lateral_mixing.biharmonic import biharmonic_lateral_mixing
-from legoesm.ocean.physics.lateral_mixing.gm_redi import gm_redi_lateral_mixing
+from legoesm.ocean.physics.lateral_mixing.gm_redi import (
+    gm_redi_lateral_mixing,
+    validate_cubed_sphere_gm_redi_config,
+)
 from legoesm.ocean.physics.tendencies import make_none_physics_fn, wrap_ocean_tendencies
 
 
@@ -77,9 +80,15 @@ def _make_gm_redi(config: LateralMixingConfig) -> Callable:
     ``gm_redi_latlon_cgrid.gm_redi_tracer_tendency_latlon`` directly
     from ``ocean_model_latlon_cgrid.py``.  Unifying the factory to
     support both grids is tracked as a known gap (see
-    ``docs/ocean_experiments/gm_redi_latlon_cgrid_plan.md``).
+    ``docs/ocean/experiments/gm_redi_latlon_cgrid_plan.md``).
     """
     cfg = config.gm_redi
+
+    # Fail fast at factory-build time if the config sets a field the
+    # cubed-sphere GM/Redi leaf does not honor (those are lat-lon C-grid
+    # only).  Validated here on the static Python config so the error is
+    # surfaced before the JIT-traced physics_fn ever runs.
+    validate_cubed_sphere_gm_redi_config(cfg)
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
                    z_coord: OceanZStarCoordinate,

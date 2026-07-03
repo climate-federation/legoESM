@@ -91,3 +91,25 @@ def test_apply_aam_correction_pe_only_adjusts_u_d_v_d():
     # u_d, v_d changed
     assert not jnp.array_equal(state_corr.u_d.data, state_new.u_d.data)
     assert not jnp.array_equal(state_corr.v_d.data, state_new.v_d.data)
+
+
+def test_apply_aam_correction_pe_is_jit_and_grad_safe():
+    """PR B #2: the correction advertised 'Differentiable end-to-end' but the
+    old Newton loop used a host ``float()`` AAM + a data-dependent ``break`` on
+    a traced scalar, so it could not be jit/grad'd. The fixed-iteration lax loop
+    must now compile under jit and yield finite reverse-mode gradients."""
+    grid, coord, state_old = _build_pe(u_amp=0.0)
+    _, _, state_new = _build_pe(u_amp=5.0)
+
+    jitted = jax.jit(lambda s: apply_aam_correction_pe(state_old, s, grid, coord))
+    out = jitted(state_new)
+    assert jnp.all(jnp.isfinite(out.u_d.data))
+
+    def loss(u_new):
+        sn = state_new._replace(u_d=state_new.u_d.replace(data=u_new))
+        corr = apply_aam_correction_pe(state_old, sn, grid, coord)
+        return jnp.sum(corr.u_d.data ** 2 + corr.v_d.data ** 2)
+
+    g = jax.grad(loss)(state_new.u_d.data)
+    assert jnp.all(jnp.isfinite(g)), "grad through PE AAM correction is non-finite"
+    assert float(jnp.max(jnp.abs(g))) > 0.0, "grad is identically zero"

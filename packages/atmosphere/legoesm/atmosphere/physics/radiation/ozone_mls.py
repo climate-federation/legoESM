@@ -30,6 +30,7 @@ levels, but are not bit-identical at arbitrary intermediate pressures.
 
 from __future__ import annotations
 
+import numpy as np
 import jax.numpy as jnp
 
 # MLS standard-atmosphere pressure [hPa] and O3 volume mixing ratio [mol/mol],
@@ -58,8 +59,12 @@ _MLS_O3_VMR = (
 
 # Pre-sorted ASCENDING in pressure (top -> surface) for jnp.interp, with the
 # interpolation done in log space: x = log(p), y = log(O3).
-_LOGP_ASC = jnp.log(jnp.asarray(_MLS_P_HPA[::-1]))
-_LOGO3_ASC = jnp.log(jnp.asarray(_MLS_O3_VMR[::-1]))
+#
+# Keep these as NumPy constants.  This module is imported lazily by the radiation
+# path, which can happen while an SCM step is being traced by jax.jit/lax.scan;
+# initializing JAX arrays here would cache DynamicJaxprTracers in module globals.
+_LOGP_ASC = np.log(np.asarray(_MLS_P_HPA[::-1], dtype=np.float64))
+_LOGO3_ASC = np.log(np.asarray(_MLS_O3_VMR[::-1], dtype=np.float64))
 
 
 def mls_ozone_vmr(p_full: jnp.ndarray) -> jnp.ndarray:
@@ -71,5 +76,5 @@ def mls_ozone_vmr(p_full: jnp.ndarray) -> jnp.ndarray:
     interp is piecewise-linear).
     """
     log_p = jnp.log(jnp.clip(p_full, 1.0e-2) / 100.0)   # coeff-ok: pressure floor [Pa]; /100=Pa->hPa
-    log_o3 = jnp.interp(log_p, _LOGP_ASC, _LOGO3_ASC)
+    log_o3 = jnp.interp(log_p, jnp.asarray(_LOGP_ASC), jnp.asarray(_LOGO3_ASC))
     return jnp.exp(log_o3)

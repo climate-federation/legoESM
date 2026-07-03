@@ -333,31 +333,31 @@ def test_edmf_updraft_area_bounds():
 def test_stratosphere_mass_flux_gate_actually_closes():
     """The gate must vanish (not merely attenuate) in the deep stratosphere.
 
-    Codex caught a regression where the default sharpness equalled the
-    cutoff, leaving the gate at sigmoid(-1) ≈ 0.27 at the model top —
-    only halving M_u rather than zeroing it.  This test pins the
-    behaviour at canonical pressure levels so a future tuning that
-    relaxes the cutoff cannot silently weaken the protection.
+    Codex caught regressions where the transition was broad enough to
+    leave percent-level mass flux in the deep stratosphere. On the RCE
+    grid that residual flux is amplified by very small density and can
+    produce unphysical cold-point heating, so this test pins the
+    behaviour at canonical pressure levels.
     """
     p_full = jnp.array([3_470.0, 5_000.0, 8_430.0, 10_000.0,
                         13_370.0, 20_000.0, 50_000.0, 100_000.0])
     gate = stratosphere_mass_flux_gate(p_full)
-    # Deep stratosphere: gate must be < 5% (not just < 50%)
-    assert float(gate[0]) < 0.05, (
+    # Deep stratosphere: gate must be effectively closed.
+    assert float(gate[0]) < 1.0e-5, (
         f"gate at model top (p=3470 Pa) = {float(gate[0]):.3f}; "
-        "must be < 0.05 to actually close the convection path"
+        "must be < 1e-5 to actually close the convection path"
     )
-    assert float(gate[1]) < 0.10, (
-        f"gate at 50 hPa = {float(gate[1]):.3f}; must be < 0.10"
+    assert float(gate[1]) < 1.0e-3, (
+        f"gate at 50 hPa = {float(gate[1]):.3f}; must be < 1e-3"
     )
-    # Tropopause: half-open
+    # Tropopause cutoff: half-open.
     assert 0.4 < float(gate[3]) < 0.6, (
-        f"gate at 100 hPa (tropopause) = {float(gate[3]):.3f}; "
+        f"gate at 100 hPa = {float(gate[3]):.3f}; "
         "must be ~0.5 (transition midpoint)"
     )
-    # Upper troposphere: nearly fully open
-    assert float(gate[4]) > 0.80, (
-        f"gate at 130 hPa = {float(gate[4]):.3f}; must be > 0.80 "
+    # Upper troposphere: nearly fully open.
+    assert float(gate[4]) > 0.99, (
+        f"gate at 130 hPa = {float(gate[4]):.3f}; must be > 0.99 "
         "to leave deep tropical convection unaffected"
     )
     # Lower troposphere: fully open (sigmoid saturates to 1.0 in
@@ -373,7 +373,7 @@ def test_stratosphere_mass_flux_gate_actually_closes():
     transition = gate[:5]
     assert jnp.all(jnp.diff(transition) > 0), (
         "gate must be strictly monotonic across the transition region "
-        f"(35–134 hPa); got {[float(v) for v in transition]}"
+        f"(35-134 hPa); got {[float(v) for v in transition]}"
     )
 
 
@@ -434,7 +434,7 @@ def test_cmt_gregory_1997_applies_stratospheric_gate():
 
     # Sanity contrast with the *ungated* calculation — at the model
     # top the function output must be much smaller than the ungated
-    # value (gate ≈ 0.013 at 35 hPa).
+    # value (gate is effectively closed at 35 hPa).
     flux_ungated = -c_u * M_u * du_layer
     dflux_ungated = jnp.diff(
         flux_ungated, axis=-1, append=flux_ungated[:, -1:],
@@ -442,9 +442,9 @@ def test_cmt_gregory_1997_applies_stratospheric_gate():
     du_dt_ungated = -g * dflux_ungated / dp
     ratio_top = float(jnp.abs(du_dt_func[0, 0])
                       / (jnp.abs(du_dt_ungated[0, 0]) + 1e-30))
-    assert ratio_top < 0.10, (
+    assert ratio_top < 1.0e-4, (
         f"At p=3470 Pa, gated CMT |du/dt| / ungated |du/dt| = "
-        f"{ratio_top:.4f}; expected < 0.10 (gate factor at TOA ≈ 0.013)"
+        f"{ratio_top:.4f}; expected < 1e-4 (gate closed at TOA)"
     )
 
 

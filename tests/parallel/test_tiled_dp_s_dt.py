@@ -1,0 +1,138 @@
+"""COMPOSED 3D-PE surface-pressure-tendency stage (dp_s/dt) sub-face-tiled.
+
+Composes THREE cc/face-local ops into ONE shard_map: dgrid_to_cgrid (D->C
+within-face) -> cgrid_divergence (C-grid flux-form; the staggered tile u_c/v_c
+carry the tile boundary faces, NO halo) -> column-integrated divergence
+(per-column cumsum) -> dp_s/dt pointwise.  ALL LOCAL (no in-stage halo), so
+dp_s/dt is bit-identical (EXACT) to the global composition sliced.  Covers BOTH
+sigma and hybrid coordinates, host-composition + np24/np54.
+
+This is the continuity prognostic (the next after the D-grid momentum stage)
+toward the full tiled fv3_hydrostatic_tendencies capstone.  Excludes the
+downstream GLOBAL zero_mean_tendency reduction (applied after the stage).
+
+24 host CPU devices (kt=2) / 54 (kt=3):
+``XLA_FLAGS=--xla_force_host_platform_device_count=54``.
+"""
+from __future__ import annotations
+
+import jax
+
+jax.config.update("jax_enable_x64", True)
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from legoesm.grids.cubed_sphere import create_cubed_sphere
+from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+from legoesm.grids.halo import set_halo_backend
+from legoesm.grids.vertical import (
+    create_sigma_coordinate, make_hybrid_levels,
+    compute_sigma_dot_and_total, compute_mass_flux_hybrid,
+    HybridSigmaPressureCoordinate,
+)
+from legoesm.core.operators_cdgrid import (
+    dgrid_to_cgrid, cgrid_divergence, cgrid_divergence_local,
+)
+from legoesm.parallel.tiled_production_cdgrid import (
+    make_tiled_dp_s_dt_stage_2d, dgrid_to_cgrid_tile_2d,
+)
+
+N = 24  # divisible by kt=2 (nl=12) and kt=3 (nl=8)
+NLEV = 6
+
+
+def _inputs(n, nlev, seed):
+    rng = np.random.default_rng(seed)
+    u_d = jnp.asarray(rng.standard_normal((6, n + 1, n + 1, nlev)))
+    v_d = jnp.asarray(rng.standard_normal((6, n + 1, n + 1, nlev)))
+    p_s = jnp.asarray(1.0e5 + 1.0e3 * rng.standard_normal((6, n, n)))
+    return u_d, v_d, p_s
+
+
+def _global_dps_dt(u_d, v_d, p_s, cdgrid, coord, hybrid):
+    """Hand-composed global dp_s/dt = primitive_eq_cdgrid.py:481-483/744-781
+    base case (pre-zero-mean), single-device 'local' path."""
+    u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
+    div_v = cgrid_divergence(u_c, v_c, cdgrid)
+    if hybrid:
+        _mf, D_total = compute_mass_flux_hybrid(div_v, p_s, coord)
+        return np.asarray(-D_total[..., 0] / coord.B_range)
+    _sd, D_total = compute_sigma_dot_and_total(div_v, coord)
+    sigma_range = 1.0 - float(coord.sigma_half[0])
+    return np.asarray(-p_s * D_total[..., 0] / sigma_range)
+
+
+def _reassemble_cc(get_tile, kt):
+    return np.concatenate(
+        [np.concatenate([np.asarray(get_tile(ti, tj)) for tj in range(kt)], axis=2)
+         for ti in range(kt)], axis=1)
+
+
+@pytest.fixture(scope="module")
+def cdg():
+    set_halo_backend("local")
+    g = create_cubed_sphere_cdgrid(create_cubed_sphere(N))
+    assert g.base.duogrid is None, "base cut is non-duogrid"
+    return g
+
+
+@pytest.mark.parametrize("hybrid", [False, True])
+@pytest.mark.parametrize("KT", [2, 3])
+def test_dp_s_dt_stage_matches_global(cdg, KT, hybrid):
+    ndev = 6 * KT * KT
+    if len(jax.devices()) < ndev:
+        pytest.skip(
+            f"kt={KT} needs {ndev} host devices "
+            f"(--xla_force_host_platform_device_count={ndev})")
+    nl = N // KT
+    coord = make_hybrid_levels(NLEV) if hybrid else create_sigma_coordinate(NLEV)
+    u_d, v_d, p_s = _inputs(N, NLEV, (30 if hybrid else 40) + KT)
+    g = _global_dps_dt(u_d, v_d, p_s, cdg, coord, hybrid)
+
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+    dev = np.array(jax.devices()[:ndev]).reshape(6, KT, KT)
+    mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
+    stage = make_tiled_dp_s_dt_stage_2d(mesh, cdg, coord, N, KT, NLEV)
+
+    fw = NamedSharding(mesh, P("face", None, None, None))
+    fo = NamedSharding(mesh, P("face", None, None))
+    out = stage(jax.device_put(u_d, fw), jax.device_put(v_d, fw),
+                jax.device_put(p_s, fo))
+    a = np.asarray(out).reshape(6, KT, nl, KT, nl)
+    t = _reassemble_cc(lambda ti, tj: a[:, ti, :, tj, :], KT)
+    np.testing.assert_array_equal(
+        t, g, err_msg=f"dp_s_dt != global (kt={KT}, hybrid={hybrid})")
+
+
+@pytest.mark.parametrize("hybrid", [False, True])
+def test_dp_s_dt_compose_host_body(cdg, hybrid):
+    """Composition exactness WITHOUT 24 devices: the same per-tile chain on host
+    (dgrid_to_cgrid_tile_2d -> cgrid_divergence_local -> continuity) reassembled
+    == global."""
+    kt, nl = 3, N // 3
+    coord = make_hybrid_levels(NLEV) if hybrid else create_sigma_coordinate(NLEV)
+    u_d, v_d, p_s = _inputs(N, NLEV, 55 if hybrid else 66)
+    g = _global_dps_dt(u_d, v_d, p_s, cdg, coord, hybrid)
+    cu, dye, dxe, ar = (cdg.cosa_u, cdg.dy_edge_x, cdg.dx_edge_y, cdg.base.area)
+    sigma_range = 1.0 - float(coord.sigma_half[0])
+
+    def _chain(ti, tj):
+        a_i, a_j = ti * nl, tj * nl
+        u_c, v_c = dgrid_to_cgrid_tile_2d(u_d, v_d, cu, a_i, a_j, nl)
+        div_v = cgrid_divergence_local(
+            u_c, v_c, dye[:, a_i:a_i + nl + 1, a_j:a_j + nl],
+            dxe[:, a_i:a_i + nl, a_j:a_j + nl + 1],
+            ar[:, a_i:a_i + nl, a_j:a_j + nl])
+        p_s_t = p_s[:, a_i:a_i + nl, a_j:a_j + nl]
+        if hybrid:
+            _mf, D_total = compute_mass_flux_hybrid(div_v, p_s_t, coord)
+            return -D_total[..., 0] / coord.B_range
+        _sd, D_total = compute_sigma_dot_and_total(div_v, coord)
+        return -p_s_t * D_total[..., 0] / sigma_range
+
+    t = _reassemble_cc(_chain, kt)
+    np.testing.assert_array_equal(
+        t, g, err_msg=f"dp_s_dt host-body != global (hybrid={hybrid})")

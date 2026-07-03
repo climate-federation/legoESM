@@ -201,6 +201,21 @@ def _step_multilayer_land_impl(
 
     beta_soil = config.beta_min + (1.0 - config.beta_min) * w_frac_rz
 
+    # Top-layer effective saturation S_top = (theta0 - theta_r)/(theta_sat - theta_r),
+    # used by BOTH surface schemes' bare-soil-evaporation resistance.  Compute it in
+    # the (ncol, nlayers) layer space THEN take layer 0, so a per-column (ncol, 1)
+    # theta_r / theta_sat (spatial hydraulics, e.g. the coupled land tile) broadcasts
+    # against the 2-D theta rather than outer-producting against the 1-D theta[:, 0]
+    # to (ncol, ncol) — the shape bug behind the coupled multilayer-land driver crash.
+    # .astype(theta.dtype): a per-column theta_r/theta_sat may be float64 while the
+    # coupled land state theta is float32 — keep S_top in the state precision so the
+    # bare-soil-evap throttle does not silently promote the step output to float64
+    # (the scan carry requires input/output dtypes to match).
+    _S_top = jnp.clip(
+        (theta - theta_r)
+        / jnp.maximum(config.hydraulics.theta_sat - theta_r, 1e-6),
+        1e-6, 1.0)[:, 0].astype(theta.dtype)
+
     # =================================================================
     # Surface scheme dispatch
     # =================================================================
@@ -241,17 +256,29 @@ def _step_multilayer_land_impl(
             dt=dt,
             TgC_override=TgC_override,
             LAI_override=LAI_override,
-            # Bare-soil evaporation efficiency = soil pore RELATIVE HUMIDITY from
-            # the PROGNOSTIC top-layer matric potential (Kelvin equation):
-            # h_r = exp(psi_top * g / (R_v * T)), clamped to (0, 1].  Applied as a
-            # beta conductance efficiency in the canopy soil energy balance.  This
-            # ties soil evaporation to the fast-drying SURFACE (self-mulching)
-            # rather than the root-zone average; the latter kept the forest floor
-            # evaporating at the energy limit, which the EC + DifferBESS
-            # comparison showed over-predicts soil evaporation several-fold.
-            w_frac_soil_evap=jnp.exp(jnp.minimum(
-                psi[:, 0] * constants.g
-                / (constants.R_v * jnp.maximum(T_soil[:, 0], 1.0)), 0.0)),
+            # Bare-soil evaporation efficiency = TWO complementary top-layer
+            # limiters, applied as a beta conductance efficiency in the canopy
+            # soil energy balance (both tie evaporation to the fast-drying
+            # SURFACE, not the root-zone average):
+            #   * Kelvin pore RELATIVE HUMIDITY  h_r = exp(psi_top g /(R_v T))
+            #     — thermodynamic vapour-pressure lowering; only bites as the
+            #     surface approaches residual (psi -> -inf).
+            #   * Sellers-1992 / Lee-Pielke-1992 diffusion-crust resistance,
+            #     S_top**soil_evap_resistance_exp with S_top the top-layer
+            #     effective saturation — throttles evaporation even when the
+            #     surface is WET (S_top<1), the regime the EC + DifferBESS
+            #     comparison showed over-predicts soil evaporation several-fold.
+            # This is the canopy-path counterpart of the SimpleSEB S_top**exp
+            # throttle (#671); exp=0 recovers the Kelvin-only behaviour.
+            w_frac_soil_evap=(
+                jnp.exp(jnp.minimum(
+                    psi[:, 0] * constants.g
+                    / (constants.R_v * jnp.maximum(T_soil[:, 0], 1.0)), 0.0))
+                # _S_top (top-layer effective saturation) is floored at 1e-6 (not 0)
+                # in its shared definition above: keeps d(S_top**exp)/dS_top finite at
+                # the residual-water boundary for a trainable exp < 1 (0**exp has an
+                # infinite gradient) — AD-safe, negligible forward effect.
+                * _S_top ** config.soil_evap_resistance_exp),
         )
     else:
         # SimpleSEB: bulk fluxes with skin T = T_soil[:, 0].
@@ -321,6 +348,22 @@ def _step_multilayer_land_impl(
     precip_rain = forcing.precip_total - forcing.precip_snow
     melt_rate = snow_melt / dt
     soil_evap_demand = jnp.where(has_snow, 0.0, evap_rate_demand)
+    # Bare-soil evaporation resistance (#671, Sellers 1992 / Lee & Pielke 1992):
+    # throttle the (positive, evaporative) bare-soil demand by the TOP-layer
+    # effective saturation S_top**exp — the surface dries into a high-resistance
+    # crust far faster than the root-zone mean.  GATED to SimpleSEB: the two-leaf
+    # canopy path applies its OWN top-layer soil-evap throttle (Kelvin h_r) inside
+    # the canopy energy balance, so surface_out.lhflx already reflects it; applying
+    # S_top**exp again here would double-throttle AND wrongly throttle the canopy
+    # transpiration folded into the total lhflx.  Dew (demand<0) left un-throttled.
+    if not isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+        # _S_top (top-layer effective saturation, floored at 1e-6 in its shared
+        # definition above so d(S_top**exp)/dS_top stays finite at the residual-water
+        # boundary for a trainable exp < 1; AD-safe, negligible fwd).
+        _beta_surf = (_S_top ** config.soil_evap_resistance_exp).astype(
+            soil_evap_demand.dtype)
+        soil_evap_demand = jnp.where(
+            soil_evap_demand > 0.0, soil_evap_demand * _beta_surf, soil_evap_demand)
     max_soil_evap = jnp.maximum(
         extractable_water / dt + precip_rain + melt_rate, 0.0)
     soil_evap = jnp.minimum(soil_evap_demand, max_soil_evap)
@@ -355,17 +398,18 @@ def _step_multilayer_land_impl(
     weight_norm = weight / jnp.maximum(weight_sum, 1e-20)
     sink = weight_norm * E_pot_transp[:, None] / dz[None, :]
 
-    # --- Richards equation ---
+    # --- Richards equation (+ coupled surface ponding cell, #671) ---
     richards_out = solve_richards(
         psi, theta, grid,
         config.hydraulics, config.richards,
         flux_top, sink, dt,
+        surface_water=state.surface_water,
     )
-    theta_corrected = jnp.clip(
-        richards_out.theta_new,
-        config.hydraulics.theta_r, config.hydraulics.theta_sat,
-    )
-    richards_out = richards_out._replace(theta_new=theta_corrected)
+    # NB (#671): the former "evaporation water budget closure" — a clip of
+    # theta_new to [theta_r, theta_sat] — is removed.  It was a non-conservative
+    # band-aid for the old infiltration/evap mismatch; theta_from_psi is now
+    # bounded below at theta_r by construction, the coupled surface cell carries
+    # the ponded excess, and the mixed-form solve closes the water budget.
 
     # --- Soil thermal diffusion (final, with converged G) ---
     G_surface = G_surface + evap_excess_energy
@@ -382,15 +426,32 @@ def _step_multilayer_land_impl(
         TgC_new = None
 
     # --- Build new state ---
+    # Preserve the INPUT state's precision.  The Richards + soil-thermal solves run
+    # in an internal working precision that is float64 whenever the hydraulics config
+    # carries float64 params (x64 enabled), even for a float32 coupled land state — so
+    # cast each updated leaf back to its input dtype.  Without this the multilayer step
+    # returns float64 leaves for a float32 carry and the driver's lax.scan rejects the
+    # segment ("carry input/output dtypes must match").  No-op for a uniform-precision
+    # (offline / test) state, where input dtype == working dtype.
+    def _match(new, old):
+        # Cast an updated leaf back to its input dtype (None-safe on either side —
+        # e.g. TgC is None for the SimpleSEB scheme).
+        if new is None or old is None:
+            return new
+        return new.astype(old.dtype)
+
     new_state = MultiLayerLandState(
-        T_soil=T_soil_new,
-        psi_soil=richards_out.psi_new,
-        theta_soil=richards_out.theta_new,
-        runoff_surface=richards_out.runoff_surface,
-        runoff_subsurface=richards_out.runoff_subsurface,
-        snow_depth=snow_new,
-        snow_age=snow_age_new,
-        TgC=TgC_new,
+        T_soil=_match(T_soil_new, state.T_soil),
+        psi_soil=_match(richards_out.psi_new, state.psi_soil),
+        theta_soil=_match(richards_out.theta_new, state.theta_soil),
+        runoff_surface=_match(richards_out.runoff_surface, state.runoff_surface),
+        runoff_subsurface=_match(richards_out.runoff_subsurface,
+                                 state.runoff_subsurface),
+        snow_depth=_match(snow_new, state.snow_depth),
+        snow_age=_match(snow_age_new, state.snow_age),
+        TgC=_match(TgC_new, state.TgC),
+        surface_water=_match(richards_out.surface_water,   # coupled ponding cell (#671)
+                             state.surface_water),
     )
 
     # --- Post-step surface state for coupler ---
@@ -557,8 +618,16 @@ def init_multilayer_land_state(
     if theta_init is None:
         theta_init = 0.5 * config.hydraulics.theta_sat
 
-    T_soil = jnp.full((ncol, nlayers), T_init)
-    theta_soil = jnp.full((ncol, nlayers), theta_init)
+    # T_init may be a scalar (uniform column, legacy) or a per-column (ncol,)
+    # array (spatial warm start, e.g. lat-varying near-surface air T) — #671.
+    _T = jnp.asarray(T_init)
+    if _T.ndim == 0:
+        T_soil = jnp.full((ncol, nlayers), T_init)
+    else:
+        T_soil = jnp.broadcast_to(_T.reshape(ncol, 1), (ncol, nlayers))
+    # broadcast_to (not full) so a PER-COLUMN theta_init (ncol,1) from a spatial
+    # theta_sat works; scalar theta_init broadcasts identically.
+    theta_soil = jnp.broadcast_to(jnp.asarray(theta_init), (ncol, nlayers))
     psi_soil = psi_from_theta(theta_soil, config.hydraulics)
 
     if TgC_init is not None:
@@ -575,4 +644,5 @@ def init_multilayer_land_state(
         snow_depth=jnp.zeros(ncol),
         snow_age=jnp.zeros(ncol),
         TgC=TgC,
+        surface_water=jnp.zeros(ncol),   # coupled ponding cell (#671)
     )

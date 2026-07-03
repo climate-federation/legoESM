@@ -132,7 +132,7 @@ def run_d1_blowup(grid, z_coord_base, H_bathy, ocean_mask,
     state, z_coord = _build_initial_state(
         grid, z_coord_base, H_bathy, ocean_mask, config,
     )
-    ocean_config = LatLonCGridOceanConfig(
+    ocean_config = LatLonCGridOceanConfig.from_flat(
         n_barotropic_substeps=30, physics=physics,
         A_h=A_h, B_h=5.0e9, A_v=config.A_v, K_v=config.K_v,
         bottom_drag_r=config.bottom_drag_coeff,
@@ -339,7 +339,7 @@ def run_d2_weno5(grid, z_coord_base, H_bathy, ocean_mask,
     state, z_coord = _build_initial_state(
         grid, z_coord_base, H_bathy, ocean_mask, config,
     )
-    ocean_config = LatLonCGridOceanConfig(
+    ocean_config = LatLonCGridOceanConfig.from_flat(
         n_barotropic_substeps=30, physics=physics,
         A_h=A_h, B_h=5.0e9, A_v=config.A_v, K_v=config.K_v,
         bottom_drag_r=config.bottom_drag_coeff,

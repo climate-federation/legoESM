@@ -1,0 +1,22 @@
+# legoESM experiment template — global wind-driven barotropic flow.
+#
+# Names the procedural `global_barotropic_wind` experiment via `setup:` (#388 Ask#2).
+experiment:
+  tier: tier2
+  complexity: primitive_equation
+  extent: global
+  maturity: structurally_validated
+  description: >
+    Global wind-driven barotropic circulation over a simplified continent mask:
+    a prescribed zonal wind stress spins up the depth-integrated transport — a
+    global barotropic dynamics + land-mask benchmark.
+  data: []
+  conservation_gates: [volume]
+model:
+  name: "ocean-global-barotropic-wind"
+  type: ocean_only
+setup:
+  name: global_barotropic_wind
+  grid: latlon
+output:
+  path: output/ocean/global_barotropic_wind/

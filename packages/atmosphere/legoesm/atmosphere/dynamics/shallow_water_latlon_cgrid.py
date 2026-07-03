@@ -42,6 +42,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     vector_laplacian_cgrid,
     interp_cell_to_uface,
     interp_cell_to_vface,
+    pad_lon_cgrid,
 )
 from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
 from legoesm.grids.latlon import LatLonGrid
@@ -128,6 +129,15 @@ def absolute_vorticity_coriolis(
     # constructions below (planetary vorticity ±2Ω, u_at_v zero wall
     # rows) must instead use the neighbour rank's rows.
     _band = get_band_mpi_cut_layout()
+    # Single-program SPMD twin: under the lat-band shard_map backend
+    # ``get_band_mpi_cut_layout()`` is None (it recognizes only the 'mpi'
+    # backend), so the f_vert / u_at_v pole constants must instead be selected
+    # DATA-dependently per band — interior band cuts are NOT poles. Returns
+    # ``(south_mask, north_mask)`` traced booleans inside the shard_map, or None
+    # for serial/MPI/cube (those paths keep their static branch — additive).
+    # Mirrors curl_vertex_cgrid's SPMD pole handling.
+    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+    _spmd_pm = spmd_pole_end_masks()
 
     # --- Relative vorticity at vertices (via the B2 operator interface) ---
     # ``u_lat_pad`` (optional, exactly pad_with_pole_bc_lat(u, halo=1,
@@ -142,35 +152,43 @@ def absolute_vorticity_coriolis(
     # --- Planetary vorticity at vertices ---
     lat = grid.lat  # cell-center latitudes
     twoOmega = 2.0 * constants.Omega
-    if _band is None:
-        # sin(±π/2) = ±1 exactly, so build f_vert directly from the
-        # interior sin via Pad with constant_values = ±2Ω.  Single
-        # Pad HLO op replaces alloc-2-singletons + concatenate-of-three
-        # + sin tower.
+    if _band is None and _spmd_pm is None:
+        # Serial / single-rank: sin(±π/2) = ±1 exactly, so build f_vert directly
+        # from the interior sin via Pad with constant_values = ±2Ω.  Single
+        # Pad HLO op replaces alloc-2-singletons + concatenate-of-three + sin.
         lat_int = 0.5 * (lat[:-1] + lat[1:])
         f_vert = jnp.pad(
             twoOmega * jnp.sin(lat_int),
             (1, 1), constant_values=(-twoOmega, twoOmega),
         )  # (n_lat+1,)
     else:
-        # Band MPI: end vertex rows at interior cuts sit at the
-        # midpoint latitude ACROSS the cut.  Pad ``lat`` one row
-        # (1-D sendrecv at cuts; the constant ghost at a pole-touching
-        # end never reaches the output — overwritten below), midpoint
-        # to vertex rows, then restore the exact ±2Ω pole values at
-        # pole-touching ends.  Interior vertex rows evaluate the
-        # identical ``2Ω·sin(0.5·(lat[j-1]+lat[j]))`` chain — values
-        # bit-identical to the serial construction.
+        # Band-decomposed (MPI or single-program SPMD): end vertex rows at
+        # interior cuts sit at the midpoint latitude ACROSS the cut.  Pad
+        # ``lat`` one row (backend-aware: MPI 1-D sendrecv / SPMD lat-band
+        # ppermute at cuts; the constant ghost at a pole-touching end never
+        # reaches the output — overwritten below), midpoint to vertex rows,
+        # then restore the exact ±2Ω pole values at PHYSICAL pole ends only.
+        # Interior vertex rows evaluate the identical
+        # ``2Ω·sin(0.5·(lat[j-1]+lat[j]))`` chain — bit-identical to serial.
         from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
         lat_pad = pad_with_pole_bc_lat(
             lat, halo=1, south_value=0.0, north_value=0.0,
         )
         lat_vert = 0.5 * (lat_pad[:-1] + lat_pad[1:])  # (n_lat_local+1,)
         f_vert = twoOmega * jnp.sin(lat_vert)
-        if _band.south_rank is None:
-            f_vert = f_vert.at[0].set(-twoOmega)
-        if _band.north_rank is None:
-            f_vert = f_vert.at[-1].set(twoOmega)
+        if _spmd_pm is not None:
+            # SPMD: select the ±2Ω clamp DATA-dependently per band (a static
+            # ``if`` would clamp every interior cut). south then north,
+            # sequenced like the MPI path so a single band clamps both ends.
+            _south_m, _north_m = _spmd_pm
+            f_vert = jnp.where(_south_m, f_vert.at[0].set(-twoOmega), f_vert)
+            f_vert = jnp.where(_north_m, f_vert.at[-1].set(twoOmega), f_vert)
+        else:
+            # MPI: static per-rank pole answer (None ⟺ this rank owns the pole).
+            if _band.south_rank is None:
+                f_vert = f_vert.at[0].set(-twoOmega)
+            if _band.north_rank is None:
+                f_vert = f_vert.at[-1].set(twoOmega)
 
     # Absolute vorticity at vertices
     if is_3d:
@@ -183,12 +201,16 @@ def absolute_vorticity_coriolis(
     eta_at_u = 0.5 * (eta[:-1] + eta[1:])  # (n_lat, n_lon+1[, nlev])
 
     # --- Average v to u-faces (4-point, same as coriolis_cgrid) ---
-    v_west = jnp.roll(v, 1, axis=1)
-    v_avg = 0.25 * (v[:-1] + v[1:] + v_west[:-1] + v_west[1:])
-    if is_3d:
-        v_at_u = jnp.concatenate([v_avg, v_avg[:, 0:1, :]], axis=1)
-    else:
-        v_at_u = jnp.concatenate([v_avg, v_avg[:, 0:1]], axis=1)
+    # v sits on lat-faces, cell-aligned in lon; the u-face 4-pt average needs
+    # v's lon WEST-neighbour cell, so pad-then-average through the dispatched
+    # lon halo (local wrap / 2-D ring) -> the full n_lon+1 u-faces directly.
+    # Bit-identical to ``roll(v,1)`` + wrap-column concat at proc_lon==1, and
+    # spans lon partition cuts under a 2-D split (THIS local roll was the
+    # missed lon op that made the 2-D u-momentum decomposition-dependent).
+    v_pad = pad_lon_cgrid(v, halo=1)
+    ve = v_pad[:, 1:]    # cell j   bordering u-face j
+    vw = v_pad[:, :-1]   # cell j-1 bordering u-face j
+    v_at_u = 0.25 * (ve[:-1] + ve[1:] + vw[:-1] + vw[1:])  # (n_lat, n_lon+1)
 
     # --- Average η to v-faces ---
     # v-face[i, j] is flanked by vertex[i, j] (west) and vertex[i, j+1] (east)
@@ -196,23 +218,22 @@ def absolute_vorticity_coriolis(
     eta_at_v = 0.5 * (eta[:, :-1] + eta[:, 1:])  # (n_lat+1, n_lon[, nlev])
 
     # --- Average u to v-faces (4-point, same as coriolis_cgrid) ---
-    if _band is None:
-        # Use ``jnp.pad`` on the leading axis instead of allocating
-        # ``zero_row`` twice and concatenating — one HLO Pad op vs
-        # alloc + concat.  The zero end rows are the pole wall BC.
+    if _band is None and _spmd_pm is None:
+        # Serial / single-rank: ``jnp.pad`` on the leading axis (one HLO Pad op
+        # vs alloc + concat).  The zero end rows are the pole wall BC.
         u_avg_interior = 0.25 * (u[:-1, :-1] + u[:-1, 1:] + u[1:, :-1] + u[1:, 1:])
         if is_3d:
             u_at_v = jnp.pad(u_avg_interior, ((1, 1), (0, 0), (0, 0)))
         else:
             u_at_v = jnp.pad(u_avg_interior, ((1, 1), (0, 0)))
     else:
-        # Band MPI: the end v-face rows at interior cuts carry the
-        # genuine 4-point average spanning the cut, not the pole wall
-        # zero.  Pad ``u`` one lat row (sendrecv at cuts; u-face
-        # fields with the n_lon+1 wrap column are supported by the
-        # exchange), average on the padded array — interior rows are
-        # the identical operand chain as serial — then restore the
-        # zero wall rows at pole-touching ends only.
+        # Band-decomposed (MPI or SPMD): the end v-face rows at interior cuts
+        # carry the genuine 4-point average spanning the cut, not the pole wall
+        # zero.  Pad ``u`` one lat row (backend-aware: MPI sendrecv / SPMD
+        # lat-band ppermute; u-face fields with the n_lon+1 wrap column are
+        # supported), average on the padded array — interior rows the identical
+        # operand chain as serial — then restore the zero wall rows at PHYSICAL
+        # pole ends only.
         from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
         if u_lat_pad is None:
             u_lat_pad = pad_with_pole_bc_lat(
@@ -222,10 +243,19 @@ def absolute_vorticity_coriolis(
             u_lat_pad[:-1, :-1] + u_lat_pad[:-1, 1:]
             + u_lat_pad[1:, :-1] + u_lat_pad[1:, 1:]
         )  # (n_lat_local+1, n_lon[, nlev])
-        if _band.south_rank is None:
-            u_at_v = u_at_v.at[0].set(jnp.zeros_like(u_at_v[0]))
-        if _band.north_rank is None:
-            u_at_v = u_at_v.at[-1].set(jnp.zeros_like(u_at_v[-1]))
+        if _spmd_pm is not None:
+            # SPMD: zero the pole-wall v-face DATA-dependently per band.
+            _south_m, _north_m = _spmd_pm
+            u_at_v = jnp.where(
+                _south_m, u_at_v.at[0].set(jnp.zeros_like(u_at_v[0])), u_at_v)
+            u_at_v = jnp.where(
+                _north_m, u_at_v.at[-1].set(jnp.zeros_like(u_at_v[-1])), u_at_v)
+        else:
+            # MPI: static per-rank pole answer.
+            if _band.south_rank is None:
+                u_at_v = u_at_v.at[0].set(jnp.zeros_like(u_at_v[0]))
+            if _band.north_rank is None:
+                u_at_v = u_at_v.at[-1].set(jnp.zeros_like(u_at_v[-1]))
 
     # --- Coriolis terms ---
     cor_u = eta_at_u * v_at_u

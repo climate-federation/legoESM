@@ -179,3 +179,44 @@ radiation) to **soil over-evaporation**, not Rn/albedo/WUE:
    limited (energy → H/G).  Needs a frozen/snow soil-evaporation suppression.
 3. **Canopy↔soil radiation split** — soil sees ≈ 29 % of net radiation (summer,
    LAI = 5) vs ≈ 8 % naive Beer (clumping CI = 0.66 explains part); secondary.
+
+## Cross-site survey (22 sites, 7 PFTs, both modes)
+
+Run in parallel on SLURM (`scripts/cluster/ec_site/run_ec_site_array.sbatch`, a
+manifest-driven array — one task per `<mode> <SITE> <out_dir> [flags]` line;
+44 tasks = 22 sites × {diagnostic, prognostic-nudged}).  Sites span CRO, DBF,
+EBF, ENF, GRA, SAV, SHR.  Skill = Pearson r vs tower obs; plots/CSV in
+`diagnostics/ec_site_xsite/` (`xsite_skill_by_{site,pft}.png`,
+`xsite_diag_vs_prog.png`, `xsite_skill.csv`).
+
+**Mean r across the 22 sites:**
+
+| flux | diagnostic | prognostic (nudged) |
+|---|---|---|
+| GPP | 0.74 | 0.66 |
+| LE  | 0.52 | 0.48 |
+| **H** | **0.07** | **0.77** |
+| EF  | 0.17 | 0.12 |
+
+* **Prognostic mode fixes the energy partition everywhere** — H jumps from ≈ 0
+  (diagnostic prescribes Ts) to **r = 0.6–0.93 at essentially every site/PFT**
+  (e.g. US-SRM −0.51→0.92, CA-Qfo −0.26→0.91, FR-Pue −0.17→0.88).  This is the
+  clearest, most universal result.
+* **GPP** (diagnostic) is strong for mesic forest / crop / grass (PFT means 0.73–
+  0.85) but **drops sharply for dry/sparse ecosystems**: SAV 0.44 (US-SRM 0.14),
+  SHR 0.24 (US-Whs).  Dry-ecosystem carbon is the largest GPP gap.  Nudged
+  prognostic GPP holds for mesic types (small drop) but degrades more for some
+  ENF (US-NR1 0.80→0.36).
+* **LE** is mixed under prognostic — improves at many (US-MMS 0.46→0.66, FI-Hyy
+  0.47→0.67) but collapses at a few (DE-Hai 0.65→0.02, DE-Gri 0.72→0.01) where
+  the soil-evaporation interaction bites.  **EF** stays limited in both modes (the
+  same Bowen-partition issue documented above).
+* **Known site issues** (flagged, not dropped): AU-Wom = NaN in both modes
+  (unsupported IGBP/Köppen → all steps `valid=False`); US-SRM / US-Whs prognostic
+  = NaN (very-dry SAV/SHR prognostic — to investigate); DE-Hai / DE-Gri LE → ~0
+  under prognostic (soil-evap interaction — to investigate).
+
+**Takeaway:** the diagnosed gaps generalise across PFTs — prognostic is a decisive
+win for **H** (energy balance), GPP holds for mesic types, and the residual
+weaknesses cluster exactly where expected: **soil-evaporation / Bowen (LE/EF)**
+and **dry/sparse ecosystems (savanna, shrubland)**.

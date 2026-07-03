@@ -53,10 +53,12 @@ from legoesm.ocean.state import (
     LatLonCGridOceanTendencies,
     MomentumTendencyDiagnostics,
     LatLonCGridOceanConfig,
+    OMp25Config,
     SurfaceTracerForcing,
 )
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     apply_sponge_tracer_relaxation,
+    bbl_distributed_drag_face_column,
     iterate_eos_and_pressure_anomaly,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
@@ -65,14 +67,17 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     polar_cap_boost_factor,
     laplacian_scaling_factor,
     divergence_cgrid,
+    vface_zonal_cos_lat,
     gradient_x_cgrid,
     gradient_y_cgrid,
     bilaplacian_cgrid,
     laplacian_cgrid,
+    flux_divergence_bilaplacian_cgrid,
     vector_bilaplacian_cgrid,
     vector_laplacian_cgrid,
     vector_laplacian_dissipation_cgrid,
     flux_divergence_viscosity_cgrid,
+    no_slip_sidedrag_cgrid,
     interp_cell_to_uface,
     is_tripolar,
     lat_ends_are_poles,
@@ -82,6 +87,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     pad_ns_zero,
     fold_is_local,
     smagorinsky_biharmonic_tendency_cgrid,
+    om4p25_lateral_friction_tendency_cgrid,
+    qg_leith_viscosity_tendency_cgrid,
     smagorinsky_viscosity_cgrid,
     smagorinsky_viscosity_q_cgrid,
     strain_rate_cgrid,
@@ -114,11 +121,27 @@ from legoesm.ocean.vertical import (
 # dispatch literals (dispatch discipline: validated at config construction;
 # unknown -> ValueError, never a silent fallthrough to vector-invariant).
 VALID_MOMENTUM_ADVECTION = frozenset(
-    {"vector_invariant", "weno5", "weno7", "flux_form"}
+    {"vector_invariant", "weno5", "weno7", "weno9", "flux_form"}
 )
+# Tracer-advection literals (config.tracer_advection).  Single source for the
+# fail-fast membership check in LatLonCGridOceanModel._validate_config; mirrors
+# the flux-form tendency dispatch (its else-raise) plus the SOM special case
+# handled in step().  Keep in sync if a tracer scheme is added.
+VALID_TRACER_ADVECTION = frozenset(
+    {"upwind", "centered", "tvd", "superbee", "ppm", "ppm_fct",
+     "dst3", "dst3_multidim", "weno5", "weno7", "som"}
+)
+# WENO vector-invariant momentum-advection literals (Silvestri et al. 2024).
+# vorticity-flux Z and divergence-flux D use this order; vertical C is capped
+# at WENO5 for order 9 (paper Table 2: C is WENO5 in W9V, "minimal impact").
+VALID_WENO_MOMENTUM = frozenset({"weno5", "weno7", "weno9"})
+# WENO smoothness-measure family (Silvestri et al. 2024): "split" = W*V
+# (velocity / full-divergence smoothness, Eqs 43+45), "standard" = W*D
+# (self-smoothness, Eqs 37+44). See config.weno_smoothness.
+VALID_WENO_SMOOTHNESS = frozenset({"split", "standard"})
 # Reconstruction schemes for the advected velocity in the flux-form path
 # (config.momentum_flux_scheme; only used when momentum_advection="flux_form").
-VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered"})
+VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered", "upwind3"})
 # Stage-8 VERTICAL momentum-advection scheme (config.vertical_momentum_scheme),
 # independent of the HORIZONTAL momentum_advection dispatch above:
 #   "upwind_perturbation" (default, bit-identical) — 1st-order interface
@@ -139,6 +162,13 @@ VALID_VERTICAL_MOMENTUM_SCHEME = frozenset(
 # FLUX-DIVERGENCE harmonic friction ∇·(A_h∇u). Validated at config construction;
 # unknown -> ValueError (dispatch discipline).
 VALID_LATERAL_VISCOSITY_OPERATOR = frozenset({"vector_laplacian", "flux_divergence"})
+# Lateral side BC (config.lateral_side_bc): free-slip (default; viscous flux zeroed
+# at walls) or MITgcm no_slip_sides (adds the -(2/Δ)·A_h·u_tangential wall side-drag).
+VALID_LATERAL_SIDE_BC = frozenset({"free_slip", "no_slip"})
+# Lateral-friction CLOSURE selector (config.lateral_friction_scheme): "none"
+# (the A_h/B_h/C_smag/C_leith knobs apply) or "om4p25" (Silvestri 2024 SM2 —
+# GFDL OM4p25 Laplacian+biharmonic max(Smag,static) closure).
+VALID_LATERAL_FRICTION_SCHEME = frozenset({"none", "om4p25", "qg_leith"})
 # Coriolis time-stepping placement (config.coriolis_scheme):
 #   "matsuno_split" (default, bit-identical) — Coriolis is a sequential
 #     forward-backward (Matsuno) rotation sub-step on the FE-advanced state and
@@ -343,14 +373,30 @@ def tvd_to_v_points(
     # (3) Historical second-neighbour edge clamps at PHYSICAL poles only
     #     (static at trace time; MPI cut ends keep the true neighbour
     #     rows delivered by the pad).
-    south_is_pole, north_is_pole = lat_ends_are_poles()
-    if south_is_pole:
-        f_south2 = f_south2.at[1].set(f_south[1])
-    if north_is_pole:
+    # Restore the historical 2nd-neighbour edge clamp at PHYSICAL poles only.
+    # Under SPMD ``lat_ends_are_poles()`` is (True, True) on every band, so the
+    # static ``if`` would clamp every band's INTERIOR cut (SPMD-blind) — select
+    # the clamp DATA-dependently per band via ``axis_index``.
+    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+    _spmd_pm = spmd_pole_end_masks()
+    if _spmd_pm is not None:
+        south_mask, north_mask = _spmd_pm
+        f_south2 = jnp.where(
+            south_mask, f_south2.at[1].set(f_south[1]), f_south2)
         if fold_is_local(grid):
-            f_north2 = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
+            _fn = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
         else:
-            f_north2 = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
+            _fn = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
+        f_north2 = jnp.where(north_mask, _fn, f_north2)
+    else:
+        south_is_pole, north_is_pole = lat_ends_are_poles()
+        if south_is_pole:
+            f_south2 = f_south2.at[1].set(f_south[1])
+        if north_is_pole:
+            if fold_is_local(grid):
+                f_north2 = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
+            else:
+                f_north2 = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
     t_grad = ratio_grad_floor(f.dtype)
     delta_pos = f_north - f_south
     r_pos = grad_safe_ratio(
@@ -487,7 +533,12 @@ def neumann_fill_cgrid(
     Parameters
     ----------
     f : (n_lat, n_lon, ...) field at cell centers.
-    mask : (n_lat, n_lon) ocean mask (1 = wet, 0 = land).
+    mask : (n_lat, n_lon) ocean mask (1 = wet, 0 = land), OR a per-level
+        (n_lat, n_lon, nlev) / (n_lat, n_lon, 1) mask matching the field rank
+        (e.g. ``is_active`` for partial-cell topography). A lower-rank mask is
+        broadcast over the level axis (the historical 2D behaviour); a
+        rank-matching mask is applied per level (fills topographic-step dead
+        cells, not just lateral walls).
     grid : optional LatLonGrid or LatLonCGridGeometry.
         When provided and a tripolar fold is active, the north neighbor
         of the fold row uses the fold-partner cell instead of repeating
@@ -498,6 +549,11 @@ def neumann_fill_cgrid(
 
     from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
     south_is_pole, north_is_pole = lat_ends_are_poles()
+    # Under SPMD the static (south/north)_is_pole are (True, True) on every band,
+    # so the per-pass Neumann edge-clamp below would fire at every band's INTERIOR
+    # cut (SPMD-blind) — select it DATA-dependently per band via ``axis_index``.
+    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+    _spmd_pm = spmd_pole_end_masks()
 
     filled = f
     # Cast the mask to the FIELD dtype so the fused (field, mask) lat
@@ -535,18 +591,34 @@ def neumann_fill_cgrid(
         m_s = jnp.concatenate([m_pad[0:1], m[:-1]], axis=0)
         f_n = jnp.concatenate([filled[1:], f_pad[-1:]], axis=0)
         m_n = jnp.concatenate([m[1:], m_pad[-1:]], axis=0)
-        if south_is_pole:
-            f_s = jnp.concatenate([filled[0:1], f_s[1:]], axis=0)
-            m_s = jnp.concatenate([m[0:1], m_s[1:]], axis=0)
-        if north_is_pole:
+        if _spmd_pm is not None:
+            south_mask, north_mask = _spmd_pm
+            f_s = jnp.where(south_mask,
+                            jnp.concatenate([filled[0:1], f_s[1:]], axis=0), f_s)
+            m_s = jnp.where(south_mask,
+                            jnp.concatenate([m[0:1], m_s[1:]], axis=0), m_s)
             if use_fold:
-                f_n = jnp.concatenate(
+                _fn = jnp.concatenate(
                     [f_n[:-1], filled[-1:, fold.perm_T]], axis=0)
-                m_n = jnp.concatenate(
-                    [m_n[:-1], m[-1:, fold.perm_T]], axis=0)
+                _mn = jnp.concatenate([m_n[:-1], m[-1:, fold.perm_T]], axis=0)
             else:
-                f_n = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
-                m_n = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
+                _fn = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
+                _mn = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
+            f_n = jnp.where(north_mask, _fn, f_n)
+            m_n = jnp.where(north_mask, _mn, m_n)
+        else:
+            if south_is_pole:
+                f_s = jnp.concatenate([filled[0:1], f_s[1:]], axis=0)
+                m_s = jnp.concatenate([m[0:1], m_s[1:]], axis=0)
+            if north_is_pole:
+                if use_fold:
+                    f_n = jnp.concatenate(
+                        [f_n[:-1], filled[-1:, fold.perm_T]], axis=0)
+                    m_n = jnp.concatenate(
+                        [m_n[:-1], m[-1:, fold.perm_T]], axis=0)
+                else:
+                    f_n = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
+                    m_n = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
         f_w = jnp.roll(filled, 1, axis=1)
         m_w = jnp.roll(m, 1, axis=1)
         f_e = jnp.roll(filled, -1, axis=1)
@@ -554,7 +626,12 @@ def neumann_fill_cgrid(
 
         is_land = m < 0.5
 
-        if f.ndim > 2:
+        # Broadcast a LOWER-rank (2D) mask up to the field's level axis. A mask
+        # whose rank already MATCHES the field (a 3D per-level ``is_active`` /
+        # partial-cell mask, possibly with a singleton level axis) is used as-is
+        # and broadcasts elementwise — this lets the fill clean dead cells at
+        # TOPOGRAPHIC STEPS, not just lateral walls (#480 partial-cell coverage).
+        if f.ndim > 2 and m.ndim < f.ndim:
             m_s_e = m_s[..., jnp.newaxis]
             m_n_e = m_n[..., jnp.newaxis]
             m_w_e = m_w[..., jnp.newaxis]
@@ -572,7 +649,7 @@ def neumann_fill_cgrid(
         nbr_avg = nbr_sum / jnp.maximum(nbr_count, 1.0)
 
         has_any_nbr = (m_s + m_n + m_w + m_e) > 0.0
-        if f.ndim > 2:
+        if f.ndim > 2 and m.ndim < f.ndim:
             has_any_nbr_e = has_any_nbr[..., jnp.newaxis]
         else:
             has_any_nbr_e = has_any_nbr
@@ -602,6 +679,9 @@ def _weno_zeta_at_u(
     v_at_u: jnp.ndarray,
     order: int = 5,
     u_smooth: jnp.ndarray | None = None,
+    smoothness: str = "split",
+    convert_to_cellavg: bool = True,
+    beta_average: bool = False,
 ) -> jnp.ndarray:
     """WENO reconstruction of a vertex field to u-faces (meridional).
 
@@ -617,7 +697,7 @@ def _weno_zeta_at_u(
     phi : (n_lat+1, n_lon+1, nlev) field at vertices to reconstruct.
     v_smooth : (n_lat+1, n_lon, nlev) at v-faces (⟨v⟩_i smoothness).
     v_at_u : (n_lat, n_lon+1, nlev) at u-faces (upwinding velocity).
-    order : {5, 7}
+    order : {5, 7, 9}
     u_smooth : (n_lat, n_lon+1, nlev) or None
         u at u-faces for the ⟨u⟩_j smoothness path.
 
@@ -625,7 +705,7 @@ def _weno_zeta_at_u(
     -------
     phi_at_u : (n_lat, n_lon+1, nlev)
     """
-    hw = {5: 3, 7: 4}[order]
+    hw = {5: 3, 7: 4, 9: 5}[order]
     n_lat = phi.shape[0] - 1  # n_lat+1 vertices → n_lat u-faces
     nlev = phi.shape[2]
 
@@ -636,9 +716,18 @@ def _weno_zeta_at_u(
         [v_at_vtx, v_at_vtx[:, 0:1, :]], axis=1)  # (n_lat+1, n_lon+1, nlev)
 
     # Convert point values to cell averages along the meridional
-    # reconstruction axis before WENO.
-    from legoesm.core.weno import point_to_cellavg_bounded
-    conv_order = {5: 6, 7: 8}[order]
+    # reconstruction axis before WENO.  Faithful Oceananigans path
+    # (convert_to_cellavg=False): feed the vertex grid values DIRECTLY to the
+    # finite-volume WENO reconstruction (Oceananigans, a FV code, reconstructs
+    # nodal grid values directly with no point->cellavg pre-filter; that
+    # pre-filter is a mild grid-scale low-pass that suppresses the WENO's
+    # nonlinear ENO dissipation — see _weno_cell_to_uface).
+    conv_order = {5: 6, 7: 8, 9: 8}[order]
+    if convert_to_cellavg:
+        from legoesm.core.weno import point_to_cellavg_bounded
+    else:
+        def point_to_cellavg_bounded(a, axis=0, order=0):
+            return a
     phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
     v_at_vtx_avg = point_to_cellavg_bounded(v_at_vtx, axis=0, order=conv_order)
 
@@ -651,15 +740,23 @@ def _weno_zeta_at_u(
 
     phi_stencil = [phi_ext[1 + j: n_lat + 1 + j, :, :]
                    for j in range(2 * hw)]
+
+    if smoothness == "standard":
+        # W*D: self-smoothness {ζ;ζ} (Silvestri Eq 37). Reconstruct phi using
+        # its OWN smoothness — standard WENO-Z, more dissipative than {ζ;u}.
+        # NOTE: u_smooth/v_smooth are INERT in this branch (the velocity
+        # smoothness fields are only used by the "split" path).
+        phi_plus, phi_minus = weno_reconstruct_split(
+            phi_stencil, phi_stencil, order=order)
+        return weno_upwind(phi_plus, phi_minus, v_at_u)
+
     psi_v_stencil = [v_ext[1 + j: n_lat + 1 + j, :, :]
                      for j in range(2 * hw)]
 
-    phi_plus_v, phi_minus_v = weno_reconstruct_split(
-        phi_stencil, psi_v_stencil, order=order)
-    result_v = weno_upwind(phi_plus_v, phi_minus_v, v_at_u)
-
     if u_smooth is None:
-        return result_v
+        phi_plus_v, phi_minus_v = weno_reconstruct_split(
+            phi_stencil, psi_v_stencil, order=order)
+        return weno_upwind(phi_plus_v, phi_minus_v, v_at_u)
 
     # ⟨u⟩_j: u averaged in latitude to vertex positions.
     n_lon_u = u_smooth.shape[1]  # n_lon+1
@@ -674,6 +771,18 @@ def _weno_zeta_at_u(
     psi_u_stencil = [u_ext[1 + j: n_lat + 1 + j, :, :]
                      for j in range(2 * hw)]
 
+    if beta_average:
+        # Faithful Oceananigans VelocityStencil: average the smoothness betas
+        # of ⟨v⟩ and ⟨u⟩ per sub-stencil, then ONE reconstruction (NOT an
+        # average of two independent reconstructions, which under-dissipates).
+        from legoesm.core.weno import weno_reconstruct_split2
+        phi_plus, phi_minus = weno_reconstruct_split2(
+            phi_stencil, psi_v_stencil, psi_u_stencil, order=order)
+        return weno_upwind(phi_plus, phi_minus, v_at_u)
+
+    phi_plus_v, phi_minus_v = weno_reconstruct_split(
+        phi_stencil, psi_v_stencil, order=order)
+    result_v = weno_upwind(phi_plus_v, phi_minus_v, v_at_u)
     phi_plus_u, phi_minus_u = weno_reconstruct_split(
         phi_stencil, psi_u_stencil, order=order)
     result_u = weno_upwind(phi_plus_u, phi_minus_u, v_at_u)
@@ -687,6 +796,9 @@ def _weno_zeta_at_v(
     u_at_v: jnp.ndarray,
     order: int = 5,
     v_smooth: jnp.ndarray | None = None,
+    smoothness: str = "split",
+    convert_to_cellavg: bool = True,
+    beta_average: bool = False,
 ) -> jnp.ndarray:
     """WENO reconstruction of a vertex field to v-faces (zonal).
 
@@ -702,7 +814,7 @@ def _weno_zeta_at_v(
     phi : (n_lat+1, n_lon+1, nlev) field at vertices to reconstruct.
     u_smooth : (n_lat, n_lon+1, nlev) at u-faces (⟨u⟩_j smoothness).
     u_at_v : (n_lat+1, n_lon, nlev) at v-faces (upwinding velocity).
-    order : {5, 7}
+    order : {5, 7, 9}
     v_smooth : (n_lat+1, n_lon, nlev) or None
         v at v-faces for the ⟨v⟩_i smoothness path.
 
@@ -710,7 +822,7 @@ def _weno_zeta_at_v(
     -------
     phi_at_v : (n_lat+1, n_lon, nlev)
     """
-    hw = {5: 3, 7: 4}[order]
+    hw = {5: 3, 7: 4, 9: 5}[order]
     n_lon = phi.shape[1] - 1
     nlev = phi.shape[2]
 
@@ -722,8 +834,13 @@ def _weno_zeta_at_v(
     u_at_vtx = 0.5 * (u_ext_lat[:-1, :, :] + u_ext_lat[1:, :, :])
 
     # Convert point values to cell averages along zonal axis (periodic).
-    from legoesm.core.weno import point_to_cellavg_periodic
-    conv_order = {5: 6, 7: 8}[order]
+    # Faithful Oceananigans path (convert_to_cellavg=False): see _weno_zeta_at_u.
+    conv_order = {5: 6, 7: 8, 9: 8}[order]
+    if convert_to_cellavg:
+        from legoesm.core.weno import point_to_cellavg_periodic
+    else:
+        def point_to_cellavg_periodic(a, axis=1, order=0):
+            return a
 
     phi_core = phi[:, :n_lon, :]
     u_core = u_at_vtx[:, :n_lon, :]
@@ -733,15 +850,21 @@ def _weno_zeta_at_v(
 
     phi_stencil = [jnp.roll(phi_core_avg, hw - 1 - j, axis=1)
                    for j in range(2 * hw)]
+
+    if smoothness == "standard":
+        # W*D: self-smoothness {ζ;ζ} (Silvestri Eq 37). u_smooth/v_smooth
+        # are INERT here (only the "split" path uses velocity smoothness).
+        phi_plus, phi_minus = weno_reconstruct_split(
+            phi_stencil, phi_stencil, order=order)
+        return weno_upwind(phi_plus, phi_minus, u_at_v)
+
     psi_u_stencil = [jnp.roll(u_core_avg, hw - 1 - j, axis=1)
                      for j in range(2 * hw)]
 
-    phi_plus_u, phi_minus_u = weno_reconstruct_split(
-        phi_stencil, psi_u_stencil, order=order)
-    result_u = weno_upwind(phi_plus_u, phi_minus_u, u_at_v)
-
     if v_smooth is None:
-        return result_u
+        phi_plus_u, phi_minus_u = weno_reconstruct_split(
+            phi_stencil, psi_u_stencil, order=order)
+        return weno_upwind(phi_plus_u, phi_minus_u, u_at_v)
 
     # ⟨v⟩_i: v averaged in longitude to vertex positions.
     v_w = jnp.roll(v_smooth, 1, axis=1)
@@ -754,6 +877,16 @@ def _weno_zeta_at_v(
     psi_v_stencil = [jnp.roll(v_core_avg, hw - 1 - j, axis=1)
                      for j in range(2 * hw)]
 
+    if beta_average:
+        # Faithful Oceananigans VelocityStencil (see _weno_zeta_at_u).
+        from legoesm.core.weno import weno_reconstruct_split2
+        phi_plus, phi_minus = weno_reconstruct_split2(
+            phi_stencil, psi_u_stencil, psi_v_stencil, order=order)
+        return weno_upwind(phi_plus, phi_minus, u_at_v)
+
+    phi_plus_u, phi_minus_u = weno_reconstruct_split(
+        phi_stencil, psi_u_stencil, order=order)
+    result_u = weno_upwind(phi_plus_u, phi_minus_u, u_at_v)
     phi_plus_v, phi_minus_v = weno_reconstruct_split(
         phi_stencil, psi_v_stencil, order=order)
     result_v = weno_upwind(phi_plus_v, phi_minus_v, u_at_v)
@@ -807,6 +940,27 @@ def _flux_form_vertical_momentum_advection_weno(
 # WENO D-term (divergence flux) and K-term (KE) helpers — Phase 4b
 # =============================================================================
 
+def flux_form_vface_zonal_length(grid) -> jnp.ndarray:
+    """Canonical v-face zonal length ``dx_v = R·cos(lat_v)·dlon`` (#516).
+
+    Single source for the meridional volume-transport face length used
+    by the flux-form momentum advection, the velocity-divergence split
+    and the conservative cell divergence on a regular/Mercator lat-lon
+    grid.  Routes through :func:`vface_zonal_cos_lat` so it bit-matches
+    the canonical ``divergence_cgrid`` metric — guaranteeing that the
+    ``v·dx_v`` transport summed by the momentum advection equals the
+    transport continuity uses (no mass leak between continuity and
+    momentum advection on a non-uniform-dlat grid).
+
+    Returns
+    -------
+    dx_v : (n_lat+1,)
+        Zonal length of each v-face; interior cos-of-interface, the two
+        polar walls exactly ``0`` (no flux through the pole).
+    """
+    return grid.radius * vface_zonal_cos_lat(grid) * grid.dlon
+
+
 def _split_velocity_divergence(
     u: jnp.ndarray,
     v: jnp.ndarray,
@@ -843,16 +997,11 @@ def _split_velocity_divergence(
     else:
         # Regular or Mercator: variable-dy safe.
         _is_2d_dy = False
-        R = grid.radius
-        dlon = grid.dlon
-        lat = grid.lat
         face_dy = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]  # (n_lat,1,1)
-        lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
-        lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
-        lat_interior = 0.5 * (lat[:-1] + lat[1:])
-        lat_v = jnp.concatenate([lat_south_pole, lat_interior, lat_north_pole])
-        cos_lat_v = jnp.cos(lat_v)
-        face_dx = R * cos_lat_v * dlon                  # (n_lat+1,)
+        # #516: single-source v-face zonal length so the meridional
+        # ``v·dx_v`` transport the w-/horizontal divergence splits is
+        # bit-identical to the continuity / flux-form-advection metric.
+        face_dx = flux_form_vface_zonal_length(grid)    # (n_lat+1,)
         fd = face_dx[:, jnp.newaxis, jnp.newaxis]
 
     # Zonal flux divergence at cells.
@@ -892,6 +1041,7 @@ def _weno_cell_to_uface(
     psi: jnp.ndarray,
     u_upwind: jnp.ndarray,
     order: int = 5,
+    convert_to_cellavg: bool = True,
 ) -> jnp.ndarray:
     """WENO reconstruction of a cell-center field to u-faces (zonal, periodic).
 
@@ -905,20 +1055,34 @@ def _weno_cell_to_uface(
     phi : (n_lat, n_lon, nlev)  field at cell centers to reconstruct.
     psi : (n_lat, n_lon, nlev)  field at cell centers for smoothness.
     u_upwind : (n_lat, n_lon+1, nlev)  velocity at u-faces (upwind sign).
-    order : {5, 7}
+    order : {5, 7, 9}
 
     Returns
     -------
     phi_at_u : (n_lat, n_lon+1, nlev)
     """
-    hw = {5: 3, 7: 4}[order]
+    hw = {5: 3, 7: 4, 9: 5}[order]
     n_lon = phi.shape[1]
 
     # Convert point values to cell averages before WENO reconstruction.
-    from legoesm.core.weno import point_to_cellavg_periodic
-    conv_order = {5: 6, 7: 8}[order]
-    phi_avg = point_to_cellavg_periodic(phi, axis=1, order=conv_order)
-    psi_avg = point_to_cellavg_periodic(psi, axis=1, order=conv_order)
+    if convert_to_cellavg:
+        from legoesm.core.weno import point_to_cellavg_periodic
+        conv_order = {5: 6, 7: 8, 9: 8}[order]
+        phi_avg = point_to_cellavg_periodic(phi, axis=1, order=conv_order)
+        psi_avg = point_to_cellavg_periodic(psi, axis=1, order=conv_order)
+    else:
+        # Faithful Oceananigans path: the grid values are fed DIRECTLY to the
+        # finite-volume WENO reconstruction.  Oceananigans is a finite-volume
+        # code and reconstructs the nodal grid values directly with the same
+        # Balsara-Shu cell-avg->face coefficients; it has NO point->cellavg
+        # pre-filter.  legoESM's point_to_cellavg is a mild grid-scale low-pass
+        # (measured Nyquist gain ~0.79) that pre-smooths the field the WENO
+        # smoothness indicators see -> weights stay nearer optimal -> the
+        # nonlinear ENO dissipation is SUPPRESSED at the grid scale.  Removing
+        # it restores the standard FV-WENO operator (verified more dissipative
+        # on the 2Δx mode), matching the oracle.
+        phi_avg = phi
+        psi_avg = psi
 
     # Periodic stencil along axis 1 (longitude).
     # U-face j is between cell j-1 and cell j.  WENO at the face between
@@ -946,6 +1110,7 @@ def _weno_cell_to_vface(
     psi: jnp.ndarray,
     v_upwind: jnp.ndarray,
     order: int = 5,
+    convert_to_cellavg: bool = True,
 ) -> jnp.ndarray:
     """WENO reconstruction of a cell-center field to v-faces (meridional, wall BC).
 
@@ -960,22 +1125,27 @@ def _weno_cell_to_vface(
     phi : (n_lat, n_lon, nlev)  field at cell centers to reconstruct.
     psi : (n_lat, n_lon, nlev)  field at cell centers for smoothness.
     v_upwind : (n_lat+1, n_lon, nlev)  velocity at v-faces (upwind sign).
-    order : {5, 7}
+    order : {5, 7, 9}
 
     Returns
     -------
     phi_at_v : (n_lat+1, n_lon, nlev)
     """
-    hw = {5: 3, 7: 4}[order]
+    hw = {5: 3, 7: 4, 9: 5}[order]
     n_lat = phi.shape[0]
     nlev = phi.shape[2]
     n_lon = phi.shape[1]
 
     # Convert point values to cell averages before WENO reconstruction.
-    from legoesm.core.weno import point_to_cellavg_bounded
-    conv_order = {5: 6, 7: 8}[order]
-    phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
-    psi_avg = point_to_cellavg_bounded(psi, axis=0, order=conv_order)
+    if convert_to_cellavg:
+        from legoesm.core.weno import point_to_cellavg_bounded
+        conv_order = {5: 6, 7: 8, 9: 8}[order]
+        phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
+        psi_avg = point_to_cellavg_bounded(psi, axis=0, order=conv_order)
+    else:
+        # Faithful Oceananigans path (see _weno_cell_to_uface).
+        phi_avg = phi
+        psi_avg = psi
 
     # Ghost cells (Neumann BC) along axis 0 for meridional stencil.
     phi_ext = jnp.concatenate(
@@ -1032,6 +1202,10 @@ def laplacian_smag_cfl_cap(grid, dt: float, safety: float):
     the SAME cyclic wrap the q-point Laplacian uses), so the seam is continuous:
     ``cap_q[:, -1] == cap_q[:, 0]`` (no edge-replication discontinuity).
     """
+    # The ocean model converts EVERY grid to LatLonCGridGeometry at construction
+    # (ensure_geometry), so lat_T/area_T are always present; the regular vs
+    # tripole distinction is the scalar dlon (>0 for a regular lat-lon grid, the
+    # 0.0 sentinel for a tripole/curvilinear grid).
     lat2d = getattr(grid, "lat_T", None)
     if lat2d is None:
         lat2d = grid.lat2d
@@ -1040,6 +1214,29 @@ def laplacian_smag_cfl_cap(grid, dt: float, safety: float):
         area_h = grid.area
     cos2 = jnp.maximum(jnp.cos(lat2d) ** 2, 0.04)            # poleward floor
     cap_h = safety * area_h * cos2 / dt                      # (n_lat, n_lon)
+    _dlon = float(getattr(grid, "dlon", 0.0) or 0.0)
+    if _dlon > 0.0:
+        # POLAR-ROW CFL CORRECTION (regular lat-lon only; dlon>0). The tuned
+        # ``area*cos^2/dt`` ceiling is deliberately ~20% above the rectangular CFL
+        # to feed the marginally-resolved WBC, but the cos^2 floor (0.04, ~78.5 deg)
+        # stops it shrinking with cos(lat) while ``dx = R*dlon*cos(lat)`` keeps
+        # shrinking, so at the SINGULAR pole it runs ~9x ABOVE the true explicit-
+        # Laplacian-diffusion bound: at lat 89.75 (½ deg, dx~243 m) the ceiling
+        # gives ``A*dt/dx^2 ~ 1.14 > 0.5`` -> the Smagorinsky viscosity self-CFL-
+        # violates and amplifies the cold-start cold blowup at lat 89.75 lev59
+        # (codex root-cause; opdiscrim: removing Smag SLOWS it, removing vert-adv
+        # does not). Tighten to the strict rectangular 2-D bound
+        # ``safety/(dt*(1/dx^2+1/dy^2))`` ONLY poleward of |lat|>89.5 deg (a no-op
+        # equatorward of it), so the mid-latitude WBC keeps the larger tuned
+        # ceiling (the strict bound STARVES the WBC -- eORCA025 blew at day 0.25,
+        # job 8126978). The tripole carries the dlon=0 sentinel, so it is excluded
+        # (no singular pole -- it uses the north fold).
+        _cosl = jnp.maximum(jnp.cos(lat2d), 1.0e-12)
+        _dx = grid.radius * _dlon * _cosl                   # zonal cell width [m]
+        _dy = grid.radius * float(grid.dlat)                 # meridional cell [m]
+        cap_strict = safety / (dt * (_dx ** -2 + _dy ** -2))
+        _polar = jnp.abs(lat2d) > jnp.deg2rad(89.5)          # singular-pole rows
+        cap_h = jnp.where(_polar, jnp.minimum(cap_h, cap_strict), cap_h)
     # Vertex ceiling: pad to (n_lat+1, n_lon+1) -- edge in lat, periodic in lon.
     cap_q = jnp.pad(cap_h, ((0, 1), (0, 0)), mode="edge")    # (n_lat+1, n_lon)
     cap_q = jnp.concatenate([cap_q, cap_q[:, :1]], axis=1)   # (n_lat+1, n_lon+1)
@@ -1080,11 +1277,26 @@ def _bc_geometry_and_density(
     # accounting for the partial bottom cell.  Cells below the
     # seafloor have h_partial=0 and contribute zero pressure increment.
     # For pure z* coord (legacy), h_actual=None falls back to dz_ref.
-    _h_actual_pprime = (
-        z_coord.h_partial
-        if isinstance(z_coord, OceanPartialCellCoordinate)
-        else None
-    )
+    #
+    # z-star + smc03: integrate the hydrostatic pressure on the PHYSICAL
+    # compressed thickness (η=0: dz_ref·H_bathy/H_max) so a pressure-dependent
+    # EOS (Wright) sees the correct in-situ pressure — CONSISTENT with the
+    # physical depths the smc03 density-Jacobian reconstructs against.  With
+    # h_actual=None (dz_ref) the pressure is reference-coordinate; for a curved
+    # ρ(p) that mismatch with smc03's compressed geometry produces a spurious
+    # rest-state PGF that blows up a tall-seamount z-star column (the tier-1
+    # Wright seamount).  Linear EOS is pressure-independent ⇒ this is a no-op
+    # there.  The legacy adcroft z-star path keeps None (dz_ref) → BIT-IDENTICAL,
+    # and its raw same-level gradient is consistent with the dz_ref pressure.
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        _h_actual_pprime = z_coord.h_partial
+    elif (isinstance(z_coord, OceanZStarCoordinate)
+          and getattr(config, "pgf_scheme", "adcroft") == "smc03"):
+        _h_actual_pprime = compute_layer_thickness(
+            jnp.zeros_like(eta_safe), H_bathy, z_coord,
+        )
+    else:
+        _h_actual_pprime = None
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
     rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask,
@@ -1093,10 +1305,38 @@ def _bc_geometry_and_density(
         n_iter=2,
         hi_precision_pressure=True,
         h_actual=_h_actual_pprime,
+        allow_baroclinic_f32=True,   # opt-in f32-EOS lever (LEGOESM_BAROCLINIC_F32)
     )
 
     p_prime_filled = neumann_fill_cgrid(p_prime, mask, grid=grid)
     return J, h_k, rho_prime, p_prime_filled
+
+
+def compute_frozen_geom_density(state, grid, z_coord, config):
+    """``(J, h_k, rho_prime, p_prime_filled)`` from a state's eta/T/S.
+
+    The eta_safe derivation (mirrors :func:`latlon_cgrid_ocean_baroclinic_
+    tendencies` stages 1-3 verbatim) + :func:`_bc_geometry_and_density`.  These
+    outputs depend ONLY on eta, T, S (and static geometry), so they are
+    INVARIANT across the RK3 momentum sub-stages (which freeze eta/T/S and vary
+    only u/v) — compute once and pass as ``precomputed_geom_density`` to skip
+    the EOS + pressure-anomaly recompute in each ``_mom_pert`` call (#25).
+    Bit-identical to the inline path by construction (same derivation + same
+    pure ``_bc_geometry_and_density``); pinned by the parity gate."""
+    import jax.numpy as _jnp
+    T = state.T.data
+    S = state.S.data
+    eta = state.eta.data
+    H_bathy = state.H_bathy.data
+    mask = state.land_mask.data
+    g_val = config.g
+    rho_0 = config.rho_0
+    min_water_col = _jnp.asarray(config.min_water_column_m, dtype=eta.dtype)
+    eta_floor = min_water_col - H_bathy
+    eta_safe = _jnp.maximum(eta, eta_floor) * mask
+    return _bc_geometry_and_density(
+        eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
+    )
 
 
 def _bc_vertical_and_depthmean_velocity(
@@ -1132,6 +1372,15 @@ def _bc_vertical_and_depthmean_velocity(
     # --- 4b. Depth-mean velocity (for diagnostics / KE gradient) ---
     # Fuse num/denom reductions per face — both share their h_u/h_v
     # weight on the level axis.
+    # NOTE (#517 item 1): deliberately LEFT INLINE, not routed through the
+    # shared ``depth_average_to_faces``.  This face depth-mean feeds the
+    # large compiled ``latlon_cgrid_ocean_baroclinic_tendencies`` and the
+    # ``u_prime``/``v_prime`` below; moving the identical arithmetic behind
+    # a function-call boundary shifts XLA's fusion of the surrounding ops
+    # and perturbs the tendency at ~1e-12 (caught by the strict
+    # ``test_baroclinic_decomposition_bit_identical`` golden gate) — the
+    # same reduction-topology sensitivity that keeps the MPAS depth-average
+    # sites verbatim.  Bit-identity here outranks the dedup.
     _u_pair = jnp.sum(jnp.stack([u * h_u, h_u], axis=-1), axis=-2)
     U_bar = _u_pair[..., 0] / jnp.maximum(_u_pair[..., 1], 1e-10) * u_mask  # (n_lat, n_lon+1)
     _v_pair = jnp.sum(jnp.stack([v * h_v, h_v], axis=-1), axis=-2)
@@ -1168,7 +1417,7 @@ def _bc_ke_and_pressure_gradients(
     # in smooth regions, matching paper's design intent.
     _mom_adv = config.momentum_advection
     n_lat_g, n_lon_g, nlev_g = p_prime_filled.shape
-    if _mom_adv in ("weno5", "weno7"):
+    if _mom_adv in ("weno5", "weno7", "weno9"):
         # u² at faces and cell-centered fields needed by Eq. 33.
         u_sq_face = u ** 2                                  # (n_lat, n_lon+1, nlev)
         v_sq_face = v ** 2                                  # (n_lat+1, n_lon, nlev)
@@ -1190,12 +1439,24 @@ def _bc_ke_and_pressure_gradients(
         delta_v_sq_cell = neumann_fill_cgrid(delta_v_sq_cell, mask, grid=grid)
         v_avg_cell = neumann_fill_cgrid(v_avg_cell, mask, grid=grid)
 
+        # Faithful Oceananigans FV-WENO: feed the cell-centred δu²/δv² grid
+        # values DIRECTLY to the finite-volume WENO reconstruction
+        # (convert_to_cellavg=False).  Oceananigans (a finite-volume code)
+        # reconstructs the grid values directly with the same Balsara-Shu FV
+        # coefficients and has NO point->cellavg pre-filter.  legoESM's
+        # point_to_cellavg is a mild grid-scale low-pass (Nyquist gain ~0.79)
+        # that pre-smooths the field, so the WENO smoothness indicators see a
+        # smoother field and keep near-optimal weights — suppressing the
+        # nonlinear ENO dissipation at the grid scale.  Removing it restores the
+        # standard, more-dissipative FV-WENO operator (verified on the 2Δx mode).
         # WENO upwind of δ_i u² to u-faces (gradient times dx_u_at_face).
         delta_u_sq_at_uface = _weno_cell_to_uface(
-            delta_u_sq_cell, u_avg_cell, u, order=5)        # (n_lat, n_lon+1, nlev)
+            delta_u_sq_cell, u_avg_cell, u, order=5,
+            convert_to_cellavg=False)                       # (n_lat, n_lon+1, nlev)
         # WENO upwind of δ_j v² to v-faces.
         delta_v_sq_at_vface = _weno_cell_to_vface(
-            delta_v_sq_cell, v_avg_cell, v, order=5)        # (n_lat+1, n_lon, nlev)
+            delta_v_sq_cell, v_avg_cell, v, order=5,
+            convert_to_cellavg=False)                       # (n_lat+1, n_lon, nlev)
 
         # Convert "δ across one cell" → "gradient at face" by dividing
         # by dx_u (cell width at u-face latitude) and dy_v (distance
@@ -1323,9 +1584,11 @@ def _bc_ke_and_pressure_gradients(
     # Adcroft & Campin (2004) shift each cell's pressure to a common
     # face-reference depth (the shallower of the two centroids) before
     # differencing.  Implemented here as an additive correction to
-    # dp_dx, dp_dy.  For pure z\\* coord (legacy), all centroids align
+    # dp_dx, dp_dy.  For pure z\\* coord (legacy adcroft), all centroids align
     # within a column so the correction is identically zero — bit-exact
-    # backwards-compat preserved.
+    # backwards-compat preserved; ``pgf_scheme="smc03"`` instead applies the
+    # density-Jacobian PGF (the elif branch below).  ``pgf_scheme`` is validated
+    # against {"adcroft","smc03"} at model construction (_validate_config).
     if isinstance(z_coord, OceanPartialCellCoordinate):
         pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
         if pgf_scheme == "smc03":
@@ -1361,6 +1624,52 @@ def _bc_ke_and_pressure_gradients(
             dp_dy = dp_dy + partial_cell_pgf_correction_y(
                 centroid_depth, rho_prime, grid, g_val,
             )
+    elif isinstance(z_coord, OceanZStarCoordinate):
+        # Pure z-star (terrain-following) PGF.  The legacy path applies NO
+        # correction: the raw ``gradient_*_cgrid(p')`` differences cells at the
+        # SAME reference level k but DIFFERENT physical depth wherever the
+        # coordinate compresses over sloping bathymetry (H_bathy < H_max), the
+        # classic terrain-following PGF error (≈1.8 m/s spurious flow from rest
+        # over a ridge in the seamount-at-rest check).  ``pgf_scheme="smc03"``
+        # generalizes the density-Jacobian PGF (proven exact at rest on partial
+        # cells) to z-star: reconstruct ρ(z_physical) per column from the η=0
+        # physical thickness ``dz_ref·H_bathy/H_max`` (= ``compute_layer_thickness``
+        # at η=0, matching the η=0 reference the rest of the baroclinic path
+        # uses) and difference at a common physical depth — which vanishes at
+        # rest for a horizontally-uniform-in-z stratification.  All z-star cells
+        # are active (no below-seafloor cells).  Opt-in: the default
+        # ``pgf_scheme="adcroft"`` keeps the raw gradient → BIT-IDENTICAL
+        # (this branch is not entered).
+        if getattr(config, "pgf_scheme", "adcroft") == "smc03":
+            # ``min_water_column_m`` intentionally omitted (mirrors the partial-
+            # cell smc03 branch, which uses the unfloored static ``h_partial``):
+            # smc03 re-integrates pressure from THIS ``h_zstar`` and discards the
+            # upstream dz_ref-based ``p'``, so the centroid + pressure stay self-
+            # consistent (the well-balancedness requirement).  The floor only
+            # matters at sub-floor wet/dry-margin columns, which are masked out
+            # downstream by ``u_mask_3d``.
+            h_zstar = compute_layer_thickness(
+                jnp.zeros_like(eta_safe), H_bathy, z_coord,
+            )
+            is_active_zstar = jnp.ones(rho_prime.shape, dtype=bool)
+            # ``bottom_slope_2nd_order=True``: z-star divides the column into N
+            # compressed cells, so over a tall seamount the bottom cells become
+            # very thin and the ONE-SIDED bottom harmonic slope's O(Δz) curvature
+            # bias — under a pressure-dependent EOS where ρ(z) is curved even for
+            # uniform T,S — is amplified into a spurious rest-state PGF that blows
+            # up (the tier-1 z-star Wright-EOS seamount). The 3-point backward
+            # slope evaluates dρ/dz AT the bottom centroid (exact for linear AND
+            # quadratic ρ), removing the bias. Partial cells keep the default
+            # (False) — full-thickness column above the partial bottom, proven
+            # path bit-identical.
+            dp_dx = density_jacobian_pgf_smc03_x(
+                rho_prime, h_zstar, is_active_zstar, grid, g_val,
+                bottom_slope_2nd_order=True,
+            ).astype(dp_dx.dtype)
+            dp_dy = density_jacobian_pgf_smc03_y(
+                rho_prime, h_zstar, is_active_zstar, grid, g_val,
+                bottom_slope_2nd_order=True,
+            ).astype(dp_dy.dtype)
 
     return dKE_dx, dp_dx, dKE_dy, dp_dy
 
@@ -1443,11 +1752,14 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
 
 def _bc_pv_flux(
     du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
+    weno_smoothness="split",
     vertex_mask=None,
+    enstrophy_metric=False,
+    reconstruct_zeta=False,
 ):
     """Stage 7b: vector-invariant potential-vorticity (vorticity) flux
     (Sadourny EC / Arakawa-Lamb-81 triad, or WENO-Z when momentum_advection is
-    weno5/weno7). Pure verbatim extraction (Q8). Threads the momentum
+    weno5/weno7/weno9). Pure verbatim extraction (Q8). Threads the momentum
     accumulators; returns ``(du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v)``."""
     # --- 7b. Potential vorticity flux (#160, Sadourny EC) ---
     # Vector-invariant advection: (u·∇)u = ∇(KE) + (f+ζ) × u.
@@ -1540,10 +1852,22 @@ def _bc_pv_flux(
 
     # (Fv / Fu computed above, before the fused pad.)
 
-    # Average Fv to u-points (4-point, periodic in lon)
+    # Average Fv to u-points (4-point, periodic in lon).  enstrophy_metric selects the
+    # Sadourny Δx-WEIGHTED transport v̂ = 0.25·Σ(Δx_v·Fv)/Δx_u matching Oceananigans'
+    # WENOVectorInvariant (ℑxᶠᵃᵃ(ℑyᵃᶜᵃ,Δx_q·v)·Δx⁻¹), which conserves enstrophy at
+    # FINITE amplitude.  The plain average (default) is identical on uniform-metric
+    # grids (Δx_v ≡ Δx_u) — the cos-lat weighting is the finite-amplitude lever.
     Fv_west = jnp.roll(Fv, 1, axis=1)
-    Fv_at_u_core = 0.25 * (Fv[:-1] + Fv[1:]
-                            + Fv_west[:-1] + Fv_west[1:])  # (n_lat, n_lon, nlev)
+    if enstrophy_metric:
+        _dxv = grid.dx_v[:, :, None]                       # (n_lat+1, n_lon, 1)
+        _dxv_w = jnp.roll(_dxv, 1, axis=1)
+        _dxu_u = grid.dx_u[:, :Fv.shape[1], None]          # (n_lat, n_lon, 1)
+        Fv_at_u_core = (0.25 * (_dxv[:-1] * Fv[:-1] + _dxv[1:] * Fv[1:]
+                                + _dxv_w[:-1] * Fv_west[:-1]
+                                + _dxv_w[1:] * Fv_west[1:])) / _dxu_u
+    else:
+        Fv_at_u_core = 0.25 * (Fv[:-1] + Fv[1:]
+                                + Fv_west[:-1] + Fv_west[1:])  # (n_lat, n_lon, nlev)
     Fv_at_u = jnp.concatenate(
         [Fv_at_u_core, Fv_at_u_core[:, 0:1, :]], axis=1,
     )  # (n_lat, n_lon+1, nlev)
@@ -1567,10 +1891,20 @@ def _bc_pv_flux(
     Fu_at_v = 0.25 * (Fu_ext[:-1, :-1, :] + Fu_ext[:-1, 1:, :]
                        + Fu_ext[1:, :-1, :] + Fu_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
 
-    # Total velocity at u/v faces (for WENO upwinding direction)
+    # Total velocity at u faces (sets the WENO upwinding DIRECTION).  Same Sadourny
+    # Δx-weighting as Fv_at_u under enstrophy_metric, so the upwind side is chosen by
+    # the metric-consistent transport v̂ (matches Oceananigans bias(v̂)).
     v_west_total = jnp.roll(v, 1, axis=1)
-    v_at_u_core = 0.25 * (v[:-1] + v[1:]
-                           + v_west_total[:-1] + v_west_total[1:])
+    if enstrophy_metric:
+        _dxv = grid.dx_v[:, :, None]
+        _dxv_w = jnp.roll(_dxv, 1, axis=1)
+        _dxu_u = grid.dx_u[:, :v.shape[1], None]
+        v_at_u_core = (0.25 * (_dxv[:-1] * v[:-1] + _dxv[1:] * v[1:]
+                               + _dxv_w[:-1] * v_west_total[:-1]
+                               + _dxv_w[1:] * v_west_total[1:])) / _dxu_u
+    else:
+        v_at_u_core = 0.25 * (v[:-1] + v[1:]
+                               + v_west_total[:-1] + v_west_total[1:])
     v_at_u = jnp.concatenate(
         [v_at_u_core, v_at_u_core[:, 0:1, :]], axis=1,
     )  # (n_lat, n_lon+1, nlev)
@@ -1604,19 +1938,38 @@ def _bc_pv_flux(
     # real ETOPO under live-T integration.  Same Neumann fill of q at
     # land-adjacent vertices as WENO5 (for the centred-q part of the
     # triad).
-    if _mom_adv in ("weno5", "weno7"):
-        _weno_order = {"weno5": 5, "weno7": 7}[_mom_adv]
+    if _mom_adv in ("weno5", "weno7", "weno9"):
+        _weno_order = {"weno5": 5, "weno7": 7, "weno9": 9}[_mom_adv]
         # Fill PV at land-adjacent vertices so WENO stencils see smooth
         # Neumann extrapolation instead of masked-zero discontinuities.
         vtx_mask = (vertex_mask if vertex_mask is not None
                     else compute_vertex_mask(mask, grid=grid))
-        q_filled = _neumann_fill_vertex(q, vtx_mask)
-        q_at_u = _weno_zeta_at_u(
-            q_filled, v, v_at_u, order=_weno_order, u_smooth=u)
-        q_at_v = _weno_zeta_at_v(
-            q_filled, u, u_at_v, order=_weno_order, v_smooth=v)
-        diag_vortcor_u = q_at_u * Fv_at_u
-        diag_vortcor_v = -(q_at_v * Fu_at_v)
+        # reconstruct_zeta: Oceananigans WENOVectorInvariant form — reconstruct the
+        # RELATIVE VORTICITY ζ directly and multiply by the transport velocity v̂
+        # (flux = v̂·ζᴿ; h NOT in the vorticity flux). Default: the POTENTIAL-vorticity
+        # form (reconstruct q=ζ/h, ×mass flux h·v), which conserves potential enstrophy
+        # on partial-cell topography. Identical when h is uniform (η≈0); they diverge
+        # at finite amplitude (the nonlinear WENO over the h-varying stencil).
+        _recon = zeta if reconstruct_zeta else q
+        # Faithful Oceananigans FV-WENO (see the KE-gradient note): reconstruct the
+        # vertex grid values directly (convert_to_cellavg=False) with the VelocityStencil
+        # beta-average form (beta_average=True) — average the smoothness betas of ⟨u⟩ and
+        # ⟨v⟩ per sub-stencil and reconstruct ONCE (matches weno_interpolants.jl::beta_sum).
+        _filled = _neumann_fill_vertex(_recon, vtx_mask)
+        rec_at_u = _weno_zeta_at_u(
+            _filled, v, v_at_u, order=_weno_order, u_smooth=u,
+            smoothness=weno_smoothness, convert_to_cellavg=False,
+            beta_average=True)
+        rec_at_v = _weno_zeta_at_v(
+            _filled, u, u_at_v, order=_weno_order, v_smooth=v,
+            smoothness=weno_smoothness, convert_to_cellavg=False,
+            beta_average=True)
+        if reconstruct_zeta:
+            diag_vortcor_u = rec_at_u * v_at_u            # ζᴿ·v̂ (Oceananigans form)
+            diag_vortcor_v = -(rec_at_v * u_at_v)
+        else:
+            diag_vortcor_u = rec_at_u * Fv_at_u           # qᴿ·(h·v) PV flux
+            diag_vortcor_v = -(rec_at_v * Fu_at_v)
     else:
         vtx_mask_va = (vertex_mask if vertex_mask is not None
                        else compute_vertex_mask(mask, grid=grid))
@@ -1633,7 +1986,8 @@ def _bc_pv_flux(
     return du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v
 
 
-def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom_adv):
+def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom_adv,
+              _weno_order=5):
     """Stage 7c: WENO divergence (D-term) momentum dissipation (Silvestri et al.
     2024 Eqs. 31-32). Active only for weno5/weno7 momentum advection with
     config.weno_d_term; otherwise the diagnostics are zero. Pure verbatim
@@ -1656,22 +2010,105 @@ def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom
     #
     # Gated by config.weno_d_term so the effect can be isolated; default
     # True (paper-faithful) once the split is in place.
-    if _mom_adv in ("weno5", "weno7") and config.weno_d_term:
+    if _mom_adv in ("weno5", "weno7", "weno9") and config.weno_d_term:
         dU_di_cell, dV_dj_cell = _split_velocity_divergence(
             u * u_mask_3d, v * v_mask_3d, grid)
         # Fill land cells before WENO stencils (Neumann extrapolation).
         dU_di_filled = neumann_fill_cgrid(dU_di_cell, mask, grid=grid)
         dV_dj_filled = neumann_fill_cgrid(dV_dj_cell, mask, grid=grid)
+        # Smoothness measure for the matching-direction WENO reconstruction:
+        #   "split"    (W*V) → {δU; D}: smoothness from the FULL divergence
+        #              D = δU + δV (Silvestri Eq 45, Oceananigans
+        #              CrossAndSelfUpwinding). The paper notes this "has a large
+        #              impact on the solution".
+        #   "standard" (W*D) → {δU; δU}: self-smoothness (Eq 44, Oceananigans
+        #              OnlySelfUpwinding — the WENOVectorInvariant DEFAULT).
+        # DECOUPLED from the vorticity smoothness: Oceananigans' default mixes
+        # VelocityStencil vorticity (Eq 43, "split") with OnlySelfUpwinding
+        # divergence (Eq 44, "standard"); ``weno_divergence_smoothness`` selects the
+        # divergence family independently (None → follow ``weno_smoothness``).
+        _div_smooth = config.weno_divergence_smoothness or config.weno_smoothness
+        if _div_smooth == "split":
+            D_full_filled = neumann_fill_cgrid(
+                dU_di_cell + dV_dj_cell, mask, grid=grid)
+            psi_u, psi_v = D_full_filled, D_full_filled
+        else:
+            psi_u, psi_v = dU_di_filled, dV_dj_filled
         # Matching direction (WENO upwind), cross direction (centered).
-        D_at_u = (_weno_cell_to_uface(dU_di_filled, dU_di_filled, u, order=5)
+        # D-flux WENO order follows the momentum order Z (Silvestri Table 2:
+        # W9V has D=WENO9, paired with the order-9 vorticity flux).
+        # Faithful Oceananigans FV-WENO (see the KE-gradient note): the
+        # divergence-flux grid values are reconstructed directly
+        # (convert_to_cellavg=False), no point->cellavg deconvolution.
+        D_at_u = (_weno_cell_to_uface(dU_di_filled, psi_u, u, order=_weno_order,
+                                      convert_to_cellavg=False)
                   + centered_cell_to_uface(dV_dj_cell))
         D_at_v = (_centered_cell_to_vface(dU_di_cell)
-                  + _weno_cell_to_vface(dV_dj_filled, dV_dj_filled, v, order=5))
+                  + _weno_cell_to_vface(dV_dj_filled, psi_v, v, order=_weno_order,
+                                        convert_to_cellavg=False))
         diag_Dterm_u = -(D_at_u * u * u_mask_3d)
         diag_Dterm_v = -(D_at_v * v * v_mask_3d)
         du_dt = du_dt + diag_Dterm_u
         dv_dt = dv_dt + diag_Dterm_v
     return du_dt, dv_dt, diag_Dterm_u, diag_Dterm_v
+
+
+_WALL_FILTER_ROWS = 8   # GH #480: width of the N/S wall band the filter acts on.
+
+
+def _bc_wall_grid_filter(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, rate_s, _mom_adv):
+    """GH #480: N/S free-slip-wall 2dx-in-lon grid-mode filter (Stage 8b).
+
+    At a free-slip N/S wall the vector-invariant WENO momentum advection grows a
+    2dx-in-lon, v-dominant, ROTATIONAL grid mode that is UN-DISSIPATABLE by the
+    scheme: the mode has ~zero zonal velocity, so meridional upwinding (large v)
+    only damps lat structure and the vorticity flux that would damp the lon mode
+    is multiplied by an x-mass-flux ≈ 0. It grows ONLY in the first/last
+    ``_WALL_FILTER_ROWS`` rows (interior stays clean) and NaNs ~day 11.
+
+    This adds a BOUNDARY-LOCALISED 2dx-in-lon Shapiro filter ``-rate·hp_lon(·)``
+    on those wall rows only — identically zero in the interior, so it is NOT a
+    domain viscosity/closure. ``rate_s`` is ``config.wall_grid_filter_rate_s``
+    [1/s]; ``rate_s <= 0`` (the default) is a no-op (bit-identical), so production
+    paths are unaffected unless the run explicitly enables it (eddy-permitting
+    channel jets with free-slip walls, e.g. Silvestri §5).
+
+    SPMD/MPI-correct: the wall band is applied only at the TRUE domain south/north
+    ends, NOT at every rank's array ends (which under lat-band sharding are real
+    interior cuts). Serial/MPI use the static ``lat_ends_are_poles()``; the SPMD
+    ``shard_map`` selects the edge bands data-dependently via
+    ``spmd_pole_end_masks()`` (same pattern as ``neumann_fill_cgrid``).
+
+    Returns ``(du_dt, dv_dt)``.
+    """
+    if rate_s <= 0.0 or _mom_adv not in ("weno5", "weno7", "weno9"):
+        return du_dt, dv_dt
+    nw = _WALL_FILTER_ROWS
+    # Function-scope imports (avoid top-level ocean->core.parallel coupling).
+    from legoesm.grids.operators_latlon_cgrid import lat_ends_are_poles
+    from legoesm.parallel.latlon_spmd import spmd_pole_end_masks
+    south_end, north_end = lat_ends_are_poles()        # static: serial=(T,T), MPI=per-rank
+    _spmd = spmd_pole_end_masks()                       # (s_mask,n_mask) under SPMD else None
+    s_gate = _spmd[0] if _spmd is not None else True    # traced under SPMD, else Python True
+    n_gate = _spmd[1] if _spmd is not None else True
+
+    def _hp_lon(f):  # 2dx-in-lon high-pass (periodic in longitude)
+        return (2.0 * f - jnp.roll(f, 1, axis=1) - jnp.roll(f, -1, axis=1)) * 0.25
+
+    def _wall_band(n):
+        # South/north bands are set only on rows that are TRUE domain ends
+        # (static gate), then masked data-dependently for SPMD (s_gate/n_gate).
+        south = jnp.zeros((n,), dtype=du_dt.dtype)
+        north = jnp.zeros((n,), dtype=du_dt.dtype)
+        if south_end:
+            south = south.at[:nw].set(1.0)
+        if north_end:
+            north = north.at[n - nw:].set(1.0)
+        return (south[:, None, None] * s_gate) + (north[:, None, None] * n_gate)
+
+    du_dt = du_dt - rate_s * _wall_band(du_dt.shape[0]) * _hp_lon(u) * u_mask_3d
+    dv_dt = dv_dt - rate_s * _wall_band(dv_dt.shape[0]) * _hp_lon(v) * v_mask_3d
+    return du_dt, dv_dt
 
 
 def _bc_vertical_momentum_advection(
@@ -1759,15 +2196,29 @@ def _bc_vertical_momentum_advection(
         h_v_old = h_v
         w_u = interp_cell_to_uface(w)
         w_v = interp_to_v_points(w, grid=grid)
-        if _mom_adv in ("weno5", "weno7"):
+        if _mom_adv in ("weno5", "weno7", "weno9"):
             # WENO vertical momentum advection removes the implicit
             # viscosity (~|w|*dz/2) that first-order upwind provides.
             # Requires compensating vertical viscosity (KPP / Richardson-
             # A_v, #204).
+            # The vertical (conservative-advection C) WENO order is capped at
+            # 5 for momentum order 9: Silvestri Table 2 keeps C at WENO5 in
+            # W9V ("order has minimal impact"), and the vertical tracer kernel
+            # is only defined for orders 5 and 7.
+            _vert_order = _weno_order if _weno_order <= 7 else 5
+            # config.weno_vertadv_full_velocity: advect the FULL velocity (Oceananigans-
+            # faithful) vs the default baroclinic perturbation u' (omits −∂(w·U_bar)/∂z).
+            _vfull = getattr(config, "weno_vertadv_full_velocity", False)
+            if _vfull and (u_full is None or v_full is None):
+                raise ValueError(
+                    "weno_vertadv_full_velocity=True requires u_full and v_full to be "
+                    "passed to _bc_vertical_momentum_advection (match centered_full).")
+            _u_va = u_full if _vfull else u_prime
+            _v_va = v_full if _vfull else v_prime
             diag_vertadv_u = _flux_form_vertical_momentum_advection_weno(
-                u_prime, w_u, h_u_old, order=_weno_order)
+                _u_va, w_u, h_u_old, order=_vert_order)
             diag_vertadv_v = _flux_form_vertical_momentum_advection_weno(
-                v_prime, w_v, h_v_old, order=_weno_order)
+                _v_va, w_v, h_v_old, order=_vert_order)
         else:
             # Non-WENO explicit vertical momentum advection.  Pass u/v
             # face-activity masks so the vertical momentum flux is exactly
@@ -1822,6 +2273,7 @@ def _bc_vertical_momentum_advection(
 
 def _bc_horizontal_viscosity(
     du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy, dt,
+    rho_prime=None, h_k=None,
     vertex_mask=None,
 ):
     """Stages 10 + 10b: horizontal viscosity (A_h Laplacian + B_h biharmonic +
@@ -1907,14 +2359,29 @@ def _bc_horizontal_viscosity(
     _use_flux_div = _visc_op == "flux_divergence"
     _kdiss_fluxdiv_cell = None  # set by the flux-div A_h branch when _want_kdiss_flux
 
-    if _use_flux_div and config.A_h > 0:
+    def _biharmonic_op(uu, vv):
+        """∇⁴ operator matched to the lateral-viscosity family: the component
+        ``flux_divergence`` biharmonic (MITgcm-faithful per-component del4, stable)
+        when ``lateral_viscosity_operator="flux_divergence"``, else the vector
+        ``grad(div)−curl(curl)`` biharmonic."""
+        if _use_flux_div:
+            return flux_divergence_bilaplacian_cgrid(
+                uu, vv, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
+        # Thread the precomputed ``vertex_mask`` so the vector biharmonic reuses the
+        # cached vertex mask instead of recomputing it (a per-step
+        # ``compute_vertex_mask`` + N-S pole-BC halo) every call.
+        return vector_bilaplacian_cgrid(
+            uu, vv, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
+            vertex_mask=vertex_mask)
+
+    if _use_flux_div and config.lateral_viscosity.A_h > 0:
         # Veros component-wise harmonic friction (``flux_divergence_viscosity_cgrid``)
         # applies the cos(lat) A_h scaling INSIDE the flux (Veros
         # ``enable_hor_friction_cos_scaling`` / ``hor_friction_cosPower``).  The
         # legoESM-specific A_h boosts (eq / polar-cap) and the A_h_floor are NOT part
         # of Veros's harmonic friction, so reject those combinations rather than
         # silently ignoring them (they would change answers without effect here).
-        if config.A_h_eq_boost > 1.0 or config.A_h_cap_boost > 1.0 or config.A_h_floor > 0.0:
+        if config.lateral_viscosity.A_h_eq_boost > 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0 or config.lateral_viscosity.A_h_floor > 0.0:
             raise ValueError(
                 "lateral_viscosity_operator='flux_divergence' (Veros harmonic "
                 "friction) does not support A_h_eq_boost / A_h_cap_boost / A_h_floor "
@@ -1922,7 +2389,7 @@ def _bc_horizontal_viscosity(
                 "operator). Set them to their defaults, or use "
                 "lateral_viscosity_operator='vector_laplacian'."
             )
-        _cos_p = config.A_h_cos_power if config.A_h_lat_scaling else 0
+        _cos_p = config.lateral_viscosity.A_h_cos_power if config.lateral_viscosity.A_h_lat_scaling else 0
         # PER-LEVEL face masks (variable bathymetry): with only the 2-D
         # u_mask/v_mask the operator computes a flux across faces that are
         # CLOSED at depth at topographic steps — a spurious no-slip wall
@@ -1944,7 +2411,7 @@ def _bc_horizontal_viscosity(
             _fd_u, _fd_v = u, v
         diag_Ah_lap_u, diag_Ah_lap_v, _kdiss_fluxdiv_cell = (
             flux_divergence_viscosity_cgrid(
-                _fd_u, _fd_v, grid, config.A_h, cos_power=_cos_p,
+                _fd_u, _fd_v, grid, config.lateral_viscosity.A_h, cos_power=_cos_p,
                 mask=mask, u_mask=_fd_um, v_mask=_fd_vm,
                 want_dissipation=_want_kdiss_flux,
             )
@@ -1952,23 +2419,22 @@ def _bc_horizontal_viscosity(
         diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
-        if config.B_h > 0:
-            # Biharmonic is a separate (vector-Laplacian) operator, unaffected by the
-            # A_h operator choice: ∇⁴ = ∇²_vec(∇²_vec).
-            bilap_u, bilap_v = vector_bilaplacian_cgrid(
-                u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
-            if config.B_h_lat_scaling:
+        if config.lateral_viscosity.B_h > 0:
+            # Biharmonic matched to the operator family (component for
+            # flux_divergence — MITgcm-faithful + stable; vector otherwise).
+            bilap_u, bilap_v = _biharmonic_op(u, v)
+            if config.lateral_viscosity.B_h_lat_scaling:
                 scale_u, scale_v = biharmonic_scaling_factor(grid)
-                diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
-                diag_Bh_bilap_v = -config.B_h * scale_v[:, None, None] * bilap_v
+                diag_Bh_bilap_u = -config.lateral_viscosity.B_h * scale_u[:, None, None] * bilap_u
+                diag_Bh_bilap_v = -config.lateral_viscosity.B_h * scale_v[:, None, None] * bilap_v
             else:
-                diag_Bh_bilap_u = -config.B_h * bilap_u
-                diag_Bh_bilap_v = -config.B_h * bilap_v
+                diag_Bh_bilap_u = -config.lateral_viscosity.B_h * bilap_u
+                diag_Bh_bilap_v = -config.lateral_viscosity.B_h * bilap_v
             diag_Bh_bilap_u, diag_Bh_bilap_v = _apply_slope_foot(
                 diag_Bh_bilap_u, diag_Bh_bilap_v)
             du_dt = du_dt + diag_Bh_bilap_u
             dv_dt = dv_dt + diag_Bh_bilap_v
-    elif config.A_h > 0 and config.B_h > 0:
+    elif config.lateral_viscosity.A_h > 0 and config.lateral_viscosity.B_h > 0:
         # Both A_h Laplacian and B_h biharmonic active: the biharmonic's
         # *inner* vector Laplacian is identical to the explicit A_h
         # vector Laplacian, so compute ∇²(u, v) ONCE and feed it to
@@ -1981,48 +2447,48 @@ def _bc_horizontal_viscosity(
             u, v, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask,
             vertex_mask=vertex_mask)
-        if config.A_h_lat_scaling:
-            _floor = config.A_h_floor / config.A_h if config.A_h_floor > 0 else 0.0
+        if config.lateral_viscosity.A_h_lat_scaling:
+            _floor = config.lateral_viscosity.A_h_floor / config.lateral_viscosity.A_h if config.lateral_viscosity.A_h_floor > 0 else 0.0
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(
-                grid, power=config.A_h_cos_power, floor=_floor)
-            if config.A_h_eq_boost > 1.0:
+                grid, power=config.lateral_viscosity.A_h_cos_power, floor=_floor)
+            if config.lateral_viscosity.A_h_eq_boost > 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
-                    grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
+                    grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 lap_scale_u = lap_scale_u * eb_u
                 lap_scale_v = lap_scale_v * eb_v
-            if config.A_h_cap_boost > 1.0:
+            if config.lateral_viscosity.A_h_cap_boost > 1.0:
                 cap_u, cap_v = polar_cap_boost_factor(
-                    grid, config.A_h_cap_lat_deg,
-                    config.A_h_cap_boost, config.A_h_cap_width_deg)
+                    grid, config.lateral_viscosity.A_h_cap_lat_deg,
+                    config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 lap_scale_u = lap_scale_u * cap_u
                 lap_scale_v = lap_scale_v * cap_v
-            diag_Ah_lap_u = config.A_h * lap_scale_u[:, None, None] * _vlap_u
-            diag_Ah_lap_v = config.A_h * lap_scale_v[:, None, None] * _vlap_v
+            diag_Ah_lap_u = config.lateral_viscosity.A_h * lap_scale_u[:, None, None] * _vlap_u
+            diag_Ah_lap_v = config.lateral_viscosity.A_h * lap_scale_v[:, None, None] * _vlap_v
             if _want_kdiss_flux:
-                _ah_scale_center = config.A_h * lap_scale_u
-        elif config.A_h_eq_boost > 1.0 or config.A_h_cap_boost > 1.0:
+                _ah_scale_center = config.lateral_viscosity.A_h * lap_scale_u
+        elif config.lateral_viscosity.A_h_eq_boost > 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0:
             scale_u = jnp.ones((grid.lat.shape[0],), dtype=grid.lat.dtype)
             scale_v = jnp.ones((grid.lat.shape[0] + 1,), dtype=grid.lat.dtype)
-            if config.A_h_eq_boost > 1.0:
+            if config.lateral_viscosity.A_h_eq_boost > 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
-                    grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
+                    grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 scale_u = scale_u * eb_u
                 scale_v = scale_v * eb_v
-            if config.A_h_cap_boost > 1.0:
+            if config.lateral_viscosity.A_h_cap_boost > 1.0:
                 cap_u, cap_v = polar_cap_boost_factor(
-                    grid, config.A_h_cap_lat_deg,
-                    config.A_h_cap_boost, config.A_h_cap_width_deg)
+                    grid, config.lateral_viscosity.A_h_cap_lat_deg,
+                    config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 scale_u = scale_u * cap_u
                 scale_v = scale_v * cap_v
-            diag_Ah_lap_u = config.A_h * scale_u[:, None, None] * _vlap_u
-            diag_Ah_lap_v = config.A_h * scale_v[:, None, None] * _vlap_v
+            diag_Ah_lap_u = config.lateral_viscosity.A_h * scale_u[:, None, None] * _vlap_u
+            diag_Ah_lap_v = config.lateral_viscosity.A_h * scale_v[:, None, None] * _vlap_v
             if _want_kdiss_flux:
-                _ah_scale_center = config.A_h * scale_u
+                _ah_scale_center = config.lateral_viscosity.A_h * scale_u
         else:
-            diag_Ah_lap_u = config.A_h * _vlap_u
-            diag_Ah_lap_v = config.A_h * _vlap_v
+            diag_Ah_lap_u = config.lateral_viscosity.A_h * _vlap_u
+            diag_Ah_lap_v = config.lateral_viscosity.A_h * _vlap_v
             if _want_kdiss_flux:
-                _ah_scale_center = config.A_h * jnp.ones(
+                _ah_scale_center = config.lateral_viscosity.A_h * jnp.ones(
                     (grid.lat.shape[0],), dtype=grid.lat.dtype)
         diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         du_dt = du_dt + diag_Ah_lap_u
@@ -2031,88 +2497,101 @@ def _bc_horizontal_viscosity(
             _vlap_u, _vlap_v, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask,
             vertex_mask=vertex_mask)
-        if config.B_h_lat_scaling:
+        if config.lateral_viscosity.B_h_lat_scaling:
             scale_u, scale_v = biharmonic_scaling_factor(grid)
-            diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
-            diag_Bh_bilap_v = -config.B_h * scale_v[:, None, None] * bilap_v
+            diag_Bh_bilap_u = -config.lateral_viscosity.B_h * scale_u[:, None, None] * bilap_u
+            diag_Bh_bilap_v = -config.lateral_viscosity.B_h * scale_v[:, None, None] * bilap_v
         else:
-            diag_Bh_bilap_u = -config.B_h * bilap_u
-            diag_Bh_bilap_v = -config.B_h * bilap_v
+            diag_Bh_bilap_u = -config.lateral_viscosity.B_h * bilap_u
+            diag_Bh_bilap_v = -config.lateral_viscosity.B_h * bilap_v
         diag_Bh_bilap_u, diag_Bh_bilap_v = _apply_slope_foot(diag_Bh_bilap_u, diag_Bh_bilap_v)
         du_dt = du_dt + diag_Bh_bilap_u
         dv_dt = dv_dt + diag_Bh_bilap_v
-    elif config.A_h > 0:
+    elif config.lateral_viscosity.A_h > 0:
         vlap_u, vlap_v = vector_laplacian_cgrid(
             u, v, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask,
             vertex_mask=vertex_mask)
-        if config.A_h_lat_scaling:
-            _floor = config.A_h_floor / config.A_h if config.A_h_floor > 0 else 0.0
+        if config.lateral_viscosity.A_h_lat_scaling:
+            _floor = config.lateral_viscosity.A_h_floor / config.lateral_viscosity.A_h if config.lateral_viscosity.A_h_floor > 0 else 0.0
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(
-                grid, power=config.A_h_cos_power, floor=_floor)
-            if config.A_h_eq_boost > 1.0:
+                grid, power=config.lateral_viscosity.A_h_cos_power, floor=_floor)
+            if config.lateral_viscosity.A_h_eq_boost > 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
-                    grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
+                    grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 lap_scale_u = lap_scale_u * eb_u
                 lap_scale_v = lap_scale_v * eb_v
-            if config.A_h_cap_boost > 1.0:
+            if config.lateral_viscosity.A_h_cap_boost > 1.0:
                 cap_u, cap_v = polar_cap_boost_factor(
-                    grid, config.A_h_cap_lat_deg,
-                    config.A_h_cap_boost, config.A_h_cap_width_deg)
+                    grid, config.lateral_viscosity.A_h_cap_lat_deg,
+                    config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 lap_scale_u = lap_scale_u * cap_u
                 lap_scale_v = lap_scale_v * cap_v
-            diag_Ah_lap_u = config.A_h * lap_scale_u[:, None, None] * vlap_u
-            diag_Ah_lap_v = config.A_h * lap_scale_v[:, None, None] * vlap_v
+            diag_Ah_lap_u = config.lateral_viscosity.A_h * lap_scale_u[:, None, None] * vlap_u
+            diag_Ah_lap_v = config.lateral_viscosity.A_h * lap_scale_v[:, None, None] * vlap_v
             if _want_kdiss_flux:
-                _ah_scale_center = config.A_h * lap_scale_u
-        elif config.A_h_eq_boost > 1.0 or config.A_h_cap_boost > 1.0:
+                _ah_scale_center = config.lateral_viscosity.A_h * lap_scale_u
+        elif config.lateral_viscosity.A_h_eq_boost > 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0:
             scale_u = jnp.ones((grid.lat.shape[0],), dtype=grid.lat.dtype)
             scale_v = jnp.ones((grid.lat.shape[0] + 1,), dtype=grid.lat.dtype)
-            if config.A_h_eq_boost > 1.0:
+            if config.lateral_viscosity.A_h_eq_boost > 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
-                    grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
+                    grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 scale_u = scale_u * eb_u
                 scale_v = scale_v * eb_v
-            if config.A_h_cap_boost > 1.0:
+            if config.lateral_viscosity.A_h_cap_boost > 1.0:
                 cap_u, cap_v = polar_cap_boost_factor(
-                    grid, config.A_h_cap_lat_deg,
-                    config.A_h_cap_boost, config.A_h_cap_width_deg)
+                    grid, config.lateral_viscosity.A_h_cap_lat_deg,
+                    config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 scale_u = scale_u * cap_u
                 scale_v = scale_v * cap_v
-            diag_Ah_lap_u = config.A_h * scale_u[:, None, None] * vlap_u
-            diag_Ah_lap_v = config.A_h * scale_v[:, None, None] * vlap_v
+            diag_Ah_lap_u = config.lateral_viscosity.A_h * scale_u[:, None, None] * vlap_u
+            diag_Ah_lap_v = config.lateral_viscosity.A_h * scale_v[:, None, None] * vlap_v
             if _want_kdiss_flux:
-                _ah_scale_center = config.A_h * scale_u
+                _ah_scale_center = config.lateral_viscosity.A_h * scale_u
         else:
-            diag_Ah_lap_u = config.A_h * vlap_u
-            diag_Ah_lap_v = config.A_h * vlap_v
+            diag_Ah_lap_u = config.lateral_viscosity.A_h * vlap_u
+            diag_Ah_lap_v = config.lateral_viscosity.A_h * vlap_v
             if _want_kdiss_flux:
-                _ah_scale_center = config.A_h * jnp.ones(
+                _ah_scale_center = config.lateral_viscosity.A_h * jnp.ones(
                     (grid.lat.shape[0],), dtype=grid.lat.dtype)
         diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
-    elif config.B_h > 0:
-        bilap_u, bilap_v = vector_bilaplacian_cgrid(
-            u, v, grid,
-            mask=mask, u_mask=u_mask, v_mask=v_mask,
-            vertex_mask=vertex_mask)
-        if config.B_h_lat_scaling:
+    elif config.lateral_viscosity.B_h > 0:
+        bilap_u, bilap_v = _biharmonic_op(u, v)
+        if config.lateral_viscosity.B_h_lat_scaling:
             # Scale biharmonic coefficient with (cos(lat)/cos_max)^4 to prevent
             # CFL violation near poles where dx shrinks (MOM6 convention).
             scale_u, scale_v = biharmonic_scaling_factor(grid)
-            diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
-            diag_Bh_bilap_v = -config.B_h * scale_v[:, None, None] * bilap_v
+            diag_Bh_bilap_u = -config.lateral_viscosity.B_h * scale_u[:, None, None] * bilap_u
+            diag_Bh_bilap_v = -config.lateral_viscosity.B_h * scale_v[:, None, None] * bilap_v
         else:
-            diag_Bh_bilap_u = -config.B_h * bilap_u
-            diag_Bh_bilap_v = -config.B_h * bilap_v
+            diag_Bh_bilap_u = -config.lateral_viscosity.B_h * bilap_u
+            diag_Bh_bilap_v = -config.lateral_viscosity.B_h * bilap_v
         diag_Bh_bilap_u, diag_Bh_bilap_v = _apply_slope_foot(diag_Bh_bilap_u, diag_Bh_bilap_v)
         du_dt = du_dt + diag_Bh_bilap_u
         dv_dt = dv_dt + diag_Bh_bilap_v
 
-    if config.C_smag > 0:
+    # No-slip lateral walls (MITgcm no_slip_sides): ADD the wall side-drag on top
+    # of the (free-slip) harmonic flux operator, exactly as MITgcm adds
+    # MOM_U_SIDEDRAG on top of MOM_U_DEL2U. Free-slip (the default) adds nothing.
+    _side_bc = getattr(config, "lateral_side_bc", "free_slip")
+    if _side_bc not in VALID_LATERAL_SIDE_BC:
+        raise ValueError(
+            f"lateral_side_bc must be one of {sorted(VALID_LATERAL_SIDE_BC)}, "
+            f"got {_side_bc!r}"
+        )
+    if _side_bc == "no_slip" and config.lateral_viscosity.A_h > 0:
+        du_drag, dv_drag = no_slip_sidedrag_cgrid(
+            u, v, grid, config.lateral_viscosity.A_h, u_mask=u_mask, v_mask=v_mask, mask=mask)
+        du_drag, dv_drag = _apply_slope_foot(du_drag, dv_drag)
+        du_dt = du_dt + du_drag
+        dv_dt = dv_dt + dv_drag
+
+    if config.lateral_viscosity.C_smag > 0:
         smag_u, smag_v = smagorinsky_biharmonic_tendency_cgrid(
-            u, v, grid, config.C_smag,
+            u, v, grid, config.lateral_viscosity.C_smag,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         diag_Cs_smag_u = -smag_u
         diag_Cs_smag_v = -smag_v
@@ -2120,7 +2599,7 @@ def _bc_horizontal_viscosity(
         du_dt = du_dt + diag_Cs_smag_u
         dv_dt = dv_dt + diag_Cs_smag_v
 
-    if getattr(config, "C_smag_lap", 0.0) > 0:
+    if config.lateral_viscosity.C_smag_lap > 0:  # #501: nested LateralViscosityConfig
         # Laplacian Smagorinsky: flow-adaptive viscosity via the
         # energy-stable stress-tensor operator.  A_smag = (C·dx)²·|D|
         # at both h-points (cell centers) and q-points (vertices).
@@ -2130,10 +2609,10 @@ def _bc_horizontal_viscosity(
         D_T, D_S = strain_rate_cgrid(u, v, grid,
                                       mask=mask, u_mask=u_mask, v_mask=v_mask)
         A_smag_h = smagorinsky_viscosity_cgrid(
-            u, v, grid, config.C_smag_lap,
+            u, v, grid, config.lateral_viscosity.C_smag_lap,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         A_smag_q = smagorinsky_viscosity_q_cgrid(
-            D_T, D_S, grid, config.C_smag_lap, mask=mask)
+            D_T, D_S, grid, config.lateral_viscosity.C_smag_lap, mask=mask)
         # Per-cell viscosity ceiling on the Laplacian-Smagorinsky coefficient.
         # A_smag = (C*dx)^2 * |D| grows without bound at sharp jets (|D| large)
         # and self-CFL-violates there -- the western-boundary-current cold-start
@@ -2145,9 +2624,9 @@ def _bc_horizontal_viscosity(
         # rectangular CFL bound safety/(dt*(1/dx^2+1/dy^2)) STARVES the WBC and
         # blew up the eORCA025 cold-start (job 8126978) -- the larger area*cos^2
         # ceiling is what the cold start needs (empirically validated).
-        if config.smag_cfl_safety > 0.0:
+        if config.lateral_viscosity.smag_cfl_safety > 0.0:
             _cap_h, _cap_q = laplacian_smag_cfl_cap(
-                grid, dt, config.smag_cfl_safety)
+                grid, dt, config.lateral_viscosity.smag_cfl_safety)
             A_smag_h = jnp.minimum(
                 A_smag_h, _cap_h[..., None] if A_smag_h.ndim == 3 else _cap_h)
             A_smag_q = jnp.minimum(
@@ -2162,10 +2641,10 @@ def _bc_horizontal_viscosity(
         diag_Cs_smag_u = diag_Cs_smag_u + _smag_lap_u
         diag_Cs_smag_v = diag_Cs_smag_v + _smag_lap_v
 
-    if getattr(config, "C_leith", 0.0) > 0:
+    if config.lateral_viscosity.C_leith > 0:
         leith_u, leith_v = leith_biharmonic_tendency_cgrid(
-            u, v, grid, config.C_leith,
-            modified=getattr(config, "C_leith_modified", False),
+            u, v, grid, config.lateral_viscosity.C_leith,
+            modified=config.lateral_viscosity.C_leith_modified,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         diag_Cl_leith_u = -leith_u
         diag_Cl_leith_v = -leith_v
@@ -2173,12 +2652,52 @@ def _bc_horizontal_viscosity(
         du_dt = du_dt + diag_Cl_leith_u
         dv_dt = dv_dt + diag_Cl_leith_v
 
+    # --- 10a'. OM4p25 lateral-friction closure (Silvestri 2024 "SM2"). ---
+    # A self-contained Laplacian+biharmonic max(Smag,static) closure; when
+    # selected it is the SOLE lateral friction (the recipe zeros A_h/B_h/
+    # C_smag/C_leith). Returns the combined tendency (already Laplacian +
+    # (−biharmonic)); accumulated into the Smagorinsky diagnostic bucket.
+    if config.lateral_friction_scheme == "om4p25":
+        _om = config.omp25 if config.omp25 is not None else OMp25Config()
+        om_u, om_v = om4p25_lateral_friction_tendency_cgrid(
+            u, v, grid, C2=_om.C2, Cu2=_om.Cu2, C4=_om.C4, Cu4=_om.Cu4,
+            deformation_radius=_om.deformation_radius_m,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        om_u, om_v = _apply_slope_foot(om_u, om_v)
+        du_dt = du_dt + om_u
+        dv_dt = dv_dt + om_v
+        diag_Cs_smag_u = diag_Cs_smag_u + om_u
+        diag_Cs_smag_v = diag_Cs_smag_v + om_v
+
+    # --- 10a''. QG-Leith harmonic viscosity (Silvestri 2024 "QG2"). ---
+    # Sole lateral friction when selected (recipe zeros A_h/B_h/C_smag/C_leith);
+    # accumulated into the Leith diagnostic bucket.
+    if config.lateral_friction_scheme == "qg_leith":
+        # Full QG2 (B5b): pass the buoyancy (from the density anomaly) + layer
+        # thicknesses so the operator adds the baroclinic stretching term. Gated
+        # by config.qg_leith_stretching (default barotropic, backward-compatible).
+        _b = None
+        if getattr(config, "qg_leith_stretching", False) and rho_prime is not None:
+            # Buoyancy b = -g·ρ'/ρ₀ (the g/ρ₀ factor cancels in f·∇b/N², but the
+            # SIGN sets N²=∂b/∂z > 0 for a stable column, which the N² floor needs).
+            _b = -(config.g / config.rho_0) * rho_prime
+        qgl_u, qgl_v = qg_leith_viscosity_tendency_cgrid(
+            u, v, grid, C_qgleith=config.qg_leith_coeff,
+            buoyancy=_b, h_k=(h_k if _b is not None else None),
+            deformation_radius=config.qg_leith_deformation_radius_m,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        qgl_u, qgl_v = _apply_slope_foot(qgl_u, qgl_v)
+        du_dt = du_dt + qgl_u
+        dv_dt = dv_dt + qgl_v
+        diag_Cl_leith_u = diag_Cl_leith_u + qgl_u
+        diag_Cl_leith_v = diag_Cl_leith_v + qgl_v
+
     # --- 10b. Meridional-only Laplacian viscosity ---
     # Scalar d²/dy² applied directly at faces, targeting the 2Δy mode
     # without damping zonal flow.  Useful on lat-lon grids with large
     # dx/dy anisotropy where isotropic A_h over-damps zonal structure.
     # Acts on total velocity (like the main viscosity block above).
-    _A_h_merid = config.A_h_merid
+    _A_h_merid = config.lateral_viscosity.A_h_merid
     if _A_h_merid > 0:
         _dy = grid.radius * (grid.lat[1] - grid.lat[0])  # constant
         _inv_dy2 = 1.0 / (_dy * _dy)
@@ -2250,11 +2769,11 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid):
     diag_botdrag_u, diag_botdrag_v)``."""
     diag_botdrag_u = jnp.zeros_like(du_dt)
     diag_botdrag_v = jnp.zeros_like(dv_dt)
-    if config.bottom_drag_r > 0:
+    if config.bottom_drag.bottom_drag_r > 0:
         # Drag acts on the full velocity (not perturbation) — the ocean
         # floor sees the total flow.  Consistent with MPAS and MOM6.
         # r is in [m/s]: du/dt = -r * u / dz_bottom  (resolution-independent stress).
-        H_BBL = getattr(config, "bottom_drag_bbl_thickness", 0.0)
+        H_BBL = getattr(config.bottom_drag, "bottom_drag_bbl_thickness", 0.0)
         # MOM6-style background-velocity floor (DRAG_BG_VEL).  When >0,
         # the linear-in-u drag is upgraded to quadratic-with-floor:
         #   r_eff = (bottom_drag_r / u_bg) · √(u² + u_bg²)
@@ -2263,14 +2782,14 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid):
         # quadratic Cd · |u| at |u| ≫ u_bg (production-equivalent
         # to MOM6 OM4's `BOTTOMDRAGLAW="quadratic"` with `DRAG_BG_VEL`).
         # u_bg=0 → exactly the legacy linear formula (bit-exact path).
-        u_bg = float(getattr(config, "bottom_drag_bg_velocity", 0.0))
+        u_bg = float(getattr(config.bottom_drag, "bottom_drag_bg_velocity", 0.0))
         if u_bg > 0.0:
-            Cd_eq = config.bottom_drag_r / u_bg
+            Cd_eq = config.bottom_drag.bottom_drag_r / u_bg
             r_eff_u = Cd_eq * jnp.sqrt(u * u + u_bg * u_bg)
             r_eff_v = Cd_eq * jnp.sqrt(v * v + u_bg * u_bg)
         else:
-            r_eff_u = config.bottom_drag_r
-            r_eff_v = config.bottom_drag_r
+            r_eff_u = config.bottom_drag.bottom_drag_r
+            r_eff_v = config.bottom_drag.bottom_drag_r
         if H_BBL > 0:
             # Distributed BBL drag (Killworth & Edwards 1999, MOM6 BBL_thick_min):
             # spread drag over a fixed Ekman thickness ``H_BBL`` near the
@@ -2295,35 +2814,14 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid):
             # along the level axis.  For the seafloor, ``z_seafloor =
             # -sum(h_u, axis=-1)`` (face's wet depth = sum of per-level
             # face thickness, partial-aware via min h).
-            def _bbl_drag_for_face(u_field, h_face, r_eff):
-                z_half = jnp.concatenate([
-                    jnp.zeros(h_face.shape[:-1] + (1,), dtype=h_face.dtype),
-                    -jnp.cumsum(h_face, axis=-1),
-                ], axis=-1)
-                z_top = z_half[..., :-1]
-                z_bot = z_half[..., 1:]
-                z_seafloor = z_half[..., -1:]
-                bbl_top = z_seafloor + H_BBL
-                overlap = jnp.maximum(
-                    0.0,
-                    jnp.minimum(z_top, bbl_top)
-                    - jnp.maximum(z_bot, z_seafloor),
-                )
-                h_safe = jnp.maximum(h_face, 1e-10)
-                # Effective BBL thickness: on shelves where the
-                # total wet depth is shallower than ``H_BBL`` the
-                # boundary-layer band cannot extend to its full
-                # nominal thickness.  Divide by the actual total
-                # overlap to keep the rate correct (matches
-                # ``ocean_tendency_common.bbl_drag_distributed``).
-                # Codex iter-39 #2.
-                total_overlap = jnp.sum(overlap, axis=-1, keepdims=True)
-                h_bbl_eff = jnp.minimum(
-                    jnp.maximum(total_overlap, 1e-10), H_BBL,
-                )
-                return -r_eff * u_field * overlap / (h_safe * h_bbl_eff)
-            diag_botdrag_u = _bbl_drag_for_face(u, h_u, r_eff_u)
-            diag_botdrag_v = _bbl_drag_for_face(v, h_v, r_eff_v)
+            # #517: distributed BBL drag is the shared canonical helper
+            # (Killworth & Edwards 1999 / MOM6) — route through it instead
+            # of re-deriving the cumsum/overlap/h_bbl_eff math (was
+            # bit-identical to the helper).
+            diag_botdrag_u = bbl_distributed_drag_face_column(
+                u, h_u, r_eff_u, H_BBL)
+            diag_botdrag_v = bbl_distributed_drag_face_column(
+                v, h_v, r_eff_v, H_BBL)
         elif isinstance(z_coord, OceanPartialCellCoordinate):
             # Partial cells: apply drag at each column's actual seafloor
             # (the lowest active level, ``bottom_level[i,j]``), using the
@@ -2496,8 +2994,15 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
             tau_n_T = -jnp.asarray(_sf_tau_y, dtype=u.dtype)
             tau_e_u_face = interp_cell_to_uface(tau_e_T)       # (n_lat, n_lon+1)
             tau_n_u_face = interp_cell_to_uface(tau_n_T)
-            tau_e_v_face = interp_to_v_points(tau_e_T, grid=grid)  # (n_lat+1, n_lon)
-            tau_n_v_face = interp_to_v_points(tau_n_T, grid=grid)
+            # Coalesce the THREE v-face interps (tau_e, tau_n, dz_0) into ONE
+            # fused lat-halo exchange: -2 sendrecv pairs/step under band MPI
+            # (codex halo-hunt #1, audit lever O4).  dz_0_T is computed here
+            # (was below) so all three ride one pad_with_pole_bc_lat_multi;
+            # interp_to_v_points_multi is value-identical to the per-field
+            # calls.  The u-face interps stay separate (lon-local, no halo).
+            dz_0_T = jnp.asarray(z_coord.dz_ref[0], dtype=u.dtype) * J
+            tau_e_v_face, tau_n_v_face, dz_0_v = interp_to_v_points_multi(
+                (tau_e_T, tau_n_T, dz_0_T), grid=grid)   # each (n_lat+1, n_lon)
 
             cos_a_u = getattr(grid, "cos_alpha_u", None)
             sin_a_u = getattr(grid, "sin_alpha_u", None)
@@ -2516,9 +3021,7 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
             else:
                 tau_j_v = tau_n_v_face
 
-            dz_0_T = jnp.asarray(z_coord.dz_ref[0], dtype=u.dtype) * J
-            dz_0_u = interp_cell_to_uface(dz_0_T)
-            dz_0_v = interp_to_v_points(dz_0_T, grid=grid)
+            dz_0_u = interp_cell_to_uface(dz_0_T)   # dz_0_T + dz_0_v fused above
             rho_0_dt = jnp.asarray(rho_0, dtype=u.dtype)
             inv_rho_dz_u = 1.0 / (rho_0_dt * jnp.maximum(dz_0_u, 1e-10))
             inv_rho_dz_v = 1.0 / (rho_0_dt * jnp.maximum(dz_0_v, 1e-10))
@@ -2660,6 +3163,26 @@ def _bc_sponge_relaxation(du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid,
     return du_dt, dv_dt, dT_dt, dS_dt, diag_sponge_u, diag_sponge_v
 
 
+def _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, transport):
+    """3rd-order upwind-biased face reconstruction (NEMO/ROMS UP3, kappa=1/3).
+
+    For a face straddled by cells (``adv_pos``, ``adv_neg``) with the next
+    cells outward (``far_pos`` beyond ``adv_pos``, ``far_neg`` beyond
+    ``adv_neg``), returns the upwind-biased face value selected by the sign of
+    ``transport``:
+
+        transport > 0:  (-far_pos + 5·adv_pos + 2·adv_neg) / 6
+        transport < 0:  ( 2·adv_pos + 5·adv_neg - far_neg) / 6
+
+    Reconstructs constants and linears exactly; the upstream bias supplies a
+    3rd-derivative (biharmonic-like) implicit dissipation. Silvestri et al.
+    2024 "UP3" = Oceananigans ``UpwindBiased(order=3)``.
+    """
+    pos = (-far_pos + 5.0 * adv_pos + 2.0 * adv_neg) / 6.0
+    neg = (2.0 * adv_pos + 5.0 * adv_neg - far_neg) / 6.0
+    return jnp.where(transport > 0.0, pos, neg)
+
+
 def _bc_horizontal_momentum_advection_flux_form(
     du_dt, dv_dt, u, v, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, config,
 ):
@@ -2684,14 +3207,30 @@ def _bc_horizontal_momentum_advection_flux_form(
             "grids (the vertex-metric handling needs the 2D dx_v/dy_u fields). "
             "Use 'vector_invariant' on tripolar, or extend this substage."
         )
-    scheme = getattr(config, "momentum_flux_scheme", "upwind")
-    u.shape[1] - 1
+    scheme = config.momentum_flux_scheme
+
+    def _recon(adv_pos, adv_neg, transport, far_pos=None, far_neg=None):
+        """Reconstruct the advected velocity at a face.
+
+        ``adv_pos``/``adv_neg`` are the two cells straddling the face (upstream
+        side for transport>0 is ``adv_pos``). ``far_pos``/``far_neg`` are the
+        next cells outward (only used by "upwind3"): ``far_pos`` is beyond
+        ``adv_pos`` on the +flow upstream side, ``far_neg`` beyond ``adv_neg``.
+        """
+        if scheme == "centered":
+            return 0.5 * (adv_pos + adv_neg)
+        if scheme == "upwind3":
+            # 3rd-order upwind-biased (NEMO/ROMS UP3); see _up3_reconstruct.
+            return _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, transport)
+        # 1st-order upwind (default).
+        return jnp.where(transport > 0.0, adv_pos, adv_neg)
 
     # --- FV metrics (mirror divergence_cgrid) ---
     dy_u = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]            # (n_lat,1,1)
-    lat = grid.lat
-    cos_lat_v = jnp.pad(jnp.cos(0.5 * (lat[:-1] + lat[1:])), (1, 1))
-    face_dx_v = (grid.radius * cos_lat_v * grid.dlon)[:, jnp.newaxis, jnp.newaxis]  # (n_lat+1,1,1)
+    # #516: single-source v-face zonal length — bit-identical to the
+    # continuity / divergence metric so the ``v·dx_v`` transport this
+    # advection sums equals the transport continuity uses (no mass leak).
+    face_dx_v = flux_form_vface_zonal_length(grid)[:, jnp.newaxis, jnp.newaxis]  # (n_lat+1,1,1)
     area = grid.area[..., jnp.newaxis]                            # (n_lat,n_lon,1)
 
     # Volume transports through faces [m^3/s] (h-weighted velocity x face length).
@@ -2707,7 +3246,13 @@ def _bc_horizontal_momentum_advection_flux_form(
     # ============ u-momentum at u-points (n_lat, n_lon+1) ============
     # x-flux at cell centres: transport_x_centre * u_advected_centre.
     Qx_c = 0.5 * (Q_u[:, :-1, :] + Q_u[:, 1:, :])                 # (n_lat,n_lon,nlev)
-    u_c = _upwind(u[:, :-1, :], u[:, 1:, :], Qx_c)               # west when Qx>0
+    # u advected to cell centre; periodic-lon 4-pt stencil for upwind3. Build
+    # the far cells from the DISTINCT core u[:, :-1] (faces 0..n_lon-1) via
+    # rolls so the reconstruction does not depend on the periodic wrap column
+    # u[:, n_lon] (matches the wrap-robust style of the v-momentum x-part).
+    u_c = _recon(u[:, :-1, :], u[:, 1:, :], Qx_c,
+                 far_pos=jnp.roll(u[:, :-1, :], 1, axis=1),       # face c-1
+                 far_neg=jnp.roll(u[:, :-1, :], -2, axis=1))      # face c+2; west when Qx>0
     Fx_uu = Qx_c * u_c                                           # (n_lat,n_lon,nlev)
     # divergence to u-points (periodic in lon): flux[centre J] - flux[centre J-1].
     _dx = Fx_uu - jnp.roll(Fx_uu, 1, axis=1)
@@ -2720,11 +3265,22 @@ def _bc_horizontal_momentum_advection_flux_form(
     # u to lat-faces (vertices): interior avg of adjacent u rows; poles unused (Qy=0 there).
     u_south = u[:-1, :, :]
     u_north = u[1:, :, :]
-    u_vtx_int = _upwind(u_south, u_north, Qy_vtx[1:-1, :, :])    # (n_lat-1,n_lon+1,nlev)
+    # Edge-padded (Neumann) 4-pt meridional stencil for upwind3. Boundary
+    # vertices where the stencil is incomplete are damped by Qy→0 at the poles.
+    u_pad = jnp.concatenate([u[:1, :, :], u, u[-1:, :, :]], axis=0)  # (n_lat+2,...)
+    n_lat_u = u.shape[0]
+    u_vtx_int = _recon(
+        u_south, u_north, Qy_vtx[1:-1, :, :],
+        far_pos=u_pad[0:n_lat_u - 1, :, :],
+        far_neg=u_pad[3:n_lat_u + 2, :, :])                     # (n_lat-1,n_lon+1,nlev)
     zero_row = jnp.zeros_like(u[:1, :, :])
     u_vtx = jnp.concatenate([zero_row, u_vtx_int, zero_row], axis=0)  # (n_lat+1,n_lon+1,nlev)
     Fy_vu = Qy_vtx * u_vtx                                       # (n_lat+1,n_lon+1,nlev)
     net_merid_u = Fy_vu[1:, :, :] - Fy_vu[:-1, :, :]            # (n_lat,n_lon+1,nlev)
+    # Oceananigans `Flat`-y: δy(meridional u-momentum flux) ≡ 0.
+    from legoesm.grids.halo_latlon import get_meridionally_flat
+    if get_meridionally_flat():
+        net_merid_u = jnp.zeros_like(net_merid_u)
 
     # u-cell area at u-faces (avg of adjacent cell areas, periodic).
     a_uc = 0.5 * (area[:, :, 0] + jnp.roll(area[:, :, 0], 1, axis=1))   # (n_lat,n_lon)
@@ -2735,12 +3291,19 @@ def _bc_horizontal_momentum_advection_flux_form(
     # ============ v-momentum at v-points (n_lat+1, n_lon) ============
     # y-flux at cell centres: transport_y_centre * v_advected_centre.
     Qy_c = 0.5 * (Q_v[:-1, :, :] + Q_v[1:, :, :])               # (n_lat,n_lon,nlev)
-    v_c = _upwind(v[:-1, :, :], v[1:, :, :], Qy_c)              # south when Qy>0
+    v_pad = jnp.concatenate([v[:1, :, :], v, v[-1:, :, :]], axis=0)  # (n_lat+3,...)
+    n_v = v.shape[0]                                            # n_lat+1
+    v_c = _recon(v[:-1, :, :], v[1:, :, :], Qy_c,
+                 far_pos=v_pad[0:n_v - 1, :, :],
+                 far_neg=v_pad[3:n_v + 2, :, :])                # south when Qy>0
     Fy_vv = Qy_c * v_c                                          # (n_lat,n_lon,nlev)
     # divergence to v-points (interior lat-faces; poles are walls -> 0).
     net_merid_v_int = Fy_vv[1:, :, :] - Fy_vv[:-1, :, :]       # (n_lat-1,n_lon,nlev)
     zero_lon = jnp.zeros_like(v[:1, :, :])
     net_merid_v = jnp.concatenate([zero_lon, net_merid_v_int, zero_lon], axis=0)
+    # Oceananigans `Flat`-y: δy(meridional v-momentum flux) ≡ 0.
+    if get_meridionally_flat():
+        net_merid_v = jnp.zeros_like(net_merid_v)
 
     # x-flux at vertices (lon-faces). Use roll-based periodicity in lon (drop
     # the u wrap column) so the divergence telescopes EXACTLY regardless of
@@ -2752,7 +3315,9 @@ def _bc_horizontal_momentum_advection_flux_form(
     Qx_vtx = jnp.concatenate([zero_vtx, Qx_vtx_int, zero_vtx], axis=0)  # (n_lat+1,n_lon,nlev) at lon-faces
     # v to lon-faces (vertices), periodic: west/east centres are v[:, j-1], v[:, j].
     v_west = jnp.roll(v, 1, axis=1)
-    v_vtx = _upwind(v_west, v, Qx_vtx)                         # (n_lat+1,n_lon,nlev) west when Qx>0
+    v_vtx = _recon(v_west, v, Qx_vtx,
+                   far_pos=jnp.roll(v, 2, axis=1),
+                   far_neg=jnp.roll(v, -1, axis=1))            # (n_lat+1,n_lon,nlev) west when Qx>0
     Fx_uv = Qx_vtx * v_vtx                                     # at lon-faces 0..n_lon-1
     # v-cell (centre j) E face = vertex j+1, W face = vertex j (periodic).
     net_zonal_v = jnp.roll(Fx_uv, -1, axis=1) - Fx_uv          # (n_lat+1,n_lon,nlev)
@@ -2772,7 +3337,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     state: LatLonCGridOceanState,
     grid: LatLonGrid,
     z_coord: OceanZStarCoordinate,
-    config: LatLonCGridOceanConfig = LatLonCGridOceanConfig(),
+    config: LatLonCGridOceanConfig = LatLonCGridOceanConfig.from_flat(),
     physics_fn=None,
     surface_forcing=None,
     sponge=None,
@@ -2780,6 +3345,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     diagnose_momentum: bool = False,
     surface_tracer_forcing_fn=None,
     vertex_mask=None,
+    momentum_only: bool = False,
+    precomputed_geom_density=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -2850,9 +3417,17 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
     # --- Stages 1-3: geometry (J, h_k) + density (rho_prime) + baroclinic
     # pressure anomaly (p_prime_filled). ---
-    J, h_k, rho_prime, p_prime_filled = _bc_geometry_and_density(
-        eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
-    )
+    # These depend only on eta/T/S (frozen across RK3 momentum sub-stages), so
+    # _mom_pert passes them precomputed to skip the EOS + pressure-anomaly
+    # recompute (#25).  Bit-identical: same pure _bc_geometry_and_density on the
+    # same frozen inputs (compute_frozen_geom_density mirrors the eta_safe
+    # derivation above).
+    if precomputed_geom_density is not None:
+        J, h_k, rho_prime, p_prime_filled = precomputed_geom_density
+    else:
+        J, h_k, rho_prime, p_prime_filled = _bc_geometry_and_density(
+            eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
+        )
 
     # --- Stages 4-4b: vertical velocity (w), face thicknesses (h_u, h_v),
     # per-layer flux divergence, and perturbation velocities. ---
@@ -2876,7 +3451,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # WENO order, used only inside the WENO branches of the vertical-advection
     # stage (None otherwise -> never dereferenced). The PV-flux stage computes
     # its own copy internally.
-    _weno_order = {"weno5": 5, "weno7": 7}.get(_mom_adv)
+    _weno_order = {"weno5": 5, "weno7": 7, "weno9": 9}.get(_mom_adv)
     dKE_dx, dp_dx, dKE_dy, dp_dy = _bc_ke_and_pressure_gradients(
         u, v, p_prime_filled, rho_prime, grid, config, z_coord,
         eta_safe, H_bathy, g_val, mask,
@@ -2937,7 +3512,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     else:
         du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v = _bc_pv_flux(
             du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
+            config.weno_smoothness,
             vertex_mask=vertex_mask,
+            enstrophy_metric=config.vortcor_enstrophy_metric,
+            reconstruct_zeta=config.vortcor_reconstruct_zeta,
         )
 
     # --- Stage 7b': PLANETARY Coriolis as an explicit tendency (Veros-faithful).
@@ -2974,6 +3552,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # --- Stage 7c: WENO divergence (D-term) dissipation. ---
     du_dt, dv_dt, diag_Dterm_u, diag_Dterm_v = _bc_dterm(
         du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom_adv,
+        _weno_order if _weno_order is not None else 5,
     )
 
     # --- Stage 8: vertical momentum advection. ---
@@ -2986,8 +3565,34 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         u_full=u, v_full=v,
     )
 
+    # --- Stage 8b: GH #480 N/S free-slip-wall grid-mode filter. ---
+    # At a free-slip N/S wall the 2dx-in-lon, v-dominant, ROTATIONAL grid mode
+    # (which has ~zero zonal velocity) is UN-DISSIPATABLE by the vector-invariant
+    # WENO advection — meridional upwinding (large v) only damps lat structure,
+    # the vorticity flux that would damp the lon mode is x mass-flux≈0. It grows
+    # ONLY in the first/last few wall rows (interior is clean) and NaNs day 11.
+    # This is a BOUNDARY-LOCALISED 2dx Shapiro filter on the wall rows only (NOT a
+    # domain viscosity / closure): identically zero in the interior. Validated:
+    # §5 W9V no-closure survives 16 d at the Oceananigans-oracle amplitude (~0.06).
+    du_dt, dv_dt = _bc_wall_grid_filter(
+        du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d,
+        getattr(config, "wall_grid_filter_rate_s", 0.0), _mom_adv,
+    )
+
     # --- Stage 9: tracer diffusion tendencies (dT_dt, dS_dt). ---
-    dT_dt, dS_dt = _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord)
+    if momentum_only:
+        # RK3 momentum sub-stages freeze T/S, so this tracer-diffusion
+        # tendency is recomputed identically and DISCARDED by the caller
+        # (_mom_pert reads only du_dt/dv_dt).  Skip it => bit-identical
+        # momentum (the momentum stages never read dT_dt/dS_dt), saving the
+        # laplacian/biharmonic + vertical-diffusion compute AND its lat-halos
+        # per RK sub-stage (codex halo-hunt #3).  The physics/forcing/sponge
+        # blocks below still run (they also produce momentum tendencies); their
+        # tracer additions land on this zero and are discarded by the caller.
+        dT_dt = jnp.zeros_like(T)
+        dS_dt = jnp.zeros_like(S)
+    else:
+        dT_dt, dS_dt = _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord)
     # AB2 "advective" scope: snapshot the LATERAL tracer-diffusion tendency
     # (computed from the pre-step tracer T^n/S^n, exactly Veros's
     # ``tr[tau]``-evaluated ``hor_diffusion``) BEFORE surface forcing / sponge /
@@ -3015,6 +3620,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
      diag_Bh_bilap_v, diag_Cs_smag_u, diag_Cs_smag_v, diag_Cl_leith_u,
      diag_Cl_leith_v, kdiss_h_cell) = _bc_horizontal_viscosity(
         du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy, dt,
+        rho_prime=rho_prime, h_k=h_k,
         vertex_mask=vertex_mask,
     )
 

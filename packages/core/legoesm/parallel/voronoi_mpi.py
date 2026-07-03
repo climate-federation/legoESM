@@ -3,15 +3,19 @@
 Each MPI rank owns a partition of the Voronoi mesh obtained via
 Recursive Coordinate Bisection (RCB) or METIS graph partitioning.
 Ghost cell/edge values are refreshed from their owning ranks between
-each RK stage.  The DEFAULT state exchange is the legacy per-entity
-path (u edges; T+p_s packed cells; tracers packed cells); the batched
-union-neighbor exchange
+each RK stage.  The DEFAULT state exchange is the batched union-neighbor
+exchange
 (:func:`legoesm.parallel.halo_exchange_voronoi.batched_halo_exchange`,
-one message per neighbor per dtype group) is OPT-IN via
-``LEGOESM_VORONOI_BATCHED_HALO=1`` pending a performance fix — see
-``_USE_BATCHED_HALO`` below.  On both paths every message routes
-through the AD-safe ``@jax.custom_vjp`` sendrecv wrapper (reverse-mode
-differentiable, never raw ``mpi4jax.sendrecv``).
+one message per neighbor per dtype group); the legacy per-entity path
+(u edges; T+p_s packed cells; tracers packed cells) is opt-OUT via
+``LEGOESM_VORONOI_BATCHED_HALO=0``.  Batched is now the default because it
+is MEASURED faster at every size benchmarked — I4/I5 f32 np8 -12%/-5%
+(job 8488057) and I6 f64 np8/np16 -4.6%/-3.5% (job 8488023); the historical
+18x regression (435.9 ms I5/f32, 2026-06-10) was fixed by the one-scatter
+pack/unpack rework.  On both paths every message routes through the AD-safe
+``@jax.custom_vjp`` sendrecv wrapper (reverse-mode differentiable, never raw
+``mpi4jax.sendrecv``), and pack/unpack is pure gather/scatter so the two
+paths are bit-identical.
 
 Design
 ------
@@ -53,7 +57,9 @@ from legoesm.parallel.voronoi_partition import (
     build_local_mesh,
     partition_cells_geometric,
     partition_cells_metis,
+    partition_cells_sfc,
     partition_voronoi_mesh,
+    resolve_partition_method,
     scatter_to_local,
 )
 from legoesm.parallel.halo_exchange_voronoi import (
@@ -77,24 +83,27 @@ logger = logging.getLogger(__name__)
 # (both the per-RK-stage exchange and the post-physics exchange).  Read ONCE
 # at import time:
 #
-#   * unset / ``"0"`` (DEFAULT) -> legacy per-entity exchange: per neighbor,
-#     one u edge message + ONE packed T/p_s cell message + ONE packed tracer
-#     cell message, via ``VoronoiHaloExchange`` -> ``_exchange_mpi`` -> the
-#     AD-safe ``get_sendrecv_vjp`` wrapper.
-#   * ``"1"`` -> batched union-neighbor exchange (``batched_halo_exchange``,
-#     one message per union neighbor per dtype group).  OPT-IN pending a
-#     performance fix: 18x CPU runtime regression at I5 np=8 f32
-#     (435.9 vs 24.1 ms/step; job 8457273, 2026-06-10) — see the
-#     ``halo_exchange_voronoi`` module docstring.
+#   * unset / ``"1"`` (DEFAULT) -> batched union-neighbor exchange
+#     (``batched_halo_exchange``, one message per union neighbor per dtype
+#     group).  Default because MEASURED faster at every benchmarked size:
+#     I4/I5 f32 np8 -12%/-5% (job 8488057), I6 f64 np8/np16 -4.6%/-3.5%
+#     (job 8488023).  The historical 18x regression (435.9 vs 24.1 ms/step,
+#     I5/f32, job 8457273, 2026-06-10) was fixed by the one-scatter pack/unpack
+#     rework — re-measured GONE 2026-06-15.
+#   * ``"0"`` -> legacy per-entity exchange (opt-OUT): per neighbor, one u edge
+#     message + ONE packed T/p_s cell message + ONE packed tracer cell message,
+#     via ``VoronoiHaloExchange`` -> ``_exchange_mpi`` -> the AD-safe
+#     ``get_sendrecv_vjp`` wrapper.  Pack/unpack is pure gather/scatter, so the
+#     two paths are bit-identical (kept as a fallback + parity reference).
 #
 # Trace-time semantics: the flag is consulted as a static Python bool while
 # ``make_voronoi_mpi_step`` builds the exchange closure, which is then traced
 # into the jitted ``_step`` — the choice is baked into the compiled step.
 # Flipping the environment variable after this module is imported has NO
-# effect; tests/profiling opt in either by setting the env var before first
+# effect; tests/profiling opt out either by setting the env var before first
 # import or by monkeypatching ``voronoi_mpi._USE_BATCHED_HALO`` BEFORE
 # calling ``make_voronoi_mpi_step``.
-_USE_BATCHED_HALO = os.environ.get("LEGOESM_VORONOI_BATCHED_HALO", "0") == "1"
+_USE_BATCHED_HALO = os.environ.get("LEGOESM_VORONOI_BATCHED_HALO", "1") == "1"
 
 
 # ============================================================================
@@ -126,7 +135,7 @@ def make_voronoi_partition_layout(
     rank: int,
     n_ranks: int,
     *,
-    method: str = "geometric",
+    method: str = "auto",
     halo_depth: int = 2,
     cell_owner: np.ndarray | None = None,
 ) -> VoronoiPartitionLayout:
@@ -185,18 +194,30 @@ def scatter_state_voronoi(
 ) -> MPASHydrostaticState:
     """Extract rank-local state from a global MPASHydrostaticState.
 
-    u is edge-centered; T, p_s, phis are cell-centered.
+    u is edge-centered; T, p_s, phis and every tracer field are
+    cell-centered.  ``v`` is None for MPAS (edge-normal u only) and passes
+    through unchanged.
+
+    Tracers (``q_v``/``q_c``/``q_r`` for a moist run) MUST be scattered here
+    too: the per-step halo exchange only FILLS halos, it does not distribute
+    the initial global field.  Without this, a moist run's local state would
+    have ``tracers=None`` and the Kessler ``physics_fn`` would raise.
     """
-    return MPASHydrostaticState(
+    def _cell(f):
+        return f.replace(data=scatter_to_local(f.data, partition, "cell"))
+
+    new = global_state._replace(
         u=global_state.u.replace(
             data=scatter_to_local(global_state.u.data, partition, "edge")),
-        T=global_state.T.replace(
-            data=scatter_to_local(global_state.T.data, partition, "cell")),
-        p_s=global_state.p_s.replace(
-            data=scatter_to_local(global_state.p_s.data, partition, "cell")),
-        phis=global_state.phis.replace(
-            data=scatter_to_local(global_state.phis.data, partition, "cell")),
+        T=_cell(global_state.T),
+        p_s=_cell(global_state.p_s),
+        phis=_cell(global_state.phis),
     )
+    if global_state.tracers is not None:
+        new = new._replace(
+            tracers={k: _cell(f) for k, f in global_state.tracers.items()}
+        )
+    return new
 
 
 def scatter_state_mpas_ocean(global_state, partition: VoronoiPartition):
@@ -370,7 +391,7 @@ def _fix_mass_mpi(
 def initialize_voronoi_mpi(
     global_mesh: VoronoiMesh,
     *,
-    method: str = "geometric",
+    method: str = "auto",
     halo_depth: int = 2,
 ) -> tuple[int, int, VoronoiPartitionLayout]:
     """Initialize MPI for Voronoi domain decomposition.
@@ -387,10 +408,15 @@ def initialize_voronoi_mpi(
     n_ranks = comm.Get_size()
 
     # Compute cell ownership on all ranks (deterministic, no communication)
+    method = resolve_partition_method(method)
     if method == "geometric":
         cell_owner = partition_cells_geometric(global_mesh, n_ranks)
-    else:
+    elif method == "metis":
         cell_owner = partition_cells_metis(global_mesh, n_ranks)
+    elif method == "sfc":
+        cell_owner = partition_cells_sfc(global_mesh, n_ranks)
+    else:
+        raise ValueError(f"Unknown partitioning method: {method!r}")
 
     layout = make_voronoi_partition_layout(
         global_mesh, rank, n_ranks,
@@ -485,13 +511,14 @@ def make_voronoi_mpi_step(
        through this step propagates halo cotangents back to the owning
        rank (see ``tests/distributed/test_mpi_differentiability.py::
        TestVoronoiHaloMPIGrad``).  This holds on BOTH state-exchange
-       paths: the DEFAULT legacy per-entity exchange (u edges; T+p_s
-       packed cells; tracers packed cells) and the OPT-IN batched
-       union-neighbor exchange (one message per union (cell ∪ edge)
-       neighbor per dtype group — ``n_union_nbrs`` messages vs the
-       legacy ``n_edge_nbrs + 2*n_cell_nbrs``), selected at import via
-       ``LEGOESM_VORONOI_BATCHED_HALO=1`` (see ``_USE_BATCHED_HALO``;
-       opt-in pending an 18x CPU runtime-regression fix).  Note the
+       paths: the DEFAULT batched union-neighbor exchange (one message
+       per union (cell ∪ edge) neighbor per dtype group —
+       ``n_union_nbrs`` messages vs the legacy ``n_edge_nbrs +
+       2*n_cell_nbrs``) and the opt-OUT legacy per-entity exchange (u
+       edges; T+p_s packed cells; tracers packed cells), selected at
+       import via ``LEGOESM_VORONOI_BATCHED_HALO`` (see
+       ``_USE_BATCHED_HALO``; batched now default — measured faster at
+       all sizes, the 18x regression is fixed/gone).  Note the
        mass fixer's ``allreduce`` remains the only other collective; as
        everywhere, keep ``global_max/min`` out of losses.
 
@@ -542,6 +569,17 @@ def make_voronoi_mpi_step(
             "Pass return_phys_state=True and thread the returned carry, or "
             "use a diagnostic scheme."
         )
+    # Column-local physics (Newtonian relaxation, warm-rain microphysics) reads
+    # ONLY its own column and never touches halo cells, so the pre-physics halo
+    # exchange below is wasted work.  Skipping it removes one halo exchange per
+    # step (~1/4 of a moist step's exchanges: 3 RK-stage + 1 pre-physics) with
+    # NO effect on results — a latency-bound strong-scaling win.  Schemes opt in
+    # via a ``_column_local = True`` attribute; unknown physics defaults to
+    # exchanging (safe).  Static at trace time (set on the closure at build).
+    _phys_col_local = (
+        bool(getattr(physics_fn, "_column_local", False))
+        and os.environ.get("LEGOESM_NO_COLUMN_LOCAL_SKIP") != "1"
+    )
     if config is None:
         config = model.config
 
@@ -606,11 +644,13 @@ def make_voronoi_mpi_step(
                 state: MPASHydrostaticState) -> MPASHydrostaticState:
             """Batched halo exchange for u (edge) + T/p_s/tracers (cell).
 
-            OPT-IN (``LEGOESM_VORONOI_BATCHED_HALO=1``) pending a
-            performance fix — 18x CPU runtime regression vs the legacy
-            per-entity path (job 8457273, 2026-06-10); see
-            ``_USE_BATCHED_HALO`` and the ``halo_exchange_voronoi``
-            module docstring.
+            DEFAULT path (opt-OUT via ``LEGOESM_VORONOI_BATCHED_HALO=0``):
+            measured faster than the legacy per-entity path at every
+            benchmarked size (I4/I5 f32 -12%/-5% job 8488057; I6 f64
+            np8/np16 -4.6%/-3.5% job 8488023).  The historical 18x
+            regression (job 8457273, 2026-06-10) was fixed by the
+            one-scatter pack/unpack rework; see ``_USE_BATCHED_HALO`` and
+            the ``halo_exchange_voronoi`` module docstring.
 
             All prognostic fields go out in **one** flat message per union
             (cell ∪ edge) neighbor per dtype group via
@@ -656,9 +696,10 @@ def make_voronoi_mpi_step(
                 })
             return new
     else:
-        # DEFAULT: legacy per-entity exchange.  ``halo_ex`` dispatches
-        # through ``_exchange_mpi`` — every message via the AD-safe
-        # ``get_sendrecv_vjp`` custom-VJP wrapper, same as the batched path.
+        # opt-OUT (``LEGOESM_VORONOI_BATCHED_HALO=0``): legacy per-entity
+        # exchange.  ``halo_ex`` dispatches through ``_exchange_mpi`` — every
+        # message via the AD-safe ``get_sendrecv_vjp`` custom-VJP wrapper, same
+        # as the (now default) batched path; kept as the parity reference.
         halo_ex = layout.halo_exchange
 
         def _exchange_mpas_state(
@@ -768,7 +809,10 @@ def make_voronoi_mpi_step(
         # by it but the exchange keeps the boundary consistent.
         phys_state_out = phys_state
         if physics_fn is not None:
-            state_phys_in = _exchange_mpas_state(state_new)
+            # Column-local physics needs no neighbor cells -> skip the exchange.
+            state_phys_in = (
+                state_new if _phys_col_local
+                else _exchange_mpas_state(state_new))
             _pr = physics_fn(
                 state_phys_in, local_mesh, sigma_coord,
                 phys_state=phys_state, forcing=forcing,

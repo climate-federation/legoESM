@@ -8,6 +8,7 @@ from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity
 from legoesm.core.bulk_flux import compute_most_fluxes
 from legoesm.ocean.eos import rho_0 as rho_0_ref, c_sw
+from legoesm.ocean.physics.surface_forcing._shared import surface_tendency_factors
 from legoesm.ocean.physics.surface_forcing.config import BulkFormulaConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
@@ -39,7 +40,13 @@ def bulk_formula_surface_forcing(
     dtype = T.dtype
 
     T_s = T[..., 0] + constants.T_freeze  # (6, n, n)
-    q_sat = saturation_specific_humidity(T_s, jnp.full_like(T_s, constants.p_atm_std))
+    # Surface saturation humidity over SALINE ocean water: Large & Yeager (2004)
+    # / OMIP prescribe q_s = 0.98 * q_sat(SST, p) (~2% reduction of saturation
+    # vapour pressure over seawater).  Omitting it biases the latent heat flux
+    # (and evaporative freshwater) high.
+    q_sat = cfg.q_sat_salinity_factor * saturation_specific_humidity(
+        T_s, jnp.full_like(T_s, constants.p_atm_std)
+    )
 
     # Upward longwave from a grey surface: surface emission PLUS the
     # reflected component of the incident longwave.  An earlier form
@@ -94,10 +101,16 @@ def bulk_formula_surface_forcing(
     # Net heat flux (positive into ocean)
     Q_net = cfg.SW_down - Q_lw_up + cfg.LW_down - Q_sh - Q_lh
 
-    # Convert to top-layer tendencies
+    # Convert to top-layer tendencies.  Mask land columns (jacobian = 0):
+    # without it ``1/max(dz_0, 1e-10)`` yields ~1e7-scale heat/momentum
+    # tendencies on dry cells that contaminate neighbouring ocean faces when
+    # interpolated.  Mirrors the ``is_ocean`` guard in ``prescribed.py`` /
+    # ``external.py`` (codex review, finding #5).
     dz_0 = z_coord.dz_ref[0] * jacobian
-    inv_rho_dz = 1.0 / (rho_0_ref * jnp.maximum(dz_0, 1e-10))
-    inv_rho_csw_dz = 1.0 / (rho_0_ref * c_sw * jnp.maximum(dz_0, 1e-10))
+    is_ocean = dz_0 > cfg.min_wet_cell_thickness_m
+    # Wet-cell flux→tendency reciprocals (#518: shared helper; eos rho_0/c_sw).
+    inv_rho_dz, inv_rho_csw_dz = surface_tendency_factors(
+        is_ocean, dz_0, rho_0_ref, c_sw)
 
     # Pad with zero on trailing axis instead of alloc-zeros +
     # scatter — single Pad HLO op per field.  Same pattern as the
@@ -113,7 +126,13 @@ def bulk_formula_surface_forcing(
     dT_dt = jnp.pad(
         (Q_net * inv_rho_csw_dz)[..., None], (*pad_axes, (0, nlev - 1)),
     )
-    # No freshwater forcing in basic bulk formulation
+    # Salinity forcing is intentionally delegated to the model's dedicated
+    # freshwater channel (P - E + runoff via ``model.step(freshwater=...)``),
+    # NOT emitted here.  Adding a virtual-salt flux from this scheme's
+    # evaporation (E = Q_lh / L_v) would DOUBLE-COUNT the evaporative salt
+    # concentration already carried by the freshwater channel.  This "basic"
+    # bulk scheme therefore reports dS_dt = 0 by design; a run that needs
+    # salinity forcing must route E - P - R through the freshwater channel.
     dS_dt = jnp.zeros(shape_3d, dtype=dtype)
 
     return SurfaceForcingOutput(

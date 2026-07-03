@@ -31,6 +31,29 @@ from legoesm.atmosphere.physics.physics_state import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _fp64_precision_policy():
+    """Pin the legoESM precision policy to fp64 for the duration of each test.
+
+    Enabling the JAX ``jax_enable_x64`` flag (module top) is NOT sufficient on
+    its own: the legoESM precision policy is a separate process-global that
+    still defaults to fp32, so the model state comes back fp32 while x64-enabled
+    physics produces fp64 tendencies — the MPAS ``ssp_rk54`` scan-carry guard
+    then (correctly) rejects the dtype-narrowing mismatch.  Set the policy to
+    fp64 so state and tendencies are consistently fp64, and RESTORE it on
+    teardown so the policy does not leak into sibling test modules sharing the
+    xdist worker process (the cross-test contamination this repo guards against).
+    """
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
+    _prev = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        yield
+    finally:
+        set_policy(_prev)
+
+
 def _tke_physics_config():
     from legoesm.atmosphere.physics.combined import PhysicsConfig
     from legoesm.atmosphere.physics.turbulence import TurbulenceConfig

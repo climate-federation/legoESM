@@ -1,6 +1,6 @@
 """Unit tests for CLUBB advance-helper kernels (sigma_sqd_w, Brunt-Vaisala).
 
-Part of the fuller CLUBB port — see ``docs/md_files/clubb.md``.
+Part of the fuller CLUBB port — see ``docs/dev-notes/clubb.md``.
 """
 
 from __future__ import annotations

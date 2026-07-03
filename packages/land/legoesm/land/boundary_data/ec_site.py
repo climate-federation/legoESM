@@ -121,6 +121,7 @@ _OBS_RANGE: dict[str, tuple[float, float]] = {
     "NEE": (-100.0, 100.0),      # umolCO2/m2/s
     "ET": (-50.0, 100.0),        # mm/day
     "H": (-1000.0, 1500.0),      # W/m2
+    "USTAR": (0.0, 10.0),        # friction velocity [m/s]
 }
 
 # Required per-timestep driving inputs (forcing + canopy params); a step is
@@ -419,6 +420,7 @@ def read_ec_site_driver(
         "le_wm2": le_obs,
         "h_wm2": _obs_masked(ds, "H", n),
         "nee_umol": _obs_masked(ds, "NEE", n),
+        "ustar": _obs_masked(ds, "USTAR", n),     # friction velocity [m/s]
     }
 
     # Gap-free producer provenance (absent on a standard driver_v2).  Prefer the

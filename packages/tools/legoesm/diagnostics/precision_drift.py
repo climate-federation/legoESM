@@ -215,16 +215,23 @@ class PrecisionDriftChecker:
         max_linf_u = max(s.linf_u for s in self.snapshots)
         max_linf_ps = max(s.linf_ps for s in self.snapshots)
 
-        # Mass drift: relative difference at final snapshot
+        # Mass / energy drift at the final snapshot.  Delegate to the
+        # canonical conservation_drift helper (magnitude-aware baseline)
+        # rather than an inline ``max(abs(ref), 1e-30)`` floor — the
+        # iter-78/80/83/87 floor pathology that manufactures spurious huge
+        # drift for a near-zero / rest-state reference.  Matches the
+        # precision_health_report delegation below.
+        from legoesm.diagnostics.conservation_drift import (
+            compute_relative_drift,
+        )
         last = self.snapshots[-1]
         mass_ref = last.global_mass_ref
-        mass_drift_rel = abs(last.global_mass_test - mass_ref) / max(
-            abs(mass_ref), 1e-30
+        mass_drift_rel = compute_relative_drift(
+            [mass_ref, last.global_mass_test]
         )
-
         energy_ref = last.global_energy_ref
-        energy_drift_rel = abs(last.global_energy_test - energy_ref) / max(
-            abs(energy_ref), 1e-30
+        energy_drift_rel = compute_relative_drift(
+            [energy_ref, last.global_energy_test]
         )
 
         if max_rms_T > self.rms_T_threshold:

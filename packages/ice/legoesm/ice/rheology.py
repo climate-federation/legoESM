@@ -311,8 +311,8 @@ def delta_deformation(
     eps_11: jnp.ndarray,
     eps_22: jnp.ndarray,
     eps_12: jnp.ndarray,
-    e_yield: float = 2.0,
-    Delta_min: float = 2.0e-9,
+    e_yield: float = _RHEO_DEFAULTS.e_yield,
+    Delta_min: float = _RHEO_DEFAULTS.Delta_min,
 ) -> jnp.ndarray:
     """Compute the deformation rate invariant Delta.
 
@@ -358,7 +358,7 @@ def vp_stress(
     eps_12: jnp.ndarray,
     P: jnp.ndarray,
     Delta: jnp.ndarray,
-    e_yield: float = 2.0,
+    e_yield: float = _RHEO_DEFAULTS.e_yield,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Compute the VP stress tensor.
 
@@ -412,7 +412,7 @@ def evp_stress_update(
     T_evp: float,
     dt_s: float,
     N_evp: int,
-    Delta_min: float = 2.0e-9,
+    Delta_min: float = _RHEO_DEFAULTS.Delta_min,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Single EVP subcycle stress update (Hunke & Dukowicz 1997).
 
@@ -507,7 +507,7 @@ def mevp_stress_update(
     P: jnp.ndarray,
     e_yield: float,
     alpha: float,
-    Delta_min: float = 2.0e-9,
+    Delta_min: float = _RHEO_DEFAULTS.Delta_min,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Single mEVP pseudo-time stress update (Bouillon 2013 / Kimmritz 2015).
 

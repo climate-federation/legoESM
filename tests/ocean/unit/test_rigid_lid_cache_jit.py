@@ -43,7 +43,7 @@ def rigid_lid_setup():
         v=state.v.replace(data=(state.v.data + 0.02 * jax.random.normal(
             kv, state.v.data.shape)) * state.v_mask.data[..., None]),
     )
-    config = LatLonCGridOceanConfig(
+    config = LatLonCGridOceanConfig.from_flat(
         A_h=1000.0, K_h=100.0, A_v=1e-3, K_v=1e-4, bottom_drag_r=1e-3,
         barotropic_solver="rigid_lid", enable_runtime_checks=False)
     return grid, z_coord, state, config

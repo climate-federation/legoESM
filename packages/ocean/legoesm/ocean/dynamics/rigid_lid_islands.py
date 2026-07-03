@@ -269,6 +269,6 @@ def build_rigid_lid_data(H_bathy, land_mask, u_mask, v_mask, config, grid,
 
     psin = build_psin_basis(
         rl_partial, grid,
-        tol=config.rigid_lid_cg_tol, maxiter=config.rigid_lid_cg_maxiter)
+        tol=config.barotropic.rigid_lid_cg_tol, maxiter=config.barotropic.rigid_lid_cg_maxiter)
     line_psin = build_line_psin(psin, rl_partial, grid)
     return rl_partial._replace(psin=psin, line_psin=line_psin)

@@ -163,10 +163,30 @@ def mpas_ocean_baroclinic_tendencies(
         _is_active_3d = z_coord.is_active.astype(T_3d.dtype)
     else:
         _is_active_3d = None
-    # Use h_actual (partial-cell-aware) for the baroclinic pressure
-    # cumsum on partial cells — matches NEMO ``ln_hpg_zps`` and MITgcm
-    # conventions.  When unset, falls back to dz_ref (legacy z*).
-    _use_h_actual_pgf = getattr(config, "use_h_actual_pgf", False)
+    # Integrate the baroclinic pressure anomaly p' against the actual
+    # partial-cell thickness h_k (NEMO ``ln_hpg_zps`` / MITgcm) ONLY for
+    # the Adcroft scheme.  This is the matched partner of the
+    # ``pgf_scheme == "adcroft"`` Adcroft–Campin face-correction branch
+    # below and MUST fire under the same guard: the AC correction reads
+    # centroid depths from h_partial, so p' has to be on the h_partial
+    # grid too (commit 62913cbe6 fixed that mismatch by enabling
+    # ``use_h_actual_pgf`` for the adcroft comparison runs).
+    #
+    # The bare "centered" scheme carries NO such correction.  Integrating
+    # p' on h_partial places p'[k] at each cell's *actual* centroid
+    # depth, which differs across a bottom-level step; the centered
+    # ``gradient_edge(p')`` then differences pressures at mismatched
+    # depths, injecting an uncompensated spurious ∇p' that blows up the
+    # rest state on a seamount step (max|u| 5.5e-4 → 1.2e-1 over 1 h).
+    # Centered therefore always integrates p' on the dz_ref reference-
+    # depth grid (its stable, common-depth treatment) regardless of
+    # ``use_h_actual_pgf``.  smc03/ahh08/zero drop p' from the Bernoulli
+    # scalar entirely, so the choice is moot for them and they too keep
+    # the dz_ref default.  When unset, falls back to dz_ref (legacy z*).
+    _use_h_actual_pgf = (
+        getattr(config, "use_h_actual_pgf", False)
+        and getattr(config, "pgf_scheme", "centered") == "adcroft"
+    )
     if _use_h_actual_pgf and isinstance(z_coord, OceanPartialCellCoordinate):
         _h_for_pgf = h_k
     else:
@@ -180,6 +200,7 @@ def mpas_ocean_baroclinic_tendencies(
         is_active_3d=_is_active_3d,
         h_actual=_h_for_pgf,
         rho_ref_z_static=_rho_ref_z_static,
+        allow_baroclinic_f32=True,   # opt-in f32-EOS lever (LEGOESM_BAROCLINIC_F32)
     )
 
     # Fill land cells in p_prime before gradient_edge so the 2-cell
@@ -243,6 +264,15 @@ def mpas_ocean_baroclinic_tendencies(
         h_e_continuity = h_e_3d
     # Both ``H_e`` and ``u_bar`` numerator share the ``h_e_3d`` weight
     # on the level axis — fuse into one stacked column reduction.
+    # NOTE (#517 item 1/5): NOT routed through the shared
+    # depth_average_to_faces / column_depth helpers.  Splitting this
+    # fused ``jnp.stack``+single-``jnp.sum`` into two separate reductions
+    # changes XLA's fusion in the full MPAS step and drifts the seamount
+    # centered-scheme transport at ~1e-10 (caught by
+    # test_seamount_centered_stable_over_steps), so the fused form is
+    # kept verbatim to stay byte-identical.  H_e additionally is reused
+    # by F_slow_u below; u_bar floors the divisor at a bare 1e-10 ON TOP
+    # of H_e's min_water_column_m floor (a divergent second floor).
     _u_pair = jnp.sum(jnp.stack([h_e_3d, u_3d * h_e_3d], axis=-1), axis=1)
     H_e = jnp.maximum(_u_pair[..., 0], config.min_water_column_m)
     u_bar = _u_pair[..., 1] / jnp.maximum(H_e, 1e-10)
@@ -405,7 +435,7 @@ def mpas_ocean_baroclinic_tendencies(
     #                thin spike at partial-cell interfaces that drives
     #                a 2Δz vertical mode on ETOPO; SMC03's per-column
     #                ρ(z) reconstruction is smooth in z).  See
-    #                ``docs/ocean_experiments/density_jacobian_pgf_mpas.md``.
+    #                ``docs/ocean/experiments/density_jacobian_pgf_mpas.md``.
     #   "centered" : no correction; ``grad_B`` already contains the
     #                bare ``∇(KE + p'/rho_0)``.
     if pgf_scheme == "adcroft" and isinstance(z_coord, OceanPartialCellCoordinate):
@@ -502,9 +532,14 @@ def mpas_ocean_baroclinic_tendencies(
               * pv_flux_enstrophy_conserving_3d(
                   u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
               ))
-    else:
+    elif config.pv_scheme == "enstrophy":
         pv_flux = pv_flux_enstrophy_conserving_3d(
             u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
+        )
+    else:
+        raise ValueError(
+            f"Unknown pv_scheme {config.pv_scheme!r}; "
+            "expected one of: 'energy', 'enstrophy', 'mixed'."
         )
 
     # Horizontal viscosity on TOTAL velocity (not perturbation).
@@ -659,7 +694,7 @@ def mpas_ocean_baroclinic_tendencies(
         elif isinstance(z_coord, OceanPartialCellCoordinate):
             # Legacy single-cell drag at maxLevelEdgeBot.
             # WARNING: CFL-violates at thin partial cells (see
-            # docs/ocean_experiments/density_jacobian_pgf_mpas.md §8a).
+            # docs/ocean/experiments/density_jacobian_pgf_mpas.md §8a).
             # Prefer ``bottom_drag_bbl_thickness > 0`` on real bathymetry.
             bot_e = compute_max_level_edge_bot(z_coord.bottom_level, mesh)
             # Edges with at least one dry neighbor have bot_e < 0 (since
@@ -859,6 +894,34 @@ def mpas_ocean_baroclinic_tendencies(
         # (the same correction the free-surface eta path applies for volume in
         # ocean_model_mpas.step) -- without it an unbalanced ∮(P-E+R) drifts the
         # mean salinity even though volume is conserved.
+        #
+        # FAIL-FAST under multi-rank MPAS (codex round-2 #1/#2, round-3 placement):
+        # the salt freshwater normalization below AND the sibling eta
+        # normalization (ocean_model_mpas.step) are rank-local area-means with NO
+        # owned-cell mask, so an MPI Voronoi run would silently halo-double-count
+        # and apply inconsistent volume vs salt corrections.  Guard the SINGLE
+        # reduction SOURCE here (the public ``MPASOceanModel.tendencies`` entry,
+        # which ``_step_impl`` also routes through first) so a DIRECT tendency
+        # call is refused too — not just a full step.  ``is_multi_process()``
+        # alone misses the layout-less Voronoi MPI path, so also check
+        # ``mpi_world_size()`` (the established MPAS fail-fast predicate).  Inert
+        # single-rank.  Remove when owned-mask plumbing lands on both paths
+        # (the freshwater helper already exposes ``owned_mask`` +
+        # ``global_sum_if_distributed``).
+        if bool(getattr(config, "normalize_freshwater", False)):
+            from legoesm.parallel.reductions import (
+                is_multi_process, mpi_world_size,
+            )
+            if is_multi_process() or mpi_world_size() > 1:
+                raise NotImplementedError(
+                    "normalize_freshwater=True under multi-rank MPAS is not yet "
+                    "supported: the top-layer-salt and eta freshwater means are "
+                    "rank-local (no owned-cell mask), so an MPI Voronoi run would "
+                    "silently apply halo-double-counted and inconsistent volume "
+                    "vs salt corrections.  Run single-rank, or set "
+                    "normalize_freshwater=False, until owned-mask plumbing lands "
+                    "on both paths."
+                )
         _spread_m = float(getattr(config, "runoff_depth_spread_m", 0.0))
         if _spread_m > 0.0:
             # NEMO-style runoff depth spreading (rn_dep_max=150): the runoff

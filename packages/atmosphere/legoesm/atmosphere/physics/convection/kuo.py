@@ -66,13 +66,18 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_vapor_pressure, saturation_mixing_ratio
+from legoesm.thermo import (
+    saturation_vapor_pressure,
+    saturation_mixing_ratio,
+    saturation_mixing_ratio_dT,
+)
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_moist_adiabat,
     compute_cape,
 )
 from legoesm.atmosphere.physics.convection.config import KuoConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics.convection._triggers import smooth_step
 
 
 __all__ = ("kuo_convection",)
@@ -87,10 +92,6 @@ _VT_COEFF = 1.0 / constants.epsilon - 1.0
 # ----------------------------------------------------------------------------
 # Thermodynamic helpers (legoesm constants + thermo; no re-derived saturation)
 # ----------------------------------------------------------------------------
-
-# --- pspec autoblock
-_MAGNUS_A = 17.67
-_MAGNUS_B = 243.5
 
 def _latent_heat(T: jax.Array) -> jax.Array:
     """Temperature-dependent latent heat of vaporization [J/kg].
@@ -110,34 +111,15 @@ def _latent_heat(T: jax.Array) -> jax.Array:
 def _dqsat_dT(T: jax.Array, p: jax.Array) -> jax.Array:
     """d(q_sat)/dT [1/K] for the legoesm Tetens saturation used here.
 
-    Analytic derivative of :func:`legoesm.thermo.saturation_mixing_ratio`
-    in the regime ``e_sat ≪ p`` (q_sat = ε e_sat / (p − e_sat)).  We
-    differentiate the *physical* relation rather than the smooth-floor /
-    smooth-cap surrogate so the Newton solve uses a clean slope; the
-    surrogate only modifies q_sat near ``e_sat ≈ p`` (never reached in
-    the troposphere) and at ``q_sat → 1``.
-
-        de_sat/dT = e_sat · 17.67·243.5 / (T_c + 243.5)^2
-        dq_sat/dT = ε p · de_sat/dT / (p − e_sat)^2
-
-    The constants ``17.67`` and ``243.5`` are NOT a re-derived saturation
-    formula: they are the Tetens coefficients of
-    :func:`legoesm.thermo.saturation_vapor_pressure`
-    (``611.2·exp(17.67·T_c/(T_c+243.5))``), and this routine is the exact
-    analytic ``d/dT`` of that mandated function.  Keeping them inline ties
-    the slope to the model's own ``e_sat`` curve; promoting them to
-    constants.py would risk drift from ``thermo.py`` (Codex review-1 #6).
+    Thin wrapper over :func:`legoesm.thermo.saturation_mixing_ratio_dT`,
+    which is the exact analytic ``d/dT`` of the mandated
+    :func:`legoesm.thermo.saturation_vapor_pressure` Tetens curve with the
+    hard ``max(p − e_sat, 1)`` floor the Newton solve wants (no smooth
+    softplus surrogate). Kept as a named alias so the Kuo call sites read
+    physically; the saturation prefactors live solely in ``thermo`` so the
+    slope cannot drift from the model's own ``e_sat`` curve.
     """
-    e_sat = saturation_vapor_pressure(T)
-    T_c = T - constants.T_freeze
-    desat_dT = e_sat * (_MAGNUS_A * _MAGNUS_B) / (T_c + _MAGNUS_B) ** 2
-    denom = jnp.maximum(p - e_sat, 1.0) ** 2
-    return constants.epsilon * p * desat_dT / denom
-
-
-def _smooth_gt(x: jax.Array, sharpness: float) -> jax.Array:
-    """Smooth ``x > 0`` indicator (sigmoid), differentiable in [0, 1]."""
-    return jax.nn.sigmoid(sharpness * x)
+    return saturation_mixing_ratio_dT(T, p)
 
 
 # ----------------------------------------------------------------------------
@@ -251,8 +233,8 @@ def _parcel_ascent(
         # Arguments normalised to O(1) so a single dimensionless sharpness
         # gives a crisp Heaviside.
         cond_gate = (
-            _smooth_gt((qv1 - qsat_k) / config.supersat_scale, sharp)
-            * _smooth_gt((qv1 - config.qv_min) / config.qv_min, sharp)
+            smooth_step((qv1 - qsat_k) / config.supersat_scale, sharp)
+            * smooth_step((qv1 - config.qv_min) / config.qv_min, sharp)
         )
 
         # In-cloud values: condensing → (t2, qsat); else dry → (t1, qv1).
@@ -262,7 +244,7 @@ def _parcel_ascent(
 
         # Virtual cloud temperature with water loading.
         tvc = t_cloud * (1.0 + _VT_COEFF * qv_cloud - qc)
-        buoyant = _smooth_gt((tvc - tve_k) / config.buoyancy_scale_K, sharp)
+        buoyant = smooth_step((tvc - tve_k) / config.buoyancy_scale_K, sharp)
 
         # ``w_lcl`` captured at the FIRST condensing level (oracle:
         # icond(k)==0 .and. icond(k+1)==0 → w_lcl = w(k)).  Smoothly:
@@ -272,7 +254,7 @@ def _parcel_ascent(
         w_lcl_new = first_lcl * w_k + (1.0 - first_lcl) * w_lcl
 
         # icond==2: condensing AND buoyant AND w_lcl > 0.
-        w_pos = _smooth_gt(w_lcl_new, sharp)
+        w_pos = smooth_step(w_lcl_new, sharp)
         icond2 = cond_gate * buoyant * w_pos
 
         # Advance carry: new MSE from the condensing branch (oracle uses
@@ -447,7 +429,7 @@ def kuo_convection(
     # column down to its exponential tail, not 0.5 at the cloud top.
     # ``ptenq_sign_floor`` (1e-30) is a pure division-by-zero guard.
     pq_sign = ptenq / (jnp.abs(ptenq) + config.ptenq_sign_floor)
-    pq_gate = _smooth_gt(pq_sign, config.icond_sharpness)
+    pq_gate = smooth_step(pq_sign, config.icond_sharpness)
     active = icond2 * pq_gate                    # (ncol, nlev) in [0,1]
     dpg = dp / g                                 # mass / area per layer
 

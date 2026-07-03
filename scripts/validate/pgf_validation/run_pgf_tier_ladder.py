@@ -6,7 +6,7 @@ diagnostic (Tier 1: idealized rest-state) to most realistic (Tier 5:
 JRA-forced realistic bathymetry).  Each tier adds one source of
 complexity, so failures can be attributed cleanly.
 
-See docs/ocean_experiments/pgf_test_plan.md for the full rationale.
+See docs/ocean/experiments/pgf_test_plan.md for the full rationale.
 
 Tiers
 -----
@@ -200,8 +200,8 @@ def build_bathymetry(grid, config: TierConfig):
 
     # Apply smoothing
     if config.smoothing_passes > 0 and config.bathymetry_type != "flat":
-        from legoesm.ocean.bathymetry import _laplacian_smooth_2d
-        H_bathy = _laplacian_smooth_2d(H_bathy, config.smoothing_passes,
+        from legoesm.ocean.bathymetry import laplacian_smooth_2d
+        H_bathy = laplacian_smooth_2d(H_bathy, config.smoothing_passes,
                                         is_cubed=False)
 
     return jnp.asarray(H_bathy), jnp.asarray(land_mask)
@@ -597,9 +597,9 @@ def run_tier(config: TierConfig):
     state, coord = build_initial_state(grid, z_coord, config)
 
     # Build model
-    ocean_config = LatLonCGridOceanConfig(
+    ocean_config = LatLonCGridOceanConfig.from_flat(
         pgf_scheme=config.pgf_scheme,
-        barotropic_solver=config.barotropic_solver,
+        barotropic_solver=config.barotropic.barotropic_solver,
         momentum_advection=config.momentum_advection,
         bottom_drag_r=config.bottom_drag_r,
         A_h=config.A_h,
@@ -703,7 +703,7 @@ def tier_config_from_args(args) -> TierConfig:
         stratification=args.stratification or preset.get("stratification", "uniform"),
         smoothing_passes=args.smoothing_passes if args.smoothing_passes is not None
             else preset.get("smoothing_passes", 5),
-        barotropic_solver=args.barotropic_solver,
+        barotropic_solver=args.barotropic.barotropic_solver,
         momentum_advection=args.momentum_advection,
         bottom_drag_r=args.bottom_drag_r,
         A_h=args.A_h,

@@ -499,3 +499,41 @@ class TestPhysicsParamsSpectral:
         # At least some grads should be non-zero
         has_nonzero = any(g != 0 for g in grads.raw_values.values())
         assert has_nonzero, "All physics param gradients are zero"
+
+
+class TestAreaWeightedLoss:
+    """PR B #6: the spectral-state MSE/CRPS must be Gaussian-latitude area
+    weighted, not a plain jnp.mean that over-weights the poles (which would
+    contradict the area-weighted bias term in the same function)."""
+
+    def test_mse_downweights_polar_error(self):
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state, spectral_state_vs_carry_loss,
+        )
+        from legoesm.training.losses import LossConfig
+
+        carry = _make_gaussian_carry()
+        pred_state = carry_to_spectral_state(carry, _GRID)
+
+        # Two equal-magnitude, equal-extent temperature errors: one placed on
+        # the two most-polar Gaussian rows (small quadrature weight), one on
+        # the two most-equatorial rows (large weight). Area weighting must make
+        # the polar-error loss strictly smaller.
+        lat = jnp.asarray(_GRID.lat)
+        order = jnp.argsort(jnp.abs(lat))
+        eq_rows = order[:2]
+        polar_rows = order[-2:]
+        dT = 10.0
+
+        def _bump(rows):
+            return carry._replace(T=carry.T.at[rows, :, :].add(dT))
+
+        cfg = LossConfig(w_T=1.0, w_u=0.0, w_v=0.0, w_q=0.0, w_ps=0.0)
+        loss_polar = float(spectral_state_vs_carry_loss(
+            pred_state, _bump(polar_rows), _GRID, _SIGMA, _SIGMA.sigma_full, cfg))
+        loss_equator = float(spectral_state_vs_carry_loss(
+            pred_state, _bump(eq_rows), _GRID, _SIGMA, _SIGMA.sigma_full, cfg))
+        assert loss_polar < loss_equator, (
+            f"area-weighting should down-weight polar error: polar={loss_polar:.6e} "
+            f">= equator={loss_equator:.6e} (plain jnp.mean would make them equal)"
+        )

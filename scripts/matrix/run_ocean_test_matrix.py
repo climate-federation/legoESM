@@ -90,9 +90,6 @@ if _MATRIX_DIR not in sys.path:
 import jax
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.runtime.backend import ensure_metal_or_fallback
-ensure_metal_or_fallback()
-
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd  # iter-19 fix: pd was used (lines 4617, 6106) but
@@ -406,7 +403,7 @@ def _build_test_matrix() -> list[TestCase]:
     # (cubed_sphere excluded — wind-driven Munk boundary current
     # interacts with face corners producing NaN at ~step 200 even
     # with FC-Gram + raised diffusion; tracked in
-    # docs/ocean_experiments/cubed_sphere_pgf_stability.md as a
+    # docs/ocean/experiments/cubed_sphere_pgf_stability.md as a
     # documented cube ocean dycore limitation.)
     for g in ["latlon", "mpas"]:
         matrix.append(TestCase(
@@ -567,6 +564,14 @@ def _apply_value_threshold(
 # sentinel from legoesm.diagnostics so the same singleton is used
 # across both monolithic and modular runners.
 from legoesm.diagnostics import DAYS_REQUIRED as _DAYS_REQUIRED
+from legoesm.experiments.matrix.namelist import write_case_namelist
+
+# Absolute deadband for the Overflow / Lock-Exchange RPE-sign gate (iter-156).
+# Kept in sync with the modular twin in
+# scripts/matrix/ocean_test_matrix/timeloop.py. 10x above the observed O(1e-6)
+# quick-mode sign-noise, ~1000x below the 1e-2 conservation-health scale: passes
+# discretization noise, fails a genuine (unphysical) RPE increase.
+_PE_REL_SIGN_DEADBAND = 1.0e-5
 
 
 def _apply_pe_rel_sign(
@@ -610,6 +615,21 @@ def _apply_pe_rel_sign(
     ``days=NaN``) would silently get quick-mode ``op="le"``,
     weakening the documented full-mode strict gate.  Now
     every code path requires a finite positive ``days``.
+
+    iter-156 (smoke-sweep finding): in QUICK MODE ONLY, use a
+    small ABSOLUTE deadband (``_PE_REL_SIGN_DEADBAND``) instead
+    of a strict sign-of-noise check.  A short quick-mode gravity
+    current (Overflow on cubed_sphere, 0.1 days) barely evolves
+    the plume, so the diagnosed RPE change is dominated by
+    O(1e-7) discretization noise that can land marginally
+    POSITIVE (+6.5e-7 observed) without the plume gaining
+    available potential energy.  Quick mode now passes while
+    ``pe_rel_final`` stays below the deadband (10x above the
+    O(1e-6) sign-noise, ~1000x below the 1e-2 health scale).
+    FULL mode (days>=1) keeps the strict ``< 0`` contract
+    (threshold 0), so a genuine production RPE increase still
+    fails; Lock Exchange and full-mode Overflow (both negative)
+    are unaffected.
     """
     if days is _DAYS_REQUIRED:
         raise TypeError(
@@ -641,8 +661,12 @@ def _apply_pe_rel_sign(
             f"explicit experiment duration."
         )
     op = "lt" if days_f >= 1.0 else "le"
+    # Full mode keeps the STRICT documented RPE-decrease contract (threshold 0);
+    # the deadband applies ONLY in quick mode, where a barely-evolved plume's
+    # O(1e-7) discretization noise can land marginally positive.
+    threshold = 0.0 if days_f >= 1.0 else _PE_REL_SIGN_DEADBAND
     return _apply_value_threshold(
-        ok, notes, pe_rel_final, 0.0,
+        ok, notes, pe_rel_final, threshold,
         label=label, op=op, n_samples=n_samples,
     )
 
@@ -2303,47 +2327,23 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
 
         n = params["n"]
         grid = create_cubed_sphere(n)
-        # Cubed-sphere ocean: FV3 C-D grid backend (the deprecated FC-Gram
-        # A-grid was removed) + raised face-edge dissipation + FV3-faithful
-        # fv3sw barotropic.  The cd-grid A-L corner stencil's face-edge PGF
-        # amplification under horizontal density gradients is the documented
-        # cube cold-start gate (lock_exchange, phillips_two_layer, overflow,
-        # geostrophic_adjustment, stommel_gyre_tracer); raised A_h/K_h delay
-        # it for the matrix smoke.  ``cube_light_diffusion`` keeps lateral
-        # diffusion light for wave tests (barotropic_wave / inertia_gravity_
-        # wave carry no density gradient; K_h=5e6 would decay a 0.1 m wave to
-        # 0.04 m).  The a_grid barotropic is forbidden by the never-A-grid /
-        # FV3-faithfulness directive — use fv3sw (vector-invariant absolute-
-        # vorticity flux + RK3 + div-damp/hyperdiff).
-        kw = dict(
-            n_barotropic_substeps=60,
-            barotropic_diffusion_alpha=0.3,
-            use_conservation_fixer=True,
-            physics=physics,
-            barotropic_staggering="fv3sw",
-        )
-        if cube_light_diffusion:
-            if A_h is not None:
-                kw["A_h"] = A_h
-        elif A_h is None:
-            kw["A_h"] = 5.0e5
-            kw["K_h"] = 5.0e6
-        else:
-            kw["A_h"] = max(A_h, 5.0e5)
-            kw["K_h"] = 5.0e6
-        if A_v is not None:
-            kw["A_v"] = A_v
-        # Phase B.1 of the bulletproof-ocean validation plan added
-        # ``bottom_drag_r`` / ``bottom_drag_bg_velocity`` /
-        # ``bottom_drag_bbl_thickness`` to ``OceanConfig`` (mirroring
-        # ``LatLonCGridOceanConfig``); the cube tendency
-        # the cd-grid backend ``ocean_baroclinic_tendencies_cdgrid`` applies
-        # linear / quadratic-with-floor / distributed-BBL drag the
-        # same way the lat-lon C-grid does. The previous gate that
-        # raised ``NotImplementedError`` for ``bottom_drag_r > 0`` is
-        # removed; the kwarg is now plumbed straight through.
-        if bottom_drag_r is not None:
-            kw["bottom_drag_r"] = bottom_drag_r
+        # Cubed-sphere ocean: FV3 C-D grid backend + FV3-faithful fv3sw
+        # barotropic.  The cube cold-start stabilization (60 barotropic
+        # substeps, raised A_h/K_h, conservation fixer, ``cube_light_diffusion``
+        # for wave tests) is the single shared
+        # ``cube_matrix_ocean_config_kwargs`` block in
+        # ``ocean_test_matrix.setup`` — the monolithic and modular drivers MUST
+        # use the same source so they cannot diverge (the modular copy had
+        # silently dropped to 30 substeps and blew overflow up to NaN).
+        # ``bottom_drag_r`` is plumbed straight through (the old
+        # NotImplementedError gate is gone); the cd-grid backend
+        # ``ocean_baroclinic_tendencies_cdgrid`` applies linear / quadratic /
+        # BBL drag the same way the lat-lon C-grid does.
+        from ocean_test_matrix.setup import cube_matrix_ocean_config_kwargs
+        kw = cube_matrix_ocean_config_kwargs(
+            physics=physics, A_h=A_h, A_v=A_v,
+            bottom_drag_r=bottom_drag_r,
+            cube_light_diffusion=cube_light_diffusion)
         config = OceanConfig(**kw)
         model = OceanModel(grid, z_coord, config)
         coord_kind = "cube"
@@ -2364,7 +2364,7 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
             kw["A_v"] = A_v
         if bottom_drag_r is not None:
             kw["bottom_drag_r"] = bottom_drag_r
-        config = LatLonCGridOceanConfig(**kw)
+        config = LatLonCGridOceanConfig.from_flat(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, config)
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -2433,7 +2433,7 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
             kw["A_h"] = A_h
         if A_v is not None:
             kw["A_v"] = A_v
-        config = LatLonCGridOceanConfig(**kw)
+        config = LatLonCGridOceanConfig.from_flat(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, config)
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -5178,6 +5178,8 @@ def _run_experiment_via_registry(
         setup_kw["bottom_drag_r"] = cfg.bottom_drag_coeff
     elif hasattr(cfg, "bottom_drag_r"):
         setup_kw["bottom_drag_r"] = cfg.bottom_drag_r
+    elif hasattr(cfg, "bottom_drag"):  # #501: nested DynBottomDragConfig
+        setup_kw["bottom_drag_r"] = cfg.bottom_drag.bottom_drag_r
     for attr in ("tracer_advection", "barotropic_diffusion_alpha",
                  "barotropic_div_damp"):
         if hasattr(cfg, attr):
@@ -5187,6 +5189,27 @@ def _run_experiment_via_registry(
         setup_kw["eos_linear"] = eos_linear_factory(cfg)
     if extra_setup_kwargs:
         setup_kw.update(extra_setup_kwargs)
+
+    # Recipe-factory path: when the experiment exposes a model-config factory
+    # (EXPERIMENT_CONFIG["create_model_config"] / ["create_mpas_model_config"],
+    # e.g. global_overturning), build the config with it and inject it VERBATIM
+    # so the matrix tests the SAME recipe the production driver runs. Without
+    # this the field-by-field scrape above silently drops K_v / bottom_drag /
+    # eos / gm_redi on the lat-lon path (see the divergence note in
+    # docs/dev-notes/planning/ocean_recipe_consolidation_audit.md, #488). This is the
+    # generalisation of what DINO already does by hand (run_dino calls
+    # dino_*_model_config directly, bypassing this registry helper). Only the
+    # latlon/mpas grids are wired; other grids fall back to the scrape.
+    factory_key = {"latlon": "create_model_config",
+                   "latlon_channel": "create_model_config",
+                   "mpas": "create_mpas_model_config"}.get(tc.grid_type)
+    factory = exp_config.get(factory_key) if factory_key else None
+    if factory is not None:
+        eos_cfg = eos_linear_factory(cfg) if eos_linear_factory is not None \
+            else None
+        gm_redi_cfg = (extra_setup_kwargs or {}).get("gm_redi")
+        setup_kw["model_config"] = factory(
+            cfg, physics=physics, eos_config=eos_cfg, gm_redi_cfg=gm_redi_cfg)
 
     # Plumb channel / regional bounds into ``tc.run_kwargs``.
     bounds = {}
@@ -5826,71 +5849,6 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
 # equatorward over a mid-latitude bathymetric ridge.
 # ===========================================================================
 
-def _init_overflow(state, grid_type, grid, z_coord):
-    """Initialize overflow: dense water at high latitudes over bathymetric slope.
-
-    Adapted from Petersen et al. (2015):
-      - Poleward of 50 deg: cold (T=5 degC, dense)
-      - Equatorward of 50 deg: warm (T=20 degC, light)
-      - Smooth tanh transition at 50 deg latitude
-      - Bathymetric ridge at ~40 deg: shelf at 500m, deep basin at 2000m
-    """
-    from legoesm.core.field import Field
-
-    T_cold = 5.0
-    T_warm = 20.0
-    lat_front = np.radians(50.0)   # front position
-    sigma_front = np.radians(5.0)  # transition width
-
-    # Bathymetry: shelf (500m) poleward of 40 deg, deep (2000m) equatorward
-    lat_shelf = np.radians(40.0)
-    sigma_shelf = np.radians(7.0)
-    d_shallow = 500.0
-    d_deep = float(z_coord.H_max)
-
-    lat, lon = _get_cell_latlon_rad(grid_type, grid)
-    abs_lat = np.abs(lat)
-
-    # Temperature: tanh transition at lat_front
-    T_profile = T_warm + (T_cold - T_warm) * 0.5 * (
-        1.0 + np.tanh((abs_lat - lat_front) / sigma_front))
-
-    # Bathymetry: tanh transition at lat_shelf
-    H_bathy_new = d_shallow + (d_deep - d_shallow) * 0.5 * (
-        1.0 - np.tanh((abs_lat - lat_shelf) / sigma_shelf))
-
-    if grid_type == "spectral":
-        from legoesm.grids.gaussian import sh_analysis_3d, sh_synthesis_3d
-        T_hat = state.T_hat.data
-        T_grid = np.array(sh_synthesis_3d(grid, T_hat), dtype=np.float64)
-        nlev = T_grid.shape[-1]
-        mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
-        for k in range(nlev):
-            # Decay temperature perturbation with depth
-            depth_frac = float(z_coord.z_full_ref[k] / z_coord.z_full_ref[-1])
-            T_grid[..., k] = (T_profile * (1.0 - 0.5 * depth_frac) + 2.0 * depth_frac) * mask
-        new_T_hat = sh_analysis_3d(grid, jnp.array(T_grid))
-        # Note: spectral model doesn't easily support variable bathymetry
-        return state._replace(T_hat=Field(new_T_hat))
-
-    else:
-        T_data = np.array(state.T.data, dtype=np.float64, copy=True)
-        mask = np.asarray(state.land_mask.data, dtype=np.float64)
-        nlev = T_data.shape[-1]
-        for k in range(nlev):
-            depth_frac = float(z_coord.z_full_ref[k] / z_coord.z_full_ref[-1])
-            T_data[..., k] = (T_profile * (1.0 - 0.5 * depth_frac) + 2.0 * depth_frac) * mask
-
-        # Update bathymetry
-        H_bathy_new_masked = H_bathy_new * mask
-        # Ensure minimum depth where ocean exists
-        H_bathy_new_masked = np.where(mask > 0.5, np.maximum(H_bathy_new_masked, 50.0), 0.0)
-
-        return state._replace(
-            T=Field(jnp.array(T_data)),
-            H_bathy=Field(jnp.array(H_bathy_new_masked)))
-
-
 def run_overflow(tc: TestCase, output_dir: Path, days: float
                  ) -> tuple[str, float, str]:
     """Overflow: dense water descending a bathymetric slope (Petersen et al. 2015).
@@ -5898,12 +5856,17 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     Cold dense water at high latitudes flows equatorward over a mid-latitude
     ridge. Monitors PE evolution and plume descent.
     """
-    H_max = 2000.0
-    nlev = 20
+    from legoesm.ocean.experiments.overflow import (
+        OverflowConfig, create_initial_conditions as _overflow_ic)
+    ov_config = OverflowConfig()
+    H_max = ov_config.H_max
+    nlev = ov_config.nlev
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc, nlev=nlev, H_max=H_max))
-    state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
-    state = _init_overflow(state, tc.grid_type, grid, z_coord)
+    # Single canonical overflow IC, shared with the modular driver.  The old
+    # script-local ``_create_rest_state`` + ``_init_overflow`` duplicated this
+    # library setup byte-for-byte (verified 2026-06-14 across all grids).
+    state = _overflow_ic(tc.grid_type, grid, z_coord, ov_config)
 
     pe_init = _compute_rpe(state, tc.grid_type, grid, z_coord)
 
@@ -8023,6 +7986,11 @@ def main():
     DEFAULT_DT = args.dt
 
     tests = filter_tests(TEST_MATRIX, args)
+    # Global match count BEFORE any MPI slicing — the exact-selector guard
+    # below keys off this so every rank makes the SAME decision (a per-rank
+    # empty slice when matches < ranks must not make non-owning ranks raise
+    # while owning ranks block at the barrier).
+    _n_matched_global = len(tests)
 
     # MPI case-split: each rank takes a disjoint slice of the filtered
     # test list.  Each case writes to its own (case, grid, resolution)
@@ -8055,8 +8023,30 @@ def main():
         return
 
     if not tests:
-        print("No tests match the given filters.")
-        return
+        # An EXACT selector (``--only =name``, the form emitted by ocean
+        # `setup:` templates / OceanExperimentConfig.run_command) that matches
+        # nothing GLOBALLY is a hard error: the named (case, grid) is not an
+        # instantiated matrix case, so the run would otherwise silently do
+        # nothing.  A bare substring / ``all`` filter that matches nothing
+        # stays a graceful no-op (backward-compatible matrix usage).  Both
+        # decisions key off the GLOBAL pre-slice count so every MPI rank agrees.
+        if _n_matched_global == 0:
+            if str(args.only).startswith("="):
+                raise SystemExit(
+                    f"ERROR: no ocean test case matches --only {args.only!r} "
+                    f"--grid {args.grid!r}. Run `--list` to see valid "
+                    f"(case, grid) pairs."
+                )
+            print("No tests match the given filters.")
+            return
+        # Otherwise the global filter matched but THIS rank's MPI slice is
+        # empty (matches < ranks).  Do NOT return: fall through with
+        # ``tests == []`` so the rank still reaches the collective
+        # barrier/gather below (returning here would deadlock the ranks that
+        # do hold work).  The run loop is a no-op on an empty list.
+        if mpi_comm is not None:
+            print(f"[rank {mpi_rank}/{mpi_size}] no cases assigned; "
+                  "continuing to barrier")
 
     if args.resolution:
         # iter-102 fix: ``--resolution N`` (integer) was previously
@@ -8126,6 +8116,13 @@ def main():
         else:
             days = tc.quick_days if args.quick else tc.duration_days
         out_dir = output_base / tc.output_path
+        # Per-case namelist parameter file (#682): the resolved case config,
+        # written up-front so it is present even if the run later fails.
+        write_case_namelist(
+            out_dir, tc,
+            title=f"ocean test-case namelist: {tc.output_path}",
+            extra={"days_run": days, "quick": bool(args.quick)},
+        )
 
         label = f"{tc.case}/{tc.grid_type}/{tc.resolution}"
         print(f"\n[{i}/{len(tests)}] {label} ({days:.4g} days)")
@@ -8206,6 +8203,38 @@ def main():
           f"ERROR: {n_error} | Wall: {total_wall:.1f}s "
           f"({total_wall / 60:.1f} min)")
     print("=" * 78)
+
+    # --- Summary by RECIPE (the recipe x setup grid, #490) ---
+    # The ~21 experiments are really a handful of dycore recipes x many setups;
+    # group the results so that structure is visible instead of 21 flat rows.
+    try:
+        from legoesm.ocean.experiments.recipe_map import EXPERIMENT_RECIPES
+    except Exception:
+        EXPERIMENT_RECIPES = {}
+
+    def _recipe_for_case(case):
+        if case in EXPERIMENT_RECIPES:
+            return EXPERIMENT_RECIPES[case]
+        for exp in sorted(EXPERIMENT_RECIPES, key=len, reverse=True):
+            if case.startswith(exp + "_") or exp in case:
+                return EXPERIMENT_RECIPES[exp]
+        return "(untagged)"
+
+    if EXPERIMENT_RECIPES:
+        by_recipe = {}
+        for r in ALL_RESULTS:
+            by_recipe.setdefault(_recipe_for_case(r["test"]), []).append(r)
+        print("\n" + "=" * 78)
+        print("  SUMMARY BY RECIPE  (recipe x setup grid, #490)")
+        print("=" * 78)
+        for rec in sorted(by_recipe):
+            rs = by_recipe[rec]
+            p = sum(1 for x in rs if x["status"] == "PASS")
+            print(f"  [{rec}]  {p}/{len(rs)} PASS  ({len(rs)} setups)")
+            for x in sorted(rs, key=lambda z: z["test"]):
+                print(f"      {x['status']:5}  {x['test']:<28} "
+                      f"{x['grid']:<12} {x['resolution']}")
+        print("=" * 78)
 
     # Save summary
     output_base.mkdir(parents=True, exist_ok=True)

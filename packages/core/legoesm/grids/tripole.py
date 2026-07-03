@@ -110,6 +110,7 @@ def _detect_fold(
     max_fold_asym_deg: float = 0.1,
     cap_dlat_rel_deviation: float = 0.1,
     fold_convention: str = "auto",
+    fold_tie_tol_deg: float = 1e-6,
 ) -> FoldDescriptor:
     """Detect the tripolar fold from the T-point coordinates.
 
@@ -130,13 +131,18 @@ def _detect_fold(
         used to detect where the bipolar cap begins (dimensionless).
     fold_convention : {"auto", "n_lon-1-i", "(n_lon-i)%n_lon"}, default "auto"
         Fold index convention. ``"auto"`` picks whichever convention makes the
-        fold-row latitude most self-symmetric. Auto-detection tie-breaks
-        SILENTLY to ``n_lon-1-i`` when both conventions fit equally well (e.g.
-        a near-constant fold-row latitude), which can be the WRONG origin for a
-        de-haloed mesh. Pass the convention EXPLICITLY (``"(n_lon-i)%n_lon"``
-        for de-haloed meshes such as eORCA025, ``"n_lon-1-i"`` for halo-
-        inclusive meshes such as eORCA1.2) to bypass the ambiguous tie-break;
-        the explicit choice is still verified against ``max_fold_asym_deg``.
+        fold-row latitude most self-symmetric, and RAISES when both conventions
+        fit equally well (a true tie, e.g. a near-constant fold-row latitude),
+        since symmetry then cannot disambiguate the E-W wrap origin and a silent
+        guess could be the WRONG origin for a de-haloed mesh. Pass the
+        convention EXPLICITLY (``"(n_lon-i)%n_lon"`` for de-haloed meshes such
+        as eORCA025, ``"n_lon-1-i"`` for halo-inclusive meshes such as
+        eORCA1.2); the explicit choice is still verified against
+        ``max_fold_asym_deg``.
+    fold_tie_tol_deg : float, default 1e-6
+        ``"auto"`` tie threshold [deg]: if the two candidate fold-row latitude
+        asymmetries differ by no more than this (and both are valid fits), the
+        detection is ambiguous and raises rather than silently guessing.
 
     Returns
     -------
@@ -168,9 +174,31 @@ def _detect_fold(
         for name, p in perm_candidates.items()
     }
     if fold_convention == "auto":
-        # Symmetry-based auto-detect. NOTE: ties (both conventions fit, e.g. a
-        # constant fold-row latitude) break silently to the first candidate
-        # (n_lon-1-i); pass fold_convention explicitly to disambiguate.
+        # Symmetry-based auto-detect. A near-tie means BOTH conventions fit the
+        # fold-row latitude equally well (e.g. a near-constant fold-row
+        # latitude), so symmetry cannot disambiguate the E-W wrap origin.
+        # Silently taking min(...) would pick the dict-first key and could
+        # corrupt every ORCA-seam fold halo / vector-sign flip — require an
+        # explicit convention instead.
+        # A tie = BOTH conventions are valid fits (each asymmetry <=
+        # max_fold_asym_deg) AND they are indistinguishable (their asymmetries
+        # differ by <= fold_tie_tol_deg) — e.g. a near-constant fold-row
+        # latitude is self-symmetric under either origin. Symmetry then cannot
+        # disambiguate the E-W wrap origin, so silently taking min(...) could
+        # pick the wrong ORCA seam. A real mesh leaves the WRONG origin with an
+        # O(deg) asymmetry (>> the right one), so the normal case — exactly one
+        # convention fitting — falls through to the min() below.
+        _asyms = list(asym_by_perm.values())
+        if (max(_asyms) <= max_fold_asym_deg
+                and abs(_asyms[0] - _asyms[1]) <= fold_tie_tol_deg):
+            raise ValueError(
+                f"Ambiguous fold_convention='auto' at j={fold_j}: both index "
+                f"conventions fit the fold-row latitude equally well "
+                f"(asymmetries {asym_by_perm}, within {fold_tie_tol_deg} deg). "
+                f"Pass fold_convention explicitly ('(n_lon-i)%n_lon' for "
+                f"de-haloed meshes such as eORCA025, 'n_lon-1-i' for "
+                f"halo-inclusive meshes such as eORCA1.2)."
+            )
         best_perm = min(asym_by_perm, key=asym_by_perm.get)
     else:
         best_perm = fold_convention
@@ -291,6 +319,7 @@ def create_tripole_grid(
     dtype=None,
     min_dx_m: float = 1000.0,
     fold_convention: str = "auto",
+    allow_ambiguous_legacy_fold: bool = False,
 ) -> LatLonCGridGeometry:
     """Load a tripolar grid from a NEMO mesh_mask NetCDF file.
 
@@ -316,12 +345,18 @@ def create_tripole_grid(
         Pass 0.0 to disable.
     fold_convention : {"auto", "n_lon-1-i", "(n_lon-i)%n_lon"}, default "auto"
         T-fold index convention forwarded to ``_detect_fold``. ``"auto"``
-        symmetry-detects it but tie-breaks silently to ``n_lon-1-i`` on a
-        near-constant fold-row latitude. Pass it EXPLICITLY for a de-haloed
-        mesh whose fold row is too flat to disambiguate
-        (``"(n_lon-i)%n_lon"`` for eORCA025-style de-haloed meshes,
-        ``"n_lon-1-i"`` for halo-inclusive eORCA1.2-style meshes); the choice
-        is still verified against the symmetry tolerance.
+        symmetry-detects it; on a genuinely ambiguous (near-constant) fold row
+        where both conventions fit equally it RAISES (fail loud) rather than
+        guess a seam origin that could silently corrupt the northern-halo
+        exchange. Pass it EXPLICITLY for a de-haloed mesh whose fold row is too
+        flat to disambiguate (``"(n_lon-i)%n_lon"`` for eORCA025-style de-haloed
+        meshes, ``"n_lon-1-i"`` for halo-inclusive eORCA1.2-style meshes); the
+        choice is still verified against the symmetry tolerance.
+    allow_ambiguous_legacy_fold : bool, default False
+        Explicit opt-in: when ``True`` and ``fold_convention="auto"`` hits an
+        ambiguous fold row, fall back to the historical ``"n_lon-1-i"`` origin
+        (with a warning) instead of raising. For callers who knowingly accept
+        the legacy tie-break; prefer an explicit ``fold_convention``.
 
     Returns
     -------
@@ -398,9 +433,36 @@ def create_tripole_grid(
     f_v_inner = 0.5 * (f_T[:-1] + f_T[1:])
     f_v = jnp.concatenate([f_T[0:1], f_v_inner, f_T[-1:]], axis=0)
 
-    # Fold descriptor
-    fold = _detect_fold(raw["glamt"], raw["gphit"], n_lat, n_lon,
-                        fold_convention=fold_convention)
+    # Fold descriptor. ``_detect_fold`` raises on a genuinely ambiguous
+    # (near-constant) fold row under "auto" because BOTH seam origins fit, and a
+    # silent guess would corrupt the northern-boundary halo exchange / vector
+    # sign-flip for the whole run (not just at startup). The default here is to
+    # let that error propagate — fail loud and require an explicit
+    # ``fold_convention``. Real ORCA meshes have a curved (non-constant) fold
+    # row and never hit this. ``allow_ambiguous_legacy_fold=True`` is an
+    # explicit opt-in that restores the historical "n_lon-1-i" tie-break (with a
+    # warning) for callers who knowingly accept the legacy behaviour. Non-
+    # ambiguity errors always propagate.
+    try:
+        fold = _detect_fold(raw["glamt"], raw["gphit"], n_lat, n_lon,
+                            fold_convention=fold_convention)
+    except ValueError as exc:
+        is_ambiguity = (
+            fold_convention == "auto"
+            and "Ambiguous fold_convention" in str(exc)
+        )
+        if not (is_ambiguity and allow_ambiguous_legacy_fold):
+            raise
+        import warnings
+        warnings.warn(
+            f"{exc} allow_ambiguous_legacy_fold=True → using the legacy "
+            "'n_lon-1-i' fold origin, which may be WRONG for a de-haloed mesh; "
+            "pass fold_convention explicitly for a guaranteed-correct origin.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        fold = _detect_fold(raw["glamt"], raw["gphit"], n_lat, n_lon,
+                            fold_convention="n_lon-1-i")
 
     # Rotation angles
     glamu = raw.get("glamu", glamt)

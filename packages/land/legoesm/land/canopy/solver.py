@@ -479,6 +479,15 @@ def _make_implicit_newton_solver(
         def body(state):
             x, i, _ = state
             delta = jnp.linalg.solve(Jac(x), -F(x))
+            # Sanitise a non-finite Newton step BEFORE the clip: a singular
+            # Jacobian / non-finite residual at the calm cold-night MOST edge
+            # makes ``solve`` return NaN, and ``jnp.clip(nan)`` stays NaN — a
+            # single non-finite step then poisons the whole coupled land state
+            # (every soil leaf goes NaN, forcing the atomic land guard to revert
+            # the step).  Replace it with 0 (no update this iteration) so the
+            # closure returns the last finite iterate instead, keeping the flux
+            # finite.  inf is already mapped to +/-5 by the clip below.
+            delta = jnp.where(jnp.isfinite(delta), delta, 0.0)
             # Constant scalar clamp on the Newton step.  The earlier
             # decaying clamp (10 → 0.1) starved late iterations of step
             # size during dusk transitions; constant 5.0 lets the solver

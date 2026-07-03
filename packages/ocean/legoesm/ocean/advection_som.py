@@ -770,15 +770,17 @@ def som_advect_tracers(
 
     # Y: mass_flux_v is h*v at v-faces [m²/s].  Volume transport = h*v * dx_face * dt.
     # dx at v-face j = R * dlon * cos(lat_v_j)
-    # v-faces: n_lat+1 total, interior = 1..n_lat-1
-    # Use cos(average latitude) to match the divergence operator exactly
-    # (divergence_cgrid uses cos(0.5*(lat[i]+lat[i+1])), not avg(cos)).
-    # cos(±π/2) ≈ 0 analytically; build cos_lat_v directly via Pad of
-    # cos(lat_interior) (single Pad HLO op vs alloc-2-singletons +
-    # concatenate-of-three + cos tower).
-    lat = grid.lat  # (n_lat,)
-    lat_interior_v = 0.5 * (lat[:-1] + lat[1:])
-    cos_lat_v = jnp.pad(jnp.cos(lat_interior_v), (1, 1))  # (n_lat+1,)
+    # v-faces: n_lat+1 total, interior = 1..n_lat-1.  #516: single-source
+    # v-face zonal cos(lat_v) (interior cos(0.5·(lat[i]+lat[i+1])), poles 0)
+    # to match divergence_cgrid exactly — routes through the shared
+    # backend-aware helper so an MPI lat-band cut keeps the neighbour-rank
+    # metric instead of the serial jnp.pad (which zeroed local band edges).
+    # Bit-identical on serial.  (Function-scope import: avoids a module-load
+    # cycle with the operators module.)
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        vface_zonal_cos_lat,
+    )
+    cos_lat_v = vface_zonal_cos_lat(grid)  # (n_lat+1,)
     face_dx_v = grid.radius * grid.dlon * cos_lat_v  # (n_lat+1,)
     vol_flux_v_all = mass_flux_v * face_dx_v[:, jnp.newaxis, jnp.newaxis] * dt
     # Interior v-faces only (1..n_lat-1), excluding wall boundaries

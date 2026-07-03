@@ -1,0 +1,23 @@
+# legoESM experiment template — Eady baroclinic instability.
+#
+# Names the procedural `eady_instability` experiment via `setup:` (#388 Ask#2).
+# Channel grids only.
+experiment:
+  tier: tier2
+  complexity: primitive_equation
+  extent: channel
+  maturity: structurally_validated
+  description: >
+    Eady baroclinic instability: a uniformly-sheared, uniformly-stratified
+    channel grows the Eady mode at the analytic rate — a mesoscale baroclinic-
+    instability benchmark in a reentrant channel.
+  data: []
+  conservation_gates: [volume]
+model:
+  name: "ocean-eady-instability"
+  type: ocean_only
+setup:
+  name: eady_instability
+  grid: latlon_channel
+output:
+  path: output/ocean/eady_instability/

@@ -2,8 +2,11 @@
 
 Implements two cloud fraction schemes:
 
-1. **Sundqvist (1988)**: RH-based, simple and robust.
-   ``cf = clamp((RH - RH_crit) / (1 - RH_crit), 0, 1)``
+1. **Sundqvist, Berge & Kristjansson (1989)**: RH-based, simple and robust.
+   The sqrt-form ``(1 − b)² = (1 − RH)/(1 − RH_crit)``, i.e.
+   ``cf = 1 − sqrt((1 − RH)/(1 − RH_crit))`` for RH ≥ RH_crit, else 0
+   (clamped to [0, 1]).  See ``sundqvist_cloud_fraction`` for the
+   AD-safe double-``where`` implementation.
 
 2. **Xu-Randall (1996)**: RH + condensate-based, more physical.
    ``cf = RH^p * [1 - exp(-alpha * q_c / ((1 - RH) * q_s))]``
@@ -31,8 +34,7 @@ import jax.numpy as jnp
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm import constants
-# Cloud-optics defaults (fixed): default droplet number, effective-radius bounds.
-_NC_DEFAULT_PER_M3 = 1.0e8       # default cloud droplet number [1/m^3]
+# Cloud-optics defaults (fixed): effective-radius bounds.
 _CLOUD_R_EFF_MAX_M = 60.0e-6     # max liquid effective radius for lamc clip [m]
 _R_EFF_ICE_PSD_COEFF = 1.5       # ice effective-radius PSD coefficient
 _R_EFF_ICE_DEFAULT_M = 25.0e-6   # fallback ice effective radius [m]
@@ -186,6 +188,67 @@ def xu_randall_cloud_fraction(
     return jnp.clip(cf, 0.0, 1.0)
 
 
+def convective_cloud_fraction(
+    conv_precip: jnp.ndarray,
+    p_full: jnp.ndarray,
+    config: CloudConfig,
+) -> jnp.ndarray:
+    """Slingo (1987)-style convective (cumulus) cloud fraction.
+
+    Adjustment convection schemes (sbm Betts-Miller) hold the grid-mean column
+    near ``RH_ref`` (~0.7) and detrain no ``q_c``, so the RH/condensate
+    stratiform schemes diagnose ~0 cloud in the convecting tropics — the
+    surface then radiates LW straight to space (the measured ~4.5 K coupled
+    cold bias: tropical ``LW_net_sfc`` ~−137 W/m², precip ~1 mm/day).
+    Following Slingo (1987), tie a *bounded* cumulus cloud cover to the
+    convective precipitation rate:
+
+        ``cf_conv = clip(conv_cloud_coeff · ln(1 + P_conv/P0), 0, conv_cloud_max)``
+
+    distributed over the free-tropospheric convective deck
+    ``[conv_cloud_sigma_top, conv_cloud_sigma_base]``.  The log-of-precip form
+    saturates (so heavy ITCZ precip gives a capped, not overcast, cover — the
+    failure mode of feeding a moistened column to the steep Sundqvist √-curve,
+    which goes to cf≈1).  Combine with the stratiform fraction by MAXIMUM
+    overlap in :func:`compute_cloud_properties`.
+
+    Parameters
+    ----------
+    conv_precip : jnp.ndarray
+        Column precipitation rate [kg/m²/s] used as the cumulus-activity proxy,
+        shape (ncol,).  The coupled driver passes the (lagged) TOTAL column
+        precip — in the convecting tropics this is dominated by convection (the
+        target regime); precipitating extratropical columns also gain a modest
+        capped cover, which is physically reasonable (rain ⇒ cloud).  Swap in a
+        convective-only rate here if extratropical over-clouding appears.
+    p_full : jnp.ndarray
+        Full-level pressure [Pa], shape (ncol, nlev).
+    config : CloudConfig
+
+    Returns
+    -------
+    jnp.ndarray
+        Convective cloud fraction [0, 1], shape (ncol, nlev).
+    """
+    # Normalize to strict (ncol,): accept (ncol,) or (ncol, 1) without the
+    # ``[:, None]`` below producing a rank-3 broadcast (codex review).
+    P = jnp.maximum(
+        jnp.reshape(jnp.asarray(conv_precip, p_full.dtype), (p_full.shape[0],)),
+        0.0,
+    )
+    cf_col = jnp.clip(
+        config.conv_cloud_coeff * jnp.log1p(P / config.conv_precip_scale),
+        0.0, config.conv_cloud_max,
+    )  # (ncol,)
+    # Sigma from the column's own surface (bottom full level ≈ surface).
+    sigma = p_full / jnp.maximum(p_full[:, -1:], 1.0)
+    deck = (
+        (sigma >= config.conv_cloud_sigma_top)
+        & (sigma <= config.conv_cloud_sigma_base)
+    ).astype(p_full.dtype)
+    return cf_col[:, None] * deck
+
+
 def compute_cloud_properties(
     T: jnp.ndarray,
     p_full: jnp.ndarray,
@@ -196,6 +259,7 @@ def compute_cloud_properties(
     q_ice: jnp.ndarray | None = None,
     n_ice: jnp.ndarray | None = None,
     n_cloud: jnp.ndarray | None = None,
+    conv_precip: jnp.ndarray | None = None,
 ) -> CloudProperties:
     """Compute diagnostic cloud fraction and cloud optical properties.
 
@@ -256,18 +320,93 @@ def compute_cloud_properties(
             f"(Use cloud_scheme='none' upstream to skip clouds entirely.)"
         )
 
+    # --- Opt-in convective (cumulus) cloud, MAXIMUM-overlap combined ---
+    # The stratiform RH/condensate fractions above miss convective cloud when an
+    # adjustment scheme (sbm) holds the column subsaturated, so the convecting
+    # tropics get cf≈0 and leak surface LW.  When enabled, add a bounded
+    # Slingo(1987) cumulus cover tied to the convective precip rate; the
+    # condensate floor below makes it radiatively active.  Default-off /
+    # ``conv_precip=None`` ⇒ ``cf`` unchanged.  ``cf_strat`` is the stratiform
+    # fraction BEFORE the convective overlap; the convective EXCESS
+    # (``cf - cf_strat``) gets the optically-THIN ``conv_cloud_condensate``
+    # (anvil cirrus: LW-active, SW-transparent) instead of the thick
+    # ``q_c_diagnostic`` stratiform floor — without this, the high anvil
+    # over-reflects SW (validation: planetary albedo ~42% vs Earth 30%).
+    cf_strat = cf
+    # Only the diagnostic-fraction schemes have the cf·condensate floor that
+    # makes the added convective cover radiatively active; for 'resolved' (CRM,
+    # explicit condensate is the truth) raising cf would leave the convective
+    # excess optically inert, so restrict the feature to sundqvist/xu_randall
+    # (codex review).
+    if config.convective_cloud and config.scheme in ("sundqvist", "xu_randall"):
+        if conv_precip is None:
+            # Loud misconfiguration: the feature was requested but the caller
+            # never plumbed the convective precip, so it would silently be a
+            # no-op (dispatch-hardening — never a silent default).
+            raise ValueError(
+                "CloudConfig.convective_cloud=True requires conv_precip to be "
+                "passed to compute_cloud_properties (the column convective "
+                "precipitation rate [kg/m^2/s]); got None.  Wire the "
+                "convection scheme's precip into the radiation cloud call."
+            )
+        cf_conv = convective_cloud_fraction(conv_precip, p_full, config)
+        cf = jnp.maximum(cf, cf_conv)
+
+    # --- Diagnostic in-cloud condensate scale, split stratiform/convective ---
+    # Stratiform fraction carries the thick ``q_c_diagnostic``; the convective
+    # EXCESS carries the thin ``conv_cloud_condensate`` so the anvil is LW-active
+    # but SW-transparent.  When the convective cloud is off, ``cf_strat == cf``
+    # ⇒ the excess is 0 ⇒ this reduces EXACTLY to ``cf * q_c_diagnostic``
+    # (value-identical legacy behaviour — same numbers; the extra max/add ops
+    # constant-fold but are not byte-identical HLO).
+    _conv_excess = jnp.maximum(cf - cf_strat, 0.0)
+    q_total_diag = (
+        cf_strat * config.q_c_diagnostic
+        + _conv_excess * config.conv_cloud_condensate
+    )
+
     # --- Cloud condensate ---
     has_explicit_condensate = q_cloud is not None or q_ice is not None
     if has_explicit_condensate:
         q_c = jnp.zeros_like(T) if q_cloud is None else jnp.maximum(q_cloud, 0.0)
         q_i = jnp.zeros_like(T) if q_ice is None else jnp.maximum(q_ice, 0.0)
+        # Coarse-GCM cloud-radiation floor (planetary-albedo fix).  The
+        # prognostic GRID-MEAN condensate from microphysics under-represents the
+        # radiatively-active SUB-GRID in-cloud water: a coarse grid-mean rarely
+        # reaches saturation, so the grid-mean saturation-adjustment condenses
+        # ~0 (q_c->0) even where the DIAGNOSTIC cloud fraction cf>0.  Feeding
+        # that q_c~=0 to the cloud optics makes clouds OPTICALLY INERT and the
+        # planetary albedo collapses to the clear-sky value (~12% vs Earth ~30%;
+        # rrtmgp 8525261 measured rsut 35 W/m^2 with q_c~=0).  For the
+        # DIAGNOSTIC-fraction schemes (sundqvist / xu_randall — sub-grid by
+        # construction) floor the RADIATIVE condensate with ``cf *
+        # q_c_diagnostic`` (the SAME calibrated in-cloud value the no-microphysics
+        # path below uses), temperature-partitioned.  ``jnp.maximum`` so a scheme
+        # carrying genuinely resolved/large q_c is unchanged (no double-count),
+        # and condensate stays proportional to cf (aligned with the rh_crit=0.8
+        # onset — does NOT re-introduce the cf/condensate MISMATCH that drove the
+        # earlier overcast cold-drift; see CloudConfig.rh_crit).  Radiation-only:
+        # the prognostic q_c and the water/energy budget are untouched.
+        # NOT applied to 'resolved' (CRM: q_c IS the truth; a floor would inject
+        # spurious cloud water).
+        if config.scheme in ("sundqvist", "xu_randall"):
+            # Floor on TOTAL condensate, then add only the DEFICIT, partitioned
+            # by temperature.  Per-phase maxima would over-floor a layer whose
+            # explicit condensate already meets the floor but sits in one phase
+            # (e.g. all-ice: the liquid max would still inject liquid),
+            # inflating total condensate (codex review).  The deficit form adds
+            # nothing when the prognostic TOTAL already meets the floor, so the
+            # explicit phase split is preserved EXACTLY there.
+            deficit = jnp.maximum(q_total_diag - (q_c + q_i), 0.0)
+            f_ice_diag = _ice_fraction(T, config)
+            q_c = q_c + deficit * (1.0 - f_ice_diag)
+            q_i = q_i + deficit * f_ice_diag
     else:
-        # Diagnose condensate from cloud fraction and a typical in-cloud value.
-        # Total condensate = cf * q_c_diagnostic, partitioned by temperature.
-        q_total = cf * config.q_c_diagnostic
+        # Diagnose condensate from cloud fraction and a typical in-cloud value
+        # (stratiform thick + convective-excess thin), partitioned by temperature.
         f_ice = _ice_fraction(T, config)
-        q_c = q_total * (1.0 - f_ice)
-        q_i = q_total * f_ice
+        q_c = q_total_diag * (1.0 - f_ice)
+        q_i = q_total_diag * f_ice
 
     # --- Cloud water/ice paths [kg/m^2] ---
     # Grid-mean water/ice paths: q * dp / g
@@ -295,8 +434,7 @@ def compute_cloud_properties(
         # Where the prognostic droplet number is 0/garbage (SAM specified-Nc
         # Morrison, dopredictNc=.false., keeps the Nc slot at 0), fall back to the
         # specified Nc_default so r_eff is the SAM constant-Nc value, not 35 um.
-        n_cloud = jnp.where(n_cloud > 1.0, n_cloud,
-                            getattr(config, "Nc_default", _NC_DEFAULT_PER_M3))
+        n_cloud = jnp.where(n_cloud > 1.0, n_cloud, config.Nc_default)
         rho_air = p_full / (constants.R_d * jnp.maximum(T, 1.0))
         nc_cm3 = jnp.maximum(jnp.clip(n_cloud, 0.0), 0.0) / 1.0e6
         pgam = config.martin_pgam_slope * nc_cm3 + config.martin_pgam_intercept

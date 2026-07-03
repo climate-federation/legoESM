@@ -155,3 +155,53 @@ def test_no_gap_is_noop():
     filled, n_long, n_short = m.fill_gaps(vals.copy(), months, hours, 24, 3600.0)
     assert n_long == 0 and n_short == 0
     assert np.array_equal(filled, vals)
+
+
+def test_soil_field_uses_shallowest_sensor_when_driver_is_depth_averaged(tmp_path):
+    """SOIL fields (TS/SWC) must take the SHALLOWEST FULLSET sensor (_F_MDS_1) as
+    the model's top-layer field, even when the driver's own field is a DIFFERENT
+    definition (preprocess_v2 sets TS = mean of 3 depths).  A maxdiff there is
+    EXPECTED and must NOT raise; MET forcing keeps the strict units check.
+    """
+    import numpy as np
+    import pandas as pd
+    import xarray as xr
+
+    m = _mod()
+    sub = m._SUBSTITUTIONS                     # {driver_var: fullset_col}
+    n = 150
+    starts = pd.date_range("2020-01-01 00:00", periods=n, freq="1h")
+    ends = starts + pd.Timedelta("1h")
+    centre = starts + pd.Timedelta("30min")    # driver time coordinate
+
+    met = {"TA": 15.0, "VPD": 5.0, "SW_IN": 200.0, "LW_IN": 300.0, "PA": 100.0}
+    driver_ts, shallow_ts, swc = 15.0, 18.0, 30.0   # driver TS depth-avg vs shallowest
+
+    def _val(dv, shallow):
+        if dv == "TS":
+            return shallow_ts if shallow else driver_ts
+        if dv == "SWC":
+            return swc
+        return met[dv]
+
+    # driver NC: TS is the depth-average (15), differing from the shallowest (18)
+    ds = xr.Dataset(
+        {dv: ("time", np.full(n, _val(dv, shallow=False))) for dv in sub},
+        coords={"time": centre.values})
+    drv = tmp_path / "SITE_driver_v2.nc"
+    ds.to_netcdf(drv)
+
+    # FULLSET: TS_F_MDS_1 is the shallowest sensor (18); MET matches the driver
+    csv_cols = {"TIMESTAMP_START": [int(x) for x in starts.strftime("%Y%m%d%H%M")],
+                "TIMESTAMP_END": [int(x) for x in ends.strftime("%Y%m%d%H%M")]}
+    for dv, fv in sub.items():
+        csv_cols[fv] = np.full(n, _val(dv, shallow=True))
+    csv = tmp_path / "FULLSET.csv"
+    pd.DataFrame(csv_cols).to_csv(csv, index=False)
+
+    res = m.build(str(drv), str(csv), str(tmp_path / "out.nc"))  # must NOT raise
+
+    # TS output == the SHALLOWEST sensor (18), NOT the driver's depth-average (15)
+    np.testing.assert_allclose(np.asarray(res["TS"].values), shallow_ts)
+    # MET forcing passed the strict check and is unchanged
+    np.testing.assert_allclose(np.asarray(res["TA"].values), met["TA"])

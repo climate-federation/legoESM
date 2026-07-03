@@ -173,3 +173,23 @@ class SurfaceToAtm(NamedTuple):
     # Tile-blended salt mass flux to ocean [kg(salt)/m²/s, positive
     # = INTO ocean].  See ``TileResponse.salt_flux``.
     salt_flux: jax.Array
+    # River runoff sub-component of ``freshwater_flux`` [kg/m²/s, positive
+    # = INTO ocean] = ``f_land * land.freshwater_flux`` only.  Kept SEPARATE
+    # because a dynamic ocean depth-spreads river runoff over the top
+    # ``runoff_depth_spread_m`` metres (NEMO ``rn_dep_max``) while ocean P-E,
+    # ice melt and lake P-E stay at the top cell.  It is a subset of
+    # ``freshwater_flux`` (NOT additive) — the surface (top-cell) freshwater is
+    # ``freshwater_flux - river_runoff_flux``.  Zero for tiles/runs without land.
+    # APPENDED at the struct end so the positional pytree ABI of the prior 19
+    # fields is unchanged.
+    river_runoff_flux: jax.Array
+    # Surface (top-cell) NON-ocean freshwater sub-component of ``freshwater_flux``
+    # [kg/m²/s, +INTO ocean] = ice melt/freeze (f_water-weighted, F11) + lake P-E
+    # (f_lake-weighted).  Kept SEPARATE from ``river_runoff_flux`` because these
+    # are surface fluxes (NOT depth-spread) and SEPARATE from the ocean P-E so a
+    # consumer can keep ocean P-E CURRENT (it depends on the current SST) while
+    # lagging the land/ice/lake exchange one coupling sub-step.  Together
+    # ``river_runoff_flux + ice_lake_freshwater_flux`` is the full non-ocean
+    # freshwater = ``freshwater_flux - f_ocean*(ocean P-E)``; both are zero for an
+    # aquaplanet (no land/ice/lake tile).
+    ice_lake_freshwater_flux: jax.Array

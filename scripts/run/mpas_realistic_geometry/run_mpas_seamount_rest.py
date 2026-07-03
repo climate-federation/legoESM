@@ -1,6 +1,6 @@
 """MPAS seamount rest-state diagnostic — canonical PGF-over-topography test.
 
-P6 of ``docs/ocean_experiments/realistic_geometry_mpas_plan.md``,
+P6 of ``docs/ocean/experiments/realistic_geometry_mpas_plan.md``,
 mirroring the lat-lon ``run_phase3a_seamount.py``.  An isolated
 Gaussian seamount on an otherwise-flat-bottom ico mesh; stratified
 T(z); no forcing; integrate for several hours.  In a true ocean the

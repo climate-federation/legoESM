@@ -260,6 +260,73 @@ class TestDiagnosticCollector(unittest.TestCase):
             self.assertEqual(collector.cf_writer.experiment_id, "piControl")
             collector.cf_writer.close()
 
+    def test_3d_plev_ordering_surface_warm_toa_cold(self):
+        """CMOR ta: highest pressure (surface) maps to highest temperature.
+
+        _write_cmip_data stores 3-D fields in ascending pressure order
+        (100 Pa at index 0), but CMIP6 convention requires descending plev
+        (100000 Pa at index 0).  The [::-1] flip in _write_cmip_data must
+        align data[0] with plev[0]=100000 Pa.
+        """
+        import xarray as xr
+        from legoesm.driver.diagnostics import DiagnosticCollector
+        from legoesm.io.cmor_output import CMIP6_PLEV19
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # 5-degree grid: 36 lat × 72 lon
+            cmip_res = 5.0
+            nlat = int(round(180.0 / cmip_res))   # 36
+            nlon = int(round(360.0 / cmip_res))   # 72
+            nlev = len(CMIP6_PLEV19)              # 19
+
+            collector = DiagnosticCollector(
+                nlev=40,
+                sigma_full=np.linspace(0.025, 0.993, 40),
+                dsigma=np.full(40, 0.025),
+                experiment_id="test",
+                cmip_output=True,
+                output_dir=tmpdir,
+                cmip_resolution_deg=cmip_res,
+            )
+
+            # Build a test temperature field in ascending pressure order:
+            # level 0 = 100 Pa (TOA, cold=100 K), level 18 = 100000 Pa (surface=280 K).
+            T_ascending = 100.0 + np.arange(nlev) * 10.0  # [100, 110, ..., 280] K
+
+            # Shape: (nlat, nlon, nlev) as stored by SpatialMonthlyAccumulator.
+            field_3d = np.broadcast_to(
+                T_ascending[np.newaxis, np.newaxis, :],
+                (nlat, nlon, nlev),
+            ).copy()
+
+            # Inject directly into the monthly accumulator (bypass collect()).
+            collector._spatial_monthly.add_3d(15.0, 0, {"ta": field_3d})
+
+            collector._write_cmip_monthly_files()
+            collector.cf_writer.close()
+
+            nc_files = [
+                os.path.join(root, f)
+                for root, _, files in os.walk(tmpdir)
+                for f in files
+                if "ta_" in f and f.endswith(".nc")
+            ]
+            self.assertEqual(len(nc_files), 1, f"Expected 1 ta file, got {nc_files}")
+
+            ds = xr.open_dataset(nc_files[0])
+            plev_vals = ds["plev"].values   # CMIP6: descending [100000, ..., 100] Pa
+            ta_vals = ds["ta"].values[0, :, 0, 0]  # (time, plev, lat, lon)
+
+            # plev must be descending (CMIP6 convention)
+            self.assertGreater(plev_vals[0], plev_vals[-1])
+            # T at highest pressure (surface=plev[0]) must be warm, not cold
+            self.assertGreater(ta_vals[0], ta_vals[-1])
+            # Surface (plev[0]=100000 Pa) → T_ascending[-1] = 280 K
+            self.assertAlmostEqual(ta_vals[0], T_ascending[-1], delta=1.0)
+            # TOA (plev[-1]=100 Pa) → T_ascending[0] = 100 K
+            self.assertAlmostEqual(ta_vals[-1], T_ascending[0], delta=1.0)
+            ds.close()
+
 
 # ======================================================================
 # Experiment templates
@@ -273,7 +340,8 @@ class TestExperimentTemplates(unittest.TestCase):
         """All expected experiments are defined."""
         from legoesm.forcing.experiments import EXPERIMENT_TEMPLATES
 
-        expected = {"piControl", "historical", "ssp245", "ssp585", "amip", "1pctCO2"}
+        expected = {"piControl", "historical", "ssp245", "ssp585", "amip",
+                    "1pctCO2", "abrupt-4xCO2"}
         self.assertEqual(expected, set(EXPERIMENT_TEMPLATES.keys()))
 
     def test_template_fields(self):
@@ -294,6 +362,36 @@ class TestExperimentTemplates(unittest.TestCase):
         pi = EXPERIMENT_TEMPLATES["piControl"]
         self.assertEqual(pi.forcing_type, "fixed")
         self.assertAlmostEqual(pi.base_co2_ppmv, 284.3)
+
+    def test_abrupt4xco2_quadruples_co2(self):
+        """abrupt-4xCO2 (CMIP6 DECK) instantaneously quadruples
+        pre-industrial CO2 and holds it fixed; CH4/N2O stay pre-industrial."""
+        from legoesm.forcing.experiments import (
+            EXPERIMENT_TEMPLATES, ghg_at_year,
+        )
+
+        a4 = EXPERIMENT_TEMPLATES["abrupt-4xCO2"]
+        pi = EXPERIMENT_TEMPLATES["piControl"]
+        self.assertEqual(a4.forcing_type, "fixed")
+        self.assertEqual(a4.parent_experiment, "piControl")
+        # 4 x pre-industrial CO2; only CO2 is perturbed.
+        self.assertAlmostEqual(a4.base_co2_ppmv, 4.0 * pi.base_co2_ppmv)
+        self.assertAlmostEqual(a4.base_ch4_ppbv, pi.base_ch4_ppbv)
+        self.assertAlmostEqual(a4.base_n2o_ppbv, pi.base_n2o_ppbv)
+        # Fixed forcing: CO2 constant at 4x for every year of the run.
+        co2_y0, _, _ = ghg_at_year("abrupt-4xCO2", a4.start_year)
+        co2_yend, _, _ = ghg_at_year("abrupt-4xCO2", a4.end_year)
+        self.assertAlmostEqual(co2_y0, 4.0 * pi.base_co2_ppmv)
+        self.assertAlmostEqual(co2_yend, 4.0 * pi.base_co2_ppmv)
+
+    def test_abrupt4xco2_defaults_to_rrtmgp(self):
+        """The CO2 perturbation is radiatively inert under gray radiation,
+        so the factory must default abrupt-4xCO2 to rrtmgp."""
+        from legoesm.forcing.experiments import create_experiment_config
+
+        cfg = create_experiment_config("abrupt-4xCO2")
+        self.assertEqual(cfg.radiation, "rrtmgp")
+        self.assertAlmostEqual(cfg.co2_ppmv, 4.0 * 284.3)
 
     def test_historical_transient(self):
         """historical uses transient forcing 1850-2014."""
@@ -702,7 +800,10 @@ class TestTuningParameters(unittest.TestCase):
         from legoesm.tuning import TUNING_PARAMETERS
 
         categories = {p.category for p in TUNING_PARAMETERS.values()}
-        expected = {"dynamics", "radiation", "convection", "diffusion", "surface"}
+        expected = {
+            "dynamics", "radiation", "convection", "diffusion", "surface",
+            "turbulence", "gwd", "clouds",
+        }
         self.assertEqual(expected, categories)
 
     def test_ranges_valid(self):

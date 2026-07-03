@@ -51,6 +51,9 @@ from legoesm.ocean.physics.vertical_mixing import (
     implicit_vertical_diffusion_ocean,
     build_dz_half,
 )
+from legoesm.ocean.dynamics.ocean_tendency_common import (
+    masked_background_vmix_coefficient,
+)
 
 
 def _forward_backward_coriolis_mpas_3d(
@@ -160,6 +163,32 @@ class MPASOceanModel:
                 f"barotropic_solver must be one of {_valid_solvers}, "
                 f"got {self.config.barotropic_solver!r}"
             )
+        _valid_time_filters = ("box", "cosine")
+        if self.config.barotropic_time_filter not in _valid_time_filters:
+            raise ValueError(
+                f"barotropic_time_filter must be one of {_valid_time_filters}, "
+                f"got {self.config.barotropic_time_filter!r}"
+            )
+        # Loud no-op guard (mirrors the latlon C-grid model): the time filter is
+        # consumed only by the explicit_substep substep (barotropic_substeps_mpas);
+        # under implicit_cn it is silently inert. Warn so the no-op is visible.
+        if (self.config.barotropic_time_filter != "cosine"
+                and self.config.barotropic_solver != "explicit_substep"):
+            import warnings
+            warnings.warn(
+                f"barotropic_time_filter={self.config.barotropic_time_filter!r} has "
+                f"NO effect under barotropic_solver={self.config.barotropic_solver!r}"
+                ": the time filter is consumed only by the explicit_substep "
+                'barotropic substep. Use barotropic_solver="explicit_substep" to '
+                'apply it, or leave the filter at its "cosine" default.',
+                stacklevel=2)
+        _valid_fw = ("none", "virtual_salt_flux")
+        if self.config.freshwater_closure not in _valid_fw:
+            raise ValueError(
+                f"freshwater_closure must be one of {_valid_fw}, got "
+                f"{self.config.freshwater_closure!r} (the MPAS path implements "
+                "only virtual_salt_flux; real_freshwater is not available here)"
+            )
         # Reserved distributed-PCG knobs (single-rank stock CG today; see
         # barotropic_implicit_mpas.py Step-4 TODO).  Validate so the
         # schema stays consistent with the lat-lon path.
@@ -190,10 +219,25 @@ class MPASOceanModel:
                 f"upwind, tvd, superbee."
             )
 
+        # Model-selected EOS callable, built ONCE and threaded into every
+        # density-consuming mixing path (KPP Ri/buoyancy, convective-adjustment
+        # static stability) so a non-Wright EOS (e.g. nemo_seos for DINO) drives
+        # the mixing decision consistently with the baroclinic dycore — matching
+        # the lat-lon model's ``_vmix_eos_fn``.  ``eos_linear`` is read defensively
+        # (None ⇒ make_eos_fn supplies LinearEOSConfig() defaults for eos="linear").
+        # NOTE: only ``eos`` + ``eos_linear`` are model-config fields; the
+        # nemo_seos / veros_* oracle coefficients use their NamedTuple DEFAULTS
+        # here (DINO uses the default S-EOS set). A future custom-coefficient
+        # field would need threading the matching ``eos_<scheme>`` config too.
+        from legoesm.ocean.eos import make_eos_fn as _make_eos_fn
+        self._eos_fn = _make_eos_fn(
+            self.config.eos, getattr(self.config, "eos_linear", None))
+
         if self.config.physics is not None:
             self._physics_fn = make_mpas_ocean_physics(
                 self.config.physics,
                 implicit_vertical_mixing=self.config.implicit_vertical_mixing,
+                eos_fn=self._eos_fn,
             )
         else:
             self._physics_fn = None
@@ -208,7 +252,8 @@ class MPASOceanModel:
                 from legoesm.ocean.physics.vertical_mixing.mpas_integration import (
                     make_kpp_profiles_mpas,
                 )
-                self._kpp_profiles_fn = make_kpp_profiles_mpas(_vm_cfg)
+                self._kpp_profiles_fn = make_kpp_profiles_mpas(
+                    _vm_cfg, eos_fn=self._eos_fn)
 
         # Cache convection config for implicit vertical mixing path.
         self._conv_config = None
@@ -379,15 +424,11 @@ class MPASOceanModel:
             # full level; interfaces below that must have K=0 to prevent
             # the tridiagonal solver from seeing huge coefficients.
             if hasattr(z_coord, 'bottom_level'):
-                nlev_c = T_new.shape[1]
-                k_half_c = jnp.arange(nlev_c - 1, dtype=jnp.int32)
-                bot_c = z_coord.bottom_level  # (nCells,)
-                _active_half_c = (k_half_c[None, :] < bot_c[:, None])
-                K_v_cell = jnp.where(
-                    _active_half_c,
-                    config.K_v,
-                    0.0,
-                )  # (nCells, nlev-1)
+                # Background K_v on active interfaces, zeroed below the
+                # seafloor (shared MPAS cell/edge helper — #517 item 6).
+                K_v_cell, _active_half_c = masked_background_vmix_coefficient(
+                    config.K_v, z_coord.bottom_level, T_new.shape[1] - 1,
+                )  # (nCells, nlev-1); _active_half_c reused by convection
             else:
                 K_v_cell = jnp.full(
                     (T_new.shape[0], T_new.shape[1] - 1),
@@ -411,7 +452,8 @@ class MPASOceanModel:
                     state.eta.data, state.H_bathy.data, z_coord,
                 )
                 _J_conv = jnp.where(mask > 0.5, _J_conv, 1.0)
-                _rho_conv = compute_ocean_rho(state, z_coord, _J_conv)
+                _rho_conv = compute_ocean_rho(
+                    state, z_coord, _J_conv, eos_fn=self._eos_fn)
                 # Density difference at half-levels: drho > 0 ⇒ unstable
                 # (denser water sits above lighter water).
                 _drho = _rho_conv[:, :-1] - _rho_conv[:, 1:]  # (nCells, nlev-1)
@@ -453,7 +495,7 @@ class MPASOceanModel:
         # the physics-stepped tracer, before advection).  Mirrors the
         # lat-lon pattern in ocean_model_latlon_cgrid.py.  Only the
         # centred scheme is implemented on MPAS (Phase 1-4 of the plan
-        # at docs/ocean_experiments/gm_redi_mpas_plan.md); the triad
+        # at docs/ocean/experiments/gm_redi_mpas_plan.md); the triad
         # branch raises NotImplementedError.
         if config.gm_redi is not None:
             dT_gm, dS_gm = gm_redi_tracer_tendency_mpas(
@@ -538,16 +580,14 @@ class MPASOceanModel:
             # (where dz=1e-10) gets coefficients ~dt*K/dz^2 ~ 3e20,
             # making the system singular and producing NaN.
             if isinstance(z_coord, OceanPartialCellCoordinate):
-                nlev_e = u_star.shape[1]
-                k_half = jnp.arange(nlev_e - 1, dtype=bot_e.dtype)
-                active_half_edge = (k_half[None, :] < bot_e[:, None]).astype(
-                    u_star.dtype,
-                )
-                A_v_edge = jnp.where(
-                    active_half_edge > 0.5,
-                    config.A_v,
-                    0.0,
+                # Background A_v on active interfaces, zeroed below the
+                # seafloor (shared MPAS cell/edge helper — #517 item 6).
+                # ``active_half_edge`` is cast to the velocity dtype to match
+                # the float mask reused by the KPP-edge masking below.
+                A_v_edge, _active_half_edge_b = masked_background_vmix_coefficient(
+                    config.A_v, bot_e, u_star.shape[1] - 1,
                 )  # (nEdges, nlev-1)
+                active_half_edge = _active_half_edge_b.astype(u_star.dtype)
             else:
                 A_v_edge = jnp.full(
                     (u_star.shape[0], u_star.shape[1] - 1),
@@ -608,9 +648,16 @@ class MPASOceanModel:
             # This prevents global volume drift from unbalanced P-E+R
             # (standard OMIP practice for runs without sea ice).  Local
             # ``jnp.sum`` (exact single-rank, matching the salt virtual-salt
-            # normalization which removes the same area-mean).  MPI-sharded runs
-            # need an owned-cell mask to avoid Voronoi halo double-counting
-            # (codex) -- a shared follow-up with the salt path.
+            # normalization which removes the same area-mean).
+            #
+            # MPI: this eta mean is rank-local (no owned-cell mask), as is the
+            # sibling top-layer-salt mean in ``mpas_ocean_baroclinic_tendencies``
+            # (ocean_pe_mpas).  A multi-rank MPAS run with normalize_freshwater is
+            # refused by the SINGLE fail-fast guard at that tendency reduction
+            # SOURCE (codex round-3) — which ``self.tendencies(...)`` above (step
+            # 1) hits FIRST, so this eta block is never reached under MPI.  Keep
+            # this local sum (single-rank-correct) until owned-mask plumbing
+            # (``owned_mask`` + ``global_sum_if_distributed``) lands on both paths.
             if config.normalize_freshwater:
                 area = mesh.areaCell
                 ocean_area = jnp.sum(area * mask)

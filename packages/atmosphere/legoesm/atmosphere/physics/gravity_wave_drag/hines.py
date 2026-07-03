@@ -35,6 +35,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
 from legoesm.atmosphere.physics.gravity_wave_drag.config import HinesConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 
@@ -65,21 +66,8 @@ def hines_gwd(
     """
     ncol, nlev = u.shape
 
-    # Brunt-Väisälä frequency
-    theta = T * (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
-    dz_full = jnp.abs(z_full[:, :-1] - z_full[:, 1:])
-    dz_full = jnp.clip(dz_full, 1.0, None)
-    dtheta_dz = (theta[:, :-1] - theta[:, 1:]) / dz_full
-    theta_bar = 0.5 * (theta[:, :-1] + theta[:, 1:])
-    N2_half = (constants.g / jnp.clip(theta_bar, 1.0, None)) * dtheta_dz
-    N2_half = jnp.clip(N2_half, 1e-8, None)
-    N_half = jnp.sqrt(N2_half)
-
-    N_full = jnp.concatenate([
-        N_half[:, :1],
-        0.5 * (N_half[:, :-1] + N_half[:, 1:]),
-        N_half[:, -1:],
-    ], axis=1)
+    # Brunt-Väisälä frequency at full levels
+    N_full = brunt_vaisala_n_full(T, p_full, z_full)
 
     # Wind magnitude at each level
     U_mag = jnp.sqrt(u ** 2 + v ** 2 + 1e-10)
@@ -157,7 +145,11 @@ def hines_gwd(
         drag = (sigma_grown ** 2 - sigma_new ** 2) * rho[:, k]
         drag = jnp.clip(drag, 0.0, config.Fmax)
 
-        return sigma_new, drag
+        # Pin the carry back to the launch-wind precision: under x64 the
+        # Python-float ``config.*`` constants promote ``sigma_new`` to f64, but
+        # the scan carry init (sigma_gw_init) is ``u.dtype`` (f32) — lax.scan
+        # requires carry in/out dtypes to match, so cast the carry output.
+        return sigma_new.astype(sigma_gw.dtype), drag
 
     # Pin the carry dtype so the scan body stays at the input precision
     # (defaulting allows x64 to silently promote the launch wind to f64).

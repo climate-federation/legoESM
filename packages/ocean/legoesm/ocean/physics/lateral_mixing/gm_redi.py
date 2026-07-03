@@ -65,6 +65,71 @@ from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
 
+# GMRediConfig fields actually honored by the cubed-sphere leaf. Every other
+# scheme-altering field is silently inert on this path (the lat-lon C-grid
+# implementation honors them via fail-fast dispatch in gm_redi_latlon_cgrid).
+# Cross-checked against the `cfg.<field>` reads in this module:
+#   kappa_GM, kappa_Redi, S_max, taper_width_frac, visbeck (all paths) and
+#   adjoint_stabilization (the stop_gradient knob in _compute_tapered_slopes).
+_CUBED_SPHERE_SUPPORTED_FIELDS = frozenset({
+    "kappa_GM",
+    "kappa_Redi",
+    "S_max",
+    "taper_width_frac",
+    "visbeck",
+    "adjoint_stabilization",
+})
+
+
+def validate_cubed_sphere_gm_redi_config(cfg: GMRediConfig) -> None:
+    """Fail fast if a cubed-sphere-UNSUPPORTED GMRediConfig field is set.
+
+    The cubed-sphere GM/Redi leaf implements only the centered small-slope
+    tensor with DM95 tapering and the (Visbeck-adaptive) ``kappa_GM``.  The
+    Veros-faithful triad options (``slope_scheme``, ``slope_density``,
+    ``implicit_K33``, ``K_iso_steep``, ``veros_triad_weights``,
+    ``double_redi_diagonal``) and prognostic EKE (``eke``) are only available
+    on the lat-lon C-grid path.
+
+    The Ferrari (2008) surface complement (``surface_complement``,
+    ``surface_complement_depth``) is INHERENT on the cubed-sphere path, not
+    absent.  The lat-lon tapered tensor multiplies the Redi DIAGONAL by the DM95
+    taper, which vanishes in the mixed layer, so it needs the explicit
+    depth-masked complement to restore ``kappa_Redi`` horizontal mixing there.
+    The cubed-sphere diagonal (``laplacian_viscosity_3d(q, grid, kappa_Redi)``
+    in ``_tracer_tendency_gm_redi``) is NEVER tapered — it applies
+    ``kappa_Redi * nabla^2 q`` at every level, mixed layer included — so the
+    total boundary-layer horizontal diffusivity is already ``kappa_Redi`` by
+    construction.  The default ``surface_complement=True`` is therefore honored;
+    a non-default value (``False``, or a changed ``surface_complement_depth``)
+    is rejected below because the cube has no depth-masked TOGGLE to match — its
+    diagonal mixing is structurally always-on.
+
+    To avoid a silent no-op, this raises ``ValueError`` for any unsupported
+    field whose value differs from its ``GMRediConfig`` default.  A default
+    config (and any config that touches only supported fields) is unaffected.
+
+    The comparison is on the static Python config (mirrors the fail-fast
+    ``slope_scheme`` / triad-option dispatch in ``gm_redi_latlon_cgrid``);
+    it adds no traced ops and is safe under JIT/grad.
+    """
+    defaults = GMRediConfig()
+    offending = [
+        name
+        for name in cfg._fields
+        if name not in _CUBED_SPHERE_SUPPORTED_FIELDS
+        and getattr(cfg, name) != getattr(defaults, name)
+    ]
+    if offending:
+        raise ValueError(
+            "The cubed-sphere GM/Redi path does not support these "
+            f"GMRediConfig field(s): {', '.join(sorted(offending))}. "
+            "They are only honored by the lat-lon C-grid path "
+            "(gm_redi_latlon_cgrid); use that path or leave these fields "
+            "at their GMRediConfig defaults."
+        )
+
+
 def _compute_tapered_slopes(
     rho: jnp.ndarray,
     z_coord: OceanZStarCoordinate,
@@ -149,7 +214,6 @@ def _tracer_tendency_gm_redi(
         Tapered isopycnal slopes at interfaces.
     """
     eps = EPS
-    q.shape[-1]
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
 
     # Accept ``kappa_GM`` as either a scalar or an array.  When it is a
@@ -202,7 +266,10 @@ def _tracer_tendency_gm_redi(
         + jnp.pad(off_diag_y, (*pad_axes, (0, 1)))
     )
 
-    # Diagonal: kappa_Redi * nabla^2(q)
+    # Diagonal: kappa_Redi * nabla^2(q). UNTAPERED (constant kappa_Redi at every
+    # level) — this is the Ferrari (2008) surface complement made inherent: the
+    # mixed-layer horizontal diffusivity is always kappa_Redi, so no separate
+    # depth-masked complement term is needed (unlike the lat-lon tapered tensor).
     dq_h = laplacian_viscosity_3d(q, grid, kappa_Redi)
 
     # Off-diagonal: div[(kR-kG) * S * dq/dz]
@@ -248,6 +315,11 @@ def gm_redi_lateral_mixing(
     -------
     LateralMixingOutput
     """
+    # Fail fast on cubed-sphere-unsupported config (static Python check on the
+    # config literal; no traced ops). Mirrors the lat-lon path's fail-fast
+    # dispatch so a user-set unsupported field is never silently ignored.
+    validate_cubed_sphere_gm_redi_config(cfg)
+
     # Compute tapered isopycnal slopes at interfaces
     S_x, S_y, taper = _compute_tapered_slopes(rho, z_coord, jacobian, grid, cfg)
 

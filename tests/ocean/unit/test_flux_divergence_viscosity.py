@@ -33,6 +33,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    flux_divergence_bilaplacian_cgrid,
     flux_divergence_viscosity_cgrid,
     vector_laplacian_cgrid,
     _cos_lat_uv,
@@ -50,8 +51,21 @@ def _basin(uniform_cos=False, enclosed=True, seed=7, nlev=_NLEV):
     spherical metric vanishes and the flux divergence telescopes EXACTLY."""
     grid = create_latlon_grid(_NLAT, _NLON, dtype=jnp.float64)
     if uniform_cos:
-        cosc = float(grid.cos_lat[_NLAT // 2])
-        grid = grid._replace(cos_lat=jnp.full_like(grid.cos_lat, cosc))
+        # Metric-free basin: the spherical metric vanishes only if EVERY
+        # cos(lat) the operator reads is the same constant.  #516 routes
+        # the v-face cosine through ``vface_zonal_cos_lat``, which
+        # recomputes ``cos(0.5·(lat[j]+lat[j+1]))`` from ``grid.lat`` —
+        # so overriding only ``cos_lat`` (the cell cosine) leaves a
+        # varying interface cosine and the budget no longer telescopes.
+        # Pin ``lat`` to a single mid-latitude too, so both the cell and
+        # the interface cosine collapse to the same constant.
+        mid = _NLAT // 2
+        latc = float(grid.lat[mid])
+        cosc = float(grid.cos_lat[mid])
+        grid = grid._replace(
+            lat=jnp.full_like(grid.lat, latc),
+            cos_lat=jnp.full_like(grid.cos_lat, cosc),
+        )
     m = np.ones((_NLAT, _NLON))
     m[0, :] = 0.0
     m[-1, :] = 0.0
@@ -189,7 +203,19 @@ def _veros_harmonic_friction_reference(grid, um, vm, u, v, cos_power):
     """
     R = float(grid.radius); dlon = float(grid.dlon)
     cos_u = np.asarray(grid.cos_lat)
-    cos_v = np.concatenate([cos_u[:1], 0.5 * (cos_u[:-1] + cos_u[1:]), cos_u[-1:]])
+    # #516: Veros's velocity-point cosine is ``cosu = cos(yu)`` at the
+    # v-FACE (interface) latitude ``yu`` — the cos-OF-interface
+    # ``cos(0.5·(lat[j]+lat[j+1]))``.  (The earlier ``0.5·(cos_u[:-1]+
+    # cos_u[1:])`` mean-of-cos reference was the slightly-LESS-faithful
+    # approximation #516 removed: it equals ``cos(yu)`` only to O(dlat²) on
+    # a stretched grid.)  Computed INDEPENDENTLY from ``grid.lat`` with
+    # numpy — NOT via the operator's ``_cos_lat_uv`` — so a regression in
+    # the unified metric cannot be copied into this oracle (codex).  Only
+    # the interior ``cos_v[1:-1]`` is used below; the polar placeholders
+    # are irrelevant to the friction terms.
+    _lat = np.asarray(grid.lat)
+    _cos_v_int = np.cos(0.5 * (_lat[:-1] + _lat[1:]))   # (n_lat-1,) interior
+    cos_v = np.concatenate([cos_u[:1], _cos_v_int, cos_u[-1:]])
     dx_cell = R * cos_u * dlon                       # cost*dxt (zonal arc of T-cell)
     dy_cell = np.asarray(grid.dy) * 0.5              # dyt
     dy_v_int = 0.5 * (dy_cell[1:] + dy_cell[:-1])    # dyu interior
@@ -427,7 +453,7 @@ def test_default_is_vector_laplacian_bit_identical():
     value is BYTE-IDENTICAL to the historical (no-field) path through the full
     ``_bc_horizontal_viscosity`` dispatch — the mandatory default-off regression."""
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    cfg = LatLonCGridOceanConfig(A_h=2.2e5, A_h_lat_scaling=True, A_h_cos_power=1)
+    cfg = LatLonCGridOceanConfig.from_flat(A_h=2.2e5, A_h_lat_scaling=True, A_h_cos_power=1)
     assert cfg.lateral_viscosity_operator == "vector_laplacian"
     t_default = _tend(cfg)
     t_explicit = _tend(cfg._replace(lateral_viscosity_operator="vector_laplacian"))
@@ -441,7 +467,7 @@ def test_flux_divergence_differs_and_finite_via_config():
     """Selecting flux_divergence through the config produces a DIFFERENT (the curvature
     coupling is dropped) but finite momentum tendency vs the vector Laplacian."""
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    base = LatLonCGridOceanConfig(A_h=2.2e5, A_h_lat_scaling=True, A_h_cos_power=1)
+    base = LatLonCGridOceanConfig.from_flat(A_h=2.2e5, A_h_lat_scaling=True, A_h_cos_power=1)
     t_vec = _tend(base)
     t_fd = _tend(base._replace(lateral_viscosity_operator="flux_divergence"))
     assert bool(jnp.all(jnp.isfinite(t_fd.du_dt.data)))
@@ -458,7 +484,7 @@ def test_unknown_operator_raises_via_model_validation():
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     grid = create_latlon_grid(12, 24, dtype=jnp.float64)
     z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
-    cfg = LatLonCGridOceanConfig(lateral_viscosity_operator="bogus")
+    cfg = LatLonCGridOceanConfig.from_flat(lateral_viscosity_operator="bogus")
     with pytest.raises(ValueError, match="lateral_viscosity_operator"):
         LatLonCGridOceanModel(grid, z_coord, cfg)
 
@@ -467,7 +493,7 @@ def test_flux_divergence_rejects_legoesm_boosts():
     """flux_divergence (Veros harmonic friction) rejects the legoESM-only A_h boosts
     (eq / cap / floor) it does not implement, rather than silently ignoring them."""
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         A_h=2.2e5, A_h_lat_scaling=True, A_h_cos_power=1,
         lateral_viscosity_operator="flux_divergence", A_h_eq_boost=3.0)
     with pytest.raises(ValueError, match="flux_divergence"):
@@ -482,3 +508,47 @@ def test_acc_recipe_selects_flux_divergence():
     assert cfg.lateral_viscosity_operator == "flux_divergence"
     assert cfg.gm_redi.eke.kdiss_h_flux_form is True
     assert cfg.gm_redi.eke.source_kdiss_h is True
+
+
+# ---------------------------------------------------------------------------
+# Component biharmonic (flux_divergence applied twice) — the MITgcm-faithful
+# per-component del4 (useStrainTensionVisc=.FALSE.), stable where the vector
+# grad(div)-curl(curl) biharmonic is ill-scaled (front_relax baroclinic oracle).
+# ---------------------------------------------------------------------------
+def test_component_biharmonic_equals_flux_divergence_twice():
+    """By definition ∇⁴ = ∇²(∇²): the operator IS flux_divergence_viscosity_cgrid
+    applied twice with unit coefficient."""
+    grid, um, vm, m, u, v = _basin(uniform_cos=True)
+    bu, bv = flux_divergence_bilaplacian_cgrid(u, v, grid, mask=m, u_mask=um, v_mask=vm)
+    lu, lv, _ = flux_divergence_viscosity_cgrid(u, v, grid, 1.0, mask=m, u_mask=um, v_mask=vm)
+    cu, cv, _ = flux_divergence_viscosity_cgrid(lu, lv, grid, 1.0, mask=m, u_mask=um, v_mask=vm)
+    np.testing.assert_allclose(np.asarray(bu), np.asarray(cu), rtol=0, atol=0)
+    np.testing.assert_allclose(np.asarray(bv), np.asarray(cv), rtol=0, atol=0)
+
+
+def test_component_biharmonic_momentum_conserving():
+    """∇⁴ telescopes: the area-weighted domain integral of each component is
+    machine-zero on a metric-free closed basin (no spurious momentum source)."""
+    grid, um, vm, m, u, v = _basin(uniform_cos=True)
+    bu, bv = flux_divergence_bilaplacian_cgrid(u, v, grid, mask=m, u_mask=um, v_mask=vm)
+    area_u, area_v = _area_uv(grid)
+    wbu = np.asarray(bu) * area_u
+    wbv = np.asarray(bv) * area_v
+    assert abs(float(np.sum(wbu))) < 1e-9 * float(np.abs(wbu).sum() + 1e-30)
+    assert abs(float(np.sum(wbv))) < 1e-9 * float(np.abs(wbv).sum() + 1e-30)
+
+
+def test_component_biharmonic_correct_dimensional_scale():
+    """The component ∇⁴ is at the correct ``~u/dx⁴`` dimensional scale (a clean
+    5-point ∇² telescoped twice), finite everywhere. (The vector
+    grad(div)-curl(curl) biharmonic is ADDITIONALLY ill-scaled on a
+    uniform-Cartesian / near-degenerate C-grid — orders of magnitude too large,
+    the front_relax instability — but that is grid-specific; the end-to-end
+    stability of the faithful biharmonic is gated by the front_relax @slow test.)"""
+    grid, um, vm, m, u, v = _basin(uniform_cos=True)
+    bu, bv = flux_divergence_bilaplacian_cgrid(u, v, grid, mask=m, u_mask=um, v_mask=vm)
+    assert np.all(np.isfinite(np.asarray(bu))) and np.all(np.isfinite(np.asarray(bv)))
+    dx = float(grid.radius * grid.dlon * grid.cos_lat[_NLAT // 2])
+    scale = 0.3 / dx ** 4                            # |u|~0.3, ∇⁴ ~ u/dx⁴
+    assert float(np.abs(bu).max()) < 1e4 * scale    # right ballpark (not u-scale)
+    assert float(np.abs(bu).max()) > 0.0            # genuinely non-trivial

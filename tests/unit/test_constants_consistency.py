@@ -65,8 +65,9 @@ def test_rrtmgp_constants_re_export_canonical():
     assert rrtmgp_constants.R_D == constants.R_d
     assert rrtmgp_constants.R_V == constants.R_v
     assert rrtmgp_constants.CP_D == constants.c_pd
-    assert rrtmgp_constants.CV_D == constants.c_vd
-    assert rrtmgp_constants.CP_V == constants.c_pv
+    # iter-47 dropped the CV_D (c_vd) and CP_V (c_pv) re-exports from rrtmgp
+    # constants — they are moist-thermo dycore values, not radiation constants;
+    # the canonical definitions live in legoesm.constants.
     assert rrtmgp_constants.DRY_AIR_MOL_MASS == constants.M_dry
     assert rrtmgp_constants.WATER_MOL_MASS == constants.M_h2o
     assert rrtmgp_constants.AVOGADRO == constants.N_A

@@ -113,18 +113,23 @@ class TestStructuredGridCMIP:
         assert result.shape == (36, 72, 5)
         assert np.all(np.isfinite(result))
 
-    def test_voronoi_cmip_raises(self):
-        """Voronoi grid with CMIP output raises a clear error."""
-        from legoesm.driver.diagnostics import DiagnosticCollector
-        dc = DiagnosticCollector(
-            nlev=5,
-            sigma_full=np.linspace(0, 1, 5),
-            dsigma=np.ones(5) / 5,
-            cmip_output=True,
-            cmip_resolution_deg=5.0,
+    def test_voronoi_cmip_regrids(self):
+        """Voronoi/MPAS grid with CMIP output is regridded to lat-lon (IDW),
+        not rejected — the unstructured CMIP path the diagnostics collector
+        wires up via ``compute_voronoi_to_latlon_weights``."""
+        from legoesm.grids.regridding import (
+            compute_voronoi_to_latlon_weights,
+            apply_voronoi_to_latlon,
         )
-        with pytest.raises(ValueError, match="not supported.*voronoi"):
-            dc.set_cmip_grid_info("voronoi", grid=None, start_year=1850)
+        n_cells = 64
+        lat_cell = np.linspace(-np.pi / 2, np.pi / 2, n_cells)  # radians
+        lon_cell = np.linspace(0, 2 * np.pi, n_cells, endpoint=False)
+        w = compute_voronoi_to_latlon_weights(
+            lat_cell, lon_cell, n_lon=72, n_lat=36,
+        )
+        result = apply_voronoi_to_latlon(np.cos(lat_cell), w)  # (nCells,) -> (36,72)
+        assert result.shape == (36, 72)
+        assert np.all(np.isfinite(result))
 
 
 # =====================================================================
@@ -184,8 +189,14 @@ class TestGridAwareExperimentConfig:
 class TestCMIPDiagnosticCorrectness:
     """CMIP output does not publish incorrect standard variables."""
 
-    def test_no_rsds_rlds_clt_in_output(self, tmp_path):
-        """rsds, rlds, clt are NOT written (they were physically incorrect)."""
+    def test_rsds_rlds_absent_clt_published(self, tmp_path):
+        """rsds/rlds stay unpublished (net != downwelling); clt IS published.
+
+        ``clt`` now derives from the model's fractional layer cloud fraction
+        (the shared ``compute_cloud_properties``, here sundqvist) reduced by
+        maximum-random overlap, replacing the retired near-binary condensate
+        mask that saturated it to ~100% (issue #689).
+        """
         from legoesm.forcing.experiments import create_experiment_config
         from legoesm.driver.model_driver import ModelDriver
 
@@ -193,6 +204,7 @@ class TestCMIPDiagnosticCorrectness:
             "piControl", resolution=8, nlev=5, dt=600, days=35,
         )
         cfg = cfg._replace(
+            cloud_scheme="sundqvist",
             output=cfg.output._replace(cmip_output=True, diag_days=5),
         )
         driver = ModelDriver(cfg, output_dir=str(tmp_path))
@@ -207,10 +219,36 @@ class TestCMIPDiagnosticCorrectness:
             parts = nc_path.stem.split("_")
             written_vars.add(parts[0])
 
-        # These should NOT be present (physically incorrect)
+        # rsds/rlds remain unpublished (runtime exposes net, not downwelling).
         assert "rsds" not in written_vars, "rsds should not be published (net != downwelling)"
         assert "rlds" not in written_vars, "rlds should not be published (net != downwelling)"
-        assert "clt" not in written_vars, "clt should not be published (binary mask != cloud fraction)"
+        # clt is published from the real cloud fraction (issue #689).
+        assert "clt" in written_vars, (
+            "clt should be published from the model cloud fraction "
+            "(sundqvist + maximum-random overlap, #689)"
+        )
+
+        # Value check: clt must be a bounded CMIP percent and NOT saturated at
+        # ~100% everywhere (the original #689 bug from the binary-mask overlap).
+        try:
+            import xarray as xr
+        except ImportError:
+            pytest.skip("xarray not installed")
+        clt_files = list(cmor_dir.rglob("clt_*.nc"))
+        assert clt_files, "clt file should exist"
+        ds = xr.open_dataset(clt_files[0])
+        clt = ds["clt"].values
+        assert np.all(np.isfinite(clt)), "clt must be finite"
+        assert clt.min() >= -1e-6 and clt.max() <= 100.0 + 1e-6, (
+            f"clt out of [0, 100]%: min={clt.min()}, max={clt.max()}"
+        )
+        # Fractional cloud + max-random overlap cannot pin every cell to ~100%
+        # the way the retired binary condensate mask did.
+        assert float(np.mean(clt)) < 99.0, (
+            f"clt saturated (mean={np.mean(clt):.2f}%); the fractional "
+            "cloud-fraction diagnostic should not report near-total cover"
+        )
+        ds.close()
 
     def test_rsdt_is_written(self, tmp_path):
         """rsdt (TOA incoming SW) IS correctly written."""

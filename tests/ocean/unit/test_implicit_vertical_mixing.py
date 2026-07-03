@@ -71,7 +71,7 @@ def _build_model(implicit: bool, A_v=1e-3, K_v=1e-4,
         ),
         shortwave_penetration=None,
     )
-    cfg = LatLonCGridOceanConfig(
+    cfg = LatLonCGridOceanConfig.from_flat(
         # Disable everything that isn't being tested so the comparison
         # is between explicit and implicit vertical mixing only.
         A_h=0.0, B_h=0.0, K_h=0.0, K_bih=0.0,
@@ -176,7 +176,7 @@ class TestStabilityAtLargeK:
             ),
             shortwave_penetration=None,
         )
-        cfg = LatLonCGridOceanConfig(
+        cfg = LatLonCGridOceanConfig.from_flat(
             A_h=0.0, B_h=0.0, K_h=0.0, K_bih=0.0,
             bottom_drag_r=0.0, hyperdiff_coeff=0.0,
             A_v=1e-3, K_v=1e-4,

@@ -18,6 +18,7 @@ Reference Fortran: Zenodo 8327578 (atmos_cubed_sphere-symmetryclean).
 
 from __future__ import annotations
 
+import warnings
 from typing import NamedTuple
 
 import numpy as np
@@ -902,6 +903,16 @@ def fill_corner_region(
         mitigates the overshoot downstream in a way that our A-L+RK3
         path does not).  Enable for DUOGRID mass-transport stability.
     """
+    if monotone_clip:
+        warnings.warn(
+            "fill_corner_region(monotone_clip=True) clips cube-corner halo "
+            "cells to the neighbour min/max — a NON-CONSERVATIVE limiter: it "
+            "perturbs the Lagrange-interpolated values, so the corner fill no "
+            "longer preserves the global tracer/mass integral. Enable only for "
+            "duogrid mass-transport stability; leave it False (the default) for "
+            "conservation-critical runs.",
+            stacklevel=2,
+        )
     n = duogrid.n
     ng = duogrid.ng
     h = halo
@@ -1043,6 +1054,24 @@ def fill_corner_region(
         lambda d: h - d, lambda d: h - d)
 
     return padded
+
+
+def apply_duogrid_4d(padded, duogrid, halo):
+    """Apply the duogrid kinked-to-extended remap + corner fill to a 4D
+    padded field ``(6, n+2h, n+2h, nlev)``, level-by-level via ``jax.vmap``.
+
+    Mirrors the post-processing loop inside :func:`legoesm.grids.halo.pad_halo_4d`;
+    shared by the MPI (``parallel.halo_exchange``) and SPMD
+    (``parallel.cubesphere_exchange``) 4D halo paths so the two cannot drift.
+    """
+    def _remap_level(level_slice):
+        level_slice = cube_rmp_vectorized(level_slice, duogrid, halo)
+        level_slice = fill_corner_region(level_slice, duogrid, halo)
+        return level_slice
+
+    padded_t = jnp.transpose(padded, (3, 0, 1, 2))  # (nlev, 6, ...)
+    padded_t = jax.vmap(_remap_level)(padded_t)
+    return jnp.transpose(padded_t, (1, 2, 3, 0))
 
 
 def _fill_corner_region_averaging(

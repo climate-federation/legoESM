@@ -99,18 +99,17 @@ scoping SS C — "= global_flexible row-for-row EXCEPT tke_mxl_choice=1"):
 INERT with ``enable_idemix=False`` (4deg-verified) — unmapped.  The file's
 ``tidal_energy``/``wind_energy`` fields are idemix-only — unread.
 
-DEDUP NOTE: :func:`veros_mit_tau_shift_1deg`, the shape-generic layout
-bridges and :func:`veros_area_t_1deg` are the same constructions as the
-NOT-YET-MERGED global_flexible recipe carries (``/tmp`` worktree at the
-time of writing); whichever lands second must factor them into ONE shared
-fidelity helper module (this build stands alone on origin/main).
+DEDUP NOTE: the shape-generic layout bridges are now FACTORED into the
+shared :mod:`legoesm.ocean.fidelity.veros_layout` (re-exported here under
+the ``_1deg`` names).  :func:`veros_mit_tau_shift_1deg` and
+:func:`veros_area_t_1deg` remain the same constructions as the
+global_flexible recipe carries and are still candidates to factor next.
 """
 
 from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
-from legoesm.core.field import Field
 from legoesm.grids.latlon import LatLonGrid, create_regional_latlon_grid
 from legoesm.ocean.constants_config import VEROS_CONSTANTS_CONFIG
 
@@ -128,8 +127,24 @@ from legoesm.ocean.fidelity.veros_global_4deg_recipe import (
     VEROS_GLOBAL4_CP0,
     get_periodic_interval_weights,
 )
+
+# Shared global-recipe builders (state seeding, GM/EKE delta, area weights).
+from legoesm.ocean.fidelity.veros_global_common import (
+    build_veros_global_state,
+    gm_redi_eke_isopycnal_on,
+    veros_area_t_generic,
+)
+
+# Shape-generic layout bridges, shared via fidelity.veros_layout (DEDUP NOTE
+# resolved); re-exported under the recipe's ``_1deg`` names (scripts/tests use them).
+from legoesm.ocean.fidelity.veros_layout import (
+    veros_xy_to_legoesm as veros_xy_to_legoesm_1deg,
+)
+from legoesm.ocean.fidelity.veros_layout import (
+    veros_xyz_to_legoesm as veros_xyz_to_legoesm_1deg,
+)
 from legoesm.ocean.fidelity.veros_state_bridge import veros_u_centered_z_centres
-from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+from legoesm.ocean.fidelity.veros_stepping import veros_faithful_stepping
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
@@ -353,25 +368,6 @@ def kbot_to_mask_and_h_bathy_1deg(
 # ---------------------------------------------------------------------------
 
 
-def veros_xyz_to_legoesm_1deg(arr_xyz: np.ndarray,
-                              fill: float = 0.0) -> np.ndarray:
-    """(x, y, z) VEROS z-order (k=0 deepest) → legoESM (lat, lon, z) with
-    k=0 SURFACE, plus the two wall rows (shape-generic)."""
-    nx, ny, nz = arr_xyz.shape
-    out = np.full((ny + 2, nx, nz), fill, dtype=np.float64)
-    out[1:-1, :, :] = np.transpose(arr_xyz, (1, 0, 2))[:, :, ::-1]
-    return out
-
-
-def veros_xy_to_legoesm_1deg(arr_xy: np.ndarray,
-                             fill: float = 0.0) -> np.ndarray:
-    """(x, y) → legoESM (lat, lon) with wall rows (2-D forcing fields)."""
-    nx, ny = arr_xy.shape
-    out = np.full((ny + 2, nx), fill, dtype=np.float64)
-    out[1:-1, :] = arr_xy.T
-    return out
-
-
 def veros_mit_tau_shift_1deg(taux_xym: np.ndarray,
                              tauy_xym: np.ndarray,
                              ) -> tuple[np.ndarray, np.ndarray]:
@@ -403,9 +399,7 @@ def veros_area_t_1deg(
 ) -> np.ndarray:
     """Veros T-cell area column weights ``dxt·dyt·cost`` [m**2] for the
     uniform 1-degree grid (per-latitude row; broadcast over x)."""
-    degtom = r_earth * np.pi / 180.0
-    return (DXT_DEG * degtom) * (DYT_DEG * degtom) * np.cos(
-        np.deg2rad(np.asarray(yt_deg)))
+    return veros_area_t_generic(yt_deg, DXT_DEG, DYT_DEG, r_earth)
 
 
 # ---------------------------------------------------------------------------
@@ -417,18 +411,12 @@ def veros_area_t_1deg(
 # like ACC/global_flexible; the 4deg's False was the settings default) ⇒
 # K_iso = K_gm (the Redi tracer diffusivity follows the prognostic GM
 # coefficient).
-GLOBAL_1DEG_EKE_CONFIG = GLOBAL4_EKE_CONFIG._replace(
-    isopycnal_diffusion=True,     # *** the flip back vs global_4deg ***
-)
-
 # GM/Redi: K_iso_0=1000, K_iso_steep=50, iso_dslope=iso_slopec=0.005 ⇒
 # S_max=5e-3, taper_width_frac=1.0 (established mapping S_max=iso_slopec,
-# frac=iso_dslope/iso_slopec) — the global_flexible values.
-GLOBAL_1DEG_GM_REDI_CONFIG = GLOBAL4_GM_REDI_CONFIG._replace(
-    S_max=5.0e-3,                 # Veros iso_slopec   (4deg: 1e-3)
-    taper_width_frac=1.0,         # iso_dslope/iso_slopec (4deg: 4.0)
-    K_iso_steep=50.0,             # Veros K_iso_steep  (4deg: 1000)
-    eke=GLOBAL_1DEG_EKE_CONFIG,
+# frac=iso_dslope/iso_slopec) — the global_flexible values.  The exact same
+# delta pair is shared with global_flexible via gm_redi_eke_isopycnal_on.
+GLOBAL_1DEG_GM_REDI_CONFIG, GLOBAL_1DEG_EKE_CONFIG = gm_redi_eke_isopycnal_on(
+    GLOBAL4_GM_REDI_CONFIG, GLOBAL4_EKE_CONFIG,
 )
 
 # TKE: the setup repeats the global_4deg block (c_k=0.1, c_eps=0.7,
@@ -460,40 +448,12 @@ def build_global_1deg_state(
     """Initial state: file T/S (legoESM order/shape) masked by the active
     cells, rest velocity, rigid-lid eta ≡ 0, TKE/EKE carry fields seeded
     (the 4deg seeding convention — see its docstring)."""
-    nz = z_coord.n_levels
-    state = rest_state_latlon_cgrid_ocean(
-        grid, z_coord,
-        S_uniform=35.0, H_max=float(z_coord.H_max),
-        land_mask_override=jnp.asarray(land_mask),
-        H_bathy_override=jnp.asarray(H_bathy),
+    return build_veros_global_state(
+        grid, z_coord, land_mask, H_bathy,
+        tke_config=GLOBAL_1DEG_TKE_CONFIG,
+        eke_config=GLOBAL_1DEG_EKE_CONFIG,
+        T_init=T_init, S_init=S_init,
     )
-    is_active = jnp.asarray(z_coord.is_active, dtype=state.T.data.dtype)
-    if T_init is not None:
-        state = state._replace(
-            T=state.T.replace(data=jnp.asarray(T_init) * is_active))
-    if S_init is not None:
-        state = state._replace(
-            S=state.S.replace(data=jnp.asarray(S_init) * is_active))
-
-    lm = state.land_mask.data
-    dtype = state.T.data.dtype
-    wet3 = (lm[:, :, jnp.newaxis] > 0.5) * jnp.ones((1, 1, nz - 1), dtype=dtype)
-
-    tke0 = GLOBAL_1DEG_TKE_CONFIG.tke_background * wet3
-    state = state._replace(
-        tke=Field(data=tke0, name="tke", dims=("lat", "lon", "level"),
-                  units="m^2/s^2"),
-        dtke=Field(data=jnp.zeros_like(tke0), name="dtke",
-                   dims=("lat", "lon", "level"), units="m^2/s^3"),
-    )
-    eke0 = GLOBAL_1DEG_EKE_CONFIG.e_min * wet3
-    state = state._replace(
-        eke=Field(data=eke0, name="eke", dims=("lat", "lon", "level"),
-                  units="m^2/s^2"),
-        eke_diss=Field(data=jnp.zeros_like(eke0), name="eke_diss",
-                       dims=("lat", "lon", "level"), units="m^2/s^3"),
-    )
-    return state
 
 
 # ---------------------------------------------------------------------------
@@ -535,7 +495,7 @@ def build_global_1deg_model_config() -> LatLonCGridOceanConfig:
     """global_1deg dynamics config — the matched-4deg faithful dycore stack
     (same Veros core ⇒ same options) with the setup's parameter deltas
     (A_h literal, GM/Redi block, STOCK synchronous dt)."""
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         g=VEROS_CONSTANTS_CONFIG.g,
         rho_0=VEROS_CONSTANTS_CONFIG.rho_0,
         constants=VEROS_CONSTANTS_CONFIG,
@@ -553,12 +513,10 @@ def build_global_1deg_model_config() -> LatLonCGridOceanConfig:
         K_v=0.0,
         gm_redi=GLOBAL_1DEG_GM_REDI_CONFIG,
         surface_forcing_implicit=True,              # Veros source placement
-        outer_integrator="ab2",
-        ab2_scope="advective",
-        barotropic_solver="rigid_lid",
-        dt_mom_ratio=DT_MOM_RATIO,                  # 1 — STOCK sync stepping
-        momentum_friction_additive=True,
-        coriolis_scheme="explicit_ab2",             # |f|·dt_mom ≈ 0.26 @79.5°
+        # Shared bundle via veros_stepping.veros_faithful_stepping (#433);
+        # dt_mom_ratio=DT_MOM_RATIO=1 — STOCK sync stepping (|f|·dt_mom ≈ 0.26 @79.5°).
+        **veros_faithful_stepping(with_surface_forcing=True,
+                                  dt_mom_ratio=DT_MOM_RATIO),
         physics=build_global_1deg_physics_config(),
     )
 

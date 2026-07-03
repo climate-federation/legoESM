@@ -8,8 +8,7 @@ shape-agnostic — it performs element-wise JAX operations that work
 with any array shape. This module provides:
 
 1. Initialization helpers for MPAS-shaped surface state
-2. A ``make_mpas_coupler`` factory that wraps the standard coupler
-3. Velocity reconstruction from edge normals to cell centers
+2. Velocity reconstruction from edge normals to cell centers
 """
 
 from __future__ import annotations
@@ -17,11 +16,9 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.coupler.config import CouplerConfig, TileConfig
+from legoesm.coupler.config import TileConfig
 from legoesm.core.coupling_fields import AtmToSurface, SurfaceToAtm
-from legoesm.coupler.coupler import init_surface_state, make_coupler, LakeConfig
-from legoesm.land.config import LandConfig
-from legoesm.ice.config import SeaIceConfig
+from legoesm.coupler.coupler import init_surface_state
 from legoesm.ocean.freshwater import FreshwaterForcing, freshwater_from_coupler
 
 
@@ -83,50 +80,6 @@ def init_mpas_surface_state(
         T_hypo_init=T_hypo_init,
         T_ice_init=T_ice_init,
         land_config=land_config,
-    )
-
-
-def make_mpas_coupler(
-    coupler_config: CouplerConfig,
-    land_config=None,
-    ice_config=None,
-    lake_config=None,
-    lat=None,
-):
-    """Create a coupler step function for MPAS-shaped fields.
-
-    Wraps the standard ``make_coupler`` — the underlying coupler is
-    shape-agnostic, so this simply provides default configs and
-    passes latitude as (nCells,) array.
-
-    Parameters
-    ----------
-    coupler_config : CouplerConfig
-    land_config : LandConfig or None
-    ice_config : SeaIceConfig or None
-    lake_config : LakeConfig or None
-    lat : jax.Array or None, shape (nCells,)
-        Cell-center latitudes [rad]. Needed for carbon cycle.
-
-    Returns
-    -------
-    step_surface : callable
-        ``(sfc_state, atm_forcing, tile_config, ocean_sst, ocean_u, ocean_v, dt, doy)``
-        → ``(SurfaceState, SurfaceToAtm)``
-    """
-    if land_config is None:
-        land_config = LandConfig()
-    if ice_config is None:
-        ice_config = SeaIceConfig()
-    if lake_config is None:
-        lake_config = LakeConfig()
-
-    return make_coupler(
-        coupler_config=coupler_config,
-        land_config=land_config,
-        ice_config=ice_config,
-        lake_config=lake_config,
-        lat=lat,
     )
 
 
@@ -198,11 +151,10 @@ def compute_mpas_freshwater(
         ):
             runoff_sfc = land_state.runoff
 
-    # Phase-aware evap mass flux (audit F22).  Prefer
-    # ``surface_mass_flux`` over the L_v back-derivation when
-    # available, since SurfaceToAtm gained the field in iter-16 and
-    # it correctly accounts for sublimation over cold tiles.
-    surface_mass_flux = getattr(sfc_response, 'surface_mass_flux', None)
+    # Phase-aware evap mass flux (audit F22): ``surface_mass_flux`` is a
+    # mandatory SurfaceToAtm field that correctly accounts for sublimation
+    # over cold tiles, used in place of the L_v back-derivation.
+    surface_mass_flux = sfc_response.surface_mass_flux
 
     return freshwater_from_coupler(
         precip_total=atm_forcing.precip_total,

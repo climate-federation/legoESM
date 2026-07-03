@@ -80,6 +80,14 @@ def thompson_microphysics(
     MicrophysicsOutput
     """
     ncol, nlev = T.shape
+    # Validate the snow scheme on the static config value at fn entry so a
+    # typo cannot silently select the bulk power-law fall speed (site below)
+    # while leaving Thompson-2008 snow deposition disabled — a physics change.
+    if config.snow_scheme not in ("thompson2008", "bulk_qpower"):
+        raise ValueError(
+            f"Unknown snow_scheme {config.snow_scheme!r}; "
+            "expected one of: 'thompson2008', 'bulk_qpower'."
+        )
     q_c = hydrometeors.q_c
     q_r = hydrometeors.q_r
     q_i = hydrometeors.q_i
@@ -373,7 +381,15 @@ def thompson_microphysics(
     qv_avail = jnp.clip(q_v, 0.0)
     qv_scale = donor_clamp_scale(qv_avail, qv_sink_total, dt)
     condensation = jnp.where(condensation > 0.0, condensation * qv_scale, condensation)
-    dq_i_dep = dq_i_dep * qv_scale
+    # Scale ONLY the depositional (positive, vapour-limited) branch of dq_i_dep;
+    # the sublimation (negative) branch is a vapour SOURCE, not a sink — it is
+    # already donor-clamped to q_i in the q_i clamp above and must NOT be scaled
+    # by qv_scale. In exactly-dry air (q_v=0) qv_scale=0, so the previous
+    # unconditional ``dq_i_dep *= qv_scale`` zeroed legitimate ice sublimation
+    # (no vapour source, no sublimation cooling) — codex round 1 finding 2.
+    # This now matches the positive-branch ``where`` already used for
+    # condensation and prds.
+    dq_i_dep = jnp.where(dq_i_dep > 0.0, dq_i_dep * qv_scale, dq_i_dep)
     # Scale only the depositional (positive, vapour-limited) branch of prds;
     # sublimation (negative) is already snow-limited inside the snow module.
     prds = jnp.where(prds > 0.0, prds * qv_scale, prds)
@@ -410,13 +426,21 @@ def thompson_microphysics(
         return_surface_flux=True,
         extra_sink=evaporation,
     )
+    # The post-clamp ice/snow SUBLIMATION (negative deposition branch) is also
+    # an in-column q_i / q_s sink sharing this explicit step — it must be in the
+    # sed ``extra_sink`` budget too.  Omitting it let sublimation + sedimentation
+    # each draw up to q/dt and drove q_i / q_s negative on a subsaturated
+    # sedimenting column even at the standard dt=300 s (physics-validator probe).
+    ice_subl_post = jnp.maximum(-dq_i_dep, 0.0)
+    snow_subl_post = jnp.maximum(-prds, 0.0)
     sed_i, precip_i = sedimentation_tendency(
         q_i, rho, V_t_i, dz, dt=dt, return_surface_flux=True,
-        extra_sink=aggregation + melt_ice + rime_to_graupel_from_i,
+        extra_sink=aggregation + melt_ice + rime_to_graupel_from_i
+        + ice_subl_post,
     )
     sed_s, precip_s = sedimentation_tendency(
         q_s, rho, V_t_s, dz, dt=dt, return_surface_flux=True,
-        extra_sink=melt_snow + rime_to_graupel_from_s,
+        extra_sink=melt_snow + rime_to_graupel_from_s + snow_subl_post,
     )
     sed_g, precip_g = sedimentation_tendency(
         q_g, rho, V_t_g, dz, dt=dt, return_surface_flux=True,

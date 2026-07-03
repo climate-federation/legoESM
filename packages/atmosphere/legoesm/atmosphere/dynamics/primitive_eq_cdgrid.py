@@ -81,6 +81,9 @@ from legoesm.grids.halo import (
 )
 from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d
 from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
+from legoesm.atmosphere.dynamics.tracer_transport import (
+    advective_tracer_tendency,
+)
 from legoesm import constants
 
 
@@ -242,6 +245,7 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         #
         # Default ``False`` keeps the legacy explicit-diffusion
         # path bit-exact.
+    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p). Appended last to preserve positional ABI.
 
 
 def validate_corner_div_damp_nord(nord: int) -> None:
@@ -302,7 +306,7 @@ def fv3_hydrostatic_tendencies(
 
     # Positivity protections
     T = jnp.maximum(T, config.T_min)
-    p_s = jnp.clip(p_s, config.p_floor, 2.0e6)
+    p_s = jnp.clip(p_s, config.p_floor, config.p_ceil)
 
     # --- 1. D-grid to C-grid ---
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
@@ -365,10 +369,27 @@ def fv3_hydrostatic_tendencies(
         # (the cube-edge halo error propagates through the dynamics).  This
         # broke the 16 ``test_cubed_sphere_spmd_step`` parity cases.
         _pe_offs_zeta = None if _pe_dg is not None else grid.halo_interp_offsets
-        _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_4d(
-            zeta, B, inv_T, mesh=_spmd_mesh, duogrid=_pe_dg,
+        # iter-58/60: ln_ps_3d (+ hybrid_factor when hybrid) RIDE this stage
+        # pack so the sec-8 PGF gradient + sec-8 hybrid-coord correction reuse
+        # the merged halo instead of taking 1-2 SEPARATE collectives/substep
+        # — reviving the iter-59/60 _lnps_pad/_hf_pad reuse branches below, which
+        # were dead because the slots were never filled (the comment at the
+        # ln_ps_3d definition said it "rides the pack" but it did not).  Mirrors
+        # the NH sibling compressible_euler_cdgrid.py:320 {K, pi_prime} pack.
+        _pe_pack = [zeta, B, inv_T, ln_ps_3d]
+        _pe_opt = []                       # names of optional trailing fields
+        if _hybrid:
+            _pe_pack.append(_hybrid_factor); _pe_opt.append("hf")
+        if _need_div_pad:                  # div_v rides too (div-damp AL grad)
+            _pe_pack.append(div_v); _pe_opt.append("div")
+        _pe_pieces = packed_pad_halo_4d(
+            *_pe_pack, mesh=_spmd_mesh, duogrid=_pe_dg,
             interp_offsets=_pe_offs_zeta,
         )
+        _zeta_pad, _B_pad, _invT_pad, _lnps_pad = _pe_pieces[:4]
+        _opt = dict(zip(_pe_opt, _pe_pieces[4:]))
+        _hf_pad = _opt.get("hf")
+        _div_v_pad = _opt.get("div")
     elif _halo_backend == "mpi":
         from legoesm.grids.halo import get_mpi_topology
         # FV3_3D iter-1041: pass interp_offsets when duogrid is off so the
@@ -376,17 +397,29 @@ def fv3_hydrostatic_tendencies(
         # copying — matches the single-device path which threads
         # ``grid.halo_interp_offsets`` here.
         _pe_offs_zeta = None if _pe_dg is not None else grid.halo_interp_offsets
-        _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_mpi_4d(
-            zeta, B, inv_T, topology=get_mpi_topology(), duogrid=_pe_dg,
+        # iter-58/60/61: ride ln_ps_3d (+ hybrid_factor + div_v) on this pack —
+        # see SPMD note.
+        _pe_pack = [zeta, B, inv_T, ln_ps_3d]
+        _pe_opt = []
+        if _hybrid:
+            _pe_pack.append(_hybrid_factor); _pe_opt.append("hf")
+        if _need_div_pad:
+            _pe_pack.append(div_v); _pe_opt.append("div")
+        _pe_pieces = packed_pad_halo_mpi_4d(
+            *_pe_pack, topology=get_mpi_topology(), duogrid=_pe_dg,
             interp_offsets=_pe_offs_zeta,
         )
+        _zeta_pad, _B_pad, _invT_pad, _lnps_pad = _pe_pieces[:4]
+        _opt = dict(zip(_pe_opt, _pe_pieces[4:]))
+        _hf_pad = _opt.get("hf")
+        _div_v_pad = _opt.get("div")
     else:
-        _zeta_pad = _B_pad = _invT_pad = None  # operators do own exchange
+        # operators do own exchange (single-device); no merged stage halo.
+        _zeta_pad = _B_pad = _invT_pad = _lnps_pad = _hf_pad = None
+        _div_v_pad = None
 
-    # Pre-pad slots for section 11 (T/ln_ps_3d/u_cell/v_cell); None falls back to per-op halo
-    _lnps_pad = None
-    _hf_pad = None
-    _div_v_pad = None
+    # _lnps_pad/_hf_pad/_div_v_pad are now filled by the stage pack above
+    # (SPMD/MPI) or None (single-device → per-op halo).
 
     # FV3_3D iter 14/190: optional a2b_ord4 for ζ_corner; shared with iter-187 smag_vort cap (sw_core.F90:1795)
     _need_zeta_a2b_for_smag = (
@@ -739,6 +772,11 @@ def fv3_hydrostatic_tendencies(
         vert_adv_T = _vert_adv_uvT_lead[2]
         # iter-64: defer _vert_adv_uv_cc corner interp to section 12c (batched with diff)
 
+        # Tracer vertical advection uses the SAME hybrid mass flux as T (bound
+        # via default args so the closure captures this branch's arrays).
+        def _tracer_vert_fn(_q1, _mf=mass_flux, _ps=p_s):
+            return vertical_advection_hybrid(_q1, _mf, _ps, sigma_coord)
+
         omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt_data, sigma_coord)
         p_adiab = jnp.maximum(p_full, config.p_floor)
     else:
@@ -768,6 +806,11 @@ def fv3_hydrostatic_tendencies(
         )
         _vert_adv_uv_cc = jnp.moveaxis(_vert_adv_uvT_lead[:2], 0, -1)
         vert_adv_T = _vert_adv_uvT_lead[2]
+
+        # Tracer vertical advection uses the SAME sigma_dot as T (bound via a
+        # default arg so the closure captures this branch's array).
+        def _tracer_vert_fn(_q1, _sd=sigma_dot):
+            return vertical_advection(_q1, _sd, sigma_coord)
 
         omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_data, sigma_coord)
         p_adiab = jnp.maximum(p_full, config.p_floor)
@@ -840,6 +883,23 @@ def fv3_hydrostatic_tendencies(
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     dT_dt_data = horiz_adv_T + vert_adv_T + adiabatic
+
+    # --- 11c. Tracer advection (advective form, consistent with T) ---
+    # Dynamics tracer tendency via the SHARED cubed-sphere advective-tracer core
+    # (one batched cube halo pad; same numerics as TracerTransportModel and the
+    # T transport above).  Physics tracer tendencies (e.g. Kessler warm-rain via
+    # physics_tendency_cc.tracer_tendencies) are added in the physics block
+    # below.  ``None`` when the state is dry (no tracers).
+    _dtracers = None
+    if state.tracers:
+        _tnames = list(state.tracers)
+        _q_packed = jnp.stack(
+            [state.tracers[k].data for k in _tnames], axis=-1,
+        )  # (6, n, n, nlev, n_tracers)
+        _dq_packed = advective_tracer_tendency(
+            _q_packed, u_cell, v_cell, grid, _tracer_vert_fn,
+        )
+        _dtracers = {k: _dq_packed[..., i] for i, k in enumerate(_tnames)}
 
     # FV3_3D iter 239: aggregate 3 tendency-based d_con sources after A_h block, then cap once
     # (FV3 sw_core.F90 + dyn_core.F90:1764-1779)
@@ -1129,6 +1189,18 @@ def fv3_hydrostatic_tendencies(
         dT_dt_data = dT_dt_data + physics_tendency_cc.dT_dt.data
         dp_s_dt_data = dp_s_dt_data + physics_tendency_cc.dp_s_dt.data
 
+    # Physics tracer tendencies (e.g. Kessler warm-rain) → add to the dynamics
+    # tracer tendency, for tracers already prognostic in the state (introducing
+    # a new key here would break the RK integrator's pytree structure).  Both
+    # tendency containers carry an optional tracer_tendencies dict.
+    if _dtracers is not None:
+        for _src in (physics_tendency, physics_tendency_cc):
+            _tt = None if _src is None else _src.tracer_tendencies
+            if _tt:
+                for _k, _f in _tt.items():
+                    if _k in _dtracers:
+                        _dtracers[_k] = _dtracers[_k] + _f.data
+
     dims_3d_corner = ("face", "x", "y", "level")
     dims_3d = ("face", "x", "y", "level")
     dims_2d = ("face", "x", "y")
@@ -1140,6 +1212,12 @@ def fv3_hydrostatic_tendencies(
         dp_s_dt=Field(data=dp_s_dt_data, name="dp_s_dt", dims=dims_2d, units="Pa/s"),
         dphis_dt=Field(
             data=jnp.zeros_like(phis), name="dphis_dt", dims=dims_2d, units="m^2/s^3"
+        ),
+        tracer_tendencies=(
+            None if _dtracers is None else {
+                k: Field(data=v, name=f"d{k}_dt", dims=dims_3d, units="kg/kg/s")
+                for k, v in _dtracers.items()
+            }
         ),
     )
 
@@ -1324,13 +1402,23 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 physics_tendency_cc=phys_cc,
                 dt_actual=dt,
             )
-            # Return FV3HydrostaticState-shaped pytree for integrator tree_map
+            # Return FV3HydrostaticState-shaped pytree for integrator tree_map.
+            # Tracer tendencies ride as a matching tracers dict (same keys + Field
+            # aux as the input state) so the SSP-RK3 ``state + dt·tendency``
+            # tree_map advances q_v/q_c/q_r alongside the prognostic fields.
+            _tracer_tend = None
+            if s.tracers is not None and tend.tracer_tendencies is not None:
+                _tracer_tend = {
+                    k: s.tracers[k].replace(data=tend.tracer_tendencies[k].data)
+                    for k in s.tracers
+                }
             return FV3HydrostaticState(
                 u_d=s.u_d.replace(data=tend.du_d_dt.data),
                 v_d=s.v_d.replace(data=tend.dv_d_dt.data),
                 T=s.T.replace(data=tend.dT_dt.data),
                 p_s=s.p_s.replace(data=tend.dp_s_dt.data),
                 phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
+                tracers=_tracer_tend,
             )
 
         state_new = dispatch_integrator(
@@ -1668,6 +1756,17 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 ),
             )
 
+        # Prognostic tracer floor: advective tracer transport is not
+        # positive-definite, so clamp q >= 0 AFTER the RK update (the physics
+        # adapters clip their INPUT; this is the prognostic floor the moist
+        # forcing's contract relies on).  Tracers are untouched by the
+        # wind/sponge/vorticity-damping post-steps above.
+        if state_new.tracers is not None:
+            state_new = state_new._replace(tracers={
+                _k: _f.replace(data=jnp.maximum(_f.data, 0.0))
+                for _k, _f in state_new.tracers.items()
+            })
+
         state_out = cast_pytree(state_new, None, "storage")
 
         # Operator-split physics carry (issue #413): one extra physics
@@ -1802,6 +1901,10 @@ def cdgrid_hydrostatic_tendencies(
         dT_dt=fv3_tend.dT_dt,
         dp_s_dt=fv3_tend.dp_s_dt,
         dphis_dt=fv3_tend.dphis_dt,
+        # Tracers are cell-centre scalars (no corner→centre conversion needed),
+        # so the FV3 advective tracer tendencies pass through unchanged — codex
+        # caught this being dropped on the cell-centre tendencies API.
+        tracer_tendencies=fv3_tend.tracer_tendencies,
     )
 
 

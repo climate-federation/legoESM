@@ -56,6 +56,7 @@ def _make_driver(path: str, n: int = 96) -> None:
             # observed fluxes (only daytime "measured" for GPP/H; ET in mm/day)
             "GPP_DT": var(np.where(day > 0.1, 12.0 * day, 0.0)),
             "NEE": var(-8.0 * day + 2.0), "ET": var(2.0 * day), "H": var(60.0 * day),
+            "USTAR": var(0.15 + 0.35 * day),   # friction velocity [m/s]
         },
         coords={"time": (np.datetime64("2015-06-01T00:00")
                          + np.arange(n) * np.timedelta64(30, "m"))},
@@ -104,8 +105,10 @@ def test_run_ec_site_prognostic_smoke(tmp_path):
     out_dir = str(tmp_path / "out_prog")
     metrics = mod.run_site(driver_nc, "prognostic", out_dir, chunk=96)
 
-    assert set(metrics) == {"GPP", "LE", "H"}
-    for flux in ("GPP", "LE", "H"):
+    # prognostic mode also evaluates the soil STATE (top ~5 cm T / moisture) vs the
+    # driver's shallowest observed TS / SWC.
+    assert set(metrics) == {"GPP", "LE", "H", "TS", "SWC", "USTAR"}
+    for flux in ("GPP", "LE", "H", "TS", "SWC", "USTAR"):
         assert metrics[flux]["n"] > 0
         assert np.isfinite(metrics[flux]["rmse"])
         # the NaN guard must keep every modelled-on-valid step finite
@@ -148,3 +151,39 @@ def test_run_ec_site_rejects_unknown_mode(tmp_path):
     mod = _load_driver_module()
     with pytest.raises(ValueError, match="mode"):
         mod.run_site(driver_nc, "bogus-mode", str(tmp_path / "o"), chunk=8)
+
+
+def test_texture_config_builds_van_genuchten_hydraulics():
+    """Fix 1: ``_build_land_config(texture=(sand, clay))`` maps the USDA class to
+    per-site van-Genuchten hydraulics (Carsel-Parrish) + the matching
+    theta_fc/theta_wp, overriding the loam-for-all preset.  Locks the wiring and
+    the (theta_wp < theta_fc <= theta_sat) ordering the SWC-bias fix depends on
+    (a swapped fc/wp unpack would silently invert the water-holding band)."""
+    from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
+    mod = _load_driver_module()
+    cfg = mod._build_land_config(
+        mod.TwoLeafCanopyConfig(), soil="auto", bottom_bc="free_drainage",
+        depth_m=0.0, texture=(79.4, 9.4))          # loamy sand (US-SRM)
+    assert isinstance(cfg.hydraulics, SoilHydraulicsConfig)
+    assert cfg.hydraulics.retention_curve == "van_genuchten"
+    assert 1e-5 < float(cfg.hydraulics.K_sat) < 1e-3
+    assert 0.30 < float(cfg.hydraulics.theta_sat) < 0.50
+    assert float(cfg.theta_wp) < float(cfg.theta_fc) <= float(cfg.hydraulics.theta_sat)
+    # a clay texture must hold MORE water and drain SLOWER than the loamy sand.
+    clay = mod._build_land_config(
+        mod.TwoLeafCanopyConfig(), soil="auto", bottom_bc="free_drainage",
+        depth_m=0.0, texture=(20.0, 60.0))
+    assert float(clay.theta_fc) > float(cfg.theta_fc)
+    assert float(clay.hydraulics.K_sat) < float(cfg.hydraulics.K_sat)
+
+
+def test_texture_lookup_reads_site_table():
+    """``_texture_lookup`` resolves a site to its (sand, clay) from the committed
+    table, and returns None for an unknown site (loam-default fallback path)."""
+    mod = _load_driver_module()
+    csv = str(_REPO / mod._DEFAULT_TEXTURE_CSV)
+    tex = mod._texture_lookup("US-SRM", csv)
+    assert tex is not None
+    sand, clay = tex
+    assert sand > 70.0 and clay < 15.0            # loamy sand (Santa Rita, BIF)
+    assert mod._texture_lookup("ZZ-Nowhere", csv) is None

@@ -20,11 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.vertical import create_ocean_z_star
-from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.experiments.global_overturning import (
     GlobalOverturningConfig, create_initial_conditions,
-    create_forcings, create_eos_config,
+    create_forcings, create_eos_config, global_overturning_model_config,
 )
 
 OUTPUT_DIR = Path("results/ocean/global_overturning_idealized_5deg")
@@ -71,15 +70,8 @@ def main():
     physics = create_forcings("latlon", grid, config)
     eos_config = create_eos_config(config)
 
-    ocean_config = LatLonCGridOceanConfig(
-        n_barotropic_substeps=30,
-        physics=physics,
-        A_h=config.A_h,
-        A_v=config.A_v,
-        K_v=config.K_v,
-        bottom_drag_r=config.bottom_drag_coeff,
-        eos="linear",
-        eos_linear=eos_config,
+    ocean_config = global_overturning_model_config(
+        config, physics=physics, eos_config=eos_config,
         barotropic_solver="implicit_cn",
     )
     model = LatLonCGridOceanModel(grid, z_coord, ocean_config)

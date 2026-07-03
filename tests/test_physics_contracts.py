@@ -2,7 +2,7 @@
 ``__physics_contract__``.
 
 This is the "Domain Architect dictates logic" half of the harness (see
-``docs/ai_guardrails/domain_architect_vs_syntax_engine.md``). Before the body of
+``docs/architecture/ai_guardrails/domain_architect_vs_syntax_engine.md``). Before the body of
 a physics parameterization is written, the domain expert pins its *contract* —
 the units of every input/output, the sign convention, what it conserves, whether
 it is differentiable, the literature reference, and an idealized acceptance
@@ -130,6 +130,23 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/optics_utils.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rte/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rte/rte_utils.py",
+        # mc3d: 3D Monte-Carlo ray tracer is a SPATIAL SOLVER (like the rte/
+        # two-stream tree above), not a single-tendency parameterization. Its
+        # energy-conservation invariant is gated analytically in
+        # tests/unit/test_mc3d_raytracer.py, not via __physics_contract__.
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/__init__.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/config.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/emulator.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/knull_grid.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/mie.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/parallel.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/photon_walk.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/plane_adapter.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/qrng.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/raytracer_lw.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/raytracer_sw.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/sampling.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/tally.py",
         "packages/atmosphere/legoesm/atmosphere/physics/thermodynamics.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/config.py",
@@ -151,6 +168,7 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/output.py",
         "packages/ocean/legoesm/ocean/physics/mpas_physics.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/__init__.py",
+        "packages/ocean/legoesm/ocean/physics/surface_forcing/_shared.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/config.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/integration.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/output.py",
@@ -220,7 +238,6 @@ CONTRACT_TODO: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/vertical_diffusion.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/vreman.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/ysu.py",
-        "packages/ocean/legoesm/ocean/physics/bottom_drag/quadratic.py",
         "packages/ocean/legoesm/ocean/physics/convection/enhanced_diffusion.py",
         "packages/ocean/legoesm/ocean/physics/convection/plume.py",
         "packages/ocean/legoesm/ocean/physics/ice_shelf.py",

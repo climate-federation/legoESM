@@ -224,28 +224,13 @@ def aam_drift_nh(state_old, state_new, grid, hc) -> float:
 # =============================================================================
 
 
-def aam_from_pe_state(state, grid, coord) -> tuple[jax.Array, float]:
-    """FV3_3D iter 604: AAM from a FV3HydrostaticState.
+def _aam_column_pe(state, grid, coord) -> jax.Array:
+    """Per-column PE absolute angular momentum [kg·m²/s] as a traced JAX array
+    — the un-reduced core of :func:`aam_from_pe_state`.
 
-    PE mirror of iter-587's ``aam_from_nh_state``.  Differences:
-    - Winds u_d, v_d on D-grid corners (shape (face, n+1, n+1, nlev));
-      averaged to cell-center via 4-point average.
-    - Column mass from hybrid coord: ``delp = A·p_ref + B·p_s``,
-      ``dm = delp · area / g`` (kg per cell).
-    - Face-local (u, v) at cell-center → rotated to u_east via
-      ``u_east = cos(angle)·u - sin(angle)·v``.
-
-    Faithful to FV3 compute_aam hydrostatic branch.
-
-    Parameters
-    ----------
-    state : FV3HydrostaticState
-    grid : CubedSphereGrid
-    coord : HybridSigmaPressureCoordinate
-
-    Returns
-    -------
-    aam_column, aam_total
+    Kept separate so the differentiable ``apply_aam_correction_pe`` can sum it
+    under trace, without the host ``float()`` the public diagnostic applies to
+    its scalar total.
     """
     # iter-46: promote to fp64 budget accumulator (see NH twin).
     from legoesm.core.conservation import conservation_accumulator
@@ -283,8 +268,37 @@ def aam_from_pe_state(state, grid, coord) -> tuple[jax.Array, float]:
     aam_cell = (r2[..., None] * omega_acc
                 + r1[..., None] * u_east) * dm
     aam_column = jnp.sum(aam_cell, axis=-1)            # (6, n, n)
-    aam_total = float(jnp.sum(aam_column))
-    return aam_column, aam_total
+    return aam_column
+
+
+def aam_from_pe_state(state, grid, coord) -> tuple[jax.Array, float]:
+    """FV3_3D iter 604: AAM from a FV3HydrostaticState.
+
+    PE mirror of iter-587's ``aam_from_nh_state``.  Differences:
+    - Winds u_d, v_d on D-grid corners (shape (face, n+1, n+1, nlev));
+      averaged to cell-center via 4-point average.
+    - Column mass from hybrid coord: ``delp = A·p_ref + B·p_s``,
+      ``dm = delp · area / g`` (kg per cell).
+    - Face-local (u, v) at cell-center → rotated to u_east via
+      ``u_east = cos(angle)·u - sin(angle)·v``.
+
+    Faithful to FV3 compute_aam hydrostatic branch.
+
+    Parameters
+    ----------
+    state : FV3HydrostaticState
+    grid : CubedSphereGrid
+    coord : HybridSigmaPressureCoordinate
+
+    Returns
+    -------
+    aam_column : jax.Array, shape (6, n, n)
+        Per-column absolute angular momentum [kg·m²/s].
+    aam_total : float
+        Globally-integrated AAM [J·s] (host scalar).
+    """
+    aam_column = _aam_column_pe(state, grid, coord)
+    return aam_column, float(jnp.sum(aam_column))
 
 
 def aam_drift_pe(state_old, state_new, grid, coord) -> float:
@@ -300,6 +314,12 @@ def aam_drift_pe(state_old, state_new, grid, coord) -> float:
     _, aam_old = aam_from_pe_state(state_old, grid, coord)
     _, aam_new = aam_from_pe_state(state_new, grid, coord)
     return aam_new - aam_old
+
+
+# Fixed Newton sweeps for the PE AAM correction (a COUNT, never config): the
+# solid-body-rotation correction is nearly linear so this converges in 1-2
+# iters; a fixed loop keeps the correction jit/grad-safe (no break).
+_AAM_NEWTON_ITERS = 5
 
 
 def apply_aam_correction_pe(state_old, state_new, grid, coord):
@@ -325,8 +345,7 @@ def apply_aam_correction_pe(state_old, state_new, grid, coord):
     state_corrected : FV3HydrostaticState
         State with u_d, v_d adjusted; other fields unchanged.
     """
-    _, aam_target = aam_from_pe_state(state_old, grid, coord)
-    _, aam_curr = aam_from_pe_state(state_new, grid, coord)
+    aam_target = jnp.sum(_aam_column_pe(state_old, grid, coord))  # traced scalar
 
     # iter-46: promote to fp64 budget accumulator for M_fac integral.
     from legoesm.core.conservation import conservation_accumulator
@@ -352,29 +371,30 @@ def apply_aam_correction_pe(state_old, state_new, grid, coord):
     cos_a_c = jnp.cos(grid.angle)
     sin_a_c = jnp.sin(grid.angle)
 
-    state_curr = state_new
-    # Newton iteration: D-grid edge-padding introduces a small
-    # mismatch between the analytic correction (cell-center linear)
-    # and the AAM operator (D-grid avg + rotation).  Newton converges
-    # quickly because the correction is nearly linear.
-    for _ in range(5):
+    # Newton iteration: D-grid edge-padding introduces a small mismatch between
+    # the analytic correction (cell-center linear) and the AAM operator (D-grid
+    # avg + rotation). The correction is nearly linear so this converges in 1-2
+    # iters; use a FIXED-count loop (no data-dependent ``break``, no host
+    # ``float()``) so the whole correction is jit/grad-safe. M_fac_total is the
+    # physical R²·cos²·mass integral (strictly > 0), so the divide is safe.
+    def _newton_step(_, state_curr):
+        aam_curr = jnp.sum(_aam_column_pe(state_curr, grid, coord))
         amdt = aam_curr - aam_target
-        if abs(amdt) < 1e10:  # negligible drift relative to typical scales
-            break
         u0 = -grid.radius * amdt / M_fac_total
         delta_u_face_2d = cos_a_c * u0 * cos_lat
         delta_v_face_2d = -sin_a_c * u0 * cos_lat
-        du_pad = jnp.pad(delta_u_face_2d, [(0, 0), (0, 1), (0, 1)],
-                         mode="edge")
-        dv_pad = jnp.pad(delta_v_face_2d, [(0, 0), (0, 1), (0, 1)],
-                         mode="edge")
-        state_curr = state_curr._replace(
+        du_pad = jnp.pad(delta_u_face_2d, [(0, 0), (0, 1), (0, 1)], mode="edge")
+        dv_pad = jnp.pad(delta_v_face_2d, [(0, 0), (0, 1), (0, 1)], mode="edge")
+        # Cast the (fp64-budget) increments to the wind dtype so the fori_loop
+        # carry keeps a stable dtype (input == output).
+        u_dt = state_curr.u_d.data.dtype
+        return state_curr._replace(
             u_d=state_curr.u_d.replace(
-                data=state_curr.u_d.data + du_pad[..., None],
+                data=state_curr.u_d.data + du_pad[..., None].astype(u_dt),
             ),
             v_d=state_curr.v_d.replace(
-                data=state_curr.v_d.data + dv_pad[..., None],
+                data=state_curr.v_d.data + dv_pad[..., None].astype(u_dt),
             ),
         )
-        _, aam_curr = aam_from_pe_state(state_curr, grid, coord)
-    return state_curr
+
+    return jax.lax.fori_loop(0, _AAM_NEWTON_ITERS, _newton_step, state_new)

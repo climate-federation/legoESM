@@ -1,0 +1,53 @@
+#!/bin/bash
+#PBS -N restart_time
+#PBS -A UCLB0017
+#PBS -q casper
+#PBS -l select=1:ncpus=4:mem=24GB
+#PBS -l walltime=03:00:00
+#PBS -j oe
+#PBS -o /glade/derecho/scratch/adac/restart_time/validate.log
+
+# FIX_RESTART_TIME (docs/FIX_RESTART_TIME.md): production-setup validation
+# that checkpoint/restart chains are bit-identical to uninterrupted runs
+# after the two restart forcing-time fixes (MPAS day-boundary sampling;
+# cube/lat-lon/spectral checkpoint-day -> epoch normalization), at scales
+# beyond the unit tests.  Exit 0 only if every prognostic field and every
+# physics carry is bitwise identical.
+#
+# GWD is 'none' on MPAS: prognostic_spectral still raises
+# NotImplementedError on main's MPAS bridge (tracked separately).
+
+set -uo pipefail
+cd /glade/work/adac/Claude/legoESM
+PY=.venv/bin/python
+export JAX_ENABLE_X64=1
+export JAX_PLATFORMS=cpu
+WORK=/glade/derecho/scratch/adac/restart_time
+mkdir -p "$WORK"
+
+echo "=== HOST ==="; hostname; date
+
+echo "=== 1/2: MPAS level-5, tke turbulence ==="
+$PY scripts/validate/validate_restart_continuation.py \
+    --grid mpas --resolution 5 --nlev 20 --dt 300 \
+    --days-per-link 1 --links 2 \
+    --turbulence tke --gwd none \
+    --workdir "$WORK/mpas_l5"
+rc_mpas=$?
+echo "mpas_rc=$rc_mpas"
+
+echo "=== 2/2: cubed-sphere res-16 compiled, tke + prognostic_spectral ==="
+$PY scripts/validate/validate_restart_continuation.py \
+    --grid cubed_sphere --resolution 16 --nlev 20 --dt 300 \
+    --days-per-link 1 --links 2 \
+    --turbulence tke --gwd prognostic_spectral \
+    --workdir "$WORK/cube_r16"
+rc_cube=$?
+echo "cube_rc=$rc_cube"
+
+date
+if [ "$rc_mpas" -ne 0 ] || [ "$rc_cube" -ne 0 ]; then
+    echo "RESTART_TIME VALIDATION: FAIL (mpas=$rc_mpas cube=$rc_cube)"
+    exit 1
+fi
+echo "RESTART_TIME VALIDATION: PASS"

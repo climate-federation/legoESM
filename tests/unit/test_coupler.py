@@ -108,8 +108,10 @@ def test_coupling_fields_shapes():
     # and ``surface_mass_flux`` (F3) slots in the Physical_Consistency
     # cycle for tile-blended water, ice→ocean heat, ice→ocean stress
     # reaction, and phase-aware moisture mass closure.
-    sfc = SurfaceToAtm(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
-    assert len(sfc) == 20  # 13 → … → 19 (salt_flux) → 20 (T_rad, radiative-equiv skin T)
+    sfc = SurfaceToAtm(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
+    # merged union: T_rad (HEAD, radiative-equiv skin T) + river_runoff_flux +
+    # ice_lake_freshwater_flux (origin/main) → 22 fields (salt_flux is #20).
+    assert len(sfc) == 22
 
     tile = TileResponse(z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z)
     assert len(tile) == 20  # 19 + T_rad (optional emission-equiv skin T, default None)
@@ -881,7 +883,8 @@ def test_accumulator_mean():
         u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z,
         freshwater_flux=z, ocean_heat_extraction=z,
         ocean_stress_x=z, ocean_stress_y=z,
-        surface_mass_flux=z, salt_flux=z,
+        surface_mass_flux=z, salt_flux=z, river_runoff_flux=z,
+        ice_lake_freshwater_flux=z,
     )
     acc = accumulate(acc, sfc1, 100.0)
 
@@ -915,7 +918,8 @@ def test_accumulator_lw_flux_conservation_varying_substeps():
             emissivity=jnp.full(SHAPE, eps), z0=z, q_surface=z, shflx=z, lhflx=z,
             tau_x=z, tau_y=z, lw_up=z, u_ocean_sfc=z, v_ocean_sfc=z, co2_flux=z,
             freshwater_flux=z, ocean_heat_extraction=z, ocean_stress_x=z,
-            ocean_stress_y=z, surface_mass_flux=z, salt_flux=z)
+            ocean_stress_y=z, surface_mass_flux=z, salt_flux=z,
+            river_runoff_flux=z, ice_lake_freshwater_flux=z)
 
     acc = reset_accumulator(SHAPE)
     acc = accumulate(acc, _sfc(310.0, 0.95), 100.0)   # substep 1
@@ -969,6 +973,53 @@ def test_full_coupler_step():
 
     # Accumulator advanced
     assert new_state.accumulator.total_dt > 0.0
+
+
+def test_full_coupler_step_multilayer_richards():
+    """End-to-end coupler step with the MULTILAYER soil-thermal + RICHARDS land
+    tile (columnar (ncol, nlayers) state), proving the coupler dispatch wires the
+    multilayer land into AMIP/CMIP the same way as the slab tile.
+
+    The coupler flattens (6,n,n) forcing to (ncol,), steps ``step_multilayer_land``,
+    and unflattens the TileResponse back to spatial shape for blending."""
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.soil_grid import SoilGridConfig
+
+    ncol = 6 * 4 * 4
+    nlayers = 6
+    land_cfg = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=nlayers, total_depth=2.0))
+    lat = jnp.full(SHAPE, 0.5)  # radians (required to flatten for the columnar tile)
+    step_fn = make_coupler(CouplerConfig(), land_cfg, SeaIceConfig(), LakeConfig(),
+                           lat=lat)
+
+    sfc_state = init_surface_state(SHAPE, land_config=land_cfg)
+    # the land sub-state is the columnar multilayer state, not the slab Field state
+    assert sfc_state.land.T_soil.shape == (ncol, nlayers)
+    assert sfc_state.land.theta_soil.shape == (ncol, nlayers)
+
+    forcing = _make_forcing()
+    tile_cfg = TileConfig(f_land=jnp.full(SHAPE, 0.5), f_lake=jnp.zeros(SHAPE))
+    sst = jnp.full(SHAPE, 300.0); zu = jnp.zeros(SHAPE)
+
+    theta_init = sfc_state.land.theta_soil
+    for _ in range(3):
+        sfc_state, blended = step_fn(sfc_state, forcing, tile_cfg, sst, zu, zu, DT)
+
+    # blended response is unflattened back to spatial shape and finite
+    assert blended.T_sfc.shape == SHAPE
+    assert jnp.all(jnp.isfinite(blended.T_sfc))
+    assert jnp.all(jnp.isfinite(blended.lhflx))
+    assert jnp.all(jnp.isfinite(blended.shflx))
+    # multilayer land state advanced, finite, Richards moisture stays physical
+    assert jnp.all(jnp.isfinite(sfc_state.land.T_soil))
+    assert jnp.all(jnp.isfinite(sfc_state.land.theta_soil))
+    assert jnp.all(sfc_state.land.theta_soil >= 0.0)
+    assert jnp.all(sfc_state.land.theta_soil <= 1.0)
+    # soil moisture EVOLVES (Richards) in the coupled model — it is NOT frozen (the
+    # frozen-moisture trick lives only in the offline calibrator, for tractability).
+    assert float(jnp.max(jnp.abs(sfc_state.land.theta_soil - theta_init))) > 0.0
+    assert float(sfc_state.accumulator.total_dt) == pytest.approx(3 * DT, abs=1e-6)
 
 
 def test_coupler_multiple_steps():
@@ -1053,17 +1104,6 @@ def test_make_coupler_rejects_invalid_config(kwargs, match):
     """Coupler factory should fail fast on invalid configuration."""
     with pytest.raises(ValueError, match=match):
         make_coupler(CouplerConfig(**kwargs), LandConfig(), SeaIceConfig(), LakeConfig())
-
-
-def test_make_coupler_warns_for_unused_blend_sharpness():
-    """Non-default blend_sharpness should surface an explicit warning."""
-    with pytest.warns(RuntimeWarning, match="blend_sharpness"):
-        make_coupler(
-            CouplerConfig(blend_sharpness=10.0),
-            LandConfig(),
-            SeaIceConfig(),
-            LakeConfig(),
-        )
 
 
 def test_coupler_step_validates_dt():

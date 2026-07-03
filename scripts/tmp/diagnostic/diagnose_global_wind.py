@@ -80,7 +80,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
 from legoesm.core.field import Field
 
 ll_grid = create_latlon_grid(36, 72)
-ll_config = LatLonCGridOceanConfig(n_barotropic_substeps=30, physics=physics, A_h=5e5)
+ll_config = LatLonCGridOceanConfig.from_flat(n_barotropic_substeps=30, physics=physics, A_h=5e5)
 ll_model = LatLonCGridOceanModel(ll_grid, z_coord, ll_config)
 
 ll_state = rest_state_latlon_cgrid_ocean(

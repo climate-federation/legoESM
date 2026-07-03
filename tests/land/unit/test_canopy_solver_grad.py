@@ -107,3 +107,20 @@ def test_nonconverged_returns_zero_gradient():
 
     g = jax.grad(tf_bad)(_a(350.0))
     assert float(g) == 0.0
+
+
+def test_cold_calm_forcing_stays_finite():
+    """Fix 3a (non-finite Newton-step guard): at the calm cold-night MOST edge the
+    aerodynamic Jacobian can degenerate so ``jnp.linalg.solve`` returns a NaN step
+    — and ``jnp.clip(nan)`` stays NaN, which would poison every coupled land leaf
+    and force the atomic land guard to revert the step.  The solver now sanitises a
+    non-finite step to 0 BEFORE the clip, so the closure returns its last finite
+    iterate.  This locks in a finite solve for the extreme cold / near-calm /
+    no-sunlight forcing that regime lives in."""
+    stressed = _bundle(La=_a(180.0), Ta=_a(233.0))._replace(
+        SZA=_a(89.0), fSun=_a(0.0), APAR_Sun=_a(0.0), APAR_Sh=_a(0.0),
+        ASW_Sun=_a(0.0), ASW_Sh=_a(0.0), ASW_Soil=_a(0.0),
+        ur=_a(1.0e-4), Ts_bc=_a(235.0), Tv_atm=_a(233.0), q_atm=_a(1.0e-4))
+    x0 = jnp.array([235.0, 235.0, 233.0, 233.0, 235.0, 1.0e-4])
+    out, _n_iters = solve_canopy_closure(x0, stressed, _CFG)
+    assert bool(jnp.all(jnp.isfinite(out)))

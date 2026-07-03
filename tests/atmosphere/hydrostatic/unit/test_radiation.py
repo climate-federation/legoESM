@@ -37,21 +37,19 @@ from legoesm.atmosphere.physics.clouds.cloud_fraction import (
     xu_randall_cloud_fraction,
 )
 from legoesm import constants
-from legoesm.runtime.backend import metal_fell_back_to_cpu
+from legoesm.runtime.backend import get_backend
 
 
 # Skip marker for tests that exercise jax.device_put with a shard Mesh.
-# On Apple Silicon with JAX-Metal installed but non-functional (jax-metal /
-# JAX version mismatch), the runtime falls back to CPU for compute but the
-# Metal platform stays registered, and ``batched_copy_array_to_devices_with_sharding``
-# raises ``UNIMPLEMENTED: default_memory_space is not supported``.  Skip on
-# this exact environment; the tests still run on CI Linux/CUDA where the
-# Metal platform is absent.
+# The Apple GPU backend ``mps`` (jax-mps / MLX) exposes a single device, so
+# ``batched_copy_array_to_devices_with_sharding`` cannot build a multi-device
+# shard Mesh there.  Skip on that backend; the tests still run on CI
+# Linux/CUDA where multi-device sharding is available.
 _skip_if_metal_broken = pytest.mark.skipif(
-    metal_fell_back_to_cpu(),
+    get_backend() == "mps",
     reason=(
-        "JAX-Metal/CPU fallback env: device_put with shard Mesh hits "
-        "UNIMPLEMENTED default_memory_space.  CI Linux/CUDA runs this."
+        "Apple GPU (mps) is single-device: device_put with a shard Mesh is "
+        "unsupported.  CI Linux/CUDA runs this."
     ),
 )
 
@@ -1776,6 +1774,61 @@ class TestColumnShardedRadiation:
         np.testing.assert_allclose(
             np.asarray(out.dT_dt.data),
             np.asarray(ref.dT_dt.data),
+            rtol=1.0e-10, atol=1.0e-12,
+        )
+
+    @_skip_if_metal_broken
+    def test_aerosol_ccn_override_sharded_matches_unsharded_single_device(self):
+        """R2 (single-device): with ``nc_from_aerosol=True`` the rrtmgp
+        factory overrides ``n_cloud`` from ``forcing['aerosol_od']`` at the
+        GLOBAL ``(ncol, nlev)`` shape BEFORE the column-shard.  A 1-device
+        mesh must reproduce the unsharded heating rate exactly — proving the
+        overridden field is sharded consistently with the other column
+        arrays (not left at the global shape, which would crash or corrupt
+        the backend call under a real multi-device mesh)."""
+        from legoesm.parallel.column_shard import create_column_mesh
+        grid, sigma, state = self._make_state(n=4, nlev=8)
+        ncol, nlev = 6 * 4 * 4, 8
+        forcing = {"aerosol_od": jnp.full((ncol, nlev), 0.1 / nlev)}
+        config = RadiationConfig(scheme="rrtmgp")
+        ref = make_radiation_physics(
+            config, model_type="hydrostatic", nc_from_aerosol=True,
+        )(state, grid, sigma, forcing=forcing)
+        mesh = create_column_mesh(n_devices=1)
+        out = make_radiation_physics(
+            config, model_type="hydrostatic", column_mesh=mesh,
+            nc_from_aerosol=True,
+        )(state, grid, sigma, forcing=forcing)
+        np.testing.assert_allclose(
+            np.asarray(out.dT_dt.data), np.asarray(ref.dT_dt.data),
+            rtol=1.0e-10, atol=1.0e-12,
+        )
+
+    def test_aerosol_ccn_override_sharded_matches_unsharded_multidevice(self):
+        """R2 (true multi-device): 4-device CPU emulation — the sharded
+        aerosol-CCN ``n_cloud`` override produces identical heating rates to
+        the single-device path.  This is the case the single-A100 smoke run
+        could NOT exercise.  Skipped unless >=2 devices are visible (set
+        ``XLA_FLAGS=--xla_force_host_platform_device_count=4``)."""
+        if len(jax.devices()) < 2:
+            pytest.skip(
+                "single-device host — set XLA_FLAGS to emulate 4 devices"
+            )
+        from legoesm.parallel.column_shard import create_column_mesh
+        grid, sigma, state = self._make_state(n=4, nlev=8)
+        ncol, nlev = 6 * 4 * 4, 8     # 96 — divisible by 1,2,3,4,6,8,...
+        forcing = {"aerosol_od": jnp.full((ncol, nlev), 0.1 / nlev)}
+        config = RadiationConfig(scheme="rrtmgp")
+        ref = make_radiation_physics(
+            config, model_type="hydrostatic", nc_from_aerosol=True,
+        )(state, grid, sigma, forcing=forcing)
+        mesh = create_column_mesh(n_devices=len(jax.devices()))
+        out = make_radiation_physics(
+            config, model_type="hydrostatic", column_mesh=mesh,
+            nc_from_aerosol=True,
+        )(state, grid, sigma, forcing=forcing)
+        np.testing.assert_allclose(
+            np.asarray(out.dT_dt.data), np.asarray(ref.dT_dt.data),
             rtol=1.0e-10, atol=1.0e-12,
         )
 

@@ -988,8 +988,12 @@ def create_cubed_sphere_cdgrid(
     #     physical wall, not a cube seam, and panel-edge rsin is not used.
     rsin_u = 1.0 / jnp.maximum(sina_u**2, _EPS)
     rsin_v = 1.0 / jnp.maximum(sina_v**2, _EPS)
-    _is_single_face = base.lat.shape[0] == 1
-    _bounded_domain = (base.duogrid is not None) or _is_single_face
+    # Use the backend-aware property (single source of truth) rather than
+    # re-deriving from ``lat.shape[0] == 1``: under cubed-sphere MPI
+    # face-scatter a rank can own a SINGLE global cube face (shape[0] == 1)
+    # that is NOT a regional panel — its panel edges ARE cube seams handled by
+    # MPI halo exchange, so the rsin_u/rsin_v seam override must still apply.
+    _bounded_domain = base.bounded_domain
     if not _bounded_domain:
         # Panel-edge override: replace 1/sin² with 1/sin at i==0 and i==n
         # for rsin_u, and j==0 and j==n for rsin_v.

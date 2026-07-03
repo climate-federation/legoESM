@@ -65,7 +65,7 @@ RUN_SETS: dict[str, list] = {
          DATA_ROOT / "mpas_jra55_etopo_100yr_ico6" / "mpas" / "ico6"),
     ],
     # 3-way intercomparison once the tripole JRA55 spinup completes
-    # (Step 2 of docs/ocean_experiments/tripole_omip_plan.md). The
+    # (Step 2 of docs/ocean/experiments/tripole_omip_plan.md). The
     # tripole entry resolves to results/omip/tripole/eorca1/ during
     # the run, then to ~/saved_legoESM_data/tripole_jra55_etopo_10yr_nudge/
     # after archival.
@@ -145,7 +145,12 @@ def _load_tripole(rundir: Path, target_day: float | None) -> dict:
     u = np.asarray(npz["u"])
     v = np.asarray(npz["v"])
     lm = np.asarray(npz["land_mask"]) > 0.5
-    geom = create_tripole_grid(str(REPO / "data/grids/eORCA1.2_mesh_mask.nc"))
+    # eORCA1.2 is a halo-inclusive mesh -> explicit "n_lon-1-i" fold origin
+    # (its curved fold row resolves under auto too, but state the intent).
+    geom = create_tripole_grid(
+        str(REPO / "data/grids/eORCA1.2_mesh_mask.nc"),
+        fold_convention="n_lon-1-i",
+    )
     lat = np.degrees(np.asarray(geom.lat_T))   # (n_lat, n_lon)
     lon = np.degrees(np.asarray(geom.lon_T))
     lon = np.where(lon > 180.0, lon - 360.0, lon)

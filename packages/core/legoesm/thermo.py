@@ -424,6 +424,50 @@ def saturation_specific_humidity(
     return w_sat / (1.0 + w_sat)
 
 
+def mixing_ratio_to_specific_humidity(
+    mixing_ratio: jax.Array,
+) -> jax.Array:
+    """Convert water-vapor mixing ratio to specific humidity.
+
+    The mixing ratio convention is ``r = m_v / m_d``; specific humidity is
+    ``q = m_v / (m_v + m_d)``.  This helper centralizes the conversion for
+    data-ingest paths that cross between those conventions.
+    """
+    r = jnp.maximum(jnp.asarray(mixing_ratio), 0.0)
+    return r / (1.0 + r)
+
+
+def specific_humidity_to_mixing_ratio(
+    specific_humidity: jax.Array,
+    *,
+    denominator_floor: float = 1.0e-12,
+) -> jax.Array:
+    """Convert specific humidity to water-vapor mixing ratio.
+
+    ``q`` is clipped below one so malformed input cannot divide by zero;
+    valid atmospheric values are unchanged.
+    """
+    q = jnp.clip(jnp.asarray(specific_humidity), 0.0, 1.0 - denominator_floor)
+    return q / (1.0 - q)
+
+
+def specific_humidity_tendency_to_mixing_ratio_tendency(
+    specific_humidity: jax.Array,
+    specific_humidity_tendency: jax.Array,
+    *,
+    denominator_floor: float = 1.0e-12,
+) -> jax.Array:
+    """Convert ``dq/dt`` to ``dr/dt`` for ``r = q / (1 - q)``.
+
+    DEPHY and reanalysis files often provide tendencies for specific humidity,
+    while the atmospheric physics path consumes water-vapor mixing ratio.  The
+    derivative is ``dr/dt = dq/dt / (1 - q)^2``.
+    """
+    q = jnp.clip(jnp.asarray(specific_humidity), 0.0, 1.0 - denominator_floor)
+    denom = jnp.maximum(1.0 - q, denominator_floor)
+    return jnp.asarray(specific_humidity_tendency) / (denom * denom)
+
+
 def relative_humidity(
     T: jax.Array,
     p: jax.Array,

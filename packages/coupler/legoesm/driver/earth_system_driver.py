@@ -117,7 +117,13 @@ class EarthSystemDriver:
         q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
         sigma_full = jnp.asarray(self._atm.sigma.sigma_full)
         p_low = p_s * sigma_full[-1]
-        rho_low = p_low / (constants.R_d * T_low)
+        # Moist-air density: rho = p / (R_d * T_v), T_v = T*(1 + (1/eps - 1)*q).
+        # The dry form rho = p/(R_d*T) underestimates density by ~0.6% in the
+        # tropics and biases every downstream bulk-flux surface stress /
+        # turbulent flux that reads forcing.rho_lowest -- the SAME T_v
+        # correction the canonical extract_atm_to_surface uses.
+        T_v_low = T_low * (1.0 + (1.0 / constants.epsilon - 1.0) * q_low)
+        rho_low = p_low / (constants.R_d * T_v_low)
 
         # Extract real radiation and precipitation from last atmosphere physics
         aux = getattr(self._atm, '_carry_aux', {})
@@ -163,8 +169,8 @@ class EarthSystemDriver:
         else:
             albedo_eff = blend_surface_property(
                 sic,
-                getattr(cfg, 'albedo_ice', 0.6),
-                getattr(cfg, 'albedo_ocean', 0.06),
+                cfg.albedo_ice,
+                cfg.albedo_ocean,
             )
             T_sfc = blend_surface_temperature(sst, sic, cfg.T_ice)
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
@@ -184,9 +190,14 @@ class EarthSystemDriver:
         lw_up_sfc = eps_sfc * constants.sigma_sb * T_sfc ** 4
         lw_down = (lw_net_sfc + lw_up_sfc) / jnp.maximum(eps_sfc, 0.01)
 
-        # Snow fraction: approximate from T_lowest < freezing
+        # Snow fraction: smooth Wigmosta 1994 / Dai 2008 ramp (shared helper).
+        # The prior hard step ``where(T_low < T_freeze, 1, 0)`` killed
+        # d(snow)/d(T_low) on training/DA paths and miscounted mixed-phase
+        # precip in the 0–4 °C band; the helper matches the coupled driver so
+        # the two cannot diverge.
+        from legoesm.forcing.surface_utils import snow_fraction
         precip_total = jnp.maximum(seg_precip, 0.0)
-        snow_frac = jnp.where(T_low < constants.T_freeze, 1.0, 0.0)
+        snow_frac = snow_fraction(T_low, constants.T_freeze)
         precip_snow = precip_total * snow_frac
 
         # Cosine zenith: daily-mean approximation cos_zen = Q / S_0
@@ -194,10 +205,22 @@ class EarthSystemDriver:
         doy, _ = day_to_calendar(day)
         lat = self._atm._grid_lat
         if lat is not None:
-            from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
-            S_0 = getattr(cfg, 'S_0', constants.S_0)
-            Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0)
-            cos_zen = jnp.clip(Q_daily / S_0, 0.0, 1.0)
+            from legoesm.atmosphere.physics.radiation.solar import (
+                daily_mean_insolation, earth_orbit, earth_sun_distance_factor,
+            )
+            S_0 = cfg.S_0
+            # Realistic orbit (Berger 1978) when enabled; None ⇒ circular.
+            _orbit = (earth_orbit()
+                      if getattr(cfg, "orbital_insolation", False) else None)
+            _eccf = (earth_sun_distance_factor(float(doy), _orbit)
+                     if _orbit is not None else 1.0)
+            Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0,
+                                            orbit=_orbit)
+            # cos_zen is a geometric optical-path cosine: use the orbital
+            # declination but divide out the (a/r)^2 flux factor so it stays
+            # <= 1 (eccf scales flux, not the sun angle).  _eccf == 1.0 on the
+            # circular orbit ⇒ bit-identical to the legacy path.
+            cos_zen = jnp.clip(Q_daily / (_eccf * S_0), 0.0, 1.0)
         else:
             cos_zen = jnp.full_like(p_s, 0.5)
 

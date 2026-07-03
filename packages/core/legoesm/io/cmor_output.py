@@ -130,9 +130,6 @@ def _import_netcdf4():
 
 def _to_numpy(arr) -> np.ndarray:
     """Convert a JAX array (or anything array-like) to a numpy ndarray."""
-    if hasattr(arr, "to_py"):
-        # Older JAX
-        return np.asarray(arr.to_py())
     return np.asarray(arr)
 
 
@@ -224,6 +221,20 @@ _AMON_VARIABLES: Dict[str, Dict[str, str]] = {
         "cell_methods": "time: mean",
         "dimensions": ("time", "lat", "lon"),
     },
+    "clwvi": {
+        "standard_name": "atmosphere_mass_content_of_cloud_condensed_water",
+        "long_name": "Condensed Water Path",
+        "units": "kg m-2",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "clivi": {
+        "standard_name": "atmosphere_mass_content_of_cloud_ice",
+        "long_name": "Ice Water Path",
+        "units": "kg m-2",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
     # --- TOA radiation ---
     "rsdt": {
         "standard_name": "toa_incoming_shortwave_flux",
@@ -242,6 +253,20 @@ _AMON_VARIABLES: Dict[str, Dict[str, str]] = {
     "rlut": {
         "standard_name": "toa_outgoing_longwave_flux",
         "long_name": "TOA Outgoing Longwave Radiation",
+        "units": "W m-2",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "rsutcs": {
+        "standard_name": "toa_outgoing_shortwave_flux_assuming_clear_sky",
+        "long_name": "TOA Outgoing Clear-Sky Shortwave Radiation",
+        "units": "W m-2",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "rlutcs": {
+        "standard_name": "toa_outgoing_longwave_flux_assuming_clear_sky",
+        "long_name": "TOA Outgoing Clear-Sky Longwave Radiation",
         "units": "W m-2",
         "cell_methods": "time: mean",
         "dimensions": ("time", "lat", "lon"),
@@ -967,13 +992,15 @@ def _make_lon_da(lon: np.ndarray):
 
 def _cell_bounds_from_centers(
     centers: np.ndarray,
-    periodic: bool = False,
 ) -> np.ndarray:
     """Compute cell edges from cell centers.
 
     For a uniform-spacing grid the edges sit halfway between neighboring
     centers; the outermost edges are extrapolated by the same half-step.
     Returns a ``(n, 2)`` array of ``(lower_edge, upper_edge)`` pairs.
+
+    Note: this does not wrap modulo 360 for circular axes (e.g. longitude);
+    callers are responsible for providing centers on a canonical interval.
     """
     c = np.asarray(centers, dtype=np.float64)
     if c.size == 1:
@@ -984,13 +1011,7 @@ def _cell_bounds_from_centers(
     lower_first = c[0] - (mids[0] - c[0])
     upper_last = c[-1] + (c[-1] - mids[-1])
     edges = np.concatenate([[lower_first], mids, [upper_last]])
-    bnds = np.stack([edges[:-1], edges[1:]], axis=-1)
-    if periodic:
-        # Keep the span consistent with a circular axis (e.g. longitude).
-        # This function does not wrap modulo 360; callers are responsible
-        # for providing centers on a canonical interval.
-        pass
-    return bnds
+    return np.stack([edges[:-1], edges[1:]], axis=-1)
 
 
 def _make_lat_bnds_da(lat: np.ndarray):
@@ -1012,9 +1033,7 @@ def _make_lat_bnds_da(lat: np.ndarray):
 def _make_lon_bnds_da(lon: np.ndarray):
     """Build a longitude cell-bounds DataArray, shape ``(nlon, 2)``."""
     xr = _import_xarray()
-    bnds = _cell_bounds_from_centers(
-        np.asarray(lon, dtype=np.float64), periodic=True,
-    )
+    bnds = _cell_bounds_from_centers(np.asarray(lon, dtype=np.float64))
     return xr.DataArray(
         bnds,
         dims=("lon", "bnds"),

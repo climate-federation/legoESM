@@ -21,6 +21,7 @@ synthetic climatology when the on-disk cache is missing.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +32,8 @@ from .jra55_do import (
     synthetic_ocean_forcing,
     _cache_dir as _jra_cache_dir,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _cache_dir() -> Path:
@@ -79,6 +82,15 @@ def load_core2_nyf(*, cache_dir: Optional[Path] = None,
             f"CORE-II NYF cache missing: {zarr_path}; populate from "
             f"https://www.earthsystemgrid.org/dataset/ucar.cgd.artmip.core2.html"
         )
+    # Loud (not silent) fallback: synthetic analytic forcing is NOT the
+    # OMIP-1 / CORE-II protocol — never mistake it for a real NYF run.
+    logger.warning(
+        "CORE-II NYF cache missing at %s — falling back to SYNTHETIC analytic "
+        "forcing. This is NOT the OMIP-1 protocol; results are not "
+        "OMIP-comparable. Pass allow_synthetic=False to fail loudly, or build "
+        "the cache (scripts/data/build_core2_nyf_zarr.py).",
+        zarr_path,
+    )
     # Synthetic climatology with daily resolution.
     return synthetic_ocean_forcing(0, n_time=n_time)
 

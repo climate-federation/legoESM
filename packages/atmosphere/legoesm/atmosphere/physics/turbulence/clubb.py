@@ -1,7 +1,7 @@
 """CLUBB higher-order turbulence closure (fuller port; ``scheme="clubb"``).
 
 This is the single-file home for the fuller CLUBB port tracked in
-``docs/md_files/clubb.md`` — substantially richer than :mod:`clubb_lite` — restricted to
+``docs/dev-notes/clubb.md`` — substantially richer than :mod:`clubb_lite` — restricted to
 the call tree exercised by the **CAM-default CLUBB flags** (every piece
 golden-locked or parity-tested against CLUBB-JAX). Per the legoESM
 one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
@@ -994,7 +994,7 @@ def calc_brunt_vaisala_freq_sqd(
 # NOTE: DIFFERENT numerics from the simple mixing length in
 # atmosphere/physics/_shared.py used by clubb_lite (issue: the parcel length
 # could eventually supplant the _shared one — see
-# docs/issues/clubb_parcel_lscale_vs_shared_mixing_length.md).
+# docs/dev-notes/issues/clubb_parcel_lscale_vs_shared_mixing_length.md).
 
 # Derived thermodynamic ratios (legoESM constants).
 _EP = constants.epsilon
@@ -4111,7 +4111,7 @@ def advance_wp2_wp3(wp2, wp3, up2, vp2, sigma_sqd_w, wp3_on_wp2,
 # (masked fori_loop), lax.scan sequential clip, xm re-solve, top spike-fix.
 # NOTE: the local ``_safe_sqrt`` here is the intentionally NaN-PROPAGATING
 # variant (distinct from the AD-safe ``clubb_helpers.safe_sqrt`` — see the
-# de-dup note in docs/md_files/clubb_port_history.md; consolidating would
+# de-dup note in docs/dev-notes/clubb_port_history.md; consolidating would
 # change behavior).
 
 # Monotonic-flux-limiter field ids + their max-variance caps (constants_clubb).

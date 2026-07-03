@@ -493,7 +493,7 @@ class TestIter92AuditFollowupDelegation:
         """
         from pathlib import Path
         scripts_dir = Path(__file__).resolve().parent.parent.parent / "scripts"
-        sea_ice_path = scripts_dir / "run_sea_ice_test_matrix.py"
+        sea_ice_path = scripts_dir / "matrix" / "run_sea_ice_test_matrix.py"
         text = sea_ice_path.read_text()
         # Strip line comments to test ACTIVE code only.
         code_only = "\n".join(

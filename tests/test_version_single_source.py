@@ -14,7 +14,7 @@ If any of these drift, a release ships inconsistent provenance, so they fail
 fast here (a clear ``AssertionError``, not a confusing downstream mismatch).
 
 **Deliberately out of scope:** *illustrative* version strings inside
-documentation (e.g. an example ``pyproject`` snippet in ``docs/specs/`` or the
+documentation (e.g. an example ``pyproject`` snippet in ``docs/science/specs/`` or the
 generated ``docs/*.html``) and throwaway agent-review notes.  Those are
 human-readable examples, not machine-read provenance; forcing them through this
 guard would require allowlisting essentially every file that contains an example
@@ -75,10 +75,12 @@ def test_runtime_version_matches_pyproject() -> None:
     )
 
 
-# A user-facing version banner: "legoESM v" immediately followed by a digit means
-# a *literal* version was baked in.  The single-sourced form interpolates
-# (``legoESM v{__version__}``), so a brace — not a digit — follows the "v".
-_BANNER_LITERAL = re.compile(r"legoESM\s+v\d")
+# A user-facing version banner: "legoESM v" followed by a DOTTED version number
+# (``v0.1.0``) means a *literal* version was baked in.  The single-sourced form
+# interpolates (``legoESM v{__version__}``), so a brace follows the "v".  Require
+# a dot so prose like "the legoESM v1 TKE scheme" (an approach generation, not a
+# release) doesn't trip the guard; real shipped banners are always dotted (X.Y[.Z]).
+_BANNER_LITERAL = re.compile(r"legoESM\s+v\d+\.\d")
 
 
 def test_no_hardcoded_version_literal_in_source() -> None:
@@ -119,6 +121,8 @@ def test_banner_literal_regex_catches_stale_versions() -> None:
     # The single-sourced, interpolated form must NOT trip the guard.
     assert not _BANNER_LITERAL.search("legoESM v{__version__}")
     assert not _BANNER_LITERAL.search('f"legoESM v{__version__} | Benchmark"')
+    # Prose naming an approach-generation (un-dotted) is NOT a release banner.
+    assert not _BANNER_LITERAL.search("TKE is implicit-only in legoESM v1 to match Veros")
 
 
 def test_uv_lock_root_package_version_matches() -> None:

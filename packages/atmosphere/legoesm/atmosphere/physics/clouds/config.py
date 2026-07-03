@@ -29,7 +29,7 @@ __param_spec__ = {
             "p_xr": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
             "gamma_xr": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
             # --- condensate: diagnostic in-cloud water + resolved-cf condensate scale [kg/kg] ---
-            "q_c_diagnostic": {"units": "kg/kg", "bounds": (5.0e-5, 1.0e-3), "tunable_tier": 1, "transform": "sigmoid", "category": "condensate", "reference": "diagnostic-cloud scheme default", "shape": None},
+            "q_c_diagnostic": {"units": "kg/kg", "bounds": (5.0e-5, 1.5e-3), "tunable_tier": 1, "transform": "sigmoid", "category": "condensate", "reference": "diagnostic-cloud scheme default", "shape": None},
             "q_cloud_resolved_ref": {"units": "kg/kg", "bounds": (1.0e-7, 1.0e-5), "tunable_tier": 2, "transform": "sigmoid", "category": "condensate", "reference": "resolved (CRM/SAM) cloud-fraction scheme default", "shape": None},
             # --- ice_fraction: temperature below which all condensate is ice [K] ---
             "T_ice_only": {"units": "K", "bounds": (220.0, 268.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_fraction", "reference": "linear ice-fraction ramp scheme default", "shape": None},
@@ -43,6 +43,13 @@ __param_spec__ = {
             "pgam_max": {"units": "1", "bounds": (4.0, 30.0), "tunable_tier": 3, "transform": "sigmoid", "category": "droplet_psd", "reference": "Morrison module_mp_mg.F90 (gamma-PSD shape cap)", "shape": None},
             # --- microphysics_density: M2005 cloud-ice bulk density [kg/m^3] for ice r_eff PSD ---
             "rho_cloud_ice": {"units": "kg/m^3", "bounds": (100.0, 917.0), "tunable_tier": 3, "transform": "sigmoid", "category": "microphysics_density", "reference": "Morrison et al. (2005) M2005 (RHOI)", "shape": None},
+            # --- convective_cloud: Slingo(1987)-style cumulus cloud-fraction from convective precip (opt-in) ---
+            "conv_cloud_coeff": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "convective_cloud", "reference": "Slingo (1987) convective cloud-amount vs ln(precip)", "shape": None},
+            "conv_cloud_max": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "convective_cloud", "reference": "Slingo (1987) convective cloud-amount cap", "shape": None},
+            "conv_precip_scale": {"units": "kg/m^2/s", "bounds": (1.0e-6, 1.0e-4), "tunable_tier": 2, "transform": "sigmoid", "category": "convective_cloud", "reference": "convective-cloud reference precip rate (~1 mm/day)", "shape": None},
+            "conv_cloud_sigma_top": {"units": "1", "bounds": (0.05, 0.4), "tunable_tier": 0, "transform": "sigmoid", "category": "convective_cloud", "reference": "convective cloud-deck top (sigma); numerics layer-bound", "shape": None},
+            "conv_cloud_sigma_base": {"units": "1", "bounds": (0.35, 0.98), "tunable_tier": 0, "transform": "sigmoid", "category": "convective_cloud", "reference": "convective anvil-deck base (sigma); numerics layer-bound", "shape": None},
+            "conv_cloud_condensate": {"units": "kg/kg", "bounds": (1.0e-5, 1.0e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "condensate", "reference": "thin anvil-cirrus in-cloud condensate", "shape": None},
         },
     },
 }
@@ -100,7 +107,15 @@ class CloudConfig(NamedTuple):
         so any resolved cloud with ``q_cond ≳ 0.1 g/kg`` gives cf ≈ 1).
     """
     scheme: str = "none"
-    rh_crit: float = 0.7
+    # 0.8 (standard Sundqvist/ECHAM) matches the microphysics
+    # SundqvistConfig.rh_crit=0.8.  At 0.7 the cloud-FRACTION diagnostic (used
+    # for the RRTMGP cloud-radiative effect) onset 0.1 RH BELOW where the
+    # microphysics condenses, so the 0.70-0.80 RH band produced radiative cloud
+    # with no matching condensate.  Because cf = 1 - sqrt((1-RH)/(1-rh_crit))
+    # multiplies the cloud optical depth (both LW + SW), that mismatch fed a
+    # cooling -> RH-up -> cf-up -> OLR-down/albedo-up positive feedback that
+    # cold-drifted the coupled rrtmgp run to a ~277 K overcast plateau.
+    rh_crit: float = 0.77
     alpha_xr: float = 100.0
     p_xr: float = 0.25
     gamma_xr: float = 0.49
@@ -113,7 +128,13 @@ class CloudConfig(NamedTuple):
                                      # MorrisonConfig.predict_Nc=False) where the
                                      # prognostic Nc slot stays 0. Matches Morrison
                                      # Nc_0=1e8 so RRTMGP r_eff_liq is SAM-faithful.
-    q_c_diagnostic: float = 0.2e-3
+    q_c_diagnostic: float = 1.0e-3   # in-cloud condensate for the radiative
+    # cloud-opacity floor [kg/kg].  Raised 0.2e-3 -> 1.0e-3 per the CAM
+    # surface-energy audit: thin clouds gave planetary albedo ~14% (vs ~30%)
+    # AND weak LW_down (~270 vs ~340) => surface LW loss -110 (vs -55) =>
+    # energy-starved evaporation => cold/dry feedback.  More in-cloud condensate
+    # raises BOTH cloud albedo (SW) and cloud LW emissivity (LW_down), running
+    # the cold/dry feedback in reverse.  Upper bound of the __param_spec__ range.
     T_freeze: float = constants.T_freeze
     T_ice_only: float = 233.15
     q_cloud_resolved_ref: float = 1.0e-6
@@ -128,3 +149,75 @@ class CloudConfig(NamedTuple):
     martin_pgam_intercept: float = 0.2714
     pgam_min: float = 2.0
     pgam_max: float = 10.0
+    # --- Convective cloud fraction (Slingo 1987), OPT-IN (default OFF) ---
+    # The RH-based stratiform schemes (sundqvist/xu_randall) give cloud only
+    # near saturation, so an adjustment convection scheme (sbm) that holds the
+    # tropical column at RH~0.7 produces NO radiative cloud => the convecting
+    # tropics radiate surface LW straight to space (measured LW_net_sfc ~-137
+    # W/m^2, precip ~1 mm/day, ~4.5 K cold bias).  When ``convective_cloud`` is
+    # True, ``convective_cloud_fraction`` adds a bounded cumulus cloud cover
+    # ``cf_conv = clip(coeff * ln(1 + P_conv/P0), 0, cf_max)`` over the
+    # free-tropospheric deck [sigma_top, sigma_base], combined with the
+    # stratiform fraction by maximum overlap.  Default False => byte-identical
+    # to the validated stratiform-only path (no production change).
+    convective_cloud: bool = False
+    # Tuned DOWN from coeff=0.15/cap=0.6/deck[0.15,0.90] (15 levels), which
+    # over-produced: applying cf_conv across the whole free troposphere, each
+    # level then carrying the cf*q_c_diagnostic radiative-condensate floor,
+    # stacked column LWP to OVERCAST (validation 8534361: albedo 78.9%, R_TOA
+    # -100 W/m2 — the mass_flux failure mode).  Concentrate the cover in a thin
+    # upper-tropospheric ANVIL deck [0.15,0.45] (~3-4 levels) with a small
+    # coeff/cap so the convective cloud NUDGES the tropical cloud-radiative
+    # effect instead of dominating it.
+    # v2 (coeff0.04/cap0.2/deck[0.15,0.45]) closed the LW deficit (LW_net_sfc
+    # -110 -> -66, CWV 14 -> 25) but albedo was still 44% (Earth ~30%): the
+    # anvil reflected too much SW, so the LW warming was offset (R_TOA -15, SST
+    # drift unchanged).  v3 RAISES + THINS the anvil to make it LW-DOMINANT —
+    # colder/higher cloud tops trap LW efficiently while a thinner, higher deck
+    # reflects less SW.
+    conv_cloud_coeff: float = 0.04      # cloud-amount per e-fold of P_conv
+    conv_cloud_max: float = 0.15        # cap on convective cloud cover
+    conv_precip_scale: float = 1.1574e-5  # ~1 mm/day in kg/m^2/s (P0)
+    conv_cloud_sigma_top: float = 0.10   # convective anvil deck top (sigma)
+    conv_cloud_sigma_base: float = 0.35  # convective anvil deck base (sigma)
+    # In-cloud condensate [kg/kg] for the convective EXCESS fraction — an
+    # optically-THIN anvil cirrus (~7x less than the thick stratiform
+    # q_c_diagnostic=1e-3) so the high cloud traps LW without over-reflecting SW
+    # (the v3 albedo~42% overshoot; high cold tops keep the LW benefit).
+    conv_cloud_condensate: float = 1.5e-4
+
+
+def build_cloud_config(
+    scheme: str,
+    *,
+    convective_cloud: bool = False,
+    rh_crit: float | None = None,
+    q_c_diagnostic: float | None = None,
+    conv_cloud_max: float | None = None,
+    p_xr: float | None = None,
+    alpha_xr: float | None = None,
+) -> "CloudConfig":
+    """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
+    fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
+    ``cloud_q_c_diagnostic`` / ``cloud_conv_cloud_max`` overrides).
+
+    Single source of truth so the radiation path (physics pipeline) and the
+    ``clt`` diagnostic (diagnostics collector) build the SAME cloud fraction
+    and can never drift as override knobs are added (issue #689 codex review).
+    A ``None`` override falls back to the ``CloudConfig`` default (so an
+    all-``None`` call is byte-identical to the defaults).
+    """
+    overrides: dict[str, float] = {}
+    if rh_crit is not None:
+        overrides["rh_crit"] = rh_crit
+    if q_c_diagnostic is not None:
+        overrides["q_c_diagnostic"] = q_c_diagnostic
+    if conv_cloud_max is not None:
+        overrides["conv_cloud_max"] = conv_cloud_max
+    if p_xr is not None:
+        overrides["p_xr"] = p_xr
+    if alpha_xr is not None:
+        overrides["alpha_xr"] = alpha_xr
+    return CloudConfig(
+        scheme=scheme, convective_cloud=convective_cloud, **overrides
+    )

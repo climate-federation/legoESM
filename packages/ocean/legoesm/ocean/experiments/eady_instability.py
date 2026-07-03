@@ -47,8 +47,14 @@ from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
 from legoesm import constants
-from legoesm.constants import g, Omega
+from legoesm.constants import g
 from legoesm.core.field import Field
+from legoesm.ocean.experiments.idealized_ic import (
+    coriolis_f,
+    gaussian_lat_envelope,
+    integrate_thermal_wind_bottom_up,
+    thermal_wind_dudz_coeff,
+)
 
 
 @dataclass
@@ -287,7 +293,7 @@ def _add_thermal_wind_latlon(state, grid, z_coord,
     # Latitude at cell centers
     np.asarray(grid.lat)  # (n_lat,) radians
     lat_mid = np.radians(config.front_lat_center)
-    f0 = 2.0 * Omega * np.sin(lat_mid)
+    f0 = coriolis_f(lat_mid)
 
     # ∂T/∂y at u-face latitudes (between cell centers): distance from
     # centre-of-row(i-1) to centre-of-row(i). 1D over latitude →
@@ -303,24 +309,11 @@ def _add_thermal_wind_latlon(state, grid, z_coord,
     # Average over longitude for zonal-mean front (simpler, avoids noise)
     dTdy_zonal = np.mean(dTdy, axis=1)  # (n_lat-1, nlev)
 
-    # Thermal wind: dU/dz = -(g * alpha_T / f0) * dT/dy
+    # Thermal wind: dU/dz = -(g * alpha_T / f0) * dT/dy; integrate bottom-up
+    # (U(−H)=0), remove the depth mean (barotropic solver carries it).
     dz = np.asarray(z_coord.dz_ref)  # (nlev,), layer thicknesses
-    coeff = -g * config.alpha_T / f0
-
-    # Build U(lat, z) — zonal mean, then broadcast to u-faces
-    # U at u-face latitudes (n_lat-1 interior faces)
-    U_zonal = np.zeros((n_lat - 1, nlev), dtype=np.float64)
-    # Integrate bottom-up: U[k] = U[k+1] + dU/dz * dz[k]
-    for k in range(nlev - 2, -1, -1):
-        dz_half = 0.5 * (dz[k] + dz[k + 1]) if k + 1 < nlev else dz[k]
-        U_zonal[:, k] = U_zonal[:, k + 1] + coeff * dTdy_zonal[:, k] * dz_half
-
-    # Depth-mean velocity (for geostrophic SSH balance)
-    H_col = np.sum(dz)
-    U_bar_full = np.sum(U_zonal * dz[np.newaxis, :], axis=1) / H_col  # (n_lat-1,)
-
-    # Remove depth mean from 3D velocity (barotropic solver handles it)
-    U_zonal = U_zonal - U_bar_full[:, np.newaxis]
+    coeff = thermal_wind_dudz_coeff(f0, config.alpha_T, g)
+    U_zonal, U_bar_full = integrate_thermal_wind_bottom_up(dTdy_zonal, dz, coeff)
 
     # Broadcast to full u-face array (n_lat, n_lon+1, nlev)
     u_data = np.zeros_like(state.u.data)
@@ -377,8 +370,8 @@ def _add_thermal_wind_mpas(state, mesh, z_coord,
 
     lat_cell = np.asarray(mesh.latCell)  # (nCells,) radians
     lat_mid = np.radians(config.front_lat_center)
-    f0 = 2.0 * Omega * np.sin(lat_mid)
-    coeff = -g * config.alpha_T / f0
+    f0 = coriolis_f(lat_mid)
+    coeff = thermal_wind_dudz_coeff(f0, config.alpha_T, g)
 
     R = constants.R_earth
     lat_deg = np.degrees(lat_cell)
@@ -394,7 +387,14 @@ def _add_thermal_wind_mpas(state, mesh, z_coord,
     level_idx = np.arange(nlev, dtype=np.float64)
     front_decay = np.exp(-level_idx / config.front_depth_decay)
 
-    # U(cell, z): integrate bottom-up
+    # U(cell, z): integrate bottom-up.  Kept as the explicit loop (NOT routed
+    # through integrate_thermal_wind_bottom_up): here ∂T/∂y enters as the
+    # product ``dTdy_base · front_decay[k]`` formed INSIDE the accumulation,
+    # i.e. ``coeff * dTdy_base * front_decay[k] * dz_half`` evaluated
+    # left-to-right.  Pre-forming ``dTdy_base · front_decay`` and feeding the
+    # shared helper would reassociate the float multiplies (fp · is not
+    # associative) and could change the IC in the last ULP — so this path is
+    # deliberately byte-preserving.
     U_cell = np.zeros((mesh.nCells, nlev), dtype=np.float64)
     for k in range(nlev - 2, -1, -1):
         dz_half = 0.5 * (dz[k] + dz[k + 1]) if k + 1 < nlev else dz[k]
@@ -465,8 +465,8 @@ def _add_ssh_perturbation_latlon(state, grid, config: EadyInstabilityConfig):
     k = config.perturbation_wavenumber
     # Sinusoidal in longitude, Gaussian envelope in latitude around front
     lon_2d, lat_2d = np.meshgrid(lon_rad, lat_rad)
-    lat_envelope = np.exp(-((np.degrees(lat_2d) - config.front_lat_center)
-                            / config.front_width_deg) ** 2)
+    lat_envelope = gaussian_lat_envelope(
+        np.degrees(lat_2d), config.front_lat_center, config.front_width_deg)
     eta_pert = (config.eta_perturbation_m
                 * np.sin(k * lon_2d) * lat_envelope)
 
@@ -484,8 +484,8 @@ def _add_ssh_perturbation_mpas(state, mesh, config: EadyInstabilityConfig):
     lat_cell = np.asarray(mesh.latCell)
 
     k = config.perturbation_wavenumber
-    lat_envelope = np.exp(-((np.degrees(lat_cell) - config.front_lat_center)
-                            / config.front_width_deg) ** 2)
+    lat_envelope = gaussian_lat_envelope(
+        np.degrees(lat_cell), config.front_lat_center, config.front_width_deg)
     eta_pert = (config.eta_perturbation_m
                 * np.sin(k * lon_cell) * lat_envelope)
 

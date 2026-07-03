@@ -69,7 +69,7 @@ Per-component dirs (`atmosphere/`, `ocean/`, `land/`, `sea_ice/`, …) plus
 `unit/`, `validation/`, `distributed/`, `tools/`. Complexity-tier markers
 `tier0`–`tier3` (research → operational) gate the suite; the curated
 FV3/cubed-sphere dycore regressions live in `tests/atmosphere/dycore/regression/`.
-See [docs/TESTING.md](docs/TESTING.md) for the shared tier ladder and how a
+See [docs/validation/TESTING.md](docs/validation/TESTING.md) for the shared tier ladder and how a
 component plugs into the matrix framework.
 
 ## Model Components
@@ -106,7 +106,7 @@ component plugs into the matrix framework.
 - **Idealized experiments suite** (`ocean/experiments/`): rest state, Eady / Phillips / baroclinic gyres, ACC channel, Drake/Stommel, lock exchange, overflow, baroclinic & barotropic wave, geostrophic adjustment, inertia–gravity wave, global overturning, Silvestri baroclinic jet, Munk, Held–Larichev, NeverWorld2-lite, ISOMIP+
 - **Realistic geometry**: NetCDF bathymetry (ETOPO/GEBCO/ERDDAP) with bilinear regridding, Laplacian smoothing, MEO r-cap steepness limiter, polar-cap masking, flood-fill isolated-basin removal, and strait enforcement
 - **Centennial spin-up library** (`ocean.spinup`): AMOC@26.5°N tracker, RPE / volume / heat / salt drift diagnostics, declarative `ConvergenceCriteria`, Bryan–Lewis (1984) distorted-physics accelerated protocol, and auto-restart discovery (`scripts/run/run_omip.py`)
-- **Peer-comparison fidelity harness** (`ocean/fidelity/`): Veros DINO / Eady adapters, regridder, and `docs/ocean_fidelity/legoesm_vs_veros_v2.md`
+- **Peer-comparison fidelity harness** (`ocean/fidelity/`): Veros DINO / Eady adapters, regridder, and `docs/ocean/fidelity/legoesm_vs_veros_v2.md`
 - **Simple ocean**: slab mixed-layer and two-layer (cubed-sphere and MPAS variants)
 
 ### Land Surface
@@ -188,12 +188,12 @@ component plugs into the matrix framework.
   - Ocean: `scripts/matrix/run_ocean_test_matrix.py` (57/57 PASS across lat-lon, tripolar, cubed-sphere, MPAS Voronoi)
   - Sea ice: `scripts/matrix/run_sea_ice_test_matrix.py` (15 benchmark tests)
 - **CFL-aware numerical-convergence tests + plotters**: term-by-term analytic shallow-water and ocean tests
-- **Dycore validation catalog**: [`docs/dycore_validation_catalog.md`](docs/dycore_validation_catalog.md) — complete have/missing inventory against Hughes (2026) *"How to validate a 3D spherical dynamical core"* tutorial
+- **Dycore validation catalog**: [`docs/validation/dycore_validation_catalog.md`](docs/validation/dycore_validation_catalog.md) — complete have/missing inventory against Hughes (2026) *"How to validate a 3D spherical dynamical core"* tutorial
 - **Dycore progression suite** (`tests/validation/run_dycore_progression_suite.py`)
-- **Ocean fidelity assessment harness** (`ocean/fidelity/`): Veros DINO / Eady adapters and cross-model comparison reports under `docs/ocean_fidelity/`
+- **Ocean fidelity assessment harness** (`ocean/fidelity/`): Veros DINO / Eady adapters and cross-model comparison reports under `docs/ocean/fidelity/`
 - **Distributed tests** including MPI differentiability (`tests/distributed/test_mpi_differentiability.py`)
 - **Scaling benchmarks** (`scripts/bench/run_levante_gpu_scaling.py`, `scripts/bench/run_cpu_mpi_scaling.py`)
-- **Source-guardrail harness** (static tripwires that verify the existing source obeys the project rules): ratchet audits (`tests/test_no_hardcoded_constants.py`, `tests/test_no_saturation_reimpl.py`), dispatch hardening (`tests/test_dispatch_hardening.py`), spec-first physics contracts (`tests/test_physics_contracts.py`), federation boundaries (`tests/test_import_boundaries.py`, `tests/test_federation_plan.py`), plus LIVE editor hooks in `.claude/hooks/`. Design: [`docs/ai_guardrails/domain_architect_vs_syntax_engine.md`](docs/ai_guardrails/domain_architect_vs_syntax_engine.md)
+- **Source-guardrail harness** (static tripwires that verify the existing source obeys the project rules): ratchet audits (`tests/test_no_hardcoded_constants.py`, `tests/test_no_saturation_reimpl.py`), dispatch hardening (`tests/test_dispatch_hardening.py`), spec-first physics contracts (`tests/test_physics_contracts.py`), federation boundaries (`tests/test_import_boundaries.py`, `tests/test_federation_plan.py`), plus LIVE editor hooks in `.claude/hooks/`. Design: [`docs/architecture/ai_guardrails/domain_architect_vs_syntax_engine.md`](docs/architecture/ai_guardrails/domain_architect_vs_syntax_engine.md)
 - **Scientific validators** (`scripts/validate/*.py`, each `python scripts/validate/<name>.py`): convection/barotropic/ocean-SCM physics, `validate_federation_packaging.py`, and `visual_regression.py` (cube-imprint/edge artifacts — inspect the PNGs)
 - **Adversarial-review agents** (user-triggered): Codex (`/codex:adversarial-review --wait` → fix → `/codex:review --wait`, iterate to clean) and specialized subagents in `.claude/agents/` (`physics-validator`, `lego-modularity-tester`, `dycore-tester`, `test-differentiability`, `test-scalability`, …)
 
@@ -224,7 +224,7 @@ python scripts/validate/validate_federation_packaging.py
 ```
 
 > Full details — pytest tiers, the matrix framework, the guardrail harness, and the
-> review agents — are in [`docs/TESTING.md`](docs/TESTING.md). On Apple Silicon set
+> review agents — are in [`docs/validation/TESTING.md`](docs/validation/TESTING.md). On Apple Silicon set
 > `JAX_PLATFORMS=cpu` (the Metal backend is broken); use `JAX_ENABLE_X64=1` for
 > scientific/conservation runs. legoESM is developed and tested on Linux and macOS
 > (POSIX) only — Windows is unsupported (bash scripts, SLURM, POSIX subprocess
@@ -308,7 +308,7 @@ the per-member wheels build and import root-absent.
 
 legoESM separates **what you run** (versioned experiment *templates* + the
 reproducibility manifest) from **the code that runs it** (bucketed scripts).
-Full guide: [docs/TESTING.md](docs/TESTING.md) §4 and
+Full guide: [docs/validation/TESTING.md](docs/validation/TESTING.md) §4 and
 [config/templates/README.md](config/templates/README.md).
 
 ### A new experiment (template → run → reproduce)
@@ -398,8 +398,8 @@ gates the matrix runners use.
 | Path | Hardware / Backend | MPI Runtime | Tested JAX | Tested mpi4jax | Status / Notes |
 |---|---|---|---|---|---|
 | Finite-volume dycores + ocean (single-process) | CPU (`jax` CPU backend) | N/A | `>=0.8,<0.10` | N/A | Regular unit/regression path |
-| Finite-volume dycores + ocean (single-process) | Apple Silicon Metal (`jax-metal`) | N/A | `>=0.8,<0.10` | N/A | FV solvers only (`float32`); no `float64` |
-| Spectral solvers (atmosphere/ocean) | CPU (`JAX_PLATFORMS=cpu`) | N/A | `>=0.8,<0.10` | N/A | Requires `float64`/`complex128`; not Metal-compatible |
+| Finite-volume dycores + ocean (single-process) | Apple Silicon Metal (`jax-mps` / MLX, `JAX_PLATFORMS=mps`) | N/A | `>=0.8,<0.10` | N/A | FV solvers only (`float32`); no `float64` |
+| Spectral solvers (atmosphere/ocean) | CPU (`JAX_PLATFORMS=cpu`) | N/A | `>=0.8,<0.10` | N/A | Requires `float64`/`complex128`; not mps-compatible |
 | Distributed MPI halo/reductions | CPU + OpenMPI (`mpirun`) | OpenMPI 4.x/5.x | `>=0.8,<0.10` | `>=0.8,<0.9` | Validated with `mpirun -np 2/3/6` |
 | Multi-device scaling suite | CPU/GPU (if available) | Optional | `>=0.8,<0.10` | `>=0.8,<0.9` (MPI mode) | `scripts/bench/run_levante_gpu_scaling.py` |
 
@@ -410,7 +410,7 @@ JAX versions outside the tested range may work but are not guaranteed. Versions 
 - **Warning** for JAX or mpi4jax outside the tested range. Set `LEGOESM_MPI_STRICT_COMPAT=1` to promote the warning to a hard error.
 
 Detailed runbook for real-hardware MPI / multi-GPU scaling:
-- [docs/REAL_HARDWARE_SCALING.md](docs/REAL_HARDWARE_SCALING.md)
+- [docs/performance/REAL_HARDWARE_SCALING.md](docs/performance/REAL_HARDWARE_SCALING.md)
 
 ### Parallel Runtime & Supported Device Counts
 
@@ -501,20 +501,20 @@ the coupler, the federation packaging, and the tiered test/experiment harness.
 
 ## Documentation
 
-- [docs/getting_started.md](docs/getting_started.md) — **Newbie onboarding guide** (start here)
+- [docs/user-guide/getting_started.md](docs/user-guide/getting_started.md) — **Newbie onboarding guide** (start here)
 - [CHANGELOG.md](CHANGELOG.md) — Release notes / what changed
-- [SPECIFICATION.md](docs/specs/SPECIFICATION.md) — Full technical specification
-- [docs/md_files/implementation_summary.md](docs/md_files/implementation_summary.md) — Comprehensive summary of implementations and tests
-- [docs/cmip_readiness.md](docs/cmip_readiness.md) — CMIP production readiness checklist
-- [docs/amip.md](docs/amip.md) — AMIP experiment guide
-- [docs/scm.md](docs/scm.md) — Single-column model (SCM) guide
-- [docs/ml_physics_parameterization.md](docs/ml_physics_parameterization.md) — Joint ML physics workflow and canonical moist run
-- [docs/md_files/slab_s2s_documentation.md](docs/md_files/slab_s2s_documentation.md) — NeuralGCM/SFNO slab-coupled S2S workflow
-- [docs/REAL_HARDWARE_SCALING.md](docs/REAL_HARDWARE_SCALING.md) — Multi-GPU/MPI scaling guide
-- [docs/md_files/LATLON_CGRID_MIGRATION.md](docs/md_files/LATLON_CGRID_MIGRATION.md) — Lat-lon C-grid migration notes
-- [docs/md_files/cubed_sphere_edge_artifacts.md](docs/md_files/cubed_sphere_edge_artifacts.md) — FV3-faithful cubed-sphere notes
-- [docs/md_files/ocean_experiments_reference.md](docs/md_files/ocean_experiments_reference.md) — Ocean idealized-experiment reference
-- [docs/ocean_fidelity/legoesm_vs_veros_v2.md](docs/ocean_fidelity/legoesm_vs_veros_v2.md) — legoESM ↔ Veros peer-comparison report
+- [SPECIFICATION.md](docs/science/specs/SPECIFICATION.md) — Full technical specification
+- [docs/dev-notes/implementation_summary.md](docs/dev-notes/implementation_summary.md) — Comprehensive summary of implementations and tests
+- [docs/validation/cmip_readiness.md](docs/validation/cmip_readiness.md) — CMIP production readiness checklist
+- [docs/user-guide/amip.md](docs/user-guide/amip.md) — AMIP experiment guide
+- [docs/user-guide/scm.md](docs/user-guide/scm.md) — Single-column model (SCM) guide
+- [docs/science/ml_physics_parameterization.md](docs/science/ml_physics_parameterization.md) — Joint ML physics workflow and canonical moist run
+- [docs/dev-notes/slab_s2s_documentation.md](docs/dev-notes/slab_s2s_documentation.md) — NeuralGCM/SFNO slab-coupled S2S workflow
+- [docs/performance/REAL_HARDWARE_SCALING.md](docs/performance/REAL_HARDWARE_SCALING.md) — Multi-GPU/MPI scaling guide
+- [docs/dev-notes/LATLON_CGRID_MIGRATION.md](docs/dev-notes/LATLON_CGRID_MIGRATION.md) — Lat-lon C-grid migration notes
+- [docs/dev-notes/cubed_sphere_edge_artifacts.md](docs/dev-notes/cubed_sphere_edge_artifacts.md) — FV3-faithful cubed-sphere notes
+- [docs/dev-notes/ocean_experiments_reference.md](docs/dev-notes/ocean_experiments_reference.md) — Ocean idealized-experiment reference
+- [docs/ocean/fidelity/legoesm_vs_veros_v2.md](docs/ocean/fidelity/legoesm_vs_veros_v2.md) — legoESM ↔ Veros peer-comparison report
 
 ## Acknowledgments
 

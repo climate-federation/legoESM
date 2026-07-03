@@ -60,6 +60,7 @@ __param_spec__ = {
             "epsilon_shallow": "entrainment: IFS shallow base rate scaled in-scheme",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
             "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the buoyancy/RH soft triggers",
+            "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Bechtold et al. (2008) stability cap", "shape": None},
@@ -111,30 +112,36 @@ __param_spec__ = {
     "EmanuelConfig": {
         "scheme_key": "atm.conv.EmanuelConfig",
         "excluded": {
+            "beta_downdraft": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
             "cbmf_positive_sharpness": "numerics: softplus sharpness on the relaxed CBMF positive-part",
+            "cloud_base_index_width": "legacy numerics: superseded by pressure-interpolated PLCL closure",
+            "coeffr": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
+            "coeffs": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
+            "cu_momentum": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
             "denom_floor": "numerics: SIJ denominator magnitude floor (oracle ABS(DENOM)<0.01)",
             "epsilon_0": "entrainment: near-undilute bulk-plume rate held fixed (mixing handled by the ensemble)",
             "level_window_sharpness": "numerics: sigmoid sharpness on the ICB/INB cloud-layer windows",
+            "lcl_pressure_sharpness": "numerics: sigmoid sharpness on the pressure-bounded sub-cloud layer",
+            "below_lcl_index_sharpness": "numerics: sigmoid sharpness on the below-LCL index indicator (downdraft re-evap)",
             "precip_efficiency_lcl": "default 0 = disabled/off (enable via config, not training)",
             "precip_efficiency_water": "precipitation_efficiency: default 1.0 at domain boundary (not sigmoid-tunable, fix via config)",
+            "precip_threshold_qc": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
             "sat_branch_sharpness": "numerics: sigmoid sharpness on the saturated-mixture re-solve switch",
+            "sigd": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
+            "sigs": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
             "sij_gate_sharpness": "numerics: sigmoid sharpness on the 0<SIJ<0.9 entrainment band gate",
             "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the buoyancy-sort weighting",
             "strict_index_sharpness": "numerics: sigmoid sharpness on the strict integer-index inequalities",
+            "sub_cloud_relaxation": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
         },
         "params": {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Emanuel (1991) stability cap", "shape": None},
             "alpha_closure": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c ALPHA", "shape": None},
-            "beta_downdraft": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 3, "transform": "sigmoid", "category": "downdraft", "reference": "Emanuel (1991) CONVECT v4.3c BETA", "shape": None},
             "c_l_emanuel": {"units": "J/kg/K", "bounds": (2000.0, 4500.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Emanuel (1991) CONVECT v4.3c CL", "shape": None},
             "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Emanuel (1991)", "shape": None},
             "cbmf_carry_max": {"units": "kg/m^2/s", "bounds": (0.099, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "mass_flux", "reference": "Emanuel (1991) anti-runaway guard", "shape": None},
-            "cloud_base_index_width": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "Emanuel (1991) cloud-base selector width", "shape": None},
-            "coeffr": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 3, "transform": "sigmoid", "category": "downdraft", "reference": "Emanuel (1991) CONVECT v4.3c COEFFR", "shape": None},
-            "coeffs": {"units": "1", "bounds": (0.264, 2.4), "tunable_tier": 3, "transform": "sigmoid", "category": "downdraft", "reference": "Emanuel (1991) CONVECT v4.3c COEFFS", "shape": None},
             "cu_coefficient": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Emanuel (1991) alpha entrainment scale", "shape": None},
-            "cu_momentum": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Emanuel (1991) CMT coefficient", "shape": None},
             "damp_coefficient": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c DAMP", "shape": None},
             "delta_0": {"units": "1/m", "bounds": (6.6e-05, 0.0006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Emanuel (1991) bulk plume", "shape": None},
             "downdraft_efficiency": {"units": "1", "bounds": (0.0, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Emanuel (1991) downdraft re-evaporation", "shape": None},
@@ -145,11 +152,7 @@ __param_spec__ = {
             "parcel_perturb_T": {"units": "K", "bounds": (0.0, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Emanuel (1991) sub-cloud perturbation", "shape": None},
             "parcel_perturb_q": {"units": "kg/kg", "bounds": (0.0, 0.003), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Emanuel (1991) sub-cloud perturbation", "shape": None},
             "precip_efficiency_max": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Emanuel (1991) CONVECT v4.3c EPMAX", "shape": None},
-            "precip_threshold_qc": {"units": "kg/kg", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Emanuel (1991) cloud-water precip threshold", "shape": None},
-            "sigd": {"units": "1", "bounds": (0.0, 0.15), "tunable_tier": 3, "transform": "sigmoid", "category": "downdraft", "reference": "Emanuel (1991) CONVECT v4.3c SIGD", "shape": None},
-            "sigs": {"units": "1", "bounds": (0.0, 0.36), "tunable_tier": 3, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Emanuel (1991) CONVECT v4.3c SIGS", "shape": None},
             "sij_upper_gate": {"units": "1", "bounds": (0.297, 2.7), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Emanuel (1991) CONVECT v4.3c SIJ upper bound", "shape": None},
-            "sub_cloud_relaxation": {"units": "s", "bounds": (1800.0, 21600.0), "tunable_tier": 3, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Emanuel (1991) sub-cloud mixing (legacy, unused with DTMA closure)", "shape": None},
             "tlcrit": {"units": "degC", "bounds": (-165.0, -18.15), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Emanuel (1991) CONVECT v4.3c TLCRIT", "shape": None},
         },
     },
@@ -161,9 +164,14 @@ __param_spec__ = {
             "cape_threshold": "default 0 = disabled/off (KF gates on the trigger function, not CAPE)",
             "cloud_depth_min": "trigger: fixed shallow/deep cloud-depth split (not sigmoid-tunable, fix via config)",
             "cloud_depth_sharpness": "numerics: sigmoid sharpness on the deep/shallow blend",
+            "cloud_top_detrainment_fraction": "fixed KF-Eta cloud-top detrainment-level fraction (structural detrainment profile, not a tunable closure rate)",
+            "cloud_top_detrainment_width_levels": "numerics: smoothing width [levels] of the cloud-top detrainment taper",
+            "condload_fresh_retention_fraction": "fixed KF CONDLOAD retained fresh-condensate fraction",
             "dtlcl_pos_sharpness": "numerics: sharpness of the outer positive-part on the DTLCL base",
             "epsilon_0": "entrainment: legacy constant rate, superseded by the faithful radius-based profile",
-            "pef_min": "numerics: lower clamp on the cloud-base-height precip efficiency",
+            "rh_trigger_rhmax": "fixed KF-Eta trigger-3 upper RH branch threshold",
+            "rh_trigger_slope": "fixed KF-Eta trigger-3 mid-RH branch coefficient",
+            "rh_trigger_u00": "fixed KF-Eta trigger-3 RH threshold coefficient",
             "trigger_sharpness": "numerics: sigmoid sharpness on the trigger threshold",
             "wkl_floor": "numerics: cube-root base floor keeping the DTLCL gradient finite at WKL->0",
             "wkl_softplus_sharpness": "numerics: softplus sharpness inside the DTLCL surrogate",
@@ -181,7 +189,6 @@ __param_spec__ = {
             "entrain_const": {"units": "1", "bounds": (0.0099, 0.09), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Kain (2004) Eq. 5-6 radius entrainment", "shape": None},
             "parcel_perturb_T": {"units": "K", "bounds": (0.0, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Kain & Fritsch (1990) sub-cloud perturbation", "shape": None},
             "parcel_perturb_q": {"units": "kg/kg", "bounds": (0.0, 0.003), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kain & Fritsch (1990) sub-cloud perturbation", "shape": None},
-            "pef_max": {"units": "1", "bounds": (0.297, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Kain (2004) PEFCBH upper clamp", "shape": None},
             "rad_max_m": {"units": "m", "bounds": (660.0, 6000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "Kain (2004) updraft-radius upper bound", "shape": None},
             "rad_min_m": {"units": "m", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "Kain (2004) updraft-radius lower bound", "shape": None},
             "rad_wkl_ref": {"units": "m/s", "bounds": (0.033, 0.3), "tunable_tier": 3, "transform": "sigmoid", "category": "entrainment", "reference": "Kain (2004) updraft-radius WKL ramp", "shape": None},
@@ -247,6 +254,7 @@ __param_spec__ = {
             "epsilon_shallow": "entrainment: shallow-branch base rate held fixed in-scheme",
             "moisture_convergence_sharpness": "numerics: sigmoid sharpness on the MC-proxy threshold",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
+            "precip_efficiency": "default 0 = disabled (legacy no rain-split, gated `if > 0.0` in tiedtke.py); enable + retune via config, not sigmoid-trained from the off state",
             "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the buoyancy/RH soft triggers",
         },
         "params": {
@@ -800,6 +808,22 @@ class KainFritschConfig(NamedTuple):
     # DTLCL coefficient and exponent (Kain 2004 Eq. 1: DTLCL = c * WKL^p, K).
     dtlcl_coeff: float = 4.64
     dtlcl_exponent: float = 0.33
+    # KF-Eta trigger-3 relative-humidity perturbation DTRH (WRF
+    # module_cu_kfeta.F lines 996-1017).  The ETA branch uses U00=0.75:
+    # humid LCL environments get an additional temperature perturbation
+    # derived from the local saturation derivative.  This stays faithful to
+    # the reference trigger path without imposing external SCM forcing.
+    enable_rh_trigger_perturb: bool = True
+    rh_trigger_u00: float = 0.75
+    rh_trigger_rhmax: float = 0.95
+    rh_trigger_slope: float = 0.25
+    # KF CONDLOAD precipitation fallout (KF90 Eq. 9; WRF module_cu_kfeta.F
+    # lines 2869-2923) lets only 60% of fresh condensate participate in
+    # immediate conversion and retains the remaining 40% as cloud condensate.
+    # The full WTW/load recursion is not in the shared plume helper, but this
+    # reference fraction prevents treating all fresh updraft condensate as
+    # retained grid cloud.
+    condload_fresh_retention_fraction: float = 0.4
     # Reference vertical velocity for the LCL-height threshold (Kain 2004
     # Eq. 2: WKLCL = wklcl_ref * min(ZLCL, z_ref)/z_ref) [m/s] and [m].
     wklcl_ref: float = 0.02
@@ -832,6 +856,13 @@ class KainFritschConfig(NamedTuple):
     rad_min_m: float = 1.0e3
     rad_max_m: float = 2.0e3
     rad_wkl_ref: float = 0.1
+    # Smooth surrogate for the oracle's cloud-top total-detrainment step
+    # (WRF KF-Eta ``UDR(LTOP)=UMF(LTOP)+UDR(LTOP)-UER(LTOP)``): detrain this
+    # fraction of the remaining updraft over the LNB-centred transition
+    # layer.  0.99 is the differentiable finite-rate stand-in for total
+    # detrainment; the width is in model levels.
+    cloud_top_detrainment_fraction: float = 0.99
+    cloud_top_detrainment_width_levels: float = 1.0
     # Convective (CAPE-removal) timescale bounds [s] (oracle TIMEC clamp
     # [1800, 3600]).  The SCM/idealised bridge does not expose the LCL/
     # mid-trop wind that sets TIMEC=DX/VCONV, so ``cape_consumption_time``
@@ -843,12 +874,12 @@ class KainFritschConfig(NamedTuple):
     # bulk one-pass closure removes CAPE over TIMEC so this is the nominal
     # fraction removed per call, used only for diagnostics/documentation).
     cape_removal_fraction: float = 0.90
-    # Precipitation efficiency as a function of cloud-base height (Kain 2004
-    # / KF eta PEFCBH polynomial), used to split detrained condensate into
-    # rain vs retained cloud water.  Clamped to [pef_min, pef_max].
-    apply_precip_efficiency: bool = True
-    pef_min: float = 0.2
-    pef_max: float = 0.9
+    # NOTE: a cloud-base-height precipitation-efficiency retention scaling was
+    # removed (validator codex review-2 #1): under the ConvectionOutput
+    # contract microphysics owns precipitation, so scaling the cloud-water
+    # source down here leaked column water with no output channel to receive
+    # the precipitating fraction.  The full detrained condensate is now handed
+    # to microphysics, which applies precip efficiency via autoconversion.
 
 
 class EmanuelConfig(NamedTuple):
@@ -938,11 +969,20 @@ class EmanuelConfig(NamedTuple):
     alpha_closure: float = 0.2
     damp_coefficient: float = 0.1
     dtmax: float = 0.9
-    # Width [levels] of the smooth cloud-base-level selector used to read
-    # the parcel buoyancy excess at the LCL for the DTMA closure.  A
-    # narrow Gaussian (≈1 level) localises the buoyancy to cloud base
-    # while staying differentiable.
+    # Legacy width [levels] of the old smooth cloud-base selector.  Kept
+    # for config/back-compat; the faithful DTMA closure now pressure-
+    # interpolates exactly to PLCL as in CONVECT v4.3c lines 549-558.
     cloud_base_index_width: float = 1.0
+    # Pressure sharpness [1/Pa] for the differentiable mask that bounds
+    # the DTPBL average to levels between the launch level NK and cloud
+    # base ICB (CONVECT v4.3c lines 553-557).  1e-3 gives an O(1 kPa)
+    # transition, matching the shared LCL crossing sharpness.
+    lcl_pressure_sharpness: float = 1.0e-3
+    # Sharpness [1/level] of the below-LCL smooth index indicator used by the
+    # optional unsaturated-downdraft re-evaporation (surface-last: level index
+    # > k_lcl_smooth ⇒ below LCL).  Default 2.0 gives an ~1-level transition,
+    # matching the historical inline value.  Numerics (not a tunable closure).
+    below_lcl_index_sharpness: float = 2.0
     # Sharpness [1/(kg/m²/s)] of the softplus positive-part applied to the
     # relaxed CBMF so it is ~0 when the relaxation target goes negative
     # (stable column) without a hard ``max`` that would kill the gradient.
@@ -1152,6 +1192,18 @@ class TiedtkeConfig(NamedTuple):
     midlevel_M_b_fraction: float = 0.5  # M_b_midlevel = M_b_shallow * this
     # Single-plume scheme — see ZhangMcFarlaneConfig.buoyancy_death_memory.
     buoyancy_death_memory: bool = False
+    # Convective precipitation efficiency [0,1]: the fraction of the detrained
+    # plume condensate that has precipitated in the updraft and is therefore
+    # emitted as RAIN (ConvectionOutput.dq_r_conv_dt — a precipitating species
+    # that sediments via microphysics and is invisible to radiation) rather
+    # than detrained as suspended cloud water.  The plume docstring delegates
+    # precipitation to the calling scheme; this implements it as a bulk
+    # efficiency (same convention as SBMConfig.sbm_precip_efficiency /
+    # EmanuelConfig.precip_efficiency_max).  Observed deep-convective CPE
+    # ~0.5-0.9.  Default 0.0 = OFF (detrain all condensate as cloud, preserving
+    # existing behaviour); without it 100% of convective condensate loads the
+    # grid-scale cloud + radiation, which microphysics cannot drain.
+    precip_efficiency: float = 0.0
 
 
 class BechtoldConfig(NamedTuple):
@@ -1270,6 +1322,26 @@ class BechtoldConfig(NamedTuple):
     mc_normalize_scale: float = 0.05
     # Single-plume scheme — see ZhangMcFarlaneConfig.buoyancy_death_memory.
     buoyancy_death_memory: bool = False
+    # Vertical solve for the compensating subsidence + detrainment in the
+    # shared mass-flux kernel.  ``"advective"`` (default) is the legacy
+    # donor-cell advective form — BYTE-IDENTICAL to the historical scheme
+    # but conserves column dry-static-energy only to truncation order
+    # (the advective form leaves a non-telescoping ``(φ/ρ)dM/dz`` residual
+    # ⇒ a resolution-dependent MSE leak).  ``"implicit_flux"`` selects the
+    # IMPLICIT (backward-Euler / θ-blended) CONSERVATIVE flux-form solve
+    # (mass_flux.apply_mass_flux_kernel_implicit_flux): flux-form
+    # CONSERVATIVE unconditionally (transports s = c_pT+gz and q_v so the
+    # column MSE budget telescopes to machine precision for any M/θ/dt),
+    # and donor-cell backward-Euler STABLE in the production M/dt/Δp regime
+    # (diagonally dominant for θ·dt·g·M/Δp < 1; removes the 2Δz checkerboard
+    # the explicit flux form NaN'd on — decoupled from the M_b_max clip).
+    # The dispatch raises ValueError on any other value (fn-entry, static).
+    subsidence_solve: str = "advective"
+    # Off-centering for the implicit_flux solve.  1.0 = fully implicit
+    # (backward Euler, most damping, default); the kernel clamps to
+    # [0.5, 1.0] (θ ≥ 0.5 removes the explicit-side amplification).  Unused
+    # when subsidence_solve == "advective".
+    theta_implicit: float = 1.0
 
 
 class ConvectiveEDMFConfig(NamedTuple):
@@ -1320,7 +1392,11 @@ class ConvectionConfig(NamedTuple):
     sbm, dca, kuo, mass_flux, edmf, zhang_mcfarlane :
         Per-scheme configuration NamedTuples.
     update_interval_steps : int
-        Recompute convection every N time steps (1 = every step).
+        NOT YET IMPLEMENTED in the production physics pipeline — convection
+        is recomputed EVERY step regardless of this value.  Only the SCM
+        enforces it (rejecting values != 1 for stateful/non-autonomous
+        integrators, see ``scm.py``).  Retained as a forward-looking config
+        knob; setting it != 1 in a production driver is a silent no-op.
     """
     scheme: str = "sbm"
     sbm: SBMConfig = SBMConfig()
@@ -1333,4 +1409,6 @@ class ConvectionConfig(NamedTuple):
     emanuel: EmanuelConfig = EmanuelConfig()
     tiedtke: TiedtkeConfig = TiedtkeConfig()
     bechtold: BechtoldConfig = BechtoldConfig()
+    # NOT YET IMPLEMENTED in the production pipeline (see docstring above):
+    # convection runs every step; only the SCM reads this (rejection guard).
     update_interval_steps: int = 1

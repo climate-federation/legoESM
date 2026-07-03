@@ -44,3 +44,7 @@ class MultiLayerLandState(NamedTuple):
     # 30-day exponential moving average of near-surface air temperature
     # in [°C] — see ``LandState.TgC``.  Optional; ``None`` by default.
     TgC: jax.Array | None = None
+    # Surface ponding depth [m], (ncol,) — a coupled surface cell (ParFlow/CliMA
+    # overland store): excess precip ponds, infiltrates on later steps, and
+    # overflows to runoff above ``pond_max``.  ``None`` (legacy) is zero ponding.
+    surface_water: jax.Array = None

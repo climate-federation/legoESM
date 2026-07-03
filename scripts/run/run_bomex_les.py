@@ -49,10 +49,13 @@ import jax.numpy as jnp  # noqa: E402
 from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.dynamics import spectral_les_plane as sl  # noqa: E402
 from legoesm.atmosphere.dynamics.spectral_les_moist import (  # noqa: E402
+    LagrangianSDMSegmentDiagnostics,
     conserving_positive,
+    make_lagrangian_sdm_step_segment,
     make_lagrangian_sdm_les_step,
     make_anelastic_reference,
     make_les_microphysics_fn,
+    update_lagrangian_sdm_segment_diagnostics,
 )
 from legoesm.atmosphere.physics.microphysics.config import (  # noqa: E402
     MicrophysicsConfig,
@@ -62,6 +65,7 @@ from legoesm.atmosphere.physics.microphysics.sdm import (  # noqa: E402
     SDMConfig,
     diagnose_liquid_mixing_ratios,
     initialize_lagrangian_sdm,
+    sample_lognormal_radius,
     set_diagnostic_liquid_tracers,
     total_water_mass,
 )
@@ -76,13 +80,21 @@ from legoesm.timestepping.split_explicit import select_dt  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import les_record  # noqa: E402
 
-import os as _os  # noqa: E402
+from legoesm.atmosphere.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 
-_GSAM_ROOT = _os.environ.get(
-    "LEGOESM_GSAM_ROOT", "/home/gentine/Documents/Code/gSAM/gsam1.8.7/gSAM1.8.7"
-)
-_DEFAULT_CASE = f"{_GSAM_ROOT}/CASES/BOMEX"
+# Default case dir: external LEGOESM_GSAM_ROOT if set, else the repo-local
+# cache (scripts/data/fetch_les_forcing.py); --case-dir overrides. See
+# resolve_sam_case_dir.
+_DEFAULT_CASE = resolve_sam_case_dir("BOMEX")
 _FCOR = 0.376e-4                       # CASES/BOMEX/prm fcor [1/s]
+_DEFAULT_LAGRANGIAN_SD_PER_CELL = 64
+_DEFAULT_LAGRANGIAN_INIT_SAMPLING = "cell_stratified"
+_DEFAULT_LAGRANGIAN_DIAGNOSTIC_ASSIGNMENT = "cic"
+_DEFAULT_LAGRANGIAN_AEROSOL_SPECTRUM = "lognormal"
+_DEFAULT_LAGRANGIAN_AEROSOL_GEOM_STD = 2.0
+_DEFAULT_LAGRANGIAN_DRY_RADIUS_MIN = 1.0e-8
+_DEFAULT_LAGRANGIAN_DRY_RADIUS_MAX = 5.0e-7
+_DEFAULT_LAGRANGIAN_SEGMENT_STEPS = 64
 
 
 def parse_args():
@@ -112,8 +124,45 @@ def parse_args():
     p.add_argument("--lagrangian-sdm", action="store_true",
                    help="OPT-IN persistent advected Lagrangian SDM instead of "
                         "the Eulerian microphysics adapter.")
-    p.add_argument("--n-sd", type=int, default=4096,
-                   help="super-droplet slots for --lagrangian-sdm.")
+    p.add_argument("--n-sd", type=int, default=None,
+                   help="total super-droplet slots for --lagrangian-sdm. If "
+                        "omitted, uses --sdm-sd-per-cell times nx*ny*nz.")
+    p.add_argument("--sdm-sd-per-cell", type=int,
+                   default=_DEFAULT_LAGRANGIAN_SD_PER_CELL,
+                   help="default Lagrangian SDM slots per Eulerian cell when "
+                        "--n-sd is omitted. Faithful LES diagnostics generally "
+                        "need O(32-128) SD/cell.")
+    p.add_argument("--sdm-init-sampling",
+                   choices=["uniform", "cell_stratified"],
+                   default=_DEFAULT_LAGRANGIAN_INIT_SAMPLING,
+                   help="initial Lagrangian SDM particle placement. "
+                        "cell_stratified gives an exact per-cell SD-count floor; "
+                        "uniform preserves the legacy whole-volume Monte Carlo.")
+    p.add_argument("--sdm-diagnostic-assignment",
+                   choices=["nearest", "cic"],
+                   default=_DEFAULT_LAGRANGIAN_DIAGNOSTIC_ASSIGNMENT,
+                   help="particle-to-mesh assignment for diagnostic q_c/q_r.")
+    p.add_argument("--sdm-aerosol-spectrum",
+                   choices=["lognormal", "monodisperse"],
+                   default=_DEFAULT_LAGRANGIAN_AEROSOL_SPECTRUM,
+                   help="initial Lagrangian SDM aerosol mode. 'lognormal' "
+                        "samples dry CCN radii and starts near-dry; "
+                        "'monodisperse' preserves the legacy single wet radius.")
+    p.add_argument("--sdm-aerosol-geom-std", type=float,
+                   default=_DEFAULT_LAGRANGIAN_AEROSOL_GEOM_STD,
+                   help="geometric standard deviation of the lognormal dry "
+                        "aerosol mode for --sdm-aerosol-spectrum=lognormal.")
+    p.add_argument("--sdm-dry-radius-min", type=float,
+                   default=_DEFAULT_LAGRANGIAN_DRY_RADIUS_MIN,
+                   help="lower truncation radius [m] for the lognormal dry "
+                        "aerosol sampler.")
+    p.add_argument("--sdm-dry-radius-max", type=float,
+                   default=_DEFAULT_LAGRANGIAN_DRY_RADIUS_MAX,
+                   help="upper truncation radius [m] for the lognormal dry "
+                        "aerosol sampler.")
+    p.add_argument("--sdm-wet-radius-factor", type=float, default=1.0,
+                   help="initial wet water-equivalent radius divided by dry "
+                        "radius for lognormal aerosol seeding.")
     p.add_argument("--collision-mode", choices=["stochastic", "deterministic"],
                    default="stochastic",
                    help="Lagrangian SDM collision mode; default preserves the "
@@ -128,13 +177,21 @@ def parse_args():
     p.add_argument("--sdm-cdnc", type=float, default=1.0e8,
                    help="initial Lagrangian SDM number concentration [m^-3].")
     p.add_argument("--sdm-radius", type=float, default=1.0e-6,
-                   help="initial wet super-droplet radius [m].")
+                   help="legacy monodisperse initial wet super-droplet radius "
+                        "[m], used when --sdm-aerosol-spectrum=monodisperse.")
     p.add_argument("--sdm-dry-radius", type=float, default=5.0e-8,
-                   help="dry aerosol radius used to seed solute mass [m].")
+                   help="dry aerosol median radius [m] for lognormal seeding, "
+                        "or dry radius used to seed monodisperse solute mass.")
     p.add_argument("--sdm-solute-density", type=float, default=1770.0,
                    help="dry aerosol material density [kg/m^3].")
     p.add_argument("--sdm-seed", type=int, default=0,
                    help="PRNG seed for initial particles and stochastic collisions.")
+    p.add_argument("--sdm-segment-steps", type=int,
+                   default=_DEFAULT_LAGRANGIAN_SEGMENT_STEPS,
+                   help="number of Lagrangian-SDM steps per compiled loop chunk; "
+                        "larger values reduce host synchronization frequency, "
+                        "while print/record events still occur at exact step "
+                        "boundaries.")
     p.add_argument("--n-tracers", type=int, default=9,
                    help="standard slot layout; 9 covers the double-moment "
                         "schemes (morrison/thompson/sb).")
@@ -206,6 +263,20 @@ def build(args, dtype):
         filter_monotone_scalars=args.filter_monotone_scalars)
     g = sl.make_grid(cfg, dtype=dtype)
     case = Path(args.case_dir)
+    if not case.is_dir():
+        # The BOMEX forcing (snd/lsf/sfc) is read from a gSAM CASES checkout that
+        # is NOT bundled in this repo; the default path is a non-portable absolute
+        # path. Fail early with actionable guidance instead of a deep
+        # FileNotFoundError on the first read_sam_* call.
+        sys.exit(
+            f"[run_bomex_les] BOMEX case directory not found: {case}\n"
+            f"  This case reads the gSAM CASES/BOMEX deck. Populate the "
+            f"repo-local cache from a gSAM checkout:\n"
+            f"    python scripts/data/fetch_les_forcing.py --only BOMEX\n"
+            f"  or point at a checkout directly: LEGOESM_GSAM_ROOT=<root "
+            f"containing CASES/>, or --case-dir <path/to/CASES/BOMEX>.\n"
+            f"  (Same applies to the sibling rico/dycoms/gate/lba LES drivers.)"
+        )
     snd = read_sam_snd(case / "snd")
     lsf = read_sam_lsf(case / "lsf")
     sfc0 = surface_at_day(read_sam_sfc(case / "sfc"), day=0.0)
@@ -318,15 +389,44 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
     """Run BOMEX with the opt-in persistent Lagrangian SDM coupling."""
     if args.n_tracers < 3:
         raise ValueError("--lagrangian-sdm needs --n-tracers >= 3")
-    if args.n_sd < 1:
-        raise ValueError("--n-sd must be >= 1")
+    n_cells = g.cfg.nx * g.cfg.ny * g.cfg.nz
+    if args.n_sd is None:
+        if args.sdm_sd_per_cell < 1:
+            raise ValueError("--sdm-sd-per-cell must be >= 1")
+        n_sd = int(args.sdm_sd_per_cell) * n_cells
+    else:
+        if args.n_sd < 1:
+            raise ValueError("--n-sd must be >= 1")
+        n_sd = int(args.n_sd)
 
     dt0 = (select_dt(g.dx, max_wind_safe=args.max_wind, cfl_safe=args.cfl,
                      dt_cap=args.dt_max) if args.adaptive_dt
            else float(args.dt))
     dry_r = max(float(args.sdm_dry_radius), 0.0)
-    solute_mass = (
-        4.0 / 3.0 * np.pi * float(args.sdm_solute_density) * dry_r ** 3)
+    if args.sdm_aerosol_spectrum == "lognormal":
+        if args.sdm_wet_radius_factor < 1.0:
+            raise ValueError("--sdm-wet-radius-factor must be >= 1")
+        if args.sdm_dry_radius_min <= 0.0:
+            raise ValueError("--sdm-dry-radius-min must be > 0")
+        if args.sdm_dry_radius_max <= args.sdm_dry_radius_min:
+            raise ValueError("--sdm-dry-radius-max must be > --sdm-dry-radius-min")
+        k_init, k_aero = jax.random.split(jax.random.PRNGKey(args.sdm_seed))
+        dry_radii = sample_lognormal_radius(
+            k_aero, n_sd, dry_r, float(args.sdm_aerosol_geom_std),
+            r_min=float(args.sdm_dry_radius_min),
+            r_max=float(args.sdm_dry_radius_max),
+            dtype=dtype)
+        solute_mass = (
+            4.0 / 3.0 * jnp.pi * float(args.sdm_solute_density) * dry_radii ** 3)
+        initial_radius = float(args.sdm_wet_radius_factor) * dry_radii
+    elif args.sdm_aerosol_spectrum == "monodisperse":
+        k_init = jax.random.PRNGKey(args.sdm_seed)
+        solute_mass = (
+            4.0 / 3.0 * np.pi * float(args.sdm_solute_density) * dry_r ** 3)
+        initial_radius = args.sdm_radius
+    else:  # pragma: no cover - argparse choices guard this path.
+        raise ValueError(
+            f"unknown --sdm-aerosol-spectrum {args.sdm_aerosol_spectrum!r}")
     sdm_cfg = SDMConfig(
         n_substeps_condensation=max(1, int(args.micro_substeps)),
         # The Köhler diffusional-growth ODE is STIFF at LES dt; explicit rk4 with
@@ -337,13 +437,20 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
         condensation_integrator=args.condensation_integrator,
         collision_mode=args.collision_mode,
         cdnc=float(args.sdm_cdnc),
+        lagrangian_diagnostic_assignment=args.sdm_diagnostic_assignment,
     )
     sdm = initialize_lagrangian_sdm(
-        jax.random.PRNGKey(args.sdm_seed), g, n_sd=args.n_sd,
-        number_concentration=args.sdm_cdnc, radius=args.sdm_radius,
-        solute_mass=solute_mass, dtype=dtype)
-    q_c0, q_r0 = diagnose_liquid_mixing_ratios(sdm, g, ref.rho_c, sdm_cfg.r_rain)
+        k_init, g, n_sd=n_sd,
+        number_concentration=args.sdm_cdnc, radius=initial_radius,
+        solute_mass=solute_mass, dtype=dtype,
+        spatial_sampling=args.sdm_init_sampling)
+    q_c0, q_r0 = diagnose_liquid_mixing_ratios(
+        sdm, g, ref.rho_c, sdm_cfg.r_rain, r_cloud=sdm_cfg.r_cloud,
+        assignment=sdm_cfg.lagrangian_diagnostic_assignment)
     st = st._replace(tracers=set_diagnostic_liquid_tracers(st.tracers, q_c0, q_r0))
+    del solute_mass, initial_radius, q_c0, q_r0
+    if args.sdm_aerosol_spectrum == "lognormal":
+        del dry_radii
 
     forcing = make_forcing_fn(g, ref, forc, dtype)
     lag_step = make_lagrangian_sdm_les_step(
@@ -358,8 +465,7 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
     spf = jnp.where(zf > z_sp, 0.5 * (1.0 - jnp.cos(
         jnp.pi * (zf - z_sp) / (args.Lz - z_sp))), 0.0).astype(dtype)
 
-    @partial(jax.jit, static_argnames=("first",))
-    def step(state, sdm_state, dt, first=False):
+    def step_raw(state, sdm_state, dt, first=False):
         if args.micro_order == "pre":
             state = forcing(state, dt)
         state, sdm_state, us, diag = lag_step(
@@ -374,16 +480,23 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
         u, v, w = sl.project(u, v, w, dt=dt, g=g)
         return state._replace(u=u, v=v, w=w), sdm_state, us, diag
 
+    step = partial(jax.jit, static_argnames=("first",))(step_raw)
+
     T = args.hours * 3600.0
     n_steps = int(np.ceil(T / dt0 - 1.0e-12))
     print(f"[BOMEX LES Lagrangian-SDM] {args.nx}x{args.ny}x{args.nz} "
           f"dx={g.dx:.0f} dz={g.dz:.0f} dt={dt0:.2f}s {args.time_scheme} "
           f"sgs={'LASD' if args.dynamic else args.sgs_model} "
-          f"n_sd={args.n_sd} collision={args.collision_mode} "
+          f"n_sd={n_sd} ({n_sd / n_cells:.1f}/cell) "
+          f"init={args.sdm_init_sampling} deposit={args.sdm_diagnostic_assignment} "
+          f"collision={args.collision_mode} "
           f"dtype={dtype.__name__}")
     print(f"  sfc: SHF={forc['sfc']['shf']:.1f} LHF={forc['sfc']['lhf']:.1f} "
           f"W/m²; CDNC={args.sdm_cdnc:.2e} m^-3, "
-          f"r_wet={args.sdm_radius:.2e} m, r_dry={dry_r:.2e} m; "
+          f"aerosol={args.sdm_aerosol_spectrum}, "
+          f"r_dry={dry_r:.2e} m, "
+          f"gstd={args.sdm_aerosol_geom_std:.2f}, "
+          f"wet_factor={args.sdm_wet_radius_factor:.2f}; "
           f"{n_steps} steps")
 
     rec = args.record_frames > 0
@@ -409,35 +522,88 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
     z0p = np.asarray(sdm.z)
     water0 = float(total_water_mass(sdm, st.tracers, g, ref.rho_c))
     dt = jnp.asarray(dt0, dtype)
+    run_segment = make_lagrangian_sdm_step_segment(
+        step_raw, segment_steps=args.sdm_segment_steps, donate_args=True)
     if rec:
         _save(0.0)
-    t = 0.0; i = 0
-    next_rec = T / args.record_frames if rec else np.inf
-    max_sdm_water_error = 0.0
+    t = 0.0
+    i = 0
+    rec_interval = T / args.record_frames if rec else np.inf
+    next_rec = rec_interval
+
+    def _ceil_step(t_seconds):
+        return int(np.ceil(t_seconds / dt0 - 1.0e-12))
+
+    next_rec_step = _ceil_step(next_rec) if rec else n_steps + 1
+    next_print_step = args.print_every
+    zero = jnp.asarray(0.0, dtype)
+    diag_acc = LagrangianSDMSegmentDiagnostics(
+        max_abs_total_water_error=zero,
+        total_water_error=zero,
+        n_active=zero,
+        u_star=zero,
+    )
+
+    def _print_progress():
+        mw = float(jnp.max(jnp.abs(st.w)))
+        if not np.isfinite(mw) or mw > 1e3:
+            print(f"[BLOWUP] step {i} max|w|={mw}")
+            return 1
+        d = moist_profiles(st, g, ref)
+        precip = float(jnp.mean(sdm.surface_precip))
+        print(f"{i:7d} {t/3600.0:5.2f}h max|w|={mw:5.2f} "
+              f"cc={d['cloud_cover']:.3f} LWP={d['lwp']:6.2f} g/m² "
+              f"qc_max={float(jnp.max(st.tracers[..., 1])):.2e} "
+              f"qr_max={float(jnp.max(st.tracers[..., 2])):.2e} "
+              f"Psurf={precip:.3e} kg/m² "
+              f"n_act={float(diag_acc.n_active):.0f} "
+              f"sdm_dwater={float(diag_acc.total_water_error):.2e} "
+              f"u*={float(diag_acc.u_star):.3f}", flush=True)
+        return 0
+
+    def _handle_events():
+        nonlocal next_rec, next_rec_step, next_print_step
+        if i == next_print_step:
+            rc = _print_progress()
+            if rc != 0:
+                return rc
+            next_print_step += args.print_every
+        while rec and i >= next_rec_step and frame < args.record_frames:
+            _save(t / 3600.0)
+            next_rec += rec_interval
+            next_rec_step = _ceil_step(next_rec)
+        if rec and frame >= args.record_frames:
+            next_rec_step = n_steps + 1
+        return 0
+
     t0_wall = time.time()
-    while t < T:
-        st, sdm, us, diag = step(st, sdm, dt, first=(i == 0))
-        max_sdm_water_error = max(
-            max_sdm_water_error, abs(float(diag["total_water_error"])))
-        t += dt0; i += 1
-        if i % args.print_every == 0:
-            mw = float(jnp.max(jnp.abs(st.w)))
-            if not np.isfinite(mw) or mw > 1e3:
-                print(f"[BLOWUP] step {i} max|w|={mw}"); return 1
-            d = moist_profiles(st, g, ref)
-            precip = float(jnp.mean(sdm.surface_precip))
-            print(f"{i:7d} {t/3600.0:5.2f}h max|w|={mw:5.2f} "
-                  f"cc={d['cloud_cover']:.3f} LWP={d['lwp']:6.2f} g/m² "
-                  f"qc_max={float(jnp.max(st.tracers[..., 1])):.2e} "
-                  f"qr_max={float(jnp.max(st.tracers[..., 2])):.2e} "
-                  f"Psurf={precip:.3e} kg/m² n_act={float(diag['n_active']):.0f} "
-                  f"sdm_dwater={float(diag['total_water_error']):.2e} "
-                  f"u*={float(us):.3f}", flush=True)
-        if rec and t >= next_rec and frame < args.record_frames:
-            _save(t / 3600.0); next_rec += T / args.record_frames
+    if n_steps > 0:
+        st, sdm, us, diag = step(st, sdm, dt, first=True)
+        diag_acc = update_lagrangian_sdm_segment_diagnostics(diag_acc, us, diag)
+        del us, diag
+        i = 1
+        t = i * dt0
+        rc = _handle_events()
+        if rc != 0:
+            return rc
+    while i < n_steps:
+        target_step = min(n_steps, next_print_step, next_rec_step)
+        steps_to_event = target_step - i
+        while steps_to_event > 0:
+            chunk_steps = min(args.sdm_segment_steps, steps_to_event)
+            st, sdm, diag_acc = run_segment(
+                st, sdm, dt, jnp.asarray(chunk_steps, jnp.int32), diag_acc)
+            jax.block_until_ready(diag_acc.total_water_error)
+            i += chunk_steps
+            t = i * dt0
+            steps_to_event = target_step - i
+        rc = _handle_events()
+        if rc != 0:
+            return rc
     wall = time.time() - t0_wall
     rate = i / wall if wall > 0.0 else np.inf
     print(f"[DONE-LAGRANGIAN-SDM] wall={wall:.0f}s  {rate:.1f} steps/s")
+    max_sdm_water_error = float(diag_acc.max_abs_total_water_error)
     if rec and frame < args.record_frames:
         _save(t / 3600.0)
     d = moist_profiles(st, g, ref)
@@ -453,6 +619,12 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
         water_initial=water0, water_final=water1,
         max_sdm_water_error=max_sdm_water_error,
         mean_particle_displacement=mean_disp,
+        n_sd=n_sd,
+        sd_per_cell=n_sd / n_cells,
+        aerosol_spectrum=args.sdm_aerosol_spectrum,
+        dry_radius_median=dry_r,
+        aerosol_geom_std=float(args.sdm_aerosol_geom_std),
+        wet_radius_factor=float(args.sdm_wet_radius_factor),
         n_active=float(jnp.sum(sdm.droplets.active)))
     print(f"  FINAL: cloud cover={d['cloud_cover']:.3f}, "
           f"LWP={d['lwp']:.2f} g/m², "
@@ -480,6 +652,10 @@ def main():
         raise ValueError("--micro-substeps must be >= 1")
     if args.micro_relax_factor <= 0.0:
         raise ValueError("--micro-relax-factor must be > 0")
+    if args.print_every < 1:
+        raise ValueError("--print-every must be >= 1")
+    if args.sdm_segment_steps < 1:
+        raise ValueError("--sdm-segment-steps must be >= 1")
     dtype = jnp.float32 if args.f32 else jnp.float64
     args.output.mkdir(parents=True, exist_ok=True)
     g, st, ref, forc, th_prof = build(args, dtype)

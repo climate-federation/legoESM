@@ -54,10 +54,7 @@ from legoesm.grids.halo import (
 
 logger = logging.getLogger("legoesm.parallel.cubesphere_exchange")
 
-try:
-    from jax import shard_map  # JAX >= 0.8 exposes it at top level
-except ImportError:
-    from jax.experimental.shard_map import shard_map  # older JAX fallback
+from legoesm.parallel.shard_map_compat import shard_map
 
 # ---------------------------------------------------------------------------
 # Static connectivity tables (built once at import).
@@ -542,8 +539,8 @@ def _make_exchange_ppermute(mesh, ndim, with_offsets=False):
     # cubed-sphere SPMD tests vs. pre-iter-93b baseline). The
     # outer-scope construction runs ONCE per factory call (when
     # `_make_exchange_ppermute` is called from
-    # `activate_spmd_halo_backend`), which is after
-    # `ensure_metal_or_fallback()` has run — so no Metal crash.
+    # `activate_spmd_halo_backend`), which is after backend
+    # configuration has run.
     ppermute_send_j = jnp.asarray(_PPERMUTE_SEND)
     ppermute_recv_j = jnp.asarray(_PPERMUTE_RECV)
     ppermute_rev_j = jnp.asarray(_PPERMUTE_REV)
@@ -1587,6 +1584,14 @@ def make_tiled_pad_vector_body(mesh, ndim, halo=1, with_offsets=True):
 
     def _vbody(u_tile, v_tile, cos_angle, sin_angle,
                cos_angle_padded, sin_angle_padded, offsets):
+        # The angle metrics are 2D tile blocks (interior (n_loc,n_loc); padded
+        # (n_loc+2h, n_loc+2h)).  A 4D global wind (ndim=4) leaves a trailing
+        # channel/level axis on the per-device tile (n_loc, n_loc, C), so the
+        # rotation must broadcast the angle over that axis.  ndim=3 (SW): the
+        # wind tile is 2D == the angle rank -> no reshape (path unchanged).
+        if u_tile.ndim == cos_angle.ndim + 1:
+            cos_angle = cos_angle[..., None]
+            sin_angle = sin_angle[..., None]
         # 1. grid -> geographic (east, north): continuous across seams.
         u_east = cos_angle * u_tile - sin_angle * v_tile
         v_north = sin_angle * u_tile + cos_angle * v_tile
@@ -1595,6 +1600,9 @@ def make_tiled_pad_vector_body(mesh, ndim, halo=1, with_offsets=True):
         v_north_pad = scalar_body(v_north, offsets)
         # 3. geographic -> grid with the PADDED angle (inverse of step 1).
         cap, sap = cos_angle_padded, sin_angle_padded
+        if u_east_pad.ndim == cap.ndim + 1:
+            cap = cap[..., None]
+            sap = sap[..., None]
         u_pad = cap * u_east_pad + sap * v_north_pad
         v_pad = -sap * u_east_pad + cap * v_north_pad
         return u_pad, v_pad
@@ -2198,6 +2206,7 @@ def packed_pad_halo_4d(
                 f"FV3_3D.md iter-1072."
             )
 
+    from legoesm.grids.duogrid import apply_duogrid_4d
     if len(fields) == 1:
         out = explicit_pad_halo_4d(
             fields[0], mesh, halo=halo, interp_offsets=interp_offsets,
@@ -2207,7 +2216,7 @@ def packed_pad_halo_4d(
         # `packed_pad_halo_4d(f, duogrid=dg)` silently returned a nearest-copy
         # halo while the unpacked `pad_halo_4d(f, duogrid=dg)` applied the remap).
         if duogrid is not None:
-            out = _apply_duogrid_4d(out, duogrid, halo=halo)
+            out = apply_duogrid_4d(out, duogrid, halo=halo)
         return [out]
 
     # Use plain Python ints for split indices so JAX treats them as
@@ -2222,26 +2231,8 @@ def packed_pad_halo_4d(
     )
     pieces = list(jnp.split(padded, split_indices, axis=-1))
     if duogrid is not None:
-        pieces = [_apply_duogrid_4d(p, duogrid, halo=halo) for p in pieces]
+        pieces = [apply_duogrid_4d(p, duogrid, halo=halo) for p in pieces]
     return pieces
-
-
-def _apply_duogrid_4d(padded, duogrid, halo):
-    """Apply duogrid kinked-to-extended remap + corner fill to a 4D
-    padded field, level-by-level via ``jax.vmap``.  Mirrors the
-    post-processing loop inside ``halo.pad_halo_4d``.
-    """
-    from legoesm.grids.duogrid import cube_rmp_vectorized, fill_corner_region
-    import jax
-
-    def _remap_level(level_slice):
-        level_slice = cube_rmp_vectorized(level_slice, duogrid, halo)
-        level_slice = fill_corner_region(level_slice, duogrid, halo)
-        return level_slice
-
-    padded_t = jnp.transpose(padded, (3, 0, 1, 2))
-    padded_t = jax.vmap(_remap_level)(padded_t)
-    return jnp.transpose(padded_t, (1, 2, 3, 0))
 
 
 # ===================================================================
@@ -2251,8 +2242,29 @@ def _apply_duogrid_4d(padded, duogrid, halo):
 _spmd_mesh = None
 
 
+def _mesh_supports_face_exchange(mesh) -> bool:
+    """True iff ``mesh`` can run the SPMD cube halo exchange.
+
+    The face-axis ppermute/all_gather kernels block-partition the
+    length-6 face axis over the ``"face"`` mesh axis, so the device
+    count must divide 6 (1, 2, 3 or 6) — OR the mesh must be a
+    ``(6, kt, kt)`` sub-face *tiled* mesh.  Any other device count
+    (4, 5, 7, 8, …) cannot face-sub-shard and must run the halo
+    REPLICATED (see ``activate_spmd_halo_backend(..., allow_replicated
+    _fallback=True)``).  Static (reads only ``mesh.devices`` shape) —
+    safe to call outside a trace.
+    """
+    n_devices = len(mesh.devices.flat)
+    sh = tuple(mesh.devices.shape)
+    is_tiled = (
+        len(sh) == 3 and sh[0] == 6 and sh[1] == sh[2] and sh[1] >= 2
+    )
+    return is_tiled or (n_devices >= 1 and 6 % n_devices == 0)
+
+
 def activate_spmd_halo_backend(
     mesh, n: int = 0, nlev: int = 1, *, force_allgather: bool | None = None,
+    allow_replicated_fallback: bool = False,
 ) -> None:
     """Switch the global halo backend to explicit SPMD exchange.
 
@@ -2266,7 +2278,9 @@ def activate_spmd_halo_backend(
     Parameters
     ----------
     mesh : jax.sharding.Mesh
-        Face-axis mesh; the device count must divide 6.
+        Face-axis mesh; the device count must divide 6 (1, 2, 3, 6) or
+        be a ``(6, kt, kt)`` tiled mesh.  A non-divisor count (e.g. an
+        8-chip TPU slice) is rejected unless ``allow_replicated_fallback``.
     n : int
         Per-face resolution.  Retained for call-site compatibility and
         logging; no longer drives backend choice (the retired volume
@@ -2277,14 +2291,59 @@ def activate_spmd_halo_backend(
         ``True`` selects the all_gather diagnostic kernels.  ``None``
         (default) defers to the ``LEGOESM_SPMD_FORCE_ALLGATHER=1``
         environment override, otherwise ppermute.
+    allow_replicated_fallback : bool
+        When the mesh cannot face-sub-shard (device count does not
+        divide 6 and not a ``(6, kt, kt)`` tile), ``False`` (default)
+        RAISES — a non-divisor face mesh is a configuration error, not
+        silently degraded (dispatch-hardening).  ``True`` instead leaves
+        the LOCAL halo backend active (each device holds all 6 faces;
+        the halo is filled by the serial ``pad_halo_local_*`` body, so
+        the result is bit-identical to single-device), logging the
+        replication loudly.  Use for an 8-chip TPU slice / any
+        non-divisor count where a correct replicated cube halo is wanted
+        over a crash.  Numerics are unchanged; only the cross-device
+        face exchange is skipped (each device recomputes it locally).
     """
     global _spmd_mesh, _use_ppermute
     from legoesm.grids import halo
+    n_devices = len(mesh.devices.flat)
+    _mshape = tuple(mesh.devices.shape)
+    _is_tiled = (
+        len(_mshape) == 3 and _mshape[0] == 6
+        and _mshape[1] == _mshape[2] and _mshape[1] >= 2
+    )
+    # A mesh that cannot face-sub-shard (count does not divide 6 and is not a
+    # (6,kt,kt) tile) either runs the cube halo REPLICATED on the serial local
+    # body (opt-in, bit-identical to single-device) or is REFUSED — never a
+    # silent half-activation. Checked FIRST, BEFORE the corner-fill restriction
+    # and any global mutation: a refusal leaves state untouched, and the
+    # replicated fallback is deliberately NOT subject to the SPMD-kernel
+    # corner_fill='avg' rule below (the local pad body honors every corner mode).
+    if not _mesh_supports_face_exchange(mesh):
+        if allow_replicated_fallback:
+            logger.warning(
+                "SPMD cube halo: %d devices (shape %s) cannot face-sub-shard "
+                "6; running the cube halo REPLICATED (local pad body, each "
+                "device holds all 6 faces — bit-identical to single-device, no "
+                "cross-device face exchange).",
+                n_devices, _mshape,
+            )
+            _spmd_mesh = None
+            halo._halo_backend = "local"
+            halo._spmd_mesh = None
+            return
+        raise ValueError(
+            f"SPMD halo backend requires a face-axis mesh whose device "
+            f"count divides 6 (1, 2, 3 or 6) or a (6, kt, kt) tiled "
+            f"mesh, got {n_devices} devices, shape {_mshape}. Pass "
+            f"allow_replicated_fallback=True to run the cube halo REPLICATED "
+            f"on this device count instead."
+        )
     # The SPMD exchange kernels hard-code AVERAGE corner fill at the 4 cube
     # corners (3-face junctions); they do NOT honor the non-default
     # ``_corner_fill_mode`` the serial/mpi4jax paths apply. Reject non-avg modes
     # so SPMD never silently produces wrong corner cells (codex review). Checked
-    # FIRST, before any global mutation, so a raise leaves state untouched.
+    # before any global mutation, so a raise leaves state untouched.
     cfm = halo.get_corner_fill_mode()
     if cfm != "avg":
         raise NotImplementedError(
@@ -2292,18 +2351,6 @@ def activate_spmd_halo_backend(
             f"'{cfm}': the 4 cube-corner cells would silently mismatch the "
             f"serial path. Call set_corner_fill_mode('avg'), or use the mpi4jax "
             f"backend for non-avg corner fills.")
-    n_devices = len(mesh.devices.flat)
-    _mshape = tuple(mesh.devices.shape)
-    _is_tiled = (
-        len(_mshape) == 3 and _mshape[0] == 6
-        and _mshape[1] == _mshape[2] and _mshape[1] >= 2
-    )
-    if not _is_tiled and (n_devices < 1 or 6 % n_devices != 0):
-        raise ValueError(
-            f"SPMD halo backend requires a face-axis mesh whose device "
-            f"count divides 6 (1, 2, 3 or 6) or a (6, kt, kt) tiled "
-            f"mesh, got {n_devices} devices, shape {_mshape}."
-        )
     if _is_tiled and (force_allgather
                       or os.environ.get(_FORCE_ALLGATHER_ENV) == "1"):
         # Checked BEFORE any global mutation: tiled meshes have no

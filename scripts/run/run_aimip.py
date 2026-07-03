@@ -524,8 +524,10 @@ def _evaluate_variant(
             mode="state_update",
             dt_sfno=eval_dt_sfno,
             correct_mass=True,
-            correct_moisture_budget=True,
-            clip_q=True,
+            # Not yet wired in the SFNO PE bridge (spectral moisture tracer
+            # needs synthesis/clip/re-analysis); previously silently ignored.
+            correct_moisture_budget=False,
+            clip_q=False,
             use_normalization=False,
         )
         eval_full_wrapper = SFNOPrimitiveEquationModel(

@@ -165,7 +165,7 @@ _LOGNORMAL_32 = 1.5
 def _kernel_matrix(masses, config: FastSBMConfig):
     """Collision kernel K(m_i, m_j) [m^3/s] from computed formulations
     (the oracle's YW* tables are file-read; CLAUDE-spec'd substitution —
-    see docs/specs/bin_microphysics.md kernel strategy)."""
+    see docs/science/specs/bin_microphysics.md kernel strategy)."""
     r = radius_from_mass(masses)
     ri, rj = r[:, None], r[None, :]
     if config.collision_kernel == "golovin":

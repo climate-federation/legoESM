@@ -24,16 +24,19 @@ from legoesm.parallel.profiling import mpi_timer
 _TESTED_JAX_MIN = (0, 8, 0)
 _TESTED_JAX_MAX_EXCL = (0, 10, 0)
 _TESTED_MPI4JAX_MIN = (0, 8, 0)
-_TESTED_MPI4JAX_MAX_EXCL = (0, 9, 0)
+_TESTED_MPI4JAX_MAX_EXCL = (0, 10, 0)
 
-# mpi4jax 0.8.x uses the deprecated API_VERSION_STATUS_RETURNING custom-call
-# convention removed in JAX 0.10.  Until mpi4jax ships an FFI-based release,
-# pin JAX < 0.10 for MPI workloads.  The warning from XLA is cosmetic for now
-# (the API still functions) but will become a hard error once JAX 0.10 ships.
+# mpi4jax 0.9.0 shipped the FFI rewrite (mpi4jax#289): the collectives now use
+# JAX's modern FFI mechanism instead of the legacy API_VERSION_STATUS_RETURNING
+# custom call, so they no longer emit the XLA deprecation warning and survive
+# the legacy-API removal in JAX 0.10.  Validated np=2 on this stack (issue #567):
+# mpi4jax 0.8.1 emits STATUS_RETURNING, 0.9.0 does not (allreduce numerics
+# match).  Prefer mpi4jax >= 0.9; 0.8.x still functions but on the deprecated
+# (warned, slow) custom-call path.
 _MPI4JAX_FFI_MIGRATION_NOTE = (
-    "mpi4jax 0.8.x uses a custom-call API deprecated in JAX 0.9 and removed "
-    "in JAX 0.10.  Monitor https://github.com/mpi4jax/mpi4jax for an FFI-based "
-    "release.  Until then, pin JAX < 0.10 for MPI workloads."
+    "mpi4jax 0.8.x uses a custom-call API deprecated in JAX 0.9 and removed in "
+    "JAX 0.10.  Upgrade to mpi4jax >= 0.9 (the FFI rewrite, mpi4jax#289), which "
+    "uses JAX's FFI mechanism and works on JAX 0.10+."
 )
 
 
@@ -90,7 +93,7 @@ def _check_mpi4jax_api_version_deprecation() -> str | None:
         return (
             "mpi4jax is using the deprecated API_VERSION_STATUS_RETURNING "
             "custom-call interface, which is incompatible with modern JAX. "
-            "Upgrade mpi4jax: pip install 'mpi4jax>=0.8,<0.9'"
+            "Upgrade mpi4jax: pip install 'mpi4jax>=0.9,<0.10'"
         )
 
     # Also check via XLA custom call registration if available.
@@ -101,7 +104,7 @@ def _check_mpi4jax_api_version_deprecation() -> str | None:
                 return (
                     f"mpi4jax xla_bridge uses deprecated attribute "
                     f"'{attr_name}', indicating an incompatible custom-call "
-                    "API. Upgrade mpi4jax: pip install 'mpi4jax>=0.8,<0.9'"
+                    "API. Upgrade mpi4jax: pip install 'mpi4jax>=0.9,<0.10'"
                 )
 
     return None
@@ -129,7 +132,7 @@ def _validate_mpi_runtime_versions(
             f"{_format_range(_TESTED_MPI4JAX_MIN, _TESTED_MPI4JAX_MAX_EXCL)} "
             f"because older versions use incompatible token semantics. "
             f"Detected mpi4jax=={mpi4jax_version}. "
-            f"Fix: pip install 'mpi4jax>=0.8,<0.9'",
+            f"Fix: pip install 'mpi4jax>=0.9,<0.10'",
         )
 
     # Detect API_VERSION_STATUS_RETURNING deprecation (fail-fast).
@@ -163,7 +166,7 @@ def _validate_mpi_runtime_versions(
         + ". MPI execution may fail or produce incorrect results. "
         + _MPI4JAX_FFI_MIGRATION_NOTE + " "
         "Set LEGOESM_MPI_STRICT_COMPAT=1 to turn this into a hard error, "
-        "or install tested versions: pip install 'mpi4jax>=0.8,<0.9'"
+        "or install tested versions: pip install 'mpi4jax>=0.9,<0.10'"
     )
     if strict:
         raise RuntimeError(msg)
@@ -205,6 +208,99 @@ def mpi_stack_outside_tested_range() -> bool:
     return not (in_jax and in_mpi4jax)
 
 
+# --- mpi4jax GPU transport (device-direct vs host-staged) -------------------
+# mpi4jax decides, once per process, whether a halo ``sendrecv`` hands the
+# on-device buffer straight to (GPU-aware) MPI or first copies
+# device->host->device.  The switch is the env var ``MPI4JAX_USE_CUDA_MPI``
+# (read in mpi4jax's decorators): unset/falsy -> HOST-STAGED (always safe, but
+# the per-exchange host round-trip caps multi-GPU scaling); truthy ->
+# GPU-DIRECT (fast, but segfaults if mpi4jax has no CUDA extension or the MPI is
+# not GPU-aware).  legoESM hands device arrays to ``sendrecv`` unconditionally,
+# so on a GPU backend this choice is otherwise INVISIBLE -- a silent host-stage
+# looks like "the halo works but doesn't scale".  ``mpi4jax.has_cuda_support()``
+# reports whether the CUDA extension was built in; a missing or raising
+# predicate is treated as UNPROVEN (we fail closed when GPU-direct is requested).
+_GPU_TRANSPORT_BACKENDS = ("gpu", "cuda", "rocm")
+_mpi4jax_transport_warned = False
+
+_MPI4JAX_NO_CUDA_EXT_MSG = (
+    "MPI4JAX_USE_CUDA_MPI is set (GPU-direct halo exchange requested) on a GPU "
+    "backend, but this mpi4jax does not report usable CUDA support "
+    "(mpi4jax.has_cuda_support() returned False or could not be called): handing "
+    "an on-device sendrecv buffer to MPI would error or segfault. Rebuild "
+    "mpi4jax with CUDA against the GPU-aware Cray MPICH "
+    "(scripts/cluster/scaling_derecho/README.md), or unset MPI4JAX_USE_CUDA_MPI "
+    "to use the (slower) host-staged path."
+)
+_MPI4JAX_HOST_STAGED_MSG = (
+    "GPU backend with a CUDA-capable mpi4jax, but MPI4JAX_USE_CUDA_MPI is unset: "
+    "every halo sendrecv copies device->host->device, which caps multi-GPU "
+    "scaling. Export MPI4JAX_USE_CUDA_MPI=1 for GPU-direct halo exchange (also "
+    "needs MPICH_GPU_SUPPORT_ENABLED=1 and the craype-accel-nvidia80 GTL on "
+    "Cray/Slingshot)."
+)
+
+
+def _mpi4jax_transport_action(
+    backend: str, use_cuda_mpi: bool, cuda_built: bool | None
+) -> str:
+    """Decide the halo-transport diagnostic: ``"ok"`` | ``"warn"`` | ``"raise"``.
+
+    Pure (no I/O, no globals) so the policy is unit-testable in isolation.
+
+    * ``"raise"`` -- GPU backend with GPU-direct REQUESTED (``use_cuda_mpi``) but
+      CUDA support not POSITIVELY proven (``cuda_built`` is ``False`` *or*
+      ``None``/unintrospectable): handing an on-device ``sendrecv`` buffer to MPI
+      would error or segfault, so fail CLOSED before the first halo exchange.
+    * ``"warn"``  -- GPU backend, the toggle UNSET, and a CUDA-capable mpi4jax:
+      the halo silently host-stages (device<->host copy), capping GPU scaling.
+    * ``"ok"``    -- CPU/TPU (toggle irrelevant); a proven GPU-direct run; or a
+      host-staged run whose build offers no usable CUDA path anyway (nothing
+      actionable to say).
+    """
+    if backend not in _GPU_TRANSPORT_BACKENDS:
+        return "ok"
+    if use_cuda_mpi:
+        # GPU-direct demanded: only a positive proof of CUDA support is safe.
+        # ``None`` (predicate missing/raising) is NOT proof -> fail closed.
+        return "ok" if cuda_built is True else "raise"
+    # Toggle unset -> host-staged (safe). Nudge only when GPU-direct is actually
+    # available; stay quiet when it is unavailable or cannot be proven.
+    return "warn" if cuda_built is True else "ok"
+
+
+def check_mpi4jax_transport(mpi4jax) -> None:
+    """Surface the mpi4jax GPU halo transport mode.
+
+    Called from every checked entry point that can issue a device-array MPI op:
+    :func:`require_mpi_stack` (collectives) and the halo sendrecv choke point
+    :func:`legoesm.parallel.halo_exchange.get_sendrecv_vjp`.  Trace-safe: pure
+    Python, no JAX ops.
+    The hard-error condition is RECOMPUTED on every call (never latched) so a
+    later ``MPI4JAX_USE_CUDA_MPI`` / backend / build change cannot slip a
+    GPU-direct misconfiguration past the preflight; only the advisory
+    host-staging warning is rate-limited to once per process.
+    """
+    global _mpi4jax_transport_warned
+    backend = jax.default_backend()
+    if backend not in _GPU_TRANSPORT_BACKENDS:
+        return  # CPU/TPU: the device-direct toggle is moot; never poke mpi4jax.
+    try:
+        cuda_built: bool | None = bool(mpi4jax.has_cuda_support())
+    except Exception:
+        cuda_built = None  # predicate missing/raising -> CUDA support UNPROVEN
+    action = _mpi4jax_transport_action(
+        backend,
+        _env_flag_true("MPI4JAX_USE_CUDA_MPI"),
+        cuda_built,
+    )
+    if action == "raise":
+        raise ImportError(_MPI4JAX_NO_CUDA_EXT_MSG)
+    if action == "warn" and not _mpi4jax_transport_warned:
+        _mpi4jax_transport_warned = True
+        warnings.warn(_MPI4JAX_HOST_STAGED_MSG, RuntimeWarning, stacklevel=2)
+
+
 def require_mpi_stack():
     """Return (mpi4jax, MPI) or raise a clear ImportError."""
     missing = []
@@ -225,6 +321,7 @@ def require_mpi_stack():
         mpi4jax.__version__,
         strict=_env_flag_true("LEGOESM_MPI_STRICT_COMPAT"),
     )
+    check_mpi4jax_transport(mpi4jax)
     return mpi4jax, MPI
 
 
@@ -490,6 +587,75 @@ def batch_allreduce_mpi(
     for i, (shape, size) in enumerate(zip(shapes, sizes)):
         chunk = global_packed[offset : offset + size].reshape(shape)
         # Cast back to original dtype if it differs from the common one.
+        if dtypes[i] != common_dtype:
+            chunk = chunk.astype(dtypes[i])
+        results.append(chunk)
+        offset += size
+
+    return results
+
+
+def batch_psum_spmd(
+    values: list[jax.Array],
+    axis_name: str | tuple[str, ...],
+) -> list[jax.Array]:
+    """Batch multiple SPMD reductions into a single ``jax.lax.psum``.
+
+    The single-controller (``shard_map``) analogue of
+    :func:`batch_allreduce_mpi`: instead of ``mpi4jax.allreduce`` it sums
+    the packed buffer with :func:`jax.lax.psum` over the mesh ``axis_name``
+    (the device-shard axis).  Used by the lat-lon band SPMD ocean step
+    (route-B, pure-jax multi-GPU — no mpi4jax), where the barotropic PCG's
+    inner products are local PARTIAL sums over each device's latitude band
+    and must be summed across the ``"lat"`` axis to obtain the global dot.
+
+    MUST be called INSIDE a ``shard_map`` whose mesh carries ``axis_name``
+    (``jax.lax.psum`` needs the axis in scope); the lat-lon ocean step
+    arms it via :func:`legoesm.parallel.latlon_spmd.activate_latlon_spmd_halo`.
+
+    **Differentiable**: ``jax.lax.psum`` is self-transposing (its VJP is a
+    ``psum`` of the cotangents), so unrolling the fixed-M PCG and
+    differentiating straight through these reductions is AD-safe — the same
+    property ``allreduce(SUM)`` has in the MPI path (CLAUDE.md MPI-AD
+    doctrine).
+
+    Parameters
+    ----------
+    values : list[jax.Array]
+        Local partial values (per-device) to sum across ``axis_name``.
+        Each may be a scalar or array of any shape; shapes need not match.
+    axis_name : str | tuple[str, ...]
+        The ``shard_map`` mesh axis (or axes) over which the field is
+        sharded — the device dimension the partial sums must combine over.
+
+    Returns
+    -------
+    list[jax.Array]
+        Globally-summed values, original shapes and dtypes restored.
+    """
+    if not values:
+        return []
+
+    import jax.numpy as jnp
+
+    # Pack -> ONE psum -> unpack (mirrors batch_allreduce_mpi so a single
+    # collective carries all CG scalars of an iteration).
+    dtypes = [v.dtype for v in values]
+    common_dtype = jnp.result_type(*dtypes)
+    promoted = [v.astype(common_dtype) for v in values]
+
+    shapes = [v.shape for v in values]
+    sizes = [int(v.size) for v in promoted]
+
+    flat_parts = [v.reshape(-1) for v in promoted]
+    packed = jnp.concatenate(flat_parts, axis=0)
+
+    global_packed = jax.lax.psum(packed, axis_name)
+
+    results = []
+    offset = 0
+    for i, (shape, size) in enumerate(zip(shapes, sizes)):
+        chunk = global_packed[offset : offset + size].reshape(shape)
         if dtypes[i] != common_dtype:
             chunk = chunk.astype(dtypes[i])
         results.append(chunk)

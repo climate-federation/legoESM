@@ -58,12 +58,16 @@ from legoesm.ocean.physics.lateral_mixing.mle import (
     face_mld,
     mle_coefficient,
     mle_mld_and_buoyancy,
+    mle_streamfunction_magnitude,
     mle_vertical_structure,
 )
+from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+    EPS_DIV as _EPS_DIV,
+)
 
-# Division-guard epsilon — larger than float32 machine eps to prevent
-# intermediate blow-up in the backward pass (matches gm_redi_latlon_cgrid).
-_EPS_DIV = 1e-10
+# Division-guard epsilon (shared _gm_redi_common.EPS_DIV = 1e-10, #518 item 11):
+# larger than float32 machine eps to prevent intermediate blow-up in the
+# backward pass (matches gm_redi_latlon_cgrid).
 
 
 __physics_contract__ = {
@@ -266,9 +270,9 @@ def mle_tracer_tendency_latlon_cgrid(
     dbm_dy_v = gradient_y_cgrid(bm_filled, grid)      # (n_lat+1, n_lon) = (bm_N-bm_S)/e2v
     cap_u = jnp.minimum(cfg.max_grid_scale_m, e1u)    # min(111 km, e1u)
     cap_v = jnp.minimum(cfg.max_grid_scale_m, e2v)
-    # Psi_u = rc_f · H_u² · e2u · dbm/dx · min(111km, e1u);  e2u·dbm/dx = e2_e1u·(bm_E-bm_W).
-    psim_u = rc_f * H_u * H_u * e2u * dbm_dx_u * cap_u     # (n_lat, n_lon+1)
-    psim_v = rc_f * H_v * H_v * e1v * dbm_dy_v * cap_v     # (n_lat+1, n_lon)
+    # Psi = rc_f · H² · width · dbm · cap (shared kernel, #518 item 9).
+    psim_u = mle_streamfunction_magnitude(rc_f, H_u, e2u, dbm_dx_u, cap_u)  # (n_lat, n_lon+1)
+    psim_v = mle_streamfunction_magnitude(rc_f, H_v, e1v, dbm_dy_v, cap_v)  # (n_lat+1, n_lon)
 
     # --- Convection gate (NEMO nn_conv=1): no MLE where a neighbour column is
     # statically unstable.  NEMO gates on the ML-INTEGRATED N^2 (zn2), NOT the

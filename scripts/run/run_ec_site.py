@@ -62,18 +62,67 @@ _SOIL_FC_WP = {"siltloam": (0.33, 0.13), "sandyloam": (0.21, 0.10)}
 
 
 def _build_land_config(canopy_config: TwoLeafCanopyConfig, soil: str,
-                       bottom_bc: str, depth_m: float) -> MultiLayerLandConfig:
-    """Assemble the multilayer land config for the offline EC-site run."""
-    kw = dict(surface_scheme=canopy_config)
+                       bottom_bc: str, depth_m: float,
+                       k_sat_decay_m: float = 0.0,
+                       soil_evap_resistance_exp: float = 2.0,
+                       root_depth: float = 1.0,
+                       texture: tuple[float, float] | None = None
+                       ) -> MultiLayerLandConfig:
+    """Assemble the multilayer land config for the offline EC-site run.
+
+    ``k_sat_decay_m`` (>0) enables the Niu-2005 depth-decaying K_sat(z) retention;
+    ``soil_evap_resistance_exp`` sets the S_top**exp bare-soil evaporation throttle
+    on the canopy path (0 => Kelvin-h_r only, the pre-fix behaviour).
+    ``texture`` = (pct_sand, pct_clay): build per-site van-Genuchten hydraulics
+    (Carsel-Parrish, via :mod:`legoesm.land.soil_texture`) + the matching
+    theta_fc/theta_wp, overriding the ``soil`` preset — the physically-correct
+    per-site soil water-holding instead of loam-for-all.
+    """
+    kw = dict(surface_scheme=canopy_config,
+              soil_evap_resistance_exp=soil_evap_resistance_exp,
+              root_depth=root_depth)
     if depth_m > 0:
         kw["soil_grid"] = SoilGridConfig(total_depth=depth_m)
     if bottom_bc != "free_drainage":
         kw["richards"] = RichardsConfig(bottom_bc=bottom_bc)
-    if soil != "default":
-        kw["hydraulics"] = SoilHydraulicsConfig(**_SOIL_HYDRAULICS[soil])
+    if texture is not None:
+        from legoesm.land import soil_texture as _st
+        sand, clay = float(texture[0]), float(texture[1])
+        vg = _st.vg_params_from_index(int(_st.usda_texture_index(sand, clay)))
+        wp, fc = _st.wilting_field_capacity(vg)
+        kw["hydraulics"] = SoilHydraulicsConfig(
+            retention_curve="van_genuchten",
+            theta_r=float(vg["theta_r"]), theta_sat=float(vg["theta_sat"]),
+            alpha_vg=float(vg["alpha_vg"]), n_vg=float(vg["n_vg"]),
+            K_sat=float(vg["K_sat"]), k_sat_decay_m=k_sat_decay_m)
+        kw["theta_fc"], kw["theta_wp"] = float(fc), float(wp)
+    elif soil != "default" and soil != "auto":
+        h = dict(_SOIL_HYDRAULICS[soil])
+        h["k_sat_decay_m"] = k_sat_decay_m
+        kw["hydraulics"] = SoilHydraulicsConfig(**h)
         fc, wp = _SOIL_FC_WP[soil]
         kw["theta_fc"], kw["theta_wp"] = fc, wp
+    elif k_sat_decay_m > 0.0:
+        kw["hydraulics"] = SoilHydraulicsConfig(k_sat_decay_m=k_sat_decay_m)
     return MultiLayerLandConfig(**kw)
+
+
+_DEFAULT_TEXTURE_CSV = "scripts/cluster/ec_site/ec_site_soil_texture.csv"
+
+
+def _texture_lookup(site: str, csv_path: str) -> tuple[float, float] | None:
+    """(pct_sand, pct_clay) for ``site`` from the texture table, or None if absent
+    (caller then falls back to the loam default)."""
+    import csv as _csv
+    if not os.path.isfile(csv_path):
+        return None
+    key = (site.replace("_driver_v2_gapfree.nc", "")
+               .replace("_driver_v2.nc", ""))
+    with open(csv_path) as fh:
+        for row in _csv.DictReader(fh):
+            if row["site"] == key:
+                return float(row["sand_pct"]), float(row["clay_pct"])
+    return None
 
 
 # gC per umol CO2 (carbon molar mass conversion); matches the canopy's own
@@ -191,6 +240,10 @@ def _prognostic_fluxes(d: ECSiteDriver, canopy_config: TwoLeafCanopyConfig,
     # between rains, so the (top-layer-based) bare-soil evaporation is realistic.
     _zc = np.cumsum(np.asarray(make_soil_grid(land_config.soil_grid).dz))
     nudge_layer_mask = jnp.asarray(_zc >= 0.05)
+    # Model layer nearest the ~5 cm shallowest soil sensor, for the soil-state
+    # (T / moisture) evaluation against the driver's shallowest TS/SWC.
+    _znode = np.asarray(make_soil_grid(land_config.soil_grid).z_node)
+    _i5 = int(np.argmin(np.abs(_znode - 0.05)))
 
     def _scan_step(state, xs):
         forcing_t, params_t, doy_t, theta_obs_t = xs
@@ -220,15 +273,23 @@ def _prognostic_fluxes(d: ECSiteDriver, canopy_config: TwoLeafCanopyConfig,
         # from skill metrics rather than silently scored.
         nan = jnp.array(jnp.nan, dtype=jnp.float64)
         masked = lambda v: jnp.where(reverted, nan, v)
+        # friction velocity u* from the modelled momentum stress:
+        # |tau| = rho * u*^2  ->  u* = sqrt(|tau|/rho).
+        u_star = jnp.sqrt(
+            jnp.sqrt(out.tau_x ** 2 + out.tau_y ** 2)
+            / jnp.maximum(forcing_t.rho_lowest, 1e-3))
         emit = (masked(out.gpp), masked(out.lhflx), masked(out.shflx),
-                masked(out.T_surface), reverted.astype(jnp.float64))
+                masked(out.T_surface), reverted.astype(jnp.float64),
+                safe_state.T_soil[:, _i5], safe_state.theta_soil[:, _i5],
+                masked(u_star))
         return safe_state, emit
 
     xs = (d.forcing, d.canopy_params, d.doy, jnp.asarray(d.theta_soil))
     run = jax.jit(lambda s0, x: jax.lax.scan(_scan_step, s0, x))
-    _final, (gpp, le, h, ts, reverted) = run(state0, xs)
+    _final, (gpp, le, h, ts, reverted, ts_soil, swc_soil, ustar) = run(state0, xs)
     rav = lambda a: np.asarray(a).ravel()
-    return rav(gpp), rav(le), rav(h), rav(ts), rav(reverted)
+    return (rav(gpp), rav(le), rav(h), rav(ts), rav(reverted),
+            rav(ts_soil), rav(swc_soil), rav(ustar))
 
 
 def _skill(model: np.ndarray, obs: np.ndarray, valid: np.ndarray) -> dict:
@@ -264,6 +325,15 @@ def _write_output(out_dir: str, d: ECSiteDriver, model: dict,
         "h_mod": ("time", model["h_wm2"]), "h_obs": ("time", d.obs["h_wm2"]),
         "valid": ("time", d.valid.astype("i1")),
     }
+    if "ts_soil" in model:
+        # prognostic soil STATE: top (~5 cm) model soil T / moisture vs the driver's
+        # SHALLOWEST observed TS / SWC.
+        data["ts_mod"] = ("time", model["ts_soil"])
+        data["ts_obs"] = ("time", np.asarray(d.T_soil_top).ravel())
+        data["swc_mod"] = ("time", model["swc_soil"])
+        data["swc_obs"] = ("time", np.asarray(d.theta_soil).ravel())
+        data["ustar_mod"] = ("time", model["ustar"])
+        data["ustar_obs"] = ("time", np.asarray(d.obs["ustar"]).ravel())
     if reverted is not None:
         # prognostic: per-step flag, 1 where the soil update was NaN-reverted.
         data["reverted"] = ("time", np.asarray(reverted).astype("i1"))
@@ -303,30 +373,78 @@ def _slice_driver(d: ECSiteDriver, start: int, k: int) -> ECSiteDriver:
     )
 
 
+def _best_year_slice(driver_nc: str, d) -> tuple[int, int, int]:
+    """Return ``(start_step, n_steps, year)`` for the calendar year with the most
+    genuinely-observed flux steps.
+
+    A single contiguous calendar year spans BOTH the growing and non-growing
+    season (required for a prognostic free-run, whose soil state is carried
+    step-to-step), and is ~12-24x shorter than a full multi-decade FLUXNET record
+    — the dominant cost of the offline scan.
+    """
+    import numpy as np
+    import pandas as pd
+    import xarray as xr
+    t = pd.DatetimeIndex(xr.open_dataset(driver_nc)["time"].values)
+    valid = np.asarray(d.valid).ravel()
+    le = np.asarray(d.obs["le_wm2"]).ravel()
+    good = valid & np.isfinite(le)
+    years = t.year.to_numpy()
+    n = min(len(years), good.size)
+    years, good = years[:n], good[:n]
+    counts = {int(y): int(good[years == y].sum()) for y in np.unique(years)}
+    best = max(counts, key=counts.get)
+    idx = np.nonzero(years == best)[0]
+    return int(idx[0]), int(len(idx)), best
+
+
 def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              max_steps: int | None = None, start_step: int = 0,
              soil: str = "default", bottom_bc: str = "free_drainage",
-             soil_depth_m: float = 0.0, nudge_tau_days: float = 0.0) -> dict:
+             soil_depth_m: float = 0.0, nudge_tau_days: float = 0.0,
+             k_sat_decay_m: float = 0.0, soil_evap_resistance_exp: float = 2.0,
+             root_depth: float = 1.0, select_best_year: bool = False,
+             texture_csv: str = _DEFAULT_TEXTURE_CSV) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     d = read_ec_site_driver(driver_nc)
+    if select_best_year:
+        start_step, max_steps, _yr = _best_year_slice(driver_nc, d)
+        print(f"  select-best-year: {_yr} (steps {start_step}..{start_step + max_steps}, "
+              f"{max_steps} of {int(d.forcing.T_lowest.shape[0])})")
     if max_steps is not None or start_step:
         n = int(d.forcing.T_lowest.shape[0])
         k = (n - start_step) if max_steps is None else max_steps
         d = _slice_driver(d, start_step, k)
+    texture = None
+    if soil == "auto":
+        texture = _texture_lookup(d.site_id, texture_csv)
+        if texture is None:
+            print(f"  texture=auto: {d.site_id} not in {texture_csv}; using loam default")
+        else:
+            print(f"  texture=auto: sand={texture[0]:.0f}% clay={texture[1]:.0f}%")
     canopy_config = TwoLeafCanopyConfig(max_iters=30)
-    land_config = _build_land_config(canopy_config, soil, bottom_bc, soil_depth_m)
+    land_config = _build_land_config(
+        canopy_config, soil, bottom_bc, soil_depth_m,
+        k_sat_decay_m=k_sat_decay_m,
+        soil_evap_resistance_exp=soil_evap_resistance_exp,
+        root_depth=root_depth, texture=texture)
 
     reverted = None
+    ts_soil = swc_soil = ustar = None
     if mode == "diagnostic":
         gpp_gC, le, h, _ = _diagnostic_fluxes(d, canopy_config, land_config, chunk)
     else:
-        gpp_gC, le, h, _ts, reverted = _prognostic_fluxes(
+        gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar = _prognostic_fluxes(
             d, canopy_config, land_config, _U_MIN, nudge_tau_days=nudge_tau_days)
     model = {
         "gpp_umol": gpp_gC / _GC_PER_UMOL_CO2,   # gC/m2/s -> umolCO2/m2/s (obs units)
         "le_wm2": le, "h_wm2": h,
     }
+    if ts_soil is not None:
+        model["ts_soil"] = ts_soil       # top (~5 cm) model soil T [K]
+        model["swc_soil"] = swc_soil     # top (~5 cm) model soil moisture [m3/m3]
+        model["ustar"] = ustar           # friction velocity [m/s]
     # Score on genuinely-OBSERVED forcing: when running a gap-free driver, exclude
     # steps whose forcing was gap-filled so skill is not credited to synthesised
     # forcing.  Atmospheric fill (met_filled) is per-step forcing in BOTH modes.
@@ -344,6 +462,17 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         "LE": _skill(model["le_wm2"], d.obs["le_wm2"], score_valid),
         "H": _skill(model["h_wm2"], d.obs["h_wm2"], score_valid),
     }
+    # Prognostic soil STATE evaluation: top (~5 cm) model soil T / moisture vs the
+    # driver's SHALLOWEST observed TS / SWC, scored only where those obs are genuine
+    # (soil_filled == 0), so gap-filled soil obs never credit the state skill.
+    if "ts_soil" in model:
+        soil_score = score_valid
+        if d.soil_filled is not None:
+            soil_score = soil_score & (np.asarray(d.soil_filled).ravel() == 0)
+        metrics["TS"] = _skill(model["ts_soil"], np.asarray(d.T_soil_top), soil_score)
+        metrics["SWC"] = _skill(model["swc_soil"], np.asarray(d.theta_soil), soil_score)
+        # friction velocity: modelled u* (from momentum stress) vs observed USTAR.
+        metrics["USTAR"] = _skill(model["ustar"], np.asarray(d.obs["ustar"]), score_valid)
     path = _write_output(out_dir, d, model, mode=mode, reverted=reverted,
                          score_valid=score_valid)
     forcing_note = ("" if d.met_filled is None else
@@ -381,8 +510,12 @@ def main() -> int:
     ap.add_argument("--start-step", type=int, default=0,
                     help="first timestep index to run (skip early gappy record)")
     ap.add_argument("--soil", default="default",
-                    choices=["default", "siltloam", "sandyloam"],
-                    help="soil texture preset for the prognostic hydraulics")
+                    choices=["default", "siltloam", "sandyloam", "auto"],
+                    help="prognostic hydraulics: a preset, or 'auto' = per-site "
+                         "van-Genuchten from the --texture-csv table")
+    ap.add_argument("--texture-csv", default=_DEFAULT_TEXTURE_CSV,
+                    help="site->(sand,clay) table for --soil auto "
+                         "(build with scripts/data/build_ec_site_texture.py)")
     ap.add_argument("--bottom-bc", default="free_drainage",
                     choices=["free_drainage", "zero_flux"],
                     help="Richards bottom boundary condition (prognostic)")
@@ -391,12 +524,28 @@ def main() -> int:
     ap.add_argument("--nudge-tau-days", type=float, default=0.0,
                     help="prognostic mode: relax soil moisture toward observed SWC "
                          "with this e-folding timescale [days] (0 = free-running)")
+    ap.add_argument("--k-sat-decay-m", type=float, default=0.0,
+                    help="Niu-2005 K_sat(z)=K0*exp(-z/L) retention decay length L [m] "
+                         "(0 = uniform K, no depth decay)")
+    ap.add_argument("--soil-evap-resistance-exp", type=float, default=2.0,
+                    help="S_top**exp bare-soil evaporation throttle on the canopy path "
+                         "(0 = Kelvin-h_r only; 2 = #671 default; 3-4 = stronger)")
+    ap.add_argument("--root-depth", type=float, default=1.0,
+                    help="root e-folding depth [m] (deeper => more deep-water access)")
+    ap.add_argument("--select-best-year", action="store_true",
+                    help="run only the calendar year with the most observed flux "
+                         "steps (contiguous, spans both seasons) — ~12-24x faster "
+                         "than the full multi-decade record")
     args = ap.parse_args()
     for nc in args.driver_nc:
         run_site(nc, args.mode, args.out, args.chunk,
                  max_steps=args.max_steps, start_step=args.start_step,
                  soil=args.soil, bottom_bc=args.bottom_bc,
-                 soil_depth_m=args.soil_depth_m, nudge_tau_days=args.nudge_tau_days)
+                 soil_depth_m=args.soil_depth_m, nudge_tau_days=args.nudge_tau_days,
+                 k_sat_decay_m=args.k_sat_decay_m,
+                 soil_evap_resistance_exp=args.soil_evap_resistance_exp,
+                 root_depth=args.root_depth, select_best_year=args.select_best_year,
+                 texture_csv=args.texture_csv)
     return 0
 
 

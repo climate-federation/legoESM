@@ -238,6 +238,327 @@ class TestWENO7VorticityFlux:
         assert jnp.allclose(r_v, zeta_val, atol=1e-13)
 
 
+class TestWENO9VorticityFlux:
+    """WENO9 vorticity reconstruction (Silvestri W9V) — shapes, constant +
+    linear-field exactness, and the cell-to-face D-flux path at order 9."""
+
+    def test_zeta_at_u_shape(self):
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _weno_zeta_at_u
+        n_lat, n_lon, nlev = 14, 24, 5
+        zeta = jnp.ones((n_lat + 1, n_lon + 1, nlev))
+        v_prime = jnp.ones((n_lat + 1, n_lon, nlev)) * 0.1
+        v_at_u = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.1
+        result = _weno_zeta_at_u(zeta, v_prime, v_at_u, order=9, u_smooth=v_at_u)
+        assert result.shape == (n_lat, n_lon + 1, nlev)
+
+    def test_zeta_at_v_shape(self):
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _weno_zeta_at_v
+        n_lat, n_lon, nlev = 14, 24, 5
+        zeta = jnp.ones((n_lat + 1, n_lon + 1, nlev))
+        u_prime = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.1
+        u_at_v = jnp.ones((n_lat + 1, n_lon, nlev)) * 0.1
+        result = _weno_zeta_at_v(zeta, u_prime, u_at_v, order=9, v_smooth=u_at_v)
+        assert result.shape == (n_lat + 1, n_lon, nlev)
+
+    def test_constant_field_both(self):
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _weno_zeta_at_u, _weno_zeta_at_v,
+        )
+        n_lat, n_lon, nlev = 14, 24, 3
+        zeta_val = 3.0e-4
+        zeta = jnp.full((n_lat + 1, n_lon + 1, nlev), zeta_val)
+        v_prime = jnp.ones((n_lat + 1, n_lon, nlev)) * 0.1
+        v_at_u = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.1
+        u_prime = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.1
+        u_at_v = jnp.ones((n_lat + 1, n_lon, nlev)) * 0.1
+        r_u = _weno_zeta_at_u(zeta, v_prime, v_at_u, order=9)
+        r_v = _weno_zeta_at_v(zeta, u_prime, u_at_v, order=9)
+        assert jnp.allclose(r_u, zeta_val, atol=1e-13)
+        assert jnp.allclose(r_v, zeta_val, atol=1e-13)
+
+    def test_zonal_smooth_field_higher_order_more_accurate(self):
+        """On a WELL-RESOLVED smooth periodic field, WENO9 (with the order-8
+        point-to-cellavg conversion) is at least as accurate as WENO5 at the
+        v-face — the effective-resolution property W9V relies on. Needs enough
+        points per wavelength that the 10-point WENO9 stencil stays local
+        (a coarse grid spreads the stencil over a large phase span and the
+        nonlinear WENO weighting loses the ordering)."""
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _weno_zeta_at_v
+        n_lat, n_lon, nlev = 4, 96, 1
+        lon = jnp.arange(n_lon + 1)[None, :, None] * (2 * jnp.pi / n_lon)
+        zeta = jnp.sin(lon) * jnp.ones((n_lat + 1, n_lon + 1, nlev))
+        u_prime = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.3
+        u_at_v = jnp.ones((n_lat + 1, n_lon, nlev)) * 0.3
+        r9 = _weno_zeta_at_v(zeta, u_prime, u_at_v, order=9)
+        r5 = _weno_zeta_at_v(zeta, u_prime, u_at_v, order=5)
+        assert bool(jnp.all(jnp.isfinite(r9)))
+        # WENO reconstructs the CELL AVERAGE to the v-face; compare to the
+        # analytic cell-average of sin over the lon-cell straddling the face.
+        h = 2 * jnp.pi / n_lon
+        face_lon = (jnp.arange(n_lon)[None, :, None] + 0.5) * h
+        exact_avg = (jnp.sin(face_lon) * (jnp.sin(h / 2) / (h / 2))) \
+            * jnp.ones((n_lat + 1, n_lon, nlev))
+        err9 = float(jnp.max(jnp.abs(r9 - exact_avg)))
+        err5 = float(jnp.max(jnp.abs(r5 - exact_avg)))
+        assert err9 <= err5 + 1e-12, f"WENO9 err {err9} worse than WENO5 {err5}"
+
+    def test_cell_to_uface_order9(self):
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _weno_cell_to_uface
+        n_lat, n_lon, nlev = 6, 24, 2
+        D = jnp.full((n_lat, n_lon, nlev), 2.0e-6)
+        u = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.2
+        result = _weno_cell_to_uface(D, D, u, order=9)
+        assert result.shape == (n_lat, n_lon + 1, nlev)
+        assert jnp.allclose(result, 2.0e-6, atol=1e-15)
+
+
+class TestWENOSmoothnessSplitVsStandard:
+    """B2: weno_smoothness 'split' ({ζ;u}/{δU;D}, W*V) vs 'standard'
+    ({ζ;ζ}/{δU;δU}, W*D). The two MUST differ on a non-smooth vorticity
+    field with a smooth velocity (the regime where the smoothness measure
+    matters), and both must build + step finitely."""
+
+    def _sharp_vertex_field(self, n_lat, n_lon, nlev):
+        # A vorticity field with a sharp meridional step (non-smooth) so the
+        # WENO smoothness measure actually changes the stencil weights.
+        zeta = jnp.zeros((n_lat + 1, n_lon + 1, nlev))
+        zeta = zeta.at[n_lat // 2:, :, :].set(1.0e-4)
+        return zeta
+
+    def test_zeta_at_u_split_differs_from_standard(self):
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _weno_zeta_at_u
+        n_lat, n_lon, nlev = 14, 12, 2
+        zeta = self._sharp_vertex_field(n_lat, n_lon, nlev)
+        v_smooth = jnp.ones((n_lat + 1, n_lon, nlev)) * 0.2     # smooth velocity
+        v_at_u = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.2
+        u_smooth = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.2
+        r_split = _weno_zeta_at_u(zeta, v_smooth, v_at_u, order=9,
+                                  u_smooth=u_smooth, smoothness="split")
+        r_std = _weno_zeta_at_u(zeta, v_smooth, v_at_u, order=9,
+                                u_smooth=u_smooth, smoothness="standard")
+        assert bool(jnp.all(jnp.isfinite(r_split)))
+        assert bool(jnp.all(jnp.isfinite(r_std)))
+        assert not jnp.allclose(r_split, r_std, atol=1e-12), \
+            "split {ζ;u} and standard {ζ;ζ} must differ on a sharp ζ field"
+
+    def test_zeta_at_v_split_differs_from_standard(self):
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _weno_zeta_at_v
+        n_lat, n_lon, nlev = 8, 24, 2
+        # Sharp zonal step in ζ.
+        zeta = jnp.zeros((n_lat + 1, n_lon + 1, nlev)).at[:, n_lon // 2:, :].set(1e-4)
+        u_smooth = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.2
+        u_at_v = jnp.ones((n_lat + 1, n_lon, nlev)) * 0.2
+        v_smooth = jnp.ones((n_lat + 1, n_lon, nlev)) * 0.2
+        r_split = _weno_zeta_at_v(zeta, u_smooth, u_at_v, order=9,
+                                  v_smooth=v_smooth, smoothness="split")
+        r_std = _weno_zeta_at_v(zeta, u_smooth, u_at_v, order=9,
+                                v_smooth=v_smooth, smoothness="standard")
+        assert not jnp.allclose(r_split, r_std, atol=1e-12)
+
+    def test_constant_field_both_smoothness_exact(self):
+        """Constant ζ → both split and standard reconstruct the constant."""
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _weno_zeta_at_u
+        n_lat, n_lon, nlev = 12, 12, 2
+        zeta = jnp.full((n_lat + 1, n_lon + 1, nlev), 2.0e-4)
+        v_smooth = jnp.ones((n_lat + 1, n_lon, nlev)) * 0.2
+        v_at_u = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.2
+        for sm in ("split", "standard"):
+            r = _weno_zeta_at_u(zeta, v_smooth, v_at_u, order=9,
+                                u_smooth=v_at_u, smoothness=sm)
+            assert jnp.allclose(r, 2.0e-4, atol=1e-13), sm
+
+    @pytest.mark.parametrize("sm", ["split", "standard"])
+    def test_config_accepts_smoothness(self, sm):
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        cfg = LatLonCGridOceanConfig.from_flat(momentum_advection="weno9", weno_smoothness=sm)
+        assert cfg.weno_smoothness == sm
+
+    def test_invalid_smoothness_rejected(self):
+        from legoesm.core.precision import set_policy, get_policy, PrecisionPolicy
+        from legoesm.ocean.experiments.eady_uniform import build_eady_uniform_setup
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        prev = get_policy()
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            r = build_eady_uniform_setup(n_lat=12, n_lon=12, momentum_advection="weno9")
+            bad = r.model_config._replace(weno_smoothness="bogus")
+            with pytest.raises(ValueError, match="weno_smoothness"):
+                LatLonCGridOceanModel(r.grid, r.z_coord, bad)
+        finally:
+            set_policy(prev)
+
+    def test_w9v_vs_w9d_full_step_differ(self):
+        """A full ocean step: W9V (split) and W9D (standard) build, stay finite,
+        and yield DIFFERENT velocity tendencies — the V-vs-D distinction the
+        paper says 'has a large impact on the solution'.
+
+        The smoothness measure only matters where vorticity is NON-smooth (on a
+        purely-linear field all WENO candidate stencils coincide regardless of
+        smoothness). The Eady thermal-wind IC is nearly linear, so we inject a
+        sharp localized velocity feature to make ζ grid-scale and force the
+        V-vs-D paths apart in a single step."""
+        from legoesm.core.field import Field
+        from legoesm.core.precision import set_policy, get_policy, PrecisionPolicy
+        from legoesm.ocean.experiments.eady_uniform import build_eady_uniform_setup
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        prev = get_policy()
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            def _run(sm):
+                r = build_eady_uniform_setup(n_lat=16, n_lon=16,
+                                             momentum_advection="weno9")
+                cfg = r.model_config._replace(weno_smoothness=sm)
+                model = LatLonCGridOceanModel(r.grid, r.z_coord, cfg)
+                s = r.initial_state
+                # Sharp localized u feature → grid-scale ζ (a 2-cell blob).
+                u2 = s.u.data.at[8, 8, :].add(0.3).at[8, 9, :].add(-0.3)
+                s = s._replace(u=s.u.replace(data=u2))
+
+                def _z(d):
+                    return Field(data=jnp.zeros_like(d.data),
+                                 name=d.name + "_incr_prev", dims=d.dims, units=d.units)
+                s = s._replace(T_incr_prev=_z(s.T), S_incr_prev=_z(s.S),
+                               u_incr_prev=_z(s.u), v_incr_prev=_z(s.v))
+                return model.step(s, 300.0)
+            nv = _run("split")
+            nd = _run("standard")
+            assert bool(jnp.all(jnp.isfinite(nv.u.data)))
+            assert bool(jnp.all(jnp.isfinite(nd.u.data)))
+            dmax = float(jnp.max(jnp.abs(nv.u.data - nd.u.data)))
+            assert dmax > 1e-10, \
+                f"W9V and W9D should differ on a sharp ζ field; max|Δu|={dmax}"
+        finally:
+            set_policy(prev)
+
+    def test_weno_vertadv_full_vs_perturbation_differ(self):
+        """The full-velocity vs perturbation WENO vertical momentum advection differ by
+        exactly the −∂(w·U_bar)/∂z redistribution that the perturbation form omits — the
+        §5/baroclinic interior-eddy closure lever. A barotropic offset (U_bar≠0) with a
+        vertically-structured w MUST change the WENO vertical-advection tendency; a
+        DEPTH-UNIFORM w (∂w/∂z=0) must NOT (the redistribution is then zero)."""
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _flux_form_vertical_momentum_advection_weno,
+        )
+        nlev = 8
+        u_prime = jnp.linspace(-0.2, 0.2, nlev)          # baroclinic shear (zero-mean)
+        u_full = u_prime + 1.3                            # + barotropic U_bar = 1.3
+        h = jnp.full(nlev, 100.0)
+        # Vertically-STRUCTURED w (∂w/∂z ≠ 0): the redistribution term is nonzero.
+        w_struct = jnp.concatenate([jnp.zeros(1), jnp.sin(jnp.linspace(0, 3.0, nlev - 1)),
+                                    jnp.zeros(1)])
+        gp = _flux_form_vertical_momentum_advection_weno(u_prime, w_struct, h, order=5)
+        gf = _flux_form_vertical_momentum_advection_weno(u_full, w_struct, h, order=5)
+        d = float(jnp.max(jnp.abs(gf - gp)))
+        assert d > 1e-6, f"full vs perturbation must differ with U_bar≠0, ∂w/∂z≠0; Δ={d}"
+        assert bool(jnp.all(jnp.isfinite(gf)))
+        # DEPTH-UNIFORM w (∂w/∂z = 0 in the interior): −∂(w·U_bar)/∂z = 0, so the
+        # barotropic offset's flux is a constant across interior faces and cancels in the
+        # divergence — full and perturbation agree in the INTERIOR (the boundary cells see
+        # the top/bottom flux BC and may differ; that is the physical w=0 boundary, not
+        # the redistribution under test).
+        w_unif = jnp.full(nlev + 1, 0.5)
+        gp2 = _flux_form_vertical_momentum_advection_weno(u_prime, w_unif, h, order=5)
+        gf2 = _flux_form_vertical_momentum_advection_weno(u_full, w_unif, h, order=5)
+        assert jnp.allclose(gf2[1:-1], gp2[1:-1], atol=1e-12)
+
+    @pytest.mark.parametrize("sm", [None, "split", "standard"])
+    def test_config_accepts_divergence_smoothness(self, sm):
+        """The DECOUPLED divergence-flux smoothness accepts None (follow
+        weno_smoothness) or a valid family."""
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        cfg = LatLonCGridOceanConfig.from_flat(momentum_advection="weno9",
+                                     weno_divergence_smoothness=sm)
+        assert cfg.weno_divergence_smoothness == sm
+
+    def test_invalid_divergence_smoothness_rejected(self):
+        from legoesm.core.precision import set_policy, get_policy, PrecisionPolicy
+        from legoesm.ocean.experiments.eady_uniform import build_eady_uniform_setup
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        prev = get_policy()
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            r = build_eady_uniform_setup(n_lat=12, n_lon=12, momentum_advection="weno9")
+            bad = r.model_config._replace(weno_divergence_smoothness="bogus")
+            with pytest.raises(ValueError, match="weno_divergence_smoothness"):
+                LatLonCGridOceanModel(r.grid, r.z_coord, bad)
+        finally:
+            set_policy(prev)
+
+    def test_divergence_smoothness_decouples_dterm(self):
+        """The Oceananigans WENOVectorInvariant default MIXES VelocityStencil
+        vorticity (Eq 43, "split") with OnlySelfUpwinding divergence (Eq 44,
+        "standard") — a combination the single ``weno_smoothness`` flag cannot
+        express. ``weno_divergence_smoothness`` selects the divergence family
+        INDEPENDENTLY of the vorticity family. This test pins three invariants on a
+        full step with a sharp ζ/divergence feature:
+
+        1. ``weno_divergence_smoothness=None`` is BIT-IDENTICAL to leaving it unset
+           (None → follow ``weno_smoothness`` for the D-term) — backward compat.
+        2. With ``weno_smoothness="split"`` fixed, switching the D-term to
+           "standard" (self/OnlySelfUpwinding) actually CHANGES the solution — so
+           the decoupling is wired through, not a no-op.
+        3. The faithful Oceananigans mix (split vorticity + standard divergence)
+           differs from BOTH pure split/split and pure standard/standard.
+        """
+        from legoesm.core.field import Field
+        from legoesm.core.precision import set_policy, get_policy, PrecisionPolicy
+        from legoesm.ocean.experiments.eady_uniform import build_eady_uniform_setup
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        prev = get_policy()
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            def _run(weno_sm, div_sm):
+                r = build_eady_uniform_setup(n_lat=16, n_lon=16,
+                                             momentum_advection="weno9")
+                cfg = r.model_config._replace(weno_smoothness=weno_sm,
+                                              weno_divergence_smoothness=div_sm,
+                                              weno_d_term=True)
+                model = LatLonCGridOceanModel(r.grid, r.z_coord, cfg)
+                s = r.initial_state
+                # Sharp u AND v features so BOTH divergence components δU and δV are
+                # grid-scale nonzero — required to separate the full-divergence
+                # smoothness {δU; D=δU+δV} ("split") from the self-smoothness
+                # {δU; δU} ("standard"): with δV≈0 the two coincide.
+                u2 = s.u.data.at[8, 8, :].add(0.3).at[8, 9, :].add(-0.3)
+                v2 = s.v.data.at[8, 8, :].add(0.3).at[9, 8, :].add(-0.3)
+                s = s._replace(u=s.u.replace(data=u2), v=s.v.replace(data=v2))
+
+                def _z(d):
+                    return Field(data=jnp.zeros_like(d.data),
+                                 name=d.name + "_incr_prev", dims=d.dims, units=d.units)
+                s = s._replace(T_incr_prev=_z(s.T), S_incr_prev=_z(s.S),
+                               u_incr_prev=_z(s.u), v_incr_prev=_z(s.v))
+                return model.step(s, 300.0).u.data
+
+            split_none = _run("split", None)        # default path (D-term follows split)
+            split_split = _run("split", "split")    # explicit; must equal split_none
+            split_self = _run("split", "standard")  # faithful Oceananigans mix
+            std_std = _run("standard", "standard")  # pure W9D
+
+            # 1. None == explicit "split" (backward compat, bit-identical).
+            assert jnp.allclose(split_none, split_split, atol=1e-14), \
+                "weno_divergence_smoothness=None must follow weno_smoothness exactly"
+            # 2. Decoupling is wired: self-divergence changes the solution.
+            d_div = float(jnp.max(jnp.abs(split_self - split_split)))
+            assert d_div > 1e-10, \
+                f"self-divergence must change the D-term; max|Δu|={d_div}"
+            # 3. The faithful mix is distinct from pure W9D too.
+            d_mix = float(jnp.max(jnp.abs(split_self - std_std)))
+            assert d_mix > 1e-10, \
+                f"split-vort+self-div must differ from standard/standard; max|Δu|={d_mix}"
+            assert bool(jnp.all(jnp.isfinite(split_self)))
+        finally:
+            set_policy(prev)
+
+
 # =====================================================================
 # WENO vertical momentum advection
 # =====================================================================
@@ -321,11 +642,42 @@ class TestWENOVerticalMomentum:
 class TestMomentumAdvectionConfig:
     """Verify that momentum_advection options are accepted."""
 
-    @pytest.mark.parametrize("mode", ["vector_invariant", "weno5", "weno7"])
+    @pytest.mark.parametrize("mode", ["vector_invariant", "weno5", "weno7", "weno9"])
     def test_config_field_accepted(self, mode):
         from legoesm.ocean.state import LatLonCGridOceanConfig
-        cfg = LatLonCGridOceanConfig(momentum_advection=mode)
+        cfg = LatLonCGridOceanConfig.from_flat(momentum_advection=mode)
         assert cfg.momentum_advection == mode
+
+    def test_weno9_full_step_finite(self):
+        """Full ocean step with momentum_advection='weno9' (Silvestri W9V):
+        the whole wiring — order-9 vorticity Z + order-9 divergence D + the
+        capped order-5 vertical C — runs and stays finite (scan-carry stable)."""
+        from legoesm.core.field import Field
+        from legoesm.core.precision import set_policy, get_policy, PrecisionPolicy
+        from legoesm.ocean.experiments.eady_uniform import build_eady_uniform_setup
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        prev = get_policy()
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            r = build_eady_uniform_setup(
+                n_lat=16, n_lon=16, momentum_advection="weno9")
+            assert r.model_config.momentum_advection == "weno9"
+            model = LatLonCGridOceanModel(r.grid, r.z_coord, r.model_config)
+            s = r.initial_state
+
+            def _z(d):
+                return Field(data=jnp.zeros_like(d.data), name=d.name + "_incr_prev",
+                             dims=d.dims, units=d.units)
+            s = s._replace(T_incr_prev=_z(s.T), S_incr_prev=_z(s.S),
+                           u_incr_prev=_z(s.u), v_incr_prev=_z(s.v))
+            nxt = model.step(s, 300.0)
+            assert bool(jnp.all(jnp.isfinite(nxt.u.data)))
+            assert bool(jnp.all(jnp.isfinite(nxt.v.data)))
+            assert bool(jnp.all(jnp.isfinite(nxt.T.data)))
+        finally:
+            set_policy(prev)
 
 
 # =====================================================================
@@ -729,7 +1081,7 @@ class TestFullTendencyWENODK:
         from legoesm.ocean.state import LatLonCGridOceanConfig
 
         state, grid, z_coord = self._make_state_and_deps()
-        config = LatLonCGridOceanConfig(momentum_advection="weno5")
+        config = LatLonCGridOceanConfig.from_flat(momentum_advection="weno5")
         tend = latlon_cgrid_ocean_baroclinic_tendencies(
             state, grid, z_coord, config)
         du = tend.du_dt.data
@@ -745,9 +1097,9 @@ class TestFullTendencyWENODK:
         from legoesm.ocean.state import LatLonCGridOceanConfig
 
         state, grid, z_coord = self._make_state_and_deps()
-        cfg_centered = LatLonCGridOceanConfig(
+        cfg_centered = LatLonCGridOceanConfig.from_flat(
             momentum_advection="vector_invariant")
-        cfg_weno = LatLonCGridOceanConfig(momentum_advection="weno5")
+        cfg_weno = LatLonCGridOceanConfig.from_flat(momentum_advection="weno5")
 
         tend_c = latlon_cgrid_ocean_baroclinic_tendencies(
             state, grid, z_coord, cfg_centered)
@@ -762,3 +1114,80 @@ class TestFullTendencyWENODK:
         assert du_diff > 1e-15 or dv_diff > 1e-15, (
             f"WENO and centered tendencies are identical: "
             f"du_diff={du_diff}, dv_diff={dv_diff}")
+
+
+class TestFaithfulFVWenoReconstruction:
+    """Faithful Oceananigans FV-WENO momentum reconstruction: feed grid values
+    directly (convert_to_cellavg=False) and use the VelocityStencil beta-average
+    (beta_average=True).  These pin the NEW production branches in
+    _weno_cell_to_uface / _weno_zeta_at_u (used by momentum_advection=weno5/7/9).
+    """
+
+    def test_cell_to_uface_no_deconv_is_gridscale_only_change(self):
+        """convert_to_cellavg=False (faithful FV-WENO, no point->cellavg
+        pre-filter) differs from the legacy pre-smoothed path ONLY at the grid
+        scale: the two reconstructions diverge on a pure 2Δx-lon mode but agree
+        to high order on a smooth field (the pre-filter is ~unity away from
+        Nyquist).  Faithfulness to Oceananigans (which has no pre-filter) is the
+        rationale; the net grid-scale dissipation effect is a property of the
+        full composite operator, verified at the §5 integration level."""
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _weno_cell_to_uface,
+        )
+        n_lat, n_lon, nlev = 8, 32, 3
+        i = jnp.arange(n_lon, dtype=jnp.float64)
+        psi = jnp.ones((n_lat, n_lon, nlev))
+        u = jnp.ones((n_lat, n_lon + 1, nlev))  # +x upwind
+        # (a) pure 2Δx-lon (Nyquist) mode → the two paths MUST differ.
+        phi_2dx = jnp.broadcast_to(
+            ((-1.0) ** i)[jnp.newaxis, :, jnp.newaxis],
+            (n_lat, n_lon, nlev)).astype(jnp.float64)
+        f_legacy = _weno_cell_to_uface(phi_2dx, psi, u, order=5,
+                                       convert_to_cellavg=True)
+        f_fv = _weno_cell_to_uface(phi_2dx, psi, u, order=5,
+                                   convert_to_cellavg=False)
+        assert bool(jnp.all(jnp.isfinite(f_fv)))
+        grid_diff = float(jnp.max(jnp.abs(f_fv - f_legacy)))
+        assert grid_diff > 1e-3, (
+            "faithful FV path is a no-op vs legacy on the grid mode")
+        # (b) smooth low-k mode → the two paths agree closely (grid-scale-only
+        # change; both high-order accurate where the pre-filter is ~unity).
+        phi_smooth = jnp.broadcast_to(
+            jnp.cos(2 * jnp.pi * 1 * i / n_lon)[jnp.newaxis, :, jnp.newaxis],
+            (n_lat, n_lon, nlev)).astype(jnp.float64)
+        g_legacy = _weno_cell_to_uface(phi_smooth, psi, u, order=5,
+                                       convert_to_cellavg=True)
+        g_fv = _weno_cell_to_uface(phi_smooth, psi, u, order=5,
+                                   convert_to_cellavg=False)
+        smooth_diff = float(jnp.max(jnp.abs(g_fv - g_legacy)))
+        assert smooth_diff < 0.1 * grid_diff, (
+            f"change is not grid-scale-localised: smooth_diff={smooth_diff} "
+            f"vs grid_diff={grid_diff}")
+
+    def test_zeta_beta_average_differs_and_finite(self):
+        """beta_average=True (Oceananigans VelocityStencil: average the betas of
+        ⟨u⟩ and ⟨v⟩, ONE reconstruction) must differ from the legacy
+        average-of-two-reconstructions and stay finite, on a noisy field."""
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _weno_zeta_at_u,
+        )
+        n_lat, n_lon, nlev = 12, 16, 4
+        k1, k2, k3, k4 = jax.random.split(jax.random.PRNGKey(7), 4)
+        zeta = jax.random.uniform(k1, (n_lat + 1, n_lon + 1, nlev),
+                                  minval=-1e-4, maxval=1e-4)
+        v_prime = jax.random.uniform(k2, (n_lat + 1, n_lon, nlev),
+                                     minval=-0.2, maxval=0.2)
+        v_at_u = jax.random.uniform(k3, (n_lat, n_lon + 1, nlev),
+                                    minval=-0.2, maxval=0.2)
+        u_smooth = jax.random.uniform(k4, (n_lat, n_lon + 1, nlev),
+                                      minval=-0.2, maxval=0.2)
+        common = dict(order=9, u_smooth=u_smooth, smoothness="split",
+                      convert_to_cellavg=False)
+        r_avg = _weno_zeta_at_u(zeta, v_prime, v_at_u,
+                                beta_average=True, **common)
+        r_legacy = _weno_zeta_at_u(zeta, v_prime, v_at_u,
+                                   beta_average=False, **common)
+        assert bool(jnp.all(jnp.isfinite(r_avg)))
+        assert r_avg.shape == r_legacy.shape
+        assert float(jnp.max(jnp.abs(r_avg - r_legacy))) > 1e-12, (
+            "beta_average=True is a no-op vs the reconstruction-average")

@@ -104,7 +104,7 @@ def compute_cs_to_gauss_weights(
 
     return RegridWeights(
         src_indices=jnp.array(indices, dtype=jnp.int32),
-        weights=jnp.array(weights, dtype=jnp.float32),
+        weights=jnp.array(weights, dtype=jnp.float64),
         target_shape=target_shape,
         src_flat_size=src_flat_size,
     )
@@ -154,7 +154,7 @@ def compute_gauss_to_cs_weights(
 
     return RegridWeights(
         src_indices=jnp.array(indices, dtype=jnp.int32),
-        weights=jnp.array(weights, dtype=jnp.float32),
+        weights=jnp.array(weights, dtype=jnp.float64),
         target_shape=target_shape,
         src_flat_size=src_flat_size,
     )
@@ -215,7 +215,7 @@ def compute_latlon_to_voronoi_weights(
 
     return RegridWeights(
         src_indices=jnp.array(indices, dtype=jnp.int32),
-        weights=jnp.array(weights, dtype=jnp.float32),
+        weights=jnp.array(weights, dtype=jnp.float64),
         target_shape=(n_target,),
         src_flat_size=src_flat_size,
     )
@@ -242,7 +242,6 @@ def regrid_scalar(
     """
     # Flatten spatial dimensions
     spatial_size = regrid_weights.src_flat_size
-    field.shape[len(field.shape) - (field.size // spatial_size):]
 
     # Handle different source shapes
     if field.size == spatial_size:
@@ -256,7 +255,16 @@ def regrid_scalar(
         extra_dims = flat.shape[1:]
 
     indices = regrid_weights.src_indices    # (n_target, k)
-    weights = regrid_weights.weights        # (n_target, k)
+    # Weights are stored fp64. For a FLOATING field, downcast to the field dtype
+    # so an fp64 field keeps full-precision gradients through the IDW sum while
+    # an fp32 field stays fp32 (no fp64 footprint at run time). For a NON-floating
+    # field (int/bool mask, categorical), keep the float weights so the fractional
+    # IDW weights are not truncated to 0/1 — the product then promotes the result
+    # to float, exactly as before this change.
+    if jnp.issubdtype(field.dtype, jnp.floating):
+        weights = regrid_weights.weights.astype(field.dtype)    # (n_target, k)
+    else:
+        weights = regrid_weights.weights                        # (n_target, k)
 
     if len(extra_dims) == 0:
         # Simple scalar: (n_target,)
@@ -348,26 +356,32 @@ _CONNECTIVITY = {
 }
 
 
-def _pad_field_for_regrid(field: np.ndarray, n: int) -> np.ndarray:
-    """Create (6, n+2, n+2) padded field with neighbor boundary cells.
+def _pad_faces_for_regrid(field: np.ndarray, *, strip_inset: int) -> np.ndarray:
+    """Pad a ``(6, m, m)`` per-face field into ``(6, m+2, m+2)`` with the
+    neighbouring faces' boundary cells (CONNECTIVITY reversal-aware); the
+    four corners are the mean of the two adjacent halo values.
 
-    Copies the outermost row/column of each neighbouring face into the
-    halo ring, respecting the CONNECTIVITY reversal flags.  Corners are
-    filled by averaging the two adjacent halo values.
+    ``strip_inset`` selects which neighbour row/column is copied into the
+    halo ring: ``0`` = the shared-boundary cell (cell-centre regrid), ``1``
+    = one gnomonic cell inside it (D-grid corner data, whose index-0/-n
+    points sit ON the shared boundary).  Output is sized off
+    ``field.shape`` so it serves both the ``(6,n,n)`` and ``(6,n+1,n+1)``
+    layouts.
     """
-    padded = np.zeros((6, n + 2, n + 2), dtype=field.dtype)
+    m = field.shape[1]
+    padded = np.zeros((6, m + 2, m + 2), dtype=field.dtype)
     padded[:, 1:-1, 1:-1] = field
 
-    def _get_nbr_strip(f: int, edge: int) -> np.ndarray:
-        if edge == _WEST:   return field[f, 0, :]
-        if edge == _EAST:   return field[f, -1, :]
-        if edge == _SOUTH:  return field[f, :, 0]
-        return field[f, :, -1]  # NORTH
+    def _nbr_strip(f: int, edge: int) -> np.ndarray:
+        if edge == _WEST:   return field[f, strip_inset, :]
+        if edge == _EAST:   return field[f, -1 - strip_inset, :]
+        if edge == _SOUTH:  return field[f, :, strip_inset]
+        return field[f, :, -1 - strip_inset]  # NORTH
 
     for face in range(6):
         for edge in (_WEST, _EAST, _SOUTH, _NORTH):
             nbr_face, nbr_edge, rev = _CONNECTIVITY[face][edge]
-            strip = _get_nbr_strip(nbr_face, nbr_edge)
+            strip = _nbr_strip(nbr_face, nbr_edge)
             if rev:
                 strip = strip[::-1]
             if edge == _WEST:
@@ -387,6 +401,15 @@ def _pad_field_for_regrid(field: np.ndarray, n: int) -> np.ndarray:
         padded[face, -1, -1] = 0.5 * (padded[face, -1, -2] + padded[face, -2, -1])
 
     return padded
+
+
+def _pad_field_for_regrid(field: np.ndarray, n: int) -> np.ndarray:
+    """Create (6, n+2, n+2) padded field with neighbor boundary cells.
+
+    Copies the outermost row/column of each neighbouring face into the
+    halo ring (see :func:`_pad_faces_for_regrid`).
+    """
+    return _pad_faces_for_regrid(field, strip_inset=0)
 
 
 class CubedSphereToLatLonWeights(NamedTuple):
@@ -590,42 +613,11 @@ def _pad_corner_field_for_regrid(field: np.ndarray, n: int) -> np.ndarray:
     """Pad (6, n+1, n+1) D-grid corner data → (6, n+3, n+3).
 
     Corner indices 0 and n sit ON the face boundary (shared with the
-    neighbouring face).  The halo copies the *second-from-boundary*
-    corner on the neighbour, which is one gnomonic cell-spacing inside
-    the adjacent face.
+    neighbouring face), so the halo copies the *second-from-boundary*
+    corner on the neighbour (``strip_inset=1``); see
+    :func:`_pad_faces_for_regrid`.
     """
-    padded = np.zeros((6, n + 3, n + 3), dtype=field.dtype)
-    padded[:, 1:-1, 1:-1] = field
-
-    def _nbr_strip(f: int, edge: int) -> np.ndarray:
-        """Return the corner strip one step inside from the shared boundary."""
-        if edge == _WEST:   return field[f, 1, :]
-        if edge == _EAST:   return field[f, -2, :]
-        if edge == _SOUTH:  return field[f, :, 1]
-        return field[f, :, -2]
-
-    for face in range(6):
-        for edge in (_WEST, _EAST, _SOUTH, _NORTH):
-            nbr_face, nbr_edge, rev = _CONNECTIVITY[face][edge]
-            strip = _nbr_strip(nbr_face, nbr_edge)
-            if rev:
-                strip = strip[::-1]
-            if edge == _WEST:
-                padded[face, 0, 1:-1] = strip
-            elif edge == _EAST:
-                padded[face, -1, 1:-1] = strip
-            elif edge == _SOUTH:
-                padded[face, 1:-1, 0] = strip
-            else:
-                padded[face, 1:-1, -1] = strip
-
-    for face in range(6):
-        padded[face, 0, 0] = 0.5 * (padded[face, 0, 1] + padded[face, 1, 0])
-        padded[face, 0, -1] = 0.5 * (padded[face, 0, -2] + padded[face, 1, -1])
-        padded[face, -1, 0] = 0.5 * (padded[face, -1, 1] + padded[face, -2, 0])
-        padded[face, -1, -1] = 0.5 * (padded[face, -1, -2] + padded[face, -2, -1])
-
-    return padded
+    return _pad_faces_for_regrid(field, strip_inset=1)
 
 
 def apply_cubedsphere_corners_to_latlon(

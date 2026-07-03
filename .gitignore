@@ -101,9 +101,9 @@ forcing_amip/
 keys.pub
 keys
 
-# new_test_dycores: temporary probe scripts created during ralph-loop
-# iterations.  These are local-only audit scripts (e.g. _probe_iter59_substep.py,
-# _probe_iter61_cb_error_map.py, _probe_iter63_c72.py) — never to be committed.
+# Temporary / throwaway debug scripts — never committed.
+# scripts/tmp/ is the canonical bucket for one-off probes and scratch.
+scripts/tmp/
 _probe_*.py
 
 # Local codex-bridge SQLite review database; per-clone artifact carrying
@@ -134,3 +134,9 @@ docs/_build/
 # Local Claude project state (session transcripts + file-based memory) —
 # machine-specific paths and private working notes, NEVER committed.
 /.claude/projects/
+*.pyc
+
+# mc3d Mie scattering LUT — committed MODEL DATA (microhh mie_lut_broadband.nc
+# sampling subset), not a runtime artifact; override the broad `data/` ignore.
+!packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/data/
+!packages/atmosphere/legoesm/atmosphere/physics/radiation/mc3d/data/mie_lut_sampling.npz

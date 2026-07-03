@@ -125,7 +125,15 @@ class TestBoundaryFix:
         assert jnp.all(jnp.isfinite(state.h))
 
     def test_mass_conservation(self, grid_and_cdgrid):
-        """boundary_fix preserves mass (50 steps, C16, rel err < 1e-6)."""
+        """boundary_fix preserves mass to fp64 roundoff (50 steps, C16).
+
+        The conservation fixer anchors and corrects ``int h dA`` in fp64
+        (``conservation_accumulator``), so the diagnostic MUST also reduce in
+        fp64 — the SW state/grid arrays are fp32 (FV finite-volume policy), and
+        an fp32 ``sum(h * area)`` over the ~6*N^2 cubed-sphere cells carries a
+        ~sqrt(N)*eps ~ 2e-6 summation-roundoff floor that masks the true drift
+        (~2e-16). Match the fp64 diagnostic + 1e-12 tolerance of the sibling
+        test_sw_mass_conservation_anchored.py."""
         grid, cdgrid, n = grid_and_cdgrid
         dx = float(grid.radius) * np.pi / (2 * n)
         dt = 300.0
@@ -136,12 +144,14 @@ class TestBoundaryFix:
         model = FV3EdgeShallowWaterModel(grid, config)
         state = _make_edge_ic(grid, cdgrid, 2)
         model.set_initial_mass(state)
-        mass0 = float(jnp.sum(state.h * grid.area))
+        mass0 = float(jnp.sum(
+            state.h.astype(jnp.float64) * grid.area.astype(jnp.float64)))
         for _ in range(50):
             state = model.step(state, dt)
-        mass1 = float(jnp.sum(state.h * grid.area))
+        mass1 = float(jnp.sum(
+            state.h.astype(jnp.float64) * grid.area.astype(jnp.float64)))
         rel_err = abs(mass1 - mass0) / abs(mass0)
-        assert rel_err < 1e-6
+        assert rel_err < 1e-12, f"mass drift {rel_err:.2e} exceeds fp64 roundoff"
 
     def test_edge_ratio_not_worse(self, grid_and_cdgrid):
         """boundary_fix does not make the edge-artifact ratio worse.

@@ -21,6 +21,10 @@ import pytest
 xr = pytest.importorskip("xarray")
 zarr = pytest.importorskip("zarr")
 pd = pytest.importorskip("pandas")
+# Both integration tests below run the full make_ryf -> build_jra55_cache
+# chain; the cache builder writes via ``.chunk(...).to_zarr``, which needs the
+# optional dask chunk manager. Skip (don't error) when dask is absent.
+pytest.importorskip("dask")
 
 
 # Load make_ryf as a module (it lives in scripts/, not in the package).

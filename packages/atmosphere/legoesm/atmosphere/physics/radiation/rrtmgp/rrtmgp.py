@@ -466,6 +466,8 @@ class RRTMGP:
       aerosol_absorption_optical_depth_lw: jnp.ndarray | None = None,
       solar_spectral_fraction: jnp.ndarray | None = None,
       ghg_vmr_override: dict | None = None,
+      sw_optical_field_only: bool = False,
+      lw_optical_field_only: bool = False,
   ):
       """Compute radiation for legoESM column arrays.
 
@@ -608,7 +610,13 @@ class RRTMGP:
       h2o_vmr = mol_ratio * q_v_3d / (1.0 - q_v_3d)
 
       if o3_vmr is not None:
-          o3_3d = _add_halos(jnp.clip(o3_vmr, 1.0e-10, None)[:, None, ::-1])
+          # Clip AFTER ``_add_halos``: linear halo extrapolation of a steep
+          # boundary ozone profile (e.g. [1e-5, 1e-10]) can extrapolate to a
+          # NEGATIVE halo VMR (2·1e-10 − 1e-5 < 0), which is an unphysical
+          # absorber concentration in the optics lookup.  Same fix class as
+          # the q_v post-clip above (codex atm-radiation review).
+          o3_3d = _add_halos(o3_vmr[:, None, ::-1])
+          o3_3d = jnp.clip(o3_3d, 1.0e-10, None)
       else:
           o3_3d = _standard_o3_profile(p_3d)
 
@@ -701,29 +709,50 @@ class RRTMGP:
           _cpi = cloud_path_ice if cloud_path_ice is not None else _zero
           _crl = cloud_r_eff_liq if cloud_r_eff_liq is not None else _r_min
           _cri = cloud_r_eff_ice if cloud_r_eff_ice is not None else _r_min
-          cpl_3d = _add_halos(jnp.clip(_cpl, 0.0, None)[:, None, ::-1])
-          cpi_3d = _add_halos(jnp.clip(_cpi, 0.0, None)[:, None, ::-1])
-          crl_3d = _add_halos(jnp.clip(_crl, 1.0e-6, None)[:, None, ::-1])
-          cri_3d = _add_halos(jnp.clip(_cri, 1.0e-6, None)[:, None, ::-1])
+          # Clip AFTER ``_add_halos`` (same fix class as q_v / o3 / cf):
+          # linear halo extrapolation of a boundary cloud-water step can
+          # produce a NEGATIVE halo water path / sub-floor halo radius,
+          # which becomes a negative cloud optical depth in the halo layer
+          # (optics.py scales τ by these paths).  The halo flux is stripped
+          # but its optics feed the interior recurrence — so re-floor the
+          # halo-expanded fields, not just the interior.
+          cpl_3d = jnp.clip(_add_halos(_cpl[:, None, ::-1]), 0.0, None)
+          cpi_3d = jnp.clip(_add_halos(_cpi[:, None, ::-1]), 0.0, None)
+          crl_3d = jnp.clip(_add_halos(_crl[:, None, ::-1]), 1.0e-6, None)
+          cri_3d = jnp.clip(_add_halos(_cri[:, None, ::-1]), 1.0e-6, None)
           if cloud_fraction is not None:
-              cf_3d = _add_halos(jnp.clip(cloud_fraction, 0.0, 1.0)[:, None, ::-1])
+              # Clip AFTER ``_add_halos``: linear halo extrapolation of a
+              # boundary cloud-fraction step (e.g. [0, 1]) produces halo
+              # values OUTSIDE [0, 1] (2·0 − 1 = −1, or 2·1 − 0 = 2).  The
+              # halo layer's optical depth is scaled by cf in optics.py
+              # (``optical_depth * cloud_fraction``); a NEGATIVE halo cf
+              # injects an unphysical negative cloud optical depth into the
+              # two-stream recurrence that feeds the interior fluxes (the
+              # halo flux itself is stripped, but its optics are not).  Same
+              # post-clip fix class as q_v / o3 above (codex review).
+              cf_3d = _add_halos(cloud_fraction[:, None, ::-1])
+              cf_3d = jnp.clip(cf_3d, 0.0, 1.0)
           else:
               cf_3d = None
       else:
           cpl_3d = cpi_3d = crl_3d = cri_3d = cf_3d = None
 
-      # Optional aerosol optical depth (shortwave)
+      # Optional aerosol optical depth (shortwave).  Clip AFTER ``_add_halos``
+      # (same fix class as q_v / o3 / cf / cloud paths): linear halo
+      # extrapolation can drive a boundary aerosol OD negative, which is an
+      # unphysical (negative) optical depth feeding the interior recurrence.
       if aerosol_optical_depth is not None:
-          aerosol_od_3d = _add_halos(
-              jnp.clip(aerosol_optical_depth, 0.0, None)[:, None, ::-1],
+          aerosol_od_3d = jnp.clip(
+              _add_halos(aerosol_optical_depth[:, None, ::-1]), 0.0, None,
           )
       else:
           aerosol_od_3d = None
 
       # Optional aerosol optical depth (longwave, pure absorber)
       if aerosol_absorption_optical_depth_lw is not None:
-          aerosol_od_lw_3d = _add_halos(
-              jnp.clip(aerosol_absorption_optical_depth_lw, 0.0, None)[:, None, ::-1],
+          aerosol_od_lw_3d = jnp.clip(
+              _add_halos(aerosol_absorption_optical_depth_lw[:, None, ::-1]),
+              0.0, None,
           )
       else:
           aerosol_od_lw_3d = None
@@ -740,6 +769,77 @@ class RRTMGP:
               )
       else:
           solar_weights = None
+
+      # --- 3b. Optics-only short-circuit for the 3D MC ray tracer ---
+      # Reuses the EXACT state above (no duplicated numerics); returns the
+      # per-g-point shortwave optical field instead of solving transport. The
+      # default path (sw_optical_field_only=False) is byte-identical.
+      if sw_optical_field_only:
+          sw_props = two_stream.compute_sw_optical_field(
+              p_3d, T_3d, molecules, optics_lib, vmr_fields,
+              cloud_r_eff_liq=crl_3d, cloud_path_liq=cpl_3d,
+              cloud_r_eff_ice=cri_3d, cloud_path_ice=cpi_3d,
+              cloud_fraction=cf_3d,
+              aerosol_optical_depth=aerosol_od_3d,
+              aerosol_single_scattering_albedo=config.aerosol_ssa,
+              aerosol_asymmetry_factor=config.aerosol_g,
+          )
+          # Strip the singleton Y axis + vertical halos, flip back to the
+          # legoESM TOA-first convention -> (n_gpt, ncol, nlev).
+          hw = 1
+
+          def _strip(a):
+              return a[:, :, 0, hw:-hw][:, :, ::-1]
+
+          tau_gpt = _strip(sw_props['optical_depth'])
+          ssa_gpt = _strip(sw_props['ssa'])
+          g_gpt = _strip(sw_props['asymmetry_factor'])
+          rayleigh_frac_gpt = _strip(sw_props['rayleigh_frac'])
+          # Cloud liquid effective radius [um] per cell for Mie-LUT sampling
+          # (microhh LUT spans 2.5..21.5 um). Clear-sky -> the LUT floor.
+          # crl_3d is 3D (ncol, 1, nlev+2) -- NOT per-g-point 4D -- so it needs a
+          # 3D strip (drop singleton, trim halo, z-reverse to TOA-first), not the
+          # 4D _strip used for the per-g-point optics.
+          if crl_3d is not None:
+              r_eff_um = crl_3d[:, 0, hw:-hw][:, ::-1] * 1.0e6   # (ncol, nlev)
+          else:
+              r_eff_um = jnp.full((ncol, nlev), 2.5, dtype=tau_gpt.dtype)  # coeff-ok: microhh Mie LUT lower r_eff bound [um]
+          weights = solar_weights
+          if weights is None:
+              weights = optics_lib.solar_fraction_by_gpt
+          # Beam-normal solar flux per g-point [W/m^2].
+          solar_flux_normal = config.S_0 * weights
+          return (tau_gpt, ssa_gpt, g_gpt, rayleigh_frac_gpt, r_eff_um,
+                  solar_flux_normal)
+
+      # --- 3c. Optics-only short-circuit for the 3D MC LW emission tracer ---
+      # Reuses the EXACT state above; returns per-g-point LW absorption optical
+      # depth + Planck sources instead of solving transport. Default path
+      # (lw_optical_field_only=False) is byte-identical.
+      if lw_optical_field_only:
+          lw_props = two_stream.compute_lw_optical_field(
+              p_3d, T_3d, molecules, optics_lib, sfc_T_2d, vmr_fields,
+              cloud_r_eff_liq=crl_3d, cloud_path_liq=cpl_3d,
+              cloud_r_eff_ice=cri_3d, cloud_path_ice=cpi_3d,
+              cloud_fraction=cf_3d,
+              aerosol_absorption_optical_depth=aerosol_od_lw_3d,
+          )
+          hw = 1
+
+          def _strip3d(a):  # (n_gpt, ncol, 1, nlev+2) -> (n_gpt, ncol, nlev) TOA-first
+              return a[:, :, 0, hw:-hw][:, :, ::-1]
+
+          abs_od_gpt = _strip3d(lw_props['abs_optical_depth'])
+          planck_gpt = _strip3d(lw_props['planck_src'])
+          # Cell-face Planck (lower/upper-z faces) for Phase-3c linear-in-tau
+          # in-cell emission. The strip+flip preserves each cell's lower-z /
+          # upper-z face labeling (see compute_plane_lw_heating_spectral).
+          planck_bot_gpt = _strip3d(lw_props['planck_src_bottom'])
+          planck_top_gpt = _strip3d(lw_props['planck_src_top'])
+          # Surface Planck is 2D per g-point (n_gpt, ncol, 1) -> (n_gpt, ncol).
+          planck_sfc_gpt = lw_props['planck_src_sfc'][:, :, 0]
+          return (abs_od_gpt, planck_gpt, planck_bot_gpt, planck_top_gpt,
+                  planck_sfc_gpt)
 
       # --- 4. Solve LW ---
       lw_fluxes = two_stream.solve_lw(
@@ -759,6 +859,7 @@ class RRTMGP:
           use_scan=config.use_scan,
           use_optimal_angle=getattr(config, "use_optimal_angle", False),
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
+          gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
       )
 
       # --- 5. Solve SW ---
@@ -780,6 +881,7 @@ class RRTMGP:
           solar_fraction_by_gpt=solar_weights,
           use_scan=config.use_scan,
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
+          gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
       )
 
       # --- 6. Compute heating rates using exact layer thickness ---

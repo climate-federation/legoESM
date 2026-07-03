@@ -41,8 +41,10 @@ class TestShardingSpec:
         spec = _make_sharding_spec(config)
         # face_3d should shard face axis
         assert "face" in str(spec.face_3d)
-        # replicated should be empty PartitionSpec
-        assert str(spec.replicated) == "PartitionSpec()"
+        # replicated should be an empty PartitionSpec.  jax shortened the
+        # repr from "PartitionSpec()" to "P()" in recent releases, so accept
+        # either rather than pinning a version-specific string.
+        assert str(spec.replicated) in ("PartitionSpec()", "P()")
 
 
 # ---------------------------------------------------------------------------

@@ -55,6 +55,7 @@ from legoesm.ocean.vertical import (
 )
 from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
 from legoesm.ocean.dynamics.ocean_tendency_common import (
+    bbl_distributed_drag_face_column,
     iterate_eos_and_pressure_anomaly,
 )
 
@@ -143,30 +144,11 @@ def _bc_bottom_drag_cdgrid(du_dt, dv_dt, u_a, v_a, h_k, z_coord, config):
         # Distributed BBL drag (Killworth & Edwards 1999 / MOM6): spread the
         # stress over a fixed near-seafloor thickness ``H_BBL`` instead of
         # dumping r·u/h into a single (possibly <1 m) partial cell — the
-        # cold-start thin-bottom-cell blowup fix.  Cell-centre column form of
-        # the lat-lon ``_bbl_drag_for_face``.
-        def _bbl(vel, r_eff):
-            z_half = jnp.concatenate([
-                jnp.zeros(h_k.shape[:-1] + (1,), dtype=h_k.dtype),
-                -jnp.cumsum(h_k, axis=-1),
-            ], axis=-1)
-            z_top = z_half[..., :-1]
-            z_bot = z_half[..., 1:]
-            z_seafloor = z_half[..., -1:]
-            bbl_top = z_seafloor + H_BBL
-            overlap = jnp.maximum(
-                0.0,
-                jnp.minimum(z_top, bbl_top) - jnp.maximum(z_bot, z_seafloor),
-            )
-            h_safe = jnp.maximum(h_k, 1e-10)
-            # Effective BBL thickness: on shelves shallower than ``H_BBL`` the
-            # band cannot reach its nominal thickness; normalise by the actual
-            # total overlap (matches the lat-lon path / bbl_drag_distributed).
-            total_overlap = jnp.sum(overlap, axis=-1, keepdims=True)
-            h_bbl_eff = jnp.minimum(jnp.maximum(total_overlap, 1e-10), H_BBL)
-            return -r_eff * vel * overlap / (h_safe * h_bbl_eff)
-        drag_u = _bbl(u_a, r_eff_u)
-        drag_v = _bbl(v_a, r_eff_v)
+        # cold-start thin-bottom-cell blowup fix.  #517: route through the
+        # shared canonical helper instead of re-deriving the cell-centre
+        # column form (was bit-identical to ``bbl_distributed_drag_face_column``).
+        drag_u = bbl_distributed_drag_face_column(u_a, h_k, r_eff_u, H_BBL)
+        drag_v = bbl_distributed_drag_face_column(v_a, h_k, r_eff_v, H_BBL)
     else:
         n_lev = u_a.shape[-1]
         level_idx = jnp.arange(n_lev)
@@ -272,7 +254,7 @@ def ocean_baroclinic_tendencies_cdgrid(
         # wet/rock mask (face active iff BOTH adjacent A-cells active, with a
         # cross-seam ``is_active`` halo) is the next conservation upgrade and
         # closes coastline + seafloor faces together; tracked in
-        # docs/md_files/ocean_faithfulness_nemo.md.
+        # docs/dev-notes/ocean_faithfulness_nemo.md.
 
     # --- 2. Density from EOS + 3. Baroclinic pressure anomaly ---
     # Reference Jacobian (J=1, eta=0): the barotropic solver handles
@@ -306,6 +288,7 @@ def ocean_baroclinic_tendencies_cdgrid(
         n_iter=2, hi_precision_pressure=True,
         h_actual=(z_coord.h_partial if is_partial else None),
         is_active_3d=(active_3d if is_partial else None),
+        allow_baroclinic_f32=True,   # opt-in f32-EOS lever (LEGOESM_BAROCLINIC_F32)
     )
 
     # --- 4. Convert to D-grid ---
@@ -322,7 +305,7 @@ def ocean_baroclinic_tendencies_cdgrid(
         # carry a spurious flux across the seafloor step.  Mask each C-face to
         # wet iff BOTH adjacent A-cells are wet (land_mask AND above seafloor),
         # halo-correctly across cube seams.  This is the conservation upgrade
-        # tracked in docs/md_files/ocean_faithfulness_nemo.md and closes the
+        # tracked in docs/dev-notes/ocean_faithfulness_nemo.md and closes the
         # coastline + seafloor faces together.  z* path (is_partial False)
         # stays bit-exact (no masking).
         wet_cc_3d = mask_3d * active_3d
@@ -414,14 +397,17 @@ def ocean_baroclinic_tendencies_cdgrid(
     #              spurious bottom PGF above) → not faithful on the cube.
     #   "smc03"  : full Shchepetkin & McWilliams 2003 density-Jacobian PGF
     #              REPLACING dp — see below.  Matches the proven latlon/tripole.
+    pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
+    if pgf_scheme not in ("adcroft", "smc03", "zero"):
+        # Static config value -> validate at fn entry UNCONDITIONALLY. A pure
+        # z* run has is_partial=False, so gating this guard inside `if
+        # is_partial` let a typo (e.g. 'smc3') silently fall back to adcroft and
+        # disable the faithful scheme on z*; a typo must fail loudly on every
+        # vertical coordinate (matches the latlon/mpas siblings).
+        raise ValueError(
+            f"Unknown cd-grid pgf_scheme {pgf_scheme!r}; "
+            "expected 'adcroft', 'smc03', or 'zero' (diagnostic).")
     if is_partial:
-        pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
-        if pgf_scheme not in ("adcroft", "smc03", "zero"):
-            # Static config value -> validate at fn entry (a typo must fail loudly,
-            # not silently fall back to adcroft and disable the faithful scheme).
-            raise ValueError(
-                f"Unknown cd-grid pgf_scheme {pgf_scheme!r}; "
-                "expected 'adcroft', 'smc03', or 'zero' (diagnostic).")
         cref = jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref
         if pgf_scheme == "smc03":
             # S&M03 density-Jacobian PGF on the AL corners.  Per-cell geometry
@@ -536,7 +522,7 @@ def ocean_baroclinic_tendencies_cdgrid(
     # residual is the SOLE cause (vs any barotropic / advective / metric term).
     # Works for both partial and z* (zeroes the base AL gradient + any
     # correction).  Diagnostic only — never a faithful run.
-    if getattr(config, "pgf_scheme", "adcroft") == "zero":
+    if pgf_scheme == "zero":
         dp_dx = jnp.zeros_like(dp_dx)
         dp_dy_perp = jnp.zeros_like(dp_dy_perp)
 

@@ -44,6 +44,10 @@ def main():
     p.add_argument("--years", type=float, default=20.0)
     p.add_argument("--etopo", default=os.environ.get("LEGOESM_ETOPO_PATH", "data/bathymetry/etopo_1deg.nc"))
     p.add_argument("--grid", default="data/grids/eORCA1.2_mesh_mask.nc")
+    p.add_argument("--fold-convention", default="auto",
+                   choices=["auto", "n_lon-1-i", "(n_lon-i)%n_lon"],
+                   help="Tripole T-fold seam origin (default auto; auto raises "
+                        "on a genuinely ambiguous near-constant fold row).")
     args = p.parse_args()
 
     OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -51,7 +55,7 @@ def main():
     n_steps = int(days * 86400 / DT)
     n_blocks = n_steps // BLOCK
 
-    geom = create_tripole_grid(args.grid)
+    geom = create_tripole_grid(args.grid, fold_convention=args.fold_convention)
 
     H_raw, mask = init_ocean_bathymetry(geom, BathymetryConfig(
         source="file", path=args.etopo, H_max=5500.0, H_min=200.0,
@@ -76,7 +80,7 @@ def main():
         convection=OceanConvectionConfig(scheme="enhanced_diffusion",
             enhanced_diffusion=EnhancedDiffusionConfig(K_conv=1.0)),
         shortwave_penetration=None)
-    oc = LatLonCGridOceanConfig(
+    oc = LatLonCGridOceanConfig.from_flat(
         A_h=1e5, C_smag_lap=0.33, A_h_floor=1000.0, A_v=1e-4, K_v=1e-5,
         bottom_drag_r=1e-3, bottom_drag_bbl_thickness=100.0, bottom_drag_bg_velocity=0.1,
         barotropic_solver="implicit_cn", pgf_scheme="adcroft",

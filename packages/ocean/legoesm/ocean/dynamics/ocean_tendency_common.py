@@ -34,6 +34,7 @@ These helpers are pure and pytree-friendly: they accept and return
 
 from __future__ import annotations
 
+import os
 from typing import Callable, Optional, Tuple
 
 import jax.numpy as jnp
@@ -43,6 +44,22 @@ from legoesm.ocean.freshwater import (
     virtual_salt_flux,
     normalized_virtual_salt_flux,
 )
+
+
+def _baroclinic_f32_enabled(dtype) -> bool:
+    """Mixed-precision opt-in (``LEGOESM_BAROCLINIC_F32=1``, f64-state-gated): pass
+    ``compute_dtype=float32`` to the EOS in the baroclinic anomaly iteration so the
+    EOS polynomial runs in f32 WORK while rho is RETURNED in the f64 STATE dtype and
+    the downstream rho' / pressure / PGF stay f64 — the Oceananigans / NeuralGCM
+    "f32 work, f64 state" pattern, mirroring the vmix ``LEGOESM_VMIX_F32_SOLVE``
+    lever and SCOPED to the baroclinic EOS call ONLY (N^2 / diagnostics keep the
+    policy dtype, since their full-density vertical differences are NOT anomaly-
+    safe in f32).  Precision-safe here via the density ANOMALY rho'~O(1) (offline
+    experiment 8520588: PGF relRMS ~8e-5, spurious |v| ~1 mm/s/day).  GPU-only
+    benefit (RTX8000 f64 = 1/32 f32); CPU f32 ~flat/slowdown — OPT-IN, default
+    OFF.  Requires a ``make_eos_fn``-built eos_fn (accepts ``compute_dtype``)."""
+    return (dtype == jnp.float64
+            and os.environ.get("LEGOESM_BAROCLINIC_F32", "0") == "1")
 
 
 def iterate_eos_and_pressure_anomaly(
@@ -61,6 +78,7 @@ def iterate_eos_and_pressure_anomaly(
     use_depth_dependent_ref: bool = False,
     is_active_3d: jnp.ndarray | None = None,
     rho_ref_z_static: jnp.ndarray | None = None,
+    allow_baroclinic_f32: bool = False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Run the standard 2-pass EOS iteration and form ``p_prime``.
 
@@ -136,13 +154,24 @@ def iterate_eos_and_pressure_anomaly(
     J_ref = jnp.ones(horiz_shape, dtype=T.dtype)
     eta_ref = jnp.zeros(horiz_shape, dtype=T.dtype)
 
-    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T))
+    # f32-EOS lever (default OFF -> byte-identical): pass compute_dtype=f32 so the
+    # EOS polynomial runs in f32 WORK; rho is returned in the f64 STATE dtype
+    # (T_filled is f64), so the hydrostatic iteration, rho', cumsum and PGF below
+    # all stay f64 — only the polynomial is f32.  Gated by BOTH the env AND the
+    # caller's explicit ``allow_baroclinic_f32`` so it fires ONLY for the true
+    # baroclinic-PGF dynamics callers (where the anomaly rho'~O(1) makes f32 safe)
+    # — NOT for the GM/Redi/MLE/N^2/init callers that also use this helper but
+    # whose density gradients are not anomaly-safe in f32 (codex review).
+    eos_kw = ({"compute_dtype": jnp.float32}
+              if (allow_baroclinic_f32 and _baroclinic_f32_enabled(T.dtype))
+              else {})
+    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T), **eos_kw)
     for _ in range(n_iter):
         p_hydro = compute_hydrostatic_pressure(
             rho, eta_ref, dz_ref, J_ref, rho_0, g,
             h_actual=h_actual,
         )
-        rho = eos_fn(T_filled, S_filled, p_hydro)
+        rho = eos_fn(T_filled, S_filled, p_hydro, **eos_kw)
 
     if rho_ref_z_static is not None:
         # STATIC reference profile (preferred): a frozen-at-init
@@ -273,6 +302,230 @@ def compute_static_rho_ref_z(
     wet_count = jnp.maximum(jnp.sum(wet, axis=horiz_axes), 1.0)
     rho_ref_z = jnp.sum(rho * wet, axis=horiz_axes) / wet_count
     return rho_ref_z.astype(T.dtype)
+
+
+def ab2_blend(
+    f_new: jnp.ndarray,
+    f_old: jnp.ndarray,
+    eps: jnp.ndarray | float,
+) -> jnp.ndarray:
+    """Adams-Bashforth-2 time blend ``(1.5 + eps)·f_new − (0.5 + eps)·f_old``.
+
+    The standard AB2 extrapolation of a tendency to the half-step, with
+    the Robert-Asselin-style stabilising offset ``eps`` (``config.
+    ab2_epsilon``) that shifts the weights ``(3/2, −1/2)`` towards a more
+    damped ``(3/2 + ε, −1/2 − ε)`` to suppress the AB2 weak instability.
+
+    ``f_new`` is the tendency at the current step ``F^n``; ``f_old`` is
+    the previous step ``F^{n−1}``.  Open-coded identically across the
+    rigid-lid streamfunction update and the split / unsplit baroclinic
+    tracer + momentum predictors — factored here (#517 item 8).
+
+    The arithmetic is written EXACTLY as the call sites had it
+    (``(1.5 + eps) * f_new - (0.5 + eps) * f_old``, including those that
+    pre-bound ``a_n = 1.5 + eps``, ``a_p = 0.5 + eps``) so the result is
+    BIT-IDENTICAL.  Pure elementwise; broadcasts over any shape; fully
+    differentiable.
+
+    Parameters
+    ----------
+    f_new : jax.Array
+        Tendency at the current step ``F^n``.
+    f_old : jax.Array
+        Tendency at the previous step ``F^{n−1}``.
+    eps : float or jax.Array
+        AB2 stabilising offset (``config.ab2_epsilon``).
+
+    Returns
+    -------
+    jax.Array
+        ``(1.5 + eps)·f_new − (0.5 + eps)·f_old``.
+    """
+    return (1.5 + eps) * f_new - (0.5 + eps) * f_old
+
+
+def column_depth(
+    h_face: jnp.ndarray,
+    min_water_column_m: jnp.ndarray | float,
+    *,
+    axis: int = -1,
+    keepdims: bool = False,
+) -> jnp.ndarray:
+    """Floored water-column depth ``max(Σ_k h_face, min_water_column_m)``.
+
+    The vertically-summed thickness at a velocity/face/cell location,
+    floored to a positive ``min_water_column_m`` so it is safe to divide
+    by (the barotropic depth-average denominator).
+
+    NOTE on the floor: call sites historically use DIVERGENT floors —
+    e.g. ``config.min_water_column_m`` (≈ a physical wet-cell minimum,
+    O(0.1–1 m)) in the barotropic-mean and PE-flux paths, but a bare
+    numerical ``1e-10`` in the diagnostic depth-mean paths.  This helper
+    takes the floor as an explicit argument so every call site passes
+    its OWN current value and the result is BIT-IDENTICAL.  Do NOT unify
+    these into one floor — that would change answers.
+
+    Parameters
+    ----------
+    h_face : jax.Array
+        Per-level layer thickness at the location, with the vertical
+        axis at ``axis`` [m].
+    min_water_column_m : float or jax.Array
+        Lower bound on the column depth.  ``max`` is exact (no rounding)
+        so passing each site's own floor reproduces it bit-for-bit.
+    axis : int, default -1
+        Vertical (level) axis to sum over.  Lat-lon C-grid uses ``-1``;
+        MPAS edge columns use ``1``.
+    keepdims : bool, default False
+        Forwarded to ``jnp.sum`` so a site that needs the summed axis
+        retained for broadcasting gets a bit-identical result.
+
+    Returns
+    -------
+    jax.Array
+        ``max(Σ_k h_face, min_water_column_m)``.
+    """
+    return jnp.maximum(
+        jnp.sum(h_face, axis=axis, keepdims=keepdims), min_water_column_m
+    )
+
+
+def depth_mean(
+    field: jnp.ndarray,
+    h_face: jnp.ndarray,
+    min_water_column_m: jnp.ndarray | float,
+    *,
+    axis: int = -1,
+    keepdims: bool = False,
+    fused: bool = True,
+) -> jnp.ndarray:
+    """Thickness-weighted column mean ``Σ_k(field·h_face) / max(Σ_k h_face, floor)``.
+
+    The barotropic / depth-averaged component of a 3-D field: the
+    thickness-weighted vertical average, with the denominator floored
+    via :func:`column_depth`.
+
+    NOTE on the floor: see :func:`column_depth`.  Call sites pass
+    DIVERGENT floors (``config.min_water_column_m`` vs ``1e-10``); each
+    passes its OWN value here so the result is BIT-IDENTICAL.  No mask is
+    applied — use :func:`depth_average_to_faces` when a face mask is
+    required (it multiplies the mean by the mask afterwards, matching the
+    original ``... * u_mask`` call sites).
+
+    NOTE on ``fused`` (BYTE-IDENTITY — reduction topology):  the original
+    call sites split into two families that XLA can compile to *bit-
+    different* results in the full step (it reassociates the level-axis
+    accumulation differently depending on the surrounding fused kernel —
+    a ~1e-10 drift observed on the MPAS seamount path):
+
+    * ``fused=True`` (default): ONE stacked column reduction
+      ``jnp.sum(jnp.stack([field·h, h]), axis)`` — reproduces the sites
+      that were already written with the fused stack (the
+      ``ocean_model_latlon_cgrid`` barotropic split, ``barotropic_implicit``
+      ``V_bar``).
+    * ``fused=False``: TWO independent ``jnp.sum`` calls — reproduces the
+      sites that were open-coded as separate sums (``barotropic_implicit``
+      ``U_bar``, ``rigid_lid`` ``U_old``/``V_old``, the ``_split`` baroclinic
+      decomposition).
+
+    Each call site selects the flag matching its ORIGINAL form so the
+    result is bit-identical on every backend — do NOT change a site's flag
+    to "tidy up", it changes answers.
+
+    Parameters
+    ----------
+    field : jax.Array
+        3-D field to depth-average (velocity, momentum tendency, …),
+        with its vertical axis at ``axis``.
+    h_face : jax.Array
+        Per-level layer thickness at the same location.
+    min_water_column_m : float or jax.Array
+        Column-depth floor passed verbatim to :func:`column_depth`.
+    axis : int, default -1
+        Vertical (level) axis.
+    keepdims : bool, default False
+        Retain the reduced axis (for broadcasting the mean back against
+        the 3-D field, e.g. ``u - U_bar[..., None]`` callers that keep
+        the axis).
+
+    Returns
+    -------
+    jax.Array
+        Thickness-weighted depth mean of ``field``.
+    """
+    # Fuse the numerator (Σ field·h) and denominator (Σ h) into ONE
+    # stacked column reduction.  This is the exact form the call sites
+    # had (``jnp.sum(jnp.stack([h, field·h], axis=-1), axis=-2)``).  It
+    # MATTERS for byte-identity: splitting the fused stack into two
+    # separate ``jnp.sum`` calls changes XLA's fusion in the full
+    # compiled step and drifts results at ~1e-10 on some grids (observed
+    # in the MPAS seamount path).  Stacking on a NEW trailing axis and
+    # reducing the level axis ``axis`` reproduces the original exactly;
+    # the stack ORDER does not matter (both slices reduce independently).
+    if fused:
+        stacked = jnp.stack([field * h_face, h_face], axis=-1)
+        pair = jnp.sum(stacked, axis=axis if axis >= 0 else axis - 1,
+                       keepdims=keepdims)
+        num = pair[..., 0]
+        denom = jnp.maximum(pair[..., 1], min_water_column_m)
+        return num / denom
+    # Split form: two independent reductions (matches the open-coded
+    # ``jnp.sum(field·h)/max(jnp.sum(h), floor)`` sites bit-for-bit).
+    num = jnp.sum(field * h_face, axis=axis, keepdims=keepdims)
+    denom = column_depth(h_face, min_water_column_m, axis=axis,
+                         keepdims=keepdims)
+    return num / denom
+
+
+def depth_average_to_faces(
+    field: jnp.ndarray,
+    h_face: jnp.ndarray,
+    mask: jnp.ndarray,
+    min_water_column_m: jnp.ndarray | float,
+    *,
+    axis: int = -1,
+    fused: bool = True,
+) -> jnp.ndarray:
+    """Masked thickness-weighted depth mean ``depth_mean(field, h_face) · mask``.
+
+    The barotropic face velocity ``U_bar`` used in the baroclinic /
+    barotropic split: the thickness-weighted vertical average of an
+    edge-normal velocity at a face, multiplied by the face mask so land
+    faces stay zero.  Equivalent to the open-coded
+    ``Σ(u·h)/max(Σh, floor) · u_mask`` that previously lived in every
+    ``barotropic_*`` and ``ocean_pe_*`` / ``ocean_model_*`` split.
+
+    NOTE on the floor: see :func:`column_depth`.  Each call site passes
+    its OWN ``min_water_column_m`` (``config.min_water_column_m`` for the
+    barotropic-mean paths, ``1e-10`` for the PE diagnostic paths) so the
+    output is BIT-IDENTICAL.
+
+    Parameters
+    ----------
+    field : jax.Array
+        Edge-normal velocity with its vertical axis at ``axis``.
+    h_face : jax.Array
+        Per-level face thickness (same shape as ``field``).
+    mask : jax.Array
+        Face mask (1 = wet) with the horizontal shape of the depth mean.
+    min_water_column_m : float or jax.Array
+        Column-depth floor passed verbatim to :func:`column_depth`.
+    axis : int, default -1
+        Vertical (level) axis.
+    fused : bool, default True
+        Reduction topology — forwarded to :func:`depth_mean`.  ``True`` for
+        the already-fused-stack sites (``ocean_model`` split, ``V_bar``);
+        ``False`` for the open-coded separate-sum sites (``U_bar``,
+        ``U_old``/``V_old``).  See :func:`depth_mean` for the byte-identity
+        rationale.
+
+    Returns
+    -------
+    jax.Array
+        ``Σ_k(field·h_face) / max(Σ_k h_face, floor) · mask``.
+    """
+    return depth_mean(field, h_face, min_water_column_m, axis=axis,
+                      fused=fused) * mask
 
 
 def apply_sponge_tracer_relaxation(
@@ -424,25 +677,20 @@ def implicit_bottom_drag_factor(
     form would diverge for ``dt·r/H > 2``, a hazard in shallow-shelf
     and inundation configurations).
 
-    Known limitation — combined drag application
-    --------------------------------------------
-    The explicit barotropic substep loops in this codebase apply this
-    factor *in addition to* a depth-mean bottom drag carried by
-    ``F_slow_u`` / ``F_slow_v`` (the depth-average of the 3D PE solver's
-    ``du_dt``, which already contains a bottom-cell drag of magnitude
-    ``-r·u_bot / dz_bot`` whose depth-average is ``-r·u_bot / H``).
-    The Crank-Nicolson implicit barotropic solver
-    (``barotropic_implicit_*``) intentionally relies on ``F_slow``
-    alone and does *not* apply this factor.  Effective barotropic-mode
-    drag in the explicit path is therefore ``≈ 2·r/H`` rather than
-    ``r/H`` (codex adversarial review iter-2 finding #1).  Resolving
-    this requires single-owner drag plumbing: either subtract the
-    depth-mean bottom drag from ``F_slow_u`` before the barotropic
-    substep, or remove the bottom-drag contribution from the 3D
-    solver's ``du_dt`` for the barotropic-explicit path.  Tracked as
-    open architectural debt; do not silently change call-site
-    semantics without a paired update to ``F_slow`` construction in
-    ``ocean_model_*.py``.
+    Single-owner bottom drag (RESOLVED — was codex iter-2 finding #1)
+    ----------------------------------------------------------------
+    The 3D PE solvers already apply the full bottom drag ``-r·u_bot/h_bot``
+    (with BBL / partial-cell handling) to ``du_dt``; its depth-mean
+    ``-r·u_bot/H`` is carried into the barotropic mode through ``F_slow_u`` /
+    ``F_slow_v`` and applied at every substep.  The explicit barotropic substep
+    loops therefore NO LONGER multiply by this factor (it would double-count to
+    an effective ``≈ 2·r/H``) — drag is owned exclusively by the 3D tendency /
+    F_slow, matching the Crank-Nicolson implicit solver
+    (``barotropic_implicit_*``), which always relied on ``F_slow`` alone.  This
+    helper is retained for the implicit-vertical-drag use cases that legitimately
+    DO want an unconditionally-stable standalone ``dU/dt = -r·U/H`` update; any
+    new caller MUST confirm the drag is not already in its ``F_slow`` to avoid
+    re-introducing the double count.
 
     Parameters
     ----------
@@ -537,7 +785,7 @@ def bbl_distributed_drag_face_column(
     Killworth & Edwards (1999), JPO 29, 1221–1238.
     MOM6 ``BBL_thick_min`` (Adcroft et al. 2019, JAMES).
 
-    See ``docs/ocean_experiments/density_jacobian_pgf_mpas.md`` §8a
+    See ``docs/ocean/experiments/density_jacobian_pgf_mpas.md`` §8a
     for the MPAS+ETOPO diagnostic that motivated the cross-grid port.
     """
     pad_axes = ((0, 0),) * (h_face.ndim - 1)  # noqa: F841 (parity with lat-lon)
@@ -567,3 +815,52 @@ def bbl_distributed_drag_face_column(
     total_overlap = jnp.sum(overlap, axis=-1, keepdims=True)
     h_bbl_eff = jnp.minimum(jnp.maximum(total_overlap, eps), H_BBL)
     return -drag_r * u_field * overlap / (h_safe * h_bbl_eff)
+
+
+def masked_background_vmix_coefficient(
+    background: jnp.ndarray | float,
+    bottom_level: jnp.ndarray,
+    n_half: int,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Per-column background vertical-mixing coefficient zeroed below seafloor.
+
+    Builds the constant background diffusivity / viscosity floor on the
+    HALF-LEVELS (interfaces) of an MPAS partial-cell column and zeros it at
+    every interface that lies below the deepest active full level.  Interface
+    ``k`` couples full levels ``k`` and ``k + 1``; it is *active* only when
+    ``k < bottom_level`` (so both coupled cells are at or above the seafloor).
+    Interfaces at/below the seafloor must carry EXACTLY zero coefficient, or
+    the backward-Euler tridiagonal solver — fed the floored ``dz = 1e-10`` of
+    a dry cell — sees ``dt·K/dz² ~ 1e20`` coefficients, goes singular, and
+    produces NaN (see ``ocean_model_mpas`` §2a/§3a).
+
+    This is the genuinely-shared composition between the MPAS tracer (per
+    cell, ``bottom_level = z_coord.bottom_level``) and momentum (per edge,
+    ``bottom_level = compute_max_level_edge_bot(...)``) implicit-mixing
+    coefficient builds — the only byte-identical-mergeable sub-part of the
+    two assemblies (the surrounding KPP/convection composition and the
+    lat-lon C-grid analogue differ structurally; see the #517-item-6 report).
+
+    Parameters
+    ----------
+    background : float or jax.Array
+        Scalar background coefficient (``config.K_v`` for tracers,
+        ``config.A_v`` for momentum) [m²/s].
+    bottom_level : jax.Array, shape (n_col,)
+        Index of the deepest active full level per column.
+    n_half : int
+        Number of half-levels (interfaces), ``= nlev - 1``.
+
+    Returns
+    -------
+    coeff : jax.Array, shape (n_col, n_half)
+        ``background`` on active interfaces, ``0.0`` below the seafloor.
+    active_half : jax.Array (bool), shape (n_col, n_half)
+        The active-interface mask ``k < bottom_level`` — returned so the
+        caller can reuse it for the convection / KPP profile masking with
+        the SAME seafloor definition (cast to the working dtype as needed).
+    """
+    k_half = jnp.arange(n_half, dtype=jnp.int32)
+    active_half = k_half[None, :] < bottom_level[:, None].astype(jnp.int32)
+    coeff = jnp.where(active_half, background, 0.0)
+    return coeff, active_half

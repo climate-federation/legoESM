@@ -13,8 +13,8 @@ Lat-lon-specific edge wrappers (``density_jacobian_pgf_smc03_x`` /
 
 Reference: Shchepetkin & McWilliams (2003), JGR Oceans 108(C9), §4.
 
-See ``docs/ocean_experiments/density_jacobian_pgf_plan.md`` (lat-lon
-design) and ``docs/ocean_experiments/density_jacobian_pgf_mpas.md``
+See ``docs/ocean/experiments/density_jacobian_pgf_plan.md`` (lat-lon
+design) and ``docs/ocean/experiments/density_jacobian_pgf_mpas.md``
 (MPAS port) for context.
 """
 from __future__ import annotations

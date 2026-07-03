@@ -47,6 +47,7 @@ import jax.numpy as jnp
 
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.constants_config import VEROS_CONSTANTS_CONFIG
+from legoesm.ocean.fidelity.veros_stepping import veros_faithful_stepping
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
@@ -199,7 +200,7 @@ def build_acc_basic_model_config(grid: LatLonGrid | None = None, *,
     viscosity with cos(lat), nonlin2 EOS, implicit vmix, K_v=0, faithful bottom
     drag, implicit surface forcing) are SHARED with acc verbatim -- which is the
     whole point of the transfer test."""
-    return LatLonCGridOceanConfig(
+    return LatLonCGridOceanConfig.from_flat(
         g=VEROS_CONSTANTS_CONFIG.g,
         rho_0=VEROS_CONSTANTS_CONFIG.rho_0,
         constants=VEROS_CONSTANTS_CONFIG,
@@ -225,14 +226,12 @@ def build_acc_basic_model_config(grid: LatLonGrid | None = None, *,
         # showed leaks ~+1.8 GW of spurious KE on the acc twin. Gated on
         # with_surface_forcing exactly like surface_forcing_implicit (the
         # frozen-state probe path keeps legoESM defaults, bit-identical).
-        outer_integrator="ab2" if with_surface_forcing else "forward_euler",
-        dt_mom_ratio=(DT_TRACER_S / DT_MOM_S) if with_surface_forcing else 1.0,
-        barotropic_solver=("rigid_lid" if with_surface_forcing
-                           else "explicit_substep"),
-        coriolis_scheme=("explicit_ab2" if with_surface_forcing
-                         else "matsuno_split"),
-        ab2_scope="advective" if with_surface_forcing else "total",
-        momentum_friction_additive=with_surface_forcing,
+        # Veros dzw divisor of the implicit solves (#428); u_centered coord.
+        # Shared bundle (veros_stepping.veros_faithful_stepping, #433) — this is
+        # the copy that previously diverged from acc and silently ran the wrong
+        # scheme; now there is one source of truth.
+        **veros_faithful_stepping(with_surface_forcing=with_surface_forcing,
+                                  dt_mom_ratio=DT_TRACER_S / DT_MOM_S),
         physics=build_acc_basic_physics_config(
             grid, with_surface_forcing=with_surface_forcing),
     )

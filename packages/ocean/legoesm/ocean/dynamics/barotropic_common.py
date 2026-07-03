@@ -29,12 +29,68 @@ import jax
 import jax.numpy as jnp
 
 
+def compute_power_law_filter_weights(
+    n_substeps: int,
+    dtype: jnp.dtype,
+    *,
+    p: int = 2,
+    q: int = 4,
+    r: float = 0.18927,
+):
+    """Shchepetkin & McWilliams (2005) power-law barotropic averaging filter.
+
+    This is the averaging kernel used by ROMS, MOM6 and Oceananigans'
+    ``SplitExplicitFreeSurface`` (``averaging_shape_function``).  Unlike the
+    cosine (Hanning) filter — which is only first-order accurate and is
+    *documented* to excite the 2Δx barotropic checkerboard (the C-grid Coriolis
+    rotational null mode; see docs/issues/barotropic_mode_noise.md §B) — the
+    power-law filter spans an EXTENDED window τ∈(0, 2] (i.e. the barotropic
+    substeps run for ~1.5× the baroclinic step) with the shape
+
+        w(τ) = (τ/τ₀)^p · (1 − (τ/τ₀)^q) − r·(τ/τ₀),
+        τ₀ = (p+2)(p+q+2) / [(p+1)(p+q+1)],
+
+    whose centroid sits at the baroclinic step (τ=1) and which strongly damps
+    the grid mode.  The window is trimmed at the last positive weight ``M★``
+    and the averaging weights are normalised to sum to 1.  ``transport_weights``
+    (the SM2005 secondary weights) keep the time-averaged barotropic transport
+    consistent with the SSH evolution for volume conservation.
+
+    Returns
+    -------
+    (w_avg, w_total, w_transport, n_loop) : the per-substep averaging weights
+        (length ``n_loop`` = M★), their sum (== 1), the transport weights, and
+        the (static) number of substeps to run.  ``n_loop`` > ``n_substeps``
+        because the window extends past the baroclinic step.
+    """
+    import numpy as _np
+    tau0 = (p + 2) * (p + q + 2) / ((p + 1) * (p + q + 1))
+    # τ resolved at the same Δτ = dt/n_substeps as the cosine path, spanning
+    # (0, 2]; this is 2·n_substeps candidate substeps before trimming.
+    tau = _np.arange(1, 2 * n_substeps + 1, dtype=_np.float64) / n_substeps
+    w = (tau / tau0) ** p * (1.0 - (tau / tau0) ** q) - r * (tau / tau0)
+    m_star = int(_np.max(_np.where(w > 0.0)[0]) + 1)   # last positive weight
+    w = w[:m_star]
+    w = w / w.sum()
+    # SM2005 transport weights: transport_w[i] = sum(w[i:]) / n_substeps so the
+    # cumulative averaged transport closes the depth-integrated continuity.
+    w_transport = _np.array(
+        [w[i:].sum() for i in range(m_star)], dtype=_np.float64
+    ) / n_substeps
+    return (
+        jnp.asarray(w, dtype=dtype),
+        jnp.asarray(w.sum(), dtype=dtype),
+        jnp.asarray(w_transport, dtype=dtype),
+        m_star,
+    )
+
+
 def compute_filter_weights(
     n_substeps: int,
     dtype: jnp.dtype,
     *,
     use_cosine: bool,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Return per-substep accumulator weights for time-averaging.
 
     The cosine bell (Hanning window) suppresses the side lobes of the
@@ -44,6 +100,31 @@ def compute_filter_weights(
 
         w_i = 1 + cos(2π · (i - n/2) / n)         (cosine)
         w_i = 1                                   (box)
+
+    Transport (``Hu``) weights — continuity-consistent (SM2005)
+    ----------------------------------------------------------------
+    The time-averaged SSH is ``eta_avg = (1/w_total)·Σ_i w_i·eta_{i+1}``
+    with the substep continuity ``eta_{i+1} = eta_i − dt_s·div(flux_i)``.
+    Telescoping gives
+
+        eta_old − eta_avg = (dt_s/w_total)·Σ_j div(flux_j)·tail_j,
+        tail_j = Σ_{i≥j} w_i.
+
+    The flux-form tracer step requires the depth-integrated transport
+    ``Hu_avg`` to satisfy the discrete continuity invariant
+    ``div(Hu_avg) == (eta_old − eta_avg)/dt`` (``dt = n·dt_s``) so a
+    uniform tracer is preserved.  Matching the two expressions gives the
+    ONLY consistent per-substep transport weight
+
+        w_transport[j] = tail_j / (n_substeps · w_total).
+
+    This is exactly the Shchepetkin & McWilliams (2005) secondary
+    (transport) weight used by the ``power_law`` path; with a uniform
+    (box) ``w_i=1`` it is ``(n−j)/n²`` — NOT the flat ``1/n`` that the
+    earlier code used, which broke continuity for BOTH box and cosine
+    (the cosine inconsistency was the worse of the two, ~99 % residual;
+    box ~95 %).  Returning it here makes every non-``power_law`` filter
+    continuity-consistent through a single owner.
 
     Parameters
     ----------
@@ -57,12 +138,15 @@ def compute_filter_weights(
     Returns
     -------
     w_filter : jax.Array, shape (n_substeps,)
-        Per-substep weight passed as ``xs`` to ``lax.scan`` (or
-        indexed inside ``fori_loop``).
+        Per-substep averaging weight (eta / velocity) passed as ``xs``
+        to ``lax.scan`` (or indexed inside ``fori_loop``).
     w_total : jax.Array, scalar
-        ``sum(w_filter)`` — used to normalise the eta / velocity
-        accumulators.  Transport accumulators (``Hu``) keep using
-        ``n_substeps`` for exact volume conservation.
+        ``sum(w_filter)`` — normalises the eta / velocity accumulators.
+    w_transport : jax.Array, shape (n_substeps,)
+        Per-substep TRANSPORT weight (continuity-consistent, sums to
+        ``(n+1)/(2n)`` for box; the accumulator ``Σ_i w_transport_i·flux_i``
+        IS the time-averaged transport ``Hu_avg`` directly — no further
+        ``/n_substeps`` normalisation).
     """
     i = jnp.arange(n_substeps, dtype=dtype)
     if use_cosine:
@@ -81,7 +165,11 @@ def compute_filter_weights(
             )
     else:
         w_filter = jnp.ones(n_substeps, dtype=dtype)
-    return w_filter, jnp.sum(w_filter)
+    w_total = jnp.sum(w_filter)
+    # tail_j = sum_{i>=j} w_filter[i]  (reverse cumulative sum).
+    tail = jnp.cumsum(w_filter[::-1])[::-1]
+    w_transport = tail / (jnp.asarray(n_substeps, dtype=dtype) * w_total)
+    return w_filter, w_total, w_transport
 
 
 def bebt_blend(
@@ -105,6 +193,58 @@ def maxvel_clip(field: jnp.ndarray, maxvel: float | jnp.ndarray) -> jnp.ndarray:
     would otherwise crash the solver before the substep finishes.
     """
     return jnp.clip(field, -maxvel, maxvel)
+
+
+def coriolis_at_faces(grid, dtype) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Coriolis parameter at C-grid u-/v-faces ``(f_u, f_v)``.
+
+    Single source of truth for the semi-implicit Coriolis face values that
+    the lat-lon C-grid barotropic solvers (explicit + implicit) and the
+    full PE step each reconstructed with a byte-identical inline block
+    (#517).  Behaviour, in preference order:
+
+    1. **Stored metrics (the shipping path).** If the geometry carries
+       pre-computed ``grid.f_u`` (shape ``(n_lat, n_lon+1)``) and
+       ``grid.f_v`` (``(n_lat+1, n_lon)``) — every ``LatLonCGridGeometry``,
+       including tripolar — return those cast to ``dtype``.  Bit-identical
+       to the previous inline ``hasattr(grid, "f_u")`` branch.
+    2. **Reconstruct from cell-centre ``grid.f``** (lean ``LatLonGrid``,
+       which lacks face metrics): average adjacent cells onto the faces.
+       Bit-identical to the previous inline ``else`` branch.
+
+    Fold safety (the latent bug this dedup closes): the reconstruction in
+    (2) is NOT tripolar-fold-aware — it averages cell-centre ``f`` without
+    the fold's ``vector_sign_v`` flip on the north v-row, so on a folded
+    grid it would yield wrong vorticity at the seam.  Real folded grids
+    always take path (1) (they store ``f_u/f_v``).  Should a folded grid
+    ever reach (2) without stored face metrics, RAISE rather than silently
+    mis-reconstruct (dispatch-hardening: a latent silent-wrong-answer
+    becomes a loud error; no shipping path changes).
+
+    Operator-package-free: the fold check reads ``grid.fold.is_active``
+    directly (mirrors ``operators_latlon_cgrid.is_tripolar``) so this
+    module keeps its no-operator-import contract.
+    """
+    if hasattr(grid, "f_u") and hasattr(grid, "f_v"):
+        return grid.f_u.astype(dtype), grid.f_v.astype(dtype)
+
+    fold = getattr(grid, "fold", None)
+    if fold is not None and bool(getattr(fold, "is_active", False)):
+        raise ValueError(
+            "coriolis_at_faces: tripolar/folded grid is missing stored "
+            "f_u/f_v. The reconstruct-from-grid.f fallback is not "
+            "fold-aware (no vector_sign_v flip on the north v-row) and "
+            "would produce wrong vorticity at the fold seam. Populate "
+            "grid.f_u/grid.f_v (LatLonCGridGeometry does this) instead of "
+            "passing a bare fold-less grid."
+        )
+
+    f_cell = grid.f.astype(dtype)
+    f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
+    f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
+    f_v_interior = 0.5 * (f_cell[:-1] + f_cell[1:])
+    f_v = jnp.concatenate([f_cell[0:1], f_v_interior, f_cell[-1:]], axis=0)
+    return f_u, f_v
 
 
 # ---------------------------------------------------------------------
@@ -208,6 +348,44 @@ def _global_dot_batch(
     PCG and differentiating straight through these reductions is AD-safe.
     """
     local = [jnp.sum(a * b) for (a, b) in pairs]
+    # SPMD (single-controller shard_map, route-B multi-GPU — no mpi4jax)
+    # path: each ``local`` sum is a PARTIAL sum over this device's shard
+    # (one latitude band) and must be summed across the mesh shard axis
+    # with ``jax.lax.psum``.  Checked FIRST because ``is_multi_process()``
+    # is FALSE under one process — otherwise the partial sum would be
+    # silently returned as the "global" dot and every band would converge
+    # to its own sub-system (the MPAS analogue of this bug was job
+    # 8460616).  Backend is ``"spmd"`` ONLY when armed by
+    # ``activate_latlon_spmd_halo`` (cube SPMD does not call this), so this
+    # branch is inert for the serial and MPI paths.  ``psum`` is
+    # self-transposing => AD-safe, same as ``allreduce(SUM)``.
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    if get_halo_backend() == "spmd":
+        mesh = get_spmd_mesh()
+        if mesh is None:
+            # backend armed "spmd" but no mesh set: an invalid state
+            # reachable only via the public set_halo_backend("spmd")
+            # without a matching set_spmd_mesh.  FAIL FAST rather than
+            # silently return unreduced partial sums inside a sharded
+            # solve (codex LOW) — the supported activators
+            # (activate_latlon_spmd_halo / the cube equivalent) always set
+            # the mesh together with the backend.
+            raise RuntimeError(
+                "_global_dot_batch: halo backend is 'spmd' but no SPMD mesh "
+                "is set; arm it via activate_latlon_spmd_halo(mesh).")
+        # Route to psum ONLY for the lat-band ocean SPMD mesh, keyed on the
+        # ``"lat"`` axis BY NAME (activate_latlon_spmd_halo guarantees it).
+        # The cube atm SPMD backend ALSO sets backend=="spmd" but with a
+        # ``("face", ...)`` mesh; in a coupled run that mesh could be armed
+        # while this ocean barotropic PCG runs, and psum'ing over a
+        # non-lat (or replicated) axis would multiply the dots by the
+        # device count or crash (codex HIGH).  When the armed SPMD mesh is
+        # not the lat-band one, fall through to the MPI/local logic below
+        # (ocean fields are never cube-sharded, so the local/allreduce sum
+        # is the correct reduction there).
+        if "lat" in tuple(mesh.axis_names):
+            from legoesm.parallel.reductions import batch_psum_spmd
+            return batch_psum_spmd(local, "lat")
     # Function-scope import: ``reductions`` pulls in mpi4jax lazily and
     # ``core.operators`` (cross-package), so keep it out of module top.
     from legoesm.parallel.reductions import (
@@ -481,7 +659,7 @@ def _fixed_iteration_pcg_single_reduce(
     return final.x, final.rr
 
 
-def _global_rel_residual(
+def global_rel_residual(
     A_op: Callable[[jnp.ndarray], jnp.ndarray],
     x: jnp.ndarray,
     b: jnp.ndarray,
@@ -513,9 +691,6 @@ def solve_helmholtz_implicit(
     stock_cg_maxiter: int,
     pcg_variant: str = "standard",
     dot_weight: jnp.ndarray | None = None,
-    inv_area_weight: jnp.ndarray | None = None,  # accepted for API
-    # stability; unused (the unrolled distributed path needs no area
-    # weight — see the module note on why custom_linear_solve was dropped).
 ) -> tuple[jnp.ndarray, HelmholtzSolveDiagnostics]:
     """Solve ``A eta = rhs`` for the implicit free-surface step.
 
@@ -558,10 +733,6 @@ def solve_helmholtz_implicit(
         (diagnostic only; never loop control).
     stock_cg_tol, stock_cg_maxiter :
         Single-rank stock-CG tolerance / iteration cap.
-    inv_area_weight : jax.Array or None
-        Accepted for API stability; unused (the unrolled path needs no
-        area weighting — only the dropped ``custom_linear_solve``
-        transpose did).
 
     Returns
     -------
@@ -574,7 +745,7 @@ def solve_helmholtz_implicit(
             A_op, rhs, x0=x0, tol=stock_cg_tol,
             maxiter=int(stock_cg_maxiter), M=M_inv,
         )
-        rel = _global_rel_residual(A_op, eta_new, rhs)
+        rel = global_rel_residual(A_op, eta_new, rhs)
         return eta_new, HelmholtzSolveDiagnostics(
             rel_residual=rel, converged=rel <= residual_tol,
         )

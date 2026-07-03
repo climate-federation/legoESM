@@ -62,7 +62,11 @@ def test_coriolis_f_plane_is_constant():
         nx=4, ny=4, nlev=2, dx=1.0e3, dy=1.0e3,
         coriolis_mode="f_plane", f0=1.0e-4,
     )
-    assert jnp.all(g.f_y == jnp.float32(1.0e-4))
+    # Compare at the grid's native storage dtype: ``f_y`` follows the active
+    # precision policy (float32 by default, float64 under the fp64 policy), so a
+    # hardcoded ``jnp.float32(1e-4)`` reference spuriously mismatches a float64
+    # ``f_y`` (``float64(1e-4) != float32(1e-4)``).
+    assert jnp.all(g.f_y == jnp.asarray(1.0e-4, dtype=g.f_y.dtype))
 
 
 def test_coriolis_beta_plane_linear_in_y():

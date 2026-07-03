@@ -16,7 +16,7 @@ Usage::
     python scripts/run/ocean_long_runs/postprocess_climate.py \\
         --run-dir results/ocean_long_runs/omip2_1deg_1yr \\
         --grid latlon --resolution 180x360 --H-max 5500 --nlev 15 \\
-        --report docs/ocean_long_runs/results_omip2_local.md
+        --report docs/ocean/long_runs/results_omip2_local.md
 """
 
 from __future__ import annotations

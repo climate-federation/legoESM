@@ -25,9 +25,9 @@ from legoesm.ocean.fidelity.tendency_probe import (
 )
 from legoesm.ocean.fidelity.veros_acc_recipe import (
     ACC_DZT, ACC_GM_REDI_CONFIG, ACC_TKE_CONFIG, NX, NY, NZ,
-    T_RESTORING_DAYS, acc_A_h, build_acc_grid, build_acc_recipe,
-    build_acc_restoring_config, build_acc_t_star, build_acc_wind_stress,
-    build_acc_z_coord,
+    T_RESTORING_DAYS, VEROS_BLOCK_MAPPING, acc_A_h, build_acc_grid,
+    build_acc_model_config, build_acc_recipe, build_acc_restoring_config,
+    build_acc_t_star, build_acc_wind_stress, build_acc_z_coord,
 )
 from legoesm.ocean.fidelity.veros_runner import VerosResult
 from legoesm.ocean.fidelity.veros_state_bridge import (
@@ -108,8 +108,8 @@ def test_full_recipe_builds():
     Veros constants pinned via config (no monkey-patch)."""
     recipe = build_acc_recipe()
     assert recipe.model_config.eos == "veros_nonlin2"
-    assert recipe.model_config.A_h_lat_scaling is True
-    assert recipe.model_config.A_h_cos_power == 1
+    assert recipe.model_config.lateral_viscosity.A_h_lat_scaling is True
+    assert recipe.model_config.lateral_viscosity.A_h_cos_power == 1
     assert recipe.model_config.implicit_vertical_mixing is True
     assert recipe.physics_config.vertical_mixing.scheme == "tke"
     # GM/Redi on lat-lon is a top-level (dynamics) field, NOT physics-pathway
@@ -485,7 +485,7 @@ def test_latlon_model_rejects_physics_lateral_mixing():
     from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
-    bad = LatLonCGridOceanConfig(
+    bad = LatLonCGridOceanConfig.from_flat(
         physics=OceanPhysicsConfig(
             lateral_mixing=LateralMixingConfig(
                 scheme="gm_redi", gm_redi=ACC_GM_REDI_CONFIG,
@@ -582,7 +582,7 @@ def test_free_run_ships_faithful_stepping_composition():
     free = build_acc_model_config(with_surface_forcing=True)
     assert free.outer_integrator == "ab2"
     assert free.dt_mom_ratio == 9.0          # dt_tracer 43200 / dt_mom 4800
-    assert free.barotropic_solver == "rigid_lid"
+    assert free.barotropic.barotropic_solver == "rigid_lid"
     assert free.coriolis_scheme == "explicit_ab2"   # the energy lever
     assert free.ab2_scope == "advective"
     assert free.momentum_friction_additive is True
@@ -592,7 +592,7 @@ def test_free_run_ships_faithful_stepping_composition():
     probe = build_acc_model_config(with_surface_forcing=False)
     assert probe.outer_integrator == "forward_euler"
     assert probe.dt_mom_ratio == 1.0
-    assert probe.barotropic_solver == "explicit_substep"
+    assert probe.barotropic.barotropic_solver == "explicit_substep"
     assert probe.coriolis_scheme == "matsuno_split"
     assert probe.ab2_scope == "total"
     assert probe.momentum_friction_additive is False
@@ -625,3 +625,53 @@ def test_initial_condition_is_veros_exact_linear():
     assert abs(expected[-1] - (-1.147)) < 0.05
     # surface ~14.9 C (not exactly 15: zt[0] != 0)
     assert 14.5 < expected[0] < 15.0
+
+
+# ---------------------------------------------------------------------------
+# Oracle-card wiring diagram (VEROS_BLOCK_MAPPING) — the card<->catalog link
+# ---------------------------------------------------------------------------
+
+
+def test_veros_block_mapping_fields_are_real_config_fields():
+    """Every bare top-level field the wiring diagram names must be a real
+    ``LatLonCGridOceanConfig`` attribute (keeps the audit diagram honest, like
+    NEMO_BLOCK_MAPPING). Non-bare entries (``ConstantsConfig``, ``physics.*``)
+    are sub-config/documentation rows, skipped here."""
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+
+    cfg = LatLonCGridOceanConfig.from_flat()
+    # documentation rows whose middle column names a sub-config / dotted path
+    # rather than a bare top-level scheme field (skipped by the field check).
+    doc_rows = {"ConstantsConfig"}
+    assert len(VEROS_BLOCK_MAPPING) >= 15
+    for name, field, note in VEROS_BLOCK_MAPPING:
+        assert name and note                       # documented
+        if "." in field or field in doc_rows:      # sub-config / documentation row
+            continue
+        assert hasattr(cfg, field) or field in type(cfg).flat_fields(), field  # #501: grouped members          # bare top-level field must be real
+
+
+def test_veros_block_mapping_covers_the_full_dycore_identity():
+    """The wiring diagram documents EVERY scheme field in the ``veros_faithful_v1``
+    catalog recipe — so the card's audit trail is complete w.r.t. the catalog's
+    dycore identity (a new scheme key in the recipe without a mapping row fails)."""
+    from legoesm.ocean.recipes import get_recipe
+
+    identity_keys = set(get_recipe("veros_faithful_v1"))
+    mapped_fields = {field for _, field, _ in VEROS_BLOCK_MAPPING}
+    missing = identity_keys - mapped_fields
+    assert not missing, f"dycore-identity keys absent from VEROS_BLOCK_MAPPING: {missing}"
+
+
+def test_veros_block_mapping_matches_catalog_and_card():
+    """The explicit card<->catalog link: for every ``veros_faithful_v1`` selector,
+    the catalog value == the Veros card's assembled config value. This is the
+    Veros analogue of test_recipes.TestCatalogMatchesFactories, asserted next to
+    the card so the card module itself guards the link (non-vacuous: 16 keys)."""
+    from legoesm.ocean.recipes import get_recipe
+
+    identity = get_recipe("veros_faithful_v1")
+    assert len(identity) >= 16
+    mc = build_acc_model_config(with_surface_forcing=True)
+    for key, catalog_value in identity.items():
+        assert mc.flat_get(key) == catalog_value, key  # #501: grouped names via flat_get
