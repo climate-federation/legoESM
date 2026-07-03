@@ -1868,7 +1868,7 @@ class TestTiledStepFnRouting:
     of the scan body — same cc HydrostaticState contract; everything else
     (physics mock, fixers, carry plumbing) untouched."""
 
-    def _run(self, tiled_step_fn, explicit_none=False):
+    def _run(self, tiled_step_fn, explicit_none=False, q_v_fill=0.01):
         args = _make_segment_fn_args()
         if tiled_step_fn is not None or explicit_none:
             args["tiled_step_fn"] = tiled_step_fn
@@ -1878,7 +1878,7 @@ class TestTiledStepFnRouting:
         shape_2d = (N_FACES, N, N)
         carry = pack_carry(
             state,
-            q_v=jnp.ones(shape_3d) * 0.01,
+            q_v=jnp.ones(shape_3d) * q_v_fill,
             q_c=jnp.zeros(shape_3d),
             q_r=jnp.zeros(shape_3d),
             held_dT_rad=jnp.zeros(shape_3d),
@@ -1900,8 +1900,14 @@ class TestTiledStepFnRouting:
             return state._replace(
                 T=state.T.replace(data=state.T.data + 7.0))
 
-        out = self._run(_marker_step)
-        base = self._run(None)
+        # DRY column (q_v=0): microphysics="none" activates the segment's
+        # T-DEPENDENT saturation adjustment (do_sat_adjust), which at
+        # q_v=0.01 releases ~9 K more latent heat on the cooler base
+        # trajectory than on the +7 K/step marker one at the lowest level
+        # (measured: level sigma=1.0 delta 4.73 vs 13.99) — zero vapor
+        # makes it inert so the dynamics delta is exactly pinnable.
+        out = self._run(_marker_step, q_v_fill=0.0)
+        base = self._run(None, q_v_fill=0.0)
         # ONLY the dynamics core differs: tiled = 2*7 K, mock dynamics =
         # 2*DT/86400 K, physics identical in both branches.  Pinning the
         # elementwise difference to that exact value catches (a) the mock
