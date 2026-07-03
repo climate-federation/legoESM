@@ -53,6 +53,23 @@ def test_default_nlev_is_40_for_climate_fidelity():
     assert parse_args(["--grid", "latlon", "--nlev", "20"]).nlev == 20
 
 
+def test_enable_latlon_spmd_flags_round_trip():
+    """--enable-latlon-spmd / --spmd-n-devices parse and reach OMIPRunConfig
+    (the lat-band SPMD restoring lane, part 2a of the ocean-SPMD promotion)."""
+    args = parse_args(["--grid", "latlon"])
+    assert args.enable_latlon_spmd is False
+    assert args.spmd_n_devices == 0
+    cfg = build_config_from_args(args)
+    assert cfg.enable_latlon_spmd is False
+    assert cfg.spmd_n_devices == 0
+
+    args = parse_args(["--grid", "latlon", "--enable-latlon-spmd",
+                       "--spmd-n-devices", "4"])
+    cfg = build_config_from_args(args)
+    assert cfg.enable_latlon_spmd is True
+    assert cfg.spmd_n_devices == 4
+
+
 def test_jra55_sea_ice_flag_parses():
     """--jra55-sea-ice opt-in (default off) drives the prognostic slab ice
     wired into the JRA55 scan block loop."""
