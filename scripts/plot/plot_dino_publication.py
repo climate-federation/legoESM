@@ -42,7 +42,7 @@ def _load_sibling(name):
 
 
 XG = _load_sibling("plot_dino_cross_grid")   # _latlon_coords/_mpas_coords/_regrid_TS/_stats/_corr_vs_time/_snap_for_day/TGT_*
-ACC = _load_sibling("plot_dino_acc")          # _grid_and_z/_partial_cell_h
+ACC = _load_sibling("plot_dino_acc")          # _grid_and_z/_snaps
 
 
 def _parse_args():
@@ -75,7 +75,7 @@ def _panel(ax, letter):
 
 def _acc_series_and_psi(run_dir):
     """ACC(t) [Sv] + the last barotropic streamfunction [Sv] for a lat-lon run,
-    via the canonical partial-cell diagnostics (reuses ACC._partial_cell_h)."""
+    via the canonical partial-cell diagnostics (partial_cell_thickness)."""
     from legoesm.ocean.diagnostics_streamfunction import barotropic_streamfunction
     from legoesm.ocean.diagnostics_climate import acc_transport
     cfg, grid, dz_ref = ACC._grid_and_z(run_dir)
@@ -87,7 +87,11 @@ def _acc_series_and_psi(run_dir):
             H = np.asarray(d["H_bathy"]); day = float(d["time_days"])
         if not np.isfinite(u).all():
             continue
-        psi = np.asarray(barotropic_streamfunction(u, ACC._partial_cell_h(H, dz_ref), mask, grid))
+        from legoesm.ocean.diagnostics_streamfunction import (
+            partial_cell_thickness,
+        )
+        psi = np.asarray(barotropic_streamfunction(
+            u, partial_cell_thickness(H, dz_ref), mask, grid))
         a = acc_transport(psi * _SV, lat_deg,
                           drake_lat_south=cfg.channel_lat_south_deg,
                           drake_lat_north=cfg.channel_lat_north_deg).transport_Sv

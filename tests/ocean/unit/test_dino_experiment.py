@@ -753,3 +753,17 @@ def test_S_star_boundary_targets_match_oracle():
     s_n = float(dino_S_star(jnp.asarray(70.0), cfg))
     assert s_s == pytest.approx(35.0, abs=1e-6)
     assert s_n == pytest.approx(35.1, abs=1e-6)
+
+
+def test_mpas_builder_rejects_fct_family_tracer_advection():
+    """The r1_exact preset (fct2) must fail LOUDLY at the MPAS config
+    builder with actionable guidance, not deep in model construction."""
+    import pytest as _pytest
+
+    from legoesm.ocean.experiments.dino import (
+        dino_mpas_model_config, dino_r1_exact_config,
+    )
+
+    cfg = dino_r1_exact_config()
+    with _pytest.raises(ValueError, match="lat-lon only"):
+        dino_mpas_model_config(None, cfg, physics=False)

@@ -1469,6 +1469,29 @@ def dino_mpas_state(
     )
 
 
+_MPAS_TRACER_ADVECTION = ("upwind", "tvd", "superbee")
+
+
+def _mpas_tracer_advection(cfg: "DINOConfig") -> str:
+    """Validate the configured tracer advection for the MPAS DINO path.
+
+    MPASOceanModel only implements upwind / tvd / superbee; the FCT
+    family (ppm_fct, fct2 — e.g. from the latlon-oriented ``r1_exact``
+    preset) would be rejected deep inside model construction.  Raise
+    here with actionable guidance instead (dispatch discipline).
+    """
+    if cfg.tracer_advection not in _MPAS_TRACER_ADVECTION:
+        raise ValueError(
+            f"DINOConfig.tracer_advection={cfg.tracer_advection!r} is not "
+            f"available on the MPAS DINO path (supported: "
+            f"{_MPAS_TRACER_ADVECTION}). The r1_exact preset is lat-lon "
+            "only — override tracer_advection (e.g. "
+            "dino_r1_exact_config(tracer_advection='tvd')) to run its "
+            "other levers on MPAS."
+        )
+    return cfg.tracer_advection
+
+
 def dino_mpas_model_config(
     mesh,
     cfg: DINOConfig | None = None,
@@ -1503,6 +1526,7 @@ def dino_mpas_model_config(
 
     if cfg is None:
         cfg = DINOConfig()
+    _mpas_tracer_advection(cfg)   # fail fast BEFORE any mesh access
 
     # Representative cell size from mean cell area (m).
     cell_dx_m = float(jnp.sqrt(jnp.mean(mesh.areaCell)))
@@ -1530,7 +1554,7 @@ def dino_mpas_model_config(
         bottom_drag_cd0=cfg.C_d_bottom,
         n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_solver=cfg.barotropic_solver,
-        tracer_advection=cfg.tracer_advection,
+        tracer_advection=_mpas_tracer_advection(cfg),
         implicit_vertical_mixing=True,
         eos=cfg.eos,                   # "wright" (default) | "nemo_seos" (paper)
     )

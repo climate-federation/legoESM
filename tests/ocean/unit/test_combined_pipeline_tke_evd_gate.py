@@ -106,3 +106,18 @@ def test_fallback_composes_tke_with_evd():
     # EVD K_conv=10 must dominate the interior of the unstable columns
     assert float(jnp.max(K_v)) >= 10.0
     assert float(jnp.max(A_v)) >= 10.0
+
+
+def test_scm_rejects_fallback_computed_schemes():
+    """The ocean SCM has no compute_vertical_K_profiles fallback, so the
+    fallback-computed closures (tke/catke) must be rejected there rather
+    than silently running with background-only mixing."""
+    from legoesm.ocean.scm import OceanColumnModel
+
+    with pytest.raises(NotImplementedError, match="tke"):
+        OceanColumnModel.create(
+            nlev=8, dt=1800.0,
+            T_profile=jnp.linspace(18.0, 4.0, 8),
+            physics_config=_physics_cfg("tke"),
+            implicit_vertical_mixing=True,
+        )
