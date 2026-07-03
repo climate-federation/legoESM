@@ -1117,3 +1117,18 @@ class TestSlopeLimitNemoCap:
         g = dino_lat_lon_grid(cfg, n_lon=12)
         mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
         assert mc.gm_redi.slope_limit == "nemo_cap"
+
+    def test_mpas_gm_redi_rejects_nemo_cap(self):
+        """MPAS centred GM/Redi must raise on slope_limit='nemo_cap'
+        rather than silently keep the DM95 taper (codex r7 P1)."""
+        from types import SimpleNamespace
+
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_mpas import (
+            gm_redi_tracer_tendency_mpas,
+        )
+        cfg = GMRediConfig(slope_limit="nemo_cap")
+        with pytest.raises(NotImplementedError, match="slope_limit"):
+            # entry-guard fires before any mesh access
+            gm_redi_tracer_tendency_mpas(
+                None, None, None, None, None, None, cfg)

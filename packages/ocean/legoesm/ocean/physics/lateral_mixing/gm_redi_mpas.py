@@ -588,6 +588,12 @@ def gm_redi_tracer_tendency_mpas(
     -------
     dT_dt, dS_dt : (nCells, nlev)
     """
+    if getattr(cfg, "slope_limit", "dm95_taper") != "dm95_taper":
+        raise NotImplementedError(
+            f"GMRediConfig.slope_limit={cfg.slope_limit!r} is implemented "
+            "on the lat-lon C-grid triads path only; the MPAS centred "
+            "GM/Redi keeps the DM95 taper and would silently ignore it "
+            "(codex r7 P1).")
     if mask is None:
         mask = jnp.ones((mesh.nCells,), dtype=T.dtype)
     if edge_mask is None:

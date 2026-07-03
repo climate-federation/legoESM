@@ -198,6 +198,15 @@ def probe_latlon_cgrid(
                 mask=state.land_mask.data,
                 rho_0=config.constants.rho_0, g=config.constants.g,
             )
+            # Match the production model: zero K33 at non-wet interfaces
+            # so partial-cell bottom cells never mix against below-bottom
+            # values (ocean_model_latlon_cgrid masks the combined tracer
+            # K with is_active[..., 1:]; without this, nemo_cap — which
+            # no longer taper-kills bottom-adjacent slopes — leaks
+            # through the probe; codex r7 P2).
+            from legoesm.ocean.vertical import OceanPartialCellCoordinate
+            if isinstance(z_coord, OceanPartialCellCoordinate):
+                K33 = K33 * z_coord.is_active[..., 1:].astype(K33.dtype)
             dz_cell = z_coord.dz_ref * J[:, :, jnp.newaxis]
             dz_half = build_dz_half(dz_cell)
             mask3 = state.land_mask.data[:, :, jnp.newaxis]
