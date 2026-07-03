@@ -324,6 +324,12 @@ def gm_redi_lateral_mixing(
     S_x, S_y, taper = _compute_tapered_slopes(rho, z_coord, jacobian, grid, cfg)
 
     # GM coefficient: scalar from config, or Visbeck-adaptive field.
+    if getattr(cfg, "treguier", None) is not None and cfg.treguier.enabled:
+        raise NotImplementedError(
+            "GMRediConfig.treguier (NEMO nn_aei_ijk_t=21 adaptive kappa) is "
+            "implemented on the lat-lon C-grid path only; the cubed-sphere "
+            "GM/Redi would silently fall back to constant kappa. Use "
+            "visbeck or constant kappa_GM here.")
     if cfg.visbeck.enabled:
         f_coriolis = jnp.asarray(grid.grid_coriolis)
         kappa_GM = compute_visbeck_kappa_gm(

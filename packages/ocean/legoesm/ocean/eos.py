@@ -2001,3 +2001,33 @@ def compute_ocean_rho_and_pressure(state, z_coord, jacobian, eos_fn=None):
         h_actual=h_actual,
     )
     return rho, p_hydro
+
+
+# --- NEMO eos_fzp freezing point (eosbn2.F90; TEOS-10 branch) ---------------
+# Polynomial fit of the conservative-temperature freezing point (Roquet et
+# al. 2015 TEOS-10 polynomial EOS, as hard-coded in NEMO eos_fzp) plus the
+# NEMO 7.53e-4 K/m pressure lowering.  ORCA1 runs ln_teos10=.true., so this
+# is the oracle's ISF/sea-ice freezing-point function.
+_NEMO_FZP_S0 = 35.16504          # TEOS-10 reference salinity SA0 [g/kg]
+_NEMO_FZP_C0 = -5.87701e-2       # eos_fzp polynomial coefficients
+_NEMO_FZP_C1 = 2.07679e-2
+_NEMO_FZP_C2 = -3.12775e-2
+_NEMO_FZP_C3 = 2.28348e-2
+_NEMO_FZP_C4 = -9.64972e-3
+_NEMO_FZP_C5 = 1.46873e-3
+_NEMO_FZP_DEP = -7.53e-4         # [degC/m] freezing-point pressure lowering
+
+
+def nemo_eos_fzp(S_psu, depth_m=None):
+    """Seawater freezing point [°C] — NEMO ``eos_fzp`` (TEOS-10 branch).
+
+    ``T_f(S, z) = S · P(√(S/S0)) − 7.53e-4 · z`` with the eosbn2.F90
+    polynomial ``P``; ``depth_m`` positive down (``None`` = surface).
+    """
+    zs = jnp.sqrt(jnp.abs(jnp.asarray(S_psu)) / _NEMO_FZP_S0)
+    poly = ((((_NEMO_FZP_C5 * zs + _NEMO_FZP_C4) * zs + _NEMO_FZP_C3) * zs
+             + _NEMO_FZP_C2) * zs + _NEMO_FZP_C1) * zs + _NEMO_FZP_C0
+    tf = poly * jnp.asarray(S_psu)
+    if depth_m is not None:
+        tf = tf + _NEMO_FZP_DEP * jnp.asarray(depth_m)
+    return tf

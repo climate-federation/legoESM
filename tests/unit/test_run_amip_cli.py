@@ -37,6 +37,22 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_clm_surfdata_path_flows_to_config():
+    """--clm-surfdata-path round-trips into ExperimentConfig (empty default =>
+    UCAR download; a set path lets a compute node with no internet use a staged
+    surfdata NetCDF for the multilayer land)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.clm_surfdata_path == ""
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--clm-surfdata-path", "/data/clm_surfdata.nc",
+    ]), parser))
+    assert cfg.clm_surfdata_path == "/data/clm_surfdata.nc"
+
+
 def test_snow_albedo_feedback_flag_flows_to_config():
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
@@ -59,6 +75,39 @@ def test_orbital_insolation_flag_flows_to_config():
         "--dataset", "analytical", "--orbital-insolation",
     ]), parser))
     assert cfg_on.orbital_insolation is True
+
+
+def test_convective_cloud_boolean_optional_action_can_disable_config_default():
+    """--no-convective-cloud must override a config-file-enabled default.
+
+    convective_cloud is BooleanOptionalAction (not store_true): a YAML
+    ``--config`` (e.g. amip_production.yaml) sets convective_cloud=True via
+    parser.set_defaults, and a store_true flag could never turn that back OFF
+    from the CLI. This guards the paired --convective-cloud / --no-convective-cloud
+    behaviour AND the set_defaults(True) + --no-... override that the AMIP-optimal
+    (prescribed-SST) run relies on.
+    """
+    parser = build_arg_parser()
+    # default (no flag): OFF, and flows to the config
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.convective_cloud is False
+
+    # explicit --convective-cloud: ON (backward-compatible with the old store_true)
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convective-cloud",
+    ]), parser))
+    assert cfg_on.convective_cloud is True
+
+    # the NEW capability: a config default of True (as amip_production.yaml sets)
+    # can be turned OFF with --no-convective-cloud (impossible under store_true).
+    parser2 = build_arg_parser()
+    parser2.set_defaults(convective_cloud=True)          # simulates the YAML default
+    assert parser2.parse_args(["--dataset", "analytical"]).convective_cloud is True
+    cfg_off = build_config_from_args(_postprocess_args(parser2.parse_args([
+        "--dataset", "analytical", "--no-convective-cloud",
+    ]), parser2))
+    assert cfg_off.convective_cloud is False
 
 
 def test_build_config_includes_joint_physics_parameterization_flags():
@@ -295,8 +344,9 @@ def test_surface_tiled_defaults_off():
     assert cfg.surface_tiled is False
 
 
-def test_surface_tiled_requires_louis_rejected():
-    """--surface-tiled with a non-louis scheme fails strict validation."""
+def test_surface_tiled_unsupported_turbulence_rejected():
+    """--surface-tiled with a scheme that cannot consume the injected tiled
+    surface_flux tuple (e.g. holtslag_boville) fails strict validation."""
     parser = build_arg_parser()
     args = parser.parse_args([
         "--dataset", "analytical",
@@ -308,6 +358,25 @@ def test_surface_tiled_requires_louis_rejected():
     cfg = build_config_from_args(args)
     with pytest.raises(ValueError, match="surface_tiled.*louis"):
         cfg.validate_strict()
+
+
+@pytest.mark.parametrize("scheme", ["louis", "clubb_lite", "clubb"])
+def test_surface_tiled_accepts_flux_consuming_schemes(scheme):
+    """--surface-tiled validates with EVERY kernel that accepts the injected
+    tiled surface_flux=(tau_x, tau_y, shflx, lhflx, ustar) BC: louis and the
+    CLUBB family (clubb routes it through clubb_step's kinematic interface)."""
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--turbulence", scheme,
+        "--surface-bulk-scheme", "coare3",
+        "--slab-land-active",
+        "--surface-tiled",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.turbulence == scheme
+    assert cfg.validate_strict() is None
 
 
 def test_soil_bucket_flags_flow_to_config():
@@ -1007,16 +1076,45 @@ _AMIP_DUMMY_PATHS = [
 ]
 
 
-def test_config_yaml_loads_all_keys_are_valid_dests():
-    """Every key in the authoritative AMIP config is a real run_amip dest — a
-    typo'd / dropped override is a hard error (dispatch-hardening)."""
+def _amip_config_yamls():
+    """Every shipped config/amip/*.yaml — so a typo'd key in ANY of them (not just
+    amip_production) is caught, incl. amip_sota.yaml and future configs."""
+    return sorted((_repo_root() / "config" / "amip").glob("*.yaml"))
+
+
+@pytest.mark.parametrize("cfg_file", _amip_config_yamls(),
+                         ids=lambda p: p.name)
+def test_config_yaml_loads_all_keys_are_valid_dests(cfg_file):
+    """Every key in each shipped AMIP config is a real run_amip dest — a typo'd /
+    dropped override is a hard error (dispatch-hardening)."""
     from legoesm.driver.run_config_yaml import load_yaml_config
-    cfg_file = _repo_root() / "config" / "amip" / "amip_production.yaml"
     parser = build_arg_parser()
     defaults = load_yaml_config(str(cfg_file), parser)  # raises on unknown key
     assert defaults  # non-empty
     valid_dests = {a.dest for a in parser._actions}
     assert set(defaults).issubset(valid_dests)
+
+
+def test_amip_sota_config_builds_valid_experiment_config():
+    """config/amip/amip_sota.yaml (SOTA: multilayer land + aerosol_ccn +
+    conv-cloud-off) builds a valid ExperimentConfig — the SOTA knobs are consistent
+    (e.g. multilayer land waives the slab-bucket requirement for stomata; aerosol_ccn
+    has morrison + external aerosol)."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    cfg_file = _repo_root() / "config" / "amip" / "amip_sota.yaml"
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
+    args = _postprocess_args(parser.parse_args(
+        _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc",
+                             "--land-mask-file", "/dummy/lsm.nc"]), parser)
+    cfg = build_config_from_args(args)
+    cfg.validate_strict()  # raises if the SOTA combo is inconsistent
+    assert cfg.use_multilayer_land is True
+    # --aerosol-ccn threads into ExperimentConfig.nc_from_aerosol (specified-Nc from
+    # the Andreae AOT->CCN inversion), enabling the 1st+2nd aerosol indirect effect.
+    assert cfg.nc_from_aerosol is True
+    assert cfg.convective_cloud is False
+    assert cfg.convection == "sbm"
 
 
 def test_config_yaml_round_trips_authoritative_values():
@@ -1061,6 +1159,32 @@ def test_config_yaml_explicit_cli_flag_overrides_file():
         parser.parse_args(_AMIP_DUMMY_PATHS + ["--convection", "bechtold"]), parser)
     cfg = build_config_from_args(args)
     assert cfg.convection == "bechtold"
+
+
+def test_params_flag_parses():
+    parser = build_arg_parser()
+    args = parser.parse_args(_AMIP_DUMMY_PATHS + ["--params", "x.yaml"])
+    assert args.params == "x.yaml"
+
+
+def test_params_calibration_applies_to_atm_experimentconfig(tmp_path):
+    """A --params calibration entry (registry qualified name) applies to the
+    flattened ExperimentConfig scalar via the atm scalar-param map — the same
+    path run_amip.main() takes (issue #691)."""
+    from legoesm.driver.run_config_yaml import (
+        apply_params_to_config,
+        build_atm_scalar_param_map,
+        load_params_config,
+    )
+    parser = build_arg_parser()
+    cfg = build_config_from_args(
+        _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser))
+    p = tmp_path / "params.yaml"
+    p.write_text("atm.clouds.CloudConfig.q_c_diagnostic: 3.0e-4\n")
+    out = apply_params_to_config(
+        cfg, load_params_config(str(p)), driver="run_amip",
+        scalar_param_map=build_atm_scalar_param_map())
+    assert out.cloud_q_c_diagnostic == 3.0e-4
 
 
 def test_aimip_louis_preserves_resolved_surface_scheme():
@@ -1169,6 +1293,129 @@ def test_sundqvist_flags_rejected_on_mpas_spectral():
     # but no override flags -> no raise even on MPAS
     bare = parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi"])
     _validate_sundqvist_flags(bare, parser)
+
+
+def test_evaluate_flags_flow_to_config():
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--cmip-output",
+        "--evaluate",
+        "--evaluation-suite", "Tier1_sanity_checks", "Tier2_atmosphere_monthly",
+        "--evaluation-model-id", "legoESM-1-0-test",
+        "--evaluation-experiment-id", "amip",
+        "--evaluation-variant-id", "r1i1p1f1",
+        "--evaluation-data-root-dir", "/tmp/climateeval_data",
+        "--evaluation-timerange", "19790101/19791231",
+        "--evaluation-fail-missing",
+        "--evaluation-download",
+        "--evaluation-climateeval-python", "/tmp/climateeval_env/bin/python",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+
+    ev = cfg.output.evaluation
+    assert ev.enabled is True
+    assert ev.suites == ("Tier1_sanity_checks", "Tier2_atmosphere_monthly")
+    assert ev.model_id == "legoESM-1-0-test"
+    assert ev.data_root_dir == "/tmp/climateeval_data"
+    assert ev.timerange == "19790101/19791231"
+    assert ev.fail_on_missing_data is True
+    assert ev.download_missing_data is True
+    assert ev.climateeval_python == "/tmp/climateeval_env/bin/python"
+
+
+def test_evaluate_defaults_off():
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical"])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.output.evaluation.enabled is False
+
+
+def test_evaluate_default_suites_empty_means_all_tiers():
+    """With --evaluate but no --evaluation-suite, suites is empty — the runner
+    then discovers + runs ALL bundled suites (every tier)."""
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical", "--cmip-output", "--evaluate",
+        "--evaluation-climateeval-python", sys.executable,
+        "--evaluation-data-root-dir", "/tmp",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.output.evaluation.suites == ()
+
+
+def test_evaluate_requires_cmip_output_rejected():
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical", "--evaluate"])
+    with pytest.raises(SystemExit):
+        _postprocess_args(args, parser)
+
+
+def test_evaluate_climateeval_python_unset_rejected():
+    """--evaluate with no climateeval_python configured fails LOUDLY at
+    validate_strict, before the (multi-hour) run ever starts."""
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical", "--cmip-output", "--evaluate",
+        "--evaluation-data-root-dir", "/tmp",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.output.evaluation.climateeval_python == ""
+    with pytest.raises(ValueError, match="climateeval_python"):
+        cfg.validate_strict()
+
+
+def test_evaluate_climateeval_python_nonexistent_rejected():
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical", "--cmip-output", "--evaluate",
+        "--evaluation-climateeval-python", "/no/such/interpreter",
+        "--evaluation-data-root-dir", "/tmp",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    with pytest.raises(ValueError, match="climateeval_python"):
+        cfg.validate_strict()
+
+
+def test_evaluate_data_root_dir_unset_rejected(tmp_path):
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical", "--cmip-output", "--evaluate",
+        "--evaluation-climateeval-python", sys.executable,
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    with pytest.raises(ValueError, match="data_root_dir"):
+        cfg.validate_strict()
+
+
+def test_evaluate_valid_climateeval_config_passes(tmp_path):
+    """A real, executable interpreter + a real directory clears validate_strict."""
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical", "--cmip-output", "--evaluate",
+        "--evaluation-climateeval-python", sys.executable,
+        "--evaluation-data-root-dir", str(tmp_path),
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.validate_strict() is None
+
+
+def test_evaluate_climateeval_python_env_var_default(monkeypatch):
+    monkeypatch.setenv("LEGOESM_CLIMATEEVAL_PYTHON", "/env/climateeval/bin/python")
+    monkeypatch.setenv("LEGOESM_CLIMATEEVAL_DATA_ROOT", "/env/climateeval_data")
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical", "--cmip-output", "--evaluate"])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.output.evaluation.climateeval_python == "/env/climateeval/bin/python"
+    assert cfg.output.evaluation.data_root_dir == "/env/climateeval_data"
 
 
 def test_cloud_sensitivity_flags_round_trip_and_validate():

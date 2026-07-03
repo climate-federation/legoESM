@@ -159,5 +159,35 @@ def test_build_training_segment_land_gradient(monkeypatch, tmp_path):
     assert g != 0.0, "coupled land gradient is zero (params not reaching the flux)"
 
 
+def test_multilayer_no_mask_still_enables_tiled_surface(monkeypatch, tmp_path):
+    """use_multilayer_land + surface_tiled WITHOUT a land mask (f_land from
+    --topography) must actually ENABLE the tiled turbulent-flux path — i.e. set
+    physics.surface_tiled=True.  Regression guard: physics.surface_tiled was
+    previously threaded only inside the slab/mask activation branch, so a mask-free
+    multilayer config (the SOTA amip_sota.yaml case) validated but silently no-op'd
+    the tiled surface.  gaussian topography gives f_land>0 so _has_land is true."""
+    _patch_land_loaders(monkeypatch)
+    cfg = ExperimentConfig(
+        grid=GridConfig(resolution=8, nlev=8),
+        dycore=DycoreConfig(dt=600.0),
+        output=OutputConfig(diag_days=1),
+        days=1, dataset="analytical", radiation="gray",
+        topography="gaussian",            # elevation-derived f_land, NO mask
+        surface_tiled=True, turbulence="louis",
+        use_multilayer_land=True,
+        multilayer_n_layers=6, multilayer_soil_depth=2.5,
+    )
+    cfg.validate_strict()  # the mask-free multilayer+tiled config is valid
+    driver = ModelDriver(cfg, output_dir=tmp_path)
+    driver.setup()
+
+    assert bool(jnp.any(driver._f_land > 0)), "gaussian topo should give some land"
+    assert driver.physics.surface_tiled is True, \
+        "mask-free multilayer must still enable the tiled surface (not a silent no-op)"
+    assert driver.physics.slab_land_active is False, \
+        "multilayer land must not activate the slab tile"
+    assert driver.physics.land_ml_cfg is not None, "multilayer land was set up"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

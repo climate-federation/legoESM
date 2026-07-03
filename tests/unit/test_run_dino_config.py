@@ -134,3 +134,41 @@ def test_A_v_bg_effective_floors_only_tke():
     assert dataclasses.replace(
         base, vmix_scheme="tke",
         tke_momentum_visc_bg=1.2e-4).A_v_bg_effective == 1.2e-4
+
+
+def test_evd_momentum_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino", "--evd-momentum", "off"])
+    args = rd._parse_args()
+    assert args.evd_momentum == "off"
+
+
+def test_evd_momentum_default_none(monkeypatch):
+    """Default None -> main() keeps DINOConfig.evd_on_momentum (True)."""
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    args = rd._parse_args()
+    assert args.evd_momentum is None
+
+
+def test_evd_momentum_replaces_config():
+    import dataclasses
+    from legoesm.ocean.experiments.dino import DINOConfig
+    cfg = DINOConfig()
+    assert cfg.evd_on_momentum is True      # NEMO nn_evdm=1 default
+    cfg = dataclasses.replace(cfg, evd_on_momentum=False)
+    assert cfg.evd_on_momentum is False
+
+
+def test_bottom_drag_scheme_flag_parses(monkeypatch):
+    """--bottom-drag-scheme parses (DINOConfig.bottom_drag_scheme wiring);
+    unknown values are rejected by argparse choices."""
+    monkeypatch.setattr(sys, "argv", ["run_dino.py"])
+    assert rd._parse_args().bottom_drag_scheme is None    # keep field default
+    monkeypatch.setattr(sys, "argv", [
+        "run_dino.py", "--bottom-drag-scheme", "nemo_quadratic"])
+    assert rd._parse_args().bottom_drag_scheme == "nemo_quadratic"
+    monkeypatch.setattr(sys, "argv", [
+        "run_dino.py", "--bottom-drag-scheme", "nemo_typo"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+    from legoesm.ocean.experiments.dino import DINOConfig
+    assert DINOConfig().bottom_drag_scheme == "legacy"

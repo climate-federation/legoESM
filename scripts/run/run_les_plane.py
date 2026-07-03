@@ -167,6 +167,12 @@ _CASES = {
     ),
 }
 
+# Cases with a surface-flux branch in ``_apply_pbl_column``.  Kept in sync
+# with ``_CASES`` (enforced by tests/unit/test_run_les_plane_cli.py) so a new
+# case cannot silently fall through to the Wangara flux branch: an unknown
+# selection raises ValueError at the column's entry (dispatch doctrine).
+_PBL_COLUMN_CASES = ("neutral", "ekman", "gabls1", "wangara")
+
 
 def _implicit_vertical_diffusion(phi_asc, K_iface, dz_asc, dzc, dt,
                                  flux_sfc=None, drag_sfc=None):
@@ -205,6 +211,13 @@ def _apply_pbl_column(state, t, *, case, hc, z0, dt, ug, vg):
     K_v is a Louis-type mixing-length closure ``l²·|∂U/∂z|·f(Ri)`` with a small
     floor; the implicit Thomas solve is unconditionally stable. The dynamic
     Smagorinsky still provides the resolved HORIZONTAL SGS inside the dycore."""
+    # ``case`` is a static Python string (partial-bound), so this guard runs at
+    # trace time — an unknown case raises instead of silently running the
+    # Wangara prescribed-flux branch (dispatch doctrine: raise on unknown).
+    if case not in _PBL_COLUMN_CASES:
+        raise ValueError(
+            f"Unknown LES case {case!r} for the PBL surface-flux column; "
+            f"expected one of {_PBL_COLUMN_CASES}.")
     g = constants.g
     # Ascending-z views (state stores top-down: index 0 = top).
     u = state.u.data[..., ::-1]
@@ -284,7 +297,7 @@ def _apply_pbl_column(state, t, *, case, hc, z0, dt, ug, vg):
         new_th = _implicit_vertical_diffusion(thp, K_iface, dz, dzc, dt,
                                               flux_sfc=F_th)
         upd = dict(theta_prime=state.theta_prime.replace(data=new_th[..., ::-1]))
-    else:                                          # Wangara prescribed fluxes
+    elif case == "wangara":                        # Wangara prescribed fluxes
         t_hr = 9.0 + t / 3600.0
         cos_t = jnp.cos((t_hr - 13.0) / 11.0 * jnp.pi)
         F_th = 0.216 * cos_t
@@ -298,6 +311,12 @@ def _apply_pbl_column(state, t, *, case, hc, z0, dt, ug, vg):
             jnp.clip(new_qv[..., ::-1], 0.0, None))
         upd = dict(theta_prime=state.theta_prime.replace(data=new_th[..., ::-1]),
                    tracers=state.tracers.replace(data=new_tr))
+    else:
+        # A case admitted by the entry guard but lacking a surface-flux branch
+        # (i.e. added to _PBL_COLUMN_CASES without implementing its fluxes).
+        raise ValueError(
+            f"LES case {case!r} has no surface-flux branch in "
+            "_apply_pbl_column; implement its surface forcing.")
     return state._replace(
         u=state.u.replace(data=new_u[..., ::-1]),
         v=state.v.replace(data=new_v[..., ::-1]),

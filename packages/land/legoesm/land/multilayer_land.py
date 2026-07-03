@@ -27,6 +27,7 @@ Physics sequence each time step:
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -412,11 +413,17 @@ def _step_multilayer_land_impl(
     # the ponded excess, and the mixed-form solve closes the water budget.
 
     # --- Soil thermal diffusion (final, with converged G) ---
+    # Semi-implicit surface conductance (Robin BC): the SimpleSEB scheme returns a
+    # linearised lambda = -dG/dT_sfc that makes the surface energy balance's
+    # T_sfc-dependence implicit here, removing the explicit-coupling large-dt/thin-
+    # top-layer instability.  None for the two-leaf canopy (its Newton closure owns
+    # the coupling) and for slab builds that leave it unset -> explicit BC, unchanged.
     G_surface = G_surface + evap_excess_energy
     T_soil_new = solve_soil_thermal(
         T_soil, richards_out.theta_new, grid,
         config.hydraulics, config.thermal,
         G_surface, dt,
+        surface_conductance=surface_out.surface_conductance,
     )
 
     # --- Advance the 30-day TgC EMA (only when state carries it) ---

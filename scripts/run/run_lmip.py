@@ -167,7 +167,7 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
             growth_factor=1.5,
         ),
         hydraulics=SoilHydraulicsConfig(**texture_kwargs),
-        thermal=SoilThermalConfig(),
+        thermal=SoilThermalConfig(enable_freeze_thaw=args.freeze_thaw),
         richards=RichardsConfig(),
         carbon=CarbonConfig(scheme=args.carbon_scheme),
     )
@@ -513,6 +513,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Strict mode: fail unless a --config file is given, so "
                         "the run is fully specified by a committed config (no "
                         "hidden parser defaults). (issue #691)")
+    p.add_argument("--params", type=str, default=None,
+                   help="YAML calibration file of tuned parameters keyed by "
+                        "param_collector qualified name 'scheme_key.field', "
+                        "validated against each scheme's __param_spec__ bounds "
+                        "and spliced into the nested land *Config NamedTuples "
+                        "(soil thermal/hydraulics, carbon, stomata...). (#691)")
     p.add_argument("--lat", type=float, default=None,
                    help="Latitude [deg] (required — via CLI or the --config file)")
     p.add_argument("--lon", type=float, default=0.0,
@@ -536,6 +542,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Number of soil layers")
     p.add_argument("--soil-depth", type=float, default=3.0,
                    help="Total soil depth [m]")
+    p.add_argument("--freeze-thaw", action="store_true",
+                   help="Enable soil-water freeze/thaw (apparent-heat-capacity "
+                        "zero-curtain) in the soil thermal solver.")
     p.add_argument("--bulk-scheme", default="most",
                    choices=["constant", "most"],
                    help="Bulk flux scheme")
@@ -608,6 +617,15 @@ def main() -> None:
     lat_jnp = jnp.asarray([lat_rad])   # shape (1,) for snow_albedo_feedback
 
     run_config = build_config_from_args(args)
+    # Apply the --params calibration layer (tuned scheme parameters) into the
+    # built config's nested land *Config NamedTuples (issue #691).
+    if getattr(args, "params", None):
+        from legoesm.driver.run_config_yaml import (
+            apply_params_to_config,
+            load_params_config,
+        )
+        run_config = apply_params_to_config(
+            run_config, load_params_config(args.params), driver="run_lmip")
     config = run_config.land
 
     dt = args.dt

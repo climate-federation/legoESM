@@ -210,6 +210,10 @@ CLM5_PFT_NAMES: tuple[str, ...] = (
 )
 
 # Each row: one PFT; each column: one parameter in PARAM_NAMES order
+# NOTE: the C4 PFT rows (c4_grass, crop_c4) are consumed by the C3-only
+# Farquhar biochemistry in land/carbon/stomata.py -- their photosynthesis is
+# run through C3 kinetics as a documented approximation, NOT a Collatz (1992)
+# C4 scheme, so C4 CO2 sensitivity / compensation point are not represented.
 _CLM5_PFT_TABLE_RAW: list[list[float]] = [
     # bare soil
     [0.30, 0.96, 0.001,  50.0, 2.0e6, 1.0, 0.1, 0.10, 0.20,  0.0, 50.0, 1.0],
@@ -239,11 +243,11 @@ _CLM5_PFT_TABLE_RAW: list[list[float]] = [
     [0.20, 0.96, 0.03, 100.0, 2.0e6, 0.5, 0.5, 0.10, 0.25, 43.0, 30.0, 5.0],
     # c3 grass
     [0.20, 0.96, 0.03, 100.0, 2.0e6, 0.5, 0.5, 0.10, 0.25, 43.0, 30.0, 5.0],
-    # c4 grass
+    # c4 grass  (C4 PFT run through C3 Farquhar kinetics -- approximation)
     [0.20, 0.96, 0.03, 100.0, 2.0e6, 0.5, 0.5, 0.10, 0.25, 24.0, 30.0, 4.0],
     # crop c3
     [0.18, 0.96, 0.06, 150.0, 2.0e6, 0.5, 0.5, 0.10, 0.25, 50.0, 35.0, 5.0],
-    # crop c4
+    # crop c4  (C4 PFT run through C3 Farquhar kinetics -- approximation)
     [0.18, 0.96, 0.06, 150.0, 2.0e6, 0.5, 0.5, 0.10, 0.25, 30.0, 35.0, 4.0],
 ]
 # fmt: on

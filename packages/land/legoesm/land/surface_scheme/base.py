@@ -106,3 +106,14 @@ class SurfaceFluxOutput(NamedTuple):
     # gradients directly and q_surface is derived from the converged
     # skin T, not from a beta * q_sat product.
     stomatal_ratio: jax.Array | None = None
+
+    # ---- Semi-implicit surface conductance for the soil-thermal Robin BC ----
+    # lambda = -dG_surface/dT_sfc (>= 0) from the SimpleSEB linearisation
+    # (longwave + finite-difference sensible/latent).  Passed to
+    # ``solve_soil_thermal(surface_conductance=...)`` to make the T_sfc-dependence
+    # of the surface energy balance implicit, removing the explicit-coupling
+    # instability (large dt + thin top layer + stiff surface -> NaN).  ``None`` for
+    # the two-leaf canopy (its own Newton closure handles the coupling) and for a
+    # SimpleSEB build that leaves it unset -> solve_soil_thermal falls back to the
+    # explicit BC (lambda = 0), byte-identical to before.
+    surface_conductance: jax.Array | None = None

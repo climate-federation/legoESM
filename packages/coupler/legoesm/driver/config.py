@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 from typing import NamedTuple
 
@@ -180,6 +181,48 @@ class DycoreConfig(NamedTuple):
     time_integrator: str = "ssp_rk3"
 
 
+class EvaluationConfig(NamedTuple):
+    """Post-run ClimateEval configuration.
+
+    When ``enabled=True`` and ``cmip_output=True``, the driver invokes
+    ClimateEval (via ``climateeval_hook.maybe_run_climateeval``) after a
+    successful AMIP run, comparing CMOR outputs against ERA5 /
+    observational reference data. ClimateEval is a separate, externally
+    installed tool (github.com/climate-federation/ClimateEval) — NEVER a
+    legoESM dependency (its iris/ESMValTool stack is heavy/conda-only and
+    conflicts with the JAX environment). The hook shells out to
+    ``climateeval_python`` rather than importing ``climateeval`` into this
+    process. ``suites`` are pass-through names consumed by that external
+    tool (not legoESM scheme dispatch), so they are intentionally not
+    membership-validated here; an unknown suite fails loudly inside
+    ClimateEval's own ``Suite()`` constructor. All listed suites are
+    rendered into ONE combined HTML report. **Empty (the default) = run
+    ALL bundled suites (every tier)**; a suite whose data is missing /
+    inapplicable is skipped and reported by the runner, not fatal.
+
+    ``climateeval_python`` and ``data_root_dir`` have no hardcoded
+    personal defaults — the CLI (``run_amip.py --evaluation-climateeval-
+    python`` / ``--evaluation-data-root-dir``) defaults them from the
+    ``LEGOESM_CLIMATEEVAL_PYTHON`` / ``LEGOESM_CLIMATEEVAL_DATA_ROOT``
+    environment variables instead, since both paths are inherently
+    per-user/per-machine (there is no shared, canonical install or
+    reference-data location). If either is left unset while
+    ``enabled=True``, ``ExperimentConfig.validate_strict`` raises LOUDLY
+    before the run starts (see setup instructions in
+    ``docs/user-guide/climateeval_evaluation.md``).
+    """
+    enabled: bool = False
+    suites: tuple[str, ...] = ()  # empty = ALL bundled suites (every tier)
+    model_id: str = "legoESM-1-0"
+    experiment_id: str = "amip"
+    variant_id: str = "r1i1p1f1"
+    data_root_dir: str = ""
+    fail_on_missing_data: bool = False
+    download_missing_data: bool = False
+    timerange: str = ""
+    climateeval_python: str = ""
+
+
 class OutputConfig(NamedTuple):
     """Output and diagnostics configuration."""
     output_dir: str = ""
@@ -197,6 +240,7 @@ class OutputConfig(NamedTuple):
     # ``restart_buffer_seconds`` to spare, letting a dependency chain resume.
     max_wallclock_seconds: float = 0.0
     restart_buffer_seconds: float = 600.0
+    evaluation: EvaluationConfig = EvaluationConfig()
 
 
 # Single source of truth for the valid microphysics scheme literals — consumed
@@ -499,6 +543,11 @@ class ExperimentConfig(NamedTuple):
     # stl1-4, swvl1-4, sd on a regular lat-lon grid.  Ignored when
     # use_multilayer_land is False.
     era5_land_ic_path: str = ""
+    # Pre-staged CLM surfdata NetCDF (PFT/texture/glacier maps) for the multilayer
+    # land.  Empty => download from UCAR to /tmp (fails on compute nodes with no
+    # outbound internet, so stage the file and set this).  Ignored unless
+    # use_multilayer_land is True.
+    clm_surfdata_path: str = ""
 
     # Diagnostic T-based ice partition.  At every radiation call the
     # grid-mean cloud water q_c is split into liquid + ice via
@@ -897,21 +946,41 @@ class ExperimentConfig(NamedTuple):
                 f"surface layer uses the same bulk-flux algorithm as the ocean "
                 f"tile; got turbulence='none'."
             )
-        # Tiled (mosaic) surface fluxes inject a per-tile flux as the louis BL
-        # bottom boundary condition; only the louis kernel accepts it, so reject
-        # the combination loudly rather than silently ignoring the request
-        # (dispatch hardening).
-        if self.surface_tiled and self.turbulence != "louis":
+        # Tiled (mosaic) surface fluxes inject a per-tile flux as the BL bottom
+        # boundary condition; only the kernels that accept the injected
+        # ``surface_flux=(tau_x, tau_y, shflx, lhflx, ustar)`` tuple can consume
+        # it (louis and the CLUBB family — clubb_lite / clubb, the latter routing
+        # the flux through clubb_step's kinematic prescribed-BC interface).
+        # Reject any other scheme loudly rather than silently ignoring the
+        # request (dispatch hardening).
+        _tiled_turbulence = ("louis", "clubb_lite", "clubb")
+        if self.surface_tiled and self.turbulence not in _tiled_turbulence:
             errors.append(
                 f"surface_tiled=True is currently supported only with "
-                f"turbulence='louis' (the kernel that consumes the injected "
-                f"tiled surface flux); got turbulence={self.turbulence!r}."
+                f"turbulence in {_tiled_turbulence} (the kernels that consume the "
+                f"injected tiled surface flux); got turbulence={self.turbulence!r}."
             )
-        if self.surface_tiled and not (self.slab_land_active or self.land_mask_path):
+        if self.surface_tiled and not (self.slab_land_active
+                                       or self.land_mask_path
+                                       or self.use_multilayer_land):
             errors.append(
                 "surface_tiled=True requires an active land tile "
-                "(--slab-land-active or a land-mask file); otherwise there is no "
-                "land tile to give its own surface scheme."
+                "(--slab-land-active, --use-multilayer-land, or a land-mask file); "
+                "otherwise there is no land tile to give its own surface scheme. "
+                "use_multilayer_land is an active tile whose land fraction comes "
+                "from --topography (elevation-derived f_land) when no mask is given."
+            )
+        # ...but the multilayer tile can only get f_land from topography — a FLAT
+        # topography gives f_land==0 everywhere (no land), which would silently
+        # no-op the requested land tile.  Require real topography OR an explicit
+        # mask when multilayer is the sole land-tile signal.
+        if (self.surface_tiled and self.use_multilayer_land
+                and not self.slab_land_active and not self.land_mask_path
+                and self.topography == "flat"):
+            errors.append(
+                "use_multilayer_land + surface_tiled with topography='flat' and no "
+                "land-mask file has NO land (elevation-derived f_land is 0 "
+                "everywhere) — pass a real --topography or a --land-mask-file."
             )
         if not (self.surface_z0_land > 0.0):
             errors.append(
@@ -957,11 +1026,15 @@ class ExperimentConfig(NamedTuple):
                 f"[0, 1]; got {self.land_bucket_w_init_frac!r}."
             )
         # Stomatal soil-water limitation needs the bucket to supply beta_soil.
-        if self.land_stomatal_beta and not self.land_soil_bucket:
+        if (self.land_stomatal_beta and not self.land_soil_bucket
+                and not self.use_multilayer_land):
             errors.append(
                 "land_stomatal_beta=True requires land_soil_bucket=True "
                 "(the bucket supplies the soil availability beta_soil that the "
-                "Jarvis stomatal model down-regulates)."
+                "Jarvis stomatal model down-regulates) — UNLESS use_multilayer_land "
+                "is set, in which case the Richards multilayer soil supplies the "
+                "root-zone moisture availability instead (the stomata are threaded "
+                "into MultiLayerLandConfig.stomata, PR #715)."
             )
         # Optional cloud-tuning override bounds (mirror CloudConfig.__param_spec__
         # so an out-of-range knob fails early, not deep in the cloud diagnosis).
@@ -1090,6 +1163,32 @@ class ExperimentConfig(NamedTuple):
                     "aimip_variant='classical' requires "
                     "cloud_scheme='xu_randall', "
                     f"got {self.cloud_scheme!r}"
+                )
+
+        if self.output.evaluation.enabled:
+            ceval_py = self.output.evaluation.climateeval_python
+            if not ceval_py or not (
+                Path(ceval_py).is_file() and os.access(ceval_py, os.X_OK)
+            ):
+                errors.append(
+                    "output.evaluation.enabled=True requires "
+                    "climateeval_python to point at a real, executable "
+                    f"ClimateEval Python interpreter (got {ceval_py!r}). "
+                    "ClimateEval is a separate, externally-installed tool "
+                    "(never a legoESM dependency) — set "
+                    "--evaluation-climateeval-python or the "
+                    "LEGOESM_CLIMATEEVAL_PYTHON environment variable. See "
+                    "docs/user-guide/climateeval_evaluation.md for setup."
+                )
+            data_root = self.output.evaluation.data_root_dir
+            if not data_root or not Path(data_root).is_dir():
+                errors.append(
+                    "output.evaluation.enabled=True requires data_root_dir "
+                    f"to point at a real ClimateEval reference-data "
+                    f"directory (got {data_root!r}). Set "
+                    "--evaluation-data-root-dir or the "
+                    "LEGOESM_CLIMATEEVAL_DATA_ROOT environment variable. "
+                    "See docs/user-guide/climateeval_evaluation.md."
                 )
 
         if errors:
@@ -1474,14 +1573,20 @@ _SUB_CONFIGS = {
 def experiment_config_to_dict(config: ExperimentConfig) -> dict:
     """Serialize ExperimentConfig to a JSON-safe dict.
 
-    Sub-configs (grid, dycore, output) are inlined as nested dicts.
-    This is the canonical serialization format.
+    Sub-configs (grid, dycore, output) are inlined as nested dicts. This
+    is the canonical serialization format. ``output.evaluation`` is
+    itself a nested ``EvaluationConfig`` NamedTuple one level deeper —
+    without this it round-trips through ``json.dumps`` as a bare
+    positional list (NamedTuple is a tuple), losing field names.
     """
     d = config._asdict()
     for key in _SUB_CONFIGS:
         sub = d[key]
         if hasattr(sub, '_asdict'):
-            d[key] = sub._asdict()
+            sub_d = sub._asdict()
+            if hasattr(sub_d.get('evaluation'), '_asdict'):
+                sub_d['evaluation'] = sub_d['evaluation']._asdict()
+            d[key] = sub_d
     return d
 
 
@@ -1495,8 +1600,19 @@ def experiment_config_from_dict(d: dict) -> ExperimentConfig:
     sub_values = {}
     for key, cls in _SUB_CONFIGS.items():
         if key in d and isinstance(d[key], dict):
+            sub_d = dict(d[key])
+            if isinstance(sub_d.get('evaluation'), dict):
+                known_eval = set(EvaluationConfig._fields)
+                filtered_eval = {
+                    k: v for k, v in sub_d['evaluation'].items() if k in known_eval
+                }
+                # ``suites`` is a tuple field; JSON round-trips it as a list, so
+                # coerce back so the reconstructed config == the original.
+                if isinstance(filtered_eval.get('suites'), list):
+                    filtered_eval['suites'] = tuple(filtered_eval['suites'])
+                sub_d['evaluation'] = EvaluationConfig(**filtered_eval)
             known_sub = set(cls._fields)
-            filtered = {k: v for k, v in d[key].items() if k in known_sub}
+            filtered = {k: v for k, v in sub_d.items() if k in known_sub}
             sub_values[key] = cls(**filtered)
 
     # Filter top-level fields
