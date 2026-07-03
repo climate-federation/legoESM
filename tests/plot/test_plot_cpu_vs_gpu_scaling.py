@@ -108,6 +108,17 @@ def test_group_builds_mcells_curve():
     assert g["latlon"][128]["CPU"] == [(1, 10.0), (2, 20.0), (4, 40.0)]
 
 
+def test_hw_tick_label_nodes_and_fractions():
+    # Full-node / A100 counts render as integers; sub-node CPU points (cores <
+    # 128 -> nodes < 1) render as unit fractions.
+    assert plot._hw_tick_label(1.0) == "1"
+    assert plot._hw_tick_label(16.0) == "16"
+    assert plot._hw_tick_label(0.5) == "1/2"            # 64 cores / 128
+    assert plot._hw_tick_label(0.25) == "1/4"           # 32 cores / 128
+    cores = plot._CPU_CORES_PER_NODE
+    assert plot._hw_tick_label(1.0 / cores) == f"1/{cores}"  # a single core
+
+
 def test_make_figures_one_png_per_grid(tmp_path):
     csvp = tmp_path / "tidy.csv"
     _write_csv(csvp, _sample_rows())

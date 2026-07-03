@@ -3,15 +3,17 @@
 
 The companion plot to the Derecho CPU-vs-A100 comparison
 (``scripts/cluster/scaling_derecho/submit_scaling.sh``): each grid is swept on
-BOTH backends across their parallel units -- CPU MPI ranks 1..128 (cores) and
-GPU 1..4 A100 -- at each resolution.  CPU cores and GPUs are DIFFERENT units, so
-the two backends get their own columns (never compare a CPU point to a GPU point
-at the same x); the cross-backend headline is the peak-SYPD table, not the axes.
+BOTH backends across their parallel units -- CPU MPI ranks (shown as NODES, 128
+cores/node, from a fraction of a node up to the multi-node sweep) and GPU A100
+count -- at each resolution.  CPU nodes and GPUs are DIFFERENT units, so the two
+backends get their own columns (never compare a CPU point to a GPU point at the
+same x); the cross-backend headline is the peak-SYPD table, not the axes.  Axes
+are labelled in hardware units (nodes / A100s), not base-2 exponents.
 
 Per grid, one 2x2 figure:
-  - top-left   CPU: SYPD vs cores,        one line per resolution
+  - top-left   CPU: SYPD vs nodes,        one line per resolution
   - top-right  GPU: SYPD vs A100,         one line per resolution
-  - bottom-left  CPU: Mcells/s vs cores,  one line per resolution
+  - bottom-left  CPU: Mcells/s vs nodes,  one line per resolution
   - bottom-right GPU: Mcells/s vs A100,   one line per resolution
 Mcells/s (cells x levels / step-time) is raw compute throughput; unlike SYPD it
 normalises out the per-resolution timestep, so a plateau in the bottom row is
@@ -31,11 +33,32 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.ticker import FuncFormatter  # noqa: E402
 
 # Grid spellings that mean the same thing across the repo.
 _GRID_ALIASES = {"cubed_sphere": "cubed-sphere"}
-# The two columns: backend -> x-axis label.  CPU = cores, GPU = A100 count.
-_BACKENDS = (("CPU", "MPI ranks (cores)"), ("GPU", "A100 GPUs"))
+# Derecho hardware unit: an EPYC compute node is 128 cores; the CPU x-axis is
+# expressed in NODES (cores / this), so a 16-node run reads "16", not "2048".
+# Sub-node rank counts (<128 cores) render as fractions (1/128 ... 1/2 node).
+_CPU_CORES_PER_NODE = 128
+# The two columns: backend -> (x-axis label, divisor from n_resource to the
+# display unit).  CPU: cores -> nodes (/128).  GPU: A100 count is already the
+# unit (/1).  Axes are labelled in hardware units, not base-2 exponents.
+_BACKENDS = (
+    ("CPU", "CPU nodes (128 cores/node)", _CPU_CORES_PER_NODE),
+    ("GPU", "A100 GPUs", 1),
+)
+
+
+def _hw_tick_label(v: float) -> str:
+    """Tick label in hardware units: integer for >=1, unit-fraction below.
+
+    GPU A100 counts and full-node CPU points are integers ("1", "2", ... "16");
+    sub-node CPU points (cores < 128 -> nodes < 1) read as "1/128" ... "1/2".
+    """
+    if v >= 1:
+        return f"{int(round(v))}"
+    return f"1/{int(round(1.0 / v))}"
 
 
 def _canon_grid(g: str) -> str:
@@ -55,7 +78,7 @@ def group(rows, metric: str = "sypd"):
     non-positive/missing metric, resource, or resolution; backends normalised
     to CPU / GPU.
     """
-    known = {b for b, _ in _BACKENDS}
+    known = {b for b, *_ in _BACKENDS}
     out: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     for r in rows:
         grid = _canon_grid(r.get("grid", ""))
@@ -166,19 +189,31 @@ def make_figures(rows, out_dir: Path) -> list[Path]:
         color = {res: cmap((i + 0.5) / ncol) for i, res in enumerate(resolutions)}
 
         fig, axes = plt.subplots(2, 2, figsize=(12, 9), squeeze=False)
-        for col, (backend, xlabel) in enumerate(_BACKENDS):
+        for col, (backend, xlabel, divisor) in enumerate(_BACKENDS):
             for row, src, ylabel in panels:
                 ax = axes[row][col]
                 src_res = src.get(grid, {})
+                panel_xs: set[float] = set()
                 for res in resolutions:
                     pts = src_res.get(res, {}).get(backend, [])
                     if not pts:
                         continue
-                    ax.plot([n for n, _ in pts], [v for _, v in pts],
+                    # n_resource -> hardware unit (CPU cores/128 = nodes; GPU=A100).
+                    xs = [n / divisor for n, _ in pts]
+                    panel_xs.update(xs)
+                    ax.plot(xs, [v for _, v in pts],
                             marker="o", color=color[res],
                             label=_res_label(km_map, grid, res))
-                ax.set_xscale("log", base=2)      # device counts: powers of two
+                # Powers-of-two spacing, but tick ONLY at the measured points and
+                # label them in hardware units (nodes / A100s) -- no base-2
+                # exponents and no log minor-tick clutter.
+                ax.set_xscale("log", base=2)
                 ax.set_yscale("log", base=10)
+                if panel_xs:
+                    ax.set_xticks(sorted(panel_xs))
+                    ax.xaxis.set_major_formatter(
+                        FuncFormatter(lambda v, _pos=None: _hw_tick_label(v)))
+                    ax.minorticks_off()
                 ax.set_xlabel(xlabel)
                 ax.set_ylabel(ylabel)
                 ax.set_title(f"{backend} — {ylabel.split(' (')[0]}")
