@@ -1342,6 +1342,12 @@ class LatLonCGridOceanModel:
         if pgf_scheme not in _valid_pgf:
             raise ValueError(
                 f"pgf_scheme must be one of {_valid_pgf}, got {pgf_scheme!r}")
+        _valid_pgf_quad = {"cell_integral", "nemo_trapezoid"}
+        _pgf_quad = getattr(config, "pgf_quadrature", "cell_integral")
+        if _pgf_quad not in _valid_pgf_quad:
+            raise ValueError(
+                f"pgf_quadrature must be one of {_valid_pgf_quad}, "
+                f"got {_pgf_quad!r}")
         _valid_time_int = {"euler", "ab2", "rk3"}
         if config.tracer_time_integrator not in _valid_time_int:
             raise ValueError(

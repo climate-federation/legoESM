@@ -1269,6 +1269,14 @@ class LatLonCGridOceanConfig(NamedTuple):
     # docs/ocean/experiments/density_jacobian_pgf_plan.md.  Pure-z*
     # runs ignore this field (the existing path is identical).
     pgf_scheme: str = "adcroft"
+    # Vertical quadrature of the baroclinic pressure anomaly p'.
+    # "cell_integral" (default, bit-identical legacy): half-cell cumsum
+    # using the cell-centre ρ' over each cell.  "nemo_trapezoid": the
+    # NEMO dynhpg recurrence — trapezoid between cell centres on the
+    # w-spacing e3w(k) = (dz(k)+dz(k-1))/2 with surface e3w(1)=dz(1)
+    # (DINO L1 exactness; the two agree on uniform grids and differ by
+    # (g/4)·Δdz·Δρ' per interface on stretched levels).
+    pgf_quadrature: str = "cell_integral"
     # Tracer time integration for the flux-form advection step.
     # "euler" (default): forward Euler (1st-order).
     # "ab2": Adams-Bashforth 2 with stabilization (MITgcm convention).

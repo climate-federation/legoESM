@@ -330,6 +330,19 @@ class DINOConfig:
     # - Vector-invariant + AL81 EEN PV-flux: legoESM default
     # ------------------------------------------------------------------
     pgf_scheme: str = "adcroft"
+    # Vertical p' quadrature (LatLonCGridOceanConfig.pgf_quadrature):
+    # "cell_integral" (legacy) or "nemo_trapezoid" (dynhpg recurrence —
+    # the DINO oracle; on DINO's stretched levels the two differ).
+    pgf_quadrature: str = "cell_integral"
+    # Vertical coordinate for the lat-lon path: "zstar" (legacy — all 36
+    # levels compressed to the local bowl depth, terrain-following) or
+    # "masked_zco" (NEMO DINO_R1 ln_zco: FLAT geopotential levels with
+    # full-cell bottom masking per zgr_msk_top_bot — wet iff
+    # gdept(k) < H; the column's depth snaps to the interface below the
+    # deepest wet centre).  The oracle runs masked z-levels, so the
+    # r1_exact preset selects "masked_zco".  MPAS keeps its own column
+    # handling and rejects "masked_zco".
+    vertical_coordinate: str = "zstar"
     barotropic_solver: str = "implicit_cn"
     barotropic_implicit_theta_eta: float = 0.55
     tracer_advection: str = "tvd"
@@ -410,6 +423,8 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
         A_h_floor=0.0,
         A_h_eq_boost=1.0,
         tracer_advection="fct2",
+        vertical_coordinate="masked_zco",
+        pgf_quadrature="nemo_trapezoid",
         forcing_annual_cycle=True,
         wind_through_step=True,
     )
@@ -994,6 +1009,76 @@ def create_dino_z_star(cfg: DINOConfig | None = None) -> OceanZStarCoordinate:
     )
 
 
+def dino_masked_zco_coordinate(z_ref, H_bowl):
+    """NEMO ``zgr_msk_top_bot`` masked z-levels for the DINO bowl.
+
+    Reproduces DINO_R1's ``ln_zco`` vertical grid: a cell (i,j,k) is wet
+    iff its reference centre depth is above the bathymetry
+    (``gdept(k) < H``, usrdef_zgr.F90:471-479), and every wet cell is a
+    FULL cell — the column's effective depth snaps to the interface
+    below the deepest wet centre.  Implemented as an
+    ``OceanPartialCellCoordinate`` whose ``H_bathy`` input is that
+    snapped interface depth, so ``h_partial ∈ {0, dz_ref}`` exactly and
+    the Jacobian is 1 at η=0.
+
+    Parameters
+    ----------
+    z_ref : OceanZStarCoordinate
+        The 36-level Lévy reference grid (``create_dino_z_star``).
+    H_bowl : array (n_lat, n_lon)
+        Continuous bowl bathymetry [m, positive down]; <= 0 on land.
+
+    Returns
+    -------
+    (coord, H_snap) : (OceanPartialCellCoordinate, jnp.ndarray)
+        ``H_snap[i,j] = Σ_k h_partial[i,j,k]`` — pass it as the state's
+        ``H_bathy`` so geometry and state agree.
+    """
+    from legoesm.ocean.vertical import create_partial_cell_coordinate
+
+    abs_half = jnp.abs(jnp.asarray(z_ref.z_half_ref))       # (nlev+1,)
+    centers = 0.5 * (abs_half[:-1] + abs_half[1:])          # (nlev,)
+    H = jnp.asarray(H_bowl)
+    # NEMO rule: wet iff gdept(k) < H  (strict; usrdef_zgr WHERE clause)
+    n_wet = jnp.sum(centers[None, None, :] < H[..., None], axis=-1)
+    H_snap = jnp.where(n_wet > 0, abs_half[n_wet], 0.0)
+    coord = create_partial_cell_coordinate(z_ref, H_snap)
+    return coord, H_snap
+
+
+def dino_lat_lon_bowl(grid, cfg: DINOConfig | None = None):
+    """Continuous DINO bowl bathymetry H(i,j) [m] on a Mercator grid.
+
+    Single canonical construction (lon wrap to (-180,180] + meshgrid +
+    :func:`dino_bathymetry`) shared by the state builder and the
+    masked-zco coordinate builder.
+    """
+    if cfg is None:
+        cfg = DINOConfig()
+    lat_deg_1d = jnp.degrees(grid.lat)
+    lon_deg_1d = jnp.degrees(grid.lon)
+    lon_deg_1d = (lon_deg_1d + 180.0) % 360.0 - 180.0
+    lon2d, lat2d = jnp.meshgrid(lon_deg_1d, lat_deg_1d, indexing="xy")
+    return dino_bathymetry(lon2d, lat2d, cfg)
+
+
+def dino_lat_lon_vertical(grid, cfg: DINOConfig | None = None):
+    """Vertical coordinate for the lat-lon DINO per
+    ``cfg.vertical_coordinate`` ("zstar" | "masked_zco")."""
+    if cfg is None:
+        cfg = DINOConfig()
+    z_ref = create_dino_z_star(cfg)
+    if cfg.vertical_coordinate == "zstar":
+        return z_ref
+    if cfg.vertical_coordinate == "masked_zco":
+        coord, _H_snap = dino_masked_zco_coordinate(
+            z_ref, dino_lat_lon_bowl(grid, cfg))
+        return coord
+    raise ValueError(
+        f"unknown DINOConfig.vertical_coordinate "
+        f"{cfg.vertical_coordinate!r}; expected 'zstar' or 'masked_zco'")
+
+
 # ---------------------------------------------------------------------
 # Phase 3 — MPAS regional mesh wiring (partial-periodic via land mask)
 #
@@ -1158,13 +1243,9 @@ def dino_lat_lon_initial_state_arrays(
         cfg = DINOConfig()
 
     lat_deg_1d = jnp.degrees(grid.lat)                        # (n_lat,)
-    lon_deg_1d = jnp.degrees(grid.lon)                        # (n_lon,)
-    # Wrap longitudes to (-180, 180] to match DINOConfig
-    lon_deg_1d = (lon_deg_1d + 180.0) % 360.0 - 180.0
-    lon2d, lat2d = jnp.meshgrid(lon_deg_1d, lat_deg_1d, indexing="xy")
 
-    # Bathymetry
-    H_bathy = dino_bathymetry(lon2d, lat2d, cfg)
+    # Bathymetry (shared canonical construction)
+    H_bathy = dino_lat_lon_bowl(grid, cfg)
 
     # ICs: T(lat, z), S(lat, z) — broadcast over longitude
     T_lat_z, S_lat_z = dino_initial_T_S(lat_deg_1d, z_coord.z_full_ref, cfg)
@@ -1213,6 +1294,14 @@ def dino_lat_lon_state(
     T, S, H_bathy, land_mask = dino_lat_lon_initial_state_arrays(
         grid, z_coord, cfg,
     )
+
+    # Masked z-levels (vertical_coordinate="masked_zco"): the state's
+    # H_bathy must be the coordinate's SNAPPED full-cell depth
+    # (Σ h_partial), not the continuous bowl — otherwise the Jacobian
+    # (H_bathy vs Σ h_partial) is inconsistent at η=0.
+    from legoesm.ocean.vertical import OceanPartialCellCoordinate
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        H_bathy = jnp.sum(z_coord.h_partial, axis=-1)
 
     # Build a base rest-state with our overrides, then replace T, S
     state = rest_state_latlon_cgrid_ocean(
@@ -1413,6 +1502,7 @@ def dino_lat_lon_model_config(
         barotropic_implicit_theta_eta=cfg.barotropic_implicit_theta_eta,
         tracer_advection=cfg.tracer_advection,
         pgf_scheme=cfg.pgf_scheme,
+        pgf_quadrature=cfg.pgf_quadrature,
         ke_gradient_scheme=cfg.ke_gradient_scheme,  # #263 Hollingsworth fix
         # MOM6-style stability protection (diagnosed 2026-05-14)
         A_h_floor=cfg.A_h_floor,
@@ -1527,6 +1617,12 @@ def dino_mpas_model_config(
     if cfg is None:
         cfg = DINOConfig()
     _mpas_tracer_advection(cfg)   # fail fast BEFORE any mesh access
+    if cfg.vertical_coordinate != "zstar":
+        raise ValueError(
+            f"DINOConfig.vertical_coordinate={cfg.vertical_coordinate!r} "
+            "is not available on the MPAS DINO path (MPAS keeps its own "
+            "column handling). The r1_exact preset is lat-lon only — "
+            "override vertical_coordinate='zstar' to run on MPAS.")
 
     # Representative cell size from mean cell area (m).
     cell_dx_m = float(jnp.sqrt(jnp.mean(mesh.areaCell)))

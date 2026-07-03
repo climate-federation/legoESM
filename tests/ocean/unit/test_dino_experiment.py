@@ -767,3 +767,108 @@ def test_mpas_builder_rejects_fct_family_tracer_advection():
     cfg = dino_r1_exact_config()
     with _pytest.raises(ValueError, match="lat-lon only"):
         dino_mpas_model_config(None, cfg, physics=False)
+
+
+class TestMaskedZco:
+    """NEMO ln_zco full-cell masking (zgr_msk_top_bot) for DINO."""
+
+    def _z_and_bowl(self):
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, create_dino_z_star, dino_lat_lon_bowl,
+            dino_lat_lon_grid,
+        )
+        cfg = DINOConfig()
+        z = create_dino_z_star(cfg)
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        return cfg, z, np.asarray(dino_lat_lon_bowl(g, cfg))
+
+    def test_snap_rule_matches_f90_transliteration(self):
+        """k_bot per usrdef_zgr.F90 zgr_msk_top_bot:
+        WHERE( pdept(jk) < H .AND. H <= pdept(jk+1) ) k_bot = jk."""
+        from legoesm.ocean.experiments.dino import (
+            dino_masked_zco_coordinate,
+        )
+        cfg, z, H = self._z_and_bowl()
+        abs_half = np.abs(np.asarray(z.z_half_ref))
+        centers = 0.5 * (abs_half[:-1] + abs_half[1:])
+        coord, H_snap = dino_masked_zco_coordinate(z, jnp.asarray(H))
+
+        # F90 loop transliteration (1-based jk -> 0-based k)
+        nlev = centers.size
+        pdept = np.concatenate([centers, [np.inf]])
+        k_bot = np.zeros(H.shape, dtype=int)   # 0 = land (k_top=0)
+        for jk in range(nlev):
+            sel = (pdept[jk] < H) & (H <= pdept[jk + 1])
+            k_bot[sel] = jk + 1                # NEMO 1-based level count
+        np.testing.assert_array_equal(
+            np.asarray(coord.bottom_level) + 1, k_bot)
+
+    def test_full_cells_and_snap_depth(self):
+        from legoesm.ocean.experiments.dino import (
+            dino_masked_zco_coordinate,
+        )
+        cfg, z, H = self._z_and_bowl()
+        coord, H_snap = dino_masked_zco_coordinate(z, jnp.asarray(H))
+        h = np.asarray(coord.h_partial)
+        dz = np.asarray(z.dz_ref)
+        # every wet cell is a FULL cell; below-bottom cells are zero
+        is_full = np.isclose(h, dz[None, None, :], rtol=0, atol=1e-9)
+        is_zero = h == 0.0
+        assert bool(np.all(is_full | is_zero))
+        # column depth = the snapped interface depth
+        np.testing.assert_allclose(h.sum(-1), np.asarray(H_snap),
+                                   rtol=0, atol=1e-9)
+        # and the Jacobian is 1 at eta=0 on wet columns
+        from legoesm.ocean.vertical import compute_ocean_jacobian
+        J = np.asarray(compute_ocean_jacobian(
+            jnp.zeros(H.shape), jnp.asarray(H_snap), coord))
+        wet = np.asarray(coord.bottom_level) >= 0
+        np.testing.assert_allclose(J[wet], 1.0, rtol=0, atol=1e-12)
+
+    def test_dispatch(self):
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid, dino_lat_lon_vertical,
+        )
+        from legoesm.ocean.vertical import (
+            OceanPartialCellCoordinate, OceanZStarCoordinate,
+        )
+        cfg = DINOConfig()
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        assert isinstance(dino_lat_lon_vertical(g, cfg),
+                          OceanZStarCoordinate)
+        cfg2 = dataclasses.replace(cfg, vertical_coordinate="masked_zco")
+        assert isinstance(dino_lat_lon_vertical(g, cfg2),
+                          OceanPartialCellCoordinate)
+        cfg3 = dataclasses.replace(cfg, vertical_coordinate="sigma")
+        with pytest.raises(ValueError, match="vertical_coordinate"):
+            dino_lat_lon_vertical(g, cfg3)
+
+    def test_state_H_bathy_matches_coordinate(self):
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_lat_lon_grid, dino_lat_lon_state,
+            dino_lat_lon_vertical,
+        )
+        cfg = dataclasses.replace(DINOConfig(),
+                                  vertical_coordinate="masked_zco")
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        z = dino_lat_lon_vertical(g, cfg)
+        st = dino_lat_lon_state(g, z, cfg)
+        # state fields are stored float32 -> f32-appropriate tolerance
+        np.testing.assert_allclose(
+            np.asarray(st.H_bathy.data),
+            np.asarray(z.h_partial).sum(-1), rtol=1e-6)
+
+    def test_mpas_builder_rejects_masked_zco(self):
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_mpas_model_config,
+        )
+        cfg = dataclasses.replace(DINOConfig(),
+                                  vertical_coordinate="masked_zco")
+        with pytest.raises(ValueError, match="lat-lon only"):
+            dino_mpas_model_config(None, cfg, physics=False)

@@ -45,6 +45,7 @@ from legoesm.ocean.experiments.dino import (
     apply_dino_lat_lon_surface_forcing,
     apply_dino_mpas_surface_forcing,
     create_dino_z_star,
+    dino_lat_lon_vertical,
     dino_lat_lon_grid,
     dino_lat_lon_model_config,
     dino_lat_lon_state,
@@ -387,9 +388,11 @@ def main():
     grid_kind = args.grid
 
     # Build grid, state, model — branch on grid type
-    z = create_dino_z_star(cfg)
     if grid_kind == "latlon":
         grid = dino_lat_lon_grid(cfg, n_lon=args.n_lon)
+        # zstar OR masked_zco (NEMO ln_zco full-cell masking) per
+        # cfg.vertical_coordinate — the coordinate drives state + model.
+        z = dino_lat_lon_vertical(grid, cfg)
         state = dino_lat_lon_state(grid, z, cfg)
         model_cfg, _ = dino_lat_lon_model_config(
             grid, cfg, physics=not args.physics_off,
@@ -406,6 +409,7 @@ def main():
             else None)
         grid_desc = f"{grid.n_lat}x{grid.n_lon} lat-lon Mercator"
     else:  # mpas
+        z = create_dino_z_star(cfg)
         grid = create_regional_voronoi_mesh(
             lon_range=(cfg.lon_west_deg, cfg.lon_east_deg),
             lat_range=(-cfg.lat_max_deg, cfg.lat_max_deg),

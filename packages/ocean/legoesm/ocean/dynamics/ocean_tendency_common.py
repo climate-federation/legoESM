@@ -79,6 +79,7 @@ def iterate_eos_and_pressure_anomaly(
     is_active_3d: jnp.ndarray | None = None,
     rho_ref_z_static: jnp.ndarray | None = None,
     allow_baroclinic_f32: bool = False,
+    quadrature: str = "cell_integral",
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Run the standard 2-pass EOS iteration and form ``p_prime``.
 
@@ -92,12 +93,23 @@ def iterate_eos_and_pressure_anomaly(
        the **reference** thickness profile ``dz_ref`` (i.e. ``J=1``,
        ``η=0``).  Using the actual Jacobian here would double-count
        the ``-g·∇η`` forcing handled by the barotropic solver.
-    3. Build the layer-centred baroclinic pressure anomaly
+    3. Build the layer-centred baroclinic pressure anomaly (see
+       ``quadrature``):
 
-       ``p'(k) = g · Σ_{j<k} ρ'(j) · dz_ref(j) + 0.5 · g · ρ'(k) · dz_ref(k)``
-
-       which equals the half-trapezoidal cumulative integral of
-       ``g·ρ'`` from the surface to the layer mid-point.
+       - ``"cell_integral"`` (legacy default, bit-identical):
+         ``p'(k) = g · Σ_{j<k} ρ'(j) · dz(j) + 0.5 · g · ρ'(k) · dz(k)``
+         — the half-cell cumulative integral of ``g·ρ'`` to the layer
+         mid-point using the CELL value over each cell.
+       - ``"nemo_trapezoid"`` — NEMO ``dynhpg`` vertical quadrature
+         (dynhpg.F90 hpg_sco/zco recurrence): trapezoid between cell
+         centres on the w-spacing ``e3w(k) = (dz(k)+dz(k−1))/2`` with
+         surface half-cell ``e3w(1) = dz(1)``:
+         ``p'(1) = (g/2)·dz(1)·ρ'(1)``,
+         ``p'(k) = p'(k−1) + (g/2)·e3w(k)·(ρ'(k)+ρ'(k−1))``.
+         ``ρ'`` is zeroed below the seafloor (NEMO's masked ``rhd``)
+         when ``is_active_3d`` is provided.  The two rules agree on a
+         UNIFORM grid; on stretched levels they differ per interface by
+         ``(g/4)·(dz(k)−dz(k−1))·(ρ'(k−1)−ρ'(k))``.
 
     Parameters
     ----------
@@ -217,6 +229,32 @@ def iterate_eos_and_pressure_anomaly(
         h_for_cumsum = dz_ref
     else:
         h_for_cumsum = h_actual
+
+    if quadrature not in ("cell_integral", "nemo_trapezoid"):
+        raise ValueError(
+            f"Unknown p' quadrature {quadrature!r}; expected "
+            "'cell_integral' or 'nemo_trapezoid'")
+
+    if quadrature == "nemo_trapezoid":
+        # NEMO dynhpg recurrence (see docstring).  Mask ρ' below the
+        # seafloor first — NEMO's rhd is masked, so a column's cumsum
+        # stays constant past its own bottom (h may still be the full
+        # dz_ref there on the pure-z* path).
+        if hi_precision_pressure:
+            rho_q = rho_prime.astype(jnp.float64)
+            h_q = jnp.asarray(h_for_cumsum, dtype=jnp.float64)
+        else:
+            rho_q = rho_prime
+            h_q = jnp.asarray(h_for_cumsum)
+        if is_active_3d is not None:
+            rho_q = jnp.where(is_active_3d, rho_q, jnp.zeros_like(rho_q))
+        pair = rho_q[..., 1:] + rho_q[..., :-1]          # (..., nlev-1)
+        h_b = jnp.broadcast_to(h_q, rho_q.shape)
+        e3w_int = 0.5 * (h_b[..., 1:] + h_b[..., :-1])   # (..., nlev-1)
+        inc = jnp.concatenate(
+            [h_b[..., :1] * rho_q[..., :1], e3w_int * pair], axis=-1)
+        p_prime = (0.5 * g) * jnp.cumsum(inc, axis=-1)
+        return rho, rho_prime, p_prime
 
     if hi_precision_pressure:
         rho_prime_hi = rho_prime.astype(jnp.float64)
