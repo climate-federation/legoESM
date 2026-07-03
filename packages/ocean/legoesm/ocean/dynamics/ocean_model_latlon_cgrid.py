@@ -1014,6 +1014,21 @@ class LatLonCGridOceanModel:
                 "physics.lateral_mixing.scheme='none'."
             )
 
+        # Dispatch hardening: the equilibrium-tide body force is applied inside
+        # the SPLIT-EXPLICIT barotropic substeps (barotropic_substeps_latlon_cgrid,
+        # the `else` branch of the barotropic-solver dispatch). The rigid-lid /
+        # implicit-CN / unsplit solvers route AROUND that call, so an enabled tide
+        # there would be a SILENT no-op — reject it LOUDLY at construction.
+        _tf = getattr(config, "tidal_forcing", None)
+        if _tf is not None and _tf.enabled:
+            _bsolver = config.barotropic.barotropic_solver
+            if _bsolver in ("rigid_lid", "implicit_cn", "implicit_unsplit"):
+                raise ValueError(
+                    f"tidal_forcing.enabled=True is not supported with "
+                    f"barotropic_solver={_bsolver!r}: the equilibrium-tide body "
+                    f"force is applied in the split-explicit barotropic substeps. "
+                    f"Use barotropic_solver='explicit_substep' (the default).")
+
         # Meridionally-FLAT (Oceananigans `Flat`-y, ∂/∂y≡0) is wired ONLY into the
         # operators built via gradient_y_cgrid / divergence_cgrid (PGF, KE-gradient,
         # tracer advection, the scalar Laplacian, the vector-Laplacian viscosity)
@@ -1773,7 +1788,7 @@ class LatLonCGridOceanModel:
     def _step_impl(self, state: LatLonCGridOceanState, dt: float,
                    freshwater=None, surface_forcing=None,
                    sponge=None, *, _apply_implicit_vmix: bool = True,
-                   grid=None, vertex_mask=None):
+                   grid=None, vertex_mask=None, t_seconds=None):
         """Core step logic — no JIT wrapper.
 
         Use this directly inside an outer ``@jax.jit`` context (e.g.
@@ -2164,6 +2179,7 @@ class LatLonCGridOceanModel:
                 F_slow_u=F_slow_u,
                 F_slow_v=F_slow_v,
                 add_barotropic_coriolis=_add_bt_cor,
+                t_seconds=t_seconds,  # traced model time for the equilibrium tide
             )
 
         # 6b. Issue #271: project out global mean-eta drift right after
@@ -3982,7 +3998,7 @@ class LatLonCGridOceanModel:
     def step(self, state: LatLonCGridOceanState, dt: float,
              freshwater=None, surface_forcing=None,
              sponge=None, *, grid=None,
-             vertex_mask=None) -> LatLonCGridOceanState:
+             vertex_mask=None, t_seconds=None) -> LatLonCGridOceanState:
         """Advance one time step using split-explicit stepping.
 
         Eager Python shim over the JIT-compiled ``_step_jitted``: fills
@@ -4034,15 +4050,32 @@ class LatLonCGridOceanModel:
         # mid-step state inside _step_jitted (np.asarray on a tracer raises).
         # Single warming entry point shared with external _step_impl drivers.
         self.prime_step_caches(state)
+        # Eager fail-fast (dispatch hardening): an ENABLED equilibrium tide
+        # with no model time supplied would otherwise be a SILENT no-op (the
+        # in-body gate is ``enabled and t_seconds is not None``) — a driver
+        # stepping via bare ``step(state, dt)`` would run a tide-free
+        # simulation while the config says tides are on.  integrate()/
+        # integrate_scan() thread t automatically; direct steppers must pass
+        # ``t_seconds`` (elapsed model seconds; t=0 = constituent epoch).
+        _tf = getattr(self.config, "tidal_forcing", None)
+        if _tf is not None and _tf.enabled and t_seconds is None:
+            raise ValueError(
+                "tidal_forcing.enabled=True but step() was called without "
+                "t_seconds — the equilibrium tide needs the elapsed model "
+                "time and would otherwise be SILENTLY inert.  Pass "
+                "t_seconds=<elapsed seconds device scalar> to step()/"
+                "step_checked(), or drive the run via integrate()/"
+                "integrate_scan() which thread it automatically."
+            )
         return self._step_jitted(
             state, dt, freshwater, surface_forcing, sponge,
-            grid=grid, vertex_mask=vertex_mask)
+            grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds)
 
     @partial(jax.jit, static_argnums=(0,))
     def _step_jitted(self, state: LatLonCGridOceanState, dt: float,
                      freshwater=None, surface_forcing=None,
                      sponge=None, *, grid=None,
-                     vertex_mask=None) -> LatLonCGridOceanState:
+                     vertex_mask=None, t_seconds=None) -> LatLonCGridOceanState:
         """JIT body of :meth:`step` (split out so the vertex-mask cache
         fill runs eagerly — see the ``step`` docstring).
 
@@ -4067,6 +4100,9 @@ class LatLonCGridOceanModel:
                 raise ValueError(
                     "barotropic_solver='implicit_unsplit' requires "
                     "outer_integrator='ab2'.")
+            # (tidal_forcing + implicit_unsplit is rejected at construction in
+            # _validate_config — the unsplit solver has no barotropic-substep
+            # forcing hook.)
             new_state = self._unsplit_ab2_step(
                 state, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge,
@@ -4084,12 +4120,13 @@ class LatLonCGridOceanModel:
             new_state = self._ab2_step(
                 state, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge,
-                grid=grid, vertex_mask=vertex_mask)
+                grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds)
         else:
             new_state = self._step_impl(state, dt, freshwater=freshwater,
                                         surface_forcing=surface_forcing,
                                         sponge=sponge,
-                                        grid=grid, vertex_mask=vertex_mask)
+                                        grid=grid, vertex_mask=vertex_mask,
+                                        t_seconds=t_seconds)
         # Feature-gated on a STATIC config bool (CLAUDE.md feature-gating
         # exception): a Python ``if`` selects the branch at trace time, so
         # the freeze-floor clamp is only traced when enabled — no jnp.where
@@ -4335,7 +4372,8 @@ class LatLonCGridOceanModel:
 
     def _ab2_step(self, state: LatLonCGridOceanState, dt: float,
                   freshwater=None, surface_forcing=None, sponge=None,
-                  *, grid=None, vertex_mask=None) -> LatLonCGridOceanState:
+                  *, grid=None, vertex_mask=None,
+                  t_seconds=None) -> LatLonCGridOceanState:
         """Adams-Bashforth-2 outer integrator (Veros's faithful scheme).
 
         Veros AB2-extrapolates only the EXPLICIT tendency and applies implicit
@@ -4397,7 +4435,8 @@ class LatLonCGridOceanModel:
                      diss_incr, tracer_source) = self._step_impl(
             state, dt, freshwater=freshwater,
             surface_forcing=surface_forcing, sponge=sponge,
-            _apply_implicit_vmix=False, grid=_grid, vertex_mask=vertex_mask)
+            _apply_implicit_vmix=False, grid=_grid, vertex_mask=vertex_mask,
+            t_seconds=t_seconds)
         _tke_prog = self._tke_prognostic_active()
         _tke_old = (state.tke.data if (_tke_prog and state.tke is not None)
                     else None)
@@ -4784,6 +4823,8 @@ class LatLonCGridOceanModel:
         freshwater=None,
         surface_forcing=None,
         sponge=None,
+        *,
+        t_seconds=None,
     ) -> LatLonCGridOceanState:
         """Advance one timestep with host-side runtime validation."""
         if not self._cfl_checked:
@@ -4791,7 +4832,7 @@ class LatLonCGridOceanModel:
             self._cfl_checked = True
         state_new = self.step(state, dt, freshwater=freshwater,
                               surface_forcing=surface_forcing,
-                              sponge=sponge)
+                              sponge=sponge, t_seconds=t_seconds)
         if self.config.runtime_checks.enable_runtime_checks:
             self._assert_runtime_invariants(state_new)
         return state_new
@@ -4890,6 +4931,7 @@ class LatLonCGridOceanModel:
         duration: float,
         dt: float,
         save_every: int = 1,
+        t0_seconds: float = 0.0,
     ) -> tuple[LatLonCGridOceanState, list[LatLonCGridOceanState]]:
         """Integrate forward for a given duration.
 
@@ -4923,8 +4965,18 @@ class LatLonCGridOceanModel:
 
         trajectory = [state]
         step_fn = self.step_checked if self.config.runtime_checks.enable_runtime_checks else self.step
+        # Thread the traced elapsed model time ONLY when the equilibrium tide is
+        # on; otherwise call step_fn exactly as before (bit-identical). t is a
+        # device array (NOT a Python float) so the jitted step is compiled once,
+        # not retraced per step. t=0 <-> the constituents' reference epoch.
+        _tf = getattr(self.config, "tidal_forcing", None)
+        _tide_on = _tf is not None and _tf.enabled
         for i in range(n_steps):
-            state = step_fn(state, dt)
+            if _tide_on:
+                state = step_fn(state, dt,
+                                t_seconds=jnp.asarray(t0_seconds + i * dt))
+            else:
+                state = step_fn(state, dt)
             if (i + 1) % save_every == 0:
                 trajectory.append(state)
 
@@ -5131,6 +5183,7 @@ class LatLonCGridOceanModel:
         state: LatLonCGridOceanState,
         n_steps: int,
         dt: float,
+        t0_seconds: float = 0.0,
     ) -> tuple[LatLonCGridOceanState, LatLonCGridOceanState]:
         """Integrate using jax.lax.scan (differentiable).
 
@@ -5155,7 +5208,29 @@ class LatLonCGridOceanModel:
         than the Euler fallback of 1.0.  At typical CFL values
         (≤ 0.3) this is stable.
         """
-        state = self.seed_scan_carry(state, dt)
+        _tf = getattr(self.config, "tidal_forcing", None)
+        _tide_on = _tf is not None and _tf.enabled
+        # seed_scan_carry probes the step via jax.eval_shape — with the tide
+        # on it must probe the SAME (t-threaded) signature, both so the shape
+        # discovery follows the tide-on trace and so the step()'s eager
+        # enabled-but-no-time guard does not trip inside the probe.
+        state = (self.seed_scan_carry(state, dt,
+                                      t_seconds=jnp.asarray(t0_seconds))
+                 if _tide_on else self.seed_scan_carry(state, dt))
+
+        if _tide_on:
+            # Feed the traced per-step elapsed model time through xs (NOT a scan
+            # carry change) so the equilibrium tide advances each step; grads
+            # flow back to t and the config amplitudes. t=0 <-> the constituents'
+            # reference epoch. Tide-off keeps xs=None => bit-identical.
+            times = t0_seconds + dt * jnp.arange(n_steps)
+
+            def scan_fn(state, t):
+                new_state = self.step(state, dt, t_seconds=t)
+                return new_state, new_state
+
+            final_state, trajectory = jax.lax.scan(scan_fn, state, xs=times)
+            return final_state, trajectory
 
         def scan_fn(state, _):
             new_state = self.step(state, dt)

@@ -33,6 +33,32 @@ from __future__ import annotations
 import numpy as np
 import jax.numpy as jnp
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "SAM/gSAM RCEMIP mid-latitude-summer (MLS) standard-atmosphere ozone: "
+        "bundled O3 VMR profile interpolated (log-O3 vs log-p) to the model "
+        "levels as the RRTMGP ozone absorber."
+    ),
+    "inputs": {"p_full": "Pa"},
+    "outputs": {"o3_vmr": "mol/mol (ozone volume mixing ratio)"},
+    "sign_convention": (
+        "o3_vmr>0; a positive mole fraction peaking in the lower stratosphere; "
+        "interpolation clamps to the tabulated endpoints outside "
+        "[0.0097, 1054] hPa. Diagnoses an absorber field only (no budget)."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "AFGL mid-latitude-summer standard atmosphere (Anderson et al. 1986); "
+        "SAM/gSAM RUNDATA/rrtmg_lw.nc AbsorberAmountMLS (O3)."
+    ),
+    "idealized_test": (
+        "tests/unit/test_mls_ozone.py: interpolant reproduces the MLS table at "
+        "its nodes; log-log interp is AD-finite (log of clamped-positive p)."
+    ),
+}
+
 # MLS standard-atmosphere pressure [hPa] and O3 volume mixing ratio [mol/mol],
 # surface -> top, read from gSAM RUNDATA/rrtmg_lw.nc (AbsorberAmountMLS, O3).
 _MLS_P_HPA = (

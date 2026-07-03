@@ -3767,8 +3767,9 @@ def main() -> int:
     # GLOBAL state UNCHANGED.  n_lat is already SPMD-divisible (build_tripole
     # south-padded it; the latlon branch errored on a non-divisible --latlon-res).
     # ------------------------------------------------------------------
-    _ocean_step = (lambda st, sf, fw:
-                   model.step(st, dt, surface_forcing=sf, freshwater=fw))
+    _ocean_step = (lambda st, sf, fw, t_sec=None:
+                   model.step(st, dt, surface_forcing=sf, freshwater=fw,
+                              t_seconds=t_sec))
     if args.n_gpus > 1:
         if app_grid_type not in ("tripole", "latlon"):
             raise SystemExit(
@@ -3825,8 +3826,16 @@ def main() -> int:
         # per band; an unprimed cache raises in _build_band_vertex_masks).
         model.prime_step_caches(state)
         _spmd_mesh = create_latlon_mesh(n_devices=args.n_gpus).mesh
+        _tf_spmd = getattr(model.config, "tidal_forcing", None)
+        if _tf_spmd is not None and _tf_spmd.enabled:
+            raise SystemExit(
+                "--n-gpus > 1 with tidal_forcing.enabled=True is unsupported: "
+                "the lat-band sharded step does not thread t_seconds, so the "
+                "equilibrium tide would be SILENTLY inert. Run the tide "
+                "single-device, or disable tidal forcing for the SPMD run.")
         _spmd_step = make_sharded_ocean_step_global(model, _spmd_mesh)
-        _ocean_step = (lambda st, sf, fw:
+        # t_sec is always None here (tide-enabled fail-fasts above).
+        _ocean_step = (lambda st, sf, fw, t_sec=None:
                        _spmd_step(st, dt, surface_forcing=sf, freshwater=fw))
         print(f"[setup] multi-GPU lat-band SPMD: {args.n_gpus} devices, "
               f"n_lat={n_lat_final} ({n_lat_final // args.n_gpus} rows/band); "
@@ -3849,13 +3858,22 @@ def main() -> int:
             "block path fuses single-device on-device steps (it does not use the "
             "lat-band sharded step). Pick one — multi-GPU SPMD (the host Python "
             "loop, --scan-block 0) OR single-device scan fusion.")
+    # Equilibrium tide disqualifies the scan-block path: its body steps via
+    # model._step_impl(...) with no t_seconds (bypassing step()'s eager
+    # enabled-but-no-time guard), so an enabled tide would be SILENTLY inert
+    # inside the scan.  Fall back to the host loop, which threads t.
+    _tf_scan = getattr(getattr(model, "config", None), "tidal_forcing", None)
+    _tide_enabled = _tf_scan is not None and _tf_scan.enabled
     use_scan = (int(args.scan_block) > 0 and app_grid_type == "tripole"
                 and nudge_tau_s == 0.0 and drag_tau_s == 0.0
                 and not args.sss_restore
+                and not _tide_enabled
                 and _tti != "ab2")
     if int(args.scan_block) > 0 and not use_scan:
         why = ("AB2 tracer time integrator (None->Field carry breaks "
                "lax.scan)" if _tti == "ab2"
+               else "tidal_forcing enabled (the scan body does not thread the "
+                    "model time the tide needs)" if _tide_enabled
                else "grid!=tripole or WOA-nudging / spin-up-drag / SSS-restoring "
                     "enabled (those need per-step host updates)")
         print(f"[scan] --scan-block ignored: {why}.", flush=True)
@@ -3954,8 +3972,17 @@ def main() -> int:
                   f"({args.years:.0f}yr -> {yr_est*args.years:.1f} h)")
         return 0
 
+    # Equilibrium-tide wiring: when ocean.tidal_forcing.enabled the model's
+    # step() REQUIRES the elapsed model time (it fail-fasts otherwise — the
+    # tide would be silently inert).  Thread t = (step-1)*dt as a device
+    # scalar (compiled once, no per-step retrace); tide-off passes None and
+    # the call is byte-identical to before.
+    _tf_cfg = getattr(model.config, "tidal_forcing", None)
+    _tide_on = _tf_cfg is not None and _tf_cfg.enabled
+
     for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
+        _t_sec = jnp.asarray((step - 1) * dt) if _tide_on else None
         ramp = min(1.0, (step * dt) / ramp_s) if ramp_s > 0 else 1.0
         # Piecewise viscosity schedule (--visc-schedule): at each segment
         # boundary rebuild config+model ONCE (one JIT recompile per segment)
@@ -4093,7 +4120,8 @@ def main() -> int:
                     grid_type=app_grid_type, runoff_R=_R,
                     emp=args.emp_freshwater, ramp=ramp)
                 sf = sf._replace(freshwater=net_freshwater_flux(fw))
-            state = model.step(state, dt, surface_forcing=sf)
+            state = model.step(state, dt, surface_forcing=sf,
+                               t_seconds=_t_sec)
         else:
             fw = None
             # Build the freshwater struct if EITHER the atmospheric P-E/runoff is
@@ -4125,8 +4153,10 @@ def main() -> int:
             # _ocean_step = single-device model.step (default) OR the lat-band
             # SPMD global-in/global-out step (--n-gpus > 1); both apply the
             # in-core wind-stress / heat / freshwater forcing.  Returns a GLOBAL
-            # state, so the host post-step BCs below are unchanged.
-            state = _ocean_step(state, sf, fw)
+            # state, so the host post-step BCs below are unchanged.  t_seconds
+            # threads the equilibrium-tide model time (None when tide off; the
+            # SPMD path fail-fasts at setup if the tide is enabled).
+            state = _ocean_step(state, sf, fw, _t_sec)
         if sss_restore_cfg is not None:
             # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS restoring
             # under sea ice).  Feed the SAME prescribed siconc the albedo uses

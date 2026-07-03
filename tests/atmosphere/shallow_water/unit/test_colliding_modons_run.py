@@ -23,18 +23,45 @@ if not jax.config.read("jax_enable_x64"):
         allow_module_level=True,
     )
 
+from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    FV3EdgeShallowWaterModel,
+    iter1009_dual_target_config,
+)
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-    FV3EdgeShallowWaterModel, iter1009_dual_target_config)
+
 from tests.test_cases.colliding_modons import (
-    colliding_modons_cdgrid, _modon_winds_geo, _MODON_UMAX, _MODON_H0)
+    _MODON_H0,
+    _MODON_UMAX,
+    _modon_winds_geo,
+    colliding_modons_cdgrid,
+)
 
 
 def _u_east(lon, lat, radius):
     """Scalar eastward wind from the shared kernel (v_north is identically 0)."""
     u_east, _ = _modon_winds_geo(lon, lat, radius)
     return u_east
+
+
+@pytest.fixture
+def fp64_policy():
+    """Pin the legoESM precision policy to fp64 for mass-conservation pins.
+
+    ``JAX_ENABLE_X64`` alone does not change the model compute dtype — the
+    step casts through the ACTIVE PrecisionPolicy, and the anchored mass
+    fixer's per-step correction rounds to the state dtype, capping fp32
+    relative conservation at ~1e-7 (the 1e-10 pins here need fp64).
+    Restored after the test so no policy leaks across the session.
+    """
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
+    prev = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        yield
+    finally:
+        set_policy(prev)
 
 
 def test_modon_ic_fields():
@@ -110,53 +137,67 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# Lat-lon wiring (#521 follow-up): matrix catalog + non-rotating C-grid run
+# Lat-lon wiring (#521 follow-up): non-rotating C-grid run.  The catalog
+# gate (all four grids registered) lives in the NON-x64-gated
+# tests/unit/test_matrix_modon_catalog.py so default fp32 CI runs it
+# (codex 2026-07-03 Medium).
 # ---------------------------------------------------------------------------
 
-def _load_matrix_module():
-    """Load the matrix-runner script WITHOUT permanent sys.path pollution
-    (codex round-12 Low): spec-load under a private module name; nothing
-    is inserted into sys.path and the bare name never enters sys.modules."""
-    import importlib.util
-    import sys
-    from pathlib import Path
-    script = (Path(__file__).resolve().parents[4]
-              / "scripts" / "matrix" / "run_atmosphere_test_matrix.py")
-    name = "_modons_matrix_catalog"
-    spec = importlib.util.spec_from_file_location(name, script)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    try:
-        spec.loader.exec_module(mod)
-    finally:
-        sys.modules.pop(name, None)
-    return mod
+
+def test_latlon_coriolis_derives_from_grid_omega(fp64_policy):
+    """``absolute_vorticity_coriolis`` must take the rotation rate from
+    the GRID: an ``omega=0`` grid yields a Coriolis-free cross term.
+
+    Regression pin for the codex 2026-07-03 HIGH: the planetary
+    vorticity was hardcoded ``2*constants.Omega``, so the lat-lon
+    colliding-modons path silently kept rotating despite the omega=0
+    grid.  For uniform zonal flow (v = 0) the v-acceleration is
+    ``-eta * u``: with omega=0 only the metric relative vorticity
+    ``u*tan(lat)/R`` remains (~1.5% of f at 45 deg), while the rotating
+    grid is f-dominated — a >20x separation the hardcoded version
+    collapses to equality.
+    """
+    from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+        absolute_vorticity_coriolis,
+    )
+    from legoesm.grids.latlon import create_latlon_grid
+
+    n_lat, n_lon = 24, 48
+    g0 = create_latlon_grid(n_lat, n_lon, omega=0.0)
+    g_earth = create_latlon_grid(n_lat, n_lon)
+    assert float(jnp.max(jnp.abs(g0.f))) == 0.0
+
+    u = jnp.full((n_lat, n_lon + 1), 10.0)
+    v = jnp.zeros((n_lat + 1, n_lon))
+    _, cv0 = absolute_vorticity_coriolis(u, v, g0)
+    _, cv_e = absolute_vorticity_coriolis(u, v, g_earth)
+
+    m0 = float(jnp.max(jnp.abs(cv0)))
+    m_e = float(jnp.max(jnp.abs(cv_e)))
+    assert m_e > 0.0
+    # Hardcoded-Omega regression collapses these to identical fields.
+    assert not np.allclose(np.asarray(cv0), np.asarray(cv_e))
+    # omega=0 leaves only the metric relative-vorticity contribution
+    # (max ~ u*tan(lat_top)/R at the 86-deg top row = ~8% of the
+    # f-dominated rotating value; the regression gives ratio 1.0).
+    assert m0 < 0.15 * m_e
 
 
-def test_matrix_registers_cube_and_latlon():
-    """Catalog-backed (name, grid) gate: ``--test colliding_modons`` must
-    select a REAL case on cube AND latlon (never a silent no-op)."""
-    M = _load_matrix_module()
-    mat = M._build_test_matrix()
-    cm = [t for t in mat if t.case == "colliding_modons"]
-    grids = sorted(t.grid_type for t in cm)
-    assert grids == ["cubed_sphere", "latlon"], grids
-    for t in cm:
-        assert t.run_kwargs.get("test_num") == 8, t.run_kwargs
-    assert M.RUNNERS.get("colliding_modons") is M.run_shallow_water
-
-
-def test_latlon_nonrotating_run_stable_and_conserves_mass():
+def test_latlon_nonrotating_run_stable_and_conserves_mass(fp64_policy):
     """Short prognostic latlon C-grid modons run: non-rotating grid (f=0),
     finite fields, area-weighted mass conserved, and the flow stays
     equator-centred (winds do not blow up)."""
-    from legoesm.grids.latlon import create_latlon_grid
     from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
-        CGridLatLonShallowWaterModel, CGridLatLonShallowWaterConfig,
+        CGridLatLonShallowWaterConfig,
+        CGridLatLonShallowWaterModel,
         CGridLatLonShallowWaterState,
     )
+    from legoesm.grids.latlon import create_latlon_grid
+
     from tests.test_cases.colliding_modons import (
-        colliding_modons_latlon, _modon_winds_geo, _MODON_UMAX,
+        _MODON_UMAX,
+        _modon_winds_geo,
+        colliding_modons_latlon,
     )
 
     grid = create_latlon_grid(24, 48, omega=0.0)
@@ -174,17 +215,123 @@ def test_latlon_nonrotating_run_stable_and_conserves_mass():
         grid, CGridLatLonShallowWaterConfig(A_h=1e5,
                                             anchor_mass_to_initial=True),
         dt=120.0)
-    mass0 = float(jnp.sum(state.h * grid.area))
+    # f64 accumulation for the mass pins (same rationale as the MPAS test:
+    # policy/cache-dependent f32 geometry makes an f32 sum read as drift).
+    def _mass(st):
+        return float(jnp.sum(st.h.astype(jnp.float64)
+                             * grid.area.astype(jnp.float64)))
+
+    mass0 = _mass(state)
     s = state
     for _ in range(30):
         s = model.step(s, 120.0)
     assert bool(jnp.all(jnp.isfinite(s.h)))
     assert bool(jnp.all(jnp.isfinite(s.u)))
-    mass1 = float(jnp.sum(s.h * grid.area))
-    # The anchored fixer holds drift to truncation level (~1.6e-6 relative
-    # measured at 24x48 / 30 steps / dt=120), not machine zero — the
-    # matrix's own SW conservation criterion is 1e-3.  1e-5 still catches
-    # a real leak or a disabled fixer.
-    assert abs(mass1 - mass0) / mass0 < 1e-5
+    mass1 = _mass(s)
+    assert abs(mass1 - mass0) / mass0 < 1e-10
     # Winds bounded: no instability spike beyond ~2x the initial jet.
     assert float(jnp.max(jnp.abs(s.u))) < 2.0 * _MODON_UMAX
+
+
+# ---------------------------------------------------------------------------
+# MPAS + spectral wiring (#521 all-grid standard case): non-rotating runs
+# ---------------------------------------------------------------------------
+
+def test_mpas_nonrotating_run_stable_and_conserves_mass(fp64_policy):
+    """Short prognostic MPAS modons run on an omega=0 Voronoi mesh:
+    Coriolis identically zero, finite fields, mass conserved, winds
+    bounded."""
+    from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+        MPASShallowWaterConfig,
+        MPASShallowWaterModel,
+    )
+    from legoesm.grids.voronoi import create_voronoi_mesh
+
+    from tests.test_cases.colliding_modons import (
+        _MODON_UMAX,
+        colliding_modons_mpas,
+    )
+
+    mesh = create_voronoi_mesh(3, omega=0.0)   # 642 cells: fast CI size
+    assert float(jnp.max(jnp.abs(mesh.fVertex))) == 0.0
+    assert float(jnp.max(jnp.abs(mesh.fEdge))) == 0.0
+
+    state = colliding_modons_mpas(mesh)
+    assert float(jnp.max(jnp.abs(state.u.data))) <= _MODON_UMAX + 1e-6
+
+    model = MPASShallowWaterModel(
+        mesh, MPASShallowWaterConfig(anchor_mass_to_initial=True))
+
+    # Mass diagnostics MUST accumulate in f64: the mesh cache can serve
+    # f32 geometry (built under the default policy), and an f32
+    # sum(h*area) carries ~3e-8 relative rounding — which then reads as
+    # fake "drift" against the f64 post-step sum.  The model itself
+    # conserves to ~1e-16 (fixer accumulates in the f64 budget dtype).
+    def _mass(st):
+        return float(jnp.sum(st.h.data.astype(jnp.float64)
+                             * mesh.areaCell.astype(jnp.float64)))
+
+    mass0 = _mass(state)
+    s = state
+    step = jax.jit(lambda st: model.step(st, 300.0))
+    for _ in range(30):
+        s = step(s)
+    jax.block_until_ready(s.h.data)
+
+    assert bool(jnp.all(jnp.isfinite(s.h.data)))
+    assert bool(jnp.all(jnp.isfinite(s.u.data)))
+    mass1 = _mass(s)
+    assert abs(mass1 - mass0) / mass0 < 1e-10
+    assert float(jnp.max(jnp.abs(s.u.data))) < 2.0 * _MODON_UMAX
+    assert float(jnp.min(s.h.data)) > 0.0
+
+
+def test_spectral_nonrotating_run_stable_and_conserves_mass(fp64_policy):
+    """Short prognostic spectral modons run on an omega=0 Gaussian grid:
+    f = 0, finite spectral state, mean geopotential (mass) conserved,
+    physical winds bounded."""
+    from legoesm.atmosphere.dynamics.spectral_sw import (
+        SpectralShallowWaterModel,
+        SpectralSWConfig,
+    )
+    from legoesm.grids.gaussian import (
+        create_gaussian_grid,
+        sh_synthesis,
+        uv_from_vordiv,
+    )
+
+    from legoesm import constants
+    from tests.test_cases.colliding_modons import (
+        _MODON_H0,
+        _MODON_UMAX,
+        colliding_modons_spectral,
+    )
+
+    grid = create_gaussian_grid(21, omega=0.0)
+    assert float(jnp.max(jnp.abs(grid.f))) == 0.0
+
+    model = SpectralShallowWaterModel(
+        grid, SpectralSWConfig(spectral_filter_order=8))
+    state = model.filter_initial_state(colliding_modons_spectral(grid))
+
+    def _mean_h(st):
+        phi = sh_synthesis(grid, st.phi_hat.data)
+        w = grid.grid_area / jnp.sum(grid.grid_area)
+        return float(jnp.sum(phi * w) / constants.g)
+
+    h_bar0 = _mean_h(state)
+    assert h_bar0 == pytest.approx(_MODON_H0, rel=1e-6)
+
+    s = state
+    step = jax.jit(lambda st: model.step(st, 300.0))
+    for _ in range(30):
+        s = step(s)
+    jax.block_until_ready(s.phi_hat.data)
+
+    assert bool(jnp.all(jnp.isfinite(s.phi_hat.data)))
+    assert bool(jnp.all(jnp.isfinite(s.vor_hat.data)))
+    assert abs(_mean_h(s) / h_bar0 - 1.0) < 1e-10
+    u_cos, v_cos = uv_from_vordiv(grid, s.vor_hat.data, s.div_hat.data)
+    cos2d = grid.cos_lat[:, None]
+    ws = jnp.sqrt((u_cos / cos2d) ** 2 + (v_cos / cos2d) ** 2)
+    assert float(jnp.max(ws)) < 2.0 * _MODON_UMAX

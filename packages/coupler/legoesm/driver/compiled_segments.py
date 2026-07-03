@@ -547,6 +547,7 @@ class SegmentForcing(NamedTuple):
     # is created at import and the pytree carries no spurious empty leaf.
     sfc_albedo_override: jax.Array | None = None
     sfc_T_override: jax.Array | None = None
+    sfc_emissivity_override: jax.Array | None = None
     # Coupler-provided SHARED surface turbulent heat fluxes — the tile-blended
     # sensible / latent heat flux [W/m2, positive UP = surface→atmosphere] the
     # coupler computed for this segment (its bulk scheme, q_sfc = 0.98·q_sat
@@ -604,6 +605,7 @@ def pack_forcing(
     ghg_vmr=None,
     sfc_albedo_override=None,
     sfc_T_override=None,
+    sfc_emissivity_override=None,
     sfc_shflx_override=None,
     sfc_lhflx_override=None,
 ) -> SegmentForcing:
@@ -614,6 +616,13 @@ def pack_forcing(
     ghg_vmr : dict, jax.Array, or None
         GHG volume mixing ratios.  Accepts a dict (auto-converted via
         :func:`ghg_dict_to_array`), a pre-packed array, or None.
+    sfc_albedo_override, sfc_T_override, sfc_emissivity_override : jax.Array or None
+        Coupler-provided tile-blended surface albedo / skin temperature /
+        emissivity for this segment (grid-shaped, like sst/sic).  ``None``
+        (default) leaves the radiation's static internal blend untouched —
+        byte-identical for AMIP / standalone runs.  The emissivity override
+        carries the canopy's LAI-dependent eps_eff so the atmospheric LW
+        boundary uses the same emissivity the land tile formed its LW_out with.
     sfc_albedo_override, sfc_T_override : jax.Array or None
         Coupler-provided tile-blended surface albedo / skin temperature for
         this segment (grid-shaped, like sst/sic).  ``None`` (default) leaves
@@ -660,6 +669,10 @@ def pack_forcing(
         sfc_T_override=(
             None if sfc_T_override is None else jnp.asarray(sfc_T_override)
         ),
+        sfc_emissivity_override=(
+            None if sfc_emissivity_override is None
+            else jnp.asarray(sfc_emissivity_override)
+        ),
         sfc_shflx_override=(
             None if sfc_shflx_override is None
             else jnp.asarray(sfc_shflx_override)
@@ -679,7 +692,7 @@ def pack_forcing(
 # vectors (ghg_vmr) stay uncommitted -> the segment JIT pins them replicated.
 _GRID_SHAPED_FORCING_FIELDS = (
     "sst", "sic", "solar_weights", "o3_vmr", "aerosol_od", "aerosol_lw_od",
-    "sfc_albedo_override", "sfc_T_override",
+    "sfc_albedo_override", "sfc_T_override", "sfc_emissivity_override",
     "sfc_shflx_override", "sfc_lhflx_override",
 )
 
@@ -687,7 +700,7 @@ _GRID_SHAPED_FORCING_FIELDS = (
 def shard_forcing(forcing: SegmentForcing, device_config) -> SegmentForcing:
     """Commit the grid-shaped ``SegmentForcing`` leaves to the SAME device
     layout as the sharded state (SPMD sharding step 3 of the production
-    cs_spmd design — ginsburg plan addendum 6).
+    cs_spmd design).
 
     ``run_segment``'s sharded JIT wrapper honours a committed
     ``NamedSharding`` on the build-time mesh per leaf and pins anything
@@ -1113,6 +1126,7 @@ def build_segment_fn(
                     aerosol_lw_od=forcing.aerosol_lw_od,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
+                    sfc_emissivity_override=forcing.sfc_emissivity_override,
                     sfc_shflx_override=forcing.sfc_shflx_override,
                     sfc_lhflx_override=forcing.sfc_lhflx_override,
                     T_land=_T_land_in, land_ml=carry.land_ml,
@@ -1257,6 +1271,7 @@ def build_segment_fn(
                     aerosol_lw_od=forcing.aerosol_lw_od,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
+                    sfc_emissivity_override=forcing.sfc_emissivity_override,
                     sfc_shflx_override=forcing.sfc_shflx_override,
                     sfc_lhflx_override=forcing.sfc_lhflx_override,
                     T_land=carry.T_land, land_ml=carry.land_ml,

@@ -37,6 +37,41 @@ from legoesm.grids.gaussian import GaussianGrid, sh_analysis_3d
 from legoesm.atmosphere.physics.neural_physics import NeuralPhysics, pack_column_features
 from legoesm.atmosphere.physics.radiation.solar import cos_zenith_angle
 from legoesm.atmosphere.physics._shared import zero_like_tracers
+
+# Machine-checked scheme contract (see tests/test_physics_contracts.py). Learned
+# per-column mapping -> no hard conservation guarantee.
+__physics_contract__ = {
+    "summary": (
+        "Learned per-column MLP physics (Rasp et al. 2018) for the spectral "
+        "primitive-equation dycore: predicts a temperature tendency from the "
+        "local column state, with no horizontal coupling."
+    ),
+    "inputs": {
+        "T": "K", "u": "m/s", "v": "m/s", "q_v": "kg/kg",
+        "p_s": "Pa", "solar": "W/m^2",
+    },
+    "outputs": {
+        "dT_dt": (
+            "K/s (spectral T_hat tendency; vor/div/lnps and tracer "
+            "tendencies identically 0)"
+        ),
+    },
+    "sign_convention": (
+        "Learned mapping: no enforced sign or conservation. Only a "
+        "temperature tendency is produced; momentum (vor/div), surface-"
+        "pressure (lnps) and tracer tendencies are set to zero, so those "
+        "reservoirs are untouched rather than conservatively redistributed."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": "Rasp, Pritchard & Gentine (2018), PNAS 115(39), 9684-9689",
+    "idealized_test": (
+        "tests/unit/test_learned_column.py; untrained network "
+        "(residual_scale=0.01) -> near-zero dT/dt; vor/div/lnps tendencies "
+        "exactly zero; per-column vmap without horizontal coupling"
+    ),
+}
+
 # Default neural-column architecture width + residual output scale (structural).
 _DEFAULT_HIDDEN_DIM = 256
 _DEFAULT_RESIDUAL_SCALE = 0.01

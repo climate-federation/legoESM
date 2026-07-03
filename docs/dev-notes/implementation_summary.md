@@ -276,7 +276,7 @@ legoESM is a fully differentiable Earth System Model implemented in JAX, compris
 | Atmosphere dynamics | ~25 | ~400 | All 24 dynamical cores, FV integration, spectral |
 | Atmosphere physics | ~10 | ~250 | Radiation (diurnal, ozone, clouds), convection, microphysics, turbulence (PBL), GWD |
 | Ocean | ~8 | ~150 | Dynamics, biogeochem, MPI conservation, FC-Gram, FV |
-| Land surface | ~5 | ~180 | Slab, multilayer, carbon cycle, stomata, stability |
+| Land surface | ~10 | ~220 | Slab + multilayer soil × SimpleSEB + TwoLeafCanopy surface schemes (4 combos), carbon cycle, canopy biophysics, Newton A-gs coupling, stability |
 | Sea ice / albedo | ~3 | ~80 | EVP dynamics, multi-category, surface albedo |
 | Coupler / forcing | ~5 | ~100 | Bulk flux, tile coupling, AMIP config, external forcing |
 | Parallelism | ~5 | ~80 | Device mesh, Voronoi partition/halo (34 tests), ensemble (32 tests) |

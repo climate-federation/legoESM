@@ -330,6 +330,12 @@ def build_parser():
                                  "mynn25", "clubb", "edmf", "none"],
                         help="Boundary-layer turbulence scheme "
                              "(default: holtslag_boville)")
+    # NOTE: "most" is deliberately NOT offered here although the coupler
+    # ocean tile accepts it: the atmosphere surface layer's
+    # compute_surface_fluxes treats "most" as constant (fixed-roughness LAND
+    # scheme), so offering it would silently split the interface (ocean tile
+    # MOST vs atmosphere constant) — the exact inconsistency validate() below
+    # rejects for turbulence="none".
     parser.add_argument("--surface-bulk-scheme", default="constant",
                         choices=["constant", "most", "coare3", "large_yeager"],
                         help="AIR-SEA surface bulk-flux algorithm for the "
@@ -371,6 +377,21 @@ def build_parser():
                              "(fixes the persistent tropical hfls<<Earth / R_TOA "
                              "imbalance). Applied to the atmosphere surface layer "
                              "AND the slab ocean heat budget (kept consistent).")
+    parser.add_argument("--surface-stability-scheme", default="dyer1974",
+                        choices=["dyer1974", "beljaars_holtslag1991",
+                                 "grachev2007_sheba", "gryanik2020"],
+                        help="Stable-regime (zeta>0) Monin-Obukhov similarity "
+                             "functions for the MOST-family surface bulk "
+                             "schemes (coare3/large_yeager). Applied "
+                             "CONSISTENTLY to BOTH the atmosphere surface "
+                             "layer (SurfaceLayerConfig) and the coupler "
+                             "ocean tile (CouplerConfig) so the interface "
+                             "cannot split. 'dyer1974' (default) = the "
+                             "historical linear -5*zeta, byte-identical; "
+                             "'grachev2007_sheba'/'gryanik2020' = SHEBA-based "
+                             "Arctic/strong-stable forms; "
+                             "'beljaars_holtslag1991' avoids the stable flux "
+                             "collapse. Unstable branch stays Businger-Dyer.")
     parser.add_argument("--gravity-wave-drag", default="hines",
                         choices=["rayleigh", "lindzen", "mcfarlane", "hines",
                                  "prognostic_spectral", "e3sm_cam", "ml_emulator",
@@ -806,6 +827,7 @@ def main():
         turbulence=args.turbulence,
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        surface_stability_scheme=args.surface_stability_scheme,
         gravity_wave_drag=args.gravity_wave_drag,
         cloud_scheme=args.clouds,
         convective_cloud=args.convective_cloud,
@@ -1001,7 +1023,8 @@ def main():
     # user opts out of "constant" so the default run stays byte-identical (the
     # driver builds the default CouplerConfig when coupler_config is None).
     coupler_config = None
-    if args.surface_bulk_scheme != "constant":
+    if (args.surface_bulk_scheme != "constant"
+            or args.surface_stability_scheme != "dyer1974"):
         from legoesm.coupler.config import CouplerConfig
         # Thread the SAME convective-gustiness BL depth onto the coupler ocean
         # tile that the atmosphere surface layer uses (--gustiness-zi), so the
@@ -1012,10 +1035,12 @@ def main():
         coupler_config = CouplerConfig(
             bulk_scheme=args.surface_bulk_scheme,
             gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
+            stability_scheme=args.surface_stability_scheme,
         )
-        logger.info("  Surface bulk-flux scheme: %s (atmosphere + coupler "
-                    "ocean tile); convective gustiness z_i=%.0f m",
-                    args.surface_bulk_scheme,
+        logger.info("  Surface bulk-flux scheme: %s (stability: %s; "
+                    "atmosphere + coupler ocean tile); convective "
+                    "gustiness z_i=%.0f m",
+                    args.surface_bulk_scheme, args.surface_stability_scheme,
                     (args.surface_gustiness_zi or 0.0))
 
     # Apply the --params calibration layer (issue #691) across EVERY component

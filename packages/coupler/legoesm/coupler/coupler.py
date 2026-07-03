@@ -226,13 +226,17 @@ def ocean_tile_response(
     )
     rho = forcing.rho_lowest
 
-    valid_schemes = ("constant", "coare3", "large_yeager")
+    valid_schemes = ("constant", "most", "coare3", "large_yeager")
     if config.bulk_scheme not in valid_schemes:
         raise ValueError(
             f"Unknown coupler bulk_scheme {config.bulk_scheme!r}; "
             f"expected one of {valid_schemes}."
         )
-    if config.bulk_scheme in ("coare3", "large_yeager"):
+    # ``most`` (iterative MOST at the fixed ``ocean_z0`` roughness), ``coare3``
+    # and ``large_yeager`` all take the MOST solver; only ``constant`` uses the
+    # fixed-coefficient path below. Adding ``most`` restores parity with the
+    # sea-ice / land / lake tiles, whose dispatchers already accept it.
+    if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         # Use wind relative to ocean surface current
         u_rel = forcing.u_lowest - ocean_u
         v_rel = forcing.v_lowest - ocean_v
@@ -252,6 +256,7 @@ def ocean_tile_response(
             # layer (which already carries gustiness_w_zi) and lets a calm warm
             # ocean evaporate realistically.  0.0 => off => byte-identical.
             gustiness_w_zi=config.gustiness_w_zi,
+            stability_scheme=config.stability_scheme,
         )
     else:
         # Constant neutral coefficients (original behavior).  Sub-grid

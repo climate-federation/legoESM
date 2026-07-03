@@ -15,15 +15,12 @@ import os
 
 os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=6")
 
-import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
-
 from legoesm.driver.compiled_segments import (
+    _GRID_SHAPED_FORCING_FIELDS,
     pack_forcing,
     shard_forcing,
-    _GRID_SHAPED_FORCING_FIELDS,
 )
 from legoesm.parallel.mesh import create_device_mesh
 

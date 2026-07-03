@@ -118,3 +118,64 @@ def test_setup_devices_spmd_single_process_mesh():
     assert cfg.is_distributed is False
     assert cfg.n_devices == len(jax.devices())
     assert cfg.mesh is not None or cfg.n_devices == 1
+
+
+# --- _spmd_barrier_on_root_error (root-write failure rendezvous) ----------
+# Hermetic single-process tests of the lockstep-error helper (codex LOW:
+# the real 2-process failure injection needs an mpirun lane; these pin the
+# helper's logic — native re-raise off-SPMD, collective + peer-flag raise
+# on-SPMD — without a launcher).
+
+def _barrier_stub(spmd: bool):
+    from legoesm.driver.model_driver import ModelDriver
+
+    class _Stub:
+        def _is_spmd_multiprocess(self):
+            return spmd
+        _spmd_barrier_on_root_error = ModelDriver._spmd_barrier_on_root_error
+
+    return _Stub()
+
+
+def test_spmd_barrier_off_spmd_is_native_raise():
+    s = _barrier_stub(spmd=False)
+    s._spmd_barrier_on_root_error(None)  # no-op
+    with pytest.raises(ValueError, match="boom"):
+        s._spmd_barrier_on_root_error(ValueError("boom"))
+
+
+def test_spmd_barrier_peer_failure_raises_lockstep(monkeypatch):
+    """A peer's error flag (allgather'd) raises HERE, so this process never
+    sails into the next collective while the peer is dead."""
+    import jax.numpy as jnp
+    from jax.experimental import multihost_utils
+
+    calls = []
+
+    def _fake_allgather(x):
+        calls.append(x)
+        return jnp.asarray([0.0, 1.0])  # some peer flagged failure
+
+    monkeypatch.setattr(multihost_utils, "process_allgather", _fake_allgather)
+    with pytest.raises(RuntimeError, match="lockstep"):
+        _barrier_stub(spmd=True)._spmd_barrier_on_root_error(None)
+    assert len(calls) == 1, "the collective must run on every process"
+
+
+def test_spmd_barrier_own_error_reraises_after_collective(monkeypatch):
+    """The failing process still DISPATCHES the collective (peers need the
+    flag), then re-raises its own error."""
+    import jax.numpy as jnp
+    from jax.experimental import multihost_utils
+
+    calls = []
+
+    def _fake_allgather(x):
+        calls.append(float(x))
+        return jnp.asarray([1.0, 0.0])
+
+    monkeypatch.setattr(multihost_utils, "process_allgather", _fake_allgather)
+    with pytest.raises(ValueError, match="root boom"):
+        _barrier_stub(spmd=True)._spmd_barrier_on_root_error(
+            ValueError("root boom"))
+    assert calls == [1.0], "own failure must be flagged to peers"

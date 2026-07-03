@@ -103,6 +103,7 @@ def barotropic_substeps_latlon_cgrid(
     F_slow_u=None,
     F_slow_v=None,
     add_barotropic_coriolis: bool = True,
+    t_seconds=None,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -178,6 +179,21 @@ def barotropic_substeps_latlon_cgrid(
         F_slow_v = jnp.zeros((eta.shape[0] + 1, eta.shape[1]), dtype=eta.dtype)
     else:
         F_slow_v = F_slow_v.astype(eta.dtype)
+
+    # --- Equilibrium-tide barotropic body force (OPT-IN; #tidal_forcing) -------
+    # Add a = +g*grad(eta_eq_eff) to the SLOW forcing so it (a) is applied at
+    # every substep as a constant-over-the-baroclinic-step body force (the tide
+    # is slowly varying vs the ~s barotropic subcycle), and (b) is MASKED by
+    # u_mask/v_mask together with F_slow inside the substep (lines below:
+    # ``(... + F_slow_u) * u_mask``) — so closed/land faces receive nothing.
+    # Feature-gated on the STATIC config bool (CLAUDE.md feature-gating exception)
+    # AND a supplied traced model time: disabled / no-time => bit-identical.
+    _tf_cfg = getattr(config, "tidal_forcing", None)
+    if _tf_cfg is not None and _tf_cfg.enabled and t_seconds is not None:
+        from legoesm.ocean.physics.tidal_forcing import tidal_acceleration
+        _a_tide_x, _a_tide_y = tidal_acceleration(grid, t_seconds, _tf_cfg, g=g)
+        F_slow_u = F_slow_u + _a_tide_x.astype(F_slow_u.dtype)
+        F_slow_v = F_slow_v + _a_tide_y.astype(F_slow_v.dtype)
 
     # Depth-averaged velocity.  Cast h_k to _dt because z_coord.sigma_w
     # may be float64 (jnp.linspace default under x64), which would

@@ -58,11 +58,11 @@ _JAX_DIST_COORDINATOR_PORT = 1234
 def _require_mpi4py():
     """Return ``mpi4py.MPI`` or raise a clear ImportError.
 
-    The lat-lon SPMD multi-process path needs ONLY MPI rank/hostname discovery
-    (to derive the ``jax.distributed`` coordinator) — its halo + reductions run
-    through pure-JAX ``ppermute``/``psum`` inside ``shard_map`` (see
-    :mod:`legoesm.parallel.latlon_spmd`), NOT mpi4jax.  So this helper requires
-    mpi4py only, unlike :func:`legoesm.parallel.reductions.require_mpi_stack`
+    The multi-controller SPMD multi-process path needs ONLY MPI rank/hostname
+    discovery (to derive the ``jax.distributed`` coordinator) — its halo +
+    reductions run through pure-JAX ``ppermute``/``psum`` inside ``shard_map``,
+    NOT mpi4jax.  So this helper requires mpi4py only, unlike
+    :func:`legoesm.parallel.reductions.require_mpi_stack`
     (which also requires mpi4jax for the cubed-sphere ``sendrecv`` halo).
     """
     import importlib.util
@@ -84,9 +84,9 @@ def initialize_jax_distributed_multiprocess(
     local_device_ids=None,
 ):
     """Initialize the ``jax.distributed`` runtime for a multi-PROCESS run, deriving
-    the coordinator from MPI rank/hostname — the mpi4jax-free bootstrap the lat-lon
-    SPMD ocean step (``make_sharded_ocean_step_global``) uses to span GPUs across
-    several nodes.
+    the coordinator from MPI rank/hostname — the mpi4jax-free bootstrap used by
+    the multi-controller SPMD paths (cs_spmd production driver, lat-lon SPMD
+    ocean step) to span GPUs across several nodes.
 
     This factors the SAME proven coordinator-discovery logic as the multi-node
     branch of :func:`initialize_distributed` (rank 0's hostname is the coordinator;
@@ -98,7 +98,7 @@ def initialize_jax_distributed_multiprocess(
       launcher reporting >1 task) returns ``(0, 1)`` WITHOUT importing mpi4py, so
       the default single-controller path never depends on the optional dep;
     * does NOT arm the MPI halo backend (the SPMD step arms its own per-call
-      ``activate_latlon_spmd_halo`` around the ``shard_map``);
+      halo backend around the ``shard_map``);
     * is a NO-OP for a single process — the default single-controller path stays
       byte-unchanged;
     * is idempotent — once ``jax.distributed`` is initialized (or the process is
@@ -133,6 +133,16 @@ def initialize_jax_distributed_multiprocess(
             break
     if _launcher_size is not None and _launcher_size <= 1:
         return 0, 1
+    if _launcher_size is None:
+        # NO launcher env at all (codex Medium): overwhelmingly a plain
+        # ``python script.py`` — honour the documented no-optional-dep
+        # single-process contract when mpi4py is absent.  When mpi4py IS
+        # importable, still probe COMM_WORLD (an exotic launcher that
+        # exports none of the four vars gets correct rank discovery
+        # rather than a silent N-way replicated-serial run).
+        import importlib.util
+        if importlib.util.find_spec("mpi4py") is None:
+            return 0, 1
 
     MPI = _require_mpi4py()
     comm = MPI.COMM_WORLD
@@ -316,8 +326,12 @@ def initialize_distributed(
         # Multi-node: initialize the JAX distributed runtime with MPI-derived
         # coordinator info (rank 0's hostname is the coordinator).  Delegate to
         # the shared bootstrap so the discovery + initialize + MPI-vs-JAX
-        # validation live in ONE place (the lat-lon SPMD path uses the same
-        # helper); single-node MPI is handled by the elif below.
+        # validation live in ONE place (the SPMD paths use the same helper);
+        # single-node MPI is handled by the elif below.  The helper is
+        # idempotent via ``jax.distributed.is_initialized()`` — it never
+        # probes ``jax.process_count()`` first (which would itself
+        # initialise the XLA backend and guarantee a subsequent
+        # ``initialize()`` raise — the #693 init-ordering bug class).
         initialize_jax_distributed_multiprocess()
     elif n_processes > 1:
         # Single-node MPI: skip jax.distributed.initialize().

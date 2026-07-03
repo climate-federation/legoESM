@@ -339,6 +339,17 @@ def parse_args(argv: list[str] | None = None):
                         "validated against each scheme's __param_spec__ bounds "
                         "and spliced into the nested *Config (here the vertical-"
                         "mixing configs, e.g. KPPConfig). (issue #691)")
+    p.add_argument("--surface-stability-scheme", default="dyer1974",
+                   choices=["dyer1974", "beljaars_holtslag1991",
+                            "grachev2007_sheba", "gryanik2020"],
+                   help="Stable-regime (zeta>0) MOST similarity functions for "
+                        "the air-sea (CouplerConfig, LY09 bulk) AND air-ice "
+                        "(SeaIceConfig) turbulent fluxes. 'dyer1974' (default) "
+                        "= historical -5*zeta, byte-identical; "
+                        "'grachev2007_sheba' = SHEBA Arctic stable functions "
+                        "(the sea-ice reference); 'gryanik2020' = modified "
+                        "SHEBA; 'beljaars_holtslag1991' avoids stable flux "
+                        "collapse. Unstable branch stays Businger-Dyer.")
     p.add_argument("--grid", type=str, default="all",
                    choices=GRID_TYPES + ["all"])
     p.add_argument("--resolution", type=str, default=None,
@@ -1462,6 +1473,7 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         z_ref=10.0,
         z_t_atm=2.0,
         z_q_atm=2.0,
+        stability_scheme=args.surface_stability_scheme,
     )
 
     state: dict = {
@@ -1551,7 +1563,10 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         from legoesm.ice.state import SeaIceState
         state["enable_sea_ice"] = True
         state["enable_freeze_cap"] = False
-        state["ice_config"] = SeaIceConfig()  # slab: dynamics="none", n_cat=1
+        # Slab ice: dynamics="none", n_cat=1.  stability_scheme only takes
+        # effect if bulk_scheme is switched to a MOST-family scheme.
+        state["ice_config"] = SeaIceConfig(
+            stability_scheme=args.surface_stability_scheme)
         # Ice state lives on the full ocean-surface 2-D grid: lat_2d/lon_2d are
         # broadcast factors ((n_lat,1) x (1,n_lon) for lat-lon; (nCells,) for
         # MPAS), so the surface shape is their broadcast — matching SST

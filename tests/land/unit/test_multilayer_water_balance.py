@@ -18,6 +18,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
@@ -27,8 +28,6 @@ from legoesm.land.soil_hydraulics import (
     SoilHydraulicsConfig, psi_from_theta, theta_from_psi, hydraulic_conductivity)
 from legoesm.land.richards import solve_richards
 from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
-
-import pytest
 
 _RHO = constants.rho_water
 
@@ -283,7 +282,15 @@ def test_richards_free_drainage_runs_under_fp32_policy():
 # ── surface soil resistance (the user-requested physics) ────────────────────
 def test_surface_resistance_throttles_dry_soil_evaporation():
     """A drying surface forms a crust: bare-soil evaporation with the resistance
-    (exp>0) is strictly less than with none (exp=0) from a dry top layer."""
+    (exp>0) is strictly less than with none (exp=0) from a dry top layer.
+
+    Was xfail'd: the extreme 60-step dry+hot scenario also tripped a SimpleSEB
+    surface-energy <-> soil-T thermal runaway (the ``S_top**exp`` resistance buries the
+    un-evaporated energy in ``G_surface``, which the EXPLICIT surface coupling amplified
+    to NaN).  The semi-implicit surface conductance ported from origin/main
+    (``compute_simple_seb_fluxes`` -> ``solve_soil_thermal(surface_conductance=...)``, a
+    Robin BC) damps that feedback, so the run now stays finite and the resistance-
+    throttling physics is directly testable — this doubles as the regression guard."""
     base = MultiLayerLandConfig(soil_grid=SoilGridConfig(n_layers=8, total_depth=3.0))
     f = _forcing(4, T_air=305.0, q_air=0.002, precip=0.0)
     dry = 0.10

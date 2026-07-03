@@ -43,6 +43,45 @@ import equinox as eqx
 from legoesm import constants
 from legoesm.core.physics_output import PhysicsOutput
 from legoesm.core.grid_adapters import ColumnAdapter
+
+# Machine-checked scheme contract (see tests/test_physics_contracts.py). Learned
+# column MLP -> no hard conservation guarantee.
+__physics_contract__ = {
+    "summary": (
+        "Column MLP (Equinox) emitting full physics tendencies plus surface / "
+        "TOA radiative fluxes per column; a pure-neural drop-in for the physics "
+        "pipeline or an alpha-weighted learned correction (hybrid mode)."
+    ),
+    "inputs": {
+        "T": "K", "u": "m/s", "v": "m/s", "q_v": "kg/kg",
+        "p_s": "Pa", "solar": "W/m^2",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_dt": "kg/kg/s",
+        "dq_r_dt": "kg/kg/s", "precip": "kg/m^2/s",
+        "sw_net_sfc": "W/m^2", "lw_net_sfc": "W/m^2",
+        "sw_up_toa": "W/m^2", "lw_up_toa": "W/m^2", "sw_down_toa": "W/m^2",
+    },
+    "sign_convention": (
+        "Learned mapping: no enforced sign or conservation. residual_scale "
+        "(default 0.01) keeps an untrained network near zero tendency; in "
+        "hybrid mode output = traditional + alpha * neural_correction, so "
+        "alpha=0 recovers the traditional step exactly."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Rasp, Pritchard & Gentine (2018), PNAS 115(39), 9684-9689 -- "
+        "column-MLP physics replacement (NeuralPhysics used by learned_column.py)"
+    ),
+    "idealized_test": (
+        "tests/unit/test_learned_column.py; untrained NeuralPhysics "
+        "(residual_scale=0.01) -> near-zero tendencies; hybrid alpha=0 "
+        "reproduces the traditional step_unified; per-column vmap, no "
+        "horizontal coupling"
+    ),
+}
+
 # Neural-physics feature-normalization scales + default architecture (structural).
 _NORM_T_K = 300.0
 _NORM_WIND_M_S = 30.0

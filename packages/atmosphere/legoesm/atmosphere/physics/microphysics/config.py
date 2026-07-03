@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from legoesm import constants
+from legoesm.atmosphere.physics.microphysics.arg_activation import ActivationConfig
 from legoesm.atmosphere.physics.microphysics.fast_sbm.config import FastSBMConfig
 from legoesm.atmosphere.physics.microphysics.sdm.config import SDMConfig
 
@@ -674,6 +675,13 @@ class MorrisonConfig(NamedTuple):
     # Gated on q_s≥0.1 g/kg AND q_c≥0.5 g/kg. Snow number sink NSCNG via MG0.
     do_snow_to_graupel: bool = True
     graupel_embryo_mass: float = 1.6e-10    # SAM MG0 graupel embryo mass [kg]
+    # Aerosol -> cloud-droplet-number ACTIVATION scheme selector (opt-in).
+    # Consumed only when ``nc_from_aerosol=True``: "proxy" (default) keeps the
+    # Andreae (2009) AOD->CCN diagnostic byte-identical; "arg" switches to the
+    # physically-based Abdul-Razzak & Ghan (2000) modal activation
+    # (``arg_activation.activated_nc_field``). Appended LAST (nested config,
+    # non-float) so positional construction and the param spec are unaffected.
+    activation: ActivationConfig = ActivationConfig()
 
 
 class ThompsonConfig(NamedTuple):
