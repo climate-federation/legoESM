@@ -721,6 +721,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "bucket ramp: beta=min(beta_soil, beta_canopy), closing "
                              "stomata in low light / high VPD. Requires "
                              "--land-soil-bucket.")
+    parser.add_argument("--land-gs-max", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_gs_max,
+                        dest="land_gs_max",
+                        help="Global maximum stomatal (canopy) conductance "
+                             "[mol/m2/s] (StomataConfig.gs_max). Land-ET "
+                             "calibration knob: gs = gs_max * f(PAR,T,VPD,soil), "
+                             "so lowering it raises canopy resistance and pulls "
+                             "land evapotranspiration below potential (issue "
+                             "#730). Only active with --land-stomatal-beta. "
+                             f"Default {_EXPERIMENT_DEFAULTS.land_gs_max} "
+                             "(byte-identical when unchanged).")
     parser.add_argument("--snow-albedo-feedback", action="store_true",
                         default=False, dest="snow_albedo_feedback",
                         help="Prognostic snow + snow-albedo feedback on the "
@@ -1054,6 +1065,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_infil_suction_boost=args.land_infil_suction_boost,
         land_infiltration_excess=args.land_infiltration_excess,
         land_stomatal_beta=args.land_stomatal_beta,
+        land_gs_max=args.land_gs_max,
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         dynamic_albedo=args.dynamic_albedo,

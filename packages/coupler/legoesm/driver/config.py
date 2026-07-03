@@ -486,6 +486,16 @@ class ExperimentConfig(NamedTuple):
     # stomata in low light / high VPD.  Requires land_soil_bucket (which
     # supplies beta_soil).  Off → soil-only bucket beta (byte-identical).
     land_stomatal_beta: bool = False
+    # Global maximum stomatal (canopy) conductance [mol/m2/s] for the Jarvis /
+    # Farquhar land stomata (StomataConfig.gs_max).  This is the calibration knob
+    # for land evapotranspiration: gs = gs_max * f(PAR) * f(T) * f(VPD) * f(soil),
+    # so lowering it raises canopy resistance and pulls land ET below potential.
+    # Only Vc_max25 / g1 are PFT-overridden, so gs_max stays a clean *global*
+    # lever (issue #730: the multilayer land over-transpires at potential because
+    # the free-drainage equilibrium sits at field capacity where beta_root=1 with
+    # no canopy resistance).  Default 0.3 matches StomataConfig.gs_max (byte-
+    # identical when unchanged); only active when land_stomatal_beta=True.
+    land_gs_max: float = 0.3
     # Prognostic snow + snow-albedo feedback on the AMIP slab-land tile: snow
     # water (SWE) accumulates from snowfall and melts (degree-day), brightening
     # the land albedo (snow ~0.5-0.8 vs vegetation ~0.15) — the positive
@@ -1037,6 +1047,15 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"land_bucket_w_init_frac (initial fill fraction) must be in "
                 f"[0, 1]; got {self.land_bucket_w_init_frac!r}."
+            )
+        # gs_max is a physical conductance [mol/m2/s]: must be finite and
+        # strictly positive (nan/<=0 would zero or NaN the whole land latent
+        # flux).  Upper sanity bound 2.0 is well above the StomataConfig
+        # __param_spec__ tunable range (0.099, 0.9).
+        if not (0.0 < self.land_gs_max <= 2.0):
+            errors.append(
+                f"land_gs_max (max stomatal conductance [mol/m2/s]) must be "
+                f"finite and in (0, 2]; got {self.land_gs_max!r}."
             )
         # Stomatal soil-water limitation needs the bucket to supply beta_soil.
         if (self.land_stomatal_beta and not self.land_soil_bucket

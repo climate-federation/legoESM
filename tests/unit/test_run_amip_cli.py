@@ -65,6 +65,32 @@ def test_snow_albedo_feedback_flag_flows_to_config():
     assert cfg_on.snow_albedo_feedback is True
 
 
+def test_land_gs_max_flag_flows_to_config():
+    """--land-gs-max round-trips into ExperimentConfig (the global stomatal
+    canopy-conductance calibration knob for land ET, issue #730). Default 0.3
+    matches StomataConfig.gs_max; a lower value raises canopy resistance."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_gs_max == 0.3
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-gs-max", "0.15",
+    ]), parser))
+    assert cfg.land_gs_max == 0.15
+
+
+def test_land_gs_max_validate_strict_rejects_nonpositive_or_nonfinite():
+    """validate_strict() rejects a non-positive / non-finite gs_max — such a
+    value would zero or NaN the entire land latent-heat flux."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    for bad in (0.0, -0.1, float("nan")):
+        with pytest.raises(ValueError, match="land_gs_max"):
+            cfg._replace(land_gs_max=bad).validate_strict()
+
+
 def test_orbital_insolation_flag_flows_to_config():
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
