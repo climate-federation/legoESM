@@ -139,14 +139,20 @@ def main(argv=None) -> int:
                         "u=1e-4 p_s=0.3 (defaults: "
                         + " ".join(f"{k}={v:g}"
                                    for k, v in _DEFAULT_TOL.items()) + ").")
+    p.add_argument("--bench", action="store_true",
+                   help="Timing-only run: no reference write/compare "
+                        "(parity gates are calibrated for the 5-step "
+                        "horizon; bench horizons exceed them). Use the "
+                        "printed wall receipt with two-duration "
+                        "subtraction.")
     args = p.parse_args(argv)
 
     # Argument contract FIRST — fail before the (expensive) driver setup.
-    if args.mode == "untiled" and not args.out:
-        print("ERROR: --mode untiled requires --out")
+    if args.mode == "untiled" and not args.out and not args.bench:
+        print("ERROR: --mode untiled requires --out (or --bench)")
         return 2
-    if args.mode == "tiled" and not args.ref:
-        print("ERROR: --mode tiled requires --ref")
+    if args.mode == "tiled" and not args.ref and not args.bench:
+        print("ERROR: --mode tiled requires --ref (or --bench)")
         return 2
     tol = _parse_tols(args.tol)
 
@@ -181,7 +187,20 @@ def main(argv=None) -> int:
     from legoesm.driver.model_driver import ModelDriver
     driver = ModelDriver(cfg, output_dir=workdir)
     driver.setup()
+    import time as _time
+    _t0 = _time.perf_counter()
     driver.run()
+    _wall = _time.perf_counter() - _t0
+    _steps = args.days * 86400.0 / cfg.dycore.dt
+    # Two-duration subtraction receipt: run the SAME mode at two --days
+    # values; (wall2-wall1)/(steps2-steps1) cancels compile + setup (the
+    # persistent XLA cache makes both runs compile-warm anyway).
+    print(f"[{args.mode}] run wall {_wall:.2f} s over {_steps:.0f} steps "
+          f"(naive {1e3 * _wall / max(_steps, 1):.0f} ms/step incl. "
+          "compile — use two-duration subtraction)")
+
+    if args.bench:
+        return 0
 
     state = _final_state_arrays(driver)
 

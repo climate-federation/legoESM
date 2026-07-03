@@ -71,6 +71,26 @@ def test_tiled_mode_requires_ref(tmp_path):
     assert rc == 2
 
 
+def test_bench_bypasses_ref_out_contract(tmp_path, capsys):
+    """--bench is timing-only: neither --out (untiled) nor --ref (tiled)
+    is required.  The run proceeds past the argument contract (and then
+    fails later on the 24-device requirement in this test env — rc 2
+    with the device message, never the missing-arg message)."""
+    import os
+    mod = _load()
+    try:
+        for mode in ("untiled", "tiled"):
+            rc = mod.main(["--mode", mode, "--bench",
+                           "--workdir", str(tmp_path)])
+            out = capsys.readouterr().out
+            assert "requires --" not in out
+            if rc == 2:
+                assert "devices" in out  # device guard, not arg contract
+    finally:
+        # main() sets the experimental opt-in env for tiled mode.
+        os.environ.pop("LEGOESM_TILED_DYCORE_EXPERIMENTAL", None)
+
+
 def test_tol_parser_rejects_unknown_field():
     mod = _load()
     with pytest.raises(SystemExit, match="p_s"):
