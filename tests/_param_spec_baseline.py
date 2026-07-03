@@ -26,6 +26,17 @@ from __future__ import annotations
 # clubb.py graduates (ships a __param_spec__). Re-seed with
 # scripts/tmp/_seed_param_spec_baseline.py.
 PARAM_SPEC_FIELD_BASELINE: dict[str, frozenset[str]] = {
+    # Canopy config: classified into PARAM_SPEC_TODO 2026-07-03 (landed
+    # via the land/stable merges without a spec); delete when it ships
+    # a __param_spec__.
+    'packages/land/legoesm/land/canopy/config.py': frozenset({
+        'CanopyConfig.cv',
+        'CanopyConfig.epsf',
+        'CanopyConfig.epss',
+        'CanopyConfig.field_capacity',
+        'CanopyConfig.tol',
+        'CanopyConfig.wilting_point',
+    }),
     'packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py': frozenset({
         'CLUBBConfig.T0',
         'CLUBBConfig.clubb_dt',
