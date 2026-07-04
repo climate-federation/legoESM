@@ -175,6 +175,18 @@ def test_most_stable_vs_unstable_differ_and_bracketed():
     assert abs(float(t2[0]) - float(t2[1])) > 1e-6
 
 
+def test_t2m_nonpositive_roughness_is_finite():
+    # z0h <= 0 must be floored internally (no log(0)/log(neg) NaN) and stay bracketed.
+    T_sfc = jnp.array([300.0, 300.0])
+    T_low = jnp.array([295.0, 295.0])
+    z_low = jnp.array([40.0, 40.0])
+    L = jnp.array([1e12, 1e12])
+    z0h = jnp.array([0.0, -0.5])  # zero and negative roughness
+    t2 = screen_level_t2m(T_sfc, T_low, z_low, L, z0h)
+    assert bool(jnp.all(jnp.isfinite(t2)))
+    assert bool(jnp.all((t2 >= 295.0) & (t2 <= 300.0)))
+
+
 def test_wind10m_calm_gradient_finite():
     # sqrt(u^2+v^2) has a NaN gradient at (0,0); the AD-safe floor must fix it.
     def speed(u):

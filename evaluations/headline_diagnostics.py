@@ -112,6 +112,11 @@ def mean_sea_level_pressure(p_s, T_lowest, phis, *, lapse_rate_k_per_m=_STD_LAPS
     cells (z_s < 0) it lowers pressure. Γ = 0 falls back to the isothermal
     hypsometric limit. Temperatures are floored at ``constants.T_min_atmosphere``
     and the power base is kept positive, so no NaNs arise for cold/deep columns.
+
+    ``lapse_rate_k_per_m`` is a STATIC Python float (a fixed measurement
+    convention — the ICAO standard-atmosphere lapse rate), branched on at trace
+    time; it is not a traced/differentiable argument (MSLP is a diagnostic, not
+    a loss term, and the lapse rate is never a gradient target).
     """
     z_s = phis / constants.g
     gamma = float(lapse_rate_k_per_m)                # static (config), not traced
@@ -135,7 +140,9 @@ def _log_frac(z_ref, z_low, z0, psi_fn, obukhov_L):
     value to the [surface, lowest-level] interval). Neutral limit (L → ∞):
     ψ → 0, so f is the pure log-law fraction.
     """
-    z0_safe = jnp.minimum(z0, 0.5 * z_ref)   # keep z0 < z_ref (valid log-law bracket)
+    # floor nonpositive roughness (log(.../0)=inf, log(neg)=NaN) then cap below
+    # z_ref so the log-law bracket stays valid (matches core.bulk_flux z0 floor)
+    z0_safe = jnp.minimum(jnp.maximum(z0, 1e-12), 0.5 * z_ref)
     num = jnp.log(z_ref / z0_safe) - psi_fn(z_ref / obukhov_L)
     den = jnp.log(z_low / z0_safe) - psi_fn(z_low / obukhov_L)
     # sign-preserving guard against a vanishing denominator (never flips sign)
