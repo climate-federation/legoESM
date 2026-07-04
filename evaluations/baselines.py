@@ -33,6 +33,8 @@ def persistence_forecast(ic_fields, leads_hours):
     dict[int, dict]
         ``{lead_hours: ic_fields}`` — the same fields at every lead (skill
         degrades because the verification changes with lead while this does not).
+        The field arrays are ALIASED across leads (read-only baseline for
+        scoring; do not mutate forecast fields in place).
     """
     return {int(lead): dict(ic_fields) for lead in leads_hours}
 
@@ -52,7 +54,8 @@ def climatology_forecast(clim_fields, leads_hours):
     dict[int, dict]
         ``{lead_hours: clim_fields}``. A season-resolved climatology would index
         by each lead's valid-time day-of-year; the orchestrator supplies the
-        correct climatology per valid time (see scripts/data).
+        correct climatology per valid time (see scripts/data). Field arrays are
+        ALIASED across leads (read-only baseline; do not mutate).
     """
     return {int(lead): dict(clim_fields) for lead in leads_hours}
 
@@ -74,13 +77,24 @@ def load_sota_headline(csv_path):
     if not path.exists():
         raise FileNotFoundError(f"SOTA headline CSV not found: {path}")
     out: dict = {}
+    seen: set = set()
     with path.open(newline="") as f:
         reader = csv.DictReader(f)
         if reader.fieldnames is None or not set(_SOTA_COLUMNS).issubset(reader.fieldnames):
             raise ValueError(
                 f"SOTA CSV must have columns {list(_SOTA_COLUMNS)}, got {reader.fieldnames}"
             )
-        for row in reader:
-            key = (row["variable"], int(row["level"]), int(row["lead_hours"]))
-            out.setdefault(row["model"], {})[key] = float(row["rmse"])
+        for lineno, row in enumerate(reader, start=2):   # data rows start at line 2
+            try:
+                key = (row["variable"], int(row["level"]), int(row["lead_hours"]))
+                rmse_val = float(row["rmse"])
+            except (ValueError, TypeError) as exc:
+                raise ValueError(
+                    f"SOTA CSV line {lineno}: bad numeric value ({exc}); row={row}"
+                ) from exc
+            dedup_key = (row["model"], *key)
+            if dedup_key in seen:                        # duplicates must not silently overwrite
+                raise ValueError(f"SOTA CSV line {lineno}: duplicate entry {dedup_key}")
+            seen.add(dedup_key)
+            out.setdefault(row["model"], {})[key] = rmse_val
     return out
