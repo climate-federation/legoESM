@@ -1,10 +1,6 @@
-# Multi-year ACE2-loss retrain: train_windows span 1979-2012 (34 yr, 2
-# seasons each = 204 IC/target days), eval on held-out 2013-2014. The single
-# biggest IAV lever: the model must SEE many ENSO cycles in training to
-# reproduce interannual variability (prior suite saw only 2015+2016).
 base: config/aimip/aimip_era5.yaml
 cfg_overrides:
-  aimip_n_epochs: 10
+  aimip_n_epochs: 6
   train_windows:
   - - 1979
     - 0
