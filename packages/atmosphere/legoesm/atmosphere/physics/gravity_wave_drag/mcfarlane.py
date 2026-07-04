@@ -42,6 +42,49 @@ from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full, safe_divide
 from legoesm.atmosphere.physics.gravity_wave_drag.config import McFarlaneConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "McFarlane (1987) orographic (c=0) gravity-wave drag: a launched "
+        "subgrid-orography wave stress (Froude-capped) saturates upward "
+        "(Lindzen breaking) and deposits its stress-divergence as a momentum "
+        "sink on the resolved flow, with frictional heating."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "rho": "kg/m^3", "lat": "rad", "dt": "s",
+        "h_topo_col": "m (optional per-column subgrid orographic stddev)",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "eps_gwd": "W/m^2",
+    },
+    "sign_convention": (
+        "z up; orographic phase speed c=0. Drag is a deceleration directed "
+        "along the source (surface-wind) direction, so du_dt opposes the "
+        "source-projected wind (du_dt*u <= 0, made strict by a hard U_proj>0 "
+        "mask); carried stress is monotone non-increasing upward and bounded "
+        "by the launched stress. eps_gwd>=0 is the column KE loss returned as "
+        "frictional heating dT_dt = -(u*du_dt + v*dv_dt)/c_pd."
+    ),
+    # KE removed from the mean flow is returned exactly as frictional heating
+    # (the dT_dt tie-back), so total ENERGY is conserved. Momentum is NOT
+    # conserved (a sink to the surface / absorbed at a critical level). The
+    # post-flux tendency limiter can break the exact stress-divergence balance
+    # where it binds, but never adds momentum (drag stays a sink).
+    "conserves": ["energy"],
+    "differentiable": True,
+    "reference": (
+        "McFarlane (1987), J. Atmos. Sci. 44, 1775-1800; E3SM gw_oro.F90 "
+        "(gw_oro_src) launch stress + gw_common.F90 saturation/limiters"
+    ),
+    "idealized_test": (
+        "tests/atmosphere/hydrostatic/unit/test_gravity_wave_drag.py: rest / "
+        "zero-orography column -> zero tendency; du_dt*u <= 0 at every level; "
+        "c_pd*sum(rho*dT_dt*dz) == eps_gwd >= 0 (KE->heat closure)"
+    ),
+}
+
 
 def mcfarlane_gwd(
     u: jax.Array,

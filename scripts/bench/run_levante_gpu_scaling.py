@@ -56,6 +56,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Shared, self-describing scaling metadata (roadmap item 9): merged per-result
+# into the JSON so a host-staged / f32 / replicated GPU row is falsifiable from
+# the record.  ``metadata.py`` imports JAX only lazily (safe before JAX init).
+_BENCH_DIR = Path(__file__).resolve().parent
+if str(_BENCH_DIR) not in sys.path:
+    sys.path.insert(0, str(_BENCH_DIR))
+from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
+
 # NOTE: do NOT import ``legoesm.constants`` at module load — it eagerly
 # imports ``jax.numpy``, which initialises JAX before ``_configure_jax`` /
 # ``_configure_mpi_gpu_affinity`` have a chance to set ``JAX_ENABLE_X64``,
@@ -165,8 +173,18 @@ def _maybe_init_distributed(
     """
     # Check for MPI environment
     if "OMPI_COMM_WORLD_SIZE" in os.environ or "PMI_SIZE" in os.environ:
+        # Guard ONLY the import: mpi4py installed-but-unloadable (no libmpi;
+        # ImportError, or the loader's RuntimeError) falls through to the
+        # SLURM / serial detection below. Everything past a successful
+        # import — including jax.distributed.initialize — must fail LOUDLY:
+        # swallowing a real multi-node init failure would leave N ranks
+        # running as independent serial programs (codex finding).
+        MPI = None
         try:
             from mpi4py import MPI
+        except (ImportError, RuntimeError):
+            pass
+        if MPI is not None:
             comm = MPI.COMM_WORLD
             rank = comm.Get_rank()
             n_procs = comm.Get_size()
@@ -183,15 +201,18 @@ def _maybe_init_distributed(
                 hostnames = comm.allgather(socket.gethostname())
                 if len(set(hostnames)) > 1:
                     import jax
+                    from legoesm.parallel.early_init import (
+                        resolve_coordinator_port,
+                    )
                     jax.distributed.initialize(
-                        coordinator_address=f"{hostnames[0]}:1234",
+                        coordinator_address=(
+                            f"{hostnames[0]}:{resolve_coordinator_port()}"
+                        ),
                         num_processes=n_procs,
                         process_id=rank,
                     )
 
             return rank, n_procs
-        except ImportError:
-            pass
 
     # Check for SLURM-launched multi-process jobs.  A plain sbatch allocation
     # sets SLURM_NTASKS>1 even when this script is executed as a single process
@@ -207,7 +228,10 @@ def _maybe_init_distributed(
             and slurm_nnodes > 1
             and slurm_step_nodelist):
         import jax
-        jax.distributed.initialize()
+        from legoesm.parallel.early_init import (
+            init_jax_distributed_with_fallback,
+        )
+        init_jax_distributed_with_fallback()
         return jax.process_index(), jax.process_count()
 
     return 0, 1
@@ -409,7 +433,7 @@ def _weak_resolution_ll(
 # Strong scaling: fixed resolutions, sweep GPU counts.
 STRONG_RESOLUTIONS_CS = [48, 96, 192]   # cubed-sphere: ~200, ~100, ~50 km
 STRONG_RESOLUTIONS_SP = [42, 85, 170]   # spectral: T42, T85, T170
-STRONG_RESOLUTIONS_ICO = [4, 5, 6]      # icosahedral: levels 4, 5, 6
+STRONG_RESOLUTIONS_ICO = [4, 5, 6, 7, 8]  # icosahedral: levels 4-8 (L8 = 655,362 cells, ~25 km; high levels need multi-GPU/multi-node)
 STRONG_RESOLUTIONS_LL = [64, 128, 256]  # lat-lon: n_lat
 # Lat-lon MPI halo width: the C-grid PPM / biharmonic operators pad
 # ``halo=2`` rows (primitive_eq_latlon_cgrid: pad_halo_latlon_3d(halo=2);
@@ -1271,7 +1295,9 @@ def _run_segment_benchmark(
     try:
         from mpi4py import MPI as _MPI
         _rank, _n_ranks = _MPI.COMM_WORLD.Get_rank(), _MPI.COMM_WORLD.Get_size()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # RuntimeError: mpi4py installed but no loadable libmpi (GPU-only
+        # venv) — a single-process benchmark must not require MPI.
         pass
     _is_mpi = _n_ranks > 1
 
@@ -1304,7 +1330,8 @@ def _run_segment_benchmark(
         if _MPI.COMM_WORLD.Get_size() > 1:
             jax.block_until_ready(jax.tree.leaves(carry))
             _MPI.COMM_WORLD.Barrier()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # broken/absent mpi4py must not break a single-process run
         pass
 
     t0 = time.perf_counter()
@@ -1315,7 +1342,8 @@ def _run_segment_benchmark(
         from mpi4py import MPI as _MPI
         if _MPI.COMM_WORLD.Get_size() > 1:
             _MPI.COMM_WORLD.Barrier()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # broken/absent mpi4py must not break a single-process run
         pass
 
     t1 = time.perf_counter()
@@ -1445,7 +1473,9 @@ def run_benchmark(
     try:
         from mpi4py import MPI as _MPI
         _rank, _n_ranks = _MPI.COMM_WORLD.Get_rank(), _MPI.COMM_WORLD.Get_size()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # RuntimeError: mpi4py installed but no loadable libmpi (GPU-only
+        # venv) — a single-process benchmark must not require MPI.
         pass
     _is_mpi = _n_ranks > 1
 
@@ -1906,7 +1936,8 @@ def run_benchmark(
         if _MPI.COMM_WORLD.Get_size() > 1:
             jax.block_until_ready(jax.tree.leaves(state))
             _MPI.COMM_WORLD.Barrier()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # broken/absent mpi4py must not break a single-process run
         pass
 
     t0 = time.perf_counter()
@@ -1918,7 +1949,8 @@ def run_benchmark(
         from mpi4py import MPI as _MPI
         if _MPI.COMM_WORLD.Get_size() > 1:
             _MPI.COMM_WORLD.Barrier()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # broken/absent mpi4py must not break a single-process run
         pass
 
     t1 = time.perf_counter()
@@ -2274,16 +2306,66 @@ def write_csv(results: list[TimingResult], path: Path) -> None:
     print(f"  CSV: {path}")
 
 
-def write_json(report: ScalingReport, path: Path) -> None:
-    """Write full report to JSON."""
+def write_json(
+    report: ScalingReport, path: Path, *, n_ranks_true: int | None = None
+) -> None:
+    """Write full report to JSON.
+
+    ``n_ranks_true`` is the real MPI world size from ``_maybe_init_distributed``
+    (1 for single-process SPMD, N for the route-A MPI path).  It MUST be passed
+    for the MPI route-A latlon/icosahedral path, where ``jax.distributed`` is
+    NOT initialized on a single node, so ``jax.process_count()`` would report 1
+    and the auto default would falsely record ``n_ranks=1`` for an
+    ``mpirun -np N`` run.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _decomp(grid: str) -> str:
+        # MPI route-A (world size > 1): grid-specific domain decomposition;
+        # single-process runs shard via SPMD.
+        if n_ranks_true and n_ranks_true > 1:
+            if grid == "latlon":
+                return "band"
+            if grid == "icosahedral":
+                return "cell_partition"
+            return "mpi"
+        return "spmd"
+
+    def _row(r: TimingResult) -> dict:
+        d = asdict(r)
+        # Self-describing metadata (roadmap item 9): backend / precision knobs /
+        # GPU-direct mode / decomposition / cells-per-GPU so this row is
+        # comparable and a host-staged or f32 GPU row is falsifiable.  n_gpus is
+        # the row's device count (scaling axis); n_ranks is the true MPI world
+        # size (SPMD -> 1; route-A -> N), NOT jax.process_count() which is 1 on
+        # single-node MPI where jax.distributed is not initialized.
+        d["metadata"] = annotate_incomplete(scaling_metadata(
+            grid=r.grid_type,
+            component="atmosphere",
+            resolution=r.resolution,
+            n_levels=r.n_levels,
+            precision=r.precision,
+            n_ranks=n_ranks_true,
+            n_gpus=r.n_gpus,
+            decomposition=os.environ.get("LEGOESM_DECOMPOSITION")
+            or _decomp(r.grid_type),
+            cells_per_rank=r.cells_per_gpu,
+            scaling_kind=os.environ.get("LEGOESM_SCALING_KIND") or None,
+            extra={
+                "physics_level": r.physics_level,
+                "mode": r.mode,
+                "hlo_collective_permute": r.hlo_collective_permute,
+            },
+        ))
+        return d
+
     payload = {
         "mode": report.mode,
         "precisions": report.precisions,
         "timestamp_utc": report.timestamp_utc,
         "backend": report.backend,
         "hostname": report.hostname,
-        "results": [asdict(r) for r in report.results],
+        "results": [_row(r) for r in report.results],
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
@@ -2765,7 +2847,8 @@ def main() -> int:
                 hostname=hostname,
             )
             write_csv(weak_results, output_dir / "weak_scaling.csv")
-            write_json(weak_report, output_dir / "weak_scaling.json")
+            write_json(weak_report, output_dir / "weak_scaling.json",
+                       n_ranks_true=world_size)
 
             if not args.no_plot:
                 plot_weak_scaling(weak_results, output_dir)
@@ -2799,7 +2882,8 @@ def main() -> int:
                 hostname=hostname,
             )
             write_csv(strong_results, output_dir / "strong_scaling.csv")
-            write_json(strong_report, output_dir / "strong_scaling.json")
+            write_json(strong_report, output_dir / "strong_scaling.json",
+                       n_ranks_true=world_size)
 
             if not args.no_plot:
                 plot_strong_scaling(strong_results, output_dir)

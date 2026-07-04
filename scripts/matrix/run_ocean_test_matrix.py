@@ -564,6 +564,7 @@ def _apply_value_threshold(
 # sentinel from legoesm.diagnostics so the same singleton is used
 # across both monolithic and modular runners.
 from legoesm.diagnostics import DAYS_REQUIRED as _DAYS_REQUIRED
+from legoesm.experiments.matrix.namelist import write_case_namelist
 
 # Absolute deadband for the Overflow / Lock-Exchange RPE-sign gate (iter-156).
 # Kept in sync with the modular twin in
@@ -8115,6 +8116,13 @@ def main():
         else:
             days = tc.quick_days if args.quick else tc.duration_days
         out_dir = output_base / tc.output_path
+        # Per-case namelist parameter file (#682): the resolved case config,
+        # written up-front so it is present even if the run later fails.
+        write_case_namelist(
+            out_dir, tc,
+            title=f"ocean test-case namelist: {tc.output_path}",
+            extra={"days_run": days, "quick": bool(args.quick)},
+        )
 
         label = f"{tc.case}/{tc.grid_type}/{tc.resolution}"
         print(f"\n[{i}/{len(tests)}] {label} ({days:.4g} days)")

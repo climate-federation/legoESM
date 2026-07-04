@@ -52,6 +52,9 @@ __param_spec__ = {
         "scheme_key": "land.soil_hydraulics",
         "excluded": {
             "S_s": "numerics: specific storage regulariser",
+            "k_sat_decay_m": "opt-in depth-decay length (Niu 2005); 0 disables — "
+                             "structural switch set per soil column, not a default "
+                             "trainable closure",
         },
         "params": {
             "K_sat": {"units": "1", "bounds": (9.537e-07, 8.67e-06), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
@@ -108,6 +111,11 @@ class SoilHydraulicsConfig(NamedTuple):
     S_s: float = 1e-4           # specific storage [1/m]
     # Non-capillary (film) conductivity coefficient (Peters 2013)
     c_film: float = 1.35e-8     # [m^(5/2)/s]
+    # Depth-decay of saturated conductivity: K_sat(z) = K_sat * exp(-z/k_sat_decay_m)
+    # (Niu et al. 2005, J. Hydrometeorol.; soil compaction with depth).  Scales the
+    # WHOLE K(theta) curve by exp(-z/k_sat_decay_m) at soil-node depth z, impeding
+    # drainage OUT OF the root zone.  0.0 = disabled (uniform K, backward-compatible).
+    k_sat_decay_m: float = 0.0  # [m] e-folding decay length; 0 => uniform with depth
 
 
 # ==========================================================================
@@ -491,20 +499,35 @@ def lu_C(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
 # ==========================================================================
 
 def theta_from_psi(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
-    """Compute theta from psi using the configured retention curve."""
+    """Compute theta from psi using the configured retention curve.
+
+    Above saturation (psi >= 0) the column stores additional water ELASTICALLY
+    (specific storage): theta = theta_sat + S_s*theta_sat*psi.  This is the
+    ParFlow / CliMA-Land "change of variable near saturation": psi is the primary
+    variable everywhere and the capacity dtheta/dpsi = S_s*theta_sat stays > 0 at
+    and above saturation, where the van-Genuchten capacity is 0.  It keeps the
+    Richards matrix non-singular and theta CONSISTENT with ``moisture_capacity``,
+    so the mass-conservative mixed form needs no non-physical theta clip (a clip
+    at theta_sat silently destroyed the ponded/elastic storage) — ponding emerges
+    as a positive head."""
     curve = config.retention_curve
     if curve == "van_genuchten":
-        return van_genuchten_theta(psi, config)
+        theta = van_genuchten_theta(psi, config)
     elif curve == "clapp_hornberger" or curve == "campbell":
-        return clapp_hornberger_theta(psi, config)
+        theta = clapp_hornberger_theta(psi, config)
     elif curve == "brooks_corey":
-        return brooks_corey_theta(psi, config)
+        theta = brooks_corey_theta(psi, config)
     elif curve == "pdi":
-        return pdi_theta(psi, config)
+        theta = pdi_theta(psi, config)
     elif curve == "lu":
-        return lu_theta(psi, config)
+        theta = lu_theta(psi, config)
     else:
         raise ValueError(f"Unknown retention curve: {curve}")
+    # Specific-storage branch (psi >= 0): the integral of the elastic capacity
+    # S_s*theta_sat added in ``moisture_capacity``.  Zero below saturation so a
+    # very dry psi never drives theta below theta_r.
+    return theta + jnp.where(psi >= 0.0,
+                             config.S_s * config.theta_sat * psi, 0.0)
 
 
 def psi_from_theta(theta: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
@@ -566,11 +589,46 @@ def moisture_capacity(psi: jnp.ndarray, theta: jnp.ndarray,
     else:
         raise ValueError(f"Unknown retention curve: {curve}")
 
-    # Add elastic storage near saturation
-    C = C + config.S_s * config.theta_sat
+    # Elastic specific storage ABOVE saturation (psi >= 0) — the derivative of the
+    # theta_from_psi specific-storage branch.  Conditional (not unconditional) so it
+    # stays CONSISTENT with theta: d/dpsi[theta_sat + S_s*theta_sat*psi] = S_s*
+    # theta_sat for psi>=0, and 0 below (where the van-Genuchten capacity governs).
+    # This is what keeps C > 0 at saturation (van_genuchten_C -> 0 there) without
+    # making theta inconsistent with C in the unsaturated zone (the mass-balance
+    # error the mixed-form Picard would otherwise carry).
+    C = C + jnp.where(psi >= 0.0, config.S_s * config.theta_sat, 0.0)
     return C
 
 
 def interblock_K(K_above: jnp.ndarray, K_below: jnp.ndarray) -> jnp.ndarray:
     """Geometric mean of hydraulic conductivity between adjacent layers."""
     return jnp.sqrt(jnp.clip(K_above, 1e-20, None) * jnp.clip(K_below, 1e-20, None))
+
+
+# ==========================================================================
+# Per-column / per-layer parameter support
+# ==========================================================================
+
+def slice_layer(config: SoilHydraulicsConfig, k: int) -> SoilHydraulicsConfig:
+    """Return ``config`` with every per-(col,layer) field reduced to a single
+    layer ``k`` (so a ``(ncol, nlayer)`` or ``(ncol, 1)`` param becomes
+    ``(ncol,)``).  Scalars and 1-D fields are passed through unchanged.
+
+    Use this when a Richards step computes a quantity at a *single* layer
+    (e.g. top-layer ``K_top`` for the infiltration capacity, bottom-layer
+    ``K_bot`` for free-drainage runoff) and the soil state at that layer is
+    ``(ncol,)``: mixing ``(ncol,)`` with a ``(ncol, 1)`` param would otherwise
+    broadcast to ``(ncol, ncol)`` and silently corrupt the result.
+    """
+    def pick(v):
+        # Strings (e.g. retention_curve) and Python scalars: passthrough.
+        if not hasattr(v, "ndim"):
+            return v
+        # 0-D / 1-D arrays already align with (ncol,).
+        if v.ndim < 2:
+            return v
+        # 2-D (ncol, n_layer_or_1): pick layer k.  Length-1 layer axis acts
+        # as a broadcast and the index folds to 0 automatically.
+        idx = k if v.shape[-1] > 1 else 0
+        return v[..., idx]
+    return type(config)(*(pick(getattr(config, f)) for f in config._fields))

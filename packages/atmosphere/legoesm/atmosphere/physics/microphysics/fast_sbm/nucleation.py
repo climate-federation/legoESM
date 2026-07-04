@@ -36,6 +36,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics.microphysics._warm_rain import kelvin_coefficient
 from legoesm.atmosphere.physics.microphysics.fast_sbm.config import FastSBMConfig
 from legoesm.atmosphere.physics.microphysics.fast_sbm.grid import (
     bin_mass_widths,
@@ -80,14 +81,14 @@ __physics_contract__ = {
     ),
 }
 
-# 1e-30 m: numeric floor keeping r_crit / logs finite at s→0.
+# 1e-12: dimensionless supersaturation floor keeping r_crit ∝ s^(-2/3) finite at s→0
 _S_FLOOR = 1.0e-12
 
 
-def kelvin_coefficient(T: jax.Array) -> jax.Array:
-    """Köhler curvature term ``A = 2 σ_w / (ρ_w R_v T)`` [m] (oracle AKOE)."""
-    return 2.0 * constants.sigma_water / (
-        constants.rho_water * constants.R_v * T)
+# Köhler curvature term A = 2 σ_w / (ρ_w R_v T) [m] (oracle AKOE): canonical
+# definition lives in the shared microphysics helper module so fast-SBM and
+# ARG activation use ONE Kelvin term (imported at the top of this file;
+# re-exported through fast_sbm/__init__ unchanged).
 
 
 def hygroscopicity(config: FastSBMConfig) -> jax.Array:

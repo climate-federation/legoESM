@@ -51,7 +51,8 @@ class TestBarotropicDivDampOverride:
         from ocean_test_matrix.cli import build_parser
         parser = build_parser()
         args = parser.parse_args(["--barotropic-div-damp", "0.123"])
-        assert args.barotropic.barotropic_div_damp == pytest.approx(0.123)
+        # argparse flattens "--barotropic-div-damp" to the dest barotropic_div_damp.
+        assert args.barotropic_div_damp == pytest.approx(0.123)
 
     def test_cli_help_lists_flag(self):
         from ocean_test_matrix.cli import build_parser

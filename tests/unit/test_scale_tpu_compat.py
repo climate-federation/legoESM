@@ -52,6 +52,12 @@ class TestSegmentCarryPytree:
             precip_accum=jnp.zeros(shape2d),
             shflx_accum=jnp.zeros(shape2d),
             lhflx_accum=jnp.zeros(shape2d),
+            sw_up_toa_accum=jnp.zeros(shape2d),
+            lw_up_toa_accum=jnp.zeros(shape2d),
+            sw_down_toa_accum=jnp.zeros(shape2d),
+            sw_net_sfc_accum=jnp.zeros(shape2d),
+            lw_net_sfc_accum=jnp.zeros(shape2d),
+            t_low_accum=jnp.zeros(shape2d),
             T_land=jnp.zeros(shape2d),
             # Optional double-moment fields populated here so the no-Python-
             # objects invariant is checked on the fully-populated carry.

@@ -49,6 +49,181 @@ from legoesm.parallel.reductions import require_mpi_stack
 _active_topology: CommTopology | None = None
 _active_layout: DistributedLayout | SingleRankLayout | None = None
 
+# Default coordinator port for ``jax.distributed.initialize`` (the gRPC rendezvous
+# socket rank 0 binds; every other rank dials ``rank0_host:PORT``).  A module
+# constant (not a magic literal) so the SLURM launcher and any future caller agree.
+_JAX_DIST_COORDINATOR_PORT = 1234
+
+
+def _require_mpi4py():
+    """Return ``mpi4py.MPI`` or raise a clear ImportError.
+
+    The multi-controller SPMD multi-process path needs ONLY MPI rank/hostname
+    discovery (to derive the ``jax.distributed`` coordinator) — its halo +
+    reductions run through pure-JAX ``ppermute``/``psum`` inside ``shard_map``,
+    NOT mpi4jax.  So this helper requires mpi4py only, unlike
+    :func:`legoesm.parallel.reductions.require_mpi_stack`
+    (which also requires mpi4jax for the cubed-sphere ``sendrecv`` halo).
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("mpi4py") is None:
+        raise ImportError(
+            "Multi-process jax.distributed bootstrap requires mpi4py (for rank / "
+            "hostname discovery). Install it and launch under mpirun/srun "
+            "(one process per device)."
+        )
+    from mpi4py import MPI
+
+    return MPI
+
+
+def initialize_jax_distributed_multiprocess(
+    *,
+    coordinator_port: int | None = None,
+    local_device_ids=None,
+):
+    """Initialize the ``jax.distributed`` runtime for a multi-PROCESS run, deriving
+    the coordinator from MPI rank/hostname — the mpi4jax-free bootstrap used by
+    the multi-controller SPMD paths (cs_spmd production driver, lat-lon SPMD
+    ocean step) to span GPUs across several nodes.
+
+    This factors the SAME proven coordinator-discovery logic as the multi-node
+    branch of :func:`initialize_distributed` (rank 0's hostname is the coordinator;
+    every rank calls ``jax.distributed.initialize(addr, num_processes, process_id)``)
+    but:
+
+    * requires ONLY mpi4py for the MULTI-rank path (no mpi4jax — the SPMD halo is
+      pure-JAX ppermute/psum); a genuinely single-process run (no MPI/PMI/SLURM
+      launcher reporting >1 task) returns ``(0, 1)`` WITHOUT importing mpi4py, so
+      the default single-controller path never depends on the optional dep;
+    * does NOT arm the MPI halo backend (the SPMD step arms its own per-call
+      halo backend around the ``shard_map``);
+    * is a NO-OP for a single process — the default single-controller path stays
+      byte-unchanged;
+    * is idempotent — once ``jax.distributed`` is initialized (or the process is
+      single), re-calling just returns the discovered ``(rank, n_processes)``.
+
+    MUST be called BEFORE any ``jax`` array op / device query, because
+    ``jax.distributed.initialize`` reconfigures the global device set so that
+    ``jax.devices()`` returns ALL devices across ALL processes (and
+    ``jax.local_devices()`` only this process' GPUs).
+
+    Returns
+    -------
+    (rank, n_processes) : tuple[int, int]
+        This process' global rank and the total process count (from MPI).
+    """
+    import os
+
+    # Fast single-process short-circuit WITHOUT importing mpi4py: when no MPI/PMI/
+    # SLURM launcher reports >1 task, this is a plain single-process run -> return
+    # (0, 1) and do not even require mpi4py (the default path must not depend on an
+    # optional dep).  Covers Open MPI (OMPI_COMM_WORLD_SIZE), MPICH/PMI
+    # (PMI_SIZE), and bare srun (SLURM_NTASKS / SLURM_STEP_NUM_TASKS).
+    _launcher_size = None
+    for _var in ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE",
+                 "SLURM_STEP_NUM_TASKS", "SLURM_NTASKS"):
+        _v = os.environ.get(_var)
+        if _v:
+            try:
+                _launcher_size = int(_v)
+            except ValueError:
+                _launcher_size = None
+            break
+    if _launcher_size is not None and _launcher_size <= 1:
+        return 0, 1
+    if _launcher_size is None:
+        # NO launcher env at all (codex Medium): overwhelmingly a plain
+        # ``python script.py`` — honour the documented no-optional-dep
+        # single-process contract when mpi4py is absent.  When mpi4py IS
+        # importable, still probe COMM_WORLD (an exotic launcher that
+        # exports none of the four vars gets correct rank discovery
+        # rather than a silent N-way replicated-serial run).
+        import importlib.util
+        if importlib.util.find_spec("mpi4py") is None:
+            return 0, 1
+
+    MPI = _require_mpi4py()
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    n_processes = comm.Get_size()
+
+    if n_processes <= 1:
+        # Single process under a launcher (e.g. mpirun -np 1): the default single-
+        # controller path.  jax sees all LOCAL devices; no coordinator needed.
+        return rank, n_processes
+
+    # Already initialized (idempotent re-entry): just report the topology.
+    if jax.distributed.is_initialized():
+        return rank, n_processes
+
+    import socket
+
+    my_hostname = socket.gethostname()
+    all_hostnames = comm.allgather(my_hostname)
+    coordinator_address = all_hostnames[0]
+    if coordinator_port is None:
+        # Env override / crc32(job-id)-derived / legacy fixed port: two jobs
+        # sharing a node must not collide on the rendezvous socket
+        # (EADDRINUSE on the second job's rank 0).
+        from legoesm.parallel.early_init import resolve_coordinator_port
+
+        coordinator_port = resolve_coordinator_port(
+            default=_JAX_DIST_COORDINATOR_PORT)
+    coordinator_bind = f"{coordinator_address}:{coordinator_port}"
+
+    # Per-process LOCAL device id(s).  On a multi-GPU node with one process per
+    # GPU, jax's auto-detect of the per-process device from the global CUDA
+    # topology can DEADLOCK (DEADLINE_EXCEEDED on key cuda:global_topology) when
+    # several co-located processes each see all the node's GPUs.  Declaring this
+    # process' local GPU index explicitly (SLURM exposes it as SLURM_LOCALID under
+    # srun) makes the topology exchange deterministic.  ONLY auto-derive on a GPU
+    # platform: a CPU multi-process run (mpirun) wants MULTIPLE CPU devices per
+    # process (xla_force_host_platform_device_count) -> pinning local_device_ids to
+    # one would wrongly claim a single CPU device.  Falls back to None (jax
+    # auto-detect) for single-GPU-per-node, CPU, or non-SLURM launches.
+    if local_device_ids is None:
+        _plats = (os.environ.get("JAX_PLATFORMS")
+                  or os.environ.get("JAX_PLATFORM_NAME") or "")
+        _is_gpu = ("cuda" in _plats.lower()) or ("gpu" in _plats.lower())
+        _localid = os.environ.get("SLURM_LOCALID")
+        if _is_gpu and _localid is not None:
+            try:
+                local_device_ids = int(_localid)
+            except ValueError:
+                local_device_ids = None
+
+    _init_kwargs = dict(
+        coordinator_address=coordinator_bind,
+        num_processes=n_processes,
+        process_id=rank,
+    )
+    if local_device_ids is not None:
+        _init_kwargs["local_device_ids"] = local_device_ids
+
+    try:
+        jax.distributed.initialize(**_init_kwargs)
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"jax.distributed.initialize() failed on rank {rank}/{n_processes} "
+            f"with coordinator={coordinator_bind}. Ensure the coordinator port "
+            f"{coordinator_port} is free and every rank can reach "
+            f"{coordinator_address}. Original error: {e}"
+        ) from e
+
+    # Validate JAX agrees with MPI (same check as initialize_distributed).
+    jax_rank = jax.process_index()
+    jax_size = jax.process_count()
+    if jax_rank != rank or jax_size != n_processes:
+        warnings.warn(
+            f"JAX process_index/count ({jax_rank}/{jax_size}) differs from MPI "
+            f"rank/size ({rank}/{n_processes}). Using MPI values.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return rank, n_processes
+
 
 def initialize_distributed(
     *,
@@ -156,40 +331,16 @@ def initialize_distributed(
         _is_multi_node = len(set(all_hostnames)) > 1
 
     if _is_multi_node:
-        # Multi-node: initialize JAX distributed runtime with MPI-derived
-        # coordinator info.  Rank 0's hostname serves as coordinator.
-        coordinator_address = all_hostnames[0]
-        coordinator_port = 1234
-        coordinator_bind = f"{coordinator_address}:{coordinator_port}"
-
-        # Skip if already initialized by maybe_init_jax_distributed()
-        # (legoesm.parallel.early_init) called before any legoESM imports.
-        if jax.process_count() == 1:
-            try:
-                jax.distributed.initialize(
-                    coordinator_address=coordinator_bind,
-                    num_processes=n_processes,
-                    process_id=rank,
-                )
-            except RuntimeError as e:
-                raise RuntimeError(
-                    f"jax.distributed.initialize() failed on rank {rank}/{n_processes} "
-                    f"with coordinator={coordinator_bind}. "
-                    f"Ensure the coordinator port {coordinator_port} is not in use "
-                    f"and all ranks can reach {coordinator_address}. "
-                    f"Original error: {e}"
-                ) from e
-
-        # Validate JAX agrees with MPI.
-        jax_rank = jax.process_index()
-        jax_size = jax.process_count()
-        if jax_rank != rank or jax_size != n_processes:
-            warnings.warn(
-                f"JAX process_index/count ({jax_rank}/{jax_size}) differs from "
-                f"MPI rank/size ({rank}/{n_processes}). Using MPI values.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+        # Multi-node: initialize the JAX distributed runtime with MPI-derived
+        # coordinator info (rank 0's hostname is the coordinator).  Delegate to
+        # the shared bootstrap so the discovery + initialize + MPI-vs-JAX
+        # validation live in ONE place (the SPMD paths use the same helper);
+        # single-node MPI is handled by the elif below.  The helper is
+        # idempotent via ``jax.distributed.is_initialized()`` — it never
+        # probes ``jax.process_count()`` first (which would itself
+        # initialise the XLA backend and guarantee a subsequent
+        # ``initialize()`` raise — the #693 init-ordering bug class).
+        initialize_jax_distributed_multiprocess()
     elif n_processes > 1:
         # Single-node MPI: skip jax.distributed.initialize().
         # All ranks share the same local devices; MPI halo exchange and
@@ -287,8 +438,17 @@ def initialize_distributed_latlon(
     global_n_lat: int,
     global_n_lon: int | None = None,
     fold=None,
+    band_boundaries: tuple[int, ...] | None = None,
 ):
     """Initialize the MPI halo backend for a latitude-band lat-lon run.
+
+    ``band_boundaries`` (optional): explicit band boundaries forwarded to
+    :func:`legoesm.parallel.latlon_mpi.make_latlon_band_layout` — use
+    :func:`legoesm.parallel.latlon_mpi.wet_band_boundaries` to balance WET
+    cells across bands instead of row counts (land-heavy bands otherwise
+    idle).  Every rank must pass the IDENTICAL boundaries (deterministic
+    host computation from the global mask).  ``None`` keeps the even row
+    split byte-identically.
 
     Parallel entry point to :func:`initialize_distributed` for the
     SCVT/cubed-sphere grids — separate because the lat-lon path
@@ -390,6 +550,40 @@ def initialize_distributed_latlon(
             )
             _active_topology = None
     if _active_topology is not None:
+        # A changed band-boundary request must not be served by a stale
+        # layout (codex): a long-lived process that armed even bands and
+        # later opts into wet-cell-balanced boundaries (or vice versa) would
+        # silently keep the OLD decomposition — every slicer/scatter reads
+        # lat_start/lat_end from the layout. Compare this rank's requested
+        # span against the active one; re-arm fresh on mismatch.
+        _r = _active_topology.rank
+        _n = _active_topology.n_ranks
+        if band_boundaries is not None:
+            # Validate BEFORE the span comparison: an invalid request
+            # (non-integral / overlong / bad span) must raise, never be
+            # silently served by a coincidentally-matching stale layout
+            # (codex round 2).
+            from legoesm.parallel.latlon_mpi import validate_band_boundaries
+            _b = validate_band_boundaries(band_boundaries, _n, global_n_lat)
+            _want_span = (_b[_r], _b[_r + 1])
+        else:
+            _base, _rem = divmod(global_n_lat, _n)
+            _s = (_r * (_base + 1) if _r < _rem
+                  else _rem * (_base + 1) + (_r - _rem) * _base)
+            _want_span = (_s, _s + _base + (1 if _r < _rem else 0))
+        if (_active_topology.lat_start,
+                _active_topology.lat_end) != _want_span:
+            warnings.warn(
+                "initialize_distributed_latlon() re-called with different "
+                f"band boundaries (rank {_r}: requested rows "
+                f"[{_want_span[0]}, {_want_span[1]}) vs active "
+                f"[{_active_topology.lat_start}, "
+                f"{_active_topology.lat_end})); replacing the active layout "
+                "and re-arming the MPI halo backend.",
+                RuntimeWarning, stacklevel=2,
+            )
+            _active_topology = None
+    if _active_topology is not None:
         active_fold = getattr(_active_topology, "fold", None)
         active_on = (active_fold is not None
                      and getattr(active_fold, "is_active", False))
@@ -451,6 +645,7 @@ def initialize_distributed_latlon(
         rank=rank, n_ranks=n_processes,
         n_lat=global_n_lat, n_lon=global_n_lon,
         fold=fold,
+        boundaries=band_boundaries,
     )
     _active_topology = layout
 

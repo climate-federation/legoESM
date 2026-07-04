@@ -34,6 +34,51 @@ from legoesm.atmosphere.physics.radiation.rrtmgp.rte import two_stream
 
 Array: TypeAlias = jax.Array
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "RRTMGP correlated-k radiation solver (solve_columns): builds the gas/"
+        "cloud/aerosol optics per g-point and integrates the two-stream LW+SW "
+        "radiative transfer to broadband fluxes and radiative heating rates."
+    ),
+    "inputs": {
+        "T": "K", "p_full": "Pa", "p_half": "Pa", "sfc_temperature": "K",
+        "q_v": "kg/kg", "cos_zenith": "1 (cos solar zenith angle)",
+        "sfc_albedo": "1 (surface shortwave albedo)",
+        "sfc_emissivity": "1 (surface longwave emissivity)",
+        "o3_vmr": "mol/mol", "cloud_path_liq": "kg/m^2",
+        "cloud_path_ice": "kg/m^2", "cloud_r_eff_liq": "m",
+        "cloud_r_eff_ice": "m", "cloud_fraction": "1",
+        "aerosol_optical_depth": "1",
+    },
+    "outputs": {
+        "lw_flux_up": "W/m^2", "lw_flux_down": "W/m^2",
+        "sw_flux_up": "W/m^2", "sw_flux_down": "W/m^2",
+        "heating_rate": "K/s", "lw_heating_rate": "K/s",
+        "sw_heating_rate": "K/s",
+    },
+    "sign_convention": (
+        "heating_rate dT/dt>0 warms the layer; fluxes positive in their named "
+        "direction (up/down); net radiative flux OUT of a layer cools it "
+        "(heating_rate = -g/c_p * dF_net/dp); optical depth tau>=0, "
+        "0<=ssa<=1, |g|<=1; cos_zenith>=0 for illuminated columns (nighttime SW "
+        "zeroed). Photons enter/leave at TOA and the surface, so the column "
+        "energy budget is OPEN (accounted, not conserved)."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Pincus, Mlawer & Delamere (2019), JAMES, doi:10.1029/2019MS001621 "
+        "(RRTMGP); swirl_jatmos two-stream port."
+    ),
+    "idealized_test": (
+        "tests/atmosphere/hydrostatic/unit/test_rrtmgp_stratosphere.py + "
+        "tests/unit/test_physics_radiation.py: clear-sky LW cooling / SW heating "
+        "profiles; differentiable in the continuous optical inputs (T, q_v, VMR, "
+        "cloud paths), with only the integer band/g-point index selection static."
+    ),
+}
+
 # ---------------------------------------------------------------------------
 # Default RRTMGP data file paths (Zarr preferred, NetCDF fallback)
 # ---------------------------------------------------------------------------

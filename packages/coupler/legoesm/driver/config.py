@@ -13,8 +13,10 @@ Provides the **canonical runtime configuration** for legoESM:
 from __future__ import annotations
 
 import json
+import math
+import os
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from legoesm import constants
 
@@ -179,6 +181,48 @@ class DycoreConfig(NamedTuple):
     time_integrator: str = "ssp_rk3"
 
 
+class EvaluationConfig(NamedTuple):
+    """Post-run ClimateEval configuration.
+
+    When ``enabled=True`` and ``cmip_output=True``, the driver invokes
+    ClimateEval (via ``climateeval_hook.maybe_run_climateeval``) after a
+    successful AMIP run, comparing CMOR outputs against ERA5 /
+    observational reference data. ClimateEval is a separate, externally
+    installed tool (github.com/climate-federation/ClimateEval) — NEVER a
+    legoESM dependency (its iris/ESMValTool stack is heavy/conda-only and
+    conflicts with the JAX environment). The hook shells out to
+    ``climateeval_python`` rather than importing ``climateeval`` into this
+    process. ``suites`` are pass-through names consumed by that external
+    tool (not legoESM scheme dispatch), so they are intentionally not
+    membership-validated here; an unknown suite fails loudly inside
+    ClimateEval's own ``Suite()`` constructor. All listed suites are
+    rendered into ONE combined HTML report. **Empty (the default) = run
+    ALL bundled suites (every tier)**; a suite whose data is missing /
+    inapplicable is skipped and reported by the runner, not fatal.
+
+    ``climateeval_python`` and ``data_root_dir`` have no hardcoded
+    personal defaults — the CLI (``run_amip.py --evaluation-climateeval-
+    python`` / ``--evaluation-data-root-dir``) defaults them from the
+    ``LEGOESM_CLIMATEEVAL_PYTHON`` / ``LEGOESM_CLIMATEEVAL_DATA_ROOT``
+    environment variables instead, since both paths are inherently
+    per-user/per-machine (there is no shared, canonical install or
+    reference-data location). If either is left unset while
+    ``enabled=True``, ``ExperimentConfig.validate_strict`` raises LOUDLY
+    before the run starts (see setup instructions in
+    ``docs/user-guide/climateeval_evaluation.md``).
+    """
+    enabled: bool = False
+    suites: tuple[str, ...] = ()  # empty = ALL bundled suites (every tier)
+    model_id: str = "legoESM-1-0"
+    experiment_id: str = "amip"
+    variant_id: str = "r1i1p1f1"
+    data_root_dir: str = ""
+    fail_on_missing_data: bool = False
+    download_missing_data: bool = False
+    timerange: str = ""
+    climateeval_python: str = ""
+
+
 class OutputConfig(NamedTuple):
     """Output and diagnostics configuration."""
     output_dir: str = ""
@@ -196,6 +240,7 @@ class OutputConfig(NamedTuple):
     # ``restart_buffer_seconds`` to spare, letting a dependency chain resume.
     max_wallclock_seconds: float = 0.0
     restart_buffer_seconds: float = 600.0
+    evaluation: EvaluationConfig = EvaluationConfig()
 
 
 # Single source of truth for the valid microphysics scheme literals — consumed
@@ -224,6 +269,14 @@ class ExperimentConfig(NamedTuple):
     # Integration
     days: int = 200
     start_day: float = 0.0
+    # Optional seasonal alignment for the radiation insolation ONLY (decoupled
+    # from the relative-indexed AMIP SST forcing). When set, model day 0 maps to
+    # this noleap day-of-year [1, 366) for the insolation day_of_year, so an
+    # AMIP run started from a non-January ERA5 date can run the matching solar
+    # season WITHOUT shifting start_day (which would push the relative SST out of
+    # range). None => legacy behavior: day 0 -> Jan 1 (day_to_calendar(0)).
+    # See docs/COMPARE_REANALYSIS.md (iter 449). CODEX PENDING (radiation path).
+    insolation_start_doy: float | None = None
 
     # Forcing
     dataset: str = "analytical"
@@ -250,6 +303,12 @@ class ExperimentConfig(NamedTuple):
     # compile unit — only a host-level jit is its own executable).
     unfused_radiation: bool = False
     diurnal_cycle: bool = False
+    # Realistic (Berger 1978) orbital insolation for AMIP-II / CMIP.  When
+    # True the radiation uses the present-day orbital declination and scales
+    # TOA insolation by the Earth-Sun distance factor (a/r)^2 (eccentricity
+    # perihelion/aphelion asymmetry, ~+/-3.4%).  Default False keeps the
+    # circular-orbit approximation for idealized/aquaplanet runs.
+    orbital_insolation: bool = False
     # RRTMGP column recurrence implementation:
     #   False = Python for-loop (fully unrolled XLA graph, GPU-friendly default)
     #   True  = jax.lax.scan (smaller graph, often slower per step on GPU but
@@ -328,6 +387,11 @@ class ExperimentConfig(NamedTuple):
     # These are the SW/LW knob for the coare3 moisture-driven albedo overshoot.
     cloud_rh_crit: float | None = None
     cloud_q_c_diagnostic: float | None = None
+    #   cloud_p_xr / cloud_alpha_xr — Xu-Randall cloud-fraction sensitivity
+    #   knobs; HIGHER p_xr / LOWER alpha_xr => fraction stays fractional as
+    #   moisture rises (flattens the overcast runaway).
+    cloud_p_xr: float | None = None
+    cloud_alpha_xr: float | None = None
     cloud_conv_cloud_max: float | None = None
     microphysics: str = "none"
     # Number of microphysics sub-steps inside one dynamics step.  Morrison's
@@ -396,6 +460,14 @@ class ExperimentConfig(NamedTuple):
     # atmosphere SurfaceLayerConfig (run_coupled additionally wires the slab
     # SimpleOceanConfig + coupler ocean tile to the same convention).
     surface_thermo_convention: str = "legoesm"
+    # Stable-regime (zeta>0) MOST similarity functions for the MOST-family
+    # surface bulk schemes.  Threaded into BOTH the atmosphere
+    # SurfaceLayerConfig and the coupler ocean tile (CouplerConfig) by
+    # run_coupled so the two sides of the interface always use the SAME
+    # stable functions ("dyer1974" default = byte-identical -5*zeta;
+    # "grachev2007_sheba"/"gryanik2020" = SHEBA Arctic forms;
+    # "beljaars_holtslag1991").
+    surface_stability_scheme: str = "dyer1974"
     # Tiled (mosaic) surface fluxes: when True, the atmosphere surface
     # turbulent flux is computed SEPARATELY per surface tile and area-weighted
     # — ``surface_bulk_scheme`` (e.g. coare3) runs on the OCEAN tile, the
@@ -418,12 +490,48 @@ class ExperimentConfig(NamedTuple):
     land_bucket_w_max: float = 150.0      # soil-water bucket capacity [kg/m^2]
     land_beta_min: float = 0.1            # min moisture availability (dry soil)
     land_bucket_w_init_frac: float = 0.5  # initial soil water as fraction of W_max
+    # Bucket runoff partition: Green-Ampt infiltration excess (Hortonian) +
+    # saturation excess (Dunne).  Shared with legoesm.land.slab_land.
+    land_K_infiltration: float = 1.0e-5     # saturated infiltration capacity K_s [m/s]
+    land_infil_suction_boost: float = 2.0   # Green-Ampt suction enhancement psi_f/L_f [-]
+    land_infiltration_excess: bool = True   # enable Hortonian infiltration-excess runoff
     # Route the soil-water availability through the SHARED land Jarvis (1976)
     # stomatal model (legoesm.land.carbon.stomata) instead of the bare bucket
     # ramp: beta = min(beta_soil, beta_canopy), the canopy term closing
     # stomata in low light / high VPD.  Requires land_soil_bucket (which
     # supplies beta_soil).  Off → soil-only bucket beta (byte-identical).
     land_stomatal_beta: bool = False
+    # Global maximum stomatal (canopy) conductance [mol/m2/s] for the Jarvis /
+    # Farquhar land stomata (StomataConfig.gs_max).  This is the calibration knob
+    # for land evapotranspiration: gs = gs_max * f(PAR) * f(T) * f(VPD) * f(soil),
+    # so lowering it raises canopy resistance and pulls land ET below potential.
+    # Only Vc_max25 / g1 are PFT-overridden, so gs_max stays a clean *global*
+    # lever (issue #730: the multilayer land over-transpires at potential because
+    # the free-drainage equilibrium sits at field capacity where beta_root=1 with
+    # no canopy resistance).  Default 0.3 matches StomataConfig.gs_max (byte-
+    # identical when unchanged); only active when land_stomatal_beta=True.
+    land_gs_max: float = 0.3
+    # Multilayer-land surface scheme (#730). "simple_seb" (default) = bulk SEB
+    # with the beta_soil moisture path; "two_leaf" = DifferBESS two-leaf canopy
+    # energy balance (Kelvin h_r bare-soil evap + two-leaf stomatal transpiration),
+    # which holds land ET below potential and breaks the over-evaporation wet loop
+    # that the SimpleSEB beta_soil path (=1 at field capacity, no canopy resistance)
+    # produces. Only affects use_multilayer_land runs.
+    land_surface_scheme: str = "simple_seb"
+    # Initial multilayer soil water as a fraction of saturation (theta_init =
+    # frac * theta_sat) for the cold-start (#730). Default 0.5 is byte-identical to
+    # the init_multilayer_land_state default. The multilayer over-evaporation wet
+    # loop is precip-recycling-driven (land P ~= land ET), so a DRIER start (e.g.
+    # 0.25) can tip the land into the slab-like dry attractor (less ET -> less low
+    # cloud -> warmer land) instead of the cold-cloudy wet attractor. Only affects
+    # use_multilayer_land runs.
+    land_soil_moisture_init_frac: float = 0.5
+    # Prognostic snow + snow-albedo feedback on the AMIP slab-land tile: snow
+    # water (SWE) accumulates from snowfall and melts (degree-day), brightening
+    # the land albedo (snow ~0.5-0.8 vs vegetation ~0.15) — the positive
+    # snow-albedo feedback SOTA AMIP land has.  Requires an active land tile.
+    # Off (default) ⇒ static vegetation albedo (byte-identical legacy path).
+    snow_albedo_feedback: bool = False
     gravity_wave_drag: str = "none"    # rayleigh, lindzen, mcfarlane, hines, prognostic_spectral, e3sm_cam, ml_emulator, none
 
     # Conservation
@@ -483,6 +591,11 @@ class ExperimentConfig(NamedTuple):
     # stl1-4, swvl1-4, sd on a regular lat-lon grid.  Ignored when
     # use_multilayer_land is False.
     era5_land_ic_path: str = ""
+    # Pre-staged CLM surfdata NetCDF (PFT/texture/glacier maps) for the multilayer
+    # land.  Empty => download from UCAR to /tmp (fails on compute nodes with no
+    # outbound internet, so stage the file and set this).  Ignored unless
+    # use_multilayer_land is True.
+    clm_surfdata_path: str = ""
 
     # Diagnostic T-based ice partition.  At every radiation call the
     # grid-mean cloud water q_c is split into liquid + ice via
@@ -692,6 +805,19 @@ class ExperimentConfig(NamedTuple):
     # carry is not yet SPMD-routed.  Default off preserves all existing paths.
     enable_latlon_spmd: bool = False
 
+    # Optional explicit turbulence scheme config (a
+    # ``atmosphere.physics.turbulence.config.TurbulenceConfig``) overriding the
+    # default ``TurbulenceConfig(scheme=turbulence)`` that the driver builds from
+    # the scheme STRING.  Lets a caller inject a refined / per-column scheme
+    # sub-config (e.g. a corrected per-column ``clubb_lite.C_K`` field from the
+    # LES-informed correction loop) WITHOUT a new driver signature.  Its
+    # ``.scheme`` MUST equal ``turbulence`` (it refines the same scheme, it does
+    # NOT switch schemes — validated in ``validate_strict``).  ``None`` (default)
+    # ⇒ the driver builds the default config, byte-identical to before.  Typed
+    # ``Any`` to avoid importing the atmosphere physics config into the driver
+    # config module.
+    turbulence_override: Any = None
+
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
 
@@ -753,27 +879,19 @@ class ExperimentConfig(NamedTuple):
                 "with jax.distributed collectives in one program"
             )
         if self.distributed and self.distributed_mode == "spmd":
-            # Milestone-1 limitation (codex review MAJOR): checkpoint and
-            # diagnostics writers assume a single process or an mpi4jax
-            # topology — under multi-controller SPMD every process would
-            # hit the same output path (concurrent clobber) or call
-            # device_get on non-fully-addressable global arrays.  Refuse
-            # LOUDLY until the gathered root-only writers are wired.
-            if self.output.checkpoint_days > 0:
-                errors.append(
-                    "distributed_mode='spmd' does not support "
-                    "checkpointing yet (output.checkpoint_days="
-                    f"{self.output.checkpoint_days}); set "
-                    "checkpoint_days=0 — gathered root-only restart "
-                    "writes are a follow-up"
-                )
-            if self.output.diag_days > 0:
-                errors.append(
-                    "distributed_mode='spmd' does not support the "
-                    "diagnostics writer yet (output.diag_days="
-                    f"{self.output.diag_days}); set diag_days=0 — "
-                    "gathered root-only diagnostics are a follow-up"
-                )
+            # Checkpointing IS supported (cs_spmd step 5a):
+            # ``save_checkpoint`` gathers the face-sharded state to a host
+            # replica on EVERY process (collective process_allgather —
+            # see ``_gather_spmd_tree_to_host``) and process 0 writes the
+            # standard single-file restart.
+            # Diagnostics are FULLY supported (steps 5b+5c): perf mode
+            # runs ``collect_lightweight`` (SPMD-global jnp reductions,
+            # replicated scalar results); the full ``collect()``
+            # (snapshots/profiles/monthly/CMIP — cmip_output or
+            # diagnostics_perf_mode='never') gathers the sharded fields
+            # to host replicas on every process first.  All flush/save
+            # sites are root-gated via ``_mpi_rank = jax.process_index()``.
+            pass
         if self.enable_latlon_spmd:
             # Single-process multi-device lat-band path (NOT distributed_mode).
             if g.grid_type != "latlon":
@@ -875,6 +993,13 @@ class ExperimentConfig(NamedTuple):
                 f"{_valid_thermo_conventions}, "
                 f"got {self.surface_thermo_convention!r}"
             )
+        _valid_stability = ("dyer1974", "beljaars_holtslag1991",
+                            "grachev2007_sheba", "gryanik2020")
+        if self.surface_stability_scheme not in _valid_stability:
+            errors.append(
+                f"surface_stability_scheme must be one of {_valid_stability}, "
+                f"got {self.surface_stability_scheme!r}"
+            )
         # A non-"constant" surface scheme upgrades the ATMOSPHERE surface layer
         # (via _resolve_turbulence on the turbulence config).  With
         # turbulence="none" there is no SurfaceLayerConfig to update, so the
@@ -888,21 +1013,41 @@ class ExperimentConfig(NamedTuple):
                 f"surface layer uses the same bulk-flux algorithm as the ocean "
                 f"tile; got turbulence='none'."
             )
-        # Tiled (mosaic) surface fluxes inject a per-tile flux as the louis BL
-        # bottom boundary condition; only the louis kernel accepts it, so reject
-        # the combination loudly rather than silently ignoring the request
-        # (dispatch hardening).
-        if self.surface_tiled and self.turbulence != "louis":
+        # Tiled (mosaic) surface fluxes inject a per-tile flux as the BL bottom
+        # boundary condition; only the kernels that accept the injected
+        # ``surface_flux=(tau_x, tau_y, shflx, lhflx, ustar)`` tuple can consume
+        # it (louis and the CLUBB family — clubb_lite / clubb, the latter routing
+        # the flux through clubb_step's kinematic prescribed-BC interface).
+        # Reject any other scheme loudly rather than silently ignoring the
+        # request (dispatch hardening).
+        _tiled_turbulence = ("louis", "clubb_lite", "clubb")
+        if self.surface_tiled and self.turbulence not in _tiled_turbulence:
             errors.append(
                 f"surface_tiled=True is currently supported only with "
-                f"turbulence='louis' (the kernel that consumes the injected "
-                f"tiled surface flux); got turbulence={self.turbulence!r}."
+                f"turbulence in {_tiled_turbulence} (the kernels that consume the "
+                f"injected tiled surface flux); got turbulence={self.turbulence!r}."
             )
-        if self.surface_tiled and not (self.slab_land_active or self.land_mask_path):
+        if self.surface_tiled and not (self.slab_land_active
+                                       or self.land_mask_path
+                                       or self.use_multilayer_land):
             errors.append(
                 "surface_tiled=True requires an active land tile "
-                "(--slab-land-active or a land-mask file); otherwise there is no "
-                "land tile to give its own surface scheme."
+                "(--slab-land-active, --use-multilayer-land, or a land-mask file); "
+                "otherwise there is no land tile to give its own surface scheme. "
+                "use_multilayer_land is an active tile whose land fraction comes "
+                "from --topography (elevation-derived f_land) when no mask is given."
+            )
+        # ...but the multilayer tile can only get f_land from topography — a FLAT
+        # topography gives f_land==0 everywhere (no land), which would silently
+        # no-op the requested land tile.  Require real topography OR an explicit
+        # mask when multilayer is the sole land-tile signal.
+        if (self.surface_tiled and self.use_multilayer_land
+                and not self.slab_land_active and not self.land_mask_path
+                and self.topography == "flat"):
+            errors.append(
+                "use_multilayer_land + surface_tiled with topography='flat' and no "
+                "land-mask file has NO land (elevation-derived f_land is 0 "
+                "everywhere) — pass a real --topography or a --land-mask-file."
             )
         if not (self.surface_z0_land > 0.0):
             errors.append(
@@ -917,6 +1062,20 @@ class ExperimentConfig(NamedTuple):
                 "land_soil_bucket=True requires an active land tile "
                 "(--slab-land-active or a land-mask file); there is no land "
                 "surface to carry soil water otherwise."
+            )
+        # NaN-safe guards: ``NaN > 0`` / ``NaN < 0`` are both False, so a bare
+        # comparison would let a NaN slip through and poison the infiltration cap.
+        if not (math.isfinite(self.land_K_infiltration)
+                and self.land_K_infiltration > 0.0):
+            errors.append(
+                f"land_K_infiltration must be a positive, finite saturated "
+                f"infiltration capacity [m/s]; got {self.land_K_infiltration!r}."
+            )
+        if not (math.isfinite(self.land_infil_suction_boost)
+                and self.land_infil_suction_boost >= 0.0):
+            errors.append(
+                f"land_infil_suction_boost (Green-Ampt psi_f/L_f) must be finite "
+                f"and >= 0; got {self.land_infil_suction_boost!r}."
             )
         if not (self.land_bucket_w_max > 0.0):
             errors.append(
@@ -933,12 +1092,39 @@ class ExperimentConfig(NamedTuple):
                 f"land_bucket_w_init_frac (initial fill fraction) must be in "
                 f"[0, 1]; got {self.land_bucket_w_init_frac!r}."
             )
+        # gs_max is a physical conductance [mol/m2/s]: must be finite and
+        # strictly positive (nan/<=0 would zero or NaN the whole land latent
+        # flux).  Upper sanity bound 2.0 is well above the StomataConfig
+        # __param_spec__ tunable range (0.099, 0.9).
+        if not (0.0 < self.land_gs_max <= 2.0):
+            errors.append(
+                f"land_gs_max (max stomatal conductance [mol/m2/s]) must be "
+                f"finite and in (0, 2]; got {self.land_gs_max!r}."
+            )
+        # Soil-moisture init fraction of saturation: finite, in (0, 1].
+        if not (0.0 < self.land_soil_moisture_init_frac <= 1.0):
+            errors.append(
+                f"land_soil_moisture_init_frac (theta_init/theta_sat) must be "
+                f"finite and in (0, 1]; got {self.land_soil_moisture_init_frac!r}."
+            )
+        # Land surface-scheme membership (mirror the model_driver dispatch so a
+        # typo fails here, not at run time).
+        _valid_land_surface = ("simple_seb", "two_leaf")
+        if self.land_surface_scheme not in _valid_land_surface:
+            errors.append(
+                f"land_surface_scheme must be one of {_valid_land_surface}, "
+                f"got {self.land_surface_scheme!r}"
+            )
         # Stomatal soil-water limitation needs the bucket to supply beta_soil.
-        if self.land_stomatal_beta and not self.land_soil_bucket:
+        if (self.land_stomatal_beta and not self.land_soil_bucket
+                and not self.use_multilayer_land):
             errors.append(
                 "land_stomatal_beta=True requires land_soil_bucket=True "
                 "(the bucket supplies the soil availability beta_soil that the "
-                "Jarvis stomatal model down-regulates)."
+                "Jarvis stomatal model down-regulates) — UNLESS use_multilayer_land "
+                "is set, in which case the Richards multilayer soil supplies the "
+                "root-zone moisture availability instead (the stomata are threaded "
+                "into MultiLayerLandConfig.stomata, PR #715)."
             )
         # Optional cloud-tuning override bounds (mirror CloudConfig.__param_spec__
         # so an out-of-range knob fails early, not deep in the cloud diagnosis).
@@ -946,11 +1132,28 @@ class ExperimentConfig(NamedTuple):
             ("cloud_rh_crit", 0.5, 0.99),
             ("cloud_q_c_diagnostic", 5.0e-5, 1.0e-3),
             ("cloud_conv_cloud_max", 0.1, 1.0),
+            ("cloud_p_xr", 0.05, 1.0),
+            ("cloud_alpha_xr", 10.0, 1000.0),
         ):
             _v = getattr(self, _f)
             if _v is not None and not (_lo <= _v <= _hi):
                 errors.append(
                     f"{_f}={_v!r} out of range [{_lo}, {_hi}]"
+                )
+        if self.turbulence_override is not None:
+            from legoesm.atmosphere.physics.turbulence.config import (
+                TurbulenceConfig,
+            )
+            if not isinstance(self.turbulence_override, TurbulenceConfig):
+                errors.append(
+                    "turbulence_override must be a TurbulenceConfig, got "
+                    f"{type(self.turbulence_override).__name__}"
+                )
+            elif self.turbulence_override.scheme != self.turbulence:
+                errors.append(
+                    f"turbulence_override.scheme={self.turbulence_override.scheme!r} "
+                    f"must equal turbulence={self.turbulence!r} (an override refines "
+                    f"the same scheme's sub-config, it does not switch schemes)"
                 )
         _valid_gwd = (
             "rayleigh", "lindzen", "mcfarlane", "hines",
@@ -1065,6 +1268,41 @@ class ExperimentConfig(NamedTuple):
                     "aimip_variant='classical' requires "
                     "cloud_scheme='xu_randall', "
                     f"got {self.cloud_scheme!r}"
+                )
+
+        if self.output.evaluation.enabled:
+            ceval_py = self.output.evaluation.climateeval_python
+            if not ceval_py or not (
+                Path(ceval_py).is_file() and os.access(ceval_py, os.X_OK)
+            ):
+                errors.append(
+                    "output.evaluation.enabled=True requires "
+                    "climateeval_python to point at a real, executable "
+                    f"ClimateEval Python interpreter (got {ceval_py!r}). "
+                    "ClimateEval is a separate, externally-installed tool "
+                    "(never a legoESM dependency) — set "
+                    "--evaluation-climateeval-python or the "
+                    "LEGOESM_CLIMATEEVAL_PYTHON environment variable. See "
+                    "docs/user-guide/climateeval_evaluation.md for setup."
+                )
+            data_root = self.output.evaluation.data_root_dir
+            if not data_root or not Path(data_root).is_dir():
+                errors.append(
+                    "output.evaluation.enabled=True requires data_root_dir "
+                    f"to point at a real ClimateEval reference-data "
+                    f"directory (got {data_root!r}). Set "
+                    "--evaluation-data-root-dir or the "
+                    "LEGOESM_CLIMATEEVAL_DATA_ROOT environment variable. "
+                    "See docs/user-guide/climateeval_evaluation.md."
+                )
+
+        # Seasonal insolation alignment (radiation-only; see the field doc).
+        if self.insolation_start_doy is not None:
+            _doy = self.insolation_start_doy
+            if not (isinstance(_doy, (int, float)) and 1.0 <= float(_doy) < 366.0):
+                errors.append(
+                    "insolation_start_doy must be None or a noleap day-of-year "
+                    f"in [1, 366), got {self.insolation_start_doy!r}"
                 )
 
         if errors:
@@ -1449,14 +1687,26 @@ _SUB_CONFIGS = {
 def experiment_config_to_dict(config: ExperimentConfig) -> dict:
     """Serialize ExperimentConfig to a JSON-safe dict.
 
-    Sub-configs (grid, dycore, output) are inlined as nested dicts.
-    This is the canonical serialization format.
+    Sub-configs (grid, dycore, output) are inlined as nested dicts. This
+    is the canonical serialization format. ``output.evaluation`` is
+    itself a nested ``EvaluationConfig`` NamedTuple one level deeper —
+    without this it round-trips through ``json.dumps`` as a bare
+    positional list (NamedTuple is a tuple), losing field names.
     """
     d = config._asdict()
+    # ``turbulence_override`` is a RUNTIME-ONLY injection (it may carry a
+    # per-column JAX array C_K) — it is NOT persisted: the serialized config is
+    # the base config, and the override is re-applied in memory after load (the
+    # correction loop's build_driver). Drop it so it cannot be stringified +
+    # silently corrupted on round-trip.
+    d["turbulence_override"] = None
     for key in _SUB_CONFIGS:
         sub = d[key]
         if hasattr(sub, '_asdict'):
-            d[key] = sub._asdict()
+            sub_d = sub._asdict()
+            if hasattr(sub_d.get('evaluation'), '_asdict'):
+                sub_d['evaluation'] = sub_d['evaluation']._asdict()
+            d[key] = sub_d
     return d
 
 
@@ -1470,8 +1720,19 @@ def experiment_config_from_dict(d: dict) -> ExperimentConfig:
     sub_values = {}
     for key, cls in _SUB_CONFIGS.items():
         if key in d and isinstance(d[key], dict):
+            sub_d = dict(d[key])
+            if isinstance(sub_d.get('evaluation'), dict):
+                known_eval = set(EvaluationConfig._fields)
+                filtered_eval = {
+                    k: v for k, v in sub_d['evaluation'].items() if k in known_eval
+                }
+                # ``suites`` is a tuple field; JSON round-trips it as a list, so
+                # coerce back so the reconstructed config == the original.
+                if isinstance(filtered_eval.get('suites'), list):
+                    filtered_eval['suites'] = tuple(filtered_eval['suites'])
+                sub_d['evaluation'] = EvaluationConfig(**filtered_eval)
             known_sub = set(cls._fields)
-            filtered = {k: v for k, v in d[key].items() if k in known_sub}
+            filtered = {k: v for k, v in sub_d.items() if k in known_sub}
             sub_values[key] = cls(**filtered)
 
     # Filter top-level fields
@@ -1492,6 +1753,9 @@ def config_to_dict(config) -> dict:
     ``forcing.amip_config`` for serialization (federation carve, Step 3).
     """
     d = config._asdict()
+    # Runtime-only injection — never serialized (see experiment_config_to_dict).
+    if "turbulence_override" in d:
+        d["turbulence_override"] = None
     for key, val in d.items():
         if hasattr(val, "_asdict"):
             d[key] = val._asdict()

@@ -395,6 +395,95 @@ def linear_eos(
 
 
 # ==============================================================================
+# NEMO "simplified" EOS (S-EOS / np_seos), Roquet et al. (2015), Ocean
+# Modelling 90, 29-43; NEMO ``src/OCE/TRA/eosbn2.F90`` (np_seos branch).
+#
+# A polynomial in (potential temperature, practical salinity, depth) that
+# retains the leading thermobaric + cabbeling nonlinearities of the full
+# TEOS-10/EOS-80 forms while staying cheap and tunable.  Density anomaly:
+#
+#   zt = T - T0 ;  zs = S - S0 ;  zh = depth [m, positive down]
+#   zn = - a0 (1 + ½ λ1 zt + μ1 zh) zt        (temperature, thermobaric μ1)
+#        + b0 (1 - ½ λ2 zs - μ2 zh) zs        (salinity,    thermobaric μ2)
+#        - nu  zt zs                          (cabbeling)
+#   ρ  = ρ0 + zn
+#
+# Defaults are the Kamm et al. (2025) DINO coefficients (their Table /
+# DINO ``namelist_cfg`` &nameos): a0=0.165, b0=0.76554, λ1=0.06,
+# λ2=μ2=ν=0, μ1=1.4970e-4, T0=10 °C, S0=35 PSU, ρ0=1026 kg/m³ — i.e. a
+# linear-in-S, weakly-nonlinear-in-T state with a thermobaric term, used
+# as the NEMO oracle for the DINO ACC thermocline comparison.
+# ==============================================================================
+
+class NemoSEOSConfig(NamedTuple):
+    """Coefficients for the NEMO simplified EOS (Roquet et al. 2015).
+
+    ρ = ρ0 - a0(1 + ½λ1·zt + μ1·zh)·zt + b0(1 - ½λ2·zs - μ2·zh)·zs - ν·zt·zs
+    with zt = T - T0, zs = S - S0, zh = depth [m].
+
+    Defaults are the Kamm et al. (2025) DINO configuration.
+    """
+    rho0: float = 1026.0       # Reference (Boussinesq) density [kg/m³]
+    a0: float = 0.165          # Thermal contraction coefficient [kg/m³/K]
+    b0: float = 0.76554        # Haline contraction coefficient [kg/m³/PSU]
+    lambda1: float = 0.06      # T·T (cabbeling-in-T) coefficient [1/K]
+    lambda2: float = 0.0       # S·S (cabbeling-in-S) coefficient [1/PSU]
+    mu1: float = 1.4970e-4     # T thermobaric coefficient [1/m]
+    mu2: float = 0.0           # S thermobaric coefficient [1/m]
+    nu: float = 0.0            # T·S cabbeling coefficient [kg/m³/K/PSU]
+    T0: float = 10.0           # Reference temperature [°C]
+    S0: float = 35.0           # Reference salinity [PSU]
+
+
+def nemo_seos_eos(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p: jnp.ndarray,
+    cfg: NemoSEOSConfig | None = None,
+) -> jnp.ndarray:
+    """In-situ density from the NEMO simplified EOS (Roquet et al. 2015).
+
+    Mirrors NEMO ``eosbn2.F90`` (``np_seos``): the density anomaly ``zn``
+    is added to ``ρ0`` (NEMO stores ``prd = zn / ρ0``; ``ρ = ρ0(1+prd) =
+    ρ0 + zn``).  Depth enters via the Boussinesq hydrostatic relation
+    ``zh = p / (ρ0·g)`` (NEMO uses ``gdept`` in metres).
+
+    Pressure-vs-depth note: ``p`` is the SAME 3rd argument every legoESM EOS
+    takes — the dycore's hydrostatic pressure ``p = ∫ρg dz`` (positive,
+    increasing downward, eta-free in the baroclinic PGF path).  ``zh =
+    p/(ρ0·g)`` is therefore the Boussinesq reconstruction of geometric depth;
+    it equals NEMO's ``gdept`` to ``O(ρ'/ρ0) ≈ 0.3 %`` (the in-situ vs
+    reference-density difference).  For the DINO thermobaric term that ~12 m
+    depth error at 4000 m perturbs ``zn`` by ``~3e-3 kg/m³`` — negligible vs
+    the ~1 kg/m³ density signal, and in the physically correct direction (real
+    pressure, not geometric depth, sets compressibility).  This matches how
+    ``wright``/``unesco80``/``veros_*`` already consume ``p``.
+
+    Parameters
+    ----------
+    T : array — Potential temperature [°C].
+    S : array — Practical salinity [PSU].
+    p : array — Pressure [Pa]; depth recovered as ``p/(ρ0·g)``.
+    cfg : NemoSEOSConfig — Coefficients (defaults to the DINO set).
+
+    Returns
+    -------
+    array : In-situ density [kg/m³].
+    """
+    if cfg is None:
+        cfg = NemoSEOSConfig()
+    zt = T - cfg.T0
+    zs = S - cfg.S0
+    zh = p / (cfg.rho0 * constants.g)   # Boussinesq depth [m, positive down]
+    zn = (
+        -cfg.a0 * (1.0 + 0.5 * cfg.lambda1 * zt + cfg.mu1 * zh) * zt
+        + cfg.b0 * (1.0 - 0.5 * cfg.lambda2 * zs - cfg.mu2 * zh) * zs
+        - cfg.nu * zt * zs
+    )
+    return cfg.rho0 + zn
+
+
+# ==============================================================================
 # UNESCO 1980 EOS coefficients (international one-atmosphere standard;
 # Fofonoff & Millard 1983 UNESCO Tech. Papers in Marine Science No. 44).
 # Veros's ``eq_of_state_type=3`` is the closely-related Jackett &
@@ -1473,8 +1562,8 @@ def veros_gsw_int_drhodTS_dynamic_enthalpy(
 # by both make_eos_fn (unknown-scheme ValueError) and config validators
 # (fail-fast at construction) so the valid set is never duplicated.
 VALID_EOS_SCHEMES = frozenset(
-    {"wright", "linear", "unesco80", "veros_nonlin2", "veros_nonlin3",
-     "veros_gsw"}
+    {"wright", "linear", "nemo_seos", "unesco80", "veros_nonlin2",
+     "veros_nonlin3", "veros_gsw"}
 )
 
 
@@ -1497,6 +1586,7 @@ def _eos_compute_dtype_adapter(base_fn):
 
 
 def make_eos_fn(eos="wright", eos_linear=None,
+                eos_nemo_seos: NemoSEOSConfig | None = None,
                 eos_veros_nonlin2: VerosNonlin2Config | None = None,
                 eos_veros_nonlin3: VerosNonlin3Config | None = None,
                 eos_veros_gsw: VerosGswConfig | None = None):
@@ -1505,7 +1595,10 @@ def make_eos_fn(eos="wright", eos_linear=None,
     Parameters
     ----------
     eos : str
-        ``"wright"`` (default, Wright 1997), ``"linear"``, or
+        ``"wright"`` (default, Wright 1997), ``"linear"``,
+        ``"nemo_seos"`` (NEMO simplified EOS, Roquet et al. 2015 —
+        the DINO oracle EOS, defaults to the Kamm et al. 2025
+        coefficients), or
         ``"unesco80"`` (UNESCO 1980 polynomial — close approximation
         to Veros's ``eq_of_state_type=3`` JM95 form, within ~0.001 kg/m³
         at typical ocean T/S; bit-exact Veros parity requires reading
@@ -1516,6 +1609,9 @@ def make_eos_fn(eos="wright", eos_linear=None,
     eos_linear : LinearEOSConfig or None
         Parameters for linear EOS.  Ignored unless *eos* is ``"linear"``.
         If ``None`` and *eos* is ``"linear"``, default parameters are used.
+    eos_nemo_seos : NemoSEOSConfig or None
+        Coefficients for the NEMO simplified EOS.  Ignored unless *eos*
+        is ``"nemo_seos"``.  If ``None``, the DINO defaults are used.
 
     Returns
     -------
@@ -1540,6 +1636,11 @@ def make_eos_fn(eos="wright", eos_linear=None,
                 beta_S=cfg.beta_S, T_ref=cfg.T_ref, S_ref=cfg.S_ref,
             )
         return _eos_compute_dtype_adapter(_linear)
+    elif eos == "nemo_seos":
+        cfg = eos_nemo_seos if eos_nemo_seos is not None else NemoSEOSConfig()
+        def _nemo_seos(T, S, p):
+            return nemo_seos_eos(T, S, p, cfg=cfg)
+        return _eos_compute_dtype_adapter(_nemo_seos)
     elif eos == "unesco80":
         return _eos_compute_dtype_adapter(unesco80_eos)
     elif eos == "veros_nonlin2":
@@ -1900,3 +2001,33 @@ def compute_ocean_rho_and_pressure(state, z_coord, jacobian, eos_fn=None):
         h_actual=h_actual,
     )
     return rho, p_hydro
+
+
+# --- NEMO eos_fzp freezing point (eosbn2.F90; TEOS-10 branch) ---------------
+# Polynomial fit of the conservative-temperature freezing point (Roquet et
+# al. 2015 TEOS-10 polynomial EOS, as hard-coded in NEMO eos_fzp) plus the
+# NEMO 7.53e-4 K/m pressure lowering.  ORCA1 runs ln_teos10=.true., so this
+# is the oracle's ISF/sea-ice freezing-point function.
+_NEMO_FZP_S0 = 35.16504          # TEOS-10 reference salinity SA0 [g/kg]
+_NEMO_FZP_C0 = -5.87701e-2       # eos_fzp polynomial coefficients
+_NEMO_FZP_C1 = 2.07679e-2
+_NEMO_FZP_C2 = -3.12775e-2
+_NEMO_FZP_C3 = 2.28348e-2
+_NEMO_FZP_C4 = -9.64972e-3
+_NEMO_FZP_C5 = 1.46873e-3
+_NEMO_FZP_DEP = -7.53e-4         # [degC/m] freezing-point pressure lowering
+
+
+def nemo_eos_fzp(S_psu, depth_m=None):
+    """Seawater freezing point [°C] — NEMO ``eos_fzp`` (TEOS-10 branch).
+
+    ``T_f(S, z) = S · P(√(S/S0)) − 7.53e-4 · z`` with the eosbn2.F90
+    polynomial ``P``; ``depth_m`` positive down (``None`` = surface).
+    """
+    zs = jnp.sqrt(jnp.abs(jnp.asarray(S_psu)) / _NEMO_FZP_S0)
+    poly = ((((_NEMO_FZP_C5 * zs + _NEMO_FZP_C4) * zs + _NEMO_FZP_C3) * zs
+             + _NEMO_FZP_C2) * zs + _NEMO_FZP_C1) * zs + _NEMO_FZP_C0
+    tf = poly * jnp.asarray(S_psu)
+    if depth_m is not None:
+        tf = tf + _NEMO_FZP_DEP * jnp.asarray(depth_m)
+    return tf

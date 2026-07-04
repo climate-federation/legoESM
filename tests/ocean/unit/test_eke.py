@@ -615,8 +615,8 @@ def test_L2_eady_growth_returns_int_N_dz():
     )
     (E, rho, S_x, S_y, z, jac, f), vcfg, _beta = _coupling_with_beta(0.01)
     out = _eady_growth_and_length(rho, S_x, S_y, z, jac, f, vcfg)
-    assert len(out) == 5
-    sigma_bar, _L, _wet, int_N_dz, sigma = out
+    assert len(out) == 6              # dz_half appended (Treguier reuse)
+    sigma_bar, _L, _wet, int_N_dz, sigma, _dzh = out
     assert int_N_dz.shape == (4, 6)
     assert jnp.all(int_N_dz >= 0.0) and jnp.all(jnp.isfinite(int_N_dz))
     assert float(jnp.mean(int_N_dz)) > 0.0   # stratified -> ∫N dz > 0

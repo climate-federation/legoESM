@@ -66,13 +66,22 @@ class TestMpasToMpasConservativeRemap(unittest.TestCase):
         from legoesm.grids.conservative_regrid import apply_conservative_regrid
         src, dst = self.fine, self.coarse
         w = self._weights(src, dst, n_sub=8)
+        A_src = jnp.asarray(src.areaCell)
+        A_dst = jnp.asarray(dst.areaCell)
         f_src = jnp.asarray(np.sin(np.asarray(src.latCell))
                             + 2.0 * np.cos(np.asarray(src.lonCell)))
         f_dst = apply_conservative_regrid(f_src, w)
-        int_src = float(jnp.sum(f_src * jnp.asarray(src.areaCell)))
-        int_dst = float(jnp.sum(f_dst * jnp.asarray(dst.areaCell)))
-        rel = abs(int_dst - int_src) / abs(int_src)
-        self.assertLess(rel, 0.15)  # honest first-order bound at n_sub=8 on a coarse pair
+        int_src = float(jnp.sum(f_src * A_src))
+        int_dst = float(jnp.sum(f_dst * A_dst))
+        # ``sin(lat) + 2 cos(lon)`` integrates to ~0 over the sphere (both terms
+        # are antisymmetric / full-period), so the SIGNED ``int_src`` is a
+        # near-cancellation residual (~0.1% of the field magnitude) and
+        # ``|Δint| / |int_src|`` is a meaningless 0/0 ratio.  Normalise the
+        # conservation error by the transported quantity's L1-weighted
+        # magnitude — the physically correct, sign-robust denominator.
+        scale = float(jnp.sum(jnp.abs(f_src) * A_src))
+        rel = abs(int_dst - int_src) / scale
+        self.assertLess(rel, 0.01)  # first-order conservative: |Δintegral| << |field|
 
     def test_gate4_conservation_converges_first_order(self):
         from legoesm.grids.conservative_regrid import apply_conservative_regrid

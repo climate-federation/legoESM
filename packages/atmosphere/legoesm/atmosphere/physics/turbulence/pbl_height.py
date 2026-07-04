@@ -31,6 +31,38 @@ from legoesm import constants
 from legoesm.atmosphere.physics._shared import virtual_temperature
 
 
+__physics_contract__ = {
+    "summary": (
+        "Planetary boundary-layer height diagnosis from the bulk Richardson "
+        "number, with a smooth (sigmoid-weighted / first-crossing) estimate "
+        "for a differentiable h_pbl."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "u": "m/s", "v": "m/s",
+        "p_full": "Pa", "z_full": "m (above surface)",
+    },
+    "outputs": {"h_pbl": "m"},
+    "sign_convention": (
+        "Diagnostic only (no state tendency). h_pbl >= 0, clipped to "
+        "[h_min, h_max]; the PBL top is the lowest height where the bulk "
+        "Richardson number Ri_b crosses Ri_crit. Ri_b uses wind SHEAR from "
+        "the surface (not absolute wind), so a barotropic no-shear wind does "
+        "not deepen the PBL. z increases upward; level index -1 is the surface."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Vogelezang & Holtslag (1996), Boundary-Layer Meteorol. 81, 245-269; "
+        "Seidel et al. (2010), JGR 115, D16113"
+    ),
+    "idealized_test": (
+        "tests/atmosphere/hydrostatic/unit/test_turbulence.py: a column with a "
+        "capping inversion returns h_pbl in [h_min, h_max] near the Ri_crit "
+        "crossing; a no-shear (barotropic) wind does not deepen the PBL."
+    ),
+}
+
+
 __param_spec__ = {
     "PBLHeightConfig": {
         "scheme_key": "atm.pblh.PBLHeightConfig",
@@ -60,7 +92,10 @@ class PBLHeightConfig(NamedTuple):
     sharpness : float
         Sigmoid sharpness for smooth method (default 20.0).
     method : str
-        "smooth" (sigmoid-weighted) or "interp" (linear interpolation).
+        CURRENTLY ADVISORY / not read internally — callers select
+        ``diagnose_pbl_height`` vs ``diagnose_pbl_height_interp`` directly;
+        setting this field has no effect. "smooth" (sigmoid-weighted) or
+        "interp" (linear interpolation).
     """
     Ri_crit: float = 0.25
     h_min: float = 100.0

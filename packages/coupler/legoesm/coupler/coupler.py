@@ -234,7 +234,7 @@ def ocean_tile_response(
         )
     rho = forcing.rho_lowest
 
-    valid_schemes = ("constant", "coare3", "large_yeager")
+    valid_schemes = ("constant", "most", "coare3", "large_yeager")
     if config.bulk_scheme not in valid_schemes:
         raise ValueError(
             f"Unknown coupler bulk_scheme {config.bulk_scheme!r}; "
@@ -242,11 +242,13 @@ def ocean_tile_response(
         )
     # The aerobulk convention (SST-dependent L_vap, moist cp_air, Goff
     # q_sat) is the NEMO/AeroBulk MOST set — it engages ONLY on the MOST
-    # schemes (coare3/large_yeager).  The 'constant' fixed-coefficient
-    # closure is a different closure entirely (constant C_H/C_E, constant
-    # L_v/c_pd in simple_bulk_fluxes), so applying Goff q_sat there alone
-    # would be a HALF-convention; keep it on Tetens (codex round-20).
-    _is_most = config.bulk_scheme in ("coare3", "large_yeager")
+    # solver schemes ("most"/"coare3"/"large_yeager").  The 'constant'
+    # fixed-coefficient closure is a different closure entirely (constant
+    # C_H/C_E, constant L_v/c_pd in simple_bulk_fluxes), so applying Goff
+    # q_sat there alone would be a HALF-convention; keep it on Tetens
+    # (codex round-20).  ``most`` = iterative MOST at the fixed ``ocean_z0``
+    # roughness (parity with the sea-ice/land/lake dispatchers).
+    _is_most = config.bulk_scheme in ("most", "coare3", "large_yeager")
     _use_goff = _thermo_conv == "aerobulk" and _is_most
     q_sfc = _Q_SAT_SALINE_FACTOR * (
         saturation_mixing_ratio_goff if _use_goff
@@ -269,6 +271,7 @@ def ocean_tile_response(
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
             thermo_convention=_thermo_conv,
+            stability_scheme=config.stability_scheme,
         )
     else:
         # Constant neutral coefficients (original behavior).  Sub-grid

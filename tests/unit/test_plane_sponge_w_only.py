@@ -148,7 +148,7 @@ def test_crm_scripts_set_sam_faithful_sponge():
     repo = Path(__file__).resolve().parents[2]
     for script in ("run_gate_plane.py", "run_lba_plane.py",
                    "run_rcemip_plane.py"):
-        src = (repo / "scripts" / script).read_text()
+        src = (repo / "scripts" / "run" / script).read_text()
         assert "sponge_w_only=True" in src, f"{script}: w-only sponge"
         assert 'sponge_profile_shape="sam_rational"' in src, (
             f"{script}: SAM rational sponge taper")

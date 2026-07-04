@@ -1282,14 +1282,17 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         import ast
         import inspect
         from legoesm.core import fv3_sw_core
-        from legoesm.core.fv3_sw_core import d2a2c_vect
+        from legoesm.core.fv3_sw_core import d2a2c_vect, d2a2c_d_to_a
 
-        # Probe the actual halo depth used by `d2a2c_vect` by parsing
-        # its source.  Accept either `halo=<int>` directly or
-        # `halo=<name>` with `<name> = <int>` assigned earlier in
-        # the function body.
-        src = inspect.getsource(d2a2c_vect)
-        tree = ast.parse(src).body[0]  # FunctionDef
+        # Probe the actual halo depth used by the non-duogrid d2a2c path
+        # by parsing its source.  The halo=2 vector exchange was extracted
+        # from `d2a2c_vect` into the `d2a2c_d_to_a` D->A helper (called via
+        # `d2a2c_global_fields`; P4 phase-1b approach C), so probe BOTH
+        # bodies.  Accept either `halo=<int>` directly or `halo=<name>`
+        # with `<name> = <int>` assigned earlier in the function body.
+        src = "\n".join(
+            inspect.getsource(fn) for fn in (d2a2c_vect, d2a2c_d_to_a))
+        tree = ast.parse(src)  # Module with both FunctionDefs
         # First, build a map of simple int assignments `name = <int>`.
         int_locals: dict[str, int] = {}
         for stmt in ast.walk(tree):
@@ -1315,9 +1318,10 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         self.assertGreaterEqual(
             len(halo_values), 1,
             "Could not resolve `pad_halo_vector(..., halo=...)` to an "
-            "integer literal inside `d2a2c_vect`.  The priority-3 "
-            "architectural guard cannot probe the halo depth — update "
-            "the test to match the current implementation.",
+            "integer literal inside the `d2a2c_vect` / `d2a2c_d_to_a` "
+            "non-duogrid chain.  The priority-3 architectural guard "
+            "cannot probe the halo depth — update the test to match the "
+            "current implementation.",
         )
         actual_halo = halo_values[0]
 
@@ -1493,11 +1497,17 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         """
         import ast
         import inspect
-        from legoesm.core.fv3_sw_core import d2a2c_vect
+        from legoesm.core.fv3_sw_core import d2a2c_vect, d2a2c_d_to_a
 
-        src = inspect.getsource(d2a2c_vect)
+        # The halo=2 vector exchange was extracted from `d2a2c_vect` into
+        # the `d2a2c_d_to_a` D->A helper (called via `d2a2c_global_fields`;
+        # P4 phase-1b approach C).  Probe both function bodies so the
+        # offset-table-shape invariant stays locked wherever the
+        # `pad_halo_vector` call physically lives in the non-duogrid chain.
+        src = "\n".join(
+            inspect.getsource(fn) for fn in (d2a2c_vect, d2a2c_d_to_a))
         tree = ast.parse(src)
-        # Find the pad_halo_vector call inside d2a2c_vect.
+        # Find the pad_halo_vector call inside the d2a2c chain.
         pad_calls = []
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call)
@@ -1506,8 +1516,10 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                 pad_calls.append(node)
         self.assertGreaterEqual(
             len(pad_calls), 1,
-            "Could not locate `pad_halo_vector(...)` call in "
-            "`d2a2c_vect`.  Has the function been refactored?",
+            "Could not locate `pad_halo_vector(...)` call in the "
+            "`d2a2c_vect` / `d2a2c_d_to_a` non-duogrid chain.  Has the "
+            "function been refactored?  Update the probe to the function "
+            "now holding the halo=2 vector exchange.",
         )
 
         def resolve_halo_value(kw_value, tree):

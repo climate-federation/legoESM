@@ -42,6 +42,48 @@ class CourantNumbers(NamedTuple):
     acoustic: jax.Array
 
 
+def column_sound_speed_upper_bound(height_coord, theta_prime=None) -> jax.Array:
+    """Conservative UPPER BOUND on the dry-air sound speed ``c_s ≈ sqrt(γ R_d T_max)``
+    over a column, ``γ = c_pd/c_vd``.
+
+    ``T_max ≈ max(θ_ref + |θ'|) · max(π_ref)`` — the two maxima may occur at DIFFERENT
+    levels, so the product OVERestimates the true ``max(T)`` (intentional: it only ever
+    inflates the reported acoustic Courant, never under-reports).  ``theta_prime``
+    (``state.theta_prime.data``) adds the warm-perturbation contribution; ``None`` uses
+    only ``θ_ref`` — the REST-state bound, exact for a pre-run pre-flight where no eddies
+    have developed.  The single home for the sound-speed bound, reused by the Courant
+    diagnostics (no re-derivation).
+    """
+    gamma = constants.c_pd / constants.c_vd
+    theta_total = height_coord.theta_ref
+    if theta_prime is not None:
+        theta_total = theta_total + jnp.abs(theta_prime)
+    T_max = jnp.max(theta_total) * jnp.max(height_coord.exner_ref)
+    return jnp.sqrt(gamma * constants.R_d * T_max)
+
+
+def acoustic_courant_horizontal(
+    height_coord, grid, dt: float, n_acoustic_substeps: int = 1, theta_prime=None,
+) -> jax.Array:
+    """HORIZONTAL acoustic Courant ``c_s · (dt/n_acoustic) / min(dx, dy)``.
+
+    Distinct from :class:`CourantNumbers`.``acoustic`` (which uses ``min(dx, dy, dz)``):
+    when the dycore solves the VERTICAL acoustic mode SEMI-IMPLICITLY (unconditionally
+    stable in the vertical — e.g. the plane LES with ``semi_implicit_acoustic=True`` +
+    ``substep_horizontal_acoustic=True``), the small ``dz`` does NOT bind the acoustic
+    CFL; only the explicit HORIZONTAL acoustic mode does, so the binding length is the
+    horizontal spacing.  Wind-independent (depends on ``c_s``, ``dt``, ``n_acoustic``,
+    ``dx`` only), so it is meaningful on a REST state — a valid PRE-FLIGHT before the run.
+    """
+    if n_acoustic_substeps < 1:
+        raise ValueError(
+            f"n_acoustic_substeps={n_acoustic_substeps} must be >= 1 "
+            "(acoustic CFL meaningless for zero/negative substep counts).")
+    c_sound = column_sound_speed_upper_bound(height_coord, theta_prime)
+    dx_min = jnp.minimum(grid.dx, grid.dy)
+    return c_sound * (dt / float(n_acoustic_substeps)) / dx_min
+
+
 def compute_courant_numbers_plane(
     state, height_coord, grid, dt: float,
     n_acoustic_substeps: int = 1,
@@ -93,15 +135,9 @@ def compute_courant_numbers_plane(
     dz_min = jnp.min(height_coord.dz)
     c_v = max_abs_w * dt / dz_min
     # Acoustic: include the θ' contribution to T so warm perturbations
-    # raise c_s. ``T ≈ (θ_ref + θ') · π_ref`` is a first-order
-    # approximation that ignores Exner perturbations (small for
-    # |θ'/θ| < 0.05); use it as a conservative upper bound on c_s.
-    gamma = constants.c_pd / constants.c_vd
-    theta_total_max = jnp.max(
-        height_coord.theta_ref + jnp.abs(state.theta_prime.data),
-    )
-    T_max = theta_total_max * jnp.max(height_coord.exner_ref)
-    c_sound = jnp.sqrt(gamma * constants.R_d * T_max)
+    # raise c_s (a conservative upper bound; see
+    # :func:`column_sound_speed_upper_bound` — the single sound-speed home).
+    c_sound = column_sound_speed_upper_bound(height_coord, state.theta_prime.data)
     delta_min = jnp.minimum(
         jnp.minimum(grid.dx, grid.dy), dz_min,
     )
@@ -197,15 +233,10 @@ def suggest_stable_dt(
         max_abs_u / grid.dx, max_abs_v / grid.dy, eps,
     )
     dt_v = courant_target * dz_min / max(max_abs_w, eps)
-    # Sound speed from the total state (Codex iter-1: include θ'
-    # contribution so warm perturbations raise c_s).
-    gamma = constants.c_pd / constants.c_vd
-    theta_total_max = float(jnp.max(
-        height_coord.theta_ref + jnp.abs(state.theta_prime.data),
-    ))
-    exner_max = float(jnp.max(height_coord.exner_ref))
-    T_max = theta_total_max * exner_max
-    c_sound = (gamma * constants.R_d * T_max) ** 0.5
+    # Sound speed from the total state (incl. θ' so warm perturbations raise c_s) —
+    # the SAME conservative bound the Courant diagnostic uses (no re-derivation).
+    c_sound = float(column_sound_speed_upper_bound(
+        height_coord, state.theta_prime.data))
     delta_min = min(grid.dx, grid.dy, dz_min)
     # Acoustic substep budget: outer dt can be n_substeps × the
     # bare acoustic limit before the substep CFL bites.

@@ -1,9 +1,10 @@
-"""GM/Redi isopycnal mixing on the MPAS Voronoi mesh — API skeleton.
+"""GM/Redi isopycnal mixing on the MPAS Voronoi mesh.
 
-**Status (2026-04-28):** This module defines the public API for the
-MPAS port of GM/Redi but does not yet implement it.  Calling any
-function below raises ``NotImplementedError`` with a pointer to the
-implementation plan at ``docs/ocean/experiments/gm_redi_mpas_plan.md``.
+**Status:** The centered GM/Redi scheme is implemented —
+``compute_isopycnal_slopes_mpas``, ``gm_redi_tracer_tendency_centered_mpas``
+and ``gm_redi_tracer_tendency_mpas`` are live.  Only the TRIAD slope-limited
+path is still pending and raises ``NotImplementedError`` with a pointer to
+the implementation plan at ``docs/ocean/experiments/gm_redi_mpas_plan.md``.
 
 The signatures mirror ``gm_redi_tracer_tendency_latlon`` in
 ``gm_redi_latlon_cgrid.py`` so the dycore hook in
@@ -54,6 +55,40 @@ if TYPE_CHECKING:
     from legoesm.grids.voronoi import VoronoiMesh
     from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
     from legoesm.ocean.vertical import OceanZStarCoordinate
+
+
+__physics_contract__ = {
+    "summary": (
+        "GM/Redi isopycnal mixing on the MPAS Voronoi mesh (centred small-slope "
+        "scheme): density -> isoneutral slopes -> optional Visbeck kappa -> "
+        "adiabatic eddy advection + isoneutral diffusion tendencies for T and S "
+        "via edge fluxes and a cell divergence."
+    ),
+    "inputs": {
+        "T": "degC", "S": "psu", "eta": "m", "H_bathy": "m",
+        "cfg.kappa_GM": "m^2/s", "cfg.kappa_Redi": "m^2/s",
+    },
+    "outputs": {"dT_dt": "degC/s", "dS_dt": "psu/s"},
+    "sign_convention": (
+        "kappa_GM, kappa_Redi >= 0; slopes DM95-tapered; GM skew flux adiabatic "
+        "+ Redi along-isopycnal down-gradient; edge fluxes summed into a cell "
+        "divergence so the cell-area/volume-integrated tracer is conserved; "
+        "edge/land masks give no-flux boundaries; z positive up. (The triad "
+        "slope-limited path raises NotImplementedError.)"
+    ),
+    # Adiabatic tracer redistribution: conserves cell-volume-integrated tracer.
+    "conserves": ["tracer"],
+    "differentiable": True,
+    "reference": (
+        "Griffies (1998) JPO 28, 831-841; Gent & McWilliams (1990); Redi "
+        "(1982); MPAS-Ocean (Ringler et al. 2013, Ocean Modelling 69)"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_gm_redi_mpas.py — the centred MPAS tendency "
+        "matches the lat-lon C-grid path on an equivalent slope and conserves "
+        "cell-area-integrated T, S; the triads path raises NotImplementedError."
+    ),
+}
 
 
 _PLAN = "docs/ocean/experiments/gm_redi_mpas_plan.md"
@@ -596,6 +631,11 @@ def gm_redi_tracer_tendency_mpas(
     )
 
     # GM coefficient.
+    if getattr(cfg, "treguier", None) is not None and cfg.treguier.enabled:
+        raise NotImplementedError(
+            "GMRediConfig.treguier (NEMO nn_aei_ijk_t=21 adaptive kappa) is "
+            "implemented on the lat-lon C-grid path only; the MPAS GM/Redi "
+            "would silently fall back. Use visbeck or constant kappa_GM here.")
     if cfg.visbeck.enabled:
         if f_coriolis is None:
             f_coriolis = 2.0 * constants.Omega * jnp.sin(mesh.latCell)

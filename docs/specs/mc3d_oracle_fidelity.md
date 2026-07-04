@@ -111,3 +111,18 @@ gaps:
 - Phase 5: differentiable neural emulator (separate spec).
 - A head-to-head numeric microhh comparison on a shared cloud field, when a
   CUDA/NVHPC build of `rte-rrtmgp-cpp` is available.
+
+Efficiency follow-ups (from the ponytail review). DONE: SW per-batch index
+derivation (no n_total index arrays), LW photon sub-batching (`n_batches` memory
+bound, matches SW), time-folded MC seed (per-timestep independent realization).
+DEFERRED with rationale:
+- Combined SW+LW optics-only `solve_columns` (build the RRTMGP atmospheric state
+  once per step instead of twice): marginal — the state build is O(ncol·nlev),
+  far cheaper than the MC walk O(photons·steps) — and `solve_columns` carries a
+  byte-identity contract (high regression risk). Not worth it until profiling
+  shows the double state-build matters.
+- Opt-in float32 walk (finite-volume MC is fp32-safe, ~2x): the walk dtype
+  threads through `solve_sw_spectral`/`plane_adapter`/the heating conversion, and
+  fp32 cancellation can rectify noise (see the fp32-saturation lesson), so it
+  needs a dedicated fp32-vs-fp64 validation campaign; it is opt-in (no default
+  benefit), so it stays out of a cleanup pass.

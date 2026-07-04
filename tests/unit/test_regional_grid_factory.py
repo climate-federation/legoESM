@@ -8,7 +8,9 @@ from legoesm.grids.factory import REGIONAL_GRID_TYPES, create_regional_grid
 
 
 def test_regional_grid_types() -> None:
-    assert REGIONAL_GRID_TYPES == ("latlon", "mercator", "mpas", "cubed_sphere")
+    assert REGIONAL_GRID_TYPES == (
+        "latlon", "latlon_stretched", "mercator", "mpas", "cubed_sphere",
+    )
 
 
 def test_regional_latlon_returns_grid_and_mask() -> None:

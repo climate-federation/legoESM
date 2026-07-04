@@ -382,3 +382,19 @@ def test_banded_mg_refuses_unequal_bands():
     with pytest.raises(ValueError, match="EQUAL bands"):
         _make_multigrid_preconditioner_banded(
             H_cell, coeff, grid, mask, layout)
+
+
+def test_banded_mg_refuses_wet_balanced_bands():
+    """Lock-step guard vs EXPLICIT boundaries (codex): divisibility alone no
+    longer proves equal bands — wet-cell-balanced boundaries on a divisible
+    global (48 % 4 == 0) still give unequal/odd-aligned bands, which would
+    coarsen ranks to different depths. The guard must check the ACTUAL band
+    span, and it must fire even for a rank whose OWN band happens to be
+    base-sized but mis-aligned."""
+    grid, coeff, mask, H_cell, _, _ = _setup()
+    b = (0, 10, 22, 34, N_LAT)               # 48 rows, 4 bands: 10/12/12/14
+    # Rank 1 owns 12 rows == base, but lat_start 10 != 1*12 — mis-aligned.
+    layout = make_latlon_band_layout(1, 4, N_LAT, N_LON, boundaries=b)
+    with pytest.raises(ValueError, match="EQUAL bands"):
+        _make_multigrid_preconditioner_banded(
+            H_cell, coeff, grid, mask, layout)
