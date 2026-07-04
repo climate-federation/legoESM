@@ -263,3 +263,93 @@ def test_baseline_metadata_present():
     m = json.loads(meta.read_text())
     assert m["skin_correction"] is False
     assert set(m["algos"]) == {"ncar", "coare3p0"}
+
+
+# ---------------------------------------------------------------------------
+# 5. Thermodynamic-convention lever (#762): thermo_convention="aerobulk"
+#    resolves the SAME SST-dependent L the oracle injects explicitly, and
+#    the moist-cp sensible flux moves TOWARD the aerobulk truth.
+# ---------------------------------------------------------------------------
+
+def test_aerobulk_convention_L_matches_explicit_injection(oracle):
+    """convention="aerobulk" with NO explicit L_latent must equal the
+    L_latent=L_sst injection bitwise on the latent flux (same formula,
+    same inputs) — pins that the lever resolves L internally exactly as
+    the oracle fixture does."""
+    inp = oracle["inp"]
+    common = dict(
+        u_rel=jnp.asarray(inp["u"]), v_rel=jnp.asarray(inp["v"]),
+        T_atm=jnp.asarray(oracle["theta10"]),
+        q_atm=jnp.asarray(inp["q_air"]),
+        T_sfc=jnp.asarray(oracle["theta_s"]),
+        q_sfc=jnp.asarray(oracle["ssq"]),
+        rho=jnp.asarray(oracle["rho10"]), z_ref=10.0,
+        scheme="coare3", n_iter=5,
+    )
+    out_conv = compute_most_fluxes(**common, thermo_convention="aerobulk")
+    out_inj = compute_most_fluxes(
+        **common, L_latent=jnp.asarray(oracle["L_sst"]))
+    # Latent: bitwise-equal L resolution (formula + inputs identical).
+    np.testing.assert_array_equal(np.asarray(out_conv[3]),
+                                  np.asarray(out_inj[3]))
+    # Momentum: convention must not touch stress at all.
+    np.testing.assert_array_equal(np.asarray(out_conv[0]),
+                                  np.asarray(out_inj[0]))
+
+
+def test_aerobulk_convention_sh_closes_gap_to_oracle(oracle):
+    """Moist cp_air(q) moves the sensible flux TOWARD the aerobulk truth
+    (median relative error must not degrade; it improves wherever q is
+    large).  Non-vacuity: the two conventions must actually differ."""
+    d, inp = oracle["d"], oracle["inp"]
+    m = oracle["core_mask"]
+    common = dict(
+        u_rel=jnp.asarray(inp["u"]), v_rel=jnp.asarray(inp["v"]),
+        T_atm=jnp.asarray(oracle["theta10"]),
+        q_atm=jnp.asarray(inp["q_air"]),
+        T_sfc=jnp.asarray(oracle["theta_s"]),
+        q_sfc=jnp.asarray(oracle["ssq"]),
+        rho=jnp.asarray(oracle["rho10"]), z_ref=10.0,
+        scheme="coare3", n_iter=5,
+        L_latent=jnp.asarray(oracle["L_sst"]),
+    )
+    sh_legacy = np.asarray(compute_most_fluxes(
+        **common, thermo_convention="legoesm")[2])
+    sh_moist = np.asarray(compute_most_fluxes(
+        **common, thermo_convention="aerobulk")[2])
+    ref = -d["coare3p0_zt10_zu10_qh"]
+    assert not np.allclose(sh_legacy, sh_moist), "lever is a no-op"
+    def _med_rel(x):
+        e = np.abs(x - ref) / np.maximum(np.abs(ref), _FLOOR_HEAT)
+        return float(np.median(e[m]))
+    assert _med_rel(sh_moist) <= _med_rel(sh_legacy) + 1e-12, (
+        f"moist cp moved SH AWAY from aerobulk: "
+        f"{_med_rel(sh_moist):.4f} vs {_med_rel(sh_legacy):.4f}")
+
+
+def test_thermo_convention_dispatch_hardening():
+    """A typo'd convention must raise, never silently run the other set."""
+    one = jnp.ones((2,))
+    with pytest.raises(ValueError, match="thermo_convention"):
+        compute_most_fluxes(one, one, one * 290.0, one * 0.01,
+                            one * 291.0, one * 0.012, one * 1.2,
+                            thermo_convention="aerobulk_typo")
+
+
+def test_legoesm_default_unchanged(oracle):
+    """Omitting thermo_convention == passing "legoesm" bitwise (the
+    default flip-guard: production paths are byte-identical)."""
+    inp = oracle["inp"]
+    common = dict(
+        u_rel=jnp.asarray(inp["u"]), v_rel=jnp.asarray(inp["v"]),
+        T_atm=jnp.asarray(oracle["theta10"]),
+        q_atm=jnp.asarray(inp["q_air"]),
+        T_sfc=jnp.asarray(oracle["theta_s"]),
+        q_sfc=jnp.asarray(oracle["ssq"]),
+        rho=jnp.asarray(oracle["rho10"]), z_ref=10.0,
+        scheme="large_yeager", n_iter=5,
+    )
+    a = compute_most_fluxes(**common)
+    b = compute_most_fluxes(**common, thermo_convention="legoesm")
+    for x, y in zip(a, b):
+        np.testing.assert_array_equal(np.asarray(x), np.asarray(y))

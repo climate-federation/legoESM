@@ -54,6 +54,7 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "convection",
         "turbulence",
         "surface_bulk_scheme",
+        "surface_thermo_convention",
         "gravity_wave_drag",
         "physics_parameterization",
         "ic",

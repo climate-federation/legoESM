@@ -655,6 +655,29 @@ def test_gustiness_defaults_scheme_native():
     assert cfg0.surface_gustiness_zi == 0.0
 
 
+def test_bulk_thermo_convention_flag_flows_to_config():
+    """--bulk-thermo-convention must reach
+    ExperimentConfig.surface_thermo_convention (#762): default "legoesm"
+    (constant L_v / dry c_pd, byte-identical); "aerobulk" = NEMO/AeroBulk
+    parity, and passes the validate_strict membership check."""
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical"])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.surface_thermo_convention == "legoesm"
+
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--surface-bulk-scheme", "coare3",
+        "--turbulence", "holtslag_boville",
+        "--bulk-thermo-convention", "aerobulk",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.surface_thermo_convention == "aerobulk"
+    cfg.validate_strict()
+
+
 def test_cloud_tuning_flags_thread_to_config():
     """--rh-crit / --cloud-conv-cloud-max reach ExperimentConfig and pass
     strict validation within their bounds."""

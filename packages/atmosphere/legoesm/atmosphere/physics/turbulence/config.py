@@ -251,6 +251,11 @@ class SurfaceLayerConfig(NamedTuple):
     # is part of the COARE 3.0 algorithm, AeroBulk parity), off otherwise.
     # Explicit 0.0 disables; explicit value overrides for any MOST scheme.
     gustiness_w_zi: float | None = None
+    # Thermodynamic constants set converting the MOST scales into fluxes
+    # (compute_most_fluxes, #762): "legoesm" (default) = constant L_v / dry
+    # c_pd; "aerobulk" = NEMO/AeroBulk/COARE parity (SST-dependent
+    # L_vap(T_sfc), moist cp_air(q_atm)).  Str selector — not spec-eligible.
+    thermo_convention: str = "legoesm"
 
 
 class SmagorinskyConfig(NamedTuple):

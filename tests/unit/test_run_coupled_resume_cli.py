@@ -37,6 +37,20 @@ def test_resume_flags_roundtrip():
     assert args.max_wallclock_hours == 11.5
 
 
+def test_bulk_thermo_convention_flag_flows_to_config():
+    """--bulk-thermo-convention (#762) round-trips through the parser: default
+    "legoesm" (constant L_v / dry c_pd, byte-identical), "aerobulk" =
+    NEMO/AeroBulk parity.  main() wires args.bulk_thermo_convention into
+    ExperimentConfig.surface_thermo_convention, SimpleOceanConfig.
+    thermo_convention, and CouplerConfig.thermo_convention (air-sea only)."""
+    args = mod.build_parser().parse_args([])
+    assert args.bulk_thermo_convention == "legoesm"
+    args = mod.build_parser().parse_args(
+        ["--surface-bulk-scheme", "coare3",
+         "--bulk-thermo-convention", "aerobulk"])
+    assert args.bulk_thermo_convention == "aerobulk"
+
+
 def test_find_latest_checkpoint_picks_highest_day(tmp_path):
     """_find_latest_checkpoint returns the highest-day checkpoint (numeric, not
     lexicographic) and ignores non-matching files."""

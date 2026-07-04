@@ -247,6 +247,7 @@ def ocean_tile_response(
             z0_init=config.ocean_z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
+            thermo_convention=config.thermo_convention,
         )
     else:
         # Constant neutral coefficients (original behavior).  Sub-grid

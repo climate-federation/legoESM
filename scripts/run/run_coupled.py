@@ -65,7 +65,8 @@ def land_scheme_overrides(land_scheme: str) -> dict:
 # error hint:
 _COUPLED_EXAMPLE_KEYS = (
     "'surface_bulk_scheme', 'ocean', 'surface_gustiness_zi', "
-    "'cloud_q_c_diagnostic', 'ocean_restore_sst_tau_days'"
+    "'bulk_thermo_convention', 'cloud_q_c_diagnostic', "
+    "'ocean_restore_sst_tau_days'"
 )
 
 
@@ -199,6 +200,17 @@ def build_parser():
                              "(fixes the persistent tropical hfls<<Earth / R_TOA "
                              "imbalance). Applied to the atmosphere surface layer "
                              "AND the slab ocean heat budget (kept consistent).")
+    parser.add_argument("--bulk-thermo-convention", dest="bulk_thermo_convention",
+                        type=str, default="legoesm",
+                        choices=["legoesm", "aerobulk"],
+                        help="Thermodynamic constants set for the MOST bulk "
+                             "fluxes (coare3/large_yeager): 'legoesm' (default) "
+                             "= constant L_v / dry c_pd; 'aerobulk' = "
+                             "NEMO/AeroBulk/COARE parity (SST-dependent L_vap, "
+                             "moist cp_air). Applied CONSISTENTLY to the "
+                             "atmosphere surface layer, the slab ocean heat "
+                             "budget, and the coupler ocean tile (air-sea only; "
+                             "land/ice/lake keep the default).")
     parser.add_argument("--gravity-wave-drag", default="hines",
                         choices=["rayleigh", "lindzen", "mcfarlane", "hines",
                                  "prognostic_spectral", "e3sm_cam", "ml_emulator",
@@ -590,6 +602,7 @@ def main():
         turbulence=args.turbulence,
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        surface_thermo_convention=args.bulk_thermo_convention,
         gravity_wave_drag=args.gravity_wave_drag,
         cloud_scheme=args.clouds,
         convective_cloud=args.convective_cloud,
@@ -683,6 +696,7 @@ def main():
             # surface layer (interface energy consistency); see SimpleOceanConfig.
             bulk_scheme=args.surface_bulk_scheme,
             gustiness_w_zi=args.surface_gustiness_zi,
+            thermo_convention=args.bulk_thermo_convention,
         )
         overrides["ocean_mode"] = "two_layer"
     else:
@@ -690,6 +704,7 @@ def main():
             mode=args.ocean, h_mix=args.ocean_h_mix,
             bulk_scheme=args.surface_bulk_scheme,
             gustiness_w_zi=args.surface_gustiness_zi,
+            thermo_convention=args.bulk_thermo_convention,
         )
         # ocean_mode log label (fixed/slab -> "slab").
         overrides["ocean_mode"] = "slab"
@@ -741,7 +756,10 @@ def main():
     coupler_config = None
     if args.surface_bulk_scheme != "constant":
         from legoesm.coupler.config import CouplerConfig
-        coupler_config = CouplerConfig(bulk_scheme=args.surface_bulk_scheme)
+        coupler_config = CouplerConfig(
+            bulk_scheme=args.surface_bulk_scheme,
+            thermo_convention=args.bulk_thermo_convention,
+        )
         logger.info("  Surface bulk-flux scheme: %s (atmosphere + coupler "
                     "ocean tile)", args.surface_bulk_scheme)
 

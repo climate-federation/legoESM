@@ -461,6 +461,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "Unset = scheme-native (coare3: 600 m per "
                              "AeroBulk/Fairall 2003, others: off); 0 = force "
                              "off; tuned slab value 300.")
+    parser.add_argument("--bulk-thermo-convention", dest="bulk_thermo_convention",
+                        type=str, default="legoesm",
+                        choices=["legoesm", "aerobulk"],
+                        help="Thermodynamic constants set for the MOST bulk "
+                             "fluxes (coare3/large_yeager): 'legoesm' "
+                             "(default) = constant L_v / dry c_pd; 'aerobulk' "
+                             "= NEMO/AeroBulk/COARE parity (SST-dependent "
+                             "L_vap, moist cp_air).")
     parser.add_argument("--q-c-diagnostic", dest="cloud_q_c_diagnostic", type=float,
                         default=None,
                         help="In-cloud diagnostic condensate fed to radiation "
@@ -838,6 +846,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         # Tuned air-sea + cloud calibration (mirror run_coupled).
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        surface_thermo_convention=args.bulk_thermo_convention,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_rh_crit=args.cloud_rh_crit,
         convective_cloud=args.convective_cloud,
@@ -1118,7 +1127,8 @@ def main(argv: list[str] | None = None):
         parser.set_defaults(**load_yaml_config(
             pre.config, parser,
             example_keys="'convection', 'microphysics', 'surface_bulk_scheme', "
-                         "'q_c_diagnostic', 'gustiness_zi', 'convective_cloud'"))
+                         "'q_c_diagnostic', 'gustiness_zi', "
+                         "'bulk_thermo_convention', 'convective_cloud'"))
 
     args = parser.parse_args(argv)
     args = _postprocess_args(args, parser)

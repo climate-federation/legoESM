@@ -415,3 +415,28 @@ def relative_humidity(
     """
     e = p * mixing_ratio / (constants.epsilon + mixing_ratio)
     return e / saturation_vapor_pressure(T)
+
+
+def latent_heat_vaporization_sst(T_sfc_K: jax.Array) -> jax.Array:
+    """SST-dependent latent heat of vaporization [J/kg].
+
+    The NEMO/AeroBulk air-sea convention (sbc_phy ``L_vap``, also
+    COARE/Fairall): ``L = L_v - L_v_sst_slope (T - T_freeze)``; equals
+    ``constants.L_v`` at 0 degC by construction.  Up to ~3 % smaller than
+    the constant at warm SST (issue #762).  Dtype-preserving — the OMIP
+    NEMO-parity path wraps this with its float64 pin.
+    """
+    return constants.L_v - constants.L_v_sst_slope * (
+        T_sfc_K - constants.T_freeze
+    )
+
+
+def moist_air_cp(q_air: jax.Array) -> jax.Array:
+    """Moist-air specific heat [J/(kg K)], NEMO/AeroBulk convention.
+
+    ``cp = rCp_dry + rCp_vap q`` (NEMO sbc_phy ``cp_air``) — the
+    convention set of the transcribed bulk schemes, NOT the
+    mixture-weighted ``c_pd (1-q) + c_pv q`` (issue #762).  ~1-2 % above
+    dry ``c_pd`` in the humid tropics.  Dtype-preserving.
+    """
+    return constants.c_p_dry_air_nemo + constants.c_p_vapor_nemo * q_air

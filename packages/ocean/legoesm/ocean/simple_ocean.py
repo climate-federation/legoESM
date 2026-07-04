@@ -69,6 +69,12 @@ class SimpleOceanConfig(NamedTuple):
     # consistent with the atmosphere SurfaceLayerConfig.gustiness_w_zi by
     # run_coupled.
     gustiness_w_zi: float | None = None
+    # Thermodynamic constants set for the slab's coare3/large_yeager fluxes
+    # (#762): "legoesm" (default) = constant L_v / dry c_pd; "aerobulk" =
+    # NEMO/AeroBulk/COARE parity (SST-dependent L_vap(T_sfc), moist
+    # cp_air(q_atm)).  Kept consistent with the atmosphere
+    # SurfaceLayerConfig.thermo_convention by run_coupled.
+    thermo_convention: str = "legoesm"
     T_freeze: float = constants.T_freeze_ocean
     # Two-layer additions
     h_deep: float = 200.0            # Deep layer depth [m]
@@ -173,6 +179,7 @@ def _ocean_turbulent_fluxes(
             forcing.T_lowest, forcing.q_lowest, T_sfc, q_sfc, rho,
             scheme=config.bulk_scheme,
             gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
+            thermo_convention=getattr(config, "thermo_convention", "legoesm"),
         )
         return shflx, lhflx
     raise ValueError(
