@@ -317,6 +317,49 @@ def shard_forcing_latlon(forcing, mesh):
     return jax.tree.map(_put, forcing)
 
 
+def shard_forcing_stack_latlon(stack, mesh):
+    """Lay out a STACKED per-block forcing pytree for the lat-band SPMD
+    block-scan (the ``run_omip`` JRA55 lanes; see
+    ``_build_jra55_block_fn`` / ``_build_jra55_block_fn_interp``).
+
+    Unlike :func:`shard_forcing_latlon` (per-step, lat at axis 0), the
+    block builders stack ``N`` steps / raw records along a LEADING axis,
+    so the lat axis sits at position 1.  A ``(n_rec, n_lat, n_lon[, ...])``
+    leaf therefore shards ``P(None, "lat", ...)`` (records replicated, the
+    time index stays shard-local so the in-scan interpolation needs no
+    cross-band comm); a bare ``(n_lat, n_lon)`` leaf shards ``P("lat", None)``;
+    1-D metadata / scalars replicate; ``None`` and non-array leaves pass
+    through.  ``mesh=None`` returns ``stack`` unchanged (serial lane).
+
+    CONTRACT: rank is the ONLY signal used, so a rank-2 leaf is assumed to
+    be a ``(n_lat, n_lon)`` field and is lat-sharded on axis 0.  Any future
+    metadata that is genuinely rank-2 but NOT lat-major (e.g. a
+    ``(n_rec, n_meta)`` table) would be silently mis-sharded — keep such
+    metadata 1-D (or replicate it explicitly) before it reaches this helper.
+
+    Keeping this next to :func:`shard_state_latlon` means the driver and
+    the parity tests share ONE layout definition — the block-scan forcing
+    stack must be laid out consistently with the state the sharded step
+    carries, and a second copy would drift.
+    """
+    if mesh is None:
+        return stack
+
+    def _put(leaf):
+        if leaf is None or not hasattr(leaf, "ndim"):
+            return leaf
+        arr = jnp.asarray(leaf)
+        if arr.ndim >= 3:
+            spec = P(None, "lat", *((None,) * (arr.ndim - 2)))
+        elif arr.ndim == 2:
+            spec = P("lat", None)
+        else:
+            spec = P()
+        return jax.device_put(arr, NamedSharding(mesh, spec))
+
+    return jax.tree.map(_put, stack)
+
+
 def gather_state_latlon(state, mesh):
     """Inverse of :func:`shard_state_latlon`: gather every leaf to a single device
     and rebuild the full ``(n_lat+1, ...)`` ``v`` / ``v_mask`` by appending the

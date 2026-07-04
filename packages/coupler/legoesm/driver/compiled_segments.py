@@ -752,7 +752,12 @@ def shard_forcing(forcing: SegmentForcing, device_config) -> SegmentForcing:
         if (_flat_face is not None and leaf.ndim >= 1
                 and leaf.shape[0] != 6 and leaf.shape[0] > 0
                 and leaf.shape[0] % 6 == 0):
-            updates[name] = jax.device_put(leaf, _flat_face)
+            # multiprocess_safe_device_put, NOT jax.device_put: under
+            # multi-controller SPMD the cross-process bit-equality assert
+            # in device_put trips on host-precomputed forcing (#693,
+            # Levante 2-node receipt job 26030677).
+            from legoesm.parallel.mesh import multiprocess_safe_device_put
+            updates[name] = multiprocess_safe_device_put(leaf, _flat_face)
         else:
             updates[name] = shard_pytree(leaf, device_config)
     return forcing._replace(**updates) if updates else forcing

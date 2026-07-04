@@ -1253,7 +1253,14 @@ def write_result_json(
     # Record the hybrid layout so scaling can be plotted vs CORES, not ranks:
     # a hybrid 8r x 4c run and a packed 32r x 1c run both report n_ranks but use
     # 32 vs 128 cores. cpus_per_task * n_ranks = the true resource count.
-    _cpt = int(os.environ.get("SLURM_CPUS_PER_TASK", "1") or "1")
+    # cpus_per_task: SLURM sets SLURM_CPUS_PER_TASK, but on PBS/PALS (Derecho)
+    # that is absent — fall back to the per-rank thread pool the launcher
+    # bound (OMP_NUM_THREADS), so n_cores reflects the true full-node
+    # resource, not 1 (#764: else n_resource / the CPU resource axis is
+    # wrong for the route-B cube lane on PBS).
+    _cpt = int(os.environ.get("SLURM_CPUS_PER_TASK")
+               or os.environ.get("OMP_NUM_THREADS")
+               or "1")
     payload["cpus_per_task"] = _cpt
     payload["n_cores"] = result.n_ranks * _cpt
     # Record conservation mode so a LEGOESM_NO_MASS_FIX ablation never dedups
@@ -1453,16 +1460,13 @@ def main() -> int:
             return 2
         import jax as _jax
         import os as _os
-        # Launcher-agnostic process count: SLURM (srun) or OpenMPI
-        # (mpirun) — gating on SLURM_NTASKS alone would silently skip
-        # initialize() under mpirun and leave N independent local
-        # meshes all reporting n_ranks=N.
-        _nproc = 1
-        for _var in ("SLURM_NTASKS", "OMPI_COMM_WORLD_SIZE", "PMI_SIZE"):
-            _val = _os.environ.get(_var)
-            if _val:
-                _nproc = int(_val)
-                break
+        # Launcher-agnostic process count via the canonical helper, which
+        # covers OpenMPI / PMI / Cray PALS / SLURM (#764: the prior inline
+        # subset omitted PALS_LOCAL_SIZE, so a Derecho mpiexec route-B
+        # launch skipped initialize() and each rank ran an independent np1
+        # mesh — caught loudly by the consistency gate below, but the sweep
+        # never federated).  _launcher_world_size == _launcher_world_size().
+        _nproc = _launcher_world_size()
         if _nproc > 1:
             # PBS/PALS has no bare-initialize auto-detection; the helper
             # falls back to the mpi4py bootstrap (plain MPI, mpi4jax
