@@ -42,6 +42,10 @@ n_eval_days:  6
 
 aimip_grid: "gaussian"
 n_max: 63
+# NOTE: the worktree's run_aimip.py (off main) reads cfg["nlev"] with NO fallback
+# to "n_levels" (that fallback lives only on the omip branch). Provide BOTH so the
+# real (non-smoke) config-build works regardless of which key the code reads.
+nlev: 8
 n_levels: 8
 dt: 600.0
 
