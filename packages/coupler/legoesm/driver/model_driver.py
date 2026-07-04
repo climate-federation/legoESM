@@ -3837,6 +3837,23 @@ class ModelDriver:
         if step != self._last_checkpoint_step:
             ckpt_fn(step, day)
         self.diagnostics.flush_to_disk(self._output_dir)
+        # Write the CMOR tables that the normal end-of-run ``save`` would emit
+        # but this ``sys.exit(0)`` never reaches — flushing only COMPLETED
+        # periods so a restart chain does not double-write a boundary period:
+        #   * completed months (flush_cmip_monthly pops months < the current),
+        #   * completed days   (finalize_cmip_daily pops days < the current),
+        #   * the fx table     (areacella/sftlf/orog — static, referenced by
+        #                       every variable's ``external_variables`` and
+        #                       required for area-weighted / land-ocean-split
+        #                       diagnostics).
+        # Without this every wallclock-graceful AMIP run (a year rarely
+        # finishes in one SLURM window) would drop fx entirely and lose the
+        # segment's monthly/daily output.  The single month/day straddling the
+        # exit is a bounded, documented limitation (the in-progress accumulator
+        # is not checkpointed).  All three are guarded on the CMIP writer.
+        self.diagnostics.flush_cmip_monthly(day, write=True)
+        self.diagnostics.finalize_cmip_daily(day)
+        self.diagnostics.finalize_cmip_fixed()
         sys.exit(0)
 
     def run(self, start_step: int = 0, start_day: float | None = None,
