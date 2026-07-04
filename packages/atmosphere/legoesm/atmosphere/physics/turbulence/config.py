@@ -252,6 +252,11 @@ class SurfaceLayerConfig(NamedTuple):
     # Explicit 0.0 disables; explicit value overrides for any MOST scheme.
     # Annotated ``float | None`` => not spec-eligible (see __param_spec__ above).
     gustiness_w_zi: float | None = None
+    # Thermodynamic constants set converting the MOST scales into fluxes
+    # (compute_most_fluxes, #762): "legoesm" (default) = constant L_v / dry
+    # c_pd; "aerobulk" = NEMO/AeroBulk/COARE parity (SST-dependent
+    # L_vap(T_sfc), moist cp_air(q_atm)).  Str selector — not spec-eligible.
+    thermo_convention: str = "legoesm"
     # Stable-regime (zeta>0) MOST similarity functions for the MOST-family
     # bulk schemes: "dyer1974" (default, historical -5*zeta) |
     # "beljaars_holtslag1991" | "grachev2007_sheba" | "gryanik2020".

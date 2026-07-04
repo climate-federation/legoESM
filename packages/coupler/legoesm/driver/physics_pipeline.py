@@ -583,6 +583,9 @@ class PhysicsPipeline:
         ocean_cfg = self.turbulence_config.surface
         land_cfg = ocean_cfg._replace(
             bulk_scheme="most", z0=self.surface_z0_land, gustiness_w_zi=0.0,
+            # AIR-SEA-only option (#762): the land tile keeps the default
+            # thermodynamic convention even when the ocean tile runs aerobulk.
+            thermo_convention="legoesm",
         )
         ice_cfg = ocean_cfg._replace(bulk_scheme="constant")
 
@@ -2593,10 +2596,11 @@ def _resolve_turbulence(config):
     # coefficients — the fix for anemic evaporation over a calm warm ocean.
     sbs = getattr(config, "surface_bulk_scheme", "constant")
     gzi = getattr(config, "surface_gustiness_zi", None)
+    stc = getattr(config, "surface_thermo_convention", "legoesm")
     sss_scheme = getattr(config, "surface_stability_scheme", "dyer1974")
     if (turb_config is not None
             and getattr(turb_config, "surface", None) is not None
-            and (sbs != "constant" or gzi is not None
+            and (sbs != "constant" or gzi is not None or stc != "legoesm"
                  or sss_scheme != "dyer1974")):
         surf = turb_config.surface
         if sbs != "constant":
@@ -2605,6 +2609,10 @@ def _resolve_turbulence(config):
             # COARE convective-gustiness BL depth (only effective with a MOST
             # bulk_scheme); the diagnosed fix for the calm-warm-ocean low hfls.
             surf = surf._replace(gustiness_w_zi=gzi)
+        if stc != "legoesm":
+            # AeroBulk thermodynamic-constants parity (#762; only effective
+            # with a MOST bulk_scheme).
+            surf = surf._replace(thermo_convention=stc)
         if sss_scheme != "dyer1974":
             # Stable-regime MOST functions: keep the atmosphere surface layer
             # on the SAME stable functions as the coupler ocean tile (both

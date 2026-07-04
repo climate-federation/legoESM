@@ -521,6 +521,7 @@ def compute_most_fluxes(
     n_iter=5,
     charnock=0.011,
     L_latent=None,
+    thermo_convention="legoesm",
     gustiness_w_zi=None,
     gustiness_beta=1.25,
     return_2m=False,
@@ -565,6 +566,13 @@ def compute_most_fluxes(
         Number of MOST iterations (default 5).
     charnock : float
         Charnock coefficient (COARE only, default 0.011).
+    thermo_convention : str
+        Constants set converting MOST scales into fluxes (#762):
+        ``"legoesm"`` (default) = constant ``L_v`` / dry ``c_pd``;
+        ``"aerobulk"`` = the NEMO/AeroBulk/COARE convention
+        (SST-dependent ``L_vap(T_sfc)``, moist ``cp_air(q_atm)``) — up to
+        ~3 % LH at warm SST and ~1-2 % SH in the humid tropics.  An
+        explicit ``L_latent`` overrides the L choice either way.
     gustiness_w_zi : float or None
         COARE convective-gustiness BL depth z_i [m].  None (default) =
         scheme-native: 600 m for ``"coare3"`` (AeroBulk/Fairall 2003 —
@@ -628,6 +636,14 @@ def compute_most_fluxes(
     # wrong air-sea physics. ``coare3``/``large_yeager`` take dedicated
     # branches; ``constant``/``most`` are the (valid) fixed-roughness else path.
     validate_bulk_scheme(scheme)
+    # Dispatch hardening (#762): the thermodynamic-convention selector is a
+    # static string — a typo must fail LOUDLY, never silently run the other
+    # constants set.
+    if thermo_convention not in ("legoesm", "aerobulk"):
+        raise ValueError(
+            "thermo_convention must be 'legoesm' or 'aerobulk', got "
+            f"{thermo_convention!r}"
+        )
     # ``stability_scheme`` selects the STABLE-branch psi_m/psi_h; also a static
     # string, so validate it once here rather than inside the traced loop body.
     validate_stability_scheme(stability_scheme)
@@ -953,10 +969,27 @@ def compute_most_fluxes(
     # -rho u*^2 u/U_eff == -rho Cd U_eff u (AeroBulk/COARE: one factor of the
     # bulk wind incl. gust/floor, one raw wind component for direction and
     # magnitude); reduces to u/|U| exactly when U_eff == wind_speed.
-    _L = constants.L_v if L_latent is None else L_latent
+    # Thermodynamic convention (#762): the constants converting MOST scales
+    # into fluxes are part of the transcribed schemes' definitions.
+    # 'aerobulk' = the NEMO/AeroBulk/COARE set (SST-dependent L_vap, moist
+    # cp_air(q)); 'legoesm' = the historical constant L_v / dry c_pd
+    # (default, byte-identical).  An explicit ``L_latent`` always wins
+    # (the OMIP NEMO-parity path and the oracle tests inject their own).
+    if L_latent is not None:
+        _L = L_latent
+    elif thermo_convention == "aerobulk":
+        from legoesm.thermo import latent_heat_vaporization_sst
+        _L = latent_heat_vaporization_sst(T_sfc)
+    else:
+        _L = constants.L_v
+    if thermo_convention == "aerobulk":
+        from legoesm.thermo import moist_air_cp
+        _cp = moist_air_cp(q_atm)
+    else:
+        _cp = constants.c_pd
     tau_x = -rho * u_star ** 2 * u_rel / U_eff_final
     tau_y = -rho * u_star ** 2 * v_rel / U_eff_final
-    shflx = rho * constants.c_pd * u_star * theta_star
+    shflx = rho * _cp * u_star * theta_star
     lhflx = rho * _L * u_star * q_star_val
 
     if return_2m:

@@ -453,6 +453,13 @@ class ExperimentConfig(NamedTuple):
     # (the persistent tropical hfls<<Earth / R_TOA imbalance lever).  Threaded
     # into the atmosphere SurfaceLayerConfig + the slab SimpleOceanConfig.
     surface_gustiness_zi: float | None = None
+    # Thermodynamic constants set for the MOST surface fluxes (#762):
+    # "legoesm" (default, byte-identical) = constant L_v / dry c_pd;
+    # "aerobulk" = NEMO/AeroBulk/COARE parity (SST-dependent L_vap(T_sfc),
+    # moist cp_air(q_atm)) — up to ~3 % LH at warm SST.  Threaded into the
+    # atmosphere SurfaceLayerConfig (run_coupled additionally wires the slab
+    # SimpleOceanConfig + coupler ocean tile to the same convention).
+    surface_thermo_convention: str = "legoesm"
     # Stable-regime (zeta>0) MOST similarity functions for the MOST-family
     # surface bulk schemes.  Threaded into BOTH the atmosphere
     # SurfaceLayerConfig and the coupler ocean tile (CouplerConfig) by
@@ -978,6 +985,13 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"surface_bulk_scheme must be one of {_valid_surface_bulk}, "
                 f"got {self.surface_bulk_scheme!r}"
+            )
+        _valid_thermo_conventions = ("legoesm", "aerobulk")
+        if self.surface_thermo_convention not in _valid_thermo_conventions:
+            errors.append(
+                f"surface_thermo_convention must be one of "
+                f"{_valid_thermo_conventions}, "
+                f"got {self.surface_thermo_convention!r}"
             )
         _valid_stability = ("dyer1974", "beljaars_holtslag1991",
                             "grachev2007_sheba", "gryanik2020")
