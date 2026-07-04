@@ -488,9 +488,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "not an accepted AMIP surface scheme (coare3 is the "
                              "MOST-with-gustiness variant).")
     parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi", type=float,
-                        default=0.0,
-                        help="COARE convective-gustiness BL depth z_i [m] (0=off; "
-                             "tuned slab value 300).")
+                        default=None,
+                        help="COARE convective-gustiness BL depth z_i [m]. "
+                             "Unset = scheme-native (coare3: 600 m per "
+                             "AeroBulk/Fairall 2003, others: off); 0 = force "
+                             "off; tuned slab value 300.")
     parser.add_argument("--q-c-diagnostic", dest="cloud_q_c_diagnostic", type=float,
                         default=None,
                         help="In-cloud diagnostic condensate fed to radiation "
