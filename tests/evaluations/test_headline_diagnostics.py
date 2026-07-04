@@ -65,6 +65,21 @@ def test_z500_isothermal_atmosphere():
     assert float(jnp.max(jnp.abs(z500 - expected))) < 50.0  # within 50 m (discretisation)
 
 
+def test_geopotential_on_levels_shape_and_isothermal():
+    from evaluations.headline_diagnostics import geopotential_on_levels
+    nlev = 10
+    sig = create_sigma_coordinate(nlev)
+    T = jnp.full((2, 2, nlev), 250.0)
+    q = jnp.zeros((2, 2, nlev))
+    p_s = jnp.full((2, 2), 100000.0)
+    phis = jnp.zeros((2, 2))
+    phi = geopotential_on_levels(T, q, p_s, phis, sig)
+    assert phi.shape == (2, 2, nlev)
+    assert bool(jnp.all(phi >= 0.0))                 # phis=0 -> Phi increases upward from 0
+    # top level higher than bottom level (Phi increases upward; index 0 = top)
+    assert float(jnp.mean(phi[..., 0] - phi[..., -1])) > 0.0
+
+
 def test_z500_virtual_temperature_raises_thickness():
     # Adding moisture (virtual T > T) increases layer thickness -> higher Z500.
     nlev = 20

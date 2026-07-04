@@ -23,6 +23,7 @@ from legoesm import constants
 
 __all__ = [
     "interp_to_pressure_level",
+    "geopotential_on_levels",
     "geopotential_height_at",
     "mean_sea_level_pressure",
     "screen_level_t2m",
@@ -78,13 +79,12 @@ def _virtual_temperature(T, q):
     return T * (1.0 + (1.0 / constants.epsilon - 1.0) * q)
 
 
-def geopotential_height_at(T, q, p_s, phis, sigma_coord, p_target_pa):
-    """Geopotential HEIGHT [m] at ``p_target_pa`` (e.g. Z500 at 50000 Pa).
+def geopotential_on_levels(T, q, p_s, phis, sigma_coord):
+    """Full-level geopotential Φ [J/kg] using VIRTUAL temperature.
 
-    Uses virtual temperature in the hydrostatic integration so the result
-    matches ERA5 geopotential. Convention: Φ increases upward. Works for both
-    pure-sigma and hybrid sigma-pressure coordinates (dispatches on type;
-    pressure comes from the coordinate's own ``pressure_at_full``).
+    Dispatches on coordinate type (pure-sigma vs hybrid sigma-pressure) so the
+    hydrostatic integration is correct over topography. Convention: Φ increases
+    upward. Shape ``(..., nlev)``.
     """
     from legoesm.grids.vertical import (
         HybridSigmaPressureCoordinate,
@@ -94,9 +94,19 @@ def geopotential_height_at(T, q, p_s, phis, sigma_coord, p_target_pa):
 
     T_v = _virtual_temperature(T, q)
     if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
-        phi = compute_geopotential_hybrid(T_v, p_s, sigma_coord, phis)  # (..., nlev), J/kg
-    else:
-        phi = compute_geopotential(T_v, p_s, sigma_coord, phis)         # (..., nlev), J/kg
+        return compute_geopotential_hybrid(T_v, p_s, sigma_coord, phis)
+    return compute_geopotential(T_v, p_s, sigma_coord, phis)
+
+
+def geopotential_height_at(T, q, p_s, phis, sigma_coord, p_target_pa):
+    """Geopotential HEIGHT [m] at ``p_target_pa`` (e.g. Z500 at 50000 Pa).
+
+    Uses virtual temperature in the hydrostatic integration so the result
+    matches ERA5 geopotential. Convention: Φ increases upward. Works for both
+    pure-sigma and hybrid sigma-pressure coordinates (dispatches on type;
+    pressure comes from the coordinate's own ``pressure_at_full``).
+    """
+    phi = geopotential_on_levels(T, q, p_s, phis, sigma_coord)  # (..., nlev), J/kg
     p_model = sigma_coord.pressure_at_full(p_s)                 # (..., nlev), Pa (polymorphic)
     phi_at = interp_to_pressure_level(phi, p_model, p_target_pa)
     return phi_at / constants.g                                 # geopotential height [m]
