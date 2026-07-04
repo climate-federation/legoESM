@@ -16,9 +16,12 @@ where ``g_k = (a_1k, a_2k, a_3k)`` is the k-th column of the gradient tensor
 (the derivative of the velocity VECTOR in direction k).  Key properties:
 
 * **Minimum dissipation.** ``max(·,0)`` makes ν_t vanish wherever the resolved
-  flow needs no sub-grid dissipation — in particular a well-resolved laminar or
-  1-D shear (only one non-zero gradient direction) gives ν_t = 0 exactly — and
-  it NEVER produces negative viscosity (no spurious backscatter).
+  flow needs no sub-grid dissipation (``N <= 0``) — in particular a pure
+  off-diagonal 1-D shear (e.g. a well-resolved ``∂u/∂z``) gives ν_t = 0
+  exactly — and it NEVER produces negative viscosity (no spurious backscatter).
+  (A pure NORMAL strain draws ν_t > 0 or 0 depending on its sign — this is the
+  intended minimum-dissipation behaviour, not a laminar cutoff of every
+  single-gradient field.)
 * **Anisotropy.** the per-direction Δ_k² weights make it well-behaved on
   Δx ≠ Δz grids, like Vreman.
 * **Purely local** (no plane average) ⇒ MPI-safe algebra.
@@ -61,9 +64,9 @@ __physics_contract__ = {
         "Abkar, Bae & Moin (2016), Phys. Rev. Fluids 1, 041701"
     ),
     "idealized_test": (
-        "tests/unit/test_amd_sgs.py: a well-resolved 1-D shear (single non-zero "
-        "gradient direction) gives nu_t = nu_floor; nu_t >= nu_floor always; a "
-        "3-D field gives nu_t > nu_floor; differentiable at rest (arg=0)."
+        "tests/unit/test_amd_sgs.py: a pure off-diagonal 1-D shear gives "
+        "nu_t = nu_floor; nu_t >= nu_floor always (never negative); a 3-D field "
+        "gives nu_t > nu_floor; differentiable at rest (arg=0)."
     ),
 }
 

@@ -128,6 +128,18 @@ def mask_immersed_field(field: jnp.ndarray, is_active_3d: jnp.ndarray,
     return jnp.where(is_active_3d.astype(bool), field, value)
 
 
+def immersed_column_depth(coord: OceanPartialCellCoordinate) -> jnp.ndarray:
+    """Per-column water depth ``H_bathy = Σ_k h_partial`` [m], shape ``(...,)``.
+
+    The coordinate invariant is ``Σ_k h_partial == H_bathy``, so after a solid
+    carve reduces some cells' thickness to zero THIS is the depth callers MUST
+    pass to :func:`legoesm.ocean.vertical.compute_layer_thickness` (which scales
+    partial cells by ``(eta + H_bathy)/H_bathy``) — never a separately-cached
+    pre-carve bathymetry, which would mis-scale the live column thickness.
+    """
+    return jnp.sum(coord.h_partial, axis=-1)
+
+
 def immersed_partial_cell_coordinate(
     coord: OceanPartialCellCoordinate,
     solid_3d: jnp.ndarray,
@@ -136,13 +148,25 @@ def immersed_partial_cell_coordinate(
 
     Combines the coordinate's bathymetry ``is_active`` with the arbitrary
     ``solid_3d`` mask, zeroes ``h_partial`` on the newly-solid cells (so their
-    volume and every flux-form transport through them vanish), and VALIDATES
-    that the result keeps every column surface-connected (raises otherwise).
-    ``bottom_level`` is left unchanged — it still marks the bathymetric
-    seafloor; the solid mask carves additional interior/lateral geometry above
-    it that the face masks + zero thickness enforce.
+    volume and every flux-form transport through them vanish), RECOMPUTES
+    ``bottom_level`` as the deepest still-active level per column (so
+    bottom-cell physics — bottom drag, the bottom boundary layer — target the
+    NEW seafloor, not a carved-out level), and VALIDATES surface-connectivity
+    (raises on an overhang / cavity).
+
+    NOTE on depth: a bottom-anchored carve makes the column shallower, so its
+    ``H_bathy = Σ h_partial`` shrinks — callers computing layer thickness must
+    use :func:`immersed_column_depth` (the coordinate invariant), NOT a cached
+    pre-carve bathymetry.  ``H_max`` / the reference z-grid are unchanged.
     """
     new_active = combine_solid_mask(coord.is_active, solid_3d)
     assert_columns_surface_connected(new_active)
     new_h = jnp.where(new_active, coord.h_partial, 0.0)
-    return coord._replace(is_active=new_active, h_partial=new_h)
+    # Deepest still-active level per column (-1 for a fully-solid/dry column),
+    # so bottom_level tracks the carved seafloor.
+    nlev = new_active.shape[-1]
+    k_idx = jnp.arange(nlev, dtype=coord.bottom_level.dtype)
+    active_k = jnp.where(new_active, k_idx, jnp.asarray(-1, coord.bottom_level.dtype))
+    new_bottom = jnp.max(active_k, axis=-1)
+    return coord._replace(
+        is_active=new_active, h_partial=new_h, bottom_level=new_bottom)

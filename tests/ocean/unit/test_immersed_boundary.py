@@ -20,6 +20,7 @@ from legoesm.ocean.dynamics.immersed_boundary import (
     immersed_face_masks,
     mask_immersed_field,
     immersed_partial_cell_coordinate,
+    immersed_column_depth,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
 
@@ -161,6 +162,17 @@ def test_immersed_partial_cell_coordinate():
     assert not bool(masked.is_active[1, 2, 2])
     assert float(masked.h_partial[1, 2, 2]) == 0.0
     assert bool(masked.is_active[1, 2, 1])           # cells above still active
+    # bottom_level MUST move up to the new deepest active level (codex BLOCKER:
+    # else bottom drag / BBL target the carved-out level).
+    assert int(masked.bottom_level[1, 2]) == 1
+    assert int(masked.bottom_level[0, 0]) == 2       # uncarved column unchanged
+    # H_bathy = sum(h_partial) shrinks for the carved column and stays the depth
+    # invariant callers must use for layer thickness.
+    depth = immersed_column_depth(masked)
+    assert float(depth[1, 2]) == pytest.approx(30.0, rel=1e-9)   # 10+20, level 2 gone
+    assert float(depth[0, 0]) == pytest.approx(70.0, rel=1e-9)
+    np.testing.assert_allclose(
+        np.asarray(depth), np.asarray(jnp.sum(masked.h_partial, axis=-1)))
 
     # Interior overhang solid (mask a MIDDLE level, water below) -> raises.
     bad = jnp.zeros((nlat, nlon, 3), dtype=bool).at[0, 0, 1].set(True)

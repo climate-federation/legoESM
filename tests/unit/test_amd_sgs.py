@@ -25,13 +25,22 @@ def _nu(**grads):
                     a["a31"], a["a32"], a["a33"], _DX, _DY, _DZ, _C)
 
 
-def test_one_d_shear_gives_zero():
-    """A well-resolved 1-D shear (only du/dz nonzero) needs no SGS dissipation:
-    AMD gives exactly zero (the minimum-dissipation property Smagorinsky lacks)."""
+def test_offdiagonal_one_d_shear_gives_zero():
+    """A pure off-diagonal 1-D shear (du/dz or dv/dz only) needs no SGS
+    dissipation: AMD gives exactly zero (the minimum-dissipation property
+    Smagorinsky lacks)."""
     assert float(_nu(a13=0.5)) == pytest.approx(0.0, abs=1e-20)
-    # also for a pure dv/dz and a pure du/dx shear
     assert float(_nu(a23=0.3)) == pytest.approx(0.0, abs=1e-20)
+    assert float(_nu(a31=-0.7)) == pytest.approx(0.0, abs=1e-20)
+
+
+def test_normal_strain_sign_dependence():
+    """A single NORMAL strain is sign-dependent: expanding (positive a11) needs
+    no dissipation (nu_t=0) while compressing (negative a11) draws positive
+    viscosity — the intended minimum-dissipation behaviour, NOT a blanket
+    single-gradient cutoff."""
     assert float(_nu(a11=0.4)) == pytest.approx(0.0, abs=1e-20)
+    assert float(_nu(a11=-0.4)) > 0.0
 
 
 def test_nonnegative_never_backscatter():
