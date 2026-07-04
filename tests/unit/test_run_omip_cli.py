@@ -53,6 +53,54 @@ def test_default_nlev_is_40_for_climate_fidelity():
     assert parse_args(["--grid", "latlon", "--nlev", "20"]).nlev == 20
 
 
+def test_enable_latlon_spmd_flags_round_trip():
+    """--enable-latlon-spmd / --spmd-n-devices parse and reach OMIPRunConfig
+    (the lat-band SPMD restoring lane, part 2a of the ocean-SPMD promotion)."""
+    args = parse_args(["--grid", "latlon"])
+    assert args.enable_latlon_spmd is False
+    assert args.spmd_n_devices == 0
+    cfg = build_config_from_args(args)
+    assert cfg.enable_latlon_spmd is False
+    assert cfg.spmd_n_devices == 0
+
+    args = parse_args(["--grid", "latlon", "--enable-latlon-spmd",
+                       "--spmd-n-devices", "4"])
+    cfg = build_config_from_args(args)
+    assert cfg.enable_latlon_spmd is True
+    assert cfg.spmd_n_devices == 4
+
+
+def test_multicontroller_flags_round_trip():
+    """--multicontroller / --coordinator parse and reach OMIPRunConfig
+    (the route-B cross-process lane, part 2c of the ocean-SPMD promotion)."""
+    args = parse_args(["--grid", "latlon"])
+    assert args.multicontroller is False
+    assert args.coordinator is None
+    cfg = build_config_from_args(args)
+    assert cfg.multicontroller is False
+    assert cfg.coordinator is None
+
+    args = parse_args([
+        "--grid", "latlon", "--enable-latlon-spmd", "--multicontroller",
+        "--coordinator", "localhost:12345"])
+    cfg = build_config_from_args(args)
+    assert cfg.multicontroller is True
+    assert cfg.coordinator == "localhost:12345"
+
+
+def test_multicontroller_without_spmd_refused():
+    """--multicontroller alone (no --enable-latlon-spmd) must hard-fail BEFORE
+    any device work: otherwise every rank runs the full serial model and
+    clobbers the same output paths (codex r2 #2).  The guard sits right after
+    build_config_from_args, so this raises without building a model."""
+    from scripts.run.run_omip import run_omip_single
+
+    args = parse_args(["--grid", "latlon", "--multicontroller"])
+    assert args.enable_latlon_spmd is False
+    with pytest.raises(SystemExit, match="requires --enable-latlon-spmd"):
+        run_omip_single("latlon", args)
+
+
 def test_jra55_sea_ice_flag_parses():
     """--jra55-sea-ice opt-in (default off) drives the prognostic slab ice
     wired into the JRA55 scan block loop."""

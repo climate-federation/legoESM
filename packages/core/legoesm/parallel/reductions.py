@@ -404,21 +404,31 @@ def global_sum_mpi(local_value: jax.Array, comm=None) -> jax.Array:
 
 
 def is_multi_process() -> bool:
-    """Whether reductions must cross process/rank boundaries.
+    """Whether a local partial sum must be MANUALLY all-reduced via mpi4jax.
 
-    ``jax.process_count() > 1`` covers JAX multi-host runs; ``is_distributed()``
-    covers the mpi4jax single-host-multi-rank path where ``process_count`` stays
-    1.  Either condition means a local partial sum must be all-reduced to obtain
-    the global value.  Canonical home (#177) for the predicate the ocean
-    conservation fixers and the eta-floor mass redistribution previously each
-    re-implemented identically.
+    True exactly when an mpi4jax-style decomposition is armed — the MPI halo
+    backend (``is_distributed()``) or a Voronoi partition layout — i.e. when
+    each rank holds a LOCAL shard as a plain per-process array.  Canonical
+    home (#177) for the predicate the ocean conservation fixers and the
+    eta-floor mass redistribution previously each re-implemented identically.
+
+    ``jax.process_count() > 1`` (a jax.distributed multi-controller run) is
+    deliberately NOT a trigger: mpi4jax is never armed in that mode (mixed
+    jax.distributed + mpi4jax stacks deadlock), and no manual reduction is
+    needed there — outside ``shard_map`` the state lives in GLOBAL jax.Arrays
+    whose ``jnp`` reductions are already global, and inside ``shard_map`` the
+    armed "spmd" halo backend routes the same call sites to ``psum`` branches
+    checked BEFORE this predicate.  The old ``process_count`` clause sent the
+    multi-controller ocean serial-reference/invariant legs into
+    ``batch_allreduce_mpi`` — importing mpi4jax into a program where it must
+    never run.  Refusal-style guards that need ANY-multi-process semantics
+    must additionally check ``jax.process_count()`` themselves (see the
+    ``ocean_pe_mpas`` normalize_freshwater guard).
     """
     # Function-scope import: ``core.operators`` imports ``global_sum_mpi`` from
     # this module (function-scope), so importing ``is_distributed`` at module
     # top level would risk an operators<->reductions import cycle.
     from legoesm.core.operators import is_distributed
-    if jax.process_count() > 1:
-        return True
     if is_distributed():
         return True
     # Voronoi/MPAS cell-partition MPI arms NO halo backend (it carries a
@@ -449,10 +459,30 @@ def mpi_world_size() -> int:
     real multi-rank launch.  Caveat: an ``mpirun`` ensemble of
     INDEPENDENT serial members also trips such guards — that pattern
     is not used in this repo (ensembles batch via vmap).
+
+    Absent (``ImportError``) or unloadable (the loader's ``RuntimeError``,
+    e.g. no libmpi in a GPU-only venv) mpi4py returns 1 ONLY when no MPI
+    launcher started the process — under launcher evidence
+    (OMPI/PMI/PALS/SLURM env) it raises LOUDLY, or every rank of a real
+    multi-rank launch would sail past the fail-fast guards keyed on this
+    function as "serial" (codex rounds 4-5; the same policy as the bench
+    drivers' ``_init_mpi``).
     """
     try:
         from mpi4py import MPI
-    except ImportError:
+    except (ImportError, RuntimeError) as e:
+        launcher = any(
+            v in os.environ
+            for v in ("OMPI_COMM_WORLD_SIZE", "OMPI_COMM_WORLD_RANK",
+                      "PMI_SIZE", "PMI_RANK", "PALS_RANKID",
+                      "PALS_LOCAL_SIZE")
+        ) or (os.environ.get("SLURM_NTASKS", "1").isdigit()
+              and int(os.environ.get("SLURM_NTASKS", "1")) > 1)
+        if launcher:
+            raise RuntimeError(
+                "MPI launcher detected but mpi4py is unavailable/unusable: "
+                f"{e}"
+            ) from e
         return 1
     return int(MPI.COMM_WORLD.Get_size())
 

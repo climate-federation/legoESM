@@ -36,6 +36,7 @@ from legoesm.driver.config import (
     GridConfig,
     OutputConfig,
 )
+from legoesm.driver.run_status import status_to_exit_code
 
 _DYCORE_DEFAULTS = DycoreConfig()
 _OUTPUT_DEFAULTS = OutputConfig()
@@ -487,9 +488,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "not an accepted AMIP surface scheme (coare3 is the "
                              "MOST-with-gustiness variant).")
     parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi", type=float,
-                        default=0.0,
-                        help="COARE convective-gustiness BL depth z_i [m] (0=off; "
-                             "tuned slab value 300).")
+                        default=None,
+                        help="COARE convective-gustiness BL depth z_i [m]. "
+                             "Unset = scheme-native (coare3: 600 m per "
+                             "AeroBulk/Fairall 2003, others: off); 0 = force "
+                             "off; tuned slab value 300.")
+    parser.add_argument("--bulk-thermo-convention", dest="bulk_thermo_convention",
+                        type=str, default="legoesm",
+                        choices=["legoesm", "aerobulk"],
+                        help="Thermodynamic constants set for the MOST bulk "
+                             "fluxes (coare3/large_yeager): 'legoesm' "
+                             "(default) = constant L_v / dry c_pd; 'aerobulk' "
+                             "= NEMO/AeroBulk/COARE parity (SST-dependent "
+                             "L_vap, moist cp_air).")
     parser.add_argument("--q-c-diagnostic", dest="cloud_q_c_diagnostic", type=float,
                         default=None,
                         help="In-cloud diagnostic condensate fed to radiation "
@@ -732,6 +743,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "#730). Only active with --land-stomatal-beta. "
                              f"Default {_EXPERIMENT_DEFAULTS.land_gs_max} "
                              "(byte-identical when unchanged).")
+    parser.add_argument("--land-soil-moisture-init-frac", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_soil_moisture_init_frac,
+                        dest="land_soil_moisture_init_frac",
+                        help="Initial multilayer soil water as a fraction of "
+                             "saturation (theta_init = frac * theta_sat) for the "
+                             "cold-start (issue #730). A drier start (e.g. 0.25) "
+                             "can break the over-evaporation wet loop and tip the "
+                             "land into the slab-like dry attractor. Default "
+                             f"{_EXPERIMENT_DEFAULTS.land_soil_moisture_init_frac} "
+                             "(byte-identical when unchanged).")
+    parser.add_argument("--land-surface-scheme",
+                        choices=["simple_seb", "two_leaf"],
+                        default=_EXPERIMENT_DEFAULTS.land_surface_scheme,
+                        dest="land_surface_scheme",
+                        help="Multilayer-land surface scheme (issue #730). "
+                             "'simple_seb' (default) = bulk SEB with the beta_soil "
+                             "moisture path; 'two_leaf' = DifferBESS two-leaf canopy "
+                             "energy balance (Kelvin h_r bare-soil + two-leaf "
+                             "stomatal transpiration) that holds land ET below "
+                             "potential and breaks the over-evaporation wet loop. "
+                             "Only affects --use-multilayer-land runs.")
     parser.add_argument("--snow-albedo-feedback", action="store_true",
                         default=False, dest="snow_albedo_feedback",
                         help="Prognostic snow + snow-albedo feedback on the "
@@ -1036,6 +1068,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         # Tuned air-sea + cloud calibration (mirror run_coupled).
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        surface_thermo_convention=args.bulk_thermo_convention,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_rh_crit=args.cloud_rh_crit,
         cloud_p_xr=args.cloud_p_xr,
@@ -1066,6 +1099,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_infiltration_excess=args.land_infiltration_excess,
         land_stomatal_beta=args.land_stomatal_beta,
         land_gs_max=args.land_gs_max,
+        land_soil_moisture_init_frac=args.land_soil_moisture_init_frac,
+        land_surface_scheme=args.land_surface_scheme,
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         dynamic_albedo=args.dynamic_albedo,
@@ -1316,6 +1351,46 @@ def _check_run_state_finite(driver) -> tuple[bool, str | None]:
     return True, None
 
 
+def _sync_finite_verdict_across_ranks(driver, state_ok, bad_field):
+    """Make the post-run finiteness verdict identical on every rank.
+
+    Under mpi4jax topologies ``driver.state`` is the RANK-LOCAL partition, so
+    ``_check_run_state_finite`` can disagree across ranks (NaN on one band
+    only).  A divergent verdict means divergent ``sys.exit`` — one rank dies
+    while root prints "Complete".  Reduce with logical-AND and surface the
+    first bad field name from any rank.
+
+    Multi-controller SPMD (``distributed_mode='spmd'``) needs no reduction:
+    the state is globally sharded and jnp reductions are SPMD-global, so the
+    verdict is process-identical by construction (mirrors the segment-boundary
+    stability check in ``ModelDriver``); mpi4py there would be a second
+    control plane beside jax.distributed.
+    """
+    _dc = getattr(driver, "_device_config", None)
+    if (driver._mpi_rank is None or _dc is None
+            or not getattr(_dc, "is_distributed", False)):
+        return state_ok, bad_field
+    from mpi4py import MPI
+
+    state_ok = bool(MPI.COMM_WORLD.allreduce(bool(state_ok), op=MPI.LAND))
+    bad_fields = MPI.COMM_WORLD.allgather(bad_field)
+    bad_field = next((f for f in bad_fields if f is not None), None)
+    return state_ok, bad_field
+
+
+def _resolve_run_exit(run_status: str, state_ok: bool) -> int:
+    """Combine the two independent failure signals into one exit code.
+
+    0 only when the driver status is ``COMPLETED`` (via the shared
+    ``status_to_exit_code`` contract) AND the final-state NaN/Inf sweep is
+    clean; 1 otherwise, so a SLURM ``afterok`` chain stops instead of
+    restarting from garbage.
+    """
+    if status_to_exit_code(run_status) != 0:
+        return 1
+    return 0 if state_ok else 1
+
+
 def _apply_aimip_classical_overrides(
     args: argparse.Namespace,
 ) -> argparse.Namespace:
@@ -1551,7 +1626,8 @@ def main(argv: list[str] | None = None):
         parser.set_defaults(**load_yaml_config(
             pre.config, parser,
             example_keys="'convection', 'microphysics', 'surface_bulk_scheme', "
-                         "'q_c_diagnostic', 'gustiness_zi', 'convective_cloud'"))
+                         "'q_c_diagnostic', 'gustiness_zi', "
+                         "'bulk_thermo_convention', 'convective_cloud'"))
 
     args = parser.parse_args(argv)
     args = _postprocess_args(args, parser)
@@ -1702,33 +1778,55 @@ def main(argv: list[str] | None = None):
         n_profile_days = args.profile * args.dt / 86400.0
         driver.config = driver.config._replace(days=int(n_profile_days + 1))
         with jax.profiler.trace(profile_dir):
-            driver.run(start_step=start_step, start_day=start_day)
+            profile_status = driver.run(start_step=start_step,
+                                        start_day=start_day)
         if _is_root:
             print(f"Profile saved to {profile_dir}")
             print("View with: tensorboard --logdir " + profile_dir)
+        # Same status→exit-code contract as the production path below: a
+        # profiled blowup must not exit 0 either.
+        if status_to_exit_code(profile_status) != 0:
+            if _is_root:
+                print(f"FAIL: profiled run did not complete cleanly "
+                      f"(status={profile_status!r}).", file=sys.stderr)
+            sys.exit(1)
         return
 
     if _is_root:
         print("Running...")
-    driver.run(start_step=start_step, start_day=start_day)
+    run_status = driver.run(start_step=start_step, start_day=start_day)
 
-    # iter-100: post-run finiteness check.  Pre-iter-100,
-    # ``run_amip.py`` had ZERO blowup detection (``grep -c
-    # isfinite`` = 0 in 450 lines).  A NaN-producing AMIP run
-    # would silently complete and print "Complete." while
-    # writing garbage to the output directory.  iter-98's audit
-    # of the OMIP/atmosphere-matrix BLOWUP-reporting bug flagged
-    # this as a separate gap; iter-100 closes it.
+    # Post-run FAILURE detection needs TWO independent signals — either one
+    # non-clean means exit 1 (so a SLURM ``afterok`` chain STOPS instead of
+    # restarting from garbage):
     #
-    # The check inspects the final ``driver.state`` for NaN/Inf
-    # in the primary atmospheric fields (T, u, v, p_s).  When
-    # non-finite, the run is flagged FAIL with a clear message
-    # and the script exits with code 1 so wrappers
-    # (``run_amip_cross_grid.sh``) can detect failure.
-    state_ok, bad_field = _check_run_state_finite(driver)
+    #  1. the driver's own run status.  ``check_stability`` flags a BLOWUP
+    #     (winds / T / p_s out of *physical* bounds) at a segment boundary and
+    #     returns e.g. ``"BLOWUP at day 515"``.  Those values are FINITE, so the
+    #     NaN/Inf sweep below never sees them — before this, ``driver.run()``'s
+    #     status was DISCARDED and a blown-up chain link printed "Complete" and
+    #     exited 0, letting the chain march on (the 3-yr-chain false-completion).
+    #  2. a final NaN/Inf sweep (iter-100) of the primary fields (T, u, v, p_s)
+    #     — catches a non-finite state a segment-boundary probe could miss.
+    #
+    # ``status_to_exit_code`` is the shared status→exit-code contract.  The
+    # BLOWUP verdict is already rank-identical (root checks, mpi4py bcasts —
+    # see the segment-boundary stability check in ``ModelDriver``); the
+    # finiteness sweep is rank-LOCAL under mpi4jax, so it is reduced across
+    # ranks before the verdict so every rank exits identically.
+    state_ok, bad_field = _sync_finite_verdict_across_ranks(
+        driver, *_check_run_state_finite(driver))
+    status_code = status_to_exit_code(run_status)
+    run_failed = _resolve_run_exit(run_status, state_ok) != 0
     if _is_root:
-        if state_ok:
+        if not run_failed:
             print(f"Complete. Output: {driver.output_dir}")
+        elif status_code != 0:
+            print(
+                f"FAIL: run did not complete cleanly (status={run_status!r}).  "
+                f"Output (with garbage): {driver.output_dir}",
+                file=sys.stderr,
+            )
         else:
             print(
                 f"FAIL: final state contains NaN/Inf in field "
@@ -1736,7 +1834,8 @@ def main(argv: list[str] | None = None):
                 f"{driver.output_dir}",
                 file=sys.stderr,
             )
-            sys.exit(1)
+    if run_failed:
+        sys.exit(1)
 
     if args.plot and _is_root:
         # ``plot_amip`` lives under ``scripts/plot/`` (bucket layout; see

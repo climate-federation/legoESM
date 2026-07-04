@@ -196,7 +196,8 @@ def land_scheme_overrides(land_scheme: str) -> dict:
 # error hint:
 _COUPLED_EXAMPLE_KEYS = (
     "'surface_bulk_scheme', 'ocean', 'surface_gustiness_zi', "
-    "'cloud_q_c_diagnostic', 'ocean_restore_sst_tau_days'"
+    "'bulk_thermo_convention', 'cloud_q_c_diagnostic', "
+    "'ocean_restore_sst_tau_days'"
 )
 
 
@@ -337,12 +338,24 @@ def build_parser():
                         type=float, default=None,
                         help="COARE 3.0 convective-gustiness boundary-layer depth "
                              "z_i [m] for the MOST surface fluxes (needs "
-                             "--surface-bulk-scheme coare3/large_yeager). 0/unset "
-                             "= off (byte-identical); ~600 enables the w* "
-                             "free-convection gust so a calm warm ocean evaporates "
+                             "--surface-bulk-scheme coare3/large_yeager). Unset = "
+                             "scheme-native (coare3: 600 m per AeroBulk/Fairall "
+                             "2003; large_yeager/constant: off). 0 = force off. "
+                             "The w* gust lets a calm warm ocean evaporate "
                              "(fixes the persistent tropical hfls<<Earth / R_TOA "
                              "imbalance). Applied to the atmosphere surface layer "
                              "AND the slab ocean heat budget (kept consistent).")
+    parser.add_argument("--bulk-thermo-convention", dest="bulk_thermo_convention",
+                        type=str, default="legoesm",
+                        choices=["legoesm", "aerobulk"],
+                        help="Thermodynamic constants set for the MOST bulk "
+                             "fluxes (coare3/large_yeager): 'legoesm' (default) "
+                             "= constant L_v / dry c_pd; 'aerobulk' = "
+                             "NEMO/AeroBulk/COARE parity (SST-dependent L_vap, "
+                             "moist cp_air). Applied CONSISTENTLY to the "
+                             "atmosphere surface layer, the slab ocean heat "
+                             "budget, and the coupler ocean tile (air-sea only; "
+                             "land/ice/lake keep the default).")
     parser.add_argument("--surface-stability-scheme", default="dyer1974",
                         choices=["dyer1974", "beljaars_holtslag1991",
                                  "grachev2007_sheba", "gryanik2020"],
@@ -758,6 +771,7 @@ def main():
         turbulence=args.turbulence,
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        surface_thermo_convention=args.bulk_thermo_convention,
         surface_stability_scheme=args.surface_stability_scheme,
         gravity_wave_drag=args.gravity_wave_drag,
         cloud_scheme=args.clouds,
@@ -854,14 +868,16 @@ def main():
             # Match the slab heat-budget turbulent fluxes to the atmosphere
             # surface layer (interface energy consistency); see SimpleOceanConfig.
             bulk_scheme=args.surface_bulk_scheme,
-            gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
+            gustiness_w_zi=args.surface_gustiness_zi,
+            thermo_convention=args.bulk_thermo_convention,
         )
         overrides["ocean_mode"] = "two_layer"
     else:
         overrides["ocean_config"] = SimpleOceanConfig(
             mode=args.ocean, h_mix=args.ocean_h_mix,
             bulk_scheme=args.surface_bulk_scheme,
-            gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
+            gustiness_w_zi=args.surface_gustiness_zi,
+            thermo_convention=args.bulk_thermo_convention,
         )
         # ocean_mode log label (fixed/slab -> "slab").
         overrides["ocean_mode"] = "slab"
@@ -916,11 +932,13 @@ def main():
         from legoesm.coupler.config import CouplerConfig
         coupler_config = CouplerConfig(
             bulk_scheme=args.surface_bulk_scheme,
+            thermo_convention=args.bulk_thermo_convention,
             stability_scheme=args.surface_stability_scheme,
         )
-        logger.info("  Surface bulk-flux scheme: %s (stability: %s; "
+        logger.info("  Surface bulk-flux scheme: %s (thermo: %s; stability: %s; "
                     "atmosphere + coupler ocean tile)",
-                    args.surface_bulk_scheme, args.surface_stability_scheme)
+                    args.surface_bulk_scheme, args.bulk_thermo_convention,
+                    args.surface_stability_scheme)
 
     # Apply the --params calibration layer (issue #691) across EVERY component
     # config this driver builds — see apply_coupled_params (the single source

@@ -16,7 +16,8 @@ scaling_derecho/
 ├── submit_scaling.sh   # ►ENTRY POINT◄  submit_scaling.sh <outdir> <grid> [res...]
 ├── scaling_cpu.sh      # CPU scaling sweep (latlon/ico = ranks 1..128; spectral = 1 x threads)
 ├── scaling_gpu.sh      # GPU scaling sweep (latlon + ico = 1->2->4 A100 single node, ->8->16… multi-node via NODES; spectral = 1)
-├── cube_scaling_cpu.sh # cube CPU scaling (faces 1,2,3,6 x node-filling threads)
+├── cube_scaling_cpu.sh # cube CPU scaling, route A (faces 1,2,3,6; mpi4jax scatter)
+├── cube_scaling_cpu_routeb.sh # cube CPU scaling, route B (jax.distributed/gloo; --cs-spmd; extends past 6 to 6*kt^2) — #764
 ├── cube_scaling_gpu.sh   # cube GPU scaling (1->2->3 A100; mpi4jax face-scatter)
 └── finalize_scaling.sh # after jobs finish: aggregate <outdir> + per-grid CPU-vs-GPU plots
 ```
@@ -457,3 +458,46 @@ column -s, -t < $OUT/all_tidy.csv | less -S    # grid, backend, n_resource, reso
       allocation — confirm with the interactive `qsub -I` in Step 1; adjust the
       `select=`/`gpu_type` line in `scaling_gpu.sh` / `cube_scaling_gpu.sh` if not.
 - [ ] `DRYRUN=1` preview looks right before the real submit.
+
+---
+
+## Ocean + multi-node GPU additions (2026-07)
+
+Alongside the cube pair above, three further jobs + a build script:
+
+| File | What |
+|---|---|
+| `ocean_gpu_scaling.pbs` | OCEAN weak+strong on one GPU node via `scripts/bench/bench_ocean_latlon_spmd_scaling.py` (full lat-lon C-grid step sharded over 1/2/4 A100; fail-fast `--parity-gate` + `--check-conservation` smoke first). Plain GPU env — no mpi4jax. |
+| `ocean_cpu_scaling.pbs` | OCEAN weak+strong CPU-MPI rank ladder (`bench_ocean_mpi_scaling.py`, `legoesm-mpi` env), with a 2-rank parity+conservation smoke. |
+| `gpu_multinode_scaling.pbs` | MULTI-NODE GPU lanes over jax.distributed + NCCL: A = cube `--cs-spmd` (6 GPU / 2 nodes), C = atm lat-lon `--multicontroller` (8 GPU), D = ocean `--multicontroller` (8 GPU); plus the optional route-A CUDA-aware mpi4jax lane (`RUN_ROUTEA=1`, needs the overlay env). |
+| `build_nccl_ofi.sh` | Login-node build of **aws-ofi-nccl** against Derecho's Cray libfabric (no NCCL build dep — the plugin vendors the net-API headers and is dlopen'd by the jax-wheel NCCL). |
+
+NCCL on Slingshot-11 has NO native CXI support: without the plugin the
+multi-node lanes fall back to TCP sockets over `hsn` (correct, 2-3x slower
+comm — loud warning, fine for shakeout). For production numbers:
+
+```bash
+bash scripts/cluster/scaling_derecho/build_nccl_ofi.sh
+qsub -v LEGOESM_NCCL_OFI_LIB=/glade/work/$USER/nccl-ofi/<tag>/lib \
+     scripts/cluster/scaling_derecho/gpu_multinode_scaling.pbs
+```
+
+Verify the first run's `NCCL_DEBUG=INFO` log prints
+`Using network AWS Libfabric` (not `Socket`). The NCCL lanes keep
+`MPICH_GPU_SUPPORT_ENABLED=0` (mixing GPU-aware cray-mpich and NCCL in one
+program risks deadlock); the route-A lane sets it to 1 — the two transports
+never share a process.
+
+
+## 2026-07 lane E: icosahedral/MPAS multicontroller
+
+`gpu_multinode_scaling.pbs` gained lane E (`RUN_MPAS=1`, default on): the
+icosahedral MPAS PE dycore over `jax.distributed` + NCCL via
+`scripts/bench/bench_mpas_spmd_scaling.py` — cell-partition reorder
+(`reorder_voronoi_for_sharding`, Hilbert-SFC pinned for cross-process
+determinism) + `make_voronoi_sharded_step` ppermute halos. 6 processes
+(2 nodes x 3 GPUs): `nCells = 10*4^L + 2` admits 1/2/3/6 even splits at
+every level. A subdiv-4 smoke with `--parity-gate --check-conservation`
+runs before the timed `ICO_LEVEL` (default L7 = 163842 cells, ~27k
+cells/GPU at np=6) case. 2-process CPU federation gate:
+`tests/parallel/test_mpas_spmd_multicontroller_selfspawn.py`.

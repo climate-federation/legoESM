@@ -61,3 +61,24 @@ def test_clm5_reader_landunit_reconstruction():
 def test_clm5_reader_pft_axis_matches_surface_params():
     d = read_clm5_cover_veg(dataset=_synthetic_clm())
     assert list(d["pft_names"]) == list(CLM5_PFT_NAMES)
+
+
+def test_reconstruct_clm5_pft_frac_crop_split():
+    """The shared landunit→17-PFT reconstruction (used by BOTH the surfdata reader
+    and the coupled-AMIP LAI loader) splits crop cover across cft (crop_c3/crop_c4)
+    via PCT_CFT and weights natural PFTs by PCT_NATVEG."""
+    from legoesm.land.surface_data.sources.clm5_surfdata import reconstruct_clm5_pft_frac
+
+    natveg = np.array([[80.0]]); crop = np.array([[20.0]])   # (1, 1) percent gridcell
+    be = CLM5_PFT_NAMES.index("broadleaf_evergreen_tropical")
+    nat_pft = np.zeros((15, 1, 1)); nat_pft[be, 0, 0] = 100.0
+    cft = np.zeros((2, 1, 1)); cft[0, 0, 0] = 50.0; cft[1, 0, 0] = 50.0  # 50/50 c3/c4
+    pf = reconstruct_clm5_pft_frac(natveg, crop, nat_pft, cft)
+    assert pf.shape == (N_PFT_CLM5, 1, 1)
+    np.testing.assert_allclose(pf[be, 0, 0], 80.0)                       # 80% * 100%
+    np.testing.assert_allclose(pf[CLM5_PFT_NAMES.index("crop_c3"), 0, 0], 10.0)  # 20%*50%
+    np.testing.assert_allclose(pf[CLM5_PFT_NAMES.index("crop_c4"), 0, 0], 10.0)  # 20%*50%
+    np.testing.assert_allclose(pf.sum(), 100.0)                          # = f_land
+    # PFT-count guard (wrong natpft count) raises rather than silently mis-aligning.
+    with pytest.raises(ValueError, match="expected"):
+        reconstruct_clm5_pft_frac(natveg, crop, np.zeros((14, 1, 1)), cft)

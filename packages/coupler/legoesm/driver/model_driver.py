@@ -332,6 +332,17 @@ class ModelDriver:
         if "conv_prog" in base:
             base["conv_prog_scheme"] = np.asarray(
                 str(getattr(self.config, "convection", "none")))
+        # Multilayer (Richards) land state (#730 chain-enable): the prognostic
+        # soil/snow/carbon columns ride carry_aux (namespaced land_ml_*) so a
+        # chained C48 SOTA restart resumes the deep-soil spin-up instead of
+        # cold-starting. No-op for slab-land runs (_land_ml_state is None).
+        if self._land_ml_state is not None:
+            for _f, _v in self._land_ml_state._asdict().items():
+                # Optional fields (TgC, surface_water) may be None — np.asarray
+                # would pickle a 0-d object array into the npz and crash the
+                # load-side jnp.asarray. Skip; restore only replaces saved keys.
+                if _v is not None:
+                    base[f"land_ml_{_f}"] = np.asarray(_v)
         return base if base else None
 
     def _restore_dm_tracers_from_carry_aux(self) -> None:
@@ -344,6 +355,62 @@ class ModelDriver:
             return
         for key in [k for k in self._carry_aux if k.startswith("dmtr_")]:
             _tracers[key[len("dmtr_"):]] = self._carry_aux.pop(key)
+
+    def _restore_land_ml_from_carry_aux(self) -> None:
+        """Rebuild ``self._land_ml_state`` from any ``land_ml_*`` entries restored
+        into ``carry_aux``, so a chained multilayer-land restart resumes the
+        prognostic soil/snow/carbon columns instead of cold-starting (#730).
+        No-op for slab-land runs (``_land_ml_state`` is None).
+
+        Fail-loud on a partial or version-skewed checkpoint: the save side
+        (:meth:`_checkpoint_carry_aux`) emits every non-None field, so the
+        restored set must exactly match the current template's non-None field
+        set.  A missing field would leave that prognostic column at its
+        cold-start value — a silent mixed restart, exactly what #730 exists to
+        prevent — and an unknown or wrong-shaped field signals a schema /
+        resolution skew.  Mirrors the MPAS phys-state load, which likewise
+        refuses a field-set mismatch rather than silently dropping columns."""
+        if not isinstance(self._carry_aux, dict):
+            return
+        keys = [k for k in self._carry_aux if k.startswith("land_ml_")]
+        if not keys:
+            return
+        # Pop the namespaced keys regardless of land type so a stray land_ml_*
+        # (e.g. a slab run chained off a multilayer checkpoint) is never left to
+        # leak forward into the next _checkpoint_carry_aux() re-save.
+        popped = {k[len("land_ml_"):]: self._carry_aux.pop(k) for k in keys}
+        template = self._land_ml_state
+        if template is None:
+            return  # slab run: keys removed above, nothing to restore
+        import jax.numpy as jnp
+        valid = set(template._fields)
+        unknown = set(popped) - valid
+        if unknown:
+            raise ValueError(
+                f"land_ml checkpoint has unknown field(s) {sorted(unknown)}; "
+                f"current MultiLayerLandState fields are {sorted(valid)}")
+        expected = {f for f in template._fields
+                    if getattr(template, f) is not None}
+        got = set(popped)
+        if got != expected:
+            raise ValueError(
+                "land_ml checkpoint field set does not match the current "
+                "MultiLayerLandState: "
+                f"missing={sorted(expected - got)}, "
+                f"unexpected={sorted(got - expected)}. Refusing to build a "
+                "mixed restart state (the missing prognostic columns would "
+                "silently stay at cold-start values).")
+        fields = {}
+        for name, val in popped.items():
+            arr = jnp.asarray(val)
+            ref = getattr(template, name)
+            if arr.shape != ref.shape:
+                raise ValueError(
+                    f"land_ml checkpoint field '{name}' has shape "
+                    f"{tuple(arr.shape)}, expected {tuple(ref.shape)} "
+                    "(resolution / soil-layer-count skew)")
+            fields[name] = arr
+        self._land_ml_state = template._replace(**fields)
 
     def _validate_microphysics_tracer_state(
         self,
@@ -1368,6 +1435,23 @@ class ModelDriver:
         from legoesm.land.carbon.stomata import StomataConfig
         from legoesm.land.config import MultiLayerLandConfig
         from legoesm.land.soil_grid import SoilGridConfig
+        from legoesm.land.surface_scheme import (
+            SimpleSEBConfig, TwoLeafCanopyConfig,
+        )
+        # Land surface-scheme dispatch (#730). "simple_seb" (default) = bulk SEB
+        # with the beta_soil moisture path; "two_leaf" = DifferBESS two-leaf canopy
+        # (Kelvin h_r bare-soil + two-leaf stomatal transpiration), which limits
+        # land ET below potential and breaks the over-evaporation wet loop.
+        _scheme_name = self.config.land_surface_scheme
+        if _scheme_name == "simple_seb":
+            _surface_scheme = SimpleSEBConfig()
+        elif _scheme_name == "two_leaf":
+            _surface_scheme = TwoLeafCanopyConfig()
+        else:
+            raise ValueError(
+                f"Unknown land_surface_scheme {_scheme_name!r}; "
+                "expected 'simple_seb' or 'two_leaf'."
+            )
 
         ad = self.physics.adapter
         # column-order latitude / longitude.  grid.lat is geographic latitude in
@@ -1414,6 +1498,7 @@ class ModelDriver:
             ),
             bulk_scheme="most",
             snow_albedo_feedback=self.config.snow_albedo_feedback,
+            surface_scheme=_surface_scheme,
             stomata=StomataConfig(
                 enabled=self.config.land_stomatal_beta,
                 gs_max=self.config.land_gs_max,
@@ -1429,7 +1514,13 @@ class ModelDriver:
         ncol = lat_deg.shape[0]
         T_init = ad.flatten_2d(self.state.T.data[..., -1]).reshape(-1).astype(
             storage_dtype)
-        self._land_ml_state = init_multilayer_land_state(ncol, cfg, T_init=T_init)
+        # Soil-moisture cold-start = frac * theta_sat (#730; default 0.5 is
+        # byte-identical to the init default).  A drier start can break the
+        # multilayer over-evaporation wet loop.
+        self._land_ml_state = init_multilayer_land_state(
+            ncol, cfg, T_init=T_init,
+            theta_init=(self.config.land_soil_moisture_init_frac
+                        * cfg.hydraulics.theta_sat))
         logger.info(
             "  Land tile: MULTILAYER override ACTIVE (%d soil layers, %d columns)",
             cfg.soil_grid.n_layers, ncol,
@@ -1561,6 +1652,18 @@ class ModelDriver:
         else:
             p_s = self.state.p_s.data
             lat = self._grid_lat
+            # Multi-controller SPMD: ``p_s`` is GLOBALLY sharded across
+            # processes, but the external-forcing consumers downstream
+            # (``get_ozone_at_time`` & co) are host/NumPy interpolators —
+            # ``np.asarray`` on a process-spanning array raises "spans
+            # non-addressable devices".  Gather to a process-local replicated
+            # array (collective; every call site runs on all processes —
+            # context build + per-segment forcing refresh).  No-op for
+            # fully-addressable arrays, so serial / single-GPU / mpi4jax
+            # lanes are byte-unchanged.  First hit by the 2-node Levante
+            # receipt run (#693): the CPU parity smokes run gray radiation
+            # with no external forcing and never reach this path.
+            p_s = self._gather_spmd_tree_to_host(p_s)
         return p_s, lat
 
     def _precompute_external_forcing(self, day, p_s, lat):
@@ -3617,6 +3720,7 @@ class ModelDriver:
                 # Restore evolved double-moment tracers persisted via carry_aux
                 # (per-rank distributed checkpoint is restart-exact for them).
                 self._restore_dm_tracers_from_carry_aux()
+                self._restore_land_ml_from_carry_aux()
                 from legoesm.core.state import HydrostaticState
                 from legoesm.core.field import Field
                 import jax.numpy as jnp
@@ -3785,6 +3889,7 @@ class ModelDriver:
         # Restore evolved double-moment tracers persisted via carry_aux
         # (serial npz is restart-exact for them).
         self._restore_dm_tracers_from_carry_aux()
+        self._restore_land_ml_from_carry_aux()
         if metadata:
             logger.info(f"  Loaded restart: step={step}, day={day}, "
                        f"digest={metadata.state_digest[:16]}...")
@@ -3813,6 +3918,23 @@ class ModelDriver:
         if step != self._last_checkpoint_step:
             ckpt_fn(step, day)
         self.diagnostics.flush_to_disk(self._output_dir)
+        # Write the CMOR tables that the normal end-of-run ``save`` would emit
+        # but this ``sys.exit(0)`` never reaches — flushing only COMPLETED
+        # periods so a restart chain does not double-write a boundary period:
+        #   * completed months (flush_cmip_monthly pops months < the current),
+        #   * completed days   (finalize_cmip_daily pops days < the current),
+        #   * the fx table     (areacella/sftlf/orog — static, referenced by
+        #                       every variable's ``external_variables`` and
+        #                       required for area-weighted / land-ocean-split
+        #                       diagnostics).
+        # Without this every wallclock-graceful AMIP run (a year rarely
+        # finishes in one SLURM window) would drop fx entirely and lose the
+        # segment's monthly/daily output.  The single month/day straddling the
+        # exit is a bounded, documented limitation (the in-progress accumulator
+        # is not checkpointed).  All three are guarded on the CMIP writer.
+        self.diagnostics.flush_cmip_monthly(day, write=True)
+        self.diagnostics.finalize_cmip_daily(day)
+        self.diagnostics.finalize_cmip_fixed()
         sys.exit(0)
 
     def run(self, start_step: int = 0, start_day: float | None = None,
@@ -5882,8 +6004,32 @@ class ModelDriver:
                 _finalize_err = e
         self._spmd_barrier_on_root_error(_finalize_err)
 
-        if checkpoint_interval > 0:
-            self.save_checkpoint(n_steps_total, START_DAY + N_DAYS)
+        # Only a CLEAN run yields a restartable final checkpoint.  A BLOWUP
+        # leaves the state finite-but-unphysical, and labelling that garbage
+        # with the TARGET day (``START_DAY + N_DAYS``) let a SLURM ``afterok``
+        # chain restart from it and skip straight to "done" — the 3-yr-chain
+        # false-completion (blew up at day 515, wrote ``checkpoint_day_1095``).
+        # Mirror the spectral / MPAS paths, which already gate their final
+        # checkpoint on ``run_status == "COMPLETED"``.  The last PERIODIC
+        # checkpoint (written at the actual elapsed day) remains the restart
+        # point for a blown-up run.
+        if checkpoint_interval > 0 and run_status == "COMPLETED":
+            # Route through the coupled checkpoint callback when one is set
+            # (mirrors the periodic path): a coupled run must persist the FULL
+            # coupled state (atm + ocean + surface + CO2) at the final day too,
+            # or ``run_coupled --resume`` finds the atmosphere checkpoint but
+            # no ``coupled_day_*.npz`` and silently resumes with a stale ocean.
+            # Single-rank only: the coupled tail (CoupledESMDriver.
+            # save_checkpoint) writes rank-LOCAL ocean/surface pytrees with no
+            # gather, so under mpi4jax every rank would race the same npz with
+            # its own slice.  Under MPI keep the atmosphere save, which IS
+            # collective-safe (gathers internally, root writes) — the
+            # coupled-MPI full-state final checkpoint is a pre-existing gap
+            # shared with the periodic path.
+            _ckpt = ((getattr(self, "_checkpoint_callback", None)
+                      if self._mpi_rank is None else None)
+                     or self.save_checkpoint)
+            _ckpt(n_steps_total, START_DAY + N_DAYS)
 
         # Issue #275 fix A lifecycle: restore the halo backend captured
         # at activation time so subsequent drivers / tests in the same

@@ -715,3 +715,67 @@ class SpatialDailyAccumulator:
                 result[f"field_2d_{name}_max"] = max_out
 
         return result
+
+    def pop_completed_days(self, current_year: int, current_doy: int) -> dict:
+        """Finalize and remove days strictly before the in-progress day.
+
+        Daily analogue of
+        :meth:`SpatialMonthlyAccumulator.pop_completed_months`.  A graceful
+        wallclock exit uses this to emit (and free) the segment's COMPLETED
+        daily means while leaving the in-progress day un-written: writing the
+        partial current day here and then again from the restart segment —
+        which resumes inside the same ``(year, doy)`` — would produce
+        duplicate ``time`` coordinates and split-day means, because
+        ``CFWriter.write_field`` appends blindly to an existing file.  Unlike
+        :meth:`finalize`, no ``min_sample_fraction`` guard is applied (parity
+        with ``pop_completed_months``); every strictly-past day is complete by
+        construction.
+
+        Parameters
+        ----------
+        current_year, current_doy : int
+            The day currently being accumulated (will NOT be popped).
+
+        Returns
+        -------
+        dict
+            Same structure as :meth:`finalize` but only for completed days.
+            Empty ``{'days': []}`` if none are ready.
+        """
+        current_key = (current_year, int(current_doy))
+        completed = sorted(k for k in self._data if k < current_key)
+        if not completed:
+            return {'days': []}
+
+        result: dict = {'days': completed}
+        n = len(completed)
+        all_names: set[str] = set()
+        for key in completed:
+            all_names.update(self._data.get(key, {}).keys())
+
+        for name in sorted(all_names):
+            has_extrema = name in self.track_extremes
+            mean_arr = np.full((n, self.nlat, self.nlon), np.nan)
+            if has_extrema:
+                min_out = np.full((n, self.nlat, self.nlon), np.nan)
+                max_out = np.full((n, self.nlat, self.nlon), np.nan)
+            for i, key in enumerate(completed):
+                bucket = self._data.get(key, {})
+                if name in bucket:
+                    s, c, mn, mx = bucket[name]
+                    if c > 0:
+                        mean_arr[i] = s / c
+                    if has_extrema and mn is not None:
+                        min_out[i] = mn
+                        max_out[i] = mx
+            result[f"field_2d_{name}"] = mean_arr
+            if has_extrema:
+                result[f"field_2d_{name}_min"] = min_out
+                result[f"field_2d_{name}_max"] = max_out
+
+        # Free memory for completed days.
+        for key in completed:
+            self._data.pop(key, None)
+            self._call_counts.pop(key, None)
+
+        return result
