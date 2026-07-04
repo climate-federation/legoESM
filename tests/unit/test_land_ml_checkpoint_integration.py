@@ -143,6 +143,21 @@ def test_slab_driver_checkpoint_has_no_land_ml(monkeypatch, tmp_path):
     assert dst._land_ml_state is None
 
 
+def test_band_mpi_land_ml_guard_predicate():
+    """Directly exercise the band-MPI fail-fast predicate: the guard itself
+    only fires on the distributed restart path the single-process tests above
+    never reach, so without this a prefix rename would silently disable it."""
+    f = ModelDriver._carry_has_unscatterable_land_ml
+    assert f({"land_ml_T_soil": 1}) is True            # multilayer -> must block
+    assert f({}) is False                              # clean restart -> allow
+    assert f(None) is False                            # no carry_aux -> allow
+    assert f({"T_land": 1, "dmtr_q_v": 2}) is False    # slab/other carry -> allow
+    # The guard runs on the POST-bcast in-memory carry_aux, whose keys are bare
+    # (load strips the on-disk ``carry_``/``diag_`` prefix), so an on-disk-style
+    # key must NOT match — matching semantics are startswith, not substring.
+    assert f({"carry_land_ml_T_soil": 1}) is False
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-q"]))
