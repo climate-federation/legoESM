@@ -371,6 +371,11 @@ def main():
         meta = {
             "next_day": next_day.isoformat(),
             "monthly": [[y, m, vals] for (y, m), vals in sorted(monthly.items())],
+            # Provenance: which trained checkpoint produced this trajectory.
+            # Resume refuses a mismatch (a NEW ckpt silently continuing an
+            # OLD — possibly runaway — trajectory burned the first sfno
+            # stable-sanity run).
+            "ckpt": str(args.ckpt),
         }
         tmp_j = restart_json.with_suffix(".json.tmp")
         tmp_j.write_text(json.dumps(meta))
@@ -380,6 +385,14 @@ def main():
 
     if restart_eqx.exists() and restart_json.exists():
         meta = json.loads(restart_json.read_text())
+        _restart_ckpt = meta.get("ckpt")
+        if _restart_ckpt is not None and _restart_ckpt != str(args.ckpt):
+            raise SystemExit(
+                f"Restart {restart_eqx} was written by ckpt={_restart_ckpt} "
+                f"but this run uses --ckpt {args.ckpt}. Refusing to resume a "
+                f"different model's trajectory — delete the restart (and its "
+                f"CSV) to start fresh, or pass --restart-path elsewhere."
+            )
         # ``state`` currently holds the IC -> identical pytree structure, so it
         # is the deserialisation template.
         state = eqx.tree_deserialise_leaves(restart_eqx, state)
