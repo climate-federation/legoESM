@@ -89,6 +89,17 @@ def reconstruct_clm5_pft_frac(natveg, crop, nat_pft, cft):
     crop = np.asarray(crop, dtype=np.float64)
     nat_pft = np.asarray(nat_pft, dtype=np.float64)
     cft = np.asarray(cft, dtype=np.float64)
+    # Landunit axes must be EXACTLY 15 natural + 2 crop in CLM5 order; a reordered or
+    # merged source (e.g. natpft=16, cft=1) would still sum to 17 but silently
+    # mis-align the concatenated per-PFT rows.  Guard the axis lengths + spatial shapes.
+    if nat_pft.shape[0] != N_PFT_CLM5 - 2 or cft.shape[0] != 2:
+        raise ValueError(
+            f"expected {N_PFT_CLM5 - 2} natural PFTs + 2 crop CFTs (CLM5 17-PFT), "
+            f"got natpft={nat_pft.shape[0]} + cft={cft.shape[0]}.")
+    if not (natveg.shape == crop.shape == nat_pft.shape[1:] == cft.shape[1:]):
+        raise ValueError(
+            f"cover spatial shapes disagree: natveg{natveg.shape}, crop{crop.shape}, "
+            f"nat_pft{nat_pft.shape[1:]}, cft{cft.shape[1:]}.")
     nat_w = (natveg[None, :, :] / 100.0) * nat_pft          # (15, lat, lon)
     crop_w = (crop[None, :, :] / 100.0) * cft               # (2, lat, lon)
     pft_frac = np.concatenate([nat_w, crop_w], axis=0)      # (17, lat, lon) %

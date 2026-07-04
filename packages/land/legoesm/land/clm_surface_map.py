@@ -198,18 +198,25 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
     # present: a minimal/synthetic surfdata lacking them yields None -> the canopy
     # falls back to its scalar default.  Weighting on the native grid then
     # nearest-regridding the scalar is identical to per-PFT-regrid-then-weight.
-    lai_native = None
-    if "MONTHLY_LAI" in ds and "PCT_CFT" in ds:
+    # Canonical PCT_CFT-aware 17-PFT cover (shared with read_clm5_cover_veg), used
+    # for BOTH the per-cell parameter weighting (fr, below) and the LAI so crop cells
+    # get a CONSISTENT c3/c4 split.  None when the surfdata lacks PCT_CFT (minimal /
+    # synthetic files) -> fr falls back to the crop_c3-only cover and LAI to None
+    # (canopy scalar default).
+    pft_frac_pct = None
+    if "PCT_CFT" in ds:
         from legoesm.land.surface_data.sources.clm5_surfdata import (
             reconstruct_clm5_pft_frac)
+        pft_frac_pct = reconstruct_clm5_pft_frac(   # (n_pft, nlat, nlon) % of gridcell
+            pct_natveg, pct_crop, pct_nat, ds["PCT_CFT"].values)
+    lai_native = None
+    if "MONTHLY_LAI" in ds and pft_frac_pct is not None:
         lai_annual = np.asarray(
             ds["MONTHLY_LAI"].values, dtype=np.float64).mean(axis=0)  # (n_pft, nlat, nlon)
         if lai_annual.shape[0] != _N_PFT:
             raise ValueError(
                 f"MONTHLY_LAI has {lai_annual.shape[0]} PFTs, expected {_N_PFT} "
                 "(CLM5 17-PFT ordering aligned with the reconstructed cover).")
-        pft_frac_pct = reconstruct_clm5_pft_frac(   # (n_pft, nlat, nlon) % of gridcell
-            pct_natveg, pct_crop, pct_nat, ds["PCT_CFT"].values)
         lai_native = np.sum(
             (pft_frac_pct / 100.0) * lai_annual, axis=0)   # (nlat, nlon) grid-cell mean
     # root-zone mean sand/clay (top layers)
@@ -225,13 +232,21 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
     clay_c = _nearest_regrid(slat, slon, clay, tgt_lat_deg, tgt_lon_deg)
     lai_c = (_nearest_regrid(slat, slon, lai_native, tgt_lat_deg, tgt_lon_deg)
              if lai_native is not None else None)              # (ncol,) or None
+    pft_frac_pct_c = (
+        _nearest_regrid(slat, slon, pft_frac_pct, tgt_lat_deg, tgt_lon_deg)  # (17, ncol) %
+        if pft_frac_pct is not None else None)
     ncol = natveg_c.shape[0]
 
-    # PFT fractions over the 17 CLM5 classes: natural PFTs 0..n_nat-1 weighted by
-    # the gridcell natural-veg fraction; crops -> crop_c3 slot.
-    fr = np.zeros((ncol, _N_PFT))
-    fr[:, :n_nat] = (pct_nat_c.T / 100.0) * (natveg_c[:, None] / 100.0)
-    fr[:, _I_CROP_C3] += crop_c / 100.0
+    # PFT fractions over the 17 CLM5 classes.  With PCT_CFT present, reuse the ONE
+    # canonical crop-split cover (so the per-cell params and the LAI weight by the
+    # SAME 17-PFT split, incl. crop_c3/crop_c4); else fall back to the crop_c3-only
+    # cover for surfdata lacking PCT_CFT.
+    if pft_frac_pct_c is not None:
+        fr = pft_frac_pct_c.T / 100.0                          # (ncol, 17) fraction of gridcell
+    else:
+        fr = np.zeros((ncol, _N_PFT))
+        fr[:, :n_nat] = (pct_nat_c.T / 100.0) * (natveg_c[:, None] / 100.0)
+        fr[:, _I_CROP_C3] += crop_c / 100.0
     # normalise per column (bare-soil floor keeps the weighted avg well-defined
     # where the gridcell is non-vegetated land — lakes/glacier/urban remainder).
     fr[:, 0] += np.maximum(1.0 - fr.sum(1), 0.0)
