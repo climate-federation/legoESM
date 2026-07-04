@@ -115,17 +115,26 @@ def add_face_barriers(u_mask_3d: jnp.ndarray, v_mask_3d: jnp.ndarray,
     def _apply(mask, barrier, name):
         if barrier is None:
             return mask
-        # Static host-side geometry: validate the face-plane shape up front so a
+        # Static host-side geometry: validate the FULL shape up front so a
         # transposed / mis-sized barrier fails loudly instead of broadcasting a
-        # wall onto the wrong faces.
-        if barrier.ndim not in (mask.ndim - 1, mask.ndim):
+        # wall onto the wrong faces or levels.  A per-level barrier must match
+        # the face mask exactly (a ``(..., 1)`` or ``(..., nlev±1)`` barrier
+        # would otherwise silently broadcast one level onto the whole column);
+        # a face-plane (level-less) barrier must match the mask's spatial plane.
+        if barrier.ndim == mask.ndim:
+            if tuple(barrier.shape) != tuple(mask.shape):
+                raise ValueError(
+                    f"{name} per-level shape {tuple(barrier.shape)} != face-mask "
+                    f"shape {tuple(mask.shape)}")
+        elif barrier.ndim == mask.ndim - 1:
+            if tuple(barrier.shape) != tuple(mask.shape[:-1]):
+                raise ValueError(
+                    f"{name} face-plane shape {tuple(barrier.shape)} != face-mask "
+                    f"plane {tuple(mask.shape[:-1])}")
+        else:
             raise ValueError(
                 f"{name} must be {mask.ndim - 1}-D (face plane) or {mask.ndim}-D "
                 f"(per-level), got ndim={barrier.ndim}")
-        if tuple(barrier.shape[:2]) != tuple(mask.shape[:2]):
-            raise ValueError(
-                f"{name} face-plane shape {tuple(barrier.shape[:2])} != face-mask "
-                f"shape {tuple(mask.shape[:2])}")
         b = barrier[..., None] if barrier.ndim == mask.ndim - 1 else barrier
         return mask * (1.0 - b.astype(mask.dtype))
 

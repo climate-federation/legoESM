@@ -161,17 +161,30 @@ def test_thin_wall_barrier_blocks_without_masking_cells():
 
 def test_add_face_barriers_rejects_mismatched_shape():
     """A transposed / mis-sized barrier fails LOUDLY (static geometry check),
-    not by silently broadcasting a wall onto the wrong faces."""
+    not by silently broadcasting a wall onto the wrong faces OR levels."""
     nlat, nlon, nlev = 4, 4, 2
     u_mask, v_mask = compute_face_masks_3d(_all_active(nlat, nlon, nlev))
     # v_barrier must be (nlat+1, nlon[, nlev]); give it a wrong first dim.
     bad_v = jnp.zeros((nlat, nlon), dtype=bool)
     with pytest.raises(ValueError, match="v_barrier"):
         add_face_barriers(u_mask, v_mask, v_barrier=bad_v)
-    # And a wrong rank.
+    # A wrong rank.
     bad_u = jnp.zeros((nlat,), dtype=bool)
     with pytest.raises(ValueError, match="u_barrier"):
         add_face_barriers(u_mask, v_mask, u_barrier=bad_u)
+    # A per-level barrier with a SINGLETON level dim (would silently broadcast
+    # one level onto the whole column) must be rejected, not broadcast.
+    bad_lvl1 = jnp.zeros((nlat, nlon + 1, 1), dtype=bool)
+    with pytest.raises(ValueError, match="u_barrier"):
+        add_face_barriers(u_mask, v_mask, u_barrier=bad_lvl1)
+    # A per-level barrier with the WRONG number of levels must be rejected too.
+    bad_lvlN = jnp.zeros((nlat, nlon + 1, nlev + 1), dtype=bool)
+    with pytest.raises(ValueError, match="u_barrier"):
+        add_face_barriers(u_mask, v_mask, u_barrier=bad_lvlN)
+    # A CORRECT per-level (3-D) barrier passes.
+    good_lvl = jnp.zeros((nlat, nlon + 1, nlev), dtype=bool).at[0, 2, 1].set(True)
+    um, _ = add_face_barriers(u_mask, v_mask, u_barrier=good_lvl)
+    assert float(um[0, 2, 1]) == 0.0 and float(um[0, 2, 0]) == float(u_mask[0, 2, 0])
 
 
 def test_immersed_face_masks_combines_solid_and_barrier():
