@@ -144,13 +144,48 @@ def _configure_jax_gpu(precision: str) -> None:
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 
+def _launcher_world_size() -> int:
+    """World size the MPI/SLURM/PALS launcher env reports (1 = no launcher)."""
+    for var in ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "PALS_LOCAL_SIZE",
+                "SLURM_NTASKS"):
+        val = os.environ.get(var)
+        if val and val.isdigit():
+            return int(val)
+    return 1
+
+
+def _under_mpi_launcher() -> bool:
+    """True when an MPI launcher started this process.
+
+    Size vars alone under-detect Cray PALS (PALS_LOCAL_SIZE is per-node;
+    a job can expose only per-rank ids) — so the PRESENCE of a per-rank id
+    counts as launcher evidence too (codex round-2).
+    """
+    if _launcher_world_size() > 1:
+        return True
+    return any(
+        v in os.environ
+        for v in ("PALS_RANKID", "PMI_RANK", "OMPI_COMM_WORLD_RANK")
+    )
+
+
 def _init_mpi() -> tuple[int, int]:
     """Initialize MPI and return (rank, n_ranks)."""
     try:
         from mpi4py import MPI
         comm = MPI.COMM_WORLD
         return comm.Get_rank(), comm.Get_size()
-    except ImportError:
+    except (ImportError, RuntimeError) as e:
+        # RuntimeError: mpi4py installed but no loadable libmpi (common in
+        # a GPU-only venv). A single-process run must not require MPI —
+        # BUT under a real MPI launcher a broken mpi4py must fail LOUDLY
+        # here, or every rank silently runs duplicated serial work
+        # reporting n_ranks=1 (codex finding).
+        if _under_mpi_launcher():
+            raise RuntimeError(
+                f"MPI launcher detected (world size "
+                f"{_launcher_world_size()}) but mpi4py is unusable: {e}"
+            ) from e
         return 0, 1
 
 
@@ -1051,7 +1086,8 @@ def run_single_benchmark(
         if _MPI.COMM_WORLD.Get_size() > 1:
             jax.block_until_ready(jax.tree.leaves(state))
             _MPI.COMM_WORLD.Barrier()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # broken/absent mpi4py must not break a single-process run
         pass
 
     t0 = time.perf_counter()
@@ -1063,7 +1099,8 @@ def run_single_benchmark(
         from mpi4py import MPI as _MPI
         if _MPI.COMM_WORLD.Get_size() > 1:
             _MPI.COMM_WORLD.Barrier()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # broken/absent mpi4py must not break a single-process run
         pass
 
     t1 = time.perf_counter()
@@ -1420,10 +1457,20 @@ def main() -> int:
         # (mpirun) — gating on SLURM_NTASKS alone would silently skip
         # initialize() under mpirun and leave N independent local
         # meshes all reporting n_ranks=N.
-        _nproc = int(_os.environ.get(
-            "SLURM_NTASKS", _os.environ.get("OMPI_COMM_WORLD_SIZE", "1")))
+        _nproc = 1
+        for _var in ("SLURM_NTASKS", "OMPI_COMM_WORLD_SIZE", "PMI_SIZE"):
+            _val = _os.environ.get(_var)
+            if _val:
+                _nproc = int(_val)
+                break
         if _nproc > 1:
-            _jax.distributed.initialize()
+            # PBS/PALS has no bare-initialize auto-detection; the helper
+            # falls back to the mpi4py bootstrap (plain MPI, mpi4jax
+            # never armed on the --cs-spmd path).
+            from legoesm.parallel.early_init import (
+                init_jax_distributed_with_fallback,
+            )
+            init_jax_distributed_with_fallback()
 
     # --- GPU backend assertion (DEFERRED past --cs-spmd init) ---
     # Now safe to touch the backend: jax.distributed.initialize() (if any) has

@@ -51,7 +51,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
+from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.vertical import create_ocean_z_star
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanConfig
@@ -156,6 +156,254 @@ def test_latlon_ocean_spmd_matches_single_device():
                                    err_msg=f"SPMD {nm} mismatch")
 
 
+def _omip_like_forcing(grid, z_coord):
+    """Production-shaped forcing pytrees: the OMIP-populated fields of
+    ``OceanSurfaceForcing`` (sw_down/q_net/tau_x/tau_y), a full
+    ``FreshwaterForcing`` with a deliberately UNBALANCED net (so the
+    ``normalize_freshwater`` global-mean removal is load-bearing), and a
+    tracer-only ``SpongeForcing`` (gamma/T_ref/S_ref, u_ref=v_ref=None —
+    the run_omip shape).  All cell-centered, matching the JRA55 lanes."""
+    from legoesm.ocean.freshwater import FreshwaterForcing
+    from legoesm.ocean.sponge import SpongeForcing
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    rng = np.random.default_rng(7)
+    n_lat, n_lon = grid.n_lat, grid.n_lon
+    nlev = z_coord.n_levels
+    sf = OceanSurfaceForcing(
+        sw_down=jnp.asarray(
+            np.clip(180.0 + 60.0 * rng.standard_normal((n_lat, n_lon)),
+                    0.0, None)),
+        q_net=jnp.asarray(30.0 * rng.standard_normal((n_lat, n_lon))),
+        tau_x=jnp.asarray(0.08 * rng.standard_normal((n_lat, n_lon))),
+        tau_y=jnp.asarray(0.05 * rng.standard_normal((n_lat, n_lon))),
+    )
+    fw = FreshwaterForcing(
+        precip=jnp.asarray(
+            np.abs(3e-5 * rng.standard_normal((n_lat, n_lon)))),
+        evap=jnp.asarray(
+            -np.abs(2e-5 * rng.standard_normal((n_lat, n_lon)))),
+        runoff=jnp.asarray(
+            np.abs(1e-5 * rng.standard_normal((n_lat, n_lon)))),
+        ice_fw=jnp.asarray(np.zeros((n_lat, n_lon))),
+    )
+    lat_frac = np.abs(np.linspace(-1.0, 1.0, n_lat))[:, None]
+    gamma = (1.0 / (30.0 * 86400.0)) * np.clip(
+        (lat_frac - 0.8) / 0.2, 0.0, 1.0) * np.ones((n_lat, n_lon))
+    sponge = SpongeForcing(
+        gamma=jnp.asarray(gamma),
+        T_ref=jnp.asarray(
+            4.0 + 10.0 * np.exp(np.linspace(0, -4, nlev))[None, None, :]
+            * np.ones((n_lat, n_lon, 1))),
+        S_ref=jnp.asarray(35.0 * np.ones((n_lat, n_lon, nlev))),
+    )
+    return fw, sf, sponge
+
+
+@pytest.mark.skipif(jax.device_count() < 4,
+                    reason="needs >=4 devices (XLA_FLAGS host device count)")
+@pytest.mark.skipif(not _have_sharded_step(),
+                    reason="sharded_ocean_step module not present")
+def test_latlon_ocean_spmd_forcing_matches_single_device():
+    """Forcing-channel parity: the run_omip promotion gate.
+
+    Exercises through the sharded step every forcing path the JRA55 lanes
+    hit — wind stress (the one neighbor-row stencil, cell->v-face via the
+    SPMD-aware pads), q_net + shortwave column deposition, virtual salt
+    with ``normalize_freshwater=True`` (the band-local-mean hazard: the
+    global-mean removal must psum over the "lat" axis inside the body or
+    every band subtracts a different correction), sponge tracer
+    relaxation, and the replicated ``t_seconds`` scalar.  Also flips the
+    same step callable between dynamics-only and forcing calls to pin the
+    forcing-aware compile-cache keying (stale specs would crash or
+    corrupt).
+    """
+    from legoesm.parallel.mesh import create_latlon_mesh
+    from legoesm.ocean.dynamics.sharded_ocean_step import (
+        gather_state_latlon,
+        make_sharded_ocean_step,
+        shard_forcing_latlon,
+        shard_state_latlon,
+    )
+
+    n_lat, n_lon, nlev = 48, 96, 10
+    grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+    z_coord = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
+    cfg = LatLonCGridOceanConfig.from_flat()._replace(
+        normalize_freshwater=True)   # closure default: virtual_salt_flux
+    model = LatLonCGridOceanModel(grid, z_coord, cfg)
+    state0 = _perturbed_state(grid, z_coord)
+    fw, sf, sponge = _omip_like_forcing(grid, z_coord)
+    dt, n_steps = 600.0, 3
+
+    # single-device reference
+    s = state0
+    for i in range(n_steps):
+        s = model.step(s, dt, freshwater=fw, surface_forcing=sf,
+                       sponge=sponge, t_seconds=jnp.asarray(i * dt))
+
+    model._ensure_vertex_mask(state0)
+    dev = create_latlon_mesh(n_devices=4)
+    step = make_sharded_ocean_step(model, dev.mesh)
+    ss = shard_state_latlon(state0, dev.mesh)
+    fws = shard_forcing_latlon(fw, dev.mesh)
+    sfs = shard_forcing_latlon(sf, dev.mesh)
+    sponges = shard_forcing_latlon(sponge, dev.mesh)
+
+    # Cache-key flip smoke: dynamics-only compile first, then the forcing
+    # program — the second call MUST rebuild (different forcing structure),
+    # not reuse the no-forcing specs.
+    _ = step(ss, dt)
+
+    for i in range(n_steps):
+        ss = step(ss, dt, freshwater=fws, surface_forcing=sfs,
+                  sponge=sponges, t_seconds=jnp.asarray(i * dt))
+    ss = gather_state_latlon(ss, dev.mesh)
+
+    _ATOL, _RTOL = 2.0e-4, 1.0e-3
+    for nm in ("u", "v", "eta", "T", "S"):
+        a = np.asarray(getattr(s, nm).data)
+        b = np.asarray(getattr(ss, nm).data)
+        np.testing.assert_allclose(b, a, atol=_ATOL, rtol=_RTOL,
+                                   err_msg=f"SPMD forcing {nm} mismatch")
+
+
+@pytest.mark.skipif(jax.device_count() < 4,
+                    reason="needs >=4 devices (XLA_FLAGS host device count)")
+def test_shard_forcing_stack_latlon_layout():
+    """The block-scan stack sharder (run_omip JRA55 lanes) puts the lat axis
+    on the ``"lat"`` mesh axis whether the leaf is a stacked
+    ``(n_rec, n_lat, n_lon[, nlev])`` record (lat at axis 1) or a bare
+    ``(n_lat, n_lon)`` field (lat at axis 0); 1-D metadata and scalars
+    replicate; ``None`` / non-array leaves pass through untouched.  A drift
+    here silently commits the whole forcing stack to device 0 and serializes
+    every in-scan forcing op."""
+    from legoesm.parallel.mesh import create_latlon_mesh
+    from legoesm.ocean.dynamics.sharded_ocean_step import (
+        shard_forcing_stack_latlon,
+    )
+
+    def _lat_axis(arr):
+        spec = tuple(arr.sharding.spec)
+        return spec.index("lat") if "lat" in spec else None
+
+    n_lat, n_lon, nlev, n_rec = 48, 96, 10, 8
+    dev = create_latlon_mesh(n_devices=4)
+    stack = {
+        "rec3d": jnp.ones((n_rec, n_lat, n_lon)),        # ndim 3: lat @ 1
+        "rec4d": jnp.ones((n_rec, n_lat, n_lon, nlev)),  # ndim 4: lat @ 1
+        "field2d": jnp.ones((n_lat, n_lon)),             # ndim 2: lat @ 0
+        "record_days": jnp.ones((n_rec,)),               # ndim 1: replicate
+        "scalar": jnp.asarray(3.0),                      # ndim 0: replicate
+        "none": None,                                    # pytree-None
+        "meta": "1958-01-01",                            # non-array passthrough
+    }
+    out = shard_forcing_stack_latlon(stack, dev.mesh)
+
+    assert _lat_axis(out["rec3d"]) == 1
+    assert _lat_axis(out["rec4d"]) == 1
+    assert _lat_axis(out["field2d"]) == 0
+    assert _lat_axis(out["record_days"]) is None
+    assert _lat_axis(out["scalar"]) is None
+    assert out["none"] is None
+    assert out["meta"] == "1958-01-01"
+
+    # mesh=None is the serial-lane passthrough (identity).
+    assert shard_forcing_stack_latlon(stack, None) is stack
+
+
+@pytest.mark.skipif(jax.device_count() < 4,
+                    reason="needs >=4 devices (XLA_FLAGS host device count)")
+def test_normalize_freshwater_net_psum_under_spmd():
+    """Direct, EXACT-tolerance pin of the ``normalize_freshwater_net`` psum
+    branch — the full-step forcing gate's ~1e-4 re-association floor sits
+    ABOVE the band-local-vs-global-mean error at these sizes, so it cannot
+    certify this reduction on its own.  Inside an armed lat-band shard_map
+    the band-local sums MUST be psum'ed to the global mean; without the
+    psum every band subtracts its own band mean (asserted differing from
+    the global one below, so the check is non-vacuous)."""
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+    from legoesm.grids.halo import (
+        get_halo_backend, get_mpi_topology, get_spmd_mesh,
+        set_halo_backend, set_spmd_mesh,
+    )
+    from legoesm.ocean.freshwater import normalize_freshwater_net
+    from legoesm.parallel.latlon_spmd import activate_latlon_spmd_halo
+    from legoesm.parallel.shard_map_compat import shard_map
+
+    n_lat, n_lon = 16, 8
+    rng = np.random.default_rng(3)
+    F = jnp.asarray(rng.standard_normal((n_lat, n_lon)))
+    # Lat-varying area + a masked band so band means genuinely differ.
+    area = jnp.asarray(1.0 + 0.5 * np.cos(
+        np.linspace(-1.5, 1.5, n_lat))[:, None] * np.ones((n_lat, n_lon)))
+    mask = jnp.asarray((rng.random((n_lat, n_lon)) > 0.2).astype(float))
+
+    serial = normalize_freshwater_net(F, area, mask)
+
+    mesh = Mesh(np.array(jax.devices()[:4]), axis_names=("lat",))
+    sh = NamedSharding(mesh, P("lat"))
+    body = shard_map(
+        lambda f, a, m: normalize_freshwater_net(f, a, m),
+        mesh=mesh, in_specs=(P("lat"), P("lat"), P("lat")),
+        out_specs=P("lat"), check_vma=False)
+
+    _prev = (get_halo_backend(), get_mpi_topology(), get_spmd_mesh())
+    activate_latlon_spmd_halo(mesh)
+    try:
+        sharded = body(jax.device_put(F, sh), jax.device_put(area, sh),
+                       jax.device_put(mask, sh))
+        # Non-vacuity: at least one band's local mean differs from the
+        # global mean, so a missing psum WOULD change the answer.
+        w = np.asarray(area) * np.asarray(mask)
+        f_np = np.asarray(F)
+        g_mean = (f_np * w).sum() / w.sum()
+        band_means = [
+            (f_np[b * 4:(b + 1) * 4] * w[b * 4:(b + 1) * 4]).sum()
+            / w[b * 4:(b + 1) * 4].sum()
+            for b in range(4)
+        ]
+        assert max(abs(bm - g_mean) for bm in band_means) > 1e-3
+        # atol: f32-reduction round-off (the file's x64 setdefault is
+        # ineffective when another module imported jax first) — still 1000x
+        # below the >1e-3 band-vs-global mean spread asserted above, so a
+        # missing psum cannot pass.
+        np.testing.assert_allclose(np.asarray(sharded), np.asarray(serial),
+                                   atol=1e-6, rtol=0.0)
+    finally:
+        set_spmd_mesh(_prev[2])
+        set_halo_backend(_prev[0], _prev[1])
+
+
+@pytest.mark.skipif(jax.device_count() < 4,
+                    reason="needs >=4 devices (XLA_FLAGS host device count)")
+@pytest.mark.skipif(not _have_sharded_step(),
+                    reason="sharded_ocean_step module not present")
+def test_sharded_step_refuses_staggered_forcing():
+    """A (n_lat+1, n_lon) forcing leaf must fail LOUDLY at the wrapper, not
+    with an opaque shard_map divisibility error."""
+    from legoesm.parallel.mesh import create_latlon_mesh
+    from legoesm.ocean.dynamics.sharded_ocean_step import (
+        make_sharded_ocean_step,
+        shard_state_latlon,
+    )
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    grid = create_latlon_grid(n_lat=16, n_lon=32)
+    z_coord = create_ocean_z_star(n_levels=3, H_max=4000.0)
+    model = LatLonCGridOceanModel(grid, z_coord,
+                                  LatLonCGridOceanConfig.from_flat())
+    state0 = _perturbed_state(grid, z_coord)
+    model._ensure_vertex_mask(state0)
+    dev = create_latlon_mesh(n_devices=4)
+    step = make_sharded_ocean_step(model, dev.mesh)
+    ss = shard_state_latlon(state0, dev.mesh)
+    bad = OceanSurfaceForcing(
+        tau_y=jnp.zeros((grid.n_lat + 1, grid.n_lon)))
+    with pytest.raises(ValueError, match="leading dim"):
+        step(ss, 600.0, surface_forcing=bad)
+
+
 @pytest.mark.skipif(jax.device_count() < 4,
                     reason="needs >=4 devices (XLA_FLAGS host device count)")
 @pytest.mark.skipif(not _have_sharded_step(),
@@ -169,6 +417,7 @@ def test_sharded_ocean_step_global_matches_explicit_scatter_gather():
     Also exercises the WITH-forcing path through the global wrapper (a smooth
     cell-shaped wind-stress + heat ``OceanSurfaceForcing``)."""
     from legoesm.parallel.mesh import create_latlon_mesh
+    from legoesm.grids.latlon import ensure_geometry
     from legoesm.ocean.dynamics.sharded_ocean_step import (
         make_sharded_ocean_step,
         make_sharded_ocean_step_global,

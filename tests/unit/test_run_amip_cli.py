@@ -91,6 +91,47 @@ def test_land_gs_max_validate_strict_rejects_nonpositive_or_nonfinite():
             cfg._replace(land_gs_max=bad).validate_strict()
 
 
+def test_land_soil_moisture_init_frac_flag_flows_to_config():
+    """--land-soil-moisture-init-frac round-trips (issue #730 drier-cold-start
+    knob); default 0.5 is byte-identical to the init default."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_soil_moisture_init_frac == 0.5
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-soil-moisture-init-frac", "0.25",
+    ]), parser))
+    assert cfg.land_soil_moisture_init_frac == 0.25
+    for bad in (0.0, -0.1, 1.5, float("nan")):
+        with pytest.raises(ValueError, match="land_soil_moisture_init_frac"):
+            cfg._replace(land_soil_moisture_init_frac=bad).validate_strict()
+
+
+def test_land_surface_scheme_flag_flows_to_config():
+    """--land-surface-scheme round-trips (issue #730 two-leaf canopy selector);
+    default is the SimpleSEB path, 'two_leaf' selects the DifferBESS canopy."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_surface_scheme == "simple_seb"
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-surface-scheme", "two_leaf",
+    ]), parser))
+    assert cfg.land_surface_scheme == "two_leaf"
+
+
+def test_land_surface_scheme_validate_strict_rejects_unknown():
+    """validate_strict() rejects an unknown surface scheme (dispatch hardening —
+    a typo must fail early, not silently fall through in model_driver)."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    with pytest.raises(ValueError, match="land_surface_scheme"):
+        cfg._replace(land_surface_scheme="two_leff").validate_strict()
+
+
 def test_orbital_insolation_flag_flows_to_config():
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
@@ -1122,10 +1163,10 @@ def test_config_yaml_loads_all_keys_are_valid_dests(cfg_file):
 
 
 def test_amip_sota_config_builds_valid_experiment_config():
-    """config/amip/amip_sota.yaml (SOTA: multilayer land + aerosol_ccn +
-    conv-cloud-off) builds a valid ExperimentConfig — the SOTA knobs are consistent
-    (e.g. multilayer land waives the slab-bucket requirement for stomata; aerosol_ccn
-    has morrison + external aerosol)."""
+    """config/amip/amip_sota.yaml (SOTA: multilayer land + conv-cloud-off)
+    builds a valid ExperimentConfig — the SOTA knobs are consistent (e.g.
+    multilayer land waives the slab-bucket requirement for stomata; morrison +
+    external aerosol stay on as the aerosol_ccn prereqs)."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     cfg_file = _repo_root() / "config" / "amip" / "amip_sota.yaml"
     parser = build_arg_parser()
@@ -1136,9 +1177,13 @@ def test_amip_sota_config_builds_valid_experiment_config():
     cfg = build_config_from_args(args)
     cfg.validate_strict()  # raises if the SOTA combo is inconsistent
     assert cfg.use_multilayer_land is True
-    # --aerosol-ccn threads into ExperimentConfig.nc_from_aerosol (specified-Nc from
-    # the Andreae AOT->CCN inversion), enabling the 1st+2nd aerosol indirect effect.
-    assert cfg.nc_from_aerosol is True
+    # aerosol_ccn is DISABLED in the shipped SOTA config (#745): as wired the
+    # indirect effect is ~15x too strong (-24 W/m^2 vs IPCC -1 to -1.7); it
+    # returns after the Twomey/lifetime split + autoconv calibration (#730).
+    # The prereqs (morrison + external aerosol forcing) stay on.
+    assert cfg.nc_from_aerosol is False
+    assert cfg.microphysics == "morrison"
+    assert cfg.aerosol_forcing == "external"
     assert cfg.convective_cloud is False
     assert cfg.convection == "sbm"
 

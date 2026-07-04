@@ -66,6 +66,13 @@ export FI_CXI_DEFAULT_CQ_SIZE="${FI_CXI_DEFAULT_CQ_SIZE:-131072}"
 # is safe to set here in the shared env rather than only in the GPU job script.
 export FI_CXI_DISABLE_HOST_REGISTER="${FI_CXI_DISABLE_HOST_REGISTER:-1}"
 
+# libfabric memory-registration cache monitor. The default monitor can miss
+# CUDA/host frees under the CUDA-aware path; userfaultfd is the setting the
+# NCAR/ALCF GPU runtime configs ship for Slingshot-11
+# (benkirk/derecho-pytorch-mpi profile.d config; ALCF Polaris NCCL docs).
+# Harmless for CPU-only jobs.
+export FI_MR_CACHE_MONITOR="${FI_MR_CACHE_MONITOR:-userfaultfd}"
+
 # Scratch tmp (mirrors the user's reference Casper job script).
 export TMPDIR="${TMPDIR:-$SCRATCH/temp}"
 mkdir -p "$TMPDIR"

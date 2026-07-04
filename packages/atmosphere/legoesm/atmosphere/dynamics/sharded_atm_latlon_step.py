@@ -368,7 +368,13 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
     def sharded_step(c_state, dt, phys_state=None):
         refuse_unthreaded_stateful_physics(
             physics_fn, phys_state, where="atm lat-band SPMD step")
-        key = ("fn", phys_state is None,
+        # Cache key = (state pytree STRUCTURE, phys_state pytree structure):
+        # in_specs/out_specs derive from both, so a structure change (optional
+        # field None <-> Field, or the phys carry appearing/disappearing) must
+        # rebuild the shard_map rather than reuse stale specs (codex finding,
+        # ocean-twin parity). ``phys_state`` threading is the AIMIP-branch
+        # feature main lacks (main rejects a non-None carry here).
+        key = (jax.tree.structure(c_state),
                None if phys_state is None
                else jax.tree_util.tree_structure(phys_state))
         fn = _cache.get(key)

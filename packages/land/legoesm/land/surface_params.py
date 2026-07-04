@@ -72,6 +72,11 @@ class LandSurfaceParams(NamedTuple):
     Vc_max25: jax.Array       # Max carboxylation at 25 C [10, 120] umol/m2/s
     LCMA: jax.Array           # Leaf carbon mass per area [20, 120] gC/m2
     g1: jax.Array             # Stomatal slope [1, 15]
+    # Prescribed leaf area index [m2/m2] — the two-leaf canopy reads this as its
+    # spatial LAI climatology (PFT-weighted CLM MONTHLY_LAI). None => the canopy
+    # falls back to its scalar default (only for non-CLM setups); a NEW CLM/two-leaf
+    # path must populate it so barren land gets LAI~0, not a spurious uniform canopy.
+    LAI: jax.Array = None
 
 
 # =====================================================================

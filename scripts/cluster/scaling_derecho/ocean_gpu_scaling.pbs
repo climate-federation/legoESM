@@ -1,0 +1,144 @@
+#!/bin/bash -l
+#PBS -N legoesm_ocean_gpu
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=1:ncpus=64:mpiprocs=1:ngpus=4:gpu_type=a100:mem=400GB
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# OCEAN weak+strong GPU scaling on a Derecho GPU node (4x A100-40GB, NVLink).
+#
+# Runs the SINGLE-PROCESS multi-device SPMD lane of
+# scripts/bench/bench_ocean_latlon_spmd_scaling.py: the FULL
+# lat-lon C-grid ocean step sharded over 1/2/4 A100s via
+# make_sharded_ocean_step (shard_map ppermute band halos + psum reductions
+# over NVLink/NCCL; NO mpi4jax — uses the plain `legoesm-gpu` env from
+# README Step 1, no route-A overlay needed).
+#
+# Correctness gates: tests/parallel/test_latlon_ocean_spmd_step.py +
+# tests/bench/test_bench_ocean_latlon_spmd_gates.py; the job
+# additionally runs one smoke case with --parity-gate + --check-conservation
+# armed before the timed ladder (fail fast on a broken build).
+#
+# SUBMIT:
+#   qsub scripts/cluster/scaling_derecho/ocean_gpu_scaling.pbs
+# OVERRIDE:
+#   qsub -v MODE=strong,PRECISION=float64,STRONG_RES=192 \
+#        scripts/cluster/scaling_derecho/ocean_gpu_scaling.pbs
+#
+# Knobs (qsub -v NAME=value):
+#   MODE        weak | strong | both        (default both)
+#   PRECISION   float32 | float64 | both    (default both)
+#   STRONG_RES  global n_lat for strong     (default 192; n_lon = 2*n_lat)
+#   WEAK_ROWS   lat rows per device (weak)  (default 64)
+#   NLEV        vertical levels             (default 20)
+#   NDEV_LIST   device ladder               (default "1 2 4")
+# ===========================================================================
+set -uo pipefail
+
+# PBS copies this script to a spool dir before running it, so $0 / BASH_SOURCE
+# do NOT point at the repo. Locate _env.sh from the submit dir ($PBS_O_WORKDIR)
+# instead -- works whether you qsub from the repo root or this job's own dir.
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+if   [ -f "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}/scripts/cluster/scaling_derecho"
+elif [ -f "${SUBMIT_DIR}/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}"
+else
+    echo "ERROR: cannot find _env.sh from PBS_O_WORKDIR=${SUBMIT_DIR}" >&2
+    echo "       qsub from the repo root or from scripts/cluster/scaling_derecho/." >&2
+    exit 1
+fi
+
+# Force the CUDA backend BEFORE sourcing _env.sh (same rationale as
+# gpu_scaling.pbs: a stale JAX_PLATFORMS=cpu must never silently run this
+# GPU benchmark on the CPU). Single-process SPMD lane -> plain legoesm-gpu
+# env; NO route-A mpi4jax overlay is needed.
+export JAX_PLATFORMS=cuda
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
+# shellcheck source=_env.sh
+source "${SCRIPT_DIR}/_env.sh"
+cd "$REPO"
+
+MODE="${MODE:-both}"
+PRECISION="${PRECISION:-both}"
+STRONG_RES="${STRONG_RES:-192}"
+WEAK_ROWS="${WEAK_ROWS:-64}"
+NLEV="${NLEV:-20}"
+# Ocean SPMD bench runs the production-default config (from_flat).
+NDEV_LIST="${NDEV_LIST:-1 2 4}"
+N_WARMUP="${N_WARMUP:-3}"
+N_TIMING="${N_TIMING:-30}"
+
+STAMP=$(date +%Y%m%d_%H%M%S)
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/ocean_gpu_${STAMP}}"
+mkdir -p "$OUTDIR"
+
+echo "=== HOST ==="; hostname; date
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1 | head -8 || true
+echo "=== CONFIG ==="
+echo "mode=$MODE precision=$PRECISION strong_res=$STRONG_RES weak_rows=$WEAK_ROWS nlev=$NLEV ndev=[$NDEV_LIST]"
+echo "outdir=$OUTDIR"
+
+case "$MODE" in
+    weak)   MODES="weak" ;;
+    strong) MODES="strong" ;;
+    both)   MODES="strong weak" ;;
+    *) echo "ERROR: MODE=$MODE (weak|strong|both)"; exit 2 ;;
+esac
+case "$PRECISION" in
+    float32) PRECS="float32" ;;
+    float64) PRECS="float64" ;;
+    both)    PRECS="float64 float32" ;;
+    *) echo "ERROR: PRECISION=$PRECISION"; exit 2 ;;
+esac
+
+# --- 0) Fail-fast correctness smoke (parity + conservation, 2 devices) ------
+echo "=== SMOKE: parity + conservation gates (LL32/L6, nd=2) ==="
+"$PY" scripts/bench/bench_ocean_latlon_spmd_scaling.py \
+    --n-devices 2 \
+    --n-lat 32 --n-lon 64 --nlev 6 \
+    --steps 4 --warmup 1 \
+    --parity-gate --check-conservation --cons-rtol 1e-6 \
+    --out "$OUTDIR/smoke/ocean_spmd_scaling.jsonl"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "SMOKE GATE FAILED rc=$rc — aborting the timed ladder." >&2
+    exit "$rc"
+fi
+
+# --- 1) Timed weak/strong ladder --------------------------------------------
+rc_all=0
+for prec in $PRECS; do
+    for mode in $MODES; do
+        for nd in $NDEV_LIST; do
+            if [ "$mode" = "strong" ]; then
+                res="$STRONG_RES"
+            else
+                res="$WEAK_ROWS"
+            fi
+            echo "--- ocean spmd: mode=$mode prec=$prec nd=$nd res=$res ---"
+            if [ "$prec" = "float64" ]; then _X64=1; else _X64=0; fi
+            if [ "$mode" = "strong" ]; then
+                _GEOM="--mode strong --n-lat $res --n-lon $((2 * res))"
+            else
+                _GEOM="--mode weak --nlat-per-dev $res --n-lon $((2 * res))"
+            fi
+            JAX_ENABLE_X64=$_X64 "$PY" \
+                scripts/bench/bench_ocean_latlon_spmd_scaling.py \
+                --n-devices "$nd" $_GEOM --nlev "$NLEV" \
+                --steps $((N_WARMUP + N_TIMING)) --warmup "$N_WARMUP" \
+                --out "$OUTDIR/ocean_spmd_scaling.jsonl"
+            rc=$?
+            [ "$rc" -ne 0 ] && { echo "case FAILED rc=$rc"; rc_all=$rc; }
+        done
+    done
+done
+
+echo "=== RESULTS ==="
+ls -la "$OUTDIR"
+cat "$OUTDIR/ocean_scaling.csv" 2>/dev/null || true
+echo "=== DONE rc=$rc_all ==="
+exit "$rc_all"

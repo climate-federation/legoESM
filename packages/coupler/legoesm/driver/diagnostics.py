@@ -1280,6 +1280,52 @@ class DiagnosticCollector:
 
         self._write_cmip_data(data)
 
+    def finalize_cmip_daily(self, current_day: float) -> None:
+        """Write the COMPLETED days of the CMIP6 ``day`` table if a CMIP
+        writer is active.
+
+        Companion to :meth:`finalize_cmip_fixed` for the graceful wallclock
+        exit.  The daily accumulator is otherwise drained only by :meth:`save`
+        at the end of a run, so a restart-chain ``sys.exit(0)`` would drop this
+        SLURM segment's daily means (day/tas, tasmin, tasmax, …).  Mirrors
+        :meth:`flush_cmip_monthly`: only days STRICTLY BEFORE ``current_day``
+        are emitted (and freed).  The in-progress day is deliberately withheld
+        — writing it here and again from the restart segment (which resumes
+        inside the same ``(year, doy)``) would create duplicate ``time``
+        coordinates, since ``CFWriter.write_field`` appends blindly.  The one
+        boundary day straddling the exit is therefore a bounded imperfection
+        (its restart-segment mean omits the pre-exit samples), matching the
+        monthly-boundary limitation; a fully lossless chain would require
+        checkpointing the accumulator state.  Guarded on ``cf_writer`` and the
+        daily accumulator (no-op for non-CMOR / daily-off runs)."""
+        if self._spatial_daily is None or self.cf_writer is None:
+            return
+        doy, _ = day_to_calendar(current_day)
+        current_year = int(current_day // 365.0)
+        data = self._spatial_daily.pop_completed_days(current_year, int(doy))
+        if not data.get('days'):
+            return
+        lat, lon = self._cmip_target_latlon()
+        self.cf_writer.write_daily(data, lat=lat, lon=lon)
+
+    def finalize_cmip_fixed(self) -> None:
+        """Write the CMOR ``fx`` table (areacella / sftlf / orog) if a CMIP
+        writer is active.
+
+        The time-invariant ``fx`` fields are normally written once by
+        :meth:`save` at the end of a run.  A wallclock-graceful exit
+        (:meth:`ModelDriver._maybe_wallclock_exit`) calls ``sys.exit(0)`` and
+        never reaches :meth:`save`, so without this public entry a
+        restart-chained run — i.e. EVERY multi-hour AMIP run, whose year does
+        not finish in a single SLURM window — writes its incremental monthly
+        ``Amon`` files but never ``areacella``/``sftlf``.  The resulting CMOR
+        output is non-compliant (each variable's ``external_variables``
+        attribute references ``areacella``/``sftlf``) and blocks any
+        area-weighted or land/ocean-split diagnostic.  Idempotent: rewriting
+        the same static fields on a later flush is harmless."""
+        if self.cf_writer is not None:
+            self._write_cmip_fixed_files()
+
     def save(self, output_dir: str | Path) -> None:
         """Save all accumulated diagnostics to disk."""
         output_dir = Path(output_dir)

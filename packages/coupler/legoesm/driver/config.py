@@ -504,6 +504,21 @@ class ExperimentConfig(NamedTuple):
     # no canopy resistance).  Default 0.3 matches StomataConfig.gs_max (byte-
     # identical when unchanged); only active when land_stomatal_beta=True.
     land_gs_max: float = 0.3
+    # Multilayer-land surface scheme (#730). "simple_seb" (default) = bulk SEB
+    # with the beta_soil moisture path; "two_leaf" = DifferBESS two-leaf canopy
+    # energy balance (Kelvin h_r bare-soil evap + two-leaf stomatal transpiration),
+    # which holds land ET below potential and breaks the over-evaporation wet loop
+    # that the SimpleSEB beta_soil path (=1 at field capacity, no canopy resistance)
+    # produces. Only affects use_multilayer_land runs.
+    land_surface_scheme: str = "simple_seb"
+    # Initial multilayer soil water as a fraction of saturation (theta_init =
+    # frac * theta_sat) for the cold-start (#730). Default 0.5 is byte-identical to
+    # the init_multilayer_land_state default. The multilayer over-evaporation wet
+    # loop is precip-recycling-driven (land P ~= land ET), so a DRIER start (e.g.
+    # 0.25) can tip the land into the slab-like dry attractor (less ET -> less low
+    # cloud -> warmer land) instead of the cold-cloudy wet attractor. Only affects
+    # use_multilayer_land runs.
+    land_soil_moisture_init_frac: float = 0.5
     # Prognostic snow + snow-albedo feedback on the AMIP slab-land tile: snow
     # water (SWE) accumulates from snowfall and melts (degree-day), brightening
     # the land albedo (snow ~0.5-0.8 vs vegetation ~0.15) — the positive
@@ -1071,6 +1086,20 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"land_gs_max (max stomatal conductance [mol/m2/s]) must be "
                 f"finite and in (0, 2]; got {self.land_gs_max!r}."
+            )
+        # Soil-moisture init fraction of saturation: finite, in (0, 1].
+        if not (0.0 < self.land_soil_moisture_init_frac <= 1.0):
+            errors.append(
+                f"land_soil_moisture_init_frac (theta_init/theta_sat) must be "
+                f"finite and in (0, 1]; got {self.land_soil_moisture_init_frac!r}."
+            )
+        # Land surface-scheme membership (mirror the model_driver dispatch so a
+        # typo fails here, not at run time).
+        _valid_land_surface = ("simple_seb", "two_leaf")
+        if self.land_surface_scheme not in _valid_land_surface:
+            errors.append(
+                f"land_surface_scheme must be one of {_valid_land_surface}, "
+                f"got {self.land_surface_scheme!r}"
             )
         # Stomatal soil-water limitation needs the bucket to supply beta_soil.
         if (self.land_stomatal_beta and not self.land_soil_bucket

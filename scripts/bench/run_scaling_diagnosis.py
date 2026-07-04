@@ -144,8 +144,12 @@ def _init_distributed(grid_type: str, global_n: int | None = None):
                 import jax
                 hostnames = comm.allgather(socket.gethostname())
                 if len(set(hostnames)) > 1:
+                    from legoesm.parallel.early_init import (
+                        resolve_coordinator_port,
+                    )
+                    _port = resolve_coordinator_port()
                     jax.distributed.initialize(
-                        coordinator_address=f"{hostnames[0]}:1234",
+                        coordinator_address=f"{hostnames[0]}:{_port}",
                         num_processes=n_procs,
                         process_id=rank,
                     )

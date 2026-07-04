@@ -124,6 +124,9 @@ docs/_build/
 
 # Local SLURM sbatch scripts and logs
 *.sbatch
+# ... but curated cluster job sets ARE tracked (the pre-existing sbatch under
+# scripts/cluster/ were force-added; the negation makes that the rule).
+!scripts/cluster/**/*.sbatch
 *.out
 *.err
 .jax_cache_aimip/
