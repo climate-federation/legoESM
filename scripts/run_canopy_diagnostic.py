@@ -37,6 +37,7 @@ import xarray as xr
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.canopy import CanopyConfig, CanopyLandParams
 from legoesm.land.config import MultiLayerLandConfig
@@ -445,7 +446,7 @@ def plot_main(ds: xr.Dataset, out_path: Path) -> None:
 
     ax = axes[0, 1]
     for j, name in enumerate(CASE_NAMES):
-        ax.plot(t, ds["response_T_surface"].isel(case=j).values - 273.15,
+        ax.plot(t, ds["response_T_surface"].isel(case=j).values - constants.T_freeze,
                 color=COLORS[j], label=name)
     ax.set_ylabel(r"T$_{surface}$  [$\degree$C]")
     ax.set_title("Surface temperature")

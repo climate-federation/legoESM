@@ -84,7 +84,7 @@ def medlyn_gs(
     A_pos = jnp.maximum(An, 0.0)
     Cs_safe = jnp.maximum(Cs, 1.0)
     # Floor VPD to avoid divergence of 1/sqrt(VPD) as VPD → 0.
-    VPD_safe = jnp.maximum(VPD_kPa, 0.05)
+    VPD_safe = jnp.maximum(VPD_kPa, 0.05)  # coeff-ok: VPD floor guarding 1/sqrt(VPD) blow-up
     return jnp.maximum(
         g0
         + _DIFFUSIVITY_RATIO_H2O_CO2
