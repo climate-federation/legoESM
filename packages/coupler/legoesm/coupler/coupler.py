@@ -223,19 +223,15 @@ def ocean_tile_response(
     MOST algorithms (COARE 3.0 or Large & Yeager 2004).
     """
     shape = ocean_sst.shape
-    # Surface saturation curve follows the SAME thermodynamic convention
-    # as the flux constants (#762): 'aerobulk' = 0.98 x Goff (1957) over
-    # seawater (NEMO/AeroBulk); 'legoesm' (default) = 0.98 x Tetens
-    # (byte-identical to the historical path).  The 0.98 saline reduction
-    # is common to both.
-    _q_sat_curve = (
-        saturation_mixing_ratio_goff
-        if getattr(config, "thermo_convention", "legoesm") == "aerobulk"
-        else saturation_mixing_ratio
-    )
-    q_sfc = _Q_SAT_SALINE_FACTOR * _q_sat_curve(
-        ocean_sst, forcing.p_surface,
-    )
+    # Resolve the thermodynamic convention ONCE (getattr-safe for any
+    # config lacking the field) and validate it, so the q_sat curve and
+    # the MOST call below never disagree (#762, codex round-20).
+    _thermo_conv = getattr(config, "thermo_convention", "legoesm")
+    if _thermo_conv not in ("legoesm", "aerobulk"):
+        raise ValueError(
+            f"Unknown thermo_convention {_thermo_conv!r}; expected "
+            "'legoesm' or 'aerobulk'."
+        )
     rho = forcing.rho_lowest
 
     valid_schemes = ("constant", "coare3", "large_yeager")
@@ -244,7 +240,20 @@ def ocean_tile_response(
             f"Unknown coupler bulk_scheme {config.bulk_scheme!r}; "
             f"expected one of {valid_schemes}."
         )
-    if config.bulk_scheme in ("coare3", "large_yeager"):
+    # The aerobulk convention (SST-dependent L_vap, moist cp_air, Goff
+    # q_sat) is the NEMO/AeroBulk MOST set — it engages ONLY on the MOST
+    # schemes (coare3/large_yeager).  The 'constant' fixed-coefficient
+    # closure is a different closure entirely (constant C_H/C_E, constant
+    # L_v/c_pd in simple_bulk_fluxes), so applying Goff q_sat there alone
+    # would be a HALF-convention; keep it on Tetens (codex round-20).
+    _is_most = config.bulk_scheme in ("coare3", "large_yeager")
+    _use_goff = _thermo_conv == "aerobulk" and _is_most
+    q_sfc = _Q_SAT_SALINE_FACTOR * (
+        saturation_mixing_ratio_goff if _use_goff
+        else saturation_mixing_ratio
+    )(ocean_sst, forcing.p_surface)
+
+    if _is_most:
         # Use wind relative to ocean surface current
         u_rel = forcing.u_lowest - ocean_u
         v_rel = forcing.v_lowest - ocean_v
@@ -259,7 +268,7 @@ def ocean_tile_response(
             z0_init=config.ocean_z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
-            thermo_convention=config.thermo_convention,
+            thermo_convention=_thermo_conv,
         )
     else:
         # Constant neutral coefficients (original behavior).  Sub-grid

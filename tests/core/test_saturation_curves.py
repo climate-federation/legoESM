@@ -48,6 +48,25 @@ def test_goff_differs_from_tetens_but_close():
     assert np.all(np.isfinite(gof)) and np.all(gof > 0)  # physical
 
 
+def test_goff_reference_values():
+    """Anchor the Goff q_sat to an INDEPENDENT reference (codex round-20:
+    'different but nearby' can't catch a wrong liquid curve).  Goff (1957)
+    e_sat over liquid at 1 atm: 872.3 Pa at 5 degC (278.15 K), 2338.3 Pa
+    at 20 degC (293.15 K); q_sat = eps*e/(p-e) at p=101325 Pa.  Compared
+    to the SMOOTH-CAPPED model conversion, so a generous 3% tol absorbs
+    the softplus floor/cap (negligible far from p)."""
+    from legoesm import constants
+    # Published Goff(1957) liquid e_sat [Pa] at standard-atm p [Pa] — the
+    # independent reference (not model constants).
+    p = 101325.0
+    for T_K, e_ref in ((278.15, 872.3), (293.15, 2338.3)):
+        q_ref = constants.epsilon * e_ref / (p - e_ref)
+        q = float(saturation_mixing_ratio_goff(
+            jnp.array([T_K]), jnp.array([p]))[0])
+        assert abs(q - q_ref) / q_ref < 0.03, (
+            f"Goff q_sat at {T_K} K: {q:.5e} vs ref {q_ref:.5e}")
+
+
 def test_goff_monotone_in_T():
     gof = np.asarray(saturation_mixing_ratio_goff(_T, _P))
     assert np.all(np.diff(gof) > 0)                      # warmer -> wetter
