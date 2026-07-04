@@ -3141,6 +3141,31 @@ def main() -> int:
               f"{int(np.asarray(bbl_geom.u_active).sum())}, j-faces "
               f"{int(np.asarray(bbl_geom.v_active).sum())}")
 
+    lat2d, lon2d = _grid_lat2d_deg(grid, args.grid)
+
+    if args.nemo_monthly_init is not None:
+        # Exact-recipe IC: NEMO's own monthly init (sn_tem/sn_sal) at the
+        # start month — the annual --woa-init leaves Arctic shelves ~1-3
+        # PSU salty vs NEMO's January state.
+        if app_grid_type == "mpas":
+            raise SystemExit(
+                "--nemo-monthly-init is wired for the structured grids "
+                "(tripole/latlon); MPAS keeps its own IC path.")
+        from legoesm.ocean.forcing.nemo_native_fields import (
+            load_nemo_monthly_init_ts,
+        )
+        _T_ic, _S_ic = load_nemo_monthly_init_ts(
+            args.nemo_monthly_init[0], args.nemo_monthly_init[1],
+            lat2d, lon2d, n_levels=int(z_coord.n_levels),
+            month=int(args.nemo_init_month))
+        _Td = state.T.data.dtype
+        state = state._replace(
+            T=state.T.replace(data=jnp.asarray(_T_ic, dtype=_Td)),
+            S=state.S.replace(data=jnp.asarray(_S_ic, dtype=_Td)))
+        print(f"[setup] NEMO monthly init: month {args.nemo_init_month} "
+              f"from {args.nemo_monthly_init[0].rsplit('/', 1)[-1]} / "
+              f"{args.nemo_monthly_init[1].rsplit('/', 1)[-1]}")
+
     sss_restore_cfg = None
     sss_restore_target = None
     if args.sss_restore:
@@ -3228,30 +3253,7 @@ def main() -> int:
             with_ssh=(not args.no_balanced_ssh),
         )
 
-    lat2d, lon2d = _grid_lat2d_deg(grid, args.grid)
 
-    if args.nemo_monthly_init is not None:
-        # Exact-recipe IC: NEMO's own monthly init (sn_tem/sn_sal) at the
-        # start month — the annual --woa-init leaves Arctic shelves ~1-3
-        # PSU salty vs NEMO's January state.
-        if app_grid_type == "mpas":
-            raise SystemExit(
-                "--nemo-monthly-init is wired for the structured grids "
-                "(tripole/latlon); MPAS keeps its own IC path.")
-        from legoesm.ocean.forcing.nemo_native_fields import (
-            load_nemo_monthly_init_ts,
-        )
-        _T_ic, _S_ic = load_nemo_monthly_init_ts(
-            args.nemo_monthly_init[0], args.nemo_monthly_init[1],
-            lat2d, lon2d, n_levels=int(z_coord.n_levels),
-            month=int(args.nemo_init_month))
-        _Td = state.T.data.dtype
-        state = state._replace(
-            T=state.T.replace(data=jnp.asarray(_T_ic, dtype=_Td)),
-            S=state.S.replace(data=jnp.asarray(_S_ic, dtype=_Td)))
-        print(f"[setup] NEMO monthly init: month {args.nemo_init_month} "
-              f"from {args.nemo_monthly_init[0].rsplit('/', 1)[-1]} / "
-              f"{args.nemo_monthly_init[1].rsplit('/', 1)[-1]}")
     runoff_monthly = None
     if args.runoff:
         if app_grid_type == "cubed_sphere":
