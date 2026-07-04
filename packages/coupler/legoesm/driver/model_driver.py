@@ -356,6 +356,23 @@ class ModelDriver:
         for key in [k for k in self._carry_aux if k.startswith("dmtr_")]:
             _tracers[key[len("dmtr_"):]] = self._carry_aux.pop(key)
 
+    @staticmethod
+    def _carry_has_unscatterable_land_ml(carry_aux) -> bool:
+        """True iff ``carry_aux`` carries multilayer-land (``land_ml_*``) fields.
+
+        Pure predicate behind the lat-lon band-MPI restart fail-fast guard: a
+        gathered checkpoint's ``land_ml_*`` are the writer's GLOBAL soil/snow/
+        carbon columns, which cannot be band-scattered (multilayer land is
+        single-rank-only, #769).  Extracted so the guard — which only fires on
+        the distributed restart path never reached by the single-process
+        tests — is unit-testable directly; a future rename of the ``land_ml_``
+        prefix then breaks the test loudly instead of silently disabling the
+        guard.  Operates on the post-``bcast`` in-memory ``carry_aux`` whose
+        keys are bare (the ``carry_``/``diag_`` serialization prefixes are
+        stripped on load), so it matches with ``startswith`` not a substring."""
+        return isinstance(carry_aux, dict) and any(
+            k.startswith("land_ml_") for k in carry_aux)
+
     def _restore_land_ml_from_carry_aux(self) -> None:
         """Rebuild ``self._land_ml_state`` from any ``land_ml_*`` entries restored
         into ``carry_aux``, so a chained multilayer-land restart resumes the
@@ -3827,6 +3844,27 @@ class ModelDriver:
             step = comm.bcast(step, root=0)
             day = comm.bcast(day, root=0)
             carry_aux = comm.bcast(carry_aux, root=0)
+
+            # Multilayer (Richards) land state (#769) cannot be band-scattered:
+            # the gathered file's land_ml_* are the writer's GLOBAL-column
+            # soil/snow/carbon fields, and this band branch never calls
+            # ``_restore_land_ml_from_carry_aux`` — so they would sit unrestored
+            # in every rank's _carry_aux (the soil silently cold-starts) and, if
+            # adopted, hand every rank global-shape columns.  Multilayer land is
+            # single-rank-only anyway (the downstream _run_compiled guard aborts
+            # multilayer-under-distributed).  Check the just-bcast ``carry_aux``
+            # and fail fast BEFORE ``_scatter_global_state_to_bands`` mutates
+            # ``self.state`` — every rank has the same bcast dict, so the raise
+            # is symmetric (no half-scattered state, no collective deadlock).
+            if self._carry_has_unscatterable_land_ml(carry_aux):
+                raise ValueError(
+                    "Lat-lon MPI restart cannot band-scatter the multilayer "
+                    "(Richards) land state (land_ml_*) from a global "
+                    "checkpoint — multilayer land is single-rank-only, so the "
+                    "gathered soil/snow/carbon columns cannot be partitioned "
+                    "onto the bands (the soil would silently cold-start, "
+                    "issue #769). Run single-process for multilayer-land runs."
+                )
 
             self._scatter_global_state_to_bands(state_global, tracers_global)
             self._carry_aux = carry_aux if carry_aux else {}
