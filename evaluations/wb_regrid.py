@@ -25,6 +25,8 @@ def wb2_grid(resolution_deg: float = WB2_RESOLUTION_DEG):
     Returns ``(lat, lon)`` with ``lat`` ascending -90..90 inclusive and ``lon``
     0..360 exclusive of the wrap point. At 1.5 deg this is 121 x 240.
     """
+    if not (np.isfinite(resolution_deg) and resolution_deg > 0.0):
+        raise ValueError(f"resolution_deg must be finite and positive, got {resolution_deg}")
     n_lat_intervals = 180.0 / resolution_deg
     n_lon_cells = 360.0 / resolution_deg
     if not (np.isclose(n_lat_intervals, round(n_lat_intervals))

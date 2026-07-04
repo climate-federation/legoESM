@@ -26,6 +26,15 @@ def test_acc_mask_excludes_anticorrelated_cells():
     assert float(a_unmasked) < float(a_masked)   # unmasked is dragged down
 
 
+def test_bias_mask_leading_dims():
+    # (..., n_lat, n_lon) contract: a leading dim must not double-count the denominator.
+    pred = jnp.ones((2, 2, 2))
+    target = jnp.zeros((2, 2, 2))
+    w = jnp.ones(2)
+    mask = jnp.ones((2, 2))
+    assert np.isclose(float(bias(pred, target, w, mask=mask)), 1.0)
+
+
 def test_mask_none_matches_unmasked():
     pred = jnp.array([[2.0, 3.0]])
     target = jnp.array([[1.0, 1.0]])

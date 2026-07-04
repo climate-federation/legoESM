@@ -119,7 +119,8 @@ def bias(
     diff = pred - target
     if mask is not None:
         w = weights[:, None] * mask
-        return jnp.sum(w * diff) / jnp.sum(w)
+        # denominator broadcasts over any leading dims exactly like the numerator
+        return jnp.sum(w * diff) / jnp.sum(w * jnp.ones_like(diff))
     w = weights[:, None]
     return jnp.sum(w * diff) / jnp.sum(w * jnp.ones_like(diff))
 

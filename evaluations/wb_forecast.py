@@ -191,6 +191,10 @@ def score_forecast(pred_fields, verif_fields, clim_fields, wb2_lat_deg, *, valid
         target = verif_fields[key]
         clim = clim_fields[key]
         m = None if valid is None else valid.get(key)
+        if m is not None and float(jnp.sum(weights[:, None] * m)) <= 0.0:
+            # an all-masked field has no valid cells -> the score is undefined;
+            # fail loudly rather than return a misleading NaN/0.
+            raise ValueError(f"headline field {key!r} has no valid (above-ground) cells to score")
         scores[key] = {
             "rmse": float(rmse(pred, target, weights, mask=m)),
             "acc": float(acc(pred, target, clim, weights, mask=m)),

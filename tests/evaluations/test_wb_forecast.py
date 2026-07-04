@@ -144,6 +144,17 @@ def test_score_forecast_mask_changes_rmse():
     assert s_unmasked["t850"]["rmse"] > 1.0                      # bad cell dominates
 
 
+def test_score_forecast_all_masked_raises():
+    from evaluations.wb_forecast import score_forecast
+    lat = np.array([-45.0, 45.0])
+    pred = {"t850": jnp.ones((2, 2))}
+    verif = {"t850": jnp.zeros((2, 2))}
+    clim = {"t850": jnp.zeros((2, 2))}
+    valid = {"t850": jnp.zeros((2, 2), dtype=bool)}   # entirely below ground -> undefined
+    with pytest.raises(ValueError):
+        score_forecast(pred, verif, clim, lat, valid=valid)
+
+
 def test_headline_10m_wind_not_stronger_than_lowest_level():
     # The neutral reduction must weaken (never amplify) the lowest-level wind.
     from legoesm.atmosphere.dynamics.spectral_pe import spectral_pe_to_grid

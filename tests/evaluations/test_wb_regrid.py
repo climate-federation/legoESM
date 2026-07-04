@@ -17,6 +17,12 @@ def test_wb2_grid_rejects_nondivisor_resolution():
         wb2_grid(7.0)      # 180/7 and 360/7 are not integers
 
 
+def test_wb2_grid_rejects_nonfinite_or_nonpositive_resolution():
+    for bad in (np.inf, np.nan, 0.0, -1.5):
+        with pytest.raises(ValueError):
+            wb2_grid(bad)
+
+
 def test_regrid_constant_preserved():
     field = np.full((32, 64), 5.0)
     src_lat = np.linspace(-88.0, 88.0, 32)
