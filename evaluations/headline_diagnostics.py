@@ -53,7 +53,11 @@ def interp_to_pressure_level(field, p_model, p_target_pa):
     array, shape (...)
         ``field`` at the target pressure. Extrapolation beyond the column is
         clamped to the nearest level value (``jnp.interp`` edge behaviour) so
-        no NaNs are produced. Differentiable in ``field`` and ``p_model``.
+        no NaNs are produced. Differentiable in ``field`` (and in the two
+        bracketing ``p_model`` levels) for a FIXED level ordering; the internal
+        argsort makes the ordering itself piecewise-constant and duplicate
+        pressures are resolved arbitrarily, so callers must pass pressures that
+        are monotonic along the level axis (model full levels always are).
     """
     x = jnp.log(p_model)
     xt = jnp.log(jnp.asarray(p_target_pa, dtype=x.dtype))
@@ -78,15 +82,24 @@ def geopotential_height_at(T, q, p_s, phis, sigma_coord, p_target_pa):
     """Geopotential HEIGHT [m] at ``p_target_pa`` (e.g. Z500 at 50000 Pa).
 
     Uses virtual temperature in the hydrostatic integration so the result
-    matches ERA5 geopotential. Convention: Φ increases upward.
+    matches ERA5 geopotential. Convention: Φ increases upward. Works for both
+    pure-sigma and hybrid sigma-pressure coordinates (dispatches on type;
+    pressure comes from the coordinate's own ``pressure_at_full``).
     """
-    from legoesm.grids.vertical import compute_geopotential
+    from legoesm.grids.vertical import (
+        HybridSigmaPressureCoordinate,
+        compute_geopotential,
+        compute_geopotential_hybrid,
+    )
 
     T_v = _virtual_temperature(T, q)
-    phi = compute_geopotential(T_v, p_s, sigma_coord, phis)      # (..., nlev), J/kg
-    p_model = sigma_coord.sigma_full * p_s[..., None]            # (..., nlev), Pa
+    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        phi = compute_geopotential_hybrid(T_v, p_s, sigma_coord, phis)  # (..., nlev), J/kg
+    else:
+        phi = compute_geopotential(T_v, p_s, sigma_coord, phis)         # (..., nlev), J/kg
+    p_model = sigma_coord.pressure_at_full(p_s)                 # (..., nlev), Pa (polymorphic)
     phi_at = interp_to_pressure_level(phi, p_model, p_target_pa)
-    return phi_at / constants.g                                  # geopotential height [m]
+    return phi_at / constants.g                                 # geopotential height [m]
 
 
 def mean_sea_level_pressure(p_s, T_lowest, phis, *, lapse_rate_k_per_m=_STD_LAPSE_RATE_K_PER_M):
@@ -95,13 +108,19 @@ def mean_sea_level_pressure(p_s, T_lowest, phis, *, lapse_rate_k_per_m=_STD_LAPS
         p_msl = p_s · (1 + Γ z_s / T0)^(g / (R_d Γ)),   T0 = T_lowest + Γ z_s / 2
 
     Convention: z_s = phis/g. For z_s > 0 the reduction RAISES pressure
-    (p_msl ≥ p_s); at sea level (z_s = 0) it is the identity.
+    (p_msl ≥ p_s); at sea level (z_s = 0) it is the identity; for below-sea-level
+    cells (z_s < 0) it lowers pressure. Γ = 0 falls back to the isothermal
+    hypsometric limit. Temperatures are floored at ``constants.T_min_atmosphere``
+    and the power base is kept positive, so no NaNs arise for cold/deep columns.
     """
     z_s = phis / constants.g
-    gamma = lapse_rate_k_per_m
-    T0 = T_lowest + 0.5 * gamma * z_s                # mean-layer temperature [K]
+    gamma = float(lapse_rate_k_per_m)                # static (config), not traced
+    T_low_safe = jnp.maximum(T_lowest, constants.T_min_atmosphere)
+    if abs(gamma) < 1e-8:                            # isothermal hypsometric limit
+        return p_s * jnp.exp(constants.g * z_s / (constants.R_d * T_low_safe))
+    T0 = jnp.maximum(T_low_safe + 0.5 * gamma * z_s, constants.T_min_atmosphere)
     exponent = constants.g / (constants.R_d * gamma)
-    ratio = 1.0 + gamma * z_s / jnp.maximum(T0, 1.0)
+    ratio = jnp.maximum(1.0 + gamma * z_s / T0, 1e-6)   # positive base for fractional power
     return p_s * ratio ** exponent
 
 
@@ -110,11 +129,18 @@ def _log_frac(z_ref, z_low, z0, psi_fn, obukhov_L):
 
         f = [ln(z_ref/z0) - ψ(z_ref/L)] / [ln(z_low/z0) - ψ(z_low/L)]
 
-    Neutral limit (L → ∞): ψ → 0, so f is the pure log-law fraction in (0, 1).
+    The log-law fraction is only valid for z0 < z_ref < z_low, so z0 is capped
+    below z_ref and f is clipped to the physical bracket [0, 1] (matching
+    core.bulk_flux.compute_most_fluxes(return_2m=True), which clips the screen
+    value to the [surface, lowest-level] interval). Neutral limit (L → ∞):
+    ψ → 0, so f is the pure log-law fraction.
     """
-    num = jnp.log(z_ref / z0) - psi_fn(z_ref / obukhov_L)
-    den = jnp.log(z_low / z0) - psi_fn(z_low / obukhov_L)
-    return num / jnp.where(jnp.abs(den) < 1e-6, 1e-6, den)
+    z0_safe = jnp.minimum(z0, 0.5 * z_ref)   # keep z0 < z_ref (valid log-law bracket)
+    num = jnp.log(z_ref / z0_safe) - psi_fn(z_ref / obukhov_L)
+    den = jnp.log(z_low / z0_safe) - psi_fn(z_low / obukhov_L)
+    # sign-preserving guard against a vanishing denominator (never flips sign)
+    den_safe = jnp.where(den >= 0, jnp.maximum(den, 1e-6), jnp.minimum(den, -1e-6))
+    return jnp.clip(num / den_safe, 0.0, 1.0)
 
 
 def screen_level_t2m(T_sfc, T_lowest, z_lowest, obukhov_L, z0h, *, z_ref=_Z_REF_2M):
@@ -137,4 +163,5 @@ def wind_10m(u_lowest, v_lowest, z_lowest, obukhov_L, z0m, *, z_ref=_Z_REF_10M):
     from legoesm.core.bulk_flux import psi_m
 
     f = _log_frac(z_ref, z_lowest, z0m, psi_m, obukhov_L)
-    return jnp.sqrt(u_lowest ** 2 + v_lowest ** 2) * f
+    speed = jnp.sqrt(u_lowest ** 2 + v_lowest ** 2 + 1e-12)  # AD-safe at calm (u=v=0)
+    return speed * f
