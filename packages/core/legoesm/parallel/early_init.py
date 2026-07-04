@@ -162,6 +162,45 @@ def init_jax_distributed_with_fallback() -> None:
     _INITIALIZED = True
 
 
+def init_multicontroller_distributed(coordinator: str | None = None) -> None:
+    """Initialize ``jax.distributed`` for a route-B multicontroller launch.
+
+    Shared by every ``--multicontroller`` entry point (the ocean/atm SPMD
+    benches and the ``run_omip`` route-B driver) so the launcher-env contract
+    lives in ONE place.  MUST run before any other JAX use (backend init).
+
+    - Explicit ``coordinator`` (``host:port``): read the launcher rank/size
+      from Open MPI ``OMPI_COMM_WORLD_SIZE``/``RANK`` or Cray PALS
+      ``PMI_SIZE``/``PMI_RANK`` and call ``jax.distributed.initialize``
+      directly (the mpiexec path; also how the self-spawn tests inject rank).
+    - No ``coordinator``: delegate to :func:`init_jax_distributed_with_fallback`
+      (SLURM/OMPI auto-detect or the PALS mpi4py bootstrap).
+
+    Real init failures re-raise loudly — a missing launcher rank env is a
+    hard ``SystemExit``, never a silent single-process fallback (that would
+    run N identical un-federated copies clobbering each other's output).
+    """
+    if coordinator is None:
+        init_jax_distributed_with_fallback()
+        return
+
+    import jax
+
+    n_procs = int(os.environ.get(
+        "OMPI_COMM_WORLD_SIZE", os.environ.get("PMI_SIZE", "0")))
+    proc_id = int(os.environ.get(
+        "OMPI_COMM_WORLD_RANK", os.environ.get("PMI_RANK", "-1")))
+    if n_procs < 1 or proc_id < 0:
+        raise SystemExit(
+            "--coordinator given but no launcher rank env found "
+            "(OMPI_COMM_WORLD_SIZE/RANK or PMI_SIZE/PMI_RANK).")
+    jax.distributed.initialize(
+        coordinator_address=coordinator,
+        num_processes=n_procs, process_id=proc_id)
+    global _INITIALIZED
+    _INITIALIZED = True
+
+
 def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
     """Initialize ``jax.distributed`` if running under multi-node MPI.
 

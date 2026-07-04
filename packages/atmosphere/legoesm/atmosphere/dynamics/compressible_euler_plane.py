@@ -52,6 +52,8 @@ from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.atmosphere.physics.turbulence.lasd_core import lasd_cs2 as _lasd_cs2
 from legoesm.atmosphere.physics.turbulence.vreman import (
     vreman_nu_t as _vreman_nu_t_core)
+from legoesm.atmosphere.physics.turbulence.amd import (
+    amd_nu_t as _amd_nu_t_core)
 from legoesm.core.field import Field
 from legoesm.core.state import (
     PlaneNonHydrostaticState,
@@ -1395,6 +1397,24 @@ def _compute_vreman_K_m_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord,
         grid.dx, grid.dy, height_coord.dz, c_vreman)
 
 
+def _compute_amd_K_m_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord,
+                           c_amd):
+    """Anisotropic Minimum-Dissipation eddy viscosity ``K_m`` at cell centres —
+    OPTIONAL alternative to :func:`_compute_smagorinsky_K_m_plane`. Computes the
+    nine A-grid velocity gradients (the SAME helper Vreman uses) and defers the
+    algebra to the shared
+    :func:`legoesm.atmosphere.physics.turbulence.amd.amd_nu_t`. Per-direction
+    filter widths handle Δx≠Δz; purely local (no plane average) ⇒ MPI-safe
+    algebra. The minimum-dissipation ``max(N,0)`` already gives zero K_m in
+    resolved laminar/1-D shear, so no N² cutoff / wall cap is needed."""
+    (uc, vc, wc, dudx, dudy, dudz, dvdx, dvdy, dvdz,
+     dwdx, dwdy, dwdz) = _velocity_gradients_plane(
+        u_yxz, v_yxz, w_yxz_half, grid, height_coord)
+    return _amd_nu_t_core(
+        dudx, dudy, dudz, dvdx, dvdy, dvdz, dwdx, dwdy, dwdz,
+        grid.dx, grid.dy, height_coord.dz, c_amd)
+
+
 def _compute_dynamic_smag_cs_plane(
     u_yxz: jax.Array,
     v_yxz: jax.Array,
@@ -2179,7 +2199,8 @@ def plane_compressible_euler_slow_tendencies(
     _use_mol = (_closure == "molecular"
                 and getattr(config, "molecular_viscosity", 0.0) > 0.0)
     _use_vreman = _closure == "vreman" and config.vreman_c > 0.0
-    if _use_smag or _use_mol or _use_vreman:
+    _use_amd = _closure == "amd" and getattr(config, "amd_c", 0.0) > 0.0
+    if _use_smag or _use_mol or _use_vreman or _use_amd:
         if _use_mol:
             # DNS: CONSTANT molecular kinematic viscosity ν everywhere — no
             # eddy model, no stratification cutoff. K_h = ν / Pr for the heat
@@ -2195,6 +2216,16 @@ def plane_compressible_euler_slow_tendencies(
             # (no plane average) ⇒ MPI-safe. K_h = K_m / Pr (same Prandtl).
             K_m = _compute_vreman_K_m_plane(
                 u, v, w, grid, height_coord, config.vreman_c)
+            sgs_prandtl = config.smagorinsky_prandtl
+        elif _use_amd:
+            # Anisotropic Minimum-Dissipation (Rozema 2015 / Abkar-Bae-Moin
+            # 2016) EDDY viscosity — an OPTIONAL alternative to Smagorinsky.
+            # Gives ZERO SGS viscosity where the resolved flow needs none
+            # (minimum dissipation) and never negative, with per-direction
+            # filter widths for anisotropic Δx≠Δz grids. Purely local (no plane
+            # average) ⇒ MPI-safe. K_h = K_m / Pr (same Prandtl).
+            K_m = _compute_amd_K_m_plane(
+                u, v, w, grid, height_coord, config.amd_c)
             sgs_prandtl = config.smagorinsky_prandtl
         else:
             # CRM/LES: Smagorinsky-Lilly EDDY viscosity. Full 3D strain (takes
@@ -2721,13 +2752,31 @@ def validate_plane_config(config: CompressibleEulerConfig) -> None:
             "or NaNs for Pr <= 0."
         )
     closure = getattr(config, "turbulence_closure", "smagorinsky")
-    if closure not in ("smagorinsky", "molecular", "none", "vreman"):
+    if closure not in ("smagorinsky", "molecular", "none", "vreman", "amd"):
         raise ValueError(
             f"turbulence_closure={closure!r} invalid; use 'smagorinsky' "
             "(CRM/LES eddy viscosity, SAM-faithful default), 'vreman' (optional "
-            "Vreman-2004 eddy viscosity), 'molecular' (DNS molecular viscosity), "
-            "or 'none' (inviscid)."
+            "Vreman-2004 eddy viscosity), 'amd' (optional Anisotropic "
+            "Minimum-Dissipation eddy viscosity), 'molecular' (DNS molecular "
+            "viscosity), or 'none' (inviscid)."
         )
+    if closure == "amd":
+        if getattr(config, "amd_c", 0.0) <= 0.0:
+            raise ValueError(
+                f"amd_c={getattr(config, 'amd_c', 0.0)!r} must be > 0 for "
+                "turbulence_closure='amd' (modified Poincaré const, e.g. 0.3)."
+            )
+        if getattr(config, "smagorinsky_dynamic", False):
+            raise ValueError(
+                "turbulence_closure='amd' is incompatible with "
+                "smagorinsky_dynamic=True (AMD is an inherently static, "
+                "self-contained closure — there is no dynamic-coefficient path)."
+            )
+        if config.smagorinsky_prandtl <= 0.0:
+            raise ValueError(
+                f"smagorinsky_prandtl={config.smagorinsky_prandtl!r} must be > 0 "
+                "for turbulence_closure='amd' (K_h = K_m / Pr)."
+            )
     if closure == "vreman":
         if config.vreman_c <= 0.0:
             raise ValueError(

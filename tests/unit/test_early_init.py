@@ -275,3 +275,51 @@ def test_fallback_respects_shared_initialized_flag(monkeypatch):
     _with_fake_jax(monkeypatch, fake)
     early_init.init_jax_distributed_with_fallback()
     assert fake.calls == []  # idempotent no-op, no jax.distributed touch
+
+
+# ---------------------------------------------------------------------------
+# init_multicontroller_distributed: the shared --multicontroller entry point
+# (ocean/atm SPMD benches + the run_omip route-B driver).
+# ---------------------------------------------------------------------------
+
+def test_multicontroller_coordinator_uses_launcher_env(monkeypatch):
+    # Explicit coordinator -> read rank/size from the OMPI launcher env and
+    # call initialize() directly (the mpiexec / self-spawn path).
+    _clear_launcher_env(monkeypatch)
+    monkeypatch.setenv("OMPI_COMM_WORLD_SIZE", "4")
+    monkeypatch.setenv("OMPI_COMM_WORLD_RANK", "2")
+    fake = _FakeDistributed()
+    _with_fake_jax(monkeypatch, fake)
+    early_init.init_multicontroller_distributed("host:5000")
+    assert fake.calls == [
+        {"coordinator_address": "host:5000",
+         "num_processes": 4, "process_id": 2},
+    ]
+    assert early_init._INITIALIZED is True
+
+
+def test_multicontroller_coordinator_missing_env_raises(monkeypatch):
+    # A coordinator without a launcher rank env is a HARD error — never a
+    # silent single-process fallback (that would run N un-federated copies
+    # clobbering each other's output).
+    import pytest
+
+    _clear_launcher_env(monkeypatch)
+    monkeypatch.delenv("OMPI_COMM_WORLD_RANK", raising=False)
+    monkeypatch.delenv("PMI_SIZE", raising=False)
+    fake = _FakeDistributed()
+    _with_fake_jax(monkeypatch, fake)
+    with pytest.raises(SystemExit, match="no launcher rank env"):
+        early_init.init_multicontroller_distributed("host:5000")
+    assert fake.calls == []  # never initialized on a bad env
+
+
+def test_multicontroller_no_coordinator_delegates_to_fallback(monkeypatch):
+    # No coordinator -> environment-routed fallback (here SLURM -> bare init).
+    _clear_launcher_env(monkeypatch)
+    monkeypatch.setenv("SLURM_JOB_ID", "7")
+    fake = _FakeDistributed()
+    _with_fake_jax(monkeypatch, fake)
+    early_init.init_multicontroller_distributed(None)
+    assert fake.calls == [{}]  # bare auto-detect via init_..._with_fallback
+    assert early_init._INITIALIZED is True

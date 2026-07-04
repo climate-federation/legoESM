@@ -360,17 +360,57 @@ class ModelDriver:
         """Rebuild ``self._land_ml_state`` from any ``land_ml_*`` entries restored
         into ``carry_aux``, so a chained multilayer-land restart resumes the
         prognostic soil/snow/carbon columns instead of cold-starting (#730).
-        No-op for slab-land runs (``_land_ml_state`` is None)."""
-        if not (isinstance(self._carry_aux, dict)
-                and self._land_ml_state is not None):
+        No-op for slab-land runs (``_land_ml_state`` is None).
+
+        Fail-loud on a partial or version-skewed checkpoint: the save side
+        (:meth:`_checkpoint_carry_aux`) emits every non-None field, so the
+        restored set must exactly match the current template's non-None field
+        set.  A missing field would leave that prognostic column at its
+        cold-start value — a silent mixed restart, exactly what #730 exists to
+        prevent — and an unknown or wrong-shaped field signals a schema /
+        resolution skew.  Mirrors the MPAS phys-state load, which likewise
+        refuses a field-set mismatch rather than silently dropping columns."""
+        if not isinstance(self._carry_aux, dict):
             return
         keys = [k for k in self._carry_aux if k.startswith("land_ml_")]
         if not keys:
             return
+        # Pop the namespaced keys regardless of land type so a stray land_ml_*
+        # (e.g. a slab run chained off a multilayer checkpoint) is never left to
+        # leak forward into the next _checkpoint_carry_aux() re-save.
+        popped = {k[len("land_ml_"):]: self._carry_aux.pop(k) for k in keys}
+        template = self._land_ml_state
+        if template is None:
+            return  # slab run: keys removed above, nothing to restore
         import jax.numpy as jnp
-        fields = {k[len("land_ml_"):]: jnp.asarray(self._carry_aux.pop(k))
-                  for k in keys}
-        self._land_ml_state = self._land_ml_state._replace(**fields)
+        valid = set(template._fields)
+        unknown = set(popped) - valid
+        if unknown:
+            raise ValueError(
+                f"land_ml checkpoint has unknown field(s) {sorted(unknown)}; "
+                f"current MultiLayerLandState fields are {sorted(valid)}")
+        expected = {f for f in template._fields
+                    if getattr(template, f) is not None}
+        got = set(popped)
+        if got != expected:
+            raise ValueError(
+                "land_ml checkpoint field set does not match the current "
+                "MultiLayerLandState: "
+                f"missing={sorted(expected - got)}, "
+                f"unexpected={sorted(got - expected)}. Refusing to build a "
+                "mixed restart state (the missing prognostic columns would "
+                "silently stay at cold-start values).")
+        fields = {}
+        for name, val in popped.items():
+            arr = jnp.asarray(val)
+            ref = getattr(template, name)
+            if arr.shape != ref.shape:
+                raise ValueError(
+                    f"land_ml checkpoint field '{name}' has shape "
+                    f"{tuple(arr.shape)}, expected {tuple(ref.shape)} "
+                    "(resolution / soil-layer-count skew)")
+            fields[name] = arr
+        self._land_ml_state = template._replace(**fields)
 
     def _validate_microphysics_tracer_state(
         self,
@@ -3955,6 +3995,23 @@ class ModelDriver:
         if step != self._last_checkpoint_step:
             ckpt_fn(step, day)
         self.diagnostics.flush_to_disk(self._output_dir)
+        # Write the CMOR tables that the normal end-of-run ``save`` would emit
+        # but this ``sys.exit(0)`` never reaches — flushing only COMPLETED
+        # periods so a restart chain does not double-write a boundary period:
+        #   * completed months (flush_cmip_monthly pops months < the current),
+        #   * completed days   (finalize_cmip_daily pops days < the current),
+        #   * the fx table     (areacella/sftlf/orog — static, referenced by
+        #                       every variable's ``external_variables`` and
+        #                       required for area-weighted / land-ocean-split
+        #                       diagnostics).
+        # Without this every wallclock-graceful AMIP run (a year rarely
+        # finishes in one SLURM window) would drop fx entirely and lose the
+        # segment's monthly/daily output.  The single month/day straddling the
+        # exit is a bounded, documented limitation (the in-progress accumulator
+        # is not checkpointed).  All three are guarded on the CMIP writer.
+        self.diagnostics.flush_cmip_monthly(day, write=True)
+        self.diagnostics.finalize_cmip_daily(day)
+        self.diagnostics.finalize_cmip_fixed()
         sys.exit(0)
 
     def run(self, start_step: int = 0, start_day: float | None = None,
