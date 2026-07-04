@@ -1186,6 +1186,20 @@ class TestNemoCentredBarotropic:
         with pytest.raises(ValueError, match="n="):
             nemo_auto_substeps(1e-6, H, inv, float(_c.g), cmax=0.8)
 
+    def test_mpas_builder_rejects_centred_barotropic(self):
+        import dataclasses
+
+        from legoesm.ocean.experiments.dino import (
+            DINOConfig, dino_mpas_model_config,
+        )
+        cfg = dataclasses.replace(
+            DINOConfig(), barotropic_time_filter="nemo_boxcar_centred")
+        with pytest.raises(ValueError, match="barotropic"):
+            dino_mpas_model_config(None, cfg, physics=False)
+        cfg2 = dataclasses.replace(DINOConfig(), barotropic_auto_cmax=0.8)
+        with pytest.raises(ValueError, match="barotropic"):
+            dino_mpas_model_config(None, cfg2, physics=False)
+
     def test_preset_selects_centred_explicit(self):
         from legoesm.ocean.experiments.dino import (
             dino_lat_lon_grid, dino_lat_lon_model_config,

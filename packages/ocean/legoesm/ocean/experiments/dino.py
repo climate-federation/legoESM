@@ -1750,6 +1750,15 @@ def dino_mpas_model_config(
             "DINO path (the Redi-only iso-neutral recipe is wired for the "
             "lat-lon C-grid). Override lateral_tracer_mixing="
             "'geopotential' to run on MPAS.")
+    if cfg.barotropic_time_filter != "cosine" or cfg.barotropic_auto_cmax > 0:
+        raise ValueError(
+            "DINOConfig.barotropic_time_filter="
+            f"{cfg.barotropic_time_filter!r} / barotropic_auto_cmax="
+            f"{cfg.barotropic_auto_cmax!r}: the MPAS DINO builder does not "
+            "thread these (it would silently run different barotropic "
+            "numerics — codex r9 P2). The centred split-explicit recipe is "
+            "lat-lon only; override barotropic_time_filter='cosine' and "
+            "barotropic_auto_cmax=0.0 to run on MPAS.")
 
     # Representative cell size from mean cell area (m).
     cell_dx_m = float(jnp.sqrt(jnp.mean(mesh.areaCell)))
