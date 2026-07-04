@@ -36,13 +36,19 @@ from legoesm import constants
 __param_spec__ = {
     "TopmodelConfig": {
         "scheme_key": "land.topmodel",
-        "excluded": {},
+        "excluded": {
+            # A DIAGNOSTIC mapping (z_wt = z_wt_max*(1-W/W_max)) from the slab
+            # storage deficit to a water-table depth, not a Niu-2005 physical
+            # closure with a literature bound — tier-0 / excluded per the
+            # CLAUDE.md tier continuum (like a smoothing width / measurement
+            # convention), even though it is a legitimate config knob.
+            "z_wt_max": "diagnostic slab water-table-depth scale [m] (not a closure)",
+        },
         "params": {
             "f_max": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "Niu 2005 / CLM4.5 (Oleson 2013) max saturated fraction", "shape": None},
             "f_over": {"units": "1/m", "bounds": (0.1, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "Niu 2005 / CLM4.5 saturated-fraction decay", "shape": None},
             "q_drai_max": {"units": "kg/m^2/s", "bounds": (1e-5, 1e-2), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "Niu 2005 / CLM4.5 max baseflow", "shape": None},
             "f_drai": {"units": "1/m", "bounds": (0.5, 6.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "Niu 2005 / CLM4.5 baseflow decay", "shape": None},
-            "z_wt_max": {"units": "m", "bounds": (1.0, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "diagnostic water-table depth scale (slab deficit map)", "shape": None},
         },
     },
 }

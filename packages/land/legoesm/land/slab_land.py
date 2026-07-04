@@ -258,8 +258,10 @@ def step_land(
     P_input = precip_rain + melt_rate
     # Runoff scheme dispatch (hardened: unknown -> ValueError on the static
     # config string).  "bucket" (default) is byte-identical; "topmodel" adds
-    # the SIMTOP sub-grid saturated fraction + topographic baseflow.
-    _runoff_scheme = getattr(config, "runoff_scheme", "bucket")
+    # the SIMTOP sub-grid saturated fraction + topographic baseflow.  Direct
+    # attribute read (LandConfig always carries the field) so a non-LandConfig
+    # caller fails LOUDLY rather than silently defaulting to bucket.
+    _runoff_scheme = config.runoff_scheme
     if _runoff_scheme == "topmodel":
         from legoesm.land.topmodel_runoff import partition_topmodel_runoff
         W_new, soil_evap_actual, runoff, _runoff_inf, _runoff_sat = partition_topmodel_runoff(
