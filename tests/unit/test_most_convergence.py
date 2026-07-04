@@ -79,14 +79,22 @@ def test_return_convergence_with_return_2m():
 
 
 def test_differentiable_through_convergence_path():
-    """Adding the residual carry leaf must not break reverse-mode AD."""
-    def loss(T_sfc):
+    """Adding the residual carry leaf must not break reverse-mode AD — both
+    for the fluxes and for the residual itself (the abs/divide path)."""
+    def flux_loss(T_sfc):
         tau_x, _, shflx, lhflx, _, resid = compute_most_fluxes(
             **{**_args(285.0), "T_sfc": T_sfc}, n_iter=6,
             return_convergence=True)
         return jnp.sum(shflx ** 2 + lhflx ** 2 + tau_x ** 2)
-    g = jax.grad(loss)(jnp.asarray(285.0))
-    assert jnp.isfinite(g)
+    assert jnp.isfinite(jax.grad(flux_loss)(jnp.asarray(285.0)))
+
+    # Differentiate THROUGH the residual (the abs/max/divide chain) — it must
+    # stay AD-finite too, not just be carried dead.
+    def resid_loss(T_sfc):
+        return compute_most_fluxes(
+            **{**_args(283.0), "T_sfc": T_sfc}, n_iter=4,
+            return_convergence=True)[-1]
+    assert jnp.isfinite(jax.grad(resid_loss)(jnp.asarray(283.0)))
 
 
 @pytest.mark.parametrize("scheme", ("most", "coare3", "large_yeager"))
