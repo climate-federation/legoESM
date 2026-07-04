@@ -39,6 +39,7 @@ from .headline_diagnostics import (
 
 __all__ = [
     "diagnose_headline_fields",
+    "diagnose_and_regrid",
     "score_forecast",
     "HeadlineDiagnosis",
     "HEADLINE_FIELD_KEYS",
@@ -157,6 +158,42 @@ def diagnose_headline_fields(state, grid, sigma_coord) -> HeadlineDiagnosis:
     valid["u10"] = valid["v10"] = valid["wind_speed_10m"] = all_valid
 
     return HeadlineDiagnosis(fields=fields, valid=valid)
+
+
+def diagnose_and_regrid(state, grid, sigma_coord, *, resolution_deg=None):
+    """Diagnose WB2 headline fields from a spectral state and regrid to the WB2 grid.
+
+    Bridges :func:`diagnose_headline_fields` (Task 5) and
+    ``wb_regrid.regrid_to_wb2`` (Task 6): the model Gaussian-grid headline fields
+    and their above-ground masks are bilinearly regridded onto the WB2 common
+    grid, so a forecast and its ERA5 verification can be scored on identical
+    coordinates.
+
+    Returns
+    -------
+    (fields_wb2, valid_wb2, wb2_lat_deg, wb2_lon_deg)
+        Dicts keyed by :data:`HEADLINE_FIELD_KEYS` on the WB2 grid, plus its
+        latitude/longitude in degrees.
+    """
+    import numpy as np
+
+    from .wb_regrid import WB2_RESOLUTION_DEG, regrid_to_wb2
+
+    res = WB2_RESOLUTION_DEG if resolution_deg is None else resolution_deg
+    diag = diagnose_headline_fields(state, grid, sigma_coord)
+    src_lat = np.rad2deg(np.asarray(grid.lat))       # Gaussian lat, radians S->N
+    src_lon = np.rad2deg(np.asarray(grid.lon))       # radians [0, 2pi)
+
+    fields_wb2, valid_wb2 = {}, {}
+    wb2_lat = wb2_lon = None
+    for key, field in diag.fields.items():
+        f, wb2_lat, wb2_lon = regrid_to_wb2(
+            np.asarray(field), src_lat, src_lon, resolution_deg=res)
+        m, _, _ = regrid_to_wb2(
+            np.asarray(diag.valid[key]), src_lat, src_lon, resolution_deg=res, mask=True)
+        fields_wb2[key] = f
+        valid_wb2[key] = m
+    return fields_wb2, valid_wb2, wb2_lat, wb2_lon
 
 
 def score_forecast(pred_fields, verif_fields, clim_fields, wb2_lat_deg, *, valid=None):

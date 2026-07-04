@@ -111,6 +111,23 @@ def test_all_masks_consistent_with_targets():
         assert bool(jnp.all(diag.valid[key])), key
 
 
+def test_diagnose_and_regrid_isothermal():
+    from evaluations.wb_forecast import diagnose_and_regrid
+    state, grid, sigma = _rest_state()
+    fields_wb2, valid_wb2, lat, lon = diagnose_and_regrid(state, grid, sigma)
+    assert set(fields_wb2) == set(HEADLINE_FIELD_KEYS)
+    assert lat.shape == (121,) and lon.shape == (240,)
+    for k, arr in fields_wb2.items():
+        assert arr.shape == (121, 240), k
+        assert bool(np.all(np.isfinite(arr))), k
+        assert valid_wb2[k].shape == (121, 240)
+        assert valid_wb2[k].dtype == np.bool_
+    # isothermal T=300 -> z500 ~ 6086 m everywhere; flat p_ref -> all valid
+    z500_analytic = float(constants.R_d * 300.0 / constants.g * np.log(2.0))
+    assert abs(float(np.mean(fields_wb2["z500"])) - z500_analytic) < 150.0
+    assert bool(np.all(valid_wb2["z500"]))
+
+
 def test_score_forecast_perfect_and_climatology():
     from evaluations.wb_forecast import score_forecast
     lat = np.linspace(-90.0, 90.0, 24)
