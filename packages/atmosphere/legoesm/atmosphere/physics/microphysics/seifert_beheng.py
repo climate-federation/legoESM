@@ -42,6 +42,43 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
 _RHO_FLOOR = 0.1
 _VT_CLIP_RAIN = 20.0
 
+__physics_contract__ = {
+    "summary": (
+        "Seifert & Beheng (2001) two-moment warm-rain microphysics: prognostic "
+        "cloud + rain mass AND number, with saturation adjustment, "
+        "autoconversion, accretion, self-collection, breakup, rain evaporation "
+        "and size-sorted sedimentation to surface precipitation."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",
+        "hydrometeors.q_r": "kg/kg", "hydrometeors.N_c": "1/m^3",
+        "hydrometeors.N_r": "1/m^3", "p_full": "Pa", "rho": "kg/m^3",
+        "dz": "m", "dt": "s",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_dt": "kg/kg/s",
+        "dq_r_dt": "kg/kg/s", "dN_c_dt": "1/(m^3 s)", "dN_r_dt": "1/(m^3 s)",
+        "precipitation": "kg/m^2/s",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. Latent heating dT_dt is consistent with the "
+        "vapour<->liquid phase change via L_v. Mass and number are redistributed "
+        "cloud<->rain; SURFACE PRECIPITATION (>= 0) removes water, so column "
+        "moisture is NOT conserved -- no contract-level conservation is claimed. "
+        "Mixing ratios and number concentrations stay >= 0."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": "Seifert & Beheng (2001), Atmos. Res. 59-60, 265-281",
+    "idealized_test": (
+        "tests/unit/test_physics_microphysics.py — a cloudy two-moment column "
+        "autoconverts to rain and precipitates; number concentrations respond "
+        "to self-collection/breakup; all masses and numbers stay >= 0; "
+        "differentiable wrt T, q_v, N_c."
+    ),
+}
+
+
 def seifert_beheng_microphysics(
     T: jax.Array,
     q_v: jax.Array,

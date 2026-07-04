@@ -250,7 +250,14 @@ class SurfaceLayerConfig(NamedTuple):
     # None (default) = scheme-native: 600 m for bulk_scheme "coare3" (gustiness
     # is part of the COARE 3.0 algorithm, AeroBulk parity), off otherwise.
     # Explicit 0.0 disables; explicit value overrides for any MOST scheme.
+    # Annotated ``float | None`` => not spec-eligible (see __param_spec__ above).
     gustiness_w_zi: float | None = None
+    # Stable-regime (zeta>0) MOST similarity functions for the MOST-family
+    # bulk schemes: "dyer1974" (default, historical -5*zeta) |
+    # "beljaars_holtslag1991" | "grachev2007_sheba" | "gryanik2020".
+    # Threaded together with the coupler ocean tile by run_coupled so the
+    # interface cannot split; unknown -> ValueError at dispatch.
+    stability_scheme: str = "dyer1974"
 
 
 class SmagorinskyConfig(NamedTuple):

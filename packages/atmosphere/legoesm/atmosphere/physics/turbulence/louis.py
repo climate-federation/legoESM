@@ -36,6 +36,43 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion_theta,
 )
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "Louis (1979) stability-dependent PBL turbulence: mixing-length eddy "
+        "diffusivities Km, Kh scaled by Richardson-number stability functions "
+        "f_m, f_h; mixes momentum, heat (theta-space) and moisture implicitly."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "T_sfc": "K", "q_sfc": "kg/kg", "rho": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "Km": "m^2/s", "Kh": "m^2/s", "shflx": "W/m^2", "lhflx": "W/m^2",
+        "ustar": "m/s", "h_pbl": "m",
+    },
+    "sign_convention": (
+        "Down-gradient eddy diffusion, Km = l^2*|S|*f_m >= 0, Kh = l^2*|S|*f_h "
+        ">= 0; stability functions enhance mixing for Ri<0 (unstable) and "
+        "suppress it for Ri>0 (stable). The column budget is OPEN: the surface "
+        "flux (shflx > 0 upward, lhflx > 0 upward/moistening) is injected as "
+        "the bottom boundary condition, top is zero-flux; z increases upward."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Louis (1979), Boundary-Layer Meteorol. 17, 187-202; "
+        "Louis, Tiedtke & Geleyn (1982) separate heat stability function"
+    ),
+    "idealized_test": (
+        "rest state with zero surface flux and a neutral column (Ri=0) -> "
+        "f_m = f_h = 1 and near-zero interior tendency; Km, Kh >= 0; "
+        "stable stratification reduces Km relative to neutral."
+    ),
+}
+
 
 def louis_turbulence(
     u: jax.Array,

@@ -62,6 +62,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Shared, self-describing scaling metadata (roadmap item 9): merged into every
+# result JSON so a host-staged / f32 / replicated run is falsifiable from the
+# record.  ``metadata.py`` imports JAX only lazily, so importing it here does
+# NOT trigger early JAX init before ``_configure_jax_cpu``.
+_BENCH_DIR = Path(__file__).resolve().parent
+if str(_BENCH_DIR) not in sys.path:
+    sys.path.insert(0, str(_BENCH_DIR))
+from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
+
 # NOTE: do NOT import ``legoesm.constants`` at module load — it eagerly
 # imports ``jax.numpy``, which initialises JAX before ``_configure_jax_cpu``
 # has a chance to set ``JAX_ENABLE_X64`` / ``JAX_PLATFORMS`` / thread flags.
@@ -135,13 +144,48 @@ def _configure_jax_gpu(precision: str) -> None:
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 
+def _launcher_world_size() -> int:
+    """World size the MPI/SLURM/PALS launcher env reports (1 = no launcher)."""
+    for var in ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "PALS_LOCAL_SIZE",
+                "SLURM_NTASKS"):
+        val = os.environ.get(var)
+        if val and val.isdigit():
+            return int(val)
+    return 1
+
+
+def _under_mpi_launcher() -> bool:
+    """True when an MPI launcher started this process.
+
+    Size vars alone under-detect Cray PALS (PALS_LOCAL_SIZE is per-node;
+    a job can expose only per-rank ids) — so the PRESENCE of a per-rank id
+    counts as launcher evidence too (codex round-2).
+    """
+    if _launcher_world_size() > 1:
+        return True
+    return any(
+        v in os.environ
+        for v in ("PALS_RANKID", "PMI_RANK", "OMPI_COMM_WORLD_RANK")
+    )
+
+
 def _init_mpi() -> tuple[int, int]:
     """Initialize MPI and return (rank, n_ranks)."""
     try:
         from mpi4py import MPI
         comm = MPI.COMM_WORLD
         return comm.Get_rank(), comm.Get_size()
-    except ImportError:
+    except (ImportError, RuntimeError) as e:
+        # RuntimeError: mpi4py installed but no loadable libmpi (common in
+        # a GPU-only venv). A single-process run must not require MPI —
+        # BUT under a real MPI launcher a broken mpi4py must fail LOUDLY
+        # here, or every rank silently runs duplicated serial work
+        # reporting n_ranks=1 (codex finding).
+        if _under_mpi_launcher():
+            raise RuntimeError(
+                f"MPI launcher detected (world size "
+                f"{_launcher_world_size()}) but mpi4py is unusable: {e}"
+            ) from e
         return 0, 1
 
 
@@ -175,6 +219,10 @@ class TimingResult:
     # 2-D-pencil curve from the 1-D band laggard.  N/A for other grids ("band"
     # is a harmless default they never key on).
     decomposition: str = "band"
+    # MPAS/Voronoi partition-quality telemetry (roadmap #6): edge-cut /
+    # owned-halo-ratio / cells-per-rank min-max / message count.  Populated only
+    # for the multi-rank icosahedral path; None otherwise.
+    partition_metrics: dict | None = None
 
 
 @dataclass
@@ -261,7 +309,7 @@ WEAK_BASE_ICO = 4  # subdivision level
 # Strong scaling resolution sets
 STRONG_RES_CS = [24, 48, 96]
 STRONG_RES_LL = [64, 128, 256]
-STRONG_RES_ICO = [4, 5, 6]
+STRONG_RES_ICO = [4, 5, 6, 7, 8]  # levels 4-8 (L8 = 655,362 cells, ~25 km)
 STRONG_RES_SP = [21, 42]
 
 
@@ -421,21 +469,26 @@ def _build_amip_step(
 
     if grid_type == "cubed-sphere":
         if cs_spmd:
-            return _build_cubed_sphere_spmd(
+            out = _build_cubed_sphere_spmd(
                 resolution, nlev, dt, dtype, physics_level, _cast)
-        return _build_cubedsphere(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
-                                  physics_level, _cast)
+        else:
+            out = _build_cubedsphere(resolution, nlev, sigma, dt, dtype, rank,
+                                     n_ranks, physics_level, _cast)
     elif grid_type == "latlon":
-        return _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
-                             physics_level, _cast, latlon_2d=latlon_2d)
+        out = _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
+                            physics_level, _cast, latlon_2d=latlon_2d)
     elif grid_type == "icosahedral":
-        return _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
-                                  physics_level, _cast)
+        out = _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank,
+                                 n_ranks, physics_level, _cast)
     elif grid_type == "spectral":
-        return _build_spectral(resolution, nlev, sigma, dt, dtype,
-                               physics_level, _cast)
+        out = _build_spectral(resolution, nlev, sigma, dt, dtype,
+                              physics_level, _cast)
     else:
         raise ValueError(f"Unsupported grid: {grid_type!r}")
+    # Normalize to (step_fn, state, dt, total_cells, cells_per_rank,
+    # partition_metrics): only _build_icosahedral (MPAS) carries partition
+    # metrics; the other builders return a 5-tuple, padded with None here.
+    return out if len(out) == 6 else (*out, None)
 
 
 def _build_cubedsphere(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
@@ -832,6 +885,7 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     else:
         physics_fn = _build_physics_fn(physics_level, "icosahedral")
 
+    part_metrics = None
     if n_ranks > 1:
         # ``make_voronoi_mpi_step`` now forwards ``physics_fn`` via the
         # operator-split path (iter: HS MPI scaling), so multi-rank
@@ -843,12 +897,21 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
             make_voronoi_partition_layout,
             scatter_state_voronoi,
             make_voronoi_mpi_step,
+            voronoi_partition_metrics,
+            reduce_partition_metrics,
         )
         # Partition method A/B (audit #3): LEGOESM_VORONOI_PARTITION =
         # "geometric" (RCB, default) | "metis" (pymetis k-way edge-cut min).
         _pmethod = os.environ.get("LEGOESM_VORONOI_PARTITION", "geometric")
         layout = make_voronoi_partition_layout(mesh, rank, n_ranks,
                                                method=_pmethod)
+        # Partition-quality telemetry (roadmap #6): edge-cut / owned-halo /
+        # cells-per-rank / message count into the result metadata.
+        # ``reduce_partition_metrics`` issues collectives, so EVERY rank runs
+        # it (uniform, deadlock-free); done here outside the timed loop.
+        part_metrics = reduce_partition_metrics(
+            voronoi_partition_metrics(layout))
+        part_metrics["partition_method"] = _pmethod
         state = scatter_state_voronoi(state, layout.partition)
         step_fn = make_voronoi_mpi_step(
             model, layout, sigma, config, physics_fn=physics_fn,
@@ -861,7 +924,7 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
             step_fn = model.step
 
     cells_per_rank = total_cells // max(1, n_ranks)
-    return step_fn, state, dt, total_cells, cells_per_rank
+    return step_fn, state, dt, total_cells, cells_per_rank, part_metrics
 
 
 def _build_spectral(resolution, nlev, sigma, dt, dtype, physics_level, cast_fn):
@@ -932,7 +995,8 @@ def run_single_benchmark(
     import jax
     import jax.numpy as jnp
 
-    step_fn, state, dt_used, total_cells, cells_per_rank = _build_amip_step(
+    (step_fn, state, dt_used, total_cells, cells_per_rank,
+     part_metrics) = _build_amip_step(
         grid_type=grid_type,
         resolution=resolution,
         nlev=nlev,
@@ -1022,7 +1086,8 @@ def run_single_benchmark(
         if _MPI.COMM_WORLD.Get_size() > 1:
             jax.block_until_ready(jax.tree.leaves(state))
             _MPI.COMM_WORLD.Barrier()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # broken/absent mpi4py must not break a single-process run
         pass
 
     t0 = time.perf_counter()
@@ -1034,7 +1099,8 @@ def run_single_benchmark(
         from mpi4py import MPI as _MPI
         if _MPI.COMM_WORLD.Get_size() > 1:
             _MPI.COMM_WORLD.Barrier()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # broken/absent mpi4py must not break a single-process run
         pass
 
     t1 = time.perf_counter()
@@ -1079,6 +1145,7 @@ def run_single_benchmark(
         cells_per_rank=cells_per_rank,
         mcells_per_s=mcells_per_s,
         decomposition=decomposition,
+        partition_metrics=part_metrics,
     )
 
 
@@ -1151,8 +1218,18 @@ def generate_sweep_cases(
 # Output
 # ===========================================================================
 
-def write_result_json(result: TimingResult, output_dir: Path) -> None:
-    """Write a single result as a JSON file."""
+def write_result_json(
+    result: TimingResult, output_dir: Path, *, cs_spmd: bool = False
+) -> None:
+    """Write a single result as a JSON file.
+
+    ``cs_spmd`` marks the single-controller cubed-sphere SPMD path, where
+    ``result.n_ranks`` was rewritten to ``jax.device_count()`` for the
+    filename / plot axis.  The metadata ``n_ranks`` (= process count) must NOT
+    use that rewritten value, so it is left to ``scaling_metadata`` to default
+    to ``jax.process_count()`` (1 for single-controller, N for multi-controller
+    SPMD) while the device count lives in ``n_gpus`` / ``device_count``.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     # Tag a non-default (2-D) decomposition into the filename so a 2-D-pencil
     # run never overwrites the band run at the same grid/res/np (the payload
@@ -1164,6 +1241,8 @@ def write_result_json(result: TimingResult, output_dir: Path) -> None:
     )
     path = output_dir / fname
     payload = asdict(result)
+    # Move partition metrics into the metadata block (not a top-level dup).
+    _part_metrics = payload.pop("partition_metrics", None)
     # Record the actual JAX backend so downstream aggregation does not have to
     # infer CPU-vs-GPU from the output-dir name (codex review): cpu/gpu/tpu.
     try:
@@ -1174,12 +1253,47 @@ def write_result_json(result: TimingResult, output_dir: Path) -> None:
     # Record the hybrid layout so scaling can be plotted vs CORES, not ranks:
     # a hybrid 8r x 4c run and a packed 32r x 1c run both report n_ranks but use
     # 32 vs 128 cores. cpus_per_task * n_ranks = the true resource count.
-    _cpt = int(os.environ.get("SLURM_CPUS_PER_TASK", "1") or "1")
+    # cpus_per_task: SLURM sets SLURM_CPUS_PER_TASK, but on PBS/PALS (Derecho)
+    # that is absent — fall back to the per-rank thread pool the launcher
+    # bound (OMP_NUM_THREADS), so n_cores reflects the true full-node
+    # resource, not 1 (#764: else n_resource / the CPU resource axis is
+    # wrong for the route-B cube lane on PBS).
+    _cpt = int(os.environ.get("SLURM_CPUS_PER_TASK")
+               or os.environ.get("OMP_NUM_THREADS")
+               or "1")
     payload["cpus_per_task"] = _cpt
     payload["n_cores"] = result.n_ranks * _cpt
     # Record conservation mode so a LEGOESM_NO_MASS_FIX ablation never dedups
     # with / is mislabeled as a production (mass-conserving) run (codex audit).
     payload["fix_mass"] = os.environ.get("LEGOESM_NO_MASS_FIX") != "1"
+    # Self-describing metadata block (roadmap item 9): backend / precision knobs
+    # / GPU-direct mode / decomposition / cells-per-rank so this row is
+    # comparable and a host-staged or f32 run is falsifiable from the record.
+    # cs-spmd: result.n_ranks is the DEVICE count (rewritten upstream); leave
+    # metadata n_ranks to auto process-count.  Non-cs-spmd (mpi4jax): jax is
+    # unaware of the MPI world, so the real MPI rank count must be passed.
+    _md_n_ranks = None if cs_spmd else result.n_ranks
+    payload["metadata"] = annotate_incomplete(scaling_metadata(
+        grid=result.grid_type,
+        component="atmosphere",
+        resolution=result.resolution,
+        n_levels=result.n_levels,
+        precision=result.precision,
+        n_ranks=_md_n_ranks,
+        n_gpus=(result.n_ranks
+                if payload["backend"] in ("gpu", "cuda", "rocm") else 0),
+        decomposition=result.decomposition,
+        cells_per_rank=result.cells_per_rank,
+        scaling_kind=os.environ.get("LEGOESM_SCALING_KIND") or None,
+        partition_metrics=_part_metrics,
+        extra={
+            "physics_level": result.physics_level,
+            "mode": result.mode,
+            "cpus_per_task": payload["cpus_per_task"],
+            "n_cores": payload["n_cores"],
+            "fix_mass": payload["fix_mass"],
+        },
+    ))
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
     print(f"  Result: {path}")
@@ -1346,14 +1460,21 @@ def main() -> int:
             return 2
         import jax as _jax
         import os as _os
-        # Launcher-agnostic process count: SLURM (srun) or OpenMPI
-        # (mpirun) — gating on SLURM_NTASKS alone would silently skip
-        # initialize() under mpirun and leave N independent local
-        # meshes all reporting n_ranks=N.
-        _nproc = int(_os.environ.get(
-            "SLURM_NTASKS", _os.environ.get("OMPI_COMM_WORLD_SIZE", "1")))
+        # Launcher-agnostic process count via the canonical helper, which
+        # covers OpenMPI / PMI / Cray PALS / SLURM (#764: the prior inline
+        # subset omitted PALS_LOCAL_SIZE, so a Derecho mpiexec route-B
+        # launch skipped initialize() and each rank ran an independent np1
+        # mesh — caught loudly by the consistency gate below, but the sweep
+        # never federated).  _launcher_world_size == _launcher_world_size().
+        _nproc = _launcher_world_size()
         if _nproc > 1:
-            _jax.distributed.initialize()
+            # PBS/PALS has no bare-initialize auto-detection; the helper
+            # falls back to the mpi4py bootstrap (plain MPI, mpi4jax
+            # never armed on the --cs-spmd path).
+            from legoesm.parallel.early_init import (
+                init_jax_distributed_with_fallback,
+            )
+            init_jax_distributed_with_fallback()
 
     # --- GPU backend assertion (DEFERRED past --cs-spmd init) ---
     # Now safe to touch the backend: jax.distributed.initialize() (if any) has
@@ -1506,7 +1627,7 @@ def main() -> int:
     if is_rank0:
         print_summary(result)
         output_dir = Path(args.output_dir) / f"{grid_type}_{physics_level}_{mode}"
-        write_result_json(result, output_dir)
+        write_result_json(result, output_dir, cs_spmd=bool(args.cs_spmd))
 
     return 0
 

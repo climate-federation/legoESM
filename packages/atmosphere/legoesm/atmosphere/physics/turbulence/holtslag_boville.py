@@ -27,6 +27,19 @@ replaced by smooth sigmoid blends whose sharpnesses live in
 ``vmap`` safe and smooth everywhere while reproducing the oracle within a
 stated tolerance.
 
+Conserved heat variable — deviation from the oracle.  The E3SM ``hb_diff``
+oracle diffuses the DRY STATIC ENERGY ``s = c_p T + g z`` in flux form,
+which conserves the column enthalpy ``Σ ρ dz c_p T`` exactly.  THIS port
+instead diffuses potential temperature θ (see
+:func:`diffuse_theta_with_countergradient` and the shared
+:func:`legoesm.atmosphere.physics.turbulence.vertical_diffusion.implicit_vertical_diffusion_theta`).
+Diffusing θ conserves the mass-weighted column θ, ``Σ ρ dz θ``, but NOT the
+column enthalpy, because the Exner function π = (p/p_ref)^κ (T = π θ) varies
+with height.  The scheme is therefore faithful to the oracle's K-profile,
+PBL-height, and nonlocal-countergradient STRUCTURE, but deviates in the
+conserved heat variable (an accepted approximation; switching the diffused
+variable to DSE is a validated follow-up).
+
 References
 ----------
 - Holtslag, A. A. M., & Boville, B. A. (1993). Local versus nonlocal
@@ -50,6 +63,47 @@ from legoesm.atmosphere.physics.turbulence.surface_layer import (
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
 )
+
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "Holtslag-Boville (1993) nonlocal K-profile PBL turbulence: a "
+        "bulk-Richardson PBL height sets a nonlocal eddy-diffusivity profile "
+        "with a countergradient heat-transport term, blended with a "
+        "free-atmosphere local-Ri diffusivity; differentiable E3SM-HB port."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "T_sfc": "K", "q_sfc": "kg/kg", "rho": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "Km": "m^2/s", "Kh": "m^2/s", "shflx": "W/m^2", "lhflx": "W/m^2",
+        "ustar": "m/s", "h_pbl": "m",
+    },
+    "sign_convention": (
+        "Down-gradient nonlocal K-profile (Km, Kh >= 0) plus a positive "
+        "countergradient gamma that drives an upward theta flux (warming the "
+        "layers below the flux convergence). The column budget is OPEN: the "
+        "surface flux (shflx > 0 upward, lhflx > 0 upward/moistening) is the "
+        "bottom boundary condition, top is zero-flux; z increases upward. "
+        "Heat is diffused in theta-space, so column enthalpy is NOT conserved "
+        "(mass-weighted theta is) -- an accepted deviation from the DSE oracle."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Holtslag & Boville (1993), J. Climate 6, 1825-1842; "
+        "E3SM/CAM hb_diff.F90 + pbl_utils.F90 oracle"
+    ),
+    "idealized_test": (
+        "no surface flux + neutral column -> zero countergradient, "
+        "K -> free-atmosphere floor, near-zero interior tendency; unstable "
+        "surface buoyancy flux -> deeper h_pbl and positive gamma; oracle "
+        "parity vs E3SM hb_diff within a stated tolerance."
+    ),
+}
 
 _ONET = 1.0 / 3.0  # 1/3 power in the MO gradient expressions (oracle ``onet``)
 
@@ -596,6 +650,20 @@ def diffuse_theta_with_countergradient(
     theta diffusion of the local gradient with the surface flux, and convert
     back.  This keeps the implicit part identical to the no-cg path while
     adding the nonlocal term consistently with the oracle.
+
+    Conserved-variable caveat.  The E3SM oracle diffuses dry static energy
+    s = c_p T + g z (enthalpy-conserving in flux form); this routine diffuses
+    θ instead, so it reproduces the oracle's K-profile and countergradient
+    structure but conserves mass-weighted θ (``Σ ρ dz θ``) rather than column
+    enthalpy (``Σ ρ dz c_p T``), since the Exner π = (p/p_ref)^κ varies with
+    height.  An energy-conserving variant would diffuse s; this is an accepted
+    approximation and a validated follow-up.
+
+    Surface-Exner proxy.  ``exner_sfc`` below uses the lowest FULL-level Exner
+    (exner[:, -1]) as a surface-Exner stand-in.  Since p_low < p_surface this
+    proxy is biased low, so the injected surface θ-flux F_θ_sfc =
+    F_T_sfc / exner_sfc is biased slightly HIGH; threading a true p_surface
+    and using (p_sfc/p_ref)^κ would remove the bias.
     """
     p_safe = jnp.clip(p_full, 1.0, None)
     exner = (p_safe / constants.p_ref) ** constants.kappa

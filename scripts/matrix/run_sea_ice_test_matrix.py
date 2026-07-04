@@ -101,6 +101,7 @@ import matplotlib.pyplot as plt
 from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.diagnostics.conservation_drift import compute_relative_drift
+from legoesm.experiments.matrix.namelist import write_case_namelist
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.state import (
@@ -1644,6 +1645,13 @@ def main():
             continue
 
         outdir = output_base / tc.output_path
+        # Per-case namelist parameter file (#682): the resolved case config,
+        # written up-front so it is present even if the run later fails.
+        write_case_namelist(
+            outdir, tc,
+            title=f"sea-ice test-case namelist: {tc.output_path}",
+            extra={"quick": bool(args.quick)},
+        )
         t0 = time.time()
         try:
             status, notes = runner(tc, outdir, args.quick)

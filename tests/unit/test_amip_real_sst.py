@@ -12,9 +12,9 @@ physical SST (Kelvin) and a [0,1] ice fraction, and that the WRONG flags
 import numpy as np
 import pytest
 import xarray as xr
+from legoesm.forcing.amip import AMIPForcingConfig, load_amip_forcing
 
 from legoesm import constants
-from legoesm.forcing.amip import load_amip_forcing, AMIPForcingConfig
 
 
 def _write_input4mips_sst(path, *, sst_units="K", sic_units="%"):
@@ -94,3 +94,27 @@ def test_real_percent_sic_with_wrong_fraction_scale_fails(tmp_path):
     )
     with pytest.raises(ValueError, match="(?i)percent|fraction|<=1"):
         load_amip_forcing(cfg, grid)
+
+
+def test_real_era5_fraction_sic_with_wrong_percent_scale_fails(tmp_path):
+    # NCAR-RDA ERA5 sea-ice (ci) carries units "(0-1)" — an unambiguous [0,1] fraction.
+    # Running it with sic_scale=0.01 (the percent scale) must be REJECTED: else all values
+    # *0.01 land in [0,0.01], passing the <=1 value-sanity floor and SILENTLY zeroing the
+    # ice (codex-review iter 420).
+    p = tmp_path / "era5_ci.nc"
+    nlat, nlon, nt = 36, 72, 12
+    lat = np.linspace(-89, 89, nlat)
+    lon = np.linspace(0, 357.5, nlon)
+    sst = 290.0 * np.ones((nt, nlat, nlon))
+    sic = np.clip(np.abs(lat)[None, :, None] / 90.0, 0.0, 1.0) * np.ones((nt, nlat, nlon))
+    ds = xr.Dataset(
+        {"SSTK": (("time", "lat", "lon"), sst), "CI": (("time", "lat", "lon"), sic)},
+        coords={"time": np.arange(nt, dtype=float), "lat": lat, "lon": lon})
+    ds["SSTK"].attrs["units"] = "K"
+    ds["CI"].attrs["units"] = "(0-1)"
+    ds.to_netcdf(p)
+    cfg = AMIPForcingConfig(
+        dataset="custom", path=str(p), sst_var="SSTK", sic_var="CI",
+        sst_offset=0.0, sic_scale=0.01)   # WRONG: "(0-1)" is already a fraction
+    with pytest.raises(ValueError, match="(?i)fraction"):
+        load_amip_forcing(cfg, _target_grid())

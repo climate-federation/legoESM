@@ -39,6 +39,47 @@ from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
 from legoesm.atmosphere.physics.gravity_wave_drag.config import HinesConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "Hines (1997) Doppler-spread non-orographic gravity-wave drag "
+        "(single bulk-amplitude approximation): a launched rms wave amplitude "
+        "grows with 1/sqrt(rho) upward, saturates at the Doppler-broadening "
+        "cap, and deposits its momentum-flux divergence as a drag on the flow."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "rho": "kg/m^3", "lat": "rad", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "eps_gwd": "W/m^2",
+    },
+    "sign_convention": (
+        "z up. Drag opposes the wind: accel is a pure deceleration along the "
+        "local wind vector (du_dt*u + dv_dt*v <= 0); momentum-flux deposition "
+        "drag = rho*(sigma_grown^2 - sigma_sat^2) is floored at 0 (a sink). "
+        "eps_gwd>=0 is the column KE loss returned as frictional heating "
+        "dT_dt = -(u*du_dt + v*dv_dt)/c_pd."
+    ),
+    # KE removed from the mean flow is returned exactly as frictional heating,
+    # so total ENERGY is conserved. Momentum is NOT conserved (wave source at
+    # launch, absorption aloft). The Fmax momentum-flux cap and the post-flux
+    # tendency limiter reshape the vertical distribution but keep the drag a
+    # sink; they do not add momentum.
+    "conserves": ["energy"],
+    "differentiable": True,
+    "reference": (
+        "Hines (1997), J. Atmos. Solar-Terr. Phys. 59, 371-386 "
+        "(Doppler-spread parameterization, basic formulation)"
+    ),
+    "idealized_test": (
+        "tests/atmosphere/hydrostatic/unit/test_gravity_wave_drag.py: rest "
+        "state -> zero tendency; du_dt*u + dv_dt*v <= 0 at every level; "
+        "c_pd*sum(rho*dT_dt*dz) == eps_gwd >= 0 (KE->heat closure)"
+    ),
+}
+
 
 def hines_gwd(
     u: jax.Array,

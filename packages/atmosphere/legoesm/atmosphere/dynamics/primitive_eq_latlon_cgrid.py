@@ -77,6 +77,7 @@ from legoesm.grids.vertical import (
     vertical_advection,
     vertical_advection_hybrid,
     compute_pressure_velocity,
+    compute_mass_flux_from_cumsum,
     compute_omega_hybrid,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
@@ -479,19 +480,13 @@ def cgrid_latlon_hydrostatic_tendencies(
     # smoothing from a cell-center round-trip.  sigma_dot/mass_flux are
     # interpolated to u-face and v-face locations first.
     if _hybrid:
-        # Build mass flux from the corrected div(dp*v) closure (div_dp),
-        # not from div(v)*dp which is what compute_mass_flux_hybrid uses.
-        # F_{k+1/2} = (B_{k+1/2}-B_top)/B_range * D_total_p - cumsum(div_dp)
-        _B_top = sigma_coord.B_half[0]
-        _frac_B = (sigma_coord.B_half[1:] - _B_top) / sigma_coord.B_range
-        # Iter-54: reuse the cumsum precomputed for D_total_p above.
-        _mf_inner = _frac_B * D_total_p[..., jnp.newaxis] - _cumsum_dp
-        # Top BC: F=0; bottom BC: zero by construction
-        # (frac_B[-1]=1, cumsum[-1]=D_total_p → _mf_inner[-1]=0).  Drop
-        # the trailing (∼0) element + pad both ends in one Pad HLO op
-        # (replaces Pad + scatter, also eliminates the float roundoff).
-        _pad_axes = ((0, 0),) * (_mf_inner.ndim - 1) + ((1, 1),)
-        mass_flux = jnp.pad(_mf_inner[..., :-1], _pad_axes)
+        # Build mass flux from the corrected div(dp*v) closure (div_dp), NOT
+        # from div(v)*dp which is what compute_mass_flux_hybrid's INTERNAL
+        # div_dp uses.  The integration + boundary closure is the shared
+        # compute_mass_flux_from_cumsum; we feed it the flux-form cumsum
+        # precomputed above (iter-54 reuse — no extra cross-shard reduction).
+        mass_flux = compute_mass_flux_from_cumsum(
+            _cumsum_dp, D_total_p[..., jnp.newaxis], sigma_coord)
         mf_u = interp_cell_to_uface(mass_flux)
         # mass_flux depends on div(dp*v) -> cannot join the entry pad.
         mf_v = interp_cell_to_vface_halo(mass_flux)

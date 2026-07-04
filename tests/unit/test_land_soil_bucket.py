@@ -176,45 +176,59 @@ class TestBucketUpdate:
     def test_noop_when_off(self):
         pipe = _bucket_pipeline(active=False)
         w0 = jnp.full(SHAPE_2D, 75.0)
-        w1 = pipe._bucket_update(**_bucket_args(pipe, 75.0, 1e-4, 0.5))
+        w1, runoff = pipe._bucket_update(**_bucket_args(pipe, 75.0, 1e-4, 0.5))
         assert jnp.array_equal(w1, w0)
+        assert runoff is None              # inactive -> no runoff diagnostic
 
     def test_fills_with_heavy_precip(self):
         pipe = _bucket_pipeline(active=True)
-        # Large precip, dry bucket => water rises.
-        w1 = pipe._bucket_update(**_bucket_args(pipe, 50.0, 1e-3, 0.3))
+        # Moderate precip below the infiltration capacity, dry bucket => water rises.
+        w1, _ = pipe._bucket_update(**_bucket_args(pipe, 50.0, 1e-3, 0.3))
         assert jnp.all(w1 > 50.0)
 
     def test_empties_under_evaporation(self):
         pipe = _bucket_pipeline(active=True)
         # No precip, warm wet surface into dry air => water falls.
-        w1 = pipe._bucket_update(**_bucket_args(pipe, 100.0, 0.0, 1.0))
+        w1, _ = pipe._bucket_update(**_bucket_args(pipe, 100.0, 0.0, 1.0))
         assert jnp.all(w1 < 100.0)
 
     def test_capped_at_w_max_runoff(self):
         pipe = _bucket_pipeline(active=True, w_max=150.0)
-        # Enormous precip over many steps cannot exceed capacity.
+        # Enormous precip over many steps cannot exceed capacity, and the rejected
+        # water is reported as runoff (Hortonian + saturation excess), not lost.
         w = jnp.full(SHAPE_2D, 140.0)
+        last_runoff = None
         for _ in range(50):
-            w = pipe._bucket_update(**{**_bucket_args(pipe, 0.0, 1.0, 1.0),
-                                       "w_land": w})
+            w, last_runoff = pipe._bucket_update(**{**_bucket_args(pipe, 0.0, 1.0, 1.0),
+                                                    "w_land": w})
         assert jnp.all(w <= 150.0 + 1e-6)
-        assert jnp.allclose(jnp.max(w), 150.0)
+        assert jnp.all(last_runoff > 0.0)   # heavy rain on a full bucket -> runoff
 
     def test_stays_nonnegative(self):
         pipe = _bucket_pipeline(active=True)
         # No precip, strong evaporation, repeatedly => floored at 0.
         w = jnp.full(SHAPE_2D, 5.0)
         for _ in range(200):
-            w = pipe._bucket_update(**{**_bucket_args(pipe, 0.0, 0.0, 1.0),
-                                       "w_land": w})
+            w, _ = pipe._bucket_update(**{**_bucket_args(pipe, 0.0, 0.0, 1.0),
+                                          "w_land": w})
         assert jnp.all(w >= 0.0)
+
+    def test_infiltration_excess_runoff_with_bucket_room(self):
+        """Intense rain on a bucket with room generates Hortonian runoff and the
+        runoff is suppressed when infiltration excess is disabled."""
+        pipe = _bucket_pipeline(active=True, w_max=150.0)
+        w_on, runoff_on = pipe._bucket_update(**_bucket_args(pipe, 75.0, 5e-2, 1.0))
+        assert jnp.all(runoff_on > 0.0)        # rain rate > capacity -> Hortonian
+        assert jnp.all(w_on < 150.0)           # bucket still has room
+        pipe.land_infiltration_excess = False
+        w_off, runoff_off = pipe._bucket_update(**_bucket_args(pipe, 75.0, 5e-2, 1.0))
+        assert jnp.all(w_off > w_on)           # more infiltrates without the cap
 
     def test_drier_evaporates_less(self):
         """Lower beta removes less water for the same atmospheric state."""
         pipe = _bucket_pipeline(active=True)
-        w_dry = pipe._bucket_update(**_bucket_args(pipe, 80.0, 0.0, 0.2))
-        w_wet = pipe._bucket_update(**_bucket_args(pipe, 80.0, 0.0, 1.0))
+        w_dry, _ = pipe._bucket_update(**_bucket_args(pipe, 80.0, 0.0, 0.2))
+        w_wet, _ = pipe._bucket_update(**_bucket_args(pipe, 80.0, 0.0, 1.0))
         # Both lose water (no precip), but the low-beta surface loses less.
         assert jnp.all(w_dry > w_wet)
 
@@ -280,7 +294,8 @@ class TestDifferentiability:
             args = _bucket_args(pipe, 0.0, 0.0, None)
             args["w_land"] = w_land
             args["beta_land"] = beta
-            return jnp.mean(pipe._bucket_update(**args))
+            w_new, _ = pipe._bucket_update(**args)
+            return jnp.mean(w_new)
 
         g = jax.grad(_w_next_mean)(jnp.full(SHAPE_2D, 70.0))
         assert jnp.all(jnp.isfinite(g))
@@ -342,7 +357,9 @@ class TestCompiledStepIntegration:
 
         pipe = _bucket_step_pipeline()
         w0 = jnp.full(SHAPE_2D, 30.0)   # fairly dry bucket
-        phys_out, _, _ = _run(pipe, w0)
+        # step_unified returns (physics_out, new_held, T_land, land_ml) since the
+        # multilayer-land refactor (#650); land_ml is None here.
+        phys_out, _, _, _ = _run(pipe, w0)
 
         assert phys_out.w_land is not None
         assert phys_out.w_land.shape == w0.shape
@@ -354,6 +371,70 @@ class TestCompiledStepIntegration:
         # saturated surface (bucket off): proves beta is wired into the step.
         pipe_off = _bucket_step_pipeline()
         pipe_off.land_soil_bucket = False
-        out_off, _, _ = _run(pipe_off, None)
+        out_off, _, _, _ = _run(pipe_off, None)
         assert out_off.w_land is None
         assert not jnp.allclose(phys_out.dq_v_dt, out_off.dq_v_dt)
+
+
+def test_land_stomatal_beta_allowed_with_multilayer_land():
+    """land_stomatal_beta needs the slab bucket ONLY when the slab land is active.
+    use_multilayer_land supplies the root-zone moisture availability from the
+    Richards column instead (#715 threads the stomata into MultiLayerLandConfig),
+    so validate_strict must WAIVE the bucket requirement — else the SOTA multilayer
+    + stomata AMIP config (config/amip/amip_sota.yaml) fails validation."""
+    # multilayer + stomata, no slab bucket => the bucket rule must NOT fire
+    ml = ExperimentConfig(use_multilayer_land=True, land_stomatal_beta=True,
+                          land_soil_bucket=False)
+    try:
+        ml.validate_strict()
+        waived = True
+    except ValueError as exc:
+        waived = "land_stomatal_beta=True requires land_soil_bucket" not in str(exc)
+    assert waived, "multilayer land must waive the slab-bucket requirement for stomata"
+
+    # slab land + stomata + no bucket => the rule STILL fires (guard not weakened)
+    slab = ExperimentConfig(use_multilayer_land=False, land_stomatal_beta=True,
+                            land_soil_bucket=False)
+    try:
+        slab.validate_strict()
+        fired = False
+    except ValueError as exc:
+        fired = "land_stomatal_beta=True requires land_soil_bucket" in str(exc)
+    assert fired, "slab land must still require the bucket for stomata"
+
+
+def test_surface_tiled_allowed_with_multilayer_land_no_mask():
+    """surface_tiled needs an active land tile; use_multilayer_land IS one (its land
+    fraction comes from --topography elevation-derived f_land when no mask is given),
+    so validate_strict must accept surface_tiled + multilayer WITHOUT a land-mask
+    file or slab activation — else the SOTA config (config/amip/amip_sota.yaml) could
+    only run with a redundant explicit mask."""
+    # multilayer + tiled + REAL topography (gaussian -> f_land>0), no mask, no slab
+    # => validates cleanly (NOT rejected by the active-tile rule NOR the flat guard).
+    ml = ExperimentConfig(surface_tiled=True, turbulence="louis",
+                          use_multilayer_land=True, slab_land_active=False,
+                          land_mask_path="", topography="gaussian")
+    ml.validate_strict()  # raises if the mask-free multilayer combo is rejected
+
+    # multilayer + tiled + FLAT topography + no mask => f_land==0 everywhere, so the
+    # flat guard must reject it (a real land tile was requested but there is no land).
+    flat = ExperimentConfig(surface_tiled=True, turbulence="louis",
+                            use_multilayer_land=True, slab_land_active=False,
+                            land_mask_path="", topography="flat")
+    try:
+        flat.validate_strict()
+        flat_fired = False
+    except ValueError as exc:
+        flat_fired = "topography='flat'" in str(exc)
+    assert flat_fired, "multilayer + tiled + flat topo + no mask must be rejected"
+
+    # tiled + no land tile at all (no slab, no mask, no multilayer) => STILL fires
+    none_tile = ExperimentConfig(surface_tiled=True, turbulence="louis",
+                                 use_multilayer_land=False, slab_land_active=False,
+                                 land_mask_path="")
+    try:
+        none_tile.validate_strict()
+        fired = False
+    except ValueError as exc:
+        fired = "surface_tiled=True requires an active land tile" in str(exc)
+    assert fired, "tiled surface with NO land tile must still be rejected"

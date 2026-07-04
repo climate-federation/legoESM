@@ -164,6 +164,202 @@ class TestVerticalInterp:
         ))(jnp.float64(95000.0))
         assert jnp.isfinite(grad)
 
+    # ---- numerical contract (the shape/constant-field tests above are vacuous:
+    # a constant field hides bracketing / log-p / axis / extrapolation bugs) ----
+
+    _PLEV = jnp.array([5000., 10000., 25000., 50000., 85000., 100000.])  # ascending Pa
+
+    def test_logp_linear_field_is_exact_interior(self):
+        """A field linear in log-p, f = a + b·ln(p), must be reproduced EXACTLY by
+        log-p interpolation at interior targets (catches linear-in-p, wrong bracket,
+        or axis bugs that a constant field would not)."""
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+        a, b = 280.0, -8.0
+        f = (a + b * jnp.log(self._PLEV))[None, :]
+        p_s = jnp.array([100000.])
+        sigma = jnp.array([0.1, 0.3, 0.6, 0.85, 0.99])     # p_target strictly in-range
+        out = np.asarray(interp_pressure_to_sigma(f, self._PLEV, p_s, sigma))[0]
+        p_t = np.asarray(sigma) * 1.0e5
+        np.testing.assert_allclose(out, a + b * np.log(p_t), rtol=1e-4)
+
+    def test_reproduces_values_at_source_levels(self):
+        """Target pressure exactly on a source level returns that level's value."""
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+        f = jnp.array([[200., 210., 230., 250., 270., 285.]])
+        p_s = jnp.array([100000.])
+        sigma = self._PLEV / 1.0e5                          # p_target == plev exactly
+        out = np.asarray(interp_pressure_to_sigma(f, self._PLEV, p_s, sigma))[0]
+        np.testing.assert_allclose(out, np.asarray(f)[0], rtol=1e-5)
+
+    def test_hold_constant_above_model_top(self):
+        """p_target below the lowest source level (above model top) holds f[0]."""
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+        f = jnp.array([[200., 210., 230., 250., 270., 285.]])
+        out = interp_pressure_to_sigma(
+            f, self._PLEV, jnp.array([100000.]), jnp.array([0.01]))   # p=1000 < 5000
+        assert float(out[0, 0]) == pytest.approx(200.0, abs=1e-5)
+
+    def test_hold_constant_below_surface(self):
+        """p_target above the highest source level (below surface) holds f[-1]."""
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+        f = jnp.array([[200., 210., 230., 250., 270., 285.]])
+        out = interp_pressure_to_sigma(
+            f, self._PLEV, jnp.array([110000.]), jnp.array([1.0]))    # p=110000 > 100000
+        assert float(out[0, 0]) == pytest.approx(285.0, abs=1e-5)
+
+    def test_per_column_surface_pressure_vectorized(self):
+        """Different p_s AND a different source profile per column: catches BOTH a
+        take_along_axis target-pressure broadcast bug AND a source-field
+        column-mixing bug (each column must use its OWN p_s and its OWN profile)."""
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+        coeffs = ((280.0, -8.0), (300.0, -12.0))     # distinct (a,b) per column
+        f = jnp.stack([a + b * jnp.log(self._PLEV) for a, b in coeffs])  # (2, 6), rows differ
+        p_s = jnp.array([100000., 60000.])           # column 1 surface = 600 hPa
+        sigma = jnp.array([0.5, 0.9])
+        out = np.asarray(interp_pressure_to_sigma(f, self._PLEV, p_s, sigma))
+        # each column's targets are sigma * its OWN p_s, all interior → exact log-p
+        # of THAT column's profile (a column-mix would pull the other (a,b)).
+        for c, ((a, b), ps) in enumerate(zip(coeffs, (100000.0, 60000.0))):
+            p_t = np.asarray(sigma) * ps
+            np.testing.assert_allclose(out[c], a + b * np.log(p_t), rtol=1e-4)
+
+    def test_monotone_field_no_overshoot(self):
+        """Interpolated values stay within the bracketing source values (the clamp
+        on alpha forbids overshoot)."""
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+        f = jnp.array([[200., 210., 230., 250., 270., 285.]])   # increasing with p
+        p_s = jnp.array([100000.])
+        sigma = jnp.linspace(0.02, 1.05, 40)                    # spans both extrapolations
+        out = np.asarray(interp_pressure_to_sigma(f, self._PLEV, p_s, sigma))[0]
+        assert out.min() >= 200.0 - 1e-4 and out.max() <= 285.0 + 1e-4
+
+    def test_gradient_wrt_field_nonconstant(self):
+        """Gradient flows through the (non-constant) source field with the EXACT
+        LOG-P weights: an interior target depends ONLY on its two bracketing levels,
+        and d/df equals the log-pressure interpolation weight (a linear-in-PRESSURE
+        interpolator with the same bracket would give a DIFFERENT, wrong weight)."""
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+        f0 = jnp.array([[200., 210., 230., 250., 270., 285.]])
+        p_s = jnp.array([100000.])
+        sigma = jnp.array([0.6])                 # p_t=60000 ∈ (50000, 85000) → levels 3,4
+        g = jax.grad(lambda f: interp_pressure_to_sigma(
+            f, self._PLEV, p_s, sigma).sum())(f0)
+        g = np.asarray(g)[0]
+        # exact log-p weight on the UPPER bracket level (index 4 @ 85000 Pa):
+        alpha = (np.log(60000.0) - np.log(50000.0)) / (np.log(85000.0) - np.log(50000.0))
+        # distinct from the linear-in-pressure weight 10000/35000≈0.286 → this asserts log-p.
+        assert abs(alpha - 10000.0 / 35000.0) > 0.05
+        np.testing.assert_allclose(g[4], alpha, rtol=1e-4)        # d/df[4] = alpha (log-p)
+        np.testing.assert_allclose(g[3], 1.0 - alpha, rtol=1e-4)  # d/df[3] = 1-alpha
+        assert np.allclose(g[[0, 1, 2, 5]], 0.0)                  # non-bracket levels unused
+
+    def test_hybrid_p_full_overrides_pure_sigma_target(self):
+        """The explicit ``p_full`` (iter-339) must land the field on the MODEL's HYBRID
+        full-level pressures (``A·p_ref + B·p_s``), NOT pure-sigma ``σ·p_s`` — else a
+        hybrid model's ERA5 reference is interpolated to the wrong levels and every
+        bias is silently off.  A field linear in log-p is reproduced at ``p_full``'s
+        pressures, which DIFFER from ``σ·p_s`` here (so ``p_full`` must actually be used)."""
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+        a, b = 280.0, -8.0
+        f = (a + b * jnp.log(self._PLEV))[None, :]
+        p_s = jnp.array([100000.])
+        sigma = jnp.array([0.3, 0.6, 0.85])             # σ·p_s = [30000, 60000, 85000]
+        p_full = jnp.array([[40000., 55000., 80000.]])  # hybrid levels, interior, ≠ σ·p_s
+        out = np.asarray(
+            interp_pressure_to_sigma(f, self._PLEV, p_s, sigma, p_full=p_full))[0]
+        # Lands on p_full (reproducing the log-p-linear field at the HYBRID pressures).
+        np.testing.assert_allclose(out, a + b * np.log(np.asarray(p_full)[0]), rtol=1e-4)
+        # And is DISTINCT from the pure-sigma result (proves p_full is honoured, not ignored).
+        pure = np.asarray(interp_pressure_to_sigma(f, self._PLEV, p_s, sigma))[0]
+        assert not np.allclose(out, pure)
+
+    def test_p_full_overrides_pure_sigma_target_for_hybrid(self):
+        """``p_full`` interpolates to the model's TRUE full-level pressures (e.g. a HYBRID
+        coordinate's ``A·p_ref + B·p_s``) instead of pure-sigma ``sigma·p_s`` (iter 339,
+        completing the iter-337/338 fix so the ERA5 reference lands on the model's actual
+        levels).  Over terrain (p_s != p_ref) the targets differ ⇒ the interpolated field
+        differs; passing ``p_full == sigma·p_s`` reproduces the default EXACTLY."""
+        from legoesm.grids.vertical import make_hybrid_levels
+        from legoesm.training.vertical_interp import interp_pressure_to_sigma
+
+        f = jnp.array([[200., 210., 230., 250., 270., 285.]])     # T(p), increasing with p
+        p_s = jnp.array([70000.0])                               # terrain (p_s != p_ref ~1e5)
+        hc = make_hybrid_levels(6, p_top_Pa=100.0)
+        sigma_f = jnp.asarray(hc.sigma_full)
+        pure = interp_pressure_to_sigma(f, self._PLEV, p_s, sigma_f)
+        hybrid = interp_pressure_to_sigma(
+            f, self._PLEV, p_s, sigma_f, p_full=hc.pressure_at_full(p_s))
+        assert float(jnp.max(jnp.abs(hybrid - pure))) > 1.0       # the level pressures differ
+        # passing the pure-sigma target explicitly reproduces the default (byte-identical).
+        same = interp_pressure_to_sigma(
+            f, self._PLEV, p_s, sigma_f, p_full=p_s[:, None] * sigma_f)
+        np.testing.assert_allclose(np.asarray(same), np.asarray(pure), rtol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# 1b. era5 horizontal regrid — latitude ordering (no N/S hemisphere flip)
+# ---------------------------------------------------------------------------
+
+class TestEra5HorizontalRegrid:
+    """ERA5 stores latitude 90→-90 DESCENDING.  The regrid feeds that descending
+    axis straight into ``scipy.interpolate.RegularGridInterpolator``, which requires
+    a strictly-MONOTONIC axis (modern scipy accepts descending; older scipy raises).
+    The silent-catastrophe failure mode is a hemisphere FLIP — model-North paired
+    with ERA5-South — which makes every column bias compare the wrong latitude.
+    Using ``field == latitude`` (a linear field that linear interp reproduces
+    EXACTLY) catches a flip decisively: a correct regrid returns each target lat's
+    own value; a flip returns its negation."""
+
+    class _Grid:
+        def __init__(self, lat, lon):
+            self.lat = lat
+            self.lon = lon
+
+    def test_regrid_2d_to_gaussian_preserves_hemisphere(self):
+        from legoesm.training.era5_to_state import regrid_2d_to_gaussian
+
+        era5_lat = np.deg2rad(np.linspace(90.0, -90.0, 19))      # DESCENDING (ERA5)
+        era5_lon = np.deg2rad(np.linspace(0.0, 360.0, 24, endpoint=False))
+        field = np.broadcast_to(era5_lat[:, None], (19, 24)).astype(np.float64)  # f = lat
+        # Target Gaussian grid: ASCENDING interior latitudes (no extrapolation).
+        gauss_lat = np.deg2rad(np.array([-60.0, -20.0, 0.0, 30.0, 75.0]))
+        gauss_lon = np.deg2rad(np.array([10.0, 100.0, 250.0]))
+        out = np.asarray(regrid_2d_to_gaussian(
+            field, era5_lat, era5_lon, self._Grid(gauss_lat, gauss_lon)))
+        # f == lat ⇒ regridded value at each target lat is THAT lat (exact for a
+        # linear field), identical across lon.  A hemisphere flip would yield
+        # -gauss_lat instead (e.g. +75° → -75°) — caught by the sign + value.
+        for i, gl in enumerate(gauss_lat):
+            np.testing.assert_allclose(out[i, :], gl, atol=1e-5)
+        assert np.all(np.diff(out[:, 0]) > 0)                    # increases N-ward, not flipped
+
+    def test_regrid_latlon_to_gaussian_preserves_hemisphere(self):
+        # The 3D production path (T/u/v/q) uses the SAME descending-lat interp.
+        from legoesm.training.era5_to_state import (
+            ERA5Slice,
+            regrid_latlon_to_gaussian,
+        )
+
+        nlat, nlon, nlev = 19, 24, 3
+        era5_lat = np.deg2rad(np.linspace(90.0, -90.0, nlat))    # DESCENDING
+        era5_lon = np.deg2rad(np.linspace(0.0, 360.0, nlon, endpoint=False))
+        lat_field = np.broadcast_to(
+            era5_lat[:, None, None], (nlat, nlon, nlev)).astype(np.float64)  # f = lat
+        ps = np.broadcast_to(era5_lat[:, None], (nlat, nlon)).astype(np.float64)
+        era5 = ERA5Slice(
+            T=lat_field, u=lat_field, v=lat_field, q=lat_field, p_s=ps,
+            sst=ps, phis=ps, lat=era5_lat, lon=era5_lon,
+            plev_Pa=np.linspace(5000.0, 100000.0, nlev))
+        gauss_lat = np.deg2rad(np.array([-50.0, 0.0, 65.0]))
+        gauss_lon = np.deg2rad(np.array([30.0, 200.0]))
+        t_g, _u, _v, _q, ps_g = regrid_latlon_to_gaussian(
+            era5, self._Grid(gauss_lat, gauss_lon))
+        t_g = np.asarray(t_g)
+        # Each regridded level reproduces the target latitude (no flip), and p_s too.
+        for i, gl in enumerate(gauss_lat):
+            np.testing.assert_allclose(t_g[i, :, :], gl, atol=1e-5)
+            np.testing.assert_allclose(np.asarray(ps_g)[i, :], gl, atol=1e-5)
+
 
 # ---------------------------------------------------------------------------
 # 2. losses
@@ -369,9 +565,18 @@ class TestERA5ToState:
 
     def test_weight_cache(self):
         from legoesm.training.era5_to_state import _get_cs_weights
-        w1 = _get_cs_weights(100, _GRID)
-        w2 = _get_cs_weights(100, _GRID)
-        assert w1 is w2  # same object from cache
+        # New 3-arg API: weights built from the ACTUAL source lat/lon (radians).
+        src_lat = np.linspace(np.pi / 2, -np.pi / 2, 18)
+        src_lon = np.linspace(0.0, 2 * np.pi, 36, endpoint=False)
+        w1 = _get_cs_weights(src_lat, src_lon, _GRID)
+        w2 = _get_cs_weights(src_lat, src_lon, _GRID)
+        assert w1 is w2  # same object from content-fingerprinted cache
+        # A source grid with the SAME shape+endpoints but different INTERIOR
+        # spacing must NOT collide on the cache (the proxy-bug failure mode).
+        src_lat_stretched = np.linspace(np.pi / 2, -np.pi / 2, 18)
+        src_lat_stretched[1:-1] *= 0.5   # perturb interior, keep endpoints
+        w3 = _get_cs_weights(src_lat_stretched, src_lon, _GRID)
+        assert w3 is not w1
 
     def test_era5_to_cubedsphere_carry_shapes_and_finite(self):
         """era5_to_cubedsphere_carry produces carry with correct shapes
@@ -515,6 +720,168 @@ class TestERA5ToState:
         assert float(jnp.min(dp)) >= -1.0, (
             f"Negative layer thickness dp_min={float(jnp.min(dp)):.2f} Pa after p_s floor"
         )
+
+    def test_era5_to_mpas_carry_phis_smoothing(self):
+        """The MPAS carry smooths raw ERA5 phis on the Voronoi mesh (default
+        passes=4), reducing cell-to-cell terrain gradients vs no smoothing,
+        applies the barometric p_s correction, and stays finite.  Regression
+        for the MPAS ERA5-IC wind-runaway blowup caused by unsmoothed phis."""
+        import jax.numpy as jnp
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.grids.vertical import standard_hybrid_levels
+        from legoesm.training.era5_to_state import ERA5Slice, era5_to_mpas_carry
+
+        mesh = create_voronoi_mesh(2)          # ~162 cells, cheap
+        sigma = standard_hybrid_levels(10)
+
+        n_lat, n_lon, n_plev = 24, 48, 5
+        rng = np.random.default_rng(11)
+        plev_Pa = np.array(
+            [5000.0, 15000.0, 30000.0, 55000.0, 100000.0], dtype=np.float64
+        )
+        T_ll = (250.0 + rng.random((n_lat, n_lon, n_plev)) * 40.0).astype(np.float32)
+        u_ll = (rng.random((n_lat, n_lon, n_plev)) * 20.0).astype(np.float32)
+        v_ll = (rng.random((n_lat, n_lon, n_plev)) * 20.0).astype(np.float32)
+        q_ll = (rng.random((n_lat, n_lon, n_plev)) * 0.005).astype(np.float32)
+
+        # Steep, noisy Tibet-like massif in the northern third (grid-scale
+        # roughness is what the smoother must reduce).
+        phis = np.zeros((n_lat, n_lon), dtype=np.float32)
+        massif = slice(n_lat // 6, n_lat // 3)
+        phis[massif, :] = (
+            45000.0 + rng.random((massif.stop - massif.start, n_lon)) * 15000.0
+        ).astype(np.float32)
+        p_s = np.where(phis > 0, 56000.0, 101325.0).astype(np.float32)
+
+        era5 = ERA5Slice(
+            T=T_ll, u=u_ll, v=v_ll, q=q_ll,
+            p_s=p_s, sst=np.full((n_lat, n_lon), 285.0, dtype=np.float32),
+            phis=phis,
+            lat=np.linspace(-np.pi / 2, np.pi / 2, n_lat),
+            lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
+            plev_Pa=plev_Pa,
+        )
+
+        carry_smooth = era5_to_mpas_carry(era5, mesh, sigma, smoothing_passes=4)
+        carry_raw = era5_to_mpas_carry(era5, mesh, sigma, smoothing_passes=0)
+
+        # Finite + physical
+        for name, arr in (("T", carry_smooth.T), ("u", carry_smooth.u),
+                          ("p_s", carry_smooth.p_s), ("phis", carry_smooth.phis)):
+            assert jnp.all(jnp.isfinite(arr)), f"{name} non-finite with smoothing"
+        assert jnp.all(carry_smooth.p_s > 0), "p_s non-positive after correction"
+
+        # Max cell-to-cell phis gradient must drop with smoothing.
+        def _max_neighbor_grad(field):
+            f = np.asarray(field)
+            coc = np.asarray(mesh.cellsOnCell)
+            valid = coc >= 0
+            idx = np.where(valid, coc, 0)
+            diff = np.where(valid, np.abs(f[idx] - f[None, :]), 0.0)
+            return float(diff.max())
+
+        g_raw = _max_neighbor_grad(carry_raw.phis)
+        g_smooth = _max_neighbor_grad(carry_smooth.phis)
+        assert g_smooth < g_raw, (
+            f"smoothing did not reduce phis gradient: raw={g_raw:.1f} "
+            f"smooth={g_smooth:.1f} m^2/s^2"
+        )
+
+        # Barometric p_s correction changed p_s relative to the unsmoothed carry.
+        assert not np.allclose(
+            np.asarray(carry_smooth.p_s), np.asarray(carry_raw.p_s)
+        ), "barometric p_s correction had no effect"
+
+    def test_era5_to_cubedsphere_carry_converts_q_to_mixing_ratio(self):
+        """Cross-grid parity with the latlon carry's q→mixing-ratio lock
+        (``test_era5_load_regrid_to_reference_column_state_integration``): the
+        cubed-sphere carry must ALSO convert ERA5 SPECIFIC humidity to MIXING ratio
+        ``r = q/(1−q)`` (each ``era5_to_*_carry`` applies it independently, line 559;
+        a refactor dropping it from THIS carry would silently leave the reference q as
+        specific humidity — a moisture bias on every cubed-sphere run).  A CONSTANT
+        ``q`` makes the test robust to the (nonlinear) convert-vs-regrid order: both
+        give ``r`` for a uniform field."""
+        import jax.numpy as jnp
+        from legoesm.thermo import specific_humidity_to_mixing_ratio
+        from legoesm.training.era5_to_state import ERA5Slice, era5_to_cubedsphere_carry
+
+        n_lat, n_lon, n_plev = 18, 36, 4
+        q0 = 5e-3
+
+        def const(v):
+            return np.full((n_lat, n_lon, n_plev), v, dtype=np.float32)
+
+        era5 = ERA5Slice(
+            T=const(280.0), u=const(5.0), v=const(0.0), q=const(q0),
+            p_s=np.full((n_lat, n_lon), 101325.0, dtype=np.float32),
+            sst=np.full((n_lat, n_lon), 290.0, dtype=np.float32),
+            phis=np.zeros((n_lat, n_lon), dtype=np.float32),
+            lat=np.linspace(-np.pi / 2, np.pi / 2, n_lat),
+            lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
+            plev_Pa=np.array([5000.0, 25000.0, 50000.0, 100000.0], dtype=np.float64))
+        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA)
+        expected_r = float(specific_humidity_to_mixing_ratio(jnp.asarray(q0)))
+        # The uniform specific humidity becomes the (larger) MIXING ratio everywhere.
+        np.testing.assert_allclose(np.asarray(carry.q_v), expected_r, rtol=2e-3)
+        assert expected_r > q0          # mixing ratio strictly exceeds specific humidity
+
+    def test_era5_to_spectral_carry_converts_q_to_mixing_ratio(self):
+        """The LAST carry to reach q→mixing-ratio parity (after latlon/MPAS/cubed-
+        sphere): the SPECTRAL carry must ALSO convert ERA5 SPECIFIC humidity to MIXING
+        ratio ``r = q/(1−q)`` (line 462) — previously only its dispatch NAME was
+        tested.  ``carry.q_v`` is the grid-space tracer (a constant field is invariant
+        under the latlon→Gaussian regrid, so it equals ``r`` everywhere)."""
+        import jax.numpy as jnp
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.thermo import specific_humidity_to_mixing_ratio
+        from legoesm.training.era5_to_state import ERA5Slice, era5_to_spectral_carry
+
+        n_lat, n_lon, n_plev = 18, 36, 4
+        q0 = 5e-3
+
+        def const(v):
+            return np.full((n_lat, n_lon, n_plev), v, dtype=np.float32)
+
+        era5 = ERA5Slice(
+            T=const(280.0), u=const(5.0), v=const(0.0), q=const(q0),
+            p_s=np.full((n_lat, n_lon), 101325.0, dtype=np.float32),
+            sst=np.full((n_lat, n_lon), 290.0, dtype=np.float32),
+            phis=np.zeros((n_lat, n_lon), dtype=np.float32),
+            lat=np.linspace(np.pi / 2, -np.pi / 2, n_lat),   # descending (ERA5 convention)
+            lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
+            plev_Pa=np.array([5000.0, 25000.0, 50000.0, 100000.0], dtype=np.float64))
+        carry = era5_to_spectral_carry(
+            era5, create_gaussian_grid(8), create_sigma_coordinate(5))
+        expected_r = float(specific_humidity_to_mixing_ratio(jnp.asarray(q0)))
+        np.testing.assert_allclose(np.asarray(carry.q_v), expected_r, rtol=2e-3)
+        assert expected_r > q0          # mixing ratio strictly exceeds specific humidity
+
+    def test_era5_to_cubedsphere_carry_regrids_phis_into_the_state(self):
+        """``era5_to_*_carry`` builds a FULL reference state — used both as the compare
+        target AND to INITIALISE a model from ERA5, where the surface geopotential
+        ``phis`` (topography ``g·z_s``) matters.  T/q/u have their regridded VALUES
+        asserted; ``phis`` (regridded by the same IDW ``regrid_scalar``) only had its
+        shape checked.  A CONSTANT ERA5 ``phis`` is invariant under the IDW regrid
+        (weights sum to 1), so ``carry.phis`` equals it everywhere — a dropped or
+        zeroed phis regrid is caught."""
+        from legoesm.training.era5_to_state import ERA5Slice, era5_to_cubedsphere_carry
+
+        n_lat, n_lon, n_plev = 18, 36, 4
+        phis0 = 2000.0          # surface geopotential g·z_s [m²/s²]
+
+        def const(v):
+            return np.full((n_lat, n_lon, n_plev), v, dtype=np.float32)
+
+        era5 = ERA5Slice(
+            T=const(280.0), u=const(5.0), v=const(0.0), q=const(5e-3),
+            p_s=np.full((n_lat, n_lon), 101325.0, dtype=np.float32),
+            sst=np.full((n_lat, n_lon), 290.0, dtype=np.float32),
+            phis=np.full((n_lat, n_lon), phis0, dtype=np.float32),
+            lat=np.linspace(np.pi / 2, -np.pi / 2, n_lat),
+            lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
+            plev_Pa=np.array([5000.0, 25000.0, 50000.0, 100000.0], dtype=np.float64))
+        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA)
+        np.testing.assert_allclose(np.asarray(carry.phis), phis0, rtol=1e-4)
 
 
 # ---------------------------------------------------------------------------

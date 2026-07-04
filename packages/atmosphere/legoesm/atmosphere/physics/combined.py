@@ -250,6 +250,22 @@ def _aerosol_ccn_active(config: PhysicsConfig) -> bool:
     )
 
 
+def _aerosol_activation_config(config: PhysicsConfig):
+    """The selected microphysics scheme's ``ActivationConfig`` (or None).
+
+    Threaded into the radiation factory alongside ``nc_from_aerosol`` so the
+    radiation cloud-optics droplet number runs the SAME proxy|arg activation
+    dispatch as the microphysics N_c fill — one droplet number per step for
+    both indirect effects.  None (schemes without the field / default) keeps
+    the radiation fill on the default proxy, byte-identical to before.
+    """
+    if not _aerosol_ccn_active(config):
+        return None
+    mc = config.microphysics
+    sc = getattr(mc, getattr(mc, "scheme", "none"), None)
+    return getattr(sc, "activation", None)
+
+
 def _attach_lifecycle_hooks(physics_fn, tagged_fns):
     """Attach reset_state / set_time / set_T_sfc_override propagation hooks.
 
@@ -307,11 +323,13 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     # cloud-optics droplet number (Twomey r_eff) matches the microphysics
     # fill.  False (default) keeps both paths byte-identical.
     _nc_from_aerosol = _aerosol_ccn_active(config)
+    _activation_cfg = _aerosol_activation_config(config)
     if config.radiation.scheme != "none":
         tagged_fns.append((
             make_radiation_physics(
                 config.radiation, model_type, column_mesh=column_mesh,
                 nc_from_aerosol=_nc_from_aerosol,
+                activation_config=_activation_cfg,
             ),
             False,
             None,
@@ -488,13 +506,16 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 zt = _zero_tendencies(state, has_v)
                 dT = zt.dT_dt.data
                 if cached_rad is not None:
-                    dT = dT + cached_rad
+                    # cached_rad is column-shaped (ncol, nlev); restore the
+                    # native layout to add to the native tendency data.
+                    dT = dT + cached_rad.reshape(dT.shape)
                 return zt._replace(dT_dt=zt.dT_dt.replace(data=dT)), phys_state
             (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
              combined_tracer_tends, phys_updates, first) = _accumulate(
                 _non_rad_fns, state, grid, sigma_coord, phys_state, forcing)
             if cached_rad is not None:
-                dT_dt = dT_dt + cached_rad
+                # cached_rad is column-shaped (ncol, nlev); restore native layout.
+                dT_dt = dT_dt + cached_rad.reshape(dT_dt.shape)
             combined = _build_combined(
                 first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
                 combined_tracer_tends)
@@ -512,7 +533,17 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         # steps.  Radiation is tagged_fns[0], so ``first.dT_dt`` is exactly
         # its contribution before any other module is summed.
         if _has_rad and phys_state is not None:
-            phys_updates["rad_heating"] = first.dT_dt.data
+            # PhysicsState carries are COLUMN-shaped (ncol, nlev) — that is how
+            # init_physics_state seeds rad_heating (and every other carry).  The
+            # radiation tendency Field data is in the model's NATIVE layout: 2D
+            # (ncol, nlev) for MPAS but 4D (face, x, y, nlev) for hydrostatic/SCM.
+            # Storing the native array would flip the lax.scan carry shape
+            # 2D->4D after step 0 (the SCM/hydrostatic radiation-substep bug);
+            # flatten the horizontal axes to the canonical column shape so the
+            # carry type is stable for ALL models (no-op for MPAS).  The held
+            # consumers below reshape it back to native before adding.
+            _rad = first.dT_dt.data
+            phys_updates["rad_heating"] = _rad.reshape(-1, _rad.shape[-1])
         combined = _build_combined(
             first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
             combined_tracer_tends)

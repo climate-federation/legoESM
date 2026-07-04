@@ -74,11 +74,20 @@ def gather_state_atm_latlon(
     """Inverse of :func:`shard_state_atm_latlon`: replicate every leaf and
     rebuild the full ``(n_lat+1, ...)`` ``v`` by re-appending the zero north
     pole-wall face. Bit-comparable to the single-device state (whose top v-face
-    is the pole wall == 0)."""
+    is the pole wall == 0).
+
+    Multi-controller (route-B ``jax.distributed``, mesh spanning processes):
+    replication routes through a jit-compiled identity instead of
+    ``device_put`` (see :func:`legoesm.parallel.latlon_spmd.replicate_leaf`,
+    the primitive shared with the ocean gather); the single-process path is
+    byte-unchanged."""
+    from legoesm.parallel.latlon_spmd import replicate_leaf
+
     rep = NamedSharding(mesh, P())
+    _mp = jax.process_count() > 1
 
     def _get(arr):
-        return jax.device_put(arr, rep)
+        return replicate_leaf(arr, rep, multiprocess=_mp)
 
     v_lower = _get(state.v)
     v_full = jnp.concatenate([v_lower, jnp.zeros_like(v_lower[:1])], axis=0)
@@ -309,14 +318,19 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
     _cache = {}
 
     def sharded_step(c_state, dt):
-        fn = _cache.get("fn")
+        # Cache key = the state's pytree STRUCTURE: in_specs/out_specs derive
+        # from it, so a structure change (optional field None <-> Field) must
+        # rebuild the shard_map rather than reuse stale specs (codex finding,
+        # ocean-twin parity).
+        key = jax.tree.structure(c_state)
+        fn = _cache.get(key)
         if fn is None:
             in_spec = jax.tree.map(_lat_spec, c_state)
             stacks_spec = jax.tree.map(lambda _x: P(), stacks)  # all replicated
             fn = jax.jit(shard_map(
                 _body, mesh=mesh, in_specs=(in_spec, stacks_spec, P()),
                 out_specs=in_spec, check_vma=False))
-            _cache["fn"] = fn
+            _cache[key] = fn
         # Arm the SPMD band halo around the call ONLY; save+restore the FULL
         # backend state (a later serial/full-domain call must not take SPMD-only
         # branches outside a shard_map). The first call traces (baking the band

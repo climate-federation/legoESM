@@ -34,6 +34,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.core.field import Field
 from legoesm.parallel.metal import place_spectral_grid
@@ -114,6 +115,113 @@ class SpectralHydrostaticState(NamedTuple):
     lnps_hat: Field   # Spectral log(surface pressure) [-]
     phis_hat: Field   # Spectral surface geopotential [m^2/s^2] (static)
     tracers: dict | None = None  # name → grid-space Field (n_lat, n_lon, nlev)
+
+
+_SPECTRAL_COEFF_NAMES = ("vor_hat", "div_hat", "T_hat", "lnps_hat", "phis_hat")
+
+
+def reconstruct_spectral_state_from_npz(d, *, template: SpectralHydrostaticState | None = None):
+    """Rebuild a :class:`SpectralHydrostaticState` + ``(step, day)`` from a saved
+    spectral checkpoint dict ``d`` (the keys ``ModelDriver.save_checkpoint`` writes
+    for a ``discretization='spectral'`` run: the five ``*_hat`` complex coefficient
+    arrays + ``spectral_layout`` marker + ``step``/``day`` + optional grid-space
+    ``tracer_names``/``trc_*``).
+
+    Single canonical reconstruction used by BOTH the in-driver restart
+    (``ModelDriver._load_checkpoint``, ``template=self.state`` → reuse the configured
+    Field metadata + VALIDATE shapes + refuse to silently drop water) AND the
+    standalone offline loader (``driver.restart.load_restart`` / the one-shot compare
+    CLI, ``template=None`` → plain ``Field``-wrapped coefficients, since the spectral
+    Fields carry no layout-specific metadata).  Raises if ``d`` is not a spectral
+    checkpoint (missing the ``spectral_layout`` marker).
+    """
+    keys = d.files if hasattr(d, "files") else d
+    if "spectral_layout" not in keys:
+        raise ValueError(
+            "reconstruct_spectral_state_from_npz: not a spectral checkpoint "
+            "(missing the 'spectral_layout' marker)."
+        )
+
+    def _load_coeff(arr_in):
+        """jnp.asarray with a LOUD x64 guard: complex128 coefficients silently
+        downcast to complex64 when JAX x64 is disabled — the spectral transforms
+        require x64 (Codex iter 92), so refuse rather than corrupt the restart."""
+        src = np.asarray(arr_in)
+        out = jnp.asarray(arr_in)
+        if np.iscomplexobj(src) and src.dtype == np.complex128 and \
+                out.dtype != jnp.complex128:
+            raise TypeError(
+                "spectral checkpoint is complex128 but JAX x64 is disabled — set "
+                "JAX_ENABLE_X64=1 (spectral transforms require it); refusing to "
+                "silently downcast the coefficients to complex64."
+            )
+        return out
+
+    fields = {}
+    for name in _SPECTRAL_COEFF_NAMES:
+        arr = _load_coeff(d[name])
+        if template is not None:
+            cur = getattr(template, name)
+            if arr.shape != cur.data.shape:
+                raise ValueError(
+                    f"spectral checkpoint {name} shape {tuple(arr.shape)} != "
+                    f"configured state {tuple(cur.data.shape)} (resolution/nlev "
+                    f"mismatch)."
+                )
+            fields[name] = cur.replace(data=arr)
+        else:
+            fields[name] = Field(arr)
+
+    # tracer_names may be a NumPy string OR byte-string array (dtype-dependent) —
+    # decode bytes so the trc_<name> lookup key is correct (Codex iter 92).
+    def _name(n):
+        return n.decode() if isinstance(n, bytes | np.bytes_) else str(n)
+
+    tracers = None
+    names = [_name(n) for n in d["tracer_names"]] if "tracer_names" in keys else None
+    if names is not None:
+        if template is not None:
+            if template.tracers is None:
+                raise ValueError(
+                    f"spectral checkpoint carries tracers {names} but the configured "
+                    "run has none — refusing to silently drop water."
+                )
+            if set(names) != set(template.tracers):
+                raise ValueError(
+                    f"spectral checkpoint tracers {sorted(names)} != configured "
+                    f"{sorted(template.tracers)} — refusing to add/drop a tracer "
+                    "across restart (a different run)."
+                )
+        tracers = {}
+        for k in names:
+            arr = _load_coeff(d[f"trc_{k}"])
+            if template is not None:
+                cur_t = template.tracers[k]
+                if arr.shape != cur_t.data.shape:
+                    raise ValueError(
+                        f"spectral checkpoint tracer {k} shape {tuple(arr.shape)} != "
+                        f"configured {tuple(cur_t.data.shape)} (resolution/nlev "
+                        "mismatch)."
+                    )
+                tracers[k] = cur_t.replace(data=arr)
+            else:
+                tracers[k] = Field(arr)
+    elif template is not None and template.tracers is not None:
+        # The checkpoint carries NO tracers but the configured run is moist — a
+        # bit-exact spectral save always writes tracer_names for a moist run, so
+        # this is a dry-checkpoint-vs-moist-run mismatch; refuse to invent water
+        # (the symmetric guard to the drop-water raise above) (Codex iter 92).
+        raise ValueError(
+            f"spectral checkpoint carries NO tracers but the configured run has "
+            f"{sorted(template.tracers)} — refusing to silently invent water "
+            "(a different run)."
+        )
+
+    state = (
+        template._replace(tracers=tracers, **fields) if template is not None
+        else SpectralHydrostaticState(tracers=tracers, **fields)
+    )
+    return state, int(d["step"]), float(d["day"])
 
 
 class SpectralPEConfig(NamedTuple):

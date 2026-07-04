@@ -198,7 +198,20 @@ class TestCDGridConstruction(unittest.TestCase):
 
         Combined: (a-prime) + (b) preserves iter-505's bug-detection
         power while accommodating the iter-878+ era drift.
+
+        Requires JAX_ENABLE_X64=1: the machine-precision-zero polar
+        mass-rate invariant only holds in float64.  In float32 the
+        polar faces carry round-off at the equatorial scale and the
+        guard false-fails.  The module enables x64 at import, but a
+        full-suite run can toggle the global flag off before this
+        test executes, so re-check the runtime config here.
         """
+        if not jax.config.read("jax_enable_x64"):
+            self.skipTest(
+                "polar mass-rate machine-precision-zero invariant "
+                "requires JAX_ENABLE_X64=1; in float32 the polar faces "
+                "carry round-off at the equatorial scale."
+            )
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import (
@@ -3163,13 +3176,34 @@ class TestDgridToCgridAsymmetryIsIntentional(unittest.TestCase):
         return legoesm_source_path("grids/__init__.py").exists() and (
             legoesm_source_path("core/operators_cdgrid.py").read_text())
 
+    def _extract_op_with_core(self, src, name):
+        """Source of operator `name` UNION its pure-array `<name>_core`
+        helper when present.
+
+        The non-orthogonality asymmetry (``u_c = u_avg*sina_u -
+        v*cosa_u`` x-face projection vs ``v_c`` = plain average) was
+        extracted from the thin ``dgrid_to_cgrid`` / ``fv3_cc2c``
+        wrappers into ``dgrid_to_cgrid_core`` / ``fv3_cc2c_core`` (the
+        pure-array cores shared with the tiled per-tile kernels — no
+        dup numerics).  Probe BOTH so the intentional u/v asymmetry
+        stays locked wherever the formula physically lives.
+        """
+        import ast
+        defined = {n.name for n in ast.parse(src).body
+                   if isinstance(n, ast.FunctionDef)}
+        parts = [self._extract_function_source(src, name)]
+        core = f"{name}_core"
+        if core in defined:
+            parts.append(self._extract_function_source(src, core))
+        return "\n".join(parts)
+
     def test_dgrid_to_cgrid_u_has_correction_v_does_not(self):
         """`dgrid_to_cgrid`: `u_c =` line must contain BOTH `sina_u`
         AND `cosa_u`; `v_c =` line(s) must contain NEITHER `sina_v`
         NOR `cosa_v` (no non-orthogonality correction on v)."""
         src = self._read_operators_cdgrid()
         self.assertTrue(src, "Could not read operators_cdgrid.py")
-        func_src = self._extract_function_source(src, "dgrid_to_cgrid")
+        func_src = self._extract_op_with_core(src, "dgrid_to_cgrid")
 
         u_assign_lines = [ln for ln in func_src.splitlines()
                           if ln.strip().startswith("u_c =")]
@@ -3214,7 +3248,7 @@ class TestDgridToCgridAsymmetryIsIntentional(unittest.TestCase):
         """`fv3_cc2c`: same structural asymmetry as dgrid_to_cgrid —
         u_c uses the non-orthogonality correction, v_c does not."""
         src = self._read_operators_cdgrid()
-        func_src = self._extract_function_source(src, "fv3_cc2c")
+        func_src = self._extract_op_with_core(src, "fv3_cc2c")
 
         u_assign_lines = [ln for ln in func_src.splitlines()
                           if ln.strip().startswith("u_c =")]

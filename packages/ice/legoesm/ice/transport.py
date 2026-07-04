@@ -31,6 +31,7 @@ from legoesm.core.operators_fv_latlon import fv_flux_divergence_latlon
 from legoesm.core.operators_voronoi import (
     divergence_cell,
 )
+from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.grids.voronoi import VoronoiMesh
 
@@ -186,7 +187,11 @@ def _ppm_tendency_2d(
         return fv_flux_divergence_latlon(q, u, v, grid, limiter=True)
     if _is_voronoi_mesh(grid):
         return fv_flux_divergence_voronoi(q, u, v, grid)
-    return fv_flux_divergence(q, u, v, grid, limiter=True)
+    if isinstance(grid, CubedSphereGrid):
+        return fv_flux_divergence(q, u, v, grid, limiter=True)
+    raise TypeError(
+        f"unsupported grid {type(grid).__name__} for _ppm_tendency_2d"
+    )
 
 
 def _ppm_tendency_per_category(
@@ -210,6 +215,11 @@ def _ppm_tendency_per_category(
         def _kernel_v(qk):
             return fv_flux_divergence_voronoi(qk, u, v, grid)
         return jax.vmap(_kernel_v, in_axes=-1, out_axes=-1)(q_cat)
+    if not isinstance(grid, CubedSphereGrid):
+        raise TypeError(
+            f"unsupported grid {type(grid).__name__} for "
+            f"_ppm_tendency_per_category"
+        )
     u_3d = jnp.broadcast_to(u[..., None], q_cat.shape)
     v_3d = jnp.broadcast_to(v[..., None], q_cat.shape)
     return fv_flux_divergence_3d(q_cat, u_3d, v_3d, grid, limiter=True)

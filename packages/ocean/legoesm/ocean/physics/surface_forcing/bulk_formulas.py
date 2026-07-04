@@ -13,6 +13,52 @@ from legoesm.ocean.physics.surface_forcing.config import BulkFormulaConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
+__physics_contract__ = {
+    "summary": (
+        "COARE-like bulk air-sea flux surface forcing: turbulent (sensible + "
+        "latent) heat and wind stress from a prescribed near-surface "
+        "atmospheric state, applied as sources to the top ocean layer "
+        "(constant-Cd or MOST/COARE-3.0/Large-Yeager stability-dependent "
+        "exchange coefficients). Salinity tendency is identically 0 here: the "
+        "evaporative virtual-salt flux is applied via the dedicated freshwater "
+        "channel (not this module) to avoid double-counting."
+    ),
+    "inputs": {
+        "T": "degC (SST)", "S": "psu", "jacobian": "1 (z-star dimensionless)",
+        "cfg.U_a": "m/s", "cfg.T_a": "K", "cfg.q_a": "kg/kg",
+        "cfg.C_H": "1 (dimensionless exchange coeff)",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "degC/s",
+        "dS_dt": "psu/s (identically 0; salinity via the freshwater channel)",
+        "Q_net": "W/m^2", "tau_x": "N/m^2", "tau_y": "N/m^2",
+    },
+    "sign_convention": (
+        "Surface boundary fluxes deposited in the TOP layer only (sources/sinks, "
+        "NOT interior-conservative); Q_net > 0 warms the ocean "
+        "(dT/dt = Q_net/(rho_0*c_sw*dz_0)); wind stress accelerates the surface "
+        "layer in the stress direction; dS_dt = 0 in this module (the "
+        "evaporative virtual-salt flux is handled by the freshwater channel); "
+        "exchange coefficients C_D,C_H,C_E >= 0; z positive up. An unknown "
+        "bulk_scheme raises ValueError."
+    ),
+    # Air-sea boundary source/sink; not a conservative interior operator.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Fairall et al. (2003) COARE 3.0, J. Climate 16, 571-591; Large & "
+        "Yeager (2004/2009) CORE-II bulk formulae"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_bulk_flux_ly09.py + "
+        "tests/ocean/unit/test_ncar_bulk.py + "
+        "tests/ocean/unit/test_surface_forcing_sign_convention.py — warm/humid "
+        "air over cool water gives downward (warming) Q_net; the wind-stress "
+        "sign matches convention; an unknown bulk_scheme raises."
+    ),
+}
+
+
 def bulk_formula_surface_forcing(
     T: jnp.ndarray,
     S: jnp.ndarray,
@@ -126,7 +172,13 @@ def bulk_formula_surface_forcing(
     dT_dt = jnp.pad(
         (Q_net * inv_rho_csw_dz)[..., None], (*pad_axes, (0, nlev - 1)),
     )
-    # No freshwater forcing in basic bulk formulation
+    # Salinity forcing is intentionally delegated to the model's dedicated
+    # freshwater channel (P - E + runoff via ``model.step(freshwater=...)``),
+    # NOT emitted here.  Adding a virtual-salt flux from this scheme's
+    # evaporation (E = Q_lh / L_v) would DOUBLE-COUNT the evaporative salt
+    # concentration already carried by the freshwater channel.  This "basic"
+    # bulk scheme therefore reports dS_dt = 0 by design; a run that needs
+    # salinity forcing must route E - P - R through the freshwater channel.
     dS_dt = jnp.zeros(shape_3d, dtype=dtype)
 
     return SurfaceForcingOutput(

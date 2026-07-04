@@ -160,6 +160,43 @@ LATLON_RECIPES = {
         "implicit_vertical_mixing": True,
         "n_barotropic_substeps": 30,
     },
+    # Oracle dycores — the canonical numerics of the runnable oracle models. SINGLE
+    # SOURCE for the *_canonical_ocean_config factory defaults (the factories splat
+    # get_recipe(...) then add per-deck dimensional args; their parameterized scheme
+    # args override these per deck). See ocean/fidelity/{oceananigans,mitgcm}_recipe.py.
+    "oceananigans_v1": {
+        "eos": "linear",
+        "momentum_advection": "vector_invariant",   # VectorInvariant() [APPROX]
+        "tracer_advection": "weno7",                 # WENO(order=7)
+        "coriolis_scheme": "explicit_ab2",           # spherical Coriolis [APPROX]
+        "barotropic_solver": "implicit_cn",          # ImplicitFreeSurface
+        "outer_integrator": "ab2",
+        "lateral_viscosity_operator": "flux_divergence",
+        "A_h_lat_scaling": False,
+        "C_smag": 0.0,
+        "differentiable_barotropic": True,
+        "use_conservation_fixer": False,
+        "enable_runtime_checks": False,
+        "weno_vertadv_full_velocity": True,
+    },
+    "mitgcm_v1": {
+        "eos": "linear",
+        "momentum_advection": "flux_form",
+        "momentum_flux_scheme": "centered",          # MITgcm centered momentum
+        "coriolis_scheme": "explicit_ab2",           # face-f
+        "coriolis_energy_conserving": False,
+        "outer_integrator": "ab2",
+        "ab2_scope": "total",
+        "barotropic_implicit_theta_eta": 1.0,        # fully backward-Euler free surface
+        "barotropic_implicit_theta_pgf": 1.0,
+        "lateral_viscosity_operator": "flux_divergence",
+        "A_h_lat_scaling": False,
+        "C_smag": 0.0,
+        "bottom_drag_r": 0.0,
+        "differentiable_barotropic": True,
+        "use_conservation_fixer": False,
+        "enable_runtime_checks": False,
+    },
 }
 
 # --- MPAS (Voronoi C-grid) recipes (MPASOceanConfig scheme bundles) ----------

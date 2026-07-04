@@ -33,6 +33,50 @@ AbstractLookupGasOptics: TypeAlias = (
 )
 AtmosphericState: TypeAlias = atmospheric_state.AtmosphericState
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "Spectral two-stream RTE solver (solve_lw/solve_sw): maps per-g-point "
+        "gas/cloud/aerosol optics to Meador-Weaver reflectance/transmittance and "
+        "integrates the vertical transport, summing over g-points to broadband "
+        "up/down/net fluxes; compute_heating_rate converts flux divergence to K/s."
+    ),
+    "inputs": {
+        "pressure": "Pa", "temperature": "K",
+        "molecules": "molecules/m^2", "sfc_temperature": "K",
+        "vmr_fields": "mol/mol (per-gas volume mixing ratio)",
+        "cloud_path_liq": "kg/m^2", "cloud_path_ice": "kg/m^2",
+        "cloud_r_eff_liq": "m", "cloud_r_eff_ice": "m",
+        "cloud_fraction": "1", "aerosol_optical_depth": "1",
+        "flux_net": "W/m^2", "dp": "Pa",
+    },
+    "outputs": {
+        "flux_up": "W/m^2", "flux_down": "W/m^2", "flux_net": "W/m^2",
+        "heating_rate": "K/s",
+    },
+    "sign_convention": (
+        "fluxes positive in their named direction (flux_up upward, flux_down "
+        "downward); flux_net = flux_up - flux_down (positive-up); heating_rate "
+        "dT/dt>0 warms and is -g/c_p * dF_net/dp so net flux OUT of a layer "
+        "cools it; optical depth tau>=0, 0<=ssa<=1, |g|<=1 (clipped); nighttime "
+        "SW columns are zeroed. Per-layer reflectance+transmittance+absorptance=1 "
+        "(energy-consistent), but photons leave at TOA/surface so the column "
+        "budget is OPEN (accounted, not conserved)."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Meador & Weaver (1980), J. Atmos. Sci. 37, 630-643; Pincus, Mlawer & "
+        "Delamere (2019), doi:10.1029/2019MS001621 (RRTMGP two-stream)."
+    ),
+    "idealized_test": (
+        "tests/unit/test_two_stream_top_flux.py: near-TOA flux extrapolation is "
+        "range-limited (no super-physical TOA SW / negative OLR); differentiable "
+        "in the continuous optics, integer g-point index selection static; "
+        "checkpointed g-point scan for reverse-mode memory."
+    ),
+}
+
 
 # Default aerosol optical properties (fixed scheme defaults).
 _AEROSOL_SSA_DEFAULT = 0.93

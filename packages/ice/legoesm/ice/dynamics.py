@@ -213,7 +213,11 @@ def stress_divergence(
         return _stress_divergence_voronoi(sigma_11, sigma_22, sigma_12, grid)
     if _is_latlon_grid(grid):
         return _stress_divergence_latlon(sigma_11, sigma_22, sigma_12, grid)
-    return _stress_divergence_cubed_sphere(sigma_11, sigma_22, sigma_12, grid)
+    if isinstance(grid, CubedSphereGrid):
+        return _stress_divergence_cubed_sphere(sigma_11, sigma_22, sigma_12, grid)
+    raise TypeError(
+        f"unsupported grid {type(grid).__name__} for stress_divergence"
+    )
 
 
 # ==============================================================================

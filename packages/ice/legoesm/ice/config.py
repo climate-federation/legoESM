@@ -69,10 +69,11 @@ __param_spec__ = {
             "refreeze_width_K": "numerics: refreeze-ramp smoothing half-width",
         },
         "params": {
-            "drainage_timescale": {
+            "drainage_timescale_s": {
                 "units": "s", "bounds": (3600.0, 864000.0), "tunable_tier": 2,
                 "transform": "sigmoid", "category": "closure",
                 "reference": "CESM melt-pond drainage e-folding time", "shape": None,
+                "legacy_name": "drainage_timescale",
             },
             "pond_to_ice_max_area": {
                 "units": "1", "bounds": (0.2, 0.9), "tunable_tier": 2,
@@ -251,7 +252,7 @@ class MeltPondConfig(NamedTuple):
     # threshold (keeps the refreeze response differentiable — see
     # step_ponds).  Smaller → sharper, CICE-like cutoff.
     refreeze_width_K: float = 0.5
-    drainage_timescale: float = 86400.0  # Drainage e-folding time [s] (1 day)
+    drainage_timescale_s: float = 86400.0  # Drainage e-folding time [s] (1 day)
     pond_to_ice_max_area: float = 0.6    # Cap pond fraction per category
     depth_to_area_ratio: float = 0.8     # Volume → area conversion (CICE)
     # Minimum snow depth that blocks pond formation [m].  Snow
@@ -327,6 +328,11 @@ class SeaIceConfig(NamedTuple):
     h_new_ice: float = 0.05         # Thickness for new ice formation [m]
     # Bulk flux algorithm
     bulk_scheme: str = "constant"   # "constant" or "most"
+    # Stable-regime (zeta>0) MOST similarity functions for the MOST-family
+    # bulk schemes: "dyer1974" (default -5*zeta) | "beljaars_holtslag1991" |
+    # "grachev2007_sheba" (SHEBA — the Arctic sea-ice reference) |
+    # "gryanik2020".  Unknown -> ValueError at dispatch.
+    stability_scheme: str = "dyer1974"
     z_ref: float = 10.0             # Reference height for MOST [m]
     bulk_n_iter: int = 5            # MOST iterations
     # Temperature-dependent albedo (Task 10)

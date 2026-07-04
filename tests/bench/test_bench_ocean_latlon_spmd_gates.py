@@ -1,0 +1,100 @@
+"""Guard the parity/conservation gates of ``bench_ocean_latlon_spmd_scaling``.
+
+The gates (ported from the retired ``--transport spmd`` lane of
+``bench_ocean_mpi_scaling``) are the fail-fast correctness armor the
+Derecho/Levante ocean GPU jobs run before any timed ladder:
+
+* wiring tripwire — the gate flags/constants exist (a rename would only
+  break at runtime on a cluster);
+* an end-to-end single-process 2-virtual-device CPU run with BOTH gates
+  armed exits 0, writes the JSONL record, and prints per-field parity lines;
+* the smoke-window cap refuses long runs (the re-association floor grows
+  with steps).
+
+Multi-controller federation of the same bench:
+tests/parallel/test_latlon_ocean_spmd_multicontroller_selfspawn.py (and the
+launcher-gated test_latlon_ocean_spmd_multicontroller.py).
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+_BENCH = (
+    Path(__file__).resolve().parents[2]
+    / "scripts" / "bench" / "bench_ocean_latlon_spmd_scaling.py"
+)
+
+
+def _load_bench():
+    spec = importlib.util.spec_from_file_location(
+        "bench_ocean_latlon_spmd_scaling", _BENCH,
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_gate_symbols_and_flags_exist():
+    mod = _load_bench()
+    assert set(mod.SPMD_PARITY_TOLS) == {"float32", "float64"}
+    for rtol, atol in mod.SPMD_PARITY_TOLS.values():
+        assert rtol > 0 and atol > 0
+    assert mod.SPMD_PARITY_MAX_STEPS >= 4
+    # Parser accepts the gate flags (argparse would SystemExit on unknowns).
+    import argparse  # noqa: F401  (documents the surface under test)
+    for flag in ("--parity-gate", "--check-conservation", "--cons-rtol",
+                 "--multicontroller", "--coordinator"):
+        assert flag in Path(_BENCH).read_text()
+
+
+@pytest.mark.timeout(600)
+def test_single_process_two_virtual_devices_with_gates(tmp_path):
+    out = tmp_path / "ocean_spmd.jsonl"
+    env = dict(os.environ)
+    env["JAX_PLATFORMS"] = "cpu"
+    env["JAX_ENABLE_X64"] = "1"
+    env["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
+    proc = subprocess.run(
+        [
+            sys.executable, str(_BENCH),
+            "--n-devices", "2",
+            "--n-lat", "16", "--n-lon", "32", "--nlev", "4",
+            "--steps", "4", "--warmup", "1", "--dt", "600",
+            "--parity-gate", "--check-conservation", "--cons-rtol", "1e-6",
+            "--out", str(out),
+        ],
+        env=env, capture_output=True, text=True, timeout=570,
+    )
+    assert proc.returncode == 0, (
+        f"rc={proc.returncode}\nstdout:\n{proc.stdout[-3000:]}\n"
+        f"stderr:\n{proc.stderr[-3000:]}"
+    )
+    rec = json.loads(out.read_text().strip().splitlines()[-1])
+    assert rec["component"] == "ocean"
+    assert rec["n_devices"] == 2
+    assert "parity" in proc.stdout and "MISMATCH" not in proc.stdout
+
+
+def test_parity_gate_refuses_long_windows(tmp_path):
+    env = dict(os.environ)
+    env["JAX_PLATFORMS"] = "cpu"
+    env["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
+    proc = subprocess.run(
+        [
+            sys.executable, str(_BENCH),
+            "--n-devices", "2", "--n-lat", "16", "--n-lon", "32",
+            "--nlev", "4", "--steps", "30", "--warmup", "2",
+            "--parity-gate", "--out", str(tmp_path / "x.jsonl"),
+        ],
+        env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode != 0
+    assert "smoke gate" in (proc.stdout + proc.stderr)

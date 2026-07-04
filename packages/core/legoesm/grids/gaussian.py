@@ -1169,6 +1169,40 @@ def sh_analysis_oc2_dmu_3d(
     return oc2, dmu
 
 
+# Pole-safe floor for the 1/cos φ in the geographic spectral gradient (Gaussian
+# grids carry no pole row, so this only bounds the highest |lat| Gaussian latitude).
+_GRADIENT_COS_LAT_MIN = 1.0e-6
+
+
+def spectral_gradient_3d(
+    grid: GaussianGrid, coeffs_3d: jax.Array
+) -> tuple[jax.Array, jax.Array]:
+    """Geographic east/north horizontal gradient of a 3D scalar from its SH spectrum.
+
+    Returns ``(dfdx, dfdy)`` on the Gaussian grid where ``dfdx = (1/(a cos φ)) ∂f/∂λ``
+    (eastward) and ``dfdy = (1/a) ∂f/∂φ`` (northward), using the zonal derivative
+    ``∂/∂λ → i·m`` (applied in :func:`sh_synthesis_3d`) and the meridional
+    Legendre-derivative synthesis :func:`sh_synthesis_H_3d` (``∂/∂φ = -∂/∂θ`` for
+    colatitude θ).  The shared spectral gradient operator (sibling of
+    :func:`vordiv_from_uv_3d` / :func:`uv_from_vordiv_3d`); the spectral NH dycore
+    and the column-forcing geostrophic diagnostic both use it (no parallel copy).
+
+    Parameters
+    ----------
+    coeffs_3d : ``(n_sh, nlev)`` complex SH spectrum.
+
+    Returns
+    -------
+    dfdx, dfdy : ``(n_lat, n_lon, nlev)`` real arrays.
+    """
+    a = grid.radius
+    ims = grid.ms.astype(jnp.float64)
+    cos_lat = jnp.clip(grid.cos_lat[:, None], _GRADIENT_COS_LAT_MIN, None)[..., None]
+    dfdx = sh_synthesis_3d(grid, (1j * ims)[:, None] * coeffs_3d) / (a * cos_lat)
+    dfdy = -sh_synthesis_H_3d(grid, coeffs_3d) / (a * cos_lat)
+    return dfdx, dfdy
+
+
 def uv_from_vordiv_3d(
     grid: GaussianGrid,
     vor_hat_3d: jax.Array,

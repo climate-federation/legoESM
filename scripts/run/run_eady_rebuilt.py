@@ -209,7 +209,7 @@ def run(resolution: str, days: float, dt: float, out: str, no_sponge: bool = Fal
               f"max|u|_final={umax_final:.3f} | gridscale_frac={gs_frac:.4f} "
               f"(low=clean/high-eff-res, high=under-damped grid pileup)")
         # Single parseable line for the ralph min-dissipation loop:
-        diss = f"A_h={a_h:g},B_h={b_h:g},C_smag={cfg.C_smag:g},C_leith={c_leith:g},cap={smag_cfl_safety:g}"
+        diss = f"A_h={a_h:g},B_h={b_h:g},C_smag={cfg.lateral_viscosity.C_smag:g},C_leith={c_leith:g},cap={smag_cfl_safety:g}"
         print(f"VERDICT res={n_lat}x{n_lon} U={cfg_e.U_surface} dt={dt:.0f} sponge={not no_sponge} "
               f"mom={cfg.momentum_advection} | stable={not blew} saturated={sat} "
               f"max_u={umax_final:.3f} EKE_sat={eke_sat:.3e} gridscale_frac={gs_frac:.4f} "

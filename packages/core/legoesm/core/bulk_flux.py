@@ -25,9 +25,30 @@ References
   341-364. doi:10.1007/s00382-008-0441-3.
 - Businger, J. A., et al. (1971). Flux-profile relationships in the
   atmospheric surface layer. J. Atmos. Sci., 28, 181-189.
+- Dyer, A. J. (1974). A review of flux-profile relationships. Boundary-Layer
+  Meteorol., 7, 363-372.
+- Beljaars, A. C. M., & Holtslag, A. A. M. (1991). Flux parameterization over
+  land surfaces for atmospheric models. J. Appl. Meteorol., 30, 327-341.
+- Grachev, A. A., Andreas, E. L., Fairall, C. W., Guest, P. S., & Persson,
+  P. O. G. (2007). SHEBA flux-profile relationships in the stable atmospheric
+  boundary layer. Boundary-Layer Meteorol., 124, 315-333.
+  doi:10.1007/s10546-007-9177-6.
+- Gryanik, V. M., Lupkes, C., Grachev, A., & Sidorenko, D. (2020). New modified
+  and extended stability functions for the stable boundary layer based on SHEBA
+  and parametrizations of bulk transfer coefficients for climate models.
+  J. Atmos. Sci., 77, 2687-2716. doi:10.1175/JAS-D-19-0255.1.
+
+The stable-regime (zeta>0) similarity functions are selectable via the
+``stability_scheme`` argument to :func:`psi_m` / :func:`psi_h` /
+:func:`compute_most_fluxes`; the unstable branch stays Businger-Dyer for every
+scheme. Coefficient values cross-checked against CliMA ``SurfaceFluxes.jl``
+(``UniversalFunctions``).
 """
 
 from __future__ import annotations
+
+import math
+import numbers
 
 import jax
 import jax.numpy as jnp
@@ -45,6 +66,67 @@ NU_AIR = constants.nu_air  # kinematic viscosity of air [m²/s]
 #   "coare3"       — COARE 3.0
 #   "large_yeager" — Large & Yeager 2009 (OMIP)
 _VALID_BULK_SCHEMES = ("constant", "most", "coare3", "large_yeager")
+
+
+# ============================================================================
+# Stable-regime stability-function coefficients (empirical fits)
+# ============================================================================
+# ``stability_scheme`` selects the STABLE-branch (zeta = z/L > 0) Monin-Obukhov
+# similarity functions psi_m, psi_h. The UNSTABLE branch (zeta < 0) stays
+# Businger-Dyer for every scheme. These are EMPIRICAL fit coefficients (not
+# physical constants), tabulated here as module-level named constants -- not
+# inline literals -- each under its published-reference provenance block. Values
+# cross-checked against CliMA SurfaceFluxes.jl (UniversalFunctions / ClimaParams).
+_VALID_STABILITY_SCHEMES = (
+    "dyer1974",
+    "beljaars_holtslag1991",
+    "grachev2007_sheba",
+    "gryanik2020",
+)
+
+# --- Dyer (1974) linear stable functions ---
+# psi_m(zeta) = psi_h(zeta) = -beta*zeta (the historical default). Dyer (1974).
+_DYER_STABLE_BETA = 5.0
+
+# --- Beljaars & Holtslag (1991) stable functions ---
+#   psi_m(zeta) = -(a*zeta + b*(zeta - c/d)*exp(-d*zeta) + b*c/d)
+#   psi_h(zeta) = -((1 + 2a*zeta/3)^{3/2} + b*(zeta - c/d)*exp(-d*zeta) + b*c/d - 1)
+_BH91_A = 1.0
+_BH91_B = 0.667
+_BH91_C = 5.0
+_BH91_D = 0.35
+
+# --- Grachev et al. (2007) SHEBA stable functions ---
+# Momentum = their Eq. 12 (x = (1+zeta)^{1/3}, B_m = (1/b_m - 1)^{1/3});
+# heat = their Eq. 13 (B_h = (c_h^2 - 4)^{1/2}); b_m = a_m/6.5. Rational/log-
+# arctan fits valid to very large zeta (Arctic sea-ice / strongly-stable SBL).
+_GRACHEV_A_M = 5.0
+_GRACHEV_B_M = 5.0 / 6.5  # = 0.7692307692307693
+_GRACHEV_A_H = 5.0
+_GRACHEV_B_H = 5.0
+_GRACHEV_C_H = 3.0
+# Grachev et al. (2007) Eq. 13 assumes phi_h(0) = 1 — there is NO neutral-
+# Prandtl prefactor in the paper (d psi_h/d zeta|0+ = -a_h = -5), and CliMA
+# SurfaceFluxes.jl likewise pins Pr_0 = 1.0 for Grachev (CreateParametersExt:
+# "the formulation assumes phi_h(0) = 1.0").  Pr0 = 0.98 belongs to the
+# Gryanik et al. (2020) modification only (see _GRYANIK_PR0 below).
+_GRACHEV_PR0 = 1.0        # neutral turbulent Prandtl number (paper + CliMA)
+
+# --- Gryanik et al. (2020) modified SHEBA stable functions ---
+#   psi_m(zeta) = -3*(a_m/b_m)*((1 + b_m*zeta)^{1/3} - 1)
+#   psi_h(zeta) = -Pr0*(a_h/b_h)*ln(1 + b_h*zeta)
+_GRYANIK_A_M = 5.0
+_GRYANIK_B_M = 0.3
+_GRYANIK_A_H = 5.0
+_GRYANIK_B_H = 0.4
+_GRYANIK_PR0 = 0.98
+
+# Safety floor for the base of the Beljaars-Holtslag psi_h ^{3/2} power. In the
+# valid domain (zeta > 0) the base 1 + 2a*zeta/3 >= 1, so the floor is inert; it
+# only guards a direct out-of-domain (zeta <= 0) call from a NaN value/gradient
+# (fractional power of a non-positive base) -- the "clamp the base before the
+# power" AD-safety rule.
+_BH91_PSIH_BASE_FLOOR = 1e-6
 
 
 def apply_gustiness(u: jax.Array, v: jax.Array, gustiness: float) -> jax.Array:
@@ -107,6 +189,22 @@ def validate_bulk_scheme(scheme: str) -> None:
         )
 
 
+def validate_stability_scheme(stability_scheme: str) -> None:
+    """Raise ``ValueError`` on an unknown stable-regime stability scheme.
+
+    ``stability_scheme`` selects the STABLE-branch (zeta > 0) ``psi_m``/``psi_h``
+    forms; it is a static Python string resolved at trace time, so this validates
+    at function entry -- never inside a traced / ``jit`` body. Dispatch-hardening
+    (CLAUDE.md): a typo'd name must fail LOUDLY rather than silently fall through
+    to a default branch and run the wrong surface-layer physics.
+    """
+    if stability_scheme not in _VALID_STABILITY_SCHEMES:
+        raise ValueError(
+            f"Unknown stability_scheme {stability_scheme!r}; expected one of "
+            f"{_VALID_STABILITY_SCHEMES}."
+        )
+
+
 def large_yeager_neutral_cd(wind, *, nemo_parity: bool = False):
     """Large & Yeager (2009) Eq. 6 neutral 10-m drag coefficient ``C_DN``.
 
@@ -141,21 +239,110 @@ def large_yeager_neutral_cd(wind, *, nemo_parity: bool = False):
 
 
 # ============================================================================
-# Stability functions (Businger-Dyer)
+# Stability functions (Businger-Dyer unstable; selectable stable regime)
 # ============================================================================
+# Convention: zeta = z/L is the Monin-Obukhov stability parameter (L the Obukhov
+# length); zeta < 0 unstable, zeta > 0 stable. Every psi satisfies psi(0) = 0
+# and, in the stable regime, decreases monotonically (more negative) with
+# increasing zeta -- a more-stable column raises the log-law denominator
+# ``ln(z/z0) - psi`` and thereby REDUCES the drag/exchange coefficient and the
+# surface fluxes (the physically-required stable-regime suppression).
+#
+# The private ``_<scheme>_psi_{m,h}`` helpers below evaluate ONLY the stable
+# branch and are always called with a strictly-positive ``zeta_pos`` (floored at
+# 1e-10 by :func:`psi_m` / :func:`psi_h`), so no fractional power / log / cbrt
+# ever sees a non-positive argument. Together with the ``jnp.where`` split this
+# keeps the masked (inactive) branch finite in BOTH value and gradient -- the
+# classic AD-safe double-branch construction.
 
-def psi_m(zeta):
-    """MOST momentum stability function.
 
-    Unstable (ζ < 0): Businger-Dyer
-        ψ_m = 2 ln((1+x)/2) + ln((1+x²)/2) − 2 arctan(x) + π/2
-        where x = (1 − 16ζ)^{1/4}
-    Stable (ζ > 0): Dyer (1974)
-        ψ_m = −5ζ
+def _gryanik_psi_m(zeta_pos):
+    """Gryanik et al. (2020) stable momentum psi_m(zeta), zeta = zeta_pos > 0."""
+    a_m, b_m = _GRYANIK_A_M, _GRYANIK_B_M
+    return -3.0 * (a_m / b_m) * (jnp.cbrt(1.0 + b_m * zeta_pos) - 1.0)
 
-    Uses safe branching (min/max on inputs) to avoid NaN gradients
-    in the inactive branch.
+
+def _gryanik_psi_h(zeta_pos):
+    """Gryanik et al. (2020) stable heat psi_h(zeta), zeta > 0."""
+    a_h, b_h = _GRYANIK_A_H, _GRYANIK_B_H
+    return -_GRYANIK_PR0 * (a_h / b_h) * jnp.log1p(b_h * zeta_pos)
+
+
+def _beljaars_holtslag_psi_m(zeta_pos):
+    """Beljaars & Holtslag (1991) stable momentum psi_m(zeta), zeta > 0."""
+    a, b, c, d = _BH91_A, _BH91_B, _BH91_C, _BH91_D
+    return -(
+        a * zeta_pos
+        + b * (zeta_pos - c / d) * jnp.exp(-d * zeta_pos)
+        + b * c / d
+    )
+
+
+def _beljaars_holtslag_psi_h(zeta_pos):
+    """Beljaars & Holtslag (1991) stable heat psi_h(zeta), zeta > 0."""
+    a, b, c, d = _BH91_A, _BH91_B, _BH91_C, _BH91_D
+    # Clamp the ^{3/2} base to a positive floor BEFORE the power (AD-safety):
+    # in-domain (zeta > 0) the base 1 + 2a*zeta/3 >= 1 so the floor is inert.
+    base = jnp.maximum(1.0 + (2.0 / 3.0) * a * zeta_pos, _BH91_PSIH_BASE_FLOOR)
+    return -(
+        base ** 1.5
+        + b * (zeta_pos - c / d) * jnp.exp(-d * zeta_pos)
+        + b * c / d
+        - 1.0
+    )
+
+
+def _grachev_psi_m(zeta_pos):
+    """Grachev et al. (2007) SHEBA stable momentum psi_m(zeta), zeta > 0 (Eq. 12)."""
+    a_m, b_m = _GRACHEV_A_M, _GRACHEV_B_M
+    # Compile-time scalar constants via ``math`` (weakly-typed Python floats, so
+    # they never promote the traced float32 ``zeta_pos`` state to float64).
+    B_m = (1.0 / b_m - 1.0) ** (1.0 / 3.0)
+    sqrt3 = math.sqrt(3.0)
+    one_plus_Bm = 1.0 + B_m
+    quad_den = 1.0 - B_m + B_m * B_m
+    atan_ref = math.atan((2.0 - B_m) / (sqrt3 * B_m))
+    x = jnp.cbrt(1.0 + zeta_pos)  # (1 + zeta)^{1/3}
+    linear = -3.0 * (a_m / b_m) * (x - 1.0)
+    log_1 = 2.0 * jnp.log((x + B_m) / one_plus_Bm)
+    log_2 = -jnp.log((x * x - x * B_m + B_m * B_m) / quad_den)
+    atan_1 = jnp.arctan((2.0 * x - B_m) / (sqrt3 * B_m))
+    bracket = log_1 + log_2 + 2.0 * sqrt3 * (atan_1 - atan_ref)
+    return linear + (a_m * B_m) / (2.0 * b_m) * bracket
+
+
+def _grachev_psi_h(zeta_pos):
+    """Grachev et al. (2007) SHEBA stable heat psi_h(zeta), zeta > 0 (Eq. 13)."""
+    a_h, b_h, c_h = _GRACHEV_A_H, _GRACHEV_B_H, _GRACHEV_C_H
+    B_h = math.sqrt(c_h * c_h - 4.0)  # = sqrt(5); compile-time constant
+    coeff = a_h / B_h - (b_h * c_h) / (2.0 * B_h)
+    log_ref = math.log((c_h - B_h) / (c_h + B_h))
+    fractional_logs = jnp.log(
+        (2.0 * zeta_pos + c_h - B_h) / (2.0 * zeta_pos + c_h + B_h)
+    ) - log_ref
+    quadratic_log = (b_h / 2.0) * jnp.log1p(c_h * zeta_pos + zeta_pos * zeta_pos)
+    return _GRACHEV_PR0 * (-coeff * fractional_logs - quadratic_log)
+
+
+def psi_m(zeta, stability_scheme="dyer1974"):
+    """MOST momentum stability function psi_m(zeta).
+
+    Convention zeta = z/L (>0 stable). Unstable (zeta < 0) is Businger-Dyer for
+    every scheme:
+        psi_m = 2 ln((1+x)/2) + ln((1+x^2)/2) - 2 arctan(x) + pi/2,
+        with x = (1 - 16 zeta)^{1/4}.
+    Stable (zeta > 0) is selected by ``stability_scheme``:
+
+    - ``"dyer1974"``             : psi_m = -5 zeta (default; historical linear form)
+    - ``"beljaars_holtslag1991"``: Beljaars & Holtslag (1991)
+    - ``"grachev2007_sheba"``    : Grachev et al. (2007) SHEBA (Arctic/strong-stable)
+    - ``"gryanik2020"``          : Gryanik et al. (2020) modified SHEBA
+
+    Safe double-branch construction: the unstable expression is evaluated on
+    ``zeta_neg <= -1e-10`` and the stable expression on ``zeta_pos >= 1e-10`` so
+    the masked branch never produces a NaN value or gradient under ``jnp.where``.
     """
+    validate_stability_scheme(stability_scheme)
     zeta_c = jnp.clip(zeta, -10.0, 10.0)
     # Safe inputs: each branch only sees valid arguments
     zeta_neg = jnp.minimum(zeta_c, -1e-10)
@@ -168,26 +355,56 @@ def psi_m(zeta):
         - 2.0 * jnp.arctan(x)
         + jnp.pi / 2.0
     )
-    stable = -5.0 * zeta_pos
+
+    # Stable branch: static ``stability_scheme`` -> Python dispatch (only the
+    # selected expression is traced), not ``jnp.where`` (which would trace all).
+    if stability_scheme == "dyer1974":
+        stable = -_DYER_STABLE_BETA * zeta_pos
+    elif stability_scheme == "beljaars_holtslag1991":
+        stable = _beljaars_holtslag_psi_m(zeta_pos)
+    elif stability_scheme == "grachev2007_sheba":
+        stable = _grachev_psi_m(zeta_pos)
+    elif stability_scheme == "gryanik2020":
+        stable = _gryanik_psi_m(zeta_pos)
+    else:  # unreachable: validate_stability_scheme already guarded at entry
+        raise ValueError(
+            f"Unknown stability_scheme {stability_scheme!r}; expected one of "
+            f"{_VALID_STABILITY_SCHEMES}."
+        )
 
     return jnp.where(zeta_c < 0.0, unstable, stable)
 
 
-def psi_h(zeta):
-    """MOST heat/moisture stability function.
+def psi_h(zeta, stability_scheme="dyer1974"):
+    """MOST heat/moisture stability function psi_h(zeta).
 
-    Unstable (ζ < 0): Businger-Dyer
-        ψ_h = 2 ln((1+y)/2)  where y = (1 − 16ζ)^{1/2}
-    Stable (ζ > 0): Dyer (1974)
-        ψ_h = −5ζ
+    Convention zeta = z/L (>0 stable). Unstable (zeta < 0) is Businger-Dyer for
+    every scheme:
+        psi_h = 2 ln((1+y)/2),  y = (1 - 16 zeta)^{1/2}.
+    Stable (zeta > 0) is selected by ``stability_scheme`` (same options as
+    :func:`psi_m`; ``"dyer1974"`` default reproduces the historical -5 zeta).
     """
+    validate_stability_scheme(stability_scheme)
     zeta_c = jnp.clip(zeta, -10.0, 10.0)
     zeta_neg = jnp.minimum(zeta_c, -1e-10)
     zeta_pos = jnp.maximum(zeta_c, 1e-10)
 
     y = jnp.sqrt(1.0 - 16.0 * zeta_neg)
     unstable = 2.0 * jnp.log((1.0 + y) / 2.0)
-    stable = -5.0 * zeta_pos
+
+    if stability_scheme == "dyer1974":
+        stable = -_DYER_STABLE_BETA * zeta_pos
+    elif stability_scheme == "beljaars_holtslag1991":
+        stable = _beljaars_holtslag_psi_h(zeta_pos)
+    elif stability_scheme == "grachev2007_sheba":
+        stable = _grachev_psi_h(zeta_pos)
+    elif stability_scheme == "gryanik2020":
+        stable = _gryanik_psi_h(zeta_pos)
+    else:  # unreachable: validate_stability_scheme already guarded at entry
+        raise ValueError(
+            f"Unknown stability_scheme {stability_scheme!r}; expected one of "
+            f"{_VALID_STABILITY_SCHEMES}."
+        )
 
     return jnp.where(zeta_c < 0.0, unstable, stable)
 
@@ -308,6 +525,9 @@ def compute_most_fluxes(
     gustiness_beta=1.25,
     return_2m=False,
     z_diag=2.0,
+    max_exchange_coeff=None,
+    stability_scheme="dyer1974",
+    return_convergence=False,
 ):
     """Compute stability-dependent bulk fluxes via iterative MOST.
 
@@ -350,6 +570,41 @@ def compute_most_fluxes(
         scheme-native: 600 m for ``"coare3"`` (AeroBulk/Fairall 2003 —
         gustiness is part of the algorithm), 0 (off) for the others.
         Explicit 0.0 disables for any scheme.
+    max_exchange_coeff : float or None
+        Optional physical ceiling on the neutral-equivalent bulk transfer
+        coefficient ``C = κ²/(denom_m·denom_h)``.  ``None`` (default) leaves
+        the MOST log-law denominators floored at the standard ``0.5``
+        (``C ≤ κ²/0.25 ≈ 0.64``), i.e. BYTE-IDENTICAL to the prior behaviour
+        for every existing (ocean/atmosphere) caller.  When set to ``C_max``,
+        each denominator is instead floored at ``max(0.5, κ/√C_max)`` so the
+        implied ``C_d``, ``C_h`` and ``C_e`` cannot exceed ``C_max``.  This
+        caps ``u*``, ``θ*`` and ``q*`` CONSISTENTLY (the fluxes stay linear in
+        the T/q gradients, so a surface-energy-balance solve retains its
+        self-limiting feedback) and removes the extreme-instability cold-start
+        singularity where the floored ``0.5`` denominator lets a trivial
+        ~0.6 g/kg humidity gradient generate a spurious ~4900 W/m² latent
+        shock (``C_e≈0.64`` vs a physical ~3.4e-3).  Intended for the land
+        surface tile, whose stiff thin top layer at ``dt_rad`` is unstable to
+        that shock; ocean/atmosphere callers never approach the floor.
+    stability_scheme : str
+        Stable-regime (zeta > 0) similarity functions ``psi_m``/``psi_h``.
+        ``"dyer1974"`` (default) is the historical linear ``-5 zeta`` and is
+        BYTE-IDENTICAL to the prior behaviour for every existing caller. The
+        non-linear alternatives ``"beljaars_holtslag1991"``,
+        ``"grachev2007_sheba"`` and ``"gryanik2020"`` do not collapse the fluxes
+        to zero under strong stability (Arctic sea-ice / nocturnal SBL). The
+        unstable branch (zeta < 0) stays Businger-Dyer regardless. Validated at
+        function entry (a typo raises ``ValueError``).
+    return_convergence : bool
+        When True, additionally return the MOST fixed-point convergence
+        residual (the relative change in ``u*`` over the FINAL iteration).
+        Default False = byte-identical to the prior signature.  The Obukhov
+        iteration is a fixed ``n_iter`` ``fori_loop`` (AD-safe — a
+        tolerance-based ``while_loop`` would break reverse-mode ``grad``), so
+        this residual is the convergence CHECK: it is ~0 where the fixed
+        iteration count converged and O(1) in the strong-stability columns
+        where it did not (the gap vs a tolerance-guaranteed root solve, e.g.
+        CliMA SurfaceFluxes.jl).  It does not affect the fluxes.
 
     Returns
     -------
@@ -361,6 +616,10 @@ def compute_most_fluxes(
         Latent heat flux [W/m²] (positive upward = surface moister).
     ustar : array
         Friction velocity [m/s].
+    most_residual : array
+        ONLY when ``return_convergence=True`` (appended last, after ``T_2m``
+        if ``return_2m`` is also set): the final-iteration relative ``u*``
+        change [1], per column.
     """
     # Dispatch hardening (CLAUDE.md): ``scheme`` is a static Python string
     # resolved at trace time. Validate it at function entry so a typo'd name
@@ -369,6 +628,9 @@ def compute_most_fluxes(
     # wrong air-sea physics. ``coare3``/``large_yeager`` take dedicated
     # branches; ``constant``/``most`` are the (valid) fixed-roughness else path.
     validate_bulk_scheme(scheme)
+    # ``stability_scheme`` selects the STABLE-branch psi_m/psi_h; also a static
+    # string, so validate it once here rather than inside the traced loop body.
+    validate_stability_scheme(stability_scheme)
 
     # Scheme-native gustiness default (AeroBulk/COARE parity, static Python
     # resolved at trace time): COARE 3.0 includes convective gustiness as
@@ -394,6 +656,45 @@ def compute_most_fluxes(
     _vT_coef = 1.0 / constants.epsilon - 1.0
     T_v = T_atm * (1.0 + _vT_coef * q_atm)
 
+    # Log-law denominator floor. Default 0.5 (=> C ≤ κ²/0.25 ≈ 0.64, the
+    # historical behaviour, byte-identical for every existing caller). When a
+    # physical ceiling ``max_exchange_coeff`` is requested, floor each
+    # denominator at κ/√C_max so the implied C_d/C_h/C_e ≤ C_max — a static
+    # Python float, constant-folded, no retrace (feature-gating, not traced
+    # selection). See the ``max_exchange_coeff`` docstring entry.
+    if max_exchange_coeff is None:
+        _denom_floor = 0.5
+        _coeff_cap = None
+    else:
+        # Static feature-gate value (constant-folded). A traced/array scalar
+        # would break the Python ``max``/``if`` below, so require a real Python
+        # or numpy scalar and reject it loudly rather than silently mis-tracing.
+        # ``bool`` is a numbers.Real subclass — exclude it explicitly. Then
+        # guard finite > 0: C_max = 0 gives an infinite floor (silent zero
+        # fluxes) and C_max < 0 gives ``sqrt`` of a negative (NaN).
+        if isinstance(max_exchange_coeff, bool) or not isinstance(
+            max_exchange_coeff, numbers.Real
+        ):
+            raise TypeError(
+                "max_exchange_coeff must be a static real scalar or None, "
+                f"got {type(max_exchange_coeff).__name__}"
+            )
+        max_exchange_coeff = float(max_exchange_coeff)
+        if not (math.isfinite(max_exchange_coeff) and max_exchange_coeff > 0.0):
+            raise ValueError(
+                "max_exchange_coeff must be finite and > 0, "
+                f"got {max_exchange_coeff}"
+            )
+        _denom_floor = max(0.5, KAPPA / (max_exchange_coeff ** 0.5))
+        # Coefficient-space equivalent ceiling for the large_yeager branch,
+        # which forms rd/rh/re directly (u*=rd·U, θ*=rh·dT, q*=re·dq) and never
+        # touches the log-law denominators.  The log-law path caps the
+        # "rd-equivalent" κ/denom at κ/_denom_floor, so bounding rd, rh, re at
+        # the SAME value gives C_d=rd² , C_h=rd·rh , C_e=rd·re ≤ C_max
+        # identically.  = min(√C_max, 0.8) so it never tightens below the
+        # historical 0.5-floor behaviour.
+        _coeff_cap = KAPPA / _denom_floor
+
     # Initialize with neutral log-law profile
     z0 = jnp.full_like(wind_speed, z0_init)
     z0_t = z0 * 0.1
@@ -402,15 +703,20 @@ def compute_most_fluxes(
     ln_zu_z0 = jnp.log(z_u / jnp.maximum(z0, 1e-12))
     ln_zt_z0t = jnp.log(z_t / jnp.maximum(z0_t, 1e-12))
     ln_zq_z0q = jnp.log(z_q / jnp.maximum(z0_q, 1e-12))
-    u_star = KAPPA * wind_speed / jnp.maximum(ln_zu_z0, 0.5)
-    theta_star = KAPPA * dT / jnp.maximum(ln_zt_z0t, 0.5)
-    q_star_val = KAPPA * dq / jnp.maximum(ln_zq_z0q, 0.5)
+    u_star = KAPPA * wind_speed / jnp.maximum(ln_zu_z0, _denom_floor)
+    theta_star = KAPPA * dT / jnp.maximum(ln_zt_z0t, _denom_floor)
+    q_star_val = KAPPA * dq / jnp.maximum(ln_zq_z0q, _denom_floor)
 
-    # U_eff (the bulk/effective wind incl. gustiness + scheme floor) rides in
-    # the carry so the post-loop stress normalization tau = rho u*^2 u/U_eff
-    # (AeroBulk semantics: tau = rho Cd Ub u) uses the CONVERGED value; with
-    # gustiness off and no floor binding, U_eff == wind_speed byte-identically.
-    carry = (u_star, z0, z0_t, z0_q, theta_star, q_star_val, wind_speed)
+    # Carry leaves 7-8 (orthogonal MOST diagnostics unioned across branches):
+    #  (7) U_eff, the bulk/effective wind incl. gustiness + scheme calm-wind
+    #      floor, so the post-loop stress normalization tau = rho u*^2 u/U_eff
+    #      (AeroBulk semantics: tau = rho Cd Ub u) uses the CONVERGED value;
+    #      with gustiness off and no floor binding, U_eff == wind_speed
+    #      byte-identically.  Seeded with the pre-loop wind_speed.
+    #  (8) the MOST convergence residual (relative u* change), updated each
+    #      iteration; seeded at 1.0 ("not yet converged").
+    resid0 = jnp.ones_like(u_star)
+    carry = (u_star, z0, z0_t, z0_q, theta_star, q_star_val, wind_speed, resid0)
     # The MOST iteration mixes the (possibly float32) input state with float64
     # physical constants (G, NU_AIR, c_pd via the virtual-T coefficient), so a
     # carry leaf would silently promote float32 -> float64 mid-loop and trip
@@ -420,7 +726,7 @@ def compute_most_fluxes(
     _carry_dtypes = tuple(c.dtype for c in carry)
 
     def body_fn(i, carry):
-        u_star, z0, z0_t, z0_q, theta_star, q_star_val, _ = carry
+        u_star, z0, z0_t, z0_q, theta_star, q_star_val, _U_eff_prev, _resid = carry
         u_star_safe = jnp.maximum(u_star, 1e-6)
 
         # Virtual potential temperature scale (1/ε − 1 ≈ 0.6078)
@@ -485,15 +791,16 @@ def compute_most_fluxes(
         # Scheme-matched stability functions (static Python dispatch at trace
         # time): COARE 3.0 uses the Fairall 1996/2003 Kansas + free-convective
         # blend and the COARE stable form; large_yeager/constant/most keep
-        # Businger-Dyer/Dyer (which is what LY09 and NEMO's ncar use).
+        # Businger-Dyer with the selectable ``stability_scheme`` stable branch
+        # ("dyer1974" default = the historical -5*zeta that LY09/NEMO ncar use).
         if scheme == "coare3":
             psi_m_u = psi_m_coare(zeta_u)
             psi_h_t = psi_h_coare(zeta_t)
             psi_h_q = psi_h_coare(zeta_q)
         else:
-            psi_m_u = psi_m(zeta_u)
-            psi_h_t = psi_h(zeta_t)
-            psi_h_q = psi_h(zeta_q)
+            psi_m_u = psi_m(zeta_u, stability_scheme)
+            psi_h_t = psi_h(zeta_t, stability_scheme)
+            psi_h_q = psi_h(zeta_q, stability_scheme)
 
         # --- Roughness update (Python if resolved at trace time) ---
         if scheme == "coare3":
@@ -573,6 +880,18 @@ def compute_most_fluxes(
                 1.0 + ren / KAPPA * (ln_zr_q - psi_h_q), 0.2
             )
 
+            # Optional transfer-coefficient ceiling (max_exchange_coeff). The LY
+            # coefficient-space path bypasses the log-law denominator floor, so
+            # apply the equivalent cap directly: rd, rh, re ≤ κ/_denom_floor
+            # bounds C_d=rd², C_h=rd·rh, C_e=rd·re ≤ C_max — the SAME guarantee
+            # the else-branch gets from _denom_floor. _coeff_cap is None (skip,
+            # byte-identical) unless a ceiling was requested. z0_new below reads
+            # the capped rd, so the roughness estimate stays consistent.
+            if _coeff_cap is not None:
+                rd = jnp.minimum(rd, _coeff_cap)
+                rh = jnp.minimum(rh, _coeff_cap)
+                re = jnp.minimum(re, _coeff_cap)
+
             # 5) Update scaling parameters directly from coefficients
             u_star_new = rd * U_eff
             theta_star_new = rh * dT
@@ -584,8 +903,12 @@ def compute_most_fluxes(
             z0_t_new = z0_t  # not used in coefficient path
             z0_q_new = z0_q  # not used in coefficient path
 
+            # Convergence residual (relative u* change) — see the common
+            # return below; kept in sync so the carry structure matches.
+            resid_new = jnp.abs(u_star_new - u_star) / jnp.maximum(
+                jnp.abs(u_star_new), 1e-6)
             return (u_star_new, z0_new, z0_t_new, z0_q_new,
-                    theta_star_new, q_star_new, U_eff)
+                    theta_star_new, q_star_new, U_eff, resid_new)
 
         else:
             z0_new = z0
@@ -598,16 +921,25 @@ def compute_most_fluxes(
         ln_zt_z0t = jnp.log(z_t / jnp.maximum(z0_t_new, 1e-12))
         ln_zq_z0q = jnp.log(z_q / jnp.maximum(z0_q_new, 1e-12))
 
-        denom_m = jnp.maximum(ln_zu_z0 - psi_m_u, 0.5)
-        denom_h = jnp.maximum(ln_zt_z0t - psi_h_t, 0.5)
-        denom_q = jnp.maximum(ln_zq_z0q - psi_h_q, 0.5)
+        denom_m = jnp.maximum(ln_zu_z0 - psi_m_u, _denom_floor)
+        denom_h = jnp.maximum(ln_zt_z0t - psi_h_t, _denom_floor)
+        denom_q = jnp.maximum(ln_zq_z0q - psi_h_q, _denom_floor)
 
         u_star_new = KAPPA * U_eff / denom_m
         theta_star_new = KAPPA * dT / denom_h
         q_star_new = KAPPA * dq / denom_q
 
+        # MOST fixed-point convergence residual: the relative change in u*
+        # over this iteration (small = converged).  DIAGNOSTIC ONLY — it does
+        # not feed the fluxes, so the default (return_convergence=False) path
+        # is byte-identical; it lets callers/tests detect columns where the
+        # fixed n_iter under-converges (strong stability), the gap vs a
+        # tolerance-based root solve (CliMA SurfaceFluxes.jl).
+        resid_new = jnp.abs(u_star_new - u_star) / jnp.maximum(
+            jnp.abs(u_star_new), 1e-6)
+
         return (u_star_new, z0_new, z0_t_new, z0_q_new,
-                theta_star_new, q_star_new, U_eff)
+                theta_star_new, q_star_new, U_eff, resid_new)
 
     def _body_fn_dtype_stable(i, carry):
         out = body_fn(i, carry)
@@ -615,7 +947,7 @@ def compute_most_fluxes(
                      for o, d in zip(out, _carry_dtypes))
 
     carry = jax.lax.fori_loop(0, n_iter, _body_fn_dtype_stable, carry)
-    u_star, z0, z0_t, z0_q, theta_star, q_star_val, U_eff_final = carry
+    u_star, z0, z0_t, z0_q, theta_star, q_star_val, U_eff_final, most_residual = carry
 
     # Fluxes from scaling parameters.  Stress normalization: tau =
     # -rho u*^2 u/U_eff == -rho Cd U_eff u (AeroBulk/COARE: one factor of the
@@ -639,14 +971,20 @@ def compute_most_fluxes(
         theta_v_star = theta_star + _vT_coef * T_atm * q_star_val
         inv_L = -KAPPA * G * theta_v_star / (u_star_safe ** 2 * T_v)
         zeta_d = jnp.clip(z_diag * inv_L, -10.0, 10.0)
-        denom_d = jnp.log(z_diag / jnp.maximum(z0_t, 1e-12)) - psi_h(zeta_d)
+        denom_d = jnp.log(z_diag / jnp.maximum(z0_t, 1e-12)) - psi_h(
+            zeta_d, stability_scheme
+        )
         T_2m = T_sfc - (theta_star / KAPPA) * denom_d
         # Guard against profile extrapolation outside [T_atm, T_sfc].
         lo = jnp.minimum(T_atm, T_sfc)
         hi = jnp.maximum(T_atm, T_sfc)
         T_2m = jnp.clip(T_2m, lo, hi)
+        if return_convergence:
+            return tau_x, tau_y, shflx, lhflx, u_star, T_2m, most_residual
         return tau_x, tau_y, shflx, lhflx, u_star, T_2m
 
+    if return_convergence:
+        return tau_x, tau_y, shflx, lhflx, u_star, most_residual
     return tau_x, tau_y, shflx, lhflx, u_star
 
 

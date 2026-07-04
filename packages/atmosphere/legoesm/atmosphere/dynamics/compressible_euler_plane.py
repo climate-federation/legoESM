@@ -52,6 +52,8 @@ from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.atmosphere.physics.turbulence.lasd_core import lasd_cs2 as _lasd_cs2
 from legoesm.atmosphere.physics.turbulence.vreman import (
     vreman_nu_t as _vreman_nu_t_core)
+from legoesm.atmosphere.physics.turbulence.amd import (
+    amd_nu_t as _amd_nu_t_core)
 from legoesm.core.field import Field
 from legoesm.core.state import (
     PlaneNonHydrostaticState,
@@ -250,6 +252,41 @@ def _assert_flat_terrain(
 # --------------------------------------------------------------------- #
 
 
+def _plane_horizontal_weight(
+    grid: PlaneGrid,
+    terrain_metric: TerrainMetric,
+) -> jax.Array:
+    """Shared fixer weight ``(J * area_T)[:, :, None]`` of shape
+    ``(ny, nx, 1)``.
+
+    Single source of the mass-fixer weight expression so every mass
+    integral below multiplies bit-identical factors in the same order.
+    """
+    return (terrain_metric.jacobian * grid.area_T)[:, :, None]
+
+
+def _plane_weighted_mass_sum(
+    rho_like: jax.Array,
+    grid: PlaneGrid,
+    height_coord: HeightCoordinate,
+    terrain_metric: TerrainMetric,
+) -> jax.Array:
+    """``sum(rho_like * J * area_T * dz)`` — the mass-fixer integral.
+
+    ``rho_like`` broadcasts against ``(ny, nx, 1)``; either ``(nlev,)``
+    (a reference profile) or ``(ny, nx, nlev)`` (a density field).
+    The products associate left-to-right (``(rho_like * w_h) * dz``)
+    and the final ``jnp.sum`` reduces one ``(ny, nx, nlev)`` array, so
+    every caller — :func:`compute_dry_mass_plane`,
+    :func:`_plane_background_mass`, and the anomaly sum in
+    :func:`fix_mass_nonhydrostatic_plane` — accumulates in exactly the
+    same order. The mass fixer's rest-state bit-exactness relies on
+    this shared op order (see :func:`_plane_background_mass`).
+    """
+    weight_horizontal = _plane_horizontal_weight(grid, terrain_metric)
+    return jnp.sum(rho_like * weight_horizontal * height_coord.dz)
+
+
 def compute_dry_mass_plane(
     state: PlaneNonHydrostaticState,
     grid: PlaneGrid,
@@ -285,11 +322,9 @@ def compute_dry_mass_plane(
     """
     rho_p = state.rho_prime.data
     rho_total = height_coord.rho_ref + rho_p   # broadcast (nlev,) → (ny,nx,nlev)
-    weight_horizontal = (
-        terrain_metric.jacobian * grid.area_T
-    )[:, :, None]                              # (ny, nx, 1)
-    cell_mass = rho_total * weight_horizontal * height_coord.dz
-    return jnp.sum(cell_mass)
+    return _plane_weighted_mass_sum(
+        rho_total, grid, height_coord, terrain_metric,
+    )
 
 
 def _plane_volume_weight(
@@ -298,10 +333,31 @@ def _plane_volume_weight(
     terrain_metric: TerrainMetric,
 ) -> jax.Array:
     """Total weighted volume ``sum(J * area_T * dz)`` used by the fixer."""
-    weight_horizontal = (
-        terrain_metric.jacobian * grid.area_T
-    )[:, :, None]
+    weight_horizontal = _plane_horizontal_weight(grid, terrain_metric)
     return jnp.sum(weight_horizontal * height_coord.dz)
+
+
+def _plane_background_mass(
+    grid: PlaneGrid,
+    height_coord: HeightCoordinate,
+    terrain_metric: TerrainMetric,
+) -> jax.Array:
+    """State-independent part of :func:`compute_dry_mass_plane`:
+    ``sum(rho_ref * J * area_T * dz)``.
+
+    Bit-match invariant: this must equal
+    ``compute_dry_mass_plane(state, ...)`` BIT-EXACTLY when
+    ``state.rho_prime`` is identically zero and both are evaluated
+    eagerly. That holds because ``rho_ref + 0.0 == rho_ref`` exactly
+    and both route through the SAME :func:`_plane_weighted_mass_sum`
+    (same broadcast shapes, same left-to-right association, same
+    final ``jnp.sum`` over ``(ny, nx, nlev)``, same cached
+    executable). The mass fixer's rest-state exactness
+    (``test_one_step_at_rest_with_mass_fixer``) relies on it.
+    """
+    return _plane_weighted_mass_sum(
+        height_coord.rho_ref, grid, height_coord, terrain_metric,
+    )
 
 
 def fix_mass_nonhydrostatic_plane(
@@ -310,26 +366,62 @@ def fix_mass_nonhydrostatic_plane(
     grid: PlaneGrid,
     height_coord: HeightCoordinate,
     terrain_metric: TerrainMetric,
+    background_mass: jax.Array | None = None,
 ) -> PlaneNonHydrostaticState:
     """Restore dry mass to ``target_mass`` via a uniform additive
     correction to ``rho_prime``.
 
-    The correction is
+    The correction is computed in ANOMALY form, cancelling the
+    state-independent background integral ``B = sum(rho_ref * J *
+    area_T * dz)`` analytically instead of numerically:
 
-        delta = (target_mass - current_mass) / sum(J * area_T * dz)
+        delta = ((target_mass - B) - sum(rho' * J * area_T * dz))
+                / sum(J * area_T * dz)
         rho_prime' = rho_prime + delta
 
-    Adding a spatially uniform ``delta`` preserves every spatial
-    gradient of ``rho_prime`` used in the slow-tendency assembly, so
-    momentum / theta / w tendencies are unchanged by the fixer. This
-    matches the MPAS pattern in
+    This is algebraically identical to the naive
+    ``(target_mass - current_mass) / V`` (``current_mass = B +
+    anomaly``) but avoids subtracting two ~1e11-scale totals whose
+    true difference is near zero. The naive form is NOT exact at rest:
+    the traced ``current_mass`` reduce gets fused into the step graph
+    by XLA and can land 1 ulp away from the eagerly computed
+    ``target_mass``, injecting a spurious ``ulp(M)/V`` (~1e-16 kg/m³)
+    uniform shift into a bit-zero ``rho_prime`` every step (caught by
+    ``test_one_step_at_rest_with_mass_fixer``). In anomaly form the
+    only traced reduction sums ``rho' * w`` — exactly zero in any
+    fusion/reduction order when ``rho'`` is bit-zero — while
+    ``target_mass - B`` subtracts two eagerly computed scalars that
+    are bit-identical at rest (see :func:`_plane_background_mass`).
+    For ``B/2 <= target_mass <= 2B`` (always, since |rho'| << rho_ref)
+    the subtraction is exact by Sterbenz's lemma, so the anomaly form
+    is also strictly more accurate off rest. This refines the MPAS
+    pattern in
     :func:`compressible_euler_mpas.fix_mass_nonhydrostatic_mpas`.
+
+    ``background_mass`` lets the caller pass an EAGERLY precomputed
+    ``B`` (``PlaneCompressibleEulerModel`` computes it once in
+    ``__init__`` and threads it through ``_step_jit``). This matters
+    under ``jax.jit``: omnistaging stages even the all-constant
+    ``B`` reduce into the graph, and XLA's constant folding
+    (HloEvaluator) can accumulate in a different order than the eager
+    executable — measured 6 ulps of ``M`` on the 4x4x6 rest test —
+    reintroducing a spurious shift. An eagerly computed ``B`` is
+    embedded as a literal constant with its bits preserved. When
+    ``background_mass`` is ``None`` (eager utility callers, e.g. the
+    single-rank MPI short-circuit and unit tests), it is computed
+    inline, which is bit-safe outside a trace.
+
+    Sign convention: mass deficit (``current < target``) gives
+    ``delta > 0`` → ``rho'`` increases → mass increases by
+    ``delta * V = target - current``; the budget closes exactly.
 
     Differentiability
     -----------------
     The fixer is a pure additive correction with no ``jnp.where`` /
-    clip / branch, so ``jax.grad`` flows through cleanly. The global
-    sum is differentiable in JAX.
+    clip / branch, so ``jax.grad`` flows through cleanly. The anomaly
+    sum carries the same linear dependence on ``rho_prime`` as the
+    total-mass form (``d delta / d rho'[j,i,k] = -J*area_T*dz/V``),
+    so gradients are unchanged.
 
     Parameters
     ----------
@@ -345,9 +437,18 @@ def fix_mass_nonhydrostatic_plane(
     PlaneNonHydrostaticState
         Same state with ``rho_prime`` shifted by ``delta`` everywhere.
     """
-    current = compute_dry_mass_plane(state, grid, height_coord, terrain_metric)
+    # Static feature-gate style Python branch on a non-traced value
+    # (background_mass is either None or a concrete array — never a
+    # tracer in any caller).
+    if background_mass is None:
+        background_mass = _plane_background_mass(
+            grid, height_coord, terrain_metric,
+        )
+    anomaly = _plane_weighted_mass_sum(
+        state.rho_prime.data, grid, height_coord, terrain_metric,
+    )
     weighted_volume = _plane_volume_weight(grid, height_coord, terrain_metric)
-    delta = (target_mass - current) / weighted_volume
+    delta = ((target_mass - background_mass) - anomaly) / weighted_volume
     rho_p_new = state.rho_prime.data + delta
     return PlaneNonHydrostaticState(
         u=state.u,
@@ -1296,6 +1397,24 @@ def _compute_vreman_K_m_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord,
         grid.dx, grid.dy, height_coord.dz, c_vreman)
 
 
+def _compute_amd_K_m_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord,
+                           c_amd):
+    """Anisotropic Minimum-Dissipation eddy viscosity ``K_m`` at cell centres —
+    OPTIONAL alternative to :func:`_compute_smagorinsky_K_m_plane`. Computes the
+    nine A-grid velocity gradients (the SAME helper Vreman uses) and defers the
+    algebra to the shared
+    :func:`legoesm.atmosphere.physics.turbulence.amd.amd_nu_t`. Per-direction
+    filter widths handle Δx≠Δz; purely local (no plane average) ⇒ MPI-safe
+    algebra. The minimum-dissipation ``max(N,0)`` already gives zero K_m in
+    resolved laminar/1-D shear, so no N² cutoff / wall cap is needed."""
+    (uc, vc, wc, dudx, dudy, dudz, dvdx, dvdy, dvdz,
+     dwdx, dwdy, dwdz) = _velocity_gradients_plane(
+        u_yxz, v_yxz, w_yxz_half, grid, height_coord)
+    return _amd_nu_t_core(
+        dudx, dudy, dudz, dvdx, dvdy, dvdz, dwdx, dwdy, dwdz,
+        grid.dx, grid.dy, height_coord.dz, c_amd)
+
+
 def _compute_dynamic_smag_cs_plane(
     u_yxz: jax.Array,
     v_yxz: jax.Array,
@@ -2080,7 +2199,8 @@ def plane_compressible_euler_slow_tendencies(
     _use_mol = (_closure == "molecular"
                 and getattr(config, "molecular_viscosity", 0.0) > 0.0)
     _use_vreman = _closure == "vreman" and config.vreman_c > 0.0
-    if _use_smag or _use_mol or _use_vreman:
+    _use_amd = _closure == "amd" and getattr(config, "amd_c", 0.0) > 0.0
+    if _use_smag or _use_mol or _use_vreman or _use_amd:
         if _use_mol:
             # DNS: CONSTANT molecular kinematic viscosity ν everywhere — no
             # eddy model, no stratification cutoff. K_h = ν / Pr for the heat
@@ -2096,6 +2216,16 @@ def plane_compressible_euler_slow_tendencies(
             # (no plane average) ⇒ MPI-safe. K_h = K_m / Pr (same Prandtl).
             K_m = _compute_vreman_K_m_plane(
                 u, v, w, grid, height_coord, config.vreman_c)
+            sgs_prandtl = config.smagorinsky_prandtl
+        elif _use_amd:
+            # Anisotropic Minimum-Dissipation (Rozema 2015 / Abkar-Bae-Moin
+            # 2016) EDDY viscosity — an OPTIONAL alternative to Smagorinsky.
+            # Gives ZERO SGS viscosity where the resolved flow needs none
+            # (minimum dissipation) and never negative, with per-direction
+            # filter widths for anisotropic Δx≠Δz grids. Purely local (no plane
+            # average) ⇒ MPI-safe. K_h = K_m / Pr (same Prandtl).
+            K_m = _compute_amd_K_m_plane(
+                u, v, w, grid, height_coord, config.amd_c)
             sgs_prandtl = config.smagorinsky_prandtl
         else:
             # CRM/LES: Smagorinsky-Lilly EDDY viscosity. Full 3D strain (takes
@@ -2622,13 +2752,31 @@ def validate_plane_config(config: CompressibleEulerConfig) -> None:
             "or NaNs for Pr <= 0."
         )
     closure = getattr(config, "turbulence_closure", "smagorinsky")
-    if closure not in ("smagorinsky", "molecular", "none", "vreman"):
+    if closure not in ("smagorinsky", "molecular", "none", "vreman", "amd"):
         raise ValueError(
             f"turbulence_closure={closure!r} invalid; use 'smagorinsky' "
             "(CRM/LES eddy viscosity, SAM-faithful default), 'vreman' (optional "
-            "Vreman-2004 eddy viscosity), 'molecular' (DNS molecular viscosity), "
-            "or 'none' (inviscid)."
+            "Vreman-2004 eddy viscosity), 'amd' (optional Anisotropic "
+            "Minimum-Dissipation eddy viscosity), 'molecular' (DNS molecular "
+            "viscosity), or 'none' (inviscid)."
         )
+    if closure == "amd":
+        if getattr(config, "amd_c", 0.0) <= 0.0:
+            raise ValueError(
+                f"amd_c={getattr(config, 'amd_c', 0.0)!r} must be > 0 for "
+                "turbulence_closure='amd' (modified Poincaré const, e.g. 0.3)."
+            )
+        if getattr(config, "smagorinsky_dynamic", False):
+            raise ValueError(
+                "turbulence_closure='amd' is incompatible with "
+                "smagorinsky_dynamic=True (AMD is an inherently static, "
+                "self-contained closure — there is no dynamic-coefficient path)."
+            )
+        if config.smagorinsky_prandtl <= 0.0:
+            raise ValueError(
+                f"smagorinsky_prandtl={config.smagorinsky_prandtl!r} must be > 0 "
+                "for turbulence_closure='amd' (K_h = K_m / Pr)."
+            )
     if closure == "vreman":
         if config.vreman_c <= 0.0:
             raise ValueError(
@@ -2727,6 +2875,22 @@ class PlaneCompressibleEulerModel:
         self.terrain_metric = terrain_metric
         self.config = config
         self._target_mass: jax.Array | None = None
+        # Eagerly precomputed state-independent mass integral
+        # sum(rho_ref * J * area_T * dz). Computed HERE (outside any
+        # trace) so its bits match the eagerly computed target mass at
+        # rest; inside _step_jit it is embedded as a literal constant
+        # (an in-trace recompute would be const-folded by XLA with a
+        # different accumulation order — see
+        # fix_mass_nonhydrostatic_plane). Constant for the model's
+        # lifetime, so no reset needed (unlike _target_mass). Only the
+        # fix_mass branch of _step_jit reads it, so skip the device
+        # reduction when the fixer is off (static config value —
+        # feature-gate Python `if`, not jnp.where). The fixer itself
+        # tolerates None (computes inline), so this never traps.
+        self._background_mass: jax.Array | None = (
+            _plane_background_mass(grid, height_coord, terrain_metric)
+            if config.fix_mass else None
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -3076,5 +3240,8 @@ class PlaneCompressibleEulerModel:
             state_new = fix_mass_nonhydrostatic_plane(
                 state_new, target_mass, self.grid, self.height_coord,
                 self.terrain_metric,
+                # Concrete eager constant read off the static ``self``
+                # at trace time — bit-preserved as a jaxpr literal.
+                background_mass=self._background_mass,
             )
         return state_new

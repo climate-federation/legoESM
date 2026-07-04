@@ -184,5 +184,122 @@ def test_clm_multilayer_setup_builds_params_and_config(tmp_path):
     assert np.asarray(cfg.hydraulics.theta_sat).shape == (ncol, 1)
 
 
+def test_clm_multilayer_setup_preserves_surface_snow_stomata(tmp_path):
+    """clm_multilayer_setup must PRESERVE the base's surface/snow/stomata features
+    (it may overwrite ONLY hydraulics/thermal).  This is the contract the AMIP
+    driver's _setup_multilayer_land relies on to thread surface_bulk_scheme +
+    snow_albedo_feedback + land_stomatal_beta through, so use_multilayer_land is a
+    strict upgrade of the slab rather than a constant-bulk/no-snow/no-stomata
+    partial regression.  A silent reset here would re-introduce that regression."""
+    from legoesm.land.clm_surface_map import load_clm_surface, clm_multilayer_setup
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.soil_grid import SoilGridConfig
+
+    f = str(tmp_path / "s.nc")
+    _write_synthetic_surfdata(f)
+    lat = np.linspace(70, -70, 4); lon = np.linspace(20, 300, 5)
+    LO, LA = np.meshgrid(lon, lat)
+    m = load_clm_surface(f, LA.ravel(), LO.ravel())
+
+    # exactly what _setup_multilayer_land builds: land MOST for the soil SEB
+    # (matching the atmospheric land tile) + snow-albedo feedback + Jarvis stomata.
+    base = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=6, total_depth=2.5),
+        bulk_scheme="most",
+        snow_albedo_feedback=True,
+        stomata=StomataConfig(enabled=True),
+    )
+    _params, cfg = clm_multilayer_setup(m, base_config=base)
+
+    assert cfg.bulk_scheme == "most", "surface bulk scheme was reset (regression)"
+    assert cfg.snow_albedo_feedback is True, "snow-albedo feedback was reset"
+    assert cfg.stomata.enabled is True, "stomata was reset (regression)"
+
+
+def _write_surfdata_with_lai(path):
+    """Synthetic CLM surfdata WITH MONTHLY_LAI + PCT_CFT: 3 cells (bare / forest /
+    50-50 c3-c4 crop) at one latitude so the loader's crop-split LAI is checkable."""
+    import xarray as xr
+    nlat, nlon, n_nat, ncft, npft, nlev = 1, 3, 15, 2, _N_PFT, 5
+    lat = np.array([0.0]); lon = np.array([0.0, 120.0, 240.0])
+    LO, LA = np.meshgrid(lon, lat)
+    be = CLM5_PFT_NAMES.index("broadleaf_evergreen_tropical")
+    i_c3 = CLM5_PFT_NAMES.index("crop_c3"); i_c4 = CLM5_PFT_NAMES.index("crop_c4")
+
+    nat = np.zeros((n_nat, nlat, nlon))
+    nat[0, 0, 0] = 100.0            # cell0: all bare_soil (LAI 0)
+    nat[be, 0, 1] = 100.0           # cell1: all broadleaf-evergreen-tropical forest
+    natveg = np.array([[100.0, 100.0, 0.0]])
+    crop = np.array([[0.0, 0.0, 100.0]])                         # cell2: all crop
+    cft = np.zeros((ncft, nlat, nlon)); cft[0, 0, 2] = 50.0; cft[1, 0, 2] = 50.0
+
+    lai = np.zeros((12, npft, nlat, nlon))
+    lai[:, be, 0, 1] = 5.0          # forest LAI
+    lai[:, i_c3, 0, 2] = 2.0        # crop_c3 LAI
+    lai[:, i_c4, 0, 2] = 6.0        # crop_c4 LAI (distinct -> the split is observable)
+
+    ds = xr.Dataset({
+        "LATIXY": (("lsmlat", "lsmlon"), LA),
+        "LONGXY": (("lsmlat", "lsmlon"), LO),
+        "PCT_NAT_PFT": (("natpft", "lsmlat", "lsmlon"), nat),
+        "PCT_NATVEG": (("lsmlat", "lsmlon"), natveg),
+        "PCT_CROP": (("lsmlat", "lsmlon"), crop),
+        "PCT_CFT": (("cft", "lsmlat", "lsmlon"), cft),
+        "PCT_GLACIER": (("lsmlat", "lsmlon"), np.zeros((nlat, nlon))),
+        "MONTHLY_LAI": (("time", "lsmpft", "lsmlat", "lsmlon"), lai),
+        "PCT_SAND": (("nlevsoi", "lsmlat", "lsmlon"), np.full((nlev, nlat, nlon), 40.0)),
+        "PCT_CLAY": (("nlevsoi", "lsmlat", "lsmlon"), np.full((nlev, nlat, nlon), 20.0))})
+    ds.to_netcdf(path)
+
+
+def test_clm_loader_spatial_lai_crop_split(tmp_path):
+    """load_clm_surface builds a per-cell LAI from the CLM MONTHLY_LAI climatology
+    using the canonical PCT_CFT-aware 17-PFT weights (shared with read_clm5_cover_veg):
+    bare -> ~0, forest -> the forest LAI, and a 50/50 c3/c4 crop cell -> the AVERAGE of
+    the two crop LAIs (proving the crop split the old crop_c3-only path could not do)."""
+    f = str(tmp_path / "lai.nc")
+    _write_surfdata_with_lai(f)
+    tgt_lat = np.array([0.0, 0.0, 0.0]); tgt_lon = np.array([0.0, 120.0, 240.0])
+    m = load_clm_surface(f, tgt_lat, tgt_lon)
+    lai = np.asarray(m["lai"])
+    assert lai.shape == (3,)
+    assert lai[0] < 1e-6, f"bare cell LAI ~0, got {lai[0]}"
+    np.testing.assert_allclose(lai[1], 5.0, atol=1e-6)    # forest
+    np.testing.assert_allclose(lai[2], 4.0, atol=1e-6)    # 0.5*2 + 0.5*6 (c3/c4 split)
+    # end-to-end through the provider -> LandSurfaceParams.LAI
+    prov = CLMSurfaceParamProvider(m["pft_fractions"], m["theta_wp"], m["theta_fc"],
+                                   m["glacier_frac"], lai=m["lai"])
+    np.testing.assert_allclose(np.asarray(prov().LAI), lai, atol=1e-6)
+
+
+def test_clm_provider_maps_percell_lai():
+    """The provider passes the per-cell LAI through to LandSurfaceParams.LAI, clamped
+    to be non-negative (guards a regrid/interp undershoot)."""
+    lai_cell = np.array([-1.0, 0.0, 5.0])                 # negative -> clamped to 0
+    fr = np.full((3, _N_PFT), 1.0 / _N_PFT)
+    prov = CLMSurfaceParamProvider(
+        jnp.asarray(fr), jnp.full(3, 0.1), jnp.full(3, 0.3), jnp.zeros(3),
+        lai=jnp.asarray(lai_cell))
+    out = np.asarray(prov().LAI)
+    assert out.shape == (3,)
+    np.testing.assert_allclose(out, [0.0, 0.0, 5.0])
+
+
+def test_clm_loader_no_lai_when_climatology_absent(tmp_path):
+    """A surfdata without MONTHLY_LAI/PCT_CFT -> loader lai is None and the provider
+    leaves LandSurfaceParams.LAI None (the two-leaf canopy then uses its scalar
+    default) — preserving non-CLM/minimal-surfdata behaviour."""
+    f = str(tmp_path / "nolai.nc")
+    _write_synthetic_surfdata(f)                          # no MONTHLY_LAI / PCT_CFT
+    lat = np.linspace(80, -80, 4); lon = np.linspace(0, 270, 4)
+    LO, LA = np.meshgrid(lon, lat)
+    m = load_clm_surface(f, LA.ravel(), LO.ravel())
+    assert m.get("lai") is None
+    prov = CLMSurfaceParamProvider(m["pft_fractions"], m["theta_wp"], m["theta_fc"],
+                                   m["glacier_frac"])
+    assert prov().LAI is None
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

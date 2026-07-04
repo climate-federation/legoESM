@@ -153,6 +153,39 @@ def diagnose_sundqvist_process_rates(
     )
 
 
+__physics_contract__ = {
+    "summary": (
+        "Sundqvist et al. (1989) large-scale diagnostic condensation: "
+        "fractional-cloud RH-based condensation/evaporation of cloud water and "
+        "a Sundqvist-Berge autoconversion + accretion precipitation rate."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",
+        "hydrometeors.q_r": "kg/kg", "p_full": "Pa", "rho": "kg/m^3",
+        "dz": "m", "dt": "s",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_dt": "kg/kg/s",
+        "dq_r_dt": "kg/kg/s", "precipitation": "kg/m^2/s",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. Latent heating dT_dt is tied to the "
+        "diagnosed condensation rate via L_v. Condensate above the threshold is "
+        "converted to precipitation which leaves the column (precipitation "
+        ">= 0), so column moisture is NOT conserved -- no contract-level "
+        "conservation is claimed. Cloud water and q_v stay >= 0."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": "Sundqvist, Berge & Kristjansson (1989), Mon. Wea. Rev. 117, 1641-1657",
+    "idealized_test": (
+        "tests/unit/test_physics_microphysics.py — RH above the critical "
+        "threshold forms cloud with L_v heating; supersaturation is removed; "
+        "condensate above the conversion threshold rains out; q_c, q_v >= 0."
+    ),
+}
+
+
 def sundqvist_microphysics(
     T: jax.Array,
     q_v: jax.Array,

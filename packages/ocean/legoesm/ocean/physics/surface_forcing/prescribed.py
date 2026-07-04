@@ -15,6 +15,45 @@ from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 from legoesm.ocean.physics.surface_forcing.wind_profiles import compute_wind_stress
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
+__physics_contract__ = {
+    "summary": (
+        "Prescribed surface forcing: apply a fixed/analytic wind-stress profile "
+        "and prescribed heat and freshwater fluxes to the top ocean layer "
+        "(idealized spin-up forcing)."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "degC", "S": "psu",
+        "jacobian": "1 (z-star dimensionless)", "grid.grid_lat": "rad",
+        "cfg.tau_max": "N/m^2", "cfg.Q_net": "W/m^2", "cfg.E_minus_P": "m/s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "degC/s", "dS_dt": "psu/s",
+        "Q_net": "W/m^2", "tau_x": "N/m^2", "tau_y": "N/m^2",
+    },
+    "sign_convention": (
+        "Top-layer boundary sources (NOT interior-conservative); applies +tau "
+        "as an on-ocean stress DIRECTLY (accelerates the surface layer in the "
+        "stress direction; note the OPPOSITE sign to the external / "
+        "atmosphere-convention scheme); prescribed Q_net > 0 warms; "
+        "cfg.E_minus_P > 0 (net evaporation) SALINIFIES via a virtual salt flux "
+        "(dS/dt = S*(E-P)/dz_0 > 0), < 0 (net precipitation) freshens; z "
+        "positive up."
+    ),
+    # Prescribed surface boundary source/sink; not interior-conservative.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Idealized prescribed air-sea forcing; wind-stress profiles after "
+        "Bryan (1987) JPO 17 / Munk (1950) double-gyre & ACC configurations"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_surface_forcing_sign_convention.py — a "
+        "prescribed zonal wind stress accelerates the surface layer eastward; "
+        "a positive Q_net warms the top layer; the rest of the column is "
+        "untouched."
+    ),
+}
+
 
 def prescribed_surface_forcing(
     u: jnp.ndarray,

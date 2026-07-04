@@ -30,6 +30,43 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion_theta,
 )
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "EDMF turbulence: prognostic-TKE eddy diffusivity (ED) for local "
+        "down-gradient mixing combined with a buoyant mass-flux (MF) updraft "
+        "for nonlocal transport of heat and moisture in the convective PBL."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg", "tke": "m^2/s^2",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "T_sfc": "K", "q_sfc": "kg/kg", "rho": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "Km": "m^2/s", "Kh": "m^2/s", "shflx": "W/m^2", "lhflx": "W/m^2",
+        "ustar": "m/s", "h_pbl": "m", "tke_new": "m^2/s^2",
+    },
+    "sign_convention": (
+        "ED part is down-gradient (Km >= 0, Kh = Km/Pr_t >= 0); the MF part "
+        "adds -d/dz(M*(phi_u - phi)) so a warm/moist updraft transports heat "
+        "and moisture upward. The column budget is OPEN: the surface flux "
+        "(shflx > 0 upward, lhflx > 0 upward/moistening) is injected as the "
+        "bottom boundary condition and the top is zero-flux; z increases upward."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Siebesma, Soares & Teixeira (2007), J. Atmos. Sci. 64, 1230-1248; "
+        "Tan et al. (2018) plume closure"
+    ),
+    "idealized_test": (
+        "no surface flux + neutral non-buoyant column -> dead updraft "
+        "(w_u -> 0) and near-zero interior tendency; Km, Kh >= 0; "
+        "tke stays >= tke_min."
+    ),
+}
+
 
 # Convective velocity-scale coefficient w* ~ 2.5 u* (EDMF default).
 _EDMF_WSTAR_COEFF = 2.5

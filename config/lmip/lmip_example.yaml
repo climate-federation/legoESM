@@ -1,0 +1,16 @@
+# Example LMIP (single-point land) run config (issue #691).
+#
+#   .venv/bin/python scripts/run/run_lmip.py --config config/lmip/lmip_example.yaml
+#
+# Keys are argument dests of run_lmip.py (dashes -> underscores); every key must
+# be a valid dest or the loader raises.  Explicit CLI flags still override these
+# (precedence: CLI > config file > parser default).  `lat` may be set here or on
+# the CLI; add --require-config to force a run to be fully config-driven.
+lat: 40.0
+lon: -105.0
+days: 3650
+dt: 1800.0
+soil_texture: loam
+veg_type: c3_grass
+carbon_scheme: none
+snow_albedo_feedback: true

@@ -134,47 +134,32 @@ def mitgcm_canonical_ocean_config(
     This is the one auditable place the MITgcm card's choices live; all 5 tutorial
     recipes call it.
     """
+    from legoesm.ocean.recipes import get_recipe
     vmix: dict[str, float] = {}
     if A_v is not None:
         vmix["A_v"] = A_v
     if K_v is not None:
         vmix["K_v"] = K_v
+    # SINGLE SOURCE: the pinned MITgcm dycore identity is the `mitgcm_v1` catalog
+    # recipe (flux-form centered momentum, explicit_ab2 face-f Coriolis, AB2(total),
+    # fully-backward-Euler free surface, component flux_divergence friction, the
+    # differentiable / no-fixer runtime flags). Per-deck axes stay factory args.
+    bundle = get_recipe("mitgcm_v1")
     return LatLonCGridOceanConfig.from_flat(
+        **bundle,
         # --- per-deck dimensional knobs ---
+        eos_linear=eos_linear,
         g=g,
         rho_0=rho_0,
-        eos="linear",
-        eos_linear=eos_linear,
         A_h=A_h,
         K_h=K_h,
         physics=physics,
-        # --- pinned: MITgcm flux-form centered momentum ---
-        momentum_advection="flux_form",
-        momentum_flux_scheme="centered",
-        # --- per-deck tracer advection (tempAdvScheme) ---
+        # --- per-deck axes (differ between MITgcm tutorial decks) ---
         tracer_advection=tracer_advection,
-        # --- pinned: explicit_ab2 face-f Coriolis + AB2(total) ---
-        coriolis_scheme="explicit_ab2",
-        coriolis_energy_conserving=False,
-        outer_integrator="ab2",
-        ab2_scope="total",
-        ab2_epsilon=ab2_epsilon,
-        # --- free surface: per-deck solver, pinned fully-backward-Euler theta ---
         barotropic_solver=barotropic_solver,
-        barotropic_implicit_theta_eta=1.0,
-        barotropic_implicit_theta_pgf=1.0,
-        # --- pinned: component del2 lateral friction, no cos-lat scaling ---
-        lateral_viscosity_operator="flux_divergence",
-        A_h_lat_scaling=False,
-        C_smag=0.0,
+        ab2_epsilon=ab2_epsilon,
         lateral_side_bc=lateral_side_bc,
-        # --- per-deck vertical mixing (implicit backward-Euler) ---
         implicit_vertical_mixing=implicit_vertical_mixing,
-        bottom_drag_r=0.0,
-        # --- pinned: differentiable barotropic solve, no conservation fixer ---
-        differentiable_barotropic=True,
-        use_conservation_fixer=False,
-        enable_runtime_checks=False,
         **vmix,
         **overrides,
     )

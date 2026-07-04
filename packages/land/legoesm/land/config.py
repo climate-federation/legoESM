@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from legoesm import constants
 from legoesm.land.carbon.config import CarbonConfig
@@ -10,7 +10,9 @@ from legoesm.land.carbon.stomata import StomataConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
+from legoesm.land.topmodel_runoff import TopmodelConfig
 from legoesm.land.richards import RichardsConfig
+from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.surface_albedo import LandAlbedoConfig
 
 
@@ -26,6 +28,8 @@ __param_spec__ = {
             "Cd_land": {"units": "1", "bounds": (0.00099, 0.009), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "legoESM land surface", "shape": None},
             "Ch_land": {"units": "1", "bounds": (0.00099, 0.009), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "legoESM land surface", "shape": None},
             "W_max": {"units": "1", "bounds": (49.5, 450.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "legoESM land surface", "shape": None},
+            "K_infiltration": {"units": "m/s", "bounds": (1e-7, 1e-4), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "Rawls Brakensiek Miller 1983 (Green-Ampt K_s)", "shape": None},
+            "infil_suction_boost": {"units": "1", "bounds": (0.0, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "Mein & Larson 1973 (Green-Ampt psi_f/L_f)", "shape": None},
             "albedo_land": {"units": "1", "bounds": (0.066, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "radiation", "reference": "legoESM land surface", "shape": None},
             "d_soil": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "legoESM land surface", "shape": None},
             "emissivity_land": {"units": "1", "bounds": (0.3168, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "radiation", "reference": "legoESM land surface", "shape": None},
@@ -46,6 +50,7 @@ __param_spec__ = {
             "emissivity_land": {"units": "1", "bounds": (0.3168, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "radiation", "reference": "legoESM land surface", "shape": None},
             "root_depth": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "legoESM land surface", "shape": None},
             "snow_melt_rate": {"units": "1", "bounds": (1.65e-06, 1.5e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "legoESM land surface", "shape": None},
+            "soil_evap_resistance_exp": {"units": "1", "bounds": (0.0, 6.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "Sellers 1992 / Lee & Pielke 1992 (bare-soil evap resistance)", "shape": None},
             "theta_fc": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "legoESM land surface", "shape": None},
             "theta_wp": {"units": "1", "bounds": (0.0495, 0.45), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "legoESM land surface", "shape": None},
             "z0_land": {"units": "1", "bounds": (0.0165, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "legoESM land surface", "shape": None},
@@ -59,6 +64,10 @@ class LandConfig(NamedTuple):
     C_soil: float = 2.0e6       # Soil heat capacity [J/m3/K]
     d_soil: float = 1.0         # Slab soil depth [m]
     W_max: float = 150.0        # Bucket capacity [kg/m2]
+    # Bucket runoff partition (Green-Ampt infiltration excess + saturation excess)
+    K_infiltration: float = 1.0e-5     # Saturated infiltration capacity K_s [m/s]
+    infil_suction_boost: float = 2.0   # Green-Ampt suction enhancement psi_f/L_f [-]
+    infiltration_excess: bool = True   # Enable Hortonian infiltration-excess runoff
     albedo_land: float = 0.2    # Fallback constant albedo
     emissivity_land: float = 0.96
     z0_land: float = 0.05       # Roughness length [m]
@@ -77,6 +86,16 @@ class LandConfig(NamedTuple):
     carbon: CarbonConfig = CarbonConfig()
     # Stomatal conductance / plant physiology
     stomata: StomataConfig = StomataConfig()
+    # Surface scheme: ``SimpleSEBConfig`` (default) or ``TwoLeafCanopyConfig``.
+    # Type hint is ``Any`` because NamedTuple does not support Unions well;
+    # dispatch is done via ``isinstance`` inside ``step_land``.
+    surface_scheme: Any = SimpleSEBConfig()
+    # Runoff scheme (appended for positional-ABI stability): "bucket" (default,
+    # Green-Ampt Hortonian + Dunne saturation-excess, byte-identical) or
+    # "topmodel" (SIMTOP sub-grid saturated fraction + topographic baseflow,
+    # Niu 2005 / CLM4.5).  Unknown -> ValueError at dispatch.
+    runoff_scheme: str = "bucket"
+    topmodel: TopmodelConfig = TopmodelConfig()
 
 
 class MultiLayerLandConfig(NamedTuple):
@@ -89,6 +108,14 @@ class MultiLayerLandConfig(NamedTuple):
     Cd_land: float = 3.0e-3
     Ch_land: float = 3.0e-3
     beta_min: float = 0.1
+    # Surface soil resistance to BARE-SOIL evaporation.  The top soil layer dries
+    # into a high-resistance crust far faster than the root-zone mean, so bare-soil
+    # evaporation is throttled by the TOP-layer effective saturation S_top via a
+    # beta-method efficiency S_top**soil_evap_resistance_exp (Sellers 1992 / Lee &
+    # Pielke 1992 magnitude at exp=2).  exp=0 disables it (legacy: bare-soil evap
+    # limited only by the root-zone beta + whole-column water supply -> over-strong
+    # soil evaporation and a too-fast surface dry-down).
+    soil_evap_resistance_exp: float = 2.0
     bulk_scheme: str = "constant"
     z_ref: float = 10.0
     bulk_n_iter: int = 5
@@ -110,3 +137,22 @@ class MultiLayerLandConfig(NamedTuple):
     carbon: CarbonConfig = CarbonConfig()
     # Stomatal conductance / plant physiology
     stomata: StomataConfig = StomataConfig()
+    # Surface scheme: ``SimpleSEBConfig`` (default) or ``TwoLeafCanopyConfig``.
+    # Runtime dispatch via ``isinstance`` inside ``step_multilayer_land``.
+    surface_scheme: Any = SimpleSEBConfig()
+
+
+def resolve_land_config(land_mode: str, land_config=None):
+    """Return the land config object matching ``land_mode``.
+
+    Single source of truth for the ``land_mode`` -> config-type mapping used by
+    the coupled driver and the ``run_lmip_smoke`` driver: ``"multilayer"`` ->
+    :class:`MultiLayerLandConfig`, ``"slab"``/``"none"`` -> :class:`LandConfig`.
+    A ``land_config`` of the wrong type for the mode is replaced with the
+    mode's default (so the runtime type always matches the selected model).
+    """
+    if land_mode == "multilayer":
+        return land_config if isinstance(land_config, MultiLayerLandConfig) else MultiLayerLandConfig()
+    if land_mode == "none":
+        return LandConfig()
+    return land_config if isinstance(land_config, LandConfig) else LandConfig()

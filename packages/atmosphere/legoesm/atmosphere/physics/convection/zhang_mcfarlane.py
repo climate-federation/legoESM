@@ -69,6 +69,57 @@ from legoesm.atmosphere.physics.convection._zm_dilute import (
 __all__ = ("zhang_mcfarlane_convection",)
 
 
+__physics_contract__ = {
+    "summary": (
+        "Zhang-McFarlane (1995) deep convection: a single entraining-detraining "
+        "plume with a dilute-CAPE quasi-equilibrium closure (M_b relaxed toward "
+        "the CAPE-consumption equilibrium) and optional Gregory-97 CMT. Uses "
+        "the shared subsidence+detrainment kernel; condensate handed to "
+        "microphysics. Smooth (differentiable)."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa",
+        "u": "m/s", "v": "m/s",
+        "conv_prog_profile": "kg/m^2/s (cloud-base mass-flux carry M_b at [:, -1])",
+        "dt": "s",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "dq_c_conv_dt": "kg/kg/s (detrained cloud-water source to microphysics, >=0)",
+        "cape": "J/kg", "convective_mask": "1 (0-1 CAPE trigger)",
+        "du_dt_conv": "m/s^2 (CMT; None if disabled)",
+        "dv_dt_conv": "m/s^2 (CMT; None if disabled)",
+        "conv_prog_profile_new": "kg/m^2/s (relaxed M_b at [:, -1])",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. Where dilute CAPE>threshold the plume warms "
+        "aloft and dries the lower column via compensating subsidence + "
+        "detrainment; dq_c_conv_dt >= 0 is a cloud-water SOURCE to microphysics "
+        "(precip deferred). The kernel conserves column moist static energy and "
+        "total water (advective default: truncation order). Optional Gregory-97 "
+        "CMT redistributes momentum vertically (transport-dominant, not exactly "
+        "conserving, so momentum is not claimed)."
+    ),
+    # The DEFAULT public path uses the shared kernel's advective subsidence
+    # solve, conservative only to TRUNCATION ORDER (exact only in the opt-in
+    # implicit_flux path), so no contract-level conservation is guaranteed; the
+    # column budget is closed downstream.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Zhang & McFarlane (1995), Atmos.-Ocean 33, 407-446; "
+        "Gregory et al. (1997), Q. J. R. Meteorol. Soc. 123, 1153-1183"
+    ),
+    "idealized_test": (
+        "tests/unit/test_zhang_mcfarlane.py; CAPE<=threshold -> zero mass flux "
+        "and zero tendency; a conditionally-unstable tropical column -> heating "
+        "aloft + low-level drying with a positive dq_c source and M_b relaxing "
+        "toward the CAPE-closure equilibrium; column MSE and total water "
+        "conserved by the shared kernel."
+    ),
+}
+
+
 def zhang_mcfarlane_convection(
     T: jax.Array,
     q_v: jax.Array,
@@ -153,7 +204,13 @@ def zhang_mcfarlane_convection(
     cape_weight = cape_trigger(
         cape, config.cape_threshold, config.cape_sharpness,
     )
-    # Dimensionally-correct CAPE-relaxation closure (Kain 2004 §3):
+    # Generic first-order CAPE-relaxation SURROGATE (NOT a published
+    # closure).  This is *not* the Zhang-McFarlane (1995) closure, which
+    # consumes CAPE at a rate set by a cloud-work-function / quasi-equilibrium
+    # sensitivity, and it is *not* a Kain (2004) formula (Kain 2004 has no
+    # closed-form M_b — it iterates M_b to remove CAPE over TIMEC).  Here the
+    # ``g / rho_BL`` factor is a dimensional stand-in for that CAPE-consumption
+    # sensitivity, giving a kg/m^2/s mass flux:
     #     M_b = rho_BL * (CAPE - threshold)+ / (g * tau)   [kg/m^2/s]
     # The earlier formula ``(CAPE - threshold)+ / tau`` had units
     # ``m^2/s^3`` — wrong by a factor of ``rho_BL/g``.  At sea level

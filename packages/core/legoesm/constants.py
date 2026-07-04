@@ -96,6 +96,11 @@ sigma_water = 0.0728            # Surface tension of the water-air interface [N/
 # Turbulence
 # ==============================================================================
 kappa_von_karman = 0.4          # Von Kármán constant for the log-law (Pope 2000)
+nu_ocean_molecular = 1.4e-6     # Molecular kinematic viscosity of seawater
+                                # [m^2/s] (~10 degC; NEMO phycst/zdfiwm ``rnu``)
+kappa_T_ocean_molecular = 1.4e-7  # Molecular thermal diffusivity of seawater
+                                  # [m^2/s] (= nu_ocean_molecular / Pr, Pr~10;
+                                  # NEMO zdfiwm lower bound on wave-driven Kz)
 
 
 # ==============================================================================
@@ -103,6 +108,15 @@ kappa_von_karman = 0.4          # Von Kármán constant for the log-law (Pope 20
 # ==============================================================================
 sigma_sb = 5.670374419e-8       # Stefan-Boltzmann constant [W/(m^2*K^4)]
 S_0 = 1361.0                    # Total solar irradiance [W/m^2]
+
+# Present-day (≈ year 2000) Earth orbital elements for the realistic
+# (AMIP-II / CMIP) insolation.  Berger (1978) convention as used by CESM
+# ``shr_orb_mod`` / climlab: the longitude of perihelion is measured from
+# the moving vernal equinox.  Used only when orbital insolation is enabled;
+# the idealized default keeps a circular orbit (eccentricity = 0).
+orbital_eccentricity = 0.016704         # [-] orbital eccentricity (year ~2000)
+orbital_obliquity_deg = 23.439          # [deg] obliquity of the ecliptic
+orbital_long_perihelion_deg = 282.895   # [deg] longitude of perihelion from VE
 
 # Broadband longwave emissivities (used as defaults when a tile config
 # does not specify its own).  Sea-water and most ice surfaces are
@@ -144,6 +158,8 @@ c_p_vapor_nemo = 1860.0         # [J/(kg*K)] NEMO sbc_phy rCp_vap
 g_nemo = 9.80665                # [m/s^2]  NEMO phycst grav
 R_v_nemo = 461.495              # [J/(kg*K)] NEMO sbc_phy R_vap (ours: 461.51)
 L_fus_nemo = 0.3333601e6        # [J/kg]   NEMO phycst rLfus (ours L_f: 3.337e5)
+L_fus_isf_nemo = 0.334e6        # [J/kg]   NEMO isf_oce rLfusisf (ISF melt latent
+                                #          heat — deliberately NOT rLfus)
 c_p_ice_nemo = 2096.7           # [J/(kg*K)] NEMO phycst rcpi (ours c_pi: 2106)
 # Universal molar constants used by NEMO's barometric 10-m pressure
 # (sbc_phy pres_temp): molar gas constant + dry-air/water molar masses.

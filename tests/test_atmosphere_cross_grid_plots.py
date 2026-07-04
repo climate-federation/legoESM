@@ -1222,7 +1222,7 @@ class TestAmipToMatrixFormat:
 
     def _import_converter(self):
         import importlib.util
-        path = _SCRIPT_DIR / "_amip_to_matrix_format.py"
+        path = _SCRIPT_DIR.parent / "run" / "_amip_to_matrix_format.py"
         spec = importlib.util.spec_from_file_location(
             "_amip_to_matrix_format", path,
         )
@@ -4623,24 +4623,50 @@ class TestHeldSuarezMassDriftTolerance:
             "``HELD_SUAREZ_MASS_DRIFT_TOL`` and gate PASS on "
             "``mass_drift <= tol``."
         )
-        # The tolerance must be tight enough to catch gross
-        # violations (anything >= 1.0 = 100% drift) but loose
-        # enough to allow current latlon/spectral 1e-4.
-        # Parse the literal.
+        # The tolerance must be tight enough to catch gross violations
+        # (anything >= 1.0 = 100% drift) while remaining an active,
+        # positive gate.  iter-30 hoisted the dycore mass-drift PASS
+        # ceiling to a single module constant ``_DYCORE_MASS_DRIFT_TOL``
+        # and iter-23 tightened it to 1e-6 (every grid sits at ~1e-15 in
+        # this test path, so the original iter-117 1e-2 example became 13
+        # orders too loose).  ``run_held_suarez`` now references that
+        # constant BY NAME:
+        #     HELD_SUAREZ_MASS_DRIFT_TOL = _DYCORE_MASS_DRIFT_TOL
+        # so capture the RHS token and resolve a numeric literal either
+        # directly OR one hop through a module-level ``<name> = <literal>``.
         m = re.search(
-            r"HELD_SUAREZ_MASS_DRIFT_TOL\s*=\s*([\de.\-]+)",
+            r"HELD_SUAREZ_MASS_DRIFT_TOL\s*=\s*(\S+)",
             code_only,
         )
         assert m is not None, (
-            "iter-117: ``HELD_SUAREZ_MASS_DRIFT_TOL`` must "
-            "be defined as a literal."
+            "iter-117: ``HELD_SUAREZ_MASS_DRIFT_TOL`` must be assigned "
+            "(a numeric literal or a module-constant reference)."
         )
-        tol = float(m.group(1))
-        assert 1e-4 < tol < 1.0, (
-            f"iter-117: tolerance must be tight enough to "
-            f"catch gross violations (< 1.0) but loose enough "
-            f"to allow current latlon/spectral 1e-4 (> 1e-4).  "
-            f"Got {tol:.0e}."
+        rhs = m.group(1).rstrip(",")
+        _LIT = re.compile(r"^[-+]?[0-9.]+(?:[eE][-+]?[0-9]+)?$")
+        if _LIT.match(rhs):
+            tol = float(rhs)
+        else:
+            mod_src = inspect.getsource(M)
+            mm = re.search(
+                rf"^{re.escape(rhs)}\s*=\s*"
+                r"([-+]?[0-9.]+(?:[eE][-+]?[0-9]+)?)\s*$",
+                mod_src,
+                flags=re.MULTILINE,
+            )
+            assert mm is not None, (
+                f"iter-117: ``HELD_SUAREZ_MASS_DRIFT_TOL = {rhs}`` "
+                f"references a module constant that does not resolve to "
+                f"a numeric literal ``{rhs} = <number>`` at module scope."
+            )
+            tol = float(mm.group(1))
+        # Active conservation gate: positive (gate is live) and < 1.0
+        # (catches gross violations).  Production centralizes this at
+        # ``_DYCORE_MASS_DRIFT_TOL`` = 1e-6.
+        assert 0.0 < tol < 1.0, (
+            f"iter-117: mass-drift tolerance must be an active gate "
+            f"(> 0) that catches gross violations (< 1.0).  Got "
+            f"{tol:.0e}."
         )
 
     def test_apply_mass_drift_tolerance_fails_nan(self):

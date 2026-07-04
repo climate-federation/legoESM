@@ -41,6 +41,7 @@ from legoesm.driver.compiled_segments import (
 )
 from legoesm.driver.physics_pipeline import PhysicsOutput
 from legoesm.grids.cubed_sphere import create_cubed_sphere
+from legoesm import constants
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +118,7 @@ class _MockModel:
 
 def _mock_step_unified(
     need_rad,
-    T, p_s, q_v, q_c, q_r, u, v,
+    T, p_s, q_v, q_c, q_r, conv_prog, u, v,
     sst, sic, lat, lon,
     day_of_year, seconds_of_day, dt,
     solar_weights, s_0,
@@ -130,6 +131,12 @@ def _mock_step_unified(
     shape_3d = T.shape
     kwargs = _zero_physics_output(T, p_s)
     kwargs["dT_dt"] = jnp.full(shape_3d, 1e-5)
+    # Pass the prognostic convective state through unchanged so the scan
+    # carry stays shape/type-consistent (production carries
+    # ``phys_out.conv_prog`` straight into the next step). A scalar zero
+    # would break the ``(ncol,)`` carry contract.
+    if "conv_prog" in PhysicsOutput._fields:
+        kwargs["conv_prog"] = conv_prog
     phys_out = PhysicsOutput(**kwargs)
     held_new = (
         held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
@@ -297,7 +304,7 @@ def _build_raw_segment_fn(args: dict):
             phys_out, held_new = step_unified(
                 need_rad,
                 T_new, p_s_new,
-                carry.q_v, carry.q_c, carry.q_r,
+                carry.q_v, carry.q_c, carry.q_r, carry.conv_prog,
                 u_new, v_new,
                 forcing.sst, forcing.sic, lat, lon,
                 forcing.day_of_year, forcing.seconds_of_day, _dt,
@@ -445,8 +452,16 @@ class TestEnsembleCorrectness:
         # --- Compare member 0 ---
         vmap_member_0 = _extract_member(vmapped_result, 0)
         for field_name in SegmentCarry._fields:
-            vmap_arr = np.asarray(getattr(vmap_member_0, field_name))
-            indep_arr = np.asarray(getattr(indep_result_0, field_name))
+            vmap_val = getattr(vmap_member_0, field_name)
+            indep_val = getattr(indep_result_0, field_name)
+            # Optional carry slots (land tile, extra microphysics species)
+            # are None on both paths under this mock setup — nothing to
+            # compare numerically. Assert structural agreement, then skip.
+            if vmap_val is None or indep_val is None:
+                assert vmap_val is None and indep_val is None, field_name
+                continue
+            vmap_arr = np.asarray(vmap_val)
+            indep_arr = np.asarray(indep_val)
             if field_name in _DIAGNOSTIC_FIELDS:
                 np.testing.assert_allclose(
                     vmap_arr, indep_arr, atol=1e-14, rtol=1e-14,
@@ -467,8 +482,14 @@ class TestEnsembleCorrectness:
         # --- Compare member 1 ---
         vmap_member_1 = _extract_member(vmapped_result, 1)
         for field_name in SegmentCarry._fields:
-            vmap_arr = np.asarray(getattr(vmap_member_1, field_name))
-            indep_arr = np.asarray(getattr(indep_result_1, field_name))
+            vmap_val = getattr(vmap_member_1, field_name)
+            indep_val = getattr(indep_result_1, field_name)
+            # Optional carry slots are None on both paths — skip (see above).
+            if vmap_val is None or indep_val is None:
+                assert vmap_val is None and indep_val is None, field_name
+                continue
+            vmap_arr = np.asarray(vmap_val)
+            indep_arr = np.asarray(indep_val)
             if field_name in _DIAGNOSTIC_FIELDS:
                 np.testing.assert_allclose(
                     vmap_arr, indep_arr, atol=1e-14, rtol=1e-14,
@@ -544,7 +565,11 @@ class TestEnsembleCorrectness:
         for m in range(N_ENSEMBLE):
             member = _extract_member(vmapped_result, m)
             for field_name in SegmentCarry._fields:
-                arr = np.asarray(getattr(member, field_name))
+                val = getattr(member, field_name)
+                if val is None:
+                    # Optional carry slot not populated by the mock setup.
+                    continue
+                arr = np.asarray(val)
                 assert np.all(np.isfinite(arr)), (
                     f"Member {m}, field '{field_name}' has non-finite values"
                 )
@@ -573,8 +598,14 @@ class TestEnsembleCorrectness:
         jax.block_until_ready(compiled_result)
 
         for field_name in SegmentCarry._fields:
-            raw_arr = np.asarray(getattr(raw_result, field_name))
-            compiled_arr = np.asarray(getattr(compiled_result, field_name))
+            raw_val = getattr(raw_result, field_name)
+            compiled_val = getattr(compiled_result, field_name)
+            # Optional carry slots are None on both paths — skip (see above).
+            if raw_val is None or compiled_val is None:
+                assert raw_val is None and compiled_val is None, field_name
+                continue
+            raw_arr = np.asarray(raw_val)
+            compiled_arr = np.asarray(compiled_val)
             if field_name in _DIAGNOSTIC_FIELDS:
                 np.testing.assert_allclose(
                     raw_arr, compiled_arr, atol=1e-14, rtol=1e-14,
