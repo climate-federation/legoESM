@@ -1205,10 +1205,17 @@ class TestNemoCentredBarotropic:
             dino_lat_lon_grid, dino_lat_lon_model_config,
             dino_r1_exact_config,
         )
+        import dataclasses
+
+        # The PRESET keeps implicit_cn: the centred window needs the MLF
+        # before-state start (job 8826132 NaN; NEMO's own namelist:
+        # "model crashes if ln_bt_fw=T"). The blocks remain selectable:
         cfg = dino_r1_exact_config()
-        assert cfg.barotropic_solver == "explicit_substep"
-        assert cfg.barotropic_time_filter == "nemo_boxcar_centred"
-        assert cfg.barotropic_auto_cmax == 0.8
+        assert cfg.barotropic_solver == "implicit_cn"
+        cfg = dataclasses.replace(
+            cfg, barotropic_solver="explicit_substep",
+            barotropic_time_filter="nemo_boxcar_centred",
+            barotropic_auto_cmax=0.8)
         g = dino_lat_lon_grid(cfg, n_lon=12)
         mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
         assert mc.barotropic.barotropic_solver == "explicit_substep"

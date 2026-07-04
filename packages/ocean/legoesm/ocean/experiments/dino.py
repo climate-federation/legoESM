@@ -454,9 +454,14 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
         lateral_tracer_mixing="isoneutral",
         redi_S_max=0.01,               # rn_slpmax
         redi_slope_limit="nemo_cap",   # ldfslp cap semantics (not DM95)
-        barotropic_solver="explicit_substep",
-        barotropic_time_filter="nemo_boxcar_centred",  # ln_bt_fw=F, flt=1
-        barotropic_auto_cmax=0.8,      # ln_bt_auto rn_bt_cmax
+        # Centred split-explicit barotropic (ln_bt_fw=F + flt=1) is
+        # INSEPARABLE from the MLF integrator: the window needs the
+        # before-state (t-dt) start. The forward-frame reduction grows
+        # energy from day ~30 and NaNs by d180 (job 8826132) — and
+        # NEMO's own DINO namelist says the same ("model crashes if
+        # ln_bt_fw=T"). The filter + ln_bt_auto blocks are shipped and
+        # F90-locked; the PRESET keeps implicit_cn until ladder step 4
+        # (MLF) wires the before-state start.
         forcing_annual_cycle=True,
         wind_through_step=True,
     )
