@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import logging
+import os
 from pathlib import Path
 
 import equinox as eqx
@@ -443,6 +444,16 @@ def main():
                 f"(state={tot_state / n:.6f} "
                 f"drift={tot_drift / n:.6f} [K^2 @lead])"
             )
+            # Per-epoch RAW-params checkpoint (atomic): long-rollout phases
+            # run hours/epoch, so a SLURM TIMEOUT before the final save must
+            # not lose the whole fine-tune. The bias-corrected EMA is only
+            # meaningful at the end; the resumable artifact is the raw
+            # params. (~10 KB — cheap.)
+            _ck = args.out_ckpt.with_name(args.out_ckpt.stem + "_latest_raw.eqx")
+            _tmp = _ck.with_suffix(".eqx.tmp")
+            _ck.parent.mkdir(parents=True, exist_ok=True)
+            save_checkpoint(params, _tmp)
+            os.replace(_tmp, _ck)
             if not np.isfinite(avg_loss):
                 logger.error("non-finite loss; stopping")
                 broke = True
