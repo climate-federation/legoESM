@@ -179,6 +179,26 @@ def test_setup_multilayer_land_latlon(monkeypatch, tmp_path):
     del lon1d
 
 
+def test_setup_dispatches_land_surface_scheme(monkeypatch, tmp_path):
+    """land_surface_scheme dispatches the right surface scheme onto the
+    multilayer land config (issue #730): default -> SimpleSEB, 'two_leaf' ->
+    the DifferBESS two-leaf canopy (Kelvin h_r bare-soil + stomatal transp.)."""
+    from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
+    _patch_land_loaders(monkeypatch)
+
+    driver_seb = ModelDriver(_small_cfg(), output_dir=tmp_path / "seb")
+    driver_seb.setup()
+    assert isinstance(
+        driver_seb.physics.land_ml_cfg.surface_scheme, SimpleSEBConfig)
+
+    driver_two_leaf = ModelDriver(
+        _small_cfg()._replace(land_surface_scheme="two_leaf"),
+        output_dir=tmp_path / "twoleaf")
+    driver_two_leaf.setup()
+    assert isinstance(
+        driver_two_leaf.physics.land_ml_cfg.surface_scheme, TwoLeafCanopyConfig)
+
+
 def test_multilayer_land_evolves_over_amip_segment(monkeypatch, tmp_path):
     """A 1-day AMIP run completes and the prognostic soil column advances."""
     _patch_land_loaders(monkeypatch)

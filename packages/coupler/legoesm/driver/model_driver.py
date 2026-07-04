@@ -1369,6 +1369,23 @@ class ModelDriver:
         from legoesm.land.carbon.stomata import StomataConfig
         from legoesm.land.config import MultiLayerLandConfig
         from legoesm.land.soil_grid import SoilGridConfig
+        from legoesm.land.surface_scheme import (
+            SimpleSEBConfig, TwoLeafCanopyConfig,
+        )
+        # Land surface-scheme dispatch (#730). "simple_seb" (default) = bulk SEB
+        # with the beta_soil moisture path; "two_leaf" = DifferBESS two-leaf canopy
+        # (Kelvin h_r bare-soil + two-leaf stomatal transpiration), which limits
+        # land ET below potential and breaks the over-evaporation wet loop.
+        _scheme_name = self.config.land_surface_scheme
+        if _scheme_name == "simple_seb":
+            _surface_scheme = SimpleSEBConfig()
+        elif _scheme_name == "two_leaf":
+            _surface_scheme = TwoLeafCanopyConfig()
+        else:
+            raise ValueError(
+                f"Unknown land_surface_scheme {_scheme_name!r}; "
+                "expected 'simple_seb' or 'two_leaf'."
+            )
 
         ad = self.physics.adapter
         # column-order latitude / longitude in RADIANS.  The CLM map regrids onto
@@ -1429,6 +1446,7 @@ class ModelDriver:
             ),
             bulk_scheme="most",
             snow_albedo_feedback=self.config.snow_albedo_feedback,
+            surface_scheme=_surface_scheme,
             stomata=StomataConfig(
                 enabled=self.config.land_stomatal_beta,
                 gs_max=self.config.land_gs_max,
@@ -1453,8 +1471,9 @@ class ModelDriver:
         # potential-evaporation blowup (~day 8).  RH here uses the model's own
         # saturation_mixing_ratio -- the SAME law the land bulk flux uses -- so it
         # is consistent with the running physics (q_v is the atmospheric lowest
-        # level; p_s is a close proxy for the lowest-level pressure).  Fall back to
-        # the legacy uniform seed only when the IC carries no q_v tracer.
+        # level; p_s is a close proxy for the lowest-level pressure).  When the IC
+        # carries no q_v tracer, fall back to the configurable uniform seed
+        # frac * theta_sat (#766; default 0.5 == legacy init default).
         theta_init = None
         _qv = self.q_v  # canonical tracer store: raw (...,nlev) array, same column
         # layout as self.state.T.data; populated by both the analytical and ERA5 IC.
@@ -1473,7 +1492,9 @@ class ModelDriver:
         else:
             logger.warning(
                 "  Land tile: IC has no q_v tracer; multilayer soil seeded at the "
-                "moisture-uniform default (aridity-aware theta_init skipped).")
+                "uniform frac*theta_sat default (aridity-aware theta_init skipped).")
+            theta_init = (self.config.land_soil_moisture_init_frac
+                          * cfg.hydraulics.theta_sat)
         self._land_ml_state = init_multilayer_land_state(
             ncol, cfg, T_init=T_init, theta_init=theta_init)
         logger.info(

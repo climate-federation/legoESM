@@ -54,6 +54,8 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "convection",
         "turbulence",
         "surface_bulk_scheme",
+        "surface_stability_scheme",  # already guarded (config.py); ratchet entry
+        "land_surface_scheme",
         "gravity_wave_drag",
         "physics_parameterization",
         "ic",

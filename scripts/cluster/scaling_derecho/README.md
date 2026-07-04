@@ -487,3 +487,16 @@ Verify the first run's `NCCL_DEBUG=INFO` log prints
 program risks deadlock); the route-A lane sets it to 1 — the two transports
 never share a process.
 
+
+## 2026-07 lane E: icosahedral/MPAS multicontroller
+
+`gpu_multinode_scaling.pbs` gained lane E (`RUN_MPAS=1`, default on): the
+icosahedral MPAS PE dycore over `jax.distributed` + NCCL via
+`scripts/bench/bench_mpas_spmd_scaling.py` — cell-partition reorder
+(`reorder_voronoi_for_sharding`, Hilbert-SFC pinned for cross-process
+determinism) + `make_voronoi_sharded_step` ppermute halos. 6 processes
+(2 nodes x 3 GPUs): `nCells = 10*4^L + 2` admits 1/2/3/6 even splits at
+every level. A subdiv-4 smoke with `--parity-gate --check-conservation`
+runs before the timed `ICO_LEVEL` (default L7 = 163842 cells, ~27k
+cells/GPU at np=6) case. 2-process CPU federation gate:
+`tests/parallel/test_mpas_spmd_multicontroller_selfspawn.py`.

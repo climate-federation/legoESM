@@ -739,6 +739,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "#730). Only active with --land-stomatal-beta. "
                              f"Default {_EXPERIMENT_DEFAULTS.land_gs_max} "
                              "(byte-identical when unchanged).")
+    parser.add_argument("--land-soil-moisture-init-frac", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_soil_moisture_init_frac,
+                        dest="land_soil_moisture_init_frac",
+                        help="Initial multilayer soil water as a fraction of "
+                             "saturation (theta_init = frac * theta_sat) for the "
+                             "cold-start (issue #730). A drier start (e.g. 0.25) "
+                             "can break the over-evaporation wet loop and tip the "
+                             "land into the slab-like dry attractor. Default "
+                             f"{_EXPERIMENT_DEFAULTS.land_soil_moisture_init_frac} "
+                             "(byte-identical when unchanged).")
+    parser.add_argument("--land-surface-scheme",
+                        choices=["simple_seb", "two_leaf"],
+                        default=_EXPERIMENT_DEFAULTS.land_surface_scheme,
+                        dest="land_surface_scheme",
+                        help="Multilayer-land surface scheme (issue #730). "
+                             "'simple_seb' (default) = bulk SEB with the beta_soil "
+                             "moisture path; 'two_leaf' = DifferBESS two-leaf canopy "
+                             "energy balance (Kelvin h_r bare-soil + two-leaf "
+                             "stomatal transpiration) that holds land ET below "
+                             "potential and breaks the over-evaporation wet loop. "
+                             "Only affects --use-multilayer-land runs.")
     parser.add_argument("--snow-albedo-feedback", action="store_true",
                         default=False, dest="snow_albedo_feedback",
                         help="Prognostic snow + snow-albedo feedback on the "
@@ -1073,6 +1094,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_infiltration_excess=args.land_infiltration_excess,
         land_stomatal_beta=args.land_stomatal_beta,
         land_gs_max=args.land_gs_max,
+        land_soil_moisture_init_frac=args.land_soil_moisture_init_frac,
+        land_surface_scheme=args.land_surface_scheme,
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         dynamic_albedo=args.dynamic_albedo,

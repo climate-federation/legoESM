@@ -68,7 +68,7 @@ from legoesm.timestepping.integration import (
     IntegrationMixin,
     refuse_unthreaded_stateful_physics,
 )
-from legoesm.parallel.reductions import global_sum_mpi
+from legoesm.parallel.reductions import global_sum_mpi, is_multi_process
 from legoesm import constants
 
 
@@ -771,7 +771,14 @@ def _fix_mass_mpas_hydro(
     area_acc = area.astype(acc)
     if target_mass is not None:
         mass_new = jnp.sum(state_new.p_s.data.astype(acc) * area_acc)
-        if jax.process_count() > 1:
+        # is_multi_process(), NOT jax.process_count() > 1: the mpi4jax
+        # allreduce is correct only when each rank holds a LOCAL partition
+        # (route-A MPI).  Under multi-controller SPMD (route-B, federated
+        # jax.distributed) every process traces the GLOBAL sharded arrays —
+        # the sum above is already global via GSPMD, and routing it through
+        # mpi4jax would arm the forbidden mixed stack AND over-count by the
+        # world size (#751 latent-bug class).
+        if is_multi_process():
             mass_new = global_sum_mpi(mass_new)
         mass_old = target_mass
     else:
@@ -783,7 +790,7 @@ def _fix_mass_mpas_hydro(
             axis=-1,
         ) * area_acc[..., None]
         local = jnp.sum(_ps_stack, axis=tuple(range(area.ndim)))
-        if jax.process_count() > 1:
+        if is_multi_process():  # route-A local partitions only (see above)
             local = global_sum_mpi(local)
         mass_old, mass_new = local[0], local[1]
     correction = (mass_old - mass_new) / total_area

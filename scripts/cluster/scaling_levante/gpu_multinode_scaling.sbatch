@@ -20,7 +20,8 @@
 #                         gap-#0 lane (native ppermute halos replace the
 #                         route-A mpi4jax >=2-node ceiling)
 #   Lane D (RUN_OCEAN=1)  ocean lat-band multihost, 8 procs
-#                         (bench --transport spmd --multihost)
+#   Lane E (RUN_MPAS=1)   icosahedral MPAS multicontroller, 6 procs
+#                         (cell-partition reorder + ppermute halo)
 #
 # First run: NCCL_DEBUG=INFO must show `NET/IB` (not `NET/Socket`) — a wrong
 # bootstrap interface (NCCL_SOCKET_IFNAME) is the #1 IB-cluster timeout cause.
@@ -54,11 +55,13 @@ cd "$REPO"
 RUN_NCCL="${RUN_NCCL:-1}"
 RUN_LATLON="${RUN_LATLON:-1}"
 RUN_OCEAN="${RUN_OCEAN:-1}"
+RUN_MPAS="${RUN_MPAS:-1}"
 MODE="${MODE:-strong}"
 PRECISION="${PRECISION:-float32}"
 CS_RES="${CS_RES:-96}"
 LL_RES="${LL_RES:-512}"
 OC_RES="${OC_RES:-288}"
+ICO_LEVEL="${ICO_LEVEL:-7}"   # lane E: L7 = 163842 cells -> ~27k cells/GPU at np=6
 PHYSICS="${PHYSICS:-moist}"
 NLEV="${NLEV:-26}"
 OC_NLEV="${OC_NLEV:-20}"
@@ -72,7 +75,7 @@ mkdir -p "$OUTDIR"
 
 echo "=== HOSTS ==="; scontrol show hostnames "$SLURM_JOB_NODELIST"; date
 echo "=== CONFIG ==="
-echo "lanes: cube=$RUN_NCCL latlon=$RUN_LATLON ocean=$RUN_OCEAN | mode=$MODE prec=$PRECISION C$CS_RES LL$LL_RES OC$OC_RES"
+echo "lanes: cube=$RUN_NCCL latlon=$RUN_LATLON ocean=$RUN_OCEAN mpas=$RUN_MPAS | mode=$MODE prec=$PRECISION C$CS_RES LL$LL_RES OC$OC_RES ICO-L$ICO_LEVEL"
 echo "outdir=$OUTDIR"
 
 # One GPU per task: SLURM exports SLURM_LOCALID per task; jax's SLURM
@@ -134,6 +137,31 @@ if [ "$RUN_OCEAN" = "1" ]; then
         --out "$OUTDIR/ocean_multicontroller/ocean_spmd_scaling.jsonl"
     rc=$?
     [ "$rc" -ne 0 ] && { echo "LANE D FAILED rc=$rc"; rc_all=$rc; }
+fi
+
+# Lane E: icosahedral/MPAS multicontroller (6 procs = 2 nodes x 3 GPUs) —
+# cell-partition reorder + ppermute halo (make_voronoi_sharded_step) over
+# jax.distributed. np=6: nCells = 10*4^L+2 admits 1/2/3/6 even splits at
+# every level. Smoke gate (parity+conservation) first, then the timed case.
+# Gate: tests/parallel/test_mpas_spmd_multicontroller_selfspawn.py.
+if [ "$RUN_MPAS" = "1" ]; then
+    echo "=== LANE E: icosahedral MPAS multicontroller np=6 (L$ICO_LEVEL) ==="
+    srun --ntasks=6 --ntasks-per-node=3 --kill-on-bad-exit=1 bash -c "$PIN" _ \
+        "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
+        --multicontroller --n-devices 6 \
+        --subdivision 4 --nlev 8 --steps 4 --warmup 1 \
+        --partition-method sfc \
+        --parity-gate --check-conservation \
+        --out "$OUTDIR/mpas_multicontroller/smoke.jsonl" \
+    && srun --ntasks=6 --ntasks-per-node=3 --kill-on-bad-exit=1 bash -c "$PIN" _ \
+        "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
+        --multicontroller --n-devices 6 \
+        --subdivision "$ICO_LEVEL" --nlev "$NLEV" \
+        --steps $((N_WARMUP + N_TIMING)) --warmup "$N_WARMUP" \
+        --partition-method sfc \
+        --out "$OUTDIR/mpas_multicontroller/mpas_spmd_scaling.jsonl"
+    rc=$?
+    [ "$rc" -ne 0 ] && { echo "LANE E FAILED rc=$rc"; rc_all=$rc; }
 fi
 
 echo "=== RESULTS ==="
