@@ -217,7 +217,13 @@ def test_ingests_cube_cs_spmd_face_ladder(tmp_path):
     # constant ({128,128,126,126}) — the 4 rungs survive ONLY because n_devices
     # is in the dedup key.  Asserting the collapse condition makes this a real
     # regression guard: revert n_devices from _key and dropped becomes 2.
-    assert max(r["n_cores"] for r in cube) - min(r["n_cores"] for r in cube) <= 2
+    # Tolerance = the exact node-fill remainder for this ladder (128 - the
+    # smallest N*(128//N)), not a magic 2, so a ladder/node-size change stays
+    # honest.
+    _node_cores = 128
+    _fill_spread = _node_cores - min(n * (_node_cores // n) for n in (1, 2, 3, 6))
+    assert max(r["n_cores"] for r in cube) - min(r["n_cores"] for r in cube) \
+        <= _fill_spread
     assert len({r["n_resource"] for r in cube}) < len(cube)   # cores alone collapse
     # One shared face-edge resolution across the whole ladder.
     assert {r["resolution"] for r in cube} == {48}

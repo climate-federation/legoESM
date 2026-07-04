@@ -14,8 +14,9 @@ measured point with the columns the publication plotter consumes:
 (``..._gpu_...`` / ``..._cpu_...``) because the flat CPU-MPI JSON does not
 record a device field.  ``case`` maps ``physics_level`` ("none"->"dry",
 "moist"->"moist", others kept verbatim).  ``resolution_km`` is the nominal
-horizontal grid spacing for the grid family.  Duplicate keys
-(same backend/grid/case/precision/mode/n_devices/resolution) keep the row with
+horizontal grid spacing for the grid family.  Duplicate keys (the full
+``_key`` tuple: component, backend, grid, case, precision, mode, n_resource,
+n_devices, resolution, n_levels, physics_level, fix_mass) keep the row with
 the highest SYPD (best of repeated measurements); the number dropped is logged.
 
 Pure stdlib + ``legoesm.constants`` (for R_earth) — no JAX — so it runs in a
