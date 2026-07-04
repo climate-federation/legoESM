@@ -52,11 +52,11 @@ def _load_yaml(p):
         return yaml.safe_load(fh) or {}
 
 
-def _merged_cfg(suite_path: Path) -> dict:
+def _merged_cfg(suite_path: Path, variant: str = "classical") -> dict:
     suite = _load_yaml(suite_path)
     base = _load_yaml(Path(suite["base"]))
     base.update(suite.get("cfg_overrides", {}) or {})
-    base.update(_load_yaml(suite_path.parent / "variant_classical.yaml"))
+    base.update(_load_yaml(suite_path.parent / f"variant_{variant}.yaml"))
     base.setdefault("nlev", base["n_levels"])
     return base
 
@@ -67,6 +67,15 @@ def main():
                     default=Path("results/aimip_ace2loss_assembled/classical/params.eqx"))
     ap.add_argument("--out-ckpt", type=Path,
                     default=Path("results/aimip_amip_finetune/classical_stable.eqx"))
+    ap.add_argument("--variant", type=str, default="classical",
+                    choices=["classical", "column_nn", "sfno_physics"],
+                    help="What to fine-tune: the classical scheme knobs, or "
+                         "the NN weights (column MLP / SFNO physics). NN "
+                         "variants free-run to a radiative runaway exactly "
+                         "like the pre-finetune classical (sfno r0 sanity: "
+                         "435 K year-1) — same multi-day prescribed-SST "
+                         "rollout + drift penalty, via "
+                         "spectral_rollout(forcing_base=...).")
     ap.add_argument("--suite", type=Path, default=Path("config/aimip/ace2/suite.yaml"))
     ap.add_argument("--forcing-path", type=str, default=None)
     ap.add_argument("--cache-path", type=str,
@@ -131,12 +140,15 @@ def main():
         TrainingERA5Config, era5_to_spectral_carry, load_era5_ic,
     )
     from legoesm.training.neural_gcm_spectral import (
-        carry_to_spectral_state, spectral_amip_rollout,
+        carry_to_spectral_state, spectral_amip_rollout, spectral_rollout,
         spectral_state_vs_carry_loss,
     )
 
-    cfg = _merged_cfg(args.suite)
+    cfg = _merged_cfg(args.suite, args.variant)
+    is_nn = args.variant != "classical"
     if args.convection_scheme:
+        if is_nn:
+            raise SystemExit("--convection-scheme is classical-only.")
         # Single override point: make_aimip_* (loss + warm-up) AND the sizing
         # PhysicsState all read cfg["aimip_convection"].
         cfg["aimip_convection"] = args.convection_scheme
@@ -168,14 +180,16 @@ def main():
     ocean = land < 0.5
     T_ice = float(constants.T_freeze_ocean)
     wb2 = TrainingERA5Config().zarr_store
-    ds_o3 = open_arco_era5()  # historical ERA5 ozone (ARCO)
+    # Historical ERA5 ozone (ARCO): only the classical RRTMGP consumes it.
+    ds_o3 = None if is_nn else open_arco_era5()
 
     def _override_at(date: _dt.date):
         ns = np.datetime64(date).astype("datetime64[ns]").astype(np.int64)
         sst = interp_forcing_at(times_ns, sst_m, ns)
         sic = np.clip(interp_forcing_at(times_ns, sic_m, ns), 0.0, 1.0)
         tsfc = np.asarray(blend_surface_temperature(sst, sic, T_ice))
-        return np.where(ocean, tsfc, np.nan).astype(np.float64)
+        return (np.where(ocean, tsfc, np.nan).astype(np.float64),
+                np.where(ocean, sic, 0.0).astype(np.float64))
 
     # --- sample builder (rollout length varies across the curriculum) ---
     def _build_samples(rollout_days):
@@ -187,45 +201,103 @@ def main():
             ic_carry = era5_to_spectral_carry(load_era5_ic(wb2, d0.year, d0.month, d0.day), grid, sigma)
             tgt_carry = era5_to_spectral_carry(load_era5_ic(wb2, d1.year, d1.month, d1.day), grid, sigma)
             mid = d0 + _dt.timedelta(days=rollout_days // 2)
-            # Transient historical GHG for this sample's year (traced scalars ->
-            # no retrace across samples/years). Physical RRTMGP needs it.
-            ghg = {k: jnp.asarray(float(v)) for k, v in ghg_vmr_at_year(d0.year).items()}
-            # Transient historical ozone at this sample's date (ncol, nlev),
-            # interpolated to sigma with the sample's own surface pressure.
-            o3 = jnp.asarray(ozone_vmr_at_date(
-                ds_o3, d0, grid, sigma_full, np.asarray(ic_carry.p_s),
-            ))
-            out.append((
-                carry_to_spectral_state(ic_carry, grid), tgt_carry,
-                jnp.asarray(_override_at(mid)),
-                jnp.asarray(float(d0.timetuple().tm_yday)),
-                ghg, o3,
-            ))
+            t_sfc_col, sic_col = _override_at(mid)
+            doy = jnp.asarray(float(d0.timetuple().tm_yday))
+            ic_state = carry_to_spectral_state(ic_carry, grid)
+            if is_nn:
+                # NN forcing dict fields (spectral_rollout advances the
+                # calendar per step from doy/seconds inside the scan).
+                out.append((
+                    ic_state, tgt_carry, jnp.asarray(t_sfc_col),
+                    jnp.asarray(sic_col), doy,
+                ))
+            else:
+                # Transient historical GHG for this sample's year (traced
+                # scalars -> no retrace across samples/years). Physical
+                # RRTMGP needs it.
+                ghg = {k: jnp.asarray(float(v))
+                       for k, v in ghg_vmr_at_year(d0.year).items()}
+                # Transient historical ozone at this sample's date
+                # (ncol, nlev), interpolated to sigma with the sample's own
+                # surface pressure.
+                o3 = jnp.asarray(ozone_vmr_at_date(
+                    ds_o3, d0, grid, sigma_full, np.asarray(ic_carry.p_s),
+                ))
+                out.append((
+                    ic_state, tgt_carry, jnp.asarray(t_sfc_col), doy, ghg, o3,
+                ))
             if phis is None:
                 phis = jnp.asarray(ic_carry.phis)
         return out, phis
 
-    _, phis0 = _build_samples(1)  # phis is rollout-agnostic -> land mask once
-    land_mask = land_mask_from_phis(phis0, smooth=True)
-    sizing_ps = init_physics_state(
-        ncol, nlev,
-        PhysicsConfig(
-            radiation=RadiationConfig(scheme="none"),
-            convection=ConvectionConfig(scheme=str(cfg["aimip_convection"])),
-            turbulence=TurbulenceConfig(scheme=str(cfg["aimip_turbulence"])),
-            microphysics=MicrophysicsConfig(scheme=str(cfg["aimip_microphysics"])),
-            gravity_wave_drag=GravityWaveDragConfig(scheme=str(cfg["aimip_gwd"])),
-        ),
-    )
     sponge = (compute_sponge_factor(sigma.sigma_full, pe.sponge_sigma, pe.sponge_tau, dt)
               if pe.sponge_tau > 0 else None)
     sfilt = (compute_spectral_filter(grid.ls, grid.n_max, order=pe.spectral_filter_order,
                                      cutoff_fraction=pe.spectral_filter_strength)
              if pe.spectral_filter_strength > 0 else None)
 
-    params0 = load_checkpoint(
-        AIMIPClassicalParams.from_defaults(spatial_surface=True), args.init_ckpt,
-    )
+    land_mask = None
+    sizing_ps = None
+    if not is_nn:
+        _, phis0 = _build_samples(1)  # phis is rollout-agnostic -> land mask once
+        land_mask = land_mask_from_phis(phis0, smooth=True)
+        sizing_ps = init_physics_state(
+            ncol, nlev,
+            PhysicsConfig(
+                radiation=RadiationConfig(scheme="none"),
+                convection=ConvectionConfig(scheme=str(cfg["aimip_convection"])),
+                turbulence=TurbulenceConfig(scheme=str(cfg["aimip_turbulence"])),
+                microphysics=MicrophysicsConfig(scheme=str(cfg["aimip_microphysics"])),
+                gravity_wave_drag=GravityWaveDragConfig(scheme=str(cfg["aimip_gwd"])),
+            ),
+        )
+
+    # --- what gets fine-tuned: classical scheme knobs OR the NN weights ---
+    if args.variant == "column_nn":
+        from legoesm.atmosphere.physics.learned_column import (
+            build_column_physics,
+        )
+        from legoesm.training.neural_gcm_spectral import (
+            make_column_mlp_spectral_physics,
+        )
+        params0 = load_checkpoint(
+            build_column_physics(
+                nlev=nlev,
+                hidden_dim=int(cfg.get("nn_hidden_dim", 256)),
+                n_layers=int(cfg.get("nn_n_layers", 4)),
+                key=jax.random.PRNGKey(int(cfg.get("nn_seed", 0))),
+            ),
+            args.init_ckpt,
+        )
+        _make_nn_physics = make_column_mlp_spectral_physics
+    elif args.variant == "sfno_physics":
+        from legoesm.ml.channel_packing import PE3DChannelSpec
+        from legoesm.ml.sfno import SFNO, SFNOConfig
+        from legoesm.training.neural_gcm_spectral import (
+            N_SFNO_FORCING_CHANNELS, make_sfno_spectral_physics,
+        )
+        _spec = PE3DChannelSpec(nlev=nlev)
+        params0 = load_checkpoint(
+            SFNO(
+                SFNOConfig(
+                    in_channels=_spec.n_channels + N_SFNO_FORCING_CHANNELS,
+                    out_channels=_spec.n_channels,
+                    embed_dim=int(cfg.get("sfno_embed_dim", 128)),
+                    n_blocks=int(cfg.get("sfno_n_blocks", 4)),
+                    mlp_expansion=int(cfg.get("sfno_mlp_expansion", 4)),
+                    residual_prediction=False,
+                ),
+                grid, key=jax.random.PRNGKey(int(cfg.get("sfno_seed", 0))),
+            ),
+            args.init_ckpt,
+        )
+        _make_nn_physics = make_sfno_spectral_physics
+    else:
+        params0 = load_checkpoint(
+            AIMIPClassicalParams.from_defaults(spatial_surface=True),
+            args.init_ckpt,
+        )
+        _make_nn_physics = None
 
     def _gm_surf_T_state(s):
         T = spectral_pe_to_grid(s, grid, sigma)["T"][..., -1]  # (n_lat, n_lon)
@@ -239,25 +311,42 @@ def main():
         # ONE sample per graph -> memory = a single checkpointed rollout (the
         # multi-sample sum OOM'd at the 3-day phase); the epoch loop accumulates
         # gradients across samples instead.
-        non_rad_fn, rad_fn = make_aimip_classical_spectral_physics(
-            params, grid, dt,
-            radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
-            rad_update_interval_steps=args.rad_update_interval,
-            convection_scheme=str(cfg["aimip_convection"]),
-            turbulence_scheme=str(cfg["aimip_turbulence"]),
-            gwd_scheme=str(cfg["aimip_gwd"]),
-            microphysics_scheme=str(cfg["aimip_microphysics"]),
-            cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
-            land_mask=land_mask, split_rad=True,
-        )
-        ic_state, tgt_carry, sst_col, doy, ghg, o3 = sample
-        pred = spectral_amip_rollout(
-            ic_state, non_rad_fn, rad_fn, grid, sigma, pe, dt, n_steps,
-            sst_col=sst_col, sizing_phys_state=sizing_ps, day_of_year_base=doy,
-            rad_update_interval=args.rad_update_interval,
-            sponge_factor=sponge, spectral_filter=sfilt,
-            ghg_vmr=ghg, o3_vmr=o3, use_checkpoint=True,
-        )
+        if is_nn:
+            # NN weights are the traced leaves: build the physics fn INSIDE
+            # the loss so gradients flow (same doctrine as the classical
+            # params below). spectral_rollout's non-gated path jax.checkpoints
+            # every step, so reverse-mode through a multi-day rollout fits.
+            physics_fn = _make_nn_physics(params, grid)
+            ic_state, tgt_carry, t_sfc_col, sic_col, doy = sample
+            pred = spectral_rollout(
+                ic_state, physics_fn, grid, sigma, pe, dt, n_steps,
+                sponge, sfilt,
+                forcing_base={
+                    "T_sfc": t_sfc_col, "sic": sic_col,
+                    "day_of_year": doy,
+                    "seconds_of_day": jnp.asarray(0.0, jnp.float64),
+                },
+            )
+        else:
+            non_rad_fn, rad_fn = make_aimip_classical_spectral_physics(
+                params, grid, dt,
+                radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
+                rad_update_interval_steps=args.rad_update_interval,
+                convection_scheme=str(cfg["aimip_convection"]),
+                turbulence_scheme=str(cfg["aimip_turbulence"]),
+                gwd_scheme=str(cfg["aimip_gwd"]),
+                microphysics_scheme=str(cfg["aimip_microphysics"]),
+                cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
+                land_mask=land_mask, split_rad=True,
+            )
+            ic_state, tgt_carry, sst_col, doy, ghg, o3 = sample
+            pred = spectral_amip_rollout(
+                ic_state, non_rad_fn, rad_fn, grid, sigma, pe, dt, n_steps,
+                sst_col=sst_col, sizing_phys_state=sizing_ps, day_of_year_base=doy,
+                rad_update_interval=args.rad_update_interval,
+                sponge_factor=sponge, spectral_filter=sfilt,
+                ghg_vmr=ghg, o3_vmr=o3, use_checkpoint=True,
+            )
         state_loss = spectral_state_vs_carry_loss(
             pred, tgt_carry, grid, sigma, sigma_full, spec_cfg.loss_config,
         )
@@ -273,8 +362,9 @@ def main():
     # params: the NetCDF gas-optics load is module-cached by static file paths,
     # but the first (inside-trace) call would hit the tracer state and crash with
     # TracerArrayConversionError. Mirrors _train_spectral_loop's warm-up.
+    # NN variants have no RRTMGP -> nothing to warm.
     try:
-        _warm = make_aimip_classical_spectral_physics(
+        _warm = None if is_nn else make_aimip_classical_spectral_physics(
             params0, grid, dt,
             radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
             rad_update_interval_steps=args.rad_update_interval,
