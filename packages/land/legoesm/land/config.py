@@ -10,6 +10,7 @@ from legoesm.land.carbon.stomata import StomataConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
+from legoesm.land.topmodel_runoff import TopmodelConfig
 from legoesm.land.richards import RichardsConfig
 from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.surface_albedo import LandAlbedoConfig
@@ -89,6 +90,12 @@ class LandConfig(NamedTuple):
     # Type hint is ``Any`` because NamedTuple does not support Unions well;
     # dispatch is done via ``isinstance`` inside ``step_land``.
     surface_scheme: Any = SimpleSEBConfig()
+    # Runoff scheme (appended for positional-ABI stability): "bucket" (default,
+    # Green-Ampt Hortonian + Dunne saturation-excess, byte-identical) or
+    # "topmodel" (SIMTOP sub-grid saturated fraction + topographic baseflow,
+    # Niu 2005 / CLM4.5).  Unknown -> ValueError at dispatch.
+    runoff_scheme: str = "bucket"
+    topmodel: TopmodelConfig = TopmodelConfig()
 
 
 class MultiLayerLandConfig(NamedTuple):

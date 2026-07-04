@@ -435,6 +435,7 @@ def compute_most_fluxes(
     z_diag=2.0,
     max_exchange_coeff=None,
     stability_scheme="dyer1974",
+    return_convergence=False,
 ):
     """Compute stability-dependent bulk fluxes via iterative MOST.
 
@@ -497,6 +498,16 @@ def compute_most_fluxes(
         to zero under strong stability (Arctic sea-ice / nocturnal SBL). The
         unstable branch (zeta < 0) stays Businger-Dyer regardless. Validated at
         function entry (a typo raises ``ValueError``).
+    return_convergence : bool
+        When True, additionally return the MOST fixed-point convergence
+        residual (the relative change in ``u*`` over the FINAL iteration).
+        Default False = byte-identical to the prior signature.  The Obukhov
+        iteration is a fixed ``n_iter`` ``fori_loop`` (AD-safe — a
+        tolerance-based ``while_loop`` would break reverse-mode ``grad``), so
+        this residual is the convergence CHECK: it is ~0 where the fixed
+        iteration count converged and O(1) in the strong-stability columns
+        where it did not (the gap vs a tolerance-guaranteed root solve, e.g.
+        CliMA SurfaceFluxes.jl).  It does not affect the fluxes.
 
     Returns
     -------
@@ -508,6 +519,10 @@ def compute_most_fluxes(
         Latent heat flux [W/m²] (positive upward = surface moister).
     ustar : array
         Friction velocity [m/s].
+    most_residual : array
+        ONLY when ``return_convergence=True`` (appended last, after ``T_2m``
+        if ``return_2m`` is also set): the final-iteration relative ``u*``
+        change [1], per column.
     """
     # Dispatch hardening (CLAUDE.md): ``scheme`` is a static Python string
     # resolved at trace time. Validate it at function entry so a typo'd name
@@ -588,7 +603,10 @@ def compute_most_fluxes(
     theta_star = KAPPA * dT / jnp.maximum(ln_zt_z0t, _denom_floor)
     q_star_val = KAPPA * dq / jnp.maximum(ln_zq_z0q, _denom_floor)
 
-    carry = (u_star, z0, z0_t, z0_q, theta_star, q_star_val)
+    # 7th carry leaf: the MOST convergence residual (relative u* change),
+    # updated each iteration; seeded at 1.0 ("not yet converged").
+    resid0 = jnp.ones_like(u_star)
+    carry = (u_star, z0, z0_t, z0_q, theta_star, q_star_val, resid0)
     # The MOST iteration mixes the (possibly float32) input state with float64
     # physical constants (G, NU_AIR, c_pd via the virtual-T coefficient), so a
     # carry leaf would silently promote float32 -> float64 mid-loop and trip
@@ -598,7 +616,7 @@ def compute_most_fluxes(
     _carry_dtypes = tuple(c.dtype for c in carry)
 
     def body_fn(i, carry):
-        u_star, z0, z0_t, z0_q, theta_star, q_star_val = carry
+        u_star, z0, z0_t, z0_q, theta_star, q_star_val, _resid = carry
         u_star_safe = jnp.maximum(u_star, 1e-6)
 
         # Virtual potential temperature scale (1/ε − 1 ≈ 0.6078)
@@ -731,8 +749,12 @@ def compute_most_fluxes(
             z0_t_new = z0_t  # not used in coefficient path
             z0_q_new = z0_q  # not used in coefficient path
 
+            # Convergence residual (relative u* change) — see the common
+            # return below; kept in sync so the carry structure matches.
+            resid_new = jnp.abs(u_star_new - u_star) / jnp.maximum(
+                jnp.abs(u_star_new), 1e-6)
             return (u_star_new, z0_new, z0_t_new, z0_q_new,
-                    theta_star_new, q_star_new)
+                    theta_star_new, q_star_new, resid_new)
 
         else:
             z0_new = z0
@@ -753,8 +775,17 @@ def compute_most_fluxes(
         theta_star_new = KAPPA * dT / denom_h
         q_star_new = KAPPA * dq / denom_q
 
+        # MOST fixed-point convergence residual: the relative change in u*
+        # over this iteration (small = converged).  DIAGNOSTIC ONLY — it does
+        # not feed the fluxes, so the default (return_convergence=False) path
+        # is byte-identical; it lets callers/tests detect columns where the
+        # fixed n_iter under-converges (strong stability), the gap vs a
+        # tolerance-based root solve (CliMA SurfaceFluxes.jl).
+        resid_new = jnp.abs(u_star_new - u_star) / jnp.maximum(
+            jnp.abs(u_star_new), 1e-6)
+
         return (u_star_new, z0_new, z0_t_new, z0_q_new,
-                theta_star_new, q_star_new)
+                theta_star_new, q_star_new, resid_new)
 
     def _body_fn_dtype_stable(i, carry):
         out = body_fn(i, carry)
@@ -762,7 +793,7 @@ def compute_most_fluxes(
                      for o, d in zip(out, _carry_dtypes))
 
     carry = jax.lax.fori_loop(0, n_iter, _body_fn_dtype_stable, carry)
-    u_star, z0, z0_t, z0_q, theta_star, q_star_val = carry
+    u_star, z0, z0_t, z0_q, theta_star, q_star_val, most_residual = carry
 
     # Fluxes from scaling parameters
     _L = constants.L_v if L_latent is None else L_latent
@@ -791,8 +822,12 @@ def compute_most_fluxes(
         lo = jnp.minimum(T_atm, T_sfc)
         hi = jnp.maximum(T_atm, T_sfc)
         T_2m = jnp.clip(T_2m, lo, hi)
+        if return_convergence:
+            return tau_x, tau_y, shflx, lhflx, u_star, T_2m, most_residual
         return tau_x, tau_y, shflx, lhflx, u_star, T_2m
 
+    if return_convergence:
+        return tau_x, tau_y, shflx, lhflx, u_star, most_residual
     return tau_x, tau_y, shflx, lhflx, u_star
 
 
