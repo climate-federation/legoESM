@@ -176,7 +176,15 @@ def _cs_spmd_case(res, n_ranks, sypd, backend="cpu"):
     """A FLAT cube cs-spmd payload as emitted by
     run_cpu_mpi_scaling.py --cs-spmd (grid_type='cubed-sphere', device
     ladder = face divisors, resolution = face-edge N).  Measured shape:
-    job on Ginsburg C24/L10/np1 -> sypd 383.7."""
+    job on Ginsburg C24/L10/np1 -> sypd 383.7.
+
+    Models the REAL route-B node-fill: each rung fills a 128-core node with
+    THREADS=128/N per rank, so n_cores ~ 128 for EVERY rung (N in {1,2,3,6} ->
+    {128,128,126,126}) while n_devices varies.  Emitting cpus_per_task/n_cores
+    here (as the real run does) is load-bearing: without n_devices in the dedup
+    key the near-constant n_cores collapses the 4-rung curve to ~2 points."""
+    _node_cores = 128
+    cpt = max(1, _node_cores // n_ranks)
     return {
         "n_ranks": n_ranks, "resolution": res, "n_levels": 10,
         "precision": "float64", "mode": "single", "backend": backend,
@@ -184,6 +192,7 @@ def _cs_spmd_case(res, n_ranks, sypd, backend="cpu"):
         "dt_seconds": 450.0, "time_per_step_ms": 1000.0 / sypd,
         "sypd": sypd, "total_cells": 6 * res * res * 10,
         "mcells_per_s": 10.8, "compile_time_s": 5.0,
+        "cpus_per_task": cpt, "n_cores": n_ranks * cpt,
         "decomposition": f"cs-spmd np{n_ranks}",
     }
 
@@ -204,6 +213,18 @@ def test_ingests_cube_cs_spmd_face_ladder(tmp_path):
     cube = [r for r in rows if r["grid"] == "cubed-sphere"]
     assert {r["n_devices"] for r in cube} == {1, 2, 3, 6}
     assert all(r["component"] == "atm" and r["case"] == "dry" for r in cube)
+    # Node-fill: every rung ~fills the 128-core node, so n_cores is nearly
+    # constant ({128,128,126,126}) — the 4 rungs survive ONLY because n_devices
+    # is in the dedup key.  Asserting the collapse condition makes this a real
+    # regression guard: revert n_devices from _key and dropped becomes 2.
+    # Tolerance = the exact node-fill remainder for this ladder (128 - the
+    # smallest N*(128//N)), not a magic 2, so a ladder/node-size change stays
+    # honest.
+    _node_cores = 128
+    _fill_spread = _node_cores - min(n * (_node_cores // n) for n in (1, 2, 3, 6))
+    assert max(r["n_cores"] for r in cube) - min(r["n_cores"] for r in cube) \
+        <= _fill_spread
+    assert len({r["n_resource"] for r in cube}) < len(cube)   # cores alone collapse
     # One shared face-edge resolution across the whole ladder.
     assert {r["resolution"] for r in cube} == {48}
     assert len({r["resolution_km"] for r in cube}) == 1
