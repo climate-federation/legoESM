@@ -3431,6 +3431,28 @@ class ModelDriver:
                 _write_err = e
         self._spmd_barrier_on_root_error(_write_err)
 
+    def _moisture_advection_active(self) -> bool:
+        """True iff resolved-wind moisture advection is on (issue #771).
+
+        Config-gated to the tracer-capable dycore: cubed_sphere + cdgrid
+        (the only PE step whose RHS advects ``state.tracers``).  Other
+        grid/discretization combos keep the legacy column-locked moisture
+        and log a notice once so the gap is visible, not silent.
+        """
+        cfg = self.config
+        if not getattr(cfg, "moisture_advection", True):
+            return False
+        supported = (cfg.grid.grid_type == "cubed_sphere"
+                     and cfg.dycore.discretization == "cdgrid")
+        if not supported and not getattr(self, "_warned_no_advection", False):
+            self._warned_no_advection = True
+            logger.info(
+                "  moisture_advection: not available on %s/%s (tracer "
+                "advection is wired for cubed_sphere+cdgrid only, #771) — "
+                "running legacy column-locked moisture.",
+                cfg.grid.grid_type, cfg.dycore.discretization)
+        return supported
+
     def _is_spmd_multiprocess(self) -> bool:
         """True iff this run is multi-controller SPMD across >1 process
         (distributed_mode='spmd' under a real multi-process launch) — the
@@ -6110,6 +6132,7 @@ class ModelDriver:
             ghg_vmr_override=ctx["ghg_vmr"],
             hs_newtonian_relax=self._hs_newtonian_relax,
             energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
+            advect_moisture=self._moisture_advection_active(),
             pipeline=self.physics,
         )
 
@@ -6383,6 +6406,7 @@ class ModelDriver:
             hs_newtonian_relax=self._hs_newtonian_relax,
             device_config=_seg_device_config,
             energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
+            advect_moisture=self._moisture_advection_active(),
             # Un-fused-radiation host path (ExperimentConfig.unfused_radiation,
             # default OFF): the pipeline lets build_segment_fn expose
             # run_norad_scan / run_rad so rrtmgp and the no-rad scan compile
@@ -6885,6 +6909,7 @@ class ModelDriver:
                         hs_newtonian_relax=self._hs_newtonian_relax,
                         device_config=_seg_device_config,
                         energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
+                        advect_moisture=self._moisture_advection_active(),
                         pipeline=self.physics,
                     )
 
