@@ -2570,6 +2570,30 @@ def main() -> int:
                    help="Use NEMO's exact under-ice SSS-restoring law (sbcssr "
                         "nn_sssr_ice=0: coefice = 1 - fr_i, zero under full ice) "
                         "instead of the legoESM tanh cutoff. Requires --sss-restore.")
+    p.add_argument("--sss-restore-file", type=str, default=None,
+                   help="NEMO-native monthly SSS-restoring climatology "
+                        "(sn_sss, e.g. sss_climatology_for_restoring.nc, "
+                        "presalt 12 x y x x). Replaces the IC-surface "
+                        "restoring target with NEMO's own product — the "
+                        "IC-surface target holds Arctic shelves several PSU "
+                        "too salty. Requires --sss-restore.")
+    p.add_argument("--nemo-monthly-init", nargs=2, default=None,
+                   metavar=("TEMP_NC", "SALT_NC"),
+                   help="Initialise T/S from NEMO's monthly init files "
+                        "(sn_tem/sn_sal, woce_*_monthly_init_4p2.nc) at "
+                        "--nemo-init-month, replacing the (annual) --woa-init "
+                        "T/S AFTER the state build. nemolev ladders only "
+                        "(75 levels, no vertical interpolation).")
+    p.add_argument("--nemo-init-month", type=int, default=1,
+                   help="Month (1-12) of --nemo-monthly-init to use "
+                        "(default 1 — a 1 January cold start).")
+    p.add_argument("--runoff-depth-nemo-ini", action="store_true",
+                   help="NEMO ln_rnf_depth_ini: per-cell runoff spread depth "
+                        "proportional to the local climatological runoff max "
+                        "(h = 150 m * rnf_max/0.05, floor 1 m, capped at the "
+                        "local depth) instead of the flat "
+                        "--runoff-depth-spread-m. Requires --runoff; mutually "
+                        "exclusive with --runoff-depth-spread-m.")
     p.add_argument("--woa-smoothing-passes", type=int, default=0,
                    help="Horizontal Laplacian smoothing passes/level on the WOA T,S IC "
                         "-- removes spurious grid-scale fronts from interpolating/flood-"
@@ -3122,9 +3146,10 @@ def main() -> int:
     if args.sss_restore:
         if app_grid_type == "cubed_sphere":
             raise ValueError("--sss-restore: not wired for the cube (parked grid).")
-        if not args.woa_init:
-            raise ValueError("--sss-restore requires --woa-init (the restoring "
-                             "target is the WOA surface-salinity climatology).")
+        if not args.woa_init and args.sss_restore_file is None:
+            raise ValueError(
+                "--sss-restore requires --woa-init (IC-surface target) or "
+                "--sss-restore-file (NEMO sn_sss monthly climatology).")
         if not (float(args.sss_restore_tau_days) > 0.0):
             raise ValueError("--sss-restore-tau-days must be > 0 (0 divides by "
                              "zero in build_region_masks; negative = anti-restoring).")
@@ -3145,17 +3170,29 @@ def main() -> int:
             tau_restore_days_default=float(args.sss_restore_tau_days),
             **_cfg_kwargs,
         )
-        sss_restore_target = np.asarray(
-            state.S.data, dtype=np.float64)[..., 0].copy()      # surface SSS
+        if args.sss_restore_file is not None:
+            from legoesm.ocean.forcing.nemo_native_fields import (
+                load_nemo_sss_restoring_climatology,
+            )
+            sss_restore_target = load_nemo_sss_restoring_climatology(
+                args.sss_restore_file, lat2d, lon2d,
+                np.asarray(state.land_mask.data) > 0.5)   # (12, n_lat, n_lon)
+        else:
+            sss_restore_target = np.asarray(
+                state.S.data, dtype=np.float64)[..., 0].copy()  # surface SSS
         _wet = np.asarray(state.land_mask.data) > 0.5
         _bnd = (f"{args.sss_restore_bound_mmday:.1f} mm/day (NEMO ln_sssr_bnd)"
                 if args.sss_restore_bound_mmday is not None
                 else "200 mm/day safety cap")
+        _tgt_kind = ("NEMO sn_sss monthly clim"
+                     if sss_restore_target.ndim == 3 else "WOA surface SSS")
+        _tgt_wet = (sss_restore_target[:, _wet]
+                    if sss_restore_target.ndim == 3
+                    else sss_restore_target[_wet])
         print(f"[setup] SSS restoring ON: tau_default="
               f"{args.sss_restore_tau_days:.0f} d + OMIP-2 regional masks; "
-              f"flux bound {_bnd}; target = WOA surface SSS "
-              f"[{sss_restore_target[_wet].min():.1f},"
-              f"{sss_restore_target[_wet].max():.1f}] PSU")
+              f"flux bound {_bnd}; target = {_tgt_kind} "
+              f"[{_tgt_wet.min():.1f},{_tgt_wet.max():.1f}] PSU")
 
     if args.woa_smoothing_passes and args.woa_smoothing_passes > 0:
         if not args.woa_init:
@@ -3192,6 +3229,29 @@ def main() -> int:
         )
 
     lat2d, lon2d = _grid_lat2d_deg(grid, args.grid)
+
+    if args.nemo_monthly_init is not None:
+        # Exact-recipe IC: NEMO's own monthly init (sn_tem/sn_sal) at the
+        # start month — the annual --woa-init leaves Arctic shelves ~1-3
+        # PSU salty vs NEMO's January state.
+        if app_grid_type == "mpas":
+            raise SystemExit(
+                "--nemo-monthly-init is wired for the structured grids "
+                "(tripole/latlon); MPAS keeps its own IC path.")
+        from legoesm.ocean.forcing.nemo_native_fields import (
+            load_nemo_monthly_init_ts,
+        )
+        _T_ic, _S_ic = load_nemo_monthly_init_ts(
+            args.nemo_monthly_init[0], args.nemo_monthly_init[1],
+            lat2d, lon2d, n_levels=int(z_coord.n_levels),
+            month=int(args.nemo_init_month))
+        _Td = state.T.data.dtype
+        state = state._replace(
+            T=state.T.replace(data=jnp.asarray(_T_ic, dtype=_Td)),
+            S=state.S.replace(data=jnp.asarray(_S_ic, dtype=_Td)))
+        print(f"[setup] NEMO monthly init: month {args.nemo_init_month} "
+              f"from {args.nemo_monthly_init[0].rsplit('/', 1)[-1]} / "
+              f"{args.nemo_monthly_init[1].rsplit('/', 1)[-1]}")
     runoff_monthly = None
     if args.runoff:
         if app_grid_type == "cubed_sphere":
@@ -3217,6 +3277,37 @@ def main() -> int:
         runoff_monthly = load_runoff_monthly(
             grid, app_grid_type, lat2d, lon2d, args.mesh,
             land_mask=np.asarray(state.land_mask.data), spread_passes=_spread)
+    if args.runoff_depth_nemo_ini:
+        # NEMO ln_rnf_depth_ini: per-cell spread depth from the runoff
+        # climatology maximum — small Arctic rivers stay near-surface
+        # (flat 150 m dilutes their shelf plumes several PSU salty).
+        if runoff_monthly is None:
+            raise SystemExit("--runoff-depth-nemo-ini requires --runoff.")
+        if app_grid_type == "mpas":
+            raise SystemExit(
+                "--runoff-depth-nemo-ini is wired for the structured grids "
+                "(the MPAS runoff path uses Voronoi coastal spreading).")
+        if float(getattr(model.config, "runoff_depth_spread_m", 0.0)) > 0.0:
+            raise SystemExit(
+                "--runoff-depth-nemo-ini and --runoff-depth-spread-m are "
+                "mutually exclusive.")
+        from legoesm.ocean.forcing.runoff_depth import nemo_runoff_depth_map
+        _h_rnf = nemo_runoff_depth_map(
+            np.asarray(runoff_monthly), np.asarray(H_bathy))
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        model = LatLonCGridOceanModel(
+            grid, z_coord,
+            model.config._replace(
+                runoff_depth_spread_map=jnp.asarray(_h_rnf)),
+            iwm_forcing=getattr(model, "_iwm_forcing", None))
+        _wetm = np.asarray(state.land_mask.data) > 0.5
+        print(f"[setup] NEMO runoff depth map (ln_rnf_depth_ini): "
+              f"h_rnf wet range [{_h_rnf[_wetm].min():.1f},"
+              f"{_h_rnf[_wetm].max():.1f}] m; "
+              f"{(np.asarray(runoff_monthly).max(0)[_wetm] > 0).sum()} "
+              f"runoff cells")
     # Prescribed sea-ice-concentration field for the SW-albedo surrogate
     # (--ice-albedo) AND the NEMO-faithful SSS-restoring ice gate (nn_sssr_ice=0:
     # no restoring under ice).  Loaded ONCE, regridded onto the model grid; passed
@@ -3721,16 +3812,21 @@ def main() -> int:
             # runoff so restoring is OFF at river mouths and does not fight
             # the plume toward coarse WOA (Amazon artifact). Gated by flag.
             _R_gate = _R if args.river_mouth_restoring_gate else None
+            # Monthly (12, ...) NEMO sn_sss target -> this step's month;
+            # 2-D IC-surface target unchanged.
+            _sss_tgt_step = (sss_restore_target[_runoff_month_idx(step, dt)]
+                             if sss_restore_target.ndim == 3
+                             else sss_restore_target)
             if app_grid_type == "mpas":
                 from legoesm.ocean.coupler.sss_apply import apply_sss_restoring_step_mpas
                 state = apply_sss_restoring_step_mpas(
-                    state, S_target=sss_restore_target, ice_concentration=_sss_ice,
+                    state, S_target=_sss_tgt_step, ice_concentration=_sss_ice,
                     config=sss_restore_cfg, mesh=grid, dt=dt,
                     river_runoff=_R_gate)
             else:
                 from legoesm.ocean.coupler.sss_apply import apply_sss_restoring_step
                 state = apply_sss_restoring_step(
-                    state, S_target=sss_restore_target, ice_concentration=_sss_ice,
+                    state, S_target=_sss_tgt_step, ice_concentration=_sss_ice,
                     config=sss_restore_cfg, grid=grid, z_coord=z_coord, dt=dt,
                     lat2d_deg=lat2d, lon2d_deg=lon2d,
                     river_runoff=_R_gate)

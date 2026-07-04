@@ -2785,7 +2785,13 @@ class LatLonCGridOceanModel:
             dz_0 = h_k_new[..., 0]
             _S_dtype = state_new.S.data.dtype
             _spread_m = float(getattr(self.config, "runoff_depth_spread_m", 0.0))
-            if _spread_m > 0.0:
+            _spread_map = getattr(self.config, "runoff_depth_spread_map", None)
+            if _spread_map is not None and _spread_m > 0.0:
+                raise ValueError(
+                    "runoff_depth_spread_map and runoff_depth_spread_m are "
+                    "mutually exclusive — pick the NEMO ln_rnf_depth_ini "
+                    "per-cell map OR the flat spread depth.")
+            if _spread_map is not None or _spread_m > 0.0:
                 # NEMO-style runoff depth spreading (rn_dep_max): the runoff
                 # channel dilutes the top `_spread_m` metres; all other
                 # channels stay at the top cell.  Column-integral salt
@@ -2796,7 +2802,10 @@ class LatLonCGridOceanModel:
                 )
                 dS_fw_3d = runoff_spread_virtual_salt_tendency_3d(
                     freshwater, self.config.S_ref, h_k_new, self.config.rho_0,
-                    mask, runoff_spread_m=_spread_m,
+                    mask,
+                    runoff_spread_m=(jnp.asarray(_spread_map)
+                                     if _spread_map is not None
+                                     else _spread_m),
                     area=_grid.area,
                     normalize=bool(getattr(self.config,
                                            "normalize_freshwater", False)),

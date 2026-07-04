@@ -1612,6 +1612,14 @@ class LatLonCGridOceanConfig(NamedTuple):
     # column-integral salt tendency is unchanged (conservation identical);
     # only the vertical distribution moves.  0 = legacy top-cell (bit-exact).
     runoff_depth_spread_m: float = 0.0
+    # NEMO ln_rnf_depth_ini per-cell spread-depth MAP [m] (array or None):
+    # depth proportional to the local climatological runoff maximum
+    # (h = rn_dep_max·rnf_max/rn_rnf_max, floor 1 m) so small Arctic rivers
+    # stay near-surface while the Amazon spreads to 150 m — a flat
+    # runoff_depth_spread_m leaves shelf river plumes several PSU too
+    # salty.  Build with forcing.runoff_depth.nemo_runoff_depth_map;
+    # mutually exclusive with a nonzero runoff_depth_spread_m (validated).
+    runoff_depth_spread_map: object = None
     # --- Implicit (weight-1.0 pre-vmix) sponge placement (EXT-N2) -----------
     # Apply the SPONGE tracer relaxation (``SpongeForcing`` gamma·(ref − q))
     # at weight 1.0 inside the backward-Euler vertical-mixing solve instead of

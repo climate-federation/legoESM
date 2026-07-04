@@ -331,9 +331,17 @@ def runoff_spread_virtual_salt_tendency_3d(
         ACTUAL layer thicknesses (partial-cell aware; 0 on dry levels).
     mask : jax.Array, shape (...,)
         Ocean mask (1 = ocean).
-    runoff_spread_m : float
-        Spread depth [m] (NEMO rn_dep_max). Must be > 0 — the caller gates
-        the legacy top-cell path on a static config bool.
+    runoff_spread_m : float or jax.Array, shape (...)
+        Spread depth [m]. A SCALAR spreads every river over the same
+        depth (NEMO rn_dep_max flat mode; must be > 0 — the caller gates
+        the legacy top-cell path on a static config bool). A PER-CELL
+        array is the NEMO ``ln_rnf_depth_ini`` mode — depth proportional
+        to the local climatological runoff maximum (``h_rnf = rn_dep_max
+        · rnf_max/rn_rnf_max``, floored at 1 m, capped at the local
+        depth by the fractional-weight construction below), so small
+        Arctic rivers stay near-surface while the Amazon spreads to
+        150 m. Build the map with
+        :func:`legoesm.ocean.forcing.runoff_depth.nemo_runoff_depth_map`.
 
     Returns
     -------
@@ -341,11 +349,18 @@ def runoff_spread_virtual_salt_tendency_3d(
         Salinity tendency; the caller multiplies by its land mask and
         integrates (``S += dt*dS`` or ``dS_dt += dS``).
     """
-    if runoff_spread_m <= 0.0:
-        raise ValueError(
-            "runoff_spread_virtual_salt_tendency_3d requires "
-            f"runoff_spread_m > 0 (got {runoff_spread_m}); the legacy "
-            "top-cell closure handles the un-spread case.")
+    _spread = jnp.asarray(runoff_spread_m)
+    if _spread.ndim == 0:
+        if float(runoff_spread_m) <= 0.0:
+            raise ValueError(
+                "runoff_spread_virtual_salt_tendency_3d requires "
+                f"runoff_spread_m > 0 (got {runoff_spread_m}); the legacy "
+                "top-cell closure handles the un-spread case.")
+    else:
+        # per-cell NEMO ln_rnf_depth_ini map: broadcast over levels; the
+        # builder guarantees >= 1 m on wet cells (values <= top-cell
+        # thickness degrade gracefully to the single-cell form).
+        _spread = _spread[..., None]
     R = fw.runoff
     h_top = h_k[..., 0]
     # --- top-cell channels (everything but runoff) -------------------------
@@ -381,7 +396,7 @@ def runoff_spread_virtual_salt_tendency_3d(
     # is exact for any weights: sum_k (dS_col*w_k)*h_k = dS_col*h_rnf.
     cum_above = jnp.cumsum(h_k, axis=-1) - h_k          # depth of level top
     h_safe = jnp.maximum(h_k, 1.0e-3)
-    w_frac = jnp.clip((runoff_spread_m - cum_above) / h_safe, 0.0, 1.0)
+    w_frac = jnp.clip((_spread - cum_above) / h_safe, 0.0, 1.0)
     wet_lvl = (h_k > 1.0e-3) & (mask[..., None] > 0.5)
     w_frac = jnp.where(wet_lvl, w_frac, 0.0)
     h_rnf = jnp.sum(w_frac * h_k, axis=-1)
