@@ -401,6 +401,7 @@ def main():
     _, static = eqx.partition(params0, eqx.is_inexact_array)
 
     broke = False
+    best_drift_per_day = float("inf")
     for rd, ep in phases:
         if broke:
             break
@@ -454,6 +455,22 @@ def main():
             _ck.parent.mkdir(parents=True, exist_ok=True)
             save_checkpoint(params, _tmp)
             os.replace(_tmp, _ck)
+            # BEST-drift raw params across the whole fine-tune: a late-phase
+            # divergence (colnn v3: 15d drift 4.2 -> 424 K^2) must not
+            # overwrite the best stability state. Drift normalised by the
+            # phase's rollout length so phases are comparable (K^2 per day
+            # at lead ~ drift-rate^2 signal).
+            _drift_per_day = (tot_drift / n) / max(rd, 1) ** 2
+            if _drift_per_day < best_drift_per_day:
+                best_drift_per_day = _drift_per_day
+                _bk = args.out_ckpt.with_name(args.out_ckpt.stem + "_best_raw.eqx")
+                _btmp = _bk.with_suffix(".eqx.tmp")
+                save_checkpoint(params, _btmp)
+                os.replace(_btmp, _bk)
+                logger.info(
+                    f"  new BEST drift/day^2 {_drift_per_day:.4f} "
+                    f"[K^2/d^2 @rd={rd}d] -> {_bk.name}"
+                )
             if not np.isfinite(avg_loss):
                 logger.error("non-finite loss; stopping")
                 broke = True
