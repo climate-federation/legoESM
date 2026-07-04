@@ -1067,9 +1067,11 @@ def ocean_surface_q_sat(
     saline_factor: float = 1.0,
 ) -> jnp.ndarray:
     """Air-sea surface saturation MIXING RATIO with the convention-appropriate
-    saturation curve (#762), so the interface humidity is single-valued across
-    every air-sea flux path (coupler ocean tile, standalone slab ocean, tiled
-    surface layer) rather than split between Goff and Tetens.
+    saturation curve (#762): the single q_sfc source shared by the coupler
+    ocean tile and the standalone slab ocean, so the interface humidity is no
+    longer split between Goff (coupler) and Tetens (slab) on the aerobulk MOST
+    path.  (The atmosphere tiled surface-layer q_sfc is a separate site tracked
+    for the same unification.)
 
     The WMO Goff (1957) curve is used under ``thermo_convention='aerobulk'`` on
     a MOST solver scheme (``'most'``/``'coare3'``/``'large_yeager'`` — the only
