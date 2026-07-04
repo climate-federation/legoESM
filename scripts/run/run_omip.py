@@ -590,15 +590,17 @@ def parse_args(argv: list[str] | None = None):
                    ))
     p.add_argument("--enable-latlon-spmd", action="store_true", default=False,
                    help=(
-                       "Run the lat-lon RESTORING lane's dynamics step "
-                       "lat-band-SPMD across the local devices "
-                       "(make_sharded_ocean_step — the validated multi-GPU "
-                       "ocean lane). Single-controller only (one process; "
-                       "multi-node scaling lives in "
+                       "Run the lat-lon lane's dynamics step lat-band-SPMD "
+                       "across the local devices (make_sharded_ocean_step — "
+                       "the validated multi-GPU ocean lane). Supports the "
+                       "restoring lane AND the JRA55 block-scan lanes "
+                       "(forcing stacks are lat-band-sharded; the in-scan "
+                       "bulk fluxes stay shard-local). Single-controller "
+                       "only (one process; multi-node scaling lives in "
                        "bench_ocean_latlon_spmd_scaling --multicontroller); "
-                       "requires --grid latlon, --forcing-mode restoring, "
-                       "and n_lat divisible by the device count. JRA55 "
-                       "lanes: follow-up."
+                       "requires --grid latlon and n_lat divisible by the "
+                       "device count. Unsupported: --jra55-sea-ice, the "
+                       "JRA55 single-step fallback."
                    ))
     p.add_argument("--spmd-n-devices", type=int, default=0,
                    help=(
@@ -2125,7 +2127,7 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
     return raw_stack, runoff_stack, record_meta
 
 
-def _build_jra55_block_fn(model, jra55_state, dt):
+def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
     """Return a JIT-compiled block function that runs N steps via lax.scan.
 
     Captures everything that's static across the block (sponge, SSS
@@ -2182,6 +2184,18 @@ def _build_jra55_block_fn(model, jra55_state, dt):
     # the split-explicit solver doesn't prevent baroclinic blowup.
     _maxvel_3d = model.config.barotropic.maxvel_barotropic
     enable_maxvel = _maxvel_3d > 0.0
+
+    # Lat-band SPMD (--enable-latlon-spmd): the scan body's dynamics step
+    # runs through the sharded wrapper (same forcing kwargs as _step_impl;
+    # the wrapper's cache/arm-restore Python runs ONCE at block trace).
+    # Sea ice is refused upstream (the ice tile is not SPMD-audited yet).
+    if spmd_step is not None and enable_sea_ice:
+        raise ValueError(
+            "spmd_step + prognostic sea ice is unsupported "
+            "(run_omip_single refuses --jra55-sea-ice with "
+            "--enable-latlon-spmd).")
+    _dyn_step = (spmd_step if spmd_step is not None
+                 else lambda st, d, **kw: model._step_impl(st, d, **kw))
 
     @jax.jit
     def block_fn(state, atm_stack, runoff_stack, block_start_step,
@@ -2258,7 +2272,7 @@ def _build_jra55_block_fn(model, jra55_state, dt):
             else:
                 sponge_step = sponge
 
-            new_state = model._step_impl(
+            new_state = _dyn_step(
                 state_in, dt,
                 freshwater=fw, surface_forcing=sf, sponge=sponge_step,
             )
@@ -2313,7 +2327,7 @@ def _build_jra55_block_fn(model, jra55_state, dt):
     return block_fn
 
 
-def _build_jra55_block_fn_interp(model, jra55_state, dt):
+def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
     """JIT-compiled block function with GPU-side forcing interpolation.
 
     Like ``_build_jra55_block_fn``, but instead of receiving pre-
@@ -2370,6 +2384,15 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
 
     _maxvel_3d = model.config.barotropic.maxvel_barotropic
     enable_maxvel = _maxvel_3d > 0.0
+
+    # Lat-band SPMD: see _build_jra55_block_fn.
+    if spmd_step is not None and enable_sea_ice:
+        raise ValueError(
+            "spmd_step + prognostic sea ice is unsupported "
+            "(run_omip_single refuses --jra55-sea-ice with "
+            "--enable-latlon-spmd).")
+    _dyn_step = (spmd_step if spmd_step is not None
+                 else lambda st, d, **kw: model._step_impl(st, d, **kw))
 
     lat_2d = jra55_state["lat_2d"]
     lon_2d = jra55_state["lon_2d"]
@@ -2516,7 +2539,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
 
                 sponge_k = (sponge._replace(gamma=sponge.gamma * ramp)
                             if enable_sponge else None)
-                new_state = model._step_impl(
+                new_state = _dyn_step(
                     state_in, dt, freshwater=fw,
                     surface_forcing=sf, sponge=sponge_k,
                 )
@@ -2882,7 +2905,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                    restart_buffer_seconds: float = 600.0,
                    start_step=0,
                    nudge_woa_tau=0.0, T_woa_3d=None, S_woa_3d=None,
-                   snapshot_fn=None, spmd_step=None, spmd_gather=None):
+                   snapshot_fn=None, spmd_step=None, spmd_gather=None,
+                   spmd_shard_stack=None):
     """Run time loop with diagnostics.
 
     Two forcing paths, mutually exclusive:
@@ -2924,10 +2948,17 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             "exclusive — choose one forcing path."
         )
     if spmd_step is not None and jra55_state is not None:
-        raise ValueError(
-            "spmd_step is restoring-lane only (the JRA55 block functions "
-            "call model._step_impl directly); run_omip_single refuses this "
-            "combination before the loop.")
+        # The block-scan lanes now thread spmd_step; the two unsupported
+        # JRA sub-modes still refuse loudly.
+        if jra55_state.get("_use_single_step", False):
+            raise ValueError(
+                "spmd_step + the JRA55 single-step fallback is unsupported "
+                "(_jra55_step calls model.step directly); use the "
+                "block-scan path (default).")
+        if jra55_state.get("enable_sea_ice", False):
+            raise ValueError(
+                "spmd_step + prognostic sea ice is unsupported "
+                "(--jra55-sea-ice; the ice tile is not SPMD-audited).")
     if checkpoint_days is not None and checkpoint_dir is None:
         raise ValueError(
             "_run_omip_loop: checkpoint_days requires checkpoint_dir."
@@ -3047,7 +3078,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         ice_state = jra55_state.get("ice_state_init") if _ice_on else None
         if use_gpu_interp:
             _get_block_fn_interp = _build_jra55_block_fn_interp(
-                model, jra55_state, dt)
+                model, jra55_state, dt, spmd_step=spmd_step)
             print("  GPU-interp mode: forcing interpolation on GPU")
             # Pre-load the full JRA55 cache for repeat-year runs to
             # eliminate per-block Zarr I/O (~0.3s/block → ~0s/block).
@@ -3057,7 +3088,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                     jra55_state)
                 _full_cache = (_fc_all, _fc_days, _fc_len)
         else:
-            block_fn = _build_jra55_block_fn(model, jra55_state, dt)
+            block_fn = _build_jra55_block_fn(model, jra55_state, dt,
+                                             spmd_step=spmd_step)
             _full_cache = None
         block_size = max(1, diag_every)
         if checkpoint_days is not None:
@@ -3083,6 +3115,17 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 atm_stack, runoff_stack = _preload_jra55_forcing_block(
                     block_start, actual, dt, jra55_state,
                 )
+            if spmd_shard_stack is not None:
+                # Lay the per-block forcing stacks out lat-band-sharded so
+                # the in-scan interpolation / bulk fluxes stay shard-local
+                # (an unsharded stack commits to device 0 and serializes
+                # every forcing op there).
+                if use_gpu_interp:
+                    raw_stack = spmd_shard_stack(raw_stack)
+                    runoff_records = spmd_shard_stack(runoff_records)
+                else:
+                    atm_stack = spmd_shard_stack(atm_stack)
+                    runoff_stack = spmd_shard_stack(runoff_stack)
             io_dt = time.time() - t_io_start
 
             t_compute_start = time.time()
@@ -3163,7 +3206,9 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                     state = state._replace(
                         eta=state.eta.replace(data=eta_corrected))
 
-            scalars = _extract_scalars(state, grid_type, grid, z_coord)
+            _st_diag = (spmd_gather(state) if spmd_gather is not None
+                        else state)
+            scalars = _extract_scalars(_st_diag, grid_type, grid, z_coord)
 
             # B2: chi diagnostic from last 3 eta snapshots
             chi = 0.0
@@ -4173,11 +4218,10 @@ def run_omip_single(grid_type: str, args) -> dict:
     # and before any device work; a negative device count would otherwise
     # silently no-op through the `_nd or len(devices)` resolution (r1 #3).
     if run_config.enable_latlon_spmd:
-        if args.forcing_mode != "restoring":
+        if getattr(args, "jra55_sea_ice", False):
             raise SystemExit(
-                f"--enable-latlon-spmd supports --forcing-mode restoring "
-                f"only (got {args.forcing_mode!r}; the JRA55 lanes are a "
-                f"follow-up).")
+                "--enable-latlon-spmd does not support --jra55-sea-ice "
+                "yet (the prognostic ice tile is not SPMD-audited).")
         if run_config.spmd_n_devices < 0:
             raise SystemExit(
                 f"--spmd-n-devices must be >= 0 "
@@ -4380,15 +4424,18 @@ def run_omip_single(grid_type: str, args) -> dict:
     # the restart load so a resumed state is sharded too.
     spmd_step = None
     spmd_gather = None
+    spmd_shard_stack = None
     if run_config.enable_latlon_spmd:
         if grid_type != "latlon":
             raise SystemExit(
                 f"--enable-latlon-spmd requires --grid latlon "
                 f"(got {grid_type}).")
-        if jra55_state is not None:
+        if (jra55_state is not None
+                and jra55_state.get("_use_single_step", False)):
             raise SystemExit(
-                "--enable-latlon-spmd supports --forcing-mode restoring "
-                "only (the JRA55 lanes are a follow-up).")
+                "--enable-latlon-spmd requires the JRA55 block-scan path, "
+                "but this run selected the single-step fallback "
+                "(_jra55_step calls model.step directly).")
         if jax.process_count() > 1:
             raise SystemExit(
                 "--enable-latlon-spmd is single-controller only; "
@@ -4406,6 +4453,7 @@ def run_omip_single(grid_type: str, args) -> dict:
             from legoesm.ocean.dynamics.sharded_ocean_step import (
                 gather_state_latlon,
                 make_sharded_ocean_step,
+                shard_forcing_stack_latlon,
                 shard_state_latlon,
             )
             from legoesm.parallel.mesh import create_latlon_mesh
@@ -4416,6 +4464,11 @@ def run_omip_single(grid_type: str, args) -> dict:
             spmd_step = make_sharded_ocean_step(model, _dev.mesh)
             spmd_gather = partial(gather_state_latlon, mesh=_dev.mesh)
             state = shard_state_latlon(state, _dev.mesh)
+            # Lay per-block forcing stacks out lat-band-sharded so the
+            # in-scan interpolation / bulk fluxes stay shard-local (shared
+            # layout helper — see shard_forcing_stack_latlon).
+            spmd_shard_stack = partial(
+                shard_forcing_stack_latlon, mesh=_dev.mesh)
             print(f"  SPMD: lat-band sharded dynamics step over {_nd} "
                   f"devices ({jax.default_backend()}).")
         else:
@@ -4443,6 +4496,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         snapshot_fn=_snapshot_fn,
         spmd_step=spmd_step,
         spmd_gather=spmd_gather,
+        spmd_shard_stack=spmd_shard_stack,
     )
     if spmd_gather is not None:
         # Downstream report/plot/save paths expect the full (n_lat+1)

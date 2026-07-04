@@ -270,6 +270,50 @@ def test_latlon_ocean_spmd_forcing_matches_single_device():
 
 @pytest.mark.skipif(jax.device_count() < 4,
                     reason="needs >=4 devices (XLA_FLAGS host device count)")
+def test_shard_forcing_stack_latlon_layout():
+    """The block-scan stack sharder (run_omip JRA55 lanes) puts the lat axis
+    on the ``"lat"`` mesh axis whether the leaf is a stacked
+    ``(n_rec, n_lat, n_lon[, nlev])`` record (lat at axis 1) or a bare
+    ``(n_lat, n_lon)`` field (lat at axis 0); 1-D metadata and scalars
+    replicate; ``None`` / non-array leaves pass through untouched.  A drift
+    here silently commits the whole forcing stack to device 0 and serializes
+    every in-scan forcing op."""
+    from legoesm.parallel.mesh import create_latlon_mesh
+    from legoesm.ocean.dynamics.sharded_ocean_step import (
+        shard_forcing_stack_latlon,
+    )
+
+    def _lat_axis(arr):
+        spec = tuple(arr.sharding.spec)
+        return spec.index("lat") if "lat" in spec else None
+
+    n_lat, n_lon, nlev, n_rec = 48, 96, 10, 8
+    dev = create_latlon_mesh(n_devices=4)
+    stack = {
+        "rec3d": jnp.ones((n_rec, n_lat, n_lon)),        # ndim 3: lat @ 1
+        "rec4d": jnp.ones((n_rec, n_lat, n_lon, nlev)),  # ndim 4: lat @ 1
+        "field2d": jnp.ones((n_lat, n_lon)),             # ndim 2: lat @ 0
+        "record_days": jnp.ones((n_rec,)),               # ndim 1: replicate
+        "scalar": jnp.asarray(3.0),                      # ndim 0: replicate
+        "none": None,                                    # pytree-None
+        "meta": "1958-01-01",                            # non-array passthrough
+    }
+    out = shard_forcing_stack_latlon(stack, dev.mesh)
+
+    assert _lat_axis(out["rec3d"]) == 1
+    assert _lat_axis(out["rec4d"]) == 1
+    assert _lat_axis(out["field2d"]) == 0
+    assert _lat_axis(out["record_days"]) is None
+    assert _lat_axis(out["scalar"]) is None
+    assert out["none"] is None
+    assert out["meta"] == "1958-01-01"
+
+    # mesh=None is the serial-lane passthrough (identity).
+    assert shard_forcing_stack_latlon(stack, None) is stack
+
+
+@pytest.mark.skipif(jax.device_count() < 4,
+                    reason="needs >=4 devices (XLA_FLAGS host device count)")
 def test_normalize_freshwater_net_psum_under_spmd():
     """Direct, EXACT-tolerance pin of the ``normalize_freshwater_net`` psum
     branch — the full-step forcing gate's ~1e-4 re-association floor sits
