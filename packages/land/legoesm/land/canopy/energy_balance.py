@@ -33,8 +33,19 @@ from legoesm.land.canopy.stomatal import ball_berry_gs, medlyn_gs
 # NOTE: Stefan-Boltzmann, freezing point, latent heat of vaporisation, etc.
 # are imported from ``legoesm.constants`` — do not redefine them here.
 _Ps0   = 101325.0    # IUPAC STP pressure [Pa] used in the mol → m/s
-                     # unit conversion factor 0.446; distinct from
+                     # unit conversion factor _CF_MOLAR_VOLUME; distinct from
                      # ``constants.p_ref`` (1e5 Pa hydrostatic reference).
+# mol m-2 s-1 → m s-1 leaf-conductance prefactor at IUPAC STP (encodes the
+# reference molar volume 22.4 L/mol); scaled by (T_freeze/Tf)·(Ps/_Ps0).
+_CF_MOLAR_VOLUME = 0.446
+
+# Leaf H2O:CO2 molecular-diffusivity ratio (Fick's law; Ci = Ca − ratio·An/gs).
+_DIFFUSIVITY_RATIO_H2O_CO2 = 1.6
+
+# Latent-heat-of-vaporisation temperature slope −dλ/dT [J kg-1 K-1], used as
+# λ(T) = L_v − _LAMBDA_T_SLOPE·(T − T_freeze). DifferBESS canopy value; distinct
+# from ``constants.L_v_sst_slope`` (2.370e3) — keep the canopy value verbatim.
+_LAMBDA_T_SLOPE = 2.361e3
 
 # Minimum cuticular (residual) stomatal conductance [mol m-2 s-1].  Stomata
 # never fully close — the leaf cuticle always leaks a little — so the conductance
@@ -166,7 +177,7 @@ def canopy_met_variables(
     RH_c  = jnp.clip(e_c / jnp.maximum(es_c, 1e-6), 0.0, 1.0)
 
     # Latent heat (temperature-corrected) and psychrometric constant
-    lam   = constants.L_v - 2.361e3 * TcC
+    lam   = constants.L_v - _LAMBDA_T_SLOPE * TcC
     gamma = constants.c_pd / constants.epsilon * Ps / lam   # [Pa K-1]
 
     return e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma
@@ -215,7 +226,7 @@ def _compute_gs_and_ci(
     (rs [s m-1], gs [m s-1], Ci [μmol mol-1])
     """
     if stomatal_model == "medlyn":
-        VPD_kPa = jnp.maximum(VPD_c, 50.0) / 1000.0  # Pa → kPa, floor 0.05 kPa
+        VPD_kPa = jnp.maximum(VPD_c, 50.0) / 1000.0  # coeff-ok: 50 Pa (0.05 kPa) VPD floor; Pa→kPa
         gs_mol = medlyn_gs(An, VPD_kPa, Ca, m, b0)
     else:
         gs_mol = ball_berry_gs(An, RH_c, Ca, m, b0)
@@ -225,17 +236,18 @@ def _compute_gs_and_ci(
     # canopy Newton Jacobian goes singular → NaN.  See ``_GS_MIN_MOL``.
     gs_mol = jnp.maximum(gs_mol, _GS_MIN_MOL)
 
-    Ci = Ca - 1.6 * An / jnp.maximum(gs_mol, 1e-9)
+    Ci = Ca - _DIFFUSIVITY_RATIO_H2O_CO2 * An / jnp.maximum(gs_mol, 1e-9)
     # Clip Ci to the physically reasonable C3 range; mixed-PFT C3/C4
     # is handled upstream in ``photosynthesis()`` via the continuous fC4
     # fraction, so the C4 bounds are not needed here.
-    Ci = jnp.clip(Ci, 0.5 * Ca, 0.9 * Ca)
+    Ci = jnp.clip(Ci, 0.5 * Ca, 0.9 * Ca)  # coeff-ok: clamp Ci to physical C3 range [0.5, 0.9]·Ca
 
     # Unit conversion: mol m-2 s-1 → m s-1 at IUPAC STP reference
-    # (T_std = 273.15 K, P_std = 101325 Pa, V_molar = 22.4 L/mol → 0.0224 m^3).
-    # The factor 0.446 encodes the reference molar volume; leave as-is.
-    cf = 0.446 * (constants.T_freeze / Tf) * (Ps / _Ps0)
-    rs = 1.0 / (gs_mol / cf * 1e-2)   # [s m-1]
+    # (T_std = T_freeze, P_std = _Ps0 = 101325 Pa, V_molar = 22.4 L/mol → 0.0224 m^3).
+    # ``_CF_MOLAR_VOLUME`` encodes the reference molar volume (with the 1e-2 factor
+    # below giving V_molar = 1e-2 / _CF_MOLAR_VOLUME = 0.0224 m^3/mol).
+    cf = _CF_MOLAR_VOLUME * (constants.T_freeze / Tf) * (Ps / _Ps0)
+    rs = 1.0 / (gs_mol / cf * 1e-2)   # coeff-ok: fixed molar-volume unit factor → [s m-1]
     gs = 1.0 / rs                      # [m s-1]
     return rs, gs, Ci
 

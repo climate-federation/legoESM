@@ -1004,9 +1004,14 @@ def compute_most_fluxes(
         theta_v_star = theta_star + _vT_coef * T_atm * q_star_val
         inv_L = -KAPPA * G * theta_v_star / (u_star_safe ** 2 * T_v)
         zeta_d = jnp.clip(z_diag * inv_L, -10.0, 10.0)
-        denom_d = jnp.log(z_diag / jnp.maximum(z0_t, 1e-12)) - psi_h(
-            zeta_d, stability_scheme
-        )
+        # Scheme-match the diagnostic psi_h to the MAIN loop (static Python
+        # dispatch): COARE 3.0 uses the Fairall free-convective psi_h_coare,
+        # every other scheme uses the stability_scheme-selected psi_h.  Using
+        # the non-COARE psi_h here for coare3 made the 2 m T inconsistent with
+        # the converged coare3 profile.
+        _psi_h_d = (psi_h_coare(zeta_d) if scheme == "coare3"
+                    else psi_h(zeta_d, stability_scheme))
+        denom_d = jnp.log(z_diag / jnp.maximum(z0_t, 1e-12)) - _psi_h_d
         T_2m = T_sfc - (theta_star / KAPPA) * denom_d
         # Guard against profile extrapolation outside [T_atm, T_sfc].
         lo = jnp.minimum(T_atm, T_sfc)

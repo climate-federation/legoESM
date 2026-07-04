@@ -69,6 +69,14 @@ from legoesm.land.canopy.energy_balance import (
 )
 
 
+# --- Sunlit-leaf degeneracy anchor smoother (numerics; see solver notes) ---
+# tanh blend Tf_Sun -> Tf_Sh as the sunlit fraction shrinks; centred at
+# fSun = 0.08 with transition half-width 0.03 (differentiable replacement for
+# the old hard ``where(fSun < 0.05, ...)`` kink).
+_ANCHOR_FSUN_CENTER = 0.08   # [-] tanh centre in sunlit fraction
+_ANCHOR_FSUN_WIDTH  = 0.03   # [-] tanh transition half-width
+
+
 # ---------------------------------------------------------------------------
 # Forcing bundle NamedTuple — groups all per-column inputs for the closure
 # ---------------------------------------------------------------------------
@@ -253,7 +261,7 @@ def _canopy_residual(
     # ``where(fSun < 0.05, ...)`` produced a visible kink in H and LE
     # at the transition (seen in diagnostic plots) and made the residual
     # non-differentiable there, causing ``jax.grad`` to return NaN.
-    anchor_weight = 0.5 * (1.0 - jnp.tanh((b.fSun - 0.08) / 0.03))
+    anchor_weight = 0.5 * (1.0 - jnp.tanh((b.fSun - _ANCHOR_FSUN_CENTER) / _ANCHOR_FSUN_WIDTH))
     res_Tf_Sun = (anchor_weight * (Tf_Sun - Tf_Sh)
                   + (1.0 - anchor_weight) * (Tf_Sun - Tf_Sun_new))
     res_Ci_Sun = (anchor_weight * (Ci_Sun - Ci_Sh)
@@ -493,7 +501,7 @@ def _make_implicit_newton_solver(
             # size during dusk transitions; constant 5.0 lets the solver
             # traverse the radiation-collapse smoothly while still
             # preventing catastrophic overshoot.
-            delta = jnp.clip(delta, -5.0, 5.0)
+            delta = jnp.clip(delta, -5.0, 5.0)  # coeff-ok: constant Newton step cap (see note above)
             x_new = x + delta
             new_converged = jnp.linalg.norm(delta) < tol
             return (x_new, i + 1, new_converged)
