@@ -1058,6 +1058,55 @@ def sam_ocean_surface_q(
     return salt_factor * saturation_specific_humidity(T_sfc, p_sfc)
 
 
+def ocean_surface_q_sat(
+    T_sfc: jnp.ndarray,
+    p_sfc: jnp.ndarray | float,
+    *,
+    thermo_convention: str = "legoesm",
+    bulk_scheme: str = "constant",
+    saline_factor: float = 1.0,
+) -> jnp.ndarray:
+    """Air-sea surface saturation MIXING RATIO with the convention-appropriate
+    saturation curve (#762), so the interface humidity is single-valued across
+    every air-sea flux path (coupler ocean tile, standalone slab ocean, tiled
+    surface layer) rather than split between Goff and Tetens.
+
+    The WMO Goff (1957) curve is used under ``thermo_convention='aerobulk'`` on
+    a MOST solver scheme (``'most'``/``'coare3'``/``'large_yeager'`` — the only
+    schemes carrying the NEMO/AeroBulk constant set, matching the flux-formation
+    convention); every other case keeps the Tetens
+    :func:`legoesm.thermo.saturation_mixing_ratio`, so the default ``legoesm``
+    convention and the fixed-coefficient ``constant`` closure are byte-identical.
+    ``saline_factor`` applies the salinity reduction of q_sat (0.98 for the
+    coupled ocean tile; 1.0 leaves it unscaled).
+
+    Parameters
+    ----------
+    T_sfc : array
+        Sea-surface temperature [K].
+    p_sfc : array or float
+        Surface pressure [Pa].
+    thermo_convention : str
+        ``'legoesm'`` (Tetens) or ``'aerobulk'`` (Goff on the MOST schemes).
+    bulk_scheme : str
+        Surface bulk scheme; Goff engages only on the MOST solvers.
+    saline_factor : float
+        Salinity reduction of q_sat (1.0 = none).
+
+    Returns
+    -------
+    array
+        Surface saturation mixing ratio [kg/kg].
+    """
+    from legoesm.thermo import (
+        saturation_mixing_ratio, saturation_mixing_ratio_goff)
+
+    _use_goff = (thermo_convention == "aerobulk"
+                 and bulk_scheme in ("most", "coare3", "large_yeager"))
+    _sat = saturation_mixing_ratio_goff if _use_goff else saturation_mixing_ratio
+    return saline_factor * _sat(T_sfc, p_sfc)
+
+
 def _sam_cdn(u10: jnp.ndarray) -> jnp.ndarray:
     """SAM/CESM neutral 10 m drag coefficient (``oceflx.f90`` ``cdn``).
 

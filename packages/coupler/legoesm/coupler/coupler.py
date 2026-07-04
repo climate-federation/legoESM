@@ -14,12 +14,10 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import (
-    saturation_mixing_ratio, saturation_mixing_ratio_goff,
-)
 from legoesm.core.precision import get_policy
 from legoesm.core.bulk_flux import (
     simple_bulk_fluxes, compute_most_fluxes, apply_gustiness,
+    ocean_surface_q_sat,
 )
 from legoesm.land.multilayer_land import init_multilayer_land_state
 from legoesm.land.surface_params import reshape_params
@@ -249,11 +247,10 @@ def ocean_tile_response(
     # (codex round-20).  ``most`` = iterative MOST at the fixed ``ocean_z0``
     # roughness (parity with the sea-ice/land/lake dispatchers).
     _is_most = config.bulk_scheme in ("most", "coare3", "large_yeager")
-    _use_goff = _thermo_conv == "aerobulk" and _is_most
-    q_sfc = _Q_SAT_SALINE_FACTOR * (
-        saturation_mixing_ratio_goff if _use_goff
-        else saturation_mixing_ratio
-    )(ocean_sst, forcing.p_surface)
+    q_sfc = ocean_surface_q_sat(
+        ocean_sst, forcing.p_surface,
+        thermo_convention=_thermo_conv, bulk_scheme=config.bulk_scheme,
+        saline_factor=_Q_SAT_SALINE_FACTOR)
 
     if _is_most:
         # Use wind relative to ocean surface current

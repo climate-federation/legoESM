@@ -17,10 +17,9 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
 from legoesm.core.field import Field
 from legoesm.core.coupling_fields import AtmToSurface
-from legoesm.core.bulk_flux import apply_gustiness
+from legoesm.core.bulk_flux import apply_gustiness, ocean_surface_q_sat
 
 
 # ============================================================================
@@ -197,8 +196,14 @@ def _slab_step(
     """Single mixed-layer energy balance step."""
     T_sfc = state.T_sfc.data
 
-    # Surface humidity: saturated
-    q_sfc = saturation_mixing_ratio(T_sfc, forcing.p_surface)
+    # Surface humidity: saturated, on the same thermodynamic convention as the
+    # flux formation (#762) — Goff under aerobulk+MOST, else Tetens (default
+    # legoesm / 'constant' scheme byte-identical).  Matches the coupler ocean
+    # tile so the air-sea interface q_sfc is single-valued.
+    q_sfc = ocean_surface_q_sat(
+        T_sfc, forcing.p_surface,
+        thermo_convention=getattr(config, "thermo_convention", "legoesm"),
+        bulk_scheme=config.bulk_scheme)
 
     # Bulk turbulent fluxes (positive upward); scheme-consistent with the
     # atmosphere surface layer (see _ocean_turbulent_fluxes).
@@ -251,8 +256,14 @@ def _two_layer_step(
     T_sfc = state.T_sfc.data
     T_deep = state.T_deep.data
 
-    # Surface humidity: saturated
-    q_sfc = saturation_mixing_ratio(T_sfc, forcing.p_surface)
+    # Surface humidity: saturated, on the same thermodynamic convention as the
+    # flux formation (#762) — Goff under aerobulk+MOST, else Tetens (default
+    # legoesm / 'constant' scheme byte-identical).  Matches the coupler ocean
+    # tile so the air-sea interface q_sfc is single-valued.
+    q_sfc = ocean_surface_q_sat(
+        T_sfc, forcing.p_surface,
+        thermo_convention=getattr(config, "thermo_convention", "legoesm"),
+        bulk_scheme=config.bulk_scheme)
 
     # Bulk turbulent fluxes (positive upward); scheme-consistent with the
     # atmosphere surface layer (see _ocean_turbulent_fluxes).
