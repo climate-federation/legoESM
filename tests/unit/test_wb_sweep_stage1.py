@@ -37,6 +37,10 @@ def test_generator_writes_expected_combos(tmp_path, monkeypatch):
             "combo_micro_thompson", "combo_cloud_sundqvist"} <= names
     assert manifest["n_combos"] == 10          # baseline + 9 curated alternatives
     assert manifest["campaign"] == "weatherbench"
+    # all 5 families explicit in the baseline (incl. cloud, for manifest analysis)
+    assert set(manifest["baseline"]) == {
+        "aimip_convection", "aimip_turbulence", "aimip_gwd",
+        "aimip_microphysics", "aimip_cloud"}
 
     # every OAT arm changes EXACTLY one family from the baseline (all-active, no 'none')
     base = manifest["baseline"]
@@ -50,6 +54,7 @@ def test_generator_writes_expected_combos(tmp_path, monkeypatch):
     # runner sbatch emitted + points at the worktree
     runner = (tmp_path / "scripts" / "run" / "_wb_sweep_stage1_runner.sbatch").read_text()
     assert "run_aimip.py" in runner and "--variants classical" in runner
+    assert "--resume" in runner                # walltime-kill-safe resubmit
     assert "scripts/cluster/wb_forecast/env.sh" in runner
 
 

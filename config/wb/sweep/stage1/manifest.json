@@ -5,7 +5,8 @@
     "aimip_convection": "tiedtke",
     "aimip_turbulence": "louis",
     "aimip_gwd": "mcfarlane",
-    "aimip_microphysics": "sundqvist"
+    "aimip_microphysics": "sundqvist",
+    "aimip_cloud": "xu_randall"
   },
   "baseline_yaml": "config/wb/sweep/stage1/baseline_classical_t63_rrtmgp.yaml",
   "results_dir": "results/wb_sweep_stage1",
@@ -19,7 +20,8 @@
         "aimip_convection": "tiedtke",
         "aimip_turbulence": "louis",
         "aimip_gwd": "mcfarlane",
-        "aimip_microphysics": "sundqvist"
+        "aimip_microphysics": "sundqvist",
+        "aimip_cloud": "xu_randall"
       },
       "suite": "config/wb/sweep/stage1/combo_baseline/suite.yaml"
     },
@@ -31,7 +33,8 @@
         "aimip_convection": "bechtold",
         "aimip_turbulence": "louis",
         "aimip_gwd": "mcfarlane",
-        "aimip_microphysics": "sundqvist"
+        "aimip_microphysics": "sundqvist",
+        "aimip_cloud": "xu_randall"
       },
       "suite": "config/wb/sweep/stage1/combo_conv_bechtold/suite.yaml"
     },
@@ -43,7 +46,8 @@
         "aimip_convection": "edmf",
         "aimip_turbulence": "louis",
         "aimip_gwd": "mcfarlane",
-        "aimip_microphysics": "sundqvist"
+        "aimip_microphysics": "sundqvist",
+        "aimip_cloud": "xu_randall"
       },
       "suite": "config/wb/sweep/stage1/combo_conv_edmf/suite.yaml"
     },
@@ -55,7 +59,8 @@
         "aimip_convection": "tiedtke",
         "aimip_turbulence": "ysu",
         "aimip_gwd": "mcfarlane",
-        "aimip_microphysics": "sundqvist"
+        "aimip_microphysics": "sundqvist",
+        "aimip_cloud": "xu_randall"
       },
       "suite": "config/wb/sweep/stage1/combo_turb_ysu/suite.yaml"
     },
@@ -67,7 +72,8 @@
         "aimip_convection": "tiedtke",
         "aimip_turbulence": "edmf",
         "aimip_gwd": "mcfarlane",
-        "aimip_microphysics": "sundqvist"
+        "aimip_microphysics": "sundqvist",
+        "aimip_cloud": "xu_randall"
       },
       "suite": "config/wb/sweep/stage1/combo_turb_edmf/suite.yaml"
     },
@@ -79,7 +85,8 @@
         "aimip_convection": "tiedtke",
         "aimip_turbulence": "louis",
         "aimip_gwd": "hines",
-        "aimip_microphysics": "sundqvist"
+        "aimip_microphysics": "sundqvist",
+        "aimip_cloud": "xu_randall"
       },
       "suite": "config/wb/sweep/stage1/combo_gwd_hines/suite.yaml"
     },
@@ -91,7 +98,8 @@
         "aimip_convection": "tiedtke",
         "aimip_turbulence": "louis",
         "aimip_gwd": "mcfarlane",
-        "aimip_microphysics": "kessler"
+        "aimip_microphysics": "kessler",
+        "aimip_cloud": "xu_randall"
       },
       "suite": "config/wb/sweep/stage1/combo_micro_kessler/suite.yaml"
     },
@@ -103,7 +111,8 @@
         "aimip_convection": "tiedtke",
         "aimip_turbulence": "louis",
         "aimip_gwd": "mcfarlane",
-        "aimip_microphysics": "morrison"
+        "aimip_microphysics": "morrison",
+        "aimip_cloud": "xu_randall"
       },
       "suite": "config/wb/sweep/stage1/combo_micro_morrison/suite.yaml"
     },
@@ -115,7 +124,8 @@
         "aimip_convection": "tiedtke",
         "aimip_turbulence": "louis",
         "aimip_gwd": "mcfarlane",
-        "aimip_microphysics": "thompson"
+        "aimip_microphysics": "thompson",
+        "aimip_cloud": "xu_randall"
       },
       "suite": "config/wb/sweep/stage1/combo_micro_thompson/suite.yaml"
     },

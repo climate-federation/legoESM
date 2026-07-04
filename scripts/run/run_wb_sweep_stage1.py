@@ -35,6 +35,8 @@ BASELINE = {
     "aimip_turbulence": "louis",
     "aimip_gwd": "mcfarlane",
     "aimip_microphysics": "sundqvist",
+    "aimip_cloud": "xu_randall",   # explicit 5th family so the manifest/analysis
+                                   # sees the cloud OAT diff as xu_randall->sundqvist
 }
 
 # CURATED OAT alternatives per family (excludes the baseline value, added
@@ -118,7 +120,8 @@ mkdir -p results/wb_sweep_stage1/slurm_logs
 echo "[$(date)] task ${{SLURM_ARRAY_TASK_ID}} -> suite=${{SUITE_PATH}}"
 "$WB_PYTHON" scripts/run/run_aimip.py \\
     --suite "${{SUITE_PATH}}" \\
-    --variants classical
+    --variants classical \\
+    --resume
 echo "[$(date)] task ${{SLURM_ARRAY_TASK_ID}} done"
 """
     path.write_text(content)
@@ -172,6 +175,10 @@ def main():
     }
     manifest_path = repo_root / SWEEP_DIR_REL / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    # SLURM opens #SBATCH --output/--error before the job body runs, so the log
+    # dir must exist at submission time.
+    (repo_root / RESULTS_DIR_REL / "slurm_logs").mkdir(parents=True, exist_ok=True)
 
     runner_sbatch = _write_runner_sbatch(
         repo_root, manifest_rel=Path(SWEEP_DIR_REL) / "manifest.json")

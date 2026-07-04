@@ -35,5 +35,6 @@ mkdir -p results/wb_sweep_stage1/slurm_logs
 echo "[$(date)] task ${SLURM_ARRAY_TASK_ID} -> suite=${SUITE_PATH}"
 "$WB_PYTHON" scripts/run/run_aimip.py \
     --suite "${SUITE_PATH}" \
-    --variants classical
+    --variants classical \
+    --resume
 echo "[$(date)] task ${SLURM_ARRAY_TASK_ID} done"
