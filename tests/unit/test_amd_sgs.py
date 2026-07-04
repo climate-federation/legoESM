@@ -107,3 +107,57 @@ def test_plane_config_validation_accepts_amd():
     with pytest.raises(ValueError, match="amd_c"):
         cep.validate_plane_config(
             CompressibleEulerConfig(turbulence_closure="amd", amd_c=0.0))
+
+
+def test_plane_config_validation_rejects_amd_incompatibilities():
+    """AMD is a static, self-contained closure with a K_h = K_m/Pr split, so the
+    validation rejects a dynamic-Smagorinsky coefficient and a non-positive
+    Prandtl number (dispatch hardening on the nested closure config)."""
+    from legoesm.atmosphere.dynamics.compressible_euler import (
+        CompressibleEulerConfig)
+    from legoesm.atmosphere.dynamics import compressible_euler_plane as cep
+
+    with pytest.raises(ValueError, match="smagorinsky_dynamic"):
+        cep.validate_plane_config(CompressibleEulerConfig(
+            turbulence_closure="amd", amd_c=0.3, smagorinsky_dynamic=True))
+    with pytest.raises(ValueError, match="smagorinsky_prandtl"):
+        cep.validate_plane_config(CompressibleEulerConfig(
+            turbulence_closure="amd", amd_c=0.3, smagorinsky_prandtl=0.0))
+
+
+def test_amd_falls_back_on_halo_fast_path_not_silently_inviscid():
+    """Regression: the JIT-split halo fast path (`slow_tendency_jit_split`) must
+    NOT silently run inviscid for an 'amd' config.
+
+    amd_c and smagorinsky_cs both default to 0.0, so unless the fast-path guard
+    lists the closure by NAME an 'amd' config trips none of its
+    (smag_cs>0 / tracers / coriolis / non-upwind1 / w_hyperdiff) fall-back
+    conditions and skips the SGS block entirely (inviscid).  With the guard
+    fixed, an 'amd' config falls back to the eager halo kernel, which then hits
+    the explicit single-rank NotImplementedError guard — proving AMD is routed,
+    not dropped.  (Reachable in production via scripts/bench/bench_dd_scaling.py.)
+    """
+    import jax.numpy as jnp
+    from legoesm.atmosphere.dynamics.compressible_euler import (
+        CompressibleEulerConfig)
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        make_flat_plane_terrain_metric, make_rest_state)
+    from legoesm.atmosphere.dynamics.compressible_euler_plane_halo import (
+        slow_tendency_jit_split)
+    from legoesm.grids.plane import create_plane_grid
+    from legoesm.grids.vertical import create_stretched_height_coordinate
+    from legoesm.parallel.plane_mpi import make_plane_pencil_layout
+
+    grid = create_plane_grid(nx=8, ny=8, nlev=6, dx=1000.0, dy=1000.0,
+                             dtype=jnp.float64)
+    hc = create_stretched_height_coordinate(6, H=20_000.0, dz_sfc=100.0)
+    tm = make_flat_plane_terrain_metric(grid, hc)
+    layout = make_plane_pencil_layout(
+        rank=0, n_ranks=1, n_ranks_y=1, n_ranks_x=1, ny_global=8, nx_global=8)
+    state = make_rest_state(grid, hc, dtype=jnp.float64)
+    # AMD is the SOLE fall-back trigger: 0 tracers (make_rest_state default),
+    # smag_cs=0, w_hyperdiff=0, upwind1 (all defaults); coriolis OFF.
+    cfg = CompressibleEulerConfig(
+        turbulence_closure="amd", amd_c=0.3, use_coriolis=False)
+    with pytest.raises(NotImplementedError, match="single-rank"):
+        slow_tendency_jit_split(state, grid, hc, tm, cfg, layout)

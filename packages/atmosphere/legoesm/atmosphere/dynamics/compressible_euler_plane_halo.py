@@ -1088,14 +1088,16 @@ def slow_tendency_jit_split(
     """
     _w_hyperdiff = getattr(config, "hyperdiff_w_coeff", 0.0)
     _advection = getattr(config, "horizontal_advection_scheme", "upwind1")
-    # Any non-default eddy/DNS closure ("vreman", "molecular") has an SGS block
-    # this fast path does not implement (it only covers the no-SGS case); fall
-    # back to the eager kernel so the closure is not silently skipped. ("vreman"
-    # then hits the explicit single-rank guard there.)
+    # Any non-default eddy/DNS closure ("vreman", "amd", "molecular") has an SGS
+    # block this fast path does not implement (it only covers the no-SGS case);
+    # fall back to the eager kernel so the closure is not silently skipped
+    # ("vreman"/"amd" then hit the explicit single-rank guard there).  amd_c /
+    # smagorinsky_cs default 0.0, so without listing the closure by NAME an
+    # 'amd' config would trip none of these conditions and run INVISCID.
     _closure = getattr(config, "turbulence_closure", "smagorinsky")
     if (
         config.smagorinsky_cs > 0.0
-        or _closure in ("vreman", "molecular")
+        or _closure in ("vreman", "amd", "molecular")
         or state.tracers.data.shape[-1] > 0
         or config.use_coriolis
         or _advection != "upwind1"

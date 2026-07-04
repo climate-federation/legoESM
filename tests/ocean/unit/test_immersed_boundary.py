@@ -1,10 +1,17 @@
 """General immersed-boundary (GridFittedBoundary) geometry — arbitrary solid
 cells + thin-wall face barriers on the lat-lon C-grid.
 
+The module is a validated-but-NOT-YET-INTEGRATED core under
+``ocean.dynamics._future`` (no production experiment carves an interior obstacle
+yet — all use smooth bathymetry via GridFittedBottom); these tests exercise the
+core so the impermeability / conservation / atomicity guarantees are locked in
+before it is wired.
+
 Correctness gate: IMPERMEABILITY — no flux-form transport crosses a masked /
-barrier face for ANY velocity — and the telescoping mass conservation that
-follows, plus the surface-connectivity guard that fails loudly on the
-deferred cavity/overhang geometry.
+barrier face for ANY velocity — the mass conservation that follows, the
+surface-connectivity guard that fails loudly on the deferred cavity/overhang
+geometry, and the ATOMIC state carve that keeps H_bathy / land_mask / face masks
+consistent with the carved coordinate.
 """
 
 from __future__ import annotations
@@ -13,7 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.ocean.dynamics.immersed_boundary import (
+from legoesm.ocean.dynamics._future.immersed_boundary import (
     combine_solid_mask,
     assert_columns_surface_connected,
     add_face_barriers,
@@ -21,6 +28,7 @@ from legoesm.ocean.dynamics.immersed_boundary import (
     mask_immersed_field,
     immersed_partial_cell_coordinate,
     immersed_column_depth,
+    carve_immersed_state,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
 
@@ -77,6 +85,30 @@ def test_impermeable_faces_zero_flux_for_any_velocity():
     assert bool(jnp.all(jnp.where(v_mask == 0.0, Fv == 0.0, True)))
 
 
+def test_solid_cell_has_exactly_zero_net_flux():
+    """The STRICT impermeability statement: the net flux-divergence into EACH
+    solid cell is exactly zero for any velocity — a solid cell neither gains
+    nor loses mass (no spurious source/sink at an immersed boundary).  Stronger
+    than a whole-domain telescoping sum (which vanishes even with no obstacle).
+    """
+    nlat, nlon, nlev = 4, 5, 1
+    a = _all_active(nlat, nlon, nlev)
+    solid = jnp.zeros_like(a).at[1, 2, :].set(True).at[2, 1, :].set(True)
+    active = combine_solid_mask(a, solid)
+    u_mask, v_mask = compute_face_masks_3d(active)
+
+    rng = np.random.default_rng(3)
+    Fu = jnp.asarray(rng.normal(size=u_mask.shape)) * u_mask   # (nlat, nlon+1, k)
+    Fv = jnp.asarray(rng.normal(size=v_mask.shape)) * v_mask   # (nlat+1, nlon, k)
+
+    # Per-cell flux divergence (uniform area, arbitrary velocities).
+    div = (Fu[:, 1:, :] - Fu[:, :-1, :]) + (Fv[1:, :, :] - Fv[:-1, :, :])
+    solid_2d = np.asarray(~np.asarray(active))[..., 0]         # (nlat, nlon) bool
+    # EVERY solid cell has all four faces masked, so its net flux is exactly 0
+    # regardless of the (random) velocities.
+    assert float(jnp.max(jnp.abs(div[solid_2d]))) == 0.0
+
+
 def test_mass_conservation_telescopes_to_zero():
     """With walls at the meridional boundaries and periodic longitude, the
     discrete flux divergence of a masked flux field sums to zero over the whole
@@ -98,11 +130,14 @@ def test_mass_conservation_telescopes_to_zero():
 
     # Cell divergence (uniform area): (Fu_east - Fu_west) + (Fv_north - Fv_south).
     div = (Fu[:, 1:, :] - Fu[:, :-1, :]) + (Fv[1:, :, :] - Fv[:-1, :, :])
-    # Sum over ALL cells = net domain-boundary flux. Longitude telescopes to the
-    # (equal) periodic wrap faces and the meridional boundary v-faces are walls
-    # (v_mask=0), so the net must vanish to round-off — no spurious source/sink
-    # at the solid faces (flux-form impermeability => mass conservation).
-    total = float(jnp.sum(div))
+    # Sum over the WATER cells only (active) = net domain-boundary flux. Longitude
+    # telescopes to the (equal) periodic wrap faces and the meridional boundary
+    # v-faces are walls (v_mask=0), so the net must vanish to round-off — no
+    # spurious source/sink at the solid faces (flux-form impermeability => mass
+    # conservation).  Summing over active cells (not all cells) is the honest
+    # water-budget statement; solid cells are separately exactly-zero above.
+    water_2d = np.asarray(np.asarray(active))[..., 0]
+    total = float(jnp.sum(jnp.where(jnp.asarray(water_2d)[..., None], div, 0.0)))
     assert abs(total) < 1e-10
 
 
@@ -122,6 +157,21 @@ def test_thin_wall_barrier_blocks_without_masking_cells():
     assert_columns_surface_connected(a)              # still valid
     # A barrier is stricter than the bare face mask.
     assert float(jnp.sum(vm2)) < float(jnp.sum(v_mask))
+
+
+def test_add_face_barriers_rejects_mismatched_shape():
+    """A transposed / mis-sized barrier fails LOUDLY (static geometry check),
+    not by silently broadcasting a wall onto the wrong faces."""
+    nlat, nlon, nlev = 4, 4, 2
+    u_mask, v_mask = compute_face_masks_3d(_all_active(nlat, nlon, nlev))
+    # v_barrier must be (nlat+1, nlon[, nlev]); give it a wrong first dim.
+    bad_v = jnp.zeros((nlat, nlon), dtype=bool)
+    with pytest.raises(ValueError, match="v_barrier"):
+        add_face_barriers(u_mask, v_mask, v_barrier=bad_v)
+    # And a wrong rank.
+    bad_u = jnp.zeros((nlat,), dtype=bool)
+    with pytest.raises(ValueError, match="u_barrier"):
+        add_face_barriers(u_mask, v_mask, u_barrier=bad_u)
 
 
 def test_immersed_face_masks_combines_solid_and_barrier():
@@ -178,3 +228,64 @@ def test_immersed_partial_cell_coordinate():
     bad = jnp.zeros((nlat, nlon, 3), dtype=bool).at[0, 0, 1].set(True)
     with pytest.raises(ValueError, match="surface-connected"):
         immersed_partial_cell_coordinate(coord, bad)
+
+
+def _minimal_cgrid_state(land_mask_2d, H_bathy_2d):
+    """A bare LatLonCGridOceanState from 2-D masks (no grid needed): carve_
+    immersed_state only reads land_mask/H_bathy and recomputes the face masks."""
+    from legoesm.core.field import Field
+    from legoesm.ocean.state import LatLonCGridOceanState
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
+    nlat, nlon = land_mask_2d.shape
+    um, vm = compute_face_masks(land_mask_2d)
+    F = lambda d, n, dims, u="": Field(data=d, name=n, dims=dims, units=u)
+    return LatLonCGridOceanState(
+        u=F(jnp.zeros((nlat, nlon + 1)), "u", ("y", "x"), "m/s"),
+        v=F(jnp.zeros((nlat + 1, nlon)), "v", ("y", "x"), "m/s"),
+        T=F(jnp.zeros((nlat, nlon)), "T", ("y", "x"), "degC"),
+        S=F(jnp.zeros((nlat, nlon)), "S", ("y", "x"), "PSU"),
+        eta=F(jnp.zeros((nlat, nlon)), "eta", ("y", "x"), "m"),
+        H_bathy=F(H_bathy_2d, "H_bathy", ("y", "x"), "m"),
+        land_mask=F(land_mask_2d, "land_mask", ("y", "x")),
+        u_mask=F(um, "u_mask", ("y", "x")),
+        v_mask=F(vm, "v_mask", ("y", "x")),
+        w=F(jnp.zeros((nlat, nlon)), "w", ("y", "x"), "m/s"),
+    )
+
+
+def test_carve_immersed_state_atomic_H_bathy_and_land_mask():
+    """carve_immersed_state keeps state.H_bathy == Σ h_partial AND drops a
+    fully-solid column to land (with consistent face masks) — the atomic entry
+    that prevents the H_bathy/land_mask desync footgun."""
+    from legoesm.ocean.vertical import (
+        create_z_star_from_thicknesses, create_partial_cell_coordinate)
+    nlat, nlon = 3, 4
+    zc = create_z_star_from_thicknesses(jnp.array([10.0, 20.0, 40.0]))
+    H = jnp.full((nlat, nlon), 70.0)
+    coord = create_partial_cell_coordinate(zc, H)
+    state = _minimal_cgrid_state(jnp.ones((nlat, nlon)), jnp.full((nlat, nlon), 70.0))
+
+    # Partial carve at (1,2): deepest level only -> shallower, still wet.
+    # Full carve at (0,3): ALL levels solid -> becomes land.
+    solid = (jnp.zeros((nlat, nlon, 3), dtype=bool)
+             .at[1, 2, 2].set(True)
+             .at[0, 3, :].set(True))
+    new_state, new_coord = carve_immersed_state(state, coord, solid)
+
+    # ATOMIC invariant: state.H_bathy tracks the carved coordinate exactly.
+    np.testing.assert_allclose(
+        np.asarray(new_state.H_bathy.data),
+        np.asarray(immersed_column_depth(new_coord)))
+    # Partial-carve column: shallower (30 m) but STILL OCEAN.
+    assert float(new_state.H_bathy.data[1, 2]) == pytest.approx(30.0, rel=1e-9)
+    assert float(new_state.land_mask.data[1, 2]) == 1.0
+    # Full-carve column: land_mask -> 0 and depth -> 0.
+    assert float(new_state.land_mask.data[0, 3]) == 0.0
+    assert float(new_state.H_bathy.data[0, 3]) == 0.0
+    # Face masks recomputed from the new land_mask (the fully-solid column walls
+    # off): both u-faces bordering (0,3) are dry.
+    assert float(new_state.u_mask.data[0, 3]) == 0.0
+    assert float(new_state.u_mask.data[0, 4]) == 0.0
+    # Untouched column unchanged.
+    assert float(new_state.H_bathy.data[2, 0]) == pytest.approx(70.0, rel=1e-9)
+    assert float(new_state.land_mask.data[2, 0]) == 1.0

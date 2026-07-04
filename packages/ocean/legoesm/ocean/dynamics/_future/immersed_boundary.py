@@ -1,9 +1,27 @@
 """General immersed-boundary geometry for the lat-lon C-grid ocean.
 
-Oceananigans-style ``GridFittedBoundary``: carve ARBITRARY solid cells and/or
-thin-wall face barriers into an otherwise-active ocean, on top of the
-bathymetry-following ``GridFittedBottom`` (partial bottom cells + ``bottom_level``
-+ the 2-D ``land_mask``) the model already supports.
+**NOT YET INTEGRATED** — this module is the validated general-immersed-boundary
+*core* (Oceananigans-style ``GridFittedBoundary``: carve ARBITRARY solid cells
+and/or thin-wall face barriers into an otherwise-active ocean, on top of the
+bathymetry-following ``GridFittedBottom`` — partial bottom cells +
+``bottom_level`` + the 2-D ``land_mask`` — the model already supports).  It is
+not yet imported by any production ocean experiment: every current experiment
+(``overflow``, ``dino``, ``isomip_plus``, …) builds a SMOOTH bathymetry field
+and uses the already-wired ``GridFittedBottom`` partial-cell path, so none needs
+an interior obstacle / thin-wall.  Wire this in when an experiment requires a
+general immersed boundary by:
+
+1. building the ``solid_3d`` mask (and/or ``u_barrier``/``v_barrier``) for the
+   geometry in the experiment's ``create_initial_conditions``;
+2. calling :func:`carve_immersed_state` with the freshly-built
+   ``(state, z_coord, solid_3d)`` to get a CONSISTENT ``(state, z_coord)`` pair
+   (``H_bathy``, ``land_mask``, face masks and the partial-cell coordinate all
+   updated together) — never carve the coordinate alone (see the footgun note on
+   :func:`carve_immersed_state`);
+3. threading the barrier-augmented face masks through the experiment's operator
+   setup via :func:`immersed_face_masks` when a thin-wall sill/dam is needed;
+4. adding a matrix case + a conservation/impermeability regression before the
+   experiment is declared production-ready.
 
 The C-grid tracer/momentum operators already enforce no flux through a face
 whose per-level mask is zero (fluxes are ``h_face * u * u_mask_3d``), and
@@ -20,6 +38,8 @@ mask.  This module is the user-facing layer on top of that leak-free machinery:
 * :func:`immersed_partial_cell_coordinate` — a masked
   :class:`OceanPartialCellCoordinate` from a solid-cell mask, VALIDATED to keep
   every column surface-connected;
+* :func:`carve_immersed_state` — the ATOMIC entry: carve the coordinate AND the
+  live C-grid state (``H_bathy`` + the three masks) together;
 * :func:`mask_immersed_field` — zero a prognostic field on solid cells.
 
 SCOPE / SAFETY.  The masked cells must keep every water column
@@ -37,6 +57,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm.core.field import Field
 from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
 from legoesm.ocean.vertical import OceanPartialCellCoordinate
 
@@ -86,18 +107,30 @@ def add_face_barriers(u_mask_3d: jnp.ndarray, v_mask_3d: jnp.ndarray,
     A barrier zeroes the face mask so the flux-form operators pass NO flux
     through it, WITHOUT masking either adjacent cell — a sub-grid sill / dam /
     strait closure that leaves both columns fully active (vertical logic
-    untouched).  Shapes match the face masks: ``u_barrier`` ``(n_lat, n_lon+1,
-    nlev)``, ``v_barrier`` ``(n_lat+1, n_lon, nlev)`` (2-D per-face barriers
-    broadcast over levels).  Returns the masked ``(u_mask_3d, v_mask_3d)``.
+    untouched).  Shapes match the face masks: ``u_barrier`` ``(n_lat, n_lon+1
+    [, nlev])``, ``v_barrier`` ``(n_lat+1, n_lon [, nlev])`` (2-D per-face
+    barriers broadcast over levels).  Returns the masked
+    ``(u_mask_3d, v_mask_3d)``.
     """
-    um, vm = u_mask_3d, v_mask_3d
-    if u_barrier is not None:
-        ub = u_barrier[..., None] if u_barrier.ndim == um.ndim - 1 else u_barrier
-        um = um * (1.0 - ub.astype(um.dtype))
-    if v_barrier is not None:
-        vb = v_barrier[..., None] if v_barrier.ndim == vm.ndim - 1 else v_barrier
-        vm = vm * (1.0 - vb.astype(vm.dtype))
-    return um, vm
+    def _apply(mask, barrier, name):
+        if barrier is None:
+            return mask
+        # Static host-side geometry: validate the face-plane shape up front so a
+        # transposed / mis-sized barrier fails loudly instead of broadcasting a
+        # wall onto the wrong faces.
+        if barrier.ndim not in (mask.ndim - 1, mask.ndim):
+            raise ValueError(
+                f"{name} must be {mask.ndim - 1}-D (face plane) or {mask.ndim}-D "
+                f"(per-level), got ndim={barrier.ndim}")
+        if tuple(barrier.shape[:2]) != tuple(mask.shape[:2]):
+            raise ValueError(
+                f"{name} face-plane shape {tuple(barrier.shape[:2])} != face-mask "
+                f"shape {tuple(mask.shape[:2])}")
+        b = barrier[..., None] if barrier.ndim == mask.ndim - 1 else barrier
+        return mask * (1.0 - b.astype(mask.dtype))
+
+    return _apply(u_mask_3d, u_barrier, "u_barrier"), \
+        _apply(v_mask_3d, v_barrier, "v_barrier")
 
 
 def immersed_face_masks(is_active_3d: jnp.ndarray, grid=None,
@@ -157,7 +190,9 @@ def immersed_partial_cell_coordinate(
     NOTE on depth: a bottom-anchored carve makes the column shallower, so its
     ``H_bathy = Σ h_partial`` shrinks — callers computing layer thickness must
     use :func:`immersed_column_depth` (the coordinate invariant), NOT a cached
-    pre-carve bathymetry.  ``H_max`` / the reference z-grid are unchanged.
+    pre-carve bathymetry.  ``H_max`` / the reference z-grid are unchanged.  When
+    a live C-grid state exists, prefer :func:`carve_immersed_state`, which also
+    keeps ``state.H_bathy`` / ``land_mask`` / face masks consistent.
     """
     new_active = combine_solid_mask(coord.is_active, solid_3d)
     assert_columns_surface_connected(new_active)
@@ -170,3 +205,54 @@ def immersed_partial_cell_coordinate(
     new_bottom = jnp.max(active_k, axis=-1)
     return coord._replace(
         is_active=new_active, h_partial=new_h, bottom_level=new_bottom)
+
+
+def carve_immersed_state(state, coord: OceanPartialCellCoordinate,
+                         solid_3d: jnp.ndarray):
+    """Atomically carve ``solid_3d`` into BOTH the coordinate and the C-grid state.
+
+    A bottom-anchored solid carve makes columns shallower (or fully dry).  The
+    cgrid model reads ``state.H_bathy`` — a field SEPARATE from the partial-cell
+    coordinate — in every ``compute_layer_thickness`` call, so carving only the
+    coordinate leaves ``state.H_bathy`` at its pre-carve value and silently
+    mis-scales the live column thickness (partial cells scale by
+    ``(eta + H_bathy)/H_bathy``): a mass-conservation footgun.  This returns a
+    CONSISTENT ``(new_state, new_coord)`` pair:
+
+    * ``new_coord`` = :func:`immersed_partial_cell_coordinate` (masked
+      ``is_active``, zeroed ``h_partial`` on solids, ``bottom_level`` tracking
+      the new seafloor, surface-connectivity validated);
+    * ``new_state.H_bathy`` <- :func:`immersed_column_depth` (= ``Σ h_partial``),
+      the depth callers must use for layer thickness;
+    * ``new_state.land_mask`` <- 0 on any column carved FULLY solid (no active
+      cell left, ``bottom_level == -1``), with ``u_mask``/``v_mask`` recomputed
+      via :func:`legoesm.ocean.init_latlon_cgrid.replace_land_mask` so the three
+      masks stay consistent (never ``_replace(land_mask=...)`` alone — stale
+      face masks leak flux through walls).
+
+    Sign convention: ``H_bathy`` is positive-downward depth [m]; the carved
+    depth ``Σ h_partial >= 0`` and a fully-solid column has depth 0 AND
+    ``land_mask = 0`` (consistent land).  A partially-carved column keeps
+    ``land_mask = 1`` (still ocean) with a reduced ``H_bathy``.
+
+    Returns ``(new_state, new_coord)``.
+    """
+    # Function-scope import: init_latlon_cgrid imports latlon_cgrid_operators
+    # (this module's sibling), so a top-level import would be an ordering hazard.
+    from legoesm.ocean.init_latlon_cgrid import replace_land_mask
+
+    new_coord = immersed_partial_cell_coordinate(coord, solid_3d)
+    new_H = immersed_column_depth(new_coord)                    # (n_lat, n_lon)
+
+    # A column carved fully solid (no active cell at any level -> bottom_level
+    # == -1) becomes LAND: drop it from land_mask so the recomputed face masks
+    # wall it off.  A still-wet column keeps its existing land/ocean flag.
+    column_wet = (new_coord.bottom_level >= 0).astype(new_H.dtype)
+    new_land_mask = state.land_mask.data.astype(new_H.dtype) * column_wet
+
+    new_state = replace_land_mask(state, new_land_mask)
+    new_state = new_state._replace(
+        H_bathy=Field(data=new_H, name="H_bathy",
+                      dims=state.H_bathy.dims, units=state.H_bathy.units),
+    )
+    return new_state, new_coord
