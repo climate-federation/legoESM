@@ -111,6 +111,39 @@ def test_all_masks_consistent_with_targets():
         assert bool(jnp.all(diag.valid[key])), key
 
 
+def test_score_forecast_perfect_and_climatology():
+    from evaluations.wb_forecast import score_forecast
+    lat = np.linspace(-90.0, 90.0, 24)
+    rng = np.random.default_rng(0)
+    v = jnp.asarray(rng.normal(5500.0, 100.0, (24, 48)))
+    clim = {"z500": jnp.full((24, 48), 5500.0)}
+    verif = {"z500": v}
+
+    # perfect forecast -> RMSE 0, bias 0, ACC 1
+    s = score_forecast({"z500": v}, verif, clim, lat)
+    assert s["z500"]["rmse"] < 1e-6
+    assert abs(s["z500"]["bias"]) < 1e-6
+    assert s["z500"]["acc"] > 0.999
+
+    # climatology forecast -> ACC ~ 0 (zero anomaly), RMSE > 0
+    s2 = score_forecast(clim, verif, clim, lat)
+    assert abs(s2["z500"]["acc"]) < 1e-6
+    assert s2["z500"]["rmse"] > 0.0
+
+
+def test_score_forecast_mask_changes_rmse():
+    from evaluations.wb_forecast import score_forecast
+    lat = np.array([-45.0, 45.0])
+    pred = {"t850": jnp.array([[10.0, 10.0], [10.0, 10.0]])}
+    verif = {"t850": jnp.array([[10.0, 10.0], [10.0, 1000.0]])}  # one bad cell
+    clim = {"t850": jnp.zeros((2, 2))}
+    valid = {"t850": jnp.array([[1.0, 1.0], [1.0, 0.0]])}        # mask the bad cell
+    s_masked = score_forecast(pred, verif, clim, lat, valid=valid)
+    s_unmasked = score_forecast(pred, verif, clim, lat)
+    assert s_masked["t850"]["rmse"] < 1e-6                       # bad cell excluded
+    assert s_unmasked["t850"]["rmse"] > 1.0                      # bad cell dominates
+
+
 def test_headline_10m_wind_not_stronger_than_lowest_level():
     # The neutral reduction must weaken (never amplify) the lowest-level wind.
     from legoesm.atmosphere.dynamics.spectral_pe import spectral_pe_to_grid

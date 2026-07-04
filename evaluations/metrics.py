@@ -50,6 +50,7 @@ def acc(
     target: jnp.ndarray,
     climatology: jnp.ndarray,
     weights: jnp.ndarray,
+    mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Anomaly Correlation Coefficient.
 
@@ -67,6 +68,9 @@ def acc(
         Climatological mean field.
     weights : array, shape (n_lat,)
         Gaussian quadrature weights.
+    mask : array, optional, shape (n_lat, n_lon)
+        Spatial mask in [0, 1]; masked-out cells are excluded from the ACC
+        (used for below-ground pressure-level cells).
 
     Returns
     -------
@@ -77,6 +81,8 @@ def acc(
     target_anom = target - climatology
 
     w = weights[:, None]
+    if mask is not None:
+        w = w * mask               # exclude below-ground / invalid cells from the ACC
     numerator = jnp.sum(w * pred_anom * target_anom)
     denom_pred = jnp.sum(w * pred_anom**2)
     denom_target = jnp.sum(w * target_anom**2)
@@ -89,6 +95,7 @@ def bias(
     pred: jnp.ndarray,
     target: jnp.ndarray,
     weights: jnp.ndarray,
+    mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Area-weighted mean bias (pred - target).
 
@@ -100,6 +107,9 @@ def bias(
         Target field.
     weights : array, shape (n_lat,)
         Gaussian quadrature weights.
+    mask : array, optional, shape (n_lat, n_lon)
+        Spatial mask in [0, 1]; masked-out cells are excluded from the mean
+        (used for below-ground pressure-level cells).
 
     Returns
     -------
@@ -107,6 +117,9 @@ def bias(
         Area-weighted mean bias.
     """
     diff = pred - target
+    if mask is not None:
+        w = weights[:, None] * mask
+        return jnp.sum(w * diff) / jnp.sum(w)
     w = weights[:, None]
     return jnp.sum(w * diff) / jnp.sum(w * jnp.ones_like(diff))
 

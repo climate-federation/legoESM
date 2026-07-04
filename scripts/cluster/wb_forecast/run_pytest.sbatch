@@ -15,4 +15,5 @@ export JAX_PLATFORMS=cpu
 export JAX_ENABLE_X64=1
 echo "python: ${WB_PYTHON}"
 echo "target: ${WB_PYTEST_TARGET:-tests/evaluations/}"
-"${WB_PYTHON}" -m pytest "${WB_PYTEST_TARGET:-tests/evaluations/}" -v -p no:cacheprovider
+# unquoted so WB_PYTEST_TARGET may hold multiple space-separated paths
+"${WB_PYTHON}" -m pytest ${WB_PYTEST_TARGET:-tests/evaluations/} -v -p no:cacheprovider

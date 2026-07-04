@@ -37,7 +37,12 @@ from .headline_diagnostics import (
     wind_10m,
 )
 
-__all__ = ["diagnose_headline_fields", "HeadlineDiagnosis", "HEADLINE_FIELD_KEYS"]
+__all__ = [
+    "diagnose_headline_fields",
+    "score_forecast",
+    "HeadlineDiagnosis",
+    "HEADLINE_FIELD_KEYS",
+]
 
 # --- WB2 headline pressure levels (Pa) ---
 _Z500_PA = 50000.0
@@ -152,3 +157,43 @@ def diagnose_headline_fields(state, grid, sigma_coord) -> HeadlineDiagnosis:
     valid["u10"] = valid["v10"] = valid["wind_speed_10m"] = all_valid
 
     return HeadlineDiagnosis(fields=fields, valid=valid)
+
+
+def score_forecast(pred_fields, verif_fields, clim_fields, wb2_lat_deg, *, valid=None):
+    """Score WB2 headline forecast fields against verification.
+
+    Reuses the shared ``evaluations.metrics`` primitives (no new metric math).
+
+    Parameters
+    ----------
+    pred_fields, verif_fields, clim_fields : dict[str, (n_lat, n_lon) array]
+        Forecast, verification (ERA5), and climatology fields on the SAME WB2
+        grid, keyed identically (e.g. by :data:`HEADLINE_FIELD_KEYS`).
+    wb2_lat_deg : array (n_lat,)
+        WB2 grid latitudes in degrees; cosine-latitude quadrature weights are
+        used (poles get zero weight).
+    valid : dict[str, (n_lat, n_lon) bool], optional
+        Per-field above-ground mask from :func:`diagnose_headline_fields`;
+        masked (below-ground) cells are excluded from RMSE/ACC/bias.
+
+    Returns
+    -------
+    dict[str, dict]
+        ``{key: {"rmse": float, "acc": float, "bias": float}}``.
+    """
+    import numpy as np
+
+    from .metrics import acc, bias, rmse
+
+    weights = jnp.asarray(np.cos(np.deg2rad(np.asarray(wb2_lat_deg, dtype=np.float64))))
+    scores = {}
+    for key, pred in pred_fields.items():
+        target = verif_fields[key]
+        clim = clim_fields[key]
+        m = None if valid is None else valid.get(key)
+        scores[key] = {
+            "rmse": float(rmse(pred, target, weights, mask=m)),
+            "acc": float(acc(pred, target, clim, weights, mask=m)),
+            "bias": float(bias(pred, target, weights, mask=m)),
+        }
+    return scores
