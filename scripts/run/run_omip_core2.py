@@ -3143,10 +3143,25 @@ def main() -> int:
 
     lat2d, lon2d = _grid_lat2d_deg(grid, args.grid)
 
+    if args.woa_smoothing_passes and args.woa_smoothing_passes > 0:
+        if not args.woa_init:
+            raise ValueError("--woa-smoothing-passes requires --woa-init.")
+        if args.grid == "mpas":
+            raise ValueError(
+                "--woa-smoothing-passes is not available for mpas: smooth_woa_ts "
+                "uses the structured 2-D laplacian_smooth_2d; a Voronoi "
+                "connectivity smoother (cellsOnCell) is future work.")
+        state = smooth_woa_ts(state, grid, args.woa_smoothing_passes)
+
     if args.nemo_monthly_init is not None:
         # Exact-recipe IC: NEMO's own monthly init (sn_tem/sn_sal) at the
         # start month — the annual --woa-init leaves Arctic shelves ~1-3
         # PSU salty vs NEMO's January state.
+        if args.woa_smoothing_passes and int(args.woa_smoothing_passes) > 0:
+            raise SystemExit(
+                "--nemo-monthly-init with --woa-smoothing-passes would "
+                "silently smooth away the exact NEMO IC — drop one "
+                "(codex r11 MED#2).")
         if app_grid_type == "mpas":
             raise SystemExit(
                 "--nemo-monthly-init is wired for the structured grids "
@@ -3219,15 +3234,6 @@ def main() -> int:
               f"flux bound {_bnd}; target = {_tgt_kind} "
               f"[{_tgt_wet.min():.1f},{_tgt_wet.max():.1f}] PSU")
 
-    if args.woa_smoothing_passes and args.woa_smoothing_passes > 0:
-        if not args.woa_init:
-            raise ValueError("--woa-smoothing-passes requires --woa-init.")
-        if args.grid == "mpas":
-            raise ValueError(
-                "--woa-smoothing-passes is not available for mpas: smooth_woa_ts "
-                "uses the structured 2-D laplacian_smooth_2d; a Voronoi "
-                "connectivity smoother (cellsOnCell) is future work.")
-        state = smooth_woa_ts(state, grid, args.woa_smoothing_passes)
 
     # apply_balanced_init is the lat-lon C-grid geostrophic cold-start (tripole/
     # latlon).  The cube's FC-gradient balanced-init was removed with the FC

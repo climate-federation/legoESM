@@ -162,14 +162,18 @@ def load_nemo_monthly_init_ts(
     shape = np.asarray(lat_T_deg).shape
     T_out = np.empty(shape + (nlev_src,), dtype=np.float64)
     S_out = np.empty_like(T_out)
-    regridder = None
     for k in range(nlev_src):
-        T_out[..., k], regridder = _to_model_grid_2d(
+        # PER-LEVEL regridder: the wet mask shrinks with depth, and a
+        # level-0 nearest-wet map would sample below-bathy NaN at depth
+        # on the regrid path (codex r11 MED#1). T and S share the level's
+        # bathymetry, so one regridder serves both. Native-embed targets
+        # never build one (coords_match short-circuits).
+        T_out[..., k], regridder_k = _to_model_grid_2d(
             T_arr[m, k], src_lat, src_lon, lat_T_deg, lon_T_deg, None,
-            regridder)
-        S_out[..., k], regridder = _to_model_grid_2d(
+            None)
+        S_out[..., k], _ = _to_model_grid_2d(
             S_arr[m, k], src_lat, src_lon, lat_T_deg, lon_T_deg, None,
-            regridder)
+            regridder_k)
     # Finite everywhere: below-seafloor / land cells inherit the deepest
     # finite value of their column (masked in the model, but the state
     # arrays must be NaN-free), then any all-NaN column takes the level

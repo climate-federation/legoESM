@@ -1368,6 +1368,16 @@ class LatLonCGridOceanModel:
         if pgf_scheme not in _valid_pgf:
             raise ValueError(
                 f"pgf_scheme must be one of {_valid_pgf}, got {pgf_scheme!r}")
+        _rdsm = getattr(config, "runoff_depth_spread_map", None)
+        if _rdsm is not None:
+            import numpy as _np
+            _rdsm_np = _np.asarray(_rdsm)
+            if (not _np.isfinite(_rdsm_np).all()) or (_rdsm_np <= 0).any():
+                raise ValueError(
+                    "runoff_depth_spread_map must be finite and > 0 "
+                    "everywhere (build it with nemo_runoff_depth_map, "
+                    "which floors at 1 m) — zero/negative cells would "
+                    "silently drop the runoff dilution (codex r11 LOW).")
         _valid_pgf_quad = {"cell_integral", "nemo_trapezoid"}
         _pgf_quad = getattr(config, "pgf_quadrature", "cell_integral")
         if _pgf_quad not in _valid_pgf_quad:
