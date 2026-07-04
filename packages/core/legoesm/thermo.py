@@ -184,7 +184,17 @@ def saturation_mixing_ratio(
     jax.Array
         Saturation mixing ratio [kg/kg].
     """
-    e_sat = saturation_vapor_pressure(T)
+    return _mixing_ratio_from_esat(saturation_vapor_pressure(T), p)
+
+
+def _mixing_ratio_from_esat(e_sat: jax.Array, p: jax.Array) -> jax.Array:
+    """Saturation mixing ratio from a saturation vapour pressure [Pa].
+
+    The shared (differentiable, smooth-floored/capped) ``e_sat -> q_sat``
+    conversion used by every saturation curve (Tetens, Goff), so the curve
+    is the ONLY thing that varies between conventions — no re-derived
+    conversion numerics (#762).
+    """
     # Smooth floor on denominator: preserves gradients near e_sat ≈ p
     # instead of a hard clip that creates a zero-gradient plateau.
     # softplus(x - 1) + 1 ≈ x for x >> 1, ≈ 1 for x << 1, smooth at x = 1.
@@ -194,6 +204,20 @@ def saturation_mixing_ratio(
     # while allowing gradients to flow (unlike hard jnp.minimum).
     # Uses LogSumExp smooth-min: 1 - softplus(β(1 - x))/β with β = 20.
     return 1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat)) / 20.0
+
+
+def saturation_mixing_ratio_goff(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Saturation mixing ratio from the WMO Goff (1957) curve [kg/kg].
+
+    The NEMO/AeroBulk air-sea convention for the surface saturation
+    humidity (issue #762): identical smooth ``e_sat -> q_sat`` conversion
+    as :func:`saturation_mixing_ratio`, but over the Goff vapour-pressure
+    curve instead of Tetens — ~0.5-1 % on Δq (hence LH) at warm SST.
+    """
+    return _mixing_ratio_from_esat(saturation_vapor_pressure_goff(T), p)
 
 
 def saturation_mixing_ratio_ice(

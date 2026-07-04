@@ -14,7 +14,9 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import (
+    saturation_mixing_ratio, saturation_mixing_ratio_goff,
+)
 from legoesm.core.precision import get_policy
 from legoesm.core.bulk_flux import (
     simple_bulk_fluxes, compute_most_fluxes, apply_gustiness,
@@ -221,7 +223,17 @@ def ocean_tile_response(
     MOST algorithms (COARE 3.0 or Large & Yeager 2004).
     """
     shape = ocean_sst.shape
-    q_sfc = _Q_SAT_SALINE_FACTOR * saturation_mixing_ratio(
+    # Surface saturation curve follows the SAME thermodynamic convention
+    # as the flux constants (#762): 'aerobulk' = 0.98 x Goff (1957) over
+    # seawater (NEMO/AeroBulk); 'legoesm' (default) = 0.98 x Tetens
+    # (byte-identical to the historical path).  The 0.98 saline reduction
+    # is common to both.
+    _q_sat_curve = (
+        saturation_mixing_ratio_goff
+        if getattr(config, "thermo_convention", "legoesm") == "aerobulk"
+        else saturation_mixing_ratio
+    )
+    q_sfc = _Q_SAT_SALINE_FACTOR * _q_sat_curve(
         ocean_sst, forcing.p_surface,
     )
     rho = forcing.rho_lowest
