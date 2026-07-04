@@ -1054,12 +1054,16 @@ def build_segment_fn(
                 q_v_dyn = _adv["q_v"].data
                 q_c_dyn = _adv["q_c"].data
                 q_r_dyn = _adv["q_r"].data
-                q_i_dyn = _adv["q_i"].data if "q_i" in _adv else None
-                q_s_dyn = _adv["q_s"].data if "q_s" in _adv else None
-                q_g_dyn = _adv["q_g"].data if "q_g" in _adv else None
-                N_c_dyn = _adv["N_c"].data if "N_c" in _adv else None
-                N_r_dyn = _adv["N_r"].data if "N_r" in _adv else None
-                N_i_dyn = _adv["N_i"].data if "N_i" in _adv else None
+                # Tracers NOT in the advected set (per-volume N_c/N_r are
+                # intentionally excluded, #772 review) fall back to their carry
+                # value — i.e. they stay column-locked — NOT to None, which
+                # would drop the double-moment number fields on an opt-in run.
+                q_i_dyn = _adv["q_i"].data if "q_i" in _adv else carry.q_i
+                q_s_dyn = _adv["q_s"].data if "q_s" in _adv else carry.q_s
+                q_g_dyn = _adv["q_g"].data if "q_g" in _adv else carry.q_g
+                N_c_dyn = _adv["N_c"].data if "N_c" in _adv else carry.N_c
+                N_r_dyn = _adv["N_r"].data if "N_r" in _adv else carry.N_r
+                N_i_dyn = _adv["N_i"].data if "N_i" in _adv else carry.N_i
             else:
                 q_v_dyn, q_c_dyn, q_r_dyn = carry.q_v, carry.q_c, carry.q_r
                 q_i_dyn, q_s_dyn, q_g_dyn = carry.q_i, carry.q_s, carry.q_g

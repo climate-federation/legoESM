@@ -251,3 +251,19 @@ def test_gate_off_when_disabled_or_unsupported():
     # spectral on a cube is NOT tracer-capable here -> legacy path.
     assert ModelDriver._moisture_advection_active(
         _fake_driver("cubed_sphere", "spectral")) is False
+
+
+def test_per_volume_number_densities_excluded_from_advection():
+    # N_c/N_r are per-VOLUME [#/m^3]; advecting them with the mass-mixing-ratio
+    # operator applies the wrong conservation law (#772 review), so they are
+    # excluded — masses q_c/q_r still advect, the per-mass ice number N_i may.
+    # This is a contract guard: if the set changes, the compiled_segments
+    # readback fallback (non-advected tracers -> carry.<X>, NOT None, so a
+    # double-moment opt-in run keeps its numbers column-locked instead of
+    # dropping them) and the per-volume/per-mass units handling MUST be
+    # revisited together.
+    from legoesm.driver.compiled_segments import _ADVECTED_TRACER_NAMES
+    assert "N_c" not in _ADVECTED_TRACER_NAMES
+    assert "N_r" not in _ADVECTED_TRACER_NAMES
+    assert {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_i"} <= set(
+        _ADVECTED_TRACER_NAMES)
