@@ -214,11 +214,16 @@ def test_cube_and_latlon_lanes_are_distinct_curves(tmp_path):
     """The cube face-divisor ladder and the latlon lat-band ladder must
     stay SEPARABLE rows (different grid) at the same device count — they
     are different curves, not points on one device axis (#764)."""
+    # SAME resolution AND device count for both grids, so ONLY `grid`
+    # distinguishes them — a collector key that dropped `grid` but kept
+    # (resolution, n_devices) would collapse these to one row (codex
+    # round-19 Low: the prior 48-vs-96 version couldn't catch that).
     dc = tmp_path / "cubed-sphere_none_single_r48_n6"
-    dl = tmp_path / "latlon_none_single_r96_n6"
+    dl = tmp_path / "latlon_none_single_r48_n6"
     _write(dc, "c.json", _cs_spmd_case(48, 6, 35.0))
-    _write(dl, "l.json", _case("latlon", "none", "single", 96, 6, "float64",
+    _write(dl, "l.json", _case("latlon", "none", "single", 48, 6, "float64",
                                60.0))
-    rows, _ = agg.collect(tmp_path)
-    grids = {r["grid"] for r in rows if r["n_devices"] == 6}
-    assert grids == {"cubed-sphere", "latlon"}
+    rows, dropped = agg.collect(tmp_path)
+    same_dev = [r for r in rows if r["n_devices"] == 6]
+    assert dropped == 0 and len(same_dev) == 2      # NOT merged into one
+    assert {r["grid"] for r in same_dev} == {"cubed-sphere", "latlon"}

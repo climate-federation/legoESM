@@ -51,9 +51,15 @@ cd "$REPO"
 module load gcc cray-mpich 2>/dev/null || true
 
 # --- Sweep configuration -----------------------------------------------------
-# Face-divisor ladder (each must divide 6) + optional sub-face tiled counts
-# (6*kt^2: 24, 54).  Override to include the P4 sub-face regime:
-#   CUBE_SPMD_RANKS="1 2 3 6 24 54" ./cube_scaling_cpu_routeb.sh
+# Face-divisor ladder (each must divide 6).  Default caps at 6 to match the
+# PBS `select=...:mpiprocs=6` header — one process per face on one node.
+# The P4 sub-face regime (6*kt^2 = 24, 54) needs MORE MPI slots than this
+# header grants, so it would oversubscribe: to run it, ALSO raise the PBS
+# select (e.g. -l select=1:ncpus=128:mpiprocs=24 for kt=2, or span nodes)
+# AND set the ladder:
+#   CUBE_SPMD_RANKS="6 24 54" qsub -l select=1:ncpus=128:mpiprocs=54 ...
+# A rank count exceeding the granted slots is rejected below rather than
+# silently oversubscribed.
 CUBE_SPMD_RANKS="${CUBE_SPMD_RANKS:-1 2 3 6}"
 _CORES="${LEGOESM_NCPUS:-128}"          # full Derecho node cores
 PHYSICS="${PHYSICS:-none}"              # 'none' = dycore-only (aggregate 'dry')
@@ -67,9 +73,20 @@ mkdir -p "$CAMP"
 echo "=== cube CPU route-B strong scaling: ranks=[$CUBE_SPMD_RANKS] on ${_CORES} cores  res=[$STRONG_RES] ==="
 echo "    physics=$PHYSICS prec=$PRECISION  outdir=$CAMP"
 
+# Granted MPI slots (PBS $PBS_NODEFILE line count, or 1 outside PBS) — a
+# ladder rung exceeding this would oversubscribe under Cray PALS, so reject
+# it loudly rather than emit meaningless timings.
+_SLOTS=1
+[ -n "${PBS_NODEFILE:-}" ] && [ -f "${PBS_NODEFILE}" ] \
+    && _SLOTS=$(wc -l < "${PBS_NODEFILE}")
+
 rc_all=0
 for RES in $STRONG_RES; do
   for N in $CUBE_SPMD_RANKS; do
+    if [ -n "${PBS_NODEFILE:-}" ] && [ "$N" -gt "$_SLOTS" ]; then
+      echo "  SKIP res=$RES ranks=$N: exceeds granted MPI slots ($_SLOTS) "\
+"— raise the PBS select= mpiprocs to run this rung"; rc_all=1; continue
+    fi
     THREADS=$(( _CORES / N )); [ "$THREADS" -lt 1 ] && THREADS=1
     # Each rank = one jax.distributed process (a face/tile shard); fill the
     # node with THREADS XLA threads per rank, bound to its own core block.
