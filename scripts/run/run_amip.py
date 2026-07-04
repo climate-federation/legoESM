@@ -796,6 +796,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # convection (the kessler+sbm wind blow-up).  Default off => unchanged.
     parser.add_argument("--energy-consistent-moisture-clip",
                         action="store_true", default=False)
+    # Resolved-wind moisture advection through the cdgrid dycore (issue
+    # #771).  Default ON (the fix for the column-locked-moisture wet drift);
+    # --no-moisture-advection reproduces the legacy behaviour.
+    parser.add_argument("--no-moisture-advection", dest="moisture_advection",
+                        action="store_false", default=True)
 
     # CMIP
     parser.add_argument("--experiment", type=str, default="")
@@ -1065,6 +1070,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         convective_cloud=args.convective_cloud,
         fix_moisture=args.fix_moisture,
         energy_consistent_moisture_clip=args.energy_consistent_moisture_clip,
+        moisture_advection=args.moisture_advection,
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,
         topo_edge_blend=args.topo_edge_blend,

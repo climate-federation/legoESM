@@ -534,6 +534,15 @@ class ExperimentConfig(NamedTuple):
     # of the clipped vapour sink).  Opt-in for the kessler+sbm wind blow-up;
     # default off => bit-identical.
     energy_consistent_moisture_clip: bool = False
+    # Resolved-wind moisture advection (issue #771): attach q_v/q_c/q_r (+
+    # the double-moment fields) to the dycore state each step so the
+    # primitive-equation step advects them (the MPAS Phase B design).
+    # Without it, cube moisture is COLUMN-LOCKED (physics tendencies +
+    # hyperdiffusion smoothing only) — the wet-drift / day-150 blowup
+    # family.  Effective on cubed_sphere+cdgrid only (the tracer-capable
+    # dycore); other grid/discretization combos log a notice and keep the
+    # legacy path.
+    moisture_advection: bool = True
 
     # Topography
     topography: str = "flat"
@@ -1448,6 +1457,7 @@ class ExperimentConfig(NamedTuple):
             fix_moisture=getattr(amip_cfg, 'fix_moisture', False),
             energy_consistent_moisture_clip=getattr(
                 amip_cfg, 'energy_consistent_moisture_clip', False),
+            moisture_advection=getattr(amip_cfg, 'moisture_advection', True),
             topography=amip_cfg.topography,
             topo_smoothing=amip_cfg.topo_smoothing,
             topo_edge_blend=amip_cfg.topo_edge_blend,
