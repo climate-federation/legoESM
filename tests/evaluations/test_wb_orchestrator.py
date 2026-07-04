@@ -41,6 +41,18 @@ def test_orchestrator_identity_rollout_perfect_scores():
         assert np.isfinite(m["acc"]), (key, lead)
 
 
+def test_orchestrator_rejects_lead_not_multiple_of_dt():
+    import pytest
+    state, grid, sigma = _rest_state()
+    vf, vv, _, _ = diagnose_and_regrid(state, grid, sigma)
+    clim = {k: np.zeros_like(vf[k]) for k in vf}
+    case = ForecastCase(state, {1: {"fields": vf, "valid": vv}})
+    with pytest.raises(ValueError):
+        # 1 h = 3600 s is not a multiple of dt = 1000 s -> would round -> wrong valid time
+        run_wb_forecast_eval(None, grid, sigma, None, 1000.0, [case], [1], clim,
+                             rollout_fn=lambda s, *a, **k: s)
+
+
 def test_orchestrator_averages_over_cases():
     # Two cases, identity rollout; a nonzero-error case + a perfect case -> mean RMSE > 0.
     state, grid, sigma = _rest_state()

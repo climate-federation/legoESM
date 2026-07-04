@@ -77,7 +77,14 @@ def run_wb_forecast_eval(physics_fn, grid, sigma_coord, pe_config, dt,
 
     for case in cases:
         for lead in leads_hours:
-            n_steps = int(round(lead * _SECONDS_PER_HOUR / dt))
+            steps_f = lead * _SECONDS_PER_HOUR / dt
+            n_steps = int(round(steps_f))
+            if abs(steps_f - n_steps) > 1e-6:
+                # silent rounding would score a different valid time than requested
+                raise ValueError(
+                    f"lead {lead} h ({lead * _SECONDS_PER_HOUR:g}s) is not an exact "
+                    f"multiple of dt={dt:g}s (ratio {steps_f}); pick leads on the dt grid"
+                )
             rolled = rollout_fn(
                 case.init_state, physics_fn, grid, sigma_coord, pe_config, dt, n_steps)
             pred_fields, pred_valid, _, _ = diagnose_and_regrid(
