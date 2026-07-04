@@ -409,7 +409,15 @@ def main():
     if restart_eqx.exists() and restart_json.exists():
         meta = json.loads(restart_json.read_text())
         _restart_ckpt = meta.get("ckpt")
-        if _restart_ckpt is not None and _restart_ckpt != str(args.ckpt):
+
+        def _resolved(p):
+            try:
+                return str(Path(p).resolve())
+            except Exception:
+                return str(p)
+
+        if (_restart_ckpt is not None
+                and _resolved(_restart_ckpt) != _resolved(args.ckpt)):
             raise SystemExit(
                 f"Restart {restart_eqx} was written by ckpt={_restart_ckpt} "
                 f"but this run uses --ckpt {args.ckpt}. Refusing to resume a "

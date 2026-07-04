@@ -429,6 +429,11 @@ def main():
                 )
             n = len(samples)
             acc = jax.tree_util.tree_map(lambda a: a / n, acc)  # mean grad
+            # The measured drift belongs to THESE params (the rollouts above
+            # used them). Snapshot before the update so _best_raw is the
+            # checkpoint that actually produced the drift (codex MED), not the
+            # one-gradient-step-ahead successor.
+            params_at_drift = params
             updates, opt_state = opt.update(
                 acc, opt_state, eqx.filter(params, eqx.is_inexact_array),
             )
@@ -465,7 +470,7 @@ def main():
                 best_drift_per_day = _drift_per_day
                 _bk = args.out_ckpt.with_name(args.out_ckpt.stem + "_best_raw.eqx")
                 _btmp = _bk.with_suffix(".eqx.tmp")
-                save_checkpoint(params, _btmp)
+                save_checkpoint(params_at_drift, _btmp)  # the params that produced it
                 os.replace(_btmp, _bk)
                 logger.info(
                     f"  new BEST drift/day^2 {_drift_per_day:.4f} "
