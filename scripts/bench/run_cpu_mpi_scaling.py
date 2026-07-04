@@ -86,13 +86,20 @@ def _configure_jax_cpu(precision: str) -> None:
     if precision == "float64":
         os.environ["JAX_ENABLE_X64"] = "1"
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-    # Threads per rank = SLURM cpus-per-task (cpu-bind confines them to THIS
-    # rank's cores).  ==1 (the default packing, one rank per core) => force
+    # Threads per rank = cpus-per-task (cpu-bind confines them to THIS rank's
+    # cores).  ==1 (the default packing, one rank per core) => force
     # single-threaded Eigen so packed ranks never oversubscribe.  >1 (hybrid:
     # fewer ranks x more cores/rank) => let Eigen multi-thread so each rank uses
     # its allocated cores -- fewer ranks means fewer halo messages, the codex
-    # MPI-improve lever, without idling cores.  Honors an explicit OMP override.
-    n_thr = int(os.environ.get("SLURM_CPUS_PER_TASK", "1") or "1")
+    # MPI-improve lever, without idling cores.
+    #
+    # SLURM sets SLURM_CPUS_PER_TASK; PBS/PALS (Derecho route-B) does NOT — it
+    # exports the per-rank thread count as OMP_NUM_THREADS (see
+    # cube_scaling_cpu_routeb.sh).  Fall back to it (matching write_result_json's
+    # n_cores accounting) so the cube route-B lane does not silently single-
+    # thread XLA while the JSON reports a full-node core count.
+    n_thr = int(os.environ.get("SLURM_CPUS_PER_TASK")
+                or os.environ.get("OMP_NUM_THREADS") or "1")
     for _v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
         os.environ.setdefault(_v, str(n_thr))
     if n_thr <= 1:
@@ -1465,7 +1472,7 @@ def main() -> int:
         # subset omitted PALS_LOCAL_SIZE, so a Derecho mpiexec route-B
         # launch skipped initialize() and each rank ran an independent np1
         # mesh — caught loudly by the consistency gate below, but the sweep
-        # never federated).  _launcher_world_size == _launcher_world_size().
+        # never federated).
         _nproc = _launcher_world_size()
         if _nproc > 1:
             # PBS/PALS has no bare-initialize auto-detection; the helper
