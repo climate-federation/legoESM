@@ -686,15 +686,15 @@ def plane_compressible_euler_slow_tendencies_halo(
     # closure="molecular" (DNS) and "smagorinsky" (CRM/LES) stay bit-identical
     # serial vs MPI at n_ranks==1.
     _closure = getattr(config, "turbulence_closure", "smagorinsky")
-    if _closure == "vreman":
-        # Vreman uses A-grid centred (roll-±1) gradients, which would need a
-        # halo-2 stencil to stay bit-equal to the serial kernel; like the dynamic
-        # Smagorinsky closure it is SINGLE-RANK ONLY. Guard explicitly rather than
-        # silently producing a different K_m under MPI.
+    if _closure in ("vreman", "amd"):
+        # Vreman and AMD both use A-grid centred (roll-±1) gradients, which would
+        # need a halo-2 stencil to stay bit-equal to the serial kernel; like the
+        # dynamic Smagorinsky closure they are SINGLE-RANK ONLY. Guard explicitly
+        # rather than silently producing a different K_m under MPI.
         raise NotImplementedError(
-            "turbulence_closure='vreman' is single-rank only (no MPI-halo kernel; "
-            "the dynamic closures are likewise serial-only). Run on one rank, or "
-            "use turbulence_closure='smagorinsky' under MPI.")
+            f"turbulence_closure={_closure!r} is single-rank only (no MPI-halo "
+            "kernel; the dynamic closures are likewise serial-only). Run on one "
+            "rank, or use turbulence_closure='smagorinsky' under MPI.")
     _use_smag = _closure == "smagorinsky" and config.smagorinsky_cs > 0.0
     _use_mol = (_closure == "molecular"
                 and getattr(config, "molecular_viscosity", 0.0) > 0.0)
