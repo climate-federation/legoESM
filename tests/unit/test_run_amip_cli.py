@@ -91,6 +91,23 @@ def test_land_gs_max_validate_strict_rejects_nonpositive_or_nonfinite():
             cfg._replace(land_gs_max=bad).validate_strict()
 
 
+def test_land_soil_moisture_init_frac_flag_flows_to_config():
+    """--land-soil-moisture-init-frac round-trips (issue #730 drier-cold-start
+    knob); default 0.5 is byte-identical to the init default."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_soil_moisture_init_frac == 0.5
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-soil-moisture-init-frac", "0.25",
+    ]), parser))
+    assert cfg.land_soil_moisture_init_frac == 0.25
+    for bad in (0.0, -0.1, 1.5, float("nan")):
+        with pytest.raises(ValueError, match="land_soil_moisture_init_frac"):
+            cfg._replace(land_soil_moisture_init_frac=bad).validate_strict()
+
+
 def test_land_surface_scheme_flag_flows_to_config():
     """--land-surface-scheme round-trips (issue #730 two-leaf canopy selector);
     default is the SimpleSEB path, 'two_leaf' selects the DifferBESS canopy."""

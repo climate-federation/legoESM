@@ -1447,7 +1447,13 @@ class ModelDriver:
         ncol = lat_deg.shape[0]
         T_init = ad.flatten_2d(self.state.T.data[..., -1]).reshape(-1).astype(
             storage_dtype)
-        self._land_ml_state = init_multilayer_land_state(ncol, cfg, T_init=T_init)
+        # Soil-moisture cold-start = frac * theta_sat (#730; default 0.5 is
+        # byte-identical to the init default).  A drier start can break the
+        # multilayer over-evaporation wet loop.
+        self._land_ml_state = init_multilayer_land_state(
+            ncol, cfg, T_init=T_init,
+            theta_init=(self.config.land_soil_moisture_init_frac
+                        * cfg.hydraulics.theta_sat))
         logger.info(
             "  Land tile: MULTILAYER override ACTIVE (%d soil layers, %d columns)",
             cfg.soil_grid.n_layers, ncol,
