@@ -256,11 +256,28 @@ def step_land(
     # energy and water stay consistent: precip + melt == dW/dt + E + runoff exactly.
     soil_evap = jnp.where(has_snow, 0.0, evap_rate)
     P_input = precip_rain + melt_rate
-    W_new, soil_evap_actual, runoff, _runoff_inf, _runoff_sat = partition_bucket_runoff(
-        W, P_input, soil_evap, dt, W_max,
-        K_infiltration, infil_suction_boost,
-        infiltration_excess=config.infiltration_excess,
-    )
+    # Runoff scheme dispatch (hardened: unknown -> ValueError on the static
+    # config string).  "bucket" (default) is byte-identical; "topmodel" adds
+    # the SIMTOP sub-grid saturated fraction + topographic baseflow.
+    _runoff_scheme = getattr(config, "runoff_scheme", "bucket")
+    if _runoff_scheme == "topmodel":
+        from legoesm.land.topmodel_runoff import partition_topmodel_runoff
+        W_new, soil_evap_actual, runoff, _runoff_inf, _runoff_sat = partition_topmodel_runoff(
+            W, P_input, soil_evap, dt, W_max,
+            K_infiltration, infil_suction_boost, config.topmodel,
+            infiltration_excess=config.infiltration_excess,
+        )
+    elif _runoff_scheme == "bucket":
+        W_new, soil_evap_actual, runoff, _runoff_inf, _runoff_sat = partition_bucket_runoff(
+            W, P_input, soil_evap, dt, W_max,
+            K_infiltration, infil_suction_boost,
+            infiltration_excess=config.infiltration_excess,
+        )
+    else:
+        raise ValueError(
+            f"Unknown land runoff_scheme {_runoff_scheme!r}; "
+            "expected one of: 'bucket', 'topmodel'."
+        )
 
     # Total actual mass flux and excess energy
     evap_rate_actual = jnp.where(has_snow, sublim_actual, soil_evap_actual)
