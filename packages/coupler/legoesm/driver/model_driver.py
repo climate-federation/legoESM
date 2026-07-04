@@ -3828,6 +3828,29 @@ class ModelDriver:
             day = comm.bcast(day, root=0)
             carry_aux = comm.bcast(carry_aux, root=0)
 
+            # Multilayer (Richards) land state (#769) cannot be band-scattered:
+            # the gathered file's land_ml_* are the writer's GLOBAL-column
+            # soil/snow/carbon fields, and this band branch never calls
+            # ``_restore_land_ml_from_carry_aux`` — so they would sit unrestored
+            # in every rank's _carry_aux (the soil silently cold-starts) and, if
+            # adopted, hand every rank global-shape columns.  Multilayer land is
+            # single-rank-only anyway (the downstream _run_compiled guard aborts
+            # multilayer-under-distributed).  Check the just-bcast ``carry_aux``
+            # and fail fast BEFORE ``_scatter_global_state_to_bands`` mutates
+            # ``self.state`` — every rank has the same bcast dict, so the raise
+            # is symmetric (no half-scattered state, no collective deadlock).
+            if isinstance(carry_aux, dict) and any(
+                k.startswith("land_ml_") for k in carry_aux
+            ):
+                raise ValueError(
+                    "Lat-lon MPI restart cannot band-scatter the multilayer "
+                    "(Richards) land state (land_ml_*) from a global "
+                    "checkpoint — multilayer land is single-rank-only, so the "
+                    "gathered soil/snow/carbon columns cannot be partitioned "
+                    "onto the bands (the soil would silently cold-start, "
+                    "issue #769). Run single-process for multilayer-land runs."
+                )
+
             self._scatter_global_state_to_bands(state_global, tracers_global)
             self._carry_aux = carry_aux if carry_aux else {}
             # Double-moment tracers cannot be band-scattered here: carry_aux is
