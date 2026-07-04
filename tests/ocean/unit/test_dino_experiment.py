@@ -1132,3 +1132,75 @@ class TestSlopeLimitNemoCap:
             # entry-guard fires before any mesh access
             gm_redi_tracer_tendency_mpas(
                 None, None, None, None, None, None, cfg)
+
+
+class TestNemoCentredBarotropic:
+    """dynspg_ts ln_bt_fw=F + nn_bt_flt=1 forward-frame reduction."""
+
+    def test_boxcar_window_centred_at_new_time(self):
+        from legoesm.ocean.dynamics.barotropic_common import (
+            compute_nemo_boxcar_centred_weights,
+        )
+        n = 12
+        w, w_total, w_tr, n_loop = compute_nemo_boxcar_centred_weights(
+            n, jnp.float64)
+        w = np.asarray(w)
+        assert n_loop == w.size
+        np.testing.assert_allclose(w.sum(), 1.0, rtol=1e-14)
+        # F90 transliteration: zwgt1(jn)=1 where |jn - n|/n < 0.5
+        jn = np.arange(1, n_loop + 1, dtype=float)
+        expect = (np.abs(jn - n) / n < 0.5).astype(float)
+        expect = expect / expect.sum()
+        np.testing.assert_allclose(w, expect, rtol=1e-14)
+        # centroid at the baroclinic step (tau = 1)
+        centroid = (w * jn / n).sum()
+        np.testing.assert_allclose(centroid, 1.0, rtol=0, atol=0.05)
+        # window extends past the step but not to 2n
+        assert n < n_loop < 2 * n
+
+    def test_transport_weights_continuity_telescoping(self):
+        """w_transport[j] = sum(w[j:]) / n — the unique choice with
+        div(Hu_avg) == (eta_old - eta_avg)/dt (uniform tracer)."""
+        from legoesm.ocean.dynamics.barotropic_common import (
+            compute_nemo_boxcar_centred_weights,
+        )
+        n = 9
+        w, _, w_tr, n_loop = compute_nemo_boxcar_centred_weights(
+            n, jnp.float64)
+        w, w_tr = np.asarray(w), np.asarray(w_tr)
+        expect = np.array([w[i:].sum() for i in range(n_loop)]) / n
+        np.testing.assert_allclose(w_tr, expect, rtol=1e-14)
+
+    def test_auto_substeps_formula(self):
+        from legoesm.ocean.dynamics.barotropic_common import (
+            nemo_auto_substeps,
+        )
+        import math
+
+        from legoesm import constants as _c
+        dt, H, e1, e2 = 2700.0, 4000.0, 1.1e5, 1.1e5
+        inv = 1.0 / e1 ** 2 + 1.0 / e2 ** 2
+        n = nemo_auto_substeps(dt, H, inv, float(_c.g), cmax=0.8)
+        zcu = math.sqrt(float(_c.g) * H * inv)
+        assert n == math.ceil(dt / 0.8 * zcu)
+        with pytest.raises(ValueError, match="n="):
+            nemo_auto_substeps(1e-6, H, inv, float(_c.g), cmax=0.8)
+
+    def test_preset_selects_centred_explicit(self):
+        from legoesm.ocean.experiments.dino import (
+            dino_lat_lon_grid, dino_lat_lon_model_config,
+            dino_r1_exact_config,
+        )
+        cfg = dino_r1_exact_config()
+        assert cfg.barotropic_solver == "explicit_substep"
+        assert cfg.barotropic_time_filter == "nemo_boxcar_centred"
+        assert cfg.barotropic_auto_cmax == 0.8
+        g = dino_lat_lon_grid(cfg, n_lon=12)
+        mc, _ = dino_lat_lon_model_config(g, cfg, physics=True)
+        assert mc.barotropic.barotropic_solver == "explicit_substep"
+        assert mc.barotropic.barotropic_time_filter == "nemo_boxcar_centred"
+        # auto count: static int equal to the ln_bt_auto helper's value
+        from legoesm.ocean.experiments.dino import _dino_barotropic_substeps
+        assert isinstance(mc.barotropic.n_barotropic_substeps, int)
+        assert (mc.barotropic.n_barotropic_substeps
+                == _dino_barotropic_substeps(g, cfg) >= 2)

@@ -358,6 +358,14 @@ class DINOConfig:
     vertical_coordinate: str = "zstar"
     barotropic_solver: str = "implicit_cn"
     barotropic_implicit_theta_eta: float = 0.55
+    # Barotropic averaging filter (explicit_substep only): "cosine"
+    # (legacy) | "power_law" | "box" | "nemo_boxcar_centred" (dynspg_ts
+    # ln_bt_fw=F + nn_bt_flt=1 — the DINO namelist selection).
+    barotropic_time_filter: str = "cosine"
+    # ln_bt_auto: compute n_barotropic_substeps from the external-wave
+    # CFL with this Courant ceiling (rn_bt_cmax); <= 0 disables (use
+    # n_barotropic_substeps as-is).
+    barotropic_auto_cmax: float = 0.0
     tracer_advection: str = "tvd"
     # Hollingsworth correction for KE gradient (fixes Hollingsworth-
     # Kallberg instability over stratified bathymetry; legoESM #263).
@@ -446,6 +454,9 @@ def dino_r1_exact_config(**overrides) -> DINOConfig:
         lateral_tracer_mixing="isoneutral",
         redi_S_max=0.01,               # rn_slpmax
         redi_slope_limit="nemo_cap",   # ldfslp cap semantics (not DM95)
+        barotropic_solver="explicit_substep",
+        barotropic_time_filter="nemo_boxcar_centred",  # ln_bt_fw=F, flt=1
+        barotropic_auto_cmax=0.8,      # ln_bt_auto rn_bt_cmax
         forcing_annual_cycle=True,
         wind_through_step=True,
     )
@@ -1416,6 +1427,32 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
         "expected 'tke' or 'kpp'")
 
 
+def _dino_barotropic_substeps(grid, cfg: DINOConfig) -> int:
+    """n_barotropic_substeps, optionally from NEMO ln_bt_auto.
+
+    ``barotropic_auto_cmax > 0``: nn_e = ceil(dt/cmax · max zcu) with
+    ``zcu = sqrt(g·H·(1/e1² + 1/e2²))`` (dynspg_ts.F90:1223-1240),
+    evaluated conservatively with the basin's deepest wet column and
+    the smallest Mercator metrics (poleward rows).  Otherwise the
+    configured ``n_barotropic_substeps`` is returned unchanged.
+    """
+    if cfg.barotropic_auto_cmax <= 0.0:
+        return cfg.n_barotropic_substeps
+    from legoesm import constants
+    from legoesm.ocean.dynamics.barotropic_common import nemo_auto_substeps
+
+    R = float(constants.R_earth)
+    cos_min = float(jnp.min(jnp.cos(jnp.asarray(grid.lat))))
+    e1_min = R * float(grid.dlon) * cos_min          # zonal, smallest row
+    e2_min = R * float(jnp.min(jnp.asarray(grid.dlat))) \
+        if hasattr(grid, "dlat") and jnp.ndim(grid.dlat) > 0 \
+        else R * float(grid.dlat)
+    inv_metric = 1.0 / e1_min ** 2 + 1.0 / e2_min ** 2
+    return nemo_auto_substeps(
+        cfg.dt, cfg.H_deep, inv_metric, float(constants.g),
+        cmax=cfg.barotropic_auto_cmax)
+
+
 def dino_lat_lon_model_config(
     grid,
     cfg: DINOConfig | None = None,
@@ -1579,9 +1616,10 @@ def dino_lat_lon_model_config(
         bottom_drag_bbl_thickness=cfg.bottom_drag_bbl_thickness,
         bottom_drag_scheme=cfg.bottom_drag_scheme,
         bottom_drag_cd0=cfg.C_d_bottom,
-        n_barotropic_substeps=cfg.n_barotropic_substeps,
+        n_barotropic_substeps=_dino_barotropic_substeps(grid, cfg),
         barotropic_solver=cfg.barotropic_solver,
         barotropic_implicit_theta_eta=cfg.barotropic_implicit_theta_eta,
+        barotropic_time_filter=cfg.barotropic_time_filter,
         tracer_advection=cfg.tracer_advection,
         pgf_scheme=cfg.pgf_scheme,
         pgf_quadrature=cfg.pgf_quadrature,

@@ -747,7 +747,7 @@ class BarotropicConfig(NamedTuple):
     barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
     bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
     maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled. MOM6 uses 6.0.
-    barotropic_time_filter: str = "cosine"  # "box", "cosine", or "power_law" (SM2005 ROMS/MOM6/Oceananigans extended-window filter; damps the 2dx barotropic Coriolis null mode)
+    barotropic_time_filter: str = "cosine"  # "box", "cosine", "power_law" (SM2005 ROMS/MOM6/Oceananigans extended-window filter; damps the 2dx barotropic Coriolis null mode), or "nemo_boxcar_centred" (dynspg_ts ln_bt_fw=F + nn_bt_flt=1: boxcar width n centred at t+dt, ~1.5n substeps)
     differentiable_barotropic: bool = False
     # SOTA-local split-explicit barotropic (MOM6/MPAS-Ocean style): when True the
     # per-substep eta-floor clamp is LOCAL (jnp.maximum, NO allreduce) and the
