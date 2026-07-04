@@ -34,14 +34,11 @@ def rmse(
         Area-weighted RMSE.
     """
     sq_err = (pred - target) ** 2
-
+    w = weights[:, None]
     if mask is not None:
-        sq_err = sq_err * mask
-        w = weights[:, None] * mask
-    else:
-        w = weights[:, None] * jnp.ones(pred.shape[-1:])[None, :]
-
-    wmse = jnp.sum(sq_err * weights[:, None]) / jnp.sum(w)
+        w = w * mask
+    # numerator and denominator both broadcast over any leading dims of sq_err
+    wmse = jnp.sum(sq_err * w) / jnp.sum(w * jnp.ones_like(sq_err))
     return jnp.sqrt(wmse)
 
 
