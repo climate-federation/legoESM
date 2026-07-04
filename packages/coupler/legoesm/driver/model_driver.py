@@ -332,6 +332,17 @@ class ModelDriver:
         if "conv_prog" in base:
             base["conv_prog_scheme"] = np.asarray(
                 str(getattr(self.config, "convection", "none")))
+        # Multilayer (Richards) land state (#730 chain-enable): the prognostic
+        # soil/snow/carbon columns ride carry_aux (namespaced land_ml_*) so a
+        # chained C48 SOTA restart resumes the deep-soil spin-up instead of
+        # cold-starting. No-op for slab-land runs (_land_ml_state is None).
+        if self._land_ml_state is not None:
+            for _f, _v in self._land_ml_state._asdict().items():
+                # Optional fields (TgC, surface_water) may be None — np.asarray
+                # would pickle a 0-d object array into the npz and crash the
+                # load-side jnp.asarray. Skip; restore only replaces saved keys.
+                if _v is not None:
+                    base[f"land_ml_{_f}"] = np.asarray(_v)
         return base if base else None
 
     def _restore_dm_tracers_from_carry_aux(self) -> None:
@@ -344,6 +355,22 @@ class ModelDriver:
             return
         for key in [k for k in self._carry_aux if k.startswith("dmtr_")]:
             _tracers[key[len("dmtr_"):]] = self._carry_aux.pop(key)
+
+    def _restore_land_ml_from_carry_aux(self) -> None:
+        """Rebuild ``self._land_ml_state`` from any ``land_ml_*`` entries restored
+        into ``carry_aux``, so a chained multilayer-land restart resumes the
+        prognostic soil/snow/carbon columns instead of cold-starting (#730).
+        No-op for slab-land runs (``_land_ml_state`` is None)."""
+        if not (isinstance(self._carry_aux, dict)
+                and self._land_ml_state is not None):
+            return
+        keys = [k for k in self._carry_aux if k.startswith("land_ml_")]
+        if not keys:
+            return
+        import jax.numpy as jnp
+        fields = {k[len("land_ml_"):]: jnp.asarray(self._carry_aux.pop(k))
+                  for k in keys}
+        self._land_ml_state = self._land_ml_state._replace(**fields)
 
     def _validate_microphysics_tracer_state(
         self,
@@ -3708,6 +3735,7 @@ class ModelDriver:
                 # Restore evolved double-moment tracers persisted via carry_aux
                 # (per-rank distributed checkpoint is restart-exact for them).
                 self._restore_dm_tracers_from_carry_aux()
+                self._restore_land_ml_from_carry_aux()
                 from legoesm.core.state import HydrostaticState
                 from legoesm.core.field import Field
                 import jax.numpy as jnp
@@ -3876,6 +3904,7 @@ class ModelDriver:
         # Restore evolved double-moment tracers persisted via carry_aux
         # (serial npz is restart-exact for them).
         self._restore_dm_tracers_from_carry_aux()
+        self._restore_land_ml_from_carry_aux()
         if metadata:
             logger.info(f"  Loaded restart: step={step}, day={day}, "
                        f"digest={metadata.state_digest[:16]}...")
