@@ -8,12 +8,22 @@ Task 5 (this file, first piece): ``diagnose_headline_fields``.
 
 Surface-variable caveat: the spectral DYNAMICAL state carries no skin
 temperature, roughness length, or Obukhov length. Pressure-level fields
-(z500, t850, q700, u/v at 850/700/500/250) and MSLP are diagnosed rigorously;
-the surface fields are documented proxies (see ``diagnose_headline_fields``).
-Total precipitation is not available from the dynamical state (it needs
-physics-output accumulation) and is intentionally omitted here.
+(z500, t850, q700, u/v at 850/700/500/250) and MSLP are diagnosed inside the
+model column; the surface fields are documented proxies (see
+``diagnose_headline_fields``). Total precipitation is not available from the
+dynamical state (needs physics-output accumulation) and is omitted here.
+
+Below-ground caveat: a target pressure level can lie BELOW the surface over
+high terrain (e.g. 850 hPa over the Andes, 500 hPa over Everest/Tibet). There
+the pressure interpolation clamps to the lowest model level, which is NOT a
+faithful pressure-level value. Every pressure-level field therefore ships a
+companion validity mask (``valid[key]`` True where the level is at/above the
+surface); the scorer MUST mask those cells rather than treat clamped values as
+real. Surface fields are valid everywhere.
 """
 from __future__ import annotations
+
+from typing import NamedTuple
 
 import jax.numpy as jnp
 
@@ -27,7 +37,7 @@ from .headline_diagnostics import (
     wind_10m,
 )
 
-__all__ = ["diagnose_headline_fields", "HEADLINE_FIELD_KEYS"]
+__all__ = ["diagnose_headline_fields", "HeadlineDiagnosis", "HEADLINE_FIELD_KEYS"]
 
 # --- WB2 headline pressure levels (Pa) ---
 _Z500_PA = 50000.0
@@ -46,60 +56,99 @@ HEADLINE_FIELD_KEYS = (
     "mslp", "t2m", "u10", "v10", "wind_speed_10m",
 )
 
+# pressure-level keys that carry a below-ground validity mask, and their target Pa
+_PLEVEL_TARGET_PA = {
+    "z500": _Z500_PA, "t850": _T850_PA, "q700": _Q700_PA,
+    "u850": 85000.0, "v850": 85000.0, "u700": 70000.0, "v700": 70000.0,
+    "u500": 50000.0, "v500": 50000.0, "u250": 25000.0, "v250": 25000.0,
+}
 
-def diagnose_headline_fields(state, grid, sigma_coord):
+
+class HeadlineDiagnosis(NamedTuple):
+    """Result of :func:`diagnose_headline_fields`.
+
+    fields : dict[str, (n_lat, n_lon) array]  — the WB2 headline fields.
+    valid  : dict[str, (n_lat, n_lon) bool]   — per-field above-ground mask
+             (True = usable). Pressure-level fields are invalid where the target
+             level is below the surface; surface fields are valid everywhere.
+    """
+    fields: dict
+    valid: dict
+
+
+def diagnose_headline_fields(state, grid, sigma_coord) -> HeadlineDiagnosis:
     """Map a rolled-out ``SpectralHydrostaticState`` to WB2 headline fields.
 
-    Returns a ``dict[str, (n_lat, n_lon) array]`` keyed by
-    :data:`HEADLINE_FIELD_KEYS`.
+    Returns a :class:`HeadlineDiagnosis` (``.fields`` keyed by
+    :data:`HEADLINE_FIELD_KEYS`, ``.valid`` the matching above-ground masks).
 
-    Rigorous (pressure-level) fields: ``z500`` (geopotential height, m),
-    ``t850`` (K), ``q700`` (kg/kg), ``u/v`` at 850/700/500/250 hPa (m/s),
-    ``mslp`` (Pa).
+    Pressure-level fields: ``z500`` (geopotential height, m), ``t850`` (K),
+    ``q700`` (kg/kg), ``u/v`` at 850/700/500/250 hPa (m/s). These are exact
+    within the model column; where the target level is below the surface the
+    value is clamped and flagged ``valid=False`` (score with the mask).
+
+    ``mslp`` (Pa): standard sea-level reduction, valid everywhere.
 
     Surface proxies (the spectral state has no skin-T / roughness / Obukhov L):
       * ``t2m`` := lowest-level air temperature.
       * ``u10``/``v10``/``wind_speed_10m`` := the lowest-level wind reduced to
         10 m by a NEUTRAL log law, using the lowest-level height above ground
-        from the geopotential and an open-terrain roughness. This is a
-        documented global-neutral proxy; it does not resolve land/ocean
-        roughness or stability, so surface-wind scores carry that caveat.
+        from the geopotential and an open-terrain roughness — a documented
+        global-neutral proxy that does not resolve land/ocean roughness or
+        stability, so surface-wind scores carry that caveat.
     """
     from legoesm.atmosphere.dynamics.spectral_pe import spectral_pe_to_grid
 
-    fields = spectral_pe_to_grid(state, grid, sigma_coord)
-    T, u, v = fields["T"], fields["u"], fields["v"]     # (n_lat, n_lon, nlev)
-    p_s, phis = fields["p_s"], fields["phis"]           # (n_lat, n_lon)
+    gridded = spectral_pe_to_grid(state, grid, sigma_coord)
+    T, u, v = gridded["T"], gridded["u"], gridded["v"]   # (n_lat, n_lon, nlev)
+    p_s, phis = gridded["p_s"], gridded["phis"]          # (n_lat, n_lon)
 
+    # q_v tracer may be a Field (has .data) or a raw array; both are accepted by
+    # SpectralHydrostaticState, so duck-type and validate the layout.
     tracers = getattr(state, "tracers", None)
     if tracers is not None and "q_v" in tracers:
-        q = tracers["q_v"].data                         # (n_lat, n_lon, nlev)
+        q_raw = tracers["q_v"]
+        q_data = q_raw.data if hasattr(q_raw, "data") else q_raw
+        q = jnp.asarray(q_data, dtype=T.dtype)
+        if q.shape != T.shape:
+            raise ValueError(f"q_v tracer shape {q.shape} != temperature shape {T.shape}")
     else:
         q = jnp.zeros_like(T)
 
-    p_model = sigma_coord.pressure_at_full(p_s)         # (n_lat, n_lon, nlev), Pa
+    p_model = sigma_coord.pressure_at_full(p_s)          # (n_lat, n_lon, nlev), Pa
+    all_valid = jnp.ones(p_s.shape, dtype=bool)
 
-    out = {}
-    out["z500"] = geopotential_height_at(T, q, p_s, phis, sigma_coord, _Z500_PA)
-    out["t850"] = interp_to_pressure_level(T, p_model, _T850_PA)
-    out["q700"] = interp_to_pressure_level(q, p_model, _Q700_PA)
+    fields, valid = {}, {}
+
+    # --- pressure-level headline fields (masked below the surface) ---
+    fields["z500"] = geopotential_height_at(T, q, p_s, phis, sigma_coord, _Z500_PA)
+    fields["t850"] = interp_to_pressure_level(T, p_model, _T850_PA)
+    fields["q700"] = interp_to_pressure_level(q, p_model, _Q700_PA)
     for name, pa in _WIND_LEVELS_PA:
-        out[f"u{name}"] = interp_to_pressure_level(u, p_model, pa)
-        out[f"v{name}"] = interp_to_pressure_level(v, p_model, pa)
-    out["mslp"] = mean_sea_level_pressure(p_s, T[..., -1], phis)
+        fields[f"u{name}"] = interp_to_pressure_level(u, p_model, pa)
+        fields[f"v{name}"] = interp_to_pressure_level(v, p_model, pa)
+    for key, pa in _PLEVEL_TARGET_PA.items():
+        valid[key] = pa <= p_s                           # True where level is at/above surface
 
-    # --- surface proxies ---
-    out["t2m"] = T[..., -1]                             # lowest-level air T (proxy)
+    # --- MSLP (defined everywhere) ---
+    fields["mslp"] = mean_sea_level_pressure(p_s, T[..., -1], phis)
+    valid["mslp"] = all_valid
+
+    # --- surface proxies (spectral state carries no skin-T / z0 / L) ---
+    fields["t2m"] = T[..., -1]                            # lowest-level air T (proxy)
+    valid["t2m"] = all_valid
     phi = geopotential_on_levels(T, q, p_s, phis, sigma_coord)
-    # lowest-level height above ground [m]; floor at the 10 m ref so the
-    # log-law bracket z_ref <= z_low stays valid.
+    # lowest-level height above ground [m]; floor at the 10 m ref so the log-law
+    # bracket z_ref <= z_low stays valid.
     z_low = jnp.maximum((phi[..., -1] - phis) / constants.g, _Z_10M)
     L = jnp.full_like(z_low, _L_NEUTRAL)
     z0m = jnp.full_like(z_low, _Z0M_SURFACE_PROXY)
     speed10 = wind_10m(u[..., -1], v[..., -1], z_low, L, z0m)
     speed_low = jnp.sqrt(u[..., -1] ** 2 + v[..., -1] ** 2 + 1e-12)
-    scale = speed10 / speed_low                         # in [0, 1]
-    out["u10"] = u[..., -1] * scale
-    out["v10"] = v[..., -1] * scale
-    out["wind_speed_10m"] = speed10
-    return out
+    scale = speed10 / speed_low                           # in [0, 1]
+    fields["u10"] = u[..., -1] * scale
+    fields["v10"] = v[..., -1] * scale
+    fields["wind_speed_10m"] = speed10
+    valid["u10"] = valid["v10"] = valid["wind_speed_10m"] = all_valid
+
+    return HeadlineDiagnosis(fields=fields, valid=valid)
