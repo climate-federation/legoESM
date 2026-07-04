@@ -124,6 +124,15 @@ def main():
                          "untrained-edmf drives a +3.3 K/day column heating "
                          "runaway; trained tiedtke is near-balanced).")
     ap.add_argument("--rad-update-interval", type=int, default=36)
+    ap.add_argument("--reinit-yearly", action="store_true",
+                    help="Hindcast-IAV mode: reload the ERA5 initial condition "
+                         "every Jan 1 (+member-offset days) instead of free-"
+                         "running. Annual means then isolate the prescribed-"
+                         "SST-driven interannual signal from multi-year model "
+                         "drift — the drift-robust IAV metric for NN variants "
+                         "whose free-running stability is still being "
+                         "fine-tuned. Not the AIMIP Phase-1 free-run protocol; "
+                         "outputs are written with a _reinit suffix.")
     ap.add_argument("--wall-limit-hours", type=float, default=0.0,
                     help="Stop cleanly after this many wall hours, write a "
                          "restart + .RESUME marker (0 = no limit). The 46-yr "
@@ -140,8 +149,9 @@ def main():
                          "legoesm_<variant>_amip.csv).")
     args = ap.parse_args()
     if args.out is None:
+        _suffix = "_reinit" if args.reinit_yearly else ""
         args.out = Path(
-            f"results/aimip_fleet_paper/legoesm_{args.variant}_amip.csv"
+            f"results/aimip_fleet_paper/legoesm_{args.variant}_amip{_suffix}.csv"
         )
 
     logging.basicConfig(
@@ -406,6 +416,18 @@ def main():
     stop = False
     # --- Gregorian daily loop with linearly-interpolated prescribed SST ---
     while day < end and not stop:
+        # Hindcast-IAV mode: fresh ERA5 IC every Jan 1 (member = successive
+        # IC days, same convention as the initial condition). The model then
+        # runs 12 prescribed-SST months per year — annual means carry the
+        # SST-driven interannual signal without multi-year drift.
+        if (args.reinit_yearly and day.month == 1 and day.day == 1
+                and day != start):
+            _rd = day + _dt.timedelta(days=int(args.member))
+            _slice = load_era5_ic(wb2, _rd.year, _rd.month, _rd.day)
+            state = carry_to_spectral_state(
+                era5_to_spectral_carry(_slice, grid, sigma), grid,
+            )
+            logger.info(f"{day}: REINIT from ERA5 {_rd} (hindcast-IAV mode)")
         # Prescribed SST/sea-ice = the monthly forcing LINEARLY interpolated to
         # this day, held across the day's 144 dycore steps. SST varies ~0.1 K/day,
         # so daily granularity is <0.01 K from per-step interpolation and matches

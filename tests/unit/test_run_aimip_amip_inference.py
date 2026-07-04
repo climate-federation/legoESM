@@ -98,3 +98,17 @@ def test_nn_rollout_signature_contract():
     params = inspect.signature(mod.spectral_rollout).parameters
     assert "forcing_base" in params
     assert mod.N_SFNO_FORCING_CHANNELS == 3
+
+
+def test_reinit_yearly_flag_and_out_suffix():
+    """--reinit-yearly (hindcast-IAV mode) must route outputs to _reinit
+    files so free-run protocol CSVs are never overwritten."""
+    mod = _load_driver()
+    import argparse
+    # the parser is built inside main(); assert the flag exists by source
+    # contract: the module must reference reinit_yearly and the _reinit
+    # suffix (cheap AST-free check that the wiring survives refactors).
+    src = _DRIVER.read_text()
+    assert "--reinit-yearly" in src
+    assert 'legoesm_{args.variant}_amip{_suffix}' in src
+    assert "REINIT from ERA5" in src
