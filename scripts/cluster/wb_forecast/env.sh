@@ -14,3 +14,6 @@ done
 export PYTHONPATH="${_pp}:${PYTHONPATH:-}"
 export WB_PYTHON
 export WB_WORKTREE
+# match the AIMIP runner env (suppress mpi4jax warning; disable persistent JIT cache)
+export MPI4JAX_NO_WARN_JAX_VERSION=1
+export LEGOESM_JIT_CACHE_DIR=""
