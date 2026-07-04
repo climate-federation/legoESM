@@ -65,6 +65,25 @@ def test_snow_albedo_feedback_flag_flows_to_config():
     assert cfg_on.snow_albedo_feedback is True
 
 
+def test_moisture_advection_flag_flows_to_config():
+    """Issue #771: resolved-wind moisture advection is OPT-IN (default OFF,
+    bit-identical legacy path); --moisture-advection turns it on."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.moisture_advection is False   # default off
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--moisture-advection",
+    ]), parser))
+    assert cfg_on.moisture_advection is True
+
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-moisture-advection",
+    ]), parser))
+    assert cfg_off.moisture_advection is False
+
+
 def test_land_gs_max_flag_flows_to_config():
     """--land-gs-max round-trips into ExperimentConfig (the global stomatal
     canopy-conductance calibration knob for land ET, issue #730). Default 0.3
