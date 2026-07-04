@@ -112,3 +112,13 @@ def test_reinit_yearly_flag_and_out_suffix():
     assert "--reinit-yearly" in src
     assert 'legoesm_{args.variant}_amip{_suffix}' in src
     assert "REINIT from ERA5" in src
+
+
+def test_reinit_every_months_wiring():
+    """--reinit-every-months (sub-annual hindcast) + suffix wiring survives."""
+    src = _DRIVER.read_text()
+    assert "--reinit-every-months" in src
+    assert "(day.month - 1) % _reinit_months == 0" in src
+    assert '_reinit{_reinit_months}mo' in src
+    # --reinit-yearly maps to the 12-month interval
+    assert "_reinit_months = 12" in src
