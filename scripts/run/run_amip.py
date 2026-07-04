@@ -796,11 +796,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # convection (the kessler+sbm wind blow-up).  Default off => unchanged.
     parser.add_argument("--energy-consistent-moisture-clip",
                         action="store_true", default=False)
-    # Resolved-wind moisture advection through the cdgrid dycore (issue
-    # #771).  Default ON (the fix for the column-locked-moisture wet drift);
-    # --no-moisture-advection reproduces the legacy behaviour.
-    parser.add_argument("--no-moisture-advection", dest="moisture_advection",
-                        action="store_false", default=True)
+    # Resolved-wind moisture advection through the cdgrid dycore (issue #771).
+    # OPT-IN / experimental (advective form, not discretely mass-conserving) —
+    # default OFF is bit-identical to the legacy column-locked moisture path.
+    _madv = parser.add_mutually_exclusive_group()
+    _madv.add_argument("--moisture-advection", dest="moisture_advection",
+                       action="store_true",
+                       help="Opt in to resolved-wind cube moisture advection "
+                            "(#771; experimental, advective form). Default off.")
+    _madv.add_argument("--no-moisture-advection", dest="moisture_advection",
+                       action="store_false",
+                       help="Force the legacy column-locked moisture path "
+                            "(the default).")
+    parser.set_defaults(moisture_advection=False)
 
     # CMIP
     parser.add_argument("--experiment", type=str, default="")

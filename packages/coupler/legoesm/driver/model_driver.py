@@ -3346,10 +3346,15 @@ class ModelDriver:
         and log a notice once so the gap is visible, not silent.
         """
         cfg = self.config
-        if not getattr(cfg, "moisture_advection", True):
+        if not getattr(cfg, "moisture_advection", False):
             return False
+        # ``centered``/``finite_volume`` resolve to the cdgrid PE dycore (see
+        # atmosphere.dynamics DISPATCH), so they are tracer-capable too — the
+        # gate must accept them or an opt-in run on those aliases would drop to
+        # the legacy column-locked path despite running a cdgrid step (#771).
         supported = (cfg.grid.grid_type == "cubed_sphere"
-                     and cfg.dycore.discretization == "cdgrid")
+                     and cfg.dycore.discretization
+                     in ("cdgrid", "centered", "finite_volume"))
         if not supported and not getattr(self, "_warned_no_advection", False):
             self._warned_no_advection = True
             logger.info(

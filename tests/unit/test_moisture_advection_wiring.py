@@ -191,15 +191,23 @@ def test_cdgrid_step_advects_attached_tracer():
             phis=F(jnp.zeros((6, n, n)), "phis", d2, "m2/s2"),
             tracers={"q_v": F(q, "q_v", d3, "kg/kg")})
 
-    # Wind on: the blob moves, and the global mean is conserved to advective-
-    # form tolerance.  Wind off: bit-exact no-op (roundoff only).
+    # Wind on: the blob moves (advection is wired).  Wind off: bit-exact no-op.
+    #
+    # We deliberately do NOT assert mass conservation here: the transport is
+    # ADVECTIVE form -(u·∇q), not discretely mass-conserving on the unequal-area
+    # cube, and a plain jnp.mean is neither the conserved integral (∫ q·δp·dA)
+    # nor area-weighted — a tight mean-tolerance check would be misleading (it
+    # passes trivially because one 150 s step moves the blob << a cell).  Budget
+    # closure is fix_moisture's job; a proper area+mass-weighted total-water
+    # closure test belongs with the flux-form follow-up (#771).  Here we assert
+    # only the wiring: the blob moved, and it stayed finite/bounded (no blow-up).
     s = mkstate(20.0)
     s1 = model.step(s, 150.0)
     dq = jnp.abs(s1.tracers["q_v"].data - s.tracers["q_v"].data)
     assert float(jnp.max(dq)) > 1e-8            # advection acted
-    m0 = float(jnp.mean(s.tracers["q_v"].data))
-    m1 = float(jnp.mean(s1.tracers["q_v"].data))
-    assert abs(m1 - m0) / m0 < 1e-4             # near-conservative
+    q1 = s1.tracers["q_v"].data
+    assert bool(jnp.all(jnp.isfinite(q1)))      # no NaN/Inf blow-up
+    assert float(jnp.max(q1)) < 5.0 * float(jnp.max(s.tracers["q_v"].data))
 
     s = mkstate(0.0)
     s1 = model.step(s, 150.0)
@@ -226,8 +234,20 @@ def test_gate_on_for_cube_cdgrid():
         _fake_driver("cubed_sphere", "cdgrid")) is True
 
 
+def test_gate_on_for_cube_cdgrid_aliases():
+    # "centered"/"finite_volume" resolve to the cdgrid PE dycore, so they are
+    # tracer-capable and must gate ON too (else an opt-in run on those aliases
+    # silently drops to the legacy column-locked path, #771).
+    for alias in ("centered", "finite_volume"):
+        assert ModelDriver._moisture_advection_active(
+            _fake_driver("cubed_sphere", alias)) is True
+
+
 def test_gate_off_when_disabled_or_unsupported():
     assert ModelDriver._moisture_advection_active(
         _fake_driver("cubed_sphere", "cdgrid", flag=False)) is False
     assert ModelDriver._moisture_advection_active(
         _fake_driver("latlon", "latlon_cgrid")) is False
+    # spectral on a cube is NOT tracer-capable here -> legacy path.
+    assert ModelDriver._moisture_advection_active(
+        _fake_driver("cubed_sphere", "spectral")) is False

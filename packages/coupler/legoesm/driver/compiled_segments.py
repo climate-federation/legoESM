@@ -2156,8 +2156,14 @@ def build_segment_fn(
 # q_v/q_c/q_r are always present on moist runs; the double-moment fields
 # are None for warm-rain runs (their None-ness is static pytree structure,
 # so the per-name `is not None` check below is trace-safe).
+# Tracers carried through the resolved-wind advective step (#771).  Mass
+# mixing ratios [kg/kg] and the per-MASS ice number N_i [#/kg] transport like
+# passive scalars.  N_c/N_r are per-VOLUME number densities [#/m^3] — advecting
+# them with the mass-mixing-ratio operator applies the wrong conservation law,
+# so they are intentionally excluded until a density-aware number transport
+# exists (their masses q_c/q_r still advect; the numbers stay column-locked).
 _ADVECTED_TRACER_NAMES = (
-    "q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
+    "q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_i",
 )
 
 
