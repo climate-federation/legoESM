@@ -58,6 +58,16 @@ def test_load_sota_headline_bad_numeric_has_row_context(tmp_path):
         load_sota_headline(bad)
 
 
+def test_load_sota_headline_rejects_nonfinite_rmse(tmp_path):
+    bad = tmp_path / "nonfinite.csv"
+    bad.write_text(
+        "model,variable,level,lead_hours,rmse\n"
+        "ifs_hres,geopotential,500,72,nan\n"
+    )
+    with pytest.raises(ValueError, match="non-finite"):
+        load_sota_headline(bad)
+
+
 def test_load_sota_headline_missing_columns(tmp_path):
     bad = tmp_path / "bad.csv"
     bad.write_text("model,rmse\nx,1.0\n")

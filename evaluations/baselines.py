@@ -13,6 +13,7 @@ approximations. This module only parses it; it does not invent numbers.
 from __future__ import annotations
 
 import csv
+import math
 from pathlib import Path
 
 __all__ = ["persistence_forecast", "climatology_forecast", "load_sota_headline"]
@@ -92,6 +93,10 @@ def load_sota_headline(csv_path):
                 raise ValueError(
                     f"SOTA CSV line {lineno}: bad numeric value ({exc}); row={row}"
                 ) from exc
+            if not math.isfinite(rmse_val):
+                raise ValueError(
+                    f"SOTA CSV line {lineno}: non-finite rmse {row['rmse']!r}; row={row}"
+                )
             dedup_key = (row["model"], *key)
             if dedup_key in seen:                        # duplicates must not silently overwrite
                 raise ValueError(f"SOTA CSV line {lineno}: duplicate entry {dedup_key}")

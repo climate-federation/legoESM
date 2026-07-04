@@ -78,6 +78,19 @@ def test_regrid_shifted_longitude_origin_periodic():
     assert 30.0 < float(out[:, 0].mean()) < 70.0
 
 
+def test_regrid_mask_conservative_vs_majority():
+    # A source mask with one invalid corner: the conservative (all-valid)
+    # threshold must mark FEWER cells valid than the 0.5 majority threshold,
+    # so a bilinearly-contaminated field cell is not scored as valid.
+    src_lat = np.array([-45.0, 45.0])
+    src_lon = np.array([0.0, 180.0])
+    m = np.array([[True, True], [True, False]])
+    out_majority, _, _ = regrid_to_wb2(m, src_lat, src_lon, mask=True, mask_threshold=0.5)
+    out_conserv, _, _ = regrid_to_wb2(m, src_lat, src_lon, mask=True, mask_threshold=1.0 - 1e-9)
+    assert int(out_conserv.sum()) < int(out_majority.sum())
+    assert bool(out_conserv[out_conserv.shape[0] // 2, 0])  # far-from-invalid stays valid
+
+
 def test_regrid_handles_descending_latitude():
     # ERA5-style N->S latitude must be flipped internally, not mis-interpolated.
     src_lat = np.linspace(90.0, -90.0, 40)          # descending

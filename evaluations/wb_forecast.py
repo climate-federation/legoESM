@@ -189,8 +189,13 @@ def diagnose_and_regrid(state, grid, sigma_coord, *, resolution_deg=None):
     for key, field in diag.fields.items():
         f, wb2_lat, wb2_lon = regrid_to_wb2(
             np.asarray(field), src_lat, src_lon, resolution_deg=res)
+        # CONSERVATIVE validity mask: a WB2 cell is valid only if ALL source
+        # cells contributing to its bilinear interpolation were valid, so a
+        # "valid" cell's field value cannot have been contaminated by a
+        # below-ground/clamped source cell.
         m, _, _ = regrid_to_wb2(
-            np.asarray(diag.valid[key]), src_lat, src_lon, resolution_deg=res, mask=True)
+            np.asarray(diag.valid[key]), src_lat, src_lon, resolution_deg=res,
+            mask=True, mask_threshold=1.0 - 1e-9)
         fields_wb2[key] = f
         valid_wb2[key] = m
     return fields_wb2, valid_wb2, wb2_lat, wb2_lon

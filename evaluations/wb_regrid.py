@@ -43,7 +43,8 @@ def wb2_grid(resolution_deg: float = WB2_RESOLUTION_DEG):
 
 
 def regrid_to_wb2(field, src_lat_deg, src_lon_deg, *,
-                  resolution_deg: float = WB2_RESOLUTION_DEG, mask: bool = False):
+                  resolution_deg: float = WB2_RESOLUTION_DEG, mask: bool = False,
+                  mask_threshold: float = 0.5):
     """Bilinearly regrid a ``(n_lat_src, n_lon_src)`` field onto the WB2 grid.
 
     Parameters
@@ -58,8 +59,14 @@ def regrid_to_wb2(field, src_lat_deg, src_lon_deg, *,
         WB2 grid resolution (default 1.5).
     mask : bool
         If True, treat ``field`` as a boolean mask: regrid as float and return a
-        bool array thresholded at 0.5 (a target cell is valid iff it interpolates
-        from a majority of valid source cells).
+        bool array thresholded at ``mask_threshold``.
+    mask_threshold : float
+        Threshold for ``mask=True``. 0.5 = majority (a target cell is valid iff
+        the bilinear interpolation of the source mask exceeds 0.5). Use ~1.0 for
+        a CONSERVATIVE mask: a target is valid only if ALL contributing source
+        cells are valid — required for a validity mask on a bilinearly
+        interpolated field, so a "valid" target's field value cannot have been
+        contaminated by an invalid (e.g. below-ground/clamped) source cell.
 
     Returns
     -------
@@ -97,5 +104,5 @@ def regrid_to_wb2(field, src_lat_deg, src_lon_deg, *,
     out = interp(pts).reshape(lat2d.shape)
 
     if mask:
-        out = out >= 0.5
+        out = out >= mask_threshold
     return out, tgt_lat, tgt_lon
