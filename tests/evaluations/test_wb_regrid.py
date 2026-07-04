@@ -1,5 +1,6 @@
 """Tests for the WB2 regridding primitive (Stage 0, Task 6). numpy/scipy only."""
 import numpy as np
+import pytest
 
 from evaluations.wb_regrid import wb2_grid, regrid_to_wb2
 
@@ -9,6 +10,11 @@ def test_wb2_grid_shape():
     assert lat.shape == (121,) and lon.shape == (240,)
     assert lat[0] == -90.0 and lat[-1] == 90.0
     assert lon[0] == 0.0 and lon[-1] == 358.5
+
+
+def test_wb2_grid_rejects_nondivisor_resolution():
+    with pytest.raises(ValueError):
+        wb2_grid(7.0)      # 180/7 and 360/7 are not integers
 
 
 def test_regrid_constant_preserved():
@@ -52,6 +58,18 @@ def test_regrid_mask_returns_bool():
     out, lat, lon = regrid_to_wb2(m, src_lat, src_lon, mask=True)
     assert out.dtype == np.bool_
     assert out.any() and not out.all()
+
+
+def test_regrid_shifted_longitude_origin_periodic():
+    # Offset source grid (src_lon starts at 0.75, not 0): a target lon of 0 must
+    # interpolate periodically between the LAST and FIRST source columns.
+    src_lat = np.array([-90.0, 90.0])
+    src_lon = np.arange(0.75, 360.0, 1.5)     # 0.75 .. 359.25
+    field = np.zeros((2, len(src_lon)))
+    field[:, -1] = 100.0                       # only the last column (lon 359.25)
+    out, tlat, tlon = regrid_to_wb2(field, src_lat, src_lon)
+    # target lon 0 is equidistant (0.75) from src 359.25 (=100) and 0.75 (=0) -> ~50
+    assert 30.0 < float(out[:, 0].mean()) < 70.0
 
 
 def test_regrid_handles_descending_latitude():

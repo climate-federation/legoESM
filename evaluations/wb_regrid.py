@@ -25,8 +25,16 @@ def wb2_grid(resolution_deg: float = WB2_RESOLUTION_DEG):
     Returns ``(lat, lon)`` with ``lat`` ascending -90..90 inclusive and ``lon``
     0..360 exclusive of the wrap point. At 1.5 deg this is 121 x 240.
     """
-    n_lat = int(round(180.0 / resolution_deg)) + 1
-    n_lon = int(round(360.0 / resolution_deg))
+    n_lat_intervals = 180.0 / resolution_deg
+    n_lon_cells = 360.0 / resolution_deg
+    if not (np.isclose(n_lat_intervals, round(n_lat_intervals))
+            and np.isclose(n_lon_cells, round(n_lon_cells))):
+        raise ValueError(
+            f"resolution_deg={resolution_deg} must divide both 180 and 360 "
+            "(e.g. 0.25, 0.5, 1.0, 1.5, 2.0)"
+        )
+    n_lat = int(round(n_lat_intervals)) + 1
+    n_lon = int(round(n_lon_cells))
     lat = np.linspace(-90.0, 90.0, n_lat)
     lon = np.linspace(0.0, 360.0, n_lon, endpoint=False)
     return lat, lon
@@ -68,10 +76,13 @@ def regrid_to_wb2(field, src_lat_deg, src_lon_deg, *,
         src_lat = src_lat[::-1]
         field = field[::-1, :]
 
-    # Pad longitude periodically (append the first column at lon+360) so the
-    # 360/0 seam interpolates.
-    lon_p = np.concatenate([src_lon, src_lon[:1] + 360.0])
-    field_p = np.concatenate([field, field[:, :1]], axis=1)
+    # Pad longitude periodically on BOTH sides so any target longitude in
+    # [0, 360) interpolates across the 360/0 seam regardless of where src_lon
+    # starts (offset grids with src_lon[0] != 0 included). Prepend the last
+    # column at lon-360 and append the first column at lon+360; the result is
+    # strictly increasing because src_lon[-1] < src_lon[0] + 360.
+    lon_p = np.concatenate([src_lon[-1:] - 360.0, src_lon, src_lon[:1] + 360.0])
+    field_p = np.concatenate([field[:, -1:], field, field[:, :1]], axis=1)
 
     interp = RegularGridInterpolator(
         (src_lat, lon_p), field_p, method="linear",
