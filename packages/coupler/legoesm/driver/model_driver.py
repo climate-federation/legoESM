@@ -332,6 +332,17 @@ class ModelDriver:
         if "conv_prog" in base:
             base["conv_prog_scheme"] = np.asarray(
                 str(getattr(self.config, "convection", "none")))
+        # Multilayer (Richards) land state (#730 chain-enable): the prognostic
+        # soil/snow/carbon columns ride carry_aux (namespaced land_ml_*) so a
+        # chained C48 SOTA restart resumes the deep-soil spin-up instead of
+        # cold-starting. No-op for slab-land runs (_land_ml_state is None).
+        if self._land_ml_state is not None:
+            for _f, _v in self._land_ml_state._asdict().items():
+                # Optional fields (TgC, surface_water) may be None — np.asarray
+                # would pickle a 0-d object array into the npz and crash the
+                # load-side jnp.asarray. Skip; restore only replaces saved keys.
+                if _v is not None:
+                    base[f"land_ml_{_f}"] = np.asarray(_v)
         return base if base else None
 
     def _restore_dm_tracers_from_carry_aux(self) -> None:
@@ -344,6 +355,79 @@ class ModelDriver:
             return
         for key in [k for k in self._carry_aux if k.startswith("dmtr_")]:
             _tracers[key[len("dmtr_"):]] = self._carry_aux.pop(key)
+
+    @staticmethod
+    def _carry_has_unscatterable_land_ml(carry_aux) -> bool:
+        """True iff ``carry_aux`` carries multilayer-land (``land_ml_*``) fields.
+
+        Pure predicate behind the lat-lon band-MPI restart fail-fast guard: a
+        gathered checkpoint's ``land_ml_*`` are the writer's GLOBAL soil/snow/
+        carbon columns, which cannot be band-scattered (multilayer land is
+        single-rank-only, #769).  Extracted so the guard — which only fires on
+        the distributed restart path never reached by the single-process
+        tests — is unit-testable directly; a future rename of the ``land_ml_``
+        prefix then breaks the test loudly instead of silently disabling the
+        guard.  Operates on the post-``bcast`` in-memory ``carry_aux`` whose
+        keys are bare (the ``carry_``/``diag_`` serialization prefixes are
+        stripped on load), so it matches with ``startswith`` not a substring."""
+        return isinstance(carry_aux, dict) and any(
+            k.startswith("land_ml_") for k in carry_aux)
+
+    def _restore_land_ml_from_carry_aux(self) -> None:
+        """Rebuild ``self._land_ml_state`` from any ``land_ml_*`` entries restored
+        into ``carry_aux``, so a chained multilayer-land restart resumes the
+        prognostic soil/snow/carbon columns instead of cold-starting (#730).
+        No-op for slab-land runs (``_land_ml_state`` is None).
+
+        Fail-loud on a partial or version-skewed checkpoint: the save side
+        (:meth:`_checkpoint_carry_aux`) emits every non-None field, so the
+        restored set must exactly match the current template's non-None field
+        set.  A missing field would leave that prognostic column at its
+        cold-start value — a silent mixed restart, exactly what #730 exists to
+        prevent — and an unknown or wrong-shaped field signals a schema /
+        resolution skew.  Mirrors the MPAS phys-state load, which likewise
+        refuses a field-set mismatch rather than silently dropping columns."""
+        if not isinstance(self._carry_aux, dict):
+            return
+        keys = [k for k in self._carry_aux if k.startswith("land_ml_")]
+        if not keys:
+            return
+        # Pop the namespaced keys regardless of land type so a stray land_ml_*
+        # (e.g. a slab run chained off a multilayer checkpoint) is never left to
+        # leak forward into the next _checkpoint_carry_aux() re-save.
+        popped = {k[len("land_ml_"):]: self._carry_aux.pop(k) for k in keys}
+        template = self._land_ml_state
+        if template is None:
+            return  # slab run: keys removed above, nothing to restore
+        import jax.numpy as jnp
+        valid = set(template._fields)
+        unknown = set(popped) - valid
+        if unknown:
+            raise ValueError(
+                f"land_ml checkpoint has unknown field(s) {sorted(unknown)}; "
+                f"current MultiLayerLandState fields are {sorted(valid)}")
+        expected = {f for f in template._fields
+                    if getattr(template, f) is not None}
+        got = set(popped)
+        if got != expected:
+            raise ValueError(
+                "land_ml checkpoint field set does not match the current "
+                "MultiLayerLandState: "
+                f"missing={sorted(expected - got)}, "
+                f"unexpected={sorted(got - expected)}. Refusing to build a "
+                "mixed restart state (the missing prognostic columns would "
+                "silently stay at cold-start values).")
+        fields = {}
+        for name, val in popped.items():
+            arr = jnp.asarray(val)
+            ref = getattr(template, name)
+            if arr.shape != ref.shape:
+                raise ValueError(
+                    f"land_ml checkpoint field '{name}' has shape "
+                    f"{tuple(arr.shape)}, expected {tuple(ref.shape)} "
+                    "(resolution / soil-layer-count skew)")
+            fields[name] = arr
+        self._land_ml_state = template._replace(**fields)
 
     def _validate_microphysics_tracer_state(
         self,
@@ -1585,6 +1669,18 @@ class ModelDriver:
         else:
             p_s = self.state.p_s.data
             lat = self._grid_lat
+            # Multi-controller SPMD: ``p_s`` is GLOBALLY sharded across
+            # processes, but the external-forcing consumers downstream
+            # (``get_ozone_at_time`` & co) are host/NumPy interpolators —
+            # ``np.asarray`` on a process-spanning array raises "spans
+            # non-addressable devices".  Gather to a process-local replicated
+            # array (collective; every call site runs on all processes —
+            # context build + per-segment forcing refresh).  No-op for
+            # fully-addressable arrays, so serial / single-GPU / mpi4jax
+            # lanes are byte-unchanged.  First hit by the 2-node Levante
+            # receipt run (#693): the CPU parity smokes run gray radiation
+            # with no external forcing and never reach this path.
+            p_s = self._gather_spmd_tree_to_host(p_s)
         return p_s, lat
 
     def _precompute_external_forcing(self, day, p_s, lat):
@@ -3337,6 +3433,33 @@ class ModelDriver:
                 _write_err = e
         self._spmd_barrier_on_root_error(_write_err)
 
+    def _moisture_advection_active(self) -> bool:
+        """True iff resolved-wind moisture advection is on (issue #771).
+
+        Config-gated to the tracer-capable dycore: cubed_sphere + cdgrid
+        (the only PE step whose RHS advects ``state.tracers``).  Other
+        grid/discretization combos keep the legacy column-locked moisture
+        and log a notice once so the gap is visible, not silent.
+        """
+        cfg = self.config
+        if not getattr(cfg, "moisture_advection", False):
+            return False
+        # ``centered``/``finite_volume`` resolve to the cdgrid PE dycore (see
+        # atmosphere.dynamics DISPATCH), so they are tracer-capable too — the
+        # gate must accept them or an opt-in run on those aliases would drop to
+        # the legacy column-locked path despite running a cdgrid step (#771).
+        supported = (cfg.grid.grid_type == "cubed_sphere"
+                     and cfg.dycore.discretization
+                     in ("cdgrid", "centered", "finite_volume"))
+        if not supported and not getattr(self, "_warned_no_advection", False):
+            self._warned_no_advection = True
+            logger.info(
+                "  moisture_advection: not available on %s/%s (tracer "
+                "advection is wired for cubed_sphere+cdgrid only, #771) — "
+                "running legacy column-locked moisture.",
+                cfg.grid.grid_type, cfg.dycore.discretization)
+        return supported
+
     def _is_spmd_multiprocess(self) -> bool:
         """True iff this run is multi-controller SPMD across >1 process
         (distributed_mode='spmd' under a real multi-process launch) — the
@@ -3641,6 +3764,7 @@ class ModelDriver:
                 # Restore evolved double-moment tracers persisted via carry_aux
                 # (per-rank distributed checkpoint is restart-exact for them).
                 self._restore_dm_tracers_from_carry_aux()
+                self._restore_land_ml_from_carry_aux()
                 from legoesm.core.state import HydrostaticState
                 from legoesm.core.field import Field
                 import jax.numpy as jnp
@@ -3748,6 +3872,27 @@ class ModelDriver:
             day = comm.bcast(day, root=0)
             carry_aux = comm.bcast(carry_aux, root=0)
 
+            # Multilayer (Richards) land state (#769) cannot be band-scattered:
+            # the gathered file's land_ml_* are the writer's GLOBAL-column
+            # soil/snow/carbon fields, and this band branch never calls
+            # ``_restore_land_ml_from_carry_aux`` — so they would sit unrestored
+            # in every rank's _carry_aux (the soil silently cold-starts) and, if
+            # adopted, hand every rank global-shape columns.  Multilayer land is
+            # single-rank-only anyway (the downstream _run_compiled guard aborts
+            # multilayer-under-distributed).  Check the just-bcast ``carry_aux``
+            # and fail fast BEFORE ``_scatter_global_state_to_bands`` mutates
+            # ``self.state`` — every rank has the same bcast dict, so the raise
+            # is symmetric (no half-scattered state, no collective deadlock).
+            if self._carry_has_unscatterable_land_ml(carry_aux):
+                raise ValueError(
+                    "Lat-lon MPI restart cannot band-scatter the multilayer "
+                    "(Richards) land state (land_ml_*) from a global "
+                    "checkpoint — multilayer land is single-rank-only, so the "
+                    "gathered soil/snow/carbon columns cannot be partitioned "
+                    "onto the bands (the soil would silently cold-start, "
+                    "issue #769). Run single-process for multilayer-land runs."
+                )
+
             self._scatter_global_state_to_bands(state_global, tracers_global)
             self._carry_aux = carry_aux if carry_aux else {}
             # Double-moment tracers cannot be band-scattered here: carry_aux is
@@ -3809,6 +3954,7 @@ class ModelDriver:
         # Restore evolved double-moment tracers persisted via carry_aux
         # (serial npz is restart-exact for them).
         self._restore_dm_tracers_from_carry_aux()
+        self._restore_land_ml_from_carry_aux()
         if metadata:
             logger.info(f"  Loaded restart: step={step}, day={day}, "
                        f"digest={metadata.state_digest[:16]}...")
@@ -4144,6 +4290,8 @@ class ModelDriver:
                         cfg, "rrtmgp_gpoint_batch_size", 0),
                     gpoint_checkpoint=getattr(
                         cfg, "rrtmgp_gpoint_checkpoint", True),
+                    column_chunk_size=getattr(
+                        cfg, "rrtmgp_column_chunk_size", 0),
                 ),
                 cloud_scheme=_cloud_scheme,
                 diurnal_cycle=cfg.diurnal_cycle,
@@ -5097,6 +5245,8 @@ class ModelDriver:
                             cfg, "rrtmgp_gpoint_batch_size", 0),
                         gpoint_checkpoint=getattr(
                             cfg, "rrtmgp_gpoint_checkpoint", True),
+                        column_chunk_size=getattr(
+                            cfg, "rrtmgp_column_chunk_size", 0),
                     ),
                     cloud_scheme=_cloud_scheme,
                     diurnal_cycle=cfg.diurnal_cycle,
@@ -6327,6 +6477,7 @@ class ModelDriver:
             ghg_vmr_override=ctx["ghg_vmr"],
             hs_newtonian_relax=self._hs_newtonian_relax,
             energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
+            advect_moisture=self._moisture_advection_active(),
             pipeline=self.physics,
         )
 
@@ -6600,6 +6751,7 @@ class ModelDriver:
             hs_newtonian_relax=self._hs_newtonian_relax,
             device_config=_seg_device_config,
             energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
+            advect_moisture=self._moisture_advection_active(),
             # Un-fused-radiation host path (ExperimentConfig.unfused_radiation,
             # default OFF): the pipeline lets build_segment_fn expose
             # run_norad_scan / run_rad so rrtmgp and the no-rad scan compile
@@ -7102,6 +7254,7 @@ class ModelDriver:
                         hs_newtonian_relax=self._hs_newtonian_relax,
                         device_config=_seg_device_config,
                         energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
+                        advect_moisture=self._moisture_advection_active(),
                         pipeline=self.physics,
                     )
 

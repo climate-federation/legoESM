@@ -199,6 +199,54 @@ class CanopyConfig(NamedTuple):
     n_root_layers: int = 5        # number of layers to integrate for root-zone stress
 
 
+# Machine-readable tunable/fixed classification for every ``: float`` field of
+# CanopyConfig (see tests/test_param_specs.py). Values live on the NamedTuple;
+# this spec adds only units/bounds/tier/transform/category/reference.
+__param_spec__ = {
+    "CanopyConfig": {
+        "scheme_key": "land.two_leaf_canopy",
+        "excluded": {
+            "tol": "numerics: Newton-Raphson convergence tolerance",
+        },
+        "params": {
+            "epsf": {
+                "units": "1", "bounds": (0.90, 1.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "radiation",
+                "reference": "leaf longwave emissivity (Ryu et al. 2011 / CLM5)",
+                "shape": None,
+            },
+            "epss": {
+                "units": "1", "bounds": (0.90, 1.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "radiation",
+                "reference": "soil longwave emissivity (Ryu et al. 2011 / CLM5)",
+                "shape": None,
+            },
+            "cv": {
+                "units": "m^-0.5 s^0.5", "bounds": (0.005, 0.03), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "aerodynamics",
+                "reference": "leaf boundary-layer forced-convection coefficient "
+                             "(Campbell & Norman 1998 / CLM5)",
+                "shape": None,
+            },
+            "wilting_point": {
+                "units": "m^3/m^3", "bounds": (0.05, 0.25), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "hydrology",
+                "reference": "soil-moisture-stress wilting point theta_wp "
+                             "(CLM5 / DifferBESS fallback)",
+                "shape": None,
+            },
+            "field_capacity": {
+                "units": "m^3/m^3", "bounds": (0.20, 0.50), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "hydrology",
+                "reference": "soil-moisture-stress field capacity theta_fc "
+                             "(CLM5 / DifferBESS fallback)",
+                "shape": None,
+            },
+        },
+    },
+}
+
+
 # ---------------------------------------------------------------------------
 # CanopyLandParams — spatially varying prescribed per-column fields
 # All array fields have shape (ncol,) and are provided externally

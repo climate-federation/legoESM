@@ -753,7 +753,12 @@ def shard_forcing(forcing: SegmentForcing, device_config) -> SegmentForcing:
         if (_flat_face is not None and leaf.ndim >= 1
                 and leaf.shape[0] != 6 and leaf.shape[0] > 0
                 and leaf.shape[0] % 6 == 0):
-            updates[name] = jax.device_put(leaf, _flat_face)
+            # multiprocess_safe_device_put, NOT jax.device_put: under
+            # multi-controller SPMD the cross-process bit-equality assert
+            # in device_put trips on host-precomputed forcing (#693,
+            # Levante 2-node receipt job 26030677).
+            from legoesm.parallel.mesh import multiprocess_safe_device_put
+            updates[name] = multiprocess_safe_device_put(leaf, _flat_face)
         else:
             updates[name] = shard_pytree(leaf, device_config)
     return forcing._replace(**updates) if updates else forcing
@@ -877,25 +882,41 @@ class _SplitStepLocals(NamedTuple):
     phys_gwd: object
 
 
+_MOIST_FIELDS = ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_c", "N_r", "N_i")
+
+
 def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
-                               need_rad, doy_step, sod_step, statics):
+                               need_rad, doy_step, sod_step, statics,
+                               moist=None):
     """The single-rank (``owned_face_ids is None``) operator-split physics body:
     ``step_unified`` on the whole column set, then the Euler write-back +
-    accumulators.  VERBATIM extraction of the former ``_single_step`` ``else``
-    body (dynamics + mass fixer done by the caller in the prologue) — the only
-    change is reading closure statics off ``statics`` and returning the
-    ``_SplitStepLocals`` bundle the shared finalizer consumes."""
+    accumulators.  Extraction of the former ``_single_step`` ``else`` body
+    (dynamics + mass fixer done by the caller in the prologue) — reads closure
+    statics off ``statics`` and returns the ``_SplitStepLocals`` bundle the
+    shared finalizer consumes.
+
+    ``moist`` (issue #771): the moisture fields the physics acts on — a dict
+    over ``_MOIST_FIELDS`` (q_v/q_c/q_r + the double-moment fields).  ``None``
+    (the lat-band-SPMD lane + the column-locked serial path) reads them straight
+    off the carry, BYTE-IDENTICAL; the ``advect_moisture`` serial path passes the
+    POST-ADVECTION aliases so the physics update acts on the transported
+    moisture.  ``tke/qke/gwd_spectrum`` are physics carries (not advected) and
+    always ride the carry."""
     from legoesm.core.conservation import energy_consistent_moisture_floor
+    if moist is None:
+        moist = {_nm: getattr(carry, _nm) for _nm in _MOIST_FIELDS}
     _dm_in = {}
-    for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
-                "tke", "qke", "gwd_spectrum"):
+    for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+        if moist[_nm] is not None:
+            _dm_in[_nm] = moist[_nm]
+    for _nm in ("tke", "qke", "gwd_spectrum"):
         _fld = getattr(carry, _nm)
         if _fld is not None:
             _dm_in[_nm] = _fld
     _ret = statics.step_unified(
         need_rad,
         T_new, p_s_new,
-        carry.q_v, carry.q_c, carry.q_r, carry.conv_prog,
+        moist["q_v"], moist["q_c"], moist["q_r"], carry.conv_prog,
         u_new, v_new,
         statics.forcing.sst, statics.forcing.sic, statics.lat, statics.lon,
         doy_step, sod_step, statics.dt,
@@ -939,24 +960,24 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         _phys_dT_dt = _phys_dT_dt + statics.hs_newtonian_relax(
             T_new, p_s_new, statics.lat)
     T_upd = T_new + statics.dt * _phys_dT_dt
-    _qv_raw = carry.q_v + statics.dt * phys_out.dq_v_dt
+    _qv_raw = moist["q_v"] + statics.dt * phys_out.dq_v_dt
     if statics.energy_consistent_moisture_clip:
         # Issue #323: keep the q_v floor moist-static-energy neutral by
         # removing the latent heat of the clipped (un-removed) vapour sink.
         q_v_upd, T_upd = energy_consistent_moisture_floor(_qv_raw, T_upd)
     else:
         q_v_upd = jnp.maximum(_qv_raw, 0.0)
-    q_c_upd = jnp.maximum(carry.q_c + statics.dt * phys_out.dq_c_dt, 0.0)
-    q_r_upd = jnp.maximum(carry.q_r + statics.dt * phys_out.dq_r_dt, 0.0)
+    q_c_upd = jnp.maximum(moist["q_c"] + statics.dt * phys_out.dq_c_dt, 0.0)
+    q_r_upd = jnp.maximum(moist["q_r"] + statics.dt * phys_out.dq_r_dt, 0.0)
     def _dm_upd(fld, tend):
         return (None if fld is None
                 else jnp.maximum(fld + statics.dt * tend, 0.0))
-    q_i_upd = _dm_upd(carry.q_i, phys_out.dq_i_dt)
-    q_s_upd = _dm_upd(carry.q_s, phys_out.dq_s_dt)
-    q_g_upd = _dm_upd(carry.q_g, phys_out.dq_g_dt)
-    N_c_upd = _dm_upd(carry.N_c, phys_out.dN_c_dt)
-    N_r_upd = _dm_upd(carry.N_r, phys_out.dN_r_dt)
-    N_i_upd = _dm_upd(carry.N_i, phys_out.dN_i_dt)
+    q_i_upd = _dm_upd(moist["q_i"], phys_out.dq_i_dt)
+    q_s_upd = _dm_upd(moist["q_s"], phys_out.dq_s_dt)
+    q_g_upd = _dm_upd(moist["q_g"], phys_out.dq_g_dt)
+    N_c_upd = _dm_upd(moist["N_c"], phys_out.dN_c_dt)
+    N_r_upd = _dm_upd(moist["N_r"], phys_out.dN_r_dt)
+    N_i_upd = _dm_upd(moist["N_i"], phys_out.dN_i_dt)
     conv_prog_upd = phys_out.conv_prog
 
     # --- Accumulate precipitation ---
@@ -1148,6 +1169,7 @@ def build_segment_fn(
     device_config=None,
     energy_consistent_moisture_clip: bool = False,
     pipeline=None,
+    advect_moisture: bool = False,
 ):
     """Build a compiled segment function.
 
@@ -1252,6 +1274,15 @@ def build_segment_fn(
         organised convection; the existing floor truncates the sink but
         keeps the full latent heating).  Default ``False`` =>
         bit-identical to the legacy path.
+    advect_moisture : bool, optional
+        Issue #771.  When ``True``, the moisture tracers (q_v/q_c/q_r and
+        the double-moment fields when present) are attached to the dycore
+        state each step so the primitive-equation step advects them with
+        the resolved wind (the MPAS Phase B design); the physics update
+        then acts on the post-advection fields.  Requires a tracer-capable
+        dycore (cubed-sphere cdgrid).  Default ``False`` => the legacy
+        column-locked moisture (physics tendencies + hyperdiffusion
+        smoothing only), byte-identical.
     pipeline : PhysicsPipeline or None, optional
         The physics pipeline.  Only consumed by the optional "un-fused
         radiation" host path (``ExperimentConfig.unfused_radiation`` —
@@ -1403,7 +1434,8 @@ def build_segment_fn(
 
             # --- Dynamics ---
             dyn_state = _dynamics_model.step(
-                _rebuild_state(carry, _dynamics_model),
+                _rebuild_state(carry, _dynamics_model,
+                               advect_moisture=advect_moisture),
                 _dt,
             )
 
@@ -1411,6 +1443,33 @@ def build_segment_fn(
             u_new = dyn_state.u.data
             v_new = dyn_state.v.data
             p_s_new = dyn_state.p_s.data
+
+            # --- Advected moisture (issue #771) ---
+            # With advect_moisture the tracers rode ``dyn_state`` through the
+            # PE step (resolved-wind transport, same MPAS Phase B design); the
+            # physics update below then acts on the POST-ADVECTION fields.
+            # With the flag off these aliases are exactly the carry fields, so
+            # every downstream line is byte-identical to the legacy
+            # column-locked behaviour.
+            if advect_moisture:
+                _adv = dyn_state.tracers
+                q_v_dyn = _adv["q_v"].data
+                q_c_dyn = _adv["q_c"].data
+                q_r_dyn = _adv["q_r"].data
+                # Tracers NOT in the advected set (per-volume N_c/N_r are
+                # intentionally excluded, #772 review) fall back to their carry
+                # value — i.e. they stay column-locked — NOT to None, which
+                # would drop the double-moment number fields on an opt-in run.
+                q_i_dyn = _adv["q_i"].data if "q_i" in _adv else carry.q_i
+                q_s_dyn = _adv["q_s"].data if "q_s" in _adv else carry.q_s
+                q_g_dyn = _adv["q_g"].data if "q_g" in _adv else carry.q_g
+                N_c_dyn = _adv["N_c"].data if "N_c" in _adv else carry.N_c
+                N_r_dyn = _adv["N_r"].data if "N_r" in _adv else carry.N_r
+                N_i_dyn = _adv["N_i"].data if "N_i" in _adv else carry.N_i
+            else:
+                q_v_dyn, q_c_dyn, q_r_dyn = carry.q_v, carry.q_c, carry.q_r
+                q_i_dyn, q_s_dyn, q_g_dyn = carry.q_i, carry.q_s, carry.q_g
+                N_c_dyn, N_r_dyn, N_i_dyn = carry.N_c, carry.N_r, carry.N_i
 
             # --- Dry mass fixer (target-anchored) ---
             if fix_mass:
@@ -1464,10 +1523,11 @@ def build_segment_fn(
                 # step_unified wrappers (which parse the positional tail by
                 # length) route them through **kwargs unchanged.
                 _dm_in = {}
-                for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
-                    _fld = getattr(carry, _nm)
-                    if _fld is not None:
-                        _dm_in[_nm] = _fld[_ofi]
+                for _nm, _dyn in (("q_i", q_i_dyn), ("q_s", q_s_dyn),
+                                  ("q_g", q_g_dyn), ("N_c", N_c_dyn),
+                                  ("N_r", N_r_dyn), ("N_i", N_i_dyn)):
+                    if _dyn is not None:
+                        _dm_in[_nm] = _dyn[_ofi]
                 # Stateful-physics carries (issue #413): rank-local
                 # owned-column layout like conv_prog — passed whole,
                 # by keyword (None fields omitted; legacy wrappers
@@ -1479,7 +1539,7 @@ def build_segment_fn(
                 _ret = _step_unified(
                     need_rad,
                     T_new[_ofi], p_s_new[_ofi],
-                    carry.q_v[_ofi], carry.q_c[_ofi], carry.q_r[_ofi],
+                    q_v_dyn[_ofi], q_c_dyn[_ofi], q_r_dyn[_ofi],
                     carry.conv_prog,
                     u_new[_ofi], v_new[_ofi],
                     forcing.sst, forcing.sic, lat, lon,
@@ -1518,7 +1578,7 @@ def build_segment_fn(
                     _phys_dT = _phys_dT + hs_newtonian_relax(
                         T_new[_ofi], p_s_new[_ofi], lat[_ofi])
                 _T_owned = T_new[_ofi] + _dt * _phys_dT
-                _qv_raw = carry.q_v[_ofi] + _dt * phys_out.dq_v_dt
+                _qv_raw = q_v_dyn[_ofi] + _dt * phys_out.dq_v_dt
                 if energy_consistent_moisture_clip:
                     # Issue #323: keep the q_v floor moist-static-energy
                     # neutral (remove the latent heat of the clipped vapour
@@ -1530,25 +1590,26 @@ def build_segment_fn(
                 else:
                     _qv_owned = jnp.maximum(_qv_raw, 0.0)
                 T_upd = T_new.at[_ofi].set(_T_owned)
-                q_v_upd = carry.q_v.at[_ofi].set(_qv_owned)
-                q_c_upd = carry.q_c.at[_ofi].set(
-                    jnp.maximum(carry.q_c[_ofi] + _dt * phys_out.dq_c_dt, 0.0)
+                q_v_upd = q_v_dyn.at[_ofi].set(_qv_owned)
+                q_c_upd = q_c_dyn.at[_ofi].set(
+                    jnp.maximum(q_c_dyn[_ofi] + _dt * phys_out.dq_c_dt, 0.0)
                 )
-                q_r_upd = carry.q_r.at[_ofi].set(
-                    jnp.maximum(carry.q_r[_ofi] + _dt * phys_out.dq_r_dt, 0.0)
+                q_r_upd = q_r_dyn.at[_ofi].set(
+                    jnp.maximum(q_r_dyn[_ofi] + _dt * phys_out.dq_r_dt, 0.0)
                 )
                 # Double-moment tracers (None unless populated): evolve at owned
                 # indices from the matching microphysics tendencies, clipped
-                # non-negative like q_c/q_r.
+                # non-negative like q_c/q_r.  Base = the (possibly advected)
+                # _dyn alias so non-owned faces keep dynamics-only values.
                 def _dm_upd_owned(fld, tend):
                     return (None if fld is None else fld.at[_ofi].set(
                         jnp.maximum(fld[_ofi] + _dt * tend, 0.0)))
-                q_i_upd = _dm_upd_owned(carry.q_i, phys_out.dq_i_dt)
-                q_s_upd = _dm_upd_owned(carry.q_s, phys_out.dq_s_dt)
-                q_g_upd = _dm_upd_owned(carry.q_g, phys_out.dq_g_dt)
-                N_c_upd = _dm_upd_owned(carry.N_c, phys_out.dN_c_dt)
-                N_r_upd = _dm_upd_owned(carry.N_r, phys_out.dN_r_dt)
-                N_i_upd = _dm_upd_owned(carry.N_i, phys_out.dN_i_dt)
+                q_i_upd = _dm_upd_owned(q_i_dyn, phys_out.dq_i_dt)
+                q_s_upd = _dm_upd_owned(q_s_dyn, phys_out.dq_s_dt)
+                q_g_upd = _dm_upd_owned(q_g_dyn, phys_out.dq_g_dt)
+                N_c_upd = _dm_upd_owned(N_c_dyn, phys_out.dN_c_dt)
+                N_r_upd = _dm_upd_owned(N_r_dyn, phys_out.dN_r_dt)
+                N_i_upd = _dm_upd_owned(N_i_dyn, phys_out.dN_i_dt)
                 conv_prog_upd = phys_out.conv_prog
 
                 # Held radiation: update at owned indices
@@ -1643,9 +1704,14 @@ def build_segment_fn(
             else:
                 # Single-rank (single-controller / lat-band-SPMD) operator-split
                 # physics — the module-scope body the SPMD lane reuses verbatim.
+                # ``moist`` passes the post-advection aliases (issue #771); with
+                # advect_moisture off they ARE carry.q_* -> byte-identical.
                 lz = split_physics_single_rank(
                     carry, T_new, u_new, v_new, p_s_new,
-                    need_rad, _doy_step, _sod_step, _split_statics)
+                    need_rad, _doy_step, _sod_step, _split_statics,
+                    moist={"q_v": q_v_dyn, "q_c": q_c_dyn, "q_r": q_r_dyn,
+                           "q_i": q_i_dyn, "q_s": q_s_dyn, "q_g": q_g_dyn,
+                           "N_c": N_c_dyn, "N_r": N_r_dyn, "N_i": N_i_dyn})
 
             # Shared operator-split TAIL (sat-adjust, moisture fixer/smoothing,
             # Rayleigh, carry pack) — ONE source for both branches.
@@ -2318,12 +2384,33 @@ def build_segment_fn(
     return run_segment_jit
 
 
-def _rebuild_state(carry: SegmentCarry, model):
+# Moisture tracers eligible for dycore advection, in carry-field order.
+# q_v/q_c/q_r are always present on moist runs; the double-moment fields
+# are None for warm-rain runs (their None-ness is static pytree structure,
+# so the per-name `is not None` check below is trace-safe).
+# Tracers carried through the resolved-wind advective step (#771).  Mass
+# mixing ratios [kg/kg] and the per-MASS ice number N_i [#/kg] transport like
+# passive scalars.  N_c/N_r are per-VOLUME number densities [#/m^3] — advecting
+# them with the mass-mixing-ratio operator applies the wrong conservation law,
+# so they are intentionally excluded until a density-aware number transport
+# exists (their masses q_c/q_r still advect; the numbers stay column-locked).
+_ADVECTED_TRACER_NAMES = (
+    "q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_i",
+)
+
+
+def _rebuild_state(carry: SegmentCarry, model, advect_moisture: bool = False):
     """Rebuild the model's expected state type from raw carry arrays.
 
     The dynamics model expects a NamedTuple with Field-wrapped arrays.
     Inside lax.scan we store raw arrays, so we reconstruct the state
     type here.  This is cheap — only Python object creation, no data copy.
+
+    With ``advect_moisture=True`` (issue #771) the moisture tracers ride
+    the state as ``state.tracers`` so the primitive-equation step advects
+    them with the resolved wind (mass-consistently, via the shared
+    cubed-sphere tracer kernel — the same MPAS Phase B design).  Default
+    ``False`` keeps the legacy column-locked moisture byte-identical.
     """
     # Detect state type from model
     if hasattr(model, '_state_type'):
@@ -2339,5 +2426,19 @@ def _rebuild_state(carry: SegmentCarry, model):
     T_f = Field(carry.T, name="T", dims=("face", "x", "y", "level"), units="K")
     p_s_f = Field(carry.p_s, name="p_s", dims=("face", "x", "y"), units="Pa")
     phis_f = Field(carry.phis, name="phis", dims=("face", "x", "y"), units="m2/s2")
+
+    if advect_moisture:
+        # Only the tracer-capable dycore states reach this branch (the
+        # driver gates on cubed_sphere+cdgrid); a state type without a
+        # ``tracers`` field fails loudly here rather than silently
+        # dropping the moisture.
+        tracers = {
+            nm: Field(getattr(carry, nm), name=nm,
+                      dims=("face", "x", "y", "level"), units="kg/kg")
+            for nm in _ADVECTED_TRACER_NAMES
+            if getattr(carry, nm) is not None
+        }
+        return StateType(u=u_f, v=v_f, T=T_f, p_s=p_s_f, phis=phis_f,
+                         tracers=tracers)
 
     return StateType(u=u_f, v=v_f, T=T_f, p_s=p_s_f, phis=phis_f)

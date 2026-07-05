@@ -26,6 +26,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.canopy import CanopyConfig, CanopyLandParams
 from legoesm.land.config import MultiLayerLandConfig
@@ -167,7 +168,7 @@ def make_plot(times_hr, sw_in, T_surf, LE, H, GPP, theta0, out_path: Path):
 
     ax = axes[0, 1]
     for j, name in enumerate(CASE_NAMES):
-        ax.plot(times_hr, T_surf[:, j] - 273.15, color=colors[j], label=name)
+        ax.plot(times_hr, T_surf[:, j] - constants.T_freeze, color=colors[j], label=name)
     ax.set_ylabel("T$_{surface}$  [\u00b0C]")
     ax.set_title("Canopy / surface temperature")
     ax.legend(fontsize=8, loc="upper right")

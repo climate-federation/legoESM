@@ -320,6 +320,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "smaller compiled footprint / faster cold compile for "
                              "FORWARD/inference runs (relieves the MPAS/L5 XLA compile "
                              "wall). Keep True for reverse-mode AD / training.")
+    parser.add_argument("--radiation-column-chunk", type=int,
+                        default=_EXPERIMENT_DEFAULTS.rrtmgp_column_chunk_size,
+                        help="RRTMGP column-chunk block size (0 = off). >0 maps "
+                             "the rrtmgp solve over fixed-size column blocks so the "
+                             "per-block XLA graph compiles ONCE at this size — caps "
+                             "the super-linear rrtmgp compile time so higher "
+                             "resolutions (C24/C48 L20) compile instead of stalling. "
+                             "Numerically exact (columns are independent); must "
+                             "divide the column count.")
     # Issue #273 GPU tuning: RRTMGP column-recurrence kernel choice.
     # ``--rrtmgp-use-scan`` forces ``jax.lax.scan`` (smaller graph,
     # ~5-10× cheaper to JIT — material against the 2600s cold compile
@@ -488,9 +497,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "not an accepted AMIP surface scheme (coare3 is the "
                              "MOST-with-gustiness variant).")
     parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi", type=float,
-                        default=0.0,
-                        help="COARE convective-gustiness BL depth z_i [m] (0=off; "
-                             "tuned slab value 300).")
+                        default=None,
+                        help="COARE convective-gustiness BL depth z_i [m]. "
+                             "Unset = scheme-native (coare3: 600 m per "
+                             "AeroBulk/Fairall 2003, others: off); 0 = force "
+                             "off; tuned slab value 300.")
+    parser.add_argument("--bulk-thermo-convention", dest="bulk_thermo_convention",
+                        type=str, default="legoesm",
+                        choices=["legoesm", "aerobulk"],
+                        help="Thermodynamic constants set for the MOST bulk "
+                             "fluxes (coare3/large_yeager): 'legoesm' "
+                             "(default) = constant L_v / dry c_pd; 'aerobulk' "
+                             "= NEMO/AeroBulk/COARE parity (SST-dependent "
+                             "L_vap, moist cp_air).")
     parser.add_argument("--q-c-diagnostic", dest="cloud_q_c_diagnostic", type=float,
                         default=None,
                         help="In-cloud diagnostic condensate fed to radiation "
@@ -796,6 +815,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # convection (the kessler+sbm wind blow-up).  Default off => unchanged.
     parser.add_argument("--energy-consistent-moisture-clip",
                         action="store_true", default=False)
+    # Resolved-wind moisture advection through the cdgrid dycore (issue #771).
+    # OPT-IN / experimental (advective form, not discretely mass-conserving) —
+    # default OFF is bit-identical to the legacy column-locked moisture path.
+    _madv = parser.add_mutually_exclusive_group()
+    _madv.add_argument("--moisture-advection", dest="moisture_advection",
+                       action="store_true",
+                       help="Opt in to resolved-wind cube moisture advection "
+                            "(#771; experimental, advective form). Default off.")
+    _madv.add_argument("--no-moisture-advection", dest="moisture_advection",
+                       action="store_false",
+                       help="Force the legacy column-locked moisture path "
+                            "(the default).")
+    parser.set_defaults(moisture_advection=False)
 
     # CMIP
     parser.add_argument("--experiment", type=str, default="")
@@ -1020,6 +1052,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         rrtmgp_use_scan=args.rrtmgp_use_scan,
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
+        rrtmgp_column_chunk_size=args.radiation_column_chunk,
         diurnal_cycle=args.diurnal_cycle,
         orbital_insolation=args.orbital_insolation,
         co2_ppmv=args.co2_ppmv,
@@ -1058,6 +1091,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         # Tuned air-sea + cloud calibration (mirror run_coupled).
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        surface_thermo_convention=args.bulk_thermo_convention,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_rh_crit=args.cloud_rh_crit,
         cloud_p_xr=args.cloud_p_xr,
@@ -1065,6 +1099,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         convective_cloud=args.convective_cloud,
         fix_moisture=args.fix_moisture,
         energy_consistent_moisture_clip=args.energy_consistent_moisture_clip,
+        moisture_advection=args.moisture_advection,
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,
         topo_edge_blend=args.topo_edge_blend,
@@ -1615,7 +1650,8 @@ def main(argv: list[str] | None = None):
         parser.set_defaults(**load_yaml_config(
             pre.config, parser,
             example_keys="'convection', 'microphysics', 'surface_bulk_scheme', "
-                         "'q_c_diagnostic', 'gustiness_zi', 'convective_cloud'"))
+                         "'q_c_diagnostic', 'gustiness_zi', "
+                         "'bulk_thermo_convention', 'convective_cloud'"))
 
     args = parser.parse_args(argv)
     args = _postprocess_args(args, parser)
