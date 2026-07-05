@@ -63,7 +63,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-canopy = ["clm-ml-jax"]
+canopy = ["clm-ml-jax>=0.1.0"]
 ml = ["imageio>=2.30", "equinox>=0.11", "optax>=0.2"]
 mesh = ["pymetis>=1.2", "scipy>=1.10"]
 viz = ["matplotlib>=3.9", "cartopy>=0.23"]

@@ -132,7 +132,7 @@ def advance_TgC_ema(
     T_air_K : instantaneous near-surface air temperature [K]
     dt      : time step [s]
     """
-    T_air_C = T_air_K - 273.15
+    T_air_C = T_air_K - constants.T_freeze
     alpha = dt / TGC_EMA_TAU_S
     return TgC_old + alpha * (T_air_C - TgC_old)
 
@@ -248,7 +248,7 @@ def compute_two_leaf_canopy_fluxes(
     if TgC_override is not None:
         TgC = TgC_override
     else:
-        TgC = _get(lp, "TgC", forcing.T_lowest - 273.15)
+        TgC = _get(lp, "TgC", forcing.T_lowest - constants.T_freeze)
 
     # ---- Soil moisture stress (canopy reuses the shared root-zone beta) ----
     fStress_soil  = w_frac_rz         # soil evaporation stress

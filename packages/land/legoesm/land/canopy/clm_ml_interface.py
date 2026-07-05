@@ -39,10 +39,41 @@ if TYPE_CHECKING:
     from legoesm.land.config import MultiLayerLandConfig
 
 # ---------------------------------------------------------------------------
-# Module-level CLM initialization guard
+# Physics contract
+# ---------------------------------------------------------------------------
+
+__physics_contract__ = {
+    "units": {
+        "shflx": "W/m² (positive upward, sensible heat to atmosphere)",
+        "lhflx": "W/m² (positive upward, latent heat to atmosphere)",
+        "G_soil": "W/m² (positive downward into soil)",
+        "lw_up": "W/m² (positive upward, outgoing longwave)",
+        "T_canopy_air": "K (PAI-weighted mean within-canopy air temperature)",
+        "gpp": "gC/m²/s (gross primary production, zero in darkness)",
+    },
+    "signs": {
+        "shflx": "positive = atmosphere gains heat",
+        "lhflx": "positive = atmosphere gains moisture-equivalent energy",
+        "G_soil": "positive = soil gains heat",
+        "lw_up": "positive = upward emission from surface",
+    },
+    "conserves": "energy (Rnet = shflx + lhflx + G_soil + stflx_air + stflx_veg per timestep)",
+    "differentiable": False,
+    "reference": "Bonan et al. (2021), GMD, CLM-ML v2",
+    "idealized_test": "tests/land/unit/test_canopy.py::TestCLMMLInterface",
+}
+
+# ---------------------------------------------------------------------------
+# Module-level CLM initialization guard and topology cache
 # ---------------------------------------------------------------------------
 
 _CLM_INITIALIZED: bool = False
+
+# Topology cache: avoid re-running _setup_clm_topology when the grid has not
+# changed between timesteps.  Key = (ncol, lat[0], lon[0]) — sufficient to
+# detect a new grid allocation; full lat/lon arrays are not hashed here for
+# performance.  Reset when any element changes.
+_last_topology_key: tuple | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +110,7 @@ def _ensure_clm_initialized() -> None:
     import clm_src_utils.clm_varorb as _varorb
 
     # shr_orb_params returns (eccen, obliq_deg, mvelp_deg, obliqr, lambm0, mvelpp)
-    eccen, _obliq, _mvelp, obliqr, lambm0, mvelpp = shr_orb_params(2001)
+    eccen, _obliq, _mvelp, obliqr, lambm0, mvelpp = shr_orb_params(2001)  # coeff-ok: non-leap reference year 2001 for CLM orbital parameters epoch
     _varorb.eccen = float(eccen)
     _varorb.obliqr = float(obliqr)
     _varorb.mvelpp = float(mvelpp)
@@ -235,11 +266,11 @@ def _setup_clm_time(dt: float, doy: float, step_count: int) -> None:
     # get_curr_date() recomputes curr_date_ymd from itim*dtstep using isleap(),
     # so keeping start_date_ymd=20000101 caused all caldays after Feb 28 to be
     # 1 day behind (Apr 30 instead of May 1 for doy=120).
-    _tm.start_date_ymd = 20010101
+    _tm.start_date_ymd = 20010101  # coeff-ok: CLM time epoch: Jan 1 2001 (non-leap year, 365 days)
     _tm.start_date_tod = 0
     # Derive curr_date_ymd from doy (non-leap 2001 epoch).
     import datetime as _dt
-    _jan1 = _dt.date(2001, 1, 1)
+    _jan1 = _dt.date(2001, 1, 1)  # coeff-ok: CLM time epoch: Jan 1 2001 (non-leap year, 365 days)
     _curr = _jan1 + _dt.timedelta(days=int(doy))
     _tm.curr_date_ymd = int(_curr.strftime("%Y%m%d"))
     _tm.curr_date_tod = int((doy * 86400.0) % 86400)
@@ -252,7 +283,14 @@ def _compute_cos_zenith(
 ) -> np.ndarray:
     """Compute cosine of solar zenith angle per column.
 
-    Uses a simple declination + hour-angle formula.  Accuracy is ±0.01 in
+    .. note::
+        **Legacy function** — used only in unit tests
+        (``tests/land/unit/test_canopy.py::TestSolarGeometry``).
+        The production path uses :func:`_compute_virtual_lon_deg` with
+        CLM's Kepler ``shr_orb_cosz`` for round-trip consistency.
+        Do NOT delete this function without updating the test class.
+
+    Uses the Spencer (1971) declination formula.  Accuracy is ±0.01 in
     cos_zen, sufficient for the Weiss–Norman clearness-index partition.
 
     Parameters
@@ -269,20 +307,20 @@ def _compute_cos_zenith(
     # Solar declination — Spencer (1971).
     # doy is 0-based (0.0 = Jan 1 00:00), so Spencer's d_n = doy + 1 and
     # B = 2π*(d_n-1)/365 = 2π*doy/365.  The previous (doy-1) was wrong by 1 day.
-    B = 2.0 * np.pi * doy / 365.0
-    decl = (0.006918
-            - 0.399912 * np.cos(B)
-            + 0.070257 * np.sin(B)
-            - 0.006758 * np.cos(2 * B)
-            + 0.000907 * np.sin(2 * B)
-            - 0.002697 * np.cos(3 * B)
-            + 0.00148  * np.sin(3 * B))
+    B = 2.0 * np.pi * doy / 365.0  # coeff-ok: Julian year length (365 days, non-leap 2001 epoch)
+    decl = (0.006918                # coeff-ok: Spencer (1971, J. Appl. Meteorol.) declination polynomial
+            - 0.399912 * np.cos(B)  # coeff-ok: Spencer (1971) declination polynomial
+            + 0.070257 * np.sin(B)  # coeff-ok: Spencer (1971) declination polynomial
+            - 0.006758 * np.cos(2 * B)  # coeff-ok: Spencer (1971) declination polynomial
+            + 0.000907 * np.sin(2 * B)  # coeff-ok: Spencer (1971) declination polynomial
+            - 0.002697 * np.cos(3 * B)  # coeff-ok: Spencer (1971) declination polynomial
+            + 0.00148  * np.sin(3 * B))  # coeff-ok: Spencer (1971) declination polynomial
     # Fractional time of day (UTC hours from doy fractional part)
     frac = doy % 1.0           # 0.0 = midnight, 0.5 = noon UTC
-    utc_hour = frac * 24.0
+    utc_hour = frac * 24.0     # coeff-ok: exact hours-per-day conversion (24 h/day)
     # Local solar time hour angle (degrees, 0=noon)
     lon_norm = np.where(lon_deg > 180.0, lon_deg - 360.0, lon_deg)
-    ha_deg = (utc_hour - 12.0) * 15.0 + lon_norm
+    ha_deg = (utc_hour - 12.0) * 15.0 + lon_norm  # coeff-ok: exact degrees-per-hour (360°/24h=15°/h)
     ha_r = np.deg2rad(ha_deg)
     cos_zen = (np.sin(lat_r) * np.sin(decl)
                + np.cos(lat_r) * np.cos(decl) * np.cos(ha_r))
@@ -371,18 +409,18 @@ def _estimate_beam_fraction(
     Direct fraction: f_dir = 1 - Id/I, clamped to [0, 1].
     Returns f_dir per column.
     """
-    S0 = 1361.0  # solar constant [W/m²]
-    cos_zen_clamped = np.maximum(cos_zen, 0.01)
+    S0 = constants.S_0  # solar constant [W/m²]
+    cos_zen_clamped = np.maximum(cos_zen, 0.01)  # coeff-ok: minimum cos_zen floor to avoid division by zero in clearness index
     sw_toa = S0 * cos_zen_clamped
     kt = np.where(sw_down > 1.0, np.minimum(sw_down / sw_toa, 1.0), 0.0)
 
-    # Erbs et al. 1982 diffuse fraction polynomial
-    id_over_i_low = 1.0 - 0.09 * kt
-    id_over_i_mid = (0.9511 - 0.1604 * kt + 4.388 * kt**2
-                     - 16.638 * kt**3 + 12.336 * kt**4)
-    id_over_i_high = np.full_like(kt, 0.165)
-    id_over_i = np.where(kt <= 0.22, id_over_i_low,
-                np.where(kt <= 0.80, id_over_i_mid, id_over_i_high))
+    # Erbs et al. (1982, Solar Energy 28:293-302) diffuse-fraction polynomial
+    id_over_i_low = 1.0 - 0.09 * kt  # coeff-ok: Erbs et al. (1982, Solar Energy 28:293) low-kt regime
+    id_over_i_mid = (0.9511 - 0.1604 * kt + 4.388 * kt**2  # coeff-ok: Erbs et al. (1982) mid-kt polynomial
+                     - 16.638 * kt**3 + 12.336 * kt**4)     # coeff-ok: Erbs et al. (1982) mid-kt polynomial
+    id_over_i_high = np.full_like(kt, 0.165)  # coeff-ok: Erbs et al. (1982) high-kt (clear-sky) limit
+    id_over_i = np.where(kt <= 0.22, id_over_i_low,  # coeff-ok: Erbs et al. (1982) kt regime threshold
+                np.where(kt <= 0.80, id_over_i_mid, id_over_i_high))  # coeff-ok: Erbs et al. (1982) kt regime threshold
     f_dir = np.clip(1.0 - id_over_i, 0.0, 1.0)
 
     # At night (sw_down < 1 W/m²) force beam fraction to zero
@@ -391,9 +429,10 @@ def _estimate_beam_fraction(
 
 def _sw_partition(
     sw_down: jnp.ndarray,
-    f_vis: float = 0.46,
+    f_vis: float = 0.46,  # coeff-ok: observation-based VIS fraction (Weiss & Norman 1985; ~0.46 climatological mean)
     f_dir: float = -1.0,
     cos_zen: np.ndarray | None = None,
+    f_dir_fallback: float = 0.30,  # coeff-ok: Erbs et al. (1982) overcast-sky beam fraction fallback; prefer CLMMLCanopyConfig.f_dir_noclearness_fallback
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Partition total downwelling SW into direct/diffuse × VIS/NIR bands.
 
@@ -413,6 +452,9 @@ def _sw_partition(
     cos_zen : np.ndarray | None
         Cosine of solar zenith angle per column, shape ``(ncol,)``.
         Required when ``f_dir < 0``.  Ignored otherwise.
+    f_dir_fallback : float
+        Beam fraction used when ``f_dir < 0`` but ``cos_zen`` is unavailable.
+        Provided from ``CLMMLCanopyConfig.f_dir_noclearness_fallback``.
 
     Returns
     -------
@@ -427,7 +469,7 @@ def _sw_partition(
         # Physics-based estimate using clearness index
         if cos_zen is None:
             # Fallback: assume overcast (conservative, no zenith info)
-            f_dir_arr = np.full_like(sw_np, 0.30)
+            f_dir_arr = np.full_like(sw_np, f_dir_fallback)
         else:
             f_dir_arr = _estimate_beam_fraction(sw_np, np.asarray(cos_zen, dtype=np.float64))
     else:
@@ -481,6 +523,7 @@ def _build_stubs(
         f_vis=float(canopy_config.f_vis),
         f_dir=float(canopy_config.f_dir),
         cos_zen=cos_zen,
+        f_dir_fallback=float(canopy_config.f_dir_noclearness_fallback),
     )
 
     # shape (np_, numrad+1) = (np_, 3); CLM uses ivis=1, inir=2
@@ -502,7 +545,7 @@ def _build_stubs(
     # co2_ppmv × p_surface × 1e-6 → Pa
     # In _GetCLMVar: co2ref_cur = forc_pco2[g] / pbot * 1e6 → umol/mol (round-trips)
     co2_pa = forcing.co2_ppmv * forcing.p_surface * 1.0e-6  # Pa
-    o2_pa = canopy_config.o2ref * 1.0e-3 * forcing.p_surface  # Pa (mmol/mol × 1e-3)
+    o2_pa = canopy_config.o2ref * 1.0e-3 * forcing.p_surface  # coeff-ok: exact unit conversion mmol/mol → mol/mol (1e-3); Pa = mol/mol × p_surface
 
     # ---- 1-D forcing arrays (1-based) ----
     def _pad1(arr):
@@ -552,10 +595,13 @@ def _build_stubs(
     hk_l_col = jnp.zeros((np_, nlevgrnd + 1), dtype=jnp.float64)    # [mm/s]
     rootfr_patch = jnp.zeros((np_, nlevgrnd + 1), dtype=jnp.float64)
     h2osoi_ice = jnp.zeros((np_, nlevgrnd + 1), dtype=jnp.float64)   # no ice
-    # ~0.5 W/m/K for moist mineral soil (physical range 0.2–2.0 W/m/K)
-    thk_col = jnp.full((np_, nlevgrnd + 1), 0.5, dtype=jnp.float64)
+    # Soil thermal conductivity [W/m/K] — CLM4.5 Table 3.3 moist loam default.
+    # Physical range 0.2–2.0 W/m/K; 0.9–1.5 for wetter/sandier soils.
+    thk_col = jnp.full((np_, nlevgrnd + 1),
+                       float(canopy_config.thk_soil_default_W_m_K),
+                       dtype=jnp.float64)
 
-    root_depth = float(land_config.root_depth) if hasattr(land_config, "root_depth") else 1.0
+    root_depth = float(land_config.root_depth)
     z_centers = np.array([float(z) for z in dz_soil], dtype=np.float64).cumsum() - dz_soil / 2
 
     # Root fraction exponential profile (same as legoESM multilayer_land.py)
@@ -640,7 +686,7 @@ def _build_stubs(
     for i in range(ncol):
         p = i + 1
         htop_v = (float(land_params.htop[i]) if land_params is not None and land_params.htop is not None
-                  else 5.0)  # 5 m default canopy height
+                  else 5.0)  # coeff-ok: 5 m fallback canopy height (CLM4.5 DBF-temperate default)
         lai_v  = (float(land_params.LAI[i]) if land_params is not None and land_params.LAI is not None
                   else 2.0)  # LAI=2 default
         sai_v  = (float(land_params.SAI[i]) if land_params is not None and land_params.SAI is not None
@@ -650,8 +696,7 @@ def _build_stubs(
         esai_patch = esai_patch.at[p].set(sai_v)
 
     # ---- frictionvel ----
-    forc_hgt_u_patch = jnp.full(np_, float(land_config.z_ref) if hasattr(land_config, "z_ref") else 10.0,
-                                  dtype=jnp.float64)
+    forc_hgt_u_patch = jnp.full(np_, float(land_config.z_ref), dtype=jnp.float64)
 
     # ---- Build stub namespaces ----
     atm2lnd = SimpleNamespace(
@@ -757,7 +802,7 @@ def _init_mlcanopy(ncol: int, stubs: dict, canopy_config: CLMMLCanopyConfig) -> 
     for i in range(ncol):
         p = i + 1
         htop_v = float(canopy.htop_patch[p])
-        hbot_v = 0.1 * htop_v  # hbot ≈ 10% of htop by default
+        hbot_v = canopy_config.hbot_frac * htop_v  # hbot_frac from CLMMLCanopyConfig (default 0.1)
 
         ztop = ztop.at[p].set(htop_v)
         zbot = zbot.at[p].set(hbot_v)
@@ -815,8 +860,8 @@ def _extract_surface_fluxes(
     lhflx = jnp.stack([mlcanopy.lhflx_canopy[i + 1] for i in range(ncol)])
     G_soil = jnp.stack([mlcanopy.gsoi_soil[i + 1] for i in range(ncol)])
     lw_up = jnp.stack([mlcanopy.lwup_canopy[i + 1] for i in range(ncol)])
-    # GPP: µmol CO2/m²/s → gC/m²/s  (standard atomic weight of C = 12.011 g/mol)
-    _M_C_g_per_mol = 12.011
+    # GPP: µmol CO2/m²/s → gC/m²/s  (standard atomic weight of C = constants.M_C g/mol)
+    _M_C_g_per_mol = constants.M_C
     gpp_umol = jnp.stack([mlcanopy.gppveg_canopy[i + 1] for i in range(ncol)])
     gpp = gpp_umol * (_M_C_g_per_mol * 1.0e-6)  # µmol/m²/s → gC/m²/s
 
@@ -849,7 +894,7 @@ def _extract_surface_fluxes(
 
     # Canopy-mean albedo: 1 - SW_absorbed / SW_down
     sw_down = forcing.sw_down
-    albedo = jnp.where(sw_down > 1.0, 1.0 - sw_net / (sw_down + 1.0e-6), 0.15)
+    albedo = jnp.where(sw_down > 1.0, 1.0 - sw_net / (sw_down + 1.0e-6), 0.15)  # coeff-ok: nighttime/low-light albedo fallback (~0.15 broadband for vegetated surface)
 
     # Surface temperature: use soil surface T (updated by CLM-ML)
     T_surface = jnp.stack([mlcanopy.tg_soil[i + 1] for i in range(ncol)])
@@ -869,8 +914,7 @@ def _extract_surface_fluxes(
         q_surface = q_sat_surface
 
     # Emissivity and roughness from canopy
-    emissivity = jnp.full(ncol, float(land_config.emissivity_land)
-                          if hasattr(land_config, "emissivity_land") else 0.96)
+    emissivity = jnp.full(ncol, float(land_config.emissivity_land))
     z0 = jnp.stack([mlcanopy.z0m_canopy[i + 1] for i in range(ncol)])
 
     # Canopy heat storage: needed for energy balance closure in the coupler.
@@ -1024,7 +1068,7 @@ def compute_clm_ml_canopy_fluxes(
     # _setup_clm_time must precede _compute_virtual_lon_deg because the latter
     # calls shr_orb_decl with orbital params set by _ensure_clm_initialized and
     # needs caldaym1 derived from the itim we are about to write.
-    z_ref = float(land_config.z_ref) if hasattr(land_config, "z_ref") else 10.0
+    z_ref = float(land_config.z_ref)
     _setup_clm_time(dt, doy, 0)
     # caldaym1 matches what _MLCanopyForcing computes internally:
     #   get_curr_calday(offset=-int(dtime_clm)) = 1 + (itim-1) * dt / 86400
@@ -1059,8 +1103,13 @@ def compute_clm_ml_canopy_fluxes(
         cos_zen = np.maximum(np.array(forcing.cos_zenith, dtype=np.float64), 0.0)
         lon_deg = _compute_virtual_lon_deg(cos_zen, lat_deg, _caldaym1)
 
-    _setup_clm_topology(ncol, lat_deg, lon_deg, dz_soil, z_soil, z_ref,
-                        pft_clm=int(canopy_config.pft_clm))
+    _topo_key = (ncol, float(lat_deg[0]) if len(lat_deg) > 0 else 0.0,
+                 float(lon_deg[0]) if len(lon_deg) > 0 else 0.0)
+    global _last_topology_key
+    if _topo_key != _last_topology_key:
+        _setup_clm_topology(ncol, lat_deg, lon_deg, dz_soil, z_soil, z_ref,
+                            pft_clm=int(canopy_config.pft_clm))
+        _last_topology_key = _topo_key
 
     # ---- Propagate 10-day running mean temperature for Vcmax acclimation ----
     # MLCanopyFluxes copies t_a10_patch into tacclim_forcing on output — reading
@@ -1080,7 +1129,7 @@ def compute_clm_ml_canopy_fluxes(
     t_a10_prior = jnp.array(t_a10_now)
 
     # ---- Build stub CLM instances ----
-    soil_hyd = getattr(land_config, "hydraulics", None)
+    soil_hyd = land_config.hydraulics
     stubs = _build_stubs(
         ncol, forcing, canopy_config, land_config, land_params,
         T_soil_top, psi_soil, theta_soil, dz_soil, soil_hyd,

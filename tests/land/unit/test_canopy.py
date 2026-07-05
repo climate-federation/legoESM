@@ -157,9 +157,9 @@ class TestCLMMLInterface(unittest.TestCase):
     def test_energy_balance_closure(self):
         """CLM-ML internal energy balance: Rnet = SH + LH + G + stflx_air + stflx_veg.
 
-        The complete CLM-ML identity includes canopy heat storage (stflx_air +
-        stflx_veg).  Testing the surface_out fields directly (before the coupler
-        stflx fold) requires including these terms in the residual.
+        stflx_air + stflx_veg are canopy heat storage terms internal to CLM-ML.
+        They are NOT folded into the coupler shflx (standard CLM-CAM convention).
+        The coupler sees a small per-step residual that averages to zero diurnally.
         """
         surface_out, _ = _call_interface()
         net_rad = surface_out.sw_net + surface_out.lw_net
@@ -173,7 +173,7 @@ class TestCLMMLInterface(unittest.TestCase):
         )
         max_res = float(jnp.max(residual))
         self.assertLess(
-            max_res, 50.0,   # loose on cold start; tightened in integration test
+            max_res, 10.0,   # cold-start residual; includes stflx_air + stflx_veg terms
             f"Energy balance residual too large: {max_res:.2f} W/m²",
         )
 
@@ -254,11 +254,15 @@ class TestCLMMLDifferentiability(unittest.TestCase):
         strict=True,
     )
     def test_grad_lhflx_wrt_T_lowest(self):
-        """jax.grad of sum(lhflx) w.r.t. T_lowest should run without error.
+        """Expected to fail: CLM-ML uses Python/NumPy control flow and is not JAX-differentiable.
 
-        The gradient flows only through the JAX-traced MLCanopyFluxes
-        computation; Python side-effect code (CLM global state setup) is
-        treated as a compile-time constant by JAX.
+        This test documents that ``jax.grad`` raises or produces wrong results
+        through the CLM-ML path, because the Fortran port uses ``float()`` on
+        traced arrays and Python control flow throughout its inner loops —
+        incompatible with JAX tracing.
+
+        If this test starts passing, CLM-ML-JAX has become JAX-compatible —
+        remove the xfail and add a proper gradient finite-difference check.
         """
         from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
         from legoesm.land.canopy.config import CLMMLCanopyConfig
@@ -334,14 +338,19 @@ class TestCLMMLIntegration(unittest.TestCase):
 
     @pytest.mark.timeout(120)
     def test_single_step_finite(self):
-        """One step with scheme='clm_ml' must produce finite TileResponse."""
+        """One step with scheme='clm_ml' must produce finite TileResponse.
+
+        Uses CHATS7 site geometry (38.47°N, California, May 1) so that the
+        solar zenith angle is physically consistent with the validation site.
+        """
         from legoesm.land.multilayer_land import step_multilayer_land
 
         state, config = self._make_state_and_config()
         forcing = _make_forcing(NCOL)
 
         new_state, response, _ = step_multilayer_land(
-            state, forcing, config, U_min=1.0, dt=1800.0)
+            state, forcing, config, U_min=1.0, dt=1800.0,
+            lat=jnp.full(NCOL, 38.47), doy=120.5)
 
         # Check TileResponse is finite
         for name in response._fields:
@@ -395,12 +404,19 @@ class TestCLMMLIntegration(unittest.TestCase):
         delta_w = jnp.sum((theta_final - theta0) * dz[None, :], axis=-1)
 
         # ET [m water equivalent]: lhflx / (Lv * rho_w)  summed over steps
-        Lv = 2.5e6   # J/kg
-        rho_w = 1000.0  # kg/m³
+        from legoesm import constants
+        Lv = constants.L_v
+        rho_w = constants.rho_water  # const-ok: standard liquid water density
         et_m = total_lhflx * dt / (Lv * rho_w)  # m over 24 h
 
-        # Water balance: delta_w + et_m + total_runoff × dt ~ 0 (no precip)
-        budget_residual = jnp.abs(delta_w + et_m)
+        # Runoff [m water equivalent]: (kg/m��/s × s) / (kg/m³) = m
+        # total_runoff accumulated per step (kg/m²/s), so convert: × dt / rho_w
+        runoff_m = total_runoff * dt / rho_w  # m over 24 h
+
+        # Water balance: Δsoil + ET + runoff ≈ precip (≈0 for dry forcing)
+        # Signs: delta_w = water gained (+), et_m = water lost to atmosphere (+),
+        # runoff_m = water lost through drainage (+).
+        budget_residual = jnp.abs(delta_w + et_m + runoff_m)
         max_res_mm = float(jnp.max(budget_residual)) * 1000.0
         self.assertLess(
             max_res_mm, 5.0,   # within 5 mm/day tolerance
@@ -743,44 +759,6 @@ class TestSolarGeometry(unittest.TestCase):
             )
             self.assertGreaterEqual(float(lon_out[i]), -180.0)
             self.assertLessEqual(float(lon_out[i]), 180.0)
-
-
-    def test_stflx_folded_into_reported_shflx(self):
-        """stflx_air + stflx_veg are folded into shflx in step_multilayer_land.
-
-        TileResponse.shflx must equal surface_out.shflx + stflx_air + stflx_veg
-        so the coupler energy budget Rnet = SH_reported + LH + G_soil closes.
-        """
-        import numpy as np
-        from legoesm.land.canopy.clm_ml_interface import _ensure_clm_initialized
-        from legoesm.land.multilayer_land import (
-            step_multilayer_land_with_diagnostics,
-            init_multilayer_land_state,
-        )
-        from legoesm.land.config import MultiLayerLandConfig
-        from legoesm.land.canopy.config import CLMMLCanopyConfig
-
-        _ensure_clm_initialized()
-        ncol = NCOL
-        config = MultiLayerLandConfig(surface_scheme=CLMMLCanopyConfig())
-        state = init_multilayer_land_state(ncol, config)
-        forcing = _make_forcing(ncol)
-
-        _, response, _, surface_out = step_multilayer_land_with_diagnostics(
-            state, forcing, config, U_min=0.1, dt=1800.0,
-            lat=jnp.full(ncol, 38.47), doy=120.5,
-        )
-
-        if surface_out.stflx_air is not None and surface_out.stflx_veg is not None:
-            expected_shflx = (surface_out.shflx
-                              + surface_out.stflx_air
-                              + surface_out.stflx_veg)
-            np.testing.assert_allclose(
-                np.array(response.shflx),
-                np.array(expected_shflx),
-                rtol=1e-6,
-                err_msg="TileResponse.shflx should equal shflx + stflx_air + stflx_veg",
-            )
 
 
 if __name__ == "__main__":

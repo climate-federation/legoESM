@@ -248,6 +248,12 @@ def _step_multilayer_land_impl(
         )
     elif isinstance(config.surface_scheme, CLMMLCanopyConfig):
         # CLM-ML-JAX multilayer canopy scheme (Phase 3 implementation).
+        # Architectural constraints:
+        #   1. NOT jax.jit-compatible — CLM-ML uses Python/NumPy control flow internally.
+        #   2. ``lon`` is not forwarded; a virtual longitude is inferred from
+        #      forcing.cos_zenith via CLM's shr_orb_cosz inversion for round-trip consistency.
+        #   3. ``canopy_state.t_a10_arr`` (np.ndarray, shape (ncol,)) carries the
+        #      10-day running-mean air temperature on the Python host between steps.
         # Lazy import keeps clm_ml_jax optional.
         from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
 
@@ -267,7 +273,7 @@ def _step_multilayer_land_impl(
             lat=lat,
             doy=doy,
         )
-    else:
+    elif isinstance(config.surface_scheme, SimpleSEBConfig):
         # SimpleSEB: bulk fluxes with skin T = T_soil[:, 0].
         surface_out = compute_simple_seb_fluxes(
             T_surface=T_surface,
@@ -285,20 +291,21 @@ def _step_multilayer_land_impl(
             emissivity=emissivity,
             z0=z0,
         )
+    else:
+        raise ValueError(
+            f"Unknown surface_scheme type: {type(config.surface_scheme)!r}. "
+            f"Expected TwoLeafCanopyConfig, CLMMLCanopyConfig, or SimpleSEBConfig."
+        )
 
     # =================================================================
     # Shared post-flux pipeline
     # =================================================================
     shflx = surface_out.shflx
-    # CLM-ML tracks transient canopy heat storage (stflx_air + stflx_veg)
-    # separately from the aerodynamic SH to the atmosphere.  Fold these
-    # into the reported shflx so the coupler's energy budget closes:
-    #   Rnet = SH_reported + LH + G_soil  (per timestep)
-    # Magnitude is small (~1–10 W/m²) relative to typical SH (50–200 W/m²).
-    if (isinstance(config.surface_scheme, CLMMLCanopyConfig)
-            and surface_out.stflx_air is not None
-            and surface_out.stflx_veg is not None):
-        shflx = shflx + surface_out.stflx_air + surface_out.stflx_veg
+    # stflx_air + stflx_veg (CLM-ML canopy heat storage) are intentionally
+    # NOT folded into shflx.  They are internal canopy redistribution terms,
+    # not turbulent SH going to the atmosphere.  Standard CLM-CAM coupling
+    # reports eflx_sh_tot = shflx_canopy without stflx (Bonan et al. 2021).
+    # The coupler sees a small per-step residual that integrates to zero diurnally.
     lhflx = surface_out.lhflx
     tau_x = surface_out.tau_x
     tau_y = surface_out.tau_y

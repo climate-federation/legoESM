@@ -87,6 +87,12 @@ docs/references/
 src/legoesm/ml/data/**
 !src/legoesm/ml/data/**/
 !src/legoesm/ml/data/**/*.py
+
+# CLM-ML-JAX checkout and runtime output directories (not part of the legoESM package)
+clm-ml-jax/
+docs/output_files_clm_ml-v2/
+validation_output/
+
 .claude/worktrees/serene-perlman/
 .claude/worktrees/agent-a5afdce4/
 ralph-claude-code/

@@ -30,6 +30,12 @@ JAX_DIR = REPO_ROOT / "clm-ml-jax" / "src" / "output_files" / "JAX_outputs_05_20
 OUT_DIR = REPO_ROOT / "validation_output"
 OUT_DIR.mkdir(exist_ok=True)
 
+if not REF_DIR.exists():
+    raise FileNotFoundError(
+        f"Reference output directory not found: {REF_DIR}\n"
+        "Run the Fortran CLM-ML v2 standalone first and copy outputs here."
+    )
+
 MONTH_TAG = "CHATS7_2007-05"
 
 # ---------------------------------------------------------------------------
