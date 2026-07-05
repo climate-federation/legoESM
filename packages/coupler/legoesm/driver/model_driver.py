@@ -5615,15 +5615,27 @@ class ModelDriver:
     # ==================================================================
 
     def _latlon_spmd_mesh(self):
-        """Build the 1-D ``("lat",)`` device mesh for the single-process
-        multi-device lat-band SPMD run from ``config.n_devices`` (``"auto"`` =
-        all visible devices). Returns ``None`` for a single device (the
-        run_atm_latlon_spmd mesh=None single-device fallback)."""
+        """Build the 1-D ``("lat",)`` device mesh for the multi-device lat-band
+        SPMD run from ``config.n_devices`` (``"auto"`` = all visible devices).
+        Returns ``None`` for a single device (the run_atm_latlon_spmd mesh=None
+        single-device fallback).
+
+        Under route-B multicontroller (``jax.process_count() > 1``, after
+        ``init_multicontroller_distributed``) ``jax.devices()`` is the GLOBAL
+        device list; the mesh must span ALL of them (one band per device across
+        every process) — a strict subset would leave some processes' devices out
+        of the program (non-addressable participation hazard)."""
         import numpy as _np
         nd_cfg = self.config.n_devices
         devs = jax.devices()
         nd = len(devs) if nd_cfg == "auto" else int(nd_cfg)
         nd = max(1, min(nd, len(devs)))
+        if jax.process_count() > 1 and nd != len(devs):
+            raise ValueError(
+                f"--multicontroller (route-B) uses ALL {len(devs)} global "
+                f"devices across {jax.process_count()} processes; "
+                f"n_devices={nd_cfg!r} selects {nd} — set n_devices='auto' "
+                f"or {len(devs)}.")
         if nd <= 1:
             return None
         n_lat = int(self.grid.n_lat)
@@ -5802,9 +5814,17 @@ class ModelDriver:
         from legoesm.core.conservation import (
             compute_global_moisture, global_area_sum,
         )
+        from legoesm.parallel.latlon_spmd import replicate_leaf
 
         cfg = self.config
         n_dev = mesh.devices.size
+        # Route-B multicontroller (jax.distributed cross-process NCCL): the mesh
+        # spans devices across processes. ``_mp`` gates the cross-process gather
+        # (replicate_leaf's jit-identity all-gather vs the single-process
+        # device_put) and the rank-0 log gating; both are no-ops when
+        # process_count()==1 (single-controller / serial), so never-regress.
+        _mp = jax.process_count() > 1
+        _io_rank = jax.process_index() == 0
 
         # --- Refusals: the carry has no lat-band partition spec for these ---
         if self._ensemble_size > 1:
@@ -5932,6 +5952,13 @@ class ModelDriver:
         )
         carry = shard_operator_split_carry(carry, mesh)
 
+        if _io_rank:
+            _lane = "route-B multicontroller" if _mp else "single-controller"
+            logger.info(
+                "operator-split SPMD (%s): lat-band sharded over %d device(s) "
+                "across %d process(es) (%s).",
+                _lane, n_dev, jax.process_count(), jax.default_backend())
+
         # Per-segment external forcing: seg 0 of a FRESH run uses the START_DAY
         # precompute in ctx (byte-faithful to _run_compiled); later segments (or
         # a resumed run) re-sample at the segment-end day.
@@ -5986,14 +6013,19 @@ class ModelDriver:
                 carry = sharded_step(carry, forcing)
             if seg_idx == 0:
                 jax.block_until_ready(carry.u)
-                logger.info("  operator-split SPMD segment 0 (incl. JIT) in "
-                            "%.1fs", time.time() - _t_jit)
+                if _io_rank:
+                    logger.info("  operator-split SPMD segment 0 (incl. JIT) in "
+                                "%.1fs", time.time() - _t_jit)
             current_step += seg_steps
 
-            # Gather a cell-centered COPY (replicate every leaf) for the callback
-            # + blow-up guard; the sharded carry continues the integration.
+            # Gather the sharded carry to a replicated cell-centered copy for
+            # the callback + NaN guard.  ``replicate_leaf`` is the shared gather
+            # primitive: single-process -> jax.device_put (byte-identical);
+            # route-B (``_mp``) -> a jit-identity with replicated out_shardings
+            # (the supported cross-process all-gather — a top-level device_put
+            # cannot reshard shards living on other processes' devices).
             carry_full = jax.tree.map(
-                lambda x: jax.device_put(x, rep), carry)
+                lambda x: replicate_leaf(x, rep, multiprocess=_mp), carry)
             state, self.q_v, self.q_c, self.q_r = unpack_carry(
                 carry_full, self.state)[:4]
             self.state = state
@@ -6012,9 +6044,13 @@ class ModelDriver:
             finite = bool(jnp.isfinite(state.p_s.data).all()
                           & jnp.isfinite(state.T.data).all())
             if not finite:
+                # ``finite`` reads the REPLICATED gathered state, so every rank
+                # sees the identical verdict and returns in lockstep (no
+                # process_allgather needed — unlike a per-rank wallclock timer).
                 status = f"BLOWUP at step {current_step}"
-                logger.info("operator-split SPMD run: %s (%.1fs)",
-                            status, time.time() - t0)
+                if _io_rank:
+                    logger.info("operator-split SPMD run: %s (%.1fs)",
+                                status, time.time() - t0)
                 return status
             # current_step == seg_end_step now, so ``day`` is the segment-end day.
             self._current_day = day
@@ -6048,8 +6084,18 @@ class ModelDriver:
                             _fold[_nm] = jax.device_put(_sv, _cv.sharding)
                 carry = carry._replace(**_fold)
 
-        logger.info("operator-split SPMD run: %s, %d steps (%.1fs)",
-                    status, n_steps_total - start_step, time.time() - t0)
+        if _io_rank:
+            # Rank-0 completion summary. self.state is the last segment's
+            # REPLICATED gathered copy, so the max reductions are valid on any
+            # rank; the selfspawn route-B gate greps this line + the finite
+            # magnitudes to confirm the federation integrated without a hang.
+            _maxT = float(jnp.abs(self.state.T.data).max())
+            _maxU = float(jnp.abs(self.state.u.data).max())
+            logger.info(
+                "operator-split SPMD run: %s, %d steps, %d device(s) / %d "
+                "process(es), max|T|=%.3f max|u|=%.3f (%.1fs)",
+                status, n_steps_total - start_step, n_dev,
+                jax.process_count(), _maxT, _maxU, time.time() - t0)
         return status
 
     def _prepare_run_context(self, start_step, start_day, restore_carry=False):
