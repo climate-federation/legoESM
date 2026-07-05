@@ -179,6 +179,15 @@ class DycoreConfig(NamedTuple):
     # (including ``ssp_rk3`` on MPAS) is forwarded verbatim, so
     # deliberate integrator-sensitivity runs are still possible.
     time_integrator: str = "ssp_rk3"
+    # #771: transport the (attached) moisture tracers horizontally with the
+    # mass-conserving flux-form post-RK3 substep instead of the in-RK3 advective
+    # -(u·∇q).  Fixes the cube column-water non-conservation / day-150 blow-up.
+    # Only takes effect on the cubed_sphere cdgrid PE dycore AND with moisture
+    # attached (``ExperimentConfig.moisture_advection=True``).  EXPERIMENTAL,
+    # default off (advective path bit-exact); serial-only (fail-closed under MPI
+    # face-scatter until the reductions are allreduce-aware).  Appended last to
+    # preserve positional ABI.
+    moisture_flux_form: bool = False
 
 
 class EvaluationConfig(NamedTuple):

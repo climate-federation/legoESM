@@ -15,6 +15,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from types import SimpleNamespace
+
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.core.field import Field
@@ -23,6 +25,28 @@ from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationModel,
     CDGridPrimitiveEquationConfig,
 )
+
+
+def test_flux_form_scatter_guard_predicate():
+    """The fail-closed predicate: refuse cube face-scatter / SPMD face-shard
+    (rank/shard-local flux-form reductions) but NOT replicated / single-rank."""
+    f = CDGridPrimitiveEquationModel._flux_form_scatter_blocked
+    _topo3 = SimpleNamespace(local_face_ids=(0, 1, 2))   # rank owns 3 of 6 faces
+    _topo6 = SimpleNamespace(local_face_ids=(0, 1, 2, 3, 4, 5))
+    _band = SimpleNamespace(band_id=0)                   # lat-lon: no faces attr
+    # Genuinely scattered: <6 owned faces AND state sliced to them (lead==3).
+    assert f("mpi", _topo3, None, 3) is True
+    # Replicated cube MPI: <6 owned faces but FULL 6-face state (lead==6).
+    assert f("mpi", _topo3, None, 6) is False
+    # Single-rank MPI: owns all 6 faces.
+    assert f("mpi", _topo6, None, 6) is False
+    # Serial / local backend.
+    assert f("local", None, None, 6) is False
+    # Lat-lon band MPI (no local_face_ids) must not false-positive.
+    assert f("mpi", _band, None, 96) is False
+    # SPMD with an active mesh -> fail-closed; without a mesh -> allowed.
+    assert f("spmd", None, object(), 6) is True
+    assert f("spmd", None, None, 6) is False
 
 
 def _model(n, nlev, flux_form):
@@ -62,16 +86,19 @@ def _run(flux_form, n=24, nlev=8, nsteps=10, dt=120.0):
     state = _divergent_state(n, nlev)
     w0 = _column_water(model, sigma, state)
     min_q = 1.0e9
+    max_drift = 0.0
     for _ in range(nsteps):
         state = model.step(state, dt)
         min_q = min(min_q, float(jnp.min(state.tracers["q_v"].data)))
-    drift = abs(_column_water(model, sigma, state) - w0) / w0
-    return drift, min_q
+        max_drift = max(
+            max_drift, abs(_column_water(model, sigma, state) - w0) / w0)
+    final_drift = abs(_column_water(model, sigma, state) - w0) / w0
+    return final_drift, min_q, max_drift
 
 
 def test_flux_form_conserves_and_stays_positive():
-    drift_adv, minq_adv = _run(flux_form=False)
-    drift_ff, minq_ff = _run(flux_form=True)
+    drift_adv, minq_adv, _ = _run(flux_form=False)
+    drift_ff, minq_ff, _ = _run(flux_form=True)
 
     # Advective drifts substantially (the #771 non-conservation) and clips to 0.
     assert drift_adv > 1e-4, f"advective drift unexpectedly small: {drift_adv:.2e}"
@@ -83,6 +110,27 @@ def test_flux_form_conserves_and_stays_positive():
     assert drift_ff < 1e-4, f"flux-form drift too large: {drift_ff:.2e}"
     assert minq_ff > -1e-12, \
         f"flux-form produced spurious negatives: {minq_ff:.2e}"
+
+
+@pytest.mark.slow
+def test_flux_form_conservation_is_bounded_not_accumulating():
+    """The #771 acceptance property, over a longer run: the advective form
+    ACCUMULATES column-water error (final ≈ max — the monotone day-150 drift),
+    while flux-form stays BOUNDED (max drift small, no runaway) and positive.
+    A single-step or short run cannot distinguish transient from accumulating
+    drift; this gate can.  (Serial-only; the scattered/SPMD path is fail-closed
+    until the flux-form reductions are allreduce-aware — #771 follow-up.)"""
+    final_adv, _minq_adv, max_adv = _run(flux_form=False, nsteps=40)
+    final_ff, minq_ff, max_ff = _run(flux_form=True, nsteps=40)
+    # Advective ACCUMULATES: final drift is large and ≈ its max (monotone growth,
+    # not a transient), and it clips.
+    assert final_adv > 1e-2, f"advective should accumulate: {final_adv:.2e}"
+    assert final_adv > 0.5 * max_adv
+    # Flux-form BOUNDED (no runaway), >= ~20x better, and never negative.
+    assert max_ff < 1e-3, f"flux-form max drift not bounded: {max_ff:.2e}"
+    assert max_ff < max_adv / 20.0, \
+        f"flux-form max {max_ff:.2e} not << advective max {max_adv:.2e}"
+    assert minq_ff > -1e-12, f"flux-form went negative: {minq_ff:.2e}"
 
 
 def test_flux_form_off_is_the_advective_path():

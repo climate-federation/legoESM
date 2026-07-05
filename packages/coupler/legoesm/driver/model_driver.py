@@ -5917,6 +5917,13 @@ class ModelDriver:
             held_lw_up_toa=ctx["held_lw_up_toa"],
             held_sw_down_toa=ctx["held_sw_down_toa"],
             step_index=start_step,
+            # Seed the lagged convective-cloud precip (radiation runs before
+            # convection). _run_compiled seeds this too; without it a restart
+            # with active convection would run the first SPMD step on the
+            # pack_carry default (zeros) while serial uses the restored lag
+            # (codex #789-F2).  Ensembles are refused above, so the single-member
+            # path is unconditional (matches _run_compiled's ensemble_size==1 arm).
+            conv_precip_prev=getattr(self, "_conv_precip_prev", None),
             target_moisture=_target_moisture, target_mass=_target_mass,
             precip_accum=jnp.zeros(shape_2d, dtype=_sd),
             T_land=ctx["T_land"], w_land=ctx["w_land"], snow=ctx.get("snow"),
@@ -6021,7 +6028,7 @@ class ModelDriver:
                 # a no-op resharding of identical values when the callback does
                 # not mutate.  The non-driver carry fields (held radiation, tke,
                 # conv_prog) keep their threaded sharded values.
-                carry = carry._replace(
+                _fold = dict(
                     u=jax.device_put(self.state.u.data, carry.u.sharding),
                     v=jax.device_put(self.state.v.data, carry.v.sharding),
                     T=jax.device_put(self.state.T.data, carry.T.sharding),
@@ -6029,6 +6036,17 @@ class ModelDriver:
                     q_v=jax.device_put(self.q_v, carry.q_v.sharding),
                     q_c=jax.device_put(self.q_c, carry.q_c.sharding),
                     q_r=jax.device_put(self.q_r, carry.q_r.sharding))
+                # Double-moment tracers: a DA/coupling callback may nudge
+                # self.tracers[q_i…N_i]; fold those back too (same repack-from-self
+                # _run_compiled does), else a double-moment run diverges after a
+                # tracer-mutating callback (codex #789-F4).  Only carry-threaded
+                # (non-None) fields are re-shardable.
+                if isinstance(self.tracers, dict):
+                    for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                        _cv, _sv = getattr(carry, _nm), self.tracers.get(_nm)
+                        if _cv is not None and _sv is not None:
+                            _fold[_nm] = jax.device_put(_sv, _cv.sharding)
+                carry = carry._replace(**_fold)
 
         logger.info("operator-split SPMD run: %s, %d steps (%.1fs)",
                     status, n_steps_total - start_step, time.time() - t0)

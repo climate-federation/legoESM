@@ -1371,6 +1371,39 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             state, dt, physics_fn=physics_fn, target_mass=target_mass,
             phys_state=phys_state)
 
+    @staticmethod
+    def _flux_form_scatter_blocked(backend, topo, spmd_mesh, state_lead) -> bool:
+        """True iff the ``moisture_flux_form`` substep must fail-closed (#771).
+
+        ``flux_form_tracer_step`` (and ``transport_step`` + the reconcile fixer)
+        do their mass conservation with a rank/shard-LOCAL ``jnp.sum``, which is
+        the true global sum ONLY when a rank holds the full 6-face cube.
+
+        * MPI: ``initialize_distributed`` runs for ANY cube MPI run, so a rank's
+          topology can report ``< 6`` owned faces even in REPLICATED dynamics —
+          which keeps the FULL ``(6, …)`` state and whose local sum IS the global
+          sum.  Disambiguate by the state's leading FACE dim exactly as
+          ``core.conservation._total_area``: genuinely scattered ⟺ the topology
+          owns ``< 6`` faces AND the state is sliced to those faces
+          (``state_lead == n_local``).  Replicated keeps ``state_lead == 6`` and
+          is left running; single-rank has ``n_local == 6``.
+        * SPMD: fail-closed whenever a mesh is active — over-conservative (GSPMD
+          may auto-reduce a top-level ``jnp.sum`` over the sharded face axis) but
+          safe, and ``moisture_flux_form`` (default off) is unvalidated across
+          face shards.
+
+        Extracted + pure so the guard is unit-tested (a prefix/shape rename then
+        breaks the test loudly instead of silently disabling the guard).
+        """
+        if backend == "mpi":
+            if topo is not None and hasattr(topo, "local_face_ids"):
+                n_local = len(topo.local_face_ids)
+                return n_local < 6 and state_lead == n_local
+            return False
+        if backend == "spmd" and spmd_mesh is not None:
+            return True
+        return False
+
     def _flux_form_moisture_substep(self, state_in, state_out, dt):
         """#771: mass-conserving flux-form HORIZONTAL tracer transport as a
         post-RK3 substep.
@@ -1409,6 +1442,24 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             flux_form_tracer_step,
         )
         from legoesm.core.conservation import conservation_accumulator
+
+        # FAIL-CLOSED under cubed-sphere face-scatter / SPMD face-sharding — the
+        # flux-form mass reductions are rank/shard-LOCAL (see the predicate).
+        # Static-config check at trace time (globals + static shape), so the
+        # raise is a hard compile-time refusal, not traced control flow.
+        from legoesm.grids.halo import (
+            get_halo_backend, get_mpi_topology, get_spmd_mesh,
+        )
+        if self._flux_form_scatter_blocked(
+                get_halo_backend(), get_mpi_topology(), get_spmd_mesh(),
+                state_out.u_d.data.shape[0]):
+            raise NotImplementedError(
+                "moisture_flux_form is not supported under cubed-sphere "
+                "face-scatter / SPMD face-sharding: the flux-form "
+                "mass-conservation reductions are rank/shard-LOCAL, so they "
+                "would silently break global moisture conservation. Run "
+                "replicated / single-rank, or await the allreduce-aware "
+                "flux-form reductions (#771 follow-up).")
 
         cdgrid = self.cdgrid
         sigma = self.sigma_coord
