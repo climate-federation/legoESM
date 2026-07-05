@@ -25,8 +25,14 @@ logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 
 # Early JAX distributed init — must happen before any legoESM/JAX import that
 # triggers XLA backend discovery (jax.numpy import in core/precision.py).
+# Route-B multicontroller (--multicontroller) initializes jax.distributed in
+# main() via init_multicontroller_distributed's explicit --coordinator path (a
+# direct jax.distributed.initialize, no mpi4py); skip this import-time MPI
+# auto-detect for it — it would try to load libmpi before argv is parsed and
+# hard-crash on a node without a loadable MPI library (verified).
 from legoesm.parallel.early_init import maybe_init_jax_distributed
-maybe_init_jax_distributed()
+if "--multicontroller" not in sys.argv:
+    maybe_init_jax_distributed()
 
 from legoesm import constants
 from legoesm.driver.config import (
@@ -946,10 +952,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
               "scripts/validate/validate_driver_cs_spmd_parity.py."))
     parser.add_argument(
         "--enable-latlon-spmd", action="store_true", default=False,
-        help=("Single-process multi-device lat-BAND SPMD for the lat-lon C-grid "
-              "dycore (A1). Requires --grid-type latlon, n_lat %% n_devices == 0, "
-              "and dynamics-only or --held-suarez physics (stateful physics not "
-              "yet SPMD-routed). Distinct from --distributed (MPI)."))
+        help=("Multi-device lat-BAND SPMD for the lat-lon C-grid dycore (A1). "
+              "Requires --grid-type latlon, n_lat %% n_devices == 0. Runs the "
+              "operator-split unified physics (or dynamics-only / --held-suarez) "
+              "band-local. Single-process by default; add --multicontroller for "
+              "the multi-node route-B lane. Distinct from --distributed (MPI)."))
+    parser.add_argument(
+        "--multicontroller", action="store_true", default=False,
+        help=("Promote --enable-latlon-spmd to ROUTE-B (jax.distributed, "
+              "cross-process NCCL): the lat-band operator-split atm step runs "
+              "one band per device across ALL processes (the multi-node lane). "
+              "Requires --enable-latlon-spmd; launch under mpiexec/srun and pass "
+              "--coordinator (or rely on SLURM/OMPI auto-detect)."))
+    parser.add_argument(
+        "--coordinator", type=str, default=None,
+        help=("jax.distributed coordinator address (host:port) for "
+              "--multicontroller under mpiexec (reads Open MPI OMPI_* / Cray "
+              "PALS PMI_* rank env); omit for SLURM/OMPI auto-detect."))
     parser.add_argument("--ensemble-size", type=int, default=1)
     # Issue #273 follow-up: opt-in horizontal-column sharding for the
     # per-column radiation kernel.  Decouples per-column physics
@@ -1180,7 +1199,12 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
     # only treat it as an MPI signal when > 1 actual tasks are allocated.
     _slurm_ntasks = int(os.environ.get("SLURM_NTASKS", "1"))
     _mpi_env_vars = {"OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "MPI_LOCALNRANKS"}
-    if not args.distributed and (
+    # Route-B multicontroller (--multicontroller) also launches under mpiexec/srun
+    # (so the SAME MPI env vars are present), but it federates via jax.distributed
+    # driven by the lat-band SPMD lane — NOT the MPI/mpi4jax ``distributed`` path.
+    # Its ``distributed`` MUST stay False (else config.validate_strict rejects
+    # enable_latlon_spmd + distributed as mutually exclusive).
+    if not args.distributed and not getattr(args, "multicontroller", False) and (
         any(key in os.environ for key in _mpi_env_vars)
         or _slurm_ntasks > 1
     ):
@@ -1664,6 +1688,19 @@ def main(argv: list[str] | None = None):
 
     args = parser.parse_args(argv)
     args = _postprocess_args(args, parser)
+
+    # Route-B multicontroller: initialize jax.distributed BEFORE any device work
+    # (ModelDriver/setup query devices; a jax op before init makes
+    # jax.distributed.initialize raise "must be called before backend init").
+    # The explicit --coordinator path reads OMPI_/PMI_ rank env and calls
+    # jax.distributed.initialize directly (no mpi4py); --coordinator omitted
+    # falls back to SLURM/OMPI auto-detect. No-op unless --multicontroller.
+    if getattr(args, "multicontroller", False):
+        if not getattr(args, "enable_latlon_spmd", False):
+            parser.error("--multicontroller requires --enable-latlon-spmd (it "
+                         "is the route-B transport for the lat-band SPMD lane).")
+        from legoesm.parallel.early_init import init_multicontroller_distributed
+        init_multicontroller_distributed(getattr(args, "coordinator", None))
 
     # --aimip-classical-checkpoint: seed the classical physics with the AIMIP
     # best-fit trained params used as INITIAL values (forces the trained scheme
