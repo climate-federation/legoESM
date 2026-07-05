@@ -96,11 +96,16 @@ loss:
   w_crps_v: 0.25
   w_crps_q: 0.5
   w_crps_ps: 0.15
-  # Spectral-space deterministic CRPS for T/u/v/q (needs JAX_ENABLE_X64).
-  w_spec_crps_T: 0.5
-  w_spec_crps_u: 0.25
-  w_spec_crps_v: 0.25
-  w_spec_crps_q: 0.5
+  # Spectral-space deterministic CRPS: DISABLED for the T63 screen. It adds an
+  # SH analysis into the multi-step BACKWARD pass, which exploded the T63
+  # jit__train_step compile (>3h, hung -- canary 8832697). ACE2 (which ran
+  # T63+RRTMGP+[6,12]) omits it too. Grid-space CRPS below is kept (cheap, M=1
+  # = area-weighted MAE), so the objective is still forecast RMSE+CRPS. The
+  # winner re-enables spectral CRPS in Stage 2 (one config, compile cached).
+  w_spec_crps_T: 0.0
+  w_spec_crps_u: 0.0
+  w_spec_crps_v: 0.0
+  w_spec_crps_q: 0.0
   # Multi-step FORECAST supervision: chained 6h rollouts (2-step screen).
   multi_step_hours: [6, 12]
   multi_step_weights: [1.0, 1.0]
