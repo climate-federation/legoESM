@@ -111,12 +111,15 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
         mean_loss = sum(losses) / max(len(losses), 1)
         history.append(mean_loss)
         if on_epoch is not None:
-            on_epoch(epoch, mean_loss)
+            on_epoch(epoch, mean_loss, params, opt_state)   # CURRENT params (not a stale closure)
     return params, opt_state, history
 
 
 # ======================================================================
 # Multi-GPU-PER-PROCESS sub-case: average across a process's LOCAL devices.
+# STRICTLY local-device only -- does NOT average across MPI ranks/processes. For
+# multi-node (1 GPU/rank) use the mpi_data_parallel_* path above. Composing the
+# two (local pmean THEN cross-rank all_reduce_grad_mean) is possible but unused.
 # ======================================================================
 
 def data_parallel_value_and_grad(loss_fn, params, batched_args):
@@ -179,5 +182,5 @@ def data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
         mean_epoch_loss = sum(epoch_losses) / max(len(epoch_losses), 1)
         history.append(mean_epoch_loss)
         if on_epoch is not None:
-            on_epoch(epoch, mean_epoch_loss)
+            on_epoch(epoch, mean_epoch_loss, params, opt_state)   # CURRENT params
     return params, opt_state, history

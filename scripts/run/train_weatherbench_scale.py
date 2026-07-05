@@ -70,12 +70,25 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
 
 
 def _mpi_rank_size():
-    """(rank, num_processes) from MPI if launched under mpirun/srun, else (0, 1)."""
+    """(rank, num_processes) from MPI. RAISES if a multi-rank launcher is present
+    but mpi4py init fails -- otherwise every rank would silently train
+    independently (no cross-rank gradient average). Returns (0, 1) only when no
+    multi-rank launcher is detected."""
+    import os
+    launcher = 1
+    for v in ("SLURM_NTASKS", "PMI_SIZE", "OMPI_COMM_WORLD_SIZE", "MPI_LOCALNRANKS"):
+        val = os.environ.get(v, "")
+        if val.isdigit():
+            launcher = max(launcher, int(val))
     try:
         from mpi4py import MPI
         comm = MPI.COMM_WORLD
         return comm.Get_rank(), comm.Get_size()
-    except Exception:
+    except Exception as exc:
+        if launcher > 1:
+            raise RuntimeError(
+                f"multi-rank launcher detected (size={launcher}) but mpi4py init failed "
+                f"({exc}); gradients would NOT be averaged across ranks -- aborting") from exc
         return 0, 1
 
 
@@ -115,6 +128,10 @@ def main(argv=None):
     from legoesm.training.scale_build import load_era5_samples
     samples = load_era5_samples(cfg, yml, grid, sigma)          # list of (ic, target, forcing)
     local = shard_samples(samples, rank, nproc)
+    if nproc > 1 and len(local) == 0:
+        raise RuntimeError(
+            f"rank {rank}: empty local shard (global samples={len(samples)} < ranks={nproc}); "
+            "reduce ranks or add training data")
     log.info("ERA5 samples: %d global, %d local/rank", len(samples), len(local))
 
     # --- data-parallel loss over Equinox array-leaves ---
@@ -138,11 +155,11 @@ def main(argv=None):
     import os
     os.makedirs(cfg.out_dir, exist_ok=True)
 
-    def on_epoch(epoch, mean_loss):
+    def on_epoch(epoch, mean_loss, cur_arr, cur_opt_state):
         if rank == 0:
             log.info("Epoch %4d: loss=%.6f", epoch, mean_loss)
             path = os.path.join(cfg.out_dir, f"epoch_{epoch:04d}.eqx")
-            eqx.tree_serialise_leaves(path, eqx.combine(arr, static))
+            eqx.tree_serialise_leaves(path, eqx.combine(cur_arr, static))  # CURRENT params
 
     arr, opt_state, history = mpi_data_parallel_training_loop(
         loss_fn, arr, opt_state, optimizer, local, cfg.n_epochs, nproc, on_epoch=on_epoch)

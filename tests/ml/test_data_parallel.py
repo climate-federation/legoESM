@@ -78,6 +78,24 @@ def test_all_reduce_grad_mean_single_process_identity():
     assert float(out["b"]) == 3.0
 
 
+def test_mpi_loop_on_epoch_receives_current_params():
+    # regression: on_epoch must get the CURRENT params (not the stale initial closure).
+    w = jnp.array([2.0, 3.0])
+    optimizer = optax.sgd(0.1)
+    opt_state = optimizer.init(w)
+
+    def loss(p, x):
+        return jnp.sum((p * x) ** 2)
+
+    captured = []
+    mpi_data_parallel_training_loop(
+        loss, w, opt_state, optimizer, [jnp.array([1.0, 1.0])], n_epochs=3,
+        num_processes=1, on_epoch=lambda e, l, params, ost: captured.append(np.asarray(params).copy()))
+    assert len(captured) == 3
+    assert not np.allclose(captured[0], captured[-1])       # params evolve across epochs
+    assert not np.allclose(captured[-1], np.asarray(w))     # final != initial (not stale)
+
+
 def test_mpi_loop_single_process_reduces_loss():
     w = jnp.array([2.0, 3.0])
     optimizer = optax.sgd(0.05)
