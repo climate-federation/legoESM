@@ -1,0 +1,107 @@
+"""Data-parallel training: replicate the model across ranks, shard the ERA5
+batch, average gradients each step.
+
+Wraps the single-device per-sample training step (``training_driver``) in a
+data-parallel layer so N ranks (1 GPU each) train the SAME replicated model on
+DISTINCT ERA5 shards, averaging gradients every step. Because every rank applies
+the identical averaged gradient, the replicas stay in sync without broadcasting
+weights.
+
+Multi-process is via ``jax.distributed`` (armed in the entry BEFORE any
+``jax.numpy`` import). The cross-device gradient average uses the same collective
+idiom the repo already uses spatially: ``jax.lax.pmean(x, axis_name)`` inside a
+``jax.pmap(..., axis_name="data")`` — process-transparent under ``jax.distributed``.
+
+The gradient-average helper is validated by a 2-CPU-device equivalence test
+(``tests/ml/test_data_parallel.py``) BEFORE any GPU-hours: the data-parallel mean
+gradient must match a serial batch-mean gradient bit-closely.
+"""
+from __future__ import annotations
+
+__all__ = [
+    "shard_samples",
+    "data_parallel_value_and_grad",
+    "data_parallel_training_loop",
+]
+
+
+def shard_samples(items, process_id, num_processes, *, drop_remainder=True):
+    """Contiguous, disjoint, equal split of a sample list across ranks.
+
+    With ``drop_remainder`` (default) every rank gets ``len(items)//num_processes``
+    items so collectives stay balanced (an unequal split would deadlock a pmean).
+    Single process -> identity.
+    """
+    n = len(items)
+    if num_processes <= 1:
+        return list(items)
+    if drop_remainder:
+        per = n // num_processes
+    else:
+        per = -(-n // num_processes)  # ceil
+    start = process_id * per
+    return list(items[start:start + per])
+
+
+def data_parallel_value_and_grad(loss_fn, params, batched_args):
+    """Per-device ``value_and_grad`` of ``loss_fn(params, x)`` over the leading
+    axis of ``batched_args``, mean-reduced across devices.
+
+    ``batched_args`` has a leading axis of size ``jax.local_device_count()`` (one
+    sample slice per device). Returns ``(mean_loss, mean_grad)`` with the gradient
+    averaged across ALL devices (and, under ``jax.distributed``, all processes).
+
+    Single-device -> serial mean over the batch axis (no pmap), so the same code
+    path runs on one GPU or a laptop.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    n_dev = jax.local_device_count()
+
+    if n_dev == 1:
+        # serial: vmap value_and_grad over the batch axis, mean-reduce
+        losses, grads = jax.vmap(
+            jax.value_and_grad(loss_fn), in_axes=(None, 0))(params, batched_args)
+        mean_grad = jax.tree_util.tree_map(lambda g: jnp.mean(g, axis=0), grads)
+        return jnp.mean(losses), mean_grad
+
+    def _step(p, x):
+        loss, grad = jax.value_and_grad(loss_fn)(p, x)
+        return jax.lax.pmean(loss, "data"), jax.lax.pmean(grad, "data")
+
+    # params replicated across the device axis; x already sharded along it
+    p_rep = jax.tree_util.tree_map(
+        lambda a: jnp.broadcast_to(a, (n_dev,) + jnp.shape(a)), params)
+    losses, grads = jax.pmap(_step, axis_name="data")(p_rep, batched_args)
+    # pmean made every device identical -> take device 0
+    return losses[0], jax.tree_util.tree_map(lambda g: g[0], grads)
+
+
+def data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
+                                sample_batches, n_epochs, *, on_epoch=None):
+    """Data-parallel training over ``sample_batches`` for ``n_epochs``.
+
+    Each batch has a leading device axis (``jax.local_device_count()``). Per step:
+    average the gradient across devices/ranks, then ``optimizer.update`` +
+    ``apply_updates`` — identical on every rank, so replicas stay in sync.
+
+    ``on_epoch(epoch, mean_loss)`` is called once per epoch (rank-0 logging /
+    checkpointing belongs there). Returns ``(params, opt_state, history)``.
+    """
+    import optax
+
+    history = []
+    for epoch in range(n_epochs):
+        epoch_losses = []
+        for batched_args in sample_batches:
+            mean_loss, mean_grad = data_parallel_value_and_grad(
+                loss_fn, params, batched_args)
+            updates, opt_state = optimizer.update(mean_grad, opt_state, params)
+            params = optax.apply_updates(params, updates)
+            epoch_losses.append(float(mean_loss))
+        mean_epoch_loss = sum(epoch_losses) / max(len(epoch_losses), 1)
+        history.append(mean_epoch_loss)
+        if on_epoch is not None:
+            on_epoch(epoch, mean_epoch_loss)
+    return params, opt_state, history
