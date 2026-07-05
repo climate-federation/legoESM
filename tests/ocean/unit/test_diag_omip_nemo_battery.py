@@ -173,3 +173,20 @@ def test_zonal_section_runs_and_warms_tropics():
     cold = int(np.argmin(np.abs(tgt_lat + 60.0)))
     assert sec[0, eq] > sec[0, cold]
     assert sec[0, eq] > sec[1, eq] > sec[2, eq]   # warmer at the surface
+
+
+def test_depth_band_helper_imported_and_attributes_band():
+    # The battery re-uses compare_omip_nemo._band_breakdown to break the T/S
+    # bias down by latitude band at each depth (surface-flux vs advective test).
+    # Verify the import is live and a band-localised anomaly is attributed to
+    # that band and no other -- the property the depth-by-band diagnostic relies
+    # on.
+    assert hasattr(_b, "_band_breakdown")
+    lat = np.linspace(-89.5, 89.5, 180)
+    area = np.cos(np.deg2rad(lat))[:, None] * np.ones((1, 360))
+    base = np.full((180, 360), 10.0)
+    nh = (lat[:, None] >= 23.0) & (lat[:, None] < 45.0)
+    bands = _b._band_breakdown(np.where(nh, base - 2.8, base), base, area, lat)
+    assert abs(bands["NH_midlat_23N_45N"]["bias"] + 2.8) < 1e-6
+    assert abs(bands["tropics_23S_23N"]["bias"]) < 1e-6
+    assert abs(bands["arctic_N_of_45N"]["bias"]) < 1e-6
