@@ -5531,7 +5531,6 @@ class ModelDriver:
             run_atm_latlon_spmd)
 
         cfg = self.config
-        physics_fn = self._latlon_spmd_physics_fn()      # None / HS / raise
         if cfg.output.checkpoint_days > 0 or cfg.output.diag_days > 0:
             raise NotImplementedError(
                 "enable_latlon_spmd does not yet support the diagnostics / "
@@ -5539,6 +5538,15 @@ class ModelDriver:
                 "gathered root-only writers are a follow-up — use the "
                 "segment_callback hook for I/O.")
         mesh = self._latlon_spmd_mesh()
+        # Operator-split lane: the general run_amip COLUMN-LOCAL unified physics
+        # (radiation / turbulence / convection / microphysics / GWD / cloud) is
+        # active — route to the sharded operator-split integration (dynamics ->
+        # mass fixer -> step_unified physics -> tail), a faithful multi-device
+        # twin of _run_compiled.  Held-Suarez and dynamics-only fall through to
+        # the stateless run_atm_latlon_spmd lane below.
+        if self._operator_split_spmd_active():
+            return self._run_operator_split_spmd(start_step, start_day, mesh)
+        physics_fn = self._latlon_spmd_physics_fn()      # None / HS / raise
         DT = cfg.dycore.dt
         n_steps_total = int(cfg.days * 86400.0 / DT)
         START_DAY = start_day if start_day is not None else cfg.start_day
@@ -5586,6 +5594,294 @@ class ModelDriver:
             on_segment=_on_segment)
         self.state = hs_final
         logger.info("lat-lon SPMD run: %s (%.1fs)", status, time.time() - t0)
+        return status
+
+    def _operator_split_spmd_active(self) -> bool:
+        """True when the lat-band SPMD run must use the OPERATOR-SPLIT lane — the
+        general run_amip COLUMN-LOCAL unified physics is active.
+
+        False for ``held_suarez_forcing`` and dynamics-only (all schemes
+        ``'none'``), which the stateless :func:`run_atm_latlon_spmd` lane handles.
+        The only decomposition-VARIANT unified physics — stochastic Bechtold
+        (``enable_stochastic=True``, a per-column PRNG keyed by global column) —
+        is refused UPSTREAM at pipeline build (``physics_pipeline`` raises before
+        this lane runs), and every radiation scheme (gray / rrtmgp / rrtmg) is
+        1-D column, so no extra column-locality guard is needed here."""
+        cfg = self.config
+        if cfg.held_suarez_forcing:
+            return False
+        return any(v not in (None, "none") for v in (
+            cfg.radiation, cfg.convection, cfg.turbulence,
+            cfg.microphysics, cfg.gravity_wave_drag, cfg.cloud_scheme))
+
+    def _run_operator_split_spmd(self, start_step, start_day, mesh) -> str:
+        """Lat-band-SPMD OPERATOR-SPLIT run: the faithful multi-device twin of
+        :meth:`_run_compiled` for the general run_amip column-local unified
+        physics.
+
+        Integrates dynamics -> dry-mass fixer -> ``step_unified`` physics -> Euler
+        write-back -> moisture/saturation/Rayleigh tail with the ``SegmentCarry``
+        sharded by LATITUDE BAND and THREADED across segments (held radiation /
+        tke / qke / conv_prog / double-moment tracers all ride the carry, so no
+        per-segment unpack/repack).  Host Python runs only between segments to
+        re-sample the external forcing (SST/SIC/solar/GHG/ozone/aerosol) and
+        gather a cell-centered ``HydrostaticState`` COPY for the segment callback
+        + a NaN/Inf blow-up guard — the sharded carry is never gathered back into
+        the integration.  Column-local physics is decomposition-INVARIANT, so
+        this is bit-faithful to ``_run_compiled`` up to the limited-FV-PPM
+        cut-boundary residual the sharded dynamics already carries.
+
+        Refused LOUDLY (carry has no lat-band partition spec): ensembles (the
+        vmap'd carry's leading axis is the ensemble, not the band) and multilayer
+        (Richards) land (single-rank-validated).  The diagnostics / checkpoint
+        writers are refused by :meth:`_run_compiled_latlon_spmd`."""
+        import time
+        from jax.sharding import NamedSharding, PartitionSpec as P
+        from legoesm.forcing.external import get_solar_forcing_at_time
+        from legoesm.driver.compiled_segments import (
+            pack_carry, pack_forcing, unpack_carry,
+            build_operator_split_statics, GHG_SPECIES_ORDER,
+        )
+        from legoesm.driver.sharded_operator_split_step import (
+            make_sharded_operator_split_step,
+            shard_operator_split_carry, shard_operator_split_forcing,
+        )
+        from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+            build_band_grids_atm,
+        )
+        from legoesm.core.conservation import (
+            compute_global_moisture, global_area_sum,
+        )
+
+        cfg = self.config
+        n_dev = mesh.devices.size
+
+        # --- Refusals: the carry has no lat-band partition spec for these ---
+        if self._ensemble_size > 1:
+            raise NotImplementedError(
+                "operator-split lat-band SPMD does not support ensembles (the "
+                "vmap'd carry's leading axis is the ensemble, not the lat band)"
+                " — run ensemble members as separate single-member SPMD jobs.")
+        if self._land_ml_state is not None:
+            raise NotImplementedError(
+                "operator-split lat-band SPMD does not yet support multilayer "
+                "(Richards) land (use_multilayer_land): the prognostic soil "
+                "column is single-rank-validated (rides carry.land_ml with no "
+                "band spec).  Use the slab land tile for the SPMD lane.")
+
+        ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
+        DT = ctx["DT"]
+        START_DAY = ctx["START_DAY"]
+        N_DAYS = ctx["N_DAYS"]
+        n_steps_total = ctx["n_steps_total"]
+        dsigma = ctx["dsigma"]
+        shape_2d = ctx["shape_2d"]
+        _sd = ctx["_sd"]
+        _seg_lat = (self._physics_lat if self._physics_lat is not None
+                    else self._grid_lat)
+        _seg_lon = (self._physics_lon if self._physics_lon is not None
+                    else self._grid_lon)
+        # The sharded step takes each band's physics lat/lon from
+        # band_geom.grid_lat/grid_lon (the band-sliced 2D cell fields).  For this
+        # SINGLE-PROCESS lane (enable_latlon_spmd enforces distributed=False, so
+        # _physics_lat is never the MPI band-sliced lat2d/scatter variant),
+        # _seg_lat/_seg_lon resolve to grid.grid_lat/grid_lon — EXACTLY the
+        # global field those per-band slices reconstruct — so band_geom.grid_lat
+        # is bit-faithful to the serial physics lat.  Assert it so a future
+        # rank-local _physics_lat can never silently ride this lane with a
+        # mismatched column coordinate (codex review).
+        assert (np.array_equal(np.asarray(_seg_lat),
+                               np.asarray(self.grid.grid_lat))
+                and np.array_equal(np.asarray(_seg_lon),
+                                   np.asarray(self.grid.grid_lon))), (
+            "operator-split SPMD: physics lat/lon differ from grid.grid_lat/lon "
+            "(unexpected single-process); band_geom.grid_lat would diverge from "
+            "the serial physics column coordinate.")
+
+        # --- BAND step_unified: build the physics pipeline on ONE band grid so
+        # its ColumnAdapter bakes the band ncol (bands are uniform, so one build
+        # serves every band — the make_sharded_operator_split_step CONTRACT). ---
+        band_grid = build_band_grids_atm(self.grid, n_dev)[0]
+        band_physics = build_physics_pipeline(band_grid, self.sigma, cfg)
+        band_su = band_physics.build_step_unified(static_need_rad=True)
+
+        # --- GHG species order (mirrors build_segment_fn): the sharded step
+        # rebuilds ghg_vmr_override from the per-segment forcing.ghg_vmr; None
+        # keys (gray / no GHG) leaves the (None) override untouched. ---
+        ghg_vmr = ctx["ghg_vmr"]
+        ghg_keys: tuple = ()
+        if isinstance(ghg_vmr, dict):
+            ghg_keys = tuple(k for k in GHG_SPECIES_ORDER if k in ghg_vmr)
+        ghg_keys = ghg_keys or None
+
+        # --- Conservation targets (from carry_aux restore or the IC; the full
+        # grid is un-sharded here, so global_area_sum is a plain global sum). ---
+        _carry_aux = self._carry_aux
+        _target_moisture = _carry_aux.get("target_moisture", jnp.asarray(0.0))
+        if cfg.fix_moisture and float(_target_moisture) == 0.0:
+            _target_moisture = compute_global_moisture(
+                self.q_v, self.state.p_s.data, dsigma, self.grid)
+        _target_mass = _carry_aux.get("target_mass", jnp.asarray(0.0))
+        if cfg.dycore.fix_mass and float(_target_mass) == 0.0:
+            _target_mass = global_area_sum(self.state.p_s.data, self.grid)
+
+        # --- Global operator-split statics (band step_unified; grid/lat/lon/
+        # forcing are swapped per band inside the sharded step; ghg_vmr_override
+        # is rebuilt per segment from the forcing when ghg_keys is not None). ---
+        statics = build_operator_split_statics(
+            step_unified=band_su, forcing=None,
+            lat=_seg_lat, lon=_seg_lon, dt=DT,
+            tau_equator=cfg.tau_equator, tau_pole=cfg.tau_pole,
+            sbm_tau_c=cfg.sbm_tau_c, sbm_RH_ref=cfg.sbm_RH_ref,
+            C_H=cfg.C_H, C_E=cfg.C_E,
+            albedo_ice=cfg.albedo_ice, albedo_ocean=cfg.albedo_ocean,
+            ghg_vmr_override=None,
+            hs_newtonian_relax=self._hs_newtonian_relax,
+            energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
+            do_sat_adjust=(cfg.microphysics == "none"),
+            fix_moisture=cfg.fix_moisture,
+            sigma_full=ctx["sigma_full"], dsigma=dsigma, grid=self.grid,
+            owned_mask=None, qv_smooth_coeff=self._qv_smooth_coeff,
+            fric_decay=self._fric_decay,
+            hyperdiffusion_3d=self._hyperdiffusion_3d_fn,
+        )
+        sharded_step = make_sharded_operator_split_step(
+            self.model, mesh, statics,
+            fix_mass=cfg.dycore.fix_mass,
+            rad_update_steps=ctx["RAD_UPDATE_STEPS"],
+            start_day=START_DAY, ghg_keys=ghg_keys)
+
+        # --- Seed the carry ONCE (cell-centered, full grid) and shard it; it
+        # threads across every segment (held radiation / tke / conv_prog ride
+        # it), so unlike _run_compiled there is no per-segment pack/unpack. ---
+        _dm = ({k: self.tracers.get(k)
+                for k in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")}
+               if isinstance(self.tracers, dict) else {})
+        carry = pack_carry(
+            self.state, self.q_v, self.q_c, self.q_r,
+            conv_prog=ctx["conv_prog"],
+            held_dT_rad=ctx["held_dT_rad"],
+            held_sw_net_sfc=ctx["held_sw_net_sfc"],
+            held_lw_net_sfc=ctx["held_lw_net_sfc"],
+            held_sw_up_toa=ctx["held_sw_up_toa"],
+            held_lw_up_toa=ctx["held_lw_up_toa"],
+            held_sw_down_toa=ctx["held_sw_down_toa"],
+            step_index=start_step,
+            target_moisture=_target_moisture, target_mass=_target_mass,
+            precip_accum=jnp.zeros(shape_2d, dtype=_sd),
+            T_land=ctx["T_land"], w_land=ctx["w_land"], snow=ctx.get("snow"),
+            tke=ctx["tke"], qke=ctx["qke"], gwd_spectrum=ctx["gwd_spectrum"],
+            **_dm,
+        )
+        carry = shard_operator_split_carry(carry, mesh)
+
+        # Per-segment external forcing: seg 0 of a FRESH run uses the START_DAY
+        # precompute in ctx (byte-faithful to _run_compiled); later segments (or
+        # a resumed run) re-sample at the segment-end day.
+        current_s_0 = ctx["current_s_0"]
+        solar_weights = ctx["solar_weights"]
+        o3_vmr, aerosol_od = ctx["o3_vmr"], ctx["aerosol_od"]
+
+        seg_len = max(1, int(86400.0 / DT))
+        rep = NamedSharding(mesh, P())
+        current_step = start_step
+        status = "COMPLETED"
+        seg_idx = -1
+        t0 = time.time()
+        while current_step < n_steps_total:
+            seg_idx += 1
+            seg_steps = min(seg_len, n_steps_total - current_step)
+            seg_end_step = current_step + seg_steps
+            day = START_DAY + seg_end_step * DT / 86400.0
+            doy, sod = self._calendar_for_radiation(day)
+            sst, sic = self.get_sst_sic(day)
+            if seg_idx > 0 or start_step > 0:
+                _solar_now = get_solar_forcing_at_time(self._solar_config, day)
+                current_s_0 = float(_solar_now["tsi"])
+                if self._use_solar_spectral:
+                    solar_weights = jnp.asarray(
+                        _solar_now["solar_fraction_by_gpt"])
+                _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
+                o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
+                    day, _phys_p_s, _phys_lat)
+            _alb, _T, _emis = (None, None, None)
+            if self.get_sfc_override is not None:
+                _alb, _T, _emis = self.get_sfc_override(day)
+            _shflx, _lhflx = (None, None)
+            if self.get_sfc_flux_override is not None:
+                _shflx, _lhflx = self.get_sfc_flux_override(day)
+            forcing = pack_forcing(
+                sst=jnp.asarray(sst), sic=jnp.asarray(sic),
+                day_of_year=doy, seconds_of_day=sod,
+                solar_weights=solar_weights, s_0=current_s_0,
+                o3_vmr=o3_vmr, aerosol_od=aerosol_od,
+                aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
+                ghg_vmr=ghg_vmr,
+                sfc_albedo_override=_alb, sfc_T_override=_T,
+                sfc_emissivity_override=_emis,
+                sfc_shflx_override=_shflx, sfc_lhflx_override=_lhflx,
+            )
+            forcing = shard_operator_split_forcing(forcing, mesh)
+
+            if seg_idx == 0:
+                _t_jit = time.time()
+            for _ in range(seg_steps):
+                carry = sharded_step(carry, forcing)
+            if seg_idx == 0:
+                jax.block_until_ready(carry.u)
+                logger.info("  operator-split SPMD segment 0 (incl. JIT) in "
+                            "%.1fs", time.time() - _t_jit)
+            current_step += seg_steps
+
+            # Gather a cell-centered COPY (replicate every leaf) for the callback
+            # + blow-up guard; the sharded carry continues the integration.
+            carry_full = jax.tree.map(
+                lambda x: jax.device_put(x, rep), carry)
+            state, self.q_v, self.q_c, self.q_r = unpack_carry(
+                carry_full, self.state)[:4]
+            self.state = state
+            # Refresh the driver-visible carry attributes _run_compiled also
+            # writes back (so a segment callback observes the same self.* as the
+            # serial path): the lagged convective precip + evolved double-moment
+            # tracers.  Held radiation / conv_prog / tke are LOCALS in the serial
+            # loop (not self.*), so they stay on the threaded carry — a callback
+            # cannot read them from self in either path.
+            self._conv_precip_prev = carry_full.conv_precip_prev
+            if isinstance(self.tracers, dict):
+                for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                    _v = getattr(carry_full, _nm)
+                    if _v is not None:
+                        self.tracers[_nm] = _v
+            finite = bool(jnp.isfinite(state.p_s.data).all()
+                          & jnp.isfinite(state.T.data).all())
+            if not finite:
+                status = f"BLOWUP at step {current_step}"
+                logger.info("operator-split SPMD run: %s (%.1fs)",
+                            status, time.time() - t0)
+                return status
+            # current_step == seg_end_step now, so ``day`` is the segment-end day.
+            self._current_day = day
+            if self._segment_callback is not None:
+                self._segment_callback(self, day, DT * seg_steps)
+                # Fold any callback-applied change to the atm PROGNOSTIC state
+                # back into the threaded sharded carry (a coupled/DA callback may
+                # nudge state/moisture; _run_compiled picks this up by re-packing
+                # from self.* each segment).  Re-shard the (possibly mutated)
+                # replicated fields onto the carry's existing per-leaf sharding;
+                # a no-op resharding of identical values when the callback does
+                # not mutate.  The non-driver carry fields (held radiation, tke,
+                # conv_prog) keep their threaded sharded values.
+                carry = carry._replace(
+                    u=jax.device_put(self.state.u.data, carry.u.sharding),
+                    v=jax.device_put(self.state.v.data, carry.v.sharding),
+                    T=jax.device_put(self.state.T.data, carry.T.sharding),
+                    p_s=jax.device_put(self.state.p_s.data, carry.p_s.sharding),
+                    q_v=jax.device_put(self.q_v, carry.q_v.sharding),
+                    q_c=jax.device_put(self.q_c, carry.q_c.sharding),
+                    q_r=jax.device_put(self.q_r, carry.q_r.sharding))
+
+        logger.info("operator-split SPMD run: %s, %d steps (%.1fs)",
+                    status, n_steps_total - start_step, time.time() - t0)
         return status
 
     def _prepare_run_context(self, start_step, start_day, restore_carry=False):

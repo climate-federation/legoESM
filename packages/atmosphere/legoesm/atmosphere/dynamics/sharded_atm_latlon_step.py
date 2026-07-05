@@ -35,7 +35,7 @@ from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
 )
 
 
-def _lat_spec(arr) -> P:
+def lat_spec(arr) -> P:
     """``P("lat", None, ...)`` for an array sharded on its leading (lat) axis."""
     return P("lat", *((None,) * (arr.ndim - 1)))
 
@@ -54,7 +54,7 @@ def shard_state_atm_latlon(
     walks the 6-field atm pytree (bare arrays + a tracers dict, no masks).
     """
     def _put(arr):
-        return jax.device_put(arr, NamedSharding(mesh, _lat_spec(arr)))
+        return jax.device_put(arr, NamedSharding(mesh, lat_spec(arr)))
 
     n_lat = state.T.shape[0]
     v_lower = state.v[:n_lat]
@@ -145,7 +145,7 @@ def gather_atm_latlon_to_hydrostatic(c_state, grid, mesh):
 _ATM_GRID_STATIC_FIELDS = frozenset({"n_lat", "n_lon", "radius", "dlon", "dlat"})
 
 
-def _atm_grid_array_field_names(grid) -> list[str]:
+def atm_grid_array_field_names(grid) -> list[str]:
     """Order-stable list of the ``jax.Array`` fields of a ``LatLonGrid`` (all
     except the static scalars). NamedTuple field order, so the host stack and
     the in-body ``[r]`` index agree."""
@@ -160,7 +160,7 @@ def _atm_grid_array_field_names(grid) -> list[str]:
     return names
 
 
-def _build_band_grids_atm(grid, n_devices: int):
+def build_band_grids_atm(grid, n_devices: int):
     """Build the ``n_devices`` UNIFORM lat-band ``LatLonGrid`` geometries via the
     tested MPI slicer (no bespoke metric re-derivation).
 
@@ -257,9 +257,9 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
             "jnp.sum(p_s*area) target that is not yet SPMD-routed; disable it "
             "or use fix_mass with the pre-state (psum'd) path.")
 
-    band_grids = _build_band_grids_atm(grid, n_dev)
+    band_grids = build_band_grids_atm(grid, n_dev)
     template = band_grids[0]
-    array_field_names = _atm_grid_array_field_names(template)
+    array_field_names = atm_grid_array_field_names(template)
     rep = NamedSharding(mesh, P())
     stacks = {
         name: jax.device_put(
@@ -325,7 +325,7 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
         key = jax.tree.structure(c_state)
         fn = _cache.get(key)
         if fn is None:
-            in_spec = jax.tree.map(_lat_spec, c_state)
+            in_spec = jax.tree.map(lat_spec, c_state)
             stacks_spec = jax.tree.map(lambda _x: P(), stacks)  # all replicated
             fn = jax.jit(shard_map(
                 _body, mesh=mesh, in_specs=(in_spec, stacks_spec, P()),
