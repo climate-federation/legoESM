@@ -1004,9 +1004,14 @@ def compute_most_fluxes(
         theta_v_star = theta_star + _vT_coef * T_atm * q_star_val
         inv_L = -KAPPA * G * theta_v_star / (u_star_safe ** 2 * T_v)
         zeta_d = jnp.clip(z_diag * inv_L, -10.0, 10.0)
-        denom_d = jnp.log(z_diag / jnp.maximum(z0_t, 1e-12)) - psi_h(
-            zeta_d, stability_scheme
-        )
+        # Scheme-match the diagnostic psi_h to the MAIN loop (static Python
+        # dispatch): COARE 3.0 uses the Fairall free-convective psi_h_coare,
+        # every other scheme uses the stability_scheme-selected psi_h.  Using
+        # the non-COARE psi_h here for coare3 made the 2 m T inconsistent with
+        # the converged coare3 profile.
+        _psi_h_d = (psi_h_coare(zeta_d) if scheme == "coare3"
+                    else psi_h(zeta_d, stability_scheme))
+        denom_d = jnp.log(z_diag / jnp.maximum(z0_t, 1e-12)) - _psi_h_d
         T_2m = T_sfc - (theta_star / KAPPA) * denom_d
         # Guard against profile extrapolation outside [T_atm, T_sfc].
         lo = jnp.minimum(T_atm, T_sfc)
@@ -1056,6 +1061,57 @@ def sam_ocean_surface_q(
     from legoesm.thermo import saturation_specific_humidity
 
     return salt_factor * saturation_specific_humidity(T_sfc, p_sfc)
+
+
+def ocean_surface_q_sat(
+    T_sfc: jnp.ndarray,
+    p_sfc: jnp.ndarray | float,
+    *,
+    thermo_convention: str = "legoesm",
+    bulk_scheme: str = "constant",
+    saline_factor: float = 1.0,
+) -> jnp.ndarray:
+    """Air-sea surface saturation MIXING RATIO with the convention-appropriate
+    saturation curve (#762): the single q_sfc source shared by the coupler
+    ocean tile and the standalone slab ocean, so the interface humidity is no
+    longer split between Goff (coupler) and Tetens (slab) on the aerobulk MOST
+    path.  (The atmosphere tiled surface-layer q_sfc is a separate site tracked
+    for the same unification.)
+
+    The WMO Goff (1957) curve is used under ``thermo_convention='aerobulk'`` on
+    a MOST solver scheme (``'most'``/``'coare3'``/``'large_yeager'`` — the only
+    schemes carrying the NEMO/AeroBulk constant set, matching the flux-formation
+    convention); every other case keeps the Tetens
+    :func:`legoesm.thermo.saturation_mixing_ratio`, so the default ``legoesm``
+    convention and the fixed-coefficient ``constant`` closure are byte-identical.
+    ``saline_factor`` applies the salinity reduction of q_sat (0.98 for the
+    coupled ocean tile; 1.0 leaves it unscaled).
+
+    Parameters
+    ----------
+    T_sfc : array
+        Sea-surface temperature [K].
+    p_sfc : array or float
+        Surface pressure [Pa].
+    thermo_convention : str
+        ``'legoesm'`` (Tetens) or ``'aerobulk'`` (Goff on the MOST schemes).
+    bulk_scheme : str
+        Surface bulk scheme; Goff engages only on the MOST solvers.
+    saline_factor : float
+        Salinity reduction of q_sat (1.0 = none).
+
+    Returns
+    -------
+    array
+        Surface saturation mixing ratio [kg/kg].
+    """
+    from legoesm.thermo import (
+        saturation_mixing_ratio, saturation_mixing_ratio_goff)
+
+    _use_goff = (thermo_convention == "aerobulk"
+                 and bulk_scheme in ("most", "coare3", "large_yeager"))
+    _sat = saturation_mixing_ratio_goff if _use_goff else saturation_mixing_ratio
+    return saline_factor * _sat(T_sfc, p_sfc)
 
 
 def _sam_cdn(u10: jnp.ndarray) -> jnp.ndarray:

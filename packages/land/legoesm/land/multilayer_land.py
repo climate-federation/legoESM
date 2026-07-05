@@ -192,7 +192,7 @@ def _step_multilayer_land_impl(
     # the denominator could go ~O(theta).  Ported from main during the
     # jianing/land ↔ main sync (2026-06-03).
     _denom = jnp.maximum(
-        theta_fc_c[:, None] - theta_wp_c[:, None], 1e-3,
+        theta_fc_c[:, None] - theta_wp_c[:, None], 1e-3,  # coeff-ok: floor (theta_fc - theta_wp) range to avoid /~0 in beta_root
     )
     beta_root = jnp.clip(
         (theta - theta_wp_c[:, None]) / _denom,
@@ -483,7 +483,7 @@ def _step_multilayer_land_impl(
     # into the q_surface reported back to the atmosphere.
     theta_new = richards_out.theta_new
     _denom_new = jnp.maximum(
-        theta_fc_c[:, None] - theta_wp_c[:, None], 1e-3,
+        theta_fc_c[:, None] - theta_wp_c[:, None], 1e-3,  # coeff-ok: floor (theta_fc - theta_wp) range to avoid /~0 in beta_root
     )
     beta_root_new = jnp.clip(
         (theta_new - theta_wp_c[:, None]) / _denom_new,
@@ -587,7 +587,7 @@ def _step_multilayer_land_impl(
 def init_multilayer_land_state(
     ncol: int,
     config: MultiLayerLandConfig,
-    T_init: float = 280.0,
+    T_init: float = 280.0,  # coeff-ok: initial condition (default land skin/soil temperature)
     theta_init: float | None = None,
     TgC_init: float | None = None,
 ) -> MultiLayerLandState:

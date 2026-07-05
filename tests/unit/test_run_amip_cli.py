@@ -66,17 +66,38 @@ def test_snow_albedo_feedback_flag_flows_to_config():
 
 
 def test_moisture_advection_flag_flows_to_config():
-    """Issue #771: resolved-wind moisture advection defaults ON;
-    --no-moisture-advection reproduces the legacy column-locked path."""
+    """Issue #771: resolved-wind moisture advection is OPT-IN (default OFF,
+    bit-identical legacy path); --moisture-advection turns it on."""
     parser = build_arg_parser()
-    cfg_on = build_config_from_args(_postprocess_args(
+    cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.moisture_advection is False   # default off
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--moisture-advection",
+    ]), parser))
     assert cfg_on.moisture_advection is True
 
     cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--no-moisture-advection",
     ]), parser))
     assert cfg_off.moisture_advection is False
+
+
+def test_radiation_column_chunk_flag_flows_to_config():
+    """--radiation-column-chunk round-trips into ExperimentConfig
+    (rrtmgp_column_chunk_size). 0 (default) = off / byte-identical; a >0 value
+    caps the rrtmgp XLA compile time by mapping the solve over fixed-size
+    column blocks (numerically exact — radiation columns are independent)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.rrtmgp_column_chunk_size == 0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--radiation-column-chunk", "256",
+    ]), parser))
+    assert cfg.rrtmgp_column_chunk_size == 256
 
 
 def test_land_gs_max_flag_flows_to_config():

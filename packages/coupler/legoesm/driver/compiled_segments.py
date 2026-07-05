@@ -1054,12 +1054,16 @@ def build_segment_fn(
                 q_v_dyn = _adv["q_v"].data
                 q_c_dyn = _adv["q_c"].data
                 q_r_dyn = _adv["q_r"].data
-                q_i_dyn = _adv["q_i"].data if "q_i" in _adv else None
-                q_s_dyn = _adv["q_s"].data if "q_s" in _adv else None
-                q_g_dyn = _adv["q_g"].data if "q_g" in _adv else None
-                N_c_dyn = _adv["N_c"].data if "N_c" in _adv else None
-                N_r_dyn = _adv["N_r"].data if "N_r" in _adv else None
-                N_i_dyn = _adv["N_i"].data if "N_i" in _adv else None
+                # Tracers NOT in the advected set (per-volume N_c/N_r are
+                # intentionally excluded, #772 review) fall back to their carry
+                # value — i.e. they stay column-locked — NOT to None, which
+                # would drop the double-moment number fields on an opt-in run.
+                q_i_dyn = _adv["q_i"].data if "q_i" in _adv else carry.q_i
+                q_s_dyn = _adv["q_s"].data if "q_s" in _adv else carry.q_s
+                q_g_dyn = _adv["q_g"].data if "q_g" in _adv else carry.q_g
+                N_c_dyn = _adv["N_c"].data if "N_c" in _adv else carry.N_c
+                N_r_dyn = _adv["N_r"].data if "N_r" in _adv else carry.N_r
+                N_i_dyn = _adv["N_i"].data if "N_i" in _adv else carry.N_i
             else:
                 q_v_dyn, q_c_dyn, q_r_dyn = carry.q_v, carry.q_c, carry.q_r
                 q_i_dyn, q_s_dyn, q_g_dyn = carry.q_i, carry.q_s, carry.q_g
@@ -2161,8 +2165,14 @@ def build_segment_fn(
 # q_v/q_c/q_r are always present on moist runs; the double-moment fields
 # are None for warm-rain runs (their None-ness is static pytree structure,
 # so the per-name `is not None` check below is trace-safe).
+# Tracers carried through the resolved-wind advective step (#771).  Mass
+# mixing ratios [kg/kg] and the per-MASS ice number N_i [#/kg] transport like
+# passive scalars.  N_c/N_r are per-VOLUME number densities [#/m^3] — advecting
+# them with the mass-mixing-ratio operator applies the wrong conservation law,
+# so they are intentionally excluded until a density-aware number transport
+# exists (their masses q_c/q_r still advect; the numbers stay column-locked).
 _ADVECTED_TRACER_NAMES = (
-    "q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
+    "q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_i",
 )
 
 

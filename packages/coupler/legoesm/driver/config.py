@@ -333,6 +333,12 @@ class ExperimentConfig(NamedTuple):
     # smaller compiled footprint / faster cold compile for FORWARD/inference
     # runs, used to relieve the XLA-CPU LLVM-JIT code-region pressure.
     rrtmgp_gpoint_checkpoint: bool = True
+    # Column-chunk the rrtmgp solve to cap the XLA compile time at higher
+    # horizontal resolution (see ``RRTMGPConfig.column_chunk_size``).  0 =
+    # off (byte-identical). >0 = jax.lax.map the solve over fixed-size column
+    # blocks; the per-block body compiles ONCE at this size (columns are
+    # independent → numerically exact; must divide the column count).
+    rrtmgp_column_chunk_size: int = 0
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0
@@ -541,15 +547,24 @@ class ExperimentConfig(NamedTuple):
     # of the clipped vapour sink).  Opt-in for the kessler+sbm wind blow-up;
     # default off => bit-identical.
     energy_consistent_moisture_clip: bool = False
-    # Resolved-wind moisture advection (issue #771): attach q_v/q_c/q_r (+
-    # the double-moment fields) to the dycore state each step so the
-    # primitive-equation step advects them (the MPAS Phase B design).
-    # Without it, cube moisture is COLUMN-LOCKED (physics tendencies +
-    # hyperdiffusion smoothing only) — the wet-drift / day-150 blowup
-    # family.  Effective on cubed_sphere+cdgrid only (the tracer-capable
-    # dycore); other grid/discretization combos log a notice and keep the
-    # legacy path.
-    moisture_advection: bool = True
+    # Resolved-wind moisture advection (issue #771): attach q_v/q_c/q_r/q_i/
+    # q_s/q_g (+ the per-mass ice number N_i) to the dycore state each step so
+    # the primitive-equation step advects them.  Without it, cube moisture is
+    # COLUMN-LOCKED (physics tendencies + hyperdiffusion smoothing only) — the
+    # wet-drift / day-150 blowup family.  Effective on cubed_sphere with the
+    # cdgrid PE dycore (incl. the ``centered``/``finite_volume`` aliases that
+    # resolve to cdgrid); other combos log a notice and keep the legacy path.
+    #
+    # OPT-IN / EXPERIMENTAL (default off => bit-identical): the transport is
+    # ADVECTIVE form -(u·∇q), NOT flux form, so it does not discretely conserve
+    # column/global water ∫ q·δp·dA under divergent flow — it drifts (pair with
+    # ``fix_moisture_hydrostatic`` / ``energy_consistent_moisture_clip`` to
+    # close the budget).  The per-VOLUME droplet/rain number densities N_c/N_r
+    # are intentionally NOT advected here (a per-volume number is not a mass
+    # mixing ratio; density-aware number transport is future work), so a
+    # double-moment opt-in run advects the masses but leaves N_c/N_r
+    # column-locked.  A flux-form mass-conserving tracer path is the follow-up.
+    moisture_advection: bool = False
 
     # Topography
     topography: str = "flat"
@@ -1471,7 +1486,7 @@ class ExperimentConfig(NamedTuple):
             fix_moisture=getattr(amip_cfg, 'fix_moisture', False),
             energy_consistent_moisture_clip=getattr(
                 amip_cfg, 'energy_consistent_moisture_clip', False),
-            moisture_advection=getattr(amip_cfg, 'moisture_advection', True),
+            moisture_advection=getattr(amip_cfg, 'moisture_advection', False),
             topography=amip_cfg.topography,
             topo_smoothing=amip_cfg.topo_smoothing,
             topo_edge_blend=amip_cfg.topo_edge_blend,

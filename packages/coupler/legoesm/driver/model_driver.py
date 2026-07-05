@@ -356,6 +356,23 @@ class ModelDriver:
         for key in [k for k in self._carry_aux if k.startswith("dmtr_")]:
             _tracers[key[len("dmtr_"):]] = self._carry_aux.pop(key)
 
+    @staticmethod
+    def _carry_has_unscatterable_land_ml(carry_aux) -> bool:
+        """True iff ``carry_aux`` carries multilayer-land (``land_ml_*``) fields.
+
+        Pure predicate behind the lat-lon band-MPI restart fail-fast guard: a
+        gathered checkpoint's ``land_ml_*`` are the writer's GLOBAL soil/snow/
+        carbon columns, which cannot be band-scattered (multilayer land is
+        single-rank-only, #769).  Extracted so the guard — which only fires on
+        the distributed restart path never reached by the single-process
+        tests — is unit-testable directly; a future rename of the ``land_ml_``
+        prefix then breaks the test loudly instead of silently disabling the
+        guard.  Operates on the post-``bcast`` in-memory ``carry_aux`` whose
+        keys are bare (the ``carry_``/``diag_`` serialization prefixes are
+        stripped on load), so it matches with ``startswith`` not a substring."""
+        return isinstance(carry_aux, dict) and any(
+            k.startswith("land_ml_") for k in carry_aux)
+
     def _restore_land_ml_from_carry_aux(self) -> None:
         """Rebuild ``self._land_ml_state`` from any ``land_ml_*`` entries restored
         into ``carry_aux``, so a chained multilayer-land restart resumes the
@@ -1428,8 +1445,7 @@ class ModelDriver:
         NOT silently degrade to the slab (that would run different land physics
         silently, the issue-#405 bug class)."""
         import numpy as _np
-        from legoesm.land import init_multilayer_land_state, aridity_theta_init
-        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.land import init_multilayer_land_state
         from legoesm.land.clm_surface_map import (
             load_clm_surface, download_clm_surfdata, clm_multilayer_setup,
         )
@@ -1455,25 +1471,11 @@ class ModelDriver:
             )
 
         ad = self.physics.adapter
-        # column-order latitude / longitude in RADIANS.  The CLM map regrids onto
-        # DEGREE coordinates; the land tile consumes radians.
-        #   - cubed-sphere / 2-D-per-cell grids: grid.lat/lon are already per-cell
-        #     (6,n,n) → flatten_2d gives (ncol,).
-        #   - lat-lon / Gaussian: grid.lat is 1-D (n_lat,) and grid.lon is 1-D
-        #     (n_lon,); broadcast to the (n_lat, n_lon) per-cell field and flatten
-        #     C-order, EXACTLY matching how the atm state is columnised
-        #     (model_driver.py:4746 lat_2d = broadcast(lat[:,None]); reshape(-1)),
-        #     so land column k aligns with atm column k.  flatten_2d(grid.lat) here
-        #     would try to reshape the (n_lat,) row vector into ncol and raise.
-        _lat = _np.asarray(self.grid.lat)
-        _lon = _np.asarray(self.grid.lon)
-        if _lat.ndim == 1:
-            n_lat, n_lon = _lat.shape[0], _lon.shape[0]
-            lat_rad = _np.broadcast_to(_lat[:, None], (n_lat, n_lon)).reshape(-1)
-            lon_rad = _np.broadcast_to(_lon[None, :], (n_lat, n_lon)).reshape(-1)
-        else:
-            lat_rad = _np.asarray(ad.flatten_2d(self.grid.lat)).reshape(-1)
-            lon_rad = _np.asarray(ad.flatten_2d(self.grid.lon)).reshape(-1)
+        # column-order latitude / longitude.  grid.lat is geographic latitude in
+        # RADIANS, shape (6,n,n)/(nlat,nlon); flatten to (ncol,).  The CLM map
+        # regrids onto DEGREE coordinates; the land tile consumes radians.
+        lat_rad = _np.asarray(ad.flatten_2d(self.grid.lat)).reshape(-1)
+        lon_rad = _np.asarray(ad.flatten_2d(self.grid.lon)).reshape(-1)
         lat_deg = _np.degrees(lat_rad)
         lon_deg = _np.degrees(lon_rad)
         # download_clm_surfdata caches to /tmp (one-time); load_clm_surface regrids
@@ -1529,41 +1531,13 @@ class ModelDriver:
         ncol = lat_deg.shape[0]
         T_init = ad.flatten_2d(self.state.T.data[..., -1]).reshape(-1).astype(
             storage_dtype)
-        # Aridity-aware cold-start soil moisture (issue #730).  Seed theta from the
-        # near-surface RH of the IC atmosphere, mapped into the per-column
-        # plant-available range [theta_wp, theta_fc] the tile's beta reads
-        # (params.theta_wp/theta_fc from clm_multilayer_setup).  The legacy
-        # moisture-uniform 0.5*theta_sat seed leaves subtropical deserts
-        # rainforest-wet, so a hot bare-soil skin drives a runaway
-        # potential-evaporation blowup (~day 8).  RH here uses the model's own
-        # saturation_mixing_ratio -- the SAME law the land bulk flux uses -- so it
-        # is consistent with the running physics (q_v is the atmospheric lowest
-        # level; p_s is a close proxy for the lowest-level pressure).  When the IC
-        # carries no q_v tracer, fall back to the configurable uniform seed
-        # frac * theta_sat (#766; default 0.5 == legacy init default).
-        theta_init = None
-        _qv = self.q_v  # canonical tracer store: raw (...,nlev) array, same column
-        # layout as self.state.T.data; populated by both the analytical and ERA5 IC.
-        if _qv is not None:
-            q_v_low = ad.flatten_2d(
-                getattr(_qv, "data", _qv)[..., -1]).reshape(-1).astype(storage_dtype)
-            p_s = ad.flatten_2d(
-                getattr(self.state.p_s, "data", self.state.p_s)).reshape(-1).astype(
-                    storage_dtype)
-            rh_low = q_v_low / jnp.maximum(
-                saturation_mixing_ratio(T_init, p_s), 1e-12)
-            theta_wp = jnp.asarray(getattr(params, "theta_wp", cfg.theta_wp))
-            theta_fc = jnp.asarray(getattr(params, "theta_fc", cfg.theta_fc))
-            theta_init = aridity_theta_init(
-                rh_low, theta_wp, theta_fc).reshape(-1, 1).astype(storage_dtype)
-        else:
-            logger.warning(
-                "  Land tile: IC has no q_v tracer; multilayer soil seeded at the "
-                "uniform frac*theta_sat default (aridity-aware theta_init skipped).")
-            theta_init = (self.config.land_soil_moisture_init_frac
-                          * cfg.hydraulics.theta_sat)
+        # Soil-moisture cold-start = frac * theta_sat (#730; default 0.5 is
+        # byte-identical to the init default).  A drier start can break the
+        # multilayer over-evaporation wet loop.
         self._land_ml_state = init_multilayer_land_state(
-            ncol, cfg, T_init=T_init, theta_init=theta_init)
+            ncol, cfg, T_init=T_init,
+            theta_init=(self.config.land_soil_moisture_init_frac
+                        * cfg.hydraulics.theta_sat))
         logger.info(
             "  Land tile: MULTILAYER override ACTIVE (%d soil layers, %d columns)",
             cfg.soil_grid.n_layers, ncol,
@@ -2281,23 +2255,11 @@ class ModelDriver:
             manifest_file = self._output_dir / RUN_MANIFEST_FILENAME
             if not manifest_file.exists():
                 return
-            state, tracers, carry = self.state, self.tracers, self._carry_aux
-            if self._is_spmd_multiprocess():
-                # Sharded leaves span non-addressable devices — hashing them
-                # raises (2x3-GPU smoke 26037824: "Could not record final
-                # state digest"). Gather to a replicated host copy first.
-                # COLLECTIVE: run() calls this on every process, and the
-                # manifest-exists gate above is a shared-filesystem path, so
-                # all processes reach the gather together; only process 0
-                # then writes.
-                state = self._gather_spmd_tree_to_host(state)
-                tracers = self._gather_spmd_tree_to_host(tracers)
-                carry = self._gather_spmd_tree_to_host(carry)
-                if jax.process_index() != 0:
-                    return
             # Backend-agnostic digest of the full final state (prognostic state +
             # tracers + carry), so spectral/MPAS layouts are covered too.
-            digest = pytree_state_digest(state, tracers, carry)
+            digest = pytree_state_digest(
+                self.state, self.tracers, self._carry_aux
+            )
             record_state_digest(manifest_file, digest)
         except Exception as exc:  # pragma: no cover - provenance best-effort
             logger.warning(f"Could not record final state digest: {exc}")
@@ -3480,10 +3442,15 @@ class ModelDriver:
         and log a notice once so the gap is visible, not silent.
         """
         cfg = self.config
-        if not getattr(cfg, "moisture_advection", True):
+        if not getattr(cfg, "moisture_advection", False):
             return False
+        # ``centered``/``finite_volume`` resolve to the cdgrid PE dycore (see
+        # atmosphere.dynamics DISPATCH), so they are tracer-capable too — the
+        # gate must accept them or an opt-in run on those aliases would drop to
+        # the legacy column-locked path despite running a cdgrid step (#771).
         supported = (cfg.grid.grid_type == "cubed_sphere"
-                     and cfg.dycore.discretization == "cdgrid")
+                     and cfg.dycore.discretization
+                     in ("cdgrid", "centered", "finite_volume"))
         if not supported and not getattr(self, "_warned_no_advection", False):
             self._warned_no_advection = True
             logger.info(
@@ -3905,6 +3872,27 @@ class ModelDriver:
             day = comm.bcast(day, root=0)
             carry_aux = comm.bcast(carry_aux, root=0)
 
+            # Multilayer (Richards) land state (#769) cannot be band-scattered:
+            # the gathered file's land_ml_* are the writer's GLOBAL-column
+            # soil/snow/carbon fields, and this band branch never calls
+            # ``_restore_land_ml_from_carry_aux`` — so they would sit unrestored
+            # in every rank's _carry_aux (the soil silently cold-starts) and, if
+            # adopted, hand every rank global-shape columns.  Multilayer land is
+            # single-rank-only anyway (the downstream _run_compiled guard aborts
+            # multilayer-under-distributed).  Check the just-bcast ``carry_aux``
+            # and fail fast BEFORE ``_scatter_global_state_to_bands`` mutates
+            # ``self.state`` — every rank has the same bcast dict, so the raise
+            # is symmetric (no half-scattered state, no collective deadlock).
+            if self._carry_has_unscatterable_land_ml(carry_aux):
+                raise ValueError(
+                    "Lat-lon MPI restart cannot band-scatter the multilayer "
+                    "(Richards) land state (land_ml_*) from a global "
+                    "checkpoint — multilayer land is single-rank-only, so the "
+                    "gathered soil/snow/carbon columns cannot be partitioned "
+                    "onto the bands (the soil would silently cold-start, "
+                    "issue #769). Run single-process for multilayer-land runs."
+                )
+
             self._scatter_global_state_to_bands(state_global, tracers_global)
             self._carry_aux = carry_aux if carry_aux else {}
             # Double-moment tracers cannot be band-scattered here: carry_aux is
@@ -4302,6 +4290,8 @@ class ModelDriver:
                         cfg, "rrtmgp_gpoint_batch_size", 0),
                     gpoint_checkpoint=getattr(
                         cfg, "rrtmgp_gpoint_checkpoint", True),
+                    column_chunk_size=getattr(
+                        cfg, "rrtmgp_column_chunk_size", 0),
                 ),
                 cloud_scheme=_cloud_scheme,
                 diurnal_cycle=cfg.diurnal_cycle,
@@ -5255,6 +5245,8 @@ class ModelDriver:
                             cfg, "rrtmgp_gpoint_batch_size", 0),
                         gpoint_checkpoint=getattr(
                             cfg, "rrtmgp_gpoint_checkpoint", True),
+                        column_chunk_size=getattr(
+                            cfg, "rrtmgp_column_chunk_size", 0),
                     ),
                     cloud_scheme=_cloud_scheme,
                     diurnal_cycle=cfg.diurnal_cycle,

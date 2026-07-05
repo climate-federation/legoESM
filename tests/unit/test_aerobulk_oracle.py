@@ -353,3 +353,36 @@ def test_legoesm_default_unchanged(oracle):
     b = compute_most_fluxes(**common, thermo_convention="legoesm")
     for x, y in zip(a, b):
         np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+
+def test_ocean_surface_q_sat_convention_symmetry():
+    """The shared air-sea q_sfc helper (#762): Goff only under aerobulk on a
+    MOST scheme; Tetens (byte-identical) for the default legoesm convention,
+    the 'constant' closure, and aerobulk on a non-MOST scheme.  This is the
+    single source coupler + slab-ocean + tiled surface layer share so the
+    interface q_sfc is never split between conventions."""
+    import jax.numpy as jnp
+    from legoesm.core.bulk_flux import ocean_surface_q_sat
+    from legoesm.thermo import (
+        saturation_mixing_ratio as _tet,
+        saturation_mixing_ratio_goff as _goff,
+    )
+    T = jnp.array([275.0, 290.0, 302.0])
+    p = jnp.array([1.01e5, 1.01e5, 1.01e5])
+    # Default + legoesm + non-MOST + aerobulk-on-constant -> Tetens.
+    for conv, sch in [("legoesm", "constant"), ("legoesm", "coare3"),
+                      ("aerobulk", "constant")]:
+        np.testing.assert_array_equal(
+            np.asarray(ocean_surface_q_sat(
+                T, p, thermo_convention=conv, bulk_scheme=sch)),
+            np.asarray(_tet(T, p)))
+    # aerobulk on a MOST scheme -> Goff, and it actually differs from Tetens.
+    for sch in ("most", "coare3", "large_yeager"):
+        got = ocean_surface_q_sat(
+            T, p, thermo_convention="aerobulk", bulk_scheme=sch)
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(_goff(T, p)))
+    assert not np.allclose(np.asarray(_goff(T, p)), np.asarray(_tet(T, p)))
+    # Salinity factor scales linearly.
+    np.testing.assert_allclose(
+        np.asarray(ocean_surface_q_sat(T, p, saline_factor=0.98)),
+        0.98 * np.asarray(_tet(T, p)), rtol=1e-12)

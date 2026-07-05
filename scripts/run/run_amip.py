@@ -281,12 +281,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--restart-buffer-seconds", type=float,
                         default=_OUTPUT_DEFAULTS.restart_buffer_seconds,
                         help="Wallclock buffer [s] reserved for restart writes")
-    parser.add_argument("--per-step", action="store_true",
-                        help="DEBUG: use the per-step Python reference loop "
-                             "(driver.run(compiled=False)) instead of the fused "
-                             "lax.scan segment. Slower, but JIT-compiles ONE step "
-                             "so JAX_DEBUG_NANS=1 raises at the exact step + op "
-                             "(used to localize the day-195 blow-up).")
 
     # Initial atmospheric state
     parser.add_argument("--t-init", type=float, default=None,
@@ -326,6 +320,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "smaller compiled footprint / faster cold compile for "
                              "FORWARD/inference runs (relieves the MPAS/L5 XLA compile "
                              "wall). Keep True for reverse-mode AD / training.")
+    parser.add_argument("--radiation-column-chunk", type=int,
+                        default=_EXPERIMENT_DEFAULTS.rrtmgp_column_chunk_size,
+                        help="RRTMGP column-chunk block size (0 = off). >0 maps "
+                             "the rrtmgp solve over fixed-size column blocks so the "
+                             "per-block XLA graph compiles ONCE at this size — caps "
+                             "the super-linear rrtmgp compile time so higher "
+                             "resolutions (C24/C48 L20) compile instead of stalling. "
+                             "Numerically exact (columns are independent); must "
+                             "divide the column count.")
     # Issue #273 GPU tuning: RRTMGP column-recurrence kernel choice.
     # ``--rrtmgp-use-scan`` forces ``jax.lax.scan`` (smaller graph,
     # ~5-10× cheaper to JIT — material against the 2600s cold compile
@@ -812,11 +815,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # convection (the kessler+sbm wind blow-up).  Default off => unchanged.
     parser.add_argument("--energy-consistent-moisture-clip",
                         action="store_true", default=False)
-    # Resolved-wind moisture advection through the cdgrid dycore (issue
-    # #771).  Default ON (the fix for the column-locked-moisture wet drift);
-    # --no-moisture-advection reproduces the legacy behaviour.
-    parser.add_argument("--no-moisture-advection", dest="moisture_advection",
-                        action="store_false", default=True)
+    # Resolved-wind moisture advection through the cdgrid dycore (issue #771).
+    # OPT-IN / experimental (advective form, not discretely mass-conserving) —
+    # default OFF is bit-identical to the legacy column-locked moisture path.
+    _madv = parser.add_mutually_exclusive_group()
+    _madv.add_argument("--moisture-advection", dest="moisture_advection",
+                       action="store_true",
+                       help="Opt in to resolved-wind cube moisture advection "
+                            "(#771; experimental, advective form). Default off.")
+    _madv.add_argument("--no-moisture-advection", dest="moisture_advection",
+                       action="store_false",
+                       help="Force the legacy column-locked moisture path "
+                            "(the default).")
+    parser.set_defaults(moisture_advection=False)
 
     # CMIP
     parser.add_argument("--experiment", type=str, default="")
@@ -1041,6 +1052,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         rrtmgp_use_scan=args.rrtmgp_use_scan,
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
+        rrtmgp_column_chunk_size=args.radiation_column_chunk,
         diurnal_cycle=args.diurnal_cycle,
         orbital_insolation=args.orbital_insolation,
         co2_ppmv=args.co2_ppmv,
@@ -1791,8 +1803,7 @@ def main(argv: list[str] | None = None):
         driver.config = driver.config._replace(days=int(n_profile_days + 1))
         with jax.profiler.trace(profile_dir):
             profile_status = driver.run(start_step=start_step,
-                                        start_day=start_day,
-                                        compiled=not args.per_step)
+                                        start_day=start_day)
         if _is_root:
             print(f"Profile saved to {profile_dir}")
             print("View with: tensorboard --logdir " + profile_dir)
@@ -1807,11 +1818,7 @@ def main(argv: list[str] | None = None):
 
     if _is_root:
         print("Running...")
-        if args.per_step:
-            print("  [--per-step] using the per-step Python reference loop "
-                  "(compiled=False) for NaN localization")
-    run_status = driver.run(start_step=start_step, start_day=start_day,
-                            compiled=not args.per_step)
+    run_status = driver.run(start_step=start_step, start_day=start_day)
 
     # Post-run FAILURE detection needs TWO independent signals — either one
     # non-clean means exit 1 (so a SLURM ``afterok`` chain STOPS instead of

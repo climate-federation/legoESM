@@ -299,6 +299,14 @@ def build_parser():
                         help="Checkpoint the per-g-point two-stream scan "
                              "(default on = AD-safe; --no-... = smaller/faster "
                              "compile for forward-only runs)")
+    parser.add_argument("--radiation-column-chunk", type=int, default=0,
+                        help="RRTMGP column-chunk block size (0 = off). >0 maps "
+                             "the rrtmgp solve over fixed-size column blocks so "
+                             "the per-block XLA graph compiles ONCE at this size "
+                             "— caps the super-linear rrtmgp compile time at "
+                             "higher horizontal resolution. Numerically exact "
+                             "(columns are independent); must divide the column "
+                             "count.")
     # Atmosphere physics suite.  DEFAULT = full realistic CMIP6 atmosphere:
     # convection=sbm, turbulence=holtslag_boville, gravity-wave-drag=hines,
     # clouds=sundqvist, microphysics=kessler (+ rrtmgp radiation above).  This
@@ -765,6 +773,7 @@ def main():
         orbital_insolation=args.orbital_insolation,
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
+        rrtmgp_column_chunk_size=args.radiation_column_chunk,
         ic=args.ic,
         ic_path=args.ic_path,
         convection=args.convection,

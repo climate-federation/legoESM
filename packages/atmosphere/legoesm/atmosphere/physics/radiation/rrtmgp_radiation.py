@@ -117,7 +117,7 @@ def rrtmgp_radiation(
     All arguments are forwarded to ``RRTMGP.solve_columns()``.
     """
     solver = _get_instance(config)
-    return solver.solve_columns(
+    _rad_kwargs = dict(
         T=T,
         p_full=p_full,
         p_half=p_half,
@@ -137,3 +137,12 @@ def rrtmgp_radiation(
         solar_spectral_fraction=solar_spectral_fraction,
         ghg_vmr_override=ghg_vmr_override,
     )
+    # Honour RRTMGPConfig.column_chunk_size so this public entry point caps
+    # the rrtmgp XLA compile time identically to the integration path (the
+    # per-block body compiles ONCE at column_chunk_size).  Columns are
+    # independent → numerically exact; 0 (default) = plain single-shot solve.
+    if getattr(config, "column_chunk_size", 0) and config.column_chunk_size > 0:
+        return solver.solve_columns_chunked(
+            column_chunk_size=config.column_chunk_size, **_rad_kwargs,
+        )
+    return solver.solve_columns(**_rad_kwargs)
