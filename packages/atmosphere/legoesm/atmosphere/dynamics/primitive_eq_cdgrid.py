@@ -1410,6 +1410,28 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         )
         from legoesm.core.conservation import conservation_accumulator
 
+        # FAIL-CLOSED under cubed-sphere MPI face-scatter: flux_form_tracer_step
+        # (and the underlying transport_step / this fixer) do their mass
+        # conservation with a rank-LOCAL ``jnp.sum``, which is correct only when
+        # each rank holds the full 6-face cube (replicated / single-rank).  When
+        # a rank owns only a face SUBSET, cross-boundary tracer flux breaks the
+        # per-rank rescale AND each rank computes a different global scale, so a
+        # scattered run would SILENTLY break global moisture conservation and
+        # diverge ranks.  Refuse loudly (static-config check at trace time)
+        # until the flux-form reductions are allreduce-aware (#771 follow-up).
+        from legoesm.grids.halo import get_halo_backend, get_mpi_topology
+        if get_halo_backend() == "mpi":
+            _topo = get_mpi_topology()
+            if (_topo is not None and hasattr(_topo, "local_face_ids")
+                    and len(_topo.local_face_ids) < 6):
+                raise NotImplementedError(
+                    "moisture_flux_form is not supported under cubed-sphere MPI "
+                    "face-scatter: the flux-form mass-conservation reductions "
+                    "are rank-LOCAL, so a scattered run would silently break "
+                    "global moisture conservation. Run replicated / single-rank, "
+                    "or await the allreduce-aware flux-form reductions "
+                    "(#771 follow-up).")
+
         cdgrid = self.cdgrid
         sigma = self.sigma_coord
         tnames = list(state_out.tracers)
