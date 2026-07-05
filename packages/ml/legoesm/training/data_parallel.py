@@ -128,7 +128,8 @@ def data_parallel_value_and_grad(loss_fn, params, batched_args):
 
     ``batched_args`` has a leading axis of size ``jax.local_device_count()`` (one
     sample slice per device). Returns ``(mean_loss, mean_grad)`` with the gradient
-    averaged across ALL devices (and, under ``jax.distributed``, all processes).
+    averaged across this process's LOCAL devices only -- it does NOT reduce across
+    MPI ranks/processes (use ``all_reduce_grad_mean`` for that).
 
     Single-device -> serial mean over the batch axis (no pmap), so the same code
     path runs on one GPU or a laptop.
