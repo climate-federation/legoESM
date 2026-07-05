@@ -25,6 +25,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 # Ensure the project root is on sys.path for test_cases imports
 _project_root = Path(__file__).resolve().parents[2]
@@ -41,6 +42,136 @@ logging.basicConfig(
 logger = logging.getLogger("run_coupled")
 
 _LAND_SCHEMES = ("slab", "multilayer")
+
+def _check_params_clobber(params: dict, land_params: str) -> None:
+    """Refuse --params overrides that ``CoupledESMDriver.setup()`` would clobber.
+
+    The coupled driver REBUILDS several component sub-configs during setup from
+    external maps / scheme-forcing, discarding a ``--params`` override on them:
+
+    * the **ocean** config is rebuilt from the mesh/preset — calibrate the ocean
+      via ``run_omip.py --params`` (0 ocean params are coupled-only);
+    * the **land carbon** config is rebuilt regardless of the land path (carbon-
+      active + differland, and the multilayer diurnal-surface force-upgrade to
+      differland) — calibrate via ``run_lmip.py --params``;
+    * under ``--land-params clm`` (the default) the CLM reference surfdata maps
+      and the per-PFT parameter provider override essentially ALL config-level
+      land parameters (drag, soil hydraulics/thermal, surface + material fields),
+      so no ``land.*`` override is effective — pass ``--land-params analytical``
+      (or use ``run_lmip.py``) to calibrate land via ``--params``.
+
+    Refuse each loudly (dispatch-hardening), pointing at the effective path, so a
+    ``--params`` override is never silently dropped.  Everything run_coupled owns
+    and passes through unchanged — atmosphere scalars, sea-ice, coupler, and the
+    non-carbon land config under ``--land-params analytical`` — still applies.
+    """
+    if not params:
+        return
+    keys = set(params)
+
+    ocean = sorted(k for k in keys if k.split(".")[0] == "ocean")
+    if ocean:
+        raise SystemExit(
+            f"run_coupled --params: ocean parameter(s) {ocean} are not settable "
+            "here — the coupled driver rebuilds the ocean config from the "
+            "mesh/preset during setup.  Calibrate the ocean via "
+            "`run_omip.py --params`."
+        )
+
+    carbon = sorted(k for k in keys if k.startswith("land.carbon."))
+    if carbon:
+        raise SystemExit(
+            f"run_coupled --params: land carbon parameter(s) {carbon} are not "
+            "settable here — the coupled driver rebuilds the carbon config "
+            "during setup (carbon-active / differland, and the multilayer "
+            "diurnal-surface force-upgrade).  Calibrate land carbon via "
+            "`run_lmip.py --params`."
+        )
+
+    if land_params == "clm":
+        land = sorted(k for k in keys if k.split(".")[0] == "land")
+        if land:
+            raise SystemExit(
+                f"run_coupled --params: land parameter(s) {land} are not settable "
+                "under --land-params clm (the default) — the CLM reference "
+                "surfdata maps and the per-PFT parameter provider override the "
+                "config-level land parameters during setup.  Pass --land-params "
+                "analytical to calibrate land via --params, or use "
+                "`run_lmip.py --params`."
+            )
+
+
+class _CoupledParamsBundle(NamedTuple):
+    """--params routing bundle: every non-atmosphere component config
+    run_coupled passes explicitly to ``CoupledESMDriver``.  A single bundle
+    application keeps the loader's absent/ambiguous detection exact."""
+
+    coupled: object
+    coupler: object
+    ice: object
+    lake: object
+
+
+def build_params_bundle(coupled_cfg, coupler_config=None) -> _CoupledParamsBundle:
+    """The exact --params bundle ``apply_coupled_params`` routes into: the
+    coupled config plus the coupler / sea-ice / lake configs (defaults when
+    None — ``CoupledESMDriver`` builds the identical defaults, so a no-params
+    run is unchanged).  The reachability audit
+    (tests/unit/test_params_reachability_audit.py) walks THIS bundle, so the
+    audited routing surface cannot drift from what main() applies."""
+    from legoesm.coupler.config import CouplerConfig
+    from legoesm.coupler.lake.config import LakeConfig
+    from legoesm.ice.config import SeaIceConfig
+
+    return _CoupledParamsBundle(
+        coupled=coupled_cfg,
+        coupler=coupler_config or CouplerConfig(),
+        ice=SeaIceConfig(),
+        lake=LakeConfig(),
+    )
+
+
+def apply_coupled_params(params_path, land_params, atm_config, coupled_cfg,
+                         coupler_config):
+    """Apply the --params calibration layer (issue #691) across EVERY component
+    config this driver builds: atmosphere params route to the flattened
+    ExperimentConfig scalars (scalar map); land params route into the
+    coupled_cfg's nested land_config; coupler/ice/lake params route into the
+    coupler/sea-ice/lake configs (built here with their defaults and passed
+    explicitly — CoupledESMDriver builds the identical defaults when they are
+    None, so a no-params run is unchanged).
+
+    Returns ``(atm_config, coupled_cfg, coupler_config, ice_config,
+    lake_config)``; ice/lake stay ``None`` when no non-atmosphere params are
+    given.  Single source of truth for the split-and-bundle application:
+    ``main()`` calls this, and the unit tests exercise it directly
+    (tests/unit/test_run_coupled_config_yaml.py)."""
+    from legoesm.driver.run_config_yaml import (
+        apply_params_to_config,
+        build_atm_scalar_param_map,
+        load_params_config,
+    )
+
+    ice_config = None
+    lake_config = None
+    params = load_params_config(params_path)
+    _check_params_clobber(params, land_params)
+    amap = build_atm_scalar_param_map()
+    atm_params = {k: v for k, v in params.items() if k in amap}
+    rest_params = {k: v for k, v in params.items() if k not in amap}
+    if atm_params:
+        atm_config = apply_params_to_config(
+            atm_config, atm_params, driver="run_coupled",
+            scalar_param_map=amap)
+    if rest_params:
+        bundle = apply_params_to_config(
+            build_params_bundle(coupled_cfg, coupler_config),
+            rest_params, driver="run_coupled")
+        coupled_cfg = bundle.coupled
+        coupler_config = bundle.coupler
+        ice_config = bundle.ice
+        lake_config = bundle.lake
+    return atm_config, coupled_cfg, coupler_config, ice_config, lake_config
 
 
 def land_scheme_overrides(land_scheme: str) -> dict:
@@ -84,7 +215,8 @@ def clamp_coupling_diag_days(ocean: str, diag_days: int) -> int:
 # error hint:
 _COUPLED_EXAMPLE_KEYS = (
     "'surface_bulk_scheme', 'ocean', 'surface_gustiness_zi', "
-    "'cloud_q_c_diagnostic', 'ocean_restore_sst_tau_days'"
+    "'bulk_thermo_convention', 'cloud_q_c_diagnostic', "
+    "'ocean_restore_sst_tau_days'"
 )
 
 
@@ -199,8 +331,14 @@ def build_parser():
                                  "mynn25", "clubb", "edmf", "none"],
                         help="Boundary-layer turbulence scheme "
                              "(default: holtslag_boville)")
+    # NOTE: "most" is deliberately NOT offered here although the coupler
+    # ocean tile accepts it: the atmosphere surface layer's
+    # compute_surface_fluxes treats "most" as constant (fixed-roughness LAND
+    # scheme), so offering it would silently split the interface (ocean tile
+    # MOST vs atmosphere constant) — the exact inconsistency validate() below
+    # rejects for turbulence="none".
     parser.add_argument("--surface-bulk-scheme", default="constant",
-                        choices=["constant", "most", "coare3", "large_yeager"],
+                        choices=["constant", "coare3", "large_yeager"],
                         help="AIR-SEA surface bulk-flux algorithm for the "
                              "atmosphere surface layer + the coupler OCEAN tile "
                              "(the 3D-ocean air-sea flux). 'coare3' is the "
@@ -234,12 +372,39 @@ def build_parser():
                         type=float, default=None,
                         help="COARE 3.0 convective-gustiness boundary-layer depth "
                              "z_i [m] for the MOST surface fluxes (needs "
-                             "--surface-bulk-scheme coare3/large_yeager). 0/unset "
-                             "= off (byte-identical); ~600 enables the w* "
-                             "free-convection gust so a calm warm ocean evaporates "
+                             "--surface-bulk-scheme coare3/large_yeager). Unset = "
+                             "scheme-native (coare3: 600 m per AeroBulk/Fairall "
+                             "2003; large_yeager/constant: off). 0 = force off. "
+                             "The w* gust lets a calm warm ocean evaporate "
                              "(fixes the persistent tropical hfls<<Earth / R_TOA "
                              "imbalance). Applied to the atmosphere surface layer "
                              "AND the slab ocean heat budget (kept consistent).")
+    parser.add_argument("--bulk-thermo-convention", dest="bulk_thermo_convention",
+                        type=str, default="legoesm",
+                        choices=["legoesm", "aerobulk"],
+                        help="Thermodynamic constants set for the MOST bulk "
+                             "fluxes (coare3/large_yeager): 'legoesm' (default) "
+                             "= constant L_v / dry c_pd; 'aerobulk' = "
+                             "NEMO/AeroBulk/COARE parity (SST-dependent L_vap, "
+                             "moist cp_air). Applied CONSISTENTLY to the "
+                             "atmosphere surface layer, the slab ocean heat "
+                             "budget, and the coupler ocean tile (air-sea only; "
+                             "land/ice/lake keep the default).")
+    parser.add_argument("--surface-stability-scheme", default="dyer1974",
+                        choices=["dyer1974", "beljaars_holtslag1991",
+                                 "grachev2007_sheba", "gryanik2020"],
+                        help="Stable-regime (zeta>0) Monin-Obukhov similarity "
+                             "functions for the MOST-family surface bulk "
+                             "schemes (coare3/large_yeager). Applied "
+                             "CONSISTENTLY to BOTH the atmosphere surface "
+                             "layer (SurfaceLayerConfig) and the coupler "
+                             "ocean tile (CouplerConfig) so the interface "
+                             "cannot split. 'dyer1974' (default) = the "
+                             "historical linear -5*zeta, byte-identical; "
+                             "'grachev2007_sheba'/'gryanik2020' = SHEBA-based "
+                             "Arctic/strong-stable forms; "
+                             "'beljaars_holtslag1991' avoids the stable flux "
+                             "collapse. Unstable branch stays Businger-Dyer.")
     parser.add_argument("--gravity-wave-drag", default="hines",
                         choices=["rayleigh", "lindzen", "mcfarlane", "hines",
                                  "prognostic_spectral", "e3sm_cam", "ml_emulator",
@@ -675,6 +840,8 @@ def main():
         turbulence=args.turbulence,
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        surface_thermo_convention=args.bulk_thermo_convention,
+        surface_stability_scheme=args.surface_stability_scheme,
         gravity_wave_drag=args.gravity_wave_drag,
         cloud_scheme=args.clouds,
         convective_cloud=args.convective_cloud,
@@ -687,17 +854,9 @@ def main():
         start_year=args.start_year,
         n_devices=args.n_devices if args.n_devices is not None else "auto",
     )
-    # Apply the --params calibration layer to the flattened atmosphere
-    # ExperimentConfig scalar fields (issue #691).
-    if getattr(args, "params", None):
-        from legoesm.driver.run_config_yaml import (
-            apply_params_to_config,
-            build_atm_scalar_param_map,
-            load_params_config,
-        )
-        atm_config = apply_params_to_config(
-            atm_config, load_params_config(args.params), driver="run_coupled",
-            scalar_param_map=build_atm_scalar_param_map())
+    # (--params is applied AFTER coupled_cfg / coupler_config are built, just
+    # before driver construction, so it can reach every component's config —
+    # see the calibration block below; issue #691.)
 
     # Build coupled config from preset with overrides.  The ocean_config is
     # ALWAYS overridden from --ocean so the coupled default is the two_layer
@@ -777,8 +936,10 @@ def main():
             mode="two_layer", h_mix=args.ocean_h_mix, restore_deep=True,
             # The SLAB/two-layer ocean uses its own bulk scheme (default MOST);
             # the prognostic 3D ocean is what gets COARE on the coupler tile.
+            # The thermo convention still matches the atmosphere surface layer.
             bulk_scheme=args.slab_bulk_scheme,
             gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
+            thermo_convention=args.bulk_thermo_convention,
         )
         overrides["ocean_mode"] = "two_layer"
     else:
@@ -786,6 +947,7 @@ def main():
             mode=args.ocean, h_mix=args.ocean_h_mix,
             bulk_scheme=args.slab_bulk_scheme,
             gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
+            thermo_convention=args.bulk_thermo_convention,
         )
         # ocean_mode log label (fixed/slab -> "slab").
         overrides["ocean_mode"] = "slab"
@@ -878,7 +1040,8 @@ def main():
     # user opts out of "constant" so the default run stays byte-identical (the
     # driver builds the default CouplerConfig when coupler_config is None).
     coupler_config = None
-    if args.surface_bulk_scheme != "constant":
+    if (args.surface_bulk_scheme != "constant"
+            or args.surface_stability_scheme != "dyer1974"):
         from legoesm.coupler.config import CouplerConfig
         # Thread the SAME convective-gustiness BL depth onto the coupler ocean
         # tile that the atmosphere surface layer uses (--gustiness-zi), so the
@@ -889,14 +1052,31 @@ def main():
         coupler_config = CouplerConfig(
             bulk_scheme=args.surface_bulk_scheme,
             gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
+            thermo_convention=args.bulk_thermo_convention,
+            stability_scheme=args.surface_stability_scheme,
         )
-        logger.info("  Surface bulk-flux scheme: %s (atmosphere + coupler "
-                    "ocean tile); convective gustiness z_i=%.0f m",
-                    args.surface_bulk_scheme,
+        logger.info("  Surface bulk-flux scheme: %s (thermo: %s; stability: %s; "
+                    "atmosphere + coupler ocean tile); convective gustiness "
+                    "z_i=%.0f m",
+                    args.surface_bulk_scheme, args.bulk_thermo_convention,
+                    args.surface_stability_scheme,
                     (args.surface_gustiness_zi or 0.0))
+
+    # Apply the --params calibration layer (issue #691) across EVERY component
+    # config this driver builds — see apply_coupled_params (the single source
+    # of truth for the atm-scalar-map / coupled-bundle split, exercised
+    # directly by the unit tests and the reachability audit).
+    ice_config = None
+    lake_config = None
+    if getattr(args, "params", None):
+        (atm_config, coupled_cfg, coupler_config, ice_config,
+         lake_config) = apply_coupled_params(
+            args.params, args.land_params, atm_config, coupled_cfg,
+            coupler_config)
 
     driver = CoupledESMDriver(
         atm_config, coupled_cfg, coupler_config=coupler_config,
+        ice_config=ice_config, lake_config=lake_config,
         ocean_grid=ocean_grid_obj, output_dir=args.output,
     )
 

@@ -1,0 +1,308 @@
+"""Configuration for the canopy energy balance + photosynthesis biophysics.
+
+Implements the DifferBESS-style two-leaf canopy model as a legoESM land
+surface scheme.  ``CanopyConfig`` holds the solver-level scalars
+(max_iters, LE_module, stomatal_model, ...) and is re-exported from
+``legoesm.land.surface_scheme`` as ``TwoLeafCanopyConfig`` — both names
+refer to the same NamedTuple type.
+
+PFT Vcmax25 values from Jiang & Ryu (2016) Table A1.
+Aerodynamic parameters from Ryu et al. (2011) / DifferBESS defaults.
+"""
+
+from __future__ import annotations
+
+from typing import NamedTuple
+
+import jax
+import jax.numpy as jnp
+
+
+# ---------------------------------------------------------------------------
+# PFT Vcmax25 lookup table [μmol m-2 s-1], columns [tropical, temperate, boreal]
+# (a.k.a. warm / temperate / cold).
+#
+# Authoritative CLM 4.5 Tech Note Table 8.1 entries blended with Jiang & Ryu
+# (2016) BESS v1 Table A1 where CLM has no direct PFT mapping (Mixed Forest,
+# savanna, warm-climate shrubs).  Mirrors the DifferBESS fallback table
+# (util/io.py ``_VCMAX25_C3_TABLE`` / ``_VCMAX25_C4_TABLE``).  IGBP->PFT-name
+# mapping: CSH+OSH -> SHR; WSA+SAV -> SAV; CRO+CNM -> CRO.  C4 grass uses the
+# CLM4.5 C4-grass value (51.6); C4 crop uses Jiang & Ryu (37.0) because the
+# CLM4.5 Corn value (100.7) is too aggressive for the Collatz C4 pathway here.
+# ---------------------------------------------------------------------------
+PFT_VCMAX25_C3: dict[str, list[float]] = {
+    "ENF":    [ 62.5,  62.5,  62.6],  # [CLM45] NET Temperate/Boreal
+    "EBF":    [ 55.0,  61.5,  61.5],  # [CLM45] BET Tropical/Temperate
+    "DNF":    [ 39.1,  39.1,  39.1],  # [CLM45] NDT Boreal (only DNF entry)
+    "DBF":    [ 41.0,  57.7,  57.7],  # [CLM45] BDT Tropical/Temperate/Boreal
+    "MF":     [ 54.0,  62.0,  63.0],  # [JR] Mixed forest (no CLM MF PFT)
+    "SHR":    [ 54.0,  54.0,  54.0],  # [CLM45] BDS / [JR] shrub (OSH+CSH)
+    "SAV":    [ 90.0, 120.0, 120.0],  # [JR] savanna (WSA+SAV; no CLM PFT)
+    "GRA":    [ 78.2,  78.2,  78.2],  # [CLM45] C3 grass
+    "CRO":    [100.7, 100.7, 100.7],  # [CLM45] Crop (C3 unmanaged; CRO+CNM)
+    "WET":    [ 78.2,  78.2,  78.2],  # no DifferBESS entry — use C3 grass
+}
+
+PFT_VCMAX25_C4: dict[str, list[float]] = {
+    "GRA":    [51.6, 51.6, 51.6],  # [CLM45] C4 grass
+    "SAV":    [51.6, 51.6, 51.6],  # [CLM45] C4 grass (WSA+SAV)
+    "CRO":    [37.0, 37.0, 37.0],  # [JR] C4 crop (CLM4.5 Corn 100.7 too high)
+}
+
+# Climate-column indices for the PFT Vcmax25 tables above.
+_CLIM_TROPICAL, _CLIM_TEMPERATE, _CLIM_BOREAL = 0, 1, 2
+_CLIMATE_INDEX = {
+    "tropical": _CLIM_TROPICAL,
+    "temperate": _CLIM_TEMPERATE,
+    "boreal": _CLIM_BOREAL,
+}
+
+# No-PFT fallback Vcmax25 [μmol m-2 s-1] (used when no PFT is assigned):
+#   C3 -> DBF-temperate; C4 -> mean of the C4-grass and C4-crop temperate
+# values.  Derived from the tables so they stay in sync (not magic literals).
+VCMAX25_C3_DEFAULT: float = PFT_VCMAX25_C3["DBF"][_CLIM_TEMPERATE]            # 57.7
+VCMAX25_C4_DEFAULT: float = 0.5 * (PFT_VCMAX25_C4["GRA"][_CLIM_TEMPERATE]
+                                   + PFT_VCMAX25_C4["CRO"][_CLIM_TEMPERATE])  # 44.3
+
+
+def lookup_vcmax25(pft: str, climate: str = "temperate", c4: bool = False) -> float:
+    """Leaf Vcmax25 [μmol m-2 s-1] for a (PFT, climate), with a no-PFT default.
+
+    Parameters
+    ----------
+    pft     : PFT name key (ENF/EBF/DNF/DBF/MF/SHR/SAV/GRA/CRO/WET).  Unknown
+              PFTs return the no-PFT default (DBF-temperate for C3; mean C4
+              grass/crop for C4).
+    climate : "tropical" | "temperate" | "boreal".  Unknown -> ValueError.
+    c4      : select the C4 table instead of C3.
+    """
+    if climate not in _CLIMATE_INDEX:
+        raise ValueError(
+            f"unknown climate {climate!r}; expected one of {sorted(_CLIMATE_INDEX)}")
+    idx = _CLIMATE_INDEX[climate]
+    table = PFT_VCMAX25_C4 if c4 else PFT_VCMAX25_C3
+    default = VCMAX25_C4_DEFAULT if c4 else VCMAX25_C3_DEFAULT
+    entry = table.get(pft)
+    return float(entry[idx]) if entry is not None else float(default)
+
+# ---------------------------------------------------------------------------
+# PFT aerodynamic parameters (DifferBESS / Ryu et al. 2011)
+# rz0m = z0m / hc ratio
+# rd   = displacement height / hc ratio
+# ---------------------------------------------------------------------------
+PFT_AERO_PARAMS: dict[str, dict[str, float]] = {
+    "ENF": {"rz0m": 0.055, "rd": 0.67},
+    "EBF": {"rz0m": 0.075, "rd": 0.67},
+    "DNF": {"rz0m": 0.055, "rd": 0.67},
+    "DBF": {"rz0m": 0.055, "rd": 0.67},
+    "MF":  {"rz0m": 0.055, "rd": 0.67},
+    "SHR": {"rz0m": 0.12,  "rd": 0.68},
+    "SAV": {"rz0m": 0.12,  "rd": 0.68},
+    "GRA": {"rz0m": 0.12,  "rd": 0.68},
+    "CRO": {"rz0m": 0.12,  "rd": 0.68},
+    "WET": {"rz0m": 0.12,  "rd": 0.68},
+}
+
+# Characteristic leaf width per PFT [m] (Schuepp 1993 midrange; DifferBESS
+# aa6e8b9).  Drives the leaf boundary-layer resistance rb = 1/(cv*sqrt(uav/
+# d_leaf)).  Small needles vs broad leaves; default 0.025 when unspecified.
+PFT_LEAF_WIDTH: dict[str, float] = {
+    "ENF": 0.01,
+    "EBF": 0.04,
+    "DNF": 0.01,
+    "DBF": 0.025,
+    "MF":  0.025,
+    "SHR": 0.02,   # OSH + CSH
+    "SAV": 0.025,  # WSA + SAV
+    "GRA": 0.02,
+    "CRO": 0.025,
+    "WET": 0.02,
+}
+
+# Default canopy heights per PFT [m]  (used when gridded hc not provided)
+PFT_CANOPY_HEIGHT: dict[str, float] = {
+    "ENF": 15.0,
+    "EBF": 20.0,
+    "DNF": 12.0,
+    "DBF": 15.0,
+    "MF":  12.0,
+    "SHR": 1.5,
+    "SAV": 3.0,
+    "GRA": 0.5,
+    "CRO": 0.8,
+    "WET": 0.8,
+}
+
+
+# ---------------------------------------------------------------------------
+# CanopyConfig — scalar physics settings (static Python values, not traced)
+# ---------------------------------------------------------------------------
+class CanopyConfig(NamedTuple):
+    """Physics settings for the canopy energy balance solver."""
+
+    # Newton-Raphson solver.  With the scalar-clamp damping and the
+    # outer Picard canopy↔thermal loop in canopy_land.py, 50 iters is
+    # normally ample.
+    max_iters: int = 50
+    tol: float = 1e-2
+    # Only the DifferBESS FULLY_COUPLED scheme is implemented (leaves and
+    # soil share the canopy air space Tc, q_c via clumping-weighted
+    # below-canopy resistance).  The VEG_ONLY / LEAVES_ATMO variants were
+    # removed to keep the Newton residual minimal — re-introduce them via
+    # a new static config string if a multi-scheme comparison is needed.
+    LE_module: str = "BT"                   # "BT" (Bulk Transfer, default) | "PM" (Penman-Monteith)
+    # Stomatal conductance model used inside the leaf energy balance
+    # closure.  "ball_berry" interprets ``m``/``b0`` as Ball-Berry slope
+    # and intercept; "medlyn" interprets ``m`` as the Medlyn g1 slope
+    # [kPa^0.5] and ``b0`` as g0 [mol/m2/s].  Captured as a static
+    # Python string via functools.partial — never traced.
+    stomatal_model: str = "ball_berry"      # "ball_berry" | "medlyn"
+    use_ta_for_photosynthesis: bool = False  # use Ta (True) or Tf (False) for photosynthesis
+    # Energy-balance latent-heat cap that keeps the leaf-temperature Newton
+    # solve from diverging (NaN leaf T -> NaN fluxes) under hot/dry/high-VPD
+    # forcing.  "soft" (default) is a smooth softplus bound that still admits
+    # dew and a modest LE>Rn excess; "off" reproduces the pre-cap behaviour;
+    # "hard" is the legacy clip(LE, 0, max(Rn,0)).  Resolved at trace time
+    # (static, like LE_module/stomatal_model).  See energy_balance.apply_le_cap.
+    le_cap_mode: str = "soft"               # "soft" (default) | "hard" | "off"
+    # Prognostic LAI feedback (Phase 6 / Stage 2b).  When True and the
+    # carbon cycle is active with ``scheme="differland"``, the canopy's
+    # LAI is recomputed each step from ``C_fol / LCMA``, bypassing any
+    # prescribed ``CanopyLandParams.LAI``.  **Defaults to False** until
+    # the reverse-mode ``jax.grad`` NaN through the ``C_fol → LAI →
+    # canopy Newton`` feedback loop is resolved (see ``monin_obukhov_
+    # stability`` custom-VJP follow-up).  Forward pass and non-feedback
+    # gradient paths are unaffected by this default — enable explicitly
+    # for coupled carbon ↔ canopy runs that do not require ``jax.grad``
+    # through the feedback loop.
+    use_prognostic_lai: bool = False
+
+    # NOTE: The former ``G_alpha`` tunable (G = G_alpha · Rn_soil) has been
+    # removed.  Ground heat flux is now diagnosed as the surface energy
+    # budget residual ``G = Rn_soil - LE_soil - H_soil`` using
+    # T_soil[:, 0] as the prescribed skin temperature, then fed as the
+    # top BC to ``solve_soil_thermal`` — same pattern as multilayer_land.
+
+    # Emissivities
+    epsf: float = 0.97   # leaf emissivity
+    epss: float = 0.96   # soil emissivity
+
+    # Leaf boundary-layer forced-convection transfer coefficient
+    # [m^-0.5 s^0.5] in rb = 1 / (cv * sqrt(uav / d_leaf)).  CLM5-aligned
+    # default (Campbell & Norman 1998; Bonan 2019) replacing the older BESS
+    # value 0.01 — see DifferBESS aa6e8b9.  Paired with kB^-1 = 0 in MOST.
+    cv: float = 0.0135
+
+    # Soil moisture stress thresholds (when no Richards state available)
+    wilting_point: float = 0.15   # theta_wp [m3/m3]
+    field_capacity: float = 0.30  # theta_fc [m3/m3]
+    n_root_layers: int = 5        # number of layers to integrate for root-zone stress
+
+
+# Machine-readable tunable/fixed classification for every ``: float`` field of
+# CanopyConfig (see tests/test_param_specs.py). Values live on the NamedTuple;
+# this spec adds only units/bounds/tier/transform/category/reference.
+__param_spec__ = {
+    "CanopyConfig": {
+        "scheme_key": "land.two_leaf_canopy",
+        "excluded": {
+            "tol": "numerics: Newton-Raphson convergence tolerance",
+        },
+        "params": {
+            "epsf": {
+                "units": "1", "bounds": (0.90, 1.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "radiation",
+                "reference": "leaf longwave emissivity (Ryu et al. 2011 / CLM5)",
+                "shape": None,
+            },
+            "epss": {
+                "units": "1", "bounds": (0.90, 1.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "radiation",
+                "reference": "soil longwave emissivity (Ryu et al. 2011 / CLM5)",
+                "shape": None,
+            },
+            "cv": {
+                "units": "m^-0.5 s^0.5", "bounds": (0.005, 0.03), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "aerodynamics",
+                "reference": "leaf boundary-layer forced-convection coefficient "
+                             "(Campbell & Norman 1998 / CLM5)",
+                "shape": None,
+            },
+            "wilting_point": {
+                "units": "m^3/m^3", "bounds": (0.05, 0.25), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "hydrology",
+                "reference": "soil-moisture-stress wilting point theta_wp "
+                             "(CLM5 / DifferBESS fallback)",
+                "shape": None,
+            },
+            "field_capacity": {
+                "units": "m^3/m^3", "bounds": (0.20, 0.50), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "hydrology",
+                "reference": "soil-moisture-stress field capacity theta_fc "
+                             "(CLM5 / DifferBESS fallback)",
+                "shape": None,
+            },
+        },
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# CanopyLandParams — spatially varying prescribed per-column fields
+# All array fields have shape (ncol,) and are provided externally
+# (MODIS seasonal cycle, satellite LAI, gridded canopy height maps, etc.)
+# ---------------------------------------------------------------------------
+class CanopyLandParams(NamedTuple):
+    """Per-column (ncol,) prescribed land surface parameters for the canopy model.
+
+    Fields that vary over PFTs (e.g. rz0m, rd, Vcmax25) should be pre-assigned
+    from PFT_VCMAX25_C3 / PFT_AERO_PARAMS by the driver before passing here.
+    """
+
+    # ---- Vegetation structure ----
+    LAI: jax.Array              # Leaf area index [m2/m2] — seasonally prescribed
+    hc: jax.Array               # Canopy height [m] — gridded map OR replicated PFT default
+    fC4: jax.Array              # C4 fraction [0–1] — from land-cover map
+    FNonVeg: jax.Array          # Non-vegetated fraction [0–1]
+    CI: jax.Array               # Clumping index [-] — gridded or PFT default
+    kn: jax.Array               # Nitrogen extinction coefficient [-] (typically 0.3–0.6)
+
+    # ---- Vcmax25 at leaf scale [μmol m-2 s-1] from lookup table ----
+    Vcmax25_C3_leaf: jax.Array  # C3 maximum carboxylation rate at 25°C
+    Vcmax25_C4_leaf: jax.Array  # C4 maximum carboxylation rate at 25°C
+
+    # ---- Ball-Berry stomatal parameters ----
+    m_C3: jax.Array             # Stomatal slope C3 [mol m-2 s-1 / RH] (typical: 9)
+    m_C4: jax.Array             # Stomatal slope C4 (typical: 4)
+    b0_C3: jax.Array            # Stomatal intercept C3 [mol m-2 s-1] (typical: 0.01)
+    b0_C4: jax.Array            # Stomatal intercept C4 (typical: 0.04)
+
+    # ---- Photosynthesis ----
+    # alf is the quantum yield for electron transport [mol CO2 / mol photons].
+    # It drives the RuBP-regeneration-limited rate Wj in C3 and the
+    # light-limited rate in C4; it is independent of Vcmax25.
+    alf: jax.Array              # Quantum yield (typical: 0.3 for C3, 0.067 for C4)
+    TgC: jax.Array              # 30-day mean growth temperature [°C] for Vcmax acclimation
+
+    # ---- Radiative ----
+    ALB_VIS: jax.Array          # Visible-band surface albedo (from MODIS)
+    ALB_NIR: jax.Array          # NIR-band surface albedo (from MODIS)
+    emissivity: jax.Array       # Broadband surface emissivity
+
+    # ---- Aerodynamics ----
+    # rz0m and rd are PFT-specific ratios from PFT_AERO_PARAMS, replicated to (ncol,)
+    rz0m: jax.Array             # z0m / hc ratio
+    rd: jax.Array               # Displacement height / hc ratio
+    # Characteristic leaf width [m] from PFT_LEAF_WIDTH (Schuepp 1993).
+    # Trailing optional field — None falls back to the 0.025 m midrange so
+    # existing CanopyLandParams constructors need not be updated.
+    d_leaf: jax.Array | None = None
+
+
+# NOTE: ``CanopyLandConfig`` has been removed.  Canopy is now a surface
+# scheme of ``MultiLayerLandConfig`` (and, in Phase 3b, ``LandConfig``):
+#
+#     cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(...))
+#
+# Dispatch happens inside ``step_multilayer_land`` / ``step_land`` via
+# ``isinstance`` on the ``surface_scheme`` field.

@@ -1,0 +1,119 @@
+#!/bin/bash -l
+#PBS -N legoesm_ocean_cpu
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=1:ncpus=128:mpiprocs=64
+#PBS -l walltime=03:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# OCEAN weak+strong CPU-MPI scaling on a Derecho `main` node (128-core Milan).
+#
+# Runs scripts/bench/bench_ocean_mpi_scaling.py (lat-lon C-grid ocean,
+# latitude-band MPI over mpi4jax) over a rank ladder — one case per mpiexec
+# invocation, matching the Ginsburg campaign methodology so the curves are
+# directly comparable across machines. Needs the `legoesm-mpi` env (README
+# Step 2: mpi4py/mpi4jax source-built against Cray MPICH under GCC).
+#
+# SUBMIT:
+#   qsub scripts/cluster/scaling_derecho/ocean_cpu_scaling.pbs
+# OVERRIDE:
+#   qsub -v MODE=weak,BARO=implicit_cn,MAX_RANKS=64 \
+#        scripts/cluster/scaling_derecho/ocean_cpu_scaling.pbs
+#
+# Knobs:
+#   MODE        weak | strong | both        (default both)
+#   PRECISION   float64 | float32           (default float64)
+#   STRONG_RES  global n_lat (strong)       (default 192)
+#   WEAK_ROWS   lat rows per rank (weak)    (default 64 — production-tile class)
+#   NLEV        vertical levels             (default 20)
+#   BARO        explicit_substep|implicit_cn (default implicit_cn — the
+#               production default; its fixed-M PCG reduction wall is THE
+#               multi-node weak-scaling metric to compare vs Ginsburg)
+#   RANKS       rank ladder                 (default "1 2 4 8 16 32")
+#               NOTE the Ginsburg campaign measured DRAM-bandwidth contention
+#               above ~8-16 ranks/node for bandwidth-bound dynamics; the
+#               within-node ladder here measures exactly that envelope on
+#               Milan. Multi-node: raise select= (e.g. select=2:...) and
+#               extend RANKS; mpiexec spreads with --ppn.
+# ===========================================================================
+set -uo pipefail
+
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+if   [ -f "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}/scripts/cluster/scaling_derecho"
+elif [ -f "${SUBMIT_DIR}/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}"
+else
+    echo "ERROR: cannot find _env.sh from PBS_O_WORKDIR=${SUBMIT_DIR}" >&2
+    exit 1
+fi
+
+# CPU job: pin the backend before sourcing (symmetric with cpu_scaling.pbs).
+export JAX_PLATFORMS=cpu
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-mpi}"
+# shellcheck source=_env.sh
+source "${SCRIPT_DIR}/_env.sh"
+cd "$REPO"
+
+MODE="${MODE:-both}"
+PRECISION="${PRECISION:-float64}"
+STRONG_RES="${STRONG_RES:-192}"
+WEAK_ROWS="${WEAK_ROWS:-64}"
+NLEV="${NLEV:-20}"
+BARO="${BARO:-implicit_cn}"
+RANKS="${RANKS:-1 2 4 8 16 32}"
+N_WARMUP="${N_WARMUP:-3}"
+N_TIMING="${N_TIMING:-30}"
+
+STAMP=$(date +%Y%m%d_%H%M%S)
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/ocean_cpu_${STAMP}}"
+mkdir -p "$OUTDIR"
+
+echo "=== HOST ==="; hostname; date
+echo "=== CONFIG ==="
+echo "mode=$MODE prec=$PRECISION strong_res=$STRONG_RES weak_rows=$WEAK_ROWS nlev=$NLEV baro=$BARO ranks=[$RANKS]"
+echo "outdir=$OUTDIR"
+
+case "$MODE" in
+    weak)   MODES="weak" ;;
+    strong) MODES="strong" ;;
+    both)   MODES="strong weak" ;;
+    *) echo "ERROR: MODE=$MODE (weak|strong|both)"; exit 2 ;;
+esac
+
+# --- 0) Fail-fast smoke: 2-rank parity + conservation gates ------------------
+echo "=== SMOKE: parity + conservation gates (LL64, np=2) ==="
+mpiexec -n 2 "$PY" scripts/bench/bench_ocean_mpi_scaling.py \
+    --mode strong --resolution 64 --n-levels 6 \
+    --baro-solver explicit_substep \
+    --n-warmup 2 --n-timing 6 \
+    --parity-gate --check-conservation --cons-rtol 1e-6 \
+    --output-dir "$OUTDIR/smoke" < /dev/null
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "SMOKE GATE FAILED rc=$rc — aborting the timed ladder." >&2
+    exit "$rc"
+fi
+
+# --- 1) Timed weak/strong rank ladder ----------------------------------------
+rc_all=0
+for mode in $MODES; do
+    if [ "$mode" = "strong" ]; then res="$STRONG_RES"; else res="$WEAK_ROWS"; fi
+    for np in $RANKS; do
+        echo "--- ocean mpi: mode=$mode np=$np res=$res baro=$BARO ---"
+        mpiexec -n "$np" "$PY" scripts/bench/bench_ocean_mpi_scaling.py \
+            --mode "$mode" --resolution "$res" --n-levels "$NLEV" \
+            --baro-solver "$BARO" --precision "$PRECISION" \
+            --n-warmup "$N_WARMUP" --n-timing "$N_TIMING" \
+            --output-dir "$OUTDIR" < /dev/null
+        rc=$?
+        [ "$rc" -ne 0 ] && { echo "case FAILED rc=$rc"; rc_all=$rc; }
+    done
+done
+
+echo "=== RESULTS ==="
+cat "$OUTDIR/ocean_scaling.csv" 2>/dev/null || true
+echo "=== DONE rc=$rc_all ==="
+exit "$rc_all"
