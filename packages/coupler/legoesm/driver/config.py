@@ -333,6 +333,12 @@ class ExperimentConfig(NamedTuple):
     # smaller compiled footprint / faster cold compile for FORWARD/inference
     # runs, used to relieve the XLA-CPU LLVM-JIT code-region pressure.
     rrtmgp_gpoint_checkpoint: bool = True
+    # Column-chunk the rrtmgp solve to cap the XLA compile time at higher
+    # horizontal resolution (see ``RRTMGPConfig.column_chunk_size``).  0 =
+    # off (byte-identical). >0 = jax.lax.map the solve over fixed-size column
+    # blocks; the per-block body compiles ONCE at this size (columns are
+    # independent → numerically exact; must divide the column count).
+    rrtmgp_column_chunk_size: int = 0
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0
