@@ -20,6 +20,9 @@ from __future__ import annotations
 
 __all__ = [
     "shard_samples",
+    "all_reduce_grad_mean",
+    "mpi_data_parallel_train_step",
+    "mpi_data_parallel_training_loop",
     "data_parallel_value_and_grad",
     "data_parallel_training_loop",
 ]
@@ -42,6 +45,79 @@ def shard_samples(items, process_id, num_processes, *, drop_remainder=True):
     start = process_id * per
     return list(items[start:start + per])
 
+
+# ======================================================================
+# PRIMARY multi-node path: 1 GPU per rank, cross-RANK gradient average via MPI.
+# (The pmap helper below is the multi-GPU-PER-PROCESS sub-case.)
+# ======================================================================
+
+def all_reduce_grad_mean(grad, num_processes, *, comm=None):
+    """Cross-RANK (process) gradient MEAN via mpi4jax ``allreduce(SUM) / N``.
+
+    The primary multi-node data-parallel reduction: each rank (1 GPU) computes a
+    local gradient on its ERA5 shard; this averages the gradient pytree across
+    all ranks so every rank applies the identical update (replicas stay in sync).
+    Reuses ``legoesm.parallel.reductions.global_sum_mpi`` (AD-safe: full VJP via
+    ``allreduce(SUM)``). ``num_processes <= 1`` -> identity (single-rank / laptop).
+    """
+    if num_processes <= 1:
+        return grad
+    import jax
+
+    from legoesm.parallel.reductions import global_sum_mpi
+
+    inv = 1.0 / float(num_processes)
+    return jax.tree_util.tree_map(lambda g: global_sum_mpi(g, comm=comm) * inv, grad)
+
+
+def mpi_data_parallel_train_step(loss_fn, params, opt_state, optimizer, sample,
+                                 num_processes, *, comm=None):
+    """One data-parallel step: local ``value_and_grad`` on this rank's sample,
+    mean the gradient across ranks, then ``optimizer.update`` + ``apply_updates``.
+
+    ``loss_fn(params, sample) -> scalar``. Because every rank applies the same
+    cross-rank-averaged gradient, the replicas remain identical without any weight
+    broadcast. Returns ``(params, opt_state, mean_loss)``.
+    """
+    import jax
+    import optax
+
+    loss, grad = jax.value_and_grad(loss_fn)(params, sample)
+    grad = all_reduce_grad_mean(grad, num_processes, comm=comm)
+    updates, opt_state = optimizer.update(grad, opt_state, params)
+    params = optax.apply_updates(params, updates)
+    if num_processes > 1:
+        from legoesm.parallel.reductions import global_sum_mpi
+        loss = global_sum_mpi(loss, comm=comm) / float(num_processes)
+    return params, opt_state, loss
+
+
+def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
+                                    local_samples, n_epochs, num_processes, *,
+                                    comm=None, on_epoch=None):
+    """Per-rank loop over this rank's ERA5 shard, gradients averaged across ranks
+    each step. All ranks run lockstep (balanced shards from ``shard_samples`` with
+    ``drop_remainder``), so the per-step ``allreduce`` never deadlocks. Rank-0
+    logging/checkpointing belongs in ``on_epoch(epoch, mean_loss)``. Returns
+    ``(params, opt_state, history)``.
+    """
+    history = []
+    for epoch in range(n_epochs):
+        losses = []
+        for sample in local_samples:
+            params, opt_state, loss = mpi_data_parallel_train_step(
+                loss_fn, params, opt_state, optimizer, sample, num_processes, comm=comm)
+            losses.append(float(loss))
+        mean_loss = sum(losses) / max(len(losses), 1)
+        history.append(mean_loss)
+        if on_epoch is not None:
+            on_epoch(epoch, mean_loss)
+    return params, opt_state, history
+
+
+# ======================================================================
+# Multi-GPU-PER-PROCESS sub-case: average across a process's LOCAL devices.
+# ======================================================================
 
 def data_parallel_value_and_grad(loss_fn, params, batched_args):
     """Per-device ``value_and_grad`` of ``loss_fn(params, x)`` over the leading

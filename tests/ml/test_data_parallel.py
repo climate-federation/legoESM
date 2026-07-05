@@ -12,6 +12,8 @@ import optax
 
 from legoesm.training.data_parallel import (
     shard_samples,
+    all_reduce_grad_mean,
+    mpi_data_parallel_training_loop,
     data_parallel_value_and_grad,
     data_parallel_training_loop,
 )
@@ -65,6 +67,30 @@ def test_grad_average_pytree_params():
     g1 = jax.grad(loss)(params, xs[1])
     assert np.allclose(np.asarray(mg["a"]), np.asarray((g0["a"] + g1["a"]) / 2), atol=1e-9)
     assert np.isclose(float(mg["b"]), float((g0["b"] + g1["b"]) / 2), atol=1e-9)
+
+
+# ---- MPI cross-rank path: single-process (identity) unit tests ----
+
+def test_all_reduce_grad_mean_single_process_identity():
+    grad = {"a": jnp.array([1.0, 2.0]), "b": jnp.array(3.0)}
+    out = all_reduce_grad_mean(grad, 1)                  # num_processes=1 -> identity
+    assert np.allclose(np.asarray(out["a"]), [1.0, 2.0])
+    assert float(out["b"]) == 3.0
+
+
+def test_mpi_loop_single_process_reduces_loss():
+    w = jnp.array([2.0, 3.0])
+    optimizer = optax.sgd(0.05)
+    opt_state = optimizer.init(w)
+
+    def loss(p, x):
+        return jnp.sum((p * x) ** 2)
+
+    samples = [jnp.array([1.0, 0.5]), jnp.array([0.5, 1.0])]
+    params, _, hist = mpi_data_parallel_training_loop(
+        loss, w, opt_state, optimizer, samples, n_epochs=5, num_processes=1)
+    assert len(hist) == 5 and hist[-1] < hist[0]
+    assert bool(jnp.all(jnp.isfinite(params)))
 
 
 # ---- Task 3: training loop reduces the loss ----
