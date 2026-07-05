@@ -44,6 +44,12 @@ python scripts/run/train_weatherbench_scale.py \
 Success = it loads ERA5, trains 1 epoch (a finite `loss=…` line), and writes a
 checkpoint. If it errors, fix that before spending multi-node GPU-hours.
 
+`--smoke` runs **gray radiation** (32×64×8, 1 epoch) so the wiring check compiles
+in minutes: the full rrtmgp k-distribution graph's JIT compile alone blows past a
+40-min single-GPU walltime inside the differentiable checkpointed rollout, while
+gray radiation flows through the identical wiring under test. To smoke the rrtmgp
+compile itself (with a bumped walltime), set `smoke_radiation: rrtmgp` in the YAML.
+
 ---
 
 ## 2. Launch the real multi-node run
