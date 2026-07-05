@@ -50,6 +50,8 @@ _KD_PAR       = 0.72       # diffuse PAR extinction
 _KD_NIR_COEF  = 0.35       # diffuse NIR extinction coefficient
 _RHO_UV       = 0.05       # UV reflectance (leaf + soil, PAR-like band)
 _KD_LW        = 0.78       # diffuse longwave extinction
+_KB_BEAM      = 0.5        # direct-beam extinction numerator = G-function for a
+                           # spherical (uniform) leaf-angle distribution (Ryu 2011)
 
 # --- Night ramp for the sunlit fraction (numerics; see canopy_shortwave_rt) ---
 _NIGHT_RAMP_CENTER_WM2    = 30.0   # tanh centre in direct-beam SW [W m-2]
@@ -222,7 +224,7 @@ def canopy_shortwave_rt(
     cos_sza = jnp.cos(jnp.radians(SZA))
     cos_sza_safe = jnp.where(mskNight, 0.01, cos_sza)   # coeff-ok: /0 guard on cos(SZA) at night
 
-    kb     = 0.5  / cos_sza_safe    # beam extinction
+    kb     = _KB_BEAM / cos_sza_safe    # beam extinction
     kk_Pb  = _KPB_PAR / cos_sza_safe    # beam + scattered PAR
     kb     = jnp.where(mskNight, 50.0, kb)   # coeff-ok: night sentinel extinction (kills beam)
     kk_Pb  = jnp.where(mskNight, 50.0, kk_Pb)   # coeff-ok: night sentinel extinction (kills beam)
@@ -439,7 +441,7 @@ def canopy_longwave_rt(
     cos_sza     = jnp.cos(jnp.radians(SZA_clamped))
 
     # Extinction coefficients (Ryu et al. 2011 Table A1)
-    kb = 0.5 / jnp.maximum(cos_sza, 0.01)   # coeff-ok: /0 guard on cos(SZA); direct-beam
+    kb = _KB_BEAM / jnp.maximum(cos_sza, 0.01)   # coeff-ok: /0 guard on cos(SZA); direct-beam
     kd = _KD_LW                              # diffuse
 
     # Effective LAI for radiation (clumping correction): clumped canopies
