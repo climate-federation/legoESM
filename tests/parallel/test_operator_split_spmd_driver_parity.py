@@ -39,14 +39,14 @@ RES = 8          # n_lat = 8 (divisible by N_DEV=2 -> 4 rows/band), n_lon = 16
 NLEV = 4
 
 
-def _make_cfg(out_dir, *, spmd):
+def _make_cfg(out_dir, *, spmd, dt=DT, days=N_STEPS * DT / 86400.0):
     return ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=RES, nlev=NLEV),
         dycore=DycoreConfig(
-            model_type="hydrostatic", discretization="latlon_cgrid", dt=DT,
+            model_type="hydrostatic", discretization="latlon_cgrid", dt=dt,
             fix_mass=True),
         output=OutputConfig(output_dir=out_dir, diag_days=0, checkpoint_days=0),
-        days=N_STEPS * DT / 86400.0,
+        days=days,
         dataset="analytical",
         radiation="gray",
         turbulence="tke",
@@ -113,34 +113,67 @@ def test_operator_split_spmd_driver_matches_serial(tmp_path):
     assert float(np.abs(np.asarray(spmd.state.u.data)).max()) > 0.0
 
 
+# Fold-back test spans TWO segments so a mutation folded back after segment 1 is
+# actually CONSUMED by segment 2 (the original single-segment test mutated after
+# the only segment and could not catch a dropped fold-back).  DT_FOLD gives
+# seg_len=30 steps/day (CFL~0.35 on this coarse grid, finite), DAYS_FOLD>1 forces
+# a 2nd segment (a 1-step tail) that integrates the folded-back carry.
+DT_FOLD = 2880.0
+DAYS_FOLD = 1.05
+DELTA_T = 5.0    # first-callback T bump [K]; large enough to survive integration
+
+
 def test_operator_split_spmd_segment_callback_fold_back(tmp_path):
-    """A per-segment callback that MUTATES driver.state must (a) fire with the
-    gathered cell-centered state and (b) have its mutation folded back into the
-    threaded sharded carry — matching _run_compiled, which re-packs from self.*
-    each segment.  Exercised via the driver's _segment_callback hook: a sharding
-    mismatch or a dropped mutation in the fold-back re-shard would raise / diverge
-    here (the run would not COMPLETE)."""
+    """A per-segment callback that MUTATES driver.state must have its mutation
+    folded back into the threaded sharded carry so the NEXT segment integrates the
+    mutated state — matching _run_compiled, which re-packs from self.* each
+    segment.  Non-vacuous consumption gate: bump T by DELTA_T on the FIRST
+    callback only (after segment 1), run a 2nd segment, and compare to a
+    no-callback control.  A WORKING fold-back feeds segment 2 the +DELTA_T carry
+    -> final T differs from control by ~DELTA_T; a DROPPED fold-back leaves
+    segment 2 on the un-bumped carry (and the 2nd callback does not bump) ->
+    final T ~= control.  The old single-segment test could not tell these apart."""
     if len(jax.devices()) < N_DEV:
         pytest.skip(f"needs --xla_force_host_platform_device_count={N_DEV}")
 
-    driver = ModelDriver(_make_cfg(str(tmp_path / "cb"), spmd=True),
-                         output_dir=str(tmp_path / "cb"))
-    driver.setup()
+    def _cfg(sub):
+        return _make_cfg(str(tmp_path / sub), spmd=True,
+                         dt=DT_FOLD, days=DAYS_FOLD)
 
+    # Control: identical run, no callback.
+    ctrl = ModelDriver(_cfg("ctrl"), output_dir=str(tmp_path / "ctrl"))
+    ctrl.setup()
+    assert ctrl.run(compiled=True) == "COMPLETED"
+    T_ctrl = np.asarray(ctrl.state.T.data, dtype=np.float64)
+
+    # Callback run: bump T on the first callback only.
+    driver = ModelDriver(_cfg("cb"), output_dir=str(tmp_path / "cb"))
+    driver.setup()
     seen = {"calls": 0, "shapes_ok": True}
 
     def _cb(drv, day, dt_seg):
-        # (a) the callback sees a finite, cell-centered gathered state.
         seen["calls"] += 1
         T = np.asarray(drv.state.T.data)
+        # (a) the callback sees a finite, cell-centered gathered state.
         seen["shapes_ok"] &= bool(np.isfinite(T).all())
-        # (b) mutate the prognostic state — the fold-back must re-shard this onto
-        # the carry's per-leaf sharding (a mismatch would raise inside the loop).
-        drv.state = drv.state._replace(
-            T=drv.state.T.replace(data=drv.state.T.data + 0.01))
+        # (b) bump on the FIRST call only -> segment 2 must consume the fold-back.
+        if seen["calls"] == 1:
+            drv.state = drv.state._replace(
+                T=drv.state.T.replace(data=drv.state.T.data + DELTA_T))
 
-    # run() sets self._segment_callback from its argument, so pass it here.
     status = driver.run(compiled=True, segment_callback=_cb)
     assert status == "COMPLETED", status
-    assert seen["calls"] >= 1 and seen["shapes_ok"]
-    assert np.isfinite(np.asarray(driver.state.T.data)).all()
+    assert seen["calls"] >= 2, (
+        f"fold-back consumption needs >=2 segments, saw {seen['calls']} "
+        f"callback(s) — DAYS_FOLD/DT_FOLD must span a 2nd segment")
+    assert seen["shapes_ok"]
+
+    T_cb = np.asarray(driver.state.T.data, dtype=np.float64)
+    assert np.isfinite(T_cb).all()
+    # Segment 2 integrated the +DELTA_T carry -> mean |T_cb - T_ctrl| ~ DELTA_T.
+    # A dropped fold-back would leave this ~0 (segment 2 on the un-bumped carry).
+    drift = float(np.abs(T_cb - T_ctrl).mean())
+    assert drift > 0.3 * DELTA_T, (
+        f"segment-2 T drift {drift:.3f}K vs control is far below the injected "
+        f"{DELTA_T}K bump — the first-segment callback mutation was NOT folded "
+        f"back into the sharded carry (dropped fold-back).")
