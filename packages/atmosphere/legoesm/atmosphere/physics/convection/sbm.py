@@ -218,6 +218,25 @@ def sbm_convection(
         col_net_drying, col_local_cond, eps=1e-20,
     )  # (ncol, nlev) [kg/kg/s]
 
+    # Column-water conservation (issue #771).  The relaxation ``(q_ref - q_v)``
+    # can NET-MOISTEN a column that is net-subsaturated relative to
+    # ``q_ref = RH_ref*q_sat`` (column integral ``∫dq_v > 0``), injecting column
+    # water with no source: a single-column adjustment has no moisture supply for
+    # net moistening (that water would have to be imported by transport).  The
+    # condensate rescale above already zeros precip in those columns
+    # (``col_net_drying = 0``), but the vapour + heat tendencies would still
+    # moisten.  Gate the WHOLE adjustment off there so convection only ever dries
+    # or stays neutral (never creates water); this is the ``P >= 0`` constraint of
+    # a Betts-Miller adjustment.  Net-DRYING columns are byte-identical
+    # (``gate = 1``) and stay enthalpy-neutral because ``dT_dt`` and ``dq_v_dt``
+    # carry the SAME per-column gate, preserving the Newton
+    # ``∫(c_pd·dT + L_v·dq_v) = 0`` closure.  ``col_net_drying > 0`` iff the column
+    # is net-drying (``col_net_drying = clip(-∫dq_v, 0)``).
+    drying_gate = (col_net_drying > 0.0).astype(dq_v_dt.dtype)  # (ncol, 1)
+    dT_dt = dT_dt * drying_gate
+    dq_v_dt = dq_v_dt * drying_gate
+    dq_c_conv_dt = dq_c_conv_dt * drying_gate  # already ~0 in moistening columns
+
     return ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
