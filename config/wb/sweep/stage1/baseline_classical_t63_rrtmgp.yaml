@@ -49,7 +49,7 @@ nlev: 8
 n_levels: 8
 dt: 600.0
 
-aimip_n_epochs: 6
+aimip_n_epochs: 4
 aimip_patience: 2
 aimip_min_delta: 1.0e-3
 aimip_lr: 3.0e-4
@@ -106,9 +106,15 @@ loss:
   w_spec_crps_u: 0.0
   w_spec_crps_v: 0.0
   w_spec_crps_q: 0.0
-  # Multi-step FORECAST supervision: chained 6h rollouts (2-step screen).
-  multi_step_hours: [6, 12]
-  multi_step_weights: [1.0, 1.0]
+  # SINGLE-step (6h) forecast supervision for the T63 screen. Chained multi-step
+  # ([6,12]) BPTT through ~72 dycore steps x RRTMGP exploded/hung the T63
+  # jit__train_step compile (>2-3h, canaries 8832697 & 8833799) even after
+  # dropping spectral CRPS. Production aimip_era5.yaml + the T21 baseline both
+  # use single-step 6h at T63+RRTMGP and compile fine. Objective stays a forecast
+  # RMSE + grid-CRPS + bias at 6h. The winner attempts the multi-step chain in
+  # Stage 2 (one config -- a long compile is amortized there).
+  multi_step_hours: []
+  multi_step_weights: []
   spectral_weight: 0.0
   level_weighting: "pressure"
   normalize_by_scale: true
