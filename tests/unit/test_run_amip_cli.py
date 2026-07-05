@@ -1617,3 +1617,23 @@ def test_distributed_mode_flag_flows_to_config():
     with pytest.raises(SystemExit):
         parser.parse_args(["--dataset", "analytical",
                            "--distributed-mode", "bogus"])
+
+
+def test_moisture_flux_form_flag_flows_to_dycore_config():
+    """#771: --moisture-flux-form must reach the DycoreConfig (which the
+    component factory threads into CDGridPrimitiveEquationConfig). Default off;
+    --no-moisture-flux-form explicit off."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.dycore.moisture_flux_form is False   # default off
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--moisture-flux-form",
+    ]), parser))
+    assert cfg_on.dycore.moisture_flux_form is True
+
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-moisture-flux-form",
+    ]), parser))
+    assert cfg_off.dycore.moisture_flux_form is False
