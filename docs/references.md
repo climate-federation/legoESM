@@ -12,7 +12,7 @@ legoESM ships citation metadata at the repository root:
 ## Technical specification
 
 The full equation-level specification lives at
-[`docs/specs/SPECIFICATION.md`](https://github.com/gentine/legoESM/blob/main/docs/specs/SPECIFICATION.md)
+[`docs/specs/SPECIFICATION.md`](https://github.com/climate-federation/legoESM/blob/main/docs/specs/SPECIFICATION.md)
 (LaTeX sources `docs/legoesm_documentation.tex` and `docs/legoesm_scientific_guide.tex`).
 
 ## Validation benchmarks

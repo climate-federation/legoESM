@@ -1,13 +1,13 @@
 # Developers
 
 How legoESM is organized and the invariants every change must preserve. The full
-contributor guide is [`CONTRIBUTING.md`](https://github.com/gentine/legoESM/blob/main/CONTRIBUTING.md)
+contributor guide is [`CONTRIBUTING.md`](https://github.com/climate-federation/legoESM/blob/main/CONTRIBUTING.md)
 (the same working rules live in `CLAUDE.md` for AI-assisted work).
 
 ## Setup
 
 ```bash
-git clone https://github.com/gentine/legoESM
+git clone https://github.com/climate-federation/legoESM
 cd legoESM
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"

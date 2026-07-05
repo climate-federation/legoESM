@@ -5,7 +5,7 @@ A curated map of the public entry points. Each component package
 `legoesm.coupler`, `legoesm.ml`) installs independently; the `legoesm`
 meta-package re-exports the cross-cutting helpers below. For full signatures read
 the source under `packages/<pkg>/legoesm/`, or the
-[technical specification](https://github.com/gentine/legoESM/blob/main/docs/specs/SPECIFICATION.md).
+[technical specification](https://github.com/climate-federation/legoESM/blob/main/docs/specs/SPECIFICATION.md).
 
 ## Grids
 

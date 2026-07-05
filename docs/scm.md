@@ -10,7 +10,7 @@ exercises the full atmospheric physics pipeline on a single
 - swap-matrix experiments that cross every parameterization with
   every time integrator.
 
-Issue: [#277](https://github.com/gentine/legoESM/issues/277).
+Issue: [#277](https://github.com/climate-federation/legoESM/issues/277).
 
 Source: `src/legoesm/atmosphere/scm.py` (`SingleColumnModel`).
 Demo:   `scripts/matrix/run_scm_test_matrix.py rce` (per-case modules under `scripts/matrix/scm/`).
