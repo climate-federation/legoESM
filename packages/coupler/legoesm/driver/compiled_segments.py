@@ -1048,11 +1048,17 @@ def finalize_split_step(carry, lz, statics):
         )
 
     # --- Moisture smoothing ---
-    q_v_upd = jnp.maximum(
-        q_v_upd + statics.dt * statics.hyperdiffusion_3d(
-            q_v_upd, statics.grid, statics.qv_smooth_coeff),
-        0.0,
-    )
+    # Static gate: ``qv_smooth_coeff`` is a frozen-dataclass closure constant
+    # (NOT traced), so this ``if`` folds at compile time.  When it is 0 the
+    # hyperdiffusion is a ×0 no-op AND skipping it avoids calling the
+    # grid-specific ∇⁴ operator — ``laplacian_compact_3d`` reads the cube-only
+    # ``grid.halo_interp_offsets`` (absent on lat-lon), which the lat-lon training
+    # rollout (``qv_smooth_coeff=0.0``) would otherwise hit.  The nonzero-coeff
+    # path is unchanged (bit-identical); only the q>=0 floor always applies.
+    if statics.qv_smooth_coeff != 0.0:
+        q_v_upd = q_v_upd + statics.dt * statics.hyperdiffusion_3d(
+            q_v_upd, statics.grid, statics.qv_smooth_coeff)
+    q_v_upd = jnp.maximum(q_v_upd, 0.0)
 
     # --- Rayleigh friction ---
     u_upd = lz.u_new * statics.fric_decay

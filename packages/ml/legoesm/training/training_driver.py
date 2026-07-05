@@ -99,8 +99,12 @@ def _build_training_segment(model, step_unified, grid, sigma, dt, **extra_kwargs
         fix_mass=False,
         fric_decay=jnp.ones(sigma_full.shape[0]),
         qv_smooth_coeff=0.0,
-        lat=grid.lat,
-        lon=grid.lon,
+        # Radiation flattens lat/lon to columns (ncol = n_lat*n_lon), so it needs
+        # the 2D grid field.  Lat-lon grids store a 1D lat/lon vector plus a 2D
+        # ``lat2d``/``lon2d``; the cube's ``lat``/``lon`` are already 2D (6,n,n)
+        # and have no ``lat2d``.  Mirror the production driver (grid.lat2d).
+        lat=getattr(grid, "lat2d", grid.lat),
+        lon=getattr(grid, "lon2d", grid.lon),
         start_day=0.0,
         gradient_checkpoint=True,
         **extra_kwargs,

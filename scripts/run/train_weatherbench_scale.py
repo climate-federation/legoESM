@@ -146,9 +146,15 @@ def main(argv=None):
         pred = single_day_rollout(ic, forcing, make_run_seg(trainable).raw, dt=dt)
         return combined_loss(pred, target, sigma_full, grid=grid, config=loss_config)
 
+    total_steps = cfg.n_epochs * max(len(local), 1)
+    # Honor the YAML warmup but clamp it below total_steps: the cosine schedule
+    # needs decay_steps = total_steps - warmup_steps > 0, which the tiny --smoke
+    # run (total_steps ~ a handful) otherwise violates.
+    warmup = min(int(yml.get("warmup_steps", TrainingConfig().warmup_steps)),
+                 max(1, total_steps // 10))
     optimizer = create_optimizer(TrainingConfig(
-        learning_rate=cfg.lr, optimizer=cfg.optimizer,
-        total_steps=cfg.n_epochs * max(len(local), 1),
+        lr=cfg.lr, optimizer=cfg.optimizer,
+        warmup_steps=warmup, total_steps=total_steps,
     ))
     opt_state = optimizer.init(arr)
 
