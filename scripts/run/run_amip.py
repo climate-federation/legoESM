@@ -257,6 +257,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         action=argparse.BooleanOptionalAction,
                         default=_DYCORE_DEFAULTS.fix_mass,
                         help="Enable/disable global mass correction")
+    parser.add_argument("--moisture-flux-form",
+                        action=argparse.BooleanOptionalAction,
+                        default=_DYCORE_DEFAULTS.moisture_flux_form,
+                        help="#771 (EXPERIMENTAL, cubed_sphere cdgrid + "
+                             "--moisture-advection only): transport moisture "
+                             "with the mass-conserving flux-form post-RK3 "
+                             "substep instead of the advective -(u.grad q). "
+                             "Default off = advective (bit-exact).")
 
     # Output
     parser.add_argument("--output", type=str, default=None)
@@ -994,6 +1002,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         dt=args.dt,
         hyperdiff_scale=args.hyperdiff_scale,
         div_damp_scale=args.div_damp_scale,
+        moisture_flux_form=args.moisture_flux_form,
         conservation_fixer=args.conservation_fixer,
         fix_mass=args.fix_mass,
         implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,

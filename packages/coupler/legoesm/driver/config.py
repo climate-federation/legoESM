@@ -119,6 +119,14 @@ class DycoreConfig(NamedTuple):
     a_h_scale: float = 1.0
     conservation_fixer: bool = True
     fix_mass: bool = True
+    # #771: transport the (attached) moisture tracers horizontally with the
+    # mass-conserving flux-form post-RK3 substep instead of the in-RK3 advective
+    # -(u·∇q).  Fixes the cube column-water non-conservation / day-150 blow-up.
+    # Only takes effect on the cubed_sphere cdgrid PE dycore AND with moisture
+    # attached (``ExperimentConfig.moisture_advection=True``).  EXPERIMENTAL,
+    # default off (advective path bit-exact); serial-only (fail-closed under MPI
+    # face-scatter until the reductions are allreduce-aware).
+    moisture_flux_form: bool = False
     # Issue #273 Phase 3: Hoskins–Simmons FV3 D-grid implicit
     # gravity-wave damping.  When ``implicit_grav_wave_use_pcg=True``
     # and ``implicit_grav_wave_damping > 0``, the post-RK3 surface-
