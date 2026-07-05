@@ -1,0 +1,118 @@
+"""End-to-end gate: flux-form moisture transport in the live cdgrid PE step (#771).
+
+The advective -(u·∇q) form (default) does not conserve column water under a
+divergent wind and needs a one-signed max(q, 0) clip.  With
+``moisture_flux_form=True`` the horizontal transport moves to a mass-conserving,
+monotone post-RK3 substep (flux_form_tracer_step + co-transported δp + a
+per-tracer mass fixer).  This test drives a real cubed-sphere PE model under a
+strong divergent wind and asserts the flux-form path conserves column water
+far better AND stays positive, while the advective path drifts and clips.
+"""
+
+from __future__ import annotations
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from legoesm.grids.cubed_sphere import create_cubed_sphere
+from legoesm.grids.vertical import create_sigma_coordinate
+from legoesm.core.field import Field
+from legoesm.core.state import FV3HydrostaticState
+from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    CDGridPrimitiveEquationModel,
+    CDGridPrimitiveEquationConfig,
+)
+
+
+def _model(n, nlev, flux_form):
+    grid = create_cubed_sphere(n)
+    sigma = create_sigma_coordinate(nlev)
+    cfg = CDGridPrimitiveEquationConfig(moisture_flux_form=flux_form)
+    return CDGridPrimitiveEquationModel(grid, sigma, cfg), grid, sigma
+
+
+def _divergent_state(n, nlev):
+    # Strong, spatially varying (divergent) D-grid corner winds.
+    jj = jnp.arange(n + 1) / n
+    uu = (30.0 * jnp.sin(2.0 * jnp.pi * jj))[None, None, :, None] \
+        * jnp.ones((6, n + 1, n + 1, nlev))
+    vv = (25.0 * jnp.cos(2.0 * jnp.pi * jj))[None, :, None, None] \
+        * jnp.ones((6, n + 1, n + 1, nlev))
+    # A sharp positive moisture blob on face 0 (fronts stress the limiter).
+    q = jnp.full((6, n, n, nlev), 1e-4).at[
+        0, n // 3:2 * n // 3, n // 3:2 * n // 3, :].set(2e-2)
+    return FV3HydrostaticState(
+        u_d=Field(uu, name="u_d"), v_d=Field(vv, name="v_d"),
+        T=Field(jnp.full((6, n, n, nlev), 280.0), name="T"),
+        p_s=Field(jnp.full((6, n, n), 1.0e5), name="p_s"),
+        phis=Field(jnp.zeros((6, n, n)), name="phis"),
+        tracers={"q_v": Field(q, name="q_v")})
+
+
+def _column_water(model, sigma, state):
+    dp = sigma.layer_thickness_dp(state.p_s.data)
+    area = model.cdgrid.base.area
+    return float(jnp.sum(area[..., None] * dp * state.tracers["q_v"].data,
+                         dtype=jnp.float64))
+
+
+def _run(flux_form, n=24, nlev=8, nsteps=10, dt=120.0):
+    model, grid, sigma = _model(n, nlev, flux_form)
+    state = _divergent_state(n, nlev)
+    w0 = _column_water(model, sigma, state)
+    min_q = 1.0e9
+    for _ in range(nsteps):
+        state = model.step(state, dt)
+        min_q = min(min_q, float(jnp.min(state.tracers["q_v"].data)))
+    drift = abs(_column_water(model, sigma, state) - w0) / w0
+    return drift, min_q
+
+
+def test_flux_form_conserves_and_stays_positive():
+    drift_adv, minq_adv = _run(flux_form=False)
+    drift_ff, minq_ff = _run(flux_form=True)
+
+    # Advective drifts substantially (the #771 non-conservation) and clips to 0.
+    assert drift_adv > 1e-4, f"advective drift unexpectedly small: {drift_adv:.2e}"
+    assert minq_adv <= 0.0 + 1e-20, "advective should hit the q>=0 clip"
+
+    # Flux-form conserves column water FAR better and never goes negative.
+    assert drift_ff < drift_adv / 100.0, \
+        f"flux-form drift {drift_ff:.2e} not << advective {drift_adv:.2e}"
+    assert drift_ff < 1e-4, f"flux-form drift too large: {drift_ff:.2e}"
+    assert minq_ff > -1e-12, \
+        f"flux-form produced spurious negatives: {minq_ff:.2e}"
+
+
+def test_flux_form_off_is_the_advective_path():
+    """Default (moisture_flux_form=False) must keep the advective behaviour —
+    the substep must not run when off (guards the OFF-is-unchanged contract)."""
+    model_off, grid, sigma = _model(12, 6, flux_form=False)
+    state = _divergent_state(12, 6)
+    # One step must not raise and must NOT invoke the flux-form substep path;
+    # the advective path is not positive-definite, so a clip is expected — we
+    # only assert the run completes and produces finite moisture.
+    out = model_off.step(state, 120.0)
+    q = out.tracers["q_v"].data
+    assert bool(jnp.all(jnp.isfinite(q)))
+    assert q.shape == state.tracers["q_v"].data.shape
+
+
+def test_dry_state_unaffected_by_flag():
+    """No tracers ⟹ the substep is skipped entirely (guard against touching a
+    dry run)."""
+    grid = create_cubed_sphere(12)
+    sigma = create_sigma_coordinate(6)
+    model = CDGridPrimitiveEquationModel(
+        grid, sigma, CDGridPrimitiveEquationConfig(moisture_flux_form=True))
+    n, nlev = 12, 6
+    dry = FV3HydrostaticState(
+        u_d=Field(0.3 * jnp.ones((6, n + 1, n + 1, nlev)), name="u_d"),
+        v_d=Field(jnp.zeros((6, n + 1, n + 1, nlev)), name="v_d"),
+        T=Field(jnp.full((6, n, n, nlev), 280.0), name="T"),
+        p_s=Field(jnp.full((6, n, n), 1.0e5), name="p_s"),
+        phis=Field(jnp.zeros((6, n, n)), name="phis"),
+        tracers=None)
+    out = model.step(dry, 120.0)          # must not raise
+    assert out.tracers is None

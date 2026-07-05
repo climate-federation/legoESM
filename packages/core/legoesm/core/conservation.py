@@ -163,6 +163,17 @@ def global_area_sum(
             mask = mask[..., None]
         prod = prod * mask
     local_sum = jnp.sum(prod)
+    # Lat-band SPMD (single-process shard_map): combine the band-local partial
+    # across the "lat" axis BEFORE is_distributed() — under SPMD there is one
+    # process (is_distributed() is False) yet each band holds only a partial
+    # sum. Inert for serial/MPI/cube (returns None), so the default path is
+    # byte-unchanged. Mirrors batch_global_area_sums (:241) so the SINGLE-array
+    # fixers that reduce via global_area_sum (fix_ps_mass_target,
+    # fix_moisture_hydrostatic) are lat-band-SPMD-correct too, not only the
+    # batched callers.
+    spmd_sums = _spmd_lat_psum_or_none([local_sum])
+    if spmd_sums is not None:
+        return spmd_sums[0]
     if is_distributed():
         from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
