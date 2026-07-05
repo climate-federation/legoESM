@@ -14,22 +14,32 @@ uses for mass (:func:`legoesm.core.fv_tp_2d.transport_step`: PPM reconstruction
 mixing ratio is then recovered as ``q★ = (δp·q)★ / δp★``.  Because tracer mass
 and layer mass ride the identical operator with the identical winds:
 
-* **Free-stream preserving** — ``q ≡ const`` ⟹ ``(δp·q)★ = const·δp★`` ⟹
-  ``q★ = const`` (no spurious source/sink from the transport of a uniform
-  tracer through a divergent flow).
-* **Mass conserving** — ``∑ area·(δp·q)★ = ∑ area·δp·q`` exactly (the
-  ``mass_target`` rescale), so column water is conserved on the transported
-  ``δp★`` grid.
+* **Free-stream preserving** — ``q ≡ const`` ⟹ ``(δp·q)★ ≈ const·δp★`` ⟹
+  ``q★ ≈ const`` to FLOATING-POINT ROUNDOFF (not bit-exact): ``transport_step``
+  is positively homogeneous — its PPM fluxes are linear and the monotone
+  limiter + ``mass_target`` rescale (``scale = mt / max(∑h⁺, 1)``) are
+  scale-invariant for ``c > 0`` while ``∑h⁺ > 1`` — but the per-field mass
+  targets ``_mass2d(δp)`` and ``_mass2d(δp·c)`` are summed independently, so
+  ``c`` factors out only up to summation roundoff.  The truth-test gates this
+  at ``< 1e-9`` (fp64), i.e. roundoff, not zero.
+* **Mass conserving** — ``∑ area·(δp·q)★ = ∑ area·δp·q`` to the accumulator's
+  fp64 precision (the ``mass_target`` rescale), so column water is conserved on
+  the transported ``δp★`` grid — see the HARD CONTRACT below.
 * **Monotone / positive-definite** — ``transport_step`` clips negatives before
   the conserving rescale, so dispersive under/overshoots near moisture fronts
   cannot inject a one-signed moisture source.
 
-Consistency with the dynamics' own ``δp`` (which the hybrid PE core carries via
-the surface pressure ``p_s``, not via this flux operator) is left to the
-caller: ``δp★`` and the dynamics ``δp`` differ only by the flux-form vs
-``div_v`` continuity discretisation and both conserve total dry mass; the
-caller may adopt ``δp★`` for moisture or reconcile with a mass fixer.  See
-``docs`` / issue #771.
+HARD CONTRACT — the returned ``q_new`` conserves ``∫δp·q`` and is free-stream
+preserving **only when paired with the returned co-transported ``δp★``**.  A
+caller that stores ``q_new`` against a DIFFERENT layer mass — e.g. the hybrid
+PE core's own ``δp`` derived from the RK3-updated ``p_s`` (which this flux
+operator does NOT transport) — FORFEITS both guarantees: ``∫δp_dyn·q_new`` is
+no longer the conserved moisture mass, and a uniform tracer no longer stays
+uniform.  The caller MUST either adopt ``δp★`` for the moisture columns or
+reconcile ``δp★`` with the dynamics ``δp`` via a mass fixer.  ``δp★`` and the
+dynamics ``δp`` differ only by the flux-form vs ``div_v`` continuity
+discretisation (both conserve total dry mass), so the reconciliation is a small
+correction — but it is NOT optional.  See issue #771.
 """
 
 from __future__ import annotations
@@ -78,8 +88,14 @@ def flux_form_tracer_step(
     q_new : jax.Array, shape ``(6, n, n, nlev, n_tracers)``
         ``(δp·q)★ / δp★`` — the flux-form transported mixing ratios.
     delp_new : jax.Array, shape ``(6, n, n, nlev)``
-        The co-transported layer mass ``δp★`` (the divisor above), returned so
-        the caller can reconcile it with the dynamics' ``δp``.
+        The co-transported layer mass ``δp★`` (the divisor above).
+
+    HARD CONTRACT (see the module docstring): ``q_new`` conserves ``∫δp·q`` and
+    preserves a uniform tracer **only when paired with the returned ``δp★``**.
+    Storing ``q_new`` against a different layer mass (e.g. the PE core's own
+    ``p_s``-derived ``δp``) forfeits BOTH guarantees; the caller MUST adopt
+    ``δp★`` for the moisture columns or reconcile it with the dynamics ``δp``
+    via a mass fixer.
     """
     if q.ndim != 5:
         raise ValueError(
@@ -119,9 +135,14 @@ def flux_form_tracer_step(
         _transport_level_tracers, in_axes=(3, -1, -1), out_axes=3)(
             qmass, ut, vt)                            # (6, n, n, nlev, ntr)
 
-    # Recover the mixing ratio; guard the divisor (δp★ is positive by
-    # construction — transport_step clips negatives — but a rest column can be
-    # ~0 at the model top).
+    # Recover the mixing ratio.  PRECONDITION: δp is a physical layer thickness
+    # [Pa], so δp★ ≫ the 1e-30 floor everywhere in any real atmosphere — the
+    # floor is a pure NaN-guard, never an expected path.  It can only bite a
+    # degenerate all-zero column; there the co-transported tracer mass is also
+    # zero (transport_step conserves it from a zero input), so q_new = 0/1e-30
+    # = 0 and the conservation identity ∫δp★·q_new = ∫δp·q holds trivially
+    # (both sides 0 in that column).  For any δp★ ≥ 1e-30, delp_safe == δp★ so
+    # δp★·q_new == qmass★ exactly and conservation is exact.
     delp_safe = jnp.maximum(delp_new, jnp.asarray(1e-30, delp_new.dtype))
     q_new = qmass_new / delp_safe[..., None]
     return q_new, delp_new

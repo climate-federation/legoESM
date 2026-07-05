@@ -95,8 +95,10 @@ def test_free_stream_preservation():
     # Uniform tracer q ≡ 0.5 everywhere.
     q = jnp.full((6, n, n, delp.shape[-1], 1), 0.5, dtype=jnp.float64)
     q_new, _ = flux_form_tracer_step(q, delp, ut, vt, 600.0, cdgrid)
-    # A uniform tracer must stay uniform under a divergent wind (this is the
-    # property the advective form + a separate δp evolution lacks).
+    # A uniform tracer stays uniform under a divergent wind to FP ROUNDOFF (the
+    # co-transport of δp makes transport_step's homogeneity cancel the tendency;
+    # not bit-exact because the per-field mass targets are summed separately) —
+    # the property the advective form + a separate δp evolution wholly lacks.
     assert float(jnp.max(jnp.abs(q_new - 0.5))) < 1e-9
 
 
