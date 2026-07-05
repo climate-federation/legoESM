@@ -84,6 +84,22 @@ def test_moisture_advection_flag_flows_to_config():
     assert cfg_off.moisture_advection is False
 
 
+def test_radiation_column_chunk_flag_flows_to_config():
+    """--radiation-column-chunk round-trips into ExperimentConfig
+    (rrtmgp_column_chunk_size). 0 (default) = off / byte-identical; a >0 value
+    caps the rrtmgp XLA compile time by mapping the solve over fixed-size
+    column blocks (numerically exact — radiation columns are independent)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.rrtmgp_column_chunk_size == 0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--radiation-column-chunk", "256",
+    ]), parser))
+    assert cfg.rrtmgp_column_chunk_size == 256
+
+
 def test_land_gs_max_flag_flows_to_config():
     """--land-gs-max round-trips into ExperimentConfig (the global stomatal
     canopy-conductance calibration knob for land ET, issue #730). Default 0.3
