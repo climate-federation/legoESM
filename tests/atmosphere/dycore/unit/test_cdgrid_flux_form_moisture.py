@@ -15,6 +15,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from types import SimpleNamespace
+
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.core.field import Field
@@ -23,6 +25,28 @@ from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationModel,
     CDGridPrimitiveEquationConfig,
 )
+
+
+def test_flux_form_scatter_guard_predicate():
+    """The fail-closed predicate: refuse cube face-scatter / SPMD face-shard
+    (rank/shard-local flux-form reductions) but NOT replicated / single-rank."""
+    f = CDGridPrimitiveEquationModel._flux_form_scatter_blocked
+    _topo3 = SimpleNamespace(local_face_ids=(0, 1, 2))   # rank owns 3 of 6 faces
+    _topo6 = SimpleNamespace(local_face_ids=(0, 1, 2, 3, 4, 5))
+    _band = SimpleNamespace(band_id=0)                   # lat-lon: no faces attr
+    # Genuinely scattered: <6 owned faces AND state sliced to them (lead==3).
+    assert f("mpi", _topo3, None, 3) is True
+    # Replicated cube MPI: <6 owned faces but FULL 6-face state (lead==6).
+    assert f("mpi", _topo3, None, 6) is False
+    # Single-rank MPI: owns all 6 faces.
+    assert f("mpi", _topo6, None, 6) is False
+    # Serial / local backend.
+    assert f("local", None, None, 6) is False
+    # Lat-lon band MPI (no local_face_ids) must not false-positive.
+    assert f("mpi", _band, None, 96) is False
+    # SPMD with an active mesh -> fail-closed; without a mesh -> allowed.
+    assert f("spmd", None, object(), 6) is True
+    assert f("spmd", None, None, 6) is False
 
 
 def _model(n, nlev, flux_form):
