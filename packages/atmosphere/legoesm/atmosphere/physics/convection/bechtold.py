@@ -132,6 +132,7 @@ def bechtold_convection(
     dt: float,
     config: BechtoldConfig = BechtoldConfig(),
     moisture_convergence: jax.Array | None = None,
+    col_index: jax.Array | None = None,
 ) -> tuple[ConvectionOutput, jax.Array, jax.Array]:
     """Bechtold/IFS convection (smooth, differentiable).
 
@@ -158,6 +159,11 @@ def bechtold_convection(
     dt : float
         Time step [s].
     config : BechtoldConfig
+    col_index : jax.Array or None, shape (ncol,) int32
+        GLOBAL column ids for the decomposition-invariant per-column
+        stochastic draw (``PhysicsState.col_index``; a lat-band SPMD
+        shard passes its own chunk).  ``None`` falls back to
+        ``arange(ncol)`` — identical for any undecomposed caller.
 
     Returns
     -------
@@ -326,7 +332,21 @@ def bechtold_convection(
     # -- AR1 stochastic perturbation ---------------------------------------
     if config.enable_stochastic and prng_key is not None:
         alpha_AR1 = jnp.exp(-dt / config.stochastic_decorrelation)
-        innovation = jax.random.normal(prng_key, shape=(ncol,), dtype=T.dtype)
+        # Decomposition-INVARIANT draw: fold the per-step sub-key with each
+        # column's GLOBAL id and draw one variate per column.  Under
+        # lat-band SPMD each shard receives its own contiguous chunk of
+        # ``PhysicsState.col_index``, so a given physical column sees the
+        # SAME innovation as the serial run — a bulk
+        # ``normal(key, (ncol_local,))`` would instead give every band the
+        # first ncol_local variates of one stream (decomposition-variant).
+        # NOTE: this changes the noise REALIZATION (not the statistics) of
+        # serial stochastic runs vs the pre-2026-07 bulk draw.
+        _ids = (col_index if col_index is not None
+                else jnp.arange(ncol, dtype=jnp.int32))
+        innovation = jax.vmap(
+            lambda i: jax.random.normal(
+                jax.random.fold_in(prng_key, i), dtype=T.dtype)
+        )(_ids)
         # Floor the AR(1) innovation-variance sqrt argument at a tiny positive
         # rather than 0: as dt -> 0, alpha_AR1 -> 1 and ``1 - alpha^2 -> 0``,
         # where sqrt'(0) = inf would give a NaN gradient w.r.t. dt /

@@ -770,6 +770,10 @@ class LatLonCGridOceanModel:
         # Static rigid-lid data (islands, basis, depths), built eagerly from the
         # first concrete state (host-side flood-fill).  None until built.
         self.rigid_lid_data = None
+        # Source (land_mask, H_bathy) the rigid-lid cache was built from — keyed
+        # exactly like _vertex_mask_src so a reused model instance can't serve
+        # stale island data for a CHANGED topology (codex round-1).
+        self._rigid_lid_src = None
         # Build-once vertex mask (land-mask-derived, constant per run).
         # Computing it per step paid an N-S halo exchange inside the
         # traced tendencies (x2 sites) because state.land_mask is a
@@ -868,20 +872,40 @@ class LatLonCGridOceanModel:
         directly inside an outer ``lax.scan``/``jax.jit`` (the public
         ``step`` shim does this automatically): call ONCE with the
         concrete initial state BEFORE building/tracing the scan, so the
-        traced body captures the land-mask-derived vertex mask as a
-        constant instead of re-deriving it (with its N-S halo exchange)
-        every step.  Safe to call multiple times and with traced state
-        (no-op).
+        traced body captures the build-once caches as constants instead
+        of re-deriving them every step.  Two caches:
+
+        * the land-mask-derived vertex mask (its N-S halo exchange), and
+        * (rigid-lid solver only) the host-side island / streamfunction
+          decomposition (numpy flood-fill — impossible to build from a
+          traced state, so it MUST be warmed here from the concrete IC).
+
+        Safe to call multiple times and with traced state (no-op): both
+        warms are tracer-guarded.  A cold rigid-lid cache then left to a
+        traced first ``_step_impl`` step raises an actionable error.
         """
         self._ensure_vertex_mask(state)
+        # Warm the rigid-lid island cache only when EVERY build input is
+        # concrete: a partially-traced state (e.g. concrete H_bathy + traced
+        # land_mask) would otherwise reach the cold host-side flood-fill and
+        # raise, breaking the "no-op on traced state" contract (codex round-2).
+        if self.config.barotropic.barotropic_solver == "rigid_lid":
+            _rl_inputs = (state.H_bathy.data, state.land_mask.data,
+                          state.u_mask.data, state.v_mask.data)
+            if not any(isinstance(a, jax.core.Tracer) for a in _rl_inputs):
+                self._ensure_rigid_lid_data(state)
 
     def _ensure_rigid_lid_data(self, state):
         """Build + cache the static rigid-lid data from a CONCRETE state.
 
         The island flood-fill is host-side (numpy), so this must run eagerly on
-        concrete bathymetry/masks — ``integrate``/``integrate_scan`` pre-build it
-        before the (jitted) scan so the captured data is a compile-time
-        constant.  A standalone ``step`` on a concrete state builds it lazily.
+        concrete bathymetry/masks: ``integrate_scan`` pre-builds it before the
+        (jitted) scan via ``seed_scan_carry``, and the eager ``step`` shim
+        pre-builds it from its concrete input state (so ``model.step`` /
+        ``model.integrate`` loops work too) — in both paths the captured data is
+        a compile-time constant.  Only a direct ``_step_impl`` call inside a
+        user trace builds it lazily, and there the state must already be warmed
+        (else the actionable ``TracerArrayConversionError`` below fires).
 
         ``ensure_compile_time_eval``: when the lazy build instead happens
         inside a USER's jit trace (e.g. ``jax.jit(value_and_grad(loss))``
@@ -904,16 +928,45 @@ class LatLonCGridOceanModel:
             assert_rigid_lid_single_rank,
         )
         assert_rigid_lid_single_rank()
+        lm = state.land_mask.data
+        Hb = state.H_bathy.data
         if self.rigid_lid_data is not None:
-            return self.rigid_lid_data
+            # Topology-key guard (mirrors _ensure_vertex_mask): the island
+            # decomposition is baked into the compiled step as a constant, so a
+            # reused model must NOT silently serve stale data for a different
+            # bathymetry/mask.  The hot loop passes the SAME concrete arrays
+            # (identity fast-path) or TRACED arrays (cache already built — skip,
+            # can't host-compare); only a genuinely different CONCRETE topology
+            # trips the value compare.  u_mask/v_mask are deterministic
+            # functions of land_mask, so keying on (land_mask, H_bathy) covers
+            # the full island input set.
+            if (isinstance(lm, jax.core.Tracer)
+                    or isinstance(Hb, jax.core.Tracer)):
+                return self.rigid_lid_data
+            src_lm, src_Hb = self._rigid_lid_src
+            if lm is src_lm and Hb is src_Hb:
+                return self.rigid_lid_data
+            import numpy as _np
+            if (src_lm is not None and lm.shape == src_lm.shape
+                    and Hb.shape == src_Hb.shape
+                    and bool(_np.array_equal(_np.asarray(lm), _np.asarray(src_lm)))
+                    and bool(_np.array_equal(_np.asarray(Hb), _np.asarray(src_Hb)))):
+                self._rigid_lid_src = (lm, Hb)   # adopt new identity, same value
+                return self.rigid_lid_data
+            raise ValueError(
+                "LatLonCGridOceanModel: the bathymetry/land mask changed after "
+                "the first rigid-lid step on this model instance.  The island "
+                "decomposition (and the compiled step that captured it) are "
+                "built once per model — construct a NEW model for a different "
+                "topology.")
         from legoesm.ocean.dynamics.rigid_lid_islands import build_rigid_lid_data
         try:
             with jax.ensure_compile_time_eval():
                 self.rigid_lid_data = build_rigid_lid_data(
-                    state.H_bathy.data, state.land_mask.data,
-                    state.u_mask.data, state.v_mask.data,
+                    Hb, lm, state.u_mask.data, state.v_mask.data,
                     self.config, self.grid, periodic_x=True,
                 )
+                self._rigid_lid_src = (lm, Hb)
         except jax.errors.TracerArrayConversionError as e:
             raise RuntimeError(
                 "rigid-lid island decomposition must be built from CONCRETE "
@@ -3978,7 +4031,6 @@ class LatLonCGridOceanModel:
         -------
         LatLonCGridOceanState
         """
-        self._ensure_vertex_mask(state)
         if self.config.barotropic.barotropic_solver == "rigid_lid":
             # Eager fail-fast (host-side, before the jitted body): the rigid-lid
             # streamfunction solve is single-rank only.  The in-body guard runs
@@ -3990,6 +4042,14 @@ class LatLonCGridOceanModel:
                 assert_rigid_lid_single_rank,
             )
             assert_rigid_lid_single_rank()
+        # Warm BOTH build-once caches (vertex mask + — rigid lid only — the
+        # host-side island/streamfunction decomposition) from the CONCRETE input
+        # state before crossing the jit boundary, so the jitted body reuses them
+        # as compile-time constants.  Without the rigid-lid warm the first
+        # rigid_lid step would try to build the numpy flood-fill from the TRACED
+        # mid-step state inside _step_jitted (np.asarray on a tracer raises).
+        # Single warming entry point shared with external _step_impl drivers.
+        self.prime_step_caches(state)
         # Eager fail-fast (dispatch hardening): an ENABLED equilibrium tide
         # with no model time supplied would otherwise be a SILENT no-op (the
         # in-body gate is ``enabled and t_seconds is not None``) — a driver

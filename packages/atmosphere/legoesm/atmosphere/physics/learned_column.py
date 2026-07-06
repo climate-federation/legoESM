@@ -35,6 +35,7 @@ from legoesm.atmosphere.dynamics.spectral_pe import (
 )
 from legoesm.grids.gaussian import GaussianGrid, sh_analysis_3d
 from legoesm.atmosphere.physics.neural_physics import NeuralPhysics, pack_column_features
+from legoesm.atmosphere.physics.radiation.solar import cos_zenith_angle
 from legoesm.atmosphere.physics._shared import zero_like_tracers
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py). Learned
@@ -74,6 +75,16 @@ __physics_contract__ = {
 # Default neural-column architecture width + residual output scale (structural).
 _DEFAULT_HIDDEN_DIM = 256
 _DEFAULT_RESIDUAL_SCALE = 0.01
+# The NeuralPhysics rate head shares one residual_scale calibrated for
+# TEMPERATURE tendencies (K/s).  Moisture tendencies live ~3 orders lower
+# (SFNO per-channel scales: dT 1e-4 K/s vs dq 1e-7 kg/kg/s), so the q_v head
+# is multiplied by this factor before entering the tracer tendency.  Without
+# it an UNTRAINED head emits O(1e-3 kg/kg/s) and q_v explodes within a 6 h
+# rollout (probe 2026-07-03: q_v -> 4e2 by step 6, NaN by step 36 — the
+# column_nn retrain epoch-0 NaN).  1e-4 caps the head at
+# residual_scale*tendency_cap*1e-4 = 5e-6 kg/kg/s: ~5-50x typical physical
+# moisture tendencies, the same relative headroom the T head has.
+_Q_HEAD_TENDENCY_FACTOR = 1.0e-4
 
 
 
@@ -153,7 +164,7 @@ def make_column_physics_fn(
     """
     nlev = neural_physics.nlev
 
-    def physics_fn(state, grid_, sigma_coord):
+    def physics_fn(state, grid_, sigma_coord, forcing=None):
         # Spectral → grid-space fields
         fields = spectral_pe_to_grid(state, grid_, sigma_coord)
         T = fields['T']          # (n_lat, n_lon, nlev)
@@ -178,11 +189,44 @@ def make_column_physics_fn(
         else:
             q_col = jnp.zeros_like(T_col)
         p_s_col = p_s.reshape(-1)
-        solar_col = jnp.full_like(p_s_col, constants.S_0)
+
+        # --- surface forcing features (the prescribed-SST / AMIP pathway) ---
+        # forcing dict (all traced; see ``spectral_amip_rollout``):
+        #   "T_sfc"          (ncol,) prescribed surface T over OCEAN, NaN over
+        #                    land → replaced by the lowest-level air T proxy
+        #   "sic"            (ncol,) sea-ice fraction in [0, 1]
+        #   "day_of_year"    scalar (seasonal insolation)
+        #   "seconds_of_day" scalar (diurnal phase)
+        # Without forcing (idealized / legacy tests): T_sfc proxy = lowest
+        # model level, sic = 0, solar = S_0 (the historical constant input).
+        t_lowest = T_col[:, -1]
+        if forcing is not None:
+            # Sanitize the inactive branch BEFORE the select: jnp.where
+            # propagates NaN cotangents from the untaken branch in reverse
+            # mode (codex HIGH) — land-NaN T_sfc would poison the training
+            # gradient through the proxy path.
+            t_raw = jnp.nan_to_num(forcing["T_sfc"], nan=0.0)
+            t_sfc_col = jnp.where(
+                jnp.isfinite(forcing["T_sfc"]), t_raw, t_lowest,
+            )
+            sic_col = jnp.clip(
+                jnp.nan_to_num(forcing["sic"], nan=0.0), 0.0, 1.0,
+            )
+            mu0 = cos_zenith_angle(
+                jnp.broadcast_to(grid_.lat[:, None], (n_lat, n_lon)).reshape(-1),
+                jnp.broadcast_to(grid_.lon[None, :], (n_lat, n_lon)).reshape(-1),
+                forcing["day_of_year"], forcing["seconds_of_day"] / 3600.0,
+            )
+            solar_col = constants.S_0 * jnp.maximum(mu0, 0.0)
+        else:
+            t_sfc_col = t_lowest
+            sic_col = jnp.zeros_like(p_s_col)
+            solar_col = jnp.full_like(p_s_col, constants.S_0)
 
         # Pack features + vmap forward (normalization built into _pack)
         features = jax.vmap(pack_column_features)(
             T_col, u_col, v_col, q_col, p_s_col, solar_col,
+            t_sfc_col, sic_col,
         )
         y = jax.vmap(neural_physics)(features)  # (ncol, n_output)
 
@@ -192,12 +236,30 @@ def make_column_physics_fn(
         # Convert to spectral temperature tendency
         dT_hat = sh_analysis_3d(grid_, dT_dt.astype(jnp.float64))
 
-        # Column physics: only T tendency; zero for vor, div, lnps.
-        # Mirror the input state's tracer pytree as zeros so the
-        # orchestrator and dycore RHS see a consistent tendency
-        # structure (matches the radiation / GWD bridges).
+        # Column physics: T tendency (spectral) + q_v tendency (grid-space
+        # tracer path, matching ``unpack_pe_output``'s tendency convention);
+        # zero for vor, div, lnps.  Mirror the input state's remaining tracer
+        # pytree as zeros so the orchestrator and dycore RHS see a consistent
+        # tendency structure (matches the radiation / GWD bridges).
         zero_3d = jnp.zeros_like(state.vor_hat.data)
         zero_2d = jnp.zeros_like(state.lnps_hat.data)
+
+        tracers_out = zero_like_tracers(state.tracers)
+        if tracers_out is not None and "q_v" in tracers_out:
+            # dq_v/dt from the moisture head (outputs nlev:2*nlev).  Before
+            # this the head was silently discarded — the column NN had NO
+            # moisture physics (no condensation sink / evaporation source).
+            # Rescaled to moisture magnitudes (_Q_HEAD_TENDENCY_FACTOR).
+            dq_v_dt = (
+                y[:, nlev:2 * nlev] * _Q_HEAD_TENDENCY_FACTOR
+            ).reshape(n_lat, n_lon, nlev)
+            template = state.tracers["q_v"]
+            if hasattr(template, "data") and hasattr(template, "replace"):
+                tracers_out["q_v"] = template.replace(
+                    data=dq_v_dt.astype(template.data.dtype),
+                )
+            else:
+                tracers_out["q_v"] = dq_v_dt.astype(template.dtype)
 
         return SpectralHydrostaticState(
             vor_hat=state.vor_hat.replace(data=zero_3d),
@@ -205,7 +267,7 @@ def make_column_physics_fn(
             T_hat=state.T_hat.replace(data=dT_hat),
             lnps_hat=state.lnps_hat.replace(data=zero_2d),
             phis_hat=state.phis_hat.replace(data=zero_2d),
-            tracers=zero_like_tracers(state.tracers),
+            tracers=tracers_out,
         )
 
     return physics_fn

@@ -1,0 +1,28 @@
+# AIMIP variant: column neural-network physics.
+#
+# Replaces the classical physics step with a per-column MLP
+# (``atmosphere/physics/neural_physics.NeuralPhysics``) trained on
+# ERA5.  Dycore is the same Gaussian-grid spectral PE used by all
+# variants for fair intercomparison.
+#
+# See ``training_driver.train_neural_gcm`` for the existing training
+# entry point; ``scripts/run/run_aimip.py`` dispatches to it when
+# ``aimip_variant == "column_nn"``.
+
+aimip_variant: "column_nn"
+
+# Schemes are irrelevant when physics is replaced by the NN, but the
+# AIMIP variant rule keeps the per-variant config explicit so we can
+# diff overlays in one place.
+convection: "none"
+turbulence: "none"
+gravity_wave_drag: "none"
+cloud_scheme: "none"
+microphysics: "none"
+radiation: "gray"
+physics_parameterization: "none"
+
+# Column MLP hyperparameters.
+nn_hidden_dim: 256
+nn_n_layers: 4
+nn_seed: 0

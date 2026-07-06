@@ -71,6 +71,35 @@ __physics_contract__ = {
 # Convective velocity-scale coefficient w* ~ 2.5 u* (EDMF default).
 _EDMF_WSTAR_COEFF = 2.5
 
+
+def _mass_flux_tendency(phi, phi_u, M, dz_layer, rho):
+    """Flux-form vertical divergence of the mass-flux transport of ``phi``.
+
+    ``d(phi)/dt = -(1/rho) d/dz[ M (phi_u - phi) ]`` written in FLUX FORM so the
+    column mass-weighted integral telescopes to ``F_top - F_sfc`` exactly.  A
+    non-flux-form centred difference at full levels does NOT telescope (its
+    mass-weighted column sum leaves a spurious O(interior MF flux) heat/moisture
+    source), which is the conservation defect this replaces.
+
+    Index 0 = model top, increasing downward; z increases upward.  The
+    interior interface fluxes are the 2-point average of the adjacent cell-
+    centred fluxes (identical to the old centred difference in the interior).
+    There is no mass-flux transport through the model top (``F_top = 0``); the
+    lowest interface carries the surface-coupled MF flux (``F_sfc = flux[-1]``)
+    so the legitimate surface-driven transport is retained — hard-zeroing it
+    broke ``test_mass_flux_active`` (iter-50) and is NOT done here.
+    """
+    flux = M * (phi_u - phi)                       # cell-centred updraft flux, (ncol, nlev)
+    ncol = flux.shape[0]
+    zero_top = jnp.zeros((ncol, 1), dtype=flux.dtype)
+    flux_int = 0.5 * (flux[:, :-1] + flux[:, 1:])  # interior interfaces, (ncol, nlev-1)
+    flux_sfc = flux[:, -1:]                          # surface-coupled MF flux
+    flux_iface = jnp.concatenate([zero_top, flux_int, flux_sfc], axis=1)  # (ncol, nlev+1)
+    # d(phi)/dt|_k = -(F_upper - F_lower)/(rho_k dz_k); upper iface = k, lower = k+1.
+    dflux_dz = (flux_iface[:, :-1] - flux_iface[:, 1:]) / dz_layer
+    return -dflux_dz / jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
+
+
 def edmf_turbulence(
     u: jax.Array,
     v: jax.Array,
@@ -334,21 +363,13 @@ def edmf_turbulence(
     M_max = 0.5 * rho * dz_layer / jnp.maximum(dt, 1.0e-12)
     M = jnp.minimum(M, M_max)
 
-    # MF tendencies: d(phi)/dt_mf = -(1/rho) * d(M * (phi_u - phi_env)) / dz
-    # Compute vertical derivative of mass flux transport
-    def _mf_tendency(phi, phi_u):
-        flux = M * (phi_u - phi)  # (ncol, nlev)
-        # Centered FD interior + one-sided FD at top/bottom; single
-        # concatenate replaces alloc-zeros + 3 scatter ops.
-        dflux_top = (flux[:, :1] - flux[:, 1:2]) / dz_layer[:, :1]
-        dflux_int = (flux[:, :-2] - flux[:, 2:]) / (2.0 * dz_layer[:, 1:-1])
-        dflux_bot = (flux[:, -2:-1] - flux[:, -1:]) / dz_layer[:, -1:]
-        dflux_dz = jnp.concatenate([dflux_top, dflux_int, dflux_bot], axis=1)
-        return -dflux_dz / jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
-
-    dtheta_dt_mf = _mf_tendency(theta, theta_u)
+    # MF tendencies: flux-form vertical divergence of M·(phi_u − phi_env), so
+    # the column mass-weighted integral telescopes to the boundary fluxes
+    # (conservative — a centred full-level difference leaks a spurious column
+    # source).  See module-level ``_mass_flux_tendency``.
+    dtheta_dt_mf = _mass_flux_tendency(theta, theta_u, M, dz_layer, rho)
     dT_dt_mf = dtheta_dt_mf * exner_inv
-    dq_dt_mf = _mf_tendency(q_v, q_u)
+    dq_dt_mf = _mass_flux_tendency(q_v, q_u, M, dz_layer, rho)
 
     # ===== ED tendencies via implicit diffusion =====
     sflx_u = tau_x

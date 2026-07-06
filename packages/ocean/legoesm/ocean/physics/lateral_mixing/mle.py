@@ -111,7 +111,7 @@ class MLEConfig(NamedTuple):
     bolus_cfl_cap: float = 0.0
 
 
-def mle_coefficient(ce: float, lat_ref_deg: float) -> float:
+def mle_coefficient(ce: float, lat_ref_deg: float) -> float | jnp.ndarray:
     """NEMO nn_mle=1 coefficient ``rc_f = rn_ce / (5 km * 2*Omega*sin(rn_lat))``.
 
     Constant (uses the reference latitude, not local f) so the streamfunction is
@@ -123,12 +123,17 @@ def mle_coefficient(ce: float, lat_ref_deg: float) -> float:
         raise ValueError(
             f"MLE lat_ref_deg={lat} too close to the equator: f0 -> 0 makes rc_f "
             "blow up. Use the NEMO default 20 deg.")
-    # Pure-Python (math, NOT jnp): rc_f is a config-derived CONSTANT computed once
-    # and used as a scalar multiplier inside the jitted step. Using jnp + float()
-    # here triggers ConcretizationTypeError under jit; math.sin keeps it a plain
-    # Python float.
+    # ``lat_ref_deg`` is a FIXED reference latitude (excluded-tier convention,
+    # never traced), so f0 is built with pure-Python ``math`` and stays a plain
+    # Python float — ``jnp.sin`` of a traced angle would be unnecessary here.
     f0 = 2.0 * float(constants.Omega) * math.sin(math.radians(lat))
-    return float(ce) / (_RC_F_LENGTH_SCALE_M * f0)
+    # Do NOT cast ``ce``: it is the registered tunable (MLEConfig.ce, tier-2,
+    # SPEC_MODULES, transform=sigmoid).  A prior ``float(ce)`` raised
+    # ConcretizationTypeError when a traced override was spliced into the config
+    # during extended-tier training, violating the differentiable=True contract.
+    # A Python-float ``ce`` still yields a Python float (production constant-
+    # folding preserved); a traced ``ce`` yields a differentiable traced scalar.
+    return ce / (_RC_F_LENGTH_SCALE_M * f0)
 
 
 def mle_streamfunction_magnitude(

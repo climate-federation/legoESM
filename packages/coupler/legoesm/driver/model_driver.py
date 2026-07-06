@@ -202,6 +202,9 @@ class ModelDriver:
         self._grid_global = None  # global grid preserved under band/cell MPI
         self._physics_lat = None  # rank-local lat for physics
         self._physics_lon = None  # rank-local lon for physics
+        # Global owned-cell count for the MPAS diag (partition-static:
+        # allreduced ONCE on first use by _mpas_global_diag, then cached).
+        self._mpas_g_n_cells = None
 
         # SPMD halo backend lifecycle.  When the driver activates the
         # explicit SPMD halo backend for multi-GPU single-node cubed-
@@ -4179,16 +4182,27 @@ class ModelDriver:
             T_min_l, T_max_l, finite_l.astype(T_data.dtype),
             cwv_sum_l.astype(T_data.dtype),
         ]))
-        n_owned = int(vl.partition.n_owned_cells)
         comm = _MPI.COMM_WORLD
-        g_sum_T = comm.allreduce(float(_loc[0]), op=_MPI.SUM)
-        g_sum_ps = comm.allreduce(float(_loc[1]), op=_MPI.SUM)
-        g_max_u = comm.allreduce(float(_loc[2]), op=_MPI.MAX)
-        g_T_min = comm.allreduce(float(_loc[3]), op=_MPI.MIN)
-        g_T_max = comm.allreduce(float(_loc[4]), op=_MPI.MAX)
-        g_finite = comm.allreduce(bool(_loc[5] > 0.5), op=_MPI.LAND)
-        g_sum_cwv = comm.allreduce(float(_loc[6]), op=_MPI.SUM)
-        g_n_cells = comm.allreduce(n_owned, op=_MPI.SUM)
+        # THREE batched buffer allreduces instead of eight scalar pickle
+        # rounds (each scalar ``comm.allreduce`` is its own latency-bound
+        # collective; at multi-node rank counts the per-diag latency is
+        # 8x a single round for no reason).  The finite flag (as a float)
+        # rides the MIN batch: all-ranks-finite  <=>  min(finite) == 1.
+        _sums = np.array([_loc[0], _loc[1], _loc[6]], dtype=np.float64)
+        _maxs = np.array([_loc[2], _loc[4]], dtype=np.float64)
+        _mins = np.array([_loc[3], _loc[5]], dtype=np.float64)
+        comm.Allreduce(_MPI.IN_PLACE, _sums, op=_MPI.SUM)
+        comm.Allreduce(_MPI.IN_PLACE, _maxs, op=_MPI.MAX)
+        comm.Allreduce(_MPI.IN_PLACE, _mins, op=_MPI.MIN)
+        g_sum_T, g_sum_ps, g_sum_cwv = (float(v) for v in _sums)
+        g_max_u, g_T_max = (float(v) for v in _maxs)
+        g_T_min, g_finite_min = (float(v) for v in _mins)
+        g_finite = bool(g_finite_min > 0.5)
+        # Owned-cell count is partition-static: allreduce ONCE and cache.
+        if self._mpas_g_n_cells is None:
+            self._mpas_g_n_cells = comm.allreduce(
+                int(vl.partition.n_owned_cells), op=_MPI.SUM)
+        g_n_cells = self._mpas_g_n_cells
         mean_T = g_sum_T / (g_n_cells * nlev)
         mean_ps = g_sum_ps / g_n_cells
         cwv = (g_sum_cwv / g_n_cells) if cwv_field is not None else float("nan")
@@ -4653,6 +4667,20 @@ class ModelDriver:
         _phys_state = init_physics_state(
             _ncol_phys, _nlev_phys, phys_cfg, dtype=_seed_dtype,
         )
+        # MPAS cell-partition MPI (codex round-9 HIGH): the seed above uses
+        # rank-LOCAL ncol, so ``col_index`` would be ``arange(local)`` on
+        # EVERY rank — duplicate global identities across ranks make the
+        # stochastic per-column fold decomposition-VARIANT (the exact bug
+        # class A1 increment 2 fixed for lat-band SPMD).  The partition's
+        # ``local_cells`` are the (owned+halo) GLOBAL cell ids in local
+        # order; halo columns get their true owner's id, so their draws
+        # match the owning rank (halo values are overwritten by the
+        # exchange regardless).
+        if self._voronoi_layout is not None:
+            _phys_state = _phys_state._replace(
+                col_index=jnp.asarray(
+                    self._voronoi_layout.partition.local_cells,
+                    dtype=jnp.int32))
         # Checkpoint restore (#413): the MPAS load path stashes the
         # persisted PhysicsState fields in carry_aux under
         # ``physstate_<field>``.  Overlay them onto the fresh seed and
@@ -4724,8 +4752,15 @@ class ModelDriver:
             # carry and must fail loudly (issue #405/#413).
             _NEW_OPTIONAL_PS_FIELDS = frozenset({"aerosol_number"})
             if _any_physstate:
+                # ``col_index`` is exempt from the completeness contract:
+                # it is CONSTANT derivable identity data (arange(ncol),
+                # never evolved), added 2026-07 — checkpoints written
+                # before then legitimately lack it, and the fresh seed's
+                # arange is byte-identical to what the save would have
+                # stored.  Every EVOLVING field stays mandatory.
                 _missing = [f for f in _phys_state._fields
-                            if f not in _present_fields]
+                            if f not in _present_fields
+                            and f != "col_index"]
                 _new_missing = [f for f in _missing
                                 if f in _NEW_OPTIONAL_PS_FIELDS]
                 _missing = [f for f in _missing

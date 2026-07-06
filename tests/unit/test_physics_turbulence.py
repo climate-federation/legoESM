@@ -185,3 +185,57 @@ def test_zero_wind_zero_momentum_tendency(scheme):
     max_dv = float(jnp.max(jnp.abs(tend.dv_dt.data)))
     assert max_du < 1e-10, f"{scheme}: du_dt = {max_du:.2e} with zero wind"
     assert max_dv < 1e-10, f"{scheme}: dv_dt = {max_dv:.2e} with zero wind"
+
+
+# ---------------------------------------------------------------------------
+# EDMF mass-flux transport: flux-form conservation
+# ---------------------------------------------------------------------------
+
+def test_edmf_mass_flux_tendency_is_conservative():
+    """The EDMF mass-flux transport is FLUX-FORM: its column mass-weighted
+    integral telescopes to the boundary fluxes (no MF through the model top,
+    ``F_top = 0``; surface-coupled ``F_sfc = flux[:, -1]``), so
+    ``Σ rho·dz·tend = flux[:, -1]``.  A non-flux-form centred difference at full
+    levels does NOT telescope and leaks a spurious O(interior MF flux) column
+    source — the defect this replaces.  (Physics review: turb/edmf, 2026-06-29.)
+    """
+    from legoesm.atmosphere.physics.turbulence.edmf import _mass_flux_tendency
+
+    ncol, nlev = 3, 12
+    k = jnp.arange(nlev) * 1.0
+    M = jnp.broadcast_to((0.02 + 0.03 * jnp.sin(0.4 * k))[None, :], (ncol, nlev))
+    phi = jnp.broadcast_to((300.0 + 0.5 * k)[None, :], (ncol, nlev))
+    phi_u = phi + (0.8 + 0.2 * jnp.cos(0.5 * k))[None, :]
+    dz_layer = jnp.full((ncol, nlev), 500.0)
+    rho = jnp.broadcast_to((1.1 - 0.05 * k)[None, :], (ncol, nlev))  # all > 0.01 floor
+
+    tend = _mass_flux_tendency(phi, phi_u, M, dz_layer, rho)
+    flux = M * (phi_u - phi)
+    col = jnp.sum(rho * dz_layer * tend, axis=1)   # mass-weighted column integral
+    expected = flux[:, -1]                          # F_sfc - F_top = flux[-1] - 0
+
+    assert bool(jnp.all(jnp.isfinite(tend)))
+    assert jnp.allclose(col, expected, rtol=1e-5, atol=1e-6), (
+        f"MF transport not conservative: col={col} vs expected={expected}"
+    )
+
+
+def test_edmf_wires_in_flux_form_mass_flux_helper():
+    """Wiring guard: ``edmf_turbulence`` must DELEGATE its mass-flux transport
+    to the module-level flux-form ``_mass_flux_tendency`` and not re-introduce
+    an inline (non-conservative) centred-difference divergence.  Without this
+    guard the helper could stay correct while production silently reverts to the
+    old centred formula.  (Physics review: turb/edmf conservation, 2026-06-29.)
+    """
+    import inspect
+    from legoesm.atmosphere.physics.turbulence import edmf as edmf_mod
+
+    src = inspect.getsource(edmf_mod.edmf_turbulence)
+    assert src.count("_mass_flux_tendency(") >= 2, (
+        "edmf_turbulence no longer delegates both theta and q MF transport to "
+        "the flux-form _mass_flux_tendency helper"
+    )
+    assert "def _mf_tendency" not in src, (
+        "an inline mass-flux divergence closure was re-introduced in "
+        "edmf_turbulence (use the conservative module-level helper)"
+    )

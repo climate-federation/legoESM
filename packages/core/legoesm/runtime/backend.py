@@ -543,6 +543,25 @@ def _configure_persistent_jit_cache() -> None:
     _configure_persistent_jit_cache._done = True  # type: ignore[attr-defined]
 
 
+def enable_persistent_compile_cache() -> None:
+    """Public, side-effect-only entrypoint for the persistent XLA compile cache.
+
+    Drivers that do NOT go through ``configure_backend`` / ``bootstrap`` —
+    ``scripts/run/run_amip.py`` and the ``training`` package — still want the
+    cross-process JIT cache.  The RRTMGP radiation graph cold-compiles in
+    ~2600 s; without the cache that cost is re-paid on *every* process launch
+    (each iterate/debug run, each restart, each sweep point).  With the cache
+    on, the second and later launches are a few-second cache lookup.
+
+    Thin wrapper over :func:`_configure_persistent_jit_cache` so the private
+    symbol is never imported across packages (CI ratchet
+    ``test_no_private_cross_imports``).  Idempotent; call before the first
+    ``jax.jit`` compile in the process.  Honors ``LEGOESM_JIT_CACHE_DIR`` /
+    ``LEGOESM_JIT_CACHE_MIN_SECS`` (set the dir to ``""`` to opt out).
+    """
+    _configure_persistent_jit_cache()
+
+
 # ---------------------------------------------------------------------------
 # Spectral-backend guard (from core.hardware)
 # ---------------------------------------------------------------------------
