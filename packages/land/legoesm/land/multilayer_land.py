@@ -392,11 +392,14 @@ def _step_multilayer_land_impl(
         # Per-band melt limited by each band's OWN net radiation minus the (cell)
         # turbulent fluxes; area-weighted mean equals the aggregate G_surface, so
         # soil-column energy is conserved.  Firn/ice reservoir per gap 4.
+        # Per-band rain (gap 6 refreeze input) + cell wind (gap 5 blowing snow).
+        _precip_rain_bands = forcing.precip_total[:, None] - snowfall_bands
         band_step = step_snow_bands(
             state.snow_bands, state.snow_age_bands, ice_bands_in, T_surface,
             snowfall_bands, dt,
             Q_net=band_rad.Rn_bands - shflx[:, None] - lhflx[:, None],
-            cfg=bands, T_snow_melt=config.T_snow_melt)
+            cfg=bands, T_snow_melt=config.T_snow_melt,
+            precip_rain_bands=_precip_rain_bands, wind=wind_speed)
         snow_bands_new = band_step.swe_bands
         ice_bands_new = band_step.ice_bands
         snow_age_bands_new = band_step.snow_age_bands
@@ -404,6 +407,8 @@ def _step_multilayer_land_impl(
         snow_age_new = band_step.snow_age
         snow_melt = band_step.snow_melt
         ice_melt = band_step.ice_melt
+        refreeze = band_step.refreeze          # (ncol,) rain refrozen [kg/m2] (gap 6)
+        blow_subl = band_step.blow_subl        # (ncol,) blowing-snow sublimation [kg/m2/s]
         # Frozen glacier discharge + ablation ice meltwater both leave as runoff.
         cap_runoff = band_step.ice_runoff + ice_melt / dt
     else:
@@ -417,9 +422,14 @@ def _step_multilayer_land_impl(
         snow_age_bands_new = state.snow_age_bands
         ice_bands_new = state.ice_bands
         ice_melt = jnp.zeros_like(snow_new)
+        refreeze = jnp.zeros_like(snow_new)
+        blow_subl = jnp.zeros_like(snow_new)
         cap_runoff = jnp.zeros_like(snow_new)
-    # Seasonal-snow + ablation-ice melt both consume L_f; frozen discharge does not.
-    melt_energy = (snow_melt + ice_melt) * constants.L_f / dt
+    # Energy into the surface budget: seasonal-snow + ablation-ice melt CONSUME L_f;
+    # rain-on-snow refreezing (gap 6) RELEASES L_f; blowing-snow sublimation (gap 5)
+    # consumes L_s.  (Frozen glacier discharge leaves as ice — no fusion.)
+    melt_energy = ((snow_melt + ice_melt - refreeze) * constants.L_f / dt
+                   + blow_subl * constants.L_s)
     G_surface = G_surface - melt_energy
 
     # --- Latent mass partition (sublimation vs soil evap, water-limited) ---
@@ -447,7 +457,8 @@ def _step_multilayer_land_impl(
     dz = grid.dz
     extractable_water = jnp.sum(
         jnp.maximum(theta - theta_r, 0.0) * dz[None, :], axis=-1) * rho_w
-    precip_rain = forcing.precip_total - precip_snow_eff
+    # Rain that refroze into the pack (gap 6) is now snow, so it no longer infiltrates.
+    precip_rain = forcing.precip_total - precip_snow_eff - refreeze / dt
     melt_rate = snow_melt / dt
     soil_evap_demand = jnp.where(has_snow, 0.0, evap_rate_demand)
     # Bare-soil evaporation resistance (#671, Sellers 1992 / Lee & Pielke 1992):

@@ -98,6 +98,34 @@ __param_spec__ = {
                              "bare-ice observations 0.2-0.4",
                 "shape": None,
             },
+            "sky_view_min": {
+                "units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "terrain sky-view factor of the deepest valley band "
+                             "(gap 5); 1 = flat/open sky",
+                "shape": None,
+            },
+            "blow_snow_wind_thresh_ms": {
+                "units": "m/s", "bounds": (4.0, 12.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "blowing-snow mobilisation wind threshold "
+                             "(Pomeroy / CROCUS, gap 5)",
+                "shape": None,
+            },
+            "blow_snow_subl_rate": {
+                "units": "kg/m2/s/(m/s)", "bounds": (0.0, 1.0e-5), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "blowing-snow sublimation rate over threshold (gap 5); "
+                             "0 = off",
+                "shape": None,
+            },
+            "refreeze_frac": {
+                "units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "fraction of rain refreezing into a sub-freezing snow band "
+                             "(gap 6 cold content)",
+                "shape": None,
+            },
         },
     },
 }
@@ -139,6 +167,24 @@ class ElevationSnowBandConfig(NamedTuple):
     # Ice-reservoir ceiling [kg/m2] = 10 m w.e. (CLM5 snow-capping bound, Oleson et
     # al. 2013): ice above this is shed to runoff, bounding perennial storage.
     swe_cap: float = 1.0e4
+    # --- Terrain radiation (gap 5): sub-grid sky-view / shading ---
+    # Minimum sky-view fraction of the most-shielded (lowest) band [0-1]: rough sub-grid
+    # terrain blocks part of the sky, and the blocked fraction is filled by the
+    # surrounding slopes radiating at ~the band's own skin T, so the band's NET longwave
+    # loss scales by its per-band sky-view V_band (1 at the ridge, sky_view_min in the
+    # valley) — valleys cool less at night (terrain shielding).  1.0 disables it.
+    sky_view_min: float = 1.0
+    # --- Blowing snow (gap 5): wind-driven sublimation loss ---
+    # 10 m wind threshold [m/s] above which snow is mobilised (Pomeroy / CROCUS).
+    blow_snow_wind_thresh_ms: float = 7.0
+    # Blowing-snow sublimation rate [kg/m2/s per (m/s) over threshold]; 0 = off (opt-in,
+    # needs site wind/fetch calibration).  Removes SWE from the exposed high bands.
+    blow_snow_subl_rate: float = 0.0
+    # --- Snowpack cold content (gap 6): rain-on-snow refreezing ---
+    # Fraction of rain that refreezes into a sub-freezing snow band, releasing L_f into
+    # the surface energy budget (delays runoff, warms the pack).  The frozen-SOIL latent
+    # heat is handled by SoilThermalConfig.enable_freeze_thaw (zero-curtain).
+    refreeze_frac: float = 1.0
 
 
 def band_elevation_anomalies(std_elev: jnp.ndarray, n_bands: int = 5) -> jnp.ndarray:
@@ -224,6 +270,8 @@ class SnowBandStep(NamedTuple):
     snow_melt: jax.Array       # (ncol,) area-weighted seasonal-snow melt [kg/m2] (-> infiltration)
     ice_melt: jax.Array        # (ncol,) area-weighted ablation ice melt [kg/m2] (-> runoff)
     ice_runoff: jax.Array      # (ncol,) frozen glacier discharge + ceiling [kg/m2/s] (-> runoff)
+    refreeze: jax.Array        # (ncol,) rain refrozen into the pack [kg/m2] (gap 6; -> +L_f to G, NOT infiltration)
+    blow_subl: jax.Array       # (ncol,) blowing-snow sublimation SWE loss [kg/m2/s] (gap 5; -> atmosphere)
 
 
 def step_snow_bands(
@@ -237,6 +285,8 @@ def step_snow_bands(
     Q_net: jnp.ndarray,
     cfg: ElevationSnowBandConfig,
     T_snow_melt: float = constants.T_freeze,
+    precip_rain_bands: jnp.ndarray | None = None,
+    wind: jnp.ndarray | None = None,
 ) -> SnowBandStep:
     """Advance the banded seasonal-snow + firn/glacier-ice budget one step.
 
@@ -280,6 +330,18 @@ def step_snow_bands(
         swe_bands, snow_age_bands, T_sfc_band, snowfall_bands, dt,
         Q_net=Q_net_bands, T_snow_melt=T_snow_melt,
     )
+    # 1b. Rain-on-snow refreezing (gap 6 cold content): rain onto a sub-freezing band
+    #     with snow freezes into the pack, releasing L_f (the caller adds it to G) and
+    #     adding to SWE — so it does NOT run off/infiltrate.  Single-layer band: no pack
+    #     liquid store, so this is the dominant cold-content path (multi-layer retained
+    #     liquid is the upgrade).
+    if precip_rain_bands is not None:
+        _cold_snow = (T_sfc_band < T_snow_melt) & (swe_after_melt > 1e-6)
+        refreeze_bands = jnp.where(
+            _cold_snow, cfg.refreeze_frac * precip_rain_bands * dt, 0.0)
+        swe_after_melt = swe_after_melt + refreeze_bands
+    else:
+        refreeze_bands = jnp.zeros_like(swe_after_melt)
     # 2. Firnification: seasonal snow above the snow cap densifies into ice storage.
     to_ice = jnp.maximum(swe_after_melt - cfg.swe_snow_cap, 0.0)
     swe_new = swe_after_melt - to_ice
@@ -300,6 +362,19 @@ def step_snow_bands(
     ice_new = ice_after_disch - ceil_excess
 
     n_bands = swe_bands.shape[-1]
+    # 5. Blowing-snow sublimation (gap 5): above the mobilisation wind threshold, snow
+    #    sublimes from suspension — an SWE sink to the atmosphere (opt-in; rate 0 = off),
+    #    bounded by the band SWE.  Removes preferentially from the exposed high bands via
+    #    their (larger) SWE weighting.
+    if wind is not None and cfg.blow_snow_subl_rate > 0.0:
+        _blow_rate = cfg.blow_snow_subl_rate * jnp.maximum(
+            jnp.reshape(wind, (-1, 1)) - cfg.blow_snow_wind_thresh_ms, 0.0)
+        _blow_mass = jnp.minimum(_blow_rate * dt, swe_new)
+        swe_new = swe_new - _blow_mass
+        blow_subl = jnp.sum(_blow_mass, axis=-1) / n_bands / dt
+    else:
+        blow_subl = jnp.zeros(swe_new.shape[0], dtype=swe_new.dtype)
+
     swe_sum = jnp.sum(swe_new, axis=-1)
     ok = swe_sum > 1e-12
     age_agg = jnp.where(
@@ -315,6 +390,8 @@ def step_snow_bands(
         snow_melt=jnp.sum(snow_melt, axis=-1) / n_bands,
         ice_melt=jnp.sum(ice_melt, axis=-1) / n_bands,
         ice_runoff=jnp.sum(discharge + ceil_excess, axis=-1) / n_bands / dt,
+        refreeze=jnp.sum(refreeze_bands, axis=-1) / n_bands,
+        blow_subl=blow_subl,
     )
 
 
@@ -462,6 +539,15 @@ def band_net_radiation(
     sw_net_b = sw_down_b * (1.0 - alpha_bands)
     lw_up_b = emis * constants.sigma_sb * T_skin ** 4
     lw_net_b = emis * lw_down_b - lw_up_b
+    # Terrain sky-view (gap 5): a shielded (valley) band exchanges the blocked sky
+    # fraction with surrounding slopes at ~its own skin T (no net exchange there), so
+    # its NET longwave scales by the per-band sky-view V_band — 1 at the ridge
+    # (dz_hi), sky_view_min in the deepest valley (dz_lo).  V==1 (sky_view_min=1) is a
+    # no-op.  Sub-grid geometry proxy from the band elevation spread.
+    dz_span = jnp.maximum(dz_hi - dz_lo, 1e-6)
+    shielding = jnp.clip((dz_hi - dz) / dz_span, 0.0, 1.0)     # 0 ridge -> 1 valley
+    v_band = 1.0 - (1.0 - cfg.sky_view_min) * shielding
+    lw_net_b = v_band * lw_net_b
     Rn_b = sw_net_b + lw_net_b
     # SW-flux-weighted aggregate albedo: reflected / incident.  mean_k sw_down_b is
     # exactly sw_down (zero-mean dz), so alpha_eff = mean_k sw_down_b*alpha / sw_down.

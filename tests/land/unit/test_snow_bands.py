@@ -286,6 +286,42 @@ class TestBandStep(unittest.TestCase):
         self.assertEqual(out.ice_bands.dtype, f32)
         self.assertEqual(out.snow_age_bands.dtype, f32)
 
+    def test_rain_on_snow_refreezes(self):
+        """Gap 6 cold content: rain on a sub-freezing snow band refreezes into SWE
+        (releasing L_f), not running off; a warm/snow-free band does not refreeze."""
+        cfg = _band_cfg([0.0])
+        swe0 = jnp.full((1, 5), 20.0)
+        rain = jnp.full((1, 5), 1e-4)                          # 0.36 kg/m2 over the step
+        out = step_snow_bands(
+            swe0, jnp.zeros((1, 5)), jnp.zeros((1, 5)),
+            jnp.array([constants.T_freeze - 5.0]), jnp.zeros((1, 5)), 3600.0,
+            Q_net=jnp.zeros(1), cfg=cfg, precip_rain_bands=rain)
+        npt.assert_allclose(out.refreeze, 1e-4 * 3600.0, rtol=1e-6)   # all rain refroze
+        self.assertGreater(float(out.swe_total[0]), 20.0)            # SWE grew by the rain
+        out_warm = step_snow_bands(
+            jnp.zeros((1, 5)), jnp.zeros((1, 5)), jnp.zeros((1, 5)),
+            jnp.array([constants.T_freeze + 5.0]), jnp.zeros((1, 5)), 3600.0,
+            Q_net=jnp.zeros(1), cfg=cfg, precip_rain_bands=rain)
+        self.assertEqual(float(out_warm.refreeze[0]), 0.0)          # no snow -> no refreeze
+
+    def test_blowing_snow_sublimation(self):
+        """Gap 5: wind above the mobilisation threshold sublimes SWE (opt-in rate)."""
+        cfg = ElevationSnowBandConfig(
+            band_dz=band_elevation_anomalies(jnp.asarray([0.0])),
+            blow_snow_subl_rate=1e-6, blow_snow_wind_thresh_ms=5.0)
+        swe0 = jnp.full((1, 5), 100.0)
+        out = step_snow_bands(
+            swe0, jnp.zeros((1, 5)), jnp.zeros((1, 5)),
+            jnp.array([constants.T_freeze - 10.0]), jnp.zeros((1, 5)), 3600.0,
+            Q_net=jnp.zeros(1), cfg=cfg, wind=jnp.array([15.0]))      # 10 m/s over thresh
+        self.assertGreater(float(out.blow_subl[0]), 0.0)
+        self.assertLess(float(out.swe_total[0]), 100.0)             # SWE reduced
+        out_calm = step_snow_bands(
+            swe0, jnp.zeros((1, 5)), jnp.zeros((1, 5)),
+            jnp.array([constants.T_freeze - 10.0]), jnp.zeros((1, 5)), 3600.0,
+            Q_net=jnp.zeros(1), cfg=cfg, wind=jnp.array([3.0]))       # below threshold
+        self.assertEqual(float(out_calm.blow_subl[0]), 0.0)
+
     def test_per_band_age_fresh_and_perennial_coexist(self):
         """Fresh snowfall on the LOW band resets only that band's age; the cold high
         bands (no fresh snow) keep aging -- perennial firn and fresh snow coexist
@@ -496,6 +532,21 @@ class TestBandRadiation(unittest.TestCase):
         r = band_net_radiation(jnp.array([255.0]), jnp.full((1, 5), 0.6), sw, lw, 0.97, cfg)
         self.assertTrue(bool(jnp.all(jnp.isfinite(r.Rn_bands))))
         npt.assert_allclose(r.alpha_eff * sw + r.sw_net_agg, sw, rtol=1e-10)
+
+    def test_sky_view_reduces_valley_lw_loss(self):
+        """Gap 5: sky_view_min < 1 scales down the NET LW of the shielded (valley) bands
+        (terrain shielding -> less radiative cooling); the ridge band is unchanged."""
+        cfg_open = ElevationSnowBandConfig(
+            band_dz=band_elevation_anomalies(jnp.asarray([1000.0])))
+        cfg_shield = cfg_open._replace(sky_view_min=0.5)
+        T = jnp.array([260.0]); a = jnp.full((1, 5), 0.6)
+        sw, lw, emis = jnp.array([0.0]), jnp.array([200.0]), 0.97   # night: LW only
+        r0 = band_net_radiation(T, a, sw, lw, emis, cfg_open)
+        r1 = band_net_radiation(T, a, sw, lw, emis, cfg_shield)
+        # valley band (lowest dz, index 0): shielded -> less negative net radiation
+        self.assertGreater(float(r1.Rn_bands[0, 0]), float(r0.Rn_bands[0, 0]))
+        # ridge band (highest dz, index -1): V == 1, unchanged
+        npt.assert_allclose(r1.Rn_bands[0, -1], r0.Rn_bands[0, -1], rtol=1e-9)
 
     def test_float64_band_dz_does_not_promote_output(self):
         """A float64 CLM band_dz with a float32 state must NOT promote band_net_radiation
