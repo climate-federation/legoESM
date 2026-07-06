@@ -1020,6 +1020,25 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
     )
 
 
+def _apply_qv_smoothing(q_v_upd, statics):
+    """Moisture ∇⁴ smoothing + positivity floor for the operator-split tail.
+
+    Static gate: ``qv_smooth_coeff`` is a frozen-dataclass closure constant
+    (NOT traced), so this ``if`` folds at compile time.  When it is 0 the
+    hyperdiffusion is a ×0 no-op AND skipping it avoids calling the
+    grid-specific ∇⁴ operator — ``laplacian_compact_3d`` reads the cube-only
+    ``grid.halo_interp_offsets`` (absent on lat-lon), which the lat-lon training
+    rollout (``qv_smooth_coeff=0.0``) would otherwise hit.  The nonzero-coeff
+    path is bit-identical to the former nested ``max(q + dt·∇⁴, 0)``; only the
+    q>=0 floor always applies.  Module-scope (not defined in the scan body) per
+    the repo's hot-loop helper doctrine, and so fix-5 is directly testable.
+    """
+    if statics.qv_smooth_coeff != 0.0:
+        q_v_upd = q_v_upd + statics.dt * statics.hyperdiffusion_3d(
+            q_v_upd, statics.grid, statics.qv_smooth_coeff)
+    return jnp.maximum(q_v_upd, 0.0)
+
+
 def finalize_split_step(carry, lz, statics):
     """The shared operator-split TAIL (saturation adjustment, moisture fixer,
     moisture smoothing, Rayleigh friction, ``SegmentCarry`` pack) — VERBATIM
@@ -1047,18 +1066,8 @@ def finalize_split_step(carry, lz, statics):
             owned_mask=statics.owned_mask,
         )
 
-    # --- Moisture smoothing ---
-    # Static gate: ``qv_smooth_coeff`` is a frozen-dataclass closure constant
-    # (NOT traced), so this ``if`` folds at compile time.  When it is 0 the
-    # hyperdiffusion is a ×0 no-op AND skipping it avoids calling the
-    # grid-specific ∇⁴ operator — ``laplacian_compact_3d`` reads the cube-only
-    # ``grid.halo_interp_offsets`` (absent on lat-lon), which the lat-lon training
-    # rollout (``qv_smooth_coeff=0.0``) would otherwise hit.  The nonzero-coeff
-    # path is unchanged (bit-identical); only the q>=0 floor always applies.
-    if statics.qv_smooth_coeff != 0.0:
-        q_v_upd = q_v_upd + statics.dt * statics.hyperdiffusion_3d(
-            q_v_upd, statics.grid, statics.qv_smooth_coeff)
-    q_v_upd = jnp.maximum(q_v_upd, 0.0)
+    # --- Moisture smoothing (static-gated ∇⁴ + positivity floor) ---
+    q_v_upd = _apply_qv_smoothing(q_v_upd, statics)
 
     # --- Rayleigh friction ---
     u_upd = lz.u_new * statics.fric_decay
