@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 
@@ -64,3 +64,7 @@ class MultiLayerLandState(NamedTuple):
     # dark ablation ice where the seasonal snow melts off.  ``None`` (legacy / bands
     # off) has no perennial-ice reservoir.
     ice_bands: jax.Array = None
+    # Prognostic state for the CLM-ML-JAX multilayer canopy scheme.
+    # Holds the ``mlcanopy_type`` instance carried forward between steps.
+    # ``None`` when the CLM-ML canopy scheme is not active.
+    canopy_state: Any | None = None

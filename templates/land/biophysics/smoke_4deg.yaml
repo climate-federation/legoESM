@@ -1,0 +1,76 @@
+# Fast smoke at ~4° latlon with the cheap surface-energy-balance path.
+#
+# Target use: iterating on the pipeline with realistic CRU-JRA forcing
+# and a real ~40x speedup over the 2° two-leaf-canopy default.
+#
+# Cost breakdown vs spinup_5year (90x180 + two_leaf_canopy):
+#   * 45x90 = 4050 cols vs 16200      → ~4x fewer cells
+#   * simple_seb + constant bulk       → ~10x cheaper per step
+#   * 30 days (720 steps) vs 5 years   → 60x fewer steps
+#   → 1 model-month at 4° here is measured in minutes on CPU, tens of
+#     seconds on GPU (after compile).
+#
+# NOTE on grid: --resolution is one integer N producing N x 2N (=4°x4°
+# here — 4°lat, 4°lon).  If you really need 4° x 5° (unequal aspect),
+# the driver needs a small extension to accept (n_lat, n_lon); tell me.
+#
+# PHYSICS TRADE-OFFS to know:
+#   * simple_seb is skin-only SEB — no canopy Newton, no Farquhar/Ball-Berry,
+#     no leaf radiative transfer.  Latent heat is aerodynamic-limited.
+#   * bulk_scheme=constant is REQUIRED here — simple_seb + MOST is
+#     numerically unstable (T_sfc → ±∞).  The config validator will
+#     reject that combination if you try to override it via -o.
+#
+# Everything else (Richards, soil thermal, snow, prescribed LAI from
+# surfdata) is identical to the production template.
+
+template_name: biophysics/smoke_4deg
+template_version: 1.0.0
+description: Fast 4° biophysics smoke — simple_seb + constant bulk, 30-day CRU-JRA
+
+grid:
+  type: latlon
+  resolution: 45                # 45 x 90 = 4° x 4°
+
+physics:
+  land_mode: multilayer
+  surface_scheme: simple_seb    # skip the two-leaf canopy Newton
+  bulk_scheme: constant         # MUST pair with simple_seb (validator enforces)
+
+forcing:
+  source: cru_jra
+  data_dir: data/crujra
+  prefix: clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5
+  suffix: ""
+  year_start: 1920
+  year_end: 1920                # single year (bump year_end for multi-year)
+  k_neighbors: 4
+
+surfdata:
+  path: data/legoesm_surfdata_c250617.nc
+
+time:
+  dt: 3600.0                    # 1 h
+  n_steps: 720                  # 30 days — enough to see the monthly tape land
+  start_doy: 0.0
+
+restart:
+  from: ""
+
+land_frac_min: 0.5
+land_mask_file: ""
+
+output:
+  # Monthly tapes — same shape as the production spinup_5year template so
+  # analysis code carries over.  For a 30-day run this produces one slot
+  # per tape (Jan of year_start).  Bump n_steps to see more slots.
+  tapes:
+    - name: monthly
+      freq: monthly
+      average: mean
+      vars: [T_sfc, shflx, lhflx, albedo, LAI, runoff, precip]
+
+    - name: monthly_state
+      freq: monthly
+      average: inst
+      vars: [T_soil_top, theta_soil_top, snow_depth]

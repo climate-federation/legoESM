@@ -66,22 +66,41 @@ def surfdata_covered(gsd) -> np.ndarray:
     return np.isfinite(pft0.sum(axis=-1))
 
 
-def fill_land_param_gaps(land_params, gsd):
+def fill_land_param_gaps(land_params, gsd, f_land=None):
     """Replace surfdata-uncovered (and any non-finite) columns with a bare fallback.
 
     Reconciles the surfdata with the driver's authoritative land mask: a column is
     kept only where the surfdata covers it *and* the value is finite, otherwise it
     falls back to bare soil.  Works for :class:`CanopyLandParams` or
     :class:`LandSurfaceParams`.
+
+    ``f_land`` (optional, ``(ncol,)`` in the model's column order, e.g. the
+    driver's ``_f_land`` ravelled): when given, surfdata values are kept ONLY where
+    the *driver* mask says land (``f_land > 0``) AND the surfdata covers the cell
+    with finite values; ocean cells (``f_land == 0``) and mask-land cells the
+    surfdata misses both fall back to bare soil.  This pins the land params to the
+    authoritative mask so they carry surfdata only on driver-land cells and can
+    never disagree with the ocean tile (weighted by ``1 - f_land``).  Land params
+    are finite on every column either way; ``f_land`` only constrains *where*
+    surfdata (vs bare) appears.  Without ``f_land`` the behaviour is unchanged.
     """
     covered = jnp.asarray(surfdata_covered(gsd))            # (ncol,)
     ncol = covered.shape[0]
+    keep_col = covered
+    if f_land is not None:
+        f_land = jnp.asarray(f_land).reshape(-1)
+        if f_land.shape[0] != ncol:
+            raise ValueError(
+                f"f_land has {f_land.shape[0]} columns but the land params have "
+                f"{ncol}; ravel / grid-column mismatch."
+            )
+        keep_col = keep_col & (f_land > 0.0)                # surfdata only on driver-land
     fb = (_bare_canopy_params(ncol) if isinstance(land_params, CanopyLandParams)
           else _bare_land_surface_params(ncol))
 
     def _fill(v, f):
         v = jnp.asarray(v)
-        keep = covered.reshape(covered.shape + (1,) * (v.ndim - 1))
+        keep = keep_col.reshape(keep_col.shape + (1,) * (v.ndim - 1))
         return jnp.where(keep & jnp.isfinite(v), v, jnp.asarray(f))
 
     return jax.tree.map(_fill, land_params, fb)

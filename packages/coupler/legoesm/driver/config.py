@@ -658,6 +658,12 @@ class ExperimentConfig(NamedTuple):
     # no separate mask file is available.  Ignored when land_mask_path is set
     # (the file path already implies activation).
     slab_land_active: bool = False
+    # Optional harmonized surface-data NetCDF (legoesm_surfdata_*.nc).  When
+    # set together with land_mask_path, the static land albedo field is taken
+    # from the surfdata (per-column soil-colour + PFT-vegetation blend, glacier
+    # override) instead of the latitude-only land_vegetation_albedo() curve;
+    # empty → latitude-only land albedo (unchanged behaviour).
+    surfdata_path: str = ""
 
     # Surface
     T_init: float = 300.0
@@ -1515,6 +1521,7 @@ class ExperimentConfig(NamedTuple):
             cloud_r_eff_ice=getattr(amip_cfg, 'cloud_r_eff_ice', 30.0e-6),
             cloud_r_eff_liq_ocean=getattr(amip_cfg, 'cloud_r_eff_liq_ocean', 10.0e-6),
             cloud_r_eff_liq_land=getattr(amip_cfg, 'cloud_r_eff_liq_land', 7.0e-6),
+            surfdata_path=getattr(amip_cfg, 'surfdata_path', ''),
             T_init=amip_cfg.T_init,
             rh_init=amip_cfg.rh_init,
             dynamic_albedo=amip_cfg.dynamic_albedo,

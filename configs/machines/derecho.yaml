@@ -1,0 +1,34 @@
+# Derecho (NCAR) machine profile for init_experiment.py --machine derecho.
+#
+# What this does:
+#   - Emits PBS scheduler headers at the top of the generated run.sh
+#   - Emits the `module load conda` / `conda activate` env-setup block so the
+#     job runs in the right conda env (PBS shells inherit NOTHING from login).
+#   - Exports LEGOESM_PYTHON via `which python` after activation, overriding
+#     the sys.executable that init_experiment pinned at init time.
+#
+# What this does NOT do:
+#   - Set the PBS project account (`#PBS -A ...`).  You supply that on the
+#     qsub line:
+#         qsub -A UYAL0053 run.sh
+#     This keeps run.sh portable across projects — the same file works for any
+#     user / any project without editing.
+
+scheduler: pbs
+
+pbs:
+  job_name: lmip
+  select: "1:ncpus=8:mem=32GB"       # 1 node, 8 CPU, 32 GB
+  walltime: "02:00:00"               # 2 h — bump via `qsub -l walltime=…`
+  queue: main
+  join: oe                            # merge stderr into stdout
+
+# Bash executed AFTER the PBS headers, BEFORE the driver.
+env_setup: |
+  module purge
+  module load conda
+  # `conda activate` references unset vars — briefly disable `set -u`.
+  set +u
+  conda activate "${LEGOESM_CONDA_ENV:-legoesm-lmip}"
+  set -u
+  export LEGOESM_PYTHON="$(which python)"
