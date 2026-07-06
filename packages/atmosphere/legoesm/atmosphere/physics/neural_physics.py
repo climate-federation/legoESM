@@ -238,6 +238,19 @@ class NeuralPhysics(eqx.Module):
             eqx.nn.Linear(dims[i], dims[i + 1], key=keys[i])
             for i in range(n_layers + 1)
         ]
+        # Zero-init the FINAL layer so an untrained network emits EXACTLY
+        # zero tendencies (epoch-0 rollout = the pure dycore, finite by
+        # construction).  residual_scale alone is not enough: random O(1)
+        # outputs x 0.01 are still ~0.04 in physical tendency units, which
+        # destroys q_v (~1e-3 kg/kg) within a few dycore steps (#797
+        # neural_gcm smoke loss=nan).  Learning is unaffected — the final
+        # layer's gradient is nonzero on step 1, after which gradients
+        # reach the earlier (randomly initialized) layers.
+        last = self.layers[-1]
+        self.layers[-1] = eqx.tree_at(
+            lambda l: (l.weight, l.bias), last,
+            (jnp.zeros_like(last.weight), jnp.zeros_like(last.bias)),
+        )
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Forward pass for a single column.

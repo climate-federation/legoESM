@@ -475,9 +475,17 @@ class TestColumnMLPSpectralPhysics:
             carry_to_spectral_state,
             make_column_mlp_spectral_physics,
         )
+        import equinox as eqx
+
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
         nn = _make_small_column_mlp()
+        # NeuralPhysics ZERO-inits its final layer (epoch-0 stability
+        # contract: untrained net = exactly-zero tendencies), so exercise
+        # the MLP->T_hat WIRING with an explicitly perturbed final bias.
+        nn = eqx.tree_at(
+            lambda m: m.layers[-1].bias, nn,
+            jnp.full_like(nn.layers[-1].bias, 0.1))
 
         physics_fn = make_column_mlp_spectral_physics(nn, _GRID)
         tend = physics_fn(state, _GRID, _SIGMA)
@@ -487,7 +495,7 @@ class TestColumnMLPSpectralPhysics:
         assert jnp.allclose(tend.vor_hat.data, 0.0)
         assert jnp.allclose(tend.div_hat.data, 0.0)
         assert jnp.allclose(tend.lnps_hat.data, 0.0)
-        # T tendency should be non-zero (random MLP)
+        # T tendency should be non-zero (perturbed final layer)
         assert jnp.any(tend.T_hat.data != 0.0)
 
     def test_tendencies_finite(self):
