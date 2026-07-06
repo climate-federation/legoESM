@@ -579,43 +579,59 @@ def iter1009_dual_target_config(
 # ---------------------------------------------------------------------------
 
 
-def _validate_cube_resolution(n: int) -> int:
+def _require_positive_int(value, name: str) -> int:
+    """Coerce ``value`` to a positive ``int`` or raise ``ValueError``.
+
+    Uses ``operator.index`` so a ``float``/``np.float64`` (e.g. ``2.5``) is
+    rejected rather than silently truncated, and excludes ``bool`` (which is
+    an ``int`` subclass) — the contract is a genuine positive integer.
+    """
     import operator
-    if isinstance(n, bool):
-        raise ValueError(
-            f"cubed-sphere resolution `n` must be a positive integer, "
-            f"got {n!r}"
-        )
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
     try:
-        n_int = operator.index(n)
+        ivalue = operator.index(value)
     except TypeError:
         raise ValueError(
-            f"cubed-sphere resolution `n` must be a positive integer, "
-            f"got {n!r}"
-        ) from None
-    if n_int <= 0:
-        raise ValueError(
-            f"cubed-sphere resolution `n` must be a positive integer, "
-            f"got {n!r}"
-        )
-    return n_int
+            f"{name} must be a positive integer, got {value!r}") from None
+    if ivalue <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    return ivalue
+
+
+def _validate_cube_resolution(n: int) -> int:
+    return _require_positive_int(n, "cubed-sphere resolution `n`")
 
 
 def cdgrid_hyperdiff_cube(
     n: int, ref_n: int = 48, ref_coeff: float = 1.0e16,
+    scaling_exponent: int = 4,
 ) -> float:
     """Biharmonic hyperdiffusion coefficient [m^4/s] for a C-N cubed-sphere
-    grid, scaled with ``(ref_n/n)^4`` to keep ``hyperdiff_coeff * dx^-4``
-    constant across resolutions.
+    grid, scaled with ``(ref_n/n)^scaling_exponent``.
 
-    Default ``ref_n=48``, ``ref_coeff=1e16`` is the iter-1030 calibration
-    (validated at C36/C48/C72 in the matrix runner — see
+    Default ``ref_n=48``, ``ref_coeff=1e16``, ``scaling_exponent=4`` is the
+    iter-1030 calibration (validated at C36/C48/C72 in the matrix runner — see
     ``scripts/run_atmosphere_test_matrix.py`` and the ``new_test_dycores``
-    log).  Reuse this helper rather than re-deriving ``1e16``/``ref_n``
-    inline.
+    log).  Reuse this helper rather than re-deriving ``1e16``/``ref_n`` inline.
+
+    ``scaling_exponent`` selects the resolution law:
+
+    - ``4`` (default): keeps ``hyperdiff_coeff * dx^-4`` — i.e. the grid-scale
+      biharmonic *damping time* — constant across resolutions.
+    - ``2`` (FV3 ``d_sw5`` corner-damping style, the ``cdgrid_div_damp_cube``
+      law): delivers progressively MORE absolute grid-scale damping as ``n``
+      grows.  For colliding modons (#753) the collision drives an enstrophy
+      cascade whose grid-scale delivery rate rises with resolution, so the
+      ``^4`` law is under-damped at the face seams at C96+; ``^2`` gives the
+      empirically-needed ~4x at C96 (= (96/48)^2).
+
+    Every ``scaling_exponent`` returns ``ref_coeff`` at ``n == ref_n``, so the
+    default C48 calibration is exponent-invariant (C48 runs are unchanged).
     """
+    scaling_exponent = _require_positive_int(scaling_exponent, "scaling_exponent")
     n_int = _validate_cube_resolution(n)
-    return ref_coeff * (ref_n / n_int) ** 4
+    return ref_coeff * (ref_n / n_int) ** scaling_exponent
 
 
 def cdgrid_div_damp_cube(
@@ -633,6 +649,21 @@ def cdgrid_div_damp_cube(
     """
     n_int = _validate_cube_resolution(n)
     return ref_coeff * (ref_n / n_int) ** 2
+
+
+# --- Colliding-modons (#521/#753) validated stable-config defaults ---
+# SINGLE SOURCE OF TRUTH consumed by BOTH the matrix runner (``test_num == 8``
+# env-knob defaults) and ``scripts/validate/run_colliding_modons.py`` (CLI
+# defaults), so the two cannot drift.  #800 was exactly that drift: the driver
+# defaulted to no-duogrid + ``hyperdiff_factor=0.0`` + ``damp_v=0.030`` while the
+# matrix used the tuned stable config, so a plain driver run erupted at the cube
+# seams.  The 2026-07-03 #521 sweep optimum (duogrid + ``damp_v=0.010`` +
+# ``1.0x`` biharmonic; ``0.5x`` erupts at the collision transient, ``0x`` blows
+# up ~day 40 even with duogrid) is stable 100 days at C36/C48.
+MODON_DIV_DAMP_FACTOR: float = 8.0
+MODON_DAMP_V: float = 0.010
+MODON_HYPERDIFF_FACTOR: float = 1.0
+MODON_HYPERDIFF_SCALING: int = 4
 
 
 def williamson_cli_calibration(
