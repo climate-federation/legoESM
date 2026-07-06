@@ -536,24 +536,49 @@ def test_sw_cube_propagating_tests_have_hyperdiff_override():
             "when the env knob is unset."
         )
     # Modon (#521) dedicated branch: its own hyperdiff backstop must
-    # survive — zero hyperdiff blows the 100-day run up at ~day 40.
+    # survive — zero hyperdiff blows the 100-day run up at ~day 40.  The
+    # branch delegates to ``_modon_hyperdiff_coeff(n)`` (extracted so the
+    # env-knob wiring is runtime-testable, #753); the backstop must both be
+    # CALLED in the branch AND remain the ``_m_hd... * _hyperdiff_cube(n...)``
+    # biharmonic inside that helper (``_hyperdiff_cube(n ...)`` allows the
+    # optional #753 ``scaling_exponent=`` kwarg).
     pat8 = re.search(
         r"if\s+test_num\s*==\s*8\s*:[^}]*?"
-        r"hyperdiff_coeff\s*=\s*_m_hd\s*\*\s*_hyperdiff_cube\(\s*n\s*\)",
+        r"hyperdiff_coeff\s*=\s*_modon_hyperdiff_coeff\(\s*n\s*\)",
         src,
         re.DOTALL,
     )
     assert pat8 is not None, (
         "#521 regression: the dedicated colliding-modons branch "
-        "(``test_num == 8``) no longer applies its biharmonic "
-        "hyperdiff backstop ``_m_hd * _hyperdiff_cube(n)`` — the "
-        "100-day cube run re-BLOWs-UP at ~day 40 without it."
+        "(``test_num == 8``) no longer sets ``hyperdiff_coeff="
+        "_modon_hyperdiff_coeff(n)`` — the 100-day cube run re-BLOWs-UP "
+        "at ~day 40 without its biharmonic backstop."
+    )
+    pat8_helper = re.search(
+        r"def\s+_modon_hyperdiff_coeff\(.*?"
+        r"return\s+\w+\s*\*\s*_hyperdiff_cube\(\s*n\b[^)]*\)",
+        src,
+        re.DOTALL,
+    )
+    assert pat8_helper is not None, (
+        "#521 regression: ``_modon_hyperdiff_coeff`` no longer returns "
+        "``<factor> * _hyperdiff_cube(n ...)`` — the modon backstop was "
+        "zeroed/removed inside the helper; the 100-day cube run BLOWs-UP."
     )
     assert re.search(
         r'LEGOESM_SW_MODON_HYPERDIFF_FACTOR"\s*,\s*"1\.0"', src), (
         "LEGOESM_SW_MODON_HYPERDIFF_FACTOR default must remain \"1.0\" "
         "(the #521 sweep optimum: 0.5x erupts at the collision "
         "transient, 0x blows up at ~day 40 even with duogrid)."
+    )
+    # #753: the resolution-law knob must default to "4" so an unset environment
+    # reproduces the calibrated (ref/n)^4 backstop byte-identically (the ^2 law
+    # is opt-in, pending the C96/C192 return-metric validation).
+    assert re.search(
+        r'LEGOESM_SW_MODON_HYPERDIFF_SCALING"\s*,\s*"4"', src), (
+        "LEGOESM_SW_MODON_HYPERDIFF_SCALING default must remain \"4\" so the "
+        "modon hyperdiff backstop stays the calibrated (ref/n)^4 law when the "
+        "env knob is unset (the (ref/n)^2 law is opt-in for C96+, #753)."
     )
 
 

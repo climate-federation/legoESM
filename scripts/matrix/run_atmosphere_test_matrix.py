@@ -594,6 +594,27 @@ from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
 from legoesm.experiments.matrix.namelist import write_case_namelist
 
 
+def _modon_hyperdiff_coeff(n: int) -> float:
+    """Colliding-modons biharmonic hyperdiff backstop from the env knobs (#521/#753).
+
+    ``LEGOESM_SW_MODON_HYPERDIFF_FACTOR`` (default ``1.0``) scales the
+    ``cdgrid_hyperdiff_cube`` base; ``LEGOESM_SW_MODON_HYPERDIFF_SCALING``
+    (default ``4``) selects the resolution law — ``4`` == the calibrated
+    ``(ref_n/n)^4`` grid-scale-damping-time-constant law (byte-identical at
+    every resolution to the pre-#753 expression), ``2`` == the ``(ref_n/n)^2``
+    FV3 div-damp law the #753 diagnosis wants at C96+ (unchanged at C48).  The
+    ``SCALING`` env is an open-ended sensitivity probe (any positive int),
+    unlike the ``run_colliding_modons.py`` CLI which restricts to the two
+    documented laws ``{2, 4}``.
+
+    Module-scope so the env-knob wiring is runtime-testable (not only pinned by
+    the AST parity guard).
+    """
+    m_hd = float(os.environ.get("LEGOESM_SW_MODON_HYPERDIFF_FACTOR", "1.0"))
+    m_scaling = int(os.environ.get("LEGOESM_SW_MODON_HYPERDIFF_SCALING", "4"))
+    return m_hd * _hyperdiff_cube(n, scaling_exponent=m_scaling)
+
+
 def _hyperdiff_ico(mesh) -> float:
     """Biharmonic hyperdiffusion for icosahedral mesh.
 
@@ -2456,11 +2477,14 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 os.environ.get("LEGOESM_SW_MODON_DIV_DAMP_FACTOR", "8.0"))
             _m_dv = float(
                 os.environ.get("LEGOESM_SW_MODON_DAMP_V", "0.010"))
-            _m_hd = float(
-                os.environ.get("LEGOESM_SW_MODON_HYPERDIFF_FACTOR", "1.0"))
+            # #521/#753: biharmonic backstop from the env knobs (default env ->
+            # the calibrated (ref/n)^4 law, byte-identical at every resolution;
+            # LEGOESM_SW_MODON_HYPERDIFF_SCALING=2 opts into the (ref/n)^2 law
+            # for C96+, physics-validation cluster-pending).  See
+            # ``_modon_hyperdiff_coeff``.
             config = iter1009_dual_target_config(
                 n, div_damp_factor=_m_dd, damp_v=_m_dv,
-                hyperdiff_coeff=_m_hd * _hyperdiff_cube(n),
+                hyperdiff_coeff=_modon_hyperdiff_coeff(n),
             )
         elif test_num in (2, 5, 6):
             # iter-31: cube W6 (Rossby-Haurwitz wave-4) 14-day blows up

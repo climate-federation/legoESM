@@ -41,6 +41,10 @@ def main():
     p.add_argument("--div-damp", type=float, default=8.0)   # iter1009 default
     p.add_argument("--damp-v", type=float, default=0.030)
     p.add_argument("--hyperdiff-factor", type=float, default=0.0)  # x _hyperdiff_cube(n)
+    # #753: resolution law for the biharmonic backstop. 4 == (ref/n)^4 (default,
+    # grid-scale-damping-time constant); 2 == (ref/n)^2 (FV3 div-damp law) which
+    # the diagnosis showed the modon needs at C96+ (unchanged at C48).
+    p.add_argument("--hyperdiff-scaling", type=int, default=4, choices=(2, 4))
     args = p.parse_args()
 
     from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -52,9 +56,15 @@ def main():
     grid = create_cubed_sphere(n)
     try:
         from scripts.matrix.run_atmosphere_test_matrix import _hyperdiff_cube
-        hyperdiff = args.hyperdiff_factor * _hyperdiff_cube(n)
-    except Exception:
+    except ImportError:
+        # Matrix-runner import chain unavailable -> fall back to no biharmonic
+        # backstop.  Narrow to ImportError only: a bad n / scaling_exponent must
+        # raise (loud), not silently zero the hyperdiff (which blows the 100-day
+        # run up at ~day 40).
         hyperdiff = 0.0
+    else:
+        hyperdiff = args.hyperdiff_factor * _hyperdiff_cube(
+            n, scaling_exponent=args.hyperdiff_scaling)
     cfg = iter1009_dual_target_config(
         n, div_damp_factor=args.div_damp, damp_v=args.damp_v,
         hyperdiff_coeff=hyperdiff)
