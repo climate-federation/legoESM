@@ -454,8 +454,12 @@ def forward_ml(cp, data):
         # night carries ~0 shortwave, so weighting by sw_down gives the physically
         # meaningful effective (SW-budget) albedo and excludes the dark hours.
         Tsum = Tsum.at[month].add(r.T_sfc)
-        Asum = Asum.at[month].add(r.albedo * f.sw_down)
-        Wsum = Wsum.at[month].add(f.sw_down)
+        # Clip the SW weight >= 0: ERA5 ssrd can carry small negative accumulation
+        # artefacts, which would otherwise divide a negative Asum by the 1e-6 Wsum floor
+        # into a huge negative albedo.  Matches the ssrd>=0 clip on the target.
+        _sw_w = jnp.maximum(f.sw_down, 0.0)
+        Asum = Asum.at[month].add(r.albedo * _sw_w)
+        Wsum = Wsum.at[month].add(_sw_w)
         return (s2, Tsum, Asum, Wsum), None
 
     # First seasonal pass is an unscored spin; only the second year is scored so the
