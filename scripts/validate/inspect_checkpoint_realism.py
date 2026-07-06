@@ -24,6 +24,7 @@ are deliberately not sourced from ``legoesm.constants``.
 Usage::
 
     python scripts/validate/inspect_checkpoint_realism.py <run_dir_or_ckpt> [--gate]
+    python scripts/validate/inspect_checkpoint_realism.py <run_dir> --timeseries
 """
 from __future__ import annotations
 
@@ -73,23 +74,42 @@ _CONTEXT_FIELDS = (
     ("carry_held_lw_up_toa", "OLR", 230.0, 250.0, "W/m2"),
 )
 
+# Sustained per-day drift magnitude above which a context field is flagged
+# "drifting" across the last few checkpoints — a temporal-realism signal that
+# the run is NOT equilibrating (a slow runaway the instantaneous bounds miss).
+# Loose: a settled climatology has ~0 trend; these trip only on a real march.
+_DRIFT_THRESH = {           # units per model-day
+    "air_T": 0.5,           # K/day
+    "land_T": 0.5,          # K/day
+    "seg_precip": 0.3,      # (mm/day)/day
+    "OLR": 0.5,             # (W/m2)/day
+}
+
+
+def _ckpt_day(f: str) -> int:
+    """Numeric day parsed from a ``checkpoint_day_<N>.npz`` name (-1 if none)."""
+    m = re.search(r"checkpoint_day_(\d+)\.npz$", os.path.basename(f))
+    return int(m.group(1)) if m else -1
+
+
+def _sorted_checkpoints(run_dir: str | Path) -> list:
+    """All ``checkpoint_day_*.npz`` under ``run_dir`` as ``(day, path)`` sorted
+    by NUMERIC day ascending (so day_10000 follows day_9999, not precedes it)."""
+    cks = glob.glob(os.path.join(str(run_dir), "checkpoint_day_*.npz"))
+    if not cks:
+        raise FileNotFoundError(f"no checkpoint_day_*.npz under {run_dir}")
+    return sorted(((_ckpt_day(f), f) for f in cks), key=lambda t: t[0])
+
 
 def _find_checkpoint(path: str | Path) -> str:
-    """Resolve a run directory (-> latest ``checkpoint_day_*.npz``) or a direct
-    ``.npz`` file to a concrete checkpoint path."""
+    """Resolve a run directory (-> latest ``checkpoint_day_*.npz`` by numeric
+    day) or a direct ``.npz`` file to a concrete checkpoint path."""
     p = str(path)
     if p.endswith(".npz"):
         if not os.path.exists(p):
             raise FileNotFoundError(p)
         return p
-    cks = glob.glob(os.path.join(p, "checkpoint_day_*.npz"))
-    if not cks:
-        raise FileNotFoundError(f"no checkpoint_day_*.npz under {p}")
-    # Select by NUMERIC day, not lexicographically (else day_9999 > day_10000).
-    def _day(f):
-        m = re.search(r"checkpoint_day_(\d+)\.npz$", os.path.basename(f))
-        return int(m.group(1)) if m else -1
-    return max(cks, key=_day)
+    return _sorted_checkpoints(p)[-1][1]
 
 
 def inspect_checkpoint_realism(path: str | Path) -> dict:
@@ -159,6 +179,96 @@ def inspect_checkpoint_realism(path: str | Path) -> dict:
             "n_violations": n_violations, "passed": bool(n_violations == 0)}
 
 
+def _assess_drift(days: list, series: dict, last_n: int = 5) -> dict:
+    """Per-context-field trend over the last ``last_n`` checkpoints: a linear
+    ``slope_per_day`` and a ``drifting`` flag when |slope| exceeds
+    ``_DRIFT_THRESH`` — the temporal-realism signal that the run is not settling
+    (a slow march the instantaneous bounds gate cannot see)."""
+    d = np.asarray(days, dtype=np.float64)
+    out: dict = {}
+    k = min(last_n, d.size)
+    for lab, vals in series.items():
+        v = np.asarray(vals, dtype=np.float64)
+        thr = _DRIFT_THRESH.get(lab, float("inf"))
+        # Take the last_n CHECKPOINTS first (aligned window), THEN drop
+        # non-finite — so a recent NaN/missing sample shrinks the window and
+        # can force <2 points, never silently reaches back to hide a runaway.
+        dw, vw = d[-k:], v[-k:]
+        m = np.isfinite(dw) & np.isfinite(vw)
+        if int(m.sum()) < 2:
+            out[lab] = {"slope_per_day": float("nan"), "threshold": thr,
+                        "drifting": False}
+            continue
+        x, y = dw[m], vw[m]
+        slope = float(np.polyfit(x - x[0], y, 1)[0]) if x[-1] > x[0] else 0.0
+        out[lab] = {"slope_per_day": slope, "threshold": thr,
+                    "drifting": bool(abs(slope) > thr)}
+    return out
+
+
+def inspect_checkpoint_timeseries(run_dir: str | Path, last_n: int = 5) -> dict:
+    """Scan EVERY ``checkpoint_day_*.npz`` in a run and build the per-day
+    trajectory of the realism-context global means (air-T, land-T, precip, OLR)
+    plus the per-checkpoint pass/fail — the temporal-realism complement to the
+    single-checkpoint gate, available from daily checkpoints long before the
+    first CMOR month.  Reuses ``inspect_checkpoint_realism`` per checkpoint (no
+    duplicated field math).  Returns::
+
+        {"days": [...], "series": {label: [values]}, "passed": [bool],
+         "n": int, "drift": {label: {slope_per_day, threshold, drifting}},
+         "missing_context": [(day, [label, ...]), ...],
+         "any_drifting": bool, "all_passed": bool, "all_context_present": bool}
+
+    ``missing_context`` records any checkpoint where a context field is absent or
+    non-finite — surfaced (not silently ``NaN``'d away) so a lost radiation/flux
+    carry can't hide behind an otherwise-passing gate."""
+    cks = _sorted_checkpoints(run_dir)
+    labels = [lab for _k, lab, _lo, _hi, _u in _CONTEXT_FIELDS]
+    days: list = []
+    passed: list = []
+    missing_context: list = []
+    series: dict = {lab: [] for lab in labels}
+    for day, path in cks:
+        rep = inspect_checkpoint_realism(path)
+        this_day = float(rep["day"]) if rep["day"] is not None else float(day)
+        days.append(this_day)
+        passed.append(bool(rep["passed"]))
+        miss = []
+        for lab in labels:
+            val = rep["context"].get(lab, {}).get("value", float("nan"))
+            series[lab].append(val)
+            if not np.isfinite(val):
+                miss.append(lab)
+        if miss:
+            missing_context.append((this_day, miss))
+    drift = _assess_drift(days, series, last_n=last_n)
+    return {"days": days, "series": series, "passed": passed, "n": len(days),
+            "drift": drift, "missing_context": missing_context,
+            "any_drifting": bool(any(d["drifting"] for d in drift.values())),
+            "all_passed": bool(all(passed)) if passed else False,
+            "all_context_present": bool(not missing_context)}
+
+
+def format_timeseries(ts: dict) -> str:
+    """Multi-line trajectory table + a per-field last-window drift summary."""
+    labels = list(ts["series"].keys())
+    lines = [f"REALISM TRAJECTORY  ({ts['n']} checkpoints, "
+             f"all_passed={ts['all_passed']}, any_drifting={ts['any_drifting']})"]
+    lines.append("  day   " + "  ".join(f"{lab:>10s}" for lab in labels) + "   ok")
+    for i, day in enumerate(ts["days"]):
+        vals = "  ".join(f"{ts['series'][lab][i]:>10.4g}" for lab in labels)
+        lines.append(f"  {day:>5g}  {vals}   {'Y' if ts['passed'][i] else 'N'}")
+    dr = "  ".join(
+        f"{lab}={ts['drift'][lab]['slope_per_day']:+.3g}/day"
+        f"{'(!)' if ts['drift'][lab]['drifting'] else ''}" for lab in labels)
+    lines.append(f"  last-window slope: {dr}   ((!)=|slope|>drift threshold)")
+    if ts.get("missing_context"):
+        miss = "  ".join(f"day {d:g}:{','.join(labs)}"
+                         for d, labs in ts["missing_context"])
+        lines.append(f"  MISSING CONTEXT (lost carry?): {miss}")
+    return "\n".join(lines)
+
+
 def format_realism_report(report: dict) -> str:
     """Multi-line human summary: PASS/FAIL, offending fields, context values."""
     head = "PASS" if report["passed"] else "FAIL"
@@ -184,7 +294,18 @@ def main(argv=None):
     p.add_argument("path", help="run directory (uses latest checkpoint) or a .npz")
     p.add_argument("--gate", action="store_true",
                    help="exit nonzero if the realism gate does not pass")
+    p.add_argument("--timeseries", action="store_true",
+                   help="scan ALL checkpoints in the run dir and report the "
+                        "per-day realism trajectory + drift instead of one gate")
     args = p.parse_args(argv)
+
+    if args.timeseries:
+        ts = inspect_checkpoint_timeseries(args.path)
+        print(format_timeseries(ts))
+        if args.gate and (not ts["all_passed"] or ts["any_drifting"]):
+            raise SystemExit(1)
+        return
+
     report = inspect_checkpoint_realism(args.path)
     print(format_realism_report(report))
     if args.gate and not report["passed"]:
