@@ -188,6 +188,39 @@ class TestThermodynamics:
         cape = compute_cape(T, T_parcel, p_full, p_half)
         assert jnp.allclose(cape, 0.0, atol=1e-10)
 
+    def test_cape_p_source_excludes_below_departure_buoyancy(self):
+        """An elevated-departure parcel contributes NO CAPE below its source
+        level (the parcel does not exist there).
+
+        Root cause of the tier-5 Bechtold quiescence regression: the PBL-MEAN
+        parcel, translated to surface pressure theta-preserving, is +6.3 K
+        warmer than the actual surface air of a STABLE boundary layer (theta
+        increases with height), and the resulting below-departure positive
+        area alone produced CAPE ~53-66 J/kg on a zero-CAPE column — defeating
+        the launch gate and heating the column by 886 W/m² (AMIP C24
+        bechtold+mcfarlane blowup at day 10). ``p_source`` restricts the
+        integral to levels at/above the departure level (textbook mean-layer
+        parcel convention). ``p_source = surface`` must be BYTE-IDENTICAL to
+        omitting it (all surface-parcel callers unchanged).
+        """
+        T, q_v, p_full, p_half = _make_stable_columns(ncol=2, nlev=10)
+        # Parcel buoyant ONLY in the two lowest (highest-pressure) levels —
+        # the artifact pattern: warm below the departure level, cold above.
+        T_parcel = T - 5.0
+        T_parcel = T_parcel.at[:, -2:].set(T[:, -2:] + 5.0)
+        p_src = p_full[:, -3]  # departure ABOVE the buoyant layers
+
+        cape_no_src = compute_cape(T, T_parcel, p_full, p_half)
+        assert jnp.all(cape_no_src > 0)  # artifact present without the mask
+
+        cape_src = compute_cape(T, T_parcel, p_full, p_half, p_source=p_src)
+        assert jnp.allclose(cape_src, 0.0, atol=1e-10)
+
+        # surface departure == legacy behaviour, bit-for-bit
+        cape_sfc = compute_cape(
+            T, T_parcel, p_full, p_half, p_source=p_full[:, -1])
+        assert jnp.array_equal(cape_sfc, cape_no_src)
+
     def test_parcel_profile_and_cape_depends_on_launch_humidity(self):
         """Shared parcel->CAPE helper must respond to boundary-layer humidity.
 

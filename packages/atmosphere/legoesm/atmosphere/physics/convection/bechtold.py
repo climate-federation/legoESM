@@ -251,9 +251,21 @@ def bechtold_convection(
     # ascent) and environment vapour, so buoyancy uses virtual T, not dry T.
     q_sat_parcel = saturation_mixing_ratio(T_moist, p_full)
     q_v_parcel = jnp.minimum(q_parcel[:, None], q_sat_parcel)
+    # Integrate CAPE from the parcel's DEPARTURE level upward only: the
+    # theta-preserving surface relaunch makes an elevated (PBL-mean) parcel
+    # WARMER than the actual surface air whenever the boundary layer is
+    # STABLE (theta increases with height), and the below-departure
+    # "buoyancy" is an artifact of a parcel that does not exist there —
+    # it alone reached ~53–66 J/kg on the tier-5 stable dry column,
+    # defeating the cape_weight² launch gate (886 W/m² spurious heating;
+    # the C24 AMIP bechtold blowup).  For a well-mixed convective BL,
+    # theta is uniform, the relaunched parcel matches the surface air,
+    # and the masked levels contribute ~nothing — convecting columns are
+    # essentially unchanged.
     cape_pbl = compute_cape(
         T, T_moist, p_full, p_half,
         q_v_env=q_v, q_v_parcel=q_v_parcel,
+        p_source=p_parcel_source,
     )
 
     cape_weight = cape_trigger(
