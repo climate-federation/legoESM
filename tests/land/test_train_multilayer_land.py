@@ -11,7 +11,7 @@ from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
 from scripts.run.train_land_params_era5 import _N_PFT
 from scripts.run.train_multilayer_land_era5 import (
-    forward_ml, loss_ml, constrain_ext, init_ext_params, BOUNDS_EXT,
+    forward_ml, loss_ml, constrain_ext, init_ext_params, baked_init_params, BOUNDS_EXT,
     build_multilayer_cfg, _split_cells)
 
 
@@ -57,6 +57,25 @@ def test_constrain_bounds():
     for k, (lo, hi) in BOUNDS_EXT.items():
         v = np.asarray(cp[k])
         assert np.all(v >= lo - 1e-9) and np.all(v <= hi + 1e-9)
+
+
+def test_baked_warm_start_roundtrips_to_production_params():
+    """--init-from baked must START the tune AT the production baked multilayer params
+    (so the re-tune REFINES them, not climbs from the CLM5 prior).  constrain(baked_init)
+    must reproduce the _TUNED_*_MULTILAYER values and stay in bounds."""
+    from legoesm.land import clm_surface_map as C
+    cp = constrain_ext(baked_init_params())
+    # in-bounds like any param set
+    for k, (lo, hi) in BOUNDS_EXT.items():
+        v = np.asarray(cp[k])
+        assert np.all(v >= lo - 1e-9) and np.all(v <= hi + 1e-9), k
+    # round-trips the baked constrained values (within the _inv_ext clip epsilon)
+    np.testing.assert_allclose(cp["pft_alb"], C._TUNED_PFT_ALBEDO_MULTILAYER, atol=2e-6)
+    np.testing.assert_allclose(cp["pft_z0"], C._TUNED_PFT_Z0_MULTILAYER, atol=2e-6)
+    assert abs(float(cp["glac_alb"]) - C.TUNED_GLACIER_ALBEDO_MULTILAYER) < 2e-6
+    assert abs(float(cp["snow_max"]) - C.TUNED_SNOW_ALBEDO_MAX_MULTILAYER) < 2e-6
+    # differs from the CLM5 prior (it is a genuine warm start, not the default init)
+    assert abs(float(cp["glac_alb"]) - float(constrain_ext(init_ext_params())["glac_alb"])) > 1e-3
 
 
 def test_forward_finite_and_physical():

@@ -198,7 +198,7 @@ def soil_color_albedo(color_class):
     (1..20) — the spatially-varying 'dark forest soil vs bright desert soil' pattern that
     a single per-PFT bare-soil albedo cannot represent.  Returns the SATURATED value; the
     dynamic dry brightening is applied separately (see surface_albedo.dry_soil_brightening)."""
-    idx = np.clip(np.asarray(color_class).astype(int), 1, 20) - 1
+    idx = np.clip(np.asarray(color_class).astype(int), 1, 20) - 1  # coeff-ok: CLM soil-colour classes are 1..20 (table-size index clamp)
     return _SOIL_ALB_SAT[idx]
 
 
@@ -230,6 +230,9 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
     sand = ds["PCT_SAND"].values[:_ROOTZONE_LAYERS].mean(0)   # (nlat, nlon)
     clay = ds["PCT_CLAY"].values[:_ROOTZONE_LAYERS].mean(0)
     soil_color = ds["SOIL_COLOR"].values if "SOIL_COLOR" in ds.variables else None
+    # Sub-grid elevation std [m] (drives the elevation-band snow scheme); zero
+    # (flat) when the surfdata predates STD_ELEV, e.g. a synthetic test map.
+    std_elev = ds["STD_ELEV"].values if "STD_ELEV" in ds.variables else None
 
     # regrid to target columns
     pct_nat_c = _nearest_regrid(slat, slon, pct_nat, tgt_lat_deg, tgt_lon_deg)  # (n_nat, ncol)
@@ -244,6 +247,8 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
     soil_alb_c = (soil_color_albedo(_nearest_regrid(slat, slon, soil_color,
                                                     tgt_lat_deg, tgt_lon_deg))
                   if soil_color is not None else np.full(ncol, float(_SOIL_ALB_SAT[14])))
+    std_elev_c = (_nearest_regrid(slat, slon, std_elev, tgt_lat_deg, tgt_lon_deg)
+                  if std_elev is not None else np.zeros(ncol))
 
     # PFT fractions over the 17 CLM5 classes: natural PFTs 0..n_nat-1 weighted by
     # the gridcell natural-veg fraction; crops -> crop_c3 slot.
@@ -264,6 +269,8 @@ def load_clm_surface(path: str, tgt_lat_deg, tgt_lon_deg) -> dict:
                 pct_sand=jnp.asarray(sand_c), pct_clay=jnp.asarray(clay_c),
                 # per-cell CLM soil-colour bare-soil albedo (spatial 'bright desert' map)
                 soil_albedo=jnp.asarray(soil_alb_c),
+                # sub-grid elevation std [m] (elevation-band snow scheme)
+                std_elev=jnp.asarray(np.maximum(std_elev_c, 0.0)),
                 theta_wp=wp, theta_fc=fc, **{k: vg[k] for k in vg})
 
 

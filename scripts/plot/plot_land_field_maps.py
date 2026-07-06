@@ -123,7 +123,11 @@ def main():
     ann = lambda f: float(np.sqrt(np.sum(w * (f - A_era) ** 2) / np.sum(w)))
     rmse[("A", 1)] = ann(A_def); rmse[("A", 2)] = ann(A_tun)
 
-    # rows: (name, unit, cmap, (vmin,vmax), ERA5, default, tuned)
+    # Panel layout: column 1 = the ERA5 mean-annual FIELD (reference); columns 2-3 = the
+    # BIAS (model - ERA5) of the CLM-default baseline and the tuned model, annotated with
+    # the area-weighted global-mean bias.  Bias maps are the meaningful spatial metric
+    # (a per-cell RMSE map of an annual mean is just |bias|); diverging scale about 0.
+    bias_lim = {0: 6.0, 1: 0.2}                     # +-6 K, +-0.2 albedo
     rows = [
         ("skin temperature", "K", "turbo", (240, 305), T_era, T_def, T_tun),
         ("surface albedo", "", "viridis", (0.05, 0.6), A_era, A_def, A_tun),
@@ -131,30 +135,32 @@ def main():
     proj = ccrs.Robinson(central_longitude=0)
     fig, axes = plt.subplots(2, 3, figsize=(15, 6.6), subplot_kw={"projection": proj})
     labels = "abcdefghi"
-    var_of = {0: "T", 1: "A"}
     mid_title = {0: "CLM5 default params", 1: "actual CLM (surfdata)"}
     for r, (name, unit, cmap, (vmn, vmx), era, dflt, tun) in enumerate(rows):
-        panels = [("ERA5", era), (mid_title[r], dflt), ("tuned (this work)", tun)]
-        for c, (title, field) in enumerate(panels):
+        u = f" [{unit}]" if unit else ""
+        lim = bias_lim[r]
+        panels = [("ERA5", era, cmap, (vmn, vmx), False),
+                  (f"{mid_title[r]} − ERA5", dflt - era, "RdBu_r", (-lim, lim), True),
+                  ("tuned (this work) − ERA5", tun - era, "RdBu_r", (-lim, lim), True)]
+        for c, (title, field, cm, (lo, hi), is_bias) in enumerate(panels):
             ax = axes[r, c]
-            fld = g(field)
-            m = ax.pcolormesh(lon2, lat2, np.ma.masked_invalid(fld), cmap=cmap,
-                              vmin=vmn, vmax=vmx, transform=ccrs.PlateCarree(),
+            m = ax.pcolormesh(lon2, lat2, np.ma.masked_invalid(g(field)), cmap=cm,
+                              vmin=lo, vmax=hi, transform=ccrs.PlateCarree(),
                               shading="auto", rasterized=True)
             ax.add_feature(cfeature.COASTLINE, linewidth=0.4, edgecolor="0.25")
             ax.set_global()
-            u = f" [{unit}]" if unit else ""
             ttl = f"({labels[r * 3 + c]}) {title}"
-            if c > 0:                        # RMSE vs ERA5 (skin-T space-time; albedo annual)
-                val = rmse[(var_of[r], c)]
-                ttl += (f"   RMSE {val:.2f} K" if r == 0 else f"   RMSE {val:.3f}")
+            if is_bias:
+                b = float(np.sum(w * field) / np.sum(w))     # area-weighted mean bias
+                ttl += (f"   bias {b:+.2f} K" if r == 0 else f"   bias {b:+.3f}")
             ax.set_title(ttl, fontsize=10)
-            if c == 2:
-                cb = fig.colorbar(m, ax=axes[r, :], fraction=0.018, pad=0.02,
-                                  shrink=0.9)
-                cb.set_label(f"{name}{u}", fontsize=9)
-    fig.suptitle("Mean-annual land surface: ERA5 vs CLM5-default vs ERA5-tuned parameters",
-                 fontsize=12, y=0.99)
+            cb = fig.colorbar(m, ax=ax, fraction=0.03, pad=0.02)
+            if c == 0:
+                cb.set_label(f"{name}{u}", fontsize=8)
+            elif c == 2:
+                cb.set_label(f"bias{u}", fontsize=8)
+    fig.suptitle("Mean-annual land surface: ERA5 reference and model biases "
+                 "(CLM default vs ERA5-tuned)", fontsize=12, y=0.99)
     for ext in ("png", "pdf"):
         fig.savefig(f"{args.out}.{ext}", dpi=300, bbox_inches="tight")
     print(f"# maps -> {args.out}.png / .pdf")

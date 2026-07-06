@@ -82,8 +82,12 @@ def step_land(
     W_max = _get(lp, "W_max", config.W_max)
     C_soil = _get(lp, "C_soil", config.C_soil)
     d_soil = _get(lp, "d_soil", config.d_soil)
-    K_infiltration = _get(lp, "K_infiltration", config.K_infiltration)
-    infil_suction_boost = _get(lp, "infil_suction_boost", config.infil_suction_boost)
+    # Green-Ampt infiltration params are CONFIG-ONLY (no per-cell field on
+    # LandSurfaceParams): reading them through ``_get(lp, ...)`` raised
+    # AttributeError for every provider-driven run.  Promote to per-cell params
+    # only when a provider actually supplies them.
+    K_infiltration = config.K_infiltration
+    infil_suction_boost = config.infil_suction_boost
 
     # Account for fresh snowfall that will survive this step when the
     # surface is below freezing.  Used both by the albedo block here

@@ -41,6 +41,12 @@ from legoesm.land.carbon.config import CarbonState
 from legoesm.land.carbon.carbon_cycle import step_carbon
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.snow_budget import update_snow
+from legoesm.land.snow_bands import (
+    band_albedo,
+    band_net_radiation,
+    band_precip_snow,
+    step_snow_bands,
+)
 from legoesm.land.state import MultiLayerLandState
 from legoesm.land.surface_params import read_spatial_param as _get
 from legoesm.land.soil_grid import make_soil_grid
@@ -48,7 +54,12 @@ from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
 from legoesm.land.soil_thermal import solve_soil_thermal
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
-from legoesm.surface_albedo import dry_soil_brightening
+from legoesm.surface_albedo import (
+    dry_soil_brightening,
+    land_vegetation_albedo,
+    snow_albedo,
+    snow_cover_fraction,
+)
 
 # Perturbation [K] for the one-sided finite-difference linearisation of the
 # turbulent surface fluxes when building the semi-implicit surface conductance
@@ -201,7 +212,33 @@ def step_multilayer_land(
     # snow can survive.  Existing snow always uses snow phase
     # regardless of surface temperature (snow_budget handles melt
     # energy correctly).  Iter-68 audit fix.
-    fresh_snow_mass = forcing.precip_snow * dt
+    # --- Sub-grid elevation-band snow (static feature gate) ---
+    # When enabled, the TOTAL cell precipitation is re-partitioned by phase PER
+    # elevation band (lapse-rate-downscaled air temperature), so a warm cell whose
+    # high sub-grid fractions sit below freezing still accumulates snow there.  The
+    # cell-level snow logic below (phase of q_sat, L_eff, albedo, melt energy) then
+    # runs on the area-weighted aggregates.
+    bands = config.elev_bands
+    if bands is not None:
+        if state.snow_bands is None:
+            raise ValueError(
+                "config.elev_bands is set but state.snow_bands is None; initialise "
+                "the state with init_multilayer_land_state(config=...) so the banded "
+                "SWE field exists."
+            )
+        # Firn/glacier-ice reservoir (gap 4); a legacy restart predating it carries
+        # ``None`` -> start from no perennial ice (equivalent to the old cap behaviour
+        # until the reservoir fills), keeping backward compatibility.
+        ice_bands_in = (jnp.zeros_like(state.snow_bands) if state.ice_bands is None
+                        else state.ice_bands)
+        snowfall_bands = band_precip_snow(
+            forcing.T_lowest, forcing.precip_total, forcing.precip_snow, bands,
+        )
+        precip_snow_eff = jnp.mean(snowfall_bands, axis=-1)  # equal-area bands
+    else:
+        precip_snow_eff = forcing.precip_snow
+
+    fresh_snow_mass = precip_snow_eff * dt
     has_existing_snow = snow > 1e-6
     has_surviving_fresh_snow = (fresh_snow_mass > 1e-6) & (T_sfc < constants.T_freeze)
     has_snow = has_existing_snow | has_surviving_fresh_snow
@@ -252,20 +289,68 @@ def step_multilayer_land(
         snow + jnp.where(has_surviving_fresh_snow, fresh_snow_mass, 0.0),
         snow,
     )
-    if config.snow_albedo_feedback and lat is not None:
-        # Snow-free base = per-cell map albedo (CLM PFT) when land_params supplied.
-        _base = None if lp is None else jnp.broadcast_to(albedo_land, T_sfc.shape)
-        alpha = compute_land_albedo(
-            lat, snow_effective, snow_age, config.land_albedo, base_albedo=_base,
+    if bands is not None:
+        # Banded surface energy balance (gap 1+2): per-band albedo -> per-band net
+        # radiation (elevation-lapsed SW/LW down + per-band skin T).  Rn_bands drives
+        # per-band melt; the area-weighted aggregate drives the shared soil column;
+        # alpha_eff (SW-flux-weighted) is the atmosphere-facing albedo.  Retains the
+        # elevation x albedo covariance the old cell-mean radiation averaged away.
+        _n_bands = bands.band_dz.shape[-1]
+        if config.snow_albedo_feedback and lat is not None:
+            # Banded effective SWE for the albedo cover: existing band SWE plus fresh
+            # band snowfall where it survives the step on that band (band-downscaled
+            # surface temperature below freezing) — the band analogue of the cell-level
+            # ``snow_effective`` rule.  Pre-step albedo uses the OLD per-band age (this
+            # step's snowfall resets it post-step), matching the cell-mean path.
+            _cover_fn = lambda s: snow_cover_fraction(s, config.land_albedo)
+            # NB gap 3 (solar-zenith snow brightening) is intentionally NOT wired here:
+            # the offline calibration forcing carries a constant placeholder cos_zenith
+            # so the effect is inactive/uncalibratable offline, and in coupled mode it
+            # needs radiation-time zenith to stay energy-consistent (see snow_albedo's
+            # cos_zenith arg + docs).  Snow albedo here is the diffuse (age) value.
+            _alb_fn = lambda a: snow_albedo(a, config.land_albedo)
+            _T_sfc_band = T_sfc[:, None] - bands.lapse_rate_K_m * bands.band_dz
+            _band_surviving = ((snowfall_bands * dt > 1e-6)
+                               & (_T_sfc_band < constants.T_freeze))
+            _bands_effective = state.snow_bands + jnp.where(
+                _band_surviving, snowfall_bands * dt, 0.0,
+            )
+            # Snow-free base MUST match compute_land_albedo's: the per-cell CLM map
+            # albedo when land_params are supplied, else the latitude-band vegetation
+            # albedo (so at zero relief the banded path reproduces the cell-mean one).
+            _snow_free_base = (jnp.broadcast_to(albedo_land, T_sfc.shape) if lp is not None
+                               else land_vegetation_albedo(lat, config.land_albedo))
+            alpha_bands = band_albedo(
+                _bands_effective, state.snow_age_bands, _snow_free_base, _cover_fn,
+                _alb_fn, ice_bands=ice_bands_in, cfg=bands,
+            )
+        else:
+            # Snow-albedo feedback off (or no latitude): uniform snow-free base albedo
+            # per band — the banded analogue of the cell-mean ``alpha = full(albedo_land)``
+            # path (no snow blend, no latitude dependence); the elevation SW/LW lapse
+            # (gap 2) still applies per band.  Preserves the non-banded gating semantics.
+            alpha_bands = jnp.broadcast_to(
+                jnp.reshape(albedo_land, (-1, 1)), (T_sfc.shape[0], _n_bands))
+        band_rad = band_net_radiation(
+            T_sfc, alpha_bands, forcing.sw_down, forcing.lw_down, emissivity, bands,
         )
+        alpha = band_rad.alpha_eff
+        sw_net, lw_net = band_rad.sw_net_agg, band_rad.lw_net_agg
     else:
-        alpha = jnp.full(T_sfc.shape, albedo_land, dtype=T_sfc.dtype)
-
-    # --- Radiation ---
-    sw_net, lw_net, _ = surface_radiation_fluxes(
-        forcing.sw_down, forcing.lw_down, T_sfc, alpha,
-        emissivity,
-    )
+        band_rad = None
+        if config.snow_albedo_feedback and lat is not None:
+            # Snow-free base = per-cell map albedo (CLM PFT) when land_params supplied.
+            _base = None if lp is None else jnp.broadcast_to(albedo_land, T_sfc.shape)
+            alpha = compute_land_albedo(
+                lat, snow_effective, snow_age, config.land_albedo, base_albedo=_base,
+            )
+        else:
+            alpha = jnp.full(T_sfc.shape, albedo_land, dtype=T_sfc.dtype)
+        # --- Radiation (cell-mean) ---
+        sw_net, lw_net, _ = surface_radiation_fluxes(
+            forcing.sw_down, forcing.lw_down, T_sfc, alpha,
+            emissivity,
+        )
 
     # --- Ground heat flux (residual of surface energy balance) ---
     # G = SW_net + LW_net - SH - LH  (positive into soil)
@@ -273,16 +358,42 @@ def step_multilayer_land(
 
     # --- Snow budget (energy-limited melt) ---
     # G_surface drives the melt: M = max(0, G * dt / L_f)
-    snow_new, snow_age_new, snow_melt = update_snow(
-        snow, snow_age, T_sfc, forcing.precip_snow, dt,
-        Q_net=G_surface,
-        snow_melt_rate=config.snow_melt_rate,
-        T_snow_melt=config.T_snow_melt,
-    )
+    if bands is not None:
+        # Per-band melt is limited by each band's OWN net radiation minus the (cell)
+        # turbulent fluxes — the banded surface energy balance.  Its area-weighted
+        # mean equals the aggregate G_surface, so soil-column energy is conserved.
+        band_step = step_snow_bands(
+            state.snow_bands, state.snow_age_bands, ice_bands_in, T_sfc, snowfall_bands, dt,
+            Q_net=band_rad.Rn_bands - shflx[:, None] - lhflx[:, None],
+            cfg=bands,
+            T_snow_melt=config.T_snow_melt,
+        )
+        snow_bands_new = band_step.swe_bands
+        ice_bands_new = band_step.ice_bands
+        snow_age_bands_new = band_step.snow_age_bands
+        snow_new = band_step.swe_total
+        snow_age_new = band_step.snow_age
+        snow_melt = band_step.snow_melt
+        ice_melt = band_step.ice_melt
+        # Glacier discharge (frozen) + ablation ice meltwater both leave as runoff.
+        cap_runoff = band_step.ice_runoff + ice_melt / dt
+    else:
+        snow_new, snow_age_new, snow_melt = update_snow(
+            snow, snow_age, T_sfc, precip_snow_eff, dt,
+            Q_net=G_surface,
+            snow_melt_rate=config.snow_melt_rate,
+            T_snow_melt=config.T_snow_melt,
+        )
+        snow_bands_new = state.snow_bands
+        snow_age_bands_new = state.snow_age_bands
+        ice_bands_new = state.ice_bands
+        ice_melt = jnp.zeros_like(snow_new)
+        cap_runoff = jnp.zeros_like(snow_new)
 
-    # Subtract melt energy from ground heat flux before soil thermal solve.
-    # Melting snow consumes L_f per kg, reducing the energy entering the soil.
-    melt_energy = snow_melt * constants.L_f / dt  # W/m2 consumed by melt
+    # Subtract melt energy from ground heat flux before soil thermal solve.  Both the
+    # seasonal-snow melt and the ablation ice melt consume L_f per kg; the frozen
+    # glacier discharge leaves as ice (no fusion) so it is NOT charged here.
+    melt_energy = (snow_melt + ice_melt) * constants.L_f / dt  # W/m2 consumed by melt
     G_surface = G_surface - melt_energy
 
     # --- Latent mass exchange ---
@@ -298,13 +409,30 @@ def step_multilayer_land(
     sublim_actual = jnp.minimum(sublim_demand, max_sublim)
     sublim_actual = jnp.where(sublim_demand < 0.0, sublim_demand, sublim_actual)
     snow_new = jnp.maximum(snow_new - sublim_actual * dt, 0.0)
+    if bands is not None:
+        # Distribute the aggregate sublimation/deposition across bands
+        # proportionally to their SWE (preserves the band distribution and the
+        # aggregate mass; a snow-free band stays snow-free).  AD-safe: guard the
+        # denominator, fall back to unscaled bands when the pack is empty.
+        _agg_ok = snow_after_melt > 1e-12
+        _scale = jnp.where(
+            _agg_ok, snow_new / jnp.where(_agg_ok, snow_after_melt, 1.0), 1.0,
+        )
+        # Empty-pack deposition (frost/dew grows the aggregate from ~0): scaling zero
+        # bands would keep them zero and the deposited mass would vanish from the band
+        # budget next step.  Distribute it EQUALLY across the equal-area bands so the
+        # band store matches the aggregate (mean_k snow_bands_new == snow_new).
+        _deposit_empty = (~_agg_ok) & (snow_new > 1e-12)
+        snow_bands_new = jnp.where(
+            _deposit_empty[:, None], snow_new[:, None], snow_bands_new * _scale[:, None],
+        )
 
     # --- Water-limit soil evaporation (bare soil only) ---
     dz = grid.dz  # (n_layers,) layer thicknesses [m]
     extractable_water = jnp.sum(
         jnp.maximum(theta - theta_r, 0.0) * dz[None, :], axis=-1
     ) * rho_w  # (ncol,) kg/m2
-    precip_rain = forcing.precip_total - forcing.precip_snow
+    precip_rain = forcing.precip_total - precip_snow_eff
     melt_rate = snow_melt / dt  # kg/m2/s meltwater entering liquid budget
     soil_evap_demand = jnp.where(has_snow, 0.0, evap_rate_demand)
     # Surface soil resistance: the bulk latent flux throttles by the ROOT-ZONE mean
@@ -483,33 +611,64 @@ def step_multilayer_land(
     )
 
     # --- Build new state ---
+    # ``cap_runoff`` (frozen glacier discharge + ablation ice meltwater) leaves via the
+    # runoff/freshwater path WITHOUT infiltrating (glacier outflow, not soil water), so
+    # it is added to the surface runoff after the Richards solve.
+    runoff_surface_total = richards_out.runoff_surface + cap_runoff
     new_state = MultiLayerLandState(
         T_soil=T_soil_new,
         psi_soil=richards_out.psi_new,
         theta_soil=richards_out.theta_new,
-        runoff_surface=richards_out.runoff_surface,
+        runoff_surface=runoff_surface_total,
         runoff_subsurface=richards_out.runoff_subsurface,
         snow_depth=snow_new,
         snow_age=snow_age_new,
         surface_water=richards_out.surface_water,
+        snow_bands=snow_bands_new,
+        snow_age_bands=snow_age_bands_new,
+        ice_bands=ice_bands_new,
     )
 
     # --- Build TileResponse ---
     T_sfc_new = T_soil_new[:, 0]
 
-    # Post-step albedo: reflects updated snow for the next atmosphere step
-    if config.snow_albedo_feedback and lat is not None:
-        _base = None if lp is None else jnp.broadcast_to(albedo_land, T_sfc_new.shape)
-        alpha_new = compute_land_albedo(
-            lat, snow_new, snow_age_new, config.land_albedo, base_albedo=_base,
+    # Post-step albedo + up-welling LW for the atmosphere/coupler: reflect the updated
+    # snow (+ exposed glacier ice) for the NEXT step.  The banded path re-runs the SAME
+    # flux-weighted band radiation as the pre-step (gap 1) so the reported albedo is
+    # alpha_eff and lw_up is the banded per-band emission aggregate — NOT a plain band
+    # mean and NOT the cell-mean-T Stefan-Boltzmann value, which would be inconsistent
+    # with the SW the surface actually absorbed.
+    if bands is not None:
+        if config.snow_albedo_feedback and lat is not None:
+            _base_new = (jnp.broadcast_to(albedo_land, T_sfc_new.shape) if lp is not None
+                         else land_vegetation_albedo(lat, config.land_albedo))
+            alpha_bands_new = band_albedo(
+                snow_bands_new, snow_age_bands_new, _base_new,
+                lambda s: snow_cover_fraction(s, config.land_albedo),
+                lambda a: snow_albedo(a, config.land_albedo),  # diffuse (gap 3 unwired)
+                ice_bands=ice_bands_new, cfg=bands,
+            )
+        else:
+            alpha_bands_new = jnp.broadcast_to(
+                jnp.reshape(albedo_land, (-1, 1)),
+                (T_sfc_new.shape[0], bands.band_dz.shape[-1]))
+        band_rad_new = band_net_radiation(
+            T_sfc_new, alpha_bands_new, forcing.sw_down, forcing.lw_down, emissivity, bands,
         )
+        alpha_new = band_rad_new.alpha_eff
+        lw_up_new = band_rad_new.lw_up_agg
     else:
-        alpha_new = alpha
-
-    _, _, lw_up_new = surface_radiation_fluxes(
-        forcing.sw_down, forcing.lw_down, T_sfc_new, alpha_new,
-        emissivity,
-    )
+        if config.snow_albedo_feedback and lat is not None:
+            _base = None if lp is None else jnp.broadcast_to(albedo_land, T_sfc_new.shape)
+            alpha_new = compute_land_albedo(
+                lat, snow_new, snow_age_new, config.land_albedo, base_albedo=_base,
+            )
+        else:
+            alpha_new = alpha
+        _, _, lw_up_new = surface_radiation_fluxes(
+            forcing.sw_down, forcing.lw_down, T_sfc_new, alpha_new,
+            emissivity,
+        )
 
     # Recompute q_surface with updated temperature and root-zone moisture.
     # Apply stomatal_ratio so q_surface reflects both soil moisture
@@ -585,9 +744,9 @@ def step_multilayer_land(
         v_ocean_sfc=jnp.zeros(ncol),
         co2_flux=co2_flux,
         # Multilayer land: total freshwater to ocean is surface +
-        # subsurface runoff.  Both already kg/m²/s.
+        # subsurface runoff (incl. snow-capping ice discharge).  All kg/m²/s.
         freshwater_flux=(
-            richards_out.runoff_surface + richards_out.runoff_subsurface
+            runoff_surface_total + richards_out.runoff_subsurface
         ),
         # Land does not extract heat directly from the ocean.
         ocean_heat_extraction=jnp.zeros(ncol),
@@ -650,6 +809,19 @@ def init_multilayer_land_state(
     theta_soil = jnp.broadcast_to(jnp.asarray(theta_init), (ncol, nlayers))
     psi_soil = psi_from_theta(theta_soil, config.hydraulics)
 
+    # Banded SWE/age/ice only when the elevation-band scheme is configured; ``None``
+    # keeps the legacy pytree structure (single cell-mean snowpack, no ice reservoir).
+    if config.elev_bands is not None:
+        _nb = config.elev_bands.band_dz.shape[-1]
+        # Match the soil-temperature dtype so the banded fields do not start float32
+        # under a float64 (x64) state — a mixed-dtype pytree / scan-carry hazard.
+        _bdt = T_soil.dtype
+        snow_bands = jnp.zeros((ncol, _nb), dtype=_bdt)
+        snow_age_bands = jnp.zeros((ncol, _nb), dtype=_bdt)
+        ice_bands = jnp.zeros((ncol, _nb), dtype=_bdt)
+    else:
+        snow_bands = snow_age_bands = ice_bands = None
+
     return MultiLayerLandState(
         T_soil=T_soil,
         psi_soil=psi_soil,
@@ -659,4 +831,7 @@ def init_multilayer_land_state(
         snow_depth=jnp.zeros(ncol),
         snow_age=jnp.zeros(ncol),
         surface_water=jnp.zeros(ncol),
+        snow_bands=snow_bands,
+        snow_age_bands=snow_age_bands,
+        ice_bands=ice_bands,
     )

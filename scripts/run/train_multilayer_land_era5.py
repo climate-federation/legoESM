@@ -77,6 +77,7 @@ from legoesm.land.carbon.stomata import StomataConfig
 from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
 from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
+from legoesm.land.snow_bands import ElevationSnowBandConfig, band_elevation_anomalies
 from legoesm.land.surface_params import LandSurfaceParams
 
 # Reuse the slab calibrator's constrained-parameter machinery (bounds, sigmoid
@@ -114,6 +115,10 @@ _TBL = np.asarray(S._TABLE)              # (17,12) CLM5 init values per column
 # coupled model (land_diurnal_surface).  --stomata re-enables them for experiments.
 _BULK_SCHEME = "most"
 _STOMATA_ON = False
+# Sub-grid elevation-band snow (legoesm.land.snow_bands): banded precip phase /
+# melt / permanent snow from the CLM STD_ELEV map.  Off by default (legacy
+# cell-mean snowpack); enable with --elev-bands.
+_ELEV_BANDS_ON = False
 # Loss weights (CLI-tunable).  lam_amp raised from 0.5 -> 1.5: the residual is
 # dominated by the seasonal-cycle AMPLITUDE (mid-lats under, Antarctica over), and the
 # per-PFT thermal inertia has head-room the low weight wasn't exploiting.
@@ -192,7 +197,12 @@ BOUNDS_EXT = dict(
     snow_dcrit=(3.0, 40.0),         # SWE [kg/m2] half-cover scale (tanh; LOWER=brighter)
     snow_tau_days=(1.0, 20.0),      # snow-albedo age e-folding [days]
     soil_dry_boost=(0.0, 0.16),     # CLM dry-soil albedo brightening (deserts); 0=off
-    soil_alb_scale=(0.6, 1.5))      # scale on the per-cell CLM soil-colour bare-soil albedo
+    soil_alb_scale=(0.6, 1.5),      # scale on the per-cell CLM soil-colour bare-soil albedo
+    # --- High-elevation snow/ice closures (gaps 1-4; active with --elev-bands) ---
+    elev_lapse=(4.5e-3, 8.0e-3),    # band T-downscaling lapse rate [K/m]
+    elev_sw_grad=(0.0, 1.2e-4),     # SW-down elevation gradient [1/m] (thinner air aloft)
+    elev_lw_lapse=(0.0, 6.0e-2),    # LW-down elevation lapse [W/m2/m] (colder air aloft)
+    glac_ice_alb=(0.15, 0.45))      # exposed ablation-zone glacier-ice albedo (dark ice)
 
 
 def constrain_ext(p: dict) -> dict:
@@ -236,7 +246,46 @@ def init_ext_params() -> dict:
         snow_tau_days=_inv_ext(5.0, "snow_tau_days"), # snow-albedo age e-folding [days]
         soil_dry_boost=_inv_ext(0.11, "soil_dry_boost"),  # CLM dry-soil brightening
         soil_alb_scale=_inv_ext(1.0, "soil_alb_scale"),   # start at the raw CLM soil colour
+        # High-elevation snow/ice closures (physical defaults; refined by the re-tune)
+        elev_lapse=_inv_ext(6.0e-3, "elev_lapse"),        # CESM/CLM glacier MEC lapse
+        elev_sw_grad=_inv_ext(3.0e-5, "elev_sw_grad"),    # ~3 %/km clear-sky SW gradient
+        elev_lw_lapse=_inv_ext(2.9e-2, "elev_lw_lapse"),  # ~29 W/m2/km LW-down lapse
+        glac_ice_alb=_inv_ext(0.30, "glac_ice_alb"),      # CLM exposed glacier-ice albedo
     ).items()}
+
+
+def baked_init_params() -> dict:
+    """Raw (unconstrained) params WARM-STARTED at the production baked multilayer
+    defaults (the ERA5-calibrated ``_TUNED_*_MULTILAYER`` bake in ``clm_surface_map``).
+
+    Refining these — instead of climbing from the CLM5 prior — lets the re-tune keep the
+    well-tuned production skill and only adjust for the elevation-band snow now in the
+    forward.  The Farquhar/smscale keys (not part of the offline bake) stay at CLM5.
+    """
+    from legoesm.land import clm_surface_map as C
+    p = dict(init_ext_params())
+    wp = np.asarray(C._TUNED_PFT_WP_MULTILAYER); fc = np.asarray(C._TUNED_PFT_FC_MULTILAYER)
+    over = dict(
+        pft_alb=_inv_ext(np.asarray(C._TUNED_PFT_ALBEDO_MULTILAYER), "pft_alb"),
+        pft_emis=_inv_ext(np.asarray(C._TUNED_PFT_EMISSIVITY_MULTILAYER), "pft_emis"),
+        pft_root=_inv_ext(np.asarray(C._TUNED_PFT_ROOT_DEPTH_MULTILAYER), "pft_root"),
+        pft_z0=_inv_ext(np.asarray(C._TUNED_PFT_Z0_MULTILAYER), "pft_z0"),
+        pft_ch=_inv_ext(np.asarray(C._TUNED_PFT_CH_MULTILAYER), "pft_ch"),
+        pft_kscale=_inv_ext(np.asarray(C._TUNED_PFT_KSCALE_MULTILAYER), "pft_kscale"),
+        pft_cscale=_inv_ext(np.asarray(C._TUNED_PFT_CSCALE_MULTILAYER), "pft_cscale"),
+        pft_wp=_inv_ext(wp, "pft_wp"),
+        pft_fcgap=_inv_ext(np.clip(fc - wp, 0.04, 0.29), "pft_fcgap"),
+        glac_alb=_inv_ext(C.TUNED_GLACIER_ALBEDO_MULTILAYER, "glac_alb"),
+        snow_max=_inv_ext(C.TUNED_SNOW_ALBEDO_MAX_MULTILAYER, "snow_max"),
+        snow_min=_inv_ext(C.TUNED_SNOW_ALBEDO_MIN_MULTILAYER, "snow_min"),
+        snow_dcrit=_inv_ext(C.TUNED_SNOW_DCRIT_MULTILAYER, "snow_dcrit"),
+        snow_tau_days=_inv_ext(C.TUNED_SNOW_TAU_DAYS_MULTILAYER, "snow_tau_days"),
+        soil_dry_boost=_inv_ext(C.TUNED_SOIL_DRY_BOOST_MULTILAYER, "soil_dry_boost"),
+        soil_alb_scale=_inv_ext(C.TUNED_SOIL_ALB_SCALE_MULTILAYER, "soil_alb_scale"),
+        th_glacier_cboost=_inv_ext(C.TUNED_GLACIER_CBOOST_MULTILAYER, "th_glacier_cboost"),
+    )
+    p.update({k: jnp.asarray(v) for k, v in over.items()})
+    return p
 
 
 # --------------------------------------------------------------------------- #
@@ -302,6 +351,15 @@ def build_multilayer_cfg(cp, data):
         stomata=StomataConfig(enabled=_STOMATA_ON),  # Farquhar -> Vc_max25/g1/LCMA active
         carbon=CarbonConfig(scheme="differland" if _STOMATA_ON else "none"),
         snow_albedo_feedback=True,
+        # Sub-grid elevation-band snow: banded precip phase / melt gating /
+        # permanent snow from the CLM STD_ELEV sub-grid topography (module toggle).
+        elev_bands=(ElevationSnowBandConfig(
+            band_dz=band_elevation_anomalies(data["std_elev"]),
+            lapse_rate_K_m=cp["elev_lapse"],
+            sw_elev_grad_per_m=cp["elev_sw_grad"],
+            lw_elev_lapse_W_m2_per_m=cp["elev_lw_lapse"],
+            alpha_glacier_ice=cp["glac_ice_alb"])
+            if _ELEV_BANDS_ON else None),
         land_albedo=LandAlbedoConfig(
             alpha_snow_max=cp["snow_max"], alpha_snow_min=cp["snow_min"],
             snow_depth_crit=cp["snow_dcrit"],
@@ -530,8 +588,8 @@ def _report_test(tuned: dict, test_data: dict):
 
 
 def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
-          prefilter=True, batch=0):
-    p = init_ext_params()
+          prefilter=True, batch=0, init_params=None):
+    p = init_ext_params() if init_params is None else init_params
     # The per-cell pre-filter is O(ncol) single-cell gradients — cheap at n_sub~200 but
     # the bottleneck at full-grid (~5.5k cells).  On the AD-stable 24-h forcing almost
     # no cell is pathological, so --no-prefilter skips it and leans on the per-step
@@ -699,6 +757,8 @@ def _pack(g, latc, cmap, sub, nh=_NH) -> dict:
                 pct_clay=jnp.asarray(np.asarray(cmap["pct_clay"])[sub]),
                 # per-cell CLM soil-colour bare-soil albedo (spatial desert/soil pattern)
                 soil_albedo=jnp.asarray(np.asarray(cmap["soil_albedo"])[sub]),
+                # sub-grid elevation std [m] (elevation-band snow scheme)
+                std_elev=jnp.asarray(np.asarray(cmap["std_elev"])[sub]),
                 skt=jnp.asarray(skt), alb=jnp.asarray(alb),
                 # init the whole soil column at the ERA5 annual-mean skin T
                 t0=jnp.asarray(skt.mean(0)), dom_onehot=jnp.asarray(oh),
@@ -709,7 +769,7 @@ def _pack(g, latc, cmap, sub, nh=_NH) -> dict:
 
 
 def main():
-    global _BULK_SCHEME, _STOMATA_ON, _LAM_AMP, _LAM_SM, _LAM_PFT, _LAM_ALB
+    global _BULK_SCHEME, _STOMATA_ON, _ELEV_BANDS_ON, _LAM_AMP, _LAM_SM, _LAM_PFT, _LAM_ALB
     jax.config.update("jax_enable_x64", True)
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--lam-amp", type=float, default=_LAM_AMP,
@@ -741,6 +801,9 @@ def main():
     ap.add_argument("--bulk", choices=["constant", "most"], default=_BULK_SCHEME,
                     help="surface exchange: 'most' (default, matches the coupled "
                          "diurnal model -> z0 trainable) or 'constant' (per-PFT Ch)")
+    ap.add_argument("--elev-bands", action="store_true",
+                    help="enable the sub-grid elevation-band snow scheme (banded "
+                         "precip phase/melt + permanent snow from CLM STD_ELEV)")
     ap.add_argument("--stomata", action="store_true",
                     help="enable Farquhar stomata (makes Vc_max25/g1/LCMA trainable; "
                          "degrades the offline fit — needs the coupled model)")
@@ -762,8 +825,14 @@ def main():
                          "first run (do it on CPU — the per-cell filter is slow on GPU), "
                          "loaded on later runs so a GPU full-grid run gets the CLEAN "
                          "pre-filtered gradient without paying the per-cell scan")
+    ap.add_argument("--init-from", choices=["clm5", "baked"], default="clm5",
+                    help="warm start: 'clm5' (default, the CLM5 prior) or 'baked' (the "
+                         "production _TUNED_*_MULTILAYER params -> REFINE the well-tuned "
+                         "model with the elevation bands active, instead of climbing "
+                         "from the prior)")
     args = ap.parse_args()
     _BULK_SCHEME, _STOMATA_ON = args.bulk, args.stomata
+    _ELEV_BANDS_ON = args.elev_bands
     _LAM_AMP = args.lam_amp
     _LAM_SM = args.lam_sm
     _LAM_PFT = args.lam_pft
@@ -791,8 +860,11 @@ def main():
               f"{int(test_data['lat'].shape[0])} test (holdout {args.holdout:.0%}, "
               f"seed {args.seed})", flush=True)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    init_params = baked_init_params() if args.init_from == "baked" else None
+    if init_params is not None:
+        print("# warm-start: refining the production baked multilayer params", flush=True)
     tuned = train(data, n_iter=args.iters, lr=args.lr, ckpt_path=args.out, clip=args.clip,
-                  prefilter=prefilter, batch=args.batch)
+                  prefilter=prefilter, batch=args.batch, init_params=init_params)
     with open(args.out, "w") as f:
         json.dump(tuned, f, indent=2)
     print(f"# recommended tuned params -> {args.out} (does NOT mutate production defaults)")

@@ -48,3 +48,15 @@ def test_issue484_new_lmip_flags_flow_to_config():
     assert cfg.land.beta_min == 0.2
     assert cfg.land.carbon.scheme == "differland"
     assert cfg.land.snow_albedo_feedback is False
+
+
+def test_elev_bands_flag_flows_to_config():
+    # Default: no elevation bands (legacy cell-mean snowpack)
+    assert build_config_from_args(_parse_args(["--lat", "45"])).land.elev_bands is None
+    # Enabled with a column sub-grid relief -> 5 equal-area bands
+    cfg = build_config_from_args(
+        _parse_args(["--lat", "45", "--elev-bands", "--elev-std-m", "800"]))
+    assert cfg.land.elev_bands is not None
+    assert cfg.land.elev_bands.band_dz.shape == (1, 5)
+    # dz scales with the supplied std (top band ~ +1.4 sigma * 800 m)
+    assert float(cfg.land.elev_bands.band_dz[0, -1]) > 1000.0

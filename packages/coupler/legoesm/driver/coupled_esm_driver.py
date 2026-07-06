@@ -726,6 +726,18 @@ class CoupledESMDriver:
                 Ch_land=ch_cell, Cd_land=ch_cell)
             logger.info("  Soil: CLM reference VG + per-PFT thermal/Ch map (per-column)")
 
+            # Sub-grid elevation-band snow (opt-in): band elevations from the CLM
+            # STD_ELEV map so warm cells keep bright snow on their cold high fractions.
+            if getattr(cfg, "land_elev_bands", False):
+                from legoesm.land.snow_bands import (
+                    ElevationSnowBandConfig, band_elevation_anomalies)
+                band_dz = band_elevation_anomalies(
+                    jnp.asarray(smap["std_elev"], dtype=_sd))
+                land_cfg = land_cfg._replace(
+                    elev_bands=ElevationSnowBandConfig(band_dz=band_dz))
+                logger.info("  Snow: sub-grid elevation-band scheme (CLM STD_ELEV, "
+                            "5 equal-area bands)")
+
         # Coupled DIURNAL surface model (default ON for the multilayer land): the
         # coupled atmosphere supplies a fully-resolved diurnal cycle at a single,
         # consistent lowest-model-level height, so the surface exchange can be the

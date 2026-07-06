@@ -90,10 +90,24 @@ def update_snow(
 
     snow_new = jnp.maximum(snow_available - snow_melt, 0.0)
 
-    # Snow age: reset when fresh snowfall, otherwise age
+    snow_age_new = update_snow_age(snow_new, snow_age, precip_snow, dt)
+
+    return snow_new, snow_age_new, snow_melt
+
+
+def update_snow_age(
+    snow_new: jnp.ndarray,
+    snow_age: jnp.ndarray,
+    precip_snow: jnp.ndarray,
+    dt: float,
+) -> jnp.ndarray:
+    """Snow-age clock: reset on fresh snowfall, age otherwise, zero when no snow.
+
+    Shared by the cell-mean budget (:func:`update_snow`) and the elevation-band
+    scheme (``snow_bands``), which keeps a single cell-level age for the albedo
+    decay while banding the mass budget.
+    """
     is_snowing = precip_snow > 1e-10
     snow_age_new = jnp.where(is_snowing, 0.0, snow_age + dt)
     # If all snow has melted, reset age to zero
-    snow_age_new = jnp.where(snow_new > 0.0, snow_age_new, 0.0)
-
-    return snow_new, snow_age_new, snow_melt
+    return jnp.where(snow_new > 0.0, snow_age_new, 0.0)

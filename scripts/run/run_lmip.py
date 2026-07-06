@@ -201,6 +201,14 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
         richards=RichardsConfig(),
         carbon=CarbonConfig(scheme=args.carbon_scheme),
     )
+    # Sub-grid elevation-band snow (opt-in): for an offline column, the sub-grid
+    # relief std [m] is supplied directly (--elev-std-m); a coarse gridded run gets
+    # it per cell from the CLM STD_ELEV map instead (coupled driver).
+    if getattr(args, "elev_bands", False):
+        from legoesm.land.snow_bands import (
+            ElevationSnowBandConfig, band_elevation_anomalies)
+        band_dz = band_elevation_anomalies(jnp.asarray([float(args.elev_std_m)]))
+        land = land._replace(elev_bands=ElevationSnowBandConfig(band_dz=band_dz))
     return LMIPRunConfig(
         land=land,
         max_wallclock_seconds=args.max_wallclock_seconds,
@@ -482,6 +490,13 @@ def _save_restart(
             state.surface_water if state.surface_water is not None
             else np.zeros_like(np.asarray(state.snow_depth))),
     }
+    # Elevation-band SWE/age (present iff the band scheme is enabled) round-trip so a
+    # restart keeps the perennial-snow distribution.
+    if state.snow_bands is not None:
+        payload["snow_bands"] = np.asarray(state.snow_bands)
+        payload["snow_age_bands"] = np.asarray(state.snow_age_bands)
+        if state.ice_bands is not None:
+            payload["ice_bands"] = np.asarray(state.ice_bands)
     if carbon_state is not None:
         for field in carbon_state._fields:
             payload[f"carbon_{field}"] = np.asarray(
@@ -506,6 +521,27 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
         surface_water=jnp.asarray(data["surface_water"]) if "surface_water" in data
         else jnp.zeros_like(jnp.asarray(data["snow_depth"])),
     )
+    # Elevation-band SWE/age: restore from the checkpoint when present, else (band
+    # scheme newly enabled on an old restart) seed empty bands so the step has state.
+    if config.elev_bands is not None:
+        nb = config.elev_bands.band_dz.shape[-1]
+        ncol = state.snow_depth.shape[0]
+        if "snow_bands" in data:
+            state = state._replace(snow_bands=jnp.asarray(data["snow_bands"]),
+                                   snow_age_bands=jnp.asarray(data["snow_age_bands"]))
+        else:
+            # Bands newly enabled on a legacy restart: seed the bands from the EXISTING
+            # cell snowpack (distribute snow_depth equally across the equal-area bands,
+            # mean_k == snow_depth; broadcast the cell age) so accumulated snow is not
+            # discarded — zero-seeding would silently drop it.
+            state = state._replace(
+                snow_bands=jnp.broadcast_to(state.snow_depth[:, None], (ncol, nb)),
+                snow_age_bands=jnp.broadcast_to(state.snow_age[:, None], (ncol, nb)))
+        # Firn/ice reservoir (gap 4): restore when present, else seed empty (an old
+        # banded restart predating the reservoir starts with no perennial ice).
+        state = state._replace(
+            ice_bands=jnp.asarray(data["ice_bands"]) if "ice_bands" in data
+            else jnp.zeros((ncol, nb)))
     start_step = int(data["step"])
     start_day = float(data["day"])
     carbon_state = None
@@ -598,6 +634,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    action=argparse.BooleanOptionalAction,
                    default=True,
                    help="Enable/disable snow albedo feedback")
+    p.add_argument("--elev-bands", action="store_true",
+                   help="Sub-grid elevation-band snow (banded precip phase / melt / "
+                        "perennial-snow cap): keeps bright snow on cold high fractions "
+                        "of a coarse cell.  Set --elev-std-m for the column's sub-grid "
+                        "relief.")
+    p.add_argument("--elev-std-m", type=float, default=0.0,
+                   help="Sub-grid elevation std [m] for the column when --elev-bands "
+                        "(0 = flat = no-op).")
     return p.parse_args(argv)
 
 
