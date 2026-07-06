@@ -199,10 +199,12 @@ def test_ec_site_physics_table_and_defaults():
     mod = _load_driver_module()
     ton = mod.ec_site_physics("US-Ton")
     assert ton["z_ref"] == 23.5                    # FLUXNET BADM Reference_height_v
-    assert ton["root_depth"] > 1.0                 # deep-rooted blue oaks
+    assert ton["root_depth"] == 5.0                # deep-rooted blue oaks (phreatophyte)
     assert ton["soil_depth_m"] > 0.0               # deepened column
     mms = mod.ec_site_physics("US-MMS")
-    assert mms["z_ref"] == 46.0 and mms["root_depth"] == 1.0   # tall tower, default roots
+    assert mms["z_ref"] == 46.0 and mms["root_depth"] == 2.0   # tall tower, deep loam
+    var = mod.ec_site_physics("US-Var")
+    assert var["z_ref"] == 2.0 and var["root_depth"] == 1.0    # short tower, shallow grass
     unknown = mod.ec_site_physics("ZZ-Nowhere")
     assert unknown == {"z_ref": 10.0, "root_depth": 1.0, "soil_depth_m": 0.0}
 

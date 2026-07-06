@@ -82,12 +82,17 @@ _SOIL_FC_WP = {"siltloam": (0.33, 0.13), "sandyloam": (0.21, 0.10)}
 # height is the only site-specific aerodynamic input.  The Ball-Berry intercept
 # stress (stress_b0) is set globally (cuticular conductance persists on live
 # leaves; a dormant/deciduous canopy self-limits via LAI -> 0), not per site.
+# root_depth reflects the rooting depth the site's soil profile actually permits:
+# a deep glacial-till loam (US-MMS) roots deeper than a shallow montane podzol
+# (DE-Obe) or an annual grassland (US-Var), while phreatophytes tapping deep soil /
+# weathered-bedrock water through the dry season (US-Ton oaks, AU-How savanna) root
+# far deeper.  These are the per-site values validated against the FLUXNET fluxes.
 EC_SITE_PHYSICS: dict[str, dict[str, float]] = {
-    "US-MMS": {"z_ref": 46.0},
-    "DE-Obe": {"z_ref": 30.0},
-    "US-Ton": {"z_ref": 23.5, "root_depth": 5.0, "soil_depth_m": 10.0},
-    "US-Var": {"z_ref": 2.0},
-    "AU-How": {"z_ref": 23.0, "root_depth": 5.0, "soil_depth_m": 10.0},
+    "US-MMS": {"z_ref": 46.0, "root_depth": 2.0},                     # deep loam, DBF
+    "DE-Obe": {"z_ref": 30.0, "root_depth": 1.0},                     # shallow montane ENF
+    "US-Ton": {"z_ref": 23.5, "root_depth": 5.0, "soil_depth_m": 10.0},  # phreatophyte oak
+    "US-Var": {"z_ref": 2.0,  "root_depth": 1.0},                     # shallow annual grass
+    "AU-How": {"z_ref": 23.0, "root_depth": 5.0, "soil_depth_m": 10.0},  # phreatophyte savanna
 }
 # Generic fallbacks for a site not in the table (matches the model/CLI defaults).
 _EC_SITE_DEFAULTS = {"z_ref": 10.0, "root_depth": 1.0, "soil_depth_m": 0.0}
