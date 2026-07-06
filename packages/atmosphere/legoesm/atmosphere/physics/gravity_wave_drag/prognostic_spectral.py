@@ -1,10 +1,30 @@
-"""Prognostic spectral gravity wave drag parameterization.
+"""Prognostic spectral gravity wave drag parameterization (EXPERIMENTAL).
 
 Multi-azimuthal, multi-wavenumber spectral GWD with a prognostic
 wave spectrum. Carries the wave flux array forward in time with a
 relaxation timescale back to the launch source.
 
 Uses jax.lax.scan for the vertical propagation, fully differentiable.
+
+.. warning::
+
+   **Experimental / not validated; opt-in only (the default GWD scheme is
+   ``none``).**  This scheme is *bespoke* — it is NOT a faithful
+   implementation of a published spectral GWD parameterization (e.g.
+   Alexander-Dunkerton 1999 or Scinocca 2003) and carries no
+   ``__physics_contract__`` yet (tracked in ``CONTRACT_TODO``).
+
+   **Known defect (F-GWD-1, CRITICAL).** The momentum deposition below
+   omits the ``sign(c - U_proj)`` factor (see the in-line ``FIXME``), so a
+   symmetric launch spectrum produces a force that is *independent of the
+   mean wind* rather than a wind-opposing drag.  As a consequence the
+   column-integrated ``eps_gwd`` returned here is NOT guaranteed positive
+   (the mean flow can gain kinetic energy) despite the field being
+   intended as a dissipation.  Restoring the sign factor is
+   necessary but not sufficient (the saturation energetics need a proper
+   spectral-GWD review plus a momentum-flux / QBO benchmark); see
+   ``parameterization_checks.md`` F-GWD-1.  Do NOT treat ``eps_gwd`` from
+   this scheme as a positive-definite energy diagnostic.
 """
 
 from __future__ import annotations
@@ -227,7 +247,11 @@ def prognostic_spectral_gwd(
     if not config.thermal_tendency:
         dT_dt = jnp.zeros_like(dT_dt)
 
-    # Column dissipation (positive-definite: KE lost by the mean flow)
+    # Column "dissipation" eps_gwd = -sum(rho * (u*du_dt + v*dv_dt) * dz):
+    # the KE removed from the mean flow.  NOTE (F-GWD-1): because the
+    # deposition above is missing the sign(c - U_proj) factor, this is NOT
+    # positive-definite for this scheme — the mean flow can be accelerated
+    # (eps_gwd < 0).  See the module docstring / FIXME above.
     eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
 
     # Prognostic spectrum update: relax toward launch source.  Pin the

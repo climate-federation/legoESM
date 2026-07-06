@@ -1,8 +1,23 @@
-"""YSU (Yonsei University) PBL turbulence scheme.
+"""YSU (Yonsei University) PBL turbulence scheme — differentiable variant.
 
-Nonlocal K-profile with entrainment flux at PBL top. The K-profile
-follows the same structure as Holtslag-Boville but adds an explicit
-entrainment term modeled as a Gaussian envelope centered at the PBL top.
+Nonlocal K-profile with entrainment near the PBL top. The K-profile
+follows the same structure as Holtslag-Boville.
+
+.. note::
+
+   **Disclosed variant vs published YSU.** Published YSU (Hong et al.
+   2006) prescribes entrainment as an explicit *gradient-independent*
+   flux at the inversion (proportional to the surface buoyancy flux,
+   ``w'θ'_h ≈ -0.15·w'θ'_0``), applied as a flux boundary condition at
+   PBL top.  This implementation instead models entrainment as an
+   intentional **down-gradient** eddy-diffusivity bump — a Gaussian
+   envelope ``K_ent`` in height centred on ``h_pbl`` (scaled by
+   ``w*·h``) added to the K-profile — so the entrainment flux here is
+   ``-K_ent·∂φ/∂z`` (down-gradient), NOT a prescribed
+   gradient-independent flux.  This trades exact YSU fidelity for a
+   smooth, fully differentiable closure (no flux-BC branch) at
+   GCM-typical vertical resolution; the bump width is exposed as
+   ``config.entrainment_width_frac``.
 
 References
 ----------
@@ -326,9 +341,13 @@ def ysu_turbulence(
     # Smooth blend from K-profile to local
     blend_pbl = jax.nn.sigmoid(config.blend_pbl_sharpness * (z_norm - 1.0))
 
-    # ----- Entrainment flux at PBL top -----
+    # ----- Entrainment near PBL top (down-gradient variant) -----
     # (w*, wtheta_sfc, theta_bar computed above with the K-profile.)
-    # Gaussian envelope for entrainment: K_ent = c_ent * w* * h * exp(-((z-h)/(f*h))^2)
+    # DISCLOSED VARIANT (see module docstring): published YSU prescribes a
+    # gradient-independent entrainment flux at the inversion; here we instead
+    # add a down-gradient eddy-diffusivity bump
+    # K_ent = c_ent * w* * h * exp(-((z-h)/(f*h))^2), so the entrainment flux
+    # is -K_ent*dφ/dz.  Chosen for a smooth, fully differentiable closure.
     # Width fraction f (default 0.3) is used for robustness at GCM-typical
     # vertical resolution; exposed as config.entrainment_width_frac.
     width = config.entrainment_width_frac * h_pbl[:, None]  # (ncol, 1)
