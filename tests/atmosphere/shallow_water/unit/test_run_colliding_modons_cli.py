@@ -42,8 +42,40 @@ def test_defaults_match_shared_modon_constants():
     assert args.hyperdiff_factor == hd_factor
     assert args.hyperdiff_scaling == hd_scaling
     assert args.use_duogrid is True
-    # And the canonical values are the validated stable ones.
-    assert (hd_factor, hd_scaling, div_damp, damp_v) == (1.0, 4, 8.0, 0.010)
+    # And the canonical values are the validated stable ones.  hd_scaling == 2
+    # (the #753 item-1 default flip: (ref/n)^2 keeps C96 stable at the seams;
+    # ^4 erupts).  Validated 100 days at C36/C48/C96 (mass drift 0).
+    assert (hd_factor, hd_scaling, div_damp, damp_v) == (1.0, 2, 8.0, 0.010)
+
+
+def test_default_scaling_law_coefficient_ratios_c36_c48_c96():
+    """#753 item 1: the default (ref/n)^2 law's *coefficients* must deliver the
+    extra face-seam damping at C96 (the eruption fix) while leaving the C48
+    calibration exactly invariant — the property that makes the default flip
+    safe.  This pins the coefficient ratios (a silent revert to ^4 fails here);
+    the *physical* C96 seam stability rests on the 100-day matrix integration at
+    C96 (the default matrix cube resolution is C36, which is stable under both
+    laws and so does NOT exercise the fix)."""
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        cdgrid_hyperdiff_cube,
+    )
+    _, _, _, hd_scaling = _modon_constants()
+    assert hd_scaling == 2
+    # C48 (== ref_n): exponent-invariant, so the default is byte-identical to
+    # the pre-#753 ^4 law there — no regression to the calibrated coarse case.
+    assert cdgrid_hyperdiff_cube(48, scaling_exponent=hd_scaling) == (
+        cdgrid_hyperdiff_cube(48, scaling_exponent=4)
+    )
+    # C96: the default delivers 4x the ^4 backstop (= (96/48)^2), the
+    # empirically-needed extra damping that stops the seam eruption.
+    assert cdgrid_hyperdiff_cube(96, scaling_exponent=hd_scaling) == pytest.approx(
+        4.0 * cdgrid_hyperdiff_cube(96, scaling_exponent=4)
+    )
+    # C36 (< ref_n): the default gives LESS damping than ^4 (0.56x), so the
+    # flip cannot over-damp the coarse cores — it preserves them better.
+    assert cdgrid_hyperdiff_cube(36, scaling_exponent=hd_scaling) < (
+        cdgrid_hyperdiff_cube(36, scaling_exponent=4)
+    )
 
 
 def test_instability_probe_overrides_still_available():

@@ -663,7 +663,21 @@ def cdgrid_div_damp_cube(
 MODON_DIV_DAMP_FACTOR: float = 8.0
 MODON_DAMP_V: float = 0.010
 MODON_HYPERDIFF_FACTOR: float = 1.0
-MODON_HYPERDIFF_SCALING: int = 4
+# Biharmonic backstop resolution law for the modon case (#753/#800).  ``2`` ==
+# the ``(ref/n)^2`` FV3 div-damp law; ``4`` == the ``(ref/n)^4``
+# grid-scale-damping-time-constant law.  Every exponent returns ``ref_coeff`` at
+# ``n == ref_n == 48``, so C48 is exponent-invariant; the two laws differ only
+# off the reference (C96: ^2 gives 4x the ^4 backstop = (96/48)^2; C36: ^2 gives
+# 0.56x — i.e. LESS damping, better core preservation, still stable).
+#
+# Default is ``2``: the ``(ref/n)^4`` law is under-damped at the C96+ face seams
+# (the modon collision drives an enstrophy cascade whose grid-scale delivery
+# rate rises with resolution), so C96 ERUPTS under ^4 (max|u| 309-449 m/s by
+# day ~5-50) but is stable under ^2.  Validated 100 days, mass drift 0.00e+00:
+# C36 (^2 = 0.56x, the regression gate) PASS max|u| ~9 m/s; C96 (^2 = 4x) PASS
+# max|u| ~18-40 m/s through the collision; C48 invariant.  See #753 item 1.
+# ``4`` remains selectable (env/CLI) for the pre-#753 byte-identical behaviour.
+MODON_HYPERDIFF_SCALING: int = 2
 
 
 def williamson_cli_calibration(
