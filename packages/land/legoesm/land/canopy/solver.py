@@ -282,7 +282,7 @@ def _canopy_residual(
 # Diagnostic forward pass — same logic but returns all fluxes
 # ---------------------------------------------------------------------------
 
-def _canopy_forward(
+def canopy_forward(
     x: jax.Array,
     bundle: CanopyForcingBundle,
     LE_module: str,

@@ -40,7 +40,7 @@ from legoesm.land.canopy.stability import (
     compute_aerodynamics, sat_specific_humidity,
 )
 from legoesm.land.canopy.solver import (
-    CanopyForcingBundle, solve_canopy_closure, _canopy_forward,
+    CanopyForcingBundle, solve_canopy_closure, canopy_forward,
 )
 from legoesm.land.surface_scheme.base import SurfaceFluxOutput
 
@@ -367,7 +367,7 @@ def compute_two_leaf_canopy_fluxes(
         return solve_canopy_closure(x0, bun, cc)
 
     def _fwd_one_col(xf, bun):
-        return _canopy_forward(xf, bun, cc.LE_module, cc.stomatal_model,
+        return canopy_forward(xf, bun, cc.LE_module, cc.stomatal_model,
                                cc.le_cap_mode, cc.use_ta_for_photosynthesis)
 
     # ---- Outer Picard loop: canopy closure ↔ soil thermal ----

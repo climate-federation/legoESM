@@ -25,32 +25,32 @@ _BOREAL, _TEMPERATE, _TROPICAL = 0, 1, 2
 # --- Canopy / Ball-Berry column defaults (CLM5 tech note; Ball-Berry 1987;
 #     Bonan 2019 two-leaf canopy) — fill CanopyLandParams columns the surfdata /
 #     PFT tables do not prescribe per-column. ---
-_CI_DEFAULT = 0.75          # clumping index [-]
-_KN_DEFAULT = 0.3           # nitrogen extinction coefficient [-]
-_ALF_DEFAULT = 0.3          # quantum yield [mol CO2 / mol photon]
-_M_C3 = 9.0                 # Ball-Berry slope, C3 [-]
-_M_C4 = 4.0                 # Ball-Berry slope, C4 [-]
-_B0_C3 = 0.01               # Ball-Berry intercept, C3 [mol m-2 s-1]
-_B0_C4 = 0.04               # Ball-Berry intercept, C4 [mol m-2 s-1]
-_TGC_DEFAULT_C = 25.0       # growth-temperature default for Vcmax acclimation [°C]
-_HC_MIN_M = 0.1             # minimum canopy height [m]
-_EMISS_VEG = 0.97           # vegetated-surface emissivity [-]
-_EMISS_BARE = 0.96          # bare-soil emissivity [-]
-_RZ0M_BARE = 0.01           # bare-surface z0m/hc ratio [-]
-_ALB_VIS_BARE = 0.2         # bare fallback visible albedo [-]
-_ALB_NIR_BARE = 0.3         # bare fallback NIR albedo [-]
+CI_DEFAULT = 0.75          # clumping index [-]
+KN_DEFAULT = 0.3           # nitrogen extinction coefficient [-]
+ALF_DEFAULT = 0.3          # quantum yield [mol CO2 / mol photon]
+M_C3 = 9.0                 # Ball-Berry slope, C3 [-]
+M_C4 = 4.0                 # Ball-Berry slope, C4 [-]
+B0_C3 = 0.01               # Ball-Berry intercept, C3 [mol m-2 s-1]
+B0_C4 = 0.04               # Ball-Berry intercept, C4 [mol m-2 s-1]
+TGC_DEFAULT_C = 25.0       # growth-temperature default for Vcmax acclimation [°C]
+HC_MIN_M = 0.1             # minimum canopy height [m]
+EMISS_VEG = 0.97           # vegetated-surface emissivity [-]
+EMISS_BARE = 0.96          # bare-soil emissivity [-]
+RZ0M_BARE = 0.01           # bare-surface z0m/hc ratio [-]
+ALB_VIS_BARE = 0.2         # bare fallback visible albedo [-]
+ALB_NIR_BARE = 0.3         # bare fallback NIR albedo [-]
 
 # --- Glacier ice-surface albedo (snow/ice; CLM glacier landunit) ---
-_GLACIER_ALB_VIS = 0.70
-_GLACIER_ALB_NIR = 0.50
-_GLACIER_ALBEDO_DEFAULT = 0.6   # broadband for the SEB / slab path
+GLACIER_ALB_VIS = 0.70
+GLACIER_ALB_NIR = 0.50
+GLACIER_ALBEDO_DEFAULT = 0.6   # broadband for the SEB / slab path
 
 # --- Soil-texture fallback where HWSD has no soil (sandy default) ---
-_FALLBACK_SAND_PCT = 92.0
-_FALLBACK_CLAY_PCT = 3.0
+FALLBACK_SAND_PCT = 92.0
+FALLBACK_CLAY_PCT = 3.0
 
 # --- Nominal top-layer wetness for soil-colour albedo before state exists ---
-_THETA_TOP_DEFAULT = 0.2
+THETA_TOP_DEFAULT = 0.2
 
 
 # CLM5 PFT name -> (biome key, climate-zone index, is_c4).  ``None`` biome = bare.
@@ -75,7 +75,7 @@ _CLM5_TO_BIOME: dict[str, tuple] = {
 }
 
 
-def _pft_lookup_arrays() -> dict[str, np.ndarray]:
+def pft_lookup_arrays() -> dict[str, np.ndarray]:
     """Per-CLM5-PFT (length-17) lookups built from the canopy biome tables."""
     vc3 = np.zeros(N_PFT_CLM5); vc4 = np.zeros(N_PFT_CLM5)
     rz0m = np.zeros(N_PFT_CLM5); rd = np.zeros(N_PFT_CLM5)
@@ -97,7 +97,7 @@ def _pft_lookup_arrays() -> dict[str, np.ndarray]:
             "hc": hc, "fc4": fc4, "is_veg": is_veg}
 
 
-def _cover1d(a):
+def cover1d(a):
     """A cover fraction as ``(ncol,)`` (squeeze a leading single-year axis)."""
     a = np.asarray(a)
     return a[0] if a.ndim == 2 else a

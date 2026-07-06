@@ -55,12 +55,12 @@ _KN_LAI_INTERCEPT = 0.98
 # --- Canopy stomatal / emissivity defaults (Ball-Berry; CLM/DifferBESS).
 #     Mirror legoesm.land.boundary_data._internals; defined locally to avoid a
 #     private cross-module import (test_no_private_cross_imports).
-_M_C3 = 9.0                  # Ball-Berry slope, C3 [-]
-_M_C4 = 4.0                  # Ball-Berry slope, C4 [-]
-_B0_C3 = 0.01               # Ball-Berry intercept, C3 [mol m-2 s-1]
-_B0_C4 = 0.04               # Ball-Berry intercept, C4 [mol m-2 s-1]
-_ALF_DEFAULT = 0.3          # quantum yield [mol CO2 / mol photon]
-_EMISS_VEG = 0.97           # vegetated-surface emissivity [-]
+M_C3 = 9.0                  # Ball-Berry slope, C3 [-]
+M_C4 = 4.0                  # Ball-Berry slope, C4 [-]
+B0_C3 = 0.01               # Ball-Berry intercept, C3 [mol m-2 s-1]
+B0_C4 = 0.04               # Ball-Berry intercept, C4 [mol m-2 s-1]
+ALF_DEFAULT = 0.3          # quantum yield [mol CO2 / mol photon]
+EMISS_VEG = 0.97           # vegetated-surface emissivity [-]
 # --- Diagnostic moisture-stress proxy defaults (texture-independent) -----------
 _THETA_WP_DEFAULT = 0.10     # wilting-point volumetric water content [m3/m3]
 _THETA_FC_DEFAULT = 0.35     # field-capacity volumetric water content [m3/m3]
@@ -382,10 +382,10 @@ def read_ec_site_driver(
     alb_nir = (1.0 - fdiff) * fil["Albedo_BSA_nir"] + fdiff * fil["Albedo_WSA_nir"]
 
     # Emissivity production fallback: observed where present, else the site-mean
-    # of observed values, else _EMISS_VEG (0.97).  Gaps do NOT invalidate the
+    # of observed values, else EMISS_VEG (0.97).  Gaps do NOT invalidate the
     # step (EMISSIVITY is excluded from _REQUIRED), matching DifferBESS.
     emiss_mean = (np.nanmean(np.where(obs["EMISSIVITY"], fil["EMISSIVITY"], np.nan))
-                  if obs["EMISSIVITY"].any() else _EMISS_VEG)
+                  if obs["EMISSIVITY"].any() else EMISS_VEG)
     emissivity_arr = np.where(obs["EMISSIVITY"], fil["EMISSIVITY"], emiss_mean)
 
     def colf(a):  # scalar -> (n, 1) jnp, broadcasting over time
@@ -395,8 +395,8 @@ def read_ec_site_driver(
         LAI=col(LAI), hc=colf(hc),
         fC4=colf(fC4), FNonVeg=col(FNonVeg), CI=col(CI), kn=colf(kn_site),
         Vcmax25_C3_leaf=col(vc3), Vcmax25_C4_leaf=col(vc4),
-        m_C3=colf(_M_C3), m_C4=colf(_M_C4), b0_C3=colf(_B0_C3), b0_C4=colf(_B0_C4),
-        alf=colf(_ALF_DEFAULT), TgC=col(fil["T_GROWTH"]),
+        m_C3=colf(M_C3), m_C4=colf(M_C4), b0_C3=colf(B0_C3), b0_C4=colf(B0_C4),
+        alf=colf(ALF_DEFAULT), TgC=col(fil["T_GROWTH"]),
         ALB_VIS=col(np.clip(alb_vis, 0.0, 1.0)), ALB_NIR=col(np.clip(alb_nir, 0.0, 1.0)),
         emissivity=col(emissivity_arr),
         rz0m=colf(aero["rz0m"]), rd=colf(aero["rd"]),

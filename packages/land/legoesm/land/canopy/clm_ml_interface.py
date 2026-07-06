@@ -73,7 +73,7 @@ __physics_contract__ = {
 # collapses to a zero-thickness canopy.  Floor ``htop`` to this small positive
 # value so the geometry stays valid — LAI is 0 on those columns, so the canopy
 # contributes no fluxes regardless of the nominal height.  Matches the two-leaf
-# path's ``_HC_MIN_M`` (0.1 m) in ``boundary_data/_internals``.
+# path's ``HC_MIN_M`` (0.1 m) in ``boundary_data/_internals``.
 _HTOP_GEOM_MIN_M: float = 0.1
 
 _CLM_INITIALIZED: bool = False
