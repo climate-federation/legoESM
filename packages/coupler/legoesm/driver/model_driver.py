@@ -1495,11 +1495,16 @@ class ModelDriver:
             )
 
         ad = self.physics.adapter
-        # column-order latitude / longitude.  grid.lat is geographic latitude in
-        # RADIANS, shape (6,n,n)/(nlat,nlon); flatten to (ncol,).  The CLM map
-        # regrids onto DEGREE coordinates; the land tile consumes radians.
-        lat_rad = _np.asarray(ad.flatten_2d(self.grid.lat)).reshape(-1)
-        lon_rad = _np.asarray(ad.flatten_2d(self.grid.lon)).reshape(-1)
+        # column-order latitude / longitude in RADIANS, flattened to (ncol,).
+        # The cube stores lat/lon already 2-D (6,n,n); a lat-lon grid stores
+        # 1-D lat/lon vectors plus 2-D ``lat2d``/``lon2d`` (ncol = nlat*nlon),
+        # so a bare ``grid.lat`` (nlat,) would fail flatten_2d's ncol reshape.
+        # Mirror the production radiation path: prefer the 2-D field.
+        # The CLM map regrids onto DEGREE coordinates; the land tile uses radians.
+        lat_src = getattr(self.grid, "lat2d", self.grid.lat)
+        lon_src = getattr(self.grid, "lon2d", self.grid.lon)
+        lat_rad = _np.asarray(ad.flatten_2d(lat_src)).reshape(-1)
+        lon_rad = _np.asarray(ad.flatten_2d(lon_src)).reshape(-1)
         lat_deg = _np.degrees(lat_rad)
         lon_deg = _np.degrees(lon_rad)
         # download_clm_surfdata caches to /tmp (one-time); load_clm_surface regrids
