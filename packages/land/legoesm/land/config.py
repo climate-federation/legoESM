@@ -7,6 +7,7 @@ from typing import Any, NamedTuple
 from legoesm import constants
 from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.carbon.stomata import StomataConfig
+from legoesm.land.snow_bands import ElevationSnowBandConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
@@ -124,6 +125,9 @@ class MultiLayerLandConfig(NamedTuple):
     land_albedo: LandAlbedoConfig = LandAlbedoConfig()
     T_snow_melt: float = constants.T_freeze
     snow_melt_rate: float = 5.0e-6
+    # Sub-grid elevation-band snow (VIC snow bands / CESM MEC); ``None`` (default)
+    # runs the single cell-mean snowpack.  See ``legoesm.land.snow_bands``.
+    elev_bands: ElevationSnowBandConfig | None = None
     # Root water uptake
     root_depth: float = 1.0       # Root e-folding depth [m]
     theta_wp: float = 0.15        # Wilting point volumetric water content
