@@ -76,6 +76,7 @@ rho_freshwater_curvature = 8.0e-6   # ρ-anomaly curvature [K^-2] from d²ρ/dT�
 # The kg/mol forms ``M_dry`` and ``M_h2o`` (below) are derived from these
 # via ``* 1e-3`` so future drift between g/mol and kg/mol forms is impossible.
 M_air = 28.96546        # [g/mol] dry air (CODATA)
+M_C   = 12.011          # [g/mol] atomic mass of carbon (IUPAC 2021)
 M_CO2 = 44.01           # [g/mol] CO2
 M_H2O = 18.01528        # [g/mol] water
 

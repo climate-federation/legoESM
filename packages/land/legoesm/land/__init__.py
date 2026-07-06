@@ -12,6 +12,8 @@ from legoesm.land.multilayer_land import (
 from legoesm.land.canopy import (
     CanopyConfig,
     CanopyLandParams,
+    CLMMLCanopyConfig,
+    CanopyState,
 )
 from legoesm.land.surface_scheme import (
     SimpleSEBConfig,
@@ -32,7 +34,7 @@ __all__ = [
     "LandConfig", "LandState", "step_land",
     "MultiLayerLandConfig", "MultiLayerLandState",
     "step_multilayer_land", "init_multilayer_land_state", "aridity_theta_init",
-    "CanopyConfig", "CanopyLandParams",
+    "CanopyConfig", "CanopyLandParams", "CLMMLCanopyConfig", "CanopyState",
     "SimpleSEBConfig", "TwoLeafCanopyConfig", "SurfaceFluxOutput",
     "LandSurfaceParams", "PARAM_BOUNDS", "PARAM_NAMES",
     "ConstantParamProvider", "PFTParamProvider", "NeuralParamProvider",

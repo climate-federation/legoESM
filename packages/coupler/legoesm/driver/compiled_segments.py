@@ -1020,6 +1020,25 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
     )
 
 
+def _apply_qv_smoothing(q_v_upd, statics):
+    """Moisture ∇⁴ smoothing + positivity floor for the operator-split tail.
+
+    Static gate: ``qv_smooth_coeff`` is a frozen-dataclass closure constant
+    (NOT traced), so this ``if`` folds at compile time.  When it is 0 the
+    hyperdiffusion is a ×0 no-op AND skipping it avoids calling the
+    grid-specific ∇⁴ operator — ``laplacian_compact_3d`` reads the cube-only
+    ``grid.halo_interp_offsets`` (absent on lat-lon), which the lat-lon training
+    rollout (``qv_smooth_coeff=0.0``) would otherwise hit.  The nonzero-coeff
+    path is bit-identical to the former nested ``max(q + dt·∇⁴, 0)``; only the
+    q>=0 floor always applies.  Module-scope (not defined in the scan body) per
+    the repo's hot-loop helper doctrine, and so fix-5 is directly testable.
+    """
+    if statics.qv_smooth_coeff != 0.0:
+        q_v_upd = q_v_upd + statics.dt * statics.hyperdiffusion_3d(
+            q_v_upd, statics.grid, statics.qv_smooth_coeff)
+    return jnp.maximum(q_v_upd, 0.0)
+
+
 def finalize_split_step(carry, lz, statics):
     """The shared operator-split TAIL (saturation adjustment, moisture fixer,
     moisture smoothing, Rayleigh friction, ``SegmentCarry`` pack) — VERBATIM
@@ -1047,18 +1066,8 @@ def finalize_split_step(carry, lz, statics):
             owned_mask=statics.owned_mask,
         )
 
-    # --- Moisture smoothing ---
-    # Static gate: ``qv_smooth_coeff`` is a frozen-dataclass closure constant
-    # (NOT traced), so this ``if`` folds at compile time.  When it is 0 the
-    # hyperdiffusion is a ×0 no-op AND skipping it avoids calling the
-    # grid-specific ∇⁴ operator — ``laplacian_compact_3d`` reads the cube-only
-    # ``grid.halo_interp_offsets`` (absent on lat-lon), which the lat-lon training
-    # rollout (``qv_smooth_coeff=0.0``) would otherwise hit.  The nonzero-coeff
-    # path is unchanged (bit-identical); only the q>=0 floor always applies.
-    if statics.qv_smooth_coeff != 0.0:
-        q_v_upd = q_v_upd + statics.dt * statics.hyperdiffusion_3d(
-            q_v_upd, statics.grid, statics.qv_smooth_coeff)
-    q_v_upd = jnp.maximum(q_v_upd, 0.0)
+    # --- Moisture smoothing (static-gated ∇⁴ + positivity floor) ---
+    q_v_upd = _apply_qv_smoothing(q_v_upd, statics)
 
     # --- Rayleigh friction ---
     u_upd = lz.u_new * statics.fric_decay
@@ -1312,6 +1321,20 @@ def build_segment_fn(
         energy_consistent_moisture_floor,
     )
     from legoesm.core.cfl import estimate_min_dx_cubed_sphere
+
+    # Per-step solar clock precision (codex round-11 Low): the in-scan
+    # ``_abs_day``/``day_to_calendar`` arithmetic is TRACED — without x64
+    # it runs in float32, and ``seconds_of_day`` quantizes (~8 s ulp at
+    # day ~1000), silently degrading the solar zenith on long runs.
+    # Production sets JAX_ENABLE_X64; warn loudly when it is off.
+    if not jax.config.jax_enable_x64:
+        logger.warning(
+            "build_segment_fn: JAX x64 is DISABLED — the per-step solar "
+            "clock (diurnal cycle, #720) computes day/seconds-of-day in "
+            "float32 inside the compiled scan; multi-year runs will "
+            "accumulate solar-time quantization (~8 s at day 1000). Set "
+            "JAX_ENABLE_X64=1 (production default) for exact solar time."
+        )
 
     # Precompute minimum grid spacing for CFL monitoring
     if hasattr(grid, 'n'):
@@ -1843,11 +1866,15 @@ def build_segment_fn(
 
         # Per-step solar time (diurnal-cycle fix) — mirror ``_single_step``.
         # The unfused radiation refresh recomputes held fluxes for the upcoming
-        # no-rad cycle; use the current absolute step's wall clock so the
-        # zenith advances across cycles instead of being pinned at the
-        # segment-end time.  ``carry.step_index`` is the absolute step counter
-        # after the preceding no-rad scan.
-        _abs_day = start_day + (carry.step_index + 1) * _dt / 86400.0
+        # no-rad cycle; use the CYCLE-BOUNDARY wall clock so the zenith
+        # advances across cycles instead of being pinned at the segment-end
+        # time.  ``carry.step_index`` here counts COMPLETED steps (the
+        # preceding no-rad scan already incremented it), so the boundary time
+        # is ``step_index * dt`` — matching the fused subcycle, whose fresh
+        # radiation is computed IN the last cycle step at ``(step_idx+1)*dt``
+        # = the same boundary.  ``+1`` would sample one dt into the future
+        # (codex round-11 Medium).
+        _abs_day = start_day + carry.step_index * _dt / 86400.0
         _doy_step, _sod_step = day_to_calendar(_abs_day)
 
         if owned_face_ids is not None:

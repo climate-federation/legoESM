@@ -289,6 +289,34 @@ def test_convection_tiedtke_parses_and_flows_to_config():
     assert cfg.convection == "tiedtke"
 
 
+def test_build_config_includes_surfdata_path():
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--land-mask-file", "sftlf.nc",
+        "--surfdata", "legoesm_surfdata.nc",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+
+    assert cfg.land_mask_path == "sftlf.nc"
+    assert cfg.surfdata_path == "legoesm_surfdata.nc"
+
+
+def test_build_config_surfdata_defaults_empty():
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.surfdata_path == ""
+
+
+def test_surfdata_without_land_mask_warns(capsys):
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical", "--surfdata", "sd.nc"])
+    _postprocess_args(args, parser)
+    assert "ignored without --land-mask-file" in capsys.readouterr().out
+
+
 def test_joint_parameterization_requires_mass_flux_and_louis():
     parser = build_arg_parser()
     args = parser.parse_args([
@@ -1253,7 +1281,8 @@ def test_amip_sota_config_builds_valid_experiment_config():
 
 def test_config_yaml_round_trips_authoritative_values():
     """`run_amip.py --config config/amip/amip_production.yaml` reproduces the
-    validated SBM AMIP parametrization (job 25918469)."""
+    production AMIP parametrization (Bechtold mass-flux + McFarlane GWD,
+    directive 2026-07-06; revalidation gate = the C24 physics-combo screen)."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     cfg_file = _repo_root() / "config" / "amip" / "amip_production.yaml"
     parser = build_arg_parser()
@@ -1266,7 +1295,8 @@ def test_config_yaml_round_trips_authoritative_values():
     assert args.discretization == "cdgrid"
     assert args.grid_type == "cubed_sphere"
     cfg = build_config_from_args(args)
-    assert cfg.convection == "sbm"
+    assert cfg.convection == "bechtold"   # mass-flux, water-conserving (#771)
+    assert cfg.gravity_wave_drag == "mcfarlane"
     assert cfg.microphysics == "morrison"
     assert cfg.cloud_scheme == "sundqvist"
     assert cfg.radiation == "rrtmg"          # rrtmgp builder alias

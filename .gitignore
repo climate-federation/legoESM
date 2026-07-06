@@ -7,6 +7,7 @@ __pycache__/
 dist/
 build/
 output/
+!configs/output/           # shipped default output configs (LMIP tapes, etc.) — tracked
 .ruff_cache/
 .mypy_cache/
 .DS_Store
@@ -86,6 +87,12 @@ docs/references/
 src/legoesm/ml/data/**
 !src/legoesm/ml/data/**/
 !src/legoesm/ml/data/**/*.py
+
+# CLM-ML-JAX checkout and runtime output directories (not part of the legoESM package)
+clm-ml-jax/
+docs/output_files_clm_ml-v2/
+validation_output/
+
 .claude/worktrees/serene-perlman/
 .claude/worktrees/agent-a5afdce4/
 ralph-claude-code/
@@ -129,6 +136,7 @@ docs/_build/
 !scripts/cluster/**/*.sbatch
 *.out
 *.err
+.jax_cache_aimip/
 
 # Local work journal + its skill — private, NEVER committed or pushed.
 /journal/

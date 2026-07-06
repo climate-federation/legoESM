@@ -217,5 +217,80 @@ def test_write_scorecard_json_roundtrips(tmp_path):
     assert json.loads(p.read_text()) == sc   # pure JSON scalars/lists — exact
 
 
+def _structmaps(nlat=36, nlon=24, isothermal=False, uniform_pr=False):
+    """A diagnostics dict carrying maps/lat/grid for the structural checks:
+    realistic warm-tropics/cold-poles tas + ITCZ-peaked pr unless flagged flat."""
+    lat = np.linspace(-87.5, 87.5, nlat)
+    latcol = lat[:, None] * np.ones((1, nlon))
+    tas = (np.full((nlat, nlon), 288.0) if isothermal
+           else 300.0 - 80.0 * (latcol / 90.0) ** 2)
+    pr = (np.full((nlat, nlon), 3.0) if uniform_pr
+          else 2.0 + 6.0 * np.exp(-(latcol / 10.0) ** 2))
+    return {"grid": (nlat, nlon), "lat": lat, "maps": {"tas": tas, "pr": pr}}
+
+
+def _globals_at_ref(*vars):
+    refs = {v: (r, u) for v, _s, u, r, _c in plotmod.FIELD_TABLE}
+    return {v: (refs[v][0], refs[v][0], refs[v][1]) for v in vars}
+
+
+def test_structural_checks_pass_for_realistic_structure():
+    chks = plotmod.amip_structural_checks(_structmaps())
+    assert chks["tas_eqpole_gradient_K"]["within"] is True
+    assert chks["tas_eqpole_gradient_K"]["value"] > 20.0
+    assert chks["pr_itcz_enhancement"]["within"] is True
+    assert chks["pr_itcz_enhancement"]["value"] > 1.05
+
+
+def test_structural_tas_gradient_fails_for_isothermal_run():
+    chks = plotmod.amip_structural_checks(_structmaps(isothermal=True))
+    assert chks["tas_eqpole_gradient_K"]["value"] == pytest.approx(0.0, abs=1e-9)
+    assert chks["tas_eqpole_gradient_K"]["within"] is False
+
+
+def test_structural_itcz_fails_for_uniform_precip():
+    chks = plotmod.amip_structural_checks(_structmaps(uniform_pr=True))
+    assert chks["pr_itcz_enhancement"]["value"] == pytest.approx(1.0, abs=1e-9)
+    assert chks["pr_itcz_enhancement"]["within"] is False
+
+
+def test_structural_checks_absent_without_maps():
+    assert plotmod.amip_structural_checks({"global_means": {}}) == {}
+    assert plotmod.amip_structural_checks({"lat": None, "grid": None}) == {}
+
+
+def test_band_weighted_mean_empty_band_is_nan():
+    import math
+    lat = np.linspace(-20.0, 20.0, 10)          # no |lat| >= 60 rows
+    w = plotmod._sinlat_area_weights(10, 4)
+    val = plotmod._band_weighted_mean(np.ones((10, 4)), lat, w, 60.0, 91.0)
+    assert math.isnan(val)
+
+
+def test_scorecard_fails_on_structure_despite_good_global_means():
+    """The whole point: a run with the right global-mean scalars but a dead
+    structure (isothermal -> zero equator-pole gradient) must NOT pass."""
+    d = _structmaps(isothermal=True)             # good pr structure, dead tas
+    d["global_means"] = _globals_at_ref("tas", "pr", "rsut", "rlut")
+    d["budget"] = {"albedo": 0.29, "R_TOA": 0.0}
+    sc = plotmod.amip_realism_scorecard(d)
+    assert sc["missing_required"] == []
+    assert all(f["within"] for f in sc["fields"].values())      # scalars fine
+    assert sc["structure"]["tas_eqpole_gradient_K"]["within"] is False
+    assert sc["passed"] is False                                # structure gates it
+    assert "structure=tas_eqpole_gradient_K" in plotmod.format_scorecard_line(sc)
+
+
+def test_scorecard_passes_with_structure_when_fully_realistic():
+    d = _structmaps()                            # realistic tas + pr structure
+    d["global_means"] = _globals_at_ref("tas", "pr", "rsut", "rlut")
+    d["budget"] = {"albedo": 0.29, "R_TOA": 0.0}
+    sc = plotmod.amip_realism_scorecard(d)
+    assert sc["structure"]["tas_eqpole_gradient_K"]["within"] is True
+    assert sc["structure"]["pr_itcz_enhancement"]["within"] is True
+    assert sc["n_checks"] == 8                    # 4 fields + 2 budget + 2 structure
+    assert sc["passed"] is True
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

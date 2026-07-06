@@ -211,7 +211,7 @@ def test_missing_emissivity_uses_fallback_and_stays_valid(tmp_path):
     # Missing EMISSIVITY uses the site-mean/0.97 production fallback and does NOT
     # invalidate the step (excluded from _REQUIRED), matching DifferBESS.
     d = read_ec_site_driver(_synthetic_v2(tmp_path, name="em", emiss_nan=True))
-    assert jnp.allclose(d.canopy_params.emissivity, 0.97)   # _EMISS_VEG fallback
+    assert jnp.allclose(d.canopy_params.emissivity, 0.97)   # EMISS_VEG fallback
     assert d.valid.all()
 
 

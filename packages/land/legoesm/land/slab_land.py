@@ -97,10 +97,10 @@ def step_land(
     W_max = _get(lp, "W_max", config.W_max)
     C_soil = _get(lp, "C_soil", config.C_soil)
     d_soil = _get(lp, "d_soil", config.d_soil)
-    # Bucket-hydrology scalars are LandConfig fields, NOT part of the
-    # LandSurfaceParams spatial container (which is locked to the 12 PARAM_NAMES /
-    # PARAM_BOUNDS entries).  Read them straight from config — never via the spatial
-    # helper (a passed LandSurfaceParams has no such attribute).
+    # Green-Ampt infiltration params are CONFIG-ONLY (no per-cell field on
+    # LandSurfaceParams): reading them through ``_get(lp, ...)`` raised
+    # AttributeError for every provider-driven run.  Promote to per-cell params
+    # only when a provider actually supplies them.
     K_infiltration = config.K_infiltration
     infil_suction_boost = config.infil_suction_boost
 
@@ -364,6 +364,9 @@ def step_land(
 
     response = TileResponse(
         T_sfc=T_soil_new,
+        # Radiometric surface T for the coupler's LW blend: for the no-canopy slab it
+        # is the emitting skin temperature (same T that produced ``lw_up_new``).
+        T_rad=T_soil_new,
         albedo=alpha_new,
         emissivity=jnp.full(T_soil.shape, emissivity, dtype=T_soil.dtype),
         z0=jnp.full(T_soil.shape, z0, dtype=T_soil.dtype),

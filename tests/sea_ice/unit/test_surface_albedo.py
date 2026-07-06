@@ -114,18 +114,16 @@ class TestSnowCoverFraction:
         assert float(f[0]) == 0.0
 
     def test_full_cover(self):
-        """Snow >= critical should give fraction = 1."""
+        """Deep snow (>=3x crit) saturates to ~1 (Niu-Yang tanh form)."""
         config = LandAlbedoConfig()
-        f = snow_cover_fraction(jnp.array([config.snow_depth_crit * 2]), config)
-        assert float(f[0]) == 1.0
+        f = snow_cover_fraction(jnp.array([config.snow_depth_crit * 3]), config)
+        assert float(f[0]) > 0.99
 
-    def test_half_cover(self):
-        """Half the critical snow should give ~0.5 fraction."""
+    def test_partial_cover_at_crit(self):
+        """SWE == crit gives tanh(1) ~ 0.76 (a thin pack already masks most surface)."""
         config = LandAlbedoConfig()
-        f = snow_cover_fraction(
-            jnp.array([config.snow_depth_crit * 0.5]), config
-        )
-        npt.assert_allclose(float(f[0]), 0.5, atol=1e-10)
+        f = snow_cover_fraction(jnp.array([config.snow_depth_crit]), config)
+        npt.assert_allclose(float(f[0]), float(jnp.tanh(jnp.array(1.0))), atol=1e-10)
 
 
 class TestLandAlbedo:

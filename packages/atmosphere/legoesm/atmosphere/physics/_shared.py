@@ -302,7 +302,18 @@ def exner_function(p):
         Exner function [-], same shape as ``p``.
     """
     poisson_exponent = constants.kappa
-    return (p / constants.p_ref) ** poisson_exponent
+    # AD-safe pressure floor: Π = (p/p₀)^κ with κ≈0.286<1 has
+    # dΠ/dp ∝ p^(κ−1) → ∞ as p→0, so the REVERSE-mode gradient blows up
+    # (NaN/Inf) at a p=0 top half-level — even though the forward value
+    # (0) is finite.  This silently NaN'd the gradient of any
+    # differentiable rollout that back-propagates through θ/Π (AIMIP
+    # carry-based training: grad wrt p_s was non-finite, job 8533900).
+    # Clip to 1 Pa (well below any real model level, so the forward is
+    # bit-identical everywhere it matters); the clip's zero gradient
+    # below the 1 Pa floor — times the finite (1 Pa)^(κ−1) — yields a
+    # finite (0) gradient there instead of ∞. coeff-ok: 1 Pa AD floor.
+    p_safe = jnp.clip(p, 1.0, None)
+    return (p_safe / constants.p_ref) ** poisson_exponent
 
 
 def exner_to_pressure(exner):

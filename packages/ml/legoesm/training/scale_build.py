@@ -72,27 +72,31 @@ def make_loss_config(cfg, yml):
     return LossConfig(**kwargs)
 
 
-def _cfl_dt(model, n_lat, fallback_dt):
-    from legoesm.core.cfl import cfl_max_dt
-    from legoesm import constants
-    dy_min = float(constants.R_earth) * np.pi / float(n_lat)
-    dt_cfl = cfl_max_dt(dy_min, wave_speed=400.0, cfl_number=0.7)
-    return float(min(float(getattr(model, "effective_dt", fallback_dt)), dt_cfl))
-
-
 def build_mode_components(cfg, yml):
     """Return (model, grid, sigma, params, make_run_seg, loss_config, dt) for cfg.mode."""
     import jax
 
     from legoesm.driver.model_driver import ModelDriver
     from legoesm.driver.physics_pipeline import build_physics_pipeline
-    from legoesm.training.training_driver import _build_training_segment
+    from legoesm.training.training_driver import build_training_segment
 
     config = build_latlon_config(cfg, yml)
     driver = ModelDriver(config)
     driver.setup()
     grid, sigma, model = driver.grid, driver.sigma, driver.model
-    dt = _cfl_dt(model, yml["n_lat"], yml["dt"])
+    # The driver's setup applies BOTH stability clamps (the factory's
+    # pole-cell advective clamp AND the gravity-wave CFL reduction) and
+    # stores the final safe value in config.dycore.dt — use it verbatim.
+    # Re-deriving it here is how the old _cfl_dt handed the training
+    # segment dt=81.8 s (pole-cell CFL 1.47) at the C32 smoke size: it
+    # used the meridional spacing only, and the pure-dycore modes
+    # (zero-init neural_gcm / sfno) blew up to loss=nan (#797).
+    dt = float(driver.config.dycore.dt)
+    # The driver's BL Rayleigh-friction profile: the training rollout needs
+    # the same dissipation as production — the adjoint through an undamped
+    # dycore returns NaN gradients (#797 bug 11; bites the pure-dycore
+    # epoch-0 neural_gcm/sfno modes hardest).
+    fric_decay = driver.fric_decay
     physics_pipeline = build_physics_pipeline(grid, sigma, config)
     loss_config = make_loss_config(cfg, yml)
 
@@ -102,8 +106,9 @@ def build_mode_components(cfg, yml):
         step_unified = physics_pipeline.build_step_unified()
 
         def make_run_seg(trainable):
-            return _build_training_segment(
-                model, step_unified, grid, sigma, dt, **trainable.to_segment_kwargs())
+            return build_training_segment(
+                model, step_unified, grid, sigma, dt, fric_decay=fric_decay,
+                **trainable.to_segment_kwargs())
 
     elif cfg.mode == "neural_gcm":
         from legoesm.atmosphere.physics.neural_physics import (
@@ -117,30 +122,63 @@ def build_mode_components(cfg, yml):
         adapter = make_adapter(grid)
 
         def make_run_seg(nn_phys):
-            return _build_training_segment(
-                model, make_neural_step_unified(nn_phys, adapter), grid, sigma, dt)
+            return build_training_segment(
+                model, make_neural_step_unified(nn_phys, adapter), grid, sigma,
+                dt, fric_decay=fric_decay)
 
     elif cfg.mode == "sfno":
+        import equinox as eqx
+        import jax.numpy as jnp
+
         from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
         from legoesm.training.sfno_dycore_coupling import (
             SFNOPhysics, make_sfno_step_unified_latlon,
         )
         from legoesm.ml.sfno import SFNO, SFNOConfig
-        from legoesm.grids.remap import compute_latlon_to_voronoi_weights
+
         ov = yml.get("sfno", {})
+        nlev = int(yml["nlev"])
+        n_ch = 4 * nlev + 2   # SFNOPhysics packs [u, v, T, q_v, lnps, phis]
         n_max = int(ov.get("gauss_n_max", max(21, int(yml["n_lat"]) // 3)))
-        gauss = create_gaussian_grid(n_max, dealiasing="quadratic")
-        sfno = SFNO(SFNOConfig(embed_dim=int(ov.get("sfno_embed_dim", 256)),
-                               n_blocks=int(ov.get("sfno_n_blocks", 8))),
-                    gauss, key=jax.random.PRNGKey(0))
-        params = SFNOPhysics(sfno=sfno, flux_head=None)
-        w_ll2g = compute_latlon_to_voronoi_weights(grid, gauss)
-        w_g2ll = compute_latlon_to_voronoi_weights(gauss, grid)
+        gauss = create_gaussian_grid(n_max)
+        sfno = SFNO(
+            SFNOConfig(
+                in_channels=n_ch, out_channels=n_ch,
+                embed_dim=int(ov.get("sfno_embed_dim", 256)),
+                n_blocks=int(ov.get("sfno_n_blocks", 8)),
+                # tendencies, NOT state residuals: with the default
+                # residual_prediction=True the "tendency" would contain the
+                # full state and destroy the rollout in one step.
+                residual_prediction=False,
+            ),
+            gauss, key=jax.random.PRNGKey(0))
+        # Epoch-0 stability contract (same as the NeuralPhysics zero-init):
+        # the untrained SFNO must emit exactly-zero tendencies so the first
+        # rollout is the pure dycore.
+        sfno = eqx.tree_at(
+            lambda m: (m.decoder.weight, m.decoder.bias), sfno,
+            (jnp.zeros_like(sfno.decoder.weight),
+             jnp.zeros_like(sfno.decoder.bias)))
+        params = SFNOPhysics(sfno=sfno, grid=gauss, nlev=nlev)
+
+        def _flat_points(lat_1d, lon_1d):
+            lon2d, lat2d = np.meshgrid(np.asarray(lon_1d), np.asarray(lat_1d))
+            return lat2d.ravel(), lon2d.ravel()
+
+        g_lat_f, g_lon_f = _flat_points(gauss.lat, gauss.lon)
+        ll_lat_f, ll_lon_f = _flat_points(grid.lat, grid.lon)
+        w_ll2g = compute_latlon_to_voronoi_weights(
+            np.asarray(grid.lat), np.asarray(grid.lon), g_lat_f, g_lon_f,
+        )._replace(target_shape=(int(gauss.n_lat), int(gauss.n_lon)))
+        w_g2ll = compute_latlon_to_voronoi_weights(
+            np.asarray(gauss.lat), np.asarray(gauss.lon), ll_lat_f, ll_lon_f,
+        )._replace(target_shape=(int(grid.n_lat), int(grid.n_lon)))
 
         def make_run_seg(sfno_ph):
-            step = make_sfno_step_unified_latlon(
-                sfno_ph, w_ll2g, w_g2ll, int(gauss.n_lat), int(gauss.n_lon))
-            return _build_training_segment(model, step, grid, sigma, dt)
+            step = make_sfno_step_unified_latlon(sfno_ph, w_ll2g, w_g2ll)
+            return build_training_segment(model, step, grid, sigma, dt,
+                                           fric_decay=fric_decay)
 
     else:
         raise ValueError(f"unknown mode {cfg.mode!r}")
@@ -148,7 +186,7 @@ def build_mode_components(cfg, yml):
     return model, grid, sigma, params, make_run_seg, loss_config, dt
 
 
-def _rollout_hours(cfg, yml):
+def rollout_hours(cfg, yml):
     hrs = cfg.multi_step_hours or tuple(yml.get("loss", {}).get("multi_step_hours", ()) or ())
     return float(hrs[0]) if hrs else 6.0     # first lead = the base rollout horizon
 
@@ -168,7 +206,7 @@ def load_era5_samples(cfg, yml, grid, sigma):
     ds = open_era5_zarr(era5_cfg.zarr_store)
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
     snaps_per_day = 24 // era5_cfg.dt_hours
-    roll_h = _rollout_hours(cfg, yml)
+    roll_h = rollout_hours(cfg, yml)
     stride = int(roll_h) // era5_cfg.dt_hours
 
     config = build_latlon_config(cfg, yml)

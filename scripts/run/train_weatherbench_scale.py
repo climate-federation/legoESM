@@ -43,6 +43,42 @@ def _parse_hours(s):
     return tuple(int(x) for x in str(s).split(",") if x != "")
 
 
+def _clamped_warmup(total_steps: int, desired_warmup: int) -> int:
+    """Warmup step count safe for ``optax.warmup_cosine_decay_schedule``.
+
+    The schedule builds its cosine phase with ``decay_steps - warmup_steps``
+    (``decay_steps`` == ``total_steps`` here), which optax requires to be
+    strictly positive.  A tiny run (``--smoke`` gives ``total_steps`` of a few)
+    otherwise trips ``cosine_decay_schedule requires positive decay_steps``.
+
+    Honor the configured warmup verbatim whenever it is valid, only capping at
+    ``total_steps - 1`` so ``decay_steps >= 1`` (this is the *sole* constraint
+    optax imposes — no silent hyperparameter coercion beyond it).  The cap binds
+    only when ``desired >= total_steps``, e.g. the degenerate ``total_steps == 1``
+    (one epoch over a single local sample) -> warmup 0.  A YAML
+    ``warmup_steps: <negative>`` is floored to 0 (no warmup), never passed
+    through as a negative to optax.
+    """
+    return min(max(0, int(desired_warmup)), max(0, total_steps - 1))
+
+
+def _apply_smoke_overrides(cfg: ScaleConfig, yml: dict) -> ScaleConfig:
+    """Shrink ``yml`` (in place) + ``cfg`` to a fast single-GPU wiring check.
+
+    A ~minutes pipeline check, per the runbook: a tiny 32x64x8 grid, one epoch,
+    and **gray radiation** in place of rrtmgp.  The full rrtmgp k-distribution
+    graph's JIT compile alone exceeds a 40-min single-GPU walltime inside the
+    differentiable checkpointed rollout (issue #797 item 6); gray flows through
+    the identical wiring under test (``compute_radiation_core``'s lat/lon
+    flatten, the q_v smoothing gate) but compiles in seconds, so the smoke
+    actually completes.  Opt back into the heavy path (to smoke the rrtmgp
+    compile itself, with a bumped walltime) via ``smoke_radiation: rrtmgp``.
+    """
+    yml["n_lat"], yml["n_lon"], yml["nlev"] = 32, 64, 8
+    yml["radiation"] = str(yml.get("smoke_radiation", "gray"))
+    return cfg._replace(n_epochs=1)
+
+
 def build_scale_config_from_args(argv=None) -> ScaleConfig:
     """Parse CLI into a ScaleConfig. Import-light + JAX-free (login-node testable)."""
     p = argparse.ArgumentParser(description="WeatherBench data-parallel scale training")
@@ -59,8 +95,13 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
     p.add_argument("--eval-wb2", action="store_true")
     p.add_argument("--smoke", action="store_true")
     a = p.parse_args(argv)
-    if a.mode not in VALID_MODES:
-        raise SystemExit(f"unknown --mode {a.mode!r}; choose from {VALID_MODES}")
+    # --mode is already restricted by argparse ``choices=VALID_MODES`` (exits 2
+    # on an unknown value), so no manual membership guard is needed here.
+    if a.n_epochs < 1:
+        # total_steps = n_epochs * n_local_samples feeds optax's cosine
+        # decay_steps, which must be positive; a zero/negative epoch count
+        # would make it non-positive.
+        raise SystemExit(f"--epochs must be >= 1, got {a.n_epochs}")
     return ScaleConfig(
         mode=a.mode, config_path=a.config, resolution_deg=a.resolution_deg,
         n_epochs=a.n_epochs, multi_step_hours=_parse_hours(a.multi_step_hours),
@@ -114,9 +155,8 @@ def main(argv=None):
     log.info("WB scale train: mode=%s res=%.2fdeg ranks=%d", cfg.mode, cfg.resolution_deg, nproc)
 
     yml = yaml.safe_load(open(cfg.config_path))
-    if cfg.smoke:  # tiny override for a single-GPU pipeline check
-        yml["n_lat"], yml["n_lon"], yml["nlev"] = 32, 64, 8
-        cfg = cfg._replace(n_epochs=1)
+    if cfg.smoke:  # tiny, gray-radiation single-GPU wiring check (see helper)
+        cfg = _apply_smoke_overrides(cfg, yml)
 
     # --- build grid / sigma / physics pipeline / model / mode loss_fn ---
     #  (reuses the same package builders run_aimip_latlon uses; the mode differs
@@ -135,23 +175,29 @@ def main(argv=None):
     log.info("ERA5 samples: %d global, %d local/rank", len(samples), len(local))
 
     # --- data-parallel loss over Equinox array-leaves ---
-    from legoesm.training.dycore_rollout import single_day_rollout
     from legoesm.training.losses import combined_loss
+    from legoesm.training.scale_build import rollout_hours
     sigma_full = jnp.asarray(sigma.sigma_full)
     arr, static = eqx.partition(params, eqx.is_inexact_array)
+
+    # The rollout horizon MUST match the target's lead time: load_era5_samples
+    # pairs each IC with the state rollout_hours later (the first
+    # multi_step_hours lead, default 6 h).  A fixed 24 h single_day_rollout here
+    # would score a 24 h forecast against a 6 h target.
+    roll_steps = int(rollout_hours(cfg, yml) * 3600.0 / dt)
 
     def loss_fn(arr_leaves, sample):
         trainable = eqx.combine(arr_leaves, static)
         ic, target, forcing = sample
-        pred = single_day_rollout(ic, forcing, make_run_seg(trainable).raw, dt=dt)
+        pred = make_run_seg(trainable).raw(ic, roll_steps, forcing)
         return combined_loss(pred, target, sigma_full, grid=grid, config=loss_config)
 
     total_steps = cfg.n_epochs * max(len(local), 1)
-    # Honor the YAML warmup but clamp it below total_steps: the cosine schedule
-    # needs decay_steps = total_steps - warmup_steps > 0, which the tiny --smoke
-    # run (total_steps ~ a handful) otherwise violates.
-    warmup = min(int(yml.get("warmup_steps", TrainingConfig().warmup_steps)),
-                 max(1, total_steps // 10))
+    # Honor the YAML warmup but clamp it safely below total_steps (see
+    # ``_clamped_warmup``): the cosine schedule needs decay_steps > 0, which the
+    # tiny --smoke run otherwise violates.
+    warmup = _clamped_warmup(
+        total_steps, yml.get("warmup_steps", TrainingConfig().warmup_steps))
     optimizer = create_optimizer(TrainingConfig(
         lr=cfg.lr, optimizer=cfg.optimizer,
         warmup_steps=warmup, total_steps=total_steps,

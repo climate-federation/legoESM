@@ -1,0 +1,22 @@
+base: config/aimip/aimip_era5.yaml
+cfg_overrides:
+  aimip_surface_forcing: true   # prescribed SST/sea-ice/insolation input features (IAV pathway)
+  aimip_n_epochs: 12
+  loss:
+    residual_normalize: true
+    normalize_by_scale: false
+    multi_step_hours:
+    - 6
+    - 12
+    multi_step_weights:
+    - 1.0
+    - 1.0
+    w_T: 0.5
+    w_u: 0.5
+    w_v: 0.5
+    w_q: 0.5
+    w_ps: 0.3
+    level_weighting: pressure
+variants:
+- sfno_physics
+output_dir: results/aimip_ace2loss_sfno_physics

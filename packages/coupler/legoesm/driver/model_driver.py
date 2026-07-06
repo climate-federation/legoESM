@@ -202,6 +202,9 @@ class ModelDriver:
         self._grid_global = None  # global grid preserved under band/cell MPI
         self._physics_lat = None  # rank-local lat for physics
         self._physics_lon = None  # rank-local lon for physics
+        # Global owned-cell count for the MPAS diag (partition-static:
+        # allreduced ONCE on first use by _mpas_global_diag, then cached).
+        self._mpas_g_n_cells = None
 
         # SPMD halo backend lifecycle.  When the driver activates the
         # explicit SPMD halo backend for multi-GPU single-node cubed-
@@ -228,6 +231,17 @@ class ModelDriver:
     @property
     def output_dir(self) -> Path:
         return self._output_dir
+
+    @property
+    def fric_decay(self) -> jax.Array:
+        """Per-level Rayleigh-friction decay factors ``exp(-k_f dt)``.
+
+        Computed by ``setup()`` (``_create_friction``). Public accessor so
+        external training-segment builders (WB scale trainer) reuse the
+        driver's boundary-layer damping instead of re-deriving it — an
+        undamped training rollout produces NaN gradients (#797 bug 11).
+        """
+        return self._fric_decay
 
     # Backward-compatible accessors for individual tracers.
     @property
@@ -1324,11 +1338,19 @@ class ModelDriver:
             from legoesm.core.precision import get_policy
             _sd = get_policy().storage
             self.physics.f_land = self._f_land.astype(_sd)
-            # Land albedo: a static NetCDF (e.g. ICON-extpar ALB) when
-            # ``albedo_land_path`` is set, else the latitude-vegetation
-            # default.  ``albedo_land_month`` (1-12) picks a month from a
-            # monthly climatology; 0 -> annual mean.
+            # Land albedo, in precedence order:
+            #   1. ``albedo_land_path`` — a static satellite NetCDF (ICON-extpar
+            #      ALB); ``albedo_land_month`` (1-12) picks a month, 0 -> annual
+            #      mean (main behaviour, unchanged / byte-identical when set).
+            #   2. ``surfdata_path`` — harmonized legoesm_surfdata (per-column
+            #      soil-colour + PFT-vegetation blend + glacier override).
+            #   3. latitude-vegetation default (ocean/uncovered fallback).
+            # The two file paths are alternative products; ``albedo_land_path``
+            # wins when both are set (direct satellite albedo over the derived
+            # blend).  ``lat_albedo`` is always the uncovered/fallback field.
             _alb_path = getattr(self.config, "albedo_land_path", "")
+            surfdata_path = getattr(self.config, "surfdata_path", "")
+            lat_albedo = land_vegetation_albedo(self.grid.grid_lat)
             if _alb_path:
                 from legoesm.grids.topography import load_land_albedo
                 _alb_month = getattr(self.config, "albedo_land_month", 0) or None
@@ -1340,10 +1362,12 @@ class ModelDriver:
                     f"(month={_alb_month or 'annual mean'}, "
                     f"mean={float(jnp.mean(self.physics.albedo_land)):.3f})"
                 )
+            elif surfdata_path:
+                self.physics.albedo_land = self._surfdata_land_albedo(
+                    surfdata_path, lat_albedo
+                ).astype(_sd)
             else:
-                self.physics.albedo_land = (
-                    land_vegetation_albedo(self.grid.grid_lat).astype(_sd)
-                )
+                self.physics.albedo_land = lat_albedo.astype(_sd)
             # Tiled (mosaic) surface fluxes + the radiation cadence apply to ANY
             # active land tile — slab OR multilayer (Richards).  Thread them at the
             # _has_land level so use_multilayer_land (topography-derived f_land, no
@@ -1542,6 +1566,62 @@ class ModelDriver:
             "  Land tile: MULTILAYER override ACTIVE (%d soil layers, %d columns)",
             cfg.soil_grid.n_layers, ncol,
         )
+
+    def _surfdata_land_albedo(self, surfdata_path: str, lat_albedo):
+        """Static land albedo field from harmonized surface data.
+
+        Loads + regrids the surfdata to ``self.grid`` (once, host-side), adapts it
+        to a slab SimpleSEB land config, fills mask-land gaps with bare soil, and
+        maps the per-column ``albedo_veg`` (soil-colour + PFT-vegetation blend with
+        a glacier override) onto the model grid.  Cells the driver considers ocean
+        (``f_land == 0``) keep ``lat_albedo`` — physically irrelevant there (the
+        radiation step blends land albedo by ``f_land``) but keeps the field finite
+        and smooth everywhere.
+
+        Static snapshot at ``config.start_day`` day-of-year.  Seasonal-LAI /
+        soil-wetness evolution of the albedo is a follow-up (it would thread
+        per-step ``land_params`` through the integration scan).
+        """
+        from legoesm.land.config import LandConfig
+        from legoesm.land.boundary_data import (
+            init_land_surface_data, fill_land_param_gaps,
+        )
+
+        # LandConfig defaults to SimpleSEBConfig -> LandSurfaceParams with albedo_veg.
+        land_cfg = LandConfig()
+        _, land_params, gsd = init_land_surface_data(
+            surfdata_path, self.grid, land_cfg, float(self.config.start_day),
+        )
+        # Reconcile to the driver's AUTHORITATIVE land mask (not surfdata's own
+        # cover): surfdata properties are kept only where _f_land > 0, so the
+        # land params never disagree with the ocean tile (weighted by 1-f_land)
+        # or preexisting AMIP runs.  Ravel matches the loader's column order
+        # since grid_shape_2d == grid_lat.shape (verified for latlon/gaussian/
+        # cubed-sphere).
+        land_params = fill_land_param_gaps(
+            land_params, gsd, f_land=jnp.asarray(self._f_land).reshape(-1),
+        )
+
+        albedo_col = jnp.asarray(land_params.albedo_veg)          # (ncol,)
+        grid_shape = tuple(int(s) for s in jnp.asarray(self.grid.grid_lat).shape)
+        n_grid = int(np.prod(grid_shape))
+        if albedo_col.shape[0] != n_grid:
+            raise ValueError(
+                f"surfdata albedo has {albedo_col.shape[0]} columns but grid "
+                f"{type(self.grid).__name__} has {n_grid} (shape {grid_shape}); "
+                "column/grid layout mismatch."
+            )
+        # Loader flattens grid.grid_lat in C-order (_target_latlon_flat -> ravel),
+        # so reshape aligns cell-for-cell with grid_lat / physics.albedo_land.
+        surf_albedo = albedo_col.reshape(grid_shape)
+        is_land = jnp.asarray(self._f_land) > 0.0
+        on_land = jnp.where(is_land, surf_albedo, jnp.nan)
+        logger.info(
+            f"  Land albedo: SURFDATA ({surfdata_path}); "
+            f"{int(jnp.sum(is_land))} land cells, on-land albedo range "
+            f"[{float(jnp.nanmin(on_land)):.3f}, {float(jnp.nanmax(on_land)):.3f}]"
+        )
+        return jnp.where(is_land, surf_albedo, lat_albedo)
 
     def _setup_external_forcing(self) -> None:
         """Configure external forcing: solar, ozone, aerosol, GHG."""
@@ -4113,16 +4193,27 @@ class ModelDriver:
             T_min_l, T_max_l, finite_l.astype(T_data.dtype),
             cwv_sum_l.astype(T_data.dtype),
         ]))
-        n_owned = int(vl.partition.n_owned_cells)
         comm = _MPI.COMM_WORLD
-        g_sum_T = comm.allreduce(float(_loc[0]), op=_MPI.SUM)
-        g_sum_ps = comm.allreduce(float(_loc[1]), op=_MPI.SUM)
-        g_max_u = comm.allreduce(float(_loc[2]), op=_MPI.MAX)
-        g_T_min = comm.allreduce(float(_loc[3]), op=_MPI.MIN)
-        g_T_max = comm.allreduce(float(_loc[4]), op=_MPI.MAX)
-        g_finite = comm.allreduce(bool(_loc[5] > 0.5), op=_MPI.LAND)
-        g_sum_cwv = comm.allreduce(float(_loc[6]), op=_MPI.SUM)
-        g_n_cells = comm.allreduce(n_owned, op=_MPI.SUM)
+        # THREE batched buffer allreduces instead of eight scalar pickle
+        # rounds (each scalar ``comm.allreduce`` is its own latency-bound
+        # collective; at multi-node rank counts the per-diag latency is
+        # 8x a single round for no reason).  The finite flag (as a float)
+        # rides the MIN batch: all-ranks-finite  <=>  min(finite) == 1.
+        _sums = np.array([_loc[0], _loc[1], _loc[6]], dtype=np.float64)
+        _maxs = np.array([_loc[2], _loc[4]], dtype=np.float64)
+        _mins = np.array([_loc[3], _loc[5]], dtype=np.float64)
+        comm.Allreduce(_MPI.IN_PLACE, _sums, op=_MPI.SUM)
+        comm.Allreduce(_MPI.IN_PLACE, _maxs, op=_MPI.MAX)
+        comm.Allreduce(_MPI.IN_PLACE, _mins, op=_MPI.MIN)
+        g_sum_T, g_sum_ps, g_sum_cwv = (float(v) for v in _sums)
+        g_max_u, g_T_max = (float(v) for v in _maxs)
+        g_T_min, g_finite_min = (float(v) for v in _mins)
+        g_finite = bool(g_finite_min > 0.5)
+        # Owned-cell count is partition-static: allreduce ONCE and cache.
+        if self._mpas_g_n_cells is None:
+            self._mpas_g_n_cells = comm.allreduce(
+                int(vl.partition.n_owned_cells), op=_MPI.SUM)
+        g_n_cells = self._mpas_g_n_cells
         mean_T = g_sum_T / (g_n_cells * nlev)
         mean_ps = g_sum_ps / g_n_cells
         cwv = (g_sum_cwv / g_n_cells) if cwv_field is not None else float("nan")
@@ -4587,6 +4678,20 @@ class ModelDriver:
         _phys_state = init_physics_state(
             _ncol_phys, _nlev_phys, phys_cfg, dtype=_seed_dtype,
         )
+        # MPAS cell-partition MPI (codex round-9 HIGH): the seed above uses
+        # rank-LOCAL ncol, so ``col_index`` would be ``arange(local)`` on
+        # EVERY rank — duplicate global identities across ranks make the
+        # stochastic per-column fold decomposition-VARIANT (the exact bug
+        # class A1 increment 2 fixed for lat-band SPMD).  The partition's
+        # ``local_cells`` are the (owned+halo) GLOBAL cell ids in local
+        # order; halo columns get their true owner's id, so their draws
+        # match the owning rank (halo values are overwritten by the
+        # exchange regardless).
+        if self._voronoi_layout is not None:
+            _phys_state = _phys_state._replace(
+                col_index=jnp.asarray(
+                    self._voronoi_layout.partition.local_cells,
+                    dtype=jnp.int32))
         # Checkpoint restore (#413): the MPAS load path stashes the
         # persisted PhysicsState fields in carry_aux under
         # ``physstate_<field>``.  Overlay them onto the fresh seed and
@@ -4658,8 +4763,15 @@ class ModelDriver:
             # carry and must fail loudly (issue #405/#413).
             _NEW_OPTIONAL_PS_FIELDS = frozenset({"aerosol_number"})
             if _any_physstate:
+                # ``col_index`` is exempt from the completeness contract:
+                # it is CONSTANT derivable identity data (arange(ncol),
+                # never evolved), added 2026-07 — checkpoints written
+                # before then legitimately lack it, and the fresh seed's
+                # arange is byte-identical to what the save would have
+                # stored.  Every EVOLVING field stays mandatory.
                 _missing = [f for f in _phys_state._fields
-                            if f not in _present_fields]
+                            if f not in _present_fields
+                            and f != "col_index"]
                 _new_missing = [f for f in _missing
                                 if f in _NEW_OPTIONAL_PS_FIELDS]
                 _missing = [f for f in _missing
