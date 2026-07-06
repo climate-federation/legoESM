@@ -294,6 +294,54 @@ class TestSBM:
         assert out.cape.shape == (ncol,)
         assert out.convective_mask.shape == (ncol,)
 
+    def test_never_net_moistens_a_column(self):
+        """Column-water conservation contract (#771): SBM must never ADD net
+        column water.
+
+        SBM relaxes q_v toward q_ref = RH_ref*q_sat. In a TRIGGERED column
+        that is net sub-saturated vs q_ref, the unfixed relaxation net-
+        MOISTENS the column while sbm.py rescales only the CONDENSATE to
+        col-net-drying — the applied vapour tendency then creates water
+        from nothing (+0.53 mm/day global in the 3-day C24 AMIP probe; the
+        CWV drift behind the C48 pilot's day-150 blowup). The drying_gate
+        zeroes the WHOLE adjustment in such columns:
+          (1) every column satisfies col ∫ dq_v dp/g <= 0;
+          (2) gated (would-be-moistening) columns have EXACTLY zero dT_dt
+              too (the dT/dq_v gate is shared, preserving the Newton
+              enthalpy closure — a heat-only residual would be a leak).
+        Non-vacuous: at least one column must be TRIGGERED yet gated, and
+        this test FAILS on the pre-#771-fix sbm.py (verified on main).
+        """
+        ncol, nlev = 4, 20
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        # Dry the columns progressively: column 0 keeps the moist sounding
+        # (net-drying, exercises the gate=1 path); the driest columns stay
+        # conditionally unstable (trigger on) but are net sub-saturated vs
+        # q_ref -> the unfixed scheme would net-moisten them.
+        scale = jnp.array([1.0, 0.5, 0.3, 0.15])[:, None]
+        q_v = q_v * scale
+        config = SBMConfig()
+        out = sbm_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
+
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        col_dqv = jnp.sum(out.dq_v_dt * dp, axis=1) / constants.g
+
+        # (1) no column ever gains net water (tol ~ fp roundoff of the sum)
+        assert bool(jnp.all(col_dqv <= 1e-10))
+
+        # non-vacuity: some column is triggered yet fully gated (the unfixed
+        # scheme would have moistened it), and some column genuinely dries
+        gated = (out.convective_mask > 0) & jnp.all(out.dq_v_dt == 0.0, axis=1)
+        drying = col_dqv < -1e-12
+        assert bool(jnp.any(gated)), (
+            "fixture produced no triggered net-sub-saturated column — the "
+            "conservation contract was not exercised")
+        assert bool(jnp.any(drying))
+
+        # (2) gated columns carry NO heat tendency either (shared gate)
+        dT_gated = jnp.where(gated[:, None], out.dT_dt, 0.0)
+        assert bool(jnp.all(dT_gated == 0.0))
+
     def test_enthalpy_conservation(self):
         """Column enthalpy tendency should be approximately conserved.
 
