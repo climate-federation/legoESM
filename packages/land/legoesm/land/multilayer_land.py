@@ -525,12 +525,16 @@ def _step_multilayer_land_impl(
     # Bare-soil evaporation resistance (#671, Sellers 1992 / Lee & Pielke 1992):
     # throttle the (positive, evaporative) bare-soil demand by the TOP-layer
     # effective saturation S_top**exp — the surface dries into a high-resistance
-    # crust far faster than the root-zone mean.  GATED to SimpleSEB: the two-leaf
-    # canopy path applies its OWN top-layer soil-evap throttle (Kelvin h_r) inside
-    # the canopy energy balance, so surface_out.lhflx already reflects it; applying
-    # S_top**exp again here would double-throttle AND wrongly throttle the canopy
-    # transpiration folded into the total lhflx.  Dew (demand<0) left un-throttled.
-    if not isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+    # crust far faster than the root-zone mean.  GATED to SimpleSEB ONLY: BOTH
+    # canopy schemes (two-leaf Kelvin h_r, and CLM-ML's Philip (1957) rhg_soil
+    # soil-humidity closure) apply their OWN top-layer soil-evap throttle inside
+    # the canopy energy balance, so surface_out.lhflx already reflects it;
+    # applying S_top**exp again here would double-throttle AND wrongly throttle
+    # the canopy transpiration folded into the total lhflx.  Testing
+    # ``isinstance(SimpleSEBConfig)`` (not ``not isinstance(TwoLeafCanopyConfig)``)
+    # so the third scheme, CLMMLCanopyConfig, is correctly excluded too.  Dew
+    # (demand<0) left un-throttled.
+    if isinstance(config.surface_scheme, SimpleSEBConfig):
         # _S_top (top-layer effective saturation, floored at 1e-6 in its shared
         # definition above so d(S_top**exp)/dS_top stays finite at the residual-water
         # boundary for a trainable exp < 1; AD-safe, negligible fwd).

@@ -46,8 +46,11 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
 # (``gap_fill``, ``param_providers``, ``clm_surface_map``, land-param training)
 # maps column-for-column; adding the 4 canopy names here desynchronises them
 # from the 12-column table and raises "Expected 16 columns, got 12".  The canopy
-# fields are instead prescribed through the surfdata / boundary-data path and
-# read with a ``None`` fallback in ``canopy/clm_ml_interface.py``.
+# fields are instead prescribed through the surfdata / boundary-data path:
+# ``LAI``, ``SAI`` and ``htop`` are read with a ``None`` fallback in
+# ``canopy/clm_ml_interface.py``; ``hbot`` is currently DERIVED there as
+# ``CLMMLCanopyConfig.hbot_frac * htop`` (the field is reserved for a future
+# explicit per-column bottom height and is not yet consumed).
 
 # Ordered parameter names — columns of the (ncol, n_params) matrix
 PARAM_NAMES: tuple[str, ...] = tuple(PARAM_BOUNDS.keys())
