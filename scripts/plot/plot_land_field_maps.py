@@ -67,16 +67,21 @@ def main():
     ap.add_argument("--tuned", default="results/land_tuned_fullgrid.json")
     ap.add_argument("--days", type=int, default=4)
     ap.add_argument("--out", default="/tmp/land_field_maps")
+    ap.add_argument("--elev-bands", action="store_true",
+                    help="run the tuned column with the sub-grid elevation-band snow "
+                         "scheme (gaps 1-6) active")
     args = ap.parse_args()
 
     M._BULK_SCHEME = "most"
+    M._ELEV_BANDS_ON = bool(args.elev_bands)
     data = M.load_training_data(args.npz, 100000, 0, args.days)   # all land cells
     w = np.asarray(data["w"])
 
     cp_def = _clm_default_params()                               # standard CLM5, untuned
     cp_tun = {k: jnp.asarray(v) for k, v in json.load(open(args.tuned)).items()}
 
-    def _full(cp):
+    def _full(cp, bands=False):
+        M._ELEV_BANDS_ON = bool(bands)   # forward_ml reads this at call time
         T, A, _ = M.forward_ml(cp, data)
         return np.asarray(T), np.asarray(A)                      # (12, ncol) monthly
 
@@ -89,9 +94,9 @@ def main():
     _orig_scf = _SA.snow_cover_fraction
     _SA.snow_cover_fraction = lambda sd, cfg: jnp.clip(
         sd / jnp.maximum(cfg.snow_depth_crit, 1e-6), 0.0, 1.0)
-    Tf_def, Af_def = _full(cp_def)                               # original CLM physics
+    Tf_def, Af_def = _full(cp_def, bands=False)                  # original CLM physics (no bands)
     _SA.snow_cover_fraction = _orig_scf
-    Tf_tun, Af_tun = _full(cp_tun)                               # our model (tanh + dry soil)
+    Tf_tun, Af_tun = _full(cp_tun, bands=args.elev_bands)        # our model (+ gaps if --elev-bands)
     Tf_era = np.asarray(data["skt"]); Af_era = np.asarray(data["alb"])
     T_def, A_def = Tf_def.mean(0), Af_def.mean(0)                # annual-mean for the maps
     T_tun, A_tun = Tf_tun.mean(0), Af_tun.mean(0)
