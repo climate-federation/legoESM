@@ -526,6 +526,35 @@ class TestNeuralPhysics:
         out = nn(x)
         assert out.shape[0] == NLEV * 4 + 6
 
+    def test_untrained_network_emits_exactly_zero_tendencies(self):
+        """Epoch-0 stability contract (#797 neural_gcm smoke loss=nan).
+
+        An UNTRAINED NeuralPhysics must emit EXACTLY zero output, so the
+        first neural_gcm rollout is the pure dycore (finite by construction).
+        residual_scale=0.01 alone is NOT near-zero in physical tendency
+        units: random O(1) outputs x 0.01 gave dq_v_dt ~ 0.04 kg/kg/s
+        against q_v ~ 1e-3 — the C32/L8 smoke rollout went non-finite
+        within 32 steps (probe job 26081628). Zero-init of the final layer
+        is the standard residual-learning guarantee.
+        """
+        from legoesm.atmosphere.physics.neural_physics import NeuralPhysics
+        for seed in (0, 7):
+            nn = NeuralPhysics(nlev=NLEV, key=jax.random.PRNGKey(seed))
+            x = jnp.linspace(-1.0, 1.0, NLEV * 4 + 2)   # O(1) packed features
+            assert bool(jnp.all(nn(x) == 0.0))
+
+    def test_untrained_network_final_layer_is_trainable(self):
+        """Zero-init must not kill learning: the final layer's gradient is
+        nonzero on the first step (hidden activations are nonzero), so the
+        optimizer immediately moves it off zero and gradients then reach
+        the earlier layers."""
+        import equinox as eqx
+        from legoesm.atmosphere.physics.neural_physics import NeuralPhysics
+        nn = NeuralPhysics(nlev=NLEV, key=jax.random.PRNGKey(0))
+        x = jnp.linspace(-1.0, 1.0, NLEV * 4 + 2)
+        grads = eqx.filter_grad(lambda m: jnp.mean(m(x)))(nn)
+        assert bool(jnp.any(grads.layers[-1].weight != 0.0))
+
 
 # ---------------------------------------------------------------------------
 # 6. sfno_dycore_coupling
