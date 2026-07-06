@@ -1,0 +1,30 @@
+# ACE2-loss classical EVAL-ONLY regen suite.
+# The combined run (suite.yaml) trained classical to 12/12 epochs but its
+# job was CANCELLED during the column_nn phase before the suite-level
+# scorecard write, so results/aimip_ace2loss/aimip_scorecard.json is missing
+# for classical. Run with ACE2_RESUME=1 -> --resume loads epoch_0011.eqx,
+# start_epoch=12 == n_epochs=12 -> zero training epochs -> eval + scorecard.
+# output_dir points at the EXISTING classical checkpoint tree
+# (results/aimip_ace2loss/classical) so resume finds it. Loss block mirrors
+# suite.yaml so the eval metric is comparable across the 3 variants.
+base: config/aimip/aimip_era5.yaml
+cfg_overrides:
+  aimip_n_epochs: 12
+  loss:
+    residual_normalize: true
+    normalize_by_scale: false
+    multi_step_hours:
+    - 6
+    - 12
+    multi_step_weights:
+    - 1.0
+    - 1.0
+    w_T: 0.5
+    w_u: 0.5
+    w_v: 0.5
+    w_q: 0.5
+    w_ps: 0.3
+    level_weighting: pressure
+variants:
+- classical
+output_dir: results/aimip_ace2loss

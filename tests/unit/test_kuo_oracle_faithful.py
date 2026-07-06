@@ -133,6 +133,49 @@ def test_kuo_fires_with_convergence():
     assert float(jnp.max(out.convective_mask)) > 0.9
 
 
+def _build_sounding_mixed_ptenq():
+    """Same sounding, but moisture convergence is POSITIVE in the low/mid
+    troposphere and NEGATIVE (divergence) aloft — both inside the buoyant cloud
+    layer.  This is the regime that exercises the icond2-vs-active mask mismatch
+    the conservation fix addresses (the all-positive ``_build_sounding`` never
+    has ptenq<=0 inside the cloud, so it cannot detect the bug)."""
+    T, qv, pf, ph, _ = _build_sounding()
+    p = np.asarray(pf[0])
+    peak = 3.0e-3 / 86400.0
+    ptenq = peak * np.exp(-((p - 850e2) / 120e2) ** 2)            # convergence low/mid
+    ptenq = ptenq - 1.3 * peak * np.exp(-((p - 300e2) / 70e2) ** 2)  # divergence aloft
+    return T, qv, pf, ph, jnp.asarray(ptenq)[None, :]
+
+
+@pytest.mark.parametrize("partition", ["kuo1965", "anthes"])
+def test_kuo_column_total_water_conserved_mixed_convergence(partition):
+    """CONSERVATION (truth tier): the redistribution is applied over the SAME
+    mask (icond2) used to normalise cvgu/zint, so the column total-water
+    tendency Σ(dq_v + dq_c)·dp/g = 0 even when divergence (ptenq<0) levels lie
+    inside the cloud.  The previous code applied the redistribution over
+    ``active`` (=icond2·sign(ptenq)>0), giving
+    Σ(dq_v + dq_c) = cvgu·(zint_active/zint − 1) ≠ 0 in this regime.  Both
+    partitions are fixed identically (kuo1965 uses zint; anthes uses zint_t and
+    zint_q with rt_t·zint_t = rt_q·zint_q = cvgu), so both must close.
+    (Physics review: conv/kuo conservation, 2026-06-29.)"""
+    T, qv, pf, ph, ptenq = _build_sounding_mixed_ptenq()
+    out = kuo_convection(T, qv, pf, ph, dt=900.0,
+                         config=KuoConfig(partition=partition),
+                         moisture_convergence=ptenq)
+    dp = ph[:, 1:] - ph[:, :-1]
+    # cvgu = column-integrated POSITIVE convergence (the source magnitude).
+    cvgu = float(jnp.sum(jnp.maximum(ptenq, 0.0) * dp / G))
+    col_total_water = float(jnp.sum((out.dq_v_dt + out.dq_c_conv_dt) * dp / G))
+    assert cvgu > 0.0
+    assert float(jnp.max(jnp.abs(out.dq_v_dt))) > 0.0  # the scheme fired
+    # The converged moisture is conserved (removed from vapor, returned as
+    # moistening + cloud water): the net column total-water tendency is ~0.
+    assert abs(col_total_water) < 0.03 * cvgu, (
+        f"column total water not conserved: {col_total_water:.3e} "
+        f"vs cvgu={cvgu:.3e} (ratio {col_total_water / cvgu:.3f})"
+    )
+
+
 def test_kuo_oracle_column_heating_within_tolerance():
     """Column-integrated heating matches the compiled oracle within 10%.
 

@@ -633,3 +633,38 @@ def make_sharded_ocean_step(model, mesh):
             set_halo_backend(_prev_backend, _prev_topo)
 
     return sharded_step
+
+
+def make_sharded_ocean_step_global(model, mesh):
+    """Return ``step(state_global, dt, surface_forcing=None, freshwater=None)``
+    that takes a GLOBAL (single-device-layout) state + forcing and returns a
+    GLOBAL state — the minimal-diff driver entry point.
+
+    Wraps :func:`make_sharded_ocean_step`: shards the global state + forcing IN
+    (:func:`shard_state_latlon` + :func:`shard_forcing_latlon`), runs the lat-band
+    SPMD step, then gathers the state OUT (:func:`gather_state_latlon`).  This lets
+    the OMIP host loop keep operating on a normal full-domain state — the per-step
+    host BCs (SSS restore, prognostic ice, geothermal, BBL, nudge) see the
+    gathered global state UNCHANGED — at the cost of a per-step gather/scatter
+    (acceptable for the host-coupled OMIP driver; the pure-dynamics inner loop
+    should use :func:`make_sharded_ocean_step` directly to stay sharded).
+
+    ``mesh is None`` ⇒ the plain single-device ``model.step`` (no scatter/gather).
+    """
+    if mesh is None:                   # single-device: plain step
+        return lambda state, dt, surface_forcing=None, freshwater=None: (
+            model.step(state, dt, freshwater=freshwater,
+                       surface_forcing=surface_forcing))
+
+    inner = make_sharded_ocean_step(model, mesh)
+
+    def sharded_step_global(state, dt, surface_forcing=None, freshwater=None):
+        # Scatter the global state to the band layout; the forcing is sharded
+        # INSIDE ``inner`` (make_sharded_ocean_step lays it out), so pass it
+        # through global.
+        ss = shard_state_latlon(state, mesh)
+        ss = inner(ss, dt, surface_forcing=surface_forcing,
+                   freshwater=freshwater)
+        return gather_state_latlon(ss, mesh)
+
+    return sharded_step_global

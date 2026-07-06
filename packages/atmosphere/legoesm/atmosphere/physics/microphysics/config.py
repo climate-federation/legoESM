@@ -190,7 +190,7 @@ __param_spec__ = {
             "a_v_r": {"units": "m^(1-b)/s", "bounds": (40.0, 400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
             "b_v_r": {"units": "1", "bounds": (0.15, 1.5), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
             # --- Ice nucleation (Cooper 1986) ---
-            "N_i0": {"units": "1/m^3", "bounds": (1650.0, 15000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
+            "N_i0": {"units": "1/m^3", "bounds": (1.0, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
             "N_i_nuc_max": {"units": "1/m^3", "bounds": (1e5, 5e6), "tunable_tier": 3, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
             "cooper_a": {"units": "1/K", "bounds": (0.1, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
             "cooper_T_act": {"units": "K", "bounds": (255.0, 273.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
@@ -271,7 +271,7 @@ __param_spec__ = {
             "mu_c": {"units": "1", "bounds": (0.99, 9.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Thompson et al. (2008)", "shape": None},
             "mu_r": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Thompson et al. (2008)", "shape": None},
             # --- Ice nucleation (Cooper 1986) ---
-            "N_i0": {"units": "1/m^3", "bounds": (1650.0, 15000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
+            "N_i0": {"units": "1/m^3", "bounds": (1.0, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
             "N_i_nuc_max": {"units": "1/m^3", "bounds": (1e5, 5e6), "tunable_tier": 3, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Thompson et al. (2008)", "shape": None},
             "cooper_a": {"units": "1/K", "bounds": (0.1, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
             "cooper_T_act": {"units": "K", "bounds": (255.0, 273.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
@@ -711,7 +711,10 @@ class ThompsonConfig(NamedTuple):
     # bisects that band and makes the cold-case fp32-vs-fp64 spread WORSE).
     # See _warm_rain.rain_evaporation.
     rain_evap_rh_floor: float = 5.0e-5
-    N_i0: float = 5e3
+    # Cooper(1986) base ice number [1/m³] (= 0.005/L).  Was 5e3 — 1000x too
+    # high (the canonical Cooper base is 0.005/L = 5/m³, the value MorrisonConfig
+    # uses); 5e3 pinned all clouds colder than ~-15 C at the N_i_nuc_max cap.
+    N_i0: float = 5.0
     cooper_a: float = 0.304
     # SAM "limit to 500 L⁻¹" cap on Cooper-nucleated ice number. Without it
     # the bare ``N_i0·exp(cooper_a·(T_freeze−T))`` diverges at very cold
@@ -795,7 +798,8 @@ class P3Config(NamedTuple):
     saturation_sharpness: float = 100.0
     autoconversion_sharpness: float = 10.0
     # --- Ice nucleation (Cooper 1986) ---
-    N_i0: float = 5e3               # Cooper base ice crystal number [1/m³]
+    # Was 5e3 — 1000x the canonical Cooper base (0.005/L = 5/m³, = MorrisonConfig).
+    N_i0: float = 5.0               # Cooper base ice crystal number [1/m³] (= 0.005/L)
     cooper_a: float = 0.304         # Cooper exponent
     # SAM "limit to 500 L⁻¹" cap; bounds the Cooper exponential so cold
     # tropopause temperatures cannot overflow fp32 (mirrors Morrison).

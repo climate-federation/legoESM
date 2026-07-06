@@ -678,6 +678,57 @@ def global_rel_residual(
     return jax.lax.stop_gradient(jnp.sqrt(rr / jnp.maximum(bb, eps)))
 
 
+# Relative-residual floor for the PCG/CG, expressed in machine epsilons of the
+# WORKING dtype.  A fixed-iteration (or stock) PCG cannot drive the relative
+# residual sqrt(r·r/b·b) below the rounding-noise floor ~ sqrt(N)·eps; for the
+# diagonally-dominant free-surface Helmholtz this bottoms out a couple of
+# orders above eps.  1e3·eps is a safe practical floor (f64: ~2.2e-13, well
+# below the 1e-10 default, so f64 is unchanged; f32: ~1.2e-4, which the solver
+# CAN reach — a hardcoded 1e-10 is ~3 orders below f32 eps ≈ 1.19e-7 and would
+# be permanently unreachable, leaving ``converged`` always False and the
+# single-rank stock-CG ``while_loop`` grinding to ``maxiter`` every step).
+_PCG_REL_TOL_EPS_FLOOR = 1.0e3
+
+
+def precision_aware_rel_tol(
+    requested_tol: float | jnp.ndarray, dtype: jnp.dtype,
+) -> jnp.ndarray:
+    """Floor a relative-residual tolerance to what *dtype* can actually reach.
+
+    Returns a scalar of *dtype*.
+
+    * **float64 (and any wider) → pure pass-through.**  The full-precision
+      reference path is byte-identical: ANY requested f64 tolerance (the
+      1e-10 default, or a tighter custom 1e-13, …) is returned unchanged.
+    * **float32 (and narrower) → floored** to
+      ``max(requested_tol, _PCG_REL_TOL_EPS_FLOOR · eps(dtype))`` (~1.2e-4 in
+      f32).  This raises an unreachable f64-tuned tolerance (e.g. 1e-10,
+      ~1000× below f32 machine epsilon ≈ 1.19e-7) up to a value the iterative
+      solver can satisfy — so the ``converged`` diagnostic stays meaningful
+      and a residual-gated stock-CG ``while_loop`` terminates instead of
+      running to its iteration cap.  A tolerance already above the floor
+      (a deliberately loose request) passes through unchanged.
+
+    Used by the implicit free-surface solvers (lat-lon C-grid + MPAS) for both
+    the ``converged``-flag acceptance tolerance and the stock-CG ``tol``; the
+    distributed fixed-iteration PCG runs a static iteration count regardless,
+    so this only affects the diagnostic there.
+
+    JAX-safe: ``requested_tol`` may be a Python float OR a traced scalar (no
+    host sync, no ``float()`` on a tracer); the floor is a static value of
+    *dtype* (``jnp.finfo`` reads the static dtype, not a tracer).
+    """
+    dt = jnp.dtype(dtype)
+    requested = jnp.asarray(requested_tol, dtype=dt)
+    # Pass f64 (and any dtype at least as wide) straight through so the
+    # reference path is byte-identical for ANY f64 tolerance, not just the
+    # default — the eps floor only matters for the narrow (fp32) modes.
+    if jnp.finfo(dt).eps <= jnp.finfo(jnp.float64).eps:
+        return requested
+    floor = jnp.asarray(_PCG_REL_TOL_EPS_FLOOR * jnp.finfo(dt).eps, dtype=dt)
+    return jnp.maximum(requested, floor)
+
+
 def solve_helmholtz_implicit(
     A_op: Callable[[jnp.ndarray], jnp.ndarray],
     rhs: jnp.ndarray,

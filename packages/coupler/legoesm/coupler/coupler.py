@@ -267,6 +267,11 @@ def ocean_tile_response(
             z0_init=config.ocean_z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
+            # COARE free-convection gustiness (w*) on the tile flux: keeps the
+            # air-sea interface energy-consistent with the atmosphere surface
+            # layer (which already carries gustiness_w_zi) and lets a calm warm
+            # ocean evaporate realistically.  0.0 => off => byte-identical.
+            gustiness_w_zi=config.gustiness_w_zi,
             thermo_convention=_thermo_conv,
             stability_scheme=config.stability_scheme,
         )

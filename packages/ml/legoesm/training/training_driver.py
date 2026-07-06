@@ -15,6 +15,7 @@ import logging
 import time
 from typing import Callable
 
+import jax
 import jax.numpy as jnp
 import equinox as eqx
 import optax
@@ -274,6 +275,86 @@ def _training_loop(
 # ======================================================================
 # Mode 1: Physics parameter tuning
 # ======================================================================
+
+def multi_step_rollout_loss(
+    ic, forcing, run_seg_raw, *, dt, rollout_hours, target,
+    sigma_full, grid, loss_config, truncated_bptt=True,
+):
+    """Single- or multi-step autoregressive supervision loss (shared by
+    every AIMIP trainer so the rollout+loss is defined ONCE).
+
+    ``loss_config.multi_step_hours`` empty  ->  ONE ``single_day_rollout``
+    to ``rollout_hours`` vs ``target`` (a single SegmentCarry): the legacy
+    single-horizon path, bit-identical to the old inline trainer body.
+
+    Non-empty  ->  GenCast-style multi-step (NeuralGCM / AIMIP protocol):
+    chain autoregressive segments between consecutive leads and sum
+    ``combined_loss`` after each segment against ``target[k]`` (``target``
+    is then a tuple of K carries), weighted by
+    ``loss_config.multi_step_weights`` (default uniform, normalised by the
+    weight sum).
+
+    ``truncated_bptt`` (default True) ``stop_gradient``s the carry between
+    segments, so each loss term backprops ONLY through its own segment.
+    The lat-lon primitive-equation ADJOINT explodes to NaN through a
+    >~6 h differentiable chain even when the forward is finite (job
+    8533825) — so full backprop-through-time over a 24 h+ multi-step
+    rollout is unusable on this stack.  Truncated BPTT keeps every
+    gradient a stable short-horizon adjoint while the FORWARD still chains
+    autoregressively: the model is supervised on its OWN drifted
+    6/12/18 h states, not only the ERA5 IC, which is the point of
+    multi-step training.  The spectral stack uses full BPTT (it is
+    adjoint-stable); this flag exists for the lat-lon stack.
+
+    NB the per-segment ``forcing`` is reused as-is; the diurnal solar
+    phase is therefore held at the IC time-of-day across segments.
+    # ponytail: approximate diurnal phase across segments; thread
+    # forcing.seconds_of_day per lead if a diurnal-sensitive metric needs it.
+    """
+    ms_hours = tuple(int(h) for h in (loss_config.multi_step_hours or ()))
+    if not ms_hours:
+        pred = single_day_rollout(
+            ic, forcing, run_seg_raw, dt=dt, hours=rollout_hours)
+        return combined_loss(
+            pred, target, sigma_full, grid=grid, config=loss_config)
+
+    # Segment lengths = gaps between consecutive (sorted) leads.
+    leads = sorted(ms_hours)
+    seg_hours, prev = [], 0
+    for h in leads:
+        gap = h - prev
+        if gap <= 0:
+            raise ValueError(
+                f"multi_step_hours={ms_hours} must be strictly increasing "
+                "positive hour leads.")
+        seg_hours.append(gap)
+        prev = h
+    if not isinstance(target, (tuple, list)) or len(target) != len(seg_hours):
+        raise ValueError(
+            f"multi-step loss needs {len(seg_hours)} target carries (one per "
+            f"lead {leads}); got "
+            f"{type(target).__name__} of length "
+            f"{len(target) if isinstance(target, (tuple, list)) else 'n/a'}.")
+    weights = tuple(float(w) for w in (loss_config.multi_step_weights or ()))
+    if weights and len(weights) != len(seg_hours):
+        raise ValueError(
+            f"multi_step_weights length {len(weights)} != number of leads "
+            f"{len(seg_hours)}.")
+    if not weights:
+        weights = (1.0,) * len(seg_hours)
+    wsum = float(sum(weights))
+
+    state = ic
+    total = jnp.asarray(0.0)
+    for k, sh in enumerate(seg_hours):
+        state = single_day_rollout(
+            state, forcing, run_seg_raw, dt=dt, hours=sh)
+        total = total + weights[k] * combined_loss(
+            state, target[k], sigma_full, grid=grid, config=loss_config)
+        if truncated_bptt:
+            state = jax.lax.stop_gradient(state)
+    return total / wsum
+
 
 def train_physics_params(
     model,

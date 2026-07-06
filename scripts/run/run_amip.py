@@ -1689,6 +1689,12 @@ def _require_full_physics_for_amip(args, parser) -> None:
 
 
 def main(argv: list[str] | None = None):
+    # Persistent cross-process XLA compile cache (RRTMGP cold-compile ~2600 s,
+    # otherwise re-paid every launch).  Idempotent; before any jit.  run_amip
+    # does not go through bootstrap()/configure_backend(), so wire it directly.
+    from legoesm.runtime.backend import enable_persistent_compile_cache
+    enable_persistent_compile_cache()
+
     parser = build_arg_parser()
 
     # Two-pass parse so a --config file supplies defaults that explicit CLI

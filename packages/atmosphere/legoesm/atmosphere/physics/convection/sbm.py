@@ -174,6 +174,29 @@ def sbm_convection(
     # Reference moisture at converged temperature
     q_ref = RH_ref[:, None] * saturation_mixing_ratio(T_ref, p_full)
 
+    # 5b. Frierson (2007) SHALLOW branch — conserve column water in the
+    #     net-moistening regime.  The deep references can net-MOISTEN the cloud
+    #     layer (cloud-layer mass-mean ``q_ref − q_v`` > 0); applied directly
+    #     this CREATES water out of nothing, because the cloud-water source
+    #     below clips ``col_net_drying`` to 0 and so cannot absorb it (the
+    #     column then has Σ(dq_v + dq_c) > 0).  Frierson's shallow branch sets
+    #     precipitation to zero and conserves column-integrated moisture (and,
+    #     via the enthalpy-conserving refs, column enthalpy) by a pure
+    #     redistribution.  We realise this by subtracting the cloud-layer
+    #     mass-weighted-mean MOISTENING deficit from ``q_ref`` (so the
+    #     column-integrated dq_v vanishes in the shallow regime) and adding the
+    #     matching latent-heat-equivalent shift to ``T_ref`` (so the deep
+    #     references' net cooling is removed and ∫c_p dT ≈ −L_v ∫dq ≈ 0).
+    #     ``jnp.maximum(·, 0)`` leaves the deep (net-drying) branch BYTE-
+    #     IDENTICAL (the shift is exactly 0 there) and uses the same a.e.-
+    #     differentiable clamp already employed for the cloud-water source.
+    w_cloud = cloud_mask * dp                                   # (ncol, nlev)
+    W_cloud = jnp.clip(jnp.sum(w_cloud, axis=1, keepdims=True), 1e-30, None)
+    dq_def = jnp.sum(w_cloud * (q_ref - q_v), axis=1, keepdims=True) / W_cloud
+    shallow_dq = jnp.maximum(dq_def, 0.0)                       # net moistening to remove (>=0)
+    q_ref = q_ref - shallow_dq
+    T_ref = T_ref + (constants.L_v / constants.c_pd) * shallow_dq
+
     # 6. Smooth trigger: cape_trigger == sigmoid(sharpness * (CAPE - threshold))
     trigger = cape_trigger(
         cape, CAPE_threshold, config.smooth_trigger_sharpness

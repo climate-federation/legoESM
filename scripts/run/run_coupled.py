@@ -190,6 +190,25 @@ def land_scheme_overrides(land_scheme: str) -> dict:
         f"land_scheme must be one of {_LAND_SCHEMES}, got {land_scheme!r}.")
 
 
+#: Max atm-ocean coupling interval [days] for the dynamic 3D ocean.  diag_days
+#: sets the integration segment length and the coupler fires once per segment,
+#: so diag_days IS the coupling interval; looser than this overheats the atm on
+#: stale SST and goes unstable (see clamp_coupling_diag_days).
+_MAX_COUPLED_DIAG_DAYS = 10
+
+
+def clamp_coupling_diag_days(ocean: str, diag_days: int) -> int:
+    """Clamp diag_days to a tight coupling cadence for the dynamic 3D ocean.
+
+    Returns ``min(diag_days, _MAX_COUPLED_DIAG_DAYS)`` when ``ocean == "dynamic"``
+    (diag_days is the atm-ocean coupling interval there), else ``diag_days``
+    unchanged.  Pure + side-effect-free so it is unit-testable.
+    """
+    if ocean == "dynamic" and diag_days > _MAX_COUPLED_DIAG_DAYS:
+        return _MAX_COUPLED_DIAG_DAYS
+    return diag_days
+
+
 # The --config YAML loader is the shared single source of truth
 # (legoesm.driver.run_config_yaml) reused by run_amip.py — see main(), which
 # imports it deferred.  run_coupled-specific example dests for the unknown-key
@@ -221,8 +240,7 @@ def _find_latest_checkpoint(output_dir):
 
 
 def build_parser():
-    """Build the run_coupled argument parser (exposed for CLI round-trip tests +
-    the --config loader)."""
+    """Build the run_coupled argument parser (exposed for CLI round-trip tests)."""
     # Central microphysics literal set — keep the CLI allowlist in sync with
     # ExperimentConfig.validate_strict (no drift / no dropped advertised scheme).
     from legoesm.driver.config import VALID_MICROPHYSICS
@@ -328,20 +346,36 @@ def build_parser():
     # MOST vs atmosphere constant) — the exact inconsistency validate() below
     # rejects for turbulence="none".
     parser.add_argument("--surface-bulk-scheme", default="constant",
-                        choices=["constant", "coare3", "large_yeager"],
-                        help="Air-sea surface bulk-flux algorithm. Applied "
-                             "CONSISTENTLY to the atmosphere surface layer, the "
-                             "slab/two-layer ocean heat budget, and the coupler "
-                             "ocean tile (so the turbulent heat leaving the ocean "
-                             "matches the heat entering the atmosphere). "
-                             "NOTE: the land / lake / sea-ice tiles keep their "
-                             "own bulk_scheme. 'constant' (default, byte-"
-                             "identical) = neutral coefficients, no gustiness. "
-                             "'coare3'/'large_yeager' = stability-dependent MOST "
-                             "with convective-gustiness w* — fixes anemic "
-                             "evaporation over a calm, convectively-unstable warm "
-                             "ocean (cold/dry surface-air bias). Requires a "
-                             "turbulence scheme (not --turbulence none).")
+                        choices=["constant", "most", "coare3", "large_yeager"],
+                        help="AIR-SEA surface bulk-flux algorithm for the "
+                             "atmosphere surface layer + the coupler OCEAN tile "
+                             "(the 3D-ocean air-sea flux). 'coare3' is the "
+                             "ocean-appropriate choice (Charnock roughness + "
+                             "convective-gustiness w*). The LAND and SLAB-ocean "
+                             "tiles use their OWN scheme (--land-bulk-scheme / "
+                             "--slab-bulk-scheme, default 'most'). 'constant' "
+                             "(default, byte-identical) = neutral coefficients; "
+                             "'most' = generic iterative MOST (fixed roughness); "
+                             "'coare3'/'large_yeager' = ocean stability-dependent "
+                             "MOST. Requires a turbulence scheme (not "
+                             "--turbulence none).")
+    parser.add_argument("--land-bulk-scheme", default="most",
+                        choices=["constant", "most", "coare3", "large_yeager"],
+                        help="Surface bulk-flux scheme for the LAND tile "
+                             "(slab/multilayer land). Default 'most' = "
+                             "Monin-Obukhov similarity with a land roughness "
+                             "(no ocean Charnock); 'constant' = neutral "
+                             "coefficients (legacy). Land already carries dynamic "
+                             "water pools + dryness-limited ET (bucket / Richards "
+                             "soil moisture), so MOST + soil-moisture stress gives "
+                             "a physical land-atmosphere flux.")
+    parser.add_argument("--slab-bulk-scheme", default="most",
+                        choices=["constant", "most", "coare3", "large_yeager"],
+                        help="Surface bulk-flux scheme for the SLAB / two-layer "
+                             "ocean heat budget (--ocean slab|two_layer). Default "
+                             "'most' (generic MOST). The prognostic 3D ocean "
+                             "(--ocean dynamic) instead uses --surface-bulk-scheme "
+                             "on the coupler ocean tile (coare3 for air-sea).")
     parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi",
                         type=float, default=None,
                         help="COARE 3.0 convective-gustiness boundary-layer depth "
@@ -506,6 +540,22 @@ def build_parser():
                              "up — dragging global near-surface air T down. "
                              "Default off (byte-identical); recommended ON for a "
                              "faster, more realistic land spin-up.")
+    parser.add_argument("--stomata", dest="stomata",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="STOMATAL CONDUCTANCE control of land "
+                             "evapotranspiration (StomataConfig.enabled).  DEFAULT "
+                             "ON for realistic land ET; --no-stomata => land ET is "
+                             "limited only by the bucket/Richards soil-moisture "
+                             "beta (no physiological control).  ON => the "
+                             "effective beta is further "
+                             "limited by stomatal conductance: with the DifferLand "
+                             "carbon scheme (--preset slab_carbon) it is the "
+                             "CO2-COUPLED Farquhar + Ball-Berry/Medlyn solver "
+                             "(transpiration responds to atmospheric CO2 via "
+                             "forcing.co2_ppmv); without carbon it is the Jarvis "
+                             "multiplicative model (no CO2).  Soil moisture still "
+                             "depletes dynamically (bucket dW/dt=P-E / Richards "
+                             "theta).  Recommended ON for realistic land ET.")
     parser.add_argument("--polar-filter", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Fourier polar filter for the lat-lon C-grid "
@@ -693,6 +743,25 @@ def main():
         args.ic = ("standard" if args.grid in ("latlon", "cubed_sphere")
                    else "default")
 
+    # Coupling-interval guard (dynamic 3D ocean): diag_days sets the integration
+    # SEGMENT length, and the atm<->ocean coupler (_segment_hook) — which steps
+    # the ocean and refreshes the SST the atmosphere sees — fires ONCE PER
+    # SEGMENT.  So diag_days IS the coupling interval.  A large diag_days lets
+    # the atmosphere integrate many days on a FIXED (stale) SST, which overheats
+    # the column and goes unstable (measured: --diag-days 20 -> column-T 258.9K,
+    # max_v 28.6, NaN by ~day 40; --diag-days 10 stays at 252.7K, stable).  Clamp
+    # to a tight coupling cadence for the dynamic ocean so infrequent-output runs
+    # don't silently loosen the coupling.  (Proper fix: a coupling interval
+    # independent of the output interval in model_driver's segment-length calc.)
+    _clamped = clamp_coupling_diag_days(args.ocean, args.diag_days)
+    if _clamped != args.diag_days:
+        logger.warning(
+            "--diag-days %d is too loose for --ocean dynamic (diag_days sets the "
+            "atm-ocean coupling interval); clamping to %d to keep the coupling "
+            "tight and avoid the stale-SST overheating instability.",
+            args.diag_days, _clamped)
+        args.diag_days = _clamped
+
     # Unfused radiation only engages when rad_update_steps > 1 (the host-loop
     # dispatch in _run_compiled requires it).  Make the no-op EXPLICIT rather
     # than silently falling back to the fused path.
@@ -829,7 +898,7 @@ def main():
                 "remap).  Cube-atm + tripole-ocean needs the deferred "
                 "cross-family remap.")
         overrides["ocean_mode"] = "dynamic"
-        overrides["ocean_config"] = LatLonCGridOceanConfig.from_flat()
+        overrides["ocean_config"] = LatLonCGridOceanConfig()
         overrides["ocean_nlev"] = args.ocean_nlev
         overrides["ocean_dt_s"] = args.ocean_dt
         overrides["ocean_H_max_m"] = args.ocean_H_max
@@ -881,18 +950,20 @@ def main():
     elif args.ocean == "two_layer":
         overrides["ocean_config"] = SimpleOceanConfig(
             mode="two_layer", h_mix=args.ocean_h_mix, restore_deep=True,
-            # Match the slab heat-budget turbulent fluxes to the atmosphere
-            # surface layer (interface energy consistency); see SimpleOceanConfig.
-            bulk_scheme=args.surface_bulk_scheme,
-            gustiness_w_zi=args.surface_gustiness_zi,
+            # The SLAB/two-layer ocean uses its own bulk scheme (default MOST);
+            # the prognostic 3D ocean is what gets COARE on the coupler tile.
+            # thermo_convention keeps the slab heat-budget turbulent fluxes
+            # constant-set-consistent with the atmosphere surface layer.
+            bulk_scheme=args.slab_bulk_scheme,
+            gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
             thermo_convention=args.bulk_thermo_convention,
         )
         overrides["ocean_mode"] = "two_layer"
     else:
         overrides["ocean_config"] = SimpleOceanConfig(
             mode=args.ocean, h_mix=args.ocean_h_mix,
-            bulk_scheme=args.surface_bulk_scheme,
-            gustiness_w_zi=args.surface_gustiness_zi,
+            bulk_scheme=args.slab_bulk_scheme,
+            gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
             thermo_convention=args.bulk_thermo_convention,
         )
         # ocean_mode log label (fixed/slab -> "slab").
@@ -929,6 +1000,49 @@ def main():
         logger.info("  Land albedo: snow-albedo feedback + lat-varying "
                     "vegetation albedo ENABLED")
 
+    # Land surface bulk-flux scheme (default MOST): wire --land-bulk-scheme onto
+    # the LandConfig / MultiLayerLandConfig so the land tile computes its
+    # turbulent fluxes with Monin-Obukhov similarity (land roughness, no ocean
+    # Charnock) instead of the legacy constant coefficients.  The land model
+    # already carries dynamic water pools + dryness-limited ET (bucket / Richards
+    # soil moisture), so MOST + the soil-moisture stress gives a physical
+    # land-atmosphere flux.  The config-level default stays "constant" (other
+    # callers / tests byte-identical); only run_coupled opts into MOST.
+    if (coupled_cfg.land_mode != "none"
+            and coupled_cfg.land_config is not None
+            and hasattr(coupled_cfg.land_config, "bulk_scheme")):
+        coupled_cfg = coupled_cfg._replace(
+            land_config=coupled_cfg.land_config._replace(
+                bulk_scheme=args.land_bulk_scheme))
+        logger.info("  Land surface flux scheme: %s (land tile; dynamic water "
+                    "pools + dryness-limited ET active)", args.land_bulk_scheme)
+
+    # Stomatal conductance (opt-in): enable physiological control of land ET so
+    # transpiration is NOT just soil-moisture-limited.  compute_effective_beta
+    # then routes through the CO2-coupled Farquhar+Ball-Berry/Medlyn solver when
+    # the DifferLand carbon scheme is active (CO2 via forcing.co2_ppmv), else the
+    # Jarvis model.  Default config keeps stomata.enabled=False (byte-identical).
+    if (getattr(args, "stomata", False)
+            and coupled_cfg.land_mode != "none"
+            and coupled_cfg.land_config is not None
+            and hasattr(coupled_cfg.land_config, "stomata")):
+        coupled_cfg = coupled_cfg._replace(
+            land_config=coupled_cfg.land_config._replace(
+                stomata=coupled_cfg.land_config.stomata._replace(enabled=True)))
+        _co2_coupled = (coupled_cfg.carbon_active
+                        and coupled_cfg.carbon_land == "differland")
+        logger.info("  Stomatal conductance ENABLED (%s); land ET physiologically "
+                    "limited, soil moisture depletes dynamically",
+                    "CO2-coupled Farquhar/Ball-Berry" if _co2_coupled
+                    else "Jarvis (no CO2 — use --preset slab_carbon for "
+                         "CO2-coupling)")
+        if not _co2_coupled:
+            logger.warning(
+                "  --stomata WITHOUT the DifferLand carbon scheme: stomata use "
+                "the Jarvis model (no CO2 response).  For CO2-coupled stomatal "
+                "conductance use --preset slab_carbon (carbon_active + differland "
+                "+ co2_tracer).")
+
     # Soil warm-start (opt-in): init soil at the atmosphere's lat-structured
     # near-surface air T (t=0) instead of a uniform 280 K cold start.
     if getattr(args, "warm_start_soil", False) and coupled_cfg.land_mode != "none":
@@ -947,15 +1061,23 @@ def main():
     if (args.surface_bulk_scheme != "constant"
             or args.surface_stability_scheme != "dyer1974"):
         from legoesm.coupler.config import CouplerConfig
+        # Thread the SAME convective-gustiness BL depth onto the coupler ocean
+        # tile that the atmosphere surface layer uses (--gustiness-zi), so the
+        # air-sea interface flux is energy-consistent: the latent heat the
+        # ocean loses == the moisture flux the atmosphere gains.  Without this
+        # the 3D-ocean q_net used the non-gusty tile flux -> weak evaporation
+        # -> dry atmosphere -> cold collapse (cmip_air_sea_decoupling).
         coupler_config = CouplerConfig(
-            bulk_scheme=args.surface_bulk_scheme,
+            gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
             thermo_convention=args.bulk_thermo_convention,
             stability_scheme=args.surface_stability_scheme,
         )
         logger.info("  Surface bulk-flux scheme: %s (thermo: %s; stability: %s; "
-                    "atmosphere + coupler ocean tile)",
+                    "atmosphere + coupler ocean tile); convective "
+                    "gustiness z_i=%.0f m",
                     args.surface_bulk_scheme, args.bulk_thermo_convention,
-                    args.surface_stability_scheme)
+                    args.surface_stability_scheme,
+                    (args.surface_gustiness_zi or 0.0))
 
     # Apply the --params calibration layer (issue #691) across EVERY component
     # config this driver builds — see apply_coupled_params (the single source
@@ -1035,6 +1157,41 @@ def main():
                     f"({drift / max(args.days, 1) * 365:.1f} K/yr)")
         if "co2_ppmv_mean" in df:
             logger.info(f"  CO2: {df['co2_ppmv_mean']:.1f} ppmv")
+
+    # Ocean-circulation snapshot (dynamic 3D ocean only): the prognostic
+    # currents are not in the atmosphere DiagnosticCollector, so dump the final
+    # ocean state's C-grid velocities (centred to cell centres), the
+    # depth-integrated transport (barotropic-streamfunction proxy), SST, and the
+    # wet mask + grid to ocean_circulation.npz for the circulation figure.
+    # Defensive: a diagnostic dump must never fail the run.
+    if args.ocean == "dynamic" and getattr(driver, "ocean_state", None) is not None:
+        try:
+            os_ = driver.ocean_state
+            u = _np.asarray(os_.u.data)          # (nlat, nlon+1, nlev) [m/s]
+            v = _np.asarray(os_.v.data)          # (nlat+1, nlon, nlev) [m/s]
+            uc = 0.5 * (u[:, :-1, :] + u[:, 1:, :])   # -> cell centres
+            vc = 0.5 * (v[:-1, :, :] + v[1:, :, :])
+            T = _np.asarray(os_.T.data)          # (nlat, nlon, nlev) [degC]
+            z = driver._ocean_z_coord
+            dz = _np.asarray(getattr(z, "dz_ref", _np.ones(u.shape[-1])))
+            dz = dz.reshape(1, 1, -1) if dz.ndim == 1 else dz
+            Utr = _np.sum(uc * dz, axis=-1)      # depth-integrated zonal transport
+            Vtr = _np.sum(vc * dz, axis=-1)
+            g = driver._ocean_grid
+            lat = _np.degrees(_np.asarray(getattr(g, "lat")))
+            lon = _np.degrees(_np.asarray(getattr(g, "lon")))
+            _np.savez(
+                Path(args.output) / "ocean_circulation.npz",
+                u_sfc=uc[..., 0], v_sfc=vc[..., 0],
+                speed_sfc=_np.hypot(uc[..., 0], vc[..., 0]),
+                U_transport=Utr, V_transport=Vtr,
+                T_sfc=T[..., 0], land_mask=_np.asarray(driver._ocean_land_mask),
+                lat=lat, lon=lon,
+            )
+            logger.info("  Ocean circulation saved: ocean_circulation.npz "
+                        f"(max sfc current {float(_np.nanmax(_np.hypot(uc[...,0], vc[...,0]))):.2f} m/s)")
+        except Exception as _e:   # pragma: no cover - diagnostic only
+            logger.warning(f"  Ocean-circulation dump skipped: {_e}")
 
     logger.info("=" * 60)
 

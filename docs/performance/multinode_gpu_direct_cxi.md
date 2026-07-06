@@ -1,8 +1,18 @@
 # Cross-node GPU-direct MPI on Derecho (CXI/Slingshot) — OPEN
 
-**Status:** OPEN. Multi-node GPU scaling uses **host-staged** halos (completes,
-correct); single-node GPU is GPU-direct and unaffected. Cross-node GPU-direct
-still aborts for the real model.
+**Status:** OPEN for the mpi4jax path. Multi-node GPU scaling uses
+**host-staged** halos (completes, correct); single-node GPU is GPU-direct and
+unaffected. Cross-node GPU-direct still aborts for the real model.
+
+**Strategic bypass (2026-07):** the production cubed-sphere driver now has an
+mpi4jax-FREE multi-node path — `run_amip.py --distributed
+--distributed-mode spmd` (multi-controller `jax.distributed`, NCCL
+collectives; checkpointing supported, diagnostics writer still off).
+2-process parity is bit-exact vs single-controller (jobs 8686550/8687224;
+gate `scripts/validate/validate_driver_cs_spmd_parity.py`). NCCL reaches
+Slingshot through `aws-ofi-nccl`, not the MPICH OFI inject path that aborts
+here — so this ticket no longer blocks multi-node GPU scaling for the
+cubed-sphere driver; it still bounds the mpi4jax lat-lon/ico bench lanes.
 
 ## Current state (2026-06-29)
 A 2-node latlon canary (res256/f32) **still aborts at n=8** with `cxil_map: write

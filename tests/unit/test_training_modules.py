@@ -521,7 +521,9 @@ class TestNeuralPhysics:
         key = jax.random.PRNGKey(0)
         nn = NeuralPhysics(nlev=NLEV, key=key)
         # NeuralPhysics takes a single packed column vector
-        n_input = NLEV * 4 + 2  # T, u, v, q per level + p_s + solar
+        # T, u, v, q per level + p_s + solar + T_sfc + sic
+        n_input = NLEV * 4 + 4
+        assert nn.n_input == n_input
         x = jnp.ones(n_input)
         out = nn(x)
         assert out.shape[0] == NLEV * 4 + 6

@@ -136,6 +136,7 @@ docs/_build/
 !scripts/cluster/**/*.sbatch
 *.out
 *.err
+.jax_cache_aimip/
 
 # Local work journal + its skill — private, NEVER committed or pushed.
 /journal/
