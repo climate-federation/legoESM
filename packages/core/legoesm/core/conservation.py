@@ -259,6 +259,52 @@ def batch_global_area_sums(
     return local_sums
 
 
+def global_face_sum_if_scattered(local_sum: jax.Array, area) -> jax.Array:
+    """Allreduce a cubed-sphere per-face partial to the GLOBAL total, but ONLY
+    when the 6 faces are genuinely SCATTERED across MPI ranks.
+
+    A cube "global" reduction ``jnp.sum(area * field)`` over the face axis is the
+    true whole-cube sum ONLY when this rank holds all 6 faces.  Under MPI
+    face-scatter each rank's ``area`` is sliced to its OWNED faces (leading dim
+    ``== n_local < 6``), so the sum is an owned-face PARTIAL that must be
+    ``allreduce(SUM)``-combined across ranks.  ``global_sum_mpi`` is the ONLY
+    AD-safe reduction (MAX/MIN have no meaningful gradient — repo MPI-AD
+    doctrine), so this is safe inside ``jax.grad``.
+
+    Identity (byte-unchanged) for:
+
+    * single-rank / serial (``local`` halo backend);
+    * REPLICATED cube MPI — every rank keeps the full ``(6, ...)`` state, so the
+      local sum already IS the global sum (keyed off ``area.shape[0] == 6``);
+    * SPMD — a top-level ``jnp.sum`` over a sharded face axis is auto-reduced by
+      GSPMD (shard_map cube face-sharding is out of scope / fail-closed upstream);
+    * lat-lon band MPI — the topology carries no ``local_face_ids``.
+
+    ``local_sum`` may be any shape (scalar, ``(nlev,)``, ``(nlev, ntr)``, ...);
+    ``allreduce(SUM)`` combines it element-wise.  The scatter DECISION is keyed on
+    ``area`` (the sliced cube area), not on ``local_sum`` — so a numerator and a
+    denominator reduced through this one predicate always agree on WHEN to reduce.
+    Shared gate behind :func:`_total_area` (the mass-fixer denominator) and the
+    cube flux-form moisture substep's mass reductions (#811 / #771 follow-up).
+    """
+    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
+
+    if get_halo_backend() == "mpi":
+        topo = get_mpi_topology()
+        # Only the cubed-sphere face-only topology carries ``local_face_ids``;
+        # lat-lon band MPI exposes a ``LatLonBandLayout`` through the same
+        # accessor (no ``local_face_ids``), so guard with hasattr.  The chained
+        # comparison is a static (Python-int) trace-time decision — not traced
+        # control flow.
+        if (topo is not None and area is not None
+                and hasattr(topo, "local_face_ids")
+                and area.shape[0] == len(topo.local_face_ids) < 6):
+            from legoesm.parallel.reductions import global_sum_mpi
+
+            return global_sum_mpi(local_sum)
+    return local_sum
+
+
 def _total_area(grid) -> jax.Array:
     """Total area for any grid, promoted to the fp64 budget accumulator.
 
@@ -285,22 +331,7 @@ def _total_area(grid) -> jax.Array:
     """
     acc = conservation_accumulator()
     local = grid.grid_total_area.astype(acc)
-    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
-
-    if get_halo_backend() == "mpi":
-        topo = get_mpi_topology()
-        area = getattr(grid, "area", None)
-        # Only the cubed-sphere face-only topology carries ``local_face_ids``;
-        # lat-lon band MPI exposes a ``LatLonBandLayout`` through the same
-        # accessor (no ``local_face_ids``), so guard with hasattr to avoid an
-        # AttributeError on non-cube MPI backends.
-        if topo is not None and area is not None and hasattr(topo, "local_face_ids"):
-            n_local = len(topo.local_face_ids)
-            if area.shape[0] == n_local and n_local < 6:
-                from legoesm.parallel.reductions import global_sum_mpi
-
-                local = global_sum_mpi(local)
-    return local
+    return global_face_sum_if_scattered(local, getattr(grid, "area", None))
 
 
 def fix_mass_shallow_water(

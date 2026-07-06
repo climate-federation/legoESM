@@ -47,7 +47,10 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.conservation import conservation_accumulator
+from legoesm.core.conservation import (
+    conservation_accumulator,
+    global_face_sum_if_scattered,
+)
 from legoesm.core.fv_tp_2d import transport_step
 
 
@@ -108,18 +111,44 @@ def flux_form_tracer_step(
     acc = conservation_accumulator()
     area_e = cdgrid.base.area.astype(acc)             # (6, n, n)
 
-    def _mass2d(field2d: jax.Array) -> jax.Array:     # ∑ area·field on a level
-        return jnp.sum(field2d.astype(acc) * area_e)
-
-    def _transport_conserving(field2d, ut_k, vt_k):
+    def _transport_raw(field2d, ut_k, vt_k):
+        # Raw flux-form transport (PPM + fp64 flux closure) WITHOUT
+        # ``transport_step``'s internal per-level clip + conserving rescale
+        # (``mass_target=None``).  The rescale — and its (optional) cross-face
+        # allreduce — is hoisted OUT of the level/tracer vmap into
+        # ``_conserving_rescale`` below so the collective runs ONCE on a batched
+        # vector, never inside vmap (the repo has no precedent for a collective
+        # under vmap; this mirrors ``conservation.fix_mass_hydrostatic``).
         return transport_step(
             field2d, ut_k, vt_k, dt, cdgrid,
-            mass_target=_mass2d(field2d),
-            nord=nord, damp_c=damp_c, hord=hord)
+            mass_target=None, nord=nord, damp_c=damp_c, hord=hord)
+
+    def _conserving_rescale(field_in, field_raw, red_area):
+        # Mirror ``_finalize_transport``'s clip + mass-conserving rescale
+        # (``h_pos = max(h,0); scale = mass_in / max(mass_pos, 1); h_pos*scale``)
+        # but BATCHED over the leading level (and tracer) axes and face-scatter
+        # aware.  ``red_area`` = ``area_e`` broadcast to ``field_in``'s trailing
+        # axes; reduce the spatial (face, i, j) axes, keeping level[, tracer].
+        # BIT-IDENTICAL to the per-level internal rescale on single-rank /
+        # replicated (``global_face_sum_if_scattered`` is then identity); under
+        # MPI face-scatter it allreduces the owned-face partials to the true
+        # global masses so ``scale`` is uniform across ranks (else each rank
+        # rescales to its own partial and silently breaks conservation — #811).
+        pos = jnp.maximum(field_raw, 0.0)
+        mass_in = jnp.sum(field_in.astype(acc) * red_area, axis=(0, 1, 2))
+        mass_pos = jnp.sum(pos.astype(acc) * red_area, axis=(0, 1, 2))
+        # ONE allreduce for the (numerator, denominator) pair — never divide a
+        # pre-reduced ratio (Σ of a ratio ≠ ratio of Σ); clamp the REDUCED
+        # denominator, not the local partial.
+        mass_in, mass_pos = global_face_sum_if_scattered(
+            jnp.stack([mass_in, mass_pos], axis=0), area_e)
+        scale = mass_in / jnp.maximum(mass_pos, 1.0)  # fp64, per level[, tracer]
+        return pos * scale.astype(pos.dtype)
 
     # --- Co-transport the layer mass δp, one level at a time. ---
-    delp_new = jax.vmap(
-        _transport_conserving, in_axes=(-1, -1, -1), out_axes=-1)(delp, ut, vt)
+    delp_raw = jax.vmap(
+        _transport_raw, in_axes=(-1, -1, -1), out_axes=-1)(delp, ut, vt)
+    delp_new = _conserving_rescale(delp, delp_raw, area_e[..., None])
 
     # --- Co-transport the tracer mass δp·q, per (level, tracer). ---
     # δp·q for EVERY tracer rides the SAME per-level winds; vmap the tracer axis
@@ -128,12 +157,13 @@ def flux_form_tracer_step(
 
     def _transport_level_tracers(qm_k, ut_k, vt_k):   # qm_k: (6, n, n, ntr)
         return jax.vmap(
-            lambda qm1: _transport_conserving(qm1, ut_k, vt_k),
+            lambda qm1: _transport_raw(qm1, ut_k, vt_k),
             in_axes=-1, out_axes=-1)(qm_k)
 
-    qmass_new = jax.vmap(
+    qmass_raw = jax.vmap(
         _transport_level_tracers, in_axes=(3, -1, -1), out_axes=3)(
             qmass, ut, vt)                            # (6, n, n, nlev, ntr)
+    qmass_new = _conserving_rescale(qmass, qmass_raw, area_e[..., None, None])
 
     # Recover the mixing ratio.  PRECONDITION: δp is a physical layer thickness
     # [Pa], so δp★ ≫ the 1e-30 floor everywhere in any real atmosphere — the

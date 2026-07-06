@@ -1375,22 +1375,29 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
     def _flux_form_scatter_blocked(backend, topo, spmd_mesh, state_lead) -> bool:
         """True iff the ``moisture_flux_form`` substep must fail-closed (#771).
 
-        ``flux_form_tracer_step`` (and ``transport_step`` + the reconcile fixer)
-        do their mass conservation with a rank/shard-LOCAL ``jnp.sum``, which is
-        the true global sum ONLY when a rank holds the full 6-face cube.
+        The mass-conservation REDUCTIONS are now allreduce-aware — every cube
+        "global" sum (``flux_form_tracer_step``'s per-level clip+rescale and the
+        per-tracer reconcile fixer) routes through
+        ``conservation.global_face_sum_if_scattered`` (``allreduce(SUM)`` the
+        owned-face partials; identity for single-rank / replicated / SPMD).  That
+        is the necessary FIRST half of the #811 unblock and is bit-identical on
+        single-rank.
 
-        * MPI: ``initialize_distributed`` runs for ANY cube MPI run, so a rank's
-          topology can report ``< 6`` owned faces even in REPLICATED dynamics —
-          which keeps the FULL ``(6, …)`` state and whose local sum IS the global
-          sum.  Disambiguate by the state's leading FACE dim exactly as
-          ``core.conservation._total_area``: genuinely scattered ⟺ the topology
-          owns ``< 6`` faces AND the state is sliced to those faces
-          (``state_lead == n_local``).  Replicated keeps ``state_lead == 6`` and
-          is left running; single-rank has ``n_local == 6``.
-        * SPMD: fail-closed whenever a mesh is active — over-conservative (GSPMD
-          may auto-reduce a top-level ``jnp.sum`` over the sharded face axis) but
-          safe, and ``moisture_flux_form`` (default off) is unvalidated across
-          face shards.
+        The substep is STILL fail-closed under face-scatter because its TRANSPORT
+        is not MPI-ready: ``flux_form_tracer_step`` ``vmap``s ``transport_step``
+        over levels, and under the MPI halo backend ``transport_step``'s internal
+        ``pad_halo`` becomes ``pad_halo_mpi`` (cross-face ``sendrecv``) — i.e.
+        ``vmap(pad_halo)`` over the MPI exchange, which CLAUDE.md forbids and
+        which fails at trace time with a ``batch_axes`` assertion.  The full
+        unblock needs a 4D (all-levels-one-message) MPI-aware transport for the
+        moisture substep (the ``pad_halo_4d`` idiom) — the SECOND half, tracked
+        as the #811 transport follow-up.
+
+        * MPI: genuinely face-SCATTERED (topology owns < 6 faces AND the state is
+          sliced to them, ``state_lead == n_local``) fails closed; REPLICATED
+          (full 6-face state on every rank, ``state_lead == 6``) and single-rank
+          run (their local sum IS the global sum and their ``pad_halo`` is local).
+        * SPMD: fail-closed whenever a mesh is active.
 
         Extracted + pure so the guard is unit-tested (a prefix/shape rename then
         breaks the test loudly instead of silently disabling the guard).
@@ -1441,12 +1448,21 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         from legoesm.atmosphere.dynamics.flux_form_tracer_transport import (
             flux_form_tracer_step,
         )
-        from legoesm.core.conservation import conservation_accumulator
+        from legoesm.core.conservation import (
+            conservation_accumulator,
+            global_face_sum_if_scattered,
+        )
 
-        # FAIL-CLOSED under cubed-sphere face-scatter / SPMD face-sharding — the
-        # flux-form mass reductions are rank/shard-LOCAL (see the predicate).
-        # Static-config check at trace time (globals + static shape), so the
-        # raise is a hard compile-time refusal, not traced control flow.
+        # FAIL-CLOSED under cubed-sphere face-scatter / SPMD face-sharding.  The
+        # mass-conservation REDUCTIONS are now allreduce-aware (via
+        # global_face_sum_if_scattered, used in flux_form_tracer_step's rescale
+        # AND the per-tracer fixer below) — the first half of the #811 unblock —
+        # but the TRANSPORT still vmaps transport_step's pad_halo over levels,
+        # which under the MPI backend is vmap(pad_halo_mpi) (a vmapped sendrecv,
+        # forbidden; fails with a batch_axes assertion).  The full unblock needs a
+        # 4D-halo MPI-aware moisture transport (#811 transport follow-up).
+        # Static-config check at trace time (globals + static shape), so the raise
+        # is a hard compile-time refusal, not traced control flow.
         from legoesm.grids.halo import (
             get_halo_backend, get_mpi_topology, get_spmd_mesh,
         )
@@ -1455,11 +1471,11 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 state_out.u_d.data.shape[0]):
             raise NotImplementedError(
                 "moisture_flux_form is not supported under cubed-sphere "
-                "face-scatter / SPMD face-sharding: the flux-form "
-                "mass-conservation reductions are rank/shard-LOCAL, so they "
-                "would silently break global moisture conservation. Run "
-                "replicated / single-rank, or await the allreduce-aware "
-                "flux-form reductions (#771 follow-up).")
+                "face-scatter / SPMD face-sharding: the mass reductions are now "
+                "allreduce-aware, but the per-level flux-form transport vmaps "
+                "pad_halo, which under MPI is a vmapped cross-face sendrecv "
+                "(batch_axes error). Run replicated / single-rank, or await the "
+                "4D-halo MPI-aware moisture transport (#811 transport follow-up).")
 
         cdgrid = self.cdgrid
         sigma = self.sigma_coord
@@ -1509,6 +1525,13 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
              * delp[..., None].astype(acc))                    # (6,n,n,nlev,1)
         tgt = jnp.sum(w * q.astype(acc), axis=(0, 1, 2, 3))     # (ntr,)
         cur = jnp.sum(w * q_new.astype(acc), axis=(0, 1, 2, 3))
+        # Under MPI face-scatter tgt/cur are owned-face PARTIALS; allreduce the
+        # (numerator, denominator) pair to the true global tracer masses BEFORE
+        # the per-tracer scale — else each rank divides by its own partial and
+        # the rescales diverge, silently breaking global conservation.  Identity
+        # on single-rank / replicated / SPMD, keyed off cdgrid.base.area (#811).
+        tgt, cur = global_face_sum_if_scattered(
+            jnp.stack([tgt, cur], axis=0), cdgrid.base.area)
         scale = (tgt / jnp.maximum(cur, jnp.asarray(1e-30, acc))).astype(_dt)
         q_fixed = q_new * scale
 

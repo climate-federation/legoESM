@@ -28,8 +28,10 @@ from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
 
 
 def test_flux_form_scatter_guard_predicate():
-    """The fail-closed predicate: refuse cube face-scatter / SPMD face-shard
-    (rank/shard-local flux-form reductions) but NOT replicated / single-rank."""
+    """The fail-closed predicate: the mass reductions are now allreduce-aware, but
+    the substep is STILL fail-closed under face-scatter / SPMD because the
+    per-level flux-form transport vmaps pad_halo (MPI-incompatible; #811 transport
+    follow-up).  Replicated / single-rank run."""
     f = CDGridPrimitiveEquationModel._flux_form_scatter_blocked
     _topo3 = SimpleNamespace(local_face_ids=(0, 1, 2))   # rank owns 3 of 6 faces
     _topo6 = SimpleNamespace(local_face_ids=(0, 1, 2, 3, 4, 5))
