@@ -26,6 +26,7 @@ import pandas as pd
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
 VAL = sys.argv[1]
 OUT = sys.argv[2]
@@ -65,12 +66,29 @@ def _valid(ds):
 
 
 def _obs_le(ds):
-    """Energy-balance-closure-corrected observed latent heat (FLUXNET ET_CORR)."""
-    return np.asarray(ds["le_obs_corr"] if "le_obs_corr" in ds.data_vars else ds["le_obs"])
+    """Observed latent heat, RAW eddy covariance (FLUXNET LE, not closure-adjusted).
+
+    Raw eddy-covariance fluxes typically under-close the surface energy budget;
+    the model closes energy exactly, so the honest primary target is the raw
+    measurement, with the closure-corrected value shown as an uncertainty band
+    (see :func:`_obs_le_corr`).  Falls back to the corrected field if a driver
+    lacks the raw one."""
+    return np.asarray(ds["le_obs"] if "le_obs" in ds.data_vars else ds["le_obs_corr"])
 
 
 def _obs_h(ds):
-    """Energy-balance-closure-corrected observed sensible heat (FLUXNET H_CORR)."""
+    """Observed sensible heat, RAW eddy covariance (FLUXNET H, not closure-adjusted)."""
+    return np.asarray(ds["h_obs"] if "h_obs" in ds.data_vars else ds["h_obs_corr"])
+
+
+def _obs_le_corr(ds):
+    """Energy-balance-closure-corrected observed latent heat (FLUXNET ET_CORR):
+    the other edge of the closure-uncertainty band around the raw measurement."""
+    return np.asarray(ds["le_obs_corr"] if "le_obs_corr" in ds.data_vars else ds["le_obs"])
+
+
+def _obs_h_corr(ds):
+    """Closure-corrected observed sensible heat (FLUXNET H_CORR); band edge."""
     return np.asarray(ds["h_obs_corr"] if "h_obs_corr" in ds.data_vars else ds["h_obs"])
 
 
@@ -138,8 +156,8 @@ def fig_energy():
         t = pd.DatetimeIndex(ds.time.values); jja = np.isin(t.month.values, [6, 7, 8])
         bot = r == len(SITES) - 1
         um, uo = np.asarray(ds.ustar_mod), np.asarray(ds.ustar_obs)
-        hm, ho = np.asarray(ds.h_mod), _obs_h(ds)
-        lm, lo = np.asarray(ds.le_mod), _obs_le(ds)
+        hm, ho, ho_c = np.asarray(ds.h_mod), _obs_h(ds), _obs_h_corr(ds)
+        lm, lo, lo_c = np.asarray(ds.le_mod), _obs_le(ds), _obs_le_corr(ds)
 
         # col0: u* mean diurnal (JJA)
         a = ax[r, 0]
@@ -162,29 +180,42 @@ def fig_energy():
         a.plot(mo, mm, "-", color=C_UST, lw=1.6)
         a.set_ylabel("Friction velocity (m s$^{-1}$)", fontsize=8); _month_axis(a, bot)
 
-        # col2: sensible + latent heat, mean diurnal (JJA)
+        # col2: sensible + latent heat, mean diurnal (JJA).  Markers = raw eddy-
+        # covariance observations; the shaded band spans up to the energy-balance-
+        # closure-corrected value (the closure-uncertainty envelope).
         a = ax[r, 2]
-        a.plot(range(24), _diurnal(lo, v, t, dt, jja), "o", color=C_LE, ms=2.5, mfc="white")
-        a.plot(range(24), _diurnal(lm, v, t, dt, jja), "-", color=C_LE, lw=1.6)
-        a.plot(range(24), _diurnal(ho, v, t, dt, jja), "o", color=C_H, ms=2.5, mfc="white")
-        a.plot(range(24), _diurnal(hm, v, t, dt, jja), "-", color=C_H, lw=1.6)
+        hrs = range(24)
+        for om, oc, col in [(lo, lo_c, C_LE), (ho, ho_c, C_H)]:
+            od, ocd = _diurnal(om, v, t, dt, jja), _diurnal(oc, v, t, dt, jja)
+            a.fill_between(hrs, od, ocd, color=col, alpha=0.18, lw=0)
+            a.plot(hrs, od, "o", color=col, ms=2.5, mfc="white")
+        a.plot(hrs, _diurnal(lm, v, t, dt, jja), "-", color=C_LE, lw=1.6)
+        a.plot(hrs, _diurnal(hm, v, t, dt, jja), "-", color=C_H, lw=1.6)
         a.set_ylabel("Heat flux (W m$^{-2}$)", fontsize=8); _hour_axis(a, bot)
         if r == 0:
             a.legend(handles=[Line2D([], [], color=C_LE, lw=1.6, label="Latent heat"),
                               Line2D([], [], color=C_H, lw=1.6, label="Sensible heat"),
                               Line2D([], [], color="0.4", marker="o", ls="", mfc="white",
-                                     label="Observed")],
+                                     label="Observed"),
+                              Patch(facecolor="0.4", alpha=0.25,
+                                    label="Closure correction range")],
                      frameon=False, fontsize=7, loc="upper left")
 
-        # col3: sensible + latent heat, seasonal
+        # col3: sensible + latent heat, seasonal (monthly), same raw markers +
+        # closure-correction band.
         a = ax[r, 3]
         td = t[::int(round(86400 / dt))]
+
+        def _mon(arr):
+            dd = _daily(arr, v, dt)
+            mo, mm, _ = _monthly(dd, dd, td[:len(dd)].month)
+            return mo, mm
+        for om, oc, col in [(lo, lo_c, C_LE), (ho, ho_c, C_H)]:
+            mo, raw = _mon(om); _, cor = _mon(oc)
+            a.fill_between(mo, raw, cor, color=col, alpha=0.18, lw=0)
+            a.plot(mo, raw, "o", color=col, ms=2.5, mfc="white")
         for arr, col in [(lm, C_LE), (hm, C_H)]:
-            mo, mm, _ = _monthly(_daily(arr, v, dt), _daily(arr, v, dt), td[:len(_daily(arr, v, dt))].month)
-            a.plot(mo, mm, "-", color=col, lw=1.6)
-        for arr, col in [(lo, C_LE), (ho, C_H)]:
-            mo, _, moo = _monthly(_daily(arr, v, dt), _daily(arr, v, dt), td[:len(_daily(arr, v, dt))].month)
-            a.plot(mo, moo, "o", color=col, ms=2.5, mfc="white")
+            mo, mm = _mon(arr); a.plot(mo, mm, "-", color=col, lw=1.6)
         a.set_ylabel("Heat flux (W m$^{-2}$)", fontsize=8); _month_axis(a, bot)
 
         for c in range(4): ax[r, c].spines[["top", "right"]].set_visible(False)
@@ -221,12 +252,16 @@ def fig_carbon():
         # col1: latent-heat partition (transpiration vs soil evaporation)
         a = ax[r, 1]
         lec = _daily(np.asarray(ds.le_canopy), v, dt); les = _daily(np.asarray(ds.le_soil), v, dt)
-        leo = _daily(_obs_le(ds), v, dt)
+        leo = _daily(_obs_le(ds), v, dt); leo_c = _daily(_obs_le_corr(ds), v, dt)
         n = min(len(lec), len(td)); mon = td.month[:n]
-        df = pd.DataFrame({"c": lec[:n], "s": les[:n], "o": leo[:n], "m": mon}).groupby("m").mean()
+        df = pd.DataFrame({"c": lec[:n], "s": les[:n], "o": leo[:n],
+                           "oc": leo_c[:n], "m": mon}).groupby("m").mean()
         m = df.index.values
         a.bar(m, df.c, color=C_CAN, width=0.85, label="Transpiration")
         a.bar(m, df.s, bottom=df.c, color=C_SOIL, width=0.85, label="Soil evaporation")
+        # Observed total: raw marker, whisker up to the closure-corrected value.
+        a.vlines(m, np.minimum(df.o, df.oc), np.maximum(df.o, df.oc),
+                 color=C_OBS, lw=1.0, alpha=0.6)
         a.plot(m, df.o, "o", color=C_OBS, ms=3, mfc="white", label="Observed total")
         a.set_ylabel("Latent heat (W m$^{-2}$)", fontsize=8); _month_axis(a, bot)
         if r == 0: a.legend(frameon=False, fontsize=7, loc="upper right")
@@ -275,7 +310,9 @@ def fig_summary():
             yr=pd.DatetimeIndex(ds.time.values)[::int(round(86400 / dt))].year,
             LE=(_daily(np.asarray(ds.le_mod), v, dt), _daily(_obs_le(ds), v, dt)),
             H=(_daily(np.asarray(ds.h_mod), v, dt), _daily(_obs_h(ds), v, dt)),
-            GPP=(_daily(np.asarray(ds.gpp_mod), v, dt), _daily(np.asarray(ds.gpp_obs), v, dt)))
+            GPP=(_daily(np.asarray(ds.gpp_mod), v, dt), _daily(np.asarray(ds.gpp_obs), v, dt)),
+            # closure-corrected observation (band edge) for the energy fluxes only
+            LE_c=_daily(_obs_le_corr(ds), v, dt), H_c=_daily(_obs_h_corr(ds), v, dt))
     VARS = [("LE", "Latent heat", "W m$^{-2}$"), ("H", "Sensible heat", "W m$^{-2}$"),
             ("GPP", "GPP", "µmol m$^{-2}$ s$^{-1}$")]
     for i, (key, lab, unit) in enumerate(VARS):
@@ -289,9 +326,19 @@ def fig_summary():
         lo, hi = np.nanpercentile(np.r_[O, M], 1), np.nanpercentile(np.r_[O, M], 99)
         a.plot([lo, hi], [lo, hi], "--", color="0.4", lw=1)
         a.set_xlim(lo, hi); a.set_ylim(lo, hi); a.set_aspect("equal")
+        # Skill against the raw measurement (primary); for the energy fluxes also
+        # report the Nash-Sutcliffe score against the closure-corrected value so
+        # the reader sees the whole closure-uncertainty range.
         st = _nse(M, O)
-        a.text(0.05, 0.95, f"R$^2$={st['r2']:.2f}\nNSE={st['nse']:.2f}\nbias={st['bias']:+.2g}",
-               transform=a.transAxes, va="top", fontsize=8.5,
+        txt = f"R$^2$={st['r2']:.2f}\nNSE={st['nse']:.2f}\nbias={st['bias']:+.2g}"
+        if key in ("LE", "H"):
+            Mc, Oc = [], []
+            for s in data:
+                mc, oc = data[s][key][0], data[s][f"{key}_c"]
+                g = np.isfinite(mc) & np.isfinite(oc); Mc.append(mc[g]); Oc.append(oc[g])
+            stc = _nse(np.concatenate(Mc), np.concatenate(Oc))
+            txt += f"\nNSE$_{{corr}}$={stc['nse']:.2f}"
+        a.text(0.05, 0.95, txt, transform=a.transAxes, va="top", fontsize=8.5,
                bbox=dict(boxstyle="round,pad=0.3", fc="w", ec="0.7", alpha=0.9))
         a.set_xlabel(f"Observed {lab} ({unit})"); a.set_ylabel(f"Modelled {lab} ({unit})")
         a.annotate(f"({chr(97 + i)})", xy=(0, 1.02), xycoords="axes fraction",
@@ -302,7 +349,9 @@ def fig_summary():
         a = fig.add_subplot(gs[1, j])
         for s in data:
             m, o = data[s][key]; yr = data[s]["yr"][:len(m)].astype(int)
-            grp = pd.DataFrame({"m": m[:len(yr)], "o": o[:len(yr)], "yr": yr}).groupby("yr")
+            oc = data[s][f"{key}_c"][:len(yr)] if key in ("LE", "H") else o[:len(yr)]
+            grp = pd.DataFrame({"m": m[:len(yr)], "o": o[:len(yr)],
+                                "oc": oc, "yr": yr}).groupby("yr")
             df = grp.mean()
             # Only plot an annual mean when the year has adequate valid daily
             # coverage (>=150 days), so a sparse or corrupt observation year does
@@ -310,6 +359,10 @@ def fig_summary():
             ok = (grp["o"].count() >= 150) & (grp["m"].count() >= 150)
             df = df[ok.reindex(df.index).fillna(False).values]
             xs = df.index.values.astype(int)
+            # Closure-uncertainty band between raw and corrected annual observation
+            if key in ("LE", "H"):
+                a.fill_between(xs, df.o.values, df.oc.values, color=PFT_COL[s],
+                               alpha=0.15, lw=0)
             a.plot(xs, df.o.values, "o--", color=PFT_COL[s], ms=5, lw=1, alpha=0.7, mfc="white")
             a.plot(xs, df.m.values, "s-", color=PFT_COL[s], ms=5, lw=1.6, label=s)
         a.set_xlabel("Year"); a.set_ylabel(f"Annual mean {lab} ({unit})")
