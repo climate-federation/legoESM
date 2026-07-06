@@ -534,7 +534,7 @@ def _make_land_radiation_refresh_fn(
             )
 
         lat, lon = _get_grid_lat_lon(grid, shape_2d)
-        insol, cos_sza, f_day = _compute_insolation(
+        insol, cos_sza, f_day, eccf = _compute_insolation(
             lat, radiation_config, lon=lon,
         )
 
@@ -585,6 +585,7 @@ def _make_land_radiation_refresh_fn(
         )
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
+            eccf=eccf,
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, lat=lat_col, q_v=q_v_col,
             insolation=insol_col, cos_sza=cos_sza_col,

@@ -34,6 +34,49 @@ import jax.numpy as jnp
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm import constants
+
+# Machine-checked scheme contract (see tests/test_physics_contracts.py). This is
+# a DIAGNOSTIC (state -> cloud fraction + optical properties), not a tendency
+# scheme, so it conserves nothing.
+__physics_contract__ = {
+    "summary": (
+        "Diagnostic cloud fraction and cloud optical properties (grid-mean "
+        "liquid/ice water paths + effective radii) from the column state: "
+        "RH-based Sundqvist, RH+condensate Xu-Randall, or resolved-condensate "
+        "schemes, with an optional Slingo convective (cumulus) cover."
+    ),
+    "inputs": {
+        "T": "K", "p_full": "Pa", "q_v": "kg/kg", "dp": "Pa",
+        "q_cloud": "kg/kg", "q_ice": "kg/kg",
+        "n_cloud": "1/m^3 (droplet number, per volume)",
+        "n_ice": "1/kg (ice number, per mass)",
+        "conv_precip": "kg/m^2/s",
+    },
+    "outputs": {
+        "cloud_fraction": "1 (0-1 area fraction)",
+        "lwp": "kg/m^2 (grid-mean liquid water path per layer)",
+        "iwp": "kg/m^2 (grid-mean ice water path per layer)",
+        "r_eff_liq": "m", "r_eff_ice": "m",
+    },
+    "sign_convention": (
+        "Diagnostic only (no state tendency): cloud_fraction in [0,1], "
+        "monotonically non-decreasing in RH (0 below rh_crit, 1 at RH>=1); "
+        "lwp, iwp >= 0; effective radii > 0; ice fraction ramps 0->1 as T "
+        "drops from T_freeze to T_ice_only."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Sundqvist (1988), NATO ASI Ser. 243, 433-461; Xu & Randall (1996), "
+        "JAS 53, 3084-3102; Slingo (1987) convective cloud cover"
+    ),
+    "idealized_test": (
+        "tests/unit/test_resolved_cloud_fraction.py; sub-saturated column "
+        "(RH<rh_crit) -> cf=0, RH>=1 -> cf=1, cf monotone in RH; lwp,iwp>=0; "
+        "unknown scheme raises ValueError"
+    ),
+}
+
 # Cloud-optics defaults (fixed): effective-radius bounds.
 _CLOUD_R_EFF_MAX_M = 60.0e-6     # max liquid effective radius for lamc clip [m]
 _R_EFF_ICE_PSD_COEFF = 1.5       # ice effective-radius PSD coefficient

@@ -872,8 +872,6 @@ def cmt_gregory_1997(
     du_dt, dv_dt : jax.Array, shape (ncol, nlev)
         Convective momentum tendencies [m/s²].
     """
-    u_env.shape[-1]
-
     # Layer pressure thickness; with surface-last convention dp > 0.
     dp = p_half[:, 1:] - p_half[:, :-1]
 

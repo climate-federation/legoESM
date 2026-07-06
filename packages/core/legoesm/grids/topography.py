@@ -621,6 +621,133 @@ def smooth_phis_cubed_sphere(
     return blend_scalar_cube_edges_2d(jnp.asarray(phis_np), strength=edge_blend_strength)
 
 
+def smooth_phis_gaussian(
+    phis: jnp.ndarray,
+    smoothing_passes: int = 4,
+) -> jnp.ndarray:
+    """Apply lat-lon (Gaussian-grid) topography smoothing to a phis field.
+
+    Lat-lon analogue of :func:`smooth_phis_cubed_sphere`: applies the same
+    Laplacian smoothing used by :func:`load_real_topography` on a regular
+    lat-lon grid (periodic in longitude, clamped at the poles) so that
+    ERA5-derived or other externally regridded ``phis`` fields receive
+    equivalent gradient reduction before being used as model initial
+    conditions.  Without it, the raw regridded ERA5 orography (peaks
+    ~5.6e4 m^2/s^2) drives an unbalanced pressure-gradient force that blows
+    up the coarse lat-lon dycore at step ~0.
+
+    Parameters
+    ----------
+    phis : (n_lat, n_lon) surface geopotential [m^2/s^2]
+    smoothing_passes : int
+        Number of Laplacian smoothing passes.  Default matches
+        ``TopographyConfig.smoothing_passes = 4`` (== the cube default).
+
+    Returns
+    -------
+    (n_lat, n_lon) smoothed surface geopotential [m^2/s^2]
+    """
+    phis_np = np.asarray(phis)
+    return _laplacian_smooth_gaussian(phis_np, passes=smoothing_passes)
+
+
+def _laplacian_smooth_voronoi(
+    arr: np.ndarray,
+    cells_on_cell: np.ndarray,
+    n_edges_on_cell: np.ndarray,
+    passes: int = 1,
+) -> np.ndarray:
+    """Laplacian smoothing of a cell-centred field on an SCVT/Voronoi mesh.
+
+    The unstructured-mesh analogue of :func:`_laplacian_smooth_cubed_sphere`:
+    each pass replaces a cell with the mean of itself and its edge-neighbours,
+    then blends the result halfway back toward the *original* field
+    (``0.5*arr + 0.5*smoothed``) so the smoothing stays anchored and cannot
+    drift far from the input.
+
+    Parameters
+    ----------
+    arr : (nCells,) cell-centred field to smooth.
+    cells_on_cell : (maxEdges, nCells) int — 0-based neighbour-cell indices per
+        edge of each cell, with ``-1`` in unused slots (rows
+        ``i >= n_edges_on_cell[c]``), matching the ``VoronoiMesh.cellsOnCell``
+        construction.
+    n_edges_on_cell : (nCells,) int — number of edges (= neighbours) per cell.
+    passes : int — number of smoothing passes (``<= 0`` is a no-op).
+
+    Returns
+    -------
+    (nCells,) smoothed field (same dtype as ``arr``).
+    """
+    if passes <= 0:
+        return arr
+    coc = np.asarray(cells_on_cell)
+    if coc.ndim != 2:
+        raise ValueError(
+            "cells_on_cell must be 2-D (maxEdges, nCells); got shape "
+            f"{coc.shape}"
+        )
+    n_edges = np.asarray(n_edges_on_cell)
+    if n_edges.shape[0] != coc.shape[1] or arr.shape[0] != coc.shape[1]:
+        raise ValueError(
+            "arr, n_edges_on_cell, and cells_on_cell must agree on nCells: "
+            f"arr={arr.shape}, n_edges_on_cell={n_edges.shape}, "
+            f"cells_on_cell={coc.shape}"
+        )
+    valid = coc >= 0                       # (maxEdges, nCells)
+    safe_idx = np.where(valid, coc, 0)     # clamp -1 -> 0; masked out below
+    # self + valid neighbours; +1.0 counts the cell itself.
+    count = n_edges.astype(np.float64) + 1.0
+    arr0 = arr.astype(np.float64, copy=True)
+    result = arr0.copy()
+    for _ in range(passes):
+        neigh = result[safe_idx]                              # (maxEdges, nCells)
+        neigh_sum = np.where(valid, neigh, 0.0).sum(axis=0)   # (nCells,)
+        smoothed = (result + neigh_sum) / count
+        result = 0.5 * arr0 + 0.5 * smoothed
+    return result.astype(arr.dtype)
+
+
+def smooth_phis_voronoi(
+    phis: jnp.ndarray,
+    cells_on_cell,
+    n_edges_on_cell,
+    smoothing_passes: int = 4,
+) -> jnp.ndarray:
+    """Laplacian-smooth an ERA5-derived phis field on an SCVT/Voronoi mesh.
+
+    The MPAS analogue of :func:`smooth_phis_cubed_sphere`.  Raw regridded ERA5
+    surface geopotential retains grid-scale roughness over steep terrain
+    (Himalaya/Andes/Antarctica) on a coarse Voronoi mesh; the TRiSK
+    pressure-gradient amplifies those cell-to-cell gradients to O(dx^-1)
+    spurious force, which drives a localized wind runaway / blowup within days
+    from an ERA5 initial condition.  Smoothing phis before it is used as an IC
+    reduces those gradients (the caller still applies a barometric ``p_s``
+    correction for hydrostatic consistency).  There is no cube-edge blend — a
+    Voronoi mesh has no face boundaries.
+
+    Parameters
+    ----------
+    phis : (nCells,) surface geopotential [m^2/s^2].
+    cells_on_cell : (maxEdges, nCells) ``VoronoiMesh.cellsOnCell``.
+    n_edges_on_cell : (nCells,) ``VoronoiMesh.nEdgesOnCell``.
+    smoothing_passes : int
+        Number of Laplacian passes.  Default matches
+        ``TopographyConfig.smoothing_passes = 4`` and the cubed-sphere path.
+
+    Returns
+    -------
+    (nCells,) smoothed surface geopotential [m^2/s^2].
+    """
+    smoothed = _laplacian_smooth_voronoi(
+        np.asarray(phis),
+        np.asarray(cells_on_cell),
+        np.asarray(n_edges_on_cell),
+        passes=smoothing_passes,
+    )
+    return jnp.asarray(smoothed)
+
+
 def _target_grid_degrees(grid):
     """Return target grid centers in degrees and grid metadata.
 

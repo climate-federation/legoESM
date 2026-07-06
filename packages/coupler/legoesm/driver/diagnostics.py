@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import jax.numpy as jnp
 
+from legoesm.diagnostics.cloud_overlap import maximum_random_overlap
 from legoesm.diagnostics.column_integrals import column_water_vapor
 from legoesm.diagnostics.energy_budget import (
     EnergyBudgetTracker,
@@ -171,11 +172,18 @@ class DiagnosticCollector:
         output_dir: str | Path = "",
         cmip_resolution_deg: float = 5.0,
         start_year: int = 1979,
+        cloud_config=None,
     ):
         self.nlev = nlev
         self.sigma_full = sigma_full
         self.dsigma = dsigma
         self.clear_sky_diag = clear_sky_diag
+        # Cloud config (``atmosphere.physics.clouds.CloudConfig`` or ``None``)
+        # for the total-cloud-cover ``clt`` diagnostic — the SAME scheme
+        # selection radiation uses, so ``clt`` reflects the model's actual
+        # fractional cloud fraction (issue #689).  ``None`` (cloud scheme
+        # 'none') => ``clt`` is not published.
+        self._cloud_config = cloud_config
 
         # Per-cell horizontal area weights for global-mean diagnostics.
         # ``None`` => unweighted ``jnp.mean`` (legacy behaviour); the driver
@@ -571,6 +579,7 @@ class DiagnosticCollector:
         q_i=None,
         q_s=None,
         q_g=None,
+        t_low_mean=None,
     ) -> None:
         """Collect diagnostics at a diagnostic interval.
 
@@ -591,9 +600,23 @@ class DiagnosticCollector:
         sw_up_toa, lw_up_toa : jax.Array
         sw_net_sfc, lw_net_sfc : jax.Array
         sw_down_toa : jax.Array
+            Radiative fluxes.  The compiled-segment driver passes SEGMENT
+            MEANS (time integrals from the carry accumulators / segment
+            duration) so the CMOR monthly means, timeseries and energy
+            budget are free of the fixed-UTC diurnal snapshot alias; the
+            per-step (debug) driver still passes instantaneous values.
         T_ice : float
         lat_deg_grid : array, optional
             Latitude in degrees for monthly means.
+        t_low_mean : array, optional
+            Segment-mean lowest-level air temperature [K].  When given, the
+            CMOR ``tas`` uses it in place of the instantaneous lowest-level
+            temperature: ``tas = tas_2m(instant) + (t_low_mean - T_low)``,
+            i.e. the instantaneous MOST 2 m stability offset applied to the
+            segment-mean temperature (removes the dominant fixed-UTC
+            diurnal alias over land; the residual alias of the stability
+            offset itself is small).  ``None`` (default) keeps the legacy
+            instantaneous ``tas``.
         """
         # Fuse 12 diagnostic reductions into one ``jnp.stack`` +
         # ``np.asarray`` host transfer.  Each ``float(jnp.X(...))``
@@ -800,6 +823,12 @@ class DiagnosticCollector:
             # level down to 2 m (CMIP tas convention).  Falls back to the
             # lowest level if the surface-layer inputs are unavailable.
             tas_field = self._tas_2m(state, q_v, sst, sic, T_ice)
+            if t_low_mean is not None:
+                # Segment-mean tas: instantaneous 2 m stability offset on the
+                # segment-mean lowest-level T (see the ``t_low_mean`` doc).
+                tas_field = tas_field + (
+                    np.asarray(t_low_mean) - np.asarray(state.T.data[..., -1])
+                )
             r = self._regrid_to_latlon_2d(tas_field)
             if r is not None:
                 fields_2d['tas'] = r
@@ -887,25 +916,64 @@ class DiagnosticCollector:
                 if r_lwp is not None and r_iwp is not None:
                     fields_2d['clivi'] = r_iwp
                     fields_2d['clwvi'] = r_lwp + r_iwp  # liquid + frozen
-                # Layer cloud fraction: soft threshold sigmoid on TOTAL
-                # condensate (liquid + frozen) so high cirrus counts toward clt.
-                # 1 mg/kg threshold with steep slope gives a near-binary
-                # mask that matches the calibration's metric convention.
-                q_cond_np = np.asarray(q_c)
-                if q_frozen is not None:
-                    q_cond_np = q_cond_np + np.asarray(q_frozen)
-                q_thresh = 1e-6
-                sharpness = 1.0e6
-                cf_layer = 1.0 / (1.0 + np.exp(-(q_cond_np - q_thresh) * sharpness))
-                # Random overlap: clt = 1 - prod(1 - cf_layer) along vertical.
-                log_clear = np.sum(
-                    np.log(np.clip(1.0 - cf_layer, 1e-7, 1.0)),
-                    axis=-1,
-                )
-                clt_field = 1.0 - np.exp(log_clear)
-                r_clt = self._regrid_to_latlon_2d(clt_field)
-                if r_clt is not None:
-                    fields_2d['clt'] = r_clt * 100.0  # CMIP units: %
+
+                # Total cloud cover (clt, CMIP %) from the MODEL's fractional
+                # layer cloud fraction — the SAME sundqvist/xu_randall/resolved
+                # scheme radiation uses, via the shared ``compute_cloud_properties``
+                # — reduced by MAXIMUM-RANDOM vertical overlap.  This replaces the
+                # retired near-binary condensate mask (sigmoid sharpness 1e6 on a
+                # 1 mg/kg threshold + pure random overlap) that saturated clt to
+                # ~100% wherever a column held any trace of condensate (issue #689).
+                # Diagnostics-only; no cloud-fraction numerics are re-derived (the
+                # shared function is called).  The ``_cloud_config`` is built with
+                # ``convective_cloud=False`` (see ModelDriver._create_diagnostics),
+                # so this is the model's STRATIFORM cloud cover — the opt-in
+                # convective radiative-tuning add-on is intentionally not counted.
+                if self._cloud_config is not None:
+                    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+                        compute_cloud_properties,
+                    )
+                    # Flatten the horizontal dims to the (ncol, nlev) column
+                    # layout compute_cloud_properties documents, then reshape the
+                    # scalar overlap result back — C-order round-trips exactly, so
+                    # cells map back for the downstream regridder.  Works for
+                    # cubed-sphere (6,n,n,nlev) and lat-lon (nlat,nlon,nlev).
+                    T_data = state.T.data
+                    horiz_shape = T_data.shape[:-1]
+                    nlev = T_data.shape[-1]
+                    ncol = int(np.prod(horiz_shape)) if horiz_shape else 1
+                    # p_full = sigma_full * p_s, dp = dsigma * p_s (the sigma
+                    # pressures the collector's other column diagnostics assume).
+                    p_s_col = jnp.reshape(state.p_s.data, (ncol, 1))
+                    p_full = p_s_col * self.sigma_full
+                    dp = p_s_col * self.dsigma
+                    # Cloud fraction takes CLOUD ice q_i only (matching the
+                    # radiation call, physics_pipeline ``q_ice=q_i_col``) — NOT
+                    # the precipitating q_i+q_s+q_g used for the clivi ice PATH
+                    # above, which would over-count condensate for the
+                    # condensate-dependent schemes (xu_randall/resolved).
+                    q_ice_col = (
+                        None if q_i is None
+                        else jnp.reshape(q_i, (ncol, nlev))
+                    )
+                    cloud_props = compute_cloud_properties(
+                        jnp.reshape(T_data, (ncol, nlev)),
+                        p_full,
+                        jnp.reshape(q_v, (ncol, nlev)),
+                        dp,
+                        self._cloud_config,
+                        q_cloud=jnp.reshape(q_c, (ncol, nlev)),
+                        q_ice=q_ice_col,
+                    )
+                    clt_field = np.asarray(
+                        jnp.reshape(
+                            maximum_random_overlap(cloud_props.cloud_fraction),
+                            horiz_shape,
+                        )
+                    ) * 100.0  # CMIP units: %
+                    r_clt = self._regrid_to_latlon_2d(clt_field)
+                    if r_clt is not None:
+                        fields_2d['clt'] = r_clt
 
             # psl: sea-level pressure via hypsometric equation
             # p_sl = p_s * exp(phis / (R_d * T_lowest))
@@ -1181,12 +1249,20 @@ class DiagnosticCollector:
                 **{k: np.array(v) for k, v in moisture_data.items()},
             )
 
-    def flush_cmip_monthly(self, current_day: float) -> None:
+    def flush_cmip_monthly(self, current_day: float, *,
+                           write: bool = True) -> None:
         """Write completed CMIP months incrementally and free their memory.
 
         Call this periodically (e.g. at each diagnostic interval) during
         long runs.  Only months strictly before the current month are
         flushed; the in-progress month is kept for further accumulation.
+
+        ``write=False`` pops (frees) the completed months WITHOUT writing —
+        for multi-controller SPMD non-root processes, whose accumulators
+        fill identically to root's (every process runs the gathered full
+        ``collect()``) but must never touch the shared output files; without
+        the pop they would retain every completed month for the whole run
+        (codex round-10 Medium).
         """
         if self._spatial_monthly is None or self.cf_writer is None:
             return
@@ -1199,10 +1275,56 @@ class DiagnosticCollector:
             current_year, current_month,
         )
         months = data.get('months', [])
-        if not months:
+        if not months or not write:
             return
 
         self._write_cmip_data(data)
+
+    def finalize_cmip_daily(self, current_day: float) -> None:
+        """Write the COMPLETED days of the CMIP6 ``day`` table if a CMIP
+        writer is active.
+
+        Companion to :meth:`finalize_cmip_fixed` for the graceful wallclock
+        exit.  The daily accumulator is otherwise drained only by :meth:`save`
+        at the end of a run, so a restart-chain ``sys.exit(0)`` would drop this
+        SLURM segment's daily means (day/tas, tasmin, tasmax, …).  Mirrors
+        :meth:`flush_cmip_monthly`: only days STRICTLY BEFORE ``current_day``
+        are emitted (and freed).  The in-progress day is deliberately withheld
+        — writing it here and again from the restart segment (which resumes
+        inside the same ``(year, doy)``) would create duplicate ``time``
+        coordinates, since ``CFWriter.write_field`` appends blindly.  The one
+        boundary day straddling the exit is therefore a bounded imperfection
+        (its restart-segment mean omits the pre-exit samples), matching the
+        monthly-boundary limitation; a fully lossless chain would require
+        checkpointing the accumulator state.  Guarded on ``cf_writer`` and the
+        daily accumulator (no-op for non-CMOR / daily-off runs)."""
+        if self._spatial_daily is None or self.cf_writer is None:
+            return
+        doy, _ = day_to_calendar(current_day)
+        current_year = int(current_day // 365.0)
+        data = self._spatial_daily.pop_completed_days(current_year, int(doy))
+        if not data.get('days'):
+            return
+        lat, lon = self._cmip_target_latlon()
+        self.cf_writer.write_daily(data, lat=lat, lon=lon)
+
+    def finalize_cmip_fixed(self) -> None:
+        """Write the CMOR ``fx`` table (areacella / sftlf / orog) if a CMIP
+        writer is active.
+
+        The time-invariant ``fx`` fields are normally written once by
+        :meth:`save` at the end of a run.  A wallclock-graceful exit
+        (:meth:`ModelDriver._maybe_wallclock_exit`) calls ``sys.exit(0)`` and
+        never reaches :meth:`save`, so without this public entry a
+        restart-chained run — i.e. EVERY multi-hour AMIP run, whose year does
+        not finish in a single SLURM window — writes its incremental monthly
+        ``Amon`` files but never ``areacella``/``sftlf``.  The resulting CMOR
+        output is non-compliant (each variable's ``external_variables``
+        attribute references ``areacella``/``sftlf``) and blocks any
+        area-weighted or land/ocean-split diagnostic.  Idempotent: rewriting
+        the same static fields on a later flush is harmless."""
+        if self.cf_writer is not None:
+            self._write_cmip_fixed_files()
 
     def save(self, output_dir: str | Path) -> None:
         """Save all accumulated diagnostics to disk."""

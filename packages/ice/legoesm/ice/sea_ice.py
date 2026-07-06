@@ -404,6 +404,7 @@ def _bulk_flux_dispatch(
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
             L_latent=constants.L_s,
+            stability_scheme=config.stability_scheme,
         )
     else:
         tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
@@ -534,6 +535,9 @@ def _step_slab(
     ocean_heat_extraction = (
         diag["ocean_heat_basal_per_ice_area"] * conc
         + config.rho_ice * config.L_f * diag["vlead_freeze"]
+        # Surplus surface-melt heat WARMS the ocean (energy closure, finding
+        # #6): negative contribution to extraction (+sign = ocean loses heat).
+        - diag["surface_melt_ocean_gain_per_ice_area"] * conc
     )
 
     # Sea-ice → ocean back-reaction stress (Newton's third law).
@@ -1043,7 +1047,7 @@ def _thermo_single(
     # (cap_dt + K_cond)*(T_trial - T_melt_surface); using skin_cap/dt =
     # cap_dt alone (the explicit coefficient) would under-count melt by the
     # conductive term K_cond and silently delete heat (large for thin ice).
-    excess_energy = (cap_dt + K_cond) * jnp.maximum(
+    excess_energy_raw = (cap_dt + K_cond) * jnp.maximum(
         T_trial - config.T_melt_surface, 0.0
     )  # [W/m²]
     # Cap the surface-melt RATE at the available ice (per unit time): the
@@ -1052,8 +1056,13 @@ def _thermo_single(
     # diagnostics over-report the melt.  rho_ice*L_f*h/dt is the energy that
     # fully ablates the existing ice this step.
     max_surface_melt_W = config.rho_ice * config.L_f * h / dt
-    excess_energy = jnp.minimum(excess_energy, max_surface_melt_W)
+    excess_energy = jnp.minimum(excess_energy_raw, max_surface_melt_W)
     dh_dt_surface_melt = -excess_energy / (config.rho_ice * config.L_f)
+    # NOTE: the surplus surface-melt heat that must warm the ocean (energy
+    # closure, finding #6) is computed BELOW, AFTER ``removal_scale`` is applied
+    # to ``surface_melt_rate`` — it must be based on the REALIZED surface melt
+    # (post first-cap AND post multi-process competition), not this first cap
+    # alone (codex adversarial review).
 
     # Growth/melt — turbulent ocean heat transfer (not conductive scaling)
     F_ocean = config.ocean_heat_transfer_coeff * jnp.maximum(
@@ -1121,6 +1130,17 @@ def _thermo_single(
     basal_melt_rate = basal_melt_rate * removal_scale
     sublim_loss_rate = sublim_loss_rate * removal_scale
     sublim_mass_per_ice_area = config.rho_ice * (sublim_loss_rate - deposition_rate)
+    # Surplus surface-melt heat that REALIZED ablation could not consume must
+    # warm the ocean mixed layer (energy closure, finding #6), not be discarded.
+    # Uses the REALIZED surface melt (post first-cap AND post ``removal_scale``
+    # competition with basal melt / sublimation), so
+    # ``realized_surface_melt_W + gain == excess_energy_raw`` exactly (energy
+    # closes).  Gated to ice-present cells; CREDITED to the ocean (subtracted
+    # from ocean_heat_extraction) in the callers.  [W/m² per ice-area]
+    realized_surface_melt_W = config.rho_ice * config.L_f * surface_melt_rate
+    surface_melt_ocean_gain_per_ice_area = jnp.where(
+        ice_mask, jnp.maximum(excess_energy_raw - realized_surface_melt_W, 0.0), 0.0,
+    )
 
     # ---- Energy-closing latent flux + single skin re-solve (#28) ----
     # The latent the ATMOSPHERE receives must equal L_s * the REALIZED (post
@@ -1265,6 +1285,11 @@ def _thermo_single(
         # Ocean basal heat with the unrealized (clamped) basal-melt latent
         # removed, so ocean heat matches the realized state change (#28).
         "ocean_heat_basal_per_ice_area": ocean_heat_basal_per_ice_area,
+        # Surplus surface-melt heat (per ice-area) that ablation could not
+        # consume; credited to the ocean by the callers so energy closes.
+        "surface_melt_ocean_gain_per_ice_area": (
+            surface_melt_ocean_gain_per_ice_area
+        ),
         # Realized ice->atmosphere sublimation mass [kg/m2(ice)/s] (#28).
         "sublim_mass_per_ice_area": sublim_mass_per_ice_area,
         # Latent flux PER-ICE-AREA consistent with the realized sublimation mass
@@ -1300,6 +1325,9 @@ def _ocean_exchange_from_diag(diag, conc_in, config):
     fw = rho * (diag["vmelt_ice"] - diag["vgrowth_basal"] - diag["vlead_freeze"])
     heat = (
         diag["ocean_heat_basal_per_ice_area"] * conc_in
+        # Surplus surface-melt heat WARMS the ocean (energy closure, finding
+        # #6): negative contribution (+sign = ocean loses heat to the ice).
+        - diag["surface_melt_ocean_gain_per_ice_area"] * conc_in
         + rho * Lf * diag["vlead_freeze"]
     )
     # Realized ice->atmosphere sublimation mass, PER-GRID-CELL: the capped
@@ -1953,7 +1981,7 @@ def _thermo_v2(
             h_snow=h_snow_new,
             T_air=forcing.T_lowest,
             dt=dt,
-            drainage_timescale=config.ponds.drainage_timescale,
+            drainage_timescale=config.ponds.drainage_timescale_s,
             refreeze_threshold=config.ponds.refreeze_threshold,
             pond_to_ice_max_area=config.ponds.pond_to_ice_max_area,
             depth_to_area_ratio=config.ponds.depth_to_area_ratio,

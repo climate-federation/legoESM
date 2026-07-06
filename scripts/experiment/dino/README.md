@@ -20,7 +20,7 @@ unknown key is a hard error (typo guard).
 | `prev_latlon_full_year.yaml` | lat-lon Mercator | 365 d / 10 d | original full-year deliverable |
 | `prev_mpas_90d.yaml`      | MPAS Voronoi     | 90 d / 10 d | original clean 90-day deliverable |
 | `acc_kpp_latlon_365d.yaml` | lat-lon, KPP     | 365 d / 5 d | barotropic-Psi + ACC-transport spin-up |
-| `paper_tke_latlon.yaml`   | lat-lon, **TKE** | 90 d / 5 d  | paper-faithful vmix (UNSTABLE ~day 40) |
+| `paper_tke_latlon.yaml`   | lat-lon, **TKE** | 180 d / 5 d | NEMO TKE closure (sub-annual; floor fixes the day-39 mode, a 2nd ~day-230 mode needs KPP) |
 
 Cross-grid comparison (after running a matched pair):
 
@@ -57,11 +57,18 @@ vector-invariant momentum advection, FCT/TVD tracer advection.
 
 **Remaining gaps** (not bit-identical to the paper):
 - **Vertical mixing**: the paper uses NEMO TKE. `--vmix tke` selects our TKE
-  closure configured to the paper, but it is **unstable in our 1° DINO**
-  (lat-lon blows up ~day 40 — our TKE / lateral-viscosity tuning differs from
-  NEMO's). The stable default is **KPP**; the configs use `vmix: kpp`. On MPAS
-  the vertical mixing is implicit constant-coefficient, so the scheme is inert.
-- **EOS**: ours = Wright (1997); paper = Roquet/Caneill simplified polynomial.
+  closure configured to the paper, but DINO lat-lon has TWO SW channel-wall-
+  corner surface-momentum instabilities: (A) day ~39, TKE-specific,
+  viscosity-sensitive — damped by the default `tke_momentum_visc_bg=5e-4` floor
+  (4× the paper, raises only the momentum viscosity; tracer K_v_bg untouched);
+  (B) day ~230, scheme-general (NaNs `tke` AND `constant`), **viscosity-
+  insensitive** (5e-4/1e-3/2e-3 all NaN ~d226-236). So TKE runs to ~day 226 (a
+  clean sub-annual window) but is **not multi-year-stable**; **KPP** is the only
+  multi-year-stable closure and stays the default (`vmix: kpp`). On MPAS the
+  vertical mixing is implicit constant-coefficient, so the scheme is inert.
+- **EOS**: default = Wright (1997); `--eos nemo_seos` selects the paper's
+  simplified S-EOS (Roquet et al. 2015) with the DINO coefficients (the oracle
+  EOS for the thermocline comparison).
 - **Restoring**: ours = annual-mean; paper = seasonal (360-day, 1-month lag).
 - **Spin-up**: the paper's R1 numbers are at **3000-year equilibrium**; our runs
   are ≤1 year, so equilibrium diagnostics (ACC 206 Sv, MOC, deep stratification)

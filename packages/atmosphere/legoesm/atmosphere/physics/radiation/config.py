@@ -24,6 +24,7 @@ from legoesm.atmosphere.physics.radiation.mc3d.config import MC3DRadiationConfig
 
 if TYPE_CHECKING:
     from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    from legoesm.atmosphere.physics.radiation.solar import OrbitalParameters
 
 
 # Machine-readable tunable/fixed split for the radiation scheme configs.
@@ -257,6 +258,16 @@ class RRTMGPConfig(NamedTuple):
     # <0.01 K/day vs fp64).  Default off; the MPAS driver enables it for the
     # long-run rrtmgp path.
     compute_fp32: bool = False
+    # Column-chunking for the rrtmgp XLA compile wall at higher horizontal
+    # resolution.  0 (default) = disabled, byte-identical single-shot solve.
+    #   >0 -> jax.lax.map ``solve_columns`` over fixed-size blocks of this many
+    #         columns.  Radiation columns are INDEPENDENT, so the result is
+    #         numerically EXACT; the per-block body compiles ONCE at this size,
+    #         capping the highly super-linear rrtmgp JIT cost independent of the
+    #         total column count (C24/C48 at L20 compile instead of stalling).
+    #         Must divide ncol.  A pure compile-time NUMERICS knob — NOT a
+    #         tunable/trainable parameter (levels stay coupled, never chunked).
+    column_chunk_size: int = 0
 
 
 class OzoneProfileConfig(NamedTuple):
@@ -371,3 +382,9 @@ class RadiationConfig(NamedTuple):
     # circular import (clouds.config is a downstream consumer that
     # already imports from this module via the integration bridge).
     cloud_config: "CloudConfig | None" = None
+    # Realistic Earth orbit (Berger 1978) for AMIP-II / CMIP insolation.
+    # When set, ``_compute_insolation`` uses the orbital declination and
+    # scales the TOA flux by the Earth-Sun distance factor (a/r)^2 (the
+    # eccentricity-driven perihelion/aphelion asymmetry).  ``None`` (default)
+    # ⇒ circular orbit, so idealized/aquaplanet experiments are unchanged.
+    orbit: "OrbitalParameters | None" = None

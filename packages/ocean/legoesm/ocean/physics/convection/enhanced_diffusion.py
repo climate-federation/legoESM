@@ -15,6 +15,47 @@ from legoesm.ocean.physics.convection.config import EnhancedDiffusionConfig
 from legoesm.ocean.physics.convection.output import OceanConvectionOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
+__physics_contract__ = {
+    "summary": (
+        "Convective adjustment by enhanced vertical diffusion (Oceananigans "
+        "ConvectiveAdjustmentVerticalDiffusivity): apply a large tracer "
+        "diffusivity K_conv (and an independent momentum viscosity nu_conv) "
+        "wherever N^2 < 0, background values elsewhere."
+    ),
+    "inputs": {
+        "T": "degC", "S": "psu", "rho": "kg/m^3",
+        "jacobian": "1 (z-star dimensionless)", "u": "m/s", "v": "m/s",
+        "cfg.K_conv": "m^2/s", "cfg.nu_conv": "m^2/s",
+    },
+    "outputs": {
+        "dT_dt": "degC/s", "dS_dt": "psu/s", "convection_flag": "1 (active)",
+        "K_v": "m^2/s", "du_dt": "m/s^2", "dv_dt": "m/s^2", "A_v": "m^2/s",
+    },
+    "sign_convention": (
+        "K_conv, nu_conv >= 0 and applied only where statically unstable "
+        "(N^2 < 0); down-gradient flux-form vertical diffusion with no-flux "
+        "top/bottom BC, so the column integral of heat, salt (and momentum, "
+        "when u,v are supplied) is conserved (adiabatic vertical "
+        "redistribution); z positive up; K/A zeroed on dry interfaces."
+    ),
+    # Flux-form diffusion with no-flux BC conserves column-integrated heat
+    # (energy), salt, and momentum (momentum only when u,v are supplied).
+    "conserves": ["energy", "salt", "momentum"],
+    "differentiable": True,
+    "reference": (
+        "Oceananigans ConvectiveAdjustmentVerticalDiffusivity (Ramadhan et al. "
+        "2020, JOSS 5, 2018); Klinger et al. (1996) JPO 26 enhanced-diffusion "
+        "convective adjustment"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_enhanced_diffusion_momentum.py + "
+        "tests/ocean/unit/test_convective_K_A_flag_direct.py — an unstable "
+        "column mixes toward neutral conserving column-integrated T,S,(u,v); a "
+        "stable column keeps background K; convection_flag marks N^2<0 "
+        "interfaces."
+    ),
+}
+
 
 def convective_K_A_flag(
     rho: jnp.ndarray,

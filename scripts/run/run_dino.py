@@ -99,9 +99,58 @@ def _parse_args():
     )
     p.add_argument(
         "--vmix", choices=("kpp", "tke", "constant"), default=None,
-        help="Vertical-mixing closure (DINOConfig.vmix_scheme): 'kpp' (stable "
-             "default), 'tke' (paper's NEMO scheme, unstable >~day40), or "
-             "'constant' (background-only, identical across grids). Both grids.",
+        help="Vertical-mixing closure (DINOConfig.vmix_scheme): 'kpp' "
+             "(multi-year-stable default), 'tke' (paper's NEMO scheme — the "
+             "default 5e-4 momentum floor fixes the day-39 instability so it "
+             "runs to ~day 226, but a 2nd viscosity-insensitive SW-corner mode "
+             "NaNs it ~day 230; multi-year needs kpp), or 'constant' "
+             "(background-only; also NaNs ~day 230). Both grids.",
+    )
+    p.add_argument(
+        "--eos", choices=("wright", "nemo_seos"), default=None,
+        help="Equation of state (DINOConfig.eos): 'wright' (legoESM default, "
+             "Wright 1997 full nonlinear EOS) or 'nemo_seos' (the paper/NEMO "
+             "simplified S-EOS, Roquet et al. 2015, with the DINO coefficients "
+             "— the oracle EOS for the thermocline comparison). Both grids.",
+    )
+    p.add_argument(
+        "--tke-momentum-visc-bg", type=float, default=None,
+        help="TKE-only background vertical viscosity FLOOR [m²/s] "
+             "(DINOConfig.tke_momentum_visc_bg, default 5e-4 = 4× the paper "
+             "1.2e-4). Damps the SW channel-corner surface-momentum instability "
+             "that NaNs our TKE at the paper value; applied (max with A_v_bg) "
+             "only when --vmix tke. kpp/constant ignore it. Lower it (e.g. "
+             "1.2e-4) to run TKE at the unstable paper viscosity.",
+    )
+    p.add_argument(
+        "--evd-momentum", choices=("on", "off"), default=None,
+        help="Enhanced vertical diffusion on MOMENTUM (DINOConfig."
+             "evd_on_momentum; NEMO nn_evdm=1, the DINO namelist setting). "
+             "Default on (paper-faithful); effective only for --vmix "
+             "tke/constant (kpp carries its own convective viscosity — the "
+             "combination is rejected). Lat-lon only; MPAS is tracer-only.",
+    )
+    p.add_argument(
+        "--gm-kappa-scheme", choices=("visbeck", "treguier"), default=None,
+        help="Adaptive kappa_GM scaling (DINOConfig.gm_kappa_scheme): "
+             "'visbeck' (Visbeck 1997, historical default) or 'treguier' "
+             "(Treguier 1997 / NEMO nn_aei_ijk_t=21 — the DINO oracle "
+             "scaling, cap aei0=rn_Ue*rn_Le=3000 m2/s). Lat-lon only.",
+    )
+    p.add_argument(
+        "--bottom-drag-scheme",
+        choices=("legacy", "nemo_quadratic", "nemo_loglayer"), default=None,
+        help="Bottom-drag law (DINOConfig.bottom_drag_scheme): 'legacy' = "
+             "historical MOM6 quadratic-with-floor; 'nemo_quadratic' = "
+             "zdfdrg np_non_lin, the DINO reference's namdrg selection "
+             "(Cd0*sqrt(u^2+v^2+ke0), Cd0=C_d_bottom); 'nemo_loglayer' = "
+             "zdfdrg np_loglayer.",
+    )
+    p.add_argument(
+        "--treguier-aei0", type=float, default=None,
+        help="Treguier kappa cap aei0 [m2/s] (DINOConfig.treguier_aei0, "
+             "default 3000 = the DINO namelist rn_Ue*rn_Le). Ignored unless "
+             "--gm-kappa-scheme treguier.",
     )
     p.add_argument(
         "--days", type=float, default=10.0,
@@ -296,6 +345,21 @@ def main():
         cfg = dataclasses.replace(cfg, dt=args.dt)
     if args.vmix is not None:
         cfg = dataclasses.replace(cfg, vmix_scheme=args.vmix)
+    if args.eos is not None:
+        cfg = dataclasses.replace(cfg, eos=args.eos)
+    if args.tke_momentum_visc_bg is not None:
+        cfg = dataclasses.replace(
+            cfg, tke_momentum_visc_bg=args.tke_momentum_visc_bg)
+    if args.evd_momentum is not None:
+        cfg = dataclasses.replace(
+            cfg, evd_on_momentum=(args.evd_momentum == "on"))
+    if args.gm_kappa_scheme is not None:
+        cfg = dataclasses.replace(cfg, gm_kappa_scheme=args.gm_kappa_scheme)
+    if args.bottom_drag_scheme is not None:
+        cfg = dataclasses.replace(
+            cfg, bottom_drag_scheme=args.bottom_drag_scheme)
+    if args.treguier_aei0 is not None:
+        cfg = dataclasses.replace(cfg, treguier_aei0=args.treguier_aei0)
     if args.mpas_eq_visc_boost is not None:
         cfg = dataclasses.replace(
             cfg, mpas_equatorial_visc_boost=args.mpas_eq_visc_boost)

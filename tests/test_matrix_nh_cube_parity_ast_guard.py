@@ -502,15 +502,20 @@ def test_sw_cube_propagating_tests_have_hyperdiff_override():
     # factor form; if the factor form is used, the default must stay 2.0.
     # This test verifies the override EXPRESSION (``hyperdiff_coeff =
     # <factor> * _hyperdiff_cube(n)``) sits immediately under the gate.
-    # It anchors on the exact tuple spelling ``(2, 5, 6, 8)`` (matching
-    # the current matrix-runner source) to keep the two co-located; the
-    # canonical, order-independent SET-equality check on the gate lives
-    # in ``test_sw_cube_hyperdiff_gate_matches_propagating_tests`` (which
-    # parses the tuple into a set).  If the matrix runner reorders the
-    # tuple or moves it to a named constant, update this anchor AND that
-    # set check together.
+    #
+    # #521 (2026-07-03): colliding modons (test_num 8) LEFT the shared
+    # gate for a DEDICATED ``if test_num == 8`` branch (duogrid grid +
+    # per-case damping — the W2/W5/W6 calibration erodes the modon
+    # cores below the cube seam-noise floor).  The shared-gate anchor
+    # is therefore ``(2, 5, 6)`` now, and the modon branch's OWN
+    # hyperdiff backstop (default 1.0x, env knob
+    # LEGOESM_SW_MODON_HYPERDIFF_FACTOR) is pinned separately below —
+    # zero hyperdiff blows the 100-day modon run up at ~day 40 even
+    # with duogrid, so the backstop protection is unchanged, just
+    # per-case.  The canonical SET-equality check on the shared gate
+    # lives in ``test_sw_cube_hyperdiff_gate_matches_propagating_tests``.
     pat = re.search(
-        r"if\s+test_num\s+in\s*\(\s*2\s*,\s*5\s*,\s*6\s*,\s*8\s*\)\s*:[^}]*?"
+        r"if\s+test_num\s+in\s*\(\s*2\s*,\s*5\s*,\s*6\s*\)\s*:[^}]*?"
         r"hyperdiff_coeff\s*=\s*(?:2\.0|_sw_hd_fac)\s*\*\s*"
         r"_hyperdiff_cube\(\s*n\s*\)",
         src,
@@ -519,7 +524,7 @@ def test_sw_cube_propagating_tests_have_hyperdiff_override():
     assert pat is not None, (
         "iter-31/33/42/44 regression: cube SW propagating-test "
         "branch no longer overrides ``hyperdiff_coeff=2.0 * "
-        "_hyperdiff_cube(n)`` for (W2, W5, W6, modons) — cube W5/W6 "
+        "_hyperdiff_cube(n)`` for (W2, W5, W6) — cube W5/W6 "
         "full-duration will re-BLOWUP and cube W2 5-day v_ll_Linf "
         "will regress (latlon stable; cube parity gap reopens)."
     )
@@ -530,6 +535,26 @@ def test_sw_cube_propagating_tests_have_hyperdiff_override():
             "the cube SW propagating-test hyperdiff override is preserved "
             "when the env knob is unset."
         )
+    # Modon (#521) dedicated branch: its own hyperdiff backstop must
+    # survive — zero hyperdiff blows the 100-day run up at ~day 40.
+    pat8 = re.search(
+        r"if\s+test_num\s*==\s*8\s*:[^}]*?"
+        r"hyperdiff_coeff\s*=\s*_m_hd\s*\*\s*_hyperdiff_cube\(\s*n\s*\)",
+        src,
+        re.DOTALL,
+    )
+    assert pat8 is not None, (
+        "#521 regression: the dedicated colliding-modons branch "
+        "(``test_num == 8``) no longer applies its biharmonic "
+        "hyperdiff backstop ``_m_hd * _hyperdiff_cube(n)`` — the "
+        "100-day cube run re-BLOWs-UP at ~day 40 without it."
+    )
+    assert re.search(
+        r'LEGOESM_SW_MODON_HYPERDIFF_FACTOR"\s*,\s*"1\.0"', src), (
+        "LEGOESM_SW_MODON_HYPERDIFF_FACTOR default must remain \"1.0\" "
+        "(the #521 sweep optimum: 0.5x erupts at the collision "
+        "transient, 0x blows up at ~day 40 even with duogrid)."
+    )
 
 
 def test_sw_cube_hyperdiff_gate_matches_propagating_tests():
@@ -581,16 +606,33 @@ def test_sw_cube_hyperdiff_gate_matches_propagating_tests():
     gate_values = {
         int(v.strip()) for v in gate_pat.group(1).split(",") if v.strip()
     }
-    assert gate_values == {2, 5, 6, 8}, (
-        f"iter-42/#529 regression: SW cube hyperdiff gate now matches "
+    assert gate_values == {2, 5, 6}, (
+        f"iter-42 regression: SW cube hyperdiff gate now matches "
         f"test_num in {sorted(gate_values)} — must be exactly "
-        "{{2, 5, 6, 8}} (W2, W5, W6, colliding modons).  Dropping "
-        "``2`` re-opens the cube W2 5-day v_ll_Linf gap "
-        "(0.51 -> 3.65 m/s); dropping ``5``/``6`` re-blows-up cube "
-        "W5/W6; dropping ``8`` removes the modons hyperdiff backstop "
-        "(#521/#529).  If a new SW cube case is added that legitimately "
-        "needs the override, extend this set AND the override regex in "
-        "``test_sw_cube_propagating_tests_have_hyperdiff_override``."
+        "{{2, 5, 6}} (W2, W5, W6).  Dropping ``2`` re-opens the cube "
+        "W2 5-day v_ll_Linf gap (0.51 -> 3.65 m/s); dropping "
+        "``5``/``6`` re-blows-up cube W5/W6.  Colliding modons "
+        "(test_num 8) moved to a DEDICATED ``if test_num == 8`` branch "
+        "on 2026-07-03 (#521: duogrid grid + per-case damping) — its "
+        "own hyperdiff backstop is pinned by the ``pat8`` check in "
+        "``test_sw_cube_propagating_tests_have_hyperdiff_override``.  "
+        "If a new SW cube case is added that legitimately needs the "
+        "shared override, extend this set AND the override regex there."
+    )
+    # The modon branch must precede the shared gate (it is checked as
+    # ``if test_num == 8: ... elif test_num in (2, 5, 6)``) — assert the
+    # dedicated branch exists so the case can't silently fall back to
+    # the plain iter1009 defaults with NO hyperdiff at all.
+    assert re.search(
+        r"if\s+test_num\s*==\s*8\s*:"
+        r"[\s\S]{0,4000}?"
+        r"config\s*=\s*iter1009_dual_target_config\s*\(\s*n\s*,",
+        src,
+    ), (
+        "#521 regression: the dedicated colliding-modons config branch "
+        "(``if test_num == 8`` -> ``iter1009_dual_target_config(n, ...)``)"
+        " is gone — the case would fall through to the no-hyperdiff "
+        "default and the 100-day cube run re-BLOWs-UP at ~day 40."
     )
 
 

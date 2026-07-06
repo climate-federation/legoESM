@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from scripts.run.run_lmip import _parse_args, build_config_from_args, _get_pft_row
 
 
@@ -22,6 +24,14 @@ def test_pft_params_calibrated_is_default_and_matches_bake():
     raw = build_config_from_args(_parse_args(["--lat", "60.0", "--pft-params", "raw"])).land
     assert raw.land_albedo.snow_depth_crit == 50.0            # LandAlbedoConfig default
     assert _get_pft_row("bare_soil", calibrated=False)["albedo_veg"] == 0.3
+
+
+def test_freeze_thaw_flag_flows_to_config():
+    """--freeze-thaw toggles SoilThermalConfig.enable_freeze_thaw (default off)."""
+    cfg_off = build_config_from_args(_parse_args(["--lat", "45.0"]))
+    assert cfg_off.land.thermal.enable_freeze_thaw is False
+    cfg_on = build_config_from_args(_parse_args(["--lat", "45.0", "--freeze-thaw"]))
+    assert cfg_on.land.thermal.enable_freeze_thaw is True
 
 
 def test_issue484_new_lmip_flags_flow_to_config():
@@ -60,3 +70,77 @@ def test_elev_bands_flag_flows_to_config():
     assert cfg.land.elev_bands.band_dz.shape == (1, 5)
     # dz scales with the supplied std (top band ~ +1.4 sigma * 800 m)
     assert float(cfg.land.elev_bands.band_dz[0, -1]) > 1000.0
+
+
+# --- issue #691: --config / --require-config -------------------------------
+
+def _lmip_example_config():
+    from pathlib import Path
+    return (Path(__file__).resolve().parents[2]
+            / "config" / "lmip" / "lmip_example.yaml")
+
+
+def test_config_yaml_round_trips_to_args():
+    """The committed example config loads; keys reach args (incl. lat from the
+    file, which is otherwise required)."""
+    args = _parse_args(["--config", str(_lmip_example_config())])
+    assert args.lat == 40.0
+    assert args.lon == -105.0
+    assert args.soil_texture == "loam"
+    assert args.veg_type == "c3_grass"
+    cfg = build_config_from_args(args)
+    assert cfg.land is not None
+
+
+def test_config_yaml_explicit_cli_flag_overrides_file():
+    args = _parse_args([
+        "--config", str(_lmip_example_config()), "--lat", "12.5"])
+    assert args.lat == 12.5
+
+
+def test_lat_required_from_cli_or_config():
+    """--lat is mandatory but may come from either source; missing both errors."""
+    with pytest.raises(SystemExit):
+        _parse_args(["--lon", "0.0"])  # no --lat, no --config
+    # supplied via CLI is fine
+    assert _parse_args(["--lat", "0.0"]).lat == 0.0
+
+
+def test_require_config_without_config_errors():
+    with pytest.raises(SystemExit):
+        _parse_args(["--require-config", "--lat", "0.0"])
+
+
+def test_require_config_with_config_ok():
+    args = _parse_args(["--require-config", "--config", str(_lmip_example_config())])
+    assert args.config is not None
+
+
+def test_params_flag_parses():
+    assert _parse_args(["--lat", "0.0", "--params", "x.yaml"]).params == "x.yaml"
+
+
+def test_params_routes_land_override_into_config():
+    """A calibration --params entry routes into the built LMIPRunConfig's nested
+    land *Config (the qualified-name loader, #691)."""
+    from legoesm.driver.run_config_yaml import apply_params_to_config
+    from legoesm.training.param_collector import build_registry
+    m = next(m for m in build_registry() if m.config_class == "MultiLayerLandConfig")
+    lo, hi = m.bounds
+    val = (lo + hi) / 2.0
+    cfg = build_config_from_args(_parse_args(["--lat", "0.0"]))
+    out = apply_params_to_config(cfg, {m.qualified_name: val}, driver="run_lmip")
+    assert getattr(out.land, m.field) == val
+
+
+def test_example_params_file_loads_and_applies():
+    """The committed config/lmip/params_example.yaml is a valid calibration
+    file (every key in the registry, in bounds, routable)."""
+    from legoesm.driver.run_config_yaml import (
+        apply_params_to_config,
+        load_params_config,
+    )
+    p = _lmip_example_config().parent / "params_example.yaml"
+    cfg = build_config_from_args(_parse_args(["--lat", "0.0"]))
+    out = apply_params_to_config(cfg, load_params_config(str(p)), driver="run_lmip")
+    assert out.land.Cd_land == 3.0e-3

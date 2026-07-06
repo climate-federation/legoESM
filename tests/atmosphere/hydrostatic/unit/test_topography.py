@@ -18,6 +18,8 @@ from legoesm.grids.topography import (
     _derive_land_fraction,
     _laplacian_smooth_cubed_sphere,
     _laplacian_smooth_gaussian,
+    _laplacian_smooth_voronoi,
+    smooth_phis_voronoi,
     gaussian_mountain,
     phis_from_topography,
     land_mask_from_topography,
@@ -214,6 +216,51 @@ class TestSmoothing(unittest.TestCase):
         arr = rng.normal(500, 100, (32, 64))
         smoothed = _laplacian_smooth_gaussian(arr, passes=4)
         npt.assert_allclose(np.mean(smoothed), np.mean(arr), rtol=0.1)
+
+
+class TestSmoothPhisGaussian(unittest.TestCase):
+    """Public lat-lon phis smoother used by the ERA5 lat-lon IC carry."""
+
+    @staticmethod
+    def _max_abs_grad(arr):
+        # Longitude-periodic, pole-clamped finite differences.
+        di = np.abs(np.diff(arr, axis=0)).max()
+        dj = np.abs(arr - np.roll(arr, 1, axis=1)).max()
+        return max(di, dj)
+
+    def test_reduces_max_gradient_on_steep_peak(self):
+        """A steep single-peak phis must have its max gradient reduced."""
+        from legoesm.grids.topography import smooth_phis_gaussian
+        n_lat, n_lon = 24, 48
+        phis = np.zeros((n_lat, n_lon))
+        phis[12, 24] = 5.6e4  # ~5600 m ERA5-like spike (m^2/s^2)
+        smoothed = np.asarray(smooth_phis_gaussian(phis, smoothing_passes=4))
+        self.assertEqual(smoothed.shape, phis.shape)
+        self.assertLess(self._max_abs_grad(smoothed), self._max_abs_grad(phis))
+
+    def test_flat_field_is_invariant(self):
+        """Flat orography (AMIP flat-topo path) is unchanged by smoothing."""
+        from legoesm.grids.topography import smooth_phis_gaussian
+        phis = np.full((16, 32), 0.0)
+        npt.assert_array_equal(np.asarray(smooth_phis_gaussian(phis)), phis)
+        const = np.full((16, 32), 1234.0)
+        npt.assert_allclose(np.asarray(smooth_phis_gaussian(const)), const, rtol=1e-6)
+
+    def test_zero_passes_is_noop(self):
+        """passes<=0 returns the input untouched."""
+        from legoesm.grids.topography import smooth_phis_gaussian
+        arr = np.random.default_rng(0).normal(0, 100, (8, 16))
+        npt.assert_array_equal(np.asarray(smooth_phis_gaussian(arr, 0)), arr)
+
+    def test_longitude_periodic(self):
+        """A peak on the lon seam smooths into BOTH wrap neighbours."""
+        from legoesm.grids.topography import smooth_phis_gaussian
+        n_lat, n_lon = 12, 24
+        phis = np.zeros((n_lat, n_lon))
+        phis[6, 0] = 1.0e4
+        sm = np.asarray(smooth_phis_gaussian(phis, smoothing_passes=1))
+        # Mass leaked across the periodic seam to lon index n_lon-1.
+        self.assertGreater(sm[6, n_lon - 1], 0.0)
 
 
 class TestLoadRealTopography(unittest.TestCase):

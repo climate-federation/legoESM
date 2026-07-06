@@ -108,6 +108,48 @@ from legoesm.timestepping.tridiagonal import thomas_solve
 
 from legoesm import constants
 
+# Machine-checked scheme contract for the public entries in section 19 (see
+# tests/test_physics_contracts.py). The architect pins units/signs/reference;
+# the body must honour it.
+__physics_contract__ = {
+    "summary": (
+        "CLUBB higher-order turbulence closure (phase-1 diagnostic default "
+        "clubb_turbulence): down-gradient eddy diffusion using CLUBB's parcel "
+        "buoyant-sorting length scale Lscale and an ADG1 double-Gaussian PDF "
+        "buoyancy flux; the wp2 (w'^2) moment is carried and advanced."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
+        "tke": "m^2/s^2 (carries wp2 = w'^2)",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "T_sfc": "K", "q_sfc": "kg/kg", "rho": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "Km": "m^2/s", "Kh": "m^2/s", "shflx": "W/m^2", "lhflx": "W/m^2",
+        "ustar": "m/s", "h_pbl": "m", "wp2_new": "m^2/s^2 (updated w'^2)",
+    },
+    "sign_convention": (
+        "Down-gradient eddy diffusion, Km >= 0, Kh = Km/Pr_t >= 0; PDF "
+        "buoyancy flux wpthvp produces wp2 in unstable layers. The column "
+        "budget is OPEN: the surface flux (shflx > 0 upward, lhflx > 0 "
+        "upward/moistening) is injected as the bottom boundary condition and "
+        "the top is zero-flux; z increases upward."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Golaz, Larson & Cotton (2002), J. Atmos. Sci. 59, 3540-3551; "
+        "Larson & Golaz (2005), J. Atmos. Sci. 62, 3620-3649; "
+        "Larson (2022) arXiv:1711.03675"
+    ),
+    "idealized_test": (
+        "no surface flux + well-mixed neutral column -> near-zero interior "
+        "tendency; Km, Kh >= 0; wp2 stays in [tke_min, wp2_max]; per-piece "
+        "parity vs CLUBB-JAX for Lscale and the ADG1 liquid cloud fraction."
+    ),
+}
+
 # Eddy-diffusivity and dissipation coefficients are read from CLUBBParams
 # (c_K, beta, ...) — no hardcoded tunables here.
 _PR_T = 1.0   # phase-1 turbulent Prandtl number (Kh = Km/_PR_T); refined in P2
@@ -5172,12 +5214,21 @@ def clubb_turbulence(
     rho: jax.Array,
     dt: float,
     config: CLUBBConfig,
+    surface_flux: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]
+    | None = None,
 ) -> tuple[TurbulenceOutput, jax.Array]:
     """CLUBB turbulence tendencies (phase 1: CLUBB ``Lscale`` eddy diffusion).
 
     Parameters mirror :func:`clubb_lite.clubb_lite_turbulence` (the ``tke`` slot
     carries ``wp2`` [m^2/s^2]); all column fields are TOP-DOWN ``(ncol, nlev)``,
     half-level fields ``(ncol, nlev+1)``.
+
+    ``surface_flux`` (optional ``(tau_x, tau_y, shflx, lhflx, ustar)``, each
+    ``(ncol,)``) is the driver-supplied tiled (mosaic) surface flux used as the
+    BL bottom boundary condition in place of the single-surface
+    ``compute_surface_fluxes`` call — the same contract Louis honours.  Same
+    units/sign convention (``tau`` [Pa], ``shflx``/``lhflx`` [W/m^2]).  ``None``
+    (default) keeps the legacy single-surface flux (identical behaviour).
 
     Returns
     -------
@@ -5264,10 +5315,15 @@ def clubb_turbulence(
     wp2_new = jnp.clip(wp2_new, config.tke_min, config.wp2_max)
 
     # ---- Surface fluxes ----
-    tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
-        u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
-        T_sfc, q_sfc, rho[:, -1], config.surface,
-    )
+    # Either the driver-supplied tiled (mosaic) flux or the legacy single-surface
+    # bulk flux from the blended T_sfc (mirrors louis_turbulence).
+    if surface_flux is not None:
+        tau_x, tau_y, shflx, lhflx, ustar = surface_flux
+    else:
+        tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
+            u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
+            T_sfc, q_sfc, rho[:, -1], config.surface,
+        )
     sflx_u, sflx_v = tau_x, tau_y
     sflx_T = shflx / constants.c_pd
     sflx_q = lhflx / constants.L_v
@@ -5513,6 +5569,8 @@ def clubb_turbulence_prognostic(
     sfc_wprtp: jax.Array | None = None,
     sfc_upwp: jax.Array | None = None,
     sfc_vpwp: jax.Array | None = None,
+    surface_flux: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]
+    | None = None,
 ) -> tuple[TurbulenceOutput, jax.Array]:
     """Prognostic CLUBB scheme entry (``scheme="clubb"``, ``prognostic=True``).
 
@@ -5541,17 +5599,66 @@ def clubb_turbulence_prognostic(
     (steady surface forcing, as in BOMEX/DYCOMS/ARM), the natural contract for a
     prescribed-flux case run within one host ``dt``.
 
+    **Driver-injected tiled surface flux** (``surface_flux`` =
+    ``(tau_x, tau_y, shflx, lhflx, ustar)`` in the DYNAMIC convention, identical
+    to ``compute_surface_fluxes`` / Louis) is the coupled-run path: each
+    :func:`clubb_step` (sub-)step converts it to the kinematic ``sfc_*`` lower BC
+    at THAT step's near-surface density, so the prescribed DYNAMIC W/m^2 / Pa flux
+    is conserved exactly across the sub-cycle (the coupler energy-budget contract),
+    and the reported ``shflx``/``lhflx``/``ustar`` are the injected values
+    directly (Louis-equivalent).  So ``clubb`` runs in tiled (mosaic-surface)
+    production exactly like Louis.  Mutually exclusive with the explicit ``sfc_*``
+    prescriptions (raises if both are given).
+
     Returns ``(TurbulenceOutput, clubb_moments_new)``; the second element flows
     back into ``PhysicsState.clubb_moments`` via the carry machinery.
     """
     moments = unpack_clubb_moments(clubb_moments)
     n_sub = max(1, math.ceil(dt / config.clubb_dt))
 
+    # When the driver injects the tiled (mosaic) surface flux — the DYNAMIC
+    # convention identical to compute_surface_fluxes / louis: (tau_x, tau_y [Pa],
+    # shflx, lhflx [W/m^2], ustar [m/s]) — forward it as the KINEMATIC
+    # prescribed-flux lower BC that clubb_step consumes, converting PER (SUB)STEP
+    # with that step's near-surface density (``_sfc_bcs`` below).  Converting per
+    # step (not once with the host rho) keeps the prescribed DYNAMIC W/m^2 / Pa
+    # flux CONSERVED exactly as the column density drifts across the sub-cycle —
+    # the coupler energy-budget contract (the atmosphere must receive exactly the
+    # flux the surface/ocean tile exchanged).  Mutually exclusive with the
+    # explicit SCM sfc_* prescriptions (a static None-ness check, not traced).
+    if surface_flux is not None and any(
+            s is not None for s in (sfc_wpthlp, sfc_wprtp, sfc_upwp, sfc_vpwp)):
+        raise ValueError(
+            "clubb_turbulence_prognostic: pass EITHER surface_flux (the "
+            "driver's tiled bottom BC) OR the explicit sfc_* kinematic "
+            "prescriptions, not both."
+        )
+    exner_sfc = exner_function(p_full[:, -1])
+
+    def _sfc_bcs(rho_local):
+        """Kinematic lower-BC ``(sfc_wpthlp, sfc_wprtp, sfc_upwp, sfc_vpwp)`` for
+        the given near-surface density.  With an injected tiled DYNAMIC flux we
+        convert it HERE — per (sub)step density ``rho_local[:, -1]`` — so the
+        prescribed W/m^2 / Pa flux is conserved exactly across the sub-cycle (the
+        EXACT inverse of clubb_step's internal bulk->kinematic map: shflx/lhflx
+        positive UP; tau = -rho*Cd*|V|*u so u'w'_sfc = tau_x/rho is NEGATIVE for
+        u>0 / downward drag, matching clubb_step's upwp_b = tau_x/rho).  Without
+        an injected flux, pass the explicit SCM kinematic prescriptions through."""
+        if surface_flux is None:
+            return sfc_wpthlp, sfc_wprtp, sfc_upwp, sfc_vpwp
+        tau_x_sf, tau_y_sf, shflx_sf, lhflx_sf, _ = surface_flux
+        rho_s = rho_local[:, -1]
+        return (
+            shflx_sf / (rho_s * constants.c_pd * exner_sfc),   # w'thl' [K m/s]
+            lhflx_sf / (rho_s * constants.L_v),                # w'rt'  [kg/kg m/s]
+            tau_x_sf / rho_s,                                  # u'w'   [m^2/s^2]
+            tau_y_sf / rho_s,                                  # v'w'   [m^2/s^2]
+        )
+
     if n_sub == 1:
         du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diags = clubb_step(
             u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
-            T_sfc, q_sfc, rho, dt, config,
-            sfc_wpthlp, sfc_wprtp, sfc_upwp, sfc_vpwp)
+            T_sfc, q_sfc, rho, dt, config, *_sfc_bcs(rho))
         shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
         Kh_full = flip_vertical(diags["Kh_zt"])
     else:
@@ -5568,10 +5675,11 @@ def clubb_turbulence_prognostic(
             # (rt_tol), so a slightly-negative mean rtm is robust (cloud → 0).
             tv = jnp.maximum(virtual_temperature(T_c, q_c), tv_floor)
             rho_c = p_full / (constants.R_d * tv)
+            # Re-derive the kinematic BC from the (constant) injected DYNAMIC flux
+            # at THIS sub-step's density so the applied W/m^2 / Pa flux is exact.
             du, dv, dT, dq, m_new, diag = clubb_step(
                 u_c, v_c, T_c, q_c, m_c, p_full, p_half, z_full, z_half,
-                T_sfc, q_sfc, rho_c, dt_sub, config,
-                sfc_wpthlp, sfc_wprtp, sfc_upwp, sfc_vpwp)
+                T_sfc, q_sfc, rho_c, dt_sub, config, *_sfc_bcs(rho_c))
             carry = (u_c + dt_sub * du, v_c + dt_sub * dv, T_c + dt_sub * dT,
                      q_c + dt_sub * dq, m_new)
             return carry, diag
@@ -5588,6 +5696,13 @@ def clubb_turbulence_prognostic(
         ustar = jnp.mean(diag_stk["ustar"], axis=0)
         Kh_full = flip_vertical(diag_stk["Kh_zt"][-1])
 
+    # With an injected tiled flux, report the surface diagnostics as the INJECTED
+    # dynamic values directly (Louis-equivalent), rather than clubb_step's
+    # reconstruction-from-stress: the per-sub-step conversion already makes the
+    # applied flux equal these, and it avoids clubb_step's ustar fourth-root floor
+    # (a dead gradient at zero stress) and any sub-cycle-mean drift in the report.
+    if surface_flux is not None:
+        _, _, shflx, lhflx, ustar = surface_flux
     h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
     output = TurbulenceOutput(
         du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, dq_v_dt=dq_v_dt,

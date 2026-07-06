@@ -291,45 +291,61 @@ def test_horizontal_advection_halo_requirement_map_locked():
     )
     assert HORIZONTAL_ADVECTION_HALO_REQUIREMENT == {
         "upwind1": 1,
+        "centered": 1,
         "van_leer": 2,
         "weno5": 3,
     }
 
 
 def test_van_leer_scheme_dispatch_in_slow_tendency():
-    """The plane CRM slow-tendency entry rejects bad scheme names AND
-    accepts the three supported names. Iter-179 added 'van_leer' to
-    the dispatch — verify a typo still raises (so a silent fallback
-    cannot reintroduce iter-114's typo-class bug)."""
-    import re
+    """The plane CRM slow-tendency entry accepts the registered schemes
+    (van_leer among them) AND rejects a bad scheme name. Iter-179 added
+    'van_leer'; the dispatch was later refactored from a literal if/elif
+    chain to table membership (``if scheme not in _ADV_PAIRS: raise``).
+    Assert the BEHAVIOUR (registry membership + typo raises) rather than
+    scraping source text, so the table refactor doesn't break the lock
+    while a silent fallback would still be caught."""
+    import pytest
+    from legoesm.atmosphere.dynamics.compressible_euler import (
+        CompressibleEulerConfig,
+    )
     from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        HORIZONTAL_ADVECTION_HALO_REQUIREMENT,
+        make_flat_plane_terrain_metric,
+        make_rest_state,
         plane_compressible_euler_slow_tendencies,
     )
-    # Use the module-source check approach: scrape the dispatch
-    # block from compressible_euler_plane.py and verify all three
-    # schemes appear. Cheaper than building a full plane state.
-    from pathlib import Path
-    src = Path(
-        plane_compressible_euler_slow_tendencies.__code__.co_filename
-    ).read_text()
-    # Locate the dispatch block.
-    m = re.search(
-        r'scheme\s*=\s*getattr\(config,\s*"horizontal_advection_scheme"',
-        src,
+    from legoesm.grids.plane import create_plane_grid
+    from legoesm.grids.vertical import create_height_coordinate
+
+    # van_leer is a registered scheme in the shared halo-requirement map
+    # (the single source of truth the dispatch validates against).
+    assert "van_leer" in HORIZONTAL_ADVECTION_HALO_REQUIREMENT
+
+    grid = create_plane_grid(
+        nx=8, ny=8, nlev=3, dx=200.0, dy=200.0, dtype=jnp.float64,
     )
-    assert m is not None, "dispatch block missing"
-    # All three schemes must be listed.
-    block = src[m.start():m.start() + 1500]
-    for name in ("upwind1", "van_leer", "weno5"):
-        assert f'"{name}"' in block, (
-            f"scheme {name!r} missing from dispatch block"
+    hc = create_height_coordinate(grid.nlev, H=3_000.0)
+    tm = make_flat_plane_terrain_metric(grid, hc)
+    state = make_rest_state(grid, hc, dtype=jnp.float64)
+
+    def _cfg(scheme):
+        return CompressibleEulerConfig(
+            sponge_coeff=0.0, hyperdiff_coeff=0.0, hyperdiff_rho_coeff=0.0,
+            hyperdiff_w_coeff=0.0, semi_implicit_acoustic=False,
+            use_coriolis=False, fix_mass=False,
+            horizontal_advection_scheme=scheme,
         )
-    # iter-194: the ValueError message must reference the shared
-    # registry map so a future fourth scheme automatically surfaces.
-    # Pre-iter-194 the message was a hardcoded list "'upwind1',
-    # 'van_leer', or 'weno5'" which would have gone stale.
-    assert "HORIZONTAL_ADVECTION_HALO_REQUIREMENT" in block, (
-        "ValueError must reference the shared "
-        "HORIZONTAL_ADVECTION_HALO_REQUIREMENT registry so the "
-        "list of valid schemes stays in lockstep with the map."
+
+    # The van_leer path is accepted and produces a finite tendency.
+    tend = plane_compressible_euler_slow_tendencies(
+        state, grid, hc, tm, _cfg("van_leer"),
     )
+    assert jnp.all(jnp.isfinite(tend.du_dt.data))
+
+    # An unknown scheme must raise (a silent fallback cannot reintroduce
+    # iter-114's typo-class bug).
+    with pytest.raises(ValueError):
+        plane_compressible_euler_slow_tendencies(
+            state, grid, hc, tm, _cfg("vanleer_typo"),
+        )

@@ -177,10 +177,12 @@ class TestAMIP:
         assert jnp.all(jnp.isfinite(driver.state.T.data))
 
     def test_amip_baseline_ghg(self):
-        """AMIP uses AMIP-II baseline GHG (CO2 ≈ 348 ppmv)."""
+        """AMIP starts in 1979 with the CMIP6 historical GHG baseline
+        (CO2 ≈ 336.78 ppmv, NOAA Mauna Loa + AGGI for the AMIP start
+        year)."""
         from legoesm.forcing.experiments import create_experiment_config
         cfg = create_experiment_config("amip")
-        assert cfg.co2_ppmv == pytest.approx(348.0, abs=1.0)
+        assert cfg.co2_ppmv == pytest.approx(336.78, abs=1.0)
 
     def test_amip_warns_analytical_sst(self):
         """AMIP with analytical SST emits a warning."""

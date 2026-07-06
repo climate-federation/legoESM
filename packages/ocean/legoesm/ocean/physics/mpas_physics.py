@@ -27,6 +27,7 @@ _SW_PENETRATION_FRACTION = 0.94
 def make_mpas_ocean_physics(
     config,
     implicit_vertical_mixing: bool = False,
+    eos_fn=None,
 ) -> Callable:
     """Build a combined physics function for MPAS ocean.
 
@@ -39,6 +40,12 @@ def make_mpas_ocean_physics(
         implicit solver in ``MPASOceanModel.step()`` instead.  Wind,
         restoring, and other physics are still applied as explicit
         tendencies.
+    eos_fn : callable or None
+        Model-selected EOS ``(T, S, p) -> rho`` for the explicit KPP /
+        convective-adjustment density diagnostics.  ``None`` ⇒ Wright
+        default (bit-identical legacy).  Threaded so a non-Wright EOS
+        (e.g. ``nemo_seos``) drives the mixing decision consistently with
+        the baroclinic dycore instead of silently via Wright.
 
     Returns
     -------
@@ -58,7 +65,7 @@ def make_mpas_ocean_physics(
         from legoesm.ocean.physics.vertical_mixing.mpas_integration import (
             make_kpp_physics_mpas,
         )
-        _kpp_fn = make_kpp_physics_mpas(vm_config)
+        _kpp_fn = make_kpp_physics_mpas(vm_config, eos_fn=eos_fn)
     else:
         _kpp_fn = None
 
@@ -376,12 +383,14 @@ def make_mpas_ocean_physics(
             )
             from legoesm.ocean.eos import compute_ocean_rho
             cfg_c = conv_config.enhanced_diffusion
-            # Match the lat-lon convection integration: use the default
-            # (Wright) EOS for the ρ used in the static-stability check,
-            # even when the dycore is configured with linear EOS.  This
-            # is a known approximation — the EOS choice only affects the
-            # static-stability ranking, not the dycore tendencies.
-            rho = compute_ocean_rho(state, z_coord, jacobian)
+            # Static-stability ρ for the convective-adjustment check uses the
+            # model-selected EOS (``eos_fn``; ``None`` ⇒ Wright default),
+            # matching the lat-lon convection integration which threads its
+            # ``_vmix_eos_fn`` (ocean_model_latlon_cgrid.py).  This matters for
+            # a depth-dependent (thermobaric) EOS such as ``nemo_seos``, where
+            # the stability ranking — not just the dycore tendencies — depends
+            # on the EOS; using Wright there would mis-rank N²<0 convection.
+            rho = compute_ocean_rho(state, z_coord, jacobian, eos_fn=eos_fn)
             # Tracer-only on MPAS: the convective **momentum** viscosity
             # (cfg_c.nu_conv / convective_νz) is intentionally NOT applied
             # here.  MPAS carries edge-normal velocity (nEdges) whose

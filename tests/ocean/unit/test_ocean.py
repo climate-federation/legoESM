@@ -76,6 +76,34 @@ def ocean_z_coord():
 
 
 @pytest.fixture
+def _default_precision_pinned():
+    """Pin x64-OFF / fp32 policy for a single float32-asserting test.
+
+    NOT autouse: most tests in this file legitimately build float64 state
+    and need x64 ON.  Only the ``vertical_diffusion`` dtype-preservation
+    test (which asserts the tendency keeps the float32 *field* dtype) needs
+    x64 off so the vertical coordinate is built in float32 too.  Requested
+    BEFORE ``ocean_z_coord`` in the test signature so the coordinate is
+    constructed while x64 is off, robust to a sibling test leaking
+    ``jax_enable_x64`` ON in the same worker.  Restores the prior global
+    precision state at teardown.
+    """
+    from legoesm.core.precision import (
+        PrecisionPolicy, get_policy, set_policy,
+    )
+
+    x64_before = jax.config.jax_enable_x64
+    policy_before = get_policy()
+    jax.config.update("jax_enable_x64", False)
+    set_policy(PrecisionPolicy.fp32())
+    try:
+        yield
+    finally:
+        set_policy(policy_before)
+        jax.config.update("jax_enable_x64", x64_before)
+
+
+@pytest.fixture
 def ocean_state(ocean_grid, ocean_z_coord):
     """Rest-state ocean initial condition."""
     return rest_state_ocean(
@@ -741,7 +769,9 @@ class TestFluxFormVerticalMomentumAdvection:
 class TestVerticalMixing:
     """Tests for vertical diffusion operator."""
 
-    def test_vertical_diffusion_no_scatter_dtype_warning(self, ocean_z_coord):
+    def test_vertical_diffusion_no_scatter_dtype_warning(
+        self, _default_precision_pinned, ocean_z_coord,
+    ):
         """vertical_diffusion should avoid mixed-dtype scatter updates."""
         nlev = ocean_z_coord.n_levels
         field = jnp.linspace(0.0, 1.0, nlev, dtype=jnp.float32)[

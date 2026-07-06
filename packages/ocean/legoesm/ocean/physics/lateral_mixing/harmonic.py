@@ -14,6 +14,42 @@ from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
 from legoesm.ocean.physics.lateral_mixing.config import HarmonicConfig
 from legoesm.ocean.physics.lateral_mixing.output import LateralMixingOutput
 
+__physics_contract__ = {
+    "summary": (
+        "Harmonic (Laplacian) lateral mixing: A_h*grad^2(u,v) with no-slip "
+        "coastal masking and K_h*grad^2(T,S) with a Neumann (no-flux) coastal "
+        "fill."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "degC", "S": "psu",
+        "mask": "1 (1=ocean, 0=land)", "cfg.A_h": "m^2/s", "cfg.K_h": "m^2/s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "degC/s", "dS_dt": "psu/s",
+    },
+    "sign_convention": (
+        "A_h, K_h >= 0; down-gradient Laplacian in divergence form (variance-"
+        "dissipative); tracer diffusion uses a no-flux Neumann coastal fill so "
+        "the area-integrated heat/salt are conserved; momentum diffusion is "
+        "divergence-form with no-slip coastal masking (a boundary stress sink, "
+        "like drag); horizontal operator only, no vertical flux."
+    ),
+    # Flux/divergence-form lateral diffusion conserves the area integral of the
+    # diffused heat (energy) and salt (no-flux Neumann tracer BC). Momentum is
+    # NOT conserved: no-slip coastal masking is a boundary stress sink.
+    "conserves": ["energy", "salt"],
+    "differentiable": True,
+    "reference": (
+        "Laplacian lateral friction/diffusion; Griffies (2004) Fundamentals of "
+        "Ocean Climate Models"
+    ),
+    "idealized_test": (
+        "a single-mode tracer/velocity anomaly decays (rate ~ A*k^2) toward the "
+        "domain mean while the area integral of T, S is conserved (no-flux "
+        "coastal fill); a uniform field gives zero tendency."
+    ),
+}
+
 
 def harmonic_lateral_mixing(
     u: jnp.ndarray,

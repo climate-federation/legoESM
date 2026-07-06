@@ -1,0 +1,291 @@
+"""Shared, self-describing metadata for scaling-benchmark outputs (roadmap item 9).
+
+SINGLE source of the metadata block that every scaling JSON carries, so that
+each bench driver stops rolling its own record.  The goal is that a scaling row
+is comparable and *falsifiable* from the record ALONE — a CPU fallback, a
+host-staged halo, a replicated (non-SPMD) run, or an f32 ablation can no longer
+masquerade as a valid GPU-direct f64 scaling point.
+
+Every record answers the roadmap's item-9 questions:
+  grid, component, resolution, levels; precision + precision knobs; backend,
+  rank count, GPU count, devices per rank; decomposition type; MPI / GPU-direct
+  settings; solver variant + residual; cells per rank/GPU.
+
+Scientific descriptors (grid, resolution, solver, ...) are passed by the caller;
+runtime facts (backend, device / process count, precision knobs, GPU-direct
+mode) are auto-detected from the LIVE process so they cannot be mislabeled.
+
+Consumers: ``run_levante_gpu_scaling.py``, ``run_cpu_mpi_scaling.py`` (and any
+future bench driver) merge ``scaling_metadata(...)`` under the ``"metadata"``
+key of their JSON payload.  Aggregators read ``payload["metadata"]``.
+"""
+from __future__ import annotations
+
+import os
+from datetime import datetime, timezone
+from typing import Any
+
+#: Bump when the record shape changes so aggregators can branch on it.
+METADATA_SCHEMA_VERSION = 1
+
+#: Env knobs that change a run's numerics / comparability.  Recorded VERBATIM so
+#: an f32 (or TF32) ablation is never silently compared to an f64 baseline.
+PRECISION_ENV_KNOBS: tuple[str, ...] = (
+    "JAX_ENABLE_X64",
+    "LEGOESM_VMIX_F32_SOLVE",
+    "LEGOESM_BAROCLINIC_F32",
+    "LEGOESM_ENABLE_TF32",
+)
+
+#: The env toggle requesting CUDA-aware (device-direct) mpi4jax halos.
+GPU_DIRECT_ENV = "MPI4JAX_USE_CUDA_MPI"
+
+#: Backends on which the GPU-direct toggle is meaningful.
+_GPU_BACKENDS = ("gpu", "cuda", "rocm")
+
+#: Keys a self-describing scaling record MUST carry with a NON-EMPTY value
+#: (fail-fast hygiene).  ``0`` / ``False`` / a populated ``precision_knobs``
+#: dict are legal values; only ``None`` / ``""`` fail.  These are the fields
+#: without which a row cannot be compared or a fake-scaling run detected.
+REQUIRED_KEYS: tuple[str, ...] = (
+    "schema_version",
+    "grid",
+    "component",
+    "resolution",
+    "n_levels",
+    "precision",
+    "precision_knobs",
+    "backend",
+    "decomposition",
+    "n_ranks",
+    "n_gpus",
+    "device_count",
+    "process_count",
+    "gpu_direct_active",
+    "host_staged_halo",
+)
+
+#: Keys that MUST be PRESENT (the roadmap requires the field) but whose value
+#: may legitimately be ``None`` — an atmosphere run has no barotropic-solver
+#: residual; a single-device run has no partition metrics or cells-per-rank.
+PRESENT_KEYS: tuple[str, ...] = (
+    "devices_per_rank",
+    "cells_per_rank",
+    "solver_variant",
+    "solver_residual",
+    "scaling_kind",
+)
+
+
+def _env_flag_true(name: str) -> bool:
+    """True iff env var ``name`` is a truthy flag ("1"/"true"/"yes"/"on")."""
+    return os.environ.get(name, "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _is_empty(v: Any) -> bool:
+    """True for a non-informative required value: ``None``, ``""``, or an EMPTY
+    container (e.g. ``precision_knobs={}`` — which would hide an f32/TF32
+    ablation).  Scalars ``0`` / ``0.0`` / ``False`` are NOT empty (a legitimate
+    ``n_gpus=0`` / ``gpu_direct_active=False`` must pass)."""
+    if v is None or v == "":
+        return True
+    if isinstance(v, (dict, list, tuple, set, frozenset)) and len(v) == 0:
+        return True
+    return False
+
+
+def detect_backend() -> str:
+    """Live JAX backend ("cpu"/"gpu"/"tpu"), or "unknown" if JAX is absent."""
+    try:
+        import jax
+
+        return str(jax.default_backend())
+    except Exception:
+        return "unknown"
+
+
+def _jax_count(fn_name: str, default: int) -> int:
+    try:
+        import jax
+
+        return int(getattr(jax, fn_name)())
+    except Exception:
+        return default
+
+
+def mpi4jax_cuda_support() -> bool | None:
+    """``True``/``False`` as reported by mpi4jax; ``None`` when mpi4jax (or the
+    ``has_cuda_support`` predicate) is absent — i.e. CUDA support UNPROVEN."""
+    try:
+        import mpi4jax
+
+        return bool(mpi4jax.has_cuda_support())
+    except Exception:
+        return None
+
+
+def precision_knobs() -> dict[str, str]:
+    """Snapshot of every precision-affecting env knob (default ``"0"`` = off)."""
+    return {k: os.environ.get(k, "0") for k in PRECISION_ENV_KNOBS}
+
+
+def gpu_direct_mode(backend: str | None = None) -> dict[str, Any]:
+    """Device-direct MPI configuration for the record.
+
+    ``gpu_direct_active`` is ``True`` ONLY when a GPU backend is live, the
+    ``MPI4JAX_USE_CUDA_MPI`` toggle is set, AND mpi4jax reports CUDA support —
+    the exact conjunction that distinguishes a real GPU-direct halo from a
+    silently host-staged one.  ``host_staged_halo`` flags the dangerous case: a
+    GPU run whose halos are NOT device-direct (a scaling bug hiding as a valid
+    row).  On CPU/TPU the toggle is moot, so both are ``False``.
+    """
+    b = (backend or detect_backend()).lower()
+    on_gpu = b in _GPU_BACKENDS
+    requested = _env_flag_true(GPU_DIRECT_ENV)
+    cuda = mpi4jax_cuda_support()
+    device_direct = bool(requested and cuda is True)
+    return {
+        "gpu_direct_requested": requested,
+        "mpi4jax_cuda_support": cuda,
+        "gpu_direct_active": bool(on_gpu and device_direct),
+        "host_staged_halo": bool(on_gpu and not device_direct),
+    }
+
+
+def scaling_metadata(
+    *,
+    grid: str,
+    component: str,
+    resolution: Any,
+    n_levels: int,
+    precision: str,
+    n_ranks: int | None = None,
+    n_gpus: int = 0,
+    devices_per_rank: int | None = None,
+    decomposition: str = "none",
+    solver_variant: str = "n/a",
+    solver_residual: float | None = None,
+    conservation_drift: float | None = None,
+    cells_per_rank: int | None = None,
+    scaling_kind: str | None = None,
+    partition_metrics: dict[str, Any] | None = None,
+    timestamp_utc: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the complete self-describing metadata block for one scaling row.
+
+    Parameters
+    ----------
+    grid, component, resolution, n_levels, precision, decomposition
+        Scientific descriptors of the case (caller-supplied).
+    n_ranks, n_gpus, devices_per_rank, cells_per_rank
+        Parallel layout.  ``devices_per_rank`` defaults to
+        ``jax.device_count() // jax.process_count()`` when omitted.
+    solver_variant, solver_residual, conservation_drift
+        Solver identity + convergence/conservation evidence.  The roadmap
+        forbids claiming a solver speedup without recording a residual /
+        conservation drift, so these belong in the record.
+    scaling_kind
+        ``"weak"`` | ``"strong"`` | ``None`` — keeps weak/strong normalization
+        from being conflated downstream.
+    partition_metrics
+        MPAS / Voronoi partition-quality numbers when available
+        (``edge_cut``, ``owned_halo_ratio``, ``cells_per_rank_min/max``,
+        ``message_count``).
+    extra
+        Any other component-specific descriptors.
+    """
+    backend = detect_backend()
+    device_count = _jax_count("device_count", -1)
+    process_count = _jax_count("process_count", 1)
+    # ``n_ranks`` = number of MPI processes.  Default to the auto-detected
+    # process count so a single-process SPMD run (1 process, N GPUs) records
+    # ``n_ranks=1`` (truthful) while the device parallelism lives in
+    # ``n_gpus`` / ``device_count``.  Route-A drivers (1 GPU/rank) pass the
+    # real rank count explicitly.
+    if n_ranks is None:
+        n_ranks = process_count
+    if devices_per_rank is None and device_count > 0 and process_count > 0:
+        devices_per_rank = device_count // process_count
+
+    md: dict[str, Any] = {
+        "schema_version": METADATA_SCHEMA_VERSION,
+        "timestamp_utc": timestamp_utc or datetime.now(timezone.utc).isoformat(),
+        # --- scientific descriptors ---
+        "grid": grid,
+        "component": component,
+        "resolution": resolution,
+        "n_levels": n_levels,
+        "precision": precision,
+        "decomposition": decomposition,
+        "solver_variant": solver_variant,
+        "solver_residual": solver_residual,
+        "conservation_drift": conservation_drift,
+        "scaling_kind": scaling_kind,
+        # --- parallel layout ---
+        "n_ranks": n_ranks,
+        "n_gpus": n_gpus,
+        "device_count": device_count,
+        "process_count": process_count,
+        "devices_per_rank": devices_per_rank,
+        "cells_per_rank": cells_per_rank,
+        # --- runtime facts (auto-detected) ---
+        "backend": backend,
+        "precision_knobs": precision_knobs(),
+        "hostname": os.environ.get("HOSTNAME")
+        or os.environ.get("SLURMD_NODENAME", ""),
+        "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
+    }
+    md.update(gpu_direct_mode(backend))
+    if partition_metrics:
+        md["partition_metrics"] = partition_metrics
+    if extra:
+        md["extra"] = extra
+    return md
+
+
+def validate_scaling_metadata(
+    md: dict[str, Any], *, strict: bool = True
+) -> list[str]:
+    """Return the list of comparability problems (empty = self-describing).
+
+    A REQUIRED key that is ``None``/``""`` and a PRESENT key that is absent
+    both count.  Raises ``ValueError`` when ``strict`` and any problem exists —
+    benchmark hygiene fail-fast, so a record that cannot be compared is never
+    silently written.  (``decomposition == "none"`` and ``solver_residual is
+    None`` are legal and do NOT count; ``0``/``False`` are legal values.)
+    """
+    missing = [k for k in REQUIRED_KEYS if _is_empty(md.get(k))]
+    absent = [f"{k}(absent)" for k in PRESENT_KEYS if k not in md]
+    problems = missing + absent
+    if strict and problems:
+        raise ValueError(
+            f"scaling metadata not self-describing: {problems}; a record that "
+            "cannot be compared must not be written (roadmap benchmark hygiene)."
+        )
+    return problems
+
+
+def annotate_incomplete(md: dict[str, Any], *, warn: bool = True) -> dict[str, Any]:
+    """Flag (do NOT discard) an incomplete record at write time.
+
+    A benchmark record is built AFTER an expensive run has already completed,
+    so a hard raise here would throw away real data.  Instead: validate
+    non-strictly, and if the record is not self-describing, embed the problem
+    list under ``md["_incomplete"]`` and emit a ``RuntimeWarning`` so the row
+    is LOUDLY flagged and a downstream aggregator can skip/annotate it.
+    Returns ``md`` (mutated) for chaining.  Use this at JSON-write time; use
+    :func:`validate_scaling_metadata` (strict) where aborting is acceptable.
+    """
+    problems = validate_scaling_metadata(md, strict=False)
+    if problems:
+        md["_incomplete"] = problems
+        if warn:
+            import warnings
+
+            warnings.warn(
+                f"scaling record not fully self-describing: {problems}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+    return md

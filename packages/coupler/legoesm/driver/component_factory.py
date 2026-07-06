@@ -333,6 +333,9 @@ def create_atmosphere_dycore(
             time_integrator=(CDGridPrimitiveEquationConfig().time_integrator
                              if dc.time_integrator == "auto"
                              else dc.time_integrator),
+            # #771: flux-form moisture transport (needs moisture attached via
+            # ExperimentConfig.moisture_advection; default off = advective).
+            moisture_flux_form=getattr(dc, "moisture_flux_form", False),
         )
         return CDGridPrimitiveEquationModel(grid, sigma, cfg)
 
@@ -761,8 +764,19 @@ def create_ocean_component(
         # Guard the grid family with a clear message instead of an AttributeError
         # deep inside cdgrid construction (mirrors the resolve_model_complexity guard).
         from legoesm.driver.config import normalize_grid_type
-        _gt = normalize_grid_type(config.grid.grid_type)
-        if _gt not in _FULL_OCEAN_GRID_TYPES:
+        from legoesm.grids.cubed_sphere import CubedSphereGrid
+        # full_3d OceanModel is cubed-sphere-only (it calls
+        # create_cubed_sphere_cdgrid).  Detect the family from the GRID OBJECT,
+        # not ``config.grid`` — ``config`` is logging-only here and is legitimately
+        # ``None`` on the complexity-builder path (test_component_complexity passes
+        # config=None with a real grid).  Mirrors the isinstance(grid,
+        # CubedSphereGrid) convention used throughout ocean/atmosphere physics.
+        if not isinstance(grid, CubedSphereGrid):
+            _gt = (
+                normalize_grid_type(config.grid.grid_type)
+                if config is not None and getattr(config, "grid", None) is not None
+                else type(grid).__name__
+            )
             raise ValueError(
                 f"full_3d (OceanConfig) ocean is implemented only for grid_type in "
                 f"{sorted(_FULL_OCEAN_GRID_TYPES)} (the cubed-sphere OceanModel); got "
@@ -812,6 +826,7 @@ def create_land_component(config: ExperimentConfig, grid, *, land_config=None):
     from legoesm.land import (
         LandConfig, MultiLayerLandConfig,
         step_land, step_multilayer_land,
+        TwoLeafCanopyConfig,
     )
 
     if land_config is None:
@@ -836,11 +851,16 @@ def create_land_component(config: ExperimentConfig, grid, *, land_config=None):
             )
 
     if isinstance(land_config, MultiLayerLandConfig):
-        logger.info("Land: multilayer model (n_layers=%d)", land_config.soil_grid.n_layers)
+        scheme_name = type(land_config.surface_scheme).__name__
+        logger.info(
+            "Land: multilayer model (n_layers=%d, surface_scheme=%s)",
+            land_config.soil_grid.n_layers, scheme_name,
+        )
         return step_multilayer_land
 
     if isinstance(land_config, LandConfig):
-        logger.info("Land: slab model")
+        scheme_name = type(land_config.surface_scheme).__name__
+        logger.info("Land: slab model (surface_scheme=%s)", scheme_name)
         return step_land
 
     raise TypeError(

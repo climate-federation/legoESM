@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from legoesm import constants
 from legoesm.land.carbon.config import CarbonConfig
@@ -11,7 +11,9 @@ from legoesm.land.snow_bands import ElevationSnowBandConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
+from legoesm.land.topmodel_runoff import TopmodelConfig
 from legoesm.land.richards import RichardsConfig
+from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.surface_albedo import LandAlbedoConfig
 
 
@@ -85,6 +87,16 @@ class LandConfig(NamedTuple):
     carbon: CarbonConfig = CarbonConfig()
     # Stomatal conductance / plant physiology
     stomata: StomataConfig = StomataConfig()
+    # Surface scheme: ``SimpleSEBConfig`` (default) or ``TwoLeafCanopyConfig``.
+    # Type hint is ``Any`` because NamedTuple does not support Unions well;
+    # dispatch is done via ``isinstance`` inside ``step_land``.
+    surface_scheme: Any = SimpleSEBConfig()
+    # Runoff scheme (appended for positional-ABI stability): "bucket" (default,
+    # Green-Ampt Hortonian + Dunne saturation-excess, byte-identical) or
+    # "topmodel" (SIMTOP sub-grid saturated fraction + topographic baseflow,
+    # Niu 2005 / CLM4.5).  Unknown -> ValueError at dispatch.
+    runoff_scheme: str = "bucket"
+    topmodel: TopmodelConfig = TopmodelConfig()
 
 
 class MultiLayerLandConfig(NamedTuple):
@@ -129,3 +141,22 @@ class MultiLayerLandConfig(NamedTuple):
     carbon: CarbonConfig = CarbonConfig()
     # Stomatal conductance / plant physiology
     stomata: StomataConfig = StomataConfig()
+    # Surface scheme: ``SimpleSEBConfig`` (default) or ``TwoLeafCanopyConfig``.
+    # Runtime dispatch via ``isinstance`` inside ``step_multilayer_land``.
+    surface_scheme: Any = SimpleSEBConfig()
+
+
+def resolve_land_config(land_mode: str, land_config=None):
+    """Return the land config object matching ``land_mode``.
+
+    Single source of truth for the ``land_mode`` -> config-type mapping used by
+    the coupled driver and the ``run_lmip_smoke`` driver: ``"multilayer"`` ->
+    :class:`MultiLayerLandConfig`, ``"slab"``/``"none"`` -> :class:`LandConfig`.
+    A ``land_config`` of the wrong type for the mode is replaced with the
+    mode's default (so the runtime type always matches the selected model).
+    """
+    if land_mode == "multilayer":
+        return land_config if isinstance(land_config, MultiLayerLandConfig) else MultiLayerLandConfig()
+    if land_mode == "none":
+        return LandConfig()
+    return land_config if isinstance(land_config, LandConfig) else LandConfig()

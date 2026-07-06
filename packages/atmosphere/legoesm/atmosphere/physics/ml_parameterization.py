@@ -35,6 +35,54 @@ from legoesm.ml.physics.model import (
 )
 
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py). A learned
+# column model predicts closure inputs (Km, Kh, M_eq, microphysics tendencies)
+# that are run through the physical closures; the ML predictions carry no hard
+# conservation guarantee -> conserves ["none"].
+__physics_contract__ = {
+    "summary": (
+        "Joint ML physics parameterization: a learned column model predicts "
+        "eddy diffusivities (Km, Kh), an equilibrium convective mass flux "
+        "(M_eq) and optional microphysics tendencies, then runs them through "
+        "the mass-flux convection / implicit vertical-diffusion / Sundqvist-"
+        "Kessler microphysics closures to produce standard tendencies."
+    ),
+    "inputs": {
+        "T": "K", "u": "m/s", "v": "m/s", "q_v": "kg/kg", "q_c": "kg/kg",
+        "q_r": "kg/kg", "p_full": "Pa", "p_half": "Pa", "p_s": "Pa",
+        "z_full": "m", "z_half": "m", "T_sfc": "K", "q_sfc": "kg/kg",
+        "lat": "rad", "rho": "kg/m^3", "M_c": "kg/m^2/s", "dt": "s",
+    },
+    "outputs": {
+        "Km": "m^2/s", "Kh": "m^2/s", "M_eq": "kg/m^2/s",
+        "M_c_new": "kg/m^2/s",
+        "dT_dt": "K/s (convective + turbulent temperature tendency)",
+        "dq_v_dt": "kg/kg/s", "du_dt": "m/s^2", "dv_dt": "m/s^2",
+        "precipitation": "kg/m^2/s",
+    },
+    "sign_convention": (
+        "Learned mapping: no enforced conservation. Predicted diffusivities "
+        "clipped to [0, max_diffusivity], M_eq >= 0; learned warm-rain tracer "
+        "tendencies floored so one step cannot drive q_v/q_c/q_r negative; "
+        "precipitation >= 0 (leaves the column). Downstream closures apply "
+        "their own flux-form updates."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Learned column parameterization run through physical closures "
+        "(mass-flux convection + Louis vertical diffusion + Sundqvist/Kessler "
+        "microphysics); no single canonical reference -- see module and "
+        "closure docstrings"
+    ),
+    "idealized_test": (
+        "tests/unit/test_ml_physics_parameterization.py; zero predicted "
+        "diffusivity & mass flux -> zero turbulent/convective tendency; "
+        "learned warm-rain tendencies obey one-step non-negativity"
+    ),
+}
+
+
 __param_spec__ = {
     "PhysicsParameterizationAssets": {
         "scheme_key": "atm.ml_param.PhysicsParameterizationAssets",

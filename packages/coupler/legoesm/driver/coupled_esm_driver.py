@@ -18,12 +18,12 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
-
-from legoesm import constants
-from legoesm.driver.model_driver import ModelDriver
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.coupled_config import CoupledConfig
 from legoesm.diagnostics.energy_budget import area_weighted_mean
+from legoesm.driver.model_driver import ModelDriver
+
+from legoesm import constants
 
 logger = logging.getLogger("legoesm.driver.coupled_esm")
 
@@ -185,6 +185,27 @@ class CoupledESMDriver:
     def output_dir(self) -> Path:
         return self._atm.output_dir
 
+    @property
+    def grid(self):
+        """The atmosphere grid (delegates to the atm driver).
+
+        Exposes the same public ``grid`` as :class:`ModelDriver` so a coupled
+        (CMIP) run is grid-introspectable like an atm-only run — e.g. the column
+        comparison reconstructs the MPAS cell wind from ``driver.grid`` (the
+        ``VoronoiMesh``) for both AMIP and CMIP.
+        """
+        return self._atm.grid
+
+    @property
+    def sigma(self):
+        """The atmosphere vertical coordinate (delegates to the atm driver).
+
+        Exposes the same public ``sigma`` as :class:`ModelDriver` so the column
+        comparison can synthesize the grid winds from a spectral CMIP state
+        (``spectral_pe_to_grid`` needs the grid + sigma) for both AMIP and CMIP.
+        """
+        return self._atm.sigma
+
     # ==================================================================
     # Setup
     # ==================================================================
@@ -222,8 +243,8 @@ class CoupledESMDriver:
 
     def _init_ocean(self):
         """Initialize the slab/two-layer ocean (on the ocean grid)."""
-        from legoesm.ocean.simple_ocean import make_ocean, init_slab_state
         from legoesm.coupler.grid_remap import make_grid_remapper, remap_field
+        from legoesm.ocean.simple_ocean import init_slab_state, make_ocean
 
         cfg = self.coupled_cfg
         # The ocean may live on a DIFFERENT grid than the atmosphere.  Build the
@@ -281,14 +302,15 @@ class CoupledESMDriver:
         'dynamic') on the shared lat-lon grid with the OMIP-validated stable
         cold-start stack.  See docs/ocean/coupled_3d_ocean_plan.md (Phase 1)."""
         from legoesm.grids.latlon import LatLonGrid
-        from legoesm.ocean.state import LatLonCGridOceanConfig
-        from legoesm.ocean.vertical import create_ocean_z_star
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
         )
         from legoesm.ocean.init_latlon_cgrid import (
-            rest_state_latlon_cgrid_ocean, idealized_bathymetry_latlon_cgrid,
+            idealized_bathymetry_latlon_cgrid,
+            rest_state_latlon_cgrid_ocean,
         )
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        from legoesm.ocean.vertical import create_ocean_z_star
 
         cfg = self.coupled_cfg
         # Accept EITHER a regular lat-lon ocean grid (co-located with the
@@ -330,11 +352,12 @@ class CoupledESMDriver:
         # (max|u| 21 m/s, eta 84 m in 2 h, NaN by 10 h; the OMIP latlon
         # cold-start recipe uses exactly --C-smag-lap 3.0 --smag-cfl-safety
         # 0.125; see omip_smag_cap_stabilizer).
-        ocfg = _oc._replace(
-            # barotropic_solver was nested into BarotropicConfig (#640); a direct
-            # _replace can't route the flat kwarg the way from_flat does, so nest
-            # it explicitly.
-            barotropic=_oc.barotropic._replace(barotropic_solver="implicit_cn"),
+        # replace_flat routes the flat names into their nested sub-configs
+        # (barotropic_solver -> BarotropicConfig #640; C_smag_lap /
+        # smag_cfl_safety -> LateralViscosityConfig #661) exactly like the
+        # hand-nested ``_replace`` it replaced — leaf-identical by probe.
+        ocfg = _oc.replace_flat(
+            barotropic_solver="implicit_cn",
             momentum_time_integrator="rk3",
             pgf_scheme="smc03",
             implicit_vertical_mixing=True,
@@ -637,12 +660,12 @@ class CoupledESMDriver:
 
     def _init_coupler(self):
         """Initialize coupler, land, ice, lake surface states."""
-        from legoesm.coupler.coupler import make_coupler, init_surface_state
-        from legoesm.coupler.config import CouplerConfig, TileConfig
-        from legoesm.land.config import LandConfig, MultiLayerLandConfig
-        from legoesm.ice.config import SeaIceConfig
-        from legoesm.coupler.lake.config import LakeConfig
         from legoesm.core.precision import get_policy
+        from legoesm.coupler.config import CouplerConfig, TileConfig
+        from legoesm.coupler.coupler import init_surface_state, make_coupler
+        from legoesm.coupler.lake.config import LakeConfig
+        from legoesm.ice.config import SeaIceConfig
+        from legoesm.land.config import LandConfig, MultiLayerLandConfig
 
         cfg = self.coupled_cfg
         shape_2d = self._atm.grid.grid_shape_2d
@@ -867,6 +890,7 @@ class CoupledESMDriver:
         ``land_param_source='clm'`` → CLM reference surfdata (real PFT map +
         reference soil); ``'analytical'`` → latitude-band PFT fractions."""
         import math
+
         from legoesm.land.param_providers import PFTParamProvider
 
         lat = self._atm._grid_lat
@@ -1006,8 +1030,21 @@ class CoupledESMDriver:
             return
 
         from legoesm.forcing.surface_utils import (
-            blend_surface_property, blend_surface_temperature,
+            blend_surface_property,
+            blend_surface_temperature,
+            surface_temperature_for_lw_boundary,
         )
+
+        # Only correlated-k schemes (RRTMGP/RRTMG) honour the PAIRED dynamic
+        # (T_rad, eps_grid) surface boundary, so they get the flux-conserving
+        # radiative-equivalent temperature + dynamic emissivity.  Gray/none use
+        # an idealized black surface (eps=1) and ignore the dynamic emissivity;
+        # handing them T_rad (which is defined WITH eps_grid via
+        # eps_grid*sigma*T_rad^4 = blended emission) would make sigma*T_rad^4
+        # over-emit by 1/eps_grid, so they keep the area-weighted skin
+        # temperature instead.  See physics_pipeline gray radiation_fn.
+        _conservative_lw = getattr(
+            self.atm_config, "radiation", "gray") in ("rrtmgp", "rrtmg")
 
         def _seed_blend(day):
             # Same static blend the atmosphere radiation would use, as
@@ -1018,17 +1055,54 @@ class CoupledESMDriver:
                 sic, acfg.albedo_ice, acfg.albedo_ocean,
             )
             T = blend_surface_temperature(sst, sic, acfg.T_ice)
-            return alb, T
+            if not _conservative_lw:
+                # Gray/none never take an emissivity override (eps=1); return
+                # None so the override leaf is CONSISTENTLY None across seed and
+                # response — matching ``_coupled_get_sfc_override`` so no
+                # None->array pytree transition / recompile occurs.
+                return alb, T, None
+            # Seed a GRID-SHAPED emissivity — NOT None.  A None->array transition
+            # at the first coupler response would change the SegmentForcing pytree
+            # structure (None has no leaf, an array does) and force a recompile,
+            # violating the no-recompile invariant.  Use the EXACT static blend
+            # the radiation pipeline emits with (ocean/ice/land, configured
+            # emissivity_* values) so the seeded boundary that radiation uses
+            # before the first response is the SAME emissivity the lw_net_sfc
+            # inversion reconstructs with (otherwise land cells bias the initial
+            # lw_down).
+            _phys = self._atm.physics
+            eps = _phys.static_surface_emissivity(
+                sic, land_active=_phys.f_land is not None)
+            return alb, T, eps
 
         def _coupled_get_sfc_override(day):
             r = self._last_sfc_response
             if r is None or getattr(r, "albedo", None) is None:
                 return _seed_blend(day)
-            return r.albedo, r.T_sfc
+            if not _conservative_lw:
+                # Gray/none emit as an idealized BLACK surface (eps = 1) and
+                # cannot honour the canopy's eps_col, so feed them a black-surface
+                # BRIGHTNESS temperature derived from the full upward flux
+                # (sigma*T_bb^4 = LW_out).  Feeding T_rad would emit
+                # sigma*T_rad^4 = LW_emit/eps_col and overstate canopy emission by
+                # ~1/eps_col.  No emissivity override (gray keeps eps = 1).  NOT
+                # the aerodynamic/sensible-heat T_sfc (the canopy air-space Tc).
+                T_bb = surface_temperature_for_lw_boundary(
+                    "gray", T_rad=getattr(r, "T_rad", r.T_sfc), lw_up=r.lw_up)
+                return r.albedo, T_bb, None
+            eps = getattr(r, "emissivity", None)
+            if eps is None:
+                # Keep the override leaf a constant-shape array (no recompile).
+                eps = _seed_blend(day)[2]
+            # RRTMGP/RRTMG: the radiative-equivalent T_rad + dynamic eps_grid
+            # (flux-conserving tile blend) make eps*sigma*T_rad^4 + (1-eps)*La
+            # equal the area-weighted sum of tile lw_up exactly for mixed cells.
+            return r.albedo, getattr(r, "T_rad", r.T_sfc), eps
 
         self._atm.get_sfc_override = _coupled_get_sfc_override
         logger.info(
-            "  Surface-radiation feedback: dynamic albedo + skin T -> radiation"
+            "  Surface-radiation feedback: dynamic albedo + skin T + emissivity"
+            " -> radiation"
         )
 
     def _override_sfc_fluxes(self):
@@ -1150,7 +1224,11 @@ class CoupledESMDriver:
     def _build_atm_forcing(self, day: float):
         """Build AtmToSurface from atmosphere state and physics."""
         from legoesm.core.coupling_fields import AtmToSurface
-        from legoesm.forcing.surface_utils import blend_surface_temperature
+        from legoesm.forcing.surface_utils import (
+            blend_surface_temperature,
+            surface_emissivity_for_lw_inversion,
+            surface_temperature_for_lw_boundary,
+        )
 
         state = self._atm.state
         q_v = self._atm.q_v
@@ -1195,22 +1273,38 @@ class CoupledESMDriver:
             and _resp is not None
             and getattr(_resp, "albedo", None) is not None
         )
+        # Invert the held lw_net_sfc back to gross lw_down with the SAME (eps, T)
+        # pair radiation EMITTED the boundary with, or the round trip leaks an
+        # O(1 W/m^2) surface-energy bias.  Temperature: RRTMGP/RRTMG use the
+        # radiative-equivalent T_rad; gray/none use a black-surface brightness
+        # temperature (sigma*T_bb^4 = LW_out) — NOT the aerodynamic/sensible-heat
+        # T_sfc (the canopy air-space Tc over vegetated cells).
+        _radiation = getattr(self.atm_config, "radiation", "gray")
         if _dyn_sfc:
             albedo_eff = _resp.albedo
-            T_sfc = _resp.T_sfc
+            T_sfc = surface_temperature_for_lw_boundary(
+                _radiation, T_rad=getattr(_resp, "T_rad", _resp.T_sfc),
+                lw_up=_resp.lw_up)
         else:
             albedo_eff = blend_surface_property(
                 sic, acfg.albedo_ice, acfg.albedo_ocean,
             )
             T_sfc = blend_surface_temperature(sst, sic, acfg.T_ice)
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
-        # Surface emissivity: blend canonical ocean/ice emissivity by sea-ice
-        # fraction (same blend as albedo, matching earth_system_driver). The
-        # old ``getattr(coupled_cfg, "surface_emissivity", ...)`` referenced a
-        # field ``CoupledDriverConfig`` never defines, so it silently pinned
-        # emissivity to the ocean value and ignored the ice fraction.
-        eps_sfc = blend_surface_property(
-            sic, constants.emissivity_ice, constants.emissivity_ocean,
+        # Emissivity matching the emission:
+        #   * RRTMGP/RRTMG + dynamic feedback -> the coupler's tile-blended eps_col
+        #     (incl. the canopy's LAI-dependent eps_eff);
+        #   * RRTMGP/RRTMG static / pre-first-response -> the EXACT ocean/ice/land
+        #     emissivity blend the radiation pipeline emitted with (configured
+        #     emissivity_* values, not a constant ocean/ice approximation);
+        #   * gray/none -> an idealized black surface (eps = 1.0).
+        _phys = self._atm.physics
+        eps_sfc = surface_emissivity_for_lw_inversion(
+            _radiation,
+            dynamic_emissivity=(
+                getattr(_resp, "emissivity", None) if _dyn_sfc else None),
+            static_sfc_emissivity=_phys.static_surface_emissivity(
+                sic, land_active=_phys.f_land is not None),
         )
         lw_up_sfc = eps_sfc * constants.sigma_sb * T_sfc ** 4
         lw_down = (lw_net_sfc + lw_up_sfc) / jnp.maximum(eps_sfc, 0.01)
@@ -1224,17 +1318,31 @@ class CoupledESMDriver:
         snow_frac = snow_fraction(T_low, constants.T_freeze)
         precip_snow = precip_total * snow_frac
 
-        # Cosine zenith
-        from legoesm.forcing.time_utils import day_to_calendar
-        doy, _ = day_to_calendar(day)
+        # Cosine zenith — route through the atmosphere's seasonal insolation seam (iter
+        # 449/461) so the coupler's ocean/surface insolation runs the SAME season as the
+        # atmosphere (config.insolation_start_doy); offset 0 (default) == day_to_calendar(day),
+        # byte-identical. Without this the coupled ocean surface saw JANUARY insolation while
+        # the atmosphere saw the aligned season — a physically inconsistent sun.
+        doy, _ = self._atm._calendar_for_radiation(day)
         lat = self._atm._grid_lat
         if lat is not None:
-            from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
+            from legoesm.atmosphere.physics.radiation.solar import (
+                daily_mean_insolation, earth_orbit, earth_sun_distance_factor,
+            )
             # Solar constant from legoesm.constants per CLAUDE.md.
             # ``acfg.S_0`` allows override for sensitivity studies.
             S_0 = acfg.S_0
-            Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0)
-            cos_zen = jnp.clip(Q_daily / S_0, 0.0, 1.0)
+            # Realistic orbit (Berger 1978) when enabled; None ⇒ circular.
+            _orbit = (earth_orbit()
+                      if getattr(acfg, "orbital_insolation", False) else None)
+            _eccf = (earth_sun_distance_factor(float(doy), _orbit)
+                     if _orbit is not None else 1.0)
+            Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0,
+                                            orbit=_orbit)
+            # cos_zen is a geometric optical-path cosine: use the orbital
+            # declination but divide out the (a/r)^2 flux factor so it stays
+            # <= 1.  _eccf == 1.0 on the circular orbit ⇒ bit-identical.
+            cos_zen = jnp.clip(Q_daily / (_eccf * S_0), 0.0, 1.0)
         else:
             cos_zen = jnp.full_like(p_s, 0.5)
 
@@ -1397,11 +1505,12 @@ class CoupledESMDriver:
         which is the cube-only channel).  Ice→ocean channels (freshwater_flux /
         ocean_heat_extraction / salt_flux / ice stress) are Phase 3 — an
         aquaplanet Phase-1 run has no ice tile."""
-        from legoesm.coupler.coupler import ocean_tile_response
         from legoesm.coupler.config import CouplerConfig
+        from legoesm.coupler.coupler import ocean_tile_response
         from legoesm.coupler.grid_remap import remap_field
-        from legoesm.ocean.state import OceanSurfaceForcing
         from legoesm.ocean.freshwater import FreshwaterForcing
+        from legoesm.ocean.state import OceanSurfaceForcing
+
         from legoesm import constants
 
         sst_K, u_o, v_o = self._ocean_surface_KuvC()
@@ -1521,8 +1630,6 @@ class CoupledESMDriver:
         so that the carbon cycle's forward-Euler integration remains
         stable and fluxes are physically consistent.
         """
-        from legoesm.forcing.time_utils import day_to_calendar
-
         coupling_dt = self.coupled_cfg.coupling_dt  # default 3600 s
         n_sub = max(1, int(round(dt_segment / coupling_dt)))
         sub_dt = dt_segment / n_sub
@@ -1547,7 +1654,9 @@ class CoupledESMDriver:
             u_sfc = remap_field(u_o, self._grid_remapper.o2a)
             v_sfc = remap_field(v_o, self._grid_remapper.o2a)
 
-            doy, _ = day_to_calendar(day)
+            # Same seasonal insolation seam as the atmosphere (iter 449/461) so the surface
+            # step's day-of-year matches the atmosphere's season; offset 0 => identical.
+            doy, _ = self._atm._calendar_for_radiation(day)
 
             self._sfc_state, sfc_response = self._step_surface(
                 self._sfc_state,
@@ -1631,13 +1740,31 @@ class CoupledESMDriver:
     # Run
     # ==================================================================
 
-    def run(self, start_step: int = 0, start_day: float | None = None) -> str:
-        """Run the coupled integration."""
+    def run(
+        self,
+        start_step: int = 0,
+        start_day: float | None = None,
+        segment_callback=None,
+    ) -> str:
+        """Run the coupled integration.
+
+        ``segment_callback(driver, day, dt_segment)`` is an OPTIONAL extra hook
+        invoked at each segment boundary AFTER the coupling step ``_segment_hook``
+        (so it sees the post-coupling state, e.g. the updated ocean SST) — used to
+        sample diagnostics such as the time-mean column state for ERA5 comparison.
+        ``None`` (default) is byte-identical to the plain coupled run.
+        """
         logger.info("Starting coupled ESM run")
+        if segment_callback is None:
+            hook = self._segment_hook
+        else:
+            def hook(driver, day, dt_segment):
+                self._segment_hook(driver, day, dt_segment)  # couple first
+                segment_callback(driver, day, dt_segment)    # then sample
         status = self._atm.run(
             start_step=start_step,
             start_day=start_day,
-            segment_callback=self._segment_hook,
+            segment_callback=hook,
             # Checkpoint the FULL coupled state (atm + ocean + surface + CO2),
             # not just the atmosphere, on periodic and wallclock-budget saves.
             checkpoint_callback=self.save_checkpoint,
@@ -1654,12 +1781,32 @@ class CoupledESMDriver:
         return self._atm.state
 
     @property
+    def q_v(self):
+        """Atmospheric specific humidity ``q_v`` (stored outside the dycore state)."""
+        return self._atm.q_v
+
+    @property
     def ocean_state(self):
         return self._ocean_state
 
     @property
     def surface_state(self):
         return self._sfc_state
+
+    def get_sst_sic(self, day):
+        """The coupled SST + SIC on the ATMOSPHERE grid (the same public signature as
+        :meth:`ModelDriver.get_sst_sic`).
+
+        Delegates to the atmosphere driver, whose ``get_sst_sic`` was overridden at setup
+        (:meth:`_override_sst`) to return the slab/dynamic-ocean SST remapped onto the
+        atmosphere grid via the coupler's ``o2a`` remapper — so it is atm-grid even when the
+        ocean runs on a DIFFERENT grid.  Exposed (like ``grid`` / ``sigma`` / ``state`` /
+        ``q_v``) so the column comparison reads the CMIP coupled SST on the atmosphere grid
+        (matching the atm columns) for BOTH AMIP and CMIP — unlike ``ocean_state.T_sfc``,
+        which is on the OCEAN grid and would mis-align the env tag when ``ocean_grid``
+        differs (cf. the ``column_state_from_hydrostatic`` sst_K grid guard, iter 329).
+        """
+        return self._atm.get_sst_sic(day)
 
     @property
     def diagnostics(self):
@@ -1677,7 +1824,15 @@ class CoupledESMDriver:
     #       The v1 slab keys are unchanged, so a v1 slab checkpoint still
     #       restores under v2 (a stale-version restore only warns; it is the
     #       additive dynamic-ocean keys that a v1 reader would lack).
-    _CKPT_VERSION = 2
+    #   v3: + coupling-lag surface response (sfcresp_* = the SurfaceToAtm
+    #       ``_last_sfc_response`` lag buffer) + sst_mean_init (the SST-drift
+    #       reference), so a --resume run's first coupled sub-step delivers
+    #       the SAME lagged runoff / ice-lake-freshwater / CO2 fluxes as the
+    #       uninterrupted run and sst_drift_K stays referenced to the ORIGINAL
+    #       run start.  Additive: a v1/v2 checkpoint still restores; the lag
+    #       buffer / drift reference then fall back to the pre-v3 resume
+    #       behavior (explicit in load_coupled_checkpoint, not silent).
+    _CKPT_VERSION = 3
 
     def save_checkpoint(self, step: int, day: float) -> None:
         """Save atmosphere + ocean + surface + CO2 state."""
@@ -1720,6 +1875,23 @@ class CoupledESMDriver:
         # the pytree into a dict of named arrays for serialization.
         if self._sfc_state is not None:
             arrays.update(_flatten_pytree_to_npz(self._sfc_state, "sfc_"))
+
+        # Coupling-lag surface response (ckpt v3).  ``_last_sfc_response`` is
+        # the one-coupling-sub-step lag buffer the NEXT segment reads for the
+        # land-runoff / ice-lake-freshwater delivery, the CO2 tracer flux and
+        # the radiation skin-T/albedo channels; without it a --resume run's
+        # first coupled sub-step takes the prev-is-None zero-flux branch,
+        # dropping one sub-step of those fluxes vs the uninterrupted run.
+        if self._last_sfc_response is not None:
+            arrays.update(
+                _flatten_pytree_to_npz(self._last_sfc_response, "sfcresp_"))
+
+        # SST-drift reference (ckpt v3): the run-start SST mean, so the
+        # resumed sst_drift_K diagnostic stays referenced to the ORIGINAL run
+        # start rather than resetting at the restart point.
+        if self._sst_mean_init is not None:
+            arrays["sst_mean_init"] = np.asarray(
+                self._sst_mean_init, dtype=np.float64)
 
         if arrays:
             np.savez(coupled_path, **arrays)
@@ -1842,5 +2014,55 @@ class CoupledESMDriver:
         if self._sfc_state is not None:
             self._sfc_state, _ = _restore_pytree_from_npz(
                 self._sfc_state, data, "sfc_", coupled_path.name)
+
+        # Coupling-lag surface response (ckpt v3): restore the one-sub-step lag
+        # buffer so the first coupled sub-step after --resume delivers the SAME
+        # lagged runoff / ice-lake-freshwater / CO2 fluxes (and radiation
+        # skin-T/albedo channels) as the uninterrupted run.
+        if any(k.startswith("sfcresp_") for k in data.files):
+            from legoesm.core.coupling_fields import SurfaceToAtm
+            _struct = SurfaceToAtm(*([0] * len(SurfaceToAtm._fields)))
+            _paths = ["sfcresp_" + ".".join(str(p) for p in pp)
+                      for pp, _ in jax.tree_util.tree_leaves_with_path(_struct)]
+            expected = set(_paths)
+            saved_resp = {k for k in data.files if k.startswith("sfcresp_")}
+            if saved_resp == expected:
+                # Every SurfaceToAtm leaf lives on the atmosphere grid with
+                # the same 2D shape as p_s (cube (6,n,n) / lat-lon
+                # (nlat,nlon)) — that pins the current-run shape the restore
+                # helper validates against.  The dtype comes from each SAVED
+                # leaf, canonicalized by the current runtime (jnp.zeros
+                # downcasts float64 -> float32 when x64 is off), so a
+                # same-config resume restores the buffer BIT-IDENTICALLY (the
+                # coupler emits float64 under x64 even when the storage
+                # policy keeps p_s float32).
+                _shape = self._atm.state.p_s.data.shape
+                template = jax.tree_util.tree_unflatten(
+                    jax.tree_util.tree_structure(_struct),
+                    [jnp.zeros(_shape, dtype=jnp.zeros((), data[k].dtype).dtype)
+                     for k in _paths])
+                self._last_sfc_response, _ = _restore_pytree_from_npz(
+                    template, data, "sfcresp_", coupled_path.name, strict=True)
+            else:
+                # SurfaceToAtm changed shape (field append/removal) since the
+                # save.  A PARTIAL restore would silently zero some channels;
+                # fall back to a fresh (None) lag buffer instead — exactly the
+                # pre-v3 resume behavior (one zero-flux land/ice/CO2 sub-step),
+                # loudly.
+                logger.warning(
+                    f"Coupled checkpoint {coupled_path.name}: 'sfcresp_' "
+                    f"structure drift (SurfaceToAtm changed since the save); "
+                    f"falling back to a fresh coupling-lag buffer (pre-v3 "
+                    f"resume behavior: one zero-flux land/ice/CO2 sub-step).")
+        # else: pre-v3 checkpoint — no lag buffer saved.  Keep None: the first
+        # coupled sub-step after resume takes the prev-is-None zero-flux branch
+        # (exactly the pre-v3 resume behavior), then rebuilds the buffer.
+
+        # SST-drift reference (ckpt v3): keep sst_drift_K referenced to the
+        # ORIGINAL run start across --resume.
+        if "sst_mean_init" in data.files:
+            self._sst_mean_init = float(data["sst_mean_init"])
+        # else: pre-v3 checkpoint — keep None: the drift re-references at the
+        # restart point (the pre-v3 resume behavior), explicit not silent.
 
         logger.info(f"  Loaded coupled checkpoint: {coupled_path.name}")

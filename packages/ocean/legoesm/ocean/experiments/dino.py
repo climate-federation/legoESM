@@ -161,24 +161,71 @@ class DINOConfig:
     A_v_bg: float = 1.2e-4         # background vertical viscosity [m²/s]
     K_v_bg: float = 1.2e-5         # background vertical diffusivity [m²/s]
     K_conv: float = 100.0          # enhanced-diffusion convective K [m²/s] (rn_evd)
+    # NEMO nn_evdm=1 (DINO namelist): the enhanced vertical diffusion applies
+    # to tracers AND momentum. Effective only when the vertical-mixing closure
+    # is NOT kpp (KPP carries its own interior convective viscosity — the
+    # k_profiles guard rejects nu_conv under kpp to avoid double-counting;
+    # NEMO likewise pairs EVD with TKE, never KPP). MPAS is tracer-only
+    # (edge-momentum convective mixing needs a TRiSK reconstruction) — the
+    # MPAS path keeps nu_conv=0 regardless.
+    # NOTE: this default CHANGES the historical --vmix constant/tke lat-lon
+    # baselines (they previously ran tracer-only EVD; the pre-2026-07
+    # stability numbers — constant NaN d231, tke NaN d226/d39 — were measured
+    # WITHOUT momentum EVD). Reproduce those with --evd-momentum off.
+    evd_on_momentum: bool = True   # NEMO nn_evdm=1 (momentum EVD, non-kpp closures)
     # Vertical-mixing turbulence closure. The paper (Kamm et al. 2025) uses the
     # NEMO TKE scheme (Blanke & Delecluse 1993); "tke" selects our TKE closure
     # configured to the paper (background visc/diff = A_v_bg / K_v_bg, convective
-    # ceiling K_conv, constant background, prandtl_mode="constant"). HOWEVER our
-    # TKE is currently UNSTABLE in this 1deg DINO: the lower diffusivity makes the
-    # lat-lon run too energetic and it blows up near day ~40 (our TKE +
-    # lateral-viscosity tuning differs from NEMO's, where TKE is stable for 3000
-    # yr). So the DEFAULT is "kpp" (our stable closure, full-year stable); "tke"
-    # is the paper-faithful option for the short (<~40 day) window. This is a
-    # documented fidelity gap alongside the EOS (Wright vs Roquet) and the
-    # annual-mean-vs-seasonal restoring. Set per run via --vmix.
-    vmix_scheme: str = "kpp"       # "kpp" (stable default) | "tke" (paper, unstable >~day 40)
+    # ceiling K_conv, constant background, prandtl_mode="constant"). DINO lat-lon
+    # has TWO SW channel∩wall-corner (lat −69.7/lon −49.5, wind τ→0) surface-u
+    # instabilities (DIAGNOSED 2026-06-30, _diag_dino_tke_blowup.py):
+    #   (A) day ~39, TKE-specific, VISCOSITY-SENSITIVE — the ``tke_momentum_visc_bg``
+    #       floor (below) damps it (sweep 1.2e-4→d39, 5e-4→>90d).
+    #   (B) day ~230, scheme-GENERAL (NaNs tke AND "constant"), VISCOSITY-INSENSITIVE
+    #       (5e-4/1e-3/2e-3 all NaN ~d226-236) — a deep corner numerical mode,
+    #       analogous to the MPAS southern-channel one. NOT fixable by viscosity.
+    # So with the floor, "tke" runs to ~day 226 (good for the laminar sub-annual
+    # spin-up comparison) but is NOT multi-year-stable; only "kpp" (strong surface
+    # mixing suppresses BOTH) is multi-year-stable, and stays the DEFAULT. The
+    # tracer background K_v_bg is untouched, so the thermocline comparison is
+    # unaffected. Set per run via --vmix.
+    vmix_scheme: str = "kpp"       # "kpp" (multi-year-stable default) | "tke" (paper, ~226d)
+    # TKE-only momentum-viscosity background [m²/s], a FLOOR applied (max with
+    # A_v_bg) ONLY when vmix_scheme="tke" — see ``A_v_bg_effective``. 5e-4 (4×
+    # the paper's 1.2e-4) damps the day-39 instability (A); raising it further
+    # does NOT help instability (B) (2e-3 still NaNs ~d236), so 5e-4 is the
+    # chosen floor. kpp/constant are unaffected (they keep the paper A_v_bg).
+    tke_momentum_visc_bg: float = 5.0e-4
 
     # ------------------------------------------------------------------
-    # GM/Redi mesoscale eddy parameterization (Visbeck 1997; decisions
-    # log: stay with Visbeck, do not implement Tréguier 1997).
+    # Equation of state. The paper (Kamm et al. 2025) uses NEMO's
+    # "simplified" S-EOS (Roquet et al. 2015, np_seos) with the DINO
+    # coefficients (a0=0.165, b0=0.76554, λ1=0.06, μ1=1.4970e-4
+    # thermobaric; λ2=μ2=ν=0, T0=10°C, S0=35). "nemo_seos" selects exactly
+    # that oracle EOS — NemoSEOSConfig's defaults ARE the DINO coefficients
+    # (mirroring how "veros_gsw" carries the global_4deg oracle coefficients
+    # in its default config), so no per-experiment EOS-config threading is
+    # needed. The legoESM default is "wright" (Wright 1997 full nonlinear
+    # EOS) — a documented fidelity gap vs NEMO alongside the vmix closure.
+    # Set per run via --eos.
+    # ------------------------------------------------------------------
+    eos: str = "wright"            # "wright" (legoESM default) | "nemo_seos" (paper/oracle)
+
+    # ------------------------------------------------------------------
+    # GM/Redi mesoscale eddy parameterization. Adaptive κ via Visbeck 1997
+    # (default) or Treguier 1997 (gm_kappa_scheme="treguier", the NEMO
+    # nn_aei_ijk_t=21 oracle scaling — supersedes the 2026-05-14 decision
+    # to skip Tréguier, added 2026-07-02 after the GM-effectiveness diag).
     # ------------------------------------------------------------------
     use_gm_redi: bool = True
+    # Adaptive-κ_GM scaling: "visbeck" (Visbeck 1997, the historical legoESM
+    # DINO choice) | "treguier" (Treguier 1997 / NEMO nn_aei_ijk_t=21 — the
+    # ACTUAL DINO+ORCA1 oracle scaling; cap aei0 = rn_Ue·rn_Le = 0.03·100 km
+    # = 3000 m²/s from the DINO &namtra_eiv). The GM-effectiveness diagnostic
+    # (2026-07-01) showed Visbeck κ (200-2000) under-predicts the 1° channel
+    # need — Treguier is the faithful option. Lat-lon only (MPAS raises).
+    gm_kappa_scheme: str = "visbeck"
+    treguier_aei0: float = 3000.0  # Treguier κ cap [m²/s] = rn_Ue·rn_Le
     visbeck_alpha: float = 0.015   # Visbeck dimensionless prefactor
     visbeck_kappa_min: float = 200.0      # κ_GM floor [m²/s]
     visbeck_kappa_max: float = 2000.0     # κ_GM ceiling [m²/s]
@@ -237,6 +284,13 @@ class DINOConfig:
     C_d_bottom: float = 1.0e-3     # quadratic drag coefficient
     bottom_drag_bg_velocity: float = 0.1   # u_bg [m/s] for MOM6 quadratic-with-floor form
     bottom_drag_bbl_thickness: float = 50.0  # BBL thickness [m] for distributed drag
+    # NEMO zdfdrg drag law: "legacy" keeps the historical MOM6 form above
+    # (bit-exact); "nemo_quadratic" is the DINO reference's ACTUAL namdrg
+    # selection (ln_non_lin: r = Cd0*sqrt(u^2+v^2+ke0) with Cd0 = C_d_bottom
+    # and the namelist_ref ke0 = 2.5e-3 m^2/s^2); "nemo_loglayer" = the
+    # zdfdrg np_loglayer option.  Threaded to the model config's
+    # bottom_drag_scheme on BOTH the lat-lon and MPAS DINO paths.
+    bottom_drag_scheme: str = "legacy"
     n_barotropic_substeps: int = 30   # baroclinic-to-barotropic step ratio
 
     # ------------------------------------------------------------------
@@ -271,6 +325,22 @@ class DINOConfig:
     sigma_2_ref_depth: float = 2000.0     # reference depth for σ_2 [m]
     rho_ref_z0: float = 1026.0            # ρ_ref(z=0) [kg/m³]
     rho_ref_z2000: float = 1035.0         # ρ_ref(z=2000) [kg/m³]
+
+    @property
+    def A_v_bg_effective(self) -> float:
+        """Effective background vertical VISCOSITY [m²/s] for the momentum
+        solve (the model ``A_v`` and the TKE ``kappaM_min``).
+
+        For ``vmix_scheme="tke"`` this is ``max(A_v_bg, tke_momentum_visc_bg)``
+        — a FLOOR that damps the diagnosed SW channel-corner surface-momentum
+        instability (a higher A_v_bg override still wins).  ``kpp``/``constant``
+        keep ``A_v_bg`` (they are stable at the paper 1.2e-4).  The tracer
+        background ``K_v_bg`` is NOT raised here, so the thermocline mixing
+        stays at the paper value.
+        """
+        if self.vmix_scheme == "tke":
+            return max(self.A_v_bg, self.tke_momentum_visc_bg)
+        return self.A_v_bg
 
 
 # ---------------------------------------------------------------------
@@ -1045,14 +1115,25 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
         # floor inherits kappaM_min) and kappaM_max is ignored. "constant" gives
         # K_H = max(kappaH_min, K_M / Prandtl_tke0) and applies the kappaM_max
         # ceiling, so K_v_bg (1.2e-5) and the convective ceiling (K_conv) are
-        # honored (Prandtl_tke0 default 10 = A_v_bg / K_v_bg). The TKE step is
-        # fed N2 + shear_sq by the vertical-mixing integration.
+        # honored. kappaM_min is the EFFECTIVE momentum-viscosity floor
+        # (A_v_bg_effective = max(A_v_bg, tke_momentum_visc_bg) = 5e-4 by default
+        # — the SW-corner stabilizer); the TRACER floor kappaH_min stays at the
+        # paper K_v_bg (1.2e-5), and Prandtl_tke0 is a FIXED field (default 10,
+        # the paper's 1.2e-4/1.2e-5 ratio) — NOT recomputed from the raised
+        # momentum floor — so the thermocline mixing is unchanged. The TKE step
+        # is fed N2 + shear_sq by the vertical-mixing integration.
         return VerticalMixingConfig(
             scheme="tke",
             tke=TKEConfig(
                 prandtl_mode="constant",
-                kappaM_min=cfg.A_v_bg, kappaH_min=cfg.K_v_bg,
+                kappaM_min=cfg.A_v_bg_effective, kappaH_min=cfg.K_v_bg,
                 kappaM_max=cfg.K_conv, bg_diff_scale=0.0,
+                # NEMO zdftke surface terms — BOTH are namelist_ref defaults
+                # (DINO's namelist_cfg sets no &namzdf_tke overrides, so the
+                # oracle runs with ln_lc=T (rn_lc=0.15) and nn_etau=1
+                # (rn_efr=0.05, nn_htau=0 → constant 10 m)). Faithful ON.
+                lc=True,
+                etau_mode="below_ml",
             ),
         )
     if cfg.vmix_scheme == "kpp":
@@ -1109,19 +1190,31 @@ def dino_lat_lon_model_config(
     from legoesm.ocean.physics.lateral_mixing.config import (
         GMRediConfig, VisbeckConfig,
     )
+    if cfg.gm_kappa_scheme not in ("visbeck", "treguier"):
+        raise ValueError(
+            f"unknown DINOConfig.gm_kappa_scheme {cfg.gm_kappa_scheme!r}; "
+            "expected 'visbeck' or 'treguier'")
+    from legoesm.ocean.physics.lateral_mixing.config import TreguierConfig
     gm_redi_cfg = GMRediConfig(
-        # Placeholders; ignored at runtime because Visbeck is enabled.
+        # Placeholders; ignored at runtime because an adaptive κ is enabled.
         # Anchored to visbeck_kappa_min so the static value is non-
-        # degenerate if the Visbeck path is ever mis-wired.
+        # degenerate if the adaptive path is ever mis-wired.
         kappa_GM=cfg.visbeck_kappa_min,
         kappa_Redi=cfg.visbeck_kappa_min,
         S_max=cfg.redi_S_max,
         slope_scheme=cfg.gm_redi_slope_scheme,
+        # Exactly ONE adaptive-κ diagnostic on (the GM/Redi dispatch raises
+        # if both are enabled): "visbeck" (historical) or "treguier" (the
+        # NEMO nn_aei_ijk_t=21 oracle scaling, cap aei0 = rn_Ue·rn_Le).
         visbeck=VisbeckConfig(
-            enabled=True,
+            enabled=(cfg.gm_kappa_scheme == "visbeck"),
             alpha=cfg.visbeck_alpha,
             kappa_min=cfg.visbeck_kappa_min,
             kappa_max=cfg.visbeck_kappa_max,
+        ),
+        treguier=TreguierConfig(
+            enabled=(cfg.gm_kappa_scheme == "treguier"),
+            aei0=cfg.treguier_aei0,
         ),
     ) if cfg.use_gm_redi else None
 
@@ -1147,7 +1240,18 @@ def dino_lat_lon_model_config(
             lateral_mixing=LateralMixingConfig(scheme="none"),
             convection=OceanConvectionConfig(
                 scheme="enhanced_diffusion",
-                enhanced_diffusion=EnhancedDiffusionConfig(K_conv=cfg.K_conv),
+                # NEMO nn_evdm=1: EVD on tracers AND momentum (nu_conv =
+                # rn_evd = K_conv). Gated off under kpp (k_profiles rejects
+                # the combination — KPP's interior convective viscosity would
+                # double-count; NEMO pairs EVD with TKE). The MPAS builder
+                # below keeps nu_conv=0 (tracer-only; edge-momentum
+                # convective mixing needs a TRiSK reconstruction).
+                enhanced_diffusion=EnhancedDiffusionConfig(
+                    K_conv=cfg.K_conv,
+                    nu_conv=(cfg.K_conv
+                             if (cfg.evd_on_momentum
+                                 and cfg.vmix_scheme != "kpp") else 0.0),
+                ),
             ),
             shortwave_penetration=ShortwavePenetrationConfig(
                 water_type=cfg.jerlov_water_type,
@@ -1161,11 +1265,13 @@ def dino_lat_lon_model_config(
         A_h=A_h_base,
         A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B
         K_h=K_h_base,
-        A_v=cfg.A_v_bg,
+        A_v=cfg.A_v_bg_effective,   # TKE: 4× floor at the SW-corner stabilizer
         K_v=cfg.K_v_bg,
         bottom_drag_r=bottom_drag_r,
         bottom_drag_bg_velocity=cfg.bottom_drag_bg_velocity,
         bottom_drag_bbl_thickness=cfg.bottom_drag_bbl_thickness,
+        bottom_drag_scheme=cfg.bottom_drag_scheme,
+        bottom_drag_cd0=cfg.C_d_bottom,
         n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_solver=cfg.barotropic_solver,
         barotropic_implicit_theta_eta=cfg.barotropic_implicit_theta_eta,
@@ -1178,7 +1284,7 @@ def dino_lat_lon_model_config(
         A_h_eq_sigma_deg=cfg.A_h_eq_sigma_deg,
         gm_redi=gm_redi_cfg,           # lat-lon C-grid GM/Redi direct path
         physics=physics_cfg,
-        eos="wright",
+        eos=cfg.eos,                   # "wright" (default) | "nemo_seos" (paper)
     )
     return model_cfg, physics_cfg
 
@@ -1279,15 +1385,18 @@ def dino_mpas_model_config(
         # — see the mpas_equatorial_visc_boost note in DINOConfig.
         equatorial_visc_boost=cfg.mpas_equatorial_visc_boost,
         K_h=K_h,
-        A_v=cfg.A_v_bg,
+        A_v=cfg.A_v_bg_effective,   # TKE: 4× floor at the SW-corner stabilizer
         K_v=cfg.K_v_bg,
         bottom_drag_r=bottom_drag_r,
         bottom_drag_bg_velocity=cfg.bottom_drag_bg_velocity,
         bottom_drag_bbl_thickness=cfg.bottom_drag_bbl_thickness,
+        bottom_drag_scheme=cfg.bottom_drag_scheme,
+        bottom_drag_cd0=cfg.C_d_bottom,
         n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_solver=cfg.barotropic_solver,
         tracer_advection=cfg.tracer_advection,
         implicit_vertical_mixing=True,
+        eos=cfg.eos,                   # "wright" (default) | "nemo_seos" (paper)
     )
 
     if not physics:
@@ -1306,6 +1415,11 @@ def dino_mpas_model_config(
     from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
     from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 
+    if cfg.use_gm_redi and cfg.gm_kappa_scheme != "visbeck":
+        raise ValueError(
+            f"DINOConfig.gm_kappa_scheme={cfg.gm_kappa_scheme!r} is not "
+            "supported on the MPAS grid (Treguier adaptive kappa is lat-lon "
+            "C-grid only); use gm_kappa_scheme='visbeck' or --grid latlon.")
     physics_config = OceanPhysicsConfig(
         vertical_mixing=_dino_vertical_mixing_config(cfg),
         lateral_mixing=LateralMixingConfig(

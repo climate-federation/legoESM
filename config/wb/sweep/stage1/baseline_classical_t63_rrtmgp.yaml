@@ -1,0 +1,124 @@
+# Stage-1 baseline for the WeatherBench classical-physics OAT sweep (T63).
+#
+# Swap ONE physics family at a time around the baseline
+#   tiedtke + louis + mcfarlane + sundqvist + xu_randall
+# and train the swapped scheme's parameters on ERA5 with a MULTI-STEP
+# FORECAST objective (RMSE + CRPS + spectral CRPS over chained 6h rollouts).
+# Everything else -- grid, dt, loss, optimizer, ERA5 windows, RRTMGP -- is
+# held fixed so the sweep isolates the parameterization choice.
+#
+# Resolution: T63 (96 lat x 128 lon, ncol=12288), 8 levels, dt=600s
+# (dt=1200 NaN's at T63 step 0 -- hyperdiff too weak; see aimip_era5.yaml).
+#
+# Radiation: RRTMGP (USER REQUIREMENT -- never gray). Affordable here because
+# the OAT screen uses a SHORT 2-step chain [6,12]h (the ACE2 T63 campaign ran
+# this cadence with RRTMGP); the winner is promoted to the fuller [6,12,18,24]h
+# chain in Stage 2. RRTMGP is called every 36 dycore steps (=6h at dt=600).
+#
+# Loss: the forecast RMSE+CRPS block from aimip_era5_multistep.yaml, chained
+# over [6,12]h. Per-component diagnostics (mse/bias/crps/spec_crps) surface in
+# the epoch log via _spectral_state_loss_components.
+
+era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+cache_dir: ".cache/aimip_era5"
+
+train_windows:
+  - [2015,   0,  3]     # 2015 Jan (winter)
+  - [2015, 180,  3]     # 2015 Jun (summer)
+  - [2016,   0,  3]     # 2016 Jan
+  - [2016, 180,  3]     # 2016 Jun
+
+eval_windows:
+  - [2017,   0,  3]     # 2017 Jan (held-out year)
+  - [2017, 180,  3]     # 2017 Jun
+
+train_year: 2015
+eval_year:  2017
+train_period: ["2015-01-01", "2016-12-31"]
+eval_period:  ["2017-01-01", "2017-12-31"]
+
+n_train_days: 12
+n_eval_days:  6
+
+aimip_grid: "gaussian"
+n_max: 63
+# NOTE: the worktree's run_aimip.py (off main) reads cfg["nlev"] with NO fallback
+# to "n_levels" (that fallback lives only on the omip branch). Provide BOTH so the
+# real (non-smoke) config-build works regardless of which key the code reads.
+nlev: 8
+n_levels: 8
+dt: 600.0
+
+aimip_n_epochs: 4
+aimip_patience: 2
+aimip_min_delta: 1.0e-3
+aimip_lr: 3.0e-4
+aimip_warmup: 10
+aimip_weight_decay: 1.0e-5
+aimip_grad_clip: 1.0
+aimip_optimizer: "adamw"
+
+aimip_radiation: "rrtmgp"          # USER REQUIREMENT: RRTMGP, never gray.
+aimip_rad_update_interval: 36      # 36 * 600s = 6h RRTMGP cadence.
+
+# Spatial surface fields OFF for the screen so the sweep isolates the
+# parameterization choice rather than the surface-field init (matches the
+# T21 sweep philosophy); the winner can enable them in Stage 2.
+aimip_spatial_surface: false
+aimip_spatial_init_std: 0.0
+aimip_spatial_seed: 0
+aimip_spatial_lr_scale: 1.0
+
+# Baseline physics schemes (overridden per-variant in the OAT sweep).
+aimip_convection: "tiedtke"
+aimip_turbulence: "louis"
+aimip_gwd: "mcfarlane"
+aimip_microphysics: "sundqvist"
+aimip_cloud: "xu_randall"
+
+aimip_rollout_days: 1
+aimip_rollout_hours: 6
+
+loss:
+  w_T: 1.0
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.3
+  w_ps: 0.3
+  # Area-weighted bias penalty.
+  w_bias_T: 100.0
+  w_bias_u: 1.0
+  w_bias_v: 1.0
+  w_bias_ps: 1.0
+  # Grid-space deterministic CRPS (M=1 = area-weighted MAE).
+  w_crps_T: 0.5
+  w_crps_u: 0.25
+  w_crps_v: 0.25
+  w_crps_q: 0.5
+  w_crps_ps: 0.15
+  # Spectral-space deterministic CRPS: DISABLED for the T63 screen. It adds an
+  # SH analysis into the multi-step BACKWARD pass, which exploded the T63
+  # jit__train_step compile (>3h, hung -- canary 8832697). ACE2 (which ran
+  # T63+RRTMGP+[6,12]) omits it too. Grid-space CRPS below is kept (cheap, M=1
+  # = area-weighted MAE), so the objective is still forecast RMSE+CRPS. The
+  # winner re-enables spectral CRPS in Stage 2 (one config, compile cached).
+  w_spec_crps_T: 0.0
+  w_spec_crps_u: 0.0
+  w_spec_crps_v: 0.0
+  w_spec_crps_q: 0.0
+  # SINGLE-step (6h) forecast supervision for the T63 screen. Chained multi-step
+  # ([6,12]) BPTT through ~72 dycore steps x RRTMGP exploded/hung the T63
+  # jit__train_step compile (>2-3h, canaries 8832697 & 8833799) even after
+  # dropping spectral CRPS. Production aimip_era5.yaml + the T21 baseline both
+  # use single-step 6h at T63+RRTMGP and compile fine. Objective stays a forecast
+  # RMSE + grid-CRPS + bias at 6h. The winner attempts the multi-step chain in
+  # Stage 2 (one config -- a long compile is amortized there).
+  multi_step_hours: []
+  multi_step_weights: []
+  spectral_weight: 0.0
+  level_weighting: "pressure"
+  normalize_by_scale: true
+  T_scale: 30.0
+  wind_scale: 20.0
+  q_scale: 5.0e-3
+  ps_scale: 1000.0

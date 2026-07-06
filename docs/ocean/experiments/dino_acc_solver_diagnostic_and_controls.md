@@ -1,0 +1,357 @@
+# DINO ACC: barotropic solver/diagnostic validation + the ACC controls
+
+Follow-up to `dino_rigid_lid_acc_analysis.md`.  User question (2026-06-29): the
+barotropic streamfunction "looks weird" — is it the **solver** or the
+**diagnostic**?  Plan: (1) a geostrophic-adjustment test (explicit vs production
+barotropic solver), then (2) the two idealized-channel ACC controls — **bottom
+friction** and **bathymetry** — against a Kamm-et-al. oracle.
+
+## P1 — solver + diagnostic are BOTH correct
+
+| test | result |
+| --- | --- |
+| **Diagnostic** unit test: known transport ψ → u=−∂ψ/∂y/H → `barotropic_streamfunction` → recover | corr **0.998**, 1.7 % RMS (discretization) — CORRECT. The `dy = grid.dy*0.5` is right (`grid.dy` is the 2-cell span, `latlon.py:74`). |
+| **Solver**, steady: Munk wind-driven gyre (analytic Stommel-Munk WBC ~20 Sv) | `implicit_cn` ≡ `explicit_substep` **bit-identical** (corr 1.0, RMS 0.0, WBC 16.7 Sv). |
+| Solver, transient: constant-density DINO + SSH bump (geostrophic adjustment) | `implicit_cn` vs `explicit` diverge (corr −0.29) — **but this is the gravity-wave transient**, not a steady-balance error (implicit-CN θ=0.55 damps the sloshing waves the radiating bump excites; the balanced residual was weak). |
+
+**Conclusion:** neither the solver nor the diagnostic is the "weird streamfunction".
+On a *steady* barotropic balance — which the ACC is — the solvers agree exactly.
+Use a steady test (not a wave-radiating transient) to compare barotropic solvers.
+
+## Oracle anchoring
+
+Kamm Zenodo 15016824 provides EXP_R1 (1°, ACC 206 Sv) and EXP_R16 (1/16°) — **no
+1/4°**.  NEMO reaches 206 Sv at **1°**, so 206 is achievable at our resolution
+(not an eddy-resolution limit); the gap is a model/configuration issue.  The R1
+restart grid (199×52×36) ≈ ours (198×50×36, top levels identical).  Longitude
+convention differs: NEMO 0–50 °E, ours −50–0 (shift NEMO lon −50).  The regridded
+NEMO R1 velocity reads **ACC = 209 Sv** in our diagnostic (≈ 206) — a third
+independent confirmation that the diagnostic is correct.
+
+A **warm-start** from the R1 state (full u,v,η; or T,S at rest; smoothed; dt down
+to 300 s) NaNs within days every time — the regridded NEMO state is not in our
+model's discrete hydrostatic/geostrophic balance (sharp fronts + level-mismatch
+inversions).  Model-from-model initialization needs a dedicated balancing step;
+shelved.  The clean equilibrium comparison is therefore still open; the cold-start
+control sweep below answers the *controls* question regardless.
+
+## P2 — the ACC controls: bathymetry, not friction
+
+Cold-start DINO, validated `implicit_cn`, ACC at day 120 (baseline ~41 Sv; the
+absolute value is thermocline-spin-up-confounded — NEMO's 206 is a 3000-yr
+equilibrium — but the *sensitivities* are the physics):
+
+| control | ACC (Sv) |
+| --- | --- |
+| bottom drag C_d = 2.5e-4 / 5e-4 / 1e-3 / 2e-3 | 41 / 40 / 41 / 41 — **inert** |
+| sill H_sill = 2500 / 3000 / 3500 / 4000 m | 41 / 46 / 176 / 758 (runaway) |
+
+**Bottom friction is irrelevant** (40–41 Sv across an 8× drag range).  **The sill
+bathymetry is the dominant control** — there is a sharp threshold (~3000→3500 m:
+46→176 Sv), and removing the sill entirely (4000 m) lets the ACC run away (758 Sv
+and climbing).  So the sill provides the **topographic form stress** that *limits*
+the ACC — exactly the expected idealized-channel physics, and the same
+runaway-without-a-limiter behaviour seen for the rigid lid.
+
+The 41-vs-206 gap at our nominal sill is **thermocline spin-up modulated by the
+sill depth**: the geostrophic shear over the sill is immature at 120 d, and the
+ACC is extremely sensitive to how much of the water column the sill blocks.  Our
+discretized sill crest is ~2805 m (vs nominal 2500 — a Gaussian-ring sampling
+offset).  A deeper sill (3500 m) reaches ~176 Sv (near 206) much faster.
+
+## Where this leaves the ACC
+
+- Solver + diagnostic: validated, not the problem.
+- The ACC is **sill-form-stress-controlled**; bottom friction is not a lever.
+- Matching NEMO's 206 Sv at 1° requires the right sill form stress + a mature
+  thermocline; the open piece is a balanced warm-start (or a long spin-up) to
+  compare equilibria cleanly, plus checking the sill discretization vs the paper.
+
+## Levers L1–L3 — RESOLVED: the gap was thermocline spin-up
+
+Following the controls result, three levers were worked in order:
+
+**L2 (sill geometry) — correct, not the cause.** Our discretized bathymetry equals
+the analytic eq A5 at every point; the channel-band sill crest is 2309 m (≈ the
+nominal 2500). The sill is faithfully represented, so the low ACC is not a sill
+discretization error.
+
+**L1 (balanced warm-start, clean equilibrium comparison) — blocked.** A warm-start
+of our model from the NEMO R1 equilibrium NaNs every way tried (full u,v,η; T,S at
+rest; smoothed; dt down to 300 s; `apply_balanced_init` geostrophic/thermal-wind
+balance; balanced + smoothed). The thermal-wind ACC our balancer reconstructs from
+NEMO's density is clip-artifact-dominated (480 → 909 Sv, |u| clipping at 2.5 m/s):
+the ACC's steep isopycnals over the deep column + the 1500 m level-of-no-motion +
+the regridded fronts produce unphysically large velocities. Model-from-model
+initialisation of a deep-reaching ACC is a genuinely hard balancing problem;
+shelved. (It did confirm the ACC is **thermal-wind / density-controlled**: the
+immature cold-start density gives a low ACC, a mature density a high one.)
+
+**L3 (thermocline spin-up) — the ACC OVERSHOOTS, it does not settle at 206.** A
+6-year cold-start (nominal sill, `implicit_cn`):
+
+| year | 0.5 | 1.0 | 1.5 | 2.0 | 2.5 | 3.0 | 3.5 | 4.0 | 4.5 | 5.0 | 5.5 | 6.0 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| ACC [Sv] | 46 | 41 | 69 | 81 | 126 | 243 | 412 | 576 | 713 | 753 | 752 | 691 |
+
+The ACC is flat ~45 Sv through year 1 (immature thermocline — the "too low 44 Sv"
+WAS spin-up), then accelerates through 206 (~yr 2.7) and **keeps climbing to ~753 Sv
+by year 5** (3.7× NEMO) before slowly declining. So **our DINO equilibrium ACC is
+far too HIGH** (~700 Sv), not too low.
+
+**Cause — the thermocline over-deepens (not eddy saturation).** A GM sweep
+(`visbeck_kappa_max` 2000 → 6000 → 15000, α 0.015 → 0.06) has **no effect** — all
+overshoot to ~750 Sv. So the overshoot is GM-insensitive (the same GM-insensitivity
+as the rigid-lid barotropic runaway). With too-weak eddy flattening unable to be
+the lever, the thermocline keeps deepening and the thermal-wind ACC grows without
+saturation. NEMO's 206 Sv is set by a shallower equilibrium thermocline — a
+**vertical-mixing / buoyancy-forcing / EOS** difference vs NEMO, the real
+model-vs-NEMO discrepancy.
+
+**Warm-start (clean equilibrium comparison) is blocked** (6+ variants NaN,
+including convective-adjustment of the 6.3 % regrid density inversions — the
+in-place adjustment itself was unstable). Model-from-model ACC initialisation is a
+genuinely hard balancing problem.
+
+**Conclusion (corrected):** the barotropic solver and diagnostic are correct;
+bottom friction is irrelevant; the sill geometry is correct. The "50 Sv too low"
+was a 1-year spin-up artifact — but the model's *equilibrium* ACC is too HIGH
+(~700 Sv, thermocline over-deepening, GM-insensitive). Matching NEMO's 206 Sv is a
+**vertical-mixing / buoyancy-forcing / EOS** tuning problem (the thermocline depth),
+not a solver/friction/sill/GM/eddy issue.
+
+## NEMO side-by-side (the oracle, running)
+
+Built NEMO 5.0.1 + the DINO config (`vopikamm/DINO`, branch `wip/DINO_5.0.1`) and
+ran the actual oracle cold-start beside ours.  Build notes: register `DINO OCE` in
+`tests/demo_cfgs.txt` (else OCE isn't linked); `makenemo -n DINO_R1 -a DINO -m
+ORCA1_GCC` inside the morays Singularity container.  Run notes: singularity module
+only on `short`; MPI needs `--oversubscribe`; **attached XIOS** (`using_server=false`)
+— the detached XIOS server deadlocks (0.13 → 20 steps/s).  ACC extracted from `uoce`
+with the same barotropic-streamfunction diagnostic.
+
+**Cold-start ACC, year by year:**
+
+| year | 1 | 2 | 3 | 4 | 5 | 6 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **NEMO** | 62 | 66 | 74 | 90 | 101 | 110 |
+| **ours** | 41 | 81 | 243 | 576 | 753 | 691 |
+
+- **Laminar years 1–2 AGREE** (~50–80 Sv) — the dynamics match early.
+- **NEMO marches slowly + stably** toward its 206 Sv equilibrium (a 50-yr spin-up).
+- **Ours over-spins the thermocline ~10× too fast** → overshoots to ~750 Sv.
+
+**Ablations (N3) — clears GM:**
+- Our `vmix`: kpp overshoots; **tke and constant both NaN** (unstable in our 1°
+  DINO), so the alternatives can't be run our side.
+- Our GM is **active** (wired + applied) but **insensitive** (κ_GM ×7.5 no effect).
+- **NEMO with GM OFF** (`ln_ldfeiv=.false.`, verified in `ocean.output`) gives an
+  **identical** early spin-up (62,66,74,90) to GM-on.  So **GM has no effect on the
+  laminar spin-up in either model** — it only saturates the ACC near equilibrium
+  (isopycnal slopes are small early).
+
+**So the discrepancy is the diabatic thermocline spin-up RATE** — set by vertical
+mixing (our KPP vs NEMO TKE), the EOS (our Wright vs NEMO's cabbeling/thermobaric
+S-EOS), convection, and the surface buoyancy forcing — **not** the barotropic
+solver, diagnostic, sill, friction, or GM (all cleared).  The next lever is the
+thermocline physics (a KPP/TKE-mixing or EOS ablation; our TKE NaNs and we lack
+NEMO's exact S-EOS, so both need work first).
+
+NEMO build/run: `scripts/cluster/omip_nemo/{_build_dino,_run_dino_nemo}.sbatch`,
+extract `scripts/tmp/_diag_nemo_acc_extract.py`.
+Diagnostics: `scripts/tmp/_diag_{psi_unittest,geoadj_balanced,munk_solver,
+r1_warmstart_check,r1_warmstart_balanced,dino_sill_geom,dino_acc_controls,
+dino_spinup_multiyear,dino_vmix_ablation}.py`.
+
+## Matching NEMO's thermocline physics (M1 S-EOS + M2 TKE stability)
+
+Following the N3 conclusion (the discrepancy is the diabatic thermocline-spin-up
+rate = vertical mixing + EOS), two pieces were addressed.
+
+**M1 — NEMO's simplified S-EOS (Roquet 2015) added.** `eos="nemo_seos"`
+(`NemoSEOSConfig`/`nemo_seos_eos` in `ocean/eos.py`) reproduces NEMO `eosbn2.F90`
+`np_seos` with the Kamm 2025 DINO coefficients (a0=0.165, b0=0.76554, λ1=0.06,
+μ1=1.4970e-4 thermobaric; λ2=μ2=ν=0). Selected via `DINOConfig.eos` / `run_dino
+--eos`. The same PR closed a latent footgun: the KPP/CATKE/convection density —
+interior **and** surface buoyancy α/β — used Wright regardless of `config.eos`;
+the model EOS is now threaded through both grids' mixing (None ⇒ Wright,
+bit-identical). See the commit; codex-reviewed (3 iterations, 3 HIGH fixed).
+
+**M2 — the TKE NaN is a SW channel-corner surface-momentum instability, not the
+low background.** Correcting the N3 note ("tke and constant both NaN"): a 90-day
+NaN-localisation + A_v sweep (`_diag_dino_tke_blowup.py`) shows
+
+| config (A_v_bg) | result |
+| --- | --- |
+| **constant** @1.2e-4 (paper) | **stable ≥90 d** |
+| tke @1.2e-4 (paper) | NaN **day 39** — surface `u` runaway at lat −69.7/lon −49.5 (SW channel∩wall corner) |
+| tke, dt halved (1350 s) | NaN day 40 — **not a CFL** |
+| tke @2e-4 / 3e-4 | NaN day 47 / 57 |
+| tke @**5e-4** | **stable ≥90 d** |
+
+So the instability is **TKE-closure-specific** (constant is stable at the same
+background), **not** a CFL (halving dt doesn't help), and a slow (~6-day e-fold)
+surface-momentum runaway at the wind-shadowed SW corner (channel wind τ→0 at
+−70°). Raising the vertical-viscosity background to ~5e-4 (4× the paper's 1.2e-4)
+**suppresses** it over the 90-day window. The tracer background `K_v_bg` (the
+thermocline-relevant mixing) is left at the paper value.
+
+**M2 corrected — there are TWO corner instabilities; only KPP is multi-year-
+stable.** A multi-year re-diagnosis (`_diag_tke_multiyear.sbatch`, to 800 d) shows
+the 90-day window masked a SECOND blow-up (the recurring "smoke past the turnover"
+lesson):
+
+| config | first NaN | |
+| --- | --- | --- |
+| `constant` @1.2e-4 | **day 231** | scheme-general |
+| `tke` @5e-4 | **day 226** | viscosity- |
+| `tke` @1e-3 | **day 230** | INSENSITIVE |
+| `tke` @2e-3 | **day 236** | (16× → +10 d) |
+
+All at the SAME SW corner. So: instability **(A)** day ~39 is TKE-specific +
+viscosity-sensitive (the 5e-4 floor extends `tke` to ~day 226 — a real 6× gain,
+good for the laminar sub-annual comparison); instability **(B)** day ~230 is
+scheme-general (NaNs `tke` AND `constant`) and **viscosity-insensitive** (a deep
+corner numerical mode, analogous to the MPAS southern-channel one). Only **KPP**
+(strong surface mixing) suppresses both → the only multi-year-stable closure.
+
+**M3 — side-by-side DONE: S-EOS does NOT fix the over-deepening.** 4-yr ACC/yr
+(Sv); only KPP survives 4 yr:
+
+| config | yr1 | yr2 | yr3 | yr4 |
+| --- | --- | --- | --- | --- |
+| **NEMO** | 62 | 66 | 74 | 90 |
+| kpp + wright | 45 | 84 | 232 | **604** |
+| kpp + nemo_seos | 45 | 91 | 221 | **589** |
+| constant / tke ×(wright,nemo_seos) | — | — | — | NaN (instability B) |
+
+Wright vs NEMO S-EOS changes the ACC by ~2.5 % at yr 4 (604→589) — negligible
+against the 604-vs-90 overshoot. So the **ACC over-deepening is NOT an EOS
+effect**; the "match NEMO thermocline via S-EOS" hypothesis is refuted for the
+EOS lever. (The thermocline-core-depth proxy read flat ~36 m — it located the
+SURFACE T-gradient, not the thermocline core; uninformative, the ACC is the
+reliable signal.) The remaining lever is most likely the **KPP closure itself
+over-mixing** (deep boundary layer → deep thermocline → strong thermal-wind ACC)
+or convection — a vertical-mixing-TUNING problem (KPP entrainment / `Ri_crit` /
+`Cv`), not the EOS, and not cleanly testable via TKE (instability B). M1's S-EOS
++ EOS-consistent-mixing fix is correct and shipped regardless; it is just not the
+thermocline lever.
+
+**KPP boundary-layer depth (Ri_crit) — also NOT the lever.** A Ri_crit sweep on
+the stable kpp+wright run (`_diag_dino_kpp_ricrit.py`, 3 yr; Ri_crit patched in
+the model config — confirmed applied, 0.10 NaNs):
+
+| Ri_crit | 0.30 (default) | 0.20 | 0.15 | 0.10 |
+| --- | --- | --- | --- | --- |
+| ACC yr3 [Sv] | 232 | 233 | 231 | NaN |
+
+The yr-3 ACC is **~232 regardless** of the KPP critical bulk Richardson number, so
+the over-deepening is not set by the KPP boundary-layer DEPTH.
+
+**Where the lever stands (running tally of what's RULED OUT):** barotropic solver,
+diagnostic, sill form-stress, bottom friction, GM eddy, EOS (Wright vs S-EOS), and
+now KPP Ri_crit — none control the over-deepening. The ACC over-spins the
+thermocline ~10× too fast (45→84→232→604 vs NEMO 62→66→74→90) and KPP is the only
+multi-year-stable closure. Remaining untested candidates: the KPP/background
+DIFFUSIVITY MAGNITUDE (not BL depth), the enhanced-diffusion CONVECTION
+(K_conv/depth), and the surface buoyancy RESTORING strength/profile. The
+higher-information next step is a DIAGNOSTIC — compare our subtropical T(z)
+thermocline structure vs the NEMO oracle at yr 1-3 to localise *where* the
+deepening diverges — rather than more blind ~3-h lever sweeps.
+
+**The diagnostic (`_diag_dino_thermocline_levers.py`) — the over-deepening is a
+TOO-DIFFUSE thermocline, insensitive to ALL diabatic levers.** Subtropical
+(|lat|<40) mean T(z) at yr 3, ours vs the NEMO oracle (`grid_T.nc`):
+
+| depth | NEMO | ours |
+| --- | --- | --- |
+| 100 m | **20.4** | 12.4 |
+| 500 m | 10.8 | 8.3 |
+| 1000 m | 6.2 | **7.1** |
+
+NEMO holds a SHARP, SHALLOW thermocline (warm 20 °C confined above ~500 m); ours
+is **too cold at the surface (−8 °C) and too warm at depth (+0.9 °C)** — the warm
+water is smeared DOWN instead of confined to a shallow layer. A lever sweep
+(kpp+wright, 3 yr; yr-3 ACC / T@1000m) leaves both flat:
+
+| lever | K_v ×0.25 | K_v ×4 | K_conv ×0.3 | A_θ ×0.5 |
+| --- | --- | --- | --- | --- |
+| ACC yr3 | 233 | 242 | 232 | 233 |
+| T@1000m | 7.1 | 7.3 | 7.1 | 7.0 |
+
+So the excess vertical heat redistribution is **NOT** physical
+diffusivity/convection/restoring (all ruled out, ACC stuck at ~232). The remaining
+mechanisms are NUMERICAL vertical diffusion (the tracer-advection scheme), the KPP
+K MAGNITUDE (boundary-layer mixing, not its depth), or insufficient surface-heat
+RETENTION. Round 2 (`DINO_LEVER_ROUND` unset) tests superbee advection (less
+numerical diffusion), A_θ ×2/×4 (heat input), and K_conv≈0.
+
+**Round 2 — ALSO fully refuted; the cause is DYNAMICAL, not thermodynamic.**
+
+| lever | superbee | A_θ ×2 | A_θ ×4 | K_conv≈0 |
+| --- | --- | --- | --- | --- |
+| ACC yr3 | 232 | 227 | 241 | 225 |
+| T@100 m | 12.4 | 12.6 | **12.7** | 12.3 |
+
+`superbee` leaves T(z) BIT-IDENTICAL → not numerical advection diffusion;
+`K_conv≈0` unchanged → not convection; and **4× the surface restoring (~2400 W/m²)
+warms the surface only 0.3 °C** — the heat is exported as fast as it is added.
+**Verdict: the DINO ACC over-deepening is a DYNAMICAL (circulation / eddy-
+saturation) problem, NOT a thermodynamic one.** Every thermodynamic lever is
+refuted (EOS, K_v, K_conv, Ri_crit, A_θ ×0.5–4, superbee). The ACC overshoot and
+the diffuse thermocline are two symptoms of too-strong circulation that exports
+subtropical surface heat faster than any local mixing/forcing can set it. The
+ACC's strength was already shown GM-insensitive (N3: κ_GM-cap ×7.5 + α ×4) — so
+the open question is the **eddy-saturation / GM application** in the channel: is
+GM actually flattening the channel isopycnals, or is the Visbeck κ / slope-taper
+(`redi_S_max`) leaving the slopes too steep? That is a GM-effectiveness DIAGNOSTIC
+(is GM applied; what are the channel isopycnal slopes vs `S_max`), not another
+thermodynamic sweep — the canonical coarse-resolution ACC problem and the explicit
+subject of the Kamm 2025 paper.
+
+**GM-effectiveness diagnostic — THE LEVER FOUND: the Visbeck κ_GM is too weak.**
+`_diag_dino_gm_effectiveness.py` (kpp+wright, 2 yr, channel lat −65→−45):
+
+| GM setting | ACC yr1 | ACC yr2 | channel ‖S‖ p95 / max | capped @S_max |
+| --- | --- | --- | --- | --- |
+| OFF | 43 | 92 | — | — |
+| Visbeck base (κ 200–2000) | 45 | 84 | 1.3e-3 / 4.0e-3 | 0 % |
+| κ = 5000 (const) | 37 | **66** | 1.3e-3 / 4.0e-3 | 0 % |
+| κ = 15000 (const) | 35 | **66** | — | 0 % |
+
+GM **does** saturate the ACC — raising κ off→base→5000 drops yr-2 ACC 92→84→**66 =
+NEMO's yr-2 66**, saturating by κ≈5000. The channel isopycnal slopes are NOT capped
+(0 % at `S_max`, max 4e-3 < 5e-3), so it is **not** slope-limiting — just an
+insufficient κ. This RESOLVES the apparent N3 "GM-insensitive" contradiction: N3
+raised the κ **cap** (`kappa_max`), but the Visbeck-computed κ sits *below* the cap,
+so the effective lever is the **floor** (`kappa_min`), forced to 5000 here. So the
+DINO ACC over-deepening is an **eddy-saturation closure** problem: the Visbeck κ_GM
+(α=0.015, 200–2000 m²/s) under-predicts the eddy diffusivity the 1° channel needs
+(~5000 m²/s). FIX candidate = raise `visbeck_kappa_min` to ~5000.
+
+**…but the yr-4 confirmation FALSIFIES even this (the "smoke past the turnover"
+lesson, again).** `GM_CONFIRM=1` (kpp+wright, 4 yr):
+
+| config | yr1 | yr2 | yr3 | yr4 |
+| --- | --- | --- | --- | --- |
+| Visbeck base | 45 | 84 | 232 | 604 |
+| κ_min 5000 (floor or const) | 37 | **66** | **238** | **601** |
+
+κ=5000 matches NEMO at yr 2 (66) but then overshoots to 238/601 — IDENTICAL to
+baseline (232/604) — and the channel slopes converge to the same 2.4e-4. So GM
+saturates the EARLY ACC but NOT the late overshoot: the deep over-deepening drives
+the thermal-wind ACC up regardless of κ_GM. **Final verdict: the late ACC overshoot
+is a robust spin-up TRANSIENT, insensitive to EVERY physical lever — vertical
+mixing (K_v/K_conv/KPP/TKE), EOS, restoring, advection scheme, AND GM eddy
+saturation.** GM gives only a transient early-spin-up improvement (yr1-2). The
+6-yr cold-start overshoots to ~753 (yr5) then DECLINES (691, yr6) — a damped
+overshoot, vs NEMO's monotonic slow rise (62→110); both may approach a similar
+multi-century equilibrium by different transient paths. The residual is a deep
+baroclinic-adjustment / spin-up-dynamics difference vs NEMO, NOT a single tunable
+closure — a research-level open question, not a config fix. The durable
+deliverables are M1 (S-EOS + EOS-consistent mixing, shipped) and this exhaustive
+diagnostic infrastructure.
+
+M1/M2/M3 + lever + GM diagnostics: `scripts/tmp/_diag_dino_{tke_blowup,thermocline_sidebyside,kpp_ricrit,thermocline_levers,gm_effectiveness}.py`;
+sweeps `scripts/cluster/omip_nemo/_diag_{tke_blowup,avsweep,multiyear,kpp_ricrit,thermocline_levers,gm_effectiveness,gm_confirm}.sbatch`.
+NEMO T(z) oracle: `DINO_R1/EXP00/DINO_1m_grid_T.nc` (`toce`).

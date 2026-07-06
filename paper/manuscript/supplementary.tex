@@ -189,8 +189,25 @@ shows cosine-bell solid-body advection (Williamson case 1) on the cubed sphere; 
 traverses panel edges without distortion. Figure~\ref{si:w5w6} shows the Williamson 5
 (flow over an isolated mountain) and Williamson 6 (Rossby--Haurwitz wave) tests on the
 cubed sphere. The Jablonowski--Williamson baroclinic wave is shown for surface pressure and
-near-surface wind speed in Fig.~\ref{si:baroclinic}. Mass is conserved to round-off; energy and
+near-surface wind speed in Fig.~\ref{si:baroclinic}. Crucially, because the equation set and the
+numerical discretization are independent choices in legoESM, the same shallow-water problem can
+be solved on every grid: Fig.~\ref{si:gridcompare} shows that the cubed-sphere, lat--lon,
+icosahedral and spectral cores give visually indistinguishable solutions for the
+Rossby--Haurwitz wave and for flow over a mountain. Mass is conserved to round-off; energy and
 potential enstrophy budgets close to their scheme-dependent tolerances.
+
+\begin{figure}[h]\centering
+\begin{subfigure}{0.495\textwidth}\includegraphics[width=\textwidth]{si_grids_w6.png}
+\caption{Williamson 6 (Rossby--Haurwitz wave)}\end{subfigure}\hfill
+\begin{subfigure}{0.495\textwidth}\includegraphics[width=\textwidth]{si_grids_w5.png}
+\caption{Williamson 5 (flow over a mountain)}\end{subfigure}
+\caption{\textbf{The same shallow-water equations solved on four grids.} Height field for (a) the
+Rossby--Haurwitz wave (Williamson 6) and (b) flow over an isolated mountain (Williamson 5), each
+integrated on the cubed-sphere (C36), lat--lon ($72\times144$), icosahedral (level~5) and
+spectral (T21) discretizations. The solutions are visually indistinguishable across grids,
+showing that the physical equation set and the numerical method are orthogonal choices
+\cite{Williamson1992}.}\label{si:gridcompare}
+\end{figure}
 
 \begin{figure}[h]\centering
 \includegraphics[width=0.92\textwidth]{si_cosinebell.png}
@@ -286,7 +303,12 @@ Fig.~4a), the Ekman layer, the Wangara diurnal cycle, and the DYCOMS-II\cite{Ste
 RICO\cite{vanZanten2011} cloud-topped boundary layers (Fig.~\ref{si:les}). Cloud-resolving
 RCEMIP\cite{Wing2018} runs (Fig.~\ref{si:crm}) self-aggregate convection; warm-rain
 microphysics matches a super-droplet Golovin coalescence benchmark\cite{Shima2009,Bartman2022}
-(Fig.~\ref{si:sdm}).
+(Fig.~\ref{si:sdm}). The Lagrangian super-droplet method (SDM) is supplied here as a
+non-differentiable reference scheme rather than as a trainable component. Its particle-based
+formulation is closely connected to what is measured in laboratory and field observations of
+individual droplets, quantities that are otherwise very difficult to integrate at the global
+modelling scale because of the scale mismatch, which makes it a valuable oracle for calibrating
+the bulk schemes used in coarser configurations.
 
 \begin{figure}[h]\centering
 \begin{subfigure}{0.495\textwidth}\includegraphics[width=\textwidth]{si_les_ekman.png}\caption{Ekman layer}\end{subfigure}\hfill
@@ -337,12 +359,22 @@ equilibrate, demonstrating a stable Antarctic Circumpolar Current under the spli
 % #####################################################################
 \section{Performance and scaling}
 % #####################################################################
-Throughput and acceleration numbers (main-text Fig.~6) were measured on a single RTX-class GPU
-plus a 24-core CPU; strong/weak scaling was measured on a CPU cluster with one process per node.
-Headline single-GPU throughput (Mcells\,s$^{-1}$, fp32) is 678 (lat--lon atmosphere), 404
+Throughput and acceleration numbers (Fig.~\ref{si:scaling}) were measured on a single RTX-class
+GPU plus a 24-core CPU; strong/weak scaling was measured on a CPU cluster with one process per
+node. Headline single-GPU throughput (Mcells\,s$^{-1}$, fp32) is 678 (lat--lon atmosphere), 404
 (cubed-sphere), 298 (icosahedral), 400 (lat--lon ocean), 313 (tripolar) and 252 (MPAS ocean).
 GPU acceleration over the CPU is $16$--$21\times$ (atmosphere) and $33$--$99\times$ (ocean) at fp32.
 A halo-batching change (fewer, larger messages) improves the MPAS halo path (Fig.~\ref{si:halo}).
+
+\begin{figure}[h]\centering
+\includegraphics[width=0.96\textwidth]{f6_scaling.pdf}
+\caption{\textbf{Portability and scaling.} (a) Single-GPU throughput (million cells per second,
+fp32) across atmosphere and ocean grids. (b) CPU$\rightarrow$GPU speed-up at single and double
+precision. (c) Strong scaling (time per step vs.\ MPI ranks; lower is better) for the ocean
+(implicit vs.\ split-explicit barotropic solvers) and the MPAS atmosphere, against the ideal
+line. (d) Multi-node parallel efficiency for the ocean and three atmospheric grids. All numbers
+are measured on the hardware noted above.}\label{si:scaling}
+\end{figure}
 Reverse-mode differentiability is preserved across distributed execution: gradients through MPI
 halo exchange (\texttt{sendrecv} with a custom adjoint) and \texttt{allreduce(SUM)} match
 single-rank references to $\sim$$10^{-9}$. Documented limits: spectral transforms are

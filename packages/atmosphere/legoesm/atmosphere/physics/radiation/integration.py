@@ -53,6 +53,7 @@ from legoesm.atmosphere.physics.radiation.solar import (
     cos_zenith_angle,
     daily_mean_insolation,
     daylight_fraction,
+    earth_sun_distance_factor,
     perpetual_equinox_insolation,
 )
 from legoesm.atmosphere.physics.thermodynamics import (
@@ -176,31 +177,53 @@ def _compute_insolation(
         Daylight fraction per column.  Returned for non-diurnal daily-mean
         insolation so that RRTMGP can use a daytime-effective cos(SZA)
         rather than a day+night average.
+    eccf : float or jnp.ndarray
+        Earth-Sun distance factor ``(a/r)^2`` (1.0 on the circular orbit).
+        The returned ``insolation`` already includes it (correct for the
+        gray solver and the rsdt diagnostic); it is returned SEPARATELY so
+        the RRTMGP consumer can apply it as a SW-flux scale while keeping
+        ``cos_sza`` purely geometric (the optical-path cosine must stay
+        <= 1 and unscaled by distance).
     """
     S_0 = config.rrtmgp.S_0 if config.scheme == "rrtmgp" else config.gray.S_0
     obliquity = config.gray.obliquity
+    # Realistic orbit (Berger 1978) when enabled — None ⇒ circular orbit, so
+    # the idealized/aquaplanet paths below are bit-for-bit unchanged.
+    orbit = getattr(config, "orbit", None)
+    # Eccentricity (a/r)^2 flux factor; 1.0 on the circular-orbit path.  It
+    # scales the incoming SW *flux*, NOT the optical-path cosine.
+    eccf = (earth_sun_distance_factor(day_of_year, orbit)
+            if orbit is not None else 1.0)
 
     # SAM perpetual fixed-zenith RCE (doperpetual): uniform TOA insolation
     # S_0·cosθ with cosθ used directly as the SW optical-path cosine — no
     # latitude / daily-mean / daytime-effective rescaling. (RAD-2.)
+    # Perpetual RCE is a fixed-geometry idealization → orbit does not apply.
     if config.rce_fixed_cos_zenith is not None:
         cos_zen = jnp.full_like(lat, config.rce_fixed_cos_zenith)
-        return S_0 * cos_zen, cos_zen, None
+        return S_0 * cos_zen, cos_zen, None, 1.0
 
     if config.diurnal_cycle and lon is not None:
         hour = seconds_of_day / 3600.0
-        cos_sza = cos_zenith_angle(lat, lon, day_of_year, hour, obliquity)
+        cos_sza = cos_zenith_angle(lat, lon, day_of_year, hour, obliquity,
+                                   orbit=orbit)
         cos_sza_pos = jnp.maximum(cos_sza, 0.0)
-        return S_0 * cos_sza_pos, cos_sza_pos, None
+        # insolation carries (a/r)^2 (for gray + the rsdt diagnostic); cos_sza
+        # stays geometric for the RRTMGP optical path.
+        return S_0 * eccf * cos_sza_pos, cos_sza_pos, None, eccf
 
     # No diurnal cycle — daily-mean or perpetual-equinox insolation.
     gray_config = config.gray
     if gray_config.perpetual_equinox:
-        # Equinox: f_day = 0.5 everywhere
+        # Equinox: f_day = 0.5 everywhere (idealized — orbit not applied).
         f_day = jnp.full_like(lat, 0.5)
-        return perpetual_equinox_insolation(lat, S_0), None, f_day
-    f_day = daylight_fraction(lat, day_of_year, obliquity)
-    return daily_mean_insolation(lat, day_of_year, S_0, obliquity), None, f_day
+        return perpetual_equinox_insolation(lat, S_0), None, f_day, 1.0
+    f_day = daylight_fraction(lat, day_of_year, obliquity, orbit=orbit)
+    # daily_mean_insolation applies the (a/r)^2 eccentricity factor internally
+    # when ``orbit`` is set; eccf is returned so the RRTMGP consumer can keep
+    # cos_zenith geometric and apply the distance factor as a flux scale.
+    return (daily_mean_insolation(lat, day_of_year, S_0, obliquity,
+                                  orbit=orbit), None, f_day, eccf)
 
 
 def sam_ocean_albedo(
@@ -490,6 +513,7 @@ def _call_radiation_backend(
     aerosol_od: jnp.ndarray | None = None,
     aerosol_lw_od: jnp.ndarray | None = None,
     solar_spectral_fraction: jnp.ndarray | None = None,
+    eccf: float | jnp.ndarray = 1.0,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -547,24 +571,37 @@ def _call_radiation_backend(
 
     # RRTMGP: use actual cos_sza if available (diurnal cycle), else derive
     # from daily-mean insolation using the daytime-effective zenith angle.
+    # The eccentricity (a/r)^2 factor scales the SW *flux* (folded into
+    # _sw_scale), NOT the optical-path cosine — so divide ``eccf`` out of any
+    # cos_sza derived from the (eccf-folded) ``insolation``.  Gated on a static
+    # orbit flag so the circular-orbit path is bit-for-bit unchanged.
+    _orbit_on = getattr(radiation_config, "orbit", None) is not None
     _sw_scale = None
     if cos_sza is None:
         S_0 = radiation_config.rrtmgp.S_0
         if f_day is not None:
-            # Use daytime-effective cos(SZA): insol = S_0 * f_day * <cos_sza>_day
-            # so <cos_sza>_day = insol / (S_0 * f_day).  The solver sees the
-            # correct daytime optical path; we rescale SW output by f_day afterward.
+            # Use daytime-effective cos(SZA): insol = (a/r)^2·S_0·f_day·<cos>_day
+            # so <cos>_day = insol / (eccf·S_0·f_day).  The solver sees the
+            # geometric daytime optical path; SW output is rescaled by
+            # f_day·eccf afterward to recover daily-mean energy + distance.
             f_day_safe = jnp.maximum(f_day, 1.0e-6)
             cos_sza = jnp.clip(
-                insolation / (S_0 * f_day_safe), 0.0, 1.0,
+                insolation / (eccf * S_0 * f_day_safe), 0.0, 1.0,
             )
-            _sw_scale = f_day
+            _sw_scale = f_day * eccf if _orbit_on else f_day
         else:
             cos_sza = jnp.clip(
-                insolation / jnp.clip(S_0, 1.0e-6, None),
+                insolation / (eccf * jnp.clip(S_0, 1.0e-6, None)),
                 0.0,
                 1.0,
             )
+            if _orbit_on:
+                _sw_scale = jnp.full((cos_sza.shape[0],), eccf,
+                                     dtype=cos_sza.dtype)
+    elif _orbit_on:
+        # Diurnal path: cos_sza is already geometric; apply the distance factor
+        # to the SW flux (the solver runs with S_0, not S_0·eccf).
+        _sw_scale = jnp.full((cos_sza.shape[0],), eccf, dtype=cos_sza.dtype)
     q_v_safe = q_v if q_v is not None else jnp.zeros_like(T)
 
     # Compute ozone VMR based on config — unless the caller supplied a
@@ -613,7 +650,7 @@ def _call_radiation_backend(
         from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
         rrtmgp_solver = RRTMGP.from_legoesm_config(radiation_config.rrtmgp)
 
-    result = rrtmgp_solver.solve_columns(
+    _rad_kwargs = dict(
         T=T,
         p_full=p_full,
         p_half=p_half,
@@ -629,6 +666,17 @@ def _call_radiation_backend(
         solar_spectral_fraction=solar_spectral_fraction,
         **cloud_kwargs,
     )
+    # Column-chunk the rrtmgp solve when configured: the per-block body
+    # compiles ONCE at ``column_chunk_size`` columns, capping the highly
+    # super-linear rrtmgp XLA compile time at higher horizontal resolution.
+    # Columns are physically independent, so this is numerically EXACT.
+    _col_chunk = getattr(radiation_config.rrtmgp, "column_chunk_size", 0)
+    if _col_chunk and _col_chunk > 0:
+        result = rrtmgp_solver.solve_columns_chunked(
+            column_chunk_size=_col_chunk, **_rad_kwargs,
+        )
+    else:
+        result = rrtmgp_solver.solve_columns(**_rad_kwargs)
 
     # When using daytime-effective cos(SZA), the solver computes SW fluxes at
     # the daytime level (1/f_day times too large).  Rescale to daily-mean.
@@ -704,6 +752,7 @@ def make_radiation_physics(
     sfc_albedo_override: jnp.ndarray | float | None = None,
     sfc_emissivity_override: jnp.ndarray | float | None = None,
     nc_from_aerosol: bool = False,
+    activation_config=None,
 ) -> Callable:
     """Create a physics function for radiation matching a model's signature.
 
@@ -793,7 +842,8 @@ def make_radiation_physics(
         return _make_hydrostatic_radiation(radiation_config, rrtmgp_solver,
                                             ml_ozone_coefs=ml_ozone_coefs,
                                             column_mesh=column_mesh,
-                                            nc_from_aerosol=nc_from_aerosol)
+                                            nc_from_aerosol=nc_from_aerosol,
+                                            activation_config=activation_config)
     elif model_type == "nonhydrostatic":
         return _make_nonhydrostatic_radiation(radiation_config, rrtmgp_solver,
                                                ml_ozone_coefs=ml_ozone_coefs)
@@ -833,6 +883,7 @@ def _make_hydrostatic_radiation(
     ml_ozone_coefs=None,
     column_mesh=None,
     nc_from_aerosol: bool = False,
+    activation_config=None,
 ) -> Callable:
     """Create radiation physics_fn for any hydrostatic model.
 
@@ -920,7 +971,7 @@ def _make_hydrostatic_radiation(
         if forcing is not None and forcing.get("seconds_of_day") is not None:
             _sod = forcing["seconds_of_day"]
 
-        insol, cos_sza, f_day = _compute_insolation(
+        insol, cos_sza, f_day, eccf = _compute_insolation(
             lat, radiation_config,
             lon=lon,
             day_of_year=_doy,
@@ -954,18 +1005,35 @@ def _make_hydrostatic_radiation(
         # indirect effect) but skips this radiation-only first-indirect path
         # instead of computing a droplet field the gray optics would discard.
         if nc_from_aerosol and radiation_config.scheme == "rrtmgp":
-            if _aer_ext is None:
+            # Route through the SAME activation dispatch as the microphysics
+            # N_c fill (proxy | arg) so the first (radiation r_eff) and second
+            # (autoconversion) indirect effects see ONE droplet number per
+            # step.  activation_config=None -> default proxy, byte-identical
+            # to the previous direct specified_nc_field call.  The
+            # missing-aerosol_od raise is proxy-only, mirroring the
+            # microphysics guard (ARG needs no AOD).
+            from legoesm.atmosphere.physics.microphysics.arg_activation import (  # noqa: E501
+                ActivationConfig,
+                activated_nc_field,
+            )
+            _act_cfg = (activation_config if activation_config is not None
+                        else ActivationConfig())
+            if _act_cfg.scheme == "proxy" and _aer_ext is None:
                 raise ValueError(
                     "nc_from_aerosol=True but no 'aerosol_od' was passed to "
                     "the radiation physics_fn via forcing — enable external "
                     "aerosol forcing (--aerosol-forcing external) or disable "
                     "--aerosol-ccn."
                 )
-            from legoesm.atmosphere.physics.microphysics.aerosol_activation import (  # noqa: E501
-                specified_nc_field,
-            )
-            n_cloud_col = specified_nc_field(
-                jnp.asarray(_aer_ext), (ncol, nlev),
+            _aer_num = (forcing.get("aerosol_number")
+                        if forcing is not None else None)
+            n_cloud_col = activated_nc_field(
+                _act_cfg, (ncol, nlev),
+                aerosol_od=(None if _aer_ext is None
+                            else jnp.asarray(_aer_ext)),
+                T=T_col, p=p_full_col,
+                aerosol_number=(None if _aer_num is None
+                                else jnp.asarray(_aer_num)),
             )
 
         f_day_col = f_day.reshape(ncol) if f_day is not None else None
@@ -1015,6 +1083,7 @@ def _make_hydrostatic_radiation(
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
+            eccf=eccf,
             T=T_col,
             p_full=p_full_col,
             p_half=p_half_col,
@@ -1113,7 +1182,7 @@ def _make_nonhydrostatic_radiation(
         T_sfc = _apply_T_sfc_override(T[..., -1], _T_sfc_override_cell[0])
 
         # Insolation (and optionally cos_sza for diurnal cycle).
-        insol, cos_sza, f_day = _compute_insolation(
+        insol, cos_sza, f_day, eccf = _compute_insolation(
             lat, radiation_config,
             lon=lon,
             day_of_year=_time["day_of_year"],
@@ -1179,6 +1248,7 @@ def _make_nonhydrostatic_radiation(
         f_day_col = f_day.reshape(ncol) if f_day is not None else None
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
+            eccf=eccf,
             T=T_col,
             p_full=p_full_col,
             p_half=p_half_col,
@@ -1483,7 +1553,7 @@ def _make_plane_radiation(
         # Plane lat/lon: PlaneGrid.grid_lat returns constant lat0 over
         # (ny, nx), already in radians (deg2rad applied in property).
         lat, lon = _get_grid_lat_lon(grid, shape_2d)
-        insol, cos_sza, f_day = _compute_insolation(
+        insol, cos_sza, f_day, eccf = _compute_insolation(
             lat, radiation_config, lon=lon,
             day_of_year=_time["day_of_year"],
             seconds_of_day=_time["seconds_of_day"],
@@ -1551,6 +1621,7 @@ def _make_plane_radiation(
         else:
             rad_out = _call_radiation_backend(
                 radiation_config=radiation_config,
+                eccf=eccf,
                 T=T_col, p_full=p_full_col, p_half=p_half_col,
                 sfc_temperature=T_sfc_col, lat=lat_col, q_v=q_v_col,
                 insolation=insol_col, cos_sza=cos_sza_col,
@@ -1668,7 +1739,7 @@ def _make_mpas_nh_radiation(
         # MPAS lat/lon at cells handled by `_get_grid_lat_lon` via the
         # `hasattr(grid_or_mesh, 'latCell')` branch.
         lat, lon = _get_grid_lat_lon(mesh, shape_2d)
-        insol, cos_sza, f_day = _compute_insolation(
+        insol, cos_sza, f_day, eccf = _compute_insolation(
             lat, radiation_config, lon=lon,
             day_of_year=_time["day_of_year"],
             seconds_of_day=_time["seconds_of_day"],
@@ -1738,6 +1809,7 @@ def _make_mpas_nh_radiation(
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
+            eccf=eccf,
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, lat=lat_col, q_v=q_v_col,
             insolation=insol_col, cos_sza=cos_sza_col,
@@ -1913,14 +1985,14 @@ def _make_spectral_pe_radiation(
         if radiation_config.diurnal_cycle:
             lat_2d = jnp.broadcast_to(lat[:, None], (n_lat, n_lon))
             lon_2d = jnp.broadcast_to(grid.lon[None, :], (n_lat, n_lon))
-            insol, cos_sza, f_day = _compute_insolation(
+            insol, cos_sza, f_day, eccf = _compute_insolation(
                 lat_2d, radiation_config,
                 lon=lon_2d,
                 day_of_year=day_eff,
                 seconds_of_day=secs_eff,
             )
         else:
-            insol_1d, _, f_day_1d = _compute_insolation(
+            insol_1d, _, f_day_1d, eccf = _compute_insolation(
                 lat, radiation_config,
                 day_of_year=day_eff,
                 seconds_of_day=secs_eff,
@@ -1958,6 +2030,7 @@ def _make_spectral_pe_radiation(
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
+            eccf=eccf,
             T=T_col,
             p_full=p_full_col,
             p_half=p_half_col,

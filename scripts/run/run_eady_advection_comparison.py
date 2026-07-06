@@ -380,8 +380,8 @@ def _run_single(
                 alpha_T=eu_config.alpha_T, rho_ref=eu_config.rho_0,
                 T_ref=eu_config.T_ref_C, S_ref=eu_config.S_uniform,
             ),
-            barotropic_diffusion_alpha=eu_config.barotropic.barotropic_diffusion_alpha,
-            barotropic_div_damp=eu_config.barotropic.barotropic_div_damp,
+            barotropic_diffusion_alpha=eu_config.barotropic_diffusion_alpha,
+            barotropic_div_damp=eu_config.barotropic_div_damp,
             tracer_advection=tracer_scheme,
             momentum_advection=momentum_scheme,
             barotropic_solver=bt_solver,
@@ -743,7 +743,7 @@ def main():
     print(f"  Regime:       {args.regime} (U={regime['U_surface']} m/s)")
     print(f"  Duration:     {days} days")
     print(f"  Grid:         {args.grid} ({args.resolution})")
-    print(f"  BT solver:    {args.barotropic.barotropic_solver}")
+    print(f"  BT solver:    {args.barotropic_solver}")
     print(f"  B_h:          {eu_config.B_h:.2e}")
     print(f"  C_smag:       {eu_config.C_smag}")
     print(f"  Sponge:       {'OFF' if args.no_sponge else 'ON'}")
@@ -786,7 +786,7 @@ def main():
                     momentum_scheme=momentum,
                     grid_type=args.grid,
                     resolution=args.resolution,
-                    barotropic_solver=args.barotropic.barotropic_solver,
+                    barotropic_solver=args.barotropic_solver,
                     eu_config=eu_config,
                     days=days,
                     dt=args.dt,
@@ -810,7 +810,7 @@ def main():
     total_wall = time.time() - t_start_all
 
     # Summary
-    _print_summary(all_results, args.regime, args.barotropic.barotropic_solver,
+    _print_summary(all_results, args.regime, args.barotropic_solver,
                    output_base)
     print(f"\n  Total wall time: {total_wall:.1f}s ({total_wall/60:.1f} min)")
 

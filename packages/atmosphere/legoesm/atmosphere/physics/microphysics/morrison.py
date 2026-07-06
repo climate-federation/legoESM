@@ -109,6 +109,46 @@ def resolve_morrison_flavor(config: MorrisonConfig) -> MorrisonConfig:
     )
 
 
+__physics_contract__ = {
+    "summary": (
+        "Morrison, Curry & Khvorostyanov (2005) double-moment ice+liquid "
+        "microphysics: extends two-moment warm rain with ice nucleation, "
+        "deposition/sublimation, riming, melting and snow, with mass+number "
+        "prognostic and sedimentation to surface precipitation."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",
+        "hydrometeors.q_r": "kg/kg", "hydrometeors.q_i": "kg/kg",
+        "hydrometeors.q_s": "kg/kg", "p_full": "Pa", "rho": "kg/m^3",
+        "dz": "m", "dt": "s",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_dt": "kg/kg/s",
+        "dq_r_dt": "kg/kg/s", "dq_i_dt": "kg/kg/s", "dq_s_dt": "kg/kg/s",
+        "dN_c_dt": "1/(m^3 s)", "dN_r_dt": "1/(m^3 s)", "dN_i_dt": "1/(kg s)",
+        "precipitation": "kg/m^2/s",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. Latent heating dT_dt uses L_v (vapour<->"
+        "liquid), L_s (vapour<->ice deposition/sublimation) and L_f (freezing/"
+        "melting), consistent with each phase-change rate. Water is "
+        "redistributed among vapour/cloud/rain/ice/snow; SURFACE PRECIPITATION "
+        "(rain+snow melt, >= 0) removes water, so column moisture is NOT "
+        "conserved -- no contract-level conservation is claimed. Masses and "
+        "numbers stay >= 0."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": "Morrison, Curry & Khvorostyanov (2005), J. Atmos. Sci. 62, 1665-1677",
+    "idealized_test": (
+        "tests/unit/test_physics_microphysics.py + tests/unit/"
+        "test_rce_ice_microphysics.py — a cold supersaturated column nucleates "
+        "ice with L_s heating; riming/melting move mass between phases; snow + "
+        "rain reach the surface; all masses/numbers >= 0."
+    ),
+}
+
+
 def morrison_microphysics(
     T: jax.Array,
     q_v: jax.Array,
@@ -651,25 +691,54 @@ def morrison_microphysics(
         freeze_N_to_snow = freeze_N_r
 
     # === DONOR CLAMP for q_i sinks ===
-    # Mirror of the q_c donor clamp: aggregation and melt_ice are q_i
-    # sinks that share the same explicit-Euler step with riming_i (a
-    # q_i source from q_c).  Without this clamp, the combined
-    # (aggregation + melt_ice) · dt can exceed available q_i, sending
-    # q_i negative.  Mass is conserved because each sink rate appears
-    # once in dq_i_dt as a sink and once elsewhere as a source — a
-    # uniform rescale of both pieces preserves the budget.
-    qi_sink_total = aggregation + melt_ice
+    # q_i sinks sharing this explicit-Euler step: aggregation, melt_ice
+    # (both also sources elsewhere, via riming_i / dq_r), AND ice
+    # SUBLIMATION (the negative branch of dq_i_dep).  Without the joint
+    # clamp the combined sinks · dt can exceed available q_i — each is
+    # individually bounded but their SUM is not — sending q_i negative;
+    # sublimation in particular could also overlap sedimentation below
+    # (sed reserves up to q_i/dt independently).  Backport of the Thompson
+    # fix.  Mass is conserved because each sink rate appears once in dq_i_dt
+    # as a sink and once elsewhere as a source — a uniform rescale of both
+    # pieces preserves the budget.  dq_i_dep's negative (sublimation) branch
+    # is FINAL here: the later qv clamp only rescales its positive
+    # (deposition) branch, so max(-dq_i_dep, 0) is the true sublimation sink.
+    ice_subl_sink = jnp.maximum(-dq_i_dep, 0.0)
+    qi_sink_total = aggregation + melt_ice + ice_subl_sink
     qi_avail = jnp.clip(q_i, 0.0)
     qi_scale = donor_clamp_scale(qi_avail, qi_sink_total, dt)
     aggregation = aggregation * qi_scale
     melt_ice = melt_ice * qi_scale
+    # Scale ONLY the sublimation (negative) branch of dq_i_dep; deposition
+    # (positive, a q_i SOURCE) is unaffected.  The matching vapour source
+    # (-dq_i_dep in dq_v_dt) and L_s heating read this same scaled value, so
+    # mass + energy stay closed.
+    dq_i_dep = jnp.where(dq_i_dep < 0.0, dq_i_dep * qi_scale, dq_i_dep)
+
+    # Snow vapour deposition / sublimation PRDS must be known BEFORE the q_s
+    # donor clamp so snow sublimation can be reserved against q_s jointly
+    # with melt_snow (mirrors Thompson; the cloud-ice M1b tail is added so
+    # the snow mass / latent-heat / vapour-sink budgets stay consistent).
+    if snow_double_moment and config.do_snow_deposition:
+        prds = snow_deposition_m2005(
+            q_v, q_s, N_s, q_sat_i, T, p_full, rho, config, dt=dt)
+    else:
+        prds = jnp.zeros_like(jnp.clip(q_s, 0.0))
+    prds = prds + dep_to_snow_m1b
 
     # === DONOR CLAMP for q_s sinks ===
-    # melt_snow is a q_s sink.  Same logic as the q_i clamp.
-    qs_sink_total = melt_snow
+    # q_s sinks sharing this explicit step: melt_snow AND snow SUBLIMATION
+    # (the negative branch of prds).  Each is individually q_s-limited but
+    # their SUM (plus sedimentation, reserved separately below) can exceed
+    # q_s/dt.  Backport of the Thompson joint clamp.
+    snow_subl_sink = jnp.maximum(-prds, 0.0)
+    qs_sink_total = melt_snow + snow_subl_sink
     qs_avail = jnp.clip(q_s, 0.0)
     qs_scale = donor_clamp_scale(qs_avail, qs_sink_total, dt)
     melt_snow = melt_snow * qs_scale
+    # Scale only the sublimation (negative) branch of prds; deposition
+    # (positive, a q_s SOURCE) is vapour-limited later by the qv clamp.
+    prds = jnp.where(prds < 0.0, prds * qs_scale, prds)
 
     # === DONOR CLAMP for q_c sinks ===
     # Scale q_c-consuming processes (autoconversion, accretion, Bergeron,
@@ -803,21 +872,11 @@ def morrison_microphysics(
     # (donor_clamp_scale).  The helper's ``divisor_floor`` (default
     # 1e-15) keeps the VJP bounded under fp32 even for tiny
     # supersaturated icy layers where the sink is small but positive.
-    # Snow vapor deposition / sublimation PRDS (double-moment snow only). It
-    # competes with the cloud-ice deposition PRD for the same ice
-    # supersaturation, so its DEPOSITION (positive) branch joins the vapour
-    # sink budget below; sublimation (negative) is already snow-limited.
-    if snow_double_moment and config.do_snow_deposition:
-        prds = snow_deposition_m2005(
-            q_v, q_s, N_s, q_sat_i, T, p_full, rho, config, dt=dt)
-    else:
-        prds = jnp.zeros_like(jnp.clip(q_s, 0.0))
-    # M1b: add the cloud-ice deposition TAIL (ice grown past DCS) to the snow
-    # vapour-deposition rate, so it joins the snow mass (dq_s), the latent heat
-    # (L_s·prds), the vapour sink (−prds), AND the donor-clamp budget below in
-    # one consistent term (dq_i_dep was reduced by exactly this in the m2005
-    # block; total ice+snow deposition is conserved).
-    prds = prds + dep_to_snow_m1b
+    # Snow vapour deposition/sublimation PRDS (incl. the M1b cloud-ice tail)
+    # is now computed ABOVE, before the q_s donor clamp, so snow sublimation
+    # is reserved against q_s jointly with melt_snow.  Its positive
+    # (deposition) branch is vapour-limited just below; its negative
+    # (sublimation) branch was already snow-limited by the q_s clamp.
     # Graupel vapor deposition/sublimation PRDG (the graupel analog of PRDS):
     # deposition (positive) joins the vapour-sink budget below; sublimation
     # (negative) is already graupel-limited inside the helper.
@@ -997,11 +1056,11 @@ def morrison_microphysics(
     )
     sed_i, precip_i = sedimentation_tendency(
         q_i, rho, V_t_i, dz, dt=dt, return_surface_flux=True,
-        extra_sink=aggregation + melt_ice,
+        extra_sink=aggregation + melt_ice + jnp.maximum(-dq_i_dep, 0.0),
     )
     sed_s, precip_s = sedimentation_tendency(
         q_s, rho, V_t_s, dz, dt=dt, return_surface_flux=True,
-        extra_sink=melt_snow,
+        extra_sink=melt_snow + jnp.maximum(-prds, 0.0),
     )
     # Graupel sedimentation. In-column q_g sinks sharing the step are melting
     # AND sublimation (the negative PRDG branch); both reserve mass so sed +
