@@ -168,7 +168,26 @@ warm-started from baked, 200 iters, batched — the cached `/tmp/keep_fullgrid.n
   the model computes its own radiation (removing the forcing-driven residual) and gap 3
   becomes naturally active — not the offline forced calibration.
 
-**Bake decision: NOT recommended yet.** Gaps 1,2,4 are correct and safe (opt-in, default
-OFF, byte-identical when disabled), but they do not yet measurably reduce the headline
-biases offline, and the re-tune produced no improvement. Enable/bake only after a coupled
-AMIP evaluation (and/or the gap-3 metric redesign) shows a net gain.
+## Update (2026-07-05): all 6 gaps + main merge + review round
+
+Merged origin/main (`1a8a73e51`, 0 behind) — gaps 1,2,4 re-applied onto main's
+`compute_simple_seb_fluxes`/`surface_out` flow; fixed two main regressions (slab lost
+`T_rad`; the SEB dropped the per-cell CLM/`pft_alb` albedo under snow feedback). Gap 3
+WIRED (`aa378b627`): real diurnal `cos(zenith)` in the trainer loader (Cooper decl. +
+lon/local-time) + **insolation-weighted** albedo metric (model + ERA5 target, `sw≥0`
+clipped for ssrd artefacts). Gaps 5+6 (`25c65242d`): terrain sky-view LW + blowing-snow
+sublimation (opt-in) + rain-on-snow refreezing (frozen-soil = main's `enable_freeze_thaw`).
+
+**Codex adversarial review** of gaps 3/5/6 + the merge re-application: 6 findings, all
+fixed (`4b3ef4385`) — sky-view effective LW-up consistency, blowing-snow latent/vapor
+export, config-scalar dtype casts, AD-safe blowing-snow branch, canopy+bands rejection,
+insolation-weighted albedo *loss*. **Code-review agent: no correctness defects.**
+
+**Re-tune (all gaps active, insolation-weighted metric):** loss 28.99→**28.36**, skin-T
+RMSE 2.86→2.83 K (the metric now has a trainable signal — unlike the earlier flat re-tune).
+
+**Global map (ERA5 vs CLM5-default vs tuned+gaps, `plot_land_field_maps.py --elev-bands`):**
+skin-T RMSE **3.07→2.81 K** (annual-mean field 2.55→2.18 K); albedo 0.075→0.080
+(comparable to actual-CLM). The elevation-band + zenith physics improves the global land
+skin-T. Bake still gated on a coupled AMIP eval; the residual is substantially
+forcing-driven (see above).
