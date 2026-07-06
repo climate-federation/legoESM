@@ -93,9 +93,24 @@ All notable changes to legoESM. Format roughly follows
 
 ### Land
 
-- **Offline single-point multilayer land driver**
-  (`scripts/run_lmip.py`) for 10-year soil spin-up before ERA5
-  coupling.
+- **CLM-ML-JAX multilayer canopy scheme** (`legoesm.land.canopy.CLMMLCanopyConfig`,
+  `legoesm.land.canopy.clm_ml_interface`): port of the NCAR Community Land Model
+  with Multi-Layer Canopy (CLM-ML v2; Bonan et al. 2021) as a pluggable legoESM
+  surface scheme. Activated via
+  `MultiLayerLandConfig(surface_scheme=CLMMLCanopyConfig())`;
+  requires `pip install legoesm[canopy]`. Key capabilities:
+  - Multi-layer within-canopy radiative transfer, turbulence, leaf energy balance,
+    stomatal conductance (Ball-Berry / Medlyn), and plant hydraulics.
+  - 87-variable CHATS7 site validation (May 2007 walnut orchard) against Fortran
+    CLM-ML v2 reference outputs; see `scripts/validate/validate_clm_ml_canopy.py`.
+  - `CanopyState` carries `mlcanopy_type` (JAX NamedTuple) and 10-day running-mean
+    air temperature (`t_a10_arr`) between timesteps; cold-start allocated on first
+    call.
+  - **Architectural note**: CLM-ML uses Python/NumPy control flow; the scheme is
+    not `jax.jit`-compatible and gradients do not flow through it. Forward
+    simulation only.
+- **Offline single-point multilayer land driver** (`scripts/run/run_lmip.py`) for
+  10-year soil spin-up before ERA5 coupling.
 
 ### Coupler
 

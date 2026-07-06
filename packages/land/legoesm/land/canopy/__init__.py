@@ -17,6 +17,7 @@ advanced diagnostics.
 from legoesm.land.canopy.config import (
     CanopyConfig,
     CanopyLandParams,
+    CLMMLCanopyConfig,
     PFT_AERO_PARAMS,
     PFT_CANOPY_HEIGHT,
     PFT_LEAF_WIDTH,
@@ -26,10 +27,13 @@ from legoesm.land.canopy.config import (
     VCMAX25_C4_DEFAULT,
     lookup_vcmax25,
 )
+from legoesm.land.canopy.state import CanopyState
 
 __all__ = [
     "CanopyConfig",
     "CanopyLandParams",
+    "CLMMLCanopyConfig",
+    "CanopyState",
     "PFT_AERO_PARAMS",
     "PFT_CANOPY_HEIGHT",
     "PFT_LEAF_WIDTH",

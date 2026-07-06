@@ -289,6 +289,34 @@ def test_convection_tiedtke_parses_and_flows_to_config():
     assert cfg.convection == "tiedtke"
 
 
+def test_build_config_includes_surfdata_path():
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--land-mask-file", "sftlf.nc",
+        "--surfdata", "legoesm_surfdata.nc",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+
+    assert cfg.land_mask_path == "sftlf.nc"
+    assert cfg.surfdata_path == "legoesm_surfdata.nc"
+
+
+def test_build_config_surfdata_defaults_empty():
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.surfdata_path == ""
+
+
+def test_surfdata_without_land_mask_warns(capsys):
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical", "--surfdata", "sd.nc"])
+    _postprocess_args(args, parser)
+    assert "ignored without --land-mask-file" in capsys.readouterr().out
+
+
 def test_joint_parameterization_requires_mass_flux_and_louis():
     parser = build_arg_parser()
     args = parser.parse_args([

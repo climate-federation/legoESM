@@ -1,0 +1,50 @@
+# Derecho GPU (single A100) machine profile for init_experiment.py.
+#
+# What this does:
+#   - Emits PBS scheduler headers requesting 1 GPU + host resources.
+#   - Emits the conda-activate env-setup block for a GPU JAX env
+#     (default env name: legoesm-gpu — override via $LEGOESM_CONDA_ENV).
+#   - Sets JAX GPU environment vars (don't pre-allocate all HBM; pin platform).
+#
+# What this does NOT do:
+#   - Set the PBS project account (`#PBS -A ...`).  Supply on the qsub line:
+#         qsub -A UYAL0053 run.sh
+#   - Multi-GPU / multi-node.  Single A100 = the "cheap easy scale-up" from
+#     CPU; multi-GPU spmd is a separate profile once the driver supports it.
+#
+# Expected speedup: ~10-30x per step vs. CPU for the two-leaf-canopy path,
+# after a slightly higher JAX compile cost (~15-25 min vs. 5-15 min on CPU).
+# Only worth it for runs of many hundreds of steps (i.e. anything real).
+#
+# Env prerequisite: a conda env named 'legoesm-gpu' (or whatever you set
+# LEGOESM_CONDA_ENV to) with a GPU-enabled JAX build:
+#     pip install --upgrade "jax[cuda12]"
+# on the login node ONCE, then submit.
+
+scheduler: pbs
+
+pbs:
+  job_name: lmip_gpu
+  select: "1:ncpus=32:mem=64GB:ngpus=1"      # 1 node, 1 A100, 32 CPU, 64 GB host RAM
+  walltime: "04:00:00"                        # 4 h — bump via `qsub -l walltime=…`
+  queue: main
+  join: oe
+
+env_setup: |
+  module purge
+  module load conda
+  # `conda activate` references unset vars — briefly disable `set -u`.
+  set +u
+  conda activate "${LEGOESM_CONDA_ENV:-legoesm-gpu}"
+  set -u
+
+  # JAX GPU knobs.  The default is to pre-allocate ~90 % of HBM at startup;
+  # that trips OOM if another process is co-hosted on the GPU, and it makes
+  # the "did anything even start" question harder to debug.  Turn it off.
+  export XLA_PYTHON_CLIENT_PREALLOCATE=false
+  export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+  # Pin platform explicitly — JAX auto-detects, but if the CUDA libs are missing
+  # the fallback to CPU is silent; explicit force gives a clean error instead.
+  export JAX_PLATFORM_NAME=gpu
+
+  export LEGOESM_PYTHON="$(which python)"

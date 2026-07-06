@@ -802,6 +802,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Cap on convective (Slingo 1987) cloud cover "
                              "(CloudConfig.conv_cloud_max). Limits anvil "
                              "over-reflection. Bounds (0.1, 1.0).")
+    parser.add_argument("--surfdata", type=str, default="",
+                        help="Harmonized surface-data NetCDF "
+                             "(legoesm_surfdata_*.nc). When set together with "
+                             "--land-mask-file, the static land albedo is taken "
+                             "from the surfdata (per-column soil-colour + PFT "
+                             "vegetation blend) instead of the latitude-only "
+                             "curve.")
 
     # Surface / diagnostics
     parser.add_argument("--monthly-means", action="store_true", default=False)
@@ -1155,6 +1162,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_surface_scheme=args.land_surface_scheme,
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
+        surfdata_path=args.surfdata,
         dynamic_albedo=args.dynamic_albedo,
         T_ice=args.t_ice_k,
         albedo_ice=args.albedo_ice,
@@ -1213,6 +1221,15 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
     # Backward-compatible alias
     if args.radiation == "rrtmgp":
         args.radiation = "rrtmg"
+
+    # Surfdata land albedo only takes effect when the slab-land tile is active,
+    # which requires a land-sea mask.  Warn (don't fail) so the run still works
+    # with the latitude-only land albedo rather than silently ignoring --surfdata.
+    if args.surfdata and not args.land_mask_file:
+        print("WARNING: --surfdata is ignored without --land-mask-file "
+              "(the slab-land tile, and thus surfdata albedo, only activate "
+              "when a land-sea mask is set); land albedo stays the "
+              "latitude-only curve.")
 
     if (args.forcing_path is None and args.restart_from is None
             and args.dataset != "analytical"):

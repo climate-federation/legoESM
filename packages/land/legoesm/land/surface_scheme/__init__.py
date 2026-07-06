@@ -14,7 +14,13 @@ given the land state and forcing.  Two schemes are available:
   and an outer Picard loop reconciling canopy turbulence with soil
   thermal diffusion.
 
-Both schemes produce a common ``SurfaceFluxOutput`` that downstream
+- ``CLMMLCanopyConfig`` — CLM-ML-JAX multilayer canopy model (Bonan
+  et al. 2021, GMD, CLM-ML v2). Multi-layer within-canopy radiative
+  transfer, turbulence, leaf energy balance, stomatal conductance, and
+  plant hydraulics.  Requires ``pip install legoesm[canopy]``.
+  **Not** ``jax.jit``-compatible; forward simulation only.
+
+All three schemes produce a common ``SurfaceFluxOutput`` that downstream
 land-model post-processing (snow, Richards, soil thermal, carbon,
 TileResponse) consumes without knowing which scheme produced it.
 

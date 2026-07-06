@@ -244,6 +244,120 @@ __param_spec__ = {
             },
         },
     },
+    "CLMMLCanopyConfig": {
+        "scheme_key": "land.canopy.clm_ml",
+        "excluded": {},
+        "params": {
+            "o2ref": {
+                "units": "mmol/mol",
+                "bounds": (180.0, 230.0),
+                "tunable_tier": 0,
+                "transform": "none",
+                "category": "atmospheric",
+                "reference": "standard atmosphere O2 = 209 mmol/mol",
+                "shape": None,
+            },
+            "f_vis": {
+                "units": "1",
+                "bounds": (0.40, 0.55),
+                "tunable_tier": 2,
+                "transform": "sigmoid",
+                "category": "radiation",
+                "reference": "Weiss & Norman (1985); observation mean ~0.46",
+                "shape": None,
+            },
+            "f_dir": {
+                "units": "1 (or -1 for auto)",
+                "bounds": (-1.0, 1.0),
+                "tunable_tier": 0,
+                "transform": "none",
+                "category": "radiation",
+                "reference": "Erbs et al. (1982) clearness-index estimate; -1=auto",
+                "shape": None,
+            },
+            "smp_default_mm": {
+                "units": "mm",
+                "bounds": (-200000.0, -1000.0),
+                "tunable_tier": 0,
+                "transform": "none",
+                "category": "soil",
+                "reference": "CLM4.5 standalone; moderate stress -50000 mm",
+                "shape": None,
+            },
+            "hk_default_mm_s": {
+                "units": "mm/s",
+                "bounds": (1.0e-7, 1.0e-2),
+                "tunable_tier": 0,
+                "transform": "none",
+                "category": "soil",
+                "reference": "silty clay loam at moderate dryness",
+                "shape": None,
+            },
+            "soilresis_default_s_m": {
+                "units": "s/m",
+                "bounds": (50.0, 10000.0),
+                "tunable_tier": 0,
+                "transform": "none",
+                "category": "soil",
+                "reference": "Sellers-Lockwood formula; ~2000 s/m at Se=0.15",
+                "shape": None,
+            },
+            "root_biomass_default_g_m2": {
+                "units": "g/m²",
+                "bounds": (50.0, 1000.0),
+                "tunable_tier": 2,
+                "transform": "softplus",
+                "category": "vegetation",
+                "reference": "Jackson et al. (1997) Global Ecol. Biogeogr.; 150–500 g/m²",
+                "shape": None,
+            },
+            "albgrd_vis_default": {
+                "units": "1",
+                "bounds": (0.04, 0.30),
+                "tunable_tier": 1,
+                "transform": "sigmoid",
+                "category": "radiation",
+                "reference": "CLM4.5 loam soil lookup; moist ~0.10, dry ~0.17",
+                "shape": None,
+            },
+            "albgrd_nir_default": {
+                "units": "1",
+                "bounds": (0.08, 0.50),
+                "tunable_tier": 1,
+                "transform": "sigmoid",
+                "category": "radiation",
+                "reference": "CLM4.5 loam soil lookup; moist ~0.20, dry ~0.34",
+                "shape": None,
+            },
+            "hbot_frac": {
+                "units": "1",
+                "bounds": (0.02, 0.30),
+                "tunable_tier": 0,
+                "transform": "sigmoid",
+                "category": "vegetation",
+                "reference": "DifferBESS / Bonan et al. (2021) GMD; hbot = 0.1 * htop",
+                "shape": None,
+            },
+            "thk_soil_default_W_m_K": {
+                "units": "W/m/K",
+                "bounds": (0.1, 3.0),
+                "tunable_tier": 0,
+                "transform": "softplus",
+                "category": "soil",
+                "reference": "CLM4.5 Table 3.3 moist loam; 0.9–1.5 for wetter soils",
+                "shape": None,
+            },
+            "f_dir_noclearness_fallback": {
+                "units": "1",
+                "bounds": (0.10, 0.50),
+                "tunable_tier": 0,
+                "transform": "sigmoid",
+                "category": "radiation",
+                "reference": "Erbs et al. (1982) overcast-sky limit; low clearness index",
+                "shape": None,
+            },
+        },
+    },
 }
 
 
@@ -306,3 +420,109 @@ class CanopyLandParams(NamedTuple):
 #
 # Dispatch happens inside ``step_multilayer_land`` / ``step_land`` via
 # ``isinstance`` on the ``surface_scheme`` field.
+
+
+# ---------------------------------------------------------------------------
+# CLMMLCanopyConfig — configuration for the CLM-ML-JAX multilayer canopy
+# ---------------------------------------------------------------------------
+
+class CLMMLCanopyConfig(NamedTuple):
+    """Configuration for the CLM-ML-JAX multilayer canopy surface scheme.
+
+    Used as ``MultiLayerLandConfig(surface_scheme=CLMMLCanopyConfig())``.
+    Dispatch inside ``step_multilayer_land`` detects this type via
+    ``isinstance`` and routes to the CLM-ML-JAX interface in
+    ``legoesm.land.canopy.clm_ml_interface``.
+
+    All fields are static (Python scalars captured in the closure at
+    JIT compile time — never traced).  Per-column spatial parameters
+    (LAI, SAI, htop, hbot) are provided via ``LandSurfaceParams`` at
+    each timestep.
+    """
+
+    # Canopy vertical discretisation
+    nlevmlcan: int = 9          # Number of canopy layers (MLclm_varpar.nlevmlcan)
+
+    # Sub-cycling / Runge-Kutta integration
+    # 10 → Euler (nrk_steps = 0); 2x → RK with x stages
+    runge_kutta_type: int = 10
+    num_ml_steps: int = 1       # CLM sub-steps per legoESM timestep
+
+    # Reference O2 concentration [mmol/mol]
+    o2ref: float = 209.0
+
+    # Atmospheric forcing interpolation mode:
+    #   0 → no interpolation (single forcing value per CLM step)
+    #   3 → 3-point centred interpolation (bef / cur / next)
+    met_type: int = 0
+
+    # CLM PFT index (1-based, 0=bare).  Controls Vcmax25, plant hydraulic
+    # parameters, beta-distribution PAD shape, and canopy height defaults
+    # from the MLpftcon lookup table.
+    #   7  = broadleaf deciduous temperate tree (BDT) — default for forests
+    #   13 = C3 non-arctic grass — CLM default grass PFT
+    # When in doubt, choose the PFT whose Vcmax25 and htop match the site.
+    pft_clm: int = 7
+
+    # SW band partitioning.
+    # f_vis: fraction of total SW in the visible (PAR) band [0.4–0.7 µm].
+    #   Observation-based climatological mean is ~0.46 (not 0.5).
+    # f_dir: direct-beam fraction of total SW.
+    #   -1.0 → estimate from solar zenith angle and clearness index (default).
+    #   0.0–1.0 → fixed override (use only when the coupler guarantees a
+    #              constant sky condition, e.g. idealised aquaplanet runs).
+    f_vis: float = 0.46
+    f_dir: float = -1.0         # -1 → auto-estimated from zenith + clearness
+
+    # Default soil matric potential [mm] when psi_soil is not provided.
+    # -50 000 mm = -0.49 MPa — moderate stress, mid-range of plant-available water
+    # (FC ≈ -33 kPa = -3 400 mm; permanent wilting point ≈ -1.5 MPa = -153 000 mm).
+    # Previous value (-3 000 mm = -0.029 MPa) was at field capacity and kept
+    # btran≈1 (no plant stress) for all May timesteps in the CHATS7 default run.
+    # The Fortran standalone uses -10 000 to -40 000 mm for a California walnut.
+    smp_default_mm: float = -50_000.0
+
+    # Default unsaturated hydraulic conductivity [mm/s].
+    # 1e-5 mm/s ≈ 0.86 mm/day, representative of silty clay loam at
+    # moderate dryness.  The prior default (1e-4) was 10× too high.
+    hk_default_mm_s: float = 1.0e-5
+
+    # Default soil evaporative resistance [s/m] when soil texture is not known.
+    # Sellers-Lockwood formula with silty clay loam parameters and Se≈0.15
+    # (corresponding to smp_default_mm = -50000 mm) gives rs ≈ 1927 s/m.
+    # Using 2000 s/m as a round number.  Previous default (100 s/m) matched
+    # saturated conditions only and was ~20× too low for the new dry default.
+    soilresis_default_s_m: float = 2000.0
+
+    # Default fine root biomass per unit ground area [g/m²].
+    # Used by CLM-ML SoilResistance to compute root length density and soil
+    # hydraulic conductance.  The default mlcanopy_type initializes this to
+    # spval=1e36, which produces anomalous root conductance.
+    # Literature range for temperate deciduous trees: 150–500 g/m²
+    # (Jackson et al. 1997 Global Ecol. Biogeogr.); using 300 g/m² as default.
+    root_biomass_default_g_m2: float = 300.0
+
+    # Sub-canopy soil (ground) spectral albedo for the CLM-ML two-stream RT.
+    # These are the SOIL bottom-boundary albedos used by MLSolarRadiationMod,
+    # NOT the vegetation broadband albedo.  CLM4.5 loam soil lookup values:
+    #   VIS (0.4–0.7 µm):  ~0.10  (moist loam; dry loam ~0.17)
+    #   NIR (0.7–5.0 µm):  ~0.20  (moist loam; dry loam ~0.34)
+    # These are lower than the vegetation albedo (0.15–0.20 broadband) and
+    # must NOT be derived from albedo_veg.
+    albgrd_vis_default: float = 0.10
+    albgrd_nir_default: float = 0.20
+
+    # Bottom-of-canopy height as fraction of canopy top height.
+    # CLM-ML expects hbot < htop; 0.1 * htop is the DifferBESS default
+    # (Bonan et al. 2021 GMD) for the beta-distribution PAD lower boundary.
+    hbot_frac: float = 0.1
+
+    # Soil thermal conductivity [W/m/K] used for the soil-to-canopy heat flux
+    # linearization in MLSoilTemperatureMod.  CLM4.5 Table 3.3 moist loam
+    # default; 0.9–1.5 W/m/K for wetter/sandier soils.
+    thk_soil_default_W_m_K: float = 0.5
+
+    # Direct-beam fraction fallback [0–1] when f_dir < 0 (auto-estimate) but
+    # cos_zen is not available.  Corresponds to an overcast sky condition;
+    # Erbs et al. (1982) gives f_dir ≈ 0.20–0.35 for low clearness index.
+    f_dir_noclearness_fallback: float = 0.30

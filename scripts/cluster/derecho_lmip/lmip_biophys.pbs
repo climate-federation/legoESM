@@ -1,0 +1,140 @@
+#!/bin/bash
+# Derecho PBS batch: biophysics-only LMIP smoke run.
+#
+# Runs ``scripts/run/run_lmip_biophys.py`` end-to-end against the real CRU-JRA
+# reanalysis on glade + the Zenodo-hosted CLM5 surfdata (staged by
+# ``scripts/data/download_lmip_data.sh``).  M3 of the LMIP forcing workplan
+# (``docs/land/lmip_s3_scope.md``).
+#
+# Usage:
+#   qsub -A <ACCOUNT> scripts/cluster/derecho_lmip/lmip_biophys.pbs
+#
+# Requirements before submitting:
+#   1) The batch script activates the conda env itself (PBS shells inherit NOTHING
+#      from the submitting login shell).  Default env name is 'legoesm-lmip';
+#      override with 'qsub -v LEGOESM_CONDA_ENV=<name>' or the environment.
+#   2) Data staged under repo-relative data/:
+#        ./scripts/data/download_lmip_data.sh --year 1920
+#   3) Working directory = repo root (PBS_O_WORKDIR is the repo root).
+#
+# Override knobs via qsub -v (all optional):
+#   LEGOESM_CONDA_ENV=legoesm-lmip  — conda env with jax + xarray + legoesm
+#   YEAR=1920                       — CRU-JRA year to force with (start of range)
+#   YEAR_END=""                     — Phase B: end of contiguous multi-year span
+#                                     (empty = single-year YEAR).  Example: YEAR=1920,
+#                                     YEAR_END=1924 → 5-year spin-up.
+#   RESTART_FROM=""                 — Phase C: seed run from a prior restart .npz.
+#                                     Empty = cold start.  Every run auto-saves
+#                                     its end-state to a model-time-stamped file:
+#                                     <OUT_DIR>/restart_<YEAR>_d<DDD>h<HH>.npz.
+#                                     Reads chronologically with `ls`.
+#   RESOLUTION=90                   — latlon N (N x 2N = 90 x 180 ~ 2 deg)
+#   DT=3600                         — timestep in seconds (1 h default; 1800 = 30 min)
+#   N_STEPS=240                     — number of land steps (240 * 1 h = 10 model days)
+#   START_DOY=196                   — starting day-of-year (mid-July)
+#   SURFACE_SCHEME=two_leaf_canopy  — surface scheme (or simple_seb).  NOTE:
+#                                     'simple_seb' + BULK='most' is numerically
+#                                     unstable — pair simple_seb with BULK=constant.
+#   BULK=most                       — 'most' (Monin-Obukhov, default) or 'constant'
+#   OUT_TAG=""                      — appended to $SCRATCH/lmip_biophys_${YEAR}${OUT_TAG}
+#
+#PBS -N lmip_biophys
+#PBS -l select=1:ncpus=8:mem=32GB
+#PBS -l walltime=02:00:00
+#PBS -q main
+#PBS -l job_priority=premium
+#PBS -j oe
+
+set -euo pipefail
+
+# --- knobs (with defaults) ---
+YEAR="${YEAR:-1920}"
+RESOLUTION="${RESOLUTION:-90}"
+DT="${DT:-3600}"
+N_STEPS="${N_STEPS:-240}"
+START_DOY="${START_DOY:-196}"
+SURFACE_SCHEME="${SURFACE_SCHEME:-two_leaf_canopy}"
+BULK="${BULK:-most}"
+YEAR_END="${YEAR_END:-}"                # multi-year forcing (Phase B)
+RESTART_FROM="${RESTART_FROM:-}"        # chained-run seed (Phase C)
+OUT_TAG="${OUT_TAG:-}"
+
+# Guardrail: 'simple_seb' + MOST is numerically unstable (T_sfc -> +/-inf), so
+# refuse to enter the queue in that combination.  Cheap sanity, saves debug time.
+if [[ "$SURFACE_SCHEME" == "simple_seb" && "$BULK" == "most" ]]; then
+    echo "ERROR: SURFACE_SCHEME=simple_seb requires BULK=constant." >&2
+    echo "       MOST + simple_seb is unstable under low-wind / near-neutral" >&2
+    echo "       stratification.  Use BULK=constant, or use two_leaf_canopy." >&2
+    exit 4
+fi
+
+# PBS_O_WORKDIR = the directory qsub was called from = the repo root.
+cd "${PBS_O_WORKDIR:-$PWD}"
+mkdir -p results/derecho_lmip
+
+# --- activate the legoesm conda env (PBS shells inherit NOTHING from login;
+#     `conda activate` in the submitting shell does NOT reach the compute node).
+LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-lmip}"
+module purge
+module load conda
+# `conda activate` references unbound vars internally — briefly disable -u.
+set +u
+conda activate "$LEGOESM_CONDA_ENV"
+set -u
+
+# Sanity: refuse to spend queue time when the env is wrong.
+python -c "import jax, xarray, netCDF4, legoesm" 2>/dev/null || {
+    echo "ERROR: legoesm/jax/xarray/netCDF4 not importable in env '$LEGOESM_CONDA_ENV'." >&2
+    echo "       activate the right env, or set LEGOESM_CONDA_ENV via 'qsub -v'." >&2
+    which python; python --version
+    exit 3
+}
+
+OUT_DIR="${SCRATCH:-$PWD/results/derecho_lmip}/lmip_biophys_${YEAR}${OUT_TAG}"
+mkdir -p "$OUT_DIR"
+
+echo "=================================================================="
+echo "LMIP biophysics run"
+echo "  repo:        $PWD"
+echo "  branch:      $(git rev-parse --abbrev-ref HEAD)  ($(git rev-parse --short HEAD))"
+echo "  conda env:   $LEGOESM_CONDA_ENV"
+echo "  python:      $(which python)  ($(python --version 2>&1))"
+echo "  year:        $YEAR"
+echo "  grid:        latlon ${RESOLUTION} x $((RESOLUTION * 2))"
+echo "  timestep:    ${DT}s   n_steps=${N_STEPS}   start_doy=${START_DOY}"
+echo "  scheme:      $SURFACE_SCHEME"
+echo "  out:         $OUT_DIR"
+echo "=================================================================="
+
+# --- verify staged data present (fail fast with a clear message) ---
+CRUJRA_SOLR="data/crujra/clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5.Solr.${YEAR}.nc"
+SURFDATA="data/legoesm_surfdata_c250617.nc"
+for f in "$CRUJRA_SOLR" "$SURFDATA"; do
+    if [[ ! -e "$f" ]]; then
+        echo "ERROR: expected staged input not found: $f" >&2
+        echo "  Stage inputs first from a login node:" >&2
+        echo "    ./scripts/data/download_lmip_data.sh --year $YEAR" >&2
+        exit 2
+    fi
+done
+
+# --- run ---
+export JAX_ENABLE_X64=1
+export PYTHONPATH="${PYTHONPATH:-}:$PWD"
+EXTRA_ARGS=()
+if [[ -n "$YEAR_END" ]];     then EXTRA_ARGS+=(--year-end "$YEAR_END"); fi
+if [[ -n "$RESTART_FROM" ]]; then EXTRA_ARGS+=(--restart-from "$RESTART_FROM"); fi
+python scripts/run/run_lmip_biophys.py \
+    --surfdata "$SURFDATA" \
+    --forcing-dir data/crujra \
+    --year "$YEAR" --start-doy "$START_DOY" \
+    --grid-type latlon --resolution "$RESOLUTION" \
+    --surface-scheme "$SURFACE_SCHEME" \
+    --bulk "$BULK" \
+    --dt "$DT" --n-steps "$N_STEPS" \
+    --output "$OUT_DIR" \
+    "${EXTRA_ARGS[@]}"
+
+echo "=================================================================="
+echo "output NetCDF: $OUT_DIR/lmip_biophys.nc"
+ls -lh "$OUT_DIR" 2>/dev/null || true

@@ -6,9 +6,11 @@ Dispatches between:
   skin T = ``T_soil[:, 0]``, optional Jarvis / Leuning stomatal coupling.
 - ``TwoLeafCanopyConfig``: DifferBESS-style two-leaf canopy Newton +
   Picard closure on top of the same soil column.
+- ``CLMMLCanopyConfig``: CLM-ML-JAX multilayer canopy model (Phase 3).
 
-Both surface schemes produce a ``SurfaceFluxOutput``; the post-flux
-pipeline (snow, Richards, soil thermal, carbon, TileResponse) is shared.
+Both ``SimpleSEBConfig`` and ``TwoLeafCanopyConfig`` produce a
+``SurfaceFluxOutput``; the post-flux pipeline (snow, Richards, soil
+thermal, carbon, TileResponse) is shared.
 
 Physics sequence each time step:
 
@@ -43,6 +45,7 @@ from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
 from legoesm.land.soil_thermal import solve_soil_thermal
+from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.surface_scheme import (
     SimpleSEBConfig,
     TwoLeafCanopyConfig,
@@ -190,15 +193,20 @@ def _step_multilayer_land_impl(
     # cell-mean radiation in ``G_surface`` with the banded per-band balance.
     bands = config.elev_bands
     if bands is not None:
-        if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+        if isinstance(config.surface_scheme,
+                      (TwoLeafCanopyConfig, CLMMLCanopyConfig)):
             # The banded radiation replaces the surface scheme's radiation/G with a
-            # BARE (no-canopy) per-band balance; mixing it with the two-leaf canopy's
-            # radiative closure (and its T_rad/lw_up) would be inconsistent.  Reject
-            # rather than silently apply incompatible closures.
+            # BARE (no-canopy) per-band balance; mixing it with a canopy scheme's
+            # radiative closure (two-leaf Kelvin RT, or CLM-ML's multilayer canopy
+            # RT — both carry their own T_rad/lw_up) would be inconsistent.  Reject
+            # rather than silently apply incompatible closures.  Applies to BOTH
+            # canopy schemes (the guard predates CLMMLCanopyConfig, which needs the
+            # same treatment as TwoLeafCanopyConfig).
             raise ValueError(
                 "config.elev_bands (sub-grid snow bands) is not supported with the "
-                "TwoLeafCanopyConfig surface scheme — the banded radiation would "
-                "override the canopy radiative closure.  Use SimpleSEBConfig with bands.")
+                "TwoLeafCanopyConfig or CLMMLCanopyConfig surface scheme — the "
+                "banded radiation would override the canopy radiative closure.  "
+                "Use SimpleSEBConfig with bands.")
         if state.snow_bands is None:
             raise ValueError(
                 "config.elev_bands is set but state.snow_bands is None; initialise "
@@ -272,6 +280,7 @@ def _step_multilayer_land_impl(
     # =================================================================
     # Surface scheme dispatch
     # =================================================================
+    canopy_state_new = None  # updated only by CLMMLCanopyConfig branch
     if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
         # Canopy surface scheme: Newton closure with Picard loop that
         # advances soil thermal tentatively between passes.
@@ -333,7 +342,34 @@ def _step_multilayer_land_impl(
                 # infinite gradient) — AD-safe, negligible forward effect.
                 * _S_top ** config.soil_evap_resistance_exp),
         )
-    else:
+    elif isinstance(config.surface_scheme, CLMMLCanopyConfig):
+        # CLM-ML-JAX multilayer canopy scheme (Phase 3 implementation).
+        # Architectural constraints:
+        #   1. NOT jax.jit-compatible — CLM-ML uses Python/NumPy control flow internally.
+        #   2. ``lon`` is not forwarded; a virtual longitude is inferred from
+        #      forcing.cos_zenith via CLM's shr_orb_cosz inversion for round-trip consistency.
+        #   3. ``canopy_state.t_a10_arr`` (np.ndarray, shape (ncol,)) carries the
+        #      10-day running-mean air temperature on the Python host between steps.
+        # Lazy import keeps clm_ml_jax optional.
+        from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
+
+        surface_out, canopy_state_new = compute_clm_ml_canopy_fluxes(
+            T_soil_top=T_surface,
+            forcing=forcing,
+            canopy_config=config.surface_scheme,
+            land_config=config,
+            land_params=lp,
+            w_frac_rz=w_frac_rz,
+            wind_speed=wind_speed,
+            canopy_state=state.canopy_state,
+            dt=dt,
+            T_soil=T_soil,
+            psi_soil=psi,
+            theta_soil=theta,
+            lat=lat,
+            doy=doy,
+        )
+    elif isinstance(config.surface_scheme, SimpleSEBConfig):
         # SimpleSEB: bulk fluxes with skin T = T_soil[:, 0].
         surface_out = compute_simple_seb_fluxes(
             T_surface=T_surface,
@@ -351,11 +387,21 @@ def _step_multilayer_land_impl(
             emissivity=emissivity,
             z0=z0,
         )
+    else:
+        raise ValueError(
+            f"Unknown surface_scheme type: {type(config.surface_scheme)!r}. "
+            f"Expected TwoLeafCanopyConfig, CLMMLCanopyConfig, or SimpleSEBConfig."
+        )
 
     # =================================================================
     # Shared post-flux pipeline
     # =================================================================
     shflx = surface_out.shflx
+    # stflx_air + stflx_veg (CLM-ML canopy heat storage) are intentionally
+    # NOT folded into shflx.  They are internal canopy redistribution terms,
+    # not turbulent SH going to the atmosphere.  Standard CLM-CAM coupling
+    # reports eflx_sh_tot = shflx_canopy without stflx (Bonan et al. 2021).
+    # The coupler sees a small per-step residual that integrates to zero diurnally.
     lhflx = surface_out.lhflx
     tau_x = surface_out.tau_x
     tau_y = surface_out.tau_y
@@ -484,12 +530,16 @@ def _step_multilayer_land_impl(
     # Bare-soil evaporation resistance (#671, Sellers 1992 / Lee & Pielke 1992):
     # throttle the (positive, evaporative) bare-soil demand by the TOP-layer
     # effective saturation S_top**exp — the surface dries into a high-resistance
-    # crust far faster than the root-zone mean.  GATED to SimpleSEB: the two-leaf
-    # canopy path applies its OWN top-layer soil-evap throttle (Kelvin h_r) inside
-    # the canopy energy balance, so surface_out.lhflx already reflects it; applying
-    # S_top**exp again here would double-throttle AND wrongly throttle the canopy
-    # transpiration folded into the total lhflx.  Dew (demand<0) left un-throttled.
-    if not isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+    # crust far faster than the root-zone mean.  GATED to SimpleSEB ONLY: BOTH
+    # canopy schemes (two-leaf Kelvin h_r, and CLM-ML's Philip (1957) rhg_soil
+    # soil-humidity closure) apply their OWN top-layer soil-evap throttle inside
+    # the canopy energy balance, so surface_out.lhflx already reflects it;
+    # applying S_top**exp again here would double-throttle AND wrongly throttle
+    # the canopy transpiration folded into the total lhflx.  Testing
+    # ``isinstance(SimpleSEBConfig)`` (not ``not isinstance(TwoLeafCanopyConfig)``)
+    # so the third scheme, CLMMLCanopyConfig, is correctly excluded too.  Dew
+    # (demand<0) left un-throttled.
+    if isinstance(config.surface_scheme, SimpleSEBConfig):
         # _S_top (top-layer effective saturation, floored at 1e-6 in its shared
         # definition above so d(S_top**exp)/dS_top stays finite at the residual-water
         # boundary for a trainable exp < 1; AD-safe, negligible fwd).
@@ -597,6 +647,9 @@ def _step_multilayer_land_impl(
         snow_bands=_match(snow_bands_new, state.snow_bands),
         snow_age_bands=_match(snow_age_bands_new, state.snow_age_bands),
         ice_bands=_match(ice_bands_new, state.ice_bands),
+        # CLM-ML canopy carry is a NamedTuple pytree (not a dtype-castable leaf),
+        # so it bypasses ``_match``; ``None`` for the non-canopy schemes.
+        canopy_state=canopy_state_new,
     )
 
     # --- Post-step surface state for coupler ---
@@ -645,7 +698,11 @@ def _step_multilayer_land_impl(
     # --- Post-step q_surface ---
     # Reuse the same Audit #6 / Iter-65 1e-3 floor as the pre-step branch
     # above so degenerate PFT cells cannot blow up beta_root_new propagating
-    # into the q_surface reported back to the atmosphere.
+    # into the q_surface reported back to the atmosphere.  Computed
+    # UNCONDITIONALLY (not folded into the non-canopy branch): the carbon
+    # cycle below consumes ``beta_soil_new`` for EVERY surface scheme,
+    # including CLM-ML canopy — moving it inside ``else`` leaves it undefined
+    # for canopy + carbon runs.
     theta_new = richards_out.theta_new
     _denom_new = jnp.maximum(
         theta_fc_c[:, None] - theta_wp_c[:, None], 1e-3,  # coeff-ok: floor (theta_fc - theta_wp) range to avoid /~0 in beta_root
@@ -668,8 +725,18 @@ def _step_multilayer_land_impl(
     q_sat_ice_new = saturation_mixing_ratio_ice(T_surface_new, forcing.p_surface)
     has_snow_new = snow_new > 1e-6
     q_sat_sfc_new = jnp.where(has_snow_new, q_sat_ice_new, q_sat_liq_new)
-    beta_effective_new = jnp.where(has_snow_new, 1.0, beta_new)
-    q_sfc_new = beta_effective_new * q_sat_sfc_new
+    if isinstance(config.surface_scheme, CLMMLCanopyConfig):
+        # CLM-ML computes q_surface via the Philip (1957) soil-humidity formula
+        # (rhg_soil * q_sat) internally and returns it in surface_out.q_surface.
+        # Use it directly so the coupler sees the same humidity as CLM-ML used
+        # for soil evaporation.  Override with q_sat_ice over snow (physically
+        # correct; CLM-ML always runs with snl=0, so this path is dormant).
+        q_sfc_new = jnp.where(has_snow_new, q_sat_sfc_new, surface_out.q_surface)
+    else:
+        # SimpleSEB / TwoLeafCanopy: beta·qsat with the updated moisture state
+        # (``beta_new`` computed unconditionally above).
+        beta_effective_new = jnp.where(has_snow_new, 1.0, beta_new)
+        q_sfc_new = beta_effective_new * q_sat_sfc_new
 
     # --- Carbon cycle ---
     if config.carbon.scheme != "none":
@@ -700,14 +767,15 @@ def _step_multilayer_land_impl(
     # for SimpleSEB it is the top-soil surface temperature ``T_surface_new``.
     # Static dispatch on the (compile-time) surface-scheme type — feature gating,
     # not data-dependent selection.
-    if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
-        response_T_sfc = surface_out.T_canopy_air   # aerodynamic (canopy air-space temp)
-        # Upward LW MUST be the canopy's conservative top-of-canopy LW_out (the
-        # flux consistent with T_rad / eps_col), NOT a recomputation from the
-        # post-step top-SOIL temperature — otherwise the tile blend, the gray
-        # brightness temperature (sigma*T_bb^4 = lw_up), and lw_net all carry a
-        # soil-based flux that discards the canopy radiative state.  (The slab
-        # canopy path likewise reports surface_out.lw_up.)
+    if isinstance(config.surface_scheme, (TwoLeafCanopyConfig, CLMMLCanopyConfig)):
+        # For both canopy schemes the coupler must receive the canopy-consistent
+        # LW_up (computed inside the canopy RT, not recomputed from post-step soil T)
+        # and the aerodynamic canopy-air temperature (not the soil skin T).
+        # CLMMLCanopyConfig populates T_canopy_air in _extract_surface_fluxes;
+        # fall back to T_surface if absent (should not happen post-Iter 9).
+        response_T_sfc = (surface_out.T_canopy_air
+                          if surface_out.T_canopy_air is not None
+                          else surface_out.T_surface)
         response_lw_up = surface_out.lw_up          # canopy LW_out
     else:
         response_T_sfc = T_surface_new              # SimpleSEB: top-soil surface temp
@@ -823,6 +891,16 @@ def init_multilayer_land_state(
     else:
         snow_bands = snow_age_bands = ice_bands = None
 
+    # Initialize canopy state for CLM-ML-JAX scheme.
+    # On cold start the mlcanopy_type is not allocated here — the interface
+    # allocates it lazily on the first call to compute_clm_ml_canopy_fluxes
+    # when canopy_state is None.
+    if isinstance(config.surface_scheme, CLMMLCanopyConfig):
+        from legoesm.land.canopy.state import CanopyState
+        canopy_state = CanopyState(mlcanopy=None)
+    else:
+        canopy_state = None
+
     return MultiLayerLandState(
         T_soil=T_soil,
         psi_soil=psi_soil,
@@ -836,4 +914,5 @@ def init_multilayer_land_state(
         snow_bands=snow_bands,
         snow_age_bands=snow_age_bands,
         ice_bands=ice_bands,
+        canopy_state=canopy_state,
     )
