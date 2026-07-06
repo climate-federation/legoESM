@@ -55,6 +55,7 @@ from legoesm.land.surface_scheme.two_leaf_canopy import (
 )
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 from legoesm.surface_albedo import (
+    dry_soil_brightening,
     land_vegetation_albedo,
     snow_albedo,
     snow_cover_fraction,
@@ -158,7 +159,17 @@ def _step_multilayer_land_impl(
     grid = make_soil_grid(config.soil_grid)
 
     # Spatially-varying surface parameters (or config scalar fallbacks).
-    albedo_land = _get(lp, "albedo_veg", config.albedo_land)
+    _albedo_base = _get(lp, "albedo_veg", config.albedo_land)   # snow-free veg/soil base
+    # Dry-soil brightening (Oleson et al. 2013 / CLM): snow-free bare soil brightens
+    # by up to ``soil_dry_albedo_boost`` as the top layer dries out, so a desert
+    # (theta~0.05) is bright while moist tundra (theta~0.3) stays dark.  This term was
+    # dropped in the main land-refactor merge; re-wire it onto the per-cell base albedo
+    # BEFORE the surface scheme / snow feedback so the SEB, the banded ``_base`` (line
+    # ~372/599) and ``compute_land_albedo`` all see the brightened desert soil.  Uses the
+    # START-of-step top-layer moisture here (this base drives the pre-step SEB fluxes);
+    # the post-step reported albedo (coupler hand-off) re-brightens with END-of-step
+    # moisture below for state consistency.
+    albedo_land = _albedo_base + dry_soil_brightening(theta[:, 0], config.land_albedo)
     emissivity = _get(lp, "emissivity", config.emissivity_land)
     z0 = _get(lp, "z0", config.z0_land)
 
@@ -590,13 +601,18 @@ def _step_multilayer_land_impl(
 
     # --- Post-step surface state for coupler ---
     T_surface_new = T_soil_new[:, 0]
+    # Re-brighten the snow-free base with the END-of-step top-layer moisture so the albedo
+    # handed to the coupler (drives the next radiation step) is consistent with the updated
+    # T_surface_new / snow_new state — the pre-step ``albedo_land`` used start-of-step theta.
+    albedo_land_post = _albedo_base + dry_soil_brightening(
+        richards_out.theta_new[:, 0], config.land_albedo)
 
     if bands is not None:
         # Post-step banded albedo + up-welling LW for the atmosphere: the SAME
         # flux-weighted band radiation as the pre-step (gap 1), so the coupler sees a
         # consistent albedo (alpha_eff) and banded LW emission (not a cell-mean value).
         if config.snow_albedo_feedback and lat is not None:
-            _base_new = jnp.broadcast_to(albedo_land, T_surface_new.shape)
+            _base_new = jnp.broadcast_to(albedo_land_post, T_surface_new.shape)
             _cz_new = forcing.cos_zenith[:, None]
             alpha_bands_new = band_albedo(
                 snow_bands_new, snow_age_bands_new, _base_new,
@@ -605,7 +621,7 @@ def _step_multilayer_land_impl(
                 ice_bands=ice_bands_new, cfg=bands)
         else:
             alpha_bands_new = jnp.broadcast_to(
-                jnp.reshape(albedo_land, (-1, 1)), (ncol, bands.band_dz.shape[-1]))
+                jnp.reshape(albedo_land_post, (-1, 1)), (ncol, bands.band_dz.shape[-1]))
         band_rad_new = band_net_radiation(
             T_surface_new, alpha_bands_new, forcing.sw_down, forcing.lw_down,
             emissivity, bands)
@@ -616,7 +632,7 @@ def _step_multilayer_land_impl(
             # Per-cell base albedo (CLM PFT / trainable), consistent with the SEB.
             alpha_new = compute_land_albedo(
                 lat, snow_new, snow_age_new, config.land_albedo,
-                base_albedo=jnp.broadcast_to(albedo_land, T_surface_new.shape))
+                base_albedo=jnp.broadcast_to(albedo_land_post, T_surface_new.shape))
         else:
             alpha_new = surface_out.albedo
         # lw_up recomputed with post-step surface T and surface scheme's

@@ -191,3 +191,46 @@ skin-T RMSE **3.07→2.81 K** (annual-mean field 2.55→2.18 K); albedo 0.075→
 (comparable to actual-CLM). The elevation-band + zenith physics improves the global land
 skin-T. Bake still gated on a coupled AMIP eval; the residual is substantially
 forcing-driven (see above).
+
+## Update (2026-07-06): dry-soil brightening merge-regression FIX (deserts)
+
+**Regression found + fixed.** The main land-refactor merge dropped the CLM/Oleson-2013
+**dry-soil albedo brightening** application from `multilayer_land.step_multilayer_land` —
+the term (`+dry_soil_brightening(theta[:,0], config.land_albedo)`, an additive increment
+up to `soil_dry_albedo_boost` as the top soil layer dries) is what makes deserts bright,
+and its loss darkened every arid pixel. Re-wired at `multilayer_land.py:169` onto the
+per-cell base albedo BEFORE the surface scheme + banded snow feedback, so the SEB, the
+banded `_base`, and `compute_land_albedo` all see the brightened soil. `clm_surface_map.py`
+line ~200 already documents that the static soil-color map excludes this and expects it
+applied dynamically — the merge broke exactly that contract; no double-count (single
+call site, full-repo grep). Default baseline (`soil_dry_albedo_boost=0`) stays a no-op.
+
+**Region diagnostic (tuned `land_tuned_allgaps.json`, insolation-weighted albedo bias vs ERA5):**
+| region | before fix | after fix | ERA5 |
+|---|---|---|---|
+| Sahara (bare desert) | −0.084 | **−0.006** | 0.394 |
+| north >60°N (non-glac) | −0.072 | **+0.050** | 0.395 |
+| Tibetan plateau | −0.165 | **−0.151** | 0.410 |
+| global land | ~−0.02 | **+0.011** (rmse 0.073) | — |
+
+The **desert/dry-region dark bias is solved** (Sahara near-exact; the CLM soil-color map,
+0.30 in the Sahara, brightens to 0.39 = ERA5 once the dynamic dry term is restored) and
+the **northern snow/ice albedo is fixed** (slightly bright now, was too dark).
+
+**Tibet still −0.15 — diagnosed, forcing/resolution-limited (NOT a model bug).** The
+banded snow *does* accumulate (SWE_max→180 kg/m² perennial pack on the coldest top band),
+melt is correctly T-gated, but the cell-aggregate stays dark for two structural reasons:
+(1) the offline trainer subsamples each month as `_DAYS=4` days → the seasonal SWE *stock*
+integrates only ~4/30 of the real snowfall → winter cell-mean SWE ~6 vs the ~30 kg/m² that
+gives ERA5's 0.9 cover; (2) 5 equal-area Gaussian bands concentrate snow in the top ~20%
+while the 4 warmer bands (majority area) dominate `alpha_eff`. Scaling a snow-only dt to
+fix (1) would break the surface energy budget (melt energy couples to the soil heat flux at
+`dt=6h`) — CLAUDE.md hard rule — so the faithful closure is a **coupled AMIP run** (real
+forcing, full temporal resolution) or more sample-days, consistent with the standing
+"root cause = forcing" finding. Map regenerated: skin-T RMSE 3.03→**2.57 K** (annual field
+2.49→**1.85 K**), albedo 0.075→**0.073**. Change: 129 land tests green. **Adversarial review**
+(1 round): flagged that the post-step reported albedo (coupler hand-off) re-used
+start-of-step `theta` for the dry-brightening while `T_surface_new`/`snow_new` were
+end-of-step → fixed by re-brightening the post-step base with `richards_out.theta_new[:,0]`
+(`albedo_land_post`, lines 607-608; pre-step SEB path unchanged). Re-review **CLEAN**.
+Numerically negligible (theta ~constant over 6 h; Sahara bias identical) but state-consistent.
