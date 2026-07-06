@@ -69,6 +69,19 @@ _R_TOA_ABS_TOL = 5.0          # |net TOA imbalance| acceptance band [W/m2]
 # Fields that MUST be present for a run to be scorecard-eligible at all.
 _REQUIRED_FIELDS = ("tas", "pr", "rsut", "rlut")
 
+# --- Structural-realism thresholds: first-order checks that the run has the
+#     right large-scale STRUCTURE, not just the right global-mean scalars (a
+#     globally-correct but structurally-dead run — e.g. an isothermal / uniform
+#     initial-condition blow-up — passes the global-mean gate yet has no
+#     equator-pole gradient and no ITCZ).  These are deliberately LOOSE physical
+#     floors any realistic climate clears, chosen to catch a degenerate run, not
+#     to grade fidelity — OBSERVATIONAL criteria, not model physics constants. ---
+_TAS_TROPICS_MINUS_POLE_MIN_K = 20.0  # eq(|lat|<30)-minus-pole(|lat|>60) tas floor [K]
+_PR_ITCZ_ENHANCEMENT_MIN = 1.05       # tropical(|lat|<15)/global mean-precip ratio floor
+_TROPICS_LAT_DEG = 30.0               # |lat| bound for the "tropics" band [deg]
+_POLE_LAT_DEG = 60.0                  # |lat| bound for the "pole" band [deg]
+_ITCZ_LAT_DEG = 15.0                  # |lat| bound for the ITCZ/deep-tropics band [deg]
+
 
 def _sinlat_area_weights(nlat: int, nlon: int) -> np.ndarray:
     """Reproduce the model's ``areacella`` weights (exact sin-latitude bands,
@@ -78,6 +91,18 @@ def _sinlat_area_weights(nlat: int, nlon: int) -> np.ndarray:
     band = sin_edges[1:] - sin_edges[:-1]
     w = np.broadcast_to(band[:, None], (nlat, nlon)).astype(np.float64)
     return w / w.sum()
+
+
+def _band_weighted_mean(field: np.ndarray, lat: np.ndarray, w: np.ndarray,
+                        lat_lo: float, lat_hi: float) -> float:
+    """Area-weighted mean of ``field`` over rows with ``lat_lo <= |lat| < lat_hi``.
+    Returns ``NaN`` if no row falls in the band (so a degenerate grid fails a
+    structural check rather than silently passing)."""
+    mask = (np.abs(lat) >= lat_lo) & (np.abs(lat) < lat_hi)
+    if not bool(mask.any()):
+        return float("nan")
+    wm = w[mask, :]
+    return float(np.sum(field[mask, :] * wm) / np.sum(wm))
 
 
 def _load_clim(cmor_amon: str, var: str):
@@ -140,6 +165,45 @@ def compute_amip_diagnostics(run_dir: str | Path) -> dict:
     }
 
 
+def amip_structural_checks(diag: dict) -> dict:
+    """First-order large-scale STRUCTURE checks on a diagnostics dict — catch a
+    globally-plausible but structurally-dead run (no equator-pole gradient / no
+    ITCZ) that the global-mean gate alone would pass.
+
+    Returns ``{check_name: {value, threshold, comparison, within}}``.  Runs the
+    ``tas`` equator-pole gradient whenever a ``tas`` map is present and the
+    ``pr`` ITCZ-enhancement whenever a ``pr`` map is present; a check whose band
+    is empty (degenerate grid) yields ``value=NaN`` and ``within=False``.  Pure
+    + deterministic (no matplotlib, no I/O)."""
+    maps = diag.get("maps") or {}
+    lat = diag.get("lat")
+    grid = diag.get("grid")
+    checks: dict = {}
+    if lat is None or grid is None:
+        return checks
+    lat = np.asarray(lat, dtype=np.float64)
+    nlat, nlon = grid
+    w = _sinlat_area_weights(nlat, nlon)
+
+    if "tas" in maps:
+        trop = _band_weighted_mean(maps["tas"], lat, w, 0.0, _TROPICS_LAT_DEG)
+        pole = _band_weighted_mean(maps["tas"], lat, w, _POLE_LAT_DEG, 91.0)
+        grad = trop - pole
+        checks["tas_eqpole_gradient_K"] = {
+            "value": float(grad), "threshold": float(_TAS_TROPICS_MINUS_POLE_MIN_K),
+            "comparison": ">=", "within": bool(grad >= _TAS_TROPICS_MINUS_POLE_MIN_K)}
+
+    if "pr" in maps:
+        trop_pr = _band_weighted_mean(maps["pr"], lat, w, 0.0, _ITCZ_LAT_DEG)
+        glob_pr = float(np.sum(maps["pr"] * w))
+        ratio = trop_pr / glob_pr if glob_pr > 0.0 else float("nan")
+        checks["pr_itcz_enhancement"] = {
+            "value": float(ratio), "threshold": float(_PR_ITCZ_ENHANCEMENT_MIN),
+            "comparison": ">=", "within": bool(ratio >= _PR_ITCZ_ENHANCEMENT_MIN)}
+
+    return checks
+
+
 def amip_realism_scorecard(diag: dict, *, tol_scale: float = 1.0,
                            abs_tol: dict | None = None,
                            albedo_tol: float | None = None,
@@ -147,17 +211,21 @@ def amip_realism_scorecard(diag: dict, *, tol_scale: float = 1.0,
     """Mechanical publication-realism gate on a ``compute_amip_diagnostics`` dict.
 
     Each area-weighted global mean is compared to its Earth reference with an
-    absolute acceptance band (``_REALISM_ABS_TOL`` scaled by ``tol_scale``), and
-    the TOA budget's planetary albedo and net imbalance to their own bands.
-    Returns::
+    absolute acceptance band (``_REALISM_ABS_TOL`` scaled by ``tol_scale``), the
+    TOA budget's planetary albedo and net imbalance to their own bands, and the
+    large-scale STRUCTURE (equator-pole gradient, ITCZ) to physical floors via
+    ``amip_structural_checks`` — so a globally-plausible but structurally-dead
+    run cannot pass on scalars alone.  Returns::
 
         {"fields": {var: {value, ref, unit, abs_tol, abs_err, within}},
          "budget": {"albedo": {...}, "r_toa": {...}} | None,
+         "structure": {check: {value, threshold, comparison, within}},
          "missing_required": [var, ...],
          "n_pass": int, "n_checks": int, "passed": bool}
 
     ``passed`` is True iff every required field AND the TOA budget are present
-    AND every check (fields + albedo + net-imbalance) lies within its band.  A
+    AND every check (fields + albedo + net-imbalance + structure) lies within
+    its band/floor.  A
     missing/blown-up field scores ``within=False`` (``NaN`` errors compare
     False), and an absent/malformed budget is reported in ``missing_required``
     as ``"budget"`` (it needs ``rsdt``/``rsut``/``rlut``) — never a silent pass.
@@ -202,11 +270,18 @@ def amip_realism_scorecard(diag: dict, *, tol_scale: float = 1.0,
         n_checks += 2
         n_pass += int(alb_ok) + int(rt_ok)
 
+    # Structural checks (equator-pole gradient, ITCZ) — only when the diagnostics
+    # carry the maps/lat/grid needed to compute them; each counts as a check.
+    structure = amip_structural_checks(diag)
+    for chk in structure.values():
+        n_checks += 1
+        n_pass += int(chk["within"])
+
     missing_required = [v for v in _REQUIRED_FIELDS if v not in gmeans]
     if not budget_present:                # TOA budget is a required check
         missing_required = missing_required + ["budget"]
     passed = bool(not missing_required and n_checks > 0 and n_pass == n_checks)
-    return {"fields": fields, "budget": budget,
+    return {"fields": fields, "budget": budget, "structure": structure,
             "missing_required": missing_required,
             "n_pass": n_pass, "n_checks": n_checks, "passed": passed}
 
@@ -217,11 +292,15 @@ def format_scorecard_line(scorecard: dict) -> str:
     fails = [v for v, d in scorecard["fields"].items() if not d["within"]]
     if scorecard["budget"] is not None:
         fails += [k for k, d in scorecard["budget"].items() if not d["within"]]
+    struct_fails = [k for k, d in scorecard.get("structure", {}).items()
+                    if not d["within"]]
     parts = [f"{verdict} realism {scorecard['n_pass']}/{scorecard['n_checks']}"]
     if scorecard["missing_required"]:
         parts.append("missing_required=" + ",".join(scorecard["missing_required"]))
     if fails:
         parts.append("out_of_band=" + ",".join(fails))
+    if struct_fails:
+        parts.append("structure=" + ",".join(struct_fails))
     return "  ".join(parts)
 
 
