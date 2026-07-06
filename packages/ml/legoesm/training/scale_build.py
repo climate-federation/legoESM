@@ -51,6 +51,13 @@ def build_latlon_config(cfg, yml):
         "--turbulence", str(yml.get("turbulence", "louis")),
         "--microphysics", str(yml.get("microphysics", "kessler")),
         "--gravity-wave-drag", str(yml.get("gravity_wave_drag", "hines")),
+        # run_amip's --rad-update-steps defaults to None (its main() auto-sets
+        # None -> floor(3600/dt) inside _postprocess_args, which we deliberately
+        # skip here — it enforces AMIP forcing-path args the WB/ERA5 path lacks).
+        # Pass an explicit value so cfg.rad_update_steps is a valid int (the
+        # driver's _prepare_run_context reads it bare): radiation every step (1)
+        # unless the YAML overrides.
+        "--rad-update-steps", str(int(yml.get("rad_update_steps", 1))),
     ]
     parsed = ra.build_arg_parser().parse_args(argv)
     return ra.build_config_from_args(parsed)

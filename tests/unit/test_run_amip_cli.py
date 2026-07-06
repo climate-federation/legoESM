@@ -1637,3 +1637,27 @@ def test_moisture_flux_form_flag_flows_to_dycore_config():
         "--dataset", "analytical", "--no-moisture-flux-form",
     ]), parser))
     assert cfg_off.dycore.moisture_flux_form is False
+
+
+def test_multicontroller_coordinator_flags_parse():
+    """Route-B flags round-trip through the parser (they are RUN args consumed
+    in main() for the jax.distributed bootstrap, not ExperimentConfig fields)."""
+    parser = build_arg_parser()
+    a = parser.parse_args(["--enable-latlon-spmd", "--multicontroller",
+                           "--coordinator", "localhost:12455"])
+    assert a.multicontroller is True
+    assert a.coordinator == "localhost:12455"
+    # Default: single-controller (both off).
+    d = parser.parse_args(["--dataset", "analytical"])
+    assert d.multicontroller is False
+    assert d.coordinator is None
+
+
+def test_multicontroller_requires_enable_latlon_spmd(capsys):
+    """--multicontroller without --enable-latlon-spmd is refused in main()
+    BEFORE any device work (it is only the route-B transport for that lane)."""
+    from scripts.run.run_amip import main
+    with pytest.raises(SystemExit):
+        main(["--grid-type", "latlon", "--dataset", "analytical",
+              "--multicontroller"])
+    assert "requires --enable-latlon-spmd" in capsys.readouterr().err

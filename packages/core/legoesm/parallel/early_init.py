@@ -179,7 +179,15 @@ def init_multicontroller_distributed(coordinator: str | None = None) -> None:
     Real init failures re-raise loudly — a missing launcher rank env is a
     hard ``SystemExit``, never a silent single-process fallback (that would
     run N identical un-federated copies clobbering each other's output).
+
+    Idempotent: a no-op if the federation is already up (another entry point —
+    e.g. run_amip's import-time ``maybe_init_jax_distributed`` on a real MPI
+    launch — may have initialized first; a second ``jax.distributed.initialize``
+    would raise "already initialized").
     """
+    global _INITIALIZED
+    if _INITIALIZED:
+        return
     if coordinator is None:
         init_jax_distributed_with_fallback()
         return
@@ -197,7 +205,6 @@ def init_multicontroller_distributed(coordinator: str | None = None) -> None:
     jax.distributed.initialize(
         coordinator_address=coordinator,
         num_processes=n_procs, process_id=proc_id)
-    global _INITIALIZED
     _INITIALIZED = True
 
 

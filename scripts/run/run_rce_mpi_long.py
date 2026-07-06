@@ -719,24 +719,40 @@ def save_snapshot(out_dir, day_idx, t_sim, state, hc):
 
 
 def save_snapshot_3d(out_dir, hr_idx, t_sim, state, hc):
-    """Full 3D MSE/q_v/T volumes [float32, compressed].
+    """Full 3D MSE/q_v/T/condensate volumes [float32, compressed].
 
-    Stored at ``snapshots_3d/snap_hr_NNNN.npz`` with arrays:
-    ``mse``, ``qv``, ``T`` each shape (ny, nx, nlev); plus ``z``
-    (nlev,) and scalars ``t_sim``, ``day``, ``hour``.
+    Stored at ``snapshots_3d/snap_hr_NNNN.npz`` with arrays ``mse``, ``qv``,
+    ``T``, ``cond`` each shape (ny, nx, nlev); plus ``z`` (nlev,) and scalars
+    ``t_sim``, ``day``, ``hour``. ``cond`` is the total condensate mixing
+    ratio (all non-vapor tracer mass slots, i.e. q_c + q_r + ... [kg/kg]) so
+    the volume is directly consumable as an SCM-RCE campaign reference (which
+    reads ``z``/``T``/``mse``/``cond``; q_v is inverted from ``mse``).
     """
     mse_3d = np.asarray(
         moist_static_energy_3d_plane(state, hc), dtype=np.float32,
     )
     qv_3d = np.asarray(state.tracers.data[..., 0], dtype=np.float32)
     T_3d = np.asarray(temperature_3d_plane(state, hc), dtype=np.float32)
+    # Total condensate = sum of the non-vapor tracer MASS slots (slot 0 is
+    # q_v). For the warm-rain Kessler CRM these are q_c (slot 1) and q_r
+    # (slot 2); summing all slots >= 1 stays correct if more hydrometeor
+    # mass tracers are added. Clipped to >= 0 (advection can leave tiny
+    # negatives without the mass fixer).
+    n_tracers = state.tracers.data.shape[-1]
+    if n_tracers > 1:
+        cond_3d = np.asarray(
+            jnp.clip(state.tracers.data[..., 1:], 0.0).sum(axis=-1),
+            dtype=np.float32,
+        )
+    else:
+        cond_3d = np.zeros_like(qv_3d)
     z = np.asarray(hc.z_full, dtype=np.float32)
     snap_path = out_dir / "snapshots_3d" / f"snap_hr_{hr_idx:04d}.npz"
     snap_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         snap_path,
         t_sim=t_sim, day=t_sim / SEC_PER_DAY, hour=t_sim / 3600.0,
-        z=z, mse=mse_3d, qv=qv_3d, T=T_3d,
+        z=z, mse=mse_3d, qv=qv_3d, T=T_3d, cond=cond_3d,
     )
 
 
