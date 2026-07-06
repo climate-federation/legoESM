@@ -3,8 +3,9 @@
 Covers the two pure helpers behind ``--kpp-ri-crit`` / ``--kpp-cv``:
 the override builder (which must leave the production KPPConfig byte-identical
 when no knob is set, reject out-of-range knobs, and thread through
-``build_mpas_ocean -> _create_setup``) and the mpas-only dispatch guard (fail
-loud, never silently ignore a flag).
+``build_mpas_ocean``/``build_latlon_bathy -> _create_setup``) and the dispatch
+guard, which allows the KPP-running grids (mpas, latlon_bathy) and fails loud on
+grids that would silently ignore the flag (tripole = no KPP, cubed_sphere).
 """
 
 from __future__ import annotations
@@ -63,16 +64,21 @@ def test_override_accepts_range_endpoints():
     assert _kpp_vmix_override(kpp_ri_crit=hi).kpp.Ri_crit == hi
 
 
-def test_guard_raises_on_nonmpas_grid_when_flag_set():
-    for grid in ("tripole", "latlon_bathy", "cubed_sphere"):
+def test_guard_raises_on_non_kpp_grid_when_flag_set():
+    # tripole ships physics=None (dynamics-core implicit vmix, no KPP boundary
+    # layer) and cubed_sphere is not wired -> the override would silently do
+    # nothing, so the guard must still fail loud on those.
+    for grid in ("tripole", "cubed_sphere"):
         with pytest.raises(SystemExit):
             _validate_kpp_grid(grid, kpp_ri_crit=0.5, kpp_cv=None)
         with pytest.raises(SystemExit):
             _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=2.5)
 
 
-def test_guard_noop_on_mpas_or_no_flags():
-    _validate_kpp_grid("mpas", kpp_ri_crit=0.5, kpp_cv=2.5)   # mpas+flags: ok
+def test_guard_noop_on_kpp_grids_or_no_flags():
+    # mpas AND latlon_bathy run the KPP boundary layer -> override is live -> ok.
+    _validate_kpp_grid("mpas", kpp_ri_crit=0.5, kpp_cv=2.5)
+    _validate_kpp_grid("latlon_bathy", kpp_ri_crit=0.5, kpp_cv=2.5)
     for grid in ("tripole", "latlon_bathy", "cubed_sphere", "mpas"):
         _validate_kpp_grid(grid, None, None)                  # no flags: ok
 
@@ -101,3 +107,29 @@ def test_build_mpas_ocean_threads_override_to_create_setup(monkeypatch):
     assert captured["vm"] is vm
     assert captured["vm"].kpp.Ri_crit == 0.5
     assert captured["vm"].kpp.Cv == 2.5
+
+
+def test_build_latlon_bathy_threads_override_to_create_setup(monkeypatch):
+    """Integration: build_latlon_bathy MUST forward ``vertical_mixing`` to
+    _create_setup so the KPP Ri_crit/Cv override reaches the live KPP scheme on
+    the lat-lon bathy path (the NH-midlat winter-MLD lever).  A dropped kwarg
+    would pass the pure-helper tests but silently ignore the flag."""
+    import scripts.run.run_omip_core2 as core2
+    from scripts.run import run_omip
+
+    captured = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _fake_create_setup(*a, **k):
+        captured["vm"] = k.get("vertical_mixing")
+        raise _Stop
+
+    monkeypatch.setattr(run_omip, "_create_setup", _fake_create_setup)
+    vm = _kpp_vmix_override(0.2, None)          # shoal the too-deep winter ML
+    with pytest.raises(_Stop):
+        core2.build_latlon_bathy(75, 6000.0, "dummy_mesh.nc",
+                                 vertical_mixing=vm)
+    assert captured["vm"] is vm
+    assert captured["vm"].kpp.Ri_crit == 0.2

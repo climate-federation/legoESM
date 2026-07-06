@@ -372,13 +372,24 @@ def main() -> int:
         # Median bias is robust to the deep-convection tail that dominates RMSE.
         finite = mld_ocean & np.isfinite(mldL_g) & np.isfinite(mldN_g)
         med_bias = float(np.median((mldL_g - mldN_g)[finite])) if finite.any() else float("nan")
+        # Per-band MLD (same latitude bands as SST/SSS) so a global MLD bias can
+        # be attributed to a band rather than blamed on a few deep-convection
+        # cells that inflate the global mean -- e.g. is the mixed layer too deep
+        # exactly in the NH-midlat band where SST is coldest (entrainment link)?
+        mld_bands = _band_breakdown(mldL_g, mldN_g, mld_area, tgt_lat)
         mld_report = {**mld_raw, "rmse_log1p_m": mld_log["rmse"],
                       "median_bias_m": med_bias, "delta_sigma": 0.01,
+                      "bands": mld_bands,
                       "method": "de Boyer Montegut / Treguier 2023; dsigma=0.01 wrt 10m "
                                 "to match NEMO mldr10_1; snapshot/annual-state (not seasonal)"}
         print(f"[MLD] rmse {mld_raw['rmse']:.1f} m  bias {mld_raw['bias']:+.1f} m  "
               f"median-bias {med_bias:+.1f} m  corr {mld_raw['corr']:.3f}  "
               f"rmse(log1p) {mld_log['rmse']:.3f}")
+        print("[MLD bands]")
+        for bn, bs in mld_bands.items():
+            if bs is not None:
+                print(f"  {bn:22s} bias {bs['bias']:+7.1f} m  lego {bs['lego_mean']:6.1f}  "
+                      f"nemo {bs['nemo_mean']:6.1f}  corr {bs['corr']:.3f}")
         # Cap at the 99th percentile for display so deep-convection cells don't
         # wash out the colour scale (scoring above uses raw metres).
         cap = float(np.nanpercentile(np.where(mld_ocean, mldN_g, np.nan), 99))
