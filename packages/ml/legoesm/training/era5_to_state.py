@@ -13,34 +13,52 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.ml.channel_packing import WB2_PRESSURE_LEVELS
 from legoesm.ml.data.era5_loader import (
-    ERA5Config,
     WB2_ERA5_ZARR,
+    ERA5Config,
     create_era5_dataset,
 )
-from legoesm.ml.channel_packing import WB2_PRESSURE_LEVELS
+from legoesm.thermo import specific_humidity_to_mixing_ratio
+
+# Canonical long ERA5/WeatherBench variable name → its short ECMWF/GRIB alias.
+# Used BIDIRECTIONALLY by resolve_var: a request for either form finds the other.
+_ERA5_VAR_ALIASES = {
+    'temperature': 't', 'u_component_of_wind': 'u',
+    'v_component_of_wind': 'v', 'specific_humidity': 'q',
+    'surface_pressure': 'sp', 'skin_temperature': 'skt',
+    'sea_surface_temperature': 'sst', '2m_temperature': 't2m',
+    'geopotential': 'z',
+    'geopotential_at_surface': 'z_sfc',
+}
+
+
 def resolve_var(ds, name):
-    """Find a variable in the dataset, trying common aliases."""
-    aliases = {
-        'temperature': 't', 'u_component_of_wind': 'u',
-        'v_component_of_wind': 'v', 'specific_humidity': 'q',
-        'surface_pressure': 'sp', 'skin_temperature': 'skt',
-        'geopotential': 'z',
-        'geopotential_at_surface': 'z_sfc',
-    }
+    """Find a variable in the dataset by ``name`` or an equivalent alias.
+
+    BIDIRECTIONAL: a long-name request (``"temperature"``) finds a short-named
+    store variable (``"t"``) AND a short-name request (``"t"``) finds a long-named
+    store variable — so the loader is robust to either the WeatherBench/ARCO-ERA5
+    long-name convention or the classic ECMWF/GRIB short-name convention.  Returns
+    the matched store key, or ``None`` if neither ``name`` nor any alias is present.
+    """
     if name in ds:
         return name
-    if name in aliases and aliases[name] in ds:
-        return aliases[name]
-    for k, v in aliases.items():
-        if name == k and v in ds:
-            return v
+    candidates = []
+    short = _ERA5_VAR_ALIASES.get(name)          # name is a long key → its short
+    if short is not None:
+        candidates.append(short)
+    candidates += [long for long, s in _ERA5_VAR_ALIASES.items()
+                   if s == name]                  # name is a short alias → its long(s)
+    for cand in candidates:
+        if cand in ds:
+            return cand
     return None
 
 
@@ -120,16 +138,35 @@ def _apply_phis_hydrostatic_adjustment(
 _CS_WEIGHT_CACHE: dict[tuple, object] = {}
 
 
-def _get_cs_weights(n_lon_era5: int, grid):
-    """Get or compute cached cubed-sphere regridding weights."""
-    key = (n_lon_era5, id(grid))
+def _coord_fingerprint(arr) -> tuple:
+    """Content fingerprint ``(shape, hash(bytes))`` of a coordinate array.
+
+    Keyed on the FULL array contents, not just shape + endpoints: two source grids
+    with the same bounding box but different INTERIOR spacing (e.g. a uniform lat-lon
+    grid vs a Gaussian-quadrature grid of the same extent — the very confusion this
+    path fixes) must NOT collide.  Fingerprinting the target grid's coordinates too
+    makes the cache robust to ``id()`` reuse after a grid is garbage-collected.
+    """
+    a = np.ascontiguousarray(np.asarray(arr))
+    return (a.shape, hash(a.tobytes()))
+
+
+def _get_cs_weights(src_lat, src_lon, grid):
+    """Get or compute cached ERA5-lat-lon → cubed-sphere regridding weights.
+
+    Built from the ACTUAL ERA5 lat/lon grid (``src_lat``/``src_lon``, 1-D radians) —
+    NOT a Gaussian proxy of it, whose quadrature latitudes + differing latitude count
+    mis-index the uniform ERA5 data (the regrid pulled near-antipodal latitudes; #cs).
+    Cached on the CONTENT fingerprint of both source coords and the target grid
+    coords (collision- and GC-safe; see ``_coord_fingerprint``).
+    """
+    src_lat = np.asarray(src_lat)
+    src_lon = np.asarray(src_lon)
+    key = (_coord_fingerprint(src_lat), _coord_fingerprint(src_lon),
+           _coord_fingerprint(grid.lat), _coord_fingerprint(grid.lon))
     if key not in _CS_WEIGHT_CACHE:
-        from legoesm.grids.regridding import compute_gauss_to_cs_weights
-        from legoesm.grids.gaussian import create_gaussian_grid
-        gauss_proxy = create_gaussian_grid(
-            n_max=n_lon_era5 // 2 - 1, dealiasing="linear",
-        )
-        _CS_WEIGHT_CACHE[key] = compute_gauss_to_cs_weights(gauss_proxy, grid)
+        from legoesm.grids.regridding import compute_latlon_to_cs_weights
+        _CS_WEIGHT_CACHE[key] = compute_latlon_to_cs_weights(src_lat, src_lon, grid)
     return _CS_WEIGHT_CACHE[key]
 
 
@@ -256,7 +293,33 @@ class ERA5Slice(NamedTuple):
     plev_Pa: np.ndarray    # (n_plev,) pressure levels [Pa], ascending
 
 
-def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
+def _assert_required_era5_vars(ds_t, ds) -> None:
+    """Upfront preflight: report ALL missing REQUIRED ERA5 variables in ONE error.
+
+    The per-field loaders (``_get_3d`` / ``_get_2d``) each raise on the FIRST unresolvable
+    required variable, so an operator preparing a real-ERA5 zarr with several mis-named
+    fields would iterate error-by-error.  This lists every missing required variable (with
+    its accepted alias) at once, so the whole naming pass is fixed in one go.  Required =
+    the 3D state T/u/v/q + the surface pressure; SST + surface geopotential stay OPTIONAL
+    (zero-filled if absent, so they are NOT flagged here).
+    """
+    required = ("temperature", "u_component_of_wind", "v_component_of_wind",
+                "specific_humidity", "surface_pressure")
+    missing = [n for n in required
+               if resolve_var(ds_t, n) is None and resolve_var(ds, n) is None]
+    if missing:
+        listed = ", ".join(
+            f"{n!r} (alias {_ERA5_VAR_ALIASES.get(n, '—')!r})" for n in missing)
+        raise ValueError(
+            f"load_era5_slice: REQUIRED ERA5 variable(s) {listed} not found in the "
+            f"store; available variables: {sorted(map(str, ds_t.data_vars))}. Provide "
+            "them (or an accepted alias) in --era5-zarr — a missing required field must "
+            "NOT silently load as zeros (it would corrupt the whole compare).")
+
+
+def load_era5_slice(
+    config: TrainingERA5Config, time_idx: int, *, ds: Any = None
+) -> ERA5Slice:
     """Load a single ERA5 time slice with all fields needed for IC + forcing.
 
     Parameters
@@ -264,16 +327,49 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
     config : TrainingERA5Config
     time_idx : int
         Time index into the dataset.
+    ds : xarray.Dataset, optional
+        A PRE-OPENED ERA5 dataset (lat/lon dims, ``resolve_var``-findable variables on
+        a ``level`` axis).  When given, the Zarr open from ``config`` is BYPASSED — used
+        by a local-archive adapter (e.g. per-variable NetCDF merged into one dataset)
+        to feed REAL ERA5 through the SAME extraction/regrid chain WITHOUT a Zarr store
+        or network.  ``None`` (default) opens the configured store as before.
 
     Returns
     -------
     ERA5Slice with all fields on the native ERA5 lat-lon grid.
     """
-    store = config.local_cache_dir if config.local_cache_dir else config.zarr_store
-    ds = open_era5_zarr(store)
+    if ds is None:
+        store = config.local_cache_dir if config.local_cache_dir else config.zarr_store
+        ds = open_era5_zarr(store)
+    else:
+        # Normalize a PRE-OPENED ds the same way open_era5_zarr does, so a local-archive
+        # adapter may pass the raw ``latitude``/``longitude`` dims (the NetCDF/CF
+        # convention) without renaming them itself.
+        _rename = {long: short for short, long in (("lat", "latitude"),
+                                                   ("lon", "longitude"))
+                   if long in ds.dims and short not in ds.dims}
+        if _rename:
+            ds = ds.rename(_rename)
+
+    # Bounds-check the time index up front so a typo'd ``--era5-time-idx`` /
+    # held-out index gives a CAMPAIGN-specific message (with the store's actual time
+    # count) instead of xarray's generic "index N is out of bounds for axis 0".  Same
+    # ``IndexError`` type (callers/tests catching it are unaffected); negative indices
+    # are allowed exactly as xarray would (valid range [-n, n-1]).  ``time``-dim
+    # absent ⇒ skip and let ``isel`` raise (a differently-named time axis).
+    n_time = ds.sizes.get("time")
+    if n_time is not None and not (-n_time <= time_idx < n_time):
+        raise IndexError(
+            f"era5 time index {time_idx} is out of range: the ERA5 store has "
+            f"{n_time} time(s) (valid 0..{n_time - 1} or -{n_time}..-1). Pick an "
+            "in-range --era5-time-idx / held-out index.")
 
     # Select time
     ds_t = ds.isel(time=time_idx)
+
+    # Fail loud + COMPLETE on a mis-prepared store: report every missing required variable
+    # at once (the per-field _get_* below still raise as a backstop / on other errors).
+    _assert_required_era5_vars(ds_t, ds)
 
     # Extract lat/lon
     lat = np.deg2rad(ds_t.lat.values.astype(np.float64))
@@ -284,30 +380,59 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
     plev_hPa = np.array(config.levels, dtype=np.float64)
     plev_Pa = np.sort(plev_hPa * 100.0)  # ascending in Pa
 
-    def _get_3d(name):
-        """Extract a 3D variable as (lat, lon, level) with levels ascending in pressure."""
-        resolved = [v for v in [resolve_var(ds_t, name)] if v]
-        if not resolved:
-            return np.zeros((len(lat), len(lon), len(plev_Pa)))
-        data = ds_t[resolved[0]].sel({level_dim: list(config.levels)}).values
+    def _missing(name):
+        return (
+            f"load_era5_slice: REQUIRED ERA5 variable {name!r} not found in the "
+            f"store (tried alias {_ERA5_VAR_ALIASES.get(name, '—')!r}); available "
+            f"variables: {sorted(map(str, ds_t.data_vars))}. Fix the store / "
+            "--era5-zarr or the variable naming — a missing required field must NOT "
+            "silently load as zeros (it would corrupt the whole compare)."
+        )
+
+    def _get_3d(name, *, required=True):
+        """Extract a 3D variable as (lat, lon, level), levels ascending in pressure.
+
+        A REQUIRED but unresolvable variable RAISES (never silently zero-fills — a
+        zeros T/u/v/q would corrupt the bias and make the loop 'correct' garbage).
+        """
+        resolved = resolve_var(ds_t, name)
+        if resolved is None:
+            if required:
+                raise ValueError(_missing(name))
+            return np.zeros((len(lat), len(lon), len(plev_Pa)), dtype=np.float32)
+        data = ds_t[resolved].sel({level_dim: list(config.levels)}).values
         if data.ndim == 3:
-            dims = list(ds_t[resolved[0]].dims)
+            dims = list(ds_t[resolved].dims)
             spatial = {"lat", "lon", "latitude", "longitude"}
             level_axis = next((i for i, d in enumerate(dims) if d not in spatial), 0)
             if level_axis != 2:
                 data = np.moveaxis(data, level_axis, -1)
-        # Ensure levels are ascending in pressure
-        if plev_hPa[0] > plev_hPa[-1]:
-            data = data[..., ::-1]
+        # Reorder the level axis to ASCENDING pressure, matching ``plev_Pa =
+        # np.sort(plev_hPa)`` for ANY level order — not just a monotonic config.levels.
+        # The coordinate is robustly sorted, so the DATA (selected in config.levels
+        # order) must be reordered the SAME way; a mere ``[::-1]`` flip only matches when
+        # config.levels is monotonic, so a non-monotonic list (e.g. [1000, 850, 500, 700,
+        # 200]) would silently pair each level's data with the WRONG pressure in the
+        # vertical interp.  ``argsort`` == reversal for the descending WB2 default, so
+        # this is behavior-preserving there.
+        order = np.argsort(plev_hPa)
+        data = data[..., order]
         return data.astype(np.float32)
 
-    def _get_2d(name):
-        """Extract a 2D surface variable as (lat, lon)."""
+    def _get_2d(name, *, required=False):
+        """Extract a 2D surface variable as (lat, lon).
+
+        ``required`` (e.g. ``surface_pressure``) RAISES on an unresolvable variable;
+        optional surface fields (skin temperature, surface geopotential) keep the
+        zero-fill so an IC missing them still loads.
+        """
         # Try time-selected dataset first, then full dataset for static fields
         resolved = resolve_var(ds_t, name)
         if resolved is None:
             resolved = resolve_var(ds, name)
             if resolved is None:
+                if required:
+                    raise ValueError(_missing(name))
                 return np.zeros((len(lat), len(lon)), dtype=np.float32)
             data = ds[resolved].values
         else:
@@ -318,18 +443,102 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
             data = data[0]
         return data.astype(np.float32)
 
+    def _has(name):
+        return resolve_var(ds_t, name) is not None or resolve_var(ds, name) is not None
+
+    def _get_sst():
+        """Skin/SST surface-temperature forcing with a physical fallback chain.
+
+        ``skin_temperature`` (defined everywhere) when the store carries it; else
+        ``sea_surface_temperature`` (NaN over land) gap-filled with
+        ``2m_temperature``; else ``2m_temperature`` alone (skin proxy).  The
+        legacy zero-fill (0 K!) is the LAST resort and warns loudly: the WB2
+        6h zarr has no skin_temperature, and the silent 0 K SST forcing sent
+        the WB scale-trainer surface fluxes into a sick regime (#797 bug 7).
+        """
+        if _has("skin_temperature"):
+            return _get_2d("skin_temperature")
+        if _has("sea_surface_temperature"):
+            sst = _get_2d("sea_surface_temperature")
+            if _has("2m_temperature"):
+                t2m = _get_2d("2m_temperature")
+                return np.where(np.isfinite(sst), sst, t2m).astype(np.float32)
+            fill = float(np.nanmean(sst))
+            return np.nan_to_num(sst, nan=fill).astype(np.float32)
+        if _has("2m_temperature"):
+            return _get_2d("2m_temperature")
+        logger.warning(
+            "ERA5 store has none of skin_temperature/sea_surface_temperature/"
+            "2m_temperature; sst zero-filled (0 K) — unusable as SST forcing")
+        return np.zeros((len(lat), len(lon)), dtype=np.float32)
+
     return ERA5Slice(
         T=_get_3d("temperature"),
         u=_get_3d("u_component_of_wind"),
         v=_get_3d("v_component_of_wind"),
         q=_get_3d("specific_humidity"),
-        p_s=_get_2d("surface_pressure"),
-        sst=_get_2d("skin_temperature"),
-        phis=_get_2d("geopotential_at_surface"),  # already in m²/s²
+        p_s=_get_2d("surface_pressure", required=True),
+        sst=_get_sst(),
+        phis=_get_2d("geopotential_at_surface"),  # optional; already in m²/s²
         lat=lat,
         lon=lon,
         plev_Pa=plev_Pa,
     )
+
+
+def load_era5_time_mean(
+    config: TrainingERA5Config, time_indices, *, ds: Any = None
+) -> ERA5Slice:
+    """Time-MEAN ERA5 reference: the element-wise average over ``time_indices`` of each
+    field, so the time-mean MODEL state (``run_to_column_mean``) is compared to a
+    time-mean ERA5 CLIMATOLOGY rather than a single synoptic snapshot (which injects
+    weather noise into the bias).
+
+    Coords (``lat``/``lon``/``plev_Pa``) are identical across times (kept from the
+    first slice).  A SINGLE index returns :func:`load_era5_slice` unchanged
+    (byte-identical to the old single-time behaviour).  NaN-PROPAGATING (a running SUM,
+    not ``nanmean``) — consistent with the raw single-slice extraction: an SST-over-land
+    cell is NaN in every slice, so the mean is NaN there too, no worse than a single
+    slice.
+
+    Memory: an INCREMENTAL running sum (float64) holds only ~ONE slice's worth + the
+    current slice, NOT all ``N`` slices at once — so averaging a full-res global ERA5
+    over many times (a monthly/seasonal climatology) does not OOM.  The sum is float64
+    (no float32 precision loss over many times); each field is divided by ``N`` and cast
+    BACK to the first slice's dtype.  Reuses ``load_era5_slice`` per time (a one-time
+    campaign-start load).  An OUT-OF-RANGE time index (the requested window exceeds the
+    store's times) FAILS LOUD with a clear, actionable error (vs a cryptic xarray
+    ``IndexError`` mid-load).  Empty ``time_indices`` ⇒ raise."""
+    indices = list(time_indices)
+    if not indices:
+        raise ValueError("load_era5_time_mean: time_indices must be non-empty.")
+
+    def _load(i):
+        try:
+            return load_era5_slice(config, int(i), ds=ds)
+        except IndexError as e:
+            raise ValueError(
+                f"load_era5_time_mean: ERA5 time index {int(i)} is out of range — the "
+                "requested time window exceeds the store's available times (campaign "
+                "CLI: lower --era5-n-times or --era5-time-idx). "
+                f"Underlying: {e}") from e
+
+    if len(indices) == 1:
+        return _load(indices[0])
+    data_fields = ("T", "u", "v", "q", "p_s", "sst", "phis")
+    first = None
+    acc = None
+    for i in indices:
+        sl = _load(i)
+        if acc is None:
+            first = sl
+            acc = {name: getattr(sl, name).astype(np.float64) for name in data_fields}
+        else:
+            for name in data_fields:
+                acc[name] = acc[name] + getattr(sl, name)   # running sum (slice discarded)
+    n = float(len(indices))
+    return first._replace(**{
+        name: (acc[name] / n).astype(getattr(first, name).dtype) for name in data_fields})
 
 
 def era5_to_spectral_carry(
@@ -353,9 +562,9 @@ def era5_to_spectral_carry(
     -------
     SegmentCarry
     """
-    from legoesm.driver.compiled_segments import pack_carry
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
+    from legoesm.driver.compiled_segments import pack_carry
 
     from legoesm.grids.vertical import HybridSigmaPressureCoordinate
     _is_hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
@@ -373,31 +582,24 @@ def era5_to_spectral_carry(
     # path comment for details).
     p_s_jax = jnp.asarray(p_s_ll)
     plev = jnp.asarray(era5.plev_Pa)
-    if _is_hybrid:
-        _A = jnp.asarray(sigma.A_full)
-        _B = jnp.asarray(sigma.B_full)
-        _p_ref = float(sigma.p_ref)
-        def _vinterp(f):
-            return interp_pressure_to_hybrid(jnp.asarray(f), plev, p_s_jax, _A, _B, _p_ref)
-    else:
-        sigma_f = jnp.asarray(sigma_full)
-        def _vinterp(f):
-            return interp_pressure_to_sigma(jnp.asarray(f), plev, p_s_jax, sigma_f)
+    sigma_f = jnp.asarray(sigma_full)
+    # Model TRUE full-level pressures (hybrid-correct; iter 339): interp the
+    # ERA5 reference to these, not pure-sigma sigma*p_s, so it lands on the model's
+    # actual levels.  Pure-sigma: pressure_at_full == sigma*p_s (byte-identical).
+    p_full = sigma.pressure_at_full(p_s_jax)
 
-    T_model = _vinterp(T_ll)
-    u_model = _vinterp(u_ll)
-    v_model = _vinterp(v_ll)
-    # ERA5 q is SPECIFIC HUMIDITY (mass vapor / mass moist air).  The
-    # legoesm physics path treats q_v as MASS MIXING RATIO (mass vapor
-    # / mass dry air) — saturation_mixing_ratio in thermo.py returns
-    # the mixing-ratio convention, and atmosphere/physics modules
-    # consume q_v under that convention.  Convert at the ERA5
-    # boundary: r = q / (1 − q).  In the tropical PBL (q ≈ 0.025) the
-    # bias from skipping this conversion is ~3% of q.  Clip to avoid
-    # division blow-up at q = 1.
-    q_specific = jnp.maximum(_vinterp(q_ll), 0.0)
-    q_specific = jnp.clip(q_specific, 0.0, 0.99)
-    q_model = q_specific / (1.0 - q_specific)
+    T_model = interp_pressure_to_sigma(jnp.asarray(T_ll), plev, p_s_jax, sigma_f, p_full=p_full)
+    u_model = interp_pressure_to_sigma(jnp.asarray(u_ll), plev, p_s_jax, sigma_f, p_full=p_full)
+    v_model = interp_pressure_to_sigma(jnp.asarray(v_ll), plev, p_s_jax, sigma_f, p_full=p_full)
+    # ERA5 q is SPECIFIC HUMIDITY (mass vapor / mass moist air); the legoesm
+    # physics path treats q_v as MASS MIXING RATIO (mass vapor / mass dry air —
+    # the convention saturation_mixing_ratio + the physics modules consume).
+    # Convert at the ERA5 boundary via the CANONICAL thermo helper r = q/(1−q)
+    # (clips q below 1 to guard the division).  In the tropical PBL (q ≈ 0.025)
+    # the bias from skipping this conversion is ~3% of q.
+    q_model = specific_humidity_to_mixing_ratio(
+        interp_pressure_to_sigma(jnp.asarray(q_ll), plev, p_s_jax, sigma_f, p_full=p_full)
+    )
 
     # Surface geopotential (regrid to Gaussian)
     phis_ll = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
@@ -467,16 +669,17 @@ def era5_to_cubedsphere_carry(
     """
     # ``target_phis`` is intentionally unused — see the parameter docstring.
     del target_phis
-    from legoesm.grids.regridding import regrid_scalar
-    from legoesm.driver.compiled_segments import pack_carry
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
+    from legoesm.driver.compiled_segments import pack_carry
+    from legoesm.grids.regridding import regrid_scalar
 
     from legoesm.grids.vertical import HybridSigmaPressureCoordinate
     _is_hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
     sigma_full = np.asarray(sigma.sigma_full)
-    n_lon_era5 = era5.T.shape[1]
-    weights = _get_cs_weights(n_lon_era5, grid)
+    # Build the regrid weights from the ACTUAL ERA5 lat/lon grid (not a Gaussian
+    # proxy — see _get_cs_weights / compute_latlon_to_cs_weights for the bug fixed).
+    weights = _get_cs_weights(era5.lat, era5.lon, grid)
 
     # Regrid 3D fields
     def _regrid_3d(field_ll):
@@ -536,26 +739,19 @@ def era5_to_cubedsphere_carry(
     # ~20 K temperature errors and ~70 m/s wind imbalances that cause
     # immediate numerical blowup.
     plev = jnp.asarray(era5.plev_Pa)
-    if _is_hybrid:
-        _A = jnp.asarray(sigma.A_full)
-        _B = jnp.asarray(sigma.B_full)
-        _p_ref = float(sigma.p_ref)
-        def _vinterp(field_cs):
-            return interp_pressure_to_hybrid(field_cs, plev, p_s_cs, _A, _B, _p_ref)
-    else:
-        sigma_f = jnp.asarray(sigma_full)
-        def _vinterp(field_cs):
-            return interp_pressure_to_sigma(field_cs, plev, p_s_cs, sigma_f)
-
-    T_model = _vinterp(T_cs)
-    u_model = _vinterp(u_cs)
-    v_model = _vinterp(v_cs)
-    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING
-    # RATIO (see comment at the lat-lon path above).  Convert
-    # r = q / (1 − q) at the boundary.
-    q_specific = jnp.maximum(_vinterp(q_cs), 0.0)
-    q_specific = jnp.clip(q_specific, 0.0, 0.99)
-    q_model = q_specific / (1.0 - q_specific)
+    sigma_f = jnp.asarray(sigma_full)
+    # Model TRUE full-level pressures (hybrid-correct; iter 339): interp the
+    # ERA5 reference to these, not pure-sigma sigma*p_s, so it lands on the model's
+    # actual levels.  Pure-sigma: pressure_at_full == sigma*p_s (byte-identical).
+    p_full = sigma.pressure_at_full(p_s_cs)
+    T_model = interp_pressure_to_sigma(T_cs, plev, p_s_cs, sigma_f, p_full=p_full)
+    u_model = interp_pressure_to_sigma(u_cs, plev, p_s_cs, sigma_f, p_full=p_full)
+    v_model = interp_pressure_to_sigma(v_cs, plev, p_s_cs, sigma_f, p_full=p_full)
+    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING RATIO
+    # r = q/(1−q) (canonical thermo helper; see era5_to_spectral_carry).
+    q_model = specific_humidity_to_mixing_ratio(
+        interp_pressure_to_sigma(q_cs, plev, p_s_cs, sigma_f, p_full=p_full)
+    )
 
     if logger.isEnabledFor(logging.INFO):
         import jax as _jax
@@ -605,6 +801,118 @@ def era5_to_cubedsphere_carry(
     )
 
 
+_VORONOI_WEIGHT_CACHE: dict[tuple, object] = {}
+
+
+def _get_voronoi_weights(src_lat_rad, src_lon_rad, mesh):
+    """Cached ERA5-lat-lon → MPAS-cell inverse-distance regridding weights.
+
+    Keyed on the CONTENT fingerprint of both the source coords AND the mesh cell
+    coords (``_coord_fingerprint``), exactly as the cubed-sphere path: keying on
+    shape + endpoints alone COLLIDES on two source grids that share an extent but
+    differ in INTERIOR spacing (a uniform lat-lon grid vs a Gaussian grid of the
+    same bounds), and an ``id(mesh)`` key is unsafe after the mesh is
+    garbage-collected and its id reused.  Fingerprinting the mesh cells makes the
+    cache collision- and GC-safe (see #cs / iter 109's cubed-sphere fix).
+    """
+    src_lat = np.asarray(src_lat_rad)
+    src_lon = np.asarray(src_lon_rad)
+    key = (
+        _coord_fingerprint(src_lat), _coord_fingerprint(src_lon),
+        _coord_fingerprint(mesh.latCell), _coord_fingerprint(mesh.lonCell),
+    )
+    if key not in _VORONOI_WEIGHT_CACHE:
+        from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
+        _VORONOI_WEIGHT_CACHE[key] = compute_latlon_to_voronoi_weights(
+            src_lat, src_lon,
+            np.asarray(mesh.latCell), np.asarray(mesh.lonCell),
+        )
+    return _VORONOI_WEIGHT_CACHE[key]
+
+
+def era5_to_mpas_carry(
+    era5: ERA5Slice,
+    grid,
+    sigma,
+):
+    """Convert an ERA5 slice to a ``SegmentCarry`` on an MPAS/Voronoi mesh.
+
+    The real-data reference path for the MPAS column comparison (the Voronoi
+    sibling of :func:`era5_to_cubedsphere_carry`): ERA5 lat-lon fields are
+    inverse-distance regridded to the mesh CELL centres
+    (:func:`~legoesm.grids.regridding.compute_latlon_to_voronoi_weights`, keyed on
+    ``mesh.latCell``/``lonCell``), then vertically interpolated to model sigma.
+
+    ``grid`` is the :class:`~legoesm.grids.voronoi.VoronoiMesh`.  ``u``/``v`` are
+    regridded COMPONENT-WISE in the geographic (east, north) basis — frame-
+    consistent with the model-side Perot cell wind (iter 74,
+    ``reconstruct_cell_velocity`` returns ``u_east, v_north``), so the model-vs-ERA5
+    vector-wind RMSE is like-for-like.  This is a DIAGNOSTIC component
+    interpolation, NOT a conservative vector remap; near-pole geographic-basis
+    distortion is a known limitation (the same as the cubed-sphere path).  Single-
+    rank / full mesh (matching the column extractor + iter-74 compare scope).
+    """
+    from legoesm.core.field import Field
+    from legoesm.core.state import HydrostaticState
+    from legoesm.driver.compiled_segments import pack_carry
+    from legoesm.grids.regridding import regrid_scalar
+
+    mesh = grid
+    weights = _get_voronoi_weights(era5.lat, era5.lon, mesh)
+    sigma_f = jnp.asarray(sigma.sigma_full)
+    plev = jnp.asarray(era5.plev_Pa)            # ascending (interp searchsorted)
+
+    def _regrid_3d(field_ll):
+        # (n_lat, n_lon, n_plev) → (n_lat*n_lon, n_plev): the SAME (lat, lon)
+        # C-order ravel the weights' meshgrid was built over → cells map correctly.
+        flat = jnp.asarray(field_ll).reshape(-1, field_ll.shape[-1])
+        return regrid_scalar(flat, weights)     # (nCells, n_plev)
+
+    T_cell = _regrid_3d(era5.T)
+    u_cell = _regrid_3d(era5.u)
+    v_cell = _regrid_3d(era5.v)
+    q_cell = _regrid_3d(era5.q)
+    p_s_cell = regrid_scalar(jnp.asarray(era5.p_s.ravel()), weights)   # (nCells,)
+    phis_cell = regrid_scalar(jnp.asarray(era5.phis.ravel()), weights)
+
+    # Model TRUE full-level pressures (hybrid-correct; iter 339): interp the ERA5 reference
+    # to these, not pure-sigma sigma*p_s.  Pure-sigma: pressure_at_full == sigma*p_s.
+    p_full = sigma.pressure_at_full(p_s_cell)
+    T_model = interp_pressure_to_sigma(T_cell, plev, p_s_cell, sigma_f, p_full=p_full)
+    u_model = interp_pressure_to_sigma(u_cell, plev, p_s_cell, sigma_f, p_full=p_full)
+    v_model = interp_pressure_to_sigma(v_cell, plev, p_s_cell, sigma_f, p_full=p_full)
+    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING RATIO
+    # r = q/(1−q) (canonical thermo helper; see era5_to_spectral_carry).
+    q_model = specific_humidity_to_mixing_ratio(
+        interp_pressure_to_sigma(q_cell, plev, p_s_cell, sigma_f, p_full=p_full)
+    )
+
+    dims_3d = ("cell", "level")
+    dims_2d = ("cell",)
+    state = HydrostaticState(
+        u=Field(u_model, name="u", dims=dims_3d, units="m/s"),
+        v=Field(v_model, name="v", dims=dims_3d, units="m/s"),
+        T=Field(T_model, name="T", dims=dims_3d, units="K"),
+        p_s=Field(p_s_cell, name="p_s", dims=dims_2d, units="Pa"),
+        phis=Field(phis_cell, name="phis", dims=dims_2d, units="m2/s2"),
+    )
+    shape_3d = T_model.shape
+    shape_2d = p_s_cell.shape
+    return pack_carry(
+        state,
+        q_v=q_model,
+        q_c=jnp.zeros(shape_3d),
+        q_r=jnp.zeros(shape_3d),
+        held_dT_rad=jnp.zeros(shape_3d),
+        held_sw_net_sfc=jnp.zeros(shape_2d),
+        held_lw_net_sfc=jnp.zeros(shape_2d),
+        held_sw_up_toa=jnp.zeros(shape_2d),
+        held_lw_up_toa=jnp.zeros(shape_2d),
+        held_sw_down_toa=jnp.zeros(shape_2d),
+        step_index=0,
+    )
+
+
 def era5_to_latlon_carry(
     era5: ERA5Slice,
     grid,
@@ -634,9 +942,9 @@ def era5_to_latlon_carry(
     -------
     SegmentCarry
     """
-    from legoesm.driver.compiled_segments import pack_carry
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
+    from legoesm.driver.compiled_segments import pack_carry
 
     sigma_full = np.asarray(sigma.sigma_full)
 
@@ -687,10 +995,10 @@ def era5_to_latlon_carry(
     T_model = _vinterp(T_ll)
     u_model = _vinterp(u_ll)
     v_model = _vinterp(v_ll)
-    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING
-    # RATIO r = q / (1 − q) (see the spectral path for the rationale).
-    q_specific = jnp.clip(jnp.maximum(_vinterp(q_ll), 0.0), 0.0, 0.99)
-    q_model = q_specific / (1.0 - q_specific)
+    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING RATIO
+    # r = q/(1−q) (canonical thermo helper; consistent with the spectral,
+    # Gaussian, and cube carries above — #565 unified this path onto it).
+    q_model = specific_humidity_to_mixing_ratio(_vinterp(q_ll))
 
     dims_3d = ("lat", "lon", "level")
     dims_2d = ("lat", "lon")

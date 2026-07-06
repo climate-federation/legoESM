@@ -163,6 +163,17 @@ def global_area_sum(
             mask = mask[..., None]
         prod = prod * mask
     local_sum = jnp.sum(prod)
+    # Lat-band SPMD (single-process shard_map): combine the band-local partial
+    # across the "lat" axis BEFORE is_distributed() — under SPMD there is one
+    # process (is_distributed() is False) yet each band holds only a partial
+    # sum. Inert for serial/MPI/cube (returns None), so the default path is
+    # byte-unchanged. Mirrors batch_global_area_sums (:241) so the SINGLE-array
+    # fixers that reduce via global_area_sum (fix_ps_mass_target,
+    # fix_moisture_hydrostatic) are lat-band-SPMD-correct too, not only the
+    # batched callers.
+    spmd_sums = _spmd_lat_psum_or_none([local_sum])
+    if spmd_sums is not None:
+        return spmd_sums[0]
     if is_distributed():
         from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
@@ -1061,7 +1072,13 @@ def fix_mass_mpas(state_new, state_old, mesh, target_mass=None):
             axis=-1,
         ) * area[..., None]
         local = jnp.sum(_h_stack, axis=tuple(range(area.ndim)))
-        if jax.process_count() > 1:
+        # is_multi_process(), NOT jax.process_count() > 1: mpi4jax reduce
+        # only when each rank holds a LOCAL partition (route-A).  Under
+        # multi-controller SPMD the sum above is already global via GSPMD;
+        # mpi4jax here would arm the forbidden mixed stack and over-count
+        # by the world size (#751 latent-bug class).
+        from legoesm.parallel.reductions import is_multi_process
+        if is_multi_process():
             from legoesm.parallel.reductions import global_sum_mpi
             local = global_sum_mpi(local)
         mass_new, total_area = local[0], local[1]
@@ -1076,7 +1093,8 @@ def fix_mass_mpas(state_new, state_old, mesh, target_mass=None):
             axis=-1,
         ) * area[..., None]
         local = jnp.sum(_h_stack, axis=tuple(range(area.ndim)))
-        if jax.process_count() > 1:
+        from legoesm.parallel.reductions import is_multi_process
+        if is_multi_process():  # route-A local partitions only (see above)
             from legoesm.parallel.reductions import global_sum_mpi
             local = global_sum_mpi(local)
         mass_old, mass_new, total_area = local[0], local[1], local[2]
@@ -1220,7 +1238,10 @@ def fix_energy_mpas(state_new, state_old, mesh, g=constants.g):
     KE_new, PE_new = _ke_pe_terms(state_new)
 
     local = jnp.stack([KE_old, PE_old, KE_new, PE_new])
-    if jax.process_count() > 1:
+    # Route-A local-partition reduce only — NOT under multi-controller SPMD
+    # (GSPMD already made the sums global; #751 latent-bug class).
+    from legoesm.parallel.reductions import is_multi_process
+    if is_multi_process():
         from legoesm.parallel.reductions import global_sum_mpi
         local = global_sum_mpi(local)
     KE_old, PE_old, KE_new, PE_new = local[0], local[1], local[2], local[3]

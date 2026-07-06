@@ -68,12 +68,46 @@ def _as_profile(arr, nlev, name):
     return out
 
 
+def surface_kinematic_flux_tendency(flux_s, height_coord: HeightCoordinate):
+    """``(nlev,)`` scalar tendency [φ/s] from a PRESCRIBED surface kinematic flux
+    ``flux_s`` [φ·m/s], POSITIVE = UPWARD (surface → atmosphere): a positive
+    sensible-heat / moisture flux WARMS / MOISTENS the surface cell.
+
+    Injected ONLY on the SURFACE boundary cell — the LAST index in the height
+    coordinate's TOP-TO-BOTTOM storage (``z_half[-1] = 0``).  The interior SGS
+    vertical diffusion (``compressible_euler_plane._vertical_K_diffusion_full``)
+    uses a NO-FLUX (``F=0``) surface interface and documents that "surface/top
+    fluxes are injected SEPARATELY by the surface scheme" (SAM
+    ``diffuse_scalar_z.f90:61``); this boundary-cell source is EXACTLY that
+    injection — NOT a double-count of the interior stencil.  Mass-weighted to
+    match the SGS form ``∂_t φ = (1/ρ_ref)·∂_z(ρ_w·F)``::
+
+        tend_sfc = flux_s · ρ_w_sfc / (ρ_ref_sfc · dz_sfc)
+
+    with ``ρ_w_sfc = rho_ref_half[-1]`` the surface-interface reference density,
+    ``ρ_ref_sfc = rho_ref[-1]`` the surface-cell density, ``dz_sfc = dz[-1]`` the
+    surface-cell thickness.  Pure + AD-safe: ``flux_s`` flows LINEARLY into a
+    single cell and the only divisions are by STATIC grid metric (no division by
+    a traced value).  This is a boundary SOURCE — it intentionally changes the
+    column heat/moisture budget by the surface flux (it is NOT internally
+    conservative, unlike the interior SGS).
+    """
+    rho_ref = jnp.asarray(height_coord.rho_ref)
+    rho_w_sfc = jnp.asarray(height_coord.rho_ref_half)[-1]
+    dz_sfc = jnp.asarray(height_coord.dz)[-1]
+    tend_sfc = jnp.asarray(flux_s) * (rho_w_sfc / rho_ref[-1]) / dz_sfc
+    out = jnp.zeros((height_coord.n_levels,), dtype=rho_ref.dtype)
+    return out.at[-1].set(tend_sfc.astype(rho_ref.dtype))
+
+
 def make_plane_ls_forcing_physics(
     height_coord: HeightCoordinate,
     *,
     w_ls=None,
     theta_adv=None,
     qv_adv=None,
+    w_theta_sfc=None,
+    w_qv_sfc=None,
     u_nudge=None,
     v_nudge=None,
     tau_nudge=None,
@@ -104,6 +138,14 @@ def make_plane_ls_forcing_physics(
     theta_adv, qv_adv
         ``(nlev,)`` prescribed horizontal-advection tendencies of θ [K/s] and
         q_v [(kg/kg)/s].  ``None`` disables that channel.
+    w_theta_sfc, w_qv_sfc
+        Scalar PRESCRIBED surface kinematic fluxes of θ [K·m/s] and q_v
+        [(kg/kg)·m/s], POSITIVE = UPWARD (surface → atmosphere).  Applied via
+        :func:`surface_kinematic_flux_tendency` ONLY to the surface (last) cell —
+        the separate surface-scheme injection the no-flux interior SGS leaves room
+        for (SAM ``diffuse_scalar_z.f90:61``).  ``None`` disables that channel.
+        (The prescribed-FLUX surface BC; a prescribed surface-TEMPERATURE bulk
+        path is a separate future channel.)
     u_nudge, v_nudge
         ``(nlev,)`` target wind profiles [m/s] for DOMAIN-MEAN relaxation (SAM
         ``donudging_uv`` — only the horizontal-mean wind is nudged, eddies are
@@ -136,13 +178,21 @@ def make_plane_ls_forcing_physics(
             )
     inv_tau = (1.0 / tau_nudge) if nudging else 0.0
 
-    if w_ls is None and theta_adv is None and qv_adv is None and not nudging:
+    if (w_ls is None and theta_adv is None and qv_adv is None and not nudging
+            and w_theta_sfc is None and w_qv_sfc is None):
         raise ValueError(
             "make_plane_ls_forcing_physics: no forcing channel is active "
-            "(all of w_ls, theta_adv, qv_adv, u_nudge, v_nudge are None) — "
-            "this would add a pure-zero tendency every step. Configure at "
-            "least one channel or omit the forcing physics entirely."
+            "(all of w_ls, theta_adv, qv_adv, w_theta_sfc, w_qv_sfc, u_nudge, "
+            "v_nudge are None) — this would add a pure-zero tendency every step. "
+            "Configure at least one channel or omit the forcing physics entirely."
         )
+
+    # Prescribed surface kinematic fluxes → a static (nlev,) surface-cell tendency
+    # profile baked into the closure (flux is steady; compute once, not per step).
+    sfc_theta_tend = (None if w_theta_sfc is None
+                      else surface_kinematic_flux_tendency(w_theta_sfc, height_coord))
+    sfc_qv_tend = (None if w_qv_sfc is None
+                   else surface_kinematic_flux_tendency(w_qv_sfc, height_coord))
 
     z_full = height_coord.z_full            # (nlev,), top-to-bottom
     theta_ref = height_coord.theta_ref      # (nlev,)
@@ -213,6 +263,16 @@ def make_plane_ls_forcing_physics(
         if qv_adv is not None and n_tr > 0:
             d_tracers = d_tracers.at[..., 0].add(
                 qv_adv.reshape(1, 1, nlev).astype(sd)
+            )
+
+        # --- Prescribed surface kinematic fluxes (surface-cell source) -----
+        # The no-flux interior SGS leaves the surface flux to this scheme (SAM
+        # diffuse_scalar_z.f90:61); only the surface (last) cell is nonzero.
+        if sfc_theta_tend is not None:
+            d_theta = d_theta + sfc_theta_tend.reshape(1, 1, nlev).astype(sd)
+        if sfc_qv_tend is not None and n_tr > 0:
+            d_tracers = d_tracers.at[..., 0].add(
+                sfc_qv_tend.reshape(1, 1, nlev).astype(sd)
             )
 
         # --- Wind nudging (SAM donudging_uv) -------------------------------

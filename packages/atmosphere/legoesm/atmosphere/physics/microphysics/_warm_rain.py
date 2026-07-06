@@ -91,6 +91,17 @@ def donor_clamp_scale(q_avail, sink_total, dt, divisor_floor=1.0e-15):
     return jnp.minimum(1.0, q_avail / sink_dt_safe)
 
 
+def kelvin_coefficient(T):
+    """Köhler curvature (Kelvin) term ``A = 2 σ_w / (ρ_w R_v T)`` [m].
+
+    SINGLE canonical definition — shared by the fast-SBM nucleation
+    (oracle ``AKOE``) and the ARG (Abdul-Razzak & Ghan 2000) activation
+    scheme, so the two cannot drift (no-duplicate-numerics rule).
+    """
+    return 2.0 * constants.sigma_water / (
+        constants.rho_water * constants.R_v * T)
+
+
 # --- air transport properties (SAM M2005 module_mp_graupel.f90; fixed) -------
 # Hall & Pruppacher (1976) water-vapour diffusivity in air, Sutherland dynamic
 # viscosity, and the derived Schmidt number / air thermal conductivity — shared

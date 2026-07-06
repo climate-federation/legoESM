@@ -21,6 +21,52 @@ from legoesm.atmosphere.physics.gravity_wave_drag.config import (
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "Prognostic multi-azimuthal / multi-wavenumber spectral gravity-wave "
+        "drag: carries a wave momentum-flux spectrum forward in time (relaxed "
+        "toward a launch source), saturates it upward, and deposits the "
+        "stress-divergence as wind tendencies (opt-in; known sign defect)."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "rho": "kg/m^3", "lat": "rad", "dt": "s",
+        "spectrum_in": "Pa (per-column wave momentum-flux spectrum, (n_az, n_wn))",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "eps_gwd": "W/m^2",
+        "spectrum_new": "Pa (updated wave momentum-flux spectrum)",
+    },
+    "sign_convention": (
+        "z up. INTENDED as a momentum sink with KE->heat "
+        "(dT_dt=-(u*du_dt+v*dv_dt)/c_pd, gated by config.thermal_tendency) and "
+        "eps_gwd>=0. KNOWN DEFECT (F-GWD-1, parameterization_checks.md): the "
+        "deposition is missing the sign(c - U_proj) factor, so a symmetric "
+        "launch spectrum yields a wind-independent force (not a true drag) and "
+        "eps_gwd can be < 0 (accelerates jets). Opt-in only; default GWD=none."
+    ),
+    # Conserves NOTHING robustly: the spectrum is RELAXED toward a launch source
+    # (a source/sink, not conserved wave momentum flux); the thermal (energy)
+    # tie-back is config-gated (thermal_tendency) and the documented F-GWD-1
+    # sign defect means the drag is not a guaranteed momentum sink. Declaring
+    # any conserved quantity would over-claim.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Multi-azimuthal spectral non-orographic GWD (prognostic wave "
+        "spectrum), legoESM; known defect tracked as F-GWD-1 in "
+        "docs parameterization_checks.md (no external reference cited)"
+    ),
+    "idealized_test": (
+        "rest state -> zero tendency and spectrum relaxes toward launch_flux "
+        "on timescale tau_decay; du_dt/dv_dt shapes (ncol, nlev); "
+        "FLAG: eps_gwd>=0 does NOT hold until F-GWD-1 (missing sign factor) "
+        "is fixed"
+    ),
+}
+
 _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 
 

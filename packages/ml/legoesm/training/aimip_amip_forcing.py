@@ -66,8 +66,17 @@ def regrid_monthly_forcing_to_gaussian(forcing_path, grid, cache_path=None):
     ``cache_path`` (``.npz``) because regridding 556 0.25-deg fields is slow and
     both the run and the fine-tune reuse it.
     """
+    ncol_grid = len(grid.lat) * len(grid.lon)
     if cache_path is not None and Path(cache_path).exists():
         d = np.load(cache_path)
+        if d["sst"].shape[1] != ncol_grid:
+            raise ValueError(
+                f"Forcing cache {cache_path} was built for ncol="
+                f"{d['sst'].shape[1]} but the requested grid has "
+                f"ncol={ncol_grid} — a T63 cache silently reused at T106 "
+                f"(or vice versa) would prescribe garbage SST. Use a "
+                f"per-resolution cache_path."
+            )
         return d["times_ns"], d["sst"], d["sic"], d["land"]
 
     import xarray as xr
@@ -111,6 +120,74 @@ def interp_forcing_at(times_ns, field, target_ns):
     j = int(np.searchsorted(t, tt))  # t[j-1] < tt <= t[j]
     w = (tt - t[j - 1]) / (t[j] - t[j - 1])
     return (1.0 - w) * np.asarray(field[j - 1]) + w * np.asarray(field[j])
+
+
+def build_amip_sample_forcings(ic_times, grid, forcing_path=None,
+                               cache_path=None):
+    """Per-training-sample prescribed surface forcing for learned physics.
+
+    For each IC time in ``ic_times`` (np.datetime64, from
+    ``load_training_data``) interpolate the AIMIP monthly SST / sea-ice
+    forcing to the sample date and build the traced forcing dict consumed
+    by ``spectral_rollout(forcing_base=...)`` /
+    ``physics_fn(..., forcing=...)``::
+
+        {"T_sfc": (ncol,)  SST/sea-ice blend over OCEAN, NaN over land
+                            (physics fns substitute their lowest-level
+                            air-T proxy there),
+         "sic":   (ncol,)  sea-ice fraction in [0, 1],
+         "day_of_year": scalar float (1-366),
+         "seconds_of_day": scalar float [0, 86400)}
+
+    This is the SAME forcing file + interpolation + SST/ice blend as the
+    AMIP inference driver (``run_aimip_amip_inference``), so train-time
+    and inference-time surface inputs are consistent by construction.
+
+    Returns a list of dicts of jnp arrays, aligned with ``ic_times``.
+    Raises if any IC time is None (the zarr time coordinate was
+    unreadable) — silent unforced training would produce a network with
+    no SST response.
+    """
+    import jax.numpy as jnp
+    from legoesm import constants
+    from legoesm.forcing.surface_utils import blend_surface_temperature
+
+    forcing_path = forcing_path or DEFAULT_AIMIP_FORCING
+    times_ns, sst_m, sic_m, land = regrid_monthly_forcing_to_gaussian(
+        forcing_path, grid, cache_path=cache_path,
+    )
+    ocean = land < 0.5
+    t_ice = float(constants.T_freeze_ocean)
+
+    forcings = []
+    for t in ic_times:
+        if t is None:
+            raise ValueError(
+                "build_amip_sample_forcings: sample IC time is None "
+                "(ERA5 zarr time coordinate unreadable) — cannot build "
+                "prescribed surface forcing."
+            )
+        t64 = np.datetime64(t, "ns")
+        t_ns = t64.astype(np.int64)
+        sst_c = interp_forcing_at(times_ns, sst_m, t_ns)
+        sic_c = np.clip(interp_forcing_at(times_ns, sic_m, t_ns), 0.0, 1.0)
+        t_sfc = np.asarray(blend_surface_temperature(sst_c, sic_c, t_ice))
+        day = t64.astype("datetime64[D]")
+        year_start = np.datetime64(t64.astype("datetime64[Y]"), "D")
+        doy = float((day - year_start) / np.timedelta64(1, "D")) + 1.0
+        sec = float((t64 - np.datetime64(day, "ns"))
+                    / np.timedelta64(1, "s"))
+        forcings.append({
+            "T_sfc": jnp.asarray(
+                np.where(ocean, t_sfc, np.nan), dtype=jnp.float64,
+            ),
+            "sic": jnp.asarray(
+                np.where(ocean, sic_c, 0.0), dtype=jnp.float64,
+            ),
+            "day_of_year": jnp.asarray(doy, dtype=jnp.float64),
+            "seconds_of_day": jnp.asarray(sec, dtype=jnp.float64),
+        })
+    return forcings
 
 
 def ghg_vmr_at_year(year, experiment: str = "amip") -> dict:

@@ -1925,3 +1925,53 @@ class TestTiledStepFnRouting:
         b = self._run(None, explicit_none=True)
         assert float(jnp.max(jnp.abs(a.T - b.T))) == 0.0
         assert float(jnp.max(jnp.abs(a.p_s - b.p_s))) == 0.0
+
+
+class TestQvSmoothingGate:
+    """Direct leaf tests for the fix-5 moisture-smoothing static gate
+    (``_apply_qv_smoothing``), the only operator-split-tail hot-loop change in
+    PR #798 (#797). The gate skips the cube-only ∇⁴ operator when
+    ``qv_smooth_coeff == 0`` so the lat-lon training rollout does not crash on
+    ``grid.halo_interp_offsets``, while the nonzero path stays bit-identical to
+    the former nested ``max(q + dt·∇⁴, 0)``."""
+
+    def test_zero_coeff_skips_operator_and_only_floors(self):
+        from types import SimpleNamespace
+
+        from legoesm.driver.compiled_segments import _apply_qv_smoothing
+
+        def _boom(*args, **kwargs):
+            raise AssertionError(
+                "hyperdiffusion_3d must NOT be called when qv_smooth_coeff == 0 "
+                "(that call is what crashes lat-lon on grid.halo_interp_offsets)")
+
+        q = jnp.array([[-1.0, 2.0, 0.0, 0.5]])
+        # grid deliberately has NO halo_interp_offsets — mimics a lat-lon grid.
+        statics = SimpleNamespace(
+            qv_smooth_coeff=0.0, dt=100.0, grid=object(), hyperdiffusion_3d=_boom)
+        out = _apply_qv_smoothing(q, statics)
+        # operator skipped; only the positivity floor applied.
+        assert jnp.array_equal(out, jnp.maximum(q, 0.0))
+
+    def test_nonzero_coeff_is_bit_identical_to_former_nested_max(self):
+        from types import SimpleNamespace
+
+        from legoesm.driver.compiled_segments import _apply_qv_smoothing
+
+        seen = {}
+
+        def _hd(field, grid, coeff):
+            seen["coeff"] = coeff
+            seen["grid"] = grid
+            return jnp.full_like(field, 1.0e-3)  # arbitrary ∇⁴ tendency
+
+        q = jnp.array([[0.01, -0.002, 0.5, 3.0e-4]])
+        dt, coeff, grid = 90.0, 0.25, object()
+        statics = SimpleNamespace(
+            qv_smooth_coeff=coeff, dt=dt, grid=grid, hyperdiffusion_3d=_hd)
+        out = _apply_qv_smoothing(q, statics)
+        # Former inline form: max(q + dt*hyperdiffusion_3d(q, grid, coeff), 0).
+        expected = jnp.maximum(q + dt * jnp.full_like(q, 1.0e-3), 0.0)
+        assert jnp.array_equal(out, expected)
+        # The real operator was invoked with the configured coeff + grid.
+        assert seen["coeff"] == coeff and seen["grid"] is grid

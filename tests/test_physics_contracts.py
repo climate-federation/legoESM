@@ -88,6 +88,12 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/convection/config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/convection/output.py",
+        # Shared convection primitive libraries (NOT single-tendency schemes):
+        # _plume = LCL/LFC/CIN/entraining-plume/CMT helpers reused across ZM/KF/
+        # Emanuel/Tiedtke/Bechtold; _triggers = dimensionless smooth trigger/
+        # indicator primitives. Same rationale as _shared.py / thermodynamics.py.
+        "packages/atmosphere/legoesm/atmosphere/physics/convection/_plume.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/convection/_triggers.py",
         "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/integration.py",
@@ -99,6 +105,12 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/fast_sbm/grid.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/output.py",
+        # Shared microphysics primitive libraries (NOT single-tendency schemes):
+        # _warm_rain = saturation-adjustment / autoconversion / accretion / rain-
+        # evap helpers reused by Kessler/SB/Morrison/Thompson/P3; _thompson_snow =
+        # Thompson-2008 snow process functions used by thompson.py. Like _shared.py.
+        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/_thompson_snow.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/particles.py",
@@ -152,6 +164,9 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
+        # MPI plumbing: slices a deployed per-column override to a rank's tile,
+        # not a single-tendency physics scheme.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/override_sharding.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",
         "packages/ocean/legoesm/ocean/physics/bottom_drag/__init__.py",
         "packages/ocean/legoesm/ocean/physics/bottom_drag/config.py",
@@ -183,61 +198,7 @@ EXCLUDED: frozenset[str] = frozenset(
 
 # Scheme modules not yet carrying a contract (iter 2026-06-09). SHRINK-ONLY.
 CONTRACT_TODO: frozenset[str] = frozenset(
-    {
-        "packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/convection/_emanuel_mixing.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/convection/_plume.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/convection/_triggers.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/convection/_zm_dilute.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/convection/bechtold.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/convection/dca.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/convection/emanuel.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/convection/kain_fritsch.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/convection/kuo.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/convection/mass_flux.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/convection/sbm.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/convection/tiedtke.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/convection/zhang_mcfarlane.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/e3sm_cam.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/hines.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/lindzen.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/mcfarlane.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/ml_emulator.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/prognostic_spectral.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/learned_column.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/_thompson_snow.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/kessler.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/ml_emulator.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/p3.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/seifert_beheng.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/sundqvist.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/thompson.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/ml_parameterization.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/neural_physics.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/radiation/gray.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/radiation/ozone_ml.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/radiation/ozone_mls.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rrtmgp.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rte/monochromatic_two_stream.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rte/two_stream.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp_radiation.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/radiation/solar.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_lite.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/holtslag_boville.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/lasd_core.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/louis.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/mynn25.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/pbl_height.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/smagorinsky.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/surface_layer.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/tke.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/vertical_diffusion.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/vreman.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/ysu.py",
+    (
         "packages/ocean/legoesm/ocean/physics/convection/enhanced_diffusion.py",
         "packages/ocean/legoesm/ocean/physics/convection/plume.py",
         "packages/ocean/legoesm/ocean/physics/ice_shelf.py",
@@ -247,13 +208,10 @@ CONTRACT_TODO: frozenset[str] = frozenset(
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/biharmonic.py",
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/eke.py",
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi.py",
-        # MLE shared core: config + Fox-Kemper formulas/helpers (coefficient,
-        # vertical structure, MLE-MLD + buoyancy), NOT a single-tendency scheme.
-        # The scheme (mle_latlon_cgrid.py) carries the __physics_contract__.
-        "packages/ocean/legoesm/ocean/physics/lateral_mixing/mle.py",
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py",
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_mpas.py",
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/harmonic.py",
+        "packages/ocean/legoesm/ocean/physics/lateral_mixing/mle.py",
         "packages/ocean/legoesm/ocean/physics/mixing.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/bulk_formulas.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/external.py",
@@ -268,7 +226,7 @@ CONTRACT_TODO: frozenset[str] = frozenset(
         "packages/ocean/legoesm/ocean/physics/vertical_mixing/richardson.py",
         "packages/ocean/legoesm/ocean/physics/vertical_mixing/tidal.py",
         "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py",
-    }
+    )
 )
 
 

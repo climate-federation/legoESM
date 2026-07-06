@@ -52,6 +52,56 @@ from legoesm.atmosphere.physics.gravity_wave_drag.config import (
     E3SMCAMConfig,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
+
+# Machine-checked scheme contract (see tests/test_physics_contracts.py). Applies
+# to the top-level driver ``e3sm_cam_gwd``; the ``gw_*`` functions above/below
+# are its faithful E3SM sub-steps (source, stress solver, ediff, fixer).
+__physics_contract__ = {
+    "summary": (
+        "Faithful differentiable E3SM/CAM gravity-wave drag (gw_drag_prof "
+        "spectral solver): orographic (McFarlane c=0), frontal (CM), or "
+        "convective (Beres) source launched, propagated with Lindzen "
+        "saturation + WKB damping, deposited as wind tendencies + heating."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "rho": "kg/m^3", "lat": "rad", "dt": "s",
+        "h_topo_col": "m (optional subgrid orographic stddev, sgh)",
+        "frontgf_col": "K^2 m^-2 s^-1 (optional frontogenesis function, frontal source)",
+        "netdt_col": "K/s (optional convective heating rate, Beres source)",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "eps_gwd": "W/m^2",
+    },
+    "sign_convention": (
+        "z up; k=0 model top, k=nlev-1 surface. Drag opposes the wave-relative "
+        "wind: the tendency is signed sign(c - ubm) (= deceleration toward the "
+        "phase speed c), so it decelerates the resolved flow; tendency "
+        "limiters cap the magnitude without changing sign. dT_dt>0 is the "
+        "KE->heat / wave-energy deposition; eps_gwd>=0 is the column KE loss."
+    ),
+    # Energy is the robustly-conserved quantity: KE removed from the mean flow
+    # is returned as heating (orographic: exact local dT_dt=-(u*du+v*dv)/c_pd;
+    # spectral: wave-energy deposition dttke), and the optional C.-C. Chen fixer
+    # (config.do_energy_conservation, default OFF) additionally self-closes the
+    # exact column momentum+energy budget below source. Momentum is NOT
+    # conserved by default (stress penetrates to the surface / is limiter-
+    # capped); it is redeposited in-column only when do_energy_conservation=True.
+    "conserves": ["energy"],
+    "differentiable": True,
+    "reference": (
+        "McFarlane (1987) / Lindzen (1981) / Beres (2004); E3SM EAM "
+        "gw_common.F90 (gw_prof, gw_drag_prof, momentum_energy_conservation), "
+        "gw_oro.F90, gw_front.F90, gw_convect.F90"
+    ),
+    "idealized_test": (
+        "tests/atmosphere/hydrostatic/unit/test_gwd_e3sm_cam.py: rest state -> "
+        "zero tendency; drag decelerates a westerly jet; "
+        "test_gwd_damping_factor_never_amplifies_stress (mi>=0, stress "
+        "monotone); do_energy_conservation closes the column energy budget"
+    ),
+}
 # Default critical-Froude tuning + orographic tendency cap (scheme defaults).
 _DCA_DEFAULT = 0.1
 _TNDMAX_ORO_PER_DAY = 500.0

@@ -35,6 +35,10 @@ c_pv = 1846.0                   # Specific heat of water vapor [J/(kg*K)]
 c_pw = 4218.0                   # Specific heat of liquid water [J/(kg*K)]
 c_pi = 2106.0                   # Specific heat of ice [J/(kg*K)]
 L_v = 2.501e6                   # Latent heat of vaporization at 0C [J/kg]
+# SST slope of L_v in the NEMO/AeroBulk air-sea convention (sbc_phy
+# L_vap: L = (2.501 - 0.00237 (T - T_freeze)) 1e6) — equals L_v at 0 degC
+# by construction.  Used by thermo.latent_heat_vaporization_sst (#762).
+L_v_sst_slope = 2.370e3         # [J/(kg*K)] dL_v/dT, NEMO sbc_phy / Fairall
 L_s = 2.834e6                   # Latent heat of sublimation at 0C [J/kg]
 L_f = 3.337e5                   # Latent heat of fusion at 0C [J/kg]
 rho_water = 1000.0              # Density of liquid water [kg/m^3]
@@ -72,6 +76,7 @@ rho_freshwater_curvature = 8.0e-6   # ρ-anomaly curvature [K^-2] from d²ρ/dT�
 # The kg/mol forms ``M_dry`` and ``M_h2o`` (below) are derived from these
 # via ``* 1e-3`` so future drift between g/mol and kg/mol forms is impossible.
 M_air = 28.96546        # [g/mol] dry air (CODATA)
+M_C   = 12.011          # [g/mol] atomic mass of carbon (IUPAC 2021)
 M_CO2 = 44.01           # [g/mol] CO2
 M_H2O = 18.01528        # [g/mol] water
 
@@ -96,6 +101,11 @@ sigma_water = 0.0728            # Surface tension of the water-air interface [N/
 # Turbulence
 # ==============================================================================
 kappa_von_karman = 0.4          # Von Kármán constant for the log-law (Pope 2000)
+nu_ocean_molecular = 1.4e-6     # Molecular kinematic viscosity of seawater
+                                # [m^2/s] (~10 degC; NEMO phycst/zdfiwm ``rnu``)
+kappa_T_ocean_molecular = 1.4e-7  # Molecular thermal diffusivity of seawater
+                                  # [m^2/s] (= nu_ocean_molecular / Pr, Pr~10;
+                                  # NEMO zdfiwm lower bound on wave-driven Kz)
 
 
 # ==============================================================================
@@ -153,6 +163,8 @@ c_p_vapor_nemo = 1860.0         # [J/(kg*K)] NEMO sbc_phy rCp_vap
 g_nemo = 9.80665                # [m/s^2]  NEMO phycst grav
 R_v_nemo = 461.495              # [J/(kg*K)] NEMO sbc_phy R_vap (ours: 461.51)
 L_fus_nemo = 0.3333601e6        # [J/kg]   NEMO phycst rLfus (ours L_f: 3.337e5)
+L_fus_isf_nemo = 0.334e6        # [J/kg]   NEMO isf_oce rLfusisf (ISF melt latent
+                                #          heat — deliberately NOT rLfus)
 c_p_ice_nemo = 2096.7           # [J/(kg*K)] NEMO phycst rcpi (ours c_pi: 2106)
 # Universal molar constants used by NEMO's barometric 10-m pressure
 # (sbc_phy pres_temp): molar gas constant + dry-air/water molar masses.

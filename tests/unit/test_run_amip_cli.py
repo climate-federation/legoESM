@@ -65,6 +65,108 @@ def test_snow_albedo_feedback_flag_flows_to_config():
     assert cfg_on.snow_albedo_feedback is True
 
 
+def test_moisture_advection_flag_flows_to_config():
+    """Issue #771: resolved-wind moisture advection is OPT-IN (default OFF,
+    bit-identical legacy path); --moisture-advection turns it on."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.moisture_advection is False   # default off
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--moisture-advection",
+    ]), parser))
+    assert cfg_on.moisture_advection is True
+
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-moisture-advection",
+    ]), parser))
+    assert cfg_off.moisture_advection is False
+
+
+def test_radiation_column_chunk_flag_flows_to_config():
+    """--radiation-column-chunk round-trips into ExperimentConfig
+    (rrtmgp_column_chunk_size). 0 (default) = off / byte-identical; a >0 value
+    caps the rrtmgp XLA compile time by mapping the solve over fixed-size
+    column blocks (numerically exact — radiation columns are independent)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.rrtmgp_column_chunk_size == 0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--radiation-column-chunk", "256",
+    ]), parser))
+    assert cfg.rrtmgp_column_chunk_size == 256
+
+
+def test_land_gs_max_flag_flows_to_config():
+    """--land-gs-max round-trips into ExperimentConfig (the global stomatal
+    canopy-conductance calibration knob for land ET, issue #730). Default 0.3
+    matches StomataConfig.gs_max; a lower value raises canopy resistance."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_gs_max == 0.3
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-gs-max", "0.15",
+    ]), parser))
+    assert cfg.land_gs_max == 0.15
+
+
+def test_land_gs_max_validate_strict_rejects_nonpositive_or_nonfinite():
+    """validate_strict() rejects a non-positive / non-finite gs_max — such a
+    value would zero or NaN the entire land latent-heat flux."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    for bad in (0.0, -0.1, float("nan")):
+        with pytest.raises(ValueError, match="land_gs_max"):
+            cfg._replace(land_gs_max=bad).validate_strict()
+
+
+def test_land_soil_moisture_init_frac_flag_flows_to_config():
+    """--land-soil-moisture-init-frac round-trips (issue #730 drier-cold-start
+    knob); default 0.5 is byte-identical to the init default."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_soil_moisture_init_frac == 0.5
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-soil-moisture-init-frac", "0.25",
+    ]), parser))
+    assert cfg.land_soil_moisture_init_frac == 0.25
+    for bad in (0.0, -0.1, 1.5, float("nan")):
+        with pytest.raises(ValueError, match="land_soil_moisture_init_frac"):
+            cfg._replace(land_soil_moisture_init_frac=bad).validate_strict()
+
+
+def test_land_surface_scheme_flag_flows_to_config():
+    """--land-surface-scheme round-trips (issue #730 two-leaf canopy selector);
+    default is the SimpleSEB path, 'two_leaf' selects the DifferBESS canopy."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_surface_scheme == "simple_seb"
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-surface-scheme", "two_leaf",
+    ]), parser))
+    assert cfg.land_surface_scheme == "two_leaf"
+
+
+def test_land_surface_scheme_validate_strict_rejects_unknown():
+    """validate_strict() rejects an unknown surface scheme (dispatch hardening —
+    a typo must fail early, not silently fall through in model_driver)."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    with pytest.raises(ValueError, match="land_surface_scheme"):
+        cfg._replace(land_surface_scheme="two_leff").validate_strict()
+
+
 def test_orbital_insolation_flag_flows_to_config():
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
@@ -1487,3 +1589,47 @@ def test_enable_tiled_dycore_flag_flows_to_config():
     ]), parser))
     with pytest.raises(ValueError, match="cubed_sphere"):
         cfg_bad.validate_strict()
+
+
+def test_moisture_flux_form_flag_flows_to_dycore_config():
+    """#771: --moisture-flux-form must reach the DycoreConfig (which the
+    component factory threads into CDGridPrimitiveEquationConfig). Default off;
+    --no-moisture-flux-form explicit off."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.dycore.moisture_flux_form is False   # default off
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--moisture-flux-form",
+    ]), parser))
+    assert cfg_on.dycore.moisture_flux_form is True
+
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-moisture-flux-form",
+    ]), parser))
+    assert cfg_off.dycore.moisture_flux_form is False
+
+
+def test_multicontroller_coordinator_flags_parse():
+    """Route-B flags round-trip through the parser (they are RUN args consumed
+    in main() for the jax.distributed bootstrap, not ExperimentConfig fields)."""
+    parser = build_arg_parser()
+    a = parser.parse_args(["--enable-latlon-spmd", "--multicontroller",
+                           "--coordinator", "localhost:12455"])
+    assert a.multicontroller is True
+    assert a.coordinator == "localhost:12455"
+    # Default: single-controller (both off).
+    d = parser.parse_args(["--dataset", "analytical"])
+    assert d.multicontroller is False
+    assert d.coordinator is None
+
+
+def test_multicontroller_requires_enable_latlon_spmd(capsys):
+    """--multicontroller without --enable-latlon-spmd is refused in main()
+    BEFORE any device work (it is only the route-B transport for that lane)."""
+    from scripts.run.run_amip import main
+    with pytest.raises(SystemExit):
+        main(["--grid-type", "latlon", "--dataset", "analytical",
+              "--multicontroller"])
+    assert "requires --enable-latlon-spmd" in capsys.readouterr().err

@@ -245,7 +245,11 @@ def surface_data_param_provider(
     fracs[zero_cover, 0] = 1.0
     pft_provider = PFTParamProvider.from_defaults(jnp.asarray(fracs))
 
-    lai_m = np.asarray(interp_monthly(gsd.lai_monthly, jnp.asarray(float(day_of_year))))
+    # Sanitise BEFORE the PFT-weighted sum: a NaN in a zero-weight PFT slot would
+    # otherwise poison the whole column via ``NaN * 0 == NaN`` (same guard as
+    # ``prescribed_canopy_structure`` and ``step_updater._update_seb``).
+    lai_m = np.nan_to_num(
+        np.asarray(interp_monthly(gsd.lai_monthly, jnp.asarray(float(day_of_year)))), nan=0.0)
     lai_col = np.nan_to_num(np.sum(lai_m * fracs, axis=-1), nan=0.0)            # (ncol,)
     soil_bg = np.asarray(
         soil_albedo_broadband(jnp.asarray(np.asarray(gsd.soil_color)), jnp.asarray(theta_top)))
@@ -262,20 +266,66 @@ def surface_data_param_provider(
 # ===========================================================================
 # Scheme-agnostic dispatcher + simulation-start entry
 # ===========================================================================
+def prescribed_canopy_structure(gsd, day_of_year):
+    """PFT-weighted monthly canopy structure ``(LAI, SAI, htop)`` — each
+    ``(ncol,)`` — for the CLM-ML canopy's PRESCRIBED-LAI mode.
+
+    Reuses the same PFT weights as the albedo blend in
+    :func:`surface_data_param_provider` (year-mean ``pft_frac``, zero-cover
+    columns collapsed to the bare-soil PFT row) so the prescribed LAI here is
+    identical to the ``lai_col`` that drives the surfdata albedo.
+
+    - ``LAI``/``SAI`` are area-additive (total leaf/stem area per unit ground =
+      ``sum_pft frac * pft_value``), so the PFT-weighted sum is the physical
+      column aggregate.
+    - ``htop`` is a height (intensive); the PFT-fraction-weighted mean is
+      returned as the effective single-canopy top height for the column.
+
+    ``hbot`` is intentionally NOT returned: the CLM-ML interface derives the
+    bottom-of-canopy height as ``CLMMLCanopyConfig.hbot_frac * htop`` (Bonan et
+    al. 2021 GMD default), so it already tracks the prescribed ``htop`` and a
+    separate prescribed ``hbot`` would be populated-but-unread.
+    """
+    fracs = np.nan_to_num(np.asarray(jnp.mean(gsd.pft_frac, axis=0)), nan=0.0)  # (ncol,npft)
+    zero_cover = fracs.sum(axis=-1) < 1e-6
+    fracs[zero_cover, :] = 0.0
+    fracs[zero_cover, 0] = 1.0   # uncovered -> bare-soil PFT row (LAI/SAI/height ~ 0)
+    doy = jnp.asarray(float(day_of_year))
+
+    def _wcol(monthly):
+        # Sanitise the monthly field BEFORE the PFT-weighted sum: a NaN in a
+        # zero-weight PFT slot would otherwise poison the whole column via
+        # ``NaN * 0 == NaN`` (matches the ``jnp.where(isfinite, ., 0)`` guard in
+        # ``step_updater._update_seb``).
+        m = np.nan_to_num(np.asarray(interp_monthly(monthly, doy)), nan=0.0)  # (ncol,npft)
+        return jnp.asarray(np.sum(m * fracs, axis=-1))                        # (ncol,)
+
+    return (_wcol(gsd.lai_monthly), _wcol(gsd.sai_monthly),
+            _wcol(gsd.htop_monthly))
+
+
 def surface_data_to_land_params(gsd, surface_scheme, day_of_year, theta_top):
     """Dispatch to the right per-column land-params object for ``surface_scheme``.
 
     ``TwoLeafCanopyConfig`` -> :class:`CanopyLandParams` (built directly — land/dev
-    has no canopy provider).  ``SimpleSEBConfig`` (slab or multilayer) ->
-    :class:`LandSurfaceParams` materialized from :class:`SurfaceDataParamProvider`.
-    For coupler use, prefer :func:`surface_data_param_provider` and pass the
-    provider to ``make_coupler(land_param_provider=...)``.  (clm-ml is an external
-    plugin with its own input contract; feed it ``gsd`` directly.)
+    has no canopy provider).  ``CLMMLCanopyConfig`` -> :class:`LandSurfaceParams`
+    from :class:`SurfaceDataParamProvider` PLUS the prescribed PFT-weighted monthly
+    canopy structure (``LAI``/``SAI``/``htop`` from
+    :func:`prescribed_canopy_structure`) so the CLM-ML scheme runs on real
+    vegetation structure instead of its scalar fallbacks (``hbot`` stays derived
+    as ``hbot_frac * htop`` inside the CLM-ML interface).  ``SimpleSEBConfig``
+    (slab or multilayer) -> :class:`LandSurfaceParams` (albedo/PFT params only;
+    it does not read the canopy-structure fields).
     """
     from legoesm.land.canopy import CanopyConfig
+    from legoesm.land.canopy.config import CLMMLCanopyConfig
     if isinstance(surface_scheme, CanopyConfig):
         return build_canopy_params(gsd, day_of_year, theta_top)
-    return surface_data_param_provider(gsd, day_of_year, theta_top)()
+    lp = surface_data_param_provider(gsd, day_of_year, theta_top)()
+    if isinstance(surface_scheme, CLMMLCanopyConfig):
+        lai, sai, htop = prescribed_canopy_structure(gsd, day_of_year)
+        lp = lp._replace(LAI=lai, SAI=sai, htop=htop)
+    return lp
 
 
 def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *, theta_top=None):

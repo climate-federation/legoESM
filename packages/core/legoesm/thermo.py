@@ -63,6 +63,94 @@ def saturation_vapor_pressure(T: jax.Array) -> jax.Array:
     return 611.2 * jnp.exp(17.67 * T_c / (T_c + 243.5))
 
 
+# ---------------------------------------------------------------------------
+# Alduchov & Eskridge (1996) "AERK" water + "AERKi" ice saturation curve.
+#
+# A single smooth (C-infinity), differentiable curve over the whole physical
+# range: the over-water Magnus form (AERK, Eq. 21) and the over-ice Magnus form
+# (AERKi, Eq. 23) blended across 0 degC by a logistic weight.  Unlike the plain
+# over-water ``saturation_vapor_pressure`` above (Bolton 17.67/243.5), this
+# branches to ice below freezing — the over-water extrapolation over-estimates
+# e_s by ~10-60 % at -10..-50 degC.  Ported to match DifferBESS
+# ``process/thermo.py`` (the two-big-leaf canopy oracle); the canopy energy
+# balance uses this curve and its analytic derivatives for VPD/RH and the
+# Penman-Monteith linearisation.  Alduchov & Eskridge (1996) J. Appl. Meteorol.
+# 35(4) 601-609:  water (AERK, Eq.21) 610.94 Pa / 17.625 / 243.04 (<0.384% over
+# -40..+50C);  ice (AERKi, Eq.23) 611.21 Pa / 22.587 / 273.86 (<0.213% over
+# -80..0C).  Analytic derivatives match jax.grad / grad(grad) to round-off.
+# ---------------------------------------------------------------------------
+_AERK_C1_WATER, _AERK_A_WATER, _AERK_B_WATER = 610.94, 17.625, 243.04  # satcurve-ok: AERK water (thermo)
+_AERK_C1_ICE,   _AERK_A_ICE,   _AERK_B_ICE   = 611.21, 22.587, 273.86  # satcurve-ok: AERKi ice (thermo)
+_AERK_BLEND_HALFWIDTH_C = 1.0   # logistic blend half-width [degC]
+
+
+def _aerk_magnus(C1, A, B, Tc):
+    return C1 * jnp.exp(A * Tc / (Tc + B))
+
+
+def _aerk_d_magnus(C1, A, B, Tc):
+    e = _aerk_magnus(C1, A, B, Tc)
+    return e * (A * B) * (Tc + B) ** (-2)
+
+
+def _aerk_dd_magnus(C1, A, B, Tc):
+    e  = _aerk_magnus(C1, A, B, Tc)
+    de = _aerk_d_magnus(C1, A, B, Tc)
+    return (A * B) * (de * (Tc + B) ** (-2) - 2.0 * e * (Tc + B) ** (-3))
+
+
+def _aerk_w(Tc):
+    """Logistic weight on the WATER branch (-> 1 warm, -> 0 cold)."""
+    return jax.nn.sigmoid(Tc / _AERK_BLEND_HALFWIDTH_C)
+
+
+def saturation_vapor_pressure_aerk(T: jax.Array) -> jax.Array:
+    """Saturation vapour pressure [Pa] from T [K] — AERK water + AERKi ice blend.
+
+    Over-water/over-ice Magnus forms (Alduchov & Eskridge 1996) blended across
+    0 degC.  Matches DifferBESS ``process/thermo.py``.  Use in place of the plain
+    over-water :func:`saturation_vapor_pressure` where sub-freezing accuracy
+    matters (the canopy energy balance) — the over-water form over-estimates e_s
+    by ~10-60 % below -10 degC.
+    """
+    Tc = T - constants.T_freeze
+    w  = _aerk_w(Tc)
+    ew = _aerk_magnus(_AERK_C1_WATER, _AERK_A_WATER, _AERK_B_WATER, Tc)
+    ei = _aerk_magnus(_AERK_C1_ICE,   _AERK_A_ICE,   _AERK_B_ICE,   Tc)
+    return w * ew + (1.0 - w) * ei
+
+
+def d_saturation_vapor_pressure_aerk(T: jax.Array) -> jax.Array:
+    """First derivative d e_s/dT [Pa K-1] of the AERK blend (analytic)."""
+    Tc = T - constants.T_freeze
+    w  = _aerk_w(Tc)
+    dw = w * (1.0 - w) / _AERK_BLEND_HALFWIDTH_C
+    ew  = _aerk_magnus(_AERK_C1_WATER, _AERK_A_WATER, _AERK_B_WATER, Tc)
+    ei  = _aerk_magnus(_AERK_C1_ICE,   _AERK_A_ICE,   _AERK_B_ICE,   Tc)
+    dew = _aerk_d_magnus(_AERK_C1_WATER, _AERK_A_WATER, _AERK_B_WATER, Tc)
+    dei = _aerk_d_magnus(_AERK_C1_ICE,   _AERK_A_ICE,   _AERK_B_ICE,   Tc)
+    return dw * (ew - ei) + w * dew + (1.0 - w) * dei
+
+
+def dd_saturation_vapor_pressure_aerk(T: jax.Array) -> jax.Array:
+    """Second derivative d^2 e_s/dT^2 [Pa K-2] of the AERK blend (analytic).
+
+    Uses the saturation curve only (no actual vapour pressure) — fixing the
+    historical ``e_c``-instead-of-``e_s`` Penman-Monteith bug at the source.
+    """
+    Tc  = T - constants.T_freeze
+    w   = _aerk_w(Tc)
+    dw  = w * (1.0 - w) / _AERK_BLEND_HALFWIDTH_C
+    ddw = w * (1.0 - w) * (1.0 - 2.0 * w) / _AERK_BLEND_HALFWIDTH_C ** 2
+    ew   = _aerk_magnus(_AERK_C1_WATER, _AERK_A_WATER, _AERK_B_WATER, Tc)
+    ei   = _aerk_magnus(_AERK_C1_ICE,   _AERK_A_ICE,   _AERK_B_ICE,   Tc)
+    dew  = _aerk_d_magnus(_AERK_C1_WATER, _AERK_A_WATER, _AERK_B_WATER, Tc)
+    dei  = _aerk_d_magnus(_AERK_C1_ICE,   _AERK_A_ICE,   _AERK_B_ICE,   Tc)
+    ddew = _aerk_dd_magnus(_AERK_C1_WATER, _AERK_A_WATER, _AERK_B_WATER, Tc)
+    ddei = _aerk_dd_magnus(_AERK_C1_ICE,   _AERK_A_ICE,   _AERK_B_ICE,   Tc)
+    return ddw * (ew - ei) + 2.0 * dw * (dew - dei) + w * ddew + (1.0 - w) * ddei
+
+
 def saturation_vapor_pressure_goff(T: jax.Array) -> jax.Array:
     """Saturation vapour pressure over liquid water, WMO Goff (1957) [Pa].
 
@@ -198,7 +286,17 @@ def saturation_mixing_ratio(
     jax.Array
         Saturation mixing ratio [kg/kg].
     """
-    e_sat = saturation_vapor_pressure(T)
+    return _mixing_ratio_from_esat(saturation_vapor_pressure(T), p)
+
+
+def _mixing_ratio_from_esat(e_sat: jax.Array, p: jax.Array) -> jax.Array:
+    """Saturation mixing ratio from a saturation vapour pressure [Pa].
+
+    The shared (differentiable, smooth-floored/capped) ``e_sat -> q_sat``
+    conversion used by every saturation curve (Tetens, Goff), so the curve
+    is the ONLY thing that varies between conventions — no re-derived
+    conversion numerics (#762).
+    """
     # Smooth floor on denominator: preserves gradients near e_sat ≈ p
     # instead of a hard clip that creates a zero-gradient plateau.
     # softplus(x - 1) + 1 ≈ x for x >> 1, ≈ 1 for x << 1, smooth at x = 1.
@@ -208,6 +306,20 @@ def saturation_mixing_ratio(
     # while allowing gradients to flow (unlike hard jnp.minimum).
     # Uses LogSumExp smooth-min: 1 - softplus(β(1 - x))/β with β = 20.
     return 1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat)) / 20.0
+
+
+def saturation_mixing_ratio_goff(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Saturation mixing ratio from the WMO Goff (1957) curve [kg/kg].
+
+    The NEMO/AeroBulk air-sea convention for the surface saturation
+    humidity (issue #762): identical smooth ``e_sat -> q_sat`` conversion
+    as :func:`saturation_mixing_ratio`, but over the Goff vapour-pressure
+    curve instead of Tetens — ~0.5-1 % on Δq (hence LH) at warm SST.
+    """
+    return _mixing_ratio_from_esat(saturation_vapor_pressure_goff(T), p)
 
 
 def saturation_mixing_ratio_ice(
@@ -370,11 +482,16 @@ def specific_humidity_to_mixing_ratio(
 ) -> jax.Array:
     """Convert specific humidity to water-vapor mixing ratio.
 
-    ``q`` is clipped below one so malformed input cannot divide by zero;
-    valid atmospheric values are unchanged.
+    ``q`` is clipped below one AND the denominator is explicitly floored so
+    malformed input cannot divide by zero; valid atmospheric values are
+    unchanged.  The explicit ``jnp.maximum(1 - q, floor)`` (matching
+    :func:`specific_humidity_tendency_to_mixing_ratio_tendency`) is required for
+    float32 inputs, where ``1 - 1e-12`` rounds to exactly ``1.0`` so the clip
+    alone would still divide by zero (→ ``inf``) at ``q ≥ 1``.
     """
     q = jnp.clip(jnp.asarray(specific_humidity), 0.0, 1.0 - denominator_floor)
-    return q / (1.0 - q)
+    denom = jnp.maximum(1.0 - q, denominator_floor)
+    return q / denom
 
 
 def specific_humidity_tendency_to_mixing_ratio_tendency(
@@ -429,3 +546,28 @@ def relative_humidity(
     """
     e = p * mixing_ratio / (constants.epsilon + mixing_ratio)
     return e / saturation_vapor_pressure(T)
+
+
+def latent_heat_vaporization_sst(T_sfc_K: jax.Array) -> jax.Array:
+    """SST-dependent latent heat of vaporization [J/kg].
+
+    The NEMO/AeroBulk air-sea convention (sbc_phy ``L_vap``, also
+    COARE/Fairall): ``L = L_v - L_v_sst_slope (T - T_freeze)``; equals
+    ``constants.L_v`` at 0 degC by construction.  Up to ~3 % smaller than
+    the constant at warm SST (issue #762).  Dtype-preserving — the OMIP
+    NEMO-parity path wraps this with its float64 pin.
+    """
+    return constants.L_v - constants.L_v_sst_slope * (
+        T_sfc_K - constants.T_freeze
+    )
+
+
+def moist_air_cp(q_air: jax.Array) -> jax.Array:
+    """Moist-air specific heat [J/(kg K)], NEMO/AeroBulk convention.
+
+    ``cp = rCp_dry + rCp_vap q`` (NEMO sbc_phy ``cp_air``) — the
+    convention set of the transcribed bulk schemes, NOT the
+    mixture-weighted ``c_pd (1-q) + c_pv q`` (issue #762).  ~1-2 % above
+    dry ``c_pd`` in the humid tropics.  Dtype-preserving.
+    """
+    return constants.c_p_dry_air_nemo + constants.c_p_vapor_nemo * q_air

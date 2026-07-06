@@ -130,12 +130,127 @@ class LatLonBandLayout(NamedTuple):
     fold: "FoldDescriptor | None" = None
 
 
+def wet_band_boundaries(
+    wet_rows,
+    n_ranks: int,
+    *,
+    min_rows: int = 1,
+) -> tuple[int, ...]:
+    """Contiguous latitude-band boundaries equalizing WET (ocean) cells.
+
+    The default row-count split (``make_latlon_band_layout`` with no
+    ``boundaries``) gives land-heavy bands the same row budget as open-ocean
+    bands, so ranks whose band is mostly land idle at every collective (the
+    lat-lon analogue of the Voronoi path's METIS weighting). This computes
+    band boundaries from the per-ROW wet-cell counts instead: each band gets
+    as close to ``total_wet / n_ranks`` wet cells as a contiguous row split
+    allows.
+
+    Pure host-side numpy — deterministic, no MPI; every rank computes the
+    identical result from the identical global mask. Feed the result to
+    ``make_latlon_band_layout(..., boundaries=...)`` (or
+    ``initialize_distributed_latlon(band_boundaries=...)``).
+
+    Parameters
+    ----------
+    wet_rows : (n_lat,) array-like
+        Wet-cell count per latitude row, e.g. ``land_mask.sum(axis=1)``
+        (any non-negative row weight works).
+    n_ranks : int
+        Number of contiguous bands.
+    min_rows : int
+        Minimum rows per band (halo floor — the MPI pads raise when
+        ``halo > n_lat_local``; pass 2 for the halo=2 PPM/biharmonic paths).
+
+    Returns
+    -------
+    boundaries : tuple of ``n_ranks + 1`` ints, ``boundaries[0] == 0``,
+        ``boundaries[-1] == n_lat``, strictly increasing; band ``r`` owns rows
+        ``[boundaries[r], boundaries[r+1])``.
+
+    Algorithm: walk the cumulative wet count and cut band ``r`` at the first
+    row where the running total reaches ``r / n_ranks`` of the global wet
+    total, clamped so every band (including all remaining ones) keeps
+    ``min_rows`` rows. All-land stretches (zero weight) attach to whichever
+    band the running quantile puts them in — they cost compute-idle rows but
+    carry no wet work, which is exactly the imbalance being minimized.
+    """
+    w = np.asarray(wet_rows, dtype=np.float64)
+    if w.ndim != 1:
+        raise ValueError(f"wet_rows must be 1-D (n_lat,), got shape {w.shape}")
+    n_lat = int(w.shape[0])
+    if n_ranks < 1:
+        raise ValueError(f"n_ranks must be >=1, got {n_ranks}")
+    if min_rows < 1:
+        raise ValueError(f"min_rows must be >=1, got {min_rows}")
+    if np.any(w < 0) or not np.all(np.isfinite(w)):
+        raise ValueError("wet_rows must be finite and non-negative")
+    if n_lat < n_ranks * min_rows:
+        raise ValueError(
+            f"Cannot decompose {n_lat} lat rows across {n_ranks} ranks with "
+            f"min_rows={min_rows} (need at least {n_ranks * min_rows} rows)."
+        )
+    total = float(w.sum())
+    if total <= 0.0:
+        # Degenerate all-land domain: fall back to the even row split (there
+        # is no wet work to balance).
+        base, rem = divmod(n_lat, n_ranks)
+        sizes = [base + 1 if r < rem else base for r in range(n_ranks)]
+        return tuple(int(x) for x in np.concatenate([[0], np.cumsum(sizes)]))
+
+    cum = np.cumsum(w)
+    boundaries = [0]
+    for r in range(1, n_ranks):
+        target = total * r / n_ranks
+        # First row whose cumulative weight reaches the target; the cut is
+        # AFTER that row (searchsorted on the running total).
+        cut = int(np.searchsorted(cum, target, side="left")) + 1
+        lo = boundaries[-1] + min_rows                 # this band keeps min_rows
+        hi = n_lat - (n_ranks - r) * min_rows          # remaining bands too
+        boundaries.append(int(np.clip(cut, lo, hi)))
+    boundaries.append(n_lat)
+    return tuple(boundaries)
+
+
+def validate_band_boundaries(boundaries, n_ranks: int, n_lat: int,
+                             ) -> tuple[int, ...]:
+    """Validate explicit band boundaries; return them as a tuple of ints.
+
+    Shared by :func:`make_latlon_band_layout` and the
+    ``initialize_distributed_latlon`` re-init span comparison (which must
+    reject invalid boundaries BEFORE deciding a stale layout may be reused —
+    an invalid request must never be silently served; codex round 2).
+    Checks: integral values (no silent float truncation), ``n_ranks + 1``
+    entries, ``[0, n_lat]`` span, strictly increasing.
+    """
+    if any(int(x) != x for x in boundaries):
+        raise ValueError(
+            f"boundaries must be integers (a float like 1.9 would be "
+            f"silently truncated), got {tuple(boundaries)}")
+    b = tuple(int(x) for x in boundaries)
+    if len(b) != n_ranks + 1:
+        raise ValueError(
+            f"boundaries must have n_ranks+1 = {n_ranks + 1} entries, "
+            f"got {len(b)}")
+    if b[0] != 0 or b[-1] != n_lat:
+        raise ValueError(
+            f"boundaries must span [0, n_lat={n_lat}], got "
+            f"[{b[0]}, {b[-1]}]")
+    if any(b[i + 1] <= b[i] for i in range(n_ranks)):
+        raise ValueError(
+            f"boundaries must be strictly increasing (every band >= 1 "
+            f"row), got {b}")
+    return b
+
+
 def make_latlon_band_layout(
     rank: int,
     n_ranks: int,
     n_lat: int,
     n_lon: int,
     fold: "FoldDescriptor | None" = None,
+    *,
+    boundaries: tuple[int, ...] | None = None,
 ) -> LatLonBandLayout:
     """Build a latitude-band decomposition layout.
 
@@ -148,6 +263,19 @@ def make_latlon_band_layout(
         Tripolar north-fold descriptor (issue #353).  Carried on the
         layout so the MPI halo path can apply the permutation-based
         fold at the northernmost rank.  ``None`` ⇒ regular lat-lon.
+    boundaries : tuple of ints or None
+        Optional explicit band boundaries (``n_ranks + 1`` strictly
+        increasing ints spanning ``[0, n_lat]``): band ``r`` owns rows
+        ``[boundaries[r], boundaries[r+1])``.  Use
+        :func:`wet_band_boundaries` to balance WET cells instead of row
+        counts (land-heavy bands otherwise idle).  ``None`` (default)
+        keeps the even row split byte-identically.  Every rank must pass
+        the IDENTICAL boundaries (a deterministic host computation from
+        global data).  Non-uniform bands are an MPI-band-path feature:
+        the SPMD steps require uniform ``n_lat % n_devices == 0`` bands,
+        and the banded-multigrid preconditioner needs even-aligned
+        boundaries to coarsen (it degrades gracefully to fewer levels
+        otherwise).
     """
     if n_ranks < 1:
         raise ValueError(f"n_ranks must be >=1, got {n_ranks}")
@@ -160,15 +288,21 @@ def make_latlon_band_layout(
             "neighbour exchange)."
         )
 
-    base = n_lat // n_ranks
-    remainder = n_lat % n_ranks
-    if rank < remainder:
-        n_local = base + 1
-        lat_start = rank * (base + 1)
+    if boundaries is not None:
+        b = validate_band_boundaries(boundaries, n_ranks, n_lat)
+        lat_start = b[rank]
+        lat_end = b[rank + 1]
+        n_local = lat_end - lat_start
     else:
-        n_local = base
-        lat_start = remainder * (base + 1) + (rank - remainder) * base
-    lat_end = lat_start + n_local
+        base = n_lat // n_ranks
+        remainder = n_lat % n_ranks
+        if rank < remainder:
+            n_local = base + 1
+            lat_start = rank * (base + 1)
+        else:
+            n_local = base
+            lat_start = remainder * (base + 1) + (rank - remainder) * base
+        lat_end = lat_start + n_local
 
     return LatLonBandLayout(
         rank=rank,
@@ -2474,13 +2608,15 @@ def build_padded_grid(grid, layout: LatLonBandLayout, halo: int = 1):
         )
         extended_lat = jnp.concatenate([extended_lat, north_extrap])
 
-    # Recover ``omega`` from the original grid's Coriolis field so the
-    # rebuilt grid carries the same rotation rate (the LatLonGrid
-    # NamedTuple does not store ``omega`` directly).  Use the
-    # interior row furthest from the pole so cos(lat) is well above
-    # the clamp floor.
-    mid = grid.lat.shape[0] // 2
-    omega_eff = float(grid.f[mid, 0] / (2.0 * grid.sin_lat[mid]))
+    # The rebuilt grid carries the ORIGINAL grid's rotation rate:
+    # LatLonGrid now stores the construction scalar (``grid.omega``,
+    # #521), exact on any band.  The prior recovery from the local
+    # Coriolis field (f[mid,0] / (2*sin_lat[mid])) was 0/0 -> NaN
+    # whenever the selected mid row sat on the equator — odd-n_lat
+    # global grids and small equatorial bands (codex 2026-07-03
+    # round-3 HIGH) — and a non-rotating omega=0 grid hit the same
+    # 0/0 at ANY row.
+    omega_eff = float(grid.omega)
 
     # Delegate the metric construction to the shared helper so the
     # serial create_latlon_grid path and this MPI extension stay

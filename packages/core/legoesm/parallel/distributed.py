@@ -58,11 +58,11 @@ _JAX_DIST_COORDINATOR_PORT = 1234
 def _require_mpi4py():
     """Return ``mpi4py.MPI`` or raise a clear ImportError.
 
-    The lat-lon SPMD multi-process path needs ONLY MPI rank/hostname discovery
-    (to derive the ``jax.distributed`` coordinator) — its halo + reductions run
-    through pure-JAX ``ppermute``/``psum`` inside ``shard_map`` (see
-    :mod:`legoesm.parallel.latlon_spmd`), NOT mpi4jax.  So this helper requires
-    mpi4py only, unlike :func:`legoesm.parallel.reductions.require_mpi_stack`
+    The multi-controller SPMD multi-process path needs ONLY MPI rank/hostname
+    discovery (to derive the ``jax.distributed`` coordinator) — its halo +
+    reductions run through pure-JAX ``ppermute``/``psum`` inside ``shard_map``,
+    NOT mpi4jax.  So this helper requires mpi4py only, unlike
+    :func:`legoesm.parallel.reductions.require_mpi_stack`
     (which also requires mpi4jax for the cubed-sphere ``sendrecv`` halo).
     """
     import importlib.util
@@ -80,13 +80,13 @@ def _require_mpi4py():
 
 def initialize_jax_distributed_multiprocess(
     *,
-    coordinator_port: int = _JAX_DIST_COORDINATOR_PORT,
+    coordinator_port: int | None = None,
     local_device_ids=None,
 ):
     """Initialize the ``jax.distributed`` runtime for a multi-PROCESS run, deriving
-    the coordinator from MPI rank/hostname — the mpi4jax-free bootstrap the lat-lon
-    SPMD ocean step (``make_sharded_ocean_step_global``) uses to span GPUs across
-    several nodes.
+    the coordinator from MPI rank/hostname — the mpi4jax-free bootstrap used by
+    the multi-controller SPMD paths (cs_spmd production driver, lat-lon SPMD
+    ocean step) to span GPUs across several nodes.
 
     This factors the SAME proven coordinator-discovery logic as the multi-node
     branch of :func:`initialize_distributed` (rank 0's hostname is the coordinator;
@@ -98,7 +98,7 @@ def initialize_jax_distributed_multiprocess(
       launcher reporting >1 task) returns ``(0, 1)`` WITHOUT importing mpi4py, so
       the default single-controller path never depends on the optional dep;
     * does NOT arm the MPI halo backend (the SPMD step arms its own per-call
-      ``activate_latlon_spmd_halo`` around the ``shard_map``);
+      halo backend around the ``shard_map``);
     * is a NO-OP for a single process — the default single-controller path stays
       byte-unchanged;
     * is idempotent — once ``jax.distributed`` is initialized (or the process is
@@ -133,6 +133,16 @@ def initialize_jax_distributed_multiprocess(
             break
     if _launcher_size is not None and _launcher_size <= 1:
         return 0, 1
+    if _launcher_size is None:
+        # NO launcher env at all (codex Medium): overwhelmingly a plain
+        # ``python script.py`` — honour the documented no-optional-dep
+        # single-process contract when mpi4py is absent.  When mpi4py IS
+        # importable, still probe COMM_WORLD (an exotic launcher that
+        # exports none of the four vars gets correct rank discovery
+        # rather than a silent N-way replicated-serial run).
+        import importlib.util
+        if importlib.util.find_spec("mpi4py") is None:
+            return 0, 1
 
     MPI = _require_mpi4py()
     comm = MPI.COMM_WORLD
@@ -153,6 +163,14 @@ def initialize_jax_distributed_multiprocess(
     my_hostname = socket.gethostname()
     all_hostnames = comm.allgather(my_hostname)
     coordinator_address = all_hostnames[0]
+    if coordinator_port is None:
+        # Env override / crc32(job-id)-derived / legacy fixed port: two jobs
+        # sharing a node must not collide on the rendezvous socket
+        # (EADDRINUSE on the second job's rank 0).
+        from legoesm.parallel.early_init import resolve_coordinator_port
+
+        coordinator_port = resolve_coordinator_port(
+            default=_JAX_DIST_COORDINATOR_PORT)
     coordinator_bind = f"{coordinator_address}:{coordinator_port}"
 
     # Per-process LOCAL device id(s).  On a multi-GPU node with one process per
@@ -316,8 +334,12 @@ def initialize_distributed(
         # Multi-node: initialize the JAX distributed runtime with MPI-derived
         # coordinator info (rank 0's hostname is the coordinator).  Delegate to
         # the shared bootstrap so the discovery + initialize + MPI-vs-JAX
-        # validation live in ONE place (the lat-lon SPMD path uses the same
-        # helper); single-node MPI is handled by the elif below.
+        # validation live in ONE place (the SPMD paths use the same helper);
+        # single-node MPI is handled by the elif below.  The helper is
+        # idempotent via ``jax.distributed.is_initialized()`` — it never
+        # probes ``jax.process_count()`` first (which would itself
+        # initialise the XLA backend and guarantee a subsequent
+        # ``initialize()`` raise — the #693 init-ordering bug class).
         initialize_jax_distributed_multiprocess()
     elif n_processes > 1:
         # Single-node MPI: skip jax.distributed.initialize().
@@ -416,8 +438,17 @@ def initialize_distributed_latlon(
     global_n_lat: int,
     global_n_lon: int | None = None,
     fold=None,
+    band_boundaries: tuple[int, ...] | None = None,
 ):
     """Initialize the MPI halo backend for a latitude-band lat-lon run.
+
+    ``band_boundaries`` (optional): explicit band boundaries forwarded to
+    :func:`legoesm.parallel.latlon_mpi.make_latlon_band_layout` — use
+    :func:`legoesm.parallel.latlon_mpi.wet_band_boundaries` to balance WET
+    cells across bands instead of row counts (land-heavy bands otherwise
+    idle).  Every rank must pass the IDENTICAL boundaries (deterministic
+    host computation from the global mask).  ``None`` keeps the even row
+    split byte-identically.
 
     Parallel entry point to :func:`initialize_distributed` for the
     SCVT/cubed-sphere grids — separate because the lat-lon path
@@ -519,6 +550,40 @@ def initialize_distributed_latlon(
             )
             _active_topology = None
     if _active_topology is not None:
+        # A changed band-boundary request must not be served by a stale
+        # layout (codex): a long-lived process that armed even bands and
+        # later opts into wet-cell-balanced boundaries (or vice versa) would
+        # silently keep the OLD decomposition — every slicer/scatter reads
+        # lat_start/lat_end from the layout. Compare this rank's requested
+        # span against the active one; re-arm fresh on mismatch.
+        _r = _active_topology.rank
+        _n = _active_topology.n_ranks
+        if band_boundaries is not None:
+            # Validate BEFORE the span comparison: an invalid request
+            # (non-integral / overlong / bad span) must raise, never be
+            # silently served by a coincidentally-matching stale layout
+            # (codex round 2).
+            from legoesm.parallel.latlon_mpi import validate_band_boundaries
+            _b = validate_band_boundaries(band_boundaries, _n, global_n_lat)
+            _want_span = (_b[_r], _b[_r + 1])
+        else:
+            _base, _rem = divmod(global_n_lat, _n)
+            _s = (_r * (_base + 1) if _r < _rem
+                  else _rem * (_base + 1) + (_r - _rem) * _base)
+            _want_span = (_s, _s + _base + (1 if _r < _rem else 0))
+        if (_active_topology.lat_start,
+                _active_topology.lat_end) != _want_span:
+            warnings.warn(
+                "initialize_distributed_latlon() re-called with different "
+                f"band boundaries (rank {_r}: requested rows "
+                f"[{_want_span[0]}, {_want_span[1]}) vs active "
+                f"[{_active_topology.lat_start}, "
+                f"{_active_topology.lat_end})); replacing the active layout "
+                "and re-arming the MPI halo backend.",
+                RuntimeWarning, stacklevel=2,
+            )
+            _active_topology = None
+    if _active_topology is not None:
         active_fold = getattr(_active_topology, "fold", None)
         active_on = (active_fold is not None
                      and getattr(active_fold, "is_active", False))
@@ -580,6 +645,7 @@ def initialize_distributed_latlon(
         rank=rank, n_ranks=n_processes,
         n_lat=global_n_lat, n_lon=global_n_lon,
         fold=fold,
+        boundaries=band_boundaries,
     )
     _active_topology = layout
 

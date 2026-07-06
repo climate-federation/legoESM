@@ -42,6 +42,47 @@ from legoesm.atmosphere.physics.convection._triggers import cape_trigger
 from legoesm.atmosphere.physics._shared import safe_divide
 
 
+__physics_contract__ = {
+    "summary": (
+        "Simplified Betts-Miller convective adjustment: relax T and q_v toward "
+        "a moist-adiabatic reference (q_ref = RH_ref*q_sat) over tau_c, with an "
+        "enthalpy-conserving Newton correction and a column-water-conserving "
+        "condensation source. Smooth (differentiable)."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa", "dt": "s",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "dq_c_conv_dt": "kg/kg/s (condensation -> cloud-water source to microphysics, >=0)",
+        "cape": "J/kg", "convective_mask": "1 (0-1 CAPE trigger)",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. Where CAPE>threshold the column relaxes "
+        "toward the (warmer, moist-adiabatic) reference: "
+        "dT_dt = trigger*mask*(T_ref-T)/tau_c and "
+        "dq_v_dt = trigger*mask*(q_ref-q_v)/tau_c. The Newton correction "
+        "enforces column-integrated (c_pd*dT + L_v*dq_v) = 0 (enthalpy/MSE "
+        "conserved); the condensation source dq_c_conv_dt >= 0 is rescaled so "
+        "its column integral equals the column net drying (total water "
+        "conserved), deferred to microphysics for precip."
+    ),
+    "conserves": ["energy", "moisture"],
+    "differentiable": True,
+    "reference": (
+        "Frierson (2007), J. Atmos. Sci. 64, 1959-1976; "
+        "Betts & Miller (1986), Q. J. R. Meteorol. Soc. 112, 693-709"
+    ),
+    "idealized_test": (
+        "tests/unit/test_physics_convection.py; CAPE<=threshold -> zero "
+        "tendency (trigger off); a conditionally-unstable column relaxes "
+        "T -> moist adiabat and q_v -> RH_ref*q_sat with column-integrated "
+        "(c_pd*dT + L_v*dq_v) = 0 (enthalpy) and the dq_c column integral = the "
+        "column net drying (total water)."
+    ),
+}
+
+
 def sbm_convection(
     T: jax.Array,
     q_v: jax.Array,
@@ -199,6 +240,25 @@ def sbm_convection(
     dq_c_conv_dt = local_cond * safe_divide(
         col_net_drying, col_local_cond, eps=1e-20,
     )  # (ncol, nlev) [kg/kg/s]
+
+    # Column-water conservation (issue #771).  The relaxation ``(q_ref - q_v)``
+    # can NET-MOISTEN a column that is net-subsaturated relative to
+    # ``q_ref = RH_ref*q_sat`` (column integral ``∫dq_v > 0``), injecting column
+    # water with no source: a single-column adjustment has no moisture supply for
+    # net moistening (that water would have to be imported by transport).  The
+    # condensate rescale above already zeros precip in those columns
+    # (``col_net_drying = 0``), but the vapour + heat tendencies would still
+    # moisten.  Gate the WHOLE adjustment off there so convection only ever dries
+    # or stays neutral (never creates water); this is the ``P >= 0`` constraint of
+    # a Betts-Miller adjustment.  Net-DRYING columns are byte-identical
+    # (``gate = 1``) and stay enthalpy-neutral because ``dT_dt`` and ``dq_v_dt``
+    # carry the SAME per-column gate, preserving the Newton
+    # ``∫(c_pd·dT + L_v·dq_v) = 0`` closure.  ``col_net_drying > 0`` iff the column
+    # is net-drying (``col_net_drying = clip(-∫dq_v, 0)``).
+    drying_gate = (col_net_drying > 0.0).astype(dq_v_dt.dtype)  # (ncol, 1)
+    dT_dt = dT_dt * drying_gate
+    dq_v_dt = dq_v_dt * drying_gate
+    dq_c_conv_dt = dq_c_conv_dt * drying_gate  # already ~0 in moistening columns
 
     return ConvectionOutput(
         dT_dt=dT_dt,

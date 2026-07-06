@@ -41,6 +41,7 @@ from legoesm.training.trainable_params import (
 # Dotted module paths that carry a validated ``__param_spec__``. Append as
 # scheme configs are migrated; the drift test keeps this in sync with the gate.
 SPEC_MODULES: tuple[str, ...] = (
+    "legoesm.land.snow_bands",
     "legoesm.land.soil_thermal",
     "legoesm.ocean.physics.shortwave_penetration",
     "legoesm.ocean.physics.bottom_drag.config",
@@ -53,6 +54,7 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.land.richards",
     "legoesm.land.soil_grid",
     "legoesm.land.soil_hydraulics",
+    "legoesm.land.topmodel_runoff",
     "legoesm.ocean.physics.convection.config",
     "legoesm.ocean.physics.ice_shelf",
     "legoesm.ocean.physics.lateral_mixing.backscatter",
@@ -60,7 +62,9 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.ocean.physics.lateral_mixing.eke",
     "legoesm.ocean.physics.lateral_mixing.mle",
     "legoesm.ocean.physics.surface_forcing.config",
+    "legoesm.ocean.physics.tidal_forcing",
     "legoesm.ocean.physics.vertical_mixing.config",
+    "legoesm.ocean.physics.vertical_mixing.internal_wave_mixing",
     "legoesm.ocean.physics.vertical_mixing.tidal",
     # --- atmosphere physics (Phase 4 spec migration) ---
     "legoesm.atmosphere.physics.gravity_wave_drag.config",
@@ -70,6 +74,8 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.atmosphere.physics.microphysics.sdm.config",
     "legoesm.atmosphere.physics.microphysics.fast_sbm.config",
     "legoesm.atmosphere.physics.microphysics.aerosol_activation",
+    "legoesm.atmosphere.physics.microphysics.arg_activation",
+    "legoesm.atmosphere.physics.microphysics.prognostic_aerosol",
     "legoesm.atmosphere.physics.turbulence.config",
     "legoesm.atmosphere.physics.turbulence.pbl_height",
     "legoesm.atmosphere.physics.radiation.config",

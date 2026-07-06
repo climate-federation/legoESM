@@ -342,6 +342,101 @@ def vertical_velocity_variance_plane(state, height_coord) -> jax.Array:
     return jnp.var(w, axis=(0, 1))         # (nlev+1,)
 
 
+def _validate_w_half(state) -> None:
+    """Reject a ``w`` field that is not on the ``nlev+1`` interface grid."""
+    rho_p = state.rho_prime.data
+    ny, nx, nlev = rho_p.shape
+    w = state.w.data
+    if w.shape != (ny, nx, nlev + 1):
+        raise ValueError(
+            f"resolved-flux diagnostics expect w on half levels "
+            f"shape (ny={ny}, nx={nx}, nlev+1={nlev + 1}); got {w.shape}."
+        )
+
+
+def _resolved_flux_interfaces(
+    w_half: jax.Array, phi_full: jax.Array
+) -> jax.Array:
+    """Domain-mean resolved eddy flux ``<w'φ'>`` at interior interfaces.
+
+    ``w_half`` is ``(ny, nx, nlev+1)`` (native ``w`` grid); ``phi_full`` is a
+    full-level scalar ``(ny, nx, nlev)``.  The flux naturally lives at the
+    ``nlev-1`` interior interfaces between cells, so the scalar is averaged to
+    those interfaces (``φ_{k+1/2}=½(φ_k+φ_{k+1})``) while ``w`` stays on its
+    native grid — consistent with :func:`vertical_velocity_variance_plane`
+    (averaging ``w`` to cell centres would smooth and bias the flux).
+    Perturbations are taken from the doubly-periodic ``(y, x)`` horizontal mean
+    at each level, so any horizontally-uniform reference (``theta_ref`` etc.)
+    cancels.  The two rigid boundary interfaces carry ``w=0`` and hence zero
+    flux; they are excluded.  Returns ``(nlev-1,)``.
+    """
+    w_int = w_half[..., 1:-1]                                  # (ny,nx,nlev-1)
+    phi_iface = 0.5 * (phi_full[..., :-1] + phi_full[..., 1:])  # (ny,nx,nlev-1)
+    w_pert = w_int - jnp.mean(w_int, axis=(0, 1), keepdims=True)
+    phi_pert = phi_iface - jnp.mean(phi_iface, axis=(0, 1), keepdims=True)
+    return jnp.mean(w_pert * phi_pert, axis=(0, 1))           # (nlev-1,)
+
+
+class ResolvedTurbulentFluxes(NamedTuple):
+    """LES-resolved turbulent fluxes at the ``nlev-1`` interior interfaces.
+
+    All fluxes are *kinematic* domain means over the doubly-periodic plane, on
+    the ``z_half_interior`` interface grid where ``w`` natively lives.  These
+    are the quantities a closure-coefficient diagnosis (entrainment / eddy
+    diffusivity) consumes — see ``docs/COMPARE_REANALYSIS.md`` stage 6.
+    """
+
+    z_half_interior: jax.Array  # (nlev-1,) interior interface heights [m]
+    w_theta: jax.Array          # (nlev-1,) resolved potential-temp flux [K m/s]
+    w_qv: jax.Array             # (nlev-1,) resolved water-vapor flux [(kg/kg) m/s]
+    w_u: jax.Array              # (nlev-1,) resolved zonal-momentum flux [m²/s²]
+    w_v: jax.Array              # (nlev-1,) resolved merid-momentum flux [m²/s²]
+    w_thetav: jax.Array         # (nlev-1,) resolved buoyancy (virtual-θ) flux [K m/s]
+
+
+def resolved_turbulent_fluxes_plane(
+    state, height_coord, qv_slot: int = 0
+) -> ResolvedTurbulentFluxes:
+    """Resolved ``w'θ'``, ``w'q_v'``, ``w'u'``, ``w'v'``, ``w'θ_v'`` profiles.
+
+    Computes the LES-resolved kinematic eddy fluxes (perturbations from the
+    horizontal mean) at the interior interfaces.  The buoyancy flux uses the
+    virtual potential temperature ``θ_v = θ (1 + (1/ε − 1) q_v)`` with the same
+    ``ε`` convention as :func:`compute_cape` (no re-derived constant).  The
+    horizontally-uniform ``theta_ref`` cancels in the perturbation, so the full
+    ``θ = theta_ref + theta_prime`` is used directly.
+    """
+    _validate_plane_state(state, height_coord)
+    _validate_w_half(state)
+    _validate_slot(qv_slot, state.tracers.data.shape[-1], "qv_slot")
+    ny, nx, nlev = state.rho_prime.data.shape
+    if jnp.asarray(height_coord.z_half).shape != (nlev + 1,):
+        raise ValueError(
+            f"height_coord.z_half shape {jnp.asarray(height_coord.z_half).shape}"
+            f" != (nlev+1={nlev + 1},)."
+        )
+    for name in ("u", "v"):
+        arr = getattr(state, name).data
+        if arr.shape != (ny, nx, nlev):
+            raise ValueError(
+                f"state.{name} shape {arr.shape} != full-level layout "
+                f"(ny={ny}, nx={nx}, nlev={nlev})."
+            )
+    w = state.w.data
+    theta_total = height_coord.theta_ref + state.theta_prime.data
+    q_v = state.tracers.data[..., qv_slot]
+    coeff = 1.0 / constants.epsilon - 1.0
+    theta_v = theta_total * (1.0 + coeff * q_v)
+    return ResolvedTurbulentFluxes(
+        z_half_interior=jnp.asarray(height_coord.z_half)[1:-1],
+        w_theta=_resolved_flux_interfaces(w, theta_total),
+        w_qv=_resolved_flux_interfaces(w, q_v),
+        w_u=_resolved_flux_interfaces(w, state.u.data),
+        w_v=_resolved_flux_interfaces(w, state.v.data),
+        w_thetav=_resolved_flux_interfaces(w, theta_v),
+    )
+
+
 def updraft_mass_flux_plane(
     state, height_coord, w_threshold: float = 0.0,
 ) -> jax.Array:

@@ -35,7 +35,7 @@ from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
 )
 
 
-def _lat_spec(arr) -> P:
+def lat_spec(arr) -> P:
     """``P("lat", None, ...)`` for an array sharded on its leading (lat) axis."""
     return P("lat", *((None,) * (arr.ndim - 1)))
 
@@ -54,7 +54,7 @@ def shard_state_atm_latlon(
     walks the 6-field atm pytree (bare arrays + a tracers dict, no masks).
     """
     def _put(arr):
-        return jax.device_put(arr, NamedSharding(mesh, _lat_spec(arr)))
+        return jax.device_put(arr, NamedSharding(mesh, lat_spec(arr)))
 
     n_lat = state.T.shape[0]
     v_lower = state.v[:n_lat]
@@ -74,11 +74,20 @@ def gather_state_atm_latlon(
     """Inverse of :func:`shard_state_atm_latlon`: replicate every leaf and
     rebuild the full ``(n_lat+1, ...)`` ``v`` by re-appending the zero north
     pole-wall face. Bit-comparable to the single-device state (whose top v-face
-    is the pole wall == 0)."""
+    is the pole wall == 0).
+
+    Multi-controller (route-B ``jax.distributed``, mesh spanning processes):
+    replication routes through a jit-compiled identity instead of
+    ``device_put`` (see :func:`legoesm.parallel.latlon_spmd.replicate_leaf`,
+    the primitive shared with the ocean gather); the single-process path is
+    byte-unchanged."""
+    from legoesm.parallel.latlon_spmd import replicate_leaf
+
     rep = NamedSharding(mesh, P())
+    _mp = jax.process_count() > 1
 
     def _get(arr):
-        return jax.device_put(arr, rep)
+        return replicate_leaf(arr, rep, multiprocess=_mp)
 
     v_lower = _get(state.v)
     v_full = jnp.concatenate([v_lower, jnp.zeros_like(v_lower[:1])], axis=0)
@@ -136,7 +145,7 @@ def gather_atm_latlon_to_hydrostatic(c_state, grid, mesh):
 _ATM_GRID_STATIC_FIELDS = frozenset({"n_lat", "n_lon", "radius", "dlon", "dlat"})
 
 
-def _atm_grid_array_field_names(grid) -> list[str]:
+def atm_grid_array_field_names(grid) -> list[str]:
     """Order-stable list of the ``jax.Array`` fields of a ``LatLonGrid`` (all
     except the static scalars). NamedTuple field order, so the host stack and
     the in-body ``[r]`` index agree."""
@@ -151,7 +160,7 @@ def _atm_grid_array_field_names(grid) -> list[str]:
     return names
 
 
-def _build_band_grids_atm(grid, n_devices: int):
+def build_band_grids_atm(grid, n_devices: int):
     """Build the ``n_devices`` UNIFORM lat-band ``LatLonGrid`` geometries via the
     tested MPI slicer (no bespoke metric re-derivation).
 
@@ -263,9 +272,9 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
             "jnp.sum(p_s*area) target that is not yet SPMD-routed; disable it "
             "or use fix_mass with the pre-state (psum'd) path.")
 
-    band_grids = _build_band_grids_atm(grid, n_dev)
+    band_grids = build_band_grids_atm(grid, n_dev)
     template = band_grids[0]
-    array_field_names = _atm_grid_array_field_names(template)
+    array_field_names = atm_grid_array_field_names(template)
     rep = NamedSharding(mesh, P())
     stacks = {
         name: jax.device_put(
@@ -359,12 +368,18 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None):
     def sharded_step(c_state, dt, phys_state=None):
         refuse_unthreaded_stateful_physics(
             physics_fn, phys_state, where="atm lat-band SPMD step")
-        key = ("fn", phys_state is None,
+        # Cache key = (state pytree STRUCTURE, phys_state pytree structure):
+        # in_specs/out_specs derive from both, so a structure change (optional
+        # field None <-> Field, or the phys carry appearing/disappearing) must
+        # rebuild the shard_map rather than reuse stale specs (codex finding,
+        # ocean-twin parity). ``phys_state`` threading is the AIMIP-branch
+        # feature main lacks (main rejects a non-None carry here).
+        key = (jax.tree.structure(c_state),
                None if phys_state is None
                else jax.tree_util.tree_structure(phys_state))
         fn = _cache.get(key)
         if fn is None:
-            in_spec = jax.tree.map(_lat_spec, c_state)
+            in_spec = jax.tree.map(lat_spec, c_state)
             stacks_spec = jax.tree.map(lambda _x: P(), stacks)  # all replicated
             if phys_state is None:
                 fn = jax.jit(shard_map(

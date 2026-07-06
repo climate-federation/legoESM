@@ -112,6 +112,20 @@ class PhysicsState(NamedTuple):
         of the sub-cycle, so the cache is populated before any held step
         reads it).  Carried through the #413 checkpoint so a restart that
         lands mid-sub-cycle continues with the correct held tendency.
+    aerosol_number : jnp.ndarray, shape (ncol, nlev)
+        OPTIONAL prognostic accumulation-mode aerosol NUMBER concentration
+        [1/m^3] for the opt-in prognostic-aerosol tracer
+        (:mod:`~legoesm.atmosphere.physics.microphysics.prognostic_aerosol`).
+        Zero-filled by default so every existing run is byte-identical and the
+        pytree stays uniform.  When the option is enabled a driver advances it
+        with ``step_prognostic_aerosol`` and hands it to ARG activation via the
+        ``activated_nc_field(..., aerosol_number=...)`` /
+        ``arg_cdnc_from_config`` HOOK — e.g. by placing this field in the
+        microphysics ``forcing`` dict under key ``"aerosol_number"`` (the
+        microphysics ``physics_fn`` reads it there).  The default (disabled)
+        path keeps the prescribed-AOD proxy and never touches this field.
+        Appended LAST (with a default) so existing direct constructors are
+        unaffected.
     """
     tke: jnp.ndarray
     conv_prog_profile: jnp.ndarray
@@ -130,6 +144,7 @@ class PhysicsState(NamedTuple):
     # the decomposition.  Constant data (never updated by sub-physics);
     # re-derivable as arange(ncol) — restart loaders may default it.
     col_index: jnp.ndarray
+    aerosol_number: jnp.ndarray = None
 
 
 def init_physics_state(
@@ -259,6 +274,11 @@ def init_physics_state(
     # always a radiation step) before any held step reads it.
     rad_heating = jnp.zeros((ncol, nlev), dtype=dtype)
 
+    # --- Prognostic aerosol number (opt-in tracer) ---
+    # Always materialised as zeros so the pytree is uniform and existing runs
+    # are byte-identical; only evolved when the prognostic-aerosol option is on.
+    aerosol_number = jnp.zeros((ncol, nlev), dtype=dtype)
+
     return PhysicsState(
         tke=tke,
         conv_prog_profile=conv_prog_profile,
@@ -270,6 +290,7 @@ def init_physics_state(
         clubb_moments=clubb_moments,
         rad_heating=rad_heating,
         col_index=jnp.arange(ncol, dtype=jnp.int32),
+        aerosol_number=aerosol_number,
     )
 
 
@@ -313,4 +334,7 @@ def update_physics_state(phys_state, updates):
         clubb_moments=updates.get("clubb_moments", phys_state.clubb_moments),
         rad_heating=updates.get("rad_heating", phys_state.rad_heating),
         col_index=phys_state.col_index,   # constant identity, never updated
+        aerosol_number=updates.get(
+            "aerosol_number", phys_state.aerosol_number
+        ),
     )

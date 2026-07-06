@@ -536,6 +536,7 @@ def create_tripole_grid(
         lon=lon_1d,
         dlon=0.0,   # sentinel: tripole grids have non-uniform spacing
         dlat=0.0,
+        omega=float(omega),   # (#521) so grid.omega matches the f_T/f_u/f_v build
     )
 
 

@@ -105,6 +105,13 @@ class CoupledConfig(NamedTuple):
     # coupling (vs a constant bulk coefficient + soil-only beta).  Well-posed in the
     # coupled model because the atmosphere supplies a resolved diurnal cycle.
     land_diurnal_surface: bool = True
+    # Sub-grid elevation-band snow for multilayer land (default OFF): re-partition
+    # precipitation phase and melt over sub-grid elevation bands from the CLM
+    # ``STD_ELEV`` map, so a warm cell keeps bright snow on its cold high fractions
+    # (fixes the high-elevation / perennial-snow warm-albedo bias).  Requires
+    # ``land_mode="multilayer"`` and ``land_param_source="clm"`` (the band elevations
+    # come from the CLM surface map).  See ``legoesm.land.snow_bands``.
+    land_elev_bands: bool = False
     # Carbon cycle
     carbon_active: bool = False
     carbon_land: str = "none"

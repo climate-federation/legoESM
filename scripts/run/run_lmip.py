@@ -112,11 +112,15 @@ from legoesm.land.soil_texture import SOIL_TEXTURE_VG as _SOIL_TEXTURE_PRESETS
 # PFT parameter extraction
 # ===========================================================================
 
-def _get_pft_row(veg_type: str) -> dict:
+def _get_pft_row(veg_type: str, calibrated: bool = True) -> dict:
     """Look up CLM5 PFT parameters by name.
 
-    Returns a dict with albedo_veg, emissivity, z0, root_depth,
-    theta_wp, theta_fc from the CLM5 PFT table.
+    Returns a dict with albedo_veg, emissivity, z0, root_depth, theta_wp, theta_fc.
+    ``calibrated`` (the DEFAULT) overrides the raw CLM5 values with the 2026-07
+    ERA5-calibrated per-PFT MULTILAYER parameters baked in ``clm_surface_map`` — the
+    SAME land-parameter defaults the AMIP / CMIP multilayer land uses (via
+    ``clm_multilayer_setup``), so an offline LMIP point runs the production land.
+    ``calibrated=False`` returns the untuned CLM5 table (reproduces the old default).
     """
     if veg_type not in CLM5_PFT_NAMES:
         valid = ", ".join(CLM5_PFT_NAMES)
@@ -124,17 +128,43 @@ def _get_pft_row(veg_type: str) -> dict:
             f"Unknown veg_type {veg_type!r}. Valid choices: {valid}"
         )
     idx = CLM5_PFT_NAMES.index(veg_type)
-    row = _CLM5_PFT_TABLE_RAW[idx]
-    return {name: val for name, val in zip(PARAM_NAMES, row)}
+    row = {name: val for name, val in zip(PARAM_NAMES, _CLM5_PFT_TABLE_RAW[idx])}
+    if calibrated:
+        # CLM5_PFT_NAMES is the same 17-PFT order as the baked _MULTILAYER tuples.
+        from legoesm.land import clm_surface_map as _csm
+        row["albedo_veg"] = _csm._TUNED_PFT_ALBEDO_MULTILAYER[idx]
+        row["emissivity"] = _csm._TUNED_PFT_EMISSIVITY_MULTILAYER[idx]
+        row["z0"] = _csm._TUNED_PFT_Z0_MULTILAYER[idx]
+        row["root_depth"] = _csm._TUNED_PFT_ROOT_DEPTH_MULTILAYER[idx]
+        row["theta_wp"] = _csm._TUNED_PFT_WP_MULTILAYER[idx]
+        row["theta_fc"] = _csm._TUNED_PFT_FC_MULTILAYER[idx]
+    return row
 
 
 def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
     """Resolve LMIP CLI arguments into the land config and run controls."""
     texture_kwargs = _SOIL_TEXTURE_PRESETS[args.soil_texture]
-    pft_row = _get_pft_row(args.veg_type)
+    _calibrated = getattr(args, "pft_params", "calibrated") == "calibrated"
+    pft_row = _get_pft_row(args.veg_type, calibrated=_calibrated)
+    # Snow albedo: the calibrated feedback (cover threshold + fresh/aged brightness +
+    # age decay) baked in clm_surface_map, matching the AMIP/CMIP multilayer default;
+    # raw uses the LandAlbedoConfig defaults.
+    if _calibrated:
+        from legoesm.land import clm_surface_map as _csm
+        from legoesm.surface_albedo import LandAlbedoConfig
+        _land_albedo = LandAlbedoConfig(
+            alpha_snow_max=_csm.TUNED_SNOW_ALBEDO_MAX_MULTILAYER,
+            alpha_snow_min=_csm.TUNED_SNOW_ALBEDO_MIN_MULTILAYER,
+            snow_depth_crit=_csm.TUNED_SNOW_DCRIT_MULTILAYER,
+            tau_snow_decay=_csm.TUNED_SNOW_TAU_DAYS_MULTILAYER * 86400.0,
+            soil_dry_albedo_boost=_csm.TUNED_SOIL_DRY_BOOST_MULTILAYER)
+    else:
+        from legoesm.surface_albedo import LandAlbedoConfig
+        _land_albedo = LandAlbedoConfig()
     land = MultiLayerLandConfig(
         albedo_land=pft_row["albedo_veg"],
         emissivity_land=pft_row["emissivity"],
+        land_albedo=_land_albedo,
         z0_land=(
             args.z0_land
             if args.z0_land is not None
@@ -171,6 +201,14 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
         richards=RichardsConfig(),
         carbon=CarbonConfig(scheme=args.carbon_scheme),
     )
+    # Sub-grid elevation-band snow (opt-in): for an offline column, the sub-grid
+    # relief std [m] is supplied directly (--elev-std-m); a coarse gridded run gets
+    # it per cell from the CLM STD_ELEV map instead (coupled driver).
+    if getattr(args, "elev_bands", False):
+        from legoesm.land.snow_bands import (
+            ElevationSnowBandConfig, band_elevation_anomalies)
+        band_dz = band_elevation_anomalies(jnp.asarray([float(args.elev_std_m)]))
+        land = land._replace(elev_bands=ElevationSnowBandConfig(band_dz=band_dz))
     return LMIPRunConfig(
         land=land,
         max_wallclock_seconds=args.max_wallclock_seconds,
@@ -452,6 +490,13 @@ def _save_restart(
             state.surface_water if state.surface_water is not None
             else np.zeros_like(np.asarray(state.snow_depth))),
     }
+    # Elevation-band SWE/age (present iff the band scheme is enabled) round-trip so a
+    # restart keeps the perennial-snow distribution.
+    if state.snow_bands is not None:
+        payload["snow_bands"] = np.asarray(state.snow_bands)
+        payload["snow_age_bands"] = np.asarray(state.snow_age_bands)
+        if state.ice_bands is not None:
+            payload["ice_bands"] = np.asarray(state.ice_bands)
     if carbon_state is not None:
         for field in carbon_state._fields:
             payload[f"carbon_{field}"] = np.asarray(
@@ -476,6 +521,27 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
         surface_water=jnp.asarray(data["surface_water"]) if "surface_water" in data
         else jnp.zeros_like(jnp.asarray(data["snow_depth"])),
     )
+    # Elevation-band SWE/age: restore from the checkpoint when present, else (band
+    # scheme newly enabled on an old restart) seed empty bands so the step has state.
+    if config.elev_bands is not None:
+        nb = config.elev_bands.band_dz.shape[-1]
+        ncol = state.snow_depth.shape[0]
+        if "snow_bands" in data:
+            state = state._replace(snow_bands=jnp.asarray(data["snow_bands"]),
+                                   snow_age_bands=jnp.asarray(data["snow_age_bands"]))
+        else:
+            # Bands newly enabled on a legacy restart: seed the bands from the EXISTING
+            # cell snowpack (distribute snow_depth equally across the equal-area bands,
+            # mean_k == snow_depth; broadcast the cell age) so accumulated snow is not
+            # discarded — zero-seeding would silently drop it.
+            state = state._replace(
+                snow_bands=jnp.broadcast_to(state.snow_depth[:, None], (ncol, nb)),
+                snow_age_bands=jnp.broadcast_to(state.snow_age[:, None], (ncol, nb)))
+        # Firn/ice reservoir (gap 4): restore when present, else seed empty (an old
+        # banded restart predating the reservoir starts with no perennial ice).
+        state = state._replace(
+            ice_bands=jnp.asarray(data["ice_bands"]) if "ice_bands" in data
+            else jnp.zeros((ncol, nb)))
     start_step = int(data["step"])
     start_day = float(data["day"])
     carbon_state = None
@@ -533,6 +599,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--veg-type", default="c3_grass",
                    choices=list(CLM5_PFT_NAMES),
                    help="CLM5 plant functional type")
+    p.add_argument("--pft-params", choices=("calibrated", "raw"), default="calibrated",
+                   help="per-PFT land parameters: 'calibrated' (default) = the 2026-07 "
+                        "ERA5-tuned MULTILAYER defaults shared with AMIP/CMIP (albedo, "
+                        "z0, root, water-stress + snow albedo); 'raw' = untuned CLM5 table")
     p.add_argument("--t-init", type=float, default=278.0,
                    help="Initial uniform soil temperature [K]. "
                         "Should be close to the local annual-mean atmospheric "
@@ -581,6 +651,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    action=argparse.BooleanOptionalAction,
                    default=True,
                    help="Enable/disable snow albedo feedback")
+    p.add_argument("--elev-bands", action="store_true",
+                   help="Sub-grid elevation-band snow (banded precip phase / melt / "
+                        "perennial-snow cap): keeps bright snow on cold high fractions "
+                        "of a coarse cell.  Set --elev-std-m for the column's sub-grid "
+                        "relief.")
+    p.add_argument("--elev-std-m", type=float, default=0.0,
+                   help="Sub-grid elevation std [m] for the column when --elev-bands "
+                        "(0 = flat = no-op).")
     # Two-pass parse so a --config file supplies defaults that explicit CLI
     # flags still override (precedence: CLI > config file > parser default).
     # Shared loader (single source of truth) — same mechanism as run_amip /

@@ -25,8 +25,14 @@ logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 
 # Early JAX distributed init — must happen before any legoESM/JAX import that
 # triggers XLA backend discovery (jax.numpy import in core/precision.py).
+# Route-B multicontroller (--multicontroller) initializes jax.distributed in
+# main() via init_multicontroller_distributed's explicit --coordinator path (a
+# direct jax.distributed.initialize, no mpi4py); skip this import-time MPI
+# auto-detect for it — it would try to load libmpi before argv is parsed and
+# hard-crash on a node without a loadable MPI library (verified).
 from legoesm.parallel.early_init import maybe_init_jax_distributed
-maybe_init_jax_distributed()
+if "--multicontroller" not in sys.argv:
+    maybe_init_jax_distributed()
 
 from legoesm import constants
 from legoesm.driver.config import (
@@ -256,6 +262,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         action=argparse.BooleanOptionalAction,
                         default=_DYCORE_DEFAULTS.fix_mass,
                         help="Enable/disable global mass correction")
+    parser.add_argument("--moisture-flux-form",
+                        action=argparse.BooleanOptionalAction,
+                        default=_DYCORE_DEFAULTS.moisture_flux_form,
+                        help="#771 (EXPERIMENTAL, cubed_sphere cdgrid + "
+                             "--moisture-advection only): transport moisture "
+                             "with the mass-conserving flux-form post-RK3 "
+                             "substep instead of the advective -(u.grad q). "
+                             "Default off = advective (bit-exact).")
 
     # Output
     parser.add_argument("--output", type=str, default=None)
@@ -319,6 +333,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "smaller compiled footprint / faster cold compile for "
                              "FORWARD/inference runs (relieves the MPAS/L5 XLA compile "
                              "wall). Keep True for reverse-mode AD / training.")
+    parser.add_argument("--radiation-column-chunk", type=int,
+                        default=_EXPERIMENT_DEFAULTS.rrtmgp_column_chunk_size,
+                        help="RRTMGP column-chunk block size (0 = off). >0 maps "
+                             "the rrtmgp solve over fixed-size column blocks so the "
+                             "per-block XLA graph compiles ONCE at this size — caps "
+                             "the super-linear rrtmgp compile time so higher "
+                             "resolutions (C24/C48 L20) compile instead of stalling. "
+                             "Numerically exact (columns are independent); must "
+                             "divide the column count.")
     # Issue #273 GPU tuning: RRTMGP column-recurrence kernel choice.
     # ``--rrtmgp-use-scan`` forces ``jax.lax.scan`` (smaller graph,
     # ~5-10× cheaper to JIT — material against the 2600s cold compile
@@ -490,6 +513,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         default=0.0,
                         help="COARE convective-gustiness BL depth z_i [m] (0=off; "
                              "tuned slab value 300).")
+    parser.add_argument("--bulk-thermo-convention", dest="bulk_thermo_convention",
+                        type=str, default="legoesm",
+                        choices=["legoesm", "aerobulk"],
+                        help="Thermodynamic constants set for the MOST bulk "
+                             "fluxes (coare3/large_yeager): 'legoesm' "
+                             "(default) = constant L_v / dry c_pd; 'aerobulk' "
+                             "= NEMO/AeroBulk/COARE parity (SST-dependent "
+                             "L_vap, moist cp_air).")
     parser.add_argument("--q-c-diagnostic", dest="cloud_q_c_diagnostic", type=float,
                         default=None,
                         help="In-cloud diagnostic condensate fed to radiation "
@@ -719,6 +750,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "bucket ramp: beta=min(beta_soil, beta_canopy), closing "
                              "stomata in low light / high VPD. Requires "
                              "--land-soil-bucket.")
+    parser.add_argument("--land-gs-max", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_gs_max,
+                        dest="land_gs_max",
+                        help="Global maximum stomatal (canopy) conductance "
+                             "[mol/m2/s] (StomataConfig.gs_max). Land-ET "
+                             "calibration knob: gs = gs_max * f(PAR,T,VPD,soil), "
+                             "so lowering it raises canopy resistance and pulls "
+                             "land evapotranspiration below potential (issue "
+                             "#730). Only active with --land-stomatal-beta. "
+                             f"Default {_EXPERIMENT_DEFAULTS.land_gs_max} "
+                             "(byte-identical when unchanged).")
+    parser.add_argument("--land-soil-moisture-init-frac", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_soil_moisture_init_frac,
+                        dest="land_soil_moisture_init_frac",
+                        help="Initial multilayer soil water as a fraction of "
+                             "saturation (theta_init = frac * theta_sat) for the "
+                             "cold-start (issue #730). A drier start (e.g. 0.25) "
+                             "can break the over-evaporation wet loop and tip the "
+                             "land into the slab-like dry attractor. Default "
+                             f"{_EXPERIMENT_DEFAULTS.land_soil_moisture_init_frac} "
+                             "(byte-identical when unchanged).")
+    parser.add_argument("--land-surface-scheme",
+                        choices=["simple_seb", "two_leaf"],
+                        default=_EXPERIMENT_DEFAULTS.land_surface_scheme,
+                        dest="land_surface_scheme",
+                        help="Multilayer-land surface scheme (issue #730). "
+                             "'simple_seb' (default) = bulk SEB with the beta_soil "
+                             "moisture path; 'two_leaf' = DifferBESS two-leaf canopy "
+                             "energy balance (Kelvin h_r bare-soil + two-leaf "
+                             "stomatal transpiration) that holds land ET below "
+                             "potential and breaks the over-evaporation wet loop. "
+                             "Only affects --use-multilayer-land runs.")
     parser.add_argument("--snow-albedo-feedback", action="store_true",
                         default=False, dest="snow_albedo_feedback",
                         help="Prognostic snow + snow-albedo feedback on the "
@@ -734,6 +797,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Cap on convective (Slingo 1987) cloud cover "
                              "(CloudConfig.conv_cloud_max). Limits anvil "
                              "over-reflection. Bounds (0.1, 1.0).")
+
+    parser.add_argument("--surfdata", type=str, default="",
+                        help="Harmonized surface-data NetCDF "
+                             "(legoesm_surfdata_*.nc). When set together with "
+                             "--land-mask-file, the static land albedo is taken "
+                             "from the surfdata (per-column soil-colour + PFT "
+                             "vegetation blend) instead of the latitude-only "
+                             "curve.")
 
     # Surface / diagnostics
     parser.add_argument("--monthly-means", action="store_true", default=False)
@@ -761,6 +832,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # convection (the kessler+sbm wind blow-up).  Default off => unchanged.
     parser.add_argument("--energy-consistent-moisture-clip",
                         action="store_true", default=False)
+    # Resolved-wind moisture advection through the cdgrid dycore (issue #771).
+    # OPT-IN / experimental (advective form, not discretely mass-conserving) —
+    # default OFF is bit-identical to the legacy column-locked moisture path.
+    _madv = parser.add_mutually_exclusive_group()
+    _madv.add_argument("--moisture-advection", dest="moisture_advection",
+                       action="store_true",
+                       help="Opt in to resolved-wind cube moisture advection "
+                            "(#771; experimental, advective form). Default off.")
+    _madv.add_argument("--no-moisture-advection", dest="moisture_advection",
+                       action="store_false",
+                       help="Force the legacy column-locked moisture path "
+                            "(the default).")
+    parser.set_defaults(moisture_advection=False)
 
     # CMIP
     parser.add_argument("--experiment", type=str, default="")
@@ -877,10 +961,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
               "base-cut envelope. Requires --grid-type cubed_sphere."))
     parser.add_argument(
         "--enable-latlon-spmd", action="store_true", default=False,
-        help=("Single-process multi-device lat-BAND SPMD for the lat-lon C-grid "
-              "dycore (A1). Requires --grid-type latlon, n_lat %% n_devices == 0, "
-              "and dynamics-only or --held-suarez physics (stateful physics not "
-              "yet SPMD-routed). Distinct from --distributed (MPI)."))
+        help=("Multi-device lat-BAND SPMD for the lat-lon C-grid dycore (A1). "
+              "Requires --grid-type latlon, n_lat %% n_devices == 0. Runs the "
+              "operator-split unified physics (or dynamics-only / --held-suarez) "
+              "band-local. Single-process by default; add --multicontroller for "
+              "the multi-node route-B lane. Distinct from --distributed (MPI)."))
+    parser.add_argument(
+        "--multicontroller", action="store_true", default=False,
+        help=("Promote --enable-latlon-spmd to ROUTE-B (jax.distributed, "
+              "cross-process NCCL): the lat-band operator-split atm step runs "
+              "one band per device across ALL processes (the multi-node lane). "
+              "Requires --enable-latlon-spmd; launch under mpiexec/srun and pass "
+              "--coordinator (or rely on SLURM/OMPI auto-detect)."))
+    parser.add_argument(
+        "--coordinator", type=str, default=None,
+        help=("jax.distributed coordinator address (host:port) for "
+              "--multicontroller under mpiexec (reads Open MPI OMPI_* / Cray "
+              "PALS PMI_* rank env); omit for SLURM/OMPI auto-detect."))
     parser.add_argument("--ensemble-size", type=int, default=1)
     # Issue #273 follow-up: opt-in horizontal-column sharding for the
     # per-column radiation kernel.  Decouples per-column physics
@@ -933,6 +1030,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         dt=args.dt,
         hyperdiff_scale=args.hyperdiff_scale,
         div_damp_scale=args.div_damp_scale,
+        moisture_flux_form=args.moisture_flux_form,
         conservation_fixer=args.conservation_fixer,
         fix_mass=args.fix_mass,
         implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,
@@ -991,6 +1089,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         rrtmgp_use_scan=args.rrtmgp_use_scan,
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
+        rrtmgp_column_chunk_size=args.radiation_column_chunk,
         diurnal_cycle=args.diurnal_cycle,
         orbital_insolation=args.orbital_insolation,
         co2_ppmv=args.co2_ppmv,
@@ -1029,6 +1128,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         # Tuned air-sea + cloud calibration (mirror run_coupled).
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        surface_thermo_convention=args.bulk_thermo_convention,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_rh_crit=args.cloud_rh_crit,
         cloud_p_xr=args.cloud_p_xr,
@@ -1036,6 +1136,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         convective_cloud=args.convective_cloud,
         fix_moisture=args.fix_moisture,
         energy_consistent_moisture_clip=args.energy_consistent_moisture_clip,
+        moisture_advection=args.moisture_advection,
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,
         topo_edge_blend=args.topo_edge_blend,
@@ -1044,6 +1145,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         multilayer_n_layers=args.multilayer_n_layers,
         multilayer_soil_depth=args.multilayer_soil_depth,
         clm_surfdata_path=args.clm_surfdata_path,
+        surfdata_path=args.surfdata,
         albedo_land_path=args.albedo_land_file,
         albedo_land_month=args.albedo_land_month,
         subgrid_orography_path=args.subgrid_orography_file,
@@ -1059,6 +1161,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_infiltration_excess=args.land_infiltration_excess,
         land_stomatal_beta=args.land_stomatal_beta,
         snow_albedo_feedback=args.snow_albedo_feedback,
+        land_gs_max=args.land_gs_max,
+        land_soil_moisture_init_frac=args.land_soil_moisture_init_frac,
+        land_surface_scheme=args.land_surface_scheme,
         cloud_conv_cloud_max=args.conv_cloud_max,
         dynamic_albedo=args.dynamic_albedo,
         T_ice=args.t_ice_k,
@@ -1105,7 +1210,12 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
     # only treat it as an MPI signal when > 1 actual tasks are allocated.
     _slurm_ntasks = int(os.environ.get("SLURM_NTASKS", "1"))
     _mpi_env_vars = {"OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "MPI_LOCALNRANKS"}
-    if not args.distributed and (
+    # Route-B multicontroller (--multicontroller) also launches under mpiexec/srun
+    # (so the SAME MPI env vars are present), but it federates via jax.distributed
+    # driven by the lat-band SPMD lane — NOT the MPI/mpi4jax ``distributed`` path.
+    # Its ``distributed`` MUST stay False (else config.validate_strict rejects
+    # enable_latlon_spmd + distributed as mutually exclusive).
+    if not args.distributed and not getattr(args, "multicontroller", False) and (
         any(key in os.environ for key in _mpi_env_vars)
         or _slurm_ntasks > 1
     ):
@@ -1554,6 +1664,19 @@ def main(argv: list[str] | None = None):
 
     args = parser.parse_args(argv)
     args = _postprocess_args(args, parser)
+
+    # Route-B multicontroller: initialize jax.distributed BEFORE any device work
+    # (ModelDriver/setup query devices; a jax op before init makes
+    # jax.distributed.initialize raise "must be called before backend init").
+    # The explicit --coordinator path reads OMPI_/PMI_ rank env and calls
+    # jax.distributed.initialize directly (no mpi4py); --coordinator omitted
+    # falls back to SLURM/OMPI auto-detect. No-op unless --multicontroller.
+    if getattr(args, "multicontroller", False):
+        if not getattr(args, "enable_latlon_spmd", False):
+            parser.error("--multicontroller requires --enable-latlon-spmd (it "
+                         "is the route-B transport for the lat-band SPMD lane).")
+        from legoesm.parallel.early_init import init_multicontroller_distributed
+        init_multicontroller_distributed(getattr(args, "coordinator", None))
 
     # --aimip-classical-checkpoint: seed the classical physics with the AIMIP
     # best-fit trained params used as INITIAL values (forces the trained scheme

@@ -333,6 +333,9 @@ def create_atmosphere_dycore(
             time_integrator=(CDGridPrimitiveEquationConfig().time_integrator
                              if dc.time_integrator == "auto"
                              else dc.time_integrator),
+            # #771: flux-form moisture transport (needs moisture attached via
+            # ExperimentConfig.moisture_advection; default off = advective).
+            moisture_flux_form=getattr(dc, "moisture_flux_form", False),
         )
         return CDGridPrimitiveEquationModel(grid, sigma, cfg)
 

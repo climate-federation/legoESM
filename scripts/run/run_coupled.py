@@ -317,6 +317,14 @@ def build_parser():
                         help="Checkpoint the per-g-point two-stream scan "
                              "(default on = AD-safe; --no-... = smaller/faster "
                              "compile for forward-only runs)")
+    parser.add_argument("--radiation-column-chunk", type=int, default=0,
+                        help="RRTMGP column-chunk block size (0 = off). >0 maps "
+                             "the rrtmgp solve over fixed-size column blocks so "
+                             "the per-block XLA graph compiles ONCE at this size "
+                             "— caps the super-linear rrtmgp compile time at "
+                             "higher horizontal resolution. Numerically exact "
+                             "(columns are independent); must divide the column "
+                             "count.")
     # Atmosphere physics suite.  DEFAULT = full realistic CMIP6 atmosphere:
     # convection=sbm, turbulence=holtslag_boville, gravity-wave-drag=hines,
     # clouds=sundqvist, microphysics=kessler (+ rrtmgp radiation above).  This
@@ -505,6 +513,13 @@ def build_parser():
                              "exchange + Farquhar photosynthesis-stomata coupling.  "
                              "--no-land-diurnal-surface reverts to a constant bulk "
                              "coefficient + soil-only beta.")
+    parser.add_argument("--elev-bands", dest="land_elev_bands",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Sub-grid elevation-band snow for multilayer+CLM land "
+                             "(OFF by default): re-partition precip phase / melt over "
+                             "sub-grid elevation bands (CLM STD_ELEV) so warm cells "
+                             "keep bright snow on cold high fractions -- fixes the "
+                             "high-elevation / perennial-snow warm-albedo bias.")
     parser.add_argument("--snow-albedo-feedback", dest="snow_albedo_feedback",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="Enable the land snow-albedo feedback + latitude-"
@@ -834,6 +849,7 @@ def main():
         orbital_insolation=args.orbital_insolation,
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
+        rrtmgp_column_chunk_size=args.radiation_column_chunk,
         ic=args.ic,
         ic_path=args.ic_path,
         convection=args.convection,
@@ -959,6 +975,7 @@ def main():
     if args.land_params == "clm":
         overrides["use_pft"] = True
     overrides["land_diurnal_surface"] = args.land_diurnal_surface
+    overrides["land_elev_bands"] = args.land_elev_bands
 
     # Explicit --land-scheme overrides the preset's land model for ANY ocean mode
     # (the woa branch already applied its own default above; re-applying the same

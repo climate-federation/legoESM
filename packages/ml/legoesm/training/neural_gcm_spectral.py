@@ -49,6 +49,7 @@ from legoesm.atmosphere.dynamics.spectral_pe import (
     apply_spectral_filter_to_state,
     apply_filter_to_tracers,
 )
+from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.grids.gaussian import (
     GaussianGrid,
@@ -330,6 +331,15 @@ def carry_to_spectral_state(
 # SFNO as spectral physics
 # =============================================================================
 
+# Surface-forcing planes appended to the SFNO input (prescribed-SST /
+# AMIP pathway): T_sfc, sea-ice fraction, TOA insolation.
+N_SFNO_FORCING_CHANNELS = 3
+# Per-plane normalization: T [K] ~300, sic already in [0,1], insolation
+# [W/m^2] ~1400 (matches the column-MLP feature scales in
+# ``atmosphere.physics.neural_physics``).
+_SFNO_FORCING_INPUT_SCALE = jnp.array([300.0, 1.0, 1400.0])
+
+
 def _channel_input_scale(nlev: int) -> jnp.ndarray:
     """Per-channel normalization factors for PE3DChannelSpec.
 
@@ -366,7 +376,7 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
 
     The returned function has signature::
 
-        physics_fn(state, grid, sigma_coord)
+        physics_fn(state, grid, sigma_coord, forcing=None)
             -> SpectralHydrostaticState  (tendencies)
 
     Includes input normalization and output scaling so that a
@@ -374,10 +384,24 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
 
     Internally:
     1. ``pack_pe_state`` transforms spectral state to grid-space tensor
-    2. Input is normalized to O(1) per channel
-    3. SFNO forward pass (residual_prediction=False) produces O(1) output
-    4. Output is scaled to physical tendency magnitudes
-    5. ``unpack_pe_output`` converts to spectral tendencies
+    2. Three surface-forcing planes are appended (T_sfc, sea-ice
+       fraction, TOA insolation) — the prescribed-SST / AMIP pathway
+       that gives the SFNO its interannual-variability response.  The
+       state channels stay ``PE3DChannelSpec`` (4*nlev+2); the SFNO is
+       constructed with ``in_channels = n_channels + 3`` and
+       ``out_channels = n_channels``.
+    3. Input is normalized to O(1) per channel
+    4. SFNO forward pass (residual_prediction=False) produces O(1) output
+    5. Output is scaled to physical tendency magnitudes
+    6. ``unpack_pe_output`` converts to spectral tendencies
+
+    ``forcing`` dict (traced; see ``spectral_amip_rollout``):
+    ``"T_sfc"`` (ncol,) prescribed surface T over ocean / NaN over land
+    (→ lowest-level air T proxy), ``"sic"`` (ncol,) sea-ice fraction,
+    ``"day_of_year"`` + ``"seconds_of_day"`` scalars (seasonal + diurnal
+    insolation via the shared orbital helper).  Without forcing
+    (idealized / legacy tests): T_sfc proxy = lowest model level,
+    sic = 0, insolation = S_0 (the historical constant input).
 
     Parameters
     ----------
@@ -391,14 +415,67 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
     callable
         Physics function for the spectral PE dycore.
     """
-    nlev = (sfno.config.in_channels - 2) // 4  # n_channels = 4*nlev + 2
+    from legoesm.atmosphere.physics.radiation.solar import cos_zenith_angle
+
+    # nlev from the OUTPUT channels (pure state tendencies, 4*nlev+2);
+    # in_channels additionally carries the N_SFNO_FORCING_CHANNELS
+    # forcing planes.
+    nlev = (sfno.config.out_channels - 2) // 4
+    if (sfno.config.in_channels != sfno.config.out_channels + N_SFNO_FORCING_CHANNELS
+            or (sfno.config.out_channels - 2) % 4 != 0
+            or nlev < 1):
+        raise ValueError(
+            f"SFNO physics expects out_channels = 4*nlev + 2 (PE state "
+            f"layout) and in_channels = out_channels + "
+            f"{N_SFNO_FORCING_CHANNELS} (forcing planes); got "
+            f"in={sfno.config.in_channels}, out={sfno.config.out_channels}."
+        )
     in_scale = _channel_input_scale(nlev)
     out_scale = _channel_tendency_scale(nlev)
+    spec = PE3DChannelSpec(nlev=nlev)
+    lat2d = jnp.broadcast_to(grid.lat[:, None], (len(grid.lat), len(grid.lon)))
+    lon2d = jnp.broadcast_to(grid.lon[None, :], (len(grid.lat), len(grid.lon)))
 
-    def physics_fn(state, grid_, sigma_coord):
+    def physics_fn(state, grid_, sigma_coord, forcing=None):
         packed = pack_pe_state(state, grid_)
+        n_lat, n_lon = packed.shape[:2]
+        # Lowest-level air T from the packed T channel (proxy for T_sfc
+        # over land / when no forcing is prescribed).
+        t_lowest = packed[..., spec.T_slice][..., -1]
+        if forcing is not None:
+            # Sanitize the inactive branch BEFORE the select: jnp.where
+            # propagates NaN cotangents from the untaken branch in reverse
+            # mode (codex HIGH) — land-NaN T_sfc would poison the training
+            # gradient through the proxy path.
+            t_raw = jnp.nan_to_num(
+                forcing["T_sfc"].reshape(n_lat, n_lon), nan=0.0,
+            )
+            t_sfc = jnp.where(
+                jnp.isfinite(forcing["T_sfc"]).reshape(n_lat, n_lon),
+                t_raw, t_lowest,
+            )
+            sic = jnp.clip(
+                jnp.nan_to_num(forcing["sic"].reshape(n_lat, n_lon), nan=0.0),
+                0.0, 1.0,
+            )
+            mu0 = cos_zenith_angle(
+                lat2d, lon2d,
+                forcing["day_of_year"], forcing["seconds_of_day"] / 3600.0,
+            )
+            insol = constants.S_0 * jnp.maximum(mu0, 0.0)
+        else:
+            t_sfc = t_lowest
+            sic = jnp.zeros((n_lat, n_lon), dtype=packed.dtype)
+            insol = jnp.full((n_lat, n_lon), constants.S_0, dtype=packed.dtype)
+        packed_in = jnp.concatenate(
+            [packed,
+             t_sfc[..., None], sic[..., None], insol[..., None]],
+            axis=-1,
+        )
         # Normalize inputs to O(1)
-        packed_norm = packed / jnp.maximum(in_scale, 1e-10)
+        packed_norm = packed_in / jnp.maximum(
+            jnp.concatenate([in_scale, _SFNO_FORCING_INPUT_SCALE]), 1e-10,
+        )
         # SFNO forward: O(1) in, O(1) out
         output_norm = sfno(packed_norm.astype(jnp.float32), grid_)
         # Scale to physical tendency magnitudes
@@ -556,6 +633,7 @@ def spectral_rollout(
     rad_update_interval: int = 1,
     *,
     sim_time_offset_seconds: float = 0.0,
+    forcing_base: dict | None = None,
 ) -> SpectralHydrostaticState:
     """Roll out spectral PE + SFNO physics for n_steps using lax.scan.
 
@@ -606,6 +684,18 @@ def spectral_rollout(
         Step period between radiation re-evaluations.  Only used when
         ``rad_physics_fn`` is non-None.  Default 1 = compute every
         step (same as a single combined physics_fn).
+    forcing_base : dict or None
+        Optional prescribed surface forcing for learned-physics
+        variants (column MLP / SFNO): ``{"T_sfc": (ncol,), "sic":
+        (ncol,), "day_of_year": scalar, "seconds_of_day": scalar}``,
+        all TRACED (SegmentForcing doctrine — per-sample values change
+        without retrace).  Per step the calendar entries are advanced
+        by the elapsed simulated time (``step_idx * dt +
+        sim_time_offset_seconds``) and the dict is passed to
+        ``physics_fn(..., forcing=...)``.  T_sfc / sic are held fixed
+        across the rollout (daily-AMIP granularity).  Mutually
+        exclusive with the rad-gating path (the classical AMIP rollout
+        ``spectral_amip_rollout`` owns that combination).
 
     Returns
     -------
@@ -623,15 +713,54 @@ def spectral_rollout(
     )
 
     use_rad_gating = rad_physics_fn is not None and rad_update_interval > 1
+    if forcing_base is not None and use_rad_gating:
+        raise ValueError(
+            "spectral_rollout: forcing_base is the learned-physics forcing "
+            "path and cannot be combined with rad-gating; classical "
+            "prescribed-SST runs go through spectral_amip_rollout."
+        )
 
     if not use_rad_gating:
         # Legacy single-physics path -- physics_fn computes the full
         # tendency (radiation included or absent) every dycore step.
-        def tendency_fn(s):
-            phys = physics_fn(s, grid, sigma_coord)
-            return spectral_pe_tendencies(s, grid, sigma_coord, pe_config, phys)
+        _t_off = jnp.asarray(sim_time_offset_seconds, dtype=jnp.float64)
 
-        def step_fn(state, _):
+        def _forcing_at(step_idx):
+            # Elapsed simulated time -> advancing day-of-year (seasonal
+            # insolation, FRACTIONAL like spectral_amip_rollout so the
+            # declination is continuous within a day — codex) + wrapped
+            # seconds-of-day (diurnal phase).  day_of_year additionally
+            # wraps to [1, 366) so a year-end IC never exceeds
+            # cos_zenith_angle's documented 1-365 domain (the declination
+            # is 365-periodic, so the wrap is phase-preserving).
+            t = (step_idx.astype(jnp.float64) * dt + _t_off
+                 + jnp.asarray(forcing_base["seconds_of_day"], jnp.float64))
+            doy = (
+                jnp.asarray(forcing_base["day_of_year"], jnp.float64)
+                + t / 86400.0
+            )
+            return {
+                "T_sfc": forcing_base["T_sfc"],
+                "sic": forcing_base["sic"],
+                "day_of_year": jnp.mod(doy - 1.0, 365.0) + 1.0,
+                "seconds_of_day": jnp.mod(t, 86400.0),
+            }
+
+        def step_fn(state, step_idx):
+            if forcing_base is not None:
+                fc = _forcing_at(step_idx)
+                def tendency_fn(s):
+                    phys = physics_fn(s, grid, sigma_coord, forcing=fc)
+                    return spectral_pe_tendencies(
+                        s, grid, sigma_coord, pe_config, phys,
+                    )
+            else:
+                def tendency_fn(s):
+                    phys = physics_fn(s, grid, sigma_coord)
+                    return spectral_pe_tendencies(
+                        s, grid, sigma_coord, pe_config, phys,
+                    )
+
             new_state = dispatch_integrator(
                 state, tendency_fn, dt, integrator_name,
             )
@@ -671,7 +800,9 @@ def spectral_rollout(
         )
 
         final_state, _ = jax.lax.scan(
-            step_fn_ckpt, initial_state, None, length=n_steps,
+            step_fn_ckpt, initial_state,
+            jnp.arange(n_steps) if forcing_base is not None else None,
+            length=None if forcing_base is not None else n_steps,
         )
         return final_state
 
@@ -1199,6 +1330,10 @@ def load_training_data(
         Initial conditions in spectral space.
     target_carries : list[SegmentCarry]
         Targets in grid space (for loss computation).
+    ic_times : list[np.datetime64 | None]
+        Wall-clock IC time per sample (None if the zarr time
+        coordinate was unreadable) — consumed by the prescribed
+        surface-forcing path.
     """
     import numpy as np
     from legoesm.training.era5_to_state import (
@@ -1402,13 +1537,29 @@ def load_training_data(
     # carries.  Multi-step path: a tuple of K carries per IC, one per
     # lead in ``multi_step_hours``.  Downstream callers detect the
     # tuple form and run K chained 6-hour rollouts.
+    # Wall-clock IC times (np.datetime64) per sample — consumed by the
+    # prescribed-surface-forcing path (``build_amip_sample_forcings``)
+    # to evaluate SST/sea-ice + the orbital calendar at each sample.
+    try:
+        _era5_times = np.array(ds.time.values, dtype="datetime64[ns]")
+    except Exception as exc:  # zarr store without a readable time coord
+        _era5_times = None
+        logger.warning(
+            f"load_training_data: ds.time unavailable ({exc!r}); "
+            f"ic_times will be None (prescribed-forcing training needs it)."
+        )
     ic_states = []
     target_carries: list = []
+    ic_times: list = []
     n_total_pairs = 0
     multi_step = len(target_strides) > 1 or bool(multi_step_hours)
     for (base, n_w) in window_offsets:
         for d in range(n_w):
             ic_states.append(carry_to_spectral_state(carries[base + d], grid))
+            ic_times.append(
+                _era5_times[time_indices[base + d]]
+                if _era5_times is not None else None
+            )
             if multi_step:
                 targets_seq = tuple(
                     carries[base + d + s] for s in target_strides
@@ -1429,7 +1580,7 @@ def load_training_data(
             f"Built {n_total_pairs} IC/target pairs "
             f"(rollout={rollout_hours}h) across {len(window_offsets)} window(s)"
         )
-    return ic_states, target_carries
+    return ic_states, target_carries, ic_times
 
 
 # =============================================================================
@@ -1446,6 +1597,7 @@ def _train_spectral_loop(
     config: NeuralGCMSpectralConfig,
     *,
     start_epoch: int = 0,
+    sample_forcings: list | None = None,
 ):
     """Shared training loop for any learned-physics model coupled to the
     spectral PE dycore.
@@ -1460,12 +1612,27 @@ def _train_spectral_loop(
     ic_states : list of SpectralHydrostaticState.
     target_carries : list of SegmentCarry.
     config : NeuralGCMSpectralConfig.
+    sample_forcings : list or None
+        Optional per-sample prescribed surface forcing, aligned with
+        ``ic_states``: each entry is the traced dict consumed by
+        ``spectral_rollout(forcing_base=...)`` (``T_sfc``/``sic``
+        columns + ``day_of_year``/``seconds_of_day`` scalars at the
+        sample's IC time).  Passed to ``_train_step`` as a TRACED
+        pytree argument (SegmentForcing doctrine: one JIT trace, the
+        values change per sample).  ``None`` = legacy unforced
+        training (idealized inputs; physics_fn falls back to its
+        internal proxies).
 
     Returns
     -------
     model : updated eqx.Module
     loss_history : list[float]
     """
+    if sample_forcings is not None and len(sample_forcings) != len(ic_states):
+        raise ValueError(
+            f"sample_forcings length {len(sample_forcings)} != "
+            f"n_samples {len(ic_states)}."
+        )
     sigma_full = jnp.asarray(sigma.sigma_full)
     pe_config = config.pe_config
 
@@ -1635,14 +1802,17 @@ def _train_spectral_loop(
         ms_weights = ()
         ms_weight_sum = 0.0
 
-    def _rollout_one_segment(state, physics, n_seg_steps, time_offset_seconds):
+    def _rollout_one_segment(state, physics, n_seg_steps, time_offset_seconds,
+                             forcing_base=None):
         """Run one autoregressive segment (n_seg_steps dycore steps).
 
         ``time_offset_seconds`` is the cumulative simulated time elapsed
         since the IC.  The gated-radiation branch adds this to the
         per-segment scan index so the diurnal cycle stays phase-correct
         across multi-step autoregressive rollouts (segment k of K
-        evaluates rad at IC + k * 6h, not 00 UTC each time).
+        evaluates rad at IC + k * 6h, not 00 UTC each time).  The same
+        offset advances ``forcing_base``'s calendar inside
+        ``spectral_rollout`` for the learned-physics forcing path.
         """
         if isinstance(physics, tuple):
             non_rad_fn, rad_fn = physics
@@ -1659,9 +1829,10 @@ def _train_spectral_loop(
             config.dt, n_seg_steps,
             sponge_factor, spectral_filter,
             sim_time_offset_seconds=time_offset_seconds,
+            forcing_base=forcing_base,
         )
 
-    def _train_step(model, opt_state, ic_spectral, target_carry):
+    def _train_step(model, opt_state, ic_spectral, target_carry, forcing_base):
         def loss_fn(m):
             physics = make_physics_fn(m, grid)
             if segment_steps:
@@ -1677,6 +1848,7 @@ def _train_spectral_loop(
                 for k, n_seg in enumerate(segment_steps):
                     state = _rollout_one_segment(
                         state, physics, n_seg, t_offset,
+                        forcing_base=forcing_base,
                     )
                     seg_loss, seg_comp = _spectral_state_loss_components(
                         state, target_carry[k], grid, sigma,
@@ -1691,6 +1863,7 @@ def _train_spectral_loop(
             # Legacy single-step path.
             pred = _rollout_one_segment(
                 ic_spectral, physics, n_steps_rollout, 0.0,
+                forcing_base=forcing_base,
             )
             return _spectral_state_loss_components(
                 pred, target_carry, grid, sigma,
@@ -1731,6 +1904,8 @@ def _train_spectral_loop(
         for sample_idx, (ic, target) in enumerate(zip(ic_states, target_carries)):
             model, opt_state, loss, grad_norm, components = train_step(
                 model, opt_state, ic, target,
+                sample_forcings[sample_idx] if sample_forcings is not None
+                else None,
             )
 
             # --- NaN / Inf detection (outside JIT, values are materialized) ---
@@ -1800,12 +1975,35 @@ def _train_spectral_loop(
     return model, loss_history
 
 
+def _maybe_build_sample_forcings(surface_forcing_path, ic_times, grid,
+                                 forcing_cache_path):
+    """Build per-sample prescribed surface forcing, or None when off.
+
+    Deferred import: ``aimip_amip_forcing`` pulls xarray/scipy at call
+    time only, keeping the unforced training path import-light.
+    """
+    if surface_forcing_path is None:
+        return None
+    from legoesm.training.aimip_amip_forcing import build_amip_sample_forcings
+    forcings = build_amip_sample_forcings(
+        ic_times, grid, forcing_path=surface_forcing_path,
+        cache_path=forcing_cache_path,
+    )
+    logger.info(
+        f"Prescribed surface forcing ACTIVE for {len(forcings)} samples "
+        f"({surface_forcing_path})"
+    )
+    return forcings
+
+
 def train_neural_gcm_spectral(
     config: NeuralGCMSpectralConfig = NeuralGCMSpectralConfig(),
     cache_dir: str = "data/era5_cache",
     seed: int = 0,
     *,
     resume_from_dir=None,
+    surface_forcing_path: str | None = None,
+    forcing_cache_path: str | None = None,
 ):
     """Train NeuralGCM: SFNO physics + spectral PE dycore.
 
@@ -1816,6 +2014,15 @@ def train_neural_gcm_spectral(
         ``epoch_NNNN.eqx`` checkpoint and continue training from the
         next epoch.  Used by ``scripts/run/run_aimip.py --resume`` for
         chained-resubmission SLURM jobs.
+    surface_forcing_path : str | None
+        Path to the AIMIP monthly SST/sea-ice forcing NetCDF.  When
+        set, per-sample prescribed surface forcing (T_sfc over ocean,
+        sea-ice fraction, orbital calendar) is fed to the SFNO's
+        forcing input planes during training — REQUIRED for a network
+        that must respond to prescribed SST at AMIP inference time.
+        ``None`` trains unforced (physics_fn internal proxies).
+    forcing_cache_path : str | None
+        Optional .npz cache for the regridded monthly forcing.
 
     Returns (trained_sfno, loss_history).
     """
@@ -1825,7 +2032,10 @@ def train_neural_gcm_spectral(
     spec = PE3DChannelSpec(nlev=config.n_levels)
     sfno = SFNO(
         SFNOConfig(
-            in_channels=spec.n_channels,
+            # State channels + the surface-forcing planes (T_sfc, sic,
+            # insolation) on the INPUT side only — see
+            # ``make_sfno_spectral_physics``.
+            in_channels=spec.n_channels + N_SFNO_FORCING_CHANNELS,
             out_channels=spec.n_channels,
             embed_dim=config.sfno_embed_dim,
             n_blocks=config.sfno_n_blocks,
@@ -1841,14 +2051,18 @@ def train_neural_gcm_spectral(
 
     sfno, start_epoch = maybe_resume_model(sfno, resume_from_dir)
 
-    ic_states, target_carries = load_training_data(
+    ic_states, target_carries, ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
+    )
+    sample_forcings = _maybe_build_sample_forcings(
+        surface_forcing_path, ic_times, grid, forcing_cache_path,
     )
 
     return _train_spectral_loop(
         sfno, make_sfno_spectral_physics,
         grid, sigma, ic_states, target_carries, config,
         start_epoch=start_epoch,
+        sample_forcings=sample_forcings,
     )
 
 
@@ -1918,7 +2132,7 @@ def train_sfno_full_spectral(
 
     sfno, start_epoch = maybe_resume_model(sfno, resume_from_dir)
 
-    ic_states, target_carries = load_training_data(
+    ic_states, target_carries, _ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
     )
 
@@ -2173,8 +2387,15 @@ def train_column_mlp_spectral(
     residual_scale: float = 0.01,
     *,
     resume_from_dir=None,
+    surface_forcing_path: str | None = None,
+    forcing_cache_path: str | None = None,
 ):
     """Train column MLP physics (Rasp 2018) + spectral PE dycore.
+
+    ``surface_forcing_path`` / ``forcing_cache_path``: as in
+    :func:`train_neural_gcm_spectral` — prescribed SST/sea-ice +
+    orbital-calendar features per training sample (the AMIP /
+    interannual-variability pathway).
 
     Returns (trained_neural_physics, loss_history).
     """
@@ -2194,14 +2415,18 @@ def train_column_mlp_spectral(
 
     nn_phys, start_epoch = maybe_resume_model(nn_phys, resume_from_dir)
 
-    ic_states, target_carries = load_training_data(
+    ic_states, target_carries, ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
+    )
+    sample_forcings = _maybe_build_sample_forcings(
+        surface_forcing_path, ic_times, grid, forcing_cache_path,
     )
 
     return _train_spectral_loop(
         nn_phys, make_column_mlp_spectral_physics,
         grid, sigma, ic_states, target_carries, config,
         start_epoch=start_epoch,
+        sample_forcings=sample_forcings,
     )
 
 
@@ -2233,7 +2458,7 @@ def train_physics_params_spectral(
     for k, v in params.as_dict().items():
         logger.info(f"  {k} = {float(v):.4f}")
 
-    ic_states, target_carries = load_training_data(
+    ic_states, target_carries, _ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
     )
 

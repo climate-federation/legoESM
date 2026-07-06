@@ -650,7 +650,7 @@ def _call_radiation_backend(
         from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
         rrtmgp_solver = RRTMGP.from_legoesm_config(radiation_config.rrtmgp)
 
-    result = rrtmgp_solver.solve_columns(
+    _rad_kwargs = dict(
         T=T,
         p_full=p_full,
         p_half=p_half,
@@ -666,6 +666,17 @@ def _call_radiation_backend(
         solar_spectral_fraction=solar_spectral_fraction,
         **cloud_kwargs,
     )
+    # Column-chunk the rrtmgp solve when configured: the per-block body
+    # compiles ONCE at ``column_chunk_size`` columns, capping the highly
+    # super-linear rrtmgp XLA compile time at higher horizontal resolution.
+    # Columns are physically independent, so this is numerically EXACT.
+    _col_chunk = getattr(radiation_config.rrtmgp, "column_chunk_size", 0)
+    if _col_chunk and _col_chunk > 0:
+        result = rrtmgp_solver.solve_columns_chunked(
+            column_chunk_size=_col_chunk, **_rad_kwargs,
+        )
+    else:
+        result = rrtmgp_solver.solve_columns(**_rad_kwargs)
 
     # When using daytime-effective cos(SZA), the solver computes SW fluxes at
     # the daytime level (1/f_day times too large).  Rescale to daily-mean.
@@ -741,6 +752,7 @@ def make_radiation_physics(
     sfc_albedo_override: jnp.ndarray | float | None = None,
     sfc_emissivity_override: jnp.ndarray | float | None = None,
     nc_from_aerosol: bool = False,
+    activation_config=None,
 ) -> Callable:
     """Create a physics function for radiation matching a model's signature.
 
@@ -830,7 +842,8 @@ def make_radiation_physics(
         return _make_hydrostatic_radiation(radiation_config, rrtmgp_solver,
                                             ml_ozone_coefs=ml_ozone_coefs,
                                             column_mesh=column_mesh,
-                                            nc_from_aerosol=nc_from_aerosol)
+                                            nc_from_aerosol=nc_from_aerosol,
+                                            activation_config=activation_config)
     elif model_type == "nonhydrostatic":
         return _make_nonhydrostatic_radiation(radiation_config, rrtmgp_solver,
                                                ml_ozone_coefs=ml_ozone_coefs)
@@ -870,6 +883,7 @@ def _make_hydrostatic_radiation(
     ml_ozone_coefs=None,
     column_mesh=None,
     nc_from_aerosol: bool = False,
+    activation_config=None,
 ) -> Callable:
     """Create radiation physics_fn for any hydrostatic model.
 
@@ -991,18 +1005,35 @@ def _make_hydrostatic_radiation(
         # indirect effect) but skips this radiation-only first-indirect path
         # instead of computing a droplet field the gray optics would discard.
         if nc_from_aerosol and radiation_config.scheme == "rrtmgp":
-            if _aer_ext is None:
+            # Route through the SAME activation dispatch as the microphysics
+            # N_c fill (proxy | arg) so the first (radiation r_eff) and second
+            # (autoconversion) indirect effects see ONE droplet number per
+            # step.  activation_config=None -> default proxy, byte-identical
+            # to the previous direct specified_nc_field call.  The
+            # missing-aerosol_od raise is proxy-only, mirroring the
+            # microphysics guard (ARG needs no AOD).
+            from legoesm.atmosphere.physics.microphysics.arg_activation import (  # noqa: E501
+                ActivationConfig,
+                activated_nc_field,
+            )
+            _act_cfg = (activation_config if activation_config is not None
+                        else ActivationConfig())
+            if _act_cfg.scheme == "proxy" and _aer_ext is None:
                 raise ValueError(
                     "nc_from_aerosol=True but no 'aerosol_od' was passed to "
                     "the radiation physics_fn via forcing — enable external "
                     "aerosol forcing (--aerosol-forcing external) or disable "
                     "--aerosol-ccn."
                 )
-            from legoesm.atmosphere.physics.microphysics.aerosol_activation import (  # noqa: E501
-                specified_nc_field,
-            )
-            n_cloud_col = specified_nc_field(
-                jnp.asarray(_aer_ext), (ncol, nlev),
+            _aer_num = (forcing.get("aerosol_number")
+                        if forcing is not None else None)
+            n_cloud_col = activated_nc_field(
+                _act_cfg, (ncol, nlev),
+                aerosol_od=(None if _aer_ext is None
+                            else jnp.asarray(_aer_ext)),
+                T=T_col, p=p_full_col,
+                aerosol_number=(None if _aer_num is None
+                                else jnp.asarray(_aer_num)),
             )
 
         f_day_col = f_day.reshape(ncol) if f_day is not None else None
