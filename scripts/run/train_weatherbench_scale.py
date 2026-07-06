@@ -135,15 +135,21 @@ def main(argv=None):
     log.info("ERA5 samples: %d global, %d local/rank", len(samples), len(local))
 
     # --- data-parallel loss over Equinox array-leaves ---
-    from legoesm.training.dycore_rollout import single_day_rollout
     from legoesm.training.losses import combined_loss
+    from legoesm.training.scale_build import rollout_hours
     sigma_full = jnp.asarray(sigma.sigma_full)
     arr, static = eqx.partition(params, eqx.is_inexact_array)
+
+    # The rollout horizon MUST match the target's lead time: load_era5_samples
+    # pairs each IC with the state rollout_hours later (the first
+    # multi_step_hours lead, default 6 h).  A fixed 24 h single_day_rollout here
+    # would score a 24 h forecast against a 6 h target.
+    roll_steps = int(rollout_hours(cfg, yml) * 3600.0 / dt)
 
     def loss_fn(arr_leaves, sample):
         trainable = eqx.combine(arr_leaves, static)
         ic, target, forcing = sample
-        pred = single_day_rollout(ic, forcing, make_run_seg(trainable).raw, dt=dt)
+        pred = make_run_seg(trainable).raw(ic, roll_steps, forcing)
         return combined_loss(pred, target, sigma_full, grid=grid, config=loss_config)
 
     total_steps = cfg.n_epochs * max(len(local), 1)
