@@ -922,7 +922,7 @@ class TestERA5ToState:
 class TestTrainingDriver:
 
     def test_build_training_segment(self):
-        from legoesm.training.training_driver import _build_training_segment
+        from legoesm.training.training_driver import build_training_segment
         from legoesm.driver.physics_pipeline import PhysicsOutput
 
         class MockModel:
@@ -934,7 +934,7 @@ class TestTrainingDriver:
             p = PhysicsOutput(**_zero_physics_output(T, p_s))
             return p, (a[16], a[17], a[18], a[19], a[20], a[21])
 
-        fn = _build_training_segment(
+        fn = build_training_segment(
             MockModel(), mock_step, _GRID, _SIGMA, 600.0,
         )
         assert callable(fn)
@@ -986,7 +986,7 @@ class TestTrainingDriver:
         )
 
         def make_run_seg(trainable):
-            return td._build_training_segment(
+            return td.build_training_segment(
                 None, None, _GRID, _SIGMA, 600.0,
                 **trainable.to_segment_kwargs(),
             )

@@ -78,7 +78,7 @@ def build_mode_components(cfg, yml):
 
     from legoesm.driver.model_driver import ModelDriver
     from legoesm.driver.physics_pipeline import build_physics_pipeline
-    from legoesm.training.training_driver import _build_training_segment
+    from legoesm.training.training_driver import build_training_segment
 
     config = build_latlon_config(cfg, yml)
     driver = ModelDriver(config)
@@ -106,7 +106,7 @@ def build_mode_components(cfg, yml):
         step_unified = physics_pipeline.build_step_unified()
 
         def make_run_seg(trainable):
-            return _build_training_segment(
+            return build_training_segment(
                 model, step_unified, grid, sigma, dt, fric_decay=fric_decay,
                 **trainable.to_segment_kwargs())
 
@@ -122,7 +122,7 @@ def build_mode_components(cfg, yml):
         adapter = make_adapter(grid)
 
         def make_run_seg(nn_phys):
-            return _build_training_segment(
+            return build_training_segment(
                 model, make_neural_step_unified(nn_phys, adapter), grid, sigma,
                 dt, fric_decay=fric_decay)
 
@@ -177,7 +177,7 @@ def build_mode_components(cfg, yml):
 
         def make_run_seg(sfno_ph):
             step = make_sfno_step_unified_latlon(sfno_ph, w_ll2g, w_g2ll)
-            return _build_training_segment(model, step, grid, sigma, dt,
+            return build_training_segment(model, step, grid, sigma, dt,
                                            fric_decay=fric_decay)
 
     else:

@@ -3597,10 +3597,10 @@ class LatLonCGridOceanModel:
                 # below (_wet_if_vmix) masks it at the seafloor exactly like
                 # the fallback path's tail guard.
                 from legoesm.ocean.physics.vertical_mixing.k_profiles import (
-                    _iwm_K_profile,
+                    iwm_K_profile,
                 )
                 from legoesm.ocean.eos import make_eos_fn as _mk_eos
-                _K_iwm = _iwm_K_profile(
+                _K_iwm = iwm_K_profile(
                     state, self.z_coord, self.config.physics,
                     _phys_cfg.vertical_mixing.iwm,
                     eos_fn=_mk_eos(eos=self.config.eos,
