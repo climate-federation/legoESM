@@ -198,6 +198,20 @@ class CanopyConfig(NamedTuple):
     field_capacity: float = 0.30  # theta_fc [m3/m3]
     n_root_layers: int = 5        # number of layers to integrate for root-zone stress
 
+    # Whether the soil-moisture stress factor down-regulates the Ball-Berry
+    # INTERCEPT b0 (cuticular / residual minimum conductance) as well as the slope
+    # m.  True = legacy (both stressed).  False keeps b0 unstressed: the leaf
+    # cuticle keeps leaking under drought, so a baseline dry-season transpiration
+    # persists (raises LE at drought-adapted / phreatophytic sites), while adding
+    # negligible CO2 uptake — light/LAI-limited GPP is essentially unchanged
+    # (identically unchanged only at full Vcmax stress, where An -> 0 regardless
+    # of gs; at partial drought a slightly higher gs raises Ci and can nudge An
+    # up marginally).  Also floors gs at b0>0, avoiding the gs->0 Newton
+    # degeneracy.  Static Python bool.  Appended (not inserted mid-tuple) so a
+    # positional / tuple reconstruction of a pre-field CanopyConfig stays aligned
+    # and defaults this to the legacy True.
+    stress_b0: bool = True
+
 
 # Machine-readable tunable/fixed classification for every ``: float`` field of
 # CanopyConfig (see tests/test_param_specs.py). Values live on the NamedTuple;
@@ -411,6 +425,11 @@ class CanopyLandParams(NamedTuple):
     # Trailing optional field — None falls back to the 0.025 m midrange so
     # existing CanopyLandParams constructors need not be updated.
     d_leaf: jax.Array | None = None
+    # Persistent STRUCTURAL leaf area index [m2/m2] driving the forest-floor litter
+    # cover in the soil-evaporation resistance (a slowly-varying / seasonal-maximum
+    # LAI, so a deciduous forest floor keeps its litter through the leaf-off
+    # season).  Trailing optional field — None falls back to the live ``LAI``.
+    litter_LAI: jax.Array | None = None
 
 
 # NOTE: ``CanopyLandConfig`` has been removed.  Canopy is now a surface
