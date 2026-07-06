@@ -517,6 +517,21 @@ class CLMMLCanopyConfig(NamedTuple):
     # (Bonan et al. 2021 GMD) for the beta-distribution PAD lower boundary.
     hbot_frac: float = 0.1
 
+    # Leaf-area-index source (mirrors ``CanopyConfig.use_prognostic_lai``):
+    #   False (default) → PRESCRIBED LAI: the climatology in
+    #     ``LandSurfaceParams.LAI`` (surfdata monthly, PFT-weighted) or the
+    #     scalar fallback in ``clm_ml_interface``.
+    #   True → PROGNOSTIC LAI: ``LAI = C_fol / LCMA`` from the DifferLand
+    #     carbon pool (``compute_prognostic_lai``), so leaf area responds to the
+    #     coupled carbon dynamics.  Requires ``land_config.carbon.scheme ==
+    #     "differland"`` and a non-None ``carbon_state``; otherwise the call
+    #     falls back to the prescribed LAI.  Canopy STRUCTURE (SAI, htop, hbot)
+    #     stays prescribed either way — the carbon cycle produces no allometric
+    #     height/stem mapping.  FORWARD-ONLY: CLM-ML is eager/non-jit, so the
+    #     carbon→LAI feedback is a prognostic forward coupling, not a
+    #     differentiable one (do not ``jax.grad`` through the CLM-ML interface).
+    use_prognostic_lai: bool = False
+
     # Soil thermal conductivity [W/m/K] used for the soil-to-canopy heat flux
     # linearization in MLSoilTemperatureMod.  CLM4.5 Table 3.3 moist loam
     # default; 0.9–1.5 W/m/K for wetter/sandier soils.
