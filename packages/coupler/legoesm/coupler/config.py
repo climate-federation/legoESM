@@ -99,6 +99,12 @@ class CouplerConfig(NamedTuple):
     Cd_ocean: float = 1.5e-3          # Ocean drag coefficient
     Ch_ocean: float = 1.5e-3          # Ocean heat transfer coefficient
     bulk_scheme: str = "constant"     # "constant", "most", "coare3", "large_yeager"
+    # Thermodynamic constants set for the ocean-tile most/coare3/large_yeager
+    # fluxes (#762): "legoesm" (default) = constant L_v / dry c_pd;
+    # "aerobulk" = NEMO/AeroBulk/COARE parity (SST-dependent L_vap(T_sfc),
+    # moist cp_air(q_atm)).  Kept consistent with the atmosphere
+    # SurfaceLayerConfig.thermo_convention by run_coupled.
+    thermo_convention: str = "legoesm"
     # Stable-regime (zeta>0) MOST similarity functions for the MOST-family
     # bulk schemes ("most"/"coare3"/"large_yeager"): "dyer1974" (default,
     # historical -5*zeta), "beljaars_holtslag1991", "grachev2007_sheba"

@@ -27,6 +27,22 @@ _ZETA_MAX_STABLE = 0.5
 _CONV_BDY_HEIGHT = 1000.0  # convective boundary layer height [m]
 _Z0MG_BARE = 0.01          # bare-soil momentum roughness length [m]
 
+# --- CLM5 Monin-Obukhov similarity-theory (MOST) constants ---
+_MOST_GAMMA_UNSTABLE = 16.0   # Businger-Dyer (1 - 16 ζ) unstable-branch factor
+_MOST_BETA_STABLE    = 5.0    # stable-branch linear slope
+_ZETAM = 1.574                # momentum stability-regime transition
+_ZETAT = 0.465                # heat stability-regime transition
+_MOST_MOM_CONV_COEF  = 1.14   # very-unstable momentum convective correction
+_MOST_HEAT_CONV_COEF = 0.8    # very-unstable heat convective correction
+_VIRT_T_COEF = 0.61           # virtual-temperature coefficient (≈ 1/ε − 1, rounded)
+_RIB_MAX = 0.19               # bulk Richardson-number cap (Zeng et al. 1998 init)
+
+# --- Below-canopy resistance Cs (CLM5 / DifferBESS) ---
+_NU_AIR       = 1.5e-5        # kinematic viscosity of air [m2 s-1]
+_CS_DENSE     = 0.004         # dense-canopy turbulent transfer coefficient [-]
+_CS_BARE_COEF = 0.13          # bare-soil Cs prefactor (κ / 0.13)
+_CS_BARE_EXP  = 0.45          # bare-soil Cs Reynolds-number exponent
+
 
 # ---------------------------------------------------------------------------
 # Saturation specific humidity helper
@@ -100,7 +116,7 @@ def compute_aerodynamics(
 
 def _stability_func_momentum(zeta: jax.Array) -> jax.Array:
     """Ψ_m(ζ) — momentum stability function (unstable branch)."""
-    chik2 = jnp.sqrt(1.0 - 16.0 * zeta)
+    chik2 = jnp.sqrt(1.0 - _MOST_GAMMA_UNSTABLE * zeta)
     chik  = jnp.sqrt(chik2)
     return (2.0 * jnp.log((1.0 + chik) * 0.5)
             + jnp.log((1.0 + chik2) * 0.5)
@@ -110,14 +126,14 @@ def _stability_func_momentum(zeta: jax.Array) -> jax.Array:
 
 def _stability_func_heat(zeta: jax.Array) -> jax.Array:
     """Ψ_h(ζ) — heat stability function (unstable branch)."""
-    chik2 = jnp.sqrt(1.0 - 16.0 * zeta)
+    chik2 = jnp.sqrt(1.0 - _MOST_GAMMA_UNSTABLE * zeta)
     return 2.0 * jnp.log((1.0 + chik2) * 0.5)
 
 
 def _friction_velocity(zldis: jax.Array, z0m: jax.Array,
                        obu: jax.Array, um: jax.Array) -> jax.Array:
     """Compute ustar using 4-regime stability functions (CLM5 / DifferBESS)."""
-    zetam = 1.574  # momentum regime transition
+    zetam = _ZETAM  # momentum regime transition
     zeta = zldis / obu
 
     # Very unstable
@@ -125,7 +141,7 @@ def _friction_velocity(zldis: jax.Array, z0m: jax.Array,
         jnp.log(-zetam * obu / z0m)
         - _stability_func_momentum(-zetam)
         + _stability_func_momentum(z0m / obu)
-        + 1.14 * (jnp.cbrt(-zeta) - jnp.cbrt(zetam))
+        + _MOST_MOM_CONV_COEF * (jnp.cbrt(-zeta) - jnp.cbrt(zetam))
     )
     # Unstable
     ustar2 = constants.kappa_vk * um / (
@@ -134,11 +150,12 @@ def _friction_velocity(zldis: jax.Array, z0m: jax.Array,
         + _stability_func_momentum(z0m / obu)
     )
     # Stable
-    ustar3 = constants.kappa_vk * um / (jnp.log(zldis / z0m) + 5.0 * zeta - 5.0 * z0m / obu)
+    ustar3 = constants.kappa_vk * um / (
+        jnp.log(zldis / z0m) + _MOST_BETA_STABLE * zeta - _MOST_BETA_STABLE * z0m / obu)
     # Very stable
     ustar4 = constants.kappa_vk * um / (
-        jnp.log(obu / z0m) + 5.0 - 5.0 * z0m / obu
-        + (5.0 * jnp.log(zeta) + zeta - 1.0)
+        jnp.log(obu / z0m) + _MOST_BETA_STABLE - _MOST_BETA_STABLE * z0m / obu
+        + (_MOST_BETA_STABLE * jnp.log(zeta) + zeta - 1.0)
     )
 
     ustar = jnp.where(zeta < -zetam, ustar1,
@@ -150,24 +167,25 @@ def _friction_velocity(zldis: jax.Array, z0m: jax.Array,
 def _temperature_humidity_relation(zldis: jax.Array, obu: jax.Array,
                                    z0h: jax.Array) -> jax.Array:
     """Compute θ* / (θ_atm - θ_sfc) (4 regimes, CLM5 / DifferBESS)."""
-    zetat = 0.465
+    zetat = _ZETAT
     zeta  = zldis / obu
 
     ch1 = constants.kappa_vk / (
         jnp.log(-zetat * obu / z0h)
         - _stability_func_heat(-zetat)
         + _stability_func_heat(z0h / obu)
-        + 0.8 * (1.0 / jnp.cbrt(zetat) - 1.0 / jnp.cbrt(-zeta))
+        + _MOST_HEAT_CONV_COEF * (1.0 / jnp.cbrt(zetat) - 1.0 / jnp.cbrt(-zeta))
     )
     ch2 = constants.kappa_vk / (
         jnp.log(zldis / z0h)
         - _stability_func_heat(zeta)
         + _stability_func_heat(z0h / obu)
     )
-    ch3 = constants.kappa_vk / (jnp.log(zldis / z0h) + 5.0 * zeta - 5.0 * z0h / obu)
+    ch3 = constants.kappa_vk / (
+        jnp.log(zldis / z0h) + _MOST_BETA_STABLE * zeta - _MOST_BETA_STABLE * z0h / obu)
     ch4 = constants.kappa_vk / (
-        jnp.log(obu / z0h) + 5.0 - 5.0 * z0h / obu
-        + (5.0 * jnp.log(zeta) + zeta - 1.0)
+        jnp.log(obu / z0h) + _MOST_BETA_STABLE - _MOST_BETA_STABLE * z0h / obu
+        + (_MOST_BETA_STABLE * jnp.log(zeta) + zeta - 1.0)
     )
 
     ch = jnp.where(zeta < -zetat, ch1,
@@ -181,18 +199,18 @@ def _monin_obukhov_init(ur: jax.Array, Tv_atm: jax.Array,
                         z0m: jax.Array) -> tuple[jax.Array, jax.Array]:
     """Initialise MOST via bulk Richardson number (Zeng et al. 1998)."""
     wc  = 0.5
-    um  = jnp.where(dthv >= 0.0, jnp.maximum(ur, 0.1), jnp.sqrt(ur**2 + wc**2))
+    um  = jnp.where(dthv >= 0.0, jnp.maximum(ur, 0.1), jnp.sqrt(ur**2 + wc**2))  # coeff-ok: 0.1 m/s wind floor
     rib = constants.g * zldis * dthv / (Tv_atm * um**2)
 
     zeta = jnp.where(
         rib >= 0.0,
-        rib * jnp.log(zldis / z0m) / (1.0 - 5.0 * jnp.minimum(rib, 0.19)),
+        rib * jnp.log(zldis / z0m) / (1.0 - _MOST_BETA_STABLE * jnp.minimum(rib, _RIB_MAX)),
         rib * jnp.log(zldis / z0m),
     )
     zeta = jnp.where(
         rib >= 0.0,
-        jnp.clip(zeta, 0.01, _ZETA_MAX_STABLE),
-        jnp.clip(zeta, -100.0, -0.01),
+        jnp.clip(zeta, 0.01, _ZETA_MAX_STABLE),   # coeff-ok: near-neutral stable floor on ζ
+        jnp.clip(zeta, -100.0, -0.01),            # coeff-ok: near-neutral unstable clamp on ζ
     )
     obu = zldis / zeta
     return um, obu
@@ -216,13 +234,13 @@ def _stability_step(carry: jax.Array, _xs: None,
     ch    = _temperature_humidity_relation(zldis, obu, z0h)
     tstar = ch * dth
     qstar = ch * dq
-    thvstar = tstar * (1.0 + 0.61 * q_atm) + 0.61 * Ta * qstar
+    thvstar = tstar * (1.0 + _VIRT_T_COEF * q_atm) + _VIRT_T_COEF * Ta * qstar
 
     zeta  = zldis * constants.kappa_vk * constants.g * thvstar / (ustar**2 * Tv_atm)
 
-    zeta_stable = jnp.clip(zeta, 0.01, _ZETA_MAX_STABLE)
-    um_stable   = jnp.maximum(ur, 0.1)
-    zeta_unstable = jnp.clip(zeta, -100.0, -0.01)
+    zeta_stable = jnp.clip(zeta, 0.01, _ZETA_MAX_STABLE)   # coeff-ok: near-neutral stable floor on ζ
+    um_stable   = jnp.maximum(ur, 0.1)                     # coeff-ok: 0.1 m/s wind floor
+    zeta_unstable = jnp.clip(zeta, -100.0, -0.01)          # coeff-ok: near-neutral unstable clamp on ζ
     wc_unstable = jnp.cbrt(jnp.maximum(
         -constants.g * ustar * thvstar * _CONV_BDY_HEIGHT / Tv_atm, 0.0))
     um_unstable = jnp.sqrt(ur**2 + wc_unstable**2)
@@ -276,7 +294,7 @@ def monin_obukhov_stability(
     z0h  = z0m   # kB^-1 = 0
     dth  = Ta - Tc
     dq   = q_atm - q_c
-    dthv = (Ta - Tc) * (1.0 + 0.61 * q_atm) + 0.61 * Ta * (q_atm - q_c)
+    dthv = (Ta - Tc) * (1.0 + _VIRT_T_COEF * q_atm) + _VIRT_T_COEF * Ta * (q_atm - q_c)
 
     um, obu = _monin_obukhov_init(ur, Tv_atm, dthv, zldis, z0m)
 
@@ -373,9 +391,9 @@ def compute_below_canopy_resistance(
     -------
     rah_soil, raw_soil : below-canopy aerodynamic resistance [s/m]
     """
-    nu       = 1.5e-5   # kinematic viscosity of air [m2/s]
-    Csdense  = 0.004    # dense-canopy drag coefficient
-    Csbare   = constants.kappa_vk / 0.13 * (z0mg * jnp.maximum(uav, 1e-3) / nu) ** (-0.45)
+    nu       = _NU_AIR    # kinematic viscosity of air [m2/s]
+    Csdense  = _CS_DENSE  # dense-canopy turbulent transfer coefficient
+    Csbare   = constants.kappa_vk / _CS_BARE_COEF * (z0mg * jnp.maximum(uav, 1e-3) / nu) ** (-_CS_BARE_EXP)  # coeff-ok: 1e-3 m/s wind floor
 
     w   = jnp.exp(-0.5 * CI * LAI)
     Cs  = Csbare * w + Csdense * (1.0 - w)

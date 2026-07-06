@@ -16,7 +16,8 @@ scaling_derecho/
 ├── submit_scaling.sh   # ►ENTRY POINT◄  submit_scaling.sh <outdir> <grid> [res...]
 ├── scaling_cpu.sh      # CPU scaling sweep (latlon/ico = ranks 1..128; spectral = 1 x threads)
 ├── scaling_gpu.sh      # GPU scaling sweep (latlon + ico = 1->2->4 A100 single node, ->8->16… multi-node via NODES; spectral = 1)
-├── cube_scaling_cpu.sh # cube CPU scaling (faces 1,2,3,6 x node-filling threads)
+├── cube_scaling_cpu.sh # cube CPU scaling, route A (faces 1,2,3,6; mpi4jax scatter)
+├── cube_scaling_cpu_routeb.sh # cube CPU scaling, route B (jax.distributed/gloo; --cs-spmd; extends past 6 to 6*kt^2) — #764
 ├── cube_scaling_gpu.sh   # cube GPU scaling (1->2->3 A100; mpi4jax face-scatter)
 └── finalize_scaling.sh # after jobs finish: aggregate <outdir> + per-grid CPU-vs-GPU plots
 ```

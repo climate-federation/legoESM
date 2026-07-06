@@ -65,6 +65,41 @@ def test_snow_albedo_feedback_flag_flows_to_config():
     assert cfg_on.snow_albedo_feedback is True
 
 
+def test_moisture_advection_flag_flows_to_config():
+    """Issue #771: resolved-wind moisture advection is OPT-IN (default OFF,
+    bit-identical legacy path); --moisture-advection turns it on."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.moisture_advection is False   # default off
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--moisture-advection",
+    ]), parser))
+    assert cfg_on.moisture_advection is True
+
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-moisture-advection",
+    ]), parser))
+    assert cfg_off.moisture_advection is False
+
+
+def test_radiation_column_chunk_flag_flows_to_config():
+    """--radiation-column-chunk round-trips into ExperimentConfig
+    (rrtmgp_column_chunk_size). 0 (default) = off / byte-identical; a >0 value
+    caps the rrtmgp XLA compile time by mapping the solve over fixed-size
+    column blocks (numerically exact — radiation columns are independent)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.rrtmgp_column_chunk_size == 0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--radiation-column-chunk", "256",
+    ]), parser))
+    assert cfg.rrtmgp_column_chunk_size == 256
+
+
 def test_land_gs_max_flag_flows_to_config():
     """--land-gs-max round-trips into ExperimentConfig (the global stomatal
     canopy-conductance calibration knob for land ET, issue #730). Default 0.3
@@ -252,6 +287,34 @@ def test_convection_tiedtke_parses_and_flows_to_config():
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
     assert cfg.convection == "tiedtke"
+
+
+def test_build_config_includes_surfdata_path():
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--land-mask-file", "sftlf.nc",
+        "--surfdata", "legoesm_surfdata.nc",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+
+    assert cfg.land_mask_path == "sftlf.nc"
+    assert cfg.surfdata_path == "legoesm_surfdata.nc"
+
+
+def test_build_config_surfdata_defaults_empty():
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.surfdata_path == ""
+
+
+def test_surfdata_without_land_mask_warns(capsys):
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical", "--surfdata", "sd.nc"])
+    _postprocess_args(args, parser)
+    assert "ignored without --land-mask-file" in capsys.readouterr().out
 
 
 def test_joint_parameterization_requires_mass_flux_and_louis():
@@ -669,7 +732,9 @@ def test_tuned_slab_knobs_flow_to_config():
     d = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
     assert d.surface_bulk_scheme == "constant"
-    assert d.surface_gustiness_zi == 0.0
+    # None = scheme-native gustiness (coare3: 600 m AeroBulk default, others
+    # off).  With the default "constant" scheme this is still off.
+    assert d.surface_gustiness_zi is None
     assert d.cloud_q_c_diagnostic is None
     assert d.cloud_rh_crit is None
     assert d.convective_cloud is False
@@ -1038,16 +1103,42 @@ def test_q_c_diagnostic_threads_to_config():
     assert cfg.cloud_q_c_diagnostic == pytest.approx(3e-4)
 
 
-def test_gustiness_defaults_off():
-    """Gustiness and q_c_diagnostic disabled by default — opt-in only.
-    (--gustiness-zi default is 0.0 = off after the run_coupled-mirrored #647
-    knobs; cloud_q_c_diagnostic stays None = CloudConfig default.)"""
+def test_gustiness_defaults_scheme_native():
+    """--gustiness-zi unset = None = scheme-native (AeroBulk parity): off for
+    the default "constant" scheme, 600 m built-in for coare3; explicit 0
+    forces off.  cloud_q_c_diagnostic stays None = CloudConfig default."""
     parser = build_arg_parser()
     args = parser.parse_args(["--dataset", "analytical"])
     args = _postprocess_args(args, parser)
     cfg = build_config_from_args(args)
-    assert cfg.surface_gustiness_zi == 0.0
+    assert cfg.surface_gustiness_zi is None
     assert cfg.cloud_q_c_diagnostic is None
+    args0 = parser.parse_args(["--dataset", "analytical", "--gustiness-zi", "0"])
+    cfg0 = build_config_from_args(_postprocess_args(args0, parser))
+    assert cfg0.surface_gustiness_zi == 0.0
+
+
+def test_bulk_thermo_convention_flag_flows_to_config():
+    """--bulk-thermo-convention must reach
+    ExperimentConfig.surface_thermo_convention (#762): default "legoesm"
+    (constant L_v / dry c_pd, byte-identical); "aerobulk" = NEMO/AeroBulk
+    parity, and passes the validate_strict membership check."""
+    parser = build_arg_parser()
+    args = parser.parse_args(["--dataset", "analytical"])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.surface_thermo_convention == "legoesm"
+
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--surface-bulk-scheme", "coare3",
+        "--turbulence", "holtslag_boville",
+        "--bulk-thermo-convention", "aerobulk",
+    ])
+    args = _postprocess_args(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.surface_thermo_convention == "aerobulk"
+    cfg.validate_strict()
 
 
 def test_cloud_tuning_flags_thread_to_config():
@@ -1554,3 +1645,47 @@ def test_distributed_mode_flag_flows_to_config():
     with pytest.raises(SystemExit):
         parser.parse_args(["--dataset", "analytical",
                            "--distributed-mode", "bogus"])
+
+
+def test_moisture_flux_form_flag_flows_to_dycore_config():
+    """#771: --moisture-flux-form must reach the DycoreConfig (which the
+    component factory threads into CDGridPrimitiveEquationConfig). Default off;
+    --no-moisture-flux-form explicit off."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.dycore.moisture_flux_form is False   # default off
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--moisture-flux-form",
+    ]), parser))
+    assert cfg_on.dycore.moisture_flux_form is True
+
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-moisture-flux-form",
+    ]), parser))
+    assert cfg_off.dycore.moisture_flux_form is False
+
+
+def test_multicontroller_coordinator_flags_parse():
+    """Route-B flags round-trip through the parser (they are RUN args consumed
+    in main() for the jax.distributed bootstrap, not ExperimentConfig fields)."""
+    parser = build_arg_parser()
+    a = parser.parse_args(["--enable-latlon-spmd", "--multicontroller",
+                           "--coordinator", "localhost:12455"])
+    assert a.multicontroller is True
+    assert a.coordinator == "localhost:12455"
+    # Default: single-controller (both off).
+    d = parser.parse_args(["--dataset", "analytical"])
+    assert d.multicontroller is False
+    assert d.coordinator is None
+
+
+def test_multicontroller_requires_enable_latlon_spmd(capsys):
+    """--multicontroller without --enable-latlon-spmd is refused in main()
+    BEFORE any device work (it is only the route-B transport for that lane)."""
+    from scripts.run.run_amip import main
+    with pytest.raises(SystemExit):
+        main(["--grid-type", "latlon", "--dataset", "analytical",
+              "--multicontroller"])
+    assert "requires --enable-latlon-spmd" in capsys.readouterr().err

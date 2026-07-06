@@ -14,10 +14,10 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
 from legoesm.core.precision import get_policy
 from legoesm.core.bulk_flux import (
     simple_bulk_fluxes, compute_most_fluxes, apply_gustiness,
+    ocean_surface_q_sat,
 )
 from legoesm.land.multilayer_land import init_multilayer_land_state
 from legoesm.land.surface_params import reshape_params
@@ -221,9 +221,15 @@ def ocean_tile_response(
     MOST algorithms (COARE 3.0 or Large & Yeager 2004).
     """
     shape = ocean_sst.shape
-    q_sfc = _Q_SAT_SALINE_FACTOR * saturation_mixing_ratio(
-        ocean_sst, forcing.p_surface,
-    )
+    # Resolve the thermodynamic convention ONCE (getattr-safe for any
+    # config lacking the field) and validate it, so the q_sat curve and
+    # the MOST call below never disagree (#762, codex round-20).
+    _thermo_conv = getattr(config, "thermo_convention", "legoesm")
+    if _thermo_conv not in ("legoesm", "aerobulk"):
+        raise ValueError(
+            f"Unknown thermo_convention {_thermo_conv!r}; expected "
+            "'legoesm' or 'aerobulk'."
+        )
     rho = forcing.rho_lowest
 
     valid_schemes = ("constant", "most", "coare3", "large_yeager")
@@ -232,11 +238,21 @@ def ocean_tile_response(
             f"Unknown coupler bulk_scheme {config.bulk_scheme!r}; "
             f"expected one of {valid_schemes}."
         )
-    # ``most`` (iterative MOST at the fixed ``ocean_z0`` roughness), ``coare3``
-    # and ``large_yeager`` all take the MOST solver; only ``constant`` uses the
-    # fixed-coefficient path below. Adding ``most`` restores parity with the
-    # sea-ice / land / lake tiles, whose dispatchers already accept it.
-    if config.bulk_scheme in ("most", "coare3", "large_yeager"):
+    # The aerobulk convention (SST-dependent L_vap, moist cp_air, Goff
+    # q_sat) is the NEMO/AeroBulk MOST set — it engages ONLY on the MOST
+    # solver schemes ("most"/"coare3"/"large_yeager").  The 'constant'
+    # fixed-coefficient closure is a different closure entirely (constant
+    # C_H/C_E, constant L_v/c_pd in simple_bulk_fluxes), so applying Goff
+    # q_sat there alone would be a HALF-convention; keep it on Tetens
+    # (codex round-20).  ``most`` = iterative MOST at the fixed ``ocean_z0``
+    # roughness (parity with the sea-ice/land/lake dispatchers).
+    _is_most = config.bulk_scheme in ("most", "coare3", "large_yeager")
+    q_sfc = ocean_surface_q_sat(
+        ocean_sst, forcing.p_surface,
+        thermo_convention=_thermo_conv, bulk_scheme=config.bulk_scheme,
+        saline_factor=_Q_SAT_SALINE_FACTOR)
+
+    if _is_most:
         # Use wind relative to ocean surface current
         u_rel = forcing.u_lowest - ocean_u
         v_rel = forcing.v_lowest - ocean_v
@@ -256,6 +272,7 @@ def ocean_tile_response(
             # layer (which already carries gustiness_w_zi) and lets a calm warm
             # ocean evaporate realistically.  0.0 => off => byte-identical.
             gustiness_w_zi=config.gustiness_w_zi,
+            thermo_convention=_thermo_conv,
             stability_scheme=config.stability_scheme,
         )
     else:

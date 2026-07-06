@@ -71,6 +71,16 @@ _HA_JMAX = 50000.0     # Kattge & Knorr 2007 (CLM5 Table 2.9.2)
 _HD_VCMAX = 200000.0
 _HD_JMAX = 200000.0
 
+# --- Kattge & Knorr (2007) acclimation linear fits (Bonan eq. 11.62-11.64) ---
+# Vcmax/Jmax entropy terms dS [J K-1 mol-1] and the Jmax25/Vcmax25 ratio, each a
+# linear function of growth temperature TgC [degC]. Values verbatim from the fit.
+_DS_VCMAX_INTERCEPT = 668.39   # [J K-1 mol-1]
+_DS_VCMAX_SLOPE     = 1.07     # [J K-1 mol-1 degC-1]
+_DS_JMAX_INTERCEPT  = 659.70   # [J K-1 mol-1]
+_DS_JMAX_SLOPE      = 0.75     # [J K-1 mol-1 degC-1]
+_JV_RATIO_INTERCEPT = 2.59     # [-] Jmax25/Vcmax25 at TgC = 0 degC
+_JV_RATIO_SLOPE     = 0.035    # [degC-1]
+
 # --- Tjoelker (2001) + Atkin (2008) dark respiration (Bonan eq. 11.65-11.67) ---
 _RD0_VCMAX_FRAC_C3 = 0.015   # Rd0 / Vcmax25 (basal rate at 25 degC)
 _Q10_INTERCEPT = 3.22
@@ -128,17 +138,17 @@ def _smaller_root_quadratic(theta: float, A: jax.Array, B: jax.Array,
 
 def _delta_s_vcmax(TgC_a: jax.Array) -> jax.Array:
     """Vcmax entropy term (Bonan eq. 11.62, Kattge & Knorr 2007). [J K-1 mol-1]"""
-    return 668.39 - 1.07 * TgC_a
+    return _DS_VCMAX_INTERCEPT - _DS_VCMAX_SLOPE * TgC_a
 
 
 def _delta_s_jmax(TgC_a: jax.Array) -> jax.Array:
     """Jmax entropy term (Bonan eq. 11.63, Kattge & Knorr 2007). [J K-1 mol-1]"""
-    return 659.70 - 0.75 * TgC_a
+    return _DS_JMAX_INTERCEPT - _DS_JMAX_SLOPE * TgC_a
 
 
 def _jmax25_over_vcmax25(TgC_a: jax.Array) -> jax.Array:
     """Acclimated Jmax25/Vcmax25 ratio (Bonan eq. 11.64, Kattge & Knorr 2007)."""
-    return 2.59 - 0.035 * TgC_a
+    return _JV_RATIO_INTERCEPT - _JV_RATIO_SLOPE * TgC_a
 
 
 def _q10_tjoelker(Tf: jax.Array) -> jax.Array:
@@ -239,7 +249,7 @@ def c3_photosynthesis(
     J = _smaller_root_quadratic(_THETA_J, I_PSII, Jmax)
 
     # Limited rates (Bonan eq. 11.28, 11.29, 11.32)
-    Ci_safe = jnp.maximum(Ci, 1e-3)  # avoid div-by-zero at zero CO2
+    Ci_safe = jnp.maximum(Ci, 1e-3)  # coeff-ok: div-by-zero guard on intercellular CO2 (mole fraction)
     Ac = Vcmax * (Ci_safe - GammaStar) / (Ci_safe + Kc * (1.0 + _OI / Ko))
     Aj = (J / 4.0) * (Ci_safe - GammaStar) / (Ci_safe + 2.0 * GammaStar)
     Ap = 0.5 * Vcmax

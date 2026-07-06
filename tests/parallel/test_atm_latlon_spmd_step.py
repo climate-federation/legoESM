@@ -54,9 +54,9 @@ from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
     shard_state_atm_latlon,
     gather_state_atm_latlon,
     run_atm_latlon_spmd_segment,
-    _build_band_grids_atm,
-    _atm_grid_array_field_names,
-    _lat_spec,
+    build_band_grids_atm,
+    atm_grid_array_field_names,
+    lat_spec,
 )
 from legoesm.parallel.latlon_spmd import replicate_leaf
 from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
@@ -146,9 +146,9 @@ def _serial_and_band_tendency(use_polar_filter):
         state, grid, sigma, cfg)
     serial = tuple(np.asarray(x) for x in (du_s, dv_s, dT_s, dps_s))
 
-    band_grids = _build_band_grids_atm(grid, N_DEV)
+    band_grids = build_band_grids_atm(grid, N_DEV)
     template = band_grids[0]
-    afn = _atm_grid_array_field_names(template)
+    afn = atm_grid_array_field_names(template)
     rep = NamedSharding(mesh, P())
     stacks = {n: jax.device_put(jnp.stack([jnp.asarray(getattr(g, n))
               for g in band_grids], 0), rep) for n in afn}
@@ -163,7 +163,7 @@ def _serial_and_band_tendency(use_polar_filter):
         return du, to_vface_lower(dv), dT, dps
 
     sc = shard_state_atm_latlon(state, mesh)
-    in_spec = jax.tree.map(_lat_spec, sc)
+    in_spec = jax.tree.map(lat_spec, sc)
     sp3 = P("lat", None, None)
     sp2 = P("lat", None)
     fn = shard_map(

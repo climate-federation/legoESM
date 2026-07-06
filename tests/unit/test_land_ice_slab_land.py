@@ -470,7 +470,8 @@ class TestScanCarryDtypeStability:
         )
         mismatched = [
             f"land.{f}" for f in state._fields
-            if getattr(
+            if getattr(state, f) is not None and getattr(new_state, f) is not None
+            and getattr(
                 getattr(new_state, f), "data", getattr(new_state, f)
             ).dtype != getattr(
                 getattr(state, f), "data", getattr(state, f)

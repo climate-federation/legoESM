@@ -76,9 +76,13 @@ class Test2a_SmokeMultilayer:
         )
         for name in MultiLayerLandState._fields:
             arr = getattr(new_state, name)
+            if arr is None:            # feature-gated fields (ponding, elevation bands)
+                continue
             assert jnp.all(jnp.isfinite(arr)), f"MultiLayerLandState.{name} has non-finite values"
         for name in TileResponse._fields:
             arr = getattr(response, name)
+            if arr is None:
+                continue
             assert jnp.all(jnp.isfinite(arr)), f"TileResponse.{name} has non-finite values"
 
     def test_T_soil_bounded(self):

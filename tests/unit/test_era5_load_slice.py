@@ -37,8 +37,13 @@ def test_resolve_var_bidirectional():
     assert resolve_var({"foo"}, "bar") is None
 
 
-def _synthetic_era5(names="long", *, drop=()):
-    """A tiny in-memory ERA5-like dataset with the requested naming convention."""
+def _synthetic_era5(names="long", *, drop=(), extra2d=None):
+    """A tiny in-memory ERA5-like dataset with the requested naming convention.
+
+    ``extra2d``: {long_name: scalar-or-(nlat,nlon)-array} appended as extra
+    (time, lat, lon) surface variables — used to exercise the sst fallback
+    chain (sea_surface_temperature / 2m_temperature).
+    """
     import xarray as xr
 
     nlat, nlon, nlev = 5, 6, 3
@@ -46,6 +51,7 @@ def _synthetic_era5(names="long", *, drop=()):
         "temperature": "t", "u_component_of_wind": "u",
         "v_component_of_wind": "v", "specific_humidity": "q",
         "surface_pressure": "sp", "skin_temperature": "skt",
+        "sea_surface_temperature": "sst", "2m_temperature": "t2m",
         "geopotential_at_surface": "z_sfc",
     }
     # temperature VARIES by level (300/250/200 K at 1000/500/100 hPa) so the loader's
@@ -87,6 +93,11 @@ def _synthetic_era5(names="long", *, drop=()):
             continue
         data[_key(long)] = (("time", "lat", "lon"),
                             np.full((1, nlat, nlon), val, dtype=np.float32))
+    for long, val in (extra2d or {}).items():
+        arr = np.asarray(val, dtype=np.float32)
+        if arr.ndim == 0:
+            arr = np.full((nlat, nlon), float(arr), dtype=np.float32)
+        data[_key(long)] = (("time", "lat", "lon"), arr[None, :, :])
     return xr.Dataset(data, coords=coords)
 
 
@@ -164,6 +175,64 @@ def test_load_era5_slice_missing_required_raises(monkeypatch):
         lambda store: _synthetic_era5("long", drop=("temperature",)))
     with pytest.raises(ValueError, match="REQUIRED.*temperature.*not found"):
         load_era5_slice(_config(), 0)
+
+
+# --- sst fallback chain (#797 bug 7: WB2 6h zarr has NO skin_temperature; the
+# ---   old unconditional zero-fill silently forced 0 K SST on the WB trainer) ---
+
+def _no_skt(extra2d):
+    return _synthetic_era5("long", drop=("skin_temperature",), extra2d=extra2d)
+
+
+def test_sst_falls_back_to_sea_surface_gap_filled_with_t2m(monkeypatch):
+    """No skin_temperature: sea_surface_temperature (NaN over land) is gap-filled
+    with 2m_temperature — the WB2-store shape that hit the 0 K zero-fill."""
+    sst = np.full((5, 6), 290.0, dtype=np.float32)
+    sst[0, 0] = np.nan                                     # a 'land' cell
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _no_skt(
+        {"sea_surface_temperature": sst, "2m_temperature": 280.0}))
+    sl = load_era5_slice(_config(), 0)
+    np.testing.assert_allclose(sl.sst[0, 0], 280.0)        # land <- t2m
+    np.testing.assert_allclose(sl.sst[1, 1], 290.0)        # ocean <- sst
+    assert np.all(np.isfinite(sl.sst))
+
+
+def test_sst_sea_surface_only_fills_nan_with_finite_mean(monkeypatch):
+    """sea_surface_temperature without 2m_temperature: NaN cells take the finite
+    mean instead of leaking NaN (or 0 K) into the forcing."""
+    sst = np.full((5, 6), 290.0, dtype=np.float32)
+    sst[0, 0] = np.nan
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _no_skt(
+        {"sea_surface_temperature": sst}))
+    sl = load_era5_slice(_config(), 0)
+    np.testing.assert_allclose(sl.sst[0, 0], 290.0)
+    assert np.all(np.isfinite(sl.sst))
+
+
+def test_sst_falls_back_to_t2m_alone(monkeypatch):
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _no_skt(
+        {"2m_temperature": 281.5}))
+    sl = load_era5_slice(_config(), 0)
+    np.testing.assert_allclose(sl.sst, 281.5)
+
+
+def test_sst_zero_fill_is_last_resort_and_warns(monkeypatch, caplog):
+    """With NO surface-temperature variable at all, the legacy zero-fill remains
+    (idealized ICs must still load) but is no longer silent."""
+    import logging
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _no_skt(None))
+    with caplog.at_level(logging.WARNING, logger=e2s.logger.name):
+        sl = load_era5_slice(_config(), 0)
+    np.testing.assert_allclose(sl.sst, 0.0)
+    assert any("sst zero-filled" in r.message for r in caplog.records)
+
+
+def test_sst_skin_temperature_still_wins_over_fallbacks(monkeypatch):
+    """A store WITH skin_temperature is untouched by the new chain."""
+    monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: _synthetic_era5(
+        "long", extra2d={"sea_surface_temperature": 250.0, "2m_temperature": 251.0}))
+    sl = load_era5_slice(_config(), 0)
+    np.testing.assert_allclose(sl.sst, 290.0)              # vals2 skin_temperature
 
 
 def _synthetic_era5_multitime():
