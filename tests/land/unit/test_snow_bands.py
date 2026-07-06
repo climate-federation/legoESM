@@ -591,6 +591,16 @@ class TestMultilayerIntegration(unittest.TestCase):
                 lat=jnp.full(2, 0.7),
             )
 
+    def test_elev_bands_with_canopy_raises(self):
+        """Elevation bands + the two-leaf canopy surface scheme are rejected: the banded
+        radiation would override the canopy's radiative closure (codex #5)."""
+        from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+        config = self._config([500.0])._replace(surface_scheme=TwoLeafCanopyConfig())
+        state = init_multilayer_land_state(1, config)
+        with self.assertRaises(ValueError):
+            step_multilayer_land(state, _make_forcing(1), config, U_min=1.0, dt=600.0,
+                                 lat=jnp.full(1, 0.7))
+
     def test_warm_cell_cold_peaks_accumulates_and_brightens(self):
         """+2 C rain-only cell: the banded mountain cell accumulates snow on its
         cold high bands and ends up brighter than the flat cell."""

@@ -179,6 +179,15 @@ def _step_multilayer_land_impl(
     # cell-mean radiation in ``G_surface`` with the banded per-band balance.
     bands = config.elev_bands
     if bands is not None:
+        if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+            # The banded radiation replaces the surface scheme's radiation/G with a
+            # BARE (no-canopy) per-band balance; mixing it with the two-leaf canopy's
+            # radiative closure (and its T_rad/lw_up) would be inconsistent.  Reject
+            # rather than silently apply incompatible closures.
+            raise ValueError(
+                "config.elev_bands (sub-grid snow bands) is not supported with the "
+                "TwoLeafCanopyConfig surface scheme — the banded radiation would "
+                "override the canopy radiative closure.  Use SimpleSEBConfig with bands.")
         if state.snow_bands is None:
             raise ValueError(
                 "config.elev_bands is set but state.snow_bands is None; initialise "
@@ -700,7 +709,10 @@ def _step_multilayer_land_impl(
         z0=surface_out.z0,
         q_surface=q_sfc_new,
         shflx=shflx,
-        lhflx=lhflx_actual,
+        # Latent heat to the atmosphere = the evaporative/sublimation demand PLUS the
+        # blowing-snow sublimation (gap 5): its L_s was charged to the surface energy
+        # budget, so it must reach the atmosphere as latent heat (0 when bands off).
+        lhflx=lhflx_actual + blow_subl * constants.L_s,
         tau_x=tau_x,
         tau_y=tau_y,
         lw_up=response_lw_up,
@@ -714,9 +726,10 @@ def _step_multilayer_land_impl(
         ocean_heat_extraction=jnp.zeros(ncol),
         ocean_stress_x=jnp.zeros(ncol),
         ocean_stress_y=jnp.zeros(ncol),
-        # Phase-aware moisture mass flux: lhflx_actual was computed with
-        # L_eff (L_s over snow, L_v otherwise) so dividing recovers mass.
-        surface_mass_flux=lhflx_actual / L_eff,
+        # Phase-aware moisture mass flux (up): the evaporative/sublimation demand
+        # (lhflx_actual / L_eff) PLUS the blowing-snow sublimated SWE that left as
+        # vapor (gap 5) — so the vapor mass balances the reported latent heat.
+        surface_mass_flux=lhflx_actual / L_eff + blow_subl,
         # Land tile does not exchange salt with the ocean directly.
         salt_flux=jnp.zeros(ncol),
     )

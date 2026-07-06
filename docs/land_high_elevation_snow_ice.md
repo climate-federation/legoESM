@@ -16,10 +16,16 @@ State: `MultiLayerLandState.snow_bands / snow_age_bands / ice_bands`
 |---|---------|--------|
 | 1 | Banded surface energy balance (per-band SEB) | **Implemented + wired + tunable** |
 | 2 | Elevation lapse of radiative forcing (SW↑, LW↓) | **Implemented + wired + tunable** |
-| 3 | Snow darkening (grain / solar-zenith / dust / spectral) | **Zenith implemented + unit-tested; forward wiring DEFERRED** |
+| 3 | Snow darkening (solar-zenith / grain) | **Implemented + WIRED** (real diurnal cos zenith + insolation-weighted albedo) |
 | 4 | Glacier firn/ice reservoir + ablation dark-ice albedo | **Implemented + wired + tunable** |
-| 5 | Terrain radiation (slope/aspect/sky-view) + blowing-snow | **DEFERRED (data-limited)** |
-| 6 | Frozen-soil latent heat / meltwater refreezing (cold content) | **DEFERRED (needs pack liquid store)** |
+| 5 | Terrain radiation (sky-view) + blowing-snow | **Implemented** (sky-view LW + blowing-snow sublimation, opt-in) |
+| 6 | Meltwater refreezing / frozen-soil cold content | **Implemented** (rain-on-snow refreezing; frozen-SOIL = main's `enable_freeze_thaw`) |
+
+All six merged onto main (`1a8a73e51`) + committed (gap 3 `aa378b627`, gaps 5+6 `25c65242d`).
+Grain-size metamorphism = the age decay; dust/BC darkening + per-band terrain geometry
++ multi-layer retained-liquid cold content are the documented remaining refinements.
+Deferred within gap 3: the coupled `couple_surface_radiation` radiation-time zenith
+recompute (narrow opt-in; the offline calibration path is correct).
 
 ## Implemented physics
 

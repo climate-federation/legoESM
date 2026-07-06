@@ -318,8 +318,19 @@ def step_snow_bands(
     charges ``(snow_melt + ice_melt)*L_f`` to the surface energy budget (ice_runoff is
     frozen outflow — no fusion).
     """
-    dz = cfg.band_dz
-    T_sfc_band = T_sfc[:, None] - cfg.lapse_rate_K_m * dz
+    # Cast the band geometry + trainable (traced) config scalars to the state dtype so a
+    # float64 config cannot promote the returned float32 band mass/age outputs (coupled
+    # lax.scan carry-dtype mismatch).
+    dt_work = swe_bands.dtype
+    dz = cfg.band_dz.astype(dt_work)
+    _lapse = jnp.asarray(cfg.lapse_rate_K_m, dt_work)
+    _snow_cap = jnp.asarray(cfg.swe_snow_cap, dt_work)
+    _ice_cap = jnp.asarray(cfg.swe_cap, dt_work)
+    _tau = jnp.asarray(cfg.tau_ice_discharge_s, dt_work)
+    _refreeze_frac = jnp.asarray(cfg.refreeze_frac, dt_work)
+    _blow_rate_c = jnp.asarray(cfg.blow_snow_subl_rate, dt_work)
+    _blow_thresh = jnp.asarray(cfg.blow_snow_wind_thresh_ms, dt_work)
+    T_sfc_band = T_sfc[:, None] - _lapse * dz
     # Q_net may be the scalar cell energy balance (ncol,) broadcast to every band, or
     # the per-band net radiation (ncol, n_bands) from band_net_radiation (banded SEB).
     Q_net_bands = Q_net[:, None] if jnp.ndim(Q_net) == 1 else Q_net
@@ -338,12 +349,12 @@ def step_snow_bands(
     if precip_rain_bands is not None:
         _cold_snow = (T_sfc_band < T_snow_melt) & (swe_after_melt > 1e-6)
         refreeze_bands = jnp.where(
-            _cold_snow, cfg.refreeze_frac * precip_rain_bands * dt, 0.0)
+            _cold_snow, _refreeze_frac * precip_rain_bands * dt, 0.0)
         swe_after_melt = swe_after_melt + refreeze_bands
     else:
         refreeze_bands = jnp.zeros_like(swe_after_melt)
     # 2. Firnification: seasonal snow above the snow cap densifies into ice storage.
-    to_ice = jnp.maximum(swe_after_melt - cfg.swe_snow_cap, 0.0)
+    to_ice = jnp.maximum(swe_after_melt - _snow_cap, 0.0)
     swe_new = swe_after_melt - to_ice
     ice_after_firn = ice_bands + to_ice
     # 3. Ablation: melt energy the seasonal snow could not consume ablates exposed ice.
@@ -355,10 +366,10 @@ def step_snow_bands(
     # 4. Slow discharge (ice/tau) + hard ceiling overflow, both frozen runoff.  Bound
     #    the discharge by the available ice so a pathological dt/tau > 1 cannot drive the
     #    reservoir negative (runoff > storage).
-    discharge = jnp.minimum(ice_after_melt * (dt / cfg.tau_ice_discharge_s),
+    discharge = jnp.minimum(ice_after_melt * (dt / _tau),
                             ice_after_melt)
     ice_after_disch = ice_after_melt - discharge
-    ceil_excess = jnp.maximum(ice_after_disch - cfg.swe_cap, 0.0)
+    ceil_excess = jnp.maximum(ice_after_disch - _ice_cap, 0.0)
     ice_new = ice_after_disch - ceil_excess
 
     n_bands = swe_bands.shape[-1]
@@ -366,9 +377,12 @@ def step_snow_bands(
     #    sublimes from suspension — an SWE sink to the atmosphere (opt-in; rate 0 = off),
     #    bounded by the band SWE.  Removes preferentially from the exposed high bands via
     #    their (larger) SWE weighting.
-    if wind is not None and cfg.blow_snow_subl_rate > 0.0:
-        _blow_rate = cfg.blow_snow_subl_rate * jnp.maximum(
-            jnp.reshape(wind, (-1, 1)) - cfg.blow_snow_wind_thresh_ms, 0.0)
+    # Branch ONLY on the static ``wind is not None`` (Python) — the rate is a traced
+    # trainable scalar, so a ``rate > 0`` Python branch would raise under jax.grad; a
+    # zero rate just yields zero sublimation.
+    if wind is not None:
+        _blow_rate = _blow_rate_c * jnp.maximum(
+            jnp.reshape(wind, (-1, 1)) - _blow_thresh, 0.0)
         _blow_mass = jnp.minimum(_blow_rate * dt, swe_new)
         swe_new = swe_new - _blow_mass
         blow_subl = jnp.sum(_blow_mass, axis=-1) / n_bands / dt
@@ -522,7 +536,14 @@ def band_net_radiation(
     n_bands = dz.shape[-1]
     emis = jnp.asarray(emissivity, dtype=dt_work)
     emis = jnp.reshape(emis, (-1, 1)) if emis.ndim == 1 else emis
-    T_skin = T_sfc[:, None] - cfg.lapse_rate_K_m * dz
+    # Cast EVERY config scalar entering the arithmetic to the working dtype: these are
+    # trainable (traced) scalars that may be float64 while the coupled state is float32,
+    # and an un-cast scalar would promote the returned radiation (hence the land state).
+    _lapse = jnp.asarray(cfg.lapse_rate_K_m, dt_work)
+    _lw_lapse = jnp.asarray(cfg.lw_elev_lapse_W_m2_per_m, dt_work)
+    _sw_grad = jnp.asarray(cfg.sw_elev_grad_per_m, dt_work)
+    _sky_min = jnp.asarray(cfg.sky_view_min, dt_work)
+    T_skin = T_sfc[:, None] - _lapse * dz
     # Elevation lapse of the down-flux, kept EXACTLY zero-mean (conservation): the band
     # anomalies dz are zero-mean, and a per-COLUMN scalar slope times dz is still
     # zero-mean, so mean_k(SW/LW down_k) == the cell forcing.  Cap each column's slope
@@ -531,9 +552,9 @@ def band_net_radiation(
     # itself would break conservation, so we bound the SLOPE instead.
     dz_hi = jnp.max(dz, axis=-1, keepdims=True)             # highest band (dz >= 0)
     dz_lo = jnp.min(dz, axis=-1, keepdims=True)             # lowest band (dz <= 0)
-    lw_slope = jnp.minimum(cfg.lw_elev_lapse_W_m2_per_m,
+    lw_slope = jnp.minimum(_lw_lapse,
                            jnp.maximum(lw_down[:, None], 0.0) / jnp.maximum(dz_hi, 1e-6))
-    sw_slope = jnp.minimum(cfg.sw_elev_grad_per_m, 1.0 / jnp.maximum(-dz_lo, 1e-6))
+    sw_slope = jnp.minimum(_sw_grad, 1.0 / jnp.maximum(-dz_lo, 1e-6))
     sw_down_b = sw_down[:, None] * (1.0 + sw_slope * dz)
     lw_down_b = lw_down[:, None] - lw_slope * dz
     sw_net_b = sw_down_b * (1.0 - alpha_bands)
@@ -546,8 +567,12 @@ def band_net_radiation(
     # no-op.  Sub-grid geometry proxy from the band elevation spread.
     dz_span = jnp.maximum(dz_hi - dz_lo, 1e-6)
     shielding = jnp.clip((dz_hi - dz) / dz_span, 0.0, 1.0)     # 0 ridge -> 1 valley
-    v_band = 1.0 - (1.0 - cfg.sky_view_min) * shielding
+    v_band = 1.0 - (1.0 - _sky_min) * shielding
     lw_net_b = v_band * lw_net_b
+    # Effective UPWARD LW reported to the atmosphere, CONSISTENT with the sky-view net:
+    # lw_up_eff = emis*lw_down - lw_net = (1-V)*emis*lw_down_b + V*lw_up_b, so the
+    # coupler's LW budget sees the same reduced surface net (V=1 -> unchanged lw_up_b).
+    lw_up_b = (1.0 - v_band) * emis * lw_down_b + v_band * lw_up_b
     Rn_b = sw_net_b + lw_net_b
     # SW-flux-weighted aggregate albedo: reflected / incident.  mean_k sw_down_b is
     # exactly sw_down (zero-mean dz), so alpha_eff = mean_k sw_down_b*alpha / sw_down.

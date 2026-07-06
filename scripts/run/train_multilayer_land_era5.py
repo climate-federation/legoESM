@@ -477,7 +477,11 @@ def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None):
     T, A, W = forward_ml(cp, data)
     w = data["w"][None, :]
     tmse = jnp.sum(w * (T - data["skt"]) ** 2) / jnp.sum(w) / 12
-    amse = jnp.sum(w * (A - data["alb"]) ** 2) / jnp.sum(w) / 12
+    # Albedo MSE is INSOLATION-weighted (area w x monthly SW): a polar-night month-cell
+    # (no sun -> the model's zenith albedo and the ERA5 target are both undefined) must
+    # not enter the fit.  Falls back to uniform monthly weight if alb_wt is absent.
+    _awt = w * data["alb_wt"] if "alb_wt" in data else w
+    amse = jnp.sum(_awt * (A - data["alb"]) ** 2) / jnp.maximum(jnp.sum(_awt), 1e-12)
     # soil moisture: model root-zone equilibrium vs ERA5 annual-mean swvl (0-28cm).
     # FINITE-MASKED: a diverged forward (NaN W) or a missing target must not poison the
     # loss/gradient via a NaN that survives the lam_sm weight (codex: 0*NaN == NaN).
@@ -769,8 +773,9 @@ def _pack(g, latc, cmap, sub, lonc=None, hours=None, nh=_NH) -> dict:
     # insolation-weighted albedo in forward_ml so the zenith brightening (gap 3) is
     # compared on the SW-budget-relevant effective albedo, not a night-inflated mean.
     _ssrd = np.maximum(g("ssrd_wm2"), 0.0)                     # (12, nh, ncol)
+    _ssrd_month = np.sum(_ssrd, axis=1)                        # (12, ncol) monthly SW total
     alb = np.clip(np.sum(g("forecast_albedo") * _ssrd, axis=1)
-                  / np.maximum(np.sum(_ssrd, axis=1), 1e-6), 0.05, 0.85)
+                  / np.maximum(_ssrd_month, 1e-6), 0.05, 0.85)
     # soil-moisture target: ERA5 swvl1 (0-7cm) + swvl2 (7-28cm), depth-weighted to a
     # single 0-28cm root-zone value, then the ANNUAL mean (the frozen column's signal).
     # Backward-compat: an OLD npz without soil moisture yields an all-NaN target, which
@@ -800,6 +805,9 @@ def _pack(g, latc, cmap, sub, lonc=None, hours=None, nh=_NH) -> dict:
                 # sub-grid elevation std [m] (elevation-band snow scheme)
                 std_elev=jnp.asarray(np.asarray(cmap["std_elev"])[sub]),
                 skt=jnp.asarray(skt), alb=jnp.asarray(alb),
+                # per-(month,cell) monthly SW total -> insolation weight for the albedo
+                # loss so polar-night months (no sun, garbage albedo) don't bias amse.
+                alb_wt=jnp.asarray(_ssrd_month),
                 # init the whole soil column at the ERA5 annual-mean skin T
                 t0=jnp.asarray(skt.mean(0)), dom_onehot=jnp.asarray(oh),
                 w=jnp.cos(jnp.asarray(latc)))
