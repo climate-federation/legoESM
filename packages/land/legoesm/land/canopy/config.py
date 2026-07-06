@@ -526,5 +526,3 @@ class CLMMLCanopyConfig(NamedTuple):
     # cos_zen is not available.  Corresponds to an overcast sky condition;
     # Erbs et al. (1982) gives f_dir ≈ 0.20–0.35 for low clearness index.
     f_dir_noclearness_fallback: float = 0.30
-
-
