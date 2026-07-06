@@ -229,6 +229,17 @@ class ModelDriver:
     def output_dir(self) -> Path:
         return self._output_dir
 
+    @property
+    def fric_decay(self) -> jax.Array:
+        """Per-level Rayleigh-friction decay factors ``exp(-k_f dt)``.
+
+        Computed by ``setup()`` (``_create_friction``). Public accessor so
+        external training-segment builders (WB scale trainer) reuse the
+        driver's boundary-layer damping instead of re-deriving it — an
+        undamped training rollout produces NaN gradients (#797 bug 11).
+        """
+        return self._fric_decay
+
     # Backward-compatible accessors for individual tracers.
     @property
     def q_v(self) -> jax.Array:

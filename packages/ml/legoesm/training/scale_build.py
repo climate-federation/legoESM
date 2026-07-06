@@ -92,6 +92,11 @@ def build_mode_components(cfg, yml):
     # used the meridional spacing only, and the pure-dycore modes
     # (zero-init neural_gcm / sfno) blew up to loss=nan (#797).
     dt = float(driver.config.dycore.dt)
+    # The driver's BL Rayleigh-friction profile: the training rollout needs
+    # the same dissipation as production — the adjoint through an undamped
+    # dycore returns NaN gradients (#797 bug 11; bites the pure-dycore
+    # epoch-0 neural_gcm/sfno modes hardest).
+    fric_decay = driver.fric_decay
     physics_pipeline = build_physics_pipeline(grid, sigma, config)
     loss_config = make_loss_config(cfg, yml)
 
@@ -102,7 +107,8 @@ def build_mode_components(cfg, yml):
 
         def make_run_seg(trainable):
             return _build_training_segment(
-                model, step_unified, grid, sigma, dt, **trainable.to_segment_kwargs())
+                model, step_unified, grid, sigma, dt, fric_decay=fric_decay,
+                **trainable.to_segment_kwargs())
 
     elif cfg.mode == "neural_gcm":
         from legoesm.atmosphere.physics.neural_physics import (
@@ -117,7 +123,8 @@ def build_mode_components(cfg, yml):
 
         def make_run_seg(nn_phys):
             return _build_training_segment(
-                model, make_neural_step_unified(nn_phys, adapter), grid, sigma, dt)
+                model, make_neural_step_unified(nn_phys, adapter), grid, sigma,
+                dt, fric_decay=fric_decay)
 
     elif cfg.mode == "sfno":
         import equinox as eqx
@@ -170,7 +177,8 @@ def build_mode_components(cfg, yml):
 
         def make_run_seg(sfno_ph):
             step = make_sfno_step_unified_latlon(sfno_ph, w_ll2g, w_g2ll)
-            return _build_training_segment(model, step, grid, sigma, dt)
+            return _build_training_segment(model, step, grid, sigma, dt,
+                                           fric_decay=fric_decay)
 
     else:
         raise ValueError(f"unknown mode {cfg.mode!r}")
