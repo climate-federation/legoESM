@@ -47,6 +47,28 @@ FIELD_TABLE = (
 )
 _ALBEDO_REF = 0.29   # observational planetary albedo (CERES); annotation only.
 
+# --- Publication-realism acceptance bands: absolute tolerance on the
+#     area-weighted global mean of each field vs its Earth reference above.
+#     These are OBSERVATIONAL ACCEPTANCE CRITERIA (roughly obs uncertainty +
+#     CMIP-class model spread on the annual global mean), used only to turn the
+#     realism judgement into a mechanical pass/fail gate — they are NOT model
+#     physical constants and are deliberately not sourced from
+#     ``legoesm.constants``.  Widen/tighten per campaign via ``--tol-scale``. ---
+_REALISM_ABS_TOL = {
+    "tas": 4.0,     # K
+    "pr": 0.6,      # mm/day  (~20% of 2.9)
+    "rsut": 12.0,   # W/m2
+    "rlut": 10.0,   # W/m2
+    "clt": 12.0,    # %
+    "prw": 4.0,     # mm
+    "hfls": 15.0,   # W/m2
+    "hfss": 8.0,    # W/m2
+}
+_ALBEDO_ABS_TOL = 0.03        # planetary-albedo acceptance band (dimensionless)
+_R_TOA_ABS_TOL = 5.0          # |net TOA imbalance| acceptance band [W/m2]
+# Fields that MUST be present for a run to be scorecard-eligible at all.
+_REQUIRED_FIELDS = ("tas", "pr", "rsut", "rlut")
+
 
 def _sinlat_area_weights(nlat: int, nlon: int) -> np.ndarray:
     """Reproduce the model's ``areacella`` weights (exact sin-latitude bands,
@@ -118,6 +140,116 @@ def compute_amip_diagnostics(run_dir: str | Path) -> dict:
     }
 
 
+def amip_realism_scorecard(diag: dict, *, tol_scale: float = 1.0,
+                           abs_tol: dict | None = None,
+                           albedo_tol: float | None = None,
+                           r_toa_tol: float | None = None) -> dict:
+    """Mechanical publication-realism gate on a ``compute_amip_diagnostics`` dict.
+
+    Each area-weighted global mean is compared to its Earth reference with an
+    absolute acceptance band (``_REALISM_ABS_TOL`` scaled by ``tol_scale``), and
+    the TOA budget's planetary albedo and net imbalance to their own bands.
+    Returns::
+
+        {"fields": {var: {value, ref, unit, abs_tol, abs_err, within}},
+         "budget": {"albedo": {...}, "r_toa": {...}} | None,
+         "missing_required": [var, ...],
+         "n_pass": int, "n_checks": int, "passed": bool}
+
+    ``passed`` is True iff every required field AND the TOA budget are present
+    AND every check (fields + albedo + net-imbalance) lies within its band.  A
+    missing/blown-up field scores ``within=False`` (``NaN`` errors compare
+    False), and an absent/malformed budget is reported in ``missing_required``
+    as ``"budget"`` (it needs ``rsdt``/``rsut``/``rlut``) — never a silent pass.
+    ``abs_tol`` overrides are MERGED onto the defaults so a partial override can
+    never drop a required field's band.  Pure + deterministic — the unit-tested
+    realism gate (no matplotlib, no I/O)."""
+    if not (tol_scale > 0.0):
+        raise ValueError(f"tol_scale must be > 0, got {tol_scale!r}")
+    bands = {**_REALISM_ABS_TOL, **(abs_tol or {})}   # merge, never replace
+    a_tol = (_ALBEDO_ABS_TOL if albedo_tol is None else albedo_tol) * tol_scale
+    rt_tol = (_R_TOA_ABS_TOL if r_toa_tol is None else r_toa_tol) * tol_scale
+
+    gmeans = diag.get("global_means", {})
+    fields, n_pass, n_checks = {}, 0, 0
+    for var, (value, ref, unit) in gmeans.items():
+        if var not in bands:
+            continue
+        tol = bands[var] * tol_scale
+        err = abs(float(value) - float(ref))
+        within = bool(err <= tol)   # NaN err -> False -> a blown-up run fails
+        fields[var] = {"value": float(value), "ref": float(ref), "unit": unit,
+                       "abs_tol": float(tol), "abs_err": float(err), "within": within}
+        n_checks += 1
+        n_pass += int(within)
+
+    budget = None
+    b = diag.get("budget")
+    budget_present = isinstance(b, dict) and "albedo" in b and "R_TOA" in b
+    if budget_present:
+        alb_err = abs(float(b["albedo"]) - _ALBEDO_REF)
+        alb_ok = bool(alb_err <= a_tol)
+        rt_err = abs(float(b["R_TOA"]))
+        rt_ok = bool(rt_err <= rt_tol)
+        budget = {
+            "albedo": {"value": float(b["albedo"]), "ref": float(_ALBEDO_REF),
+                       "abs_tol": float(a_tol), "abs_err": float(alb_err),
+                       "within": alb_ok},
+            "r_toa": {"value": float(b["R_TOA"]), "ref": 0.0,
+                      "abs_tol": float(rt_tol), "abs_err": float(rt_err),
+                      "within": rt_ok},
+        }
+        n_checks += 2
+        n_pass += int(alb_ok) + int(rt_ok)
+
+    missing_required = [v for v in _REQUIRED_FIELDS if v not in gmeans]
+    if not budget_present:                # TOA budget is a required check
+        missing_required = missing_required + ["budget"]
+    passed = bool(not missing_required and n_checks > 0 and n_pass == n_checks)
+    return {"fields": fields, "budget": budget,
+            "missing_required": missing_required,
+            "n_pass": n_pass, "n_checks": n_checks, "passed": passed}
+
+
+def format_scorecard_line(scorecard: dict) -> str:
+    """One-line human summary: ``PASS/FAIL realism n/m`` + first offenders."""
+    verdict = "PASS" if scorecard["passed"] else "FAIL"
+    fails = [v for v, d in scorecard["fields"].items() if not d["within"]]
+    if scorecard["budget"] is not None:
+        fails += [k for k, d in scorecard["budget"].items() if not d["within"]]
+    parts = [f"{verdict} realism {scorecard['n_pass']}/{scorecard['n_checks']}"]
+    if scorecard["missing_required"]:
+        parts.append("missing_required=" + ",".join(scorecard["missing_required"]))
+    if fails:
+        parts.append("out_of_band=" + ",".join(fails))
+    return "  ".join(parts)
+
+
+def _json_safe(obj):
+    """Recursively replace non-finite floats (``NaN``/``Inf`` from a blown-up
+    run's global means) with ``None`` so the scorecard is always VALID JSON.
+    Such fields already score ``within=False``; this only fixes serialization."""
+    import math
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
+def write_scorecard(scorecard: dict, path: str | Path) -> Path:
+    """Write a scorecard dict to ``path`` as valid JSON (sorted, indented).
+    Non-finite values are normalised to ``null`` and ``allow_nan=False`` guards
+    against any stray ``NaN``/``Inf`` slipping through as invalid JSON."""
+    import json
+    path = Path(path)
+    with open(path, "w") as fh:
+        json.dump(_json_safe(scorecard), fh, indent=2, sort_keys=True, allow_nan=False)
+    return path
+
+
 def plot_amip_cmor_diagnostics(run_dir: str | Path, label: str, out_path: str | Path) -> Path:
     """Render the systematic-diagnostics figure to ``out_path``."""
     import matplotlib
@@ -187,11 +319,33 @@ def main(argv=None):
     p.add_argument("run_dir", help="run directory containing cmor/Amon/*.nc")
     p.add_argument("--label", default=None, help="figure title label")
     p.add_argument("--out", default=None, help="output PNG path")
+    p.add_argument("--scorecard", action="store_true",
+                   help="also compute + write a publication-realism pass/fail scorecard JSON")
+    p.add_argument("--no-plot", action="store_true",
+                   help="skip the figure; only compute the scorecard (implies --scorecard)")
+    p.add_argument("--tol-scale", type=float, default=1.0,
+                   help="scale every acceptance band (>1 widen, <1 tighten); default 1.0")
+    p.add_argument("--gate", action="store_true",
+                   help="exit nonzero if the realism scorecard does not pass")
     args = p.parse_args(argv)
+    if args.tol_scale <= 0.0:
+        p.error(f"--tol-scale must be > 0, got {args.tol_scale}")
     label = args.label or os.path.basename(str(args.run_dir).rstrip("/"))
-    out = args.out or os.path.join(str(args.run_dir), f"amip_diagnostics_{label}.png")
-    saved = plot_amip_cmor_diagnostics(args.run_dir, label, out)
-    print(f"SAVED {saved}")
+
+    if not args.no_plot:
+        out = args.out or os.path.join(str(args.run_dir), f"amip_diagnostics_{label}.png")
+        saved = plot_amip_cmor_diagnostics(args.run_dir, label, out)
+        print(f"SAVED {saved}")
+
+    if args.scorecard or args.no_plot or args.gate:
+        diag = compute_amip_diagnostics(args.run_dir)
+        sc = amip_realism_scorecard(diag, tol_scale=args.tol_scale)
+        sc_path = os.path.join(str(args.run_dir), f"amip_scorecard_{label}.json")
+        write_scorecard(sc, sc_path)
+        print(f"SCORECARD {sc_path}")
+        print(format_scorecard_line(sc))
+        if args.gate and not sc["passed"]:
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

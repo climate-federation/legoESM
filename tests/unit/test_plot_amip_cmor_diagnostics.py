@@ -93,5 +93,129 @@ def test_figure_renders(tmp_path):
     assert out.exists() and out.stat().st_size > 0
 
 
+def _diag(global_means, budget=None):
+    """Minimal diagnostics dict — only the keys the scorecard reads."""
+    return {"global_means": dict(global_means), "budget": budget}
+
+
+def _at_ref(*vars):
+    """global_means entries sitting exactly on their Earth reference."""
+    refs = {v: (r, u) for v, _s, u, r, _c in plotmod.FIELD_TABLE}
+    return {v: (refs[v][0], refs[v][0], refs[v][1]) for v in vars}
+
+
+def test_scorecard_passes_when_all_within_band():
+    gm = _at_ref("tas", "pr", "rsut", "rlut")
+    sc = plotmod.amip_realism_scorecard(
+        _diag(gm, budget={"albedo": 0.29, "R_TOA": 0.0}))
+    assert sc["passed"] is True
+    assert sc["missing_required"] == []
+    assert sc["n_pass"] == sc["n_checks"] == 6   # 4 fields + albedo + R_TOA
+    assert all(d["within"] for d in sc["fields"].values())
+
+
+def test_scorecard_fails_field_out_of_band():
+    gm = _at_ref("tas", "pr", "rsut", "rlut")
+    gm["tas"] = (288.0 + 10.0, 288.0, "K")       # 10 K bias >> 4 K band
+    sc = plotmod.amip_realism_scorecard(
+        _diag(gm, budget={"albedo": 0.29, "R_TOA": 0.0}))  # budget OK -> isolate tas
+    assert sc["passed"] is False
+    assert sc["fields"]["tas"]["within"] is False
+    assert sc["fields"]["pr"]["within"] is True
+    assert sc["missing_required"] == []
+    assert "out_of_band=tas" in plotmod.format_scorecard_line(sc)
+    assert plotmod.format_scorecard_line(sc).startswith("FAIL")
+
+
+def test_scorecard_missing_required_field():
+    gm = _at_ref("tas", "pr", "rlut")            # rsut absent
+    sc = plotmod.amip_realism_scorecard(
+        _diag(gm, budget={"albedo": 0.29, "R_TOA": 0.0}))  # budget OK -> only rsut missing
+    assert sc["missing_required"] == ["rsut"]
+    assert sc["passed"] is False
+    assert "missing_required=rsut" in plotmod.format_scorecard_line(sc)
+
+
+def test_scorecard_requires_toa_budget():
+    """A run with all required fields but NO TOA budget must NOT silently pass —
+    the budget triplet (rsdt/rsut/rlut) is a required check (codex HIGH #1)."""
+    gm = _at_ref("tas", "pr", "rsut", "rlut")
+    sc = plotmod.amip_realism_scorecard(_diag(gm, budget=None))
+    assert "budget" in sc["missing_required"]
+    assert sc["passed"] is False
+    assert sc["budget"] is None
+    assert "missing_required=budget" in plotmod.format_scorecard_line(sc)
+
+
+def test_scorecard_partial_abs_tol_override_keeps_required_bands():
+    """A partial ``abs_tol`` override must MERGE onto defaults, not replace them,
+    so an un-overridden required field is still checked (codex HIGH #2)."""
+    gm = _at_ref("tas", "pr", "rsut", "rlut")
+    gm["rsut"] = (100.0 + 50.0, 100.0, "W/m2")   # 50 >> default 12 band
+    sc = plotmod.amip_realism_scorecard(
+        _diag(gm, budget={"albedo": 0.29, "R_TOA": 0.0}),
+        abs_tol={"tas": 1.0})                    # override only tas
+    assert "rsut" in sc["fields"]                # still checked, not dropped
+    assert sc["fields"]["rsut"]["within"] is False
+    assert sc["passed"] is False
+
+
+def test_scorecard_tol_scale_nonpositive_raises():
+    gm = _at_ref("tas", "pr", "rsut", "rlut")
+    for bad in (0.0, -1.0):
+        with pytest.raises(ValueError):
+            plotmod.amip_realism_scorecard(_diag(gm), tol_scale=bad)
+
+
+def test_scorecard_malformed_budget_is_not_keyerror():
+    """A budget dict missing a key is treated as absent, not a crash (codex MED)."""
+    gm = _at_ref("tas", "pr", "rsut", "rlut")
+    sc = plotmod.amip_realism_scorecard(_diag(gm, budget={"albedo": 0.29}))  # no R_TOA
+    assert "budget" in sc["missing_required"]
+    assert sc["budget"] is None
+    assert sc["passed"] is False
+
+
+def test_scorecard_nan_field_fails_and_serializes(tmp_path):
+    """A blown-up run (NaN global mean) scores within=False and still writes
+    VALID JSON (NaN -> null), not the non-standard ``NaN`` token (codex MED)."""
+    import json
+    gm = _at_ref("tas", "pr", "rsut", "rlut")
+    gm["tas"] = (float("nan"), 288.0, "K")
+    sc = plotmod.amip_realism_scorecard(
+        _diag(gm, budget={"albedo": 0.29, "R_TOA": 0.0}))
+    assert sc["fields"]["tas"]["within"] is False
+    assert sc["passed"] is False
+    p = plotmod.write_scorecard(sc, tmp_path / "nan.json")
+    loaded = json.loads(p.read_text())           # would raise if NaN token written
+    assert loaded["fields"]["tas"]["value"] is None
+
+
+def test_scorecard_budget_albedo_and_r_toa_bands():
+    gm = _at_ref("tas", "pr", "rsut", "rlut")
+    sc = plotmod.amip_realism_scorecard(
+        _diag(gm, budget={"albedo": 0.29 + 0.05, "R_TOA": 2.0}))
+    assert sc["budget"]["albedo"]["within"] is False   # 0.05 > 0.03 band
+    assert sc["budget"]["r_toa"]["within"] is True      # 2.0 < 5.0 band
+    assert sc["passed"] is False
+
+
+def test_scorecard_tol_scale_widens_band():
+    gm = _at_ref("tas", "pr", "rsut", "rlut")
+    gm["tas"] = (288.0 + 5.0, 288.0, "K")        # 5 K: outside 4 K, inside 8 K
+    assert plotmod.amip_realism_scorecard(_diag(gm))["fields"]["tas"]["within"] is False
+    wide = plotmod.amip_realism_scorecard(_diag(gm), tol_scale=2.0)
+    assert wide["fields"]["tas"]["within"] is True
+
+
+def test_write_scorecard_json_roundtrips(tmp_path):
+    import json
+    gm = _at_ref("tas", "pr", "rsut", "rlut")
+    sc = plotmod.amip_realism_scorecard(_diag(gm, budget={"albedo": 0.29, "R_TOA": 0.0}))
+    p = plotmod.write_scorecard(sc, tmp_path / "score.json")
+    assert p.exists()
+    assert json.loads(p.read_text()) == sc   # pure JSON scalars/lists — exact
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
