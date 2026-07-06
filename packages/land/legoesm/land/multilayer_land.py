@@ -193,15 +193,20 @@ def _step_multilayer_land_impl(
     # cell-mean radiation in ``G_surface`` with the banded per-band balance.
     bands = config.elev_bands
     if bands is not None:
-        if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+        if isinstance(config.surface_scheme,
+                      (TwoLeafCanopyConfig, CLMMLCanopyConfig)):
             # The banded radiation replaces the surface scheme's radiation/G with a
-            # BARE (no-canopy) per-band balance; mixing it with the two-leaf canopy's
-            # radiative closure (and its T_rad/lw_up) would be inconsistent.  Reject
-            # rather than silently apply incompatible closures.
+            # BARE (no-canopy) per-band balance; mixing it with a canopy scheme's
+            # radiative closure (two-leaf Kelvin RT, or CLM-ML's multilayer canopy
+            # RT — both carry their own T_rad/lw_up) would be inconsistent.  Reject
+            # rather than silently apply incompatible closures.  Applies to BOTH
+            # canopy schemes (the guard predates CLMMLCanopyConfig, which needs the
+            # same treatment as TwoLeafCanopyConfig).
             raise ValueError(
                 "config.elev_bands (sub-grid snow bands) is not supported with the "
-                "TwoLeafCanopyConfig surface scheme — the banded radiation would "
-                "override the canopy radiative closure.  Use SimpleSEBConfig with bands.")
+                "TwoLeafCanopyConfig or CLMMLCanopyConfig surface scheme — the "
+                "banded radiation would override the canopy radiative closure.  "
+                "Use SimpleSEBConfig with bands.")
         if state.snow_bands is None:
             raise ValueError(
                 "config.elev_bands is set but state.snow_bands is None; initialise "
