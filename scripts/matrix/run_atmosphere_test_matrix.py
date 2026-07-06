@@ -588,6 +588,10 @@ def _area_weighted_sum(field, area) -> float:
 # Sentinel tests under ``tests/test_iter9*`` keep their own bit-identical
 # mirrors so that pinning is independent of script imports.
 from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    MODON_DAMP_V,
+    MODON_DIV_DAMP_FACTOR,
+    MODON_HYPERDIFF_FACTOR,
+    MODON_HYPERDIFF_SCALING,
     cdgrid_div_damp_cube as _div_damp_cube,
     cdgrid_hyperdiff_cube as _hyperdiff_cube,
 )
@@ -597,21 +601,25 @@ from legoesm.experiments.matrix.namelist import write_case_namelist
 def _modon_hyperdiff_coeff(n: int) -> float:
     """Colliding-modons biharmonic hyperdiff backstop from the env knobs (#521/#753).
 
-    ``LEGOESM_SW_MODON_HYPERDIFF_FACTOR`` (default ``1.0``) scales the
-    ``cdgrid_hyperdiff_cube`` base; ``LEGOESM_SW_MODON_HYPERDIFF_SCALING``
-    (default ``4``) selects the resolution law — ``4`` == the calibrated
-    ``(ref_n/n)^4`` grid-scale-damping-time-constant law (byte-identical at
-    every resolution to the pre-#753 expression), ``2`` == the ``(ref_n/n)^2``
-    FV3 div-damp law the #753 diagnosis wants at C96+ (unchanged at C48).  The
-    ``SCALING`` env is an open-ended sensitivity probe (any positive int),
-    unlike the ``run_colliding_modons.py`` CLI which restricts to the two
-    documented laws ``{2, 4}``.
+    ``LEGOESM_SW_MODON_HYPERDIFF_FACTOR`` (default ``MODON_HYPERDIFF_FACTOR`` ==
+    1.0) scales the ``cdgrid_hyperdiff_cube`` base;
+    ``LEGOESM_SW_MODON_HYPERDIFF_SCALING`` (default ``MODON_HYPERDIFF_SCALING``
+    == 4) selects the resolution law — ``4`` == the calibrated ``(ref_n/n)^4``
+    grid-scale-damping-time-constant law (byte-identical at every resolution to
+    the pre-#753 expression), ``2`` == the ``(ref_n/n)^2`` FV3 div-damp law the
+    #753 diagnosis wants at C96+ (unchanged at C48).  The ``SCALING`` env is an
+    open-ended sensitivity probe (any positive int), unlike the
+    ``run_colliding_modons.py`` CLI which restricts to the two documented laws
+    ``{2, 4}``.  Defaults come from the shared ``MODON_*`` constants so the
+    matrix and the driver cannot drift (the #800 desync).
 
     Module-scope so the env-knob wiring is runtime-testable (not only pinned by
     the AST parity guard).
     """
-    m_hd = float(os.environ.get("LEGOESM_SW_MODON_HYPERDIFF_FACTOR", "1.0"))
-    m_scaling = int(os.environ.get("LEGOESM_SW_MODON_HYPERDIFF_SCALING", "4"))
+    m_hd = float(os.environ.get(
+        "LEGOESM_SW_MODON_HYPERDIFF_FACTOR", str(MODON_HYPERDIFF_FACTOR)))
+    m_scaling = int(os.environ.get(
+        "LEGOESM_SW_MODON_HYPERDIFF_SCALING", str(MODON_HYPERDIFF_SCALING)))
     return m_hd * _hyperdiff_cube(n, scaling_exponent=m_scaling)
 
 
@@ -2473,10 +2481,10 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             # with duogrid — the enstrophy cascade needs the
             # biharmonic sink.  Dedicated env knobs for sensitivity
             # probes.
-            _m_dd = float(
-                os.environ.get("LEGOESM_SW_MODON_DIV_DAMP_FACTOR", "8.0"))
-            _m_dv = float(
-                os.environ.get("LEGOESM_SW_MODON_DAMP_V", "0.010"))
+            _m_dd = float(os.environ.get(
+                "LEGOESM_SW_MODON_DIV_DAMP_FACTOR", str(MODON_DIV_DAMP_FACTOR)))
+            _m_dv = float(os.environ.get(
+                "LEGOESM_SW_MODON_DAMP_V", str(MODON_DAMP_V)))
             # #521/#753: biharmonic backstop from the env knobs (default env ->
             # the calibrated (ref/n)^4 law, byte-identical at every resolution;
             # LEGOESM_SW_MODON_HYPERDIFF_SCALING=2 opts into the (ref/n)^2 law

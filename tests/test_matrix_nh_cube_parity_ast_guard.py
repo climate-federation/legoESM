@@ -565,20 +565,50 @@ def test_sw_cube_propagating_tests_have_hyperdiff_override():
         "``<factor> * _hyperdiff_cube(n ...)`` — the modon backstop was "
         "zeroed/removed inside the helper; the 100-day cube run BLOWs-UP."
     )
+    # #800: the env-knob defaults come from the shared ``MODON_*`` constants
+    # (single source of truth with the run_colliding_modons.py driver) — pin
+    # that the matrix reads them via ``str(MODON_HYPERDIFF_{FACTOR,SCALING})``
+    # AND that those canonical constants still hold their validated values.
     assert re.search(
-        r'LEGOESM_SW_MODON_HYPERDIFF_FACTOR"\s*,\s*"1\.0"', src), (
-        "LEGOESM_SW_MODON_HYPERDIFF_FACTOR default must remain \"1.0\" "
-        "(the #521 sweep optimum: 0.5x erupts at the collision "
-        "transient, 0x blows up at ~day 40 even with duogrid)."
+        r'LEGOESM_SW_MODON_HYPERDIFF_FACTOR"\s*,\s*str\(MODON_HYPERDIFF_FACTOR\)',
+        src), (
+        "LEGOESM_SW_MODON_HYPERDIFF_FACTOR default must be str(MODON_HYPERDIFF_"
+        "FACTOR) (the shared #800 source of truth), not a re-hardcoded literal."
     )
-    # #753: the resolution-law knob must default to "4" so an unset environment
-    # reproduces the calibrated (ref/n)^4 backstop byte-identically (the ^2 law
-    # is opt-in, pending the C96/C192 return-metric validation).
     assert re.search(
-        r'LEGOESM_SW_MODON_HYPERDIFF_SCALING"\s*,\s*"4"', src), (
-        "LEGOESM_SW_MODON_HYPERDIFF_SCALING default must remain \"4\" so the "
-        "modon hyperdiff backstop stays the calibrated (ref/n)^4 law when the "
-        "env knob is unset (the (ref/n)^2 law is opt-in for C96+, #753)."
+        r'LEGOESM_SW_MODON_HYPERDIFF_SCALING"\s*,\s*str\(MODON_HYPERDIFF_SCALING\)',
+        src), (
+        "LEGOESM_SW_MODON_HYPERDIFF_SCALING default must be str(MODON_HYPERDIFF_"
+        "SCALING) (the shared #800 source of truth), not a re-hardcoded literal."
+    )
+    assert re.search(
+        r'LEGOESM_SW_MODON_DIV_DAMP_FACTOR"\s*,\s*str\(MODON_DIV_DAMP_FACTOR\)',
+        src), (
+        "LEGOESM_SW_MODON_DIV_DAMP_FACTOR default must be str(MODON_DIV_DAMP_"
+        "FACTOR) (the shared #800 source of truth), not a re-hardcoded literal."
+    )
+    assert re.search(
+        r'LEGOESM_SW_MODON_DAMP_V"\s*,\s*str\(MODON_DAMP_V\)', src), (
+        "LEGOESM_SW_MODON_DAMP_V default must be str(MODON_DAMP_V) (the shared "
+        "#800 source of truth), not a re-hardcoded literal."
+    )
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        MODON_DAMP_V,
+        MODON_DIV_DAMP_FACTOR,
+        MODON_HYPERDIFF_FACTOR,
+        MODON_HYPERDIFF_SCALING,
+    )
+    # The canonical values: 1.0x biharmonic (the #521 sweep optimum: 0.5x erupts
+    # at the collision transient, 0x blows up ~day 40 even with duogrid) + the
+    # (ref/n)^4 law (scaling 4; ^2 is opt-in for C96+, #753) + the tuned
+    # div_damp/damp_v.
+    assert MODON_HYPERDIFF_FACTOR == 1.0
+    assert MODON_HYPERDIFF_SCALING == 4
+    assert MODON_DIV_DAMP_FACTOR == 8.0
+    assert MODON_DAMP_V == 0.010, (
+        "MODON_* modon config drifted — this is the #800 desync class; the "
+        "matrix and run_colliding_modons.py both read these, keep them the "
+        "2026-07-03 #521 sweep optimum."
     )
 
 

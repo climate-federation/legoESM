@@ -651,6 +651,21 @@ def cdgrid_div_damp_cube(
     return ref_coeff * (ref_n / n_int) ** 2
 
 
+# --- Colliding-modons (#521/#753) validated stable-config defaults ---
+# SINGLE SOURCE OF TRUTH consumed by BOTH the matrix runner (``test_num == 8``
+# env-knob defaults) and ``scripts/validate/run_colliding_modons.py`` (CLI
+# defaults), so the two cannot drift.  #800 was exactly that drift: the driver
+# defaulted to no-duogrid + ``hyperdiff_factor=0.0`` + ``damp_v=0.030`` while the
+# matrix used the tuned stable config, so a plain driver run erupted at the cube
+# seams.  The 2026-07-03 #521 sweep optimum (duogrid + ``damp_v=0.010`` +
+# ``1.0x`` biharmonic; ``0.5x`` erupts at the collision transient, ``0x`` blows
+# up ~day 40 even with duogrid) is stable 100 days at C36/C48.
+MODON_DIV_DAMP_FACTOR: float = 8.0
+MODON_DAMP_V: float = 0.010
+MODON_HYPERDIFF_FACTOR: float = 1.0
+MODON_HYPERDIFF_SCALING: int = 4
+
+
 def williamson_cli_calibration(
     n: int,
     div_damp_factor: float = 2.0,
