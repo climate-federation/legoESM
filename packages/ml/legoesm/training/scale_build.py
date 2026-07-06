@@ -121,25 +121,56 @@ def build_mode_components(cfg, yml):
                 model, make_neural_step_unified(nn_phys, adapter), grid, sigma, dt)
 
     elif cfg.mode == "sfno":
+        import equinox as eqx
+        import jax.numpy as jnp
+
         from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
         from legoesm.training.sfno_dycore_coupling import (
             SFNOPhysics, make_sfno_step_unified_latlon,
         )
         from legoesm.ml.sfno import SFNO, SFNOConfig
-        from legoesm.grids.remap import compute_latlon_to_voronoi_weights
+
         ov = yml.get("sfno", {})
+        nlev = int(yml["nlev"])
+        n_ch = 4 * nlev + 2   # SFNOPhysics packs [u, v, T, q_v, lnps, phis]
         n_max = int(ov.get("gauss_n_max", max(21, int(yml["n_lat"]) // 3)))
-        gauss = create_gaussian_grid(n_max, dealiasing="quadratic")
-        sfno = SFNO(SFNOConfig(embed_dim=int(ov.get("sfno_embed_dim", 256)),
-                               n_blocks=int(ov.get("sfno_n_blocks", 8))),
-                    gauss, key=jax.random.PRNGKey(0))
-        params = SFNOPhysics(sfno=sfno, flux_head=None)
-        w_ll2g = compute_latlon_to_voronoi_weights(grid, gauss)
-        w_g2ll = compute_latlon_to_voronoi_weights(gauss, grid)
+        gauss = create_gaussian_grid(n_max)
+        sfno = SFNO(
+            SFNOConfig(
+                in_channels=n_ch, out_channels=n_ch,
+                embed_dim=int(ov.get("sfno_embed_dim", 256)),
+                n_blocks=int(ov.get("sfno_n_blocks", 8)),
+                # tendencies, NOT state residuals: with the default
+                # residual_prediction=True the "tendency" would contain the
+                # full state and destroy the rollout in one step.
+                residual_prediction=False,
+            ),
+            gauss, key=jax.random.PRNGKey(0))
+        # Epoch-0 stability contract (same as the NeuralPhysics zero-init):
+        # the untrained SFNO must emit exactly-zero tendencies so the first
+        # rollout is the pure dycore.
+        sfno = eqx.tree_at(
+            lambda m: (m.decoder.weight, m.decoder.bias), sfno,
+            (jnp.zeros_like(sfno.decoder.weight),
+             jnp.zeros_like(sfno.decoder.bias)))
+        params = SFNOPhysics(sfno=sfno, grid=gauss, nlev=nlev)
+
+        def _flat_points(lat_1d, lon_1d):
+            lon2d, lat2d = np.meshgrid(np.asarray(lon_1d), np.asarray(lat_1d))
+            return lat2d.ravel(), lon2d.ravel()
+
+        g_lat_f, g_lon_f = _flat_points(gauss.lat, gauss.lon)
+        ll_lat_f, ll_lon_f = _flat_points(grid.lat, grid.lon)
+        w_ll2g = compute_latlon_to_voronoi_weights(
+            np.asarray(grid.lat), np.asarray(grid.lon), g_lat_f, g_lon_f,
+        )._replace(target_shape=(int(gauss.n_lat), int(gauss.n_lon)))
+        w_g2ll = compute_latlon_to_voronoi_weights(
+            np.asarray(gauss.lat), np.asarray(gauss.lon), ll_lat_f, ll_lon_f,
+        )._replace(target_shape=(int(grid.n_lat), int(grid.n_lon)))
 
         def make_run_seg(sfno_ph):
-            step = make_sfno_step_unified_latlon(
-                sfno_ph, w_ll2g, w_g2ll, int(gauss.n_lat), int(gauss.n_lon))
+            step = make_sfno_step_unified_latlon(sfno_ph, w_ll2g, w_g2ll)
             return _build_training_segment(model, step, grid, sigma, dt)
 
     else:
