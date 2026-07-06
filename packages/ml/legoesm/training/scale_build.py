@@ -72,14 +72,6 @@ def make_loss_config(cfg, yml):
     return LossConfig(**kwargs)
 
 
-def _cfl_dt(model, n_lat, fallback_dt):
-    from legoesm.core.cfl import cfl_max_dt
-    from legoesm import constants
-    dy_min = float(constants.R_earth) * np.pi / float(n_lat)
-    dt_cfl = cfl_max_dt(dy_min, wave_speed=400.0, cfl_number=0.7)
-    return float(min(float(getattr(model, "effective_dt", fallback_dt)), dt_cfl))
-
-
 def build_mode_components(cfg, yml):
     """Return (model, grid, sigma, params, make_run_seg, loss_config, dt) for cfg.mode."""
     import jax
@@ -92,7 +84,14 @@ def build_mode_components(cfg, yml):
     driver = ModelDriver(config)
     driver.setup()
     grid, sigma, model = driver.grid, driver.sigma, driver.model
-    dt = _cfl_dt(model, yml["n_lat"], yml["dt"])
+    # The driver's setup applies BOTH stability clamps (the factory's
+    # pole-cell advective clamp AND the gravity-wave CFL reduction) and
+    # stores the final safe value in config.dycore.dt — use it verbatim.
+    # Re-deriving it here is how the old _cfl_dt handed the training
+    # segment dt=81.8 s (pole-cell CFL 1.47) at the C32 smoke size: it
+    # used the meridional spacing only, and the pure-dycore modes
+    # (zero-init neural_gcm / sfno) blew up to loss=nan (#797).
+    dt = float(driver.config.dycore.dt)
     physics_pipeline = build_physics_pipeline(grid, sigma, config)
     loss_config = make_loss_config(cfg, yml)
 
