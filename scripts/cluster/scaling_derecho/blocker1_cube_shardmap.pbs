@@ -1,0 +1,77 @@
+#!/bin/bash -l
+#PBS -N legoesm_blocker1_shardmap
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=1:ncpus=64:mpiprocs=1:ngpus=4:gpu_type=a100:mem=400GB
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# Blocker-1 decisive experiment (SINGLE-NODE lane): does the GSPMD shard_map
+# cubed-sphere ppermute halo hold strong-scaling efficiency on REAL A100 NVLink?
+#
+# Runs scripts/bench/bench_cube_shardmap_halo.py as a SINGLE controller over the
+# node's 4 A100s. Because the cube face axis is length 6, the valid device
+# counts that divide 6 within one 4-GPU node are {1, 2, 3} — so this lane
+# measures ppermute scaling 1->3 on NVLink and proves correctness + reverse-mode
+# AD (collective_permute VJP) on real GPUs. It does NOT cross the np6 cliff.
+#
+# CROSS-NODE (np6, 2 nodes) is the decisive cliff-crossing measurement and is the
+# documented REMAINDER (docs/performance/scream_parity_scope.md §5): it needs a
+# per-N multi-controller launch + external aggregation lane (mirroring
+# cube_scaling_gpu.sh + aggregate_bcw_scaling.py), because a multi-controller job
+# fixes the device count for the whole run and the single-device correctness/AD
+# baseline must come from a separate launch. Not shipped here — do not fake it.
+#
+# SUBMIT:
+#   qsub scripts/cluster/scaling_derecho/blocker1_cube_shardmap.pbs
+#   qsub -v DECISIVE=1,PASS_EFF=0.6 scripts/cluster/scaling_derecho/blocker1_cube_shardmap.pbs
+# ===========================================================================
+set -uo pipefail
+
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+if   [ -f "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}/scripts/cluster/scaling_derecho"
+elif [ -f "${SUBMIT_DIR}/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}"
+else
+    echo "ERROR: cannot find _env.sh from PBS_O_WORKDIR=${SUBMIT_DIR}" >&2
+    exit 1
+fi
+
+export JAX_PLATFORMS=cuda
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
+# shellcheck source=_env.sh
+source "${SCRIPT_DIR}/_env.sh"
+cd "$REPO"
+
+# --- Sweep configuration (overridable via qsub -v) ---------------------------
+COUNTS="${COUNTS:-1,2,3}"          # face divisors that fit one 4-GPU node
+N_GRID="${N_GRID:-48}"             # C48 per-face resolution
+N_LEV="${N_LEV:-26}"
+N_WARMUP="${N_WARMUP:-3}"
+N_TIMING="${N_TIMING:-50}"
+DECISIVE="${DECISIVE:-0}"          # 1 -> hard efficiency exit gate at largest count
+PASS_EFF="${PASS_EFF:-0.6}"
+OUT="${OUT:-results/blocker1_cube_shardmap_derecho}"
+
+GATE_FLAG=""
+[ "$DECISIVE" = "1" ] && GATE_FLAG="--gate-efficiency"
+
+echo "=== Blocker-1 shard_map halo | counts=$COUNTS C$N_GRID L$N_LEV decisive=$DECISIVE ==="
+nvidia-smi -L || true
+
+# fp32 (GPU-realistic) then fp64 (tight correctness/AD tolerances).
+for PREC in float32 float64; do
+    echo "--- precision=$PREC ---"
+    "$PY" scripts/bench/bench_cube_shardmap_halo.py \
+        --device-counts "$COUNTS" --n-grid "$N_GRID" --n-lev "$N_LEV" \
+        --n-warmup "$N_WARMUP" --n-timing "$N_TIMING" \
+        --precision "$PREC" $GATE_FLAG --pass-efficiency "$PASS_EFF" \
+        --output-dir "${OUT}/${PREC}" < /dev/null
+    echo "--- report (${PREC}) ---"
+    cat "${OUT}/${PREC}/report.md" || true
+done
+
+echo "=== done; results under ${OUT}/{float32,float64}/ ==="
