@@ -523,7 +523,7 @@ def _select_cells(data: dict, idx) -> dict:
     for k, v in data.items():
         if k == "forc":
             out[k] = [jax.tree.map(lambda x: x[:, idx], f) for f in v]
-        elif k in ("skt", "alb"):
+        elif k in ("skt", "alb", "alb_wt"):     # (12, ncol) monthly targets/weights
             out[k] = v[:, idx]
         elif k == "rz_w":
             out[k] = v
