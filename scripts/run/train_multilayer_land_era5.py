@@ -202,7 +202,8 @@ BOUNDS_EXT = dict(
     elev_lapse=(4.5e-3, 8.0e-3),    # band T-downscaling lapse rate [K/m]
     elev_sw_grad=(0.0, 1.2e-4),     # SW-down elevation gradient [1/m] (thinner air aloft)
     elev_lw_lapse=(0.0, 6.0e-2),    # LW-down elevation lapse [W/m2/m] (colder air aloft)
-    glac_ice_alb=(0.15, 0.45))      # exposed ablation-zone glacier-ice albedo (dark ice)
+    glac_ice_alb=(0.15, 0.45),      # exposed ablation-zone glacier-ice albedo (dark ice)
+    snow_zenith=(0.0, 0.6))         # BATS solar-zenith snow brightening weight (gap 3)
 
 
 def constrain_ext(p: dict) -> dict:
@@ -251,6 +252,7 @@ def init_ext_params() -> dict:
         elev_sw_grad=_inv_ext(3.0e-5, "elev_sw_grad"),    # ~3 %/km clear-sky SW gradient
         elev_lw_lapse=_inv_ext(2.9e-2, "elev_lw_lapse"),  # ~29 W/m2/km LW-down lapse
         glac_ice_alb=_inv_ext(0.30, "glac_ice_alb"),      # CLM exposed glacier-ice albedo
+        snow_zenith=_inv_ext(0.2, "snow_zenith"),         # BATS zenith brightening weight
     ).items()}
 
 
@@ -364,6 +366,7 @@ def build_multilayer_cfg(cp, data):
             alpha_snow_max=cp["snow_max"], alpha_snow_min=cp["snow_min"],
             snow_depth_crit=cp["snow_dcrit"],
             tau_snow_decay=cp["snow_tau_days"] * 86400.0,    # days -> seconds
+            snow_zenith_factor=cp["snow_zenith"],            # BATS zenith brightening (gap 3)
             soil_dry_albedo_boost=cp["soil_dry_boost"]))     # CLM dry-soil brightening
     # Carbon state is PRESCRIBED (fixed climatological leaf carbon -> fixed LAI), the
     # same decoupling as the soil-moisture trick: it activates the photosynthesis /
@@ -439,22 +442,28 @@ def forward_ml(cp, data):
     # --- STAGE B: seasonal years with subdaily forcing -> monthly means ----------
     @jax.checkpoint     # remat per step -> bounded backward memory
     def body(carry, k):
-        s, Tsum, Asum = carry
+        s, Tsum, Asum, Wsum = carry
         month = k // spm; hour = k % nh
         f = jax.tree.map(lambda x: x[month, hour], fstack)
         s2, r = step(s, f)
         s2 = s2._replace(
             theta_soil=s2.theta_soil.at[:, _FREEZE_FROM:].set(deep),
             psi_soil=s2.psi_soil.at[:, _FREEZE_FROM:].set(deep_psi))  # pin deep reservoir
-        Tsum = Tsum.at[month].add(r.T_sfc); Asum = Asum.at[month].add(r.albedo)
-        return (s2, Tsum, Asum), None
+        # Albedo is INSOLATION-WEIGHTED (weight = sw_down): with the real diurnal sun
+        # (gap 3) the zenith brightening makes a night albedo spuriously bright, but
+        # night carries ~0 shortwave, so weighting by sw_down gives the physically
+        # meaningful effective (SW-budget) albedo and excludes the dark hours.
+        Tsum = Tsum.at[month].add(r.T_sfc)
+        Asum = Asum.at[month].add(r.albedo * f.sw_down)
+        Wsum = Wsum.at[month].add(f.sw_down)
+        return (s2, Tsum, Asum, Wsum), None
 
     # First seasonal pass is an unscored spin; only the second year is scored so the
     # monthly means are free of first-cycle thermal/snow transients.
     z = lambda: jnp.zeros((12, n), dtype=st.T_soil.dtype)
-    (st, _, _), _ = jax.lax.scan(body, (st, z(), z()), jnp.arange(nstep))
-    (st, Tsum, Asum), _ = jax.lax.scan(body, (st, z(), z()), jnp.arange(nstep))
-    return Tsum / spm, Asum / spm, W_sm
+    (st, _, _, _), _ = jax.lax.scan(body, (st, z(), z(), z()), jnp.arange(nstep))
+    (st, Tsum, Asum, Wsum), _ = jax.lax.scan(body, (st, z(), z(), z()), jnp.arange(nstep))
+    return Tsum / spm, Asum / jnp.maximum(Wsum, 1e-6), W_sm
 
 
 def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None):
@@ -703,11 +712,35 @@ def load_training_data(diurnal_npz: str, n_sub: int, seed: int = 0,
     sub = np.random.default_rng(seed).choice(lidx.size, size=min(n_sub, lidx.size),
                                              replace=False)
     g = lambda k: D[k].reshape(12, nh, -1)[:, :, lidx][:, :, sub]       # (12, nh, ncol)
-    return _pack(g, latc[sub], cmap, sub, nh)
+    _hours = np.asarray(D["hours"]) if "hours" in D else None
+    return _pack(g, latc[sub], cmap, sub, lonc=lonc[sub], hours=_hours, nh=nh)
 
 
-def _pack(g, latc, cmap, sub, nh=_NH) -> dict:
+# --- Solar geometry (gap 3: real diurnal cos(zenith) for the zenith snow albedo) ---
+# Mid-month day-of-year for the 12 months (Cooper 1969 declination).
+_MONTH_DOY = np.array([15, 46, 74, 105, 135, 166, 196, 227, 258, 288, 319, 349])
+
+
+def _solar_cos_zenith(lat_rad, lon_deg, hours_utc, month) -> np.ndarray:
+    """cos(solar zenith) for one month, shape ``(nh, ncol)`` (clipped >= 0).
+
+    ``mu = sin(lat) sin(delta) + cos(lat) cos(delta) cos(H)`` with the Cooper (1969)
+    solar declination ``delta`` and the LOCAL hour angle ``H`` from the UTC hour plus
+    the cell longitude (local solar time = UTC + lon/15).  Used to give the offline
+    calibration a real diurnal sun so the BATS zenith snow brightening is active and
+    calibratable (the old constant 0.5 placeholder left it inert)."""
+    doy = _MONTH_DOY[month]
+    delta = np.deg2rad(23.45) * np.sin(2.0 * np.pi * (284 + doy) / 365.0)
+    lst = hours_utc[:, None] + lon_deg[None, :] / 15.0          # (nh, ncol) local solar hr
+    H = np.deg2rad(15.0 * (lst - 12.0))
+    mu = (np.sin(lat_rad)[None, :] * np.sin(delta)
+          + np.cos(lat_rad)[None, :] * np.cos(delta) * np.cos(H))
+    return np.maximum(mu, 0.0)
+
+
+def _pack(g, latc, cmap, sub, lonc=None, hours=None, nh=_NH) -> dict:
     """Assemble the training dict from a per-key getter ``g(key) -> (12, nh, ncol)``."""
+    _hours = hours if hours is not None else np.arange(nh) * (24.0 / nh)
     T2, D2, SP = g("2m_temperature"), g("2m_dewpoint_temperature"), g("surface_pressure")
     PR = np.maximum(g("precip_kgms"), 0)
     zc = lambda v: jnp.full((nh, latc.size), v)
@@ -721,7 +754,9 @@ def _pack(g, latc, cmap, sub, nh=_NH) -> dict:
         v_lowest=jnp.asarray(g("10m_v_component_of_wind")[m]),
         p_lowest=0.99 * jnp.asarray(SP[m]), p_surface=jnp.asarray(SP[m]),
         rho_lowest=jnp.asarray(SP[m]) / (constants.R_d * jnp.asarray(T2[m])),
-        cos_zenith=zc(0.5), co2_ppmv=zc(412.0), has_radiation=zc(1.0),
+        cos_zenith=(jnp.asarray(_solar_cos_zenith(latc, lonc, _hours, m))
+                    if lonc is not None else zc(0.5)),
+        co2_ppmv=zc(412.0), has_radiation=zc(1.0),
         has_precipitation=zc(1.0)) for m in range(12)]
     # ERA5/ARCO fields load as float32; cast forcing to float64 so the float64 soil
     # state and the MOST flux loop share one dtype (the fori_loop carry rejects a
@@ -730,7 +765,12 @@ def _pack(g, latc, cmap, sub, nh=_NH) -> dict:
     pft = np.asarray(cmap["pft_fractions"])[sub]
     dom = pft.argmax(1); oh = np.zeros((latc.size, 17)); oh[np.arange(latc.size), dom] = 1.0
     skt = g("skin_temperature").mean(1)                       # (12, ncol)
-    alb = np.clip(g("forecast_albedo").mean(1), 0.05, 0.85)
+    # INSOLATION-WEIGHTED forecast albedo (weight = ssrd), matching the model's
+    # insolation-weighted albedo in forward_ml so the zenith brightening (gap 3) is
+    # compared on the SW-budget-relevant effective albedo, not a night-inflated mean.
+    _ssrd = np.maximum(g("ssrd_wm2"), 0.0)                     # (12, nh, ncol)
+    alb = np.clip(np.sum(g("forecast_albedo") * _ssrd, axis=1)
+                  / np.maximum(np.sum(_ssrd, axis=1), 1e-6), 0.05, 0.85)
     # soil-moisture target: ERA5 swvl1 (0-7cm) + swvl2 (7-28cm), depth-weighted to a
     # single 0-28cm root-zone value, then the ANNUAL mean (the frozen column's signal).
     # Backward-compat: an OLD npz without soil moisture yields an all-NaN target, which

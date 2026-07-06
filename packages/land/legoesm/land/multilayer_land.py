@@ -347,7 +347,10 @@ def _step_multilayer_land_impl(
     # from the surface scheme.  ``band_rad.Rn_bands`` drives per-band melt below.
     if bands is not None:
         _cover_fn = lambda s: snow_cover_fraction(s, config.land_albedo)
-        _alb_fn = lambda a: snow_albedo(a, config.land_albedo)
+        # gap 3: solar-zenith snow brightening (cos_zenith per cell -> broadcast over
+        # the band axis).  Inactive where cos_zenith is a constant placeholder.
+        _cz = forcing.cos_zenith[:, None]
+        _alb_fn = lambda a: snow_albedo(a, config.land_albedo, cos_zenith=_cz)
         _T_sfc_band = T_surface[:, None] - bands.lapse_rate_K_m * bands.band_dz
         _band_surviving = ((snowfall_bands * dt > 1e-6)
                            & (_T_sfc_band < constants.T_freeze))
@@ -574,10 +577,11 @@ def _step_multilayer_land_impl(
         # consistent albedo (alpha_eff) and banded LW emission (not a cell-mean value).
         if config.snow_albedo_feedback and lat is not None:
             _base_new = jnp.broadcast_to(albedo_land, T_surface_new.shape)
+            _cz_new = forcing.cos_zenith[:, None]
             alpha_bands_new = band_albedo(
                 snow_bands_new, snow_age_bands_new, _base_new,
                 lambda s: snow_cover_fraction(s, config.land_albedo),
-                lambda a: snow_albedo(a, config.land_albedo),
+                lambda a: snow_albedo(a, config.land_albedo, cos_zenith=_cz_new),
                 ice_bands=ice_bands_new, cfg=bands)
         else:
             alpha_bands_new = jnp.broadcast_to(
