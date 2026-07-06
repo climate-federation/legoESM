@@ -61,6 +61,7 @@ __param_spec__ = {
             "epsilon_shallow": "entrainment: IFS shallow base rate scaled in-scheme",
             "lcl_membership_sharpness": "numerics: sigmoid sharpness on the below-LCL level membership [1/level index]",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
+            "precip_efficiency": "bulk in-updraft rain fraction (default 0.7, gated `if > 0.0` in bechtold.py; 0 = legacy detrain-all which is unstable); retune via config, not sigmoid-trained across the off/on discontinuity",
             "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
@@ -1345,7 +1346,13 @@ class BechtoldConfig(NamedTuple):
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0
-    M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
+    # Cloud-base mass-flux stability cap [kg/m^2/s].  Lowered 0.05 -> 0.02 (the
+    # __param_spec__ bounds floor): the SCM-RCE closure matrix (job 26092602)
+    # showed 0.05 runs the RCE equilibrium away to 354-448 K (realism gate
+    # FAILED) while 0.02 is the ONLY variant that bounds it (T_max 327 K, PASS)
+    # — the default cap was too high, so convection overshot and drove the
+    # C24/2deg-cube day-5..15 AMIP blowups even with the CAPE + rain-split fixes.
+    M_b_max: float = 0.02   # see ZhangMcFarlaneConfig.M_b_max
     # Strong-convergence normaliser used to make the moisture-convergence
     # enhancement an O(1) multiplier of M_b (Bechtold 2008 Fig. 2 — typical
     # tropical strong-convergence is ≈ 0.05 kg/m²/s).
@@ -1372,6 +1379,18 @@ class BechtoldConfig(NamedTuple):
     # [0.5, 1.0] (θ ≥ 0.5 removes the explicit-side amplification).  Unused
     # when subsidence_solve == "advective".
     theta_implicit: float = 1.0
+    # In-updraft precipitation split (same convention as
+    # TiedtkeConfig.precip_efficiency): divert this fraction of the detrained
+    # condensate to RAIN (dq_r_conv_dt, sediments via microphysics, invisible
+    # to radiation), leaving (1-PE) as anvil cloud water.  Observed
+    # deep-convective CPE ~0.5-0.9.  Default 0.7 (mid-range) — UNLIKE
+    # TiedtkeConfig this is ON by default: with PE=0 Bechtold produces ~zero
+    # convective precip and is UNUSABLE, not merely biased (SCM-RCE a-priori
+    # gate: equilibrium ran away to 409 K at precip 5e-7 mm/day — no
+    # precipitating heat-removal path; C24 AMIP blew up day 10-15; the June
+    # albedo-0.57/precip-0.8 suspended-condensate bias is the same defect).
+    # Set 0.0 explicitly to reproduce the legacy detrain-all behaviour.
+    precip_efficiency: float = 0.7
 
 
 class ConvectiveEDMFConfig(NamedTuple):

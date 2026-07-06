@@ -172,6 +172,12 @@ def test_bechtold_downdraft_evap_conserves_water_locally():
     dT_diff = out_on.dT_dt - out_off.dT_dt
     dqv_diff = out_on.dq_v_dt - out_off.dq_v_dt
     dqc_diff = out_on.dq_c_conv_dt - out_off.dq_c_conv_dt
+    # With the in-updraft rain split ON by default, the detrained water is
+    # divided between dq_c and dq_r; the water budget books BOTH.
+    _zero = jnp.zeros_like(out_on.dq_c_conv_dt)
+    dqr_on = out_on.dq_r_conv_dt if out_on.dq_r_conv_dt is not None else _zero
+    dqr_off = out_off.dq_r_conv_dt if out_off.dq_r_conv_dt is not None else _zero
+    dqr_diff = dqr_on - dqr_off
 
     assert float(jnp.min(dT_diff)) < 0.0, (
         "Bechtold downdraft did not produce cooling — formulation regressed."
@@ -191,10 +197,11 @@ def test_bechtold_downdraft_evap_conserves_water_locally():
     dp = ph[:, 1:] - ph[:, :-1]
     col_dqv = jnp.sum(dqv_diff * dp, axis=-1) / constants.g
     col_dqc = jnp.sum(dqc_diff * dp, axis=-1) / constants.g
-    col_residual = float(jnp.max(jnp.abs(col_dqv + col_dqc)))
+    col_dqr = jnp.sum(dqr_diff * dp, axis=-1) / constants.g
+    col_residual = float(jnp.max(jnp.abs(col_dqv + col_dqc + col_dqr)))
     col_scale = float(jnp.max(jnp.abs(col_dqv)) + 1e-15)
     assert col_residual < 1e-10 * max(col_scale, 1.0), (
-        f"Bechtold downdraft column water unclosed: max|∫dq_v + ∫dq_c|="
+        f"Bechtold downdraft column water unclosed: max|∫dq_v + ∫dq_c + ∫dq_r|="
         f"{col_residual:.3e} kg/m²/s, vapor source={col_scale:.3e}"
     )
 
@@ -222,7 +229,7 @@ def test_bechtold_stochastic_changes_with_key():
     different AR1 noise states and different diagnosed mass fluxes.
 
     The fixture uses a high-CAPE sounding that drives diagnosed M_b
-    above the production ``M_b_max=0.05`` cap on both keys; we set
+    above the production ``M_b_max=0.02`` cap on both keys; we set
     ``M_b_max=10.0`` here so the cap does not bind and mask the
     stochastic variation.  In production the cap is intentional — it
     bounds single-step shocks from outlier columns — and a no-cap
@@ -619,12 +626,74 @@ def test_bechtold_mse_conservation_within_tolerance():
     dp = ph[:, 1:] - ph[:, :-1]
     H = float(jnp.sum(out.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
     Q = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
-    C = float(jnp.sum(out.dq_c_conv_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    # Total detrained condensate = suspended cloud water + the in-updraft rain
+    # split (default precip_efficiency=0.7 diverts most of it to dq_r_conv_dt).
+    # dT_dt already carries the latent heat of the FULL condensation, so the
+    # MSE budget must count cloud + rain to close.
+    dq_r = out.dq_r_conv_dt if out.dq_r_conv_dt is not None else jnp.zeros_like(out.dq_c_conv_dt)
+    C = float(jnp.sum((out.dq_c_conv_dt + dq_r) * dp / constants.g, axis=1).mean()) * constants.L_v
     rel = abs(H + Q + C) / (abs(H) + abs(Q) + abs(C) + 1e-10)
     assert rel < 0.10, (
         f"Bechtold (implicit_flux) MSE residual {H+Q+C:.1f} W/m^2 "
         f"({rel*100:.1f}% of total)"
     )
+
+
+# ---------------------------------------------------------------------------
+# In-updraft precipitation split (convective precipitation efficiency)
+# ---------------------------------------------------------------------------
+
+def test_bechtold_precip_efficiency_rain_split():
+    """Bechtold must be able to rain (the SCM-RCE zero-precip runaway).
+
+    Without a rain split, Bechtold detrains 100% of its condensate as
+    SUSPENDED cloud water: convective precip is ~0 (SCM-RCE a-priori gate:
+    precip 5.4e-7 mm/day vs reference 3.2, equilibrium T runs to 409 K —
+    no precipitating heat-removal path), and AMIP shows the June albedo
+    0.57 / precip 0.81 signature. Mirror tiedtke's gated in-updraft split:
+    ``precip_efficiency`` of the detrained condensate goes to RAIN
+    (``dq_r_conv_dt``, sediments via microphysics, invisible to radiation),
+    the rest stays anvil cloud water.
+
+    Contracts: pe=0 (default) is BYTE-IDENTICAL legacy (dq_r_conv_dt None);
+    pe>0 splits the same total bit-for-bit (dq_c + dq_r == legacy dq_c).
+    """
+    T, q, pf, ph, u, v = _column(ncol=3, nlev=12)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    stoch = jnp.zeros((ncol,))
+
+    out0, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(precip_efficiency=0.0),
+    )
+    assert out0.dq_r_conv_dt is None            # explicit 0 = legacy detrain-all
+    assert jnp.any(out0.dq_c_conv_dt > 0)       # convecting fixture detrains
+
+    # the DEFAULT config rains (PE on by default: PE=0 bechtold is unusable —
+    # zero convective precip => RCE 409 K runaway / AMIP day-15 blowup)
+    out_d, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(),
+    )
+    assert out_d.dq_r_conv_dt is not None
+    assert jnp.any(out_d.dq_r_conv_dt > 0)
+
+    pe = 0.7
+    out1, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(precip_efficiency=pe),
+    )
+    assert out1.dq_r_conv_dt is not None
+    assert jnp.array_equal(out1.dq_r_conv_dt, out0.dq_c_conv_dt * pe)
+    assert jnp.array_equal(out1.dq_c_conv_dt, out0.dq_c_conv_dt * (1.0 - pe))
+    # split conserves the detrained total bit-for-bit
+    assert jnp.allclose(
+        out1.dq_c_conv_dt + out1.dq_r_conv_dt, out0.dq_c_conv_dt,
+        rtol=0, atol=1e-18)
+    # heat/vapour tendencies untouched by the split
+    assert jnp.array_equal(out1.dT_dt, out0.dT_dt)
+    assert jnp.array_equal(out1.dq_v_dt, out0.dq_v_dt)
 
 
 # ---------------------------------------------------------------------------

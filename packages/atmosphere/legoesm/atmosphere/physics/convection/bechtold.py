@@ -626,13 +626,32 @@ def bechtold_convection(
 
     convective_mask = cape_weight * (deep_weight + shallow_weight + midlevel_weight)
 
+    # -- In-updraft precipitation (convective precipitation efficiency) ---
+    # Same gated split as tiedtke.py: without it the plume detrains its FULL
+    # cloud water as suspended grid-scale cloud, which loads the radiation
+    # and which microphysics cannot drain — Bechtold then produces ~zero
+    # convective precip (SCM-RCE a-priori gate: precip 5e-7 mm/day vs 3.2
+    # reference, equilibrium T runs away to 409 K with no precipitating
+    # heat-removal path).  Divert precip_efficiency of the detrained
+    # condensate to RAIN (dq_r_conv_dt — sediments via microphysics,
+    # invisible to radiation), leave (1-PE) as anvil cloud water.
+    # precip_efficiency=0 (default) => no split (legacy, byte-identical).
+    dq_c_pos = jnp.maximum(dq_c_conv_dt, 0.0)
+    if config.precip_efficiency > 0.0:
+        pe = jnp.clip(config.precip_efficiency, 0.0, 1.0)
+        dq_r_conv_dt = dq_c_pos * pe
+        dq_c_pos = dq_c_pos * (1.0 - pe)
+    else:
+        dq_r_conv_dt = None
+
     out = ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
-        dq_c_conv_dt=jnp.maximum(dq_c_conv_dt, 0.0),
+        dq_c_conv_dt=dq_c_pos,
         cape=cape_pbl,
         convective_mask=convective_mask,
         du_dt_conv=du_dt_conv,
         dv_dt_conv=dv_dt_conv,
+        dq_r_conv_dt=dq_r_conv_dt,
     )
     return out, M_u_new, conv_stoch_state_new
