@@ -67,6 +67,15 @@ __physics_contract__ = {
 # Module-level CLM initialization guard and topology cache
 # ---------------------------------------------------------------------------
 
+# Minimum canopy-top geometry height [m].  A prescribed/climatology ``htop`` can
+# be 0 on a bare or surfdata-uncovered column; CLM-ML then derives
+# ``hbot = hbot_frac * htop = 0`` and the ``hbot < htop`` layering invariant
+# collapses to a zero-thickness canopy.  Floor ``htop`` to this small positive
+# value so the geometry stays valid — LAI is 0 on those columns, so the canopy
+# contributes no fluxes regardless of the nominal height.  Matches the two-leaf
+# path's ``_HC_MIN_M`` (0.1 m) in ``boundary_data/_internals``.
+_HTOP_GEOM_MIN_M: float = 0.1
+
 _CLM_INITIALIZED: bool = False
 
 # Topology cache: avoid re-running _setup_clm_topology when the grid has not
@@ -499,6 +508,7 @@ def _build_stubs(
     cos_zen: np.ndarray | None = None,
     T_soil_all: jnp.ndarray | None = None,
     t_a10_prior: jnp.ndarray | None = None,
+    lai_override: jnp.ndarray | None = None,
 ) -> dict[str, Any]:
     """Build minimal CLM input stub objects from legoESM state.
 
@@ -687,8 +697,20 @@ def _build_stubs(
         p = i + 1
         htop_v = (float(land_params.htop[i]) if land_params is not None and land_params.htop is not None
                   else 5.0)  # coeff-ok: 5 m fallback canopy height (CLM4.5 DBF-temperate default)
-        lai_v  = (float(land_params.LAI[i]) if land_params is not None and land_params.LAI is not None
-                  else 2.0)  # LAI=2 default
+        # A prescribed/climatology htop can be 0 on a bare or uncovered column;
+        # floor it so hbot = hbot_frac*htop stays < htop (valid CLM-ML layering).
+        # LAI is 0 there, so the nominal height changes no canopy flux.
+        htop_v = max(htop_v, _HTOP_GEOM_MIN_M)
+        # LAI precedence: prognostic ``lai_override`` (C_fol / LCMA from the
+        # DifferLand carbon pool) > prescribed ``LandSurfaceParams.LAI``
+        # climatology > scalar fallback.  Canopy STRUCTURE (htop/SAI) stays
+        # prescribed either way (the carbon cycle produces no allometric map).
+        if lai_override is not None:
+            lai_v = float(lai_override[i])
+        elif land_params is not None and land_params.LAI is not None:
+            lai_v = float(land_params.LAI[i])
+        else:
+            lai_v = 2.0  # coeff-ok: LAI=2 fallback (no prescribed/prognostic LAI)
         sai_v  = (float(land_params.SAI[i]) if land_params is not None and land_params.SAI is not None
                   else 0.5)
         htop_patch = htop_patch.at[p].set(htop_v)
@@ -987,6 +1009,7 @@ def compute_clm_ml_canopy_fluxes(
     lat: jnp.ndarray | None = None,
     lon: jnp.ndarray | None = None,
     doy: float = 0.0,
+    lai_override: jnp.ndarray | None = None,
 ) -> tuple[SurfaceFluxOutput, CanopyState]:
     """Compute canopy fluxes via the CLM-ML-JAX multilayer canopy model.
 
@@ -1136,6 +1159,7 @@ def compute_clm_ml_canopy_fluxes(
         cos_zen=cos_zen,
         T_soil_all=T_soil,
         t_a10_prior=t_a10_prior,
+        lai_override=lai_override,
     )
 
     # ---- Allocate / retrieve mlcanopy_type ----

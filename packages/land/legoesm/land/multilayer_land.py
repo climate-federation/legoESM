@@ -353,6 +353,20 @@ def _step_multilayer_land_impl(
         # Lazy import keeps clm_ml_jax optional.
         from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
 
+        # Prognostic LAI feedback for CLM-ML — mirrors the two-leaf branch above.
+        # When ``CLMMLCanopyConfig.use_prognostic_lai`` is set AND differland
+        # carbon is active, ``compute_prognostic_lai`` returns C_fol / LCMA and it
+        # supersedes the prescribed ``LandSurfaceParams.LAI`` inside CLM-ML; it
+        # returns ``None`` otherwise, so CLM-ML falls back to the prescribed
+        # climatology (or its scalar default).  Canopy structure (SAI/htop/hbot)
+        # stays prescribed — the carbon cycle produces no allometric mapping.
+        # FORWARD-ONLY coupling: the whole CLM-ML interface is eager/non-jit
+        # (Python-NumPy control flow, host-side ``float(lai_override[i])`` reads),
+        # so this is a prognostic forward feedback (carbon evolves -> LAI updates
+        # each step), NOT a differentiable one — do not ``jax.grad`` through it.
+        LAI_override = compute_prognostic_lai(
+            carbon_state, config, config.surface_scheme)
+
         surface_out, canopy_state_new = compute_clm_ml_canopy_fluxes(
             T_soil_top=T_surface,
             forcing=forcing,
@@ -368,6 +382,7 @@ def _step_multilayer_land_impl(
             theta_soil=theta,
             lat=lat,
             doy=doy,
+            lai_override=LAI_override,
         )
     elif isinstance(config.surface_scheme, SimpleSEBConfig):
         # SimpleSEB: bulk fluxes with skin T = T_soil[:, 0].

@@ -39,6 +39,7 @@ from legoesm.land.boundary_data.builders import (
     SurfaceDataParamProvider,
     surface_data_param_provider,
     surface_data_to_land_params,
+    prescribed_canopy_structure,
     init_land_surface_data,
 )
 from legoesm.land.boundary_data.gap_fill import (
@@ -58,7 +59,8 @@ __all__ = [
     "dominant_pft_index", "glacier_mask",
     "build_canopy_params", "build_soil_hydraulics",
     "SurfaceDataParamProvider", "surface_data_param_provider",
-    "surface_data_to_land_params", "init_land_surface_data",
+    "surface_data_to_land_params", "prescribed_canopy_structure",
+    "init_land_surface_data",
     # gap fill
     "surfdata_covered", "fill_land_param_gaps",
     # step updater (lax.scan)
