@@ -1316,7 +1316,13 @@ class BechtoldConfig(NamedTuple):
     enable_stochastic: bool = False
     stochastic_amplitude: float = 0.5
     stochastic_decorrelation: float = 7200.0
-    M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
+    # Cloud-base mass-flux stability cap [kg/m^2/s].  Lowered 0.05 -> 0.02 (the
+    # __param_spec__ bounds floor): the SCM-RCE closure matrix (job 26092602)
+    # showed 0.05 runs the RCE equilibrium away to 354-448 K (realism gate
+    # FAILED) while 0.02 is the ONLY variant that bounds it (T_max 327 K, PASS)
+    # — the default cap was too high, so convection overshot and drove the
+    # C24/2deg-cube day-5..15 AMIP blowups even with the CAPE + rain-split fixes.
+    M_b_max: float = 0.02   # see ZhangMcFarlaneConfig.M_b_max
     # Strong-convergence normaliser used to make the moisture-convergence
     # enhancement an O(1) multiplier of M_b (Bechtold 2008 Fig. 2 — typical
     # tropical strong-convergence is ≈ 0.05 kg/m²/s).

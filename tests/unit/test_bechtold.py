@@ -229,7 +229,7 @@ def test_bechtold_stochastic_changes_with_key():
     different AR1 noise states and different diagnosed mass fluxes.
 
     The fixture uses a high-CAPE sounding that drives diagnosed M_b
-    above the production ``M_b_max=0.05`` cap on both keys; we set
+    above the production ``M_b_max=0.02`` cap on both keys; we set
     ``M_b_max=10.0`` here so the cap does not bind and mask the
     stochastic variation.  In production the cap is intentional — it
     bounds single-step shocks from outlier columns — and a no-cap
