@@ -148,7 +148,7 @@ def build_mode_components(cfg, yml):
     return model, grid, sigma, params, make_run_seg, loss_config, dt
 
 
-def _rollout_hours(cfg, yml):
+def rollout_hours(cfg, yml):
     hrs = cfg.multi_step_hours or tuple(yml.get("loss", {}).get("multi_step_hours", ()) or ())
     return float(hrs[0]) if hrs else 6.0     # first lead = the base rollout horizon
 
@@ -168,7 +168,7 @@ def load_era5_samples(cfg, yml, grid, sigma):
     ds = open_era5_zarr(era5_cfg.zarr_store)
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
     snaps_per_day = 24 // era5_cfg.dt_hours
-    roll_h = _rollout_hours(cfg, yml)
+    roll_h = rollout_hours(cfg, yml)
     stride = int(roll_h) // era5_cfg.dt_hours
 
     config = build_latlon_config(cfg, yml)

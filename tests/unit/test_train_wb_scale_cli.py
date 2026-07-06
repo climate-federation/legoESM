@@ -41,3 +41,21 @@ def test_config_yaml_loads():
     assert {"w_T", "multi_step_hours"} <= set(y["loss"])
     assert y["loss"]["w_spec_crps_T"] == 0.0            # spectral-CRPS off at scale
     assert y["train_years"] and y["eval_years"] == [2020]
+
+
+def test_rollout_hours_matches_first_lead():
+    """The training rollout horizon = the FIRST multi_step_hours lead — the same
+    lead load_era5_samples uses to pick the target, so pred and target stay at
+    the same forecast time (the old hardwired single_day_rollout scored a 24 h
+    forecast against a 6 h target)."""
+    from legoesm.training.scale_build import rollout_hours
+
+    cfg = mod.build_scale_config_from_args(["--multi-step-hours", "12,24"])
+    assert rollout_hours(cfg, {}) == 12.0
+    # CLI default (6,12) -> 6 h
+    cfg = mod.build_scale_config_from_args([])
+    assert rollout_hours(cfg, {}) == 6.0
+    # no CLI leads -> YAML loss.multi_step_hours wins; nothing at all -> 6 h
+    cfg = cfg._replace(multi_step_hours=())
+    assert rollout_hours(cfg, {"loss": {"multi_step_hours": [12, 24]}}) == 12.0
+    assert rollout_hours(cfg, {}) == 6.0
