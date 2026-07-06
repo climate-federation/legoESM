@@ -17,7 +17,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from legoesm.grids.gaussian import create_gaussian_grid
 from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
 from legoesm.ml.sfno import SFNO, SFNOConfig

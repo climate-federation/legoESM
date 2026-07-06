@@ -14,7 +14,6 @@ lat-lon C32/L8 gray keeps it seconds. Needs JAX_ENABLE_X64 not required.
 from __future__ import annotations
 
 import importlib.util
-import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -33,7 +32,8 @@ _SMOKE_YML = {
 def test_training_dt_equals_driver_cfl_safe_dt():
     from legoesm.driver.model_driver import ModelDriver
     from legoesm.training.scale_build import (
-        build_latlon_config, build_mode_components,
+        build_latlon_config,
+        build_mode_components,
     )
 
     cfg = _mod.build_scale_config_from_args(
