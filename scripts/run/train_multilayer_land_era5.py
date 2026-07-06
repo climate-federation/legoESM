@@ -484,7 +484,10 @@ def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None):
     # Albedo MSE is INSOLATION-weighted (area w x monthly SW): a polar-night month-cell
     # (no sun -> the model's zenith albedo and the ERA5 target are both undefined) must
     # not enter the fit.  Falls back to uniform monthly weight if alb_wt is absent.
-    _awt = w * data["alb_wt"] if "alb_wt" in data else w
+    # Broadcast to (12, ncol) so the numerator sum (over months x cells) matches the
+    # denominator sum — else the uniform fallback under-counts the denominator 12x.
+    _awt = (w * data["alb_wt"] if "alb_wt" in data
+            else jnp.broadcast_to(w, A.shape))
     amse = jnp.sum(_awt * (A - data["alb"]) ** 2) / jnp.maximum(jnp.sum(_awt), 1e-12)
     # soil moisture: model root-zone equilibrium vs ERA5 annual-mean swvl (0-28cm).
     # FINITE-MASKED: a diverged forward (NaN W) or a missing target must not poison the

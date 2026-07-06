@@ -534,6 +534,10 @@ def band_net_radiation(
     dt_work = T_sfc.dtype
     dz = cfg.band_dz.astype(dt_work)                         # (ncol, n_bands)
     n_bands = dz.shape[-1]
+    # alpha_bands comes from band_albedo, which mixes the (possibly float64, trainable)
+    # ice_expose_kg_m2 / alpha_glacier_ice config scalars — cast it so a promoted albedo
+    # cannot promote the returned radiation under a float32 carry.
+    alpha_bands = jnp.asarray(alpha_bands, dtype=dt_work)
     emis = jnp.asarray(emissivity, dtype=dt_work)
     emis = jnp.reshape(emis, (-1, 1)) if emis.ndim == 1 else emis
     # Cast EVERY config scalar entering the arithmetic to the working dtype: these are
@@ -569,10 +573,11 @@ def band_net_radiation(
     shielding = jnp.clip((dz_hi - dz) / dz_span, 0.0, 1.0)     # 0 ridge -> 1 valley
     v_band = 1.0 - (1.0 - _sky_min) * shielding
     lw_net_b = v_band * lw_net_b
-    # Effective UPWARD LW reported to the atmosphere, CONSISTENT with the sky-view net:
-    # lw_up_eff = emis*lw_down - lw_net = (1-V)*emis*lw_down_b + V*lw_up_b, so the
-    # coupler's LW budget sees the same reduced surface net (V=1 -> unchanged lw_up_b).
-    lw_up_b = (1.0 - v_band) * emis * lw_down_b + v_band * lw_up_b
+    # Effective TOTAL UPWARD LW for the atmosphere, in the repo convention (see
+    # surface_energy.surface_radiation_fluxes: lw_up = emit + reflected = lw_down -
+    # lw_net), CONSISTENT with the sky-view-scaled net.  This also corrects the plain
+    # (V=1) case, which must report emit + (1-emis)*lw_down, not emit alone.
+    lw_up_b = lw_down_b - lw_net_b
     Rn_b = sw_net_b + lw_net_b
     # SW-flux-weighted aggregate albedo: reflected / incident.  mean_k sw_down_b is
     # exactly sw_down (zero-mean dz), so alpha_eff = mean_k sw_down_b*alpha / sw_down.
