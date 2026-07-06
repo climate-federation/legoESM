@@ -583,6 +583,9 @@ class PhysicsPipeline:
         ocean_cfg = self.turbulence_config.surface
         land_cfg = ocean_cfg._replace(
             bulk_scheme="most", z0=self.surface_z0_land, gustiness_w_zi=0.0,
+            # AIR-SEA-only option (#762): the land tile keeps the default
+            # thermodynamic convention even when the ocean tile runs aerobulk.
+            thermo_convention="legoesm",
         )
         ice_cfg = ocean_cfg._replace(bulk_scheme="constant")
 
@@ -1804,8 +1807,29 @@ class PhysicsPipeline:
                 sw_down_toa, T_land_new, land_ml_new)
 
     def build_step_unified(self, static_need_rad: bool | None = None,
+                           rad_stop_gradient: bool = False,
                            jit: bool = True):
         """Build a JIT-compiled unified physics step with radiation sub-cycling.
+
+        ``rad_stop_gradient`` (radiation-as-forcing): wrap the radiation core's
+        outputs (heating + TOA/surface fluxes) in ``jax.lax.stop_gradient`` so
+        radiation is applied FORWARD but carries no reverse-mode gradient.
+        rrtmgp's adjoint is the dominant XLA compile cost of the differentiable
+        rollout (it grows with grid size — minutes at T21, >10 h at T106), yet
+        the only rrtmgp-tunable param is surface albedo (2 scalars; ``tau`` is
+        gray-only).  Treating radiation as a slowly-varying forcing collapses
+        that compile so high-res training becomes feasible; the state loss
+        still trains convection/turbulence/surface, and TOA/surface fluxes
+        follow once the state matches.  Albedo, if needed, is tuned via a cheap
+        separate path (forward-mode / finite-diff on the 2 scalars), NOT this
+        rollout adjoint.  Default False (full adjoint, unchanged behavior).
+
+        SCOPE: this also makes the slab-land skin temperature ``T_land_new``
+        forward-only — it is a ``compute_radiation_core`` output, so leaving it
+        differentiable would drag the rrtmgp adjoint back in.  Intended (the
+        radiation-driven land skin update is forcing too); moot for ocean-only
+        AIMIP (``T_land`` inert).  A land run needing differentiable skin-T
+        must use the full adjoint (False).
 
         ``jit`` (default True) wraps the step in ``jax.jit`` — the production path.
         Pass ``jit=False`` for differentiable parameter calibration that feeds a
@@ -1910,6 +1934,19 @@ class PhysicsPipeline:
                         conv_precip=conv_precip, land_ml=land_ml, w_land=w_land,
                         snow=snow,
                     )
+
+                # Radiation-as-forcing: cut radiation's reverse-mode so the
+                # expensive rrtmgp adjoint never enters the rollout backward
+                # graph (the dominant, grid-size-scaling compile cost).
+                # T_land_new is included (it is a radiation-core output;
+                # leaving it differentiable re-introduces the rrtmgp adjoint)
+                # -> the slab-land skin update is forward-only too. Moot for
+                # ocean-only AIMIP; see build_step_unified docstring SCOPE.
+                if rad_stop_gradient:
+                    (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
+                     lw_up_toa, sw_down_toa, T_land_new) = jax.lax.stop_gradient(
+                        (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
+                         lw_up_toa, sw_down_toa, T_land_new))
 
                 physics_out = pipeline.physics_step_no_rad(
                     T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, dt,
@@ -2189,6 +2226,7 @@ def _build_rrtmgp_radiation_fn(config):
         use_scan=_exp_use_scan,
         gpoint_batch_size=getattr(config, 'rrtmgp_gpoint_batch_size', 0),
         gpoint_checkpoint=getattr(config, 'rrtmgp_gpoint_checkpoint', True),
+        column_chunk_size=getattr(config, 'rrtmgp_column_chunk_size', 0),
         include_clouds=(getattr(config, 'cloud_scheme', 'none') != 'none'),
     )
 
@@ -2261,7 +2299,7 @@ def _build_rrtmgp_radiation_fn(config):
         # mixing-ratio inputs while RRTMGP sees the right unit.
         # Audit 2026-05-12 #6, narrowed to RRTMGP per Codex review.
         q_v_specific = q_v_col / (1.0 + jnp.clip(q_v_col, 0.0, None))
-        result = solver.solve_columns(
+        _rad_kwargs = dict(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, q_v=q_v_specific,
             cos_zenith=cos_zenith,
@@ -2278,6 +2316,17 @@ def _build_rrtmgp_radiation_fn(config):
             cloud_r_eff_ice=cloud_r_eff_ice,
             cloud_fraction=cloud_fraction,
         )
+        # Column-chunk the rrtmgp solve when configured: the per-block body
+        # compiles ONCE at column_chunk_size, capping the super-linear rrtmgp
+        # XLA compile time at higher horizontal resolution.  Columns are
+        # independent → numerically exact.  ``column_chunk_size`` is a static
+        # closure int, so this is a compile-time feature gate (plain ``if``).
+        if rrtmg_config.column_chunk_size and rrtmg_config.column_chunk_size > 0:
+            result = solver.solve_columns_chunked(
+                column_chunk_size=rrtmg_config.column_chunk_size, **_rad_kwargs,
+            )
+        else:
+            result = solver.solve_columns(**_rad_kwargs)
 
         # Rescale SW fluxes/heating to daily-mean when using daytime-effective SZA
         if _sw_scale is not None:
@@ -2593,10 +2642,11 @@ def _resolve_turbulence(config):
     # coefficients — the fix for anemic evaporation over a calm warm ocean.
     sbs = getattr(config, "surface_bulk_scheme", "constant")
     gzi = getattr(config, "surface_gustiness_zi", None)
+    stc = getattr(config, "surface_thermo_convention", "legoesm")
     sss_scheme = getattr(config, "surface_stability_scheme", "dyer1974")
     if (turb_config is not None
             and getattr(turb_config, "surface", None) is not None
-            and (sbs != "constant" or gzi is not None
+            and (sbs != "constant" or gzi is not None or stc != "legoesm"
                  or sss_scheme != "dyer1974")):
         surf = turb_config.surface
         if sbs != "constant":
@@ -2605,6 +2655,10 @@ def _resolve_turbulence(config):
             # COARE convective-gustiness BL depth (only effective with a MOST
             # bulk_scheme); the diagnosed fix for the calm-warm-ocean low hfls.
             surf = surf._replace(gustiness_w_zi=gzi)
+        if stc != "legoesm":
+            # AeroBulk thermodynamic-constants parity (#762; only effective
+            # with a MOST bulk_scheme).
+            surf = surf._replace(thermo_convention=stc)
         if sss_scheme != "dyer1974":
             # Stable-regime MOST functions: keep the atmosphere surface layer
             # on the SAME stable functions as the coupler ocean tile (both

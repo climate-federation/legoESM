@@ -64,12 +64,16 @@ cd "$REPO"
 RUN_NCCL="${RUN_NCCL:-1}"           # lane A: cube cs-spmd
 RUN_LATLON="${RUN_LATLON:-1}"       # lane C: atm latlon lat-band multihost
 RUN_OCEAN="${RUN_OCEAN:-1}"         # lane D: ocean lat-band multihost
+RUN_MPAS="${RUN_MPAS:-1}"           # lane E: icosahedral MPAS multicontroller
 RUN_ROUTEA="${RUN_ROUTEA:-0}"       # lane B: CUDA-aware mpi4jax (overlay env)
 PRECISION="${PRECISION:-float32}"
 MODE="${MODE:-strong}"
 CS_RES="${CS_RES:-96}"              # cube face edge for lane A (C96 strong)
 LL_RES="${LL_RES:-512}"             # atm latlon n_lat for lane C (LL512 strong)
 OC_RES="${OC_RES:-288}"             # ocean n_lat for lane D (LL288 strong)
+ICO_LEVEL="${ICO_LEVEL:-7}"         # lane E subdivision (L7 = 163842 cells
+                                    # -> ~27k cells/GPU at np=6, above the
+                                    # per-device saturation floor)
 NLEV="${NLEV:-26}"
 OC_NLEV="${OC_NLEV:-20}"
 N_WARMUP="${N_WARMUP:-3}"
@@ -158,6 +162,38 @@ if [ "$RUN_OCEAN" = "1" ]; then
     )
     rc=$?
     [ "$rc" -ne 0 ] && { echo "LANE D FAILED rc=$rc"; rc_all=$rc; }
+fi
+
+# --------------------------------------------------------------------------
+# Lane E: icosahedral/MPAS multicontroller (6 procs = 2 nodes x 3 GPUs, NCCL)
+# — cell-partition reorder + ppermute halo (make_voronoi_sharded_step) over
+# jax.distributed. np=6: the icosahedral nCells = 10*4^L+2 admits 1/2/3/6
+# even splits at every level (ghost padding covers the rest, but 6 is the
+# natural cross-node count on 4-GPU nodes: 2x3).
+# Gate: tests/parallel/test_mpas_spmd_multicontroller_selfspawn.py.
+# --------------------------------------------------------------------------
+if [ "$RUN_MPAS" = "1" ]; then
+    echo "=== LANE E: icosahedral MPAS multicontroller, np=6 over 2 nodes (L$ICO_LEVEL) ==="
+    (
+        nccl_env
+        # Smoke gate first: small mesh, parity + conservation armed.
+        mpiexec -n 6 --ppn 3 bash -c "$PIN" _ \
+            "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
+            --multicontroller --n-devices 6 \
+            --subdivision 4 --nlev 8 --steps 4 --warmup 1 \
+            --partition-method sfc \
+            --parity-gate --check-conservation \
+            --out "$OUTDIR/mpas_multicontroller/smoke.jsonl" < /dev/null \
+        && mpiexec -n 6 --ppn 3 bash -c "$PIN" _ \
+            "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
+            --multicontroller --n-devices 6 \
+            --subdivision "$ICO_LEVEL" --nlev "$NLEV" \
+            --steps $((N_WARMUP + N_TIMING)) --warmup "$N_WARMUP" \
+            --partition-method sfc \
+            --out "$OUTDIR/mpas_multicontroller/mpas_spmd_scaling.jsonl" < /dev/null
+    )
+    rc=$?
+    [ "$rc" -ne 0 ] && { echo "LANE E FAILED rc=$rc"; rc_all=$rc; }
 fi
 
 # --------------------------------------------------------------------------

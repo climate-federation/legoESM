@@ -650,7 +650,7 @@ def _call_radiation_backend(
         from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
         rrtmgp_solver = RRTMGP.from_legoesm_config(radiation_config.rrtmgp)
 
-    result = rrtmgp_solver.solve_columns(
+    _rad_kwargs = dict(
         T=T,
         p_full=p_full,
         p_half=p_half,
@@ -666,6 +666,17 @@ def _call_radiation_backend(
         solar_spectral_fraction=solar_spectral_fraction,
         **cloud_kwargs,
     )
+    # Column-chunk the rrtmgp solve when configured: the per-block body
+    # compiles ONCE at ``column_chunk_size`` columns, capping the highly
+    # super-linear rrtmgp XLA compile time at higher horizontal resolution.
+    # Columns are physically independent, so this is numerically EXACT.
+    _col_chunk = getattr(radiation_config.rrtmgp, "column_chunk_size", 0)
+    if _col_chunk and _col_chunk > 0:
+        result = rrtmgp_solver.solve_columns_chunked(
+            column_chunk_size=_col_chunk, **_rad_kwargs,
+        )
+    else:
+        result = rrtmgp_solver.solve_columns(**_rad_kwargs)
 
     # When using daytime-effective cos(SZA), the solver computes SW fluxes at
     # the daytime level (1/f_day times too large).  Rescale to daily-mean.

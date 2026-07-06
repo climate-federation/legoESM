@@ -113,6 +113,41 @@ class LossConfig(NamedTuple):
     wind_scale: float = 20.0       # m/s — typical wind anomaly
     q_scale: float = 5.0e-3        # kg/kg — typical q anomaly
     ps_scale: float = 1000.0       # Pa — typical ps anomaly
+    # ACE2-style RESIDUAL normalization: when True, normalize each MSE term by
+    # the std of the 6-hour FIELD CHANGE (the prognostic "residual scale" of
+    # Watt-Meyer et al. 2024 / ACE2) instead of the full-field std above. The
+    # loss then weights the predictable TENDENCY rather than the (large) mean
+    # state, the key conditioning trick behind ACE2's short-range skill. The
+    # defaults are ERA5 6-hourly global tendency stds (approximate ACE's
+    # data-computed scaling-residual; override per-run if needed).
+    residual_normalize: bool = False
+    T_resid_scale: float = 1.5     # K — ERA5 6 h |ΔT| std
+    wind_resid_scale: float = 3.0  # m/s — ERA5 6 h |Δu|,|Δv| std
+    q_resid_scale: float = 5.0e-4  # kg/kg — ERA5 6 h |Δq| std
+    ps_resid_scale: float = 200.0  # Pa — ERA5 6 h |Δps| std
+    # Radiation-flux supervision (TOA + surface) — drives cross-climate
+    # generalization by constraining the radiative response, not just the
+    # instantaneous state.  Reads the SegmentCarry ``held_*`` flux fields
+    # (rsut = held_sw_up_toa, OLR = held_lw_up_toa, surface net SW/LW =
+    # held_sw_net_sfc / held_lw_net_sfc) against ERA5-loaded targets on the
+    # target carry.  ``w_flux_*`` are MSE weights; ``w_bias_flux_*`` add a
+    # squared area-mean (global-energy-balance) penalty so the model's mean
+    # OLR / reflected-SW / surface fluxes match ERA5 — the term that
+    # actually transfers across climate states.  All default 0.0 → no-op
+    # (byte-identical legacy behaviour); the term is only active when a
+    # weight is >0 AND the target carry's ``held_*`` fields hold real ERA5
+    # fluxes (``TrainingERA5Config.load_radiation_fluxes=True``).  rsdt
+    # (held_sw_down_toa) is prescribed insolation, not predicted, so it is
+    # NOT penalized; constraining rsut+OLR pins the TOA net radiation.
+    w_flux_rsut: float = 0.0        # TOA reflected SW (held_sw_up_toa)
+    w_flux_olr: float = 0.0         # TOA outgoing LW / OLR (held_lw_up_toa)
+    w_flux_sfc_sw: float = 0.0      # surface net SW (held_sw_net_sfc)
+    w_flux_sfc_lw: float = 0.0      # surface net LW (held_lw_net_sfc)
+    w_bias_flux_rsut: float = 0.0
+    w_bias_flux_olr: float = 0.0
+    w_bias_flux_sfc_sw: float = 0.0
+    w_bias_flux_sfc_lw: float = 0.0
+    flux_scale: float = 20.0        # W/m² — typical radiative-flux anomaly scale
 
 
 def level_weights(
@@ -152,6 +187,124 @@ def level_weights(
     return w * (sigma_full.shape[0] / jnp.sum(w))
 
 
+def _lat_weighted_mean(
+    field: jax.Array, lat_weights: jax.Array | None
+) -> jax.Array:
+    """Mean over all dims, with optional latitude weighting.
+
+    When ``lat_weights`` is provided and ``field`` has *exactly one* axis
+    of length ``n_lat = len(lat_weights)``, the mean is replaced by the
+    area-weighted mean ``mean(field · lat_w) · n_lat / Σ(lat_w)``
+    (resolution-independent, identical correction as iter-63
+    ``ml/loss.py``).
+
+    Disambiguation rules (size-matching is intentionally strict because
+    the bias term is silent-failure-prone otherwise):
+    - 0 axes match n_lat → uniform mean (e.g. cubed-sphere where the
+      leading face dim differs from n_lat).
+    - 1 axis matches → use it.
+    - >1 axes match → raise.  Callers seeing this should pass their field
+      with an unambiguous lat axis (flatten or rename the colliding axis).
+
+    Lifted to module scope (iter-AIMIP-flux) so ``carry_mse`` and
+    ``radiation_flux_loss`` share one implementation — no duplicated
+    area-weighting numerics across the state and radiation-flux losses.
+    """
+    if lat_weights is None:
+        return jnp.mean(field)
+    n_lat_w = lat_weights.shape[0]
+    matching_axes = [a for a, d in enumerate(field.shape) if d == n_lat_w]
+    if not matching_axes:
+        return jnp.mean(field)
+    # >1 axis of length n_lat (e.g. a carry field (n_lat, n_lon, nlev)
+    # with nlev == n_lat): the lat axis is axis 0 by convention for every
+    # grid that supplies lat_weights (lat-lon / Gaussian put latitude
+    # first; cubed-sphere passes lat_weights=None).  Use the FIRST match
+    # (axis 0) rather than raising — adding LatLonGrid.weights newly made
+    # the loss area-weighted, so a raise would crash otherwise-valid
+    # n_lev==n_lat configs (codex review).
+    axis = matching_axes[0]
+    shape = [1] * field.ndim
+    shape[axis] = n_lat_w
+    w = lat_weights.reshape(shape)
+    return jnp.mean(field * w) * n_lat_w / jnp.sum(lat_weights)
+
+
+# Public alias: the AIMIP lat-lon eval reuses this area-weighting helper
+# for held-out RMSE/bias metrics rather than re-deriving the numerics.
+lat_weighted_mean = _lat_weighted_mean
+
+
+def radiation_flux_loss(
+    pred_carry,
+    target_carry,
+    lat_weights: jax.Array | None = None,
+    config: LossConfig = LossConfig(),
+) -> jax.Array:
+    """Area-weighted MSE + bias penalty on TOA + surface radiation fluxes.
+
+    Reads the ``SegmentCarry`` held-radiation fields directly:
+    ``held_sw_up_toa`` (rsut, TOA reflected SW), ``held_lw_up_toa`` (OLR /
+    rlut), ``held_sw_net_sfc`` (surface net SW), ``held_lw_net_sfc``
+    (surface net LW).  Each contributes a scale-normalized area-weighted
+    MSE (weight ``w_flux_*``) and, when ``w_bias_flux_* > 0``, a squared
+    area-mean (global-energy-balance) penalty.  Normalized by
+    ``config.flux_scale²`` (MSE) / ``flux_scale`` (bias) so the terms are
+    commensurate with the scale-normalized state losses.
+
+    Active only when a flux weight is >0; otherwise returns exactly 0.0
+    (the target carry's ``held_*`` are zeros unless ERA5 fluxes were
+    loaded).  rsdt (``held_sw_down_toa``) is prescribed insolation, not a
+    model prediction, so it is intentionally NOT penalized — constraining
+    rsut + OLR already pins the net TOA radiation.
+
+    Grid-agnostic: works on whatever 2D layout the carry uses (Gaussian /
+    lat-lon ``(n_lat, n_lon)`` or cubed-sphere ``(6, n, n)`` / flat
+    ``(ncol,)``) via the shared :func:`_lat_weighted_mean`.
+    """
+    from legoesm.core.precision import resolve_dtype
+    loss = jnp.array(0.0, dtype=resolve_dtype(None, "accumulate"))
+
+    if config.normalize_by_scale:
+        f_mse_norm = config.flux_scale ** 2
+        f_bias_norm = config.flux_scale ** 2
+    else:
+        f_mse_norm = f_bias_norm = 1.0
+
+    # (carry field, MSE weight, bias weight)
+    terms = (
+        (pred_carry.held_sw_up_toa, target_carry.held_sw_up_toa,
+         config.w_flux_rsut, config.w_bias_flux_rsut),
+        (pred_carry.held_lw_up_toa, target_carry.held_lw_up_toa,
+         config.w_flux_olr, config.w_bias_flux_olr),
+        (pred_carry.held_sw_net_sfc, target_carry.held_sw_net_sfc,
+         config.w_flux_sfc_sw, config.w_bias_flux_sfc_sw),
+        (pred_carry.held_lw_net_sfc, target_carry.held_lw_net_sfc,
+         config.w_flux_sfc_lw, config.w_bias_flux_sfc_lw),
+    )
+    for pred_f, tgt_f, w_mse, w_bias in terms:
+        d = pred_f - tgt_f
+        if w_mse > 0.0:
+            loss = loss + w_mse * _lat_weighted_mean(d ** 2, lat_weights) / f_mse_norm
+        if w_bias > 0.0:
+            bias = _lat_weighted_mean(d, lat_weights)
+            loss = loss + w_bias * bias ** 2 / f_bias_norm
+
+    return loss
+
+
+def _any_flux_weight(config: LossConfig) -> bool:
+    """True when any radiation-flux loss weight is active (>0)."""
+    return any(
+        w > 0.0 for w in (
+            config.w_flux_rsut, config.w_flux_olr,
+            config.w_flux_sfc_sw, config.w_flux_sfc_lw,
+            config.w_bias_flux_rsut, config.w_bias_flux_olr,
+            config.w_bias_flux_sfc_sw, config.w_bias_flux_sfc_lw,
+        )
+    )
+
+
 def carry_mse(
     pred_carry,
     target_carry,
@@ -183,43 +336,9 @@ def carry_mse(
     from legoesm.core.precision import resolve_dtype
     loss = jnp.array(0.0, dtype=resolve_dtype(None, "accumulate"))
 
-    def _lat_weighted_mean(sq_err: jax.Array) -> jax.Array:
-        """Mean over all dims, with optional latitude weighting.
-
-        When ``lat_weights`` is provided and ``sq_err`` has *exactly
-        one* axis of length ``n_lat = len(lat_weights)``, the mean is
-        replaced by the area-weighted mean
-        ``mean(sq · lat_w) · n_lat / Σ(lat_w)`` (resolution-
-        independent, identical correction as iter-63 ml/loss.py).
-
-        Disambiguation rules (size-matching is intentionally strict
-        because the bias term is silent-failure-prone otherwise):
-        - 0 axes match n_lat → uniform mean (e.g. cubed-sphere where
-          leading face dim differs from n_lat).
-        - 1 axis matches → use it.
-        - >1 axes match → raise.  Callers seeing this should pass
-          their carry field with an unambiguous lat axis (e.g. by
-          flattening a batch dim that coincidentally equals n_lat).
-        """
-        if lat_weights is None:
-            return jnp.mean(sq_err)
-        n_lat_w = lat_weights.shape[0]
-        matching_axes = [a for a, d in enumerate(sq_err.shape) if d == n_lat_w]
-        if not matching_axes:
-            return jnp.mean(sq_err)
-        if len(matching_axes) > 1:
-            raise ValueError(
-                f"_lat_weighted_mean: field shape {sq_err.shape} has "
-                f"{len(matching_axes)} axes of length n_lat={n_lat_w} "
-                f"(axes={matching_axes}).  Lat axis is ambiguous; flatten "
-                f"or rename the colliding axis before calling carry_mse "
-                f"with lat_weights set."
-            )
-        axis = matching_axes[0]
-        shape = [1] * sq_err.ndim
-        shape[axis] = n_lat_w
-        w = lat_weights.reshape(shape)
-        return jnp.mean(sq_err * w) * n_lat_w / jnp.sum(lat_weights)
+    # Area weighting uses the shared module-level ``_lat_weighted_mean``
+    # (also used by ``radiation_flux_loss``) — one implementation, no
+    # duplicated numerics.
 
     # Per-variable scale denominators.  When normalize_by_scale=True
     # each variable's MSE is divided by its typical amplitude² so the
@@ -227,7 +346,15 @@ def carry_mse(
     # this, w_T·<dT²>, w_q·<dq²>, w_ps·<dps²> differ by ~9 orders of
     # magnitude (ps² ~ 1e10 dominates; q² ~ 1e-4 is invisible).  Set
     # to all-1 when normalization is off for backward compatibility.
-    if config.normalize_by_scale:
+    if getattr(config, "residual_normalize", False):
+        # ACE2-style residual normalization (scale by std of the 6h field
+        # change — see LossConfig). Matches _spectral_state_loss_components.
+        # floor guards a misconfigured 0 residual scale (codex: no zero-div).
+        T_norm = max(config.T_resid_scale ** 2, 1e-30)
+        wind_norm = max(config.wind_resid_scale ** 2, 1e-30)
+        q_norm = max(config.q_resid_scale ** 2, 1e-30)
+        ps_norm = max(config.ps_resid_scale ** 2, 1e-30)
+    elif config.normalize_by_scale:
         T_norm = config.T_scale ** 2
         wind_norm = config.wind_scale ** 2
         q_norm = config.q_scale ** 2
@@ -237,21 +364,21 @@ def carry_mse(
 
     # Temperature: (..., nlev)
     dT = pred_carry.T - target_carry.T
-    loss = loss + config.w_T * _lat_weighted_mean(dT ** 2 * lev_w) / T_norm
+    loss = loss + config.w_T * _lat_weighted_mean(dT ** 2 * lev_w, lat_weights) / T_norm
 
     # Winds: (..., nlev)
     du = pred_carry.u - target_carry.u
     dv = pred_carry.v - target_carry.v
-    loss = loss + config.w_u * _lat_weighted_mean(du ** 2 * lev_w) / wind_norm
-    loss = loss + config.w_v * _lat_weighted_mean(dv ** 2 * lev_w) / wind_norm
+    loss = loss + config.w_u * _lat_weighted_mean(du ** 2 * lev_w, lat_weights) / wind_norm
+    loss = loss + config.w_v * _lat_weighted_mean(dv ** 2 * lev_w, lat_weights) / wind_norm
 
     # Moisture: (..., nlev)
     dq = pred_carry.q_v - target_carry.q_v
-    loss = loss + config.w_q * _lat_weighted_mean(dq ** 2 * lev_w) / q_norm
+    loss = loss + config.w_q * _lat_weighted_mean(dq ** 2 * lev_w, lat_weights) / q_norm
 
     # Surface pressure: (...)
     dp = pred_carry.p_s - target_carry.p_s
-    loss = loss + config.w_ps * _lat_weighted_mean(dp ** 2) / ps_norm
+    loss = loss + config.w_ps * _lat_weighted_mean(dp ** 2, lat_weights) / ps_norm
 
     # Bias-penalty terms.  Squared (level-weighted) area-mean error
     # for each variable, normalised by the same scale as the MSE
@@ -263,17 +390,24 @@ def carry_mse(
     # same ``w_bias_*`` weights have the same physical effect in
     # both training paths.
     if config.w_bias_T > 0.0:
-        bias_T = _lat_weighted_mean(dT * lev_w)
+        bias_T = _lat_weighted_mean(dT * lev_w, lat_weights)
         loss = loss + config.w_bias_T * bias_T ** 2 / T_norm
     if config.w_bias_u > 0.0:
-        bias_u = _lat_weighted_mean(du * lev_w)
+        bias_u = _lat_weighted_mean(du * lev_w, lat_weights)
         loss = loss + config.w_bias_u * bias_u ** 2 / wind_norm
     if config.w_bias_v > 0.0:
-        bias_v = _lat_weighted_mean(dv * lev_w)
+        bias_v = _lat_weighted_mean(dv * lev_w, lat_weights)
         loss = loss + config.w_bias_v * bias_v ** 2 / wind_norm
     if config.w_bias_ps > 0.0:
-        bias_ps = _lat_weighted_mean(dp)
+        bias_ps = _lat_weighted_mean(dp, lat_weights)
         loss = loss + config.w_bias_ps * bias_ps ** 2 / ps_norm
+
+    # Radiation-flux supervision (TOA + surface) — shared helper, only
+    # active when a ``w_flux_*`` / ``w_bias_flux_*`` weight is >0.
+    if _any_flux_weight(config):
+        loss = loss + radiation_flux_loss(
+            pred_carry, target_carry, lat_weights=lat_weights, config=config,
+        )
 
     return loss
 

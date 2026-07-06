@@ -39,6 +39,18 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "LCMA": (20.0, 120.0),
     "g1": (1.0, 15.0),
 }
+# NOTE: the optional CLM-ML-JAX canopy inputs (``LAI``, ``SAI``, ``htop``,
+# ``hbot``) are deliberately NOT in ``PARAM_BOUNDS``.  ``PARAM_BOUNDS`` /
+# ``PARAM_NAMES`` index the 12-column CLM5 PFT lookup table
+# (``clm5_pft_table`` -> ``(n_pft, 12)``) that every ``array_to_params`` caller
+# (``gap_fill``, ``param_providers``, ``clm_surface_map``, land-param training)
+# maps column-for-column; adding the 4 canopy names here desynchronises them
+# from the 12-column table and raises "Expected 16 columns, got 12".  The canopy
+# fields are instead prescribed through the surfdata / boundary-data path:
+# ``LAI``, ``SAI`` and ``htop`` are read with a ``None`` fallback in
+# ``canopy/clm_ml_interface.py``; ``hbot`` is currently DERIVED there as
+# ``CLMMLCanopyConfig.hbot_frac * htop`` (the field is reserved for a future
+# explicit per-column bottom height and is not yet consumed).
 
 # Ordered parameter names — columns of the (ncol, n_params) matrix
 PARAM_NAMES: tuple[str, ...] = tuple(PARAM_BOUNDS.keys())
@@ -72,6 +84,16 @@ class LandSurfaceParams(NamedTuple):
     Vc_max25: jax.Array       # Max carboxylation at 25 C [10, 120] umol/m2/s
     LCMA: jax.Array           # Leaf carbon mass per area [20, 120] gC/m2
     g1: jax.Array             # Stomatal slope [1, 15]
+    # Prescribed leaf area index [m2/m2] — the two-leaf canopy reads this as its
+    # spatial LAI climatology (PFT-weighted CLM MONTHLY_LAI); the CLM-ML-JAX canopy
+    # reads it as its LAI input.  None => the canopy falls back to its scalar
+    # default (only for non-CLM setups); a NEW CLM/two-leaf/CLM-ML path must
+    # populate it so barren land gets LAI~0, not a spurious uniform canopy.
+    LAI: jax.Array | None = None   # Leaf area index [0, 10] m2/m2
+    # CLM-ML-JAX canopy scheme parameters (optional; None when not used)
+    SAI: jax.Array | None = None   # Stem area index [0, 3] m2/m2
+    htop: jax.Array | None = None  # Canopy foliage top height [0.1, 50] m
+    hbot: jax.Array | None = None  # Canopy foliage bottom height [0, 10] m
 
 
 # =====================================================================

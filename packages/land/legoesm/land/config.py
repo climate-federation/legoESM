@@ -7,9 +7,11 @@ from typing import Any, NamedTuple
 from legoesm import constants
 from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.carbon.stomata import StomataConfig
+from legoesm.land.snow_bands import ElevationSnowBandConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
+from legoesm.land.topmodel_runoff import TopmodelConfig
 from legoesm.land.richards import RichardsConfig
 from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.surface_albedo import LandAlbedoConfig
@@ -89,6 +91,12 @@ class LandConfig(NamedTuple):
     # Type hint is ``Any`` because NamedTuple does not support Unions well;
     # dispatch is done via ``isinstance`` inside ``step_land``.
     surface_scheme: Any = SimpleSEBConfig()
+    # Runoff scheme (appended for positional-ABI stability): "bucket" (default,
+    # Green-Ampt Hortonian + Dunne saturation-excess, byte-identical) or
+    # "topmodel" (SIMTOP sub-grid saturated fraction + topographic baseflow,
+    # Niu 2005 / CLM4.5).  Unknown -> ValueError at dispatch.
+    runoff_scheme: str = "bucket"
+    topmodel: TopmodelConfig = TopmodelConfig()
 
 
 class MultiLayerLandConfig(NamedTuple):
@@ -117,6 +125,9 @@ class MultiLayerLandConfig(NamedTuple):
     land_albedo: LandAlbedoConfig = LandAlbedoConfig()
     T_snow_melt: float = constants.T_freeze
     snow_melt_rate: float = 5.0e-6
+    # Sub-grid elevation-band snow (VIC snow bands / CESM MEC); ``None`` (default)
+    # runs the single cell-mean snowpack.  See ``legoesm.land.snow_bands``.
+    elev_bands: ElevationSnowBandConfig | None = None
     # Root water uptake
     root_depth: float = 1.0       # Root e-folding depth [m]
     theta_wp: float = 0.15        # Wilting point volumetric water content
@@ -130,8 +141,9 @@ class MultiLayerLandConfig(NamedTuple):
     carbon: CarbonConfig = CarbonConfig()
     # Stomatal conductance / plant physiology
     stomata: StomataConfig = StomataConfig()
-    # Surface scheme: ``SimpleSEBConfig`` (default) or ``TwoLeafCanopyConfig``.
-    # Runtime dispatch via ``isinstance`` inside ``step_multilayer_land``.
+    # Surface scheme: ``SimpleSEBConfig`` (default), ``TwoLeafCanopyConfig``,
+    # or ``CLMMLCanopyConfig``.  Runtime dispatch via ``isinstance`` inside
+    # ``step_multilayer_land``.
     surface_scheme: Any = SimpleSEBConfig()
 
 

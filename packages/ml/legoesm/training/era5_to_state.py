@@ -33,6 +33,7 @@ _ERA5_VAR_ALIASES = {
     'temperature': 't', 'u_component_of_wind': 'u',
     'v_component_of_wind': 'v', 'specific_humidity': 'q',
     'surface_pressure': 'sp', 'skin_temperature': 'skt',
+    'sea_surface_temperature': 'sst', '2m_temperature': 't2m',
     'geopotential': 'z',
     'geopotential_at_surface': 'z_sfc',
 }
@@ -442,13 +443,42 @@ def load_era5_slice(
             data = data[0]
         return data.astype(np.float32)
 
+    def _has(name):
+        return resolve_var(ds_t, name) is not None or resolve_var(ds, name) is not None
+
+    def _get_sst():
+        """Skin/SST surface-temperature forcing with a physical fallback chain.
+
+        ``skin_temperature`` (defined everywhere) when the store carries it; else
+        ``sea_surface_temperature`` (NaN over land) gap-filled with
+        ``2m_temperature``; else ``2m_temperature`` alone (skin proxy).  The
+        legacy zero-fill (0 K!) is the LAST resort and warns loudly: the WB2
+        6h zarr has no skin_temperature, and the silent 0 K SST forcing sent
+        the WB scale-trainer surface fluxes into a sick regime (#797 bug 7).
+        """
+        if _has("skin_temperature"):
+            return _get_2d("skin_temperature")
+        if _has("sea_surface_temperature"):
+            sst = _get_2d("sea_surface_temperature")
+            if _has("2m_temperature"):
+                t2m = _get_2d("2m_temperature")
+                return np.where(np.isfinite(sst), sst, t2m).astype(np.float32)
+            fill = float(np.nanmean(sst))
+            return np.nan_to_num(sst, nan=fill).astype(np.float32)
+        if _has("2m_temperature"):
+            return _get_2d("2m_temperature")
+        logger.warning(
+            "ERA5 store has none of skin_temperature/sea_surface_temperature/"
+            "2m_temperature; sst zero-filled (0 K) — unusable as SST forcing")
+        return np.zeros((len(lat), len(lon)), dtype=np.float32)
+
     return ERA5Slice(
         T=_get_3d("temperature"),
         u=_get_3d("u_component_of_wind"),
         v=_get_3d("v_component_of_wind"),
         q=_get_3d("specific_humidity"),
         p_s=_get_2d("surface_pressure", required=True),
-        sst=_get_2d("skin_temperature"),          # optional (zero-fill if absent)
+        sst=_get_sst(),
         phis=_get_2d("geopotential_at_surface"),  # optional; already in m²/s²
         lat=lat,
         lon=lon,

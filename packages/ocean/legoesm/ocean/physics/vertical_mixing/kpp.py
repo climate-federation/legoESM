@@ -200,7 +200,12 @@ def _boundary_layer_depth(
     # LMD94 Eq. 23 unresolved-shear variance:
     #   V_t^2(d) = Cv * (-beta_T)^1/2 / (Ri_c * kappa^2) * (c_s*eps)^-1/2
     #              * d * N * w_s(d)                                  [m^2/s^2]
-    # ((-beta_T)^1/2 is folded into Cv.)  The d*N*w_s(d) factor — m * (1/s) *
+    # The (-beta_T)^1/2 = sqrt(0.2) = 0.4472 prefactor is applied EXPLICITLY
+    # (``cfg.neg_beta_T``); Cv keeps its standard LMD94 value (1.6).  A prior
+    # comment claimed (-beta_T)^1/2 was "folded into Cv" — it was not, so
+    # V_t^2 was 1/sqrt(0.2) = 2.236x too large, biasing the diagnosed boundary-
+    # layer depth deep in weak-shear convective columns (where V_t^2 dominates
+    # the resolved shear).  The d*N*w_s(d) factor — m * (1/s) *
     # (m/s) — makes V_t^2 a velocity-squared, dimensionally additive with
     # delta_V2 = du^2 + dv^2 [m^2/s^2].  The turbulent velocity scale w_s(d)
     # [m/s] is essential and was previously dropped (the old non-canonical
@@ -218,7 +223,7 @@ def _boundary_layer_depth(
     h_est = max_depth if h_bl_prev is None else h_bl_prev
     h_safe = jnp.maximum(h_est[..., jnp.newaxis], eps)
     _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, h_safe, cfg, eps)
-    V_t2 = (cfg.Cv * N_full * z_depth * w_s_vt
+    V_t2 = (cfg.Cv * cfg.neg_beta_T ** 0.5 * N_full * z_depth * w_s_vt
             / (cfg.Ri_crit * cfg.kappa_vk ** 2
                * jnp.sqrt(jnp.maximum(cfg.c_s * cfg.epsilon_lmd, eps))))
 

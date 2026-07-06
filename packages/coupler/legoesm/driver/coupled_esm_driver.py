@@ -706,12 +706,20 @@ class CoupledESMDriver:
                 and getattr(cfg, "land_param_source", "analytical") == "clm"):
             import legoesm.land.clm_surface_map as _csm
             if cfg.land_mode == "multilayer":
-                ch, snow_max = _csm.TUNED_CH_MULTILAYER, _csm.TUNED_SNOW_ALBEDO_MAX_MULTILAYER
+                # Multilayer carries the full trainable snow feedback (cover threshold +
+                # fresh/aged brightness + age decay) from the 2026-07 full-grid recalibration.
+                ch = _csm.TUNED_CH_MULTILAYER
+                alb = land_cfg.land_albedo._replace(
+                    alpha_snow_max=_csm.TUNED_SNOW_ALBEDO_MAX_MULTILAYER,
+                    alpha_snow_min=_csm.TUNED_SNOW_ALBEDO_MIN_MULTILAYER,
+                    snow_depth_crit=_csm.TUNED_SNOW_DCRIT_MULTILAYER,
+                    tau_snow_decay=_csm.TUNED_SNOW_TAU_DAYS_MULTILAYER * 86400.0,  # days -> s
+                    soil_dry_albedo_boost=_csm.TUNED_SOIL_DRY_BOOST_MULTILAYER)   # deserts
             else:
-                ch, snow_max = _csm.TUNED_CH, _csm.TUNED_SNOW_ALBEDO_MAX
+                ch = _csm.TUNED_CH
+                alb = land_cfg.land_albedo._replace(alpha_snow_max=_csm.TUNED_SNOW_ALBEDO_MAX)
             land_cfg = land_cfg._replace(
-                Ch_land=ch, Cd_land=ch, snow_albedo_feedback=True,
-                land_albedo=land_cfg.land_albedo._replace(alpha_snow_max=snow_max))
+                Ch_land=ch, Cd_land=ch, snow_albedo_feedback=True, land_albedo=alb)
             logger.info(f"  Land: ERA5-calibrated Ch/snow params "
                         f"({cfg.land_mode} CLM default path)")
 
@@ -740,6 +748,18 @@ class CoupledESMDriver:
                 thermal=cast(clm_multilayer_thermal_config(smap)),
                 Ch_land=ch_cell, Cd_land=ch_cell)
             logger.info("  Soil: CLM reference VG + per-PFT thermal/Ch map (per-column)")
+
+            # Sub-grid elevation-band snow (opt-in): band elevations from the CLM
+            # STD_ELEV map so warm cells keep bright snow on their cold high fractions.
+            if getattr(cfg, "land_elev_bands", False):
+                from legoesm.land.snow_bands import (
+                    ElevationSnowBandConfig, band_elevation_anomalies)
+                band_dz = band_elevation_anomalies(
+                    jnp.asarray(smap["std_elev"], dtype=_sd))
+                land_cfg = land_cfg._replace(
+                    elev_bands=ElevationSnowBandConfig(band_dz=band_dz))
+                logger.info("  Snow: sub-grid elevation-band scheme (CLM STD_ELEV, "
+                            "5 equal-area bands)")
 
         # Coupled DIURNAL surface model (default ON for the multilayer land): the
         # coupled atmosphere supplies a fully-resolved diurnal cycle at a single,

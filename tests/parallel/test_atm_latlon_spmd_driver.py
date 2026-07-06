@@ -40,6 +40,7 @@ class _DriverStub:
     without a full data-loading ModelDriver construction)."""
     _latlon_spmd_mesh = ModelDriver._latlon_spmd_mesh
     _latlon_spmd_physics_fn = ModelDriver._latlon_spmd_physics_fn
+    _operator_split_spmd_active = ModelDriver._operator_split_spmd_active
     _run_compiled_latlon_spmd = ModelDriver._run_compiled_latlon_spmd
 
     def __init__(self, model, state, cfg):

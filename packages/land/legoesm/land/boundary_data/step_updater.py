@@ -22,20 +22,20 @@ from legoesm.land.soil_albedo import soil_albedo, soil_albedo_broadband
 from legoesm.land.global_surface_data import interp_monthly
 
 from legoesm.land.boundary_data._internals import (
-    _CI_DEFAULT, _KN_DEFAULT, _ALF_DEFAULT,
-    _M_C3, _M_C4, _B0_C3, _B0_C4,
-    _TGC_DEFAULT_C, _HC_MIN_M,
-    _EMISS_VEG, _RZ0M_BARE,
-    _GLACIER_ALB_VIS, _GLACIER_ALB_NIR, _GLACIER_ALBEDO_DEFAULT,
-    _pft_lookup_arrays,
+    CI_DEFAULT, KN_DEFAULT, ALF_DEFAULT,
+    M_C3, M_C4, B0_C3, B0_C4,
+    TGC_DEFAULT_C, HC_MIN_M,
+    EMISS_VEG, RZ0M_BARE,
+    GLACIER_ALB_VIS, GLACIER_ALB_NIR, GLACIER_ALBEDO_DEFAULT,
+    pft_lookup_arrays,
 )
 from legoesm.land.boundary_data.builders import (
     dominant_pft_index, glacier_mask,
 )
 from legoesm.land.boundary_data.gap_fill import (
     surfdata_covered,
-    _bare_canopy_params, _bare_land_surface_params,
-    _gap_fill_tree,
+    bare_canopy_params, bare_land_surface_params,
+    gap_fill_tree,
 )
 
 
@@ -80,7 +80,7 @@ def make_step_land_params_updater(gsd, surface_scheme):
     if is_canopy:
         dom = dominant_pft_index(gsd)
         ncol = int(dom.shape[0])
-        lut = _pft_lookup_arrays()
+        lut = pft_lookup_arrays()
         dom_idx = jnp.asarray(dom.astype(np.int32))
         is_veg_dom = lut["is_veg"][dom]              # (ncol,) np
         is_veg_col = jnp.asarray(is_veg_dom.astype(np.float64))
@@ -88,9 +88,9 @@ def make_step_land_params_updater(gsd, surface_scheme):
         fC4 = jnp.asarray(lut["fc4"][dom])
         Vcmax25_C3 = jnp.asarray(lut["vc3"][dom])
         Vcmax25_C4 = jnp.asarray(lut["vc4"][dom])
-        rz0m = jnp.asarray(np.where(is_veg_dom > 0.0, lut["rz0m"][dom], _RZ0M_BARE))
+        rz0m = jnp.asarray(np.where(is_veg_dom > 0.0, lut["rz0m"][dom], RZ0M_BARE))
         rd = jnp.asarray(np.where(is_veg_dom > 0.0, lut["rd"][dom], 0.0))
-        bare_fb = _bare_canopy_params(ncol)
+        bare_fb = bare_canopy_params(ncol)
         full = lambda v: jnp.full(ncol, v)
 
         def _update_canopy(theta_top: jnp.ndarray, doy: jnp.ndarray):
@@ -105,24 +105,24 @@ def make_step_land_params_updater(gsd, surface_scheme):
                             jnp.where(jnp.isfinite(LAI), LAI, 0.0), 0.0)
             hc = jnp.where(jnp.isfinite(hc_surf) & (hc_surf > 0.0),
                            hc_surf, hc_default)
-            hc = jnp.maximum(hc, _HC_MIN_M)
+            hc = jnp.maximum(hc, HC_MIN_M)
             av, an = soil_albedo(soil_color, theta_top)
             ice = glacier_col > 0.0
             is_veg = jnp.where(ice, 0.0, is_veg_col)
             LAI = jnp.where(ice, 0.0, LAI)
-            av = jnp.where(ice, _GLACIER_ALB_VIS, av)
-            an = jnp.where(ice, _GLACIER_ALB_NIR, an)
+            av = jnp.where(ice, GLACIER_ALB_VIS, av)
+            an = jnp.where(ice, GLACIER_ALB_NIR, an)
             lp = CanopyLandParams(
                 LAI=LAI, hc=hc, fC4=fC4, FNonVeg=1.0 - is_veg,
-                CI=full(_CI_DEFAULT), kn=full(_KN_DEFAULT),
+                CI=full(CI_DEFAULT), kn=full(KN_DEFAULT),
                 Vcmax25_C3_leaf=Vcmax25_C3, Vcmax25_C4_leaf=Vcmax25_C4,
-                m_C3=full(_M_C3), m_C4=full(_M_C4),
-                b0_C3=full(_B0_C3), b0_C4=full(_B0_C4),
-                alf=full(_ALF_DEFAULT), TgC=full(_TGC_DEFAULT_C),
+                m_C3=full(M_C3), m_C4=full(M_C4),
+                b0_C3=full(B0_C3), b0_C4=full(B0_C4),
+                alf=full(ALF_DEFAULT), TgC=full(TGC_DEFAULT_C),
                 ALB_VIS=av, ALB_NIR=an,
-                emissivity=full(_EMISS_VEG), rz0m=rz0m, rd=rd,
+                emissivity=full(EMISS_VEG), rz0m=rz0m, rd=rd,
             )
-            lp_filled = _gap_fill_tree(lp, bare_fb, covered_jnp)
+            lp_filled = gap_fill_tree(lp, bare_fb, covered_jnp)
             return lp_filled, lp_filled.LAI
 
         return _update_canopy
@@ -136,7 +136,7 @@ def make_step_land_params_updater(gsd, surface_scheme):
     base_lp = pft_provider()                                 # static base LandSurfaceParams
     fracs_jnp = jnp.asarray(fracs)
     ncol = int(fracs.shape[0])
-    bare_fb = _bare_land_surface_params(ncol)
+    bare_fb = bare_land_surface_params(ncol)
 
     def _update_seb(theta_top: jnp.ndarray, doy: jnp.ndarray):
         """Return ``(LandSurfaceParams, lai_col)``: ``lai_col`` is the
@@ -148,8 +148,8 @@ def make_step_land_params_updater(gsd, surface_scheme):
         soil_bg = soil_albedo_broadband(soil_color, theta_top)
         f_veg = 1.0 - jnp.exp(-0.5 * lai_col)
         alb = base_lp.albedo_veg * f_veg + soil_bg * (1.0 - f_veg)
-        alb = jnp.where(glacier_col > 0.0, _GLACIER_ALBEDO_DEFAULT, alb)
+        alb = jnp.where(glacier_col > 0.0, GLACIER_ALBEDO_DEFAULT, alb)
         lp = base_lp._replace(albedo_veg=alb)
-        return _gap_fill_tree(lp, bare_fb, covered_jnp), lai_col
+        return gap_fill_tree(lp, bare_fb, covered_jnp), lai_col
 
     return _update_seb

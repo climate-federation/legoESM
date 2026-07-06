@@ -16,7 +16,8 @@ scaling_derecho/
 ├── submit_scaling.sh   # ►ENTRY POINT◄  submit_scaling.sh <outdir> <grid> [res...]
 ├── scaling_cpu.sh      # CPU scaling sweep (latlon/ico = ranks 1..128; spectral = 1 x threads)
 ├── scaling_gpu.sh      # GPU scaling sweep (latlon + ico = 1->2->4 A100 single node, ->8->16… multi-node via NODES; spectral = 1)
-├── cube_scaling_cpu.sh # cube CPU scaling (faces 1,2,3,6 x node-filling threads)
+├── cube_scaling_cpu.sh # cube CPU scaling, route A (faces 1,2,3,6; mpi4jax scatter)
+├── cube_scaling_cpu_routeb.sh # cube CPU scaling, route B (jax.distributed/gloo; --cs-spmd; extends past 6 to 6*kt^2) — #764
 ├── cube_scaling_gpu.sh   # cube GPU scaling (1->2->3 A100; mpi4jax face-scatter)
 └── finalize_scaling.sh # after jobs finish: aggregate <outdir> + per-grid CPU-vs-GPU plots
 ```
@@ -380,7 +381,21 @@ halos are **host-staged**: cross-node GPU-direct currently aborts on Derecho's
 CXI fabric (`cxil_map` / OFI `injectdata`; `scaling_gpu.sh` auto-selects
 `MPI4JAX_USE_CUDA_MPI=0` for `NODES>1`), so multi-node points are correct but a
 **lower bound** on inter-node scaling — footnote them. See
-`docs/performance/multinode_gpu_direct_cxi.md`. **Run a 2-node canary first** so
+`docs/performance/multinode_gpu_direct_cxi.md`.
+
+> **The mpi4jax-free alternative (cubed-sphere, 2026-07):** the production
+> driver now runs true multi-node cubed-sphere via
+> `run_amip.py --distributed --distributed-mode spmd` — multi-controller
+> `jax.distributed` + NCCL collectives, no mpi4jax anywhere, so the CXI
+> GPU-direct abort does not apply (NCCL has its own Slingshot path via
+> `aws-ofi-nccl`). Parity receipt: 2-process bit-exact vs single-controller
+> over a full day incl. checkpoint writes (jobs 8686550/8687224; gate
+> `scripts/validate/validate_driver_cs_spmd_parity.py`). Launch with
+> `mpiexec --ppn 4 -n <NODES*4>` (any launcher that sets PMI env);
+> diagnostics writer must stay off (`diag_days=0`, milestone). This is the
+> path to benchmark AGAINST the host-staged mpi4jax lower bound.
+
+**Run a 2-node canary first** so
 any problem surfaces on one cheap job, not the whole sweep:
 
 ```bash
@@ -493,3 +508,16 @@ Verify the first run's `NCCL_DEBUG=INFO` log prints
 program risks deadlock); the route-A lane sets it to 1 — the two transports
 never share a process.
 
+
+## 2026-07 lane E: icosahedral/MPAS multicontroller
+
+`gpu_multinode_scaling.pbs` gained lane E (`RUN_MPAS=1`, default on): the
+icosahedral MPAS PE dycore over `jax.distributed` + NCCL via
+`scripts/bench/bench_mpas_spmd_scaling.py` — cell-partition reorder
+(`reorder_voronoi_for_sharding`, Hilbert-SFC pinned for cross-process
+determinism) + `make_voronoi_sharded_step` ppermute halos. 6 processes
+(2 nodes x 3 GPUs): `nCells = 10*4^L + 2` admits 1/2/3/6 even splits at
+every level. A subdiv-4 smoke with `--parity-gate --check-conservation`
+runs before the timed `ICO_LEVEL` (default L7 = 163842 cells, ~27k
+cells/GPU at np=6) case. 2-process CPU federation gate:
+`tests/parallel/test_mpas_spmd_multicontroller_selfspawn.py`.

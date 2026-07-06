@@ -62,13 +62,26 @@ def multilayer_config():
 # =====================================================================
 
 class TestLandSurfaceParams:
+    # LAI/SAI/htop/hbot are PRESCRIBED (climatology / surfdata) per-cell canopy
+    # fields, not trainable bounded params, so they are the LandSurfaceParams
+    # fields outside PARAM_NAMES/BOUNDS.  PARAM_NAMES/BOUNDS index the 12-column
+    # CLM5 PFT lookup table that every ``array_to_params`` caller maps
+    # column-for-column; the CLM-ML canopy inputs are prescribed separately and
+    # read with a ``None`` fallback in ``canopy/clm_ml_interface.py``.
+    _NON_BOUNDED_FIELDS = {"LAI", "SAI", "htop", "hbot"}
+
     def test_namedtuple_fields(self):
-        assert len(LandSurfaceParams._fields) == N_PARAMS
+        # Every trainable param is a field; the non-bounded extras are the
+        # prescribed canopy metadata fields (LAI/SAI/htop/hbot).
         for name in PARAM_NAMES:
             assert name in LandSurfaceParams._fields
+        assert (set(LandSurfaceParams._fields) - set(PARAM_NAMES)
+                == self._NON_BOUNDED_FIELDS)
 
     def test_param_bounds_complete(self):
         for name in LandSurfaceParams._fields:
+            if name in self._NON_BOUNDED_FIELDS:
+                continue  # prescribed metadata, not a trainable bounded param
             assert name in PARAM_BOUNDS, f"Missing bound for {name}"
             lo, hi = PARAM_BOUNDS[name]
             assert lo < hi, f"Invalid bounds for {name}: {lo} >= {hi}"

@@ -252,7 +252,7 @@ def compute_vertical_K_profiles(
                 "IWMConfig.tsdiff=True (differential T/S wave-driven "
                 "mixing) is not supported on the shared-K implicit tracer "
                 "solve; set tsdiff=False (the ORCA1 oracle value).")
-        K_iwm = _iwm_K_profile(
+        K_iwm = iwm_K_profile(
             state, z_coord, physics_config, iwm_cfg,
             eos_fn=eos_fn, iwm_fields=iwm_fields)
         K_v_total = K_v_total + K_iwm
@@ -641,7 +641,7 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
     return K, A
 
 
-def _iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
+def iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
                    eos_fn=None, iwm_fields=None):
     """Internal wave-driven diffusivity at interior interfaces (zdfiwm).
 

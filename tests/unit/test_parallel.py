@@ -588,3 +588,41 @@ class TestShardedComputation:
         result_local = pad_halo(data)
 
         assert jnp.allclose(result_sharded, result_local)
+
+
+class TestMultiprocessSafeDevicePut:
+    """multiprocess_safe_device_put (#693): identical to device_put single-
+    process; routes through make_array_from_callback under >1 process so the
+    cross-process bit-equality assert in device_put cannot trip on host-
+    precomputed forcing (Levante 2-node cs_spmd receipt, job 26030677)."""
+
+    def _sharding(self):
+        from legoesm.parallel.mesh import multiprocess_safe_device_put  # noqa: F401
+        dev = jax.devices()[0]
+        mesh = Mesh(np.array([dev]), ("face",))
+        return NamedSharding(mesh, P())
+
+    def test_single_process_matches_device_put(self):
+        from legoesm.parallel.mesh import multiprocess_safe_device_put
+        x = jnp.arange(12.0).reshape(6, 2)
+        s = self._sharding()
+        out = multiprocess_safe_device_put(x, s)
+        ref = jax.device_put(x, s)
+        assert np.array_equal(np.asarray(out), np.asarray(ref))
+        assert out.sharding == ref.sharding
+
+    def test_non_array_delegates(self):
+        from legoesm.parallel.mesh import multiprocess_safe_device_put
+        out = multiprocess_safe_device_put(3.5, self._sharding())
+        assert float(out) == 3.5
+
+    def test_multiprocess_branch_uses_callback_and_preserves_values(self):
+        from legoesm.parallel.mesh import multiprocess_safe_device_put
+        x = jnp.arange(24.0).reshape(6, 4)
+        s = self._sharding()
+        with patch("jax.process_count", return_value=2):
+            out = multiprocess_safe_device_put(x, s)
+        # values intact and placed on the requested sharding, with NO
+        # cross-process equality assertion involved
+        assert np.array_equal(np.asarray(out), np.asarray(x))
+        assert out.sharding == s

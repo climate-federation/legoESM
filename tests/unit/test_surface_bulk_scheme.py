@@ -40,10 +40,11 @@ def test_resolve_turbulence_threads_gustiness_zi() -> None:
     )
     _fn, turb_config = _resolve_turbulence(cfg)
     assert turb_config.surface.gustiness_w_zi == 600.0
-    # default None => unchanged (0.0)
+    # default None => SurfaceLayerConfig default None (scheme-native: the
+    # kernel resolves coare3 -> 600 m / AeroBulk parity, others -> off)
     cfg0 = ExperimentConfig(turbulence="holtslag_boville")
     _fn0, tc0 = _resolve_turbulence(cfg0)
-    assert tc0.surface.gustiness_w_zi == 0.0
+    assert tc0.surface.gustiness_w_zi is None
 
 
 def test_resolve_turbulence_default_constant_unchanged() -> None:
@@ -112,6 +113,28 @@ def test_ocean_coare3_enhances_unstable_latent_flux() -> None:
     assert float(lh_coare.mean()) > float(lh_const.mean())
 
 
+def test_coupler_ocean_tile_gustiness_raises_latent_flux() -> None:
+    """The coupler ocean tile (``ocean_tile_response``) drives the 3D-ocean
+    q_net.  Over a calm warm ocean under unstable air, enabling the convective
+    gustiness BL depth (``CouplerConfig.gustiness_w_zi``) must raise the tile
+    latent heat flux vs gustiness_w_zi=0 — keeping the air-sea interface
+    energy-consistent with the atmosphere surface layer (the 3D-ocean
+    cold-collapse fix; cmip_air_sea_decoupling)."""
+    import jax.numpy as jnp
+    from legoesm.coupler.config import CouplerConfig
+    from legoesm.coupler.coupler import ocean_tile_response
+
+    fc = _ocean_forcing(T_lowest=288.0, q_lowest=8e-3, u=2.0)  # const-ok: test air temp [K]
+    sst = jnp.full((6, 4, 4), 300.0)                  # warm calm ocean
+    u_o = v_o = jnp.zeros((6, 4, 4))
+    base = CouplerConfig(bulk_scheme="coare3", gustiness_w_zi=0.0)
+    gust = CouplerConfig(bulk_scheme="coare3", gustiness_w_zi=600.0)
+    r_off = ocean_tile_response(fc, sst, u_o, v_o, base)
+    r_on = ocean_tile_response(fc, sst, u_o, v_o, gust)
+    assert jnp.all(jnp.isfinite(r_on.lhflx))
+    assert float(r_on.lhflx.mean()) > float(r_off.lhflx.mean())
+
+
 @pytest.mark.parametrize("scheme", ["coare3", "large_yeager"])
 def test_compute_most_fluxes_float32_carry_stable(scheme: str) -> None:
     """Regression: MOST under float32 inputs (the atmosphere coupled path) must
@@ -134,10 +157,34 @@ def test_compute_most_fluxes_float32_carry_stable(scheme: str) -> None:
     assert float(lh.mean()) > 0.0  # evaporation upward over a warm ocean
 
 
+def test_scheme_native_gustiness_defaults() -> None:
+    """gustiness_w_zi=None resolves scheme-natively (AeroBulk parity):
+    coare3 -> built-in 600 m gustiness; large_yeager -> off."""
+    import jax.numpy as jnp
+    from legoesm.core.bulk_flux import compute_most_fluxes
+    args = dict(
+        u_rel=jnp.array([0.5]), v_rel=jnp.array([0.0]),
+        T_atm=jnp.array([298.0]), q_atm=jnp.array([0.012]),
+        T_sfc=jnp.array([302.0]), q_sfc=jnp.array([0.025]),
+        rho=jnp.array([1.15]),
+    )
+    for scheme, zi_native in (("coare3", 600.0), ("large_yeager", 0.0)):
+        default = compute_most_fluxes(**args, scheme=scheme)
+        explicit = compute_most_fluxes(**args, scheme=scheme,
+                                       gustiness_w_zi=zi_native)
+        for a, b in zip(default, explicit):
+            assert jnp.allclose(a, b), scheme
+    # coare3 default therefore beats coare3 with gustiness forced off at calm
+    lh_default = compute_most_fluxes(**args, scheme="coare3")[3]
+    lh_off = compute_most_fluxes(**args, scheme="coare3",
+                                 gustiness_w_zi=0.0)[3]
+    assert float(lh_default[0]) > float(lh_off[0])
+
+
 def test_convective_gustiness_raises_calm_unstable_flux() -> None:
-    """COARE convective gustiness (opt-in) must boost the latent flux over a calm
-    but convectively-unstable warm ocean, and the default (off) must be
-    byte-identical (OMIP/forward paths unchanged)."""
+    """COARE convective gustiness must boost the latent flux over a calm but
+    convectively-unstable warm ocean; the coare3 default is scheme-native ON
+    (600 m, AeroBulk parity), explicit 0.0 disables."""
     import jax.numpy as jnp
     from legoesm.core.bulk_flux import compute_most_fluxes
 
@@ -148,9 +195,9 @@ def test_convective_gustiness_raises_calm_unstable_flux() -> None:
     _tx, _ty, _sh1, lh_on, _u1 = compute_most_fluxes(**args, gustiness_w_zi=600.0)
     assert jnp.all(jnp.isfinite(lh_on))
     assert float(lh_on.mean()) > float(lh_off.mean())   # gustiness => more evap
-    # default param == off (byte-identical)
+    # default param (None) == scheme-native ON for coare3 (AeroBulk zi0=600)
     _tx, _ty, _shd, lh_def, _ud = compute_most_fluxes(**args)
-    assert jnp.allclose(lh_def, lh_off)
+    assert jnp.allclose(lh_def, lh_on)
 
 
 def test_compute_most_fluxes_2m_diagnostic() -> None:

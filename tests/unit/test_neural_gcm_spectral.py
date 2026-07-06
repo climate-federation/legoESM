@@ -82,9 +82,11 @@ def _assert_state_finite(pytree, label="state"):
 
 def _make_small_sfno():
     """Create a small SFNO for testing."""
+    from legoesm.training.neural_gcm_spectral import N_SFNO_FORCING_CHANNELS
     spec = PE3DChannelSpec(nlev=NLEV)
     config = SFNOConfig(
-        in_channels=spec.n_channels,
+        # state channels + the surface-forcing input planes
+        in_channels=spec.n_channels + N_SFNO_FORCING_CHANNELS,
         out_channels=spec.n_channels,
         embed_dim=16,
         n_blocks=1,
@@ -160,6 +162,70 @@ class TestSFNOSpectralPhysics:
 
         _assert_state_finite(tendencies, label="tendency")
 
+    def test_channel_mismatch_raises(self):
+        """An SFNO without the forcing input planes must be rejected —
+        silently reading nlev off the wrong channel count would misalign
+        every packed field."""
+        from legoesm.training.neural_gcm_spectral import (
+            make_sfno_spectral_physics,
+        )
+        from legoesm.ml.channel_packing import PE3DChannelSpec
+        from legoesm.ml.sfno import SFNO, SFNOConfig
+        spec = PE3DChannelSpec(nlev=NLEV)
+        legacy = SFNO(
+            SFNOConfig(
+                in_channels=spec.n_channels,      # no forcing planes
+                out_channels=spec.n_channels,
+                embed_dim=16, n_blocks=1, mlp_expansion=2,
+                residual_prediction=False,
+            ),
+            _GRID, key=jax.random.PRNGKey(0),
+        )
+        with pytest.raises(ValueError, match="forcing"):
+            make_sfno_spectral_physics(legacy, _GRID)
+
+    def test_responds_to_prescribed_sst(self):
+        """Same state, different prescribed T_sfc → different SFNO
+        tendencies (the AMIP / interannual-variability pathway)."""
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_sfno_spectral_physics,
+        )
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        sfno = _make_small_sfno()
+        physics_fn = make_sfno_spectral_physics(sfno, _GRID)
+        ncol = len(_GRID.lat) * len(_GRID.lon)
+
+        def _forcing(t_val):
+            return {
+                "T_sfc": jnp.full((ncol,), t_val, dtype=jnp.float64),
+                "sic": jnp.zeros((ncol,), dtype=jnp.float64),
+                "day_of_year": jnp.asarray(180.0),
+                "seconds_of_day": jnp.asarray(43200.0),
+            }
+
+        out_a = physics_fn(state, _GRID, _SIGMA, forcing=_forcing(285.0))
+        out_b = physics_fn(state, _GRID, _SIGMA, forcing=_forcing(300.0))
+        diff = float(jnp.max(jnp.abs(out_a.T_hat.data - out_b.T_hat.data)))
+        assert diff > 1e-12, (
+            f"SFNO tendencies must respond to prescribed T_sfc (diff={diff})"
+        )
+
+    def test_unforced_call_stays_finite(self):
+        """forcing=None (idealized/legacy path) uses internal proxies and
+        stays finite."""
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_sfno_spectral_physics,
+        )
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        physics_fn = make_sfno_spectral_physics(_make_small_sfno(), _GRID)
+        _assert_state_finite(
+            physics_fn(state, _GRID, _SIGMA), label="unforced tendency",
+        )
+
 
 # ---------------------------------------------------------------------------
 # 3. spectral_rollout
@@ -214,6 +280,67 @@ class TestSpectralRollout:
 
         assert result.T_hat.data.shape == state.T_hat.data.shape
         assert result.lnps_hat.data.shape == state.lnps_hat.data.shape
+
+    def _forcing_base(self):
+        ncol = len(_GRID.lat) * len(_GRID.lon)
+        return {
+            "T_sfc": jnp.full((ncol,), 290.0, dtype=jnp.float64),
+            "sic": jnp.zeros((ncol,), dtype=jnp.float64),
+            "day_of_year": jnp.asarray(32.0),
+            "seconds_of_day": jnp.asarray(21600.0),
+        }
+
+    def test_forced_rollout_finite_and_sst_sensitive(self):
+        """forcing_base threads through the scan into the physics fn:
+        the forced rollout runs finite and a different prescribed SST
+        yields a different final state."""
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_sfno_spectral_physics,
+            spectral_rollout,
+        )
+        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        physics_fn = make_sfno_spectral_physics(_make_small_sfno(), _GRID)
+        pe_config = SpectralPEConfig(time_integrator="ssp_rk3")
+
+        fb = self._forcing_base()
+        out_a = spectral_rollout(
+            state, physics_fn, _GRID, _SIGMA, pe_config,
+            dt=1800.0, n_steps=2, forcing_base=fb,
+        )
+        _assert_state_finite(out_a, label="forced rollout")
+        fb_warm = dict(fb, T_sfc=fb["T_sfc"] + 10.0)
+        out_b = spectral_rollout(
+            state, physics_fn, _GRID, _SIGMA, pe_config,
+            dt=1800.0, n_steps=2, forcing_base=fb_warm,
+        )
+        diff = float(jnp.max(jnp.abs(out_a.T_hat.data - out_b.T_hat.data)))
+        assert diff > 1e-14, "prescribed SST did not reach the rollout physics"
+
+    def test_forcing_with_rad_gating_raises(self):
+        """forcing_base + rad-gating is the classical AMIP combination and
+        must be rejected here (spectral_amip_rollout owns it)."""
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_sfno_spectral_physics,
+            spectral_rollout,
+        )
+        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        physics_fn = make_sfno_spectral_physics(_make_small_sfno(), _GRID)
+        pe_config = SpectralPEConfig(time_integrator="ssp_rk3")
+        with pytest.raises(ValueError, match="forcing_base"):
+            spectral_rollout(
+                state, physics_fn, _GRID, _SIGMA, pe_config,
+                dt=1800.0, n_steps=1,
+                rad_physics_fn=physics_fn, rad_update_interval=4,
+                forcing_base=self._forcing_base(),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -348,9 +475,17 @@ class TestColumnMLPSpectralPhysics:
             carry_to_spectral_state,
             make_column_mlp_spectral_physics,
         )
+        import equinox as eqx
+
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
         nn = _make_small_column_mlp()
+        # NeuralPhysics ZERO-inits its final layer (epoch-0 stability
+        # contract: untrained net = exactly-zero tendencies), so exercise
+        # the MLP->T_hat WIRING with an explicitly perturbed final bias.
+        nn = eqx.tree_at(
+            lambda m: m.layers[-1].bias, nn,
+            jnp.full_like(nn.layers[-1].bias, 0.1))
 
         physics_fn = make_column_mlp_spectral_physics(nn, _GRID)
         tend = physics_fn(state, _GRID, _SIGMA)
@@ -360,7 +495,7 @@ class TestColumnMLPSpectralPhysics:
         assert jnp.allclose(tend.vor_hat.data, 0.0)
         assert jnp.allclose(tend.div_hat.data, 0.0)
         assert jnp.allclose(tend.lnps_hat.data, 0.0)
-        # T tendency should be non-zero (random MLP)
+        # T tendency should be non-zero (perturbed final layer)
         assert jnp.any(tend.T_hat.data != 0.0)
 
     def test_tendencies_finite(self):

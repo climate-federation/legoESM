@@ -14,8 +14,9 @@ measured point with the columns the publication plotter consumes:
 (``..._gpu_...`` / ``..._cpu_...``) because the flat CPU-MPI JSON does not
 record a device field.  ``case`` maps ``physics_level`` ("none"->"dry",
 "moist"->"moist", others kept verbatim).  ``resolution_km`` is the nominal
-horizontal grid spacing for the grid family.  Duplicate keys
-(same backend/grid/case/precision/mode/n_devices/resolution) keep the row with
+horizontal grid spacing for the grid family.  Duplicate keys (the full
+``_key`` tuple: component, backend, grid, case, precision, mode, n_resource,
+n_devices, resolution, n_levels, physics_level, fix_mass) keep the row with
 the highest SYPD (best of repeated measurements); the number dropped is logged.
 
 Pure stdlib + ``legoesm.constants`` (for R_earth) — no JAX — so it runs in a
@@ -296,14 +297,19 @@ def _rows_from_nested(d: dict, source: Path, component: str = "ocean") -> list[d
 
 
 def _key(row: dict) -> tuple:
-    # Key on the RESOURCE count (CPU cores / GPU devices) so a hybrid
-    # 8r x 4c run does not collide with a packed 32r x 1c run, and include
-    # component + n_levels + physics_level + fix_mass so otherwise-identical
-    # rows (atm vs ocean latlon, L26 vs L40, ocean baro solver, or a
-    # NO_MASS_FIX ablation) never collapse to one row (codex review/audit).
+    # Key on BOTH the resource count (CPU cores / GPU devices) AND n_devices
+    # (rank/face count).  n_devices is required for the cube route-B node-fill
+    # lane, where every rung fills the node (n_cores ~ 128 for N in {1,2,3,6}
+    # via THREADS=128/N) so a cores-only key would collapse the 4-rung curve to
+    # ~2 points; it also makes a hybrid 8r x 4c run distinct from a packed
+    # 32r x 1c run at the same 32 cores (the stated intent this code previously
+    # failed to implement).  component + n_levels + physics_level + fix_mass
+    # keep otherwise-identical rows (atm vs ocean latlon, L26 vs L40, ocean
+    # baro solver, NO_MASS_FIX ablation) from collapsing (codex review/audit).
     return (row["component"], row["backend"], row["grid"], row["case"],
-            row["precision"], row["mode"], row["n_resource"], row["resolution"],
-            row["n_levels"], row.get("physics_level", ""), row.get("fix_mass", True))
+            row["precision"], row["mode"], row["n_resource"], row["n_devices"],
+            row["resolution"], row["n_levels"],
+            row.get("physics_level", ""), row.get("fix_mass", True))
 
 
 def collect(roots) -> tuple[list[dict], int]:

@@ -325,6 +325,60 @@ def zero_polar_lat_ends_band_spmd(field, mesh):
     return apply_pole_end_masks(field, ((b == 0), (b == n_dev - 1)), offset=0)
 
 
+def cell_to_cgrid_winds_spmd(u_cell, v_cell):
+    """Band-local cell -> C-grid wind conversion — the SPMD twin of
+    :func:`legoesm.grids.operators_latlon_cgrid.cell_to_cgrid_winds` (non-fold),
+    for the per-step cell<->C-grid round trip the operator-split lat-band lane
+    reproduces from serial ``model.step``.
+
+    * **u-face**: ``interp_cell_to_uface`` averages along LONGITUDE only; every
+      band owns the full periodic lon circle, so it is row-by-row identical to
+      serial with NO halo.
+    * **v-face**: ``interp_cell_to_vface_halo`` lifts each INTERIOR band-cut
+      face from the neighbour band's edge row (``ppermute`` via the armed spmd
+      backend).  A naive band-local ``pad_ns_zero(0.5*(v[:-1]+v[1:]))`` would
+      instead ZERO every band boundary (treating each interior cut as a pole)
+      and silently mis-set the interior v-faces -> non-bitwise, wrong dynamics.
+    * **physical poles**: re-zeroed to the ``v = 0`` wall via
+      :func:`apply_pole_end_masks` — ONLY axis-0 index 0 on the south band and
+      index -1 on the north band; interior cuts keep their halo'd value.
+
+    Serial / local backend (``spmd_pole_end_masks()`` is ``None``):
+    ``interp_cell_to_vface_halo`` delegates to the naive interior average with a
+    pole EDGE-COPY, and the static both-ends zero below reproduces
+    ``cell_to_cgrid_winds``'s ``pad_ns_zero`` EXACTLY (byte-identical serial).
+
+    MUST run INSIDE a ``shard_map`` over ``"lat"`` WITH the lat-band backend
+    ARMED (``activate_latlon_spmd_halo(mesh)``), or serially with it un-armed.
+    A shard_map WITHOUT arming is the one silent-wrong state: ``spmd_pole_end_masks()``
+    then returns ``None`` and BOTH local band ends get zeroed as poles — the
+    caller (the operator-split step) owns the arm/restore, exactly as
+    :func:`make_sharded_atm_latlon_step`'s ``sharded_step`` does. Non-fold only:
+    the fn takes no grid so it cannot self-check — the operator-split SPMD lane
+    refuses the tripole fold upstream (``make_sharded_atm_latlon_step``).
+
+    Parameters
+    ----------
+    u_cell, v_cell : ``(n_lat_band, n_lon[, nlev])`` cell-centered winds.
+
+    Returns
+    -------
+    (u_face, v_face) : ``(n_lat_band, n_lon+1, ...)`` and
+        ``(n_lat_band + 1, n_lon, ...)`` C-grid face winds.
+    """
+    from legoesm.grids.operators_latlon_cgrid import (
+        interp_cell_to_uface, interp_cell_to_vface_halo)
+    u_face = interp_cell_to_uface(u_cell)
+    v_face = interp_cell_to_vface_halo(v_cell)
+    masks = spmd_pole_end_masks()
+    if masks is None:                 # serial / local backend: both ends poles
+        v_face = v_face.at[0].set(jnp.zeros_like(v_face[0]))
+        v_face = v_face.at[-1].set(jnp.zeros_like(v_face[-1]))
+    else:                             # SPMD: zero the PHYSICAL poles only
+        v_face = apply_pole_end_masks(v_face, masks, offset=0)
+    return u_face, v_face
+
+
 def pad_halo_latlon_band_spmd(mesh, halo: int = 1, negate: bool = False):
     """Wrapped shard_map lat-lon band halo exchange (parity-test entry).
 

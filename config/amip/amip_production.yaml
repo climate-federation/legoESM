@@ -12,15 +12,22 @@
 # physics config stays machine-independent and reproducible across deployments.
 #
 # Provenance: derived from Pierre's tuned CMIP-realism config
-# config/cmip/cmip_ocean_slab.yaml (SBM + Morrison + Sundqvist + COARE3 +
-# gustiness + q_c_diagnostic 3e-4), ported to prescribed-SST AMIP. VALIDATED at
-# C48/L40 (job 25918469, 10-day): planetary albedo 0.292 (target ~0.29), rsut
-# 99, precip 3.2 mm/d (target ~2.8), rlut 234, net TOA +6 — SBM fixes the
-# structural over-bright (~2x) and too-dry (~4x) biases that Bechtold did NOT
-# (Bechtold: albedo 0.57 / precip 0.81). Land kept as our tiled COARE3/MOST +
-# soil bucket + Jarvis stomatal (Pierre-directed for AMIP, 2026-06-24/25); Louis
-# turbulence (required by the tiled surface).
-# Tracking: GitHub issue #636.
+# config/cmip/cmip_ocean_slab.yaml (Morrison + Sundqvist + COARE3 +
+# gustiness + q_c_diagnostic 3e-4), ported to prescribed-SST AMIP. Land kept as
+# our tiled COARE3/MOST + soil bucket + Jarvis stomatal (Pierre-directed for
+# AMIP, 2026-06-24/25); Louis turbulence (required by the tiled surface).
+#
+# Convection = BECHTOLD (mass-flux, IFS lineage; directive 2026-07-06): mass
+# flux is column-water-conserving BY CONSTRUCTION, unlike the SBM relaxation
+# whose net-moistening leak (+0.5 mm/day, #771) drove the pilot's day-150
+# blowup (gated fix: PR #819). CAVEAT: the earlier 10-day A/B (job 25918469,
+# pre-McFarlane, pre-#613 subgrid autoconversion) measured Bechtold at
+# albedo 0.57 / precip 0.81 vs SBM's on-target 0.292 / 3.2 — the C24
+# physics-combo screen (bechtold vs fixed-sbm under this exact suite,
+# /scratch amip_physcombo_c24, 2026-07-06) is the revalidation gate; revisit
+# this choice against its verdict before the 36-yr launch (#811 Gate 2).
+# GWD = McFarlane (orographic wave breaking, same directive; was hines).
+# Tracking: GitHub issues #636, #811.
 # =============================================================================
 
 # --- Grid + dycore: cubed-sphere C48 / L40 hybrid, cd-grid, dt 150 s ----------
@@ -30,14 +37,15 @@ nlev: 40
 discretization: cdgrid
 dt: 150.0
 
-# --- Atmospheric physics (SBM convection = the structural-bias fix) -----------
+# --- Atmospheric physics (Bechtold mass-flux convection, directive 2026-07-06)
 radiation: rrtmg            # rrtmg = the rrtmgp builder alias (true CMIP6 RT)
 rad_update_steps: 12
 clouds: sundqvist
 microphysics: morrison
-convection: sbm             # confirmed fixes albedo+precip (job 25918469)
+convection: bechtold        # mass-flux (IFS lineage), water-conserving by
+                            # construction; C24 screen = revalidation gate
 turbulence: louis           # Louis required by the tiled surface
-gravity_wave_drag: hines
+gravity_wave_drag: mcfarlane  # orographic wave breaking (was hines)
 diurnal_cycle: true
 orbital_insolation: true    # AMIP-II realistic orbit (Berger 1978): orbital
                             # declination + (a/r)^2 eccentricity asymmetry

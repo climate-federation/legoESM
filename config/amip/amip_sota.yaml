@@ -70,6 +70,12 @@ convective_cloud: false     # SOTA lever 3: AMIP-optimal (prescribed-SST) — #7
 use_multilayer_land: true
 multilayer_n_layers: 10
 multilayer_soil_depth: 3.0
+# Drier soil cold-start (theta_init = 0.25*theta_sat, vs the 0.5 default) — the
+# deep 3 m soil cold-starts too wet, feeding the over-evaporation cold-cloudy
+# land. A C12/30d A/B (issue #730) measured land R_TOA -82.6 -> -76.2 (+6.4),
+# land +2.2 K, cloud 69->62% at 0.25; 0.10 saturates (+0.6 more). Mitigates the
+# cold-start; the residual over-evaporation is the DifferLand ET-closure follow-up.
+land_soil_moisture_init_frac: 0.25
 # clm_surfdata_path is a machine path — pass --clm-surfdata-path at runtime.
 snow_albedo_feedback: true  # threaded into the multilayer land (#715)
 # Jarvis/Farquhar interactive stomata (#715): DISABLED. On the multilayer soil it

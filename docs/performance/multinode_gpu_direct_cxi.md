@@ -9,6 +9,15 @@ now gates the multi-node transport on `CRAY_MPICH_VERSION` (≥ 9 → GPU-direct
 NCCL multi-controller) also works cross-node but is socket-bound today — see the
 Route-B section below; **route-A on the CXI fabric is the production pick.**
 
+**Complementary bypass (2026-07):** independent of the mpi4jax fix above, the
+production cubed-sphere driver also has an mpi4jax-FREE multi-node path —
+`run_amip.py --distributed --distributed-mode spmd` (multi-controller
+`jax.distributed`, NCCL collectives; checkpointing supported, diagnostics
+writer still off). 2-process parity is bit-exact vs single-controller (jobs
+8686550/8687224; gate `scripts/validate/validate_driver_cs_spmd_parity.py`).
+NCCL reaches Slingshot through `aws-ofi-nccl`, not the MPICH OFI inject path —
+so the cubed-sphere driver has two independent working multi-node GPU lanes.
+
 ## Root cause
 
 cray-mpich **8.1.32** rejected the model's tiny cross-node device send — a

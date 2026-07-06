@@ -362,6 +362,7 @@ def compute_cape(
     p_half: jax.Array,
     q_v_env: jax.Array | None = None,
     q_v_parcel: jax.Array | None = None,
+    p_source: jax.Array | None = None,
 ) -> jax.Array:
     """Compute Convective Available Potential Energy (CAPE).
 
@@ -396,6 +397,23 @@ def compute_cape(
     q_v_env, q_v_parcel : jax.Array, shape (ncol, nlev) or None
         Optional water-vapor mixing ratio profiles [kg/kg].  Pass both
         for the virtual-temperature CAPE.
+    p_source : jax.Array, shape (ncol,) or None
+        Parcel DEPARTURE-level pressure [Pa].  When given, levels BELOW
+        the departure level (``p_full > p_source``) contribute nothing:
+        the parcel does not exist there, so any "buoyancy" at those
+        levels is an artifact of relaunching an elevated parcel from
+        the surface (textbook mean-layer-parcel convention integrates
+        from the source level upward).  A STABLE boundary layer makes
+        this artifact large: theta increases with height, so the
+        PBL-mean parcel translated to surface pressure theta-preserving
+        arrives WARMER than the actual surface air (+6.3 K on the
+        tier-5 validator column) and the below-departure positive area
+        alone reached ~53–66 J/kg fake CAPE — defeating Bechtold's
+        launch gate and heating a quiescent column by ~886 W/m² (the
+        C24 AMIP bechtold blowup, 2026-07-06).  ``None`` (default) and
+        ``p_source = surface pressure`` are byte-identical to the
+        legacy all-levels integral, so surface-parcel callers are
+        unaffected.
 
     Returns
     -------
@@ -410,6 +428,10 @@ def compute_cape(
         buoyancy = jnp.maximum(0.0, Tv_parcel - Tv_env)
     else:
         buoyancy = jnp.maximum(0.0, T_parcel - T_env)
+
+    if p_source is not None:
+        # zero out levels below the parcel departure level (p > p_source)
+        buoyancy = jnp.where(p_full <= p_source[:, None], buoyancy, 0.0)
 
     # Use the half-level midpoint pressure for the discrete ``∫ dlnp``
     # approximation: ``(p_half[k+1] - p_half[k]) / p_mid`` with

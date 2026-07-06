@@ -1,0 +1,114 @@
+"""Unit test for ``ModelDriver._mpas_global_diag`` (batched-allreduce form).
+
+The method owns the MPAS cell-partition MPI diagnostics: owned-cell masked
+local reductions, then THREE batched ``Allreduce`` rounds (SUM / MAX / MIN,
+with the finite flag riding the MIN batch) plus a cached one-time owned-cell
+count.  Run single-rank here (COMM_WORLD size 1: every allreduce is an
+identity), which pins the masking + batching + cache algebra; the multi-rank
+semantics are the same three MPI ops the mass fixer already exercises under
+``tests/distributed/``.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+jnp = pytest.importorskip("jax.numpy")
+pytest.importorskip("mpi4py")
+
+from legoesm.driver.model_driver import ModelDriver
+
+
+class _Partition:
+    def __init__(self, n_owned_cells):
+        self.n_owned_cells = n_owned_cells
+
+
+class _VLayout:
+    def __init__(self, owned_mask_cells, owned_mask_edges, n_owned_cells):
+        self.owned_mask_cells = owned_mask_cells
+        self.owned_mask_edges = owned_mask_edges
+        self.partition = _Partition(n_owned_cells)
+
+
+def _make_stub(n_cells=6, n_owned=4, n_edges=5, n_owned_edges=3):
+    """A bare ModelDriver instance (no __init__) with just the attrs
+    ``_mpas_global_diag`` reads."""
+    drv = ModelDriver.__new__(ModelDriver)
+    om_c = jnp.asarray(np.arange(n_cells) < n_owned)
+    om_e = jnp.asarray(np.arange(n_edges) < n_owned_edges)
+    drv._voronoi_layout = _VLayout(om_c, om_e, n_owned)
+    drv._mpas_g_n_cells = None
+    return drv, np.asarray(om_c), np.asarray(om_e)
+
+
+def test_owned_masked_means_and_extrema_single_rank():
+    drv, om_c, om_e = _make_stub()
+    n_cells, nlev, n_edges = 6, 3, 5
+    rng = np.random.default_rng(0)
+    T = rng.uniform(250.0, 300.0, size=(n_cells, nlev))
+    ps = rng.uniform(9.0e4, 1.05e5, size=(n_cells,))
+    u = rng.uniform(-30.0, 30.0, size=(n_edges, nlev))
+    # Halo entries carry extreme sentinels — they must NOT leak into any
+    # returned statistic (the owned mask is the point of this method).
+    T[om_c == 0] = 9999.0
+    ps[om_c == 0] = 9.0e9
+    u[om_e == 0] = -1.0e6
+    cwv = rng.uniform(10.0, 60.0, size=(n_cells,))
+    cwv[om_c == 0] = 1.0e9
+
+    mean_T, mean_ps, max_u, T_min, T_max, finite, cwv_mean = (
+        drv._mpas_global_diag(jnp.asarray(T), jnp.asarray(ps),
+                              jnp.asarray(u), jnp.asarray(cwv)))
+
+    T_own = T[om_c == 1]
+    assert mean_T == pytest.approx(T_own.sum() / (om_c.sum() * nlev))
+    assert mean_ps == pytest.approx(ps[om_c == 1].mean())
+    assert max_u == pytest.approx(np.abs(u[om_e == 1]).max())
+    assert T_min == pytest.approx(T_own.min())
+    assert T_max == pytest.approx(T_own.max())
+    assert finite is True
+    assert cwv_mean == pytest.approx(cwv[om_c == 1].mean())
+
+
+def test_finite_flag_owned_only():
+    drv, om_c, _ = _make_stub()
+    T = np.full((6, 2), 280.0)
+    ps = np.full((6,), 1.0e5)
+    u = np.zeros((5, 2))
+    # NaN in a HALO cell only: owned field is finite -> flag stays True.
+    T_halo_nan = T.copy()
+    T_halo_nan[int(np.argmax(om_c == 0)), 0] = np.nan
+    *_, finite, _ = drv._mpas_global_diag(
+        jnp.asarray(T_halo_nan), jnp.asarray(ps), jnp.asarray(u), None)
+    assert finite is True
+    # NaN in an OWNED cell -> False.
+    T_owned_nan = T.copy()
+    T_owned_nan[0, 0] = np.nan
+    *_, finite, _ = drv._mpas_global_diag(
+        jnp.asarray(T_owned_nan), jnp.asarray(ps), jnp.asarray(u), None)
+    assert finite is False
+
+
+def test_cwv_none_returns_nan():
+    drv, _, _ = _make_stub()
+    out = drv._mpas_global_diag(
+        jnp.full((6, 2), 280.0), jnp.full((6,), 1.0e5),
+        jnp.zeros((5, 2)), None)
+    assert np.isnan(out[-1])
+
+
+def test_n_cells_cache_populated_once():
+    drv, _, _ = _make_stub(n_owned=4)
+    args = (jnp.full((6, 2), 280.0), jnp.full((6,), 1.0e5),
+            jnp.zeros((5, 2)), None)
+    assert drv._mpas_g_n_cells is None
+    mean_T_1, *_ = drv._mpas_global_diag(*args)
+    assert drv._mpas_g_n_cells == 4
+    # Mutate the partition count: the CACHED global count must keep being
+    # used (the count is partition-static by contract).
+    drv._voronoi_layout.partition.n_owned_cells = 999
+    mean_T_2, *_ = drv._mpas_global_diag(*args)
+    assert drv._mpas_g_n_cells == 4
+    assert mean_T_2 == pytest.approx(mean_T_1)

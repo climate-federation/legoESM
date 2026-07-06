@@ -52,7 +52,8 @@ class TracerTransportConfig(NamedTuple):
     time_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
 
 
-def advective_tracer_tendency(q, u, v, grid, vertical_fn, *, hyperdiff_coeff=0.0):
+def advective_tracer_tendency(q, u, v, grid, vertical_fn, *, hyperdiff_coeff=0.0,
+                              horizontal=True):
     """Advective-form tracer tendency on the cubed sphere, batched over tracers.
 
     The SHARED cubed-sphere tracer-advection core: the moisture/tracer transport
@@ -78,15 +79,30 @@ def advective_tracer_tendency(q, u, v, grid, vertical_fn, *, hyperdiff_coeff=0.0
     hyperdiff_coeff : float, optional
         Biharmonic hyperdiffusion coefficient (>0 enables it); shares the single
         batched halo pad with the gradient stencils.
+    horizontal : bool, optional
+        When ``False``, SKIP the horizontal advective ``-(u·∇q)`` term (and the
+        horizontal hyperdiffusion) and return ONLY the vertical tendency.  Used
+        by the #771 flux-form moisture path, which transports horizontally with
+        the mass-conserving :func:`flux_form_tracer_step` as a post-RK3 substep
+        instead of this advective, non-conserving horizontal form.  The vertical
+        advection (already mass-flux-consistent) stays in the RK3 tendency.
 
     Returns
     -------
     jax.Array, shape ``(6, n, n, nlev, n_tracers)``
-        ``-(u·∇x q + v·∇y q) + vertical + hyperdiff``.  The tracer axis is folded
-        into the level axis so the cubed-sphere halo + gradient/hyperdiff
-        stencils run in a SINGLE ``pad_halo_4d`` exchange instead of one per
-        tracer (multi-GPU MPI exchange dominates these per-level operators).
+        ``-(u·∇x q + v·∇y q) + vertical + hyperdiff`` (or ``vertical`` alone when
+        ``horizontal=False``).  The tracer axis is folded into the level axis so
+        the cubed-sphere halo + gradient/hyperdiff stencils run in a SINGLE
+        ``pad_halo_4d`` exchange instead of one per tracer (multi-GPU MPI
+        exchange dominates these per-level operators).
     """
+    # Vertical advection — local stencil along the level axis, no halo cost.
+    # vmap over the trailing tracer axis (vertical velocity captured in the
+    # closure) so JAX emits a single batched kernel.
+    vert = jax.vmap(vertical_fn, in_axes=-1, out_axes=-1)(q)
+    if not horizontal:
+        return vert
+
     n_tracers = q.shape[-1]
     nlev = q.shape[-2]
     q_flat = q.reshape(*q.shape[:3], nlev * n_tracers)  # (6, n, n, nlev*n_tracers)
@@ -106,10 +122,6 @@ def advective_tracer_tendency(q, u, v, grid, vertical_fn, *, hyperdiff_coeff=0.0
             q_flat, grid, hyperdiff_coeff, padded=q_pad,
         ).reshape(*q.shape)
 
-    # Vertical advection — local stencil along the level axis, no halo cost.
-    # vmap over the trailing tracer axis (vertical velocity captured in the
-    # closure) so JAX emits a single batched kernel.
-    vert = jax.vmap(vertical_fn, in_axes=-1, out_axes=-1)(q)
     return horiz + vert
 
 
