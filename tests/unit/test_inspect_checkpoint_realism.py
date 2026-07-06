@@ -137,5 +137,88 @@ def test_latest_checkpoint_is_numeric_max_not_lexicographic(tmp_path):
     assert r["checkpoint"] == "checkpoint_day_10000.npz"
 
 
+def _write_series(tmp_path, days, land_T):
+    for d, lt in zip(days, land_T):
+        _write(tmp_path, name=f"checkpoint_day_{d:04d}.npz",
+               day=np.asarray(float(d)),
+               carry_T_land=np.full((2, 4, 4), float(lt)))
+
+
+def test_timeseries_builds_sorted_trajectory(tmp_path):
+    _write_series(tmp_path, [5, 10, 15], [288.0, 288.0, 288.0])
+    ts = mod.inspect_checkpoint_timeseries(tmp_path)
+    assert ts["n"] == 3
+    assert ts["days"] == [5.0, 10.0, 15.0]           # numeric-sorted
+    assert ts["all_passed"] is True
+    assert len(ts["series"]["land_T"]) == 3
+    assert "TRAJECTORY" in mod.format_timeseries(ts)
+
+
+def test_timeseries_detects_land_T_drift(tmp_path):
+    # +0.6 K/day sustained (12 K over 20 days) > 0.5 K/day threshold
+    _write_series(tmp_path, [5, 10, 15, 20, 25],
+                  [288.0, 291.0, 294.0, 297.0, 300.0])
+    ts = mod.inspect_checkpoint_timeseries(tmp_path)
+    assert ts["drift"]["land_T"]["drifting"] is True
+    assert ts["drift"]["land_T"]["slope_per_day"] == pytest.approx(0.6, abs=1e-6)
+    assert ts["any_drifting"] is True
+    assert ts["all_passed"] is True                  # still within bounds
+    assert "(!)" in mod.format_timeseries(ts)
+
+
+def test_timeseries_stationary_not_drifting(tmp_path):
+    _write_series(tmp_path, [5, 10, 15, 20, 25], [288.0] * 5)
+    ts = mod.inspect_checkpoint_timeseries(tmp_path)
+    assert ts["any_drifting"] is False
+    assert ts["drift"]["land_T"]["slope_per_day"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_timeseries_single_checkpoint_no_drift(tmp_path):
+    _write_series(tmp_path, [5], [288.0])
+    ts = mod.inspect_checkpoint_timeseries(tmp_path)
+    assert ts["n"] == 1
+    assert ts["any_drifting"] is False               # <2 points -> no slope
+    assert np.isnan(ts["drift"]["land_T"]["slope_per_day"])
+
+
+def test_timeseries_slope_uses_day_spacing_not_index(tmp_path):
+    """Unequal spacing: slope must be per-DAY (0->1->99), not per-checkpoint-index
+    (else a 100 K jump over 99 days reads as ~50 K/index)."""
+    _write_series(tmp_path, [1, 2, 100], [288.0, 288.0, 388.0])
+    ts = mod.inspect_checkpoint_timeseries(tmp_path)
+    slope = ts["drift"]["land_T"]["slope_per_day"]
+    assert slope == pytest.approx(1.015, abs=0.05)   # day-based ~1.0, not ~50
+    assert ts["drift"]["land_T"]["drifting"] is True
+
+
+def test_timeseries_recent_nan_shrinks_window_and_is_caught(tmp_path):
+    """A recent all-NaN field must NOT let drift reach back to stale finite data,
+    AND must trip the per-checkpoint gate + missing-context surfacing."""
+    _write(tmp_path, name="checkpoint_day_0018.npz", day=np.asarray(18.0),
+           carry_T_land=np.full((2, 4, 4), 288.0))
+    _write(tmp_path, name="checkpoint_day_0019.npz", day=np.asarray(19.0),
+           carry_T_land=np.full((2, 4, 4), 294.0))
+    _write(tmp_path, name="checkpoint_day_0020.npz", day=np.asarray(20.0),
+           carry_T_land=np.full((2, 4, 4), np.nan))     # lost/blown carry
+    ts = mod.inspect_checkpoint_timeseries(tmp_path, last_n=2)  # window = days 19,20
+    assert np.isnan(ts["drift"]["land_T"]["slope_per_day"])     # window shrank to 1
+    assert ts["drift"]["land_T"]["drifting"] is False
+    assert ts["all_passed"] is False                            # NaN caught by gate
+    assert (20.0, ["land_T"]) in ts["missing_context"]
+
+
+def test_timeseries_missing_context_field_surfaced(tmp_path):
+    """A checkpoint that dropped its OLR carry is surfaced, not hidden as ok=Y."""
+    d = _healthy()
+    del d["carry_held_lw_up_toa"]                     # no OLR carry this checkpoint
+    d["day"] = np.asarray(12.0)
+    np.savez(tmp_path / "checkpoint_day_0012.npz", **d)
+    ts = mod.inspect_checkpoint_timeseries(tmp_path)
+    assert ts["all_context_present"] is False
+    assert ts["missing_context"] == [(12.0, ["OLR"])]
+    assert ts["all_passed"] is True                  # bounds gate itself still passes
+    assert "MISSING CONTEXT" in mod.format_timeseries(ts)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
