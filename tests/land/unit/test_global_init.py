@@ -1,7 +1,11 @@
 import numpy as np, numpy.testing as npt, jax.numpy as jnp
-from legoesm.land.carbon.climate_features import ClimateFeatures
+from legoesm.land.carbon.climate_features import (
+    ClimateFeatures, reduce_climatology_to_features,
+)
 from legoesm.land.carbon.config import CarbonState
-from legoesm.land.carbon.global_init import build_archetypes, map_to_grid
+from legoesm.land.carbon.global_init import (
+    build_archetypes, equilibrate_archetypes, map_to_grid,
+)
 
 def _feats(mat, mapyr, seas, arid, sw):
     a = lambda v: np.asarray(v, float)
@@ -71,3 +75,72 @@ def test_absent_pft_contributes_zero_and_pools_nonneg():
     out = map_to_grid(cid, cw, eq)
     npt.assert_allclose(np.asarray(out.C_som), [0.5 * 30], rtol=1e-9)
     assert (np.asarray(out.C_som) >= 0).all()
+
+
+# ---------------------------------------------------------------------------
+# Integration gate for Tasks 2-5: features -> archetypes -> equilibrate -> map
+# on a synthetic world (no data files).  Compute-node scale (JIT-compiles the
+# coupled land+carbon model) -- run via the sbatch/srun wrapper, not login node.
+# ---------------------------------------------------------------------------
+def test_core_pipeline_synthetic_world():
+    # 3 cells, 2 PFTs (tropical=4, temperate=7), simple climatology.
+    ncell, npft = 3, 17
+    w = np.zeros((ncell, npft)); w[0, 4] = 1.0; w[1, 7] = 1.0; w[2, 4] = 0.5; w[2, 7] = 0.5
+    t = np.stack([np.full(12, 298.0), np.full(12, 283.0), np.full(12, 290.0)])
+    pr = np.stack([np.full(12, 6e-5), np.full(12, 2.5e-5), np.full(12, 4e-5)])
+    sw = np.full((ncell, 12), 220.0); nr = np.full((ncell, 12), 90.0)
+    feats = reduce_climatology_to_features(t, pr, sw, nr)
+    soil = np.array(["clay_loam", "loam", "loam"])
+    tab, cid, cw = build_archetypes(w, feats, soil, np.ones(ncell, bool), k_per_pft=1, seed=0)
+    eq, qc = equilibrate_archetypes(tab, n_spinup=15, n_verify=5, dt=7200.0, n_layers=6, soil_depth=2.0)
+    grid = map_to_grid(cid, cw, eq)
+    assert grid.C_som.shape == (ncell,)
+    assert np.all(np.isfinite(np.asarray(grid.C_som)))
+    # Mixed cell 2 is between the two pure cells for total ecosystem C.
+    tot = lambda i: sum(float(np.asarray(getattr(grid, f))[i]) for f in grid._fields)
+    assert min(tot(0), tot(1)) - 1.0 <= tot(2) <= max(tot(0), tot(1)) + 1.0
+
+
+# ---------------------------------------------------------------------------
+# The build_global_carbon_ic.py driver's full --dry-run-synthetic main() path:
+# fabricate a tiny world -> features -> archetypes -> equilibrate -> map ->
+# write both .npz.  Also compute-node scale (JIT) -- run via the srun wrapper.
+# ---------------------------------------------------------------------------
+def test_driver_dry_run_synthetic_writes_npz(tmp_path):
+    import importlib.util
+    import pathlib
+    repo = pathlib.Path(__file__).resolve().parents[3]
+    py = repo / "scripts" / "data" / "build_global_carbon_ic.py"
+    spec = importlib.util.spec_from_file_location("build_global_carbon_ic", py)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    out = tmp_path / "gcic"
+    finidat_path, arch_path = mod.main([
+        "--dry-run-synthetic", "--output", str(out),
+        "--k-per-pft", "1", "--n-spinup", "6", "--n-verify", "3",
+        "--dt", "7200", "--n-layers", "6", "--soil-depth", "2.0",
+    ])
+    assert finidat_path.exists() and arch_path.exists()
+    assert finidat_path.name == "global_carbon_ic.npz"
+    assert arch_path.name == "archetypes.npz"
+
+    with np.load(finidat_path, allow_pickle=False) as d:
+        # 6-cell, 17-PFT synthetic world.
+        for pool in CarbonState._fields:
+            assert d[pool].shape == (6,), pool
+            assert np.all(np.isfinite(d[pool]))
+        assert d["lat"].shape == (6,) and d["lon"].shape == (6,)
+        assert d["dominant_pft"].shape == (6,)
+        assert d["pft_present"].shape == (6, 17)
+        assert d["pft_weights"].shape == (6, 17)
+
+    with np.load(arch_path, allow_pickle=False) as d:
+        n_arch = d["pft_id"].shape[0]
+        assert n_arch >= 1
+        assert d["soil_class"].shape == (n_arch,)
+        for pool in CarbonState._fields:
+            assert d[f"eq_{pool}"].shape == (n_arch,)
+        for key in ("gpp", "npp", "som_kgC", "biomass_kgC", "drift_frac_per_yr"):
+            assert d[f"qc_{key}"].shape == (n_arch,)
+            assert np.all(np.isfinite(d[f"qc_{key}"]))
