@@ -696,6 +696,29 @@ class ModelDriver:
                 f"(land fraction mean={float(jnp.mean(self._f_land)):.3f})"
             )
 
+        # Per-column subgrid orographic stddev for the orographic GWD launch
+        # (tau_0 ∝ h_topo²). Attached to the grid pytree so the physics
+        # integration's ``_extract_subgrid_topo_stddev`` finds it; without it
+        # McFarlane/Lindzen fall back to the scalar ``config.h_topo`` — a
+        # uniform 500 m mountain over ocean columns too.
+        sso_path = getattr(self.config, "subgrid_orography_path", "")
+        if sso_path:
+            from legoesm.grids.topography import load_subgrid_orography
+            sso = load_subgrid_orography(self.grid, sso_path).astype(_sd)
+            try:
+                self.grid = self.grid._replace(subgrid_topo_stddev=sso)
+            except (ValueError, AttributeError) as e:
+                raise ValueError(
+                    f"subgrid_orography_path is set but grid type "
+                    f"{type(self.grid).__name__} has no subgrid_topo_stddev "
+                    f"field (supported: CubedSphereGrid, GaussianGrid)"
+                ) from e
+            logger.info(
+                f"  Subgrid orography: {sso_path} "
+                f"(stddev max={float(jnp.max(sso)):.0f} m, "
+                f"mean={float(jnp.mean(sso)):.1f} m)"
+            )
+
     def _create_dycore(self) -> None:
         """Create the dynamical core model via the component factory.
 
