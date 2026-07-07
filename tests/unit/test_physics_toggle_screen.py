@@ -101,4 +101,4 @@ def test_format_table_orders_survivors_first():
     table = format_table(rows)
     # survivor (baseline) sorts before the early blow-up
     assert table.index("baseline") < table.index("convection_off")
-    assert "survived" in table
+    assert "surv" in table

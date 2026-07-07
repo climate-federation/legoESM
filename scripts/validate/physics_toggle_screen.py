@@ -129,7 +129,7 @@ def extract_run_metrics(run_dir: Path) -> dict:
            "blowup_day": _blowup_day(status),
            "max_wind": float("nan"), "moisture_resid": float("nan"),
            "energy_toa_net": float("nan"), "rsut": float("nan"),
-           "olr": float("nan")}
+           "olr": float("nan"), "precip": float("nan")}
     ts = run_dir / "timeseries.npz"
     if ts.exists():
         z = np.load(ts, allow_pickle=True)
@@ -146,6 +146,9 @@ def extract_run_metrics(run_dir: Path) -> dict:
         # SW (the albedo proxy), olr = outgoing LW.  Used to rank cloud levers.
         out["rsut"] = _last("sw_up_toa")
         out["olr"] = _last("lw_up_toa")
+        # Global-mean surface precip [mm/day] — the primary rank key for the
+        # precip-efficiency sweep (raise toward GPCP ~2.8; drains cloud water).
+        out["precip"] = _last("precip")
     return out
 
 
@@ -153,16 +156,17 @@ def format_table(rows: list[dict]) -> str:
     """Tabulate the screen results, most-stable (largest blowup_day) first."""
     rows = sorted(rows, key=lambda r: (-(r["blowup_day"] if np.isfinite(r["blowup_day"]) else 1e9),
                                         r["label"]))
-    lines = [f"{'case':16s} {'blowup_day':>10s} {'max_wind':>9s} "
-             f"{'|moist_res|':>11s} {'rsut':>7s} {'olr':>7s} {'toa_net':>9s}  status",
+    lines = [f"{'case':16s} {'blowup':>8s} {'precip':>7s} {'rsut':>7s} "
+             f"{'olr':>7s} {'toa_net':>8s} {'max_wind':>8s} {'|moist|':>8s}  status",
              "-" * 100]
     for r in rows:
         bd = r["blowup_day"]
-        bd_s = "survived" if np.isinf(bd) else ("n/a" if np.isnan(bd) else f"{bd:.0f}")
+        bd_s = "surv" if np.isinf(bd) else ("n/a" if np.isnan(bd) else f"{bd:.0f}")
         lines.append(
-            f"{r['label']:16s} {bd_s:>10s} {r['max_wind']:9.1f} "
-            f"{r['moisture_resid']:11.3f} {r.get('rsut', float('nan')):7.1f} "
-            f"{r.get('olr', float('nan')):7.1f} {r['energy_toa_net']:9.1f}  {r['status']}")
+            f"{r['label']:16s} {bd_s:>8s} {r.get('precip', float('nan')):7.2f} "
+            f"{r.get('rsut', float('nan')):7.1f} {r.get('olr', float('nan')):7.1f} "
+            f"{r['energy_toa_net']:8.1f} {r['max_wind']:8.1f} "
+            f"{r['moisture_resid']:8.2f}  {r['status']}")
     return "\n".join(lines)
 
 
