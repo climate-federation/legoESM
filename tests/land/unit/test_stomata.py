@@ -4,6 +4,7 @@ import unittest
 
 import jax
 import jax.numpy as jnp
+import numpy.testing as npt
 
 from legoesm.land.carbon.stomata import (
     StomataConfig,
@@ -695,6 +696,74 @@ class TestDifferentiability(unittest.TestCase):
 
         grad = jax.grad(f)(jnp.array(298.15))
         self.assertTrue(jnp.isfinite(grad))
+
+
+class TestCanopyScaling(unittest.TestCase):
+    """Big-leaf canopy scaling of the photosynthetic capacities."""
+
+    def _inputs(self, LAI):
+        cfg = StomataConfig(enabled=True, stomata_model="ball_berry")
+        return (jnp.array([298.15]), jnp.array([600.0]), 400.0,
+                jnp.array([0.008]), jnp.array([101325.0]),
+                jnp.array([LAI]), jnp.array([1.0]), cfg)
+
+    def test_default_scaling_is_identity(self):
+        """canopy_scaling=1.0 reproduces the leaf-level rate."""
+        cfg = StomataConfig(enabled=True)
+        A1, G1 = farquhar_photosynthesis(
+            jnp.array([280.0]), jnp.array([800.0]), jnp.array([298.15]), cfg)
+        A2, G2 = farquhar_photosynthesis(
+            jnp.array([280.0]), jnp.array([800.0]), jnp.array([298.15]), cfg,
+            canopy_scaling=1.0)
+        npt.assert_allclose(A1, A2, rtol=0, atol=0)
+        npt.assert_allclose(G1, G2, rtol=0, atol=0)
+
+    def test_rubisco_limited_scales_with_canopy(self):
+        """In the Rubisco-limited regime A_gross scales ~linearly with L_c.
+
+        Use low light (so Wc < Wj) and doubled canopy scaling.
+        """
+        cfg = StomataConfig(enabled=True)
+        Ci = jnp.array([280.0])
+        APAR = jnp.array([2000.0])   # ample light -> Rubisco-limited
+        T = jnp.array([298.15])
+        _, G1 = farquhar_photosynthesis(Ci, APAR, T, cfg, None, 1.0)
+        _, G2 = farquhar_photosynthesis(Ci, APAR, T, cfg, None, 2.0)
+        ratio = float(jnp.squeeze(G2 / jnp.maximum(G1, 1e-9)))
+        self.assertGreater(ratio, 1.7)   # ~2x (Wj co-limitation softens it)
+        self.assertLessEqual(ratio, 2.05)
+
+    def test_leafless_column_no_assimilation(self):
+        """LAI->0 => L_c->0 => canopy GPP ~ 0."""
+        T, sw, co2, q, p, _, beta, cfg = self._inputs(1e-4)
+        _, gpp = coupled_farquhar_stomata(
+            T, sw, co2, q, p, jnp.array([1e-4]), beta, cfg)
+        self.assertLess(float(jnp.squeeze(gpp)) * 86400.0, 0.1)
+
+    def test_dense_canopy_more_gpp_than_sparse(self):
+        """A dense canopy fixes more C than a sparse one (beyond fAPAR alone)."""
+        T, sw, co2, q, p, _, beta, cfg = self._inputs(1.0)
+        _, gpp_sparse = coupled_farquhar_stomata(
+            T, sw, co2, q, p, jnp.array([1.0]), beta, cfg)
+        _, gpp_dense = coupled_farquhar_stomata(
+            T, sw, co2, q, p, jnp.array([5.0]), beta, cfg)
+        self.assertGreater(float(jnp.squeeze(gpp_dense)),
+                           float(jnp.squeeze(gpp_sparse)))
+
+    def test_grad_through_canopy_scaling(self):
+        """A_gross stays differentiable wrt LAI through the scaling."""
+        cfg = StomataConfig(enabled=True)
+
+        def f(LAI):
+            _, gpp = coupled_farquhar_stomata(
+                jnp.array([298.15]), jnp.array([600.0]), 400.0,
+                jnp.array([0.008]), jnp.array([101325.0]),
+                jnp.array([LAI]), jnp.array([1.0]), cfg)
+            return jnp.squeeze(gpp)
+
+        grad = jax.grad(f)(3.0)
+        self.assertTrue(jnp.isfinite(grad))
+        self.assertGreater(float(grad), 0.0)   # more leaves -> more GPP
 
 
 if __name__ == "__main__":

@@ -72,6 +72,40 @@ def test_elev_bands_flag_flows_to_config():
     assert float(cfg.land.elev_bands.band_dz[0, -1]) > 1000.0
 
 
+def test_carbon_woody_flag_flows_to_config():
+    """--carbon-woody / --no-carbon-woody toggles CarbonConfig.woody (default True)."""
+    cfg_default = build_config_from_args(_parse_args(["--lat", "45.0"]))
+    assert cfg_default.land.carbon.woody is True
+    cfg_herb = build_config_from_args(
+        _parse_args(["--lat", "45.0", "--no-carbon-woody"]))
+    assert cfg_herb.land.carbon.woody is False
+
+
+def test_cwd_humification_flag_flows_to_config():
+    """--cwd-humification-eff flows to CarbonConfig.cwd_humification_eff."""
+    cfg = build_config_from_args(
+        _parse_args(["--lat", "45.0", "--cwd-humification-eff", "0.15"]))
+    assert cfg.land.carbon.cwd_humification_eff == 0.15
+
+
+def test_carbon_q10_het_flag_flows_to_config():
+    """--carbon-q10-het flows to CarbonConfig.Q10_het_exp."""
+    cfg = build_config_from_args(
+        _parse_args(["--lat", "45.0", "--carbon-q10-het", "0.08"]))
+    assert cfg.land.carbon.Q10_het_exp == 0.08
+
+
+def test_carbon_spinup_flag_parses():
+    """--carbon-spinup selects the soil-C spin-up mode; default off; guarded."""
+    assert _parse_args(["--lat", "45.0"]).carbon_spinup == "none"
+    assert _parse_args(
+        ["--lat", "45.0", "--carbon-spinup", "semi_analytic"]
+    ).carbon_spinup == "semi_analytic"
+    import pytest
+    with pytest.raises(SystemExit):
+        _parse_args(["--lat", "45.0", "--carbon-spinup", "bogus"])
+
+
 # --- issue #691: --config / --require-config -------------------------------
 
 def _lmip_example_config():
