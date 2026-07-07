@@ -294,6 +294,10 @@ class PhysicsPipeline:
         # action spectrum threads through ``gwd_spectrum``.
         self._turb_energy_field = None
         self._gwd_prognostic = False
+        # Set for a stateless '+'-composite GWD (issue #834): the combined
+        # executor returns a (GWDOutput, spectrum) tuple even with no stateful
+        # part, so the pipeline must unpack it.
+        self._gwd_composite = False
 
     def _blend_land(self, ocean_field, land_field):
         """Blend an ocean/ice surface field with a land field by ``f_land``.
@@ -1364,7 +1368,13 @@ class PhysicsPipeline:
                 # ACTIVE scheme = dropped carry — fail loudly rather
                 # than silently reseed every step (the #405 bug class;
                 # codex review).
-                _sc = self.gwd_config
+                # For a '+'-composite (issue #834) the resolved gwd_config is
+                # the full GravityWaveDragConfig; the spectrum params live on
+                # its ``prognostic_spectral`` sub-config.  For pure
+                # ``prognostic_spectral`` the resolved config IS that
+                # sub-config (get_gwd_fn returns config.prognostic_spectral).
+                _sc = getattr(self.gwd_config, "prognostic_spectral",
+                              self.gwd_config)
                 _spec_shape = (ad.ncol, _sc.n_azimuths, _sc.n_wavenumbers)
                 _spec_in = gwd_spectrum
                 if (_spec_in is None
@@ -1381,6 +1391,13 @@ class PhysicsPipeline:
                 gwd_out, gwd_spectrum_out = self.gwd_fn(
                     spectrum_in=_spec_in, **_gwd_kwargs,
                 )
+            elif self._gwd_composite:
+                # Stateless '+'-composite (e.g. ``hines+mcfarlane``, issue #834):
+                # the combined executor mirrors the prognostic signature and
+                # returns ``(GWDOutput, spectrum_out)`` even with no stateful
+                # part, so pass ``spectrum_in=None`` and discard the (None)
+                # spectrum — there is no wave-action carry to thread.
+                gwd_out, _ = self.gwd_fn(spectrum_in=None, **_gwd_kwargs)
             else:
                 gwd_out = self.gwd_fn(**_gwd_kwargs)
             du_dt = du_dt + ad.unflatten_3d(gwd_out.du_dt)
@@ -3018,7 +3035,18 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline._turb_energy_field = turbulence_scheme_traits(
         getattr(config, 'turbulence', 'none'),
     ).energy_field
-    pipeline._gwd_prognostic = (
-        getattr(config, 'gravity_wave_drag', 'none') == "prognostic_spectral"
+    # A GWD scheme threads the prognostic wave-action spectrum when it is
+    # ``prognostic_spectral`` OR a '+'-composite that contains it (issue #834).
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+        gwd_carries_spectrum,
+    )
+    _gwd_scheme = getattr(config, 'gravity_wave_drag', 'none')
+    pipeline._gwd_prognostic = gwd_carries_spectrum(_gwd_scheme)
+    # A stateless '+'-composite (no prognostic_spectral part) still returns the
+    # (GWDOutput, spectrum_out) tuple from the combined executor, so the
+    # pipeline must unpack it via the composite branch rather than the plain
+    # single-return path.
+    pipeline._gwd_composite = (
+        "+" in _gwd_scheme and not pipeline._gwd_prognostic
     )
     return pipeline
