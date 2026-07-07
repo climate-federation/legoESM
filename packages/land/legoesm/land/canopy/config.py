@@ -17,6 +17,8 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm.land.canopy.sif import SIFConfig
+
 
 # ---------------------------------------------------------------------------
 # PFT Vcmax25 lookup table [μmol m-2 s-1], columns [tropical, temperate, boreal]
@@ -197,6 +199,12 @@ class CanopyConfig(NamedTuple):
     wilting_point: float = 0.15   # theta_wp [m3/m3]
     field_capacity: float = 0.30  # theta_fc [m3/m3]
     n_root_layers: int = 5        # number of layers to integrate for root-zone stress
+
+    # Optional solar-induced fluorescence (SIF) diagnostic.  ``None`` (default)
+    # disables it; a ``SIFConfig`` enables the passive top-of-canopy SIF output
+    # (sunlit+shaded sum) on ``SurfaceFluxOutput.sif``.  Static config leaf —
+    # never traced, so the Python ``is not None`` gate does not double-trace.
+    sif: SIFConfig | None = None
 
 
 # Machine-readable tunable/fixed classification for every ``: float`` field of

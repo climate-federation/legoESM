@@ -886,7 +886,7 @@ def _step_multilayer_land_impl(
             # Neither scheme produced GPP (stomata disabled, carbon=none?).
             # Re-derive via compute_effective_beta on post-step state so
             # the carbon cycle sees a consistent end-of-step GPP.
-            _, gpp_override = compute_effective_beta(
+            _, gpp_override, _ = compute_effective_beta(
                 T_surface_new, forcing, beta_soil_new, config, carbon_state,
                 dt, land_params=lp)
         carbon_state_new, co2_flux = step_carbon(

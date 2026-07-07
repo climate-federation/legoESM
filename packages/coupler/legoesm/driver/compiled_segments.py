@@ -71,6 +71,54 @@ def _resolve_checkpoint(gradient_checkpoint: bool | None, n_steps: int) -> bool:
     return gradient_checkpoint
 
 
+# Above this static scan length, checkpointing switches from PER-STEP remat to
+# NESTED (Griewank / sqrt-N) checkpointing: per-step remat recomputes each step's
+# INTERNAL activations but ``lax.scan`` reverse mode STILL stores the per-step
+# CARRY at EVERY step, so reverse-mode memory is O(n_steps) x carry regardless.
+# For a long differentiated rollout (e.g. the WeatherBench scale trainer, where a
+# lat-lon pole-cell CFL clamp forces dt ~3-4 s and roll_steps ~6000) that O(N)
+# trajectory OOMs (~1 TB at 0.7 deg, f64) — see #841.  Nested checkpointing keeps
+# only ~sqrt(N) chunk-boundary carries, recomputing each chunk's forward in the
+# backward pass: O(sqrt(N)) memory, EXACT gradient, ~2x backward compute.  Short
+# production diagnostic segments stay on the per-step path (byte-identical graph).
+_NESTED_CKPT_STEPS = 256
+
+
+def _sqrt_checkpointed_scan(step_fn, carry, n_steps):
+    """Run ``n_steps`` of ``step_fn`` as a scan with O(sqrt(n_steps)) reverse-mode
+    memory via nested (Griewank) checkpointing.
+
+    Split the scan into ``n_outer ~ sqrt(n_steps)`` OUTER chunks of ``inner ~
+    sqrt(n_steps)`` steps.  The INNER chunk scan is ``jax.checkpoint``-wrapped, so
+    reverse mode stores only the ``n_outer`` chunk-boundary carries and RECOMPUTES
+    each chunk's forward before backpropagating through it.  Per-step remat INSIDE
+    a chunk keeps that chunk's own reverse scan at O(inner) carries (its steps'
+    internals are recomputed too).  Peak memory ~ ``(n_outer + inner) x carry`` =
+    O(sqrt(n_steps)) instead of O(n_steps).  A trailing remainder (< inner) runs
+    as a final per-step-remat scan.
+
+    ``n_steps`` is the STATIC scan length (Python int; ``lax.scan`` requires it),
+    so the chunking is decided at trace time.  The result is BIT-IDENTICAL to the
+    plain scan on the forward and the EXACT gradient on the backward — only the
+    reverse-mode memory/compute schedule changes.
+    """
+    inner = max(int(math.isqrt(n_steps)), 1)
+    n_outer = n_steps // inner
+    remainder = n_steps - n_outer * inner
+
+    step_ckpt = jax.checkpoint(step_fn, prevent_cse=False)
+
+    def _chunk(c, _):
+        c, _ = jax.lax.scan(step_ckpt, c, None, length=inner)
+        return c, None
+
+    chunk_ckpt = jax.checkpoint(_chunk, prevent_cse=False)
+    carry, _ = jax.lax.scan(chunk_ckpt, carry, None, length=n_outer)
+    if remainder > 0:
+        carry, _ = jax.lax.scan(step_ckpt, carry, None, length=remainder)
+    return carry
+
+
 # ======================================================================
 # Segment carry — all mutable arrays for the hot loop
 # ======================================================================
@@ -1796,6 +1844,11 @@ def build_segment_fn(
         """
         _step_fn = _make_single_step(forcing)
         if _resolve_checkpoint(gradient_checkpoint, n_steps):
+            # Long differentiated rollout -> nested (sqrt-N) checkpointing so the
+            # reverse-mode carry storage is O(sqrt(n_steps)), not O(n_steps) which
+            # OOMs (#841).  Short segments keep the cheap per-step remat + one scan.
+            if n_steps >= _NESTED_CKPT_STEPS:
+                return _sqrt_checkpointed_scan(_step_fn, carry, n_steps)
             _step_fn = jax.checkpoint(_step_fn, prevent_cse=False)
         final_carry, _ = jax.lax.scan(_step_fn, carry, None, length=n_steps)
         return final_carry

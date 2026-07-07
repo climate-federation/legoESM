@@ -630,9 +630,8 @@ def cdgrid_compressible_euler_slow_tendencies(
         )
 
         # Step 3: del-(2*(nord+1)) damp (FV3 sw_core.F90:1725-1822, nord>0)
-        # FV3_3D iter 893: nord-loop preserved inline (1-ULP trace-reorder
-        # diff vs fv3_corner_laplacian_nord wrapper would break iter-22
-        # bit-for-bit test; mirror of PE-side rationale).
+        # FV3_3D iter 893: nord-loop preserved inline (a 1-ULP trace-reorder
+        # would break the iter-22 bit-for-bit test; mirror of PE-side rationale).
         if config.corner_div_damp_d4_bg > 0.0 and config.corner_div_damp_nord > 0:
             from legoesm.core._fv3_divergence_corner import (
                 fv3_corner_laplacian_iteration,

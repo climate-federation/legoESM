@@ -1250,7 +1250,7 @@ def _run_segment_benchmark(
         jax.config.update("jax_enable_x64", True)
 
     # RRTMG optics are preloaded inside _build_segment_benchmark() via
-    # ModelDriver.setup() → _create_physics() → preload_rrtmgp_optics().
+    # ModelDriver.setup() → _create_physics() → RRTMGP.preload().
 
     (step_fn, carry, dt_used, total_cells, cells_per_gpu,
      dev_config) = _build_segment_benchmark(
