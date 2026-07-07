@@ -59,6 +59,7 @@ __param_spec__ = {
             "epsilon_midlevel": "entrainment: IFS mid-level base rate scaled in-scheme",
             "epsilon_shallow": "entrainment: IFS shallow base rate scaled in-scheme",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
+            "precip_efficiency": "default 0 = disabled (legacy no rain-split, shared split_convective_rain gated `if > 0.0`); enable + retune via config, not sigmoid-trained from the off state (mirrors Tiedtke)",
             "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the buoyancy/RH soft triggers",
             "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
@@ -81,7 +82,6 @@ __param_spec__ = {
             "stochastic_decorrelation": {"units": "s", "bounds": (1800.0, 21600.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Bechtold et al. (2014) AR1 perturbation", "shape": None},
             "tau_M_u_relax": {"units": "s", "bounds": (600.0, 5400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Tiedtke (1989) profile relaxation", "shape": None},
             "tau_bl": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Bechtold et al. (2008) PBL closure", "shape": None},
-            "precip_efficiency": "default 0 = disabled (legacy no rain-split, shared split_convective_rain gated `if > 0.0`); enable + retune via config, not sigmoid-trained from the off state (mirrors Tiedtke)",
         },
     },
     "ConvectiveEDMFConfig": {

@@ -72,26 +72,30 @@ class ConvectionOutput(NamedTuple):
     dq_r_conv_dt: jax.Array | None = None
     """Optional convective source for RAIN mixing ratio [kg/kg/s], shape
     (ncol, nlev).  ``None`` (default) for schemes that detrain all
-    condensate as cloud water.  Tiedtke's in-updraft precipitation (the
-    1989 ``c0`` conversion) splits the plume condensate: the precipitated
-    fraction is emitted here as rain -- a *precipitating* species that
-    sediments out via microphysics and is invisible to radiation (which
-    sees only ``q_c``/``q_i``) -- while the anvil remainder stays in
-    ``dq_c_conv_dt``.  Without this split, 100% of convective condensate
-    loads the grid-scale cloud and the radiation, which microphysics
-    cannot drain fast enough (source-buffered)."""
+    condensate as cloud water.  Tiedtke's and Bechtold's in-updraft
+    precipitation (via the shared ``split_convective_rain``) splits the
+    plume condensate: the precipitated fraction is emitted here as rain --
+    an already-fallen species the pipeline column-integrates DIRECTLY to
+    surface precipitation (NOT routed through microphysics sedimentation,
+    and invisible to radiation, which sees only ``q_c``/``q_i``) -- while
+    the anvil remainder stays in ``dq_c_conv_dt``.  Without this split,
+    100% of convective condensate loads the grid-scale cloud and the
+    radiation, which microphysics cannot drain fast enough
+    (source-buffered)."""
 
 
 def split_convective_rain(dq_c_conv_dt, precip_efficiency):
     """Split a convective cloud-water source into rain + suspended cloud.
 
     Real convective updrafts convert a large fraction of their condensate
-    to PRECIPITATION before detrainment.  Diverting that fraction to a
-    precipitating species (rain) — which sediments out via microphysics and
-    is invisible to radiation (which sees only ``q_c``/``q_i``) — instead of
-    detraining 100% as suspended anvil cloud is what keeps the grid-scale
-    cloud (and its albedo) from saturating faster than microphysics can
-    drain it (the source-buffered over-bright-anvil failure mode).
+    to PRECIPITATION before detrainment.  Diverting that fraction to rain —
+    an already-fallen species the pipeline column-integrates DIRECTLY to
+    surface precipitation (``physics_pipeline`` ~L1152; NOT routed back
+    through microphysics sedimentation, and invisible to radiation, which
+    sees only ``q_c``/``q_i``) — instead of detraining 100% as suspended
+    anvil cloud is what keeps the grid-scale cloud (and its albedo) from
+    saturating faster than microphysics can drain it (the source-buffered
+    over-bright-anvil / dry-column-runaway failure mode).
 
     Shared by every mass-flux-style scheme that detrains to cloud water
     (Tiedtke, Bechtold) so the rain split is defined once (no re-derived
