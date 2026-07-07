@@ -30,6 +30,8 @@ from legoesm.driver.compiled_segments import (
     compute_segment_length,
     build_segment_fn,
     pack_forcing,
+    _sqrt_checkpointed_scan,
+    _NESTED_CKPT_STEPS,
 )
 from legoesm.driver.physics_pipeline import PhysicsOutput
 from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -1911,3 +1913,55 @@ class TestQvSmoothingGate:
         assert jnp.array_equal(out, expected)
         # The real operator was invoked with the configured coeff + grid.
         assert seen["coeff"] == coeff and seen["grid"] is grid
+
+
+class TestNestedCheckpointedScan:
+    """#841: nested (Griewank / sqrt-N) checkpointing of the rollout scan is a
+    reverse-mode MEMORY SCHEDULE only — the forward is bit-identical and the
+    gradient is EXACT vs a plain ``lax.scan``.  This is what lets the WB scale
+    trainer's ~6000-step 0.7-deg rollout fit (O(sqrt N) carries instead of the
+    O(N) ~1 TB trajectory that OOMs)."""
+
+    @staticmethod
+    def _step(c, _):
+        # A coupled nonlinear recurrence so the adjoint is sensitive to every
+        # step (a decoupled map could pass even with a dropped-step bug).
+        x = jnp.tanh(1.03 * c + 0.1) + 0.02 * jnp.roll(c, 1)
+        return x, None
+
+    @pytest.mark.parametrize("n_steps", [289, 300, _NESTED_CKPT_STEPS])
+    def test_forward_and_gradient_match_plain_scan(self, n_steps):
+        x0 = jnp.linspace(-1.0, 1.0, 8)
+
+        def plain(x):
+            c, _ = jax.lax.scan(self._step, x, None, length=n_steps)
+            return jnp.sum(c ** 2)
+
+        def nested(x):
+            c = _sqrt_checkpointed_scan(self._step, x, n_steps)
+            return jnp.sum(c ** 2)
+
+        # Forward: same op sequence (chunk boundaries do not reorder steps).
+        np.testing.assert_allclose(
+            float(nested(x0)), float(plain(x0)), rtol=1e-6,
+            err_msg="nested checkpointed scan changed the forward value")
+        # Gradient: EXACT — checkpointing recomputes the same math.  A broken
+        # chunking (dropped/duplicated steps, wrong boundary carry) gives an
+        # O(1) relative error, far above this tolerance.
+        g_nested = jax.grad(nested)(x0)
+        g_plain = jax.grad(plain)(x0)
+        np.testing.assert_allclose(
+            np.asarray(g_nested), np.asarray(g_plain), rtol=1e-5, atol=1e-8,
+            err_msg="nested checkpointed scan gradient != plain scan gradient")
+
+    def test_remainder_steps_are_not_dropped(self):
+        """A step count that is NOT a multiple of the chunk size must still run
+        EXACTLY n_steps (the trailing remainder scan) — a count regression would
+        change the forward."""
+        # 290 = 17*17 + 1: inner=17, n_outer=17 (289 steps) + 1 remainder.
+        n_steps = 290
+        x0 = jnp.linspace(0.0, 1.0, 6)
+        ref, _ = jax.lax.scan(self._step, x0, None, length=n_steps)
+        got = _sqrt_checkpointed_scan(self._step, x0, n_steps)
+        np.testing.assert_allclose(np.asarray(got), np.asarray(ref), rtol=1e-6,
+                                   err_msg="remainder steps dropped/miscounted")
