@@ -245,8 +245,13 @@ def init_physics_state(
     conv_stoch_state = jnp.zeros((ncol,), dtype=dtype)
 
     # --- GWD wave action spectrum ---
+    # Seeded for prognostic_spectral AND any '+'-composite that contains it
+    # (issue #834) — both thread the wave-action spectrum through the carry.
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+        gwd_carries_spectrum,
+    )
     gwd_cfg = physics_config.gravity_wave_drag
-    if gwd_cfg.scheme == "prognostic_spectral":
+    if gwd_carries_spectrum(gwd_cfg.scheme):
         sc = gwd_cfg.prognostic_spectral
         gwd_spectrum = jnp.full(
             (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux,

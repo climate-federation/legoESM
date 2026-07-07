@@ -55,3 +55,48 @@ class TestConfigValidate:
         )
         warns = cfg.validate()
         assert any("physics_parameterization='ml'" in w for w in warns)
+
+
+class TestGWDCompositeValidation:
+    """`+`-composite gravity_wave_drag membership (issue #834).
+
+    A composite sums multiple GWD sources.  prognostic_spectral is now an
+    allowed (single) stateful member; unknown parts and >1 stateful source
+    must fail validate_strict.
+    """
+
+    import pytest
+
+    def test_combined_mcfarlane_spectral_is_valid(self):
+        # The #834 target composite must pass strict validation.
+        ExperimentConfig(
+            gravity_wave_drag="mcfarlane+prognostic_spectral"
+        ).validate_strict()
+
+    def test_stateless_composite_is_valid(self):
+        ExperimentConfig(gravity_wave_drag="hines+mcfarlane").validate_strict()
+
+    def test_single_prognostic_spectral_is_valid(self):
+        ExperimentConfig(gravity_wave_drag="prognostic_spectral").validate_strict()
+
+    def test_unknown_part_in_composite_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="composite gravity_wave_drag"):
+            ExperimentConfig(
+                gravity_wave_drag="mcfarlane+nonsense"
+            ).validate_strict()
+
+    def test_two_stateful_parts_raises(self):
+        import pytest
+        # e3sm_cam is not composable; two spectral sources share one carry.
+        with pytest.raises(ValueError, match="at most one stateful"):
+            ExperimentConfig(
+                gravity_wave_drag="prognostic_spectral+prognostic_spectral"
+            ).validate_strict()
+
+    def test_noncomposable_scheme_in_composite_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="composite gravity_wave_drag"):
+            ExperimentConfig(
+                gravity_wave_drag="mcfarlane+e3sm_cam"
+            ).validate_strict()

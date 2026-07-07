@@ -263,3 +263,49 @@ def test_convective_rain_reaches_surface_precip_832(setup):
         "with precip_efficiency=0 the convective rain split must be OFF (no "
         "dq_r_conv_dt), so surface precip stays zero under microphysics='none'"
     )
+
+
+def test_pipeline_stateless_gwd_composite_runs_and_sums(setup):
+    """#834 (codex adversarial finding 1): a stateless '+'-composite
+    (``hines+mcfarlane``) through the coupler ``PhysicsPipeline`` must set
+    ``_gwd_composite`` (NOT ``_gwd_prognostic``), unpack the combined executor's
+    ``(GWDOutput, None)`` tuple in the composite branch, and sum both sources'
+    momentum tendencies.  Regresses the ``TypeError: _combined_gwd() missing 1
+    required positional argument: 'spectrum_in'`` that the plain single-return
+    else-path raised before the fix.
+    """
+    grid, sigma, f, state = setup
+
+    def _gwd_step(scheme):
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
+            dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+            convection="none", radiation="none", microphysics="none",
+            gravity_wave_drag=scheme,
+        )
+        config.validate_strict()
+        pipe = build_physics_pipeline(grid, sigma, config)
+        out = pipe.physics_step_no_rad(
+            f["T"], f["p_s"], f["q_v"], f["q_c"], f["q_r"], None,
+            f["u"], f["v"], f["sst"], f["sic"], f["lat"], DT,
+            f["z3"], f["z2"], f["z2"], f["z2"], f["z2"], f["z2"],
+        )
+        return pipe, out
+
+    pipe_c, out_c = _gwd_step("hines+mcfarlane")
+    # The flag wiring that routes to the composite (tuple-unpacking) branch.
+    assert pipe_c._gwd_composite is True
+    assert pipe_c._gwd_prognostic is False
+    # Runs without the pre-fix TypeError and stays finite.
+    assert bool(jnp.all(jnp.isfinite(out_c.du_dt)))
+    assert bool(jnp.all(jnp.isfinite(out_c.dv_dt)))
+
+    # Driver-path sum contract: composite GWD tendency == hines + mcfarlane,
+    # each measured against the no-GWD baseline (exact arithmetic regardless of
+    # how strongly either source is active on this column).
+    _, out_h = _gwd_step("hines")
+    _, out_m = _gwd_step("mcfarlane")
+    _, out_n = _gwd_step("none")
+    du_composite = out_c.du_dt - out_n.du_dt
+    du_sum = (out_h.du_dt - out_n.du_dt) + (out_m.du_dt - out_n.du_dt)
+    assert jnp.allclose(du_composite, du_sum, atol=1e-10)

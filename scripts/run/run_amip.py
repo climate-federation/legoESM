@@ -523,9 +523,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gravity-wave-drag", type=str, default="mcfarlane",
                         help="GWD scheme: none, rayleigh, lindzen, mcfarlane, "
                              "hines, prognostic_spectral, ml_emulator, or a "
-                             "'+'-joined composite of the diagnostic sources "
-                             "(e.g. 'hines+mcfarlane' to run non-orographic + "
-                             "orographic together). Validated in ExperimentConfig.")
+                             "'+'-joined composite whose source tendencies are "
+                             "summed. Composable parts: rayleigh, lindzen, "
+                             "mcfarlane, hines, and (as the single stateful "
+                             "member) prognostic_spectral — e.g. "
+                             "'mcfarlane+prognostic_spectral' to run orographic "
+                             "+ non-orographic GWD together (issue #834), or "
+                             "'hines+mcfarlane'. Validated in ExperimentConfig.")
     # Tuned air-sea + cloud knobs (the CMIP-realism calibration) — mirror
     # run_coupled so AMIP can run with the SAME tuned slab parameters. Defaults
     # (constant / 0 / None / off) keep the prior AMIP behaviour byte-identical.
