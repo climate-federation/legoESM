@@ -1054,3 +1054,51 @@ def init_multilayer_land_state(
         ice_bands=ice_bands,
         canopy_state=canopy_state,
     )
+
+
+def aridity_theta_init(rh_surface, theta_wp, theta_fc):
+    """Aridity-aware initial soil moisture from near-surface relative humidity.
+
+    Cold-starting the deep Richards column at the moisture-uniform
+    ``0.5 * theta_sat`` default (a soil *porosity* fraction, aridity-blind)
+    leaves subtropical deserts holding rainforest-scale water — ~375 kg/m^2 in a
+    3 m column.  A hot bare-soil skin then drives runaway *potential*
+    evaporation: the supply limiter never binds because the water is there, the
+    atmosphere moistens without bound, and the coupled AMIP run blows up after
+    ~a week (issue #730, day-8 non-finite winds).
+
+    Anchor the initial plant-available water to atmospheric aridity instead.  Map
+    the near-surface relative humidity of the IC atmosphere linearly into the
+    plant-available range ``[theta_wp, theta_fc]``::
+
+        theta_init = theta_wp + clip(rh_surface, 0, 1) * (theta_fc - theta_wp)
+
+    Arid columns (low near-surface RH) start near the wilting point, so from step
+    one the root-zone ``beta`` is at its floor (``beta`` multiplies
+    ``q_sat(T_skin)`` in the surface specific humidity) AND the extractable water
+    is small — the evaporation limiter binds immediately.  Humid columns start
+    near field capacity (the physical drained equilibrium).
+
+    ``theta_wp`` / ``theta_fc`` MUST be the SAME per-column thresholds the tile's
+    ``beta`` reads (``LandSurfaceParams.theta_wp`` / ``theta_fc``) so the seed is
+    consistent with the running physics.  CLM setup enforces
+    ``theta_fc > theta_wp``, and physically ``theta_wp >= theta_r``, so the result
+    lies in ``[theta_wp, theta_fc] ⊂ [theta_r, theta_sat]`` — a valid Richards
+    state for ``psi_from_theta``.
+
+    Parameters
+    ----------
+    rh_surface : array
+        Near-surface relative-humidity proxy ``q_v / q_sat`` (per column).
+        Clipped to ``[0, 1]``.
+    theta_wp, theta_fc : array or float
+        Per-column wilting-point / field-capacity volumetric water content
+        [m^3/m^3].
+
+    Returns
+    -------
+    array
+        Per-column initial volumetric water content (broadcast of the inputs).
+    """
+    rh = jnp.clip(rh_surface, 0.0, 1.0)
+    return theta_wp + rh * (theta_fc - theta_wp)

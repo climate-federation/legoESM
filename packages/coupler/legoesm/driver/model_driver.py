@@ -1469,7 +1469,8 @@ class ModelDriver:
         NOT silently degrade to the slab (that would run different land physics
         silently, the issue-#405 bug class)."""
         import numpy as _np
-        from legoesm.land import init_multilayer_land_state
+        from legoesm.land import init_multilayer_land_state, aridity_theta_init
+        from legoesm.thermo import saturation_mixing_ratio
         from legoesm.land.clm_surface_map import (
             load_clm_surface, download_clm_surfdata, clm_multilayer_setup,
         )
@@ -1555,13 +1556,40 @@ class ModelDriver:
         ncol = lat_deg.shape[0]
         T_init = ad.flatten_2d(self.state.T.data[..., -1]).reshape(-1).astype(
             storage_dtype)
-        # Soil-moisture cold-start = frac * theta_sat (#730; default 0.5 is
-        # byte-identical to the init default).  A drier start can break the
-        # multilayer over-evaporation wet loop.
+        # Aridity-aware cold-start soil moisture (#730 / #837).  Seed theta from
+        # the near-surface RH of the IC atmosphere, mapped into the per-column
+        # plant-available range [theta_wp, theta_fc] the tile's beta reads
+        # (params.theta_wp/theta_fc from clm_multilayer_setup).  The legacy
+        # moisture-uniform 0.5*theta_sat seed leaves subtropical deserts
+        # rainforest-wet, so a hot bare-soil skin drives a runaway
+        # potential-evaporation blowup (~day 8).  RH here uses the model's own
+        # saturation_mixing_ratio -- the SAME law the land bulk flux uses -- so it
+        # is consistent with the running physics (q_v is the atmospheric lowest
+        # level; p_s is a close proxy for the lowest-level pressure).  Fall back to
+        # the frac*theta_sat uniform seed (``land_soil_moisture_init_frac``) only
+        # when the IC carries no q_v tracer (the aridity map needs RH).
+        _qv = self.q_v  # canonical tracer store: raw (...,nlev) array, same column
+        # layout as self.state.T.data; populated by both the analytical and ERA5 IC.
+        if _qv is not None:
+            q_v_low = ad.flatten_2d(
+                getattr(_qv, "data", _qv)[..., -1]).reshape(-1).astype(storage_dtype)
+            p_s = ad.flatten_2d(
+                getattr(self.state.p_s, "data", self.state.p_s)).reshape(-1).astype(
+                    storage_dtype)
+            rh_low = q_v_low / jnp.maximum(
+                saturation_mixing_ratio(T_init, p_s), 1e-12)
+            theta_wp = jnp.asarray(getattr(params, "theta_wp", cfg.theta_wp))
+            theta_fc = jnp.asarray(getattr(params, "theta_fc", cfg.theta_fc))
+            theta_init = aridity_theta_init(
+                rh_low, theta_wp, theta_fc).reshape(-1, 1).astype(storage_dtype)
+        else:
+            theta_init = (self.config.land_soil_moisture_init_frac
+                          * cfg.hydraulics.theta_sat)
+            logger.warning(
+                "  Land tile: IC has no q_v tracer; multilayer soil seeded at "
+                "land_soil_moisture_init_frac*theta_sat (aridity-aware skipped).")
         self._land_ml_state = init_multilayer_land_state(
-            ncol, cfg, T_init=T_init,
-            theta_init=(self.config.land_soil_moisture_init_frac
-                        * cfg.hydraulics.theta_sat))
+            ncol, cfg, T_init=T_init, theta_init=theta_init)
         logger.info(
             "  Land tile: MULTILAYER override ACTIVE (%d soil layers, %d columns)",
             cfg.soil_grid.n_layers, ncol,
