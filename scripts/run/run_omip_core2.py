@@ -3295,6 +3295,12 @@ def main() -> int:
         runoff_monthly = load_runoff_monthly(
             grid, app_grid_type, lat2d, lon2d, args.mesh,
             land_mask=np.asarray(state.land_mask.data), spread_passes=_spread)
+    if ((args.runoff_dep_max is not None or args.runoff_rnf_max is not None)
+            and not args.runoff_depth_nemo_ini):
+        raise SystemExit(
+            "--runoff-dep-max/--runoff-rnf-max require --runoff-depth-nemo-ini "
+            "(they override the NEMO ln_rnf_depth_ini map; without it they would "
+            "silently do nothing).")
     if args.runoff_depth_nemo_ini:
         # NEMO ln_rnf_depth_ini: per-cell spread depth from the runoff
         # climatology maximum — small Arctic rivers stay near-surface
