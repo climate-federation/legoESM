@@ -35,6 +35,11 @@ discretization: latlon_cgrid
 resolution: 24              # n_lat (lat-lon: resolution == number of latitudes)
 nlev: 20
 dt: 600.0                  # driver auto-clamps to the pole-cell CFL on lat-lon
+# Top-of-atmosphere Rayleigh sponge (#836): the hydrostatic latlon-cgrid dycore
+# has no top sponge; without it, aggressive cloud-thinning calibration levers
+# (rh_crit, conv_cloud_condensate) blow up at ~day 7 (waves reflecting off the
+# rigid ~35 hPa lid -> non-finite winds).  Enable it so the model top absorbs.
+sponge_enabled: true
 # time_integrator: 'auto' (default) -> ssp_rk3 (non-scan) on lat-lon.  NOT
 # ssp_rk3_scan: its lax.scan carry enforces dtype equality and the latlon-cgrid
 # dycore emits a float64 p_s tendency against the float32 state (precision

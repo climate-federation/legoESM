@@ -808,6 +808,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "that avoids the stable flux collapse; "
                              "'grachev2007_sheba'/'gryanik2020' = SHEBA strong-"
                              "stable forms. Unstable branch stays Businger-Dyer.")
+    parser.add_argument("--sponge", action="store_true", default=False,
+                        dest="sponge_enabled",
+                        help="Enable the top-of-atmosphere Rayleigh sponge "
+                             "(#836): damping that increases toward the model "
+                             "lid to absorb upward-propagating gravity/convective "
+                             "waves the hydrostatic latlon-cgrid dycore otherwise "
+                             "reflects off the rigid top. Off by default.")
+    parser.add_argument("--sponge-coeff-per-day", type=float, default=None,
+                        dest="sponge_coeff_per_day",
+                        help="Rayleigh damping rate at the model top [1/day] "
+                             "(ExperimentConfig.sponge_coeff_per_day, default 2.0).")
+    parser.add_argument("--sponge-sigma-top", type=float, default=None,
+                        dest="sponge_sigma_top",
+                        help="Sponge base: sigma below which the sin^2 damping "
+                             "ramps up toward the lid (default 0.15).")
     # --cloud-conv-cloud-max closes the AMIP CLI gap for the existing
     # ExperimentConfig.cloud_conv_cloud_max field (--q-c-diagnostic / --rh-crit /
     # --subgrid-autoconv already ship from run_coupled-mirrored #647 + #613).
@@ -1181,6 +1196,13 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_soil_moisture_init_frac=args.land_soil_moisture_init_frac,
         land_surface_scheme=args.land_surface_scheme,
         surface_stability_scheme=args.surface_stability_scheme,
+        sponge_enabled=args.sponge_enabled,
+        sponge_coeff_per_day=(args.sponge_coeff_per_day
+                              if args.sponge_coeff_per_day is not None
+                              else _EXPERIMENT_DEFAULTS.sponge_coeff_per_day),
+        sponge_sigma_top=(args.sponge_sigma_top
+                          if args.sponge_sigma_top is not None
+                          else _EXPERIMENT_DEFAULTS.sponge_sigma_top),
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         cloud_conv_cloud_condensate=args.conv_cloud_condensate,
