@@ -1114,6 +1114,36 @@ class PhysicsPipeline:
         # column water removed equals the added precip (mass-conserving).
         if _ctr.detrains_to_cloud:
             dq_c_dt = dq_c_dt + dq_c_dt_conv
+            # #832: mass-flux schemes (bechtold/tiedtke) SPLIT the detrained
+            # condensate by ``precip_efficiency``: ``dq_c_conv_dt`` = anvil cloud
+            # (added to q_c above -> microphysics next step) and ``dq_r_conv_dt``
+            # = in-updraft rain that falls out THIS step.  The pipeline consumed
+            # ONLY ``dq_c_conv_dt``, so the rain fraction (default 70%) vanished
+            # from the water budget while its condensation latent heat stayed in
+            # ``dT_dt_conv`` -> near-zero convective surface precip and an
+            # upper-tropospheric warm drift (detrainment-level +30 K).
+            # Precipitate the in-updraft rain DIRECTLY (it is already a falling
+            # species, not lingering grid cloud water).
+            #   SIGN: ``dq_r_conv_dt >= 0`` is a rain SOURCE [kg/kg/s] (tiedtke/
+            #     bechtold docstring), so the column-integrated rain formed
+            #     ``sum(dq_r_conv_dt*dp/g) >= 0`` leaves as surface precip
+            #     (positive-down); the ``maximum(.,0)`` is a defensive floor.
+            #   ENERGY: neutral — the condensation latent heat of ALL condensate
+            #     (cloud + rain) is already in ``dT_dt_conv`` (the scheme heated
+            #     on condensation); precipitating the liquid adds no heat.
+            #   MASS: conserving — the vapour sunk by ``dq_v_dt_conv`` equals q_c
+            #     gained (``dq_c_conv_dt``) + rain precipitated (``dq_r_conv_dt``),
+            #     so column-water removed == surface precip added.
+            # None for schemes/efficiencies that emit no separate rain species
+            # (precip_efficiency=0) -> no-op, byte-identical.
+            if conv_out.dq_r_conv_dt is not None:
+                dq_r_dt_conv = ad.unflatten_3d(conv_out.dq_r_conv_dt)
+                _dp_r = p_s[..., None] * (
+                    self.sigma_half[1:] - self.sigma_half[:-1])
+                precip_conv_rain = jnp.maximum(
+                    jnp.sum(dq_r_dt_conv * _dp_r / constants.g, axis=-1),
+                    0.0)  # (..., n, n) kg/m2/s in-updraft rain to the surface
+                precip = precip + precip_conv_rain
         else:
             # Convective precip = the column-net VAPOUR sink of the convective
             # tendency (mass-EXACT for every adjustment scheme: water removed
@@ -2465,6 +2495,16 @@ def _resolve_convection(config):
     else:
         cc = ConvectionConfig(scheme=scheme)
         conv_config = getattr(cc, scheme)
+        # #832: thread the ExperimentConfig convective rain-split knob into the
+        # schemes that support it (currently Tiedtke's ``precip_efficiency`` —
+        # Bechtold has no such field).  Without this the field was DEAD: the
+        # scheme always saw ``precip_efficiency=0`` (no rain split), so
+        # ``dq_r_conv_dt`` was never produced and the in-updraft-rain path (whose
+        # consumption is fixed in ``physics_step_no_rad``) was unreachable.
+        # Default 0.0 keeps the legacy no-split behaviour byte-identical.
+        _pe = getattr(config, "convective_precip_efficiency", 0.0)
+        if scheme == "tiedtke" and hasattr(conv_config, "precip_efficiency"):
+            conv_config = conv_config._replace(precip_efficiency=_pe)
 
     _check_pipeline_convection_supported(scheme, conv_config)
 
