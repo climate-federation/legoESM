@@ -126,6 +126,21 @@ def _total_carbon(carbon_state: CarbonState) -> jnp.ndarray:
     )
 
 
+def _step_doy_hour(step_idx, dt):
+    """Day-of-year and hour-of-day for sub-daily ``step_idx`` at timestep ``dt``.
+
+    The repeating-annual-climate time convention shared by every forward
+    integrator in this module (the transient/verify scans in
+    :func:`run_semi_analytic_spinup` and the raw transient in
+    :func:`integrate_annual_pools`), so the time-of-year mapping is defined
+    ONCE rather than re-derived per caller.
+    """
+    t_day = step_idx * (dt / _SECS_PER_DAY)
+    doy = jnp.mod(t_day, _YEAR_DAYS)
+    hour = jnp.mod(step_idx * dt / _SECS_PER_HOUR, _HOURS_PER_DAY)
+    return doy, hour
+
+
 def run_semi_analytic_spinup(
     step_fn: Callable,
     state0,
@@ -195,9 +210,7 @@ def run_semi_analytic_spinup(
 
     def _inner_step(carry, step_idx):
         state, carbon = carry
-        t_day = step_idx * dt_days
-        doy = jnp.mod(t_day, _YEAR_DAYS)
-        hour = jnp.mod(step_idx * dt / _SECS_PER_HOUR, _HOURS_PER_DAY)
+        doy, hour = _step_doy_hour(step_idx, dt)
         forcing = forcing_fn(doy, hour)
         new_state, new_carbon, diag = step_fn(state, carbon, forcing, doy)
         return (new_state, new_carbon), diag
@@ -251,3 +264,71 @@ def run_semi_analytic_spinup(
     (final_state, final_carbon), annual_verify = jax.lax.scan(
         _year_step, (state_spun, carbon_eq), jnp.arange(n_verify))
     return final_state, final_carbon, annual_verify
+
+
+def integrate_annual_pools(
+    step_fn: Callable,
+    state0,
+    carbon0: CarbonState,
+    forcing_fn: Callable,
+    *,
+    n_years: int,
+    steps_per_year: int,
+    dt: float,
+):
+    """Forward-integrate the coupled step ``n_years`` under the repeating annual
+    ``forcing_fn``, recording the six carbon pools at the END of each year.
+
+    Unlike :func:`run_semi_analytic_spinup` this performs NO analytic slow-pool
+    reset -- it is the RAW transient used to MEASURE how far a given IC drifts
+    from equilibrium (the ``global_carbon_ic_map`` validator runs it from BOTH
+    the mapped archetype-equilibrium IC and a cold IC, then compares drifts).
+    The initial condition is returned as row 0 so the full trajectory
+    (IC -> year ``n_years``) is available to a drift metric.
+
+    Parameters
+    ----------
+    step_fn : callable
+        ``step_fn(state, carbon, forcing, doy) -> (new_state, new_carbon,
+        diag)`` -- the SAME signature :func:`run_semi_analytic_spinup` consumes;
+        ``diag`` is ignored here (only the state/carbon trajectory is kept, and
+        the pools evolve purely through ``new_carbon``).
+    state0, carbon0 :
+        Initial land state (opaque to this driver) and :class:`CarbonState`
+        (both batched over ``ncol`` columns).
+    forcing_fn : callable
+        ``forcing_fn(doy, hour) -> AtmToSurface`` repeating annual climate.
+    n_years : int
+        Number of years to integrate forward.
+    steps_per_year : int
+        Sub-daily steps per model year (``round(seconds_per_year / dt)``).
+    dt : float
+        Sub-daily timestep [s].
+
+    Returns
+    -------
+    dict[str, jnp.ndarray]
+        One ``(n_years + 1, ncol)`` array per pool in ``_POOL_FIELDS``: row 0 is
+        the initial condition, rows ``1..n_years`` the end-of-year pools.
+    """
+    def _inner_step(carry, step_idx):
+        state, carbon = carry
+        doy, hour = _step_doy_hour(step_idx, dt)
+        forcing = forcing_fn(doy, hour)
+        new_state, new_carbon, _diag = step_fn(state, carbon, forcing, doy)
+        return (new_state, new_carbon), None
+
+    def _year_step(carry, _year_idx):
+        (state_end, carbon_end), _ = jax.lax.scan(
+            _inner_step, carry, jnp.arange(steps_per_year))
+        pools = jnp.stack(
+            [getattr(carbon_end, p) for p in _POOL_FIELDS], axis=0)  # (6, ncol)
+        return (state_end, carbon_end), pools
+
+    (_final_state, _final_carbon), pools_seq = jax.lax.scan(
+        _year_step, (state0, carbon0), jnp.arange(n_years))
+    # pools_seq: (n_years, 6, ncol).  Prepend the IC as year 0 so the trajectory
+    # spans the whole run (drift is measured over IC -> final).
+    ic = jnp.stack([getattr(carbon0, p) for p in _POOL_FIELDS], axis=0)
+    allp = jnp.concatenate([ic[None], pools_seq], axis=0)  # (n_years+1, 6, ncol)
+    return {p: allp[:, i, :] for i, p in enumerate(_POOL_FIELDS)}

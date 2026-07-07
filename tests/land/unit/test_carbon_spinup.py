@@ -12,6 +12,7 @@ from legoesm.land.carbon.config import CarbonDiagnostics, CarbonState
 from legoesm.land.carbon.spinup import (
     SlowPoolFluxes,
     analytic_slow_pool_equilibrium,
+    integrate_annual_pools,
     run_semi_analytic_spinup,
 )
 
@@ -173,6 +174,43 @@ class TestRunSemiAnalyticSpinup(unittest.TestCase):
         self.assertEqual(fc.C_som.shape, (3,))
         npt.assert_allclose(np.asarray(fc.C_wood), 2000.0, rtol=1e-6)
         self.assertEqual(np.asarray(annual["gpp"]).shape, (2, 3))
+
+
+class TestIntegrateAnnualPools(unittest.TestCase):
+    """Raw forward integrator (NO analytic reset) with the frozen-carbon toy:
+    per-year pools are recorded with the IC as row 0, so a drift metric over the
+    trajectory reads ~0 when the carbon is frozen."""
+
+    def test_frozen_carbon_flat_series_with_ic_row(self):
+        ncol = 2
+        steps_per_year = 4
+        dt = 365.0 * 86400.0 / steps_per_year
+        carbon0 = CarbonState(
+            C_lab=jnp.full((ncol,), 100.0), C_fol=jnp.full((ncol,), 200.0),
+            C_root=jnp.full((ncol,), 300.0), C_wood=jnp.full((ncol,), 1000.0),
+            C_lit=jnp.full((ncol,), 400.0), C_som=jnp.full((ncol,), 5000.0))
+        state0 = jnp.zeros((ncol,))  # opaque dummy state
+
+        def forcing_fn(doy, hour):
+            return None
+
+        def step_fn(state, carbon, forcing, doy):
+            return state, carbon, _const_diag(ncol)  # carbon frozen
+
+        n_years = 3
+        out = integrate_annual_pools(
+            step_fn, state0, carbon0, forcing_fn,
+            n_years=n_years, steps_per_year=steps_per_year, dt=dt)
+        for p in ("C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som"):
+            arr = np.asarray(out[p])
+            # One (n_years+1, ncol) array per pool; row 0 == the IC.
+            self.assertEqual(arr.shape, (n_years + 1, ncol), p)
+            npt.assert_allclose(arr[0], np.asarray(getattr(carbon0, p)),
+                                rtol=1e-6)
+            # Frozen carbon -> every recorded year identical -> zero drift
+            # (broadcast the IC row explicitly; assert_allclose won't).
+            npt.assert_allclose(arr, np.broadcast_to(arr[0], arr.shape),
+                                rtol=1e-6)
 
 
 if __name__ == "__main__":

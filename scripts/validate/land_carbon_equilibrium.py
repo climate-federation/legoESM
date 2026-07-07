@@ -53,6 +53,7 @@ from legoesm.land.surface_params import (
 from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.carbon.stomata import StomataConfig
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
+from legoesm.land.carbon.realism_ranges import LITERATURE_BIOME_RANGES
 from legoesm.land.carbon.spinup import run_semi_analytic_spinup
 from legoesm.land.carbon_diagnostics import reconstruct_carbon_diagnostics
 from legoesm.land.multilayer_land import (
@@ -89,20 +90,12 @@ PIXELS = [
      "loam", 266.0, 1.0e-5, True, "tundra"),
 ]
 
-# Published biome ranges (annual GPP / NPP [gC/m2/yr], live biomass C
-# [kgC/m2], soil organic C to ~1 m [kgC/m2], peak LAI [m2/m2]).  Sources:
-# Beer et al. 2010 (GPP); Saugier/Roy/Mooney 2001 (NPP, biomass); Jobbagy &
-# Jackson 2000 (SOC); GLASS/MODIS LAI climatology.  These are order-of-
-# magnitude realism gates, not a calibration target.
-LITERATURE = {
-    "tropical_forest":  dict(gpp=(2500, 3500), npp=(900, 1500), biomass=(15, 25), soc=(8, 15),  lai=(4.5, 7.0)),
-    "savanna":          dict(gpp=(1000, 2000), npp=(400, 900),  biomass=(2, 8),   soc=(4, 12),  lai=(1.0, 3.0)),
-    "temperate_forest": dict(gpp=(1200, 2000), npp=(600, 1000), biomass=(8, 18),  soc=(8, 20),  lai=(3.0, 6.0)),
-    "grassland":        dict(gpp=(500, 1300),  npp=(200, 600),  biomass=(0.2, 1.5), soc=(6, 20), lai=(1.0, 3.0)),
-    "boreal_forest":    dict(gpp=(600, 1200),  npp=(200, 500),  biomass=(4, 12),  soc=(10, 30), lai=(1.5, 4.0)),
-    "shrubland":        dict(gpp=(300, 900),   npp=(100, 400),  biomass=(0.5, 4), soc=(3, 10),  lai=(0.5, 2.0)),
-    "tundra":           dict(gpp=(150, 600),   npp=(50, 250),   biomass=(0.2, 1.5), soc=(15, 40), lai=(0.3, 1.5)),
-}
+# Published biome realism ranges (SOC / biomass / GPP / NPP / LAI) are the
+# single-source-of-truth table in ``legoesm.land.carbon.realism_ranges``,
+# shared with the global-carbon-IC-map validator (scripts/validate/
+# global_carbon_ic_map.py).  Aliased to ``LITERATURE`` for this harness's
+# existing call sites (``_biome_carbon_init`` / ``assess_pixel``).
+LITERATURE = LITERATURE_BIOME_RANGES
 
 
 def _pft_row(pft: str) -> dict:

@@ -11,8 +11,12 @@ Two offline stages, both run ONCE (never inside a JAX-traced model step):
   (:func:`legoesm.land.carbon.spinup.run_semi_analytic_spinup`), batching
   archetypes that share ``(is_woody, soil_class)`` into ONE vectorised
   ``step_multilayer_land`` column-block (few JAX compiles, not one per
-  archetype).  The heavy JAX / land-model imports are deferred into that
-  function so Stage-A callers stay numpy-only.
+  archetype).  The per-group construction (:func:`iter_archetype_batches`) and
+  the coupled step (:func:`make_archetype_step_fn`) are factored into shared
+  helpers so the drift/realism validator (``scripts/validate/
+  global_carbon_ic_map.py``) re-integrates the IDENTICAL step without copying
+  the config / physiology / forcing build.  The heavy JAX / land-model imports
+  are deferred into those functions so Stage-A callers stay numpy-only.
 """
 
 from __future__ import annotations
@@ -182,6 +186,195 @@ def build_archetypes(pft_weights, features, soil_class, land_mask, *,
     return table, cell_id, cell_w
 
 
+class ArchetypeBatch(NamedTuple):
+    """One ``(is_woody, soil_class)`` GROUP's shared coupled-step construction.
+
+    Produced by :func:`iter_archetype_batches` and consumed BOTH by
+    :func:`equilibrate_archetypes` and the drift validator
+    (``scripts/validate/global_carbon_ic_map.py``), so the config / per-column
+    physiology / batched forcing are built ONCE, never copied.
+    """
+    config: object          # MultiLayerLandConfig (scalar per group)
+    land_params: object     # LandSurfaceParams, per-column (ncol_g,) arrays
+    forcing_fn: object       # callable(doy, hour) -> AtmToSurface (batched)
+    g_idx: np.ndarray       # (ncol_g,) archetype indices in table order
+    steps_per_year: int     # round(seconds_per_year / dt)
+    t_init: object          # (ncol_g,) land-state initial temperature [K]
+
+
+def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt):
+    """Build the per-``(is_woody, soil_class)`` GROUP construction shared by the
+    archetype equilibration (:func:`equilibrate_archetypes`) and the drift
+    validator (``scripts/validate/global_carbon_ic_map.py``).
+
+    Both must run the IDENTICAL coupled land+carbon step from a given IC, so
+    the ``MultiLayerLandConfig``, the per-column ``LandSurfaceParams`` (CLM5 PFT
+    physiology), and the ``vmap``-batched climatological ``forcing_fn`` are
+    built ONCE here rather than copied into each caller.  Archetypes are grouped
+    by ``(is_woody, soil_class)`` -- the only two config knobs that must be
+    scalar per group (the ``carbon.woody`` flag and the soil hydraulics) -- so
+    each group is one vectorised ``step_multilayer_land`` column-block; the
+    per-archetype PFT physiology and climate ride along as per-column arrays.
+
+    Parameters
+    ----------
+    table : ArchetypeTable
+        Stage-A archetypes (``pft_id`` indexes ``CLM5_PFT_NAMES``;
+        ``soil_class`` keys ``SOIL_TEXTURE_VG``).
+    n_layers : int
+        Soil layers.
+    soil_depth : float
+        Soil column depth [m].
+    dt : float
+        Sub-daily timestep [s] (sets ``steps_per_year``).
+
+    Returns
+    -------
+    list[ArchetypeBatch]
+        One batch per group; the union of the ``g_idx`` arrays covers every
+        archetype exactly once (table order preserved within a group).
+    """
+    # Deferred (function-scope) imports: keep Stage-A / module import numpy-only.
+    import jax
+    import jax.numpy as jnp
+
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.soil_grid import SoilGridConfig
+    from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
+    from legoesm.land.soil_thermal import SoilThermalConfig
+    from legoesm.land.richards import RichardsConfig
+    from legoesm.land.soil_texture import SOIL_TEXTURE_VG
+    from legoesm.land.surface_params import (
+        CLM5_PFT_NAMES, PARAM_NAMES, array_to_params, clm5_pft_table,
+    )
+    from legoesm.land.carbon.config import CarbonConfig
+    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.climate_forcing import make_climatological_forcing
+
+    pft_id = np.asarray(table.pft_id, int)
+    soil_class = np.asarray(table.soil_class, dtype=object)
+    mat_k = np.asarray(table.mat_k, float)
+    map_yr = np.asarray(table.map_yr, float)
+    t_seas = np.asarray(table.t_seasonal_amp_k, float)
+    sw_mean = np.asarray(table.sw_mean_w, float)
+    n_arch = pft_id.shape[0]
+    steps_per_year = int(round(_SECONDS_PER_YEAR / dt))
+    pft_table = clm5_pft_table()  # (n_pft, 12) in PARAM_NAMES column order
+
+    def _build_forcing_fn(mat_g, tamp_g, sw_g, precip_g):
+        """Per-group batched climatological forcing.  The group's climate is
+        bound as fn ARGS (not captured from the loop) so late binding cannot
+        collapse every group's forcing onto the last group."""
+        def forcing_fn(doy, hour):
+            # vmap the single-column climate forcing over the group's
+            # archetypes, then drop the trailing length-1 column axis.
+            batched = jax.vmap(
+                make_climatological_forcing, in_axes=(0, 0, 0, 0, None, None),
+            )(mat_g, tamp_g, sw_g, precip_g, doy, hour)
+            return jax.tree.map(
+                lambda x: jnp.squeeze(x, axis=1) if x.ndim >= 2 else x, batched)
+        return forcing_fn
+
+    # Group archetypes by (woody, soil_class) -> a shared scalar config,
+    # preserving table order within each group.
+    groups: dict = {}
+    for a in range(n_arch):
+        key = (_is_woody(CLM5_PFT_NAMES[pft_id[a]]), str(soil_class[a]))
+        groups.setdefault(key, []).append(a)
+
+    batches: list[ArchetypeBatch] = []
+    for (group_woody, soil), members in groups.items():
+        g_idx = np.asarray(members, int)
+        config = MultiLayerLandConfig(
+            bulk_scheme="most",
+            snow_albedo_feedback=True,
+            soil_grid=SoilGridConfig(
+                n_layers=n_layers, total_depth=soil_depth,
+                growth_factor=_SOIL_GROWTH_FACTOR),
+            hydraulics=SoilHydraulicsConfig(**SOIL_TEXTURE_VG[soil]),
+            thermal=SoilThermalConfig(),
+            richards=RichardsConfig(),
+            carbon=CarbonConfig(
+                scheme="differland", woody=group_woody,
+                C_lab_init=_C_LAB_SEED, C_fol_init=_C_FOL_SEED,
+                C_root_init=_C_ROOT_SEED, C_wood_init=_C_WOOD_SEED,
+                C_lit_init=_C_LIT_SEED, C_som_init=_C_SOM_SEED),
+            stomata=StomataConfig(enabled=True, stomata_model="ball_berry"),
+        )
+        # Per-archetype PFT physiology -> per-column LandSurfaceParams.  The
+        # CLM5 table rows are column-for-column PARAM_NAMES, so array_to_params
+        # populates exactly the fields step_multilayer_land / compute_effective_
+        # beta read (Vc_max25, LCMA, g1, root_depth, theta_wp, theta_fc,
+        # albedo_veg, emissivity, z0).
+        rows = pft_table[jnp.asarray(pft_id[g_idx])]  # (ncol_g, 12)
+        land_params = array_to_params(rows, PARAM_NAMES)
+        # Per-archetype climate (static per column).
+        mat_g = jnp.asarray(mat_k[g_idx])
+        tamp_g = jnp.asarray(t_seas[g_idx])
+        sw_g = jnp.asarray(sw_mean[g_idx])
+        precip_g = jnp.asarray(map_yr[g_idx] / _SECONDS_PER_YEAR)
+        forcing_fn = _build_forcing_fn(mat_g, tamp_g, sw_g, precip_g)
+        # Archetypes carry no hemisphere; the land-state initial temperature is
+        # the group mean-annual temperature (matches the NH-phased forcing).
+        batches.append(ArchetypeBatch(
+            config=config, land_params=land_params, forcing_fn=forcing_fn,
+            g_idx=g_idx, steps_per_year=steps_per_year, t_init=mat_g))
+    return batches
+
+
+def make_archetype_step_fn(config, land_params, *, dt):
+    """Build the coupled land+carbon step for one archetype batch.
+
+    Returns ``step_fn(state, carbon, forcing, doy) -> (new_state, new_carbon,
+    diag)``: it advances ``step_multilayer_land`` (state + carbon) and
+    reconstructs the carbon-flux breakdown consistently (the SAME per-column
+    ``land_params`` GPP the coupled step used).  Shared by
+    :func:`equilibrate_archetypes` (whose semi-analytic solve reads ``diag``)
+    and the drift validator (which discards ``diag`` and keeps only the
+    state/carbon trajectory), so BOTH run the byte-identical coupled step.
+
+    Note: the state/carbon evolution is driven PURELY by
+    ``step_multilayer_land``; ``diag`` is diagnostic only (it never feeds the
+    update), so a caller that needs only the pool trajectory still integrates
+    the exact same dynamics.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.land.soil_grid import make_soil_grid
+    from legoesm.land.carbon_diagnostics import reconstruct_carbon_diagnostics
+    from legoesm.land.multilayer_land import step_multilayer_land
+
+    ncol_g = land_params.root_depth.shape[0]
+    # Archetypes carry no hemisphere; run NH-phased (lat=0) consistently with
+    # the NH-phased climatological forcing.  The equilibrium depends on the
+    # seasonal amplitude + mean, not the phase.
+    lat_g = jnp.zeros(ncol_g)
+    grid = make_soil_grid(config.soil_grid)
+    # Root-density weights matching step_multilayer_land's per-column form
+    # (exp(-z/root_depth), normalised), so the reconstructed beta_soil sees
+    # exactly the model's root profile.
+    root_frac_g = jnp.exp(-grid.z_node[None, :] / land_params.root_depth[:, None])
+    root_frac_g = root_frac_g / jnp.sum(root_frac_g, axis=-1, keepdims=True)
+    theta_wp_g = land_params.theta_wp
+    theta_fc_g = land_params.theta_fc
+    beta_min = config.beta_min
+
+    def step_fn(state, carbon, forcing, doy):
+        new_state, _response, carbon_new = step_multilayer_land(
+            state, forcing, config, _U_MIN, dt,
+            lat=lat_g, carbon_state=carbon, doy=doy, land_params=land_params)
+        # Reconstruct the flux breakdown consistently with the model: pass
+        # land_params so the GPP override uses the SAME per-archetype
+        # Vc_max25/g1/LCMA the coupled step used.
+        diag = reconstruct_carbon_diagnostics(
+            new_state, forcing, carbon, config, root_frac_g,
+            theta_wp_g, theta_fc_g, beta_min, lat_g, doy, dt,
+            spatial=True, land_params=land_params)
+        return new_state, carbon_new, diag
+
+    return step_fn
+
+
 def equilibrate_archetypes(
     table: ArchetypeTable,
     *,
@@ -235,139 +428,38 @@ def equilibrate_archetypes(
         over the verify segment (a drift near 0 confirms the equilibrium).
     """
     # Deferred (function-scope) imports: keep Stage-A / module import numpy-only.
-    import jax
+    # The per-group construction (config / land_params / forcing) and the
+    # coupled step now live in the SHARED helpers below (also used by the drift
+    # validator), so this function only orchestrates + scatters.
     import jax.numpy as jnp
 
-    from legoesm.land.config import MultiLayerLandConfig
-    from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
-    from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
-    from legoesm.land.soil_thermal import SoilThermalConfig
-    from legoesm.land.richards import RichardsConfig
-    from legoesm.land.soil_texture import SOIL_TEXTURE_VG
-    from legoesm.land.surface_params import (
-        CLM5_PFT_NAMES, PARAM_NAMES, array_to_params, clm5_pft_table,
-    )
-    from legoesm.land.carbon.config import CarbonConfig, CarbonState
-    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.carbon.config import CarbonState
     from legoesm.land.carbon.carbon_cycle import init_carbon_state
     from legoesm.land.carbon.spinup import run_semi_analytic_spinup
-    from legoesm.land.carbon_diagnostics import reconstruct_carbon_diagnostics
-    from legoesm.land.climate_forcing import make_climatological_forcing
-    from legoesm.land.multilayer_land import (
-        step_multilayer_land, init_multilayer_land_state,
-    )
+    from legoesm.land.multilayer_land import init_multilayer_land_state
 
-    pft_id = np.asarray(table.pft_id, int)
-    soil_class = np.asarray(table.soil_class, dtype=object)
-    mat_k = np.asarray(table.mat_k, float)
-    map_yr = np.asarray(table.map_yr, float)
-    t_seas = np.asarray(table.t_seasonal_amp_k, float)
-    sw_mean = np.asarray(table.sw_mean_w, float)
-    n_arch = pft_id.shape[0]
-
-    steps_per_year = int(round(_SECONDS_PER_YEAR / dt))
+    n_arch = np.asarray(table.pft_id, int).shape[0]
     pool_fields = CarbonState._fields  # ("C_lab", ..., "C_som")
-    pft_table = clm5_pft_table()  # (n_pft, 12) in PARAM_NAMES column order
-
-    def _equilibrate_group(g_idx, group_woody, soil):
-        """Spin ONE (woody, soil) group's archetypes as a vectorised block.
-
-        ``g_idx`` are the group's archetype indices; returns
-        ``(final_carbon, annual)`` from :func:`run_semi_analytic_spinup`.  All
-        closures below capture these FUNCTION-LOCAL values (not loop
-        variables), so the per-step JAX callbacks are well-defined.
-        """
-        ncol_g = g_idx.shape[0]
-        config = MultiLayerLandConfig(
-            bulk_scheme="most",
-            snow_albedo_feedback=True,
-            soil_grid=SoilGridConfig(
-                n_layers=n_layers, total_depth=soil_depth,
-                growth_factor=_SOIL_GROWTH_FACTOR),
-            hydraulics=SoilHydraulicsConfig(**SOIL_TEXTURE_VG[soil]),
-            thermal=SoilThermalConfig(),
-            richards=RichardsConfig(),
-            carbon=CarbonConfig(
-                scheme="differland", woody=group_woody,
-                C_lab_init=_C_LAB_SEED, C_fol_init=_C_FOL_SEED,
-                C_root_init=_C_ROOT_SEED, C_wood_init=_C_WOOD_SEED,
-                C_lit_init=_C_LIT_SEED, C_som_init=_C_SOM_SEED),
-            stomata=StomataConfig(enabled=True, stomata_model="ball_berry"),
-        )
-
-        # Per-archetype PFT physiology -> per-column LandSurfaceParams.  The
-        # CLM5 table rows are column-for-column PARAM_NAMES, so array_to_params
-        # populates exactly the fields step_multilayer_land / compute_effective_
-        # beta read (Vc_max25, LCMA, g1, root_depth, theta_wp, theta_fc,
-        # albedo_veg, emissivity, z0).
-        rows = pft_table[jnp.asarray(pft_id[g_idx])]  # (ncol_g, 12)
-        land_params = array_to_params(rows, PARAM_NAMES)
-
-        # Per-archetype climate (static per column).
-        mat_g = jnp.asarray(mat_k[g_idx])
-        tamp_g = jnp.asarray(t_seas[g_idx])
-        sw_g = jnp.asarray(sw_mean[g_idx])
-        precip_g = jnp.asarray(map_yr[g_idx] / _SECONDS_PER_YEAR)
-        # Archetypes carry no hemisphere; run NH-phased (lat=0, no phenology
-        # flip) consistently with the NH-phased climatological forcing.  The
-        # equilibrium depends on the seasonal AMPLITUDE + mean, not the phase.
-        lat_g = jnp.zeros(ncol_g)
-
-        # Root-density weights matching step_multilayer_land's per-column form
-        # (exp(-z/root_depth), normalised), so the reconstructed beta_soil sees
-        # exactly the model's root profile.
-        grid = make_soil_grid(config.soil_grid)
-        root_depth_c = land_params.root_depth
-        root_frac_g = jnp.exp(-grid.z_node[None, :] / root_depth_c[:, None])
-        root_frac_g = root_frac_g / jnp.sum(root_frac_g, axis=-1, keepdims=True)
-        theta_wp_g = land_params.theta_wp
-        theta_fc_g = land_params.theta_fc
-        beta_min = config.beta_min
-
-        def forcing_fn(doy, hour):
-            # vmap the single-column climate forcing over the group's archetypes,
-            # then drop the trailing length-1 column axis -> (ncol_g,) fields.
-            batched = jax.vmap(
-                make_climatological_forcing, in_axes=(0, 0, 0, 0, None, None),
-            )(mat_g, tamp_g, sw_g, precip_g, doy, hour)
-            return jax.tree.map(
-                lambda x: jnp.squeeze(x, axis=1) if x.ndim >= 2 else x, batched)
-
-        def step_fn(state, carbon, forcing, doy):
-            new_state, _response, carbon_new = step_multilayer_land(
-                state, forcing, config, _U_MIN, dt,
-                lat=lat_g, carbon_state=carbon, doy=doy, land_params=land_params)
-            # Reconstruct the flux breakdown consistently with the model: pass
-            # land_params so the GPP override uses the SAME per-archetype
-            # Vc_max25/g1/LCMA the coupled step used.
-            diag = reconstruct_carbon_diagnostics(
-                new_state, forcing, carbon, config, root_frac_g,
-                theta_wp_g, theta_fc_g, beta_min, lat_g, doy, dt,
-                spatial=True, land_params=land_params)
-            return new_state, carbon_new, diag
-
-        state0 = init_multilayer_land_state(ncol_g, config, T_init=mat_g)
-        carbon0 = init_carbon_state((ncol_g,), config.carbon)
-        _final_state, final_carbon, annual = run_semi_analytic_spinup(
-            step_fn, state0, carbon0, forcing_fn,
-            n_spinup=n_spinup, n_verify=n_verify, steps_per_year=steps_per_year,
-            dt=dt, cwd_humification_eff=config.carbon.cwd_humification_eff)
-        return final_carbon, annual
-
-    # Group archetypes by (woody, soil_class) -> a shared scalar config.
-    groups: dict = {}
-    for a in range(n_arch):
-        key = (_is_woody(CLM5_PFT_NAMES[pft_id[a]]), str(soil_class[a]))
-        groups.setdefault(key, []).append(a)
+    batches = iter_archetype_batches(
+        table, n_layers=n_layers, soil_depth=soil_depth, dt=dt)
 
     # Archetype-ordered output accumulators (scattered per group via g_idx).
     pools_out = {p: np.zeros(n_arch) for p in pool_fields}
     qc = {k: np.zeros(n_arch)
           for k in ("gpp", "npp", "som_kgC", "biomass_kgC", "drift_frac_per_yr")}
 
-    for (group_woody, soil), members in groups.items():
-        g_idx = np.asarray(members, int)
-        final_carbon, annual = _equilibrate_group(g_idx, group_woody, soil)
+    for batch in batches:
+        g_idx = batch.g_idx
+        ncol_g = g_idx.shape[0]
+        step_fn = make_archetype_step_fn(batch.config, batch.land_params, dt=dt)
+        state0 = init_multilayer_land_state(
+            ncol_g, batch.config, T_init=batch.t_init)
+        carbon0 = init_carbon_state((ncol_g,), batch.config.carbon)
+        _final_state, final_carbon, annual = run_semi_analytic_spinup(
+            step_fn, state0, carbon0, batch.forcing_fn,
+            n_spinup=n_spinup, n_verify=n_verify,
+            steps_per_year=batch.steps_per_year, dt=dt,
+            cwd_humification_eff=batch.config.carbon.cwd_humification_eff)
 
         # Scatter the verified equilibrium pools back to archetype order.
         for p in pool_fields:
