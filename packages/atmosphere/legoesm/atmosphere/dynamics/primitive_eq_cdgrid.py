@@ -613,9 +613,8 @@ def fv3_hydrostatic_tendencies(
 
         # FV3_3D iter 18: del-(2*(nord+1)) damping (FV3 sw_core.F90:1725-1822, nord>0 path)
         # dd8 = (da_min_c*d4_bg)^(nord+1); ke_corr = damp2*delpc + dd8*divg_d
-        # FV3_3D iter 893: nord-loop preserved inline (1-ULP trace-reorder
-        # diff vs fv3_corner_laplacian_nord wrapper would break iter-22
-        # bit-for-bit test).  The wrapper is for unit tests only.
+        # FV3_3D iter 893: nord-loop preserved inline (a 1-ULP trace-reorder
+        # would break the iter-22 bit-for-bit test).
         if config.corner_div_damp_d4_bg > 0.0 and config.corner_div_damp_nord > 0:
             from legoesm.core._fv3_divergence_corner import (
                 fv3_corner_laplacian_iteration,

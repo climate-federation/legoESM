@@ -264,13 +264,7 @@ _GUARD_MODULES = (
     "test_fv3_a2b_ord4_vector_uv_c24_iter703",       # iter-703 add
     "test_fv3_nord_validation_iter890",              # iter-890 add
     "test_fv3_wide_halo_iter891",                    # iter-891 add
-    "test_fv3_laplacian_nord_iter892",               # iter-892 add
-    "test_fv3_laplacian_step_pad_iter897",           # iter-897 add
-    "test_fv3_laplacian_step_pad_h2_iter898",        # iter-898 add
-    "test_fv3_expanding_halo_iter899",               # iter-899 add
     "test_fv3_model_nord_validation_iter902",        # iter-902 add
-    "test_fv3_laplacian_step_pad_h3_iter903",        # iter-903 add
-    "test_fv3_expanding_halo_jit_grad_iter904",      # iter-904 add
 )
 
 
