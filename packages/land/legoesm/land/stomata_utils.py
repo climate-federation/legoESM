@@ -16,11 +16,12 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.core.coupling_fields import AtmToSurface
+from legoesm.land.canopy.sif import leaf_sif
 from legoesm.land.carbon.config import CarbonState
 from legoesm.land.carbon.stomata import (
-    coupled_farquhar_stomata,
     compute_stomatal_beta,
     jarvis_gs,
+    solve_coupled_farquhar_ci,
 )
 
 
@@ -32,7 +33,7 @@ def compute_effective_beta(
     carbon_state: CarbonState | None,
     dt: float,
     land_params=None,
-) -> tuple[jnp.ndarray, jnp.ndarray | None]:
+) -> tuple[jnp.ndarray, jnp.ndarray | None, jnp.ndarray | None]:
     """Compute effective moisture availability beta, with optional stomatal/carbon coupling.
 
     When stomatal conductance is disabled, returns ``beta_soil`` directly.
@@ -62,8 +63,11 @@ def compute_effective_beta(
 
     Returns
     -------
-    (beta, gpp_farq)
-        Effective moisture factor [0-1] and Farquhar GPP [gC/m2/s] or None.
+    (beta, gpp_farq, sif)
+        Effective moisture factor [0-1], Farquhar GPP [gC/m2/s] (or None),
+        and observed top-of-canopy SIF [umol/m2/s] (or None — only the coupled
+        Farquhar path with ``stomata.sif`` set produces it; the Jarvis fallback
+        has no Ci/An to invert).
     """
     # Override stomatal / carbon config fields with spatial arrays if provided.
     if land_params is not None:
@@ -77,16 +81,27 @@ def compute_effective_beta(
         _carbon = config.carbon
 
     gpp_farq = None
+    sif = None
 
     if config.stomata.enabled:
         if config.carbon.scheme == "differland" and carbon_state is not None:
             LAI = carbon_state.C_fol / _carbon.LCMA
-            gs, gpp_farq = coupled_farquhar_stomata(
+            leaf = solve_coupled_farquhar_ci(
                 T_sfc, forcing.sw_down, forcing.co2_ppmv,
                 forcing.q_lowest, forcing.p_surface, LAI, beta_soil,
                 _stomata)
+            gs, gpp_farq = leaf.gs, leaf.gpp
             beta = compute_stomatal_beta(
                 gs, LAI, beta_soil, _stomata)
+            # SIF from the same solve (big-leaf).  Static gate on _stomata.sif.
+            # fesc clamped to [0,1] (a probability) so a hand-set / perturbed
+            # config can't produce negative or amplified SIF. C3-style inversion
+            # (Farquhar here is C3-only), consistent with the big-leaf photosyn.
+            if _stomata.sif is not None:
+                fesc = jnp.clip(_stomata.sif.escape_probability, 0.0, 1.0)
+                sif = leaf_sif(
+                    leaf.A_net, leaf.Ci, leaf.gamma_star, leaf.APAR_umol,
+                    _stomata.sif) * fesc
         else:
             gs = jarvis_gs(
                 T_sfc, forcing.sw_down, forcing.q_lowest,
@@ -96,4 +111,4 @@ def compute_effective_beta(
     else:
         beta = beta_soil
 
-    return beta, gpp_farq
+    return beta, gpp_farq, sif
