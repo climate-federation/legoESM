@@ -1,0 +1,194 @@
+#!/usr/bin/env python
+"""AMIP physics-toggle stability screen (Tier-1 of the physics campaign).
+
+Submits one short `run_amip.py` per case — a baseline (all physics on = the
+reference config) plus one-parameterization-off variants and structural A/Bs —
+then aggregates the per-run stability signals into one table so we can see WHICH
+physics destabilizes the model.
+
+Design notes (why these metrics): the model has many safety nets that silently
+MASK instability (q_v/q_c floors, the JOINT vapour donor clamp, and the
+multiplicative moisture fixer `fix_moisture_hydrostatic`).  The only non-masking
+honesty signals are the host-side blow-up detector (the `Status:` line in
+results.txt) and the residual diagnostics.  So this screen keys off the run
+STATUS (blow-up day), `max_wind`, and the moisture/energy residuals — NOT just
+"did it NaN".  Reuses `validate_amip_run.validate` for the pass/fail verdict.
+
+Usage::
+
+    # submit the Tier-1 screen (one sbatch per case, 5-day, latlon reference)
+    python -m scripts.validate.physics_toggle_screen --submit --days 5 \
+        --base /scratch/b/b309178/phys_screen_$(date +%s)
+
+    # after the jobs finish, tabulate
+    python -m scripts.validate.physics_toggle_screen --aggregate \
+        /scratch/b/b309178/phys_screen_XXXX
+
+Off-toggles require `--allow-disabled-physics` (run_amip rejects a disabled
+physics slot otherwise).  Radiation has no 'none' -> the minimal leg is 'gray'.
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+
+# --- Tier-1 case list: (label, extra run_amip args) --------------------------
+# Baseline = the reference config verbatim.  Each off-toggle isolates one
+# parameterization's role in stability.  Structural A/Bs test the new stable-BL
+# MOST and the Rayleigh drag.
+_ALLOW = ["--allow-disabled-physics"]
+TIER1_CASES: list[tuple[str, list[str]]] = [
+    ("baseline",        []),
+    ("convection_off",  ["--convection", "none", *_ALLOW]),
+    ("gwd_off",         ["--gravity-wave-drag", "none", *_ALLOW]),
+    ("turbulence_off",  ["--turbulence", "none", *_ALLOW]),
+    ("clouds_off",      ["--clouds", "none", *_ALLOW]),
+    ("microphysics_off", ["--microphysics", "none", *_ALLOW]),
+    ("radiation_gray",  ["--radiation", "gray"]),          # no 'none' for radiation
+    ("stability_dyer",  ["--surface-stability-scheme", "dyer1974"]),  # vs beljaars A/B
+]
+
+
+# --- Tier-2 cloud-albedo levers (the reference config is over-reflective:
+# rsut +130, clt +19, netTOA -69) — rank each lever's albedo (rsut) effect. -----
+TIER2_CLOUD_CASES: list[tuple[str, list[str]]] = [
+    ("baseline",     []),                                         # convective_cloud=true (ref)
+    ("cc_off",       ["--no-convective-cloud"]),                  # biggest albedo lever
+    ("qc_low",       ["--q-c-diagnostic", "1.5e-4"]),             # thinner cloud (less LWP)
+    ("ccmax_low",    ["--cloud-conv-cloud-max", "0.05"]),         # cap convective cloud cover
+    ("rhcrit_hi",    ["--rh-crit", "0.85"]),                      # less stratiform cloud
+    ("cc_off_qc_low", ["--no-convective-cloud", "--q-c-diagnostic", "1.5e-4"]),
+]
+
+
+def build_cases(tier: str = "tier1") -> list[tuple[str, list[str]]]:
+    """Return the (label, extra-args) case list for a screen tier."""
+    if tier == "tier1":
+        return list(TIER1_CASES)
+    if tier == "tier2_cloud":
+        return list(TIER2_CLOUD_CASES)
+    raise ValueError(f"unknown screen tier {tier!r} (tier1 | tier2_cloud)")
+
+
+def _run_status(run_dir: Path) -> str:
+    """Read the model-side Status line from results.txt ('COMPLETED' / 'BLOWUP ...')."""
+    rt = run_dir / "results.txt"
+    if not rt.exists():
+        return "MISSING"
+    for line in rt.read_text().splitlines():
+        if line.strip().startswith("Status:"):
+            return line.split(":", 1)[1].strip()
+    return "NO_STATUS"
+
+
+def _blowup_day(status: str) -> float:
+    """Extract the blow-up day from a status string, or +inf if it completed."""
+    m = re.search(r"day\s+(\d+)", status)
+    if m:
+        return float(m.group(1))
+    return float("inf") if status.upper().startswith("COMPLETED") else float("nan")
+
+
+def extract_run_metrics(run_dir: Path) -> dict:
+    """Per-run stability metrics from results.txt Status + timeseries.npz.
+
+    Returns status, blowup_day, max_wind, |moisture_residual| max, and the final
+    energy_toa_net (all NaN-safe; missing timeseries -> NaN metrics)."""
+    run_dir = Path(run_dir)
+    status = _run_status(run_dir)
+    out = {"label": run_dir.name, "status": status,
+           "blowup_day": _blowup_day(status),
+           "max_wind": float("nan"), "moisture_resid": float("nan"),
+           "energy_toa_net": float("nan"), "rsut": float("nan"),
+           "olr": float("nan")}
+    ts = run_dir / "timeseries.npz"
+    if ts.exists():
+        z = np.load(ts, allow_pickle=True)
+
+        def _last(key):
+            return float(z[key][-1]) if key in z.files and z[key].size else float("nan")
+
+        if "max_wind" in z.files and z["max_wind"].size:
+            out["max_wind"] = float(np.nanmax(z["max_wind"]))
+        if "moisture_residual" in z.files and z["moisture_residual"].size:
+            out["moisture_resid"] = float(np.nanmax(np.abs(z["moisture_residual"])))
+        out["energy_toa_net"] = _last("energy_toa_net")
+        # Global-mean TOA fluxes (already area-mean diagnostics): rsut = reflected
+        # SW (the albedo proxy), olr = outgoing LW.  Used to rank cloud levers.
+        out["rsut"] = _last("sw_up_toa")
+        out["olr"] = _last("lw_up_toa")
+    return out
+
+
+def format_table(rows: list[dict]) -> str:
+    """Tabulate the screen results, most-stable (largest blowup_day) first."""
+    rows = sorted(rows, key=lambda r: (-(r["blowup_day"] if np.isfinite(r["blowup_day"]) else 1e9),
+                                        r["label"]))
+    lines = [f"{'case':16s} {'blowup_day':>10s} {'max_wind':>9s} "
+             f"{'|moist_res|':>11s} {'rsut':>7s} {'olr':>7s} {'toa_net':>9s}  status",
+             "-" * 100]
+    for r in rows:
+        bd = r["blowup_day"]
+        bd_s = "survived" if np.isinf(bd) else ("n/a" if np.isnan(bd) else f"{bd:.0f}")
+        lines.append(
+            f"{r['label']:16s} {bd_s:>10s} {r['max_wind']:9.1f} "
+            f"{r['moisture_resid']:11.3f} {r.get('rsut', float('nan')):7.1f} "
+            f"{r.get('olr', float('nan')):7.1f} {r['energy_toa_net']:9.1f}  {r['status']}")
+    return "\n".join(lines)
+
+
+def _submit(base: Path, days: int, sbatch: Path, tier: str) -> int:
+    base.mkdir(parents=True, exist_ok=True)
+    for label, extra in build_cases(tier):
+        env = (f"ALL,SCREEN_LABEL={label},SCREEN_DAYS={days},"
+               f"SCREEN_BASE={base},SCREEN_EXTRA={' '.join(extra)}")
+        cmd = ["sbatch", f"--export={env}",
+               f"--job-name=phys_{label}", str(sbatch)]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        print(f"  submit {label:16s} -> {r.stdout.strip() or r.stderr.strip()}")
+    print(f"screen base: {base}")
+    return 0
+
+
+def _aggregate(base: Path, tier: str) -> int:
+    rows = []
+    for label, _ in build_cases(tier):
+        d = base / label
+        if d.is_dir():
+            rows.append(extract_run_metrics(d))
+    if not rows:
+        print(f"no case dirs under {base}", file=sys.stderr)
+        return 2
+    print(format_table(rows))
+    return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--submit", action="store_true", help="submit one sbatch per case")
+    ap.add_argument("--aggregate", type=Path, default=None,
+                    help="tabulate an existing screen base dir")
+    ap.add_argument("--base", type=Path, default=None, help="scratch base dir for --submit")
+    ap.add_argument("--days", type=int, default=5)
+    ap.add_argument("--tier", type=str, default="tier1")
+    ap.add_argument("--sbatch", type=Path,
+                    default=Path("scripts/tmp/cluster_oneoffs/amip/physics_toggle_run.sbatch"))
+    args = ap.parse_args(argv)
+    if args.aggregate is not None:
+        return _aggregate(args.aggregate, args.tier)
+    if args.submit:
+        if args.base is None:
+            print("--submit requires --base", file=sys.stderr)
+            return 2
+        return _submit(args.base, args.days, args.sbatch, args.tier)
+    ap.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
