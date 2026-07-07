@@ -2594,6 +2594,16 @@ def main() -> int:
                         "local depth) instead of the flat "
                         "--runoff-depth-spread-m. Requires --runoff; mutually "
                         "exclusive with --runoff-depth-spread-m.")
+    p.add_argument("--runoff-dep-max", type=float, default=None,
+                   help="Override NEMO rn_dep_max [m] (default 150) used by "
+                        "--runoff-depth-nemo-ini: the depth the biggest rivers "
+                        "spread over. LOWER keeps river plumes shallower -> more "
+                        "surface freshening (Arctic-shelf retention sensitivity: "
+                        "the big Siberian rivers otherwise dilute deep -> salty).")
+    p.add_argument("--runoff-rnf-max", type=float, default=None,
+                   help="Override NEMO rn_rnf_max [kg/m^2/s] (default 0.05) used "
+                        "by --runoff-depth-nemo-ini: the climatological runoff at "
+                        "which the spread depth reaches rn_dep_max.")
     p.add_argument("--woa-smoothing-passes", type=int, default=0,
                    help="Horizontal Laplacian smoothing passes/level on the WOA T,S IC "
                         "-- removes spurious grid-scale fronts from interpolating/flood-"
@@ -3300,8 +3310,17 @@ def main() -> int:
                 "--runoff-depth-nemo-ini and --runoff-depth-spread-m are "
                 "mutually exclusive.")
         from legoesm.ocean.forcing.runoff_depth import nemo_runoff_depth_map
+        _rd_kw = {}
+        if args.runoff_dep_max is not None:
+            if not (np.isfinite(args.runoff_dep_max) and args.runoff_dep_max > 0):
+                raise SystemExit("--runoff-dep-max must be finite and > 0.")
+            _rd_kw["dep_max"] = float(args.runoff_dep_max)
+        if args.runoff_rnf_max is not None:
+            if not (np.isfinite(args.runoff_rnf_max) and args.runoff_rnf_max > 0):
+                raise SystemExit("--runoff-rnf-max must be finite and > 0.")
+            _rd_kw["rnf_max"] = float(args.runoff_rnf_max)
         _h_rnf = nemo_runoff_depth_map(
-            np.asarray(runoff_monthly), np.asarray(H_bathy))
+            np.asarray(runoff_monthly), np.asarray(H_bathy), **_rd_kw)
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
         )

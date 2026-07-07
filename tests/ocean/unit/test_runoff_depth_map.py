@@ -69,3 +69,29 @@ def test_annual_field_and_bad_shape_raise():
         nemo_runoff_depth_map(np.zeros((5, 4)), H)
     with pytest.raises(ValueError, match="must be > 0"):
         nemo_runoff_depth_map(np.zeros((12, 3, 3)), H, rnf_max=0.0)
+
+
+def test_dep_max_shoals_big_rivers():
+    # Siberian-retention lever: lowering rn_dep_max keeps big-river plumes
+    # shallower (more surface freshening) -- the big Arctic rivers otherwise
+    # spread to 150 m and dilute their shelf plumes salty. Small rivers already
+    # sit at the 1 m floor and are unaffected.
+    rnf = np.zeros((12, 2, 2))
+    rnf[:, 0, 0] = 0.05        # big river (>= rnf_max) -> hits the dep_max cap
+    rnf[:, 1, 1] = 1.0e-3      # small Arctic river     -> at/near the 1 m floor
+    H = np.full((2, 2), 4000.0)
+    h150 = nemo_runoff_depth_map(rnf, H)                  # NEMO default rn_dep_max=150
+    h30 = nemo_runoff_depth_map(rnf, H, dep_max=30.0)     # shallow-Arctic sensitivity
+    assert h150[0, 0] == pytest.approx(150.0)
+    assert h30[0, 0] == pytest.approx(30.0)               # big river shoaled 150 -> 30
+    assert h30[0, 0] < h150[0, 0]
+    assert h30[1, 1] == pytest.approx(1.0)                # small river stays at floor
+
+
+def test_rnf_max_scales_proportionality():
+    # rn_rnf_max sets the runoff at which the spread reaches dep_max; raising it
+    # shoals a fixed-runoff river proportionally (until the cap / floor).
+    rnf = np.full((3, 3), 0.05)
+    H = np.full((3, 3), 4000.0)
+    assert np.allclose(nemo_runoff_depth_map(rnf, H, rnf_max=0.05), 150.0)
+    assert np.allclose(nemo_runoff_depth_map(rnf, H, rnf_max=0.10), 75.0)
