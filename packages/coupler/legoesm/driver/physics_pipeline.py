@@ -952,6 +952,14 @@ class PhysicsPipeline:
         # melting / evaporation; surface precipitation is owned by
         # ``micro_out.precipitation`` (read into ``precip_micro`` below).
         dq_c_dt_conv = ad.unflatten_3d(conv_out.dq_c_conv_dt)
+        # In-updraft convective RAIN from the precip_efficiency split (mass-flux
+        # schemes with precip_efficiency>0; None otherwise).  This is a genuine
+        # rain SOURCE that must reach the surface — see the detrains_to_cloud
+        # branch below where it is precipitated directly.
+        dq_r_dt_conv = (
+            ad.unflatten_3d(conv_out.dq_r_conv_dt)
+            if conv_out.dq_r_conv_dt is not None else None
+        )
         precip = jnp.zeros(shape_2d, dtype=T.dtype)
 
         # Microphysics (resolved kernel — no dispatch here)
@@ -1114,6 +1122,27 @@ class PhysicsPipeline:
         # column water removed equals the added precip (mass-conserving).
         if _ctr.detrains_to_cloud:
             dq_c_dt = dq_c_dt + dq_c_dt_conv
+            # In-updraft convective RAIN (precip_efficiency split): precipitate
+            # it DIRECTLY to the surface — the SAME energy-neutral, mass-
+            # conserving treatment the adjustment-scheme branch below applies to
+            # its column-net vapour sink (the condensation latent heat is
+            # already in dT_dt_conv; the column water removed == the added
+            # precip).  ``dq_r_conv_dt`` is a positive rain SOURCE (kg/kg/s), so
+            # its column integral is a positive surface precip flux.
+            #   BUG FIX (2026-07-07): with precip_efficiency=0.7 the scheme
+            #   routed 70% of the detrained condensate into ``dq_r_conv_dt`` but
+            #   the orchestrator consumed ONLY ``dq_c_conv_dt`` — the 70% rain
+            #   vanished from the water budget while its heat stayed in dT_dt,
+            #   starving surface precipitation (~0 convective precip) and over-
+            #   heating the free troposphere (SCM RCE +50 K moist-adiabat bias;
+            #   AMIP upper-trop runaway to T_atm ~305 K).  Wiring it here closes
+            #   the water+energy budget the split assumed.
+            if dq_r_dt_conv is not None:
+                _dp_r = p_s[..., None] * (
+                    self.sigma_half[1:] - self.sigma_half[:-1])
+                precip_conv_rain = jnp.maximum(
+                    jnp.sum(dq_r_dt_conv * _dp_r / constants.g, axis=-1), 0.0)
+                precip = precip + precip_conv_rain
         else:
             # Convective precip = the column-net VAPOUR sink of the convective
             # tendency (mass-EXACT for every adjustment scheme: water removed
