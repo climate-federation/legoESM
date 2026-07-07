@@ -76,6 +76,15 @@ def test_get_gwd_fn_rejects_invalid_composites(bad):
         get_gwd_fn(GravityWaveDragConfig(scheme=bad))
 
 
+def test_validate_strict_rejects_duplicate_composite():
+    from legoesm.driver.config import ExperimentConfig
+
+    with pytest.raises(ValueError, match="duplicate parts"):
+        ExperimentConfig(gravity_wave_drag="mcfarlane+mcfarlane").validate_strict()
+    # a valid composite still passes strict validation
+    ExperimentConfig(gravity_wave_drag="hines+mcfarlane").validate_strict()
+
+
 def test_orographic_helper_truth_table():
     assert gwd_scheme_is_orographic("mcfarlane")
     assert gwd_scheme_is_orographic("lindzen")

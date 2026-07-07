@@ -1230,6 +1230,13 @@ class ExperimentConfig(NamedTuple):
                     f"{_composable}, got invalid {bad} in "
                     f"{self.gravity_wave_drag!r}"
                 )
+            # Mirror get_gwd_fn's runtime rule so a duplicate composite
+            # fails HERE, not later during physics construction.
+            if len(set(_gwd_parts)) != len(_gwd_parts):
+                errors.append(
+                    f"composite gravity_wave_drag has duplicate parts: "
+                    f"{self.gravity_wave_drag!r}"
+                )
         elif self.gravity_wave_drag not in _valid_gwd:
             errors.append(
                 f"gravity_wave_drag must be one of {_valid_gwd} "
