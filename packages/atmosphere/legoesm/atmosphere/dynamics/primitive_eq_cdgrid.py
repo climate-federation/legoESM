@@ -1382,18 +1382,27 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         ``pad_halo_vector_4d`` per exchange for all levels, so there is no
         ``vmap(pad_halo)`` cross-face ``sendrecv``).  So:
 
-        * MPI (single-rank, REPLICATED, or genuinely face-SCATTERED): **allowed**
-          — certified replicated-vs-scattered equivalent (fwd + grad) by
+        * MPI FACE-ONLY (single-rank, REPLICATED, or face-SCATTERED with
+          ``tiling == (1, 1)``): **allowed** — certified replicated-vs-scattered
+          equivalent (fwd + grad) by
           ``tests/distributed/test_cube_face_scatter_mpi.py`` (#811 / #771).
+        * MPI SUB-FACE TILING (``tiling != (1, 1)``): fail-closed — the 4D halos
+          reject ``interp_offsets`` under sub-face tiling
+          (``pad_halo_mpi_4d``), so this path is unsupported (codex #811 review).
         * SPMD: still fail-closed whenever a mesh is active.  The 4D halos
           dispatch to explicit SPMD exchanges, but that combination is
           unvalidated here (#811 SPMD follow-up).
 
-        ``topo``/``state_lead`` are retained for signature + unit-test stability.
+        ``state_lead`` is retained for signature + unit-test stability.
         Extracted + pure so the guard is unit-tested (a rename then breaks the
         test loudly instead of silently disabling it).
         """
-        del topo, state_lead  # MPI face-scatter is now 4D-halo safe (allowed).
+        del state_lead
+        if backend == "mpi":
+            # Face-only MPI is supported; sub-face tiling is not (the 4D halo
+            # rejects interp_offsets when tiling != (1, 1)).
+            tiling = getattr(topo, "tiling", (1, 1))
+            return tiling is not None and tuple(tiling) != (1, 1)
         if backend == "spmd" and spmd_mesh is not None:
             return True
         return False
@@ -1513,8 +1522,14 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         # the per-tracer scale — else each rank divides by its own partial and
         # the rescales diverge, silently breaking global conservation.  Identity
         # on single-rank / replicated / SPMD, keyed off cdgrid.base.area (#811).
+        # differentiable_broadcast=True: this scale rescales EVERY owned face
+        # (q_fixed = q_new * scale), so the reduction's VJP must allreduce the
+        # cotangent — else the cross-rank gradient through the shared scale is
+        # dropped (the same uniform ~1e-3 cotangent leak the flux_form_tracer_step
+        # rescale had; the full-step gradient gate exposes THIS second one, #811).
         tgt, cur = global_face_sum_if_scattered(
-            jnp.stack([tgt, cur], axis=0), cdgrid.base.area)
+            jnp.stack([tgt, cur], axis=0), cdgrid.base.area,
+            differentiable_broadcast=True)
         scale = (tgt / jnp.maximum(cur, jnp.asarray(1e-30, acc))).astype(_dt)
         q_fixed = q_new * scale
 

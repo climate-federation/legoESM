@@ -971,17 +971,46 @@ def _fv_tp_2d_setup(cdgrid) -> _TpSetup:
     halo_dg = dg if use_duogrid else None
     bounded_domain = bool(grid.bounded_domain)
 
-    if offsets_h2 is not None:
-        # offsets_h2: (6, 4, 2, n) — [face, edge, depth, cell]; WEST=0 EAST=1
-        # SOUTH=2 NORTH=3; depth 0 = adjacent to interior.
-        ox_L0 = offsets_h2[:, 0, 0, :]
-        ox_R0 = offsets_h2[:, 1, 0, :]
-        oy_L0 = offsets_h2[:, 2, 0, :]
-        oy_R0 = offsets_h2[:, 3, 0, :]
-        ox_L1 = offsets_h2[:, 0, 1, :]
-        ox_R1 = offsets_h2[:, 1, 1, :]
-        oy_L1 = offsets_h2[:, 2, 1, :]
-        oy_R1 = offsets_h2[:, 3, 1, :]
+    # #811 MPI face-scatter: ``halo_interp_offsets_h2`` is KEPT FULL ``(6, ...)``
+    # by the scatter (it is GLOBAL-face-indexed — ``pad_halo_mpi`` /
+    # ``pad_halo_mpi_4d`` index it by global face id inside their per-owned-face
+    # loop, so ``halo_offsets`` above MUST stay full).  But the PPM boundary
+    # offsets ``ox_*``/``oy_*`` below feed the PURE-LOCAL, vectorised-over-all-
+    # faces ``_ppm_1d`` / ``_correct_dm``, which multiply SAME-FACE PPM slopes
+    # (sliced to the rank's OWNED faces under scatter) by these offsets — so they
+    # must carry the owned faces ONLY, else a ``(n_owned, n) x (6, n)`` broadcast
+    # error (the #811 blocker: the flux-form moisture substep is the first
+    # transport run under face-scatter on the non-duogrid grid).  Detect scatter
+    # by the grid's own (already-sliced) face count and slice the offsets to the
+    # owned GLOBAL faces; a no-op on single-rank / replicated (face count == 6),
+    # preserving bit-identity there.
+    ppm_offsets_h2 = offsets_h2
+    if offsets_h2 is not None and area.shape[0] != offsets_h2.shape[0]:
+        from legoesm.grids.halo import get_mpi_topology
+        topo = get_mpi_topology()
+        owned = (getattr(topo, "local_face_ids", None)
+                 if topo is not None else None)
+        if owned is None:
+            raise RuntimeError(
+                "fv_tp_2d setup: grid is face-sliced "
+                f"(faces={area.shape[0]}) but halo_interp_offsets_h2 is full "
+                f"(faces={offsets_h2.shape[0]}) with no active MPI topology to "
+                "identify the owned faces — cannot align the PPM boundary "
+                "offsets to the transported data (#811).")
+        ppm_offsets_h2 = offsets_h2[jnp.asarray(list(owned), dtype=jnp.int32)]
+
+    if ppm_offsets_h2 is not None:
+        # offsets_h2: (n_faces, 4, 2, n) — [face, edge, depth, cell]; WEST=0
+        # EAST=1 SOUTH=2 NORTH=3; depth 0 = adjacent to interior.  n_faces is the
+        # rank's owned-face count under scatter (== 6 single-rank/replicated).
+        ox_L0 = ppm_offsets_h2[:, 0, 0, :]
+        ox_R0 = ppm_offsets_h2[:, 1, 0, :]
+        oy_L0 = ppm_offsets_h2[:, 2, 0, :]
+        oy_R0 = ppm_offsets_h2[:, 3, 0, :]
+        ox_L1 = ppm_offsets_h2[:, 0, 1, :]
+        ox_R1 = ppm_offsets_h2[:, 1, 1, :]
+        oy_L1 = ppm_offsets_h2[:, 2, 1, :]
+        oy_R1 = ppm_offsets_h2[:, 3, 1, :]
     else:
         # Regional/nested: offsets unused (the bounded_domain gate in _ppm_1d
         # short-circuits the offset path); None so any accidental use raises.

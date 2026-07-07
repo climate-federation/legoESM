@@ -111,10 +111,13 @@ def flux_form_tracer_step(
     acc = conservation_accumulator()
     area_e = cdgrid.base.area.astype(acc)             # (6, n, n)
 
-    if nord is not None or damp_c is not None:
+    # transport_step_4d does not apply del-n damping; raise only when damping
+    # would ACTUALLY fire (matching fv_tp_2d's `nord and damp_c and damp_c>1e-4`
+    # gate) so an explicit no-op `damp_c=0.0` still works (codex #811 review).
+    if nord is not None and damp_c is not None and damp_c > 1e-4:
         raise NotImplementedError(
             "flux_form_tracer_step's 4D-halo transport (#811) does not apply "
-            "del-n damping; the moisture substep passes nord=damp_c=None.")
+            "del-n damping; the moisture substep passes no (or off) damping.")
 
     def _conserving_rescale(field_in, field_raw, red_area):
         # Mirror ``_finalize_transport``'s clip + mass-conserving rescale
@@ -132,9 +135,14 @@ def flux_form_tracer_step(
         mass_pos = jnp.sum(pos.astype(acc) * red_area, axis=(0, 1, 2))
         # ONE allreduce for the (numerator, denominator) pair — never divide a
         # pre-reduced ratio (Σ of a ratio ≠ ratio of Σ); clamp the REDUCED
-        # denominator, not the local partial.
+        # denominator, not the local partial.  differentiable_broadcast=True: the
+        # reduced masses feed the shared ``scale`` that rescales EVERY face, so
+        # the reduction's VJP must allreduce the cotangent (else the cross-rank
+        # gradient through ``scale`` is dropped — a uniform ~1e-3 cotangent error
+        # in the scattered-vs-replicated gradient gate; #811).
         mass_in, mass_pos = global_face_sum_if_scattered(
-            jnp.stack([mass_in, mass_pos], axis=0), area_e)
+            jnp.stack([mass_in, mass_pos], axis=0), area_e,
+            differentiable_broadcast=True)
         scale = mass_in / jnp.maximum(mass_pos, 1.0)  # fp64, per level[, tracer]
         return pos * scale.astype(pos.dtype)
 

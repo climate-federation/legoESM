@@ -124,6 +124,8 @@ def global_area_sum(
     array: jax.Array,
     grid,
     owned_mask: jax.Array | None = None,
+    *,
+    differentiable_broadcast: bool = False,
 ) -> jax.Array:
     """Area-weighted global sum of a raw array, distributed-aware.
 
@@ -143,6 +145,16 @@ def global_area_sum(
         are authoritative.  Non-owned faces are zeroed before local
         summation; ``global_sum_mpi`` then combines owned portions.
         If ``None``, all faces are summed (single-rank or SPMD).
+    differentiable_broadcast : bool, optional
+        VJP semantics of the MPI reduction.  ``False`` (default) uses
+        ``global_sum_mpi`` (IDENTITY VJP) — kept byte-identical for the
+        established callers.  ``True`` uses :func:`_broadcast_allreduce_sum`
+        (allreduce forward AND backward), REQUIRED when the reduced value is
+        broadcast back and reused on every rank — e.g. a mass-fixer additive
+        ``correction = (target - global_area_sum(p_s)) / area`` added to EVERY
+        cell: the identity VJP silently drops the cross-rank cotangent of the
+        shared correction (a ~1e-6 gradient leak the flux-form moisture path
+        exposes via q→p_s coupling; #811).  Forward is identical either way.
 
     Execution modes:
 
@@ -175,6 +187,8 @@ def global_area_sum(
     if spmd_sums is not None:
         return spmd_sums[0]
     if is_distributed():
+        if differentiable_broadcast:
+            return _broadcast_allreduce_sum(local_sum)
         from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
     return local_sum
@@ -218,6 +232,8 @@ def batch_global_area_sums(
     arrays: list[jax.Array],
     grid,
     owned_mask: jax.Array | None = None,
+    *,
+    differentiable_broadcast: bool = False,
 ) -> list[jax.Array]:
     """Compute multiple area-weighted global sums in a single MPI call.
 
@@ -226,6 +242,13 @@ def batch_global_area_sums(
     when running under MPI, reducing latency from O(N) to O(1).
 
     Falls back to individual ``jnp.sum`` when not distributed.
+
+    ``differentiable_broadcast`` (default ``False``): see :func:`global_area_sum`
+    — ``True`` routes the batched reduction through :func:`_broadcast_allreduce_sum`
+    (one stacked allreduce, allreduce VJP) instead of ``batch_allreduce_mpi``
+    (identity VJP), for reduced values that scale every rank (the non-anchor p_s
+    mass fixer's shared ``correction``; #811).  ``batch_allreduce_mpi`` is left
+    untouched for its other callers.
     """
     acc = conservation_accumulator()
     area_acc = grid.area.astype(acc)
@@ -254,12 +277,60 @@ def batch_global_area_sums(
         return spmd_sums
 
     if is_distributed():
+        if differentiable_broadcast:
+            # One stacked broadcast-allreduce (allreduce fwd AND bwd) — same
+            # single-message batching as batch_allreduce_mpi, but the correct
+            # transpose for a reused/broadcast reduced value.
+            reduced = _broadcast_allreduce_sum(jnp.stack(local_sums, axis=0))
+            return [reduced[i] for i in range(len(local_sums))]
         from legoesm.parallel.reductions import batch_allreduce_mpi
         return batch_allreduce_mpi(local_sums, op="sum")
     return local_sums
 
 
-def global_face_sum_if_scattered(local_sum: jax.Array, area) -> jax.Array:
+@jax.custom_vjp
+def _broadcast_allreduce_sum(local_sum: jax.Array) -> jax.Array:
+    """``allreduce(SUM)`` whose VJP ALSO allreduces the cotangent — the correct
+    transpose for a reduced value that is BROADCAST and reused on every rank.
+
+    ``global_sum_mpi`` (mpi4jax ``allreduce``) has an IDENTITY VJP: each rank
+    keeps its LOCAL cotangent (``test_grad_nonzero``: "gradient 2*x, no
+    scaling").  That is right for a TOP-LEVEL loss reduction ``L =
+    global_sum_mpi(local)`` (each rank contributes 1:1 to ``L``), but WRONG for
+    an INTERMEDIATE global that is broadcast back and reused multiplicatively on
+    every face/rank — e.g. the flux-form ``scale = mass_in / mass_pos`` that
+    rescales EVERY owned face (#811).  There, ``field_in`` on rank ``r`` affects
+    the output on EVERY rank ``r'`` through the shared ``scale``, so the true
+    ``dL/d(mass)`` is the GLOBAL sum of every rank's local cotangent — i.e. the
+    reduction's transpose is ``allreduce(SUM)``, not identity.  Dropping it left
+    a UNIFORM ~1e-3 absolute cotangent error on every owned face (rel 1.1 on
+    faces far from the transported blob) in the scattered-vs-replicated gradient
+    gate.  Forward is byte-identical to ``global_sum_mpi`` (both are the same
+    ``allreduce(SUM)``); only the backward differs.
+    """
+    from legoesm.parallel.reductions import global_sum_mpi
+    return global_sum_mpi(local_sum)
+
+
+def _broadcast_allreduce_sum_fwd(local_sum):
+    from legoesm.parallel.reductions import global_sum_mpi
+    return global_sum_mpi(local_sum), None
+
+
+def _broadcast_allreduce_sum_bwd(_res, g):
+    # Transpose of ``y_r = Σ_r' x_r'`` (every rank gets the sum) is
+    # ``x̄_r = Σ_r' ȳ_r' = allreduce(SUM)(ȳ)``.
+    from legoesm.parallel.reductions import global_sum_mpi
+    return (global_sum_mpi(g),)
+
+
+_broadcast_allreduce_sum.defvjp(
+    _broadcast_allreduce_sum_fwd, _broadcast_allreduce_sum_bwd)
+
+
+def global_face_sum_if_scattered(
+    local_sum: jax.Array, area, *, differentiable_broadcast: bool = False
+) -> jax.Array:
     """Allreduce a cubed-sphere per-face partial to the GLOBAL total, but ONLY
     when the 6 faces are genuinely SCATTERED across MPI ranks.
 
@@ -286,6 +357,15 @@ def global_face_sum_if_scattered(local_sum: jax.Array, area) -> jax.Array:
     denominator reduced through this one predicate always agree on WHEN to reduce.
     Shared gate behind :func:`_total_area` (the mass-fixer denominator) and the
     cube flux-form moisture substep's mass reductions (#811 / #771 follow-up).
+
+    ``differentiable_broadcast`` (default ``False``) selects the VJP semantics of
+    the scattered reduction.  ``False`` uses ``global_sum_mpi`` (mpi4jax
+    ``allreduce``, IDENTITY VJP) — correct for a top-level loss reduction and the
+    established mass-fixer callers (kept byte-identical).  ``True`` uses
+    :func:`_broadcast_allreduce_sum` (allreduce forward AND backward) — REQUIRED
+    when the reduced value is broadcast back and reused multiplicatively on every
+    rank, so the cross-rank cotangents are not silently dropped (the flux-form
+    ``scale`` — #811).  Forward is identical either way; only the gradient differs.
     """
     from legoesm.grids.halo import get_halo_backend, get_mpi_topology
 
@@ -299,6 +379,8 @@ def global_face_sum_if_scattered(local_sum: jax.Array, area) -> jax.Array:
         if (topo is not None and area is not None
                 and hasattr(topo, "local_face_ids")
                 and area.shape[0] == len(topo.local_face_ids) < 6):
+            if differentiable_broadcast:
+                return _broadcast_allreduce_sum(local_sum)
             from legoesm.parallel.reductions import global_sum_mpi
 
             return global_sum_mpi(local_sum)
@@ -775,8 +857,12 @@ def fix_ps_mass(
     batched allreduce, matching :func:`fix_mass_hydrostatic`'s
     communication pattern.
     """
+    # differentiable_broadcast=True: ``correction`` is added to EVERY cell, so
+    # under face-scatter the reduction's VJP must allreduce the cotangent (else
+    # the cross-rank gradient of the shared correction is dropped — #811).
     mass_old, mass_new = batch_global_area_sums(
         [p_s_old, p_s_new], grid, owned_mask=owned_mask,
+        differentiable_broadcast=True,
     )
     correction = (mass_old - mass_new) / _total_area(grid)
     return p_s_new + correction
@@ -809,7 +895,11 @@ def fix_ps_mass_target(
     -------
     jax.Array : Corrected p_s with same shape.
     """
-    mass_new = global_area_sum(p_s, grid, owned_mask=owned_mask)
+    # differentiable_broadcast=True: ``correction`` is added to EVERY cell, so
+    # under face-scatter the reduction's VJP must allreduce the cotangent (else
+    # the cross-rank gradient of the shared correction is dropped — #811).
+    mass_new = global_area_sum(
+        p_s, grid, owned_mask=owned_mask, differentiable_broadcast=True)
     correction = (target_mass - mass_new) / _total_area(grid)
     return p_s + correction
 
