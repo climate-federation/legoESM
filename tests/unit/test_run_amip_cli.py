@@ -157,6 +157,22 @@ def test_land_surface_scheme_flag_flows_to_config():
     assert cfg.land_surface_scheme == "two_leaf"
 
 
+def test_surface_stability_scheme_flag_flows_to_config():
+    """--surface-stability-scheme round-trips (Pierre #5: the new stable-BL MOST
+    similarity functions); default = historical Dyer-1974 linear stable branch,
+    'beljaars_holtslag1991' selects the stable-flux-collapse-avoiding form."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.surface_stability_scheme == "dyer1974"
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--surface-stability-scheme", "beljaars_holtslag1991",
+    ]), parser))
+    assert cfg.surface_stability_scheme == "beljaars_holtslag1991"
+
+
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""
