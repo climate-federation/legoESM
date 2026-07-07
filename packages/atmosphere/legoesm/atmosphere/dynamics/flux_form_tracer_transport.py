@@ -51,7 +51,7 @@ from legoesm.core.conservation import (
     conservation_accumulator,
     global_face_sum_if_scattered,
 )
-from legoesm.core.fv_tp_2d import transport_step
+from legoesm.core.fv_tp_2d import transport_step_4d
 
 
 def flux_form_tracer_step(
@@ -111,17 +111,10 @@ def flux_form_tracer_step(
     acc = conservation_accumulator()
     area_e = cdgrid.base.area.astype(acc)             # (6, n, n)
 
-    def _transport_raw(field2d, ut_k, vt_k):
-        # Raw flux-form transport (PPM + fp64 flux closure) WITHOUT
-        # ``transport_step``'s internal per-level clip + conserving rescale
-        # (``mass_target=None``).  The rescale — and its (optional) cross-face
-        # allreduce — is hoisted OUT of the level/tracer vmap into
-        # ``_conserving_rescale`` below so the collective runs ONCE on a batched
-        # vector, never inside vmap (the repo has no precedent for a collective
-        # under vmap; this mirrors ``conservation.fix_mass_hydrostatic``).
-        return transport_step(
-            field2d, ut_k, vt_k, dt, cdgrid,
-            mass_target=None, nord=nord, damp_c=damp_c, hord=hord)
+    if nord is not None or damp_c is not None:
+        raise NotImplementedError(
+            "flux_form_tracer_step's 4D-halo transport (#811) does not apply "
+            "del-n damping; the moisture substep passes nord=damp_c=None.")
 
     def _conserving_rescale(field_in, field_raw, red_area):
         # Mirror ``_finalize_transport``'s clip + mass-conserving rescale
@@ -145,24 +138,31 @@ def flux_form_tracer_step(
         scale = mass_in / jnp.maximum(mass_pos, 1.0)  # fp64, per level[, tracer]
         return pos * scale.astype(pos.dtype)
 
-    # --- Co-transport the layer mass δp, one level at a time. ---
-    delp_raw = jax.vmap(
-        _transport_raw, in_axes=(-1, -1, -1), out_axes=-1)(delp, ut, vt)
+    # --- Co-transport the layer mass δp (all levels, ONE 4D halo exchange). ---
+    # transport_step_4d does the two field halos with pad_halo_4d (a single
+    # message for all levels each) and vmaps only the pure-local PPM sweeps, so
+    # the moisture substep is MPI face-scatter safe (no vmap(pad_halo); #811).
+    # BIT-IDENTICAL to the prior per-level vmap(transport_step) on single-rank
+    # (pad_halo_4d local == per-level pad_halo stacked).  mass_target=None; the
+    # conservation is done in _conserving_rescale (batched + allreduce-aware).
+    delp_raw = transport_step_4d(delp, ut, vt, dt, cdgrid, hord=hord)
     delp_new = _conserving_rescale(delp, delp_raw, area_e[..., None])
 
-    # --- Co-transport the tracer mass δp·q, per (level, tracer). ---
-    # δp·q for EVERY tracer rides the SAME per-level winds; vmap the tracer axis
-    # inside the level vmap so the winds broadcast correctly and are not tiled.
+    # --- Co-transport the tracer mass δp·q (all levels × tracers, ONE 4D halo).
+    # Every tracer rides the SAME per-level winds; fold (nlev, ntr) into one
+    # trailing column axis (level-major, tracer fastest) and TILE the winds over
+    # tracers so the exchange + PPM run once for all (level, tracer) columns.
+    # Column c = level*ntr + tracer, so ut_t[..., c] = ut[..., level] — exactly
+    # the per-(level, tracer) transport of the old nested vmap.
     qmass = delp[..., None] * q                       # (6, n, n, nlev, ntr)
-
-    def _transport_level_tracers(qm_k, ut_k, vt_k):   # qm_k: (6, n, n, ntr)
-        return jax.vmap(
-            lambda qm1: _transport_raw(qm1, ut_k, vt_k),
-            in_axes=-1, out_axes=-1)(qm_k)
-
-    qmass_raw = jax.vmap(
-        _transport_level_tracers, in_axes=(3, -1, -1), out_axes=3)(
-            qmass, ut, vt)                            # (6, n, n, nlev, ntr)
+    f6, nx, ny, nlev, ntr = qmass.shape
+    qmass_f = qmass.reshape(f6, nx, ny, nlev * ntr)
+    ut_t = jnp.broadcast_to(
+        ut[..., None], ut.shape + (ntr,)).reshape(ut.shape[:3] + (nlev * ntr,))
+    vt_t = jnp.broadcast_to(
+        vt[..., None], vt.shape + (ntr,)).reshape(vt.shape[:3] + (nlev * ntr,))
+    qmass_raw = transport_step_4d(
+        qmass_f, ut_t, vt_t, dt, cdgrid, hord=hord).reshape(qmass.shape)
     qmass_new = _conserving_rescale(qmass, qmass_raw, area_e[..., None, None])
 
     # Recover the mixing ratio.  PRECONDITION: δp is a physical layer thickness

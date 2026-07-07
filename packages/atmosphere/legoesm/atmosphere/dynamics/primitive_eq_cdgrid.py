@@ -1373,40 +1373,27 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
 
     @staticmethod
     def _flux_form_scatter_blocked(backend, topo, spmd_mesh, state_lead) -> bool:
-        """True iff the ``moisture_flux_form`` substep must fail-closed (#771).
+        """True iff the ``moisture_flux_form`` substep must fail-closed.
 
-        The mass-conservation REDUCTIONS are now allreduce-aware — every cube
-        "global" sum (``flux_form_tracer_step``'s per-level clip+rescale and the
-        per-tracer reconcile fixer) routes through
-        ``conservation.global_face_sum_if_scattered`` (``allreduce(SUM)`` the
-        owned-face partials; identity for single-rank / replicated / SPMD).  That
-        is the necessary FIRST half of the #811 unblock and is bit-identical on
-        single-rank.
+        The #811 unblock has BOTH halves now: (1) the mass-conservation
+        reductions are allreduce-aware (``conservation.global_face_sum_if_
+        scattered``), and (2) the transport + wind reconstruction are 4D-halo
+        (``transport_step_4d`` / ``d2a2c_vect_4d`` — ONE ``pad_halo_4d`` /
+        ``pad_halo_vector_4d`` per exchange for all levels, so there is no
+        ``vmap(pad_halo)`` cross-face ``sendrecv``).  So:
 
-        The substep is STILL fail-closed under face-scatter because its TRANSPORT
-        is not MPI-ready: ``flux_form_tracer_step`` ``vmap``s ``transport_step``
-        over levels, and under the MPI halo backend ``transport_step``'s internal
-        ``pad_halo`` becomes ``pad_halo_mpi`` (cross-face ``sendrecv``) — i.e.
-        ``vmap(pad_halo)`` over the MPI exchange, which CLAUDE.md forbids and
-        which fails at trace time with a ``batch_axes`` assertion.  The full
-        unblock needs a 4D (all-levels-one-message) MPI-aware transport for the
-        moisture substep (the ``pad_halo_4d`` idiom) — the SECOND half, tracked
-        as the #811 transport follow-up.
+        * MPI (single-rank, REPLICATED, or genuinely face-SCATTERED): **allowed**
+          — certified replicated-vs-scattered equivalent (fwd + grad) by
+          ``tests/distributed/test_cube_face_scatter_mpi.py`` (#811 / #771).
+        * SPMD: still fail-closed whenever a mesh is active.  The 4D halos
+          dispatch to explicit SPMD exchanges, but that combination is
+          unvalidated here (#811 SPMD follow-up).
 
-        * MPI: genuinely face-SCATTERED (topology owns < 6 faces AND the state is
-          sliced to them, ``state_lead == n_local``) fails closed; REPLICATED
-          (full 6-face state on every rank, ``state_lead == 6``) and single-rank
-          run (their local sum IS the global sum and their ``pad_halo`` is local).
-        * SPMD: fail-closed whenever a mesh is active.
-
-        Extracted + pure so the guard is unit-tested (a prefix/shape rename then
-        breaks the test loudly instead of silently disabling the guard).
+        ``topo``/``state_lead`` are retained for signature + unit-test stability.
+        Extracted + pure so the guard is unit-tested (a rename then breaks the
+        test loudly instead of silently disabling it).
         """
-        if backend == "mpi":
-            if topo is not None and hasattr(topo, "local_face_ids"):
-                n_local = len(topo.local_face_ids)
-                return n_local < 6 and state_lead == n_local
-            return False
+        del topo, state_lead  # MPI face-scatter is now 4D-halo safe (allowed).
         if backend == "spmd" and spmd_mesh is not None:
             return True
         return False
@@ -1444,7 +1431,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         continuity itself FV-flux-form (transport ``δp`` with the same operator)
         — a much larger dycore change tracked separately (#771 follow-up).
         """
-        from legoesm.core.fv3_sw_core import d2a2c_vect
+        from legoesm.core.fv3_sw_core import d2a2c_vect_4d
         from legoesm.atmosphere.dynamics.flux_form_tracer_transport import (
             flux_form_tracer_step,
         )
@@ -1453,16 +1440,15 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             global_face_sum_if_scattered,
         )
 
-        # FAIL-CLOSED under cubed-sphere face-scatter / SPMD face-sharding.  The
-        # mass-conservation REDUCTIONS are now allreduce-aware (via
-        # global_face_sum_if_scattered, used in flux_form_tracer_step's rescale
-        # AND the per-tracer fixer below) — the first half of the #811 unblock —
-        # but the TRANSPORT still vmaps transport_step's pad_halo over levels,
-        # which under the MPI backend is vmap(pad_halo_mpi) (a vmapped sendrecv,
-        # forbidden; fails with a batch_axes assertion).  The full unblock needs a
-        # 4D-halo MPI-aware moisture transport (#811 transport follow-up).
-        # Static-config check at trace time (globals + static shape), so the raise
-        # is a hard compile-time refusal, not traced control flow.
+        # MPI face-scatter is now SUPPORTED (#811): the mass reductions are
+        # allreduce-aware (global_face_sum_if_scattered), the transport is
+        # 4D-halo (transport_step_4d — one pad_halo_4d per exchange for all
+        # levels), and the wind reconstruction is 4D (d2a2c_vect_4d — one
+        # pad_halo_vector_4d).  Certified replicated-vs-scattered equivalent by
+        # tests/distributed/test_cube_face_scatter_mpi.py.  SPMD face-sharding is
+        # still fail-closed (the 4D halos dispatch to explicit SPMD exchanges,
+        # but that path is unvalidated here — #811 SPMD follow-up).  Static-config
+        # check at trace time, so the raise is a hard compile-time refusal.
         from legoesm.grids.halo import (
             get_halo_backend, get_mpi_topology, get_spmd_mesh,
         )
@@ -1470,12 +1456,11 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 get_halo_backend(), get_mpi_topology(), get_spmd_mesh(),
                 state_out.u_d.data.shape[0]):
             raise NotImplementedError(
-                "moisture_flux_form is not supported under cubed-sphere "
-                "face-scatter / SPMD face-sharding: the mass reductions are now "
-                "allreduce-aware, but the per-level flux-form transport vmaps "
-                "pad_halo, which under MPI is a vmapped cross-face sendrecv "
-                "(batch_axes error). Run replicated / single-rank, or await the "
-                "4D-halo MPI-aware moisture transport (#811 transport follow-up).")
+                "moisture_flux_form is not supported under SPMD face-sharding: "
+                "the 4D-halo transport + wind reconstruction dispatch to explicit "
+                "SPMD exchanges but that path is unvalidated. Run MPI "
+                "(single-rank / replicated / face-scatter, all supported) or "
+                "single-device SPMD (#811 SPMD follow-up).")
 
         cdgrid = self.cdgrid
         sigma = self.sigma_coord
@@ -1483,18 +1468,16 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
 
         # Contravariant transport winds from the STEP-INPUT corner D-grid winds
         # (the SW split transports mass with the step-input winds): corner ->
-        # edge (0.5-average, as in the del-n path) -> d2a2c_vect per level.
+        # edge (0.5-average, as in the del-n path) -> d2a2c_vect_4d (ONE vector
+        # halo for ALL levels, so the reconstruction is MPI face-scatter safe —
+        # no vmap(pad_halo_vector); #811).
         u_d = state_in.u_d.data
         v_d = state_in.v_d.data
         u_edge = 0.5 * (u_d[:, :-1, :, :] + u_d[:, 1:, :, :])   # (6,n,n+1,nlev)
         v_edge = 0.5 * (v_d[:, :, :-1, :] + v_d[:, :, 1:, :])   # (6,n+1,n,nlev)
 
-        def _winds_level(uk, vk):
-            _o = d2a2c_vect(uk, vk, cdgrid)
-            return _o[4], _o[5]                                # ut, vt contravar
-
-        ut, vt = jax.vmap(_winds_level, in_axes=(-1, -1), out_axes=-1)(
-            u_edge, v_edge)
+        _o = d2a2c_vect_4d(u_edge, v_edge, cdgrid)
+        ut, vt = _o[4], _o[5]                                  # ut, vt contravar
 
         # Layer mass on the dynamics' post-step p_s (what the moisture lives
         # on).  ``layer_thickness_dp`` is polymorphic over the sigma / hybrid
