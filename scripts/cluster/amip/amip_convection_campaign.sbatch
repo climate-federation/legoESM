@@ -45,6 +45,12 @@ export LEGOESM_REPO="${LEGOESM_REPO:-/burg-archive/glab/users/ac5006/legoESM}"
 : "${SSO_FILE:=/burg-archive/glab/users/pg2328/legoESM_chunk/data_pg/amip/sso_stdh_2deg.nc}"
 : "${OUTBASE:=/burg-archive/glab/users/pg2328/legoESM_chunk/results/amip/convcmp}"
 : "${OUTDIR:=$OUTBASE/conv_${CONV}}"
+# Publication resolution: OVERRIDE the amip_production.yaml default, which #821
+# set to a coarse C12/L20 dt450 SCREEN (not publication grade). C48/L40 dt150 is
+# the realistic AMIP config (matches Pierre's tuned production; CFL-safe at C48).
+: "${RESOLUTION:=48}"
+: "${NLEV:=40}"
+: "${DT:=150.0}"
 : "${TARGET_DAYS:=90}"
 : "${CHECKPOINT_DAYS:=5}"
 : "${MAX_WALL:=41400}"          # ~11.5 h; driver checkpoints+exits before 11:59
@@ -70,7 +76,8 @@ case "$EXTRA_FLAGS" in (*[\'\",]*)
 esac
 read -r -a EXTRA <<< "$EXTRA_FLAGS"
 SCHEME_FLAGS=(--convection "$CONV" --gravity-wave-drag "$GWD"
-              --subgrid-orography-file "$SSO_FILE")
+              --subgrid-orography-file "$SSO_FILE"
+              --resolution "$RESOLUTION" --nlev "$NLEV" --dt "$DT")
 
 _ckpt_day() { local f; f=$(ls -1 "$OUTDIR"/checkpoint_day_*.npz 2>/dev/null | sort -V | tail -1); [ -n "$f" ] && basename "$f" | sed -E 's/.*checkpoint_day_0*([0-9]+)\.npz/\1/' || echo 0; }
 cur_day=$(_ckpt_day); latest=$(ls -1 "$OUTDIR"/checkpoint_day_*.npz 2>/dev/null | sort -V | tail -1)
@@ -93,4 +100,4 @@ echo "[convcmp] rc=$rc $cur_day -> $new_day $(date)"
 [ "${new_day:-0}" -ge "$TARGET_DAYS" ] && { echo "[convcmp] COMPLETE $new_day/$TARGET_DAYS"; exit 0; }
 [ "${new_day:-0}" -le "${cur_day:-0}" ] && { echo "[convcmp] NO PROGRESS — NOT chaining"; exit 1; }
 echo "[convcmp] $new_day/$TARGET_DAYS; submitting next link."
-sbatch -J "amip_cv_${CONV}" --export="ALL,CONV=$CONV,GWD=$GWD,SSO_FILE=$SSO_FILE,OUTDIR=$OUTDIR,TARGET_DAYS=$TARGET_DAYS,CHECKPOINT_DAYS=$CHECKPOINT_DAYS,MAX_WALL=$MAX_WALL,EXTRA_FLAGS=$EXTRA_FLAGS,CONVCMP_CODE=$CODE,LEGOESM_REPO=$LEGOESM_REPO,CLM_SURFDATA=$CLM_SURFDATA" "$0"
+sbatch -J "amip_cv_${CONV}" --export="ALL,CONV=$CONV,GWD=$GWD,SSO_FILE=$SSO_FILE,OUTDIR=$OUTDIR,RESOLUTION=$RESOLUTION,NLEV=$NLEV,DT=$DT,TARGET_DAYS=$TARGET_DAYS,CHECKPOINT_DAYS=$CHECKPOINT_DAYS,MAX_WALL=$MAX_WALL,EXTRA_FLAGS=$EXTRA_FLAGS,CONVCMP_CODE=$CODE,LEGOESM_REPO=$LEGOESM_REPO,CLM_SURFDATA=$CLM_SURFDATA" "$0"
