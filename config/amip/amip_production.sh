@@ -46,6 +46,11 @@
 : "${OZONE:=${ICON_ROOT}/common/ozone_cmip6_forcing/historical/vmro3_input4MIPs_ozone_CMIP_UReading-CCMI-1-0_gn_195001-199912.nc}"
 : "${AEROSOL:=${ICON_ROOT}/common/aerosol_kinne/aeropt_kinne_sw_b14_fin_1979_rast.nc}"
 : "${VOLCANIC:=${ICON_ROOT}/common/aerosol_volcanic_cmip6/bc_aeropt_cmip6_volc_lw_b16_sw_b14_1979.nc}"
+# CLM surfdata for the multilayer Richards land model (use_multilayer_land): the
+# PFT/texture/glacier surface map. Compute nodes have NO internet, so the auto-
+# download in clm_surface_map.download_clm_surfdata() FAILS (SSL) — this file
+# MUST be staged locally and passed via --clm-surfdata-path (staged 2026-07-02).
+: "${CLM_SURFDATA:=/work/bd1083/b309178/diffESM/legoesm_ap/data/clm/surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc}"
 
 # --- The machine-specific PATH flags (everything else is in the YAML) ---------
 AMIP_PATH_FLAGS=(
@@ -58,4 +63,5 @@ AMIP_PATH_FLAGS=(
   --aerosol-file "${AEROSOL}"
   --volcanic-aerosol-file "${VOLCANIC}"
   --topography "${ETOPO}"
+  --clm-surfdata-path "${CLM_SURFDATA}"
 )
