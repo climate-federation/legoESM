@@ -1857,6 +1857,22 @@ def main(argv: list[str] | None = None):
         start_step, start_day = driver.load_checkpoint(restart_path)
         if _is_root:
             print(f"  Resumed at step={start_step}, day={start_day:.2f}")
+        # Restore the CMOR monthly/daily accumulator state from the sidecar
+        # written next to this checkpoint (setup() already rebuilt the empty
+        # accumulators above), so a calendar month split across restart-chain
+        # links completes — the CMOR ``Amon`` means were otherwise recreated
+        # empty and lost every ~10-day link.  Keyed off the ABSOLUTE simulated
+        # day load_checkpoint returned (before any --restart-start-day
+        # override), matching the sidecar save name.  Runs on every rank (the
+        # accumulators fill identically under SPMD); no-op when the sidecar is
+        # absent (older runs) or CMOR output is off.
+        if driver.diagnostics is not None:
+            _cmor_sidecar = (restart_path.parent
+                             / f"cmor_accum_day_{int(round(start_day)):04d}.npz")
+            if (driver.diagnostics.load_cmor_accumulators(_cmor_sidecar)
+                    and _is_root):
+                print(f"  Restored CMOR accumulator state from "
+                      f"{_cmor_sidecar.name}")
         if args.restart_start_day is not None:
             start_day = args.restart_start_day
             if _is_root:
