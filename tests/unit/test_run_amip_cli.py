@@ -1192,6 +1192,49 @@ def test_rh_crit_out_of_bounds_rejected():
         cfg.validate_strict()
 
 
+def test_conv_cloud_condensate_flag_resolves_to_cloudconfig():
+    """--conv-cloud-condensate round-trips into ExperimentConfig and resolves
+    onto the hot-loop anvil CloudConfig.conv_cloud_condensate; unset leaves the
+    scheme default (1.5e-4) => byte-identical anvil optics."""
+    from legoesm.atmosphere.physics.clouds.config import (
+        CloudConfig,
+        build_cloud_config,
+    )
+    parser = build_arg_parser()
+    # Explicit flag => ExperimentConfig scalar => resolved (hot-loop) CloudConfig.
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--conv-cloud-condensate", "3e-5",
+    ]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.cloud_conv_cloud_condensate == pytest.approx(3e-5)
+    assert cfg.validate_strict() is None
+    resolved = build_cloud_config(
+        cfg.cloud_scheme,
+        conv_cloud_condensate=cfg.cloud_conv_cloud_condensate)
+    assert resolved.conv_cloud_condensate == pytest.approx(3e-5)
+    # Unset => None scalar => CloudConfig keeps its default anvil condensate.
+    cfg_def = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_def.cloud_conv_cloud_condensate is None
+    resolved_def = build_cloud_config(
+        cfg_def.cloud_scheme,
+        conv_cloud_condensate=cfg_def.cloud_conv_cloud_condensate)
+    default_condensate = CloudConfig._field_defaults["conv_cloud_condensate"]
+    assert default_condensate == pytest.approx(1.5e-4)  # documented anvil default
+    assert resolved_def.conv_cloud_condensate == pytest.approx(default_condensate)
+
+
+def test_conv_cloud_condensate_out_of_bounds_rejected():
+    """A conv_cloud_condensate outside (1e-5, 1e-3) must fail strict validation."""
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--conv-cloud-condensate", "1e-2",
+    ]), parser)
+    cfg = build_config_from_args(args)
+    with pytest.raises((ValueError, AssertionError)):
+        cfg.validate_strict()
+
+
 def test_subgrid_autoconv_flag_threads_to_config():
     """--subgrid-autoconv round-trips into ExperimentConfig (#613)."""
     parser = build_arg_parser()

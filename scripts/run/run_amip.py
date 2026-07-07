@@ -816,6 +816,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Cap on convective (Slingo 1987) cloud cover "
                              "(CloudConfig.conv_cloud_max). Limits anvil "
                              "over-reflection. Bounds (0.1, 1.0).")
+    parser.add_argument("--conv-cloud-condensate", type=float, default=None,
+                        dest="conv_cloud_condensate",
+                        help="In-cloud condensate [kg/kg] of the convective "
+                             "anvil deck (CloudConfig.conv_cloud_condensate); "
+                             "lower = optically thinner/realistic anvil. "
+                             "Bounds 1e-5..1e-3.")
     parser.add_argument("--surfdata", type=str, default="",
                         help="Harmonized surface-data NetCDF "
                              "(legoesm_surfdata_*.nc). When set together with "
@@ -1177,6 +1183,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         surface_stability_scheme=args.surface_stability_scheme,
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
+        cloud_conv_cloud_condensate=args.conv_cloud_condensate,
         surfdata_path=args.surfdata,
         dynamic_albedo=args.dynamic_albedo,
         T_ice=args.t_ice_k,

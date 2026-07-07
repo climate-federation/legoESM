@@ -179,6 +179,7 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.clouds.CloudConfig.rh_crit": "cloud_rh_crit",
     "atm.clouds.CloudConfig.q_c_diagnostic": "cloud_q_c_diagnostic",
     "atm.clouds.CloudConfig.conv_cloud_max": "cloud_conv_cloud_max",
+    "atm.clouds.CloudConfig.conv_cloud_condensate": "cloud_conv_cloud_condensate",
     "atm.clouds.CloudConfig.p_xr": "cloud_p_xr",
     "atm.clouds.CloudConfig.alpha_xr": "cloud_alpha_xr",
     # convection -> _resolve_convection (physics_pipeline)

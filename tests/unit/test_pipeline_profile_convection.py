@@ -205,3 +205,61 @@ class TestMicrophysicsWiring:
             assert bool(jnp.all(jnp.isfinite(arr)))
         # The scheme must actually act on this cloudy state.
         assert float(jnp.max(jnp.abs(out.dT_dt))) > 0.0
+
+
+def _tiedtke_step_pe(grid, sigma, f, precip_efficiency):
+    """One tiedtke pipeline step with a given convective rain-split efficiency
+    (microphysics='none', so surface precip == the in-updraft convective rain)."""
+    config = ExperimentConfig(
+        grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
+        dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+        convection="tiedtke", radiation="none", microphysics="none",
+        convective_precip_efficiency=precip_efficiency,
+    )
+    config.validate_strict()
+    pipe = build_physics_pipeline(grid, sigma, config)
+    return pipe.physics_step_no_rad(
+        f["T"], f["p_s"], f["q_v"], f["q_c"], f["q_r"], None,
+        f["u"], f["v"], f["sst"], f["sic"], f["lat"], DT,
+        f["z3"], f["z2"], f["z2"], f["z2"], f["z2"], f["z2"])
+
+
+def test_convective_rain_reaches_surface_precip_832(setup):
+    """#832: Tiedtke SPLITS detrained condensate via ``precip_efficiency`` into
+    anvil cloud (``dq_c_conv_dt`` -> q_c) and in-updraft RAIN (``dq_r_conv_dt``).
+    The pipeline previously consumed ONLY ``dq_c_conv_dt``, so the rain fraction
+    vanished from the water budget (surface precip near zero) while its
+    condensation latent heat stayed in ``dT_dt`` -> the upper-tropospheric warm
+    drift #832 reports.  The fix (a) wires ``ExperimentConfig.
+    convective_precip_efficiency`` into ``TiedtkeConfig.precip_efficiency`` (the
+    field was dead) and (b) precipitates the in-updraft rain in the pipeline.
+
+    ``microphysics='none'``, so the ONLY possible surface precip is that
+    convective rain.  With the split ON it must be positive; with it OFF (the
+    legacy path) it is identically zero (the rain is trapped in q_c) — pinning
+    BOTH directions so the test is non-vacuous.
+    """
+    grid, sigma, f, _state = setup
+
+    out = _tiedtke_step_pe(grid, sigma, f, 0.7)
+    precip = np.asarray(out.precip)
+    assert np.all(np.isfinite(precip)), "convective-rain precip has non-finite cells"
+    total = float(np.sum(np.maximum(precip, 0.0)))
+    assert total > 0.0, (
+        "tiedtke in-updraft rain (dq_r_conv_dt) did not reach surface precip with "
+        "precip_efficiency=0.7 + microphysics='none' — the #832 dropped tendency "
+        "(or the dead convective_precip_efficiency wiring) is back"
+    )
+    # Physical rate, not a blow-up: a single convecting column << ~86 mm/day.
+    assert float(np.max(precip)) < 1.0e-3, (
+        f"convective-rain precip unphysically large: max={float(np.max(precip)):.3e}"
+    )
+
+    # Split OFF (precip_efficiency=0): no rain species is produced, so with
+    # microphysics='none' the convective condensate is trapped in q_c and surface
+    # precip is identically zero — the legacy behaviour, byte-preserved.
+    out0 = _tiedtke_step_pe(grid, sigma, f, 0.0)
+    assert float(np.sum(np.maximum(np.asarray(out0.precip), 0.0))) == 0.0, (
+        "with precip_efficiency=0 the convective rain split must be OFF (no "
+        "dq_r_conv_dt), so surface precip stays zero under microphysics='none'"
+    )
