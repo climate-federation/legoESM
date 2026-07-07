@@ -178,6 +178,17 @@ def _rd_atkin(Tf: jax.Array, TgC_a: jax.Array, Vcmax25: jax.Array) -> jax.Array:
     return growth_adjust * Rd0 * instantaneous
 
 
+def co2_compensation_point(Tf: jax.Array) -> jax.Array:
+    """CO2 compensation point in the absence of dark respiration, Gamma* [umol/mol].
+
+    Bernacchi (2001) Arrhenius response of ``_GS25`` (= 42.75 umol/mol at 25 degC).
+    Exposed for reuse by the SIF diagnostic (``canopy/sif.py``), which needs the
+    same Gamma* the FvCB C3 electron-transport / Aj rates use — computed here so
+    the two never drift.
+    """
+    return _GS25 * _arrhenius(Tf, _HA_GS)
+
+
 def vcmax_temperature_response(Tf: jax.Array, TgC: jax.Array) -> jax.Array:
     """Normalised Vcmax temperature response (Kattge & Knorr 2007 peaked Arrhenius).
 
@@ -237,7 +248,7 @@ def c3_photosynthesis(
     # Instantaneous T-response of kinetic constants and capacities
     Kc = _KC25 * _arrhenius(Tf, _HA_KC)
     Ko = _KO25 * _arrhenius(Tf, _HA_KO)
-    GammaStar = _GS25 * _arrhenius(Tf, _HA_GS)
+    GammaStar = co2_compensation_point(Tf)
     Vcmax = Vcmax25 * _arrhenius_peaked(Tf, _HA_VCMAX, _HD_VCMAX, dS_v)
     Jmax = Jmax25 * _arrhenius_peaked(Tf, _HA_JMAX, _HD_JMAX, dS_j)
 

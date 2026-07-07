@@ -31,6 +31,8 @@ from legoesm.land.carbon.stomata import (
     medlyn_gs,
     jarvis_gs,
     coupled_farquhar_stomata,
+    solve_coupled_farquhar_ci,
+    CoupledLeafState,
     compute_stomatal_beta,
 )
 
@@ -52,5 +54,7 @@ __all__ = [
     "medlyn_gs",
     "jarvis_gs",
     "coupled_farquhar_stomata",
+    "solve_coupled_farquhar_ci",
+    "CoupledLeafState",
     "compute_stomatal_beta",
 ]
