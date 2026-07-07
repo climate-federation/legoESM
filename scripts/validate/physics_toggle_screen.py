@@ -66,13 +66,37 @@ TIER2_CLOUD_CASES: list[tuple[str, list[str]]] = [
 ]
 
 
+# --- Tier-2 precipitation-efficiency matrix (run ALL in parallel, rank by which
+# raises precip toward ~2.8 and drops clwvi/rsut).  Root cause of the over-
+# reflection is under-precipitation -> cloud water piles up -> optically thick.
+# Levers: subgrid autoconversion (in-cloud q_c -> faster rain, CLI), the warm-rain
+# rate (k_au / autoconversion_rate via --params), and the Bechtold convective
+# precip efficiency (--params).  Param YAMLs live in /scratch/.../tuning_params. --
+_TP = "/scratch/b/b309178/tuning_params"
+TIER2_PRECIP_CASES: list[tuple[str, list[str]]] = [
+    ("baseline",       []),
+    ("subgrid_auto",   ["--subgrid-autoconversion"]),                       # in-cloud autoconv
+    ("kau_hi",         ["--params", f"{_TP}/kau_hi.yaml"]),                 # k_au 600->3000
+    ("autorate_hi",    ["--params", f"{_TP}/autorate_hi.yaml"]),           # auto rate 1e-3->5e-3
+    ("convpe_hi",      ["--params", f"{_TP}/convpe_hi.yaml"]),             # Bechtold PE 0.7->0.95
+    ("subgrid_kau",    ["--subgrid-autoconversion", "--params", f"{_TP}/kau_hi.yaml"]),
+    ("subgrid_qc_low", ["--subgrid-autoconversion", "--q-c-diagnostic", "1.5e-4"]),
+    ("subgrid_convpe", ["--subgrid-autoconversion", "--params", f"{_TP}/convpe_hi.yaml"]),
+    ("ccond_low",      ["--conv-cloud-condensate", "3.0e-5"]),               # #840 thin anvil
+    ("subgrid_ccond",  ["--subgrid-autoconversion", "--conv-cloud-condensate", "3.0e-5"]),
+]
+
+
 def build_cases(tier: str = "tier1") -> list[tuple[str, list[str]]]:
     """Return the (label, extra-args) case list for a screen tier."""
     if tier == "tier1":
         return list(TIER1_CASES)
     if tier == "tier2_cloud":
         return list(TIER2_CLOUD_CASES)
-    raise ValueError(f"unknown screen tier {tier!r} (tier1 | tier2_cloud)")
+    if tier == "tier2_precip":
+        return list(TIER2_PRECIP_CASES)
+    raise ValueError(
+        f"unknown screen tier {tier!r} (tier1 | tier2_cloud | tier2_precip)")
 
 
 def _run_status(run_dir: Path) -> str:

@@ -68,6 +68,19 @@ def test_build_cases_tier2_cloud():
     assert dict(cases)["cc_off"] == ["--no-convective-cloud"]
 
 
+def test_build_cases_tier2_precip():
+    cases = build_cases("tier2_precip")
+    labels = [c[0] for c in cases]
+    assert labels[0] == "baseline"
+    assert "subgrid_auto" in labels
+    d = dict(cases)
+    assert d["subgrid_auto"] == ["--subgrid-autoconversion"]
+    # --params levers reference a YAML path
+    assert d["kau_hi"][0] == "--params" and d["kau_hi"][1].endswith(".yaml")
+    # Pierre's #840 anvil-condensate knob is in the matrix
+    assert "--conv-cloud-condensate" in d["ccond_low"]
+
+
 def test_extract_run_metrics_survived(tmp_path):
     d = tmp_path / "baseline"
     d.mkdir()
