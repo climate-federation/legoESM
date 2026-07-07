@@ -81,6 +81,7 @@ __param_spec__ = {
             "stochastic_decorrelation": {"units": "s", "bounds": (1800.0, 21600.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Bechtold et al. (2014) AR1 perturbation", "shape": None},
             "tau_M_u_relax": {"units": "s", "bounds": (600.0, 5400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Tiedtke (1989) profile relaxation", "shape": None},
             "tau_bl": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Bechtold et al. (2008) PBL closure", "shape": None},
+            "precip_efficiency": "default 0 = disabled (legacy no rain-split, shared split_convective_rain gated `if > 0.0`); enable + retune via config, not sigmoid-trained from the off state (mirrors Tiedtke)",
         },
     },
     "ConvectiveEDMFConfig": {
@@ -1344,6 +1345,13 @@ class BechtoldConfig(NamedTuple):
     # [0.5, 1.0] (θ ≥ 0.5 removes the explicit-side amplification).  Unused
     # when subsidence_solve == "advective".
     theta_implicit: float = 1.0
+    # In-updraft precipitation efficiency (shared split_convective_rain, same
+    # knob as Tiedtke): the fraction [0,1] of detrained condensate emitted as
+    # RAIN (dq_r_conv_dt) instead of suspended anvil cloud.  0 (default) ⇒ NO
+    # split, byte-identical to the pre-split scheme; > 0 drains the convective
+    # condensate directly (the coarse-grid over-bright-anvil / dry-column
+    # runaway lever — Bechtold detrains 100% to cloud otherwise).
+    precip_efficiency: float = 0.0
 
 
 class ConvectiveEDMFConfig(NamedTuple):

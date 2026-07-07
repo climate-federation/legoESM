@@ -650,13 +650,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "the grid-mean.  Requires --microphysics morrison.")
     parser.add_argument("--convective-precip-efficiency", type=float,
                         default=0.0,
-                        help="Tiedtke convective precipitation efficiency "
-                             "[0,1] (1989 in-updraft precipitation). >0 "
-                             "diverts that fraction of convective condensate "
-                             "to rain (sediments via microphysics, invisible "
-                             "to radiation) instead of detraining it all as "
+                        help="Convective precipitation efficiency [0,1] "
+                             "(1989 in-updraft precipitation). >0 diverts that "
+                             "fraction of convective condensate to rain "
+                             "(sediments via microphysics, invisible to "
+                             "radiation) instead of detraining it all as "
                              "suspended cloud. Observed CPE ~0.5-0.9. Requires "
-                             "--convection tiedtke.")
+                             "--convection tiedtke or bechtold (shared "
+                             "split_convective_rain).")
     parser.add_argument("--convective-buoyancy-death-memory",
                         action="store_true",
                         help="Tiedtke plume buoyancy-death memory: once a "
@@ -1300,10 +1301,11 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
         parser.error("--subgrid-autoconversion requires --microphysics "
                      "morrison (the in-cloud closure lives in the Morrison "
                      "warm-rain path)")
-    if args.convective_precip_efficiency > 0.0 and args.convection != "tiedtke":
+    if (args.convective_precip_efficiency > 0.0
+            and args.convection not in ("tiedtke", "bechtold")):
         parser.error("--convective-precip-efficiency requires --convection "
-                     "tiedtke (only Tiedtke implements in-updraft "
-                     "precipitation)")
+                     "tiedtke or bechtold (the schemes with the shared "
+                     "in-updraft-precipitation rain split)")
     if args.convective_buoyancy_death_memory and args.convection != "tiedtke":
         parser.error("--convective-buoyancy-death-memory requires --convection "
                      "tiedtke (plume buoyancy-death memory is a Tiedtke "

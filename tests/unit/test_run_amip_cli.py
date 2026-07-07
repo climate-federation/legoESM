@@ -1755,3 +1755,25 @@ def test_top_sponge_flags_flow_to_dycore_config():
     assert cfg_on.dycore.sponge_width_m == 12000.0
     assert cfg_on.dycore.sponge_shape == "sam_rational"
     assert cfg_on.dycore.sponge_scale_height_m == 8000.0
+
+
+def test_convective_precip_efficiency_allows_bechtold():
+    """--convective-precip-efficiency now round-trips for bechtold (shared
+    split_convective_rain), not just tiedtke; a non-supporting scheme still
+    errors."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--convection", "bechtold",
+        "--convective-precip-efficiency", "0.6",
+    ]), parser))
+    assert cfg.convection == "bechtold"
+    assert cfg.convective_precip_efficiency == 0.6
+
+    # a scheme without the rain split is rejected at parse time
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical",
+            "--convection", "kuo",
+            "--convective-precip-efficiency", "0.6",
+        ]), parser)

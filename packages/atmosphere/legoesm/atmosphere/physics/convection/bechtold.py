@@ -42,7 +42,10 @@ from legoesm.atmosphere.physics.thermodynamics import (
     compute_moist_adiabat,
 )
 from legoesm.atmosphere.physics.convection.config import BechtoldConfig
-from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics.convection.output import (
+    ConvectionOutput,
+    split_convective_rain,
+)
 from legoesm.atmosphere.physics.convection.mass_flux import (
     apply_mass_flux_kernel,
     stratosphere_mass_flux_gate,
@@ -606,13 +609,21 @@ def bechtold_convection(
 
     convective_mask = cape_weight * (deep_weight + shallow_weight + midlevel_weight)
 
+    # In-updraft precipitation: split the detrained condensate into a
+    # precipitating rain fraction + suspended anvil remainder via the shared
+    # helper (same knob + mass proof as Tiedtke). precip_efficiency=0
+    # (default) ⇒ no split, byte-identical to the pre-split Bechtold.
+    dq_c_conv_dt, dq_r_conv_dt = split_convective_rain(
+        dq_c_conv_dt, config.precip_efficiency)
+
     out = ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
-        dq_c_conv_dt=jnp.maximum(dq_c_conv_dt, 0.0),
+        dq_c_conv_dt=dq_c_conv_dt,
         cape=cape_pbl,
         convective_mask=convective_mask,
         du_dt_conv=du_dt_conv,
         dv_dt_conv=dv_dt_conv,
+        dq_r_conv_dt=dq_r_conv_dt,
     )
     return out, M_u_new, conv_stoch_state_new

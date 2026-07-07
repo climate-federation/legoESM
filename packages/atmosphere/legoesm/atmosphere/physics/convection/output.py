@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import jax
+import jax.numpy as jnp
 
 
 class ConvectionOutput(NamedTuple):
@@ -79,3 +80,45 @@ class ConvectionOutput(NamedTuple):
     ``dq_c_conv_dt``.  Without this split, 100% of convective condensate
     loads the grid-scale cloud and the radiation, which microphysics
     cannot drain fast enough (source-buffered)."""
+
+
+def split_convective_rain(dq_c_conv_dt, precip_efficiency):
+    """Split a convective cloud-water source into rain + suspended cloud.
+
+    Real convective updrafts convert a large fraction of their condensate
+    to PRECIPITATION before detrainment.  Diverting that fraction to a
+    precipitating species (rain) — which sediments out via microphysics and
+    is invisible to radiation (which sees only ``q_c``/``q_i``) — instead of
+    detraining 100% as suspended anvil cloud is what keeps the grid-scale
+    cloud (and its albedo) from saturating faster than microphysics can
+    drain it (the source-buffered over-bright-anvil failure mode).
+
+    Shared by every mass-flux-style scheme that detrains to cloud water
+    (Tiedtke, Bechtold) so the rain split is defined once (no re-derived
+    per-scheme copy).
+
+    Parameters
+    ----------
+    dq_c_conv_dt : jax.Array
+        Convective cloud-water source [kg/kg/s], shape (ncol, nlev). Clamped
+        to its non-negative part here (a convective source is a source).
+    precip_efficiency : float
+        Fraction [0, 1] of the (positive) condensate converted to rain.
+        ``0`` (default across schemes) ⇒ NO split, legacy behaviour: the
+        full condensate stays as cloud water and ``dq_r_conv_dt`` is ``None``
+        (byte-identical to the pre-split code path).
+
+    Returns
+    -------
+    (dq_c_new, dq_r) : tuple[jax.Array, jax.Array | None]
+        ``dq_c_new`` is the anvil cloud-water remainder ``(1-pe)`` of the
+        positive condensate; ``dq_r`` is the rain source ``pe`` of it, or
+        ``None`` when ``precip_efficiency <= 0``.  MASS is conserved:
+        ``dq_c_new + dq_r == max(dq_c_conv_dt, 0)`` exactly (no extra
+        source/sink introduced by the split).
+    """
+    dq_c_pos = jnp.maximum(dq_c_conv_dt, 0.0)
+    if precip_efficiency > 0.0:
+        pe = jnp.clip(precip_efficiency, 0.0, 1.0)
+        return dq_c_pos * (1.0 - pe), dq_c_pos * pe
+    return dq_c_pos, None

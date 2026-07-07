@@ -625,3 +625,40 @@ def test_bechtold_mse_conservation_within_tolerance():
         f"Bechtold (implicit_flux) MSE residual {H+Q+C:.1f} W/m^2 "
         f"({rel*100:.1f}% of total)"
     )
+
+
+# ---------------------------------------------------------------------------
+# In-updraft precipitation: the shared convective rain split
+# ---------------------------------------------------------------------------
+
+def test_bechtold_precip_efficiency_splits_rain_conserving_mass():
+    """precip_efficiency>0 emits a rain source (dq_r_conv_dt) that is exactly
+    the pe-fraction of the detrained condensate; cloud+rain conserves the
+    positive condensate; the default (0) is byte-identical with no rain."""
+    T, q, pf, ph, u, v = _column(ncol=3, nlev=16)
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    stoch = jnp.zeros((ncol,))
+
+    base, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(),
+    )
+    assert base.dq_r_conv_dt is None                 # default: no split
+
+    pe = 0.6
+    split, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(precip_efficiency=pe),
+    )
+    assert split.dq_r_conv_dt is not None
+    # cloud + rain == the ORIGINAL positive condensate (base cloud), so the
+    # split introduces no extra source/sink
+    total = split.dq_c_conv_dt + split.dq_r_conv_dt
+    assert jnp.allclose(total, base.dq_c_conv_dt, atol=1e-20)
+    # rain is exactly pe of the original condensate
+    assert jnp.allclose(split.dq_r_conv_dt, base.dq_c_conv_dt * pe, rtol=1e-6,
+                        atol=1e-20)
+    # heating / vapor tendencies are untouched by the diagnostic split
+    assert jnp.allclose(split.dT_dt, base.dT_dt, atol=1e-20)
+    assert jnp.allclose(split.dq_v_dt, base.dq_v_dt, atol=1e-20)

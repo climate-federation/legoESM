@@ -2507,10 +2507,16 @@ def _resolve_convection(config):
     elif scheme == "bechtold":
         # Expose the Bechtold CAPE trigger threshold so it is tunable for the
         # coarse-resolution convective-precip deficit (default matches
-        # BechtoldConfig.cape_threshold ⇒ byte-identical when unset).
+        # BechtoldConfig.cape_threshold ⇒ byte-identical when unset).  Also
+        # thread the shared convective rain-split knob (#832 follow-up):
+        # Bechtold otherwise detrains 100% of its condensate to cloud (no
+        # dq_r_conv_dt), the over-bright-anvil / dry-column-runaway failure
+        # mode; precip_efficiency > 0 drains it as rain like Tiedtke.
         from legoesm.atmosphere.physics.convection.config import BechtoldConfig
         conv_config = BechtoldConfig(
             cape_threshold=getattr(config, 'bechtold_cape_threshold', 70.0),
+            precip_efficiency=getattr(
+                config, 'convective_precip_efficiency', 0.0),
         )
     else:
         cc = ConvectionConfig(scheme=scheme)
