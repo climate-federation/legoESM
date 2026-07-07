@@ -54,9 +54,11 @@ def subgrid_orography_stddev(
     auto-detect, lon [0,360) ascending, lat ascending, regular
     ``fine_res_deg`` grid), clips elevation to >= 0 m (terrain height above
     sea level; ocean contributes zeros so coastal blocks keep their cliffs),
-    then reduces non-overlapping ``block_deg`` blocks to their population
-    stddev.  Returns a Dataset ``SSO_STDH(lat, lon)`` [m] with block-center
-    coords — the layout ``load_subgrid_orography`` auto-detects.
+    then reduces non-overlapping ``block_deg`` blocks to their AREA-WEIGHTED
+    population stddev (sample weight ∝ cos(lat), the regular-grid cell area;
+    unweighted moments would overweight the poleward rows of each block).
+    Returns a Dataset ``SSO_STDH(lat, lon)`` [m] with block-center coords —
+    the layout ``load_subgrid_orography`` auto-detects.
     """
     import numpy as np
     import xarray as xr
@@ -85,7 +87,18 @@ def subgrid_orography_stddev(
     # Terrain height above sea level: bathymetry launches no mountain waves.
     h = np.clip(elev, 0.0, None)
     hb = h.reshape(n_lat // factor, factor, n_lon // factor, factor)
-    sso = hb.std(axis=(1, 3))
+    # Area weights on a regular lat-lon grid: cell area ∝ cos(lat) (row-wise;
+    # constant in lon). Weighted first/second moments so every sample counts
+    # by the area it represents inside the block.
+    w_row = np.cos(np.deg2rad(lat))
+    wb = np.broadcast_to(
+        w_row.reshape(n_lat // factor, factor, 1, 1),
+        hb.shape,
+    )
+    w_sum = np.maximum(wb.sum(axis=(1, 3)), 1e-12)
+    mu = (wb * hb).sum(axis=(1, 3)) / w_sum
+    var = (wb * (hb - mu[:, None, :, None]) ** 2).sum(axis=(1, 3)) / w_sum
+    sso = np.sqrt(var)
     lat_b = lat.reshape(-1, factor).mean(axis=1)
     lon_b = lon.reshape(-1, factor).mean(axis=1)
 

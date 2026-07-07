@@ -79,6 +79,24 @@ def test_coastal_block_between_land_and_ocean_is_intermediate():
     assert 0.0 < v < 800.0
 
 
+def test_stddev_is_area_weighted_by_cos_lat():
+    # A polar block whose terrain varies ONLY with latitude: the poleward
+    # (low cos(lat), low weight) rows carry the anomaly, so the area-weighted
+    # stddev must be strictly below the unweighted np.std of the same block.
+    n_lat, n_lon = 180, 360
+    lat = np.linspace(-89.5, 89.5, n_lat)
+    lon = np.linspace(0.5, 359.5, n_lon)
+    elev = np.zeros((n_lat, n_lon))
+    elev[-2:, :] = 1600.0                      # two most-poleward rows (88-90N)
+    ds = xr.Dataset({"elevation": (("lat", "lon"), elev)},
+                    coords={"lat": lat, "lon": lon})
+    out = prep.subgrid_orography_stddev(ds, fine_res_deg=1.0, block_deg=4.0)
+    v_weighted = float(out["SSO_STDH"].values[-1, 0])   # northernmost block
+    block = elev[-4:, :4]
+    v_unweighted = float(np.std(block))
+    assert 0.0 < v_weighted < v_unweighted
+
+
 def test_rejects_non_integer_or_degenerate_block_factor():
     ds = _synthetic_elevation()
     with pytest.raises(ValueError, match="integer multiple"):

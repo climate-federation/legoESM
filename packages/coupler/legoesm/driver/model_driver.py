@@ -700,24 +700,35 @@ class ModelDriver:
         # (tau_0 ∝ h_topo²). Attached to the grid pytree so the physics
         # integration's ``_extract_subgrid_topo_stddev`` finds it; without it
         # McFarlane/Lindzen fall back to the scalar ``config.h_topo`` — a
-        # uniform 500 m mountain over ocean columns too.
+        # uniform 500 m mountain over ocean columns too. Only loaded when the
+        # active GWD has an orographic member; otherwise the file is unused
+        # (and non-cube/Gaussian grids could not even carry the field).
         sso_path = getattr(self.config, "subgrid_orography_path", "")
         if sso_path:
-            from legoesm.grids.topography import load_subgrid_orography
-            sso = load_subgrid_orography(self.grid, sso_path).astype(_sd)
-            try:
-                self.grid = self.grid._replace(subgrid_topo_stddev=sso)
-            except (ValueError, AttributeError) as e:
-                raise ValueError(
-                    f"subgrid_orography_path is set but grid type "
-                    f"{type(self.grid).__name__} has no subgrid_topo_stddev "
-                    f"field (supported: CubedSphereGrid, GaussianGrid)"
-                ) from e
-            logger.info(
-                f"  Subgrid orography: {sso_path} "
-                f"(stddev max={float(jnp.max(sso)):.0f} m, "
-                f"mean={float(jnp.mean(sso)):.1f} m)"
-            )
+            _oro_members = ("mcfarlane", "lindzen", "e3sm_cam")
+            _gwd = str(getattr(self.config, "gravity_wave_drag", "none"))
+            if not any(p in _oro_members for p in _gwd.split("+")):
+                logger.warning(
+                    "  subgrid_orography_path=%s set but gravity_wave_drag=%r "
+                    "has no orographic member (%s) — file NOT loaded",
+                    sso_path, _gwd, "/".join(_oro_members),
+                )
+            else:
+                from legoesm.grids.topography import load_subgrid_orography
+                sso = load_subgrid_orography(self.grid, sso_path).astype(_sd)
+                try:
+                    self.grid = self.grid._replace(subgrid_topo_stddev=sso)
+                except (ValueError, AttributeError) as e:
+                    raise ValueError(
+                        f"subgrid_orography_path is set but grid type "
+                        f"{type(self.grid).__name__} has no subgrid_topo_stddev "
+                        f"field (supported: CubedSphereGrid, GaussianGrid)"
+                    ) from e
+                logger.info(
+                    f"  Subgrid orography: {sso_path} "
+                    f"(stddev max={float(jnp.max(sso)):.0f} m, "
+                    f"mean={float(jnp.mean(sso)):.1f} m)"
+                )
 
     def _create_dycore(self) -> None:
         """Create the dynamical core model via the component factory.
@@ -2579,6 +2590,18 @@ class ModelDriver:
                 # Scatter lat/lon for rank-local physics
                 self._physics_lat = scatter(self._grid_lat, layout)
                 self._physics_lon = scatter(self._grid_lon, layout)
+
+                # Scatter the per-column subgrid orography so the orographic
+                # GWD launch reads this rank's owned-face columns (same
+                # ownership as _physics_lat above). Without this, the GWD
+                # integration's reshape(-1)[:ncol] would hand every rank the
+                # first ncol GLOBAL columns — geographically wrong SSO.
+                if getattr(self.grid, "subgrid_topo_stddev", None) is not None:
+                    self.grid = self.grid._replace(
+                        subgrid_topo_stddev=scatter(
+                            self.grid.subgrid_topo_stddev, layout
+                        )
+                    )
 
                 # Rebuild physics adapter for rank-local column count
                 from legoesm.core.grid_adapters import ColumnAdapter

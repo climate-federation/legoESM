@@ -57,8 +57,13 @@ export JAX_COMPILATION_CACHE_DIR="$OUTDIR/jax_cache"; mkdir -p "$JAX_COMPILATION
 
 [ -f "$SSO_FILE" ] || { echo "[convcmp] missing SSO_FILE=$SSO_FILE — run scripts/data/prep_subgrid_orography.py first"; exit 2; }
 
-# EXTRA_FLAGS is a space-separated flag string (scheme names/values carry no
-# spaces); word-split it deliberately.
+# EXTRA_FLAGS is a space-separated flag string of SIMPLE tokens
+# (e.g. "--bechtold-cape-threshold 50"). Shell quoting is NOT honored by the
+# word-split below, and commas would corrupt the comma-separated --export list
+# on chain resubmission — reject both loudly instead of mangling silently.
+case "$EXTRA_FLAGS" in (*[\'\",]*)
+  echo "[convcmp] EXTRA_FLAGS must be simple space-separated tokens (no quotes/commas), got: $EXTRA_FLAGS"; exit 2;;
+esac
 read -r -a EXTRA <<< "$EXTRA_FLAGS"
 SCHEME_FLAGS=(--convection "$CONV" --gravity-wave-drag "$GWD"
               --subgrid-orography-file "$SSO_FILE")
