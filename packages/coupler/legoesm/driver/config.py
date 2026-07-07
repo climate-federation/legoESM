@@ -450,12 +450,15 @@ class ExperimentConfig(NamedTuple):
     # morrison microphysics.  Physics-fidelity correction (no tunable knob).
     subgrid_autoconversion: bool = False
 
-    # Tiedtke convective precipitation efficiency [0,1] (Tiedtke 1989 in-
-    # updraft precipitation).  >0 diverts that fraction of convective
-    # condensate to rain (sediments via microphysics, invisible to radiation)
-    # instead of detraining it all as suspended cloud.  0 = off (legacy).
-    # Observed deep-convective CPE ~0.5-0.9.  Tiedtke-only (guarded in
-    # _resolve_convection).
+    # Convective precipitation efficiency [0,1] (1989 in-updraft precipitation).
+    # >0 diverts that fraction of convective condensate to rain — an already-
+    # fallen species the pipeline column-integrates DIRECTLY to surface precip
+    # (invisible to radiation, which sees only q_c/q_i) — instead of detraining
+    # it all as suspended anvil cloud.  0 = off (legacy).  Observed deep-
+    # convective CPE ~0.5-0.9.  Threaded into EVERY mass-flux scheme whose
+    # config exposes precip_efficiency (tiedtke, bechtold, zhang_mcfarlane,
+    # kain_fritsch, mass_flux, edmf — the shared split_convective_rain);
+    # guarded in _resolve_convection + the run_amip CLI gate.
     convective_precip_efficiency: float = 0.0
 
     # Tiedtke plume buoyancy-death memory: when True the entraining plume,
