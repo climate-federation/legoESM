@@ -120,6 +120,66 @@ def conservation_accumulator():
     return _accumulation_dtype()
 
 
+def cube_faces_are_whole_on_shards() -> bool:
+    """True iff the active decomposition keeps each cube face WHOLE on a shard.
+
+    The shard-invariant per-face reduction (:func:`shard_invariant_cube_face_sum`)
+    is only bit-exact when no face is split across devices — i.e. single-device,
+    serial, or a whole-face SPMD mesh (device count divides 6).  A ``(6, kt, kt)``
+    SUB-FACE TILED mesh (``n_devices > 6``) shards the spatial axes too, so a
+    per-face sum would cross tiles and the per-face partial would NOT be
+    decomposition-invariant.  Read only Python module state (the halo backend +
+    SPMD mesh shape) → a static trace-time branch, never traced control flow.
+    """
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    if get_halo_backend() != "spmd":
+        return True  # serial / single-device: whole faces
+    mesh = get_spmd_mesh()
+    if mesh is None:
+        return True
+    sh = tuple(mesh.devices.shape)
+    is_tiled = len(sh) == 3 and sh[0] == 6 and sh[1] == sh[2] and sh[1] >= 2
+    return not is_tiled
+
+
+def shard_invariant_cube_face_sum(prod: jax.Array, reduce_axes=None) -> jax.Array:
+    """Sum a cube ``(6, ...)`` array shard-count-invariantly (issue #852).
+
+    A bare ``jnp.sum`` on a face-sharded array reduces each device's owned faces
+    LOCALLY and then all-reduces the per-shard partials.  float32 addition is
+    NON-ASSOCIATIVE, so that partitioned order differs from the single-device
+    flat sum — and between device counts (1 vs 3-faces/shard vs 2-faces/shard) —
+    by ~1 ulp.  A global conserved integral (mass, energy, tracer) that feeds a
+    fixer's rescale then turns that ulp into a shard-count-DEPENDENT state
+    correction which the chaotic flow amplifies (the symptom reported in #852,
+    wrongly attributed there to the ppermute halo — the halo is bit-exact; this
+    reduction is the real decomposition dependence).
+
+    On a WHOLE-FACE decomposition each shard owns ``k = 6/n_devices`` whole
+    faces, so reducing each face over ``reduce_axes`` first gives per-face
+    partials that are BIT-IDENTICAL at every decomposition; combining the 6
+    partials (axis 0) in a FIXED order (XLA does not reassociate float adds with
+    fast-math off) yields a total identical for single-device and any 1/2/3/6-way
+    face sharding.
+
+    ``reduce_axes`` are the WITHIN-face axes to sum first (default: every axis
+    but the leading face axis).  Pass a subset to keep a trailing axis, e.g. a
+    batched stack ``(6, n, n, n_arrays)`` with ``reduce_axes=(1, 2)`` returns
+    ``(n_arrays,)``.  The face axis (0) is always combined last in fixed order.
+
+    Caller MUST gate on ``prod.shape[0] == 6`` AND
+    :func:`cube_faces_are_whole_on_shards` (a tiled mesh splits faces and breaks
+    the invariance).  AD-safe (a linear sum).
+    """
+    if reduce_axes is None:
+        reduce_axes = tuple(range(1, prod.ndim))
+    per_face = jnp.sum(prod, axis=reduce_axes)  # face axis 0 preserved
+    total = per_face[0]
+    for f in range(1, per_face.shape[0]):
+        total = total + per_face[f]
+    return total
+
+
 def global_area_sum(
     array: jax.Array,
     grid,
@@ -191,6 +251,17 @@ def global_area_sum(
             return _broadcast_allreduce_sum(local_sum)
         from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
+    # Cube GSPMD / single-device: use the shard-count-invariant per-face
+    # fixed-order reduction (issue #852) so a face-sharded mass integral is
+    # bit-identical to single-device — a global conserved quantity must not
+    # depend on the device count.  Gated on the cube face axis (leading dim 6)
+    # AND a whole-face decomposition (a (6,kt,kt) tiled mesh splits faces, so
+    # the per-face reduction would not be invariant — fall back to the plain
+    # sum there).  lat-lon/lat-band (rows can split) and MPI keep the plain sum
+    # handled above.
+    if (prod.shape[0] == 6 and prod.ndim >= 3
+            and cube_faces_are_whole_on_shards()):
+        return shard_invariant_cube_face_sum(prod)
     return local_sum
 
 
@@ -285,6 +356,16 @@ def batch_global_area_sums(
             return [reduced[i] for i in range(len(local_sums))]
         from legoesm.parallel.reductions import batch_allreduce_mpi
         return batch_allreduce_mpi(local_sums, op="sum")
+    # Cube whole-face GSPMD / single-device: shard-count-invariant per-array
+    # reduction (issue #852), matching the single-array global_area_sum fix so
+    # the DEFAULT (non-anchor) mass fixer — fix_ps_mass → batch_global_area_sums
+    # — is decomposition-independent too.  ``area_acc.ndim == 3`` selects the
+    # cube (6, n, n) grid; reduce each face over the spatial axes then combine
+    # the 6 faces in fixed order (keeping the trailing per-array axis).
+    if area_acc.ndim == 3 and cube_faces_are_whole_on_shards():
+        inv = shard_invariant_cube_face_sum(
+            stacked * weight[..., None], reduce_axes=(1, 2))
+        return [inv[i] for i in range(len(arrays))]
     return local_sums
 
 
