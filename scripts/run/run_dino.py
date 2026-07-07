@@ -155,6 +155,37 @@ def _parse_args():
              "LAT-LON ONLY (MPAS supports implicit_cn / explicit_substep).",
     )
     p.add_argument(
+        "--momentum-advection",
+        choices=("vector_invariant", "flux_form", "weno5", "weno7", "weno9"),
+        default=None,
+        help="Horizontal momentum-advection scheme "
+             "(DINOConfig.momentum_advection, default 'vector_invariant' = the "
+             "AL81 PV-flux vector-invariant form; 'weno7' = the Oceananigans "
+             "WENOVectorInvariant card block; 'flux_form' = MITgcm). Overrides "
+             "the recipe card — the L2 bisect lever the cards could not "
+             "previously isolate from their time-integration blocks.",
+    )
+    p.add_argument(
+        "--coriolis-scheme",
+        choices=("matsuno_split", "explicit_ab2"),
+        default=None,
+        help="Coriolis time-stepping placement (DINOConfig.coriolis_scheme). "
+             "'matsuno_split' (default): unconditionally-neutral FB rotation "
+             "sub-step. 'explicit_ab2': f×u enters du_dt (requires "
+             "--outer ab2 via the recipe card; model validation rejects "
+             "unsupported pairings loudly).",
+    )
+    p.add_argument(
+        "--barotropic-slow-forcing-ab2", choices=("on", "off"), default=None,
+        help="AB2 time-centering of the barotropic slow forcing F_slow "
+             "(DINOConfig.barotropic_slow_forcing_ab2; Oceananigans Gᵁ "
+             "convention). REQUIRED for stability when coriolis_scheme="
+             "explicit_ab2 pairs with barotropic_solver=implicit_cn (without "
+             "it the barotropic-mode Coriolis integrates forward-Euler — the "
+             "diagnosed 'oceananigans'-card barotropic blowup). Default: the "
+             "recipe card's value ('oceananigans' card = on).",
+    )
+    p.add_argument(
         "--rigid-lid-dt-mom-ratio", type=float, default=None,
         help="dt_mom under-relaxation ratio for the rigid_lid faithful stack "
              "(DINOConfig.rigid_lid_dt_mom_ratio, default 9.0 = Veros "
@@ -377,6 +408,17 @@ def main():
             cfg, mpas_equatorial_visc_boost=args.mpas_eq_visc_boost)
     if args.barotropic_solver is not None:
         cfg = dataclasses.replace(cfg, barotropic_solver=args.barotropic_solver)
+    if args.momentum_advection is not None:
+        cfg = dataclasses.replace(
+            cfg, momentum_advection=args.momentum_advection)
+    if args.coriolis_scheme is not None:
+        cfg = dataclasses.replace(cfg, coriolis_scheme=args.coriolis_scheme)
+    if args.barotropic_slow_forcing_ab2 is not None:
+        cfg = dataclasses.replace(
+            cfg,
+            barotropic_slow_forcing_ab2=(
+                args.barotropic_slow_forcing_ab2 == "on"),
+        )
     if args.rigid_lid_dt_mom_ratio is not None:
         cfg = dataclasses.replace(
             cfg, rigid_lid_dt_mom_ratio=args.rigid_lid_dt_mom_ratio)
@@ -465,7 +507,13 @@ def main():
     # the rigid-lid island cache + dtype reconciliation) once from the concrete
     # initial state before the eager step loop, so the first step has a complete
     # carry. lat-lon only (rigid_lid is rejected on MPAS upstream).
-    if grid_kind == "latlon" and cfg.barotropic_solver == "rigid_lid":
+    # barotropic_slow_forcing_ab2 (the 'oceananigans' card's Gᵁ AB2
+    # time-centering) likewise needs its F_slow_{u,v}_prev carry seeded before
+    # step 1 (_step_impl raises on an unseeded prev); seed_scan_carry now does
+    # that too. Other stacks keep the eager-loop path byte-identical.
+    if grid_kind == "latlon" and (
+            cfg.barotropic_solver == "rigid_lid"
+            or model_cfg.flat_get("barotropic_slow_forcing_ab2")):
         state = model.seed_scan_carry(state, dt)
 
     t_wall_start = time.time()

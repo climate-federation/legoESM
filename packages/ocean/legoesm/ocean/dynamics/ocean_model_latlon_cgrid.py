@@ -4930,6 +4930,36 @@ class LatLonCGridOceanModel:
                                   dims=state.v.dims, units=state.v.units),
             )
 
+        # Barotropic slow-forcing AB2 carry (Gᵁ time-centering): seed the prev
+        # F_slow Fields to ZERO so the scan carry pytree is stable from step 1
+        # (the step stores a Field every step when barotropic_slow_forcing_ab2
+        # is on; a None -> Field transition mid-scan crashes lax.scan, and
+        # _step_impl raises on an unseeded prev).  First step then applies
+        # (3/2+ε)·F_slow — the same AB2 cold-start convention as the outer
+        # integrator.  Mirrors the in-driver seeding of
+        # build_silvestri_baroclinic_jet_setup; seeding here makes the flag
+        # usable by ANY seed_scan_carry driver (e.g. run_dino).  Field metadata
+        # matches the step's own storage (dims ("lat","lon_u")/("lat_v","lon"),
+        # units m/s^2).  No-op when the flag is off or already seeded.
+        if (getattr(self.config.barotropic, "barotropic_slow_forcing_ab2", False)
+                and (state.F_slow_u_prev is None or state.F_slow_v_prev is None)):
+            # Seed as a PAIR: a partial carry (one Field, one None -- e.g. a
+            # hand-built restart) would skip a u-only guard and then raise in
+            # _step_impl / flip None->Field mid-scan (codex).  Preserve an
+            # already-seeded component; zero-fill only the missing one.
+            from legoesm.core.field import Field
+            _fu = state.F_slow_u_prev
+            _fv = state.F_slow_v_prev
+            if _fu is None:
+                _fu = Field(data=jnp.zeros_like(state.u.data[:, :, 0]),
+                            name="F_slow_u_prev", dims=("lat", "lon_u"),
+                            units="m/s^2")
+            if _fv is None:
+                _fv = Field(data=jnp.zeros_like(state.v.data[:, :, 0]),
+                            name="F_slow_v_prev", dims=("lat_v", "lon"),
+                            units="m/s^2")
+            state = state._replace(F_slow_u_prev=_fu, F_slow_v_prev=_fv)
+
         # Prognostic-EKE carry: when EKE is on but the eddy-energy field has not
         # been seeded (state.eke is None), pre-seed it to the e_min floor so the
         # scan keeps a constant pytree (the model step would otherwise turn

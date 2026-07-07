@@ -258,6 +258,31 @@ class TestDINORecipes:
         assert mc.flat_get("coriolis_scheme") == "explicit_ab2"
         assert mc.flat_get("ab2_scope") == "advective"
         assert mc.flat_get("eos") == "veros_nonlin2"
+        # rigid_lid force-disables the F_slow AB2 flag (its validation rejects
+        # ab2_scope="advective"; the streamfunction projection has no barotropic
+        # inertial mode to time-center).
+        assert mc.flat_get("barotropic_slow_forcing_ab2") is False
+
+    def test_oceananigans_card_ab2_centers_barotropic_slow_forcing(self):
+        # Root-cause guard for the DINO 'oceananigans'-card barotropic blowup
+        # (dino_l2_bisect o_ctl: |eta| 6 m by day 15, growth rate ∝ dt, basin-
+        # scale off-equatorial quadrupole).  Under coriolis_scheme="explicit_ab2"
+        # + barotropic_solver="implicit_cn" the CN predictor gates its FB
+        # Coriolis off (_cori_fac=0) and the outer AB2 keeps the barotropic
+        # increment un-extrapolated, so WITHOUT barotropic_slow_forcing_ab2 the
+        # barotropic-mode Coriolis integrates forward-Euler — unconditionally
+        # unstable, |G| = sqrt(1 + (f·dt)²) per step.  The card must carry the
+        # Oceananigans-faithful Gᵁ AB2 time-centering (as the validated-stable
+        # Silvestri §5 jet stack does).
+        cfg = dino_config_for_recipe("oceananigans")
+        assert cfg.barotropic_slow_forcing_ab2 is True
+        grid = dino_lat_lon_grid(cfg, n_lon=10)
+        mc, _ = dino_lat_lon_model_config(grid, cfg, physics=False)
+        assert mc.flat_get("coriolis_scheme") == "explicit_ab2"
+        assert mc.flat_get("barotropic_solver") == "implicit_cn"
+        assert mc.flat_get("outer_integrator") == "ab2"
+        assert mc.flat_get("ab2_scope") == "total"
+        assert mc.flat_get("barotropic_slow_forcing_ab2") is True
 
 
 # ---------------------------------------------------------------------

@@ -94,6 +94,52 @@ def test_barotropic_solver_rejects_bad_choice(monkeypatch):
         rd._parse_args()
 
 
+def test_momentum_advection_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--momentum-advection", "weno7"])
+    args = rd._parse_args()
+    assert args.momentum_advection == "weno7"
+
+
+def test_momentum_advection_default_none_and_rejects_bad(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().momentum_advection is None
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--momentum-advection", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_coriolis_scheme_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--coriolis-scheme", "matsuno_split"])
+    args = rd._parse_args()
+    assert args.coriolis_scheme == "matsuno_split"
+
+
+def test_coriolis_scheme_default_none_and_rejects_bad(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().coriolis_scheme is None
+    monkeypatch.setattr(sys, "argv",
+                        ["run_dino", "--coriolis-scheme", "leapfrog"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_barotropic_slow_forcing_ab2_flag_parses(monkeypatch):
+    """Tri-state: None (card value) / 'on' / 'off' — the FE-barotropic-Coriolis
+    bisect lever (the 'oceananigans'-card blowup discriminator)."""
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    assert rd._parse_args().barotropic_slow_forcing_ab2 is None
+    monkeypatch.setattr(
+        sys, "argv", ["run_dino", "--barotropic-slow-forcing-ab2", "off"])
+    assert rd._parse_args().barotropic_slow_forcing_ab2 == "off"
+    monkeypatch.setattr(
+        sys, "argv", ["run_dino", "--barotropic-slow-forcing-ab2", "1"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
 def test_rigid_lid_dt_mom_ratio_flag_parses(monkeypatch):
     monkeypatch.setattr(sys, "argv",
                         ["run_dino", "--barotropic-solver", "rigid_lid",

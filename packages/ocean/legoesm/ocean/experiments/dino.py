@@ -316,6 +316,18 @@ class DINOConfig:
     coriolis_scheme: str = "matsuno_split"        # "explicit_ab2" (MITgcm/Oceananigans/Veros)
     outer_integrator: str = "forward_euler"       # "ab2" (MITgcm/Oceananigans/Veros)
     ab2_scope: str = "total"                       # "advective" (Veros; forced by rigid_lid)
+    # AB2 time-centering of the barotropic slow forcing F_slow (Oceananigans
+    # Gᵁ convention).  REQUIRED whenever coriolis_scheme="explicit_ab2" pairs
+    # with barotropic_solver="implicit_cn": the CN predictor gates its own FB
+    # Coriolis off (_cori_fac=0) and the outer AB2 deliberately excludes the
+    # barotropic increment from extrapolation, so without this flag the
+    # barotropic-mode Coriolis is integrated FORWARD EULER at weight 1.0 —
+    # unconditionally unstable, |G|=sqrt(1+(f·dt)²) per step (e-fold ≈ 2/(f²·dt):
+    # ~6 d at 15° for dt=2700 s).  Diagnosed as the DINO 'oceananigans'-card
+    # barotropic blowup (dino_l2_bisect o_ctl: basin-scale off-equatorial eta
+    # quadrupole, |eta| 6 m by day 15, growth rate ∝ dt).  The validated-stable
+    # Silvestri §5 jet runs the same Coriolis routing WITH this flag on.
+    barotropic_slow_forcing_ab2: bool = False     # True (Oceananigans card)
 
     # ------------------------------------------------------------------
     # Diagnostics (paper Figs 5-6: MOC and σ_2 referenced to 2000 m)
@@ -426,6 +438,12 @@ DINO_RECIPES: dict[str, dict] = {
         "coriolis_scheme": "explicit_ab2",  # [APPROX] face-f ~ vertex-f enstrophy
         "outer_integrator": "ab2",     # Oceananigans QuasiAdamsBashforth2 (default)
         "barotropic_solver": "implicit_cn",  # Oceananigans ImplicitFreeSurface
+        # AB2 time-centering of F_slow (Oceananigans Gᵁ): without it the
+        # explicit_ab2 × implicit_cn pairing integrates the barotropic-mode
+        # Coriolis forward-Euler (unconditionally unstable; the diagnosed
+        # DINO-oceananigans barotropic blowup).  Matches the Silvestri §5
+        # jet stack, which validates this Coriolis routing WITH the flag.
+        "barotropic_slow_forcing_ab2": True,
         "ke_gradient_scheme": "centered",
     },
 }
@@ -1402,11 +1420,22 @@ def dino_lat_lon_model_config(
         coriolis_scheme=cfg.coriolis_scheme,
         outer_integrator=cfg.outer_integrator,
         ab2_scope=cfg.ab2_scope,
+        # Routed into config.barotropic by from_flat.  Required by the
+        # oceananigans card (explicit_ab2 × implicit_cn): keeps the
+        # barotropic-mode Coriolis AB2-extrapolated instead of forward-Euler
+        # (see DINOConfig.barotropic_slow_forcing_ab2).
+        barotropic_slow_forcing_ab2=cfg.barotropic_slow_forcing_ab2,
     )
     if cfg.barotropic_solver == "rigid_lid":
         _scheme.update(
             outer_integrator="ab2", coriolis_scheme="explicit_ab2",
             ab2_scope="advective", dt_mom_ratio=cfg.rigid_lid_dt_mom_ratio,
+            # The rigid-lid streamfunction projection removes barotropic
+            # inertial modes entirely (the FE-Coriolis hazard the flag cures
+            # does not exist there), and the flag's validation rejects
+            # ab2_scope="advective" — force it OFF under the coordinated
+            # rigid-lid stack regardless of the recipe card.
+            barotropic_slow_forcing_ab2=False,
         )
 
     model_cfg = LatLonCGridOceanConfig.from_flat(
