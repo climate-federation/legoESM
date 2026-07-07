@@ -399,6 +399,10 @@ class ExperimentConfig(NamedTuple):
     #                          optically THINNER cloud (lower albedo, still
     #                          LW-active).  Bounds (5e-5, 1e-3).
     #   cloud_conv_cloud_max — convective (Slingo) cover cap.  Bounds (0.1, 1.0).
+    #   cloud_conv_cloud_condensate — convective anvil in-cloud condensate
+    #                          [kg/kg]; LOWER => optically THINNER / more realistic
+    #                          anvil (lower albedo, still LW-active).  Bounds
+    #                          (1e-5, 1e-3).
     # These are the SW/LW knob for the coare3 moisture-driven albedo overshoot.
     cloud_rh_crit: float | None = None
     cloud_q_c_diagnostic: float | None = None
@@ -408,6 +412,7 @@ class ExperimentConfig(NamedTuple):
     cloud_p_xr: float | None = None
     cloud_alpha_xr: float | None = None
     cloud_conv_cloud_max: float | None = None
+    cloud_conv_cloud_condensate: float | None = None
     microphysics: str = "none"
     # Number of microphysics sub-steps inside one dynamics step.  Morrison's
     # double-moment product terms (q_c·q_r, q_i·q_c) run away at the
@@ -1171,6 +1176,7 @@ class ExperimentConfig(NamedTuple):
             ("cloud_rh_crit", 0.5, 0.99),
             ("cloud_q_c_diagnostic", 5.0e-5, 1.0e-3),
             ("cloud_conv_cloud_max", 0.1, 1.0),
+            ("cloud_conv_cloud_condensate", 1.0e-5, 1.0e-3),
             ("cloud_p_xr", 0.05, 1.0),
             ("cloud_alpha_xr", 10.0, 1000.0),
         ):

@@ -447,6 +447,14 @@ def build_parser():
                         help="Override convective (Slingo) cloud-cover cap "
                              "(CloudConfig.conv_cloud_max). Range [0.1, 1.0]. "
                              "Default: CloudConfig default.")
+    parser.add_argument("--conv-cloud-condensate",
+                        dest="cloud_conv_cloud_condensate",
+                        type=float, default=None,
+                        help="Override in-cloud condensate [kg/kg] of the "
+                             "convective anvil deck "
+                             "(CloudConfig.conv_cloud_condensate). LOWER => "
+                             "optically THINNER / more realistic anvil. Range "
+                             "[1e-5, 1e-3]. Default: CloudConfig default.")
     parser.add_argument("--microphysics", default="morrison",
                         choices=list(VALID_MICROPHYSICS),
                         help="Microphysics scheme (default: morrison — the "
@@ -864,6 +872,7 @@ def main():
         cloud_rh_crit=args.cloud_rh_crit,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_conv_cloud_max=args.cloud_conv_cloud_max,
+        cloud_conv_cloud_condensate=args.cloud_conv_cloud_condensate,
         microphysics=args.microphysics,
         days=args.days,
         experiment=args.experiment,

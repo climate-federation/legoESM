@@ -38,11 +38,10 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.turb.CLUBBLiteConfig.C_eps',
     'atm.turb.CLUBBLiteConfig.Pr_t',
     'atm.turb.CLUBBLiteConfig.l_mix_max',
-    # atm: CloudConfig (9)
+    # atm: CloudConfig (8)
     'atm.clouds.CloudConfig.Nc_default',
     'atm.clouds.CloudConfig.T_ice_only',
     'atm.clouds.CloudConfig.conv_cloud_coeff',
-    'atm.clouds.CloudConfig.conv_cloud_condensate',
     'atm.clouds.CloudConfig.conv_precip_scale',
     'atm.clouds.CloudConfig.gamma_xr',
     'atm.clouds.CloudConfig.q_cloud_resolved_ref',
