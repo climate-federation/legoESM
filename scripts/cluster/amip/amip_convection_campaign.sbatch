@@ -42,7 +42,7 @@ export LEGOESM_REPO="${LEGOESM_REPO:-/burg-archive/glab/users/ac5006/legoESM}"
 
 : "${CONV:?set CONV=sbm|tiedtke|bechtold|edmf}"
 : "${GWD:=hines+mcfarlane}"
-: "${SSO_FILE:=/burg-archive/glab/users/pg2328/legoESM_chunk/data/amip/sso_stdh_2deg.nc}"
+: "${SSO_FILE:=/burg-archive/glab/users/pg2328/legoESM_chunk/data_pg/amip/sso_stdh_2deg.nc}"
 : "${OUTBASE:=/burg-archive/glab/users/pg2328/legoESM_chunk/results/amip/convcmp}"
 : "${OUTDIR:=$OUTBASE/conv_${CONV}}"
 : "${TARGET_DAYS:=90}"
