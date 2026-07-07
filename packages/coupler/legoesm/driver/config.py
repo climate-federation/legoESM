@@ -152,6 +152,17 @@ class DycoreConfig(NamedTuple):
     polar_filter_cutoff_deg: float = 60.0
     polar_filter_max_wave_speed: float = 300.0
 
+    # #836: hydrostatic lat-lon C-grid top sponge (Rayleigh damping increasing
+    # toward the model lid; absorbs upward gravity-wave energy that would else
+    # reflect off the rigid lid).  ``sponge_coeff=0`` (default) is OFF and
+    # bit-identical.  Threaded into ``CGridLatLonPrimitiveEquationConfig`` by
+    # ``component_factory`` (mirrors the polar-filter passthrough).
+    sponge_coeff: float = 0.0             # Rayleigh damping scale [1/s] (exact lid
+    #                                      value for 'sin2'; 'sam_rational' -> *100/101)
+    sponge_width_m: float = 10000.0       # sponge-layer depth below the top [m]
+    sponge_shape: str = "sin2"            # "sin2" | "sam_rational"
+    sponge_scale_height_m: float = 7500.0  # log-pressure scale height for sigma->z
+
     # Task #25: time integrator override.  Lat-lon C-grid uses
     # ``ssp_rk3`` by default — three RK3 stages unrolled with the
     # tendency function inlined 3×.  Setting
