@@ -453,7 +453,8 @@ def main():
           f"snapshot every {snapshot_every_steps} steps "
           f"= {snapshot_every_steps * dt / 86400.0:.2f} days")
     print(f"Forcing: {'OFF (dycore only)' if args.no_forcing else 'wind + T/S restoring (Q_sr split) + Jerlov-I SW penetration'}")
-    print(f"Physics: {'OFF' if args.physics_off else 'KPP + GM/Redi + enhanced-diffusion convection'}")
+    print(f"Physics: "
+          f"{'OFF' if args.physics_off else cfg.vmix_scheme.upper() + ' + GM/Redi + enhanced-diffusion convection'}")
     print(f"Output:  {args.output_dir}")
     print()
     print(f"{'step':>6} {'day':>7} {'|u|':>10} {'|v|':>10} {'|eta|':>10} "
