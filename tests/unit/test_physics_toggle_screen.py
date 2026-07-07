@@ -75,10 +75,10 @@ def test_build_cases_tier2_precip():
     assert "subgrid_auto" in labels
     d = dict(cases)
     assert d["subgrid_auto"] == ["--subgrid-autoconversion"]
-    # --params levers reference a YAML path
-    assert d["kau_hi"][0] == "--params" and d["kau_hi"][1].endswith(".yaml")
     # Pierre's #840 anvil-condensate knob is in the matrix
     assert "--conv-cloud-condensate" in d["ccond_low"]
+    # only CLI-reachable levers (no unreachable --params scheme fields)
+    assert not any("--params" in args for _, args in cases)
 
 
 def test_extract_run_metrics_survived(tmp_path):

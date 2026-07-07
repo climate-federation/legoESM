@@ -72,16 +72,17 @@ TIER2_CLOUD_CASES: list[tuple[str, list[str]]] = [
 # Levers: subgrid autoconversion (in-cloud q_c -> faster rain, CLI), the warm-rain
 # rate (k_au / autoconversion_rate via --params), and the Bechtold convective
 # precip efficiency (--params).  Param YAMLs live in /scratch/.../tuning_params. --
-_TP = "/scratch/b/b309178/tuning_params"
+# NOTE: only CLI-reachable levers are used.  --params scheme fields (k_au,
+# autoconversion_rate, precip_efficiency) target nested *Config NamedTuples that
+# the AMIP driver's config object does not expose to the --params class-router
+# ("scheme not built into this driver's config") — dropped; those need a
+# top-level ExperimentConfig scalar + CLI flag (as Pierre did for
+# conv_cloud_condensate #840) or a scheme-default edit.  Run WITH the sponge on
+# (config sponge_enabled=true) — the no-sponge sweep is the control.
 TIER2_PRECIP_CASES: list[tuple[str, list[str]]] = [
     ("baseline",       []),
-    ("subgrid_auto",   ["--subgrid-autoconversion"]),                       # in-cloud autoconv
-    ("kau_hi",         ["--params", f"{_TP}/kau_hi.yaml"]),                 # k_au 600->3000
-    ("autorate_hi",    ["--params", f"{_TP}/autorate_hi.yaml"]),           # auto rate 1e-3->5e-3
-    ("convpe_hi",      ["--params", f"{_TP}/convpe_hi.yaml"]),             # Bechtold PE 0.7->0.95
-    ("subgrid_kau",    ["--subgrid-autoconversion", "--params", f"{_TP}/kau_hi.yaml"]),
+    ("subgrid_auto",   ["--subgrid-autoconversion"]),                       # in-cloud autoconv (#1)
     ("subgrid_qc_low", ["--subgrid-autoconversion", "--q-c-diagnostic", "1.5e-4"]),
-    ("subgrid_convpe", ["--subgrid-autoconversion", "--params", f"{_TP}/convpe_hi.yaml"]),
     ("ccond_low",      ["--conv-cloud-condensate", "3.0e-5"]),               # #840 thin anvil
     ("subgrid_ccond",  ["--subgrid-autoconversion", "--conv-cloud-condensate", "3.0e-5"]),
 ]
