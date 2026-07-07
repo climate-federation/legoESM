@@ -1,0 +1,106 @@
+#!/bin/bash -l
+#PBS -N legoesm_blocker1_ngrid
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=1:ncpus=64:mpiprocs=1:ngpus=4:gpu_type=a100:mem=400GB
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# Blocker-1 RESOLUTION SWEEP (single-node lane): does the GSPMD shard_map cube
+# ppermute halo's strong-scaling efficiency RECOVER as the per-face problem
+# grows?  The C48 decisive run FAILED the 0.60 efficiency gate — but at C48 the
+# per-device compute is tiny, so the fixed halo cost dominates (the 1->2 step
+# pays the entire cost of introducing the collective).  This sweep runs the
+# SAME single-node 1->3 device ladder at increasing --n-grid so we can read
+# efficiency vs resolution: if it climbs toward 1.0 as compute-per-device grows,
+# the C48 FAIL is a small-domain artefact, not a halo-scaling defect.
+#
+# Measurement mode ONLY (no --gate-efficiency): every grid point runs to
+# completion so we see the whole trend — the pass/fail gate is the separate
+# decisive run (blocker1_cube_shardmap.pbs).  Does NOT cross the np6 cliff
+# (that is blocker1_cube_shardmap_xnode.pbs).
+#
+# SUBMIT:
+#   qsub scripts/cluster/scaling_derecho/blocker1_ngrid_sweep.pbs
+#   qsub -v N_GRID_LIST="48 96 192 384",PRECS="float32 float64" \
+#        scripts/cluster/scaling_derecho/blocker1_ngrid_sweep.pbs
+# ===========================================================================
+set -uo pipefail
+
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+if   [ -f "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}/scripts/cluster/scaling_derecho"
+elif [ -f "${SUBMIT_DIR}/_env.sh" ]; then
+    SCRIPT_DIR="${SUBMIT_DIR}"
+else
+    echo "ERROR: cannot find _env.sh from PBS_O_WORKDIR=${SUBMIT_DIR}" >&2
+    exit 1
+fi
+
+export JAX_PLATFORMS=cuda
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
+# shellcheck source=_env.sh
+source "${SCRIPT_DIR}/_env.sh"
+cd "$REPO"
+
+# --- Sweep configuration (overridable via qsub -v) ---------------------------
+COUNTS="${COUNTS:-1,2,3}"              # single-node face divisors (no np6 cliff)
+N_GRID_LIST="${N_GRID_LIST:-48 96 192 384}"   # per-face resolutions to sweep
+PRECS="${PRECS:-float32}"             # float32 = GPU-realistic; add float64 to match the decisive run
+N_LEV="${N_LEV:-26}"
+N_WARMUP="${N_WARMUP:-3}"
+N_TIMING="${N_TIMING:-50}"
+ROOT="${ROOT:-results/blocker1_ngrid_sweep}"
+
+echo "=== Blocker-1 n_grid sweep | counts=$COUNTS grids='$N_GRID_LIST' precs='$PRECS' L$N_LEV ==="
+nvidia-smi -L || true
+
+for PREC in $PRECS; do
+    for NG in $N_GRID_LIST; do
+        OUT="${ROOT}/c${NG}/${PREC}"
+        echo "--- n_grid=$NG precision=$PREC -> $OUT ---"
+        # NB: measurement mode (no --gate-efficiency) so a low-efficiency grid
+        # does NOT early-exit; </dev/null keeps JAX from consuming the loop stdin.
+        "$PY" scripts/bench/bench_cube_shardmap_halo.py \
+            --device-counts "$COUNTS" --n-grid "$NG" --n-lev "$N_LEV" \
+            --n-warmup "$N_WARMUP" --n-timing "$N_TIMING" \
+            --precision "$PREC" --output-dir "$OUT" < /dev/null \
+          || echo "WARN: n_grid=$NG precision=$PREC FAILED (likely OOM at the n=1 all-faces baseline) — continuing" >&2
+    done
+done
+
+echo "=== efficiency vs resolution (from results.json) ==="
+"$PY" - "$ROOT" <<'PYEOF'
+import json, sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+rows = []
+for jf in sorted(root.glob("c*/*/results.json")):
+    d = json.loads(jf.read_text())
+    cfg = d["config"]
+    by_dev = {r["n_devices"]: r for r in d["scaling"]}
+    rows.append((cfg["precision"], cfg["n_grid"], by_dev,
+                 d["efficiency_gate"]["efficiency_at_largest"]))
+
+rows.sort(key=lambda r: (r[0], r[1]))
+lines = ["| precision | n_grid | ms@1 | ms@2 | ms@3 | eff@2 | eff@3 |",
+         "|---|---|---|---|---|---|---|"]
+def g(by, c, k):
+    return f"{by[c][k]:.3f}" if c in by else "—"
+for prec, ng, by, _ in rows:
+    lines.append(
+        f"| {prec} | {ng} | {g(by,1,'ms_per_step')} | {g(by,2,'ms_per_step')} "
+        f"| {g(by,3,'ms_per_step')} | {g(by,2,'efficiency')} | {g(by,3,'efficiency')} |")
+table = "\n".join(lines)
+print(table)
+(root / "efficiency_vs_resolution.md").write_text(table + "\n")
+print(f"\nwrote {root/'efficiency_vs_resolution.md'}")
+print("READ: if eff@3 climbs toward ~0.6+ as n_grid grows, the C48 FAIL is a "
+      "small-domain artefact (halo amortizes); if it stays flat/low, the halo "
+      "genuinely does not scale on NVLink.")
+PYEOF
+
+echo "=== done; per-grid reports under ${ROOT}/c<N>/<prec>/report.md ==="
