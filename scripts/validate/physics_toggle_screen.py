@@ -88,6 +88,25 @@ TIER2_PRECIP_CASES: list[tuple[str, list[str]]] = [
 ]
 
 
+# --- Tier-2 evaporation + cloud-fraction levers.  Diagnosis (#847): the config
+# equilibrates into an over-reflective / weak-hydrological-cycle state — ocean
+# hfls 40 vs ~110 W/m2, precip 0.75 vs 2.8, albedo 0.65.  Two independent
+# hypotheses, tested in parallel:
+#   (a) EVAP source: gustiness_zi is 300 in-config vs coare3-native 600 (halved)
+#       -> raise it to boost low-wind ocean evaporation.
+#   (b) CLOUD overcast: Xu-Randall p_xr HIGHER / alpha_xr LOWER directly flatten
+#       the "moisture-driven overcast runaway" (the clt-85% / albedo lever).
+# Run WITH the sponge (config sponge_enabled=true) for stability. --
+TIER2_EVAP_CASES: list[tuple[str, list[str]]] = [
+    ("baseline",   []),
+    ("gust_600",   ["--gustiness-zi", "600"]),                    # coare3-native (vs 300)
+    ("gust_1500",  ["--gustiness-zi", "1500"]),                   # aggressive evap boost
+    ("pxr_hi",     ["--cloud-p-xr", "0.6"]),                      # flatten overcast runaway
+    ("alphaxr_lo", ["--cloud-alpha-xr", "30"]),                   # cloud grows slower w/ condensate
+    ("gust_pxr",   ["--gustiness-zi", "600", "--cloud-p-xr", "0.6"]),  # combined evap+cloud
+]
+
+
 def build_cases(tier: str = "tier1") -> list[tuple[str, list[str]]]:
     """Return the (label, extra-args) case list for a screen tier."""
     if tier == "tier1":
@@ -96,8 +115,11 @@ def build_cases(tier: str = "tier1") -> list[tuple[str, list[str]]]:
         return list(TIER2_CLOUD_CASES)
     if tier == "tier2_precip":
         return list(TIER2_PRECIP_CASES)
+    if tier == "tier2_evap":
+        return list(TIER2_EVAP_CASES)
     raise ValueError(
-        f"unknown screen tier {tier!r} (tier1 | tier2_cloud | tier2_precip)")
+        f"unknown screen tier {tier!r} "
+        "(tier1 | tier2_cloud | tier2_precip | tier2_evap)")
 
 
 def _run_status(run_dir: Path) -> str:
@@ -130,7 +152,8 @@ def extract_run_metrics(run_dir: Path) -> dict:
            "blowup_day": _blowup_day(status),
            "max_wind": float("nan"), "moisture_resid": float("nan"),
            "energy_toa_net": float("nan"), "rsut": float("nan"),
-           "olr": float("nan"), "precip": float("nan")}
+           "olr": float("nan"), "precip": float("nan"),
+           "hfls": float("nan"), "sw_net_sfc": float("nan")}
     ts = run_dir / "timeseries.npz"
     if ts.exists():
         z = np.load(ts, allow_pickle=True)
@@ -150,6 +173,10 @@ def extract_run_metrics(run_dir: Path) -> dict:
         # Global-mean surface precip [mm/day] — the primary rank key for the
         # precip-efficiency sweep (raise toward GPCP ~2.8; drains cloud water).
         out["precip"] = _last("precip")
+        # Latent heat flux (evaporation, W/m2; obs ~88) + net surface SW (W/m2;
+        # obs ~165) — the hydrological-cycle source + the over-reflection proxy.
+        out["hfls"] = _last("hfls")
+        out["sw_net_sfc"] = _last("sw_net_sfc")
     return out
 
 
@@ -157,17 +184,19 @@ def format_table(rows: list[dict]) -> str:
     """Tabulate the screen results, most-stable (largest blowup_day) first."""
     rows = sorted(rows, key=lambda r: (-(r["blowup_day"] if np.isfinite(r["blowup_day"]) else 1e9),
                                         r["label"]))
-    lines = [f"{'case':16s} {'blowup':>8s} {'precip':>7s} {'rsut':>7s} "
-             f"{'olr':>7s} {'toa_net':>8s} {'max_wind':>8s} {'|moist|':>8s}  status",
-             "-" * 100]
+    lines = [f"{'case':16s} {'blowup':>7s} {'precip':>7s} {'hfls':>6s} "
+             f"{'swnsfc':>7s} {'rsut':>7s} {'olr':>7s} {'toa_net':>8s} "
+             f"{'maxwind':>8s}  status",
+             "-" * 108]
     for r in rows:
         bd = r["blowup_day"]
         bd_s = "surv" if np.isinf(bd) else ("n/a" if np.isnan(bd) else f"{bd:.0f}")
         lines.append(
-            f"{r['label']:16s} {bd_s:>8s} {r.get('precip', float('nan')):7.2f} "
+            f"{r['label']:16s} {bd_s:>7s} {r.get('precip', float('nan')):7.2f} "
+            f"{r.get('hfls', float('nan')):6.1f} "
+            f"{r.get('sw_net_sfc', float('nan')):7.1f} "
             f"{r.get('rsut', float('nan')):7.1f} {r.get('olr', float('nan')):7.1f} "
-            f"{r['energy_toa_net']:8.1f} {r['max_wind']:8.1f} "
-            f"{r['moisture_resid']:8.2f}  {r['status']}")
+            f"{r['energy_toa_net']:8.1f} {r['max_wind']:8.1f}  {r['status']}")
     return "\n".join(lines)
 
 

@@ -81,6 +81,17 @@ def test_build_cases_tier2_precip():
     assert not any("--params" in args for _, args in cases)
 
 
+def test_build_cases_tier2_evap():
+    cases = build_cases("tier2_evap")
+    labels = [c[0] for c in cases]
+    assert labels[0] == "baseline"
+    d = dict(cases)
+    # evaporation lever (gustiness) + the untried cloud-overcast lever (p_xr)
+    assert d["gust_600"] == ["--gustiness-zi", "600"]
+    assert "--cloud-p-xr" in d["pxr_hi"]
+    assert d["gust_pxr"] == ["--gustiness-zi", "600", "--cloud-p-xr", "0.6"]
+
+
 def test_extract_run_metrics_survived(tmp_path):
     d = tmp_path / "baseline"
     d.mkdir()
