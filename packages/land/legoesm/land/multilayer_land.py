@@ -683,10 +683,18 @@ def _step_multilayer_land_impl(
     # so the third scheme, CLMMLCanopyConfig, is correctly excluded too.  Dew
     # (demand<0) left un-throttled.
     if isinstance(config.surface_scheme, SimpleSEBConfig):
-        # _S_top (top-layer effective saturation, floored at 1e-6 in its shared
-        # definition above so d(S_top**exp)/dS_top stays finite at the residual-water
-        # boundary for a trainable exp < 1; AD-safe, negligible fwd).
-        _beta_surf = (_S_top ** config.soil_evap_resistance_exp).astype(
+        # Bare-soil evaporation efficiency = Kelvin pore RELATIVE HUMIDITY x diffusion-crust
+        # resistance, matching the two-leaf-canopy path (above) and CLM5 (Oleson 2013):
+        #   * h_r = exp(psi_top g /(R_v T_top)) — pore-space vapour-pressure lowering; ~1
+        #     except as the surface nears residual (psi -> -inf), where it shuts evap off.
+        #     Previously MISSING on the SimpleSEB path (only S_top**exp), unlike the canopy.
+        #   * _S_top (top-layer effective saturation, floored at 1e-6 in its shared
+        #     definition above so d(S_top**exp)/dS_top stays finite at the residual-water
+        #     boundary for a trainable exp < 1; AD-safe, negligible fwd).
+        _h_r = jnp.exp(jnp.minimum(
+            psi[:, 0] * constants.g
+            / (constants.R_v * jnp.maximum(T_soil[:, 0], 1.0)), 0.0))
+        _beta_surf = (_h_r * _S_top ** config.soil_evap_resistance_exp).astype(
             soil_evap_demand.dtype)
         soil_evap_demand = jnp.where(
             soil_evap_demand > 0.0, soil_evap_demand * _beta_surf, soil_evap_demand)
