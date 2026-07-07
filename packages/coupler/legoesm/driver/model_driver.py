@@ -2164,6 +2164,19 @@ class ModelDriver:
         k_f = k_free + k_f_max * jnp.maximum(
             0.0, (sigma_full - cfg.sigma_b) / (1.0 - cfg.sigma_b)
         )
+        # Top-of-atmosphere sponge (#836): a Rayleigh damping increasing toward
+        # the model lid (sigma -> 0), ADDED to the surface-drag k_f so the
+        # existing fric_decay tail (applied to u, v every step) absorbs
+        # upward-propagating wave energy the hydrostatic latlon-cgrid dycore
+        # otherwise reflects off the rigid ~35 hPa top.  sin^2 taper from 0 at
+        # sigma = sponge_sigma_top to sponge_coeff_per_day at the top (the same
+        # shape as dynamics.compressible_euler.sponge_profile, expressed in
+        # sigma).  Config-gated -> byte-identical when sponge_enabled is False.
+        if getattr(cfg, "sponge_enabled", False):
+            k_sp_max = cfg.sponge_coeff_per_day / 86400.0
+            _sig_top = max(cfg.sponge_sigma_top, 1e-6)  # coeff-ok: /~0 guard
+            frac = jnp.clip((_sig_top - sigma_full) / _sig_top, 0.0, 1.0)
+            k_f = k_f + k_sp_max * jnp.sin(0.5 * jnp.pi * frac) ** 2
         self._fric_decay = jnp.exp(-k_f * DT)
         self._qv_smooth_coeff = self._hyperdiff * 0.5
 

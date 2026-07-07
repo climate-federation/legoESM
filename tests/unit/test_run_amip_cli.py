@@ -157,6 +157,23 @@ def test_land_surface_scheme_flag_flows_to_config():
     assert cfg.land_surface_scheme == "two_leaf"
 
 
+def test_sponge_flags_flow_to_config():
+    """--sponge / --sponge-coeff-per-day / --sponge-sigma-top round-trip (#836
+    top-of-atmosphere sponge); default OFF with the config default coeff/base."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.sponge_enabled is False
+    assert cfg_default.sponge_coeff_per_day == 2.0
+    assert cfg_default.sponge_sigma_top == 0.15
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--sponge",
+        "--sponge-coeff-per-day", "4.0", "--sponge-sigma-top", "0.2",
+    ]), parser))
+    assert cfg.sponge_enabled is True
+    assert cfg.sponge_coeff_per_day == 4.0
+    assert cfg.sponge_sigma_top == 0.2
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""
