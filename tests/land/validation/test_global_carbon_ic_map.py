@@ -42,3 +42,25 @@ def test_equilibrate_two_archetypes():
     # SOM stock and biomass are physical (positive) for both woody archetypes.
     assert (np.asarray(qc["som_kgC"]) > 0).all()
     assert (np.asarray(qc["biomass_kgC"]) > 0).all()
+
+
+def test_same_group_columns_get_distinct_gpp():
+    # Two WOODY archetypes (PFT 4, 7 -> both trees) forced into ONE (woody,
+    # soil_class) group by giving them the SAME soil_class -> the group runs
+    # ncol=2, exercising the per-column land_params GPP threading. Distinct
+    # climate must yield distinct GPP; equal GPP would mean the columns
+    # collapsed to a single PFT/climate (the silent batching bug).
+    tab = ArchetypeTable(
+        pft_id=np.array([4, 7]),
+        mat_k=np.array([300.0, 280.0]), map_yr=np.array([2400.0, 600.0]),
+        t_seasonal_amp_k=np.array([2.0, 14.0]), aridity=np.array([2.5, 0.8]),
+        sw_mean_w=np.array([240.0, 170.0]),
+        soil_class=np.array(["clay_loam", "clay_loam"], dtype=object))  # SAME -> one group
+    eq, qc = equilibrate_archetypes(tab, n_spinup=20, n_verify=6, dt=7200.0,
+                                    n_layers=6, soil_depth=2.0)
+    gpp = np.asarray(qc["gpp"])
+    assert gpp.shape == (2,)
+    assert np.all(np.isfinite(gpp)) and (gpp >= 0).all()
+    # The two columns ran in the SAME batch but with different climate+PFT ->
+    # their GPP must differ (guards per-column land_params collapse).
+    assert abs(float(gpp[0]) - float(gpp[1])) > 1.0   # gC/m2/yr, well above noise
