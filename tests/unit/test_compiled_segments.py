@@ -754,6 +754,13 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
         lw_up_toa_accum = carry.lw_up_toa_accum + held_new[4] * dt
         sw_down_toa_accum = carry.sw_down_toa_accum + held_new[5] * dt
         t_low_accum = carry.t_low_accum + T_upd[..., -1] * dt
+        # Clear-sky TOA accumulation (#843): the mock has no pipeline, so the
+        # compiled path runs in "hold" mode — the held clear-sky (zeros)
+        # passes through and integrates unchanged.  Mirror that here.
+        sw_up_toa_clr_accum = (
+            carry.sw_up_toa_clr_accum + carry.held_sw_up_toa_clr * dt)
+        lw_up_toa_clr_accum = (
+            carry.lw_up_toa_clr_accum + carry.held_lw_up_toa_clr * dt)
 
         # Saturation adjustment
         if do_sat_adjust:
@@ -790,6 +797,8 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             held_lw_net_sfc=held_new[2],
             held_sw_up_toa=held_new[3],
             held_lw_up_toa=held_new[4],
+            held_sw_up_toa_clr=carry.held_sw_up_toa_clr,
+            held_lw_up_toa_clr=carry.held_lw_up_toa_clr,
             held_sw_down_toa=held_new[5],
             step_index=step_idx + 1,
             target_moisture=carry.target_moisture,
@@ -800,6 +809,8 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             lhflx_accum=carry.lhflx_accum,
             sw_up_toa_accum=sw_up_toa_accum,
             lw_up_toa_accum=lw_up_toa_accum,
+            sw_up_toa_clr_accum=sw_up_toa_clr_accum,
+            lw_up_toa_clr_accum=lw_up_toa_clr_accum,
             sw_down_toa_accum=sw_down_toa_accum,
             sw_net_sfc_accum=sw_net_sfc_accum,
             lw_net_sfc_accum=lw_net_sfc_accum,

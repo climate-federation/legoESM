@@ -258,6 +258,12 @@ class PhysicsPipeline:
         # ``None`` (default) preserves bit-exact single-mesh behavior.
         self.column_mesh = column_mesh
         self._cloud_scheme = "none"  # set by build_physics_pipeline
+        # Clear-sky diagnostic (#843): static Python bool set by
+        # build_physics_pipeline from config.output.clear_sky_diag.  When True,
+        # the compiled segment runs a SECOND clouds-off compute_radiation_core
+        # pass to produce CMOR rsutcs/rlutcs; when False (default) every
+        # clear-sky code path is a byte-identical no-op.
+        self._clear_sky_diag = False  # set by build_physics_pipeline (#843)
         # Opt-in convective cumulus cloud-fraction source (set by
         # build_physics_pipeline from ExperimentConfig.convective_cloud).
         # When True, compute_radiation_core feeds the lagged convective precip
@@ -2989,6 +2995,10 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline.orbit = (earth_orbit()
                       if getattr(config, 'orbital_insolation', False) else None)
     pipeline._cloud_scheme = getattr(config, 'cloud_scheme', 'none')
+    # Clear-sky diagnostic (#843): enable the 2nd clouds-off radiation pass
+    # only when config.output.clear_sky_diag is set (default off).
+    pipeline._clear_sky_diag = bool(
+        getattr(getattr(config, 'output', None), 'clear_sky_diag', False))
     pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
     pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
     pipeline._cloud_q_c_diagnostic = getattr(config, 'cloud_q_c_diagnostic', None)
