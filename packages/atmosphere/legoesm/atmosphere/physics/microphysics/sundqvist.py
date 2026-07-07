@@ -2,14 +2,17 @@
 
 A diagnostic scheme that activates condensation when relative humidity
 exceeds a critical threshold. Produces large-scale (non-convective)
-precipitation through autoconversion and sub-cloud evaporation.
+precipitation through autoconversion — enhanced per SBK89 by coalescence
+with precipitation falling from above (F1) and the Bergeron-Findeisen
+process in mixed phase (F2) — and sub-cloud evaporation.
 
 All operations use smooth (differentiable) approximations.
 
 References
 ----------
-- Sundqvist et al. (1989): Condensation and cloud parameterization
-  studies with a mesoscale numerical weather prediction model.
+- Sundqvist, Berge & Kristjansson (1989): Condensation and cloud
+  parameterization studies with a mesoscale numerical weather prediction
+  model. Mon. Wea. Rev., 117, 1641-1657.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
+from legoesm.atmosphere.physics.microphysics._warm_rain import safe_pow
 from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
@@ -79,30 +83,27 @@ def diagnose_sundqvist_process_rates(
         f * jnp.maximum(q_v - q_sat, 0.0) / dt
     )  # [kg/kg/s]
 
-    # 2. Autoconversion
-    # condensation is a tendency [kg/kg/s]; multiply by dt to get increment [kg/kg]
+    # 2. Autoconversion (computed level-by-level INSIDE the downward scan
+    # below, because the SBK89 coalescence enhancement F1 depends on the
+    # precipitation flux falling in from above).
     # Cap the autoconversion against the available cloud water + new
     # condensation so an explicit Euler step (``q_c_new = q_c + dt·dq_c_dt``)
     # never drives q_c below zero.  Without this, default
     # ``auto_rate · dt = 1e-3·1800 = 1.8`` over ~30 min for typical
     # ``q_c ≈ 1e-4 kg/kg`` overshoots the available mass by ~80 %.
     qc_avail = jnp.maximum(q_c + condensation * dt, 0.0)
-    # Sundqvist (1989) autoconversion: P_auto = c_0·q_c·(1−exp(−(q_c/q_c,crit)²)).
-    # The threshold factor suppresses autoconversion below the critical
-    # cloud water (drizzle forms only when cloud droplets are large
-    # enough) — the previous code dropped it, autoconverting linearly at
-    # any q_c despite the docstring's "exceeds a critical threshold".
-    # The factor ∈ [0,1) is smooth + AD-safe (exp of a non-positive arg;
-    # → 0 as q_c → 0, → 1 for q_c ≫ q_c,crit).
-    threshold = 1.0 - jnp.exp(
-        -(qc_avail / jnp.maximum(config.qc_crit, 1e-12)) ** 2
-    )
-    P_auto_demand = config.auto_rate * qc_avail * threshold
-    # Donor cap: rate · dt ≤ qc_avail → rate ≤ qc_avail / dt.
     dt_safe = jnp.maximum(dt, 1.0e-12)
-    P_auto = jnp.minimum(P_auto_demand, qc_avail / dt_safe)
 
-    # 3. Sub-cloud evaporation
+    # SBK89 Bergeron-Findeisen enhancement F2 (per level, T-dependent): a
+    # smooth Gaussian window centred near −15 °C where the liquid-ice
+    # saturation difference e_sw − e_si (the Bergeron growth driver) peaks;
+    # ≈ 1 above freezing by construction (the Gaussian tail).  Smooth in T
+    # (AD-safe everywhere).
+    bergeron_f2 = 1.0 + config.bergeron_enh_coeff * jnp.exp(
+        -((T - config.bergeron_T_peak_K) / config.bergeron_T_width_K) ** 2
+    )
+
+    # 3. Precipitation release + sub-cloud evaporation (single downward scan)
     #
     # legoESM column layout convention: level index 0 = TOA, level
     # index ``nlev-1`` = surface (``sigma_full`` runs 0→1 top→bottom;
@@ -114,40 +115,60 @@ def diagnose_sundqvist_process_rates(
     # layer on the way down, and lands at the surface as the final
     # carry ``P_final``.  Sub-cloud evaporation reduces ``P_total``
     # in sub-saturated layers (``evap_mask`` peaks where ``RH < RH_crit``).
+    # Sign convention: precipitation flux P is positive DOWNWARD [kg/m²/s].
     evap_mask = jax.nn.sigmoid(sharpness * (config.rh_crit - RH))
-    P_flux_layer = P_auto * rho * dz
 
     def scan_fn(carry, x):
         P_above = carry
-        P_local, evap_m, rho_k, dz_k = x
-        P_total = P_above + P_local
+        qc_k, berg_k, evap_m, rho_k, dz_k = x
+        # SBK89 coalescence enhancement F1 = 1 + c1·√P_above from the
+        # precipitation flux entering the layer from above: falling
+        # precipitation collects cloud water, accelerating release.
+        # safe_pow guards the √P AD trap at P_above = 0 (no-precip columns).
+        coal_f1 = 1.0 + config.coalescence_enh_coeff * safe_pow(P_above, 0.5)
+        enh = coal_f1 * berg_k
+        # SBK89 release: c_0 → c_0·F1·F2 AND q_c,crit → q_c,crit/(F1·F2)
+        # (both the rate and the onset threshold are enhanced), applied to
+        # the Sundqvist (1989) base form
+        #   P_auto = c_0·q_c·(1 − exp(−(q_c/q_c,crit)²)).
+        # The threshold factor ∈ [0,1) is smooth + AD-safe (exp of a
+        # non-positive arg; → 0 as q_c → 0, → 1 for q_c ≫ q_c,crit).
+        threshold = 1.0 - jnp.exp(
+            -(qc_k * enh / jnp.maximum(config.qc_crit, 1e-12)) ** 2
+        )
+        # Donor cap: rate · dt ≤ qc_avail → rate ≤ qc_avail / dt.
+        P_auto_k = jnp.minimum(
+            config.auto_rate * enh * qc_k * threshold, qc_k / dt_safe,
+        )
+        P_total = P_above + P_auto_k * rho_k * dz_k
         evap = config.evap_coeff * evap_m * P_total / jnp.clip(rho_k * dz_k, 1.0)
         evap = jnp.minimum(evap, P_total / jnp.clip(rho_k * dz_k, 1.0))
         P_out = jnp.clip(P_total - evap * rho_k * dz_k, 0.0)
-        return P_out, evap
+        return P_out, (P_auto_k, evap)
 
     # Pick a working dtype that ``scan`` can carry without promotion.
     # Under ``JAX_ENABLE_X64=1`` ``jnp.zeros``/``jnp.ones`` default to
     # f64, so a state assembled from a mix of (f32) ``T`` and (f64)
-    # tracers ends up with f64 ``q_v``/``q_c``.  ``P_flux_layer``
-    # then inherits the f64 promotion from ``q_c + condensation * dt``,
-    # while a carry pinned to ``T.dtype`` (f32) would mismatch the
-    # f64 scan output.  Promoting to the wider of carry/input dtype
-    # keeps ``scan`` happy without silently downcasting precipitation
-    # mass.
-    _scan_dtype = jnp.promote_types(T.dtype, P_flux_layer.dtype)
+    # tracers ends up with f64 ``q_v``/``q_c``.  ``qc_avail`` inherits
+    # the f64 promotion from ``q_c + condensation * dt``, while a carry
+    # pinned to ``T.dtype`` (f32) would mismatch the f64 scan output.
+    # Promoting to the wider of carry/input dtype keeps ``scan`` happy
+    # without silently downcasting precipitation mass.
+    _scan_dtype = jnp.promote_types(T.dtype, qc_avail.dtype)
     inputs = (
-        jnp.moveaxis(P_flux_layer.astype(_scan_dtype), 1, 0),
+        jnp.moveaxis(qc_avail.astype(_scan_dtype), 1, 0),
+        jnp.moveaxis(bergeron_f2.astype(_scan_dtype), 1, 0),
         jnp.moveaxis(evap_mask.astype(_scan_dtype), 1, 0),
         jnp.moveaxis(rho.astype(_scan_dtype), 1, 0),
         jnp.moveaxis(dz.astype(_scan_dtype), 1, 0),
     )
     P_init = jnp.zeros(T.shape[0], dtype=_scan_dtype)
-    P_final, evap_col = jax.lax.scan(scan_fn, P_init, inputs)
+    P_final, (auto_col, evap_col) = jax.lax.scan(scan_fn, P_init, inputs)
+    autoconversion = jnp.moveaxis(auto_col, 0, 1)
     evaporation = jnp.moveaxis(evap_col, 0, 1)
     return SundqvistProcessRates(
         condensation=condensation,
-        autoconversion=P_auto,
+        autoconversion=autoconversion,
         evaporation=evaporation,
         precipitation=P_final,
     )
@@ -155,9 +176,11 @@ def diagnose_sundqvist_process_rates(
 
 __physics_contract__ = {
     "summary": (
-        "Sundqvist et al. (1989) large-scale diagnostic condensation: "
-        "fractional-cloud RH-based condensation/evaporation of cloud water and "
-        "a Sundqvist-Berge autoconversion + accretion precipitation rate."
+        "Sundqvist, Berge & Kristjansson (1989) large-scale diagnostic "
+        "condensation: fractional-cloud RH-based condensation/evaporation of "
+        "cloud water and the SBK89 precipitation release — base autoconversion "
+        "enhanced by coalescence with precipitation falling from above (F1) "
+        "and the Bergeron-Findeisen process in mixed phase (F2)."
     ),
     "inputs": {
         "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",

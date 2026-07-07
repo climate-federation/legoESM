@@ -42,6 +42,7 @@ from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_cape,
     compute_moist_adiabat,
+    latent_heat_vaporization,
 )
 from legoesm.atmosphere.physics.convection.config import EmanuelConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
@@ -601,9 +602,9 @@ def emanuel_convection(
     # genuine mixing path returns the smooth 1..INB mask; the legacy
     # surrogate falls back to the active mass-flux profile.
     cpn = constants.c_pd * (1.0 - q_v) + constants.c_pv * q_v
-    lv_eff = constants.L_v - (config.c_l_emanuel - constants.c_pv) * (
-        T - constants.T_freeze
-    )
+    # Kirchhoff L(T) via the shared helper, with Emanuel's CONVECT
+    # tunable liquid heat capacity CL in place of ``constants.c_pw``.
+    lv_eff = latent_heat_vaporization(T, c_liquid=config.c_l_emanuel)
     if config.use_genuine_mixing:
         ents_mask = mixing.convective_layer_mask
     else:

@@ -55,6 +55,47 @@ def test_snow_deposition_sign_and_bounds():
     assert float(dep[-1]) == 0.0 and float(subl[-1]) == 0.0
 
 
+def test_snow_deposition_supersaturation_ratio_magnitude():
+    """The A+B growth law must be driven by the DIMENSIONLESS supersaturation
+    ratio S_i - 1 = q_v/q_sat_i - 1 (WRF ``ssati``), closed to [kg/kg/s] with
+    the 1/rho per-volume-moment conversion.
+
+    Pre-fix, the numerator was the mixing-ratio excess q_v - q_sat_i =
+    q_sat_i*(S_i-1), making deposition weaker by a factor ~q_sat_i (1e3-1e4 at
+    cold upper-tropospheric temperatures) — the supersaturation relaxation
+    timescale came out at ~1e7 s (months).  Post-fix, a moderately snowy
+    240 K layer at 30 % ice supersaturation relaxes on minutes-to-tens-of-
+    minutes: tau = (q_v - q_sat_i)/prds in [10 s, 2 h].  Sublimation flips
+    sign for q_v < q_sat_i with the same magnitude (linear in S_i - 1).
+    """
+    from legoesm.thermo import saturation_mixing_ratio_ice
+    from legoesm import constants
+
+    q_s = jnp.array([1e-3, 1e-4])
+    T = jnp.array([240.0, 240.0])
+    p = jnp.array([3e4, 3e4])
+    rho = p / (constants.R_d * T)
+    q_sat_i = saturation_mixing_ratio_ice(T, p)
+    dt = 1.0  # cap = excess/dt, so tau >= 1 s can't be cap-limited
+
+    q_v_super = 1.3 * q_sat_i
+    dep = ts.snow_deposition(q_v_super, q_s, q_sat_i, T, p, rho, dt)
+    assert bool(jnp.all(dep > 0.0))
+    tau = (q_v_super - q_sat_i) / dep
+    assert bool(jnp.all(tau > 10.0)) and bool(jnp.all(tau < 7200.0)), (
+        f"snow-deposition supersaturation relaxation timescale {tau} s "
+        "outside the physical minutes-to-tens-of-minutes range — the "
+        "(q_v/q_sat_i - 1)/(A+B)/rho closure regressed."
+    )
+    # More snow -> faster deposition (larger PSD moments).
+    assert float(dep[0]) > float(dep[1])
+    # Sublimation flips sign symmetrically (rate linear in S_i - 1).
+    q_v_sub = 0.7 * q_sat_i
+    subl = ts.snow_deposition(q_v_sub, q_s, q_sat_i, T, p, rho, dt)
+    assert bool(jnp.all(subl < 0.0))
+    assert bool(jnp.allclose(subl, -dep, rtol=1e-6))
+
+
 def test_moments_reproduce_M2_M3():
     # The bimodal-PSD normalization must reproduce the 2nd and 3rd moments.
     q_s = jnp.array([1e-4]); rho = jnp.array([0.4]); T = jnp.array([245.0])

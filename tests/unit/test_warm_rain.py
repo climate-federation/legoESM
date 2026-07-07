@@ -78,6 +78,28 @@ def test_autoconversion_sb(column_state):
     assert jnp.all(x_c > 0.0)
 
 
+def test_autoconversion_sb_number_closure_newborn_mass_is_x_star(column_state):
+    """SB2001/2006 number closure: dN_r_au = (mass rate)/x_star, i.e. each
+    newborn rain drop carries the separation mass x_* (2.6e-10 kg ~ 79 um).
+
+    Pre-fix the divisor was x_star*20 (a transplanted mass-rate coefficient
+    constant), making newborn drops 20x too massive and 20x too few for a
+    given autoconversion mass flux.
+    """
+    _, _, rho, _, q_c, _, N_c, _ = column_state
+    x_star = 2.6e-10
+    dq_au, dN_au, _ = autoconversion_sb(
+        q_c, N_c, rho, k_au=9.44e9, x_star=x_star,
+    )
+    active = dN_au > 0.0
+    assert bool(jnp.any(active)), "fixture produced no autoconversion"
+    newborn_mass = jnp.where(active, dq_au * rho / jnp.where(active, dN_au, 1.0), x_star)
+    assert bool(jnp.allclose(newborn_mass, x_star, rtol=1e-10)), (
+        f"implied newborn rain-drop mass {float(jnp.max(newborn_mass)):.3e} kg "
+        f"!= x_star={x_star:.3e} kg (SB2001 number closure au/x_*)."
+    )
+
+
 def test_accretion(column_state):
     _, _, rho, _, q_c, q_r, _, _ = column_state
     rate = accretion(q_c, q_r, rho, k_ac=5.25)

@@ -50,7 +50,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.atmosphere.physics._shared import exner_function, virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import MYNN25Config
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -157,6 +157,7 @@ def _half_to_full(x_half: jax.Array, nlev: int) -> jax.Array:
 def _compute_master_length(
     q_half: jax.Array,       # (ncol, nlev-1)
     z_half_geom: jax.Array,  # (ncol, nlev-1) — geometric height above surface at interior interfaces
+    dz_half: jax.Array,      # (ncol, nlev-1) — spacing between adjacent full levels
     L_obukhov: jax.Array,    # (ncol,)
     dthv_dz_half: jax.Array, # (ncol, nlev-1)
     w_thv_sfc: jax.Array,    # (ncol,)
@@ -167,8 +168,9 @@ def _compute_master_length(
 
     All arrays are interior half-level ``(ncol, nlev-1)``.  zeta = z/L
     is clipped to a sane range so the surface-layer L_S formula behaves
-    monotonically.  Output is unfiltered — caller applies the 1-2-1
-    smoother.
+    monotonically.  ``dz_half`` weights the L_T vertical integrals
+    (NN09 eq. 54) so the turbulent length scale is correct on stretched
+    grids.  Output is unfiltered — caller applies the 1-2-1 smoother.
     """
     eps = _SMOOTH_EPS
     # L_obukhov can be ±inf in neutral conditions; jnp handles inf safely
@@ -192,11 +194,16 @@ def _compute_master_length(
     )
     L_S = jnp.maximum(L_S, _L_FLOOR)
 
-    # Turbulent length scale L_T = 0.23 * ∫(q·z)/∫(q)  (NN09 eq. 54).
-    # Use a column-wide reduction along the half-level axis; output is a
+    # Turbulent length scale L_T = 0.23 * ∫q·z dz / ∫q dz  (NN09 eq. 54).
+    # The integrals are dz-WEIGHTED sums over the interior interfaces (WRF
+    # module_bl_mynn accumulates ``qkw*zw*dz`` / ``qkw*dz`` the same way);
+    # a bare point-sum ratio Σ(q·z)/Σ(q) equals the integral ratio only on a
+    # uniform grid and under-weights the (thicker) upper layers on the
+    # stretched vertical grids used in SCM/GCM columns.  dz cancels exactly
+    # when constant, so uniform-grid results are unchanged.  Output is a
     # per-column scalar broadcast across the half-level axis.
-    num = jnp.sum(q_half * z_half_geom, axis=-1)
-    den = jnp.sum(q_half, axis=-1)
+    num = jnp.sum(q_half * z_half_geom * dz_half, axis=-1)
+    den = jnp.sum(q_half * dz_half, axis=-1)
     L_T_col = _MYNN_LT_COEFF * num / jnp.maximum(den, eps)
     L_T = jnp.broadcast_to(
         L_T_col[:, None], q_half.shape,
@@ -328,9 +335,10 @@ def mynn25_turbulence(
     w_th_s_kin = shflx / (rho_sfc * constants.c_pd)
     w_qv_s_kin = lhflx / (rho_sfc * constants.L_v)
 
-    # Potential temperature (full levels).
-    exner = (constants.p_ref / jnp.maximum(p_full, 1.0)) ** constants.kappa
-    theta = T * exner
+    # Potential temperature (full levels) via the canonical inverse-Exner
+    # helper (exner_pref = 1/Π = (p_ref/p)^κ; same 1 Pa pressure floor).
+    exner_pref = 1.0 / exner_function(p_full)
+    theta = T * exner_pref
     theta_v = virtual_temperature(theta, q_v)
 
     # Buoyancy flux (virtual potential temperature) at surface.  Use
@@ -392,6 +400,7 @@ def mynn25_turbulence(
     L = _compute_master_length(
         q_half=q_half,
         z_half_geom=z_above_half,
+        dz_half=dz_half,
         L_obukhov=L_obukhov,
         dthv_dz_half=dthv_dz,
         w_thv_sfc=w_thv_sfc,
