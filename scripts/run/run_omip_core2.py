@@ -3303,14 +3303,23 @@ def main() -> int:
             "silently do nothing).")
     if args.runoff_depth_nemo_ini:
         # NEMO ln_rnf_depth_ini: per-cell spread depth from the runoff
-        # climatology maximum — small Arctic rivers stay near-surface
-        # (flat 150 m dilutes their shelf plumes several PSU salty).
+        # climatology maximum — small Arctic/Siberian rivers stay near-surface
+        # (a flat 150 m dilutes their shelf plumes several PSU salty).  Wired
+        # for the structured C-grids (tripole/latlon) AND the MPAS Voronoi
+        # core: the per-cell map (nemo_runoff_depth_map) and the freshwater
+        # spread closure (runoff_spread_virtual_salt_tendency_3d) are BOTH
+        # grid-agnostic — the MPAS state is the flattened (nCells,) / (nCells,
+        # nlev) analogue of the C-grid's per-column arrays — so the same lever
+        # keeps river plumes shallow (more shelf-surface freshening) on all
+        # three grids.  Column-integral freshwater/salt is unchanged; only the
+        # vertical distribution shifts (sign: freshwater +into ocean lowers S).
         if runoff_monthly is None:
             raise SystemExit("--runoff-depth-nemo-ini requires --runoff.")
-        if app_grid_type == "mpas":
+        if app_grid_type == "cubed_sphere":
             raise SystemExit(
-                "--runoff-depth-nemo-ini is wired for the structured grids "
-                "(the MPAS runoff path uses Voronoi coastal spreading).")
+                "--runoff-depth-nemo-ini is not wired for the cube (parked "
+                "grid; the OMIP runner folds freshwater onto surface_forcing "
+                "there rather than passing freshwater= to the model).")
         if float(getattr(model.config, "runoff_depth_spread_m", 0.0)) > 0.0:
             raise SystemExit(
                 "--runoff-depth-nemo-ini and --runoff-depth-spread-m are "
@@ -3327,14 +3336,28 @@ def main() -> int:
             _rd_kw["rnf_max"] = float(args.runoff_rnf_max)
         _h_rnf = nemo_runoff_depth_map(
             np.asarray(runoff_monthly), np.asarray(H_bathy), **_rd_kw)
-        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-            LatLonCGridOceanModel,
-        )
-        model = LatLonCGridOceanModel(
-            grid, z_coord,
-            model.config._replace(
-                runoff_depth_spread_map=jnp.asarray(_h_rnf)),
-            iwm_forcing=getattr(model, "_iwm_forcing", None))
+        if app_grid_type == "mpas":
+            # Voronoi MPAS: rebuild the model with the per-cell map threaded
+            # into MPASOceanConfig.  The freshwater application in
+            # ocean_pe_mpas.py reads runoff_depth_spread_map via the shared
+            # resolve_runoff_spread_arg selector (same code path as the
+            # C-grid).  ``grid`` holds the Voronoi mesh here.  MPAS has no
+            # iwm_forcing (rejected in build_mpas_ocean), so the C-grid's
+            # iwm_forcing= kwarg is intentionally omitted.
+            from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+            model = MPASOceanModel(
+                grid, z_coord,
+                model.config._replace(
+                    runoff_depth_spread_map=jnp.asarray(_h_rnf)))
+        else:
+            from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+                LatLonCGridOceanModel,
+            )
+            model = LatLonCGridOceanModel(
+                grid, z_coord,
+                model.config._replace(
+                    runoff_depth_spread_map=jnp.asarray(_h_rnf)),
+                iwm_forcing=getattr(model, "_iwm_forcing", None))
         _wetm = np.asarray(state.land_mask.data) > 0.5
         print(f"[setup] NEMO runoff depth map (ln_rnf_depth_ini): "
               f"h_rnf wet range [{_h_rnf[_wetm].min():.1f},"

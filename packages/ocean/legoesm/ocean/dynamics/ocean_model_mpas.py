@@ -189,6 +189,20 @@ class MPASOceanModel:
                 f"{self.config.freshwater_closure!r} (the MPAS path implements "
                 "only virtual_salt_flux; real_freshwater is not available here)"
             )
+        # NEMO ln_rnf_depth_ini per-cell runoff spread-depth map [m]: fail fast
+        # on a bad map (mirrors LatLonCGridOceanConfig validation).  A zero/
+        # negative or non-finite cell would silently drop the runoff dilution
+        # (the map divides the runoff by h_rnf inside the freshwater helper).
+        _rdsm = getattr(self.config, "runoff_depth_spread_map", None)
+        if _rdsm is not None:
+            import numpy as _np
+            _rdsm_np = _np.asarray(_rdsm)
+            if (not _np.isfinite(_rdsm_np).all()) or (_rdsm_np <= 0).any():
+                raise ValueError(
+                    "runoff_depth_spread_map must be finite and > 0 everywhere "
+                    "(build it with nemo_runoff_depth_map, which floors at 1 m) "
+                    "— zero/negative cells would silently drop the runoff "
+                    "dilution.")
         # Reserved distributed-PCG knobs (single-rank stock CG today; see
         # barotropic_implicit_mpas.py Step-4 TODO).  Validate so the
         # schema stays consistent with the lat-lon path.

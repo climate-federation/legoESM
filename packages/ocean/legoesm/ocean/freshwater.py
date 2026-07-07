@@ -279,6 +279,49 @@ def normalized_virtual_salt_flux(
     return virtual_salt_flux_from_net(F_fw, S_ref, h_top, rho_0)
 
 
+def resolve_runoff_spread_arg(config):
+    """Resolve the NEMO runoff-depth spread argument from a model config.
+
+    Shared by the lat-lon C-grid (``LatLonCGridOceanModel``) and the MPAS
+    Voronoi core (``mpas_ocean_baroclinic_tendencies``) so the map/scalar
+    SELECTION + MUTUAL-EXCLUSION guard live in ONE place — no per-grid
+    copy-paste of the same control flow (repo rule: no duplicate numerics
+    across grids).
+
+    Reads two OPTIONAL config fields:
+
+    * ``runoff_depth_spread_m`` — a FLAT scalar spread depth [m] (NEMO
+      ``rn_dep_max`` flat mode; every river spreads over the same depth).
+    * ``runoff_depth_spread_map`` — a PER-CELL NEMO ``ln_rnf_depth_ini`` map
+      [m] (array or ``None``): depth proportional to the local climatological
+      runoff maximum, so small Arctic/Siberian rivers stay near-surface while
+      the Amazon spreads to ~150 m.  Build with
+      :func:`legoesm.ocean.forcing.runoff_depth.nemo_runoff_depth_map`.
+
+    The two are MUTUALLY EXCLUSIVE (a flat depth OR the per-cell map, not
+    both).  Returns the value to pass as ``runoff_spread_m`` to
+    :func:`runoff_spread_virtual_salt_tendency_3d`:
+
+    * the map as a JAX array when ``runoff_depth_spread_map`` is set;
+    * the scalar float when only ``runoff_depth_spread_m > 0``;
+    * ``None`` when neither is active (caller uses the legacy top-cell
+      closure — bit-identical to the pre-spread path).
+    """
+    _m = getattr(config, "runoff_depth_spread_m", 0.0)
+    spread_m = float(_m) if _m is not None else 0.0
+    spread_map = getattr(config, "runoff_depth_spread_map", None)
+    if spread_map is not None and spread_m > 0.0:
+        raise ValueError(
+            "runoff_depth_spread_map and runoff_depth_spread_m are "
+            "mutually exclusive — pick the NEMO ln_rnf_depth_ini "
+            "per-cell map OR the flat spread depth.")
+    if spread_map is not None:
+        return jnp.asarray(spread_map)
+    if spread_m > 0.0:
+        return spread_m
+    return None
+
+
 def runoff_spread_virtual_salt_tendency_3d(
     fw,
     S_ref: float,
