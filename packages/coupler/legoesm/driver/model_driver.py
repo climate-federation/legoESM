@@ -3221,6 +3221,7 @@ class ModelDriver:
                     _save[f"trc_{_k}"] = np.asarray(trc_d[_k])
             np.savez(ckpt_path, **_save)
             logger.info(f"  Checkpoint: {ckpt_path.name} (mpas)")
+            self._save_cmor_accumulator_sidecar(day)
             return
 
         # Spectral path (FIX_RESTART_TIME iteration 4): the spectral PE
@@ -3254,6 +3255,7 @@ class ModelDriver:
                     _save[f"trc_{_k}"] = np.asarray(s.tracers[_k].data)
             np.savez(ckpt_path, **_save)
             logger.info(f"  Checkpoint: {ckpt_path.name} (spectral)")
+            self._save_cmor_accumulator_sidecar(day)
             return
 
         # Distributed path
@@ -3285,6 +3287,10 @@ class ModelDriver:
                 MPI.COMM_WORLD.Barrier()
                 if self._mpi_rank == 0:
                     logger.info(f"  Checkpoint: {ckpt_dir.name} (distributed, {self._mpi_world_size} ranks)")
+                    # Rank 0 writes the single CMOR sidecar next to the
+                    # per-rank checkpoint dir (an SPMD restart would otherwise
+                    # find no sidecar and lose the in-progress month).
+                    self._save_cmor_accumulator_sidecar(day)
                 return
 
             # Lat-lon band MPI: gather rank-local bands → rank 0 writes
@@ -3375,6 +3381,7 @@ class ModelDriver:
                         f"(lat-lon MPI gathered, "
                         f"{self._mpi_world_size} ranks)"
                     )
+                    self._save_cmor_accumulator_sidecar(day)
                 from mpi4py import MPI
                 MPI.COMM_WORLD.Barrier()
                 return
@@ -3396,6 +3403,7 @@ class ModelDriver:
                     carry_aux=self._checkpoint_carry_aux(),
                 )
                 logger.info(f"  Checkpoint: {ckpt_path.name} (rank 0)")
+                self._save_cmor_accumulator_sidecar(day)
             from mpi4py import MPI
             MPI.COMM_WORLD.Barrier()
             return
@@ -3514,9 +3522,44 @@ class ModelDriver:
                     backend=backend,
                 )
                 logger.info(f"  Checkpoint: {ckpt_path.name}")
+                self._save_cmor_accumulator_sidecar(day)
             except Exception as e:
                 _write_err = e
         self._spmd_barrier_on_root_error(_write_err)
+
+    def _save_cmor_accumulator_sidecar(self, day: float) -> None:
+        """Persist the CMOR monthly/daily accumulator state to a sidecar next
+        to the checkpoint just written.
+
+        A restart-chain link is only ~10 days but a calendar month is ~30, so
+        the monthly accumulator — recreated empty on every restart — never
+        completes a month and the CMOR ``Amon`` means are lost.  This additive
+        sidecar (``cmor_accum_day_<day>.npz``) lets the next link resume the
+        in-progress month.  It never touches the checkpoint ``.npz`` schema and
+        is fully guarded so a sidecar-write failure can never abort
+        checkpointing (a no-op when CMIP output is off).
+
+        Suppressed via ``self._suppress_cmor_sidecar`` for the TERMINAL final
+        checkpoint of a COMPLETED run: ``diagnostics.save`` has already written
+        every bucket to NetCDF (without popping), so a sidecar there would make
+        a run-extending restart re-append the already-written months."""
+        if getattr(self, "_suppress_cmor_sidecar", False):
+            return
+        diag = getattr(self, "diagnostics", None)
+        if diag is None:
+            return
+        try:
+            sidecar = (self._output_dir
+                       / f"cmor_accum_day_{int(round(day)):04d}.npz")
+            diag.save_cmor_accumulators(sidecar)
+        except Exception as exc:  # pragma: no cover - defensive I/O guard
+            # LOUD (the checkpoint is already committed; a missing/stale sidecar
+            # can lose or duplicate the in-progress month on restart) but never
+            # fatal — a sidecar failure must not abort the run.
+            logger.error(
+                f"  CMOR accumulator sidecar FAILED for day {day:.2f} "
+                f"(checkpoint committed; restart may lose/duplicate the "
+                f"in-progress month): {exc}")
 
     def _moisture_advection_active(self) -> bool:
         """True iff resolved-wind moisture advection is on (issue #771).
@@ -4079,12 +4122,21 @@ class ModelDriver:
         #                       diagnostics).
         # Without this every wallclock-graceful AMIP run (a year rarely
         # finishes in one SLURM window) would drop fx entirely and lose the
-        # segment's monthly/daily output.  The single month/day straddling the
-        # exit is a bounded, documented limitation (the in-progress accumulator
-        # is not checkpointed).  All three are guarded on the CMIP writer.
+        # segment's monthly/daily output.  The month/day STRADDLING the exit is
+        # preserved across the restart by the CMOR accumulator sidecar (see the
+        # re-persist below), so a chained link completes it instead of losing
+        # it.  All three flushes are guarded on the CMIP writer.
         self.diagnostics.flush_cmip_monthly(day, write=True)
         self.diagnostics.finalize_cmip_daily(day)
         self.diagnostics.finalize_cmip_fixed()
+        # The checkpoint sidecar written above by ``ckpt_fn`` captured the
+        # accumulators PRE-flush (with the just-completed months/days still in
+        # them); those are now on disk in the CMOR NetCDF, so re-persist the
+        # sidecar to reflect the drained state.  The restart then resumes from
+        # the IN-PROGRESS month/day ONLY — otherwise the boundary period would
+        # be double-written (duplicate ``time`` coords) on the next link's
+        # flush, since ``CFWriter.write_field`` appends blindly.
+        self._save_cmor_accumulator_sidecar(day)
         sys.exit(0)
 
     def run(self, start_step: int = 0, start_day: float | None = None,
@@ -6575,7 +6627,17 @@ class ModelDriver:
             _ckpt = ((getattr(self, "_checkpoint_callback", None)
                       if self._mpi_rank is None else None)
                      or self.save_checkpoint)
-            _ckpt(n_steps_total, START_DAY + N_DAYS)
+            # A COMPLETED run has NO in-progress month to resume, and
+            # ``diagnostics.save`` above already finalized every bucket to
+            # NetCDF WITHOUT popping — so the terminal checkpoint must carry no
+            # CMOR sidecar, or a run-EXTENDING restart would re-append every
+            # already-written month (duplicate time coords).  The flag rides
+            # through whichever ``_ckpt`` callback writes the sidecar.
+            self._suppress_cmor_sidecar = True
+            try:
+                _ckpt(n_steps_total, START_DAY + N_DAYS)
+            finally:
+                self._suppress_cmor_sidecar = False
 
         # Issue #275 fix A lifecycle: restore the halo backend captured
         # at activation time so subsequent drivers / tests in the same
@@ -7442,7 +7504,9 @@ class ModelDriver:
             # Checkpoint (a coupled run routes this through its own
             # save_checkpoint so the coupled state is written too).
             _ckpt = getattr(self, "_checkpoint_callback", None) or self.save_checkpoint
-            if checkpoint_interval > 0 and current_step % checkpoint_interval == 0:
+            _checkpoint_written = (checkpoint_interval > 0
+                                   and current_step % checkpoint_interval == 0)
+            if _checkpoint_written:
                 _ckpt(current_step, day)
 
             # Wallclock-aware clean exit for long HPC dependency chains.
@@ -7462,6 +7526,16 @@ class ModelDriver:
             if diag_interval > 0 and current_step % diag_interval == 0:
                 _is_root = self._mpi_rank is None or self._mpi_rank == 0
                 self.diagnostics.flush_cmip_monthly(day, write=_is_root)
+                # If a checkpoint was written THIS step (above), its CMOR
+                # sidecar captured the accumulators PRE-flush; the flush just
+                # drained + wrote the completed months to NetCDF.  Re-persist
+                # the (now drained) sidecar so a restart from that checkpoint
+                # resumes ONLY the in-progress month — else the flushed months
+                # would be re-appended (duplicate time coords) on resume.  Root
+                # only (mirrors the sidecar write inside save_checkpoint) and
+                # bounded to the checkpoint cadence — never on a bare flush.
+                if _checkpoint_written and _is_root:
+                    self._save_cmor_accumulator_sidecar(day)
 
         return self._finalize_run(
             run_status, t_jit, t_start,
