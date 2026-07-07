@@ -204,6 +204,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Max wave speed [m/s] used to size the polar filter "
              "CFL mask (default 300.0 = external gravity wave).",
     )
+    # #836: hydrostatic lat-lon C-grid top sponge (Rayleigh damping increasing
+    # toward the model lid; absorbs upward gravity-wave energy).  Default OFF.
+    parser.add_argument(
+        "--sponge-coeff", type=float, default=_DYCORE_DEFAULTS.sponge_coeff,
+        help="Rayleigh top-sponge damping SCALE [1/s] for the hydrostatic "
+             "lat-lon C-grid (0 = OFF, default; e.g. 1.157e-5 = 1/day). Exact "
+             "lid value for --sponge-shape sin2; sam_rational peaks at "
+             "sponge_coeff*100/101. Absorbs gravity-wave energy reflecting "
+             "off the rigid model lid (#836).",
+    )
+    parser.add_argument(
+        "--sponge-width-m", type=float, default=_DYCORE_DEFAULTS.sponge_width_m,
+        help="Top-sponge layer depth below the model lid [m] (default "
+             f"{_DYCORE_DEFAULTS.sponge_width_m}).",
+    )
+    parser.add_argument(
+        "--sponge-shape", type=str, default=_DYCORE_DEFAULTS.sponge_shape,
+        choices=["sin2", "sam_rational"],
+        help="Top-sponge ramp shape (default 'sin2').",
+    )
+    parser.add_argument(
+        "--sponge-scale-height-m", type=float,
+        default=_DYCORE_DEFAULTS.sponge_scale_height_m,
+        help="Log-pressure scale height [m] mapping sigma->z for the top "
+             f"sponge (default {_DYCORE_DEFAULTS.sponge_scale_height_m}).",
+    )
     # Task #25: JIT compile bloat at production scale.  The inline
     # SSP-RK3 calls tendency_fn 3× sequentially → XLA inlines three
     # copies of the entire tendency pipeline.  Folding the 3 stages
@@ -1043,6 +1069,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         use_polar_filter=args.use_polar_filter,
         polar_filter_cutoff_deg=args.polar_filter_cutoff_deg,
         polar_filter_max_wave_speed=args.polar_filter_max_wave_speed,
+        # #836 top sponge (default OFF -> bit-identical dycore).
+        sponge_coeff=args.sponge_coeff,
+        sponge_width_m=args.sponge_width_m,
+        sponge_shape=args.sponge_shape,
+        sponge_scale_height_m=args.sponge_scale_height_m,
         # Task #25: time integrator selection.
         time_integrator=args.time_integrator,
     )

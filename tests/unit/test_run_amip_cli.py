@@ -1734,3 +1734,24 @@ def test_multicontroller_requires_enable_latlon_spmd(capsys):
         main(["--grid-type", "latlon", "--dataset", "analytical",
               "--multicontroller"])
     assert "requires --enable-latlon-spmd" in capsys.readouterr().err
+
+
+def test_top_sponge_flags_flow_to_dycore_config():
+    """#836: --sponge-coeff/--sponge-width-m/--sponge-shape/--sponge-scale-height-m
+    round-trip into DycoreConfig; default sponge_coeff=0 keeps the sponge OFF."""
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.dycore.sponge_coeff == 0.0          # default OFF
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--sponge-coeff", "1.157e-5",
+        "--sponge-width-m", "12000.0",
+        "--sponge-shape", "sam_rational",
+        "--sponge-scale-height-m", "8000.0",
+    ]), parser))
+    assert cfg_on.dycore.sponge_coeff == 1.157e-5
+    assert cfg_on.dycore.sponge_width_m == 12000.0
+    assert cfg_on.dycore.sponge_shape == "sam_rational"
+    assert cfg_on.dycore.sponge_scale_height_m == 8000.0
