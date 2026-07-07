@@ -1131,9 +1131,14 @@ class PhysicsPipeline:
             #   ENERGY: neutral — the condensation latent heat of ALL condensate
             #     (cloud + rain) is already in ``dT_dt_conv`` (the scheme heated
             #     on condensation); precipitating the liquid adds no heat.
-            #   MASS: conserving — the vapour sunk by ``dq_v_dt_conv`` equals q_c
-            #     gained (``dq_c_conv_dt``) + rain precipitated (``dq_r_conv_dt``),
-            #     so column-water removed == surface precip added.
+            #   MASS: NO ADDITIONAL leak — ``dq_r_conv_dt`` is EXACTLY the fraction
+            #     split off ``dq_c_conv_dt`` by ``precip_efficiency`` in the scheme
+            #     (tiedtke.py), and we precipitate exactly that field, so the water
+            #     the scheme diverted to rain now reaches the surface instead of
+            #     vanishing.  (The absolute column budget is only as tight as
+            #     Tiedtke's underlying mass-flux solve — the default "advective"
+            #     path conserves to truncation order, not machine-exact — but that
+            #     residual pre-dates and is independent of this routing fix.)
             # None for schemes/efficiencies that emit no separate rain species
             # (precip_efficiency=0) -> no-op, byte-identical.
             if conv_out.dq_r_conv_dt is not None:
