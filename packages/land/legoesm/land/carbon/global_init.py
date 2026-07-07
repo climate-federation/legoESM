@@ -107,7 +107,7 @@ def build_archetypes(pft_weights, features, soil_class, land_mask, *,
     feat_std = (feat - mu) / sd
     soil_class = np.asarray(soil_class, dtype=object)
     cell_id = np.full((ncell, npft), -1, int)
-    cell_w = np.where(pft_weights >= w_min, pft_weights, 0.0)
+    cell_w = np.where((pft_weights >= w_min) & np.asarray(land_mask)[:, None], pft_weights, 0.0)
     at = {f: [] for f in ("pft_id", *_FEATURE_FIELDS, "soil_class")}
     next_arch = 0
     for p in range(npft):

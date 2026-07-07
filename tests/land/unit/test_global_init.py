@@ -30,3 +30,19 @@ def test_determinism_same_seed():
     a = build_archetypes(w, feats, soil, np.ones(ncell, bool), k_per_pft=3, seed=7)
     b = build_archetypes(w, feats, soil, np.ones(ncell, bool), k_per_pft=3, seed=7)
     npt.assert_array_equal(a[1], b[1]); npt.assert_allclose(a[0].mat_k, b[0].mat_k)
+
+def test_masked_cell_has_zero_weight_and_no_archetype():
+    import numpy as np
+    from legoesm.land.carbon.climate_features import ClimateFeatures
+    from legoesm.land.carbon.global_init import build_archetypes
+    a = lambda v: np.asarray(v, float)
+    ncell, npft = 2, 1
+    w = np.array([[0.9], [0.9]])                       # both cells have the PFT
+    feats = ClimateFeatures(a([298, 283]), a([2000, 800]), a([3, 12]), a([2, 1]), a([230, 180]))
+    soil = np.array(["loam", "loam"])
+    mask = np.array([True, False])                     # cell 1 is NOT land
+    tab, cid, cw = build_archetypes(w, feats, soil, mask, k_per_pft=1, w_min=0.05, seed=0)
+    assert cid[1, 0] == -1                             # masked cell -> no archetype
+    assert cw[1, 0] == 0.0                             # ...and zero weight (the invariant)
+    # Invariant holds everywhere: weight is 0 exactly where id is -1.
+    assert np.all((cid == -1) == (cw == 0.0))
