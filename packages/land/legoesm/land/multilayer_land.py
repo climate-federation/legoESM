@@ -84,6 +84,73 @@ def _get(lp, name: str, fallback):
     return getattr(lp, name, fallback)
 
 
+def root_zone_moisture_stress(theta, beta_min, root_depth, theta_wp, theta_fc,
+                              z_centers, ncol):
+    """Root-zone soil-moisture evaporative efficiency ``beta_soil`` in
+    ``[beta_min, 1]`` plus its per-layer pieces.
+
+    Single source of the moisture-stress formula, shared by the land surface
+    energy balance (:func:`_step_multilayer_land_impl`, pre- AND post-step) and
+    the coupler's atmospheric land tile (via :func:`land_tile_beta_soil`) so
+    BOTH throttle land evaporation by the IDENTICAL stress.  Previously the
+    atmosphere re-derived the land surface humidity at ``beta = 1`` (a saturated
+    swamp surface) while the land model throttled internally, giving a land
+    latent flux ~10x too large (hfls ~775 W/m^2, Bowen ~0.04).
+
+        beta_root  = clip((theta - theta_wp) / max(theta_fc - theta_wp, 1e-3), 0, 1)
+        w_frac_rz  = clip(sum_layers(root_frac * beta_root), 0, 1)
+        beta_soil  = beta_min + (1 - beta_min) * w_frac_rz
+
+    ``root_frac`` is the exponential root density normalised over the column.
+    ``root_depth``/``theta_wp``/``theta_fc`` may be scalars (config) or
+    per-column arrays (``LandSurfaceParams``); both are promoted to ``(ncol,)``.
+    Returns ``(beta_soil, root_frac, beta_root, w_frac_rz)``.
+    """
+    def _to_ncol(v):
+        arr = jnp.asarray(v)
+        if arr.ndim == 0:
+            return jnp.broadcast_to(arr, (ncol,))
+        return arr
+
+    root_depth_c = _to_ncol(root_depth)
+    theta_wp_c   = _to_ncol(theta_wp)
+    theta_fc_c   = _to_ncol(theta_fc)
+
+    root_frac = jnp.exp(-z_centers[None, :] / root_depth_c[:, None])
+    root_frac = root_frac / jnp.sum(root_frac, axis=-1, keepdims=True)
+    # Audit #6 / Iter-65: floor the (theta_fc - theta_wp) range at 1e-3 m^3/m^3
+    # (~1 % of theta_sat) so a pathological PFT row (theta_fc ~ theta_wp) cannot
+    # explode beta_root through a ~0 denominator.
+    _denom = jnp.maximum(
+        theta_fc_c[:, None] - theta_wp_c[:, None], 1e-3,  # coeff-ok: floor (theta_fc - theta_wp) range to avoid /~0 in beta_root
+    )
+    beta_root = jnp.clip((theta - theta_wp_c[:, None]) / _denom, 0.0, 1.0)
+    w_frac_rz = jnp.clip(jnp.sum(root_frac * beta_root, axis=-1), 0.0, 1.0)
+    beta_soil = beta_min + (1.0 - beta_min) * w_frac_rz
+    return beta_soil, root_frac, beta_root, w_frac_rz
+
+
+def land_tile_beta_soil(theta_soil, config, land_params=None):
+    """Root-zone ``beta_soil`` for the coupler's atmospheric land tile, resolved
+    from the SAME ``config`` / ``land_params`` thresholds the land SEB uses.
+
+    The coupler forms the land-tile effective surface humidity
+    ``q_sfc = beta_soil * q_sat(T_land)`` (the alpha-method, matching
+    ``simple_seb`` ``q_sfc = beta_effective * q_sat_sfc``) so the atmospheric
+    land latent flux is throttled by soil moisture instead of running at the
+    saturated-surface potential rate.  ``theta_soil`` is the ``(ncol, n_layers)``
+    soil-moisture field from the carried multilayer land state.
+    """
+    grid = make_soil_grid(config.soil_grid)
+    root_depth = _get(land_params, "root_depth", config.root_depth)
+    theta_wp   = _get(land_params, "theta_wp", config.theta_wp)
+    theta_fc   = _get(land_params, "theta_fc", config.theta_fc)
+    beta_soil, _, _, _ = root_zone_moisture_stress(
+        theta_soil, config.beta_min, root_depth, theta_wp, theta_fc,
+        grid.z_node, theta_soil.shape[0])
+    return beta_soil
+
+
 def step_multilayer_land_with_diagnostics(
     state: MultiLayerLandState,
     forcing: AtmToSurface,
@@ -309,7 +376,11 @@ def _step_multilayer_land_impl(
     # see root_zone_beta_soil for the audit-#6 / iter-65 theta_fc-theta_wp
     # range floor).  theta_wp_c / theta_fc_c are already promoted to (ncol,),
     # so use the spatial (per-column) path.  beta_root (per-layer) is reused
-    # below for the root-water-uptake sink partition.
+    # below for the root-water-uptake sink partition.  (#823 keeps this
+    # root_zone_beta_soil path — numerically identical to main's canonical
+    # root_zone_moisture_stress, which stays available for the coupler land
+    # tile via land_tile_beta_soil — because the soil-C-spin-up + carbon audit
+    # downstream reuse the inline root_frac / theta_wp_c / theta_fc_c / w_frac_rz.)
     beta_soil, beta_root = root_zone_beta_soil(
         theta, root_frac, theta_wp_c, theta_fc_c, config.beta_min,
         spatial=True,

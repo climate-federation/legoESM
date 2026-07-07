@@ -158,6 +158,7 @@ def main():
             if is_bias:
                 b = float(np.sum(w * field) / np.sum(w))     # area-weighted mean bias
                 ttl += (f"   bias {b:+.2f} K" if r == 0 else f"   bias {b:+.3f}")
+                print(f"# PANEL-BIAS {name} col{c} ({title}): {b:+.4f}", flush=True)
             ax.set_title(ttl, fontsize=10)
             cb = fig.colorbar(m, ax=ax, fraction=0.03, pad=0.02)
             if c == 0:

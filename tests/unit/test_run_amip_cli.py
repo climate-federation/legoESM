@@ -1281,7 +1281,8 @@ def test_amip_sota_config_builds_valid_experiment_config():
 
 def test_config_yaml_round_trips_authoritative_values():
     """`run_amip.py --config config/amip/amip_production.yaml` reproduces the
-    validated SBM AMIP parametrization (job 25918469)."""
+    production AMIP parametrization (Bechtold mass-flux + McFarlane GWD,
+    directive 2026-07-06; revalidation gate = the C24 physics-combo screen)."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     cfg_file = _repo_root() / "config" / "amip" / "amip_production.yaml"
     parser = build_arg_parser()
@@ -1294,7 +1295,8 @@ def test_config_yaml_round_trips_authoritative_values():
     assert args.discretization == "cdgrid"
     assert args.grid_type == "cubed_sphere"
     cfg = build_config_from_args(args)
-    assert cfg.convection == "sbm"
+    assert cfg.convection == "bechtold"   # mass-flux, water-conserving (#771)
+    assert cfg.gravity_wave_drag == "mcfarlane"
     assert cfg.microphysics == "morrison"
     assert cfg.cloud_scheme == "sundqvist"
     assert cfg.radiation == "rrtmg"          # rrtmgp builder alias

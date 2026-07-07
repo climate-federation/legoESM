@@ -129,9 +129,24 @@ class TestModonHyperdiffEnvKnob:
         )
         return _modon_hyperdiff_coeff
 
-    def test_unset_env_is_byte_identical_default(self, monkeypatch):
+    def test_unset_env_defaults_to_ref_n_squared_law(self, monkeypatch):
+        # #753 item 1: the modon default is now the (ref/n)^2 law (C96 erupts
+        # under ^4; ^2 is stable, validated 100 days at C36/C48/C96).  Unset env
+        # must reproduce ^2, and C48 stays exponent-invariant (no coarse-case
+        # regression), while C96 receives the 4x face-seam backstop.
         monkeypatch.delenv("LEGOESM_SW_MODON_HYPERDIFF_FACTOR", raising=False)
         monkeypatch.delenv("LEGOESM_SW_MODON_HYPERDIFF_SCALING", raising=False)
+        coeff = self._coeff()
+        for n in (36, 48, 96, 192):
+            assert coeff(n) == cdgrid_hyperdiff_cube(n, scaling_exponent=2)
+        assert coeff(48) == cdgrid_hyperdiff_cube(48)  # C48 invariant vs ^4
+        assert coeff(96) == pytest.approx(4.0 * cdgrid_hyperdiff_cube(96))
+
+    def test_scaling_env_four_reproduces_pre753_law(self, monkeypatch):
+        # The ^4 law stays selectable (opt-out) and is byte-identical to the
+        # pre-#753 expression at every resolution.
+        monkeypatch.delenv("LEGOESM_SW_MODON_HYPERDIFF_FACTOR", raising=False)
+        monkeypatch.setenv("LEGOESM_SW_MODON_HYPERDIFF_SCALING", "4")
         coeff = self._coeff()
         for n in (36, 48, 96, 192):
             assert coeff(n) == cdgrid_hyperdiff_cube(n)  # 1.0 * ^4 law
