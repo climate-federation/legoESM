@@ -288,6 +288,13 @@ class PhysicsPipeline:
         # action spectrum threads through ``gwd_spectrum``.
         self._turb_energy_field = None
         self._gwd_prognostic = False
+        # ``_gwd_orographic`` marks schemes (single or '+'-composite) whose
+        # launch stress accepts the per-column ``h_topo_col``;
+        # ``subgrid_topo_stddev`` is the grid-shaped SSO field the driver
+        # attaches from ``subgrid_orography_path`` (and re-scatters under
+        # MPI, like ``f_land``). None -> kernels use scalar config.h_topo.
+        self._gwd_orographic = False
+        self.subgrid_topo_stddev = None
 
     def _blend_land(self, ocean_field, land_field):
         """Blend an ocean/ice surface field with a land field by ``f_land``.
@@ -1376,6 +1383,11 @@ class PhysicsPipeline:
                     spectrum_in=_spec_in, **_gwd_kwargs,
                 )
             else:
+                if (self._gwd_orographic
+                        and self.subgrid_topo_stddev is not None):
+                    _gwd_kwargs["h_topo_col"] = ad.flatten_2d(
+                        self.subgrid_topo_stddev
+                    )
                 gwd_out = self.gwd_fn(**_gwd_kwargs)
             du_dt = du_dt + ad.unflatten_3d(gwd_out.du_dt)
             dv_dt = dv_dt + ad.unflatten_3d(gwd_out.dv_dt)
@@ -3010,5 +3022,11 @@ def build_physics_pipeline(grid, sigma, config):
     ).energy_field
     pipeline._gwd_prognostic = (
         getattr(config, 'gravity_wave_drag', 'none') == "prognostic_spectral"
+    )
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+        gwd_scheme_is_orographic,
+    )
+    pipeline._gwd_orographic = gwd_scheme_is_orographic(
+        getattr(config, 'gravity_wave_drag', 'none'),
     )
     return pipeline

@@ -62,8 +62,9 @@ def _block_value(out, lat0, lon0):
 
 def test_ocean_and_flat_plateau_have_zero_stddev():
     out = _sso()
-    assert _block_value(out, -40.0, 300.0) == 0.0          # open ocean
-    assert _block_value(out, 40.0, 90.0) == 0.0            # plateau interior
+    # weighted-moment roundoff: a constant block yields O(1e-13), not exact 0
+    assert _block_value(out, -40.0, 300.0) == pytest.approx(0.0, abs=1e-9)
+    assert _block_value(out, 40.0, 90.0) == pytest.approx(0.0, abs=1e-9)
 
 
 def test_checkerboard_range_has_exact_stddev():

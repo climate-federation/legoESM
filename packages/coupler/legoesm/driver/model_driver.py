@@ -1363,6 +1363,15 @@ class ModelDriver:
         # Two modes, distinguished by whether an explicit --land-mask-file was
         # given (full slab, slab_land_active=True) or only --topography was
         # given (passive: albedo + T_sfc blend, T_land carried but not stepped).
+        # Thread the per-column subgrid orography into the compiled physics
+        # pipeline. The grid attachment (``_create_topography``) feeds the
+        # make_gwd_physics/spectral factories, which read the grid per call;
+        # the pipeline's column hot path reads this attribute instead — both
+        # are views of the same field and are re-scattered together under MPI.
+        _sso = getattr(self.grid, "subgrid_topo_stddev", None)
+        if _sso is not None:
+            self.physics.subgrid_topo_stddev = _sso
+
         _has_land = (
             self._f_land is not None
             and bool(jnp.any(self._f_land > 0))
@@ -2620,6 +2629,12 @@ class ModelDriver:
                             self.physics.f_land, layout)
                         self.physics.albedo_land = scatter(
                             self.physics.albedo_land, layout)
+                    # Rank-local SSO for the pipeline's column GWD path
+                    # (same ownership as f_land / _physics_lat).
+                    if getattr(self.physics, "subgrid_topo_stddev", None) \
+                            is not None:
+                        self.physics.subgrid_topo_stddev = scatter(
+                            self.physics.subgrid_topo_stddev, layout)
 
                 # Wrap SST/SIC forcing to return rank-local arrays
                 _global_get_sst_sic = self.get_sst_sic

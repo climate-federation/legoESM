@@ -65,8 +65,71 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 
 
+# '+'-composable diagnostic sources (mirrors ExperimentConfig.validate_strict;
+# prognostic_spectral / e3sm_cam / ml_emulator carry per-step state and are
+# NOT composable). Orographic members accept the per-column ``h_topo_col``
+# launch amplitude.
+COMPOSABLE_GWD_SCHEMES = ("rayleigh", "lindzen", "mcfarlane", "hines")
+OROGRAPHIC_GWD_SCHEMES = ("lindzen", "mcfarlane", "e3sm_cam")
+
+
+def gwd_scheme_is_orographic(scheme: str) -> bool:
+    """True when ``scheme`` (single or '+'-composite) has an orographic member."""
+    return any(p in OROGRAPHIC_GWD_SCHEMES for p in str(scheme).split("+"))
+
+
+def _make_composite_gwd_fn(members):
+    """Sum the tendencies of resolved GWD members (name, fn, sub_config).
+
+    The returned kernel keeps the canonical column signature so BOTH call
+    paths work unchanged: the hydrostatic/spectral factories call it
+    positionally with the parent ``GravityWaveDragConfig`` as ``config``
+    (ignored here — each member was bound to its own sub-config at build
+    time), and the compiled PhysicsPipeline calls it with keywords.
+    ``h_topo_col`` is forwarded only to orographic members.
+    """
+    def composite_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
+                      dt, config=None, h_topo_col=None):
+        out = None
+        for name, fn, sub_config in members:
+            kw = (
+                {"h_topo_col": h_topo_col}
+                if name in OROGRAPHIC_GWD_SCHEMES else {}
+            )
+            o = fn(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
+                   dt, sub_config, **kw)
+            # GWDOutput is all-array (du_dt, dv_dt, dT_dt, eps_gwd):
+            # distinct wave sources superpose linearly.
+            out = o if out is None else type(o)(
+                *(a + b for a, b in zip(out, o))
+            )
+        return out
+
+    return composite_gwd
+
+
 def get_gwd_fn(config: GravityWaveDragConfig):
-    """Select the GWD backend based on config.scheme."""
+    """Select the GWD backend based on config.scheme.
+
+    A '+'-joined scheme (e.g. ``"hines+mcfarlane"``) composes multiple
+    diagnostic sources whose tendencies are summed — orographic and
+    non-orographic waves parameterize distinct sources and run together
+    in CMIP-class GCMs. Returns the composite scheme string as the name
+    and the PARENT config as the scheme config.
+    """
+    if "+" in config.scheme:
+        parts = config.scheme.split("+")
+        bad = [p for p in parts if p not in COMPOSABLE_GWD_SCHEMES]
+        if bad or len(parts) < 2 or len(set(parts)) != len(parts):
+            raise ValueError(
+                f"composite GWD scheme {config.scheme!r} invalid: parts must "
+                f"be >= 2 distinct members of {COMPOSABLE_GWD_SCHEMES} "
+                f"(offending: {bad or 'duplicate/empty part'})"
+            )
+        members = tuple(
+            get_gwd_fn(config._replace(scheme=p)) for p in parts
+        )
+        return config.scheme, _make_composite_gwd_fn(members), config
     if config.scheme == "rayleigh":
         return "rayleigh", rayleigh_gwd, config.rayleigh
     elif config.scheme == "lindzen":
@@ -163,7 +226,7 @@ def _make_hydrostatic_gwd(
     # mfcc_table=)`` entry point (wiring the convective-heating coupling through
     # the physics pipeline is a separate integration task and must not reach
     # into the convection package from here).
-    is_orographic = scheme_name in ("lindzen", "mcfarlane", "e3sm_cam")
+    is_orographic = gwd_scheme_is_orographic(scheme_name)
     _ml_model_cache = [None]
 
     def physics_fn(
@@ -343,7 +406,7 @@ def _make_mpas_gwd(
     # ``e3sm_cam`` shares the orographic launch signature (accepts the
     # optional per-column ``h_topo_col`` subgrid orographic stddev keyword);
     # its config selects the orographic vs frontal source internally.
-    is_orographic = scheme_name in ("lindzen", "mcfarlane", "e3sm_cam")
+    is_orographic = gwd_scheme_is_orographic(scheme_name)
 
     def physics_fn(state, mesh, sigma_coord, phys_state=None):
         from legoesm.grids.voronoi import reconstruct_cell_velocity
@@ -461,6 +524,7 @@ def _make_nonhydrostatic_gwd(
     scheme_name, gwd_fn, scheme_config = get_gwd_fn(gwd_config)
     is_prognostic = scheme_name == "prognostic_spectral"
     is_ml = scheme_name == "ml_emulator"
+    is_orographic = gwd_scheme_is_orographic(scheme_name)
     _ml_model_cache = [None]
 
     def physics_fn(
@@ -564,6 +628,13 @@ def _make_nonhydrostatic_gwd(
                 z_full, z_half, rho_col, lat, dt, scheme_config,
                 _ml_model_cache[0],
             )
+        elif is_orographic:
+            h_topo_col = _extract_subgrid_topo_stddev(grid, ncol)
+            gwd_out = gwd_fn(
+                u_col, v_col, T_col, p_full_col, p_half,
+                z_full, z_half, rho_col, lat, dt, scheme_config,
+                h_topo_col=h_topo_col,
+            )
         else:
             gwd_out = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half,
@@ -609,6 +680,7 @@ def _make_spectral_pe_gwd(
     scheme_name, gwd_fn, scheme_config = get_gwd_fn(gwd_config)
     is_prognostic = scheme_name == "prognostic_spectral"
     is_ml = scheme_name == "ml_emulator"
+    is_orographic = gwd_scheme_is_orographic(scheme_name)
     _ml_model_cache = [None]
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
@@ -692,6 +764,13 @@ def _make_spectral_pe_gwd(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config,
                 _ml_model_cache[0],
+            )
+        elif is_orographic:
+            h_topo_col = _extract_subgrid_topo_stddev(grid, ncol)
+            gwd_out = gwd_fn(
+                u_col, v_col, T_col, p_full_col, p_half_col,
+                z_full, z_half, rho, lat, dt, scheme_config,
+                h_topo_col=h_topo_col,
             )
         else:
             gwd_out = gwd_fn(
