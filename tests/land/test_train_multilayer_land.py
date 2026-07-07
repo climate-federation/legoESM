@@ -145,12 +145,27 @@ def test_lam_sm_zero_is_true_noop():
     aux smse is exactly 0 and the total loss equals the sum of the other terms."""
     data = _synthetic_data()
     p = init_ext_params()
-    l, (tm, am, pp, sa, sm) = loss_ml(p, data, lam_sm=0.0)
+    l, (tm, am, pp, sa, sm, gb) = loss_ml(p, data, lam_sm=0.0)
     assert float(sm) == 0.0
     # the SM term contributes nothing: loss == tmse + lam_alb*amse + lam_pft*pp + lam_amp*sa
     import scripts.run.train_multilayer_land_era5 as _M
     expect = float(tm) + _M._LAM_ALB * float(am) + _M._LAM_PFT * float(pp) + _M._LAM_AMP * float(sa)
     assert abs(float(l) - expect) < 1e-6
+
+
+def test_lam_tbias_penalizes_global_bias():
+    """--lam-tbias adds an area-weighted global skin-T BIAS penalty on top of the RMSE
+    term: the aux exposes the signed bias (weight-independent), and a positive lam_tbias
+    raises the loss by exactly lam_tbias * gbias**2, differentiably."""
+    data = _synthetic_data()
+    p = init_ext_params()
+    l0, aux0 = loss_ml(p, data, lam_tbias=0.0)
+    l1, aux1 = loss_ml(p, data, lam_tbias=50.0)
+    gbias = float(aux0[-1])                                  # signed global skin-T bias [K]
+    assert float(aux1[-1]) == gbias                          # diagnostic independent of the weight
+    assert abs((float(l1) - float(l0)) - 50.0 * gbias ** 2) < 1e-5
+    g = jax.grad(lambda q: loss_ml(q, data, lam_tbias=50.0)[0])(p)
+    assert all(jnp.all(jnp.isfinite(v)) for v in g.values())
 
 
 def test_soil_moisture_loss_is_nan_safe():
@@ -170,7 +185,7 @@ def test_all_nan_soil_moisture_target_is_fully_masked():
     data = dict(_synthetic_data())
     data["sm"] = jnp.full_like(data["sm"], jnp.nan)
     l, aux = loss_ml(init_ext_params(), data)
-    assert float(aux[-1]) == 0.0 and jnp.isfinite(l)         # smse masked to 0
+    assert float(aux[4]) == 0.0 and jnp.isfinite(l)          # smse (index 4) masked to 0
     g = jax.grad(lambda q: loss_ml(q, data)[0])(init_ext_params())
     assert all(jnp.all(jnp.isfinite(v)) for v in g.values())
 
