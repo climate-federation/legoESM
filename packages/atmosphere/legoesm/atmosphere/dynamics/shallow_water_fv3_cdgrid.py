@@ -55,7 +55,23 @@ from legoesm.grids.cubed_sphere_cdgrid import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
-from legoesm.core.conservation import conservation_accumulator
+from legoesm.core.conservation import (
+    conservation_accumulator, global_area_sum, batch_global_area_sums,
+    shard_invariant_cube_face_sum, cube_faces_are_whole_on_shards,
+)
+
+
+def _cube_area_sum(x, area):
+    """Shard-count-invariant ``sum(x * area)`` on a cube ``(6, n, n)`` field
+    (issue #852): reduces each whole face then combines the 6 partials in a
+    fixed order so the sum is bit-identical across whole-face decompositions.
+    Falls back to the plain sum off-cube or on a face-split (tiled) mesh.
+    """
+    prod = x * area
+    if (prod.ndim == 3 and prod.shape[0] == 6
+            and cube_faces_are_whole_on_shards()):
+        return shard_invariant_cube_face_sum(prod)
+    return jnp.sum(prod)
 from legoesm.core.fv3_sw_core import (
     d2a2c_vect,
     d_sw5_corner_divergence,
@@ -110,11 +126,13 @@ def _apply_mass_conserving_floor(
     correction = (mass_target - mass_new) / total_area
     h_add = h + correction
     h_floored = jnp.maximum(h_add, h_floor)
-    # Mass injected by the floor (>= 0); must be removed to conserve.
-    deficit = jnp.sum((h_floored - h_add) * area)
+    # Mass injected by the floor (>= 0); must be removed to conserve.  Both
+    # global area sums use the shard-count-invariant cube reduction (#852) so
+    # the renormalization scale is decomposition-independent on the floor branch.
+    deficit = _cube_area_sum(h_floored - h_add, area)
     # Headroom above the floor that can absorb the removal.
     excess = jnp.maximum(h_floored - h_floor, 0.0)
-    excess_mass = jnp.sum(excess * area)
+    excess_mass = _cube_area_sum(excess, area)
     # Proportional shrink of the headroom; guard the empty-headroom case.
     # Use a SAFE denominator BEFORE the divide so reverse-mode AD never sees a
     # 0/0 (a bare ``deficit/excess_mass`` inside ``jnp.where`` still evaluates
@@ -862,10 +880,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
         # cubed-sphere arrays leak ~N·eps noise into the anchor and
         # produced ~10^-7 spurious "mass drift" in W5.  Matches the
         # cubed-sphere PE ``batch_global_area_sums`` precision.
-        _acc = conservation_accumulator()
-        self._target_mass = jnp.sum(
-            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
-        )
+        self._target_mass = global_area_sum(state.h, self.cdgrid.base)
 
     def reset_target_mass(self) -> None:
         """Clear the anchored mass target (iter-20; mirrors iter-18 API)."""
@@ -877,10 +892,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
 
     def compute_mass(self, state) -> jax.Array:
         """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""
-        _acc = conservation_accumulator()
-        return jnp.sum(
-            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
-        )
+        return global_area_sum(state.h, self.cdgrid.base)
 
     def _sync_dgrid_boundary(self, state: CDGridShallowWaterState):
         """Owner-based sync of D-grid corner winds at shared edges.
@@ -1240,18 +1252,16 @@ class CDGridShallowWaterModel(IntegrationMixin):
             total_area = jnp.sum(area)
             if self._target_mass is not None:
                 mass_target = self._target_mass
-                mass_new = jnp.sum(state_new.h.astype(acc) * area)
+                mass_new = global_area_sum(state_new.h, self.cdgrid.base)
             else:
-                # Both mass integrals share the ``* area`` weight on
-                # the same horizontal axes — stack and reduce once so
-                # the local sum kernel fires only once.
-                _h_pair = jnp.stack(
-                    [state.h.astype(acc), state_new.h.astype(acc)], axis=-1,
-                ) * area[..., None]
-                _mass_pair = jnp.sum(
-                    _h_pair, axis=tuple(range(area.ndim)),
+                # Shard-count-invariant batched reduction (#852): mirrors the PE
+                # fixer (fix_ps_mass -> batch_global_area_sums) so the SW cube
+                # mass fixer is decomposition-independent too (the bare stacked
+                # jnp.sum reduced per-shard then all-reduced — float32
+                # non-associative, shard-count-dependent).
+                mass_target, mass_new = batch_global_area_sums(
+                    [state.h, state_new.h], self.cdgrid.base,
                 )
-                mass_target, mass_new = _mass_pair[0], _mass_pair[1]
             # iter-5: fp64 budget accumulator promotes the add.  Floor-then-
             # renormalize keeps h >= 0 (no mass leak through a thin layer)
             # while conserving column mass exactly; BIT-IDENTICAL to the
@@ -1344,10 +1354,7 @@ class FV3FBShallowWaterModel:
         # cubed-sphere arrays leak ~N·eps noise into the anchor and
         # produced ~10^-7 spurious "mass drift" in W5.  Matches the
         # cubed-sphere PE ``batch_global_area_sums`` precision.
-        _acc = conservation_accumulator()
-        self._target_mass = jnp.sum(
-            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
-        )
+        self._target_mass = global_area_sum(state.h, self.cdgrid.base)
 
     def reset_target_mass(self) -> None:
         """Clear the anchored mass target (iter-20; mirrors iter-18 API).
@@ -1363,10 +1370,7 @@ class FV3FBShallowWaterModel:
 
     def compute_mass(self, state) -> jax.Array:
         """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""
-        _acc = conservation_accumulator()
-        return jnp.sum(
-            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
-        )
+        return global_area_sum(state.h, self.cdgrid.base)
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
@@ -1418,17 +1422,14 @@ class FV3FBShallowWaterModel:
             total_area = jnp.sum(area)
             if self._target_mass is not None:
                 mass_target = self._target_mass
-                mass_new = jnp.sum(state_new.h.astype(acc) * area)
+                mass_new = global_area_sum(state_new.h, self.cdgrid.base)
             else:
-                # Both mass integrals share the ``* area`` weight on
-                # the same horizontal axes — stack and reduce once.
-                _h_pair = jnp.stack(
-                    [state.h.astype(acc), state_new.h.astype(acc)], axis=-1,
-                ) * area[..., None]
-                _mass_pair = jnp.sum(
-                    _h_pair, axis=tuple(range(area.ndim)),
+                # Shard-count-invariant batched reduction (#852): mirrors the PE
+                # fixer (fix_ps_mass -> batch_global_area_sums) so the SW cube
+                # mass fixer is decomposition-independent too.
+                mass_target, mass_new = batch_global_area_sums(
+                    [state.h, state_new.h], self.cdgrid.base,
                 )
-                mass_target, mass_new = _mass_pair[0], _mass_pair[1]
             # iter-5: fp64 budget accumulator promotes the add.  Floor-then-
             # renormalize keeps h >= 0 (no mass leak through a thin layer)
             # while conserving column mass exactly; BIT-IDENTICAL to the
@@ -1475,10 +1476,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         # cubed-sphere arrays leak ~N·eps noise into the anchor and
         # produced ~10^-7 spurious "mass drift" in W5.  Matches the
         # cubed-sphere PE ``batch_global_area_sums`` precision.
-        _acc = conservation_accumulator()
-        self._target_mass = jnp.sum(
-            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
-        )
+        self._target_mass = global_area_sum(state.h, self.cdgrid.base)
 
     def reset_target_mass(self) -> None:
         """Clear the anchored mass target (iter-20; mirrors iter-18 API).
@@ -1494,10 +1492,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
 
     def compute_mass(self, state) -> jax.Array:
         """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""
-        _acc = conservation_accumulator()
-        return jnp.sum(
-            state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
-        )
+        return global_area_sum(state.h, self.cdgrid.base)
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
@@ -1745,17 +1740,14 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             total_area = jnp.sum(area)
             if self._target_mass is not None:
                 mass_target = self._target_mass
-                mass_new = jnp.sum(state_new.h.astype(acc) * area)
+                mass_new = global_area_sum(state_new.h, self.cdgrid.base)
             else:
-                # Both mass integrals share the ``* area`` weight on
-                # the same horizontal axes — stack and reduce once.
-                _h_pair = jnp.stack(
-                    [state.h.astype(acc), state_new.h.astype(acc)], axis=-1,
-                ) * area[..., None]
-                _mass_pair = jnp.sum(
-                    _h_pair, axis=tuple(range(area.ndim)),
+                # Shard-count-invariant batched reduction (#852): mirrors the PE
+                # fixer (fix_ps_mass -> batch_global_area_sums) so the SW cube
+                # mass fixer is decomposition-independent too.
+                mass_target, mass_new = batch_global_area_sums(
+                    [state.h, state_new.h], self.cdgrid.base,
                 )
-                mass_target, mass_new = _mass_pair[0], _mass_pair[1]
             # iter-5: fp64 budget accumulator promotes the add.  Floor-then-
             # renormalize keeps h >= 0 (no mass leak through a thin layer)
             # while conserving column mass exactly; BIT-IDENTICAL to the
