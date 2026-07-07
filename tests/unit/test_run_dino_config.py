@@ -144,6 +144,43 @@ def test_eos_replaces_dino_config(monkeypatch):
     assert cfg.eos == "nemo_seos"
 
 
+def test_recipe_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino", "--recipe", "mitgcm"])
+    args = rd._parse_args()
+    assert args.recipe == "mitgcm"
+
+
+def test_recipe_default_none(monkeypatch):
+    """Default None → main() leaves DINOConfig untouched (no recipe overlay)."""
+    monkeypatch.setattr(sys, "argv", ["run_dino"])
+    args = rd._parse_args()
+    assert args.recipe is None
+
+
+def test_recipe_via_config(tmp_path, monkeypatch):
+    cfg = _write(tmp_path, "recipe: veros\n")
+    monkeypatch.setattr(sys, "argv", ["run_dino", "--config", cfg])
+    args = rd._parse_args()
+    assert args.recipe == "veros"
+
+
+def test_recipe_rejects_bad_choice(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino", "--recipe", "bogus_model"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()
+
+
+def test_recipe_overlays_dino_config(monkeypatch):
+    """The --recipe value must reach DINOConfig via dino_config_for_recipe
+    (the cfg-overlay round-trip main() performs)."""
+    from legoesm.ocean.experiments.dino import (
+        DINOConfig, dino_config_for_recipe,
+    )
+    assert DINOConfig().eos == "wright"                 # bare default
+    mit = dino_config_for_recipe("mitgcm")
+    assert mit.eos == "unesco80" and mit.momentum_advection == "flux_form"
+
+
 def test_tke_momentum_visc_bg_flag_parses(monkeypatch):
     monkeypatch.setattr(sys, "argv",
                         ["run_dino", "--tke-momentum-visc-bg", "1.2e-4"])
@@ -178,3 +215,17 @@ def test_A_v_bg_effective_floors_only_tke():
     assert dataclasses.replace(
         base, vmix_scheme="tke",
         tke_momentum_visc_bg=1.2e-4).A_v_bg_effective == 1.2e-4
+
+
+def test_vmix_choices_include_richardson_and_catke(monkeypatch):
+    # codex fix: richardson/catke are wired in _dino_vertical_mixing_config, so
+    # --vmix must accept them (else the recipe fallback override is unusable).
+    for scheme in ("kpp", "tke", "constant", "richardson", "catke"):
+        monkeypatch.setattr(sys, "argv", ["run_dino.py", "--vmix", scheme])
+        assert rd._parse_args().vmix == scheme
+
+
+def test_vmix_rejects_unknown(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_dino.py", "--vmix", "bogus"])
+    with pytest.raises(SystemExit):
+        rd._parse_args()

@@ -41,10 +41,13 @@ from legoesm.grids.voronoi import create_regional_voronoi_mesh
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
 from legoesm.ocean.experiments.dino import (
+    DINO_L2_RECIPES,
+    DINO_RECIPES,
     DINOConfig,
     apply_dino_lat_lon_surface_forcing,
     apply_dino_mpas_surface_forcing,
     create_dino_z_star,
+    dino_config_for_recipe,
     dino_lat_lon_grid,
     dino_lat_lon_model_config,
     dino_lat_lon_state,
@@ -75,6 +78,19 @@ def _parse_args():
              "Voronoi with periodic_x=True + seam wall).",
     )
     p.add_argument(
+        "--recipe", choices=sorted(DINO_RECIPES), default=None,
+        help="Select a named MODEL RECIPE (pure config overlay of another "
+             "ocean model's DINO numerics — EOS, advection/limiter, vertical "
+             "mixing, momentum/Coriolis/integrator blocks). L1 cards: "
+             "'legoesm_default' (Wright+KPP, the identity), 'nemo_paper' "
+             "(Kamm et al. 2025: nemo_seos + TKE). L2 cards: 'veros' "
+             "(Vallis EOS + TKE + superbee + streamfunction/AB2), 'mitgcm' "
+             "(JMD95-ish EOS + KPP + DST3 + flux-form/AB2/unsplit-FS), "
+             "'oceananigans' (TEOS-10 + CATKE + WENO + AB2). Applied FIRST; "
+             "explicit --eos/--vmix/--barotropic-solver still override it. "
+             "L2 cards are lat-lon-only (the paper R1 comparison grid).",
+    )
+    p.add_argument(
         "--n-lon", type=int, default=50,
         help="Zonal cell count for the Mercator grid (lat-lon only; "
              "50 = 1° R1, default).",
@@ -98,7 +114,8 @@ def _parse_args():
              "away on the implicit-CN MPAS path; ignored on lat-lon.",
     )
     p.add_argument(
-        "--vmix", choices=("kpp", "tke", "constant"), default=None,
+        "--vmix", choices=("kpp", "tke", "constant", "richardson", "catke"),
+        default=None,
         help="Vertical-mixing closure (DINOConfig.vmix_scheme): 'kpp' "
              "(multi-year-stable default), 'tke' (paper's NEMO scheme — the "
              "default 5e-4 momentum floor fixes the day-39 instability so it "
@@ -333,6 +350,19 @@ def main():
         )
 
     cfg = DINOConfig()
+    # A named model recipe (pure config overlay) is applied FIRST; the explicit
+    # scheme flags below still override it. L2 cards (veros/mitgcm/oceananigans)
+    # select lat-lon-C-grid-only blocks (flux-form/WENO momentum, AB2 outer,
+    # rigid-lid / unsplit free surface), so they are rejected on the MPAS mesh —
+    # the intercomparison runs on the paper's lat-lon R1 grid.
+    if args.recipe is not None:
+        if args.recipe in DINO_L2_RECIPES and args.grid != "latlon":
+            raise SystemExit(
+                f"--recipe {args.recipe} is a lat-lon-only L2 card (it needs "
+                f"dycore blocks the MPAS Voronoi mesh does not provide); rerun "
+                f"with --grid latlon, or select an L1 card "
+                f"({sorted(set(DINO_RECIPES) - DINO_L2_RECIPES)}) on MPAS.")
+        cfg = dino_config_for_recipe(args.recipe, base=cfg)
     if args.dt is not None:
         cfg = dataclasses.replace(cfg, dt=args.dt)
     if args.vmix is not None:
@@ -365,6 +395,18 @@ def main():
             f"the MPAS Voronoi mesh (lat-lon-C-grid-only). On MPAS use one of "
             f"{_MPAS_BAROTROPIC}; rigid_lid / implicit_unsplit require "
             f"--grid latlon.")
+    # The MPAS implicit-vertical-mixing path only builds K-profiles for KPP
+    # (ocean_model_mpas.py:251); tke/catke/richardson have no MPAS profile
+    # builder and would NaN after the mesh is built. Fail loud + early
+    # (dispatch-hardening) -- catches e.g. `--recipe nemo_paper --grid mpas`
+    # (nemo_paper sets vmix_scheme="tke") and `--grid mpas --vmix tke`.
+    _MPAS_VMIX = ("kpp", "constant")
+    if grid_kind == "mpas" and cfg.vmix_scheme not in _MPAS_VMIX:
+        raise SystemExit(
+            f"--vmix {cfg.vmix_scheme} (from --recipe {args.recipe!r} / --vmix) "
+            f"is not supported on the MPAS Voronoi mesh: only {_MPAS_VMIX} have "
+            f"an MPAS K-profile builder. Use --grid latlon, or override with "
+            f"--vmix kpp on MPAS.")
 
     # Build grid, state, model — branch on grid type
     z = create_dino_z_star(cfg)
