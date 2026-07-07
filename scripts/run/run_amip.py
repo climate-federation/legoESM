@@ -1301,11 +1301,13 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
         parser.error("--subgrid-autoconversion requires --microphysics "
                      "morrison (the in-cloud closure lives in the Morrison "
                      "warm-rain path)")
+    _RAIN_SPLIT_SCHEMES = ("tiedtke", "bechtold", "zhang_mcfarlane",
+                           "kain_fritsch", "mass_flux", "edmf")
     if (args.convective_precip_efficiency > 0.0
-            and args.convection not in ("tiedtke", "bechtold")):
-        parser.error("--convective-precip-efficiency requires --convection "
-                     "tiedtke or bechtold (the schemes with the shared "
-                     "in-updraft-precipitation rain split)")
+            and args.convection not in _RAIN_SPLIT_SCHEMES):
+        parser.error("--convective-precip-efficiency requires a mass-flux "
+                     f"convection scheme with the shared in-updraft-rain "
+                     f"split: {_RAIN_SPLIT_SCHEMES}")
     if args.convective_buoyancy_death_memory and args.convection != "tiedtke":
         parser.error("--convective-buoyancy-death-memory requires --convection "
                      "tiedtke (plume buoyancy-death memory is a Tiedtke "

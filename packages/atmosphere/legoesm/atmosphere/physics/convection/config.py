@@ -87,6 +87,7 @@ __param_spec__ = {
     "ConvectiveEDMFConfig": {
         "scheme_key": "atm.conv.ConvectiveEDMFConfig",
         "excluded": {
+            "precip_efficiency": "default 0 = disabled (legacy no rain-split, shared split_convective_rain gated `if > 0.0`); enable + retune via config, not sigmoid-trained from the off state",
             "epsilon_0": "entrainment: bulk-plume base rate held fixed in the EDMF mass-flux core",
             "w_u_min": "numerics: minimum updraft velocity floor",
             "w_u_max": "numerics: physical cap on the updraft velocity sqrt(2*CAPE) (stability, not a tunable closure)",
@@ -162,6 +163,7 @@ __param_spec__ = {
     "KainFritschConfig": {
         "scheme_key": "atm.conv.KainFritschConfig",
         "excluded": {
+            "precip_efficiency": "default 0 = disabled (legacy no rain-split, shared split_convective_rain gated `if > 0.0`); enable + retune via config, not sigmoid-trained from the off state",
             "cape_or_sharpness": "numerics: sigmoid sharpness on the CAPE-OR fallback trigger",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
             "cape_threshold": "default 0 = disabled/off (KF gates on the trigger function, not CAPE)",
@@ -222,6 +224,7 @@ __param_spec__ = {
     "MassFluxConfig": {
         "scheme_key": "atm.conv.MassFluxConfig",
         "excluded": {
+            "precip_efficiency": "default 0 = disabled (legacy no rain-split, shared split_convective_rain gated `if > 0.0`); enable + retune via config, not sigmoid-trained from the off state",
             "M_c_init": "default 0 = disabled/off (initial base mass flux, enable via config, not training)",
             "epsilon_0": "entrainment: bulk-plume base rate held fixed in the prognostic mass-flux core",
         },
@@ -284,6 +287,7 @@ __param_spec__ = {
     "ZhangMcFarlaneConfig": {
         "scheme_key": "atm.conv.ZhangMcFarlaneConfig",
         "excluded": {
+            "precip_efficiency": "default 0 = disabled (legacy no rain-split, shared split_convective_rain gated `if > 0.0`); enable + retune via config, not sigmoid-trained from the off state",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE trigger",
             "epsilon_0": "entrainment: bulk-plume base rate held fixed (dilute CAPE uses dmpdz)",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
@@ -598,6 +602,7 @@ class MassFluxConfig(NamedTuple):
     # script flags.
     cape_activation_scale: float = 10.0
     cape_threshold: float = 70.0
+    precip_efficiency: float = 0.0  # shared split_convective_rain rain-split (default off = legacy)
     M_c_init: float = 0.0
     M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
 
@@ -684,6 +689,7 @@ class ZhangMcFarlaneConfig(NamedTuple):
     # preserves the legacy local-only filter behaviour that all
     # existing scheme test fixtures were calibrated against.
     buoyancy_death_memory: bool = False
+    precip_efficiency: float = 0.0  # shared split_convective_rain rain-split (default off = legacy)
 
 
 class KainFritschConfig(NamedTuple):
@@ -877,6 +883,7 @@ class KainFritschConfig(NamedTuple):
     # bulk one-pass closure removes CAPE over TIMEC so this is the nominal
     # fraction removed per call, used only for diagnostics/documentation).
     cape_removal_fraction: float = 0.90
+    precip_efficiency: float = 0.0  # shared split_convective_rain rain-split (default off = legacy)
     # NOTE: a cloud-base-height precipitation-efficiency retention scaling was
     # removed (validator codex review-2 #1): under the ConvectionOutput
     # contract microphysics owns precipitation, so scaling the cloud-water
@@ -1405,6 +1412,7 @@ class ConvectiveEDMFConfig(NamedTuple):
     # non-detraining updraft profile, drove a day-5 full-physics AMIP blowup.
     subsidence_solve: str = "implicit_flux"
     theta_implicit: float = 1.0
+    precip_efficiency: float = 0.0  # shared split_convective_rain rain-split (default off = legacy)
 
 
 class ConvectionConfig(NamedTuple):

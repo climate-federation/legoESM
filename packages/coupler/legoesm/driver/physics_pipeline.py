@@ -2521,15 +2521,16 @@ def _resolve_convection(config):
     else:
         cc = ConvectionConfig(scheme=scheme)
         conv_config = getattr(cc, scheme)
-        # #832: thread the ExperimentConfig convective rain-split knob into the
-        # schemes that support it (currently Tiedtke's ``precip_efficiency`` —
-        # Bechtold has no such field).  Without this the field was DEAD: the
-        # scheme always saw ``precip_efficiency=0`` (no rain split), so
-        # ``dq_r_conv_dt`` was never produced and the in-updraft-rain path (whose
-        # consumption is fixed in ``physics_step_no_rad``) was unreachable.
-        # Default 0.0 keeps the legacy no-split behaviour byte-identical.
+        # #832 + follow-up: thread the ExperimentConfig convective rain-split
+        # knob into EVERY mass-flux scheme whose config exposes
+        # ``precip_efficiency`` (tiedtke, zhang_mcfarlane, kain_fritsch,
+        # mass_flux, edmf — all now use the shared ``split_convective_rain``).
+        # Without this the field is DEAD: the scheme sees ``precip_efficiency=0``
+        # (no rain split), so ``dq_r_conv_dt`` is never produced and the
+        # in-updraft-rain path is unreachable.  Default 0.0 keeps the legacy
+        # no-split behaviour byte-identical for any scheme left at the default.
         _pe = getattr(config, "convective_precip_efficiency", 0.0)
-        if scheme == "tiedtke" and hasattr(conv_config, "precip_efficiency"):
+        if _pe > 0.0 and hasattr(conv_config, "precip_efficiency"):
             conv_config = conv_config._replace(precip_efficiency=_pe)
 
     _check_pipeline_convection_supported(scheme, conv_config)
