@@ -264,7 +264,7 @@ def make_convection_physics(
     # ``(*shape_2d, nlev)`` to ``(ncol, nlev)`` and never touches grid
     # latitude/longitude — so it is grid-agnostic across cubed-sphere
     # ``(face, n, n)``, lat-lon ``(n_lat, n_lon)``, and MPAS Voronoi
-    # ``(nCells,)``.  Without this branch ``_make_mpas_combined`` (which
+    # ``(nCells,)``.  Without this branch the MPAS combined path (which
     # passes ``model_type="mpas"`` through to all sub-physics factories)
     # crashes the moment convection is enabled on an MPAS run.
     if model_type in ("hydrostatic", "mpas"):

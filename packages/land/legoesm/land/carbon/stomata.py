@@ -46,6 +46,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.land.canopy.sif import SIFConfig
 from legoesm.thermo import saturation_vapor_pressure
 
 # Fixed Farquhar / gas-exchange constants (not tunable).
@@ -182,6 +183,12 @@ class StomataConfig(NamedTuple):
 
     # --- Numerics ---
     co_limitation_eps: float = 0.1  # Smooth-min width for Wc/Wj co-limitation
+
+    # --- Optional solar-induced fluorescence (SIF) diagnostic ---
+    # None (default) disables it; a SIFConfig enables the passive big-leaf SIF
+    # output on SurfaceFluxOutput.sif (coupled Farquhar path only — the Jarvis
+    # fallback has no Ci/An to invert). Static config leaf, never traced.
+    sif: SIFConfig | None = None
 
 
 # =====================================================================
@@ -390,7 +397,23 @@ def jarvis_gs(
 # Coupled Farquhar-stomata solver
 # =====================================================================
 
-def coupled_farquhar_stomata(
+class CoupledLeafState(NamedTuple):
+    """Converged leaf state from the coupled Farquhar-stomata solve.
+
+    Carries everything the SIF diagnostic needs (``A_net``, ``Ci``,
+    ``APAR_umol``, ``gamma_star``) alongside the ``(gs, gpp)`` the beta / ET
+    coupling consumes.  All fields share the ``T_leaf`` shape.
+    """
+
+    gs: jnp.ndarray          # stomatal conductance [mol H2O/m2/s]
+    gpp: jnp.ndarray         # gross primary production [gC/m2/s]
+    A_net: jnp.ndarray       # net assimilation [umol CO2/m2/s]
+    Ci: jnp.ndarray          # intercellular CO2 [umol/mol]
+    APAR_umol: jnp.ndarray   # absorbed PAR [umol photons/m2/s]
+    gamma_star: jnp.ndarray  # CO2 compensation point Gamma* [umol/mol]
+
+
+def solve_coupled_farquhar_ci(
     T_leaf: jnp.ndarray,
     sw_down: jnp.ndarray,
     co2_ppmv: jnp.ndarray | float,
@@ -399,31 +422,14 @@ def coupled_farquhar_stomata(
     LAI: jnp.ndarray,
     beta_soil: jnp.ndarray,
     config: StomataConfig,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Solve the coupled Farquhar-stomata system iteratively.
+) -> CoupledLeafState:
+    """Solve the coupled Farquhar-stomata system; return the converged leaf state.
 
-    Iteratively finds the intercellular CO2 (Ci) consistent with both
-    the Farquhar assimilation rate and the stomatal conductance model
-    (Ball-Berry or Medlyn).
-
-    Soil moisture stress is applied as a down-regulation of Vc_max
-    following CLM (Bonan et al. 2011).
-
-    Parameters
-    ----------
-    T_leaf : Surface/leaf temperature [K].
-    sw_down : Downward shortwave radiation [W/m2].
-    co2_ppmv : Atmospheric CO2 concentration [umol/mol].
-    q_air : Specific humidity of near-surface air [kg/kg].
-    p_surface : Surface pressure [Pa].
-    LAI : Leaf area index [m2/m2].
-    beta_soil : Soil moisture availability factor [0-1].
-    config : StomataConfig.
-
-    Returns
-    -------
-    gs : Canopy stomatal conductance [mol H2O/m2/s].
-    gpp : Gross primary production [gC/m2/s].
+    Shared core of :func:`coupled_farquhar_stomata` (which returns just
+    ``(gs, gpp)``) and the SIF diagnostic (``canopy/sif.py``, which also needs
+    ``A_net``, ``Ci``, ``APAR`` and ``Gamma*``).  Numerics are identical to the
+    historical ``coupled_farquhar_stomata`` body — see that function for the
+    parameter documentation.
     """
     if config.stomata_model not in ("ball_berry", "medlyn"):
         raise ValueError(
@@ -488,7 +494,56 @@ def coupled_farquhar_stomata(
     # GPP: A_gross [umol CO2/m2/s] -> gC/m2/s
     gpp = jnp.maximum(A_gross, 0.0) * _MC
 
-    return gs, gpp
+    # Gamma* for the SIF electron-transport inversion — same Arrhenius the
+    # Farquhar rates use (Bernacchi 2001), computed here so the two never drift.
+    gamma_star = arrhenius(config.Gamma_star25, config.Ha_Gamma, T_leaf)
+
+    return CoupledLeafState(
+        gs=gs, gpp=gpp, A_net=A_net, Ci=Ci,
+        APAR_umol=APAR_umol, gamma_star=gamma_star)
+
+
+def coupled_farquhar_stomata(
+    T_leaf: jnp.ndarray,
+    sw_down: jnp.ndarray,
+    co2_ppmv: jnp.ndarray | float,
+    q_air: jnp.ndarray,
+    p_surface: jnp.ndarray,
+    LAI: jnp.ndarray,
+    beta_soil: jnp.ndarray,
+    config: StomataConfig,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Solve the coupled Farquhar-stomata system iteratively.
+
+    Iteratively finds the intercellular CO2 (Ci) consistent with both
+    the Farquhar assimilation rate and the stomatal conductance model
+    (Ball-Berry or Medlyn).
+
+    Soil moisture stress is applied as a down-regulation of Vc_max
+    following CLM (Bonan et al. 2011).
+
+    Parameters
+    ----------
+    T_leaf : Surface/leaf temperature [K].
+    sw_down : Downward shortwave radiation [W/m2].
+    co2_ppmv : Atmospheric CO2 concentration [umol/mol].
+    q_air : Specific humidity of near-surface air [kg/kg].
+    p_surface : Surface pressure [Pa].
+    LAI : Leaf area index [m2/m2].
+    beta_soil : Soil moisture availability factor [0-1].
+    config : StomataConfig.
+
+    Returns
+    -------
+    gs : Canopy stomatal conductance [mol H2O/m2/s].
+    gpp : Gross primary production [gC/m2/s].
+
+    Thin wrapper over :func:`solve_coupled_farquhar_ci` (which also exposes
+    the ``A_net`` / ``Ci`` / ``APAR`` / ``Gamma*`` the SIF diagnostic needs).
+    """
+    st = solve_coupled_farquhar_ci(
+        T_leaf, sw_down, co2_ppmv, q_air, p_surface, LAI, beta_soil, config)
+    return st.gs, st.gpp
 
 
 # =====================================================================

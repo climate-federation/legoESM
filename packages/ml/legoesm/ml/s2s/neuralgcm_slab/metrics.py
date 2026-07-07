@@ -208,34 +208,6 @@ def score_forecast_metrics(
     return daily, summary
 
 
-def compute_forecast_delta_table(
-    coupled: xr.Dataset,
-    uncoupled: xr.Dataset,
-    *,
-    field_specs: Sequence[FieldSpec] = DEFAULT_FIELD_SPECS,
-    metrics: Sequence[MetricSpec] | None = None,
-    lead_dim: str = "lead_day",
-    latitude_name: str = "latitude",
-) -> dict[str, np.ndarray]:
-    n_leads = int(coupled.sizes[lead_dim])
-    metric_specs = tuple(metrics) if metrics is not None else resolve_metric_specs(None)
-    table: dict[str, np.ndarray] = {}
-    for metric in metric_specs:
-        for spec in field_specs:
-            daily = np.empty(n_leads, dtype=float)
-            coupled_field = _select_field(coupled, spec)
-            uncoupled_field = _select_field(uncoupled, spec)
-            for idx in range(n_leads):
-                daily[idx] = float(
-                    metric.function(
-                        coupled_field.isel({lead_dim: idx}),
-                        uncoupled_field.isel({lead_dim: idx}),
-                    )
-                )
-            table[_metric_column_name(metric.name, spec.name)] = daily
-    return table
-
-
 def save_metric_table_csv(
     metric_table: Mapping[str, Sequence[float]],
     path: str | Path,
@@ -268,7 +240,6 @@ __all__ = [
     "align_truth_to_forecast",
     "available_metric_names",
     "build_daily_metric_table",
-    "compute_forecast_delta_table",
     "latitude_weights",
     "resolve_metric_specs",
     "save_metric_table_csv",
