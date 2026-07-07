@@ -19,7 +19,7 @@ def test_scale_build_module_imports():
 def test_physics_mode_symbols_resolve():
     from legoesm.driver.model_driver import ModelDriver          # noqa: F401
     from legoesm.driver.physics_pipeline import build_physics_pipeline  # noqa: F401
-    from legoesm.training.training_driver import _build_training_segment  # noqa: F401
+    from legoesm.training.training_driver import build_training_segment  # noqa: F401
     from legoesm.training.trainable_params import TrainablePhysicsParams  # noqa: F401
     from legoesm.core.cfl import cfl_max_dt                      # noqa: F401
     from legoesm.training.dycore_rollout import single_day_rollout  # noqa: F401

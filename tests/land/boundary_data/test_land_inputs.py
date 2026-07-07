@@ -17,7 +17,7 @@ from legoesm.land.boundary_data import (
     dominant_pft_index,
     glacier_mask,
 )
-from legoesm.land.boundary_data.gap_fill import _bare_land_surface_params
+from legoesm.land.boundary_data.gap_fill import bare_land_surface_params
 from legoesm.land.surface_params import LandSurfaceParams
 from legoesm.land.canopy.config import CanopyLandParams
 from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
@@ -139,7 +139,7 @@ def test_surface_data_provider_zero_cover_gets_bare_row():
     pft = np.asarray(gsd.pft_frac).copy(); pft[0, 1, :] = 0.0     # col1: zero cover
     gsd = gsd._replace(pft_frac=jnp.asarray(pft))
     p = surface_data_param_provider(gsd, 196.0, jnp.full(2, 0.2))()
-    bare = _bare_land_surface_params(2)
+    bare = bare_land_surface_params(2)
     assert float(p.C_soil[1]) > 0.0 and float(p.W_max[1]) > 0.0
     np.testing.assert_allclose(float(p.C_soil[1]), float(bare.C_soil[1]))
 
@@ -169,7 +169,7 @@ def test_fill_land_param_gaps_uses_bare_fallback():
     assert np.all(np.isfinite(np.asarray(sp.albedo_veg)))
     # uncovered col1 -> bare-soil fallback row
     np.testing.assert_allclose(
-        float(sp.albedo_veg[1]), float(_bare_land_surface_params(2).albedo_veg[1]))
+        float(sp.albedo_veg[1]), float(bare_land_surface_params(2).albedo_veg[1]))
 
 
 def test_fill_land_param_gaps_pins_to_authoritative_f_land():
@@ -177,7 +177,7 @@ def test_fill_land_param_gaps_pins_to_authoritative_f_land():
     # With f_land given, surfdata is kept only on driver-land (col0); col1 ->
     # bare fallback regardless of surfdata coverage.
     gsd = _gsd()
-    bare1 = float(_bare_land_surface_params(2).albedo_veg[1])
+    bare1 = float(bare_land_surface_params(2).albedo_veg[1])
 
     sp_full = fill_land_param_gaps(
         surface_data_param_provider(gsd, 196.0, jnp.full(2, 0.2))(), gsd)

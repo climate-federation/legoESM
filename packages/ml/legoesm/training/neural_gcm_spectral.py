@@ -619,6 +619,61 @@ def _add_phys_tendencies(a, b):
     )
 
 
+def _make_spectral_integrator(pe_config, grid, sigma_coord, dt, integrator_name):
+    """Build the per-step ``(state, tendency_fn) -> new_state`` integrator for the
+    differentiable spectral training rollouts.
+
+    #817: when ``pe_config.semi_implicit`` the WB neural_gcm/sfno training lane
+    uses the pure Hoskins-Simmons SSP-RK3 **semi-implicit** step
+    (:func:`ssp_rk3_step_si`) instead of the explicit
+    :func:`dispatch_integrator`.  Treating the fast gravity-wave terms implicitly
+    damps the explicit core's tangent-linear (adjoint) growth — the ~x1.3/step
+    e-folding that overflowed ``value_and_grad`` to NaN past ~6 h even while the
+    forward stayed finite (the physics lane trained only because its
+    parameterised turbulence damped the same tangent-linear system).
+
+    The SI matrices depend ONLY on grid / sigma / T_ref / alpha / dt (NOT on the
+    trainable params), so they are precomputed ONCE here — outside any
+    ``lax.scan`` — and closed over; the in-scan step is then a constant-matrix,
+    traced-RHS linear solve, cheap and clean under reverse-mode AD.  We use the
+    PURE ``ssp_rk3_step_si`` (single-level carry), NOT the model's ``leapfrog_si``
+    path, which mutates ``self._state_prev`` and is not ``lax.scan``/AD-safe.
+    ``si_substeps`` internal sub-steps are honoured (matching the model's
+    ``_do_step``), sub-stepping at ``dt / si_substeps`` with SI matrices built for
+    that sub-step dt.
+    """
+    if not pe_config.semi_implicit:
+        def _integrate_explicit(state, tendency_fn):
+            return dispatch_integrator(state, tendency_fn, dt, integrator_name)
+        return _integrate_explicit
+
+    from legoesm.timestepping.semi_implicit import (
+        precompute_si_matrices,
+        ssp_rk3_step_si,
+    )
+
+    n_sub = int(pe_config.si_substeps)  # static Python int
+    if n_sub < 1:
+        raise ValueError(
+            f"si_substeps must be >= 1, got {pe_config.si_substeps!r}")
+    dt_si = dt / n_sub
+    si_data = precompute_si_matrices(
+        grid, sigma_coord, pe_config.si_T_ref, pe_config.si_alpha, dt_si,
+    )
+
+    def _integrate_si(state, tendency_fn):
+        if n_sub == 1:
+            return ssp_rk3_step_si(state, tendency_fn, dt_si, si_data, grid)
+
+        def _one(s, _):
+            return ssp_rk3_step_si(s, tendency_fn, dt_si, si_data, grid), None
+
+        s, _ = jax.lax.scan(_one, state, None, length=n_sub)
+        return s
+
+    return _integrate_si
+
+
 def spectral_rollout(
     initial_state: SpectralHydrostaticState,
     physics_fn,
@@ -703,6 +758,11 @@ def spectral_rollout(
         State after n_steps * dt seconds.
     """
     integrator_name = pe_config.time_integrator
+    # #817: explicit dispatch_integrator, or the semi-implicit SSP-RK3-SI step
+    # (precomputed ONCE, outside the scan) when pe_config.semi_implicit.
+    _integrate = _make_spectral_integrator(
+        pe_config, grid, sigma_coord, dt, integrator_name,
+    )
     ms = grid.ms  # for sponge filter
 
     # Precompute the tracer filter (mirrors the precomputation done by
@@ -761,9 +821,7 @@ def spectral_rollout(
                         s, grid, sigma_coord, pe_config, phys,
                     )
 
-            new_state = dispatch_integrator(
-                state, tendency_fn, dt, integrator_name,
-            )
+            new_state = _integrate(state, tendency_fn)
 
             # Implicit sponge damping at model top
             if sponge_factor is not None:
@@ -870,9 +928,7 @@ def spectral_rollout(
                 s, grid, sigma_coord, pe_config, combined_phys,
             )
 
-        new_state = dispatch_integrator(
-            state, tendency_fn, dt, integrator_name,
-        )
+        new_state = _integrate(state, tendency_fn)
 
         if sponge_factor is not None:
             new_state = apply_sponge_filter(new_state, sponge_factor, ms)
@@ -958,6 +1014,11 @@ def spectral_amip_rollout(
     the optional ``phys_state`` / ``forcing`` kwargs used here.
     """
     integrator_name = pe_config.time_integrator
+    # #817: explicit dispatch_integrator, or the semi-implicit SSP-RK3-SI step
+    # (precomputed ONCE, outside the scan) when pe_config.semi_implicit.
+    _integrate = _make_spectral_integrator(
+        pe_config, grid, sigma_coord, dt, integrator_name,
+    )
     ms = grid.ms  # for sponge filter
     tracer_filter = _compute_tracer_filter(grid, pe_config, spectral_filter, dt)
 
@@ -1005,7 +1066,7 @@ def spectral_amip_rollout(
                 s, grid, sigma_coord, pe_config, combined,
             )
 
-        new_state = dispatch_integrator(state, tendency_fn, dt, integrator_name)
+        new_state = _integrate(state, tendency_fn)
         if sponge_factor is not None:
             new_state = apply_sponge_filter(new_state, sponge_factor, ms)
         if spectral_filter is not None:

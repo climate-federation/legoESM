@@ -516,8 +516,33 @@ class PhysicsPipeline:
             land_params=self.land_ml_params, carbon_state=self.land_ml_carbon)
         return land_new, resp.T_sfc, resp.albedo
 
+    def _land_qsfc_multilayer(self, land_ml, T_land, p_s):
+        """Effective land-tile surface humidity for the multilayer land tile,
+        ``q_sfc = beta_soil * q_sat(T_land)`` (the alpha-method, matching
+        ``simple_seb``'s ``q_sfc = beta_effective * q_sat_sfc``), in GRID format.
+
+        ``beta_soil`` is the root-zone soil-moisture stress the land SEB itself
+        applies (``legoesm.land.multilayer_land.land_tile_beta_soil``, resolved
+        from the SAME config / land_params thresholds).  Threaded into
+        :meth:`_tiled_surface_flux` so the atmospheric land latent flux is
+        throttled by soil moisture instead of running at the ``beta = 1``
+        saturated-surface potential rate — the fix for the multilayer land
+        over-evaporation (land hfls ~775 W/m^2, Bowen ~0.04 -> physical), where
+        the throttled land-model flux was discarded and the atmosphere
+        re-derived a saturated land surface.  ``T_land`` is the (grid) skin
+        temperature already coupled from the Richards column.
+        """
+        from legoesm.land.multilayer_land import land_tile_beta_soil
+        ad = self.adapter
+        beta_col = land_tile_beta_soil(
+            land_ml.theta_soil, self.land_ml_cfg, self.land_ml_params)
+        q_sat_land_col = ad.flatten_2d(
+            saturation_specific_humidity(T_land, p_s))
+        return ad.unflatten_2d(beta_col * q_sat_land_col)
+
     def _tiled_surface_flux(self, u_low, v_low, T_low, q_low, rho_low,
-                           sst, sic, T_land, p_s, beta_land=None):
+                           sst, sic, T_land, p_s, beta_land=None,
+                           q_sfc_land_override=None):
         """Area-weighted (mosaic) surface turbulent flux over ocean/ice/land.
 
         Used when ``self.surface_tiled`` is True (the active land tile).  The
@@ -556,11 +581,19 @@ class PhysicsPipeline:
         )
 
         # Land tile: soil-moisture-limited effective surface humidity.
-        # q_eff = q_air + beta*(q_sat(T_land) - q_air) makes the land latent
-        # flux beta times its wet-surface potential.  beta=1 (beta_land None)
-        # recovers the saturated land surface exactly.
+        # Three cases, in precedence order:
+        #  1. q_sfc_land_override (MULTILAYER land): the land model's own
+        #     alpha-method humidity q_sfc = beta_soil*q_sat(T_land) computed by
+        #     _land_qsfc_multilayer — used directly so the atmospheric land
+        #     latent flux matches the throttled land SEB (fix for the beta=1
+        #     over-evaporation, hfls ~775 -> physical).
+        #  2. beta_land (SLAB bucket): q_eff = q_air + beta*(q_sat - q_air) makes
+        #     the land latent flux beta times its wet-surface potential.
+        #  3. neither (beta_land None): beta=1, the saturated land surface.
         q_sat_land_col = ad.flatten_2d(saturation_specific_humidity(T_land, p_s))
-        if beta_land is None:
+        if q_sfc_land_override is not None:
+            q_sfc_land_col = ad.flatten_2d(q_sfc_land_override)
+        elif beta_land is None:
             q_sfc_land_col = q_sat_land_col
         else:
             beta_col = ad.flatten_2d(beta_land)
@@ -604,7 +637,7 @@ class PhysicsPipeline:
                             T_land=None, aerosol_od=None,
                             sfc_shflx_override=None, sfc_lhflx_override=None,
                             tke=None, qke=None, gwd_spectrum=None,
-                            w_land=None, snow=None):
+                            w_land=None, snow=None, land_ml=None):
         """Convection + microphysics + BL exchange with held radiation.
 
         ``T_land`` is the slab-land skin temperature.  When the land tile
@@ -1221,10 +1254,17 @@ class PhysicsPipeline:
             # soil-moisture-limits the land tile's latent flux.
             if (self.surface_tiled and self.f_land is not None
                     and T_land is not None):
+                # MULTILAYER land: override the land-tile surface humidity with
+                # the land model's soil-moisture-throttled q_sfc so the BL
+                # latent flux is not the beta=1 saturated potential rate.
+                _q_sfc_land_ml = (
+                    self._land_qsfc_multilayer(land_ml, T_land, p_s)
+                    if land_ml is not None else None
+                )
                 _turb_kwargs["surface_flux"] = self._tiled_surface_flux(
                     u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
                     rho_col_phys[:, -1], sst, sic, T_land, p_s,
-                    beta_land=beta_land,
+                    beta_land=beta_land, q_sfc_land_override=_q_sfc_land_ml,
                 )
             if self._turb_energy_field is not None:
                 # Stateful scheme (issue #413): kernel takes the
@@ -1959,7 +1999,7 @@ class PhysicsPipeline:
                     sfc_shflx_override=sfc_shflx_override,
                     sfc_lhflx_override=sfc_lhflx_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
-                    w_land=w_land, snow=snow,
+                    w_land=w_land, snow=snow, land_ml=land_ml,
                 )
 
                 # Cast to storage dtype so both lax.cond branches match.
@@ -2012,7 +2052,7 @@ class PhysicsPipeline:
                     sfc_shflx_override=sfc_shflx_override,
                     sfc_lhflx_override=sfc_lhflx_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
-                    w_land=w_land, snow=snow,
+                    w_land=w_land, snow=snow, land_ml=land_ml,
                 )
 
                 # Cast to storage dtype — must match _rad_branch

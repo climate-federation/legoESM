@@ -1,6 +1,6 @@
 """Training segments must carry the driver's Rayleigh friction (#797 bug 11).
 
-``_build_training_segment`` hardcoded ``fric_decay=ones`` (no friction) and
+``build_training_segment`` hardcoded ``fric_decay=ones`` (no friction) and
 the WB trainer never threaded the driver's profile through. The forward
 rollout survives 6 h undamped, but the ADJOINT through 720 steps of the
 undamped dycore returns NaN gradients (probe job 26082581: loss=0.714
@@ -52,11 +52,11 @@ def test_build_training_segment_threads_fric_decay(monkeypatch):
     grid = SimpleNamespace(lat=jnp.zeros(4), lon=jnp.zeros(8))
 
     custom = jnp.linspace(0.9, 1.0, 8)
-    td._build_training_segment(None, None, grid, sigma, 30.0,
+    td.build_training_segment(None, None, grid, sigma, 30.0,
                                fric_decay=custom)
     assert bool(jnp.all(recorded["fric_decay"] == custom))
 
-    td._build_training_segment(None, None, grid, sigma, 30.0)
+    td.build_training_segment(None, None, grid, sigma, 30.0)
     assert bool(jnp.all(recorded["fric_decay"] == 1.0))
 
 
@@ -72,7 +72,7 @@ def test_wb_modes_receive_driver_friction(monkeypatch):
         recorded.update(kwargs)
         return SimpleNamespace(raw=None)
 
-    monkeypatch.setattr(td, "_build_training_segment", _recorder)
+    monkeypatch.setattr(td, "build_training_segment", _recorder)
 
     cfg = _mod.build_scale_config_from_args(["--mode", "physics", "--smoke"])
     yml = dict(_SMOKE_YML)
