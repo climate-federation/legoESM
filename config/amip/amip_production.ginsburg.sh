@@ -57,10 +57,17 @@ DATA="${AMIP_DATA:-${REPO}/data/amip}"
 : "${AEROSOL:=${FORCING_DIR}/aerosol_amip_clim.nc}"
 : "${VOLCANIC:=${FORCING_DIR}/volcanic_amip_1979-2014.nc}"
 
+# --- CLM surfdata (multilayer Richards land; use_multilayer_land: true) -------
+# The production YAML's land needs the CLM surfdata NetCDF staged locally —
+# compute nodes have no outbound internet, and the driver's fallback download
+# fails there (SSL hostname mismatch on the UCAR svn mirror).
+: "${CLM_SURFDATA:=${DATA%/amip}/clm/surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc}"
+
 # --- machine-specific PATH flags (everything else is in the YAML) -------------
 AMIP_PATH_FLAGS=(
   --ic-path "${ERA5_IC}"
   --topography "${ETOPO}"
+  --clm-surfdata-path "${CLM_SURFDATA}"
   --forcing-path "${SST_FILE}" --sst-var "${SST_VAR}" --sst-offset "${SST_OFFSET}"
   --sic-path "${SIC_FILE}"     --sic-var "${SIC_VAR}"
   --solar-file "${SOLAR}"
@@ -71,8 +78,9 @@ AMIP_PATH_FLAGS=(
 )
 
 # Warn (don't fail) on a missing local input so a Stage-0 flat-topo smoke still works.
-for _f in "${ETOPO}"; do
-  [ -e "${_f}" ] || echo "[ginsburg] NOTE: ${_f} not found — produce it with " \
-    "scripts/data/prep_etopo_topography.py, or run a flat-topo smoke (--topography flat)." >&2
+for _f in "${ETOPO}" "${CLM_SURFDATA}"; do
+  [ -e "${_f}" ] || echo "[ginsburg] NOTE: ${_f} not found — stage it (ETOPO: " \
+    "scripts/data/prep_etopo_topography.py; surfdata: data/clm/), or run a " \
+    "flat-topo smoke (--topography flat)." >&2
 done
 export PY AMIP_PATH_FLAGS

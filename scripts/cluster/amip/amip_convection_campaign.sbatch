@@ -51,6 +51,10 @@ export LEGOESM_REPO="${LEGOESM_REPO:-/burg-archive/glab/users/ac5006/legoESM}"
 : "${EXTRA_FLAGS:=}"            # per-scheme tuning knobs on later iterations
 mkdir -p "$OUTDIR"
 
+# CLM surfdata for the multilayer land (ac5006's data tree does not carry it;
+# ginsburg.sh consumes this env override into --clm-surfdata-path).
+export CLM_SURFDATA="${CLM_SURFDATA:-/burg-archive/glab/users/pg2328/legoESM_chunk/data_pg/clm/surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc}"
+
 source "$CODE/config/amip/amip_production.ginsburg.sh"
 export PYTHONPATH="$(ls -d "$CODE"/packages/*/ | tr '\n' ':')${PYTHONPATH:-}"
 export JAX_COMPILATION_CACHE_DIR="$OUTDIR/jax_cache"; mkdir -p "$JAX_COMPILATION_CACHE_DIR"
@@ -89,4 +93,4 @@ echo "[convcmp] rc=$rc $cur_day -> $new_day $(date)"
 [ "${new_day:-0}" -ge "$TARGET_DAYS" ] && { echo "[convcmp] COMPLETE $new_day/$TARGET_DAYS"; exit 0; }
 [ "${new_day:-0}" -le "${cur_day:-0}" ] && { echo "[convcmp] NO PROGRESS — NOT chaining"; exit 1; }
 echo "[convcmp] $new_day/$TARGET_DAYS; submitting next link."
-sbatch -J "amip_cv_${CONV}" --export="ALL,CONV=$CONV,GWD=$GWD,SSO_FILE=$SSO_FILE,OUTDIR=$OUTDIR,TARGET_DAYS=$TARGET_DAYS,CHECKPOINT_DAYS=$CHECKPOINT_DAYS,MAX_WALL=$MAX_WALL,EXTRA_FLAGS=$EXTRA_FLAGS,CONVCMP_CODE=$CODE,LEGOESM_REPO=$LEGOESM_REPO" "$0"
+sbatch -J "amip_cv_${CONV}" --export="ALL,CONV=$CONV,GWD=$GWD,SSO_FILE=$SSO_FILE,OUTDIR=$OUTDIR,TARGET_DAYS=$TARGET_DAYS,CHECKPOINT_DAYS=$CHECKPOINT_DAYS,MAX_WALL=$MAX_WALL,EXTRA_FLAGS=$EXTRA_FLAGS,CONVCMP_CODE=$CODE,LEGOESM_REPO=$LEGOESM_REPO,CLM_SURFDATA=$CLM_SURFDATA" "$0"
