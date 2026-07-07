@@ -59,6 +59,43 @@ _G_PER_KG = 1000.0
 # helpers stay JAX-free at import).
 _POOL_FIELDS = ("C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som")
 
+# Soil-column geometry fallbacks (only used when an OLD archetypes.npz predates
+# geometry persistence; a Task-8h npz carries n_layers/soil_depth/dt).  Match the
+# build_global_carbon_ic.py driver defaults.
+_N_LAYERS_DEFAULT = 10
+_SOIL_DEPTH_DEFAULT = 3.0
+_DT_DEFAULT = 3600.0
+
+
+def resolve_geometry(cli_val, stored_val, default_val, name, *, hard):
+    """Reconcile a CLI geometry value with the value stored in ``archetypes.npz``.
+
+    * ``cli_val is None`` (flag omitted) -> use the stored value, or ``default_val``
+      when the npz predates geometry persistence.
+    * ``stored_val is None`` (old npz) -> trust the CLI value.
+    * both present and equal -> that value.
+    * both present and DIFFERENT -> ``hard=True`` (soil-column geometry:
+      ``n_layers`` / ``soil_depth``) raises ``SystemExit`` so a map is never
+      re-integrated on a mismatched column; ``hard=False`` (``dt`` is the
+      re-integration timestep, not column geometry) warns and honours the CLI.
+    """
+    if cli_val is None:
+        return stored_val if stored_val is not None else default_val
+    if stored_val is None:
+        return cli_val
+    if cli_val == stored_val:
+        return stored_val
+    if hard:
+        raise SystemExit(
+            f"--{name} {cli_val} conflicts with the stored map geometry "
+            f"{stored_val} in archetypes.npz; the map must be re-integrated on "
+            f"the SAME soil column it equilibrated on. Omit --{name} to use the "
+            f"stored value.")
+    print(f"WARN: --{name} {cli_val} overrides stored {stored_val} (allowed; "
+          f"{name} is the re-integration timestep, not soil-column geometry).",
+          flush=True)
+    return cli_val
+
 
 def drift_frac_per_yr(series):
     """Mean fractional drift per year of a scalar time series.
@@ -113,8 +150,8 @@ def _per_pft_realism(pft_id, pft_names, eq_np, ranges, pft_biome):
     return out
 
 
-def assess_ic_map(archetypes_npz_path, *, n_years, dt, n_layers=10,
-                  soil_depth=3.0):
+def assess_ic_map(archetypes_npz_path, *, n_years, dt=None, n_layers=None,
+                  soil_depth=None):
     """Re-integrate every archetype from the mapped IC and a cold IC; report
     per-archetype total-carbon drift, the mapped<<cold summary, per-PFT realism
     and coverage.
@@ -123,16 +160,17 @@ def assess_ic_map(archetypes_npz_path, *, n_years, dt, n_layers=10,
     ----------
     archetypes_npz_path : path-like
         ``archetypes.npz`` from the Task-6 driver (the ``ArchetypeTable`` +
-        ``eq_C_*`` mapped equilibria + ``pft_names``).
+        ``eq_C_*`` mapped equilibria + ``pft_names`` + the persisted soil-column
+        geometry ``n_layers`` / ``soil_depth`` / ``dt``).
     n_years : int
         Forward re-integration years (drift is measured over IC -> year
         ``n_years``).
-    dt : float
-        Sub-daily timestep [s].
-    n_layers : int
-        Soil layers (must match the map's build to reproduce the coupled step).
-    soil_depth : float
-        Soil column depth [m].
+    dt, n_layers, soil_depth : float / int / float, optional
+        Re-integration timestep [s] and soil column (layers, depth [m]).  When
+        omitted (``None``) they are READ from ``archetypes.npz`` -- the geometry
+        the map equilibrated on -- so the mapped IC is re-integrated on the SAME
+        column by default (falling back to the module defaults only for an old
+        npz that predates geometry persistence).
 
     Returns
     -------
@@ -158,6 +196,20 @@ def assess_ic_map(archetypes_npz_path, *, n_years, dt, n_layers=10,
     from legoesm.land.surface_params import CLM5_PFT_NAMES
 
     z = np.load(archetypes_npz_path, allow_pickle=True)
+    # Reconcile the re-integration geometry with what the map equilibrated on
+    # (stored in the npz): a None arg adopts the stored value; an explicit value
+    # that CONFLICTS with the stored soil column (n_layers / soil_depth) is a hard
+    # error -- so a map is NEVER re-integrated on a mismatched column, whether
+    # this is invoked via the CLI (main) or as a direct library call.  dt is the
+    # re-integration timestep (not column geometry), so an override is allowed.
+    stored_nl = int(z["n_layers"]) if "n_layers" in z.files else None
+    stored_sd = float(z["soil_depth"]) if "soil_depth" in z.files else None
+    stored_dt = float(z["dt"]) if "dt" in z.files else None
+    n_layers = int(resolve_geometry(
+        n_layers, stored_nl, _N_LAYERS_DEFAULT, "n-layers", hard=True))
+    soil_depth = resolve_geometry(
+        soil_depth, stored_sd, _SOIL_DEPTH_DEFAULT, "soil-depth", hard=True)
+    dt = resolve_geometry(dt, stored_dt, _DT_DEFAULT, "dt", hard=False)
     table = ArchetypeTable(
         pft_id=np.asarray(z["pft_id"], int),
         mat_k=np.asarray(z["mat_k"], float),
@@ -355,10 +407,15 @@ def main(argv=None):
                    help="archetypes.npz written by the Task-6 driver.")
     p.add_argument("--years", type=int, default=3,
                    help="Forward re-integration years for the drift metric.")
-    p.add_argument("--dt", type=float, default=3600.0,
-                   help="Sub-daily timestep [s].")
-    p.add_argument("--n-layers", type=int, default=10)
-    p.add_argument("--soil-depth", type=float, default=3.0)
+    # Geometry flags default to None -> use the geometry stored in archetypes.npz
+    # (the column the map equilibrated on); an explicit --n-layers/--soil-depth
+    # that CONFLICTS with the stored column is a hard error (resolve_geometry).
+    p.add_argument("--dt", type=float, default=None,
+                   help="Re-integration timestep [s] (default: stored build dt).")
+    p.add_argument("--n-layers", type=int, default=None,
+                   help="Soil layers (default: stored build value; conflict=error).")
+    p.add_argument("--soil-depth", type=float, default=None,
+                   help="Soil depth [m] (default: stored build value; conflict=error).")
     p.add_argument("--output", default="results/global_carbon_ic_validation")
     args = p.parse_args(argv)
 
@@ -370,6 +427,9 @@ def main(argv=None):
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Geometry (n_layers/soil_depth/dt) defaults to what the map equilibrated on;
+    # assess_ic_map reads it from the npz and hard-errors on a conflicting
+    # n_layers/soil_depth override (a None flag => adopt the stored value).
     result = assess_ic_map(
         arch_path, n_years=args.years, dt=args.dt,
         n_layers=args.n_layers, soil_depth=args.soil_depth)

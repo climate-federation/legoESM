@@ -16,28 +16,49 @@ implements no new numerics:
     equilibrate_archetypes           (global_init.py)       -- semi-analytic spin-up
     map_to_grid                      (global_init.py)       -- cover-weighted pool mix
 
-Real-data inputs and the assembler used
----------------------------------------
-* **PFT cover + soil texture** -- read via the repo's canonical surface-data
-  assembler :func:`legoesm.land.global_surface_data.load_global_surface_data`
-  under the ``"legoesm_surfdata"`` preset.  That single call CONSUMES the
-  harmonized ``legoesm_surfdata`` NetCDF -- CLM5 cover/PFT
-  (``land.surface_data.sources.clm5_surfdata.read_clm5_cover_veg``) + HWSD v2.0
-  soil (``land.surface_data.sources.hwsd2``) -- built by
-  ``scripts/data/build_legoesm_surfdata.py`` (``surface_data.assemble.build_v1_surfdata``)
-  and CONSERVATIVELY regrids every field onto the target lat-lon grid.  We take
-  the per-cell 17-PFT weights directly and derive the per-cell USDA soil-texture
-  class from the regridded topsoil sand/clay via
-  :func:`legoesm.land.soil_texture.usda_texture_index` (the repo's texture
-  triangle).  No hand-rolled regridding.
-* **Monthly climatology (T, precip, SW-down, net radiation)** -- read from a
-  monthly-climatology NetCDF and regridded onto the SAME target grid with the
-  repo's :func:`legoesm.grids.regridding.conservative_regrid_latlon`.  NOTE: the
-  design spec points at ``tools.forcing.amip`` for climate, but that module only
-  loads prescribed **SST/SIC** (no land 2 m T / precip / SW / net radiation), so
-  the four land climate fields are read from a documented climatology NetCDF
-  here.  The four fields must be provided by the Task-8 data-prep step (e.g. an
-  ERA5 monthly-mean file); this driver never fabricates climate.
+Cover / soil presets (``--surfdata-preset``)
+--------------------------------------------
+* **``clm5_surfdata`` (default)** -- a RAW CLM5 surfdata NetCDF (e.g.
+  ``surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc``).  Read via the canonical
+  :func:`legoesm.land.surface_data.sources.clm5_surfdata.read_clm5_cover_veg`,
+  which does the CLM landunit reconstruction (``natpft=15`` natural + ``cft=2``
+  crop -> the 17 ``CLM5_PFT_NAMES`` in order) and reads the 2-D ``LATIXY`` /
+  ``LONGXY`` coordinates.  Kept on the file's NATIVE grid (no regridding of
+  cover).  Per-cell USDA soil-texture class comes from the raw file's topsoil
+  ``PCT_SAND`` / ``PCT_CLAY`` via :func:`legoesm.land.soil_texture.usda_texture_index`.
+  (The AMIP assembler :func:`~legoesm.land.global_surface_data.load_global_surface_data`
+  CANNOT read this raw file: it needs ``BULK_DENSITY`` / ``DZSOI`` and 1-D
+  ``lsmlat`` / ``lsmlon`` coordinate variables that a raw CLM5 surfdata lacks --
+  measured Task-8h.  It also reads ``PCT_NAT_PFT`` directly (15, no crops)
+  without the landunit reconstruction.  So ``clm5_surfdata`` uses the canonical
+  reader, not the AMIP assembler.)
+* **``legoesm_surfdata``** -- the harmonized ``legoesm_surfdata`` NetCDF (CLM5
+  cover/PFT + HWSD v2.0 soil, built by ``scripts/data/build_legoesm_surfdata.py``)
+  read via :func:`~legoesm.land.global_surface_data.load_global_surface_data`,
+  which CONSERVATIVELY regrids onto a ``--resolution-deg`` target grid.  The
+  17-PFT axis passes through :func:`_align_pft_axis`.
+
+The PFT axis is made explicit and CORRECT for both presets by
+:func:`_align_pft_axis`: exactly the 17-entry ``CLM5_PFT_NAMES`` layout the
+equilibration indexes, zero-padding the two crop columns if a natural-only
+(15-PFT) source is supplied, and raising on any other count -- never a silent
+mismatch.
+
+Climate (two modes)
+-------------------
+* **``--climate-from-latitude`` (zonal DEMONSTRATION)** -- builds the monthly
+  ``(ncell, 12)`` T / precip / SW / net-radiation from each cell's LATITUDE,
+  reusing the committed ``lmip_forcing`` latitude->feature pieces
+  (:func:`~legoesm.land.lmip_forcing.latitude_mean_annual_temp_k` /
+  ``latitude_seasonal_amp_k`` / ``latitude_daily_mean_sw_w`` -- MAT / seasonal
+  amplitude / daily-mean insolation) plus a documented idealized zonal
+  precipitation profile and a net-radiation fraction.  No climatology NetCDF.
+  The climate axis is LATITUDE-ONLY (a prominent banner is printed) pending a
+  real assembled ERA5 monthly land-forcing climatology.
+* **``--climatology <nc>`` (science-grade)** -- read the four monthly land fields
+  from a NetCDF and regrid onto the cover grid with the repo's
+  :func:`legoesm.grids.regridding.conservative_regrid_latlon`.  Kept intact for
+  when such a file exists; this driver never fabricates a real climatology.
 
 ``--dry-run-synthetic`` fabricates a tiny world in-process (a handful of cells,
 3 PFTs) and runs the FULL pipeline + writes both ``.npz`` files, so the driver
@@ -80,6 +101,31 @@ _LON_SPAN_DEG = 360.0          # full longitude span [deg]
 _PFT_TROPICAL_TREE = 4         # broadleaf_evergreen_tropical (woody)
 _PFT_TEMPERATE_TREE = 7        # broadleaf_deciduous_temperate (woody)
 _PFT_C3_GRASS = 13             # c3_grass (herbaceous)
+
+# --- zonal DEMONSTRATION climate (--climate-from-latitude) ---
+# Calendar (year length / NH seasonal peak) used to EXPAND the latitude-derived
+# annual mean + amplitude into a 12-month T cycle.  Matches the NH-phased
+# convention of legoesm.land.climate_forcing.make_climatological_forcing (July
+# peak), which the archetype equilibration re-imposes anyway -- the monthly
+# sampling phase only sets the clustering features (mean, half-range).
+_YEAR_DAYS = 365.0             # calendar year length [day]
+_SEASONAL_PEAK_DOY = 200.0     # NH day-of-year of the seasonal T maximum (~July)
+# Idealized zonal-mean precipitation [kg/m2/s]: an ITCZ peak at the equator plus
+# mid-latitude storm-track maxima near +-50 deg on a small everywhere-base,
+# reproducing the wet-tropics / dry-subtropics / wet-midlat / dry-pole structure
+# of the observed zonal mean (order-of-magnitude ~ Adler et al. 2003 GPCP;
+# ~4.5 mm/day tropics, ~1.7 mm/day midlat).  DEMONSTRATION magnitudes, not a fit.
+_PRECIP_BASE = 3.0e-6          # everywhere floor [kg/m2/s] (~0.26 mm/day)
+_PRECIP_ITCZ_PEAK = 5.2e-5     # ITCZ excess at the equator [kg/m2/s] (~4.5 mm/day)
+_PRECIP_ITCZ_WIDTH_DEG = 12.0  # ITCZ Gaussian half-width [deg]
+_PRECIP_STORM_PEAK = 2.0e-5    # storm-track excess [kg/m2/s] (~1.7 mm/day)
+_PRECIP_STORM_LAT_DEG = 50.0   # storm-track centre |latitude| [deg]
+_PRECIP_STORM_WIDTH_DEG = 15.0  # storm-track Gaussian half-width [deg]
+# Surface net radiation as a fraction of down-welling SW (drives ONLY the
+# PET / aridity clustering feature).  Annual-mean surface net radiation over land
+# is ~0.5-0.6 of down-SW (Trenberth et al. 2009 global energy budget); one
+# fraction is adequate for the aridity feature in this DEMONSTRATION climate.
+_NETRAD_OVER_SW_LAND = 0.55    # [-] land net-radiation / down-SW fraction
 
 
 class GlobalCarbonInputs:
@@ -242,66 +288,242 @@ def _load_monthly_climatology(args, tgt_lat_deg, tgt_lon_deg):
     return monthly_t, monthly_pr, monthly_sw, monthly_nr
 
 
-def load_real_inputs(args) -> GlobalCarbonInputs:
-    """Load + regrid the real PFT / soil / climate maps to one ``(ncell,)`` vector.
+def _align_pft_axis(pft_weights, source: str) -> np.ndarray:
+    """Return per-cell cover on the EXACT 17-entry ``CLM5_PFT_NAMES`` layout.
 
-    PFT cover and soil come through the canonical
-    :func:`legoesm.land.global_surface_data.load_global_surface_data`
-    (``"legoesm_surfdata"`` preset) assembler; the per-cell USDA soil-texture
-    class is derived from the regridded topsoil sand/clay by
-    :func:`legoesm.land.soil_texture.usda_texture_index`.  Climate comes from the
-    monthly-climatology NetCDF via :func:`_load_monthly_climatology`.
+    The equilibration indexes cover columns as ``CLM5_PFT_NAMES`` (bare + 14
+    natural veg + 2 crops).  A source already on 17 PFTs passes through; a
+    natural-only 15-PFT source (``natpft`` with no crops) zero-pads the two crop
+    columns (``CLM5_PFT_NAMES[15:17]`` = ``crop_c3`` / ``crop_c4``), which is the
+    correct reconciliation because those crops are simply absent.  Any other
+    count is a real mismatch and RAISES -- never a silent mis-alignment.
     """
-    # Deferred (function-scope) imports: keep module import + --dry-run-synthetic
-    # free of the surface-data packages / data files.
+    from legoesm.land.surface_params import N_PFT_CLM5
+
+    pw = np.asarray(pft_weights, float)
+    if pw.ndim != 2:
+        raise ValueError(f"{source} pft_weights must be 2-D (ncell, n_pft); "
+                         f"got shape {pw.shape}.")
+    n_pft = pw.shape[1]
+    if n_pft == N_PFT_CLM5:
+        return pw
+    if n_pft == N_PFT_CLM5 - 2:
+        # Natural-only source (CLM5 natpft=15): CLM5_PFT_NAMES[0:15] are the
+        # natural PFTs, [15:17] the two crops -> zero-pad the crop columns.
+        return np.concatenate([pw, np.zeros((pw.shape[0], 2), float)], axis=1)
+    raise ValueError(
+        f"{source} PFT cover has {n_pft} columns; cannot reconcile with the "
+        f"{N_PFT_CLM5}-entry CLM5_PFT_NAMES layout the equilibration indexes "
+        f"(need {N_PFT_CLM5}, or {N_PFT_CLM5 - 2} natural-only to zero-pad crops).")
+
+
+def _zonal_precip_profile(cell_lat_deg) -> np.ndarray:
+    """Idealized zonal-mean precipitation rate [kg/m2/s] from latitude [deg].
+
+    Base floor + an equatorial ITCZ Gaussian (signed latitude, peak at 0) + a
+    mid-latitude storm-track Gaussian at ``+-_PRECIP_STORM_LAT_DEG`` (|latitude|,
+    both hemispheres).  DEMONSTRATION profile (documented module constants), not
+    an observational fit.
+    """
+    lat = np.asarray(cell_lat_deg, float)
+    itcz = _PRECIP_ITCZ_PEAK * np.exp(-(lat / _PRECIP_ITCZ_WIDTH_DEG) ** 2)
+    storm = _PRECIP_STORM_PEAK * np.exp(
+        -((np.abs(lat) - _PRECIP_STORM_LAT_DEG) / _PRECIP_STORM_WIDTH_DEG) ** 2)
+    return _PRECIP_BASE + itcz + storm
+
+
+def zonal_monthly_climate(cell_lat_deg):
+    """Build the ``(ncell, 12)`` zonal DEMONSTRATION monthly climatology.
+
+    Reuses the committed ``lmip_forcing`` latitude->feature pieces -- MAT
+    (:func:`~legoesm.land.lmip_forcing.latitude_mean_annual_temp_k`), seasonal
+    half-amplitude (``latitude_seasonal_amp_k``) and daily-mean insolation
+    (``latitude_daily_mean_sw_w``) -- so no solar-geometry / temperature numerics
+    are re-derived.  T is the latitude MAT + amplitude expanded over 12 mid-month
+    days with the NH July-peaked seasonal cosine; SW is the latitude/day
+    daily-mean insolation (a real seasonal SW cycle); precip is the documented
+    zonal profile (:func:`_zonal_precip_profile`); net radiation is a documented
+    fraction of down-SW (drives only the PET / aridity clustering feature).
+
+    Returns ``(monthly_t_k, monthly_precip, monthly_sw, monthly_netrad)`` each
+    ``(ncell, 12)``, matching what ``reduce_climatology_to_features`` expects.
+    """
+    # Deferred (function-scope) import: keep module import numpy-only.
+    import jax
+    import jax.numpy as jnp
+
+    from legoesm.land.lmip_forcing import (
+        latitude_daily_mean_sw_w,
+        latitude_mean_annual_temp_k,
+        latitude_seasonal_amp_k,
+    )
+
+    lat_deg = np.asarray(cell_lat_deg, float)
+    ncell = lat_deg.shape[0]
+    lat_rad = np.deg2rad(lat_deg)
+    doy_months = (np.arange(12) + 0.5) * (_YEAR_DAYS / 12.0)        # (12,) mid-month
+
+    # --- T: latitude MAT + amplitude, expanded over 12 months (NH July peak) ---
+    mat = np.asarray(latitude_mean_annual_temp_k(jnp.asarray(lat_rad)), float)   # (ncell,)
+    amp = np.asarray(latitude_seasonal_amp_k(jnp.asarray(lat_rad)), float)       # (ncell,)
+    seasonal = np.cos(2.0 * np.pi * (doy_months - _SEASONAL_PEAK_DOY) / _YEAR_DAYS)
+    monthly_t = mat[:, None] + amp[:, None] * seasonal[None, :]                  # (ncell, 12)
+
+    # --- SW: latitude/day daily-mean insolation (one vmap over all cell-months) ---
+    lat_flat = np.repeat(lat_rad, 12)                              # (ncell*12,)
+    day_flat = np.tile(doy_months, ncell)                          # (ncell*12,)
+    sw_flat = jax.vmap(latitude_daily_mean_sw_w)(
+        jnp.asarray(lat_flat), jnp.asarray(day_flat))
+    monthly_sw = np.asarray(sw_flat, float).reshape(ncell, 12)
+
+    # --- precip (documented zonal profile) + net radiation (SW fraction) ---
+    monthly_pr = np.broadcast_to(
+        _zonal_precip_profile(lat_deg)[:, None], (ncell, 12)).copy()
+    monthly_nr = _NETRAD_OVER_SW_LAND * monthly_sw
+    return monthly_t, monthly_pr, monthly_sw, monthly_nr
+
+
+def _print_zonal_banner() -> None:
+    """Prominent banner: the climate axis is latitude-only, not real ERA5."""
+    bar = "=" * 74
+    print(bar)
+    print("  ZONAL DEMONSTRATION CLIMATE  (--climate-from-latitude)")
+    print("  Monthly T / SW derive from each cell's LATITUDE via the committed")
+    print("  lmip_forcing latitude baseline + solar geometry; precip / net-rad")
+    print("  follow documented idealized zonal profiles.  The climate axis is")
+    print("  LATITUDE-ONLY -- NOT a real ERA5 climatology.  Use --climatology <nc>")
+    print("  for a science-grade build once a monthly land-forcing file exists.")
+    print(bar)
+
+
+def _load_clm5_cover_soil(args) -> dict:
+    """Real CLM5 cover (17-PFT) + topsoil texture on the file's NATIVE grid.
+
+    Uses the canonical :func:`read_clm5_cover_veg` (LATIXY/LONGXY coords + the
+    natpft=15 + cft=2 -> 17 ``CLM5_PFT_NAMES`` landunit reconstruction) for cover,
+    and reads the raw file's topsoil ``PCT_SAND`` / ``PCT_CLAY`` (already percent)
+    for the per-cell USDA soil-texture class.  No regridding (native grid).
+    """
+    import xarray as xr
+
+    from legoesm.land.soil_texture import USDA_TEXTURES, usda_texture_index
+    from legoesm.land.surface_data.sources.clm5_surfdata import read_clm5_cover_veg
+
+    surf = args.surf_path
+    if not surf:
+        raise SystemExit(
+            "--surf-path (raw CLM5 surfdata NetCDF) is required for "
+            "--surfdata-preset clm5_surfdata, or pass --dry-run-synthetic.")
+
+    clm = read_clm5_cover_veg(surf)
+    lat = np.asarray(clm["lat"], float)                # (nlat,)
+    lon = np.asarray(clm["lon"], float)                # (nlon,)
+    n_lat, n_lon = lat.size, lon.size
+    pft_frac_pct = np.asarray(clm["pft_frac"], float)  # (17, nlat, nlon) % of gridcell
+    f_land_pct = np.asarray(clm["f_land"], float)      # (nlat, nlon) %
+
+    # Per-cell (ncell,) row-major (i_lat, i_lon), 17-PFT fractional cover.
+    pft_weights = np.moveaxis(pft_frac_pct, 0, -1).reshape(n_lat * n_lon, -1) / 100.0
+    pft_weights = _align_pft_axis(pft_weights, "clm5_surfdata")
+
+    # Topsoil (layer 0) sand/clay [percent] from the raw file -> USDA class.
+    ds = xr.open_dataset(surf, decode_times=False)
+    try:
+        sand_pct = np.asarray(ds["PCT_SAND"].values, float)[0].ravel()   # (ncell,)
+        clay_pct = np.asarray(ds["PCT_CLAY"].values, float)[0].ravel()
+    finally:
+        ds.close()
+    tex_idx = np.asarray(usda_texture_index(sand_pct, clay_pct))
+    soil_class = np.array([USDA_TEXTURES[int(i)] for i in tex_idx], dtype=object)
+
+    land_mask = f_land_pct.ravel() > 0.0
+    lat2d, lon2d = np.meshgrid(lat, lon, indexing="ij")
+    return dict(
+        pft_weights=pft_weights, soil_class=soil_class, land_mask=land_mask,
+        cell_lat=lat2d.ravel(), cell_lon=lon2d.ravel(),
+        tgt_lat_1d=lat, tgt_lon_1d=lon)
+
+
+def _load_legoesm_cover_soil(args) -> dict:
+    """Harmonized ``legoesm_surfdata`` cover + soil via the AMIP assembler.
+
+    Conservatively regrids onto a ``--resolution-deg`` target grid with
+    :func:`~legoesm.land.global_surface_data.load_global_surface_data`; the 17-PFT
+    axis passes through :func:`_align_pft_axis`.
+    """
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.land.global_surface_data import (
-        get_surfdata_preset,
-        load_global_surface_data,
+        get_surfdata_preset, load_global_surface_data,
     )
     from legoesm.land.soil_texture import USDA_TEXTURES, usda_texture_index
 
-    if not args.surfdata:
+    surf = args.surf_path
+    if not surf:
         raise SystemExit(
-            "--surfdata (harmonized legoesm_surfdata NetCDF) is required for the "
-            "real-data build; build it with scripts/data/build_legoesm_surfdata.py "
-            "or pass --dry-run-synthetic.")
-    if not args.climatology:
-        raise SystemExit(
-            "--climatology (monthly-mean T/precip/SW/netrad NetCDF) is required "
-            "for the real-data build, or pass --dry-run-synthetic.")
+            "--surf-path (harmonized legoesm_surfdata NetCDF) is required for "
+            "--surfdata-preset legoesm_surfdata; build it with "
+            "scripts/data/build_legoesm_surfdata.py or pass --dry-run-synthetic.")
 
     res = float(args.resolution_deg)
     n_lat = int(round(_LAT_SPAN_DEG / res))
     n_lon = int(round(_LON_SPAN_DEG / res))
     grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
-
     preset = get_surfdata_preset("legoesm_surfdata")._replace(
-        surf_path=args.surfdata, landuse_path=args.surfdata, veg_path=args.surfdata)
+        surf_path=surf, landuse_path=surf, veg_path=(args.veg_path or surf))
     gsd = load_global_surface_data(preset, grid)
 
-    # Per-cell 17-PFT cover weights (first/only year) on the target grid.
-    pft_weights = np.asarray(gsd.pft_frac[0], float)               # (ncell, n_pft)
-    # Topsoil (layer 0) sand/clay [fraction -> percent] -> USDA texture class.
+    pft_weights = _align_pft_axis(
+        np.asarray(gsd.pft_frac[0], float), "legoesm_surfdata")
+    # Topsoil (layer 0) sand/clay [fraction -> percent] -> USDA class.
     sand_pct = np.asarray(gsd.sand_frac[:, 0], float) * 100.0
     clay_pct = np.asarray(gsd.clay_frac[:, 0], float) * 100.0
     tex_idx = np.asarray(usda_texture_index(sand_pct, clay_pct))
     soil_class = np.array([USDA_TEXTURES[int(i)] for i in tex_idx], dtype=object)
-    land_mask = np.asarray(gsd.f_land[0], float) > 0.0             # (ncell,)
+    land_mask = np.asarray(gsd.f_land[0], float) > 0.0
 
-    # Per-cell lat/lon [deg] in the SAME row-major (i_lat, i_lon) order as gsd's
-    # ncol (load_global_surface_data ravels lat2d/lon2d).
-    cell_lat = np.rad2deg(np.asarray(grid.lat2d, float)).ravel()
-    cell_lon = np.rad2deg(np.asarray(grid.lon2d, float)).ravel()
-    tgt_lat_1d = np.rad2deg(np.asarray(grid.lat, float))
-    tgt_lon_1d = np.rad2deg(np.asarray(grid.lon, float))
+    return dict(
+        pft_weights=pft_weights, soil_class=soil_class, land_mask=land_mask,
+        cell_lat=np.rad2deg(np.asarray(grid.lat2d, float)).ravel(),
+        cell_lon=np.rad2deg(np.asarray(grid.lon2d, float)).ravel(),
+        tgt_lat_1d=np.rad2deg(np.asarray(grid.lat, float)),
+        tgt_lon_1d=np.rad2deg(np.asarray(grid.lon, float)))
 
-    monthly_t, monthly_pr, monthly_sw, monthly_nr = _load_monthly_climatology(
-        args, tgt_lat_1d, tgt_lon_1d)
+
+def load_real_inputs(args) -> GlobalCarbonInputs:
+    """Load the real PFT / soil cover + climate onto one ``(ncell,)`` vector.
+
+    Cover / soil dispatch on ``--surfdata-preset`` (``clm5_surfdata`` = raw CLM5
+    native grid via :func:`_load_clm5_cover_soil`; ``legoesm_surfdata`` =
+    harmonized + regridded via :func:`_load_legoesm_cover_soil`).  Climate is
+    either the zonal DEMONSTRATION (``--climate-from-latitude``,
+    :func:`zonal_monthly_climate`) or a real monthly-climatology NetCDF
+    (``--climatology``, :func:`_load_monthly_climatology`).
+    """
+    if args.surfdata_preset == "clm5_surfdata":
+        cov = _load_clm5_cover_soil(args)
+    elif args.surfdata_preset == "legoesm_surfdata":
+        cov = _load_legoesm_cover_soil(args)
+    else:
+        raise SystemExit(
+            f"--surfdata-preset {args.surfdata_preset!r} unknown; use "
+            f"'clm5_surfdata' or 'legoesm_surfdata'.")
+
+    if args.climate_from_latitude:
+        _print_zonal_banner()
+        monthly_t, monthly_pr, monthly_sw, monthly_nr = zonal_monthly_climate(
+            cov["cell_lat"])
+    else:
+        if not args.climatology:
+            raise SystemExit(
+                "a climate source is required: pass --climate-from-latitude "
+                "(zonal DEMONSTRATION) or --climatology <nc> (real monthly-mean "
+                "T/precip/SW/netrad), or --dry-run-synthetic.")
+        monthly_t, monthly_pr, monthly_sw, monthly_nr = _load_monthly_climatology(
+            args, cov["tgt_lat_1d"], cov["tgt_lon_1d"])
 
     return GlobalCarbonInputs(
-        pft_weights, monthly_t, monthly_pr, monthly_sw, monthly_nr,
-        soil_class, land_mask, cell_lat, cell_lon)
+        cov["pft_weights"], monthly_t, monthly_pr, monthly_sw, monthly_nr,
+        cov["soil_class"], cov["land_mask"], cov["cell_lat"], cov["cell_lon"])
 
 
 # ===========================================================================
@@ -331,7 +553,38 @@ def _print_qc_summary(table, qc, n_arch) -> None:
               f"biomass [{bio[sel].min():7.2f}, {bio[sel].max():7.2f}]")
 
 
-def _write_outputs(out_dir, inputs, grid_state, table, eq, qc, w_min, res_deg):
+def _write_archetypes_npz(path, table, eq, qc, pft_names, *,
+                          n_layers, soil_depth, dt, res_deg):
+    """Write ``archetypes.npz``: ``ArchetypeTable`` + eq pools + QC + the
+    SOIL-COLUMN GEOMETRY.
+
+    The geometry (``n_layers`` / ``soil_depth`` / ``dt`` / ``resolution_deg``) is
+    persisted so the drift validator re-integrates each archetype on the SAME
+    soil column the map equilibrated on -- it defaults the validator CLI to these
+    and errors on a conflicting override (never a mismatched column).
+    """
+    arch = {}
+    for f in table._fields:
+        vals = np.asarray(getattr(table, f))
+        # soil_class is a string/object column -> store as fixed-width unicode
+        # (no object pickling in the npz).
+        arch[f] = vals.astype("U40") if vals.dtype == object else vals
+    for f in eq._fields:
+        arch[f"eq_{f}"] = np.asarray(getattr(eq, f), float)
+    for k, v in qc.items():
+        arch[f"qc_{k}"] = np.asarray(v, float)
+    arch["pft_names"] = np.asarray(pft_names, dtype="U40")
+    # --- soil-column geometry (Task-8h geometry persistence) ---
+    arch["n_layers"] = np.asarray(int(n_layers))
+    arch["soil_depth"] = np.asarray(float(soil_depth))
+    arch["dt"] = np.asarray(float(dt))
+    arch["resolution_deg"] = np.asarray(float(res_deg))
+    np.savez(path, **arch)
+    return path
+
+
+def _write_outputs(out_dir, inputs, grid_state, table, eq, qc, w_min, res_deg,
+                   *, n_layers, soil_depth, dt):
     """Write ``global_carbon_ic.npz`` (finidat) + ``archetypes.npz`` (lookup)."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -354,22 +607,16 @@ def _write_outputs(out_dir, inputs, grid_state, table, eq, qc, w_min, res_deg):
         dominant_pft=dominant_pft, pft_present=pft_present,
         pft_weights=pft_weights, pft_names=pft_names,
         resolution_deg=np.asarray(float(res_deg)),
+        n_layers=np.asarray(int(n_layers)),
+        soil_depth=np.asarray(float(soil_depth)),
+        dt=np.asarray(float(dt)),
     )
     np.savez(finidat_path, **finidat)
 
-    # --- archetypes: ArchetypeTable + equilibrium pools + QC lookup ---
-    arch = {}
-    for f in table._fields:
-        vals = np.asarray(getattr(table, f))
-        # soil_class is a string/object column -> store as fixed-width unicode
-        # (no object pickling in the npz).
-        arch[f] = vals.astype("U40") if vals.dtype == object else vals
-    for f in eq._fields:
-        arch[f"eq_{f}"] = np.asarray(getattr(eq, f), float)
-    for k, v in qc.items():
-        arch[f"qc_{k}"] = np.asarray(v, float)
-    arch["pft_names"] = pft_names
-    np.savez(archetypes_path, **arch)
+    # --- archetypes: ArchetypeTable + equilibrium pools + QC + geometry ---
+    _write_archetypes_npz(
+        archetypes_path, table, eq, qc, pft_names,
+        n_layers=n_layers, soil_depth=soil_depth, dt=dt, res_deg=res_deg)
 
     return finidat_path, archetypes_path
 
@@ -400,11 +647,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0, help="base k-means RNG seed")
     p.add_argument("--output", type=str, default="results/global_carbon_ic",
                    help="output DIRECTORY for the two .npz files")
-    # --- real-data inputs (ignored under --dry-run-synthetic) ---
-    p.add_argument("--surfdata", type=str, default="",
-                   help="harmonized legoesm_surfdata NetCDF (CLM5 cover/PFT + HWSD soil)")
+    # --- real-data cover / soil inputs (ignored under --dry-run-synthetic) ---
+    p.add_argument("--surfdata-preset", type=str, default="clm5_surfdata",
+                   choices=("clm5_surfdata", "legoesm_surfdata"),
+                   help="cover/soil source: raw CLM5 surfdata (native grid) or "
+                        "harmonized legoesm_surfdata (regridded to --resolution-deg)")
+    p.add_argument("--surf-path", type=str, default="",
+                   help="surfdata NetCDF path (raw CLM5 file, or harmonized "
+                        "legoesm_surfdata for --surfdata-preset legoesm_surfdata)")
+    p.add_argument("--veg-path", type=str, default="",
+                   help="monthly-veg NetCDF (legoesm_surfdata preset only; "
+                        "defaults to --surf-path)")
+    # --- climate inputs ---
+    p.add_argument("--climate-from-latitude", action="store_true",
+                   help="ZONAL DEMONSTRATION climate: build the monthly T/precip/"
+                        "SW/netrad from each cell's latitude (no climatology NetCDF)")
     p.add_argument("--climatology", type=str, default="",
-                   help="monthly-climatology NetCDF (12-month T/precip/SW/netrad)")
+                   help="monthly-climatology NetCDF (12-month T/precip/SW/netrad); "
+                        "science-grade climate (omit with --climate-from-latitude)")
     p.add_argument("--clim-t-var", type=str, default="tas",
                    help="climatology 2 m air-temperature variable name")
     p.add_argument("--clim-precip-var", type=str, default="pr",
@@ -464,7 +724,8 @@ def main(argv=None):
 
     finidat_path, archetypes_path = _write_outputs(
         args.output, inputs, grid_state, table, eq, qc, args.w_min,
-        float(args.resolution_deg))
+        float(args.resolution_deg),
+        n_layers=args.n_layers, soil_depth=args.soil_depth, dt=args.dt)
     print(f"[global_carbon_ic] wrote {finidat_path}")
     print(f"[global_carbon_ic] wrote {archetypes_path}")
     return finidat_path, archetypes_path

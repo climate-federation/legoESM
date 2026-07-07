@@ -71,6 +71,43 @@ def _daily_mean_cos_sza(lat_rad, day):
     return jnp.mean(cos_solar_zenith(lat_rad, 0.0, day, sample_hours))
 
 
+# --- latitude -> climate-feature pieces (the "zonal derivation") --------------
+# Factored out of make_synthetic_lmip_forcing so a zonal (latitude-only) monthly
+# climatology builder reuses the IDENTICAL MAT / seasonal-amplitude / daily-mean
+# insolation numerics instead of re-deriving them (CLAUDE.md: no duplicated
+# solar-geometry / temperature numerics).  make_synthetic_lmip_forcing below is
+# the single-column caller; a global carbon-IC driver is the batched caller.
+def latitude_mean_annual_temp_k(lat_rad):
+    """Mean-annual near-surface air temperature [K] from latitude.
+
+    ``mat = _T_BASE_EQUATOR_K - _T_BASE_POLE_DROP_K * |phi| / (pi/2)`` -- the
+    latitudinal annual-mean baseline (288 K at the equator, dropping 30 K to the
+    pole).  Vectorised (accepts a scalar or an array of latitudes [rad]).
+    """
+    return (_T_BASE_EQUATOR_K
+            - _T_BASE_POLE_DROP_K * jnp.abs(lat_rad) / (jnp.pi / 2.0))
+
+
+def latitude_seasonal_amp_k(lat_rad):
+    """Seasonal half-amplitude of the annual T cycle [K] from latitude.
+
+    ``_T_SEASONAL_POLE_AMP_K * |phi| / (pi/2)`` -- 0 at the equator, max at the
+    pole (NH-phased: peak near doy 200 in make_climatological_forcing).
+    Vectorised over latitude [rad].
+    """
+    return _T_SEASONAL_POLE_AMP_K * jnp.abs(lat_rad) / (jnp.pi / 2.0)
+
+
+def latitude_daily_mean_sw_w(lat_rad, day):
+    """Daily-mean downward shortwave [W/m^2] from latitude and day-of-year.
+
+    ``S_0 * <daily-mean cos(zenith)>`` at this latitude/day (see
+    :func:`_daily_mean_cos_sza`); longitude-invariant.  ``lat_rad`` scalar,
+    ``day`` scalar -- vmap over the batch axis for many (lat, day) pairs.
+    """
+    return constants.S_0 * _daily_mean_cos_sza(lat_rad, day)
+
+
 def make_synthetic_lmip_forcing(
     lat_rad: float,
     lon_rad: float,
@@ -120,21 +157,17 @@ def make_synthetic_lmip_forcing(
     annual mean and seasonal cycle across latitudes.  At 45.5°N: T_atm ≈
     265 K (Jan) to 280 K (Jul).
     """
-    half_pi = jnp.pi / 2.0
-
     # Local hour: UTC hour shifted by longitude (Earth rotates
     # _DEG_PER_HOUR degrees of longitude per hour). Drives the delegate's
     # diurnal T/SW phase so a nonzero lon_rad still shifts local solar noon
     # (production single-column runs select real (lat, lon) sites).
     local_hour = hour + jnp.rad2deg(lon_rad) / _DEG_PER_HOUR
 
-    # --- Latitudinal baseline + seasonal amplitude ---
-    mat = _T_BASE_EQUATOR_K - _T_BASE_POLE_DROP_K * abs(lat_rad) / half_pi
-    t_seasonal = _T_SEASONAL_POLE_AMP_K * abs(lat_rad) / half_pi
-
-    # --- Mean-annual downward-SW from this latitude/day's daily-mean solar
-    # geometry (longitude-invariant; see _daily_mean_cos_sza) ---
-    sw_mean = constants.S_0 * _daily_mean_cos_sza(lat_rad, day)
+    # --- Latitudinal baseline + seasonal amplitude + mean-annual downward-SW
+    # (the shared latitude->feature pieces; longitude-invariant SW) ---
+    mat = latitude_mean_annual_temp_k(lat_rad)
+    t_seasonal = latitude_seasonal_amp_k(lat_rad)
+    sw_mean = latitude_daily_mean_sw_w(lat_rad, day)
 
     return make_climatological_forcing(
         mat, t_seasonal, sw_mean, precip_rate, day, local_hour, dtype=dtype

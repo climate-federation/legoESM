@@ -76,5 +76,35 @@ class TestSyntheticForcing(unittest.TestCase):
         self.assertGreater(float(f.q_lowest[0]), 0.0)
 
 
+class TestLatitudeFeatureHelpers(unittest.TestCase):
+    """The latitude->feature pieces factored out for reuse by the zonal
+    carbon-IC climatology builder (must keep the same latitude dependence)."""
+
+    def test_mat_decreases_poleward(self):
+        from legoesm.land.lmip_forcing import latitude_mean_annual_temp_k
+        eq = float(latitude_mean_annual_temp_k(_TROPICS))
+        pole = float(latitude_mean_annual_temp_k(_POLE))
+        self.assertGreater(eq, pole)
+        self.assertTrue(jnp.isfinite(latitude_mean_annual_temp_k(_MIDLAT)))
+
+    def test_seasonal_amp_increases_poleward(self):
+        from legoesm.land.lmip_forcing import latitude_seasonal_amp_k
+        npt.assert_allclose(float(latitude_seasonal_amp_k(_TROPICS)), 0.0, atol=1e-9)
+        self.assertGreater(float(latitude_seasonal_amp_k(_POLE)),
+                           float(latitude_seasonal_amp_k(_MIDLAT)))
+
+    def test_daily_mean_sw_positive_and_vmappable(self):
+        from legoesm.land.lmip_forcing import latitude_daily_mean_sw_w
+        self.assertGreater(float(latitude_daily_mean_sw_w(_TROPICS, 200.0)), 0.0)
+        # batched (vmap over lat, day) matches the scalar calls (the carbon-IC
+        # driver evaluates it over all cell-months in one vmap).
+        lats = jnp.array([_TROPICS, _MIDLAT])
+        days = jnp.array([200.0, 200.0])
+        batched = jax.vmap(latitude_daily_mean_sw_w)(lats, days)
+        npt.assert_allclose(
+            float(batched[0]), float(latitude_daily_mean_sw_w(_TROPICS, 200.0)),
+            rtol=1e-9)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,7 +4,7 @@ from legoesm.land.carbon.climate_features import (
 )
 from legoesm.land.carbon.config import CarbonState
 from legoesm.land.carbon.global_init import (
-    build_archetypes, equilibrate_archetypes, map_to_grid,
+    ArchetypeTable, build_archetypes, equilibrate_archetypes, map_to_grid,
 )
 
 def _feats(mat, mapyr, seas, arid, sw):
@@ -144,3 +144,87 @@ def test_driver_dry_run_synthetic_writes_npz(tmp_path):
         for key in ("gpp", "npp", "som_kgC", "biomass_kgC", "drift_frac_per_yr"):
             assert d[f"qc_{key}"].shape == (n_arch,)
             assert np.all(np.isfinite(d[f"qc_{key}"]))
+        # Task-8h: soil-column geometry is persisted for the drift validator.
+        assert int(d["n_layers"]) == 6
+        assert float(d["soil_depth"]) == 2.0
+        assert float(d["dt"]) == 7200.0
+
+
+# ===========================================================================
+# Task-8h: driver hardening (PFT-axis alignment, geometry persistence,
+# zonal-climate mode).  These load the build_global_carbon_ic.py driver.
+# ===========================================================================
+def _load_driver():
+    import importlib.util
+    import pathlib
+    repo = pathlib.Path(__file__).resolve().parents[3]
+    py = repo / "scripts" / "data" / "build_global_carbon_ic.py"
+    spec = importlib.util.spec_from_file_location("build_global_carbon_ic", py)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_align_pft_axis_pads_and_errors():
+    from legoesm.land.surface_params import N_PFT_CLM5
+    drv = _load_driver()
+    ncell = 4
+    # 17-PFT source passes through unchanged.
+    w17 = np.random.default_rng(0).random((ncell, N_PFT_CLM5))
+    npt.assert_array_equal(drv._align_pft_axis(w17, "t"), w17)
+    # 15-PFT natural-only source zero-pads the two crop columns (indices 15,16).
+    w15 = np.random.default_rng(1).random((ncell, N_PFT_CLM5 - 2))
+    out = drv._align_pft_axis(w15, "t")
+    assert out.shape == (ncell, N_PFT_CLM5)
+    npt.assert_array_equal(out[:, :N_PFT_CLM5 - 2], w15)
+    npt.assert_array_equal(out[:, N_PFT_CLM5 - 2:], 0.0)
+    # Any other count is a real mismatch -> raise, never silent.
+    import pytest
+    with pytest.raises(ValueError):
+        drv._align_pft_axis(np.zeros((ncell, N_PFT_CLM5 - 1)), "t")
+
+
+def test_geometry_round_trips_through_archetypes_npz(tmp_path):
+    drv = _load_driver()
+    n_arch = 2
+    table = ArchetypeTable(
+        pft_id=np.array([4, 13]),
+        mat_k=np.array([298.0, 285.0]), map_yr=np.array([2000.0, 900.0]),
+        t_seasonal_amp_k=np.array([3.0, 10.0]), aridity=np.array([2.0, 1.2]),
+        sw_mean_w=np.array([230.0, 190.0]),
+        soil_class=np.array(["clay_loam", "loam"], dtype=object))
+    eq = CarbonState(**{f: jnp.arange(n_arch, dtype=float) + 1.0
+                        for f in CarbonState._fields})
+    qc = {k: np.zeros(n_arch)
+          for k in ("gpp", "npp", "som_kgC", "biomass_kgC", "drift_frac_per_yr")}
+    path = tmp_path / "archetypes.npz"
+    drv._write_archetypes_npz(
+        path, table, eq, qc, ["bare_soil"], n_layers=7, soil_depth=2.5,
+        dt=1800.0, res_deg=2.0)
+    with np.load(path, allow_pickle=False) as d:
+        assert int(d["n_layers"]) == 7
+        assert float(d["soil_depth"]) == 2.5
+        assert float(d["dt"]) == 1800.0
+        assert float(d["resolution_deg"]) == 2.0
+        # Table + equilibria still round-trip alongside the geometry.
+        npt.assert_array_equal(d["pft_id"], [4, 13])
+        for f in CarbonState._fields:
+            npt.assert_allclose(d[f"eq_{f}"], np.arange(n_arch) + 1.0)
+
+
+def test_zonal_climate_varies_with_latitude():
+    # A tropical (0 deg) vs polar (80 deg) cell must differ in mean-annual T and
+    # seasonal amplitude after reduce_climatology_to_features -- the zonal climate
+    # is genuinely latitude-dependent, reusing the lmip_forcing latitude pieces.
+    drv = _load_driver()
+    lat = np.array([0.0, 80.0])
+    t, pr, sw, nr = drv.zonal_monthly_climate(lat)
+    assert t.shape == (2, 12) and sw.shape == (2, 12)
+    feats = reduce_climatology_to_features(t, pr, sw, nr)
+    mat = np.asarray(feats.mat_k)
+    seas = np.asarray(feats.t_seasonal_amp_k)
+    swm = np.asarray(feats.sw_mean_w)
+    assert mat[0] > mat[1] + 5.0            # tropics warmer than the pole
+    assert seas[1] > seas[0] + 2.0          # pole has a larger seasonal cycle
+    assert swm[0] > swm[1]                   # tropics get more annual-mean SW
+    assert np.all(np.isfinite(np.concatenate([t, pr, sw, nr], axis=1)))

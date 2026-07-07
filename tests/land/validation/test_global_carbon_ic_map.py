@@ -189,3 +189,86 @@ def test_assess_ic_map_mapped_drift_below_cold():
     assert (result["mapped_median_abs_drift"]
             < result["cold_median_abs_drift"])
     assert result["mapped_much_less_than_cold"]
+
+
+# ===========================================================================
+# Task-8h: geometry reconciliation (pure logic) + a NON-SKIP CI drift gate.
+# ===========================================================================
+
+def test_resolve_geometry_defaults_and_conflicts():
+    v = _load()
+    # CLI omitted -> use the stored value; stored absent -> default.
+    assert v.resolve_geometry(None, 6, 10, "n-layers", hard=True) == 6
+    assert v.resolve_geometry(None, None, 10, "n-layers", hard=True) == 10
+    # CLI equal to stored -> that value.
+    assert v.resolve_geometry(6, 6, 10, "n-layers", hard=True) == 6
+    # Stored absent (old npz) -> trust the CLI.
+    assert v.resolve_geometry(8, None, 10, "n-layers", hard=True) == 8
+    # Hard conflict (soil-column geometry) -> error, never a mismatched column.
+    with pytest.raises(SystemExit):
+        v.resolve_geometry(10, 6, 10, "n-layers", hard=True)
+    # dt is NOT column geometry -> an override is allowed (warns, no raise).
+    assert v.resolve_geometry(7200.0, 3600.0, 3600.0, "dt", hard=False) == 7200.0
+
+
+def test_assess_ic_map_rejects_conflicting_geometry(tmp_path):
+    """A stale explicit n_layers that conflicts with the STORED soil column is a
+    hard error even via the direct library call (not only the CLI) -- a map is
+    never re-integrated on a mismatched column.  Raises at geometry-reconcile
+    (right after np.load), before any coupled-step JIT, so this stays cheap."""
+    v = _load()
+    path = tmp_path / "archetypes.npz"
+    np.savez(path, n_layers=np.asarray(6), soil_depth=np.asarray(2.0),
+             dt=np.asarray(7200.0))
+    with pytest.raises(SystemExit):
+        v.assess_ic_map(path, n_years=1, n_layers=99)   # 99 != stored 6
+
+
+def _load_driver():
+    import importlib.util
+    driver_path = (Path(__file__).resolve().parents[3]
+                   / "scripts" / "data" / "build_global_carbon_ic.py")
+    s = importlib.util.spec_from_file_location("build_global_carbon_ic", driver_path)
+    m = importlib.util.module_from_spec(s)
+    sys.modules["build_global_carbon_ic"] = m
+    s.loader.exec_module(m)
+    return m
+
+
+def test_assess_ic_map_ci_gate_mapped_below_cold(tmp_path):
+    """CI drift gate (MUST run, not skip): equilibrate a tiny 2-archetype map
+    in-process, persist it via the driver's writer (with geometry), then re-load
+    the geometry from the npz and assert the mapped IC drifts LESS than a cold
+    start.  Compute-node scale (JIT-compiles the coupled land step)."""
+    from legoesm.land.surface_params import CLM5_PFT_NAMES
+
+    v = _load()
+    drv = _load_driver()
+    # Two woody archetypes sharing a soil class -> ONE (woody, soil) group, so the
+    # equilibration + re-integration each compile a single coupled step.
+    table = ArchetypeTable(
+        pft_id=np.array([4, 7]),
+        mat_k=np.array([299.0, 284.0]), map_yr=np.array([2200.0, 850.0]),
+        t_seasonal_amp_k=np.array([3.0, 12.0]), aridity=np.array([2.2, 1.0]),
+        sw_mean_w=np.array([235.0, 185.0]),
+        soil_class=np.array(["loam", "loam"], dtype=object))
+    n_layers, soil_depth, build_dt = 6, 2.0, 7200.0
+    eq, qc = equilibrate_archetypes(
+        table, n_spinup=20, n_verify=6, dt=build_dt,
+        n_layers=n_layers, soil_depth=soil_depth)
+
+    arch_path = tmp_path / "archetypes.npz"
+    drv._write_archetypes_npz(
+        arch_path, table, eq, qc, list(CLM5_PFT_NAMES),
+        n_layers=n_layers, soil_depth=soil_depth, dt=build_dt, res_deg=1.0)
+
+    # No geometry args -> assess_ic_map reads the stored soil column + dt.
+    result = v.assess_ic_map(arch_path, n_years=2)
+    assert result["n_layers"] == n_layers
+    assert result["soil_depth"] == soil_depth
+    assert result["dt"] == build_dt
+    assert result["n_archetypes"] == 2
+    # The archetype-equilibrium IC drifts LESS than a cold start (the whole point).
+    assert (result["mapped_median_abs_drift"]
+            < result["cold_median_abs_drift"])
+    assert result["mapped_much_less_than_cold"]
