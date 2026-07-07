@@ -221,6 +221,7 @@ def farquhar_photosynthesis(
     T_leaf: jnp.ndarray,
     config: StomataConfig,
     beta_soil: jnp.ndarray | None = None,
+    canopy_scaling: jnp.ndarray | float = 1.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Farquhar et al. (1980) C3 photosynthesis model.
 
@@ -237,13 +238,24 @@ def farquhar_photosynthesis(
     config : StomataConfig.
     beta_soil : Soil moisture stress factor [0-1], optional.
         When provided, scales Vc_max (CLM approach).
+    canopy_scaling : Big-leaf canopy integral ``L_c = (1-exp(-k·LAI))/k``
+        [m2 leaf / m2 ground], default 1.0.  Multiplies the photosynthetic
+        *capacity* terms (Vc_max, J_max, Rd) to convert leaf-level rates to
+        canopy-level rates PER UNIT GROUND AREA.  ``APAR_umol`` is already the
+        canopy-absorbed PAR (``fAPAR·PAR``, per ground area), so scaling the
+        capacities keeps the Rubisco-limited (Wc) and light-limited (Wj)
+        branches consistently canopy-scale — without it, Wc caps at a single
+        leaf's rate while Wj is driven by the whole canopy's light, so a dense
+        canopy (LAI≫1) is silently limited to leaf-level assimilation and GPP
+        is under-estimated ~L_c-fold (Sellers 1992 big-leaf; Bonan 2011).
+        At LAI→0, ``L_c→LAI→0`` so a leafless column assimilates nothing.
 
     Returns
     -------
-    A_net : Net assimilation rate [umol CO2/m2/s].
+    A_net : Net assimilation rate [umol CO2/m2/s] (per unit ground area).
     A_gross : Gross assimilation (before dark respiration) [umol CO2/m2/s].
     """
-    # Temperature-dependent parameters
+    # Temperature-dependent parameters (leaf-level capacities/kinetics).
     Vc_max = arrhenius(config.Vc_max25, config.Ha_Vc, T_leaf)
     J_max = peaked_arrhenius(
         config.J_max25, config.Ha_J, config.Hd_J, config.S_J, T_leaf)
@@ -251,6 +263,13 @@ def farquhar_photosynthesis(
     Kc = arrhenius(config.Kc25, config.Ha_Kc, T_leaf)
     Ko = arrhenius(config.Ko25, config.Ha_Ko, T_leaf)
     Gamma_star = arrhenius(config.Gamma_star25, config.Ha_Gamma, T_leaf)
+
+    # Big-leaf canopy scaling: convert the leaf-level CAPACITY terms to
+    # canopy-level per-ground-area rates.  Kc/Ko/Gamma_star are intensive
+    # (concentrations), so they are NOT scaled.
+    Vc_max = Vc_max * canopy_scaling
+    J_max = J_max * canopy_scaling
+    Rd = Rd * canopy_scaling
 
     # Soil moisture stress on Vc_max (CLM / Bonan et al. 2011)
     if beta_soil is not None:
@@ -419,6 +438,13 @@ def coupled_farquhar_stomata(
     fAPAR = 1.0 - jnp.exp(-config.k_ext * LAI)
     APAR_umol = fAPAR * PAR_umol
 
+    # Big-leaf canopy scaling for the photosynthetic capacities:
+    #   L_c = (1 - exp(-k·LAI)) / k = fAPAR / k   [m2 leaf / m2 ground].
+    # Converts leaf-level Vc_max/J_max/Rd to canopy-level per-ground-area
+    # rates so the Rubisco- and light-limited branches are both canopy-scale
+    # (see farquhar_photosynthesis docstring).  L_c -> LAI as LAI -> 0.
+    canopy_scaling = fAPAR / jnp.maximum(config.k_ext, 1e-6)
+
     # Atmospheric CO2
     Ca = jnp.broadcast_to(
         jnp.asarray(co2_ppmv, dtype=T_leaf.dtype), T_leaf.shape)
@@ -437,7 +463,7 @@ def coupled_farquhar_stomata(
     # Fixed-point iteration (unrolled for JIT compatibility)
     for _ in range(config.n_iter_ags):
         A_net, _ = farquhar_photosynthesis(
-            Ci, APAR_umol, T_leaf, config, beta_soil)
+            Ci, APAR_umol, T_leaf, config, beta_soil, canopy_scaling)
 
         if config.stomata_model == "medlyn":
             gs = medlyn_gs(A_net, VPD_kPa, Ca, config)
@@ -452,7 +478,7 @@ def coupled_farquhar_stomata(
 
     # Final evaluation
     A_net, A_gross = farquhar_photosynthesis(
-        Ci, APAR_umol, T_leaf, config, beta_soil)
+        Ci, APAR_umol, T_leaf, config, beta_soil, canopy_scaling)
 
     if config.stomata_model == "medlyn":
         gs = medlyn_gs(A_net, VPD_kPa, Ca, config)

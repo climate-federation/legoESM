@@ -1471,11 +1471,18 @@ class TestEDMFPhysics:
         assert float(rms_both) > 1e-10
 
     def test_subsidence_dries_troposphere(self):
-        """Compensating subsidence should dry the mid-troposphere."""
+        """The ADVECTIVE compensating subsidence dries the mid-troposphere.
+
+        #824: EDMF now DEFAULTS to the conservative ``implicit_flux`` solve, whose
+        flux-form transport conserves column water and REDISTRIBUTES it (net
+        mid-trop tendency ~0) rather than leaving the advective form's local
+        drying — so this drying property is specific to the advective term, which
+        we select explicitly here to keep testing it."""
         T, q_v, p_full, p_half = _make_unstable_columns(ncol=4, nlev=20)
         config = ConvectiveEDMFConfig(
             a_u_init=0.1, cape_threshold=0.0,
             delta_0=0.0,  # isolate subsidence
+            subsidence_solve="advective",  # #824: default is now implicit_flux
         )
         ncol = T.shape[0]
         a_u = jnp.full(ncol, 0.1)

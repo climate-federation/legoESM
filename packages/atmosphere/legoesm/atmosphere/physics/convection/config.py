@@ -89,6 +89,8 @@ __param_spec__ = {
         "excluded": {
             "epsilon_0": "entrainment: bulk-plume base rate held fixed in the EDMF mass-flux core",
             "w_u_min": "numerics: minimum updraft velocity floor",
+            "w_u_max": "numerics: physical cap on the updraft velocity sqrt(2*CAPE) (stability, not a tunable closure)",
+            "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; not trainable)",
         },
         "params": {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "EDMF mass-flux stability cap", "shape": None},
@@ -1378,22 +1380,42 @@ class ConvectiveEDMFConfig(NamedTuple):
         Relaxation timescale for a_u [s].
     w_u_min : float
         Minimum updraft velocity [m/s].
+    w_u_max : float
+        Maximum updraft velocity [m/s] — a physical cap on ``sqrt(2·CAPE)``.
+        A real cumulus updraft tops out at ~10–50 m/s; an uncapped high-CAPE
+        column can yield >80 m/s and, times ``rho``, an unphysically strong
+        compensating subsidence aloft (#824).
     cape_activation_scale : float
         Sigmoid scale for CAPE trigger [J/kg].
     cape_threshold : float
         CAPE threshold [J/kg].
+    subsidence_solve : str
+        Compensating-subsidence vertical solve passed to
+        ``apply_mass_flux_kernel``: ``"implicit_flux"`` (default) is the
+        CONSERVATIVE, backward-Euler damping tridiagonal solve (MSE-conserving,
+        damps the 2Δz checkerboard — #824); ``"advective"`` is the legacy
+        explicit donor-cell form (conserves only to truncation order).
+    theta_implicit : float
+        Off-centering of the ``implicit_flux`` backward-Euler solve in [0.5, 1.0]
+        (1.0 = fully implicit).  Numerics/stability, not a tunable closure.
     """
     epsilon_0: float = 2e-3
     delta_0: float = 2e-3
     a_u_init: float = 0.1
     tau_a: float = 1800.0
     w_u_min: float = 0.1
+    w_u_max: float = 50.0
     # Trigger gating — see MassFluxConfig for rationale (sharper
     # ``cape_activation_scale`` and a 70 J/kg threshold close the
     # CAPE=0 leak from the earlier 50 % activation).
     cape_activation_scale: float = 10.0
     cape_threshold: float = 70.0
     M_b_max: float = 0.05   # see ZhangMcFarlaneConfig.M_b_max
+    # Conservative, damping subsidence solve by default (#824): the legacy
+    # explicit "advective" solve leaked column static energy and, with the
+    # non-detraining updraft profile, drove a day-5 full-physics AMIP blowup.
+    subsidence_solve: str = "implicit_flux"
+    theta_implicit: float = 1.0
 
 
 class ConvectionConfig(NamedTuple):
