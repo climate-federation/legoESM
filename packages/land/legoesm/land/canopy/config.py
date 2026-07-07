@@ -549,3 +549,10 @@ class CLMMLCanopyConfig(NamedTuple):
     # cos_zen is not available.  Corresponds to an overcast sky condition;
     # Erbs et al. (1982) gives f_dir ≈ 0.20–0.35 for low clearness index.
     f_dir_noclearness_fallback: float = 0.30
+
+    # Optional solar-induced fluorescence (SIF) diagnostic.  ``None`` (default)
+    # disables it; a ``SIFConfig`` enables the passive top-of-canopy SIF output
+    # on ``SurfaceFluxOutput.sif`` — a leaf-area-weighted sum over the CLM-ML
+    # canopy layers × sunlit/shaded leaves, sharing the same fluorescence core
+    # as the two-leaf / big-leaf paths.  Static config leaf, never traced.
+    sif: SIFConfig | None = None
