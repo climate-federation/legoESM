@@ -37,6 +37,12 @@ _KMEANS_MAX_ITER = 50
 # Default minimum PFT cover weight for a (cell, PFT) pair to be "occupied"
 # and included in clustering; caller-overridable via `build_archetypes(w_min=...)`.
 _W_MIN_DEFAULT = 0.05
+# Bare-ground PFT index in the CLM5_PFT_NAMES layout (column 0).  Bare is inert
+# (Vc_max25 == 0, no live or soil carbon), so it is EXCLUDED from clustering and
+# from equilibration; a bare cell/fraction keeps cell_archetype_id == -1 and
+# contributes ZERO carbon in map_to_grid (F2).  This module assumes the CLM5 PFT
+# axis with bare at index 0.
+_BARE_PFT_ID = 0
 
 # --- archetype equilibration (Stage B) defaults ---
 # Time / unit conversions (exact).
@@ -118,6 +124,11 @@ def build_archetypes(pft_weights, features, soil_class, land_mask, *,
                       k_per_pft=12, w_min=_W_MIN_DEFAULT, seed=0):
     """Cluster each PFT's occupied cells into ``k_per_pft`` climate archetypes.
 
+    Bare ground (PFT index 0, ``_BARE_PFT_ID``) is excluded outright -- it is
+    inert (``Vc_max25 == 0``), so it neither clusters nor equilibrates and a
+    bare cell/fraction maps to zero carbon (F2).  Assumes the CLM5 PFT axis
+    (bare at column 0).
+
     Parameters
     ----------
     pft_weights : array (ncell, npft)
@@ -143,39 +154,67 @@ def build_archetypes(pft_weights, features, soil_class, land_mask, *,
     -------
     (ArchetypeTable, cell_archetype_id, cell_archetype_weight)
         ``cell_archetype_id`` is ``(ncell, npft)`` int, -1 where PFT ``p``
-        has weight below ``w_min`` in cell ``c``, else the archetype index
-        into the returned table. ``cell_archetype_weight`` is
-        ``(ncell, npft)`` float, the cover weight (0 where id is -1).
+        has weight below ``w_min`` in cell ``c`` OR ``p`` is bare (always
+        excluded), else the archetype index into the returned table.
+        ``cell_archetype_weight`` is ``(ncell, npft)`` float, the cover weight
+        (0 where id is -1, including the whole bare column).
     """
     pft_weights = np.asarray(pft_weights)
     ncell, npft = pft_weights.shape
+    land = np.asarray(land_mask)
     feat = np.stack(
         [np.asarray(getattr(features, f)) for f in _FEATURE_FIELDS], axis=1
     )  # (ncell, 5)
-    # Standardise globally so per-PFT clusters share a metric.
-    mu = feat.mean(0)
-    sd = feat.std(0)
+    # PFTs that get a carbon archetype: everything EXCEPT bare ground (F2).
+    cluster_pfts = [p for p in range(npft) if p != _BARE_PFT_ID]
+    # Cells that actually enter clustering: land cells with >= w_min cover in at
+    # least one clusterable (non-bare) PFT.  Standardise the features over ONLY
+    # these cells -- ocean/masked and bare-only cells must NOT perturb the
+    # mean/std metric the per-PFT k-means shares (F5).
+    occupied = np.zeros(ncell, bool)
+    for p in cluster_pfts:
+        occupied |= pft_weights[:, p] >= w_min
+    cluster_cells = occupied & land
+    ref = feat[cluster_cells] if cluster_cells.any() else feat
+    mu = ref.mean(0)
+    sd = ref.std(0)
     sd = np.where(sd < 1e-9, 1.0, sd)  # coeff-ok: std floor
     feat_std = (feat - mu) / sd
     soil_class = np.asarray(soil_class, dtype=object)
     cell_id = np.full((ncell, npft), -1, int)
-    cell_w = np.where((pft_weights >= w_min) & np.asarray(land_mask)[:, None], pft_weights, 0.0)
+    cell_w = np.where((pft_weights >= w_min) & land[:, None], pft_weights, 0.0)
+    cell_w[:, _BARE_PFT_ID] = 0.0        # bare contributes no carbon (F2)
     at = {f: [] for f in ("pft_id", *_FEATURE_FIELDS, "soil_class")}
     next_arch = 0
-    for p in range(npft):
-        occ = np.where((pft_weights[:, p] >= w_min) & np.asarray(land_mask))[0]
+    for p in cluster_pfts:
+        occ = np.where((pft_weights[:, p] >= w_min) & land)[0]
         if occ.size == 0:
             continue
+        # NOTE (F4 follow-up): the k-means ASSIGNMENT is still unweighted; fully
+        # cover-weighted k-means assignment is a documented follow-up.  The
+        # per-archetype climate means + soil-class mode below ARE cover-weighted.
         labels, _ = _kmeans(feat_std[occ], k_per_pft, seed + p)
         for j in np.unique(labels):
             members = occ[labels == j]
             cell_id[members, p] = next_arch
             at["pft_id"].append(p)
+            # Cover-weighted climate means: weight each member cell by PFT p's
+            # cover there, so the archetype's climate reflects where the PFT
+            # actually dominates, not every occupied cell equally (F4).  Members
+            # have cover >= w_min > 0, so the weight sum is strictly positive.
+            w_mem = pft_weights[members, p]
             for fi, fname in enumerate(_FEATURE_FIELDS):
-                at[fname].append(float(feat[members, fi].mean()))
-            # modal soil texture in the cluster
-            vals, cnts = np.unique(soil_class[members], return_counts=True)
-            at["soil_class"].append(str(vals[cnts.argmax()]))
+                at[fname].append(
+                    float(np.average(feat[members, fi], weights=w_mem)))
+            # Cover-weighted modal soil texture: the class holding the MOST PFT-p
+            # cover in the cluster (not the most member cells).
+            member_soils = soil_class[members]
+            cover_by_class = {
+                s: float(w_mem[member_soils == s].sum())
+                for s in np.unique(member_soils)
+            }
+            at["soil_class"].append(
+                str(max(cover_by_class, key=cover_by_class.get)))
             next_arch += 1
     table = ArchetypeTable(
         pft_id=np.asarray(at["pft_id"], int),
@@ -184,6 +223,47 @@ def build_archetypes(pft_weights, features, soil_class, land_mask, *,
         aridity=np.asarray(at["aridity"]), sw_mean_w=np.asarray(at["sw_mean_w"]),
         soil_class=np.asarray(at["soil_class"], dtype=object))
     return table, cell_id, cell_w
+
+
+def dropped_cover_fraction(pft_weights, land_mask, *, w_min=_W_MIN_DEFAULT):
+    """Per-cell vegetated land cover silently dropped from the carbon map (F3).
+
+    :func:`build_archetypes` / :func:`map_to_grid` omit every (cell, PFT) pair
+    whose cover is below ``w_min`` (no archetype -> zero carbon), and bare ground
+    is excluded outright.  Many small sub-``w_min`` fractions in one cell can sum
+    to material area, so this returns the ``(mean, max)`` over LAND cells of the
+    total NON-BARE cover falling in ``0 < cover < w_min`` -- the vegetated land
+    the archetype map does not represent.  A known Stage-A approximation
+    (documented in ``docs/land/carbon_equilibrium_audit.md``); the follow-up
+    maps each trace PFT to its nearest same-PFT archetype instead of dropping it.
+
+    Parameters
+    ----------
+    pft_weights : array (ncell, npft)
+        Per-gridcell fractional cover of each PFT.
+    land_mask : array (ncell,) bool
+        True where the cell is land.
+    w_min : float
+        Occupancy threshold (matches ``build_archetypes(w_min=...)``).
+
+    Returns
+    -------
+    (mean_dropped, max_dropped) : (float, float)
+        Mean and max over land cells of the dropped sub-``w_min`` non-bare cover
+        fraction; ``(0.0, 0.0)`` when there are no land cells.
+    """
+    w = np.asarray(pft_weights, float)
+    land = np.asarray(land_mask, bool)
+    _ncell, npft = w.shape
+    non_bare = np.ones(npft, bool)
+    if npft > _BARE_PFT_ID:
+        non_bare[_BARE_PFT_ID] = False
+    sub = w[:, non_bare]
+    dropped = np.where((sub > 0.0) & (sub < w_min), sub, 0.0).sum(axis=1)
+    dropped = dropped[land]
+    if dropped.size == 0:
+        return 0.0, 0.0
+    return float(dropped.mean()), float(dropped.max())
 
 
 class ArchetypeBatch(NamedTuple):
@@ -252,6 +332,14 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt):
     from legoesm.land.climate_forcing import make_climatological_forcing
 
     pft_id = np.asarray(table.pft_id, int)
+    # Bare ground is inert (no carbon) and must never be equilibrated; a bare
+    # archetype indicates a mis-built table (build_archetypes drops bare) (F2).
+    if np.any(pft_id == _BARE_PFT_ID):
+        raise ValueError(
+            f"iter_archetype_batches: archetype table contains bare ground "
+            f"(pft_id == {_BARE_PFT_ID}); bare is inert and is excluded from "
+            f"clustering + equilibration by build_archetypes. A bare archetype "
+            f"indicates a mis-built table.")
     soil_class = np.asarray(table.soil_class, dtype=object)
     mat_k = np.asarray(table.mat_k, float)
     map_yr = np.asarray(table.map_yr, float)

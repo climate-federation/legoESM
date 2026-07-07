@@ -206,6 +206,23 @@ def run_semi_analytic_spinup(
         mass-balance annual ``nee_model``, and the end-of-year pools
         ``C_lab``..``C_som``.
     """
+    # Fail early on degenerate run controls (dispatch-hardening discipline): the
+    # analytic reset reads the LAST spin-up year's fluxes (needs n_spinup >= 1),
+    # the drift diagnostic needs >= 2 verification years, and each year is a
+    # sub-daily scan of steps_per_year >= 1 steps (F7).
+    if n_spinup < 1:
+        raise ValueError(
+            f"run_semi_analytic_spinup: n_spinup must be >= 1 (the analytic "
+            f"slow-pool reset reads the last transient year's fluxes), got "
+            f"{n_spinup}.")
+    if n_verify < 2:
+        raise ValueError(
+            f"run_semi_analytic_spinup: n_verify must be >= 2 (drift needs at "
+            f"least two verification years), got {n_verify}.")
+    if steps_per_year < 1:
+        raise ValueError(
+            f"run_semi_analytic_spinup: steps_per_year must be >= 1, got "
+            f"{steps_per_year}.")
     dt_days = dt / _SECS_PER_DAY
 
     def _inner_step(carry, step_idx):
@@ -218,6 +235,15 @@ def run_semi_analytic_spinup(
     def _year_step(carry, _year_idx):
         _, carbon_start = carry
         total_start = _total_carbon(carbon_start)
+        # TODO(perf/AD): accumulate annual sums/max inside _inner_step and
+        # return yearly reductions, instead of materializing the full per-step
+        # `diags` for every year before reducing (codex F6).  At hourly dt this
+        # holds steps_per_year x n_diag_fields per year -> memory pressure and
+        # poor reverse-mode AD ergonomics.  Deferred here on purpose: this is the
+        # SHARED driver (equilibrate + validator + land_carbon_equilibrium) and
+        # the annual-dict contract must stay byte-for-byte behaviour-preserving,
+        # so the in-scan reduction (which reorders the float summation) is a
+        # separately-validated follow-up.
         (state_end, carbon_end), diags = jax.lax.scan(
             _inner_step, carry, jnp.arange(steps_per_year))
         # Annual totals: every per-day flux integrated as sum(rate*dt_days)

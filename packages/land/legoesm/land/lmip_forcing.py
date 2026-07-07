@@ -148,8 +148,11 @@ def make_synthetic_lmip_forcing(
     1. Mean-annual T: ``mat = 288 - 30·|φ|/(π/2)`` [K]
     2. Seasonal half-amplitude: ``t_seasonal = 15 K × |φ|/(π/2)`` (NH peak
        at doy≈200, i.e. ``~July``)
-    3. Mean-annual downward-SW: ``sw_mean = S_0 × <daily-mean cos(zenith)>``
-       at this latitude/day, from this module's own solar geometry.
+    3. This ``day``'s daily-mean downward-SW: ``S_0 × <daily-mean cos(zenith)>``
+       at this latitude/``day``, from this module's own solar geometry. The
+       delegate has NO seasonal SW term, so passing the per-day daily-mean
+       (not an annual mean) is what produces the seasonal SW cycle as ``day``
+       advances.
 
     The diurnal T/SW cycles (±3 K / rectified-cosine shape) are then added
     by the delegate using *local* solar hour (``hour`` shifted by
@@ -163,12 +166,17 @@ def make_synthetic_lmip_forcing(
     # (production single-column runs select real (lat, lon) sites).
     local_hour = hour + jnp.rad2deg(lon_rad) / _DEG_PER_HOUR
 
-    # --- Latitudinal baseline + seasonal amplitude + mean-annual downward-SW
+    # --- Latitudinal baseline + seasonal amplitude + THIS day's daily-mean SW
     # (the shared latitude->feature pieces; longitude-invariant SW) ---
     mat = latitude_mean_annual_temp_k(lat_rad)
     t_seasonal = latitude_seasonal_amp_k(lat_rad)
-    sw_mean = latitude_daily_mean_sw_w(lat_rad, day)
+    # Contract: make_climatological_forcing's third arg sets the daily mean of
+    # the diurnal SW shape for the CURRENT `day` (no internal seasonal SW term),
+    # so this per-day daily-mean insolation is what yields the seasonal SW cycle
+    # as `day` advances -- it is NOT an annual mean (F9).
+    daily_mean_sw_w = latitude_daily_mean_sw_w(lat_rad, day)
 
     return make_climatological_forcing(
-        mat, t_seasonal, sw_mean, precip_rate, day, local_hour, dtype=dtype
+        mat, t_seasonal, daily_mean_sw_w, precip_rate, day, local_hour,
+        dtype=dtype,
     )

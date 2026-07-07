@@ -176,6 +176,38 @@ class TestRunSemiAnalyticSpinup(unittest.TestCase):
         self.assertEqual(np.asarray(annual["gpp"]).shape, (2, 3))
 
 
+class TestRunSemiAnalyticSpinupGuards(unittest.TestCase):
+    """F7: fail early on degenerate run controls (raises at entry, before any
+    scan / JIT), matching the repo's dispatch-hardening discipline."""
+
+    def _kwargs(self, **over):
+        ncol = 1
+        steps_per_year = 4
+        dt = 365.0 * 86400.0 / steps_per_year
+        carbon0 = CarbonState(**{f: jnp.full((ncol,), 1.0)
+                                 for f in CarbonState._fields})
+        kw = dict(
+            step_fn=lambda s, c, f, d: (s, c, _const_diag(ncol)),
+            state0=jnp.zeros((ncol,)), carbon0=carbon0,
+            forcing_fn=lambda doy, hour: None,
+            n_spinup=3, n_verify=2, steps_per_year=steps_per_year, dt=dt,
+            cwd_humification_eff=0.3)
+        kw.update(over)
+        return kw
+
+    def test_zero_spinup_raises(self):
+        with self.assertRaises(ValueError):
+            run_semi_analytic_spinup(**self._kwargs(n_spinup=0))
+
+    def test_one_verify_year_raises(self):
+        with self.assertRaises(ValueError):
+            run_semi_analytic_spinup(**self._kwargs(n_verify=1))
+
+    def test_zero_steps_per_year_raises(self):
+        with self.assertRaises(ValueError):
+            run_semi_analytic_spinup(**self._kwargs(steps_per_year=0))
+
+
 class TestIntegrateAnnualPools(unittest.TestCase):
     """Raw forward integrator (NO analytic reset) with the frozen-carbon toy:
     per-year pools are recorded with the IC as row 0, so a drift metric over the

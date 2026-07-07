@@ -15,13 +15,16 @@ validator works from ``archetypes.npz`` (also written by the Task-6 driver),
 which carries the full :class:`ArchetypeTable` (``pft_id`` / ``soil_class`` +
 the climate features) AND the mapped per-archetype equilibria ``eq_C_*``.
 
-This is the correct proxy, not a shortcut: ``map_to_grid`` builds each cell's
-pools as a LINEAR cover-weighted mix of its archetypes' equilibria, and the
-coupled step is (to first order over a short re-integration) linear in the
-initial pools, so each cell's drift is the same cover-weighted mix of its
-archetypes' drifts.  If every archetype re-integrates with small drift, every
-cell does.  The archetype set is self-contained and testable on the dry-run
-``archetypes.npz``.
+This is INDICATIVE QC, not a per-cell proof.  ``map_to_grid`` is LINEAR in the
+IC pools, but re-integrating a MIXED cell is NOT: GPP / LAI / stomatal
+conductance / respiration depend nonlinearly on the summed foliar carbon and a
+SHARED soil column, so a cell's drift is NOT in general the cover-weighted mix
+of its archetypes' drifts.  Small per-archetype drift is therefore a NECESSARY
+condition and a strong signal that each archetype equilibrium is stationary --
+but it does not by itself prove that every mixed grid cell starts at
+equilibrium.  Rigorous per-cell validation (re-integrating a sample of ACTUAL
+mixed grid cells) is a documented follow-up.  The archetype set is
+self-contained and testable on the dry-run ``archetypes.npz``.
 
 Each archetype is re-integrated ``n_years`` from (a) the MAPPED IC (``eq_C_*``)
 and (b) a COLD IC (the pipeline's below-equilibrium seed via
@@ -393,10 +396,14 @@ def write_report(out_dir: Path, result: dict):
     L.append("")
     L.append("_Deviation from the per-cell brief: validated at the ARCHETYPE "
              "level (the finidat stores no per-cell climate/soil to rebuild "
-             "per-cell configs offline). Because `map_to_grid` is a linear "
-             "cover-weighted mix of archetype equilibria, every cell's drift is "
-             "the cover-weighted mix of its archetypes' drifts -- so small "
-             "per-archetype drift implies small per-cell drift._")
+             "per-cell configs offline). `map_to_grid` is LINEAR in the IC "
+             "pools, but re-integrating a MIXED cell is nonlinear (GPP / LAI / "
+             "stomata / respiration depend nonlinearly on the summed foliar "
+             "carbon and a shared soil column), so small per-archetype drift is "
+             "INDICATIVE QC -- a necessary condition and strong signal that each "
+             "archetype equilibrium is stationary, NOT a per-cell proof. "
+             "Rigorous per-cell validation (a sample of actual mixed grid cells) "
+             "is a documented follow-up._")
     (out_dir / "report.md").write_text("\n".join(L) + "\n")
 
 

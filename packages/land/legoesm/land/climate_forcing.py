@@ -74,8 +74,12 @@ def make_climatological_forcing(
         Half-amplitude of the annual T cycle [K] (NH-phased: peak at
         ``doy = _T_SEASONAL_PEAK_DAY``).
     sw_mean_w : float
-        Mean-annual downward shortwave [W/m^2]; scales the idealised
-        diurnal insolation shape so its daily mean equals this value.
+        Daily-mean downward shortwave [W/m^2] for the forced ``doy``; scales the
+        idealised diurnal insolation shape so its DAILY mean equals this value.
+        There is no internal seasonal SW term, so a value held constant across
+        the year is the annual mean, whereas a per-day daily-mean produces a
+        seasonal SW cycle (see
+        ``lmip_forcing.make_synthetic_lmip_forcing``) (F9).
     precip_rate : float
         Constant precipitation rate [kg/m2/s].
     doy : float

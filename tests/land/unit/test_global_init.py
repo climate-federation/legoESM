@@ -12,18 +12,18 @@ def _feats(mat, mapyr, seas, arid, sw):
     return ClimateFeatures(a(mat), a(mapyr), a(seas), a(arid), a(sw))
 
 def test_two_pft_two_climate_makes_expected_archetypes():
-    # 4 cells: PFT0 in warm+cold, PFT1 in warm+cold.
-    ncell, npft = 4, 2
-    w = np.zeros((ncell, npft)); w[0, 0] = w[1, 0] = 1.0; w[2, 1] = w[3, 1] = 1.0
+    # 4 cells: PFT1 in warm+cold, PFT2 in warm+cold (col 0 = bare, excluded).
+    ncell, npft = 4, 3
+    w = np.zeros((ncell, npft)); w[0, 1] = w[1, 1] = 1.0; w[2, 2] = w[3, 2] = 1.0
     feats = _feats([300, 270, 300, 270], [2000]*4, [3, 12, 3, 12], [1.5]*4, [250]*4)
     soil = np.array(["loam"] * ncell)
     tab, cid, cw = build_archetypes(w, feats, soil, np.ones(ncell, bool), k_per_pft=1, w_min=0.05, seed=0)
-    # k=1 per PFT -> 2 archetypes (one per PFT), each averaging its climate.
+    # k=1 per PFT -> 2 archetypes (one per non-bare PFT), each averaging climate.
     assert tab.pft_id.shape == (2,)
-    assert set(np.unique(tab.pft_id)) == {0, 1}
-    # Every occupied (cell,pft) maps to a valid archetype; empties are -1.
+    assert set(np.unique(tab.pft_id)) == {1, 2}
+    # Every occupied (cell,pft) maps to a valid archetype; empties + bare are -1.
     assert (cid[w >= 0.05] >= 0).all() and (cid[w < 0.05] == -1).all()
-    # Cover weights reproduce the input cover.
+    # Cover weights reproduce the input cover (bare column is zeroed but w[:,0]=0).
     npt.assert_allclose(cw, w, rtol=0, atol=0)
 
 def test_determinism_same_seed():
@@ -41,16 +41,83 @@ def test_masked_cell_has_zero_weight_and_no_archetype():
     from legoesm.land.carbon.climate_features import ClimateFeatures
     from legoesm.land.carbon.global_init import build_archetypes
     a = lambda v: np.asarray(v, float)
-    ncell, npft = 2, 1
-    w = np.array([[0.9], [0.9]])                       # both cells have the PFT
+    ncell, npft = 2, 2                                 # col 0 = bare (excluded)
+    w = np.array([[0.0, 0.9], [0.0, 0.9]])             # both cells have PFT 1
     feats = ClimateFeatures(a([298, 283]), a([2000, 800]), a([3, 12]), a([2, 1]), a([230, 180]))
     soil = np.array(["loam", "loam"])
     mask = np.array([True, False])                     # cell 1 is NOT land
     tab, cid, cw = build_archetypes(w, feats, soil, mask, k_per_pft=1, w_min=0.05, seed=0)
-    assert cid[1, 0] == -1                             # masked cell -> no archetype
-    assert cw[1, 0] == 0.0                             # ...and zero weight (the invariant)
-    # Invariant holds everywhere: weight is 0 exactly where id is -1.
+    assert cid[1, 1] == -1                             # masked cell -> no archetype
+    assert cw[1, 1] == 0.0                             # ...and zero weight (the invariant)
+    assert cid[0, 1] >= 0                              # the land cell DID cluster
+    # Invariant holds everywhere (incl. the excluded bare col): weight is 0
+    # exactly where id is -1.
     assert np.all((cid == -1) == (cw == 0.0))
+
+
+def test_bare_cover_yields_no_archetype_and_zero_pools():
+    # F2: a cell dominated by bare ground (>= w_min) plus a real PFT.  Bare must
+    # NOT produce an archetype and must contribute ZERO carbon in the map.
+    ncell, npft = 2, 3
+    w = np.zeros((ncell, npft))
+    w[0, 0] = 0.7; w[0, 1] = 0.3      # cell 0: 70% bare + 30% PFT 1
+    w[1, 1] = 1.0                     # cell 1: all PFT 1
+    feats = _feats([295, 290], [1500, 1200], [6, 8], [1.2, 1.0], [220, 210])
+    soil = np.array(["loam", "loam"])
+    tab, cid, cw = build_archetypes(
+        w, feats, soil, np.ones(ncell, bool), k_per_pft=1, w_min=0.05, seed=0)
+    # No bare (pft 0) archetype was created.
+    assert 0 not in set(np.unique(tab.pft_id).tolist())
+    assert set(np.unique(tab.pft_id).tolist()) == {1}
+    # Bare column carries no archetype id and no weight anywhere.
+    assert (cid[:, 0] == -1).all()
+    assert (cw[:, 0] == 0.0).all()
+    # map_to_grid: bare contributes zero even though cell 0 is 70% bare.
+    n_arch = int(tab.pft_id.shape[0])
+    eq = CarbonState(**{f: jnp.asarray([100.0] * n_arch)
+                        for f in CarbonState._fields})
+    out = map_to_grid(cid, cw, eq)
+    # Cell 0's pools come ONLY from PFT 1's 0.3 cover (bare's 0.7 adds nothing).
+    npt.assert_allclose(np.asarray(out.C_som)[0], 0.3 * 100.0, rtol=1e-9)
+    npt.assert_allclose(np.asarray(out.C_som)[1], 1.0 * 100.0, rtol=1e-9)
+
+
+def test_archetype_climate_mean_is_cover_weighted():
+    # F4: one PFT, two cells clustered together (k=1) -- a DOMINANT-cover cell
+    # and a TRACE-cover cell with very different climate.  The archetype's
+    # climate mean must sit near the dominant cell (cover-weighted), NOT at the
+    # midpoint an unweighted mean would give.
+    ncell, npft = 2, 2                # col 0 bare, PFT at col 1
+    w = np.zeros((ncell, npft))
+    w[0, 1] = 0.95                    # dominant cover, warm cell
+    w[1, 1] = 0.06                    # trace cover (>= w_min), cold cell
+    feats = _feats([300.0, 270.0], [2000, 2000], [4, 4], [1.5, 1.5], [250, 250])
+    soil = np.array(["loam", "loam"])
+    tab, cid, cw = build_archetypes(
+        w, feats, soil, np.ones(ncell, bool), k_per_pft=1, w_min=0.05, seed=0)
+    assert tab.pft_id.shape == (1,)
+    mat = float(tab.mat_k[0])
+    unweighted = 0.5 * (300.0 + 270.0)                       # 285.0
+    cover_weighted = (0.95 * 300.0 + 0.06 * 270.0) / (0.95 + 0.06)
+    npt.assert_allclose(mat, cover_weighted, rtol=1e-9)
+    # Much closer to the dominant (warm) cell than the unweighted mean would be.
+    assert mat > unweighted + 5.0
+
+
+def test_dropped_cover_fraction_audit():
+    # F3: sub-w_min NON-BARE cover is dropped from the map; the audit surfaces it.
+    from legoesm.land.carbon.global_init import dropped_cover_fraction
+    ncell, npft = 2, 3
+    w = np.zeros((ncell, npft))
+    w[0, 1] = 0.5; w[0, 2] = 0.02     # cell 0: PFT1 kept, PFT2 dropped (< w_min)
+    w[1, 1] = 0.01; w[1, 2] = 0.03    # cell 1: both dropped
+    mean_drop, max_drop = dropped_cover_fraction(
+        w, np.ones(ncell, bool), w_min=0.05)
+    # dropped (non-bare, 0 < cover < w_min): cell0 -> 0.02, cell1 -> 0.04.
+    npt.assert_allclose(max_drop, 0.04, rtol=1e-9)
+    npt.assert_allclose(mean_drop, 0.03, rtol=1e-9)
+    # No land cells -> (0, 0), never a divide-by-zero.
+    assert dropped_cover_fraction(w, np.zeros(ncell, bool)) == (0.0, 0.0)
 
 
 def _cs(vals):  # vals: (n_arch,) per pool identical for simplicity

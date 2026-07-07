@@ -87,6 +87,7 @@ import numpy as np
 from legoesm.land.carbon.climate_features import reduce_climatology_to_features
 from legoesm.land.carbon.global_init import (
     build_archetypes,
+    dropped_cover_fraction,
     equilibrate_archetypes,
     map_to_grid,
 )
@@ -291,12 +292,24 @@ def _load_monthly_climatology(args, tgt_lat_deg, tgt_lon_deg):
 def _align_pft_axis(pft_weights, source: str) -> np.ndarray:
     """Return per-cell cover on the EXACT 17-entry ``CLM5_PFT_NAMES`` layout.
 
-    The equilibration indexes cover columns as ``CLM5_PFT_NAMES`` (bare + 14
-    natural veg + 2 crops).  A source already on 17 PFTs passes through; a
-    natural-only 15-PFT source (``natpft`` with no crops) zero-pads the two crop
-    columns (``CLM5_PFT_NAMES[15:17]`` = ``crop_c3`` / ``crop_c4``), which is the
-    correct reconciliation because those crops are simply absent.  Any other
-    count is a real mismatch and RAISES -- never a silent mis-alignment.
+    The input MUST already be per-GRIDCELL cover fraction (each column is the
+    cell's cover fraction of that PFT, so the columns sum to the cell's
+    vegetated land fraction, NOT to 1).  The equilibration indexes cover columns
+    as ``CLM5_PFT_NAMES`` (bare + 14 natural veg + 2 crops).
+
+    * A source already on 17 gridcell-fraction PFTs passes through.
+    * A natural-only 15-column source zero-pads the two crop columns
+      (``CLM5_PFT_NAMES[15:17]`` = ``crop_c3`` / ``crop_c4``) -- **but only when
+      those 15 columns are already gridcell fractions**.  Raw CLM
+      ``PCT_NAT_PFT`` is percent WITHIN the natural-veg landunit (sums to 100 %
+      of natveg, not of the gridcell); feeding it here would silently treat
+      every cell as fully natural-vegetated.  Raw CLM landunit cover MUST go
+      through
+      :func:`legoesm.land.surface_data.sources.clm5_surfdata.reconstruct_clm5_pft_frac`
+      (natveg/crop-scaled to 17 gridcell fractions) FIRST -- this branch does
+      NOT rescale (F8).
+    * Any other count is a real mismatch and RAISES -- never a silent
+      mis-alignment.
     """
     from legoesm.land.surface_params import N_PFT_CLM5
 
@@ -308,8 +321,11 @@ def _align_pft_axis(pft_weights, source: str) -> np.ndarray:
     if n_pft == N_PFT_CLM5:
         return pw
     if n_pft == N_PFT_CLM5 - 2:
-        # Natural-only source (CLM5 natpft=15): CLM5_PFT_NAMES[0:15] are the
-        # natural PFTs, [15:17] the two crops -> zero-pad the crop columns.
+        # Natural-only source: CLM5_PFT_NAMES[0:15] are the natural PFTs,
+        # [15:17] the two (absent) crops -> zero-pad the crop columns.  REQUIRES
+        # gridcell-fraction input: raw within-natveg PCT_NAT_PFT must be
+        # reconstruct_clm5_pft_frac'd to 17 gridcell fractions first (this branch
+        # does NOT natveg-scale -- see the function docstring, F8).
         return np.concatenate([pw, np.zeros((pw.shape[0], 2), float)], axis=1)
     raise ValueError(
         f"{source} PFT cover has {n_pft} columns; cannot reconcile with the "
@@ -472,8 +488,15 @@ def _load_legoesm_cover_soil(args) -> dict:
         surf_path=surf, landuse_path=surf, veg_path=(args.veg_path or surf))
     gsd = load_global_surface_data(preset, grid)
 
-    pft_weights = _align_pft_axis(
-        np.asarray(gsd.pft_frac[0], float), "legoesm_surfdata")
+    # gsd.pft_frac is renormalized to sum-to-1 over PFTs per cell (ignoring the
+    # land fraction, global_surface_data._renorm_pft), so a cell with f_land < 1
+    # would otherwise carry FULL land-area carbon.  Scale by the gridcell land
+    # fraction so this preset expresses per-GRIDCELL cover, matching the
+    # clm5_surfdata path (whose reconstruct_clm5_pft_frac already returns
+    # percent-of-gridcell) (F1).
+    pft_cover = (np.asarray(gsd.pft_frac[0], float)
+                 * np.asarray(gsd.f_land[0], float)[:, None])
+    pft_weights = _align_pft_axis(pft_cover, "legoesm_surfdata")
     # Topsoil (layer 0) sand/clay [fraction -> percent] -> USDA class.
     sand_pct = np.asarray(gsd.sand_frac[:, 0], float) * 100.0
     clay_pct = np.asarray(gsd.clay_frac[:, 0], float) * 100.0
@@ -708,6 +731,16 @@ def main(argv=None):
     n_arch = int(np.asarray(table.pft_id).shape[0])
     print(f"[global_carbon_ic] built {n_arch} archetypes "
           f"(k_per_pft={args.k_per_pft}, w_min={args.w_min})")
+
+    # Audit the land cover the map silently drops: PFT fractions below w_min get
+    # no archetype (zero carbon), and many small fractions can sum to material
+    # area.  Print the loss so it is visible (F3; a known Stage-A approximation
+    # documented in docs/land/carbon_equilibrium_audit.md).
+    mean_drop, max_drop = dropped_cover_fraction(
+        inputs.pft_weights, inputs.land_mask, w_min=args.w_min)
+    print(f"[global_carbon_ic] dropped sub-w_min vegetated cover (omitted from "
+          f"the map): mean {mean_drop * 100.0:.2f}%, max {max_drop * 100.0:.2f}% "
+          f"of land area (known Stage-A approximation)")
 
     # Stage B: spin every archetype to a verified equilibrium.
     print(f"[global_carbon_ic] equilibrating (n_spinup={args.n_spinup}, "
