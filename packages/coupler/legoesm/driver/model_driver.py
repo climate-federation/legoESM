@@ -2105,7 +2105,7 @@ class ModelDriver:
                         'sst', 'sic', 'precip_total',
                         'sw_up_toa', 'lw_up_toa', 'sw_net_sfc', 'lw_net_sfc',
                         'sw_down_toa', 'shflx', 'lhflx', 'lat_deg_grid',
-                        't_low_mean',
+                        't_low_mean', 'sw_up_toa_clr', 'lw_up_toa_clr',
                     ):
                         if kwargs.get(_tname) is not None:
                             kwargs[_tname] = _g(kwargs[_tname])
@@ -2154,7 +2154,8 @@ class ModelDriver:
                     # CMOR output.  All ranks must participate (collective).
                     for tname in ('precip_total', 'shflx', 'lhflx',
                                   'sw_up_toa', 'lw_up_toa', 'sw_net_sfc',
-                                  'lw_net_sfc', 'sw_down_toa', 't_low_mean'):
+                                  'lw_net_sfc', 'sw_down_toa', 't_low_mean',
+                                  'sw_up_toa_clr', 'lw_up_toa_clr'):
                         arr = kwargs.get(tname)
                         if arr is not None:
                             kwargs[tname] = gather(arr[_ofi], self._layout, root_only=True)
@@ -6377,6 +6378,12 @@ class ModelDriver:
         held_sw_up_toa = _aux.get("held_sw_up_toa", jnp.zeros(_ens_2d, dtype=_sd))
         held_lw_up_toa = _aux.get("held_lw_up_toa", jnp.zeros(_ens_2d, dtype=_sd))
         held_sw_down_toa = _aux.get("held_sw_down_toa", jnp.zeros(_ens_2d, dtype=_sd))
+        # Clear-sky held TOA up-fluxes (#843): restored from a checkpoint's
+        # diag_accumulators when present, else zeros (cold start / pre-#843).
+        held_sw_up_toa_clr = _aux.get(
+            "held_sw_up_toa_clr", jnp.zeros(_ens_2d, dtype=_sd))
+        held_lw_up_toa_clr = _aux.get(
+            "held_lw_up_toa_clr", jnp.zeros(_ens_2d, dtype=_sd))
         # Convective carry: scalar (ncol,) for mass_flux/edmf, full
         # (ncol, nlev) conv_prog_profile for the profile-prognostic
         # schemes (ZM/KF/Emanuel/Tiedtke/Bechtold).  The shape must be
@@ -6591,6 +6598,8 @@ class ModelDriver:
             "held_sw_up_toa": held_sw_up_toa,
             "held_lw_up_toa": held_lw_up_toa,
             "held_sw_down_toa": held_sw_down_toa,
+            "held_sw_up_toa_clr": held_sw_up_toa_clr,
+            "held_lw_up_toa_clr": held_lw_up_toa_clr,
             "conv_prog": conv_prog,
             "T_land": T_land,
             "w_land": w_land,
@@ -6847,6 +6856,13 @@ class ModelDriver:
         held_sw_up_toa = ctx["held_sw_up_toa"]
         held_lw_up_toa = ctx["held_lw_up_toa"]
         held_sw_down_toa = ctx["held_sw_down_toa"]
+        # Clear-sky held TOA up-fluxes (#843): persisted across segments +
+        # checkpoints like the all-sky held fields; zeros on a cold start (or a
+        # pre-#843 checkpoint) — refreshed at the first radiation step.
+        held_sw_up_toa_clr = ctx.get(
+            "held_sw_up_toa_clr", jnp.zeros_like(held_sw_up_toa))
+        held_lw_up_toa_clr = ctx.get(
+            "held_lw_up_toa_clr", jnp.zeros_like(held_lw_up_toa))
         conv_prog = ctx["conv_prog"]
         T_land = ctx["T_land"]
         w_land = ctx["w_land"]
@@ -7146,6 +7162,10 @@ class ModelDriver:
                 held_sw_up_toa=held_sw_up_toa,
                 held_lw_up_toa=held_lw_up_toa,
                 held_sw_down_toa=held_sw_down_toa,
+                # Clear-sky held TOA up-fluxes (#843): persisted across
+                # segments (zeros when the diagnostic is off).
+                held_sw_up_toa_clr=held_sw_up_toa_clr,
+                held_lw_up_toa_clr=held_lw_up_toa_clr,
                 step_index=current_step,
                 target_moisture=_target_moisture,
                 target_mass=_target_mass,
@@ -7154,6 +7174,9 @@ class ModelDriver:
                 # fix): reset to zero at every segment start like precip.
                 sw_up_toa_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 lw_up_toa_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                # Clear-sky TOA up-flux accumulators (#843): reset each segment.
+                sw_up_toa_clr_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                lw_up_toa_clr_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 sw_down_toa_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 sw_net_sfc_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 lw_net_sfc_accum=jnp.zeros(_ens_2d, dtype=_sd),
@@ -7270,6 +7293,11 @@ class ModelDriver:
                         self.tracers[_nm] = _val
             (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
              held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = held_tuple
+            # Clear-sky held TOA up-fluxes (#843) are NOT in the 6-tuple
+            # unpack_carry returns — read them straight off the carry (like
+            # q_i / tke) so the next segment persists them.
+            held_sw_up_toa_clr = _dm_carry.held_sw_up_toa_clr
+            held_lw_up_toa_clr = _dm_carry.held_lw_up_toa_clr
 
             if os.environ.get("LEGOESM_DEBUG_HELD"):
                 import numpy as _np
@@ -7325,6 +7353,9 @@ class ModelDriver:
                 "held_sw_up_toa": held_sw_up_toa,
                 "held_lw_up_toa": held_lw_up_toa,
                 "held_sw_down_toa": held_sw_down_toa,
+                # Clear-sky held fields (#843) persisted for checkpoint restart.
+                "held_sw_up_toa_clr": held_sw_up_toa_clr,
+                "held_lw_up_toa_clr": held_lw_up_toa_clr,
                 "conv_prog": conv_prog,
                 "target_moisture": _target_moisture,
                 "target_mass": _target_mass,
@@ -7411,6 +7442,16 @@ class ModelDriver:
                 # member-wise, consistent with seg_precip).
                 seg_sw_up_toa = _dm_carry.sw_up_toa_accum / _seg_dur
                 seg_lw_up_toa = _dm_carry.lw_up_toa_accum / _seg_dur
+                # Clear-sky TOA up-fluxes for CMOR rsutcs/rlutcs (#843).  None
+                # when the diagnostic is off -> the collector skips the field
+                # (byte-identical to the pre-#843 output); a real segment-mean
+                # (accum / duration) when on.
+                seg_sw_up_toa_clr = (
+                    _dm_carry.sw_up_toa_clr_accum / _seg_dur
+                    if self.config.output.clear_sky_diag else None)
+                seg_lw_up_toa_clr = (
+                    _dm_carry.lw_up_toa_clr_accum / _seg_dur
+                    if self.config.output.clear_sky_diag else None)
                 seg_sw_down_toa = _dm_carry.sw_down_toa_accum / _seg_dur
                 seg_sw_net_sfc = _dm_carry.sw_net_sfc_accum / _seg_dur
                 seg_lw_net_sfc = _dm_carry.lw_net_sfc_accum / _seg_dur
@@ -7429,6 +7470,8 @@ class ModelDriver:
                     precip_total=seg_precip_rate,
                     sw_up_toa=seg_sw_up_toa,
                     lw_up_toa=seg_lw_up_toa,
+                    sw_up_toa_clr=seg_sw_up_toa_clr,
+                    lw_up_toa_clr=seg_lw_up_toa_clr,
                     sw_net_sfc=seg_sw_net_sfc,
                     lw_net_sfc=seg_lw_net_sfc,
                     sw_down_toa=seg_sw_down_toa,

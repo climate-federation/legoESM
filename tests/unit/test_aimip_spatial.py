@@ -373,7 +373,9 @@ def test_spectral_rollout_rad_gating_one_step():
         q_v=zero_3d, q_c=zero_3d, q_r=zero_3d,
         conv_prog=zero_3d,
         held_dT_rad=zero_3d, held_sw_net_sfc=zero_2d, held_lw_net_sfc=zero_2d,
-        held_sw_up_toa=zero_2d, held_lw_up_toa=zero_2d, held_sw_down_toa=zero_2d,
+        held_sw_up_toa=zero_2d, held_lw_up_toa=zero_2d,
+        held_sw_up_toa_clr=zero_2d, held_lw_up_toa_clr=zero_2d,
+        held_sw_down_toa=zero_2d,
         step_index=jnp.array(0),
         target_moisture=jnp.array(0.0),
         target_mass=jnp.array(0.0),
@@ -386,6 +388,8 @@ def test_spectral_rollout_rad_gating_one_step():
         # construction must gain new fields).
         sw_up_toa_accum=zero_2d,
         lw_up_toa_accum=zero_2d,
+        sw_up_toa_clr_accum=zero_2d,   # #843 clear-sky diagnostic accumulators
+        lw_up_toa_clr_accum=zero_2d,
         sw_down_toa_accum=zero_2d,
         sw_net_sfc_accum=zero_2d,
         lw_net_sfc_accum=zero_2d,
