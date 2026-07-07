@@ -31,14 +31,16 @@
 # Tracking: GitHub issues #636, #811.
 # =============================================================================
 
-# --- Grid + dycore: cubed-sphere C12 / L20, cd-grid, dt 450 s -----------------
-# Lowered from C48/L40 (dt 150) to C12/L20 for cheap turnaround while validating
-# the multilayer Richards land switch; relaxed CFL permits dt 450 at ~7.5 deg.
+# --- Grid + dycore: cubed-sphere C48 / L40 hybrid, cd-grid, dt 150 s ----------
+# C48/L40 dt150 is the PRODUCTION resolution (publication grade; CFL-safe on the
+# cd-grid).  The earlier C12/L20 dt450 was a temporary cheap-turnaround screen
+# for validating the multilayer Richards land switch — NOT a production default;
+# restored to C48/L40 (Pierre directive 2026-07-07).
 grid_type: cubed_sphere
-resolution: 12
-nlev: 20
+resolution: 48
+nlev: 40
 discretization: cdgrid
-dt: 450.0
+dt: 150.0
 
 # --- Atmospheric physics (Bechtold mass-flux convection, directive 2026-07-06)
 radiation: rrtmg            # rrtmg = the rrtmgp builder alias (true CMIP6 RT)
