@@ -39,7 +39,16 @@ export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH:-}:${LD_LIBRARY_PATH:-}"
 NPROC="${NPROC:-8}"     # >=2 nodes' worth of ranks so the ring crosses a node boundary
 PPN="${PPN:-4}"         # 4 ranks/node (1 per A100)
 
-echo "=== GPU-direct probe: -n ${NPROC} --ppn ${PPN} | MPI4JAX_USE_CUDA_MPI=${MPI4JAX_USE_CUDA_MPI} | cray-mpich=${CRAY_MPICH_VERSION:-?} | gdrcopy=${LOAD_GDRCOPY:-0} ==="
+# Escalation knobs (march the trivial ring toward the model halo):
+#   JIT=1        -> --jit   (run mpi4jax inside jax.jit, the model's compiled path)
+#   ITERS=100    -> --iters (repeat the exchange; repeated invocation)
+#   BYTES=65536  -> --bytes (realistic message size)
+PROBE_ARGS=()
+[ "${JIT:-0}" = "1" ] && PROBE_ARGS+=(--jit)
+[ -n "${ITERS:-}" ]   && PROBE_ARGS+=(--iters "${ITERS}")
+[ -n "${BYTES:-}" ]   && PROBE_ARGS+=(--bytes "${BYTES}")
+
+echo "=== GPU-direct probe: -n ${NPROC} --ppn ${PPN} | MPI4JAX_USE_CUDA_MPI=${MPI4JAX_USE_CUDA_MPI} | cray-mpich=${CRAY_MPICH_VERSION:-?} | gdrcopy=${LOAD_GDRCOPY:-0} | args=[${PROBE_ARGS[*]:-none}] ==="
 mpiexec --ppn "${PPN}" -n "${NPROC}" \
     bash -c 'export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-0}; exec "$@"' _ \
-    "${PY:-python}" "${SCRIPT_DIR}/probe_gpudirect.py"
+    "${PY:-python}" "${SCRIPT_DIR}/probe_gpudirect.py" ${PROBE_ARGS[@]+"${PROBE_ARGS[@]}"}

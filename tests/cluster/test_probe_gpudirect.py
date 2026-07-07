@@ -35,3 +35,21 @@ def test_expected_recv_wraps_at_zero():
 def test_expected_recv_rejects_nonpositive_nproc():
     with pytest.raises(ValueError):
         probe.expected_recv_value(0, 0)
+
+
+def test_n_elements_rounds_and_floors():
+    assert probe.n_elements(4) == 1          # the 4-byte scount=1 message
+    assert probe.n_elements(4096) == 1024
+    assert probe.n_elements(6) == 1          # rounds down, never below 1
+
+
+def test_n_elements_rejects_too_small():
+    with pytest.raises(ValueError):
+        probe.n_elements(0)
+
+
+def test_parse_args_defaults_and_escalation():
+    d = probe.parse_args([])
+    assert d.jit is False and d.iters == 1 and d.nbytes == 4
+    e = probe.parse_args(["--jit", "--iters", "100", "--bytes", "65536"])
+    assert e.jit is True and e.iters == 100 and e.nbytes == 65536
