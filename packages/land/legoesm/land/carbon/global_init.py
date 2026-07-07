@@ -390,3 +390,42 @@ def equilibrate_archetypes(
     equilibrium = CarbonState(
         **{p: jnp.asarray(pools_out[p]) for p in pool_fields})
     return equilibrium, qc
+
+
+def map_to_grid(cell_archetype_id, cell_archetype_weight, archetype_equilibria):
+    """Cover-weighted map of per-archetype equilibrium pools onto the grid.
+
+    ``pools[c] = sum_p w[c,p] * eq[id[c,p]]``, with ``id[c,p] == -1``
+    (PFT ``p`` absent/below ``w_min`` in cell ``c``, see
+    :func:`build_archetypes`) contributing 0.  NOT renormalised by
+    vegetated fraction -- a cell's bare-ground remainder legitimately holds
+    less carbon than a fully vegetated one.
+
+    Parameters
+    ----------
+    cell_archetype_id : array (ncell, n_pft) int
+        Archetype index per (cell, PFT); -1 where absent.
+    cell_archetype_weight : array (ncell, n_pft) float
+        Cover weight per (cell, PFT); 0 where ``cell_archetype_id`` is -1.
+    archetype_equilibria : CarbonState (n_arch,)
+        Per-archetype equilibrium pools from :func:`equilibrate_archetypes`.
+
+    Returns
+    -------
+    CarbonState (ncell,)
+        Cover-weighted pool mix per grid cell.
+    """
+    # Deferred (function-scope) import: only this Stage-C helper needs JAX,
+    # keeping Stage-A (`build_archetypes`) callers numpy-only (module
+    # docstring above).
+    import jax.numpy as jnp
+
+    cid = np.asarray(cell_archetype_id); cw = np.asarray(cell_archetype_weight, float)
+    safe = np.where(cid >= 0, cid, 0)                    # gather index (masked below)
+    mask = (cid >= 0).astype(float) * cw                 # (ncell, n_pft)
+    fields = {}
+    for f in archetype_equilibria._fields:
+        vals = np.asarray(getattr(archetype_equilibria, f))    # (n_arch,)
+        gathered = vals[safe]                                   # (ncell, n_pft)
+        fields[f] = jnp.asarray((gathered * mask).sum(axis=1))  # (ncell,)
+    return archetype_equilibria.__class__(**fields)

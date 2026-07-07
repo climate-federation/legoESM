@@ -1,6 +1,7 @@
-import numpy as np, numpy.testing as npt
+import numpy as np, numpy.testing as npt, jax.numpy as jnp
 from legoesm.land.carbon.climate_features import ClimateFeatures
-from legoesm.land.carbon.global_init import build_archetypes
+from legoesm.land.carbon.config import CarbonState
+from legoesm.land.carbon.global_init import build_archetypes, map_to_grid
 
 def _feats(mat, mapyr, seas, arid, sw):
     a = lambda v: np.asarray(v, float)
@@ -46,3 +47,27 @@ def test_masked_cell_has_zero_weight_and_no_archetype():
     assert cw[1, 0] == 0.0                             # ...and zero weight (the invariant)
     # Invariant holds everywhere: weight is 0 exactly where id is -1.
     assert np.all((cid == -1) == (cw == 0.0))
+
+
+def _cs(vals):  # vals: (n_arch,) per pool identical for simplicity
+    a = lambda: jnp.asarray(vals, float)
+    return CarbonState(a(), a(), a(), a(), a(), a())
+
+def test_single_pft_cell_equals_archetype():
+    eq = _cs([10.0, 20.0])
+    cid = np.array([[0, -1], [1, -1]]); cw = np.array([[1.0, 0.0], [1.0, 0.0]])
+    out = map_to_grid(cid, cw, eq)
+    npt.assert_allclose(np.asarray(out.C_som), [10.0, 20.0], rtol=1e-9)
+
+def test_mixed_cell_is_cover_weighted_mix():
+    eq = _cs([10.0, 30.0])
+    cid = np.array([[0, 1]]); cw = np.array([[0.25, 0.75]])
+    out = map_to_grid(cid, cw, eq)
+    npt.assert_allclose(np.asarray(out.C_som), [0.25 * 10 + 0.75 * 30], rtol=1e-9)
+
+def test_absent_pft_contributes_zero_and_pools_nonneg():
+    eq = _cs([10.0, 30.0])
+    cid = np.array([[-1, 1]]); cw = np.array([[0.0, 0.5]])
+    out = map_to_grid(cid, cw, eq)
+    npt.assert_allclose(np.asarray(out.C_som), [0.5 * 30], rtol=1e-9)
+    assert (np.asarray(out.C_som) >= 0).all()
