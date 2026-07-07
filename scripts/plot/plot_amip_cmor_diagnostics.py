@@ -29,45 +29,23 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
-# --- Field table: (CMOR var, unit-scale, unit label, Earth observational
-#     reference value, colormap).  The reference values are OBSERVATIONAL
-#     comparison targets for the diagnostics table (annual global means from
-#     ERA5 / CERES / GPCP), NOT model physical constants — they parameterise
-#     the plot annotation only and are deliberately not sourced from
-#     ``legoesm.constants`` (which holds model physics constants). ---
-FIELD_TABLE = (
-    ("tas", 1.0, "K", 288.0, "RdBu_r"),
-    ("pr", 86400.0, "mm/day", 2.9, "YlGnBu"),
-    ("rsut", 1.0, "W/m2", 100.0, "viridis"),
-    ("rlut", 1.0, "W/m2", 239.0, "magma"),
-    ("clt", 1.0, "%", 67.0, "Blues"),
-    ("prw", 1.0, "mm", 24.5, "GnBu"),
-    ("hfls", 1.0, "W/m2", 88.0, "YlOrRd"),
-    ("hfss", 1.0, "W/m2", 20.0, "YlOrRd"),
-)
-_ALBEDO_REF = 0.29   # observational planetary albedo (CERES); annotation only.
-
-# --- Publication-realism acceptance bands: absolute tolerance on the
-#     area-weighted global mean of each field vs its Earth reference above.
-#     These are OBSERVATIONAL ACCEPTANCE CRITERIA (roughly obs uncertainty +
-#     CMIP-class model spread on the annual global mean), used only to turn the
-#     realism judgement into a mechanical pass/fail gate — they are NOT model
-#     physical constants and are deliberately not sourced from
-#     ``legoesm.constants``.  Widen/tighten per campaign via ``--tol-scale``. ---
-_REALISM_ABS_TOL = {
-    "tas": 4.0,     # K
-    "pr": 0.6,      # mm/day  (~20% of 2.9)
-    "rsut": 12.0,   # W/m2
-    "rlut": 10.0,   # W/m2
-    "clt": 12.0,    # %
-    "prw": 4.0,     # mm
-    "hfls": 15.0,   # W/m2
-    "hfss": 8.0,    # W/m2
-}
-_ALBEDO_ABS_TOL = 0.03        # planetary-albedo acceptance band (dimensionless)
-_R_TOA_ABS_TOL = 5.0          # |net TOA imbalance| acceptance band [W/m2]
-# Fields that MUST be present for a run to be scorecard-eligible at all.
-_REQUIRED_FIELDS = ("tas", "pr", "rsut", "rlut")
+# --- Observational targets + realism acceptance bands: the CERES/GPCP/ERA5
+#     global-mean references and mechanical pass/fail tolerances live in the
+#     dependency-light sibling ``_amip_obs_targets`` so BOTH AMIP scorecards
+#     (this CMOR plotter and the timeseries ``plot_convection_scorecard``) grade
+#     against ONE source without the timeseries scorecard having to import
+#     xarray.  Imported here to preserve the module-level names this file uses. ---
+import importlib.util as _ilu  # noqa: E402
+_targets_spec = _ilu.spec_from_file_location(
+    "_amip_obs_targets", str(Path(__file__).resolve().parent / "_amip_obs_targets.py"))
+_targets = _ilu.module_from_spec(_targets_spec)
+_targets_spec.loader.exec_module(_targets)
+FIELD_TABLE = _targets.FIELD_TABLE
+_ALBEDO_REF = _targets._ALBEDO_REF
+_REALISM_ABS_TOL = _targets._REALISM_ABS_TOL
+_ALBEDO_ABS_TOL = _targets._ALBEDO_ABS_TOL
+_R_TOA_ABS_TOL = _targets._R_TOA_ABS_TOL
+_REQUIRED_FIELDS = _targets._REQUIRED_FIELDS
 
 # --- Structural-realism thresholds: first-order checks that the run has the
 #     right large-scale STRUCTURE, not just the right global-mean scalars (a

@@ -25,11 +25,13 @@ from pathlib import Path
 
 import numpy as np
 
-# Reuse the observational targets + acceptance bands from the CMOR plotter
-# (sibling script, not an importable package) so the pass/fail criteria are
-# identical across the two scorecards and defined in exactly one place.
-_PLOTTER = Path(__file__).resolve().parent / "plot_amip_cmor_diagnostics.py"
-_spec = importlib.util.spec_from_file_location("_amip_cmor_diag", _PLOTTER)
+# Reuse the observational targets + acceptance bands from the dependency-light
+# shared module (sibling script, not an importable package) so the pass/fail
+# criteria are identical across the two scorecards and defined in one place —
+# WITHOUT pulling the CMOR plotter's xarray import (this scorecard is
+# timeseries-only).
+_TARGETS = Path(__file__).resolve().parent / "_amip_obs_targets.py"
+_spec = importlib.util.spec_from_file_location("_amip_obs_targets", _TARGETS)
 _diag = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_diag)
 
@@ -56,7 +58,9 @@ def _spinup_mean(ts: dict, key: str, spinup_frac: float) -> float:
         return float("nan")
     i0 = int(spinup_frac * v.size)
     i0 = min(max(i0, 0), v.size - 1)
-    return float(np.nanmean(v[i0:]))
+    w = v[i0:]
+    w = w[np.isfinite(w)]          # explicit finite mask (no nanmean warning)
+    return float(np.mean(w)) if w.size else float("nan")
 
 
 def score_run(run_dir: str | Path, spinup_frac: float = 0.5) -> dict | None:
@@ -103,6 +107,8 @@ def score_run(run_dir: str | Path, spinup_frac: float = 0.5) -> dict | None:
         }
 
     graded = [m for m in metrics.values() if np.isfinite(m["value"])]
+    if not graded:
+        return None          # no finite metric -> run is not scoreable
     n_pass = sum(m["pass"] for m in graded)
     comp_err = (float(np.mean([abs(m["value"] - m["target"]) / m["tol"]
                                for m in graded]))

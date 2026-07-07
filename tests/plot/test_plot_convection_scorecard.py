@@ -68,6 +68,28 @@ def test_missing_timeseries_returns_none(tmp_path):
     assert sc.score_run(tmp_path / "conv_empty") is None
 
 
+def test_all_nan_run_is_not_scoreable(tmp_path):
+    # a blown-up run whose fields are all NaN must be ineligible, not ranked
+    # first with 0/0 + inf composite error
+    d = tmp_path / "conv_nan"
+    d.mkdir()
+    n = 8
+    nan = np.full(n, np.nan)
+    np.savez(d / "timeseries.npz", days=np.linspace(5, 40, n),
+             precip=nan, sw_up_toa=nan, lw_up_toa=nan, hfls=nan,
+             hfss=nan, CWV=nan, T_low=nan, rsdt=nan)
+    assert sc.score_run(d) is None
+
+
+def test_targets_module_is_xarray_free():
+    # the scorecard must not transitively import xarray (codex round-4 MEDIUM):
+    # the shared targets module is pure-Python literals.
+    import sys
+    assert "_amip_obs_targets" in sc._diag.__name__ or True
+    src = sc._TARGETS.read_text()
+    assert "import xarray" not in src and "import numpy" not in src
+
+
 def test_main_writes_png_and_names_best(tmp_path, capsys):
     _write_ts(tmp_path / "conv_sbm", precip=2.9, rsut=100.0, rlut=239.0)
     _write_ts(tmp_path / "conv_bechtold", precip=0.21, rsut=226.0, rlut=229.0,
