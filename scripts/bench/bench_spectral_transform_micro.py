@@ -100,6 +100,7 @@ def main() -> int:
 
     modes = {"on": [True], "off": [False],
              "both": [False, True]}[args.sh_gemm]
+    _prev_gemm_env = os.environ.get("LEGOESM_SH_GEMM")
     rows = []
     for T in truncs:
         grid = create_gaussian_grid(n_max=T)
@@ -163,6 +164,14 @@ def main() -> int:
                   f"equiv {achieved:7.2f} GF/s | "
                   f"AI {row['arithmetic_intensity_flop_per_byte']:.1f} F/B "
                   f"| err {row['band_limited_round_trip_error_max']:.1e}")
+
+    # Restore the caller's Legendre-path env (the loop mutates a
+    # process-global switch; an importing test must not inherit the last
+    # mode; codex).
+    if _prev_gemm_env is None:
+        os.environ.pop("LEGOESM_SH_GEMM", None)
+    else:
+        os.environ["LEGOESM_SH_GEMM"] = _prev_gemm_env
 
     payload = {
         "rows": rows,
