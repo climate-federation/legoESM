@@ -392,18 +392,17 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
     if coordinator_port is None:
         coordinator_port = resolve_coordinator_port()
     coordinator = f"{hosts[0]}:{coordinator_port}"
-    # local_device_ids=[0]: the repo's multi-node launch standard pins 1 GPU per
-    # task via SLURM `--gpu-bind=single:1`, so every process sees exactly one GPU
-    # as local index 0. Without this, jax auto-assigns device index by process
-    # rank (0,1,2,...) and the >1-task-per-node ranks fail with "no supported
-    # devices found for platform CUDA" (issue #693, confirmed C48 6-GPU/2-node).
-    # ponytail: assumes 1 GPU/task; a launch that exposes all GPUs to each task
-    # would instead need local_device_ids=[SLURM_LOCALID].
+    # Per-rank device binding via the shared launcher-family helper: a
+    # shim-pinned CUDA_VISIBLE_DEVICES (the SLURM --gpu-bind=single:1
+    # standard, #693) resolves to [0] exactly as before; an UNPINNED or
+    # multi-device visible list indexes by the launcher's node-local rank
+    # (guarded SLURM_LOCALID / OMPI / PALS) instead of piling every local
+    # rank onto GPU 0 (codex).
     jax.distributed.initialize(
         coordinator_address=coordinator,
         num_processes=size,
         process_id=rank,
-        local_device_ids=[0],
+        local_device_ids=_pals_local_device_ids(),
     )
     _INITIALIZED = True
     check_no_silent_process_fallback()
