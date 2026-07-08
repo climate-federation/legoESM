@@ -81,6 +81,9 @@ def test_local_rank_launcher_families(monkeypatch):
     assert ei._pals_local_device_ids() == [0]  # single-task: ignored
     monkeypatch.setenv("SLURM_NTASKS", "4")
     assert ei._pals_local_device_ids() == [1]
+    # srun -n1 inside a larger allocation: STEP size 1 wins -> ignored.
+    monkeypatch.setenv("SLURM_STEP_NUM_TASKS", "1")
+    assert ei._pals_local_device_ids() == [0]
 
 
 def _stub_jax(monkeypatch, process_count: int):

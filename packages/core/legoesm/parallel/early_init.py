@@ -125,8 +125,10 @@ def _launcher_local_rank() -> tuple[str, str] | None:
         if v is not None and v.isdigit():
             return var, v
     slid = os.environ.get("SLURM_LOCALID")
-    nt = os.environ.get("SLURM_NTASKS", "1")
-    if slid is not None and slid.isdigit() and nt.isdigit() and int(nt) > 1:
+    # Step-scoped multi-task guard (launcher_world_size prefers
+    # SLURM_STEP_NUM_TASKS): a single-task step inside a larger
+    # allocation must not bind on SLURM_LOCALID.
+    if slid is not None and slid.isdigit() and launcher_world_size() > 1:
         return "SLURM_LOCALID", slid
     return None
 
