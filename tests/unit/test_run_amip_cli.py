@@ -37,6 +37,31 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_no_use_multilayer_land_overrides_yaml_default():
+    """--no-use-multilayer-land flips a set_defaults(True) (i.e. a --config YAML
+    that enables the multilayer land) back off — needed to run a production
+    YAML on the MPAS/spectral standalone backends (#869 MPAS probe)."""
+    parser = build_arg_parser()
+    parser.set_defaults(use_multilayer_land=True)  # what a YAML would do
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-use-multilayer-land",
+    ]), parser))
+    assert cfg.use_multilayer_land is False
+
+
+def test_multilayer_land_rejected_on_mpas():
+    """use_multilayer_land + MPAS grid must fail EARLY at argparse with a clear
+    message (not an AttributeError deep in _setup_multilayer_land: VoronoiMesh
+    has no lat/lat2d — the crash mode of the first MPAS AMIP probe)."""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical",
+            "--grid-type", "mpas", "--discretization", "mpas",
+            "--use-multilayer-land",
+        ]), parser)
+
+
 def test_clm_surfdata_path_flows_to_config():
     """--clm-surfdata-path round-trips into ExperimentConfig (empty default =>
     UCAR download; a set path lets a compute node with no internet use a staged
