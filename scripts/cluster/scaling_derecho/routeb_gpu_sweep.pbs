@@ -8,15 +8,16 @@
 #PBS -j oe
 #PBS -k eod
 # ===========================================================================
-# Route-B (NCCL multi-controller) GPU THROUGHPUT sweep -- latlon | icosahedral.
-#   GPU ladder N = 1 2 4 8 16 A100 (1 process/GPU, --ppn 4; 16 = 4 nodes)
+# Route-B (NCCL multi-controller) GPU THROUGHPUT sweep -- all route-B grids.
 #   x RES_LIST resolutions, strong scaling.  GRID selects the lane:
-#     GRID=latlon       lat-band SPMD (bench_atm_latlon_spmd_scaling)
-#     GRID=icosahedral  MPAS cell-partition SPMD (bench_mpas_spmd_scaling, #757)
-# The GPU half of the fair CPU-node-vs-A100 throughput comparison; pair with
-# routeb_cpu_sweep.pbs (same SPMD code paths, 1..16 NODES).  cubed-sphere
-# route-B uses the --cs-spmd flat-JSON lane (submit_scaling.sh CUBE_ROUTEB);
-# spectral has no domain-decomposition path -- both rejected here.
+#     GRID=latlon       lat-band SPMD (bench_atm_latlon_spmd_scaling)   N=1 2 4 8 16
+#     GRID=icosahedral  MPAS cell-partition SPMD (bench_mpas, #757)     N=1 2 4 8 16
+#     GRID=cubed-sphere face-partition cs-spmd (run_cpu_mpi_scaling)    N=1 2 3 6 (|6)
+# One process per GPU (--ppn = balanced across the fewest nodes).  The GPU half
+# of the fair CPU-node-vs-A100 throughput comparison; pair with
+# routeb_cpu_sweep.pbs.  spectral has no domain-decomposition path -> rejected.
+# The three grids use DIFFERENT device axes (cube = face divisors) so they land
+# as SEPARATE curves in aggregate_bcw_scaling.py, never overlaid.
 #
 # THROUGHPUT-only: the SPMD bench times kernels (no dt), so the metric is
 # Mcells/s (SYPD is undefined).  Records are JSONL and flow through the SAME
@@ -49,17 +50,31 @@ cd "$REPO"
 
 MODE="${MODE:-strong}"
 # GRID selects the SPMD lane.  Unknown grid -> hard error (dispatch hardening),
-# never a silent latlon fallback.  Per-grid RES/NLEV defaults + output subdir.
+# never a silent latlon fallback.  Per-grid defaults: RES list, vertical levels,
+# device ladder (POWERS OF 2 for the band/cell decomps; FACE-DIVISORS 1,2,3,6
+# for the cube face decomposition), and output subdir.
 GRID="${GRID:-latlon}"
 case "$GRID" in
-  latlon)      RES_LIST="${RES_LIST:-128 256 512}"; NLEV="${NLEV:-26}"; _sub="atm_latlon" ;;
-  icosahedral) RES_LIST="${RES_LIST:-6 7 8}";       NLEV="${NLEV:-8}";  _sub="mpas_atm"   ;;
-  *) echo "ERROR: routeb_gpu_sweep GRID='$GRID' unsupported (latlon|icosahedral; cubed-sphere=submit_scaling.sh CUBE_ROUTEB, spectral=no route-B)." >&2; exit 2 ;;
+  latlon)
+    RES_LIST="${RES_LIST:-128 256 512}"; NLEV="${NLEV:-26}"
+    GPU_RANKS="${GPU_RANKS:-1 2 4 8 16}"; _sub="atm_latlon" ;;
+  icosahedral)
+    RES_LIST="${RES_LIST:-6 7 8}";        NLEV="${NLEV:-8}"
+    GPU_RANKS="${GPU_RANKS:-1 2 4 8 16}"; _sub="mpas_atm" ;;
+  cubed-sphere|cubed_sphere)
+    # Cube uses run_cpu_mpi_scaling --cs-spmd (flat-JSON, sypd) over the FACE
+    # divisor ladder N|6; extend to the sub-face 6*kt^2 counts (24,54) with more
+    # GPUs via GPU_RANKS.  Its own device axis, NOT the powers-of-2 one.
+    RES_LIST="${RES_LIST:-48 96 192}";    NLEV="${NLEV:-26}"
+    GPU_RANKS="${GPU_RANKS:-1 2 3 6}";    _sub="cs_spmd" ;;
+  *) echo "ERROR: routeb_gpu_sweep GRID='$GRID' unsupported (latlon|icosahedral|cubed-sphere; spectral=no route-B)." >&2; exit 2 ;;
 esac
 RES_LIST="${RES_LIST//[:,]/ }"          # accept colon/comma-separated (survives qsub -v)
+GPU_RANKS="${GPU_RANKS//,/ }"
 N_WARMUP="${N_WARMUP:-3}"
 N_TIMING="${N_TIMING:-30}"
-GPU_RANKS="${GPU_RANKS:-1 2 4 8 16}"; GPU_RANKS="${GPU_RANKS//,/ }"
+PHYSICS="${PHYSICS:-none}"              # cube --cs-spmd only (none|moist); 'none'=dry
+PRECISION="${PRECISION:-float32}"       # cube --cs-spmd only
 
 # GPU cap = unique nodes x GPUs/node (PBS_NODEFILE is one line PER RANK; count
 # UNIQUE hosts -- a bare $NGPUS is the per-chunk value=4, see scaling_gpu.sh).
@@ -111,7 +126,11 @@ for RES in $RES_LIST; do
         echo "--- SKIP res=$RES N=$N > cap=$TOTAL_GPUS ---"
         continue
     fi
-    PPN=$(( N < _gpus_per_node ? N : _gpus_per_node ))
+    # Balanced placement: spread N ranks across the fewest nodes, EVENLY.  For
+    # powers of 2 this equals the old min(N, gpus/node); for the cube's N=6 it
+    # gives 3+3 across 2 nodes (not 4+2), matching gpu_multinode Lane A.
+    _nodes_needed=$(( (N + _gpus_per_node - 1) / _gpus_per_node ))
+    PPN=$(( (N + _nodes_needed - 1) / _nodes_needed ))
     export LEGOESM_COORDINATOR_PORT="$_port"; _port=$(( _port + 1 ))
     echo "=== route-B GPU $GRID res=$RES N=$N (ppn=$PPN, coord_port=$LEGOESM_COORDINATOR_PORT) ==="
     # Per-grid SPMD bench argv (mpiexec + PIN wrapper is shared).  latlon sweeps
@@ -131,6 +150,16 @@ for RES in $RES_LIST; do
                 --subdivision "$RES" --nlev "$NLEV" --partition-method sfc
                 --steps $(( N_WARMUP + N_TIMING )) --warmup "$N_WARMUP"
                 --out "$OUTDIR/${_sub}/spmd_L${RES}_N${N}.jsonl" ) ;;
+      cubed-sphere|cubed_sphere)
+        # run_cpu_mpi_scaling --cs-spmd writes its OWN flat-JSON filename into
+        # --output-dir (grid_type=cubed-sphere + sypd) -> aggregator _row_from_json.
+        # Uses --n-levels/--n-warmup/--n-timing (not --nlev/--steps/--warmup).
+        BENCH=( "$PY" scripts/bench/run_cpu_mpi_scaling.py
+                --grid cubed-sphere --cs-spmd --device gpu
+                --physics "$PHYSICS" --mode "$MODE" --resolution "$RES"
+                --precision "$PRECISION" --n-levels "$NLEV"
+                --n-warmup "$N_WARMUP" --n-timing "$N_TIMING"
+                --output-dir "$OUTDIR/${_sub}" ) ;;
     esac
     (
         nccl_env

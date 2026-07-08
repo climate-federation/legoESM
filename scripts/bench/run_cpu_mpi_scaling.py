@@ -69,6 +69,15 @@ from typing import Any
 _BENCH_DIR = Path(__file__).resolve().parent
 if str(_BENCH_DIR) not in sys.path:
     sys.path.insert(0, str(_BENCH_DIR))
+# Repo root on sys.path so the ``from tests.test_cases.baroclinic_wave import ...``
+# init helpers (imported inside every builder below) resolve regardless of CWD /
+# PYTHONPATH / editable-install layout -- mirrors bench_mpas_spmd_scaling.py.
+# Without it a ``python scripts/bench/run_cpu_mpi_scaling.py`` invocation (exactly
+# how the cluster PBS lanes call it) raises ModuleNotFoundError: No module 'tests'
+# unless PYTHONPATH happens to include the repo root.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
 
 # NOTE: do NOT import ``legoesm.constants`` at module load — it eagerly
