@@ -1,20 +1,33 @@
-"""Convection-scheme AMIP comparison scorecard (timeseries.npz → table + bars).
+"""Convection-scheme AMIP comparison scorecard (→ ranked table + bars).
 
 Ranks the convection-campaign runs (``conv_<scheme>/`` dirs from
 ``scripts/cluster/amip/amip_convection_campaign.sbatch``) against CERES /
 GPCP / ERA5 global-mean targets, and names the most realistic scheme.
 
-Each run's ``timeseries.npz`` already holds the driver's AREA-WEIGHTED
-global-mean diagnostics per sample (``diagnostics.py`` uses
-``area_weighted_mean``), so this script does no spatial reduction — it takes
-the spun-up-window mean of each metric and grades it against the SAME
-observational targets + acceptance bands the CMOR diagnostics plotter uses
-(imported from ``plot_amip_cmor_diagnostics`` — NOT re-derived here).
+Two scoring sources (``--source``):
+
+* ``amon`` (DEFAULT) — grade each run's CMOR ``Amon`` monthly-mean
+  climatology by REUSING ``plot_amip_cmor_diagnostics`` (its area-weighted
+  ``compute_amip_diagnostics`` + ``amip_realism_scorecard``, spin-up dropped
+  via ``spinup_frac``).  This is the ROBUST source for the chained production
+  runs: the CMOR monthly accumulator is restored across chain links, so the
+  climatology spans the whole run — whereas ``timeseries.npz`` holds only the
+  sparse per-checkpoint samples of the FINAL link (its ``self.times`` list is
+  not restored on restart), which for a chained run collapses to a handful of
+  post-restart transient samples.  Requires ``cmor/Amon/*.nc`` (uses xarray).
+
+* ``timeseries`` — grade the driver's lightweight ``timeseries.npz``
+  area-weighted global means directly (xarray-free).  Valid for a SINGLE-link
+  run (idealised / RCE benches); UNDER-SAMPLED for a chained multi-link run.
+
+Both sources grade against the SAME observational targets + acceptance bands
+(shared ``_amip_obs_targets`` — NOT re-derived here).
 
 Usage:
     python scripts/plot/plot_convection_scorecard.py \
         results/amip/convcmp --out results/amip/convcmp/scorecard.png \
-        [--spinup-frac 0.5] [--schemes sbm tiedtke bechtold edmf]
+        [--source amon|timeseries] [--spinup-frac 0.5] [--tol-scale 1.0] \
+        [--schemes sbm tiedtke bechtold edmf]
 """
 
 from __future__ import annotations
@@ -124,12 +137,119 @@ def score_run(run_dir: str | Path, spinup_frac: float = 0.5) -> dict | None:
     }
 
 
+def _final_day(run_dir: str | Path) -> float | None:
+    """Latest simulated day from the run's ``checkpoint_day_NNNN.npz`` files, or
+    ``None`` if absent.  Uses the NUMERIC max of the parsed day (not a
+    lexicographic filename sort, which would rank ``..._10000`` before
+    ``..._9999`` once the day count needs a fifth digit)."""
+    import re
+    days = [int(m.group(1))
+            for f in Path(run_dir).glob("checkpoint_day_*.npz")
+            if (m := re.search(r"checkpoint_day_0*(\d+)\.npz", f.name))]
+    return float(max(days)) if days else None
+
+
+def _load_cmor_plotter():
+    """Lazy-load the sibling ``plot_amip_cmor_diagnostics`` module (pulls in
+    xarray) — only when scoring from the ``amon`` source, so the ``timeseries``
+    path stays xarray-free."""
+    import importlib.util
+    p = Path(__file__).resolve().parent / "plot_amip_cmor_diagnostics.py"
+    spec = importlib.util.spec_from_file_location("plot_amip_cmor_diagnostics", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def score_run_amon(run_dir: str | Path, spinup_frac: float = 0.5,
+                   tol_scale: float = 1.0) -> dict | None:
+    """Grade one run's CMOR ``Amon`` climatology by reusing the CMOR plotter's
+    area-weighted ``compute_amip_diagnostics`` + ``amip_realism_scorecard``
+    (the ROBUST, cross-chain-link source — see the module docstring).
+
+    ``n_pass``/``n_graded`` come from the shared scorecard and so INCLUDE the
+    TOA-budget and large-scale STRUCTURE checks (equator-pole gradient, ITCZ);
+    the per-metric table + ``composite_error`` cover the numeric-band checks
+    (fields + albedo + net-TOA), which are the ones with a comparable
+    normalized error.  Returns ``None`` if the run has no ``cmor/Amon/tas`` or
+    no finite graded metric (mirrors ``score_run``)."""
+    run_dir = Path(run_dir)
+    mod = _load_cmor_plotter()
+    try:
+        diag = mod.compute_amip_diagnostics(run_dir, spinup_frac=spinup_frac)
+    except FileNotFoundError:
+        return None
+    card = mod.amip_realism_scorecard(diag, tol_scale=tol_scale)
+
+    metrics: dict[str, dict] = {}
+    for var, d in card["fields"].items():
+        metrics[var] = {"value": d["value"], "target": d["ref"],
+                        "tol": d["abs_tol"], "pass": d["within"]}
+    if card["budget"] is not None:
+        alb, rt = card["budget"]["albedo"], card["budget"]["r_toa"]
+        metrics["albedo"] = {"value": alb["value"], "target": alb["ref"],
+                             "tol": alb["abs_tol"], "pass": alb["within"]}
+        metrics["R_TOA"] = {"value": rt["value"], "target": rt["ref"],
+                            "tol": rt["abs_tol"], "pass": rt["within"]}
+
+    graded = [m for m in metrics.values()
+              if np.isfinite(m["value"]) and m["tol"] > 0]
+    if not graded:
+        return None          # no finite band-checked metric -> not scoreable
+    comp_err = float(np.mean([abs(m["value"] - m["target"]) / m["tol"]
+                              for m in graded]))
+    # A run MISSING a required field or the TOA budget (e.g. a crashed run that
+    # wrote only some Amon vars) must NOT read as perfect: the shared card does
+    # not count an absent field as a failed check, so fold each missing-required
+    # item into n_graded as an (unpassed) failed check. This keeps
+    # n_pass == n_graded true ONLY for a complete, all-in-band run, and makes the
+    # ranker (sorts by -n_pass first) deprioritise an incomplete run.
+    missing = list(card.get("missing_required", []))
+    n_graded = int(card["n_checks"]) + len(missing)
+    return {
+        "run_dir": str(run_dir),
+        "metrics": metrics,
+        "n_pass": int(card["n_pass"]),
+        "n_graded": n_graded,
+        "composite_error": comp_err,
+        "final_day": _final_day(run_dir),
+        "structure": card.get("structure", {}),
+        "missing_required": missing,
+        "passed": bool(card.get("passed", False)),
+    }
+
+
+def score_run_auto(run_dir: str | Path, spinup_frac: float = 0.5,
+                   tol_scale: float = 1.0) -> dict | None:
+    """Score a run by its BEST available source: the robust CMOR ``amon``
+    climatology when ``cmor/Amon`` is present (and scoreable), otherwise the
+    ``timeseries.npz`` fallback — so a single-link / idealised run with no CMOR
+    output is still graded instead of erroring."""
+    run_dir = Path(run_dir)
+    if (run_dir / "cmor" / "Amon").is_dir():
+        s = score_run_amon(run_dir, spinup_frac=spinup_frac, tol_scale=tol_scale)
+        if s is not None:
+            return s
+    return score_run(run_dir, spinup_frac=spinup_frac)
+
+
 def rank_scheme_scores(scores: dict[str, dict]) -> list[tuple[str, dict]]:
-    """Scheme name -> score dict, ranked best-first (more passes, then lower
-    composite error)."""
+    """Scheme name -> score dict, ranked best-first by, in order:
+
+    1. MORE passing checks (``n_pass``);
+    2. FEWER missing-required items — a COMPLETE run outranks an incomplete run
+       (missing a required field / the TOA budget) on the same ``n_pass``, so a
+       run that only wrote some Amon vars can't sneak ahead on a lower composite
+       error over its handful of present metrics;
+    3. LOWER composite error.
+
+    ``missing_required`` is absent from a timeseries-source score (that path has
+    no required-field concept) — treated as complete (``len == 0``)."""
     return sorted(
         scores.items(),
-        key=lambda kv: (-kv[1]["n_pass"], kv[1]["composite_error"]),
+        key=lambda kv: (-kv[1]["n_pass"],
+                        len(kv[1].get("missing_required", [])),
+                        kv[1]["composite_error"]),
     )
 
 
@@ -192,9 +312,21 @@ def main(argv=None) -> int:
                    help="scorecard PNG path (default <campaign_dir>/scorecard.png)")
     p.add_argument("--schemes", nargs="*", default=None,
                    help="scheme subdir suffixes to score (default: all conv_*)")
+    p.add_argument("--source", choices=["auto", "amon", "timeseries"],
+                   default="auto",
+                   help="scoring source: 'auto' (default; per-run: robust CMOR "
+                        "'amon' climatology when cmor/Amon present, else the "
+                        "'timeseries.npz' fallback), 'amon', or 'timeseries' "
+                        "(sparse — single-link runs only)")
     p.add_argument("--spinup-frac", type=float, default=0.5,
-                   help="fraction of the record discarded as spin-up")
+                   help="leading fraction of the record discarded as spin-up")
+    p.add_argument("--tol-scale", type=float, default=1.0,
+                   help="scale every acceptance band (amon source; >1 widen)")
     args = p.parse_args(argv)
+    if not (0.0 <= args.spinup_frac < 1.0):
+        p.error(f"--spinup-frac must be in [0, 1), got {args.spinup_frac}")
+    if args.tol_scale <= 0.0:
+        p.error(f"--tol-scale must be > 0, got {args.tol_scale}")
 
     if args.schemes:
         dirs = [args.campaign_dir / f"conv_{s}" for s in args.schemes]
@@ -202,11 +334,18 @@ def main(argv=None) -> int:
         dirs = sorted(args.campaign_dir.glob("conv_*"))
     scores: dict[str, dict] = {}
     for d in dirs:
-        s = score_run(d, spinup_frac=args.spinup_frac)
+        if args.source == "timeseries":
+            s = score_run(d, spinup_frac=args.spinup_frac)
+        else:
+            scorer = score_run_amon if args.source == "amon" else score_run_auto
+            s = scorer(d, spinup_frac=args.spinup_frac, tol_scale=args.tol_scale)
         if s is not None:
             scores[d.name.replace("conv_", "")] = s
     if not scores:
-        p.error(f"no scoreable runs (conv_*/timeseries.npz) in {args.campaign_dir}")
+        _src = {"amon": "conv_*/cmor/Amon/tas_Amon_*.nc",
+                "timeseries": "conv_*/timeseries.npz"}.get(
+                    args.source, "conv_*/cmor/Amon/*.nc or conv_*/timeseries.npz")
+        p.error(f"no scoreable runs ({_src}) in {args.campaign_dir}")
 
     ranked = rank_scheme_scores(scores)
     print(_format_table(ranked))

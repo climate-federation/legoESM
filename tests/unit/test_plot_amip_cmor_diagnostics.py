@@ -47,6 +47,52 @@ def test_constant_field_global_mean_is_the_constant(tmp_path):
     assert unit == "K"
 
 
+def test_spinup_frac_drops_leading_months(tmp_path):
+    """spinup_frac discards the leading fraction of the monthly record before
+    the time-mean: a 4-month tas whose first 2 months are a hot IC transient
+    and last 2 are 288 K reduces to 288 K under spinup_frac=0.5 (not the
+    transient-contaminated full-record mean)."""
+    nlat, nlon = 18, 36
+    lat = np.linspace(-85, 85, nlat)
+    lon = np.linspace(5, 355, nlon)
+    cmor = tmp_path / "cmor" / "Amon"
+    cmor.mkdir(parents=True, exist_ok=True)
+    field = np.stack([np.full((nlat, nlon), v) for v in (400.0, 400.0, 288.0, 288.0)])
+    da = xr.DataArray(field, dims=("time", "lat", "lon"),
+                      coords={"time": np.arange(4.0), "lat": lat, "lon": lon},
+                      name="tas")
+    da.to_dataset().to_netcdf(cmor / "tas_Amon_test_gn.nc")
+    full = plotmod.compute_amip_diagnostics(tmp_path)["global_means"]["tas"][0]
+    spun = plotmod.compute_amip_diagnostics(tmp_path, spinup_frac=0.5
+                                            )["global_means"]["tas"][0]
+    assert full == pytest.approx(344.0, abs=1e-6)   # (400+400+288+288)/4
+    assert spun == pytest.approx(288.0, abs=1e-6)   # drops the 2 transient months
+
+
+def test_spinup_frac_keeps_at_least_one_slice(tmp_path):
+    """spinup_frac never drops the whole record — a 1-month run keeps its single
+    slice even at a large frac (clamped so n0 <= ntime-1)."""
+    nlat, nlon = 8, 8
+    lat = np.linspace(-80, 80, nlat)
+    lon = np.linspace(0, 315, nlon)
+    cmor = tmp_path / "cmor" / "Amon"
+    _write_amon(cmor, "tas", np.full((nlat, nlon), 288.0), lat, lon)  # time=1
+    gm = plotmod.compute_amip_diagnostics(tmp_path, spinup_frac=0.9
+                                          )["global_means"]["tas"][0]
+    assert gm == pytest.approx(288.0, abs=1e-9)
+
+
+def test_spinup_frac_out_of_range_raises(tmp_path):
+    nlat, nlon = 8, 8
+    lat = np.linspace(-80, 80, nlat)
+    lon = np.linspace(0, 315, nlon)
+    cmor = tmp_path / "cmor" / "Amon"
+    _write_amon(cmor, "tas", np.full((nlat, nlon), 288.0), lat, lon)
+    for bad in (1.0, -0.1, 1.5):
+        with pytest.raises(ValueError):
+            plotmod.compute_amip_diagnostics(tmp_path, spinup_frac=bad)
+
+
 def test_hemispheric_field_area_weighted_mean_is_half(tmp_path):
     """A field that is 1 in the SH and 0 in the NH integrates to 0.5 under the
     (hemispherically symmetric) sin-latitude weights — the exactness check."""
