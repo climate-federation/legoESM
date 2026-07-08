@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import jax.numpy as jnp
 
-from legoesm.land.boundary_data.builders import cover_fracs, dominant_pft_index
+from legoesm.land.boundary_data import cover_fracs, dominant_pft_index
 
 
 def _gsd(*year_slices, years):
