@@ -43,10 +43,14 @@ sponge_enabled: true
 # Fourier polar filter (#869): MANDATORY on the coarse lat-lon grid.  The
 # converging pole-row cells make fast modes locally unstable while the global
 # CFL diagnostic stays ~0.01; without the filter the production config goes
-# non-finite (day 1-10 depending on physics build).  Controlled 12-day A/B
-# 2026-07-08 (jobs 26137075/76, only this key differs): OFF = blowup day 1,
-# ON = completed.  The stable pre-drift reference (amip_ll_sota_30d_741) also
-# carried it.
+# non-finite (day 1-10 depending on physics build).  12-day A/B 2026-07-08
+# (jobs 26137075/76): OFF (dt auto-clamped to the pole-cell CFL, 60-145 s) =
+# blowup day 1; ON (filter lifts the pole clamp -> dt=600) = COMPLETED, and
+# the 30-day soak (26138145) also completed.  NOTE the legs differ in dt as a
+# CONSEQUENCE of the filter — a-fortiori evidence (the filtered leg survived
+# at 4-10x the timestep); the dt-pinned one-variable leg is 26140562.  The
+# stable pre-drift reference (amip_ll_sota_30d_741) also carried the filter.
+# Side benefit: dt 60 -> 600 makes 30 d run in ~17 min wall (1 GPU).
 use_polar_filter: true
 # time_integrator: 'auto' (default) -> ssp_rk3 (non-scan) on lat-lon.  NOT
 # ssp_rk3_scan: its lax.scan carry enforces dtype equality and the latlon-cgrid
