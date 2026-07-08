@@ -124,8 +124,14 @@ def bulk_formula_surface_forcing(
             scheme=cfg.bulk_scheme,
             n_iter=cfg.bulk_n_iter,
         )
-        # Fluxes are positive upward; stress opposes wind
-        tau_x = -tau_x  # flip to positive eastward
+        # ``compute_most_fluxes`` returns stress in the ATMOSPHERIC convention
+        # (tau = -rho*u*^2 * u/|U|, i.e. it OPPOSES the wind — drag on the air).
+        # The ocean is forced by the stress in the WIND direction, so flip the
+        # sign of BOTH components consistently: positive = stress into the ocean
+        # along the wind (eastward for u_a>0, northward for v_a>0).  Flipping
+        # only tau_x (leaving tau_y in the atmospheric convention) would drive
+        # the ocean the WRONG way meridionally once v_a != 0.
+        tau_x, tau_y = -tau_x, -tau_y
     else:
         # Constant coefficients: wind is zonal-only (u_a = U_a, v_a = 0)
         # to match the directional convention used in the MOST path.

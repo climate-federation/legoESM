@@ -165,6 +165,68 @@ def test_rrtmgp_resolved_clouds_change_heating_vs_clear():
     assert float(np.max(np.abs(hr_cloud - hr_clear)) * 86400.0) > 1.0  # K/day
 
 
+def test_rrtmgp_clear_sky_toa_cre_sign():
+    """#843 clear-sky diagnostic: the clear-sky pass (``cloud_scheme='none'``,
+    no condensate) is exactly what ``compute_radiation_core`` runs for its
+    second RRTMGP call, and its TOA up-fluxes become ``rsutcs``/``rlutcs``.
+    Assert the physical cloud-radiative-effect signs those diagnostics must
+    satisfy against the all-sky pass, so ``rsut``/``rsutcs`` can never be
+    swapped or nulled silently:
+
+      * SW: a reflective liquid deck raises reflected SW at TOA ⇒
+        ``rsut`` (all-sky) > ``rsutcs`` (clear-sky), i.e. SW_CRE > 0.
+      * LW: the same mid-tropospheric deck emits at a colder-than-surface
+        temperature ⇒ it traps OLR ⇒ ``rlut`` (all-sky) < ``rlutcs``
+        (clear-sky), i.e. LW_CRE > 0.
+
+    ``compute_radiation_core`` reads TOA up-flux at level index 0
+    (``sw_flux_up[:, 0]`` / ``lw_flux_up[:, 0]``), matched here.
+    """
+    from legoesm.atmosphere.physics.radiation.config import (
+        RadiationConfig, RRTMGPConfig,
+    )
+    from legoesm.atmosphere.physics.radiation.integration import (
+        _call_radiation_backend,
+    )
+    nlev = 20
+    # index 0 = TOA (low p, cold), index nlev-1 = surface (high p, warm).
+    T = jnp.linspace(230.0, 300.0, nlev)[None, :]
+    p_full = jnp.linspace(2.0e4, 1.0e5, nlev)[None, :]
+    p_half = jnp.linspace(1.5e4, 1.013e5, nlev + 1)[None, :]
+    q_v = jnp.full((1, nlev), 5.0e-3)
+    # Mid-tropospheric liquid cloud deck (~700 hPa, T≈275 K < T_sfc=300 K):
+    # reflective in SW, colder-than-surface emitter in LW ⇒ both CRE > 0.
+    q_c = jnp.zeros((1, nlev)).at[0, 12:15].set(5.0e-4)
+
+    def toa_up(clouds):
+        cfg = RadiationConfig(
+            scheme="rrtmgp",
+            rrtmgp=RRTMGPConfig(include_clouds=clouds),
+            cloud_scheme="resolved" if clouds else "none",
+            cloud_config=CloudConfig(scheme="resolved", r_eff_liq=14.0e-6),
+        )
+        out = _call_radiation_backend(
+            radiation_config=cfg, T=T, p_full=p_full, p_half=p_half,
+            sfc_temperature=jnp.array([300.0]), lat=jnp.array([0.0]),
+            q_v=q_v, insolation=jnp.array([425.0]),
+            cos_sza=jnp.array([0.62]),
+            q_cloud=q_c if clouds else None, q_ice=None,
+            rrtmgp_solver=None,
+        )
+        # TOA (level index 0): SW-up (rsut/rsutcs), LW-up (rlut/rlutcs).
+        return (float(np.asarray(out.sw_flux_up)[0, 0]),
+                float(np.asarray(out.lw_flux_up)[0, 0]))
+
+    rsutcs, rlutcs = toa_up(False)   # clear-sky pass (the #843 2nd call)
+    rsut, rlut = toa_up(True)        # all-sky pass
+    for v in (rsutcs, rlutcs, rsut, rlut):
+        assert np.isfinite(v)
+    # SW cloud-radiative effect > 0: clouds reflect ⇒ all-sky SW-up higher.
+    assert rsut > rsutcs + 1.0, f"SW_CRE={rsut - rsutcs} not > 0 (W/m^2)"
+    # LW cloud-radiative effect > 0: clouds trap OLR ⇒ all-sky LW-up lower.
+    assert rlutcs > rlut + 1.0, f"LW_CRE={rlutcs - rlut} not > 0 (W/m^2)"
+
+
 def test_psd_ice_effective_radius_m2005():
     """RAD-1-ice: with explicit ``n_ice``, r_eff_ice = 1.5/LAMI (SAM M2005
     EFFI), LAMI=(ρ_ci·π·N_i/q_i)^(1/3) ⇒ scales q_i^⅓·N_i^−⅓ [m]; 25 µm

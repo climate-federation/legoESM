@@ -150,9 +150,16 @@ Key metrics are in `scaling_validation` and `mpi_validation.scaling`:
 
 ## 4. Ocean Scaling and MPI Hardware Tests
 
-There is currently no single ocean script equivalent to atmosphere
-`run_levante_gpu_scaling.py` for automated strong/weak MPI+multi-GPU gating.
-Use the workflow below to cover real ocean hardware behavior.
+> **Superseded caveat.** The earlier "no single ocean script equivalent to
+> `run_levante_gpu_scaling.py`" note is out of date. Two automated ocean
+> scaling drivers now exist with parity + conservation fail-fast gates:
+> `scripts/bench/bench_ocean_latlon_spmd_scaling.py` (full-step multi-GPU /
+> SPMD, single-process **and** `--multicontroller`) and
+> `scripts/bench/bench_ocean_mpi_scaling.py` (CPU-MPI latitude-band, with
+> `--wet-balance` and the distributed fixed-M PCG options). The
+> matrix-driven workflow below (§4.1–4.3) remains a valid single-process
+> runtime-trend + MPI-correctness cross-check. Grid coverage and status per
+> ocean grid: `scaling/SCALING_STATUS_AUDIT.md`.
 
 ### 4.1 Ocean scaling matrix (single-process runtime/perf trend)
 

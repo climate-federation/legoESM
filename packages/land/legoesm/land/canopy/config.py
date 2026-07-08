@@ -17,6 +17,8 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm.land.canopy.sif import SIFConfig
+
 
 # ---------------------------------------------------------------------------
 # PFT Vcmax25 lookup table [μmol m-2 s-1], columns [tropical, temperate, boreal]
@@ -197,6 +199,25 @@ class CanopyConfig(NamedTuple):
     wilting_point: float = 0.15   # theta_wp [m3/m3]
     field_capacity: float = 0.30  # theta_fc [m3/m3]
     n_root_layers: int = 5        # number of layers to integrate for root-zone stress
+
+    # Optional solar-induced fluorescence (SIF) diagnostic.  ``None`` (default)
+    # disables it; a ``SIFConfig`` enables the passive top-of-canopy SIF output
+    # (sunlit+shaded sum) on ``SurfaceFluxOutput.sif``.  Static config leaf —
+    # never traced, so the Python ``is not None`` gate does not double-trace.
+    sif: SIFConfig | None = None
+    # Whether the soil-moisture stress factor down-regulates the Ball-Berry
+    # INTERCEPT b0 (cuticular / residual minimum conductance) as well as the slope
+    # m.  True = legacy (both stressed).  False keeps b0 unstressed: the leaf
+    # cuticle keeps leaking under drought, so a baseline dry-season transpiration
+    # persists (raises LE at drought-adapted / phreatophytic sites), while adding
+    # negligible CO2 uptake — light/LAI-limited GPP is essentially unchanged
+    # (identically unchanged only at full Vcmax stress, where An -> 0 regardless
+    # of gs; at partial drought a slightly higher gs raises Ci and can nudge An
+    # up marginally).  Also floors gs at b0>0, avoiding the gs->0 Newton
+    # degeneracy.  Static Python bool.  Appended (not inserted mid-tuple) so a
+    # positional / tuple reconstruction of a pre-field CanopyConfig stays aligned
+    # and defaults this to the legacy True.
+    stress_b0: bool = True
 
 
 # Machine-readable tunable/fixed classification for every ``: float`` field of
@@ -411,6 +432,11 @@ class CanopyLandParams(NamedTuple):
     # Trailing optional field — None falls back to the 0.025 m midrange so
     # existing CanopyLandParams constructors need not be updated.
     d_leaf: jax.Array | None = None
+    # Persistent STRUCTURAL leaf area index [m2/m2] driving the forest-floor litter
+    # cover in the soil-evaporation resistance (a slowly-varying / seasonal-maximum
+    # LAI, so a deciduous forest floor keeps its litter through the leaf-off
+    # season).  Trailing optional field — None falls back to the live ``LAI``.
+    litter_LAI: jax.Array | None = None
 
 
 # NOTE: ``CanopyLandConfig`` has been removed.  Canopy is now a surface
@@ -517,6 +543,21 @@ class CLMMLCanopyConfig(NamedTuple):
     # (Bonan et al. 2021 GMD) for the beta-distribution PAD lower boundary.
     hbot_frac: float = 0.1
 
+    # Leaf-area-index source (mirrors ``CanopyConfig.use_prognostic_lai``):
+    #   False (default) → PRESCRIBED LAI: the climatology in
+    #     ``LandSurfaceParams.LAI`` (surfdata monthly, PFT-weighted) or the
+    #     scalar fallback in ``clm_ml_interface``.
+    #   True → PROGNOSTIC LAI: ``LAI = C_fol / LCMA`` from the DifferLand
+    #     carbon pool (``compute_prognostic_lai``), so leaf area responds to the
+    #     coupled carbon dynamics.  Requires ``land_config.carbon.scheme ==
+    #     "differland"`` and a non-None ``carbon_state``; otherwise the call
+    #     falls back to the prescribed LAI.  Canopy STRUCTURE (SAI, htop, hbot)
+    #     stays prescribed either way — the carbon cycle produces no allometric
+    #     height/stem mapping.  FORWARD-ONLY: CLM-ML is eager/non-jit, so the
+    #     carbon→LAI feedback is a prognostic forward coupling, not a
+    #     differentiable one (do not ``jax.grad`` through the CLM-ML interface).
+    use_prognostic_lai: bool = False
+
     # Soil thermal conductivity [W/m/K] used for the soil-to-canopy heat flux
     # linearization in MLSoilTemperatureMod.  CLM4.5 Table 3.3 moist loam
     # default; 0.9–1.5 W/m/K for wetter/sandier soils.
@@ -526,3 +567,10 @@ class CLMMLCanopyConfig(NamedTuple):
     # cos_zen is not available.  Corresponds to an overcast sky condition;
     # Erbs et al. (1982) gives f_dir ≈ 0.20–0.35 for low clearness index.
     f_dir_noclearness_fallback: float = 0.30
+
+    # Optional solar-induced fluorescence (SIF) diagnostic.  ``None`` (default)
+    # disables it; a ``SIFConfig`` enables the passive top-of-canopy SIF output
+    # on ``SurfaceFluxOutput.sif`` — a leaf-area-weighted sum over the CLM-ML
+    # canopy layers × sunlit/shaded leaves, sharing the same fluorescence core
+    # as the two-leaf / big-leaf paths.  Static config leaf, never traced.
+    sif: SIFConfig | None = None

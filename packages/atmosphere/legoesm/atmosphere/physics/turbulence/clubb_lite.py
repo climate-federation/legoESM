@@ -107,6 +107,7 @@ import jax
 import jax.numpy as jnp
 from legoesm.atmosphere.physics._shared import (
     broadcast_column_param,
+    buoyancy_coefficient,
     exner_function,
     mixing_length,
     virtual_temperature,
@@ -352,7 +353,8 @@ def clubb_lite_turbulence(
     theta_v = virtual_temperature(T, q_v) * exner_pref
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
-    N2_half = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
+    # N² = (g/θ_v)·∂θ_v/∂z via the shared buoyancy coefficient (clip at call site).
+    N2_half = buoyancy_coefficient(jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
 
     # iter-172 F841: removed ``exner`` / ``theta`` /
     # ``dtheta_dz`` / ``drt_dz`` — only consumed by the dead

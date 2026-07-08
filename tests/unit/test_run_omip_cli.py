@@ -374,3 +374,56 @@ def test_iwm_override_installs_physics_on_flat_latlon():
     assert config2.A_v == constants.nu_ocean_molecular
     assert config2.K_v == 1.0e-10
     assert model2._iwm_forcing is None            # uniform fallback mode
+
+
+def test_barotropic_wide_halo_flags_round_trip():
+    """--barotropic-wide-halo(-chunk) reach the nested BarotropicConfig via
+    the flat-name mapping and the drag/iwm override hook; default is OFF
+    (bit-identical config)."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from scripts.run.run_omip import _apply_drag_iwm_overrides
+
+    off = parse_args(["--grid", "latlon"])
+    assert off.barotropic_wide_halo is False
+    assert off.barotropic_wide_halo_chunk == 0
+
+    args = parse_args(["--grid", "latlon", "--barotropic-wide-halo",
+                       "--barotropic-wide-halo-chunk", "4"])
+    assert args.barotropic_wide_halo is True
+    assert args.barotropic_wide_halo_chunk == 4
+
+    grid = create_latlon_grid(n_lat=6, n_lon=8)
+    z = create_ocean_z_star(n_levels=4, H_max=2000.0)
+    config = LatLonCGridOceanConfig.from_flat()
+    model = LatLonCGridOceanModel(grid, z, config)
+    config2, _model2 = _apply_drag_iwm_overrides(
+        args, "latlon", grid, z, config, model)
+    assert config2.barotropic.barotropic_wide_halo is True
+    assert config2.barotropic.barotropic_wide_halo_chunk == 4
+    # The flag also sets the (validator-required) explicit local clamp.
+    assert config2.barotropic.barotropic_local_subcycle_clamp is True
+    # No-flag path leaves the config object bit-identical.
+    config3, _ = _apply_drag_iwm_overrides(off, "latlon", grid, z,
+                                           config, model)
+    assert config3.barotropic.barotropic_wide_halo is False
+
+
+def test_barotropic_wide_halo_refused_off_latlon():
+    """Non-latlon grids must refuse the flag loudly, not silently ignore."""
+    import pytest as _pytest
+
+    from scripts.run.run_omip import _apply_drag_iwm_overrides
+
+    args = parse_args(["--grid", "cubed_sphere", "--barotropic-wide-halo"])
+
+    class _StubCfg:  # cube ocean config: no flat barotropic fields
+        bottom_drag_scheme = "legacy"
+
+    with _pytest.raises(SystemExit, match="wide-halo"):
+        _apply_drag_iwm_overrides(
+            args, "cubed_sphere", None, None, _StubCfg(), object())

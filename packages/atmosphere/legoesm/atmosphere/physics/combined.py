@@ -189,8 +189,10 @@ def make_physics(
             sfc_emissivity_override=sfc_emissivity_override,
         )
     elif model_type == "mpas":
-        fn = _make_mpas_combined(
-            config, dt, column_mesh=column_mesh, need_rad=need_rad)
+        # MPAS (Voronoi mesh) uses the unified hydrostatic combined path.
+        fn = _make_hydrostatic_combined(
+            config, dt, model_type="mpas", column_mesh=column_mesh,
+            need_rad=need_rad)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -215,18 +217,23 @@ def physics_config_requires_phys_state(config: PhysicsConfig) -> bool:
     from legoesm.atmosphere.physics.convection.integration import (
         convection_scheme_traits,
     )
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+        gwd_carries_spectrum,
+    )
     # Profile-prognostic convection counts as stateful (codex round 5):
     # the bridge reads phys_state.conv_prog_profile for ZM/KF/Emanuel/
     # Tiedtke/Bechtold and falls back to zeros when the carry is absent
     # — Tiedtke concretely relaxes the previous profile into M_u_new,
     # so a dropped carry silently erases that memory every step.
     conv = convection_scheme_traits(config.convection.scheme)
+    # A '+'-composite containing prognostic_spectral carries the wave-action
+    # spectrum too (issue #834), so it also requires a threaded PhysicsState.
     return bool(
         turbulence_scheme_traits(config.turbulence.scheme).carries_energy
         or conv.is_scalar_prognostic
         or conv.is_profile_prognostic
         or conv.is_stochastic
-        or config.gravity_wave_drag.scheme == "prognostic_spectral"
+        or gwd_carries_spectrum(config.gravity_wave_drag.scheme)
     )
 
 
@@ -835,15 +842,3 @@ def _make_spectral_pe_combined(
         getattr(fn, "_wants_forcing", False) for fn, _, _ in tagged_fns
     )
     return physics_fn
-
-
-# ======================================================================
-# MPAS (Voronoi mesh) — uses unified hydrostatic combined path
-# ======================================================================
-
-def _make_mpas_combined(config: PhysicsConfig, dt: float,
-                        column_mesh=None, need_rad: bool = True) -> Callable:
-    return _make_hydrostatic_combined(
-        config, dt, model_type="mpas", column_mesh=column_mesh,
-        need_rad=need_rad,
-    )

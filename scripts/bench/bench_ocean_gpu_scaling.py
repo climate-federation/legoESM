@@ -323,7 +323,14 @@ def main() -> int:
         backend=backend,
         hostname=os.environ.get("HOSTNAME", "unknown"),
     )
-    write_json(report, out_dir / "ocean_scaling.json")
+    # component="ocean" (write_json's default stamps "atmosphere");
+    # scaling_kind="throughput": single-device size sweep — a saturation
+    # curve, NOT device-count scaling (SCALING_STATUS_AUDIT.md tag (b)).
+    write_json(
+        report, out_dir / "ocean_scaling.json",
+        component="ocean",
+        metadata_overrides={"scaling_kind": "throughput"},
+    )
     print(f"\nResults: {out_dir}/ocean_scaling.{{csv,json}}")
     if failures:
         print(f"\n{len(failures)} case(s) FAILED:")

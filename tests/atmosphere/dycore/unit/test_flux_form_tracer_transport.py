@@ -70,6 +70,59 @@ def _column_water(delp, q, area):
         area[..., None] * delp * q, dtype=jnp.float64))
 
 
+def test_transport_step_4d_matches_vmap():
+    """#811: ``transport_step_4d`` (ONE ``pad_halo_4d`` per exchange for all
+    levels) is BIT-IDENTICAL to the per-level ``vmap(transport_step(
+    mass_target=None))`` on single-rank — a halo is a pure index gather (no
+    reduction), so the 4D exchange introduces no fp-associativity change.  This
+    is the anchor that certifies the 4D refactor did not perturb the numerics;
+    the MPI 1-vs-2-rank test then certifies the single-message correctness."""
+    from legoesm.core.fv_tp_2d import transport_step, transport_step_4d
+    _grid, cdgrid, ut, vt, delp, _area = _setup(n=12, nlev=5)
+
+    out_4d = transport_step_4d(delp, ut, vt, 600.0, cdgrid, hord=8)
+    out_vmap = jax.vmap(
+        lambda h, u, v: transport_step(
+            h, u, v, 600.0, cdgrid, mass_target=None, hord=8),
+        in_axes=(-1, -1, -1), out_axes=-1)(delp, ut, vt)
+
+    assert out_4d.shape == delp.shape
+    rel = float(jnp.max(jnp.abs(out_4d - out_vmap))
+                / (jnp.max(jnp.abs(out_vmap)) + 1e-30))
+    assert rel < 1e-13, (
+        f"transport_step_4d not bit-identical to vmap(transport_step): "
+        f"rel={rel:.3e}")
+
+
+def test_d2a2c_vect_4d_matches_vmap():
+    """#811: ``d2a2c_vect_4d`` (ONE ``pad_halo_vector_4d`` for all levels) is
+    BIT-IDENTICAL to per-level ``vmap(d2a2c_vect)`` on single-rank — the A→C tail
+    numerics are SHARED verbatim (the ``global_fields=`` fast path), only the
+    vector wind halo is batched into one message."""
+    from legoesm.core.fv3_sw_core import d2a2c_vect, d2a2c_vect_4d
+    n, nlev = 12, 5
+    grid = create_cubed_sphere(n)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    jx = jnp.arange(n + 1) / n
+    ud = jnp.stack(
+        [(20.0 + 3.0 * k) * jnp.sin(2 * jnp.pi * jx)[None, None, :]
+         * jnp.ones((6, n, n + 1)) for k in range(nlev)], axis=-1
+    ).astype(jnp.float64)                                  # (6, n, n+1, nlev)
+    vd = jnp.stack(
+        [(15.0 + 2.0 * k) * jnp.cos(2 * jnp.pi * jx)[None, :, None]
+         * jnp.ones((6, n + 1, n)) for k in range(nlev)], axis=-1
+    ).astype(jnp.float64)                                  # (6, n+1, n, nlev)
+
+    out_4d = d2a2c_vect_4d(ud, vd, cdgrid)
+    out_vmap = jax.vmap(
+        lambda u, v: d2a2c_vect(u, v, cdgrid),
+        in_axes=(-1, -1), out_axes=-1)(ud, vd)
+    for a, b, name in zip(out_4d, out_vmap,
+                          ("ua", "va", "uc", "vc", "ut", "vt")):
+        rel = float(jnp.max(jnp.abs(a - b)) / (jnp.max(jnp.abs(b)) + 1e-30))
+        assert rel < 1e-13, f"d2a2c_vect_4d {name} not bit-identical: rel={rel:.3e}"
+
+
 def test_mass_conservation_under_divergent_wind():
     grid, cdgrid, ut, vt, delp, area = _setup()
     n = grid.lat.shape[1]

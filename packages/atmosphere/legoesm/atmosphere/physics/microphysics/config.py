@@ -243,6 +243,14 @@ __param_spec__ = {
             "qc_crit": {"units": "kg/kg", "bounds": (0.0001, 0.0015), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist et al. (1989)", "shape": None},
             "auto_rate": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist et al. (1989)", "shape": None},
             "evap_coeff": {"units": "1", "bounds": (0.0001, 0.0015), "tunable_tier": 2, "transform": "sigmoid", "category": "evaporation", "reference": "Sundqvist et al. (1989)", "shape": None},
+            # SBK89 Sec. 5 precipitation-release enhancements: coalescence F1
+            # (function of the precipitation flux from above) and Bergeron F2
+            # (mixed-phase temperature window); c_0 is multiplied and q_c,crit
+            # divided by F1*F2.
+            "coalescence_enh_coeff": {"units": "(kg m^-2 s^-1)^-1/2", "bounds": (0.0, 1000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
+            "bergeron_enh_coeff": {"units": "1", "bounds": (0.0, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
+            "bergeron_T_peak_K": {"units": "K", "bounds": (248.0, 268.0), "tunable_tier": 3, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
+            "bergeron_T_width_K": {"units": "K", "bounds": (2.0, 15.0), "tunable_tier": 3, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
         },
     },
     "ThompsonConfig": {
@@ -325,6 +333,19 @@ class SundqvistConfig(NamedTuple):
     # is large enough).  0 → the linear no-threshold limit.
     qc_crit: float = 5e-4             # [kg/kg]
     evap_coeff: float = 5e-4          # Sub-cloud evaporation coefficient
+    # --- SBK89 (Sec. 5) precipitation-release enhancements ---
+    # Coalescence F1 = 1 + c1·sqrt(P) with P the precipitation flux falling
+    # in from above [kg m^-2 s^-1]: existing precipitation collects cloud
+    # water and accelerates release (F1 ≈ 6 at 1 mm/h with the default).
+    # 0 → enhancement off (plain Sundqvist base autoconversion).
+    coalescence_enh_coeff: float = 300.0   # c1 [(kg m^-2 s^-1)^-1/2]
+    # Bergeron-Findeisen F2 = 1 + c2·exp(−((T − T_peak)/T_width)²): a smooth
+    # mixed-phase window peaking near −15 °C, where the ice-liquid saturation
+    # difference e_sw − e_si (the Bergeron growth driver) is largest; decays
+    # to ~1 above freezing by construction.  0 → enhancement off.
+    bergeron_enh_coeff: float = 3.0        # peak amplification [-]
+    bergeron_T_peak_K: float = constants.T_freeze - 15.0   # [K]
+    bergeron_T_width_K: float = 7.0        # Gaussian half-width [K]
 
 
 class SeifertBehengConfig(NamedTuple):

@@ -604,10 +604,13 @@ def _modon_hyperdiff_coeff(n: int) -> float:
     ``LEGOESM_SW_MODON_HYPERDIFF_FACTOR`` (default ``MODON_HYPERDIFF_FACTOR`` ==
     1.0) scales the ``cdgrid_hyperdiff_cube`` base;
     ``LEGOESM_SW_MODON_HYPERDIFF_SCALING`` (default ``MODON_HYPERDIFF_SCALING``
-    == 4) selects the resolution law — ``4`` == the calibrated ``(ref_n/n)^4``
-    grid-scale-damping-time-constant law (byte-identical at every resolution to
-    the pre-#753 expression), ``2`` == the ``(ref_n/n)^2`` FV3 div-damp law the
-    #753 diagnosis wants at C96+ (unchanged at C48).  The ``SCALING`` env is an
+    == 2) selects the resolution law — ``2`` == the ``(ref_n/n)^2`` FV3 div-damp
+    law (the #753 item-1 default: C96 erupts at the face seams under ^4 but is
+    stable under ^2, validated 100 days at C36/C48/C96 with mass drift 0;
+    exponent-invariant at C48, and note the matrix cube default C36 DOES change
+    — 0.56x, validated PASS), ``4`` == the ``(ref_n/n)^4`` grid-scale-damping-time-
+    constant law (byte-identical at every resolution to the pre-#753 expression).
+    The ``SCALING`` env is an
     open-ended sensitivity probe (any positive int), unlike the
     ``run_colliding_modons.py`` CLI which restricts to the two documented laws
     ``{2, 4}``.  Defaults come from the shared ``MODON_*`` constants so the
@@ -2486,10 +2489,11 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             _m_dv = float(os.environ.get(
                 "LEGOESM_SW_MODON_DAMP_V", str(MODON_DAMP_V)))
             # #521/#753: biharmonic backstop from the env knobs (default env ->
-            # the calibrated (ref/n)^4 law, byte-identical at every resolution;
-            # LEGOESM_SW_MODON_HYPERDIFF_SCALING=2 opts into the (ref/n)^2 law
-            # for C96+, physics-validation cluster-pending).  See
-            # ``_modon_hyperdiff_coeff``.
+            # the (ref/n)^2 law, the #753 item-1 default: C96 erupts at the face
+            # seams under ^4 but is stable under ^2, validated 100 days at
+            # C36/C48/C96 with mass drift 0; C48 is exponent-invariant.
+            # LEGOESM_SW_MODON_HYPERDIFF_SCALING=4 opts back into the pre-#753
+            # (ref/n)^4 law.  See ``_modon_hyperdiff_coeff``.
             config = iter1009_dual_target_config(
                 n, div_damp_factor=_m_dd, damp_v=_m_dv,
                 hyperdiff_coeff=_modon_hyperdiff_coeff(n),

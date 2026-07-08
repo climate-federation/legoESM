@@ -80,13 +80,23 @@ def _make_driver_optimizer(
 # Shared helpers (avoid copy-paste across modes)
 # ======================================================================
 
-def _build_training_segment(model, step_unified, grid, sigma, dt, **extra_kwargs):
+def build_training_segment(model, step_unified, grid, sigma, dt,
+                            fric_decay=None, **extra_kwargs):
     """Build a segment function with standard training defaults.
 
     Encapsulates the boilerplate kwargs shared by all training modes.
     Returns the compiled segment function (use ``.raw`` for AD).
+
+    ``fric_decay``: per-level Rayleigh-friction decay factors (the driver's
+    ``exp(-k_f dt)`` boundary-layer profile). Pass the DRIVER's profile for
+    rollouts whose physics provides no dissipation of its own (pure-dycore
+    epoch-0 neural_gcm / sfno): without it the forward 6 h rollout stays
+    finite but the 720-step ADJOINT through the undamped dycore returns NaN
+    gradients (#797 bug 11). ``None`` keeps the legacy no-friction ones.
     """
     sigma_full = jnp.asarray(sigma.sigma_full)
+    if fric_decay is None:
+        fric_decay = jnp.ones(sigma_full.shape[0])
     return build_segment_fn(
         model=model,
         step_unified=step_unified,
@@ -98,7 +108,7 @@ def _build_training_segment(model, step_unified, grid, sigma, dt, **extra_kwargs
         microphysics="none",
         fix_moisture=False,
         fix_mass=False,
-        fric_decay=jnp.ones(sigma_full.shape[0]),
+        fric_decay=jnp.asarray(fric_decay),
         # Kept 0.0 on every grid: finalize_split_step's q_v smoothing calls the
         # cube ``hyperdiffusion_3d`` (reads cube-only ``grid.halo_interp_offsets``)
         # regardless of grid, so a nonzero coeff would crash on lat-lon.  The
@@ -401,7 +411,7 @@ def train_physics_params(
         # ``step_unified`` is param-independent (built once above); only the
         # segment kwargs carry the (traced) trainable values, so the gradient
         # path to ``trainable`` runs through ``build_segment_fn``.
-        return _build_training_segment(
+        return build_training_segment(
             model, step_unified, grid, sigma, dt,
             **trainable.to_segment_kwargs(),
         )
@@ -463,7 +473,7 @@ def train_neural_gcm(
 
     def make_run_seg(nn_phys):
         step_unified = make_neural_step_unified(nn_phys, adapter)
-        return _build_training_segment(model, step_unified, grid, sigma, dt)
+        return build_training_segment(model, step_unified, grid, sigma, dt)
 
     optimizer = _make_driver_optimizer(
         lr, "adamw", n_epochs, len(initial_carries),
@@ -541,7 +551,7 @@ def train_sfno_coupled(
             mode=coupling_mode,
             traditional_step_unified=traditional_step,
         )
-        return _build_training_segment(model, step_unified, grid, sigma, dt)
+        return build_training_segment(model, step_unified, grid, sigma, dt)
 
     optimizer = _make_driver_optimizer(
         lr, "adamw", n_epochs, len(initial_carries),
