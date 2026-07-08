@@ -37,6 +37,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
+from legoesm.atmosphere.physics._shared import compute_rho, exner_function
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_cape,
     compute_moist_adiabat,
@@ -243,8 +244,15 @@ def bechtold_convection(
     # so the sub-LCL leg is DRY adiabatic, not saturated.  A SINGLE adiabat is
     # used for CAPE, LFC and LNB (a second separate scan tripped an XLA CPU
     # compile abort); consistency is the physically correct choice anyway.
+    # Dry-adiabatic (theta-preserving) translation of the parcel temperature
+    # from ``p_parcel_source`` to ``p_base``: T(p_base) = theta * Pi(p_base),
+    # theta = T_parcel / Pi(p_parcel_source), so the ratio is
+    # Pi(p_base)/Pi(p_parcel_source) = (p_base/p_parcel_source)^kappa. Route
+    # through the shared Exner helper (no inline (p/p_ref)^kappa power).
     T_parcel_at_sfc = (
-        T_parcel * (p_base / jnp.maximum(p_parcel_source, 1.0)) ** constants.kappa
+        T_parcel
+        * exner_function(p_base)
+        / exner_function(jnp.maximum(p_parcel_source, 1.0))
     )
     T_moist = compute_moist_adiabat(T_parcel_at_sfc, p_full, q_v_base=q_parcel)
     # Virtual-temperature CAPE: parcel vapour (capped at saturation along the
@@ -275,7 +283,11 @@ def bechtold_convection(
     # -- LCL, LFC/LNB ------------------------------------------------------
     lcl = compute_lcl(T_parcel, q_parcel, p_parcel_source, p_full)
     k_lcl_smooth = lcl.k_lcl_smooth
-    k_lfc_smooth, k_lnb_smooth = compute_lfc_lnb(T, T_moist, sharpness=1.0)
+    # LFC/LNB on the SAME virtual-T buoyancy as the CAPE above (same
+    # parcel-vapor profile ``q_v_parcel``).
+    k_lfc_smooth, k_lnb_smooth = compute_lfc_lnb(
+        T, T_moist, sharpness=1.0, q_v_env=q_v, q_v_parcel=q_v_parcel,
+    )
 
     # Cloud depth.
     levels_arr = jnp.arange(nlev, dtype=T.dtype)
@@ -320,7 +332,9 @@ def bechtold_convection(
     # ``g/rho_BL`` factor stands in for the ZM cloud-work-function sensitivity.
     # The earlier formula omitted ``rho_BL`` and ``g``; magnitude was
     # masked operationally only by ``M_b_max``.
-    rho_BL = p_full[:, -1] / (constants.R_d * jnp.maximum(T[:, -1], 1.0))
+    # Dry boundary-layer density via the shared ideal-gas helper (same
+    # 1 K temperature clip as the previous inline form).
+    rho_BL = compute_rho(T[:, -1], p_full[:, -1])
     M_b_pbl_cape = (
         cape_weight
         * rho_BL
@@ -529,8 +543,11 @@ def bechtold_convection(
 
     # -- Optional downdraft (RH-dependent) ---------------------------------
     if config.enable_downdraft:
+        # ``lcl_membership_sharpness`` is a LEVEL-INDEX sharpness
+        # [1/level] (surface-last: larger index = below LCL altitude).
         below_lcl = jax.nn.sigmoid(
-            2.0 * (levels_arr[None, :] - k_lcl_smooth[:, None])
+            config.lcl_membership_sharpness
+            * (levels_arr[None, :] - k_lcl_smooth[:, None])
         )
         q_sat_env = saturation_mixing_ratio(T, p_full)
         rh_layer = q_v / jnp.maximum(q_sat_env, 1e-12)
@@ -549,8 +566,11 @@ def bechtold_convection(
         _below_lcl_dp = _col_triple[..., 0]
         below_mass = _below_lcl_dp + 1e-6
         rh_below = _col_triple[..., 1] / below_mass
+        # RH-FRACTION sharpness [1/RH]: the argument is O(0.1), so the
+        # default 10 gives a crisp trigger around ``downdraft_RH_min``.
         downdraft_trigger = jax.nn.sigmoid(
-            10.0 * (config.downdraft_RH_min - rh_below)
+            config.downdraft_rh_sharpness
+            * (config.downdraft_RH_min - rh_below)
         )
         M_d_base = -config.downdraft_alpha * M_b * downdraft_trigger
         # Subcloud rain-evaporation cooling — see tiedtke.py for the

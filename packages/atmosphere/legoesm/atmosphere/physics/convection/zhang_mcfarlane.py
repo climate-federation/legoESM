@@ -42,6 +42,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics._shared import compute_rho
 from legoesm.atmosphere.physics.thermodynamics import (
     parcel_profile_and_cape,
 )
@@ -218,7 +219,9 @@ def zhang_mcfarlane_convection(
     # the runaway was masked operationally only by the ``M_b_max`` cap,
     # but the gradient w.r.t. CAPE was off by the same factor and ``M_b``
     # did not scale with the surface air density at all.
-    rho_BL = p_full[:, -1] / (constants.R_d * jnp.maximum(T[:, -1], 1.0))
+    # Dry boundary-layer density via the shared ideal-gas helper (same
+    # 1 K temperature clip as the previous inline form).
+    rho_BL = compute_rho(T[:, -1], p_full[:, -1])
     M_b_eq = (
         cape_weight
         * rho_BL

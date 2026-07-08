@@ -196,7 +196,7 @@ def moist_adiabat_lapse_rate(
     return (R_d * T / (c_pd * p)) * numerator / denominator
 
 
-def _bolton_lcl_temperature(
+def bolton_lcl_temperature(
     T_base: jax.Array,
     p_base: jax.Array,
     q_v_base: jax.Array,
@@ -205,10 +205,21 @@ def _bolton_lcl_temperature(
 
     ``T_LCL = 1 / [ 1/(T - 55) - ln(RH)/2840 ] + 55``.
 
-    Inlined here (rather than imported from
-    :mod:`legoesm.atmosphere.physics.convection._plume`) to avoid a
-    convection → thermodynamics import cycle: the plume helper already
-    imports :func:`compute_moist_adiabat` from this module.
+    This is the CANONICAL Bolton LCL implementation — the 55 K offset and
+    2840 K denominator live only here.  Consumers:
+    :func:`compute_moist_adiabat` (this module) and
+    :func:`legoesm.atmosphere.physics.convection._plume.compute_lcl`
+    (which adds the plume-specific Poisson ``p_lcl`` and smooth crossing
+    index on top).  Do not re-implement the formula elsewhere.
+
+    Parameters
+    ----------
+    T_base : jax.Array
+        Parcel temperature at the launch level [K].
+    p_base : jax.Array
+        Parcel launch pressure [Pa].
+    q_v_base : jax.Array
+        Parcel water-vapor mixing ratio at the launch level [kg/kg].
     """
     from legoesm.thermo import saturation_mixing_ratio as _q_sat
 
@@ -216,6 +227,42 @@ def _bolton_lcl_temperature(
     RH = jnp.clip(q_v_base / jnp.maximum(q_sat_base, 1.0e-12), 1.0e-4, 1.0)  # coeff-ok: RH floor
     T_minus_55 = jnp.maximum(T_base - _LCL_T_OFFSET_K, 1.0)
     return 1.0 / (1.0 / T_minus_55 - jnp.log(RH) / _LCL_BOLTON_DENOM) + _LCL_T_OFFSET_K
+
+
+def latent_heat_vaporization(
+    T: jax.Array,
+    c_liquid: float = constants.c_pw,
+) -> jax.Array:
+    """Kirchhoff temperature-dependent latent heat of vaporization [J/kg].
+
+    ``L(T) = L_v − (c_liquid − c_pv) · (T − T_freeze)``
+
+    with ``L_v`` the vaporization latent heat at 0 °C and the slope set by
+    the specific-heat difference between liquid water and water vapor
+    (Kirchhoff's relation).  Default ``c_liquid = constants.c_pw``
+    (4218 J/kg/K) gives a slope of ``−(c_pw − c_pv) ≈ −2372 J/kg/K``.
+    Emanuel's CONVECT passes its own tunable liquid heat capacity
+    ``c_l_emanuel`` in place of ``c_pw`` (same base formula).
+
+    Distinct from :func:`legoesm.thermo.latent_heat_vaporization_sst`,
+    which is the NEMO/AeroBulk *air-sea empirical* convention
+    (slope ``constants.L_v_sst_slope`` ≈ 2370 J/kg/K, applied to SST);
+    this helper is the thermodynamic Kirchhoff form used inside moist
+    parcel/entropy budgets.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Air/parcel temperature [K].
+    c_liquid : float
+        Liquid-water specific heat [J/kg/K] (default ``constants.c_pw``).
+
+    Returns
+    -------
+    jax.Array
+        Latent heat of vaporization at ``T`` [J/kg].
+    """
+    return constants.L_v - (c_liquid - constants.c_pv) * (T - constants.T_freeze)
 
 
 def compute_moist_adiabat(
@@ -284,7 +331,7 @@ def compute_moist_adiabat(
         p_lcl = p_base
     else:
         q_v_base = q_v_base.astype(_dtype)
-        T_lcl = _bolton_lcl_temperature(T_base, p_base, q_v_base).astype(_dtype)
+        T_lcl = bolton_lcl_temperature(T_base, p_base, q_v_base).astype(_dtype)
         # Poisson relation: dry-adiabatic descent (or ascent) between
         # the base and the LCL.
         p_lcl = p_base * (T_lcl / jnp.clip(T_base, 1.0, None)) ** (

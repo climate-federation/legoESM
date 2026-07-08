@@ -919,7 +919,11 @@ def kain_fritsch_convection(
         q_parcel_lcl = q_usl + config.parcel_perturb_q
     lcl = compute_lcl(T_parcel_lcl, q_parcel_lcl, p_usl, p_full)
     k_lcl_smooth = lcl.k_lcl_smooth
-    k_lfc_smooth, k_lnb_smooth = compute_lfc_lnb(T, T_moist, sharpness=1.0)
+    # LFC/LNB on the SAME virtual-T buoyancy as the CAPE above (same
+    # parcel-vapor profile ``q_v_parcel``).
+    k_lfc_smooth, k_lnb_smooth = compute_lfc_lnb(
+        T, T_moist, sharpness=1.0, q_v_env=q_v, q_v_parcel=q_v_parcel,
+    )
     # Plume launch parcel (seeded with the sub-cloud perturbation).  The
     # plume integrator starts its scan from the SURFACE level, so the launch
     # temperature must be the surface-pressure dry-adiabatic equivalent of
@@ -1038,7 +1042,13 @@ def kain_fritsch_convection(
         config.timec_max_s,
     )
     timec = jnp.maximum(timec, dt)
-    rho_BL = p_full[:, -1] / (constants.R_d * jnp.maximum(T[:, -1], 1.0))
+    # MOIST boundary-layer density: reuse the surface level of the
+    # virtual-T column geometry computed above (``compute_column_geometry
+    # (..., q_v=q_v)`` → ``rho = p/(R_d·T_v)``).  A dry ``p/(R_d·T)``
+    # here overestimated ``rho_BL`` (hence ``M_b``) by ~(1+0.61·q_v) ≈
+    # 1-2 % in a humid tropical sub-cloud layer, inconsistent with the
+    # module's stated moist-geometry convention.
+    rho_BL = rho[:, -1]
     # The oracle drives its closure off the ENTRAINMENT-DILUTED updraft
     # buoyant energy ABE, which is markedly smaller than the undilute
     # surface-parcel CAPE that ``compute_cape`` returns (oracle ABE=5482 vs
