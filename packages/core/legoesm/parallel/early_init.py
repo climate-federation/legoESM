@@ -330,6 +330,14 @@ def init_multicontroller_distributed(coordinator: str | None = None) -> None:
 
     import jax
 
+    # Cross-path idempotency on the explicit-coordinator path too: an
+    # out-of-band bootstrap may have federated already — a second
+    # initialize() raises (codex).  Still verify the federation size.
+    if jax.distributed.is_initialized():
+        _INITIALIZED = True
+        check_no_silent_process_fallback()
+        return
+
     n_procs = int(os.environ.get(
         "OMPI_COMM_WORLD_SIZE", os.environ.get("PMI_SIZE", "0")))
     proc_id = int(os.environ.get(
