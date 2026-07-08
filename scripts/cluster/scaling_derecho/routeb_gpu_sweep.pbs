@@ -70,7 +70,7 @@ case "$GRID" in
   *) echo "ERROR: routeb_gpu_sweep GRID='$GRID' unsupported (latlon|icosahedral|cubed-sphere; spectral=no route-B)." >&2; exit 2 ;;
 esac
 RES_LIST="${RES_LIST//[:,]/ }"          # accept colon/comma-separated (survives qsub -v)
-GPU_RANKS="${GPU_RANKS//,/ }"
+GPU_RANKS="${GPU_RANKS//[:,]/ }"        # colon/comma-separated ok (survives qsub -v)
 N_WARMUP="${N_WARMUP:-3}"
 N_TIMING="${N_TIMING:-30}"
 PHYSICS="${PHYSICS:-none}"              # cube --cs-spmd only (none|moist); 'none'=dry
