@@ -42,9 +42,22 @@ import json
 import os
 import time
 
+import sys
+from pathlib import Path
+
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+# Bench dir for the shared metadata module (sibling-script import pattern —
+# needed when this file is loaded by path from tests, not run as a script).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Shared self-describing scaling metadata (anti-fake-scaling audit): merged
+# under rec["metadata"] so a virtual-CPU-device proxy, a gloo/TCP fabric run,
+# or an f32 ablation is falsifiable from the JSONL row alone.  metadata.py
+# imports JAX lazily, so this is safe before jax.distributed.initialize.
+from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
 
 
 def _build(n_lat, n_lon, nlev):
@@ -193,6 +206,29 @@ def main() -> int:
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=n_lat * args.n_lon * args.nlev,
     )
+    rec["metadata"] = annotate_incomplete(scaling_metadata(
+        grid="latlon",
+        component="atmosphere",
+        resolution=f"{n_lat}x{args.n_lon}",
+        n_levels=args.nlev,
+        precision="float64" if jax.config.jax_enable_x64 else "float32",
+        n_gpus=(nd if jax.default_backend() in ("gpu", "cuda", "rocm")
+                else 0),
+        decomposition="band" if nd > 1 else "none",
+        # cells_per_rank is per PROCESS (n_ranks semantics); the per-device
+        # share lives in extra.cells_per_device — a single-process 4-device
+        # SPMD run has 1 rank owning ALL cells (codex finding 3).
+        cells_per_rank=(n_lat * args.n_lon * args.nlev)
+        // max(jax.process_count(), 1),
+        scaling_kind=args.mode,
+        extra={
+            "physics": args.physics,
+            "steps": args.steps,
+            "warmup": args.warmup,
+            "multicontroller": bool(args.multicontroller),
+            "cells_per_device": (n_lat // nd) * args.n_lon * args.nlev,
+        },
+    ))
     # Multi-controller: every process times the same program; process 0 owns
     # the JSONL + stdout (others would duplicate/corrupt the append).
     if jax.process_index() == 0:
@@ -203,6 +239,10 @@ def main() -> int:
         print(f"[nd={nd} {args.mode} {n_lat}x{args.n_lon}x{args.nlev}] "
               f"compile={rec['compile_ms']}ms steady_median={med:.2f}ms/step "
               f"(per-step: {rec['per_step_ms']})")
+        if rec["metadata"]["virtual_cpu_devices"]:
+            print("[virtual-cpu] forced host-platform CPU devices: this row "
+                  "is a communication-overhead / correctness proxy, NOT "
+                  "hardware scaling — do not report it as a speedup.")
     return 0
 
 

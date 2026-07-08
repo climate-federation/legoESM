@@ -2307,9 +2307,19 @@ def write_csv(results: list[TimingResult], path: Path) -> None:
 
 
 def write_json(
-    report: ScalingReport, path: Path, *, n_ranks_true: int | None = None
+    report: ScalingReport,
+    path: Path,
+    *,
+    n_ranks_true: int | None = None,
+    component: str = "atmosphere",
+    metadata_overrides: dict | None = None,
 ) -> None:
     """Write full report to JSON.
+
+    ``component`` labels every row's metadata block — cross-script consumers
+    (``bench_ocean_mpi_scaling.py``) MUST pass their own component so an
+    ocean row is never stamped "atmosphere".  ``metadata_overrides`` merges
+    extra ``scaling_metadata`` kwargs (e.g. ``solver_variant``) into each row.
 
     ``n_ranks_true`` is the real MPI world size from ``_maybe_init_distributed``
     (1 for single-process SPMD, N for the route-A MPI path).  It MUST be passed
@@ -2319,6 +2329,14 @@ def write_json(
     ``mpirun -np N`` run.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _live_process_count() -> int:
+        try:
+            import jax
+
+            return int(jax.process_count())
+        except Exception:
+            return 1
 
     def _decomp(grid: str) -> str:
         # MPI route-A (world size > 1): grid-specific domain decomposition;
@@ -2339,24 +2357,40 @@ def write_json(
         # the row's device count (scaling axis); n_ranks is the true MPI world
         # size (SPMD -> 1; route-A -> N), NOT jax.process_count() which is 1 on
         # single-node MPI where jax.distributed is not initialized.
-        d["metadata"] = annotate_incomplete(scaling_metadata(
+        md_kwargs: dict = dict(
             grid=r.grid_type,
-            component="atmosphere",
+            component=component,
             resolution=r.resolution,
             n_levels=r.n_levels,
             precision=r.precision,
             n_ranks=n_ranks_true,
+            # n_ranks_true>1 is by contract the route-A MPI path (mpi4jax
+            # halos) — pin the transport explicitly, because a multi-node
+            # route-A run may ALSO have jax.distributed initialized
+            # (process_count == n_ranks), which would auto-resolve to
+            # nccl/gloo and mislabel the fabric (codex finding 1).
+            transport=("mpi4jax" if (n_ranks_true or 1) > 1 else None),
             n_gpus=r.n_gpus,
             decomposition=os.environ.get("LEGOESM_DECOMPOSITION")
             or _decomp(r.grid_type),
-            cells_per_rank=r.cells_per_gpu,
+            # cells_per_rank is per PROCESS (n_ranks semantics): route-A
+            # divides by the true MPI world; otherwise by the live process
+            # count (1 for single-process SPMD — that one rank owns ALL
+            # cells).  The per-device share stays in extra.cells_per_device.
+            cells_per_rank=r.total_cells // max(
+                n_ranks_true if (n_ranks_true and n_ranks_true > 1)
+                else _live_process_count(), 1),
             scaling_kind=os.environ.get("LEGOESM_SCALING_KIND") or None,
             extra={
                 "physics_level": r.physics_level,
                 "mode": r.mode,
                 "hlo_collective_permute": r.hlo_collective_permute,
+                "cells_per_device": r.cells_per_gpu,
             },
-        ))
+        )
+        if metadata_overrides:
+            md_kwargs.update(metadata_overrides)
+        d["metadata"] = annotate_incomplete(scaling_metadata(**md_kwargs))
         return d
 
     payload = {

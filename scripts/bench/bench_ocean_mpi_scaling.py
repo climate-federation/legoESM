@@ -2471,7 +2471,16 @@ def main() -> int:
             backend=jax.default_backend().upper(),
             hostname=os.environ.get("HOSTNAME", "unknown"),
         )
-        write_json(report, out_dir / f"{stem}.json")
+        # component="ocean": without it write_json stamps its atmosphere
+        # default on every row (mislabel); n_ranks_true: jax cannot see the
+        # mpirun world (process_count()==1 per rank), so the real rank count
+        # must be recorded explicitly — it also resolves transport="mpi4jax".
+        write_json(
+            report, out_dir / f"{stem}.json",
+            n_ranks_true=n_ranks,
+            component="ocean",
+            metadata_overrides={"solver_variant": args.baro_solver},
+        )
 
     return 0
 
