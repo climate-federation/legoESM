@@ -165,6 +165,7 @@ def fig_energy():
         a.plot(range(24), _diurnal(um, v, t, dt, jja), "-", color=C_UST, lw=1.6)
         _r2box(a, _r2(_daily(um, v, dt), _daily(uo, v, dt)))
         a.set_ylabel("Friction velocity (m s$^{-1}$)", fontsize=8); _hour_axis(a, bot)
+        a.set_ylim(0.0, 0.8)
         _row_label(a, site)
         if r == 0:
             a.legend(handles=[Line2D([], [], color=C_UST, lw=1.6, label="Model"),
@@ -179,6 +180,7 @@ def fig_energy():
         a.plot(mo, moo, "o-", color=C_OBS, ms=2.5, lw=1.2, mfc="white")
         a.plot(mo, mm, "-", color=C_UST, lw=1.6)
         a.set_ylabel("Friction velocity (m s$^{-1}$)", fontsize=8); _month_axis(a, bot)
+        a.set_ylim(0.0, 0.8)
 
         # col2: sensible + latent heat, mean diurnal (JJA).  Markers = raw eddy-
         # covariance observations; the shaded band spans up to the energy-balance-
