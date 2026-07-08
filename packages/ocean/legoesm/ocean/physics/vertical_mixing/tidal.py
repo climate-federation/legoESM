@@ -271,7 +271,7 @@ def synthetic_baroclinic_tide_energy_from_bathy(
 
     Approximates the Simmons et al. 2004 conversion-rate formula:
 
-        E_BT ≈ ρ_0 · κ_h² · ⟨h²⟩ · N_b · u_tide² / 2
+        E_BT ≈ ρ_0 · κ_h · ⟨h²⟩ · N_b · u_tide² / 2
 
     where ``κ_h = 2π/L_topo`` is the topographic wavenumber and
     ``⟨h²⟩`` is the bathymetry roughness variance.  Without a
@@ -306,11 +306,15 @@ def synthetic_baroclinic_tide_energy_from_bathy(
     E_BT : array (same shape as ``H_bathy_m``)
         Synthetic baroclinic conversion rate [W/m², ≥ 0].
     """
+    # Jayne & St. Laurent (2001) / Simmons et al. (2004) conversion rate
+    #   E = ½·ρ₀·κ_h·⟨h²⟩·N_b·⟨u²⟩   [W/m²]
+    # κ_h enters LINEARLY (not squared): kg/m³·(1/m)·m²·(1/s)·m²/s² = kg/s³ =
+    # W/m². Squaring κ_h yields W/m³ (~477× too weak at these defaults).
     kappa_h = 2.0 * np.pi / max(roughness_scale_m, 1.0)
     E_uniform = (
         0.5
         * rho_0
-        * (kappa_h ** 2)
+        * kappa_h
         * (rms_roughness_m ** 2)
         * N_bottom_per_s
         * (u_tide_m_s ** 2)
