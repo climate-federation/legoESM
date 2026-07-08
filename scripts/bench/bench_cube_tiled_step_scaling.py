@@ -175,7 +175,8 @@ def main() -> int:
     # executable; codex) — and the audit compile is reused by the timed
     # loop (per_step_ms[0] is then dispatch, not compile; recorded).
     lowered = tiled_step.lower(state0)
-    hlo = lowered.compile().as_text()
+    compiled = lowered.compile()
+    hlo = compiled.as_text()
     n_ppermute = _count_collective_permutes(hlo)
     allgathers = find_fullcube_allgathers(hlo, n=args.resolution)
     if n_ppermute == 0:
@@ -194,11 +195,14 @@ def main() -> int:
 
         multihost_utils.sync_global_devices("cube_tiled_bench_start")
 
+    # Time the AUDITED AOT executable itself — jit's dispatch cache does
+    # NOT reuse lower().compile()'s output, so calling the jit wrapper
+    # would recompile a second (unaudited) executable (codex).
     per_step_ms = []
     s = state0
     for _ in range(args.steps):
         t0 = time.perf_counter()
-        s = tiled_step(s)
+        s = compiled(s)
         jax.block_until_ready(jax.tree.leaves(s))
         per_step_ms.append((time.perf_counter() - t0) * 1e3)
 
