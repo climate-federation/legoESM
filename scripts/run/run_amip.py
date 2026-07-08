@@ -855,13 +855,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "that avoids the stable flux collapse; "
                              "'grachev2007_sheba'/'gryanik2020' = SHEBA strong-"
                              "stable forms. Unstable branch stays Businger-Dyer.")
-    parser.add_argument("--sponge", action="store_true", default=False,
+    parser.add_argument("--sponge", default=False,
+                        action=argparse.BooleanOptionalAction,
                         dest="sponge_enabled",
                         help="Enable the top-of-atmosphere Rayleigh sponge "
                              "(#836): damping that increases toward the model "
                              "lid to absorb upward-propagating gravity/convective "
                              "waves the hydrostatic latlon-cgrid dycore otherwise "
-                             "reflects off the rigid top. Off by default.")
+                             "reflects off the rigid top. Off by default. "
+                             "--no-sponge turns it back off when a --config "
+                             "YAML enables it (e.g. the #847 drift-lever walk).")
     parser.add_argument("--sponge-coeff-per-day", type=float, default=None,
                         dest="sponge_coeff_per_day",
                         help="Rayleigh damping rate at the model top [1/day] "
