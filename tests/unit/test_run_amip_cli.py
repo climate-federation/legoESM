@@ -1408,7 +1408,9 @@ def test_amip_sota_config_builds_valid_experiment_config():
     assert cfg.microphysics == "morrison"
     assert cfg.aerosol_forcing == "external"
     assert cfg.convective_cloud is False
-    assert cfg.convection == "sbm"
+    # AMIP convection is bechtold/tiedtke only (directive 2026-07-08); 'sbm'
+    # here was the historical tiedtke-overcast-trap workaround
+    assert cfg.convection == "bechtold"
 
 
 def test_config_yaml_round_trips_authoritative_values():

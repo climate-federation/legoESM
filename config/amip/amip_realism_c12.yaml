@@ -28,10 +28,11 @@ dt: 450.0
 radiation: rrtmg            # rrtmgp builder alias (true CMIP6 RT)
 rad_update_steps: 6
 
-# --- Atmospheric physics: SBM convection = THE FIX ---------------------------
-# tiedtke gives the non-precipitating overcast trap (albedo ~0.8); SBM is the
-# scheme validated realistic in amip_production.yaml (albedo 0.292, precip 3.2).
-convection: sbm
+# --- Atmospheric physics ------------------------------------------------------
+# (Historical: 'sbm' was the fix for tiedtke's non-precipitating overcast trap;
+# superseded 2026-07-08 — bechtold's in-updraft precip split closed that gap,
+# and AMIP convection is bechtold/tiedtke only by directive.)
+convection: bechtold
 microphysics: morrison
 clouds: sundqvist
 turbulence: louis           # Louis required by the tiled/coare3 surface

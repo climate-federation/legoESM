@@ -11,9 +11,11 @@
 #SBATCH --error=/scratch/b/b309178/amip_canonical_30d/slurm-%j.err
 #
 # Longer test: 30 days, C48/L40, canonical physics stack
-# (rrtmg + sundqvist + kessler + sbm + louis), synthetic forcing deck.
+# (rrtmg + sundqvist + kessler + bechtold + louis), synthetic forcing deck.
 # Uses forcing_amip/ pre-generated files. Validates full physics pipeline
 # on 4 GPUs.
+# (2026-07-08: convection sbm -> bechtold; AMIP convection is
+# bechtold/tiedtke only by directive.)
 
 set -euo pipefail
 
@@ -32,7 +34,7 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
 
 echo "========================================"
 echo "  AMIP canonical 30d  job=${SLURM_JOB_ID:-local}  host=$(hostname)"
-echo "  C48/L40  rrtmg+sundqvist+kessler+sbm+louis  synthetic forcing  4 GPU"
+echo "  C48/L40  rrtmg+sundqvist+kessler+bechtold+louis  synthetic forcing  4 GPU"
 echo "  $(date -u)"
 echo "========================================"
 nvidia-smi -L 2>&1 | head -4 || true
@@ -53,7 +55,7 @@ cd "${REPO}"
     --diurnal-cycle \
     --clouds sundqvist \
     --microphysics kessler \
-    --convection sbm \
+    --convection bechtold \
     --turbulence louis \
     --ozone-source standard \
     --ghg-forcing constant \

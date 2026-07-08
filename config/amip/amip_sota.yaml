@@ -41,7 +41,11 @@ rad_update_steps: 12
 clouds: sundqvist
 microphysics: morrison      # two-moment SOTA microphysics (predicts hydrometeors;
                             # also the aerosol_ccn prereq when that is re-enabled)
-convection: sbm             # the structural-bias fix (albedo+precip)
+convection: bechtold        # mass-flux (IFS lineage), matches amip_production.yaml.
+                            # (Historical: 'sbm' was the fix for tiedtke's non-
+                            # precipitating overcast trap; superseded 2026-07-08 —
+                            # bechtold's in-updraft precip split closed that gap, and
+                            # AMIP convection is bechtold/tiedtke only by directive.)
 turbulence: louis
 gravity_wave_drag: hines
 diurnal_cycle: true
