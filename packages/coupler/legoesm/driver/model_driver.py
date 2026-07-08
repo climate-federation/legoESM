@@ -82,6 +82,50 @@ def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> boo
     return max_s > 0.0 and elapsed_s >= (max_s - buffer_s)
 
 
+def _standalone_cloud_config(cfg, cloud_scheme: str):
+    """Tuned ``CloudConfig`` for the standalone (MPAS/spectral) radiation path.
+
+    Mirrors the FV pipeline's ``build_cloud_config`` call (#689) so the tuned
+    experiment-level cloud scalars (``cloud_rh_crit`` / ``cloud_q_c_diagnostic``
+    / Xu-Randall knobs) reach the standalone backends too (#870 Phase 1) —
+    previously these paths silently ran ``CloudConfig`` defaults.
+
+    ``convective_cloud`` stays OFF here: the standalone radiation call
+    (``radiation/integration.py``) does not thread ``conv_precip`` into
+    ``compute_cloud_properties``, and ``convective_cloud=True`` without it
+    trips that function's loud misconfiguration guard by design.  Returns
+    ``None`` (=> scheme-default config) when the scheme is "none".
+    """
+    if cloud_scheme == "none":
+        return None
+    from legoesm.atmosphere.physics.clouds.config import build_cloud_config
+
+    # LOUD, not silent (repo doctrine): a user/YAML requesting
+    # convective_cloud=True on a standalone backend would otherwise get
+    # different physics with no trace (pre-merge codex review).  The lane
+    # still runs (the production YAML sets it true for the FV path); the
+    # forced drop is now visible in the log.
+    if bool(getattr(cfg, "convective_cloud", False)):
+        logger.warning(
+            "convective_cloud=True is FORCED OFF on the standalone "
+            "(MPAS/spectral) radiation path: it does not thread conv_precip, "
+            "and convective_cloud without it trips compute_cloud_properties' "
+            "misconfiguration guard. The FV (cubed-sphere/latlon) pipeline "
+            "honours the setting."
+        )
+
+    return build_cloud_config(
+        cloud_scheme,
+        convective_cloud=False,
+        rh_crit=getattr(cfg, "cloud_rh_crit", None),
+        q_c_diagnostic=getattr(cfg, "cloud_q_c_diagnostic", None),
+        conv_cloud_max=getattr(cfg, "cloud_conv_cloud_max", None),
+        conv_cloud_condensate=getattr(cfg, "cloud_conv_cloud_condensate", None),
+        p_xr=getattr(cfg, "cloud_p_xr", None),
+        alpha_xr=getattr(cfg, "cloud_alpha_xr", None),
+    )
+
+
 class ModelDriver:
     """Top-level simulation driver.
 
@@ -4514,6 +4558,9 @@ class ModelDriver:
                         cfg, "rrtmgp_column_chunk_size", 0),
                 ),
                 cloud_scheme=_cloud_scheme,
+                # Tuned cloud scalars (rh_crit / q_c_diagnostic / Xu-Randall)
+                # reach the MPAS radiation clouds too (#870 Phase 1).
+                cloud_config=_standalone_cloud_config(cfg, _cloud_scheme),
                 diurnal_cycle=cfg.diurnal_cycle,
                 orbit=_orbit_params,
                 # Ozone source (default "standard" matches the bare default; a
@@ -5496,6 +5543,9 @@ class ModelDriver:
                             cfg, "rrtmgp_column_chunk_size", 0),
                     ),
                     cloud_scheme=_cloud_scheme,
+                    # Tuned cloud scalars for the spectral standalone
+                    # radiation path (#870 Phase 1).
+                    cloud_config=_standalone_cloud_config(cfg, _cloud_scheme),
                     diurnal_cycle=cfg.diurnal_cycle,
                     orbit=_orbit_params,
                     ozone=OzoneProfileConfig(source=cfg.ozone_source),

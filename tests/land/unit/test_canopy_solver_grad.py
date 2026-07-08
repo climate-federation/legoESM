@@ -45,6 +45,7 @@ def _bundle(La=_a(350.0), Vc3=_a(40.0), Ta=_a(298.0)):
         fStress_soil=_a(0.8),
         ur=_a(3.0), CI=_a(0.75), z0m=_a(0.5), displa=_a(3.0), z0=_a(10.0),
         cv=_a(0.0135), d_leaf=_a(0.025),
+        r_soil_surface=_a(0.0),
     )
 
 

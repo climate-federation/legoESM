@@ -7,6 +7,7 @@ from typing import Callable
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.eos import (
     compute_ocean_rho as _compute_rho,
+    compute_ocean_rho_and_pressure as _compute_rho_and_pressure,
 )
 from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.state import OceanState, OceanTendencies
@@ -121,11 +122,20 @@ def _make_richardson(config: VerticalMixingConfig,
                    z_coord: OceanZStarCoordinate,
                    surface_forcing=None) -> OceanTendencies:
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
-        rho = _compute_rho(state, z_coord, J)
+        # The adiabatic PP81 N² trigger needs the cell-centre hydrostatic
+        # pressure; compute it (with rho) only when opted in so the default
+        # in-situ path stays bit-identical.  eos_fn is None here (this factory
+        # does not thread a recipe EOS) → Wright, matching the density path.
+        if cfg.n2_mode == "adiabatic":
+            rho, p_cell = _compute_rho_and_pressure(state, z_coord, J)
+        else:
+            rho = _compute_rho(state, z_coord, J)
+            p_cell = None
         out = richardson_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             rho, z_coord, J, cfg,
             apply_diffusion=apply_diffusion,
+            p_cell=p_cell,
         )
         return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state,
                                 K_v=out.K_v if not apply_diffusion else None,

@@ -196,9 +196,12 @@ Readings:
    2-process Gloo federation probe — the cs-spmd precedent generalized); the
    work was wiring + latent-bug surfacing:
    - `bench_atm_latlon_spmd_scaling --multicontroller/--coordinator` and
-     `bench_ocean_mpi_scaling --transport spmd --multicontroller` federate
+     `bench_ocean_latlon_spmd_scaling --multicontroller` federate
      1-proc-per-GPU launches into one JAX program (native ppermute band
-     halos over NCCL — XLA-overlappable, unlike route-A mpi4jax).
+     halos over NCCL — XLA-overlappable, unlike route-A mpi4jax). (The ocean
+     multicontroller lane is on the SPMD full-step bench, NOT a
+     `--transport spmd` flag of `bench_ocean_mpi_scaling`, which is the
+     route-A mpi4jax CPU/PCIe-GPU phase-split bench.)
    - Latent bug fixed: `reductions.is_multi_process()` treated
      `jax.process_count()>1` as "mpi4jax-allreduce needed" — under
      federation that imports the forbidden mixed stack into the ocean
@@ -215,30 +218,9 @@ Readings:
      `gpu_multinode_scaling.pbs` (Derecho, shared `nccl_env()`) and the
      Levante sbatch twin; `build_nccl_ofi.sh` builds aws-ofi-nccl on a
      Derecho login node and prints the `LEGOESM_NCCL_OFI_LIB` submit line.
-   - **2026-07-03, lane E — icosahedral/Voronoi multicontroller SHIPPED**:
-     `bench_mpas_spmd_scaling.py` runs `make_voronoi_sharded_step`
-     (cell-partition reorder via `reorder_voronoi_for_sharding` + ppermute
-     halo) over a global `("device",)` mesh spanning processes. New
-     `gather_voronoi_state_spmd` (replicated gather, the multi-controller
-     I/O path); the mass-fix area vector is closed over REPLICATED (a
-     `P("device")`-sharded closure constant raises under `jax.distributed`);
-     a cross-process partition checksum (`multihost_utils.assert_equal`)
-     guards against rank-divergent `--partition-method auto` resolution —
-     the bench pins Hilbert-SFC in the job lanes. Latent-bug sweep: the
-     MPAS/SW/NH mass+energy fixers keyed mpi4jax reductions on
-     `jax.process_count() > 1` (over-counts by the world size under
-     route-B AND arms the forbidden mixed stack) — now
-     `is_multi_process()` (the #751 predicate) in
-     `primitive_eq_mpas._fix_mass_mpas_hydro` and
-     `core/conservation.py` (SW mass x2, NH energy). Gates:
-     `tests/parallel/test_mpas_spmd_multicontroller_selfspawn.py` (2-proc
-     CPU federation, parity+conservation armed),
-     `tests/bench/test_bench_mpas_spmd_gates.py`. Job lane E (np=6 —
-     `nCells = 10*4^L+2` splits evenly for 1/2/3/6) in both multinode jobs.
-   Remaining under this item: promoting the lanes into run_amip/run_omip
-   production drivers once machine numbers land; `compressible_euler_mpas`
-   and `ocean_pe_mpas` need a `sharded_tendency_fn` staticmethod before
-   they can join the Voronoi SPMD lane.
+   Remaining under this item: icosahedral/Voronoi multihost (cell-partition
+   reorder across processes) and promoting the lanes into run_amip/run_omip
+   production drivers once machine numbers land.
 1. **Wide-halo split-explicit barotropic** (Oceananigans' signature): halo
    width = substep count ⇒ ONE 2-D exchange per baroclinic step. Measured
    net-negative at Ginsburg scale (barotropic ~7% of step at production tile)

@@ -88,13 +88,26 @@ class BiharmonicConfig(NamedTuple):
     """Biharmonic lateral mixing.
 
     Explicit biharmonic CFL is ``B_h · dt / dx⁴ ≤ 1/16`` (2-D, with a
-    safety factor).  See ``HarmonicConfig`` for the analogous CFL knobs.
+    safety factor) for the legacy wide outer stencil; the compact outer
+    stencil (``compact_outer=True``) has a tighter ``≤ 1/512`` bound
+    (its 2Δx eigenvalue is ~1024/dx⁴, vs ~0 for the wide form).  See
+    ``HarmonicConfig`` for the analogous CFL knobs.
+
+    ``compact_outer`` selects the outer Laplacian of ``∇⁴ = ∇²(∇²)``:
+    ``False`` (default) keeps the legacy wide ``div(grad)`` outer stage,
+    which has an EXACT 2Δx null (does NOT damp the grid-scale checkerboard
+    the biharmonic exists to remove) — retained as the default so
+    coefficients tuned against it stay bit-identical.  ``True`` uses the
+    compact outer Laplacian (``(1,-4,6,-4,1)`` stencil, maximal 2Δx
+    damping, MOM/MPAS-faithful) and correspondingly narrows the coastal
+    Neumann fill reach and the CFL cap.
     """
     B_h_momentum: float = 0.0   # Biharmonic viscosity [m^4/s]
     B_h_tracer: float = 0.0     # Biharmonic tracer diffusivity [m^4/s]
     enforce_cfl: bool = False
     cfl_dt_estimate: float = 3600.0
     cfl_safety: float = 0.05    # Margin below 1/16 stability bound
+    compact_outer: bool = False  # Compact 2Δx-damping outer ∇² (MOM/MPAS del4)
 
 
 class VisbeckConfig(NamedTuple):
