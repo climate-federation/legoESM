@@ -298,6 +298,31 @@ def init_jax_distributed_with_fallback() -> None:
     check_no_silent_process_fallback()
 
 
+def _warn_missing_nccl_plugin(rank: int | None = None) -> None:
+    """Rank-0 warning when a multi-node launch has no NCCL net plugin
+    visible — cross-node collectives then likely run correct-but-slow TCP
+    sockets (the documented Derecho shape).  ``rank=None`` derives the rank
+    from the federated runtime (safe post-init)."""
+    report = nccl_transport_report()
+    if not report["missing_net_plugin_multi_node"]:
+        return
+    if rank is None:
+        try:
+            import jax
+
+            rank = int(jax.process_index())
+        except Exception:
+            rank = 0
+    if rank == 0:
+        print(
+            "[early_init] WARNING: multi-node launch with no NCCL net "
+            "plugin visible (libnccl-net*/NCCL_NET_PLUGIN): cross-node "
+            "collectives will likely run on TCP SOCKETS (correct but "
+            "slow — the documented Derecho socket-bound shape). Verify "
+            "with NCCL_DEBUG=INFO; build/load the aws-ofi-nccl plugin "
+            "for fabric speed.", flush=True)
+
+
 def init_multicontroller_distributed(coordinator: str | None = None) -> None:
     """Initialize ``jax.distributed`` for a route-B multicontroller launch.
 
@@ -326,6 +351,7 @@ def init_multicontroller_distributed(coordinator: str | None = None) -> None:
         return
     if coordinator is None:
         init_jax_distributed_with_fallback()
+        _warn_missing_nccl_plugin()
         return
 
     import jax
@@ -355,18 +381,7 @@ def init_multicontroller_distributed(coordinator: str | None = None) -> None:
         local_device_ids=_pals_local_device_ids())
     _INITIALIZED = True
     check_no_silent_process_fallback()
-    # Route-B transport visibility: a multi-node GPU launch without an
-    # NCCL net plugin silently runs correct-but-slow TCP sockets — warn
-    # once (rank 0) so the job log carries the flag next to the timings.
-    report = nccl_transport_report()
-    if proc_id == 0 and report["missing_net_plugin_multi_node"]:
-        print(
-            "[early_init] WARNING: multi-node launch with no NCCL net "
-            "plugin visible (libnccl-net*/NCCL_NET_PLUGIN): cross-node "
-            "collectives will likely run on TCP SOCKETS (correct but "
-            "slow — the documented Derecho socket-bound shape). Verify "
-            "with NCCL_DEBUG=INFO; build/load the aws-ofi-nccl plugin "
-            "for fabric speed.", flush=True)
+    _warn_missing_nccl_plugin(rank=proc_id)
 
 
 def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
