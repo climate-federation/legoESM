@@ -177,7 +177,7 @@ def main() -> int:
     lowered = tiled_step.lower(state0)
     hlo = lowered.compile().as_text()
     n_ppermute = _count_collective_permutes(hlo)
-    allgathers = find_fullcube_allgathers(hlo)
+    allgathers = find_fullcube_allgathers(hlo, n=args.resolution)
     if n_ppermute == 0:
         raise SystemExit(
             "compiled tiled step contains NO collective-permutes — the "
