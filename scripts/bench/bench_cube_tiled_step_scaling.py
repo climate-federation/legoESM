@@ -166,10 +166,15 @@ def main() -> int:
     set_halo_backend("local")
     dev = np.array(jax.devices()[:n_devices]).reshape(6, args.kt, args.kt)
     mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
-    tiled_step = make_tiled_cc_step(model, mesh, kt=args.kt, dt=args.dt)
+    tiled_step = jax.jit(make_tiled_cc_step(model, mesh, kt=args.kt,
+                                            dt=args.dt))
 
     # --- Anti-fake HLO census on the compiled step --------------------------
-    lowered = jax.jit(tiled_step).lower(state0)
+    # The SAME jitted callable is audited AND timed (auditing a separate
+    # jit while timing the bare adapter would census a different
+    # executable; codex) — and the audit compile is reused by the timed
+    # loop (per_step_ms[0] is then dispatch, not compile; recorded).
+    lowered = tiled_step.lower(state0)
     hlo = lowered.compile().as_text()
     n_ppermute = _count_collective_permutes(hlo)
     allgathers = find_fullcube_allgathers(hlo)
@@ -229,6 +234,9 @@ def main() -> int:
         platform=jax.default_backend(),
         n_processes=int(jax.process_count()),
         multicontroller=bool(args.multicontroller),
+        # The HLO census pre-compiled the SAME executable, so step 0 is
+        # dispatch, not compile — recorded honestly.
+        compile_prewarmed_by_hlo_census=True,
         compile_ms=round(per_step_ms[0], 1),
         steady_median_ms=round(med, 2),
         steady_min_ms=round(float(np.min(steady)), 2),
