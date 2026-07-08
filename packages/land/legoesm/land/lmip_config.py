@@ -143,6 +143,21 @@ def validate_config(data: dict) -> LMIPConfig:
     surfdata.setdefault("land_cover_dataset", "clm5")
     validate_land_cover_dataset(surfdata["land_cover_dataset"])
 
+    # E_LUC land-use-change bookkeeping (optional block; scheme fail-fast here,
+    # the numeric knobs are validated by validate_luc_config at run entry).
+    luc = data.get("land_use_change") or {}
+    from legoesm.land.land_use_change import LUC_SCHEMES, LandUseChangeConfig
+    if luc.get("scheme", "none") not in LUC_SCHEMES:
+        raise ValueError(
+            f"land_use_change.scheme={luc.get('scheme')!r} not in {LUC_SCHEMES}")
+    # A typo'd knob (e.g. clear_brun_frac) would otherwise be silently dropped and
+    # the bookkeeping would run with defaults — a hard error instead.
+    _luc_unknown = set(luc) - set(LandUseChangeConfig._fields)
+    if _luc_unknown:
+        raise ValueError(
+            f"land_use_change: unknown key(s) {sorted(_luc_unknown)}; "
+            f"valid keys: {sorted(LandUseChangeConfig._fields)}")
+
     req("time", ("dt", "n_steps", "start_doy"))
     time = data["time"]
     if time["n_steps"] <= 0:

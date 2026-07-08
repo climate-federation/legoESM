@@ -129,8 +129,44 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         restart_from=cli_args.restart_from or cfg.restart.get("from", ""),
         output_config="",                        # embedded output block is used directly
         _cfg_output_tapes=cfg.output,            # -> load_output_config indirection below
+        _cfg_luc=cfg.raw.get("land_use_change") or {},   # E_LUC bookkeeping block
     )
     return ns
+
+
+def _report_eluc(args, gsd) -> None:
+    """Compute + report annual E_LUC when land-use-change bookkeeping is enabled.
+
+    A post-run diagnostic: the bookkeeping is annual and independent of the
+    biophysics scan, so it runs once over the transient cover series (no effect
+    on the physics run).  No-op unless ``land_use_change.scheme == "bookkeeping"``.
+    """
+    luc_block = getattr(args, "_cfg_luc", None) or {}
+    if luc_block.get("scheme", "none") != "bookkeeping":
+        return
+    from legoesm.land.land_use_change import (
+        LandUseChangeConfig, annual_eluc_series, validate_luc_config)
+
+    fields = LandUseChangeConfig._fields
+    luc_cfg = LandUseChangeConfig(**{k: v for k, v in luc_block.items() if k in fields})
+    validate_luc_config(luc_cfg)
+    nyear = int(np.asarray(gsd.pft_frac).shape[0])
+    if nyear <= 1:
+        print("E_LUC: bookkeeping enabled but surfdata is single-year (static "
+              "cover) — no land-use transitions to bookkeep.")
+        return
+
+    eluc_pgc, _ = annual_eluc_series(gsd.pft_frac, gsd.cell_area, luc_cfg)
+    years = np.asarray(gsd.years).astype(int)
+    eluc = np.asarray(eluc_pgc)
+    print(f"E_LUC (bookkeeping): {int(years[0])}-{int(years[-1])} | "
+          f"cumulative {eluc.sum():.4f} PgC | mean {eluc.mean():.4f} PgC/yr | "
+          f"final year {eluc[-1]:.4f} PgC/yr")
+    out = Path(f"{args.output}.eluc_annual.txt")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    np.savetxt(out, np.column_stack([years, eluc]),
+               header="year  E_LUC_PgC_per_yr", fmt=["%d", "%.6e"])
+    print(f"  wrote {out}")
 
 
 def run(args) -> int:
@@ -399,6 +435,9 @@ def run(args) -> int:
             _step_body, (state, tape_accums),
             (forcing_year, doy_year, year_xs, slot_year_xs))
         del forcing_year, doy_year, year_xs, slot_year_xs      # free before next year
+
+    # --- E_LUC land-use-change bookkeeping (post-run annual diagnostic). ---
+    _report_eluc(args, gsd)
 
     # --- land mask + NaN-over-land validation (the smoke PASS/FAIL). ---
     def cover1d(a):

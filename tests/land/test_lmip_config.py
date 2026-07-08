@@ -55,6 +55,27 @@ def test_bad_land_cover_dataset_raises():
         validate_config(bad)
 
 
+def test_land_use_change_bookkeeping_accepted():
+    ok = _minimal()
+    ok["land_use_change"] = {"scheme": "bookkeeping"}
+    validate_config(ok)                                    # no raise
+
+
+def test_bad_land_use_change_scheme_raises():
+    bad = _minimal()
+    bad["land_use_change"] = {"scheme": "bogus"}
+    with pytest.raises(ValueError, match="land_use_change.scheme"):
+        validate_config(bad)
+
+
+def test_land_use_change_unknown_key_raises():
+    # A typo'd knob must be a hard error (else it is silently dropped -> defaults).
+    bad = _minimal()
+    bad["land_use_change"] = {"scheme": "bookkeeping", "clear_brun_frac": 0.9}
+    with pytest.raises(ValueError, match="unknown key"):
+        validate_config(bad)
+
+
 def test_simple_seb_plus_most_rejected_at_config_time():
     bad = _minimal()
     bad["physics"]["bulk_scheme"] = "most"
