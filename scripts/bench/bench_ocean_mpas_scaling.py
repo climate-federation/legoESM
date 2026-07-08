@@ -253,15 +253,23 @@ def main() -> int:
     if args.device == "gpu":
         # Pin BEFORE the first JAX import (sibling-bench convention: local
         # rank from the MPI launcher env; never SLURM_LOCALID on a
-        # single-task step — the documented silent eff=0.5 bug).
+        # single-task step — the documented silent eff=0.5 bug).  An
+        # EXISTING CUDA_VISIBLE_DEVICES (external wrapper pin, e.g. a PALS
+        # shim exporting $PALS_LOCAL_RANKID) is respected — clobbering it
+        # with "0" binds every rank to GPU 0, the exact contended-GPU fake
+        # row this pin exists to prevent (codex).
         local = (os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
-                 or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK"))
+                 or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK")
+                 or os.environ.get("PALS_LOCAL_RANKID"))
         if local is None:
             slid = os.environ.get("SLURM_LOCALID")
             nt = os.environ.get("SLURM_NTASKS", "1")
             if slid is not None and nt.isdigit() and int(nt) > 1:
                 local = slid
-        os.environ["CUDA_VISIBLE_DEVICES"] = local or "0"
+        if local is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = local
+        else:
+            os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
         os.environ["JAX_PLATFORMS"] = "cuda"
         os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     if args.precision == "float64":
