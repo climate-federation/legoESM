@@ -43,6 +43,16 @@ cd "$REPO"
 export JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+# GPU allocator: the default BFC allocator fragmented and OOM'd on the SFNO
+# rollout (the "cuda_malloc_async" hint in the failure log).  'platform' uses
+# CUDA's async allocator (cudaMallocAsync) -- on-demand pooling + defrag, which
+# can recover the shortfall.  NOTE: under 'platform' the PREALLOCATE/MEM_FRACTION
+# knobs above are IGNORED (the async allocator grows on demand to the device
+# limit).  If this still OOMs, the real lever is shortening the 120h rollout
+# curriculum (aimip_rollout_curriculum) -- the async allocator can't create
+# memory that a ~1000-step rollout genuinely needs.  Override to disable:
+# XLA_PYTHON_CLIENT_ALLOCATOR= (empty) restores the BFC allocator.
+export XLA_PYTHON_CLIENT_ALLOCATOR="${XLA_PYTHON_CLIENT_ALLOCATOR:-platform}"
 
 SUITE="config/aimip/scale/suite_${VARIANT}.yaml"
 OUT="results/aimip_scale_t106/${VARIANT}"
