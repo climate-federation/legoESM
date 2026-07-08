@@ -74,12 +74,50 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
+from legoesm.atmosphere.physics.thermodynamics import latent_heat_vaporization
 from legoesm.atmosphere.physics.convection._triggers import (
     smooth_lowest_crossing_index,
 )
 
 
 __all__ = ("DiluteParcel", "dilute_parcel_cape")
+
+
+__physics_contract__ = {
+    "summary": (
+        "Zhang-McFarlane dilute entraining-plume CAPE (Raymond-Blyth 1992 "
+        "moist-entropy parcel): lifts a constant-fractional-entrainment parcel "
+        "and diagnoses dilute CAPE and the parcel thermodynamic profile used "
+        "by the ZM trigger and closure."
+    ),
+    "inputs": {
+        "T_env": "K", "q_v_env": "kg/kg", "p_full": "Pa", "p_half": "Pa",
+        "z_full": "m",
+    },
+    "outputs": {
+        "cape": "J/kg", "T_parcel": "K", "Tv_parcel": "K",
+        "qs_parcel": "kg/kg", "buoyancy": "K",
+        "k_launch_smooth": "1 (fractional level index)",
+    },
+    "sign_convention": (
+        "Diagnostic only (no tendency applied): CAPE>=0; buoyancy is the "
+        "parcel-minus-environment virtual-temperature excess (positive = "
+        "buoyant); entrainment dilutes the parcel and reduces CAPE relative to "
+        "an undilute ascent; surface at the last vertical index."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Raymond & Blyth (1992), J. Atmos. Sci. 49, 1968-1983; Zhang & "
+        "McFarlane (1995), Atmos.-Ocean 33, 407-446 (E3SM buoyan_dilute)"
+    ),
+    "idealized_test": (
+        "Dilute CAPE is validated to <0.5% against the compiled E3SM "
+        "zm_conv.F90 oracle on a tropical RCE sounding "
+        "(.physics-validator/zhang_mcfarlane); dilute CAPE is smaller than the "
+        "undilute value and a stable column gives CAPE~0."
+    ),
+}
 
 
 # Both the oracle ``qsat_hPa`` and our shared ``saturation_mixing_ratio``
@@ -150,7 +188,8 @@ def _moist_entropy(T: jax.Array, p_pa: jax.Array, qtot: jax.Array) -> jax.Array:
     qv = jnp.minimum(qtot, q_sat)
     # Numerical floor so ln(qv/qs) is finite for a bone-dry parcel.
     qv_safe = jnp.maximum(qv, 1.0e-12)
-    L = constants.L_v - (constants.c_pw - constants.c_pv) * (T - constants.T_freeze)
+    # Kirchhoff L(T) via the shared helper (thermodynamics module).
+    L = latent_heat_vaporization(T)
     e = qv * p_pa / (constants.epsilon + qv)
     # Floor the dry partial pressure (p − e) away from zero before the log:
     # a cold, moist parcel at very low total pressure can drive e → p, and

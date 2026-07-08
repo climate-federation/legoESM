@@ -35,6 +35,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
+from legoesm.atmosphere.physics._shared import compute_rho
 from legoesm.atmosphere.physics.thermodynamics import (
     parcel_profile_and_cape,
 )
@@ -59,6 +60,62 @@ from legoesm.atmosphere.physics.convection._plume import (
 
 
 __all__ = ("tiedtke_convection",)
+
+
+__physics_contract__ = {
+    "summary": (
+        "Tiedtke (1989) bulk mass-flux convection: three-class (deep/mid/"
+        "shallow) soft blend, RH-triggered downdraft, a per-level M_u(k) "
+        "prognostic carry, and optional Gregory-97 convective momentum "
+        "transport. Uses the shared subsidence+detrainment kernel; condensate "
+        "handed to microphysics. Smooth (differentiable)."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa",
+        "u": "m/s", "v": "m/s",
+        "conv_prog_profile": "kg/m^2/s (previous-step updraft mass-flux profile M_u(k))",
+        "dt": "s",
+        "moisture_convergence": "kg/kg/s (large-scale dq/dt|dyn for the deep closure; optional)",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "dq_c_conv_dt": "kg/kg/s (detrained cloud-water source to microphysics, >=0)",
+        "cape": "J/kg", "convective_mask": "1 (0-1 activation)",
+        "du_dt_conv": "m/s^2 (CMT; None if disabled)",
+        "dv_dt_conv": "m/s^2 (CMT; None if disabled)",
+        "dq_r_conv_dt": "kg/kg/s (convective rain source when precip_efficiency>0; else None)",
+        "conv_prog_profile_new": "kg/m^2/s (implicit-Euler-relaxed M_u(k))",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. Convection warms aloft and dries where the "
+        "updraft detrains; dq_c_conv_dt, dq_r_conv_dt >= 0 are SOURCES to "
+        "microphysics (precip deferred). Compensating subsidence + detrainment "
+        "APPROXIMATELY conserve column moist static energy and total water "
+        "(exact only in the opt-in implicit_flux solve; truncation-order in the "
+        "default advective solve); the downdraft "
+        "rain-evaporation is energy-consistent (dT=-L_v/c_pd*dq_v) and "
+        "column-water conserving (net column d(q_v+q_c)=0). Optional "
+        "Gregory-97 CMT redistributes momentum vertically (transport-dominant; "
+        "its pressure-gradient term is not exactly momentum-conserving, so "
+        "momentum is not claimed)."
+    ),
+    # The DEFAULT public path uses the shared mass-flux kernel's advective
+    # subsidence solve, conservative only to TRUNCATION ORDER (exact only in
+    # the opt-in implicit_flux path), so no contract-level conservation is
+    # guaranteed; the column budget is closed downstream.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Tiedtke (1989), Mon. Wea. Rev. 117, 1779-1800; "
+        "Gregory et al. (1997), Q. J. R. Meteorol. Soc. 123, 1153-1183"
+    ),
+    "idealized_test": (
+        "tests/unit/test_tiedtke.py; CAPE<=threshold -> zero tendency; a deep "
+        "conditionally-unstable column -> deep-class heating aloft + drying "
+        "with a positive dq_c source; the downdraft branch conserves column "
+        "water; CMT populated only when enable_cmt=True."
+    ),
+}
 
 
 def tiedtke_convection(
@@ -124,7 +181,16 @@ def tiedtke_convection(
     q_parcel = q_base + config.parcel_dq
     lcl = compute_lcl(T_parcel, q_parcel, p_base, p_full)
     k_lcl_smooth = lcl.k_lcl_smooth
-    k_lfc_smooth, k_lnb_smooth = compute_lfc_lnb(T, T_moist, sharpness=1.0)
+    # LFC/LNB on the SAME virtual-T buoyancy as the CAPE above.  Parcel
+    # vapor follows the shared recipe inside ``parcel_profile_and_cape``:
+    # launch humidity conserved on the dry leg, saturation-capped above
+    # the LCL.
+    q_v_parcel_ma = jnp.minimum(
+        q_base[:, None], saturation_mixing_ratio(T_moist, p_full)
+    )
+    k_lfc_smooth, k_lnb_smooth = compute_lfc_lnb(
+        T, T_moist, sharpness=1.0, q_v_env=q_v, q_v_parcel=q_v_parcel_ma,
+    )
 
     # Cloud depth: smooth interpolation of z at fractional indices.
     levels = jnp.arange(nlev, dtype=T.dtype)
@@ -224,7 +290,9 @@ def tiedtke_convection(
     #     M_b = rho_BL * (CAPE - threshold)+ / (g * tau)   [kg/m^2/s]
     # The earlier formula omitted ``rho_BL`` and ``g``; magnitude was
     # masked operationally only by ``M_b_max``.
-    rho_BL = p_full[:, -1] / (constants.R_d * jnp.maximum(T[:, -1], 1.0))
+    # Dry boundary-layer density via the shared ideal-gas helper (same
+    # 1 K temperature clip as the previous inline form).
+    rho_BL = compute_rho(T[:, -1], p_full[:, -1])
     M_b_deep = mc_gate * cape_weight
     M_b_shallow = (
         cape_weight
@@ -297,10 +365,13 @@ def tiedtke_convection(
 
     # -- Optional downdraft (RH-dependent trigger) -------------------------
     if config.enable_downdraft:
-        # Column-mean RH below LCL.
+        # Column-mean RH below LCL.  ``lcl_membership_sharpness`` is a
+        # LEVEL-INDEX sharpness [1/level] (surface-last: index larger
+        # than the LCL index = below LCL altitude).
         levels = jnp.arange(nlev, dtype=T.dtype)
         below_lcl = jax.nn.sigmoid(
-            2.0 * (levels[None, :] - k_lcl_smooth[:, None])
+            config.lcl_membership_sharpness
+            * (levels[None, :] - k_lcl_smooth[:, None])
         )
         rh_layer = q_v / jnp.maximum(q_sat_env, 1e-12)
         # Both below-LCL reductions share ``below_lcl * dp`` — fuse them
@@ -312,8 +383,11 @@ def tiedtke_convection(
         )
         below_mass = _below_sums[..., 0] + 1e-6
         rh_below = _below_sums[..., 1] / below_mass
+        # RH-FRACTION sharpness [1/RH]: the argument is O(0.1), so the
+        # default 10 gives a crisp trigger around ``downdraft_RH_min``.
         downdraft_trigger = jax.nn.sigmoid(
-            10.0 * (config.downdraft_RH_min - rh_below)
+            config.downdraft_rh_sharpness
+            * (config.downdraft_RH_min - rh_below)
         )
         # Downdraft mass flux = -alpha * M_b at cloud base [kg/(m²·s)].
         M_d_base = -config.downdraft_alpha * M_b * downdraft_trigger

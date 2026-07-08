@@ -57,6 +57,46 @@ def _gamma_ratio(mu):
     return (mu + 3.0) * (mu + 2.0) * (mu + 1.0)
 
 
+__physics_contract__ = {
+    "summary": (
+        "Thompson et al. (2008) hybrid-moment microphysics: extends the "
+        "double-moment ice+liquid scheme with graupel formation from intense "
+        "riming and a faithful snow parameterization; sedimentation of rain/"
+        "snow/graupel to surface precipitation."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",
+        "hydrometeors.q_r": "kg/kg", "hydrometeors.q_i": "kg/kg",
+        "hydrometeors.q_s": "kg/kg", "hydrometeors.q_g": "kg/kg",
+        "hydrometeors.N_c": "1/m^3", "hydrometeors.N_r": "1/m^3",
+        "hydrometeors.N_i": "1/kg", "p_full": "Pa", "rho": "kg/m^3",
+        "dz": "m", "dt": "s",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_dt": "kg/kg/s",
+        "dq_r_dt": "kg/kg/s", "dq_i_dt": "kg/kg/s", "dq_s_dt": "kg/kg/s",
+        "dq_g_dt": "kg/kg/s", "dN_c_dt": "1/(m^3 s)", "dN_r_dt": "1/(m^3 s)",
+        "dN_i_dt": "1/(kg s)", "precipitation": "kg/m^2/s",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. Latent heating dT_dt uses L_v/L_s/L_f, "
+        "consistent with each phase-change rate. Water is redistributed among "
+        "vapour/cloud/rain/ice/snow/graupel; SURFACE PRECIPITATION (>= 0) "
+        "removes water, so column moisture is NOT conserved -- no contract-level "
+        "conservation is claimed. Masses and numbers stay >= 0. An unknown "
+        "snow_scheme raises ValueError (dispatch hardening)."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": "Thompson, Field, Rasmussen & Hall (2008), Mon. Wea. Rev. 136, 5095-5115",
+    "idealized_test": (
+        "tests/unit/test_rce_ice_microphysics.py — a deep convective column "
+        "forms graupel via riming; snow/graupel/rain reach the surface; latent "
+        "heating tracks the phase changes; masses/numbers >= 0."
+    ),
+}
+
+
 def thompson_microphysics(
     T: jax.Array,
     q_v: jax.Array,

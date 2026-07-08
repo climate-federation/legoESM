@@ -74,6 +74,7 @@ from legoesm.thermo import (
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_moist_adiabat,
     compute_cape,
+    latent_heat_vaporization,
 )
 from legoesm.atmosphere.physics.convection.config import KuoConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
@@ -81,6 +82,53 @@ from legoesm.atmosphere.physics.convection._triggers import smooth_step
 
 
 __all__ = ("kuo_convection",)
+
+
+__physics_contract__ = {
+    "summary": (
+        "Kuo (1965) convection driven by large-scale moisture convergence: "
+        "the converged moisture is redistributed into convective heating and "
+        "moistening (optional Kuo-Anthes 1977 partition); quiescent when no "
+        "convergence is supplied. Smooth (differentiable) gates."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa", "dt": "s",
+        "moisture_convergence": "kg/kg/s (large-scale dq/dt|dyn source; None -> quiescent)",
+        "w_grid": "m/s (resolved ascent for the w_lcl>0 gate; optional)",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "dq_c_conv_dt": "kg/kg/s (convective cloud-water source to microphysics, >=0)",
+        "cape": "J/kg", "convective_mask": "1 (0-1 activation)",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. Where a column is buoyant with positive "
+        "convergence, convection warms toward the cloud profile (tc>T) and "
+        "moistens (qvc>qv), and explicitly REMOVES the consumed large-scale "
+        "tendency (-ptenq). Latent heating is tied to condensation by the "
+        "column's own alpha=L_v/c_p (c_p*dT = L_v*dq_c), so column "
+        "enthalpy+latent (moist static energy) is conserved; atmospheric "
+        "moisture is NOT conserved (source-driven by external convergence; "
+        "condensate handed to microphysics)."
+    ),
+    # Source-driven: the scheme consumes/removes an EXTERNAL large-scale
+    # moisture-convergence tendency and can uniformly rescale tendencies with a
+    # positivity limiter, so this is not closed-column energy conservation ->
+    # no contract-level conservation claimed.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Kuo (1965), J. Atmos. Sci. 22, 40-63; "
+        "Anthes (1977), Mon. Wea. Rev. 105, 270-286"
+    ),
+    "idealized_test": (
+        "tests/unit/test_kuo_oracle_faithful.py; moisture_convergence=None -> "
+        "zero tendencies (quiescent single column); a conditionally-unstable "
+        "column with positive large-scale convergence -> heating + moistening "
+        "with a positive cloud-water source and convective_mask>0; a "
+        "forward-Euler step keeps q_v>=0."
+    ),
+}
 
 
 # Virtual-temperature coefficient ``T_v = T·(1 + _VT_COEFF·q_v − q_c)``,
@@ -97,15 +145,18 @@ def _latent_heat(T: jax.Array) -> jax.Array:
     """Temperature-dependent latent heat of vaporization [J/kg].
 
     Oracle ``Lh``: ``L_v0 + (T − T00)·(c_pv − c_l)`` with the reference
-    temperature taken as :data:`constants.T_freeze` (the oracle uses
-    ``t00 = 273.16``; we use ``T_freeze = 273.15``, a 0.01 K offset that
+    temperature taken as :data:`constants.T_freeze` (the oracle uses the
+    triple point ``t00 = 273.16``; ``T_freeze`` sits 0.01 K below, which
     shifts ``Lh`` by ~25 J/kg, negligible).  Sublimation (``lsub``) is
     disabled in the oracle's Kuo path, so we keep the vaporization
     branch only.
+
+    Thin named alias over the shared Kirchhoff helper
+    :func:`legoesm.atmosphere.physics.thermodynamics.latent_heat_vaporization`
+    (same pattern as :func:`_dqsat_dT` below) so the Kuo call sites read
+    like the oracle while the formula lives in one place.
     """
-    return constants.L_v + (T - constants.T_freeze) * (
-        constants.c_pv - constants.c_pw
-    )
+    return latent_heat_vaporization(T)
 
 
 def _dqsat_dT(T: jax.Array, p: jax.Array) -> jax.Array:
@@ -446,7 +497,18 @@ def kuo_convection(
     # RH-mean over the convective layer (for Kuo-Anthes partition).
     layer_mass = jnp.sum(icond2 * dpg, axis=1)
     rhmean = jnp.sum(rh * icond2 * dpg, axis=1) / jnp.maximum(layer_mass, 1e-30)
-    bkuo = 1.0 - rhmean - config.anthes_rh_offset            # (ncol,)
+    # Anthes (1977) moistening FRACTION b ∈ [0, 1] by definition: the
+    # accession splits (1−b) to heating and b to moistening.  ``rh`` is
+    # not capped at 1, so in a near-saturated cloud layer
+    # ``rhmean + offset > 1`` and the raw ``1 − rhmean − offset`` goes
+    # NEGATIVE — flipping the moistening term ``b·rt_q·(qvc−qv)`` into a
+    # spurious extra DRYING and pushing the heating factor ``(1−b)``
+    # above 1 (the column would condense more than the accession it
+    # consumes).  Clamp to [0, 1]: a saturated layer moistens nothing
+    # (b=0, all heating), a bone-dry layer at most fully moistens (b=1).
+    bkuo = jnp.clip(
+        1.0 - rhmean - config.anthes_rh_offset, 0.0, 1.0,
+    )                                                        # (ncol,)
 
     # Safe normalisation denominators (signed; floor only the magnitude).
     def _safe(x):
@@ -460,18 +522,30 @@ def kuo_convection(
     zint_q_safe = _safe(zint_q)
 
     # --- Closure tendencies ---
+    # CONSERVATION (truth tier): the redistribution terms (cvgu/zint·…) MUST be
+    # applied over the SAME mask used to NORMALISE them — ``icond2`` (the
+    # icond==2 cloud layer that defines cvgu/zint) — so that
+    # Σ_icond2 ratio·(…) = ratio·zint = cvgu exactly.  The previous code applied
+    # them over ``active`` (= icond2·sign(ptenq)>0), giving
+    # ratio·Σ_active = cvgu·(zint_active/zint) ≠ cvgu whenever divergence
+    # (ptenq≤0) levels lie inside the cloud — a spurious column source/sink with
+    # truncated heating aloft.  The LOCAL moisture-convergence REMOVAL (−ptenq)
+    # stays gated on ``active`` (convection only consumes converged moisture
+    # where it converges; it integrates to −cvgu).  Then the column total-water
+    # tendency Σ(dq_v + dq_c)·dp/g closes to 0: −cvgu (drying) + ratio·zint_q
+    # (moistening) + ratio·zint_t/alpha (condensation→cloud water) = −cvgu + cvgu.
     if config.partition == "kuo1965":
         # dt/dt = cvgu/zint·(tc−t); dq/dt = −ptenq + cvgu/zint·(qvc−qv).
         ratio = (cvgu / zint_safe)[:, None]
-        dT_dt = active * ratio * (tc - T)
-        dq_v_dt = active * (-ptenq + ratio * (qvc - q_v))
+        dT_dt = icond2 * ratio * (tc - T)
+        dq_v_dt = active * (-ptenq) + icond2 * ratio * (qvc - q_v)
     elif config.partition == "anthes":
         # Kuo-Anthes (1977): heating gets (1−bkuo), moistening gets bkuo.
         bk = bkuo[:, None]
         rt_t = (cvgu / zint_t_safe)[:, None]
         rt_q = (cvgu / zint_q_safe)[:, None]
-        dT_dt = active * alpha_env * (1.0 - bk) * rt_t * (tc - T)
-        dq_v_dt = active * (-ptenq + bk * rt_q * (qvc - q_v))
+        dT_dt = icond2 * alpha_env * (1.0 - bk) * rt_t * (tc - T)
+        dq_v_dt = active * (-ptenq) + icond2 * bk * rt_q * (qvc - q_v)
     else:
         raise ValueError(
             f"Unknown Kuo partition: {config.partition!r}. "
@@ -548,8 +622,10 @@ def kuo_convection(
     # so the quiescent path — no large-scale convergence, zero tendencies
     # — reports a zero mask (``tanh(0)=0``) rather than the spurious 0.5
     # the ``ptenq>0`` sign gate gives at exactly ptenq=0.  ``cvgu>=0`` by
-    # construction so ``tanh`` is monotone here.
-    convective_mask = jnp.tanh(cvgu / 1.0e-8)
+    # construction so ``tanh`` is monotone here.  The activation scale is
+    # a KuoConfig field (matching the sibling ``buoyancy_scale_K`` /
+    # ``supersat_scale`` trigger normalisers), not an inline literal.
+    convective_mask = jnp.tanh(cvgu / config.cvgu_activation_scale)
 
     return ConvectionOutput(
         dT_dt=dT_dt,

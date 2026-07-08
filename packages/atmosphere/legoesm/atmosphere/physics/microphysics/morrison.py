@@ -109,6 +109,46 @@ def resolve_morrison_flavor(config: MorrisonConfig) -> MorrisonConfig:
     )
 
 
+__physics_contract__ = {
+    "summary": (
+        "Morrison, Curry & Khvorostyanov (2005) double-moment ice+liquid "
+        "microphysics: extends two-moment warm rain with ice nucleation, "
+        "deposition/sublimation, riming, melting and snow, with mass+number "
+        "prognostic and sedimentation to surface precipitation."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",
+        "hydrometeors.q_r": "kg/kg", "hydrometeors.q_i": "kg/kg",
+        "hydrometeors.q_s": "kg/kg", "p_full": "Pa", "rho": "kg/m^3",
+        "dz": "m", "dt": "s",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_dt": "kg/kg/s",
+        "dq_r_dt": "kg/kg/s", "dq_i_dt": "kg/kg/s", "dq_s_dt": "kg/kg/s",
+        "dN_c_dt": "1/(m^3 s)", "dN_r_dt": "1/(m^3 s)", "dN_i_dt": "1/(kg s)",
+        "precipitation": "kg/m^2/s",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. Latent heating dT_dt uses L_v (vapour<->"
+        "liquid), L_s (vapour<->ice deposition/sublimation) and L_f (freezing/"
+        "melting), consistent with each phase-change rate. Water is "
+        "redistributed among vapour/cloud/rain/ice/snow; SURFACE PRECIPITATION "
+        "(rain+snow melt, >= 0) removes water, so column moisture is NOT "
+        "conserved -- no contract-level conservation is claimed. Masses and "
+        "numbers stay >= 0."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": "Morrison, Curry & Khvorostyanov (2005), J. Atmos. Sci. 62, 1665-1677",
+    "idealized_test": (
+        "tests/unit/test_physics_microphysics.py + tests/unit/"
+        "test_rce_ice_microphysics.py — a cold supersaturated column nucleates "
+        "ice with L_s heating; riming/melting move mass between phases; snow + "
+        "rain reach the surface; all masses/numbers >= 0."
+    ),
+}
+
+
 def morrison_microphysics(
     T: jax.Array,
     q_v: jax.Array,
@@ -1258,9 +1298,9 @@ def morrison_microphysics(
     # conservation holds exactly when the CFL limiter fires.
     precipitation = precip_r + precip_i + precip_s + precip_g
 
-    # Pin dtype to the input precision so we never silently promote
-    # the unused-species placeholders to f64 under x64 mode.
-    jnp.zeros((ncol, nlev), dtype=T.dtype)
+    # (No placeholder outputs here — every MicrophysicsOutput field below is
+    # a computed tendency, so no dtype pin is needed; a former bare
+    # ``jnp.zeros(...)`` expression at this point was dead code.)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,

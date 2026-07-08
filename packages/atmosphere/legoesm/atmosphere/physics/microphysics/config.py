@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from legoesm import constants
+from legoesm.atmosphere.physics.microphysics.arg_activation import ActivationConfig
 from legoesm.atmosphere.physics.microphysics.fast_sbm.config import FastSBMConfig
 from legoesm.atmosphere.physics.microphysics.sdm.config import SDMConfig
 
@@ -189,7 +190,7 @@ __param_spec__ = {
             "a_v_r": {"units": "m^(1-b)/s", "bounds": (40.0, 400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
             "b_v_r": {"units": "1", "bounds": (0.15, 1.5), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
             # --- Ice nucleation (Cooper 1986) ---
-            "N_i0": {"units": "1/m^3", "bounds": (1650.0, 15000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
+            "N_i0": {"units": "1/m^3", "bounds": (1.0, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
             "N_i_nuc_max": {"units": "1/m^3", "bounds": (1e5, 5e6), "tunable_tier": 3, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
             "cooper_a": {"units": "1/K", "bounds": (0.1, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
             "cooper_T_act": {"units": "K", "bounds": (255.0, 273.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
@@ -242,6 +243,14 @@ __param_spec__ = {
             "qc_crit": {"units": "kg/kg", "bounds": (0.0001, 0.0015), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist et al. (1989)", "shape": None},
             "auto_rate": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist et al. (1989)", "shape": None},
             "evap_coeff": {"units": "1", "bounds": (0.0001, 0.0015), "tunable_tier": 2, "transform": "sigmoid", "category": "evaporation", "reference": "Sundqvist et al. (1989)", "shape": None},
+            # SBK89 Sec. 5 precipitation-release enhancements: coalescence F1
+            # (function of the precipitation flux from above) and Bergeron F2
+            # (mixed-phase temperature window); c_0 is multiplied and q_c,crit
+            # divided by F1*F2.
+            "coalescence_enh_coeff": {"units": "(kg m^-2 s^-1)^-1/2", "bounds": (0.0, 1000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
+            "bergeron_enh_coeff": {"units": "1", "bounds": (0.0, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
+            "bergeron_T_peak_K": {"units": "K", "bounds": (248.0, 268.0), "tunable_tier": 3, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
+            "bergeron_T_width_K": {"units": "K", "bounds": (2.0, 15.0), "tunable_tier": 3, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
         },
     },
     "ThompsonConfig": {
@@ -270,7 +279,7 @@ __param_spec__ = {
             "mu_c": {"units": "1", "bounds": (0.99, 9.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Thompson et al. (2008)", "shape": None},
             "mu_r": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Thompson et al. (2008)", "shape": None},
             # --- Ice nucleation (Cooper 1986) ---
-            "N_i0": {"units": "1/m^3", "bounds": (1650.0, 15000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
+            "N_i0": {"units": "1/m^3", "bounds": (1.0, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
             "N_i_nuc_max": {"units": "1/m^3", "bounds": (1e5, 5e6), "tunable_tier": 3, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Thompson et al. (2008)", "shape": None},
             "cooper_a": {"units": "1/K", "bounds": (0.1, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
             "cooper_T_act": {"units": "K", "bounds": (255.0, 273.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
@@ -324,6 +333,19 @@ class SundqvistConfig(NamedTuple):
     # is large enough).  0 → the linear no-threshold limit.
     qc_crit: float = 5e-4             # [kg/kg]
     evap_coeff: float = 5e-4          # Sub-cloud evaporation coefficient
+    # --- SBK89 (Sec. 5) precipitation-release enhancements ---
+    # Coalescence F1 = 1 + c1·sqrt(P) with P the precipitation flux falling
+    # in from above [kg m^-2 s^-1]: existing precipitation collects cloud
+    # water and accelerates release (F1 ≈ 6 at 1 mm/h with the default).
+    # 0 → enhancement off (plain Sundqvist base autoconversion).
+    coalescence_enh_coeff: float = 300.0   # c1 [(kg m^-2 s^-1)^-1/2]
+    # Bergeron-Findeisen F2 = 1 + c2·exp(−((T − T_peak)/T_width)²): a smooth
+    # mixed-phase window peaking near −15 °C, where the ice-liquid saturation
+    # difference e_sw − e_si (the Bergeron growth driver) is largest; decays
+    # to ~1 above freezing by construction.  0 → enhancement off.
+    bergeron_enh_coeff: float = 3.0        # peak amplification [-]
+    bergeron_T_peak_K: float = constants.T_freeze - 15.0   # [K]
+    bergeron_T_width_K: float = 7.0        # Gaussian half-width [K]
 
 
 class SeifertBehengConfig(NamedTuple):
@@ -674,6 +696,13 @@ class MorrisonConfig(NamedTuple):
     # Gated on q_s≥0.1 g/kg AND q_c≥0.5 g/kg. Snow number sink NSCNG via MG0.
     do_snow_to_graupel: bool = True
     graupel_embryo_mass: float = 1.6e-10    # SAM MG0 graupel embryo mass [kg]
+    # Aerosol -> cloud-droplet-number ACTIVATION scheme selector (opt-in).
+    # Consumed only when ``nc_from_aerosol=True``: "proxy" (default) keeps the
+    # Andreae (2009) AOD->CCN diagnostic byte-identical; "arg" switches to the
+    # physically-based Abdul-Razzak & Ghan (2000) modal activation
+    # (``arg_activation.activated_nc_field``). Appended LAST (nested config,
+    # non-float) so positional construction and the param spec are unaffected.
+    activation: ActivationConfig = ActivationConfig()
 
 
 class ThompsonConfig(NamedTuple):
@@ -703,7 +732,10 @@ class ThompsonConfig(NamedTuple):
     # bisects that band and makes the cold-case fp32-vs-fp64 spread WORSE).
     # See _warm_rain.rain_evaporation.
     rain_evap_rh_floor: float = 5.0e-5
-    N_i0: float = 5e3
+    # Cooper(1986) base ice number [1/m³] (= 0.005/L).  Was 5e3 — 1000x too
+    # high (the canonical Cooper base is 0.005/L = 5/m³, the value MorrisonConfig
+    # uses); 5e3 pinned all clouds colder than ~-15 C at the N_i_nuc_max cap.
+    N_i0: float = 5.0
     cooper_a: float = 0.304
     # SAM "limit to 500 L⁻¹" cap on Cooper-nucleated ice number. Without it
     # the bare ``N_i0·exp(cooper_a·(T_freeze−T))`` diverges at very cold
@@ -787,7 +819,8 @@ class P3Config(NamedTuple):
     saturation_sharpness: float = 100.0
     autoconversion_sharpness: float = 10.0
     # --- Ice nucleation (Cooper 1986) ---
-    N_i0: float = 5e3               # Cooper base ice crystal number [1/m³]
+    # Was 5e3 — 1000x the canonical Cooper base (0.005/L = 5/m³, = MorrisonConfig).
+    N_i0: float = 5.0               # Cooper base ice crystal number [1/m³] (= 0.005/L)
     cooper_a: float = 0.304         # Cooper exponent
     # SAM "limit to 500 L⁻¹" cap; bounds the Cooper exponential so cold
     # tropopause temperatures cannot overflow fp32 (mirrors Morrison).

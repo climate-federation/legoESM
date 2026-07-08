@@ -338,6 +338,14 @@ class CompressibleEulerConfig(NamedTuple):
                                           # is NOT SAM-faithful (SAM uses
                                           # Smagorinsky) — for experimentation, not
                                           # the gSAM-match runs. K_h = K_m/smagorinsky_prandtl.
+    amd_c: float = 0.3                    # Anisotropic Minimum-Dissipation constant
+                                          # (modified Poincaré const ≈0.3; Rozema 2015
+                                          # / Abkar-Bae-Moin 2016) for
+                                          # turbulence_closure="amd" — an OPTIONAL
+                                          # eddy closure that gives ZERO SGS viscosity
+                                          # where the resolved flow needs none
+                                          # (minimum-dissipation) and handles Δx≠Δz.
+                                          # Not SAM-faithful. K_h = K_m/smagorinsky_prandtl.
     horizontal_advection_scheme: str = "upwind1"
                                           # Horizontal advection of theta_prime, u, v, w
                                           # (and tracers) on the plane dycore. Three

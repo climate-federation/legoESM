@@ -44,6 +44,46 @@ from legoesm.ocean.vertical import (
     compute_ocean_jacobian,
 )
 
+__physics_contract__ = {
+    "summary": (
+        "MPAS Voronoi-mesh adapters wiring KPP vertical mixing onto the C-grid: "
+        "tracers at cells, edge-normal momentum via TRiSK cell-velocity "
+        "reconstruction; produce cell/edge (K_v, A_v) profiles and the "
+        "edge-normal momentum + cell tracer tendencies."
+    ),
+    "inputs": {
+        "state.T": "degC", "state.S": "psu", "state.u": "m/s (edge-normal)",
+        "surface_forcing.tau_x": "N/m^2", "surface_forcing.q_net": "W/m^2",
+    },
+    "outputs": {
+        "du_dt_edge": "m/s^2", "dT_dt": "degC/s", "dS_dt": "psu/s",
+        "A_v_cells": "m^2/s", "K_v_cells": "m^2/s",
+    },
+    "sign_convention": (
+        "K_v, A_v >= 0; KPP diffusivities diagnosed at cells then interpolated "
+        "to edges; edge-normal momentum diffusion is flux-form with a zero-flux "
+        "seafloor (partial-cell masking); z positive up. A coefficient producer "
+        "+ flux-form applier — the budget closes in the diffusion solver; an "
+        "unknown scheme raises ValueError."
+    ),
+    # make_kpp_physics_mpas applies flux-form edge-momentum + cell-tracer
+    # tendencies (zero-flux seafloor, surface fluxes separate) = conservative
+    # redistribution of column-integrated heat (energy), salt and momentum; the
+    # sibling make_kpp_profiles_mpas is a coefficient-only producer (applies
+    # nothing, so conserves/violates nothing).
+    "conserves": ["energy", "salt", "momentum"],
+    "differentiable": True,
+    "reference": (
+        "Large, McWilliams & Doney (1994) KPP on the MPAS/TRiSK C-grid "
+        "(Perot 2000 reconstruction; Ringler et al. 2013, Ocean Modelling 69)"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_vmix_mpas_integration.py — cell-reconstructed "
+        "KPP viscosity applied to edge-normal u matches the lat-lon path; an "
+        "unknown scheme raises ValueError."
+    ),
+}
+
 
 # Placeholder salinity for dry cells so the EOS stays well-defined [PSU].
 _EOS_SAFE_SALINITY_PSU = 35.0

@@ -1,0 +1,178 @@
+"""Write a STARTER AMIP base config for the LES-informed correction campaign.
+
+The campaign launcher (``scripts/cluster/compare_reanalysis/run_correction_campaign.sbatch``)
+and CLI (``scripts/run/run_correction_campaign.py --config <path>``) need a base
+:class:`~legoesm.driver.config.ExperimentConfig` whose ``turbulence`` is
+``"clubb_lite"`` (the campaign corrects ``clubb_lite``'s C_K / Pr_t / C_eps — it
+does NOT switch schemes).  This emits a minimal, runnable such config as JSON.
+
+The config is built PROGRAMMATICALLY (never a hand-written JSON that could drift
+from the schema): :func:`build_amip_clubb_lite_config` always produces a
+schema-valid ``ExperimentConfig`` with ``turbulence="clubb_lite"``, and the CLI
+serializes it via ``experiment_config_to_dict``.  The defaults are a COARSE
+starter (latlon 8, 10 levels, gray radiation) — scale ``--resolution`` / ``--nlev``
+/ ``--dt`` up for a production demonstration.
+
+Usage::
+
+    python scripts/experiment/write_amip_clubb_lite_config.py configs/amip_clubb_lite.json
+    python scripts/experiment/write_amip_clubb_lite_config.py out.json --resolution 16 --nlev 30
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+
+from legoesm.driver.config import (
+    DycoreConfig,
+    ExperimentConfig,
+    GridConfig,
+    OutputConfig,
+    experiment_config_to_dict,
+)
+
+# A latlon resolution at/below this is a COARSE STARTER (toy ≈ 8×16 grid) — fine for a
+# smoke / dry-run but far too coarse for a meaningful ERA5 comparison. ``main`` reminds the
+# operator to scale up, so a production campaign is not run at toy resolution by mistake
+# (the runbook + sbatch quick-start both show ``--resolution 8``).
+_STARTER_RESOLUTION_MAX = 16
+
+
+def build_amip_clubb_lite_config(
+    *, resolution: int = 8, nlev: int = 10, dt: float = 600.0, radiation: str = "gray",
+    days: int = 200, land_mask_path: str = "", grid_type: str = "latlon",
+    diag_days: int | None = None,
+) -> ExperimentConfig:
+    """A runnable AMIP :class:`ExperimentConfig` with ``turbulence="clubb_lite"``.
+
+    ``turbulence`` is fixed to ``"clubb_lite"`` (the campaign's requirement); the
+    grid (``grid_type``, default ``latlon``; also ``cubed_sphere`` so the realistic
+    comparison + ocean-only ranking work on a STRUCTURED non-lat-lon grid — the iter-484
+    flat-mask bug was grid-shape-specific), vertical resolution, timestep, radiation, and
+    run length are exposed so the starter can be scaled toward a production run.  ``days``
+    is the run length, i.e. the CLIMATOLOGY WINDOW the model time-mean is computed over and
+    compared to the (matched) ERA5 mean — keep it long enough for a stable mean (the
+    200-day default ≈ 40 samples at the 5-day diagnostic cadence) and aligned to the
+    ERA5 window (runbook §6). Hydrostatic finite-volume dycore — the AMIP default the
+    comparison + LES spin-off were built against.
+
+    ``grid_type`` MUST be ``latlon`` or ``cubed_sphere``: ``clubb_lite`` carries prognostic
+    physics state that only the per-step / finite-volume run loop threads between steps
+    (issue #405), so a ``gaussian`` grid (which forces the SPECTRAL loop) cannot run the
+    clubb_lite campaign — a config that VALIDATES + dry-runs but FAILS at the model build
+    (iter 494). Fail loud here at config-gen, not deep in the build.
+
+    ``land_mask_path`` (optional land-sea fraction file) sets a real land-sea mask, so the
+    model runs land physics over land and the campaign's ``--ocean-only`` can EXCLUDE land
+    columns. WITHOUT it the config is FLAT (no land): the model treats the whole globe as
+    prescribed-SST ocean, so over CONTINENTS the comparison to ERA5 (which has land) is
+    apples-to-oranges and would dominate the worst-column ranking — see ``main``'s NOTE.
+    """
+    if grid_type not in ("latlon", "cubed_sphere"):
+        raise ValueError(
+            f"grid_type {grid_type!r} is unsupported for a clubb_lite campaign: clubb_lite "
+            "carries prognostic physics state the spectral run loop (which 'gaussian' "
+            "requires) does not thread (issue #405), so the model build fails. Use 'latlon' "
+            "or 'cubed_sphere'.")
+    # diag_days is the campaign time-mean's diagnostic CADENCE: it samples at each diag_days
+    # boundary, so a run needs days > diag_days for ≥1 sample. None ⇒ the OutputConfig default
+    # (5 → ~40 samples over the 200-day default); lower it (e.g. 1) for a fast full-loop TEST
+    # where days can then be small, raise it for a sparser climatology (iter 501).
+    _diag_days = OutputConfig().diag_days if diag_days is None else int(diag_days)
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type=str(grid_type), resolution=int(resolution),
+                        nlev=int(nlev)),
+        dycore=DycoreConfig(
+            dt=float(dt), model_type="hydrostatic", discretization="finite_volume"),
+        output=OutputConfig(diag_days=_diag_days),
+        radiation=radiation,
+        turbulence="clubb_lite",
+        days=int(days),
+        land_mask_path=str(land_mask_path),
+    )
+    # Fail-fast on a bad scheme literal (e.g. a typo'd --radiation like "rrtmpg") via the
+    # CANONICAL ExperimentConfig validator BEFORE the starter config is written to disk —
+    # else the bad value only surfaces later when the campaign LOADS the file (a worse
+    # operator UX: a written-but-broken config). validate_strict checks radiation against
+    # the same ("none","gray","rrtmgp","rrtmg") set the model build uses, so no duplication.
+    cfg.validate_strict()
+    return cfg
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("out", help="output path for the JSON config")
+    p.add_argument("--grid-type", default="latlon",
+                   choices=("latlon", "cubed_sphere"),
+                   help="model grid family (default latlon; cubed_sphere lets the "
+                        "realistic comparison + ocean-only ranking be smoked on a structured "
+                        "non-lat-lon grid)")
+    p.add_argument("--resolution", type=int, default=8, help="grid resolution (default 8)")
+    p.add_argument("--nlev", type=int, default=10, help="vertical levels (default 10)")
+    p.add_argument("--dt", type=float, default=600.0, help="dycore timestep [s] (default 600)")
+    p.add_argument("--radiation", default="gray", help="radiation scheme (default gray)")
+    p.add_argument("--days", type=int, default=200,
+                   help="run length = the CLIMATOLOGY WINDOW the time-mean is computed over "
+                        "(default 200; keep it long + aligned to the ERA5 window)")
+    p.add_argument("--diag-days", type=int, default=None,
+                   help="diagnostic CADENCE [days]: the campaign time-mean samples every "
+                        "diag_days, so --days must exceed it (default 5 -> ~40 samples over 200 "
+                        "days; lower to e.g. 1 for a fast full-loop test with small --days)")
+    p.add_argument("--land-mask-path", default="",
+                   help="optional land-sea fraction file: sets a real land mask so the model "
+                        "runs land physics over land and --ocean-only can exclude land columns. "
+                        "WITHOUT it the config is flat (no land) and the over-continent ERA5 "
+                        "comparison is apples-to-oranges (see the launch NOTE).")
+    args = p.parse_args(argv)
+    # Fail-fast (iter 454): a non-existent --land-mask-path would only surface at the model
+    # build, deep in a multi-day run. Catch the typo'd/unmounted path at generation, like the
+    # --radiation validate-before-write (iter 441). os import is function-scoped per the
+    # repo's inline-import budget.
+    if args.land_mask_path:
+        import os
+        if not os.path.exists(args.land_mask_path):
+            raise SystemExit(
+                f"--land-mask-path {args.land_mask_path!r} does not exist; supply a readable "
+                "land-sea fraction file (or omit it for a flat no-land config).")
+    cfg = build_amip_clubb_lite_config(
+        resolution=args.resolution, nlev=args.nlev, dt=args.dt, radiation=args.radiation,
+        days=args.days, land_mask_path=args.land_mask_path, grid_type=args.grid_type,
+        diag_days=args.diag_days)
+    with open(args.out, "w") as f:
+        json.dump(experiment_config_to_dict(cfg), f, indent=2)
+    print(f"[config] wrote AMIP clubb_lite base config (turbulence=clubb_lite, "
+          f"{args.grid_type} {args.resolution} L{args.nlev}, {args.days}-day climatology) "
+          f"to {args.out}")
+    if not args.land_mask_path:
+        print(
+            "[config] NOTE: no --land-mask-path => FLAT config (no land). The model treats the "
+            "whole globe as prescribed-SST ocean, so over CONTINENTS the comparison to ERA5 "
+            "(which has land) is apples-to-oranges and would dominate the worst-column ranking "
+            "(the LES correction would chase the missing-land artifact, not a closure error). "
+            "For a realistic comparison supply --land-mask-path (then the campaign's "
+            "--ocean-only / verify --ocean-only meaningfully exclude land columns); a flat "
+            "config is fine only for an aquaplanet smoke.")
+    if args.resolution <= _STARTER_RESOLUTION_MAX:
+        print(
+            f"[config] NOTE: {args.grid_type} resolution {args.resolution} is a COARSE STARTER "
+            "(fine for a smoke / dry-run). For a PRODUCTION ERA5 comparison scale "
+            "--resolution / --nlev UP — and lower --dt to keep the CFL stable (a too-large "
+            "dt at higher resolution diverges, and the campaign's baseline-divergence guard "
+            "would then fail the run loud).")
+    # The campaign time-mean fires a sample at each diag_days segment boundary; a run shorter
+    # than ONE cadence has no boundary and the campaign FAILS LOUD ("no segment boundary
+    # fired"). days <= diag_days is fine for a --dry-run smoke (which never runs the time-mean),
+    # so this WARNS rather than fails (iter 499 — caught by a real-ERA5 days=1 run).
+    if args.days <= cfg.output.diag_days:
+        print(
+            f"[config] WARNING: --days {args.days} <= the {cfg.output.diag_days}-day diagnostic "
+            "cadence (output.diag_days): a REAL campaign's climatology time-mean fires NO "
+            "segment boundary in a run this short and FAILS LOUD ('no segment boundary "
+            f"fired'). Fine for a --dry-run smoke; for a real run use --days > "
+            f"{cfg.output.diag_days} (the 200-day default gives ~40 samples).")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

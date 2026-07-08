@@ -945,10 +945,18 @@ def mpas_ocean_baroclinic_tendencies(
         # (the freshwater helper already exposes ``owned_mask`` +
         # ``global_sum_if_distributed``).
         if bool(getattr(config, "normalize_freshwater", False)):
+            import jax as _jax
+
             from legoesm.parallel.reductions import (
                 is_multi_process, mpi_world_size,
             )
-            if is_multi_process() or mpi_world_size() > 1:
+            # jax.process_count() covers the jax.distributed multi-controller
+            # mode explicitly: is_multi_process() is deliberately mpi4jax-only
+            # (reduction routing), but this is a REFUSAL guard — any
+            # multi-process shape must trip it until owned-mask plumbing
+            # lands (codex round-4).
+            if (is_multi_process() or mpi_world_size() > 1
+                    or _jax.process_count() > 1):
                 raise NotImplementedError(
                     "normalize_freshwater=True under multi-rank MPAS is not yet "
                     "supported: the top-layer-salt and eta freshwater means are "

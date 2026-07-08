@@ -1,5 +1,16 @@
 # Real MPI and Multi-GPU Scaling Tests (Atmosphere + Ocean)
 
+> **2026-07 — cluster job sets + ocean multi-GPU lane.** Ready-made
+> weak/strong job sets now exist for **NCAR Derecho**
+> (`scripts/cluster/scaling_derecho/`, incl. multi-node NCCL + ocean GPU/CPU
+> jobs) and **DKRZ Levante** (`scripts/cluster/scaling_levante/`). The ocean
+> gained a full-step multi-GPU driver:
+> `scripts/bench/bench_ocean_latlon_spmd_scaling.py` (the ocean twin of the
+> atm SPMD bench; single-process multi-device AND `--multicontroller`
+> multi-node, with `--parity-gate`/`--check-conservation` fail-fast armor) —
+> superseding §4's "no single ocean script" caveat for the GPU-node case. SOTA comparison + readiness review:
+> `docs/performance/scaling/derecho_levante_sota_review_2026-07.md`.
+
 This runbook describes how to run real-hardware scaling tests for legoESM
 atmosphere and ocean components on CPUs/GPUs and MPI clusters.
 

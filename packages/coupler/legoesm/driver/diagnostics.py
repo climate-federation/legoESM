@@ -1249,12 +1249,20 @@ class DiagnosticCollector:
                 **{k: np.array(v) for k, v in moisture_data.items()},
             )
 
-    def flush_cmip_monthly(self, current_day: float) -> None:
+    def flush_cmip_monthly(self, current_day: float, *,
+                           write: bool = True) -> None:
         """Write completed CMIP months incrementally and free their memory.
 
         Call this periodically (e.g. at each diagnostic interval) during
         long runs.  Only months strictly before the current month are
         flushed; the in-progress month is kept for further accumulation.
+
+        ``write=False`` pops (frees) the completed months WITHOUT writing —
+        for multi-controller SPMD non-root processes, whose accumulators
+        fill identically to root's (every process runs the gathered full
+        ``collect()``) but must never touch the shared output files; without
+        the pop they would retain every completed month for the whole run
+        (codex round-10 Medium).
         """
         if self._spatial_monthly is None or self.cf_writer is None:
             return
@@ -1267,10 +1275,133 @@ class DiagnosticCollector:
             current_year, current_month,
         )
         months = data.get('months', [])
-        if not months:
+        if not months or not write:
             return
 
         self._write_cmip_data(data)
+
+    def finalize_cmip_daily(self, current_day: float) -> None:
+        """Write the COMPLETED days of the CMIP6 ``day`` table if a CMIP
+        writer is active.
+
+        Companion to :meth:`finalize_cmip_fixed` for the graceful wallclock
+        exit.  The daily accumulator is otherwise drained only by :meth:`save`
+        at the end of a run, so a restart-chain ``sys.exit(0)`` would drop this
+        SLURM segment's daily means (day/tas, tasmin, tasmax, …).  Mirrors
+        :meth:`flush_cmip_monthly`: only days STRICTLY BEFORE ``current_day``
+        are emitted (and freed).  The in-progress day is deliberately withheld
+        — writing it here and again from the restart segment (which resumes
+        inside the same ``(year, doy)``) would create duplicate ``time``
+        coordinates, since ``CFWriter.write_field`` appends blindly.  The one
+        boundary day straddling the exit is therefore a bounded imperfection
+        (its restart-segment mean omits the pre-exit samples), matching the
+        monthly-boundary limitation; a fully lossless chain would require
+        checkpointing the accumulator state.  Guarded on ``cf_writer`` and the
+        daily accumulator (no-op for non-CMOR / daily-off runs)."""
+        if self._spatial_daily is None or self.cf_writer is None:
+            return
+        doy, _ = day_to_calendar(current_day)
+        current_year = int(current_day // 365.0)
+        data = self._spatial_daily.pop_completed_days(current_year, int(doy))
+        if not data.get('days'):
+            return
+        lat, lon = self._cmip_target_latlon()
+        self.cf_writer.write_daily(data, lat=lat, lon=lon)
+
+    def finalize_cmip_fixed(self) -> None:
+        """Write the CMOR ``fx`` table (areacella / sftlf / orog) if a CMIP
+        writer is active.
+
+        The time-invariant ``fx`` fields are normally written once by
+        :meth:`save` at the end of a run.  A wallclock-graceful exit
+        (:meth:`ModelDriver._maybe_wallclock_exit`) calls ``sys.exit(0)`` and
+        never reaches :meth:`save`, so without this public entry a
+        restart-chained run — i.e. EVERY multi-hour AMIP run, whose year does
+        not finish in a single SLURM window — writes its incremental monthly
+        ``Amon`` files but never ``areacella``/``sftlf``.  The resulting CMOR
+        output is non-compliant (each variable's ``external_variables``
+        attribute references ``areacella``/``sftlf``) and blocks any
+        area-weighted or land/ocean-split diagnostic.  Idempotent: rewriting
+        the same static fields on a later flush is harmless."""
+        if self.cf_writer is not None:
+            self._write_cmip_fixed_files()
+
+    def save_cmor_accumulators(self, path: str | Path) -> None:
+        """Persist the CMOR accumulator state to an additive sidecar ``.npz``.
+
+        Serializes the spatial-monthly, spatial-daily, and zonal-monthly
+        accumulators — each namespaced with a ``"monthly."`` / ``"daily."`` /
+        ``"zonal."`` key prefix — into a single ``np.savez`` file written next
+        to the model checkpoint.  This lets a calendar month split across
+        restart-chain links (each link is only ~10 days; a month is ~30) be
+        completed on resume; without it the monthly accumulator is recreated
+        empty every link and the CMOR ``Amon`` means are never written.
+
+        Additive by design: it does NOT touch the checkpoint ``.npz`` schema.
+        No-op when CMIP output is inactive (no ``cf_writer`` / accumulators).
+
+        The write is ATOMIC (``<name>.tmp`` then ``Path.replace``): a partial
+        write can never leave a corrupt sidecar, and a re-persist that fails
+        never clobbers the previous (e.g. drained) sidecar with a half-file.
+        """
+        if self.cf_writer is None:
+            return
+        merged: dict[str, np.ndarray] = {}
+        for prefix, accum in (
+            ("monthly.", self._spatial_monthly),
+            ("daily.", self._spatial_daily),
+            ("zonal.", self.monthly_accum),
+        ):
+            if accum is None:
+                continue
+            for key, arr in accum.get_state().items():
+                merged[prefix + key] = arr
+        if not merged:
+            return
+        path = Path(path)
+        tmp_path = path.parent / (path.name + ".tmp")
+        try:
+            # Write via a file handle so ``np.savez`` does not append a second
+            # ``.npz`` to the ``.tmp`` name, then atomically move into place.
+            with open(tmp_path, "wb") as fh:
+                np.savez(fh, **merged)
+            tmp_path.replace(path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)  # never leave a partial temp
+            raise
+
+    def load_cmor_accumulators(self, path: str | Path) -> bool:
+        """Restore CMOR accumulator state from a sidecar written by
+        :meth:`save_cmor_accumulators`.
+
+        Splits the merged ``.npz`` back into the ``"monthly."`` / ``"daily."`` /
+        ``"zonal."`` namespaces and calls ``set_state`` on each active
+        accumulator.  Returns ``True`` if any state was restored, ``False`` if
+        the sidecar is absent or CMIP output is inactive — an older run with no
+        sidecar simply resumes with empty accumulators (backward-compatible).
+        """
+        path = Path(path)
+        if self.cf_writer is None or not path.exists():
+            return False
+        namespaced = {
+            "monthly.": self._spatial_monthly,
+            "daily.": self._spatial_daily,
+            "zonal.": self.monthly_accum,
+        }
+        substates: dict[str, dict] = {prefix: {} for prefix in namespaced}
+        with np.load(str(path), allow_pickle=False) as npz:
+            for full_key in npz.files:
+                for prefix in namespaced:
+                    if full_key.startswith(prefix):
+                        substates[prefix][full_key[len(prefix):]] = npz[full_key]
+                        break
+        restored = False
+        for prefix, accum in namespaced.items():
+            sub = substates[prefix]
+            if accum is not None and sub:
+                accum.set_state(sub)
+                restored = True
+        return restored
 
     def save(self, output_dir: str | Path) -> None:
         """Save all accumulated diagnostics to disk."""

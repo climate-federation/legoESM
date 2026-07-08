@@ -169,6 +169,17 @@ if [ "$GRID" = "cubed-sphere" ]; then
         if [ "${CPU_ONLY:-0}" != "1" ]; then
             submit "gpu ${GRID} res=${R} (A100 sweep)" -v "$GPU_VARS" "$SD/cube_scaling_gpu.sh"
         fi
+        # Opt-in route-B cube CPU lane (#764): jax.distributed/gloo cs-spmd,
+        # a SEPARATE curve from the route-A face-scatter above (different
+        # stack; extends past 6 via 6*kt^2).  Off by default so the standard
+        # campaign is unchanged; CUBE_ROUTEB=1 adds it into the same $OUTDIR
+        # (finalize re-aggregates the whole tree, keying on grid+n_devices).
+        if [ "${CUBE_ROUTEB:-0}" = "1" ] && [ "${GPU_ONLY:-0}" != "1" ]; then
+            RB_CAMP="${OUTDIR}/${GRID}_cpu_routeb_res${R}"
+            RB_VARS="STRONG_RES=${R},CAMP=${RB_CAMP}${EXTRA_VARS}"
+            submit "cpu ${GRID} res=${R} (route-B cs-spmd)" \
+                -v "$RB_VARS" "$SD/cube_scaling_cpu_routeb.sh"
+        fi
     done
 else
     [ "${GPU_ONLY:-0}" != "1" ] && emit_noncube cpu

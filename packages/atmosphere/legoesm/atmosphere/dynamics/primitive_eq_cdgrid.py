@@ -246,6 +246,12 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Default ``False`` keeps the legacy explicit-diffusion
         # path bit-exact.
     p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p). Appended last to preserve positional ABI.
+    moisture_flux_form: bool = False
+        # #771: when True, transport the state tracers with the mass-conserving
+        # flux-form substep (flux_form_tracer_step, co-transported δp) AFTER RK3
+        # instead of the in-RK3 advective -(u·∇q) form.  Fixes the cube
+        # column-water non-conservation / day-150 blow-up.  Default False keeps
+        # the advective path bit-exact.  Appended last (positional ABI).
 
 
 def validate_corner_div_damp_nord(nord: int) -> None:
@@ -607,9 +613,8 @@ def fv3_hydrostatic_tendencies(
 
         # FV3_3D iter 18: del-(2*(nord+1)) damping (FV3 sw_core.F90:1725-1822, nord>0 path)
         # dd8 = (da_min_c*d4_bg)^(nord+1); ke_corr = damp2*delpc + dd8*divg_d
-        # FV3_3D iter 893: nord-loop preserved inline (1-ULP trace-reorder
-        # diff vs fv3_corner_laplacian_nord wrapper would break iter-22
-        # bit-for-bit test).  The wrapper is for unit tests only.
+        # FV3_3D iter 893: nord-loop preserved inline (a 1-ULP trace-reorder
+        # would break the iter-22 bit-for-bit test).
         if config.corner_div_damp_d4_bg > 0.0 and config.corner_div_damp_nord > 0:
             from legoesm.core._fv3_divergence_corner import (
                 fv3_corner_laplacian_iteration,
@@ -896,8 +901,13 @@ def fv3_hydrostatic_tendencies(
         _q_packed = jnp.stack(
             [state.tracers[k].data for k in _tnames], axis=-1,
         )  # (6, n, n, nlev, n_tracers)
+        # #771: with flux-form moisture the HORIZONTAL transport is done as a
+        # mass-conserving post-RK3 substep (step()), so the in-RK3 tendency
+        # keeps only the (mass-flux-consistent) vertical advection here; the
+        # advective -(u·∇q) horizontal term is skipped to avoid double transport.
         _dq_packed = advective_tracer_tendency(
             _q_packed, u_cell, v_cell, grid, _tracer_vert_fn,
+            horizontal=not config.moisture_flux_form,
         )
         _dtracers = {k: _dq_packed[..., i] for i, k in enumerate(_tnames)}
 
@@ -1360,6 +1370,174 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             state, dt, physics_fn=physics_fn, target_mass=target_mass,
             phys_state=phys_state)
 
+    @staticmethod
+    def _flux_form_scatter_blocked(backend, topo, spmd_mesh, state_lead) -> bool:
+        """True iff the ``moisture_flux_form`` substep must fail-closed.
+
+        The #811 unblock has BOTH halves now: (1) the mass-conservation
+        reductions are allreduce-aware (``conservation.global_face_sum_if_
+        scattered``), and (2) the transport + wind reconstruction are 4D-halo
+        (``transport_step_4d`` / ``d2a2c_vect_4d`` — ONE ``pad_halo_4d`` /
+        ``pad_halo_vector_4d`` per exchange for all levels, so there is no
+        ``vmap(pad_halo)`` cross-face ``sendrecv``).  So:
+
+        * MPI FACE-ONLY (single-rank, REPLICATED, or face-SCATTERED with
+          ``tiling == (1, 1)``): **allowed** — certified replicated-vs-scattered
+          equivalent (fwd + grad) by
+          ``tests/distributed/test_cube_face_scatter_mpi.py`` (#811 / #771).
+        * MPI SUB-FACE TILING (``tiling != (1, 1)``): fail-closed — the 4D halos
+          reject ``interp_offsets`` under sub-face tiling
+          (``pad_halo_mpi_4d``), so this path is unsupported (codex #811 review).
+        * SPMD: still fail-closed whenever a mesh is active.  The 4D halos
+          dispatch to explicit SPMD exchanges, but that combination is
+          unvalidated here (#811 SPMD follow-up).
+
+        ``state_lead`` is retained for signature + unit-test stability.
+        Extracted + pure so the guard is unit-tested (a rename then breaks the
+        test loudly instead of silently disabling it).
+        """
+        del state_lead
+        if backend == "mpi":
+            # Face-only MPI is supported; sub-face tiling is not (the 4D halo
+            # rejects interp_offsets when tiling != (1, 1)).
+            tiling = getattr(topo, "tiling", (1, 1))
+            return tiling is not None and tuple(tiling) != (1, 1)
+        if backend == "spmd" and spmd_mesh is not None:
+            return True
+        return False
+
+    def _flux_form_moisture_substep(self, state_in, state_out, dt):
+        """#771: mass-conserving flux-form HORIZONTAL tracer transport as a
+        post-RK3 substep.
+
+        The RK3 tendency already applied the (mass-flux-consistent) vertical
+        advection + physics with the advective horizontal ``-(u·∇q)`` skipped
+        (``moisture_flux_form``).  Here the horizontal transport is done by the
+        conserving, free-stream-preserving :func:`flux_form_tracer_step`.
+
+        DESIGN / LIMITATIONS (this is a 1st-order operator split, NOT a fully
+        continuity-consistent FV transport — the hybrid PE core carries mass via
+        ``p_s`` + a ``div_v`` continuity + a mass fixer, not via this flux
+        operator, so there is no shared horizontal mass-flux to advect against):
+
+        * ``flux_form_tracer_step`` co-transports its own ``δp★`` (used only to
+          keep ``q★`` free-stream-preserving) and we DISCARD it; the tracer is
+          then reconciled onto the dynamics' post-step ``δp`` by a per-tracer
+          GLOBAL multiplicative mass fixer, so ``∫ area·δp·q`` is conserved on
+          the model grid to fp-accuracy (``scale`` ≈ 1).  The end-to-end cube
+          test (``test_cdgrid_flux_form_moisture``) validates this: ~3000× less
+          column-water drift than the advective form under a divergent wind.
+        * The transport step itself is monotone/positive-definite; the tiny
+          global rescale (``scale`` ≈ 1) is NOT strictly monotone (a
+          ``scale > 1`` can lift an existing maximum) but preserves
+          nonnegativity when the tracer mass is nonnegative — which is why the
+          input ``q`` is floored at 0 below (any negative left by RK3
+          vertical/physics is unphysical noise and would otherwise poison both
+          the conserved target and the later ``q >= 0`` clip).
+
+        A fully continuity-consistent scheme would require making the PE
+        continuity itself FV-flux-form (transport ``δp`` with the same operator)
+        — a much larger dycore change tracked separately (#771 follow-up).
+        """
+        from legoesm.core.fv3_sw_core import d2a2c_vect_4d
+        from legoesm.atmosphere.dynamics.flux_form_tracer_transport import (
+            flux_form_tracer_step,
+        )
+        from legoesm.core.conservation import (
+            conservation_accumulator,
+            global_face_sum_if_scattered,
+        )
+
+        # MPI face-scatter is now SUPPORTED (#811): the mass reductions are
+        # allreduce-aware (global_face_sum_if_scattered), the transport is
+        # 4D-halo (transport_step_4d — one pad_halo_4d per exchange for all
+        # levels), and the wind reconstruction is 4D (d2a2c_vect_4d — one
+        # pad_halo_vector_4d).  Certified replicated-vs-scattered equivalent by
+        # tests/distributed/test_cube_face_scatter_mpi.py.  SPMD face-sharding is
+        # still fail-closed (the 4D halos dispatch to explicit SPMD exchanges,
+        # but that path is unvalidated here — #811 SPMD follow-up).  Static-config
+        # check at trace time, so the raise is a hard compile-time refusal.
+        from legoesm.grids.halo import (
+            get_halo_backend, get_mpi_topology, get_spmd_mesh,
+        )
+        if self._flux_form_scatter_blocked(
+                get_halo_backend(), get_mpi_topology(), get_spmd_mesh(),
+                state_out.u_d.data.shape[0]):
+            raise NotImplementedError(
+                "moisture_flux_form is not supported under SPMD face-sharding: "
+                "the 4D-halo transport + wind reconstruction dispatch to explicit "
+                "SPMD exchanges but that path is unvalidated. Run MPI "
+                "(single-rank / replicated / face-scatter, all supported) or "
+                "single-device SPMD (#811 SPMD follow-up).")
+
+        cdgrid = self.cdgrid
+        sigma = self.sigma_coord
+        tnames = list(state_out.tracers)
+
+        # Contravariant transport winds from the STEP-INPUT corner D-grid winds
+        # (the SW split transports mass with the step-input winds): corner ->
+        # edge (0.5-average, as in the del-n path) -> d2a2c_vect_4d (ONE vector
+        # halo for ALL levels, so the reconstruction is MPI face-scatter safe —
+        # no vmap(pad_halo_vector); #811).
+        u_d = state_in.u_d.data
+        v_d = state_in.v_d.data
+        u_edge = 0.5 * (u_d[:, :-1, :, :] + u_d[:, 1:, :, :])   # (6,n,n+1,nlev)
+        v_edge = 0.5 * (v_d[:, :, :-1, :] + v_d[:, :, 1:, :])   # (6,n+1,n,nlev)
+
+        _o = d2a2c_vect_4d(u_edge, v_edge, cdgrid)
+        ut, vt = _o[4], _o[5]                                  # ut, vt contravar
+
+        # Layer mass on the dynamics' post-step p_s (what the moisture lives
+        # on).  ``layer_thickness_dp`` is polymorphic over the sigma / hybrid
+        # coordinate (matches how the dycore forms δp).
+        p_s1 = jnp.clip(
+            state_out.p_s.data, self.config.p_floor, self.config.p_ceil)
+        delp = sigma.layer_thickness_dp(p_s1)                  # (6,n,n,nlev)
+        _dt = delp.dtype
+
+        # Floor at 0 BEFORE transport (see docstring): a monotone flux-form step
+        # keeps a nonnegative input nonnegative, so the final q>=0 clip becomes a
+        # true no-op and the conserved target below is a real (nonnegative) mass
+        # — not corrupted by unphysical RK3 negatives that the later clip would
+        # otherwise silently remove, breaking conservation.
+        q = jnp.maximum(
+            jnp.stack([state_out.tracers[k].data for k in tnames], axis=-1),
+            0.0).astype(_dt)                                   # (6,n,n,nlev,ntr)
+
+        q_new, _delp_star = flux_form_tracer_step(
+            q, delp, ut.astype(_dt), vt.astype(_dt), dt, cdgrid)
+
+        # Global per-tracer mass fixer: reconcile q_new (conservative on the
+        # discarded δp★ ≈ delp) onto the dynamics' delp so ∫area·delp·q is
+        # preserved to fp-accuracy on the model grid.  scale ≈ 1 (a tiny global
+        # correction — not strictly monotone, but nonnegativity-preserving).
+        acc = conservation_accumulator()
+        w = (cdgrid.base.area[..., None, None].astype(acc)
+             * delp[..., None].astype(acc))                    # (6,n,n,nlev,1)
+        tgt = jnp.sum(w * q.astype(acc), axis=(0, 1, 2, 3))     # (ntr,)
+        cur = jnp.sum(w * q_new.astype(acc), axis=(0, 1, 2, 3))
+        # Under MPI face-scatter tgt/cur are owned-face PARTIALS; allreduce the
+        # (numerator, denominator) pair to the true global tracer masses BEFORE
+        # the per-tracer scale — else each rank divides by its own partial and
+        # the rescales diverge, silently breaking global conservation.  Identity
+        # on single-rank / replicated / SPMD, keyed off cdgrid.base.area (#811).
+        # differentiable_broadcast=True: this scale rescales EVERY owned face
+        # (q_fixed = q_new * scale), so the reduction's VJP must allreduce the
+        # cotangent — else the cross-rank gradient through the shared scale is
+        # dropped (the same uniform ~1e-3 cotangent leak the flux_form_tracer_step
+        # rescale had; the full-step gradient gate exposes THIS second one, #811).
+        tgt, cur = global_face_sum_if_scattered(
+            jnp.stack([tgt, cur], axis=0), cdgrid.base.area,
+            differentiable_broadcast=True)
+        scale = (tgt / jnp.maximum(cur, jnp.asarray(1e-30, acc))).astype(_dt)
+        q_fixed = q_new * scale
+
+        return state_out._replace(tracers={
+            k: state_out.tracers[k].replace(
+                data=q_fixed[..., i].astype(state_out.tracers[k].data.dtype))
+            for i, k in enumerate(tnames)
+        })
+
     @partial(jax.jit, static_argnums=(0, 3))
     def _step_fv3(
         self,
@@ -1755,6 +1933,16 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                     data=state_new.v_d.data * _rff_pe_b,
                 ),
             )
+
+        # #771: mass-conserving flux-form HORIZONTAL moisture transport as a
+        # post-RK3 substep — replaces the in-RK3 advective -(u·∇q) (skipped in
+        # the tendency when moisture_flux_form is set).  Runs on the final
+        # (post-mass-fixer) p_s and the STEP-INPUT winds; it co-transports δp,
+        # then a per-tracer global fixer reconciles onto the dynamics' δp so
+        # column water conserves.  Being monotone, it makes the q>=0 clip below
+        # a no-op safety net rather than a one-signed moisture source.
+        if self.config.moisture_flux_form and state_new.tracers is not None:
+            state_new = self._flux_form_moisture_substep(state, state_new, dt)
 
         # Prognostic tracer floor: advective tracer transport is not
         # positive-definite, so clamp q >= 0 AFTER the RK update (the physics

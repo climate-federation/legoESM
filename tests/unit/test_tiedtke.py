@@ -406,3 +406,62 @@ def test_tiedtke_mse_conservation_within_tolerance():
         f"Tiedtke MSE residual {H+Q+C:.1f} W/m^2 ({rel*100:.1f}% of total) "
         f"exceeds 30% — kernel formulation has regressed"
     )
+
+
+# ---------------------------------------------------------------------------
+# Trigger sharpness fields (fix 2026-07): the dead ``smooth_trigger_sharpness``
+# knob is replaced by two WIRED, correctly-scaled fields.
+# ---------------------------------------------------------------------------
+
+def test_tiedtke_smooth_trigger_sharpness_removed():
+    """``TiedtkeConfig.smooth_trigger_sharpness`` (default 0.02) was a
+    dead no-op: the RH downdraft trigger hardcoded 10.0 and the
+    below-LCL membership hardcoded 2.0.  The field is deleted in favor
+    of ``downdraft_rh_sharpness`` / ``lcl_membership_sharpness``
+    (magnitudes NOT interchangeable: RH argument ~O(0.1) needs ~10;
+    level-index needs ~2)."""
+    cfg = TiedtkeConfig()
+    assert not hasattr(cfg, "smooth_trigger_sharpness")
+    assert cfg.downdraft_rh_sharpness == 10.0
+    assert cfg.lcl_membership_sharpness == 2.0
+
+
+def test_tiedtke_downdraft_rh_sharpness_wired():
+    """Perturbing ``downdraft_rh_sharpness`` changes the downdraft
+    tendencies (the former hardcoded 10.0 made the advertised sharpness
+    tunable a no-op)."""
+    T, q, pf, ph, u, v = _column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    out_default, _ = tiedtke_convection(
+        T, q, pf, ph, u, v, cpp, dt=300.0,
+        config=TiedtkeConfig(enable_downdraft=True),
+    )
+    # Near-zero sharpness pins the RH trigger sigmoid at 0.5 everywhere
+    # (vs ~sigmoid(-6)~0.0025 in this moist column at sharpness 10).
+    out_flat, _ = tiedtke_convection(
+        T, q, pf, ph, u, v, cpp, dt=300.0,
+        config=TiedtkeConfig(enable_downdraft=True,
+                             downdraft_rh_sharpness=1e-6),
+    )
+    diff = float(jnp.max(jnp.abs(out_flat.dT_dt - out_default.dT_dt)))
+    assert diff > 1e-10, "downdraft_rh_sharpness is not wired"
+
+
+def test_tiedtke_lcl_membership_sharpness_wired():
+    """Perturbing ``lcl_membership_sharpness`` changes the below-LCL
+    weighting (hence the downdraft rain-evap distribution)."""
+    T, q, pf, ph, u, v = _column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    out_default, _ = tiedtke_convection(
+        T, q, pf, ph, u, v, cpp, dt=300.0,
+        config=TiedtkeConfig(enable_downdraft=True),
+    )
+    out_flat, _ = tiedtke_convection(
+        T, q, pf, ph, u, v, cpp, dt=300.0,
+        config=TiedtkeConfig(enable_downdraft=True,
+                             lcl_membership_sharpness=1e-6),
+    )
+    diff = float(jnp.max(jnp.abs(out_flat.dT_dt - out_default.dT_dt)))
+    assert diff > 1e-10, "lcl_membership_sharpness is not wired"

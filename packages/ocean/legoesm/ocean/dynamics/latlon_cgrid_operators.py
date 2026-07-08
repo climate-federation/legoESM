@@ -36,6 +36,8 @@ from legoesm.grids.operators_latlon_cgrid import (
     is_tripolar,
     reads_stored_vface_metric,
     fold_is_local,
+    north_fold_mask,
+    apply_north_fold,
     lat_ends_are_poles,  # noqa: F401 — re-export for ocean dynamics call sites
     pad_ns_scalar,
     fold_row,
@@ -102,7 +104,12 @@ def fold_vface_row(cell_field: jnp.ndarray, grid) -> jnp.ndarray:
     partner_row : (1, n_lon, ...) — fold partner values at the fold row.
     """
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active and fold.fold_j >= 0:
+    # ``fold.is_active`` (not ``fold_is_local``): the perms are preserved on
+    # every SPMD band (fold_j=-1) so this returns a valid fold-partner row on
+    # any band; the CALLER selects it on the north band (data-dependent) or the
+    # fold-local rank.  Callers only ever invoke this inside a fold gate, so
+    # dropping the ``fold_j >= 0`` check leaves serial/MPI behaviour unchanged.
+    if fold is not None and fold.is_active:
         return cell_field[-1:, fold.perm_T]
     return jnp.zeros_like(cell_field[-1:])
 
@@ -118,10 +125,11 @@ def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
     """
     padded = pad_ns_zero(interior)
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active and fold.fold_j >= 0:
-        n_lon = fold.perm_T.shape[0]
-        north = fold_row(interior[-1:], fold.perm_T, fold.vector_sign_u, n_lon)
-        padded = jnp.concatenate([padded[:-1], north], axis=0)
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
+        north = fold_row(interior[-1:], fold.perm_T, fold.vector_sign_u,
+                         fold.perm_T.shape[0])
+        padded = apply_north_fold(padded, north, grid, north_mask=nmask)
     return padded
 
 
@@ -321,10 +329,11 @@ def min_cell_to_vface(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     f_v = jnp.minimum(f_padded[:-1], f_padded[1:])
     from legoesm.grids.halo_latlon import zero_polar_lat_ends
     f_v = zero_polar_lat_ends(f_v)
-    if fold_is_local(grid):
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
         f_partner = f[-1:, grid.fold.perm_T]
         north = jnp.minimum(f[-1:], f_partner)
-        f_v = jnp.concatenate([f_v[:-1], north], axis=0)
+        f_v = apply_north_fold(f_v, north, grid, north_mask=nmask)
     return f_v
 
 
@@ -2878,13 +2887,22 @@ def qg_leith_viscosity_tendency_cgrid(
     u_eff = u if _um is None else u * _um
     v_eff = v if _vm is None else v * _vm
 
-    # Absolute vorticity Q = ζ + f at vertices.
+    # Absolute vorticity Q = ζ + f at vertices.  Use the GRID's stored staggered
+    # Coriolis (``_vertex_coriolis`` → ``grid.f_v`` at the corners): correct on
+    # β-plane / f-plane geometries (f = f0 + β·y), and — since ``f_v`` is built
+    # from the grid's own rotation scalar — still exactly non-rotating for an
+    # omega=0 grid (#521).  A minimal duck without stored ``f_v``/``f`` falls
+    # back to the spherical reconstruction from the grid's rotation scalar.
     zeta_q = curl_vertex_cgrid(u_eff, v_eff, grid)              # (n_lat+1,n_lon+1,...)
-    lat = grid.lat
-    lat_v = jnp.concatenate([lat[:1], 0.5 * (lat[:-1] + lat[1:]), lat[-1:]])
-    f_v = 2.0 * constants.Omega * jnp.sin(lat_v)               # (n_lat+1,)
-    f_v = f_v[:, jnp.newaxis] if zeta_q.ndim == 2 else f_v[:, jnp.newaxis, jnp.newaxis]
-    absvort_q = zeta_q + f_v
+    if hasattr(grid, "f_v") or hasattr(grid, "f"):
+        f_q = _vertex_coriolis(grid)                           # (n_lat+1,n_lon+1)
+    else:
+        lat = grid.lat
+        lat_v = jnp.concatenate([lat[:1], 0.5 * (lat[:-1] + lat[1:]), lat[-1:]])
+        f_q = (2.0 * getattr(grid, "omega", constants.Omega)
+               * jnp.sin(lat_v))[:, jnp.newaxis]               # (n_lat+1,1)
+    f_q = f_q if zeta_q.ndim == 2 else f_q[..., jnp.newaxis]
+    absvort_q = zeta_q + f_q
 
     qx, qy = _grad_vertex_vec_h(absvort_q, grid)               # vector ∇(ζ+f)
     grad_Q = jnp.sqrt(qx ** 2 + qy ** 2 + 1e-30)               # |∇(ζ+f)|_h
@@ -2896,7 +2914,11 @@ def qg_leith_viscosity_tendency_cgrid(
     # the buoyancy field is supplied (else the barotropic ∇(ζ+f) is used and the
     # bounds are inert — see `bound_qg_pv_gradient`).
     if buoyancy is not None and h_k is not None and is_3d:
-        f_h = (2.0 * constants.Omega * jnp.sin(grid.lat))[:, jnp.newaxis, jnp.newaxis]
+        if hasattr(grid, "f_T"):
+            f_h = grid.f_T[..., jnp.newaxis]                    # (n_lat,n_lon,1)
+        else:
+            f_h = (2.0 * getattr(grid, "omega", constants.Omega)
+                   * jnp.sin(grid.lat))[:, jnp.newaxis, jnp.newaxis]
         sx, sy = qg_pv_stretching_vec(buoyancy, h_k, f_h, grid)
         grad_q1 = jnp.sqrt((qx + sx) ** 2 + (qy + sy) ** 2 + 1e-30)
         Delta_bu = jnp.sqrt(grid.area)[..., jnp.newaxis]
@@ -3329,7 +3351,8 @@ def partial_cell_pgf_correction_y(
     from legoesm.grids.halo_latlon import zero_polar_lat_ends
     correction = zero_polar_lat_ends(correction)
 
-    if fold_is_local(grid):
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
         centroid_partner = centroid_depth[-1:, grid.fold.perm_T, :]
         rho_partner = rho_prime[-1:, grid.fold.perm_T, :]
         face_ref_fold = jnp.minimum(centroid_depth[-1:], centroid_partner)
@@ -3338,9 +3361,8 @@ def partial_cell_pgf_correction_y(
         correction_fold = -g * (
             rho_partner * excess_partner - rho_prime[-1:] * excess_local
         )
-        correction = jnp.concatenate(
-            [correction[:-1], correction_fold], axis=0,
-        )
+        correction = apply_north_fold(
+            correction, correction_fold, grid, north_mask=nmask)
 
     # Divide by dy_v after the v-face correction is fully formed (both paths).
     if is_tripolar(grid):
@@ -3519,8 +3541,10 @@ def density_jacobian_pgf_smc03_y(
     from legoesm.grids.halo_latlon import zero_polar_lat_ends
     diff = zero_polar_lat_ends(diff)
 
-    # North fold seam: only the rank that owns it overwrites the north row.
-    if fold_is_local(grid):
+    # North fold seam: the rank / SPMD north band that owns it overwrites the
+    # north row (data-dependent under SPMD via north_fold_mask).
+    nmask = north_fold_mask(grid)
+    if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
         rho_F = rho_per_cell[-1:, fold.perm_T, :]
         h_F = h_partial[-1:, fold.perm_T, :]
@@ -3536,7 +3560,7 @@ def density_jacobian_pgf_smc03_y(
             sigma[-1:], z_target_fold, g,
         )
         diff_fold = P_fold - P_local
-        diff = jnp.concatenate([diff[:-1], diff_fold], axis=0)
+        diff = apply_north_fold(diff, diff_fold, grid, north_mask=nmask)
 
     if is_tripolar(grid):
         # Tripolar: divide by full 2D dy_v.

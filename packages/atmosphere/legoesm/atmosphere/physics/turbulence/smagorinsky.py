@@ -21,7 +21,12 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import mixing_length, virtual_temperature
+from legoesm.atmosphere.physics._shared import (
+    buoyancy_coefficient,
+    exner_function,
+    mixing_length,
+    virtual_temperature,
+)
 from legoesm.atmosphere.physics.turbulence.config import SmagorinskyConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -32,6 +37,44 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
     implicit_vertical_diffusion_theta,
 )
+
+
+__physics_contract__ = {
+    "summary": (
+        "Smagorinsky-Lilly strain-dependent eddy-viscosity turbulence: "
+        "K_m = (C_s l)^2 |S| sqrt(max(0, 1 - Ri/Pr_t)), K_h = K_m/Pr_t, "
+        "applied by implicit vertical diffusion with surface-flux boundary "
+        "conditions."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "T_sfc": "K", "q_sfc": "kg/kg", "rho": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "Km": "m^2/s", "Kh": "m^2/s", "shflx": "W/m^2", "lhflx": "W/m^2",
+        "ustar": "m/s", "h_pbl": "m",
+    },
+    "sign_convention": (
+        "Down-gradient mixing: du_dt ~ (1/rho) d/dz(rho Km du/dz); Km, Kh >= 0 "
+        "and vanish where Ri >= Pr_t (Lilly stable cutoff). shflx, lhflx are "
+        "positive UPWARD from the surface and are injected as the lower "
+        "boundary condition (a source/sink), so the resolved column budget is "
+        "NOT closed. z increases upward; level index -1 is the surface."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Smagorinsky (1963), Mon. Wea. Rev. 91, 99-164; "
+        "Lilly (1962), Tellus 14, 148-172"
+    ),
+    "idealized_test": (
+        "tests/atmosphere/hydrostatic/unit/test_turbulence.py: a strongly "
+        "stable column (Ri >= Pr_t) shuts mixing off (Km -> 0); with zero "
+        "surface flux a neutral column gives ~zero tendencies."
+    ),
+}
 
 
 def smagorinsky_turbulence(
@@ -99,12 +142,14 @@ def smagorinsky_turbulence(
     S2 = du_dz ** 2 + dv_dz ** 2 + 1e-10
     S = jnp.sqrt(S2)
 
-    # Gradient Richardson number at the interfaces (virtual θ buoyancy).
-    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
-    theta_v = virtual_temperature(T, q_v) * exner
+    # Gradient Richardson number at the interfaces (virtual θ buoyancy),
+    # via the canonical inverse-Exner + shared buoyancy-coefficient helpers
+    # (clips kept at the call sites).
+    exner_pref = 1.0 / exner_function(p_full)
+    theta_v = virtual_temperature(T, q_v) * exner_pref
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
-    N2 = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
+    N2 = buoyancy_coefficient(jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
     Ri = N2 / S2
 
     # Lilly (1962) buoyancy factor √(max(0, 1 − Ri/Pr_t)): enhances mixing

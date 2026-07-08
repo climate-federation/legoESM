@@ -83,6 +83,19 @@ class LatLonGrid(NamedTuple):
     # for scalar CFL diagnostics. Operators must use ``dy`` (1D array)
     # for per-row cell heights, not ``dlat``.
 
+    # Planetary rotation rate [rad/s] — the scalar the ``f`` field was
+    # built from.  Stored so dynamics needing the VERTEX planetary
+    # vorticity (``absolute_vorticity_coriolis``) can rebuild
+    # 2*omega*sin(lat_vertex) exactly on ANY subdomain: recovering it
+    # from the local ``f`` rows fails on an MPI band that owns only the
+    # equator row (sin(lat) = 0), and hardcoding constants.Omega
+    # silently kept omega=0 grids rotating (#521, codex 2026-07-03).
+    # APPENDED at the NamedTuple end WITH a default so positional
+    # constructions keep working (mirrors the ``radius: float``
+    # scalar-leaf precedent).  NOTE: this does add one pytree leaf;
+    # no repo code pins the LatLonGrid leaf count (checked 2026-07-03).
+    omega: float = constants.Omega
+
     # ------------------------------------------------------------------
     # GridProtocol properties
     # ------------------------------------------------------------------
@@ -136,6 +149,21 @@ class LatLonGrid(NamedTuple):
     def from_columns(self, cols):
         extra = cols.shape[1:]
         return cols.reshape(self.n_lat, self.n_lon, *extra)
+
+    @property
+    def weights(self) -> jax.Array:
+        """Per-latitude area weights for loss area-weighting.
+
+        Proportional to the cell-row area (∝ cos lat for a uniform-dlon
+        grid); consumers (``losses._lat_weighted_mean``) normalise by the
+        sum so only the relative profile matters.  Mirrors
+        ``GaussianGrid.weights`` so ``combined_loss`` / ``carry_mse``
+        area-weight lat-lon losses automatically — without it the lat-lon
+        loss is a uniform mean that over-weights the poles and distorts
+        the bias and radiation-flux global-mean terms (AIMIP codex
+        review #3).
+        """
+        return self.cos_lat
 
 
 def create_latlon_grid(
@@ -308,6 +336,7 @@ def build_uniform_latlon_grid_from_axes(
         total_area=total_area,
         dlon=float(dlon),
         dlat=float(dlat),
+        omega=float(omega),
     )
 
 
@@ -478,6 +507,7 @@ def create_regional_latlon_grid(
         total_area=total_area,
         dlon=float(dlon),
         dlat=float(dlat),
+        omega=float(omega),
     )
     return grid, wall_mask
 
@@ -672,6 +702,7 @@ def create_mercator_grid(
         total_area=total_area,
         dlon=float(dlon),
         dlat=float(dlat_repr),
+        omega=float(omega),
     )
 
 
@@ -906,6 +937,7 @@ def create_stretched_latlon_grid(
         total_area=total_area,
         dlon=float(dlon),
         dlat=float(dlat_repr),
+        omega=float(omega),
     )
     return grid, wall_mask
 
@@ -917,7 +949,7 @@ def create_stretched_latlon_grid(
 
 def ensure_geometry(
     grid,
-    omega: float = constants.Omega,
+    omega: float | None = None,
 ) -> "LatLonCGridGeometry":
     """Convert a ``LatLonGrid`` to ``LatLonCGridGeometry`` if needed.
 
@@ -931,9 +963,15 @@ def ensure_geometry(
     Parameters
     ----------
     grid : LatLonGrid or LatLonCGridGeometry
-    omega : float
-        Rotation rate [rad/s].  Only used when converting from
-        ``LatLonGrid`` (which does not store omega).
+    omega : float, optional
+        Rotation-rate override [rad/s]; only consulted when converting
+        from ``LatLonGrid``.  Default ``None`` takes the GRID's stored
+        omega (falling back to ``constants.Omega`` for grid-like
+        objects without the field), so a non-rotating
+        ``create_latlon_grid(..., omega=0.0)`` grid stays non-rotating
+        through the conversion — the previous ``constants.Omega``
+        default silently re-rotated it (#521, codex 2026-07-03
+        round-4 HIGH).
 
     Returns
     -------
@@ -944,6 +982,8 @@ def ensure_geometry(
     # Duck-type check: if it has dx_u, assume it's geometry-like
     if hasattr(grid, "dx_u") and hasattr(grid, "fold"):
         return grid  # type: ignore[return-value]
+    if omega is None:
+        omega = float(getattr(grid, "omega", constants.Omega))
     # Convert LatLonGrid -> LatLonCGridGeometry. Pass the input grid's
     # actual 1-D lat/lon arrays so regional / channel grids preserve
     # their bounds — otherwise create_latlon_geometry would silently
@@ -1137,6 +1177,14 @@ class LatLonCGridGeometry(NamedTuple):
     lon: jax.Array      # (n_lon,) 1D cell-center longitudes [rad]
     dlon: float         # scalar longitude spacing (0.0 sentinel for tripole)
     dlat: float         # scalar latitude spacing (0.0 sentinel for tripole)
+
+    # Planetary rotation rate [rad/s] the f_T/f_u/f_v fields were built
+    # from — mirrors LatLonGrid.omega (#521) so operators that rebuild
+    # f at other staggers (e.g. QG-Leith vertex absolute vorticity) see
+    # the true rotation on the operational geometry path too.  APPENDED
+    # at the NamedTuple end with a default; band slicers use _replace
+    # and inherit it.
+    omega: float = constants.Omega
 
     # ------------------------------------------------------------------
     # GridProtocol properties
@@ -1505,6 +1553,7 @@ def create_latlon_geometry(
         lon=_c(lon_1d),
         dlon=float(dlon),
         dlat=float(dlat),
+        omega=float(omega),
     )
 
 

@@ -66,6 +66,55 @@ from legoesm.atmosphere.physics.convection.config import (
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 
 
+__physics_contract__ = {
+    "summary": (
+        "Prognostic bulk mass-flux convection: Arakawa-Wu (M_c x fixed "
+        "sinusoidal profile) and a simplified single-updraft EDMF "
+        "(M_u = rho*a_u*w_u). Both apply the shared compensating-subsidence + "
+        "detrainment kernel; detrained condensate is handed to microphysics "
+        "(precip deferred). Smooth (differentiable)."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa",
+        "M_c": "kg/m^2/s (Arakawa-Wu prognostic mass flux) or a_u = updraft area fraction [1] (EDMF)",
+        "dt": "s",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "dq_c_conv_dt": "kg/kg/s (detrained cloud-water source to microphysics, >=0)",
+        "cape": "J/kg", "convective_mask": "1 (0-1 activation)",
+        "M_c_new": "kg/m^2/s (Arakawa-Wu) or a_u_new = updraft area fraction [1] (EDMF) — relaxed prognostic",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. M_profile>=0 is the UPWARD updraft mass "
+        "flux; the compensating environmental subsidence (-M/rho) warms/dries "
+        "where the updraft detrains and stabilizes the column. "
+        "dq_c_conv_dt >= 0 is a cloud-water SOURCE to microphysics (condensate "
+        "is NOT precipitated here). Compensating subsidence + detrainment "
+        "conserve column moist static energy (h=c_p*T+g*z+L_v*q_v) and total "
+        "water: exactly (machine precision) in the conservative implicit_flux "
+        "solve, to truncation order in the default advective solve."
+    ),
+    # The DEFAULT public path uses the advective subsidence solve, which
+    # conserves MSE + total water only to TRUNCATION ORDER (exact only in the
+    # opt-in implicit_flux solve), so no contract-level conservation is
+    # guaranteed; the column budget is closed downstream.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Arakawa & Wu (2013), J. Atmos. Sci. 70, 1977-1992; "
+        "Siebesma et al. (2007), J. Atmos. Sci. 64, 1230-1248; "
+        "Tiedtke (1989), Mon. Wea. Rev. 117, 1779-1800"
+    ),
+    "idealized_test": (
+        "tests/unit/test_physics_convection.py; a dry (low-RH) column produces "
+        "no convective cloud water (test_no_cloud_water_in_dry_column); CAPE=0 "
+        "-> zero convective_mask; the flux-form transport conserves column MSE "
+        "and total water (implicit_flux to machine precision)."
+    ),
+}
+
+
 # =============================================================================
 # Shared helpers — used by both the Arakawa-Wu and simplified EDMF paths.
 # =============================================================================
@@ -699,6 +748,56 @@ def mass_flux_convection(
 # =============================================================================
 
 
+def updraft_velocity_from_buoyancy(
+    B: jax.Array, dz: jax.Array, w_u_min: float, w_u_max: float,
+) -> jax.Array:
+    """Updraft vertical velocity from the SIGNED buoyancy integral (surface up).
+
+    Coordinate convention (stated at the term per CLAUDE.md): ``z`` increases
+    UPWARD; arrays are surface-LAST (index 0 = model top, index ``-1`` = surface);
+    ``dz > 0`` and ``B > 0`` is an upward-buoyant plume.  The textbook updraft
+    kinetic-energy equation ``d(½w²)/dz = B`` integrates to::
+
+        w²(z) = w_min² + 2·∫_sfc^z B dz'
+
+    so the plume ACCELERATES through the positively-buoyant CAPE layer and
+    DECELERATES above the level of neutral buoyancy where ``B < 0`` — it does NOT
+    freeze at its peak.
+
+    #824: the previous EDMF form used ``clip(B·dz, 0, None)``, dropping the
+    negative (above-LNB) contribution so the integral FROZE at its peak and the
+    mass flux ``M = ρ·a_u·w_u`` plateaued at its cap from the LNB all the way to
+    the 100 hPa gate — a top-heavy, non-detraining profile that put the strongest
+    compensating subsidence in the thin-mass upper troposphere and drove the
+    day-5 full-physics AMIP blowup.  With the SIGNED integral the plume detrains
+    to ~0 near its top like every stable scheme.  Sub-cloud CIN (``B < 0`` below
+    the LFC) makes the cumulative integral negative there, so ``w_u`` floors
+    through the stable sub-cloud layer and the plume accelerates only once it
+    reaches the buoyant layer (an elevated plume launches where it is buoyant).
+
+    The sqrt argument is clipped to ``[1e-12, w_u_max²]``: the tiny positive
+    floor keeps ``w_u`` AD-safe even at ``w_u_min = 0`` / a non-buoyant column
+    (``sqrt'(0) = ∞`` → NaN reverse-mode grad), and the upper cap bounds
+    ``sqrt(2·CAPE)`` at a physical maximum updraft speed (``w_u_max`` ~ 50 m/s).
+
+    Parameters
+    ----------
+    B, dz : jax.Array, shape ``(ncol, nlev)``
+        Buoyancy [m/s²] and layer thickness [m], surface-last.
+    w_u_min, w_u_max : float
+        Minimum (floor) and maximum (cap) updraft speed [m/s].
+
+    Returns
+    -------
+    w_u : jax.Array, shape ``(ncol, nlev)`` — updraft vertical velocity [m/s] ≥ 0.
+    """
+    # Reverse to surface-first, cumulative-sum upward, reverse back: B_integral[k]
+    # = ∫ from the surface up to level k.
+    B_dz_rev = (B * dz)[:, ::-1]
+    B_integral = jnp.cumsum(B_dz_rev, axis=1)[:, ::-1]
+    return jnp.sqrt(jnp.clip(2.0 * B_integral + w_u_min ** 2, 1e-12, w_u_max ** 2))
+
+
 def edmf_convection(
     T: jax.Array,
     q_v: jax.Array,
@@ -774,21 +873,21 @@ def edmf_convection(
     T_v_u = virtual_temperature(T_u, q_v_u) - T_u * q_c_u
     B = constants.g * (T_v_u - T_v_env) / jnp.clip(T_v_env, 1.0, None)
 
-    # Updraft velocity from buoyancy integral (surface upward), with a
-    # small floor for numerical stability.
-    B_dz_rev = jnp.clip(B * dz, 0.0, None)[:, ::-1]
-    B_integral = jnp.cumsum(B_dz_rev, axis=1)[:, ::-1]
-    # Floor the sqrt argument at a tiny positive so the updraft velocity stays
-    # AD-safe even if a caller sets ``w_u_min = 0``: at a no-convection column
-    # ``B_integral = 0`` and ``2B + w_u_min^2 = 0`` would give sqrt'(0) = inf
-    # (NaN reverse-mode grad).  Forward is unchanged for any w_u_min > 0 or
-    # buoyant column (the 1e-12 m^2/s^2 floor is far below w_u_min^2 ~ 0.01).
-    w_u = jnp.sqrt(jnp.maximum(2.0 * B_integral + config.w_u_min ** 2, 1e-12))
+    # Updraft velocity from the SIGNED buoyancy integral (surface upward): the
+    # plume accelerates through the CAPE layer and DECELERATES above the level of
+    # neutral buoyancy so the mass flux detrains near its top (see
+    # :func:`updraft_velocity_from_buoyancy` for the full derivation + #824).
+    w_u = updraft_velocity_from_buoyancy(
+        B, dz, config.w_u_min, config.w_u_max)
 
-    # Mass flux profile: M_u(z) = rho * a_u * w_u(z).
+    # Mass flux profile: M_u(z) = rho * a_u * w_u(z)  [kg/m²/s, upward ≥ 0].
     M_profile = rho * a_u_new[:, None] * w_u
 
     del dz  # (kept for interface symmetry — kernel no longer needs it)
+    # #824: route through the CONSERVATIVE, backward-Euler ``implicit_flux``
+    # subsidence solve (config default), mirroring Bechtold — the explicit
+    # ``advective`` default leaked column static energy and NaN'd on the 2Δz
+    # checkerboard.  ``edmf_convection`` already receives ``p_half``/``dt``.
     dT_dt, dq_v_dt, dq_c_conv_dt = apply_mass_flux_kernel(
         T=T,
         q_v=q_v,
@@ -801,6 +900,10 @@ def edmf_convection(
         rho=rho,
         delta_0=config.delta_0,
         M_u_max=config.M_b_max,
+        subsidence_solve=config.subsidence_solve,
+        p_half=p_half,
+        dt=dt,
+        theta_implicit=config.theta_implicit,
     )
 
     conv_out = ConvectionOutput(

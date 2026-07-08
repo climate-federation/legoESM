@@ -15,7 +15,29 @@ Usage
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
+
+# Sidecar-state schema version for the accumulator ``get_state`` /
+# ``set_state`` round-trip (bump only on an incompatible manifest-layout
+# change).  A restore rejects any other version so a stale sidecar fails
+# loudly rather than corrupting the restored means.
+_STATE_VERSION = 1
+
+
+def _encode_manifest(manifest: dict) -> np.ndarray:
+    """Serialize a state manifest dict to a 0-d numpy string array so it can
+    ride inside the same ``np.savez`` sidecar as the payload arrays."""
+    return np.asarray(json.dumps(manifest))
+
+
+def _decode_manifest(manifest_obj) -> dict:
+    """Inverse of :func:`_encode_manifest`; accepts the 0-d string array (as
+    reloaded by ``np.load``) or a raw JSON string."""
+    if isinstance(manifest_obj, np.ndarray):
+        manifest_obj = manifest_obj.item()
+    return json.loads(str(manifest_obj))
 
 
 class MonthlyAccumulator:
@@ -323,6 +345,89 @@ class MonthlyAccumulator:
         save_dict.update(extra_arrays)
         np.savez(str(path), **save_dict)
 
+    def get_state(self) -> dict[str, np.ndarray]:
+        """Serialize all mutable accumulator state to a flat, ``np.savez``-able
+        dict for restart-chain persistence.
+
+        The nested ``{(year, month): {field: (sum, count)}}`` structure is
+        encoded as a JSON manifest (a 0-d string array under ``"__manifest__"``)
+        plus one payload array per ``(bucket, field)`` sum/count, keyed by
+        index.  Reversed exactly by :meth:`set_state` (float64 sums + integer
+        counts preserved bit-for-bit).  Pure numpy — no JAX.
+        """
+        arrays: dict[str, np.ndarray] = {}
+
+        def _put(value) -> str:
+            akey = f"arr_{len(arrays)}"
+            arrays[akey] = np.asarray(value)
+            return akey
+
+        data_entries: list = []
+        for (yr, mo), bucket in self._data.items():
+            for fkey, (fsum, fcount) in bucket.items():
+                data_entries.append(
+                    [int(yr), int(mo), fkey, _put(fsum), _put(fcount)]
+                )
+        scalar_entries: list = []
+        for (yr, mo), bucket in self._scalars.items():
+            for name, (ssum, scount) in bucket.items():
+                scalar_entries.append(
+                    [int(yr), int(mo), name, _put(ssum), int(scount)]
+                )
+        manifest = {
+            "version": _STATE_VERSION,
+            "type": "MonthlyAccumulator",
+            "nlev": int(self.nlev),
+            "n_lat_bins": int(self.n_lat_bins),
+            "max_count_ever": int(self._max_count_ever),
+            "call_counts": [
+                [int(yr), int(mo), int(c)]
+                for (yr, mo), c in self._call_counts.items()
+            ],
+            "data": data_entries,
+            "scalars": scalar_entries,
+        }
+        out: dict[str, np.ndarray] = {"__manifest__": _encode_manifest(manifest)}
+        out.update(arrays)
+        return out
+
+    def set_state(self, state: dict) -> None:
+        """Restore state written by :meth:`get_state` (exact round-trip).
+
+        Raises ``ValueError`` on an unknown schema version or a
+        construction-dimension mismatch (``nlev`` / ``n_lat_bins``).
+        """
+        manifest = _decode_manifest(state["__manifest__"])
+        if manifest.get("version") != _STATE_VERSION:
+            raise ValueError(
+                f"MonthlyAccumulator.set_state: unknown state version "
+                f"{manifest.get('version')!r} (expected {_STATE_VERSION})"
+            )
+        saved = (int(manifest["nlev"]), int(manifest["n_lat_bins"]))
+        if saved != (self.nlev, self.n_lat_bins):
+            raise ValueError(
+                f"MonthlyAccumulator.set_state: dims mismatch — saved "
+                f"(nlev, n_lat_bins)={saved} vs current "
+                f"{(self.nlev, self.n_lat_bins)}"
+            )
+        self._max_count_ever = int(manifest["max_count_ever"])
+        self._call_counts = {
+            (int(yr), int(mo)): int(c) for yr, mo, c in manifest["call_counts"]
+        }
+        # Recreate every bucket (including any empty ones) so the
+        # ``_ensure_bucket`` invariant — identical key sets across
+        # ``_data`` / ``_scalars`` / ``_call_counts`` — round-trips exactly.
+        self._data = {key: {} for key in self._call_counts}
+        self._scalars = {key: {} for key in self._call_counts}
+        for yr, mo, fkey, skey, ckey in manifest["data"]:
+            self._data.setdefault((int(yr), int(mo)), {})[fkey] = (
+                np.array(state[skey]), np.array(state[ckey]),
+            )
+        for yr, mo, name, skey, scount in manifest["scalars"]:
+            self._scalars.setdefault((int(yr), int(mo)), {})[name] = (
+                float(np.asarray(state[skey]).item()), int(scount),
+            )
+
 
 class SpatialMonthlyAccumulator:
     """Accumulate full 2-D and 3-D spatial fields into monthly bins.
@@ -576,6 +681,86 @@ class SpatialMonthlyAccumulator:
 
         return result
 
+    def get_state(self) -> dict[str, np.ndarray]:
+        """Serialize all mutable state to a flat, ``np.savez``-able dict
+        (see :meth:`MonthlyAccumulator.get_state`).
+
+        Reversed exactly by :meth:`set_state`; float64 sums and integer
+        counts are preserved bit-for-bit.  Pure numpy — no JAX.
+        """
+        arrays: dict[str, np.ndarray] = {}
+
+        def _put(value) -> str:
+            akey = f"arr_{len(arrays)}"
+            arrays[akey] = np.asarray(value)
+            return akey
+
+        data_2d: list = []
+        for (yr, mo), bucket in self._data_2d.items():
+            for name, (fsum, fcount) in bucket.items():
+                data_2d.append([int(yr), int(mo), name, int(fcount), _put(fsum)])
+        data_3d: list = []
+        for (yr, mo), bucket in self._data_3d.items():
+            for name, (fsum, fcount) in bucket.items():
+                data_3d.append([int(yr), int(mo), name, int(fcount), _put(fsum)])
+        manifest = {
+            "version": _STATE_VERSION,
+            "type": "SpatialMonthlyAccumulator",
+            "nlat": int(self.nlat),
+            "nlon": int(self.nlon),
+            "nlev": int(self.nlev),
+            "max_count_ever": int(self._max_count_ever),
+            "call_counts": [
+                [int(yr), int(mo), int(c)]
+                for (yr, mo), c in self._call_counts.items()
+            ],
+            # 2-D and 3-D bucket key sets are tracked separately (``_call_counts``
+            # is their union), so any empty bucket round-trips to the right store.
+            "buckets_2d": [[int(yr), int(mo)] for (yr, mo) in self._data_2d],
+            "buckets_3d": [[int(yr), int(mo)] for (yr, mo) in self._data_3d],
+            "data_2d": data_2d,
+            "data_3d": data_3d,
+        }
+        out: dict[str, np.ndarray] = {"__manifest__": _encode_manifest(manifest)}
+        out.update(arrays)
+        return out
+
+    def set_state(self, state: dict) -> None:
+        """Restore state written by :meth:`get_state` (exact round-trip).
+
+        Raises ``ValueError`` on an unknown schema version or a
+        construction-dimension mismatch (``nlat`` / ``nlon`` / ``nlev``).
+        """
+        manifest = _decode_manifest(state["__manifest__"])
+        if manifest.get("version") != _STATE_VERSION:
+            raise ValueError(
+                f"SpatialMonthlyAccumulator.set_state: unknown state version "
+                f"{manifest.get('version')!r} (expected {_STATE_VERSION})"
+            )
+        saved = (int(manifest["nlat"]), int(manifest["nlon"]), int(manifest["nlev"]))
+        if saved != (self.nlat, self.nlon, self.nlev):
+            raise ValueError(
+                f"SpatialMonthlyAccumulator.set_state: dims mismatch — saved "
+                f"(nlat, nlon, nlev)={saved} vs current "
+                f"{(self.nlat, self.nlon, self.nlev)}"
+            )
+        self._max_count_ever = int(manifest["max_count_ever"])
+        self._call_counts = {
+            (int(yr), int(mo)): int(c) for yr, mo, c in manifest["call_counts"]
+        }
+        # Pre-create every bucket (including any empty ones) so the 2-D / 3-D
+        # key sets round-trip exactly.
+        self._data_2d = {(int(yr), int(mo)): {} for yr, mo in manifest["buckets_2d"]}
+        self._data_3d = {(int(yr), int(mo)): {} for yr, mo in manifest["buckets_3d"]}
+        for yr, mo, name, fcount, akey in manifest["data_2d"]:
+            self._data_2d.setdefault((int(yr), int(mo)), {})[name] = (
+                np.array(state[akey], dtype=np.float64), int(fcount),
+            )
+        for yr, mo, name, fcount, akey in manifest["data_3d"]:
+            self._data_3d.setdefault((int(yr), int(mo)), {})[name] = (
+                np.array(state[akey], dtype=np.float64), int(fcount),
+            )
+
 
 class SpatialDailyAccumulator:
     """Accumulate daily-resolved 2-D spatial fields for CMIP6 ``day`` table.
@@ -715,3 +900,142 @@ class SpatialDailyAccumulator:
                 result[f"field_2d_{name}_max"] = max_out
 
         return result
+
+    def pop_completed_days(self, current_year: int, current_doy: int) -> dict:
+        """Finalize and remove days strictly before the in-progress day.
+
+        Daily analogue of
+        :meth:`SpatialMonthlyAccumulator.pop_completed_months`.  A graceful
+        wallclock exit uses this to emit (and free) the segment's COMPLETED
+        daily means while leaving the in-progress day un-written: writing the
+        partial current day here and then again from the restart segment —
+        which resumes inside the same ``(year, doy)`` — would produce
+        duplicate ``time`` coordinates and split-day means, because
+        ``CFWriter.write_field`` appends blindly to an existing file.  Unlike
+        :meth:`finalize`, no ``min_sample_fraction`` guard is applied (parity
+        with ``pop_completed_months``); every strictly-past day is complete by
+        construction.
+
+        Parameters
+        ----------
+        current_year, current_doy : int
+            The day currently being accumulated (will NOT be popped).
+
+        Returns
+        -------
+        dict
+            Same structure as :meth:`finalize` but only for completed days.
+            Empty ``{'days': []}`` if none are ready.
+        """
+        current_key = (current_year, int(current_doy))
+        completed = sorted(k for k in self._data if k < current_key)
+        if not completed:
+            return {'days': []}
+
+        result: dict = {'days': completed}
+        n = len(completed)
+        all_names: set[str] = set()
+        for key in completed:
+            all_names.update(self._data.get(key, {}).keys())
+
+        for name in sorted(all_names):
+            has_extrema = name in self.track_extremes
+            mean_arr = np.full((n, self.nlat, self.nlon), np.nan)
+            if has_extrema:
+                min_out = np.full((n, self.nlat, self.nlon), np.nan)
+                max_out = np.full((n, self.nlat, self.nlon), np.nan)
+            for i, key in enumerate(completed):
+                bucket = self._data.get(key, {})
+                if name in bucket:
+                    s, c, mn, mx = bucket[name]
+                    if c > 0:
+                        mean_arr[i] = s / c
+                    if has_extrema and mn is not None:
+                        min_out[i] = mn
+                        max_out[i] = mx
+            result[f"field_2d_{name}"] = mean_arr
+            if has_extrema:
+                result[f"field_2d_{name}_min"] = min_out
+                result[f"field_2d_{name}_max"] = max_out
+
+        # Free memory for completed days.
+        for key in completed:
+            self._data.pop(key, None)
+            self._call_counts.pop(key, None)
+
+        return result
+
+    def get_state(self) -> dict[str, np.ndarray]:
+        """Serialize all mutable state to a flat, ``np.savez``-able dict
+        (see :meth:`MonthlyAccumulator.get_state`).
+
+        Preserves the running sums, integer counts, and the per-day min/max
+        extremes exactly (a ``None`` extreme — untracked field — round-trips as
+        an absent array key).  Pure numpy — no JAX.
+        """
+        arrays: dict[str, np.ndarray] = {}
+
+        def _put(value) -> str:
+            akey = f"arr_{len(arrays)}"
+            arrays[akey] = np.asarray(value)
+            return akey
+
+        entries: list = []
+        for (yr, doy), bucket in self._data.items():
+            for name, entry in bucket.items():
+                fsum, fcount, fmin, fmax = entry
+                entries.append([
+                    int(yr), int(doy), name, int(fcount),
+                    _put(fsum),
+                    None if fmin is None else _put(fmin),
+                    None if fmax is None else _put(fmax),
+                ])
+        manifest = {
+            "version": _STATE_VERSION,
+            "type": "SpatialDailyAccumulator",
+            "nlat": int(self.nlat),
+            "nlon": int(self.nlon),
+            "track_extremes": sorted(self.track_extremes),
+            "max_count_ever": int(self._max_count_ever),
+            "call_counts": [
+                [int(yr), int(doy), int(c)]
+                for (yr, doy), c in self._call_counts.items()
+            ],
+            "data": entries,
+        }
+        out: dict[str, np.ndarray] = {"__manifest__": _encode_manifest(manifest)}
+        out.update(arrays)
+        return out
+
+    def set_state(self, state: dict) -> None:
+        """Restore state written by :meth:`get_state` (exact round-trip).
+
+        Raises ``ValueError`` on an unknown schema version or a
+        construction-dimension mismatch (``nlat`` / ``nlon``).
+        """
+        manifest = _decode_manifest(state["__manifest__"])
+        if manifest.get("version") != _STATE_VERSION:
+            raise ValueError(
+                f"SpatialDailyAccumulator.set_state: unknown state version "
+                f"{manifest.get('version')!r} (expected {_STATE_VERSION})"
+            )
+        saved = (int(manifest["nlat"]), int(manifest["nlon"]))
+        if saved != (self.nlat, self.nlon):
+            raise ValueError(
+                f"SpatialDailyAccumulator.set_state: dims mismatch — saved "
+                f"(nlat, nlon)={saved} vs current {(self.nlat, self.nlon)}"
+            )
+        self.track_extremes = set(manifest["track_extremes"])
+        self._max_count_ever = int(manifest["max_count_ever"])
+        self._call_counts = {
+            (int(yr), int(doy)): int(c) for yr, doy, c in manifest["call_counts"]
+        }
+        # Pre-create every bucket (incl. empties) so the day key set round-trips
+        # (``_data`` and ``_call_counts`` share their key set by construction).
+        self._data = {key: {} for key in self._call_counts}
+        for yr, doy, name, fcount, skey, mnkey, mxkey in manifest["data"]:
+            fmin = None if mnkey is None else np.array(state[mnkey], dtype=np.float64)
+            fmax = None if mxkey is None else np.array(state[mxkey], dtype=np.float64)
+            self._data.setdefault((int(yr), int(doy)), {})[name] = [
+                np.array(state[skey], dtype=np.float64), int(fcount), fmin, fmax,
+            ]

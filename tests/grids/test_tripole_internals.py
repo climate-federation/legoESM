@@ -355,6 +355,78 @@ class TestReadNemoMeshMask:
 # -------------------------------------------------------------------------
 
 
+class TestPadTripoleGridSouth:
+    """``pad_tripole_grid_south`` (the SPMD ``n_lat % N == 0`` enabler)."""
+
+    def test_pad_preserves_wet_rows_and_keeps_fold_at_north(self):
+        from legoesm.grids.tripole import (
+            create_synthetic_tripole, pad_tripole_grid_south,
+        )
+
+        n_lat, n_lon, n_pad = 15, 24, 5    # 15 -> 20 (= 4 * 5), the eORCA025 case
+        g = create_synthetic_tripole(n_lat=n_lat, n_lon=n_lon)
+        assert g.fold.is_active
+        gp = pad_tripole_grid_south(g, n_pad)
+
+        # shape grew by n_pad on the latitude (T/u leading) axis
+        assert int(gp.n_lat) == n_lat + n_pad
+        assert int(gp.n_lon) == n_lon
+        assert gp.lat_T.shape == (n_lat + n_pad, n_lon)
+        assert gp.dx_u.shape == (n_lat + n_pad, n_lon + 1)
+        assert gp.dx_v.shape == (n_lat + n_pad + 1, n_lon)      # v leads n_lat+1
+        assert gp.area_q.shape == (n_lat + n_pad + 1, n_lon + 1)
+
+        # the ORIGINAL rows are bit-exact, just shifted +n_pad (south padding)
+        for name in ("lat_T", "lon_T", "dx_T", "dy_T", "area_T", "f_T",
+                     "dx_u", "dy_u", "cos_alpha_u", "sin_alpha_u"):
+            a = np.asarray(getattr(g, name))
+            b = np.asarray(getattr(gp, name))
+            np.testing.assert_array_equal(
+                b[n_pad:], a, err_msg=f"{name} wet rows not preserved")
+        # v/q rows (leading n_lat+1): original block preserved after the n_pad
+        # prepended south-wall rows.
+        for name in ("dx_v", "dy_v", "f_v", "area_q", "cos_alpha_v",
+                     "sin_alpha_v"):
+            a = np.asarray(getattr(g, name))
+            b = np.asarray(getattr(gp, name))
+            np.testing.assert_array_equal(
+                b[n_pad:], a, err_msg=f"{name} wet rows not preserved")
+
+        # fold seam stays at the NEW northernmost row; cap shifts +n_pad
+        assert gp.fold.is_active is True
+        assert int(gp.fold.fold_j) == int(g.fold.fold_j) + n_pad
+        assert int(gp.fold.fold_j) == (n_lat + n_pad) - 1
+        assert int(gp.fold.cap_j) == int(g.fold.cap_j) + n_pad
+        np.testing.assert_array_equal(np.asarray(gp.fold.perm_T),
+                                      np.asarray(g.fold.perm_T))
+
+        # added south rows are FINITE + positive metrics + strictly-south latitude
+        assert bool(np.all(np.isfinite(np.asarray(gp.lat_T))))
+        assert bool(np.all(np.asarray(gp.dx_T) > 0.0))
+        assert bool(np.all(np.asarray(gp.area_T) > 0.0))
+        lat_col = np.asarray(gp.lat_T)[:, 0]
+        assert bool(np.all(np.diff(lat_col) > 0.0)), "latitude not monotone north"
+
+        # total_area is PRESERVED (the area-weighted-mean denominator must not
+        # pick up the spurious land padding)
+        np.testing.assert_array_equal(np.asarray(gp.total_area),
+                                      np.asarray(g.total_area))
+
+    def test_pad_zero_is_identity_and_inactive_fold_raises(self):
+        from legoesm.grids.tripole import (
+            create_synthetic_tripole, pad_tripole_grid_south,
+        )
+        from legoesm.grids.latlon import create_latlon_geometry
+
+        g = create_synthetic_tripole(n_lat=12, n_lon=24)
+        assert pad_tripole_grid_south(g, 0) is g       # n_pad=0 -> identity
+
+        reg = create_latlon_geometry(n_lat=12, n_lon=24)
+        assert not reg.fold.is_active
+        with pytest.raises(ValueError, match="ACTIVE bipolar fold"):
+            pad_tripole_grid_south(reg, 3)
+
+
 class TestGradientYZeroPolarMetric:
     def test_zero_south_dy_v_is_finite_and_differentiable(self):
         import equinox as eqx

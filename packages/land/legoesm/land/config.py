@@ -7,9 +7,11 @@ from typing import Any, NamedTuple
 from legoesm import constants
 from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.carbon.stomata import StomataConfig
+from legoesm.land.snow_bands import ElevationSnowBandConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
+from legoesm.land.topmodel_runoff import TopmodelConfig
 from legoesm.land.richards import RichardsConfig
 from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.surface_albedo import LandAlbedoConfig
@@ -50,6 +52,7 @@ __param_spec__ = {
             "root_depth": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "legoESM land surface", "shape": None},
             "snow_melt_rate": {"units": "1", "bounds": (1.65e-06, 1.5e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "legoESM land surface", "shape": None},
             "soil_evap_resistance_exp": {"units": "1", "bounds": (0.0, 6.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "Sellers 1992 / Lee & Pielke 1992 (bare-soil evap resistance)", "shape": None},
+            "soil_evap_litter_resistance_s_m": {"units": "s m-1", "bounds": (0.0, 400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "Sakaguchi & Zeng 2009 (forest-floor litter resistance)", "shape": None},
             "theta_fc": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "legoESM land surface", "shape": None},
             "theta_wp": {"units": "1", "bounds": (0.0495, 0.45), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "legoESM land surface", "shape": None},
             "z0_land": {"units": "1", "bounds": (0.0165, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "legoESM land surface", "shape": None},
@@ -89,6 +92,12 @@ class LandConfig(NamedTuple):
     # Type hint is ``Any`` because NamedTuple does not support Unions well;
     # dispatch is done via ``isinstance`` inside ``step_land``.
     surface_scheme: Any = SimpleSEBConfig()
+    # Runoff scheme (appended for positional-ABI stability): "bucket" (default,
+    # Green-Ampt Hortonian + Dunne saturation-excess, byte-identical) or
+    # "topmodel" (SIMTOP sub-grid saturated fraction + topographic baseflow,
+    # Niu 2005 / CLM4.5).  Unknown -> ValueError at dispatch.
+    runoff_scheme: str = "bucket"
+    topmodel: TopmodelConfig = TopmodelConfig()
 
 
 class MultiLayerLandConfig(NamedTuple):
@@ -109,6 +118,28 @@ class MultiLayerLandConfig(NamedTuple):
     # limited only by the root-zone beta + whole-column water supply -> over-strong
     # soil evaporation and a too-fast surface dry-down).
     soil_evap_resistance_exp: float = 2.0
+    # Below-canopy soil-evaporation SERIES-RESISTANCE formulation (canopy path).
+    # When True (default), the top-layer moisture control on soil evaporation is a
+    # Sellers-1992 surface resistance r_ss = exp(8.206 - 4.255 theta_1/theta_sat)
+    # PLUS a Sakaguchi-Zeng-2009 forest-floor litter resistance, added in SERIES
+    # with the below-canopy aerodynamic resistance in the two-leaf soil energy
+    # balance (energy_balance.soil_surface_evap_resistance); the beta efficiency
+    # S_top**soil_evap_resistance_exp is then bypassed (mutually exclusive — same
+    # Sellers-1992 physics).  The aerodynamic-only path (r_ss omitted) let a wet
+    # forest floor evaporate at near-potential rate; the resistance form throttles
+    # a WET surface and self-scales with canopy density across biomes.  Static
+    # Python bool (feature gate).  False -> legacy beta efficiency (SimpleSEB path
+    # is unaffected either way).
+    soil_evap_series_resistance: bool = True
+    # Reference forest-floor litter resistance [s/m] (Sakaguchi & Zeng 2009),
+    # scaled by litter cover 1 - exp(-0.5 LAI); ~0 for bare soil, saturating for a
+    # closed canopy.  Only used when soil_evap_series_resistance is True.  Default
+    # 300 s/m calibrated on the FLUXNET EC-site validation (4 biomes: US-MMS DBF,
+    # DE-Obe ENF, US-Ton savanna, US-Var grassland) to give a physical closed-
+    # canopy soil-evaporation fraction (JJA ~0.2 forest, ~0 Mediterranean-summer)
+    # and unbiased LE vs energy-closure-corrected obs; well within the published
+    # forest-floor range (~1e2-1e3 s/m).
+    soil_evap_litter_resistance_s_m: float = 300.0
     bulk_scheme: str = "constant"
     z_ref: float = 10.0
     bulk_n_iter: int = 5
@@ -117,6 +148,9 @@ class MultiLayerLandConfig(NamedTuple):
     land_albedo: LandAlbedoConfig = LandAlbedoConfig()
     T_snow_melt: float = constants.T_freeze
     snow_melt_rate: float = 5.0e-6
+    # Sub-grid elevation-band snow (VIC snow bands / CESM MEC); ``None`` (default)
+    # runs the single cell-mean snowpack.  See ``legoesm.land.snow_bands``.
+    elev_bands: ElevationSnowBandConfig | None = None
     # Root water uptake
     root_depth: float = 1.0       # Root e-folding depth [m]
     theta_wp: float = 0.15        # Wilting point volumetric water content
@@ -125,13 +159,14 @@ class MultiLayerLandConfig(NamedTuple):
     soil_grid: SoilGridConfig = SoilGridConfig()
     hydraulics: SoilHydraulicsConfig = SoilHydraulicsConfig()
     thermal: SoilThermalConfig = SoilThermalConfig()
-    richards: RichardsConfig = RichardsConfig()
+    richards: RichardsConfig = RichardsConfig(fc_drain_saturation=0.5)
     # Carbon cycle
     carbon: CarbonConfig = CarbonConfig()
     # Stomatal conductance / plant physiology
     stomata: StomataConfig = StomataConfig()
-    # Surface scheme: ``SimpleSEBConfig`` (default) or ``TwoLeafCanopyConfig``.
-    # Runtime dispatch via ``isinstance`` inside ``step_multilayer_land``.
+    # Surface scheme: ``SimpleSEBConfig`` (default), ``TwoLeafCanopyConfig``,
+    # or ``CLMMLCanopyConfig``.  Runtime dispatch via ``isinstance`` inside
+    # ``step_multilayer_land``.
     surface_scheme: Any = SimpleSEBConfig()
 
 

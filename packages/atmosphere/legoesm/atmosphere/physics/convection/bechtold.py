@@ -37,6 +37,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
+from legoesm.atmosphere.physics._shared import compute_rho, exner_function
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_cape,
     compute_moist_adiabat,
@@ -65,6 +66,55 @@ from legoesm.atmosphere.physics.convection._plume import (
 __all__ = ("bechtold_convection",)
 
 
+__physics_contract__ = {
+    "summary": (
+        "Bechtold/IFS mass-flux convection (Tiedtke 1989 skeleton + Bechtold "
+        "2008 PBL/departure-CAPE closure + optional 2014 AR1 stochastic "
+        "perturbation, RH-dependent downdraft, and Gregory-1997 convective "
+        "momentum transport)."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa",
+        "u": "m/s", "v": "m/s",
+        "conv_prog_profile": "kg/m^2/s (updraft mass-flux carry)",
+        "conv_stoch_state": "1 (AR1 noise state)", "dt": "s",
+        "moisture_convergence": "kg/kg/s (optional closure enhancement)",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_conv_dt": "kg/kg/s",
+        "cape": "J/kg", "convective_mask": "1 (0-1 convective indicator)",
+        "du_dt_conv": "m/s^2 (None unless CMT enabled)",
+        "dv_dt_conv": "m/s^2 (None unless CMT enabled)",
+        "conv_prog_profile_new": "kg/m^2/s (updated mass-flux carry)",
+        "conv_stoch_state_new": "1 (updated AR1 noise state)",
+    },
+    "sign_convention": (
+        "Warms and dries the convecting layer via compensating subsidence and "
+        "updraft transport (dT_dt, dq_v_dt); the condensed vapor becomes a "
+        "non-negative detrained cloud-water source (dq_c_conv_dt>=0) handed to "
+        "microphysics; the optional downdraft cools and moistens the sub-cloud "
+        "layer by rain evaporation; the optional CMT drag opposes the "
+        "cloud-relative wind shear; surface at the last vertical index. "
+        "Column enthalpy/total-water closure is delegated to the orchestrator "
+        "rebalance + microphysics (the shared mass-flux kernel is not "
+        "self-closing), so no hard conservation is claimed for the raw "
+        "tendencies."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Bechtold et al. (2008), QJRMS 134, 1337-1351; Bechtold et al. "
+        "(2014), J. Atmos. Sci. 71, 734-753; Tiedtke (1989), Mon. Wea. Rev. "
+        "117, 1779-1800"
+    ),
+    "idealized_test": (
+        "A CAPE-positive tropical sounding produces deep convective heating "
+        "that stabilizes the column; a stable / zero-CAPE column quiesces "
+        "(<1 W/m^2 spurious heating)."
+    ),
+}
+
+
 # --- pspec autoblock
 _BECHTOLD_RH_CAP = 1.3
 _BECHTOLD_RH_ENTR = 1.3
@@ -83,6 +133,7 @@ def bechtold_convection(
     dt: float,
     config: BechtoldConfig = BechtoldConfig(),
     moisture_convergence: jax.Array | None = None,
+    col_index: jax.Array | None = None,
 ) -> tuple[ConvectionOutput, jax.Array, jax.Array]:
     """Bechtold/IFS convection (smooth, differentiable).
 
@@ -109,6 +160,11 @@ def bechtold_convection(
     dt : float
         Time step [s].
     config : BechtoldConfig
+    col_index : jax.Array or None, shape (ncol,) int32
+        GLOBAL column ids for the decomposition-invariant per-column
+        stochastic draw (``PhysicsState.col_index``; a lat-band SPMD
+        shard passes its own chunk).  ``None`` falls back to
+        ``arange(ncol)`` — identical for any undecomposed caller.
 
     Returns
     -------
@@ -188,17 +244,36 @@ def bechtold_convection(
     # so the sub-LCL leg is DRY adiabatic, not saturated.  A SINGLE adiabat is
     # used for CAPE, LFC and LNB (a second separate scan tripped an XLA CPU
     # compile abort); consistency is the physically correct choice anyway.
+    # Dry-adiabatic (theta-preserving) translation of the parcel temperature
+    # from ``p_parcel_source`` to ``p_base``: T(p_base) = theta * Pi(p_base),
+    # theta = T_parcel / Pi(p_parcel_source), so the ratio is
+    # Pi(p_base)/Pi(p_parcel_source) = (p_base/p_parcel_source)^kappa. Route
+    # through the shared Exner helper (no inline (p/p_ref)^kappa power).
     T_parcel_at_sfc = (
-        T_parcel * (p_base / jnp.maximum(p_parcel_source, 1.0)) ** constants.kappa
+        T_parcel
+        * exner_function(p_base)
+        / exner_function(jnp.maximum(p_parcel_source, 1.0))
     )
     T_moist = compute_moist_adiabat(T_parcel_at_sfc, p_full, q_v_base=q_parcel)
     # Virtual-temperature CAPE: parcel vapour (capped at saturation along the
     # ascent) and environment vapour, so buoyancy uses virtual T, not dry T.
     q_sat_parcel = saturation_mixing_ratio(T_moist, p_full)
     q_v_parcel = jnp.minimum(q_parcel[:, None], q_sat_parcel)
+    # Integrate CAPE from the parcel's DEPARTURE level upward only: the
+    # theta-preserving surface relaunch makes an elevated (PBL-mean) parcel
+    # WARMER than the actual surface air whenever the boundary layer is
+    # STABLE (theta increases with height), and the below-departure
+    # "buoyancy" is an artifact of a parcel that does not exist there —
+    # it alone reached ~53–66 J/kg on the tier-5 stable dry column,
+    # defeating the cape_weight² launch gate (886 W/m² spurious heating;
+    # the C24 AMIP bechtold blowup).  For a well-mixed convective BL,
+    # theta is uniform, the relaunched parcel matches the surface air,
+    # and the masked levels contribute ~nothing — convecting columns are
+    # essentially unchanged.
     cape_pbl = compute_cape(
         T, T_moist, p_full, p_half,
         q_v_env=q_v, q_v_parcel=q_v_parcel,
+        p_source=p_parcel_source,
     )
 
     cape_weight = cape_trigger(
@@ -208,7 +283,11 @@ def bechtold_convection(
     # -- LCL, LFC/LNB ------------------------------------------------------
     lcl = compute_lcl(T_parcel, q_parcel, p_parcel_source, p_full)
     k_lcl_smooth = lcl.k_lcl_smooth
-    k_lfc_smooth, k_lnb_smooth = compute_lfc_lnb(T, T_moist, sharpness=1.0)
+    # LFC/LNB on the SAME virtual-T buoyancy as the CAPE above (same
+    # parcel-vapor profile ``q_v_parcel``).
+    k_lfc_smooth, k_lnb_smooth = compute_lfc_lnb(
+        T, T_moist, sharpness=1.0, q_v_env=q_v, q_v_parcel=q_v_parcel,
+    )
 
     # Cloud depth.
     levels_arr = jnp.arange(nlev, dtype=T.dtype)
@@ -253,7 +332,9 @@ def bechtold_convection(
     # ``g/rho_BL`` factor stands in for the ZM cloud-work-function sensitivity.
     # The earlier formula omitted ``rho_BL`` and ``g``; magnitude was
     # masked operationally only by ``M_b_max``.
-    rho_BL = p_full[:, -1] / (constants.R_d * jnp.maximum(T[:, -1], 1.0))
+    # Dry boundary-layer density via the shared ideal-gas helper (same
+    # 1 K temperature clip as the previous inline form).
+    rho_BL = compute_rho(T[:, -1], p_full[:, -1])
     M_b_pbl_cape = (
         cape_weight
         * rho_BL
@@ -277,7 +358,21 @@ def bechtold_convection(
     # -- AR1 stochastic perturbation ---------------------------------------
     if config.enable_stochastic and prng_key is not None:
         alpha_AR1 = jnp.exp(-dt / config.stochastic_decorrelation)
-        innovation = jax.random.normal(prng_key, shape=(ncol,), dtype=T.dtype)
+        # Decomposition-INVARIANT draw: fold the per-step sub-key with each
+        # column's GLOBAL id and draw one variate per column.  Under
+        # lat-band SPMD each shard receives its own contiguous chunk of
+        # ``PhysicsState.col_index``, so a given physical column sees the
+        # SAME innovation as the serial run — a bulk
+        # ``normal(key, (ncol_local,))`` would instead give every band the
+        # first ncol_local variates of one stream (decomposition-variant).
+        # NOTE: this changes the noise REALIZATION (not the statistics) of
+        # serial stochastic runs vs the pre-2026-07 bulk draw.
+        _ids = (col_index if col_index is not None
+                else jnp.arange(ncol, dtype=jnp.int32))
+        innovation = jax.vmap(
+            lambda i: jax.random.normal(
+                jax.random.fold_in(prng_key, i), dtype=T.dtype)
+        )(_ids)
         # Floor the AR(1) innovation-variance sqrt argument at a tiny positive
         # rather than 0: as dt -> 0, alpha_AR1 -> 1 and ``1 - alpha^2 -> 0``,
         # where sqrt'(0) = inf would give a NaN gradient w.r.t. dt /
@@ -448,8 +543,11 @@ def bechtold_convection(
 
     # -- Optional downdraft (RH-dependent) ---------------------------------
     if config.enable_downdraft:
+        # ``lcl_membership_sharpness`` is a LEVEL-INDEX sharpness
+        # [1/level] (surface-last: larger index = below LCL altitude).
         below_lcl = jax.nn.sigmoid(
-            2.0 * (levels_arr[None, :] - k_lcl_smooth[:, None])
+            config.lcl_membership_sharpness
+            * (levels_arr[None, :] - k_lcl_smooth[:, None])
         )
         q_sat_env = saturation_mixing_ratio(T, p_full)
         rh_layer = q_v / jnp.maximum(q_sat_env, 1e-12)
@@ -468,8 +566,11 @@ def bechtold_convection(
         _below_lcl_dp = _col_triple[..., 0]
         below_mass = _below_lcl_dp + 1e-6
         rh_below = _col_triple[..., 1] / below_mass
+        # RH-FRACTION sharpness [1/RH]: the argument is O(0.1), so the
+        # default 10 gives a crisp trigger around ``downdraft_RH_min``.
         downdraft_trigger = jax.nn.sigmoid(
-            10.0 * (config.downdraft_RH_min - rh_below)
+            config.downdraft_rh_sharpness
+            * (config.downdraft_RH_min - rh_below)
         )
         M_d_base = -config.downdraft_alpha * M_b * downdraft_trigger
         # Subcloud rain-evaporation cooling — see tiedtke.py for the

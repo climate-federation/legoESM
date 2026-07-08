@@ -770,6 +770,10 @@ class LatLonCGridOceanModel:
         # Static rigid-lid data (islands, basis, depths), built eagerly from the
         # first concrete state (host-side flood-fill).  None until built.
         self.rigid_lid_data = None
+        # Source (land_mask, H_bathy) the rigid-lid cache was built from — keyed
+        # exactly like _vertex_mask_src so a reused model instance can't serve
+        # stale island data for a CHANGED topology (codex round-1).
+        self._rigid_lid_src = None
         # Build-once vertex mask (land-mask-derived, constant per run).
         # Computing it per step paid an N-S halo exchange inside the
         # traced tendencies (x2 sites) because state.land_mask is a
@@ -868,20 +872,40 @@ class LatLonCGridOceanModel:
         directly inside an outer ``lax.scan``/``jax.jit`` (the public
         ``step`` shim does this automatically): call ONCE with the
         concrete initial state BEFORE building/tracing the scan, so the
-        traced body captures the land-mask-derived vertex mask as a
-        constant instead of re-deriving it (with its N-S halo exchange)
-        every step.  Safe to call multiple times and with traced state
-        (no-op).
+        traced body captures the build-once caches as constants instead
+        of re-deriving them every step.  Two caches:
+
+        * the land-mask-derived vertex mask (its N-S halo exchange), and
+        * (rigid-lid solver only) the host-side island / streamfunction
+          decomposition (numpy flood-fill — impossible to build from a
+          traced state, so it MUST be warmed here from the concrete IC).
+
+        Safe to call multiple times and with traced state (no-op): both
+        warms are tracer-guarded.  A cold rigid-lid cache then left to a
+        traced first ``_step_impl`` step raises an actionable error.
         """
         self._ensure_vertex_mask(state)
+        # Warm the rigid-lid island cache only when EVERY build input is
+        # concrete: a partially-traced state (e.g. concrete H_bathy + traced
+        # land_mask) would otherwise reach the cold host-side flood-fill and
+        # raise, breaking the "no-op on traced state" contract (codex round-2).
+        if self.config.barotropic.barotropic_solver == "rigid_lid":
+            _rl_inputs = (state.H_bathy.data, state.land_mask.data,
+                          state.u_mask.data, state.v_mask.data)
+            if not any(isinstance(a, jax.core.Tracer) for a in _rl_inputs):
+                self._ensure_rigid_lid_data(state)
 
     def _ensure_rigid_lid_data(self, state):
         """Build + cache the static rigid-lid data from a CONCRETE state.
 
         The island flood-fill is host-side (numpy), so this must run eagerly on
-        concrete bathymetry/masks — ``integrate``/``integrate_scan`` pre-build it
-        before the (jitted) scan so the captured data is a compile-time
-        constant.  A standalone ``step`` on a concrete state builds it lazily.
+        concrete bathymetry/masks: ``integrate_scan`` pre-builds it before the
+        (jitted) scan via ``seed_scan_carry``, and the eager ``step`` shim
+        pre-builds it from its concrete input state (so ``model.step`` /
+        ``model.integrate`` loops work too) — in both paths the captured data is
+        a compile-time constant.  Only a direct ``_step_impl`` call inside a
+        user trace builds it lazily, and there the state must already be warmed
+        (else the actionable ``TracerArrayConversionError`` below fires).
 
         ``ensure_compile_time_eval``: when the lazy build instead happens
         inside a USER's jit trace (e.g. ``jax.jit(value_and_grad(loss))``
@@ -904,16 +928,45 @@ class LatLonCGridOceanModel:
             assert_rigid_lid_single_rank,
         )
         assert_rigid_lid_single_rank()
+        lm = state.land_mask.data
+        Hb = state.H_bathy.data
         if self.rigid_lid_data is not None:
-            return self.rigid_lid_data
+            # Topology-key guard (mirrors _ensure_vertex_mask): the island
+            # decomposition is baked into the compiled step as a constant, so a
+            # reused model must NOT silently serve stale data for a different
+            # bathymetry/mask.  The hot loop passes the SAME concrete arrays
+            # (identity fast-path) or TRACED arrays (cache already built — skip,
+            # can't host-compare); only a genuinely different CONCRETE topology
+            # trips the value compare.  u_mask/v_mask are deterministic
+            # functions of land_mask, so keying on (land_mask, H_bathy) covers
+            # the full island input set.
+            if (isinstance(lm, jax.core.Tracer)
+                    or isinstance(Hb, jax.core.Tracer)):
+                return self.rigid_lid_data
+            src_lm, src_Hb = self._rigid_lid_src
+            if lm is src_lm and Hb is src_Hb:
+                return self.rigid_lid_data
+            import numpy as _np
+            if (src_lm is not None and lm.shape == src_lm.shape
+                    and Hb.shape == src_Hb.shape
+                    and bool(_np.array_equal(_np.asarray(lm), _np.asarray(src_lm)))
+                    and bool(_np.array_equal(_np.asarray(Hb), _np.asarray(src_Hb)))):
+                self._rigid_lid_src = (lm, Hb)   # adopt new identity, same value
+                return self.rigid_lid_data
+            raise ValueError(
+                "LatLonCGridOceanModel: the bathymetry/land mask changed after "
+                "the first rigid-lid step on this model instance.  The island "
+                "decomposition (and the compiled step that captured it) are "
+                "built once per model — construct a NEW model for a different "
+                "topology.")
         from legoesm.ocean.dynamics.rigid_lid_islands import build_rigid_lid_data
         try:
             with jax.ensure_compile_time_eval():
                 self.rigid_lid_data = build_rigid_lid_data(
-                    state.H_bathy.data, state.land_mask.data,
-                    state.u_mask.data, state.v_mask.data,
+                    Hb, lm, state.u_mask.data, state.v_mask.data,
                     self.config, self.grid, periodic_x=True,
                 )
+                self._rigid_lid_src = (lm, Hb)
         except jax.errors.TracerArrayConversionError as e:
             raise RuntimeError(
                 "rigid-lid island decomposition must be built from CONCRETE "
@@ -960,6 +1013,21 @@ class LatLonCGridOceanModel:
                 "via the top-level config.gm_redi; keep "
                 "physics.lateral_mixing.scheme='none'."
             )
+
+        # Dispatch hardening: the equilibrium-tide body force is applied inside
+        # the SPLIT-EXPLICIT barotropic substeps (barotropic_substeps_latlon_cgrid,
+        # the `else` branch of the barotropic-solver dispatch). The rigid-lid /
+        # implicit-CN / unsplit solvers route AROUND that call, so an enabled tide
+        # there would be a SILENT no-op — reject it LOUDLY at construction.
+        _tf = getattr(config, "tidal_forcing", None)
+        if _tf is not None and _tf.enabled:
+            _bsolver = config.barotropic.barotropic_solver
+            if _bsolver in ("rigid_lid", "implicit_cn", "implicit_unsplit"):
+                raise ValueError(
+                    f"tidal_forcing.enabled=True is not supported with "
+                    f"barotropic_solver={_bsolver!r}: the equilibrium-tide body "
+                    f"force is applied in the split-explicit barotropic substeps. "
+                    f"Use barotropic_solver='explicit_substep' (the default).")
 
         # Meridionally-FLAT (Oceananigans `Flat`-y, ∂/∂y≡0) is wired ONLY into the
         # operators built via gradient_y_cgrid / divergence_cgrid (PGF, KE-gradient,
@@ -1720,7 +1788,7 @@ class LatLonCGridOceanModel:
     def _step_impl(self, state: LatLonCGridOceanState, dt: float,
                    freshwater=None, surface_forcing=None,
                    sponge=None, *, _apply_implicit_vmix: bool = True,
-                   grid=None, vertex_mask=None):
+                   grid=None, vertex_mask=None, t_seconds=None):
         """Core step logic — no JIT wrapper.
 
         Use this directly inside an outer ``@jax.jit`` context (e.g.
@@ -2111,6 +2179,7 @@ class LatLonCGridOceanModel:
                 F_slow_u=F_slow_u,
                 F_slow_v=F_slow_v,
                 add_barotropic_coriolis=_add_bt_cor,
+                t_seconds=t_seconds,  # traced model time for the equilibrium tide
             )
 
         # 6b. Issue #271: project out global mean-eta drift right after
@@ -3528,10 +3597,10 @@ class LatLonCGridOceanModel:
                 # below (_wet_if_vmix) masks it at the seafloor exactly like
                 # the fallback path's tail guard.
                 from legoesm.ocean.physics.vertical_mixing.k_profiles import (
-                    _iwm_K_profile,
+                    iwm_K_profile,
                 )
                 from legoesm.ocean.eos import make_eos_fn as _mk_eos
-                _K_iwm = _iwm_K_profile(
+                _K_iwm = iwm_K_profile(
                     state, self.z_coord, self.config.physics,
                     _phys_cfg.vertical_mixing.iwm,
                     eos_fn=_mk_eos(eos=self.config.eos,
@@ -3929,7 +3998,7 @@ class LatLonCGridOceanModel:
     def step(self, state: LatLonCGridOceanState, dt: float,
              freshwater=None, surface_forcing=None,
              sponge=None, *, grid=None,
-             vertex_mask=None) -> LatLonCGridOceanState:
+             vertex_mask=None, t_seconds=None) -> LatLonCGridOceanState:
         """Advance one time step using split-explicit stepping.
 
         Eager Python shim over the JIT-compiled ``_step_jitted``: fills
@@ -3962,7 +4031,6 @@ class LatLonCGridOceanModel:
         -------
         LatLonCGridOceanState
         """
-        self._ensure_vertex_mask(state)
         if self.config.barotropic.barotropic_solver == "rigid_lid":
             # Eager fail-fast (host-side, before the jitted body): the rigid-lid
             # streamfunction solve is single-rank only.  The in-body guard runs
@@ -3974,15 +4042,40 @@ class LatLonCGridOceanModel:
                 assert_rigid_lid_single_rank,
             )
             assert_rigid_lid_single_rank()
+        # Warm BOTH build-once caches (vertex mask + — rigid lid only — the
+        # host-side island/streamfunction decomposition) from the CONCRETE input
+        # state before crossing the jit boundary, so the jitted body reuses them
+        # as compile-time constants.  Without the rigid-lid warm the first
+        # rigid_lid step would try to build the numpy flood-fill from the TRACED
+        # mid-step state inside _step_jitted (np.asarray on a tracer raises).
+        # Single warming entry point shared with external _step_impl drivers.
+        self.prime_step_caches(state)
+        # Eager fail-fast (dispatch hardening): an ENABLED equilibrium tide
+        # with no model time supplied would otherwise be a SILENT no-op (the
+        # in-body gate is ``enabled and t_seconds is not None``) — a driver
+        # stepping via bare ``step(state, dt)`` would run a tide-free
+        # simulation while the config says tides are on.  integrate()/
+        # integrate_scan() thread t automatically; direct steppers must pass
+        # ``t_seconds`` (elapsed model seconds; t=0 = constituent epoch).
+        _tf = getattr(self.config, "tidal_forcing", None)
+        if _tf is not None and _tf.enabled and t_seconds is None:
+            raise ValueError(
+                "tidal_forcing.enabled=True but step() was called without "
+                "t_seconds — the equilibrium tide needs the elapsed model "
+                "time and would otherwise be SILENTLY inert.  Pass "
+                "t_seconds=<elapsed seconds device scalar> to step()/"
+                "step_checked(), or drive the run via integrate()/"
+                "integrate_scan() which thread it automatically."
+            )
         return self._step_jitted(
             state, dt, freshwater, surface_forcing, sponge,
-            grid=grid, vertex_mask=vertex_mask)
+            grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds)
 
     @partial(jax.jit, static_argnums=(0,))
     def _step_jitted(self, state: LatLonCGridOceanState, dt: float,
                      freshwater=None, surface_forcing=None,
                      sponge=None, *, grid=None,
-                     vertex_mask=None) -> LatLonCGridOceanState:
+                     vertex_mask=None, t_seconds=None) -> LatLonCGridOceanState:
         """JIT body of :meth:`step` (split out so the vertex-mask cache
         fill runs eagerly — see the ``step`` docstring).
 
@@ -4007,6 +4100,9 @@ class LatLonCGridOceanModel:
                 raise ValueError(
                     "barotropic_solver='implicit_unsplit' requires "
                     "outer_integrator='ab2'.")
+            # (tidal_forcing + implicit_unsplit is rejected at construction in
+            # _validate_config — the unsplit solver has no barotropic-substep
+            # forcing hook.)
             new_state = self._unsplit_ab2_step(
                 state, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge,
@@ -4024,12 +4120,13 @@ class LatLonCGridOceanModel:
             new_state = self._ab2_step(
                 state, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge,
-                grid=grid, vertex_mask=vertex_mask)
+                grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds)
         else:
             new_state = self._step_impl(state, dt, freshwater=freshwater,
                                         surface_forcing=surface_forcing,
                                         sponge=sponge,
-                                        grid=grid, vertex_mask=vertex_mask)
+                                        grid=grid, vertex_mask=vertex_mask,
+                                        t_seconds=t_seconds)
         # Feature-gated on a STATIC config bool (CLAUDE.md feature-gating
         # exception): a Python ``if`` selects the branch at trace time, so
         # the freeze-floor clamp is only traced when enabled — no jnp.where
@@ -4275,7 +4372,8 @@ class LatLonCGridOceanModel:
 
     def _ab2_step(self, state: LatLonCGridOceanState, dt: float,
                   freshwater=None, surface_forcing=None, sponge=None,
-                  *, grid=None, vertex_mask=None) -> LatLonCGridOceanState:
+                  *, grid=None, vertex_mask=None,
+                  t_seconds=None) -> LatLonCGridOceanState:
         """Adams-Bashforth-2 outer integrator (Veros's faithful scheme).
 
         Veros AB2-extrapolates only the EXPLICIT tendency and applies implicit
@@ -4337,7 +4435,8 @@ class LatLonCGridOceanModel:
                      diss_incr, tracer_source) = self._step_impl(
             state, dt, freshwater=freshwater,
             surface_forcing=surface_forcing, sponge=sponge,
-            _apply_implicit_vmix=False, grid=_grid, vertex_mask=vertex_mask)
+            _apply_implicit_vmix=False, grid=_grid, vertex_mask=vertex_mask,
+            t_seconds=t_seconds)
         _tke_prog = self._tke_prognostic_active()
         _tke_old = (state.tke.data if (_tke_prog and state.tke is not None)
                     else None)
@@ -4724,6 +4823,8 @@ class LatLonCGridOceanModel:
         freshwater=None,
         surface_forcing=None,
         sponge=None,
+        *,
+        t_seconds=None,
     ) -> LatLonCGridOceanState:
         """Advance one timestep with host-side runtime validation."""
         if not self._cfl_checked:
@@ -4731,7 +4832,7 @@ class LatLonCGridOceanModel:
             self._cfl_checked = True
         state_new = self.step(state, dt, freshwater=freshwater,
                               surface_forcing=surface_forcing,
-                              sponge=sponge)
+                              sponge=sponge, t_seconds=t_seconds)
         if self.config.runtime_checks.enable_runtime_checks:
             self._assert_runtime_invariants(state_new)
         return state_new
@@ -4830,6 +4931,7 @@ class LatLonCGridOceanModel:
         duration: float,
         dt: float,
         save_every: int = 1,
+        t0_seconds: float = 0.0,
     ) -> tuple[LatLonCGridOceanState, list[LatLonCGridOceanState]]:
         """Integrate forward for a given duration.
 
@@ -4863,8 +4965,18 @@ class LatLonCGridOceanModel:
 
         trajectory = [state]
         step_fn = self.step_checked if self.config.runtime_checks.enable_runtime_checks else self.step
+        # Thread the traced elapsed model time ONLY when the equilibrium tide is
+        # on; otherwise call step_fn exactly as before (bit-identical). t is a
+        # device array (NOT a Python float) so the jitted step is compiled once,
+        # not retraced per step. t=0 <-> the constituents' reference epoch.
+        _tf = getattr(self.config, "tidal_forcing", None)
+        _tide_on = _tf is not None and _tf.enabled
         for i in range(n_steps):
-            state = step_fn(state, dt)
+            if _tide_on:
+                state = step_fn(state, dt,
+                                t_seconds=jnp.asarray(t0_seconds + i * dt))
+            else:
+                state = step_fn(state, dt)
             if (i + 1) % save_every == 0:
                 trajectory.append(state)
 
@@ -5071,6 +5183,7 @@ class LatLonCGridOceanModel:
         state: LatLonCGridOceanState,
         n_steps: int,
         dt: float,
+        t0_seconds: float = 0.0,
     ) -> tuple[LatLonCGridOceanState, LatLonCGridOceanState]:
         """Integrate using jax.lax.scan (differentiable).
 
@@ -5095,7 +5208,29 @@ class LatLonCGridOceanModel:
         than the Euler fallback of 1.0.  At typical CFL values
         (≤ 0.3) this is stable.
         """
-        state = self.seed_scan_carry(state, dt)
+        _tf = getattr(self.config, "tidal_forcing", None)
+        _tide_on = _tf is not None and _tf.enabled
+        # seed_scan_carry probes the step via jax.eval_shape — with the tide
+        # on it must probe the SAME (t-threaded) signature, both so the shape
+        # discovery follows the tide-on trace and so the step()'s eager
+        # enabled-but-no-time guard does not trip inside the probe.
+        state = (self.seed_scan_carry(state, dt,
+                                      t_seconds=jnp.asarray(t0_seconds))
+                 if _tide_on else self.seed_scan_carry(state, dt))
+
+        if _tide_on:
+            # Feed the traced per-step elapsed model time through xs (NOT a scan
+            # carry change) so the equilibrium tide advances each step; grads
+            # flow back to t and the config amplitudes. t=0 <-> the constituents'
+            # reference epoch. Tide-off keeps xs=None => bit-identical.
+            times = t0_seconds + dt * jnp.arange(n_steps)
+
+            def scan_fn(state, t):
+                new_state = self.step(state, dt, t_seconds=t)
+                return new_state, new_state
+
+            final_state, trajectory = jax.lax.scan(scan_fn, state, xs=times)
+            return final_state, trajectory
 
         def scan_fn(state, _):
             new_state = self.step(state, dt)

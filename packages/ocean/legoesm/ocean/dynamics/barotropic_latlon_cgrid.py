@@ -23,6 +23,8 @@ from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
 from legoesm.ocean.state import LatLonCGridOceanState, LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     fold_is_local,
+    north_fold_mask,
+    apply_north_fold,
     divergence_cgrid,
     fold_vface_row,
     gradient_x_cgrid,
@@ -101,6 +103,7 @@ def barotropic_substeps_latlon_cgrid(
     F_slow_u=None,
     F_slow_v=None,
     add_barotropic_coriolis: bool = True,
+    t_seconds=None,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -177,6 +180,21 @@ def barotropic_substeps_latlon_cgrid(
     else:
         F_slow_v = F_slow_v.astype(eta.dtype)
 
+    # --- Equilibrium-tide barotropic body force (OPT-IN; #tidal_forcing) -------
+    # Add a = +g*grad(eta_eq_eff) to the SLOW forcing so it (a) is applied at
+    # every substep as a constant-over-the-baroclinic-step body force (the tide
+    # is slowly varying vs the ~s barotropic subcycle), and (b) is MASKED by
+    # u_mask/v_mask together with F_slow inside the substep (lines below:
+    # ``(... + F_slow_u) * u_mask``) — so closed/land faces receive nothing.
+    # Feature-gated on the STATIC config bool (CLAUDE.md feature-gating exception)
+    # AND a supplied traced model time: disabled / no-time => bit-identical.
+    _tf_cfg = getattr(config, "tidal_forcing", None)
+    if _tf_cfg is not None and _tf_cfg.enabled and t_seconds is not None:
+        from legoesm.ocean.physics.tidal_forcing import tidal_acceleration
+        _a_tide_x, _a_tide_y = tidal_acceleration(grid, t_seconds, _tf_cfg, g=g)
+        F_slow_u = F_slow_u + _a_tide_x.astype(F_slow_u.dtype)
+        F_slow_v = F_slow_v + _a_tide_y.astype(F_slow_v.dtype)
+
     # Depth-averaged velocity.  Cast h_k to _dt because z_coord.sigma_w
     # may be float64 (jnp.linspace default under x64), which would
     # promote U_bar/V_bar and break the fori_loop carry-type invariant.
@@ -237,11 +255,11 @@ def barotropic_substeps_latlon_cgrid(
         mask_p = pad_ns_zero(mask)
         diff_v_mask = mask_p[:-1] * mask_p[1:]
         diff_v_mask = _zero_polar_lat_ends(diff_v_mask)
-        if fold_is_local(grid):
+        nmask = north_fold_mask(grid)
+        if fold_is_local(grid) or nmask is not None:
             north_dm = mask[-1:] * mask[-1:, grid.fold.perm_T]
-            diff_v_mask = jnp.concatenate(
-                [diff_v_mask[:-1], north_dm], axis=0,
-            )
+            diff_v_mask = apply_north_fold(
+                diff_v_mask, north_dm, grid, north_mask=nmask)
 
     # Divergence damping on barotropic velocity: grad(div(u_bar)).
     # Targets the divergent mode that creates the eta checkerboard,
@@ -337,11 +355,12 @@ def barotropic_substeps_latlon_cgrid(
         H_total_pad = pad_ns_zero(H_total_c)
         H_v = jnp.minimum(H_total_pad[:-1], H_total_pad[1:])
         H_v = _zero_polar_lat_ends(H_v)
-        if fold_is_local(grid):
+        nmask = north_fold_mask(grid)
+        if fold_is_local(grid) or nmask is not None:
             north = jnp.minimum(
                 H_total_c[-1:], fold_vface_row(H_total_c, grid),
             )
-            H_v = jnp.concatenate([H_v[:-1], north], axis=0)
+            H_v = apply_north_fold(H_v, north, grid, north_mask=nmask)
 
         flux_u = H_u * U_bar_c * u_mask
         flux_v = H_v * V_bar_c * v_mask

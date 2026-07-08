@@ -108,6 +108,48 @@ from legoesm.timestepping.tridiagonal import thomas_solve
 
 from legoesm import constants
 
+# Machine-checked scheme contract for the public entries in section 19 (see
+# tests/test_physics_contracts.py). The architect pins units/signs/reference;
+# the body must honour it.
+__physics_contract__ = {
+    "summary": (
+        "CLUBB higher-order turbulence closure (phase-1 diagnostic default "
+        "clubb_turbulence): down-gradient eddy diffusion using CLUBB's parcel "
+        "buoyant-sorting length scale Lscale and an ADG1 double-Gaussian PDF "
+        "buoyancy flux; the wp2 (w'^2) moment is carried and advanced."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
+        "tke": "m^2/s^2 (carries wp2 = w'^2)",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "T_sfc": "K", "q_sfc": "kg/kg", "rho": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "Km": "m^2/s", "Kh": "m^2/s", "shflx": "W/m^2", "lhflx": "W/m^2",
+        "ustar": "m/s", "h_pbl": "m", "wp2_new": "m^2/s^2 (updated w'^2)",
+    },
+    "sign_convention": (
+        "Down-gradient eddy diffusion, Km >= 0, Kh = Km/Pr_t >= 0; PDF "
+        "buoyancy flux wpthvp produces wp2 in unstable layers. The column "
+        "budget is OPEN: the surface flux (shflx > 0 upward, lhflx > 0 "
+        "upward/moistening) is injected as the bottom boundary condition and "
+        "the top is zero-flux; z increases upward."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Golaz, Larson & Cotton (2002), J. Atmos. Sci. 59, 3540-3551; "
+        "Larson & Golaz (2005), J. Atmos. Sci. 62, 3620-3649; "
+        "Larson (2022) arXiv:1711.03675"
+    ),
+    "idealized_test": (
+        "no surface flux + well-mixed neutral column -> near-zero interior "
+        "tendency; Km, Kh >= 0; wp2 stays in [tke_min, wp2_max]; per-piece "
+        "parity vs CLUBB-JAX for Lscale and the ADG1 liquid cloud fraction."
+    ),
+}
+
 # Eddy-diffusivity and dissipation coefficients are read from CLUBBParams
 # (c_K, beta, ...) — no hardcoded tunables here.
 _PR_T = 1.0   # phase-1 turbulent Prandtl number (Kh = Km/_PR_T); refined in P2

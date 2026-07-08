@@ -151,7 +151,18 @@ def absolute_vorticity_coriolis(
 
     # --- Planetary vorticity at vertices ---
     lat = grid.lat  # cell-center latitudes
-    twoOmega = 2.0 * constants.Omega
+    # Rotation rate from the GRID, not constants.Omega: a non-rotating
+    # grid (create_latlon_grid(..., omega=0.0) — the colliding-modons
+    # case, #521) must yield f_vert = 0, but the hardcoded
+    # constants.Omega silently kept the planet rotating regardless of
+    # the grid omega (codex 2026-07-03 HIGH).  ``grid.omega`` is the
+    # stored construction scalar (appended NamedTuple field), so this
+    # is exact on any MPI band (no recovery from local ``f`` rows —
+    # a band owning only the equator row has sin(lat) = 0), stays in
+    # JAX space if the grid is ever passed as a dynamic pytree, and is
+    # bit-identical for every rotating caller (grids built with the
+    # default omega = constants.Omega).
+    twoOmega = 2.0 * grid.omega
     if _band is None and _spmd_pm is None:
         # Serial / single-rank: sin(±π/2) = ±1 exactly, so build f_vert directly
         # from the interior sin via Pad with constant_values = ±2Ω.  Single

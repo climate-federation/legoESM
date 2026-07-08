@@ -82,9 +82,11 @@ def _assert_state_finite(pytree, label="state"):
 
 def _make_small_sfno():
     """Create a small SFNO for testing."""
+    from legoesm.training.neural_gcm_spectral import N_SFNO_FORCING_CHANNELS
     spec = PE3DChannelSpec(nlev=NLEV)
     config = SFNOConfig(
-        in_channels=spec.n_channels,
+        # state channels + the surface-forcing input planes
+        in_channels=spec.n_channels + N_SFNO_FORCING_CHANNELS,
         out_channels=spec.n_channels,
         embed_dim=16,
         n_blocks=1,
@@ -160,6 +162,70 @@ class TestSFNOSpectralPhysics:
 
         _assert_state_finite(tendencies, label="tendency")
 
+    def test_channel_mismatch_raises(self):
+        """An SFNO without the forcing input planes must be rejected —
+        silently reading nlev off the wrong channel count would misalign
+        every packed field."""
+        from legoesm.training.neural_gcm_spectral import (
+            make_sfno_spectral_physics,
+        )
+        from legoesm.ml.channel_packing import PE3DChannelSpec
+        from legoesm.ml.sfno import SFNO, SFNOConfig
+        spec = PE3DChannelSpec(nlev=NLEV)
+        legacy = SFNO(
+            SFNOConfig(
+                in_channels=spec.n_channels,      # no forcing planes
+                out_channels=spec.n_channels,
+                embed_dim=16, n_blocks=1, mlp_expansion=2,
+                residual_prediction=False,
+            ),
+            _GRID, key=jax.random.PRNGKey(0),
+        )
+        with pytest.raises(ValueError, match="forcing"):
+            make_sfno_spectral_physics(legacy, _GRID)
+
+    def test_responds_to_prescribed_sst(self):
+        """Same state, different prescribed T_sfc → different SFNO
+        tendencies (the AMIP / interannual-variability pathway)."""
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_sfno_spectral_physics,
+        )
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        sfno = _make_small_sfno()
+        physics_fn = make_sfno_spectral_physics(sfno, _GRID)
+        ncol = len(_GRID.lat) * len(_GRID.lon)
+
+        def _forcing(t_val):
+            return {
+                "T_sfc": jnp.full((ncol,), t_val, dtype=jnp.float64),
+                "sic": jnp.zeros((ncol,), dtype=jnp.float64),
+                "day_of_year": jnp.asarray(180.0),
+                "seconds_of_day": jnp.asarray(43200.0),
+            }
+
+        out_a = physics_fn(state, _GRID, _SIGMA, forcing=_forcing(285.0))
+        out_b = physics_fn(state, _GRID, _SIGMA, forcing=_forcing(300.0))
+        diff = float(jnp.max(jnp.abs(out_a.T_hat.data - out_b.T_hat.data)))
+        assert diff > 1e-12, (
+            f"SFNO tendencies must respond to prescribed T_sfc (diff={diff})"
+        )
+
+    def test_unforced_call_stays_finite(self):
+        """forcing=None (idealized/legacy path) uses internal proxies and
+        stays finite."""
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_sfno_spectral_physics,
+        )
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        physics_fn = make_sfno_spectral_physics(_make_small_sfno(), _GRID)
+        _assert_state_finite(
+            physics_fn(state, _GRID, _SIGMA), label="unforced tendency",
+        )
+
 
 # ---------------------------------------------------------------------------
 # 3. spectral_rollout
@@ -214,6 +280,67 @@ class TestSpectralRollout:
 
         assert result.T_hat.data.shape == state.T_hat.data.shape
         assert result.lnps_hat.data.shape == state.lnps_hat.data.shape
+
+    def _forcing_base(self):
+        ncol = len(_GRID.lat) * len(_GRID.lon)
+        return {
+            "T_sfc": jnp.full((ncol,), 290.0, dtype=jnp.float64),
+            "sic": jnp.zeros((ncol,), dtype=jnp.float64),
+            "day_of_year": jnp.asarray(32.0),
+            "seconds_of_day": jnp.asarray(21600.0),
+        }
+
+    def test_forced_rollout_finite_and_sst_sensitive(self):
+        """forcing_base threads through the scan into the physics fn:
+        the forced rollout runs finite and a different prescribed SST
+        yields a different final state."""
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_sfno_spectral_physics,
+            spectral_rollout,
+        )
+        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        physics_fn = make_sfno_spectral_physics(_make_small_sfno(), _GRID)
+        pe_config = SpectralPEConfig(time_integrator="ssp_rk3")
+
+        fb = self._forcing_base()
+        out_a = spectral_rollout(
+            state, physics_fn, _GRID, _SIGMA, pe_config,
+            dt=1800.0, n_steps=2, forcing_base=fb,
+        )
+        _assert_state_finite(out_a, label="forced rollout")
+        fb_warm = dict(fb, T_sfc=fb["T_sfc"] + 10.0)
+        out_b = spectral_rollout(
+            state, physics_fn, _GRID, _SIGMA, pe_config,
+            dt=1800.0, n_steps=2, forcing_base=fb_warm,
+        )
+        diff = float(jnp.max(jnp.abs(out_a.T_hat.data - out_b.T_hat.data)))
+        assert diff > 1e-14, "prescribed SST did not reach the rollout physics"
+
+    def test_forcing_with_rad_gating_raises(self):
+        """forcing_base + rad-gating is the classical AMIP combination and
+        must be rejected here (spectral_amip_rollout owns it)."""
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_sfno_spectral_physics,
+            spectral_rollout,
+        )
+        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        physics_fn = make_sfno_spectral_physics(_make_small_sfno(), _GRID)
+        pe_config = SpectralPEConfig(time_integrator="ssp_rk3")
+        with pytest.raises(ValueError, match="forcing_base"):
+            spectral_rollout(
+                state, physics_fn, _GRID, _SIGMA, pe_config,
+                dt=1800.0, n_steps=1,
+                rad_physics_fn=physics_fn, rad_update_interval=4,
+                forcing_base=self._forcing_base(),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -348,9 +475,17 @@ class TestColumnMLPSpectralPhysics:
             carry_to_spectral_state,
             make_column_mlp_spectral_physics,
         )
+        import equinox as eqx
+
         carry = _make_gaussian_carry()
         state = carry_to_spectral_state(carry, _GRID)
         nn = _make_small_column_mlp()
+        # NeuralPhysics ZERO-inits its final layer (epoch-0 stability
+        # contract: untrained net = exactly-zero tendencies), so exercise
+        # the MLP->T_hat WIRING with an explicitly perturbed final bias.
+        nn = eqx.tree_at(
+            lambda m: m.layers[-1].bias, nn,
+            jnp.full_like(nn.layers[-1].bias, 0.1))
 
         physics_fn = make_column_mlp_spectral_physics(nn, _GRID)
         tend = physics_fn(state, _GRID, _SIGMA)
@@ -360,7 +495,7 @@ class TestColumnMLPSpectralPhysics:
         assert jnp.allclose(tend.vor_hat.data, 0.0)
         assert jnp.allclose(tend.div_hat.data, 0.0)
         assert jnp.allclose(tend.lnps_hat.data, 0.0)
-        # T tendency should be non-zero (random MLP)
+        # T tendency should be non-zero (perturbed final layer)
         assert jnp.any(tend.T_hat.data != 0.0)
 
     def test_tendencies_finite(self):
@@ -537,3 +672,84 @@ class TestAreaWeightedLoss:
             f"area-weighting should down-weight polar error: polar={loss_polar:.6e} "
             f">= equator={loss_equator:.6e} (plain jnp.mean would make them equal)"
         )
+
+
+# ---------------------------------------------------------------------------
+# #817. Semi-implicit training core for the WB lane
+# ---------------------------------------------------------------------------
+
+class TestSemiImplicitTrainingCore:
+    """The semi-implicit SSP-RK3-SI training core (#817): pe_config.semi_implicit
+    routes spectral_rollout through the Hoskins-Simmons implicit gravity-wave
+    step, damping the explicit core's tangent-linear (adjoint) growth that NaN'd
+    WB value_and_grad past ~6 h."""
+
+    @staticmethod
+    def _configs():
+        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        explicit = SpectralPEConfig(
+            time_integrator="ssp_rk3", semi_implicit=False, hyperdiff_coeff=0.0)
+        si = SpectralPEConfig(
+            time_integrator="ssp_rk3", semi_implicit=True,
+            si_alpha=0.6, hyperdiff_coeff=0.0)  # alpha>0.5 actively damps
+        return explicit, si
+
+    @staticmethod
+    def _zero_physics(s, grid, sigma, **kwargs):
+        # Zero tendency -> the rollout is the PURE spectral dycore (epoch-0, when
+        # the learned physics is zero-init: the exact WB adjoint-blowup scenario).
+        return jax.tree_util.tree_map(
+            lambda a: jnp.zeros_like(a) if eqx.is_inexact_array(a) else a, s)
+
+    def test_semi_implicit_rollout_runs_finite_and_matches_shapes(self):
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state, spectral_rollout)
+        state = carry_to_spectral_state(_make_gaussian_carry(), _GRID)
+        _explicit, si = self._configs()
+        out = spectral_rollout(
+            state, self._zero_physics, _GRID, _SIGMA, si, dt=1800.0, n_steps=3)
+        _assert_state_finite(out, label="SI rollout")
+        assert out.T_hat.data.shape == state.T_hat.data.shape
+        assert out.div_hat.data.shape == state.div_hat.data.shape
+
+    def test_semi_implicit_honours_substeps(self):
+        """si_substeps > 1 sub-steps ssp_rk3_step_si at dt/si_substeps and stays
+        finite (the model's _do_step sub-stepping, made scan-safe)."""
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state, spectral_rollout)
+        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        state = carry_to_spectral_state(_make_gaussian_carry(), _GRID)
+        cfg = SpectralPEConfig(
+            time_integrator="ssp_rk3", semi_implicit=True, si_substeps=3,
+            si_alpha=0.6, hyperdiff_coeff=0.0)
+        out = spectral_rollout(
+            state, self._zero_physics, _GRID, _SIGMA, cfg, dt=3600.0, n_steps=2)
+        _assert_state_finite(out, label="SI substep rollout")
+
+    def test_semi_implicit_rollout_is_differentiable(self):
+        """The SI rollout is reverse-mode DIFFERENTIABLE (finite, non-trivial
+        gradient) at a moderate dt — the property the WB lane needs.  The SI
+        matrices are precomputed constants w.r.t. the perturbation and
+        ``ssp_rk3_step_si``'s per-mode linear solve is AD-safe, so ``jax.grad``
+        flows cleanly through the implicit correction.
+
+        NOTE on the adjoint-DAMPING benefit: it is realised only where the
+        explicit gravity-wave CFL BINDS (fine resolution).  At this T10 smoke
+        grid the CFL is ~13 ks so the explicit core is already adjoint-stable and
+        the SI machinery gives no benefit (and is actually less stable at very
+        large dt) — the damping demonstration belongs to the at-scale WB run
+        (#817 follow-up), not a coarse unit grid."""
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state, spectral_rollout)
+        state0 = carry_to_spectral_state(_make_gaussian_carry(), _GRID)
+        _explicit, si = self._configs()
+
+        def loss(pert):
+            s = state0._replace(
+                T_hat=state0.T_hat.replace(data=state0.T_hat.data + pert))
+            out = spectral_rollout(
+                s, self._zero_physics, _GRID, _SIGMA, si, dt=1800.0, n_steps=6)
+            return jnp.real(jnp.vdot(out.T_hat.data, out.T_hat.data))
+
+        g = jax.grad(loss)(jnp.zeros_like(state0.T_hat.data))
+        assert bool(jnp.all(jnp.isfinite(g))), "SI rollout gradient not finite"

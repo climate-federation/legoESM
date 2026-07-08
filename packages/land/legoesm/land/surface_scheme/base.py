@@ -57,6 +57,12 @@ class SurfaceFluxOutput(NamedTuple):
     # ---- Photosynthesis (None if stomata disabled / carbon off) ----
     gpp: jax.Array | None = None  # gross primary production [gC/m^2/s]
 
+    # ---- Solar-induced fluorescence (None unless a SIFConfig is attached) ----
+    # Observed top-of-canopy SIF photon flux [umol/m^2/s] (sunlit+shaded sum for
+    # the two-leaf canopy, single leaf for SimpleSEB), scaled by the escape
+    # probability fesc.  Passive diagnostic — no feedback into the land state.
+    sif: jax.Array | None = None
+
     # ---- Canopy-specific diagnostics (None for SimpleSEB) ----
     Tf_Sun: jax.Array | None = None        # sunlit leaf T [K]
     Tf_Sh: jax.Array | None = None         # shaded leaf T [K]
@@ -117,3 +123,13 @@ class SurfaceFluxOutput(NamedTuple):
     # SimpleSEB build that leaves it unset -> solve_soil_thermal falls back to the
     # explicit BC (lambda = 0), byte-identical to before.
     surface_conductance: jax.Array | None = None
+
+    # ---- Canopy heat storage (CLM-ML only) ----
+    # stflx_air: canopy air-space sensible heat storage [W/m^2], positive when
+    #   the air is warming (net heat stored in the canopy air column).
+    # stflx_veg: vegetation biomass sensible heat storage [W/m^2].
+    # Both are required for full energy balance closure:
+    #   Rnet = SH + LH + G_soil + stflx_air + stflx_veg
+    # None for SimpleSEB (negligible for thin canopies without explicit storage).
+    stflx_air: jax.Array | None = None
+    stflx_veg: jax.Array | None = None

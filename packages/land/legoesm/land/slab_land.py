@@ -97,10 +97,10 @@ def step_land(
     W_max = _get(lp, "W_max", config.W_max)
     C_soil = _get(lp, "C_soil", config.C_soil)
     d_soil = _get(lp, "d_soil", config.d_soil)
-    # Bucket-hydrology scalars are LandConfig fields, NOT part of the
-    # LandSurfaceParams spatial container (which is locked to the 12 PARAM_NAMES /
-    # PARAM_BOUNDS entries).  Read them straight from config — never via the spatial
-    # helper (a passed LandSurfaceParams has no such attribute).
+    # Green-Ampt infiltration params are CONFIG-ONLY (no per-cell field on
+    # LandSurfaceParams): reading them through ``_get(lp, ...)`` raised
+    # AttributeError for every provider-driven run.  Promote to per-cell params
+    # only when a provider actually supplies them.
     K_infiltration = config.K_infiltration
     infil_suction_boost = config.infil_suction_boost
 
@@ -138,7 +138,7 @@ def step_land(
     beta_soil = config.beta_min + (1.0 - config.beta_min) * w_frac
 
     # --- Stomatal conductance (if enabled) ---
-    beta, _ = compute_effective_beta(
+    beta, _, _ = compute_effective_beta(
         T_soil, forcing, beta_soil, config, carbon_state, dt,
         land_params=lp,
     )
@@ -256,11 +256,30 @@ def step_land(
     # energy and water stay consistent: precip + melt == dW/dt + E + runoff exactly.
     soil_evap = jnp.where(has_snow, 0.0, evap_rate)
     P_input = precip_rain + melt_rate
-    W_new, soil_evap_actual, runoff, _runoff_inf, _runoff_sat = partition_bucket_runoff(
-        W, P_input, soil_evap, dt, W_max,
-        K_infiltration, infil_suction_boost,
-        infiltration_excess=config.infiltration_excess,
-    )
+    # Runoff scheme dispatch (hardened: unknown -> ValueError on the static
+    # config string).  "bucket" (default) is byte-identical; "topmodel" adds
+    # the SIMTOP sub-grid saturated fraction + topographic baseflow.  Direct
+    # attribute read (LandConfig always carries the field) so a non-LandConfig
+    # caller fails LOUDLY rather than silently defaulting to bucket.
+    _runoff_scheme = config.runoff_scheme
+    if _runoff_scheme == "topmodel":
+        from legoesm.land.topmodel_runoff import partition_topmodel_runoff
+        W_new, soil_evap_actual, runoff, _runoff_inf, _runoff_sat = partition_topmodel_runoff(
+            W, P_input, soil_evap, dt, W_max,
+            K_infiltration, infil_suction_boost, config.topmodel,
+            infiltration_excess=config.infiltration_excess,
+        )
+    elif _runoff_scheme == "bucket":
+        W_new, soil_evap_actual, runoff, _runoff_inf, _runoff_sat = partition_bucket_runoff(
+            W, P_input, soil_evap, dt, W_max,
+            K_infiltration, infil_suction_boost,
+            infiltration_excess=config.infiltration_excess,
+        )
+    else:
+        raise ValueError(
+            f"Unknown land runoff_scheme {_runoff_scheme!r}; "
+            "expected one of: 'bucket', 'topmodel'."
+        )
 
     # Total actual mass flux and excess energy
     evap_rate_actual = jnp.where(has_snow, sublim_actual, soil_evap_actual)
@@ -330,7 +349,7 @@ def step_land(
         lat_arr = lat if lat is not None else jnp.zeros_like(T_soil)
         # Recompute Farquhar GPP with updated T and moisture so that
         # photosynthesis and respiration use consistent end-of-step state.
-        _, gpp_farq_new = compute_effective_beta(
+        _, gpp_farq_new, _ = compute_effective_beta(
             T_soil_new, forcing, beta_soil_new, config, carbon_state, dt,
             land_params=lp,
         )
@@ -345,6 +364,9 @@ def step_land(
 
     response = TileResponse(
         T_sfc=T_soil_new,
+        # Radiometric surface T for the coupler's LW blend: for the no-canopy slab it
+        # is the emitting skin temperature (same T that produced ``lw_up_new``).
+        T_rad=T_soil_new,
         albedo=alpha_new,
         emissivity=jnp.full(T_soil.shape, emissivity, dtype=T_soil.dtype),
         z0=jnp.full(T_soil.shape, z0, dtype=T_soil.dtype),

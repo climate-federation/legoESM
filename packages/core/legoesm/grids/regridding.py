@@ -16,9 +16,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-import numpy as np
 import jax.numpy as jnp
-
+import numpy as np
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.gaussian import GaussianGrid
 
@@ -53,6 +52,56 @@ def _latlon_to_xyz(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
     ], axis=-1)
 
 
+def _inverse_distance_weights(src_xyz, tgt_xyz, k_neighbors: int):
+    """KD-tree k-nearest-neighbour inverse-distance weights from source to target
+    Cartesian points — the SHARED core of every ``compute_*_weights`` builder so the
+    KD-tree + IDW math is written ONCE.  Returns ``(indices (n_tgt, k), weights
+    (n_tgt, k))`` with weights summing to 1 per target."""
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(src_xyz)
+    distances, indices = tree.query(tgt_xyz, k=k_neighbors)
+    if k_neighbors == 1:
+        # cKDTree.query collapses the neighbour axis for k=1; restore (n_tgt, 1)
+        # so the axis=-1 normalization and (n_tgt, k) contract hold for all k.
+        distances = distances[:, None]
+        indices = indices[:, None]
+    distances = np.maximum(distances, 1e-12)        # guard exact matches (dist 0)
+    inv_dist = 1.0 / distances
+    weights = inv_dist / inv_dist.sum(axis=-1, keepdims=True)
+    return indices, weights
+
+
+def compute_latlon_to_cs_weights(
+    src_lat, src_lon, cs_grid: CubedSphereGrid, k_neighbors: int = 4,
+) -> RegridWeights:
+    """Regridding weights from a REGULAR lat-lon grid (1-D ``src_lat``/``src_lon`` in
+    radians, e.g. ERA5) to a cubed-sphere grid via KD-tree inverse-distance.
+
+    Built from the ACTUAL source point locations.  Going through a Gaussian PROXY of
+    the source instead (the old ERA5→cubed-sphere path) is WRONG: the proxy's
+    quadrature latitudes do not coincide with a uniform lat-lon grid, and its latitude
+    COUNT generally differs (e.g. 72 vs a pole-inclusive 73), so the ``src_indices``
+    — computed for the proxy's flattened layout — gather the WRONG source cells (the
+    regrid pulled data from near-antipodal latitudes).  The source is flattened
+    ``(lat, lon)`` in C-order (lat slowest) to match a field reshaped
+    ``(n_lat, n_lon, ...) → (n_lat·n_lon, ...)``.
+    """
+    src_lat = np.asarray(src_lat)
+    src_lon = np.asarray(src_lon)
+    lat2d, lon2d = np.meshgrid(src_lat, src_lon, indexing="ij")   # (n_lat, n_lon)
+    src_xyz = _latlon_to_xyz(lat2d.ravel(), lon2d.ravel())
+    tgt_xyz = _latlon_to_xyz(
+        np.asarray(cs_grid.lat).ravel(), np.asarray(cs_grid.lon).ravel())
+    indices, weights = _inverse_distance_weights(src_xyz, tgt_xyz, k_neighbors)
+    return RegridWeights(
+        src_indices=jnp.array(indices, dtype=jnp.int32),
+        weights=jnp.array(weights, dtype=jnp.float32),
+        target_shape=tuple(int(s) for s in cs_grid.lat.shape),
+        src_flat_size=int(src_lat.shape[0] * src_lon.shape[0]),
+    )
+
+
 def compute_cs_to_gauss_weights(
     cs_grid: CubedSphereGrid,
     gauss_grid: GaussianGrid,
@@ -77,36 +126,17 @@ def compute_cs_to_gauss_weights(
     RegridWeights
         Precomputed weights for regridding.
     """
-    from scipy.spatial import cKDTree
-
-    # Source points: flatten cubed-sphere (6, n, n) → (6*n*n, 3)
-    src_lat = np.asarray(cs_grid.lat).ravel()
-    src_lon = np.asarray(cs_grid.lon).ravel()
-    src_xyz = _latlon_to_xyz(src_lat, src_lon)
-
-    # Target points: Gaussian grid (n_lat, n_lon) → (n_lat*n_lon, 3)
-    tgt_lat = np.asarray(gauss_grid.lat2d).ravel()
-    tgt_lon = np.asarray(gauss_grid.lon2d).ravel()
-    tgt_xyz = _latlon_to_xyz(tgt_lat, tgt_lon)
-
-    # KD-tree lookup
-    tree = cKDTree(src_xyz)
-    distances, indices = tree.query(tgt_xyz, k=k_neighbors)
-
-    # Inverse-distance weights
-    # Guard against exact matches (distance = 0)
-    distances = np.maximum(distances, 1e-12)
-    inv_dist = 1.0 / distances
-    weights = inv_dist / inv_dist.sum(axis=-1, keepdims=True)
-
-    target_shape = (gauss_grid.n_lat, gauss_grid.n_lon)
-    src_flat_size = int(np.prod(np.array(cs_grid.lat.shape)))
-
+    # Source points: flatten cubed-sphere (6, n, n); target: Gaussian grid.
+    src_xyz = _latlon_to_xyz(
+        np.asarray(cs_grid.lat).ravel(), np.asarray(cs_grid.lon).ravel())
+    tgt_xyz = _latlon_to_xyz(
+        np.asarray(gauss_grid.lat2d).ravel(), np.asarray(gauss_grid.lon2d).ravel())
+    indices, weights = _inverse_distance_weights(src_xyz, tgt_xyz, k_neighbors)
     return RegridWeights(
         src_indices=jnp.array(indices, dtype=jnp.int32),
         weights=jnp.array(weights, dtype=jnp.float64),
-        target_shape=target_shape,
-        src_flat_size=src_flat_size,
+        target_shape=(gauss_grid.n_lat, gauss_grid.n_lon),
+        src_flat_size=int(np.prod(np.array(cs_grid.lat.shape))),
     )
 
 
@@ -130,33 +160,16 @@ def compute_gauss_to_cs_weights(
     -------
     RegridWeights
     """
-    from scipy.spatial import cKDTree
-
-    # Source: Gaussian grid
-    src_lat = np.asarray(gauss_grid.lat2d).ravel()
-    src_lon = np.asarray(gauss_grid.lon2d).ravel()
-    src_xyz = _latlon_to_xyz(src_lat, src_lon)
-
-    # Target: cubed-sphere
-    tgt_lat = np.asarray(cs_grid.lat).ravel()
-    tgt_lon = np.asarray(cs_grid.lon).ravel()
-    tgt_xyz = _latlon_to_xyz(tgt_lat, tgt_lon)
-
-    tree = cKDTree(src_xyz)
-    distances, indices = tree.query(tgt_xyz, k=k_neighbors)
-
-    distances = np.maximum(distances, 1e-12)
-    inv_dist = 1.0 / distances
-    weights = inv_dist / inv_dist.sum(axis=-1, keepdims=True)
-
-    target_shape = tuple(int(s) for s in cs_grid.lat.shape)
-    src_flat_size = gauss_grid.n_lat * gauss_grid.n_lon
-
+    src_xyz = _latlon_to_xyz(
+        np.asarray(gauss_grid.lat2d).ravel(), np.asarray(gauss_grid.lon2d).ravel())
+    tgt_xyz = _latlon_to_xyz(
+        np.asarray(cs_grid.lat).ravel(), np.asarray(cs_grid.lon).ravel())
+    indices, weights = _inverse_distance_weights(src_xyz, tgt_xyz, k_neighbors)
     return RegridWeights(
         src_indices=jnp.array(indices, dtype=jnp.int32),
         weights=jnp.array(weights, dtype=jnp.float64),
-        target_shape=target_shape,
-        src_flat_size=src_flat_size,
+        target_shape=tuple(int(s) for s in cs_grid.lat.shape),
+        src_flat_size=gauss_grid.n_lat * gauss_grid.n_lon,
     )
 
 
@@ -373,9 +386,12 @@ def _pad_faces_for_regrid(field: np.ndarray, *, strip_inset: int) -> np.ndarray:
     padded[:, 1:-1, 1:-1] = field
 
     def _nbr_strip(f: int, edge: int) -> np.ndarray:
-        if edge == _WEST:   return field[f, strip_inset, :]
-        if edge == _EAST:   return field[f, -1 - strip_inset, :]
-        if edge == _SOUTH:  return field[f, :, strip_inset]
+        if edge == _WEST:
+            return field[f, strip_inset, :]
+        if edge == _EAST:
+            return field[f, -1 - strip_inset, :]
+        if edge == _SOUTH:
+            return field[f, :, strip_inset]
         return field[f, :, -1 - strip_inset]  # NORTH
 
     for face in range(6):
@@ -833,9 +849,9 @@ def regrid_faces_to_latlon(
 
     # Infer default output resolution from face tile size
     face_shape = np.asarray(field_faces).shape
-    N_tile = face_shape[1] if len(face_shape) >= 3 else int(np.sqrt(face_shape[0] / 6))
+    n_tile = face_shape[1] if len(face_shape) >= 3 else int(np.sqrt(face_shape[0] / 6))
     if n_lon is None:
-        n_lon = max(360, 8 * N_tile)
+        n_lon = max(360, 8 * n_tile)
     if n_lat is None:
         n_lat = n_lon // 2
 

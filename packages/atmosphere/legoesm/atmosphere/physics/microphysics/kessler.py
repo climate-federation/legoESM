@@ -19,11 +19,11 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     rain_evaporation,
     safe_pow,
     donor_clamp_scale,
+    saturation_adjustment,
 )
 from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
 from legoesm.atmosphere.physics.microphysics.output import (
@@ -36,6 +36,42 @@ from legoesm.atmosphere.physics.microphysics.output import (
 # Kessler accretion exponent + density floor (fixed).
 _KESSLER_ACCR_EXP = 0.875
 _RHO_FLOOR = 0.1
+
+__physics_contract__ = {
+    "summary": (
+        "Kessler (1969) single-moment warm-rain microphysics: saturation "
+        "adjustment (cloud condensation/evaporation), cloud->rain "
+        "autoconversion, accretion, rain evaporation and rain sedimentation to "
+        "surface precipitation."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",
+        "hydrometeors.q_r": "kg/kg", "p_full": "Pa", "rho": "kg/m^3",
+        "dz": "m", "dt": "s",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_dt": "kg/kg/s",
+        "dq_r_dt": "kg/kg/s", "precipitation": "kg/m^2/s",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. Latent heating dT_dt is consistent with the "
+        "vapour<->liquid phase-change rate via L_v (condensation warms, "
+        "evaporation cools). Water is redistributed vapour<->cloud<->rain; "
+        "SURFACE PRECIPITATION (>= 0) removes water from the column, so column "
+        "moisture is NOT conserved and the falling condensate carries enthalpy "
+        "out -- no contract-level conservation is claimed. Mixing ratios >= 0."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": "Kessler (1969), Meteorol. Monogr. 10(32), Amer. Meteorol. Soc.",
+    "idealized_test": (
+        "tests/unit/test_physics_microphysics.py — supersaturated air condenses "
+        "with L_v heating; cloud above the autoconversion threshold makes rain "
+        "+ surface precip; subsaturated rain evaporates; mixing ratios stay "
+        ">= 0; differentiable wrt T, q_v."
+    ),
+}
+
 
 def kessler_microphysics(
     T: jax.Array,
@@ -79,37 +115,25 @@ def kessler_microphysics(
     q_r = hydrometeors.q_r
     sharpness = config.saturation_sharpness
 
-    # Saturation mixing ratio
-    q_sat = saturation_mixing_ratio(T, p_full)
-
-    # 1. Saturation adjustment — convert from increment [kg/kg] to tendency [kg/kg/s].
-    # Adopts the ``_warm_rain.saturation_adjustment`` psychrometric form and
-    # EXTENDS its donor clamp to both branches:
-    #   (a) PSYCHROMETRIC correction — condensing the full ``q_v - q_sat(T_old)``
-    #       ignores the latent warming that raises ``q_sat``, over-condensing each
-    #       call; divide by ``1 + (L_v/c_pd) dq_sat/dT`` (small-error dry-air
-    #       mixing-ratio approximation, same as the shared helper).
-    #   (b) Donor-clamp BOTH branches: evaporation (negative ``condensation``) by
-    #       the available ``q_c`` (a subsaturated clear-air column cannot drive
-    #       ``q_c`` < 0 — this is the only branch ``_warm_rain`` itself clamps),
-    #       AND — the previously MISSING bound — condensation (positive) by the
-    #       available ``q_v``.  Without the positive clamp the coupled driver
-    #       floors ``q_v`` independently while keeping the full ``q_c`` increment,
-    #       so saturation adjustment created cloud water from vapour that was
-    #       floored away → ``q_c`` accumulated to physically impossible ~1 kg/kg
-    #       (opaque clouds, planetary-albedo runaway, the coupled cold drift /
-    #       OLR collapse).
+    # 1. Saturation adjustment — the SHARED ``_warm_rain.saturation_adjustment``
+    # helper computes ``q_sat`` and the supersaturation residual (in fp64 when
+    # x64 is available — the issue #618 robustness path the fp32 LES/CRM
+    # production config relies on; an inline fp32 copy here re-exposed the
+    # ~65 % LWP deficit #618 fixed), applies the psychrometric correction, and
+    # donor-clamps the evaporation branch against ``q_c``.  Kessler EXTENDS it
+    # with the previously MISSING positive-branch bound: condensation is
+    # donor-clamped by the available ``q_v``.  Without that clamp the coupled
+    # driver floors ``q_v`` independently while keeping the full ``q_c``
+    # increment, so saturation adjustment created cloud water from vapour that
+    # was floored away → ``q_c`` accumulated to physically impossible
+    # ~1 kg/kg (opaque clouds, planetary-albedo runaway, the coupled cold
+    # drift / OLR collapse).
     _dt_safe = jnp.maximum(dt, 1e-10)
-    excess = q_v - q_sat
-    dqsdt = constants.L_v * q_sat / (constants.R_v * T ** 2)
-    psychrometric = 1.0 + dqsdt * constants.L_v / constants.c_pd
-    cond_frac = jax.nn.sigmoid(sharpness * excess)
-    condensation = cond_frac * excess / (_dt_safe * psychrometric)  # [kg/kg/s]
-    q_c_avail = jnp.clip(q_c, 0.0, None)
-    q_v_avail = jnp.clip(q_v, 0.0, None)
-    condensation = jnp.clip(
-        condensation, -q_c_avail / _dt_safe, q_v_avail / _dt_safe,
+    condensation, q_sat = saturation_adjustment(
+        T, q_v, p_full, _dt_safe, sharpness, q_c=q_c,
     )
+    q_v_avail = jnp.clip(q_v, 0.0, None)
+    condensation = jnp.minimum(condensation, q_v_avail / _dt_safe)
 
     dq_v_sat = -condensation
     dq_c_sat = condensation

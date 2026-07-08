@@ -203,6 +203,7 @@ def _read_turb_carry(phys_state, carry_field, ncol, nlev, scheme_config, dtype):
 from legoesm.atmosphere.physics._shared import (
     compute_heights_from_sigma as _compute_heights_from_sigma,
     compute_rho as _compute_rho,
+    exner_function as _exner_function,
 )
 
 
@@ -634,7 +635,9 @@ def _make_nonhydrostatic_turbulence(
         )
 
         p = pressure_from_eos(rho_total, theta_total)
-        exner = (p / constants.p_ref) ** constants.kappa
+        # Exner Pi = (p/p_ref)^kappa via the canonical helper (adds the 1 Pa
+        # AD-safe pressure floor; identical forward for any physical p).
+        exner = _exner_function(p)
         T = theta_total * exner
 
         nlev = height_coord.n_levels

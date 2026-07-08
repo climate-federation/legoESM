@@ -86,13 +86,20 @@ def _configure_jax_cpu(precision: str) -> None:
     if precision == "float64":
         os.environ["JAX_ENABLE_X64"] = "1"
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-    # Threads per rank = SLURM cpus-per-task (cpu-bind confines them to THIS
-    # rank's cores).  ==1 (the default packing, one rank per core) => force
+    # Threads per rank = cpus-per-task (cpu-bind confines them to THIS rank's
+    # cores).  ==1 (the default packing, one rank per core) => force
     # single-threaded Eigen so packed ranks never oversubscribe.  >1 (hybrid:
     # fewer ranks x more cores/rank) => let Eigen multi-thread so each rank uses
     # its allocated cores -- fewer ranks means fewer halo messages, the codex
-    # MPI-improve lever, without idling cores.  Honors an explicit OMP override.
-    n_thr = int(os.environ.get("SLURM_CPUS_PER_TASK", "1") or "1")
+    # MPI-improve lever, without idling cores.
+    #
+    # SLURM sets SLURM_CPUS_PER_TASK; PBS/PALS (Derecho route-B) does NOT — it
+    # exports the per-rank thread count as OMP_NUM_THREADS (see
+    # cube_scaling_cpu_routeb.sh).  Fall back to it (matching write_result_json's
+    # n_cores accounting) so the cube route-B lane does not silently single-
+    # thread XLA while the JSON reports a full-node core count.
+    n_thr = int(os.environ.get("SLURM_CPUS_PER_TASK")
+                or os.environ.get("OMP_NUM_THREADS") or "1")
     for _v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
         os.environ.setdefault(_v, str(n_thr))
     if n_thr <= 1:
@@ -144,13 +151,48 @@ def _configure_jax_gpu(precision: str) -> None:
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 
+def _launcher_world_size() -> int:
+    """World size the MPI/SLURM/PALS launcher env reports (1 = no launcher)."""
+    for var in ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "PALS_LOCAL_SIZE",
+                "SLURM_NTASKS"):
+        val = os.environ.get(var)
+        if val and val.isdigit():
+            return int(val)
+    return 1
+
+
+def _under_mpi_launcher() -> bool:
+    """True when an MPI launcher started this process.
+
+    Size vars alone under-detect Cray PALS (PALS_LOCAL_SIZE is per-node;
+    a job can expose only per-rank ids) — so the PRESENCE of a per-rank id
+    counts as launcher evidence too (codex round-2).
+    """
+    if _launcher_world_size() > 1:
+        return True
+    return any(
+        v in os.environ
+        for v in ("PALS_RANKID", "PMI_RANK", "OMPI_COMM_WORLD_RANK")
+    )
+
+
 def _init_mpi() -> tuple[int, int]:
     """Initialize MPI and return (rank, n_ranks)."""
     try:
         from mpi4py import MPI
         comm = MPI.COMM_WORLD
         return comm.Get_rank(), comm.Get_size()
-    except ImportError:
+    except (ImportError, RuntimeError) as e:
+        # RuntimeError: mpi4py installed but no loadable libmpi (common in
+        # a GPU-only venv). A single-process run must not require MPI —
+        # BUT under a real MPI launcher a broken mpi4py must fail LOUDLY
+        # here, or every rank silently runs duplicated serial work
+        # reporting n_ranks=1 (codex finding).
+        if _under_mpi_launcher():
+            raise RuntimeError(
+                f"MPI launcher detected (world size "
+                f"{_launcher_world_size()}) but mpi4py is unusable: {e}"
+            ) from e
         return 0, 1
 
 
@@ -1051,7 +1093,8 @@ def run_single_benchmark(
         if _MPI.COMM_WORLD.Get_size() > 1:
             jax.block_until_ready(jax.tree.leaves(state))
             _MPI.COMM_WORLD.Barrier()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # broken/absent mpi4py must not break a single-process run
         pass
 
     t0 = time.perf_counter()
@@ -1063,7 +1106,8 @@ def run_single_benchmark(
         from mpi4py import MPI as _MPI
         if _MPI.COMM_WORLD.Get_size() > 1:
             _MPI.COMM_WORLD.Barrier()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # broken/absent mpi4py must not break a single-process run
         pass
 
     t1 = time.perf_counter()
@@ -1216,7 +1260,14 @@ def write_result_json(
     # Record the hybrid layout so scaling can be plotted vs CORES, not ranks:
     # a hybrid 8r x 4c run and a packed 32r x 1c run both report n_ranks but use
     # 32 vs 128 cores. cpus_per_task * n_ranks = the true resource count.
-    _cpt = int(os.environ.get("SLURM_CPUS_PER_TASK", "1") or "1")
+    # cpus_per_task: SLURM sets SLURM_CPUS_PER_TASK, but on PBS/PALS (Derecho)
+    # that is absent — fall back to the per-rank thread pool the launcher
+    # bound (OMP_NUM_THREADS), so n_cores reflects the true full-node
+    # resource, not 1 (#764: else n_resource / the CPU resource axis is
+    # wrong for the route-B cube lane on PBS).
+    _cpt = int(os.environ.get("SLURM_CPUS_PER_TASK")
+               or os.environ.get("OMP_NUM_THREADS")
+               or "1")
     payload["cpus_per_task"] = _cpt
     payload["n_cores"] = result.n_ranks * _cpt
     # Record conservation mode so a LEGOESM_NO_MASS_FIX ablation never dedups
@@ -1416,14 +1467,21 @@ def main() -> int:
             return 2
         import jax as _jax
         import os as _os
-        # Launcher-agnostic process count: SLURM (srun) or OpenMPI
-        # (mpirun) — gating on SLURM_NTASKS alone would silently skip
-        # initialize() under mpirun and leave N independent local
-        # meshes all reporting n_ranks=N.
-        _nproc = int(_os.environ.get(
-            "SLURM_NTASKS", _os.environ.get("OMPI_COMM_WORLD_SIZE", "1")))
+        # Launcher-agnostic process count via the canonical helper, which
+        # covers OpenMPI / PMI / Cray PALS / SLURM (#764: the prior inline
+        # subset omitted PALS_LOCAL_SIZE, so a Derecho mpiexec route-B
+        # launch skipped initialize() and each rank ran an independent np1
+        # mesh — caught loudly by the consistency gate below, but the sweep
+        # never federated).
+        _nproc = _launcher_world_size()
         if _nproc > 1:
-            _jax.distributed.initialize()
+            # PBS/PALS has no bare-initialize auto-detection; the helper
+            # falls back to the mpi4py bootstrap (plain MPI, mpi4jax
+            # never armed on the --cs-spmd path).
+            from legoesm.parallel.early_init import (
+                init_jax_distributed_with_fallback,
+            )
+            init_jax_distributed_with_fallback()
 
     # --- GPU backend assertion (DEFERRED past --cs-spmd init) ---
     # Now safe to touch the backend: jax.distributed.initialize() (if any) has

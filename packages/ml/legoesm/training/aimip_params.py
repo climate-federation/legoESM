@@ -558,6 +558,27 @@ def _canonical_scheme_defaults() -> dict[str, float]:
 # Spectral-PE physics builder for AIMIP classical
 # ----------------------------------------------------------------------
 
+def spatial_baselines_from_params(d: dict, radiation: str) -> dict:
+    """Map trained-scalar keys onto the spatial-surface FIELD names.
+
+    ``AIMIPSpatialSurfaceParams.evaluate(baselines=...)`` expects the field
+    names (``Cd_neutral``, ``Ch_neutral``, ``z0``, ``sfc_emissivity``,
+    ``sfc_albedo``); the trained scalars live under ``surface_*`` and the
+    radiation-scheme-specific ``{rrtmgp,gray}_sfc_*`` keys. The values are the
+    sigmoid-bounded TRACED leaves, so the scalar knobs receive gradient through
+    the spatial fields — and, because ocean columns fall back to the baseline,
+    they are the only trainable ocean-surface levers.
+    """
+    rad = "rrtmgp" if radiation == "rrtmgp" else "gray"
+    return {
+        "Cd_neutral": d["surface_Cd_neutral"],
+        "Ch_neutral": d["surface_Ch_neutral"],
+        "z0": d["surface_z0"],
+        "sfc_emissivity": d[f"{rad}_sfc_emissivity"],
+        "sfc_albedo": d[f"{rad}_sfc_albedo"],
+    }
+
+
 def make_aimip_classical_spectral_physics(
     params: AIMIPClassicalParams,
     grid,
@@ -635,7 +656,14 @@ def make_aimip_classical_spectral_physics(
     # short-circuits to False, preserving the global-scalar path.
     spatial_fields_col: dict[str, jax.Array] = {}
     if getattr(params, "spatial_surface", None) is not None and land_mask is not None:
-        baselines = params.as_dict()
+        # Alias-map the trained scalar keys onto the SPATIAL FIELD names
+        # (codex review): ``evaluate`` looks up ``Cd_neutral``/``sfc_albedo``
+        # etc. while ``as_dict`` carries ``surface_Cd_neutral`` /
+        # ``{rrtmgp,gray}_sfc_albedo``. Passing the raw dict left every
+        # baseline at the STATIC f_0 -> the trained scalars were DEAD under
+        # ``spatial_surface=True`` and (since ocean columns fall back to the
+        # baseline) the ocean surface exchange/albedo had NO trainable lever.
+        baselines = spatial_baselines_from_params(params.as_dict(), radiation)
         fields_2d = params.spatial_surface.evaluate(
             grid, land_mask=land_mask, baselines=baselines,
         )
@@ -851,11 +879,20 @@ def make_aimip_classical_spectral_physics(
         sfc_emissivity_override=_sfc_emissivity_override,
     )
 
-    def non_rad_fn(state, grid_, sigma_coord):
-        result = non_rad_raw(state, grid_, sigma_coord)
+    def non_rad_fn(state, grid_, sigma_coord, phys_state=None, forcing=None):
+        # ``phys_state`` carries the prescribed-SST anchor for the
+        # surface-flux / turbulence scheme via ``surface_T_sfc_override``
+        # (the AMIP-inference path threads a per-month ERA5 SST here);
+        # ``forcing`` is forwarded for any non-rad scheme that consumes it.
+        # Both default ``None`` -> the free-running training/eval path
+        # (``spectral_rollout`` calls ``non_rad_fn(state, grid, sigma)``),
+        # which is byte-for-byte unchanged.
+        result = non_rad_raw(
+            state, grid_, sigma_coord, phys_state=phys_state, forcing=forcing,
+        )
         return result[0] if isinstance(result, tuple) else result
 
-    def rad_fn(state, grid_, sigma_coord, *, sim_time_seconds=0.0):
+    def rad_fn(state, grid_, sigma_coord, *, sim_time_seconds=0.0, forcing=None):
         # ``make_radiation_physics`` returns the per-module physics_fn
         # with signature
         # ``(state, grid, sigma_coord, grid_fields=None, sim_time_seconds=0.0)``
@@ -867,9 +904,17 @@ def make_aimip_classical_spectral_physics(
         # synthesise a zero-tendency tracer dict here when the input
         # state carries tracers, keeping the rad and non-rad
         # tendency pytrees structurally identical.
-        rad_out = rad_only_raw(
-            state, grid_, sigma_coord, sim_time_seconds=sim_time_seconds,
-        )
+        if forcing is not None:
+            # AMIP-inference path: prescribed SST + calendar arrive via the
+            # per-step TRACED forcing dict (forcing['T_sfc'/'day_of_year'/
+            # 'seconds_of_day']) so the JIT'd dycore step never retraces when
+            # the monthly SST / day-of-year changes (radiation/integration.py
+            # documents this as "the AMIP path").
+            rad_out = rad_only_raw(state, grid_, sigma_coord, forcing=forcing)
+        else:
+            rad_out = rad_only_raw(
+                state, grid_, sigma_coord, sim_time_seconds=sim_time_seconds,
+            )
         if rad_out.tracers is None and state.tracers is not None:
             zero_tracers = {}
             for k, f in state.tracers.items():

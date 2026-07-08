@@ -45,7 +45,21 @@ def saturation_vapor_pressure(T: jax.Array) -> jax.Array:
     jax.Array
         Saturation vapor pressure [Pa].
     """
-    T_c = T - constants.T_freeze
+    # AD-safe temperature floor.  The Tetens denominator is
+    # ``T_c + 243.5 = T - 29.65 K``; as ``T → 29.65 K`` from below the
+    # exponent → +∞ and ``exp`` OVERFLOWS to inf.  The forward is often
+    # masked downstream (the smooth cap in ``saturation_mixing_ratio``
+    # clamps q_sat to 1), but the REVERSE-mode gradient then hits
+    # ``0 × inf`` and the whole adjoint goes non-finite — this silently
+    # NaN'd carry-based differentiable training whenever a single
+    # pathological surface/atmos cell dipped toward the singularity
+    # (AIMIP, job 8533906: ``inf encountered in exp``).  Clip to 150 K
+    # (far below any real atmospheric/surface temperature, so the forward
+    # is bit-identical everywhere it matters; the clip's zero gradient
+    # below the floor × the finite e_sat'(150 K) gives a finite gradient
+    # there instead of inf).  satcurve-ok: identical Tetens curve for
+    # T ≥ 150 K; this is an AD floor, not a new saturation formula.
+    T_c = jnp.clip(T, 150.0, None) - constants.T_freeze
     return 611.2 * jnp.exp(17.67 * T_c / (T_c + 243.5))
 
 
@@ -272,7 +286,17 @@ def saturation_mixing_ratio(
     jax.Array
         Saturation mixing ratio [kg/kg].
     """
-    e_sat = saturation_vapor_pressure(T)
+    return _mixing_ratio_from_esat(saturation_vapor_pressure(T), p)
+
+
+def _mixing_ratio_from_esat(e_sat: jax.Array, p: jax.Array) -> jax.Array:
+    """Saturation mixing ratio from a saturation vapour pressure [Pa].
+
+    The shared (differentiable, smooth-floored/capped) ``e_sat -> q_sat``
+    conversion used by every saturation curve (Tetens, Goff), so the curve
+    is the ONLY thing that varies between conventions — no re-derived
+    conversion numerics (#762).
+    """
     # Smooth floor on denominator: preserves gradients near e_sat ≈ p
     # instead of a hard clip that creates a zero-gradient plateau.
     # softplus(x - 1) + 1 ≈ x for x >> 1, ≈ 1 for x << 1, smooth at x = 1.
@@ -282,6 +306,20 @@ def saturation_mixing_ratio(
     # while allowing gradients to flow (unlike hard jnp.minimum).
     # Uses LogSumExp smooth-min: 1 - softplus(β(1 - x))/β with β = 20.
     return 1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat)) / 20.0
+
+
+def saturation_mixing_ratio_goff(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Saturation mixing ratio from the WMO Goff (1957) curve [kg/kg].
+
+    The NEMO/AeroBulk air-sea convention for the surface saturation
+    humidity (issue #762): identical smooth ``e_sat -> q_sat`` conversion
+    as :func:`saturation_mixing_ratio`, but over the Goff vapour-pressure
+    curve instead of Tetens — ~0.5-1 % on Δq (hence LH) at warm SST.
+    """
+    return _mixing_ratio_from_esat(saturation_vapor_pressure_goff(T), p)
 
 
 def saturation_mixing_ratio_ice(
@@ -444,11 +482,16 @@ def specific_humidity_to_mixing_ratio(
 ) -> jax.Array:
     """Convert specific humidity to water-vapor mixing ratio.
 
-    ``q`` is clipped below one so malformed input cannot divide by zero;
-    valid atmospheric values are unchanged.
+    ``q`` is clipped below one AND the denominator is explicitly floored so
+    malformed input cannot divide by zero; valid atmospheric values are
+    unchanged.  The explicit ``jnp.maximum(1 - q, floor)`` (matching
+    :func:`specific_humidity_tendency_to_mixing_ratio_tendency`) is required for
+    float32 inputs, where ``1 - 1e-12`` rounds to exactly ``1.0`` so the clip
+    alone would still divide by zero (→ ``inf``) at ``q ≥ 1``.
     """
     q = jnp.clip(jnp.asarray(specific_humidity), 0.0, 1.0 - denominator_floor)
-    return q / (1.0 - q)
+    denom = jnp.maximum(1.0 - q, denominator_floor)
+    return q / denom
 
 
 def specific_humidity_tendency_to_mixing_ratio_tendency(
@@ -503,3 +546,28 @@ def relative_humidity(
     """
     e = p * mixing_ratio / (constants.epsilon + mixing_ratio)
     return e / saturation_vapor_pressure(T)
+
+
+def latent_heat_vaporization_sst(T_sfc_K: jax.Array) -> jax.Array:
+    """SST-dependent latent heat of vaporization [J/kg].
+
+    The NEMO/AeroBulk air-sea convention (sbc_phy ``L_vap``, also
+    COARE/Fairall): ``L = L_v - L_v_sst_slope (T - T_freeze)``; equals
+    ``constants.L_v`` at 0 degC by construction.  Up to ~3 % smaller than
+    the constant at warm SST (issue #762).  Dtype-preserving — the OMIP
+    NEMO-parity path wraps this with its float64 pin.
+    """
+    return constants.L_v - constants.L_v_sst_slope * (
+        T_sfc_K - constants.T_freeze
+    )
+
+
+def moist_air_cp(q_air: jax.Array) -> jax.Array:
+    """Moist-air specific heat [J/(kg K)], NEMO/AeroBulk convention.
+
+    ``cp = rCp_dry + rCp_vap q`` (NEMO sbc_phy ``cp_air``) — the
+    convention set of the transcribed bulk schemes, NOT the
+    mixture-weighted ``c_pd (1-q) + c_pv q`` (issue #762).  ~1-2 % above
+    dry ``c_pd`` in the humid tropics.  Dtype-preserving.
+    """
+    return constants.c_p_dry_air_nemo + constants.c_p_vapor_nemo * q_air

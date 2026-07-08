@@ -51,6 +51,44 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.ocean.physics.ice_shelf import freezing_point_C
 
+__physics_contract__ = {
+    "summary": (
+        "Jenkins (1991) three-equation ice-shelf basal-melt rate in the "
+        "small-thermal-driving limit: m = c_p*Gamma_T*(T_w - T_f(S_w, p_b))/L_f "
+        "from the top-cell temperature/salinity and the ice-base pressure, plus "
+        "the freshwater mass flux it injects."
+    ),
+    "inputs": {
+        "T_w_C": "degC", "S_w_psu": "psu", "p_b_dbar": "dbar",
+        "cfg.gamma_T": "m/s",
+    },
+    "outputs": {
+        "m": "m/s (freshwater-equivalent melt rate)",
+        "freshwater_flux": "kg/m^2/s",
+    },
+    "sign_convention": (
+        "Thermal driving = T_w - T_f(S_w, p_b); m > 0 = MELT (freshwater mass "
+        "INTO the top ocean cell, freshwater_flux = rho_fw*m > 0), m < 0 = "
+        "freezing (mass out); a boundary freshwater source with an implied "
+        "latent-heat sink, not interior-conservative; freezing-point slope "
+        "a < 0 (saltier -> lower T_f), pressure coeff c < 0 (deeper -> lower "
+        "T_f); depths positive downward."
+    ),
+    # Boundary freshwater source (+ implied latent-heat sink); not conservative.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Jenkins, A. (1991), JGR 96, 20671-20677; Asay-Davis et al. (2016) "
+        "ISOMIP+, GMD 9, 2471-2497"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_phase_d_experiments.py — warm cavity water "
+        "(T_w > T_f) gives positive melt scaling with thermal driving; T_w = "
+        "T_f gives zero melt; deeper (higher p_b) lowers T_f and raises the "
+        "thermal driving."
+    ),
+}
+
 
 # --- Thermodynamic constants ---
 # Latent heat of fusion: use the canonical substrate constant (redundancy audit)

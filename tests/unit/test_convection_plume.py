@@ -851,3 +851,187 @@ def test_plume_grad_through_epsilon_at_strong_entrainment():
         "below the discrimination threshold.  The buggy explicit-Euler "
         "entrainment can produce a near-zero gradient when eps·dz > 1."
     )
+
+
+# ---------------------------------------------------------------------------
+# Cloud-base gate: LEVEL-INDEX sharpness, not the Kelvin buoyancy sharpness
+# ---------------------------------------------------------------------------
+
+def test_plume_sub_cloud_gate_is_level_index_sharp():
+    """Fix 2026-07 (plume_core [medium/units]): the cloud-base gate
+    ``sigmoid(k · (k_rev − k_base_rev))`` used to reuse
+    ``buoyancy_sharpness`` (documented [1/K], default 0.5) as a
+    [1/level] sharpness — the level-space gate had a ~9-level
+    transition and reported 27-38 % of the cloud-base mass flux M_b
+    BELOW the cloud base, for every caller scheme.
+
+    With the dedicated ``above_base_sharpness`` (default 4.0 [1/level]),
+    the reported mass flux one level below the base must be < 5 % of the
+    value one level above the base, and two levels below < 1 %.
+    ``filter_negative_buoyancy=False`` isolates the gate from the
+    buoyancy taper so the ratio measures the gate itself.
+    """
+    ncol, nlev = 1, 16
+    T_env, q_v_env, p_full, p_half, z_full = _synthetic_column(ncol, nlev)
+    T_base = T_env[:, -1]
+    q_base = q_v_env[:, -1]
+    # Cloud base 4 levels above the surface (surface-last index).
+    k_base = float(nlev) - 4.0
+    k_base_synthetic = jnp.full((ncol,), k_base)
+
+    eps = jnp.full((ncol, nlev), 5.0e-4)
+    dlt = jnp.full((ncol, nlev), 5.0e-4)
+    M_b = jnp.full((ncol,), 0.05)
+
+    plume = P.entraining_detraining_plume(
+        T_env, q_v_env, p_full, p_half, z_full,
+        T_base, q_base, k_base_synthetic, eps, dlt, M_b,
+        filter_negative_buoyancy=False,
+    )
+    one_above = float(plume.M_u[0, int(k_base) - 1])
+    one_below = float(plume.M_u[0, int(k_base) + 1])
+    two_below = float(plume.M_u[0, int(k_base) + 2])
+
+    assert one_above > 1e-4, (
+        f"Fixture broken — no mass flux above cloud base ({one_above:.3e})"
+    )
+    # Leaky [1/K] gate gave one_below/one_above = sigmoid(-0.5)/sigmoid(0.5)
+    # = 0.61; the [1/level] gate gives sigmoid(-4)/sigmoid(4) ~ 0.018.
+    assert one_below < 0.05 * one_above, (
+        f"Sub-cloud leak one level below base: {one_below:.3e} vs "
+        f"{one_above:.3e} one level above — the cloud-base gate is "
+        "too broad (buoyancy_sharpness [1/K] reused as [1/level]?)"
+    )
+    assert two_below < 0.01 * one_above, (
+        f"Sub-cloud leak two levels below base: {two_below:.3e} vs "
+        f"{one_above:.3e}"
+    )
+
+
+def test_plume_above_base_sharpness_kwarg_wired():
+    """The gate width is controlled by ``above_base_sharpness``, not by
+    ``buoyancy_sharpness`` — varying the former changes the sub-cloud
+    profile; the (legacy leak) value 0.5 reproduces a broad gate."""
+    ncol, nlev = 1, 16
+    T_env, q_v_env, p_full, p_half, z_full = _synthetic_column(ncol, nlev)
+    T_base = T_env[:, -1]
+    q_base = q_v_env[:, -1]
+    k_base = float(nlev) - 4.0
+    k_base_synthetic = jnp.full((ncol,), k_base)
+    eps = jnp.full((ncol, nlev), 5.0e-4)
+    dlt = jnp.full((ncol, nlev), 5.0e-4)
+    M_b = jnp.full((ncol,), 0.05)
+
+    def sub_cloud(above_base_sharpness):
+        plume = P.entraining_detraining_plume(
+            T_env, q_v_env, p_full, p_half, z_full,
+            T_base, q_base, k_base_synthetic, eps, dlt, M_b,
+            above_base_sharpness=above_base_sharpness,
+            filter_negative_buoyancy=False,
+        )
+        return float(plume.M_u[0, int(k_base) + 1])
+
+    broad = sub_cloud(0.5)   # the legacy [1/K]-valued gate
+    sharp = sub_cloud(4.0)   # the [1/level] default
+    assert broad > 5.0 * sharp, (
+        f"above_base_sharpness not wired: broad={broad:.3e}, "
+        f"sharp={sharp:.3e}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Virtual-temperature buoyancy in compute_lfc_lnb / compute_cin
+# ---------------------------------------------------------------------------
+
+def test_compute_lfc_lnb_and_cin_dry_path_unchanged_at_zero_humidity():
+    """Passing ``q_v_env = q_v_parcel = 0`` must reproduce the dry-T
+    path exactly (``T_v(T, 0) = T``)."""
+    T_env, q_v_env, p_full, p_half, z_full = _synthetic_column()
+    T_ma = compute_moist_adiabat(T_env[:, -1], p_full)
+    lcl = P.compute_lcl(T_env[:, -1], q_v_env[:, -1], p_full[:, -1], p_full)
+    zeros = jnp.zeros_like(T_env)
+
+    k_lfc_dry, k_lnb_dry = P.compute_lfc_lnb(T_env, T_ma, sharpness=1.0)
+    k_lfc_v, k_lnb_v = P.compute_lfc_lnb(
+        T_env, T_ma, sharpness=1.0, q_v_env=zeros, q_v_parcel=zeros,
+    )
+    np.testing.assert_allclose(np.asarray(k_lfc_dry), np.asarray(k_lfc_v))
+    np.testing.assert_allclose(np.asarray(k_lnb_dry), np.asarray(k_lnb_v))
+
+    cin_dry = P.compute_cin(
+        T_env, T_ma, p_full, p_half, lcl.k_lcl_smooth, k_lfc_dry,
+    )
+    cin_v = P.compute_cin(
+        T_env, T_ma, p_full, p_half, lcl.k_lcl_smooth, k_lfc_v,
+        q_v_env=zeros, q_v_parcel=zeros,
+    )
+    np.testing.assert_allclose(np.asarray(cin_dry), np.asarray(cin_v))
+
+
+def test_compute_cin_virtual_temperature_reduces_inhibition_for_moist_parcel():
+    """A moist parcel in a dry environment is LIGHTER at equal dry T
+    (T_v_parcel > T_v_env), so the virtual-T CIN must be smaller than
+    the dry-T CIN — the sign of the virtual-T correction.
+
+    Uses the analytic CIN fixture (uniform T; 2 K env excess at levels
+    6-7 between LCL=8 and LFC=5) with a 10 g/kg parcel and a dry
+    environment: the T_v correction is ~1.8 K per level, comparable to
+    the 2 K deficit — exactly the regime the fix targets.
+    """
+    ncol, nlev = 1, 10
+    T_env = jnp.full((ncol, nlev), 280.0)
+    T_parcel = jnp.full((ncol, nlev), 280.0).at[:, 6:8].set(278.0)
+    p_half = jnp.broadcast_to(
+        jnp.linspace(1e4, 1e5, nlev + 1)[None, :], (ncol, nlev + 1),
+    )
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    k_lcl = jnp.array([8.0])
+    k_lfc = jnp.array([5.0])
+    q_env = jnp.zeros((ncol, nlev))
+    q_parcel = jnp.full((ncol, nlev), 10.0e-3)
+
+    cin_dry = P.compute_cin(
+        T_env, T_parcel, p_full, p_half, k_lcl, k_lfc,
+        indicator_sharpness=5.0,
+    )
+    cin_virtual = P.compute_cin(
+        T_env, T_parcel, p_full, p_half, k_lcl, k_lfc,
+        indicator_sharpness=5.0,
+        q_v_env=q_env, q_v_parcel=q_parcel,
+    )
+    assert float(cin_dry[0]) > 0.0
+    assert float(cin_virtual[0]) < float(cin_dry[0]), (
+        f"virtual-T CIN ({float(cin_virtual[0]):.3e}) should be smaller "
+        f"than dry-T CIN ({float(cin_dry[0]):.3e}) for a moist parcel in "
+        "a dry environment"
+    )
+    assert float(cin_virtual[0]) >= 0.0
+
+
+def test_compute_lfc_lnb_virtual_temperature_shifts_lfc_down_for_moist_parcel():
+    """With a capped column (env warmer than the parcel in a low layer),
+    parcel humidity adds ~0.6 K/(g/kg·0.1) of virtual buoyancy, eroding
+    the cap: the virtual-T LFC must sit at or BELOW (surface-last index
+    >=) the dry-T LFC, and strictly below when the cap deficit is
+    smaller than the virtual-T correction."""
+    ncol, nlev = 1, 12
+    # Parcel 1 K colder than env in levels 7-9 (a weak cap), 2 K warmer
+    # aloft (levels 0-6).
+    T_env = jnp.full((ncol, nlev), 280.0)
+    T_parcel = jnp.full((ncol, nlev), 282.0)
+    T_parcel = T_parcel.at[:, 7:10].set(279.0)   # weak low-level cap
+    q_env = jnp.zeros((ncol, nlev))
+    # 10 g/kg parcel: virtual-T boost ~ 280 * 0.608 * 0.01 ~ 1.7 K > 1 K cap.
+    q_parcel = jnp.full((ncol, nlev), 10.0e-3)
+
+    k_lfc_dry, _ = P.compute_lfc_lnb(T_env, T_parcel, sharpness=2.0)
+    k_lfc_v, _ = P.compute_lfc_lnb(
+        T_env, T_parcel, sharpness=2.0, q_v_env=q_env, q_v_parcel=q_parcel,
+    )
+    # Virtual buoyancy erodes the cap -> free convection starts lower
+    # (LARGER surface-last index).
+    assert float(k_lfc_v[0]) > float(k_lfc_dry[0]), (
+        f"virtual-T LFC (index {float(k_lfc_v[0]):.2f}) should sit below "
+        f"(index larger than) the dry-T LFC ({float(k_lfc_dry[0]):.2f}) "
+        "when parcel humidity erodes a weak cap"
+    )

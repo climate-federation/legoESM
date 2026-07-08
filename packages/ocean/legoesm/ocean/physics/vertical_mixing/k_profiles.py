@@ -38,6 +38,43 @@ from legoesm.ocean.physics.vertical_mixing._shared import (
     surface_buoyancy_flux,
 )
 
+__physics_contract__ = {
+    "summary": (
+        "Assemble the total vertical (K_v, A_v) at interior interfaces for the "
+        "implicit solver by SUMMING the active closures (vertical-mixing scheme "
+        "+ convection + internal-wave mixing), capped at KPP K_max; no tendency "
+        "is applied here."
+    ),
+    "inputs": {
+        "state.u": "m/s", "state.v": "m/s", "state.T": "degC", "state.S": "psu",
+        "surface_forcing.tau_x": "N/m^2", "surface_forcing.q_net": "W/m^2",
+    },
+    "outputs": {
+        "K_v": "m^2/s", "A_v": "m^2/s", "tke_new": "m^2/s^2",
+    },
+    "sign_convention": (
+        "K_v, A_v >= 0 at interior interfaces; combined by SUM across the active "
+        "closures then min-capped at KPP K_max (when KPP is active); zeroed at "
+        "non-wet (sub-seafloor) interfaces; z positive up. No flux is applied "
+        "here — the implicit solver applies the diffusion and closes the budget; "
+        "an unknown scheme raises ValueError."
+    ),
+    # Pure diffusivity/viscosity producer: nothing conserved here; the budget
+    # closes in the implicit diffusion solver.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Composition of Large-McWilliams-Doney (1994) KPP, Pacanowski-Philander "
+        "(1981), Gaspar (1990)/Burchard (2002) TKE and de Lavergne et al. (2020) "
+        "internal-wave mixing; budget closed by the implicit solver"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_vmix_k_profiles_direct.py — the summed profile "
+        "equals the explicit schemes' K_v/A_v; K/A zeroed at dry interfaces; "
+        "an unknown vertical_mixing scheme raises ValueError."
+    ),
+}
+
 
 def compute_vertical_K_profiles(
     state,
@@ -215,7 +252,7 @@ def compute_vertical_K_profiles(
                 "IWMConfig.tsdiff=True (differential T/S wave-driven "
                 "mixing) is not supported on the shared-K implicit tracer "
                 "solve; set tsdiff=False (the ORCA1 oracle value).")
-        K_iwm = _iwm_K_profile(
+        K_iwm = iwm_K_profile(
             state, z_coord, physics_config, iwm_cfg,
             eos_fn=eos_fn, iwm_fields=iwm_fields)
         K_v_total = K_v_total + K_iwm
@@ -604,7 +641,7 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
     return K, A
 
 
-def _iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
+def iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
                    eos_fn=None, iwm_fields=None):
     """Internal wave-driven diffusivity at interior interfaces (zdfiwm).
 

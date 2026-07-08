@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -120,6 +122,15 @@ class OMIPRunConfig(NamedTuple):
     # still disables it entirely).  Carried here so --params can reach
     # GMRediConfig / VisbeckConfig / TreguierConfig (#691/#724).
     gm_redi: GMRediConfig = _DEFAULT_BATHY_GM_REDI
+    # Lat-band SPMD (single-controller multi-GPU) for the lat-lon restoring
+    # lane: wraps the loop's dynamics step in ``make_sharded_ocean_step``
+    # (the #751/#758-validated lane-D step).  0 devices = all local.
+    enable_latlon_spmd: bool = False
+    spmd_n_devices: int = 0
+    # Route-B multicontroller (jax.distributed cross-process NCCL): promote the
+    # lat-band lane to span ALL global devices across processes (multi-node).
+    multicontroller: bool = False
+    coordinator: str | None = None
 
 
 def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> bool:
@@ -181,6 +192,10 @@ def build_config_from_args(args) -> OMIPRunConfig:
         seed=args.seed,
         vertical_mixing=build_vertical_mixing_config_from_args(args),
         precision=args.precision,
+        enable_latlon_spmd=getattr(args, "enable_latlon_spmd", False),
+        spmd_n_devices=getattr(args, "spmd_n_devices", 0),
+        multicontroller=getattr(args, "multicontroller", False),
+        coordinator=getattr(args, "coordinator", None),
     )
 
 
@@ -337,6 +352,17 @@ def parse_args(argv: list[str] | None = None):
                         "validated against each scheme's __param_spec__ bounds "
                         "and spliced into the nested *Config (here the vertical-"
                         "mixing configs, e.g. KPPConfig). (issue #691)")
+    p.add_argument("--surface-stability-scheme", default="dyer1974",
+                   choices=["dyer1974", "beljaars_holtslag1991",
+                            "grachev2007_sheba", "gryanik2020"],
+                   help="Stable-regime (zeta>0) MOST similarity functions for "
+                        "the air-sea (CouplerConfig, LY09 bulk) AND air-ice "
+                        "(SeaIceConfig) turbulent fluxes. 'dyer1974' (default) "
+                        "= historical -5*zeta, byte-identical; "
+                        "'grachev2007_sheba' = SHEBA Arctic stable functions "
+                        "(the sea-ice reference); 'gryanik2020' = modified "
+                        "SHEBA; 'beljaars_holtslag1991' avoids stable flux "
+                        "collapse. Unstable branch stays Businger-Dyer.")
     p.add_argument("--grid", type=str, default="all",
                    choices=GRID_TYPES + ["all"])
     p.add_argument("--resolution", type=str, default=None,
@@ -570,6 +596,43 @@ def parse_args(argv: list[str] | None = None):
                        "(see scripts/data/prepare_omip_forcing.py). Currently "
                        "supports only --grid latlon."
                    ))
+    p.add_argument("--enable-latlon-spmd", action="store_true", default=False,
+                   help=(
+                       "Run the lat-lon lane's dynamics step lat-band-SPMD "
+                       "across the local devices (make_sharded_ocean_step — "
+                       "the validated multi-GPU ocean lane). Supports the "
+                       "restoring lane AND the JRA55 block-scan lanes "
+                       "(forcing stacks are lat-band-sharded; the in-scan "
+                       "bulk fluxes stay shard-local). Single-controller "
+                       "only (one process; multi-node scaling lives in "
+                       "bench_ocean_latlon_spmd_scaling --multicontroller); "
+                       "requires --grid latlon and n_lat divisible by the "
+                       "device count. Unsupported: --jra55-sea-ice, the "
+                       "JRA55 single-step fallback."
+                   ))
+    p.add_argument("--spmd-n-devices", type=int, default=0,
+                   help=(
+                       "Device count for --enable-latlon-spmd "
+                       "(0 = all local devices)."
+                   ))
+    p.add_argument("--multicontroller", action="store_true", default=False,
+                   help=(
+                       "Promote --enable-latlon-spmd to ROUTE-B "
+                       "(jax.distributed, cross-process NCCL): the lat-band "
+                       "ocean mesh spans ALL global devices, one band per "
+                       "device across every process — the multi-node OMIP "
+                       "lane. Single-controller (one process, local devices) "
+                       "is the default when this is off. Requires --grid "
+                       "latlon. Launch under SLURM/mpiexec with one process "
+                       "per GPU; only rank 0 writes restarts/output."
+                   ))
+    p.add_argument("--coordinator", type=str, default=None,
+                   help=(
+                       "jax.distributed coordinator address (host:port) for "
+                       "--multicontroller under mpiexec (Open MPI OMPI_* / "
+                       "Cray PALS PMI_* launcher env). Omit under SLURM/OMPI "
+                       "for auto-detection."
+                   ))
     p.add_argument("--jra55-cache", type=str, default=None,
                    help=(
                        "Path to JRA55-do Zarr cache. Required when "
@@ -691,6 +754,9 @@ def _parse_resolution(grid_type: str, resolution: str) -> dict:
         meshes = {
             "eorca1": ("data/grids/eORCA1.2_mesh_mask.nc", "n_lon-1-i"),
             "eorca025": ("data/grids/eORCA025_mesh_mask.nc", "(n_lon-i)%n_lon"),
+            # eORCA05 (1/2 deg) is 2x-decimated from eORCA025 (de-haloed -> same
+            # (n_lon-i)%n_lon fold convention, fold-verified at build time).
+            "eorca05": ("data/grids/eORCA05_mesh_mask.nc", "(n_lon-i)%n_lon"),
         }
         key = resolution.lower()
         if key not in meshes:
@@ -1457,6 +1523,7 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         z_ref=10.0,
         z_t_atm=2.0,
         z_q_atm=2.0,
+        stability_scheme=args.surface_stability_scheme,
     )
 
     state: dict = {
@@ -1546,7 +1613,10 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         from legoesm.ice.state import SeaIceState
         state["enable_sea_ice"] = True
         state["enable_freeze_cap"] = False
-        state["ice_config"] = SeaIceConfig()  # slab: dynamics="none", n_cat=1
+        # Slab ice: dynamics="none", n_cat=1.  stability_scheme only takes
+        # effect if bulk_scheme is switched to a MOST-family scheme.
+        state["ice_config"] = SeaIceConfig(
+            stability_scheme=args.surface_stability_scheme)
         # Ice state lives on the full ocean-surface 2-D grid: lat_2d/lon_2d are
         # broadcast factors ((n_lat,1) x (1,n_lon) for lat-lon; (nCells,) for
         # MPAS), so the surface shape is their broadcast — matching SST
@@ -2086,7 +2156,7 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
     return raw_stack, runoff_stack, record_meta
 
 
-def _build_jra55_block_fn(model, jra55_state, dt):
+def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
     """Return a JIT-compiled block function that runs N steps via lax.scan.
 
     Captures everything that's static across the block (sponge, SSS
@@ -2143,6 +2213,18 @@ def _build_jra55_block_fn(model, jra55_state, dt):
     # the split-explicit solver doesn't prevent baroclinic blowup.
     _maxvel_3d = model.config.barotropic.maxvel_barotropic
     enable_maxvel = _maxvel_3d > 0.0
+
+    # Lat-band SPMD (--enable-latlon-spmd): the scan body's dynamics step
+    # runs through the sharded wrapper (same forcing kwargs as _step_impl;
+    # the wrapper's cache/arm-restore Python runs ONCE at block trace).
+    # Sea ice is refused upstream (the ice tile is not SPMD-audited yet).
+    if spmd_step is not None and enable_sea_ice:
+        raise ValueError(
+            "spmd_step + prognostic sea ice is unsupported "
+            "(run_omip_single refuses --jra55-sea-ice with "
+            "--enable-latlon-spmd).")
+    _dyn_step = (spmd_step if spmd_step is not None
+                 else lambda st, d, **kw: model._step_impl(st, d, **kw))
 
     @jax.jit
     def block_fn(state, atm_stack, runoff_stack, block_start_step,
@@ -2219,7 +2301,7 @@ def _build_jra55_block_fn(model, jra55_state, dt):
             else:
                 sponge_step = sponge
 
-            new_state = model._step_impl(
+            new_state = _dyn_step(
                 state_in, dt,
                 freshwater=fw, surface_forcing=sf, sponge=sponge_step,
             )
@@ -2274,7 +2356,7 @@ def _build_jra55_block_fn(model, jra55_state, dt):
     return block_fn
 
 
-def _build_jra55_block_fn_interp(model, jra55_state, dt):
+def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
     """JIT-compiled block function with GPU-side forcing interpolation.
 
     Like ``_build_jra55_block_fn``, but instead of receiving pre-
@@ -2331,6 +2413,15 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
 
     _maxvel_3d = model.config.barotropic.maxvel_barotropic
     enable_maxvel = _maxvel_3d > 0.0
+
+    # Lat-band SPMD: see _build_jra55_block_fn.
+    if spmd_step is not None and enable_sea_ice:
+        raise ValueError(
+            "spmd_step + prognostic sea ice is unsupported "
+            "(run_omip_single refuses --jra55-sea-ice with "
+            "--enable-latlon-spmd).")
+    _dyn_step = (spmd_step if spmd_step is not None
+                 else lambda st, d, **kw: model._step_impl(st, d, **kw))
 
     lat_2d = jra55_state["lat_2d"]
     lon_2d = jra55_state["lon_2d"]
@@ -2477,7 +2568,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
 
                 sponge_k = (sponge._replace(gamma=sponge.gamma * ramp)
                             if enable_sponge else None)
-                new_state = model._step_impl(
+                new_state = _dyn_step(
                     state_in, dt, freshwater=fw,
                     surface_forcing=sf, sponge=sponge_k,
                 )
@@ -2680,9 +2771,48 @@ def _check_finite(state, grid_type):
 # ===========================================================================
 
 
+# Single in-flight background restart writer (see _save_restart).  The lock
+# protects the dict slots (two savers in one process must serialize); the
+# writer thread itself only takes the lock to store its error.
+_RESTART_WRITER: dict = {
+    "thread": None, "error": None, "lock": threading.Lock(),
+}
+
+
+def _join_restart_writer():
+    """Block until the in-flight background restart write (if any) completes.
+
+    RE-RAISES the writer's exception (ENOSPC / NFS error / failed
+    ``os.replace``) into the caller — an async checkpoint failure must not
+    be silently lost (codex HIGH).  Used by consumers that must READ the
+    restart file right after :func:`_save_restart` returns (snapshot
+    plotter, tests) and by :func:`_save_restart` itself before each new
+    write."""
+    with _RESTART_WRITER["lock"]:
+        t = _RESTART_WRITER["thread"]
+    if t is not None:
+        t.join()
+    with _RESTART_WRITER["lock"]:
+        err = _RESTART_WRITER["error"]
+        _RESTART_WRITER["error"] = None
+    if err is not None:
+        raise RuntimeError(
+            "background restart write failed (the checkpoint file was NOT "
+            "produced; the atomic .tmp+rename guarantees no truncated .npz "
+            "exists)") from err
+
+
 def _save_restart(state, day, step, output_dir, ice_state=None,
                   grid_type="latlon"):
     """Save a state restart in the global-overturning npz format.
+
+    The write is ASYNCHRONOUS (background thread, atomic tmp+rename) —
+    the returned path may not exist for a few seconds; the previous
+    write is always joined (errors re-raised) before a new one starts,
+    and an ordinary interpreter exit joins the final write.  Call from
+    ONE thread only (the host step loop): consecutive saves serialize
+    through the module-level writer slot, concurrent savers are not
+    supported.
 
     Mirrors ``scripts/run/global_overturning/run_global_overturning_*``
     so the same plotting helpers consume both runs without
@@ -2717,6 +2847,14 @@ def _save_restart(state, day, step, output_dir, ice_state=None,
             f"expected one of {GRID_TYPES}."
         )
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Join the PREVIOUS in-flight write BEFORE pulling the new payload to
+    # host: peak host memory stays ONE payload (pulling first would hold
+    # payload A in the still-running writer plus payload B here — an OOM
+    # exactly when the checkpoint cadence catches up to the compression
+    # time, codex HIGH), and a FAILED previous write re-raises into the
+    # loop here (parity with the old synchronous error behavior, one
+    # checkpoint late).
+    _join_restart_writer()
     payload = {
         "step": int(step),
         "time_days": float(day),
@@ -2734,7 +2872,35 @@ def _save_restart(state, day, step, output_dir, ice_state=None,
                 continue
             payload[f"ice_{f}"] = np.asarray(obj.data)
     fname = output_dir / f"restart_day{int(round(day)):06d}.npz"
-    np.savez_compressed(fname, **payload)
+    # Async + atomic write.  The device->host pulls above are synchronous
+    # (they snapshot the state), but the gzip+disk write (seconds to
+    # minutes at eORCA-class sizes) runs on a background thread so the
+    # step loop resumes immediately.  Atomic: write ``<name>.npz.tmp``
+    # then ``os.replace`` — a kill mid-write can never leave a truncated
+    # file that resume/chain launchers (glob ``restart_day*.npz``) would
+    # mistake for a valid restart.  Non-daemon thread: an ORDINARY
+    # interpreter exit (incl. the wallclock sys.exit(0) path) joins the
+    # final write; a SIGKILL/scheduler hard kill can still lose the
+    # in-flight checkpoint, leaving only the harmless ``.tmp``.
+
+    def _write(fname=fname, payload=payload):
+        try:
+            tmp = fname.with_name(fname.name + ".tmp")
+            # Pass an OPEN file handle: np.savez_compressed APPENDS ".npz"
+            # to a path that does not already end in it, which would write
+            # "<name>.npz.tmp.npz" and break the atomic rename.
+            with open(tmp, "wb") as fh:
+                np.savez_compressed(fh, **payload)
+            os.replace(tmp, fname)
+        except BaseException as e:  # surfaced via _join_restart_writer
+            with _RESTART_WRITER["lock"]:
+                _RESTART_WRITER["error"] = e
+
+    with _RESTART_WRITER["lock"]:
+        t = threading.Thread(target=_write, name="omip-restart-writer",
+                             daemon=False)
+        t.start()
+        _RESTART_WRITER["thread"] = t
     return fname
 
 
@@ -2843,13 +3009,19 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                    restart_buffer_seconds: float = 600.0,
                    start_step=0,
                    nudge_woa_tau=0.0, T_woa_3d=None, S_woa_3d=None,
-                   snapshot_fn=None):
+                   snapshot_fn=None, spmd_step=None, spmd_gather=None,
+                   spmd_shard_stack=None):
     """Run time loop with diagnostics.
 
     Two forcing paths, mutually exclusive:
 
     * **restoring** (default): plain ``model.step(state, dt)`` followed
       by Haney SST/SSS restoring when ``restoring_targets`` is set.
+      With ``spmd_step`` set (``--enable-latlon-spmd``), the dynamics
+      step runs through that lat-band-SPMD callable instead — the state
+      arrives sharded and every downstream op (restoring, finite checks,
+      diagnostics, restart saves) works on the sharded global arrays
+      transparently under the single-controller GSPMD runtime.
     * **jra55_do_tropical**: ``_jra55_step(...)`` per step using a
       pre-built JRA55-do cache (set ``jra55_state``); the model
       receives bulk-flux fields and structured freshwater forcing.
@@ -2879,6 +3051,18 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             "_run_omip_loop: jra55_state and restoring_targets are mutually "
             "exclusive — choose one forcing path."
         )
+    if spmd_step is not None and jra55_state is not None:
+        # The block-scan lanes now thread spmd_step; the two unsupported
+        # JRA sub-modes still refuse loudly.
+        if jra55_state.get("_use_single_step", False):
+            raise ValueError(
+                "spmd_step + the JRA55 single-step fallback is unsupported "
+                "(_jra55_step calls model.step directly); use the "
+                "block-scan path (default).")
+        if jra55_state.get("enable_sea_ice", False):
+            raise ValueError(
+                "spmd_step + prognostic sea ice is unsupported "
+                "(--jra55-sea-ice; the ice tile is not SPMD-audited).")
     if checkpoint_days is not None and checkpoint_dir is None:
         raise ValueError(
             "_run_omip_loop: checkpoint_days requires checkpoint_dir."
@@ -2904,8 +3088,11 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     # ``blowup_info`` and is emitted in results.txt.
     blowup_info: dict | None = None
 
-    # Initial diagnostics
-    scalars = _extract_scalars(state, grid_type, grid, z_coord)
+    # Initial diagnostics (SPMD: gather the v_lower-carrying sharded state
+    # — _extract_scalars centers v and needs the full n_lat+1 rows)
+    scalars = _extract_scalars(
+        spmd_gather(state) if spmd_gather is not None else state,
+        grid_type, grid, z_coord)
     for k, v in scalars.items():
         diag.setdefault(k, []).append(v)
     diag["day"].append(0.0)
@@ -2914,31 +3101,89 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     t0 = time.time()
     last_print = t0
     blown_up = False
+    # Route-B multicontroller: only rank 0 writes restart/snapshot files, but
+    # EVERY rank must still dispatch the collective ``spmd_gather`` (a rank-0
+    # gather would hang the others). ``jax.process_index()`` is 0 in serial /
+    # single-controller runs, so this is a no-op there (never-regress).
+    _io_rank = jax.process_index() == 0
     # Prognostic sea-ice carry (--jra55-sea-ice); None when ice is off.  Set in
     # the scan-blocks branch below and threaded across blocks.  Declared here so
     # the restart helpers (incl. the wallclock-exit closure) persist it — a
     # checkpoint/resume must not reset the ice pack to the cold start.
     ice_state = None
 
+    # SPMD (--enable-latlon-spmd): restart files must carry the FULL
+    # (n_lat+1) staggered v/v_mask, not the sharded v_lower layout — every
+    # save choke point goes through this gather-aware wrapper.  The gather is
+    # a COLLECTIVE (all ranks dispatch it); only rank 0 writes the file and
+    # returns the path — non-root gets ``None`` so its callers skip the
+    # snapshot/print that would deref a missing filename.
+    _multiproc = jax.process_count() > 1
+    if spmd_gather is not None:
+        def save_restart(st, *a, **kw):
+            gathered = spmd_gather(st)          # collective — ALL ranks
+            if not _io_rank:
+                return None
+            if _multiproc:
+                # Route-B: a rank-0 write error (e.g. ENOSPC) must NOT raise —
+                # the collective gather already ran on every rank, so an
+                # exception here would unwind rank 0 while the others advance
+                # to the next collective and the federation would split.  Log
+                # loudly and continue in lockstep; the next cadence retries.
+                try:
+                    return _save_restart(gathered, *a, **kw)
+                except Exception as e:
+                    print(f"    WARNING: rank-0 restart write failed "
+                          f"(continuing to keep the federation in lockstep): "
+                          f"{type(e).__name__}: {e}", flush=True)
+                    return None
+            return _save_restart(gathered, *a, **kw)   # single-proc: raise
+    else:
+        save_restart = _save_restart
+
     def _maybe_wallclock_exit(state, step: int, day: float) -> None:
-        if not _wallclock_exhausted(
+        if max_wallclock_seconds <= 0:
+            return                     # wallclock exit disabled — no collective
+        local_exhausted = _wallclock_exhausted(
             time.time() - t0,
             max_wallclock_seconds,
             restart_buffer_seconds,
-        ):
-            return
-        fname = _save_restart(state, day, step, checkpoint_dir,
-                              ice_state=ice_state, grid_type=grid_type)
-        if _snapshot_fn is not None:
-            try:
-                _snapshot_fn(fname)
-            except Exception as e:
-                print(f"    Snapshot failed: {e}", flush=True)
-        print(
-            f"  Wallclock budget {max_wallclock_seconds:.0f}s nearly reached "
-            f"at day {day:.2f}; restart saved: {fname.name}.",
-            flush=True,
         )
+        if _multiproc:
+            # Route-B: the exit decision MUST be an all-rank consensus. Ranks
+            # cross the wallclock threshold at slightly different times (I/O
+            # jitter); if one exits (dispatching the save-gather collective +
+            # sys.exit) while another runs the next step, the collective order
+            # diverges and the federation hangs.  Any rank exhausted -> all
+            # exit, in lockstep.
+            from jax.experimental import multihost_utils
+            exhausted = bool(np.any(np.asarray(
+                multihost_utils.process_allgather(
+                    np.asarray([local_exhausted])))))
+        else:
+            exhausted = local_exhausted
+        if not exhausted:
+            return
+        fname = save_restart(state, day, step, checkpoint_dir,
+                              ice_state=ice_state, grid_type=grid_type)
+        # This is the LAST checkpoint before exit: join the async writer and
+        # re-raise a failed write NOW.  The writer thread otherwise stores the
+        # exception and the job exits 0 with a missing restart — the chain
+        # launcher would then resume from an older (or no) checkpoint (codex
+        # audit HIGH, 2026-07-02).
+        _join_restart_writer()
+        # fname is None on route-B non-root ranks (gather ran, no write).
+        if fname is not None:
+            if _snapshot_fn is not None:
+                try:
+                    _snapshot_fn(fname)
+                except Exception as e:
+                    print(f"    Snapshot failed: {e}", flush=True)
+            print(
+                f"  Wallclock budget {max_wallclock_seconds:.0f}s nearly "
+                f"reached at day {day:.2f}; restart saved: {fname.name}.",
+                flush=True,
+            )
         sys.exit(0)
 
     # ---- B2 standing-mode time diagnostic χ ----
@@ -2979,14 +3224,19 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         # step shim) — prime the build-once caches from the CONCRETE
         # initial state so the traced body captures the vertex mask as
         # a constant (codex review MAJOR; census 8474554).
-        model.prime_step_caches(state)
+        # SPMD: the caller (run_omip_single) already primed the caches from
+        # the UNSHARDED state before sharding; re-priming here would run
+        # np.asarray on the sharded ``state`` — a hard non-addressable error
+        # under route-B (shards span processes).  Skip it when spmd_step is set.
+        if spmd_step is None:
+            model.prime_step_caches(state)
         # Prognostic slab sea ice (--jra55-sea-ice): the block scan carries
         # (ocean_state, ice_state); thread the ice state across blocks.
         _ice_on = bool(jra55_state.get("enable_sea_ice", False))
         ice_state = jra55_state.get("ice_state_init") if _ice_on else None
         if use_gpu_interp:
             _get_block_fn_interp = _build_jra55_block_fn_interp(
-                model, jra55_state, dt)
+                model, jra55_state, dt, spmd_step=spmd_step)
             print("  GPU-interp mode: forcing interpolation on GPU")
             # Pre-load the full JRA55 cache for repeat-year runs to
             # eliminate per-block Zarr I/O (~0.3s/block → ~0s/block).
@@ -2996,7 +3246,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                     jra55_state)
                 _full_cache = (_fc_all, _fc_days, _fc_len)
         else:
-            block_fn = _build_jra55_block_fn(model, jra55_state, dt)
+            block_fn = _build_jra55_block_fn(model, jra55_state, dt,
+                                             spmd_step=spmd_step)
             _full_cache = None
         block_size = max(1, diag_every)
         if checkpoint_days is not None:
@@ -3022,6 +3273,17 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 atm_stack, runoff_stack = _preload_jra55_forcing_block(
                     block_start, actual, dt, jra55_state,
                 )
+            if spmd_shard_stack is not None:
+                # Lay the per-block forcing stacks out lat-band-sharded so
+                # the in-scan interpolation / bulk fluxes stay shard-local
+                # (an unsharded stack commits to device 0 and serializes
+                # every forcing op there).
+                if use_gpu_interp:
+                    raw_stack = spmd_shard_stack(raw_stack)
+                    runoff_records = spmd_shard_stack(runoff_records)
+                else:
+                    atm_stack = spmd_shard_stack(atm_stack)
+                    runoff_stack = spmd_shard_stack(runoff_stack)
             io_dt = time.time() - t_io_start
 
             t_compute_start = time.time()
@@ -3102,18 +3364,23 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                     state = state._replace(
                         eta=state.eta.replace(data=eta_corrected))
 
-            scalars = _extract_scalars(state, grid_type, grid, z_coord)
+            _st_diag = (spmd_gather(state) if spmd_gather is not None
+                        else state)
+            scalars = _extract_scalars(_st_diag, grid_type, grid, z_coord)
 
-            # B2: chi diagnostic from last 3 eta snapshots
+            # B2: chi diagnostic from last 3 eta snapshots.  Read the GATHERED
+            # state (_st_diag): under route-B the raw ``state.eta`` is sharded
+            # across PROCESSES, so np.asarray on it would fail on the
+            # non-addressable remote shards.  _st_diag is replicated.
             chi = 0.0
             if grid_type == "latlon":
-                eta_now = np.asarray(state.eta.data)
+                eta_now = np.asarray(_st_diag.eta.data)
                 eta_history.append(eta_now)
                 if len(eta_history) > 3:
                     eta_history.pop(0)
                 if len(eta_history) == 3:
                     eta_m2, eta_m1, eta_0 = eta_history
-                    mask_eta = np.asarray(state.land_mask.data) > 0.5
+                    mask_eta = np.asarray(_st_diag.land_mask.data) > 0.5
                     diff = (eta_m1 - 0.5 * (eta_0 + eta_m2)) * mask_eta
                     den = eta_m1 * mask_eta
                     num_sq = float(np.sum(diff * diff))
@@ -3151,23 +3418,26 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                     f"{scalars['lon_maxu']:.0f})"
                 )
             summary = scalar_summary
-            print(
-                f"    [{label}] Day {day:7.2f}/{total_days:.0f} | {summary} "
-                f"| io={io_dt:.1f}s compute={compute_dt:.1f}s "
-                f"({compute_dt/actual:.2f} s/step) | {elapsed_total:.0f}s total",
-                flush=True,
-            )
+            if _io_rank:
+                print(
+                    f"    [{label}] Day {day:7.2f}/{total_days:.0f} | {summary} "
+                    f"| io={io_dt:.1f}s compute={compute_dt:.1f}s "
+                    f"({compute_dt/actual:.2f} s/step) | {elapsed_total:.0f}s total",
+                    flush=True,
+                )
 
             if (steps_per_ckpt is not None and
                     (step % steps_per_ckpt == 0 or step == n_steps)):
-                fname = _save_restart(state, day, step, checkpoint_dir,
+                fname = save_restart(state, day, step, checkpoint_dir,
                                       ice_state=ice_state, grid_type=grid_type)
-                if _snapshot_fn is not None:
-                    try:
-                        _snapshot_fn(fname)
-                    except Exception as e:
-                        print(f"    Snapshot failed: {e}", flush=True)
-                print(f"    Restart saved: {fname.name}", flush=True)
+                # fname is None on route-B non-root ranks (gather ran, no write).
+                if fname is not None:
+                    if _snapshot_fn is not None:
+                        try:
+                            _snapshot_fn(fname)
+                        except Exception as e:
+                            print(f"    Snapshot failed: {e}", flush=True)
+                    print(f"    Restart saved: {fname.name}", flush=True)
             _maybe_wallclock_exit(state, step, day)
 
         # After the block loop, jump to the post-loop tally below.
@@ -3214,7 +3484,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 )
                 if (steps_per_ckpt is not None and
                         (step % steps_per_ckpt == 0 or step == n_steps)):
-                    fname = _save_restart(state, day, step, checkpoint_dir,
+                    fname = save_restart(state, day, step, checkpoint_dir,
                                           ice_state=ice_state,
                                           grid_type=grid_type)
                     if _snapshot_fn is not None:
@@ -3239,8 +3509,10 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     ramp_days = float(restoring_ramp_days)
     restoring_ramp_steps = max(1, int(ramp_days * 86400.0 / dt)) if ramp_days > 0 else 1
 
+    _dyn_step = spmd_step if spmd_step is not None else model.step
+
     for i in range(start_step, n_steps):
-        state = model.step(state, dt)
+        state = _dyn_step(state, dt)
 
         # Apply SST/SSS restoring (grid-agnostic, after dynamics step)
         if restoring_targets is not None:
@@ -3317,7 +3589,11 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
 
         if step % diag_every == 0 or step == n_steps:
             day = step * dt / 86400.0
-            scalars = _extract_scalars(state, grid_type, grid, z_coord)
+            # SPMD: _extract_scalars centers v (needs the full n_lat+1
+            # staggered rows) — gather the v_lower-carrying sharded state
+            # at the diag cadence only.
+            _st_diag = spmd_gather(state) if spmd_gather is not None else state
+            scalars = _extract_scalars(_st_diag, grid_type, grid, z_coord)
             diag["day"].append(day)
             diag["step"].append(step)
             for k, v in scalars.items():
@@ -3329,8 +3605,9 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                     f"{k}={v:.4g}" for k, v in list(scalars.items())[:4])
                 elapsed = now - t0
                 total_days = n_steps * dt / 86400.0
-                print(f"    [{label}] Day {day:7.1f}/{total_days:.0f} | {summary} "
-                      f"| {elapsed:.0f}s elapsed")
+                if _io_rank:
+                    print(f"    [{label}] Day {day:7.1f}/{total_days:.0f} | "
+                          f"{summary} | {elapsed:.0f}s elapsed")
                 last_print = now
 
         # Restart-checkpoint cadence (independent of the diag cadence
@@ -3339,18 +3616,20 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             day_now = step * dt / 86400.0
             steps_per_ckpt = max(1, int(round(checkpoint_days * 86400.0 / dt)))
             if step % steps_per_ckpt == 0 or step == n_steps:
-                fname = _save_restart(state, day_now, step, checkpoint_dir,
+                fname = save_restart(state, day_now, step, checkpoint_dir,
                                       ice_state=ice_state, grid_type=grid_type)
-                # Auto-generate snapshot plot alongside the restart.
-                if _snapshot_fn is not None:
-                    try:
-                        _snapshot_fn(fname)
-                    except Exception as e:
-                        print(f"    Snapshot failed: {e}", flush=True)
-                # Friendly progress; gated on the same 15-s cadence as
-                # the diag print so we don't spam.
-                if time.time() - last_print < 1.0:
-                    print(f"    Restart saved: {fname.name}", flush=True)
+                # fname is None on route-B non-root ranks (gather ran, no write).
+                if fname is not None:
+                    # Auto-generate snapshot plot alongside the restart.
+                    if _snapshot_fn is not None:
+                        try:
+                            _snapshot_fn(fname)
+                        except Exception as e:
+                            print(f"    Snapshot failed: {e}", flush=True)
+                    # Friendly progress; gated on the same 15-s cadence as
+                    # the diag print so we don't spam.
+                    if time.time() - last_print < 1.0:
+                        print(f"    Restart saved: {fname.name}", flush=True)
         _maybe_wallclock_exit(state, step, step * dt / 86400.0)
 
     if grid_type == "spectral":
@@ -3368,7 +3647,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
 # ===========================================================================
 
 def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok,
-                 blowup_info: dict | None = None):
+                 blowup_info: dict | None = None, write: bool = True):
     """Save diagnostics and metadata.
 
     iter-97: ``blowup_info`` (added kwarg) carries the BLOWUP
@@ -3377,13 +3656,42 @@ def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok,
     BLOWUP runs as such instead of silently reporting the last
     *clean* SST/SSS/SSH (which led to a false-improvement claim
     in iter-96).
+
+    ``write=False`` (route-B non-root ranks) skips every file write but still
+    builds and returns the ``results`` dict, so ALL_RESULTS / the exit code
+    stay consistent across the federation without N processes clobbering the
+    same output files.
     """
+    import csv
+    keys = list(diag.keys())
+
+    # Results dict — built for EVERY rank (ALL_RESULTS / exit-code
+    # consistency); route-B non-root ranks return it here WITHOUT writing any
+    # file, so N processes never clobber the same output paths.
+    results = {
+        "grid_type": grid_type,
+        "resolution": args.resolution or GRID_DEFAULTS[grid_type]["resolution"],
+        "nlev": args.nlev,
+        "days": args.days,
+        "dt": args.dt or GRID_DEFAULTS[grid_type]["dt"],
+        "physics": args.physics,
+        "water_type": args.water_type,
+        "sw_down": args.sw_down,
+        "wall_time_s": wall_time,
+        "status": "PASS" if ok else "FAIL",
+        "final_SST": diag["SST"][-1] if diag["SST"] else None,
+        "final_SSS": diag["SSS"][-1] if diag["SSS"] else None,
+        "final_SSH": diag["SSH"][-1] if diag["SSH"] else None,
+        "blowup_info": blowup_info,
+        "cli_args": vars(args),
+    }
+    if not write:
+        return results
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Timeseries CSV
-    import csv
     csv_path = output_dir / "timeseries.csv"
-    keys = list(diag.keys())
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(keys)
@@ -3416,24 +3724,7 @@ def _save_output(output_dir: Path, diag, args, grid_type, wall_time, ok,
         for i in range(n_rows):
             w.writerow([diag[k][i] if i < len(diag[k]) else "" for k in keys])
 
-    # Results JSON — include full CLI args for reproducibility
-    results = {
-        "grid_type": grid_type,
-        "resolution": args.resolution or GRID_DEFAULTS[grid_type]["resolution"],
-        "nlev": args.nlev,
-        "days": args.days,
-        "dt": args.dt or GRID_DEFAULTS[grid_type]["dt"],
-        "physics": args.physics,
-        "water_type": args.water_type,
-        "sw_down": args.sw_down,
-        "wall_time_s": wall_time,
-        "status": "PASS" if ok else "FAIL",
-        "final_SST": diag["SST"][-1] if diag["SST"] else None,
-        "final_SSS": diag["SSS"][-1] if diag["SSS"] else None,
-        "final_SSH": diag["SSH"][-1] if diag["SSH"] else None,
-        "blowup_info": blowup_info,
-        "cli_args": vars(args),
-    }
+    # Results JSON — the dict was built above (before the write gate).
     with open(output_dir / "results.json", "w") as f:
         json.dump(results, f, indent=2, default=str)
 
@@ -3524,6 +3815,18 @@ def run_omip_single(grid_type: str, args) -> dict:
     # longer force-applies fp64 at import (codex 2026-06-21).
     apply_run_precision(args)
     run_config = build_config_from_args(args)
+    # --multicontroller is ONLY the route-B transport for the lat-band ocean
+    # SPMD lane — it does nothing on its own.  Without --enable-latlon-spmd the
+    # SPMD block below is skipped, so spmd_gather stays None and EVERY rank runs
+    # the full serial model AND writes the SAME output/restart paths, corrupting
+    # them.  Hard-fail (all ranks raise identically) BEFORE any model/device
+    # work rather than silently clobber (codex r2 #2).
+    if run_config.multicontroller and not run_config.enable_latlon_spmd:
+        raise SystemExit(
+            "--multicontroller requires --enable-latlon-spmd (it is the "
+            "route-B transport for the lat-band ocean SPMD step). Without the "
+            "SPMD lane every rank would run the full model and clobber the "
+            "same output files.")
     # Apply the --params calibration layer (tuned scheme parameters) into the
     # built config's nested *Config NamedTuples (issue #691).
     if getattr(args, "params", None):
@@ -4101,6 +4404,20 @@ def run_omip_single(grid_type: str, args) -> dict:
         print(f"  Restart: loaded day {restart_day:.1f} (step {restart_step}) "
               f"from {Path(args.restart).name}")
 
+    # --enable-latlon-spmd preconditions that are knowable from ARGS: refuse
+    # BEFORE the JRA55 forcing setup below builds caches/state (codex r1 #1)
+    # and before any device work; a negative device count would otherwise
+    # silently no-op through the `_nd or len(devices)` resolution (r1 #3).
+    if run_config.enable_latlon_spmd:
+        if getattr(args, "jra55_sea_ice", False):
+            raise SystemExit(
+                "--enable-latlon-spmd does not support --jra55-sea-ice "
+                "yet (the prognostic ice tile is not SPMD-audited).")
+        if run_config.spmd_n_devices < 0:
+            raise SystemExit(
+                f"--spmd-n-devices must be >= 0 "
+                f"(got {run_config.spmd_n_devices}).")
+
     # Forcing dispatch: 'restoring' (default) vs JRA55-do bulk fluxes.
     restoring_targets = None
     restoring_tau_s = None
@@ -4270,6 +4587,10 @@ def run_omip_single(grid_type: str, args) -> dict:
                 Uses a lock to serialize matplotlib calls (not thread-safe).
                 """
                 def _render():
+                    # The restart write is itself async (atomic tmp+rename,
+                    # see _save_restart): join the in-flight writer so the
+                    # npz exists before the plotter reads it.
+                    _join_restart_writer()
                     with _snap_lock:
                         try:
                             _plot_snap(restart_path, _snap_mesh, _snap_z)
@@ -4291,6 +4612,79 @@ def run_omip_single(grid_type: str, args) -> dict:
     else:
         ramp_days_eff = 0.0
 
+    # --- Lat-band SPMD (--enable-latlon-spmd): wrap the dynamics step in
+    # the validated multi-GPU sharded ocean step and shard the state.
+    # Single-controller only; restoring lane only (the JRA55 block
+    # functions call model._step_impl directly — follow-up).  Runs AFTER
+    # the restart load so a resumed state is sharded too.
+    spmd_step = None
+    spmd_gather = None
+    spmd_shard_stack = None
+    if run_config.enable_latlon_spmd:
+        if grid_type != "latlon":
+            raise SystemExit(
+                f"--enable-latlon-spmd requires --grid latlon "
+                f"(got {grid_type}).")
+        if (jra55_state is not None
+                and jra55_state.get("_use_single_step", False)):
+            raise SystemExit(
+                "--enable-latlon-spmd requires the JRA55 block-scan path, "
+                "but this run selected the single-step fallback "
+                "(_jra55_step calls model.step directly).")
+        _multi = run_config.multicontroller
+        if jax.process_count() > 1 and not _multi:
+            raise SystemExit(
+                "--enable-latlon-spmd is single-controller only unless "
+                "--multicontroller is set; multi-node ocean scaling needs "
+                "the route-B lane (jax.distributed cross-process NCCL).")
+        if _multi:
+            # Route-B: the mesh spans ALL global devices (one band per device
+            # across every process). A strict subset would leave some
+            # processes' devices out of the program (non-addressable
+            # participation hazard — matches the ocean bench's guard).
+            _nd = len(jax.devices())
+            if run_config.spmd_n_devices and run_config.spmd_n_devices != _nd:
+                raise SystemExit(
+                    f"--multicontroller uses ALL global devices ({_nd} across "
+                    f"{jax.process_count()} processes); --spmd-n-devices "
+                    f"({run_config.spmd_n_devices}) must be 0 (auto) or {_nd}.")
+        else:
+            _nd = run_config.spmd_n_devices or len(jax.devices())
+        if _nd > 1:
+            if grid.n_lat % _nd != 0:
+                raise SystemExit(
+                    f"--enable-latlon-spmd: n_lat ({grid.n_lat}) not "
+                    f"divisible by the device count ({_nd}); pick "
+                    f"--spmd-n-devices dividing n_lat.")
+            from functools import partial
+
+            from legoesm.ocean.dynamics.sharded_ocean_step import (
+                gather_state_latlon,
+                make_sharded_ocean_step,
+                shard_forcing_stack_latlon,
+                shard_state_latlon,
+            )
+            from legoesm.parallel.mesh import create_latlon_mesh
+            # Prime the build-once vertex-mask cache from the CONCRETE
+            # state so the wrapper can build per-band masks host-side.
+            model.prime_step_caches(state)
+            _dev = create_latlon_mesh(n_devices=_nd)
+            spmd_step = make_sharded_ocean_step(model, _dev.mesh)
+            spmd_gather = partial(gather_state_latlon, mesh=_dev.mesh)
+            state = shard_state_latlon(state, _dev.mesh)
+            # Lay per-block forcing stacks out lat-band-sharded so the
+            # in-scan interpolation / bulk fluxes stay shard-local (shared
+            # layout helper — see shard_forcing_stack_latlon).
+            spmd_shard_stack = partial(
+                shard_forcing_stack_latlon, mesh=_dev.mesh)
+            if jax.process_index() == 0:
+                _lane = "route-B multicontroller" if _multi else "single-controller"
+                print(f"  SPMD ({_lane}): lat-band sharded dynamics step over "
+                      f"{_nd} devices across {jax.process_count()} process(es) "
+                      f"({jax.default_backend()}).")
+        elif jax.process_index() == 0:
+            print("  SPMD: single device visible — flag is a no-op.")
+
     # Run time loop
     state, diag, wall_time, ok, blowup_info = _run_omip_loop(
         model, state, grid_type, grid, z_coord,
@@ -4311,7 +4705,30 @@ def run_omip_single(grid_type: str, args) -> dict:
         S_woa_3d=(S_woa * state.land_mask.data[..., jnp.newaxis]).astype(
             state.S.data.dtype) if args.nudge_woa_tau > 0 and S_woa is not None else None,
         snapshot_fn=_snapshot_fn,
+        spmd_step=spmd_step,
+        spmd_gather=spmd_gather,
+        spmd_shard_stack=spmd_shard_stack,
     )
+    if spmd_gather is not None:
+        # Downstream report/plot/save paths expect the full (n_lat+1)
+        # staggered v layout, not the sharded v_lower carry.  Every rank
+        # dispatches this gather (it is a collective); only rank 0 writes.
+        state = spmd_gather(state)
+
+    # Surface a failed FINAL async restart write while the run can still
+    # report it (the writer thread swallows exceptions; _save_restart only
+    # re-raises them one checkpoint later — there is no later checkpoint
+    # for the last one; codex audit HIGH, 2026-07-02).  Placed AFTER the
+    # spmd_gather collective above: under route-B multiproc only rank 0
+    # spawns a writer thread, so a rank-0-only re-raise here must not be able
+    # to skip that collective and hang the federation.
+    _join_restart_writer()
+
+    # Route-B: only rank 0 writes output files (concurrent writes to the same
+    # path corrupt them); every rank still builds ``results`` so the exit code
+    # is consistent across the federation.
+    _io_rank = jax.process_index() == 0
+    _multiproc = jax.process_count() > 1
 
     status = "PASS" if ok else "FAIL"
     icon = "  " if ok else "**"
@@ -4322,36 +4739,54 @@ def run_omip_single(grid_type: str, args) -> dict:
     # Show the BLOWUP marker explicitly.
     if blowup_info is not None:
         sst_str = f"BLOWUP at step {blowup_info['step']}"
-    print(f"\n  {icon} {status} | {grid_type}/{resolution} | "
-          f"{wall_time:.1f}s | {sst_str}")
+    if _io_rank:
+        print(f"\n  {icon} {status} | {grid_type}/{resolution} | "
+              f"{wall_time:.1f}s | {sst_str}")
 
-    # Save output
+    # Save output.  Route-B: a rank-0 write failure must NOT raise past this
+    # point — the loop's collectives are done, but a bare exception would give
+    # rank 0 a different ALL_RESULTS / exit code than the non-root ranks (which
+    # never write).  Under multiprocess, log and rebuild the results dict with
+    # write=False so every rank returns the SAME record (codex r2 caveat B).
     output_dir = Path(args.output) / grid_type / resolution
-    results = _save_output(
-        output_dir, diag, args, grid_type, wall_time, ok,
-        blowup_info=blowup_info,
-    )
+    try:
+        results = _save_output(
+            output_dir, diag, args, grid_type, wall_time, ok,
+            blowup_info=blowup_info, write=_io_rank,
+        )
+    except Exception as e:
+        if not _multiproc:
+            raise
+        print(f"  WARNING: rank-0 output write failed (continuing for a "
+              f"consistent federation exit code): {type(e).__name__}: {e}",
+              flush=True)
+        results = _save_output(
+            output_dir, diag, args, grid_type, wall_time, ok,
+            blowup_info=blowup_info, write=False,
+        )
 
     # Final MLD-diagnostic snapshot (de Boyer Montegut / Treguier 2023): the
     # shared writer emits the T/S + geometry contract that
     # scripts/validate/compare_mld_dbm.py and compare_omip_nemo.py consume so
     # a finished run can be scored offline (e.g. CATKE-vs-KPP MLD).  Purely
-    # additive output; a diagnostic must never abort the run.
-    try:
-        from legoesm.ocean.restart import (
-            save_mld_snapshot, grid_lat2d_lon2d_deg,
-        )
-        # Grid coords are radians; the scorers consume degrees -> convert via
-        # the shared per-grid extractor (handles latlon/tripole/cube/mpas).
-        lat2d, lon2d = grid_lat2d_lon2d_deg(grid, grid_type)
-        snap = save_mld_snapshot(
-            state, output_dir / "snapshot_final.npz", z_coord=z_coord,
-            lat2d=lat2d, lon2d=lon2d,
-            time_s=float(args.days) * 86400.0, step=int(n_steps),
-        )
-        print(f"  MLD snapshot: {snap}")
-    except Exception as e:  # diagnostic snapshot must never crash the run
-        print(f"  Warning: MLD snapshot skipped: {type(e).__name__}: {e}")
+    # additive output; a diagnostic must never abort the run.  Rank-0 only
+    # (writes a file); ``state`` is already gathered/addressable on every rank.
+    if _io_rank:
+        try:
+            from legoesm.ocean.restart import (
+                save_mld_snapshot, grid_lat2d_lon2d_deg,
+            )
+            # Grid coords are radians; the scorers consume degrees -> convert
+            # via the shared per-grid extractor (latlon/tripole/cube/mpas).
+            lat2d, lon2d = grid_lat2d_lon2d_deg(grid, grid_type)
+            snap = save_mld_snapshot(
+                state, output_dir / "snapshot_final.npz", z_coord=z_coord,
+                lat2d=lat2d, lon2d=lon2d,
+                time_s=float(args.days) * 86400.0, step=int(n_steps),
+            )
+            print(f"  MLD snapshot: {snap}")
+        except Exception as e:  # diagnostic snapshot must never crash the run
+            print(f"  Warning: MLD snapshot skipped: {type(e).__name__}: {e}")
 
     ALL_RESULTS.append(results)
     return results
@@ -4400,6 +4835,14 @@ def print_summary():
 def main():
     args = parse_args()
 
+    # Route-B multicontroller (jax.distributed cross-process NCCL): initialize
+    # the federation BEFORE any device work (model build / device query), or
+    # jax.distributed.initialize() would raise "must be called before any JAX
+    # calls that initialise the XLA backend".  No-op unless --multicontroller.
+    if getattr(args, "multicontroller", False):
+        from legoesm.parallel.early_init import init_multicontroller_distributed
+        init_multicontroller_distributed(getattr(args, "coordinator", None))
+
     # Apply the precision policy before any model state is built. Default
     # fp64 reproduces the prior unconditional behavior exactly. run_omip_single
     # re-applies it idempotently so direct callers are also covered.
@@ -4410,11 +4853,15 @@ def main():
     # it is included in the default matrix.
     grids = GRID_TYPES if args.grid == "all" else [args.grid]
 
-    print(f"legoESM OMIP Reference Simulation")
-    print(f"  Grids: {', '.join(grids)}")
-    print(f"  Days: {'30 (quick)' if args.quick else args.days}")
-    print(f"  Physics: {args.physics}")
-    print(f"  Precision: {args.precision}")
+    # Route-B: every process runs main() to a consistent exit code, but only
+    # rank 0 prints the banner/summary (others would duplicate the log).
+    _root = jax.process_index() == 0
+    if _root:
+        print(f"legoESM OMIP Reference Simulation")
+        print(f"  Grids: {', '.join(grids)}")
+        print(f"  Days: {'30 (quick)' if args.quick else args.days}")
+        print(f"  Physics: {args.physics}")
+        print(f"  Precision: {args.precision}")
 
     for grid_type in grids:
         try:
@@ -4432,9 +4879,11 @@ def main():
                 "final_SSH": None,
             })
 
-    print_summary()
+    if _root:
+        print_summary()
 
-    # Exit with error if any failed
+    # Exit with error if any failed (ALL ranks — the launcher needs a
+    # consistent per-process exit code, so this is NOT rank-0-gated).
     if any(r["status"] != "PASS" for r in ALL_RESULTS):
         sys.exit(1)
 

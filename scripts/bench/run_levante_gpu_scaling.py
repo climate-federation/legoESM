@@ -173,8 +173,18 @@ def _maybe_init_distributed(
     """
     # Check for MPI environment
     if "OMPI_COMM_WORLD_SIZE" in os.environ or "PMI_SIZE" in os.environ:
+        # Guard ONLY the import: mpi4py installed-but-unloadable (no libmpi;
+        # ImportError, or the loader's RuntimeError) falls through to the
+        # SLURM / serial detection below. Everything past a successful
+        # import — including jax.distributed.initialize — must fail LOUDLY:
+        # swallowing a real multi-node init failure would leave N ranks
+        # running as independent serial programs (codex finding).
+        MPI = None
         try:
             from mpi4py import MPI
+        except (ImportError, RuntimeError):
+            pass
+        if MPI is not None:
             comm = MPI.COMM_WORLD
             rank = comm.Get_rank()
             n_procs = comm.Get_size()
@@ -191,15 +201,18 @@ def _maybe_init_distributed(
                 hostnames = comm.allgather(socket.gethostname())
                 if len(set(hostnames)) > 1:
                     import jax
+                    from legoesm.parallel.early_init import (
+                        resolve_coordinator_port,
+                    )
                     jax.distributed.initialize(
-                        coordinator_address=f"{hostnames[0]}:1234",
+                        coordinator_address=(
+                            f"{hostnames[0]}:{resolve_coordinator_port()}"
+                        ),
                         num_processes=n_procs,
                         process_id=rank,
                     )
 
             return rank, n_procs
-        except ImportError:
-            pass
 
     # Check for SLURM-launched multi-process jobs.  A plain sbatch allocation
     # sets SLURM_NTASKS>1 even when this script is executed as a single process
@@ -215,7 +228,10 @@ def _maybe_init_distributed(
             and slurm_nnodes > 1
             and slurm_step_nodelist):
         import jax
-        jax.distributed.initialize()
+        from legoesm.parallel.early_init import (
+            init_jax_distributed_with_fallback,
+        )
+        init_jax_distributed_with_fallback()
         return jax.process_index(), jax.process_count()
 
     return 0, 1
@@ -1234,7 +1250,7 @@ def _run_segment_benchmark(
         jax.config.update("jax_enable_x64", True)
 
     # RRTMG optics are preloaded inside _build_segment_benchmark() via
-    # ModelDriver.setup() → _create_physics() → preload_rrtmgp_optics().
+    # ModelDriver.setup() → _create_physics() → RRTMGP.preload().
 
     (step_fn, carry, dt_used, total_cells, cells_per_gpu,
      dev_config) = _build_segment_benchmark(
@@ -1279,7 +1295,9 @@ def _run_segment_benchmark(
     try:
         from mpi4py import MPI as _MPI
         _rank, _n_ranks = _MPI.COMM_WORLD.Get_rank(), _MPI.COMM_WORLD.Get_size()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # RuntimeError: mpi4py installed but no loadable libmpi (GPU-only
+        # venv) — a single-process benchmark must not require MPI.
         pass
     _is_mpi = _n_ranks > 1
 
@@ -1312,7 +1330,8 @@ def _run_segment_benchmark(
         if _MPI.COMM_WORLD.Get_size() > 1:
             jax.block_until_ready(jax.tree.leaves(carry))
             _MPI.COMM_WORLD.Barrier()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # broken/absent mpi4py must not break a single-process run
         pass
 
     t0 = time.perf_counter()
@@ -1323,7 +1342,8 @@ def _run_segment_benchmark(
         from mpi4py import MPI as _MPI
         if _MPI.COMM_WORLD.Get_size() > 1:
             _MPI.COMM_WORLD.Barrier()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # broken/absent mpi4py must not break a single-process run
         pass
 
     t1 = time.perf_counter()
@@ -1453,7 +1473,9 @@ def run_benchmark(
     try:
         from mpi4py import MPI as _MPI
         _rank, _n_ranks = _MPI.COMM_WORLD.Get_rank(), _MPI.COMM_WORLD.Get_size()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # RuntimeError: mpi4py installed but no loadable libmpi (GPU-only
+        # venv) — a single-process benchmark must not require MPI.
         pass
     _is_mpi = _n_ranks > 1
 
@@ -1914,7 +1936,8 @@ def run_benchmark(
         if _MPI.COMM_WORLD.Get_size() > 1:
             jax.block_until_ready(jax.tree.leaves(state))
             _MPI.COMM_WORLD.Barrier()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # broken/absent mpi4py must not break a single-process run
         pass
 
     t0 = time.perf_counter()
@@ -1926,7 +1949,8 @@ def run_benchmark(
         from mpi4py import MPI as _MPI
         if _MPI.COMM_WORLD.Get_size() > 1:
             _MPI.COMM_WORLD.Barrier()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # broken/absent mpi4py must not break a single-process run
         pass
 
     t1 = time.perf_counter()

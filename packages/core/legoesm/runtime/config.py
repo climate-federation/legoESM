@@ -161,11 +161,21 @@ def bootstrap(
                 _nproc = int(_val)
                 break
         if _nproc > 1:
-            try:
-                _jax.distributed.initialize()
-            except RuntimeError as e:  # second bootstrap in-process
-                if "already" not in str(e).lower():
-                    raise
+            # Idempotent: an OUTER bootstrap (parallel.early_init /
+            # initialize_jax_distributed_multiprocess in a launcher
+            # script) may already have federated the processes — the
+            # supported check is jax.distributed.is_initialized()
+            # (cs_spmd smoke, job 8684810; the old "already"-substring
+            # guard missed the post-backend-init raise).  Bare
+            # initialize() auto-detects SLURM / Open MPI only; under
+            # PBS + Cray PALS (Derecho mpiexec) the helper routes to the
+            # mpi4py bootstrap (plain-MPI rank/coordinator discovery only
+            # — mpi4jax is never armed in spmd mode).
+            if not _jax.distributed.is_initialized():
+                from legoesm.parallel.early_init import (
+                    init_jax_distributed_with_fallback,
+                )
+                init_jax_distributed_with_fallback()
             if _jax.process_count() != _nproc:
                 raise RuntimeError(
                     f"bootstrap: distributed_mode='spmd' launched with "

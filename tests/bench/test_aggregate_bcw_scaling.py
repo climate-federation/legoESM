@@ -170,3 +170,81 @@ def test_unknown_nested_schema_is_skipped_not_atm(tmp_path):
     _write(d, "strong_scaling.json", payload)
     rows, _ = agg.collect(tmp_path)
     assert rows == []                          # skipped, not flattened as atm
+
+
+def _cs_spmd_case(res, n_ranks, sypd, backend="cpu"):
+    """A FLAT cube cs-spmd payload as emitted by
+    run_cpu_mpi_scaling.py --cs-spmd (grid_type='cubed-sphere', device
+    ladder = face divisors, resolution = face-edge N).  Measured shape:
+    job on Ginsburg C24/L10/np1 -> sypd 383.7.
+
+    Models the REAL route-B node-fill: each rung fills a 128-core node with
+    THREADS=128/N per rank, so n_cores ~ 128 for EVERY rung (N in {1,2,3,6} ->
+    {128,128,126,126}) while n_devices varies.  Emitting cpus_per_task/n_cores
+    here (as the real run does) is load-bearing: without n_devices in the dedup
+    key the near-constant n_cores collapses the 4-rung curve to ~2 points."""
+    _node_cores = 128
+    cpt = max(1, _node_cores // n_ranks)
+    return {
+        "n_ranks": n_ranks, "resolution": res, "n_levels": 10,
+        "precision": "float64", "mode": "single", "backend": backend,
+        "grid_type": "cubed-sphere", "physics_level": "none",
+        "dt_seconds": 450.0, "time_per_step_ms": 1000.0 / sypd,
+        "sypd": sypd, "total_cells": 6 * res * res * 10,
+        "mcells_per_s": 10.8, "compile_time_s": 5.0,
+        "cpus_per_task": cpt, "n_cores": n_ranks * cpt,
+        "decomposition": f"cs-spmd np{n_ranks}",
+    }
+
+
+def test_ingests_cube_cs_spmd_face_ladder(tmp_path):
+    """#764 item 1: the cube route-B throughput lane.  The flat cube
+    cs-spmd JSON (face-divisor device ladder) must normalize into cube
+    throughput rows with the right grid, distinct n_devices per rung, and
+    a single resolution_km (the ladder shares one face-edge resolution,
+    UNLIKE the latlon device axis) — so a cube curve can be plotted
+    without being overlaid on the latlon device axis."""
+    # Face-divisor ladder at a fixed face-edge resolution C48.
+    for i, n in enumerate((1, 2, 3, 6)):
+        d = tmp_path / f"cubed-sphere_none_single_r48_n{n}"
+        _write(d, "r.json", _cs_spmd_case(48, n, 40.0 - i))
+    rows, dropped = agg.collect(tmp_path)
+    assert dropped == 0
+    cube = [r for r in rows if r["grid"] == "cubed-sphere"]
+    assert {r["n_devices"] for r in cube} == {1, 2, 3, 6}
+    assert all(r["component"] == "atm" and r["case"] == "dry" for r in cube)
+    # Node-fill: every rung ~fills the 128-core node, so n_cores is nearly
+    # constant ({128,128,126,126}) — the 4 rungs survive ONLY because n_devices
+    # is in the dedup key.  Asserting the collapse condition makes this a real
+    # regression guard: revert n_devices from _key and dropped becomes 2.
+    # Tolerance = the exact node-fill remainder for this ladder (128 - the
+    # smallest N*(128//N)), not a magic 2, so a ladder/node-size change stays
+    # honest.
+    _node_cores = 128
+    _fill_spread = _node_cores - min(n * (_node_cores // n) for n in (1, 2, 3, 6))
+    assert max(r["n_cores"] for r in cube) - min(r["n_cores"] for r in cube) \
+        <= _fill_spread
+    assert len({r["n_resource"] for r in cube}) < len(cube)   # cores alone collapse
+    # One shared face-edge resolution across the whole ladder.
+    assert {r["resolution"] for r in cube} == {48}
+    assert len({r["resolution_km"] for r in cube}) == 1
+    assert all(r["resolution_km"] > 0 for r in cube)
+
+
+def test_cube_and_latlon_lanes_are_distinct_curves(tmp_path):
+    """The cube face-divisor ladder and the latlon lat-band ladder must
+    stay SEPARABLE rows (different grid) at the same device count — they
+    are different curves, not points on one device axis (#764)."""
+    # SAME resolution AND device count for both grids, so ONLY `grid`
+    # distinguishes them — a collector key that dropped `grid` but kept
+    # (resolution, n_devices) would collapse these to one row (codex
+    # round-19 Low: the prior 48-vs-96 version couldn't catch that).
+    dc = tmp_path / "cubed-sphere_none_single_r48_n6"
+    dl = tmp_path / "latlon_none_single_r48_n6"
+    _write(dc, "c.json", _cs_spmd_case(48, 6, 35.0))
+    _write(dl, "l.json", _case("latlon", "none", "single", 48, 6, "float64",
+                               60.0))
+    rows, dropped = agg.collect(tmp_path)
+    same_dev = [r for r in rows if r["n_devices"] == 6]
+    assert dropped == 0 and len(same_dev) == 2      # NOT merged into one
+    assert {r["grid"] for r in same_dev} == {"cubed-sphere", "latlon"}
