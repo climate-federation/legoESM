@@ -27,20 +27,20 @@ from legoesm.thermo import (
     d_saturation_vapor_pressure_aerk,
     dd_saturation_vapor_pressure_aerk,
 )
-from legoesm.land.canopy.stomatal import ball_berry_gs, medlyn_gs
+from legoesm.land.leaf_biophysics import DIFFUSIVITY_RATIO_H2O_CO2
+from legoesm.land.stomata import ball_berry_gs, medlyn_gs
 
 # Module-local constants.
 # NOTE: Stefan-Boltzmann, freezing point, latent heat of vaporisation, etc.
 # are imported from ``legoesm.constants`` — do not redefine them here.
+# The leaf H2O:CO2 diffusivity ratio (Fick's law; Ci = Ca − ratio·An/gs) is the
+# single-source DIFFUSIVITY_RATIO_H2O_CO2 imported from leaf_biophysics above.
 _Ps0   = 101325.0    # IUPAC STP pressure [Pa] used in the mol → m/s
                      # unit conversion factor _CF_MOLAR_VOLUME; distinct from
                      # ``constants.p_ref`` (1e5 Pa hydrostatic reference).
 # mol m-2 s-1 → m s-1 leaf-conductance prefactor at IUPAC STP (encodes the
 # reference molar volume 22.4 L/mol); scaled by (T_freeze/Tf)·(Ps/_Ps0).
 _CF_MOLAR_VOLUME = 0.446
-
-# Leaf H2O:CO2 molecular-diffusivity ratio (Fick's law; Ci = Ca − ratio·An/gs).
-_DIFFUSIVITY_RATIO_H2O_CO2 = 1.6
 
 # Latent-heat-of-vaporisation temperature slope −dλ/dT [J kg-1 K-1], used as
 # λ(T) = L_v − _LAMBDA_T_SLOPE·(T − T_freeze). DifferBESS canopy value; distinct
@@ -240,7 +240,7 @@ def _compute_gs_and_ci(
     # ``_GS_MIN_MOL``.
     gs_mol = jnp.maximum(gs_mol, _GS_MIN_MOL)
 
-    Ci = Ca - _DIFFUSIVITY_RATIO_H2O_CO2 * An / jnp.maximum(gs_mol, 1e-9)
+    Ci = Ca - DIFFUSIVITY_RATIO_H2O_CO2 * An / jnp.maximum(gs_mol, 1e-9)
     # Clip Ci to the physically reasonable C3 range; mixed-PFT C3/C4
     # is handled upstream in ``photosynthesis()`` via the continuous fC4
     # fraction, so the C4 bounds are not needed here.

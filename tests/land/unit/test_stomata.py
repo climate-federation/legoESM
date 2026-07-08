@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy.testing as npt
 
-from legoesm.land.carbon.stomata import (
+from legoesm.land.stomata import (
     StomataConfig,
     arrhenius,
     peaked_arrhenius,
@@ -157,31 +157,31 @@ class TestBallBerry(unittest.TestCase):
     def test_minimum_conductance(self):
         """gs >= g0 always."""
         gs = ball_berry_gs(
-            jnp.array(-5.0), jnp.array(0.8), jnp.array(400.0), self.cfg)
+            jnp.array(-5.0), jnp.array(0.8), jnp.array(400.0), self.cfg.g1_bb, self.cfg.g0)
         self.assertAlmostEqual(float(gs), self.cfg.g0, places=5)
 
     def test_increases_with_A(self):
         """gs increases with assimilation."""
         gs_low = ball_berry_gs(
-            jnp.array(5.0), jnp.array(0.8), jnp.array(400.0), self.cfg)
+            jnp.array(5.0), jnp.array(0.8), jnp.array(400.0), self.cfg.g1_bb, self.cfg.g0)
         gs_high = ball_berry_gs(
-            jnp.array(20.0), jnp.array(0.8), jnp.array(400.0), self.cfg)
+            jnp.array(20.0), jnp.array(0.8), jnp.array(400.0), self.cfg.g1_bb, self.cfg.g0)
         self.assertGreater(float(gs_high), float(gs_low))
 
     def test_increases_with_RH(self):
         """gs increases with relative humidity."""
         gs_dry = ball_berry_gs(
-            jnp.array(10.0), jnp.array(0.3), jnp.array(400.0), self.cfg)
+            jnp.array(10.0), jnp.array(0.3), jnp.array(400.0), self.cfg.g1_bb, self.cfg.g0)
         gs_wet = ball_berry_gs(
-            jnp.array(10.0), jnp.array(0.9), jnp.array(400.0), self.cfg)
+            jnp.array(10.0), jnp.array(0.9), jnp.array(400.0), self.cfg.g1_bb, self.cfg.g0)
         self.assertGreater(float(gs_wet), float(gs_dry))
 
     def test_decreases_with_Cs(self):
         """gs decreases with surface CO2."""
         gs_low_co2 = ball_berry_gs(
-            jnp.array(10.0), jnp.array(0.8), jnp.array(200.0), self.cfg)
+            jnp.array(10.0), jnp.array(0.8), jnp.array(200.0), self.cfg.g1_bb, self.cfg.g0)
         gs_high_co2 = ball_berry_gs(
-            jnp.array(10.0), jnp.array(0.8), jnp.array(800.0), self.cfg)
+            jnp.array(10.0), jnp.array(0.8), jnp.array(800.0), self.cfg.g1_bb, self.cfg.g0)
         self.assertGreater(float(gs_low_co2), float(gs_high_co2))
 
 
@@ -194,29 +194,29 @@ class TestMedlyn(unittest.TestCase):
     def test_minimum_conductance(self):
         """gs >= g0."""
         gs = medlyn_gs(
-            jnp.array(-5.0), jnp.array(1.0), jnp.array(400.0), self.cfg)
+            jnp.array(-5.0), jnp.array(1.0), jnp.array(400.0), self.cfg.g1_med, self.cfg.g0)
         self.assertAlmostEqual(float(gs), self.cfg.g0, places=5)
 
     def test_increases_with_A(self):
         """gs increases with assimilation."""
         gs_low = medlyn_gs(
-            jnp.array(5.0), jnp.array(1.0), jnp.array(400.0), self.cfg)
+            jnp.array(5.0), jnp.array(1.0), jnp.array(400.0), self.cfg.g1_med, self.cfg.g0)
         gs_high = medlyn_gs(
-            jnp.array(20.0), jnp.array(1.0), jnp.array(400.0), self.cfg)
+            jnp.array(20.0), jnp.array(1.0), jnp.array(400.0), self.cfg.g1_med, self.cfg.g0)
         self.assertGreater(float(gs_high), float(gs_low))
 
     def test_decreases_with_VPD(self):
         """gs decreases with VPD."""
         gs_wet = medlyn_gs(
-            jnp.array(10.0), jnp.array(0.5), jnp.array(400.0), self.cfg)
+            jnp.array(10.0), jnp.array(0.5), jnp.array(400.0), self.cfg.g1_med, self.cfg.g0)
         gs_dry = medlyn_gs(
-            jnp.array(10.0), jnp.array(3.0), jnp.array(400.0), self.cfg)
+            jnp.array(10.0), jnp.array(3.0), jnp.array(400.0), self.cfg.g1_med, self.cfg.g0)
         self.assertGreater(float(gs_wet), float(gs_dry))
 
     def test_reasonable_magnitude(self):
         """gs in a reasonable range (g0 to ~0.5 mol/m2/s)."""
         gs = medlyn_gs(
-            jnp.array(15.0), jnp.array(1.0), jnp.array(400.0), self.cfg)
+            jnp.array(15.0), jnp.array(1.0), jnp.array(400.0), self.cfg.g1_med, self.cfg.g0)
         self.assertGreater(float(gs), self.cfg.g0)
         self.assertLess(float(gs), 1.0)
 
@@ -568,7 +568,7 @@ class TestSlabLandIntegration(unittest.TestCase):
         """Jarvis model (no carbon) changes latent heat flux."""
         from legoesm.land.slab_land import step_land
         from legoesm.land.config import LandConfig
-        from legoesm.land.carbon.stomata import StomataConfig
+        from legoesm.land.stomata import StomataConfig
 
         shape = (4,)
         cfg_off = LandConfig()
@@ -587,7 +587,7 @@ class TestSlabLandIntegration(unittest.TestCase):
         """Farquhar+BB stomata work with active carbon cycle."""
         from legoesm.land.slab_land import step_land
         from legoesm.land.config import LandConfig
-        from legoesm.land.carbon.stomata import StomataConfig
+        from legoesm.land.stomata import StomataConfig
         from legoesm.land.carbon.config import CarbonConfig
         from legoesm.land.carbon.carbon_cycle import init_carbon_state
 
@@ -613,7 +613,7 @@ class TestSlabLandIntegration(unittest.TestCase):
         """Farquhar+Medlyn stomata give different results from Ball-Berry."""
         from legoesm.land.slab_land import step_land
         from legoesm.land.config import LandConfig
-        from legoesm.land.carbon.stomata import StomataConfig
+        from legoesm.land.stomata import StomataConfig
         from legoesm.land.carbon.config import CarbonConfig
         from legoesm.land.carbon.carbon_cycle import init_carbon_state
 
@@ -665,7 +665,7 @@ class TestDifferentiability(unittest.TestCase):
 
         def f(A):
             return jnp.sum(ball_berry_gs(
-                A, jnp.array(0.8), jnp.array(400.0), cfg))
+                A, jnp.array(0.8), jnp.array(400.0), cfg.g1_bb, cfg.g0))
 
         grad = jax.grad(f)(jnp.array(10.0))
         self.assertTrue(jnp.isfinite(grad))

@@ -1,6 +1,6 @@
 """Tests for the canopy leaf-level stomatal primitives.
 
-Covers ``legoesm.land.canopy.stomatal`` — the explicit-parameter
+Covers ``legoesm.land.stomata`` — the explicit-parameter
 ``ball_berry_gs`` / ``medlyn_gs`` used by the two-leaf canopy energy
 balance, which pass per-leaf-class slope/intercept ``(m, b0)`` rather
 than a scalar ``StomataConfig``.
@@ -8,7 +8,7 @@ than a scalar ``StomataConfig``.
 The config-based stomatal roster (``jarvis_gs``,
 ``coupled_farquhar_stomata``, ``compute_stomatal_beta``, and the
 config-signature ``ball_berry_gs`` / ``medlyn_gs``) lives in
-``legoesm.land.carbon.stomata`` and is tested in ``test_stomata.py``.
+``legoesm.land.stomata`` and is tested in ``test_stomata.py``.
 ``StomataConfig`` is imported here only to source representative default
 slope/intercept values, which are then passed explicitly.
 """
@@ -17,8 +17,8 @@ import unittest
 
 import jax.numpy as jnp
 
-from legoesm.land.canopy.stomatal import ball_berry_gs, medlyn_gs
-from legoesm.land.carbon.stomata import StomataConfig
+from legoesm.land.stomata import ball_berry_gs, medlyn_gs
+from legoesm.land.stomata import StomataConfig
 
 
 class TestBallBerry(unittest.TestCase):

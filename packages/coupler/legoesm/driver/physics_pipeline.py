@@ -358,7 +358,7 @@ class PhysicsPipeline:
         soil availability is routed through the SHARED land Jarvis (1976)
         stomatal model: ``beta = compute_stomatal_beta(jarvis_gs(...),
         beta_soil)`` = ``min(beta_soil, clip(gs/gs_ref))`` — REUSING
-        ``legoesm.land.carbon.stomata`` (no re-derived conductance numerics,
+        ``legoesm.land.stomata`` (no re-derived conductance numerics,
         the same fallback path ``compute_effective_beta`` takes when the
         carbon state is unavailable).  ``gs`` closes the canopy term in low
         light (so ``beta -> 0`` at night) and high VPD.  Without the forcing
@@ -374,7 +374,7 @@ class PhysicsPipeline:
             return beta_soil
         # Shared Jarvis stomatal limitation (carbon state unavailable on the
         # AMIP slab path -> LAI=None -> min(beta_soil, beta_canopy)).
-        from legoesm.land.carbon.stomata import (
+        from legoesm.land.stomata import (
             compute_stomatal_beta,
             jarvis_gs,
         )

@@ -4,7 +4,7 @@ Single source of the Arrhenius / peaked-Arrhenius temperature-response factors
 and the Bernacchi (2001) Rubisco kinetic constants used by BOTH land
 photosynthesis paths:
 
-- ``legoesm.land.carbon.stomata`` — the big-leaf SimpleSEB / coupled A-gs solver
+- ``legoesm.land.stomata`` — the big-leaf SimpleSEB / coupled A-gs solver
   (config-based Farquhar C3 + Ball-Berry / Medlyn / Jarvis stomata), and
 - ``legoesm.land.canopy.photosynthesis`` — the two-leaf canonical FvCB C3 + C4.
 
@@ -57,10 +57,11 @@ HA_KC = 79430.0
 HA_KO = 36380.0
 HA_GAMMA = 37830.0
 
-# Ratio of H2O to CO2 molecular diffusivity in air.  Prefactor in the Medlyn
-# USO stomatal model and in the A -> Ci stomatal-diffusion back-calculation, so
-# both the canopy (canopy/stomatal.py) and big-leaf (carbon/stomata.py) paths
-# read it from here rather than each carrying a copy.
+# Ratio of H2O to CO2 molecular diffusivity in air (Fick's law).  Appears as the
+# Medlyn USO prefactor and in every A -> Ci stomatal-diffusion back-calculation,
+# so BOTH the big-leaf (land/stomata.py) and two-leaf canopy
+# (canopy/energy_balance.py) paths read it from here rather than each carrying a
+# copy.
 DIFFUSIVITY_RATIO_H2O_CO2 = 1.6
 
 

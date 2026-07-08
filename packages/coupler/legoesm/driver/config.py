@@ -527,7 +527,7 @@ class ExperimentConfig(NamedTuple):
     land_infil_suction_boost: float = 2.0   # Green-Ampt suction enhancement psi_f/L_f [-]
     land_infiltration_excess: bool = True   # enable Hortonian infiltration-excess runoff
     # Route the soil-water availability through the SHARED land Jarvis (1976)
-    # stomatal model (legoesm.land.carbon.stomata) instead of the bare bucket
+    # stomatal model (legoesm.land.stomata) instead of the bare bucket
     # ramp: beta = min(beta_soil, beta_canopy), the canopy term closing
     # stomata in low light / high VPD.  Requires land_soil_bucket (which
     # supplies beta_soil).  Off → soil-only bucket beta (byte-identical).

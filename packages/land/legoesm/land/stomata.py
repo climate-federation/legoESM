@@ -1,10 +1,20 @@
-"""Plant physiology: Farquhar photosynthesis and stomatal conductance.
+"""Leaf stomatal conductance + big-leaf photosynthesis (neutral single source).
+
+The one home for the land stomatal / plant-physiology roster, shared by BOTH
+surface stacks (the two-leaf canopy in ``land/canopy/`` and the big-leaf
+SimpleSEB path).  Deliberately at the neutral ``land`` top level — NOT under
+``carbon/`` or ``canopy/`` — so neither subpackage owns it and there is exactly
+one copy of the stomatal-conductance numerics.
 
 Models implemented:
-- Farquhar et al. (1980): C3 biochemical photosynthesis.
+- Farquhar et al. (1980): C3 biochemical photosynthesis (big-leaf).
 - Ball, Woodrow & Berry (1987): empirical stomatal conductance.
 - Medlyn et al. (2011): optimal stomatal conductance (USO).
 - Jarvis (1976): multiplicative stomatal conductance (CO2-independent).
+
+The Ball-Berry / Medlyn kernels take the slope/intercept as explicit arguments
+(so the two-leaf canopy can pass per-leaf-class C3/C4 values); the big-leaf
+coupled solver unpacks its scalar ``StomataConfig`` at the call site.
 
 When the carbon cycle is active, the Farquhar model replaces the
 light-use-efficiency GPP and is coupled to Ball-Berry or Medlyn stomatal
@@ -47,8 +57,6 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.land.canopy.sif import SIFConfig
-from legoesm.land.canopy.stomatal import ball_berry_gs as _ball_berry_core
-from legoesm.land.canopy.stomatal import medlyn_gs as _medlyn_core
 from legoesm.land.leaf_biophysics import (
     DIFFUSIVITY_RATIO_H2O_CO2,
     GAMMA_STAR25_UMOL_MOL,
@@ -63,10 +71,13 @@ from legoesm.land.leaf_biophysics import (
 )
 from legoesm.thermo import saturation_vapor_pressure
 
-# Fixed Farquhar / gas-exchange constants (not tunable).  The H2O:CO2
-# diffusivity ratio is shared via leaf_biophysics.DIFFUSIVITY_RATIO_H2O_CO2.
+# Fixed Farquhar / gas-exchange constants (not tunable).
 _FARQUHAR_WJ_GAMMA_COEFF = 8.0      # 4*Ci + 8*Gamma* electron-transport denominator
 _CI_CA_INIT_RATIO = 0.7             # initial intercellular:ambient CO2 guess
+# H2O:CO2 diffusivity ratio (Medlyn USO prefactor + A -> Ci back-calc) is the
+# single-source constant DIFFUSIVITY_RATIO_H2O_CO2 imported from leaf_biophysics.
+# Floor on the vapour-pressure deficit [kPa] guarding 1/sqrt(VPD) in Medlyn.
+_VPD_FLOOR_KPA = 0.05
 
 
 # =====================================================================
@@ -332,30 +343,52 @@ def ball_berry_gs(
     A: jnp.ndarray,
     RH: jnp.ndarray,
     Cs: jnp.ndarray,
-    config: StomataConfig,
+    slope: jnp.ndarray | float,
+    intercept: jnp.ndarray | float,
 ) -> jnp.ndarray:
     """Ball-Berry (1987) stomatal conductance [mol H2O/m2/s].
 
-    Config wrapper over the shared leaf-level primitive in
-    ``legoesm.land.canopy.stomatal`` (single source of the gs numerics):
-    gs = g0 + g1_bb * max(A, 0) * RH / Cs.
+    Single source of the gs numerics for BOTH land surface stacks — the
+    slope/intercept are injected explicitly so the two-leaf canopy can pass
+    per-leaf-class ``(m_C3, b0_C3)`` / ``(m_C4, b0_C4)`` and the big-leaf
+    SimpleSEB solver can pass ``(config.g1_bb, config.g0)``.
+
+    ``gs = intercept + slope * max(A, 0) * RH / Cs``, lower-bounded by
+    ``intercept``.
+
+    Parameters
+    ----------
+    A : net assimilation rate [umol CO2/m2/s]
+    RH : relative humidity at the leaf surface [-]
+    Cs : CO2 concentration at the leaf surface [umol/mol]
+    slope : Ball-Berry slope ``m`` / ``g1_bb`` [-]
+    intercept : residual conductance ``b0`` / ``g0`` [mol/m2/s]
     """
-    return _ball_berry_core(A, RH, Cs, config.g1_bb, config.g0)
+    A_pos = jnp.maximum(A, 0.0)
+    Cs_safe = jnp.maximum(Cs, 1.0)
+    return jnp.maximum(intercept + slope * A_pos * RH / Cs_safe, intercept)
 
 
 def medlyn_gs(
     A: jnp.ndarray,
     VPD_kPa: jnp.ndarray,
     Cs: jnp.ndarray,
-    config: StomataConfig,
+    g1: jnp.ndarray | float,
+    g0: jnp.ndarray | float,
 ) -> jnp.ndarray:
-    """Medlyn et al. (2011) optimal stomatal conductance [mol H2O/m2/s].
+    """Medlyn et al. (2011) optimal (USO) stomatal conductance [mol H2O/m2/s].
 
-    Config wrapper over the shared leaf-level primitive in
-    ``legoesm.land.canopy.stomatal`` (single source of the gs numerics):
-    gs = g0 + 1.6 * (1 + g1_med / sqrt(VPD)) * max(A, 0) / Cs.
+    Single source of the gs numerics (explicit-arg, see :func:`ball_berry_gs`):
+    ``gs = g0 + 1.6 * (1 + g1 / sqrt(VPD)) * max(A, 0) / Cs``, lower-bounded by
+    ``g0``.  ``g1`` [kPa^0.5]; ``VPD_kPa`` floored to guard 1/sqrt(VPD).
     """
-    return _medlyn_core(A, VPD_kPa, Cs, config.g1_med, config.g0)
+    A_pos = jnp.maximum(A, 0.0)
+    Cs_safe = jnp.maximum(Cs, 1.0)
+    VPD = jnp.maximum(VPD_kPa, _VPD_FLOOR_KPA)
+    return jnp.maximum(
+        g0 + DIFFUSIVITY_RATIO_H2O_CO2 * (1.0 + g1 / jnp.sqrt(VPD)) * A_pos / Cs_safe,
+        g0,
+    )
 
 
 def jarvis_gs(
@@ -477,9 +510,9 @@ def solve_coupled_farquhar_ci(
             Ci, APAR_umol, T_leaf, config, beta_soil, canopy_scaling)
 
         if config.stomata_model == "medlyn":
-            gs = medlyn_gs(A_net, VPD_kPa, Ca, config)
+            gs = medlyn_gs(A_net, VPD_kPa, Ca, config.g1_med, config.g0)
         else:
-            gs = ball_berry_gs(A_net, RH, Ca, config)
+            gs = ball_berry_gs(A_net, RH, Ca, config.g1_bb, config.g0)
 
         # Update Ci via stomatal diffusion (1.6 = H2O/CO2 ratio)
         gs_safe = jnp.maximum(gs, config.g0)
@@ -492,9 +525,9 @@ def solve_coupled_farquhar_ci(
         Ci, APAR_umol, T_leaf, config, beta_soil, canopy_scaling)
 
     if config.stomata_model == "medlyn":
-        gs = medlyn_gs(A_net, VPD_kPa, Ca, config)
+        gs = medlyn_gs(A_net, VPD_kPa, Ca, config.g1_med, config.g0)
     else:
-        gs = ball_berry_gs(A_net, RH, Ca, config)
+        gs = ball_berry_gs(A_net, RH, Ca, config.g1_bb, config.g0)
 
     # GPP: A_gross [umol CO2/m2/s] -> gC/m2/s
     gpp = jnp.maximum(A_gross, 0.0) * _MC

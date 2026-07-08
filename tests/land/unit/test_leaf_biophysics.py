@@ -2,7 +2,7 @@
 
 Covers the single-source Arrhenius / peaked-Arrhenius temperature responses and
 the Bernacchi (2001) kinetic constants that both land photosynthesis paths
-(``carbon/stomata.py`` big-leaf and ``canopy/photosynthesis.py`` two-leaf) now
+(``land/stomata.py`` big-leaf and ``canopy/photosynthesis.py`` two-leaf) now
 import instead of each carrying their own copy.
 """
 

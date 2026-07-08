@@ -55,7 +55,7 @@ from legoesm.land.leaf_biophysics import (
 
 # --- reference temperatures ---
 # Gas constant + 25 degC reference come from leaf_biophysics (shared with the
-# big-leaf carbon/stomata FvCB path); the gas constant was previously hardcoded
+# big-leaf land/stomata FvCB path); the gas constant was previously hardcoded
 # as 8.314 here, which both drifted from constants.R_universal and duplicated
 # the sibling path's Arrhenius helper.
 _T_REF = T_REF_K    # [K] reference temperature (25 degC)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 import pytest
 
-from legoesm.land.carbon.stomata import (
+from legoesm.land.stomata import (
     arrhenius, peaked_arrhenius,
     farquhar_photosynthesis, ball_berry_gs, medlyn_gs, jarvis_gs,
     coupled_farquhar_stomata, compute_stomatal_beta,
@@ -93,36 +93,36 @@ class Test7e_FarquharSoilStress:
 
 class Test7f_BallBerry:
     def test_gs_at_zero_A(self):
-        gs = ball_berry_gs(jnp.zeros(SHAPE), jnp.full(SHAPE, 0.7), jnp.full(SHAPE, 400.0), CFG)
+        gs = ball_berry_gs(jnp.zeros(SHAPE), jnp.full(SHAPE, 0.7), jnp.full(SHAPE, 400.0), CFG.g1_bb, CFG.g0)
         assert jnp.allclose(gs, CFG.g0, atol=1e-10)
 
     def test_gs_increases_with_A(self):
-        gs_low = ball_berry_gs(jnp.full(SHAPE, 5.0), jnp.full(SHAPE, 0.7), jnp.full(SHAPE, 400.0), CFG)
-        gs_high = ball_berry_gs(jnp.full(SHAPE, 20.0), jnp.full(SHAPE, 0.7), jnp.full(SHAPE, 400.0), CFG)
+        gs_low = ball_berry_gs(jnp.full(SHAPE, 5.0), jnp.full(SHAPE, 0.7), jnp.full(SHAPE, 400.0), CFG.g1_bb, CFG.g0)
+        gs_high = ball_berry_gs(jnp.full(SHAPE, 20.0), jnp.full(SHAPE, 0.7), jnp.full(SHAPE, 400.0), CFG.g1_bb, CFG.g0)
         assert jnp.all(gs_high > gs_low)
 
     def test_gs_increases_with_RH(self):
-        gs_dry = ball_berry_gs(jnp.full(SHAPE, 10.0), jnp.full(SHAPE, 0.3), jnp.full(SHAPE, 400.0), CFG)
-        gs_humid = ball_berry_gs(jnp.full(SHAPE, 10.0), jnp.full(SHAPE, 0.9), jnp.full(SHAPE, 400.0), CFG)
+        gs_dry = ball_berry_gs(jnp.full(SHAPE, 10.0), jnp.full(SHAPE, 0.3), jnp.full(SHAPE, 400.0), CFG.g1_bb, CFG.g0)
+        gs_humid = ball_berry_gs(jnp.full(SHAPE, 10.0), jnp.full(SHAPE, 0.9), jnp.full(SHAPE, 400.0), CFG.g1_bb, CFG.g0)
         assert jnp.all(gs_humid > gs_dry)
 
     def test_gs_ge_g0(self):
-        gs = ball_berry_gs(jnp.full(SHAPE, -5.0), jnp.full(SHAPE, 0.7), jnp.full(SHAPE, 400.0), CFG)
+        gs = ball_berry_gs(jnp.full(SHAPE, -5.0), jnp.full(SHAPE, 0.7), jnp.full(SHAPE, 400.0), CFG.g1_bb, CFG.g0)
         assert jnp.all(gs >= CFG.g0 - 1e-15)
 
 
 class Test7g_Medlyn:
     def test_gs_at_zero_A(self):
-        gs = medlyn_gs(jnp.zeros(SHAPE), jnp.full(SHAPE, 1.0), jnp.full(SHAPE, 400.0), CFG)
+        gs = medlyn_gs(jnp.zeros(SHAPE), jnp.full(SHAPE, 1.0), jnp.full(SHAPE, 400.0), CFG.g1_med, CFG.g0)
         assert jnp.allclose(gs, CFG.g0, atol=1e-10)
 
     def test_gs_decreases_with_VPD(self):
-        gs_low = medlyn_gs(jnp.full(SHAPE, 10.0), jnp.full(SHAPE, 0.5), jnp.full(SHAPE, 400.0), CFG)
-        gs_high = medlyn_gs(jnp.full(SHAPE, 10.0), jnp.full(SHAPE, 3.0), jnp.full(SHAPE, 400.0), CFG)
+        gs_low = medlyn_gs(jnp.full(SHAPE, 10.0), jnp.full(SHAPE, 0.5), jnp.full(SHAPE, 400.0), CFG.g1_med, CFG.g0)
+        gs_high = medlyn_gs(jnp.full(SHAPE, 10.0), jnp.full(SHAPE, 3.0), jnp.full(SHAPE, 400.0), CFG.g1_med, CFG.g0)
         assert jnp.all(gs_low > gs_high)
 
     def test_gs_ge_g0(self):
-        gs = medlyn_gs(jnp.full(SHAPE, -5.0), jnp.full(SHAPE, 1.0), jnp.full(SHAPE, 400.0), CFG)
+        gs = medlyn_gs(jnp.full(SHAPE, -5.0), jnp.full(SHAPE, 1.0), jnp.full(SHAPE, 400.0), CFG.g1_med, CFG.g0)
         assert jnp.all(gs >= CFG.g0 - 1e-15)
 
 

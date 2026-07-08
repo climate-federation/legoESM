@@ -18,7 +18,7 @@ import jax.numpy as jnp
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.canopy.sif import leaf_sif
 from legoesm.land.carbon.config import CarbonState
-from legoesm.land.carbon.stomata import (
+from legoesm.land.stomata import (
     compute_stomatal_beta,
     jarvis_gs,
     solve_coupled_farquhar_ci,
