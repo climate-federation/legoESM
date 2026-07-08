@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -397,7 +398,11 @@ def main(argv=None):
     if args.scorecard or args.no_plot or args.gate:
         diag = compute_amip_diagnostics(args.run_dir)
         sc = amip_realism_scorecard(diag, tol_scale=args.tol_scale)
-        sc_path = os.path.join(str(args.run_dir), f"amip_scorecard_{label}.json")
+        # Sanitize the label for the filename — a label like "C48/L40" would
+        # otherwise be read as a path separator (FileNotFoundError).
+        _safe_label = re.sub(r"[^0-9A-Za-z._+-]", "_", str(label))
+        sc_path = os.path.join(str(args.run_dir),
+                               f"amip_scorecard_{_safe_label}.json")
         write_scorecard(sc, sc_path)
         print(f"SCORECARD {sc_path}")
         print(format_scorecard_line(sc))
