@@ -64,7 +64,12 @@ dependencies = [
 
 [project.optional-dependencies]
 canopy = ["clm-ml-jax>=0.1.0"]
-ml = ["imageio>=2.30", "equinox>=0.11", "optax>=0.2"]
+# gcsfs/fsspec included: the ML training lane's DEFAULT ERA5 path is a gs://
+# zarr store (load_era5_samples / era5_to_state), so the ml extra must open it
+# without also requesting [data] (#817 papercut: the WB runbook env built
+# --extras dev only and hit ModuleNotFoundError: gcsfs at first data load).
+ml = ["imageio>=2.30", "equinox>=0.11", "optax>=0.2",
+      "gcsfs>=2024.2", "fsspec>=2024.2"]
 mesh = ["pymetis>=1.2", "scipy>=1.10"]
 viz = ["matplotlib>=3.9", "cartopy>=0.23"]
 data = [
