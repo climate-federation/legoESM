@@ -775,6 +775,10 @@ class ExperimentConfig(NamedTuple):
     # the lever for the AMIP convective-precipitation deficit.  Default matches
     # BechtoldConfig.cape_threshold (byte-identical when unset).
     bechtold_cape_threshold: float = 70.0
+    # Bechtold convective-top pressure [Pa]; terminates the (non-detraining)
+    # plume + subsidence gate. 150 hPa stability cap (see BechtoldConfig.
+    # p_conv_top_pa); raise toward 100 hPa if deep tropical tops are clipped.
+    bechtold_conv_top_pa: float = 15000.0
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -1619,6 +1623,8 @@ class ExperimentConfig(NamedTuple):
             sbm_cape_threshold=getattr(amip_cfg, 'sbm_cape_threshold', 70.0),
             bechtold_cape_threshold=getattr(
                 amip_cfg, 'bechtold_cape_threshold', 70.0),
+            bechtold_conv_top_pa=getattr(
+                amip_cfg, 'bechtold_conv_top_pa', 15000.0),
             sigma_b=amip_cfg.sigma_b,
             k_BL_max_per_day=amip_cfg.k_BL_max_per_day,
             k_free_per_day=amip_cfg.k_free_per_day,
@@ -1751,6 +1757,7 @@ class ExperimentConfig(NamedTuple):
             sbm_RH_ref=self.sbm_RH_ref,
             sbm_cape_threshold=self.sbm_cape_threshold,
             bechtold_cape_threshold=self.bechtold_cape_threshold,
+            bechtold_conv_top_pa=self.bechtold_conv_top_pa,
             sigma_b=self.sigma_b,
             k_BL_max_per_day=self.k_BL_max_per_day,
             k_free_per_day=self.k_free_per_day,

@@ -596,6 +596,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[J/kg]; lower it to trigger convection more readily "
                              "at coarse resolution (the AMIP precip-deficit lever). "
                              f"Default {_EXPERIMENT_DEFAULTS.bechtold_cape_threshold}.")
+    parser.add_argument("--bechtold-conv-top-pa", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa,
+                        dest="bechtold_conv_top_pa",
+                        help="Bechtold convective-top pressure [Pa]: gates the "
+                             "(non-detraining) plume + compensating-subsidence "
+                             "above this cutoff (stability). 15000 (150 hPa) is a "
+                             "tighter-than-kernel cap; raise toward 10000 (100 hPa) "
+                             "if deep tropical tops are clipped. "
+                             f"Default {_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa}.")
 
     # Joint ML physics parameterization
     parser.add_argument("--physics-parameterization", type=str, default="none",
@@ -1244,6 +1253,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sbm_RH_ref=args.sbm_rh_ref,
         sbm_cape_threshold=args.sbm_cape_threshold,
         bechtold_cape_threshold=args.bechtold_cape_threshold,
+        bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         physics_parameterization=args.physics_parameterization,

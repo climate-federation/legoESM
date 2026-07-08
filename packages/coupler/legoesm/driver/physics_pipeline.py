@@ -2546,6 +2546,7 @@ def _resolve_convection(config):
         from legoesm.atmosphere.physics.convection.config import BechtoldConfig
         conv_config = BechtoldConfig(
             cape_threshold=getattr(config, 'bechtold_cape_threshold', 70.0),
+            p_conv_top_pa=getattr(config, 'bechtold_conv_top_pa', 15000.0),
             precip_efficiency=getattr(
                 config, 'convective_precip_efficiency', 0.0),
         )

@@ -1794,3 +1794,18 @@ def test_convective_precip_efficiency_allows_bechtold():
             "--convection", "kuo",
             "--convective-precip-efficiency", "0.6",
         ]), parser)
+
+
+def test_bechtold_conv_top_pa_flows_to_config():
+    """--bechtold-conv-top-pa round-trips into ExperimentConfig (the Bechtold
+    plume-termination stability cap); default 15000 Pa (150 hPa)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.bechtold_conv_top_pa == 15000.0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--bechtold-conv-top-pa", "12000",
+    ]), parser))
+    assert cfg.bechtold_conv_top_pa == 12000.0
