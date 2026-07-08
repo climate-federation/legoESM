@@ -21,7 +21,12 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import mixing_length, virtual_temperature
+from legoesm.atmosphere.physics._shared import (
+    buoyancy_coefficient,
+    exner_function,
+    mixing_length,
+    virtual_temperature,
+)
 from legoesm.atmosphere.physics.turbulence.config import SmagorinskyConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -137,12 +142,14 @@ def smagorinsky_turbulence(
     S2 = du_dz ** 2 + dv_dz ** 2 + 1e-10
     S = jnp.sqrt(S2)
 
-    # Gradient Richardson number at the interfaces (virtual θ buoyancy).
-    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
-    theta_v = virtual_temperature(T, q_v) * exner
+    # Gradient Richardson number at the interfaces (virtual θ buoyancy),
+    # via the canonical inverse-Exner + shared buoyancy-coefficient helpers
+    # (clips kept at the call sites).
+    exner_pref = 1.0 / exner_function(p_full)
+    theta_v = virtual_temperature(T, q_v) * exner_pref
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
-    N2 = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
+    N2 = buoyancy_coefficient(jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
     Ri = N2 / S2
 
     # Lilly (1962) buoyancy factor √(max(0, 1 − Ri/Pr_t)): enhances mixing

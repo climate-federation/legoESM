@@ -25,7 +25,11 @@ def test_argparse_roundtrip():
 
 def test_argparse_defaults_and_all_modes():
     cfg = mod.build_scale_config_from_args([])
-    assert cfg.mode == "neural_gcm" and cfg.resolution_deg == 0.7 and cfg.grad_accum == 1
+    # --resolution defaults to None (#817 papercut fix): the grid comes from
+    # the YAML; the value is derived for logging and an explicit mismatch is a
+    # hard error (see test_resolution_yaml_check below).
+    assert cfg.mode == "neural_gcm" and cfg.resolution_deg is None and cfg.grad_accum == 1
+    assert cfg.training_core == "latlon"   # default core: byte-unchanged path
     for m in ("physics", "neural_gcm", "sfno"):
         assert mod.build_scale_config_from_args(["--mode", m]).mode == m
 
@@ -33,6 +37,32 @@ def test_argparse_defaults_and_all_modes():
 def test_argparse_rejects_bad_mode():
     with pytest.raises(SystemExit):
         mod.build_scale_config_from_args(["--mode", "bogus"])
+
+
+def test_argparse_training_core_roundtrip_and_rejects_bad():
+    """#817: --training-core selects the spectral (semi-implicit) training
+    core; unknown values are rejected by argparse choices."""
+    for core in ("latlon", "spectral"):
+        cfg = mod.build_scale_config_from_args(["--training-core", core])
+        assert cfg.training_core == core
+    with pytest.raises(SystemExit):
+        mod.build_scale_config_from_args(["--training-core", "bogus"])
+
+
+def test_resolution_yaml_check():
+    """#817 papercut: --resolution must MATCH the YAML grid or hard-error —
+    the old flag silently logged one resolution while training at another."""
+    yml = {"n_lat": 256, "n_lon": 512}
+    # None (default) -> derived from the YAML.
+    cfg = mod.build_scale_config_from_args([])
+    assert abs(mod._check_resolution_matches_yaml(cfg, yml) - 180.0 / 256) < 1e-9
+    # Matching explicit value passes.
+    cfg = mod.build_scale_config_from_args(["--resolution", "0.703125"])
+    assert mod._check_resolution_matches_yaml(cfg, yml) == 0.703125
+    # Mismatch (2.8 deg vs a 0.7 deg YAML) -> SystemExit, not a silent no-op.
+    cfg = mod.build_scale_config_from_args(["--resolution", "2.8"])
+    with pytest.raises(SystemExit, match="does not match the YAML"):
+        mod._check_resolution_matches_yaml(cfg, yml)
 
 
 def test_config_yaml_loads():

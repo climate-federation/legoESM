@@ -58,6 +58,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.ml_emulator import (
     ml_gwd,
     GWDEmulator,
 )
+from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 from legoesm.atmosphere.physics.thermodynamics import (
     pressure_from_eos,
     reconstruct_half_level_pressure_hydrostatic,
@@ -65,71 +66,8 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 
 
-# '+'-composable diagnostic sources (mirrors ExperimentConfig.validate_strict;
-# prognostic_spectral / e3sm_cam / ml_emulator carry per-step state and are
-# NOT composable). Orographic members accept the per-column ``h_topo_col``
-# launch amplitude.
-COMPOSABLE_GWD_SCHEMES = ("rayleigh", "lindzen", "mcfarlane", "hines")
-OROGRAPHIC_GWD_SCHEMES = ("lindzen", "mcfarlane", "e3sm_cam")
-
-
-def gwd_scheme_is_orographic(scheme: str) -> bool:
-    """True when ``scheme`` (single or '+'-composite) has an orographic member."""
-    return any(p in OROGRAPHIC_GWD_SCHEMES for p in str(scheme).split("+"))
-
-
-def _make_composite_gwd_fn(members):
-    """Sum the tendencies of resolved GWD members (name, fn, sub_config).
-
-    The returned kernel keeps the canonical column signature so BOTH call
-    paths work unchanged: the hydrostatic/spectral factories call it
-    positionally with the parent ``GravityWaveDragConfig`` as ``config``
-    (ignored here — each member was bound to its own sub-config at build
-    time), and the compiled PhysicsPipeline calls it with keywords.
-    ``h_topo_col`` is forwarded only to orographic members.
-    """
-    def composite_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
-                      dt, config=None, h_topo_col=None):
-        out = None
-        for name, fn, sub_config in members:
-            kw = (
-                {"h_topo_col": h_topo_col}
-                if name in OROGRAPHIC_GWD_SCHEMES else {}
-            )
-            o = fn(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
-                   dt, sub_config, **kw)
-            # GWDOutput is all-array (du_dt, dv_dt, dT_dt, eps_gwd):
-            # distinct wave sources superpose linearly.
-            out = o if out is None else type(o)(
-                *(a + b for a, b in zip(out, o))
-            )
-        return out
-
-    return composite_gwd
-
-
 def get_gwd_fn(config: GravityWaveDragConfig):
-    """Select the GWD backend based on config.scheme.
-
-    A '+'-joined scheme (e.g. ``"hines+mcfarlane"``) composes multiple
-    diagnostic sources whose tendencies are summed — orographic and
-    non-orographic waves parameterize distinct sources and run together
-    in CMIP-class GCMs. Returns the composite scheme string as the name
-    and the PARENT config as the scheme config.
-    """
-    if "+" in config.scheme:
-        parts = config.scheme.split("+")
-        bad = [p for p in parts if p not in COMPOSABLE_GWD_SCHEMES]
-        if bad or len(parts) < 2 or len(set(parts)) != len(parts):
-            raise ValueError(
-                f"composite GWD scheme {config.scheme!r} invalid: parts must "
-                f"be >= 2 distinct members of {COMPOSABLE_GWD_SCHEMES} "
-                f"(offending: {bad or 'duplicate/empty part'})"
-            )
-        members = tuple(
-            get_gwd_fn(config._replace(scheme=p)) for p in parts
-        )
-        return config.scheme, _make_composite_gwd_fn(members), config
+    """Select the GWD backend based on config.scheme."""
     if config.scheme == "rayleigh":
         return "rayleigh", rayleigh_gwd, config.rayleigh
     elif config.scheme == "lindzen":
@@ -146,8 +84,163 @@ def get_gwd_fn(config: GravityWaveDragConfig):
         return "ml_emulator", ml_gwd, config.ml_emulator
     elif config.scheme == "none":
         return "none", None, None
+    elif "+" in config.scheme:
+        # Composite: a ``+``-joined list of GWD sources whose tendencies are
+        # summed (e.g. ``mcfarlane+prognostic_spectral`` = orographic +
+        # non-orographic, issue #834).  ``_combined_gwd`` fans out to each
+        # part's single-scheme backend and adds their du/dv/dT; the full
+        # ``config`` is returned as the "scheme config" because the executor
+        # needs every part's sub-config (and reads ``config.scheme`` to know
+        # the parts).  Validate the composition HERE (factory chokepoint,
+        # independent of ExperimentConfig.validate_strict) so an invalid
+        # composite fails loudly instead of hitting a low-level TypeError or
+        # silently corrupting the spectrum carry inside the executor.
+        _validate_gwd_composite(config.scheme)
+        return config.scheme, _combined_gwd, config
     else:
         raise ValueError(f"Unknown GWD scheme: {config.scheme!r}")
+
+
+# ---------------------------------------------------------------------------
+# Composite (multi-source) GWD — issue #834
+# ---------------------------------------------------------------------------
+#
+# Orographic (lindzen/mcfarlane) and non-orographic (rayleigh/hines/
+# prognostic_spectral) drag parameterize DISTINCT gravity-wave populations
+# launched by different sources (flow over topography vs convection/fronts),
+# so as body forces on the same column their momentum and thermal tendencies
+# add linearly.  A ``+``-joined ``gravity_wave_drag`` string composes them.
+#
+# At most ONE stateful part (``prognostic_spectral``, which carries a
+# wave-action spectrum through ``phys_state.gwd_spectrum``) may appear; its
+# spectrum threads through ``spectrum_in``/``spectrum_out``.  The stateless
+# parts hold no per-step state.  ``e3sm_cam`` / ``ml_emulator`` are NOT
+# composable here (they need extra per-column source fields / a network
+# module the composite signature does not carry).
+_GWD_COMPOSABLE_STATELESS = ("rayleigh", "lindzen", "mcfarlane", "hines")
+_GWD_COMPOSABLE_STATEFUL = ("prognostic_spectral",)
+_GWD_COMPOSABLE = _GWD_COMPOSABLE_STATELESS + _GWD_COMPOSABLE_STATEFUL
+# Orographic parts accept the optional per-column subgrid-topo stddev.
+_GWD_OROGRAPHIC_PARTS = ("lindzen", "mcfarlane")
+
+
+def gwd_carries_spectrum(scheme: str) -> bool:
+    """True if a GWD scheme string threads a prognostic wave-action spectrum.
+
+    Accepts a single scheme (``"prognostic_spectral"``) or a ``+``-composite
+    (``"mcfarlane+prognostic_spectral"``).  Shared by the driver's
+    prognostic-carry plumbing (``physics_pipeline``) and the spectrum seeding
+    (``init_physics_state``) so the "does this scheme carry a spectrum?"
+    predicate is defined in exactly one place.
+    """
+    return any(p in _GWD_COMPOSABLE_STATEFUL for p in scheme.split("+"))
+
+
+# Orographic members accept the per-column ``h_topo_col`` launch amplitude
+# (subgrid orography stddev). ``e3sm_cam`` shares the orographic launch
+# signature; matches the factories' ``scheme_name in (...)`` orographic test.
+_GWD_OROGRAPHIC_LAUNCH = _GWD_OROGRAPHIC_PARTS + ("e3sm_cam",)
+
+
+def gwd_scheme_is_orographic(scheme: str) -> bool:
+    """True when ``scheme`` (single or ``+``-composite) has an orographic member.
+
+    Shared predicate for the compiled ``physics_pipeline`` h_topo_col path so
+    "does this scheme launch from subgrid orography?" is defined once.
+    """
+    return any(p in _GWD_OROGRAPHIC_LAUNCH for p in str(scheme).split("+"))
+
+
+def _validate_gwd_composite(scheme: str) -> None:
+    """Raise ValueError unless ``scheme`` is a well-formed GWD composite.
+
+    Factory-level dispatch hardening (independent of
+    ``ExperimentConfig.validate_strict``): every part must be composable and at
+    most one stateful source (``prognostic_spectral``) may appear (its
+    wave-action spectrum is a single carry).  Without this guard the executor
+    would fan out to a non-composable backend with the wrong signature
+    (``ml_emulator`` needs a network module; ``e3sm_cam`` needs extra source
+    fields) — a low-level ``TypeError`` — or run two spectral sources from the
+    same ``spectrum_in`` and return only the last ``spectrum_out``, silently
+    corrupting the carry.
+    """
+    parts = scheme.split("+")
+    bad = [p for p in parts if p not in _GWD_COMPOSABLE]
+    if bad:
+        raise ValueError(
+            f"Non-composable GWD part(s) {bad} in composite {scheme!r}; "
+            f"composable sources are {_GWD_COMPOSABLE} "
+            f"(e3sm_cam / ml_emulator are not composable)."
+        )
+    n_stateful = sum(p in _GWD_COMPOSABLE_STATEFUL for p in parts)
+    if n_stateful > 1:
+        raise ValueError(
+            f"A GWD composite may contain at most one stateful source "
+            f"{_GWD_COMPOSABLE_STATEFUL} (its wave-action spectrum is a single "
+            f"carry), got {n_stateful} in {scheme!r}."
+        )
+
+
+def _combined_gwd(
+    u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
+    config, spectrum_in, h_topo_col=None,
+):
+    """Sum the tendencies of a ``+``-composite GWD scheme (issue #834).
+
+    ``config`` is the full :class:`GravityWaveDragConfig`; its ``scheme``
+    field (e.g. ``"mcfarlane+prognostic_spectral"``) names the parts and its
+    sub-configs supply each backend's parameters.  Returns
+    ``(GWDOutput, spectrum_out)`` mirroring ``prognostic_spectral_gwd`` so the
+    composite is a drop-in for the prognostic call path.  ``spectrum_out`` is
+    the advanced spectrum when a ``prognostic_spectral`` part is present, else
+    ``spectrum_in`` unchanged (harmless passthrough for a stateless
+    composite).
+    """
+    parts = config.scheme.split("+")
+    du = dv = dT = eps = None
+    spectrum_out = spectrum_in
+    for part in parts:
+        # Per-part single-scheme dispatch reuses get_gwd_fn (which raises on an
+        # unknown part) → no duplicated scheme→backend table.
+        _name, fn, sub_cfg = get_gwd_fn(config._replace(scheme=part))
+        if part in _GWD_COMPOSABLE_STATEFUL:
+            out, spectrum_out = fn(
+                u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
+                sub_cfg, spectrum_in,
+            )
+        elif part in _GWD_OROGRAPHIC_PARTS:
+            out = fn(
+                u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
+                sub_cfg, h_topo_col=h_topo_col,
+            )
+        else:
+            out = fn(
+                u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
+                sub_cfg,
+            )
+        du = out.du_dt if du is None else du + out.du_dt
+        dv = out.dv_dt if dv is None else dv + out.dv_dt
+        dT = out.dT_dt if dT is None else dT + out.dT_dt
+        eps = out.eps_gwd if eps is None else eps + out.eps_gwd
+    return GWDOutput(du_dt=du, dv_dt=dv, dT_dt=dT, eps_gwd=eps), spectrum_out
+
+
+def _combined_spec_in(config, phys_state, ncol):
+    """Read or seed the wave-action spectrum for a spectrum-carrying composite.
+
+    Mirrors the pure-``prognostic_spectral`` spec-in logic in each factory,
+    reading the spectrum sub-config from ``config.prognostic_spectral`` (the
+    composite's full config).  Reseeds to ``launch_flux`` when absent or the
+    column count changed.
+    """
+    pcfg = config.prognostic_spectral
+    shape = (ncol, pcfg.n_azimuths, pcfg.n_wavenumbers)
+    if phys_state is not None:
+        spec_in = phys_state.gwd_spectrum
+        if spec_in.shape[0] != ncol:
+            spec_in = jnp.full(shape, pcfg.launch_flux)
+        return spec_in
+    return jnp.full(shape, pcfg.launch_flux)
 
 
 from legoesm.atmosphere.physics._shared import (
@@ -226,7 +319,12 @@ def _make_hydrostatic_gwd(
     # mfcc_table=)`` entry point (wiring the convective-heating coupling through
     # the physics pipeline is a separate integration task and must not reach
     # into the convection package from here).
-    is_orographic = gwd_scheme_is_orographic(scheme_name)
+    is_orographic = scheme_name in ("lindzen", "mcfarlane", "e3sm_cam")
+    # Composite (issue #834): a ``+``-joined scheme runs several sources and
+    # sums their tendencies; ``combined_spectrum`` marks the sub-case that also
+    # threads the prognostic wave-action spectrum.
+    is_combined = "+" in scheme_name
+    combined_spectrum = is_combined and gwd_carries_spectrum(scheme_name)
     _ml_model_cache = [None]
 
     def physics_fn(
@@ -288,7 +386,22 @@ def _make_hydrostatic_gwd(
         # Latitude: use grid.lat_face if available, else zeros
         lat = _get_lat_hydrostatic(grid, ncol)
 
-        if is_prognostic:
+        if is_combined:
+            # Composite GWD (#834): sum McFarlane (orographic) + the
+            # non-orographic source(s); thread the spectrum when present.
+            h_topo_col = _extract_subgrid_topo_stddev(grid, ncol)
+            spec_in = (
+                _combined_spec_in(scheme_config, phys_state, ncol)
+                if combined_spectrum else None
+            )
+            gwd_out, spec_new = gwd_fn(
+                u_col, v_col, T_col, p_full_col, p_half_col,
+                z_full, z_half, rho, lat, dt, scheme_config, spec_in,
+                h_topo_col=h_topo_col,
+            )
+            if combined_spectrum:
+                gwd_spectrum_out = spec_new
+        elif is_prognostic:
             sc = scheme_config
             # NOTE: ``spec_in`` (and the prognostic spectrum more
             # broadly) is intentionally allocated at the JAX default
@@ -406,7 +519,14 @@ def _make_mpas_gwd(
     # ``e3sm_cam`` shares the orographic launch signature (accepts the
     # optional per-column ``h_topo_col`` subgrid orographic stddev keyword);
     # its config selects the orographic vs frontal source internally.
-    is_orographic = gwd_scheme_is_orographic(scheme_name)
+    is_orographic = scheme_name in ("lindzen", "mcfarlane", "e3sm_cam")
+    # Composite (issue #834): a stateless ``+``-composite (e.g.
+    # ``hines+mcfarlane``) runs on MPAS by summing its parts; a
+    # spectrum-carrying composite does NOT (the wave-action spectrum is not
+    # threaded through the MPAS PE driver pytree — same limitation as pure
+    # ``prognostic_spectral`` below).
+    is_combined = "+" in scheme_name
+    combined_spectrum = is_combined and gwd_carries_spectrum(scheme_name)
 
     def physics_fn(state, mesh, sigma_coord, phys_state=None):
         from legoesm.grids.voronoi import reconstruct_cell_velocity
@@ -425,13 +545,14 @@ def _make_mpas_gwd(
             )
             return tendencies, gwd_spectrum_out
 
-        if is_prognostic or is_ml:
+        if is_prognostic or is_ml or combined_spectrum:
             raise NotImplementedError(
                 f"GWD scheme {scheme_name!r} on MPAS Voronoi mesh "
                 "needs the prognostic spectrum / ML model state to "
                 "be threaded through the MPAS driver pytree.  Use a "
                 "diagnostic scheme (rayleigh, lindzen, mcfarlane, "
-                "hines) on MPAS until that wiring lands."
+                "hines) — or a stateless '+'-composite of those — on "
+                "MPAS until that wiring lands."
             )
 
         u_edge = state.u.data
@@ -461,7 +582,16 @@ def _make_mpas_gwd(
 
         lat = jnp.asarray(mesh.latCell)
 
-        if is_orographic:
+        if is_combined:
+            # Stateless composite only (spectrum-carrying case raised above).
+            # Orographic parts use the per-cell subgrid-topo stddev.
+            h_topo_col = _extract_subgrid_topo_stddev(mesh, nCells)
+            gwd_out, _ = gwd_fn(
+                u_col, v_col, T_col, p_full_col, p_half_col,
+                z_full, z_half, rho, lat, dt, scheme_config, None,
+                h_topo_col=h_topo_col,
+            )
+        elif is_orographic:
             h_topo_col = _extract_subgrid_topo_stddev(mesh, nCells)
             gwd_out = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half_col,
@@ -524,7 +654,10 @@ def _make_nonhydrostatic_gwd(
     scheme_name, gwd_fn, scheme_config = get_gwd_fn(gwd_config)
     is_prognostic = scheme_name == "prognostic_spectral"
     is_ml = scheme_name == "ml_emulator"
-    is_orographic = gwd_scheme_is_orographic(scheme_name)
+    # Composite (issue #834): sum multiple sources; thread the spectrum when a
+    # prognostic_spectral part is present.
+    is_combined = "+" in scheme_name
+    combined_spectrum = is_combined and gwd_carries_spectrum(scheme_name)
     _ml_model_cache = [None]
 
     def physics_fn(
@@ -598,7 +731,22 @@ def _make_nonhydrostatic_gwd(
 
         lat = _get_lat_hydrostatic(grid, ncol)
 
-        if is_prognostic:
+        if is_combined:
+            # Composite GWD (#834): sum orographic + non-orographic; thread the
+            # spectrum when present.  NH drives orographic parts with the
+            # scalar ``config.h_topo`` (h_topo_col=None), matching this
+            # factory's single-scheme orographic path.
+            spec_in = (
+                _combined_spec_in(scheme_config, phys_state, ncol)
+                if combined_spectrum else None
+            )
+            gwd_out, spec_new = gwd_fn(
+                u_col, v_col, T_col, p_full_col, p_half,
+                z_full, z_half, rho_col, lat, dt, scheme_config, spec_in,
+            )
+            if combined_spectrum:
+                gwd_spectrum_out = spec_new
+        elif is_prognostic:
             sc = scheme_config
             if phys_state is not None:
                 spec_in = phys_state.gwd_spectrum
@@ -627,13 +775,6 @@ def _make_nonhydrostatic_gwd(
                 u_col, v_col, T_col, p_full_col, p_half,
                 z_full, z_half, rho_col, lat, dt, scheme_config,
                 _ml_model_cache[0],
-            )
-        elif is_orographic:
-            h_topo_col = _extract_subgrid_topo_stddev(grid, ncol)
-            gwd_out = gwd_fn(
-                u_col, v_col, T_col, p_full_col, p_half,
-                z_full, z_half, rho_col, lat, dt, scheme_config,
-                h_topo_col=h_topo_col,
             )
         else:
             gwd_out = gwd_fn(
@@ -680,7 +821,10 @@ def _make_spectral_pe_gwd(
     scheme_name, gwd_fn, scheme_config = get_gwd_fn(gwd_config)
     is_prognostic = scheme_name == "prognostic_spectral"
     is_ml = scheme_name == "ml_emulator"
-    is_orographic = gwd_scheme_is_orographic(scheme_name)
+    # Composite (issue #834): sum multiple sources; thread the spectrum when a
+    # prognostic_spectral part is present.
+    is_combined = "+" in scheme_name
+    combined_spectrum = is_combined and gwd_carries_spectrum(scheme_name)
     _ml_model_cache = [None]
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
@@ -735,7 +879,22 @@ def _make_spectral_pe_gwd(
         # Latitude from Gaussian grid
         lat = jnp.broadcast_to(grid.lat[:, None], (n_lat, n_lon)).reshape(ncol)
 
-        if is_prognostic:
+        if is_combined:
+            # Composite GWD (#834): sum orographic + non-orographic; thread the
+            # spectrum when present.  Orographic parts use the scalar
+            # ``config.h_topo`` (h_topo_col=None), matching this factory's
+            # single-scheme orographic path.
+            spec_in = (
+                _combined_spec_in(scheme_config, phys_state, ncol)
+                if combined_spectrum else None
+            )
+            gwd_out, spec_new = gwd_fn(
+                u_col, v_col, T_col, p_full_col, p_half_col,
+                z_full, z_half, rho, lat, dt, scheme_config, spec_in,
+            )
+            if combined_spectrum:
+                gwd_spectrum_out = spec_new
+        elif is_prognostic:
             sc = scheme_config
             if phys_state is not None:
                 spec_in = phys_state.gwd_spectrum
@@ -764,13 +923,6 @@ def _make_spectral_pe_gwd(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config,
                 _ml_model_cache[0],
-            )
-        elif is_orographic:
-            h_topo_col = _extract_subgrid_topo_stddev(grid, ncol)
-            gwd_out = gwd_fn(
-                u_col, v_col, T_col, p_full_col, p_half_col,
-                z_full, z_half, rho, lat, dt, scheme_config,
-                h_topo_col=h_topo_col,
             )
         else:
             gwd_out = gwd_fn(

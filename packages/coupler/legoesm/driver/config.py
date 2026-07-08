@@ -778,6 +778,17 @@ class ExperimentConfig(NamedTuple):
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
+    # Top-of-atmosphere sponge (#836): a Rayleigh damping increasing toward the
+    # model lid to absorb upward-propagating gravity-/convective-wave energy.
+    # The k_BL drag above is maximal at the SURFACE, so the hydrostatic
+    # latlon-cgrid dycore otherwise has NO top sponge -> waves reflect off the
+    # rigid ~35 hPa lid (upper-level noise; blocks aggressive cloud-thinning
+    # calibration).  OFF by default (byte-identical); enabled in the reference
+    # AMIP config.  sin^2 ramp from 0 at sigma=sponge_sigma_top to
+    # sponge_coeff_per_day at the model top; folded into the existing fric_decay.
+    sponge_enabled: bool = False
+    sponge_coeff_per_day: float = 2.0   # Rayleigh damping rate at the model top [1/day]
+    sponge_sigma_top: float = 0.15      # sponge base: sigma below which damping ramps up
 
     # Held-Suarez forcing
     held_suarez_forcing: bool = False  # add HS Newtonian relaxation + Rayleigh drag
@@ -1218,13 +1229,20 @@ class ExperimentConfig(NamedTuple):
             "rayleigh", "lindzen", "mcfarlane", "hines",
             "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",
         )
-        # A ``+``-joined string (e.g. ``hines+mcfarlane``) composes multiple
-        # GWD sources whose tendencies are summed — orographic (mcfarlane) and
-        # non-orographic (hines) parameterize distinct wave sources and are run
-        # together in CMIP-class GCMs.  ``prognostic_spectral`` / ``e3sm_cam``
-        # carry per-step state and are not composable here.
+        # A ``+``-joined string composes multiple GWD sources whose tendencies
+        # are summed — orographic (mcfarlane/lindzen) and non-orographic
+        # (hines/rayleigh/prognostic_spectral) parameterize distinct wave
+        # populations and are run together in CMIP-class GCMs
+        # (e.g. ``hines+mcfarlane`` or ``mcfarlane+prognostic_spectral``,
+        # issue #834).  ``prognostic_spectral`` is the one STATEFUL composable
+        # source — its wave-action spectrum threads through the physics carry,
+        # so at most one stateful source may appear.  ``e3sm_cam`` /
+        # ``ml_emulator`` need extra per-column source fields / a network
+        # module the composite path does not carry and are NOT composable.
+        _composable_stateless = ("rayleigh", "lindzen", "mcfarlane", "hines")
+        _composable_stateful = ("prognostic_spectral",)
+        _composable = _composable_stateless + _composable_stateful
         _gwd_parts = self.gravity_wave_drag.split("+")
-        _composable = ("rayleigh", "lindzen", "mcfarlane", "hines")
         if len(_gwd_parts) > 1:
             bad = [p for p in _gwd_parts if p not in _composable]
             if bad:
@@ -1238,6 +1256,14 @@ class ExperimentConfig(NamedTuple):
             if len(set(_gwd_parts)) != len(_gwd_parts):
                 errors.append(
                     f"composite gravity_wave_drag has duplicate parts: "
+                    f"{self.gravity_wave_drag!r}"
+                )
+            _n_stateful = sum(p in _composable_stateful for p in _gwd_parts)
+            if _n_stateful > 1:
+                errors.append(
+                    f"composite gravity_wave_drag may contain at most one "
+                    f"stateful source {_composable_stateful} (its wave-action "
+                    f"spectrum is a single carry), got {_n_stateful} in "
                     f"{self.gravity_wave_drag!r}"
                 )
         elif self.gravity_wave_drag not in _valid_gwd:
@@ -1596,6 +1622,9 @@ class ExperimentConfig(NamedTuple):
             sigma_b=amip_cfg.sigma_b,
             k_BL_max_per_day=amip_cfg.k_BL_max_per_day,
             k_free_per_day=amip_cfg.k_free_per_day,
+            sponge_enabled=getattr(amip_cfg, 'sponge_enabled', False),
+            sponge_coeff_per_day=getattr(amip_cfg, 'sponge_coeff_per_day', 2.0),
+            sponge_sigma_top=getattr(amip_cfg, 'sponge_sigma_top', 0.15),
             held_suarez_forcing=getattr(amip_cfg, 'held_suarez_forcing', False),
             physics_parameterization=getattr(
                 amip_cfg, 'physics_parameterization', 'none',

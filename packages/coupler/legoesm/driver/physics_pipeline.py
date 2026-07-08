@@ -258,6 +258,12 @@ class PhysicsPipeline:
         # ``None`` (default) preserves bit-exact single-mesh behavior.
         self.column_mesh = column_mesh
         self._cloud_scheme = "none"  # set by build_physics_pipeline
+        # Clear-sky diagnostic (#843): static Python bool set by
+        # build_physics_pipeline from config.output.clear_sky_diag.  When True,
+        # the compiled segment runs a SECOND clouds-off compute_radiation_core
+        # pass to produce CMOR rsutcs/rlutcs; when False (default) every
+        # clear-sky code path is a byte-identical no-op.
+        self._clear_sky_diag = False  # set by build_physics_pipeline (#843)
         # Opt-in convective cumulus cloud-fraction source (set by
         # build_physics_pipeline from ExperimentConfig.convective_cloud).
         # When True, compute_radiation_core feeds the lagged convective precip
@@ -295,6 +301,10 @@ class PhysicsPipeline:
         # MPI, like ``f_land``). None -> kernels use scalar config.h_topo.
         self._gwd_orographic = False
         self.subgrid_topo_stddev = None
+        # Set for a stateless '+'-composite GWD (issue #834): the combined
+        # executor returns a (GWDOutput, spectrum) tuple even with no stateful
+        # part, so the pipeline must unpack it.
+        self._gwd_composite = False
 
     def _blend_land(self, ocean_field, land_field):
         """Blend an ocean/ice surface field with a land field by ``f_land``.
@@ -1365,7 +1375,13 @@ class PhysicsPipeline:
                 # ACTIVE scheme = dropped carry — fail loudly rather
                 # than silently reseed every step (the #405 bug class;
                 # codex review).
-                _sc = self.gwd_config
+                # For a '+'-composite (issue #834) the resolved gwd_config is
+                # the full GravityWaveDragConfig; the spectrum params live on
+                # its ``prognostic_spectral`` sub-config.  For pure
+                # ``prognostic_spectral`` the resolved config IS that
+                # sub-config (get_gwd_fn returns config.prognostic_spectral).
+                _sc = getattr(self.gwd_config, "prognostic_spectral",
+                              self.gwd_config)
                 _spec_shape = (ad.ncol, _sc.n_azimuths, _sc.n_wavenumbers)
                 _spec_in = gwd_spectrum
                 if (_spec_in is None
@@ -1382,6 +1398,21 @@ class PhysicsPipeline:
                 gwd_out, gwd_spectrum_out = self.gwd_fn(
                     spectrum_in=_spec_in, **_gwd_kwargs,
                 )
+            elif self._gwd_composite:
+                # Stateless '+'-composite (e.g. ``hines+mcfarlane``, issue #834):
+                # the combined executor mirrors the prognostic signature and
+                # returns ``(GWDOutput, spectrum_out)`` even with no stateful
+                # part, so pass ``spectrum_in=None`` and discard the (None)
+                # spectrum — there is no wave-action carry to thread.  A
+                # composite with an orographic member (mcfarlane/lindzen) still
+                # needs the per-column SSO h_topo_col (else that member falls
+                # back to scalar config.h_topo — a 500 m mountain over ocean).
+                if (self._gwd_orographic
+                        and self.subgrid_topo_stddev is not None):
+                    _gwd_kwargs["h_topo_col"] = ad.flatten_2d(
+                        self.subgrid_topo_stddev
+                    )
+                gwd_out, _ = self.gwd_fn(spectrum_in=None, **_gwd_kwargs)
             else:
                 if (self._gwd_orographic
                         and self.subgrid_topo_stddev is not None):
@@ -3008,6 +3039,10 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline.orbit = (earth_orbit()
                       if getattr(config, 'orbital_insolation', False) else None)
     pipeline._cloud_scheme = getattr(config, 'cloud_scheme', 'none')
+    # Clear-sky diagnostic (#843): enable the 2nd clouds-off radiation pass
+    # only when config.output.clear_sky_diag is set (default off).
+    pipeline._clear_sky_diag = bool(
+        getattr(getattr(config, 'output', None), 'clear_sky_diag', False))
     pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
     pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
     pipeline._cloud_q_c_diagnostic = getattr(config, 'cloud_q_c_diagnostic', None)
@@ -3027,8 +3062,19 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline._turb_energy_field = turbulence_scheme_traits(
         getattr(config, 'turbulence', 'none'),
     ).energy_field
-    pipeline._gwd_prognostic = (
-        getattr(config, 'gravity_wave_drag', 'none') == "prognostic_spectral"
+    # A GWD scheme threads the prognostic wave-action spectrum when it is
+    # ``prognostic_spectral`` OR a '+'-composite that contains it (issue #834).
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+        gwd_carries_spectrum,
+    )
+    _gwd_scheme = getattr(config, 'gravity_wave_drag', 'none')
+    pipeline._gwd_prognostic = gwd_carries_spectrum(_gwd_scheme)
+    # A stateless '+'-composite (no prognostic_spectral part) still returns the
+    # (GWDOutput, spectrum_out) tuple from the combined executor, so the
+    # pipeline must unpack it via the composite branch rather than the plain
+    # single-return path.
+    pipeline._gwd_composite = (
+        "+" in _gwd_scheme and not pipeline._gwd_prognostic
     )
     from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
         gwd_scheme_is_orographic,

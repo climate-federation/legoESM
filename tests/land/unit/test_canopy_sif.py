@@ -22,6 +22,8 @@ from legoesm.land.canopy.sif import (
     degree_of_light_saturation,
     fluorescence_yield,
     leaf_sif,
+    leaf_sif_from_je,
+    multilayer_canopy_sif,
     two_leaf_canopy_sif,
 )
 
@@ -153,6 +155,64 @@ def test_two_leaf_sum_and_fesc():
     assert total_half == pytest.approx(0.5 * total, rel=1e-6)
 
 
+# --- multilayer canopy (CLM-ML) aggregation ------------------------------
+
+def _je(An, Ci, gstar):  # big-leaf-style inversion, for bridging to leaf_sif
+    return actual_electron_transport(jnp.asarray(An), jnp.asarray(Ci), jnp.asarray(gstar))
+
+
+def test_leaf_sif_from_je_matches_leaf_sif():
+    # leaf_sif is the An/Ci wrapper around leaf_sif_from_je(actual_electron_transport(...)).
+    An, Ci, gs, ap = 15.0, 280.0, 43.0, 800.0
+    a = float(leaf_sif(jnp.asarray(An), jnp.asarray(Ci), jnp.asarray(gs), jnp.asarray(ap), CFG))
+    b = float(leaf_sif_from_je(_je(An, Ci, gs), jnp.asarray(ap), CFG))
+    assert a == pytest.approx(b, rel=1e-12)
+
+
+def test_multilayer_reduces_to_leaf_sif_single_element():
+    # One element, leaf_area=1; feeding je = actual_electron_transport(An,Ci,Γ*)
+    # reproduces the big-leaf leaf_sif × fesc — the cross-check tying the
+    # multilayer (je-native) path to the big-leaf/two-leaf core.
+    An, Ci, gs, ap = 15.0, 280.0, 43.0, 800.0
+    je = jnp.asarray([[_je(An, Ci, gs)]]); apar = jnp.asarray([[ap]]); la = jnp.asarray([[1.0]])
+    ml = float(multilayer_canopy_sif(je, apar, la, CFG)[0])
+    ref = float(leaf_sif(jnp.asarray(An), jnp.asarray(Ci), jnp.asarray(gs), jnp.asarray(ap), CFG))
+    assert ml == pytest.approx(ref, rel=1e-6)
+
+
+def test_multilayer_two_elements_equals_two_leaf():
+    # Two elements (sunlit, shaded) with leaf_area=1 must equal two_leaf_canopy_sif
+    # of the same two classes (bridged via je inversion) — same fluorescence core.
+    je = jnp.asarray([[_je(18.0, 280.0, 45.0), _je(6.0, 300.0, 43.0)]])
+    apar = jnp.asarray([[900.0, 200.0]]); la = jnp.asarray([[1.0, 1.0]])
+    ml = float(multilayer_canopy_sif(je, apar, la, CFG)[0])
+    tl = float(two_leaf_canopy_sif(
+        jnp.asarray(18.0), jnp.asarray(280.0), jnp.asarray(45.0), jnp.asarray(900.0),
+        jnp.asarray(6.0), jnp.asarray(300.0), jnp.asarray(43.0), jnp.asarray(200.0), CFG))
+    assert ml == pytest.approx(tl, rel=1e-6)
+
+
+def test_multilayer_leaf_area_weighting_and_zero_mask():
+    # leaf_area scales the per-ground contribution linearly; a zero-area element
+    # (unfilled layer) drops out entirely.
+    je = jnp.asarray([[30.0, 30.0]]); apar = jnp.asarray([[800.0, 800.0]])
+    one = float(multilayer_canopy_sif(je, apar, jnp.asarray([[1.0, 0.0]]), CFG)[0])
+    two = float(multilayer_canopy_sif(je, apar, jnp.asarray([[2.0, 0.0]]), CFG)[0])
+    both = float(multilayer_canopy_sif(je, apar, jnp.asarray([[1.0, 1.0]]), CFG)[0])
+    assert two == pytest.approx(2.0 * one, rel=1e-6)     # linear in leaf area
+    assert both == pytest.approx(2.0 * one, rel=1e-6)     # the zeroed element is inert
+
+
+def test_multilayer_per_column_reduction():
+    # (ncol, K) -> (ncol,) independent per column.
+    je = jnp.asarray([[30.0, 12.0], [30.0, 12.0]])
+    apar = jnp.asarray([[800.0, 200.0], [0.0, 0.0]])       # col 1 dark
+    la = jnp.asarray([[1.0, 1.0], [1.0, 1.0]])
+    out = multilayer_canopy_sif(je, apar, la, CFG)
+    assert out.shape == (2,)
+    assert float(out[0]) > 0.0 and float(out[1]) == 0.0
+
+
 # --- differentiability ---------------------------------------------------
 
 def test_finite_gradients_wrt_An_and_APAR():
@@ -163,6 +223,22 @@ def test_finite_gradients_wrt_An_and_APAR():
     # Gradient must also be finite at the dark edge (APAR -> 0, the guarded 0/0).
     gAn0, gAp0 = jax.grad(f, argnums=(0, 1))(jnp.asarray(0.0), jnp.asarray(0.0))
     assert jnp.isfinite(gAn0) and jnp.isfinite(gAp0)
+
+
+def test_finite_gradient_wrt_kn_gamma_at_light_saturation():
+    # kn_gamma is a tunable param; x = degree_of_light_saturation hits exactly 0
+    # at light saturation (je >= max_electron_yield*apar), where power(0,gamma)
+    # has a 0*log(0) = NaN gradient wrt the exponent unless guarded.  grad wrt
+    # kn_gamma must stay finite there (and at x in (0,1)).
+    def sif_of_gamma(kg, je, apar):
+        cfg = CFG._replace(kn_gamma=kg)
+        return leaf_sif_from_je(jnp.asarray(je), jnp.asarray(apar), cfg)
+    # Saturated: je=100 >> 0.05*100=5 -> x clipped to 0.
+    g_sat = jax.grad(sif_of_gamma)(jnp.asarray(2.83), 100.0, 100.0)
+    # Interior: x in (0,1).
+    g_mid = jax.grad(sif_of_gamma)(jnp.asarray(2.83), 20.0, 800.0)
+    assert jnp.isfinite(g_sat) and jnp.isfinite(g_mid)
+    assert float(g_sat) == 0.0  # analytic limit: d/dgamma [0^gamma] = 0
 
 
 # --- param-spec / config sanity ------------------------------------------
