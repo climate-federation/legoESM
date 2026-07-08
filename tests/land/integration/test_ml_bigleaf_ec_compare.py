@@ -95,6 +95,52 @@ def test_umol_to_gc_uses_carbon_molar_mass():
     assert cmp_mod._UMOL_CO2_TO_GC == pytest.approx(constants.M_C * 1e-6, rel=1e-12)
 
 
+def test_local_solar_hours_centers_noon_on_coszen_max():
+    import numpy as np
+
+    # coszen peaks at step 40 -> that step is local solar noon (12.0 h); the
+    # rest offset by (step - 40) * 0.5 h, wrapped into [0, 24).  Steps need not
+    # be contiguous (a night gap between the two partial days).
+    steps = [38, 39, 40, 41, 42, 5, 6]
+    coszen = [0.88, 0.91, 0.92, 0.90, 0.86, 0.10, 0.20]
+    recs = [{"step": s, "coszen": c} for s, c in zip(steps, coszen)]
+    lt = cmp_mod._local_solar_hours(recs)
+    assert lt[2] == pytest.approx(12.0)          # the coszen-max step
+    assert lt[0] == pytest.approx(11.0)          # step 38 -> noon - 1 h
+    assert lt[4] == pytest.approx(13.0)          # step 42 -> noon + 1 h
+    assert lt[5] == pytest.approx((12.0 + (5 - 40) * 0.5) % 24.0)  # wrapped
+    assert np.all((lt >= 0.0) & (lt < 24.0))
+
+
+def test_local_solar_hours_all_nan_coszen_falls_back():
+    import numpy as np
+
+    # No finite coszen (solar geometry absent) must NOT raise on an all-NaN
+    # nanargmax; fall back to elapsed half-hours from the earliest step.
+    recs = [{"step": 10, "coszen": float("nan")}, {"step": 12, "coszen": float("nan")}]
+    lt = cmp_mod._local_solar_hours(recs)
+    assert lt[0] == pytest.approx(0.0)           # earliest step -> 0 h elapsed
+    assert lt[1] == pytest.approx(1.0)           # +2 steps * 0.5 h
+    assert np.all((lt >= 0.0) & (lt < 24.0))
+
+
+def test_plot_writes_figure(tmp_path):
+    # Smoke: the publication plotter renders daytime records to a PNG.  Night
+    # (sw<=50) rows are dropped; at least one daytime row must remain.
+    recs = [
+        {"step": 30, "coszen": 0.4, "sw": 300.0, "gpp_ml": 2.0e-4, "gpp_bl": 2.2e-4,
+         "sif_ml": 8.0, "sif_bl": 8.3, "lhveg_ml": 200.0, "lhveg_bl": 180.0,
+         "shveg_ml": 40.0, "shveg_bl": 55.0},
+        {"step": 40, "coszen": 0.9, "sw": 800.0, "gpp_ml": 3.2e-4, "gpp_bl": 3.7e-4,
+         "sif_ml": 15.0, "sif_bl": 15.4, "lhveg_ml": 320.0, "lhveg_bl": 300.0,
+         "shveg_ml": 90.0, "shveg_bl": 100.0},
+        {"step": 60, "coszen": 0.01, "sw": 0.0, "gpp_ml": 0.0, "gpp_bl": 0.0},  # night, dropped
+    ]
+    out = tmp_path / "fig.png"
+    cmp_mod._plot(recs, str(out))
+    assert out.exists() and out.stat().st_size > 0
+
+
 def test_capture_clm_ml_reads_real_forcing_fields():
     mlt = pytest.importorskip("multilayer_canopy.MLCanopyFluxesType")
     ml = mlt.create_mlcanopy(begp=1, endp=1)  # 1-based patch: column 0 at index 1

@@ -286,11 +286,19 @@ def multilayer_canopy_sif(
     the sub-saturated sunrise/sunset steps, raising the yield and OVERSHOOTING the
     multilayer SIF -- it BREAKS the agreement rather than improving it.  An EC-site
     diurnal cross-check (``scripts/validate/compare_ml_bigleaf_ec.py``, CHATS7)
-    confirms the native ``je_leaf`` SIF tracks the two-leaf proxy SIF to ~1 % over
-    the day while the ÷4 rescale diverges ~20-30 % near sunrise (the ~1 %/20-30 %/
-    ~5x magnitudes are EMPIRICAL, not derivable from the code).  NB: because the je
-    scale drops out at the clamp, that ~1 % agreement chiefly validates APAR
-    CONSISTENCY between the two canopies, not their electron-transport physics.
+    confirms the direction INTERNALLY to the multilayer path (same APAR, same leaf
+    areas, so it isolates the je convention): the ÷4-rescaled canopy SIF OVERSHOOTS
+    the native-``je_leaf`` SIF by ~15 % on the diurnal mean -- more near the
+    sub-saturated sunrise/sunset steps where ``x`` lifts off the clamp -- so the
+    native ``je_leaf`` is the correct feed and the ÷4 rescale breaks it (the
+    ~15 %/~5x magnitudes are EMPIRICAL, not derivable from the code).  This
+    native-vs-÷4 test is SEPARATE from how the multilayer SIF MAGNITUDE compares to
+    the two-leaf big-leaf: that cross-scheme match is set by canopy STRUCTURE (the
+    two-leaf's single green LAI absorbs less than CLM-ML's plant-area profile) and
+    runs ~10 % below, tracking the latent-heat/radiation bias -- NOT a je-convention
+    effect.  (An earlier ~1 % cross-scheme match was an artifact of driving the
+    two-leaf with plant-area index; green LAI is physiology-correct and exposes the
+    structural ~10 %.)
     ``max_electron_yield`` and ``fesc`` remain tier-1 trainables for ABSOLUTE
     calibration against satellite SIF (a separate concern from the je convention).
     """

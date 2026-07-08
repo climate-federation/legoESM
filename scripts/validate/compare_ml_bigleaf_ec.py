@@ -15,15 +15,19 @@ forcing (matched LAI, prescribed soil skin temperature) and records both.
 
 Findings at CHATS7 (irrigated walnut orchard, oasis/advection regime), driving
 the two-leaf with CLM-ML's OWN structure + physiology (see :func:`run_bigleaf`):
-- **SIF** agrees to ~1 % over the diurnal cycle.  The multilayer path consumes
-  CLM-ML's native ``je_leaf`` (full Farquhar J) directly and is CORRECT as-is:
-  at high light (midday) the fluorescence yield sits on its light-saturation
-  ``x=0`` clamp, where yield is je-INDEPENDENT, so the native/proxy je scale
-  drops out and the two agree.  Rescaling to the BEPS proxy convention (J/4)
-  lifts ``x`` off that clamp near sub-saturated SUNRISE/SUNSET, OVERSHOOTING
-  there by ~20-30 %.  So the ~1 % agreement chiefly validates APAR consistency
-  between the two paths, not the electron-transport scaling — no rescale is
-  needed (see ``canopy/sif.py::multilayer_canopy_sif``).
+- **SIF**: two distinct results, kept separate.  (i) je CONVENTION (internal to
+  the multilayer path, LAI-independent): the multilayer consumes CLM-ML's native
+  ``je_leaf`` (full Farquhar J) directly and is CORRECT as-is.  At high light the
+  fluorescence yield sits on its light-saturation ``x=0`` clamp where yield is
+  je-INDEPENDENT, so the je scale drops out; rescaling to the BEPS proxy
+  convention (J/4) lifts ``x`` off the clamp near sub-saturated SUNRISE/SUNSET and
+  OVERSHOOTS the native SIF by ~15 % on the diurnal mean — so native ``je_leaf``
+  is the correct feed (see ``canopy/sif.py::multilayer_canopy_sif``).  (ii)
+  CROSS-SCHEME magnitude: the two-leaf SIF runs ~9 % BELOW the multilayer
+  (BL/ML~0.91), tracking the LH/radiation under-bias — the same single-green-LAI
+  absorption limitation as LH, NOT a je-convention effect.  (An earlier ~1 %
+  cross-scheme match was an artifact of driving the two-leaf with plant-area
+  index; green LAI is physiology-correct and exposes the structural ~9 %.)
 - **GPP** agrees to ~5 % over the diurnal cycle (driving the two-leaf with green
   LAI; driving it with plant-area index instead over-counts photosynthetic area
   and biases GPP ~20 % high).  The residual is the stomatal MODEL: two-leaf
@@ -241,39 +245,119 @@ def run_bigleaf(c: dict, dt: float = 1800.0) -> dict:
     )
 
 
+# Forcing time step of the CLM-ML tower driver (nl.CHATS7.50steps): 30 min.
+_DT_FORCING_H = 0.5
+
+
+def _local_solar_hours(records: list) -> np.ndarray:
+    """Local SOLAR time (h, in [0, 24)) for each record, from the data's own
+    solar geometry — NOT wall-clock: the driver stores no absolute timestamp.
+
+    Solar noon is defined by the maximum cosine of the solar zenith (the clean
+    astronomical signal; incident ``sw`` is corrupted by cloud) and pinned to
+    12.00 h; every other step is offset by its ``step`` delta times ``dt``.  This
+    centres the diurnal cycle on true local solar noon regardless of the site's
+    UTC offset, so it reads correctly whether the tower's civil zone is Mountain
+    (Colorado) or Pacific.
+
+    PRECONDITION: ``step`` is this driver's absolute half-hour forcing index
+    (``time_indx``, ``dt = 1800 s``), so a day is 48 steps and the ``% 24`` wrap
+    is exact.  Steps need not be contiguous (a night gap between two partial days
+    is fine — the offset uses ``step`` deltas), but the mapping is only valid for
+    that uniform half-hour index; a different step convention would need its own
+    ``dt``.  If NO record carries a finite ``coszen`` (solar geometry absent), it
+    falls back to elapsed half-hours from the earliest step so the caller never
+    crashes on an all-NaN slice.
+    """
+    steps = np.array([x["step"] for x in records], dtype=float)
+    coszen = np.array([x.get("coszen", np.nan) for x in records], dtype=float)
+    if not np.any(np.isfinite(coszen)):
+        return ((steps - steps.min()) * _DT_FORCING_H) % 24.0
+    noon_step = steps[int(np.nanargmax(coszen))]
+    return (12.0 + (steps - noon_step) * _DT_FORCING_H) % 24.0
+
+
 def _plot(records: list, path: str) -> None:
+    """Publication diurnal figure: CLM-ML multilayer vs two-leaf big-leaf, the
+    four canopy fluxes (GPP, SIF, vegetation LH, vegetation SH) versus LOCAL
+    SOLAR time.  Daytime points only, sorted by local hour so the curve runs
+    sunrise -> noon -> sunset."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    r = [x for x in records if "error" not in x]
-    r.sort(key=lambda x: x["step"])
-    h = [(x["step"] - r[0]["step"]) * 0.5 for x in r]
+    all_rec = [x for x in records if "error" not in x]
+    if not all_rec:
+        print("no records to plot")
+        return
+    # Anchor local solar noon on the FULL record BEFORE dropping night: a cloudy
+    # true-noon step can have sw<=50, and filtering it out first would shift the
+    # inferred noon to the brightest surviving step.  Then keep daytime only.
+    lt_all = _local_solar_hours(all_rec)
+    day = np.array([x.get("sw", 0.0) > 50.0 for x in all_rec])
+    if not day.any():
+        print("no daytime records to plot")
+        return
+    lt = lt_all[day]
+    r = [x for x, d in zip(all_rec, day) if d]            # daytime, in step order
+    steps = np.array([x["step"] for x in r], dtype=float)
+    # Day segments: a jump >1 in the night-filtered step index marks a night gap,
+    # so the diurnal-composite line is drawn PER DAY and never connects across
+    # calendar days (sorting by hour alone would join two separate afternoons).
+    seg = (np.concatenate([[0], np.cumsum(np.diff(steps) > 1)]).astype(int)
+           if len(steps) else np.array([], dtype=int))
     gc = 1.0 / _UMOL_CO2_TO_GC
 
     def col(k, scale=1.0):
-        return [(x.get(k) * scale if x.get(k) is not None else np.nan) for x in r]
+        return np.array([(x.get(k) * scale if x.get(k) is not None else np.nan)
+                         for x in r], dtype=float)
 
-    # Plot the VEGETATION (leaf) SH/LH — the valid canopy comparison.  The TOTAL
-    # SH/LH carry the offline soil-BC artifact (pinned warm soil), so plotting
-    # them would show precisely the artifact the summary tells the reader to
-    # ignore; the veg fluxes isolate the canopy scheme.
-    fig, ax = plt.subplots(2, 2, figsize=(11, 7))
-    for a, title, ml, bl in [
-        (ax[0, 0], "GPP [umol CO2/m2/s]", col("gpp_ml", gc), col("gpp_bl", gc)),
-        (ax[0, 1], "SIF [umol photon/m2/s]", col("sif_ml"), col("sif_bl")),
-        (ax[1, 0], "Vegetation LH [W/m2]", col("lhveg_ml"), col("lhveg_bl")),
-        (ax[1, 1], "Vegetation SH [W/m2]", col("shveg_ml"), col("shveg_bl")),
-    ]:
-        a.plot(h, ml, "o-", color="#1b7837", ms=3, lw=1.8, label="multilayer (CLM-ML)")
-        a.plot(h, bl, "s--", color="#c51b7d", ms=3, lw=1.5, label="two-leaf (big-leaf)")
-        a.set_title(title)
-        a.set_xlabel("hours")
+    # VEGETATION (leaf) SH/LH — the valid canopy comparison.  TOTAL SH/LH carry
+    # the offline soil-BC artifact (pinned warm soil), i.e. exactly what the
+    # module docstring tells the reader to ignore; veg fluxes isolate the canopy.
+    ml_c, bl_c = "#1b7837", "#c51b7d"
+    plt.rcParams.update({"font.size": 11, "axes.titlesize": 12,
+                         "axes.labelsize": 11, "figure.dpi": 200})
+    fig, ax = plt.subplots(2, 2, figsize=(9.0, 6.6), constrained_layout=True)
+    panels = [
+        (ax[0, 0], "a", "GPP", r"$\mu$mol CO$_2$ m$^{-2}$ s$^{-1}$",
+         col("gpp_ml", gc), col("gpp_bl", gc)),
+        (ax[0, 1], "b", "SIF", r"$\mu$mol photon m$^{-2}$ s$^{-1}$",
+         col("sif_ml"), col("sif_bl")),
+        (ax[1, 0], "c", "Vegetation latent heat", r"W m$^{-2}$",
+         col("lhveg_ml"), col("lhveg_bl")),
+        (ax[1, 1], "d", "Vegetation sensible heat", r"W m$^{-2}$",
+         col("shveg_ml"), col("shveg_bl")),
+    ]
+    for a, tag, name, unit, ml, bl in panels:
+        for s in np.unique(seg):                          # one line per calendar day
+            j = np.where(seg == s)[0]
+            j = j[np.argsort(lt[j])]                       # order within the day by hour
+            a.plot(lt[j], ml[j], "-", color=ml_c, lw=1.7, zorder=1)
+            a.plot(lt[j], bl[j], "--", color=bl_c, lw=1.5, zorder=1)
+        a.plot(lt, ml, "o", color=ml_c, ms=4, label="multilayer (CLM-ML)", zorder=2)
+        a.plot(lt, bl, "s", color=bl_c, ms=4, label="two-leaf (big-leaf)", zorder=2)
+        a.set_title(f"({tag}) {name}", loc="left", fontweight="bold")
+        a.set_ylabel(unit)
+        a.set_xlim(lt.min() - 0.3, lt.max() + 0.3)
+        a.set_xticks(np.arange(6, 20, 3))
         a.grid(alpha=0.3)
-        a.legend(fontsize=8)
-    fig.suptitle("CLM-ML multilayer vs two-leaf big-leaf — vegetation fluxes (same forcing)")
-    fig.tight_layout()
-    fig.savefig(path, dpi=110)
+        # Agreement: mean bias (BL - ML) + RMSE over paired finite daytime points.
+        # Bias, not a ratio: SH's daytime mean is near zero (oasis), where a ratio
+        # explodes and misleads; bias stays meaningful for every panel.
+        m = np.isfinite(ml) & np.isfinite(bl)
+        if m.any():
+            rmse = float(np.sqrt(np.mean((bl[m] - ml[m]) ** 2)))
+            bias = float(np.mean(bl[m] - ml[m]))
+            a.text(0.03, 0.94, f"bias={bias:+.2g}\nRMSE={rmse:.2g}",
+                   transform=a.transAxes, va="top", ha="left", fontsize=8.5,
+                   bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="0.7", alpha=0.85))
+    for a in ax[1, :]:
+        a.set_xlabel("Local solar time (h)")
+    ax[0, 0].legend(fontsize=8.5, loc="upper right", framealpha=0.9)
+    fig.suptitle("CHATS7 walnut orchard: multilayer vs two-leaf canopy fluxes "
+                 "(identical forcing, diurnal composite)", fontsize=12.5)
+    fig.savefig(path)
     print(f"saved {path}")
 
 
