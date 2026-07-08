@@ -58,11 +58,16 @@ COORD_HOST="$(head -n 1 "${PBS_NODEFILE}")"
 PORT_A=29788; PORT_B1=29789; PORT_B2=29790; PORT_C1=29791; PORT_C2=29792
 
 # NCCL canary diagnostics: print the selected transport (NET/OFI vs
-# NET/Socket) — that line IS a canary deliverable. Pin bootstrap ifaces to
-# the Slingshot hsn NICs; a missing OFI plugin then falls back to sockets
-# over hsn (correct-but-slow) instead of hanging on the mgmt network.
-export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
-export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-hsn}"
+# NET/Socket) — that line IS a canary deliverable.  Route NCCL setup through
+# the SHARED nccl_env() (the SAME env the routeb + multinode lanes use) so the
+# canary actually exercises the aws-ofi-nccl plugin: nccl_env puts
+# LEGOESM_NCCL_OFI_LIB on LD_LIBRARY_PATH + sets NCCL_NET="AWS Libfabric" and
+# echoes which transport it selected.  WITHOUT this call the canary set only
+# NCCL_DEBUG/NCCL_SOCKET_IFNAME inline and silently ran on TCP sockets
+# REGARDLESS of LEGOESM_NCCL_OFI_LIB — so the OFI test could never see NET/OFI
+# (the plugin was never on the library path).  nccl_env still falls back to
+# sockets over hsn (correct-but-slow) when the plugin is genuinely absent.
+nccl_env
 
 # Per-rank shim: pin one GPU per rank (PALS_LOCAL_RANKID) and bridge the PALS
 # rank id to the OMPI env contract the probe/tests/benches read. The world
