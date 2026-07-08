@@ -225,6 +225,12 @@ def main() -> int:
     p.add_argument("--dt", type=float, default=60.0)
     p.add_argument("--precision", choices=["float32", "float64"],
                    default="float64")
+    p.add_argument("--device", choices=["cpu", "gpu"], default="cpu",
+                   help="gpu: each MPI rank pins to ONE local GPU "
+                        "(CUDA_VISIBLE_DEVICES=local-rank, "
+                        "bench_ocean_mpi_scaling convention) BEFORE the "
+                        "first JAX import; halos stay on mpi4jax "
+                        "(route-A).")
     p.add_argument("--partition-method",
                    choices=["auto", "geometric", "metis", "sfc"],
                    default="auto")
@@ -244,12 +250,33 @@ def main() -> int:
             f"--warmup must satisfy 0 <= warmup < steps "
             f"(got warmup={args.warmup}, steps={args.steps})")
 
+    if args.device == "gpu":
+        # Pin BEFORE the first JAX import (sibling-bench convention: local
+        # rank from the MPI launcher env; never SLURM_LOCALID on a
+        # single-task step — the documented silent eff=0.5 bug).
+        local = (os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
+                 or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK"))
+        if local is None:
+            slid = os.environ.get("SLURM_LOCALID")
+            nt = os.environ.get("SLURM_NTASKS", "1")
+            if slid is not None and nt.isdigit() and int(nt) > 1:
+                local = slid
+        os.environ["CUDA_VISIBLE_DEVICES"] = local or "0"
+        os.environ["JAX_PLATFORMS"] = "cuda"
+        os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     if args.precision == "float64":
         import jax
 
         jax.config.update("jax_enable_x64", True)
     import jax
     import jax.numpy as jnp  # noqa: F401  (post-x64 config)
+
+    if args.device == "gpu" and jax.default_backend() not in (
+            "gpu", "cuda", "rocm"):
+        raise SystemExit(
+            "--device gpu requested but the JAX backend is "
+            f"{jax.default_backend()!r} — refusing to record a mislabeled "
+            "GPU scaling row.")
 
     try:
         from mpi4py import MPI
@@ -330,7 +357,14 @@ def main() -> int:
         jax.block_until_ready(jax.tree.leaves(state))
         if comm is not None:
             comm.Barrier()
-        per_step_ms.append((time.perf_counter() - t0) * 1e3)
+        step_ms = (time.perf_counter() - t0) * 1e3
+        if comm is not None:
+            # Barrier-release skew means rank 0's local elapsed can
+            # undercount the slowest rank — record the MAX (codex).
+            from mpi4py import MPI as _MPI
+
+            step_ms = comm.allreduce(step_ms, op=_MPI.MAX)
+        per_step_ms.append(step_ms)
 
     # --- Correctness gates (before any timing is reported) -----------------
     if args.check_conservation:
@@ -400,7 +434,15 @@ def main() -> int:
         steady_min_ms=round(float(np.min(steady)), 2),
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=int(mesh.nCells) * args.nlev,
-        cells_per_rank_achieved=int(mesh.nCells) // n_ranks * args.nlev,
+        # HORIZONTAL cells/rank — the same unit as --cells-per-rank, so a
+        # weak-mode row is comparable to its target (codex: the 3-D count
+        # made rows look nlev-x larger).
+        cells_per_rank_achieved=int(mesh.nCells) // n_ranks,
+        # Fix 4 honesty flag: at np=1 the parity reference pre-runs the
+        # SAME shape before the timed loop, so per_step_ms[0] may not
+        # contain the real JIT compile.
+        compile_prewarmed_by_parity_ref=bool(
+            args.parity_gate and n_ranks == 1),
     )
     rec["metadata"] = annotate_incomplete(scaling_metadata(
         grid="voronoi",
@@ -409,8 +451,12 @@ def main() -> int:
         n_levels=args.nlev,
         precision=args.precision,
         n_ranks=n_ranks,
-        n_gpus=0,
         decomposition="cell_partition" if n_ranks > 1 else "none",
+        # Route-A pin: a multi-node run that ALSO initialized
+        # jax.distributed would auto-resolve to nccl/gloo and mislabel the
+        # mpi4jax halo fabric (codex).
+        transport=("mpi4jax" if n_ranks > 1 else None),
+        n_gpus=(n_ranks if args.device == "gpu" else 0),
         solver_variant="mpas_ocean_default",
         cells_per_rank=int(mesh.nCells) * args.nlev // n_ranks,
         scaling_kind=args.mode,
