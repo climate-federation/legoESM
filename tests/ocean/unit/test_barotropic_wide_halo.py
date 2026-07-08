@@ -269,6 +269,10 @@ def test_2d_pencil_layout_refused(setup):
     """local_halo_pads would also localize the 2-D pencil's ZONAL exchanges
     (silent E/W wrap inside the lon block) — the wide path must refuse the
     layout loudly (codex finding 2)."""
+    # The simulated 2-D pencil layout routes setup pads through the mpi4jax
+    # backend; envs without it (plain conda) die in the pad before reaching
+    # the refusal under test — skip there (MPI envs run it).
+    pytest.importorskip("mpi4jax")
     from legoesm.grids.halo import set_halo_backend
     from legoesm.parallel.latlon_mpi import make_latlon_2d_layout
 

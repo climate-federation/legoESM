@@ -189,8 +189,12 @@ def nccl_transport_report() -> dict:
     if os.environ.get("NCCL_NET_PLUGIN"):
         plugin_hit = os.environ["NCCL_NET_PLUGIN"]
     else:
-        paths = (os.environ.get("LD_PRELOAD", "").split(":")
-                 + os.environ.get("LD_LIBRARY_PATH", "").split(":"))
+        # LD_PRELOAD entries are separated by SPACES or colons (ld.so(8));
+        # a colon-only split records nccl_net_plugin=None for the canonical
+        # space-separated form and falsely flags a multi-node socket fallback
+        # (pre-merge codex finding).  LD_LIBRARY_PATH stays colon-only.
+        _preload = os.environ.get("LD_PRELOAD", "").replace(":", " ").split()
+        paths = _preload + os.environ.get("LD_LIBRARY_PATH", "").split(":")
         for d in (p for p in paths if p):
             if os.path.isfile(d) and "libnccl-net" in os.path.basename(d):
                 plugin_hit = d

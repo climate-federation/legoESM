@@ -1,5 +1,12 @@
 # legoESM AMIP scaling summary — atmosphere & ocean (single-node)
 
+> **Scope tag:** this document is a **single-device throughput-vs-size sweep**
+> (category (b) in `SCALING_STATUS_AUDIT.md`), NOT true multi-device weak/strong
+> scaling. All §1–3 numbers are one-GPU/one-CPU saturation curves. For the
+> authoritative cross-component support matrix (which grids have real
+> multi-device evidence, which are infrastructure-ready, which are N/A), see
+> **`SCALING_STATUS_AUDIT.md`**. §4 below covers the MPI multi-rank story.
+
 Consolidated single-node performance for AMIP-like configs across **all grid
 types**, on **MPI and GPU**, at **float32 and float64**. Held-Suarez is the
 atmosphere tester; the ocean uses the production `implicit_cn` barotropic solver.
@@ -74,17 +81,26 @@ untouched.
 
 ## 4. MPI multi-rank scaling
 
+This host has 1 GPU, so the strong-scaling column below is CPU-MPI / small-rank
+only. Real multi-device evidence at scale lives in
+`derecho_levante_sota_review_2026-07.md` (§3b, measured Derecho curves) and the
+`SCALING_STATUS_AUDIT.md` support matrix.
+
 | component | grid          | MPI multi-rank        | strong scaling (this host) |
 |-----------|---------------|-----------------------|----------------------------|
 | atmosphere| **icosahedral** | ✅ `auto` domain decomp (METIS graph-partition when `pymetis` present, else RCB; `sfc` Hilbert option) | 1.24× @2 ranks, plateaus @4 — sync-barrier/jitter-bound on a shared node; correct vs serial to ~1e-9 |
-| atmosphere| cubed-sphere  | replicated under MPI; real path = face-sharded SPMD (≥2 GPUs) | — |
-| atmosphere| lat-lon       | not implemented (#115) | — |
-| atmosphere| spectral      | rank-1 (global transforms) | — |
-| ocean     | all           | generic cubed-sphere distributed layout; MPI conservation tested | multi-device speedup needs ≥2 GPUs |
+| atmosphere| cubed-sphere  | ✅ genuine ≤6-face decomposition via `run_levante_gpu_scaling.py --cs-mpi-scatter` (bit-equal 1e-15 vs serial); default (no flag) is replicated dynamics, refused for scaling claims | face-sharded SPMD; ≥2 GPUs (Derecho/Levante lanes) |
+| atmosphere| lat-lon       | ✅ latitude-band decomposition (`make_latlon_mpi_step`, #641; pole_bc='wall' + diagnostic physics), validated vs serial | Derecho CPU-MPI 128 ranks (§3b of the SOTA review) |
+| atmosphere| spectral      | rank-1 (global transforms) — N/A by design | — |
+| ocean     | lat-lon C-grid | ✅ latitude-band MPI (`bench_ocean_mpi_scaling.py`, parity + conservation gates) + full-step SPMD (`bench_ocean_latlon_spmd_scaling.py`) | 2-GPU full step ~0.92 strong / 0.97 weak (Ginsburg); Derecho/Levante ladders exist, unrun |
+| ocean     | tripole / MPAS / cube | infrastructure-ready, no dedicated scaling lane yet (see audit) | — |
 
-Only icosahedral domain-decomposes on MPI today; multi-rank Held-Suarez was
-enabled and validated this campaign. Structured-grid and ocean multi-device
-scaling is hardware-blocked here.
+`lat-lon MPI was #115's gap; closed by #641` — the old "not implemented" line
+is superseded. Icosahedral, cubed-sphere (`--cs-mpi-scatter`), and lat-lon all
+domain-decompose on MPI today; ocean lat-lon has both CPU-MPI and multi-GPU
+SPMD harnesses. Spectral stays single-rank by construction. Production-scale
+multi-device numbers are hardware-blocked on this 1-GPU host — see the audit
+and SOTA review for the Derecho/Levante evidence.
 
 ---
 

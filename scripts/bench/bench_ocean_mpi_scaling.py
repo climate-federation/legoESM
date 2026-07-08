@@ -2609,6 +2609,10 @@ def main() -> int:
         # must be recorded explicitly — it also resolves transport="mpi4jax".
         # solver_variant records the wide-halo/local-clamp levers so an A/B
         # pair can never be conflated with the baseline in aggregation.
+        # (The analytic barotropic halo-message census lives in the SPMD
+        # bench's records — model.config is in scope there; here the census is
+        # derivable offline from solver_variant + n_barotropic_substeps, so it
+        # is deliberately not recomputed. Pre-merge codex note.)
         _grid_label = "tripole" if args.tripole else "latlon"
         _variant = args.baro_solver
         if os.environ.get("LEGOESM_BARO_LOCAL_CLAMP", "0") == "1":

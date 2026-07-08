@@ -138,6 +138,15 @@ def test_nccl_report_missing_plugin_flag(tmp_path, monkeypatch):
     monkeypatch.setenv("NCCL_NET_PLUGIN", "/opt/nccl/libnccl-net.so")
     r = ei.nccl_transport_report()
     assert r["missing_net_plugin_multi_node"] is False
+    # SPACE-separated LD_PRELOAD (the canonical ld.so form) clears it too —
+    # a colon-only split missed it and falsely flagged socket fallback
+    # (pre-merge codex finding).
+    monkeypatch.delenv("NCCL_NET_PLUGIN")
+    monkeypatch.setenv(
+        "LD_PRELOAD", f"/other/lib.so {lib}")
+    r = ei.nccl_transport_report()
+    assert r["missing_net_plugin_multi_node"] is False
+    assert r["nccl_net_plugin"] == str(lib)
 
 
 def test_nccl_report_records_knobs(monkeypatch):

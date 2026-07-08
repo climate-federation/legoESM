@@ -350,7 +350,13 @@ def compute_iwm_diffusivity(
     k_wave = reb * (1.0 / 6.0) * nu
     if cfg.mevar:
         # Variable-efficiency regimes (F90:219-227).
-        sqrt_reb = jnp.sqrt(jnp.maximum(reb, 0.0))
+        # AD-safe sqrt: ``jnp.sqrt(jnp.maximum(reb, 0.0))`` has a NaN
+        # reverse-mode gradient at reb=0 (land/zero-forcing cells) because the
+        # derivative 1/(2·sqrt(reb)) blows up while ``maximum`` still routes the
+        # cotangent through the sqrt. The double-``where`` keeps the primal
+        # BIT-IDENTICAL for reb>0 and yields a finite 0 (0 gradient) at reb<=0.
+        sqrt_reb = jnp.where(
+            reb > 0.0, jnp.sqrt(jnp.where(reb > 0.0, reb, 1.0)), 0.0)
         k_wave = jnp.where(
             reb > _REB_ENERGETIC, _REB_ENERGETIC_COEF * nu * sqrt_reb, k_wave)
         k_wave = jnp.where(
