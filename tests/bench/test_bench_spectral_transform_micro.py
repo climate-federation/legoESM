@@ -18,6 +18,11 @@ _spec.loader.exec_module(mod)
 def test_cost_model_scaling():
     a = mod.transform_flops(64, 128, 946, 30)
     b = mod.transform_flops(128, 256, 3741, 30)
+    # EXACT constants locked (codex: monotonicity alone lets a
+    # denominator drift pass): 8 real FLOPs per complex MAC, analysis +
+    # synthesis = 2 * n_lat * n_sh * nlev MACs.
+    assert a["gemm_flops"] == 8 * 2 * 64 * 946 * 30
+    assert a["fft_flops"] == 2 * 30 * 64 * 5 * 128 * 7  # log2(128)=7
     # GEMM grows ~ n_lat*n_sh; fraction of FLOPs grows with truncation.
     assert b["gemm_flops"] > 4 * a["gemm_flops"]
     assert b["gemm_fraction_of_flops"] > a["gemm_fraction_of_flops"]
@@ -41,14 +46,20 @@ def test_main_t21_smoke_round_trip_exact(tmp_path, monkeypatch):
         "--repeats", "2", "--warmup", "1", "--out", str(out)])
     assert mod.main() == 0
     payload = json.loads(out.read_text())
-    row = payload["rows"][0]
-    assert row["truncation"] == 21
-    # Round trip of a synthesized-then-analyzed field is NOT identity for a
-    # random (aliased) input — but must be FINITE and bounded; the recorded
-    # error field exists for the note's honesty.
-    assert row["round_trip_error_max"] < 10.0
-    assert row["round_trip_median_ms"] > 0
+    rows = payload["rows"]
+    # --sh-gemm both (default): one row per Legendre path, mode recorded
+    # (a legacy row can never masquerade as the GEMM measurement; codex).
+    assert {r["legendre_path"] for r in rows} == {
+        "legacy_segment_sum", "gemm"}
+    for row in rows:
+        assert row["truncation"] == 21
+        # Band-limited input: the recorded error is the TRANSFORM's own
+        # (projection applied before timing), so it must sit at the f64
+        # round-off scale, not the truncation scale.
+        assert row["band_limited_round_trip_error_max"] < 1e-9
+        assert row["round_trip_median_ms"] > 0
     md = payload["metadata"]
     assert md["grid"] == "spectral"
     assert md["scaling_kind"] == "throughput"
+    assert md["extra"]["sh_gemm_modes"] == "both"
     assert "_incomplete" not in md

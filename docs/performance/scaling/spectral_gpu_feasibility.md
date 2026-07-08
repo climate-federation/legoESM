@@ -20,19 +20,27 @@ rate makes it worthwhile.
 ## Microbenchmark (this audit)
 
 `scripts/bench/bench_spectral_transform_micro.py` — isolated
-analysis+synthesis round trip; shapes, FLOPs, arithmetic intensity, and
-achieved rate from the live backend. Measured on the laptop **CPU** lane
-(f64, nlev=30, medians of 20):
+analysis+synthesis round trip; the Legendre path is EXPLICIT per row
+(`legendre_path`: the legacy gather/segment-sum default vs the opt-in
+`LEGOESM_SH_GEMM=1` batched-GEMM), the timed input is band-limited first
+(synthesis∘analysis is a projection, so the recorded error is the
+transform's own, not truncation), and the recorded rate is an
+*equivalent*-GEMM number (model FLOPs / time). Measured on the laptop
+**CPU** lane (f64, nlev=30, medians of 20 — these rows are explicitly NOT
+the A100/H100 answer; the backend is on every row):
 
-| T | grid | n_sh | round trip | GEMM share of FLOPs | arith. intensity | achieved |
-|---|------|------|-----------:|--------------------:|-----------------:|---------:|
-| T42 | 64×128 | 946 | 2.67 ms | 63% | 20.0 F/B | 10.9 GF/s |
-| T85 | 130×260 | 3,741 | 22.1 ms | 74% | 24.2 F/B | 10.6 GF/s |
-| T170 | 256×512 | 14,706 | 171.6 ms | 84% | 26.8 F/B | 10.5 GF/s |
+| T | grid | n_sh | legacy round trip | **GEMM round trip** | GEMM share of model FLOPs | AI |
+|---|------|------|------------------:|--------------------:|--------------------------:|---:|
+| T42 | 64×128 | 946 | 2.70 ms | 2.93 ms | 63% | 20.0 F/B |
+| T85 | 130×260 | 3,741 | 22.1 ms | 20.6 ms | 74% | 24.2 F/B |
+| T170 | 256×512 | 14,706 | 160.6 ms | **52.1 ms** | 84% | 26.8 F/B |
 
-Reading: the transform is **GEMM-dominated and compute-bound** (flat
-achieved GF/s across sizes = CPU fp64 GEMM roofline; AI 20–27 F/B is well
-above the memory-bound regime). The FFT leg is ≤37% of FLOPs and shrinking
+Reading: (a) the opt-in GEMM path is already **3.1× faster than the
+legacy path at T170 on CPU alone** (identical band-limited round-trip
+error, 4.2e-12) — the audit's own review of this bench caught the first
+draft measuring the legacy path while labeling it GEMM; (b) the transform
+is GEMM-dominated (84% of model FLOPs at T170) with AI 20–27 F/B —
+compute-bound territory; (c) the FFT leg is ≤37% of FLOPs and shrinking
 with T — **cuFFT/layout work is not the lever**.
 
 ## The consumer-vs-datacenter fp64 split (revises the prior reading)
@@ -43,15 +51,20 @@ part — 1:64 fp64:fp32**. That measurement says consumer GPUs are bad at
 fp64 GEMM, not that the transform is GPU-hostile:
 
 - A100 fp64: 9.7 TF/s (19.5 TF/s tensor-core DGEMM). Against the measured
-  T170 round trip (1.81 GF GEMM / 171.6 ms CPU ≈ 10.5 GF/s), a
-  GEMM-roofline A100 run has **O(100–900×) headroom** — even a 10%-of-peak
-  realization would put the round trip at ~2 ms.
-- The einsum already lowers to cuBLAS on CUDA; the measurement costs one
-  command on a Derecho/Levante GPU node:
+  T170 GEMM-path round trip (1.81 GF model / 52.1 ms ≈ 35 GF/s equivalent),
+  the GEMM-roofline headroom is **roughly two orders of magnitude** — a
+  ROUGH UPPER BOUND, not a prediction: the model FLOPs are the triangular
+  count, the FFT leg and launch overheads are outside the GEMM roofline,
+  and realized DGEMM fractions vary. The point stands at any realistic
+  discount; only the measurement settles it.
+- The GEMM path lowers to cuBLAS on CUDA; the measurement costs one
+  command on a Derecho/Levante GPU node (``--sh-gemm both`` records the
+  legacy column too, same rows schema):
 
 ```
 JAX_ENABLE_X64=1 python scripts/bench/bench_spectral_transform_micro.py \
-    --truncations 42,85,170,341 --nlev 60 --out results/spectral_micro_a100.json
+    --truncations 42,85,170,341 --nlev 60 --sh-gemm both \
+    --out results/spectral_micro_a100.json
 ```
 
 ## Options assessed

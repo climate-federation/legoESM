@@ -65,6 +65,15 @@ def main() -> int:
     p.add_argument("--nlev", type=int, default=30)
     p.add_argument("--repeats", type=int, default=20)
     p.add_argument("--warmup", type=int, default=3)
+    p.add_argument("--sh-gemm", choices=["on", "off", "both"],
+                   default="both",
+                   help="Legendre path: 'on' = the opt-in batched-GEMM "
+                        "(LEGOESM_SH_GEMM=1, the cuBLAS-lowering path the "
+                        "feasibility note is about), 'off' = the legacy "
+                        "gather/segment-sum default, 'both' = one row per "
+                        "mode (the mode is recorded on every row — a "
+                        "legacy row can never masquerade as the GEMM "
+                        "measurement; codex).")
     p.add_argument("--out", type=str,
                    default="results/a1/spectral_transform_micro.json")
     args = p.parse_args()
@@ -87,6 +96,8 @@ def main() -> int:
         sh_synthesis_3d,
     )
 
+    modes = {"on": [True], "off": [False],
+             "both": [False, True]}[args.sh_gemm]
     rows = []
     for T in truncs:
         grid = create_gaussian_grid(n_max=T)
@@ -96,38 +107,55 @@ def main() -> int:
         field = jnp.asarray(
             rng.standard_normal((n_lat, n_lon, args.nlev)))
 
-        @jax.jit
-        def round_trip(f):
-            return sh_synthesis_3d(grid, sh_analysis_3d(grid, f))
+        for gemm_mode in modes:
+            # The Legendre-path switch is read at TRACE time — set it
+            # before building the jitted round trip (a fresh closure per
+            # mode forces a fresh trace).
+            os.environ["LEGOESM_SH_GEMM"] = "1" if gemm_mode else "0"
 
-        out = round_trip(field)
-        jax.block_until_ready(out)
-        times = []
-        for _ in range(args.warmup + args.repeats):
-            t0 = time.perf_counter()
-            out = round_trip(field)
+            @jax.jit
+            def round_trip(f, _grid=grid):
+                return sh_synthesis_3d(_grid, sh_analysis_3d(_grid, f))
+
+            # Band-limit FIRST: synthesis∘analysis is a PROJECTION, so a
+            # random grid field's first round trip includes truncation
+            # error by construction.  The SECOND application measures the
+            # transform's own error on an exactly band-limited input
+            # (codex).
+            f_band = round_trip(field)
+            jax.block_until_ready(f_band)
+            out = round_trip(f_band)
             jax.block_until_ready(out)
-            times.append(time.perf_counter() - t0)
-        med_s = float(np.median(times[args.warmup:]))
-        cost = transform_flops(n_lat, n_lon, n_sh, args.nlev)
-        achieved = cost["gemm_flops"] / med_s / 1e9
-        row = {
-            "truncation": T,
-            "n_lat": n_lat, "n_lon": n_lon, "n_sh": n_sh,
-            "nlev": args.nlev,
-            "round_trip_median_ms": round(med_s * 1e3, 3),
-            "achieved_gemm_gflops": round(achieved, 2),
-            "round_trip_error_max": float(
-                jnp.abs(out - field).max()),
-            **cost,
-        }
-        rows.append(row)
-        print(f"T{T:4d} | {n_lat}x{n_lon}, n_sh={n_sh} | "
-              f"round-trip {row['round_trip_median_ms']:9.3f} ms | "
-              f"GEMM {row['gemm_flops'] / 1e9:7.2f} GF "
-              f"({100 * row['gemm_fraction_of_flops']:.0f}% of FLOPs) | "
-              f"achieved {achieved:7.2f} GF/s | "
-              f"AI {row['arithmetic_intensity_flop_per_byte']:.1f} F/B")
+            times = []
+            for _ in range(args.warmup + args.repeats):
+                t0 = time.perf_counter()
+                out = round_trip(f_band)
+                jax.block_until_ready(out)
+                times.append(time.perf_counter() - t0)
+            med_s = float(np.median(times[args.warmup:]))
+            cost = transform_flops(n_lat, n_lon, n_sh, args.nlev)
+            achieved = cost["gemm_flops"] / med_s / 1e9
+            mode_name = "gemm" if gemm_mode else "legacy_segment_sum"
+            row = {
+                "truncation": T,
+                "legendre_path": mode_name,
+                "n_lat": n_lat, "n_lon": n_lon, "n_sh": n_sh,
+                "nlev": args.nlev,
+                "round_trip_median_ms": round(med_s * 1e3, 3),
+                "equivalent_gemm_gflops": round(achieved, 2),
+                "band_limited_round_trip_error_max": float(
+                    jnp.abs(out - f_band).max()),
+                **cost,
+            }
+            rows.append(row)
+            print(f"T{T:4d} [{mode_name:18s}] | {n_lat}x{n_lon}, "
+                  f"n_sh={n_sh} | "
+                  f"round-trip {row['round_trip_median_ms']:9.3f} ms | "
+                  f"GEMM-model {row['gemm_flops'] / 1e9:7.2f} GF "
+                  f"({100 * row['gemm_fraction_of_flops']:.0f}%) | "
+                  f"equiv {achieved:7.2f} GF/s | "
+                  f"AI {row['arithmetic_intensity_flop_per_byte']:.1f} F/B "
+                  f"| err {row['band_limited_round_trip_error_max']:.1e}")
 
     payload = {
         "rows": rows,
@@ -141,7 +169,8 @@ def main() -> int:
             solver_variant="sh_transform_round_trip",
             scaling_kind="throughput",
             transport="none",
-            extra={"repeats": args.repeats, "warmup": args.warmup},
+            extra={"repeats": args.repeats, "warmup": args.warmup,
+                   "sh_gemm_modes": args.sh_gemm},
         )),
     }
     outdir = os.path.dirname(args.out)
