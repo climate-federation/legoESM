@@ -127,6 +127,15 @@ def test_port_pbs_jobid_honored(monkeypatch):
 
 _LAUNCHER_ENV_VARS = (
     "SLURM_JOB_ID", "OMPI_COMM_WORLD_SIZE", "PALS_RANKID", "PMI_RANK",
+    # World-size vars too: a test suite RUNNING INSIDE a SLURM job inherits
+    # SLURM_NTASKS/SLURM_STEP_NUM_TASKS from the host job; leaving them set
+    # makes the fake-jax process_count and the guard's launcher_world_size
+    # disagree (host SLURM_NTASKS=1 vs the test's OMPI=4) and the
+    # silent-fallback guard fires on a correctly-federated fake (found
+    # running the suite under sbatch on Ginsburg).
+    "SLURM_NTASKS", "SLURM_STEP_NUM_TASKS", "PMI_SIZE",
+    "OMPI_COMM_WORLD_RANK", "SLURM_PROCID", "PALS_LOCAL_RANKID",
+    "SLURM_LOCALID", "OMPI_COMM_WORLD_LOCAL_RANK", "MV2_COMM_WORLD_LOCAL_RANK",
 )
 
 
@@ -155,7 +164,11 @@ def _with_fake_jax(monkeypatch, fake, process_count: int | None = None):
     # against the launcher-declared world size; the fake federation
     # matches the declared size by default so guarded paths pass.
     if process_count is None:
-        for var in ("SLURM_NTASKS", "OMPI_COMM_WORLD_SIZE", "PMI_SIZE"):
+        # SAME precedence as early_init.launcher_world_size (step size, then
+        # the MPI launcher's world, allocation-wide SLURM_NTASKS last) so the
+        # fake federation always matches what the guard will declare.
+        for var in ("SLURM_STEP_NUM_TASKS", "OMPI_COMM_WORLD_SIZE",
+                    "PMI_SIZE", "SLURM_NTASKS"):
             v = os.environ.get(var)
             if v and v.isdigit():
                 process_count = int(v)
