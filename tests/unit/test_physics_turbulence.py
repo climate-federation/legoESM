@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from legoesm import constants
@@ -191,13 +192,30 @@ def test_zero_wind_zero_momentum_tendency(scheme):
 # EDMF mass-flux transport: flux-form conservation
 # ---------------------------------------------------------------------------
 
+def _edmf_stretched_grid(ncol: int, nlev: int):
+    """Top-first stretched vertical grid: layer thickness grows with height
+    (typical GCM/SCM stretching), z_half[:, 0] = top, z_half[:, -1] = 0."""
+    # Thicknesses surface->top: 100, 150, 200, ... m; reverse to top-first.
+    dz_sfc_first = 100.0 + 50.0 * jnp.arange(nlev)
+    dz_top_first = dz_sfc_first[::-1]
+    z_half_1d = jnp.concatenate(
+        [jnp.cumsum(dz_top_first[::-1])[::-1], jnp.zeros((1,))]
+    )  # (nlev+1,), decreasing to 0
+    z_half = jnp.broadcast_to(z_half_1d[None, :], (ncol, nlev + 1))
+    z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
+    dz_layer = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
+    return z_full, z_half, dz_layer
+
+
 def test_edmf_mass_flux_tendency_is_conservative():
     """The EDMF mass-flux transport is FLUX-FORM: its column mass-weighted
     integral telescopes to the boundary fluxes (no MF through the model top,
     ``F_top = 0``; surface-coupled ``F_sfc = flux[:, -1]``), so
-    ``Σ rho·dz·tend = flux[:, -1]``.  A non-flux-form centred difference at full
-    levels does NOT telescope and leaks a spurious O(interior MF flux) column
-    source — the defect this replaces.  (Physics review: turb/edmf, 2026-06-29.)
+    ``Σ rho·dz·tend = flux[:, -1]`` — on a STRETCHED grid too (the
+    height-weighted interface interpolation must not break telescoping).
+    A non-flux-form centred difference at full levels does NOT telescope and
+    leaks a spurious O(interior MF flux) column source — the defect this
+    replaces.  (Physics review: turb/edmf, 2026-06-29 + 2026-07-07.)
     """
     from legoesm.atmosphere.physics.turbulence.edmf import _mass_flux_tendency
 
@@ -206,10 +224,10 @@ def test_edmf_mass_flux_tendency_is_conservative():
     M = jnp.broadcast_to((0.02 + 0.03 * jnp.sin(0.4 * k))[None, :], (ncol, nlev))
     phi = jnp.broadcast_to((300.0 + 0.5 * k)[None, :], (ncol, nlev))
     phi_u = phi + (0.8 + 0.2 * jnp.cos(0.5 * k))[None, :]
-    dz_layer = jnp.full((ncol, nlev), 500.0)
     rho = jnp.broadcast_to((1.1 - 0.05 * k)[None, :], (ncol, nlev))  # all > 0.01 floor
+    z_full, z_half, dz_layer = _edmf_stretched_grid(ncol, nlev)
 
-    tend = _mass_flux_tendency(phi, phi_u, M, dz_layer, rho)
+    tend = _mass_flux_tendency(phi, phi_u, M, dz_layer, rho, z_full, z_half)
     flux = M * (phi_u - phi)
     col = jnp.sum(rho * dz_layer * tend, axis=1)   # mass-weighted column integral
     expected = flux[:, -1]                          # F_sfc - F_top = flux[-1] - 0
@@ -217,6 +235,41 @@ def test_edmf_mass_flux_tendency_is_conservative():
     assert bool(jnp.all(jnp.isfinite(tend)))
     assert jnp.allclose(col, expected, rtol=1e-5, atol=1e-6), (
         f"MF transport not conservative: col={col} vs expected={expected}"
+    )
+
+
+def test_edmf_mass_flux_divergence_exact_for_linear_flux_on_stretched_grid():
+    """Interior rows must recover the EXACT constant divergence of a
+    linear-in-z mass-flux profile on a STRETCHED grid.  The previous 2-point
+    unweighted interface average reduced the interior stencil to
+    ``(F[k-1]-F[k+1])/(2·dz_layer[k])``, whose denominator does not match the
+    full-level spacing ``z_full[k-1]-z_full[k+1]`` on stretched grids — an
+    O(1) local error (physics review C3, 2026-07-07).  The height-weighted
+    interface interpolation makes a linear flux exact in every interior row
+    while preserving the flux-form telescoping (previous test).
+    """
+    from legoesm.atmosphere.physics.turbulence.edmf import _mass_flux_tendency
+
+    ncol, nlev = 2, 14
+    z_full, z_half, dz_layer = _edmf_stretched_grid(ncol, nlev)
+    rho = jnp.full((ncol, nlev), 1.0)
+
+    # Build a linear flux F(z) = s·z + b through M·(phi_u − phi):
+    # M = 1 everywhere, phi_u − phi = s·z + b.
+    s, b = 2.0e-4, 0.05
+    M = jnp.ones((ncol, nlev))
+    phi = jnp.full((ncol, nlev), 300.0)
+    phi_u = phi + (s * z_full + b)
+
+    tend = _mass_flux_tendency(phi, phi_u, M, dz_layer, rho, z_full, z_half)
+    # dF/dz = s exactly -> tend = -(1/rho)·s in every INTERIOR row (the top
+    # and bottom rows carry the flux-form boundary conditions instead).
+    expected = -s / 1.0
+    interior = np.asarray(tend[:, 1:-1])
+    np.testing.assert_allclose(
+        interior, np.full_like(interior, expected), rtol=1e-10,
+        err_msg="interior MF divergence of a linear flux must be exact on a "
+                "stretched grid (height-weighted interface interpolation)",
     )
 
 

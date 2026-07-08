@@ -16,7 +16,10 @@ import warnings
 
 import jax.numpy as jnp
 
-from legoesm.ocean.eos import compute_buoyancy_frequency
+from legoesm.ocean.eos import (
+    compute_buoyancy_frequency,
+    compute_buoyancy_frequency_adiabatic,
+)
 from legoesm.ocean.physics.mixing import vertical_diffusion_variable_K
 from legoesm.ocean.physics.vertical_mixing._shared import (
     richardson_number,
@@ -79,6 +82,8 @@ def richardson_vertical_mixing(
     cfg: RichardsonVerticalMixingConfig,
     apply_diffusion: bool = True,
     dt: float | None = None,
+    p_cell: jnp.ndarray | None = None,
+    eos_fn=None,
 ) -> VerticalMixingOutput:
     """Apply Richardson-number dependent vertical mixing.
 
@@ -91,11 +96,30 @@ def richardson_vertical_mixing(
     z_coord : OceanZStarCoordinate
     jacobian : array (6, n, n)
     cfg : RichardsonVerticalMixingConfig
+    p_cell : array (6, n, n, nlev), optional
+        Cell-centre hydrostatic pressure [Pa]. REQUIRED when
+        ``cfg.n2_mode == "adiabatic"`` (the true static stability displaces
+        both parcels of an interface to the upper cell's pressure); ignored
+        for the in-situ modes.
+    eos_fn : callable or None
+        EOS ``fn(T, S, p) -> rho`` for the adiabatic parcel displacement
+        (``None`` -> Wright 1997, matching the density path). Ignored for the
+        in-situ modes.
 
     Returns
     -------
     VerticalMixingOutput
     """
+    # Validate the static-stability mode at function entry on the STATIC config
+    # value (dispatch hardening — a typo must raise, not silently pick a
+    # different N²). Allowed set mirrors ``_shared.compute_N2``.
+    if cfg.n2_mode not in ("insitu", "insitu_signed", "adiabatic"):
+        raise ValueError(
+            "Unknown RichardsonVerticalMixingConfig.n2_mode="
+            f"{cfg.n2_mode!r}; expected 'insitu', 'insitu_signed' or "
+            "'adiabatic'."
+        )
+
     eps = _EPS
 
     # Pr_t is now a no-op (the canonical Pr-Ri scaling is built into
@@ -112,8 +136,24 @@ def richardson_vertical_mixing(
             stacklevel=2,
         )
 
-    # N^2 at interfaces
-    N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
+    # N^2 at interfaces.  "insitu"/"insitu_signed": the in-situ density N²
+    # (BIT-IDENTICAL legacy — ``compute_buoyancy_frequency`` is already SIGNED
+    # here; the Ri>=0 clip in ``richardson_number`` handles the unstable
+    # branch).  "adiabatic": PP81's true static stability (parcels displaced
+    # to the upper cell's pressure), also SIGNED, unbiased by compressibility.
+    if cfg.n2_mode == "adiabatic":
+        if p_cell is None:
+            raise ValueError(
+                "richardson_vertical_mixing: n2_mode='adiabatic' requires "
+                "p_cell (cell-centre hydrostatic pressure [Pa]); the caller "
+                "must thread it (integration._make_richardson and the implicit "
+                "k_profiles path do)."
+            )
+        N2 = compute_buoyancy_frequency_adiabatic(
+            T, S, p_cell, z_coord.dz_ref, jacobian, eos_fn=eos_fn,
+        )
+    else:
+        N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
 
     # Gradient Richardson number Ri = N^2 / S^2 (#518: shared helper; clip
     # negative Ri -> max mixing for the unstable branch).

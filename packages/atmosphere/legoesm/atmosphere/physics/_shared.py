@@ -7,6 +7,7 @@ column-physics inputs each scheme expects.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 from legoesm.core.operators_3d import fv_flux_divergence_3d
 from legoesm.core.operators_fv_latlon_3d import fv_flux_divergence_latlon_3d
@@ -416,6 +417,76 @@ def mixing_length(z, l_mix_max, z_floor=1.0):
     kappa = constants.kappa_vk
     z_abs = jnp.clip(jnp.abs(z), z_floor, None)
     return kappa * z_abs / (1.0 + kappa * z_abs / l_mix_max)
+
+
+def louis_stability_functions(
+    Ri, l_mix, dz, b, c, d, blend_sharpness, b_heat=None,
+):
+    """Louis (1979/1982) Richardson-number stability functions, smoothly blended.
+
+    Canonical home for the Louis surface-layer / free-atmosphere stability
+    functions shared by the standalone Louis PBL scheme (``louis.py``) and the
+    free-atmosphere local-Ri branch of YSU (``ysu.py``) — previously verbatim
+    copies (CLAUDE.md "no duplicate numerics"; colocated with the shared
+    Blackadar :func:`mixing_length` the same closures use).
+
+    Branch forms (Louis 1979; Louis, Tiedtke & Geleyn 1982 coefficient split):
+
+    * Unstable (Ri<0): ``f = 1 - 2·b·Ri / (1 + 3·b·c·l²·sqrt(|Ri|) / dz²)``
+    * Stable   (Ri≥0): ``f = 1 / (1 + 2·b·Ri / sqrt(1 + d·Ri))``
+
+    blended with ``sigmoid(blend_sharpness · Ri)`` so the function is smooth
+    (differentiable) through neutral.  The heat function shares BOTH branch
+    denominators with momentum and differs only in the numerator coefficient
+    ``b_heat`` (LTG82: 3b heat vs 2b momentum ⇒ ``b_heat = 1.5·b``);
+    ``b_heat=None`` (default) sets ``b_heat = b`` so ``f_h == f_m`` (the Louis
+    1979 single-function form, used by YSU which consumes only ``f_m``).
+
+    Parameters
+    ----------
+    Ri : array
+        Gradient Richardson number at interfaces.
+    l_mix : array
+        Mixing length at the same interfaces [m].
+    dz : array
+        Interface spacing [m] (same shape as ``Ri``).
+    b, c, d : float
+        Louis (1982) coefficients: ``b`` enters both branches, ``c`` is the
+        unstable-branch denominator coefficient, ``d`` the stable-branch
+        sqrt coefficient.
+    blend_sharpness : float
+        Sigmoid sharpness of the stable/unstable blend [1/Ri].
+    b_heat : float or None
+        Heat-function numerator coefficient (default ``b`` ⇒ ``f_h = f_m``).
+
+    Returns
+    -------
+    (f_m, f_h) : tuple of arrays
+        Momentum and heat stability functions (dimensionless, > 0).
+    """
+    if b_heat is None:
+        b_heat = b
+
+    # Unstable branch — denominator shared between momentum and heat.
+    Ri_neg = jnp.minimum(Ri, 0.0)
+    denom_unstable = (
+        1.0 + 3.0 * b * c * l_mix ** 2
+        * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz ** 2 + 1e-10)
+    )
+    f_unstable_m = 1.0 - 2.0 * b * Ri_neg / denom_unstable
+    f_unstable_h = 1.0 - 2.0 * b_heat * Ri_neg / denom_unstable
+
+    # Stable branch — sqrt denominator shared between momentum and heat.
+    Ri_pos = jnp.maximum(Ri, 0.0)
+    sqrt_stable = jnp.sqrt(1.0 + d * Ri_pos)
+    f_stable_m = 1.0 / (1.0 + 2.0 * b * Ri_pos / sqrt_stable)
+    f_stable_h = 1.0 / (1.0 + 2.0 * b_heat * Ri_pos / sqrt_stable)
+
+    # Smooth blending: sigmoid transitions from unstable to stable.
+    blend = jax.nn.sigmoid(blend_sharpness * Ri)
+    f_m = (1.0 - blend) * f_unstable_m + blend * f_stable_m
+    f_h = (1.0 - blend) * f_unstable_h + blend * f_stable_h
+    return f_m, f_h
 
 
 # ---------------------------------------------------------------------------

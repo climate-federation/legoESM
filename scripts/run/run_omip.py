@@ -217,6 +217,20 @@ def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
             bottom_drag_z0=args.bottom_drag_z0,
             bottom_drag_ke0=args.bottom_drag_ke0,
         )
+    # Wide-halo split-explicit barotropic (lat-lon band scaling lever):
+    # nested BarotropicConfig fields, reachable via the flat-name mapping.
+    want_wide_halo = bool(getattr(args, "barotropic_wide_halo", False))
+    if want_wide_halo:
+        drag_flat = dict(
+            drag_flat,
+            barotropic_wide_halo=True,
+            barotropic_wide_halo_chunk=getattr(
+                args, "barotropic_wide_halo_chunk", 0),
+            # The wide path's per-substep clamp is LOCAL by construction;
+            # the config validator REQUIRES the local-clamp scheme to be
+            # explicit, so the flag sets it (documented in --help).
+            barotropic_local_subcycle_clamp=True,
+        )
     want_iwm = bool(getattr(args, "iwm", False))
     if not drag_flat and not want_iwm:
         return config, model
@@ -303,6 +317,11 @@ def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
             f"--iwm is supported on the lat-lon / tripole grids only "
             f"(the {grid_type} vertical-mixing bridge does not consume "
             f"IWM yet)")
+    if want_wide_halo:
+        raise SystemExit(
+            f"--barotropic-wide-halo is supported on the lat-lon / tripole "
+            f"C-grid ocean only (the wide-halo subcycle is a lat-band "
+            f"path); the {grid_type} grid has no wide-halo barotropic")
     # Non-latlon models with flat drag fields (MPAS Voronoi, cubed-sphere):
     # replace the flat NamedTuple fields and rebuild the same model class.
     if not hasattr(config, "bottom_drag_scheme"):
@@ -514,6 +533,24 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--kpp-a-bg", type=float,
                    default=_DEFAULT_KPP_CONFIG.A_bg,
                    help="KPP background viscosity [m^2/s]")
+    # --- wide-halo split-explicit barotropic (scaling-audit item 3) ---
+    p.add_argument("--barotropic-wide-halo", action="store_true",
+                   dest="barotropic_wide_halo",
+                   help="Opt-in wide-halo split-explicit barotropic: one "
+                        "fused wide lat-halo exchange per chunk of substeps "
+                        "instead of ~4 halo pads per substep (lat-lon band "
+                        "MPI/SPMD latency lever at >=16 ranks; serial "
+                        "value-identical). Regular lat-lon C-grid only "
+                        "(tripole fold refused at construction); requires "
+                        "barotropic_solver=explicit_substep and ALSO SETS "
+                        "barotropic_local_subcycle_clamp=True (the wide "
+                        "path's per-substep clamp is local; global mass is "
+                        "restored once per step).")
+    p.add_argument("--barotropic-wide-halo-chunk", type=int, default=0,
+                   dest="barotropic_wide_halo_chunk",
+                   help="Substeps per wide exchange (0 = auto from the local "
+                        "band height). With uneven --wet-balance bands set "
+                        "it so chunk x stencil-reach <= min band height.")
     # --- internal wave-driven mixing (NEMO zdfiwm, de Lavergne 2020) ---
     _IWM_DEF = _DEFAULT_IWM_CONFIG
     p.add_argument("--iwm", action="store_true",

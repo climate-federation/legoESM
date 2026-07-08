@@ -14,6 +14,18 @@ from legoesm.ocean.dynamics.barotropic import fill_land_cells
 from legoesm.ocean.physics.lateral_mixing.config import BiharmonicConfig
 from legoesm.ocean.physics.lateral_mixing.output import LateralMixingOutput
 
+# --- compact-outer biharmonic stability (forward-Euler) ---
+# The compact ∇⁴ = ∇²_compact(∇²_compact) has max eigenvalue ~1024/dx⁴ at the
+# 2Δx checkerboard, so its explicit CFL bound is B·dt/dx⁴ ≤ 1/512 — 32× tighter
+# than the legacy wide-outer form's ≤ 1/16 (the wide form's 2Δx null pushes its
+# spectral peak to ~4Δx).  The enforce_cfl cap is divided by this factor when
+# ``compact_outer`` is selected so the same ``cfl_safety`` stays sub-stable.
+_COMPACT_OUTER_CFL_TIGHTENING = 32.0
+# Coastal Neumann-fill reach: ∇⁴ = compact(compact) samples cells up to {i±2}
+# (vs {i±3} for the wide div(grad) outer, which reaches one cell further).
+_COMPACT_OUTER_FILL_PASSES = 2
+_WIDE_OUTER_FILL_PASSES = 3
+
 __physics_contract__ = {
     "summary": (
         "Biharmonic (grad^4) scale-selective lateral mixing: -B_h*grad^4(u,v) "
@@ -46,9 +58,12 @@ __physics_contract__ = {
         "Griffies (2004) Fundamentals of Ocean Climate Models"
     ),
     "idealized_test": (
-        "grid-scale noise is damped far faster than large-scale structure; a "
-        "uniform/linear field gives ~zero tendency; the area integral of T, S "
-        "is conserved."
+        "tests/ocean/unit/test_biharmonic_compact_outer.py: with compact_outer "
+        "the 2Δx checkerboard is damped MAXIMALLY (~1024·B/dx⁴) while large "
+        "scales are barely touched; the legacy wide outer has an exact 2Δx null. "
+        "A uniform/linear field gives ~zero tendency; the cube area integral of "
+        "T, S is conserved to the halo-interp limit (compact_outer no worse than "
+        "the wide form)."
     ),
 }
 
@@ -80,14 +95,19 @@ def biharmonic_lateral_mixing(
     z = jnp.zeros_like(u)
 
     # Optional CFL cap on the explicit biharmonic: B·dt/dx⁴ ≤
-    # cfl_safety·(1/16).  Uses ``grid.resolution_km·1000`` as the
-    # nominal dx; works on a cubed sphere because all cells are within
-    # a factor of √2 of this value.  Opt-in via ``cfg.enforce_cfl``.
+    # cfl_safety·(1/16) for the wide outer stencil, or ·(1/512) for the
+    # compact outer stencil (32× tighter — see the module constant).
+    # Uses ``grid.resolution_km·1000`` as the nominal dx; works on a
+    # cubed sphere because all cells are within a factor of √2 of this
+    # value.  Opt-in via ``cfg.enforce_cfl``.
     if cfg.enforce_cfl:
         dx = grid.resolution_km * 1000.0
+        cfl_denom = (
+            _COMPACT_OUTER_CFL_TIGHTENING if cfg.compact_outer else 1.0
+        )
         coeff_cap = (
             cfg.cfl_safety * dx ** 4
-            / jnp.maximum(cfg.cfl_dt_estimate, 1.0)
+            / (cfl_denom * jnp.maximum(cfg.cfl_dt_estimate, 1.0))
         )
         B_mom_eff = jnp.minimum(cfg.B_h_momentum, coeff_cap)
         B_tr_eff = jnp.minimum(cfg.B_h_tracer, coeff_cap)
@@ -109,7 +129,9 @@ def biharmonic_lateral_mixing(
         )  # (6, n, n, nlev, 2)
         n_face, n_i, n_j, nlev_t, n_pair = vel_stack.shape
         vel_flat = vel_stack.reshape(n_face, n_i, n_j, nlev_t * n_pair)
-        vel_hyper = hyperdiffusion_3d(vel_flat, grid, B_mom_eff)
+        vel_hyper = hyperdiffusion_3d(
+            vel_flat, grid, B_mom_eff, compact_outer=cfg.compact_outer,
+        )
         vel_hyper = vel_hyper.reshape(n_face, n_i, n_j, nlev_t, n_pair)
         du_dt = vel_hyper[..., 0]
         dv_dt = vel_hyper[..., 1]
@@ -121,23 +143,29 @@ def biharmonic_lateral_mixing(
     # no-flux BC even more important.  See harmonic.py for the
     # analogous fix.
     #
-    # ``n_passes=3`` matches the biharmonic ∇⁴ stencil reach.
-    # ``hyperdiffusion_3d`` composes ``compact_laplacian`` (reach 1,
-    # uses ``f[i±1]``) with ``div(grad(·))`` (reach 2, uses ``f[i±2]``).
-    # The full ∇²∇² then samples cells up to ``{i±3}``, so land cells
-    # THREE steps from ocean must be filled for the operator to see
-    # consistent gradients at coastlines.  Bridges land barriers up to
-    # 3 cells wide — wider strips no longer leak.  Codex iter-53
-    # stop-time review (n_passes=2 from iter-53 under-counted).
+    # Coastal Neumann-fill reach matches the ∇⁴ stencil.  The inner
+    # ``compact_laplacian`` is reach-1 (``f[i±1]``); the WIDE outer
+    # ``div(grad(·))`` is reach-2 (``f[i±2]``) so the full ∇²∇² samples
+    # up to ``{i±3}`` (n_passes=3), while the COMPACT outer is reach-1 so
+    # ∇²∇² samples only ``{i±2}`` (n_passes=2).  Land cells within the
+    # operator's reach must be filled for consistent coastal gradients.
+    # (Wide n_passes=3: Codex iter-53 stop-time review; n_passes=2 from
+    # iter-53 under-counted the wide reach.)
     dT_dt = z
     dS_dt = z
     if cfg.B_h_tracer > 0:
-        T_filled = fill_land_cells(T, mask, grid, n_passes=3)
-        S_filled = fill_land_cells(S, mask, grid, n_passes=3)
+        n_passes = (
+            _COMPACT_OUTER_FILL_PASSES if cfg.compact_outer
+            else _WIDE_OUTER_FILL_PASSES
+        )
+        T_filled = fill_land_cells(T, mask, grid, n_passes=n_passes)
+        S_filled = fill_land_cells(S, mask, grid, n_passes=n_passes)
         tr_stack = jnp.stack([T_filled, S_filled], axis=-1)  # (6, n, n, nlev, 2)
         n_face, n_i, n_j, nlev_t, n_pair = tr_stack.shape
         tr_flat = tr_stack.reshape(n_face, n_i, n_j, nlev_t * n_pair)
-        tr_hyper = hyperdiffusion_3d(tr_flat, grid, B_tr_eff)
+        tr_hyper = hyperdiffusion_3d(
+            tr_flat, grid, B_tr_eff, compact_outer=cfg.compact_outer,
+        )
         tr_hyper = tr_hyper.reshape(n_face, n_i, n_j, nlev_t, n_pair)
         dT_dt = tr_hyper[..., 0] * mask_3d
         dS_dt = tr_hyper[..., 1] * mask_3d

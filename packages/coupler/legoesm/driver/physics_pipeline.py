@@ -258,6 +258,12 @@ class PhysicsPipeline:
         # ``None`` (default) preserves bit-exact single-mesh behavior.
         self.column_mesh = column_mesh
         self._cloud_scheme = "none"  # set by build_physics_pipeline
+        # Clear-sky diagnostic (#843): static Python bool set by
+        # build_physics_pipeline from config.output.clear_sky_diag.  When True,
+        # the compiled segment runs a SECOND clouds-off compute_radiation_core
+        # pass to produce CMOR rsutcs/rlutcs; when False (default) every
+        # clear-sky code path is a byte-identical no-op.
+        self._clear_sky_diag = False  # set by build_physics_pipeline (#843)
         # Opt-in convective cumulus cloud-fraction source (set by
         # build_physics_pipeline from ExperimentConfig.convective_cloud).
         # When True, compute_radiation_core feeds the lagged convective precip
@@ -288,6 +294,10 @@ class PhysicsPipeline:
         # action spectrum threads through ``gwd_spectrum``.
         self._turb_energy_field = None
         self._gwd_prognostic = False
+        # Set for a stateless '+'-composite GWD (issue #834): the combined
+        # executor returns a (GWDOutput, spectrum) tuple even with no stateful
+        # part, so the pipeline must unpack it.
+        self._gwd_composite = False
 
     def _blend_land(self, ocean_field, land_field):
         """Blend an ocean/ice surface field with a land field by ``f_land``.
@@ -1358,7 +1368,13 @@ class PhysicsPipeline:
                 # ACTIVE scheme = dropped carry — fail loudly rather
                 # than silently reseed every step (the #405 bug class;
                 # codex review).
-                _sc = self.gwd_config
+                # For a '+'-composite (issue #834) the resolved gwd_config is
+                # the full GravityWaveDragConfig; the spectrum params live on
+                # its ``prognostic_spectral`` sub-config.  For pure
+                # ``prognostic_spectral`` the resolved config IS that
+                # sub-config (get_gwd_fn returns config.prognostic_spectral).
+                _sc = getattr(self.gwd_config, "prognostic_spectral",
+                              self.gwd_config)
                 _spec_shape = (ad.ncol, _sc.n_azimuths, _sc.n_wavenumbers)
                 _spec_in = gwd_spectrum
                 if (_spec_in is None
@@ -1375,6 +1391,13 @@ class PhysicsPipeline:
                 gwd_out, gwd_spectrum_out = self.gwd_fn(
                     spectrum_in=_spec_in, **_gwd_kwargs,
                 )
+            elif self._gwd_composite:
+                # Stateless '+'-composite (e.g. ``hines+mcfarlane``, issue #834):
+                # the combined executor mirrors the prognostic signature and
+                # returns ``(GWDOutput, spectrum_out)`` even with no stateful
+                # part, so pass ``spectrum_in=None`` and discard the (None)
+                # spectrum — there is no wave-action carry to thread.
+                gwd_out, _ = self.gwd_fn(spectrum_in=None, **_gwd_kwargs)
             else:
                 gwd_out = self.gwd_fn(**_gwd_kwargs)
             du_dt = du_dt + ad.unflatten_3d(gwd_out.du_dt)
@@ -2678,6 +2701,53 @@ def _resolve_microphysics(config):
 # Turbulence resolver
 # ---------------------------------------------------------------------------
 
+def apply_surface_flux_config(tc, config):
+    """Propagate the experiment-level surface bulk-flux settings into the
+    active scheme's ``SurfaceLayerConfig``.
+
+    Single source of truth for EVERY dycore backend (#870): the FV pipeline,
+    the MPAS standalone physics, and the spectral path all consume the
+    ``TurbulenceConfig`` this returns, so ``surface_bulk_scheme=coare3`` /
+    ``surface_gustiness_zi`` / ``surface_thermo_convention`` /
+    ``surface_stability_scheme`` reach the surface fluxes identically on all
+    grids.  (Previously this injection lived only in the FV
+    ``_resolve_turbulence`` — the MPAS AMIP lane silently ran the default
+    constant-coefficient surface layer.)
+
+    Default experiment settings => ``tc`` returned UNCHANGED (same object,
+    byte-identical; the override identity contract in
+    ``test_turbulence_config_for_default_vs_override`` relies on this).
+    """
+    sbs = getattr(config, "surface_bulk_scheme", "constant")
+    gzi = getattr(config, "surface_gustiness_zi", None)
+    stc = getattr(config, "surface_thermo_convention", "legoesm")
+    sss = getattr(config, "surface_stability_scheme", "dyer1974")
+    if (sbs == "constant" and gzi is None and stc == "legoesm"
+            and sss == "dyer1974"):
+        return tc
+    sub = getattr(tc, tc.scheme, None)  # e.g. tc.louis; "none"/clubb=None safe
+    if sub is None or getattr(sub, "surface", None) is None:
+        return tc
+    surf = sub.surface
+    if sbs != "constant":
+        surf = surf._replace(bulk_scheme=sbs)
+    if gzi is not None:
+        # COARE convective-gustiness BL depth (only effective with a MOST
+        # bulk_scheme); the diagnosed fix for the calm-warm-ocean low hfls.
+        surf = surf._replace(gustiness_w_zi=gzi)
+    if stc != "legoesm":
+        # AeroBulk thermodynamic-constants parity (#762; only effective
+        # with a MOST bulk_scheme).
+        surf = surf._replace(thermo_convention=stc)
+    if sss != "dyer1974":
+        # Stable-regime MOST functions: keep the atmosphere surface layer
+        # on the SAME stable functions as the coupler ocean tile (both
+        # driven by the one --surface-stability-scheme flag) so the
+        # interface cannot split Dyer-vs-SHEBA across its two sides.
+        surf = surf._replace(stability_scheme=sss)
+    return tc._replace(**{tc.scheme: sub._replace(surface=surf)})
+
+
 def turbulence_config_for(config):
     """The ``TurbulenceConfig`` to build the turbulence kernel from.
 
@@ -2688,12 +2758,17 @@ def turbulence_config_for(config):
     every dycore backend (FV ``_resolve_turbulence``, MPAS, spectral) honours an
     injected override consistently (e.g. a corrected per-column
     ``clubb_lite.C_K`` from the LES-informed correction loop).
+
+    The experiment-level surface bulk-flux settings are applied here too
+    (``apply_surface_flux_config``) so every backend gets the same surface
+    layer (#870).
     """
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
 
     override = getattr(config, "turbulence_override", None)
     if override is None:
-        return TurbulenceConfig(scheme=getattr(config, "turbulence", "none"))
+        tc = TurbulenceConfig(scheme=getattr(config, "turbulence", "none"))
+        return apply_surface_flux_config(tc, config)
     # Under MPI a GLOBAL per-column override must be sliced to the rank's columns
     # (else broadcast_column_param mismatches the rank-local l_mix). Deferred so the
     # parallel layout machinery is only touched when an override is actually set;
@@ -2705,9 +2780,9 @@ def turbulence_config_for(config):
     )
 
     layout = active_column_layout()
-    if layout is None:
-        return override
-    return localize_turbulence_override(override, layout)
+    tc = override if layout is None else localize_turbulence_override(
+        override, layout)
+    return apply_surface_flux_config(tc, config)
 
 
 def _resolve_turbulence(config):
@@ -2722,38 +2797,11 @@ def _resolve_turbulence(config):
     from legoesm.atmosphere.physics.turbulence.integration import get_turbulence_fn
 
     tc = turbulence_config_for(config)
+    # The experiment-level surface bulk-flux settings (coare3 / gustiness /
+    # thermo convention / stability scheme) are already applied by
+    # ``turbulence_config_for`` -> ``apply_surface_flux_config`` (#870), so
+    # the sub-config returned here carries the patched SurfaceLayerConfig.
     _name, turb_fn, turb_config = get_turbulence_fn(tc)
-    # Propagate the experiment-level surface bulk-flux algorithm into the
-    # scheme's SurfaceLayerConfig.  Default "constant" => unchanged (byte-
-    # identical).  The stability-dependent MOST schemes (coare3/large_yeager)
-    # add the convective-gustiness w* term absent from the constant neutral
-    # coefficients — the fix for anemic evaporation over a calm warm ocean.
-    sbs = getattr(config, "surface_bulk_scheme", "constant")
-    gzi = getattr(config, "surface_gustiness_zi", None)
-    stc = getattr(config, "surface_thermo_convention", "legoesm")
-    sss_scheme = getattr(config, "surface_stability_scheme", "dyer1974")
-    if (turb_config is not None
-            and getattr(turb_config, "surface", None) is not None
-            and (sbs != "constant" or gzi is not None or stc != "legoesm"
-                 or sss_scheme != "dyer1974")):
-        surf = turb_config.surface
-        if sbs != "constant":
-            surf = surf._replace(bulk_scheme=sbs)
-        if gzi is not None:
-            # COARE convective-gustiness BL depth (only effective with a MOST
-            # bulk_scheme); the diagnosed fix for the calm-warm-ocean low hfls.
-            surf = surf._replace(gustiness_w_zi=gzi)
-        if stc != "legoesm":
-            # AeroBulk thermodynamic-constants parity (#762; only effective
-            # with a MOST bulk_scheme).
-            surf = surf._replace(thermo_convention=stc)
-        if sss_scheme != "dyer1974":
-            # Stable-regime MOST functions: keep the atmosphere surface layer
-            # on the SAME stable functions as the coupler ocean tile (both
-            # driven by the one --surface-stability-scheme flag) so the
-            # interface cannot split Dyer-vs-SHEBA across its two sides.
-            surf = surf._replace(stability_scheme=sss_scheme)
-        turb_config = turb_config._replace(surface=surf)
     return turb_fn, turb_config
 
 
@@ -2989,6 +3037,10 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline.orbit = (earth_orbit()
                       if getattr(config, 'orbital_insolation', False) else None)
     pipeline._cloud_scheme = getattr(config, 'cloud_scheme', 'none')
+    # Clear-sky diagnostic (#843): enable the 2nd clouds-off radiation pass
+    # only when config.output.clear_sky_diag is set (default off).
+    pipeline._clear_sky_diag = bool(
+        getattr(getattr(config, 'output', None), 'clear_sky_diag', False))
     pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
     pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
     pipeline._cloud_q_c_diagnostic = getattr(config, 'cloud_q_c_diagnostic', None)
@@ -3008,7 +3060,18 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline._turb_energy_field = turbulence_scheme_traits(
         getattr(config, 'turbulence', 'none'),
     ).energy_field
-    pipeline._gwd_prognostic = (
-        getattr(config, 'gravity_wave_drag', 'none') == "prognostic_spectral"
+    # A GWD scheme threads the prognostic wave-action spectrum when it is
+    # ``prognostic_spectral`` OR a '+'-composite that contains it (issue #834).
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+        gwd_carries_spectrum,
+    )
+    _gwd_scheme = getattr(config, 'gravity_wave_drag', 'none')
+    pipeline._gwd_prognostic = gwd_carries_spectrum(_gwd_scheme)
+    # A stateless '+'-composite (no prognostic_spectral part) still returns the
+    # (GWDOutput, spectrum_out) tuple from the combined executor, so the
+    # pipeline must unpack it via the composite branch rather than the plain
+    # single-return path.
+    pipeline._gwd_composite = (
+        "+" in _gwd_scheme and not pipeline._gwd_prognostic
     )
     return pipeline

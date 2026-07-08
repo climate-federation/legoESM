@@ -22,18 +22,33 @@ Model (all per leaf-class, following BEPS-SIF ``SIF_y``)::
     fs   = fm * (1 - ps)                                # fluorescence yield
     SIF  = fs * APAR                                    # emitted leaf SIF photon flux
 
-Canopy total is the sunlit + shaded sum (two-leaf) or the single big-leaf
-value, scaled by an optional escape probability ``fesc`` (emitted -> observed
-top-of-canopy).  ``fesc = 1`` (default) returns the *emitted* SIF; it is
-clamped to ``[0, 1]`` at the aggregation sites (a probability).
+Canopy total is the sunlit + shaded sum (two-leaf), the single big-leaf value
+(SimpleSEB), or the leaf-area-weighted sum over canopy layers × sunlit/shaded
+(CLM-ML multilayer), scaled by an optional escape probability ``fesc``
+(emitted -> observed top-of-canopy).  ``fesc = 1`` (default) returns the
+*emitted* SIF; it is clamped to ``[0, 1]`` at the aggregation sites (a
+probability).  All paths share the same per-leaf fluorescence core
+(:func:`leaf_sif_from_je` = fluorescence yield × APAR), so a single-element
+canopy reduces exactly to the big-leaf.
 
-The ``je`` inversion is **C3-style** (uses the C3 CO2 compensation point
-``Gamma*``), matching BEPS-SIF ``photosyn_gs`` (single ``gammac``).  The
-SimpleSEB big-leaf path is C3-only, so this is exact there.  For a mixed
-two-leaf canopy (``fC4 > 0``) it is applied to the blended C3/C4 ``An`` as a
-documented BEPS-parity approximation — there is no separate C4 fluorescence
-path (out of scope; ``An`` for C4 dominated cells still yields a plausible SIF,
-but the ``je`` proxy is not physically rigorous for the C4 fraction).
+Electron transport ``je`` reaches the core two ways:
+
+- **Big-leaf / two-leaf** (SimpleSEB, two-leaf canopy): no native ``je`` is
+  exposed, so :func:`leaf_sif` *inverts* it from the Farquhar solution,
+  ``je = An*(Ci+2*Gamma*)/(Ci-Gamma*)`` (BEPS-SIF ``photosyn_gs``).
+- **CLM-ML multilayer**: the Bonan model already solved electron transport, so
+  :func:`multilayer_canopy_sif` consumes its native ``je_leaf`` + ``apar_leaf``
+  **directly** — SIF stays a pure consumer of that Farquhar solution and never
+  re-implements it.
+
+The inversion is **C3-style** (uses the C3 CO2 compensation point ``Gamma*``),
+matching BEPS-SIF ``photosyn_gs`` (single ``gammac``).  The SimpleSEB big-leaf
+path is C3-only, so this is exact there.  For a mixed two-leaf canopy
+(``fC4 > 0``) it is applied to the blended C3/C4 ``An`` as a documented
+BEPS-parity approximation — there is no separate C4 fluorescence path (out of
+scope; ``An`` for C4 dominated cells still yields a plausible SIF, but the
+``je`` proxy is not physically rigorous for the C4 fraction).  The multilayer
+path sidesteps this entirely by using the model's own ``je``.
 
 Units: ``An``/``je``/``APAR``/``SIF`` in ``umol m-2 s-1`` (photon flux for
 APAR/SIF); ``Ci``/``Gamma*`` in ``umol mol-1`` (mole fraction — they must share
@@ -127,7 +142,13 @@ def fluorescence_yield(x: jax.Array, cfg: SIFConfig) -> jax.Array:
     fs : dimensionless fluorescence yield in ``(0, 1)``.
     """
     x = jnp.clip(x, 0.0, 1.0)
-    xg = jnp.power(x, cfg.kn_gamma)
+    # Guard power(0, kn_gamma): d/d(kn_gamma) x^gamma = x^gamma*log(x) is
+    # 0*(-inf) = NaN at x=0, which x commonly hits at light saturation
+    # (je >= max_electron_yield*apar).  kn_gamma is tunable, so that NaN would
+    # poison training gradients.  x=0 -> x^gamma=0 with zero gamma-gradient is
+    # the analytic limit (gamma>0), so mask x=0 off the differentiable path.
+    x_pos = x > 0.0
+    xg = jnp.where(x_pos, jnp.power(jnp.where(x_pos, x, 1.0), cfg.kn_gamma), 0.0)
     kn = cfg.kn0 * (1.0 + cfg.kn_beta) * xg / (xg + cfg.kn_beta)
     fm = cfg.kf / (cfg.kf + cfg.kd + kn)
     ps = cfg.kp / (cfg.kf + cfg.kp + cfg.kd) * (1.0 - x)
@@ -172,20 +193,36 @@ def degree_of_light_saturation(
     return jnp.clip(x, 0.0, 1.0)
 
 
+def leaf_sif_from_je(
+    je: jax.Array, apar: jax.Array, cfg: SIFConfig,
+) -> jax.Array:
+    """Emitted leaf SIF photon flux [umol m-2 s-1] from a KNOWN ``je``.
+
+    ``SIF = fluorescence_yield(x) * APAR`` with ``x =
+    degree_of_light_saturation(je, APAR)``.  Use this when the caller already
+    has the electron-transport rate — e.g. the CLM-ML multilayer canopy's
+    native ``je_leaf``; :func:`leaf_sif` is the An/Ci/Gamma* wrapper that
+    *inverts* je first (BEPS-SIF style, for callers without a native je such as
+    the SimpleSEB big-leaf).  Does NOT apply the escape probability.
+    ``APAR = 0`` gives ``SIF = 0`` exactly.
+    """
+    x = degree_of_light_saturation(je, apar, cfg)
+    return fluorescence_yield(x, cfg) * apar
+
+
 def leaf_sif(
     An: jax.Array, Ci: jax.Array, gamma_star: jax.Array, apar: jax.Array,
     cfg: SIFConfig,
 ) -> jax.Array:
     """Emitted leaf (or single leaf-class) SIF photon flux [umol m-2 s-1].
 
-    ``SIF = fluorescence_yield(x) * APAR``.  Does NOT apply the escape
+    ``SIF = fluorescence_yield(x) * APAR`` with ``je`` inverted from the Farquhar
+    solution (:func:`actual_electron_transport`).  Does NOT apply the escape
     probability (aggregate with :func:`two_leaf_canopy_sif` or multiply by
     ``cfg.escape_probability`` at the call site for the observed TOC value).
     ``APAR = 0`` gives ``SIF = 0`` exactly.
     """
-    je = actual_electron_transport(An, Ci, gamma_star)
-    x = degree_of_light_saturation(je, apar, cfg)
-    return fluorescence_yield(x, cfg) * apar
+    return leaf_sif_from_je(actual_electron_transport(An, Ci, gamma_star), apar, cfg)
 
 
 def two_leaf_canopy_sif(
@@ -207,6 +244,69 @@ def two_leaf_canopy_sif(
     return (sif_sun + sif_sh) * fesc
 
 
+def multilayer_canopy_sif(
+    je: jax.Array, apar: jax.Array, leaf_area: jax.Array, cfg: SIFConfig,
+) -> jax.Array:
+    """Observed top-of-canopy SIF for a multi-layer canopy (CLM-ML).
+
+    Consumes the multilayer model's OWN electron-transport rate ``je`` (CLM-ML
+    ``je_leaf``) and absorbed PAR ``apar`` (``apar_leaf``) directly — it does
+    NOT re-invert ``je`` from ``An``/``Ci`` (that is the big-leaf
+    :func:`leaf_sif` path, for callers without a native ``je``).  This keeps SIF
+    a *pure consumer* of the Bonan multilayer canopy's Farquhar solution.
+
+    Leaf-area-weighted sum of per-(layer, leaf-class) emitted SIF, × escape
+    probability ``fesc``.  All arrays broadcast over the canopy elements
+    (layers × sunlit/shaded) and the SIF is summed over the LAST axis, so pass
+    ``(ncol, n_elem)`` to get per-column ``(ncol,)`` SIF.
+
+    ``apar`` is per unit **leaf** area (``apar_leaf``) and ``leaf_area`` is that
+    element's leaf-area index (``dpai_profile * fracsun`` for sunlit,
+    ``dpai_profile * (1 − fracsun)`` for shaded), so ``leaf_sif * leaf_area`` is
+    the per-**ground** contribution — matching how CLM-ML sums ``anet_leaf *
+    dpai`` into canopy GPP.  Invalid / unfilled elements must be passed with
+    ``leaf_area = 0`` (their sanitized ``je``/``apar`` then drop out).
+
+    Reduces EXACTLY to :func:`leaf_sif_from_je` × ``fesc`` for a single element
+    with ``leaf_area = 1``; feeding ``je = actual_electron_transport(An, Ci,
+    Gamma*)`` then ties it to the big-leaf :func:`leaf_sif` — the cross-check
+    that validates the multilayer path against the big-leaf / two-leaf paths
+    (identical fluorescence core).
+
+    JE CONVENTION (validated at CHATS7 — do NOT rescale ``je_leaf``):
+    ``je_leaf`` is the model's FULL Farquhar electron-transport rate ``J``,
+    whereas the big-leaf inversion is the BEPS-SIF *proxy*
+    ``An*(Ci+2*Gamma*)/(Ci-Gamma*)`` ≈ ``J/4`` — so the two je definitions differ
+    ~4-5x in absolute scale.  Despite that, feeding ``je_leaf`` directly is
+    CORRECT.  With ``max_electron_yield`` (BEPS-calibrated ~0.05) applied to
+    ABSORBED PAR, the full-J ``je_leaf`` drives ``x`` onto its 0-clamp for the
+    high-light daytime elements, where ``fluorescence_yield(0)`` is je-INDEPENDENT
+    (``SIF ~ fs(0)*APAR*fesc``) so the je scale drops out there.  Rescaling
+    ``je_leaf`` to the proxy convention (÷4) instead lifts ``x`` off the clamp at
+    the sub-saturated sunrise/sunset steps, raising the yield and OVERSHOOTING the
+    multilayer SIF -- it BREAKS the agreement rather than improving it.  An EC-site
+    diurnal cross-check (``scripts/validate/compare_ml_bigleaf_ec.py``, CHATS7)
+    confirms the direction INTERNALLY to the multilayer path (same APAR, same leaf
+    areas, so it isolates the je convention): the ÷4-rescaled canopy SIF OVERSHOOTS
+    the native-``je_leaf`` SIF by ~15 % on the diurnal mean -- more near the
+    sub-saturated sunrise/sunset steps where ``x`` lifts off the clamp -- so the
+    native ``je_leaf`` is the correct feed and the ÷4 rescale breaks it (the
+    ~15 %/~5x magnitudes are EMPIRICAL, not derivable from the code).  This
+    native-vs-÷4 test is SEPARATE from how the multilayer SIF MAGNITUDE compares to
+    the two-leaf big-leaf: that cross-scheme match is set by canopy STRUCTURE (the
+    two-leaf's single green LAI absorbs less than CLM-ML's plant-area profile) and
+    runs ~10 % below, tracking the latent-heat/radiation bias -- NOT a je-convention
+    effect.  (An earlier ~1 % cross-scheme match was an artifact of driving the
+    two-leaf with plant-area index; green LAI is physiology-correct and exposes the
+    structural ~10 %.)
+    ``max_electron_yield`` and ``fesc`` remain tier-1 trainables for ABSOLUTE
+    calibration against satellite SIF (a separate concern from the je convention).
+    """
+    per_leaf = leaf_sif_from_je(je, apar, cfg)
+    fesc = jnp.clip(cfg.escape_probability, 0.0, 1.0)
+    return jnp.sum(per_leaf * leaf_area, axis=-1) * fesc
+
+
 __physics_contract__ = {
     "summary": (
         "Solar-induced chlorophyll fluorescence (SIF) as an optional passive "
@@ -215,7 +315,8 @@ __physics_contract__ = {
         "Computes leaf/canopy SIF from the existing Farquhar solution (An, Ci, "
         "Gamma*, absorbed PAR); does not re-implement photosynthesis or stomatal "
         "conductance and never feeds back into the prognostic state. Sunlit+shaded "
-        "sum for the two-leaf canopy; single leaf for SimpleSEB; optional escape "
+        "sum for the two-leaf canopy; single leaf for SimpleSEB; leaf-area-weighted "
+        "layer x sun/shade sum for the CLM-ML multilayer canopy; optional escape "
         "probability fesc (clamped to [0,1]) converts emitted to observed "
         "top-of-canopy SIF. LIMITATION: the je inversion is C3-style (uses "
         "Gamma*) as in BEPS-SIF; exact for C3 (default fC4=0 and the C3-only "

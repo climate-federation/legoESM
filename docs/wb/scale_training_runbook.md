@@ -25,7 +25,9 @@ The launchers source the machine's `scripts/cluster/scaling_{derecho,levante}/_e
 
 ERA5 streams from the public WeatherBench-2 GCS zarr, so the compute nodes need
 outbound internet (Derecho/Levante compute nodes have it). It caches locally under
-`.cache/wb_scale_era5`.
+`.cache/wb_scale_era5`. The `gs://` reader needs `gcsfs` — included in the `ml`
+extra since #817 (`pip install -e ".[dev,ml]"`); an env built with `--extras dev`
+alone hits `ModuleNotFoundError: gcsfs` at the first data load.
 
 ---
 
@@ -61,6 +63,8 @@ Edit the node count at the top of the launcher (`select=<N>:…` for Derecho,
 ```bash
 cd /glade/work/$USER/legoESM
 WB_MODE=neural_gcm qsub scripts/cluster/derecho/train_wb.pbs
+# semi-implicit spectral training core (#817 blocker 1):
+WB_MODE=neural_gcm WB_CORE=spectral qsub scripts/cluster/derecho/train_wb.pbs
 ```
 
 **Levante (SLURM):**
@@ -87,7 +91,8 @@ test year after training.
 | Flag | Meaning | Default |
 |---|---|---|
 | `--mode` | `physics` \| `neural_gcm` \| `sfno` | `neural_gcm` |
-| `--resolution` | degrees (0.7 = ~256×512 lat-lon) | `0.7` |
+| `--training-core` | `latlon` (explicit C-grid) \| `spectral` (Gaussian **semi-implicit**; #817) | `latlon` |
+| `--resolution` | **check only** — must match the YAML grid (180/n_lat); edit the YAML to change resolution | derived from YAML |
 | `--epochs` | training epochs | `40` |
 | `--multi-step-hours` | forecast rollout leads, e.g. `6,12` | `6,12` |
 | `--lr` / `--optimizer` | learning rate / `adamw`\|`muon` | `3e-4` / `adamw` |
@@ -99,13 +104,42 @@ Scale is **data-parallel**: more ranks (nodes×4) = larger effective batch +
 faster wall-clock. 0.7° fits on one A100-80GB, so you scale for throughput, not
 because the model doesn't fit.
 
+### The two #817 blockers and their levers
+
+- **Exploding adjoint (blocker 1).** The explicit lat-lon core's training
+  adjoint grows ~×1.3 per 30 s step (a numerical mode of the explicit core, not
+  weather) → `value_and_grad` NaN past ~6 h even with a finite forward.
+  **Lever: `--training-core spectral`** (or `WB_CORE=spectral` on the
+  launchers) — the Gaussian/spectral core with the Hoskins–Simmons
+  semi-implicit step treats the fast gravity-wave terms implicitly, keeping the
+  adjoint bounded, and its grid has no pole cells, so `dt` stays at the
+  configured `spectral.dt` (1800 s default) instead of collapsing to seconds.
+  Configure via the YAML `spectral:` block (`n_max`, `dt`, `semi_implicit`
+  [default true], `si_substeps`, `hyperdiff_coeff`, `spectral_filter_strength`).
+  Per the #829 T10 dt-sweep, SI pays off **only where the gravity-wave CFL
+  binds** (fine truncation) — at very coarse truncation the explicit spectral
+  core is already adjoint-stable, so don't expect a coarse-grid demonstration.
+  A model trained on the spectral core does **not** transfer its physics-head
+  wiring back to the lat-lon production core 1:1 — score it with the spectral
+  scorer path.
+- **Full-BPTT memory (blocker 2).** The segment `lax.scan` used to store every
+  step's carry (527 GiB physics/gray, 970 GiB neural_gcm/f64 at 0.7°). Fixed on
+  `main` by #841: rollouts of ≥256 steps automatically use nested **√N
+  checkpointing** (`_sqrt_checkpointed_scan`, exact gradients, O(√N) carry
+  storage — 0.7° ≈1 TB → ~26 GB); shorter segments keep per-step remat. No flag
+  needed — it engages on step count.
+
 ---
 
 ## 4. Outputs
 
 - `$OUT/epoch_XXXX.eqx` — per-epoch checkpoints (rank 0).
-- With `--eval-wb2`: a WeatherBench-2 lead-time scorecard (RMSE + ACC + bias on
-  Z500/T850/Q700/U-V/MSLP/… vs ERA5) from the scorer in `evaluations/`.
+- With `--eval-wb2`: currently a **pointer hook** (#817 papercut, honest doc):
+  it logs the instruction to run `evaluations.wb_orchestrator` against the
+  trained checkpoint — the scorecard itself (RMSE + ACC + bias on
+  Z500/T850/Q700/U-V/MSLP vs ERA5) is produced by that separate scorer run,
+  not inline by the trainer. Wiring the in-process scorecard is tracked as a
+  follow-up.
 
 ---
 

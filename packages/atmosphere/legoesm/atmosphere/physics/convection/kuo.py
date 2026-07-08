@@ -74,6 +74,7 @@ from legoesm.thermo import (
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_moist_adiabat,
     compute_cape,
+    latent_heat_vaporization,
 )
 from legoesm.atmosphere.physics.convection.config import KuoConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
@@ -144,15 +145,18 @@ def _latent_heat(T: jax.Array) -> jax.Array:
     """Temperature-dependent latent heat of vaporization [J/kg].
 
     Oracle ``Lh``: ``L_v0 + (T − T00)·(c_pv − c_l)`` with the reference
-    temperature taken as :data:`constants.T_freeze` (the oracle uses
-    ``t00 = 273.16``; we use ``T_freeze = 273.15``, a 0.01 K offset that
+    temperature taken as :data:`constants.T_freeze` (the oracle uses the
+    triple point ``t00 = 273.16``; ``T_freeze`` sits 0.01 K below, which
     shifts ``Lh`` by ~25 J/kg, negligible).  Sublimation (``lsub``) is
     disabled in the oracle's Kuo path, so we keep the vaporization
     branch only.
+
+    Thin named alias over the shared Kirchhoff helper
+    :func:`legoesm.atmosphere.physics.thermodynamics.latent_heat_vaporization`
+    (same pattern as :func:`_dqsat_dT` below) so the Kuo call sites read
+    like the oracle while the formula lives in one place.
     """
-    return constants.L_v + (T - constants.T_freeze) * (
-        constants.c_pv - constants.c_pw
-    )
+    return latent_heat_vaporization(T)
 
 
 def _dqsat_dT(T: jax.Array, p: jax.Array) -> jax.Array:
@@ -493,7 +497,18 @@ def kuo_convection(
     # RH-mean over the convective layer (for Kuo-Anthes partition).
     layer_mass = jnp.sum(icond2 * dpg, axis=1)
     rhmean = jnp.sum(rh * icond2 * dpg, axis=1) / jnp.maximum(layer_mass, 1e-30)
-    bkuo = 1.0 - rhmean - config.anthes_rh_offset            # (ncol,)
+    # Anthes (1977) moistening FRACTION b ∈ [0, 1] by definition: the
+    # accession splits (1−b) to heating and b to moistening.  ``rh`` is
+    # not capped at 1, so in a near-saturated cloud layer
+    # ``rhmean + offset > 1`` and the raw ``1 − rhmean − offset`` goes
+    # NEGATIVE — flipping the moistening term ``b·rt_q·(qvc−qv)`` into a
+    # spurious extra DRYING and pushing the heating factor ``(1−b)``
+    # above 1 (the column would condense more than the accession it
+    # consumes).  Clamp to [0, 1]: a saturated layer moistens nothing
+    # (b=0, all heating), a bone-dry layer at most fully moistens (b=1).
+    bkuo = jnp.clip(
+        1.0 - rhmean - config.anthes_rh_offset, 0.0, 1.0,
+    )                                                        # (ncol,)
 
     # Safe normalisation denominators (signed; floor only the magnitude).
     def _safe(x):
@@ -607,8 +622,10 @@ def kuo_convection(
     # so the quiescent path — no large-scale convergence, zero tendencies
     # — reports a zero mask (``tanh(0)=0``) rather than the spurious 0.5
     # the ``ptenq>0`` sign gate gives at exactly ptenq=0.  ``cvgu>=0`` by
-    # construction so ``tanh`` is monotone here.
-    convective_mask = jnp.tanh(cvgu / 1.0e-8)
+    # construction so ``tanh`` is monotone here.  The activation scale is
+    # a KuoConfig field (matching the sibling ``buoyancy_scale_K`` /
+    # ``supersat_scale`` trigger normalisers), not an inline literal.
+    convective_mask = jnp.tanh(cvgu / config.cvgu_activation_scale)
 
     return ConvectionOutput(
         dT_dt=dT_dt,

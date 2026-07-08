@@ -85,13 +85,14 @@ def _make_column(
 
 
 def _run_both(T, q_v, hydro_morrison, hydro_p3, p_full, p_half, rho, dz, dt=300.0,
-              morrison_config=None):
+              morrison_config=None, p3_config=None):
     out_m = morrison_microphysics(
         T, q_v, hydro_morrison, p_full, p_half, rho, dz, dt,
         morrison_config if morrison_config is not None else MorrisonConfig(),
     )
     out_p = p3_microphysics(
-        T, q_v, hydro_p3, p_full, p_half, rho, dz, dt, P3Config(),
+        T, q_v, hydro_p3, p_full, p_half, rho, dz, dt,
+        p3_config if p3_config is not None else P3Config(),
     )
     return out_m, out_p
 
@@ -111,12 +112,15 @@ def test_warm_rain_tendencies_agree():
     )
     out_m, out_p = _run_both(
         T, q_v, hm, hp, p_full, p_half, rho, dz,
-        # N_i0=0 disables Cooper nucleation so the vapour budget reflects
-        # only the (shared SB) warm-rain liquid processes, not Morrison's
-        # ice-nucleation mass sink at cold upper levels (iter-9).
+        # N_i0=0 disables Cooper nucleation ON BOTH SCHEMES so the vapour
+        # budget reflects only the (shared SB) warm-rain liquid processes,
+        # not the ice-nucleation seed-mass vapour sink at cold upper levels
+        # (iter-9; P3 now carries the same dq_i_nuc = dN_i_nuc*m_i0 vapour
+        # sink as Morrison, so it must be zeroed symmetrically).
         morrison_config=MorrisonConfig(
             warm_rain_scheme="seifert_beheng", N_i0=0.0,
         ),
+        p3_config=P3Config(N_i0=0.0),
     )
 
     for field in ("dq_c_dt", "dq_r_dt", "dq_v_dt"):

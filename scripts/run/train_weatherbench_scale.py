@@ -20,6 +20,7 @@ import argparse
 from typing import NamedTuple
 
 VALID_MODES = ("physics", "neural_gcm", "sfno")
+VALID_TRAINING_CORES = ("latlon", "spectral")
 
 
 class ScaleConfig(NamedTuple):
@@ -35,6 +36,12 @@ class ScaleConfig(NamedTuple):
     resume: bool
     eval_wb2: bool
     smoke: bool
+    # #817 blocker 1: 'latlon' = the explicit C-grid production core;
+    # 'spectral' = the Gaussian semi-implicit training core whose implicit
+    # gravity-wave treatment keeps the training adjoint bounded (and whose
+    # grid has no pole-cell CFL clamp).  Appended AFTER the original fields
+    # so positional construction in existing tests stays valid.
+    training_core: str = "latlon"
 
 
 def _parse_hours(s):
@@ -84,7 +91,20 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
     p = argparse.ArgumentParser(description="WeatherBench data-parallel scale training")
     p.add_argument("--mode", choices=VALID_MODES, default="neural_gcm")
     p.add_argument("--config", default="config/wb/scale/train_07deg.yaml")
-    p.add_argument("--resolution", type=float, default=0.7, dest="resolution_deg")
+    # The model grid comes from the YAML (n_lat/n_lon/nlev or spectral.n_max),
+    # NOT from this flag — a --resolution that silently disagreed with the YAML
+    # was the #817 papercut ("--resolution is a no-op on the model grid").
+    # Default None = derive from the YAML for logging; an explicit value that
+    # mismatches the YAML grid is now a hard error in main() instead of a
+    # silent no-op.
+    p.add_argument("--resolution", type=float, default=None, dest="resolution_deg",
+                   help="Informational check only: must match the YAML grid "
+                        "(180/n_lat). To change resolution, edit the YAML.")
+    p.add_argument("--training-core", choices=VALID_TRAINING_CORES,
+                   default="latlon", dest="training_core",
+                   help="latlon = explicit C-grid production core; spectral = "
+                        "Gaussian semi-implicit training core (#817 blocker 1: "
+                        "bounded adjoint, no pole-cell dt clamp).")
     p.add_argument("--epochs", type=int, default=40, dest="n_epochs")
     p.add_argument("--multi-step-hours", default="6,12", dest="multi_step_hours")
     p.add_argument("--lr", type=float, default=3.0e-4)
@@ -107,7 +127,30 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
         n_epochs=a.n_epochs, multi_step_hours=_parse_hours(a.multi_step_hours),
         lr=a.lr, optimizer=a.optimizer, grad_accum=a.grad_accum,
         out_dir=a.out_dir, resume=a.resume, eval_wb2=a.eval_wb2, smoke=a.smoke,
+        training_core=a.training_core,
     )
+
+
+def _check_resolution_matches_yaml(cfg: ScaleConfig, yml: dict) -> float:
+    """Resolve the run's resolution [deg] from the YAML grid; reject a
+    mismatched explicit ``--resolution`` (the #817 no-op papercut).
+
+    The model grid is built from ``yml["n_lat"]/["n_lon"]`` (lat-lon core) or
+    ``yml["spectral"]["n_max"]`` (spectral core); ``--resolution`` never fed it.
+    ``None`` (the default) derives 180/n_lat for logging.  An explicit value
+    that disagrees by more than 5% is a HARD error — the old behaviour trained
+    at the YAML grid while logging the flag's value.
+    """
+    derived = 180.0 / float(yml["n_lat"])
+    if cfg.resolution_deg is None:
+        return derived
+    if abs(cfg.resolution_deg - derived) > 0.05 * derived:
+        raise SystemExit(
+            f"--resolution {cfg.resolution_deg:g} deg does not match the YAML "
+            f"grid ({yml['n_lat']}x{yml['n_lon']} = {derived:.3g} deg). The "
+            f"grid comes from the YAML; edit n_lat/n_lon (and nlev) there "
+            f"instead of passing --resolution.")
+    return cfg.resolution_deg
 
 
 def _mpi_rank_size():
@@ -152,11 +195,17 @@ def main(argv=None):
     rank, nproc = _mpi_rank_size()
     logging.basicConfig(level=logging.INFO if rank == 0 else logging.WARNING)
     log = logging.getLogger("wb_scale")
-    log.info("WB scale train: mode=%s res=%.2fdeg ranks=%d", cfg.mode, cfg.resolution_deg, nproc)
 
     yml = yaml.safe_load(open(cfg.config_path))
     if cfg.smoke:  # tiny, gray-radiation single-GPU wiring check (see helper)
         cfg = _apply_smoke_overrides(cfg, yml)
+    # Resolution comes FROM the YAML grid; an explicit mismatched --resolution
+    # is a hard error, not a silent no-op (#817 papercut). Under --smoke the
+    # grid is forced to 32x64, so the derived value is used verbatim.
+    res_deg = (180.0 / float(yml["n_lat"]) if cfg.smoke
+               else _check_resolution_matches_yaml(cfg, yml))
+    log.info("WB scale train: mode=%s core=%s res=%.2fdeg ranks=%d",
+             cfg.mode, cfg.training_core, res_deg, nproc)
 
     # --- build grid / sigma / physics pipeline / model / mode loss_fn ---
     #  (reuses the same package builders run_aimip_latlon uses; the mode differs

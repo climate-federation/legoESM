@@ -755,6 +755,25 @@ def pad_with_pole_bc_lat_multi(
 
     from legoesm.grids.halo import get_halo_backend, get_mpi_topology
 
+    # SPMD leg of the message-aggregation lever (audit item 7): ONE
+    # ppermute pair per direction per dtype group instead of one per
+    # field.  OPT-IN (default off — flip per deck only with a measured
+    # GPU A/B receipt, per the audit item's contract).  Value-identical
+    # to the per-field pads (the exchange is a bit-copy).
+    _spmd_fused = os.environ.get(
+        "LEGOESM_LATLON_SPMD_FUSED_HALO", "0") != "0"
+    if _spmd_fused:
+        mesh = _spmd_lat_mesh()
+        if mesh is not None:
+            from legoesm.parallel.latlon_spmd import (
+                make_latlon_band_wall_multi_pad_body,
+            )
+            body = make_latlon_band_wall_multi_pad_body(
+                mesh, halo=halo,
+                south_values=south_values, north_values=north_values,
+                n_fields=n)
+            return body(*fields)
+
     fused = os.environ.get("LEGOESM_LATLON_FUSED_HALO", "1") != "0"
     if get_halo_backend() == "mpi" and fused:
         from legoesm.parallel.latlon_mpi import (
@@ -781,3 +800,170 @@ def pad_with_pole_bc_lat_multi(
         )
         for i, f in enumerate(fields)
     )
+
+
+# ============================================================================
+# Wide-halo band widening (opt-in wide-halo split-explicit barotropic)
+# ============================================================================
+
+def band_pole_flags():
+    """(south_is_pole, north_is_pole) for the ACTIVE lat-band backend.
+
+    Booleans may be Python bools (local / MPI band — static at trace time)
+    or traced scalars (SPMD: derived from ``lax.axis_index`` inside the
+    shard_map body, where a rank-static branch is impossible because the
+    body is one uniform program).  Callers must therefore consume them with
+    ``jnp.where``-style selects, never Python ``if``.
+
+    Local backend: a single band owns both physical poles → (True, True).
+    MPI band layout: pole ownership is ``south_rank/north_rank is None``.
+    2-D pencil: pole ownership of the proc-row (lat) axis.
+    """
+    mesh = _spmd_lat_mesh()
+    if mesh is not None:
+        import jax
+
+        idx = jax.lax.axis_index("lat")
+        n_bands = mesh.shape["lat"]
+        return idx == 0, idx == n_bands - 1
+    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
+    if get_halo_backend() == "mpi":
+        from legoesm.parallel.latlon_mpi import (
+            LatLon2DLayout,
+            LatLonBandLayout,
+        )
+        topology = get_mpi_topology()
+        if isinstance(topology, (LatLonBandLayout, LatLon2DLayout)):
+            return topology.south_rank is None, topology.north_rank is None
+    return True, True
+
+
+def _clamp_pole_pad_rows(x_ext: jnp.ndarray, halo: int,
+                         south_is_pole, north_is_pole) -> jnp.ndarray:
+    """Overwrite beyond-pole pad rows with the nearest PHYSICAL row.
+
+    The wide exchange fills pole-side pad rows with the wall constant (0).
+    Metric arrays (area, dx, dy) must stay FINITE and non-zero there — the
+    interior operators divide by them, and ``0/0 → NaN`` would leak through
+    a masked row into the owned region via ``min``/flux stencils (NaN is not
+    absorbed by ``* mask``).  Values are irrelevant (the rows are permanently
+    land-masked); finiteness is the contract.
+
+    Uniform ``jnp.where`` select so the SPMD (traced pole flags) and the
+    static local/MPI cases share one code path.
+    """
+    n_ext = x_ext.shape[0]
+    idx = jnp.arange(n_ext)
+    shape_tail = (1,) * (x_ext.ndim - 1)
+    south_sel = ((idx < halo).reshape((n_ext,) + shape_tail)
+                 & jnp.asarray(south_is_pole))
+    north_sel = ((idx >= n_ext - halo).reshape((n_ext,) + shape_tail)
+                 & jnp.asarray(north_is_pole))
+    south_row = x_ext[halo][None]
+    north_row = x_ext[n_ext - halo - 1][None]
+    out = jnp.where(south_sel, south_row, x_ext)
+    return jnp.where(north_sel, north_row, out)
+
+
+def widen_band_cell_fields(fields, halo: int, *, clamp_poles: bool = False):
+    """Widen cell-row (leading dim ``n_lat``) fields by ``halo`` rows/side.
+
+    ONE fused exchange under the MPI band backend
+    (:func:`pad_with_pole_bc_lat_multi`); wall-zero at physical poles,
+    optionally clamped to the nearest physical row (metric arrays — see
+    :func:`_clamp_pole_pad_rows`).  Applies to T-point AND u-point fields
+    (both carry one row per cell).
+    """
+    padded = pad_with_pole_bc_lat_multi(fields, halo=halo)
+    if not clamp_poles:
+        return padded
+    south_is_pole, north_is_pole = band_pole_flags()
+    return tuple(
+        _clamp_pole_pad_rows(p, halo, south_is_pole, north_is_pole)
+        for p in padded
+    )
+
+
+def widen_band_vface_fields(fields, halo: int, *, clamp_poles: bool = False):
+    """Widen v-face (leading dim ``n_lat+1``) fields by ``halo`` rows/side.
+
+    A band's v array carries one duplicated boundary face, so faces cannot
+    be exchanged like cell rows.  Trick: drop the top face — ``v[:-1]`` is
+    exactly one "south face" per cell row — exchange THAT as a cell field
+    with ``halo+1`` rows, and re-slice: ``padded[1:]`` are the south faces
+    of the ``n+2*halo`` extended cells plus the top face of the northmost
+    extended cell, i.e. the ``(n + 2*halo) + 1`` faces of the extended
+    band.  Value-identical to the serial extended domain; at physical poles
+    the wall constant fills beyond-pole faces (repaired to the nearest
+    physical face for metric arrays via ``clamp_poles``).
+
+    The band's OWN TOP face (a value the ``[:-1]`` drop discarded) is
+    restored verbatim at extended index ``halo + n``: on an interior band
+    the exchange already delivered the neighbour's bit-equal copy of that
+    shared face, but on the NORTH-POLE band the exchange fills it with the
+    wall constant — zeroing a real metric row (``dy_v``/``area_q``/``f_v``
+    at the pole face), which poisons every division at that face.  The
+    restore is unconditional (bit-neutral on interior bands), so it stays
+    uniform under SPMD.
+    """
+    interiors = tuple(f[:-1] for f in fields)
+    padded = pad_with_pole_bc_lat_multi(interiors, halo=halo + 1)
+    out = tuple(
+        p[1:].at[halo + f.shape[0] - 1].set(f[-1])
+        for p, f in zip(padded, fields)
+    )
+    if not clamp_poles:
+        return out
+    south_is_pole, north_is_pole = band_pole_flags()
+    return tuple(
+        _clamp_pole_pad_rows(p, halo, south_is_pole, north_is_pole)
+        for p in out
+    )
+
+
+def widen_cgrid_geometry_band(geom, halo: int):
+    """Extended-band twin of ``slice_cgrid_geometry_to_band``: widen a
+    band-local :class:`~legoesm.grids.latlon.LatLonCGridGeometry` by
+    ``halo`` ghost rows per side via the ACTIVE halo backend.
+
+    Field rules mirror the slicer (stagger-aware):
+
+    * T-/u-point metrics + 1-D lat arrays → cell-row widening;
+    * v-/q-point metrics → v-face widening;
+    * ``lon``/``dlon``/``dlat``/``radius``/``total_area`` unchanged
+      (``total_area`` stays the GLOBAL denominator);
+    * ``n_lat`` → ``n_lat + 2*halo`` (static Python int);
+    * ``fold`` must be inactive/non-local — the wide-halo path refuses
+      tripolar folds (caller-validated; this helper asserts).
+
+    ALL metric rows are pole-clamped (finite beyond-pole values): the
+    extended rows are permanently land-masked, so their values never enter
+    the owned region, but a zero metric would create ``0/0 = NaN`` that
+    masks do NOT absorb.
+
+    Traced (per-step) op: two fused exchanges (cell group + v-face group).
+    """
+    # Refuse on an ACTIVE fold (``is_active`` is rank-CONSISTENT on sliced
+    # bands — unlike ``fold_is_local``, which is True only on the north band
+    # and would raise on one rank while the others proceed into a fused
+    # collective: a deadlock, not an error).
+    fold = getattr(geom, "fold", None)
+    if fold is not None and getattr(fold, "is_active", False):
+        raise NotImplementedError(
+            "widen_cgrid_geometry_band: tripolar north fold is not "
+            "supported by the wide-halo barotropic path (the fold row "
+            "needs a permuted, sign-flipped wide exchange — follow-up)."
+        )
+    cell_names = ("lat_T", "lon_T", "dx_T", "dy_T", "area_T", "dx_u",
+                  "dy_u", "f_T", "f_u", "cos_alpha_u", "sin_alpha_u",
+                  "cos_lat", "sin_lat", "lat")
+    vface_names = ("dx_v", "dy_v", "area_q", "f_v", "cos_alpha_v",
+                   "sin_alpha_v")
+    cell_wide = widen_band_cell_fields(
+        tuple(getattr(geom, n) for n in cell_names), halo, clamp_poles=True)
+    vface_wide = widen_band_vface_fields(
+        tuple(getattr(geom, n) for n in vface_names), halo, clamp_poles=True)
+    updates = dict(zip(cell_names, cell_wide))
+    updates.update(zip(vface_names, vface_wide))
+    updates["n_lat"] = int(geom.n_lat) + 2 * halo
+    return geom._replace(**updates)

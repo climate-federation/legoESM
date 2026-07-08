@@ -432,6 +432,19 @@ def _step_multilayer_land_impl(
         LAI_override = compute_prognostic_lai(
             carbon_state, config, config.surface_scheme)
 
+        # Kelvin pore relative humidity h_r = exp(psi_top g/(R_v T)) — the
+        # thermodynamic vapour-pressure lowering of the drying surface (bites only
+        # near residual water).  Shape (ncol,), in state precision.
+        _h_r_top = jnp.exp(jnp.minimum(
+            psi[:, 0] * constants.g
+            / (constants.R_v * jnp.maximum(T_soil[:, 0], 1.0)), 0.0)).astype(theta.dtype)
+        # Top-layer RELATIVE saturation W_1 = theta_1/theta_sat for the Sellers-1992
+        # surface resistance (computed in layer space then sliced, same broadcast-safe
+        # pattern as _S_top above).
+        _W1_top = jnp.clip(
+            theta / jnp.maximum(config.hydraulics.theta_sat, 1e-6),
+            1e-6, 1.0)[:, 0].astype(theta.dtype)
+
         surface_out = compute_two_leaf_canopy_fluxes(
             T_soil_top=T_surface,
             forcing=forcing,
@@ -453,22 +466,27 @@ def _step_multilayer_land_impl(
             #   * Kelvin pore RELATIVE HUMIDITY  h_r = exp(psi_top g /(R_v T))
             #     — thermodynamic vapour-pressure lowering; only bites as the
             #     surface approaches residual (psi -> -inf).
-            #   * Sellers-1992 / Lee-Pielke-1992 diffusion-crust resistance,
-            #     S_top**soil_evap_resistance_exp with S_top the top-layer
-            #     effective saturation — throttles evaporation even when the
-            #     surface is WET (S_top<1), the regime the EC + DifferBESS
-            #     comparison showed over-predicts soil evaporation several-fold.
-            # This is the canopy-path counterpart of the SimpleSEB S_top**exp
-            # throttle (#671); exp=0 recovers the Kelvin-only behaviour.
+            #   * Soil-moisture control, ONE of two mutually-exclusive forms
+            #     (never both — same Sellers-1992 physics, or the limitation
+            #     double-counts):
+            #       - series_resistance ON (default): Kelvin h_r ONLY here; the
+            #         moisture control is the Sellers-1992 SURFACE RESISTANCE r_ss
+            #         (+ SZ09 litter), added in SERIES with raw_below inside the
+            #         canopy soil energy balance via ``soil_surface_relsat`` below.
+            #         Fixes the aerodynamic-only path that let a wet forest floor
+            #         evaporate at near-potential rate (LE_soil ~57% of total at
+            #         US-MMS; <15% is physical).
+            #       - series_resistance OFF (legacy): the beta EFFICIENCY
+            #         S_top**soil_evap_resistance_exp (Sellers-1992 / Lee-Pielke-1992
+            #         diffusion crust; the SimpleSEB #671 counterpart), which
+            #         throttles the conductance but barely helps a surface that
+            #         rewets to S_top~1.  exp=0 recovers Kelvin-only.
             w_frac_soil_evap=(
-                jnp.exp(jnp.minimum(
-                    psi[:, 0] * constants.g
-                    / (constants.R_v * jnp.maximum(T_soil[:, 0], 1.0)), 0.0))
-                # _S_top (top-layer effective saturation) is floored at 1e-6 (not 0)
-                # in its shared definition above: keeps d(S_top**exp)/dS_top finite at
-                # the residual-water boundary for a trainable exp < 1 (0**exp has an
-                # infinite gradient) — AD-safe, negligible forward effect.
-                * _S_top ** config.soil_evap_resistance_exp),
+                _h_r_top if config.soil_evap_series_resistance
+                # _S_top floored at 1e-6 keeps d(S_top**exp)/dS_top finite at the
+                # residual boundary for a trainable exp<1 (AD-safe; see above).
+                else _h_r_top * _S_top ** config.soil_evap_resistance_exp),
+            soil_surface_relsat=_W1_top,
         )
     elif isinstance(config.surface_scheme, CLMMLCanopyConfig):
         # CLM-ML-JAX multilayer canopy scheme (Phase 3 implementation).
@@ -683,10 +701,18 @@ def _step_multilayer_land_impl(
     # so the third scheme, CLMMLCanopyConfig, is correctly excluded too.  Dew
     # (demand<0) left un-throttled.
     if isinstance(config.surface_scheme, SimpleSEBConfig):
-        # _S_top (top-layer effective saturation, floored at 1e-6 in its shared
-        # definition above so d(S_top**exp)/dS_top stays finite at the residual-water
-        # boundary for a trainable exp < 1; AD-safe, negligible fwd).
-        _beta_surf = (_S_top ** config.soil_evap_resistance_exp).astype(
+        # Bare-soil evaporation efficiency = Kelvin pore RELATIVE HUMIDITY x diffusion-crust
+        # resistance, matching the two-leaf-canopy path (above) and CLM5 (Oleson 2013):
+        #   * h_r = exp(psi_top g /(R_v T_top)) — pore-space vapour-pressure lowering; ~1
+        #     except as the surface nears residual (psi -> -inf), where it shuts evap off.
+        #     Previously MISSING on the SimpleSEB path (only S_top**exp), unlike the canopy.
+        #   * _S_top (top-layer effective saturation, floored at 1e-6 in its shared
+        #     definition above so d(S_top**exp)/dS_top stays finite at the residual-water
+        #     boundary for a trainable exp < 1; AD-safe, negligible fwd).
+        _h_r = jnp.exp(jnp.minimum(
+            psi[:, 0] * constants.g
+            / (constants.R_v * jnp.maximum(T_soil[:, 0], 1.0)), 0.0))
+        _beta_surf = (_h_r * _S_top ** config.soil_evap_resistance_exp).astype(
             soil_evap_demand.dtype)
         soil_evap_demand = jnp.where(
             soil_evap_demand > 0.0, soil_evap_demand * _beta_surf, soil_evap_demand)
@@ -1054,3 +1080,51 @@ def init_multilayer_land_state(
         ice_bands=ice_bands,
         canopy_state=canopy_state,
     )
+
+
+def aridity_theta_init(rh_surface, theta_wp, theta_fc):
+    """Aridity-aware initial soil moisture from near-surface relative humidity.
+
+    Cold-starting the deep Richards column at the moisture-uniform
+    ``0.5 * theta_sat`` default (a soil *porosity* fraction, aridity-blind)
+    leaves subtropical deserts holding rainforest-scale water — ~375 kg/m^2 in a
+    3 m column.  A hot bare-soil skin then drives runaway *potential*
+    evaporation: the supply limiter never binds because the water is there, the
+    atmosphere moistens without bound, and the coupled AMIP run blows up after
+    ~a week (issue #730, day-8 non-finite winds).
+
+    Anchor the initial plant-available water to atmospheric aridity instead.  Map
+    the near-surface relative humidity of the IC atmosphere linearly into the
+    plant-available range ``[theta_wp, theta_fc]``::
+
+        theta_init = theta_wp + clip(rh_surface, 0, 1) * (theta_fc - theta_wp)
+
+    Arid columns (low near-surface RH) start near the wilting point, so from step
+    one the root-zone ``beta`` is at its floor (``beta`` multiplies
+    ``q_sat(T_skin)`` in the surface specific humidity) AND the extractable water
+    is small — the evaporation limiter binds immediately.  Humid columns start
+    near field capacity (the physical drained equilibrium).
+
+    ``theta_wp`` / ``theta_fc`` MUST be the SAME per-column thresholds the tile's
+    ``beta`` reads (``LandSurfaceParams.theta_wp`` / ``theta_fc``) so the seed is
+    consistent with the running physics.  CLM setup enforces
+    ``theta_fc > theta_wp``, and physically ``theta_wp >= theta_r``, so the result
+    lies in ``[theta_wp, theta_fc] ⊂ [theta_r, theta_sat]`` — a valid Richards
+    state for ``psi_from_theta``.
+
+    Parameters
+    ----------
+    rh_surface : array
+        Near-surface relative-humidity proxy ``q_v / q_sat`` (per column).
+        Clipped to ``[0, 1]``.
+    theta_wp, theta_fc : array or float
+        Per-column wilting-point / field-capacity volumetric water content
+        [m^3/m^3].
+
+    Returns
+    -------
+    array
+        Per-column initial volumetric water content (broadcast of the inputs).
+    """
+    rh = jnp.clip(rh_surface, 0.0, 1.0)
+    return theta_wp + rh * (theta_fc - theta_wp)
