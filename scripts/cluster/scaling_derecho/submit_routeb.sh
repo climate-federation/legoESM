@@ -7,9 +7,9 @@
 #                            legoesm-gpu + aws-ofi-nccl).  Each grid uses its OWN
 #                            resolution axis + device ladder, so they land as
 #                            SEPARATE curves (never overlaid).
-#   routeb_cpu_sweep.pbs  -- latlon CPU-node curve (1..16 NODES) for the
-#                            CPU-node-vs-A100 comparison.  ico/cube CPU lanes are
-#                            not built yet -> CPU is latlon-only for now.
+#   routeb_cpu_sweep.pbs  -- FANS OUT one CPU-node job per grid (same GRIDS), the
+#                            CPU-node half of the CPU-node-vs-A100 comparison
+#                            (1 proc/node, gloo).  RUN_CPU=0 skips it.
 #
 # Usage:
 #   LEGOESM_NCCL_OFI_LIB=/glade/work/$USER/nccl-ofi/<tag>/lib \
@@ -95,15 +95,22 @@ for g in $GRIDS; do
     _sub "${ACCT_GPU}" "route-B GPU ${g}" "${SCRIPT_DIR}/routeb_gpu_sweep.pbs" "$vars"
 done
 
-# --- CPU: latlon-node curve for the CPU-vs-A100 comparison (ico/cube CPU lanes
-#     are not built yet, so CPU stays latlon-only).  Skip with RUN_CPU=0. -------
-if [ "${RUN_CPU:-1}" = "1" ] && printf ' %s ' $GRIDS | grep -q ' latlon '; then
-    _cpu_res="${RES_JOINED}"
-    [ "$_res_explicit" = 1 ] && [ "$_n_grids" -eq 1 ] || _cpu_res="$(echo "${RES_LIST:-128 256 512}" | tr ' ' ':')"
-    _sub "${ACCT_CPU}" "route-B CPU latlon (1..16 nodes)" "${SCRIPT_DIR}/routeb_cpu_sweep.pbs" \
-         "RES_LIST=${_cpu_res},OUTDIR=${OUT}/routeb_cpu"
+# --- CPU: one CPU-node job per grid (the CPU half of the CPU-vs-A100 comparison,
+#     1 proc/node gloo).  Skip the whole CPU side with RUN_CPU=0. --------------
+if [ "${RUN_CPU:-1}" = "1" ]; then
+    for g in $GRIDS; do
+        case "$g" in
+          latlon|icosahedral|cubed-sphere|cubed_sphere) ;;
+          *) continue ;;   # unknown grid already warned on the GPU pass
+        esac
+        vars="OUTDIR=${OUT}/routeb_cpu_${g},GRID=${g}"
+        if [ "$_res_explicit" = 1 ] && [ "$_n_grids" -eq 1 ]; then
+            vars="RES_LIST=${RES_JOINED},${vars}"
+        fi
+        _sub "${ACCT_CPU}" "route-B CPU ${g}" "${SCRIPT_DIR}/routeb_cpu_sweep.pbs" "$vars"
+    done
 else
-    echo "    (CPU lane skipped: RUN_CPU=${RUN_CPU:-1}, latlon in GRIDS=$(printf ' %s ' $GRIDS | grep -q ' latlon ' && echo yes || echo no))"
+    echo "    (CPU lanes skipped: RUN_CPU=0)"
 fi
 
 echo "=== when the jobs finish:  scripts/cluster/scaling_derecho/finalize_scaling.sh ${OUT} ==="

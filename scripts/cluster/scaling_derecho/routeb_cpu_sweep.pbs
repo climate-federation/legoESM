@@ -8,12 +8,15 @@
 #PBS -j oe
 #PBS -k eod
 # ===========================================================================
-# Route-B (SPMD multi-controller) CPU THROUGHPUT sweep -- latlon only.
-#   NODE ladder N = 1 2 4 8 16 NODES (ONE process per FULL node = one CPU
-#   device using all 128 cores as threads; --ppn 1) x RES_LIST resolutions.
-# The CPU half of the fair CPU-node-vs-A100 throughput comparison; the SAME
-# SPMD lat-band code path as routeb_gpu_sweep.pbs, so CPU-vs-GPU is a like-for-
-# like transport comparison, differing only in the device (node vs A100).
+# Route-B (SPMD multi-controller) CPU THROUGHPUT sweep -- all route-B grids.
+#   ONE process per FULL node = one CPU device (all 128 cores as threads,
+#   --ppn 1).  GRID selects the lane (mirror routeb_gpu_sweep.pbs):
+#     GRID=latlon       lat-band SPMD          NODE ladder 1 2 4 8 16
+#     GRID=icosahedral  MPAS cell-partition    NODE ladder 1 2 4 8 16
+#     GRID=cubed-sphere face-partition cs-spmd NODE ladder 1 2 3 6 (face divisors)
+# The CPU half of the fair CPU-node-vs-A100 throughput comparison: the SAME SPMD
+# code paths + device ladders as routeb_gpu_sweep.pbs, so CPU-vs-GPU is
+# like-for-like, differing only in the device (node vs A100).  spectral rejected.
 #
 # CPU multi-controller collectives run over the jax.distributed runtime (gloo /
 # TCP over hsn) -- NO NCCL, NO GPU-aware MPICH; mpi4py is bootstrap-only.  ONE
@@ -47,13 +50,28 @@ cd "$REPO"
 module load gcc cray-mpich 2>/dev/null || true   # match the mpi4py bootstrap ABI
 
 MODE="${MODE:-strong}"
-RES_LIST="${RES_LIST:-128 256 512}"     # latlon n_lat resolutions (the 3 sizes)
+# GRID selects the SPMD lane (mirror routeb_gpu_sweep.pbs).  Per-grid defaults:
+# RES list, vertical levels, NODE ladder (powers-of-2 for band/cell decomps;
+# FACE-DIVISORS 1,2,3,6 for cube), output subdir.  Unknown grid -> hard error.
+GRID="${GRID:-latlon}"
+case "$GRID" in
+  latlon)
+    RES_LIST="${RES_LIST:-128 256 512}"; NLEV="${NLEV:-26}"
+    NODE_RANKS="${NODE_RANKS:-1 2 4 8 16}"; _sub="atm_latlon_cpu" ;;
+  icosahedral)
+    RES_LIST="${RES_LIST:-6 7 8}";        NLEV="${NLEV:-8}"
+    NODE_RANKS="${NODE_RANKS:-1 2 4 8 16}"; _sub="mpas_atm_cpu" ;;
+  cubed-sphere|cubed_sphere)
+    RES_LIST="${RES_LIST:-48 96 192}";    NLEV="${NLEV:-26}"
+    NODE_RANKS="${NODE_RANKS:-1 2 3 6}";  _sub="cs_spmd_cpu" ;;
+  *) echo "ERROR: routeb_cpu_sweep GRID='$GRID' unsupported (latlon|icosahedral|cubed-sphere; spectral=no route-B)." >&2; exit 2 ;;
+esac
 RES_LIST="${RES_LIST//[:,]/ }"          # accept colon/comma-separated (survives qsub -v)
-NLEV="${NLEV:-26}"
+NODE_RANKS="${NODE_RANKS//,/ }"          # = NODES = processes (1 proc/node)
 N_WARMUP="${N_WARMUP:-3}"
 N_TIMING="${N_TIMING:-30}"
-NODE_RANKS="${NODE_RANKS:-1 2 4 8 16}"   # = NODES = processes (1 proc/node)
-NODE_RANKS="${NODE_RANKS//,/ }"
+PHYSICS="${PHYSICS:-none}"              # cube --cs-spmd only (none|moist); 'none'=dry
+PRECISION="${PRECISION:-float32}"       # cube --cs-spmd only
 _CORES_PER_NODE="${LEGOESM_CORES_PER_NODE:-128}"
 
 # One process per node uses the WHOLE node: size the CPU thread pools to the
@@ -74,12 +92,25 @@ fi
 [ "${_n_nodes:-0}" -ge 1 ] 2>/dev/null || _n_nodes=1
 NODE_CAP="${LEGOESM_NNODES:-$_n_nodes}"
 
+# Icosahedral strong scaling: pin every device count to ONE padded mesh (LCM of
+# runnable node counts) so all points are the SAME global problem size (fair
+# strong scaling; see routeb_gpu_sweep.pbs for the rationale).  Others need none.
+_reorder_for=1
+if [ "$GRID" = icosahedral ]; then
+    _gcd() { local a="$1" b="$2" t; while [ "$b" -ne 0 ]; do t="$b"; b=$(( a % b )); a="$t"; done; echo "$a"; }
+    for N in $NODE_RANKS; do
+        [ "$N" -gt "$NODE_CAP" ] 2>/dev/null && continue
+        g="$(_gcd "$_reorder_for" "$N")"; _reorder_for=$(( _reorder_for * N / g ))
+    done
+    echo "    icosahedral reorder_for (LCM of runnable node counts) = $_reorder_for"
+fi
+
 STAMP="$(date +%Y%m%d_%H%M%S)"
 OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/routeb_cpu_${STAMP}}"
 mkdir -p "$OUTDIR"
 [ -n "${PBS_O_WORKDIR:-}" ] && exec > >(tee -a "$OUTDIR/run.log") 2>&1
 
-echo "=== route-B CPU sweep (latlon): mode=$MODE res=[$RES_LIST] nodes=[$NODE_RANKS] (cap=$NODE_CAP) nlev=$NLEV threads=$OMP_NUM_THREADS ==="
+echo "=== route-B CPU sweep ($GRID): mode=$MODE res=[$RES_LIST] nodes=[$NODE_RANKS] (cap=$NODE_CAP) nlev=$NLEV threads=$OMP_NUM_THREADS ==="
 echo "    outdir=$OUTDIR"
 
 # Distinct coordinator port per launch (sequential inits on one port hit a
@@ -94,17 +125,36 @@ for RES in $RES_LIST; do
         continue
     fi
     export LEGOESM_COORDINATOR_PORT="$_port"; _port=$(( _port + 1 ))
-    echo "=== route-B CPU latlon res=$RES N=$N nodes (1 proc/node, coord_port=$LEGOESM_COORDINATOR_PORT) ==="
-    mpiexec -n "$N" --ppn 1 \
-        "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
-        --multicontroller --n-devices "$N" \
-        --mode "$MODE" --n-lat "$RES" --n-lon $((2 * RES)) --nlev "$NLEV" \
-        --steps $((N_WARMUP + N_TIMING)) --warmup "$N_WARMUP" \
-        --out "$OUTDIR/atm_latlon_cpu/spmd_R${RES}_N${N}.jsonl" < /dev/null \
-      || { echo "route-B CPU res=$RES N=$N FAILED rc=$?"; rc_all=1; }
+    echo "=== route-B CPU $GRID res=$RES N=$N nodes (1 proc/node, coord_port=$LEGOESM_COORDINATOR_PORT) ==="
+    # Per-grid SPMD bench argv (mpiexec --ppn 1 wrapper shared).  cube uses
+    # run_cpu_mpi_scaling --cs-spmd --device cpu (flat JSON, --n-levels/--n-warmup/
+    # --n-timing); latlon/ico use the SPMD benches (--nlev/--steps/--warmup, JSONL).
+    case "$GRID" in
+      latlon)
+        BENCH=( "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py
+                --multicontroller --n-devices "$N"
+                --mode "$MODE" --n-lat "$RES" --n-lon $(( 2 * RES )) --nlev "$NLEV"
+                --steps $(( N_WARMUP + N_TIMING )) --warmup "$N_WARMUP"
+                --out "$OUTDIR/${_sub}/spmd_R${RES}_N${N}.jsonl" ) ;;
+      icosahedral)
+        BENCH=( "$PY" scripts/bench/bench_mpas_spmd_scaling.py
+                --multicontroller --n-devices "$N" --reorder-for "$_reorder_for"
+                --subdivision "$RES" --nlev "$NLEV" --partition-method sfc
+                --steps $(( N_WARMUP + N_TIMING )) --warmup "$N_WARMUP"
+                --out "$OUTDIR/${_sub}/spmd_L${RES}_N${N}.jsonl" ) ;;
+      cubed-sphere|cubed_sphere)
+        BENCH=( "$PY" scripts/bench/run_cpu_mpi_scaling.py
+                --grid cubed-sphere --cs-spmd --device cpu
+                --physics "$PHYSICS" --mode "$MODE" --resolution "$RES"
+                --precision "$PRECISION" --n-levels "$NLEV"
+                --n-warmup "$N_WARMUP" --n-timing "$N_TIMING"
+                --output-dir "$OUTDIR/${_sub}" ) ;;
+    esac
+    mpiexec -n "$N" --ppn 1 "${BENCH[@]}" < /dev/null \
+      || { echo "route-B CPU $GRID res=$RES N=$N FAILED rc=$?"; rc_all=1; }
   done
 done
 
-echo "=== DONE rc=$rc_all ===   route-B CPU curve JSONL under: $OUTDIR/atm_latlon_cpu/"
+echo "=== DONE rc=$rc_all ===   route-B CPU curve records under: $OUTDIR/${_sub}/"
 echo "    aggregate + plot:  scripts/cluster/scaling_derecho/finalize_scaling.sh $OUTDIR"
 exit "$rc_all"
