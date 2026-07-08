@@ -14,7 +14,7 @@ import pytest
 from legoesm.parallel import early_init as ei
 
 _ALL_ENV = (
-    "SLURM_NTASKS", "OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "PALS_LOCAL_RANKID",
+    "SLURM_STEP_NUM_TASKS", "SLURM_NTASKS", "OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "PALS_LOCAL_RANKID",
     "OMPI_COMM_WORLD_LOCAL_RANK", "MV2_COMM_WORLD_LOCAL_RANK",
     "SLURM_LOCALID",
     "CUDA_VISIBLE_DEVICES", "NCCL_NET_PLUGIN", "LD_LIBRARY_PATH",
@@ -41,6 +41,10 @@ def test_launcher_world_size_priority(monkeypatch):
     assert ei.launcher_world_size() == 16  # SLURM outranks all
     monkeypatch.setenv("SLURM_NTASKS", "garbage")
     assert ei.launcher_world_size() == 4  # non-numeric skipped, not crash
+    # Inner srun step: STEP size outranks the allocation-wide NTASKS.
+    monkeypatch.setenv("SLURM_NTASKS", "16")
+    monkeypatch.setenv("SLURM_STEP_NUM_TASKS", "2")
+    assert ei.launcher_world_size() == 2
 
 
 def test_pals_local_device_ids(monkeypatch):

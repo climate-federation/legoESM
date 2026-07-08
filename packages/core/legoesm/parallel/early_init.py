@@ -61,12 +61,16 @@ def launcher_world_size() -> int:
     """World size DECLARED by the job launcher's environment (0 = none).
 
     Reads the union of the launcher families every entry point supports:
-    SLURM (``SLURM_NTASKS``), Open MPI (``OMPI_COMM_WORLD_SIZE``), and
-    PMI/PALS (``PMI_SIZE``).  Used by the post-init fallback guard — the
-    launcher's declaration is the ground truth a federated runtime must
-    match.
+    SLURM (step-scoped ``SLURM_STEP_NUM_TASKS`` first, then
+    ``SLURM_NTASKS``), Open MPI (``OMPI_COMM_WORLD_SIZE``), and PMI/PALS
+    (``PMI_SIZE``).  Used by the post-init fallback guard — the launcher's
+    declaration is the ground truth a federated runtime must match.
     """
-    for var in ("SLURM_NTASKS", "OMPI_COMM_WORLD_SIZE", "PMI_SIZE"):
+    # STEP-scoped size first: an inner `srun -n k` exports
+    # SLURM_STEP_NUM_TASKS=k while SLURM_NTASKS may stay allocation-wide
+    # (the runtime/config.py bootstrap precedence; codex).
+    for var in ("SLURM_STEP_NUM_TASKS", "SLURM_NTASKS",
+                "OMPI_COMM_WORLD_SIZE", "PMI_SIZE"):
         v = os.environ.get(var)
         if v and v.isdigit():
             return int(v)
