@@ -331,3 +331,36 @@ def test_land_ic_path_wrong_grid_raises(monkeypatch, tmp_path):
     dst = ModelDriver(cfg, output_dir=tmp_path / "dst")
     with pytest.raises((ValueError, AssertionError)):
         dst.setup()
+
+
+def test_setup_multilayer_land_on_latlon_grid(monkeypatch, tmp_path):
+    """#869/#837 follow-up: the LAT-LON grid stores 1-D lat/lon axes; the land
+    setup's flatten_2d(grid.lat) raised "cannot reshape (n_lat,) into ncol" and
+    killed every latlon use_multilayer_land run at setup (the production
+    latlon24 lane).  The setup must broadcast the axes to the (n_lat, n_lon)
+    cell grid and seed a full-ncol state."""
+    from legoesm.land.state import MultiLayerLandState
+
+    _patch_land_loaders(monkeypatch)
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="latlon_cgrid"),
+        output=OutputConfig(diag_days=1),
+        days=1, dataset="analytical",
+        radiation="gray",
+        land_mask_path="synthetic.nc",
+        use_multilayer_land=True,
+        multilayer_n_layers=6, multilayer_soil_depth=2.5,
+    )
+    driver = ModelDriver(cfg, output_dir=tmp_path)
+    driver.setup()          # raised TypeError (reshape) before the fix
+
+    st = driver._land_ml_state
+    assert isinstance(st, MultiLayerLandState)
+    ncol = driver.grid.lat.size * driver.grid.lon.size   # n_lat * n_lon
+    assert st.T_soil.shape == (ncol, 6)
+    assert driver.physics.land_ml_lat.shape == (ncol,)
+    # lat must VARY across columns (a broadcast bug that tiled one row would
+    # leave it constant).
+    import numpy as _np2
+    assert _np2.unique(_np2.asarray(driver.physics.land_ml_lat)).size > 1

@@ -1540,11 +1540,21 @@ class ModelDriver:
             )
 
         ad = self.physics.adapter
-        # column-order latitude / longitude.  grid.lat is geographic latitude in
-        # RADIANS, shape (6,n,n)/(nlat,nlon); flatten to (ncol,).  The CLM map
-        # regrids onto DEGREE coordinates; the land tile consumes radians.
-        lat_rad = _np.asarray(ad.flatten_2d(self.grid.lat)).reshape(-1)
-        lon_rad = _np.asarray(ad.flatten_2d(self.grid.lon)).reshape(-1)
+        # column-order latitude / longitude in RADIANS, flattened to (ncol,).
+        # Cubed-sphere stores per-cell (6,n,n) lat/lon; the LAT-LON grid stores
+        # 1-D axes (lat (n_lat,), lon (n_lon,)) — flatten_2d on those raised
+        # "cannot reshape (n_lat,) into ncol" and killed every latlon
+        # use_multilayer_land run at setup (#837 follow-up / #869 lane).
+        # Prefer the grid's own 2-D fields when present, else broadcast the
+        # 1-D axes to the (n_lat, n_lon) cell grid (same convention as
+        # run_lmip_smoke.grid_latlon_rad).  The CLM map regrids onto DEGREE
+        # coordinates; the land tile consumes radians.
+        _glat = _np.asarray(getattr(self.grid, "lat2d", self.grid.lat))
+        _glon = _np.asarray(getattr(self.grid, "lon2d", self.grid.lon))
+        if _glat.ndim == 1 and _glon.ndim == 1:
+            _glon, _glat = _np.meshgrid(_glon, _glat)   # -> (n_lat, n_lon)
+        lat_rad = _np.asarray(ad.flatten_2d(_glat)).reshape(-1)
+        lon_rad = _np.asarray(ad.flatten_2d(_glon)).reshape(-1)
         lat_deg = _np.degrees(lat_rad)
         lon_deg = _np.degrees(lon_rad)
         # download_clm_surfdata caches to /tmp (one-time); load_clm_surface regrids
