@@ -665,10 +665,19 @@ def bechtold_convection(
     # maps NaN->0, Inf->finite; the clip is far above any real convective rate.
     dT_dt = jnp.clip(jnp.nan_to_num(dT_dt), -_BECHTOLD_DTDT_MAX, _BECHTOLD_DTDT_MAX)
     dq_v_dt = jnp.clip(jnp.nan_to_num(dq_v_dt), -_BECHTOLD_DQVDT_MAX, _BECHTOLD_DQVDT_MAX)
-    dq_c_conv_dt = jnp.nan_to_num(jnp.maximum(dq_c_conv_dt, 0.0))
+    dq_c_conv_dt = jnp.clip(jnp.nan_to_num(jnp.maximum(dq_c_conv_dt, 0.0)),
+                            0.0, _BECHTOLD_DQVDT_MAX)
 
     dq_c_conv_dt, dq_r_conv_dt = split_convective_rain(
         dq_c_conv_dt, config.precip_efficiency)
+
+    # Sanitize the returned carry + diagnostics too — M_u_new is a real
+    # physics-state carry (feeds next step's relaxation), so a non-finite here
+    # would re-enter the scheme; cape/mask are diagnostics but kept finite.
+    M_u_new = jnp.clip(jnp.nan_to_num(M_u_new), 0.0, config.M_b_max)
+    cape_pbl = jnp.nan_to_num(cape_pbl)
+    convective_mask = jnp.nan_to_num(convective_mask)
+    conv_stoch_state_new = jnp.nan_to_num(conv_stoch_state_new)
 
     out = ConvectionOutput(
         dT_dt=dT_dt,
