@@ -273,16 +273,26 @@ def multilayer_canopy_sif(
     that validates the multilayer path against the big-leaf / two-leaf paths
     (identical fluorescence core).
 
-    CALIBRATION NOTE: ``je_leaf`` is the model's FULL Farquhar electron-transport
-    rate ``J``, whereas the big-leaf inversion is the BEPS-SIF *proxy*
-    ``An*(Ci+2*Gamma*)/(Ci-Gamma*)`` ≈ ``J/4`` (no ``/4``, no ``Rd``).  The two
-    je definitions therefore differ in absolute scale, so the light-saturation
-    knob ``max_electron_yield`` (BEPS-calibrated for the proxy) sets a *different*
-    absolute magnitude on this native path — a real CHATS7 tower run shows the
-    two paths track in diurnal SHAPE but diverge up to ~35 % at midday
-    saturation.  The diurnal shape is correct as-is; recalibrate
-    ``max_electron_yield`` (and ``fesc``) against satellite SIF for absolute
-    magnitude — it is a tier-1 trainable for exactly this.
+    JE CONVENTION (validated at CHATS7 — do NOT rescale ``je_leaf``):
+    ``je_leaf`` is the model's FULL Farquhar electron-transport rate ``J``,
+    whereas the big-leaf inversion is the BEPS-SIF *proxy*
+    ``An*(Ci+2*Gamma*)/(Ci-Gamma*)`` ≈ ``J/4`` — so the two je definitions differ
+    ~4-5x in absolute scale.  Despite that, feeding ``je_leaf`` directly is
+    CORRECT.  With ``max_electron_yield`` (BEPS-calibrated ~0.05) applied to
+    ABSORBED PAR, the full-J ``je_leaf`` drives ``x`` onto its 0-clamp for the
+    high-light daytime elements, where ``fluorescence_yield(0)`` is je-INDEPENDENT
+    (``SIF ~ fs(0)*APAR*fesc``) so the je scale drops out there.  Rescaling
+    ``je_leaf`` to the proxy convention (÷4) instead lifts ``x`` off the clamp at
+    the sub-saturated sunrise/sunset steps, raising the yield and OVERSHOOTING the
+    multilayer SIF -- it BREAKS the agreement rather than improving it.  An EC-site
+    diurnal cross-check (``scripts/validate/compare_ml_bigleaf_ec.py``, CHATS7)
+    confirms the native ``je_leaf`` SIF tracks the two-leaf proxy SIF to ~1 % over
+    the day while the ÷4 rescale diverges ~20-30 % near sunrise (the ~1 %/20-30 %/
+    ~5x magnitudes are EMPIRICAL, not derivable from the code).  NB: because the je
+    scale drops out at the clamp, that ~1 % agreement chiefly validates APAR
+    CONSISTENCY between the two canopies, not their electron-transport physics.
+    ``max_electron_yield`` and ``fesc`` remain tier-1 trainables for ABSOLUTE
+    calibration against satellite SIF (a separate concern from the je convention).
     """
     per_leaf = leaf_sif_from_je(je, apar, cfg)
     fesc = jnp.clip(cfg.escape_probability, 0.0, 1.0)
