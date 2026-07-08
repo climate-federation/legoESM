@@ -159,7 +159,7 @@ class MultiLayerLandConfig(NamedTuple):
     soil_grid: SoilGridConfig = SoilGridConfig()
     hydraulics: SoilHydraulicsConfig = SoilHydraulicsConfig()
     thermal: SoilThermalConfig = SoilThermalConfig()
-    richards: RichardsConfig = RichardsConfig()
+    richards: RichardsConfig = RichardsConfig(fc_drain_saturation=0.5)
     # Carbon cycle
     carbon: CarbonConfig = CarbonConfig()
     # Stomatal conductance / plant physiology

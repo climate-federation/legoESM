@@ -17,6 +17,8 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm.land.canopy.sif import SIFConfig
+
 
 # ---------------------------------------------------------------------------
 # PFT Vcmax25 lookup table [μmol m-2 s-1], columns [tropical, temperate, boreal]
@@ -198,6 +200,11 @@ class CanopyConfig(NamedTuple):
     field_capacity: float = 0.30  # theta_fc [m3/m3]
     n_root_layers: int = 5        # number of layers to integrate for root-zone stress
 
+    # Optional solar-induced fluorescence (SIF) diagnostic.  ``None`` (default)
+    # disables it; a ``SIFConfig`` enables the passive top-of-canopy SIF output
+    # (sunlit+shaded sum) on ``SurfaceFluxOutput.sif``.  Static config leaf —
+    # never traced, so the Python ``is not None`` gate does not double-trace.
+    sif: SIFConfig | None = None
     # Whether the soil-moisture stress factor down-regulates the Ball-Berry
     # INTERCEPT b0 (cuticular / residual minimum conductance) as well as the slope
     # m.  True = legacy (both stressed).  False keeps b0 unstressed: the leaf
@@ -560,3 +567,10 @@ class CLMMLCanopyConfig(NamedTuple):
     # cos_zen is not available.  Corresponds to an overcast sky condition;
     # Erbs et al. (1982) gives f_dir ≈ 0.20–0.35 for low clearness index.
     f_dir_noclearness_fallback: float = 0.30
+
+    # Optional solar-induced fluorescence (SIF) diagnostic.  ``None`` (default)
+    # disables it; a ``SIFConfig`` enables the passive top-of-canopy SIF output
+    # on ``SurfaceFluxOutput.sif`` — a leaf-area-weighted sum over the CLM-ML
+    # canopy layers × sunlit/shaded leaves, sharing the same fluorescence core
+    # as the two-leaf / big-leaf paths.  Static config leaf, never traced.
+    sif: SIFConfig | None = None

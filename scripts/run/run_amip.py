@@ -204,6 +204,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Max wave speed [m/s] used to size the polar filter "
              "CFL mask (default 300.0 = external gravity wave).",
     )
+    # #836: hydrostatic lat-lon C-grid top sponge (Rayleigh damping increasing
+    # toward the model lid; absorbs upward gravity-wave energy).  Default OFF.
+    parser.add_argument(
+        "--sponge-coeff", type=float, default=_DYCORE_DEFAULTS.sponge_coeff,
+        help="Rayleigh top-sponge damping SCALE [1/s] for the hydrostatic "
+             "lat-lon C-grid (0 = OFF, default; e.g. 1.157e-5 = 1/day). Exact "
+             "lid value for --sponge-shape sin2; sam_rational peaks at "
+             "sponge_coeff*100/101. Absorbs gravity-wave energy reflecting "
+             "off the rigid model lid (#836).",
+    )
+    parser.add_argument(
+        "--sponge-width-m", type=float, default=_DYCORE_DEFAULTS.sponge_width_m,
+        help="Top-sponge layer depth below the model lid [m] (default "
+             f"{_DYCORE_DEFAULTS.sponge_width_m}).",
+    )
+    parser.add_argument(
+        "--sponge-shape", type=str, default=_DYCORE_DEFAULTS.sponge_shape,
+        choices=["sin2", "sam_rational"],
+        help="Top-sponge ramp shape (default 'sin2').",
+    )
+    parser.add_argument(
+        "--sponge-scale-height-m", type=float,
+        default=_DYCORE_DEFAULTS.sponge_scale_height_m,
+        help="Log-pressure scale height [m] mapping sigma->z for the top "
+             f"sponge (default {_DYCORE_DEFAULTS.sponge_scale_height_m}).",
+    )
     # Task #25: JIT compile bloat at production scale.  The inline
     # SSP-RK3 calls tendency_fn 3× sequentially → XLA inlines three
     # copies of the entire tendency pipeline.  Folding the 3 stages
@@ -497,9 +523,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gravity-wave-drag", type=str, default="mcfarlane",
                         help="GWD scheme: none, rayleigh, lindzen, mcfarlane, "
                              "hines, prognostic_spectral, ml_emulator, or a "
-                             "'+'-joined composite of the diagnostic sources "
-                             "(e.g. 'hines+mcfarlane' to run non-orographic + "
-                             "orographic together). Validated in ExperimentConfig.")
+                             "'+'-joined composite whose source tendencies are "
+                             "summed. Composable parts: rayleigh, lindzen, "
+                             "mcfarlane, hines, and (as the single stateful "
+                             "member) prognostic_spectral — e.g. "
+                             "'mcfarlane+prognostic_spectral' to run orographic "
+                             "+ non-orographic GWD together (issue #834), or "
+                             "'hines+mcfarlane'. Validated in ExperimentConfig.")
     # Tuned air-sea + cloud knobs (the CMIP-realism calibration) — mirror
     # run_coupled so AMIP can run with the SAME tuned slab parameters. Defaults
     # (constant / 0 / None / off) keep the prior AMIP behaviour byte-identical.
@@ -672,6 +702,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "for --use-multilayer-land. Required on compute nodes "
                              "with no outbound internet (empty => download from UCAR "
                              "to /tmp, which fails there).")
+    parser.add_argument("--land-ic", type=str,
+                        default=_EXPERIMENT_DEFAULTS.land_ic_path,
+                        help="Spun-up land IC (#746): a MultiLayerLandState "
+                             "restart (.npz) from scripts/run/run_land_spinup.py. "
+                             "With --use-multilayer-land, REPLACES the cold-start "
+                             "soil column with the equilibrated one (avoids the "
+                             "day-0 cold-start shock behind the land cold trap). "
+                             "ncol/n_layers must match this run's grid.")
     parser.add_argument("--subgrid-orography-file", type=str, default="",
                         help="Subgrid orographic stddev NetCDF (ICON-extpar "
                              "SSO_STDH on a regular lat-lon grid). When set with "
@@ -794,6 +832,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "snowfall and melts (degree-day), brightening the "
                              "land albedo (snow ~0.5-0.8 vs vegetation ~0.15). "
                              "Requires an active land tile (--slab-land-active).")
+    parser.add_argument("--sponge", action="store_true", default=False,
+                        dest="sponge_enabled",
+                        help="Enable the top-of-atmosphere Rayleigh sponge "
+                             "(#836): damping that increases toward the model "
+                             "lid to absorb upward-propagating gravity/convective "
+                             "waves the hydrostatic latlon-cgrid dycore otherwise "
+                             "reflects off the rigid top. Off by default.")
+    parser.add_argument("--sponge-coeff-per-day", type=float, default=None,
+                        dest="sponge_coeff_per_day",
+                        help="Rayleigh damping rate at the model top [1/day] "
+                             "(ExperimentConfig.sponge_coeff_per_day, default 2.0).")
+    parser.add_argument("--sponge-sigma-top", type=float, default=None,
+                        dest="sponge_sigma_top",
+                        help="Sponge base: sigma below which the sin^2 damping "
+                             "ramps up toward the lid (default 0.15).")
     # --cloud-conv-cloud-max closes the AMIP CLI gap for the existing
     # ExperimentConfig.cloud_conv_cloud_max field (--q-c-diagnostic / --rh-crit /
     # --subgrid-autoconv already ship from run_coupled-mirrored #647 + #613).
@@ -802,6 +855,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Cap on convective (Slingo 1987) cloud cover "
                              "(CloudConfig.conv_cloud_max). Limits anvil "
                              "over-reflection. Bounds (0.1, 1.0).")
+    parser.add_argument("--conv-cloud-condensate", type=float, default=None,
+                        dest="conv_cloud_condensate",
+                        help="In-cloud condensate [kg/kg] of the convective "
+                             "anvil deck (CloudConfig.conv_cloud_condensate); "
+                             "lower = optically thinner/realistic anvil. "
+                             "Bounds 1e-5..1e-3.")
     parser.add_argument("--surfdata", type=str, default="",
                         help="Harmonized surface-data NetCDF "
                              "(legoesm_surfdata_*.nc). When set together with "
@@ -1037,6 +1096,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         use_polar_filter=args.use_polar_filter,
         polar_filter_cutoff_deg=args.polar_filter_cutoff_deg,
         polar_filter_max_wave_speed=args.polar_filter_max_wave_speed,
+        # #836 top sponge (default OFF -> bit-identical dycore).
+        sponge_coeff=args.sponge_coeff,
+        sponge_width_m=args.sponge_width_m,
+        sponge_shape=args.sponge_shape,
+        sponge_scale_height_m=args.sponge_scale_height_m,
         # Task #25: time integrator selection.
         time_integrator=args.time_integrator,
     )
@@ -1160,8 +1224,17 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_gs_max=args.land_gs_max,
         land_soil_moisture_init_frac=args.land_soil_moisture_init_frac,
         land_surface_scheme=args.land_surface_scheme,
+        land_ic_path=args.land_ic,
+        sponge_enabled=args.sponge_enabled,
+        sponge_coeff_per_day=(args.sponge_coeff_per_day
+                              if args.sponge_coeff_per_day is not None
+                              else _EXPERIMENT_DEFAULTS.sponge_coeff_per_day),
+        sponge_sigma_top=(args.sponge_sigma_top
+                          if args.sponge_sigma_top is not None
+                          else _EXPERIMENT_DEFAULTS.sponge_sigma_top),
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
+        cloud_conv_cloud_condensate=args.conv_cloud_condensate,
         surfdata_path=args.surfdata,
         dynamic_albedo=args.dynamic_albedo,
         T_ice=args.t_ice_k,
@@ -1857,6 +1930,22 @@ def main(argv: list[str] | None = None):
         start_step, start_day = driver.load_checkpoint(restart_path)
         if _is_root:
             print(f"  Resumed at step={start_step}, day={start_day:.2f}")
+        # Restore the CMOR monthly/daily accumulator state from the sidecar
+        # written next to this checkpoint (setup() already rebuilt the empty
+        # accumulators above), so a calendar month split across restart-chain
+        # links completes — the CMOR ``Amon`` means were otherwise recreated
+        # empty and lost every ~10-day link.  Keyed off the ABSOLUTE simulated
+        # day load_checkpoint returned (before any --restart-start-day
+        # override), matching the sidecar save name.  Runs on every rank (the
+        # accumulators fill identically under SPMD); no-op when the sidecar is
+        # absent (older runs) or CMOR output is off.
+        if driver.diagnostics is not None:
+            _cmor_sidecar = (restart_path.parent
+                             / f"cmor_accum_day_{int(round(start_day)):04d}.npz")
+            if (driver.diagnostics.load_cmor_accumulators(_cmor_sidecar)
+                    and _is_root):
+                print(f"  Restored CMOR accumulator state from "
+                      f"{_cmor_sidecar.name}")
         if args.restart_start_day is not None:
             start_day = args.restart_start_day
             if _is_root:

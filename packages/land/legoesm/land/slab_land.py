@@ -138,7 +138,7 @@ def step_land(
     beta_soil = config.beta_min + (1.0 - config.beta_min) * w_frac
 
     # --- Stomatal conductance (if enabled) ---
-    beta, _ = compute_effective_beta(
+    beta, _, _ = compute_effective_beta(
         T_soil, forcing, beta_soil, config, carbon_state, dt,
         land_params=lp,
     )
@@ -349,7 +349,7 @@ def step_land(
         lat_arr = lat if lat is not None else jnp.zeros_like(T_soil)
         # Recompute Farquhar GPP with updated T and moisture so that
         # photosynthesis and respiration use consistent end-of-step state.
-        _, gpp_farq_new = compute_effective_beta(
+        _, gpp_farq_new, _ = compute_effective_beta(
             T_soil_new, forcing, beta_soil_new, config, carbon_state, dt,
             land_params=lp,
         )

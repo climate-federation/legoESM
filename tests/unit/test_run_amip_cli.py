@@ -53,6 +53,22 @@ def test_clm_surfdata_path_flows_to_config():
     assert cfg.clm_surfdata_path == "/data/clm_surfdata.nc"
 
 
+def test_land_ic_path_flows_to_config():
+    """--land-ic round-trips into ExperimentConfig.land_ic_path (#746): a
+    spun-up MultiLayerLandState restart from run_land_spinup replaces the
+    cold-start soil column in a coupled multilayer AMIP run."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_ic_path == ""
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--land-ic", "/scratch/land_spinup/land_ic.npz",
+    ]), parser))
+    assert cfg.land_ic_path == "/scratch/land_spinup/land_ic.npz"
+
+
 def test_snow_albedo_feedback_flag_flows_to_config():
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
@@ -157,6 +173,23 @@ def test_land_surface_scheme_flag_flows_to_config():
     assert cfg.land_surface_scheme == "two_leaf"
 
 
+def test_sponge_flags_flow_to_config():
+    """--sponge / --sponge-coeff-per-day / --sponge-sigma-top round-trip (#836
+    top-of-atmosphere sponge); default OFF with the config default coeff/base."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.sponge_enabled is False
+    assert cfg_default.sponge_coeff_per_day == 2.0
+    assert cfg_default.sponge_sigma_top == 0.15
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--sponge",
+        "--sponge-coeff-per-day", "4.0", "--sponge-sigma-top", "0.2",
+    ]), parser))
+    assert cfg.sponge_enabled is True
+    assert cfg.sponge_coeff_per_day == 4.0
+    assert cfg.sponge_sigma_top == 0.2
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""
@@ -1176,6 +1209,49 @@ def test_rh_crit_out_of_bounds_rejected():
         cfg.validate_strict()
 
 
+def test_conv_cloud_condensate_flag_resolves_to_cloudconfig():
+    """--conv-cloud-condensate round-trips into ExperimentConfig and resolves
+    onto the hot-loop anvil CloudConfig.conv_cloud_condensate; unset leaves the
+    scheme default (1.5e-4) => byte-identical anvil optics."""
+    from legoesm.atmosphere.physics.clouds.config import (
+        CloudConfig,
+        build_cloud_config,
+    )
+    parser = build_arg_parser()
+    # Explicit flag => ExperimentConfig scalar => resolved (hot-loop) CloudConfig.
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--conv-cloud-condensate", "3e-5",
+    ]), parser)
+    cfg = build_config_from_args(args)
+    assert cfg.cloud_conv_cloud_condensate == pytest.approx(3e-5)
+    assert cfg.validate_strict() is None
+    resolved = build_cloud_config(
+        cfg.cloud_scheme,
+        conv_cloud_condensate=cfg.cloud_conv_cloud_condensate)
+    assert resolved.conv_cloud_condensate == pytest.approx(3e-5)
+    # Unset => None scalar => CloudConfig keeps its default anvil condensate.
+    cfg_def = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_def.cloud_conv_cloud_condensate is None
+    resolved_def = build_cloud_config(
+        cfg_def.cloud_scheme,
+        conv_cloud_condensate=cfg_def.cloud_conv_cloud_condensate)
+    default_condensate = CloudConfig._field_defaults["conv_cloud_condensate"]
+    assert default_condensate == pytest.approx(1.5e-4)  # documented anvil default
+    assert resolved_def.conv_cloud_condensate == pytest.approx(default_condensate)
+
+
+def test_conv_cloud_condensate_out_of_bounds_rejected():
+    """A conv_cloud_condensate outside (1e-5, 1e-3) must fail strict validation."""
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--conv-cloud-condensate", "1e-2",
+    ]), parser)
+    cfg = build_config_from_args(args)
+    with pytest.raises((ValueError, AssertionError)):
+        cfg.validate_strict()
+
+
 def test_subgrid_autoconv_flag_threads_to_config():
     """--subgrid-autoconv round-trips into ExperimentConfig (#613)."""
     parser = build_arg_parser()
@@ -1289,9 +1365,11 @@ def test_config_yaml_round_trips_authoritative_values():
     parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
     args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
     # grid geometry (resolution/nlev/discretization are CLI dests baked into
-    # cfg.grid, so assert them at the args level the YAML controls)
-    assert args.resolution == 48
-    assert args.nlev == 40
+    # cfg.grid, so assert them at the args level the YAML controls).  The
+    # production YAML is C12/L20 (drive-by fix: these asserts were stale at
+    # 48/40 from a pre-#746 C48->C12 downsizing of amip_production.yaml).
+    assert args.resolution == 12
+    assert args.nlev == 20
     assert args.discretization == "cdgrid"
     assert args.grid_type == "cubed_sphere"
     cfg = build_config_from_args(args)
@@ -1691,3 +1769,24 @@ def test_multicontroller_requires_enable_latlon_spmd(capsys):
         main(["--grid-type", "latlon", "--dataset", "analytical",
               "--multicontroller"])
     assert "requires --enable-latlon-spmd" in capsys.readouterr().err
+
+
+def test_top_sponge_flags_flow_to_dycore_config():
+    """#836: --sponge-coeff/--sponge-width-m/--sponge-shape/--sponge-scale-height-m
+    round-trip into DycoreConfig; default sponge_coeff=0 keeps the sponge OFF."""
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.dycore.sponge_coeff == 0.0          # default OFF
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--sponge-coeff", "1.157e-5",
+        "--sponge-width-m", "12000.0",
+        "--sponge-shape", "sam_rational",
+        "--sponge-scale-height-m", "8000.0",
+    ]), parser))
+    assert cfg_on.dycore.sponge_coeff == 1.157e-5
+    assert cfg_on.dycore.sponge_width_m == 12000.0
+    assert cfg_on.dycore.sponge_shape == "sam_rational"
+    assert cfg_on.dycore.sponge_scale_height_m == 8000.0

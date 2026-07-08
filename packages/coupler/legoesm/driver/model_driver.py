@@ -1469,7 +1469,8 @@ class ModelDriver:
         NOT silently degrade to the slab (that would run different land physics
         silently, the issue-#405 bug class)."""
         import numpy as _np
-        from legoesm.land import init_multilayer_land_state
+        from legoesm.land import init_multilayer_land_state, aridity_theta_init
+        from legoesm.thermo import saturation_mixing_ratio
         from legoesm.land.clm_surface_map import (
             load_clm_surface, download_clm_surfdata, clm_multilayer_setup,
         )
@@ -1555,17 +1556,79 @@ class ModelDriver:
         ncol = lat_deg.shape[0]
         T_init = ad.flatten_2d(self.state.T.data[..., -1]).reshape(-1).astype(
             storage_dtype)
-        # Soil-moisture cold-start = frac * theta_sat (#730; default 0.5 is
-        # byte-identical to the init default).  A drier start can break the
-        # multilayer over-evaporation wet loop.
-        self._land_ml_state = init_multilayer_land_state(
-            ncol, cfg, T_init=T_init,
-            theta_init=(self.config.land_soil_moisture_init_frac
-                        * cfg.hydraulics.theta_sat))
-        logger.info(
-            "  Land tile: MULTILAYER override ACTIVE (%d soil layers, %d columns)",
-            cfg.soil_grid.n_layers, ncol,
-        )
+        # Aridity-aware cold-start soil moisture (#730 / #837).  Seed theta from
+        # the near-surface RH of the IC atmosphere, mapped into the per-column
+        # plant-available range [theta_wp, theta_fc] the tile's beta reads
+        # (params.theta_wp/theta_fc from clm_multilayer_setup).  The legacy
+        # moisture-uniform 0.5*theta_sat seed leaves subtropical deserts
+        # rainforest-wet, so a hot bare-soil skin drives a runaway
+        # potential-evaporation blowup (~day 8).  RH here uses the model's own
+        # saturation_mixing_ratio -- the SAME law the land bulk flux uses -- so it
+        # is consistent with the running physics (q_v is the atmospheric lowest
+        # level; p_s is a close proxy for the lowest-level pressure).  Fall back to
+        # the frac*theta_sat uniform seed (``land_soil_moisture_init_frac``) only
+        # when the IC carries no q_v tracer (the aridity map needs RH).
+        _qv = self.q_v  # canonical tracer store: raw (...,nlev) array, same column
+        # layout as self.state.T.data; populated by both the analytical and ERA5 IC.
+        if _qv is not None:
+            q_v_low = ad.flatten_2d(
+                getattr(_qv, "data", _qv)[..., -1]).reshape(-1).astype(storage_dtype)
+            p_s = ad.flatten_2d(
+                getattr(self.state.p_s, "data", self.state.p_s)).reshape(-1).astype(
+                    storage_dtype)
+            rh_low = q_v_low / jnp.maximum(
+                saturation_mixing_ratio(T_init, p_s), 1e-12)
+            theta_wp = jnp.asarray(getattr(params, "theta_wp", cfg.theta_wp))
+            theta_fc = jnp.asarray(getattr(params, "theta_fc", cfg.theta_fc))
+            theta_init = aridity_theta_init(
+                rh_low, theta_wp, theta_fc).reshape(-1, 1).astype(storage_dtype)
+        else:
+            theta_init = (self.config.land_soil_moisture_init_frac
+                          * cfg.hydraulics.theta_sat)
+            logger.warning(
+                "  Land tile: IC has no q_v tracer; multilayer soil seeded at "
+                "land_soil_moisture_init_frac*theta_sat (aridity-aware skipped).")
+        # Canonical cold-start template — always built so the spun-up land-IC
+        # path (below) has the correct pytree STRUCTURE to graft onto (the
+        # restart round-trips only the core prognostic fields; the optional
+        # structural fields would otherwise be None and break the segment scan).
+        _template = init_multilayer_land_state(
+            ncol, cfg, T_init=T_init, theta_init=theta_init)
+        _land_ic_path = getattr(self.config, "land_ic_path", "")
+        if _land_ic_path:
+            # #746 item 1: a spun-up land IC (offline run_land_spinup restart)
+            # REPLACES the cold-start soil column with an equilibrated one, so
+            # the coupled run doesn't start from the day-0 cold-start shock that
+            # drives the land cloud-albedo cold trap.  Shapes are validated
+            # against this run's grid (ncol / n_layers) on load; a mismatch or a
+            # slab-mode restart raises rather than silently reshaping.
+            from legoesm.land.restart import (
+                load_land_restart, merge_land_restart_into_template)
+            _ic_state, _ic_meta = load_land_restart(
+                _land_ic_path, expected_land_mode="multilayer",
+                expected_ncol=ncol, expected_n_layers=cfg.soil_grid.n_layers)
+            # Graft the restart's prognostic columns onto the canonical template
+            # (fixes the pytree structure), then cast the array leaves to the
+            # run's storage precision (the restart deserialises float64).
+            _merged = merge_land_restart_into_template(_ic_state, _template)
+            self._land_ml_state = jax.tree_util.tree_map(
+                lambda a: (a.astype(storage_dtype)
+                           if hasattr(a, "dtype")
+                           and jnp.issubdtype(a.dtype, jnp.floating) else a),
+                _merged)
+            logger.info(
+                "  Land tile: MULTILAYER IC from spin-up restart %s "
+                "(%d soil layers, %d columns; t_end=%.0f s, cold-start seed "
+                "SKIPPED)",
+                _land_ic_path, cfg.soil_grid.n_layers, ncol,
+                float(_ic_meta.get("t_end_s", 0.0)),
+            )
+        else:
+            self._land_ml_state = _template
+            logger.info(
+                "  Land tile: MULTILAYER override ACTIVE (%d soil layers, %d columns)",
+                cfg.soil_grid.n_layers, ncol,
+            )
 
     def _surfdata_land_albedo(self, surfdata_path: str, lat_albedo):
         """Static land albedo field from harmonized surface data.
@@ -2077,7 +2140,7 @@ class ModelDriver:
                         'sst', 'sic', 'precip_total',
                         'sw_up_toa', 'lw_up_toa', 'sw_net_sfc', 'lw_net_sfc',
                         'sw_down_toa', 'shflx', 'lhflx', 'lat_deg_grid',
-                        't_low_mean',
+                        't_low_mean', 'sw_up_toa_clr', 'lw_up_toa_clr',
                     ):
                         if kwargs.get(_tname) is not None:
                             kwargs[_tname] = _g(kwargs[_tname])
@@ -2126,7 +2189,8 @@ class ModelDriver:
                     # CMOR output.  All ranks must participate (collective).
                     for tname in ('precip_total', 'shflx', 'lhflx',
                                   'sw_up_toa', 'lw_up_toa', 'sw_net_sfc',
-                                  'lw_net_sfc', 'sw_down_toa', 't_low_mean'):
+                                  'lw_net_sfc', 'sw_down_toa', 't_low_mean',
+                                  'sw_up_toa_clr', 'lw_up_toa_clr'):
                         arr = kwargs.get(tname)
                         if arr is not None:
                             kwargs[tname] = gather(arr[_ofi], self._layout, root_only=True)
@@ -2164,6 +2228,19 @@ class ModelDriver:
         k_f = k_free + k_f_max * jnp.maximum(
             0.0, (sigma_full - cfg.sigma_b) / (1.0 - cfg.sigma_b)
         )
+        # Top-of-atmosphere sponge (#836): a Rayleigh damping increasing toward
+        # the model lid (sigma -> 0), ADDED to the surface-drag k_f so the
+        # existing fric_decay tail (applied to u, v every step) absorbs
+        # upward-propagating wave energy the hydrostatic latlon-cgrid dycore
+        # otherwise reflects off the rigid ~35 hPa top.  sin^2 taper from 0 at
+        # sigma = sponge_sigma_top to sponge_coeff_per_day at the top (the same
+        # shape as dynamics.compressible_euler.sponge_profile, expressed in
+        # sigma).  Config-gated -> byte-identical when sponge_enabled is False.
+        if getattr(cfg, "sponge_enabled", False):
+            k_sp_max = cfg.sponge_coeff_per_day / 86400.0
+            _sig_top = max(cfg.sponge_sigma_top, 1e-6)  # coeff-ok: /~0 guard
+            frac = jnp.clip((_sig_top - sigma_full) / _sig_top, 0.0, 1.0)
+            k_f = k_f + k_sp_max * jnp.sin(0.5 * jnp.pi * frac) ** 2
         self._fric_decay = jnp.exp(-k_f * DT)
         self._qv_smooth_coeff = self._hyperdiff * 0.5
 
@@ -3216,6 +3293,7 @@ class ModelDriver:
                     _save[f"trc_{_k}"] = np.asarray(trc_d[_k])
             np.savez(ckpt_path, **_save)
             logger.info(f"  Checkpoint: {ckpt_path.name} (mpas)")
+            self._save_cmor_accumulator_sidecar(day)
             return
 
         # Spectral path (FIX_RESTART_TIME iteration 4): the spectral PE
@@ -3249,6 +3327,7 @@ class ModelDriver:
                     _save[f"trc_{_k}"] = np.asarray(s.tracers[_k].data)
             np.savez(ckpt_path, **_save)
             logger.info(f"  Checkpoint: {ckpt_path.name} (spectral)")
+            self._save_cmor_accumulator_sidecar(day)
             return
 
         # Distributed path
@@ -3280,6 +3359,10 @@ class ModelDriver:
                 MPI.COMM_WORLD.Barrier()
                 if self._mpi_rank == 0:
                     logger.info(f"  Checkpoint: {ckpt_dir.name} (distributed, {self._mpi_world_size} ranks)")
+                    # Rank 0 writes the single CMOR sidecar next to the
+                    # per-rank checkpoint dir (an SPMD restart would otherwise
+                    # find no sidecar and lose the in-progress month).
+                    self._save_cmor_accumulator_sidecar(day)
                 return
 
             # Lat-lon band MPI: gather rank-local bands → rank 0 writes
@@ -3370,6 +3453,7 @@ class ModelDriver:
                         f"(lat-lon MPI gathered, "
                         f"{self._mpi_world_size} ranks)"
                     )
+                    self._save_cmor_accumulator_sidecar(day)
                 from mpi4py import MPI
                 MPI.COMM_WORLD.Barrier()
                 return
@@ -3391,6 +3475,7 @@ class ModelDriver:
                     carry_aux=self._checkpoint_carry_aux(),
                 )
                 logger.info(f"  Checkpoint: {ckpt_path.name} (rank 0)")
+                self._save_cmor_accumulator_sidecar(day)
             from mpi4py import MPI
             MPI.COMM_WORLD.Barrier()
             return
@@ -3509,9 +3594,44 @@ class ModelDriver:
                     backend=backend,
                 )
                 logger.info(f"  Checkpoint: {ckpt_path.name}")
+                self._save_cmor_accumulator_sidecar(day)
             except Exception as e:
                 _write_err = e
         self._spmd_barrier_on_root_error(_write_err)
+
+    def _save_cmor_accumulator_sidecar(self, day: float) -> None:
+        """Persist the CMOR monthly/daily accumulator state to a sidecar next
+        to the checkpoint just written.
+
+        A restart-chain link is only ~10 days but a calendar month is ~30, so
+        the monthly accumulator — recreated empty on every restart — never
+        completes a month and the CMOR ``Amon`` means are lost.  This additive
+        sidecar (``cmor_accum_day_<day>.npz``) lets the next link resume the
+        in-progress month.  It never touches the checkpoint ``.npz`` schema and
+        is fully guarded so a sidecar-write failure can never abort
+        checkpointing (a no-op when CMIP output is off).
+
+        Suppressed via ``self._suppress_cmor_sidecar`` for the TERMINAL final
+        checkpoint of a COMPLETED run: ``diagnostics.save`` has already written
+        every bucket to NetCDF (without popping), so a sidecar there would make
+        a run-extending restart re-append the already-written months."""
+        if getattr(self, "_suppress_cmor_sidecar", False):
+            return
+        diag = getattr(self, "diagnostics", None)
+        if diag is None:
+            return
+        try:
+            sidecar = (self._output_dir
+                       / f"cmor_accum_day_{int(round(day)):04d}.npz")
+            diag.save_cmor_accumulators(sidecar)
+        except Exception as exc:  # pragma: no cover - defensive I/O guard
+            # LOUD (the checkpoint is already committed; a missing/stale sidecar
+            # can lose or duplicate the in-progress month on restart) but never
+            # fatal — a sidecar failure must not abort the run.
+            logger.error(
+                f"  CMOR accumulator sidecar FAILED for day {day:.2f} "
+                f"(checkpoint committed; restart may lose/duplicate the "
+                f"in-progress month): {exc}")
 
     def _moisture_advection_active(self) -> bool:
         """True iff resolved-wind moisture advection is on (issue #771).
@@ -4074,12 +4194,21 @@ class ModelDriver:
         #                       diagnostics).
         # Without this every wallclock-graceful AMIP run (a year rarely
         # finishes in one SLURM window) would drop fx entirely and lose the
-        # segment's monthly/daily output.  The single month/day straddling the
-        # exit is a bounded, documented limitation (the in-progress accumulator
-        # is not checkpointed).  All three are guarded on the CMIP writer.
+        # segment's monthly/daily output.  The month/day STRADDLING the exit is
+        # preserved across the restart by the CMOR accumulator sidecar (see the
+        # re-persist below), so a chained link completes it instead of losing
+        # it.  All three flushes are guarded on the CMIP writer.
         self.diagnostics.flush_cmip_monthly(day, write=True)
         self.diagnostics.finalize_cmip_daily(day)
         self.diagnostics.finalize_cmip_fixed()
+        # The checkpoint sidecar written above by ``ckpt_fn`` captured the
+        # accumulators PRE-flush (with the just-completed months/days still in
+        # them); those are now on disk in the CMOR NetCDF, so re-persist the
+        # sidecar to reflect the drained state.  The restart then resumes from
+        # the IN-PROGRESS month/day ONLY — otherwise the boundary period would
+        # be double-written (duplicate ``time`` coords) on the next link's
+        # flush, since ``CFWriter.write_field`` appends blindly.
+        self._save_cmor_accumulator_sidecar(day)
         sys.exit(0)
 
     def run(self, start_step: int = 0, start_day: float | None = None,
@@ -4670,9 +4799,12 @@ class ModelDriver:
         # prognostic-spectral GWD is active: its wave-action spectrum
         # integration wants the default/compute dtype (codex review;
         # see the GWD integration note in physics_state.init docs).
+        from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+            gwd_carries_spectrum,
+        )
         _seed_dtype = (
             None
-            if phys_cfg.gravity_wave_drag.scheme == "prognostic_spectral"
+            if gwd_carries_spectrum(phys_cfg.gravity_wave_drag.scheme)
             else _get_policy().storage
         )
         _phys_state = init_physics_state(
@@ -5102,11 +5234,14 @@ class ModelDriver:
         # hand-written bechtold/mass_flux/edmf set), and stochastic
         # (Bechtold AR1 state).
         _ct = convection_scheme_traits(_conv)
+        from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+            gwd_carries_spectrum,
+        )
         if (turbulence_scheme_traits(_turb).carries_energy
                 or _ct.is_scalar_prognostic
                 or _ct.is_profile_prognostic
                 or _ct.is_stochastic
-                or _gwd == "prognostic_spectral"):
+                or gwd_carries_spectrum(_gwd)):
             raise NotImplementedError(
                 f"turbulence={_turb!r} / convection={_conv!r} / "
                 f"gwd={_gwd!r} carry prognostic physics state, which "
@@ -6297,6 +6432,12 @@ class ModelDriver:
         held_sw_up_toa = _aux.get("held_sw_up_toa", jnp.zeros(_ens_2d, dtype=_sd))
         held_lw_up_toa = _aux.get("held_lw_up_toa", jnp.zeros(_ens_2d, dtype=_sd))
         held_sw_down_toa = _aux.get("held_sw_down_toa", jnp.zeros(_ens_2d, dtype=_sd))
+        # Clear-sky held TOA up-fluxes (#843): restored from a checkpoint's
+        # diag_accumulators when present, else zeros (cold start / pre-#843).
+        held_sw_up_toa_clr = _aux.get(
+            "held_sw_up_toa_clr", jnp.zeros(_ens_2d, dtype=_sd))
+        held_lw_up_toa_clr = _aux.get(
+            "held_lw_up_toa_clr", jnp.zeros(_ens_2d, dtype=_sd))
         # Convective carry: scalar (ncol,) for mass_flux/edmf, full
         # (ncol, nlev) conv_prog_profile for the profile-prognostic
         # schemes (ZM/KF/Emanuel/Tiedtke/Bechtold).  The shape must be
@@ -6366,14 +6507,28 @@ class ModelDriver:
                 "fresh seed (issue #405/#413)."
             )
 
-        # Slab-land skin temperature — restored from the checkpoint when
-        # available, otherwise initialized from the lowest model-level
-        # air temperature (the thin slab equilibrates within ~1 day).
-        # ``None`` when the land tile is inactive (ocean-only run).
+        # Land skin temperature — restored from the checkpoint when available,
+        # else seeded from the lowest model-level air temperature (the thin
+        # slab / skin equilibrates within ~1 day).  ``None`` when the land tile
+        # is inactive (ocean-only run).
         if self.physics is not None and self.physics.f_land is not None:
-            T_land = _aux.get(
-                "T_land", self.state.T.data[..., -1].astype(_sd)
-            )
+            if "T_land" in _aux:
+                T_land = _aux["T_land"]
+            elif (getattr(self.config, "land_ic_path", "")
+                  and self._land_ml_state is not None):
+                # Spun-up land IC (#746): seed the skin from the equilibrated
+                # TOP-SOIL temperature so the FIRST physics step's land
+                # turbulent fluxes (tiled BL sensible/latent, land q_sfc) are
+                # consistent with the spun-up column — else the cold-start air
+                # temp would leak the day-0 shock into the BL at the closure
+                # seam, undoing part of the spin-up.  T_soil[:, 0] is (ncol,);
+                # reshape to the gridded T_land layout (row-major, the inverse
+                # of the flatten the land init used).
+                T_land = jnp.asarray(
+                    self._land_ml_state.T_soil[:, 0]
+                ).reshape(self.state.T.data[..., -1].shape).astype(_sd)
+            else:
+                T_land = self.state.T.data[..., -1].astype(_sd)
         else:
             T_land = None
 
@@ -6417,7 +6572,10 @@ class ModelDriver:
             turbulence_scheme_traits,
         )
         _turb_traits = turbulence_scheme_traits(cfg.turbulence)
-        _gwd_prognostic = cfg.gravity_wave_drag == "prognostic_spectral"
+        from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+            gwd_carries_spectrum,
+        )
+        _gwd_prognostic = gwd_carries_spectrum(cfg.gravity_wave_drag)
         tke = qke = gwd_spectrum = None
         if _turb_traits.carries_energy or _gwd_prognostic:
             from legoesm.atmosphere.physics.combined import PhysicsConfig
@@ -6511,6 +6669,8 @@ class ModelDriver:
             "held_sw_up_toa": held_sw_up_toa,
             "held_lw_up_toa": held_lw_up_toa,
             "held_sw_down_toa": held_sw_down_toa,
+            "held_sw_up_toa_clr": held_sw_up_toa_clr,
+            "held_lw_up_toa_clr": held_lw_up_toa_clr,
             "conv_prog": conv_prog,
             "T_land": T_land,
             "w_land": w_land,
@@ -6570,7 +6730,17 @@ class ModelDriver:
             _ckpt = ((getattr(self, "_checkpoint_callback", None)
                       if self._mpi_rank is None else None)
                      or self.save_checkpoint)
-            _ckpt(n_steps_total, START_DAY + N_DAYS)
+            # A COMPLETED run has NO in-progress month to resume, and
+            # ``diagnostics.save`` above already finalized every bucket to
+            # NetCDF WITHOUT popping — so the terminal checkpoint must carry no
+            # CMOR sidecar, or a run-EXTENDING restart would re-append every
+            # already-written month (duplicate time coords).  The flag rides
+            # through whichever ``_ckpt`` callback writes the sidecar.
+            self._suppress_cmor_sidecar = True
+            try:
+                _ckpt(n_steps_total, START_DAY + N_DAYS)
+            finally:
+                self._suppress_cmor_sidecar = False
 
         # Issue #275 fix A lifecycle: restore the halo backend captured
         # at activation time so subsequent drivers / tests in the same
@@ -6757,6 +6927,13 @@ class ModelDriver:
         held_sw_up_toa = ctx["held_sw_up_toa"]
         held_lw_up_toa = ctx["held_lw_up_toa"]
         held_sw_down_toa = ctx["held_sw_down_toa"]
+        # Clear-sky held TOA up-fluxes (#843): persisted across segments +
+        # checkpoints like the all-sky held fields; zeros on a cold start (or a
+        # pre-#843 checkpoint) — refreshed at the first radiation step.
+        held_sw_up_toa_clr = ctx.get(
+            "held_sw_up_toa_clr", jnp.zeros_like(held_sw_up_toa))
+        held_lw_up_toa_clr = ctx.get(
+            "held_lw_up_toa_clr", jnp.zeros_like(held_lw_up_toa))
         conv_prog = ctx["conv_prog"]
         T_land = ctx["T_land"]
         w_land = ctx["w_land"]
@@ -7056,6 +7233,10 @@ class ModelDriver:
                 held_sw_up_toa=held_sw_up_toa,
                 held_lw_up_toa=held_lw_up_toa,
                 held_sw_down_toa=held_sw_down_toa,
+                # Clear-sky held TOA up-fluxes (#843): persisted across
+                # segments (zeros when the diagnostic is off).
+                held_sw_up_toa_clr=held_sw_up_toa_clr,
+                held_lw_up_toa_clr=held_lw_up_toa_clr,
                 step_index=current_step,
                 target_moisture=_target_moisture,
                 target_mass=_target_mass,
@@ -7064,6 +7245,9 @@ class ModelDriver:
                 # fix): reset to zero at every segment start like precip.
                 sw_up_toa_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 lw_up_toa_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                # Clear-sky TOA up-flux accumulators (#843): reset each segment.
+                sw_up_toa_clr_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                lw_up_toa_clr_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 sw_down_toa_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 sw_net_sfc_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 lw_net_sfc_accum=jnp.zeros(_ens_2d, dtype=_sd),
@@ -7180,6 +7364,11 @@ class ModelDriver:
                         self.tracers[_nm] = _val
             (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
              held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = held_tuple
+            # Clear-sky held TOA up-fluxes (#843) are NOT in the 6-tuple
+            # unpack_carry returns — read them straight off the carry (like
+            # q_i / tke) so the next segment persists them.
+            held_sw_up_toa_clr = _dm_carry.held_sw_up_toa_clr
+            held_lw_up_toa_clr = _dm_carry.held_lw_up_toa_clr
 
             if os.environ.get("LEGOESM_DEBUG_HELD"):
                 import numpy as _np
@@ -7235,6 +7424,9 @@ class ModelDriver:
                 "held_sw_up_toa": held_sw_up_toa,
                 "held_lw_up_toa": held_lw_up_toa,
                 "held_sw_down_toa": held_sw_down_toa,
+                # Clear-sky held fields (#843) persisted for checkpoint restart.
+                "held_sw_up_toa_clr": held_sw_up_toa_clr,
+                "held_lw_up_toa_clr": held_lw_up_toa_clr,
                 "conv_prog": conv_prog,
                 "target_moisture": _target_moisture,
                 "target_mass": _target_mass,
@@ -7321,6 +7513,16 @@ class ModelDriver:
                 # member-wise, consistent with seg_precip).
                 seg_sw_up_toa = _dm_carry.sw_up_toa_accum / _seg_dur
                 seg_lw_up_toa = _dm_carry.lw_up_toa_accum / _seg_dur
+                # Clear-sky TOA up-fluxes for CMOR rsutcs/rlutcs (#843).  None
+                # when the diagnostic is off -> the collector skips the field
+                # (byte-identical to the pre-#843 output); a real segment-mean
+                # (accum / duration) when on.
+                seg_sw_up_toa_clr = (
+                    _dm_carry.sw_up_toa_clr_accum / _seg_dur
+                    if self.config.output.clear_sky_diag else None)
+                seg_lw_up_toa_clr = (
+                    _dm_carry.lw_up_toa_clr_accum / _seg_dur
+                    if self.config.output.clear_sky_diag else None)
                 seg_sw_down_toa = _dm_carry.sw_down_toa_accum / _seg_dur
                 seg_sw_net_sfc = _dm_carry.sw_net_sfc_accum / _seg_dur
                 seg_lw_net_sfc = _dm_carry.lw_net_sfc_accum / _seg_dur
@@ -7339,6 +7541,8 @@ class ModelDriver:
                     precip_total=seg_precip_rate,
                     sw_up_toa=seg_sw_up_toa,
                     lw_up_toa=seg_lw_up_toa,
+                    sw_up_toa_clr=seg_sw_up_toa_clr,
+                    lw_up_toa_clr=seg_lw_up_toa_clr,
                     sw_net_sfc=seg_sw_net_sfc,
                     lw_net_sfc=seg_lw_net_sfc,
                     sw_down_toa=seg_sw_down_toa,
@@ -7437,7 +7641,9 @@ class ModelDriver:
             # Checkpoint (a coupled run routes this through its own
             # save_checkpoint so the coupled state is written too).
             _ckpt = getattr(self, "_checkpoint_callback", None) or self.save_checkpoint
-            if checkpoint_interval > 0 and current_step % checkpoint_interval == 0:
+            _checkpoint_written = (checkpoint_interval > 0
+                                   and current_step % checkpoint_interval == 0)
+            if _checkpoint_written:
                 _ckpt(current_step, day)
 
             # Wallclock-aware clean exit for long HPC dependency chains.
@@ -7457,6 +7663,16 @@ class ModelDriver:
             if diag_interval > 0 and current_step % diag_interval == 0:
                 _is_root = self._mpi_rank is None or self._mpi_rank == 0
                 self.diagnostics.flush_cmip_monthly(day, write=_is_root)
+                # If a checkpoint was written THIS step (above), its CMOR
+                # sidecar captured the accumulators PRE-flush; the flush just
+                # drained + wrote the completed months to NetCDF.  Re-persist
+                # the (now drained) sidecar so a restart from that checkpoint
+                # resumes ONLY the in-progress month — else the flushed months
+                # would be re-appended (duplicate time coords) on resume.  Root
+                # only (mirrors the sidecar write inside save_checkpoint) and
+                # bounded to the checkpoint cadence — never on a bare flush.
+                if _checkpoint_written and _is_root:
+                    self._save_cmor_accumulator_sidecar(day)
 
         return self._finalize_run(
             run_status, t_jit, t_start,

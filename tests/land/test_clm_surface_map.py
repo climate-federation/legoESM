@@ -301,5 +301,44 @@ def test_clm_loader_no_lai_when_climatology_absent(tmp_path):
     assert prov().LAI is None
 
 
+def test_slab_vs_multilayer_albedo_delta_documented_and_bounded():
+    """#746 item-3 audit: the multilayer land runs ~14 W/m^2 darker than the slab.
+
+    Root cause (from the land-albedo audit): the multilayer per-PFT albedo table
+    ``_TUNED_PFT_ALBEDO_MULTILAYER`` is systematically DARKER than the slab table
+    ``_TUNED_PFT_ALBEDO`` — the two were calibrated independently against
+    different ERA5 targets (slab = offline monthly; multilayer = 24-h coupled),
+    so they never had to agree in the mean.  This is a CALIBRATION inconsistency,
+    NOT a code/convention bug: the albedo assembly and the ``(1-alpha)*SW``
+    radiation interface are shared and correct between the two land models.
+
+    This test PINS the finding — direction, magnitude, and a regression BOUND —
+    so the multilayer vegetated albedo cannot silently drift even darker (which
+    would deepen the land cloud-albedo cold trap the issue tracks).  The fix for
+    the -14 W/m^2 is to reconcile the two tables against a common reference; that
+    is a re-tuning (spin-up) task, tracked on #746, not a code change here.
+    """
+    from legoesm.land.clm_surface_map import (
+        _TUNED_PFT_ALBEDO, _TUNED_PFT_ALBEDO_MULTILAYER)
+    slab = np.asarray(_TUNED_PFT_ALBEDO)
+    mult = np.asarray(_TUNED_PFT_ALBEDO_MULTILAYER)
+    assert slab.shape == mult.shape
+    delta = slab - mult                                  # slab brighter -> positive
+    # Multilayer is NOWHERE brighter than the slab (systematically darker/equal) —
+    # the documented direction of the -14 W/m^2 land darkening.
+    assert np.all(delta >= -1e-9), (
+        f"multilayer albedo brighter than slab at PFTs {np.where(delta < -1e-9)[0]}"
+        f" — no longer the systematically-darker calibration (#746)")
+    # Bare soil (PFT 0) carries the largest delta (~0.08 = slab 0.3802 vs ml 0.30).
+    assert delta[0] > 0.05
+    # Mean delta ~0.026 (≈ the -14 W/m^2 at land insolation), and BOUNDED: the
+    # regression guard — the multilayer table must not drift beyond ~0.05 mean
+    # darker than the slab without a deliberate re-tune (#746 item-3).
+    mean_delta = float(np.mean(delta))
+    assert 0.015 < mean_delta < 0.05, (
+        f"slab-vs-multilayer mean albedo delta {mean_delta:.4f} outside the "
+        f"documented band — reconcile the two tuned tables (#746 item-3)")
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

@@ -33,9 +33,11 @@ from legoesm.land.canopy.config import (
     VCMAX25_C3_DEFAULT,
     VCMAX25_C4_DEFAULT,
 )
+from legoesm.land.canopy.photosynthesis import co2_compensation_point
 from legoesm.land.canopy.radiative_transfer import (
     split_sw_components, canopy_shortwave_rt,
 )
+from legoesm.land.canopy.sif import two_leaf_canopy_sif
 from legoesm.land.canopy.stability import (
     compute_aerodynamics, sat_specific_humidity,
 )
@@ -457,6 +459,26 @@ def compute_two_leaf_canopy_fluxes(
     H_tot  = H_Sun  + H_Sh  + H_Soil
     GPP    = (An_Sun + An_Sh) * _G_C_PER_UMOL_CO2    # gC m-2 s-1
 
+    # ---- Optional solar-induced fluorescence (passive TOC diagnostic) ----
+    # cc.sif is a static config leaf, so this Python gate does not double-trace.
+    # An_Sun/An_Sh and APAR_Sun/APAR_Sh are canopy-integrated per leaf-class
+    # (per ground area), so the sunlit+shaded sum is the canopy total.
+    # Gamma* MUST use the same temperature the Farquhar An used — the solver
+    # takes T_phot = Ta if use_ta_for_photosynthesis else Tf (solver.py) — else
+    # the je inversion is inconsistent with the assimilation it inverts.
+    # NOTE: the BEPS-SIF je inversion is C3-style (uses Gamma*); for a mixed
+    # canopy (fC4 > 0) it is applied to the blended C3/C4 An as a documented
+    # BEPS-parity approximation (no separate C4 fluorescence path).
+    if cc.sif is not None:
+        T_phot_Sun = Ta if cc.use_ta_for_photosynthesis else Tf_Sun
+        T_phot_Sh  = Ta if cc.use_ta_for_photosynthesis else Tf_Sh
+        sif_out = two_leaf_canopy_sif(
+            An_Sun, x_final[:, 2], co2_compensation_point(T_phot_Sun), sw_rt.APAR_Sun,
+            An_Sh, x_final[:, 3], co2_compensation_point(T_phot_Sh), sw_rt.APAR_Sh,
+            cc.sif)
+    else:
+        sif_out = None
+
     # Per-component canopy fluxes (for offline diagnostic drivers).
     LE_canopy_d = LE_Sun + LE_Sh
     H_canopy_d  = H_Sun  + H_Sh
@@ -532,6 +554,7 @@ def compute_two_leaf_canopy_fluxes(
         emissivity=jnp.broadcast_to(eps_eff, T_soil_top.shape),
         z0=z0m,
         gpp=GPP,
+        sif=sif_out,
         Tf_Sun=Tf_Sun,
         Tf_Sh=Tf_Sh,
         T_canopy_air=Tc_cvg,

@@ -46,6 +46,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.land.canopy.sif import SIFConfig
 from legoesm.thermo import saturation_vapor_pressure
 
 # Fixed Farquhar / gas-exchange constants (not tunable).
@@ -183,6 +184,12 @@ class StomataConfig(NamedTuple):
     # --- Numerics ---
     co_limitation_eps: float = 0.1  # Smooth-min width for Wc/Wj co-limitation
 
+    # --- Optional solar-induced fluorescence (SIF) diagnostic ---
+    # None (default) disables it; a SIFConfig enables the passive big-leaf SIF
+    # output on SurfaceFluxOutput.sif (coupled Farquhar path only — the Jarvis
+    # fallback has no Ci/An to invert). Static config leaf, never traced.
+    sif: SIFConfig | None = None
+
 
 # =====================================================================
 # Temperature response functions
@@ -221,6 +228,7 @@ def farquhar_photosynthesis(
     T_leaf: jnp.ndarray,
     config: StomataConfig,
     beta_soil: jnp.ndarray | None = None,
+    canopy_scaling: jnp.ndarray | float = 1.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Farquhar et al. (1980) C3 photosynthesis model.
 
@@ -237,13 +245,24 @@ def farquhar_photosynthesis(
     config : StomataConfig.
     beta_soil : Soil moisture stress factor [0-1], optional.
         When provided, scales Vc_max (CLM approach).
+    canopy_scaling : Big-leaf canopy integral ``L_c = (1-exp(-k·LAI))/k``
+        [m2 leaf / m2 ground], default 1.0.  Multiplies the photosynthetic
+        *capacity* terms (Vc_max, J_max, Rd) to convert leaf-level rates to
+        canopy-level rates PER UNIT GROUND AREA.  ``APAR_umol`` is already the
+        canopy-absorbed PAR (``fAPAR·PAR``, per ground area), so scaling the
+        capacities keeps the Rubisco-limited (Wc) and light-limited (Wj)
+        branches consistently canopy-scale — without it, Wc caps at a single
+        leaf's rate while Wj is driven by the whole canopy's light, so a dense
+        canopy (LAI≫1) is silently limited to leaf-level assimilation and GPP
+        is under-estimated ~L_c-fold (Sellers 1992 big-leaf; Bonan 2011).
+        At LAI→0, ``L_c→LAI→0`` so a leafless column assimilates nothing.
 
     Returns
     -------
-    A_net : Net assimilation rate [umol CO2/m2/s].
+    A_net : Net assimilation rate [umol CO2/m2/s] (per unit ground area).
     A_gross : Gross assimilation (before dark respiration) [umol CO2/m2/s].
     """
-    # Temperature-dependent parameters
+    # Temperature-dependent parameters (leaf-level capacities/kinetics).
     Vc_max = arrhenius(config.Vc_max25, config.Ha_Vc, T_leaf)
     J_max = peaked_arrhenius(
         config.J_max25, config.Ha_J, config.Hd_J, config.S_J, T_leaf)
@@ -251,6 +270,13 @@ def farquhar_photosynthesis(
     Kc = arrhenius(config.Kc25, config.Ha_Kc, T_leaf)
     Ko = arrhenius(config.Ko25, config.Ha_Ko, T_leaf)
     Gamma_star = arrhenius(config.Gamma_star25, config.Ha_Gamma, T_leaf)
+
+    # Big-leaf canopy scaling: convert the leaf-level CAPACITY terms to
+    # canopy-level per-ground-area rates.  Kc/Ko/Gamma_star are intensive
+    # (concentrations), so they are NOT scaled.
+    Vc_max = Vc_max * canopy_scaling
+    J_max = J_max * canopy_scaling
+    Rd = Rd * canopy_scaling
 
     # Soil moisture stress on Vc_max (CLM / Bonan et al. 2011)
     if beta_soil is not None:
@@ -371,6 +397,112 @@ def jarvis_gs(
 # Coupled Farquhar-stomata solver
 # =====================================================================
 
+class CoupledLeafState(NamedTuple):
+    """Converged leaf state from the coupled Farquhar-stomata solve.
+
+    Carries everything the SIF diagnostic needs (``A_net``, ``Ci``,
+    ``APAR_umol``, ``gamma_star``) alongside the ``(gs, gpp)`` the beta / ET
+    coupling consumes.  All fields share the ``T_leaf`` shape.
+    """
+
+    gs: jnp.ndarray          # stomatal conductance [mol H2O/m2/s]
+    gpp: jnp.ndarray         # gross primary production [gC/m2/s]
+    A_net: jnp.ndarray       # net assimilation [umol CO2/m2/s]
+    Ci: jnp.ndarray          # intercellular CO2 [umol/mol]
+    APAR_umol: jnp.ndarray   # absorbed PAR [umol photons/m2/s]
+    gamma_star: jnp.ndarray  # CO2 compensation point Gamma* [umol/mol]
+
+
+def solve_coupled_farquhar_ci(
+    T_leaf: jnp.ndarray,
+    sw_down: jnp.ndarray,
+    co2_ppmv: jnp.ndarray | float,
+    q_air: jnp.ndarray,
+    p_surface: jnp.ndarray,
+    LAI: jnp.ndarray,
+    beta_soil: jnp.ndarray,
+    config: StomataConfig,
+) -> CoupledLeafState:
+    """Solve the coupled Farquhar-stomata system; return the converged leaf state.
+
+    Shared core of :func:`coupled_farquhar_stomata` (which returns just
+    ``(gs, gpp)``) and the SIF diagnostic (``canopy/sif.py``, which also needs
+    ``A_net``, ``Ci``, ``APAR`` and ``Gamma*``).  Numerics are identical to the
+    historical ``coupled_farquhar_stomata`` body — see that function for the
+    parameter documentation.
+    """
+    if config.stomata_model not in ("ball_berry", "medlyn"):
+        raise ValueError(
+            f"Unknown stomata_model {config.stomata_model!r}; "
+            "expected one of: 'ball_berry', 'medlyn'."
+        )
+
+    # PAR in umol photons/m2/s
+    PAR_umol = _PAR_FRAC * sw_down * _PAR_CONV
+
+    # Absorbed PAR (Beer's law, per unit ground area)
+    fAPAR = 1.0 - jnp.exp(-config.k_ext * LAI)
+    APAR_umol = fAPAR * PAR_umol
+
+    # Big-leaf canopy scaling for the photosynthetic capacities:
+    #   L_c = (1 - exp(-k·LAI)) / k = fAPAR / k   [m2 leaf / m2 ground].
+    # Converts leaf-level Vc_max/J_max/Rd to canopy-level per-ground-area
+    # rates so the Rubisco- and light-limited branches are both canopy-scale
+    # (see farquhar_photosynthesis docstring).  L_c -> LAI as LAI -> 0.
+    canopy_scaling = fAPAR / jnp.maximum(config.k_ext, 1e-6)
+
+    # Atmospheric CO2
+    Ca = jnp.broadcast_to(
+        jnp.asarray(co2_ppmv, dtype=T_leaf.dtype), T_leaf.shape)
+
+    # Vapour pressure deficit and relative humidity.  ``q_air`` is
+    # specific humidity, so use ``e = q · p / (ε + (1 − ε) · q)``;
+    # see VPD comment in jarvis_gs above.  Audit finding #24.
+    e_sat = saturation_vapor_pressure(T_leaf)
+    e_air = q_air * p_surface / (constants.epsilon + (1.0 - constants.epsilon) * q_air)
+    VPD_kPa = jnp.maximum(e_sat - e_air, 0.0) / 1000.0
+    RH = jnp.clip(e_air / jnp.maximum(e_sat, 1.0), 0.0, 1.0)
+
+    # Initial guess for Ci (typical C3 ratio)
+    Ci = _CI_CA_INIT_RATIO * Ca
+
+    # Fixed-point iteration (unrolled for JIT compatibility)
+    for _ in range(config.n_iter_ags):
+        A_net, _ = farquhar_photosynthesis(
+            Ci, APAR_umol, T_leaf, config, beta_soil, canopy_scaling)
+
+        if config.stomata_model == "medlyn":
+            gs = medlyn_gs(A_net, VPD_kPa, Ca, config)
+        else:
+            gs = ball_berry_gs(A_net, RH, Ca, config)
+
+        # Update Ci via stomatal diffusion (1.6 = H2O/CO2 ratio)
+        gs_safe = jnp.maximum(gs, config.g0)
+        A_pos = jnp.maximum(A_net, 0.0)
+        Ci = Ca - _DIFFUSIVITY_RATIO_H2O_CO2 * A_pos / gs_safe
+        Ci = jnp.clip(Ci, 1.0, Ca)
+
+    # Final evaluation
+    A_net, A_gross = farquhar_photosynthesis(
+        Ci, APAR_umol, T_leaf, config, beta_soil, canopy_scaling)
+
+    if config.stomata_model == "medlyn":
+        gs = medlyn_gs(A_net, VPD_kPa, Ca, config)
+    else:
+        gs = ball_berry_gs(A_net, RH, Ca, config)
+
+    # GPP: A_gross [umol CO2/m2/s] -> gC/m2/s
+    gpp = jnp.maximum(A_gross, 0.0) * _MC
+
+    # Gamma* for the SIF electron-transport inversion — same Arrhenius the
+    # Farquhar rates use (Bernacchi 2001), computed here so the two never drift.
+    gamma_star = arrhenius(config.Gamma_star25, config.Ha_Gamma, T_leaf)
+
+    return CoupledLeafState(
+        gs=gs, gpp=gpp, A_net=A_net, Ci=Ci,
+        APAR_umol=APAR_umol, gamma_star=gamma_star)
+
+
 def coupled_farquhar_stomata(
     T_leaf: jnp.ndarray,
     sw_down: jnp.ndarray,
@@ -405,64 +537,13 @@ def coupled_farquhar_stomata(
     -------
     gs : Canopy stomatal conductance [mol H2O/m2/s].
     gpp : Gross primary production [gC/m2/s].
+
+    Thin wrapper over :func:`solve_coupled_farquhar_ci` (which also exposes
+    the ``A_net`` / ``Ci`` / ``APAR`` / ``Gamma*`` the SIF diagnostic needs).
     """
-    if config.stomata_model not in ("ball_berry", "medlyn"):
-        raise ValueError(
-            f"Unknown stomata_model {config.stomata_model!r}; "
-            "expected one of: 'ball_berry', 'medlyn'."
-        )
-
-    # PAR in umol photons/m2/s
-    PAR_umol = _PAR_FRAC * sw_down * _PAR_CONV
-
-    # Absorbed PAR (Beer's law, per unit ground area)
-    fAPAR = 1.0 - jnp.exp(-config.k_ext * LAI)
-    APAR_umol = fAPAR * PAR_umol
-
-    # Atmospheric CO2
-    Ca = jnp.broadcast_to(
-        jnp.asarray(co2_ppmv, dtype=T_leaf.dtype), T_leaf.shape)
-
-    # Vapour pressure deficit and relative humidity.  ``q_air`` is
-    # specific humidity, so use ``e = q · p / (ε + (1 − ε) · q)``;
-    # see VPD comment in jarvis_gs above.  Audit finding #24.
-    e_sat = saturation_vapor_pressure(T_leaf)
-    e_air = q_air * p_surface / (constants.epsilon + (1.0 - constants.epsilon) * q_air)
-    VPD_kPa = jnp.maximum(e_sat - e_air, 0.0) / 1000.0
-    RH = jnp.clip(e_air / jnp.maximum(e_sat, 1.0), 0.0, 1.0)
-
-    # Initial guess for Ci (typical C3 ratio)
-    Ci = _CI_CA_INIT_RATIO * Ca
-
-    # Fixed-point iteration (unrolled for JIT compatibility)
-    for _ in range(config.n_iter_ags):
-        A_net, _ = farquhar_photosynthesis(
-            Ci, APAR_umol, T_leaf, config, beta_soil)
-
-        if config.stomata_model == "medlyn":
-            gs = medlyn_gs(A_net, VPD_kPa, Ca, config)
-        else:
-            gs = ball_berry_gs(A_net, RH, Ca, config)
-
-        # Update Ci via stomatal diffusion (1.6 = H2O/CO2 ratio)
-        gs_safe = jnp.maximum(gs, config.g0)
-        A_pos = jnp.maximum(A_net, 0.0)
-        Ci = Ca - _DIFFUSIVITY_RATIO_H2O_CO2 * A_pos / gs_safe
-        Ci = jnp.clip(Ci, 1.0, Ca)
-
-    # Final evaluation
-    A_net, A_gross = farquhar_photosynthesis(
-        Ci, APAR_umol, T_leaf, config, beta_soil)
-
-    if config.stomata_model == "medlyn":
-        gs = medlyn_gs(A_net, VPD_kPa, Ca, config)
-    else:
-        gs = ball_berry_gs(A_net, RH, Ca, config)
-
-    # GPP: A_gross [umol CO2/m2/s] -> gC/m2/s
-    gpp = jnp.maximum(A_gross, 0.0) * _MC
-
-    return gs, gpp
+    st = solve_coupled_farquhar_ci(
+        T_leaf, sw_down, co2_ppmv, q_air, p_surface, LAI, beta_soil, config)
+    return st.gs, st.gpp
 
 
 # =====================================================================
