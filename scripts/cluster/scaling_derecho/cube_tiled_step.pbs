@@ -1,0 +1,54 @@
+#!/bin/bash -l
+#PBS -N legoesm_cube_tiled_step
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=6:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB
+#PBS -l walltime=01:30:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# Sub-face TILED cube hydrostatic step: the >6-GPU strong-scaling lane
+# (scaling-audit item 5).  24 A100 = 6 nodes x 4 GPUs, kt=2 -> (6,2,2) mesh.
+#
+# Stage A (single process, CPU virtual devices): the tiled-vs-serial PARITY
+#   gate at the adapter tolerances — correctness receipt BEFORE any timing.
+#   Virtual-CPU rows are auto-flagged in metadata and are NOT speedup rows.
+# Stage B (multicontroller, one process per GPU, route-B NCCL): the timed
+#   run.  The bench REFUSES to record a row whose compiled HLO shows a
+#   full-cube all-gather (replicated execution) or zero collective-permutes.
+#
+# The tiled step is the DYNAMICS-ONLY base cut (the adapter refuses configs
+# with hyperdiff/div-damp/sponge-implicit/duogrid — see
+# tiled_step_adapter._refuse).  Compare against the face-only 6-GPU lane
+# (blocker1_cube_shardmap.pbs / run_levante --cs-spmd) for the <=6 leg.
+# ===========================================================================
+set -euo pipefail
+cd "${PBS_O_WORKDIR}"
+source scripts/cluster/scaling_derecho/_env.sh 2>/dev/null || true
+
+OUT=results/a1/cube_tiled_scaling_derecho.jsonl
+RES=${RES:-192}
+NLEV=${NLEV:-60}
+KT=${KT:-2}
+
+echo "== Stage A: CPU-virtual parity gate (24 virtual devices) =="
+JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=24 \
+python scripts/bench/bench_cube_tiled_step_scaling.py \
+    --kt "${KT}" --resolution 48 --nlev 10 --steps 4 --warmup 1 \
+    --parity-gate --out "${OUT%.jsonl}_parity.jsonl"
+
+echo "== Stage B: 24-GPU multicontroller timed run =="
+# Per-rank GPU pinning: PALS_LOCAL_RANKID -> CUDA_VISIBLE_DEVICES via the
+# shim (mc_nccl_canary convention); NCCL over Slingshot needs the OFI
+# plugin on LD_LIBRARY_PATH (build_nccl_ofi.sh) — the bench records
+# missing_net_plugin_multi_node so a socket-bound row is falsifiable.
+export NCCL_DEBUG=INFO
+export NCCL_SOCKET_IFNAME=hsn
+mpiexec -n $((6 * KT * KT)) --ppn 4 \
+    sh -c 'export CUDA_VISIBLE_DEVICES=$PALS_LOCAL_RANKID; exec "$@"' -- \
+    python scripts/bench/bench_cube_tiled_step_scaling.py \
+    --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
+    --steps 12 --warmup 2 --multicontroller --out "${OUT}"
+
+echo "done: ${OUT}"
