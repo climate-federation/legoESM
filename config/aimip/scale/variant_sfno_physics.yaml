@@ -26,3 +26,12 @@ sfno_embed_dim: 64       # v12: was 128.  SpectralConv weights scale as
 sfno_n_blocks: 4
 sfno_mlp_expansion: 4
 sfno_seed: 0
+
+# Rollout curriculum capped at 72h (OOM fix).  The base 120h phase is ~1080
+# dycore steps (216 steps/day x 5 days); the training lax.scan stores one T106
+# state per step for the backward pass (per-step remat does NOT shrink the scan
+# carry), so ~1000 steps + SFNO activations OOM'd the 189M-param model on a 40GB
+# A100.  72h = 648 steps (~40% less rollout memory), a shorter multi-step
+# supervision horizon.  Shallow-merge REPLACES the base aimip_rollout_curriculum;
+# the 7-epoch budget is preserved (72h gains the freed epoch: 72hx3 not x2).
+aimip_rollout_curriculum: [[12, 2], [24, 2], [72, 3]]
