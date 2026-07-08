@@ -227,11 +227,18 @@ def _compute_gs_and_ci(
     -------
     (rs [s m-1], gs [m s-1], Ci [μmol mol-1])
     """
+    # ``stomatal_model`` is a static Python string (see the jitting caller's
+    # static_argnames), so this dispatch is resolved at trace time — a typo must
+    # raise, not silently run the other model (matches solve_coupled_farquhar_ci).
     if stomatal_model == "medlyn":
         VPD_kPa = jnp.maximum(VPD_c, 50.0) / 1000.0  # coeff-ok: 50 Pa (0.05 kPa) VPD floor; Pa→kPa
         gs_mol = medlyn_gs(An, VPD_kPa, Ca, m, b0)
-    else:
+    elif stomatal_model == "ball_berry":
         gs_mol = ball_berry_gs(An, RH_c, Ca, m, b0)
+    else:
+        raise ValueError(
+            f"unknown stomatal_model {stomatal_model!r}; the stomatal "
+            "conductance scheme must be one of {'ball_berry', 'medlyn'}")
 
     # Minimum cuticular conductance: keep gs > 0 even at full water stress with
     # the legacy ``stress_b0=True`` (m = b0 = 0), otherwise the leaf gs/Ci/An

@@ -116,5 +116,37 @@ class TestMedlyn(unittest.TestCase):
         self.assertLess(float(gs), 1.0)
 
 
+class TestTwoLeafSelectorDispatch(unittest.TestCase):
+    """The two-leaf ``_compute_gs_and_ci`` selector must raise on an unknown
+    ``stomatal_model`` (dispatch-hardening), not silently fall back to
+    Ball-Berry — mirroring the big-leaf ``solve_coupled_farquhar_ci`` guard."""
+
+    def _args(self):
+        return dict(
+            An=jnp.array(10.0), RH_c=jnp.array(0.7), VPD_c=jnp.array(1000.0),
+            Ca=jnp.array(400.0), Tf=jnp.array(300.0), Ps=jnp.array(101325.0),
+            m=jnp.array(9.0), b0=jnp.array(0.01))
+
+    def test_valid_models_run(self):
+        from legoesm.land.canopy.energy_balance import _compute_gs_and_ci
+        for model in ("ball_berry", "medlyn"):
+            rs, gs, Ci = _compute_gs_and_ci(**self._args(), stomatal_model=model)
+            self.assertTrue(jnp.isfinite(gs))
+
+    def test_unknown_model_raises(self):
+        from legoesm.land.canopy.energy_balance import _compute_gs_and_ci
+        with self.assertRaises(ValueError):
+            _compute_gs_and_ci(**self._args(), stomatal_model="bal_berry")
+
+    def test_config_validate_rejects_typo_early(self):
+        # Fail-early backstop: CanopyConfig.validate() rejects a typo'd
+        # stomatal_model at setup (before any jitted canopy solve).
+        from legoesm.land.canopy.config import CanopyConfig
+        CanopyConfig(stomatal_model="ball_berry").validate()
+        CanopyConfig(stomatal_model="medlyn").validate()
+        with self.assertRaises(ValueError):
+            CanopyConfig(stomatal_model="bal_berry").validate()
+
+
 if __name__ == "__main__":
     unittest.main()
