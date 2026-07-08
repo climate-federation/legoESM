@@ -327,6 +327,63 @@ def carry_to_spectral_state(
     )
 
 
+def spectral_state_to_carry(
+    state: SpectralHydrostaticState,
+    grid: GaussianGrid,
+    sigma_coord: SigmaCoordinate,
+):
+    """Convert a SpectralHydrostaticState to a grid-space SegmentCarry.
+
+    Inverse of :func:`carry_to_spectral_state` (SH synthesis of the
+    prognostic spectral fields back to the Gaussian grid; tracers are
+    already grid-space).  Used by the WB scale trainer's spectral
+    training core (#817) so a rolled-out spectral state can be scored
+    by the carry-vs-carry losses (``combined_loss``) against an
+    ``era5_to_spectral_carry`` target — the pred and target then share
+    the exact packing (zero held/accum diagnostics, ``step_index=0``)
+    that ``era5_to_spectral_carry`` uses, so the loss only ever sees
+    the physical fields (u, v, T, q_v, p_s) differ.
+    """
+    from legoesm.core.state import HydrostaticState
+    from legoesm.driver.compiled_segments import pack_carry
+
+    fields = spectral_pe_to_grid(state, grid, sigma_coord)
+    u, v, T, p_s = fields["u"], fields["v"], fields["T"], fields["p_s"]
+    phis = fields["phis"]
+
+    grid_dims_3d = ("lat", "lon", "level")
+    grid_dims_2d = ("lat", "lon")
+    hstate = HydrostaticState(
+        u=Field(u, name="u", dims=grid_dims_3d, units="m/s"),
+        v=Field(v, name="v", dims=grid_dims_3d, units="m/s"),
+        T=Field(T, name="T", dims=grid_dims_3d, units="K"),
+        p_s=Field(p_s, name="p_s", dims=grid_dims_2d, units="Pa"),
+        phis=Field(phis, name="phis", dims=grid_dims_2d, units="m2/s2"),
+    )
+
+    def _tracer(name):
+        if state.tracers is not None and name in state.tracers:
+            tr = state.tracers[name]
+            return tr.data if hasattr(tr, "data") else tr
+        return jnp.zeros_like(T)
+
+    shape_3d = T.shape
+    shape_2d = p_s.shape
+    return pack_carry(
+        hstate,
+        q_v=_tracer("q_v"),
+        q_c=_tracer("q_c"),
+        q_r=_tracer("q_r"),
+        held_dT_rad=jnp.zeros(shape_3d),
+        held_sw_net_sfc=jnp.zeros(shape_2d),
+        held_lw_net_sfc=jnp.zeros(shape_2d),
+        held_sw_up_toa=jnp.zeros(shape_2d),
+        held_lw_up_toa=jnp.zeros(shape_2d),
+        held_sw_down_toa=jnp.zeros(shape_2d),
+        step_index=0,
+    )
+
+
 # =============================================================================
 # SFNO as spectral physics
 # =============================================================================
