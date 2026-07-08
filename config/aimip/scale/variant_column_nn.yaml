@@ -1,0 +1,13 @@
+# AIMIP-at-scale T106 — column_nn variant overlay.
+#
+# The variant ARCHITECTURE is selected by the variant NAME (run_aimip.py:
+# `if variant == "column_nn"` -> train_column_mlp_spectral), not by any key
+# here.  base_t106_allyears.yaml already carries the complete settings this
+# variant reads (nn_hidden_dim / nn_n_layers / nn_seed + the physics-scheme
+# selections the column MLP corrects), so this overlay is intentionally empty:
+# it exists only because run_aimip.py merges base + `variant_<name>.yaml`.
+#
+# Put column_nn-SPECIFIC deltas here (they shallow-override base) when you want
+# to tune this variant without touching the shared base, e.g.:
+#   nn_hidden_dim: 768
+#   nn_n_layers: 8

@@ -1,0 +1,13 @@
+# AIMIP-at-scale T106 — sfno_physics variant overlay.
+#
+# The variant ARCHITECTURE is selected by the variant NAME (run_aimip.py:
+# `if variant == "sfno_physics"` -> train_neural_gcm_spectral), not by any key
+# here.  base_t106_allyears.yaml already carries the complete settings this
+# variant reads (sfno_embed_dim / sfno_n_blocks / sfno_mlp_expansion / sfno_seed
+# + all physics-scheme selections), so this overlay is intentionally empty:
+# it exists only because run_aimip.py merges base + `variant_<name>.yaml`.
+#
+# Put sfno_physics-SPECIFIC deltas here (they shallow-override base) when you
+# want to tune this variant without touching the shared base, e.g.:
+#   sfno_embed_dim: 128
+#   aimip_lr: 0.0002

@@ -1,0 +1,14 @@
+# AIMIP-at-scale T106 — classical variant overlay.
+#
+# The variant ARCHITECTURE is selected by the variant NAME (run_aimip.py:
+# `if variant == "classical"` -> _train_aimip_classical), not by any key here.
+# base_t106_allyears.yaml already carries the complete settings this variant
+# reads (the aimip_radiation / aimip_convection / aimip_turbulence / aimip_gwd /
+# aimip_microphysics / aimip_cloud scheme selections + spatial-surface knobs),
+# so this overlay is intentionally empty: it exists only because run_aimip.py
+# merges base + `variant_<name>.yaml`.
+#
+# Put classical-SPECIFIC deltas here (they shallow-override base) when you want
+# to tune this variant without touching the shared base, e.g.:
+#   aimip_convection: kuo
+#   aimip_lr: 0.0005
