@@ -2701,6 +2701,53 @@ def _resolve_microphysics(config):
 # Turbulence resolver
 # ---------------------------------------------------------------------------
 
+def apply_surface_flux_config(tc, config):
+    """Propagate the experiment-level surface bulk-flux settings into the
+    active scheme's ``SurfaceLayerConfig``.
+
+    Single source of truth for EVERY dycore backend (#870): the FV pipeline,
+    the MPAS standalone physics, and the spectral path all consume the
+    ``TurbulenceConfig`` this returns, so ``surface_bulk_scheme=coare3`` /
+    ``surface_gustiness_zi`` / ``surface_thermo_convention`` /
+    ``surface_stability_scheme`` reach the surface fluxes identically on all
+    grids.  (Previously this injection lived only in the FV
+    ``_resolve_turbulence`` — the MPAS AMIP lane silently ran the default
+    constant-coefficient surface layer.)
+
+    Default experiment settings => ``tc`` returned UNCHANGED (same object,
+    byte-identical; the override identity contract in
+    ``test_turbulence_config_for_default_vs_override`` relies on this).
+    """
+    sbs = getattr(config, "surface_bulk_scheme", "constant")
+    gzi = getattr(config, "surface_gustiness_zi", None)
+    stc = getattr(config, "surface_thermo_convention", "legoesm")
+    sss = getattr(config, "surface_stability_scheme", "dyer1974")
+    if (sbs == "constant" and gzi is None and stc == "legoesm"
+            and sss == "dyer1974"):
+        return tc
+    sub = getattr(tc, tc.scheme, None)  # e.g. tc.louis; "none"/clubb=None safe
+    if sub is None or getattr(sub, "surface", None) is None:
+        return tc
+    surf = sub.surface
+    if sbs != "constant":
+        surf = surf._replace(bulk_scheme=sbs)
+    if gzi is not None:
+        # COARE convective-gustiness BL depth (only effective with a MOST
+        # bulk_scheme); the diagnosed fix for the calm-warm-ocean low hfls.
+        surf = surf._replace(gustiness_w_zi=gzi)
+    if stc != "legoesm":
+        # AeroBulk thermodynamic-constants parity (#762; only effective
+        # with a MOST bulk_scheme).
+        surf = surf._replace(thermo_convention=stc)
+    if sss != "dyer1974":
+        # Stable-regime MOST functions: keep the atmosphere surface layer
+        # on the SAME stable functions as the coupler ocean tile (both
+        # driven by the one --surface-stability-scheme flag) so the
+        # interface cannot split Dyer-vs-SHEBA across its two sides.
+        surf = surf._replace(stability_scheme=sss)
+    return tc._replace(**{tc.scheme: sub._replace(surface=surf)})
+
+
 def turbulence_config_for(config):
     """The ``TurbulenceConfig`` to build the turbulence kernel from.
 
@@ -2711,12 +2758,17 @@ def turbulence_config_for(config):
     every dycore backend (FV ``_resolve_turbulence``, MPAS, spectral) honours an
     injected override consistently (e.g. a corrected per-column
     ``clubb_lite.C_K`` from the LES-informed correction loop).
+
+    The experiment-level surface bulk-flux settings are applied here too
+    (``apply_surface_flux_config``) so every backend gets the same surface
+    layer (#870).
     """
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
 
     override = getattr(config, "turbulence_override", None)
     if override is None:
-        return TurbulenceConfig(scheme=getattr(config, "turbulence", "none"))
+        tc = TurbulenceConfig(scheme=getattr(config, "turbulence", "none"))
+        return apply_surface_flux_config(tc, config)
     # Under MPI a GLOBAL per-column override must be sliced to the rank's columns
     # (else broadcast_column_param mismatches the rank-local l_mix). Deferred so the
     # parallel layout machinery is only touched when an override is actually set;
@@ -2728,9 +2780,9 @@ def turbulence_config_for(config):
     )
 
     layout = active_column_layout()
-    if layout is None:
-        return override
-    return localize_turbulence_override(override, layout)
+    tc = override if layout is None else localize_turbulence_override(
+        override, layout)
+    return apply_surface_flux_config(tc, config)
 
 
 def _resolve_turbulence(config):
@@ -2745,38 +2797,11 @@ def _resolve_turbulence(config):
     from legoesm.atmosphere.physics.turbulence.integration import get_turbulence_fn
 
     tc = turbulence_config_for(config)
+    # The experiment-level surface bulk-flux settings (coare3 / gustiness /
+    # thermo convention / stability scheme) are already applied by
+    # ``turbulence_config_for`` -> ``apply_surface_flux_config`` (#870), so
+    # the sub-config returned here carries the patched SurfaceLayerConfig.
     _name, turb_fn, turb_config = get_turbulence_fn(tc)
-    # Propagate the experiment-level surface bulk-flux algorithm into the
-    # scheme's SurfaceLayerConfig.  Default "constant" => unchanged (byte-
-    # identical).  The stability-dependent MOST schemes (coare3/large_yeager)
-    # add the convective-gustiness w* term absent from the constant neutral
-    # coefficients — the fix for anemic evaporation over a calm warm ocean.
-    sbs = getattr(config, "surface_bulk_scheme", "constant")
-    gzi = getattr(config, "surface_gustiness_zi", None)
-    stc = getattr(config, "surface_thermo_convention", "legoesm")
-    sss_scheme = getattr(config, "surface_stability_scheme", "dyer1974")
-    if (turb_config is not None
-            and getattr(turb_config, "surface", None) is not None
-            and (sbs != "constant" or gzi is not None or stc != "legoesm"
-                 or sss_scheme != "dyer1974")):
-        surf = turb_config.surface
-        if sbs != "constant":
-            surf = surf._replace(bulk_scheme=sbs)
-        if gzi is not None:
-            # COARE convective-gustiness BL depth (only effective with a MOST
-            # bulk_scheme); the diagnosed fix for the calm-warm-ocean low hfls.
-            surf = surf._replace(gustiness_w_zi=gzi)
-        if stc != "legoesm":
-            # AeroBulk thermodynamic-constants parity (#762; only effective
-            # with a MOST bulk_scheme).
-            surf = surf._replace(thermo_convention=stc)
-        if sss_scheme != "dyer1974":
-            # Stable-regime MOST functions: keep the atmosphere surface layer
-            # on the SAME stable functions as the coupler ocean tile (both
-            # driven by the one --surface-stability-scheme flag) so the
-            # interface cannot split Dyer-vs-SHEBA across its two sides.
-            surf = surf._replace(stability_scheme=sss_scheme)
-        turb_config = turb_config._replace(surface=surf)
     return turb_fn, turb_config
 
 

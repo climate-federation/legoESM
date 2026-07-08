@@ -685,11 +685,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Static land-albedo NetCDF (e.g. ICON-extpar ALB). "
                              "When set (with --land-mask-file), overrides the "
                              "latitude-vegetation albedo on the land tile.")
-    parser.add_argument("--use-multilayer-land", action="store_true",
+    parser.add_argument("--use-multilayer-land", default=False,
+                        action=argparse.BooleanOptionalAction,
                         help="Replace the slab land tile with the differentiable "
                              "multilayer (8-layer Richards) soil column, carried in "
                              "the segment state and warm-started from the CLM "
-                             "reference surface map.  Requires --land-mask-file.")
+                             "reference surface map.  Requires --land-mask-file. "
+                             "--no-use-multilayer-land turns it back off when a "
+                             "--config YAML enables it (e.g. for the MPAS/spectral "
+                             "backends, whose standalone physics carries a passive "
+                             "land tile and cannot step the soil column).")
     parser.add_argument("--multilayer-n-layers", type=int,
                         default=_EXPERIMENT_DEFAULTS.multilayer_n_layers,
                         help="Number of soil layers for --use-multilayer-land.")
@@ -724,7 +729,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Activate the slab-land SEB tile using the "
                              "topography-derived land fraction (requires "
                              "--topography). No separate LSM file needed.")
-    parser.add_argument("--surface-tiled", action="store_true", default=False,
+    parser.add_argument("--surface-tiled", default=False,
+                        action=argparse.BooleanOptionalAction,
                         help="Tiled (mosaic) surface fluxes: run --surface-bulk-scheme "
                              "(e.g. coare3) on the OCEAN tile and the fixed-roughness "
                              "land Monin-Obukhov scheme on the LAND tile, then "
@@ -732,7 +738,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "surface (which runs the ocean scheme over land). "
                              "Requires --slab-land-active and --turbulence in "
                              "{louis, clubb_lite, clubb} (the kernels that consume "
-                             "the injected tiled surface flux).")
+                             "the injected tiled surface flux). "
+                             "--no-surface-tiled turns it back off when a --config "
+                             "YAML enables it (e.g. for the MPAS/spectral backends, "
+                             "which do not run the tiled coupled pipeline).")
     parser.add_argument("--surface-z0-land", type=float,
                         default=_EXPERIMENT_DEFAULTS.surface_z0_land,
                         dest="surface_z0_land",
@@ -832,13 +841,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "snowfall and melts (degree-day), brightening the "
                              "land albedo (snow ~0.5-0.8 vs vegetation ~0.15). "
                              "Requires an active land tile (--slab-land-active).")
-    parser.add_argument("--sponge", action="store_true", default=False,
+    parser.add_argument("--sponge", default=False,
+                        action=argparse.BooleanOptionalAction,
                         dest="sponge_enabled",
                         help="Enable the top-of-atmosphere Rayleigh sponge "
                              "(#836): damping that increases toward the model "
                              "lid to absorb upward-propagating gravity/convective "
                              "waves the hydrostatic latlon-cgrid dycore otherwise "
-                             "reflects off the rigid top. Off by default.")
+                             "reflects off the rigid top. Off by default. "
+                             "--no-sponge turns it back off when a --config "
+                             "YAML enables it (e.g. the #847 drift-lever walk).")
     parser.add_argument("--sponge-coeff-per-day", type=float, default=None,
                         dest="sponge_coeff_per_day",
                         help="Rayleigh damping rate at the model top [1/day] "
@@ -1352,6 +1364,17 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
                      "spectral standalone radiation paths use the "
                      "RRTMGPConfig constant surface albedo and would "
                      "silently ignore the flag.")
+    if args.use_multilayer_land and (
+            args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",
+                               "mpas")
+            or args.discretization in ("spectral", "mpas")):
+        parser.error("--use-multilayer-land runs inside the coupled physics "
+                     "pipeline (cubed_sphere / latlon only); the MPAS and "
+                     "spectral standalone physics carry a PASSIVE land tile "
+                     "and cannot step the soil column (the multilayer setup "
+                     "crashes on the unstructured mesh: VoronoiMesh has no "
+                     "lat/lat2d). Pass --no-use-multilayer-land to override "
+                     "a --config YAML that enables it.")
     if args.physics_parameterization == "ml":
         if args.convection != "mass_flux" or args.turbulence != "louis":
             parser.error(
@@ -1702,22 +1725,18 @@ def _validate_sundqvist_flags(args, parser) -> None:
 
 
 def _validate_cloud_sensitivity_flags(args, parser) -> None:
-    """Refuse --cloud-p-xr / --cloud-alpha-xr on backends that rebuild CloudConfig
-    at run() and ignore the pipeline override (MPAS / spectral) — the same
-    silent-ignore failure mode guarded for the sundqvist micro override.  Bounds
-    are enforced by ExperimentConfig.validate_strict.
+    """--cloud-p-xr / --cloud-alpha-xr are valid on EVERY backend since #870
+    Phase 1: the FV pipeline threads them via ``build_cloud_config`` and the
+    standalone MPAS/spectral paths via ``model_driver._standalone_cloud_config``
+    (which reads the same experiment fields).  The pre-#870 hard rejection on
+    MPAS/spectral ("they rebuild CloudConfig at run() and would ignore them")
+    is retired — that rebuild now CARRIES the override, so rejecting the flags
+    there blocked a working feature with a false message (pre-merge codex
+    review).  Bounds are enforced by ``ExperimentConfig.validate_strict``.
+    The sundqvist micro overrides remain FV-only and keep their guard
+    (``_validate_sundqvist_flags``) — those are still not threaded standalone.
     """
-    if (getattr(args, "cloud_p_xr", None) is None
-            and getattr(args, "cloud_alpha_xr", None) is None):
-        return
-    disc = getattr(args, "discretization", "centered")
-    grid = getattr(args, "grid_type", "")
-    if disc in ("mpas", "spectral") or grid in (
-            "voronoi", "icosahedral", "mpas_voronoi", "mpas"):
-        parser.error(
-            "--cloud-p-xr / --cloud-alpha-xr apply only on the finite-volume "
-            "PhysicsPipeline (cubed_sphere / latlon); MPAS and spectral rebuild "
-            "CloudConfig at run() and would ignore them.")
+    return
 
 
 def _require_full_physics_for_amip(args, parser) -> None:

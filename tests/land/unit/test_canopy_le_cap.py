@@ -8,9 +8,11 @@ sites such as US-Ton savanna):
   admits nocturnal dew and a modest daytime LE > Rn, but stops the runaway that
   pushes the leaf energy balance to NaN.  Default ``"soft"``; ``"off"`` reproduces
   the un-capped behaviour; ``"hard"`` is the legacy ``clip(LE, 0, max(Rn,0))``.
-* ``_GS_MIN_MOL`` -- a minimum cuticular conductance.  Under full water stress the
-  stress factor scales the Ball-Berry slope AND intercept to zero, which without
-  a floor gives ``gs = 0``, a singular Newton Jacobian, and NaN fluxes.
+* ``_GS_MIN_MOL`` -- a minimum cuticular conductance.  Under full water stress with
+  the legacy/default ``CanopyConfig.stress_b0=True`` the stress factor scales the
+  Ball-Berry slope AND intercept to zero, which without a floor gives ``gs = 0``, a
+  singular Newton Jacobian, and NaN fluxes.  (With ``stress_b0=False`` b0 stays > 0
+  and the floor is inactive.)
 
 These tests pin the cap's bounds + smoothness + differentiability, the dispatch
 hardening, and the dry-site (full-stress) NaN regression at the leaf-balance and
@@ -110,8 +112,9 @@ _LEAF = dict(
 
 
 def test_leaf_balance_finite_at_full_water_stress():
-    # Full stress drives the Ball-Berry slope AND intercept to zero (m=b0=0).
-    # The conductance floor must keep gs>0 so LE/Tf are finite, not NaN.
+    # Legacy stress_b0=True: full stress drives the Ball-Berry slope AND intercept
+    # to zero (explicit m=b0=0 here).  The conductance floor must keep gs>0 so
+    # LE/Tf are finite, not NaN.  (stress_b0=False instead keeps b0>0 directly.)
     Rn, LE, H, Tf_new, gs, Ci = leaf_energy_balance_bt(
         An=jnp.array(0.0), m=jnp.array(0.0), b0=jnp.array(0.0), **_LEAF)
     for v in (LE, H, Tf_new, gs, Ci):

@@ -37,6 +37,56 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_no_use_multilayer_land_overrides_yaml_default():
+    """--no-use-multilayer-land flips a set_defaults(True) (i.e. a --config YAML
+    that enables the multilayer land) back off — needed to run a production
+    YAML on the MPAS/spectral standalone backends (#869 MPAS probe)."""
+    parser = build_arg_parser()
+    parser.set_defaults(use_multilayer_land=True)  # what a YAML would do
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-use-multilayer-land",
+    ]), parser))
+    assert cfg.use_multilayer_land is False
+
+
+def test_no_sponge_overrides_yaml_default():
+    """--no-sponge flips a set_defaults(True) (a --config YAML enabling the
+    #836 top sponge) back off — needed for the #847 drift-lever walk's
+    sponge-off leg against amip_production.yaml."""
+    parser = build_arg_parser()
+    parser.set_defaults(sponge_enabled=True)  # what a YAML would do
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-sponge",
+    ]), parser))
+    assert cfg.sponge_enabled is False
+
+
+def test_no_surface_tiled_overrides_yaml_default():
+    """--no-surface-tiled flips a set_defaults(True) (a --config YAML enabling
+    the tiled mosaic surface) back off — same MPAS/spectral escape hatch as
+    --no-use-multilayer-land (the standalone backends don't run the tiled
+    coupled pipeline; validate_strict otherwise demands an active land tile)."""
+    parser = build_arg_parser()
+    parser.set_defaults(surface_tiled=True)  # what a YAML would do
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-surface-tiled",
+    ]), parser))
+    assert cfg.surface_tiled is False
+
+
+def test_multilayer_land_rejected_on_mpas():
+    """use_multilayer_land + MPAS grid must fail EARLY at argparse with a clear
+    message (not an AttributeError deep in _setup_multilayer_land: VoronoiMesh
+    has no lat/lat2d — the crash mode of the first MPAS AMIP probe)."""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical",
+            "--grid-type", "mpas", "--discretization", "mpas",
+            "--use-multilayer-land",
+        ]), parser)
+
+
 def test_clm_surfdata_path_flows_to_config():
     """--clm-surfdata-path round-trips into ExperimentConfig (empty default =>
     UCAR download; a set path lets a compute node with no internet use a staged
@@ -1684,19 +1734,24 @@ def test_cloud_sensitivity_flags_round_trip_and_validate():
             bad.validate_strict()
 
 
-def test_cloud_sensitivity_flags_rejected_on_mpas_spectral():
-    """--cloud-p-xr/--cloud-alpha-xr are refused on MPAS/spectral (they rebuild
-    CloudConfig at run() and would silently ignore the pipeline override)."""
+def test_cloud_sensitivity_flags_allowed_on_mpas_spectral():
+    """#870 Phase 1 FLIPS the old rejection: --cloud-p-xr/--cloud-alpha-xr now
+    REACH the standalone MPAS/spectral radiation (via
+    model_driver._standalone_cloud_config reading the same experiment fields),
+    so the guard must accept them on every backend — the pre-#870 hard
+    rejection blocked a working feature with a false message."""
     from scripts.run.run_amip import _validate_cloud_sensitivity_flags
     parser = build_arg_parser()
+    # MPAS + the flags: NO raise (they thread via _standalone_cloud_config).
     mpas = parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi",
                               "--cloud-p-xr", "0.7"])
-    with pytest.raises(SystemExit):
-        _validate_cloud_sensitivity_flags(mpas, parser)
-    # FV path + no flags: no raise
-    _validate_cloud_sensitivity_flags(
-        parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi"]),
-        parser)
+    _validate_cloud_sensitivity_flags(mpas, parser)
+    # And the values flow into ExperimentConfig on the MPAS path too.
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--grid-type", "voronoi",
+         "--cloud-p-xr", "0.7", "--cloud-alpha-xr", "20.0"]), parser))
+    assert cfg.cloud_p_xr == 0.7 and cfg.cloud_alpha_xr == 20.0
+    # FV path unchanged: no raise with or without flags.
     _validate_cloud_sensitivity_flags(
         parser.parse_args(["--dataset", "analytical", "--cloud-p-xr", "0.7"]),
         parser)
