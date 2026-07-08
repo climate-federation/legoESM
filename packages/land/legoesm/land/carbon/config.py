@@ -162,6 +162,16 @@ class CarbonConfig(NamedTuple):
     clab_release_period: float = 50.0   # Labile release width [days]
     leaf_fall_period: float = 50.0      # Leaf fall width [days]
     hemisphere_aware: bool = True       # Flip phenology for SH
+    # Leaf-habit / phenology TYPE. A categorical STRUCTURAL flag (like ``woody``
+    # / ``hemisphere_aware``), NOT a tunable float -- only ``: float`` fields are
+    # ``__param_spec__``-eligible, so it needs no spec entry.  False (default)
+    # keeps every current numeric: the DALEC990 DECIDUOUS Gaussian Bday/Fday
+    # leaf-fall pulse.  True selects near-CONTINUOUS leaf turnover
+    # (``leaf_lifespan``-based, see ``carbon_cycle.compute_phenology``), correct
+    # for broadleaf/needleleaf EVERGREEN PFTs whose canopy never drops to ~0 LAI
+    # in a dormant season.  OFFLINE archetype-IC path only -- production coupled
+    # runs keep the default (docs/land/multipool_som_phenology_plan.md, Phase B).
+    evergreen: bool = False
 
     # --- Initial pool sizes [gC/m2] ---
     C_lab_init: float = 100.0
@@ -216,21 +226,31 @@ def som_total(state: CarbonState) -> jax.Array:
 
 def validate_som_transfer_fractions(
     f_active_to_slow: float, f_slow_to_passive: float,
+    cwd_humification_eff: float,
 ) -> None:
-    """Fail-early validation for the SOM cascade's inter-pool humification
-    fractions (dispatch-hardening discipline: a plain Python
-    ``if ... raise ValueError`` on the STATIC value, matching
-    ``carbon_cycle._freeze_modifier``'s ``som_freeze_width_K > 0`` guard --
-    NOT a traced ``jnp`` check).
+    """Fail-early validation for the SOM cascade's humification fractions
+    (dispatch-hardening discipline: a plain Python ``if ... raise ValueError``
+    on the STATIC value, matching ``carbon_cycle._freeze_modifier``'s
+    ``som_freeze_width_K > 0`` guard -- NOT a traced ``jnp`` check).
 
-    The ``__param_spec__`` bounds above (0.1-0.5) only constrain the
+    Covers the two inter-pool cascade fractions AND the coarse-woody-debris
+    humification efficiency ``cwd_humification_eff`` -- all three are
+    "fraction of a decomposition/turnover flux routed onward, remainder
+    respires" quantities that MUST lie in [0, 1].
+
+    The ``__param_spec__`` bounds above (0.1-0.5 / 0.05-0.6) only constrain the
     TRAINING search range and are never enforced at runtime, so a direct
-    ``CarbonConfig(f_active_to_slow=1.5)`` construction (or an out-of-range
-    float threaded straight into the spin-up solver) bypasses them entirely.
-    An out-of-[0, 1] transfer fraction breaks the cascade's "carbon into a
-    pool is positive" sign convention (``carbon_cycle.step_carbon_differland``):
-    the pool's OWN heterotrophic respiration ``(1 - f) * D_X`` goes NEGATIVE
-    for ``f > 1``, and a downstream transfer INPUT goes negative for ``f < 0``.
+    ``CarbonConfig(f_active_to_slow=1.5)`` / ``CarbonConfig(cwd_humification_eff=
+    1.5)`` construction (or an out-of-range float threaded straight into the
+    spin-up solver) bypasses them entirely.  An out-of-[0, 1] fraction breaks
+    the cascade's "carbon into a pool is positive" sign convention
+    (``carbon_cycle.step_carbon_differland``): a pool's OWN heterotrophic
+    respiration ``(1 - f) * D_X`` goes NEGATIVE for ``f > 1`` and a downstream
+    transfer INPUT goes negative for ``f < 0``; likewise the CWD split
+    ``wood_to_som = cwd_humification_eff * wood_litter`` /
+    ``R_het_cwd = wood_litter - wood_to_som`` gives a negative respiration
+    (creates carbon) for ``eff > 1`` and a negative SOM input (destroys carbon)
+    for ``eff < 0``.
 
     Lives here in ``config`` (the same import-cycle-free leaf module as
     :func:`som_total`) so every public entry point that consumes these
@@ -251,6 +271,13 @@ def validate_som_transfer_fractions(
             "f_slow_to_passive must be in [0, 1] (the fraction of "
             "slow-SOM decomposition humified onward to the passive pool), "
             f"got {f_slow_to_passive!r}."
+        )
+    if not (0.0 <= cwd_humification_eff <= 1.0):
+        raise ValueError(
+            "cwd_humification_eff must be in [0, 1] (the fraction of "
+            "coarse-woody-debris turnover humified to stable SOM; the "
+            "remainder respires to the atmosphere), "
+            f"got {cwd_humification_eff!r}."
         )
 
 

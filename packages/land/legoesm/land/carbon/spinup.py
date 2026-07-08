@@ -155,7 +155,8 @@ def analytic_slow_pool_equilibrium(
     # discipline): this function is a public entry point called DIRECTLY by
     # ``run_lmip.py`` (not only via run_semi_analytic_spinup), so it cannot
     # rely on the step-level guard in carbon_cycle.step_carbon_differland.
-    validate_som_transfer_fractions(f_active_to_slow, f_slow_to_passive)
+    validate_som_transfer_fractions(
+        f_active_to_slow, f_slow_to_passive, cwd_humification_eff)
     C_wood_eq = jnp.where(
         fluxes.wood_litter > eps,
         carbon_state.C_wood * fluxes.a_wood / jnp.maximum(fluxes.wood_litter, eps),
@@ -327,7 +328,8 @@ def run_semi_analytic_spinup(
         raise ValueError(
             f"run_semi_analytic_spinup: steps_per_year must be >= 1, got "
             f"{steps_per_year}.")
-    validate_som_transfer_fractions(f_active_to_slow, f_slow_to_passive)
+    validate_som_transfer_fractions(
+        f_active_to_slow, f_slow_to_passive, cwd_humification_eff)
     dt_days = dt / _SECS_PER_DAY
 
     def _inner_step(carry, step_idx):

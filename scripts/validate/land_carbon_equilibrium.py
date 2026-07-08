@@ -108,6 +108,17 @@ def _is_woody(pft: str) -> bool:
     return not any(tag in pft for tag in ("grass", "crop"))
 
 
+def _is_evergreen(pft: str) -> bool:
+    """Evergreen PFTs (continuous leaf turnover) vs deciduous/grass/crop.
+
+    The CLM5 PFT names encode the leaf habit (``*_evergreen_*`` vs
+    ``*_deciduous_*``); mirrors ``global_init._is_evergreen`` so the per-pixel
+    validator selects the SAME continuous-phenology branch the archetype IC map
+    uses for tropical/needleleaf-evergreen PFTs.
+    """
+    return "evergreen" in pft
+
+
 def _biome_carbon_init(biome: str, woody: bool, LCMA: float) -> dict:
     """Region-realistic initial carbon pools [gC/m2] for one biome.
 
@@ -157,6 +168,7 @@ def build_pixel_config(pft: str, texture: str, freeze_thaw: bool,
     woody = _is_woody(pft)
     carbon = CarbonConfig(
         scheme="differland", LCMA=row["LCMA"], woody=woody,
+        evergreen=_is_evergreen(pft),
         **_biome_carbon_init(biome, woody, row["LCMA"]),
     )
     return MultiLayerLandConfig(

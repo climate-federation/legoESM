@@ -35,6 +35,7 @@ from legoesm.land.carbon.carbon_cycle import (
     step_carbon_differland,
     _GC_TO_KG_CO2,
     _SPD,
+    _DAYS_PER_YEAR,
     _temperate_modifier,
     _freeze_modifier,
     _som_decomp_modifier,
@@ -232,6 +233,41 @@ class TestPhenology(unittest.TestCase):
         self.assertTrue(jnp.all(jnp.isfinite(lrf)))
         self.assertTrue(jnp.all(jnp.isfinite(lff)))
 
+    def test_evergreen_phenology_is_continuous(self):
+        """Evergreen leaf-fall is a steady, near-constant per-day rate all year
+        (no Gaussian dormant-season drop to ~0), unlike the deciduous pulse; its
+        seasonal amplitude is far smaller than the deciduous branch's."""
+        lat = jnp.array([0.7])  # NH mid-latitude
+        doys = jnp.arange(0, 365, 5.0)
+        ever = _default_config(evergreen=True)
+        deci = _default_config(evergreen=False)
+        lff_ever = jnp.array([compute_phenology(d, lat, ever)[1][0] for d in doys])
+        lff_deci = jnp.array([compute_phenology(d, lat, deci)[1][0] for d in doys])
+        # Evergreen sheds every day (canopy never fully stops) and is flat in doy.
+        self.assertTrue(jnp.all(lff_ever > 0.0), "evergreen leaf-fall hit zero")
+        amp_ever = float(lff_ever.max() - lff_ever.min())
+        amp_deci = float(lff_deci.max() - lff_deci.min())
+        self.assertLess(amp_ever, 1e-9, "evergreen leaf-fall not flat in doy")
+        # Far smaller seasonal amplitude than the deciduous Gaussian pulse.
+        self.assertGreater(amp_deci, 1e-3)          # deciduous pulse is real
+        self.assertLess(amp_ever, 0.01 * amp_deci)  # evergreen << deciduous
+        # The steady rate is 1 / (leaf_lifespan * year): continuous turnover.
+        expected = 1.0 / (ever.leaf_lifespan * _DAYS_PER_YEAR)
+        npt.assert_allclose(lff_ever, expected, rtol=1e-6)
+        # Deciduous dormant season drops BELOW the evergreen steady rate.
+        self.assertLess(float(lff_deci.min()), float(lff_ever.min()))
+
+    def test_evergreen_labile_release_is_steady(self):
+        """Evergreen labile release is also continuous (feeds the steady
+        regrowth) at 1 / (lab_lifespan * year)."""
+        lat = jnp.array([0.7])
+        doys = jnp.arange(0, 365, 5.0)
+        ever = _default_config(evergreen=True)
+        lrf_ever = jnp.array([compute_phenology(d, lat, ever)[0][0] for d in doys])
+        self.assertTrue(jnp.all(lrf_ever > 0.0))
+        expected = 1.0 / (ever.lab_lifespan * _DAYS_PER_YEAR)
+        npt.assert_allclose(lrf_ever, expected, rtol=1e-6)
+
 
 # ===================================================================
 # Decomposition
@@ -402,6 +438,23 @@ class TestSomCascade(unittest.TestCase):
             npt.assert_allclose(dC, expected, rtol=1e-9, atol=1e-9,
                                 err_msg=f"multipool column not closed (sw={sw})")
 
+    def test_evergreen_column_conserves(self):
+        """The EVERGREEN phenology branch conserves carbon exactly: it only
+        changes the (lrf, lff) turnover rates, and the pool update routes
+        lab_release C_lab->C_fol and leaf_litter C_fol->C_lit either way, so the
+        8-pool closure sum(dC) == -NEE*dt still holds to machine precision."""
+        for sw in (0.0, 400.0):
+            cfg = _default_config(scheme="differland", evergreen=True)
+            state = _make_carbon_state(shape=(1,))
+            new, flux, _d = step_carbon_differland(
+                state, jnp.full(1, sw), jnp.full(1, 290.0), jnp.full(1, 400.0),
+                jnp.full(1, 0.8), jnp.full(1, 0.7), 180.0, jnp.full(1, 3e-5),
+                cfg, 86400.0, return_diagnostics=True)
+            dC = sum(getattr(new, f) - getattr(state, f) for f in state._fields)
+            expected = -(flux / _GC_TO_KG_CO2) * 86400.0
+            npt.assert_allclose(dC, expected, rtol=1e-9, atol=1e-9,
+                                err_msg=f"evergreen column not closed (sw={sw})")
+
 
 # ===================================================================
 # SOM transfer-fraction validation (fail-early on out-of-[0,1] config)
@@ -443,10 +496,24 @@ class TestSomTransferFractionValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._call(f_slow_to_passive=-0.1)
 
+    def test_cwd_humification_eff_above_one_raises(self):
+        """cwd_humification_eff > 1 makes R_het_cwd = wood_litter - eff*wood_litter
+        negative (the CWD path would create carbon)."""
+        with self.assertRaises(ValueError):
+            self._call(cwd_humification_eff=1.5)
+
+    def test_cwd_humification_eff_negative_raises(self):
+        """cwd_humification_eff < 0 makes wood_to_som negative (destroys carbon
+        in the wood->SOM transfer)."""
+        with self.assertRaises(ValueError):
+            self._call(cwd_humification_eff=-0.1)
+
     def test_boundary_fractions_do_not_raise(self):
-        """0.0 and 1.0 are valid (inclusive) bounds."""
-        self._call(f_active_to_slow=0.0, f_slow_to_passive=1.0)
-        self._call(f_active_to_slow=1.0, f_slow_to_passive=0.0)
+        """0.0 and 1.0 are valid (inclusive) bounds for all three fractions."""
+        self._call(f_active_to_slow=0.0, f_slow_to_passive=1.0,
+                   cwd_humification_eff=0.0)
+        self._call(f_active_to_slow=1.0, f_slow_to_passive=0.0,
+                   cwd_humification_eff=1.0)
 
 
 # ===================================================================

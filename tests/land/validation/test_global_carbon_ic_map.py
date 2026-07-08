@@ -141,9 +141,11 @@ def test_realism_ranges_wellformed():
 # --- shared per-group construction (factored out of equilibrate_archetypes) ---
 
 def _tiny_table():
-    # Two woody (PFT 4, 7) + one herbaceous (PFT 13) archetype with mixed soils
-    # so the woody archetypes split by texture and the herbaceous forms its own
-    # group -> exercises the (is_woody, soil_class) grouping.
+    # Two woody (PFT 4 evergreen, PFT 7 deciduous) + one herbaceous (PFT 13)
+    # archetype with mixed soils so the woody archetypes split by texture and
+    # the herbaceous forms its own group -> exercises the
+    # (is_woody, is_evergreen, soil_class) grouping (the three archetypes land
+    # in three distinct groups regardless of which keys do the separating).
     return ArchetypeTable(
         pft_id=np.array([4, 7, 13]),
         mat_k=np.array([298.0, 283.0, 288.0]),
@@ -157,7 +159,8 @@ def _tiny_table():
 def test_iter_archetype_batches_groups_cover_all_archetypes_once():
     tab = _tiny_table()
     batches = iter_archetype_batches(tab, n_layers=6, soil_depth=2.0, dt=7200.0)
-    # 3 distinct (woody, soil) keys -> 3 groups; union of g_idx == all archetypes.
+    # 3 distinct (woody, evergreen, soil) keys -> 3 groups; union of g_idx == all
+    # archetypes.
     assert len(batches) == 3
     covered = np.concatenate([np.asarray(b.g_idx) for b in batches])
     np.testing.assert_array_equal(np.sort(covered), np.arange(3))

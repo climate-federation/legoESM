@@ -134,6 +134,24 @@ def compute_phenology(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Labile-release and leaf-fall fractions [day^-1].
 
+    Two leaf-habit modes, selected by the STATIC ``config.evergreen`` flag (a
+    Python ``if`` on a static bool -- the repo's feature-gating convention, NOT
+    a traced ``jnp.where`` that would evaluate both branches):
+
+    * DECIDUOUS (``evergreen=False``, default): the DALEC990 Gaussian seasonal
+      forcing -- labile release peaks near ``Bday``, leaf fall near ``Fday``,
+      the canopy dropping toward ~0 LAI between.
+    * EVERGREEN (``evergreen=True``): near-CONTINUOUS turnover -- a steady,
+      season-independent leaf-fall fraction ``1 / (leaf_lifespan * yr)`` and a
+      steady labile release ``1 / (lab_lifespan * yr)``, so the canopy sheds
+      and replaces a small constant fraction each day and never defoliates.
+      Correct for broadleaf/needleleaf evergreen PFTs.
+
+    Only the ``(lrf, lff)`` RATES differ between modes; carbon conservation is
+    identical -- ``step_carbon_differland`` routes ``lab_release`` C_lab->C_fol
+    and ``leaf_litter`` C_fol->C_lit exactly regardless of the rate values, and
+    ``_effective_rate`` clips any rate into [0, 1) so no pool is over-drained.
+
     Parameters
     ----------
     doy  : Day of year [0-365].
@@ -145,6 +163,26 @@ def compute_phenology(
     lrf : Labile release fraction [day^-1].
     lff : Leaf fall fraction [day^-1].
     """
+    if config.evergreen:
+        # Evergreen (continuous) phenology: shed + replace a small constant
+        # fraction of the canopy every day instead of the deciduous Bday/Fday
+        # pulse.  Leaf residence time == leaf_lifespan years, so the steady
+        # per-day leaf-fall fraction is 1 / (leaf_lifespan * days_per_year); the
+        # labile release is likewise steady (1 / (lab_lifespan * days_per_year))
+        # to feed the continuous regrowth.  Both are CONSTANT in doy/lat, use
+        # the SAME [day^-1] convention as the deciduous branch, and broadcast to
+        # lat.shape to match its output shape.  (leaf_lifespan / lab_lifespan
+        # are years and strictly positive by construction -- the deciduous
+        # branch's jnp.log(lifespan) below likewise assumes positivity.)
+        lrf_val = 1.0 / (config.lab_lifespan * _DAYS_PER_YEAR)
+        lff_val = 1.0 / (config.leaf_lifespan * _DAYS_PER_YEAR)
+        lrf = jnp.full(lat.shape, lrf_val, dtype=lat.dtype)
+        lff = jnp.full(lat.shape, lff_val, dtype=lat.dtype)
+        return lrf, lff
+
+    # Deciduous (default): DALEC990 Gaussian seasonal forcing.  Byte-identical
+    # to the pre-evergreen implementation (the evergreen early-return above
+    # leaves every line below untouched).
     sf = _DAYS_PER_YEAR / jnp.pi
     inv_sqrt_pi = 2.0 / jnp.sqrt(jnp.pi)
     sqrt2_half = jnp.sqrt(2.0) / 2.0
@@ -345,7 +383,8 @@ def step_carbon_differland(
     # discipline; see config.validate_som_transfer_fractions for why this
     # cannot rely on the __param_spec__ training bounds alone).
     validate_som_transfer_fractions(
-        config.f_active_to_slow, config.f_slow_to_passive)
+        config.f_active_to_slow, config.f_slow_to_passive,
+        config.cwd_humification_eff)
     dt_days = dt / _SPD
 
     # LAI from foliar carbon

@@ -147,6 +147,51 @@ def test_absent_pft_contributes_zero_and_pools_nonneg():
 
 
 # ---------------------------------------------------------------------------
+# Per-PFT phenology grouping (Phase B): evergreen vs deciduous leaf habit is a
+# third archetype-group key so tropical/needleleaf-evergreen PFTs equilibrate
+# with continuous phenology.
+# ---------------------------------------------------------------------------
+def test_is_evergreen_classifies_leaf_habit():
+    from legoesm.land.carbon.global_init import _is_evergreen
+    assert _is_evergreen("broadleaf_evergreen_tropical") is True
+    assert _is_evergreen("needleleaf_evergreen_boreal") is True
+    assert _is_evergreen("broadleaf_deciduous_temperate") is False
+    assert _is_evergreen("needleleaf_deciduous_boreal") is False
+    assert _is_evergreen("c3_grass") is False
+
+
+def test_iter_archetype_batches_splits_evergreen_from_deciduous():
+    """Two WOODY archetypes on the SAME soil differing only in leaf habit
+    (broadleaf_evergreen_tropical=pft 4 vs broadleaf_deciduous_temperate=pft 7)
+    must land in SEPARATE (woody, evergreen, soil) groups, and the evergreen
+    group's config must carry evergreen=True.  No archetype is dropped/duped."""
+    from legoesm.land.carbon.global_init import iter_archetype_batches
+    table = ArchetypeTable(
+        pft_id=np.array([4, 7]),
+        mat_k=np.array([298.0, 283.0]),
+        map_yr=np.array([2000.0, 1000.0]),
+        t_seasonal_amp_k=np.array([2.0, 12.0]),
+        aridity=np.array([1.0, 1.0]),
+        sw_mean_w=np.array([220.0, 200.0]),
+        soil_class=np.array(["loam", "loam"], dtype=object),
+    )
+    batches = iter_archetype_batches(
+        table, n_layers=6, soil_depth=2.0, dt=7200.0)
+    # Leaf habit splits them into two distinct groups.
+    assert len(batches) == 2
+    # Every archetype covered exactly once (no drop / duplicate).
+    covered = np.concatenate([np.asarray(b.g_idx) for b in batches])
+    npt.assert_array_equal(np.sort(covered), np.array([0, 1]))
+    # Map each single-member batch to its PFT and check the evergreen flag.
+    by_pft = {int(table.pft_id[np.asarray(b.g_idx)[0]]): b for b in batches}
+    assert by_pft[4].config.carbon.evergreen is True   # evergreen tropical
+    assert by_pft[7].config.carbon.evergreen is False  # deciduous temperate
+    # Both are woody, so woodiness alone would NOT have separated them.
+    assert by_pft[4].config.carbon.woody is True
+    assert by_pft[7].config.carbon.woody is True
+
+
+# ---------------------------------------------------------------------------
 # Integration gate for Tasks 2-5: features -> archetypes -> equilibrate -> map
 # on a synthetic world (no data files).  Compute-node scale (JIT-compiles the
 # coupled land+carbon model) -- run via the sbatch/srun wrapper, not login node.

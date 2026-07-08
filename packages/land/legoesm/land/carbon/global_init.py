@@ -9,7 +9,7 @@ Two offline stages, both run ONCE (never inside a JAX-traced model step):
 * Stage B -- :func:`equilibrate_archetypes`: spin EACH archetype to a verified
   soil-carbon equilibrium with the shared semi-analytic driver
   (:func:`legoesm.land.carbon.spinup.run_semi_analytic_spinup`), batching
-  archetypes that share ``(is_woody, soil_class)`` into ONE vectorised
+  archetypes that share ``(is_woody, is_evergreen, soil_class)`` into ONE vectorised
   ``step_multilayer_land`` column-block (few JAX compiles, not one per
   archetype).  The per-group construction (:func:`iter_archetype_batches`) and
   the coupled step (:func:`make_archetype_step_fn`) are factored into shared
@@ -85,6 +85,19 @@ _HERBACEOUS_TAGS = ("grass", "crop")
 def _is_woody(pft_name: str) -> bool:
     """True for woody PFTs (trees/shrubs); False for grasses/crops."""
     return not any(tag in pft_name for tag in _HERBACEOUS_TAGS)
+
+
+def _is_evergreen(pft_name: str) -> bool:
+    """True for evergreen PFTs (continuous leaf turnover); False otherwise.
+
+    The CLM5_PFT_NAMES strings encode the leaf habit
+    (``needleleaf_evergreen_boreal`` / ``broadleaf_evergreen_tropical`` vs the
+    ``*_deciduous_*`` / grass / crop names), so a substring match cleanly
+    separates evergreen from deciduous/herbaceous PFTs (mirrors ``_is_woody``).
+    Selects the continuous-turnover branch of
+    ``carbon.carbon_cycle.compute_phenology`` for that archetype's config.
+    """
+    return "evergreen" in pft_name
 
 
 class ArchetypeTable(NamedTuple):
@@ -267,7 +280,7 @@ def dropped_cover_fraction(pft_weights, land_mask, *, w_min=_W_MIN_DEFAULT):
 
 
 class ArchetypeBatch(NamedTuple):
-    """One ``(is_woody, soil_class)`` GROUP's shared coupled-step construction.
+    """One ``(is_woody, is_evergreen, soil_class)`` GROUP's shared coupled-step construction.
 
     Produced by :func:`iter_archetype_batches` and consumed BOTH by
     :func:`equilibrate_archetypes` and the drift validator
@@ -283,18 +296,19 @@ class ArchetypeBatch(NamedTuple):
 
 
 def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt):
-    """Build the per-``(is_woody, soil_class)`` GROUP construction shared by the
-    archetype equilibration (:func:`equilibrate_archetypes`) and the drift
-    validator (``scripts/validate/global_carbon_ic_map.py``).
+    """Build the per-``(is_woody, is_evergreen, soil_class)`` GROUP construction
+    shared by the archetype equilibration (:func:`equilibrate_archetypes`) and
+    the drift validator (``scripts/validate/global_carbon_ic_map.py``).
 
     Both must run the IDENTICAL coupled land+carbon step from a given IC, so
     the ``MultiLayerLandConfig``, the per-column ``LandSurfaceParams`` (CLM5 PFT
     physiology), and the ``vmap``-batched climatological ``forcing_fn`` are
     built ONCE here rather than copied into each caller.  Archetypes are grouped
-    by ``(is_woody, soil_class)`` -- the only two config knobs that must be
-    scalar per group (the ``carbon.woody`` flag and the soil hydraulics) -- so
-    each group is one vectorised ``step_multilayer_land`` column-block; the
-    per-archetype PFT physiology and climate ride along as per-column arrays.
+    by ``(is_woody, is_evergreen, soil_class)`` -- the config knobs that must be
+    scalar per group (the ``carbon.woody`` + ``carbon.evergreen`` flags and the
+    soil hydraulics) -- so each group is one vectorised ``step_multilayer_land``
+    column-block; the per-archetype PFT physiology and climate ride along as
+    per-column arrays.
 
     Parameters
     ----------
@@ -363,15 +377,21 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt):
                 lambda x: jnp.squeeze(x, axis=1) if x.ndim >= 2 else x, batched)
         return forcing_fn
 
-    # Group archetypes by (woody, soil_class) -> a shared scalar config,
-    # preserving table order within each group.
+    # Group archetypes by (woody, evergreen, soil_class) -> a shared scalar
+    # config, preserving table order within each group.  The leaf-habit split
+    # (evergreen vs deciduous) is a third key so tropical/needleleaf-EVERGREEN
+    # archetypes equilibrate with continuous phenology while deciduous ones keep
+    # the DALEC Gaussian pulse -- carbon.evergreen, like carbon.woody, is a
+    # scalar per group.  (Herbaceous PFTs are never evergreen, so this adds at
+    # most one extra woody group per soil texture, not a full doubling.)
     groups: dict = {}
     for a in range(n_arch):
-        key = (_is_woody(CLM5_PFT_NAMES[pft_id[a]]), str(soil_class[a]))
+        pft_name = CLM5_PFT_NAMES[pft_id[a]]
+        key = (_is_woody(pft_name), _is_evergreen(pft_name), str(soil_class[a]))
         groups.setdefault(key, []).append(a)
 
     batches: list[ArchetypeBatch] = []
-    for (group_woody, soil), members in groups.items():
+    for (group_woody, group_evergreen, soil), members in groups.items():
         g_idx = np.asarray(members, int)
         config = MultiLayerLandConfig(
             bulk_scheme="most",
@@ -384,6 +404,7 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt):
             richards=RichardsConfig(),
             carbon=CarbonConfig(
                 scheme="differland", woody=group_woody,
+                evergreen=group_evergreen,
                 C_lab_init=_C_LAB_SEED, C_fol_init=_C_FOL_SEED,
                 C_root_init=_C_ROOT_SEED, C_wood_init=_C_WOOD_SEED,
                 C_lit_init=_C_LIT_SEED, C_som_init=_C_SOM_SEED),
@@ -476,14 +497,17 @@ def equilibrate_archetypes(
 
     Runs the shared semi-analytic spin-up
     (:func:`legoesm.land.carbon.spinup.run_semi_analytic_spinup`) once per
-    ``(is_woody, soil_class)`` GROUP, batching that group's archetypes into a
-    single vectorised ``step_multilayer_land`` column-block.  There are only a
-    few such groups (<= ~2 x n_soil_textures), so the whole global archetype
-    table costs a handful of JAX compiles rather than one per archetype.
+    ``(is_woody, is_evergreen, soil_class)`` GROUP, batching that group's
+    archetypes into a single vectorised ``step_multilayer_land`` column-block.
+    There are only a few such groups (<= ~3 x n_soil_textures -- woody-evergreen,
+    woody-deciduous, and herbaceous, which is never evergreen), so the whole
+    global archetype table costs a handful of JAX compiles rather than one per
+    archetype.
 
     Grouping rationale: ``MultiLayerLandConfig`` sub-configs (soil hydraulics,
-    the ``carbon.woody`` flag) are SCALARS, so archetypes that share both the
-    soil texture and the woody/herbaceous split can share one config.  Their
+    the ``carbon.woody`` + ``carbon.evergreen`` flags) are SCALARS, so
+    archetypes that share the soil texture, the woody/herbaceous split, AND the
+    evergreen/deciduous leaf habit can share one config.  Their
     PER-ARCHETYPE PFT physiology (``Vc_max25``, ``LCMA``, ``g1``,
     ``root_depth``, ``theta_wp``, ``theta_fc``, ``albedo_veg``, ``emissivity``,
     ``z0`` -- exactly the CLM5 PFT table columns) is supplied as per-column
