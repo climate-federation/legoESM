@@ -92,7 +92,15 @@ EC_SITE_PHYSICS: dict[str, dict[str, float]] = {
     "DE-Obe": {"z_ref": 30.0, "root_depth": 1.0},                     # shallow montane ENF
     "US-Ton": {"z_ref": 23.5, "root_depth": 5.0, "soil_depth_m": 10.0},  # phreatophyte oak
     "US-Var": {"z_ref": 2.0,  "root_depth": 1.0},                     # shallow annual grass
+    "DE-Hai": {"z_ref": 42.0, "root_depth": 2.0},                     # humid deciduous (Hainich)
     "AU-How": {"z_ref": 23.0, "root_depth": 5.0, "soil_depth_m": 10.0},  # phreatophyte savanna
+    # GF-Guy (Guyaflux, Paracou): tropical wet broadleaf rainforest, 35 m canopy,
+    # 55 m flux tower (Bonal et al. 2008; no BADM ReferenceHeight file).  Deep-
+    # rooted (dry-season deep-water uptake) but rarely water-stressed.
+    "GF-Guy": {"z_ref": 55.0, "root_depth": 3.0},
+    # AU-Tum (Tumbarumba): temperate wet-sclerophyll eucalypt forest, 70 m
+    # OzFlux tower (Leuning et al. 2005; no BADM ReferenceHeight file).
+    "AU-Tum": {"z_ref": 70.0, "root_depth": 3.0},
 }
 # Generic fallbacks for a site not in the table (matches the model/CLI defaults).
 _EC_SITE_DEFAULTS = {"z_ref": 10.0, "root_depth": 1.0, "soil_depth_m": 0.0}

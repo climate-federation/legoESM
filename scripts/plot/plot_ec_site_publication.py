@@ -1,19 +1,21 @@
 """Publication figures for the offline eddy-covariance site validation.
 
-Reads the per-site NetCDFs written by scripts/tmp/_diag_canopy_run.py and makes
+Reads the per-site NetCDFs written by scripts/run/run_ec_site_evaluation.py (the
+checked-in example set lives in scripts/validate/ec_site_example_data/) and makes
 three figures:
 
-  *_energy.png    rows = sites; friction velocity and the turbulent energy fluxes
-                  (sensible + latent heat) across the mean diurnal and seasonal
-                  cycles.
+  *_energy.png    rows = sites; the latent and sensible heat fluxes across the
+                  mean summer daily cycle and the seasonal cycle.
   *_carbon.png    rows = sites; gross primary productivity, the latent-heat
                   partition into transpiration and soil evaporation, and the
                   soil-moisture time series at several depths.
-  *_summary.png   pooled model-observation scatter and year-to-year means for
-                  latent heat, sensible heat and gross primary productivity.
+  *_summary.png   pooled model-observation scatter (top) and per-site year-to-year
+                  means (bottom, one panel per site on its own year axis).
 
 Usage:
     python scripts/plot/plot_ec_site_publication.py <val_dir> <out_prefix> [corr_json]
+
+See docs/land/ec_site_evaluation_runbook.md.
 """
 from __future__ import annotations
 
@@ -32,18 +34,18 @@ VAL = sys.argv[1]
 OUT = sys.argv[2]
 CORR = json.load(open(sys.argv[3])) if len(sys.argv) > 3 and os.path.exists(sys.argv[3]) else {}
 
-# Sites, ordered from tall wet forest to short dry grassland.  The second entry
-# is kept only for internal ordering; figures label rows by site ID alone.
-SITES = ["US-MMS", "DE-Obe", "US-Ton", "US-Var"]
+# Sites spanning climate regimes: mesic temperate broadleaf forest (US-MMS),
+# montane needleleaf forest (DE-Obe), Mediterranean oak savanna (US-Ton), and
+# humid temperate deciduous forest (DE-Hai).  Figures label rows by site ID alone.
+SITES = ["US-MMS", "DE-Obe", "US-Ton", "DE-Hai"]
 
 # Observed shallow soil-moisture sensor depth [cm], site BADM metadata
-# (SWC_F_MDS_1): US-MMS 15, DE-Obe 10, AU-How 10; US-Var has no registered depth
-# (~2 cm per site reports).
-SWC_SENSOR_CM = {"US-MMS": 15.0, "DE-Obe": 10.0, "US-Ton": 2.0, "US-Var": 2.0}
+# (SWC_F_MDS_1): US-MMS 15, DE-Obe 10, US-Ton 2, DE-Hai ~8 (Hainich).
+SWC_SENSOR_CM = {"US-MMS": 15.0, "DE-Obe": 10.0, "US-Ton": 2.0, "DE-Hai": 8.0}
 
 C_LE = "#D55E00"; C_H = "#0072B2"; C_UST = "#6A51A3"; C_GPP = "#009E73"
 C_CAN = "#009E73"; C_SOIL = "#E69F00"; C_OBS = "0.25"
-PFT_COL = {"US-MMS": "#009E73", "DE-Obe": "#0072B2", "US-Ton": "#D55E00", "US-Var": "#E69F00"}
+PFT_COL = {"US-MMS": "#009E73", "DE-Obe": "#0072B2", "US-Ton": "#D55E00", "DE-Hai": "#CC79A7"}
 MONTHS = list("JFMAMJJASOND")
 
 plt.rcParams.update({"font.size": 9.5, "axes.linewidth": 0.7, "figure.dpi": 140,
@@ -146,46 +148,23 @@ def _hour_axis(a, bottom):
 # Figure 1: friction velocity + turbulent energy fluxes
 # ---------------------------------------------------------------------------
 def fig_energy():
-    fig, ax = plt.subplots(len(SITES), 4, figsize=(14, 11))
+    fig, ax = plt.subplots(len(SITES), 2, figsize=(8.5, 11))
     for r, site in enumerate(SITES):
         ds = _load(site)
         if ds is None:
-            for c in range(4): ax[r, c].set_visible(False)
+            for c in range(2): ax[r, c].set_visible(False)
             continue
         dt = float(ds.attrs["dt_s"]); v = _valid(ds)
         t = pd.DatetimeIndex(ds.time.values); jja = np.isin(t.month.values, [6, 7, 8])
         bot = r == len(SITES) - 1
-        um, uo = np.asarray(ds.ustar_mod), np.asarray(ds.ustar_obs)
         hm, ho, ho_c = np.asarray(ds.h_mod), _obs_h(ds), _obs_h_corr(ds)
         lm, lo, lo_c = np.asarray(ds.le_mod), _obs_le(ds), _obs_le_corr(ds)
 
-        # col0: u* mean diurnal (JJA)
-        a = ax[r, 0]
-        a.plot(range(24), _diurnal(uo, v, t, dt, jja), "o-", color=C_OBS, ms=2.5, lw=1.2, mfc="white")
-        a.plot(range(24), _diurnal(um, v, t, dt, jja), "-", color=C_UST, lw=1.6)
-        _r2box(a, _r2(_daily(um, v, dt), _daily(uo, v, dt)))
-        a.set_ylabel("Friction velocity (m s$^{-1}$)", fontsize=8); _hour_axis(a, bot)
-        a.set_ylim(0.0, 0.8)
-        _row_label(a, site)
-        if r == 0:
-            a.legend(handles=[Line2D([], [], color=C_UST, lw=1.6, label="Model"),
-                              Line2D([], [], color=C_OBS, marker="o", ls="", mfc="white",
-                                     label="Observed")],
-                     frameon=False, fontsize=7, loc="upper right")
-
-        # col1: u* seasonal
-        a = ax[r, 1]
-        mo, mm, moo = _monthly(_daily(um, v, dt), _daily(uo, v, dt),
-                               t[::int(round(86400 / dt))][:len(_daily(um, v, dt))].month)
-        a.plot(mo, moo, "o-", color=C_OBS, ms=2.5, lw=1.2, mfc="white")
-        a.plot(mo, mm, "-", color=C_UST, lw=1.6)
-        a.set_ylabel("Friction velocity (m s$^{-1}$)", fontsize=8); _month_axis(a, bot)
-        a.set_ylim(0.0, 0.8)
-
-        # col2: sensible + latent heat, mean diurnal (JJA).  Markers = raw eddy-
+        # col0: sensible + latent heat, mean summer daily cycle.  Markers = raw eddy-
         # covariance observations; the shaded band spans up to the energy-balance-
         # closure-corrected value (the closure-uncertainty envelope).
-        a = ax[r, 2]
+        a = ax[r, 0]
+        _row_label(a, site)
         hrs = range(24)
         for om, oc, col in [(lo, lo_c, C_LE), (ho, ho_c, C_H)]:
             od, ocd = _diurnal(om, v, t, dt, jja), _diurnal(oc, v, t, dt, jja)
@@ -203,9 +182,9 @@ def fig_energy():
                                     label="Closure correction range")],
                      frameon=False, fontsize=7, loc="upper left")
 
-        # col3: sensible + latent heat, seasonal (monthly), same raw markers +
+        # col1: sensible + latent heat, seasonal (monthly), same raw markers +
         # closure-correction band.
-        a = ax[r, 3]
+        a = ax[r, 1]
         td = t[::int(round(86400 / dt))]
 
         def _mon(arr):
@@ -220,9 +199,9 @@ def fig_energy():
             mo, mm = _mon(arr); a.plot(mo, mm, "-", color=col, lw=1.6)
         a.set_ylabel("Heat flux (W m$^{-2}$)", fontsize=8); _month_axis(a, bot)
 
-        for c in range(4): ax[r, c].spines[["top", "right"]].set_visible(False)
+        for c in range(2): ax[r, c].spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
-    fig.savefig(f"{OUT}_energy.png", bbox_inches="tight", dpi=200)
+    fig.savefig(f"{OUT}_energy.png", bbox_inches="tight", dpi=300)
     print("saved", f"{OUT}_energy.png")
 
 
@@ -285,7 +264,7 @@ def fig_carbon():
 
         for c in range(3): ax[r, c].spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
-    fig.savefig(f"{OUT}_carbon.png", bbox_inches="tight", dpi=200)
+    fig.savefig(f"{OUT}_carbon.png", bbox_inches="tight", dpi=300)
     print("saved", f"{OUT}_carbon.png")
 
 
@@ -301,8 +280,12 @@ def _nse(m, o):
 
 
 def fig_summary():
-    fig = plt.figure(figsize=(13.5, 8.5))
-    gs = fig.add_gridspec(2, 3, height_ratios=[1.15, 1.0], hspace=0.33, wspace=0.28)
+    fig = plt.figure(figsize=(14, 8.8))
+    # 12-col grid so the top row holds 3 scatter panels (width 4) and the bottom
+    # row holds ONE short interannual panel PER SITE (width 3) — each with its own
+    # year axis, so sites with different coverage do not appear on a disjoint
+    # shared timeline.
+    gs = fig.add_gridspec(2, 12, height_ratios=[1.15, 1.0], hspace=0.5, wspace=2.2)
     data = {}
     for site in SITES:
         ds = _load(site)
@@ -318,7 +301,7 @@ def fig_summary():
     VARS = [("LE", "Latent heat", "W m$^{-2}$"), ("H", "Sensible heat", "W m$^{-2}$"),
             ("GPP", "GPP", "µmol m$^{-2}$ s$^{-1}$")]
     for i, (key, lab, unit) in enumerate(VARS):
-        a = fig.add_subplot(gs[0, i])
+        a = fig.add_subplot(gs[0, 4 * i:4 * i + 4])
         M, O, C = [], [], []
         for s in data:
             m, o = data[s][key]; g = np.isfinite(m) & np.isfinite(o)
@@ -346,38 +329,52 @@ def fig_summary():
         a.annotate(f"({chr(97 + i)})", xy=(0, 1.02), xycoords="axes fraction",
                    ha="left", va="bottom", fontweight="bold", fontsize=10)
         a.spines[["top", "right"]].set_visible(False)
-    yrs = sorted({int(y) for s in data for y in np.unique(data[s]["yr"])})
-    for j, (key, lab, unit) in enumerate(VARS):
-        a = fig.add_subplot(gs[1, j])
-        for s in data:
-            m, o = data[s][key]; yr = data[s]["yr"][:len(m)].astype(int)
-            oc = data[s][f"{key}_c"][:len(yr)] if key in ("LE", "H") else o[:len(yr)]
-            grp = pd.DataFrame({"m": m[:len(yr)], "o": o[:len(yr)],
-                                "oc": oc, "yr": yr}).groupby("yr")
-            df = grp.mean()
-            # Only plot an annual mean when the year has adequate valid daily
-            # coverage (>=150 days), so a sparse or corrupt observation year does
-            # not appear as a spurious annual value.
-            ok = (grp["o"].count() >= 150) & (grp["m"].count() >= 150)
-            df = df[ok.reindex(df.index).fillna(False).values]
-            xs = df.index.values.astype(int)
-            # Closure-uncertainty band between raw and corrected annual observation
-            if key in ("LE", "H"):
-                a.fill_between(xs, df.o.values, df.oc.values, color=PFT_COL[s],
-                               alpha=0.15, lw=0)
-            a.plot(xs, df.o.values, "o--", color=PFT_COL[s], ms=5, lw=1, alpha=0.7, mfc="white")
-            a.plot(xs, df.m.values, "s-", color=PFT_COL[s], ms=5, lw=1.6, label=s)
-        a.set_xlabel("Year"); a.set_ylabel(f"Annual mean {lab} ({unit})")
-        a.set_xticks(yrs); a.set_xlim(yrs[0] - 0.5, yrs[-1] + 0.5)
-        a.annotate(f"({chr(100 + j)})", xy=(0, 1.02), xycoords="axes fraction",
-                   ha="left", va="bottom", fontweight="bold", fontsize=10)
-        a.spines[["top", "right"]].set_visible(False)
+    # --- bottom row: interannual means, ONE short panel per site (own year axis) ---
+    def _annual(s, key):
+        m, o = data[s][key]; yr = data[s]["yr"][:len(m)].astype(int)
+        oc = data[s][f"{key}_c"][:len(yr)] if key in ("LE", "H") else o[:len(yr)]
+        grp = pd.DataFrame({"m": m[:len(yr)], "o": o[:len(yr)],
+                            "oc": oc, "yr": yr}).groupby("yr")
+        df = grp.mean()
+        # Keep only years with adequate valid daily coverage (>=150 days) so a
+        # sparse/corrupt year does not appear as a spurious annual value.
+        ok = (grp["o"].count() >= 150) & (grp["m"].count() >= 150)
+        return df[ok.reindex(df.index).fillna(False).values]
+
+    for j, s in enumerate(data):
+        a = fig.add_subplot(gs[1, 3 * j:3 * j + 3])
+        for key, col in [("LE", C_LE), ("H", C_H)]:      # energy fluxes, left axis
+            df = _annual(s, key); xs = df.index.values.astype(int)
+            a.fill_between(xs, df.o.values, df.oc.values, color=col, alpha=0.15, lw=0)
+            a.plot(xs, df.o.values, "o--", color=col, ms=4, lw=1, alpha=0.7, mfc="white")
+            a.plot(xs, df.m.values, "s-", color=col, ms=4, lw=1.6)
+        a2 = a.twinx()                                   # GPP on the right axis
+        dg = _annual(s, "GPP"); xg = dg.index.values.astype(int)
+        a2.plot(xg, dg.o.values, "o--", color=C_GPP, ms=4, lw=1, alpha=0.7, mfc="white")
+        a2.plot(xg, dg.m.values, "s-", color=C_GPP, ms=4, lw=1.6)
+        a2.tick_params(axis="y", labelcolor=C_GPP, labelsize=7)
+        a2.spines[["top"]].set_visible(False)
+        xs_all = _annual(s, "LE").index.values.astype(int)
+        a.set_xticks(xs_all); a.set_xlim(xs_all.min() - 0.5, xs_all.max() + 0.5)
+        a.tick_params(axis="both", labelsize=7)
+        a.set_title(s, fontsize=9.5, fontweight="bold")
+        a.set_xlabel("Year", fontsize=8)
         if j == 0:
-            a.plot([], [], "s-", color="0.35", label="Model")
-            a.plot([], [], "o--", color="0.35", mfc="white", label="Observed")
-            a.legend(frameon=False, fontsize=7.5, ncol=3, loc="best")
-    fig.tight_layout()
-    fig.savefig(f"{OUT}_summary.png", bbox_inches="tight", dpi=200)
+            a.set_ylabel("Latent, sensible heat (W m$^{-2}$)", fontsize=8)
+        if j == len(data) - 1:
+            a2.set_ylabel("GPP (µmol m$^{-2}$ s$^{-1}$)", fontsize=8, color=C_GPP)
+        a.annotate(f"({chr(100 + j)})", xy=(0, 1.10), xycoords="axes fraction",
+                   ha="left", va="bottom", fontweight="bold", fontsize=9)
+        a.spines[["top"]].set_visible(False)
+    fig.legend(handles=[
+        Line2D([], [], color=C_LE, lw=1.6, label="Latent heat"),
+        Line2D([], [], color=C_H, lw=1.6, label="Sensible heat"),
+        Line2D([], [], color=C_GPP, lw=1.6, label="GPP (right axis)"),
+        Line2D([], [], color="0.35", marker="s", ls="-", label="Model"),
+        Line2D([], [], color="0.35", marker="o", ls="--", mfc="white", label="Observed")],
+        frameon=False, fontsize=7.5, ncol=5, loc="lower center", bbox_to_anchor=(0.5, -0.01))
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
+    fig.savefig(f"{OUT}_summary.png", bbox_inches="tight", dpi=300)
     print("saved", f"{OUT}_summary.png")
 
 
