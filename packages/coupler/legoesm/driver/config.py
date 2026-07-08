@@ -775,6 +775,17 @@ class ExperimentConfig(NamedTuple):
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
+    # Top-of-atmosphere sponge (#836): a Rayleigh damping increasing toward the
+    # model lid to absorb upward-propagating gravity-/convective-wave energy.
+    # The k_BL drag above is maximal at the SURFACE, so the hydrostatic
+    # latlon-cgrid dycore otherwise has NO top sponge -> waves reflect off the
+    # rigid ~35 hPa lid (upper-level noise; blocks aggressive cloud-thinning
+    # calibration).  OFF by default (byte-identical); enabled in the reference
+    # AMIP config.  sin^2 ramp from 0 at sigma=sponge_sigma_top to
+    # sponge_coeff_per_day at the model top; folded into the existing fric_decay.
+    sponge_enabled: bool = False
+    sponge_coeff_per_day: float = 2.0   # Rayleigh damping rate at the model top [1/day]
+    sponge_sigma_top: float = 0.15      # sponge base: sigma below which damping ramps up
 
     # Held-Suarez forcing
     held_suarez_forcing: bool = False  # add HS Newtonian relaxation + Rayleigh drag
@@ -1601,6 +1612,9 @@ class ExperimentConfig(NamedTuple):
             sigma_b=amip_cfg.sigma_b,
             k_BL_max_per_day=amip_cfg.k_BL_max_per_day,
             k_free_per_day=amip_cfg.k_free_per_day,
+            sponge_enabled=getattr(amip_cfg, 'sponge_enabled', False),
+            sponge_coeff_per_day=getattr(amip_cfg, 'sponge_coeff_per_day', 2.0),
+            sponge_sigma_top=getattr(amip_cfg, 'sponge_sigma_top', 0.15),
             held_suarez_forcing=getattr(amip_cfg, 'held_suarez_forcing', False),
             physics_parameterization=getattr(
                 amip_cfg, 'physics_parameterization', 'none',
