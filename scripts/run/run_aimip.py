@@ -146,6 +146,21 @@ def _build_spectral_config(cfg: dict[str, Any]):
         for k, v in loss_kwargs.items() if k in LossConfig._fields
     })
 
+    # Rollout curriculum (aimip_rollout_curriculum: [[lead_hours, epochs],
+    # ...]): the loader must build a target at EVERY curriculum lead, so
+    # loss.multi_step_hours is forced to the sorted unique leads (equal
+    # weights; the curriculum path scores one lead per phase anyway).
+    curriculum = tuple(
+        (int(h), int(ep))
+        for h, ep in (cfg.get("aimip_rollout_curriculum") or ())
+    ) or None
+    if curriculum:
+        _leads = tuple(sorted({h for h, _ in curriculum}))
+        loss_config = loss_config._replace(
+            multi_step_hours=_leads,
+            multi_step_weights=(1.0,) * len(_leads),
+        )
+
     sfno_embed = int(cfg.get("sfno_embed_dim", 128))
     sfno_n_blocks = int(cfg.get("sfno_n_blocks", 4))
     sfno_mlp_expansion = int(cfg.get("sfno_mlp_expansion", 4))
@@ -184,6 +199,8 @@ def _build_spectral_config(cfg: dict[str, Any]):
         ) or None,
         rollout_days=int(cfg.get("aimip_rollout_days", 1)),
         rollout_hours=int(cfg.get("aimip_rollout_hours", 0)),
+        rollout_curriculum=curriculum,
+        chunk_windows=int(cfg.get("aimip_chunk_windows", 0)),
         spatial_lr_scale=float(cfg.get("aimip_spatial_lr_scale", 1.0)),
         rad_update_interval=int(cfg.get("aimip_rad_update_interval", 1)),
         loss_config=loss_config,
@@ -371,8 +388,25 @@ def _train_aimip_classical(
         f"rad={radiation}"
     )
 
+    # Training-period-mean GHG for the classical RRTMGP (CO2 matters for the
+    # CLASSICAL variant: a physical radiation scheme trained at present-day
+    # defaults sees a systematically wrong forcing for 1979-2012 samples).
+    # A per-sample transient value is unwarranted at 6-12 h forecast leads
+    # (the radiative signal of a few ppm is far below the loss floor) and
+    # the transient path already runs in the AMIP fine-tune + inference;
+    # here the STATIC mid-training-period concentration removes the mean
+    # bias at zero plumbing cost (closure constants — no retrace).
+    _ghg_mid = None
+    if radiation == "rrtmgp" and spec_cfg.windows:
+        from legoesm.training.aimip_amip_forcing import ghg_vmr_at_year
+        _years = [int(w[0]) for w in spec_cfg.windows]
+        _mid_year = int(round(sum(_years) / len(_years)))
+        _ghg_mid = {k: float(v) for k, v in ghg_vmr_at_year(_mid_year).items()}
+        logger.info(f"Classical RRTMGP GHG pinned to training-period mid-year "
+                    f"{_mid_year}: co2={_ghg_mid['co2']:.2e}")
+
     def _make_physics_fn(p, grid_):
-        return make_aimip_classical_spectral_physics(
+        built = make_aimip_classical_spectral_physics(
             p, grid_, dt,
             radiation=radiation,
             rad_update_interval_steps=rad_update_interval,
@@ -384,6 +418,30 @@ def _train_aimip_classical(
             land_mask=land_mask,
             split_rad=split_rad,
         )
+        if _ghg_mid is None:
+            return built
+        # Wrap the rad fn so every call carries the mid-period GHG unless
+        # the caller supplied its own (transient) value in ``forcing``.
+        def _with_ghg(rad_fn):
+            def _wrapped(*args, forcing=None, **kwargs):
+                fc = dict(forcing or {})
+                fc.setdefault("ghg_vmr", _ghg_mid)
+                return rad_fn(*args, forcing=fc, **kwargs)
+            return _wrapped
+        if isinstance(built, tuple):
+            non_rad_fn, rad_fn = built
+            return non_rad_fn, _with_ghg(rad_fn)
+        # Non-split combined fn: its forcing-kwarg contract is not
+        # guaranteed — leave unwrapped (rrtmgp effectively always runs
+        # split_rad; the combined path is the gray/no-gating config where
+        # GHG does not apply). Say so loudly rather than silently
+        # dropping the pinned concentration.
+        logger.warning(
+            "GHG pinning computed but NOT applied: physics fn is not "
+            "split-rad (rad_update_interval<=1?) — training runs with "
+            "the radiation scheme's default GHG."
+        )
+        return built
 
     return _train_spectral_loop(
         params, _make_physics_fn,
