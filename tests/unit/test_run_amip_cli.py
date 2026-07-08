@@ -49,6 +49,18 @@ def test_no_use_multilayer_land_overrides_yaml_default():
     assert cfg.use_multilayer_land is False
 
 
+def test_no_sponge_overrides_yaml_default():
+    """--no-sponge flips a set_defaults(True) (a --config YAML enabling the
+    #836 top sponge) back off — needed for the #847 drift-lever walk's
+    sponge-off leg against amip_production.yaml."""
+    parser = build_arg_parser()
+    parser.set_defaults(sponge_enabled=True)  # what a YAML would do
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-sponge",
+    ]), parser))
+    assert cfg.sponge_enabled is False
+
+
 def test_no_surface_tiled_overrides_yaml_default():
     """--no-surface-tiled flips a set_defaults(True) (a --config YAML enabling
     the tiled mosaic surface) back off — same MPAS/spectral escape hatch as
