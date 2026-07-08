@@ -190,8 +190,13 @@ def compute_simple_seb_fluxes(
         snow,
     )
     if land_config.snow_albedo_feedback and lat is not None:
+        # Snow-free base = the per-cell ``albedo_land`` (lp.albedo_veg soil/veg
+        # blend, or the config scalar).  WITHOUT an explicit base, compute_land_albedo
+        # falls back to the latitude-band vegetation albedo, discarding all
+        # soil-colour + vegetation structure (soil/veg albedo "not working").
         alpha = compute_land_albedo(
-            lat, snow_effective, snow_age, land_config.land_albedo)
+            lat, snow_effective, snow_age, land_config.land_albedo,
+            base_albedo=jnp.broadcast_to(jnp.asarray(albedo_land), T_surface.shape))
     else:
         alpha = jnp.broadcast_to(jnp.asarray(albedo_land), T_surface.shape)
 

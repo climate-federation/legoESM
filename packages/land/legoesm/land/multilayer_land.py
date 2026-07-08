@@ -464,9 +464,21 @@ def _step_multilayer_land_impl(
     # --- Post-step surface state for coupler ---
     T_surface_new = T_soil_new[:, 0]
 
-    if config.snow_albedo_feedback and lat is not None:
+    # Reported/coupled snow-free base is per-scheme.  The canopy scheme diagnoses
+    # a per-cell snow-free surface albedo from its OWN shortwave radiative transfer
+    # (soil-colour ALB_VIS/NIR + vegetation) in ``surface_out.albedo`` but runs no
+    # snow feedback, so blend the snow albedo on top of it here.  Without an
+    # explicit base, ``compute_land_albedo`` falls back to the latitude-band veg
+    # albedo and discards all soil/vegetation structure (``CanopyLandParams`` has
+    # no ``albedo_veg`` field, so the scalar ``albedo_land`` above is meaningless
+    # for the canopy path).  The SEB scheme already applied its own snow feedback
+    # over its per-cell base internally, so its ``surface_out.albedo`` is used
+    # directly.
+    if (config.snow_albedo_feedback and lat is not None
+            and isinstance(config.surface_scheme, TwoLeafCanopyConfig)):
         alpha_new = compute_land_albedo(
-            lat, snow_new, snow_age_new, config.land_albedo)
+            lat, snow_new, snow_age_new, config.land_albedo,
+            base_albedo=surface_out.albedo)
     else:
         alpha_new = surface_out.albedo
 
