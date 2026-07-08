@@ -17,6 +17,13 @@ Two offline stages, both run ONCE (never inside a JAX-traced model step):
   global_carbon_ic_map.py``) re-integrates the IDENTICAL step without copying
   the config / physiology / forcing build.  The heavy JAX / land-model imports
   are deferred into those functions so Stage-A callers stay numpy-only.
+
+The Stage-B equilibration has a DIFFERENTIABLE twin,
+:func:`equilibrate_archetypes_traced`, that shares the identical construction /
+step / spin-up but splices TRACED ``CarbonConfig`` SOM leaves in via
+``apply_param_overrides`` so ``jax.grad`` of the per-archetype equilibrium SOC
+w.r.t. those parameters flows end-to-end (the Stage-B v1 carbon-calibration
+forward map; ``docs/land/stageB_carbon_calibration_plan.md``).
 """
 
 from __future__ import annotations
@@ -280,7 +287,8 @@ class ArchetypeBatch(NamedTuple):
     t_init: object          # (ncol_g,) land-state initial temperature [K]
 
 
-def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt):
+def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
+                           carbon_overrides=None):
     """Build the per-``(is_woody, is_evergreen, soil_class)`` GROUP construction
     shared by the archetype equilibration (:func:`equilibrate_archetypes`) and
     the drift validator (``scripts/validate/global_carbon_ic_map.py``).
@@ -306,6 +314,19 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt):
         Soil column depth [m].
     dt : float
         Sub-daily timestep [s] (sets ``steps_per_year``).
+    carbon_overrides : dict[str, jax.Array] | None
+        Optional ``{CarbonConfig field name -> traced scalar}`` map applied to
+        EACH group's ``CarbonConfig`` via
+        :func:`legoesm.training.param_collector.apply_param_overrides` BEFORE the
+        step / spin-up is built.  ``None`` (default) is the static Stage-A/-B
+        path -- the config keeps Python-float leaves and no ``legoesm.training``
+        import happens.  A dict makes the named SOM fields (``tor_som_active`` /
+        ``tor_som_slow`` / ``tor_som_passive`` / ``f_active_to_slow`` /
+        ``f_slow_to_passive`` / ``som_freeze_floor`` / ``Q10_het_exp`` /
+        ``cwd_humification_eff`` ...) TRACED arrays that flow through the coupled
+        ``lax.scan`` spin-up, so ``jax.grad`` of the equilibrium SOC w.r.t. those
+        parameters is computable (:func:`equilibrate_archetypes_traced`).
+        ``apply_param_overrides`` raises on any field not on ``CarbonConfig``.
 
     Returns
     -------
@@ -379,6 +400,21 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt):
     batches: list[ArchetypeBatch] = []
     for (group_woody, group_evergreen, soil), members in groups.items():
         g_idx = np.asarray(members, int)
+        carbon_cfg = CarbonConfig(
+            scheme="differland", woody=group_woody,
+            evergreen=group_evergreen,
+            C_lab_init=_C_LAB_SEED, C_fol_init=_C_FOL_SEED,
+            C_root_init=_C_ROOT_SEED, C_wood_init=_C_WOOD_SEED,
+            C_lit_init=_C_LIT_SEED, C_som_init=_C_SOM_SEED)
+        if carbon_overrides:
+            # Deferred (function-scope) import: only the differentiable
+            # calibration path pulls in ``legoesm.training``; the static path
+            # stays land-only (no land->training top-level dependency).  Splice
+            # the TRACED SOM leaves into this group's config so they flow through
+            # the coupled spin-up (SegmentForcing/SCM-RCE override doctrine);
+            # apply_param_overrides raises on any unknown CarbonConfig field.
+            from legoesm.training.param_collector import apply_param_overrides
+            carbon_cfg = apply_param_overrides(carbon_cfg, carbon_overrides)
         config = MultiLayerLandConfig(
             bulk_scheme="most",
             snow_albedo_feedback=True,
@@ -388,12 +424,7 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt):
             hydraulics=SoilHydraulicsConfig(**SOIL_TEXTURE_VG[soil]),
             thermal=SoilThermalConfig(),
             richards=RichardsConfig(),
-            carbon=CarbonConfig(
-                scheme="differland", woody=group_woody,
-                evergreen=group_evergreen,
-                C_lab_init=_C_LAB_SEED, C_fol_init=_C_FOL_SEED,
-                C_root_init=_C_ROOT_SEED, C_wood_init=_C_WOOD_SEED,
-                C_lit_init=_C_LIT_SEED, C_som_init=_C_SOM_SEED),
+            carbon=carbon_cfg,
             stomata=StomataConfig(enabled=True, stomata_model="ball_berry"),
         )
         # Per-archetype PFT physiology -> per-column LandSurfaceParams.  The
@@ -470,6 +501,58 @@ def make_archetype_step_fn(config, land_params, *, dt):
     return step_fn
 
 
+def _spinup_batch(batch: ArchetypeBatch, *, n_spinup, n_verify, dt,
+                  remat=False):
+    """Run ONE archetype group's verified semi-analytic spin-up.
+
+    The per-group construction (coupled step, IC, batched forcing) already lives
+    in the shared :func:`iter_archetype_batches` / :func:`make_archetype_step_fn`
+    helpers; this wraps the single :func:`~legoesm.land.carbon.spinup.
+    run_semi_analytic_spinup` call so BOTH the static
+    :func:`equilibrate_archetypes` (numpy scatter + QC) and the differentiable
+    :func:`equilibrate_archetypes_traced` (jnp scatter, ``jax.grad``) drive the
+    byte-identical spin-up -- the transfer-fraction kwargs are read from the
+    (possibly overridden) group config in ONE place, never copy-pasted.
+
+    Parameters
+    ----------
+    batch : ArchetypeBatch
+        One group from :func:`iter_archetype_batches`.
+    n_spinup, n_verify : int
+        Transient / verification year counts.
+    dt : float
+        Sub-daily timestep [s].
+    remat : bool
+        Forwarded to :func:`~legoesm.land.carbon.spinup.run_semi_analytic_spinup`
+        -- ``True`` checkpoints the per-year body so reverse-mode AD stays within
+        a single-year memory budget (used by the traced path).
+
+    Returns
+    -------
+    (final_carbon, annual)
+        The verified-equilibrium :class:`CarbonState` ``(ncol_g,)`` and the
+        per-verify-year ``annual`` diagnostics dict.
+    """
+    # Deferred (function-scope) imports: keep Stage-A / module import numpy-only.
+    from legoesm.land.carbon.carbon_cycle import init_carbon_state
+    from legoesm.land.carbon.spinup import run_semi_analytic_spinup
+    from legoesm.land.multilayer_land import init_multilayer_land_state
+
+    ncol_g = int(np.asarray(batch.g_idx).shape[0])
+    step_fn = make_archetype_step_fn(batch.config, batch.land_params, dt=dt)
+    state0 = init_multilayer_land_state(ncol_g, batch.config, T_init=batch.t_init)
+    carbon0 = init_carbon_state((ncol_g,), batch.config.carbon)
+    _final_state, final_carbon, annual = run_semi_analytic_spinup(
+        step_fn, state0, carbon0, batch.forcing_fn,
+        n_spinup=n_spinup, n_verify=n_verify,
+        steps_per_year=batch.steps_per_year, dt=dt,
+        cwd_humification_eff=batch.config.carbon.cwd_humification_eff,
+        f_active_to_slow=batch.config.carbon.f_active_to_slow,
+        f_slow_to_passive=batch.config.carbon.f_slow_to_passive,
+        remat=remat)
+    return final_carbon, annual
+
+
 def equilibrate_archetypes(
     table: ArchetypeTable,
     *,
@@ -526,15 +609,13 @@ def equilibrate_archetypes(
         over the verify segment (a drift near 0 confirms the equilibrium).
     """
     # Deferred (function-scope) imports: keep Stage-A / module import numpy-only.
-    # The per-group construction (config / land_params / forcing) and the
-    # coupled step now live in the SHARED helpers below (also used by the drift
-    # validator), so this function only orchestrates + scatters.
+    # The per-group construction (config / land_params / forcing), the coupled
+    # step, and the per-group spin-up now live in the SHARED helpers above (also
+    # used by the drift validator + the differentiable traced variant), so this
+    # function only orchestrates + scatters.
     import jax.numpy as jnp
 
     from legoesm.land.carbon.config import CarbonState, som_total
-    from legoesm.land.carbon.carbon_cycle import init_carbon_state
-    from legoesm.land.carbon.spinup import run_semi_analytic_spinup
-    from legoesm.land.multilayer_land import init_multilayer_land_state
 
     n_arch = np.asarray(table.pft_id, int).shape[0]
     pool_fields = CarbonState._fields  # ("C_lab", ..., "C_som_passive")
@@ -548,18 +629,8 @@ def equilibrate_archetypes(
 
     for batch in batches:
         g_idx = batch.g_idx
-        ncol_g = g_idx.shape[0]
-        step_fn = make_archetype_step_fn(batch.config, batch.land_params, dt=dt)
-        state0 = init_multilayer_land_state(
-            ncol_g, batch.config, T_init=batch.t_init)
-        carbon0 = init_carbon_state((ncol_g,), batch.config.carbon)
-        _final_state, final_carbon, annual = run_semi_analytic_spinup(
-            step_fn, state0, carbon0, batch.forcing_fn,
-            n_spinup=n_spinup, n_verify=n_verify,
-            steps_per_year=batch.steps_per_year, dt=dt,
-            cwd_humification_eff=batch.config.carbon.cwd_humification_eff,
-            f_active_to_slow=batch.config.carbon.f_active_to_slow,
-            f_slow_to_passive=batch.config.carbon.f_slow_to_passive)
+        final_carbon, annual = _spinup_batch(
+            batch, n_spinup=n_spinup, n_verify=n_verify, dt=dt)
 
         # Scatter the verified equilibrium pools back to archetype order.
         for p in pool_fields:
@@ -582,6 +653,119 @@ def equilibrate_archetypes(
     equilibrium = CarbonState(
         **{p: jnp.asarray(pools_out[p]) for p in pool_fields})
     return equilibrium, qc
+
+
+def equilibrate_archetypes_traced(
+    table: ArchetypeTable,
+    carbon_overrides,
+    *,
+    n_spinup: int = _N_SPINUP_DEFAULT,
+    n_verify: int = _N_VERIFY_DEFAULT,
+    dt: float = _DT_DEFAULT,
+    n_layers: int = _N_LAYERS_DEFAULT,
+    soil_depth: float = _SOIL_DEPTH_DEFAULT,
+):
+    """DIFFERENTIABLE archetype equilibration: per-archetype equilibrium
+    :class:`CarbonState` as a function of TRACED ``CarbonConfig`` SOM leaves.
+
+    Identical physics to :func:`equilibrate_archetypes` (it shares the SAME
+    :func:`iter_archetype_batches` construction, :func:`make_archetype_step_fn`
+    coupled step, and :func:`_spinup_batch` semi-analytic driver), but the
+    ``carbon_overrides`` are spliced into every group's ``CarbonConfig`` as TRACED
+    arrays (via ``apply_param_overrides`` inside :func:`iter_archetype_batches`),
+    so the returned pools -- in particular ``som_total(state)`` -- are
+    differentiable w.r.t. the overridden SOM parameters and ``jax.grad`` /
+    ``jax.jacobian`` flows end-to-end through the coupled ``lax.scan`` spin-up +
+    the analytic slow-pool reset.  This is the Stage-B (v1) forward map: SOM
+    parameters -> per-archetype equilibrium SOC.
+
+    Differentiability contract
+    --------------------------
+    * The archetype table + cell membership are built ONCE by
+      :func:`build_archetypes` (static numpy k-means) and are NOT differentiated
+      -- only the equilibration is.
+    * ``carbon_overrides`` (``{field name -> traced scalar}``, e.g. one scheme
+      slice of ``TrainablePhysicsParams.to_overrides()['land.carbon']``) enters as
+      TRACED leaves; production keeps static Python-float leaves (pass
+      ``equilibrate_archetypes`` / ``carbon_overrides=None``).  The tunable SOM
+      fields (``tor_som_active`` / ``tor_som_slow`` / ``tor_som_passive`` /
+      ``f_active_to_slow`` / ``f_slow_to_passive`` / ``som_freeze_floor`` /
+      ``Q10_het_exp`` / ``cwd_humification_eff``) are read by
+      ``carbon_cycle.step_carbon_differland`` and the analytic reset, so the
+      gradient flows through both the transient dynamics and the slow-pool solve.
+    * Reverse-mode memory through the multi-year nested scan is bounded by
+      ``remat=True`` (``jax.checkpoint`` on the per-year spin-up body) forwarded
+      through :func:`_spinup_batch`; a short training spin-up is acceptable (the
+      fast pools + the analytic slow reset do the heavy lifting).
+    * The per-group pools are scattered into the archetype-ordered output with a
+      differentiable ``jnp`` ``.at[g_idx].set`` (static indices, traced values)
+      -- NO numpy on the traced path -- so AD is not severed.  No per-archetype
+      QC (that reduction is numpy-only and diagnostic); use
+      :func:`equilibrate_archetypes` for the QC bundle.
+
+    Override-bound contract
+    -----------------------
+    ``carbon_overrides`` MUST be within each field's physical / ``__param_spec__``
+    range -- in particular the transfer fractions ``f_active_to_slow`` /
+    ``f_slow_to_passive`` / ``cwd_humification_eff`` and the floor
+    ``som_freeze_floor`` in ``[0, 1]`` (the SOM-cascade sign convention).  The
+    per-step Python fail-early guards
+    (``carbon_cycle._freeze_modifier`` / :func:`~legoesm.land.carbon.config.
+    validate_som_transfer_fractions`) canNOT re-check a JAX leaf (a Python bool on
+    a tracer is impossible), so the bound is enforced STRUCTURALLY UPSTREAM by the
+    constraint transform: the sanctioned producer
+    ``training.param_collector.build_trainable_params(...).to_overrides()['land.carbon']``
+    maps every trainable SOM leaf through a sigmoid onto its ``(lo, hi)`` bound for
+    ALL raw inputs, so a value out of range cannot be produced.  A caller that
+    hand-crafts an UNCONSTRAINED traced override bypasses that transform and is
+    responsible for the bound itself (exactly as a direct
+    ``CarbonConfig(f_active_to_slow=<raw>)`` construction would be).
+
+    Parameters
+    ----------
+    table : ArchetypeTable
+        The Stage-A archetypes (built once; static).
+    carbon_overrides : dict[str, jax.Array]
+        ``{CarbonConfig field name -> traced scalar}`` applied to every group's
+        carbon config.  ``apply_param_overrides`` raises on an unknown field.
+    n_spinup, n_verify : int
+        Transient / verification year counts (a short ``n_spinup`` is acceptable
+        for a training forward pass).
+    dt : float
+        Sub-daily spin-up timestep [s].
+    n_layers : int
+        Soil layers.
+    soil_depth : float
+        Soil column depth [m].
+
+    Returns
+    -------
+    CarbonState
+        Per-archetype ``(n_arch,)`` equilibrium pools; ``som_total(state)`` is the
+        differentiable per-archetype SOC [gC/m2].
+    """
+    import jax.numpy as jnp
+
+    from legoesm.land.carbon.config import CarbonState
+
+    n_arch = int(np.asarray(table.pft_id, int).shape[0])
+    pool_fields = CarbonState._fields
+    batches = iter_archetype_batches(
+        table, n_layers=n_layers, soil_depth=soil_depth, dt=dt,
+        carbon_overrides=carbon_overrides)
+
+    # Differentiable archetype-ordered scatter: jnp zeros + .at[g_idx].set with
+    # STATIC indices (g_idx from the numpy-built table) and TRACED pool values.
+    pools_out = {p: jnp.zeros(n_arch) for p in pool_fields}
+    for batch in batches:
+        g_idx = jnp.asarray(np.asarray(batch.g_idx, int))
+        # remat=True: bound reverse-mode memory to a single spin-up year.
+        final_carbon, _annual = _spinup_batch(
+            batch, n_spinup=n_spinup, n_verify=n_verify, dt=dt, remat=True)
+        for p in pool_fields:
+            pools_out[p] = pools_out[p].at[g_idx].set(getattr(final_carbon, p))
+
+    return CarbonState(**pools_out)
 
 
 def map_to_grid(cell_archetype_id, cell_archetype_weight, archetype_equilibria):

@@ -251,6 +251,7 @@ def run_semi_analytic_spinup(
     cwd_humification_eff: float,
     f_active_to_slow: float,
     f_slow_to_passive: float,
+    remat: bool = False,
 ):
     """Run a verified semi-analytic soil-carbon spin-up (Xia et al. 2012, GMD).
 
@@ -296,6 +297,18 @@ def run_semi_analytic_spinup(
     f_active_to_slow, f_slow_to_passive : float
         Inter-pool humification fractions (``CarbonConfig``) that drive the
         forward-substitution active->slow->passive cascade equilibrium.
+    remat : bool
+        When True, wrap the per-year spin-up body in ``jax.checkpoint``
+        (``jax.remat``) so reverse-mode AD recomputes each year's sub-daily inner
+        scan during the backward pass instead of storing its full tape.  This
+        bounds peak reverse-mode memory to a SINGLE year (needed when
+        differentiating the equilibrium SOC w.r.t. the SOM parameters through a
+        multi-year spin-up -- see
+        ``global_init.equilibrate_archetypes_traced``).  Numerically identical to
+        ``remat=False`` (checkpointing changes only the store-vs-recompute
+        schedule, never the values); default False keeps the forward-only /
+        static callers (``equilibrate_archetypes``, the drift validator)
+        byte-for-byte unchanged.
 
     Returns
     -------
@@ -377,9 +390,14 @@ def run_semi_analytic_spinup(
             annual[pool] = getattr(carbon_end, pool)
         return (state_end, carbon_end), annual
 
+    # Optionally checkpoint the per-year body so reverse-mode AD recomputes each
+    # year's inner sub-daily scan rather than taping it (bounds peak memory to a
+    # single year); numerically identical to the un-rematted body.
+    year_step = jax.checkpoint(_year_step) if remat else _year_step
+
     # --- Phase 1: transient spin-up (fast pools + wood + stationary fluxes) ---
     (state_spun, carbon_spun), annual_spin = jax.lax.scan(
-        _year_step, (state0, carbon0), jnp.arange(n_spinup))
+        year_step, (state0, carbon0), jnp.arange(n_spinup))
 
     # --- Phase 2: analytic linear-pool equilibrium for the slow pools ---
     # Stationary mean-annual slow-pool fluxes from the final spin-up year
@@ -398,7 +416,7 @@ def run_semi_analytic_spinup(
 
     # --- Phase 3: verification segment from the analytic equilibrium ---
     (final_state, final_carbon), annual_verify = jax.lax.scan(
-        _year_step, (state_spun, carbon_eq), jnp.arange(n_verify))
+        year_step, (state_spun, carbon_eq), jnp.arange(n_verify))
     return final_state, final_carbon, annual_verify
 
 

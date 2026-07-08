@@ -242,7 +242,7 @@ class TestRunSemiAnalyticSpinup(unittest.TestCase):
     accumulation + mass-balance NEE are exactly checkable without the land
     model."""
 
-    def _run(self, ncol):
+    def _run(self, ncol, remat=False):
         # A clean model year: steps_per_year * dt == 365 days.
         steps_per_year = 4
         dt = 365.0 * 86400.0 / steps_per_year
@@ -265,7 +265,8 @@ class TestRunSemiAnalyticSpinup(unittest.TestCase):
         return run_semi_analytic_spinup(
             step_fn, state0, carbon0, forcing_fn,
             n_spinup=3, n_verify=2, steps_per_year=steps_per_year, dt=dt,
-            cwd_humification_eff=0.3, f_active_to_slow=0.3, f_slow_to_passive=0.3)
+            cwd_humification_eff=0.3, f_active_to_slow=0.3, f_slow_to_passive=0.3,
+            remat=remat)
 
     def test_analytic_reset_and_shapes(self):
         _fs, fc, annual = self._run(ncol=1)
@@ -303,6 +304,21 @@ class TestRunSemiAnalyticSpinup(unittest.TestCase):
         self.assertEqual(fc.C_som_active.shape, (3,))
         npt.assert_allclose(np.asarray(fc.C_wood), 2000.0, rtol=1e-6)
         self.assertEqual(np.asarray(annual["gpp"]).shape, (2, 3))
+
+    def test_remat_is_numerically_identical(self):
+        # The opt-in `remat` kwarg (jax.checkpoint on the per-year body) only
+        # changes the store-vs-recompute schedule for reverse-mode AD, never the
+        # forward values -- so remat=True must reproduce remat=False exactly.
+        _fs0, fc0, annual0 = self._run(ncol=2, remat=False)
+        _fs1, fc1, annual1 = self._run(ncol=2, remat=True)
+        for field in CarbonState._fields:
+            npt.assert_allclose(
+                np.asarray(getattr(fc1, field)),
+                np.asarray(getattr(fc0, field)), rtol=0, atol=0, err_msg=field)
+        for key in ("gpp", "npp", "nee_model", "C_som_active"):
+            npt.assert_allclose(
+                np.asarray(annual1[key]), np.asarray(annual0[key]),
+                rtol=0, atol=0, err_msg=key)
 
 
 class TestRunSemiAnalyticSpinupGuards(unittest.TestCase):

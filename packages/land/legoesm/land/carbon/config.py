@@ -245,6 +245,43 @@ def som_total(state: CarbonState) -> jax.Array:
     return state.C_som_active + state.C_som_slow + state.C_som_passive
 
 
+def is_concrete(*values) -> bool:
+    """True iff EVERY argument can be evaluated in a Python boolean context, so
+    the fail-early bound checks below -- :func:`validate_som_transfer_fractions`
+    and the ``som_freeze_floor`` guard in ``carbon_cycle._freeze_modifier`` -- can
+    enforce it.
+
+    A value is concrete when a Python ``bool`` accepts it: a host scalar, a NumPy
+    scalar / 0-d array, OR a materialised ``jax.Array`` outside a trace.  For all
+    of these an out-of-range value still fails LOUD (production, a direct
+    ``CarbonConfig(f_active_to_slow=1.5)``, AND a stray concrete
+    ``jnp.asarray(1.5)`` all raise) -- the fail-early guard is NOT weakened for
+    any concretely-knowable value.
+
+    A value is NOT concrete when it is a tracer, OR a concrete ``jax`` constant
+    lifted into an enclosing trace -- e.g. the ``lax.scan`` spin-up body of the
+    differentiable calibration path
+    (:func:`legoesm.land.carbon.global_init.equilibrate_archetypes_traced`): a
+    Python ``bool`` on it raises ``TracerBoolConversionError`` (an
+    ``isinstance(_, jax.core.Tracer)`` test MISSES the lifted-constant case,
+    which is why boolability is probed directly).  Such abstract values are left
+    unchecked here because a Python fail-early on a traced value is impossible by
+    construction of automatic differentiation; their bound is instead guaranteed
+    STRUCTURALLY UPSTREAM by the ``__param_spec__`` constraint transform (a
+    sigmoid maps every raw input onto ``(lo, hi)``), which is how the sanctioned
+    producer ``training.param_collector.build_trainable_params(...).to_overrides()``
+    supplies the SOM overrides -- see
+    :func:`legoesm.land.carbon.global_init.equilibrate_archetypes_traced` for the
+    override-bound contract.
+    """
+    try:
+        for v in values:
+            bool(v == v)
+    except jax.errors.TracerBoolConversionError:
+        return False
+    return True
+
+
 def validate_som_transfer_fractions(
     f_active_to_slow: float, f_slow_to_passive: float,
     cwd_humification_eff: float,
@@ -281,6 +318,14 @@ def validate_som_transfer_fractions(
     transient scan) and ``spinup.analytic_slow_pool_equilibrium`` (the
     direct ``run_lmip.py`` call site that bypasses the step-level guard).
     """
+    # Enforce fail-early only for concretely-knowable values (host scalars AND
+    # concrete arrays both raise on an out-of-range value).  Skip for abstract
+    # values -- a tracer, or a concrete constant lifted inside the lax.scan
+    # spin-up body of the differentiable-calibration path -- whose bound is
+    # guaranteed upstream by the __param_spec__ sigmoid transform and cannot be
+    # Python-checked (see :func:`is_concrete`).
+    if not is_concrete(f_active_to_slow, f_slow_to_passive, cwd_humification_eff):
+        return
     if not (0.0 <= f_active_to_slow <= 1.0):
         raise ValueError(
             "f_active_to_slow must be in [0, 1] (the fraction of "

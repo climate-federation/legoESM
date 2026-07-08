@@ -21,6 +21,7 @@ from legoesm.land.carbon.config import (
     CarbonConfig,
     CarbonDiagnostics,
     CarbonState,
+    is_concrete,
     validate_som_transfer_fractions,
 )
 
@@ -291,7 +292,13 @@ def _freeze_modifier(
     if not w > 0.0:
         raise ValueError(f"som_freeze_width_K must be > 0, got {w!r}.")
     floor = config.som_freeze_floor
-    if not 0.0 <= floor < 1.0:
+    # ``floor`` may be a sigmoid-CONSTRAINED JAX leaf in the offline
+    # differentiable carbon-calibration path
+    # (global_init.equilibrate_archetypes_traced): the bound is then guaranteed by
+    # the transform and a Python bool on it -- even a concrete array lifted inside
+    # the scan -- raises, so the fail-early check enforces on concretely-knowable
+    # values only (host scalars AND concrete arrays; see is_concrete).
+    if is_concrete(floor) and not 0.0 <= floor < 1.0:
         raise ValueError(
             f"som_freeze_floor must be in [0, 1), got {floor!r}.")
     # Floored sigmoid: f_freeze = floor + (1 - floor) * sigmoid(...), ranging
