@@ -1,42 +1,45 @@
 #!/bin/bash
-# Derecho PBS batch: biophysics-only LMIP smoke run.
+# Derecho PBS batch: global biophysics-only LMIP run (config-driven).
 #
-# Runs ``scripts/run/run_lmip_biophys.py`` end-to-end against the real CRU-JRA
-# reanalysis on glade + the Zenodo-hosted CLM5 surfdata (staged by
-# ``scripts/data/download_lmip_data.sh``).  M3 of the LMIP forcing workplan
-# (``docs/land/lmip_s3_scope.md``).
+# Instantiates an experiment from a template with ``scripts/run/init_experiment.py``
+# (applying any qsub -v overrides), then runs ``scripts/run/run_lmip_biophys.py
+# --config`` against the real CRU-JRA reanalysis on glade + the Zenodo-hosted
+# CLM5 surfdata (staged by ``scripts/data/download_lmip_data.sh``).
+#
+# Default template: biophysics/lmip_canopy_4deg_smoke — a ~4 deg global shakedown
+# (two_leaf_canopy + MOST + soil freeze/thaw ON), the small-first test before
+# scaling to the 2 deg lmip_canopy_10yr production spin-up.
 #
 # Usage:
 #   qsub -A <ACCOUNT> scripts/cluster/derecho_lmip/lmip_biophys.pbs
+#   qsub -A <ACCOUNT> -v TEMPLATE=biophysics/lmip_canopy_10yr,RESOLUTION=90 \
+#        scripts/cluster/derecho_lmip/lmip_biophys.pbs
 #
 # Requirements before submitting:
 #   1) The batch script activates the conda env itself (PBS shells inherit NOTHING
 #      from the submitting login shell).  Default env name is 'legoesm-lmip';
-#      override with 'qsub -v LEGOESM_CONDA_ENV=<name>' or the environment.
+#      override with 'qsub -v LEGOESM_CONDA_ENV=<name>'.
 #   2) Data staged under repo-relative data/:
 #        ./scripts/data/download_lmip_data.sh --year 1920
-#   3) Working directory = repo root (PBS_O_WORKDIR is the repo root).
+#   3) qsub from the repo root (PBS_O_WORKDIR = repo root).
 #
-# Override knobs via qsub -v (all optional):
+# Override knobs via qsub -v (all optional; unset = the template's own default):
 #   LEGOESM_CONDA_ENV=legoesm-lmip  — conda env with jax + xarray + legoesm
-#   YEAR=1920                       — CRU-JRA year to force with (start of range)
-#   YEAR_END=""                     — Phase B: end of contiguous multi-year span
-#                                     (empty = single-year YEAR).  Example: YEAR=1920,
-#                                     YEAR_END=1924 → 5-year spin-up.
-#   RESTART_FROM=""                 — Phase C: seed run from a prior restart .npz.
-#                                     Empty = cold start.  Every run auto-saves
-#                                     its end-state to a model-time-stamped file:
-#                                     <OUT_DIR>/restart_<YEAR>_d<DDD>h<HH>.npz.
-#                                     Reads chronologically with `ls`.
-#   RESOLUTION=90                   — latlon N (N x 2N = 90 x 180 ~ 2 deg)
-#   DT=3600                         — timestep in seconds (1 h default; 1800 = 30 min)
-#   N_STEPS=240                     — number of land steps (240 * 1 h = 10 model days)
-#   START_DOY=196                   — starting day-of-year (mid-July)
-#   SURFACE_SCHEME=two_leaf_canopy  — surface scheme (or simple_seb).  NOTE:
-#                                     'simple_seb' + BULK='most' is numerically
-#                                     unstable — pair simple_seb with BULK=constant.
-#   BULK=most                       — 'most' (Monin-Obukhov, default) or 'constant'
-#   OUT_TAG=""                      — appended to $SCRATCH/lmip_biophys_${YEAR}${OUT_TAG}
+#   TEMPLATE=biophysics/lmip_canopy_4deg_smoke  — any templates/land/<name>.yaml
+#   YEAR=""                         — override forcing.year_start (CRU-JRA year)
+#   YEAR_END=""                     — override forcing.year_end (multi-year span)
+#   RESOLUTION=""                   — override grid.resolution (latlon N; 45=4deg, 90=2deg)
+#   DT=""                           — override time.dt [s]
+#   N_STEPS=""                      — override time.n_steps
+#   START_DOY=""                    — override time.start_doy
+#   SURFACE_SCHEME=""               — override physics.surface_scheme (two_leaf_canopy|simple_seb)
+#   BULK=""                         — override physics.bulk_scheme (most|constant)
+#   FREEZE_THAW=""                  — override physics.enable_freeze_thaw (true|false)
+#   RESTART_FROM=""                 — warm-start seed .npz (chained spin-up); empty = cold
+#   OUT_TAG=""                      — appended to the experiment dir name
+#
+# NOTE: simple_seb + MOST is numerically fragile; pair SURFACE_SCHEME=simple_seb
+# with BULK=constant.  The default template (two_leaf_canopy + MOST) is stable.
 #
 #PBS -N lmip_biophys
 #PBS -l select=1:ncpus=8:mem=32GB
@@ -47,42 +50,39 @@
 
 set -euo pipefail
 
-# --- knobs (with defaults) ---
-YEAR="${YEAR:-1920}"
-RESOLUTION="${RESOLUTION:-90}"
-DT="${DT:-3600}"
-N_STEPS="${N_STEPS:-240}"
-START_DOY="${START_DOY:-196}"
-SURFACE_SCHEME="${SURFACE_SCHEME:-two_leaf_canopy}"
-BULK="${BULK:-most}"
-YEAR_END="${YEAR_END:-}"                # multi-year forcing (Phase B)
-RESTART_FROM="${RESTART_FROM:-}"        # chained-run seed (Phase C)
+# --- knobs (empty = use the template's own value) ---
+TEMPLATE="${TEMPLATE:-biophysics/lmip_canopy_4deg_smoke}"
+YEAR="${YEAR:-}"
+YEAR_END="${YEAR_END:-}"
+RESOLUTION="${RESOLUTION:-}"
+DT="${DT:-}"
+N_STEPS="${N_STEPS:-}"
+START_DOY="${START_DOY:-}"
+SURFACE_SCHEME="${SURFACE_SCHEME:-}"
+BULK="${BULK:-}"
+FREEZE_THAW="${FREEZE_THAW:-}"
+RESTART_FROM="${RESTART_FROM:-}"
 OUT_TAG="${OUT_TAG:-}"
 
-# Guardrail: 'simple_seb' + MOST is numerically unstable (T_sfc -> +/-inf), so
-# refuse to enter the queue in that combination.  Cheap sanity, saves debug time.
+# Cheap queue-saving guard: simple_seb + MOST is fragile.  Only trips when BOTH
+# are explicitly overridden to that combination.
 if [[ "$SURFACE_SCHEME" == "simple_seb" && "$BULK" == "most" ]]; then
-    echo "ERROR: SURFACE_SCHEME=simple_seb requires BULK=constant." >&2
-    echo "       MOST + simple_seb is unstable under low-wind / near-neutral" >&2
-    echo "       stratification.  Use BULK=constant, or use two_leaf_canopy." >&2
+    echo "ERROR: SURFACE_SCHEME=simple_seb + BULK=most is numerically fragile." >&2
+    echo "       Pair simple_seb with BULK=constant, or use two_leaf_canopy." >&2
     exit 4
 fi
 
 # PBS_O_WORKDIR = the directory qsub was called from = the repo root.
 cd "${PBS_O_WORKDIR:-$PWD}"
-mkdir -p results/derecho_lmip
 
-# --- activate the legoesm conda env (PBS shells inherit NOTHING from login;
-#     `conda activate` in the submitting shell does NOT reach the compute node).
+# --- activate the legoesm conda env (PBS shells inherit NOTHING from login) ---
 LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-lmip}"
 module purge
 module load conda
-# `conda activate` references unbound vars internally — briefly disable -u.
-set +u
+set +u   # `conda activate` references unbound vars internally
 conda activate "$LEGOESM_CONDA_ENV"
 set -u
 
-# Sanity: refuse to spend queue time when the env is wrong.
 python -c "import jax, xarray, netCDF4, legoesm" 2>/dev/null || {
     echo "ERROR: legoesm/jax/xarray/netCDF4 not importable in env '$LEGOESM_CONDA_ENV'." >&2
     echo "       activate the right env, or set LEGOESM_CONDA_ENV via 'qsub -v'." >&2
@@ -90,51 +90,69 @@ python -c "import jax, xarray, netCDF4, legoesm" 2>/dev/null || {
     exit 3
 }
 
-OUT_DIR="${SCRATCH:-$PWD/results/derecho_lmip}/lmip_biophys_${YEAR}${OUT_TAG}"
+# --- experiment dir under scratch ---
+EXPT_NAME="$(basename "$TEMPLATE")${OUT_TAG}"
+OUT_DIR="${SCRATCH:-$PWD/results/derecho_lmip}/lmip_${EXPT_NAME}"
 mkdir -p "$OUT_DIR"
 
+# --- build init_experiment overrides from the set knobs only ---
+OVERRIDES=()
+add_o() { if [[ -n "${2:-}" ]]; then OVERRIDES+=(-o "$1=$2"); fi; }
+add_o forcing.year_start        "$YEAR"
+add_o forcing.year_end          "$YEAR_END"
+add_o grid.resolution           "$RESOLUTION"
+add_o time.dt                   "$DT"
+add_o time.n_steps              "$N_STEPS"
+add_o time.start_doy            "$START_DOY"
+add_o physics.surface_scheme    "$SURFACE_SCHEME"
+add_o physics.bulk_scheme       "$BULK"
+add_o physics.enable_freeze_thaw "$FREEZE_THAW"
+
 echo "=================================================================="
-echo "LMIP biophysics run"
+echo "LMIP biophysics run (config-driven)"
 echo "  repo:        $PWD"
 echo "  branch:      $(git rev-parse --abbrev-ref HEAD)  ($(git rev-parse --short HEAD))"
 echo "  conda env:   $LEGOESM_CONDA_ENV"
 echo "  python:      $(which python)  ($(python --version 2>&1))"
-echo "  year:        $YEAR"
-echo "  grid:        latlon ${RESOLUTION} x $((RESOLUTION * 2))"
-echo "  timestep:    ${DT}s   n_steps=${N_STEPS}   start_doy=${START_DOY}"
-echo "  scheme:      $SURFACE_SCHEME"
+echo "  template:    $TEMPLATE"
+echo "  overrides:   ${OVERRIDES[*]:-<none — template defaults>}"
+echo "  restart:     ${RESTART_FROM:-<cold start>}"
 echo "  out:         $OUT_DIR"
 echo "=================================================================="
 
-# --- verify staged data present (fail fast with a clear message) ---
-CRUJRA_SOLR="data/crujra/clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5.Solr.${YEAR}.nc"
-SURFDATA="data/legoesm_surfdata_c250617.nc"
-for f in "$CRUJRA_SOLR" "$SURFDATA"; do
-    if [[ ! -e "$f" ]]; then
-        echo "ERROR: expected staged input not found: $f" >&2
-        echo "  Stage inputs first from a login node:" >&2
-        echo "    ./scripts/data/download_lmip_data.sh --year $YEAR" >&2
-        exit 2
-    fi
-done
-
-# --- run ---
 export JAX_ENABLE_X64=1
 export PYTHONPATH="${PYTHONPATH:-}:$PWD"
-EXTRA_ARGS=()
-if [[ -n "$YEAR_END" ]];     then EXTRA_ARGS+=(--year-end "$YEAR_END"); fi
-if [[ -n "$RESTART_FROM" ]]; then EXTRA_ARGS+=(--restart-from "$RESTART_FROM"); fi
-python scripts/run/run_lmip_biophys.py \
-    --surfdata "$SURFDATA" \
-    --forcing-dir data/crujra \
-    --year "$YEAR" --start-doy "$START_DOY" \
-    --grid-type latlon --resolution "$RESOLUTION" \
-    --surface-scheme "$SURFACE_SCHEME" \
-    --bulk "$BULK" \
-    --dt "$DT" --n-steps "$N_STEPS" \
-    --output "$OUT_DIR" \
-    "${EXTRA_ARGS[@]}"
+
+# --- 1. instantiate the resolved config.yaml (validates the schema too) ---
+python scripts/run/init_experiment.py "$TEMPLATE" \
+    --name "$EXPT_NAME" \
+    --output-dir "$OUT_DIR" \
+    --machine derecho \
+    "${OVERRIDES[@]}"
+
+CONFIG="$OUT_DIR/config.yaml"
+
+# --- 2. verify staged data present (fail fast, reading the RESOLVED config) ---
+YEAR_RESOLVED="$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG'))['forcing']['year_start'])")"
+SURFDATA="$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG'))['surfdata']['path'])")"
+SOURCE="$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG'))['forcing'].get('source','cru_jra'))")"
+if [[ "$SOURCE" == "cru_jra" ]]; then
+    CRUJRA_SOLR="data/crujra/clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5.Solr.${YEAR_RESOLVED}.nc"
+    for f in "$CRUJRA_SOLR" "$SURFDATA"; do
+        if [[ ! -e "$f" ]]; then
+            echo "ERROR: expected staged input not found: $f" >&2
+            echo "  Stage inputs first from a login node:" >&2
+            echo "    ./scripts/data/download_lmip_data.sh --year $YEAR_RESOLVED" >&2
+            exit 2
+        fi
+    done
+fi
+
+# --- 3. run ---
+RUN_ARGS=(--config "$CONFIG" --output-dir "$OUT_DIR")
+if [[ -n "$RESTART_FROM" ]]; then RUN_ARGS+=(--restart-from "$RESTART_FROM"); fi
+python scripts/run/run_lmip_biophys.py "${RUN_ARGS[@]}"
 
 echo "=================================================================="
-echo "output NetCDF: $OUT_DIR/lmip_biophys.nc"
+echo "experiment dir: $OUT_DIR"
 ls -lh "$OUT_DIR" 2>/dev/null || true
