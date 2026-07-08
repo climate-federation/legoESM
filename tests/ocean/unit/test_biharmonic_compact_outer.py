@@ -116,11 +116,20 @@ def test_compact_conserves_cube_area_integral_no_worse_than_wide():
 
     r_wide = residual(False)
     r_compact = residual(True)
-    # Neither is machine-eps on the cube (bounded by inter-face halo interp);
-    # both are the same O(1e-3) order — compact does not regress conservation
-    # to a worse order of magnitude.
+    # Neither is machine-eps on the cube (bounded by inter-face halo interp).
     assert r_compact < 1e-2
     assert r_wide < 1e-2
+    # The NO-REGRESSION claim itself (pre-merge codex review): the compact
+    # composition is not divergence-form, so conservation is not structurally
+    # guaranteed — certify it RELATIVE to the wide operator, not just "small".
+    # Factor 10 gives headroom for stencil-dependent halo-interp differences
+    # while still failing if compact ever degrades an order of magnitude
+    # (e.g. wide 1e-8 / compact 9e-3 passed the absolute bounds alone); the
+    # 1e-6 floor keeps a near-machine-zero wide residual from making the
+    # bound unattainably strict.
+    assert r_compact <= 10.0 * max(r_wide, 1e-6), (
+        f"compact-outer conservation residual {r_compact:.3e} regressed vs "
+        f"wide {r_wide:.3e}")
 
 
 def test_compact_outer_differentiable():
