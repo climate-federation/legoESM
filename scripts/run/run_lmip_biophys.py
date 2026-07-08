@@ -323,9 +323,9 @@ def run(args) -> int:
     # ----- scan body: (state, tape_accums) -> next; no per-step output returned.
     def _step_body(carry, xs):
         state, accums = carry
-        forcing_t, doy_t, per_tape_slot = xs
+        forcing_t, doy_t, year_t, per_tape_slot = xs
         theta_top_t = (state.theta_soil[:, 0] if is_multilayer else jnp.full(ncol, 0.2))
-        land_params_t, lai_diag = update_land_params(theta_top_t, doy_t)
+        land_params_t, lai_diag = update_land_params(theta_top_t, doy_t, year_t)
         new_state, resp, _ = step_fn(state, forcing_t, config, U_MIN, dt,
                                      lat=lat_rad, land_params=land_params_t, doy=doy_t)
         # Available variables per step -> selected by each tape's spec.
@@ -387,13 +387,18 @@ def run(args) -> int:
             prefix=args.prefix, suffix=args.suffix,
             k_neighbors=args.k_neighbors, allow_synthetic=allow_syn)
         doy_year = jnp.asarray(tq_year / _SEC_PER_DAY)
+        # Transient cover: broadcast this chunk's calendar year across its steps as
+        # a TRACED scan input (not a Python constant baked into the closure) so
+        # interp_annual selects the right LUH2 slice WITHOUT recompiling the scan
+        # each year (SegmentForcing doctrine).
+        year_xs = jnp.full(n_step_year, float(year))
         # Slice each tape's GLOBAL slot indices to just this year's steps.
         slot_year_xs = {name: idx[mask] for name, idx in slot_idx_global.items()}
         print(f"  year {year} ({n_step_year} steps) ...")
         (state, tape_accums), _ = jax.lax.scan(
             _step_body, (state, tape_accums),
-            (forcing_year, doy_year, slot_year_xs))
-        del forcing_year, doy_year, slot_year_xs               # free before next year
+            (forcing_year, doy_year, year_xs, slot_year_xs))
+        del forcing_year, doy_year, year_xs, slot_year_xs      # free before next year
 
     # --- land mask + NaN-over-land validation (the smoke PASS/FAIL). ---
     def cover1d(a):
