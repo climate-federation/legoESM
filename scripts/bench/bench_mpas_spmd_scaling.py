@@ -56,6 +56,14 @@ import numpy as np
 # Repo root on the path for tests.test_cases.baroclinic_wave (the same
 # baroclinic-wave IC the icosahedral lanes of run_levante_gpu_scaling use).
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# Bench dir for the shared metadata module (sibling-script import pattern).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Shared self-describing scaling metadata (anti-fake-scaling audit): merged
+# under rec["metadata"] so a virtual-CPU-device proxy, a gloo/TCP fabric run,
+# or an f32 ablation is falsifiable from the JSONL row alone.  metadata.py
+# imports JAX lazily, so this is safe before jax.distributed.initialize.
+from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
 
 # SPMD full-step parity tolerances — the FLOATING-POINT RE-ASSOCIATION floor
 # of the sharded step (ppermute halo + mass-fix psum reduction-order change),
@@ -391,6 +399,24 @@ def main() -> int:
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=int(mesh.nCells) * args.nlev,
     )
+    rec["metadata"] = annotate_incomplete(scaling_metadata(
+        grid="icosahedral",
+        component="atmosphere",
+        resolution=f"L{args.subdivision}",
+        n_levels=args.nlev,
+        precision="float64" if jax.config.jax_enable_x64 else "float32",
+        n_gpus=(nd if jax.default_backend() in ("gpu", "cuda", "rocm")
+                else 0),
+        decomposition="cell_partition" if nd > 1 else "none",
+        cells_per_rank=int(mesh.nCells) // nd * args.nlev,
+        scaling_kind="strong",  # this bench fixes the mesh and sweeps devices
+        extra={
+            "partition_method": args.partition_method,
+            "physics": args.physics,
+            "steps": args.steps,
+            "multicontroller": bool(args.multicontroller),
+        },
+    ))
     # Multi-controller: every process times the same program; process 0 owns
     # the JSONL + stdout (others would duplicate/corrupt the append).
     if jax.process_index() == 0:
@@ -404,6 +430,10 @@ def main() -> int:
               f"nlev={args.nlev}] compile={rec['compile_ms']}ms "
               f"steady_median={med:.2f}ms/step "
               f"(per-step: {rec['per_step_ms']})")
+        if rec["metadata"]["virtual_cpu_devices"]:
+            print("[virtual-cpu] forced host-platform CPU devices: this row "
+                  "is a communication-overhead / correctness proxy, NOT "
+                  "hardware scaling — do not report it as a speedup.")
     return 0
 
 

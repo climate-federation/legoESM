@@ -2307,9 +2307,19 @@ def write_csv(results: list[TimingResult], path: Path) -> None:
 
 
 def write_json(
-    report: ScalingReport, path: Path, *, n_ranks_true: int | None = None
+    report: ScalingReport,
+    path: Path,
+    *,
+    n_ranks_true: int | None = None,
+    component: str = "atmosphere",
+    metadata_overrides: dict | None = None,
 ) -> None:
     """Write full report to JSON.
+
+    ``component`` labels every row's metadata block — cross-script consumers
+    (``bench_ocean_mpi_scaling.py``) MUST pass their own component so an
+    ocean row is never stamped "atmosphere".  ``metadata_overrides`` merges
+    extra ``scaling_metadata`` kwargs (e.g. ``solver_variant``) into each row.
 
     ``n_ranks_true`` is the real MPI world size from ``_maybe_init_distributed``
     (1 for single-process SPMD, N for the route-A MPI path).  It MUST be passed
@@ -2339,9 +2349,9 @@ def write_json(
         # the row's device count (scaling axis); n_ranks is the true MPI world
         # size (SPMD -> 1; route-A -> N), NOT jax.process_count() which is 1 on
         # single-node MPI where jax.distributed is not initialized.
-        d["metadata"] = annotate_incomplete(scaling_metadata(
+        md_kwargs: dict = dict(
             grid=r.grid_type,
-            component="atmosphere",
+            component=component,
             resolution=r.resolution,
             n_levels=r.n_levels,
             precision=r.precision,
@@ -2356,7 +2366,10 @@ def write_json(
                 "mode": r.mode,
                 "hlo_collective_permute": r.hlo_collective_permute,
             },
-        ))
+        )
+        if metadata_overrides:
+            md_kwargs.update(metadata_overrides)
+        d["metadata"] = annotate_incomplete(scaling_metadata(**md_kwargs))
         return d
 
     payload = {

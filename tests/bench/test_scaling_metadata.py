@@ -215,3 +215,85 @@ def test_devices_per_rank_defaults_from_jax_counts():
     assert dpr is None or (isinstance(dpr, int) and dpr >= 1)
     # Explicit override is honored verbatim.
     assert _record(devices_per_rank=4)["devices_per_rank"] == 4
+
+
+# --------------------------------------------------------------------------
+# schema v2: transport / virtual_cpu_devices / launcher (anti-fake-scaling)
+# --------------------------------------------------------------------------
+
+def test_schema_v2_required_keys_present():
+    rec = _record()
+    for k in ("transport", "virtual_cpu_devices", "launcher"):
+        assert k in rec, f"v2 key {k!r} absent"
+    assert rec["schema_version"] >= 2
+    assert md.validate_scaling_metadata(rec) == []
+
+
+def test_transport_explicit_wins_and_unknown_raises():
+    assert _record(transport="nccl")["transport"] == "nccl"
+    with pytest.raises(ValueError, match="unknown transport"):
+        _record(transport="carrier-pigeon")
+
+
+def test_transport_route_a_inferred_from_rank_excess():
+    # mpirun -np 8 route-A: each rank is a single-process JAX
+    # (process_count()==1) but the driver records n_ranks=8 — the world JAX
+    # cannot see is exactly the mpi4jax signature.
+    t = md.resolve_transport(
+        None, n_ranks=8, process_count=1, device_count=1, backend="cpu")
+    assert t == "mpi4jax"
+
+
+def test_transport_route_b_nccl_on_gpu_gloo_on_cpu():
+    kw = dict(n_ranks=4, process_count=4, device_count=4)
+    assert md.resolve_transport(None, backend="gpu", **kw) == "nccl"
+    assert md.resolve_transport(None, backend="cpu", **kw) == "gloo"
+
+
+def test_transport_single_process_spmd_and_serial():
+    assert md.resolve_transport(
+        None, n_ranks=1, process_count=1, device_count=4,
+        backend="cpu") == "xla-local"
+    assert md.resolve_transport(
+        None, n_ranks=1, process_count=1, device_count=1,
+        backend="cpu") == "none"
+
+
+def test_virtual_cpu_devices_detected_from_xla_flags(monkeypatch):
+    monkeypatch.setenv(
+        "XLA_FLAGS", "--xla_force_host_platform_device_count=8")
+    assert md.detect_virtual_cpu_devices(backend="cpu") is True
+    # A GPU backend with the flag set is NOT a virtual-CPU proxy.
+    assert md.detect_virtual_cpu_devices(backend="gpu") is False
+    # count=1 is the serial default, not forced parallelism.
+    monkeypatch.setenv(
+        "XLA_FLAGS", "--xla_force_host_platform_device_count=1")
+    assert md.detect_virtual_cpu_devices(backend="cpu") is False
+    monkeypatch.delenv("XLA_FLAGS")
+    assert md.detect_virtual_cpu_devices(backend="cpu") is False
+
+
+def test_launcher_detection_priority(monkeypatch):
+    for var in ("SLURM_JOB_ID", "PALS_RANKID", "PALS_NODEID", "PBS_JOBID",
+                "OMPI_COMM_WORLD_SIZE", "PMI_SIZE"):
+        monkeypatch.delenv(var, raising=False)
+    assert md.detect_launcher() == "none"
+    monkeypatch.setenv("OMPI_COMM_WORLD_SIZE", "4")
+    assert md.detect_launcher() == "openmpi"
+    # PALS jobs also carry PBS_JOBID — PALS must win over plain PBS.
+    monkeypatch.setenv("PBS_JOBID", "12345.desched1")
+    assert md.detect_launcher() == "pbs"
+    monkeypatch.setenv("PALS_RANKID", "0")
+    assert md.detect_launcher() == "pbs-pals"
+    # SLURM outranks all (SLURM steps may export OMPI vars via plugins).
+    monkeypatch.setenv("SLURM_JOB_ID", "999")
+    assert md.detect_launcher() == "slurm"
+
+
+def test_validate_catches_missing_v2_keys():
+    for k in ("transport", "virtual_cpu_devices", "launcher"):
+        rec = _record()
+        del rec[k]
+        assert k in md.validate_scaling_metadata(rec, strict=False)
+        with pytest.raises(ValueError):
+            md.validate_scaling_metadata(rec)

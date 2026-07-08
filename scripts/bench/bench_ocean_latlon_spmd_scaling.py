@@ -51,6 +51,12 @@ import numpy as np
 # same pattern as bench_ocean_mpi_scaling's own cross-script imports).
 sys.path.insert(0, str(Path(__file__).parent))
 
+# Shared self-describing scaling metadata (anti-fake-scaling audit): merged
+# under rec["metadata"] so a virtual-CPU-device proxy, a gloo/TCP fabric run,
+# or an f32 ablation is falsifiable from the JSONL row alone.  metadata.py
+# imports JAX lazily, so this is safe before jax.distributed.initialize.
+from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
+
 # SPMD full-step parity tolerances — the FLOATING-POINT RE-ASSOCIATION floor
 # of the sharded split-explicit barotropic (ppermute/psum reduction-order
 # change over the ~30-substep loop, pole-amplified), NOT a bug margin; a real
@@ -307,6 +313,26 @@ def main() -> int:
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=n_lat * args.n_lon * args.nlev,
     )
+    rec["metadata"] = annotate_incomplete(scaling_metadata(
+        grid="latlon",
+        component="ocean",
+        resolution=f"{n_lat}x{args.n_lon}",
+        n_levels=args.nlev,
+        precision="float64" if jax.config.jax_enable_x64 else "float32",
+        n_gpus=(nd if jax.default_backend() in ("gpu", "cuda", "rocm")
+                else 0),
+        decomposition="band" if nd > 1 else "none",
+        solver_variant=model.config.barotropic.barotropic_solver,
+        cells_per_rank=(n_lat // nd) * args.n_lon * args.nlev,
+        scaling_kind=args.mode,
+        extra={
+            "steps": args.steps,
+            "warmup": args.warmup,
+            "multicontroller": bool(args.multicontroller),
+            "parity_gate": bool(args.parity_gate),
+            "check_conservation": bool(args.check_conservation),
+        },
+    ))
     # Multi-controller: every process times the same program; process 0 owns
     # the JSONL + stdout (others would duplicate/corrupt the append).
     if jax.process_index() == 0:
@@ -317,6 +343,10 @@ def main() -> int:
         print(f"[ocean nd={nd} {args.mode} {n_lat}x{args.n_lon}x{args.nlev}] "
               f"compile={rec['compile_ms']}ms steady_median={med:.2f}ms/step "
               f"(per-step: {rec['per_step_ms']})")
+        if rec["metadata"]["virtual_cpu_devices"]:
+            print("[virtual-cpu] forced host-platform CPU devices: this row "
+                  "is a communication-overhead / correctness proxy, NOT "
+                  "hardware scaling — do not report it as a speedup.")
     return 0
 
 

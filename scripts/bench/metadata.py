@@ -15,18 +15,33 @@ Scientific descriptors (grid, resolution, solver, ...) are passed by the caller;
 runtime facts (backend, device / process count, precision knobs, GPU-direct
 mode) are auto-detected from the LIVE process so they cannot be mislabeled.
 
-Consumers: ``run_levante_gpu_scaling.py``, ``run_cpu_mpi_scaling.py`` (and any
-future bench driver) merge ``scaling_metadata(...)`` under the ``"metadata"``
-key of their JSON payload.  Aggregators read ``payload["metadata"]``.
+Consumers: ``run_levante_gpu_scaling.py``, ``run_cpu_mpi_scaling.py``,
+``bench_atm_latlon_spmd_scaling.py``, ``bench_ocean_latlon_spmd_scaling.py``,
+``bench_mpas_spmd_scaling.py``, ``bench_ocean_mpi_scaling.py``,
+``bench_ocean_gpu_scaling.py`` (and any future bench driver) merge
+``scaling_metadata(...)`` under the ``"metadata"`` key of their JSON payload.
+Aggregators read ``payload["metadata"]``.
 """
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 
 #: Bump when the record shape changes so aggregators can branch on it.
-METADATA_SCHEMA_VERSION = 1
+#: v2: + ``transport`` / ``virtual_cpu_devices`` / ``launcher`` (anti-fake-
+#: scaling audit) — a route-A mpi4jax row, a route-B NCCL row, a gloo/TCP
+#: fabric row, and a CPU-virtual-device infra proxy are now distinguishable
+#: from the record alone.
+METADATA_SCHEMA_VERSION = 2
+
+#: Halo/collective transports a scaling row may run on.  ``xla-local`` =
+#: single-process multi-device SPMD (intra-process XLA collectives);
+#: ``none`` = serial.  gloo/TCP multi-node is KNOWN anti-scaling fabric
+#: (docs/performance/scaling/spectral_level_shard_cliff.md) — recording it
+#: verbatim is what keeps such a row from masquerading as an NCCL result.
+TRANSPORTS: tuple[str, ...] = ("mpi4jax", "nccl", "gloo", "xla-local", "none")
 
 #: Env knobs that change a run's numerics / comparability.  Recorded VERBATIM so
 #: an f32 (or TF32) ablation is never silently compared to an f64 baseline.
@@ -63,6 +78,9 @@ REQUIRED_KEYS: tuple[str, ...] = (
     "process_count",
     "gpu_direct_active",
     "host_staged_halo",
+    "transport",
+    "virtual_cpu_devices",
+    "launcher",
 )
 
 #: Keys that MUST be PRESENT (the roadmap requires the field) but whose value
@@ -129,6 +147,83 @@ def precision_knobs() -> dict[str, str]:
     return {k: os.environ.get(k, "0") for k in PRECISION_ENV_KNOBS}
 
 
+def detect_virtual_cpu_devices(backend: str | None = None) -> bool:
+    """True when the run's parallelism comes from FORCED virtual CPU devices.
+
+    ``XLA_FLAGS=--xla_force_host_platform_device_count=N`` (N>1) on a CPU
+    backend is the infra-validation mode: it characterizes communication
+    overhead and correctness, NEVER hardware scaling.  A row with this flag
+    True must not be reported as a device-count speedup (roadmap: "do not
+    report CPU virtual devices as speedup").
+    """
+    b = (backend or detect_backend()).lower()
+    if b != "cpu":
+        return False
+    m = re.search(
+        r"xla_force_host_platform_device_count\s*=\s*(\d+)",
+        os.environ.get("XLA_FLAGS", ""),
+    )
+    return bool(m and int(m.group(1)) > 1)
+
+
+def detect_launcher() -> str:
+    """Job launcher this process runs under, from launcher-specific env.
+
+    ``slurm`` | ``pbs-pals`` (Cray PALS, e.g. Derecho ``mpiexec``) | ``pbs`` |
+    ``openmpi`` (bare ``mpirun``) | ``none`` (local shell).  Order matters:
+    PALS jobs also carry ``PBS_JOBID``, and SLURM steps may export OMPI vars.
+    """
+    env = os.environ
+    if "SLURM_JOB_ID" in env:
+        return "slurm"
+    if "PALS_RANKID" in env or "PALS_NODEID" in env:
+        return "pbs-pals"
+    if "PBS_JOBID" in env:
+        return "pbs"
+    if "OMPI_COMM_WORLD_SIZE" in env or "PMI_SIZE" in env:
+        return "openmpi"
+    return "none"
+
+
+def resolve_transport(
+    transport: str | None,
+    *,
+    n_ranks: int,
+    process_count: int,
+    device_count: int,
+    backend: str | None = None,
+) -> str:
+    """Resolve (and validate) the halo/collective transport for the record.
+
+    Explicit ``transport`` wins (validated against :data:`TRANSPORTS`).
+    Auto-resolution when ``None``:
+
+    - ``n_ranks > process_count``: a route-A MPI world JAX cannot see (each
+      rank is a separate single-process JAX) → ``"mpi4jax"``.
+    - ``process_count > 1``: route-B multi-controller ``jax.distributed`` →
+      ``"nccl"`` on a GPU backend, ``"gloo"`` on CPU (JAX's CPU collective
+      transport).
+    - ``device_count > 1``: single-process SPMD → ``"xla-local"``.
+    - else ``"none"``.
+    """
+    if transport is not None:
+        if transport not in TRANSPORTS:
+            raise ValueError(
+                f"unknown transport {transport!r}; expected one of "
+                f"{TRANSPORTS} (a scaling row's transport must be a known, "
+                "comparable fabric)."
+            )
+        return transport
+    if n_ranks > process_count:
+        return "mpi4jax"
+    if process_count > 1:
+        b = (backend or detect_backend()).lower()
+        return "nccl" if b in _GPU_BACKENDS else "gloo"
+    if device_count > 1:
+        return "xla-local"
+    return "none"
+
+
 def gpu_direct_mode(backend: str | None = None) -> dict[str, Any]:
     """Device-direct MPI configuration for the record.
 
@@ -168,6 +263,7 @@ def scaling_metadata(
     conservation_drift: float | None = None,
     cells_per_rank: int | None = None,
     scaling_kind: str | None = None,
+    transport: str | None = None,
     partition_metrics: dict[str, Any] | None = None,
     timestamp_utc: str | None = None,
     extra: dict[str, Any] | None = None,
@@ -186,8 +282,15 @@ def scaling_metadata(
         forbids claiming a solver speedup without recording a residual /
         conservation drift, so these belong in the record.
     scaling_kind
-        ``"weak"`` | ``"strong"`` | ``None`` — keeps weak/strong normalization
-        from being conflated downstream.
+        ``"weak"`` | ``"strong"`` | ``"throughput"`` | ``None`` — keeps
+        weak/strong normalization (and single-device throughput-vs-size
+        sweeps, which are NOT device-count scaling) from being conflated
+        downstream.
+    transport
+        Halo/collective fabric (see :data:`TRANSPORTS`).  ``None`` →
+        auto-resolved by :func:`resolve_transport`; route-A mpi4jax drivers
+        that pass ``n_ranks`` explicitly resolve correctly, route-B /
+        single-process SPMD auto-detect from the live process.
     partition_metrics
         MPAS / Voronoi partition-quality numbers when available
         (``edge_cut``, ``owned_halo_ratio``, ``cells_per_rank_min/max``,
@@ -232,6 +335,15 @@ def scaling_metadata(
         # --- runtime facts (auto-detected) ---
         "backend": backend,
         "precision_knobs": precision_knobs(),
+        "transport": resolve_transport(
+            transport,
+            n_ranks=int(n_ranks),
+            process_count=process_count,
+            device_count=device_count,
+            backend=backend,
+        ),
+        "virtual_cpu_devices": detect_virtual_cpu_devices(backend),
+        "launcher": detect_launcher(),
         "hostname": os.environ.get("HOSTNAME")
         or os.environ.get("SLURMD_NODENAME", ""),
         "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
