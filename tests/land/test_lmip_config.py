@@ -43,6 +43,18 @@ def test_bad_grid_type_raises():
         validate_config(bad)
 
 
+def test_land_cover_dataset_defaults_to_clm5():
+    cfg = validate_config(_minimal())
+    assert cfg.surfdata["land_cover_dataset"] == "clm5"     # default applied
+
+
+def test_bad_land_cover_dataset_raises():
+    bad = _minimal()
+    bad["surfdata"]["land_cover_dataset"] = "not_a_dataset"
+    with pytest.raises(ValueError, match="land_cover_dataset"):
+        validate_config(bad)
+
+
 def test_simple_seb_plus_most_rejected_at_config_time():
     bad = _minimal()
     bad["physics"]["bulk_scheme"] = "most"

@@ -21,7 +21,8 @@ An experiment is fully described by a YAML file with this schema::
       k_neighbors: int                 # forcing regrid IDW neighbours (default 4)
 
     surfdata:
-      path: <path to CLM5 surfdata NetCDF>
+      path: <path to a surfdata NetCDF (static CLM5 or transient LUH2/HYDE/...)>
+      land_cover_dataset: clm5 | luh2 | luh3 | hyde | pongratz | kk10  # default clm5
 
     time:
       dt: float                        # seconds
@@ -136,6 +137,11 @@ def validate_config(data: dict) -> LMIPConfig:
 
     req("surfdata", ("path",))
     surfdata = data["surfdata"]
+    # Which reconstruction built the surfdata: provenance, and (Phase 2) selects
+    # E_LUC's gross-vs-net transition handling.  Default = static CLM5 base.
+    from legoesm.land.surface_data.datasets import validate_land_cover_dataset
+    surfdata.setdefault("land_cover_dataset", "clm5")
+    validate_land_cover_dataset(surfdata["land_cover_dataset"])
 
     req("time", ("dt", "n_steps", "start_doy"))
     time = data["time"]
