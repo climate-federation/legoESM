@@ -40,6 +40,14 @@ dt: 600.0                  # driver auto-clamps to the pole-cell CFL on lat-lon
 # (rh_crit, conv_cloud_condensate) blow up at ~day 7 (waves reflecting off the
 # rigid ~35 hPa lid -> non-finite winds).  Enable it so the model top absorbs.
 sponge_enabled: true
+# Fourier polar filter (#869): MANDATORY on the coarse lat-lon grid.  The
+# converging pole-row cells make fast modes locally unstable while the global
+# CFL diagnostic stays ~0.01; without the filter the production config goes
+# non-finite (day 1-10 depending on physics build).  Controlled 12-day A/B
+# 2026-07-08 (jobs 26137075/76, only this key differs): OFF = blowup day 1,
+# ON = completed.  The stable pre-drift reference (amip_ll_sota_30d_741) also
+# carried it.
+use_polar_filter: true
 # time_integrator: 'auto' (default) -> ssp_rk3 (non-scan) on lat-lon.  NOT
 # ssp_rk3_scan: its lax.scan carry enforces dtype equality and the latlon-cgrid
 # dycore emits a float64 p_s tendency against the float32 state (precision

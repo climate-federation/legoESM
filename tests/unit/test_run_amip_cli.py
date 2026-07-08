@@ -1430,6 +1430,9 @@ def test_config_yaml_round_trips_authoritative_values():
     assert args.discretization == "latlon_cgrid"
     assert args.grid_type == "latlon"
     assert args.sponge_enabled is True
+    # polar filter is MANDATORY on coarse lat-lon (#869): the 12-day A/B
+    # convicted its absence as the day-1..10 non-finite-winds blowup
+    assert args.use_polar_filter is True
     cfg = build_config_from_args(args)
     assert cfg.convection == "bechtold"   # mass-flux, water-conserving (#771)
     assert cfg.gravity_wave_drag == "mcfarlane"
