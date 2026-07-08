@@ -71,7 +71,8 @@ SPMD_PARITY_MAX_STEPS = 8
 
 
 def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
-                          wide_halo=False, wide_halo_chunk=0):
+                          wide_halo=False, wide_halo_chunk=0,
+                          tripole=False):
     """Ocean model + gently perturbed rest state (flat 4000 m bottom).
 
     The perturbation (small u/v/eta/T noise on the rest stratification)
@@ -88,7 +89,15 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
     from legoesm.ocean.state import LatLonCGridOceanConfig
     from legoesm.ocean.vertical import create_ocean_z_star
 
-    grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+    if tripole:
+        # Synthetic tripole (ORCA fold): the sharded step's fold support
+        # is gated by tests/parallel/test_latlon_ocean_spmd_tripole.py;
+        # the wide-halo lever refuses folds at model construction.
+        from legoesm.grids.tripole import create_synthetic_tripole
+
+        grid = create_synthetic_tripole(n_lat=n_lat, n_lon=n_lon)
+    else:
+        grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
     # Wide-halo lever (A/B): one fused wide lat-halo exchange per chunk of
     # barotropic substeps instead of ~4 ppermute pads per substep.  The wide
@@ -159,6 +168,12 @@ def main() -> int:
         "--cons-rtol", type=float, default=None,
         help="Conservation tolerance (default: 1e-9 f64 / 1e-4 f32; the "
              "raw scheme drifts ~1e-8/step — calibrate to the window).")
+    p.add_argument("--tripole", action="store_true",
+                   help="Synthetic tripole (ORCA-fold) lane: the sharded "
+                        "step folds the north band data-dependently "
+                        "(SPMD equivalence gated at 4 devices). Rows are "
+                        "tagged grid=tripole. Incompatible with "
+                        "--wide-halo (fold refused at construction).")
     p.add_argument("--fused-halo", action="store_true",
                    help="Opt-in SPMD halo message aggregation "
                         "(LEGOESM_LATLON_SPMD_FUSED_HALO=1): one ppermute "
@@ -197,6 +212,18 @@ def main() -> int:
         raise SystemExit(
             f"--warmup must satisfy 0 <= warmup < steps "
             f"(got warmup={args.warmup}, steps={args.steps})")
+
+    # Align the legoESM precision POLICY with the jax x64 flag: the ocean
+    # state dtype comes from get_policy().storage (default fp32), so an
+    # x64-flag-only run would build f32 states and gate them against
+    # f64-labeled tolerances (the tripole lane caught this; the same fix
+    # as bench_ocean_mpi_scaling._ensure_precision).
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+
+    if os.environ.get("JAX_ENABLE_X64", "0") not in ("0", "", "false"):
+        set_policy(PrecisionPolicy.fp64())
+    else:
+        set_policy(PrecisionPolicy.fp32())
 
     if args.multicontroller:
         # MUST run before any other JAX use (backend init). Shared helper:
@@ -238,7 +265,8 @@ def main() -> int:
 
     model, s0 = build_model_and_state(
         n_lat, args.n_lon, args.nlev,
-        wide_halo=args.wide_halo, wide_halo_chunk=args.wide_halo_chunk)
+        wide_halo=args.wide_halo, wide_halo_chunk=args.wide_halo_chunk,
+        tripole=args.tripole)
     # Prime the build-once vertex-mask cache from the CONCRETE state so the
     # wrapper can build the per-band vertex masks host-side.
     model._ensure_vertex_mask(s0)
@@ -354,7 +382,7 @@ def main() -> int:
     from legoesm.parallel.early_init import nccl_transport_report
     _nccl_report = nccl_transport_report()
     rec["metadata"] = annotate_incomplete(scaling_metadata(
-        grid="latlon",
+        grid="tripole" if args.tripole else "latlon",
         component="ocean",
         resolution=f"{n_lat}x{args.n_lon}",
         n_levels=args.nlev,

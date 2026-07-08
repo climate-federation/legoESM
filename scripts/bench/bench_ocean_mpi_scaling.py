@@ -324,13 +324,24 @@ def _perturb_state(state, grid):
 
 
 def _ensure_precision(precision: str) -> None:
-    """Belt-and-braces in-process x64 confirmation (the env var is
-    already set pre-import by ``_configure_jax_cpu``; same pattern as
-    ``run_cpu_mpi_scaling._build_amip_step``)."""
+    """Apply the requested precision to BOTH layers: the jax x64 flag AND
+    the legoESM precision POLICY.
+
+    The x64 flag alone is NOT enough — the ocean state dtype comes from
+    ``get_policy().storage`` (default fp32), so the previous
+    flag-only version built f32 states under ``--precision float64``:
+    every gate labeled f64 actually gated f32 data (caught by the tripole
+    lane, whose salt drift sat at the f32 floor while the fp64-policy
+    parity is machine-epsilon; the 2026-06-29 full-suite gotcha)."""
     import jax
+
+    from legoesm.core.precision import PrecisionPolicy, set_policy
 
     if precision == "float64":
         jax.config.update("jax_enable_x64", True)
+        set_policy(PrecisionPolicy.fp64())
+    else:
+        set_policy(PrecisionPolicy.fp32())
 
 
 def _build_global_problem(
@@ -339,6 +350,7 @@ def _build_global_problem(
     preconditioner: str = "jacobi", fixed_iters: int = 60,
     cheby_degree: int = 4,
     land_mask: str = "none", bathymetry_file: str = "",
+    tripole: bool = False,
 ):
     """Global grid + z-coordinate + config + perturbed global IC.
 
@@ -359,7 +371,12 @@ def _build_global_problem(
     from legoesm.ocean.state import LatLonCGridOceanConfig
     from legoesm.ocean.vertical import create_ocean_z_star
 
-    grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+    if tripole:
+        from legoesm.grids.tripole import create_synthetic_tripole
+
+        grid = create_synthetic_tripole(n_lat=n_lat, n_lon=n_lon)
+    else:
+        grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
     z_coord = create_ocean_z_star(n_levels=nlev)
     import os as _os
     config = LatLonCGridOceanConfig.from_flat(
@@ -431,6 +448,7 @@ def build_case(
     wet_balance: bool = False,
     land_mask: str = "none",
     bathymetry_file: str = "",
+    tripole: bool = False,
 ):
     """Build (model, state, total_cells, layout, partition_metrics).
 
@@ -460,6 +478,7 @@ def build_case(
         preconditioner=preconditioner, fixed_iters=fixed_iters,
         force_pcg=force_pcg,
         land_mask=land_mask, bathymetry_file=bathymetry_file,
+        tripole=tripole,
     )
 
     total_cells = n_lat * n_lon * nlev
@@ -491,6 +510,9 @@ def build_case(
         layout = initialize_distributed_latlon(
             global_n_lat=n_lat, global_n_lon=n_lon,
             band_boundaries=band_boundaries,
+            # Fold-aware layout: the north rank applies the ORCA fold at
+            # its north boundary; interior cuts exchange fold-aware.
+            fold=getattr(grid, "fold", None) if tripole else None,
         )
         # Partition-quality record for the ACTUAL split (wet OR the
         # row-balanced default): wet cells + rows per band, and the
@@ -568,6 +590,7 @@ def compute_serial_reference(
     n_ranks: int = 1,
     land_mask: str = "none",
     bathymetry_file: str = "",
+    tripole: bool = False,
 ):
     """Serial reference fields after ``n_steps`` — every rank, BEFORE
     the MPI halo backend is armed.
@@ -598,6 +621,7 @@ def compute_serial_reference(
         # run is stock-CG vs stock-CG and must stay solver-matched too.
         force_pcg=(baro_solver == "implicit_cn" and n_ranks > 1),
         land_mask=land_mask, bathymetry_file=bathymetry_file,
+        tripole=tripole,
     )
     model = LatLonCGridOceanModel(grid, z_coord, config)
     for _ in range(n_steps):
@@ -2271,8 +2295,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--tripole", action="store_true",
-        help="Tripolar (ORCA-fold) grid benchmark — NOT YET WIRED; see "
-             "error message for what exists.",
+        help="Tripolar (ORCA-fold) grid lane on the synthetic tripole: "
+             "fold-aware band layout (north rank owns the seam), full-model "
+             "step validated MPI-vs-serial (test_ocean_mpi_tripole_step_"
+             "parity.py). explicit_substep barotropic only; rows are "
+             "tagged grid=tripole.",
     )
     return p
 
@@ -2281,25 +2308,21 @@ def main() -> int:
     args = build_parser().parse_args()
 
     if args.tripole:
-        # Operator-level tripolar band-MPI machinery EXISTS and is
-        # validated (fold-aware exchange_halo_latlon /
-        # slice_cgrid_geometry_to_band + operator parity in
-        # tests/distributed/test_latlon_mpi_tripole.py and
-        # tests/parallel/test_latlon_mpi_tripole_serial.py), and
-        # initialize_distributed_latlon already accepts fold=geom.fold.
-        # What is missing is a validated FULL-MODEL tripolar MPI step
-        # (no test steps LatLonCGridOceanModel on a tripole grid under
-        # MPI) and a tripole IC/bathymetry path in this driver.  Refuse
-        # loudly rather than emit unvalidated timings.
-        raise NotImplementedError(
-            "--tripole: the ocean-side full-model fold step is not wired "
-            "into this benchmark yet. Operator-level tripolar band-MPI "
-            "halo machinery exists (tests/distributed/"
-            "test_latlon_mpi_tripole.py); to wire this flag, build the "
-            "tripole geometry, pass fold=geom.fold to "
-            "initialize_distributed_latlon, and validate a full "
-            "LatLonCGridOceanModel.step MPI-vs-serial parity case first."
-        )
+        # WIRED (audit item 4): the full-model fold step is now validated
+        # MPI-vs-serial (tests/ocean/distributed/
+        # test_ocean_mpi_tripole_step_parity.py, np1/np2 at f64 1e-8) on
+        # the synthetic tripole this lane builds.  Combinations that stay
+        # refused, loudly:
+        if args.baro_solver != "explicit_substep":
+            raise SystemExit(
+                "--tripole currently validates the explicit_substep "
+                "barotropic only (the distributed implicit-CN PCG has no "
+                "tripole parity case); pass --baro-solver "
+                "explicit_substep.")
+        if args.land_mask != "none":
+            raise SystemExit(
+                "--tripole builds the synthetic tripole's own cap/land "
+                "mask; --land-mask etopo is a regular-lat-lon lane.")
 
     # --- Configure JAX BEFORE any JAX import (CPU or per-rank GPU) ---
     if args.device == "gpu":
@@ -2394,6 +2417,7 @@ def main() -> int:
             n_ranks=n_ranks,
             land_mask=args.land_mask,
             bathymetry_file=args.bathymetry_file,
+            tripole=args.tripole,
         )
 
     model, state, total_cells, layout, part_metrics = build_case(
@@ -2410,6 +2434,7 @@ def main() -> int:
         wet_balance=args.wet_balance,
         land_mask=args.land_mask,
         bathymetry_file=args.bathymetry_file,
+        tripole=args.tripole,
     )
     cells_per_rank = total_cells // n_ranks
 
@@ -2580,6 +2605,7 @@ def main() -> int:
         # must be recorded explicitly — it also resolves transport="mpi4jax".
         # solver_variant records the wide-halo/local-clamp levers so an A/B
         # pair can never be conflated with the baseline in aggregation.
+        _grid_label = "tripole" if args.tripole else "latlon"
         _variant = args.baro_solver
         if os.environ.get("LEGOESM_BARO_LOCAL_CLAMP", "0") == "1":
             _variant += "+local_clamp"
@@ -2588,6 +2614,7 @@ def main() -> int:
         _md_over = {"solver_variant": _variant}
         if part_metrics is not None:
             _md_over["partition_metrics"] = part_metrics
+        _md_over["grid"] = _grid_label
         write_json(
             report, out_dir / f"{stem}.json",
             n_ranks_true=n_ranks,
