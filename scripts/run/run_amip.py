@@ -190,7 +190,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # modes near the poles, so ``--dt`` can be set by the equatorial
     # CFL.  Essential for 1° AMIP runs spanning >10 yr.
     parser.add_argument(
-        "--use-polar-filter", action="store_true",
+        "--use-polar-filter", action=argparse.BooleanOptionalAction,
         help="Enable Fourier polar filter for lat-lon C-grid (lifts "
              "pole-cell CFL → enables larger --dt at high resolution).",
     )
@@ -393,16 +393,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "(legacy default).  Useful for CPU benchmarking."
         ),
     )
-    parser.add_argument("--diurnal-cycle", action="store_true", default=False)
+    parser.add_argument("--diurnal-cycle", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
-        "--orbital-insolation", action="store_true", default=False,
+        "--orbital-insolation", action=argparse.BooleanOptionalAction, default=False,
         dest="orbital_insolation",
         help="Use realistic (Berger 1978) orbital insolation for AMIP-II: "
              "present-day orbital declination + Earth-Sun distance factor "
              "(a/r)^2 eccentricity asymmetry (~+/-3.4%%). Default off = "
              "circular orbit (idealized).",
     )
-    parser.add_argument("--dynamic-albedo", action="store_true", default=False,
+    parser.add_argument("--dynamic-albedo", action=argparse.BooleanOptionalAction, default=False,
                         help="Zenith-angle-dependent ocean albedo "
                              "(Briegleb 1992) instead of the constant "
                              "ocean albedo; sea-ice/land blends unchanged.")
@@ -638,7 +638,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         type=float, default=None,
                         help="Sundqvist autoconversion rate c_0 [1/s] (None="
                              "default 1e-3; bounds 1e-4..1e-2).")
-    parser.add_argument("--aerosol-ccn", action="store_true", default=False,
+    parser.add_argument("--aerosol-ccn", action=argparse.BooleanOptionalAction, default=False,
                         help="Diagnose the specified cloud-droplet number "
                              "from the prescribed aerosol optical depth "
                              "(Andreae 2009 AOT-CCN inversion) instead of "
@@ -725,7 +725,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--albedo-land-month", type=int, default=0,
                         help="Month (1-12) to pick from a monthly land-albedo "
                              "climatology; 0 = annual mean (default).")
-    parser.add_argument("--slab-land-active", action="store_true", default=False,
+    parser.add_argument("--slab-land-active", action=argparse.BooleanOptionalAction, default=False,
                         help="Activate the slab-land SEB tile using the "
                              "topography-derived land fraction (requires "
                              "--topography). No separate LSM file needed.")
@@ -794,7 +794,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Disable Hortonian infiltration-excess runoff on the "
                              "bucket (keep saturation excess only; all rain "
                              "infiltrates up to capacity). Default: enabled.")
-    parser.add_argument("--land-stomatal-beta", action="store_true", default=False,
+    parser.add_argument("--land-stomatal-beta", action=argparse.BooleanOptionalAction, default=False,
                         dest="land_stomatal_beta",
                         help="Route the soil-water availability through the shared "
                              "land Jarvis (1976) stomatal model "
@@ -834,7 +834,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "stomatal transpiration) that holds land ET below "
                              "potential and breaks the over-evaporation wet loop. "
                              "Only affects --use-multilayer-land runs.")
-    parser.add_argument("--snow-albedo-feedback", action="store_true",
+    parser.add_argument("--snow-albedo-feedback", action=argparse.BooleanOptionalAction,
                         default=False, dest="snow_albedo_feedback",
                         help="Prognostic snow + snow-albedo feedback on the "
                              "slab-land tile: snow water (SWE) accumulates from "
@@ -882,7 +882,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "curve.")
 
     # Surface / diagnostics
-    parser.add_argument("--monthly-means", action="store_true", default=False)
+    parser.add_argument("--monthly-means", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--t-ice-k", type=float,
                         default=constants.T_freeze_ocean,
                         help="SST floor / sea-ice ramp threshold [K]")
@@ -929,8 +929,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Host-side forcing update cadence [days]")
     parser.add_argument("--seed", type=int, default=_EXPERIMENT_DEFAULTS.seed,
                         help="Master RNG seed for reproducibility")
-    parser.add_argument("--cmip-output", action="store_true", default=False)
-    parser.add_argument("--clear-sky-diag", action="store_true", default=False)
+    parser.add_argument("--cmip-output", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--clear-sky-diag", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
         "--evaluate", action="store_true", default=False,
         help="Run ClimateEval after a successful AMIP run to compare "

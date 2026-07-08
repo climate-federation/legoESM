@@ -1845,3 +1845,52 @@ def test_top_sponge_flags_flow_to_dycore_config():
     assert cfg_on.dycore.sponge_width_m == 12000.0
     assert cfg_on.dycore.sponge_shape == "sam_rational"
     assert cfg_on.dycore.sponge_scale_height_m == 8000.0
+
+
+def test_yaml_settable_bools_have_no_switches():
+    """#872 sweep: every store_true flag a shipped YAML can set true is now
+    BooleanOptionalAction, so a --config that enables it stays CLI-overridable
+    (--no-<flag> => False). The old store_true form made a YAML-true value
+    permanently un-overridable (no negative form), breaking one-lever A/B legs
+    — hit three times on 2026-07-08 alone (#873 converted the first three)."""
+    swept = [
+        "aerosol_ccn", "clear_sky_diag", "cmip_output", "diurnal_cycle",
+        "land_stomatal_beta", "monthly_means", "orbital_insolation",
+        "snow_albedo_feedback", "slab_land_active", "dynamic_albedo",
+        # amip_production_latlon24.yaml sets it true (#869) — the filter-off
+        # A/B leg needs --no-use-polar-filter (codex: the variant YAML created
+        # a fresh instance of exactly this pattern).
+        "use_polar_filter",
+    ]
+    for dest in swept:
+        parser = build_arg_parser()
+        # Simulate the YAML layer enabling the flag (load_yaml_config applies
+        # file values via parser.set_defaults).
+        parser.set_defaults(**{dest: True})
+        flag = "--no-" + dest.replace("_", "-")
+        args = parser.parse_args(["--dataset", "analytical", flag])
+        assert getattr(args, dest) is False, (
+            f"{flag} must override a YAML-set {dest}=true")
+        # And the positive default still holds without the switch.
+        args = parser.parse_args(["--dataset", "analytical"])
+        assert getattr(args, dest) is True
+
+
+def test_latlon24_production_variant_pins_polar_filter():
+    """#869: the lat-lon production lane variant MUST carry the polar filter
+    (the 12-day one-variable A/B convicted filter-off: blowup day 1 vs
+    COMPLETED) and the filter-enabled dt=600 (pole clamp lifted, ~10x
+    throughput, 30-day soak clean). A silent drop of either re-opens the
+    day-9/10 blowup."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    cfg_file = _repo_root() / "config" / "amip" / "amip_production_latlon24.yaml"
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
+    args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
+    assert args.use_polar_filter is True
+    assert args.dt == 600.0
+    assert args.grid_type == "latlon" and args.discretization == "latlon_cgrid"
+    assert args.resolution == 24 and args.nlev == 20
+    # Physics inherited from the production include (one source of truth).
+    cfg = build_config_from_args(args)
+    assert cfg.convection == "bechtold" and cfg.gravity_wave_drag == "mcfarlane"
