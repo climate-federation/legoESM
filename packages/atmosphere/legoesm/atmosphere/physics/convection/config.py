@@ -55,12 +55,13 @@ __param_spec__ = {
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE trigger gate",
             "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
             "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
+            "downdraft_rh_sharpness": "numerics: sigmoid sharpness on the downdraft RH trigger [1/RH-fraction]",
             "epsilon_deep": "entrainment: IFS base rate scaled by the height-dependent (1.3-RH) factor in-scheme, not a constant tunable",
             "epsilon_midlevel": "entrainment: IFS mid-level base rate scaled in-scheme",
             "epsilon_shallow": "entrainment: IFS shallow base rate scaled in-scheme",
+            "lcl_membership_sharpness": "numerics: sigmoid sharpness on the below-LCL level membership [1/level index]",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
             "precip_efficiency": "bulk in-updraft rain fraction (default 0.7, gated `if > 0.0` in bechtold.py; 0 = legacy detrain-all which is unstable); retune via config, not sigmoid-trained across the off/on discontinuity",
-            "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the buoyancy/RH soft triggers",
             "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
@@ -207,6 +208,7 @@ __param_spec__ = {
     "KuoConfig": {
         "scheme_key": "atm.conv.KuoConfig",
         "excluded": {
+            "cvgu_activation_scale": "numerics: tanh activation scale of the 0-1 convective_mask DIAGNOSTIC (no tendency effect; cvgu ~1e-4 kg/m^2/s when firing)",
             "icond_sharpness": "numerics: sigmoid sharpness on the smooth icond activation gates",
             "ptenq_sign_floor": "numerics: division-by-zero guard in the scale-free ptenq sign",
             "qv_min": "numerics: in-cloud vapor / LCL-detection floor",
@@ -252,13 +254,14 @@ __param_spec__ = {
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
             "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
             "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
+            "downdraft_rh_sharpness": "numerics: sigmoid sharpness on the downdraft RH trigger [1/RH-fraction]",
             "epsilon_deep": "entrainment: deep-branch base rate held fixed in-scheme",
             "epsilon_midlevel": "entrainment: mid-level base rate held fixed in-scheme",
             "epsilon_shallow": "entrainment: shallow-branch base rate held fixed in-scheme",
+            "lcl_membership_sharpness": "numerics: sigmoid sharpness on the below-LCL level membership [1/level index]",
             "moisture_convergence_sharpness": "numerics: sigmoid sharpness on the MC-proxy threshold",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
             "precip_efficiency": "default 0 = disabled (legacy no rain-split, gated `if > 0.0` in tiedtke.py); enable + retune via config, not sigmoid-trained from the off state",
-            "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the buoyancy/RH soft triggers",
         },
         "params": {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Tiedtke (1989) stability cap", "shape": None},
@@ -508,7 +511,10 @@ class KuoConfig(NamedTuple):
 
     The optional ``partition="anthes"`` Kuo-Anthes (1977) closure splits
     the source between heating ``(1 − bkuo)`` and moistening ``bkuo``
-    with ``bkuo = (1 − RH_mean − rh_offset)``.
+    with ``bkuo = clip(1 − RH_mean − rh_offset, 0, 1)`` — b is a
+    moistening FRACTION, so it is clamped to [0, 1] (a near-saturated
+    layer with ``RH_mean + rh_offset > 1`` moistens nothing rather than
+    flipping the term into spurious extra drying).
 
     Fields
     ------
@@ -552,6 +558,14 @@ class KuoConfig(NamedTuple):
     zint_floor : float
         Safety floor [kg/m²] on the ``|zint|`` normalisation denominator
         so the closure is finite when the convective layer is empty.
+    cvgu_activation_scale : float
+        Activation scale [kg/m²/s] of the 0-1 ``convective_mask``
+        DIAGNOSTIC ``tanh(cvgu / scale)``.  Typical firing columns have
+        ``cvgu ~ 1e-4`` kg/m²/s, so the default 1e-8 saturates the mask
+        to ~1 whenever the scheme fires while keeping ``tanh(0) = 0``
+        on the quiescent path.  Diagnostic-only smoothing (no effect on
+        tendencies) — matches the sibling ``buoyancy_scale_K`` /
+        ``supersat_scale`` trigger-normaliser pattern.
     """
     entrainment: float = 5.0e-5
     newton_iters: int = 5
@@ -563,6 +577,7 @@ class KuoConfig(NamedTuple):
     supersat_scale: float = 1.0e-5
     ptenq_sign_floor: float = 1.0e-30
     zint_floor: float = 1.0e-12
+    cvgu_activation_scale: float = 1.0e-8
 
 
 class MassFluxConfig(NamedTuple):
@@ -1145,9 +1160,18 @@ class TiedtkeConfig(NamedTuple):
         Whether to compute CMT (default ``True``).
     cmt_c_u, cmt_c_d : float
         Gregory et al. 1997 closure coefficients (default 0.7).
-    smooth_trigger_sharpness : float
-        Sigmoid sharpness on the buoyancy / RH soft triggers (default
-        0.02).
+    downdraft_rh_sharpness : float
+        Sigmoid sharpness of the downdraft RH trigger
+        ``sigmoid(k · (downdraft_RH_min − rh_below))`` in
+        [1/RH-fraction].  The RH argument is O(0.1), so the default 10
+        gates crisply around ``downdraft_RH_min``.  NOT interchangeable
+        with a level-index sharpness (different argument units) —
+        replaces the former dead ``smooth_trigger_sharpness`` field,
+        whose 0.02 default was mis-scaled for this argument anyway.
+    lcl_membership_sharpness : float
+        Sigmoid sharpness of the below-LCL level membership
+        ``sigmoid(k · (level − k_lcl_smooth))`` in [1/level index]
+        (default 2.0 — a ~1-level transition).
     tau_M_u_relax : float
         Implicit-Euler relaxation timescale [s] for the profile carry
         ``M_u`` toward its diagnosed equilibrium (default 1800.0).
@@ -1180,7 +1204,8 @@ class TiedtkeConfig(NamedTuple):
     enable_cmt: bool = True
     cmt_c_u: float = 0.7
     cmt_c_d: float = 0.7
-    smooth_trigger_sharpness: float = 0.02
+    downdraft_rh_sharpness: float = 10.0
+    lcl_membership_sharpness: float = 2.0
     tau_M_u_relax: float = 1800.0
     parcel_dT: float = 0.5
     parcel_dq: float = 1.0e-3
@@ -1266,7 +1291,8 @@ class BechtoldConfig(NamedTuple):
         AR1 decorrelation timescale [s] (default 7200.0).
     enable_downdraft, downdraft_alpha, downdraft_RH_min : as Tiedtke.
     enable_cmt, cmt_c_u, cmt_c_d : as Tiedtke.
-    cape_threshold, cape_sharpness, smooth_trigger_sharpness,
+    downdraft_rh_sharpness, lcl_membership_sharpness : as Tiedtke.
+    cape_threshold, cape_sharpness,
     parcel_dT, parcel_dq, tau_M_u_relax,
     cloud_depth_deep, cloud_depth_shallow_max, depth_split_sharpness :
         as Tiedtke.
@@ -1304,7 +1330,9 @@ class BechtoldConfig(NamedTuple):
     # [1/(J/kg)] gives a tight CAPE sigmoid around it.
     cape_threshold: float = 70.0
     cape_sharpness: float = 0.1
-    smooth_trigger_sharpness: float = 0.02
+    # See TiedtkeConfig.downdraft_rh_sharpness / lcl_membership_sharpness.
+    downdraft_rh_sharpness: float = 10.0
+    lcl_membership_sharpness: float = 2.0
     parcel_dT: float = 0.5
     parcel_dq: float = 1.0e-3
     tau_M_u_relax: float = 1800.0

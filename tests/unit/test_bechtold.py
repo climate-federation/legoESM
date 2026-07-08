@@ -626,7 +626,12 @@ def test_bechtold_mse_conservation_within_tolerance():
     dp = ph[:, 1:] - ph[:, :-1]
     H = float(jnp.sum(out.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
     Q = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
-    C = float(jnp.sum(out.dq_c_conv_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    # Total detrained condensate = suspended cloud water + the in-updraft rain
+    # split (default precip_efficiency=0.7 diverts most of it to dq_r_conv_dt).
+    # dT_dt already carries the latent heat of the FULL condensation, so the
+    # MSE budget must count cloud + rain to close.
+    dq_r = out.dq_r_conv_dt if out.dq_r_conv_dt is not None else jnp.zeros_like(out.dq_c_conv_dt)
+    C = float(jnp.sum((out.dq_c_conv_dt + dq_r) * dp / constants.g, axis=1).mean()) * constants.L_v
     rel = abs(H + Q + C) / (abs(H) + abs(Q) + abs(C) + 1e-10)
     assert rel < 0.10, (
         f"Bechtold (implicit_flux) MSE residual {H+Q+C:.1f} W/m^2 "
@@ -689,3 +694,45 @@ def test_bechtold_precip_efficiency_rain_split():
     # heat/vapour tendencies untouched by the split
     assert jnp.array_equal(out1.dT_dt, out0.dT_dt)
     assert jnp.array_equal(out1.dq_v_dt, out0.dq_v_dt)
+
+
+# ---------------------------------------------------------------------------
+# Trigger sharpness fields (fix 2026-07) — same defect class as Tiedtke:
+# BechtoldConfig.smooth_trigger_sharpness was dead; the downdraft RH trigger
+# and below-LCL membership hardcoded 10.0 / 2.0.
+# ---------------------------------------------------------------------------
+
+def test_bechtold_smooth_trigger_sharpness_removed():
+    cfg = BechtoldConfig()
+    assert not hasattr(cfg, "smooth_trigger_sharpness")
+    assert cfg.downdraft_rh_sharpness == 10.0
+    assert cfg.lcl_membership_sharpness == 2.0
+
+
+def test_bechtold_downdraft_sharpness_fields_wired():
+    """Perturbing either new sharpness field changes the downdraft-branch
+    tendencies (both were hardcoded literals before)."""
+    T, q, pf, ph, u, v = _column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    stoch = jnp.zeros((ncol,))
+    out_default, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(enable_downdraft=True),
+    )
+    out_rh_flat, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(enable_downdraft=True,
+                              downdraft_rh_sharpness=1e-6),
+    )
+    out_lcl_flat, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(enable_downdraft=True,
+                              lcl_membership_sharpness=1e-6),
+    )
+    assert float(jnp.max(jnp.abs(out_rh_flat.dT_dt - out_default.dT_dt))) > 1e-10, (
+        "downdraft_rh_sharpness is not wired"
+    )
+    assert float(jnp.max(jnp.abs(out_lcl_flat.dT_dt - out_default.dT_dt))) > 1e-10, (
+        "lcl_membership_sharpness is not wired"
+    )

@@ -27,7 +27,9 @@ __physics_contract__ = {
         "Prognostic multi-azimuthal / multi-wavenumber spectral gravity-wave "
         "drag: carries a wave momentum-flux spectrum forward in time (relaxed "
         "toward a launch source), saturates it upward, and deposits the "
-        "stress-divergence as wind tendencies (opt-in; known sign defect)."
+        "stress-divergence as wind tendencies carrying the constant launch-"
+        "level directional factor s0 = tanh((c - U_launch)/w) ~ "
+        "sign(c - U_launch) (opt-in)."
     ),
     "inputs": {
         "u": "m/s", "v": "m/s", "T": "K",
@@ -40,30 +42,40 @@ __physics_contract__ = {
         "spectrum_new": "Pa (updated wave momentum-flux spectrum)",
     },
     "sign_convention": (
-        "z up. INTENDED as a momentum sink with KE->heat "
-        "(dT_dt=-(u*du_dt+v*dv_dt)/c_pd, gated by config.thermal_tendency) and "
-        "eps_gwd>=0. KNOWN DEFECT (F-GWD-1, parameterization_checks.md): the "
-        "deposition is missing the sign(c - U_proj) factor, so a symmetric "
-        "launch spectrum yields a wind-independent force (not a true drag) and "
-        "eps_gwd can be < 0 (accelerates jets). Opt-in only; default GWD=none."
+        "z up; waves launched at the surface propagate upward. The vertical "
+        "flux of azimuth-projected momentum carried by a wave of phase speed "
+        "c is s0*F with F>=0 the carried spectrum and s0 = sign(c - U_launch) "
+        "FIXED at the launch level (a wave's pseudomomentum sign does not "
+        "change with height until absorbed), so the deposition du_proj/dt = "
+        "+g*(dF/dp)*s0 relaxes U_proj TOWARD c (a true drag whenever the "
+        "spectrum is slower than the wind; F-GWD-1 fixed). Using the CONSTANT "
+        "s0 (not the local-layer sign) makes the column deposition telescope "
+        "to g*s0*(F_launch - F_top), so momentum is conserved even across a "
+        "critical level where the local sign flips. Frictional heating uses "
+        "the intrinsic form dT_dt = (g/c_pd)*sum(drag*|c - U_proj|) >= 0 "
+        "(gated by config.thermal_tendency) and eps_gwd >= 0 BY CONSTRUCTION "
+        "(|.| >= 0 and the carried flux may not grow above the flux entering "
+        "from below)."
     ),
     # Conserves NOTHING robustly: the spectrum is RELAXED toward a launch source
-    # (a source/sink, not conserved wave momentum flux); the thermal (energy)
-    # tie-back is config-gated (thermal_tendency) and the documented F-GWD-1
-    # sign defect means the drag is not a guaranteed momentum sink. Declaring
-    # any conserved quantity would over-claim.
+    # (a source/sink, not conserved wave momentum flux) and the wave-energy flux
+    # through the column top is not tracked, so the column budget stays OPEN;
+    # the thermal (energy) tie-back is config-gated (thermal_tendency).
+    # Declaring any conserved quantity would over-claim.
     "conserves": ["none"],
     "differentiable": True,
     "reference": (
         "Multi-azimuthal spectral non-orographic GWD (prognostic wave "
-        "spectrum), legoESM; known defect tracked as F-GWD-1 in "
-        "docs parameterization_checks.md (no external reference cited)"
+        "spectrum), legoESM; directional momentum-flux sign per Warner & "
+        "McIntyre (1996) / Scinocca (2003); intrinsic-frequency heating as in "
+        "E3SM gw_common dttke (sum_l (c_l - ubm)*gwut_l)"
     ),
     "idealized_test": (
         "rest state -> zero tendency and spectrum relaxes toward launch_flux "
-        "on timescale tau_decay; du_dt/dv_dt shapes (ncol, nlev); "
-        "FLAG: eps_gwd>=0 does NOT hold until F-GWD-1 (missing sign factor) "
-        "is fixed"
+        "on timescale tau_decay; du_dt/dv_dt shapes (ncol, nlev); symmetric "
+        "two-wave spectrum (+-c, c < U) in mean flow U > 0 -> net force "
+        "opposing U, zero force at U = 0 by symmetry, eps_gwd >= 0 "
+        "(tests/atmosphere/hydrostatic/unit/test_gwd_physical_realism.py)"
     ),
 }
 
@@ -188,6 +200,15 @@ def prognostic_spectral_gwd(
             config.breaking_sharpness * (F_carry - tau_sat_flat[:, k])
         )
         F_new = F_carry * (1.0 - f_break) + tau_sat_flat[:, k] * f_break
+        # No wave source aloft: the carried flux may not GROW above the flux
+        # entering the layer from below.  The smooth blend alone overshoots by
+        # up to ~0.28/breaking_sharpness [Pa] when tau_sat > F_carry (the
+        # sigmoid tail pulls F toward the larger saturation value), which
+        # would make drag_deposit < 0 — a spurious momentum/energy source that
+        # breaks the eps_gwd >= 0 guarantee.  minimum() keeps the blend where
+        # the wave actually breaks (F_carry > tau_sat) and is exact (deposit
+        # = 0) where it does not.
+        F_new = jnp.minimum(F_new, F_carry)
         drag_deposit = (F_carry - F_new) / jnp.clip(dp_flat[:, k], 1.0, None)
         return F_new, drag_deposit
 
@@ -204,31 +225,52 @@ def prognostic_spectral_gwd(
     # not ``1`` as the earlier comment claimed.  Audit cycle iter-26
     # finding P0: missing this factor under-counted GWD acceleration
     # by a factor of ~9.8 in the prognostic-spectral path.
-    # Weight by azimuthal direction for du/dv.
-    # FIXME(F-GWD-1, CRITICAL — opt-in scheme): this deposition is missing the
-    # ``sign(c - U_proj)`` factor, so a symmetric launch spectrum gives a force
-    # independent of the wind (not a drag).  Restoring ``sign(intrinsic)`` makes
-    # it wind-dependent but, with ``c_phase = N/k`` often ≫ U, the
-    # ``tau_sat ~ |intrinsic|^3`` saturation then preferentially breaks the
-    # along-wind waves and ACCELERATES jets (column dissipation eps_gwd < 0).
-    # The sign factor is necessary but not sufficient — the breaking/saturation
-    # energetics need a proper spectral-GWD review + a momentum-deposition /
-    # QBO validation benchmark before this can be trusted operationally. Left
-    # unchanged (default GWD scheme is "none") pending that work; see
-    # parameterization_checks.md F-GWD-1.
+    #
+    # Sign convention (z up; waves launched at the surface propagate up;
+    # F-GWD-1 fix).  The vertical flux of azimuth-projected momentum carried
+    # by a wave of phase speed c in projected wind U_proj is
+    #   tau_wave = s0 * F,   F >= 0 the carried spectrum,
+    # where s0 = sign(c - U_launch) is FIXED at the launch (surface) level: a
+    # wave's pseudomomentum sign is set at launch and does NOT change with
+    # height until the wave is absorbed.  Deposition in a layer (flux in at the
+    # bottom minus flux out at the top, F_carry - F_new = dp*drag >= 0 by the
+    # no-growth clamp) puts that momentum into the flow:
+    #   du_proj/dt = -(1/rho) d(tau_wave)/dz = +g * s0 * drag
+    # (hydrostatic dp = -rho*g*dz).  Using the CONSTANT launch sign s0 (not the
+    # local-layer tanh(c - U_proj)) is what conserves momentum: the column sum
+    # telescopes to g*s0*(F_launch - F_top).  The earlier local-layer sign
+    # dropped the momentum deposited within a critical-level band (|c-U_proj| <
+    # w), where the local sign -> 0 exactly as the deposition peaks (codex
+    # conservation fix).  s0 is smoothed as tanh((c - U_launch)/w) for
+    # differentiability; w = config.direction_sign_width [m/s]; nlev-1 is the
+    # surface (launch) level.
+    launch_sign = jnp.tanh(
+        intrinsic[:, :, :, nlev - 1:nlev] / config.direction_sign_width
+    )  # (ncol, n_az, n_wn, 1) -> broadcast over levels
     _trig_stack = jnp.stack([cos_az, sin_az], axis=-1)[None, :, None, None, :]
-    _duv_spec = -drag_4d[..., None] * _trig_stack
+    _duv_spec = (drag_4d * launch_sign)[..., None] * _trig_stack
     _duv = jnp.sum(_duv_spec, axis=(1, 2)) * constants.g  # (ncol, nlev, 2)
     du_dt = _duv[..., 0]
     dv_dt = _duv[..., 1]
 
-    # Frictional heating
-    dT_dt = -(u * du_dt + v * dv_dt) / constants.c_pd
+    # Frictional heating from wave dissipation.  The vertical energy flux of a
+    # gravity wave is c_intrinsic * (momentum flux), so the dissipation rate is
+    #   |c - U_proj| * (-d(momentum flux)/dz) = |intrinsic| * g * drag  [W/kg],
+    # non-negative BY CONSTRUCTION (drag >= 0 from the no-growth clamp,
+    # |intrinsic| >= 0).  At a critical level |intrinsic| -> 0: momentum still
+    # deposits but ~zero energy dissipates (it goes to the mean-flow KE), which
+    # is physically correct.  Independent of the (constant) sign s0 used for
+    # the momentum tendency, so heating and eps_gwd stay >= 0 even when s0
+    # differs from the local (c - U_proj).
+    heating = constants.g * jnp.sum(
+        drag_4d * jnp.abs(intrinsic), axis=(1, 2)
+    )  # (ncol, nlev) [W/kg]
+    dT_dt = heating / constants.c_pd
     if not config.thermal_tendency:
         dT_dt = jnp.zeros_like(dT_dt)
 
-    # Column dissipation (positive-definite: KE lost by the mean flow)
-    eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
+    # Column dissipation [W/m^2] (>= 0 by construction, see heating above).
+    eps_gwd = jnp.sum(rho * heating * dz, axis=1)
 
     # Prognostic spectrum update: relax toward launch source.  Pin the
     # broadcast dtype to the input spectrum dtype so the relaxation

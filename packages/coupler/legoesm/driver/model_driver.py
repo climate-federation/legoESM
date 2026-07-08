@@ -1469,7 +1469,8 @@ class ModelDriver:
         NOT silently degrade to the slab (that would run different land physics
         silently, the issue-#405 bug class)."""
         import numpy as _np
-        from legoesm.land import init_multilayer_land_state
+        from legoesm.land import init_multilayer_land_state, aridity_theta_init
+        from legoesm.thermo import saturation_mixing_ratio
         from legoesm.land.clm_surface_map import (
             load_clm_surface, download_clm_surfdata, clm_multilayer_setup,
         )
@@ -1560,17 +1561,79 @@ class ModelDriver:
         ncol = lat_deg.shape[0]
         T_init = ad.flatten_2d(self.state.T.data[..., -1]).reshape(-1).astype(
             storage_dtype)
-        # Soil-moisture cold-start = frac * theta_sat (#730; default 0.5 is
-        # byte-identical to the init default).  A drier start can break the
-        # multilayer over-evaporation wet loop.
-        self._land_ml_state = init_multilayer_land_state(
-            ncol, cfg, T_init=T_init,
-            theta_init=(self.config.land_soil_moisture_init_frac
-                        * cfg.hydraulics.theta_sat))
-        logger.info(
-            "  Land tile: MULTILAYER override ACTIVE (%d soil layers, %d columns)",
-            cfg.soil_grid.n_layers, ncol,
-        )
+        # Aridity-aware cold-start soil moisture (#730 / #837).  Seed theta from
+        # the near-surface RH of the IC atmosphere, mapped into the per-column
+        # plant-available range [theta_wp, theta_fc] the tile's beta reads
+        # (params.theta_wp/theta_fc from clm_multilayer_setup).  The legacy
+        # moisture-uniform 0.5*theta_sat seed leaves subtropical deserts
+        # rainforest-wet, so a hot bare-soil skin drives a runaway
+        # potential-evaporation blowup (~day 8).  RH here uses the model's own
+        # saturation_mixing_ratio -- the SAME law the land bulk flux uses -- so it
+        # is consistent with the running physics (q_v is the atmospheric lowest
+        # level; p_s is a close proxy for the lowest-level pressure).  Fall back to
+        # the frac*theta_sat uniform seed (``land_soil_moisture_init_frac``) only
+        # when the IC carries no q_v tracer (the aridity map needs RH).
+        _qv = self.q_v  # canonical tracer store: raw (...,nlev) array, same column
+        # layout as self.state.T.data; populated by both the analytical and ERA5 IC.
+        if _qv is not None:
+            q_v_low = ad.flatten_2d(
+                getattr(_qv, "data", _qv)[..., -1]).reshape(-1).astype(storage_dtype)
+            p_s = ad.flatten_2d(
+                getattr(self.state.p_s, "data", self.state.p_s)).reshape(-1).astype(
+                    storage_dtype)
+            rh_low = q_v_low / jnp.maximum(
+                saturation_mixing_ratio(T_init, p_s), 1e-12)
+            theta_wp = jnp.asarray(getattr(params, "theta_wp", cfg.theta_wp))
+            theta_fc = jnp.asarray(getattr(params, "theta_fc", cfg.theta_fc))
+            theta_init = aridity_theta_init(
+                rh_low, theta_wp, theta_fc).reshape(-1, 1).astype(storage_dtype)
+        else:
+            theta_init = (self.config.land_soil_moisture_init_frac
+                          * cfg.hydraulics.theta_sat)
+            logger.warning(
+                "  Land tile: IC has no q_v tracer; multilayer soil seeded at "
+                "land_soil_moisture_init_frac*theta_sat (aridity-aware skipped).")
+        # Canonical cold-start template — always built so the spun-up land-IC
+        # path (below) has the correct pytree STRUCTURE to graft onto (the
+        # restart round-trips only the core prognostic fields; the optional
+        # structural fields would otherwise be None and break the segment scan).
+        _template = init_multilayer_land_state(
+            ncol, cfg, T_init=T_init, theta_init=theta_init)
+        _land_ic_path = getattr(self.config, "land_ic_path", "")
+        if _land_ic_path:
+            # #746 item 1: a spun-up land IC (offline run_land_spinup restart)
+            # REPLACES the cold-start soil column with an equilibrated one, so
+            # the coupled run doesn't start from the day-0 cold-start shock that
+            # drives the land cloud-albedo cold trap.  Shapes are validated
+            # against this run's grid (ncol / n_layers) on load; a mismatch or a
+            # slab-mode restart raises rather than silently reshaping.
+            from legoesm.land.restart import (
+                load_land_restart, merge_land_restart_into_template)
+            _ic_state, _ic_meta = load_land_restart(
+                _land_ic_path, expected_land_mode="multilayer",
+                expected_ncol=ncol, expected_n_layers=cfg.soil_grid.n_layers)
+            # Graft the restart's prognostic columns onto the canonical template
+            # (fixes the pytree structure), then cast the array leaves to the
+            # run's storage precision (the restart deserialises float64).
+            _merged = merge_land_restart_into_template(_ic_state, _template)
+            self._land_ml_state = jax.tree_util.tree_map(
+                lambda a: (a.astype(storage_dtype)
+                           if hasattr(a, "dtype")
+                           and jnp.issubdtype(a.dtype, jnp.floating) else a),
+                _merged)
+            logger.info(
+                "  Land tile: MULTILAYER IC from spin-up restart %s "
+                "(%d soil layers, %d columns; t_end=%.0f s, cold-start seed "
+                "SKIPPED)",
+                _land_ic_path, cfg.soil_grid.n_layers, ncol,
+                float(_ic_meta.get("t_end_s", 0.0)),
+            )
+        else:
+            self._land_ml_state = _template
+            logger.info(
+                "  Land tile: MULTILAYER override ACTIVE (%d soil layers, %d columns)",
+                cfg.soil_grid.n_layers, ncol,
+            )
 
     def _surfdata_land_albedo(self, surfdata_path: str, lat_albedo):
         """Static land albedo field from harmonized surface data.
@@ -2082,7 +2145,7 @@ class ModelDriver:
                         'sst', 'sic', 'precip_total',
                         'sw_up_toa', 'lw_up_toa', 'sw_net_sfc', 'lw_net_sfc',
                         'sw_down_toa', 'shflx', 'lhflx', 'lat_deg_grid',
-                        't_low_mean',
+                        't_low_mean', 'sw_up_toa_clr', 'lw_up_toa_clr',
                     ):
                         if kwargs.get(_tname) is not None:
                             kwargs[_tname] = _g(kwargs[_tname])
@@ -2131,7 +2194,8 @@ class ModelDriver:
                     # CMOR output.  All ranks must participate (collective).
                     for tname in ('precip_total', 'shflx', 'lhflx',
                                   'sw_up_toa', 'lw_up_toa', 'sw_net_sfc',
-                                  'lw_net_sfc', 'sw_down_toa', 't_low_mean'):
+                                  'lw_net_sfc', 'sw_down_toa', 't_low_mean',
+                                  'sw_up_toa_clr', 'lw_up_toa_clr'):
                         arr = kwargs.get(tname)
                         if arr is not None:
                             kwargs[tname] = gather(arr[_ofi], self._layout, root_only=True)
@@ -4740,9 +4804,12 @@ class ModelDriver:
         # prognostic-spectral GWD is active: its wave-action spectrum
         # integration wants the default/compute dtype (codex review;
         # see the GWD integration note in physics_state.init docs).
+        from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+            gwd_carries_spectrum,
+        )
         _seed_dtype = (
             None
-            if phys_cfg.gravity_wave_drag.scheme == "prognostic_spectral"
+            if gwd_carries_spectrum(phys_cfg.gravity_wave_drag.scheme)
             else _get_policy().storage
         )
         _phys_state = init_physics_state(
@@ -5172,11 +5239,14 @@ class ModelDriver:
         # hand-written bechtold/mass_flux/edmf set), and stochastic
         # (Bechtold AR1 state).
         _ct = convection_scheme_traits(_conv)
+        from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+            gwd_carries_spectrum,
+        )
         if (turbulence_scheme_traits(_turb).carries_energy
                 or _ct.is_scalar_prognostic
                 or _ct.is_profile_prognostic
                 or _ct.is_stochastic
-                or _gwd == "prognostic_spectral"):
+                or gwd_carries_spectrum(_gwd)):
             raise NotImplementedError(
                 f"turbulence={_turb!r} / convection={_conv!r} / "
                 f"gwd={_gwd!r} carry prognostic physics state, which "
@@ -6367,6 +6437,12 @@ class ModelDriver:
         held_sw_up_toa = _aux.get("held_sw_up_toa", jnp.zeros(_ens_2d, dtype=_sd))
         held_lw_up_toa = _aux.get("held_lw_up_toa", jnp.zeros(_ens_2d, dtype=_sd))
         held_sw_down_toa = _aux.get("held_sw_down_toa", jnp.zeros(_ens_2d, dtype=_sd))
+        # Clear-sky held TOA up-fluxes (#843): restored from a checkpoint's
+        # diag_accumulators when present, else zeros (cold start / pre-#843).
+        held_sw_up_toa_clr = _aux.get(
+            "held_sw_up_toa_clr", jnp.zeros(_ens_2d, dtype=_sd))
+        held_lw_up_toa_clr = _aux.get(
+            "held_lw_up_toa_clr", jnp.zeros(_ens_2d, dtype=_sd))
         # Convective carry: scalar (ncol,) for mass_flux/edmf, full
         # (ncol, nlev) conv_prog_profile for the profile-prognostic
         # schemes (ZM/KF/Emanuel/Tiedtke/Bechtold).  The shape must be
@@ -6436,14 +6512,28 @@ class ModelDriver:
                 "fresh seed (issue #405/#413)."
             )
 
-        # Slab-land skin temperature — restored from the checkpoint when
-        # available, otherwise initialized from the lowest model-level
-        # air temperature (the thin slab equilibrates within ~1 day).
-        # ``None`` when the land tile is inactive (ocean-only run).
+        # Land skin temperature — restored from the checkpoint when available,
+        # else seeded from the lowest model-level air temperature (the thin
+        # slab / skin equilibrates within ~1 day).  ``None`` when the land tile
+        # is inactive (ocean-only run).
         if self.physics is not None and self.physics.f_land is not None:
-            T_land = _aux.get(
-                "T_land", self.state.T.data[..., -1].astype(_sd)
-            )
+            if "T_land" in _aux:
+                T_land = _aux["T_land"]
+            elif (getattr(self.config, "land_ic_path", "")
+                  and self._land_ml_state is not None):
+                # Spun-up land IC (#746): seed the skin from the equilibrated
+                # TOP-SOIL temperature so the FIRST physics step's land
+                # turbulent fluxes (tiled BL sensible/latent, land q_sfc) are
+                # consistent with the spun-up column — else the cold-start air
+                # temp would leak the day-0 shock into the BL at the closure
+                # seam, undoing part of the spin-up.  T_soil[:, 0] is (ncol,);
+                # reshape to the gridded T_land layout (row-major, the inverse
+                # of the flatten the land init used).
+                T_land = jnp.asarray(
+                    self._land_ml_state.T_soil[:, 0]
+                ).reshape(self.state.T.data[..., -1].shape).astype(_sd)
+            else:
+                T_land = self.state.T.data[..., -1].astype(_sd)
         else:
             T_land = None
 
@@ -6487,7 +6577,10 @@ class ModelDriver:
             turbulence_scheme_traits,
         )
         _turb_traits = turbulence_scheme_traits(cfg.turbulence)
-        _gwd_prognostic = cfg.gravity_wave_drag == "prognostic_spectral"
+        from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+            gwd_carries_spectrum,
+        )
+        _gwd_prognostic = gwd_carries_spectrum(cfg.gravity_wave_drag)
         tke = qke = gwd_spectrum = None
         if _turb_traits.carries_energy or _gwd_prognostic:
             from legoesm.atmosphere.physics.combined import PhysicsConfig
@@ -6581,6 +6674,8 @@ class ModelDriver:
             "held_sw_up_toa": held_sw_up_toa,
             "held_lw_up_toa": held_lw_up_toa,
             "held_sw_down_toa": held_sw_down_toa,
+            "held_sw_up_toa_clr": held_sw_up_toa_clr,
+            "held_lw_up_toa_clr": held_lw_up_toa_clr,
             "conv_prog": conv_prog,
             "T_land": T_land,
             "w_land": w_land,
@@ -6837,6 +6932,13 @@ class ModelDriver:
         held_sw_up_toa = ctx["held_sw_up_toa"]
         held_lw_up_toa = ctx["held_lw_up_toa"]
         held_sw_down_toa = ctx["held_sw_down_toa"]
+        # Clear-sky held TOA up-fluxes (#843): persisted across segments +
+        # checkpoints like the all-sky held fields; zeros on a cold start (or a
+        # pre-#843 checkpoint) — refreshed at the first radiation step.
+        held_sw_up_toa_clr = ctx.get(
+            "held_sw_up_toa_clr", jnp.zeros_like(held_sw_up_toa))
+        held_lw_up_toa_clr = ctx.get(
+            "held_lw_up_toa_clr", jnp.zeros_like(held_lw_up_toa))
         conv_prog = ctx["conv_prog"]
         T_land = ctx["T_land"]
         w_land = ctx["w_land"]
@@ -7136,6 +7238,10 @@ class ModelDriver:
                 held_sw_up_toa=held_sw_up_toa,
                 held_lw_up_toa=held_lw_up_toa,
                 held_sw_down_toa=held_sw_down_toa,
+                # Clear-sky held TOA up-fluxes (#843): persisted across
+                # segments (zeros when the diagnostic is off).
+                held_sw_up_toa_clr=held_sw_up_toa_clr,
+                held_lw_up_toa_clr=held_lw_up_toa_clr,
                 step_index=current_step,
                 target_moisture=_target_moisture,
                 target_mass=_target_mass,
@@ -7144,6 +7250,9 @@ class ModelDriver:
                 # fix): reset to zero at every segment start like precip.
                 sw_up_toa_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 lw_up_toa_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                # Clear-sky TOA up-flux accumulators (#843): reset each segment.
+                sw_up_toa_clr_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                lw_up_toa_clr_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 sw_down_toa_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 sw_net_sfc_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 lw_net_sfc_accum=jnp.zeros(_ens_2d, dtype=_sd),
@@ -7260,6 +7369,11 @@ class ModelDriver:
                         self.tracers[_nm] = _val
             (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
              held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = held_tuple
+            # Clear-sky held TOA up-fluxes (#843) are NOT in the 6-tuple
+            # unpack_carry returns — read them straight off the carry (like
+            # q_i / tke) so the next segment persists them.
+            held_sw_up_toa_clr = _dm_carry.held_sw_up_toa_clr
+            held_lw_up_toa_clr = _dm_carry.held_lw_up_toa_clr
 
             if os.environ.get("LEGOESM_DEBUG_HELD"):
                 import numpy as _np
@@ -7315,6 +7429,9 @@ class ModelDriver:
                 "held_sw_up_toa": held_sw_up_toa,
                 "held_lw_up_toa": held_lw_up_toa,
                 "held_sw_down_toa": held_sw_down_toa,
+                # Clear-sky held fields (#843) persisted for checkpoint restart.
+                "held_sw_up_toa_clr": held_sw_up_toa_clr,
+                "held_lw_up_toa_clr": held_lw_up_toa_clr,
                 "conv_prog": conv_prog,
                 "target_moisture": _target_moisture,
                 "target_mass": _target_mass,
@@ -7401,6 +7518,16 @@ class ModelDriver:
                 # member-wise, consistent with seg_precip).
                 seg_sw_up_toa = _dm_carry.sw_up_toa_accum / _seg_dur
                 seg_lw_up_toa = _dm_carry.lw_up_toa_accum / _seg_dur
+                # Clear-sky TOA up-fluxes for CMOR rsutcs/rlutcs (#843).  None
+                # when the diagnostic is off -> the collector skips the field
+                # (byte-identical to the pre-#843 output); a real segment-mean
+                # (accum / duration) when on.
+                seg_sw_up_toa_clr = (
+                    _dm_carry.sw_up_toa_clr_accum / _seg_dur
+                    if self.config.output.clear_sky_diag else None)
+                seg_lw_up_toa_clr = (
+                    _dm_carry.lw_up_toa_clr_accum / _seg_dur
+                    if self.config.output.clear_sky_diag else None)
                 seg_sw_down_toa = _dm_carry.sw_down_toa_accum / _seg_dur
                 seg_sw_net_sfc = _dm_carry.sw_net_sfc_accum / _seg_dur
                 seg_lw_net_sfc = _dm_carry.lw_net_sfc_accum / _seg_dur
@@ -7419,6 +7546,8 @@ class ModelDriver:
                     precip_total=seg_precip_rate,
                     sw_up_toa=seg_sw_up_toa,
                     lw_up_toa=seg_lw_up_toa,
+                    sw_up_toa_clr=seg_sw_up_toa_clr,
+                    lw_up_toa_clr=seg_lw_up_toa_clr,
                     sw_net_sfc=seg_sw_net_sfc,
                     lw_net_sfc=seg_lw_net_sfc,
                     sw_down_toa=seg_sw_down_toa,

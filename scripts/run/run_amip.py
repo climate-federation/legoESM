@@ -204,6 +204,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Max wave speed [m/s] used to size the polar filter "
              "CFL mask (default 300.0 = external gravity wave).",
     )
+    # #836: hydrostatic lat-lon C-grid top sponge (Rayleigh damping increasing
+    # toward the model lid; absorbs upward gravity-wave energy).  Default OFF.
+    parser.add_argument(
+        "--sponge-coeff", type=float, default=_DYCORE_DEFAULTS.sponge_coeff,
+        help="Rayleigh top-sponge damping SCALE [1/s] for the hydrostatic "
+             "lat-lon C-grid (0 = OFF, default; e.g. 1.157e-5 = 1/day). Exact "
+             "lid value for --sponge-shape sin2; sam_rational peaks at "
+             "sponge_coeff*100/101. Absorbs gravity-wave energy reflecting "
+             "off the rigid model lid (#836).",
+    )
+    parser.add_argument(
+        "--sponge-width-m", type=float, default=_DYCORE_DEFAULTS.sponge_width_m,
+        help="Top-sponge layer depth below the model lid [m] (default "
+             f"{_DYCORE_DEFAULTS.sponge_width_m}).",
+    )
+    parser.add_argument(
+        "--sponge-shape", type=str, default=_DYCORE_DEFAULTS.sponge_shape,
+        choices=["sin2", "sam_rational"],
+        help="Top-sponge ramp shape (default 'sin2').",
+    )
+    parser.add_argument(
+        "--sponge-scale-height-m", type=float,
+        default=_DYCORE_DEFAULTS.sponge_scale_height_m,
+        help="Log-pressure scale height [m] mapping sigma->z for the top "
+             f"sponge (default {_DYCORE_DEFAULTS.sponge_scale_height_m}).",
+    )
     # Task #25: JIT compile bloat at production scale.  The inline
     # SSP-RK3 calls tendency_fn 3× sequentially → XLA inlines three
     # copies of the entire tendency pipeline.  Folding the 3 stages
@@ -497,9 +523,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gravity-wave-drag", type=str, default="mcfarlane",
                         help="GWD scheme: none, rayleigh, lindzen, mcfarlane, "
                              "hines, prognostic_spectral, ml_emulator, or a "
-                             "'+'-joined composite of the diagnostic sources "
-                             "(e.g. 'hines+mcfarlane' to run non-orographic + "
-                             "orographic together). Validated in ExperimentConfig.")
+                             "'+'-joined composite whose source tendencies are "
+                             "summed. Composable parts: rayleigh, lindzen, "
+                             "mcfarlane, hines, and (as the single stateful "
+                             "member) prognostic_spectral — e.g. "
+                             "'mcfarlane+prognostic_spectral' to run orographic "
+                             "+ non-orographic GWD together (issue #834), or "
+                             "'hines+mcfarlane'. Validated in ExperimentConfig.")
     # Tuned air-sea + cloud knobs (the CMIP-realism calibration) — mirror
     # run_coupled so AMIP can run with the SAME tuned slab parameters. Defaults
     # (constant / 0 / None / off) keep the prior AMIP behaviour byte-identical.
@@ -672,6 +702,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "for --use-multilayer-land. Required on compute nodes "
                              "with no outbound internet (empty => download from UCAR "
                              "to /tmp, which fails there).")
+    parser.add_argument("--land-ic", type=str,
+                        default=_EXPERIMENT_DEFAULTS.land_ic_path,
+                        help="Spun-up land IC (#746): a MultiLayerLandState "
+                             "restart (.npz) from scripts/run/run_land_spinup.py. "
+                             "With --use-multilayer-land, REPLACES the cold-start "
+                             "soil column with the equilibrated one (avoids the "
+                             "day-0 cold-start shock behind the land cold trap). "
+                             "ncol/n_layers must match this run's grid.")
     parser.add_argument("--subgrid-orography-file", type=str, default="",
                         help="Subgrid orographic stddev NetCDF (ICON-extpar "
                              "SSO_STDH on a regular lat-lon grid). When set with "
@@ -1072,6 +1110,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         use_polar_filter=args.use_polar_filter,
         polar_filter_cutoff_deg=args.polar_filter_cutoff_deg,
         polar_filter_max_wave_speed=args.polar_filter_max_wave_speed,
+        # #836 top sponge (default OFF -> bit-identical dycore).
+        sponge_coeff=args.sponge_coeff,
+        sponge_width_m=args.sponge_width_m,
+        sponge_shape=args.sponge_shape,
+        sponge_scale_height_m=args.sponge_scale_height_m,
         # Task #25: time integrator selection.
         time_integrator=args.time_integrator,
     )
@@ -1196,6 +1239,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_soil_moisture_init_frac=args.land_soil_moisture_init_frac,
         land_surface_scheme=args.land_surface_scheme,
         surface_stability_scheme=args.surface_stability_scheme,
+        land_ic_path=args.land_ic,
         sponge_enabled=args.sponge_enabled,
         sponge_coeff_per_day=(args.sponge_coeff_per_day
                               if args.sponge_coeff_per_day is not None

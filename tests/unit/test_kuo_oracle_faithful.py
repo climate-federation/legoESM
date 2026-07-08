@@ -411,3 +411,113 @@ def test_kuo_w_grid_gradients_finite():
 
     g = jax.grad(loss)(w)
     assert jnp.all(jnp.isfinite(g))
+
+
+# ---------------------------------------------------------------------------
+# Anthes moistening fraction b is clamped to [0, 1] (fix 2026-07).
+# ---------------------------------------------------------------------------
+
+def _build_sounding_with_rh(rh_target):
+    """The reference sounding with the moisture profile replaced by a
+    UNIFORM relative humidity ``rh_target`` (same T, pressures, and
+    moisture-convergence bump)."""
+    T, qv, pf, ph, ptenq = _build_sounding()
+    qs = _qsat_huang(np.asarray(pf)[0], np.asarray(T)[0])
+    qv_new = jnp.asarray(rh_target * qs)[None, :]
+    return T, qv_new, pf, ph, ptenq
+
+
+def test_kuo_anthes_b_clamps_to_zero_in_near_saturated_column():
+    """Anthes (1977) b is a moistening FRACTION in [0, 1].  In a
+    near-saturated column (``rhmean + anthes_rh_offset > 1``) the raw
+    ``1 − rhmean − offset`` is negative; unclamped it (a) flips the
+    moistening term into spurious extra drying and (b) drives the
+    heating factor (1−b) above 1 (more condensation heating than the
+    consumed accession).  With the clamp b = 0 for ANY offset once
+    ``rhmean + offset >= 1``, so two different offsets must produce
+    IDENTICAL tendencies."""
+    T, qv, pf, ph, ptenq = _build_sounding_with_rh(0.98)
+
+    out_a = kuo_convection(
+        T, qv, pf, ph, dt=900.0,
+        config=KuoConfig(partition="anthes", anthes_rh_offset=0.1),
+        moisture_convergence=ptenq,
+    )
+    out_b = kuo_convection(
+        T, qv, pf, ph, dt=900.0,
+        config=KuoConfig(partition="anthes", anthes_rh_offset=0.3),
+        moisture_convergence=ptenq,
+    )
+    # Scheme fires (fixture sanity).
+    assert float(jnp.sum(jnp.abs(out_a.dT_dt))) > 0.0, (
+        "Fixture broken — near-saturated sounding did not fire"
+    )
+    # b clamps to 0 for both offsets -> identical closure output.
+    np.testing.assert_allclose(
+        np.asarray(out_a.dT_dt), np.asarray(out_b.dT_dt), rtol=0, atol=0,
+    )
+    np.testing.assert_allclose(
+        np.asarray(out_a.dq_v_dt), np.asarray(out_b.dq_v_dt), rtol=0, atol=0,
+    )
+    # With b = 0 the ONLY vapor tendency is the accession removal
+    # (−ptenq over active levels) — no positive moistening anywhere.
+    assert float(jnp.max(out_a.dq_v_dt)) <= 1e-20, (
+        "b=0 column should have no moistening levels (dq_v_dt <= 0)"
+    )
+
+
+def test_kuo_anthes_b_clamp_is_inactive_in_midrange_rh_column():
+    """Non-vacuity guard for the clamp test above: in a mid-RH column
+    (``rhmean + offset < 1``) b is interior, so different offsets MUST
+    produce different tendencies (the clamp does not flatten the
+    partition everywhere)."""
+    T, qv, pf, ph, ptenq = _build_sounding_with_rh(0.55)
+
+    out_a = kuo_convection(
+        T, qv, pf, ph, dt=900.0,
+        config=KuoConfig(partition="anthes", anthes_rh_offset=0.1),
+        moisture_convergence=ptenq,
+    )
+    out_b = kuo_convection(
+        T, qv, pf, ph, dt=900.0,
+        config=KuoConfig(partition="anthes", anthes_rh_offset=0.3),
+        moisture_convergence=ptenq,
+    )
+    assert float(jnp.sum(jnp.abs(out_a.dT_dt))) > 0.0, (
+        "Fixture broken — mid-RH sounding did not fire"
+    )
+    diff = float(jnp.max(jnp.abs(out_a.dT_dt - out_b.dT_dt)))
+    assert diff > 0.0, (
+        "Different anthes_rh_offset values should change the partition "
+        "when b is interior to [0, 1]"
+    )
+
+
+# ---------------------------------------------------------------------------
+# convective_mask activation scale is a config field (fix 2026-07).
+# ---------------------------------------------------------------------------
+
+def test_kuo_cvgu_activation_scale_wired():
+    """``convective_mask = tanh(cvgu / cvgu_activation_scale)`` reads the
+    KuoConfig field (formerly an inline 1e-8 literal).  Default scale
+    saturates the mask ~1 when firing; a scale far above the actual
+    cvgu (~7e-5 kg/m^2/s on the reference sounding) leaves it tiny."""
+    T, qv, pf, ph, ptenq = _build_sounding()
+
+    out_default = kuo_convection(
+        T, qv, pf, ph, dt=900.0, config=KuoConfig(),
+        moisture_convergence=ptenq,
+    )
+    out_huge_scale = kuo_convection(
+        T, qv, pf, ph, dt=900.0,
+        config=KuoConfig(cvgu_activation_scale=1.0),
+        moisture_convergence=ptenq,
+    )
+    assert float(out_default.convective_mask[0]) > 0.99
+    # tanh(cvgu / 1.0) ~ cvgu ~ 7e-5 << 0.01.
+    assert float(out_huge_scale.convective_mask[0]) < 0.01
+    # Tendencies are unaffected (diagnostic-only smoothing scale).
+    np.testing.assert_allclose(
+        np.asarray(out_default.dT_dt), np.asarray(out_huge_scale.dT_dt),
+        rtol=0, atol=0,
+    )

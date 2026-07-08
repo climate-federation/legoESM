@@ -53,6 +53,22 @@ def test_clm_surfdata_path_flows_to_config():
     assert cfg.clm_surfdata_path == "/data/clm_surfdata.nc"
 
 
+def test_land_ic_path_flows_to_config():
+    """--land-ic round-trips into ExperimentConfig.land_ic_path (#746): a
+    spun-up MultiLayerLandState restart from run_land_spinup replaces the
+    cold-start soil column in a coupled multilayer AMIP run."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_ic_path == ""
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--land-ic", "/scratch/land_spinup/land_ic.npz",
+    ]), parser))
+    assert cfg.land_ic_path == "/scratch/land_spinup/land_ic.npz"
+
+
 def test_snow_albedo_feedback_flag_flows_to_config():
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
@@ -1360,18 +1376,22 @@ def test_amip_sota_config_builds_valid_experiment_config():
 def test_config_yaml_round_trips_authoritative_values():
     """`run_amip.py --config config/amip/amip_production.yaml` reproduces the
     production AMIP parametrization (Bechtold mass-flux + McFarlane GWD,
-    directive 2026-07-06; revalidation gate = the C24 physics-combo screen)."""
+    directive 2026-07-07; revalidation gate = the physics-combo screen)."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     cfg_file = _repo_root() / "config" / "amip" / "amip_production.yaml"
     parser = build_arg_parser()
     parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
     args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
     # grid geometry (resolution/nlev/discretization are CLI dests baked into
-    # cfg.grid, so assert them at the args level the YAML controls)
-    assert args.resolution == 48
-    assert args.nlev == 40
-    assert args.discretization == "cdgrid"
-    assert args.grid_type == "cubed_sphere"
+    # cfg.grid, so assert them at the args level the YAML controls).  The
+    # production YAML is lat-lon n_lat24/L20 with the hydrostatic latlon-cgrid
+    # dycore + top sponge (Pierre's 2026-07-07 directive: latlon/MPAS low-res,
+    # superseding the earlier C12 cubed-sphere target).
+    assert args.resolution == 24
+    assert args.nlev == 20
+    assert args.discretization == "latlon_cgrid"
+    assert args.grid_type == "latlon"
+    assert args.sponge_enabled is True
     cfg = build_config_from_args(args)
     assert cfg.convection == "bechtold"   # mass-flux, water-conserving (#771)
     assert cfg.gravity_wave_drag == "mcfarlane"
@@ -1769,3 +1789,24 @@ def test_multicontroller_requires_enable_latlon_spmd(capsys):
         main(["--grid-type", "latlon", "--dataset", "analytical",
               "--multicontroller"])
     assert "requires --enable-latlon-spmd" in capsys.readouterr().err
+
+
+def test_top_sponge_flags_flow_to_dycore_config():
+    """#836: --sponge-coeff/--sponge-width-m/--sponge-shape/--sponge-scale-height-m
+    round-trip into DycoreConfig; default sponge_coeff=0 keeps the sponge OFF."""
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.dycore.sponge_coeff == 0.0          # default OFF
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--sponge-coeff", "1.157e-5",
+        "--sponge-width-m", "12000.0",
+        "--sponge-shape", "sam_rational",
+        "--sponge-scale-height-m", "8000.0",
+    ]), parser))
+    assert cfg_on.dycore.sponge_coeff == 1.157e-5
+    assert cfg_on.dycore.sponge_width_m == 12000.0
+    assert cfg_on.dycore.sponge_shape == "sam_rational"
+    assert cfg_on.dycore.sponge_scale_height_m == 8000.0

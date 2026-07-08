@@ -152,6 +152,17 @@ class DycoreConfig(NamedTuple):
     polar_filter_cutoff_deg: float = 60.0
     polar_filter_max_wave_speed: float = 300.0
 
+    # #836: hydrostatic lat-lon C-grid top sponge (Rayleigh damping increasing
+    # toward the model lid; absorbs upward gravity-wave energy that would else
+    # reflect off the rigid lid).  ``sponge_coeff=0`` (default) is OFF and
+    # bit-identical.  Threaded into ``CGridLatLonPrimitiveEquationConfig`` by
+    # ``component_factory`` (mirrors the polar-filter passthrough).
+    sponge_coeff: float = 0.0             # Rayleigh damping scale [1/s] (exact lid
+    #                                      value for 'sin2'; 'sam_rational' -> *100/101)
+    sponge_width_m: float = 10000.0       # sponge-layer depth below the top [m]
+    sponge_shape: str = "sin2"            # "sin2" | "sam_rational"
+    sponge_scale_height_m: float = 7500.0  # log-pressure scale height for sigma->z
+
     # Task #25: time integrator override.  Lat-lon C-grid uses
     # ``ssp_rk3`` by default — three RK3 stages unrolled with the
     # tendency function inlined 3×.  Setting
@@ -629,6 +640,16 @@ class ExperimentConfig(NamedTuple):
     # stl1-4, swvl1-4, sd on a regular lat-lon grid.  Ignored when
     # use_multilayer_land is False.
     era5_land_ic_path: str = ""
+    # Spun-up land INITIAL CONDITION (#746 item 1): a MultiLayerLandState
+    # restart (.npz) written by ``scripts/run/run_land_spinup.py`` after an
+    # offline multi-year land spin-up.  When set (and use_multilayer_land is
+    # True) it REPLACES the cold-start ``init_multilayer_land_state`` +
+    # aridity-theta seed with the equilibrated soil column, so a coupled AMIP
+    # run starts from a settled deep-soil temperature/moisture instead of the
+    # day-0 cold-start shock that drives the land cloud-albedo cold trap.  The
+    # restart's ncol / n_layers must match the run's grid (validated on load).
+    # Takes precedence over era5_land_ic_path when both are set.
+    land_ic_path: str = ""
     # Pre-staged CLM surfdata NetCDF (PFT/texture/glacier maps) for the multilayer
     # land.  Empty => download from UCAR to /tmp (fails on compute nodes with no
     # outbound internet, so stage the file and set this).  Ignored unless
@@ -1215,19 +1236,34 @@ class ExperimentConfig(NamedTuple):
             "rayleigh", "lindzen", "mcfarlane", "hines",
             "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",
         )
-        # A ``+``-joined string (e.g. ``hines+mcfarlane``) composes multiple
-        # GWD sources whose tendencies are summed — orographic (mcfarlane) and
-        # non-orographic (hines) parameterize distinct wave sources and are run
-        # together in CMIP-class GCMs.  ``prognostic_spectral`` / ``e3sm_cam``
-        # carry per-step state and are not composable here.
+        # A ``+``-joined string composes multiple GWD sources whose tendencies
+        # are summed — orographic (mcfarlane/lindzen) and non-orographic
+        # (hines/rayleigh/prognostic_spectral) parameterize distinct wave
+        # populations and are run together in CMIP-class GCMs
+        # (e.g. ``hines+mcfarlane`` or ``mcfarlane+prognostic_spectral``,
+        # issue #834).  ``prognostic_spectral`` is the one STATEFUL composable
+        # source — its wave-action spectrum threads through the physics carry,
+        # so at most one stateful source may appear.  ``e3sm_cam`` /
+        # ``ml_emulator`` need extra per-column source fields / a network
+        # module the composite path does not carry and are NOT composable.
+        _composable_stateless = ("rayleigh", "lindzen", "mcfarlane", "hines")
+        _composable_stateful = ("prognostic_spectral",)
+        _composable = _composable_stateless + _composable_stateful
         _gwd_parts = self.gravity_wave_drag.split("+")
-        _composable = ("rayleigh", "lindzen", "mcfarlane", "hines")
         if len(_gwd_parts) > 1:
             bad = [p for p in _gwd_parts if p not in _composable]
             if bad:
                 errors.append(
                     f"composite gravity_wave_drag parts must each be one of "
                     f"{_composable}, got invalid {bad} in "
+                    f"{self.gravity_wave_drag!r}"
+                )
+            _n_stateful = sum(p in _composable_stateful for p in _gwd_parts)
+            if _n_stateful > 1:
+                errors.append(
+                    f"composite gravity_wave_drag may contain at most one "
+                    f"stateful source {_composable_stateful} (its wave-action "
+                    f"spectrum is a single carry), got {_n_stateful} in "
                     f"{self.gravity_wave_drag!r}"
                 )
         elif self.gravity_wave_drag not in _valid_gwd:
