@@ -1809,3 +1809,16 @@ def test_bechtold_conv_top_pa_flows_to_config():
         "--bechtold-conv-top-pa", "12000",
     ]), parser))
     assert cfg.bechtold_conv_top_pa == 12000.0
+
+
+def test_new_convection_knobs_validate_bounds():
+    """validate_strict rejects out-of-range convective_precip_efficiency and
+    a non-positive bechtold_conv_top_pa (codex audit MEDIUM)."""
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="convective_precip_efficiency"):
+        ExperimentConfig(convective_precip_efficiency=1.5).validate_strict()
+    with pytest.raises(ValueError, match="bechtold_conv_top_pa"):
+        ExperimentConfig(bechtold_conv_top_pa=0.0).validate_strict()
+    # in-range passes
+    ExperimentConfig(convective_precip_efficiency=0.6,
+                     bechtold_conv_top_pa=15000.0).validate_strict()

@@ -821,6 +821,7 @@ def _make_spectral_pe_gwd(
     scheme_name, gwd_fn, scheme_config = get_gwd_fn(gwd_config)
     is_prognostic = scheme_name == "prognostic_spectral"
     is_ml = scheme_name == "ml_emulator"
+    is_orographic = gwd_scheme_is_orographic(scheme_name)
     # Composite (issue #834): sum multiple sources; thread the spectrum when a
     # prognostic_spectral part is present.
     is_combined = "+" in scheme_name
@@ -881,9 +882,10 @@ def _make_spectral_pe_gwd(
 
         if is_combined:
             # Composite GWD (#834): sum orographic + non-orographic; thread the
-            # spectrum when present.  Orographic parts use the scalar
-            # ``config.h_topo`` (h_topo_col=None), matching this factory's
-            # single-scheme orographic path.
+            # spectrum when present.  Forward the per-column subgrid orography
+            # to an orographic member (else it silently falls back to the scalar
+            # config.h_topo though the driver loaded an SSO field for this grid).
+            h_topo_col = _extract_subgrid_topo_stddev(grid, ncol)
             spec_in = (
                 _combined_spec_in(scheme_config, phys_state, ncol)
                 if combined_spectrum else None
@@ -891,6 +893,7 @@ def _make_spectral_pe_gwd(
             gwd_out, spec_new = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config, spec_in,
+                h_topo_col=h_topo_col,
             )
             if combined_spectrum:
                 gwd_spectrum_out = spec_new
@@ -923,6 +926,13 @@ def _make_spectral_pe_gwd(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config,
                 _ml_model_cache[0],
+            )
+        elif is_orographic:
+            h_topo_col = _extract_subgrid_topo_stddev(grid, ncol)
+            gwd_out = gwd_fn(
+                u_col, v_col, T_col, p_full_col, p_half_col,
+                z_full, z_half, rho, lat, dt, scheme_config,
+                h_topo_col=h_topo_col,
             )
         else:
             gwd_out = gwd_fn(

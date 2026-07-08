@@ -1001,6 +1001,16 @@ class ExperimentConfig(NamedTuple):
                 f"bechtold_cape_threshold must be >= 0, got "
                 f"{self.bechtold_cape_threshold}"
             )
+        if not (0.0 <= self.convective_precip_efficiency <= 1.0):
+            errors.append(
+                f"convective_precip_efficiency must be in [0, 1], got "
+                f"{self.convective_precip_efficiency}"
+            )
+        if self.bechtold_conv_top_pa <= 0.0:
+            errors.append(
+                f"bechtold_conv_top_pa must be > 0 Pa (the convective-top gate "
+                f"cutoff), got {self.bechtold_conv_top_pa}"
+            )
         if self.physics_parameterization not in ("none", "ml"):
             errors.append(
                 "physics_parameterization must be 'none' or 'ml', "

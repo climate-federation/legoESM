@@ -77,6 +77,14 @@ class AMIPExperimentConfig(NamedTuple):
     sbm_tau_c: float = 7200.0
     sbm_RH_ref: float = 0.7
     sbm_cape_threshold: float = 70.0
+    # Bechtold convection knobs (to_amip_config round-trip; bechtold_cape_threshold
+    # predates this and was never mirrored here — #821 — so the round-trip
+    # crashed; add both).
+    bechtold_cape_threshold: float = 70.0
+    bechtold_conv_top_pa: float = 15000.0
+    # Convective in-updraft rain-split efficiency [0,1] (shared across the
+    # mass-flux schemes); 0 = disabled (legacy no split).
+    convective_precip_efficiency: float = 0.0
     C_H: float = 1.5e-3
     C_E: float = 1.5e-3
     k_free_per_day: float = 0.1
