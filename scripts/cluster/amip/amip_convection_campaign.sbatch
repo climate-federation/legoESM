@@ -77,7 +77,12 @@ esac
 read -r -a EXTRA <<< "$EXTRA_FLAGS"
 SCHEME_FLAGS=(--convection "$CONV" --gravity-wave-drag "$GWD"
               --subgrid-orography-file "$SSO_FILE"
-              --resolution "$RESOLUTION" --nlev "$NLEV" --dt "$DT")
+              --resolution "$RESOLUTION" --nlev "$NLEV" --dt "$DT"
+              # The clear-sky 2nd RRTMGP pass (#843) ~doubles the radiation
+              # compile + per-step cost and the convection-scheme comparison
+              # scores on all-sky precip/albedo/OLR; turn it off for speed.
+              # (Override with CLEAR_SKY=--clear-sky-diag for a final run.)
+              ${CLEAR_SKY:---no-clear-sky-diag})
 
 _ckpt_day() { local f; f=$(ls -1 "$OUTDIR"/checkpoint_day_*.npz 2>/dev/null | sort -V | tail -1); [ -n "$f" ] && basename "$f" | sed -E 's/.*checkpoint_day_0*([0-9]+)\.npz/\1/' || echo 0; }
 cur_day=$(_ckpt_day); latest=$(ls -1 "$OUTDIR"/checkpoint_day_*.npz 2>/dev/null | sort -V | tail -1)

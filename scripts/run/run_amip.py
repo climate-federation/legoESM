@@ -920,7 +920,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=_EXPERIMENT_DEFAULTS.seed,
                         help="Master RNG seed for reproducibility")
     parser.add_argument("--cmip-output", action="store_true", default=False)
-    parser.add_argument("--clear-sky-diag", action="store_true", default=False)
+    # BooleanOptionalAction so a YAML `clear_sky_diag: true` can be turned OFF
+    # from the CLI (--no-clear-sky-diag): the clear-sky 2nd RRTMGP pass roughly
+    # DOUBLES the radiation compile + per-step cost, unneeded for a
+    # convection-scheme precip/albedo comparison.
+    parser.add_argument("--clear-sky-diag", action=argparse.BooleanOptionalAction,
+                        default=False)
     parser.add_argument(
         "--evaluate", action="store_true", default=False,
         help="Run ClimateEval after a successful AMIP run to compare "
