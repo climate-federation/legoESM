@@ -2413,6 +2413,18 @@ def main() -> int:
     )
     cells_per_rank = total_cells // n_ranks
 
+    # ETOPO coastlines destabilize the default deep-ocean dt (measured:
+    # LL96 blows up at dt=600, stable at 150).  The post-run finite check
+    # still discards a blown-up timing (exit 3), but warn BEFORE the
+    # expensive compile+timing rather than after (codex).
+    if is_rank0 and args.land_mask == "etopo" and args.dt > 300.0:
+        print(
+            f"  WARNING: --land-mask etopo with --dt {args.dt:g}s: realistic "
+            f"coastlines have blown up at dt=600 (LL96); if the run ends "
+            f"with 'non-finite values', retry with --dt 150.",
+            flush=True,
+        )
+
     if is_rank0:
         print(
             f"  [{args.precision}] LL{n_lat}/L{args.n_levels} on {n_ranks} "
