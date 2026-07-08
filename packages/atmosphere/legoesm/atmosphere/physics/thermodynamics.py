@@ -196,7 +196,7 @@ def moist_adiabat_lapse_rate(
     return (R_d * T / (c_pd * p)) * numerator / denominator
 
 
-def _bolton_lcl_temperature(
+def bolton_lcl_temperature(
     T_base: jax.Array,
     p_base: jax.Array,
     q_v_base: jax.Array,
@@ -205,10 +205,21 @@ def _bolton_lcl_temperature(
 
     ``T_LCL = 1 / [ 1/(T - 55) - ln(RH)/2840 ] + 55``.
 
-    Inlined here (rather than imported from
-    :mod:`legoesm.atmosphere.physics.convection._plume`) to avoid a
-    convection → thermodynamics import cycle: the plume helper already
-    imports :func:`compute_moist_adiabat` from this module.
+    This is the CANONICAL Bolton LCL implementation — the 55 K offset and
+    2840 K denominator live only here.  Consumers:
+    :func:`compute_moist_adiabat` (this module) and
+    :func:`legoesm.atmosphere.physics.convection._plume.compute_lcl`
+    (which adds the plume-specific Poisson ``p_lcl`` and smooth crossing
+    index on top).  Do not re-implement the formula elsewhere.
+
+    Parameters
+    ----------
+    T_base : jax.Array
+        Parcel temperature at the launch level [K].
+    p_base : jax.Array
+        Parcel launch pressure [Pa].
+    q_v_base : jax.Array
+        Parcel water-vapor mixing ratio at the launch level [kg/kg].
     """
     from legoesm.thermo import saturation_mixing_ratio as _q_sat
 
@@ -216,6 +227,42 @@ def _bolton_lcl_temperature(
     RH = jnp.clip(q_v_base / jnp.maximum(q_sat_base, 1.0e-12), 1.0e-4, 1.0)  # coeff-ok: RH floor
     T_minus_55 = jnp.maximum(T_base - _LCL_T_OFFSET_K, 1.0)
     return 1.0 / (1.0 / T_minus_55 - jnp.log(RH) / _LCL_BOLTON_DENOM) + _LCL_T_OFFSET_K
+
+
+def latent_heat_vaporization(
+    T: jax.Array,
+    c_liquid: float = constants.c_pw,
+) -> jax.Array:
+    """Kirchhoff temperature-dependent latent heat of vaporization [J/kg].
+
+    ``L(T) = L_v − (c_liquid − c_pv) · (T − T_freeze)``
+
+    with ``L_v`` the vaporization latent heat at 0 °C and the slope set by
+    the specific-heat difference between liquid water and water vapor
+    (Kirchhoff's relation).  Default ``c_liquid = constants.c_pw``
+    (4218 J/kg/K) gives a slope of ``−(c_pw − c_pv) ≈ −2372 J/kg/K``.
+    Emanuel's CONVECT passes its own tunable liquid heat capacity
+    ``c_l_emanuel`` in place of ``c_pw`` (same base formula).
+
+    Distinct from :func:`legoesm.thermo.latent_heat_vaporization_sst`,
+    which is the NEMO/AeroBulk *air-sea empirical* convention
+    (slope ``constants.L_v_sst_slope`` ≈ 2370 J/kg/K, applied to SST);
+    this helper is the thermodynamic Kirchhoff form used inside moist
+    parcel/entropy budgets.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Air/parcel temperature [K].
+    c_liquid : float
+        Liquid-water specific heat [J/kg/K] (default ``constants.c_pw``).
+
+    Returns
+    -------
+    jax.Array
+        Latent heat of vaporization at ``T`` [J/kg].
+    """
+    return constants.L_v - (c_liquid - constants.c_pv) * (T - constants.T_freeze)
 
 
 def compute_moist_adiabat(
@@ -284,7 +331,7 @@ def compute_moist_adiabat(
         p_lcl = p_base
     else:
         q_v_base = q_v_base.astype(_dtype)
-        T_lcl = _bolton_lcl_temperature(T_base, p_base, q_v_base).astype(_dtype)
+        T_lcl = bolton_lcl_temperature(T_base, p_base, q_v_base).astype(_dtype)
         # Poisson relation: dry-adiabatic descent (or ascent) between
         # the base and the LCL.
         p_lcl = p_base * (T_lcl / jnp.clip(T_base, 1.0, None)) ** (
@@ -362,6 +409,7 @@ def compute_cape(
     p_half: jax.Array,
     q_v_env: jax.Array | None = None,
     q_v_parcel: jax.Array | None = None,
+    p_source: jax.Array | None = None,
 ) -> jax.Array:
     """Compute Convective Available Potential Energy (CAPE).
 
@@ -396,6 +444,23 @@ def compute_cape(
     q_v_env, q_v_parcel : jax.Array, shape (ncol, nlev) or None
         Optional water-vapor mixing ratio profiles [kg/kg].  Pass both
         for the virtual-temperature CAPE.
+    p_source : jax.Array, shape (ncol,) or None
+        Parcel DEPARTURE-level pressure [Pa].  When given, levels BELOW
+        the departure level (``p_full > p_source``) contribute nothing:
+        the parcel does not exist there, so any "buoyancy" at those
+        levels is an artifact of relaunching an elevated parcel from
+        the surface (textbook mean-layer-parcel convention integrates
+        from the source level upward).  A STABLE boundary layer makes
+        this artifact large: theta increases with height, so the
+        PBL-mean parcel translated to surface pressure theta-preserving
+        arrives WARMER than the actual surface air (+6.3 K on the
+        tier-5 validator column) and the below-departure positive area
+        alone reached ~53–66 J/kg fake CAPE — defeating Bechtold's
+        launch gate and heating a quiescent column by ~886 W/m² (the
+        C24 AMIP bechtold blowup, 2026-07-06).  ``None`` (default) and
+        ``p_source = surface pressure`` are byte-identical to the
+        legacy all-levels integral, so surface-parcel callers are
+        unaffected.
 
     Returns
     -------
@@ -410,6 +475,10 @@ def compute_cape(
         buoyancy = jnp.maximum(0.0, Tv_parcel - Tv_env)
     else:
         buoyancy = jnp.maximum(0.0, T_parcel - T_env)
+
+    if p_source is not None:
+        # zero out levels below the parcel departure level (p > p_source)
+        buoyancy = jnp.where(p_full <= p_source[:, None], buoyancy, 0.0)
 
     # Use the half-level midpoint pressure for the discrete ``∫ dlnp``
     # approximation: ``(p_half[k+1] - p_half[k]) / p_mid`` with

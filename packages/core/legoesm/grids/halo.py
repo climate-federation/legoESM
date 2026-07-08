@@ -509,6 +509,31 @@ def set_spmd_mesh(mesh) -> None:
     _spmd_mesh = mesh
 
 
+@contextlib.contextmanager
+def local_halo_pads():
+    """Force every ``pad_halo*`` dispatch to the LOCAL (serial) backend
+    within the ``with`` block, then restore the previous backend state.
+
+    This is a TRACE-TIME switch for wide-halo compute regions: after a code
+    path has already exchanged a wide halo (width = its full stencil reach),
+    its interior operators must run their internal pads as plain local
+    ``jnp.pad`` — re-dispatching them to MPI sendrecv / SPMD ppermute would
+    re-communicate every substep, defeating the wide exchange (and, on the
+    extended arrays, exchange the WRONG rows).  The flag is read when the
+    operators trace, so wrap the traced region, not the runtime call.
+
+    Neutralizes all three dispatch signals: backend name, MPI topology, and
+    the SPMD mesh.  Re-entrant and exception-safe.
+    """
+    global _halo_backend, _mpi_topology, _spmd_mesh
+    saved = (_halo_backend, _mpi_topology, _spmd_mesh)
+    _halo_backend, _mpi_topology, _spmd_mesh = "local", None, None
+    try:
+        yield
+    finally:
+        _halo_backend, _mpi_topology, _spmd_mesh = saved
+
+
 # ==============================================================================
 # Scalar halo exchange
 # ==============================================================================

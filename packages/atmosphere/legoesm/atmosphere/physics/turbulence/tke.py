@@ -23,7 +23,12 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import mixing_length, virtual_temperature
+from legoesm.atmosphere.physics._shared import (
+    buoyancy_coefficient,
+    exner_function,
+    mixing_length,
+    virtual_temperature,
+)
 from legoesm.atmosphere.physics.turbulence.config import TKEConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -34,6 +39,43 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
     implicit_vertical_diffusion_theta,
 )
+
+
+__physics_contract__ = {
+    "summary": (
+        "Prognostic-TKE (Mellor-Yamada level 2.5) turbulence: advances a "
+        "turbulent-kinetic-energy budget (shear production, buoyancy, "
+        "dissipation, diffusion), sets K_m = Ck l sqrt(TKE), K_h = K_m/Pr_t, "
+        "and applies implicit vertical diffusion with surface-flux BCs."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
+        "tke": "m^2/s^2", "p_full": "Pa", "p_half": "Pa",
+        "z_full": "m", "z_half": "m", "T_sfc": "K", "q_sfc": "kg/kg",
+        "rho": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "Km": "m^2/s", "Kh": "m^2/s", "shflx": "W/m^2", "lhflx": "W/m^2",
+        "ustar": "m/s", "h_pbl": "m", "tke_new": "m^2/s^2",
+    },
+    "sign_convention": (
+        "Down-gradient mixing: du_dt ~ (1/rho) d/dz(rho Km du/dz); Km, Kh >= 0; "
+        "TKE >= tke_min with shear production Km S^2 >= 0, buoyancy -Kh N^2 "
+        "(a sink in stable stratification), and dissipation Ce TKE^{3/2}/l "
+        ">= 0. shflx, lhflx positive UPWARD and injected as the lower boundary "
+        "condition (a source), so the resolved column budget is NOT closed. "
+        "z increases upward; level index -1 is the surface."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": "Mellor & Yamada (1982), Rev. Geophys. 20, 851-875",
+    "idealized_test": (
+        "tests/atmosphere/hydrostatic/unit/test_turbulence.py: TKE stays "
+        ">= tke_min; a neutral no-shear column has zero production and "
+        "buoyancy so TKE decays by dissipation; Km = Ck l sqrt(TKE) >= 0."
+    ),
+}
 
 
 def tke_turbulence(
@@ -114,12 +156,13 @@ def tke_turbulence(
     dv_dz = (v[:, :-1] - v[:, 1:]) / dz_half
     S2_half = du_dz ** 2 + dv_dz ** 2  # (ncol, nlev-1)
 
-    # Brunt-Väisälä at half-levels
-    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
-    theta_v = virtual_temperature(T, q_v) * exner
+    # Brunt-Väisälä at half-levels (canonical inverse-Exner + shared
+    # buoyancy-coefficient helpers; clips kept at the call sites).
+    exner_pref = 1.0 / exner_function(p_full)
+    theta_v = virtual_temperature(T, q_v) * exner_pref
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
-    N2_half = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
+    N2_half = buoyancy_coefficient(jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
 
     # Interpolate S2 and N2 to full levels.  Single ``concatenate`` of
     # the centered interior with the two endpoint half-values lowers

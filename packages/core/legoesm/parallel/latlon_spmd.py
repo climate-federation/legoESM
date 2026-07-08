@@ -256,6 +256,95 @@ def make_latlon_band_wall_pad_body(mesh, halo: int = 1,
     return body
 
 
+def make_latlon_band_wall_multi_pad_body(mesh, halo: int = 1,
+                                         south_values=None,
+                                         north_values=None,
+                                         n_fields: int = 0):
+    """FUSED multi-field twin of :func:`make_latlon_band_wall_pad_body`.
+
+    One ``ppermute`` pair per DIRECTION for the whole field GROUP instead of
+    one pair per field: each band's ``halo`` edge rows of every field are
+    flattened on the trailing axes, concatenated into a single
+    ``(halo, sum_flat)`` buffer per direction, exchanged once, then split
+    and reshaped back — value-identical to the per-field pads (the exchange
+    is a bit-copy; flatten/concat/split are layout ops).  This is the SPMD
+    leg of the message-aggregation lever (audit item 7): the mpi4jax leg
+    already fuses via ``pad_with_pole_bc_lat_multi_mpi``, the SPMD leg
+    expanded per field.
+
+    STATIC group signature: ``n_fields`` (+ each field's dtype/shape at
+    trace time) describes the group (shard_map bodies must be one uniform
+    program).  Mixed dtypes are grouped by dtype internally — one buffer
+    (and one ppermute pair) per dtype group, matching the MPI fused path's
+    "per dtype group" contract.
+
+    Returns ``body(*fields) -> tuple(padded_fields)``.
+    """
+    n_dev = mesh.devices.size
+    if tuple(mesh.devices.shape) != (n_dev,):
+        raise ValueError(
+            f"make_latlon_band_wall_multi_pad_body: needs a 1-D mesh; got "
+            f"shape {tuple(mesh.devices.shape)}")
+    if n_fields < 1:
+        raise ValueError("n_fields must be >= 1")
+    south_values = tuple(south_values or (0.0,) * n_fields)
+    north_values = tuple(north_values or (0.0,) * n_fields)
+    if len(south_values) != n_fields or len(north_values) != n_fields:
+        raise ValueError("boundary value tuples must match n_fields")
+    axis = mesh.axis_names[0]
+    perm_north, perm_south = latlon_band_perms(n_dev)
+
+    def body(*fields):
+        if len(fields) != n_fields:
+            raise ValueError(
+                f"fused pad body built for {n_fields} fields, got "
+                f"{len(fields)}")
+        b = jax.lax.axis_index(axis)
+
+        # Group by dtype (static: dtypes are trace-time facts of the args).
+        groups: dict = {}
+        for i, f in enumerate(fields):
+            groups.setdefault(str(f.dtype), []).append(i)
+
+        south_ghosts: list = [None] * n_fields
+        north_ghosts: list = [None] * n_fields
+        for _, idxs in sorted(groups.items()):
+            flats = []
+            widths = []
+            for i in idxs:
+                edge_shape = fields[i][:halo].shape
+                w = 1
+                for s in edge_shape[1:]:
+                    w *= int(s)
+                widths.append(w)
+                flats.append((fields[i][:halo].reshape(halo, w),
+                              fields[i][-halo:].reshape(halo, w)))
+            south_buf = jnp.concatenate([s for s, _ in flats], axis=1)
+            north_buf = jnp.concatenate([n for _, n in flats], axis=1)
+            # ONE ppermute pair for the whole dtype group.
+            north_recv = jax.lax.ppermute(south_buf, axis, perm_north)
+            south_recv = jax.lax.ppermute(north_buf, axis, perm_south)
+            off = 0
+            for k, i in enumerate(idxs):
+                w = widths[k]
+                tail = fields[i].shape[1:]
+                sr = south_recv[:, off:off + w].reshape((halo,) + tail)
+                nr = north_recv[:, off:off + w].reshape((halo,) + tail)
+                s_wall = jnp.full_like(sr, south_values[i])
+                n_wall = jnp.full_like(nr, north_values[i])
+                south_ghosts[i] = jnp.where(b == 0, s_wall, sr)
+                north_ghosts[i] = jnp.where(b == n_dev - 1, n_wall, nr)
+                off += w
+
+        return tuple(
+            jnp.concatenate([south_ghosts[i], fields[i], north_ghosts[i]],
+                            axis=0)
+            for i in range(n_fields)
+        )
+
+    return body
+
+
 def spmd_pole_end_masks():
     """``(south_mask, north_mask)`` TRACED scalar booleans for the active band
     under the armed lat-band SPMD backend, or ``None`` if SPMD is not active.
@@ -323,6 +412,60 @@ def zero_polar_lat_ends_band_spmd(field, mesh):
     axis = mesh.axis_names[0]
     b = jax.lax.axis_index(axis)
     return apply_pole_end_masks(field, ((b == 0), (b == n_dev - 1)), offset=0)
+
+
+def cell_to_cgrid_winds_spmd(u_cell, v_cell):
+    """Band-local cell -> C-grid wind conversion — the SPMD twin of
+    :func:`legoesm.grids.operators_latlon_cgrid.cell_to_cgrid_winds` (non-fold),
+    for the per-step cell<->C-grid round trip the operator-split lat-band lane
+    reproduces from serial ``model.step``.
+
+    * **u-face**: ``interp_cell_to_uface`` averages along LONGITUDE only; every
+      band owns the full periodic lon circle, so it is row-by-row identical to
+      serial with NO halo.
+    * **v-face**: ``interp_cell_to_vface_halo`` lifts each INTERIOR band-cut
+      face from the neighbour band's edge row (``ppermute`` via the armed spmd
+      backend).  A naive band-local ``pad_ns_zero(0.5*(v[:-1]+v[1:]))`` would
+      instead ZERO every band boundary (treating each interior cut as a pole)
+      and silently mis-set the interior v-faces -> non-bitwise, wrong dynamics.
+    * **physical poles**: re-zeroed to the ``v = 0`` wall via
+      :func:`apply_pole_end_masks` — ONLY axis-0 index 0 on the south band and
+      index -1 on the north band; interior cuts keep their halo'd value.
+
+    Serial / local backend (``spmd_pole_end_masks()`` is ``None``):
+    ``interp_cell_to_vface_halo`` delegates to the naive interior average with a
+    pole EDGE-COPY, and the static both-ends zero below reproduces
+    ``cell_to_cgrid_winds``'s ``pad_ns_zero`` EXACTLY (byte-identical serial).
+
+    MUST run INSIDE a ``shard_map`` over ``"lat"`` WITH the lat-band backend
+    ARMED (``activate_latlon_spmd_halo(mesh)``), or serially with it un-armed.
+    A shard_map WITHOUT arming is the one silent-wrong state: ``spmd_pole_end_masks()``
+    then returns ``None`` and BOTH local band ends get zeroed as poles — the
+    caller (the operator-split step) owns the arm/restore, exactly as
+    :func:`make_sharded_atm_latlon_step`'s ``sharded_step`` does. Non-fold only:
+    the fn takes no grid so it cannot self-check — the operator-split SPMD lane
+    refuses the tripole fold upstream (``make_sharded_atm_latlon_step``).
+
+    Parameters
+    ----------
+    u_cell, v_cell : ``(n_lat_band, n_lon[, nlev])`` cell-centered winds.
+
+    Returns
+    -------
+    (u_face, v_face) : ``(n_lat_band, n_lon+1, ...)`` and
+        ``(n_lat_band + 1, n_lon, ...)`` C-grid face winds.
+    """
+    from legoesm.grids.operators_latlon_cgrid import (
+        interp_cell_to_uface, interp_cell_to_vface_halo)
+    u_face = interp_cell_to_uface(u_cell)
+    v_face = interp_cell_to_vface_halo(v_cell)
+    masks = spmd_pole_end_masks()
+    if masks is None:                 # serial / local backend: both ends poles
+        v_face = v_face.at[0].set(jnp.zeros_like(v_face[0]))
+        v_face = v_face.at[-1].set(jnp.zeros_like(v_face[-1]))
+    else:                             # SPMD: zero the PHYSICAL poles only
+        v_face = apply_pole_end_masks(v_face, masks, offset=0)
+    return u_face, v_face
 
 
 def pad_halo_latlon_band_spmd(mesh, halo: int = 1, negate: bool = False):

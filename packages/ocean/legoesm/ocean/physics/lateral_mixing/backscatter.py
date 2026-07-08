@@ -2,8 +2,8 @@
 
 The backscatter scheme re-injects kinetic energy that has been removed by
 the resolved-scale viscous closures (Smagorinsky, Leith, biharmonic).  A
-prognostic, depth-integrated subgrid kinetic-energy reservoir ``E(x, y)``
-evolves under
+prognostic, depth-MEAN (per-mass) subgrid kinetic-energy reservoir ``E(x, y)``
+[m²/s²] evolves under
 
     dE/dt = ε_dissipation(x, y)        (source — from the resolved dyn)
           - ε_backscatter(x, y)        (sink   — returned to the resolved dyn)
@@ -64,6 +64,43 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     vertex_area_1d,
 )
 from legoesm.core.operators_voronoi import vector_laplacian_del2_3d
+
+__physics_contract__ = {
+    "summary": (
+        "Jansen & Held (2014) deterministic energy backscatter: a negative "
+        "(anti-diffusive) Laplacian viscosity du/dt = -nu_bs*grad^2(u) "
+        "(nu_bs = c_bs*Delta*sqrt(E) >= 0) re-injects resolved kinetic energy "
+        "drawn from a prognostic subgrid-KE reservoir E."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "E": "m^2/s^2 (subgrid KE reservoir)",
+        "cfg.c_bs": "1 (dimensionless)",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "E_new": "m^2/s^2",
+    },
+    "sign_convention": (
+        "nu_bs >= 0 but applied with the OPPOSITE sign to diffusion (negative "
+        "Laplacian), so the tendency INJECTS resolved KE (growth ~ +nu_bs*k^2) "
+        "and dissipates enstrophy; the reservoir E evolves as (resolved viscous "
+        "dissipation source) - (backscatter sink) - (linear damping), clamped "
+        "to [E_min, E_max]. Does NOT conserve resolved KE (energy is drawn FROM "
+        "the subgrid reservoir); energetic consistency holds only over the full "
+        "dissipation<->reservoir<->backscatter cycle."
+    ),
+    # Negative viscosity INJECTS resolved KE — not a conservative operator.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Jansen, M. F. & Held, I. M. (2014), Ocean Modelling 80, 36-48, "
+        "doi:10.1016/j.ocemod.2014.06.002; Bachman (2019), Ocean Modelling 136"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_backscatter.py — the momentum tendency INCREASES "
+        "resolved KE (sum u.du_dt.area >= 0) for E>0; E=0 or disabled gives zero "
+        "tendency; the reservoir stays within [E_min, E_max]."
+    ),
+}
 
 _EPS = float(jnp.finfo(jnp.float32).eps)
 
@@ -184,7 +221,7 @@ def backscatter_tendency_cgrid(
     ----------
     u : (n_lat, n_lon+1) or (n_lat, n_lon+1, nlev)
     v : (n_lat+1, n_lon) or (n_lat+1, n_lon, nlev)
-    E : (n_lat, n_lon) — depth-integrated subgrid KE reservoir [m²/s²].
+    E : (n_lat, n_lon) — depth-mean (per-mass) subgrid KE reservoir [m²/s²].
     grid : LatLonGrid.
     cfg : BackscatterConfig.
     """
@@ -202,7 +239,7 @@ def backscatter_tendency_cgrid(
         # coefficients; a trailing singleton would give vmap-size 1
         # which mismatches the velocity's ``nlev > 1`` axis.  Broadcast
         # to the full nlev so each level sees the same depth-
-        # integrated coefficient (E is already column-integrated).
+        # mean coefficient (E is a per-mass, depth-mean reservoir).
         nlev = u.shape[-1]
         A_h = jnp.broadcast_to(A_h[..., jnp.newaxis],
                                 A_h.shape + (nlev,))
@@ -320,12 +357,15 @@ def backscatter_power_density_cgrid(
     energy to the resolved flow, so ``ε_bs > 0`` is an energy sink
     for the reservoir.
 
-    For 3-D inputs the result is the depth-integrated per-column power
-    ``Σ_k (u·t_u + v·t_v)_k · dz_k``.  When ``dz`` is ``None`` a
-    uniform ``dz = 1`` is used (equivalent to summing the per-level
-    densities).  Pass the actual layer-thickness array
-    ``(nlev,)`` or ``(n_lat, n_lon, nlev)`` for z*-ocean grids with
-    non-uniform vertical spacing.
+    For 3-D inputs the result is the depth-MEAN per-mass power
+    ``Σ_k (u·t_u + v·t_v)_k · dz_k / Σ_k dz_k`` [m²/s³] — the per-mass
+    quantity that shares units with the per-mass EKE reservoir budget in
+    ``update_eddy_energy`` (NOT the depth-INTEGRATED column power [m³/s³],
+    which would be a factor of the column thickness too large).  When ``dz``
+    is ``None`` a uniform ``dz = 1`` is used, so the depth-mean reduces to the
+    level-mean.  Pass the actual layer-thickness array ``(nlev,)`` or
+    ``(n_lat, n_lon, nlev)`` for z*-ocean grids with non-uniform vertical
+    spacing.
     """
     is_3d = u.ndim == 3
 
@@ -366,21 +406,22 @@ def backscatter_power_density_cgrid(
 
     power = u_cell + v_cell                              # (n_lat, n_lon[, nlev])
     if is_3d:
-        # Depth-integrate ``u·tend`` with layer thickness ``dz`` to
-        # get the column total used as the reservoir source/sink.
-        # When ``dz=None`` we fall back to unit spacing, equivalent to
-        # summing per-level densities (only exact for equal-thickness
-        # layers).
+        # Depth-MEAN ``u·tend`` — a PER-MASS power density [m²/s³] that
+        # matches the units of the per-mass EKE reservoir budget consumed in
+        # ``update_eddy_energy`` (dE/dt = η·ε_diss − ε_bs − E/τ, with E in
+        # [m²/s²]).  Returning the depth-INTEGRATED column power
+        # (Σ_k u·tend·dz_k, units [m³/s³]) would be a factor of the column
+        # thickness H too large and would immediately pin E to E_max on a deep
+        # column.  Divide the dz-weighted sum by the column thickness Σ_k dz_k
+        # (guarded strictly positive so a dry/zero-thickness column stays 0).
         if dz is None:
-            power = jnp.sum(power, axis=-1)
+            # Uniform dz = 1 ⇒ depth-mean = level-mean.
+            power = jnp.mean(power, axis=-1)
         else:
-            dz_arr = jnp.asarray(dz)
-            # Broadcast 1-D dz against (n_lat, n_lon, nlev).
-            if dz_arr.ndim == 1:
-                dz_b = dz_arr
-            else:
-                dz_b = dz_arr
-            power = jnp.sum(power * dz_b, axis=-1)
+            dz_b = jnp.asarray(dz)                       # (nlev,) or (…, nlev)
+            col_thickness = jnp.maximum(
+                jnp.sum(jnp.broadcast_to(dz_b, power.shape), axis=-1), _EPS)
+            power = jnp.sum(power * dz_b, axis=-1) / col_thickness
     return power
 
 

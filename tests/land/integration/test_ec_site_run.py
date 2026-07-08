@@ -187,3 +187,44 @@ def test_texture_lookup_reads_site_table():
     sand, clay = tex
     assert sand > 70.0 and clay < 15.0            # loamy sand (Santa Rita, BIF)
     assert mod._texture_lookup("ZZ-Nowhere", csv) is None
+
+
+def test_ec_site_physics_table_and_defaults():
+    """``ec_site_physics`` returns the per-site tower height + root/column depth
+    for a table site (BADM-anchored), and the generic fallbacks for an unknown
+    site — the consolidated single source of truth that replaced the ad-hoc
+    per-site environment overrides.  A phreatophyte site (US-Ton) carries a
+    deeper root e-folding depth and column than the 1 m / model-default fallback.
+    """
+    mod = _load_driver_module()
+    ton = mod.ec_site_physics("US-Ton")
+    assert ton["z_ref"] == 23.5                    # FLUXNET BADM Reference_height_v
+    assert ton["root_depth"] == 5.0                # deep-rooted blue oaks (phreatophyte)
+    assert ton["soil_depth_m"] > 0.0               # deepened column
+    mms = mod.ec_site_physics("US-MMS")
+    assert mms["z_ref"] == 46.0 and mms["root_depth"] == 2.0   # tall tower, deep loam
+    var = mod.ec_site_physics("US-Var")
+    assert var["z_ref"] == 2.0 and var["root_depth"] == 1.0    # short tower, shallow grass
+    unknown = mod.ec_site_physics("ZZ-Nowhere")
+    assert unknown == {"z_ref": 10.0, "root_depth": 1.0, "soil_depth_m": 0.0}
+
+
+def test_build_land_config_threads_z_ref():
+    """The consolidated tower height reaches the surface-layer config: ``z_ref``
+    passed to ``_build_land_config`` lands on ``MultiLayerLandConfig.z_ref`` so
+    the Monin-Obukhov profile / u* is anchored at the real measurement height
+    (a silently-dropped z_ref would leave every site at the generic 10 m)."""
+    mod = _load_driver_module()
+    cfg = mod._build_land_config(
+        mod.TwoLeafCanopyConfig(), soil="default", bottom_bc="free_drainage",
+        depth_m=0.0, z_ref=46.0)
+    assert float(cfg.z_ref) == 46.0
+
+
+def test_stress_b0_flag_reaches_canopy_config():
+    """The ``stress_b0`` selector threads onto the canopy config: the offline
+    default (False) leaves the Ball-Berry cuticular intercept unstressed, and
+    the legacy opt-in (True) restores the both-slope-and-intercept stress."""
+    mod = _load_driver_module()
+    assert mod.TwoLeafCanopyConfig(stress_b0=False).stress_b0 is False
+    assert mod.TwoLeafCanopyConfig(stress_b0=True).stress_b0 is True

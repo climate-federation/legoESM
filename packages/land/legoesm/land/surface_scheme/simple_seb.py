@@ -118,7 +118,7 @@ def compute_simple_seb_fluxes(
         forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2)
 
     # --- Stomatal + Farquhar beta (uses forcing.sw_down, co2, q_lowest) ---
-    beta, gpp_farq = compute_effective_beta(
+    beta, gpp_farq, sif_farq = compute_effective_beta(
         T_surface, forcing, beta_soil, land_config, carbon_state, dt,
         land_params=land_params)
 
@@ -150,6 +150,15 @@ def compute_simple_seb_fluxes(
     L_eff = jnp.where(has_snow, constants.L_s, constants.L_v)
 
     # --- Bulk fluxes ---
+    # Dispatch hardening (restores the guard lost when this dispatch moved
+    # out of step_multilayer_land in the surface-scheme refactor): an unknown
+    # bulk_scheme must raise, not silently run the constant-coefficient else.
+    _valid_bulk = ("constant", "most", "coare3", "large_yeager")
+    if land_config.bulk_scheme not in _valid_bulk:
+        raise ValueError(
+            f"Unknown bulk_scheme {land_config.bulk_scheme!r}; "
+            f"expected one of {_valid_bulk}."
+        )
     rho = forcing.rho_lowest
     if land_config.bulk_scheme in ("most", "coare3", "large_yeager"):
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
@@ -190,10 +199,10 @@ def compute_simple_seb_fluxes(
         snow,
     )
     if land_config.snow_albedo_feedback and lat is not None:
-        # Snow-free base = the per-cell ``albedo_land`` (lp.albedo_veg soil/veg
-        # blend, or the config scalar).  WITHOUT an explicit base, compute_land_albedo
-        # falls back to the latitude-band vegetation albedo, discarding all
-        # soil-colour + vegetation structure (soil/veg albedo "not working").
+        # Snow-free base = the per-cell ``albedo_land`` (CLM PFT / soil-colour map or
+        # the trainable per-PFT albedo), NOT the latitude-band vegetation albedo —
+        # otherwise the calibrated per-cell / per-PFT albedo (and its gradient) is
+        # dropped whenever the snow feedback is on (bright deserts + trainable pft_alb).
         alpha = compute_land_albedo(
             lat, snow_effective, snow_age, land_config.land_albedo,
             base_albedo=jnp.broadcast_to(jnp.asarray(albedo_land), T_surface.shape))
@@ -258,6 +267,7 @@ def compute_simple_seb_fluxes(
         emissivity=jnp.broadcast_to(jnp.asarray(emissivity), T_surface.shape),
         z0=jnp.broadcast_to(jnp.asarray(z0), T_surface.shape),
         gpp=gpp_farq,
+        sif=sif_farq,
         stomatal_ratio=stomatal_ratio,
         surface_conductance=surface_conductance,
         # Canopy-specific diagnostics left as None

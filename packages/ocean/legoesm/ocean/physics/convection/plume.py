@@ -12,6 +12,44 @@ from legoesm.ocean.physics.convection.config import PlumeConfig
 from legoesm.ocean.physics.convection.output import OceanConvectionOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
+__physics_contract__ = {
+    "summary": (
+        "Entraining mass-flux convective plume: a surface-triggered plume "
+        "descends while entraining ambient water, and its detrainment plus "
+        "compensating subsidence redistribute heat and salt vertically (no "
+        "momentum mixing)."
+    ),
+    "inputs": {
+        "T": "degC", "S": "psu", "rho": "kg/m^3", "p_hydro": "Pa",
+        "jacobian": "1 (z-star dimensionless)",
+        "cfg.epsilon": "1/m (entrainment rate)", "cfg.T_excess": "K",
+    },
+    "outputs": {
+        "dT_dt": "degC/s", "dS_dt": "psu/s", "convection_flag": "1 (active)",
+    },
+    "sign_convention": (
+        "The plume is active where the parcel is denser than ambient (buoyant "
+        "descent under surface destabilisation); a vertical REDISTRIBUTION only "
+        "— an explicit surface-cell correction subtracts the column integral so "
+        "the dz-weighted column integral of T and S is conserved to machine "
+        "precision (no surface/floor flux); no momentum tendency; dry columns "
+        "masked to zero; z positive up."
+    ),
+    # Adiabatic vertical redistribution with an exact column-integral
+    # correction: conserves column-integrated heat (energy) and salt.
+    "conserves": ["energy", "salt"],
+    "differentiable": True,
+    "reference": (
+        "Entraining mass-flux plume convection; Paluszkiewicz & Romea (1997), "
+        "Dyn. Atmos. Oceans 26, 95-130"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_plume_convection.py — a surface-cooled unstable "
+        "column convects and the dz-weighted column integral of T, S is "
+        "conserved to machine precision; a stable column gives zero tendency."
+    ),
+}
+
 
 def plume_convection(
     T: jnp.ndarray,
@@ -66,8 +104,20 @@ def plume_convection(
     # column-integral correction below (codex review).
     dz_actual = (z_coord.dz_ref * jacobian[..., jnp.newaxis]).astype(dtype)
 
-    # Detect unstable surface: rho(k=0) > rho(k=1)
-    surface_unstable = rho[..., 0] > rho[..., 1]  # (6, n, n)
+    # Detect unstable surface at a CONSISTENT pressure.  Comparing the raw
+    # in-situ densities ``rho[...,0]`` (at p_hydro[...,0]) vs ``rho[...,1]``
+    # (at p_hydro[...,1]) mixes two different reference pressures: seawater
+    # compressibility makes the deeper level spuriously denser, so the trigger
+    # UNDER-fires (a truly unstable surface can read as stable).  Displace the
+    # surface parcel adiabatically to level-1 pressure via ``eos_fn`` so the
+    # comparison is at the SAME pressure as the environment there — mirroring
+    # the in-plume check ``eos_fn(T_plume, S_plume, p_hydro[k])`` below.
+    # Sign convention: parcel DENSER than the environment (delta_rho > 0)
+    # => statically unstable => plume active (denser water sinks).  ``eos_fn``
+    # is always defined here (defaults to ``wright_eos`` above), so no
+    # raw-density fallback path is reachable.
+    rho_surf_at_1 = eos_fn(T[..., 0], S[..., 0], p_hydro[..., 1])
+    surface_unstable = rho_surf_at_1 > rho[..., 1]  # (6, n, n)
 
     # Initialize plume properties at surface.  This is a DOWNWARD (sinking)
     # ocean convective plume, so the source parcel must be *denser* than the

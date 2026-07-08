@@ -111,6 +111,46 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 
+__physics_contract__ = {
+    "summary": (
+        "Prognostic TKE vertical mixing (Gaspar 1990 / Burchard 2002, Veros "
+        "enable_tke): advance a turbulent-kinetic-energy budget (shear + "
+        "buoyancy production, dissipation, TKE diffusion) with "
+        "Bougeault-Lacarrere mixing lengths, then set K_M = c_k*l_k*sqrt(2e) "
+        "and K_H = K_M/Pr."
+    ),
+    "inputs": {
+        "u_cell": "m/s", "v_cell": "m/s", "T_cell": "degC", "S_cell": "psu",
+        "rho_cell": "kg/m^3", "dz_half": "m", "tke_old": "m^2/s^2",
+        "tau_x_surface": "N/m^2", "tau_y_surface": "N/m^2", "dt": "s",
+    },
+    "outputs": {
+        "K_M": "m^2/s", "K_H": "m^2/s", "tke_new": "m^2/s^2",
+    },
+    "sign_convention": (
+        "TKE e >= tke_background >= 0; K_M, K_H >= 0; shear production P_s >= 0, "
+        "dissipation eps >= 0 (a sink), buoyancy work P_b = -K_H*N^2 (a source "
+        "when N^2<0); surface TKE flux (|tau|/rho_0)^{3/2} injected as a flux BC "
+        "at the top interface; z positive up. The TKE budget has genuine "
+        "sources/sinks so nothing is conserved; K_M/K_H close the momentum and "
+        "tracer budgets in the solver."
+    ),
+    # Prognostic-TKE diffusivity producer (like CATKE); dissipative budget, so
+    # nothing is conserved by the closure itself.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Gaspar, P. et al. (1990), JGR 95, 16179-16193; Burchard, H. (2002); "
+        "Bougeault & Lacarrere (1989), MWR 117, 1872-1890"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_tke_closure.py + "
+        "tests/ocean/unit/test_tke_prognostic.py — wind-forced surface layer "
+        "builds TKE and K_M; a stratified quiescent column decays toward "
+        "background TKE; Kato-Phillips mixed-layer deepening."
+    ),
+}
+
 _EPS = float(jnp.finfo(jnp.float32).eps)
 
 # --- NEMO zdftke surface-term constants (NEMO 5.0.1 src/OCE/ZDF/zdftke.F90) ---
@@ -128,6 +168,21 @@ _NEMO_TKE_HTAU_CONST_M = 10.0  # nn_htau=0 constant penetration depth [m]
 _NEMO_TKE_HTAU_MIN_M = 0.5
 _NEMO_TKE_HTAU_MAX_M = 30.0
 _NEMO_TKE_HTAU_SLOPE_M = 45.0
+
+
+def _safe_stress_modulus(tx: jnp.ndarray, ty: jnp.ndarray) -> jnp.ndarray:
+    """AD-safe |τ| = sqrt(τx² + τy²) with a finite (zero) gradient at τ=0.
+
+    The plain ``jnp.sqrt(tx*tx + ty*ty)`` has a NaN reverse-mode gradient at
+    ``tx = ty = 0`` (``d/dx sqrt(x) = 1/(2 sqrt(x))`` → ``0 * inf`` in the VJP),
+    though the analytic limit of the stress modulus and its contribution to the
+    surface TKE flux ``(|τ|/ρ₀)^{3/2}`` is 0 there. The double-``where`` keeps
+    the primal BIT-IDENTICAL to the plain form where ``|τ|² > 0`` and yields a
+    finite 0 (with 0 gradient) at zero stress — the same pattern used for the
+    AD-safe sqrt elsewhere in this module (see ``_veros_buoyancy_length``).
+    """
+    t2 = tx * tx + ty * ty
+    return jnp.where(t2 > 0.0, jnp.sqrt(jnp.where(t2 > 0.0, t2, 1.0)), 0.0)
 
 
 class TKEOutput(NamedTuple):
@@ -1225,7 +1280,7 @@ def tke_vertical_mixing(
     else:
         tx = tau_x_surface if tau_x_surface is not None else jnp.zeros_like(rho_cell[..., 0])
         ty = tau_y_surface if tau_y_surface is not None else jnp.zeros_like(rho_cell[..., 0])
-        taum = jnp.sqrt(tx * tx + ty * ty)
+        taum = _safe_stress_modulus(tx, ty)
         surface_flux = (taum / rho_0) ** 1.5
 
     # --- NEMO zdftke surface terms (static feature gates; see TKEConfig) ---
@@ -1411,7 +1466,7 @@ def tke_set_diffusivities(
               else jnp.zeros_like(rho_cell[..., 0]))
         ty = (tau_y_surface if tau_y_surface is not None
               else jnp.zeros_like(rho_cell[..., 0]))
-        surface_flux = (jnp.sqrt(tx * tx + ty * ty) / rho_0) ** 1.5
+        surface_flux = (_safe_stress_modulus(tx, ty) / rho_0) ** 1.5
 
     l_k, _l_eps = compute_mixing_lengths(
         tke_old, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell,

@@ -91,6 +91,17 @@ def donor_clamp_scale(q_avail, sink_total, dt, divisor_floor=1.0e-15):
     return jnp.minimum(1.0, q_avail / sink_dt_safe)
 
 
+def kelvin_coefficient(T):
+    """Köhler curvature (Kelvin) term ``A = 2 σ_w / (ρ_w R_v T)`` [m].
+
+    SINGLE canonical definition — shared by the fast-SBM nucleation
+    (oracle ``AKOE``) and the ARG (Abdul-Razzak & Ghan 2000) activation
+    scheme, so the two cannot drift (no-duplicate-numerics rule).
+    """
+    return 2.0 * constants.sigma_water / (
+        constants.rho_water * constants.R_v * T)
+
+
 # --- air transport properties (SAM M2005 module_mp_graupel.f90; fixed) -------
 # Hall & Pruppacher (1976) water-vapour diffusivity in air, Sutherland dynamic
 # viscosity, and the derived Schmidt number / air thermal conductivity — shared
@@ -236,7 +247,7 @@ def effective_Nc(N_c, Nc_0, *, predict_Nc=True, nc_specified_field=False):
     **Convention**: this module internally uses the Seifert-Beheng
     per-volume (`[1/m³]`) convention for cloud droplet number — the
     formulas ``x_c = q_c * rho / N_c`` and ``dN_r_au = dq_c_au * rho
-    / (x_star * 20)`` rely on it (audit Codex cycle 2).  An earlier
+    / x_star`` rely on it (audit Codex cycle 2).  An earlier
     docstring labeled ``N_c`` as `[1/kg]` (per-mass), which conflicts
     with the formulas: a per-mass ``N_c`` would give ``x_c`` in
     `[kg²/m³]` rather than `[kg]`, breaking the comparison against
@@ -300,7 +311,14 @@ def autoconversion_sb(q_c, N_c_eff, rho, k_au, x_star, sharpness=_DEFAULT_SAT_SH
     # canonical SB 2001 / Seifert 2008 switch behaviour.
     onset = jax.nn.sigmoid(sharpness * (x_c / x_star - 1.0))
     dq_c_au = k_au * q_c_pos ** 2 * onset * gamma_norm * rho
-    dN_r_au = dq_c_au * rho / (x_star * _SB_RAIN_NUMBER_FACTOR)
+    # SB2001/2006 number closure: each newborn rain drop carries the
+    # separation mass x_* (SB2001 Eq. for ∂N_r/∂t|_au = au/x_*), so the
+    # number source is the mass rate divided by x_star ALONE.  The factor
+    # 1/20 in SB2001 belongs to the MASS-rate coefficient k_au = k_cc/(20·x_*)
+    # — here k_au is an independent tunable — and a transplanted ·20 divisor
+    # previously made newborn drops 20× x_* (~215 µm instead of ~79 µm),
+    # biasing rain fall speed fast and rain evaporation low.
+    dN_r_au = dq_c_au * rho / x_star
     return dq_c_au, dN_r_au, x_c
 
 
@@ -347,7 +365,6 @@ _KK2000_ACCRETION_EXPONENT = 1.15
 _RHO_FLOOR = 0.1                 # air-density floor in PSD/fall-speed divisions [kg/m^3]
 _FALL_RHO_EXPONENT = 0.54        # (rho_su/rho)^0.54 fall-speed density correction
 _VENT_CONS_OFFSET = 2.5          # 5/2 in ventilation gamma argument 5/2 + b/2
-_SB_RAIN_NUMBER_FACTOR = 20.0    # SB autoconversion rain-number divisor (x_star*20)
 _BIGG_MNUCCR_PREFACTOR = 20.0    # Bigg freezing mass prefactor (20 pi^2 rho_w)
 _UMR_FALL_CAP = 9.1              # rain mass-weighted fall-speed cap [m/s]
 _UMG_FALL_CAP = 20.0             # graupel mass-weighted fall-speed cap [m/s]

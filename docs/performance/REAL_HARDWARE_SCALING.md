@@ -1,5 +1,16 @@
 # Real MPI and Multi-GPU Scaling Tests (Atmosphere + Ocean)
 
+> **2026-07 — cluster job sets + ocean multi-GPU lane.** Ready-made
+> weak/strong job sets now exist for **NCAR Derecho**
+> (`scripts/cluster/scaling_derecho/`, incl. multi-node NCCL + ocean GPU/CPU
+> jobs) and **DKRZ Levante** (`scripts/cluster/scaling_levante/`). The ocean
+> gained a full-step multi-GPU driver:
+> `scripts/bench/bench_ocean_latlon_spmd_scaling.py` (the ocean twin of the
+> atm SPMD bench; single-process multi-device AND `--multicontroller`
+> multi-node, with `--parity-gate`/`--check-conservation` fail-fast armor) —
+> superseding §4's "no single ocean script" caveat for the GPU-node case. SOTA comparison + readiness review:
+> `docs/performance/scaling/derecho_levante_sota_review_2026-07.md`.
+
 This runbook describes how to run real-hardware scaling tests for legoESM
 atmosphere and ocean components on CPUs/GPUs and MPI clusters.
 
@@ -139,9 +150,16 @@ Key metrics are in `scaling_validation` and `mpi_validation.scaling`:
 
 ## 4. Ocean Scaling and MPI Hardware Tests
 
-There is currently no single ocean script equivalent to atmosphere
-`run_levante_gpu_scaling.py` for automated strong/weak MPI+multi-GPU gating.
-Use the workflow below to cover real ocean hardware behavior.
+> **Superseded caveat.** The earlier "no single ocean script equivalent to
+> `run_levante_gpu_scaling.py`" note is out of date. Two automated ocean
+> scaling drivers now exist with parity + conservation fail-fast gates:
+> `scripts/bench/bench_ocean_latlon_spmd_scaling.py` (full-step multi-GPU /
+> SPMD, single-process **and** `--multicontroller`) and
+> `scripts/bench/bench_ocean_mpi_scaling.py` (CPU-MPI latitude-band, with
+> `--wet-balance` and the distributed fixed-M PCG options). The
+> matrix-driven workflow below (§4.1–4.3) remains a valid single-process
+> runtime-trend + MPI-correctness cross-check. Grid coverage and status per
+> ocean grid: `scaling/SCALING_STATUS_AUDIT.md`.
 
 ### 4.1 Ocean scaling matrix (single-process runtime/perf trend)
 

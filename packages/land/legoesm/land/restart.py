@@ -93,13 +93,6 @@ def save_land_restart(
     tgc = getattr(state, "TgC", None)
     if tgc is not None:
         payload["TgC"] = np.asarray(tgc)
-    # surface_water (coupled ponding cell, #671) is an ARRAY in a live state
-    # (init_multilayer_land_state seeds it with zeros), so a warm-started state
-    # MUST carry it too — otherwise the loaded state has surface_water=None while
-    # the step returns an array, and the lax.scan carry pytree mismatches.
-    sw = getattr(state, "surface_water", None)
-    if sw is not None:
-        payload["surface_water"] = np.asarray(sw)
 
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -166,13 +159,6 @@ def load_land_restart(
         snow_depth=jnp.asarray(data["snow_depth"]),
         snow_age=jnp.asarray(data["snow_age"]),
         TgC=jnp.asarray(data["TgC"]) if "TgC" in data.files else None,
-        # Match init_multilayer_land_state: a live state's surface_water is a
-        # zeros ARRAY (not None), so a legacy restart that predates the field
-        # gets zeros (no ponding) rather than None -> keeps the scan-carry
-        # pytree consistent with a cold-started run.
-        surface_water=(jnp.asarray(data["surface_water"])
-                       if "surface_water" in data.files
-                       else jnp.zeros(T.shape[0])),
     )
     meta = {
         "restart_version": version,
@@ -184,4 +170,38 @@ def load_land_restart(
     return state, meta
 
 
-__all__ = ["save_land_restart", "load_land_restart"]
+def merge_land_restart_into_template(loaded, template):
+    """Return ``template`` with its prognostic fields replaced by ``loaded``'s.
+
+    A restart round-trips only the core prognostic fields (``_MULTILAYER_FIELDS``
+    + ``TgC``); the OPTIONAL structural fields (``surface_water``,
+    ``snow_bands``, ``ice_bands``, ``canopy_state``, …) come back at their
+    NamedTuple ``None`` defaults.  But ``step_multilayer_land`` populates those
+    as arrays, so feeding a bare loaded state straight into a ``lax.scan`` (the
+    coupled-AMIP segment, or a chained spin-up) raises a carry input/output
+    pytree-structure mismatch.  Building from a freshly-initialised ``template``
+    (which has the canonical structure) and grafting the restart's prognostic
+    columns onto it fixes the structure while keeping the equilibrated values.
+
+    Mirrors the land-ml CHECKPOINT restore in ``model_driver`` (``template.
+    _replace(**fields)``), with a shape check per field so a resolution /
+    soil-layer skew fails loudly rather than silently reshaping.
+    """
+    fields = {}
+    for name in _MULTILAYER_FIELDS:
+        arr = getattr(loaded, name)
+        ref = getattr(template, name)
+        if ref is not None and hasattr(arr, "shape") and arr.shape != ref.shape:
+            raise ValueError(
+                f"land restart field '{name}' has shape {tuple(arr.shape)}, "
+                f"expected {tuple(ref.shape)} (resolution / soil-layer skew)")
+        fields[name] = arr
+    if getattr(loaded, "TgC", None) is not None:
+        fields["TgC"] = loaded.TgC
+    return template._replace(**fields)
+
+
+__all__ = [
+    "save_land_restart", "load_land_restart",
+    "merge_land_restart_into_template",
+]

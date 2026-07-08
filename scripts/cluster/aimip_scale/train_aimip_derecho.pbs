@@ -1,0 +1,75 @@
+#!/bin/bash -l
+#PBS -N aimip_scale_t106
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=1:ncpus=64:ngpus=1:gpu_type=a100:mem=400GB
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# AIMIP AT SCALE on NCAR Derecho — single A100-80GB, T106 (~1.1 deg), ALL
+# training years 1979-2014 (576 IC/target pairs), one variant per job.
+#
+# AIMIP training is SINGLE-DEVICE by design (the spectral semi-implicit solver
+# all-gathers vertical levels and the SH transforms carry no collectives), so
+# "at scale" here = a bigger GPU (80 GB vs Ginsburg's 24-40 GB) running the
+# full-resolution, all-years, higher-capacity config — NOT multi-GPU sharding.
+# The 80 GB card is what makes T106 + RRTMGP + K=2 autoregressive rollout +
+# spatial-surface coefs fit.
+#
+# The run self-CHAINS: run_aimip.py writes a per-epoch checkpoint and --resume
+# picks up at the next epoch, so a 15-epoch T106 run that exceeds one 12 h
+# walltime resubmits itself until all epochs are done (or CHAIN_MAX links).
+#
+# SUBMIT (one per variant):
+#   qsub -v VARIANT=sfno_physics scripts/cluster/aimip_scale/train_aimip_derecho.pbs
+#   qsub -v VARIANT=classical    scripts/cluster/aimip_scale/train_aimip_derecho.pbs
+#   qsub -v VARIANT=column_nn    scripts/cluster/aimip_scale/train_aimip_derecho.pbs
+# First submit auto-detects "no checkpoint yet -> fresh"; chained links pass
+# RESUME=1 themselves. Override the account with `qsub -A <proj>`; paths + conda
+# env live in scripts/cluster/scaling_derecho/_env.sh (EDIT before first run).
+# ===========================================================================
+set -uo pipefail
+
+VARIANT="${VARIANT:-sfno_physics}"     # classical | column_nn | sfno_physics
+CHAIN="${CHAIN:-0}"
+CHAIN_MAX="${CHAIN_MAX:-24}"  # v2 curriculum (72h/120h phases) needs more links
+
+cd "$PBS_O_WORKDIR"
+source scripts/cluster/scaling_derecho/_env.sh   # sets REPO, PY, conda, JAX env
+cd "$REPO"
+
+export JAX_ENABLE_X64=1
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+
+SUITE="config/aimip/scale/suite_${VARIANT}.yaml"
+OUT="results/aimip_scale_t106/${VARIANT}"
+mkdir -p "$OUT/logs"
+
+# Resume automatically if any epoch checkpoint already exists for this variant
+# (so a manual resubmit or a chained link both continue rather than restart).
+RESUME_FLAG=""
+if ls "$OUT"/*/epoch_*.eqx >/dev/null 2>&1 || [ "${RESUME:-0}" = "1" ]; then
+  RESUME_FLAG="--resume"
+fi
+
+echo "[aimip-scale] $(date) variant=$VARIANT link=$CHAIN suite=$SUITE resume=${RESUME_FLAG:-no}"
+"$PY" -u scripts/run/run_aimip.py --suite "$SUITE" $RESUME_FLAG
+RC=$?
+echo "[aimip-scale] run_aimip rc=$RC $(date)"
+
+# Chain until params.eqx (final) exists or CHAIN_MAX reached. run_aimip writes
+# results/aimip_scale_t106/<variant>/<variant>/params.eqx only after the last
+# epoch; while it is absent and the last run exited cleanly, resubmit.
+FINAL="$OUT/${VARIANT}/params.eqx"
+if [ "$RC" -eq 0 ] && [ ! -f "$FINAL" ] && [ "$CHAIN" -lt "$CHAIN_MAX" ]; then
+  echo "[aimip-scale] not complete -> chaining link $((CHAIN+1))/$CHAIN_MAX"
+  qsub -v VARIANT="$VARIANT",CHAIN="$((CHAIN+1))",CHAIN_MAX="$CHAIN_MAX",RESUME=1 \
+    "$PBS_O_WORKDIR/scripts/cluster/aimip_scale/train_aimip_derecho.pbs"
+elif [ -f "$FINAL" ]; then
+  echo "[aimip-scale] DONE: $FINAL"
+else
+  echo "[aimip-scale] stop (rc=$RC or chain limit $CHAIN_MAX)"
+fi

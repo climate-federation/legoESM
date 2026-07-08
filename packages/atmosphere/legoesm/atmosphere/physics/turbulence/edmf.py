@@ -18,7 +18,12 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import mixing_length, virtual_temperature
+from legoesm.atmosphere.physics._shared import (
+    buoyancy_coefficient,
+    exner_function,
+    mixing_length,
+    virtual_temperature,
+)
 from legoesm.atmosphere.physics.turbulence.config import TurbulentEDMFConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -30,9 +35,93 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion_theta,
 )
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "EDMF turbulence: prognostic-TKE eddy diffusivity (ED) for local "
+        "down-gradient mixing combined with a buoyant mass-flux (MF) updraft "
+        "for nonlocal transport of heat and moisture in the convective PBL."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg", "tke": "m^2/s^2",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "T_sfc": "K", "q_sfc": "kg/kg", "rho": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "Km": "m^2/s", "Kh": "m^2/s", "shflx": "W/m^2", "lhflx": "W/m^2",
+        "ustar": "m/s", "h_pbl": "m", "tke_new": "m^2/s^2",
+    },
+    "sign_convention": (
+        "ED part is down-gradient (Km >= 0, Kh = Km/Pr_t >= 0); the MF part "
+        "adds -d/dz(M*(phi_u - phi)) so a warm/moist updraft transports heat "
+        "and moisture upward. The column budget is OPEN: the surface flux "
+        "(shflx > 0 upward, lhflx > 0 upward/moistening) is injected as the "
+        "bottom boundary condition and the top is zero-flux; z increases upward."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Siebesma, Soares & Teixeira (2007), J. Atmos. Sci. 64, 1230-1248; "
+        "Tan et al. (2018) plume closure"
+    ),
+    "idealized_test": (
+        "no surface flux + neutral non-buoyant column -> dead updraft "
+        "(w_u -> 0) and near-zero interior tendency; Km, Kh >= 0; "
+        "tke stays >= tke_min."
+    ),
+}
+
 
 # Convective velocity-scale coefficient w* ~ 2.5 u* (EDMF default).
 _EDMF_WSTAR_COEFF = 2.5
+
+
+def _mass_flux_tendency(phi, phi_u, M, dz_layer, rho, z_full, z_half):
+    """Flux-form vertical divergence of the mass-flux transport of ``phi``.
+
+    ``d(phi)/dt = -(1/rho) d/dz[ M (phi_u - phi) ]`` written in FLUX FORM so the
+    column mass-weighted integral telescopes to ``F_top - F_sfc`` exactly.  A
+    non-flux-form centred difference at full levels does NOT telescope (its
+    mass-weighted column sum leaves a spurious O(interior MF flux) heat/moisture
+    source), which is the conservation defect this replaces.
+
+    Index 0 = model top, increasing downward; z increases upward.  The
+    interior interface fluxes are interpolated LINEARLY IN HEIGHT from the
+    adjacent cell-centred fluxes to the actual interface height ``z_half``
+    (weights from ``z_full``/``z_half``).  On a uniform grid the interface is
+    midway between the flanking full levels, so this reduces exactly to the
+    previous 2-point average; on a STRETCHED grid the unweighted average is
+    equivalent to the old centred difference ``(F[k-1]-F[k+1])/(2·dz_layer[k])``
+    whose denominator does not match the full-level spacing
+    ``z_full[k-1]-z_full[k+1]`` — an O(1) local truncation error the height
+    weighting removes (a linear-in-z flux now yields the exact constant
+    divergence in every interior row) while PRESERVING the telescoping
+    conservation property (the divisor stays the layer thickness ``dz_layer``).
+
+    There is no mass-flux transport through the model top (``F_top = 0``); the
+    lowest interface carries the surface-coupled MF flux (``F_sfc = flux[-1]``)
+    so the legitimate surface-driven transport is retained — hard-zeroing it
+    broke ``test_mass_flux_active`` (iter-50) and is NOT done here.
+    """
+    flux = M * (phi_u - phi)                       # cell-centred updraft flux, (ncol, nlev)
+    ncol = flux.shape[0]
+    zero_top = jnp.zeros((ncol, 1), dtype=flux.dtype)
+    # Interior interface j (between full levels j-1 and j, top-first) sits at
+    # z_half[:, 1:-1]; interpolate the full-level flux linearly to that height.
+    # w in (0, 1): fractional distance from the UPPER full level (j-1) down to
+    # the interface, w = (z_upper - z_iface)/(z_upper - z_lower).
+    z_upper = z_full[:, :-1]
+    z_lower = z_full[:, 1:]
+    z_iface = z_half[:, 1:-1]
+    w = (z_upper - z_iface) / jnp.clip(z_upper - z_lower, 1.0, None)
+    flux_int = (1.0 - w) * flux[:, :-1] + w * flux[:, 1:]  # (ncol, nlev-1)
+    flux_sfc = flux[:, -1:]                          # surface-coupled MF flux
+    flux_iface = jnp.concatenate([zero_top, flux_int, flux_sfc], axis=1)  # (ncol, nlev+1)
+    # d(phi)/dt|_k = -(F_upper - F_lower)/(rho_k dz_k); upper iface = k, lower = k+1.
+    dflux_dz = (flux_iface[:, :-1] - flux_iface[:, 1:]) / dz_layer
+    return -dflux_dz / jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
+
 
 def edmf_turbulence(
     u: jax.Array,
@@ -110,15 +199,16 @@ def edmf_turbulence(
     dv_dz = (v[:, :-1] - v[:, 1:]) / dz_half
     S2_half = du_dz ** 2 + dv_dz ** 2
 
-    # ``exner_pref`` = (p_ref / p)^κ multiplies T to get θ.
-    # Distinct from ``exner_inv`` = (p / p_ref)^κ used below to invert θ
-    # back to T.  Variable shadowing was a fragility hazard — keep them
-    # distinctly named.
-    exner_pref = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
+    # ``exner_pref`` = (p_ref / p)^κ = 1/Π multiplies T to get θ (canonical
+    # helper; same 1 Pa pressure floor).  Distinct from ``exner_inv`` =
+    # (p / p_ref)^κ used below to invert θ back to T.  Variable shadowing was
+    # a fragility hazard — keep them distinctly named.
+    exner_pref = 1.0 / exner_function(p_full)
     theta_v = virtual_temperature(T, q_v) * exner_pref
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
-    N2_half = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
+    # N² = (g/θ_v)·∂θ_v/∂z via the shared buoyancy coefficient (clip at call site).
+    N2_half = buoyancy_coefficient(jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
 
     # Interpolate to full levels: top/bottom take the nearest half-level
     # value, interior is the average of flanking half-levels.  Single
@@ -156,11 +246,12 @@ def edmf_turbulence(
     ustar = jnp.clip(ustar, 1e-4, None)  # coeff-ok: u* floor [m/s]
 
     # Potential temperature for updraft.
-    # ``exner_inv`` = (p / p_ref)^κ — divides T to give θ, multiplies
-    # dθ to give dT.  Distinct from ``exner_pref`` = (p_ref / p)^κ
-    # above.  Keeping the two names separate avoids the fragility
-    # of reassigning a single ``exner`` to its reciprocal mid-function.
-    exner_inv = (jnp.clip(p_full, 1.0, None) / constants.p_ref) ** constants.kappa
+    # ``exner_inv`` = (p / p_ref)^κ = Π (canonical helper) — divides T to
+    # give θ, multiplies dθ to give dT.  Distinct from ``exner_pref`` =
+    # (p_ref / p)^κ above.  Keeping the two names separate avoids the
+    # fragility of reassigning a single ``exner`` to its reciprocal
+    # mid-function.
+    exner_inv = exner_function(p_full)
     theta = T / jnp.clip(exner_inv, 1.0e-8, None)
 
     # Initialize updraft at surface (bottom level = index nlev-1).  Pin
@@ -297,21 +388,13 @@ def edmf_turbulence(
     M_max = 0.5 * rho * dz_layer / jnp.maximum(dt, 1.0e-12)
     M = jnp.minimum(M, M_max)
 
-    # MF tendencies: d(phi)/dt_mf = -(1/rho) * d(M * (phi_u - phi_env)) / dz
-    # Compute vertical derivative of mass flux transport
-    def _mf_tendency(phi, phi_u):
-        flux = M * (phi_u - phi)  # (ncol, nlev)
-        # Centered FD interior + one-sided FD at top/bottom; single
-        # concatenate replaces alloc-zeros + 3 scatter ops.
-        dflux_top = (flux[:, :1] - flux[:, 1:2]) / dz_layer[:, :1]
-        dflux_int = (flux[:, :-2] - flux[:, 2:]) / (2.0 * dz_layer[:, 1:-1])
-        dflux_bot = (flux[:, -2:-1] - flux[:, -1:]) / dz_layer[:, -1:]
-        dflux_dz = jnp.concatenate([dflux_top, dflux_int, dflux_bot], axis=1)
-        return -dflux_dz / jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
-
-    dtheta_dt_mf = _mf_tendency(theta, theta_u)
+    # MF tendencies: flux-form vertical divergence of M·(phi_u − phi_env), so
+    # the column mass-weighted integral telescopes to the boundary fluxes
+    # (conservative — a centred full-level difference leaks a spurious column
+    # source).  See module-level ``_mass_flux_tendency``.
+    dtheta_dt_mf = _mass_flux_tendency(theta, theta_u, M, dz_layer, rho, z_full, z_half)
     dT_dt_mf = dtheta_dt_mf * exner_inv
-    dq_dt_mf = _mf_tendency(q_v, q_u)
+    dq_dt_mf = _mass_flux_tendency(q_v, q_u, M, dz_layer, rho, z_full, z_half)
 
     # ===== ED tendencies via implicit diffusion =====
     sflx_u = tau_x

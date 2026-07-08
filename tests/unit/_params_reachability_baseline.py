@@ -38,11 +38,10 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.turb.CLUBBLiteConfig.C_eps',
     'atm.turb.CLUBBLiteConfig.Pr_t',
     'atm.turb.CLUBBLiteConfig.l_mix_max',
-    # atm: CloudConfig (9)
+    # atm: CloudConfig (8)
     'atm.clouds.CloudConfig.Nc_default',
     'atm.clouds.CloudConfig.T_ice_only',
     'atm.clouds.CloudConfig.conv_cloud_coeff',
-    'atm.clouds.CloudConfig.conv_cloud_condensate',
     'atm.clouds.CloudConfig.conv_precip_scale',
     'atm.clouds.CloudConfig.gamma_xr',
     'atm.clouds.CloudConfig.q_cloud_resolved_ref',
@@ -263,8 +262,12 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.turb.SmagorinskyConfig.C_s',
     'atm.turb.SmagorinskyConfig.Pr_t',
     'atm.turb.SmagorinskyConfig.l_mix_max',
-    # atm: SundqvistConfig (4)
+    # atm: SundqvistConfig (6) — like its siblings above, the microphysics
+    # scheme *Configs are not threaded through ExperimentConfig scalars; the
+    # SBK89 enhancement coefficients join the existing conscious entries.
     'atm.micro.SundqvistConfig.auto_rate',
+    'atm.micro.SundqvistConfig.bergeron_enh_coeff',
+    'atm.micro.SundqvistConfig.coalescence_enh_coeff',
     'atm.micro.SundqvistConfig.evap_coeff',
     'atm.micro.SundqvistConfig.qc_crit',
     'atm.micro.SundqvistConfig.rh_crit',
@@ -327,7 +330,10 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.turb.YSUConfig.Pr_t',
     'atm.turb.YSUConfig.Ri_crit',
     'atm.turb.YSUConfig.countergrad_coeff',
-    'atm.turb.YSUConfig.entrainment_coeff',
+    # entrainment_coeff renamed -> entrainment_ratio (Hong06 prescribed
+    # entrainment-flux ratio; spec carries legacy_name) — a RENAME in place,
+    # not baseline growth (net count unchanged at 10).
+    'atm.turb.YSUConfig.entrainment_ratio',
     'atm.turb.YSUConfig.entrainment_width_frac',
     'atm.turb.YSUConfig.l_mix_max',
     'atm.turb.YSUConfig.louis_b',
@@ -406,4 +412,25 @@ UNREACHABLE_PARAMS = frozenset({
     # ocean: ShortwavePenetrationConfig (2)
     'ocean.sw_penetration.rgb_ir_extinction_m',
     'ocean.sw_penetration.rgb_ir_fraction',
+    # ocean: TidalForcingConfig (3) — CONSCIOUS entry (equilibrium-tide forcing).
+    # These ARE settable via YAML (ocean.tidal_forcing.{love_factor,beta_sal,
+    # amplitude_scale}, built into a TidalForcingConfig by config.py). They are
+    # not yet on run_omip's curated OMIPRunConfig --params surface; wiring
+    # tidal_forcing onto OMIPRunConfig (+ a --tidal-forcing flag) is the follow-up
+    # that shrinks these three away.
+    'ocean.tidal_forcing.amplitude_scale',
+    'ocean.tidal_forcing.beta_sal',
+    'ocean.tidal_forcing.love_factor',
+    # atm: aerosol activation / prognostic aerosol (5) — CONSCIOUS entry.
+    # ActivationConfig hangs off MorrisonConfig.activation (reachable
+    # programmatically, wired into microphysics/integration.py) but is not yet
+    # on the AMIP flattened-scalar --params surface; PrognosticAerosolConfig is
+    # a tested driver hook not yet stepped by any production driver.  Wiring
+    # ActivationConfig onto the AMIP scalar map (+ the prognostic-aerosol
+    # driver hook) is the follow-up that shrinks these five away.
+    'atm.aerosol.ActivationConfig.w_char_m_s',
+    'atm.aerosol.PrognosticAerosolConfig.dry_dep_velocity_m_s',
+    'atm.aerosol.PrognosticAerosolConfig.emission_number_flux_m2_s',
+    'atm.aerosol.PrognosticAerosolConfig.so2_oxidation_timescale_s',
+    'atm.aerosol.PrognosticAerosolConfig.wet_scavenging_coeff_m2_kg',
 })

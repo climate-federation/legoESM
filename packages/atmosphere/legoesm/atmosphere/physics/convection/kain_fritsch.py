@@ -63,6 +63,55 @@ from legoesm.atmosphere.physics.convection._plume import (
 __all__ = ("kain_fritsch_convection",)
 
 
+__physics_contract__ = {
+    "summary": (
+        "Kain-Fritsch bulk mass-flux deep/shallow convection: a "
+        "boundary-layer-triggered entraining-detraining plume with CONDLOAD "
+        "precipitation fallout and an RH-controlled downdraft; smooth "
+        "(differentiable) trigger and deep/shallow blend."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa",
+        "w_grid": "m/s (resolved grid-scale vertical velocity)",
+        "conv_prog_profile": "kg/m^2/s (cloud-base mass-flux carry, packed at [:, -1])",
+        "dt": "s",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "dq_c_conv_dt": "kg/kg/s (detrained non-precipitating cloud-water source to microphysics, >=0)",
+        "cape": "J/kg", "convective_mask": "1 (0-1 activation)",
+        "conv_prog_profile_new": "kg/m^2/s (updated cloud-base mass-flux carry)",
+    },
+    "sign_convention": (
+        "z up; surface at [:, -1]. Convection warms aloft and dries the "
+        "sub-cloud/lower layers where it stabilizes a conditionally-unstable "
+        "column; dq_c_conv_dt >= 0. CONDLOAD fallout PRECIPITATES condensate "
+        "out of the column (partly re-evaporated by the RH-controlled "
+        "downdraft, dT=-L_v/c_pd*dq_v), so atmospheric total water is NOT "
+        "conserved; column moist static energy is conserved to closure "
+        "accuracy (latent heat of the precipitated water is retained as "
+        "sensible heating)."
+    ),
+    # Environmental tendencies come from the non-conservative default mass-flux
+    # kernel and CONDLOAD fallout leaves the column with only partial downdraft
+    # re-evaporation, so column energy holds only to CLOSURE ACCURACY, not at
+    # contract level -> no conservation claimed.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Kain & Fritsch (1990), J. Atmos. Sci. 47, 2784-2802; "
+        "Kain (2004), J. Appl. Meteor. 43, 170-181"
+    ),
+    "idealized_test": (
+        "tests/unit/test_kain_fritsch.py; neutral column (CAPE=0, no "
+        "grid-scale ascent) -> ~zero tendency; a conditionally-unstable column "
+        "with resolved ascent -> heating aloft, sub-cloud drying, positive "
+        "convective_mask; mask -> 0 when the cloud is too shallow and "
+        "enable_shallow=False."
+    ),
+}
+
+
 # Kain-Fritsch updraft-radius ramp smoothing widths (fixed).
 _KF_SHARPNESS_M = 200.0
 _KF_RAMP_WIDTH = 0.05
@@ -870,7 +919,11 @@ def kain_fritsch_convection(
         q_parcel_lcl = q_usl + config.parcel_perturb_q
     lcl = compute_lcl(T_parcel_lcl, q_parcel_lcl, p_usl, p_full)
     k_lcl_smooth = lcl.k_lcl_smooth
-    k_lfc_smooth, k_lnb_smooth = compute_lfc_lnb(T, T_moist, sharpness=1.0)
+    # LFC/LNB on the SAME virtual-T buoyancy as the CAPE above (same
+    # parcel-vapor profile ``q_v_parcel``).
+    k_lfc_smooth, k_lnb_smooth = compute_lfc_lnb(
+        T, T_moist, sharpness=1.0, q_v_env=q_v, q_v_parcel=q_v_parcel,
+    )
     # Plume launch parcel (seeded with the sub-cloud perturbation).  The
     # plume integrator starts its scan from the SURFACE level, so the launch
     # temperature must be the surface-pressure dry-adiabatic equivalent of
@@ -989,7 +1042,13 @@ def kain_fritsch_convection(
         config.timec_max_s,
     )
     timec = jnp.maximum(timec, dt)
-    rho_BL = p_full[:, -1] / (constants.R_d * jnp.maximum(T[:, -1], 1.0))
+    # MOIST boundary-layer density: reuse the surface level of the
+    # virtual-T column geometry computed above (``compute_column_geometry
+    # (..., q_v=q_v)`` → ``rho = p/(R_d·T_v)``).  A dry ``p/(R_d·T)``
+    # here overestimated ``rho_BL`` (hence ``M_b``) by ~(1+0.61·q_v) ≈
+    # 1-2 % in a humid tropical sub-cloud layer, inconsistent with the
+    # module's stated moist-geometry convention.
+    rho_BL = rho[:, -1]
     # The oracle drives its closure off the ENTRAINMENT-DILUTED updraft
     # buoyant energy ABE, which is markedly smaller than the undilute
     # surface-parcel CAPE that ``compute_cape`` returns (oracle ABE=5482 vs

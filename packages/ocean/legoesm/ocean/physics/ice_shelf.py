@@ -50,6 +50,47 @@ import jax.numpy as jnp
 from legoesm import constants
 
 
+__physics_contract__ = {
+    "summary": (
+        "Ice-shelf basal melt at the ice-ocean interface (Holland & Jenkins "
+        "1999 three-equation thermodynamic boundary layer, or Beckmann-Goosse "
+        "2003 one-equation): compute the melt rate, interface T/S, and the "
+        "freshwater + heat fluxes it drives into the ocean cavity."
+    ),
+    "inputs": {
+        "T_amb_C": "degC", "S_amb_PSU": "psu", "p_ice_dbar": "dbar",
+        "config.gamma_T": "m/s", "config.gamma_S": "m/s",
+    },
+    "outputs": {
+        "m_dot_m_s": "m/s", "T_b_C": "degC", "S_b_PSU": "psu",
+        "freshwater_to_ocean": "kg/m^2/s", "heat_extracted_from_ocean": "W/m^2",
+    },
+    "sign_convention": (
+        "m_dot > 0 = MELT (ice -> water), < 0 = freeze-on; melt is a freshwater "
+        "SOURCE into the ocean (freshwater_to_ocean = rho_i*m_dot > 0) that "
+        "dilutes salinity, and a latent-heat SINK "
+        "(heat_extracted_from_ocean = rho_w*c_w*gamma_T*(T_a - T_b) > 0 = the "
+        "ocean LOSES heat to the cavity); a cavity boundary source/sink, not "
+        "interior-conservative; depths positive downward."
+    ),
+    # Adds freshwater + extracts latent heat at the cavity: a boundary
+    # source/sink, not a conservative interior operator.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Holland, D. M. & Jenkins, A. (1999), JPO 29, 1787-1800; Jenkins "
+        "(1991) JGR 96, 20671-20677; Beckmann & Goosse (2003), Ocean Modelling "
+        "5, 157-170"
+    ),
+    "idealized_test": (
+        "tests/unit/test_ice_shelf.py + "
+        "tests/ocean/unit/test_isf_prescribed_melt.py — warm ambient water "
+        "(T_a > T_freeze) melts (m_dot>0, freshwater in, heat out); T_a at the "
+        "freezing point gives ~zero melt; freeze-on flips the signs."
+    ),
+}
+
+
 __param_spec__ = {
     "IceShelfConfig": {
         "scheme_key": "ocean.ice_shelf",
@@ -332,8 +373,13 @@ def three_equation_melt(
     # γ_T·c_w·ρ_w·θ / (ρ_i·L_f)) in the small-melt limit, matching
     # the Beckmann-Goosse linearisation.
     disc = B * B - 4.0 * A * C
-    disc_safe = jnp.maximum(disc, 0.0)
-    m_dot = (-B + jnp.sqrt(disc_safe)) / (2.0 * A)
+    # AD-safe sqrt of the discriminant: ``d/dx sqrt(x) = 1/(2 sqrt(x))`` is
+    # +inf at x=0, so ``sqrt(max(disc, 0))`` produces a NaN GRADIENT whenever
+    # disc <= 0 (physical roots, freeze-on edge cases).  The double-``where``
+    # keeps the primal BIT-IDENTICAL to ``sqrt(max(disc, 0))`` (sqrt(disc) for
+    # disc > 0, exactly 0 for disc <= 0) while making the reverse pass finite.
+    sqrt_disc = jnp.where(disc > 0.0, jnp.sqrt(jnp.where(disc > 0.0, disc, 1.0)), 0.0)
+    m_dot = (-B + sqrt_disc) / (2.0 * A)
 
     # Salt balance: S_b = β·S_a / (δ·m + β).
     denom = delta * m_dot + beta

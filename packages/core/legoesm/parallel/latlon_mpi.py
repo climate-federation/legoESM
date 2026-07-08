@@ -2608,13 +2608,15 @@ def build_padded_grid(grid, layout: LatLonBandLayout, halo: int = 1):
         )
         extended_lat = jnp.concatenate([extended_lat, north_extrap])
 
-    # Recover ``omega`` from the original grid's Coriolis field so the
-    # rebuilt grid carries the same rotation rate (the LatLonGrid
-    # NamedTuple does not store ``omega`` directly).  Use the
-    # interior row furthest from the pole so cos(lat) is well above
-    # the clamp floor.
-    mid = grid.lat.shape[0] // 2
-    omega_eff = float(grid.f[mid, 0] / (2.0 * grid.sin_lat[mid]))
+    # The rebuilt grid carries the ORIGINAL grid's rotation rate:
+    # LatLonGrid now stores the construction scalar (``grid.omega``,
+    # #521), exact on any band.  The prior recovery from the local
+    # Coriolis field (f[mid,0] / (2*sin_lat[mid])) was 0/0 -> NaN
+    # whenever the selected mid row sat on the equator — odd-n_lat
+    # global grids and small equatorial bands (codex 2026-07-03
+    # round-3 HIGH) — and a non-rotating omega=0 grid hit the same
+    # 0/0 at ANY row.
+    omega_eff = float(grid.omega)
 
     # Delegate the metric construction to the shared helper so the
     # serial create_latlon_grid path and this MPI extension stay

@@ -410,11 +410,13 @@ def barotropic_implicit_mpas(
         :func:`barotropic_substeps_mpas` interface).
 
     When ``return_residual=True`` (static; default ``False``) a fourth
-    value ``rel_residual`` is appended — the (rank-local) relative
-    Helmholtz residual diagnostic of the stock-CG solve.  MPAS runs stock
-    CG only (single-rank; the distributed PCG is deferred — see the
-    Step-4 note), so this residual is NOT a global reduction.  Log /
-    assert it OUTSIDE the JIT; never branch the compiled step on it.
+    value ``rel_residual`` is appended — the relative Helmholtz residual
+    diagnostic of the FINAL eta.  Single-rank (stock-CG branch): a
+    rank-local ``jnp.sum`` (exact for one rank).  Distributed (the entry
+    dispatch below, armed by ``initialize_voronoi_mpi``): an owned-cell-
+    masked GLOBAL reduction (one batched allreduce; halo rows excluded so
+    Voronoi ghost cells are not double-counted).  Log / assert it OUTSIDE
+    the JIT; never branch the compiled step on it.
     """
     # Distributed dispatch at ENTRY (resolves TODO(distributed-mpas-pcg)):
     # when ``initialize_voronoi_mpi`` has armed a partition layout, the
@@ -599,6 +601,7 @@ def barotropic_implicit_mpas(
             VoronoiHaloExchange,
         )
         from legoesm.ocean.dynamics.barotropic_common import (
+            precision_aware_rel_tol,
             solve_helmholtz_implicit,
         )
         _exchanger = VoronoiHaloExchange(_vlayout.partition, backend="mpi")
@@ -615,7 +618,12 @@ def barotropic_implicit_mpas(
             A_op_dist, rhs, _M_inv_dist, eta_old,
             distributed=True,
             fixed_iters=int(config.barotropic_implicit_pcg_fixed_iters),
-            residual_tol=config.barotropic_implicit_pcg_residual_tol,
+            # f32-safe acceptance tolerance (f64 unchanged); the fixed-iter
+            # PCG runs a static count, so this only floors the converged
+            # diagnostic.
+            residual_tol=precision_aware_rel_tol(
+                config.barotropic_implicit_pcg_residual_tol, eta_dtype,
+            ),
             stock_cg_tol=config.barotropic_implicit_pcg_tol,
             stock_cg_maxiter=int(config.barotropic_implicit_pcg_maxiter),
             pcg_variant=str(config.barotropic_implicit_pcg_variant),
@@ -625,8 +633,13 @@ def barotropic_implicit_mpas(
         # stencils consume it.
         eta_new = _exchanger.exchange_cell_field(eta_new) * mask
     else:
-        pcg_tol = jnp.asarray(
-            config.barotropic_implicit_pcg_tol, dtype=eta_dtype,
+        # f32: floor the 1e-10 rel-tol to the f32-reachable value so stock CG
+        # stops at convergence rather than maxiter (f64 unchanged).
+        from legoesm.ocean.dynamics.barotropic_common import (
+            precision_aware_rel_tol as _precision_aware_rel_tol,
+        )
+        pcg_tol = _precision_aware_rel_tol(
+            config.barotropic_implicit_pcg_tol, eta_dtype,
         )
         pcg_maxiter = int(config.barotropic_implicit_pcg_maxiter)
         # Forward = stock preconditioned CG, bit-identical; reverse mode
@@ -669,14 +682,12 @@ def barotropic_implicit_mpas(
         _actual_mass = _actual_mass_l
     _correction = (_target_mass - _actual_mass) / jnp.maximum(_ocean_area, 1e-30)
     eta_new = (eta_new + _correction.astype(eta_dtype) * mask) * mask
-    # Residual diagnostic for the single-rank stock-CG path (uniform
-    # return shape with the lat-lon solver's ``return_residual``).
-    # RANK-LOCAL ON PURPOSE: do NOT route through the lat-lon helper's
-    # ``_global_dot_batch`` (which would fire a bare ``batch_allreduce_mpi``
-    # under MPI and double-count Voronoi halo cells — the exact reason the
-    # MPAS solver is single-rank only here).  Plain ``jnp.sum`` is exact
-    # for the single rank this path runs on.  Computed AFTER the floor
-    # clamp below so it reflects the ACTUAL returned eta.
+    # Residual diagnostic (uniform return shape with the lat-lon solver's
+    # ``return_residual``), computed AFTER the floor clamp below so it
+    # reflects the ACTUAL returned eta.  Single-rank: plain ``jnp.sum``
+    # (exact for one rank).  Distributed: owned-masked sums + ONE batched
+    # allreduce — never the lat-lon helper's ``_global_dot_batch``, whose
+    # bare reduction would double-count Voronoi halo cells.
 
     # Mass-conserving floor clamp (safety net for extreme transients;
     # in normal operation this is a no-op since the PCG converges to

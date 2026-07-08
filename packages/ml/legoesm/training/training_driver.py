@@ -15,6 +15,7 @@ import logging
 import time
 from typing import Callable
 
+import jax
 import jax.numpy as jnp
 import equinox as eqx
 import optax
@@ -79,13 +80,23 @@ def _make_driver_optimizer(
 # Shared helpers (avoid copy-paste across modes)
 # ======================================================================
 
-def _build_training_segment(model, step_unified, grid, sigma, dt, **extra_kwargs):
+def build_training_segment(model, step_unified, grid, sigma, dt,
+                            fric_decay=None, **extra_kwargs):
     """Build a segment function with standard training defaults.
 
     Encapsulates the boilerplate kwargs shared by all training modes.
     Returns the compiled segment function (use ``.raw`` for AD).
+
+    ``fric_decay``: per-level Rayleigh-friction decay factors (the driver's
+    ``exp(-k_f dt)`` boundary-layer profile). Pass the DRIVER's profile for
+    rollouts whose physics provides no dissipation of its own (pure-dycore
+    epoch-0 neural_gcm / sfno): without it the forward 6 h rollout stays
+    finite but the 720-step ADJOINT through the undamped dycore returns NaN
+    gradients (#797 bug 11). ``None`` keeps the legacy no-friction ones.
     """
     sigma_full = jnp.asarray(sigma.sigma_full)
+    if fric_decay is None:
+        fric_decay = jnp.ones(sigma_full.shape[0])
     return build_segment_fn(
         model=model,
         step_unified=step_unified,
@@ -97,10 +108,19 @@ def _build_training_segment(model, step_unified, grid, sigma, dt, **extra_kwargs
         microphysics="none",
         fix_moisture=False,
         fix_mass=False,
-        fric_decay=jnp.ones(sigma_full.shape[0]),
+        fric_decay=jnp.asarray(fric_decay),
+        # Kept 0.0 on every grid: finalize_split_step's q_v smoothing calls the
+        # cube ``hyperdiffusion_3d`` (reads cube-only ``grid.halo_interp_offsets``)
+        # regardless of grid, so a nonzero coeff would crash on lat-lon.  The
+        # coeff=0 static gate skips it; wiring a lat-lon ∇⁴ operator here is the
+        # follow-up needed before training can smooth q_v on lat-lon.
         qv_smooth_coeff=0.0,
-        lat=grid.lat,
-        lon=grid.lon,
+        # Radiation flattens lat/lon to columns (ncol = n_lat*n_lon), so it needs
+        # the 2D grid field.  Lat-lon grids store a 1D lat/lon vector plus a 2D
+        # ``lat2d``/``lon2d``; the cube's ``lat``/``lon`` are already 2D (6,n,n)
+        # and have no ``lat2d``.  Mirror the production driver (grid.lat2d).
+        lat=getattr(grid, "lat2d", grid.lat),
+        lon=getattr(grid, "lon2d", grid.lon),
         start_day=0.0,
         gradient_checkpoint=True,
         **extra_kwargs,
@@ -266,6 +286,86 @@ def _training_loop(
 # Mode 1: Physics parameter tuning
 # ======================================================================
 
+def multi_step_rollout_loss(
+    ic, forcing, run_seg_raw, *, dt, rollout_hours, target,
+    sigma_full, grid, loss_config, truncated_bptt=True,
+):
+    """Single- or multi-step autoregressive supervision loss (shared by
+    every AIMIP trainer so the rollout+loss is defined ONCE).
+
+    ``loss_config.multi_step_hours`` empty  ->  ONE ``single_day_rollout``
+    to ``rollout_hours`` vs ``target`` (a single SegmentCarry): the legacy
+    single-horizon path, bit-identical to the old inline trainer body.
+
+    Non-empty  ->  GenCast-style multi-step (NeuralGCM / AIMIP protocol):
+    chain autoregressive segments between consecutive leads and sum
+    ``combined_loss`` after each segment against ``target[k]`` (``target``
+    is then a tuple of K carries), weighted by
+    ``loss_config.multi_step_weights`` (default uniform, normalised by the
+    weight sum).
+
+    ``truncated_bptt`` (default True) ``stop_gradient``s the carry between
+    segments, so each loss term backprops ONLY through its own segment.
+    The lat-lon primitive-equation ADJOINT explodes to NaN through a
+    >~6 h differentiable chain even when the forward is finite (job
+    8533825) — so full backprop-through-time over a 24 h+ multi-step
+    rollout is unusable on this stack.  Truncated BPTT keeps every
+    gradient a stable short-horizon adjoint while the FORWARD still chains
+    autoregressively: the model is supervised on its OWN drifted
+    6/12/18 h states, not only the ERA5 IC, which is the point of
+    multi-step training.  The spectral stack uses full BPTT (it is
+    adjoint-stable); this flag exists for the lat-lon stack.
+
+    NB the per-segment ``forcing`` is reused as-is; the diurnal solar
+    phase is therefore held at the IC time-of-day across segments.
+    # ponytail: approximate diurnal phase across segments; thread
+    # forcing.seconds_of_day per lead if a diurnal-sensitive metric needs it.
+    """
+    ms_hours = tuple(int(h) for h in (loss_config.multi_step_hours or ()))
+    if not ms_hours:
+        pred = single_day_rollout(
+            ic, forcing, run_seg_raw, dt=dt, hours=rollout_hours)
+        return combined_loss(
+            pred, target, sigma_full, grid=grid, config=loss_config)
+
+    # Segment lengths = gaps between consecutive (sorted) leads.
+    leads = sorted(ms_hours)
+    seg_hours, prev = [], 0
+    for h in leads:
+        gap = h - prev
+        if gap <= 0:
+            raise ValueError(
+                f"multi_step_hours={ms_hours} must be strictly increasing "
+                "positive hour leads.")
+        seg_hours.append(gap)
+        prev = h
+    if not isinstance(target, (tuple, list)) or len(target) != len(seg_hours):
+        raise ValueError(
+            f"multi-step loss needs {len(seg_hours)} target carries (one per "
+            f"lead {leads}); got "
+            f"{type(target).__name__} of length "
+            f"{len(target) if isinstance(target, (tuple, list)) else 'n/a'}.")
+    weights = tuple(float(w) for w in (loss_config.multi_step_weights or ()))
+    if weights and len(weights) != len(seg_hours):
+        raise ValueError(
+            f"multi_step_weights length {len(weights)} != number of leads "
+            f"{len(seg_hours)}.")
+    if not weights:
+        weights = (1.0,) * len(seg_hours)
+    wsum = float(sum(weights))
+
+    state = ic
+    total = jnp.asarray(0.0)
+    for k, sh in enumerate(seg_hours):
+        state = single_day_rollout(
+            state, forcing, run_seg_raw, dt=dt, hours=sh)
+        total = total + weights[k] * combined_loss(
+            state, target[k], sigma_full, grid=grid, config=loss_config)
+        if truncated_bptt:
+            state = jax.lax.stop_gradient(state)
+    return total / wsum
+
+
 def train_physics_params(
     model,
     grid,
@@ -311,7 +411,7 @@ def train_physics_params(
         # ``step_unified`` is param-independent (built once above); only the
         # segment kwargs carry the (traced) trainable values, so the gradient
         # path to ``trainable`` runs through ``build_segment_fn``.
-        return _build_training_segment(
+        return build_training_segment(
             model, step_unified, grid, sigma, dt,
             **trainable.to_segment_kwargs(),
         )
@@ -373,7 +473,7 @@ def train_neural_gcm(
 
     def make_run_seg(nn_phys):
         step_unified = make_neural_step_unified(nn_phys, adapter)
-        return _build_training_segment(model, step_unified, grid, sigma, dt)
+        return build_training_segment(model, step_unified, grid, sigma, dt)
 
     optimizer = _make_driver_optimizer(
         lr, "adamw", n_epochs, len(initial_carries),
@@ -451,7 +551,7 @@ def train_sfno_coupled(
             mode=coupling_mode,
             traditional_step_unified=traditional_step,
         )
-        return _build_training_segment(model, step_unified, grid, sigma, dt)
+        return build_training_segment(model, step_unified, grid, sigma, dt)
 
     optimizer = _make_driver_optimizer(
         lr, "adamw", n_epochs, len(initial_carries),

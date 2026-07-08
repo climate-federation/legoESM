@@ -77,6 +77,7 @@ from legoesm.grids.vertical import (
     vertical_advection,
     vertical_advection_hybrid,
     compute_pressure_velocity,
+    compute_mass_flux_from_cumsum,
     compute_omega_hybrid,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
@@ -167,7 +168,22 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     by ``tests/parallel/test_latlon_mpi_step_serial.py`` on Stage-2
     smoke).
     """
-    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p). Last field to preserve positional ABI.
+    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p).
+    # --- Top sponge (Rayleigh damping increasing toward the model lid, #836) ---
+    # The hydrostatic lat-lon C-grid dycore otherwise has NO absorbing layer at
+    # the rigid lid, so upward gravity-wave / convective energy reflects and
+    # contaminates the upper levels (the nonhydrostatic cores already carry
+    # ``sponge_profile``; the hydrostatic path dropped it).  ``sponge_coeff == 0``
+    # (default) is OFF and byte-identical.  ``sponge_coeff > 0`` damps u/v toward
+    # REST over the top ``sponge_width_m`` metres via the SHARED
+    # ``compressible_euler.sponge_profile`` fed a log-pressure height proxy.
+    # Appended after ``p_ceil`` (defaults => positional-ABI-safe for old callers).
+    sponge_coeff: float = 0.0          # Rayleigh damping SCALE [1/s]: the exact lid
+    #                                   value for shape='sin2'; 'sam_rational' peaks
+    #                                   at sponge_coeff*100/101 (see sponge_profile)
+    sponge_width_m: float = 10000.0    # sponge-layer depth below the top [m]
+    sponge_shape: str = "sin2"         # "sin2" | "sam_rational" (see sponge_profile)
+    sponge_scale_height_m: float = 7500.0  # log-pressure scale height for sigma->z. Last field to preserve positional ABI.
 
 
 def _zero_v_at_pole(v, *, south: bool, north: bool, offset: int = 0):
@@ -479,19 +495,13 @@ def cgrid_latlon_hydrostatic_tendencies(
     # smoothing from a cell-center round-trip.  sigma_dot/mass_flux are
     # interpolated to u-face and v-face locations first.
     if _hybrid:
-        # Build mass flux from the corrected div(dp*v) closure (div_dp),
-        # not from div(v)*dp which is what compute_mass_flux_hybrid uses.
-        # F_{k+1/2} = (B_{k+1/2}-B_top)/B_range * D_total_p - cumsum(div_dp)
-        _B_top = sigma_coord.B_half[0]
-        _frac_B = (sigma_coord.B_half[1:] - _B_top) / sigma_coord.B_range
-        # Iter-54: reuse the cumsum precomputed for D_total_p above.
-        _mf_inner = _frac_B * D_total_p[..., jnp.newaxis] - _cumsum_dp
-        # Top BC: F=0; bottom BC: zero by construction
-        # (frac_B[-1]=1, cumsum[-1]=D_total_p → _mf_inner[-1]=0).  Drop
-        # the trailing (∼0) element + pad both ends in one Pad HLO op
-        # (replaces Pad + scatter, also eliminates the float roundoff).
-        _pad_axes = ((0, 0),) * (_mf_inner.ndim - 1) + ((1, 1),)
-        mass_flux = jnp.pad(_mf_inner[..., :-1], _pad_axes)
+        # Build mass flux from the corrected div(dp*v) closure (div_dp), NOT
+        # from div(v)*dp which is what compute_mass_flux_hybrid's INTERNAL
+        # div_dp uses.  The integration + boundary closure is the shared
+        # compute_mass_flux_from_cumsum; we feed it the flux-form cumsum
+        # precomputed above (iter-54 reuse — no extra cross-shard reduction).
+        mass_flux = compute_mass_flux_from_cumsum(
+            _cumsum_dp, D_total_p[..., jnp.newaxis], sigma_coord)
         mf_u = interp_cell_to_uface(mass_flux)
         # mass_flux depends on div(dp*v) -> cannot join the entry pad.
         mf_v = interp_cell_to_vface_halo(mass_flux)
@@ -648,6 +658,31 @@ def cgrid_latlon_hydrostatic_tendencies(
         dv_dt = dv_dt + config.A_h * lap_v
         lap_T = laplacian_cgrid(T, grid)
         dT_dt = dT_dt + config.A_h * lap_T
+
+    # --- 13b. Top sponge (Rayleigh damping increasing toward the lid, #836) ---
+    # Absorb upward-propagating gravity-wave / convective energy that would else
+    # reflect off the rigid model lid and contaminate the upper levels.  Gated on
+    # config.sponge_coeff (0 -> OFF, byte-identical).  Reuse the SHARED
+    # sponge_profile (no re-derivation): it ramps 0 -> sponge_coeff over the top
+    # sponge_width_m metres, so feed it a log-pressure height proxy
+    # z = -H_scale * ln(sigma_full), which increases UPWARD (small sigma = high
+    # altitude).  SIGN: du/dt gets a -k*u term with k >= 0 -> damps u toward REST
+    # (an absorbing sponge, matching the compressible core's -sponge*w); level-
+    # only profile broadcasts over the horizontal (u/v have level as the last
+    # axis).  OFF path adds nothing, so production stays bit-for-bit unchanged.
+    if config.sponge_coeff > 0.0:
+        from legoesm.atmosphere.dynamics.compressible_euler import (
+            sponge_profile,
+        )
+        z_full = -config.sponge_scale_height_m * jnp.log(
+            jnp.clip(sigma_coord.sigma_full, 1e-30, None))  # (nlev,), up = large z
+        H_top = z_full[0]   # top level has the smallest sigma -> the largest z
+        spge = sponge_profile(
+            z_full, H_top, config.sponge_width_m, config.sponge_coeff,
+            shape=config.sponge_shape,
+        ).astype(du_dt.dtype)   # (nlev,), 0 below the sponge base
+        du_dt = du_dt - spge * u
+        dv_dt = dv_dt - spge * v
 
     # Enforce zero tendency at poles (wall BC) so that intermediate RK
     # stages never see nonzero v at poles feeding into divergence/Coriolis.

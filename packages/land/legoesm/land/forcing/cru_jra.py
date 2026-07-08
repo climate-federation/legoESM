@@ -81,6 +81,7 @@ _VAR_FLDS = "FLDS"
 _SEC_PER_DAY = 86400.0
 _SEC_PER_HOUR = 3600.0
 _HOURS_PER_DAY = 24.0
+_DAYS_PER_YEAR_NOLEAP = 365.0    # CRU-JRA calendar: fixed 365-day (noleap) year
 _CRUJRA_STEPS_PER_YEAR = 1460    # 365 noleap days x 4 (6-hourly)
 
 # --- variable-map parameters ---
@@ -680,7 +681,7 @@ def stage_forcing_years(
     if year_end < year_start:
         raise ValueError(f"year_end={year_end} < year_start={year_start}")
     tq = np.asarray(model_times_s, dtype=np.float64)
-    sec_per_year = _SEC_PER_DAY * 365.0                       # noleap
+    sec_per_year = _SEC_PER_DAY * _DAYS_PER_YEAR_NOLEAP       # noleap
 
     per_year_atm = []
     for k, year in enumerate(range(year_start, year_end + 1)):

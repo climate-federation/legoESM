@@ -7,6 +7,20 @@ All notable changes to legoESM. Format roughly follows
 
 ### Atmosphere
 
+- **LES-informed compare-to-reanalysis correction**
+  (`legoesm.training.{compare_reanalysis,correction_loop,...}`,
+  `scripts/run/run_correction_campaign.py`,
+  `docs/compare_reanalysis_runbook.md`): an offline, differentiable loop that
+  runs AMIP/CMIP → time-means → compares to ERA5 → ranks the worst columns →
+  spins off a plane LES (all four grids) → diagnoses a `clubb_lite` closure
+  coefficient (C_K / Pr_t / C_eps, single or simultaneous) → re-runs keeping
+  only bias-improving rounds (monotonic gate). The corrected per-column field
+  deploys back into a fresh production run (runtime `turbulence_override`,
+  grid-fingerprint-verified) or, via the environment kernel, onto any grid by
+  environmental similarity. Distributed (MPAS) via a partition-invariant global
+  top-k reducer; a perfect-model OSSE gives a controlled go/no-go. Turnkey
+  operator path: setup/deploy preflights, a self-requeuing SLURM launcher, and
+  a verified, drift-guarded runbook. See `docs/COMPARE_REANALYSIS.md`.
 - **Single-column model (SCM)** (`legoesm.atmosphere.scm`,
   `scripts/run_scm_test_matrix.py`): dycore-free driver that reuses the full
   physics factory. Includes a swap-matrix sweep crossing every
@@ -79,9 +93,24 @@ All notable changes to legoESM. Format roughly follows
 
 ### Land
 
-- **Offline single-point multilayer land driver**
-  (`scripts/run_lmip.py`) for 10-year soil spin-up before ERA5
-  coupling.
+- **CLM-ML-JAX multilayer canopy scheme** (`legoesm.land.canopy.CLMMLCanopyConfig`,
+  `legoesm.land.canopy.clm_ml_interface`): port of the NCAR Community Land Model
+  with Multi-Layer Canopy (CLM-ML v2; Bonan et al. 2021) as a pluggable legoESM
+  surface scheme. Activated via
+  `MultiLayerLandConfig(surface_scheme=CLMMLCanopyConfig())`;
+  requires `pip install legoesm[canopy]`. Key capabilities:
+  - Multi-layer within-canopy radiative transfer, turbulence, leaf energy balance,
+    stomatal conductance (Ball-Berry / Medlyn), and plant hydraulics.
+  - 87-variable CHATS7 site validation (May 2007 walnut orchard) against Fortran
+    CLM-ML v2 reference outputs; see `scripts/validate/validate_clm_ml_canopy.py`.
+  - `CanopyState` carries `mlcanopy_type` (JAX NamedTuple) and 10-day running-mean
+    air temperature (`t_a10_arr`) between timesteps; cold-start allocated on first
+    call.
+  - **Architectural note**: CLM-ML uses Python/NumPy control flow; the scheme is
+    not `jax.jit`-compatible and gradients do not flow through it. Forward
+    simulation only.
+- **Offline single-point multilayer land driver** (`scripts/run/run_lmip.py`) for
+  10-year soil spin-up before ERA5 coupling.
 
 ### Coupler
 

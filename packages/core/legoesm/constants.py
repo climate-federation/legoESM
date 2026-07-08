@@ -35,6 +35,10 @@ c_pv = 1846.0                   # Specific heat of water vapor [J/(kg*K)]
 c_pw = 4218.0                   # Specific heat of liquid water [J/(kg*K)]
 c_pi = 2106.0                   # Specific heat of ice [J/(kg*K)]
 L_v = 2.501e6                   # Latent heat of vaporization at 0C [J/kg]
+# SST slope of L_v in the NEMO/AeroBulk air-sea convention (sbc_phy
+# L_vap: L = (2.501 - 0.00237 (T - T_freeze)) 1e6) — equals L_v at 0 degC
+# by construction.  Used by thermo.latent_heat_vaporization_sst (#762).
+L_v_sst_slope = 2.370e3         # [J/(kg*K)] dL_v/dT, NEMO sbc_phy / Fairall
 L_s = 2.834e6                   # Latent heat of sublimation at 0C [J/kg]
 L_f = 3.337e5                   # Latent heat of fusion at 0C [J/kg]
 rho_water = 1000.0              # Density of liquid water [kg/m^3]
@@ -72,6 +76,7 @@ rho_freshwater_curvature = 8.0e-6   # ρ-anomaly curvature [K^-2] from d²ρ/dT�
 # The kg/mol forms ``M_dry`` and ``M_h2o`` (below) are derived from these
 # via ``* 1e-3`` so future drift between g/mol and kg/mol forms is impossible.
 M_air = 28.96546        # [g/mol] dry air (CODATA)
+M_C   = 12.011          # [g/mol] atomic mass of carbon (IUPAC 2021)
 M_CO2 = 44.01           # [g/mol] CO2
 M_H2O = 18.01528        # [g/mol] water
 
@@ -142,6 +147,13 @@ emissivity_seawater_lw = 0.98   # [-] NEMO sbc_phy emiss_w
 # OMIP-faithful surface-flux path uses it for the precipitation/evaporation
 # heat-content terms of the non-solar flux so they match NEMO bit-for-bit.
 c_p_seawater = 3991.86795711963  # [J/(kg*K)] NEMO TEOS-10 rcp
+
+# Seawater specific heat used by the Jenkins (1991) / ISOMIP+ ice-shelf
+# basal-melt intercomparison (Asay-Davis et al. 2016, GMD 9, 2471-2497).
+# Deliberately the ISOMIP+ reference value (distinct from Gill-1982 ``c_sw``
+# and NEMO's ``c_p_seawater``) so the linearised Jenkins melt rate reproduces
+# the ISOMIP+ intercomparison numbers bit-for-bit.
+c_p_seawater_isomip = 3974.0     # [J/(kg*K)] Jenkins 1991 / ISOMIP+
 
 # NEMO/aerobulk moist-air heat-capacity pair (sbc_phy.F90 rCp_dry/rCp_vap),
 # used by the NCAR bulk algorithm's sensible-heat flux

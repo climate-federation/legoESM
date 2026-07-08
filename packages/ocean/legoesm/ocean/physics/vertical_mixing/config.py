@@ -102,6 +102,7 @@ __param_spec__ = {
         "scheme_key": "ocean.vm.kpp",
         "excluded": {
             "Cv": "Large 1994 fixed nondim constant",
+            "neg_beta_T": "Large 1994 fixed nondim constant (-beta_T, App. B; V_t^2 prefactor)",
             "Ri_conv": "default 0 = disabled/off (enable via config, not training)",
             "a_m": "Large 1994 fixed nondim constant",
             "a_s": "Large 1994 fixed nondim constant",
@@ -149,6 +150,18 @@ class RichardsonVerticalMixingConfig(NamedTuple):
     K_bg: float = 1e-5   # Background diffusivity [m^2/s]
     A_bg: float = 1e-4   # Background viscosity [m^2/s]
     Pr_t: float = 10.0   # Turbulent Prandtl number
+    # ----- Static-stability N^2 mode for the gradient Richardson number -----
+    # ``"insitu"`` (default, BIT-IDENTICAL legacy) / ``"insitu_signed"``: N^2
+    #   from the in-situ density difference (``eos.compute_buoyancy_frequency``,
+    #   already signed/unclipped here — the downstream ``richardson_number``
+    #   clips Ri>=0), which carries the compressibility bias (~too stable).
+    # ``"adiabatic"``: PP81's TRUE static stability via adiabatic parcel
+    #   displacement to the upper cell's pressure
+    #   (``eos.compute_buoyancy_frequency_adiabatic``), SIGNED. Requires the
+    #   caller to thread cell-centre pressure ``p_cell`` (+ the model EOS) to
+    #   ``richardson_vertical_mixing``. Both integration factory and the
+    #   implicit k_profiles path supply it when this is selected.
+    n2_mode: str = "insitu"
 
 
 class TKEConfig(NamedTuple):
@@ -461,6 +474,10 @@ class KPPConfig(NamedTuple):
     c_s: float = 98.96       # LMD94 scalar stability constant (App. B; V_t^2 + scalar convective scale)
     c_b: float = 0.599       # LMD94 convective velocity scale parameter (legacy single-scale form)
     epsilon_lmd: float = 0.1  # LMD94 surface-layer fraction (App. A/B)
+    # LMD94 Eq. 23 unresolved-shear variance V_t^2 carries a (-beta_T)^1/2
+    # prefactor (beta_T = -0.2 fixed, App. B); applied EXPLICITLY in kpp.py so
+    # Cv keeps its standard standalone value 1.6 (it does NOT absorb sqrt(0.2)).
+    neg_beta_T: float = 0.2   # = -beta_T (LMD94 App. B; V_t^2 prefactor)
     # LMD94 Appendix B separate momentum/scalar velocity scales w_m, w_s.
     # In the code's sign convention zeta = d/L_MO ≥ 0 for unstable, so the
     # weakly-unstable→convective transition is at |zeta| = zeta_{m,s}_abs

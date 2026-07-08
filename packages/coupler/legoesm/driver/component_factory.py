@@ -333,6 +333,9 @@ def create_atmosphere_dycore(
             time_integrator=(CDGridPrimitiveEquationConfig().time_integrator
                              if dc.time_integrator == "auto"
                              else dc.time_integrator),
+            # #771: flux-form moisture transport (needs moisture attached via
+            # ExperimentConfig.moisture_advection; default off = advective).
+            moisture_flux_form=getattr(dc, "moisture_flux_form", False),
         )
         return CDGridPrimitiveEquationModel(grid, sigma, cfg)
 
@@ -597,6 +600,14 @@ def create_atmosphere_dycore(
             use_polar_filter=dc.use_polar_filter,
             polar_filter_cutoff_deg=dc.polar_filter_cutoff_deg,
             polar_filter_max_wave_speed=dc.polar_filter_max_wave_speed,
+            # #836 top sponge (Rayleigh damping toward the lid).  Default
+            # sponge_coeff=0 -> OFF -> the tendency is bit-identical to the
+            # pre-#836 dycore.  Direct DycoreConfig attribute access (guaranteed
+            # fields; no getattr-literal fallback that would mask a rename).
+            sponge_coeff=dc.sponge_coeff,
+            sponge_width_m=dc.sponge_width_m,
+            sponge_shape=dc.sponge_shape,
+            sponge_scale_height_m=dc.sponge_scale_height_m,
             # Task #25: time integrator (default ssp_rk3, opt into
             # ssp_rk3_scan for ~1.5× JIT compile speedup at scale).
             # "auto" -> this dycore's own default; explicit names verbatim.

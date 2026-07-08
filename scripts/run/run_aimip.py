@@ -109,6 +109,27 @@ def _apply_smoke_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
 # Variant dispatch
 # ----------------------------------------------------------------------
 
+def _surface_forcing_cfg(cfg: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Resolve the prescribed-surface-forcing config for NN variants.
+
+    Returns ``(forcing_path, cache_path)``.  ``aimip_surface_forcing``
+    (default True) gates it; the cache is keyed by spectral truncation so
+    a T63 cache can never be silently reused at T106 (the loader also
+    hard-validates ncol).  Forcing is what gives column_nn / sfno_physics
+    a prescribed-SST (AMIP / interannual-variability) pathway.
+    """
+    if not bool(cfg.get("aimip_surface_forcing", True)):
+        return None, None
+    from legoesm.training.aimip_amip_forcing import DEFAULT_AIMIP_FORCING
+    path = str(cfg.get("aimip_forcing_path") or DEFAULT_AIMIP_FORCING)
+    n_max = int(cfg["n_max"])
+    cache = str(
+        cfg.get("aimip_forcing_cache")
+        or f"results/aimip_forcing/gaussian_forcing_T{n_max}.npz"
+    )
+    return path, cache
+
+
 def _build_spectral_config(cfg: dict[str, Any]):
     """Translate AIMIP YAML dict into NeuralGCMSpectralConfig."""
     from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
@@ -125,13 +146,32 @@ def _build_spectral_config(cfg: dict[str, Any]):
         for k, v in loss_kwargs.items() if k in LossConfig._fields
     })
 
+    # Rollout curriculum (aimip_rollout_curriculum: [[lead_hours, epochs],
+    # ...]): the loader must build a target at EVERY curriculum lead, so
+    # loss.multi_step_hours is forced to the sorted unique leads (equal
+    # weights; the curriculum path scores one lead per phase anyway).
+    curriculum = tuple(
+        (int(h), int(ep))
+        for h, ep in (cfg.get("aimip_rollout_curriculum") or ())
+    ) or None
+    if curriculum:
+        _leads = tuple(sorted({h for h, _ in curriculum}))
+        loss_config = loss_config._replace(
+            multi_step_hours=_leads,
+            multi_step_weights=(1.0,) * len(_leads),
+        )
+
     sfno_embed = int(cfg.get("sfno_embed_dim", 128))
     sfno_n_blocks = int(cfg.get("sfno_n_blocks", 4))
     sfno_mlp_expansion = int(cfg.get("sfno_mlp_expansion", 4))
 
     return NeuralGCMSpectralConfig(
         n_max=int(cfg["n_max"]),
-        n_levels=int(cfg["nlev"]),
+        # Config key drift (nlev vs n_levels, CLAUDE.md naming debt): a merge
+        # left this read as "nlev" while the AIMIP configs declare "n_levels",
+        # so the spectral suite KeyError'd at step 0 (the v10 T63 ~2K path was
+        # fully blocked). Accept either key.
+        n_levels=int(cfg["nlev"] if "nlev" in cfg else cfg["n_levels"]),
         dt=float(cfg["dt"]),
         pe_config=SpectralPEConfig(
             hyperdiff_coeff=2.5e15,
@@ -159,6 +199,8 @@ def _build_spectral_config(cfg: dict[str, Any]):
         ) or None,
         rollout_days=int(cfg.get("aimip_rollout_days", 1)),
         rollout_hours=int(cfg.get("aimip_rollout_hours", 0)),
+        rollout_curriculum=curriculum,
+        chunk_windows=int(cfg.get("aimip_chunk_windows", 0)),
         spatial_lr_scale=float(cfg.get("aimip_spatial_lr_scale", 1.0)),
         rad_update_interval=int(cfg.get("aimip_rad_update_interval", 1)),
         loss_config=loss_config,
@@ -196,6 +238,7 @@ def _train_variant(
         from legoesm.training.neural_gcm_spectral import (
             train_column_mlp_spectral,
         )
+        forcing_path, forcing_cache = _surface_forcing_cfg(cfg)
         return train_column_mlp_spectral(
             config=spec_cfg,
             cache_dir=cache_dir,
@@ -203,17 +246,22 @@ def _train_variant(
             hidden_dim=int(cfg.get("nn_hidden_dim", 256)),
             n_layers=int(cfg.get("nn_n_layers", 4)),
             resume_from_dir=resume_from_dir,
+            surface_forcing_path=forcing_path,
+            forcing_cache_path=forcing_cache,
         )
 
     if variant == "sfno_physics":
         from legoesm.training.neural_gcm_spectral import (
             train_neural_gcm_spectral,
         )
+        forcing_path, forcing_cache = _surface_forcing_cfg(cfg)
         return train_neural_gcm_spectral(
             config=spec_cfg,
             cache_dir=cache_dir,
             seed=int(cfg.get("sfno_seed", 0)),
             resume_from_dir=resume_from_dir,
+            surface_forcing_path=forcing_path,
+            forcing_cache_path=forcing_cache,
         )
 
     if variant == "sfno_full":
@@ -285,7 +333,7 @@ def _train_aimip_classical(
 
     params, start_epoch = maybe_resume_model(params, resume_from_dir)
 
-    ic_states, target_carries = load_training_data(
+    ic_states, target_carries, _ic_times = load_training_data(
         spec_cfg, grid, sigma, cache_dir,
         windows=spec_cfg.windows,
     )
@@ -305,7 +353,13 @@ def _train_aimip_classical(
         # autoregressive path.  Surface geopotential is static across
         # snapshots so any of them works; unwrap when needed.
         ref_carry = target_carries[0]
-        if isinstance(ref_carry, tuple):
+        # A multi-step target is a PLAIN tuple of carries; a single-step
+        # target is ONE SegmentCarry — itself a NamedTuple (tuple subclass),
+        # so isinstance(.., tuple) is True for BOTH and would unwrap a single
+        # carry to its first FIELD (an array) -> `.phis` AttributeError. This
+        # broke the single-step v10 T63 path when multi-step was added.
+        # ``type(..) is tuple`` matches the plain tuple only.
+        if type(ref_carry) is tuple:
             ref_carry = ref_carry[0]
         from legoesm.training.aimip_spatial import land_mask_from_phis
         land_mask = land_mask_from_phis(
@@ -334,8 +388,25 @@ def _train_aimip_classical(
         f"rad={radiation}"
     )
 
+    # Training-period-mean GHG for the classical RRTMGP (CO2 matters for the
+    # CLASSICAL variant: a physical radiation scheme trained at present-day
+    # defaults sees a systematically wrong forcing for 1979-2012 samples).
+    # A per-sample transient value is unwarranted at 6-12 h forecast leads
+    # (the radiative signal of a few ppm is far below the loss floor) and
+    # the transient path already runs in the AMIP fine-tune + inference;
+    # here the STATIC mid-training-period concentration removes the mean
+    # bias at zero plumbing cost (closure constants — no retrace).
+    _ghg_mid = None
+    if radiation == "rrtmgp" and spec_cfg.windows:
+        from legoesm.training.aimip_amip_forcing import ghg_vmr_at_year
+        _years = [int(w[0]) for w in spec_cfg.windows]
+        _mid_year = int(round(sum(_years) / len(_years)))
+        _ghg_mid = {k: float(v) for k, v in ghg_vmr_at_year(_mid_year).items()}
+        logger.info(f"Classical RRTMGP GHG pinned to training-period mid-year "
+                    f"{_mid_year}: co2={_ghg_mid['co2']:.2e}")
+
     def _make_physics_fn(p, grid_):
-        return make_aimip_classical_spectral_physics(
+        built = make_aimip_classical_spectral_physics(
             p, grid_, dt,
             radiation=radiation,
             rad_update_interval_steps=rad_update_interval,
@@ -347,6 +418,30 @@ def _train_aimip_classical(
             land_mask=land_mask,
             split_rad=split_rad,
         )
+        if _ghg_mid is None:
+            return built
+        # Wrap the rad fn so every call carries the mid-period GHG unless
+        # the caller supplied its own (transient) value in ``forcing``.
+        def _with_ghg(rad_fn):
+            def _wrapped(*args, forcing=None, **kwargs):
+                fc = dict(forcing or {})
+                fc.setdefault("ghg_vmr", _ghg_mid)
+                return rad_fn(*args, forcing=fc, **kwargs)
+            return _wrapped
+        if isinstance(built, tuple):
+            non_rad_fn, rad_fn = built
+            return non_rad_fn, _with_ghg(rad_fn)
+        # Non-split combined fn: its forcing-kwarg contract is not
+        # guaranteed — leave unwrapped (rrtmgp effectively always runs
+        # split_rad; the combined path is the gray/no-gating config where
+        # GHG does not apply). Say so loudly rather than silently
+        # dropping the pinned concentration.
+        logger.warning(
+            "GHG pinning computed but NOT applied: physics fn is not "
+            "split-rad (rad_update_interval<=1?) — training runs with "
+            "the radiation scheme's default GHG."
+        )
+        return built
 
     return _train_spectral_loop(
         params, _make_physics_fn,
@@ -423,9 +518,23 @@ def _evaluate_variant(
     sigma = create_sigma_coordinate(
         spec_cfg.n_levels, sigma_top=spec_cfg.sigma_top,
     )
-    ic_states, target_carries = load_training_data(
+    ic_states, target_carries, eval_ic_times = load_training_data(
         eval_cfg, grid, sigma, cache_dir, windows=eval_cfg.windows,
     )
+    # NN variants trained WITH prescribed surface forcing must be
+    # evaluated with the same inputs (a forced network scored unforced
+    # would see out-of-distribution proxies and mis-rank the variants).
+    eval_forcings = None
+    if variant in ("column_nn", "sfno_physics"):
+        forcing_path, forcing_cache = _surface_forcing_cfg(cfg)
+        if forcing_path is not None:
+            from legoesm.training.aimip_amip_forcing import (
+                build_amip_sample_forcings,
+            )
+            eval_forcings = build_amip_sample_forcings(
+                eval_ic_times, grid, forcing_path=forcing_path,
+                cache_path=forcing_cache,
+            )
 
     pe_config = spec_cfg.pe_config
     sponge_factor = None
@@ -475,7 +584,7 @@ def _evaluate_variant(
         eval_land_mask = None
         if bool(cfg.get("aimip_spatial_surface", False)) and target_carries:
             ref_carry = target_carries[0]
-            if isinstance(ref_carry, tuple):
+            if type(ref_carry) is tuple:   # plain tuple=multi-step; carry NamedTuple is not
                 ref_carry = ref_carry[0]
             from legoesm.training.aimip_spatial import land_mask_from_phis
             eval_land_mask = land_mask_from_phis(
@@ -567,10 +676,12 @@ def _evaluate_variant(
 
     weights = jnp.asarray(grid.weights)
 
-    for ic, target in zip(ic_states, target_carries):
+    for sample_idx, (ic, target) in enumerate(zip(ic_states, target_carries)):
         # Multi-step training => loader returns a tuple of K target
-        # carries.  Eval only scores against the longest lead.
-        if isinstance(target, tuple):
+        # carries.  Eval only scores against the longest lead.  A single
+        # SegmentCarry is a NamedTuple (tuple subclass), so use type(..) is
+        # tuple — isinstance would unwrap a single carry to its last FIELD.
+        if type(target) is tuple:
             target = target[-1]
         if eval_full_emulator_rollout is not None:
             pred = eval_full_emulator_rollout(ic)
@@ -588,6 +699,10 @@ def _evaluate_variant(
                 ic, physics_fn, grid, sigma, pe_config,
                 spec_cfg.dt, n_steps_eval,
                 sponge_factor, spectral_filter,
+                forcing_base=(
+                    eval_forcings[sample_idx]
+                    if eval_forcings is not None else None
+                ),
             )
         losses.append(float(
             spectral_state_vs_carry_loss(
@@ -777,8 +892,12 @@ def main():
             "eval_metrics_train_period": eval_metrics_train,
             "checkpoint": str(ckpt_path),
         }
+        # ``loss_history`` is empty on an eval-only resume (all epochs already
+        # done, start_epoch == n_epochs -> zero training iterations); guard the
+        # [-1] so the scorecard write below still runs (e.g. scorecard regen).
+        last_train_loss = loss_history[-1] if loss_history else float("nan")
         logger.info(
-            f"{variant}: train_loss[-1]={loss_history[-1]:.6f}, "
+            f"{variant}: train_loss[-1]={last_train_loss:.6f}, "
             f"test_loss={eval_metrics_test['loss']['mean']:.6f}, "
             f"test RMSE T={eval_metrics_test['rmse']['T']['mean']:.3f}K "
             f"T_sfc={eval_metrics_test['rmse']['T_sfc']['mean']:.3f}K | "

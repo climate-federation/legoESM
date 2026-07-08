@@ -116,66 +116,6 @@ def plot_global_field(
     return fig, ax
 
 
-def plot_cubed_sphere_field(
-    field: Field,
-    grid: CubedSphereGrid,
-    title: str = "",
-    cmap: str = "viridis",
-    figsize: tuple[float, float] = (16, 8),
-    save_path: Optional[str] = None,
-):
-    """Plot a field showing all 6 cubed-sphere faces individually.
-
-    Useful for debugging grid structure and inter-face boundaries.
-
-    Parameters
-    ----------
-    field : Field
-        Scalar field with shape (6, n, n).
-    grid : CubedSphereGrid
-        The cubed-sphere grid.
-    title : str
-        Overall title.
-    """
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        raise ImportError("matplotlib is required for visualization.")
-
-    fig, axes = plt.subplots(2, 3, figsize=figsize)
-    axes = axes.ravel()
-
-    data_np = np.asarray(field.data)
-    vmin = float(np.nanmin(data_np))
-    vmax = float(np.nanmax(data_np))
-
-    face_names = ["+X (Front)", "+Y (Right)", "-X (Back)",
-                  "-Y (Left)", "+Z (Top)", "-Z (Bottom)"]
-
-    for face in range(6):
-        im = axes[face].imshow(
-            data_np[face].T,
-            origin="lower",
-            cmap=cmap,
-            vmin=vmin,
-            vmax=vmax,
-        )
-        axes[face].set_title(f"Face {face}: {face_names[face]}")
-        axes[face].set_xlabel("i")
-        axes[face].set_ylabel("j")
-        plt.colorbar(im, ax=axes[face], shrink=0.8)
-
-    if title:
-        fig.suptitle(title, fontsize=16)
-
-    plt.tight_layout()
-
-    if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-
-    return fig, axes
-
-
 def plot_conservation_timeseries(
     diagnostics: list[dict],
     dt: float,
@@ -239,72 +179,6 @@ def plot_conservation_timeseries(
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
 
     return fig, axes
-
-
-def plot_wind_field(
-    u_field: Field,
-    v_field: Field,
-    grid: CubedSphereGrid,
-    title: str = "Wind Field",
-    skip: int = 4,
-    figsize: tuple[float, float] = (12, 6),
-    save_path: Optional[str] = None,
-):
-    """Plot wind vectors on a global map.
-
-    Parameters
-    ----------
-    u_field, v_field : Field
-        Wind components (grid-aligned), shape (6, n, n).
-    grid : CubedSphereGrid
-        The grid.
-    title : str
-        Plot title.
-    skip : int
-        Plot every Nth vector for clarity.
-    """
-    try:
-        import matplotlib.pyplot as plt
-        import cartopy.crs as ccrs
-    except ImportError:
-        raise ImportError("matplotlib and cartopy required.")
-
-    fig, ax = plt.subplots(1, 1, figsize=figsize,
-                           subplot_kw={"projection": ccrs.PlateCarree()})
-
-    lon_np = np.asarray(grid.lon) * 180.0 / np.pi
-    lat_np = np.asarray(grid.lat) * 180.0 / np.pi
-
-    u_np = np.asarray(u_field.data)
-    v_np = np.asarray(v_field.data)
-
-    # Speed for coloring
-    speed = np.sqrt(u_np**2 + v_np**2)
-
-    for face in range(6):
-        ax.quiver(
-            lon_np[face, ::skip, ::skip].ravel(),
-            lat_np[face, ::skip, ::skip].ravel(),
-            u_np[face, ::skip, ::skip].ravel(),
-            v_np[face, ::skip, ::skip].ravel(),
-            speed[face, ::skip, ::skip].ravel(),
-            transform=ccrs.PlateCarree(),
-            scale=800,
-            width=0.002,
-            cmap="plasma",
-        )
-
-    ax.set_global()
-    ax.coastlines(linewidth=0.5)
-    ax.gridlines(linewidth=0.3, alpha=0.5)
-    ax.set_title(title)
-
-    plt.tight_layout()
-
-    if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-
-    return fig, ax
 
 
 def plot_dgrid_winds_per_tile(

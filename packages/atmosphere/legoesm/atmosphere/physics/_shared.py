@@ -7,6 +7,7 @@ column-physics inputs each scheme expects.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 from legoesm.core.operators_3d import fv_flux_divergence_3d
 from legoesm.core.operators_fv_latlon_3d import fv_flux_divergence_latlon_3d
@@ -247,6 +248,42 @@ def virtual_temperature(T, q_v):
     return T * (1.0 + coeff * q_v)
 
 
+def broadcast_column_param(value, like):
+    """Broadcast a config coefficient over a column field's vertical dimension.
+
+    Enables a scheme coefficient to be EITHER a scalar (production default) OR a
+    per-column ``(ncol,)`` field (the LES-informed correction, see
+    ``docs/COMPARE_REANALYSIS.md``) **without** changing the scheme body's
+    arithmetic:
+
+    * a scalar / 0-d ``value`` is returned unchanged (it already broadcasts
+      against ``like`` — the production path stays byte-identical);
+    * a 1-D ``(ncol,)`` ``value`` is reshaped to ``(ncol, 1, …)`` so it
+      broadcasts over the trailing (vertical / other) axes of ``like`` (shape
+      ``(ncol, nlev)`` etc.).
+
+    Wrap a coefficient use as ``broadcast_column_param(cfg.coeff, X) * X`` in the
+    scheme body; ``like`` is any per-column array whose leading axis is the
+    column dimension.  Raises if a 1-D ``value`` length does not match
+    ``like.shape[0]``.
+    """
+    value = jnp.asarray(value)
+    like = jnp.asarray(like)
+    if value.ndim == 0:
+        return value
+    if value.ndim == 1:
+        if value.shape[0] != like.shape[0]:
+            raise ValueError(
+                f"broadcast_column_param: per-column value length "
+                f"{value.shape[0]} != column count {like.shape[0]}."
+            )
+        return value.reshape((value.shape[0],) + (1,) * (like.ndim - 1))
+    raise ValueError(
+        f"broadcast_column_param: value must be scalar or 1-D (ncol,); got "
+        f"shape {value.shape}."
+    )
+
+
 def exner_function(p):
     """Exner function ``Π = (p / p_ref)^κ`` (potential-temperature scaling).
 
@@ -266,7 +303,41 @@ def exner_function(p):
         Exner function [-], same shape as ``p``.
     """
     poisson_exponent = constants.kappa
-    return (p / constants.p_ref) ** poisson_exponent
+    # AD-safe pressure floor: Π = (p/p₀)^κ with κ≈0.286<1 has
+    # dΠ/dp ∝ p^(κ−1) → ∞ as p→0, so the REVERSE-mode gradient blows up
+    # (NaN/Inf) at a p=0 top half-level — even though the forward value
+    # (0) is finite.  This silently NaN'd the gradient of any
+    # differentiable rollout that back-propagates through θ/Π (AIMIP
+    # carry-based training: grad wrt p_s was non-finite, job 8533900).
+    # Clip to 1 Pa (well below any real model level, so the forward is
+    # bit-identical everywhere it matters); the clip's zero gradient
+    # below the 1 Pa floor — times the finite (1 Pa)^(κ−1) — yields a
+    # finite (0) gradient there instead of ∞. coeff-ok: 1 Pa AD floor.
+    p_safe = jnp.clip(p, 1.0, None)
+    return (p_safe / constants.p_ref) ** poisson_exponent
+
+
+def exner_to_pressure(exner):
+    """Inverse Exner: pressure ``p = p_ref · Π^(1/κ)`` from the Exner function ``Π``.
+
+    The inverse of :func:`exner_function` (``Π = (p/p_ref)^κ``) — the canonical home
+    for the inverse-Poisson recovery ``p = p_ref·Π^{1/κ}`` (e.g. converting a stored
+    Exner reference back to a reference pressure), so the formula lives in one place
+    (CLAUDE.md "shared utilities — never re-derive"; the
+    ``exner_potential_temperature`` ratchet flags the ``Π^{1/κ}`` direction too).
+
+    Parameters
+    ----------
+    exner : array
+        Exner function ``Π`` [-].
+
+    Returns
+    -------
+    array
+        Pressure [Pa], same shape as ``exner``.
+    """
+    inverse_poisson_exponent = 1.0 / constants.kappa
+    return constants.p_ref * exner ** inverse_poisson_exponent
 
 
 def buoyancy_coefficient(theta):
@@ -291,6 +362,32 @@ def buoyancy_coefficient(theta):
         ``g / θ``, same shape as ``theta``.
     """
     return constants.g / theta
+
+
+def brunt_vaisala_n_squared_from_gradient(theta, dtheta_dz):
+    """Brunt-Väisälä frequency squared ``N² = g·∂θ/∂z/θ`` from an ALREADY-COMPUTED
+    potential-temperature gradient + ``θ`` at the SAME levels.
+
+    The canonical home for the N²-from-a-gradient form (the
+    ``buoyancy_term_g_over_theta`` ratchet) — distinct from
+    :func:`brunt_vaisala_n_full`, which itself builds ``θ`` + the gradient + the
+    edge mapping from ``T``/``p``/``z`` for the GWD schemes.  Floor/clip ``θ`` at
+    the CALL site as needed.  The arithmetic order ``g·∂θ/∂z/θ`` is PRESERVED (not
+    ``(g/θ)·∂θ/∂z``) so a caller replacing an inline form stays BIT-IDENTICAL.
+
+    Parameters
+    ----------
+    theta : array
+        (Virtual) potential temperature [K] co-located with ``dtheta_dz``.
+    dtheta_dz : array
+        Potential-temperature vertical gradient ``∂θ/∂z`` [K/m], same shape.
+
+    Returns
+    -------
+    array
+        ``N²`` [s⁻²], same shape.
+    """
+    return constants.g * dtheta_dz / theta
 
 
 def mixing_length(z, l_mix_max, z_floor=1.0):
@@ -320,6 +417,76 @@ def mixing_length(z, l_mix_max, z_floor=1.0):
     kappa = constants.kappa_vk
     z_abs = jnp.clip(jnp.abs(z), z_floor, None)
     return kappa * z_abs / (1.0 + kappa * z_abs / l_mix_max)
+
+
+def louis_stability_functions(
+    Ri, l_mix, dz, b, c, d, blend_sharpness, b_heat=None,
+):
+    """Louis (1979/1982) Richardson-number stability functions, smoothly blended.
+
+    Canonical home for the Louis surface-layer / free-atmosphere stability
+    functions shared by the standalone Louis PBL scheme (``louis.py``) and the
+    free-atmosphere local-Ri branch of YSU (``ysu.py``) — previously verbatim
+    copies (CLAUDE.md "no duplicate numerics"; colocated with the shared
+    Blackadar :func:`mixing_length` the same closures use).
+
+    Branch forms (Louis 1979; Louis, Tiedtke & Geleyn 1982 coefficient split):
+
+    * Unstable (Ri<0): ``f = 1 - 2·b·Ri / (1 + 3·b·c·l²·sqrt(|Ri|) / dz²)``
+    * Stable   (Ri≥0): ``f = 1 / (1 + 2·b·Ri / sqrt(1 + d·Ri))``
+
+    blended with ``sigmoid(blend_sharpness · Ri)`` so the function is smooth
+    (differentiable) through neutral.  The heat function shares BOTH branch
+    denominators with momentum and differs only in the numerator coefficient
+    ``b_heat`` (LTG82: 3b heat vs 2b momentum ⇒ ``b_heat = 1.5·b``);
+    ``b_heat=None`` (default) sets ``b_heat = b`` so ``f_h == f_m`` (the Louis
+    1979 single-function form, used by YSU which consumes only ``f_m``).
+
+    Parameters
+    ----------
+    Ri : array
+        Gradient Richardson number at interfaces.
+    l_mix : array
+        Mixing length at the same interfaces [m].
+    dz : array
+        Interface spacing [m] (same shape as ``Ri``).
+    b, c, d : float
+        Louis (1982) coefficients: ``b`` enters both branches, ``c`` is the
+        unstable-branch denominator coefficient, ``d`` the stable-branch
+        sqrt coefficient.
+    blend_sharpness : float
+        Sigmoid sharpness of the stable/unstable blend [1/Ri].
+    b_heat : float or None
+        Heat-function numerator coefficient (default ``b`` ⇒ ``f_h = f_m``).
+
+    Returns
+    -------
+    (f_m, f_h) : tuple of arrays
+        Momentum and heat stability functions (dimensionless, > 0).
+    """
+    if b_heat is None:
+        b_heat = b
+
+    # Unstable branch — denominator shared between momentum and heat.
+    Ri_neg = jnp.minimum(Ri, 0.0)
+    denom_unstable = (
+        1.0 + 3.0 * b * c * l_mix ** 2
+        * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz ** 2 + 1e-10)
+    )
+    f_unstable_m = 1.0 - 2.0 * b * Ri_neg / denom_unstable
+    f_unstable_h = 1.0 - 2.0 * b_heat * Ri_neg / denom_unstable
+
+    # Stable branch — sqrt denominator shared between momentum and heat.
+    Ri_pos = jnp.maximum(Ri, 0.0)
+    sqrt_stable = jnp.sqrt(1.0 + d * Ri_pos)
+    f_stable_m = 1.0 / (1.0 + 2.0 * b * Ri_pos / sqrt_stable)
+    f_stable_h = 1.0 / (1.0 + 2.0 * b_heat * Ri_pos / sqrt_stable)
+
+    # Smooth blending: sigmoid transitions from unstable to stable.
+    blend = jax.nn.sigmoid(blend_sharpness * Ri)
+    f_m = (1.0 - blend) * f_unstable_m + blend * f_stable_m
+    f_h = (1.0 - blend) * f_unstable_h + blend * f_stable_h
+    return f_m, f_h
 
 
 # ---------------------------------------------------------------------------

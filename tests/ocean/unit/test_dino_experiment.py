@@ -503,3 +503,88 @@ class TestMPASSeamWall:
             assert (mask[seam_strip & outside_band] < 0.5).any()
         if (seam_strip & inside_band).any():
             assert (mask[seam_strip & inside_band] > 0.5).any()
+
+
+# ---------------------------------------------------------------------
+# Rigid-lid island topology (the ACC is the channel island constant)
+# ---------------------------------------------------------------------
+
+class TestDINORigidLidIslandTopology:
+    """The re-entrant southern channel makes the DINO basin multiply-connected.
+
+    The seam-wall land (column 0) is split by the open channel band into a
+    NORTHERN segment and a SOUTHERN segment — two disconnected land masses.
+    That is the Veros ACC topology: with two islands the rigid-lid streamfunction
+    system has one free island circulation constant, and that constant IS the
+    depth-integrated ACC transport.  This is why ``rigid_lid`` is the natural
+    barotropic solver here (the ACC is a NULL mode of the free-surface eta solve,
+    which is what made implicit_cn / explicit_substep under-/over-shoot + ring in
+    the barotropic-solver audit).
+    """
+
+    def test_seam_wall_splits_into_two_land_masses(self):
+        from legoesm.ocean.dynamics.rigid_lid_islands import _label_islands
+
+        cfg = DINOConfig()
+        grid = dino_lat_lon_grid(cfg, n_lon=20)           # small + cheap
+        zc = create_levy_stretched_z_star(
+            n_levels=4, H_max=cfg.H_deep, dz_min=400.0, k_th=3.0, a_cr=2.0)
+        _, _, _, land_mask = dino_lat_lon_initial_state_arrays(grid, zc, cfg)
+        cell_land = np.asarray(land_mask) < 0.5
+
+        # All land is the seam column; the channel band rows are open there.
+        assert cell_land[:, 1:].sum() == 0, "DINO land must be the seam column only"
+        lat = np.degrees(np.asarray(grid.lat))
+        chan = (lat > cfg.channel_lat_south_deg) & (lat < cfg.channel_lat_north_deg)
+        assert not cell_land[chan, 0].any(), "channel band seam must be open ocean"
+        assert cell_land[~chan, 0].any(), "seam outside the channel must be land"
+
+        labels, nisle = _label_islands(cell_land, periodic_x=True)
+        # Two land masses (northern + southern seam wall) ⇒ one free ACC constant.
+        assert nisle == 2, (
+            f"DINO re-entrant channel must yield exactly 2 land masses "
+            f"(N + S seam walls) for the ACC island constant; got nisle={nisle}")
+        # The two islands are the seam segments north / south of the channel.
+        north = labels[(lat > cfg.channel_lat_north_deg), 0]
+        south = labels[(lat < cfg.channel_lat_south_deg), 0]
+        assert set(np.unique(north[north > 0])).isdisjoint(
+            set(np.unique(south[south > 0]))), "N and S walls must be distinct islands"
+
+
+class TestDINORigidLidFaithfulStack:
+    """Selecting rigid_lid auto-applies the Veros-faithful coordinated stack.
+
+    A BARE barotropic_solver="rigid_lid" flip runs away (568 Sv → NaN): the
+    bottom-drag depth-mean reaches the streamfunction barotropic balance only via
+    the du_diss fold, which is gated on ab2_scope="advective".  So
+    dino_lat_lon_model_config pairs rigid_lid with ab2 + explicit_ab2 +
+    ab2_scope="advective" + dt_mom_ratio (veros_acc_recipe.py); other solvers keep
+    the forward_euler defaults.
+    """
+
+    def _model_cfg(self, solver):
+        cfg = DINOConfig(barotropic_solver=solver)
+        grid = dino_lat_lon_grid(cfg, n_lon=6)
+        mcfg, _ = dino.dino_lat_lon_model_config(grid, cfg, physics=True)
+        return mcfg
+
+    def test_rigid_lid_applies_faithful_stack(self):
+        m = self._model_cfg("rigid_lid")
+        assert m.barotropic.barotropic_solver == "rigid_lid"
+        assert m.outer_integrator == "ab2"
+        assert m.coriolis_scheme == "explicit_ab2"
+        assert m.ab2_scope == "advective"
+        assert m.dt_mom_ratio == DINOConfig().rigid_lid_dt_mom_ratio == 9.0
+
+    def test_implicit_cn_keeps_forward_euler_defaults(self):
+        m = self._model_cfg("implicit_cn")
+        assert m.outer_integrator == "forward_euler"
+        assert m.coriolis_scheme == "matsuno_split"
+        assert m.ab2_scope == "total"
+        assert m.dt_mom_ratio == 1.0
+
+    def test_rigid_lid_dt_mom_ratio_is_tunable(self):
+        cfg = DINOConfig(barotropic_solver="rigid_lid", rigid_lid_dt_mom_ratio=5.0)
+        grid = dino_lat_lon_grid(cfg, n_lon=6)
+        mcfg, _ = dino.dino_lat_lon_model_config(grid, cfg, physics=True)
+        assert mcfg.dt_mom_ratio == 5.0

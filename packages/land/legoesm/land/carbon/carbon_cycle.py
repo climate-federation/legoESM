@@ -15,7 +15,11 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.land.carbon.config import CarbonConfig, CarbonState
+from legoesm.land.carbon.config import (
+    CarbonConfig,
+    CarbonDiagnostics,
+    CarbonState,
+)
 
 # Fixed calendar / radiation constants (not tunable).
 _PAR_FRACTION_OF_SW = 0.48     # photosynthetically-active fraction of shortwave
@@ -183,8 +187,13 @@ def _temperate_modifier(
     precip: jnp.ndarray,
     config: CarbonConfig,
 ) -> jnp.ndarray:
-    """Temperature-moisture modifier for heterotrophic respiration."""
-    temp_factor = jnp.exp(config.Q10_exp * (T - config.T_ref))
+    """Temperature-moisture modifier for heterotrophic (soil) respiration.
+
+    Uses ``Q10_het_exp`` (soil-decomposition Q10 ~2.5), decoupled from the
+    autotrophic ``Q10_exp``: warm soils turn SOM/litter over fast (low
+    equilibrium SOM) while cold soils retain carbon.
+    """
+    temp_factor = jnp.exp(config.Q10_het_exp * (T - config.T_ref))
     precip_ratio = precip / jnp.maximum(config.precip_ref, 1e-10)
     moist = (precip_ratio - 1.0) * config.moisture_factor + 1.0
     moist = jnp.clip(moist, config.moist_modifier_min, config.moist_modifier_max)
@@ -221,7 +230,11 @@ def step_carbon_differland(
     config: CarbonConfig,
     dt: float,
     gpp_override: jnp.ndarray | None = None,
-) -> tuple[CarbonState, jnp.ndarray]:
+    return_diagnostics: bool = False,
+) -> (
+    tuple[CarbonState, jnp.ndarray]
+    | tuple[CarbonState, jnp.ndarray, CarbonDiagnostics]
+):
     """Advance all six carbon pools by *dt* seconds.
 
     Parameters
@@ -236,11 +249,16 @@ def step_carbon_differland(
     precip   : Total precipitation [kg/m2/s].
     config   : CarbonConfig.
     dt       : Timestep [s].
+    return_diagnostics : When True, also return a :class:`CarbonDiagnostics`
+        with the full GPP / NPP / respiration / allocation / turnover
+        breakdown (per-day rates [gC/m2/day]).  Purely diagnostic — the
+        state update is byte-identical either way.
 
     Returns
     -------
     new_state : Updated CarbonState.
     co2_flux  : Net CO2 flux [kgCO2/m2/s], positive up.
+    diag      : (only when ``return_diagnostics``) CarbonDiagnostics.
     """
     dt_days = dt / _SPD
 
@@ -275,8 +293,20 @@ def step_carbon_differland(
     NPP_pos = jnp.maximum(NPP_day, 0.0)
     A_fol = NPP_pos * config.f_fol
     A_lab = (NPP_pos - A_fol) * config.f_lab
-    A_root = (NPP_pos - A_fol - A_lab) * config.f_root
-    A_wood = jnp.maximum(NPP_pos - A_fol - A_lab - A_root, 0.0)
+    A_root_base = (NPP_pos - A_fol - A_lab) * config.f_root
+    A_wood_raw = jnp.maximum(NPP_pos - A_fol - A_lab - A_root_base, 0.0)
+    # Woodiness is a static per-PFT flag -> Python branch (feature-gating
+    # exception, not a data-dependent jnp.where).  Herbaceous PFTs (grass,
+    # crop, tundra) have no wood: the structural fraction that would form wood
+    # is invested belowground (roots) instead, so a grassland does not silently
+    # grow a phantom multi-kgC tree pool.  Allocation still closes exactly
+    # (A_fol + A_lab + A_root + A_wood == NPP_pos) either way.
+    if config.woody:
+        A_root = A_root_base
+        A_wood = A_wood_raw
+    else:
+        A_root = A_root_base + A_wood_raw
+        A_wood = jnp.zeros_like(A_wood_raw)
 
     # --- Phenology ---------------------------------------------------------
     lrf, lff = compute_phenology(jnp.asarray(doy), lat, config)
@@ -292,17 +322,33 @@ def step_carbon_differland(
         jnp.asarray(config.tor_root), dt_days,
     )
 
-    # NPP deficit (NPP_day < 0, GPP cannot cover R_auto).  Cascade the
-    # draw C_lab → C_fol → C_root → C_wood so the atmosphere gain via
-    # NEE is matched exactly by biomass loss, even if any single pool
-    # is exhausted.  Each draw is capped at the **net** pool contents
-    # after natural turnover flows (lab_release / leaf_litter / etc.)
-    # so the pool cannot go below 0 once both the natural drain AND
-    # the deficit are applied — preventing the ``_soft_pos`` smoothing
-    # bias from leaking ``_alpha·log(2)`` of phantom carbon per pool.
-    # Codex iter-63 stop-time review: "exhausted-labile case still
-    # leaks carbon" — caused by the prior cap using raw state.C_x
-    # without subtracting the natural turnover drain.
+    # NPP deficit (NPP_day < 0, GPP cannot cover R_auto).  Cascade the draw
+    # C_lab → C_wood → C_root → C_fol so the atmosphere gain via NEE is matched
+    # exactly by biomass loss, even if any single pool is exhausted.
+    #
+    # DRAW ORDER = mobile reserve first, PHOTOSYNTHETIC ORGANS last.  A
+    # DALEC-style daily respiration model run at the land model's sub-daily dt
+    # sees GPP=0 every night while the biomass-proportional maintenance
+    # respiration stays on, so every night NPP_day<0 and this cascade fires to
+    # pay maintenance from stored carbon.  Which pool absorbs that recurring
+    # nighttime draw matters:
+    #   * Draining C_fol (the leaves) collapses LAI → GPP → the whole column
+    #     (a carbon death-spiral once the labile reserve empties at leaf-fall).
+    #   * Draining C_root (a functional, relatively small pool) empties it in
+    #     weeks — a grassland root system cannot buffer a forest's respiration.
+    # So after the labile (NSC) reserve, the draw goes to WOOD — the largest,
+    # most allocation-fed pool (also the plant's structural NSC store) — which
+    # absorbs the diurnal deficit yet still net-accumulates because daytime
+    # allocation (the wood share of NPP) exceeds the nighttime draw whenever
+    # daily NPP>0.  Roots and leaves are touched only in genuine starvation
+    # (labile+wood both exhausted, e.g. a leafless herbaceous column in polar
+    # winter), and the leaves strictly last.  This keeps every functional pool
+    # at a physical steady state instead of one pool cannibalising to zero.
+    #
+    # Each draw is capped at the **net** pool contents after natural turnover
+    # flows (lab_release / leaf_litter / etc.) so the pool cannot go below 0
+    # once both the natural drain AND the deficit are applied (codex iter-63:
+    # the cap must subtract the natural turnover drain, not use raw state.C_x).
     _inv_dt_days = 1.0 / jnp.maximum(dt_days, 1e-10)
     npp_deficit_day = jnp.maximum(-NPP_day, 0.0)
     # Net pool capacity per day after subtracting natural turnover drain
@@ -321,20 +367,22 @@ def step_carbon_differland(
         state.C_wood + (A_wood - wood_litter) * dt_days, 0.0,
     ) * _inv_dt_days
 
+    # Draw order: labile (mobile NSC) → wood (structural store/buffer)
+    # → root → foliage (photosynthetic organ, strictly last).
     lab_deficit_draw = jnp.minimum(npp_deficit_day, lab_net_avail)
     remaining_after_lab = npp_deficit_day - lab_deficit_draw
-    fol_deficit_draw = jnp.minimum(remaining_after_lab, fol_net_avail)
-    remaining_after_fol = remaining_after_lab - fol_deficit_draw
-    root_deficit_draw = jnp.minimum(remaining_after_fol, root_net_avail)
-    remaining_after_root = remaining_after_fol - root_deficit_draw
-    wood_deficit_draw = jnp.minimum(remaining_after_root, wood_net_avail)
+    wood_deficit_draw = jnp.minimum(remaining_after_lab, wood_net_avail)
+    remaining_after_wood = remaining_after_lab - wood_deficit_draw
+    root_deficit_draw = jnp.minimum(remaining_after_wood, root_net_avail)
+    remaining_after_root = remaining_after_wood - root_deficit_draw
+    fol_deficit_draw = jnp.minimum(remaining_after_root, fol_net_avail)
     # Unmet NPP deficit: the part of the maintenance-respiration demand that
     # NO pool could supply (all biomass exhausted).  R_auto is charged to
     # the atmosphere via NEE below, so the flux MUST be reduced by this
     # undrawn remainder or NEE reports carbon that left no pool (atmosphere
     # gain > biomass loss).  See finding #5.
     unmet_npp_deficit_day = jnp.maximum(
-        remaining_after_root - wood_deficit_draw, 0.0,
+        remaining_after_root - fol_deficit_draw, 0.0,
     )
 
     # --- Heterotrophic respiration & decomposition -------------------------
@@ -373,6 +421,17 @@ def step_carbon_differland(
     R_het_lit = lit_scale * R_het_lit_demand
     lit_to_som = lit_scale * lit_to_som_demand
 
+    # Coarse woody debris: wood turnover does NOT humify 100 % into the
+    # millennial SOM pool.  Split it like the litter pathway — a fraction
+    # ``cwd_humification_eff`` becomes stable SOM, the rest respires to the
+    # atmosphere (CWD heterotrophic respiration).  Routing all of wood_litter
+    # to C_som (the previous behaviour) drove an unphysically large soil-carbon
+    # stock (SOM_eq ~ input × 550-yr turnover).  Conserves exactly:
+    # wood_litter = wood_to_som + R_het_cwd, so C_wood loses wood_litter,
+    # C_som gains wood_to_som, and the atmosphere gains R_het_cwd (added to NEE).
+    wood_to_som = config.cwd_humification_eff * wood_litter
+    R_het_cwd = wood_litter - wood_to_som
+
     # --- Pool updates (Euler, gC/m2/day rates * dt_days) -------------------
     # Hard non-negativity ``jnp.maximum(x, 0)``.  The iter-64 cap
     # (``lab_net_avail`` etc., computed against the pool AFTER natural
@@ -404,23 +463,51 @@ def step_carbon_differland(
             state.C_lit + (leaf_litter + root_litter
                            - R_het_lit - lit_to_som) * dt_days),
         C_som=_soft_pos(
-            state.C_som + (lit_to_som + wood_litter
+            state.C_som + (lit_to_som + wood_to_som
                            - R_het_som) * dt_days),
     )
 
     # --- NEE: positive = source to atmosphere ------------------------------
     # R_het_lit is the litter-availability-CAPPED respiration (finding #4);
     # ``unmet_npp_deficit_day`` removes the maintenance respiration that no
-    # biomass pool could supply (finding #5).  With both corrections the
-    # column closes exactly: sum(dC_pools) == -NEE_day*dt (verified by
-    # test_carbon_*_conservation, formerly xfail).
+    # biomass pool could supply (finding #5); ``R_het_cwd`` is the coarse
+    # woody-debris respiration split off from wood turnover.  With these
+    # corrections the column closes exactly: sum(dC_pools) == -NEE_day*dt
+    # (verified by test_carbon_*_conservation).
     NEE_day = (
         R_auto_day - unmet_npp_deficit_day
-        + R_het_lit + R_het_som - gpp_day
+        + R_het_lit + R_het_som + R_het_cwd - gpp_day
     )
     co2_flux = NEE_day / _SPD * _GC_TO_KG_CO2
 
-    return new_state, co2_flux
+    if not return_diagnostics:
+        return new_state, co2_flux
+
+    diag = CarbonDiagnostics(
+        gpp=gpp_day,
+        npp=NPP_day,
+        r_maint=R_maint_day,
+        r_growth=R_growth_day,
+        r_auto=R_auto_day,
+        r_het_lit=R_het_lit,
+        r_het_som=R_het_som,
+        r_het_cwd=R_het_cwd,
+        r_het=R_het_lit + R_het_som + R_het_cwd,
+        nee=NEE_day,
+        unmet_npp_deficit=unmet_npp_deficit_day,
+        a_fol=A_fol,
+        a_lab=A_lab,
+        a_root=A_root,
+        a_wood=A_wood,
+        lab_release=lab_release,
+        leaf_litter=leaf_litter,
+        root_litter=root_litter,
+        wood_litter=wood_litter,
+        wood_to_som=wood_to_som,
+        lit_to_som=lit_to_som,
+        lai=LAI,
+    )
+    return new_state, co2_flux, diag
 
 
 # ===================================================================
@@ -471,7 +558,10 @@ def step_carbon(
     config: CarbonConfig,
     dt: float,
     gpp_override: jnp.ndarray | None = None,
-) -> tuple[CarbonState | None, jnp.ndarray]:
+    return_diagnostics: bool = False,
+) -> tuple[CarbonState | None, jnp.ndarray] | tuple[
+    CarbonState | None, jnp.ndarray, CarbonDiagnostics
+]:
     """Dispatch carbon step based on *config.scheme*.
 
     Parameters
@@ -479,11 +569,17 @@ def step_carbon(
     gpp_override : jnp.ndarray, optional
         When provided (e.g. from Farquhar photosynthesis), replaces the
         internal LUE-based GPP computation.
+    return_diagnostics : bool, optional
+        Return the CarbonDiagnostics breakdown as a third element.  Only
+        the ``differland`` scheme produces diagnostics; requesting them for
+        another scheme raises ``ValueError`` (there is no NPP/allocation
+        breakdown for a prescribed or disabled carbon cycle).
 
     Returns
     -------
     carbon_state : Updated state (None for "none"/"seasonal").
     co2_flux     : kgCO2/m2/s, positive up.
+    diag         : (only when ``return_diagnostics``) CarbonDiagnostics.
     """
     if config.scheme == "differland":
         if carbon_state is None:
@@ -491,8 +587,14 @@ def step_carbon(
         return step_carbon_differland(
             carbon_state, sw_down, T, co2_ppmv, beta, lat, doy,
             precip, config, dt, gpp_override=gpp_override,
+            return_diagnostics=return_diagnostics,
         )
-    elif config.scheme == "seasonal":
+    if return_diagnostics:
+        raise ValueError(
+            f"return_diagnostics is only supported for the 'differland' "
+            f"carbon scheme, not {config.scheme!r}."
+        )
+    if config.scheme == "seasonal":
         return carbon_state, seasonal_co2_flux(doy, lat, config)
     elif config.scheme == "none":
         return carbon_state, jnp.zeros_like(T)
@@ -511,12 +613,20 @@ def init_carbon_state(
     shape: tuple[int, ...],
     config: CarbonConfig,
 ) -> CarbonState:
-    """Create initial carbon pool state with uniform values from config."""
+    """Create initial carbon pool state with uniform values from config.
+
+    An herbaceous config (``woody=False``) starts with NO wood pool: the flag
+    disables both wood allocation AND the initial wood stock, so a grassland
+    never carries a phantom tree that would otherwise respire, turn over, and
+    feed CWD/SOM for decades from the ``C_wood_init`` default.  Woody configs
+    use ``C_wood_init`` unchanged.
+    """
+    C_wood_init = config.C_wood_init if config.woody else 0.0
     return CarbonState(
         C_lab=jnp.full(shape, config.C_lab_init),
         C_fol=jnp.full(shape, config.C_fol_init),
         C_root=jnp.full(shape, config.C_root_init),
-        C_wood=jnp.full(shape, config.C_wood_init),
+        C_wood=jnp.full(shape, C_wood_init),
         C_lit=jnp.full(shape, config.C_lit_init),
         C_som=jnp.full(shape, config.C_som_init),
     )

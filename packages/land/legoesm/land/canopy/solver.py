@@ -69,6 +69,14 @@ from legoesm.land.canopy.energy_balance import (
 )
 
 
+# --- Sunlit-leaf degeneracy anchor smoother (numerics; see solver notes) ---
+# tanh blend Tf_Sun -> Tf_Sh as the sunlit fraction shrinks; centred at
+# fSun = 0.08 with transition half-width 0.03 (differentiable replacement for
+# the old hard ``where(fSun < 0.05, ...)`` kink).
+_ANCHOR_FSUN_CENTER = 0.08   # [-] tanh centre in sunlit fraction
+_ANCHOR_FSUN_WIDTH  = 0.03   # [-] tanh transition half-width
+
+
 # ---------------------------------------------------------------------------
 # Forcing bundle NamedTuple — groups all per-column inputs for the closure
 # ---------------------------------------------------------------------------
@@ -111,8 +119,8 @@ class CanopyForcingBundle(NamedTuple):
     q_atm: jax.Array     # specific humidity [kg kg-1]
 
     # Stomatal
-    m: jax.Array         # Ball-Berry slope (stress-applied)
-    b0: jax.Array        # Ball-Berry intercept (stress-applied)
+    m: jax.Array         # Ball-Berry slope (soil-moisture-stressed)
+    b0: jax.Array        # Ball-Berry intercept (soil-stressed iff CanopyConfig.stress_b0)
     alf: jax.Array       # quantum yield
     TgC: jax.Array       # growth temperature [°C]
     fC4: jax.Array       # C4 fraction [-]
@@ -126,6 +134,11 @@ class CanopyForcingBundle(NamedTuple):
     z0: jax.Array        # reference height [m]
     cv: jax.Array        # leaf BL forced-convection coefficient [m^-0.5 s^0.5]
     d_leaf: jax.Array    # characteristic leaf width [m]
+    # Below-canopy soil-surface resistance to evaporation [s/m], added in SERIES
+    # with the aerodynamic ``raw_below`` in the soil energy balance (Sellers 1992
+    # r_ss + Sakaguchi-Zeng 2009 litter; see energy_balance.soil_surface_evap_
+    # resistance).  Zeros recover the pure-aerodynamic (legacy beta) behaviour.
+    r_soil_surface: jax.Array
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +178,11 @@ def _canopy_residual(
     # ---- Boundary and below-canopy resistances ----
     Rb_Sun, Rb_Sh = compute_boundary_layer_resistance(uav, b.LAI, b.fSun, b.cv, b.d_leaf)
     rah_below, raw_below = compute_below_canopy_resistance(uav, b.CI, b.LAI)
+    # Soil evaporation (vapour) path adds the soil-surface resistance in SERIES
+    # (Sellers 1992 r_ss + Sakaguchi-Zeng 2009 litter); the sensible-heat path
+    # (rah_below) is a direct skin-to-canopy-air conduction and takes NO soil-side
+    # resistance.  r_soil_surface = 0 recovers the pure-aerodynamic (legacy) form.
+    raw_soil_evap = raw_below + b.r_soil_surface
 
     # Soil evaporation uses the beta efficiency b.fStress_soil (= soil pore RH
     # h_r from the prognostic top-layer matric potential) as a conductance
@@ -221,13 +239,13 @@ def _canopy_residual(
         _, LE_Soil, H_Soil, _G = soil_energy_balance_bt(
             Ts, Tc, q_s, q_c,
             b.lam, b.rhoa, b.Cp,
-            rah_below, raw_below, b.fStress_soil,
+            rah_below, raw_soil_evap, b.fStress_soil,
             b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
     else:
         _, LE_Soil, H_Soil, _G = soil_energy_balance_pm(
             Ts, Tc, q_s, q_c,
             b.lam, b.rhoa, b.Cp,
-            rah_below, raw_below, b.fStress_soil,
+            rah_below, raw_soil_evap, b.fStress_soil,
             b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
     # ---- Canopy air update (FULLY_COUPLED: soil included) ----
@@ -237,7 +255,7 @@ def _canopy_residual(
         gs_Sun, gs_Sh,
         Rb_Sun, Rb_Sh,
         rah_above, raw_above,
-        rah_below, raw_below,
+        rah_below, raw_soil_evap,
         b.fStress_soil, b.Ps)
 
     # ---- Sunlit-leaf anchor when fSun is too small for two-leaf split ----
@@ -253,7 +271,7 @@ def _canopy_residual(
     # ``where(fSun < 0.05, ...)`` produced a visible kink in H and LE
     # at the transition (seen in diagnostic plots) and made the residual
     # non-differentiable there, causing ``jax.grad`` to return NaN.
-    anchor_weight = 0.5 * (1.0 - jnp.tanh((b.fSun - 0.08) / 0.03))
+    anchor_weight = 0.5 * (1.0 - jnp.tanh((b.fSun - _ANCHOR_FSUN_CENTER) / _ANCHOR_FSUN_WIDTH))
     res_Tf_Sun = (anchor_weight * (Tf_Sun - Tf_Sh)
                   + (1.0 - anchor_weight) * (Tf_Sun - Tf_Sun_new))
     res_Ci_Sun = (anchor_weight * (Ci_Sun - Ci_Sh)
@@ -274,7 +292,7 @@ def _canopy_residual(
 # Diagnostic forward pass — same logic but returns all fluxes
 # ---------------------------------------------------------------------------
 
-def _canopy_forward(
+def canopy_forward(
     x: jax.Array,
     bundle: CanopyForcingBundle,
     LE_module: str,
@@ -301,6 +319,11 @@ def _canopy_forward(
 
     Rb_Sun, Rb_Sh = compute_boundary_layer_resistance(uav, b.LAI, b.fSun, b.cv, b.d_leaf)
     rah_below, raw_below = compute_below_canopy_resistance(uav, b.CI, b.LAI)
+    # Soil evaporation (vapour) path adds the soil-surface resistance in SERIES
+    # (Sellers 1992 r_ss + Sakaguchi-Zeng 2009 litter); the sensible-heat path
+    # (rah_below) is a direct skin-to-canopy-air conduction and takes NO soil-side
+    # resistance.  r_soil_surface = 0 recovers the pure-aerodynamic (legacy) form.
+    raw_soil_evap = raw_below + b.r_soil_surface
 
     lw_out  = canopy_longwave_rt(
         b.LAI, b.CI, b.SZA, Ts, Tf_Sun, Tf_Sh, b.La, b.epsf, b.epss)
@@ -355,13 +378,13 @@ def _canopy_forward(
         Rn_Soil, LE_Soil, H_Soil, G = soil_energy_balance_bt(
             Ts, Tc, q_s, q_c,
             b.lam, b.rhoa, b.Cp,
-            rah_below, raw_below, b.fStress_soil,
+            rah_below, raw_soil_evap, b.fStress_soil,
             b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
     else:
         Rn_Soil, LE_Soil, H_Soil, G = soil_energy_balance_pm(
             Ts, Tc, q_s, q_c,
             b.lam, b.rhoa, b.Cp,
-            rah_below, raw_below, b.fStress_soil,
+            rah_below, raw_soil_evap, b.fStress_soil,
             b.ASW_Soil, ALW_Soil, le_cap_mode=le_cap_mode)
 
     return dict(
@@ -493,7 +516,7 @@ def _make_implicit_newton_solver(
             # size during dusk transitions; constant 5.0 lets the solver
             # traverse the radiation-collapse smoothly while still
             # preventing catastrophic overshoot.
-            delta = jnp.clip(delta, -5.0, 5.0)
+            delta = jnp.clip(delta, -5.0, 5.0)  # coeff-ok: constant Newton step cap (see note above)
             x_new = x + delta
             new_converged = jnp.linalg.norm(delta) < tol
             return (x_new, i + 1, new_converged)

@@ -50,7 +50,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.atmosphere.physics._shared import exner_function, virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import MYNN25Config
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -61,6 +61,46 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
     implicit_vertical_diffusion_theta,
 )
+
+# Machine-checked scheme contract (see tests/test_physics_contracts.py).
+__physics_contract__ = {
+    "summary": (
+        "Mellor-Yamada-Nakanishi-Niino level-2.5 (MYNN-2.5) turbulence "
+        "closure: prognostic qke = q^2 = 2*TKE with a master length scale and "
+        "algebraic level-2.5 stability functions SM, SH set eddy diffusivities "
+        "Km, Kh that mix momentum, heat (theta-space) and moisture."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
+        "qke": "m^2/s^2 (q^2 = 2*TKE)",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "T_sfc": "K", "q_sfc": "kg/kg", "rho": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
+        "Km": "m^2/s", "Kh": "m^2/s", "shflx": "W/m^2", "lhflx": "W/m^2",
+        "ustar": "m/s", "h_pbl": "m", "qke_new": "m^2/s^2",
+    },
+    "sign_convention": (
+        "Down-gradient eddy diffusion, Km = L*q*SM >= 0, Kh = L*q*SH >= 0; "
+        "stability functions increase mixing when unstable and suppress it "
+        "when stable. The column budget is OPEN: the surface flux (shflx > 0 "
+        "upward, lhflx > 0 upward/moistening) is the bottom boundary condition "
+        "and a Dirichlet qke_sfc = B1^(2/3)*u*^2 is imposed at the surface; "
+        "top is zero-flux; z increases upward."
+    ),
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Nakanishi & Niino (2009), J. Meteor. Soc. Japan 87, 895-912; "
+        "Mellor & Yamada (1982), Rev. Geophys. 20, 851-875"
+    ),
+    "idealized_test": (
+        "jax_scm oracle parity on GABLS1 / Wangara / Ekman; rest state with "
+        "zero surface flux and a neutral column -> near-zero interior "
+        "tendency; Km, Kh >= 0; qke stays >= floor."
+    ),
+}
 
 
 _QKE_FLOOR = 1e-10        # m²/s²; floor on qke to keep sqrt finite
@@ -117,6 +157,7 @@ def _half_to_full(x_half: jax.Array, nlev: int) -> jax.Array:
 def _compute_master_length(
     q_half: jax.Array,       # (ncol, nlev-1)
     z_half_geom: jax.Array,  # (ncol, nlev-1) — geometric height above surface at interior interfaces
+    dz_half: jax.Array,      # (ncol, nlev-1) — spacing between adjacent full levels
     L_obukhov: jax.Array,    # (ncol,)
     dthv_dz_half: jax.Array, # (ncol, nlev-1)
     w_thv_sfc: jax.Array,    # (ncol,)
@@ -127,8 +168,9 @@ def _compute_master_length(
 
     All arrays are interior half-level ``(ncol, nlev-1)``.  zeta = z/L
     is clipped to a sane range so the surface-layer L_S formula behaves
-    monotonically.  Output is unfiltered — caller applies the 1-2-1
-    smoother.
+    monotonically.  ``dz_half`` weights the L_T vertical integrals
+    (NN09 eq. 54) so the turbulent length scale is correct on stretched
+    grids.  Output is unfiltered — caller applies the 1-2-1 smoother.
     """
     eps = _SMOOTH_EPS
     # L_obukhov can be ±inf in neutral conditions; jnp handles inf safely
@@ -152,11 +194,16 @@ def _compute_master_length(
     )
     L_S = jnp.maximum(L_S, _L_FLOOR)
 
-    # Turbulent length scale L_T = 0.23 * ∫(q·z)/∫(q)  (NN09 eq. 54).
-    # Use a column-wide reduction along the half-level axis; output is a
+    # Turbulent length scale L_T = 0.23 * ∫q·z dz / ∫q dz  (NN09 eq. 54).
+    # The integrals are dz-WEIGHTED sums over the interior interfaces (WRF
+    # module_bl_mynn accumulates ``qkw*zw*dz`` / ``qkw*dz`` the same way);
+    # a bare point-sum ratio Σ(q·z)/Σ(q) equals the integral ratio only on a
+    # uniform grid and under-weights the (thicker) upper layers on the
+    # stretched vertical grids used in SCM/GCM columns.  dz cancels exactly
+    # when constant, so uniform-grid results are unchanged.  Output is a
     # per-column scalar broadcast across the half-level axis.
-    num = jnp.sum(q_half * z_half_geom, axis=-1)
-    den = jnp.sum(q_half, axis=-1)
+    num = jnp.sum(q_half * z_half_geom * dz_half, axis=-1)
+    den = jnp.sum(q_half * dz_half, axis=-1)
     L_T_col = _MYNN_LT_COEFF * num / jnp.maximum(den, eps)
     L_T = jnp.broadcast_to(
         L_T_col[:, None], q_half.shape,
@@ -288,9 +335,10 @@ def mynn25_turbulence(
     w_th_s_kin = shflx / (rho_sfc * constants.c_pd)
     w_qv_s_kin = lhflx / (rho_sfc * constants.L_v)
 
-    # Potential temperature (full levels).
-    exner = (constants.p_ref / jnp.maximum(p_full, 1.0)) ** constants.kappa
-    theta = T * exner
+    # Potential temperature (full levels) via the canonical inverse-Exner
+    # helper (exner_pref = 1/Π = (p_ref/p)^κ; same 1 Pa pressure floor).
+    exner_pref = 1.0 / exner_function(p_full)
+    theta = T * exner_pref
     theta_v = virtual_temperature(theta, q_v)
 
     # Buoyancy flux (virtual potential temperature) at surface.  Use
@@ -352,6 +400,7 @@ def mynn25_turbulence(
     L = _compute_master_length(
         q_half=q_half,
         z_half_geom=z_above_half,
+        dz_half=dz_half,
         L_obukhov=L_obukhov,
         dthv_dz_half=dthv_dz,
         w_thv_sfc=w_thv_sfc,

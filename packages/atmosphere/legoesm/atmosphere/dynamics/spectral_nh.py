@@ -48,6 +48,7 @@ from legoesm.grids.gaussian import (
     spectral_hyperdiffusion_3d,
     sh_synthesis_H_3d,
     dealiasing_mask,
+    spectral_gradient_3d,
 )
 from legoesm.grids.vertical import (
     HeightCoordinate,
@@ -128,41 +129,9 @@ class SpectralNHConfig(NamedTuple):
 # Spectral gradient helper
 # =============================================================================
 
-def _spectral_gradient_3d(grid, coeffs_3d):
-    """Compute horizontal gradient of a 3D scalar from spectral coefficients.
-
-    Returns (dfdx, dfdy) on the Gaussian grid where:
-    dfdx = (1/(a*cos(lat))) * d(f)/d(lambda)
-    dfdy = (1/a) * d(f)/d(lat)
-
-    Parameters
-    ----------
-    coeffs_3d : (n_sh, nlev) complex
-
-    Returns
-    -------
-    dfdx, dfdy : (n_lat, n_lon, nlev)
-    """
-    a = grid.radius
-    ims = grid.ms.astype(jnp.float64)
-    cos_lat_2d = jnp.clip(grid.cos_lat[:, None], _COS_LAT_MIN, None)
-
-    # Zonal derivative uses ``sh_synthesis_3d`` directly on the
-    # ``(n_sh, nlev)`` complex spectrum — one batched synthesis vs the
-    # previous moveaxis + vmap(per-level synthesis) + moveaxis.  The
-    # ``ims`` broadcast over the level axis is via a trailing newaxis.
-    dfdx = sh_synthesis_3d(grid, (1j * ims)[:, None] * coeffs_3d) / (
-        a * cos_lat_2d[..., None]
-    )
-
-    # Meridional derivative uses ``sh_synthesis_H_3d`` — same one-shot
-    # batched segment-sum + IRFFT as ``sh_synthesis_3d`` (no per-level
-    # moveaxis + vmap).
-    dfdy = -sh_synthesis_H_3d(grid, coeffs_3d) / (
-        a * cos_lat_2d[..., None]
-    )
-
-    return dfdx, dfdy
+# The geographic spectral gradient is the shared
+# ``legoesm.grids.gaussian.spectral_gradient_3d`` (promoted iter 90 so the
+# column-forcing geostrophic diagnostic reuses the SAME operator — no parallel copy).
 
 
 # =============================================================================
@@ -247,7 +216,7 @@ def spectral_nh_slow_tendencies(
 
     # --- 5. Spectral gradient of Exner perturbation ---
     pi_p_hat = sh_analysis_3d(grid, pi_p)
-    dpi_dx, dpi_dy = _spectral_gradient_3d(grid, pi_p_hat)
+    dpi_dx, dpi_dy = spectral_gradient_3d(grid, pi_p_hat)
 
     # PGF vectors
     pgf_x = c_p * theta_total * dpi_dx

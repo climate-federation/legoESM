@@ -42,9 +42,22 @@ import json
 import os
 import time
 
+import sys
+from pathlib import Path
+
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+# Bench dir for the shared metadata module (sibling-script import pattern —
+# needed when this file is loaded by path from tests, not run as a script).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Shared self-describing scaling metadata (anti-fake-scaling audit): merged
+# under rec["metadata"] so a virtual-CPU-device proxy, a gloo/TCP fabric run,
+# or an f32 ablation is falsifiable from the JSONL row alone.  metadata.py
+# imports JAX lazily, so this is safe before jax.distributed.initialize.
+from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
 
 
 def _build(n_lat, n_lon, nlev):
@@ -100,16 +113,15 @@ def main() -> int:
     args = p.parse_args()
 
     if args.multicontroller:
-        # MUST run before any other JAX use (backend init). SLURM auto-detects;
-        # mpiexec/OpenMPI needs the explicit coordinator + OMPI env vars.
-        if args.coordinator is not None:
-            n_procs = int(os.environ["OMPI_COMM_WORLD_SIZE"])
-            proc_id = int(os.environ["OMPI_COMM_WORLD_RANK"])
-            jax.distributed.initialize(
-                coordinator_address=args.coordinator,
-                num_processes=n_procs, process_id=proc_id)
-        else:
-            jax.distributed.initialize()
+        # MUST run before any other JAX use (backend init).  The SHARED
+        # helper owns the launcher-env contract (SLURM/OMPI auto-detect,
+        # PALS mpi4py bootstrap, explicit-coordinator path) AND the
+        # hardening: post-init silent-fallback guard + NCCL net-plugin
+        # warning — an inline init here would bypass both (codex).
+        from legoesm.parallel.early_init import (
+            init_multicontroller_distributed,
+        )
+        init_multicontroller_distributed(args.coordinator)
 
     from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
         make_sharded_atm_latlon_step, shard_state_atm_latlon)
@@ -146,6 +158,13 @@ def main() -> int:
         step = make_sharded_atm_latlon_step(model, mesh, physics_fn=physics_fn)
         c = shard_state_atm_latlon(c0, mesh)
 
+    # Multi-controller: align every process before the timed loop so per-step
+    # wall times aren't skewed by startup jitter (and once after, so no
+    # process exits while peers still hold collectives in flight).
+    if jax.process_count() > 1:
+        from jax.experimental import multihost_utils
+        multihost_utils.sync_global_devices("atm_latlon_spmd_bench_start")
+
     # Per-step timing: step 0 includes compile; record each step so re-trace
     # (every step slow) is visible vs steady-state (steps 1.. fast).
     per_step_ms = []
@@ -154,6 +173,10 @@ def main() -> int:
         c = step(c, args.dt)
         _block(c)
         per_step_ms.append((time.perf_counter() - t0) * 1e3)
+
+    if jax.process_count() > 1:
+        from jax.experimental import multihost_utils
+        multihost_utils.sync_global_devices("atm_latlon_spmd_bench_end")
 
     steady = per_step_ms[args.warmup:]
     med = float(np.median(steady))
@@ -169,6 +192,36 @@ def main() -> int:
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=n_lat * args.n_lon * args.nlev,
     )
+    from legoesm.parallel.early_init import nccl_transport_report
+    _nccl_report = nccl_transport_report()
+    rec["metadata"] = annotate_incomplete(scaling_metadata(
+        grid="latlon",
+        component="atmosphere",
+        resolution=f"{n_lat}x{args.n_lon}",
+        n_levels=args.nlev,
+        precision="float64" if jax.config.jax_enable_x64 else "float32",
+        n_gpus=(nd if jax.default_backend() in ("gpu", "cuda", "rocm")
+                else 0),
+        decomposition="band" if nd > 1 else "none",
+        # cells_per_rank is per PROCESS (n_ranks semantics); the per-device
+        # share lives in extra.cells_per_device — a single-process 4-device
+        # SPMD run has 1 rank owning ALL cells (codex finding 3).
+        cells_per_rank=(n_lat * args.n_lon * args.nlev)
+        // max(jax.process_count(), 1),
+        scaling_kind=args.mode,
+        extra={
+            "physics": args.physics,
+            "steps": args.steps,
+            "warmup": args.warmup,
+            "multicontroller": bool(args.multicontroller),
+            # Route-B transport facts (socket-fallback flag): a
+            # multi-node row without an NCCL net plugin is
+            # falsifiable from the record alone.
+            "nccl": (_nccl_report if args.multicontroller
+                     else None),
+            "cells_per_device": (n_lat // nd) * args.n_lon * args.nlev,
+        },
+    ))
     # Multi-controller: every process times the same program; process 0 owns
     # the JSONL + stdout (others would duplicate/corrupt the append).
     if jax.process_index() == 0:
@@ -179,6 +232,10 @@ def main() -> int:
         print(f"[nd={nd} {args.mode} {n_lat}x{args.n_lon}x{args.nlev}] "
               f"compile={rec['compile_ms']}ms steady_median={med:.2f}ms/step "
               f"(per-step: {rec['per_step_ms']})")
+        if rec["metadata"]["virtual_cpu_devices"]:
+            print("[virtual-cpu] forced host-platform CPU devices: this row "
+                  "is a communication-overhead / correctness proxy, NOT "
+                  "hardware scaling — do not report it as a speedup.")
     return 0
 
 

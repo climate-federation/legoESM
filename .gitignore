@@ -87,6 +87,12 @@ docs/references/
 src/legoesm/ml/data/**
 !src/legoesm/ml/data/**/
 !src/legoesm/ml/data/**/*.py
+
+# CLM-ML-JAX checkout and runtime output directories (not part of the legoESM package)
+clm-ml-jax/
+docs/output_files_clm_ml-v2/
+validation_output/
+
 .claude/worktrees/serene-perlman/
 .claude/worktrees/agent-a5afdce4/
 ralph-claude-code/
@@ -125,8 +131,12 @@ docs/_build/
 
 # Local SLURM sbatch scripts and logs
 *.sbatch
+# ... but curated cluster job sets ARE tracked (the pre-existing sbatch under
+# scripts/cluster/ were force-added; the negation makes that the rule).
+!scripts/cluster/**/*.sbatch
 *.out
 *.err
+.jax_cache_aimip/
 
 # Local work journal + its skill — private, NEVER committed or pushed.
 /journal/
