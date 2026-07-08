@@ -251,9 +251,13 @@ def init_jax_distributed_with_fallback() -> None:
     # Cross-path idempotency: an OUTER bootstrap
     # (initialize_jax_distributed_multiprocess / a launcher script) may have
     # federated the processes without setting THIS module's flag.
-    # is_initialized() is the supported check (#749).
+    # is_initialized() is the supported check (#749).  Still verify the
+    # OUTER federation against the launcher's declared world size — a
+    # pre-initialized 1-process runtime under N launcher ranks is the same
+    # silent-fallback hazard (codex).
     if jax.distributed.is_initialized():
         _INITIALIZED = True
+        check_no_silent_process_fallback()
         return
 
     auto_detectable = any(
@@ -278,6 +282,7 @@ def init_jax_distributed_with_fallback() -> None:
     except RuntimeError as e:
         if "already" in str(e).lower():
             _INITIALIZED = True
+            check_no_silent_process_fallback()
             return
         raise
     _INITIALIZED = True
