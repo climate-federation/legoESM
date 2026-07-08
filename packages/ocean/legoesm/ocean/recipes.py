@@ -171,6 +171,18 @@ LATLON_RECIPES = {
         "coriolis_scheme": "explicit_ab2",           # spherical Coriolis [APPROX]
         "barotropic_solver": "implicit_cn",          # ImplicitFreeSurface
         "outer_integrator": "ab2",
+        # STABILITY HAZARD (diagnosed via the DINO 'oceananigans'-card barotropic
+        # blowup): explicit_ab2 × implicit_cn WITHOUT barotropic_slow_forcing_ab2
+        # integrates the barotropic-mode Coriolis FORWARD EULER (the CN predictor
+        # gates its FB Coriolis off and the outer AB2 excludes the barotropic
+        # increment) — unconditionally unstable, |G|=sqrt(1+(f·dt)²)/step.  Long
+        # basin runs MUST add barotropic_slow_forcing_ab2=True (Oceananigans
+        # AB2-extrapolates Gᵁ INCLUDING Coriolis) — the DINO 'oceananigans' card
+        # and the Silvestri §5 jet do.  NOT pinned here because the fidelity
+        # compare decks (oceananigans_canonical_ocean_config consumers) override
+        # coriolis_scheme per-deck (matsuno decks would trip the flag's
+        # explicit_ab2 validation) and one passes the flag via **overrides
+        # (duplicate-kwarg).  Short compare decks tolerate the weak growth.
         "lateral_viscosity_operator": "flux_divergence",
         "A_h_lat_scaling": False,
         "C_smag": 0.0,

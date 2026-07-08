@@ -142,6 +142,30 @@ def oceananigans_canonical_ocean_config(
     if barotropic_time_filter is None:
         barotropic_time_filter = (
             "power_law" if bundle["barotropic_solver"] == "explicit_substep" else "cosine")
+    # FE-Coriolis hazard (diagnosed via the DINO 'oceananigans'-card barotropic
+    # blowup): the EFFECTIVE explicit_ab2 x implicit_cn x ab2-outer combo
+    # integrates the barotropic-mode Coriolis forward-Euler (the CN predictor
+    # gates its FB Coriolis off; the outer AB2 excludes the barotropic
+    # increment) -- unconditionally unstable, |G| = sqrt(1+(f*dt)^2) per step.
+    # Default the Oceananigans G^U AB2-chi centering ON for that combo (what
+    # Oceananigans itself does); matsuno/other per-deck Coriolis overrides never
+    # hit the condition.  A caller override always wins (popped, so **bundle +
+    # **overrides cannot collide on a duplicate kwarg).  Callers stepping with
+    # the flag on must seed F_slow_{u,v}_prev -- model.seed_scan_carry does it.
+    # Merge **overrides keys that also live in the bundle INTO the bundle first
+    # (pop, so from_flat never sees a duplicate kwarg), making the condition
+    # below read the EFFECTIVE combo -- e.g. a caller overriding
+    # outer_integrator="forward_euler" via **overrides must not trip the AB2
+    # default decision (codex).
+    for _k in [k for k in list(overrides) if k in bundle]:
+        bundle[_k] = overrides.pop(_k)
+    if "barotropic_slow_forcing_ab2" in overrides:
+        bundle["barotropic_slow_forcing_ab2"] = overrides.pop(
+            "barotropic_slow_forcing_ab2")
+    elif (bundle["coriolis_scheme"] == "explicit_ab2"
+          and bundle["barotropic_solver"] == "implicit_cn"
+          and bundle.get("outer_integrator") == "ab2"):
+        bundle["barotropic_slow_forcing_ab2"] = True
     return LatLonCGridOceanConfig.from_flat(
         **bundle,
         barotropic_time_filter=barotropic_time_filter,
