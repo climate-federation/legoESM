@@ -11,10 +11,12 @@
 # GPU STRONG-SCALING sweep for latlon / icosahedral / spectral -- the GPU half
 # of the CPU-vs-A100 comparison.  One rank per GPU (route-A mpi4jax) AT EACH
 # resolution, so the GPU side is a real scaling curve -- not a single A100.
-# icosahedral and latlon can both go MULTI-NODE (1->2->4->8->16 ...): icosahedral
-# via the MPAS cell partition, latlon via the lat-band / 2-D-pencil
-# make_latlon_mpi_step wired in #659 -- both genuine domain decompositions with
-# no face/divisor cap.  cubed-sphere is a <=6-GPU single-node face shard and
+# icosahedral and latlon can both go MULTI-NODE: icosahedral via the MPAS cell
+# partition (ladder AUTO-EXTENDS to TOTAL_GPUS -- 1 2 4 8 16 32 ... with the
+# allocation, no hardcoded 16 ceiling; RCB is non-empty/balanced at any rank
+# count), latlon via the lat-band / 2-D-pencil make_latlon_mpi_step wired in
+# #659 -- both genuine domain decompositions with no face/divisor cap.
+# cubed-sphere is a <=6-GPU single-node face shard and
 # spectral has no MPI path (1 GPU only); see #641/#660.  NOTE: multi-node latlon
 # (>4 GPU) is newly enabled and NOT yet validated on real hardware (#660) --
 # verify MPI==serial (cells/rank halves, matched SYPD) on the first run.
@@ -138,9 +140,17 @@ case "$GRID" in
     EXTRA="--latlon-2d"
     RESOLUTIONS="${RESOLUTIONS:-128 256}" ;;
   icosahedral)
-    # Multi-node ladder (powers of 2 -> MPAS cell partition); capped below to
-    # TOTAL_GPUS so the same default is correct on 1 node (1 2 4) or N nodes.
-    GPU_RANKS="${GPU_RANKS:-1 2 4 8 16}"
+    # Multi-node ladder = powers of 2 up to TOTAL_GPUS (the MPAS RCB cell
+    # partition is balanced + non-empty at ANY rank count -- verified to 64 in
+    # tests/unit/test_voronoi_partition_method.py::TestHighRankCount -- so there
+    # is no divisor/face cap).  AUTO-EXTENDS with the allocation: NODES=8 -> 32,
+    # NODES=16 -> 64, with no hardcoded 16 ceiling.  On 1 node it is 1 2 4.
+    # Override explicitly with GPU_RANKS="...".
+    if [ -z "${GPU_RANKS:-}" ]; then
+        _ladder=""; _p=1
+        while [ "$_p" -le "$TOTAL_GPUS" ]; do _ladder="$_ladder $_p"; _p=$(( _p * 2 )); done
+        GPU_RANKS="${_ladder# }"
+    fi
     RESOLUTIONS="${RESOLUTIONS:-6 7 8}" ;;
   spectral)
     GPU_RANKS="1"                            # no MPI -> 1 GPU only

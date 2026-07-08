@@ -115,6 +115,32 @@ class TestOwnerArrays:
 
 
 # ---------------------------------------------------------------------------
+# High rank counts — the multi-node scaling capability (8 nodes / 32 GPUs+)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def mesh_l4():
+    # Level-4 SCVT: 10*4^4 + 2 = 2562 cells — big enough to partition to 64
+    # ranks (>=40 cells/rank) without empties.  (L1's 42 cells can't feed 32+.)
+    return create_voronoi_mesh(subdivision_level=4, lloyd_iterations=1)
+
+
+class TestHighRankCount:
+    """RCB (geometric) partition stays valid + tightly balanced well past 16
+    ranks — the decomposition capability behind multi-node icosahedral scaling
+    to 8 Derecho nodes (32 GPUs) and beyond.  There is NO rank-count cap or
+    power-of-2 requirement; the only real constraint is nCells >= n_ranks."""
+
+    @pytest.mark.parametrize("n_ranks", [16, 32, 64])
+    def test_geometric_valid_and_balanced(self, mesh_l4, n_ranks):
+        owner = partition_cells_geometric(mesh_l4, n_ranks)
+        _assert_valid_owner(owner, mesh_l4.nCells, n_ranks)   # non-empty, covers all
+        counts = np.bincount(owner, minlength=n_ranks)
+        # RCB proportional bisection keeps cells/rank within one of even.
+        assert counts.max() - counts.min() <= 1
+
+
+# ---------------------------------------------------------------------------
 # Hilbert space-filling curve
 # ---------------------------------------------------------------------------
 
