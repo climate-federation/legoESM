@@ -61,6 +61,27 @@ def test_physics_knob_defaults():
     assert p.get("vc_max25") is None                 # None -> per-PFT / land default
 
 
+def test_freeze_thaw_defaults_off():
+    # Off by default = bit-identical sensible-only soil heat (no behaviour change
+    # for existing configs that don't mention it).
+    cfg = validate_config(_minimal())
+    assert cfg.physics["enable_freeze_thaw"] is False
+
+
+def test_freeze_thaw_override_on():
+    ok = _minimal()
+    ok["physics"]["enable_freeze_thaw"] = True
+    cfg = validate_config(ok)
+    assert cfg.physics["enable_freeze_thaw"] is True
+
+
+def test_freeze_thaw_non_bool_raises():
+    bad = _minimal()
+    bad["physics"]["enable_freeze_thaw"] = "yes"     # must be a real bool
+    with pytest.raises(ValueError, match="enable_freeze_thaw"):
+        validate_config(bad)
+
+
 def test_bad_stomatal_model_raises():
     bad = _minimal()
     bad["physics"]["stomatal_model"] = "jarvis"      # not a canopy leaf model

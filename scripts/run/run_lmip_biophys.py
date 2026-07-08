@@ -47,6 +47,7 @@ import numpy as np
 
 from legoesm.land.config import MultiLayerLandConfig, LandConfig, resolve_land_config
 from legoesm.land.soil_grid import SoilGridConfig
+from legoesm.land.soil_thermal import SoilThermalConfig
 from legoesm.land.canopy import CanopyConfig
 from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.land.carbon.stomata import StomataConfig
@@ -122,6 +123,7 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         g1=cfg.physics.get("g1", None),
         gs_max=cfg.physics.get("gs_max", None),
         snow_albedo=bool(cfg.physics.get("snow_albedo_feedback", True)),
+        enable_freeze_thaw=bool(cfg.physics.get("enable_freeze_thaw", False)),
         surfdata=cfg.surfdata["path"],
         forcing_dir=cfg.forcing.get("data_dir", ""),
         prefix=cfg.forcing.get("prefix", ""),
@@ -210,7 +212,11 @@ def run(args) -> int:
         base_cfg = MultiLayerLandConfig(
             surface_scheme=surf, soil_grid=SoilGridConfig(),
             bulk_scheme=args.bulk, snow_albedo_feedback=bool(args.snow_albedo),
-            stomata=stomata)
+            stomata=stomata,
+            # Soil-water latent zero-curtain: off is bit-identical sensible-only
+            # heat; on stabilises freezing boreal/Arctic columns.  Preserved
+            # through init_land_surface_data (which only _replace()s hydraulics).
+            thermal=SoilThermalConfig(enable_freeze_thaw=bool(args.enable_freeze_thaw)))
         step_fn = step_multilayer_land
     elif args.land_mode == "slab":
         base_cfg = LandConfig(surface_scheme=surf)
@@ -266,9 +272,10 @@ def run(args) -> int:
     forcing_desc = ("synthetic" if synthetic
                     else f"CRU-JRA {year_start}"
                     + (f"-{year_end}" if multi_year else ""))
+    _ft = bool(getattr(getattr(config, "thermal", None), "enable_freeze_thaw", False))
     print(f"grid={args.grid_type} | {ncol} columns | surface={args.surface_scheme} | "
-          f"carbon={config.carbon.scheme} | dt={dt:.0f}s | n_steps={args.n_steps} | "
-          f"forcing={forcing_desc}")
+          f"carbon={config.carbon.scheme} | freeze_thaw={'on' if _ft else 'off'} | "
+          f"dt={dt:.0f}s | n_steps={args.n_steps} | forcing={forcing_desc}")
 
     # Precompute per-year masks over model_times_s.  We stage forcing +
     # scan ONE YEAR AT A TIME in a Python loop below, so peak device memory
@@ -522,6 +529,10 @@ def run(args) -> int:
             restart_meta = {
                 "grid_type": args.grid_type, "resolution": args.resolution,
                 "surface_scheme": args.surface_scheme, "bulk_scheme": args.bulk,
+                # Sourced from the CONSTRUCTED config (not args) so provenance
+                # reflects the physics actually run — makes the YAML->config
+                # freeze/thaw wiring observable end-to-end.
+                "enable_freeze_thaw": bool(config.thermal.enable_freeze_thaw),
                 "year": year_start, "year_end": year_end, "dt": dt,
                 "n_steps": args.n_steps, "start_doy": args.start_doy,
                 "forcing": ("synthetic" if synthetic else "CRU-JRA"),

@@ -291,6 +291,36 @@ def test_slab_mode_gate_reads_real_state(tmp_path):
     assert rc in (0, 1)                                       # gate read real state, no crash
 
 
+def test_freeze_thaw_wires_into_soil_thermal(tmp_path):
+    """physics.enable_freeze_thaw must reach the constructed
+    MultiLayerLandConfig.thermal and be recorded in the run's restart metadata
+    (sourced from that config, not the raw args) — proving the
+    YAML -> _args_from_config -> MultiLayerLandConfig.thermal wiring
+    end-to-end.  Default is off; the override turns it on."""
+    from legoesm.land.restart import load_land_restart
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+
+    def _meta_freeze_thaw(out_dir):
+        r = list(out_dir.glob("restart_*.npz"))[0]
+        _, meta = load_land_restart(r, expected_land_mode="multilayer",
+                                    expected_ncol=32, expected_n_layers=None)
+        return meta["metadata"]["enable_freeze_thaw"]
+
+    # Default: freeze/thaw off (schema default = bit-identical sensible heat).
+    out_off = tmp_path / "ft_off"
+    assert _run_config(mod, _write_smoke_config(tmp_path, sd), out_off) == 0
+    assert _meta_freeze_thaw(out_off) is False
+
+    # Override on: the flag flows through to the soil-thermal config and the run
+    # (freeze/thaw physics is exercised) completes over land.
+    out_on = tmp_path / "ft_on"
+    cfg_on = _write_smoke_config(tmp_path, sd, extra_overrides=[
+        "physics.enable_freeze_thaw=true"])
+    assert _run_config(mod, cfg_on, out_on) == 0
+    assert _meta_freeze_thaw(out_on) is True
+
+
 def test_two_leaf_canopy_most_runs(tmp_path):
     """The mechanistic two-leaf canopy (intrinsic Ball-Berry stomata) + MOST
     bulk flux must run end-to-end and produce finite, physical surface T over

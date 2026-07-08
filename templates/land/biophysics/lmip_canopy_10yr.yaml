@@ -28,6 +28,11 @@ physics:
   # --- composable knobs (defaults shown; all optional) ---
   stomatal_model: ball_berry        # canopy leaf conductance: ball_berry | medlyn
   snow_albedo_feedback: true
+  # Soil-water freeze/thaw (apparent-heat-capacity zero-curtain).  ON for the
+  # production run: without it, boreal/Arctic winter columns lose their energy
+  # budget once the top soil layer crosses freezing and drift to NaN (~3-8% of
+  # land cells over 10 yr).  Bit-identical to sensible-only heat when disabled.
+  enable_freeze_thaw: true
   # Stomatal/photosynthesis calibration (null = per-PFT surfdata / land default).
   # Set these to fight #730 over-transpiration once calibrated:
   vc_max25: null                    # max carboxylation @25C [umol/m2/s] (~19.8-180)
