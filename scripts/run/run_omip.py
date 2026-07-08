@@ -226,6 +226,10 @@ def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
             barotropic_wide_halo=True,
             barotropic_wide_halo_chunk=getattr(
                 args, "barotropic_wide_halo_chunk", 0),
+            # The wide path's per-substep clamp is LOCAL by construction;
+            # the config validator REQUIRES the local-clamp scheme to be
+            # explicit, so the flag sets it (documented in --help).
+            barotropic_local_subcycle_clamp=True,
         )
     want_iwm = bool(getattr(args, "iwm", False))
     if not drag_flat and not want_iwm:
@@ -536,8 +540,12 @@ def parse_args(argv: list[str] | None = None):
                         "fused wide lat-halo exchange per chunk of substeps "
                         "instead of ~4 halo pads per substep (lat-lon band "
                         "MPI/SPMD latency lever at >=16 ranks; serial "
-                        "value-identical). Lat-lon / tripole C-grid only; "
-                        "requires barotropic_solver=explicit_substep.")
+                        "value-identical). Regular lat-lon C-grid only "
+                        "(tripole fold refused at construction); requires "
+                        "barotropic_solver=explicit_substep and ALSO SETS "
+                        "barotropic_local_subcycle_clamp=True (the wide "
+                        "path's per-substep clamp is local; global mass is "
+                        "restored once per step).")
     p.add_argument("--barotropic-wide-halo-chunk", type=int, default=0,
                    dest="barotropic_wide_halo_chunk",
                    help="Substeps per wide exchange (0 = auto from the local "

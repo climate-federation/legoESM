@@ -372,13 +372,17 @@ def _build_global_problem(
         # global redistribute once/step (cuts ~3*n_substeps subcycle allreduces
         # to 3). Measures the multi-node strong-scaling gain vs the legacy
         # per-substep-redistribute path.
-        barotropic_local_subcycle_clamp=(
-            _os.environ.get("LEGOESM_BARO_LOCAL_CLAMP", "0") == "1"),
         # Wide-halo split-explicit barotropic lever (explicit_substep only):
         # LEGOESM_BARO_WIDE_HALO=1 -> ONE fused wide lat-halo exchange per
         # chunk of substeps instead of ~4 halo pads per substep (the >=16-rank
         # latency lever; A/B against the same case with the env unset).
         # LEGOESM_BARO_WIDE_HALO_CHUNK caps substeps/exchange (0 = auto).
+        # The wide path REQUIRES the local-clamp scheme (config-validated),
+        # so the wide env implies LEGOESM_BARO_LOCAL_CLAMP — pin the local
+        # clamp in the A/B BASELINE too for a controlled comparison.
+        barotropic_local_subcycle_clamp=(
+            _os.environ.get("LEGOESM_BARO_LOCAL_CLAMP", "0") == "1"
+            or _os.environ.get("LEGOESM_BARO_WIDE_HALO", "0") == "1"),
         barotropic_wide_halo=(
             _os.environ.get("LEGOESM_BARO_WIDE_HALO", "0") == "1"),
         barotropic_wide_halo_chunk=int(

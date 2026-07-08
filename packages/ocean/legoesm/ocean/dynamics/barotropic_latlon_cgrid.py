@@ -793,9 +793,49 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
     # The v-face widening exchanges ``halo = W + 1`` cell rows (the stagger
     # trick), so the halo must satisfy W + 1 <= band height — the exchange
     # pulls rows from ONE neighbour only.
+    #
+    # RANK-CONSISTENCY (codex: uneven-band deadlock): chunk/W/n_chunks gate
+    # COLLECTIVE calls, so they must be identical on every rank.  Under the
+    # MPI band layout they derive from the GLOBAL (n_lat_global, n_ranks) —
+    # never from the local band height, which differs across ranks when
+    # n_lat % n_ranks != 0.  The local band is only ASSERTED to be within
+    # the even-split envelope {base, base+1}: every such band is >= base
+    # rows, so a base-derived W fits every neighbour; a custom (wet-balance)
+    # band outside the envelope aborts loudly BEFORE any exchange (mpirun
+    # kills the world on the nonzero exit).  The 2-D pencil is refused:
+    # local_halo_pads would also localize its ZONAL exchanges, silently
+    # wrapping E/W inside the lon block.
     reach = _substep_stencil_reach(config)
     nl = int(eta.shape[0])
-    w_max = nl - 1
+    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
+    band_height_budget = nl
+    if get_halo_backend() == "mpi":
+        from legoesm.parallel.latlon_mpi import (
+            LatLon2DLayout,
+            LatLonBandLayout,
+        )
+        topology = get_mpi_topology()
+        if isinstance(topology, LatLon2DLayout):
+            raise ValueError(
+                "wide-halo barotropic: the 2-D lat-lon pencil layout is not "
+                "supported (forcing pads local would also localize the "
+                "ZONAL halo exchanges); use the 1-D band layout or disable "
+                "barotropic_wide_halo."
+            )
+        if isinstance(topology, LatLonBandLayout):
+            base = int(topology.n_lat_global) // int(topology.n_ranks)
+            if nl not in (base, base + 1):
+                raise ValueError(
+                    f"wide-halo barotropic: local band height {nl} is "
+                    f"outside the even-split envelope {{{base}, {base + 1}}} "
+                    f"(n_lat_global={topology.n_lat_global}, n_ranks="
+                    f"{topology.n_ranks}) — a custom/wet-balanced layout. "
+                    f"The wide-halo chunk budget must be rank-consistent, "
+                    f"which this path guarantees only for even-split bands; "
+                    f"disable barotropic_wide_halo on this layout."
+                )
+            band_height_budget = base
+    w_max = band_height_budget - 1
     chunk_cfg = int(config.barotropic.barotropic_wide_halo_chunk)
     if chunk_cfg > 0:
         chunk = min(chunk_cfg, int(n_loop))
@@ -805,10 +845,10 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
     if W > w_max:
         raise ValueError(
             f"wide-halo barotropic: halo width {W} (= chunk {chunk} x reach "
-            f"{reach}) exceeds the band-height budget {w_max} (= n_lat_local "
-            f"{nl} - 1, the one-neighbour exchange limit); lower "
-            f"barotropic_wide_halo_chunk (or use more substeps per exchange "
-            f"only on taller bands)."
+            f"{reach}) exceeds the band-height budget {w_max} (= min band "
+            f"height {band_height_budget} - 1, the one-neighbour exchange "
+            f"limit); lower barotropic_wide_halo_chunk (or use more "
+            f"substeps per exchange only on taller bands)."
         )
     n_chunks = -(-int(n_loop) // chunk)  # ceil
 

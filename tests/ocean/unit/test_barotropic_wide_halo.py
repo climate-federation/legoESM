@@ -255,6 +255,46 @@ def test_model_level_dispatch_and_validation(setup):
     with pytest.raises(ValueError, match="wide_halo_chunk"):
         LatLonCGridOceanModel(
             grid, z_coord, _cfg(barotropic_wide_halo_chunk=-1))
+    # The local-clamp scheme must be the EXPLICIT choice (the wide path's
+    # per-substep clamp is local by construction — codex finding 4).
+    with pytest.raises(ValueError, match="local_subcycle_clamp"):
+        LatLonCGridOceanModel(
+            grid, z_coord,
+            LatLonCGridOceanConfig.from_flat(
+                barotropic_wide_halo=True,
+                barotropic_local_subcycle_clamp=False))
+
+
+def test_2d_pencil_layout_refused(setup):
+    """local_halo_pads would also localize the 2-D pencil's ZONAL exchanges
+    (silent E/W wrap inside the lon block) — the wide path must refuse the
+    layout loudly (codex finding 2)."""
+    from legoesm.grids.halo import set_halo_backend
+    from legoesm.parallel.latlon_mpi import make_latlon_2d_layout
+
+    grid, z_coord, state = setup
+    layout = make_latlon_2d_layout(0, 2, 2, N_LAT, N_LON)
+    set_halo_backend("mpi", topology=layout)
+    try:
+        with pytest.raises(ValueError, match="2-D lat-lon pencil"):
+            barotropic_substeps_wide_halo_latlon_cgrid(
+                state, 30.0, 6, grid, z_coord, _cfg(barotropic_wide_halo=True))
+    finally:
+        set_halo_backend("local")
+
+
+def test_tripole_fold_refused_at_construction():
+    """Wide-halo + active fold must fail at MODEL CONSTRUCTION with the
+    config knob named — not mid-run inside the widen helper (codex 3)."""
+    from legoesm.grids.tripole import create_synthetic_tripole
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    tri = create_synthetic_tripole(n_lat=12, n_lon=16)
+    z_coord = create_ocean_z_star(n_levels=3, H_max=2000.0)
+    with pytest.raises(ValueError, match="tripolar"):
+        LatLonCGridOceanModel(tri, z_coord, _cfg(barotropic_wide_halo=True))
 
 
 def test_chunk_exceeding_band_height_raises(setup):

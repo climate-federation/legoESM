@@ -405,6 +405,8 @@ def test_barotropic_wide_halo_flags_round_trip():
         args, "latlon", grid, z, config, model)
     assert config2.barotropic.barotropic_wide_halo is True
     assert config2.barotropic.barotropic_wide_halo_chunk == 4
+    # The flag also sets the (validator-required) explicit local clamp.
+    assert config2.barotropic.barotropic_local_subcycle_clamp is True
     # No-flag path leaves the config object bit-identical.
     config3, _ = _apply_drag_iwm_overrides(off, "latlon", grid, z,
                                            config, model)

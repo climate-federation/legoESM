@@ -726,6 +726,20 @@ class LatLonCGridOceanModel:
         # paths consume the stored mask and need the pre-set).
         from legoesm.grids.halo_latlon import set_meridionally_flat
         set_meridionally_flat(bool(getattr(self.config, "meridionally_flat", False)))
+        # Wide-halo barotropic refuses tripolar folds — fail at construction
+        # with the config knob named, not at the first traced step deep in
+        # widen_cgrid_geometry_band (codex: CLI accepted a tripole + wide
+        # combination that only failed mid-run).
+        if self.config.barotropic.barotropic_wide_halo:
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                is_tripolar,
+            )
+            if is_tripolar(self.grid):
+                raise ValueError(
+                    "barotropic_wide_halo=True is not supported on tripolar "
+                    "grids (the fold row needs a permuted, sign-flipped wide "
+                    "exchange — follow-up); disable the wide-halo barotropic "
+                    "for eORCA/tripole runs.")
         # GEOMETRIC EKE closure (Torres et al. 2025) needs the regular-grid
         # B_T operator (flux_divergence_viscosity_cgrid raises on tripolar);
         # fail at construction, not at the first traced step.
@@ -1075,6 +1089,16 @@ class LatLonCGridOceanModel:
                 "barotropic_solver='explicit_substep' (the wide-halo path "
                 "replaces the substep loop's per-substep exchanges), got "
                 f"{config.barotropic.barotropic_solver!r}",
+            )
+        if (config.barotropic.barotropic_wide_halo
+                and not config.barotropic.barotropic_local_subcycle_clamp):
+            raise ValueError(
+                "barotropic_wide_halo=True requires "
+                "barotropic_local_subcycle_clamp=True: the wide path's "
+                "per-substep clamp is LOCAL by construction (a per-substep "
+                "global redistribute over the extended band would "
+                "double-count the halo overlap), so the local-clamp scheme "
+                "must be the EXPLICIT choice, never a silent flip.",
             )
         if config.barotropic.barotropic_diffusion_dt_ref <= 0.0:
             raise ValueError(
