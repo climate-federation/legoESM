@@ -56,8 +56,11 @@ def test_pals_local_device_ids(monkeypatch):
     # rank (codex: '0,1,2,3' must not bind every rank to GPU 0), clamped.
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
     assert ei._pals_local_device_ids() == [3]
+    # More local ranks than visible devices = LAUNCH error, loud — a clamp
+    # would silently oversubscribe the last GPU (codex).
     monkeypatch.setenv("PALS_LOCAL_RANKID", "7")
-    assert ei._pals_local_device_ids() == [3]  # clamped to visible-1
+    with pytest.raises(RuntimeError, match="more local ranks"):
+        ei._pals_local_device_ids()
 
 
 def _stub_jax(monkeypatch, process_count: int):

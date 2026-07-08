@@ -123,11 +123,14 @@ def _pals_local_device_ids() -> list[int]:
     local = os.environ.get("PALS_LOCAL_RANKID")
     if local is not None and local.isdigit():
         idx = int(local)
-        if n_visible > 1:
-            # Multi-device CVD list: index within the VISIBLE list, clamped
-            # (a rank count above the visible count is a launch error the
-            # backend will surface; do not bind everyone to 0 silently).
-            idx = min(idx, n_visible - 1)
+        if n_visible > 1 and idx >= n_visible:
+            # More local ranks than visible devices is a LAUNCH error —
+            # clamping would silently oversubscribe the last GPU (codex).
+            raise RuntimeError(
+                f"PALS_LOCAL_RANKID={idx} but CUDA_VISIBLE_DEVICES exposes "
+                f"only {n_visible} device(s): more local ranks than visible "
+                f"GPUs. Fix the mpiexec ppn / CUDA_VISIBLE_DEVICES shim "
+                f"(one rank per GPU).")
         return [idx]
     return [0]
 
