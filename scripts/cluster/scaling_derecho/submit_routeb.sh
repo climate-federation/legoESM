@@ -16,6 +16,7 @@
 #     scripts/cluster/scaling_derecho/submit_routeb.sh <outdir> [res1 res2 res3]
 #   GRIDS="icosahedral" ... submit_routeb.sh <outdir> 7 8   # one grid + custom res
 #   RUN_CPU=0 ... submit_routeb.sh <outdir>                 # GPU curves only
+#   RUN_GPU=0 ... submit_routeb.sh <outdir>                 # CPU curves only
 #   DRYRUN=1 ... submit_routeb.sh <outdir>                  # preview, no jobs
 # A shared RES_LIST is passed to the GPU sweep ONLY for a single-grid run (the
 # resolution axes differ per grid); multi-grid runs use each grid's own default.
@@ -56,7 +57,7 @@ GRIDS="${GRIDS:-latlon icosahedral cubed-sphere}"
 _n_grids="$(echo $GRIDS | wc -w | tr -d ' ')"
 [ "${DRYRUN:-0}" = "1" ] || mkdir -p "$OUT"
 
-if [ -z "${LEGOESM_NCCL_OFI_LIB:-}" ]; then
+if [ "${RUN_GPU:-1}" = "1" ] && [ -z "${LEGOESM_NCCL_OFI_LIB:-}" ]; then
     echo "WARNING: LEGOESM_NCCL_OFI_LIB unset -> the GPU lane falls back to TCP" >&2
     echo "         sockets (2-3x slower). Build it first:" >&2
     echo "         scripts/cluster/scaling_derecho/build_nccl_ofi.sh" >&2
@@ -80,20 +81,25 @@ _sub() {  # _sub <acct> <label> <pbs> <-v vars>
 echo "=== route-B throughput campaign: GPU grids=[${GRIDS}] -> ${OUT} ==="
 echo "    accounts: CPU=${ACCT_CPU}  GPU=${ACCT_GPU}"
 
-# --- GPU: one job per grid (each grid its own resolution axis + device ladder) --
-for g in $GRIDS; do
-    case "$g" in
-      latlon|icosahedral|cubed-sphere|cubed_sphere) ;;
-      *) echo "  !!! SKIP unknown GRID='$g' (latlon|icosahedral|cubed-sphere)" >&2; continue ;;
-    esac
-    vars="OUTDIR=${OUT}/routeb_gpu_${g},LEGOESM_NCCL_OFI_LIB=${LEGOESM_NCCL_OFI_LIB:-},GRID=${g}"
-    # Shared RES override is only meaningful for a single-grid run (the axes
-    # differ across grids); multi-grid uses each grid's per-grid default.
-    if [ "$_res_explicit" = 1 ] && [ "$_n_grids" -eq 1 ]; then
-        vars="RES_LIST=${RES_JOINED},${vars}"
-    fi
-    _sub "${ACCT_GPU}" "route-B GPU ${g}" "${SCRIPT_DIR}/routeb_gpu_sweep.pbs" "$vars"
-done
+# --- GPU: one job per grid (each grid its own resolution axis + device ladder).
+#     Skip the whole GPU side with RUN_GPU=0 (CPU-only campaign). --------------
+if [ "${RUN_GPU:-1}" = "1" ]; then
+    for g in $GRIDS; do
+        case "$g" in
+          latlon|icosahedral|cubed-sphere|cubed_sphere) ;;
+          *) echo "  !!! SKIP unknown GRID='$g' (latlon|icosahedral|cubed-sphere)" >&2; continue ;;
+        esac
+        vars="OUTDIR=${OUT}/routeb_gpu_${g},LEGOESM_NCCL_OFI_LIB=${LEGOESM_NCCL_OFI_LIB:-},GRID=${g}"
+        # Shared RES override is only meaningful for a single-grid run (the axes
+        # differ across grids); multi-grid uses each grid's per-grid default.
+        if [ "$_res_explicit" = 1 ] && [ "$_n_grids" -eq 1 ]; then
+            vars="RES_LIST=${RES_JOINED},${vars}"
+        fi
+        _sub "${ACCT_GPU}" "route-B GPU ${g}" "${SCRIPT_DIR}/routeb_gpu_sweep.pbs" "$vars"
+    done
+else
+    echo "    (GPU lanes skipped: RUN_GPU=0)"
+fi
 
 # --- CPU: one CPU-node job per grid (the CPU half of the CPU-vs-A100 comparison,
 #     1 proc/node gloo).  Skip the whole CPU side with RUN_CPU=0. --------------
