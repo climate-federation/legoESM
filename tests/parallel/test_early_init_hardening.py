@@ -52,6 +52,12 @@ def test_pals_local_device_ids(monkeypatch):
     # regardless of the local rank.
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
     assert ei._pals_local_device_ids() == [0]
+    # MULTI-device visible list is NOT a pin: index within it by local
+    # rank (codex: '0,1,2,3' must not bind every rank to GPU 0), clamped.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
+    assert ei._pals_local_device_ids() == [3]
+    monkeypatch.setenv("PALS_LOCAL_RANKID", "7")
+    assert ei._pals_local_device_ids() == [3]  # clamped to visible-1
 
 
 def _stub_jax(monkeypatch, process_count: int):

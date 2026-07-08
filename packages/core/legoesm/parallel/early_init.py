@@ -109,18 +109,26 @@ def check_no_silent_process_fallback() -> None:
 def _pals_local_device_ids() -> list[int]:
     """Per-process ``local_device_ids`` for a PALS launch.
 
-    When the job shim already pinned ``CUDA_VISIBLE_DEVICES`` to one device
+    When the job shim already pinned ``CUDA_VISIBLE_DEVICES`` to ONE device
     (the #693 convention), the process sees exactly one visible device →
-    ``[0]``.  When NOT pinned (bare ``mpiexec`` without a shim), every
-    process sees all node GPUs — index by ``PALS_LOCAL_RANKID`` so ranks
-    sharing a node bind DIFFERENT devices instead of all contending for
-    GPU 0 (the fake/contended-GPU row).  Falls back to ``[0]``.
+    ``[0]``.  Otherwise (unpinned, or a MULTI-device visible list) index by
+    ``PALS_LOCAL_RANKID`` within the visible list so ranks sharing a node
+    bind DIFFERENT devices instead of all contending for GPU 0 (the
+    fake/contended-GPU row).  Falls back to ``[0]``.
     """
-    if os.environ.get("CUDA_VISIBLE_DEVICES"):
-        return [0]
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    n_visible = len([x for x in cvd.split(",") if x.strip()]) if cvd else 0
+    if n_visible == 1:
+        return [0]  # shim-pinned: exactly one visible device
     local = os.environ.get("PALS_LOCAL_RANKID")
     if local is not None and local.isdigit():
-        return [int(local)]
+        idx = int(local)
+        if n_visible > 1:
+            # Multi-device CVD list: index within the VISIBLE list, clamped
+            # (a rank count above the visible count is a launch error the
+            # backend will surface; do not bind everyone to 0 silently).
+            idx = min(idx, n_visible - 1)
+        return [idx]
     return [0]
 
 
