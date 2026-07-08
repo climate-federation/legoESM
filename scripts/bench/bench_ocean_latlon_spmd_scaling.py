@@ -220,7 +220,11 @@ def main() -> int:
     # as bench_ocean_mpi_scaling._ensure_precision).
     from legoesm.core.precision import PrecisionPolicy, set_policy
 
-    if os.environ.get("JAX_ENABLE_X64", "0") not in ("0", "", "false"):
+    # Single source of truth = the LIVE jax x64 flag (an in-process caller
+    # may have enabled it without the env var; keying on the env would
+    # build fp32 states while every gate/metadata site keys on
+    # jax.config — the exact mislabel this block exists to kill; codex).
+    if jax.config.jax_enable_x64:
         set_policy(PrecisionPolicy.fp64())
     else:
         set_policy(PrecisionPolicy.fp32())
