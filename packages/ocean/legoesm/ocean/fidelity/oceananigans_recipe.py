@@ -152,6 +152,13 @@ def oceananigans_canonical_ocean_config(
     # hit the condition.  A caller override always wins (popped, so **bundle +
     # **overrides cannot collide on a duplicate kwarg).  Callers stepping with
     # the flag on must seed F_slow_{u,v}_prev -- model.seed_scan_carry does it.
+    # Merge **overrides keys that also live in the bundle INTO the bundle first
+    # (pop, so from_flat never sees a duplicate kwarg), making the condition
+    # below read the EFFECTIVE combo -- e.g. a caller overriding
+    # outer_integrator="forward_euler" via **overrides must not trip the AB2
+    # default decision (codex).
+    for _k in [k for k in list(overrides) if k in bundle]:
+        bundle[_k] = overrides.pop(_k)
     if "barotropic_slow_forcing_ab2" in overrides:
         bundle["barotropic_slow_forcing_ab2"] = overrides.pop(
             "barotropic_slow_forcing_ab2")

@@ -239,3 +239,9 @@ def test_canonical_factory_defaults_flag_for_fe_coriolis_combo():
     cfg_off = oceananigans_canonical_ocean_config(
         eos_linear=eos, barotropic_slow_forcing_ab2=False)
     assert not cfg_off.flat_get("barotropic_slow_forcing_ab2")
+    # an outer_integrator override via **overrides must be part of the
+    # EFFECTIVE combo (codex): forward_euler outer -> no AB2 default, and no
+    # duplicate-kwarg TypeError for a bundle key arriving via **overrides.
+    cfg_fe = oceananigans_canonical_ocean_config(
+        eos_linear=eos, outer_integrator="forward_euler")
+    assert not cfg_fe.flat_get("barotropic_slow_forcing_ab2")
