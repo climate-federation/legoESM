@@ -35,6 +35,8 @@ All functions are pure JAX, JIT-compatible, and differentiable.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 
@@ -227,35 +229,35 @@ def vcmax_temperature_response(Tf: jax.Array, TgC: jax.Array) -> jax.Array:
 # C3 photosynthesis (canonical FvCB; Bonan ch. 11 / CLM5 §2.9)
 # ---------------------------------------------------------------------------
 
-@jax.jit
-def c3_photosynthesis(
+class LeafAssimilation(NamedTuple):
+    """Gross assimilation + dark respiration components of one FvCB solve.
+
+    ``a_gross`` is the co-limited GROSS assimilation A (before dark respiration)
+    and ``rd`` the dark respiration [both umol m-2 s-1]; net An = a_gross - rd.
+    Exposed so the big-leaf ``land/stomata`` path can report GROSS primary
+    production (GPP = a_gross) and couple stomata on net, sharing the EXACT
+    canonical biochemistry with the two-leaf ``c3_photosynthesis`` (which just
+    returns ``max(a_gross - rd, 0)``).
+    """
+    a_gross: jax.Array
+    rd: jax.Array
+
+
+def c3_assimilation(
     Tf: jax.Array,
     Ci: jax.Array,
     APAR: jax.Array,
     Vcmax25: jax.Array,
-    Ps: jax.Array,
-    alf: jax.Array,
     TgC: jax.Array,
-) -> jax.Array:
-    """Net assimilation rate for canonical FvCB C3 photosynthesis.
+) -> LeafAssimilation:
+    """Canonical FvCB C3 gross assimilation + dark respiration (Bonan ch. 11).
 
-    Parameters
-    ----------
-    Tf      : leaf temperature [K]
-    Ci      : intercellular CO2 mole fraction [umol mol-1]
-    APAR    : absorbed PAR [umol m-2 s-1]
-    Vcmax25 : maximum carboxylation rate at 25 degC [umol m-2 s-1]
-    Ps      : surface pressure [Pa] — accepted for parity, unused (mole-fraction Ci)
-    alf     : legacy electron-transport quantum yield — accepted for parity, unused
-              (FvCB uses the PSII quantum yield _PHI_PSII)
-    TgC     : growth temperature [degC] for Kattge & Knorr acclimation
+    The shared biochemistry kernel behind both :func:`c3_photosynthesis` (net,
+    floored) and the big-leaf coupled A-gs solver.  Returns the GROSS co-limited
+    rate ``A`` and dark respiration ``Rd`` separately (see :class:`LeafAssimilation`).
 
-    Returns
-    -------
-    An : net assimilation rate [umol m-2 s-1], clamped to >= 0
+    Parameters as :func:`c3_photosynthesis` minus the parity-only ``Ps``/``alf``.
     """
-    del Ps, alf  # signature parity; FvCB uses _PHI_PSII and mole-fraction Ci
-
     # Acclimation only valid for TgC in [11, 35] degC; clip to the boundary
     # acclimation state outside (avoid unphysical Kattge & Knorr extrapolation).
     TgC_a = jnp.clip(TgC, _TGC_LO, _TGC_HI)
@@ -293,23 +295,20 @@ def c3_photosynthesis(
     # Co-limitation (Bonan eq. 11.33 / CLM5 eq. 2.9.8)
     Ai = _smaller_root_quadratic(_THETA_CJA_C3, Ac, Aj)
     A = _smaller_root_quadratic(_THETA_IP_C3, Ai, Ap)
+    return LeafAssimilation(a_gross=A, rd=Rd)
 
-    An = A - Rd
-    return jnp.where(An < 0.0, 0.0, An)
-
-
-# ---------------------------------------------------------------------------
-# C4 photosynthesis (Collatz 1992 / SiB2 / Bonan §11.7; CLM5-aligned)
-# ---------------------------------------------------------------------------
 
 @jax.jit
-def c4_photosynthesis(
+def c3_photosynthesis(
     Tf: jax.Array,
     Ci: jax.Array,
     APAR: jax.Array,
     Vcmax25: jax.Array,
+    Ps: jax.Array,
+    alf: jax.Array,
+    TgC: jax.Array,
 ) -> jax.Array:
-    """Net assimilation rate for canonical FvCB C4 photosynthesis.
+    """Net assimilation rate for canonical FvCB C3 photosynthesis.
 
     Parameters
     ----------
@@ -317,10 +316,35 @@ def c4_photosynthesis(
     Ci      : intercellular CO2 mole fraction [umol mol-1]
     APAR    : absorbed PAR [umol m-2 s-1]
     Vcmax25 : maximum carboxylation rate at 25 degC [umol m-2 s-1]
+    Ps      : surface pressure [Pa] — accepted for parity, unused (mole-fraction Ci)
+    alf     : legacy electron-transport quantum yield — accepted for parity, unused
+              (FvCB uses the PSII quantum yield _PHI_PSII)
+    TgC     : growth temperature [degC] for Kattge & Knorr acclimation
 
     Returns
     -------
     An : net assimilation rate [umol m-2 s-1], clamped to >= 0
+    """
+    del Ps, alf  # signature parity; FvCB uses _PHI_PSII and mole-fraction Ci
+    r = c3_assimilation(Tf, Ci, APAR, Vcmax25, TgC)
+    An = r.a_gross - r.rd
+    return jnp.where(An < 0.0, 0.0, An)
+
+
+# ---------------------------------------------------------------------------
+# C4 photosynthesis (Collatz 1992 / SiB2 / Bonan §11.7; CLM5-aligned)
+# ---------------------------------------------------------------------------
+
+def c4_assimilation(
+    Tf: jax.Array,
+    Ci: jax.Array,
+    APAR: jax.Array,
+    Vcmax25: jax.Array,
+) -> LeafAssimilation:
+    """Canonical Collatz (1992)/SiB2 C4 gross assimilation + dark respiration.
+
+    Shared kernel behind :func:`c4_photosynthesis` (net, floored) and the
+    big-leaf C3/C4-blended solver.  Returns GROSS ``A`` and ``Rd`` separately.
     """
     item = (Tf - _T_REF) / 10.0
     q10_pow = jnp.power(_Q10_C4, item)
@@ -345,8 +369,31 @@ def c4_photosynthesis(
 
     Ai = _smaller_root_quadratic(_THETA_CJA_C4, Ac, Aj)
     A = _smaller_root_quadratic(_THETA_IP_C4, Ai, Ap)
+    return LeafAssimilation(a_gross=A, rd=Rd)
 
-    An = A - Rd
+
+@jax.jit
+def c4_photosynthesis(
+    Tf: jax.Array,
+    Ci: jax.Array,
+    APAR: jax.Array,
+    Vcmax25: jax.Array,
+) -> jax.Array:
+    """Net assimilation rate for canonical FvCB C4 photosynthesis.
+
+    Parameters
+    ----------
+    Tf      : leaf temperature [K]
+    Ci      : intercellular CO2 mole fraction [umol mol-1]
+    APAR    : absorbed PAR [umol m-2 s-1]
+    Vcmax25 : maximum carboxylation rate at 25 degC [umol m-2 s-1]
+
+    Returns
+    -------
+    An : net assimilation rate [umol m-2 s-1], clamped to >= 0
+    """
+    r = c4_assimilation(Tf, Ci, APAR, Vcmax25)
+    An = r.a_gross - r.rd
     return jnp.where(An < 0.0, 0.0, An)
 
 

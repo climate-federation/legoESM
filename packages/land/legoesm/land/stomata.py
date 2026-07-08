@@ -7,7 +7,10 @@ SimpleSEB path).  Deliberately at the neutral ``land`` top level — NOT under
 one copy of the stomatal-conductance numerics.
 
 Models implemented:
-- Farquhar et al. (1980): C3 biochemical photosynthesis (big-leaf).
+- Canonical FvCB photosynthesis (``canopy.photosynthesis``): the big-leaf
+  coupled A-gs solver delegates to the SAME Farquhar-von-Caemmerer-Berry C3 +
+  Collatz C4 kernels the two-leaf canopy uses (shared ``c3_assimilation`` /
+  ``c4_assimilation``), so the two land stacks cannot drift.
 - Ball, Woodrow & Berry (1987): empirical stomatal conductance.
 - Medlyn et al. (2011): optimal stomatal conductance (USO).
 - Jarvis (1976): multiplicative stomatal conductance (CO2-independent).
@@ -16,16 +19,17 @@ The Ball-Berry / Medlyn kernels take the slope/intercept as explicit arguments
 (so the two-leaf canopy can pass per-leaf-class C3/C4 values); the big-leaf
 coupled solver unpacks its scalar ``StomataConfig`` at the call site.
 
-When the carbon cycle is active, the Farquhar model replaces the
-light-use-efficiency GPP and is coupled to Ball-Berry or Medlyn stomatal
-conductance.  When the carbon cycle is off, the Jarvis model provides
-stomatal control on evapotranspiration without requiring CO2 information.
+When the carbon cycle is active, canonical FvCB replaces the light-use-efficiency
+GPP and is coupled to Ball-Berry or Medlyn stomatal conductance; a ``fC4``
+fraction blends the Collatz C4 branch (``fC4=0`` = pure C3).  When the carbon
+cycle is off, the Jarvis model provides stomatal control on evapotranspiration
+without requiring CO2 information.
 
-Limitation: C3 biochemistry only (Farquhar 1980).  The C4 PFTs in the
-CLM5 table (``c4_grass``, ``crop_c4``) are approximated with C3 kinetics --
-no Collatz (1992) C4 biochemical path is implemented.  Consequently the
-distinctive C4 CO2 sensitivity and near-zero CO2 compensation point are
-not represented for those PFTs.
+Big-leaf acclimation note: the SimpleSEB path carries no prognostic growth-
+temperature state (unlike the two-leaf canopy's 30-day TgC EMA), so its Kattge &
+Knorr acclimation uses a fixed reference growth temperature
+(``_TGC_REF_BIGLEAF_C``).  Wiring a prognostic TgC EMA into SimpleSEB is a
+future enhancement.
 
 All functions are JAX-compatible (differentiable, JIT-friendly).
 
@@ -56,6 +60,11 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.land.canopy.photosynthesis import (
+    c3_assimilation,
+    c4_assimilation,
+    co2_compensation_point,
+)
 from legoesm.land.canopy.sif import SIFConfig
 from legoesm.land.leaf_biophysics import (
     DIFFUSIVITY_RATIO_H2O_CO2,
@@ -90,6 +99,15 @@ _VPD_FLOOR_KPA = 0.05
 _PAR_FRAC = 0.48   # Fraction of shortwave that is PAR
 _PAR_CONV = 4.6    # umol photons per J of PAR
 _MC = 12.0e-6      # g C per umol CO2
+
+# Reference growth temperature [degC] for the big-leaf FvCB Kattge & Knorr
+# acclimation.  The SimpleSEB big-leaf path carries no prognostic 30-day growth-
+# temperature state (unlike the two-leaf canopy's TgC EMA), so it acclimates to a
+# FIXED reference rather than a per-column running mean.  25 degC is the centre of
+# the K&K [11,35] calibration range — a neutral "no seasonal acclimation" choice,
+# not a tunable knob (a measurement/convention constant, per the fixed/tunable
+# split).  Wiring a prognostic TgC EMA into SimpleSEB is a future enhancement.
+_TGC_REF_BIGLEAF_C = 25.0
 
 # A-gs coupling fixed-point iteration COUNT. A loop count is never a config /
 # trainable leaf (loop-counts-never-trainable doctrine) — it stays a module
@@ -451,6 +469,36 @@ class CoupledLeafState(NamedTuple):
     gamma_star: jnp.ndarray  # CO2 compensation point Gamma* [umol/mol]
 
 
+def _bigleaf_assimilation(
+    Ci: jnp.ndarray,
+    APAR_umol: jnp.ndarray,
+    T_leaf: jnp.ndarray,
+    Vcmax25_eff: jnp.ndarray,
+    TgC_C: jnp.ndarray | float,
+    fC4: jnp.ndarray | float,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Big-leaf GROSS + net assimilation via the canonical FvCB kernels.
+
+    Single source of the photosynthesis biochemistry: delegates to the shared
+    :func:`~legoesm.land.canopy.photosynthesis.c3_assimilation` /
+    :func:`~legoesm.land.canopy.photosynthesis.c4_assimilation` kernels (the same
+    ones the two-leaf canopy uses), so the big-leaf and two-leaf paths cannot
+    drift.  ``Vcmax25_eff`` and ``APAR_umol`` are already canopy-scaled (per unit
+    ground area), so the C3/C4 rates are per ground area; the C4 fraction ``fC4``
+    blends the two continuously (differentiable, matching ``canopy.photosynthesis``).
+
+    Returns
+    -------
+    (A_net, A_gross) : net (gross - Rd) and floored gross assimilation
+        [umol CO2/m2/s].  GPP uses the gross rate; the stomata coupling uses net.
+    """
+    c3 = c3_assimilation(T_leaf, Ci, APAR_umol, Vcmax25_eff, TgC_C)
+    c4 = c4_assimilation(T_leaf, Ci, APAR_umol, Vcmax25_eff)
+    a_gross = (1.0 - fC4) * c3.a_gross + fC4 * c4.a_gross
+    rd = (1.0 - fC4) * c3.rd + fC4 * c4.rd
+    return a_gross - rd, jnp.maximum(a_gross, 0.0)
+
+
 def solve_coupled_farquhar_ci(
     T_leaf: jnp.ndarray,
     sw_down: jnp.ndarray,
@@ -460,14 +508,25 @@ def solve_coupled_farquhar_ci(
     LAI: jnp.ndarray,
     beta_soil: jnp.ndarray,
     config: StomataConfig,
+    fC4: jnp.ndarray | float = 0.0,
 ) -> CoupledLeafState:
-    """Solve the coupled Farquhar-stomata system; return the converged leaf state.
+    """Solve the coupled FvCB-stomata system; return the converged leaf state.
+
+    Big-leaf photosynthesis now routes through the CANONICAL FvCB biochemistry
+    (``canopy.photosynthesis.c3_assimilation`` / ``c4_assimilation``) rather than a
+    C3-only Farquhar kernel: it gains Jmax-bounded electron transport, Kattge &
+    Knorr (2007) acclimation (at the fixed reference growth temperature
+    ``_TGC_REF_BIGLEAF_C``; SimpleSEB has no prognostic TgC state), Tjoelker/Atkin
+    dark respiration, and — via ``fC4`` — a Collatz C4 branch (``fC4=0`` = pure C3).
+
+    Soil-water stress (``beta_soil``) and the big-leaf canopy integral
+    (``L_c``) are folded into an effective ``Vcmax25`` so they scale the Rubisco-,
+    light- and respiration-capacity terms coherently through the canonical
+    derivation (Jmax25 = ratio·Vcmax25, Rd0 = 0.015·Vcmax25).
 
     Shared core of :func:`coupled_farquhar_stomata` (which returns just
     ``(gs, gpp)``) and the SIF diagnostic (``canopy/sif.py``, which also needs
-    ``A_net``, ``Ci``, ``APAR`` and ``Gamma*``).  Numerics are identical to the
-    historical ``coupled_farquhar_stomata`` body — see that function for the
-    parameter documentation.
+    ``A_net``, ``Ci``, ``APAR`` and ``Gamma*``).
     """
     if config.stomata_model not in ("ball_berry", "medlyn"):
         raise ValueError(
@@ -484,10 +543,19 @@ def solve_coupled_farquhar_ci(
 
     # Big-leaf canopy scaling for the photosynthetic capacities:
     #   L_c = (1 - exp(-k·LAI)) / k = fAPAR / k   [m2 leaf / m2 ground].
-    # Converts leaf-level Vc_max/J_max/Rd to canopy-level per-ground-area
-    # rates so the Rubisco- and light-limited branches are both canopy-scale
-    # (see farquhar_photosynthesis docstring).  L_c -> LAI as LAI -> 0.
+    # Converts leaf-level Vcmax25 to a canopy-level per-ground-area capacity so
+    # the Rubisco- and light-limited branches are both canopy-scale (APAR_umol is
+    # already canopy-absorbed).  L_c -> LAI as LAI -> 0.
     canopy_scaling = fAPAR / jnp.maximum(config.k_ext, 1e-6)
+
+    # Effective Vcmax25 folds BOTH the canopy integral and the soil-water stress
+    # (CLM btran) into a single capacity passed to the canonical FvCB kernels.
+    # Because the kernels derive Jmax25 (= ratio·Vcmax25) and Rd0 (= 0.015·Vcmax25)
+    # from Vcmax25, scaling it here scales all three capacities coherently.  NOTE:
+    # unlike the retired C3-only kernel (which stressed Vcmax ONLY), beta now also
+    # down-regulates Jmax and Rd — the CLM5-consistent behaviour.
+    Vcmax25_eff = (config.Vc_max25 * canopy_scaling
+                   * jnp.clip(beta_soil, config.beta_soil_min, 1.0))
 
     # Atmospheric CO2
     Ca = jnp.broadcast_to(
@@ -506,8 +574,8 @@ def solve_coupled_farquhar_ci(
 
     # Fixed-point iteration (unrolled for JIT compatibility)
     for _ in range(config.n_iter_ags):
-        A_net, _ = farquhar_photosynthesis(
-            Ci, APAR_umol, T_leaf, config, beta_soil, canopy_scaling)
+        A_net, _ = _bigleaf_assimilation(
+            Ci, APAR_umol, T_leaf, Vcmax25_eff, _TGC_REF_BIGLEAF_C, fC4)
 
         if config.stomata_model == "medlyn":
             gs = medlyn_gs(A_net, VPD_kPa, Ca, config.g1_med, config.g0)
@@ -521,8 +589,8 @@ def solve_coupled_farquhar_ci(
         Ci = jnp.clip(Ci, 1.0, Ca)
 
     # Final evaluation
-    A_net, A_gross = farquhar_photosynthesis(
-        Ci, APAR_umol, T_leaf, config, beta_soil, canopy_scaling)
+    A_net, A_gross = _bigleaf_assimilation(
+        Ci, APAR_umol, T_leaf, Vcmax25_eff, _TGC_REF_BIGLEAF_C, fC4)
 
     if config.stomata_model == "medlyn":
         gs = medlyn_gs(A_net, VPD_kPa, Ca, config.g1_med, config.g0)
@@ -532,9 +600,10 @@ def solve_coupled_farquhar_ci(
     # GPP: A_gross [umol CO2/m2/s] -> gC/m2/s
     gpp = jnp.maximum(A_gross, 0.0) * _MC
 
-    # Gamma* for the SIF electron-transport inversion — same Arrhenius the
-    # Farquhar rates use (Bernacchi 2001), computed here so the two never drift.
-    gamma_star = arrhenius(config.Gamma_star25, config.Ha_Gamma, T_leaf)
+    # Gamma* for the SIF electron-transport inversion — the SAME canonical
+    # Bernacchi (2001) compensation point the FvCB Aj branch uses, so the SIF
+    # inversion and the photosynthesis kernel can never drift.
+    gamma_star = co2_compensation_point(T_leaf)
 
     return CoupledLeafState(
         gs=gs, gpp=gpp, A_net=A_net, Ci=Ci,
@@ -550,15 +619,15 @@ def coupled_farquhar_stomata(
     LAI: jnp.ndarray,
     beta_soil: jnp.ndarray,
     config: StomataConfig,
+    fC4: jnp.ndarray | float = 0.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Solve the coupled Farquhar-stomata system iteratively.
+    """Solve the coupled FvCB-stomata system iteratively.
 
-    Iteratively finds the intercellular CO2 (Ci) consistent with both
-    the Farquhar assimilation rate and the stomatal conductance model
-    (Ball-Berry or Medlyn).
-
-    Soil moisture stress is applied as a down-regulation of Vc_max
-    following CLM (Bonan et al. 2011).
+    Iteratively finds the intercellular CO2 (Ci) consistent with both the
+    canonical FvCB assimilation rate and the stomatal conductance model
+    (Ball-Berry or Medlyn).  Soil-water stress down-regulates the effective
+    Vcmax25 (and, through the canonical derivation, Jmax/Rd); see
+    :func:`solve_coupled_farquhar_ci`.
 
     Parameters
     ----------
@@ -570,6 +639,7 @@ def coupled_farquhar_stomata(
     LAI : Leaf area index [m2/m2].
     beta_soil : Soil moisture availability factor [0-1].
     config : StomataConfig.
+    fC4 : C4 area fraction [0-1] (0 = pure C3; blends the Collatz C4 branch).
 
     Returns
     -------
@@ -580,7 +650,7 @@ def coupled_farquhar_stomata(
     the ``A_net`` / ``Ci`` / ``APAR`` / ``Gamma*`` the SIF diagnostic needs).
     """
     st = solve_coupled_farquhar_ci(
-        T_leaf, sw_down, co2_ppmv, q_air, p_surface, LAI, beta_soil, config)
+        T_leaf, sw_down, co2_ppmv, q_air, p_surface, LAI, beta_soil, config, fC4)
     return st.gs, st.gpp
 
 
