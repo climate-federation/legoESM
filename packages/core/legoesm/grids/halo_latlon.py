@@ -755,6 +755,25 @@ def pad_with_pole_bc_lat_multi(
 
     from legoesm.grids.halo import get_halo_backend, get_mpi_topology
 
+    # SPMD leg of the message-aggregation lever (audit item 7): ONE
+    # ppermute pair per direction per dtype group instead of one per
+    # field.  OPT-IN (default off — flip per deck only with a measured
+    # GPU A/B receipt, per the audit item's contract).  Value-identical
+    # to the per-field pads (the exchange is a bit-copy).
+    _spmd_fused = os.environ.get(
+        "LEGOESM_LATLON_SPMD_FUSED_HALO", "0") != "0"
+    if _spmd_fused:
+        mesh = _spmd_lat_mesh()
+        if mesh is not None:
+            from legoesm.parallel.latlon_spmd import (
+                make_latlon_band_wall_multi_pad_body,
+            )
+            body = make_latlon_band_wall_multi_pad_body(
+                mesh, halo=halo,
+                south_values=south_values, north_values=north_values,
+                n_fields=n)
+            return body(*fields)
+
     fused = os.environ.get("LEGOESM_LATLON_FUSED_HALO", "1") != "0"
     if get_halo_backend() == "mpi" and fused:
         from legoesm.parallel.latlon_mpi import (
