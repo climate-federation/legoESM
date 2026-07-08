@@ -310,6 +310,26 @@ def _json_safe(obj):
         return float(obj)
     if isinstance(obj, np.ndarray):
         return [_json_safe(v) for v in obj.tolist()]
+    if hasattr(obj, "shape") and hasattr(obj, "dtype"):
+        # Non-NumPy array-like (a JAX ArrayImpl config leaf): summarise as
+        # shape/dtype/range + content digest instead of raising -- a raw device
+        # array crashed the whole provenance write (ocean runoff map).  NumPy
+        # ndarrays above keep their existing full-list encoding.  The ocean
+        # codec already summarises its own arrays; this covers other config
+        # kinds reaching _json_safe directly.
+        import hashlib as _hashlib
+        arr = np.asarray(obj)
+        if arr.ndim == 0:
+            return _json_safe(arr.item())
+        _c = np.ascontiguousarray(arr)
+        return {"__array_summary__": {
+            "shape": list(arr.shape), "dtype": str(arr.dtype),
+            "min": float(arr.min()) if arr.size else None,
+            "max": float(arr.max()) if arr.size else None,
+            "sha256": _hashlib.sha256(
+                str(arr.shape).encode() + str(arr.dtype).encode()
+                + _c.tobytes()).hexdigest(),
+        }}
     if obj is None or isinstance(obj, (str, bool, int, float)):
         return obj
     if isinstance(obj, Path):
@@ -479,29 +499,8 @@ def write_run_manifest(directory, config, *, exclusive: bool = False, **kwargs) 
     path = directory / RUN_MANIFEST_FILENAME
     # PID-unique temp so concurrent writers never clobber each other's scratch.
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-
-    def _array_summary_fallback(obj):
-        """Summarise array-like config leaves instead of crashing provenance.
-
-        Config pytrees may legitimately carry array fields (e.g. the ocean
-        ``runoff_depth_spread_map`` per-cell NEMO ln_rnf_depth_ini map); the
-        manifest is best-effort provenance, so record shape/dtype/range rather
-        than dumping megabytes or raising TypeError (which silently cost the
-        whole manifest)."""
-        if hasattr(obj, "shape") and hasattr(obj, "dtype"):
-            import numpy as _np
-            arr = _np.asarray(obj)
-            return {"__array_summary__": {
-                "shape": list(arr.shape), "dtype": str(arr.dtype),
-                "min": float(arr.min()) if arr.size else None,
-                "max": float(arr.max()) if arr.size else None,
-            }}
-        raise TypeError(
-            f"Object of type {type(obj).__name__} is not JSON serializable")
-
     with open(tmp, "w") as f:
-        json.dump(manifest, f, indent=2, sort_keys=True,
-                  default=_array_summary_fallback)
+        json.dump(manifest, f, indent=2, sort_keys=True)
     try:
         if exclusive:
             os.link(tmp, path)   # atomic; raises FileExistsError if path exists

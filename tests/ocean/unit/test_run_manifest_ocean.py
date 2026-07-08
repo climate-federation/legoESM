@@ -237,3 +237,39 @@ def test_manifest_write_survives_array_config_leaf(tmp_path):
     s = _find(data)
     assert s is not None and s["shape"] == [7]
     assert s["min"] == 1.0 and s["max"] == 150.0
+    # the manifest must validate on its own output (hash consistency under the
+    # summarised encoding), not just be JSON-writable (codex)
+    from legoesm.driver.restart import validate_run_manifest
+    validate_run_manifest(data)
+
+
+def test_numpy_scalar_config_leaf_encoding_unchanged():
+    """A NumPy SCALAR leaf (np.float64 A_h) must keep the plain scalar
+    encoding -- not become an __array_summary__ dict -- so configs without
+    arrays stay byte-identical and rebuild exactly (codex)."""
+    import numpy as np
+
+    cfg = _latlon_cfg()._replace(rho_0=np.float64(1026.5))
+    d = ocean_config_to_dict(cfg)
+    assert d["rho_0"] == 1026.5 and not isinstance(d["rho_0"], dict)
+    rebuilt = ocean_config_from_dict(d)
+    assert float(rebuilt.rho_0) == 1026.5
+    assert (compute_config_hash(cfg, "ocean")
+            == compute_config_hash(cfg._replace(rho_0=1026.5), "ocean"))
+
+
+def test_array_summary_hash_is_content_sensitive():
+    """Two maps with the SAME shape/dtype/min/max but different interior
+    values must hash differently (the map affects physics; shape+range alone
+    collided -- codex)."""
+    import numpy as np
+
+    a = np.array([1.0, 2.0, 150.0])
+    b = np.array([1.0, 3.0, 150.0])          # same shape/min/max, different content
+    ca = _latlon_cfg()._replace(runoff_depth_spread_map=a)
+    cb = _latlon_cfg()._replace(runoff_depth_spread_map=b)
+    assert compute_config_hash(ca, "ocean") != compute_config_hash(cb, "ocean")
+    # and identical content hashes identically
+    assert (compute_config_hash(ca, "ocean")
+            == compute_config_hash(_latlon_cfg()._replace(
+                runoff_depth_spread_map=a.copy()), "ocean"))
