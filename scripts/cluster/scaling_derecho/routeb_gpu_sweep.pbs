@@ -8,12 +8,15 @@
 #PBS -j oe
 #PBS -k eod
 # ===========================================================================
-# Route-B (NCCL multi-controller) GPU THROUGHPUT sweep -- latlon only.
+# Route-B (NCCL multi-controller) GPU THROUGHPUT sweep -- latlon | icosahedral.
 #   GPU ladder N = 1 2 4 8 16 A100 (1 process/GPU, --ppn 4; 16 = 4 nodes)
-#   x RES_LIST resolutions, strong scaling.
+#   x RES_LIST resolutions, strong scaling.  GRID selects the lane:
+#     GRID=latlon       lat-band SPMD (bench_atm_latlon_spmd_scaling)
+#     GRID=icosahedral  MPAS cell-partition SPMD (bench_mpas_spmd_scaling, #757)
 # The GPU half of the fair CPU-node-vs-A100 throughput comparison; pair with
-# routeb_cpu_sweep.pbs (same SPMD lat-band code path, 1..16 NODES).  Route B has
-# NO icosahedral path (latlon only); MPAS ico uses route A (submit_scaling.sh).
+# routeb_cpu_sweep.pbs (same SPMD code paths, 1..16 NODES).  cubed-sphere
+# route-B uses the --cs-spmd flat-JSON lane (submit_scaling.sh CUBE_ROUTEB);
+# spectral has no domain-decomposition path -- both rejected here.
 #
 # THROUGHPUT-only: the SPMD bench times kernels (no dt), so the metric is
 # Mcells/s (SYPD is undefined).  Records are JSONL and flow through the SAME
@@ -45,9 +48,15 @@ source "${SCRIPT_DIR}/_env.sh"          # provides nccl_env(), PY, REPO, SCRATCH
 cd "$REPO"
 
 MODE="${MODE:-strong}"
-RES_LIST="${RES_LIST:-128 256 512}"     # latlon n_lat resolutions (the 3 sizes)
+# GRID selects the SPMD lane.  Unknown grid -> hard error (dispatch hardening),
+# never a silent latlon fallback.  Per-grid RES/NLEV defaults + output subdir.
+GRID="${GRID:-latlon}"
+case "$GRID" in
+  latlon)      RES_LIST="${RES_LIST:-128 256 512}"; NLEV="${NLEV:-26}"; _sub="atm_latlon" ;;
+  icosahedral) RES_LIST="${RES_LIST:-6 7 8}";       NLEV="${NLEV:-8}";  _sub="mpas_atm"   ;;
+  *) echo "ERROR: routeb_gpu_sweep GRID='$GRID' unsupported (latlon|icosahedral; cubed-sphere=submit_scaling.sh CUBE_ROUTEB, spectral=no route-B)." >&2; exit 2 ;;
+esac
 RES_LIST="${RES_LIST//[:,]/ }"          # accept colon/comma-separated (survives qsub -v)
-NLEV="${NLEV:-26}"
 N_WARMUP="${N_WARMUP:-3}"
 N_TIMING="${N_TIMING:-30}"
 GPU_RANKS="${GPU_RANKS:-1 2 4 8 16}"; GPU_RANKS="${GPU_RANKS//,/ }"
@@ -64,12 +73,28 @@ fi
 TOTAL_GPUS="${LEGOESM_NGPUS:-$(( _n_nodes * _gpus_per_node ))}"
 [ "${TOTAL_GPUS:-0}" -ge 1 ] 2>/dev/null || TOTAL_GPUS=4
 
+# Icosahedral strong scaling: pin EVERY device count to ONE padded mesh so all
+# points are the SAME global problem size (a fair strong-scaling curve, not one
+# re-partitioned per N).  reorder_for = LCM of the runnable device counts, so it
+# is divisible by every N and the bench's `nCells_padded % N == 0` check passes
+# for all N against the shared mesh.  latlon needs none (n_lat is chosen
+# divisible per rung by the bench itself).
+_reorder_for=1
+if [ "$GRID" = icosahedral ]; then
+    _gcd() { local a="$1" b="$2" t; while [ "$b" -ne 0 ]; do t="$b"; b=$(( a % b )); a="$t"; done; echo "$a"; }
+    for N in ${GPU_RANKS//,/ }; do
+        [ "$N" -gt "$TOTAL_GPUS" ] 2>/dev/null && continue
+        g="$(_gcd "$_reorder_for" "$N")"; _reorder_for=$(( _reorder_for * N / g ))
+    done
+    echo "    icosahedral reorder_for (LCM of runnable device counts) = $_reorder_for"
+fi
+
 STAMP="$(date +%Y%m%d_%H%M%S)"
 OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/routeb_gpu_${STAMP}}"
 mkdir -p "$OUTDIR"
 [ -n "${PBS_O_WORKDIR:-}" ] && exec > >(tee -a "$OUTDIR/run.log") 2>&1
 
-echo "=== route-B GPU sweep (latlon): mode=$MODE res=[$RES_LIST] gpus=[$GPU_RANKS] (cap=$TOTAL_GPUS) nlev=$NLEV ==="
+echo "=== route-B GPU sweep ($GRID): mode=$MODE res=[$RES_LIST] gpus=[$GPU_RANKS] (cap=$TOTAL_GPUS) nlev=$NLEV ==="
 echo "    nodes=$_n_nodes  outdir=$OUTDIR"
 
 # rank -> local GPU pin (PALS exports PALS_LOCAL_RANKID; python auto-pin misses it).
@@ -88,19 +113,32 @@ for RES in $RES_LIST; do
     fi
     PPN=$(( N < _gpus_per_node ? N : _gpus_per_node ))
     export LEGOESM_COORDINATOR_PORT="$_port"; _port=$(( _port + 1 ))
-    echo "=== route-B GPU latlon res=$RES N=$N (ppn=$PPN, coord_port=$LEGOESM_COORDINATOR_PORT) ==="
+    echo "=== route-B GPU $GRID res=$RES N=$N (ppn=$PPN, coord_port=$LEGOESM_COORDINATOR_PORT) ==="
+    # Per-grid SPMD bench argv (mpiexec + PIN wrapper is shared).  latlon sweeps
+    # n_lat; icosahedral sweeps subdivision level with reorder_for pinned to the
+    # shared padded mesh.  The mpas bench is inherently strong (fixed mesh, vary
+    # devices) so it takes no --mode.
+    case "$GRID" in
+      latlon)
+        BENCH=( "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py
+                --multicontroller --n-devices "$N"
+                --mode "$MODE" --n-lat "$RES" --n-lon $(( 2 * RES )) --nlev "$NLEV"
+                --steps $(( N_WARMUP + N_TIMING )) --warmup "$N_WARMUP"
+                --out "$OUTDIR/${_sub}/spmd_R${RES}_N${N}.jsonl" ) ;;
+      icosahedral)
+        BENCH=( "$PY" scripts/bench/bench_mpas_spmd_scaling.py
+                --multicontroller --n-devices "$N" --reorder-for "$_reorder_for"
+                --subdivision "$RES" --nlev "$NLEV" --partition-method sfc
+                --steps $(( N_WARMUP + N_TIMING )) --warmup "$N_WARMUP"
+                --out "$OUTDIR/${_sub}/spmd_L${RES}_N${N}.jsonl" ) ;;
+    esac
     (
         nccl_env
-        mpiexec -n "$N" --ppn "$PPN" bash -c "$PIN" _ \
-            "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
-            --multicontroller --n-devices "$N" \
-            --mode "$MODE" --n-lat "$RES" --n-lon $((2 * RES)) --nlev "$NLEV" \
-            --steps $((N_WARMUP + N_TIMING)) --warmup "$N_WARMUP" \
-            --out "$OUTDIR/atm_latlon/spmd_R${RES}_N${N}.jsonl" < /dev/null
-    ) || { echo "route-B GPU res=$RES N=$N FAILED rc=$?"; rc_all=1; }
+        mpiexec -n "$N" --ppn "$PPN" bash -c "$PIN" _ "${BENCH[@]}" < /dev/null
+    ) || { echo "route-B GPU $GRID res=$RES N=$N FAILED rc=$?"; rc_all=1; }
   done
 done
 
-echo "=== DONE rc=$rc_all ===   route-B GPU curve JSONL under: $OUTDIR/atm_latlon/"
+echo "=== DONE rc=$rc_all ===   route-B GPU curve JSONL under: $OUTDIR/${_sub}/"
 echo "    aggregate + plot:  scripts/cluster/scaling_derecho/finalize_scaling.sh $OUTDIR"
 exit "$rc_all"
