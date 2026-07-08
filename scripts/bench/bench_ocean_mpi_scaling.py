@@ -2560,6 +2560,10 @@ def main() -> int:
 
     result = TimingResult(
         n_gpus=n_ranks,  # MPI rank count (CPU run) — keeps plotter schema
+        # grid_type default is the atm dataclass's 'cubed-sphere' — left
+        # defaulted it made write_json's _decomp() label ocean rows
+        # decomposition='mpi' instead of 'band' (codex).
+        grid_type="tripole" if args.tripole else "latlon",
         resolution=n_lat,
         n_levels=args.n_levels,
         precision=args.precision,
@@ -2615,6 +2619,7 @@ def main() -> int:
         if part_metrics is not None:
             _md_over["partition_metrics"] = part_metrics
         _md_over["grid"] = _grid_label
+        _md_over["decomposition"] = "band" if n_ranks > 1 else "none"
         write_json(
             report, out_dir / f"{stem}.json",
             n_ranks_true=n_ranks,
