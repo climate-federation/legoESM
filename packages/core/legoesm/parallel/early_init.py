@@ -391,12 +391,10 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
     if _INITIALIZED:
         return False
 
-    ntasks = int(
-        os.environ.get(
-            "SLURM_NTASKS",
-            os.environ.get("PMI_SIZE", os.environ.get("OMPI_COMM_WORLD_SIZE", "1")),
-        )
-    )
+    # Shared precedence (step > OMPI/PMI > allocation-wide NTASKS): an
+    # `srun -n1` inside a larger allocation must NOT enter the MPI path
+    # (codex).
+    ntasks = launcher_world_size()
     if ntasks <= 1:
         return False
 
