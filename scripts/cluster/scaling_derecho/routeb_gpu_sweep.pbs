@@ -44,6 +44,13 @@ else
 fi
 export JAX_PLATFORMS=cuda
 export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
+# Worktree-safe: pin REPO to the checkout this job was SUBMITTED from.  _env.sh
+# defaults LEGOESM_REPO to /glade/work/$USER/legoESM, the WRONG checkout when the
+# sweep is submitted from a git worktree -> `$PY scripts/bench/...` (resolved
+# relative to $REPO after `cd "$REPO"`) is then not found.  Derive it from this
+# script's own location (an explicit -v LEGOESM_REPO still wins).
+: "${LEGOESM_REPO:=$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
+export LEGOESM_REPO
 # shellcheck source=_env.sh
 source "${SCRIPT_DIR}/_env.sh"          # provides nccl_env(), PY, REPO, SCRATCH
 cd "$REPO"
