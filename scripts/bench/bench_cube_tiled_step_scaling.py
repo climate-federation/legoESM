@@ -244,6 +244,8 @@ def main() -> int:
         cells=total_cells,
         hlo_collective_permutes=n_ppermute,
     )
+    from legoesm.parallel.early_init import nccl_transport_report
+    _nccl_report = nccl_transport_report()
     rec["metadata"] = annotate_incomplete(scaling_metadata(
         grid="cubed-sphere",
         component="atmosphere",
@@ -257,6 +259,9 @@ def main() -> int:
         cells_per_rank=total_cells // max(int(jax.process_count()), 1),
         scaling_kind="strong",
         extra={
+            # Route-B transport facts (the PBS wrapper's contract): a
+            # multi-node row without an NCCL net plugin is falsifiable.
+            "nccl": (_nccl_report if args.multicontroller else None),
             "kt": args.kt,
             "steps": args.steps,
             "warmup": args.warmup,
