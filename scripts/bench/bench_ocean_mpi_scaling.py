@@ -374,6 +374,15 @@ def _build_global_problem(
         # per-substep-redistribute path.
         barotropic_local_subcycle_clamp=(
             _os.environ.get("LEGOESM_BARO_LOCAL_CLAMP", "0") == "1"),
+        # Wide-halo split-explicit barotropic lever (explicit_substep only):
+        # LEGOESM_BARO_WIDE_HALO=1 -> ONE fused wide lat-halo exchange per
+        # chunk of substeps instead of ~4 halo pads per substep (the >=16-rank
+        # latency lever; A/B against the same case with the env unset).
+        # LEGOESM_BARO_WIDE_HALO_CHUNK caps substeps/exchange (0 = auto).
+        barotropic_wide_halo=(
+            _os.environ.get("LEGOESM_BARO_WIDE_HALO", "0") == "1"),
+        barotropic_wide_halo_chunk=int(
+            _os.environ.get("LEGOESM_BARO_WIDE_HALO_CHUNK", "0")),
     )
     # chebyshev degree: the config has no degree field (the factory reads
     # getattr(config, "barotropic_chebyshev_degree", 4)); the bench uses the
@@ -2475,11 +2484,18 @@ def main() -> int:
         # default on every row (mislabel); n_ranks_true: jax cannot see the
         # mpirun world (process_count()==1 per rank), so the real rank count
         # must be recorded explicitly — it also resolves transport="mpi4jax".
+        # solver_variant records the wide-halo/local-clamp levers so an A/B
+        # pair can never be conflated with the baseline in aggregation.
+        _variant = args.baro_solver
+        if os.environ.get("LEGOESM_BARO_LOCAL_CLAMP", "0") == "1":
+            _variant += "+local_clamp"
+        if os.environ.get("LEGOESM_BARO_WIDE_HALO", "0") == "1":
+            _variant += "+wide_halo"
         write_json(
             report, out_dir / f"{stem}.json",
             n_ranks_true=n_ranks,
             component="ocean",
-            metadata_overrides={"solver_variant": args.baro_solver},
+            metadata_overrides={"solver_variant": _variant},
         )
 
     return 0

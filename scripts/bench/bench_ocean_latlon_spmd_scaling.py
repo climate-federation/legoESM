@@ -70,7 +70,8 @@ SPMD_PARITY_TOLS = {  # precision -> (rtol, atol)
 SPMD_PARITY_MAX_STEPS = 8
 
 
-def build_model_and_state(n_lat, n_lon, nlev, seed=0):
+def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
+                          wide_halo=False, wide_halo_chunk=0):
     """Ocean model + gently perturbed rest state (flat 4000 m bottom).
 
     The perturbation (small u/v/eta/T noise on the rest stratification)
@@ -89,8 +90,17 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0):
 
     grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
+    # Wide-halo lever (A/B): one fused wide lat-halo exchange per chunk of
+    # barotropic substeps instead of ~4 ppermute pads per substep.  The wide
+    # path's per-substep clamp is local by contract, so pin local clamping
+    # in BOTH arms for a controlled comparison.
+    flat = {}
+    if wide_halo:
+        flat = dict(barotropic_wide_halo=True,
+                    barotropic_wide_halo_chunk=int(wide_halo_chunk),
+                    barotropic_local_subcycle_clamp=True)
     model = LatLonCGridOceanModel(grid, z_coord,
-                                  LatLonCGridOceanConfig.from_flat())
+                                  LatLonCGridOceanConfig.from_flat(**flat))
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0)
@@ -149,6 +159,15 @@ def main() -> int:
         "--cons-rtol", type=float, default=None,
         help="Conservation tolerance (default: 1e-9 f64 / 1e-4 f32; the "
              "raw scheme drifts ~1e-8/step — calibrate to the window).")
+    p.add_argument("--wide-halo", action="store_true",
+                   help="Opt-in wide-halo split-explicit barotropic: one "
+                        "fused wide lat-halo exchange per chunk of substeps "
+                        "instead of ~4 ppermute pads per substep (implies "
+                        "local per-substep clamping in this arm; A/B against "
+                        "the default run).")
+    p.add_argument("--wide-halo-chunk", type=int, default=0,
+                   help="Substeps per wide exchange (0 = auto from the band "
+                        "height).")
     p.add_argument("--multicontroller", action="store_true",
                    help="Route-B multi-controller: jax.distributed.initialize "
                         "per process, ('lat',) mesh over the GLOBAL device set "
@@ -205,7 +224,9 @@ def main() -> int:
             f"with steps); --steps {args.steps} > {SPMD_PARITY_MAX_STEPS} "
             f"cap.")
 
-    model, s0 = build_model_and_state(n_lat, args.n_lon, args.nlev)
+    model, s0 = build_model_and_state(
+        n_lat, args.n_lon, args.nlev,
+        wide_halo=args.wide_halo, wide_halo_chunk=args.wide_halo_chunk)
     # Prime the build-once vertex-mask cache from the CONCRETE state so the
     # wrapper can build the per-band vertex masks host-side.
     model._ensure_vertex_mask(s0)
@@ -313,6 +334,11 @@ def main() -> int:
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=n_lat * args.n_lon * args.nlev,
     )
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        estimate_barotropic_halo_messages,
+    )
+    _halo_est = estimate_barotropic_halo_messages(
+        model.config, model.config.barotropic.n_barotropic_substeps)
     rec["metadata"] = annotate_incomplete(scaling_metadata(
         grid="latlon",
         component="ocean",
@@ -322,7 +348,10 @@ def main() -> int:
         n_gpus=(nd if jax.default_backend() in ("gpu", "cuda", "rocm")
                 else 0),
         decomposition="band" if nd > 1 else "none",
-        solver_variant=model.config.barotropic.barotropic_solver,
+        # +wide_halo marks the A/B arm so aggregation never conflates it
+        # with the per-substep-pad baseline.
+        solver_variant=(model.config.barotropic.barotropic_solver
+                        + ("+wide_halo" if args.wide_halo else "")),
         # cells_per_rank is per PROCESS (n_ranks semantics); the per-device
         # share lives in extra.cells_per_device — a single-process 4-device
         # SPMD run has 1 rank owning ALL cells (codex finding 3).
@@ -336,6 +365,10 @@ def main() -> int:
             "parity_gate": bool(args.parity_gate),
             "check_conservation": bool(args.check_conservation),
             "cells_per_device": (n_lat // nd) * args.n_lon * args.nlev,
+            # Analytic barotropic lat-halo message census (the wide-halo
+            # audit item's halo-count metric): standard per-substep pads
+            # vs the wide path's fused per-chunk exchanges.
+            "barotropic_halo_messages": _halo_est,
         },
     ))
     # Multi-controller: every process times the same program; process 0 owns
