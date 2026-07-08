@@ -147,7 +147,7 @@
 <p><strong>Sea-ice dynamics with EVP rheology</strong> (<code>ice/sea_ice.py</code>): Three dynamics modes — slab (thermodynamic-only, backward compatible), free-drift (diagnostic velocity + optional tracer advection), and EVP (Elastic-Viscous-Plastic, Hunke &amp; Dukowicz 1997) with subcycled momentum solver. Multi-category ice (CICE framework, Lipscomb 2001 linear remapping). State types: <code>SeaIceState</code> (slab) and <code>DynamicSeaIceState</code> (with u_ice, v_ice, sigma fields, per-category arrays). See §4.4.</p>
 </li>
 <li>
-<p><strong>Plant physiology / stomatal conductance</strong> (<code>land/carbon/stomata.py</code>): Farquhar (1980) C3 photosynthesis with Arrhenius/peaked-Arrhenius temperature responses (Bernacchi 2001), Ball-Berry (1987) and Medlyn (2011) stomatal conductance models. Jarvis (1976) multiplicative model as CO₂-independent fallback when carbon cycle is inactive. Coupled A-gs-Ci solver via 5-iteration fixed-point loop (unrolled for JIT). Soil moisture stress on Vc_max (CLM approach). Beer-law canopy fraction blending. See §4.3.</p>
+<p><strong>Plant physiology / stomatal conductance</strong> (<code>land/stomata.py</code>): Farquhar (1980) C3 photosynthesis with Arrhenius/peaked-Arrhenius temperature responses (Bernacchi 2001), Ball-Berry (1987) and Medlyn (2011) stomatal conductance models. Jarvis (1976) multiplicative model as CO₂-independent fallback when carbon cycle is inactive. Coupled A-gs-Ci solver via 5-iteration fixed-point loop (unrolled for JIT). Soil moisture stress on Vc_max (CLM approach). Beer-law canopy fraction blending. See §4.3.</p>
 </li>
 <li>
 <p><strong>CMOR/CF-compliant output pipeline</strong> (<code>io/cmor_output.py</code>): <code>CFWriter</code> class producing CF-1.8 / CMOR 3.x compliant NetCDF4 output with CMIP6 DRS naming convention. 27 CMOR variables across 2 tables (Amon: 21 vars, Lmon: 6 vars). Standard 19-level pressure grid (CMIP6_PLEV19). See §7.</p>
@@ -1985,7 +1985,7 @@ class MultiLayerLandState(NamedTuple):
 <li><strong>Seasonal</strong> (<code>carbon_cycle.py</code>): Sinusoidal NEE with latitude-dependent amplitude/phase (quick-look carbon diagnostics).</li>
 </ul>
 <p><code>step_land()</code> and <code>step_multilayer_land()</code> return 3-tuples: <code>(state, response, carbon_state)</code>.</p>
-<h4 id="437-plant-physiology-landcarbonstomatapy">4.3.7 Plant Physiology (<code>land/carbon/stomata.py</code>)</h4>
+<h4 id="437-plant-physiology-landcarbonstomatapy">4.3.7 Plant Physiology (<code>land/stomata.py</code>)</h4>
 <p>Stomatal conductance and photosynthesis module, activated when <code>StomataConfig.enabled = True</code>:</p>
 <p><strong>Farquhar (1980) C3 photosynthesis:</strong>
 - Rubisco-limited (Wc) and RuBP-regeneration-limited (Wj) rates with smooth minimum
