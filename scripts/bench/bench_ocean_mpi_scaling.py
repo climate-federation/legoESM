@@ -338,6 +338,7 @@ def _build_global_problem(
     *, force_pcg: bool = False, pcg_variant: str = "standard",
     preconditioner: str = "jacobi", fixed_iters: int = 60,
     cheby_degree: int = 4,
+    land_mask: str = "none", bathymetry_file: str = "",
 ):
     """Global grid + z-coordinate + config + perturbed global IC.
 
@@ -393,7 +394,24 @@ def _build_global_problem(
     # default degree-4 path (no shared-config change). cheby_degree kept in
     # the signature for callers that set the attr explicitly.
     _ = cheby_degree
-    state_global = rest_state_latlon_cgrid_ocean(grid, z_coord)
+    mask_override = None
+    if land_mask == "etopo":
+        # Realistic continents from the shipped ETOPO file: the wet-balance
+        # A/B needs a REAL land distribution (the default rest-state mask is
+        # polar caps only, whose row split is already near-balanced).  Flat
+        # bottom is kept on purpose — wet_band_boundaries keys off the MASK,
+        # so bathymetric depth would only confound the row-vs-wet timing.
+        from legoesm.ocean.bathymetry import (
+            BathymetryConfig,
+            load_bathymetry_latlon_cgrid,
+        )
+        _bcfg = BathymetryConfig(source="file", path=bathymetry_file)
+        _, mask_override = load_bathymetry_latlon_cgrid(grid, _bcfg)
+    elif land_mask != "none":
+        raise SystemExit(
+            f"--land-mask must be 'none' or 'etopo', got {land_mask!r}")
+    state_global = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, land_mask_override=mask_override)
     state_global = _perturb_state(state_global, grid)
     return grid, z_coord, config, state_global
 
@@ -411,13 +429,18 @@ def build_case(
     fixed_iters: int = 60,
     force_pcg: bool = False,
     wet_balance: bool = False,
+    land_mask: str = "none",
+    bathymetry_file: str = "",
 ):
-    """Build (model, state, total_cells, layout) for one benchmark case.
+    """Build (model, state, total_cells, layout, partition_metrics).
 
     Multi-rank: the model is built on the BAND geometry (never on the
     global grid — see module docstring) and the state is the scattered
     band state; ``layout`` is the armed ``LatLonBandLayout``.  Single
     rank: identical to the serial GPU-bench build, ``layout`` is None.
+    ``partition_metrics`` (multi-rank only, else None) records the wet-cell
+    load balance of the ACTUAL band split — for the row-balanced baseline
+    too, so a wet-vs-row A/B is comparable from the JSON records alone.
     """
     from legoesm.grids.latlon import ensure_geometry
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -436,11 +459,13 @@ def build_case(
         n_lat, n_lon, nlev, baro_solver, pcg_variant=pcg_variant,
         preconditioner=preconditioner, fixed_iters=fixed_iters,
         force_pcg=force_pcg,
+        land_mask=land_mask, bathymetry_file=bathymetry_file,
     )
 
     total_cells = n_lat * n_lon * nlev
 
     layout = None
+    part_metrics = None
     if n_ranks > 1:
         # (2) Arm the band layout + MPI halo backend.
         from legoesm.parallel.distributed import initialize_distributed_latlon
@@ -467,16 +492,39 @@ def build_case(
             global_n_lat=n_lat, global_n_lon=n_lon,
             band_boundaries=band_boundaries,
         )
-        if wet_balance and layout.rank == 0:
-            rows = np.diff(band_boundaries)
-            wet_per_band = [
-                float(np.asarray(state_global.land_mask.data)
-                      [band_boundaries[r]:band_boundaries[r + 1]].sum())
-                for r in range(n_ranks)
-            ]
-            print(f"[wet-balance] boundaries={list(band_boundaries)} "
-                  f"rows/band={rows.tolist()} wet-cells/band="
-                  f"{[int(x) for x in wet_per_band]}", flush=True)
+        # Partition-quality record for the ACTUAL split (wet OR the
+        # row-balanced default): wet cells + rows per band, and the
+        # wet-imbalance ratio max/mean — the number the wet-balance A/B is
+        # about.  Computed host-side from the global mask on every rank
+        # (deterministic), recorded on rank 0's JSON row.
+        import numpy as np
+
+        _bounds = (band_boundaries if band_boundaries is not None
+                   else _even_boundaries(n_lat, n_ranks))
+        _mask_np = np.asarray(state_global.land_mask.data)
+        _wet_per_band = np.array([
+            float(_mask_np[_bounds[r]:_bounds[r + 1]].sum())
+            for r in range(n_ranks)
+        ])
+        _rows = np.diff(_bounds)
+        part_metrics = {
+            "decomposition_boundaries": [int(b) for b in _bounds],
+            "rows_per_rank_min": int(_rows.min()),
+            "rows_per_rank_max": int(_rows.max()),
+            "wet_cells_per_rank_min": int(_wet_per_band.min()),
+            "wet_cells_per_rank_max": int(_wet_per_band.max()),
+            "wet_imbalance_max_over_mean": float(
+                _wet_per_band.max() / max(_wet_per_band.mean(), 1.0)),
+            "wet_fraction_global": float(_mask_np.mean()),
+            "wet_balanced": bool(wet_balance),
+        }
+        if layout.rank == 0:
+            print(f"[bands] {'wet' if wet_balance else 'row'}-balanced "
+                  f"boundaries={part_metrics['decomposition_boundaries']} "
+                  f"rows/band={_rows.tolist()} wet-cells/band="
+                  f"{[int(x) for x in _wet_per_band]} "
+                  f"imbalance={part_metrics['wet_imbalance_max_over_mean']:.3f}",
+                  flush=True)
         # (3) Band geometry + band vertical coordinate (z* carries no
         # per-cell arrays -> slice_zcoord_to_band is a pass-through, but
         # keeps this build correct if partial cells are enabled later).
@@ -490,7 +538,18 @@ def build_case(
         model = LatLonCGridOceanModel(grid, z_coord, config)
         state = state_global
 
-    return model, state, total_cells, layout
+    return model, state, total_cells, layout, part_metrics
+
+
+def _even_boundaries(n_lat: int, n_ranks: int) -> tuple[int, ...]:
+    """The default even row split's boundaries (first ``n_lat % n_ranks``
+    bands one row taller) — mirrors ``make_latlon_band_layout``'s split so
+    the row-balanced baseline's partition metrics describe the REAL bands."""
+    import numpy as np
+
+    base, rem = divmod(n_lat, n_ranks)
+    sizes = [base + 1 if r < rem else base for r in range(n_ranks)]
+    return tuple(int(x) for x in np.concatenate([[0], np.cumsum(sizes)]))
 
 
 # ===========================================================================
@@ -507,6 +566,8 @@ def compute_serial_reference(
     dt: float,
     n_steps: int,
     n_ranks: int = 1,
+    land_mask: str = "none",
+    bathymetry_file: str = "",
 ):
     """Serial reference fields after ``n_steps`` — every rank, BEFORE
     the MPI halo backend is armed.
@@ -536,6 +597,7 @@ def compute_serial_reference(
         # Only the MULTI-rank case dispatches to the PCG; an np=1 parity
         # run is stock-CG vs stock-CG and must stay solver-matched too.
         force_pcg=(baro_solver == "implicit_cn" and n_ranks > 1),
+        land_mask=land_mask, bathymetry_file=bathymetry_file,
     )
     model = LatLonCGridOceanModel(grid, z_coord, config)
     for _ in range(n_steps):
@@ -2068,13 +2130,25 @@ def build_parser() -> argparse.ArgumentParser:
              "(mpi4jax halos over the PCIe pair). Launch e.g. "
              "`mpirun -np 2 ... --device gpu` on a 2-GPU node.",
     )
+    p.add_argument("--land-mask", choices=["none", "etopo"],
+                   default="none",
+                   help="Land mask for the benchmark problem: none = the rest-state default (polar caps only), etopo = realistic continents from --bathymetry-file (flat bottom kept — the mask is what wet-balance keys off). Use with --wet-balance for the row-vs-wet A/B on a realistic land distribution.")
+    p.add_argument("--bathymetry-file", type=str,
+                   default="data/bathymetry/etopo_1deg.nc",
+                   help="NetCDF bathymetry for --land-mask etopo (shipped 1-degree ETOPO by default).")
     p.add_argument(
         "--wet-balance", action="store_true",
         help="Wet-cell-aware latitude bands: band boundaries equalize OCEAN "
              "cells per rank (wet_band_boundaries on the global land_mask) "
              "instead of row counts, so land-heavy bands stop idling. "
              "MPI-band path only (n_ranks > 1); every rank computes the "
-             "identical boundaries from the identical global mask.",
+             "identical boundaries from the identical global mask. "
+             "MEASURED (np=4 CPU, LL96 etopo, 2026-07-08): the DENSE step "
+             "computes land cells too, so cost scales with ROWS — wet "
+             "bands cut wet imbalance 1.23->1.01 but ran ~3% SLOWER "
+             "(13.7 vs 13.3 ms/step). This flag is groundwork for "
+             "active/wet-cell COMPACTION (audit item 4); do not flip it "
+             "on the dense step expecting a win.",
     )
     p.add_argument(
         "--baro-solver", choices=list(BARO_SOLVER_CHOICES),
@@ -2318,9 +2392,11 @@ def main() -> int:
             dt=args.dt,
             n_steps=n_advanced_steps,
             n_ranks=n_ranks,
+            land_mask=args.land_mask,
+            bathymetry_file=args.bathymetry_file,
         )
 
-    model, state, total_cells, layout = build_case(
+    model, state, total_cells, layout, part_metrics = build_case(
         n_lat=n_lat,
         n_lon=n_lon,
         nlev=args.n_levels,
@@ -2332,6 +2408,8 @@ def main() -> int:
         fixed_iters=int(args.pcg_fixed_iters),
         force_pcg=args.force_pcg,
         wet_balance=args.wet_balance,
+        land_mask=args.land_mask,
+        bathymetry_file=args.bathymetry_file,
     )
     cells_per_rank = total_cells // n_ranks
 
@@ -2495,11 +2573,14 @@ def main() -> int:
             _variant += "+local_clamp"
         if os.environ.get("LEGOESM_BARO_WIDE_HALO", "0") == "1":
             _variant += "+wide_halo"
+        _md_over = {"solver_variant": _variant}
+        if part_metrics is not None:
+            _md_over["partition_metrics"] = part_metrics
         write_json(
             report, out_dir / f"{stem}.json",
             n_ranks_true=n_ranks,
             component="ocean",
-            metadata_overrides={"solver_variant": _variant},
+            metadata_overrides=_md_over,
         )
 
     return 0
