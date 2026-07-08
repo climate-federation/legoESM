@@ -257,7 +257,10 @@ def test_multicontroller_coordinator_uses_launcher_env(monkeypatch):
     early_init.init_multicontroller_distributed("host:5000")
     assert fake.calls == [
         {"coordinator_address": "host:5000",
-         "num_processes": 4, "process_id": 2},
+         "num_processes": 4, "process_id": 2,
+         # Per-rank device binding applied on the explicit-coordinator
+         # path too (clean env -> default [0]).
+         "local_device_ids": [0]},
     ]
     assert early_init._INITIALIZED is True
 

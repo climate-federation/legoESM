@@ -303,7 +303,11 @@ def init_multicontroller_distributed(coordinator: str | None = None) -> None:
             "(OMPI_COMM_WORLD_SIZE/RANK or PMI_SIZE/PMI_RANK).")
     jax.distributed.initialize(
         coordinator_address=coordinator,
-        num_processes=n_procs, process_id=proc_id)
+        num_processes=n_procs, process_id=proc_id,
+        # Same per-rank device binding as the PALS bootstrap path: a bare
+        # multi-device CUDA_VISIBLE_DEVICES must not bind every local rank
+        # to GPU 0 (codex).
+        local_device_ids=_pals_local_device_ids())
     _INITIALIZED = True
     check_no_silent_process_fallback()
     # Route-B transport visibility: a multi-node GPU launch without an
