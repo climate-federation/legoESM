@@ -100,6 +100,20 @@ def _standalone_cloud_config(cfg, cloud_scheme: str):
         return None
     from legoesm.atmosphere.physics.clouds.config import build_cloud_config
 
+    # LOUD, not silent (repo doctrine): a user/YAML requesting
+    # convective_cloud=True on a standalone backend would otherwise get
+    # different physics with no trace (pre-merge codex review).  The lane
+    # still runs (the production YAML sets it true for the FV path); the
+    # forced drop is now visible in the log.
+    if bool(getattr(cfg, "convective_cloud", False)):
+        logger.warning(
+            "convective_cloud=True is FORCED OFF on the standalone "
+            "(MPAS/spectral) radiation path: it does not thread conv_precip, "
+            "and convective_cloud without it trips compute_cloud_properties' "
+            "misconfiguration guard. The FV (cubed-sphere/latlon) pipeline "
+            "honours the setting."
+        )
+
     return build_cloud_config(
         cloud_scheme,
         convective_cloud=False,

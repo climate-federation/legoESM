@@ -1725,22 +1725,18 @@ def _validate_sundqvist_flags(args, parser) -> None:
 
 
 def _validate_cloud_sensitivity_flags(args, parser) -> None:
-    """Refuse --cloud-p-xr / --cloud-alpha-xr on backends that rebuild CloudConfig
-    at run() and ignore the pipeline override (MPAS / spectral) — the same
-    silent-ignore failure mode guarded for the sundqvist micro override.  Bounds
-    are enforced by ExperimentConfig.validate_strict.
+    """--cloud-p-xr / --cloud-alpha-xr are valid on EVERY backend since #870
+    Phase 1: the FV pipeline threads them via ``build_cloud_config`` and the
+    standalone MPAS/spectral paths via ``model_driver._standalone_cloud_config``
+    (which reads the same experiment fields).  The pre-#870 hard rejection on
+    MPAS/spectral ("they rebuild CloudConfig at run() and would ignore them")
+    is retired — that rebuild now CARRIES the override, so rejecting the flags
+    there blocked a working feature with a false message (pre-merge codex
+    review).  Bounds are enforced by ``ExperimentConfig.validate_strict``.
+    The sundqvist micro overrides remain FV-only and keep their guard
+    (``_validate_sundqvist_flags``) — those are still not threaded standalone.
     """
-    if (getattr(args, "cloud_p_xr", None) is None
-            and getattr(args, "cloud_alpha_xr", None) is None):
-        return
-    disc = getattr(args, "discretization", "centered")
-    grid = getattr(args, "grid_type", "")
-    if disc in ("mpas", "spectral") or grid in (
-            "voronoi", "icosahedral", "mpas_voronoi", "mpas"):
-        parser.error(
-            "--cloud-p-xr / --cloud-alpha-xr apply only on the finite-volume "
-            "PhysicsPipeline (cubed_sphere / latlon); MPAS and spectral rebuild "
-            "CloudConfig at run() and would ignore them.")
+    return
 
 
 def _require_full_physics_for_amip(args, parser) -> None:
