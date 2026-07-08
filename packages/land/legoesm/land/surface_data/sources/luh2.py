@@ -133,6 +133,9 @@ def read_luh2_states(
                 raise ValueError(
                     f"no LUH2 years in requested window {years}; "
                     f"file covers {int(yr.min())}-{int(yr.max())}.")
+        # Emit years in increasing order — the runtime interp_annual (jnp.interp)
+        # assumes a monotonic year axis; a non-monotonic source would misblend.
+        sel = sel[np.argsort(yr[sel], kind="stable")]
 
         missing = [s for s in LUH2_STATE_NAMES if s not in ds]
         if missing:

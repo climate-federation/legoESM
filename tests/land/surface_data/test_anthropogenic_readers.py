@@ -135,3 +135,19 @@ def test_read_kk10_bad_crop_share_raises():
     ds = xr.Dataset({"land_use": _da(np.zeros((3, 2, 2)))})
     with pytest.raises(ValueError, match="crop_share"):
         read_kk10(dataset=ds, crop_share=1.5)
+
+
+def test_generic_reader_sorts_nonmonotonic_years():
+    # A file whose time axis is out of order must come back sorted ascending, so
+    # the runtime interp_annual (jnp.interp) blends the right slices.
+    times = np.array([2000.0, 1900.0, 1950.0])
+    vals = np.stack([np.full((2, 2), 0.3),   # tagged to year 2000
+                     np.full((2, 2), 0.1),   # 1900
+                     np.full((2, 2), 0.2)])   # 1950
+    da = xr.DataArray(vals, dims=("time", "lat", "lon"),
+                      coords={"time": times, "lat": _LAT, "lon": _LON})
+    ds = xr.Dataset({"cropland": da})
+    cfg = AnthropogenicSourceConfig(crop_vars=("cropland",))
+    out = read_anthropogenic_states(dataset=ds, config=cfg)
+    assert out["years"].tolist() == [1900, 1950, 2000]     # ascending
+    np.testing.assert_allclose(out["crop"][:, 0, 0], [0.1, 0.2, 0.3])   # slices follow

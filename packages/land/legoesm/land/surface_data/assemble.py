@@ -123,6 +123,7 @@ def _load_base_static(base_surfdata_nc: str) -> dict:
             a = _get(name)
             return a[0] if (a is not None and a.ndim == 3) else a
 
+        f_land_pct = _static2d("f_land")             # percent [0-100]; None if absent
         return {
             "tgt_lat": tgt_lat, "tgt_lon": tgt_lon, "base_pft": base_pft,
             "soil": {v: _get(v) for v in _SOIL_VARS},
@@ -131,6 +132,8 @@ def _load_base_static(base_surfdata_nc: str) -> dict:
             "soil_color": _get("soil_color"), "soil_dz": _get("soil_dz"),
             "cell_area": _get("cell_area"),
             "f_lake": _static2d("f_lake"), "f_glacier": _static2d("f_glacier"),
+            # Fraction [0-1] for use as the anthropogenic-overlay land budget.
+            "f_land_frac": None if f_land_pct is None else f_land_pct / _FRAC_TO_PCT,
         }
     finally:
         base.close()
@@ -239,7 +242,7 @@ def build_anthropogenic_transient_surfdata(
     from legoesm.land.surface_data.sources.kk10 import read_kk10
     from legoesm.land.surface_data.sources.pongratz import read_pongratz
 
-    if dataset in ("hyde", "hyde33"):
+    if dataset == "hyde":
         anthro = read_hyde(anthro_nc, years=years)
     elif dataset == "pongratz":
         anthro = read_pongratz(anthro_nc, years=years)
@@ -257,7 +260,13 @@ def build_anthropogenic_transient_surfdata(
     regridded = {
         k: _regrid_time_field(anthro[k], src_lat, src_lon, base["tgt_lat"], base["tgt_lon"])
         for k in ("crop", "pasture", "urban")}
-    pft_frac = build_anthropogenic_pft_frac(regridded, base["base_pft"])
+    # The anthropogenic overlay fills natural PFTs around the crop/pasture/urban
+    # cover WITHIN the base land fraction, so the ocean / lake / glacier mask is
+    # preserved and pft_frac sums to f_land (not 1).  Fall back to whole-cell land
+    # if the base file has no f_land.
+    land_frac = base["f_land_frac"]
+    land_budget = 1.0 if land_frac is None else land_frac
+    pft_frac = build_anthropogenic_pft_frac(regridded, base["base_pft"], land_frac=land_budget)
 
     return _write_transient(
         out_path, base, anthro["years"], pft_frac,

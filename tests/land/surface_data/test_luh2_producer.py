@@ -149,20 +149,25 @@ def test_build_anthropogenic_transient_surfdata_hyde(tmp_path):
         assert ds.sizes["year"] == 3 and ds.sizes["npft"] == N_PFT_CLM5
         assert ds["year"].values.tolist() == [1900, 1950, 2000]
         pft = ds["pft_frac"].values                    # percent
-        # Anthropogenic overlay conserves area: every cell/year sums to 100% land.
-        np.testing.assert_allclose(pft.sum(axis=1), 100.0, atol=1e-6)
-        # crop 20/100=0.2 -> crop_c3 (base C4-crop frac 0); PNV puts nothing on
-        # crop rows, so crop_c3 is exactly the crop fraction.
+        f_land = ds["f_land"].values                   # percent
+        # Area conservation WITHIN the base land fraction: base f_land is 50%, so
+        # every cell/year cover sums to 50% (the ocean/lake/glacier mask is
+        # preserved, not overwritten to 100%), and f_land == the PFT sum.
+        np.testing.assert_allclose(pft.sum(axis=1), 50.0, atol=1e-6)
+        np.testing.assert_allclose(f_land, 50.0, atol=1e-6)
+        # Grid-cell anthropogenic fractions are preserved through the overlay:
+        # crop 20 km²/100 = 0.2 -> crop_c3 (base C4-crop frac 0); PNV puts nothing
+        # on crop rows, so crop_c3 is exactly the crop fraction (20%).
         np.testing.assert_allclose(pft[:, _IDX["crop_c3"]], 20.0, atol=1e-6)
         np.testing.assert_allclose(pft[:, _IDX["crop_c4"]], 0.0, atol=1e-6)
-        # bare_soil: PNV shape has no bare weight, so bare == urban (built_up) only.
+        # bare_soil: PNV shape has no bare weight, so bare == urban (built_up 2%).
         np.testing.assert_allclose(pft[:, _IDX["bare_soil"]], 2.0, atol=1e-6)
         # Grass rows carry BOTH the pasture overlay AND the natural residual routed
-        # by the PNV shape (base grass is part of PNV): natural residual
-        # 1-0.2-0.15-0.02=0.63, PNV c3/c4-grass weight 10/50=0.2 -> 0.126, plus
-        # pasture 0.15 split 0.5 -> 0.075; total 0.201 each (base C4 ratio 0.5).
-        np.testing.assert_allclose(pft[:, _IDX["c3_grass"]], 20.1, atol=1e-6)
-        np.testing.assert_allclose(pft[:, _IDX["c4_grass"]], 20.1, atol=1e-6)
+        # by the PNV shape (base grass is part of PNV): natural budget
+        # 0.5-0.2-0.15-0.02=0.13, PNV c3/c4-grass weight 10/50=0.2 -> 0.026, plus
+        # pasture 0.15 split 0.5 -> 0.075; total 0.101 each (base C4 ratio 0.5).
+        np.testing.assert_allclose(pft[:, _IDX["c3_grass"]], 10.1, atol=1e-6)
+        np.testing.assert_allclose(pft[:, _IDX["c4_grass"]], 10.1, atol=1e-6)
     finally:
         ds.close()
 

@@ -92,3 +92,40 @@ def test_build_anthropogenic_missing_keys_default_zero():
     out = build_anthropogenic_pft_frac({"crop": _f(0.5, ny=1, nx=1)}, base)  # no pasture/urban
     np.testing.assert_allclose(out.sum(axis=1), 1.0, atol=1e-12)
     np.testing.assert_allclose(out[:, _IDX["crop_c3"]], 0.5)   # pasture/urban = 0
+
+
+def test_overlay_land_frac_budget_preserves_gridcell_fractions():
+    """With land_frac < 1, cover sums to land_frac and anthro fractions are kept."""
+    crop, pasture, urban = _f(0.2, ny=1, nx=1), _f(0.15, ny=1, nx=1), _f(0.02, ny=1, nx=1)
+    out = anthropogenic_to_pft_frac(
+        crop, pasture, urban, _forest_pnv(1, 1),
+        c4_grass_frac=np.array([[0.0]]), c4_crop_frac=np.array([[0.0]]),
+        land_frac=0.5)
+    np.testing.assert_allclose(out.sum(axis=1), 0.5, atol=1e-12)   # budget, not 1
+    np.testing.assert_allclose(out[:, _IDX["crop_c3"]], 0.2)        # grid-cell frac kept
+    np.testing.assert_allclose(out[:, _IDX["c3_grass"]], 0.15)      # pasture kept (c4=0)
+    np.testing.assert_allclose(out[:, _IDX["bare_soil"]], 0.02)     # urban kept
+    # natural budget 0.5-0.37=0.13 all on the forest PFT.
+    np.testing.assert_allclose(out[:, _IDX["broadleaf_evergreen_tropical"]], 0.13)
+
+
+def test_overlay_land_frac_zero_is_all_zero():
+    """A non-land cell (land_frac 0) yields an all-zero column, mask preserved."""
+    out = anthropogenic_to_pft_frac(
+        _f(0.3, ny=1, nx=1), _f(0.2, ny=1, nx=1), _f(0.0, ny=1, nx=1),
+        _forest_pnv(1, 1), np.array([[0.0]]), np.array([[0.0]]), land_frac=0.0)
+    np.testing.assert_allclose(out, 0.0, atol=1e-12)
+
+
+def test_overlay_sanitizes_nan_and_negative():
+    """NaN/negative source values -> 0 (never poison the sum or make PFT < 0)."""
+    crop = np.array([[[np.nan]]])         # missing (coastal regrid) -> 0
+    pasture = np.array([[[-0.1]]])        # invalid negative -> 0
+    urban = _f(0.1, ny=1, nx=1)
+    out = anthropogenic_to_pft_frac(
+        crop, pasture, urban, _forest_pnv(1, 1),
+        np.array([[0.0]]), np.array([[0.0]]))
+    assert np.all(np.isfinite(out))
+    assert np.all(out >= 0.0)
+    np.testing.assert_allclose(out.sum(axis=1), 1.0, atol=1e-12)
+    np.testing.assert_allclose(out[:, _IDX["bare_soil"]], 0.1)     # only urban survived

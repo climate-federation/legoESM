@@ -36,7 +36,9 @@ from pathlib import Path
 
 from legoesm.land.surface_data.assemble import build_anthropogenic_transient_surfdata
 
-_DATASETS = ("hyde", "hyde33", "pongratz", "kk10")
+# Reconstruction families (matches the runtime registry in
+# legoesm.land.surface_data.datasets); "hyde" covers HYDE 3.2 and 3.3 (same vars).
+_DATASETS = ("hyde", "pongratz", "kk10")
 
 
 def _existing(path: str) -> str:

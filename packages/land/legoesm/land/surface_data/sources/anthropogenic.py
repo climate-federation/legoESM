@@ -87,39 +87,53 @@ def anthropogenic_to_pft_frac(
     pnv_natural: np.ndarray,
     c4_grass_frac: np.ndarray,
     c4_crop_frac: np.ndarray,
+    land_frac: np.ndarray | float = 1.0,
 ) -> np.ndarray:
     """Overlay anthropogenic cover on a PNV backdrop -> ``(nyear, 17, lat, lon)``.
 
     Parameters
     ----------
-    crop, pasture, urban : ``(nyear, lat, lon)`` fractions of LAND [0, 1].
+    crop, pasture, urban : ``(nyear, lat, lon)`` fractions of the GRID CELL [0, 1]
+        (the same convention as ``land_frac``).  Non-finite or negative values are
+        treated as zero (missing / invalid source data).
     pnv_natural : ``(>=15, lat, lon)`` PNV natural-PFT shape.
     c4_grass_frac, c4_crop_frac : ``(lat, lon)`` in [0, 1].
+    land_frac : scalar or ``(lat, lon)`` grid-cell land fraction [0, 1] -- the
+        cover *budget*.  The natural PFTs fill ``land_frac - anthropogenic``; if the
+        anthropogenic total exceeds ``land_frac`` it is scaled down to fit (nothing
+        is created).  Default 1.0 = whole cell is land.
 
     Returns
     -------
-    ``(nyear, 17, lat, lon)`` PFT cover fraction of land, ``CLM5_PFT_NAMES`` order;
-    sums to 1 per cell and year (anthropogenic totals > 1 are scaled to 1 first).
+    ``(nyear, 17, lat, lon)`` PFT cover fraction of the GRID CELL, ``CLM5_PFT_NAMES``
+    order; sums to ``land_frac`` per cell and year (so ``f_land = sum_pft`` holds and
+    the ocean / lake / glacier mask carried by ``land_frac`` is preserved).
     """
     from legoesm.land.surface_params import N_PFT_CLM5
 
-    crop = np.asarray(crop, dtype=np.float64)
-    pasture = np.asarray(pasture, dtype=np.float64)
-    urban = np.asarray(urban, dtype=np.float64)
+    def _clean(a):
+        # Missing (NaN, from a coastal regrid) or negative source data -> 0 so it
+        # can never poison the conserved column or make a PFT fraction negative.
+        a = np.asarray(a, dtype=np.float64)
+        return np.clip(np.where(np.isfinite(a), a, 0.0), 0.0, None)
+
+    crop, pasture, urban = _clean(crop), _clean(pasture), _clean(urban)
     nyear, ny, nx = crop.shape
     shape = normalised_pnv_shape(pnv_natural)                # (15, lat, lon)
     c4g = np.asarray(c4_grass_frac, dtype=np.float64)
     c4c = np.asarray(c4_crop_frac, dtype=np.float64)
+    lf = np.broadcast_to(np.asarray(land_frac, dtype=np.float64), crop.shape)
 
-    # Clip the anthropogenic total to <= 1 (noisy sources can slightly exceed it),
-    # scaling the three fractions together so nothing is created; natural is the
-    # residual.  This keeps the per-cell 17-PFT total at exactly 1.
+    # Scale the anthropogenic total down to the land budget (noisy sources can
+    # exceed it), scaling the three fractions together so nothing is created;
+    # natural is the residual.  Per-cell 17-PFT total is then exactly land_frac.
     anthro = crop + pasture + urban
-    scale = np.where(anthro > 1.0, np.divide(1.0, np.where(anthro > 1.0, anthro, 1.0)), 1.0)
+    over = anthro > lf
+    scale = np.where(over, np.divide(lf, np.where(over, anthro, 1.0)), 1.0)
     crop = crop * scale
     pasture = pasture * scale
     urban = urban * scale
-    natural = 1.0 - (crop + pasture + urban)
+    natural = lf - (crop + pasture + urban)
 
     out = np.zeros((nyear, N_PFT_CLM5, ny, nx), dtype=np.float64)
     out[:, PFT_IDX_NATURAL, :, :] = natural[:, None, :, :] * shape[None, :, :, :]
@@ -131,14 +145,20 @@ def anthropogenic_to_pft_frac(
     return out
 
 
-def build_anthropogenic_pft_frac(anthro: dict, base_pft_frac: np.ndarray) -> np.ndarray:
+def build_anthropogenic_pft_frac(
+    anthro: dict,
+    base_pft_frac: np.ndarray,
+    land_frac: np.ndarray | float = 1.0,
+) -> np.ndarray:
     """Convenience: anthropogenic fractions + a base 17-PFT map -> ``pft_frac``.
 
     ``anthro`` carries ``crop`` / ``pasture`` / ``urban`` each ``(nyear, lat, lon)``
-    (missing keys default to zero).  Derives the PNV natural shape and the C4
-    grass/crop fractions from ``base_pft_frac`` (a single-slice ``(17, lat, lon)``
-    base map) and returns ``(nyear, 17, lat, lon)`` transient cover — the single
-    call a HYDE / Pongratz / KK10 producer makes.
+    grid-cell fractions (missing keys default to zero).  Derives the PNV natural
+    shape and the C4 grass/crop fractions from ``base_pft_frac`` (a single-slice
+    ``(17, lat, lon)`` base map) and returns ``(nyear, 17, lat, lon)`` transient
+    cover summing to ``land_frac`` per cell — the single call a HYDE / Pongratz /
+    KK10 producer makes.  ``land_frac`` (scalar or ``(lat, lon)``) is the grid-cell
+    land budget the natural PFTs fill around the anthropogenic cover.
     """
     base = np.asarray(base_pft_frac, dtype=np.float64)
     crop = anthro["crop"]
@@ -147,7 +167,8 @@ def build_anthropogenic_pft_frac(anthro: dict, base_pft_frac: np.ndarray) -> np.
     urban = anthro.get("urban", zero)
     return anthropogenic_to_pft_frac(
         crop, pasture, urban, base,
-        c4_grass_fraction_from_base(base), c4_crop_fraction_from_base(base))
+        c4_grass_fraction_from_base(base), c4_crop_fraction_from_base(base),
+        land_frac=land_frac)
 
 
 class AnthropogenicSourceConfig(NamedTuple):
@@ -211,6 +232,9 @@ def read_anthropogenic_states(
                 raise ValueError(
                     f"no years in requested window {years}; "
                     f"file covers {int(yr.min())}-{int(yr.max())}.")
+        # Emit years in increasing order — the runtime interp_annual (jnp.interp)
+        # assumes a monotonic year axis; a non-monotonic source would misblend.
+        sel = sel[np.argsort(yr[sel], kind="stable")]
 
         all_vars = config.crop_vars + config.pasture_vars + config.urban_vars
         missing = [v for v in all_vars if v not in ds]
