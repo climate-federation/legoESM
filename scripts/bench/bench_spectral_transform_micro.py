@@ -141,6 +141,11 @@ def main() -> int:
             row = {
                 "truncation": T,
                 "legendre_path": mode_name,
+                # Live backend ON THE ROW (not only in the shared metadata
+                # block): a CPU row must be self-labeling even when a
+                # consumer copies the rows table alone (codex).
+                "backend": str(jax.default_backend()),
+                "device": str(jax.devices()[0]),
                 "n_lat": n_lat, "n_lon": n_lon, "n_sh": n_sh,
                 "nlev": args.nlev,
                 "round_trip_median_ms": round(med_s * 1e3, 3),
