@@ -256,3 +256,78 @@ def test_setup_seeds_aridity_aware_soil_moisture(monkeypatch, tmp_path):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_land_ic_path_overrides_cold_start(monkeypatch, tmp_path):
+    """#746: a spun-up land restart (land_ic_path) REPLACES the cold-start
+    multilayer soil column at setup — the driver loads the equilibrated state
+    bit-for-bit and skips init_multilayer_land_state.  Regresses the day-0
+    cold-start shock behind the land cloud-albedo cold trap."""
+    from legoesm.land.restart import save_land_restart
+
+    _patch_land_loaders(monkeypatch)
+
+    # 1) Build a driver, grab its cold-start state, perturb it to a distinct
+    #    "spun-up" column (warmer deep soil, drier top), save as a restart.
+    #    (src/dst use SEPARATE output dirs — the run-manifest guard refuses to
+    #    mix two configs' provenance in one directory.)
+    src = ModelDriver(_small_cfg(), output_dir=tmp_path / "src")
+    src.setup()
+    ncol = src.grid.lat.size
+    n_layers = 6
+    seed = src._land_ml_state
+    spun = seed._replace(
+        T_soil=jnp.asarray(np.asarray(seed.T_soil) + 7.5),      # +7.5 K deep soil
+        theta_soil=jnp.asarray(np.asarray(seed.theta_soil) * 0.6),
+    )
+    ic = tmp_path / "land_ic.npz"
+    save_land_restart(ic, spun, land_mode="multilayer",
+                      t_end_s=20 * 365 * 86400.0,
+                      n_steps_completed=1, metadata={})
+
+    # 2) A fresh driver with land_ic_path set must load THAT column, not the
+    #    cold start.
+    cfg = _small_cfg()._replace(land_ic_path=str(ic))
+    dst = ModelDriver(cfg, output_dir=tmp_path / "dst")
+    dst.setup()
+
+    assert dst._land_ml_state.T_soil.shape == (ncol, n_layers)
+    # Bit-identical to the saved spun-up column (modulo the storage-dtype cast),
+    # and DISTINCT from the cold start (proves the override, not a coincidence).
+    np.testing.assert_allclose(
+        np.asarray(dst._land_ml_state.T_soil),
+        np.asarray(spun.T_soil), rtol=1e-6, atol=1e-4)
+    np.testing.assert_allclose(
+        np.asarray(dst._land_ml_state.theta_soil),
+        np.asarray(spun.theta_soil), rtol=1e-6, atol=1e-6)
+    assert float(np.max(np.abs(
+        np.asarray(dst._land_ml_state.T_soil) - np.asarray(seed.T_soil)))) > 5.0
+
+    # The skin carry T_land must ALSO seed from the spun-up TOP-SOIL (not the
+    # cold-start air temp), so the first step's land turbulent fluxes are
+    # consistent with the spun-up column (codex #746: else the day-0 shock
+    # leaks into the BL at the closure seam).
+    ctx = dst._prepare_run_context(0, cfg.start_day, restore_carry=False)
+    T_land = np.asarray(ctx["T_land"])
+    expected_skin = np.asarray(spun.T_soil[:, 0]).reshape(T_land.shape)
+    np.testing.assert_allclose(T_land, expected_skin, rtol=1e-6, atol=1e-4)
+
+
+def test_land_ic_path_wrong_grid_raises(monkeypatch, tmp_path):
+    """A restart whose n_layers/ncol don't match the run's grid must raise on
+    load, not silently reshape (load_land_restart validates shapes)."""
+    from legoesm.land.restart import save_land_restart
+
+    _patch_land_loaders(monkeypatch)
+    src = ModelDriver(_small_cfg(), output_dir=tmp_path / "src")
+    src.setup()
+    ic = tmp_path / "land_ic_6lay.npz"
+    save_land_restart(ic, src._land_ml_state, land_mode="multilayer",
+                      t_end_s=0.0, n_steps_completed=0, metadata={})
+
+    # Run config asks for 10 layers; the restart has 6 -> mismatch -> raise
+    # (separate output dir so this is the SHAPE guard, not the manifest guard).
+    cfg = _small_cfg()._replace(land_ic_path=str(ic), multilayer_n_layers=10)
+    dst = ModelDriver(cfg, output_dir=tmp_path / "dst")
+    with pytest.raises((ValueError, AssertionError)):
+        dst.setup()

@@ -640,6 +640,16 @@ class ExperimentConfig(NamedTuple):
     # stl1-4, swvl1-4, sd on a regular lat-lon grid.  Ignored when
     # use_multilayer_land is False.
     era5_land_ic_path: str = ""
+    # Spun-up land INITIAL CONDITION (#746 item 1): a MultiLayerLandState
+    # restart (.npz) written by ``scripts/run/run_land_spinup.py`` after an
+    # offline multi-year land spin-up.  When set (and use_multilayer_land is
+    # True) it REPLACES the cold-start ``init_multilayer_land_state`` +
+    # aridity-theta seed with the equilibrated soil column, so a coupled AMIP
+    # run starts from a settled deep-soil temperature/moisture instead of the
+    # day-0 cold-start shock that drives the land cloud-albedo cold trap.  The
+    # restart's ncol / n_layers must match the run's grid (validated on load).
+    # Takes precedence over era5_land_ic_path when both are set.
+    land_ic_path: str = ""
     # Pre-staged CLM surfdata NetCDF (PFT/texture/glacier maps) for the multilayer
     # land.  Empty => download from UCAR to /tmp (fails on compute nodes with no
     # outbound internet, so stage the file and set this).  Ignored unless

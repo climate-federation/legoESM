@@ -53,6 +53,22 @@ def test_clm_surfdata_path_flows_to_config():
     assert cfg.clm_surfdata_path == "/data/clm_surfdata.nc"
 
 
+def test_land_ic_path_flows_to_config():
+    """--land-ic round-trips into ExperimentConfig.land_ic_path (#746): a
+    spun-up MultiLayerLandState restart from run_land_spinup replaces the
+    cold-start soil column in a coupled multilayer AMIP run."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_ic_path == ""
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--land-ic", "/scratch/land_spinup/land_ic.npz",
+    ]), parser))
+    assert cfg.land_ic_path == "/scratch/land_spinup/land_ic.npz"
+
+
 def test_snow_albedo_feedback_flag_flows_to_config():
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(
@@ -1349,9 +1365,11 @@ def test_config_yaml_round_trips_authoritative_values():
     parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
     args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
     # grid geometry (resolution/nlev/discretization are CLI dests baked into
-    # cfg.grid, so assert them at the args level the YAML controls)
-    assert args.resolution == 48
-    assert args.nlev == 40
+    # cfg.grid, so assert them at the args level the YAML controls).  The
+    # production YAML is C12/L20 (drive-by fix: these asserts were stale at
+    # 48/40 from a pre-#746 C48->C12 downsizing of amip_production.yaml).
+    assert args.resolution == 12
+    assert args.nlev == 20
     assert args.discretization == "cdgrid"
     assert args.grid_type == "cubed_sphere"
     cfg = build_config_from_args(args)

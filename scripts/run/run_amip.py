@@ -702,6 +702,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "for --use-multilayer-land. Required on compute nodes "
                              "with no outbound internet (empty => download from UCAR "
                              "to /tmp, which fails there).")
+    parser.add_argument("--land-ic", type=str,
+                        default=_EXPERIMENT_DEFAULTS.land_ic_path,
+                        help="Spun-up land IC (#746): a MultiLayerLandState "
+                             "restart (.npz) from scripts/run/run_land_spinup.py. "
+                             "With --use-multilayer-land, REPLACES the cold-start "
+                             "soil column with the equilibrated one (avoids the "
+                             "day-0 cold-start shock behind the land cold trap). "
+                             "ncol/n_layers must match this run's grid.")
     parser.add_argument("--subgrid-orography-file", type=str, default="",
                         help="Subgrid orographic stddev NetCDF (ICON-extpar "
                              "SSO_STDH on a regular lat-lon grid). When set with "
@@ -1216,6 +1224,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_gs_max=args.land_gs_max,
         land_soil_moisture_init_frac=args.land_soil_moisture_init_frac,
         land_surface_scheme=args.land_surface_scheme,
+        land_ic_path=args.land_ic,
         sponge_enabled=args.sponge_enabled,
         sponge_coeff_per_day=(args.sponge_coeff_per_day
                               if args.sponge_coeff_per_day is not None
