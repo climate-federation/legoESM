@@ -276,6 +276,43 @@ _CLM5_PFT_TABLE_RAW: list[list[float]] = [
 
 N_PFT_CLM5: int = len(CLM5_PFT_NAMES)
 
+
+# ---------------------------------------------------------------------------
+# PFT growth-form / leaf-habit classifiers
+# ---------------------------------------------------------------------------
+# The CLM5_PFT_NAMES strings encode growth form and leaf habit as substrings
+# (``grass`` / ``crop`` mark herbaceous PFTs; ``*_evergreen_*`` vs ``*_deciduous_*``
+# mark the leaf habit), so a substring match cleanly classifies a PFT.  SINGLE
+# source of truth: shared by the archetype IC builder (``carbon.global_init``,
+# which groups archetypes by ``(is_woody, is_evergreen, soil_class)``) and its
+# per-pixel validator (``scripts/validate/land_carbon_equilibrium.py``) so the
+# two never drift apart (a drift would let the validator check different physics
+# than the IC ships).
+_HERBACEOUS_PFT_TAGS: tuple[str, ...] = ("grass", "crop")
+
+
+def is_woody(pft_name: str) -> bool:
+    """True for woody PFTs (trees/shrubs); False for grasses/crops (herbaceous).
+
+    Woodiness selects the ``CarbonConfig.woody`` branch (wood pool + wood
+    allocation) for a PFT's carbon archetype.
+    """
+    return not any(tag in pft_name for tag in _HERBACEOUS_PFT_TAGS)
+
+
+def is_evergreen(pft_name: str) -> bool:
+    """True for evergreen PFTs (continuous leaf turnover); False otherwise
+    (deciduous / grass / crop).
+
+    The leaf habit is encoded in the CLM5 PFT name (``needleleaf_evergreen_boreal``
+    / ``broadleaf_evergreen_tropical`` vs the ``*_deciduous_*`` / grass / crop
+    names), so a substring match on ``evergreen`` separates the continuous-turnover
+    branch of ``carbon.carbon_cycle.compute_phenology`` from the deciduous
+    DALEC990 Gaussian pulse.
+    """
+    return "evergreen" in pft_name
+
+
 # Lazy-converted to jnp array on first use to avoid import-time JAX init
 _clm5_table_cache: jnp.ndarray | None = None
 

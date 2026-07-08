@@ -77,27 +77,12 @@ _C_WOOD_SEED = 3000.0              # woody groups only
 _C_LIT_SEED = 500.0
 _C_SOM_SEED = 5000.0
 
-# Woody-PFT classifier: trees and shrubs are woody; grasses and crops are
-# herbaceous (mirrors ``_is_woody`` in the land_carbon_equilibrium harness).
-_HERBACEOUS_TAGS = ("grass", "crop")
-
-
-def _is_woody(pft_name: str) -> bool:
-    """True for woody PFTs (trees/shrubs); False for grasses/crops."""
-    return not any(tag in pft_name for tag in _HERBACEOUS_TAGS)
-
-
-def _is_evergreen(pft_name: str) -> bool:
-    """True for evergreen PFTs (continuous leaf turnover); False otherwise.
-
-    The CLM5_PFT_NAMES strings encode the leaf habit
-    (``needleleaf_evergreen_boreal`` / ``broadleaf_evergreen_tropical`` vs the
-    ``*_deciduous_*`` / grass / crop names), so a substring match cleanly
-    separates evergreen from deciduous/herbaceous PFTs (mirrors ``_is_woody``).
-    Selects the continuous-turnover branch of
-    ``carbon.carbon_cycle.compute_phenology`` for that archetype's config.
-    """
-    return "evergreen" in pft_name
+# PFT growth-form / leaf-habit classifiers (``is_woody`` / ``is_evergreen``) live
+# in ``legoesm.land.surface_params`` next to ``CLM5_PFT_NAMES`` as the SINGLE
+# source of truth shared with the per-pixel validator
+# (``scripts/validate/land_carbon_equilibrium.py``); they are imported at
+# function scope in ``iter_archetype_batches`` to keep this module's import
+# numpy-only (surface_params pulls in JAX).
 
 
 class ArchetypeTable(NamedTuple):
@@ -340,6 +325,7 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt):
     from legoesm.land.soil_texture import SOIL_TEXTURE_VG
     from legoesm.land.surface_params import (
         CLM5_PFT_NAMES, PARAM_NAMES, array_to_params, clm5_pft_table,
+        is_evergreen, is_woody,
     )
     from legoesm.land.carbon.config import CarbonConfig
     from legoesm.land.carbon.stomata import StomataConfig
@@ -387,7 +373,7 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt):
     groups: dict = {}
     for a in range(n_arch):
         pft_name = CLM5_PFT_NAMES[pft_id[a]]
-        key = (_is_woody(pft_name), _is_evergreen(pft_name), str(soil_class[a]))
+        key = (is_woody(pft_name), is_evergreen(pft_name), str(soil_class[a]))
         groups.setdefault(key, []).append(a)
 
     batches: list[ArchetypeBatch] = []

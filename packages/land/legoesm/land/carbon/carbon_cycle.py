@@ -262,25 +262,42 @@ def _freeze_modifier(
     T: jnp.ndarray,
     config: CarbonConfig,
 ) -> jnp.ndarray:
-    """Freeze suppression of soil decomposition, ``f_freeze`` in (0, 1].
+    """Freeze suppression of soil decomposition, ``f_freeze`` in
+    ``[som_freeze_floor, 1]``.
 
     Reuses the smooth sigmoid freezing characteristic of
     ``soil_thermal.liquid_water_content`` (the unfrozen-liquid-water fraction
-    that microbial decomposition tracks) — NOT a re-derived curve::
+    that microbial decomposition tracks) — NOT a re-derived curve — then FLOORS
+    it so a frozen soil still decomposes a small nonzero fraction of its
+    unfrozen rate::
 
-        f_freeze(T) = sigmoid((T - T_freeze) / som_freeze_width_K)
+        f_freeze(T) = som_freeze_floor
+                      + (1 - som_freeze_floor)
+                        * sigmoid((T - T_freeze) / som_freeze_width_K)
 
-    -> 1 for warm soil (T >> T_freeze, no suppression), -> 0 for frozen soil
-    (T << T_freeze, decomposition shut off), monotonically INCREASING in T and
-    bounded in (0, 1].  Frozen soils therefore retain their organic carbon (the
-    high-latitude / grassland SOC fix).  ``som_freeze_width_K`` is a fixed
-    NUMERICS half-width [K]; validated > 0 (a static Python float, so a bare
-    Python branch is safe — feature-gating exception).
+    -> 1 for warm soil (T >> T_freeze, no suppression), -> ``som_freeze_floor``
+    for frozen soil (T << T_freeze, decomposition floored, NOT shut off),
+    monotonically INCREASING in T and bounded in ``[som_freeze_floor, 1]``.
+    Frozen soils therefore turn SOM over slowly and RETAIN carbon (the
+    high-latitude / grassland SOC fix), but the nonzero floor keeps the
+    millennial slow/passive-pool equilibrium ``I / (m * k)`` FINITE — without it
+    ``f_freeze -> 0`` (``m -> 0``) drove a runaway cold-soil SOC accumulation
+    (CLM4.5 / CENTURY cold-soil decomposition floor).  ``som_freeze_width_K`` is
+    a fixed NUMERICS half-width [K]; ``som_freeze_floor`` is a tunable closure
+    fraction in ``[0, 1)``.  Both validated on the STATIC Python config values
+    (a bare Python branch is safe — feature-gating exception).
     """
     w = config.som_freeze_width_K
     if not w > 0.0:
         raise ValueError(f"som_freeze_width_K must be > 0, got {w!r}.")
-    return jax.nn.sigmoid((T - constants.T_freeze) / w)
+    floor = config.som_freeze_floor
+    if not 0.0 <= floor < 1.0:
+        raise ValueError(
+            f"som_freeze_floor must be in [0, 1), got {floor!r}.")
+    # Floored sigmoid: f_freeze = floor + (1 - floor) * sigmoid(...), ranging
+    # [floor, 1].  floor in [0, 1) keeps (1 - floor) > 0 so the curve stays
+    # monotonically increasing and bounded, and floor <= f_freeze <= 1.
+    return floor + (1.0 - floor) * jax.nn.sigmoid((T - constants.T_freeze) / w)
 
 
 def _som_decomp_modifier(
@@ -302,8 +319,8 @@ def _som_decomp_modifier(
     the reference-condition base rate ``tor_som_X`` (at ``T_ref``/
     ``precip_ref``) -- this is the intended Q10/moisture control that
     produces the observed warm-fast / cold-slow SOC gradient (see
-    ``TestColdWarmSocRealism``).  Only ``f_freeze in (0, 1]`` is a bounded
-    SUPPRESSION term; ``f_temp`` (Q10 exponential, unbounded above) and
+    ``TestColdWarmSocRealism``).  Only ``f_freeze in [som_freeze_floor, 1]`` is a
+    bounded SUPPRESSION term; ``f_temp`` (Q10 exponential, unbounded above) and
     ``f_moist`` (clipped to ``[moist_modifier_min, moist_modifier_max]``,
     default max 3.0) are both free to exceed 1, so ``m`` has no upper bound.
 

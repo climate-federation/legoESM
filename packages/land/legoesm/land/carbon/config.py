@@ -52,11 +52,12 @@ __param_spec__ = {
             "r_maint_wood": {"units": "1", "bounds": (1.65e-05, 0.00015), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "tor_litter": {"units": "1", "bounds": (0.00066, 0.006), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "tor_root": {"units": "1", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
-            "tor_som_active": {"units": "1/day", "bounds": (3e-04, 3e-03), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CENTURY/CLM4.5 active-SOM MRT ~1-5 yr (Parton et al. 1987; Koven et al. 2013)", "shape": None, "legacy_name": "tor_som"},
+            "tor_som_active": {"units": "1/day", "bounds": (3e-04, 3e-03), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CENTURY/CLM4.5 active-SOM MRT ~1-5 yr (Parton et al. 1987; Koven et al. 2013)", "shape": None},
             "tor_som_slow": {"units": "1/day", "bounds": (4e-05, 2e-04), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CENTURY/CLM4.5 slow-SOM MRT ~20-50 yr (Parton et al. 1987; Koven et al. 2013)", "shape": None},
             "tor_som_passive": {"units": "1/day", "bounds": (1.5e-06, 1e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CENTURY/CLM4.5 passive-SOM MRT ~500-1000 yr (Parton et al. 1987; Koven et al. 2013)", "shape": None},
             "f_active_to_slow": {"units": "1", "bounds": (0.1, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CENTURY inter-pool humification fraction ~0.1-0.5 (Parton et al. 1987)", "shape": None},
             "f_slow_to_passive": {"units": "1", "bounds": (0.1, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CENTURY inter-pool humification fraction ~0.1-0.5 (Parton et al. 1987)", "shape": None},
+            "som_freeze_floor": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CLM4.5/CENTURY nonzero cold-soil decomposition floor (microbial activity in unfrozen liquid films + cryoturbation; Koven et al. 2013, Parton et al. 1987)", "shape": None},
             "tor_wood": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
         },
     },
@@ -109,10 +110,16 @@ class CarbonConfig(NamedTuple):
     #   active  : MRT ~3 yr   (1-5 yr)     -- fast, unprotected topsoil carbon
     #   slow    : MRT ~25 yr  (20-50 yr)   -- physically protected carbon
     #   passive : MRT ~600 yr (500-1000 yr)-- mineral-stabilised carbon
-    # Replaces the former single bulk ``tor_som`` (legacy_name preserved in the
-    # param spec): a single ~68-yr pool with no freeze control could not hold the
-    # deep, freeze-protected high-latitude / grassland SOC that observations show
-    # (docs/land/multipool_som_phenology_plan.md).
+    # Replaces the former single bulk ``tor_som``: a single ~68-yr pool with no
+    # freeze control could not hold the deep, freeze-protected high-latitude /
+    # grassland SOC that observations show (docs/land/multipool_som_phenology_
+    # plan.md).  NOTE: no ``legacy_name: "tor_som"`` alias is carried on
+    # ``tor_som_active`` in the param spec -- the mapping is NOT a faithful
+    # rename.  The old ``tor_som`` was the BULK pool (~4e-5/day, ~68-yr MRT);
+    # ``tor_som_active`` is the FAST active pool (~9e-4/day, ~3-yr MRT, ~22x
+    # faster).  ``legacy_name`` is a FUNCTIONAL alias (``param_collector`` remaps
+    # it), so aliasing them would let an externally-saved tuned JSON with the old
+    # bulk ``tor_som`` silently set the active pool ~22x too slow.
     tor_som_active: float = 9e-4
     tor_som_slow: float = 1.1e-4
     tor_som_passive: float = 4.5e-6
@@ -122,11 +129,25 @@ class CarbonConfig(NamedTuple):
     f_active_to_slow: float = 0.30
     f_slow_to_passive: float = 0.30
     # Half-width [K] of the smooth SOM freeze-suppression curve
-    # f_freeze = sigmoid((T - T_freeze) / som_freeze_width_K): warm soil -> 1
-    # (no suppression), frozen soil -> 0 (decomposition shut off, carbon
-    # retained).  A fixed NUMERICS smoothing width (never trained), mirroring
+    # f_freeze = som_freeze_floor + (1 - som_freeze_floor)
+    #           * sigmoid((T - T_freeze) / som_freeze_width_K): warm soil -> 1
+    # (no suppression), frozen soil -> som_freeze_floor (a FLOOR of the unfrozen
+    # rate, NOT 0), so cold soils turn SOM over slowly and RETAIN carbon.  A
+    # fixed NUMERICS smoothing width (never trained), mirroring
     # soil_thermal.freeze_curve_width_K.
     som_freeze_width_K: float = 2.0
+    # Cold-soil decomposition FLOOR [dimensionless fraction in [0, 1)]: the
+    # smallest fraction of the unfrozen decomposition rate a frozen soil retains,
+    # so ``f_freeze`` ranges ``[som_freeze_floor, 1]`` instead of ``(0, 1]``.
+    # Frozen soils still decompose SOME organic matter -- microbial activity in
+    # unfrozen liquid films plus cryoturbation -- so decomposition never collapses
+    # to 0 (CLM4.5 / CENTURY cold-soil floor; Koven et al. 2013, Parton et al.
+    # 1987).  Without it ``f_freeze -> 0`` drives the millennial slow/passive SOM
+    # pools' equilibrium (``I / (m * k)``) to a runaway in the coldest archetypes
+    # (a real ERA5 build overshot to ~175 kgC/m2); the floor CAPS that while
+    # KEEPING the cold-retains-more-SOC direction.  A tunable closure knob (tier
+    # 2), not a numerics-only constant.
+    som_freeze_floor: float = 0.05
     decomp_rate: float = 5e-4     # Litter -> SOM transfer [day^-1]
     # Coarse-woody-debris humification efficiency: the fraction of wood
     # turnover that becomes stable SOM.  The remainder respires to the

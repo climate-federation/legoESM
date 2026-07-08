@@ -152,12 +152,14 @@ def test_absent_pft_contributes_zero_and_pools_nonneg():
 # with continuous phenology.
 # ---------------------------------------------------------------------------
 def test_is_evergreen_classifies_leaf_habit():
-    from legoesm.land.carbon.global_init import _is_evergreen
-    assert _is_evergreen("broadleaf_evergreen_tropical") is True
-    assert _is_evergreen("needleleaf_evergreen_boreal") is True
-    assert _is_evergreen("broadleaf_deciduous_temperate") is False
-    assert _is_evergreen("needleleaf_deciduous_boreal") is False
-    assert _is_evergreen("c3_grass") is False
+    # The classifier is the shared surface_params helper the archetype grouping
+    # imports (single source of truth with the per-pixel validator).
+    from legoesm.land.surface_params import is_evergreen
+    assert is_evergreen("broadleaf_evergreen_tropical") is True
+    assert is_evergreen("needleleaf_evergreen_boreal") is True
+    assert is_evergreen("broadleaf_deciduous_temperate") is False
+    assert is_evergreen("needleleaf_deciduous_boreal") is False
+    assert is_evergreen("c3_grass") is False
 
 
 def test_iter_archetype_batches_splits_evergreen_from_deciduous():

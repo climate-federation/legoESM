@@ -14,6 +14,7 @@ Covers:
 
 from __future__ import annotations
 
+import math
 import unittest
 
 import jax
@@ -318,16 +319,44 @@ class TestDecomposition(unittest.TestCase):
 class TestFreezeModifier(unittest.TestCase):
 
     def test_freeze_bounds_and_limits(self):
-        """f_freeze in (0, 1]; ->1 warm, ->0 deep-frozen, ==0.5 at T_freeze."""
+        """f_freeze in [som_freeze_floor, 1]; ->1 warm, -> floor deep-frozen,
+        == floor + (1-floor)/2 at T_freeze (the floored-sigmoid midpoint)."""
         cfg = _default_config()
+        floor = cfg.som_freeze_floor
+        self.assertGreater(floor, 0.0)  # default floor is nonzero (the fix)
         T = jnp.linspace(240.0, 320.0, 60)
         ff = _freeze_modifier(T, cfg)
-        self.assertTrue(jnp.all(ff > 0.0))
+        self.assertTrue(jnp.all(ff >= floor - 1e-9))
         self.assertTrue(jnp.all(ff <= 1.0))
         self.assertGreater(float(_freeze_modifier(jnp.array([300.0]), cfg)[0]), 0.99)
-        self.assertLess(float(_freeze_modifier(jnp.array([255.0]), cfg)[0]), 0.01)
+        # Deep-frozen soil floors at ``som_freeze_floor`` (nonzero), NOT 0.
         npt.assert_allclose(
-            _freeze_modifier(jnp.array([constants.T_freeze]), cfg), 0.5, atol=1e-6)
+            _freeze_modifier(jnp.array([245.0]), cfg), floor, atol=1e-3)
+        npt.assert_allclose(
+            _freeze_modifier(jnp.array([constants.T_freeze]), cfg),
+            floor + (1.0 - floor) * 0.5, atol=1e-6)
+
+    def test_freeze_floor_recovers_unfloored_sigmoid(self):
+        """som_freeze_floor=0 reduces to the plain sigmoid (backward-compatible),
+        and floor <= floored <= 1 while floored >= the un-floored value."""
+        T = jnp.linspace(250.0, 300.0, 40)
+        ff0 = _freeze_modifier(T, _default_config(som_freeze_floor=0.0))
+        ff = _freeze_modifier(T, _default_config(som_freeze_floor=0.05))
+        npt.assert_allclose(ff0, jax.nn.sigmoid(
+            (T - constants.T_freeze) / _default_config().som_freeze_width_K),
+            atol=1e-12)
+        # The floor raises decomposition everywhere (f_freeze larger => faster
+        # turnover => less runaway) but never above 1.
+        self.assertTrue(jnp.all(ff >= ff0 - 1e-12))
+        self.assertTrue(jnp.all(ff <= 1.0 + 1e-12))
+
+    def test_freeze_floor_out_of_range_required(self):
+        with self.assertRaises(ValueError):
+            _freeze_modifier(jnp.array([275.0]),
+                             _default_config(som_freeze_floor=1.0))
+        with self.assertRaises(ValueError):
+            _freeze_modifier(jnp.array([275.0]),
+                             _default_config(som_freeze_floor=-0.1))
 
     def test_freeze_monotonic_increasing(self):
         cfg = _default_config()
@@ -523,7 +552,8 @@ class TestSomTransferFractionValidation(unittest.TestCase):
 class TestColdWarmSocRealism(unittest.TestCase):
     """A COLD soil equilibrates to MORE total SOC than a WARM soil with the SAME
     litter input (freeze + temperature suppression -> carbon retained), and more
-    than the former single bulk pool held for a cold case."""
+    than the former single bulk pool held for a cold case.  The ``som_freeze_floor``
+    keeps the cold accumulation FINITE (no runaway) while preserving cold>warm."""
 
     @staticmethod
     def _cascade_soc_eq(cfg, T, precip, som_input_per_day):
@@ -559,6 +589,46 @@ class TestColdWarmSocRealism(unittest.TestCase):
             jnp.array([T]), jnp.array([precip]), cfg)[0])
         soc_old_single = i / (m_old * 4e-5)   # legacy tor_som default
         self.assertGreater(soc_multi, soc_old_single)
+
+    def test_extreme_cold_soc_high_but_bounded_by_floor(self):
+        """The ``som_freeze_floor`` caps runaway cold-soil SOC while KEEPING the
+        cold-retains-more direction.
+
+        Two facts, both from the model's OWN cascade equilibrium:
+
+        (1) A genuinely cold column (-5 C) equilibrates to a HIGH but BOUNDED
+            total SOC -- far above the warm case, yet below a sane physical cap
+            (not the runaway the un-floored curve produced in a real ERA5 build,
+            global max ~175 kgC/m2).
+        (2) As the soil goes DEEP-frozen the un-floored modifier -> 0 so the
+            millennial slow/passive equilibrium ``I/(m*k)`` runs away without
+            bound; the floor keeps decomposition >= ``som_freeze_floor`` of the
+            unfrozen rate, so the SAME column stays finite and dramatically
+            smaller -- the floor MEANINGFULLY reduces the deep-cold equilibrium.
+        """
+        precip, i = _default_config().precip_ref, 0.2
+        cfg = _default_config(scheme="differland")                 # floor 0.05
+        cfg_nofloor = _default_config(scheme="differland", som_freeze_floor=0.0)
+
+        # (1) extreme (but not permafrost) cold: high, bounded, well above warm.
+        soc_cold = self._cascade_soc_eq(cfg, 268.0, precip, i)     # -5 C
+        soc_warm = self._cascade_soc_eq(cfg, 298.0, precip, i)     # +25 C
+        self.assertTrue(math.isfinite(soc_cold))
+        self.assertGreater(soc_cold, soc_warm)          # cold retains more
+        self.assertGreater(soc_cold / soc_warm, 10.0)   # well above warm
+        # Bounded: below a sane physical cap (200 kgC/m2); the un-floored value
+        # at this same column is NOT below the cap -> the floor is what bounds it.
+        self.assertLess(soc_cold, 200_000.0)            # gC/m2 == 200 kgC/m2
+        self.assertGreater(
+            self._cascade_soc_eq(cfg_nofloor, 268.0, precip, i), soc_cold)
+
+        # (2) DEEP freeze: floor turns an unbounded runaway into a finite value.
+        soc_deep_floor = self._cascade_soc_eq(cfg, 255.0, precip, i)
+        soc_deep_nofloor = self._cascade_soc_eq(cfg_nofloor, 255.0, precip, i)
+        self.assertTrue(math.isfinite(soc_deep_floor))
+        self.assertGreater(soc_deep_floor, soc_warm)
+        # Meaningful reduction vs no floor (actual ~440x at -18 C).
+        self.assertGreater(soc_deep_nofloor / soc_deep_floor, 50.0)
 
 
 # ===================================================================

@@ -91,7 +91,7 @@ class TestPixelCatalog(unittest.TestCase):
             self.assertEqual(cfg.thermal.enable_freeze_thaw, ft)
             self.assertGreater(cfg.stomata.Vc_max25, 0.0)
             # Woody stands seed a biome-appropriate wood pool; herbaceous none.
-            if lce._is_woody(pft):
+            if lce.is_woody(pft):
                 self.assertGreater(cfg.carbon.C_wood_init, 0.0)
             else:
                 self.assertEqual(cfg.carbon.C_wood_init, 0.0)
