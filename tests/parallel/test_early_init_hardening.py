@@ -86,27 +86,27 @@ def test_fallback_guard_override_env(monkeypatch):
     ei.check_no_silent_process_fallback()  # override honored
 
 
-def test_nccl_report_socket_fallback_flag(tmp_path, monkeypatch):
+def test_nccl_report_missing_plugin_flag(tmp_path, monkeypatch):
     # Single node: never flagged, plugin or not.
     r = ei.nccl_transport_report()
-    assert r["likely_socket_fallback"] is False
+    assert r["missing_net_plugin_multi_node"] is False
     # Multi-node without a plugin: flagged.
     monkeypatch.setenv("SLURM_NNODES", "2")
     r = ei.nccl_transport_report()
-    assert r["likely_socket_fallback"] is True
+    assert r["missing_net_plugin_multi_node"] is True
     assert r["n_nodes_declared"] == 2
     # Plugin on LD_LIBRARY_PATH clears the flag.
     lib = tmp_path / "libnccl-net-ofi.so"
     lib.write_bytes(b"")
     monkeypatch.setenv("LD_LIBRARY_PATH", str(tmp_path))
     r = ei.nccl_transport_report()
-    assert r["likely_socket_fallback"] is False
+    assert r["missing_net_plugin_multi_node"] is False
     assert r["nccl_net_plugin"] == str(lib)
     # Explicit NCCL_NET_PLUGIN also clears it.
     monkeypatch.delenv("LD_LIBRARY_PATH")
     monkeypatch.setenv("NCCL_NET_PLUGIN", "/opt/nccl/libnccl-net.so")
     r = ei.nccl_transport_report()
-    assert r["likely_socket_fallback"] is False
+    assert r["missing_net_plugin_multi_node"] is False
 
 
 def test_nccl_report_records_knobs(monkeypatch):

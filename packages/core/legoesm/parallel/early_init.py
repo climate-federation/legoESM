@@ -131,10 +131,12 @@ def nccl_transport_report() -> dict:
     NCCL has no Python-queryable transport API; what IS knowable up front:
     the fabric env knobs and whether an OFI/net plugin library
     (``libnccl-net*``) is discoverable on ``LD_LIBRARY_PATH``/``LD_PRELOAD``
-    / ``NCCL_NET_PLUGIN``.  ``likely_socket_fallback`` flags the documented
-    Derecho failure shape: a MULTI-NODE launch with no net plugin visible —
-    NCCL then silently runs correct-but-slow TCP sockets (git cba9715b2:
-    'route-B NCCL works cross-node but socket-bound').  Advisory (the
+    / ``NCCL_NET_PLUGIN``.  ``missing_net_plugin_multi_node`` records the
+    FACT of a multi-node launch with no net plugin visible — on OFI fabrics
+    (Derecho Slingshot) that means NCCL silently runs correct-but-slow TCP
+    sockets (git cba9715b2: 'route-B NCCL works cross-node but
+    socket-bound'); native-IB fabrics run fine without a plugin, which is
+    why the field states the fact, not the inference.  Advisory (the
     definitive check stays ``NCCL_DEBUG=INFO`` in the job log); recorded so
     a socket-bound row is falsifiable from the record.
     """
@@ -163,10 +165,19 @@ def nccl_transport_report() -> dict:
     multi_node = n_nodes > 1
     return {
         "nccl_net_plugin": plugin_hit,
+        "nccl_net": os.environ.get("NCCL_NET"),
+        "nccl_ib_disable": os.environ.get("NCCL_IB_DISABLE"),
+        "nccl_ib_hca": os.environ.get("NCCL_IB_HCA"),
         "nccl_socket_ifname": os.environ.get("NCCL_SOCKET_IFNAME"),
         "nccl_debug": os.environ.get("NCCL_DEBUG"),
         "n_nodes_declared": n_nodes,
-        "likely_socket_fallback": bool(multi_node and plugin_hit is None),
+        # The FACT (no net plugin visible on a multi-node launch), not an
+        # inference: fabrics with native IB verbs run fine without a
+        # plugin — 'sockets likely' is the DERECHO (Slingshot/OFI) reading
+        # of this flag, stated in the warning text, not the field name
+        # (codex).
+        "missing_net_plugin_multi_node": bool(
+            multi_node and plugin_hit is None),
     }
 
 
@@ -288,7 +299,7 @@ def init_multicontroller_distributed(coordinator: str | None = None) -> None:
     # NCCL net plugin silently runs correct-but-slow TCP sockets — warn
     # once (rank 0) so the job log carries the flag next to the timings.
     report = nccl_transport_report()
-    if proc_id == 0 and report["likely_socket_fallback"]:
+    if proc_id == 0 and report["missing_net_plugin_multi_node"]:
         print(
             "[early_init] WARNING: multi-node launch with no NCCL net "
             "plugin visible (libnccl-net*/NCCL_NET_PLUGIN): cross-node "

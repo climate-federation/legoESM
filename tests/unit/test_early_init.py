@@ -146,11 +146,24 @@ class _FakeDistributed:
             raise RuntimeError(self._fail_bare_with)
 
 
-def _with_fake_jax(monkeypatch, fake):
+def _with_fake_jax(monkeypatch, fake, process_count: int | None = None):
+    import os
     import sys
     import types
 
-    fake_jax = types.SimpleNamespace(distributed=fake)
+    # The post-init silent-fallback guard compares jax.process_count()
+    # against the launcher-declared world size; the fake federation
+    # matches the declared size by default so guarded paths pass.
+    if process_count is None:
+        for var in ("SLURM_NTASKS", "OMPI_COMM_WORLD_SIZE", "PMI_SIZE"):
+            v = os.environ.get(var)
+            if v and v.isdigit():
+                process_count = int(v)
+                break
+        else:
+            process_count = 1
+    fake_jax = types.SimpleNamespace(
+        distributed=fake, process_count=lambda: process_count)
     monkeypatch.setitem(sys.modules, "jax", fake_jax)
 
 
