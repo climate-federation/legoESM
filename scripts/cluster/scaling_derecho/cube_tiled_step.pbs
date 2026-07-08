@@ -23,7 +23,7 @@
 # tiled_step_adapter._refuse).  Compare against the face-only 6-GPU lane
 # (blocker1_cube_shardmap.pbs / run_levante --cs-spmd) for the <=6 leg.
 # ===========================================================================
-set -uo pipefail
+set -euo pipefail
 
 SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
 if   [ -f "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then

@@ -16,7 +16,7 @@
 # See scripts/cluster/scaling_derecho/cube_tiled_step.pbs for the lane's
 # contract (dynamics-only envelope; HLO anti-replication refusals).
 # ===========================================================================
-set -uo pipefail
+set -euo pipefail
 
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 if   [ -f "${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh" ]; then
