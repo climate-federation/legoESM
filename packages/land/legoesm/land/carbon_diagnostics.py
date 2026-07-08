@@ -46,6 +46,7 @@ def reconstruct_carbon_diagnostics(
     doy,
     dt: float,
     spatial: bool = False,
+    land_params=None,
 ):
     """Return the :class:`CarbonDiagnostics` for one coupled land step.
 
@@ -67,13 +68,23 @@ def reconstruct_carbon_diagnostics(
         Latitude [rad], day-of-year, timestep [s].
     spatial : bool
         Whether ``theta_wp``/``theta_fc`` are per-column arrays.
+    land_params : LandSurfaceParams or None
+        Per-column surface/physiology parameters.  Threaded to
+        :func:`compute_effective_beta` so the reconstructed GPP override sees
+        the SAME per-column ``Vc_max25``/``g1``/``LCMA`` the coupled model step
+        used (batched-archetype spin-up); ``None`` reproduces the config-scalar
+        reconstruction of the single-column ``run_lmip`` / validator path.  The
+        in-step carbon config (``config.carbon``) is passed unchanged, matching
+        the model's own ``step_carbon`` call (which reads ``config.carbon``, not
+        ``land_params.LCMA``).
     """
     T_sfc_new = new_state.T_soil[:, 0]
     beta_soil_new, _ = root_zone_beta_soil(
         new_state.theta_soil, root_frac, theta_wp, theta_fc, beta_min,
         spatial=spatial)
     _, gpp_override = compute_effective_beta(
-        T_sfc_new, forcing, beta_soil_new, config, carbon_state, dt)
+        T_sfc_new, forcing, beta_soil_new, config, carbon_state, dt,
+        land_params=land_params)
     _, _, diag = step_carbon_differland(
         carbon_state, forcing.sw_down, T_sfc_new, forcing.co2_ppmv,
         beta_soil_new, lat, doy, forcing.precip_total, config.carbon, dt,

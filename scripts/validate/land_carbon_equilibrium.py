@@ -52,15 +52,9 @@ from legoesm.land.surface_params import (
 )
 from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.carbon.stomata import StomataConfig
-from legoesm.land.carbon.carbon_cycle import (
-    init_carbon_state,
-    _GC_TO_KG_CO2,
-    _SPD,
-)
-from legoesm.land.carbon.spinup import (
-    SlowPoolFluxes,
-    analytic_slow_pool_equilibrium,
-)
+from legoesm.land.carbon.carbon_cycle import init_carbon_state
+from legoesm.land.carbon.realism_ranges import LITERATURE_BIOME_RANGES
+from legoesm.land.carbon.spinup import run_semi_analytic_spinup
 from legoesm.land.carbon_diagnostics import reconstruct_carbon_diagnostics
 from legoesm.land.multilayer_land import (
     step_multilayer_land,
@@ -96,20 +90,12 @@ PIXELS = [
      "loam", 266.0, 1.0e-5, True, "tundra"),
 ]
 
-# Published biome ranges (annual GPP / NPP [gC/m2/yr], live biomass C
-# [kgC/m2], soil organic C to ~1 m [kgC/m2], peak LAI [m2/m2]).  Sources:
-# Beer et al. 2010 (GPP); Saugier/Roy/Mooney 2001 (NPP, biomass); Jobbagy &
-# Jackson 2000 (SOC); GLASS/MODIS LAI climatology.  These are order-of-
-# magnitude realism gates, not a calibration target.
-LITERATURE = {
-    "tropical_forest":  dict(gpp=(2500, 3500), npp=(900, 1500), biomass=(15, 25), soc=(8, 15),  lai=(4.5, 7.0)),
-    "savanna":          dict(gpp=(1000, 2000), npp=(400, 900),  biomass=(2, 8),   soc=(4, 12),  lai=(1.0, 3.0)),
-    "temperate_forest": dict(gpp=(1200, 2000), npp=(600, 1000), biomass=(8, 18),  soc=(8, 20),  lai=(3.0, 6.0)),
-    "grassland":        dict(gpp=(500, 1300),  npp=(200, 600),  biomass=(0.2, 1.5), soc=(6, 20), lai=(1.0, 3.0)),
-    "boreal_forest":    dict(gpp=(600, 1200),  npp=(200, 500),  biomass=(4, 12),  soc=(10, 30), lai=(1.5, 4.0)),
-    "shrubland":        dict(gpp=(300, 900),   npp=(100, 400),  biomass=(0.5, 4), soc=(3, 10),  lai=(0.5, 2.0)),
-    "tundra":           dict(gpp=(150, 600),   npp=(50, 250),   biomass=(0.2, 1.5), soc=(15, 40), lai=(0.3, 1.5)),
-}
+# Published biome realism ranges (SOC / biomass / GPP / NPP / LAI) are the
+# single-source-of-truth table in ``legoesm.land.carbon.realism_ranges``,
+# shared with the global-carbon-IC-map validator (scripts/validate/
+# global_carbon_ic_map.py).  Aliased to ``LITERATURE`` for this harness's
+# existing call sites (``_biome_carbon_init`` / ``assess_pixel``).
+LITERATURE = LITERATURE_BIOME_RANGES
 
 
 def _pft_row(pft: str) -> dict:
@@ -195,17 +181,8 @@ def build_pixel_config(pft: str, texture: str, freeze_thaw: bool,
 
 
 # ---------------------------------------------------------------------------
-# Nested-scan equilibrium integration
+# Semi-analytic equilibrium integration (shared driver)
 # ---------------------------------------------------------------------------
-
-# Per-year accumulated diagnostics (all carbon amounts gC/m2, integrated over
-# the year; LAI is a running max / mean helper).
-_ACC_FIELDS = (
-    "gpp", "npp", "r_auto", "r_maint", "r_growth", "r_het", "r_het_lit",
-    "r_het_som", "r_het_cwd", "nee", "nee_model", "a_fol", "a_lab", "a_root",
-    "a_wood", "lab_release", "leaf_litter", "root_litter", "wood_litter",
-    "wood_to_som", "lit_to_som", "alloc_resid", "lai_sum", "lai_max", "nsteps",
-)
 
 
 def run_pixel(config: MultiLayerLandConfig, lat_deg: float, lon_deg: float,
@@ -236,7 +213,6 @@ def run_pixel(config: MultiLayerLandConfig, lat_deg: float, lon_deg: float,
     lat_rad = float(lat_deg * _DEG2RAD)
     lon_rad = float(lon_deg * _DEG2RAD)
     lat_jnp = jnp.asarray([lat_rad])
-    dt_days = dt / _SECS_PER_DAY
     steps_per_year = int(round(_SECS_PER_DAY * _YEAR_DAYS / dt))
 
     grid = make_soil_grid(config.soil_grid)
@@ -250,94 +226,32 @@ def run_pixel(config: MultiLayerLandConfig, lat_deg: float, lon_deg: float,
     state0 = init_multilayer_land_state(1, config, T_init=T_init)
     carbon0 = init_carbon_state((1,), config.carbon)
 
-    def inner_step(carry, step_in_year):
-        state, carbon = carry
-        t_day = step_in_year * dt_days
-        doy = jnp.mod(t_day, _YEAR_DAYS)
-        hour = jnp.mod(step_in_year * dt / 3600.0, 24.0)
-        forcing = make_synthetic_lmip_forcing(
+    def forcing_fn(doy, hour):
+        return make_synthetic_lmip_forcing(
             lat_rad, lon_rad, doy, hour, precip_rate=precip_rate)
 
-        new_state, response, carbon_new = step_multilayer_land(
+    def step_fn(state, carbon, forcing, doy):
+        new_state, _response, carbon_new = step_multilayer_land(
             state, forcing, config, _U_MIN, dt,
             lat=lat_jnp, carbon_state=carbon, doy=doy)
-
-        # Reconstruct the carbon-flux breakdown from the end-of-step soil
-        # state via the shared helper (same routine run_lmip's semi-analytic
-        # spin-up uses).
+        # Reconstruct the carbon-flux breakdown from the end-of-step soil state
+        # via the shared helper (same routine run_lmip's spin-up uses); the
+        # shared driver derives the model's NEE from the closed-column mass
+        # balance, so the discarded TileResponse is not needed here.
         diag = reconstruct_carbon_diagnostics(
             new_state, forcing, carbon, config, root_frac, theta_wp, theta_fc,
             beta_min, lat_jnp, doy, dt, spatial=False)
+        return new_state, carbon_new, diag
 
-        nee_model = response.co2_flux / _GC_TO_KG_CO2 * dt  # gC/m2 this step
-        alloc_resid = jnp.abs(
-            diag.a_fol + diag.a_lab + diag.a_root + diag.a_wood
-            - jnp.maximum(diag.npp, 0.0))
+    # The three-phase transient -> analytic slow-pool reset -> verify loop lives
+    # in the shared driver (legoesm.land.carbon.spinup); this validator and the
+    # batched archetype map (global_init.equilibrate_archetypes) do not
+    # re-derive it.  It returns per-verify-year annual diagnostics.
+    final_state, final_carbon, annual = run_semi_analytic_spinup(
+        step_fn, state0, carbon0, forcing_fn,
+        n_spinup=n_spinup, n_verify=n_verify, steps_per_year=steps_per_year,
+        dt=dt, cwd_humification_eff=config.carbon.cwd_humification_eff)
 
-        # gC/m2 integrated over the step (rate[gC/m2/day] * dt_days)
-        inc = {
-            "gpp": diag.gpp * dt_days, "npp": diag.npp * dt_days,
-            "r_auto": diag.r_auto * dt_days, "r_maint": diag.r_maint * dt_days,
-            "r_growth": diag.r_growth * dt_days, "r_het": diag.r_het * dt_days,
-            "r_het_lit": diag.r_het_lit * dt_days,
-            "r_het_som": diag.r_het_som * dt_days,
-            "r_het_cwd": diag.r_het_cwd * dt_days,
-            "nee": diag.nee * dt_days, "nee_model": nee_model,
-            "a_fol": diag.a_fol * dt_days, "a_lab": diag.a_lab * dt_days,
-            "a_root": diag.a_root * dt_days, "a_wood": diag.a_wood * dt_days,
-            "lab_release": diag.lab_release * dt_days,
-            "leaf_litter": diag.leaf_litter * dt_days,
-            "root_litter": diag.root_litter * dt_days,
-            "wood_litter": diag.wood_litter * dt_days,
-            "wood_to_som": diag.wood_to_som * dt_days,
-            "lit_to_som": diag.lit_to_som * dt_days,
-            "alloc_resid": alloc_resid * dt_days,
-            "lai_sum": diag.lai, "lai_max": diag.lai,
-            "nsteps": jnp.ones_like(diag.lai),
-        }
-        return (new_state, carbon_new), inc
-
-    def year_step(carry, year_idx):
-        (state, carbon), incs = jax.lax.scan(
-            inner_step, carry, jnp.arange(steps_per_year))
-        # Reduce the inner increments into per-year totals.
-        annual = {}
-        for k in incs:
-            if k == "lai_max":
-                annual[k] = jnp.max(incs[k])
-            else:
-                annual[k] = jnp.sum(incs[k])
-        annual["C_lab"] = carbon.C_lab[0]
-        annual["C_fol"] = carbon.C_fol[0]
-        annual["C_root"] = carbon.C_root[0]
-        annual["C_wood"] = carbon.C_wood[0]
-        annual["C_lit"] = carbon.C_lit[0]
-        annual["C_som"] = carbon.C_som[0]
-        return (state, carbon), annual
-
-    # --- Phase 1: transient spin-up (fast pools + wood + stationary fluxes) ---
-    (state_A, carbon_A), annual_A = jax.lax.scan(
-        year_step, (state0, carbon0), jnp.arange(n_spinup))
-
-    # --- Phase 2: analytic linear-pool equilibrium for the slow pools ---
-    # Use the final spin-up year's mean annual fluxes (gC/m2/yr) + end pools.
-    # Stationary mean-annual slow-pool fluxes from the final spin-up year, fed
-    # to the shared semi-analytic solver (legoesm.land.carbon.spinup) — the
-    # SAME routine the run_lmip driver's --carbon-spinup semi_analytic uses.
-    def _lastA(k):
-        return float(np.asarray(annual_A[k]).reshape(n_spinup, -1)[-1, 0])
-    fluxes = SlowPoolFluxes(
-        a_wood=jnp.full_like(carbon_A.C_wood, _lastA("a_wood")),
-        wood_litter=jnp.full_like(carbon_A.C_wood, _lastA("wood_litter")),
-        lit_to_som=jnp.full_like(carbon_A.C_som, _lastA("lit_to_som")),
-        r_het_som=jnp.full_like(carbon_A.C_som, _lastA("r_het_som")),
-    )
-    carbon_eq = analytic_slow_pool_equilibrium(
-        carbon_A, fluxes, config.carbon.cwd_humification_eff)
-
-    # --- Phase 3: verification segment from the analytic equilibrium ---
-    (final_state, final_carbon), annual = jax.lax.scan(
-        year_step, (state_A, carbon_eq), jnp.arange(n_verify))
     annual = {k: np.asarray(v).reshape(n_verify, -1).squeeze()
               for k, v in annual.items()}
     return annual, final_state, final_carbon

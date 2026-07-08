@@ -26,11 +26,21 @@ transient and are left untouched.
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
+import jax
 import jax.numpy as jnp
 
 from legoesm.land.carbon.config import CarbonState
+
+# --- time conversions (exact) ---
+_SECS_PER_DAY = 86400.0
+_SECS_PER_HOUR = 3600.0
+_HOURS_PER_DAY = 24.0
+_YEAR_DAYS = 365.0
+
+# Prognostic carbon pools summed for the closed-column mass balance.
+_POOL_FIELDS = ("C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som")
 
 
 class SlowPoolFluxes(NamedTuple):
@@ -98,3 +108,253 @@ def analytic_slow_pool_equilibrium(
         carbon_state.C_som,
     )
     return carbon_state._replace(C_wood=C_wood_eq, C_som=C_som_eq)
+
+
+def _total_carbon(carbon_state: CarbonState) -> jnp.ndarray:
+    """Column total of the six prognostic pools [gC/m2].
+
+    The DifferLand column is closed (the only exchange with the atmosphere is
+    NEE), so ``sum(dC_pools) == -NEE_day*dt`` exactly (see
+    ``carbon_cycle.step_carbon_differland``; verified by
+    ``test_carbon_*_conservation``).  The verified spin-up therefore recovers
+    the model's authoritative annual NEE from the pool change, without
+    threading the coupled ``TileResponse.co2_flux`` through ``step_fn``.
+    """
+    return (
+        carbon_state.C_lab + carbon_state.C_fol + carbon_state.C_root
+        + carbon_state.C_wood + carbon_state.C_lit + carbon_state.C_som
+    )
+
+
+def _step_doy_hour(step_idx, dt):
+    """Day-of-year and hour-of-day for sub-daily ``step_idx`` at timestep ``dt``.
+
+    The repeating-annual-climate time convention shared by every forward
+    integrator in this module (the transient/verify scans in
+    :func:`run_semi_analytic_spinup` and the raw transient in
+    :func:`integrate_annual_pools`), so the time-of-year mapping is defined
+    ONCE rather than re-derived per caller.
+    """
+    t_day = step_idx * (dt / _SECS_PER_DAY)
+    doy = jnp.mod(t_day, _YEAR_DAYS)
+    hour = jnp.mod(step_idx * dt / _SECS_PER_HOUR, _HOURS_PER_DAY)
+    return doy, hour
+
+
+def run_semi_analytic_spinup(
+    step_fn: Callable,
+    state0,
+    carbon0: CarbonState,
+    forcing_fn: Callable,
+    *,
+    n_spinup: int,
+    n_verify: int,
+    steps_per_year: int,
+    dt: float,
+    cwd_humification_eff: float,
+):
+    """Run a verified semi-analytic soil-carbon spin-up (Xia et al. 2012, GMD).
+
+    Shared 3-phase driver behind BOTH the per-pixel ``land_carbon_equilibrium``
+    validator and the batched ``global_init.equilibrate_archetypes`` archetype
+    map — neither re-derives the phase logic:
+
+    1. **Transient** (``n_spinup`` years): a nested ``lax.scan`` (outer = years,
+       inner = sub-daily steps) advances ``step_fn`` under the repeating annual
+       ``forcing_fn`` climate so the fast pools + wood + the mean-annual carbon
+       fluxes stationarise.
+    2. **Analytic slow-pool reset**: the LINEAR wood/SOM steady state is solved
+       from the LAST spin-up year's mean-annual slow-pool fluxes
+       (:func:`analytic_slow_pool_equilibrium`) and the pools reset to it.
+    3. **Verification** (``n_verify`` years): re-integrate from the analytic
+       equilibrium; the returned per-year diagnostics are this verified segment
+       (its drift -> 0 confirms the equilibrium held).
+
+    Parameters
+    ----------
+    step_fn : callable
+        ``step_fn(state, carbon, forcing, doy) -> (new_state, new_carbon,
+        diag)`` where ``diag`` is a :class:`~legoesm.land.carbon.config.
+        CarbonDiagnostics` (or any NamedTuple carrying at least its fields).
+        Each ``diag`` field is a per-day rate [gC/m2/day] (``lai`` is
+        [m2/m2]); the slow-pool solve reads ``a_wood``/``wood_litter``/
+        ``lit_to_som``/``r_het_som`` by name.
+    state0, carbon0 :
+        Initial land state (opaque to this driver) and :class:`CarbonState`
+        (both batched over ``ncol`` columns).
+    forcing_fn : callable
+        ``forcing_fn(doy, hour) -> AtmToSurface`` — the repeating annual
+        climate for every column (may be traced ``doy``/``hour`` scalars).
+    n_spinup, n_verify : int
+        Transient and verification year counts.
+    steps_per_year : int
+        Sub-daily steps per model year (``round(seconds_per_year / dt)``).
+    dt : float
+        Sub-daily timestep [s].
+    cwd_humification_eff : float
+        Fraction of wood turnover humified to SOM (``CarbonConfig``), for the
+        analytic SOM-input balance.
+
+    Returns
+    -------
+    (final_state, final_carbon, annual)
+        ``final_carbon`` is the verified-equilibrium :class:`CarbonState`
+        ``(ncol,)``.  ``annual`` is a dict of per-verify-year ``(n_verify,
+        ncol)`` arrays: every ``diag`` flux field as an annual total
+        [gC/m2/yr] (``sum(rate*dt_days)``), ``lai_sum``/``lai_max``, the
+        allocation residual ``alloc_resid``, ``nsteps``, the model's
+        mass-balance annual ``nee_model``, and the end-of-year pools
+        ``C_lab``..``C_som``.
+    """
+    # Fail early on degenerate run controls (dispatch-hardening discipline): the
+    # analytic reset reads the LAST spin-up year's fluxes (needs n_spinup >= 1),
+    # the drift diagnostic needs >= 2 verification years, and each year is a
+    # sub-daily scan of steps_per_year >= 1 steps (F7).
+    if n_spinup < 1:
+        raise ValueError(
+            f"run_semi_analytic_spinup: n_spinup must be >= 1 (the analytic "
+            f"slow-pool reset reads the last transient year's fluxes), got "
+            f"{n_spinup}.")
+    if n_verify < 2:
+        raise ValueError(
+            f"run_semi_analytic_spinup: n_verify must be >= 2 (drift needs at "
+            f"least two verification years), got {n_verify}.")
+    if steps_per_year < 1:
+        raise ValueError(
+            f"run_semi_analytic_spinup: steps_per_year must be >= 1, got "
+            f"{steps_per_year}.")
+    dt_days = dt / _SECS_PER_DAY
+
+    def _inner_step(carry, step_idx):
+        state, carbon = carry
+        doy, hour = _step_doy_hour(step_idx, dt)
+        forcing = forcing_fn(doy, hour)
+        new_state, new_carbon, diag = step_fn(state, carbon, forcing, doy)
+        return (new_state, new_carbon), diag
+
+    def _year_step(carry, _year_idx):
+        _, carbon_start = carry
+        total_start = _total_carbon(carbon_start)
+        # TODO(perf/AD): accumulate annual sums/max inside _inner_step and
+        # return yearly reductions, instead of materializing the full per-step
+        # `diags` for every year before reducing (codex F6).  At hourly dt this
+        # holds steps_per_year x n_diag_fields per year -> memory pressure and
+        # poor reverse-mode AD ergonomics.  Deferred here on purpose: this is the
+        # SHARED driver (equilibrate + validator + land_carbon_equilibrium) and
+        # the annual-dict contract must stay byte-for-byte behaviour-preserving,
+        # so the in-scan reduction (which reorders the float summation) is a
+        # separately-validated follow-up.
+        (state_end, carbon_end), diags = jax.lax.scan(
+            _inner_step, carry, jnp.arange(steps_per_year))
+        # Annual totals: every per-day flux integrated as sum(rate*dt_days)
+        # -> gC/m2/yr; LAI (a state, not a rate) reduced to season sum + max.
+        annual: dict = {}
+        for field in diags._fields:
+            if field == "lai":
+                annual["lai_sum"] = jnp.sum(diags.lai, axis=0)
+                annual["lai_max"] = jnp.max(diags.lai, axis=0)
+            else:
+                annual[field] = jnp.sum(getattr(diags, field) * dt_days, axis=0)
+        # Allocation-closure residual: |sum(A) - max(NPP,0)| accumulated per
+        # step (sum-of-abs, not |sum|, so winter NPP<0 cannot cancel it).
+        resid = jnp.abs(
+            diags.a_fol + diags.a_lab + diags.a_root + diags.a_wood
+            - jnp.maximum(diags.npp, 0.0))
+        annual["alloc_resid"] = jnp.sum(resid * dt_days, axis=0)
+        # Model's authoritative annual NEE from the closed-column mass balance
+        # (dC_total = -NEE); identical to integrating TileResponse.co2_flux.
+        total_end = _total_carbon(carbon_end)
+        annual["nee_model"] = -(total_end - total_start)
+        annual["nsteps"] = jnp.full_like(total_end, float(steps_per_year))
+        for pool in _POOL_FIELDS:
+            annual[pool] = getattr(carbon_end, pool)
+        return (state_end, carbon_end), annual
+
+    # --- Phase 1: transient spin-up (fast pools + wood + stationary fluxes) ---
+    (state_spun, carbon_spun), annual_spin = jax.lax.scan(
+        _year_step, (state0, carbon0), jnp.arange(n_spinup))
+
+    # --- Phase 2: analytic linear-pool equilibrium for the slow pools ---
+    # Stationary mean-annual slow-pool fluxes from the final spin-up year
+    # (already per-column, gC/m2/yr) fed to the shared analytic solver.
+    fluxes = SlowPoolFluxes(
+        a_wood=annual_spin["a_wood"][-1],
+        wood_litter=annual_spin["wood_litter"][-1],
+        lit_to_som=annual_spin["lit_to_som"][-1],
+        r_het_som=annual_spin["r_het_som"][-1],
+    )
+    carbon_eq = analytic_slow_pool_equilibrium(
+        carbon_spun, fluxes, cwd_humification_eff)
+
+    # --- Phase 3: verification segment from the analytic equilibrium ---
+    (final_state, final_carbon), annual_verify = jax.lax.scan(
+        _year_step, (state_spun, carbon_eq), jnp.arange(n_verify))
+    return final_state, final_carbon, annual_verify
+
+
+def integrate_annual_pools(
+    step_fn: Callable,
+    state0,
+    carbon0: CarbonState,
+    forcing_fn: Callable,
+    *,
+    n_years: int,
+    steps_per_year: int,
+    dt: float,
+):
+    """Forward-integrate the coupled step ``n_years`` under the repeating annual
+    ``forcing_fn``, recording the six carbon pools at the END of each year.
+
+    Unlike :func:`run_semi_analytic_spinup` this performs NO analytic slow-pool
+    reset -- it is the RAW transient used to MEASURE how far a given IC drifts
+    from equilibrium (the ``global_carbon_ic_map`` validator runs it from BOTH
+    the mapped archetype-equilibrium IC and a cold IC, then compares drifts).
+    The initial condition is returned as row 0 so the full trajectory
+    (IC -> year ``n_years``) is available to a drift metric.
+
+    Parameters
+    ----------
+    step_fn : callable
+        ``step_fn(state, carbon, forcing, doy) -> (new_state, new_carbon,
+        diag)`` -- the SAME signature :func:`run_semi_analytic_spinup` consumes;
+        ``diag`` is ignored here (only the state/carbon trajectory is kept, and
+        the pools evolve purely through ``new_carbon``).
+    state0, carbon0 :
+        Initial land state (opaque to this driver) and :class:`CarbonState`
+        (both batched over ``ncol`` columns).
+    forcing_fn : callable
+        ``forcing_fn(doy, hour) -> AtmToSurface`` repeating annual climate.
+    n_years : int
+        Number of years to integrate forward.
+    steps_per_year : int
+        Sub-daily steps per model year (``round(seconds_per_year / dt)``).
+    dt : float
+        Sub-daily timestep [s].
+
+    Returns
+    -------
+    dict[str, jnp.ndarray]
+        One ``(n_years + 1, ncol)`` array per pool in ``_POOL_FIELDS``: row 0 is
+        the initial condition, rows ``1..n_years`` the end-of-year pools.
+    """
+    def _inner_step(carry, step_idx):
+        state, carbon = carry
+        doy, hour = _step_doy_hour(step_idx, dt)
+        forcing = forcing_fn(doy, hour)
+        new_state, new_carbon, _diag = step_fn(state, carbon, forcing, doy)
+        return (new_state, new_carbon), None
+
+    def _year_step(carry, _year_idx):
+        (state_end, carbon_end), _ = jax.lax.scan(
+            _inner_step, carry, jnp.arange(steps_per_year))
+        pools = jnp.stack(
+            [getattr(carbon_end, p) for p in _POOL_FIELDS], axis=0)  # (6, ncol)
+        return (state_end, carbon_end), pools
+
+    (_final_state, _final_carbon), pools_seq = jax.lax.scan(
+        _year_step, (state0, carbon0), jnp.arange(n_years))
+    # pools_seq: (n_years, 6, ncol).  Prepend the IC as year 0 so the trajectory
+    # spans the whole run (drift is measured over IC -> final).
+    ic = jnp.stack([getattr(carbon0, p) for p in _POOL_FIELDS], axis=0)
+    allp = jnp.concatenate([ic[None], pools_seq], axis=0)  # (n_years+1, 6, ncol)
+    return {p: allp[:, i, :] for i, p in enumerate(_POOL_FIELDS)}
