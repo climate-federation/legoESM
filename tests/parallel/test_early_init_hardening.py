@@ -33,18 +33,17 @@ def _clean_env(monkeypatch):
 
 def test_launcher_world_size_priority(monkeypatch):
     assert ei.launcher_world_size() == 0
+    monkeypatch.setenv("SLURM_NTASKS", "16")
+    assert ei.launcher_world_size() == 16  # allocation-wide fallback
     monkeypatch.setenv("PMI_SIZE", "8")
-    assert ei.launcher_world_size() == 8
+    assert ei.launcher_world_size() == 8   # PMI (actual launcher) wins
     monkeypatch.setenv("OMPI_COMM_WORLD_SIZE", "4")
-    assert ei.launcher_world_size() == 4  # OMPI outranks PMI
-    monkeypatch.setenv("SLURM_NTASKS", "16")
-    assert ei.launcher_world_size() == 16  # SLURM outranks all
-    monkeypatch.setenv("SLURM_NTASKS", "garbage")
-    assert ei.launcher_world_size() == 4  # non-numeric skipped, not crash
-    # Inner srun step: STEP size outranks the allocation-wide NTASKS.
-    monkeypatch.setenv("SLURM_NTASKS", "16")
+    assert ei.launcher_world_size() == 4   # OMPI outranks PMI
+    # Inner srun step: STEP size outranks everything.
     monkeypatch.setenv("SLURM_STEP_NUM_TASKS", "2")
     assert ei.launcher_world_size() == 2
+    monkeypatch.setenv("SLURM_STEP_NUM_TASKS", "garbage")
+    assert ei.launcher_world_size() == 4   # non-numeric skipped, not crash
 
 
 def test_pals_local_device_ids(monkeypatch):
