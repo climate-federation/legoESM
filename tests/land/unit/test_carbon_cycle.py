@@ -404,6 +404,52 @@ class TestSomCascade(unittest.TestCase):
 
 
 # ===================================================================
+# SOM transfer-fraction validation (fail-early on out-of-[0,1] config)
+# ===================================================================
+
+class TestSomTransferFractionValidation(unittest.TestCase):
+    """FIX #3 (codex A2): step_carbon_differland must fail early (a plain
+    Python ``if ... raise ValueError`` on the STATIC config value, matching
+    the repo's dispatch-hardening pattern, e.g. ``_freeze_modifier``'s
+    ``som_freeze_width_K > 0`` guard) on an out-of-[0, 1]
+    f_active_to_slow/f_slow_to_passive.  The ``__param_spec__`` bounds
+    (0.1-0.5, config.py) only constrain the TRAINING search range and are
+    never enforced at runtime, so a direct
+    ``CarbonConfig(f_active_to_slow=1.5)`` construction bypasses them and
+    would otherwise silently drive active respiration negative (fraction > 1)
+    or a downstream transfer input negative (fraction < 0)."""
+
+    def _call(self, **cfg_over):
+        cfg = _default_config(scheme="differland", **cfg_over)
+        state = _make_carbon_state(shape=(2,))
+        return step_carbon_differland(
+            state, jnp.full(2, 300.0), jnp.full(2, 290.0), jnp.full(2, 400.0),
+            jnp.full(2, 0.8), jnp.full(2, 0.7), 150.0, jnp.full(2, 3e-5),
+            cfg, 600.0)
+
+    def test_f_active_to_slow_above_one_raises(self):
+        with self.assertRaises(ValueError):
+            self._call(f_active_to_slow=1.5)
+
+    def test_f_active_to_slow_negative_raises(self):
+        with self.assertRaises(ValueError):
+            self._call(f_active_to_slow=-0.1)
+
+    def test_f_slow_to_passive_above_one_raises(self):
+        with self.assertRaises(ValueError):
+            self._call(f_slow_to_passive=1.5)
+
+    def test_f_slow_to_passive_negative_raises(self):
+        with self.assertRaises(ValueError):
+            self._call(f_slow_to_passive=-0.1)
+
+    def test_boundary_fractions_do_not_raise(self):
+        """0.0 and 1.0 are valid (inclusive) bounds."""
+        self._call(f_active_to_slow=0.0, f_slow_to_passive=1.0)
+        self._call(f_active_to_slow=1.0, f_slow_to_passive=0.0)
+
+
+# ===================================================================
 # Cold-vs-warm SOC realism (the scientific point of the change)
 # ===================================================================
 

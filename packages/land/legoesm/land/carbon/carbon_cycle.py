@@ -21,6 +21,7 @@ from legoesm.land.carbon.config import (
     CarbonConfig,
     CarbonDiagnostics,
     CarbonState,
+    validate_som_transfer_fractions,
 )
 
 # Fixed calendar / radiation constants (not tunable).
@@ -206,6 +207,11 @@ def _temperate_modifier(
     Uses ``Q10_het_exp`` (soil-decomposition Q10 ~2.5), decoupled from the
     autotrophic ``Q10_exp``: warm soils turn SOM/litter over fast (low
     equilibrium SOM) while cold soils retain carbon.
+
+    Returns an ENVIRONMENTAL ACCELERATION factor that legitimately EXCEEDS 1
+    for warm/wet conditions (faster than the ``T_ref``/``precip_ref``
+    reference-condition rate) -- see :func:`_som_decomp_modifier` for why
+    this is intended, numerically safe, and must NOT be clipped to [0, 1].
     """
     temp_factor = jnp.exp(config.Q10_het_exp * (T - config.T_ref))
     precip_ratio = precip / jnp.maximum(config.precip_ref, 1e-10)
@@ -252,6 +258,25 @@ def _som_decomp_modifier(
     SOM cascade pools; the surface-litter path keeps the freeze-free
     ``_temperate_modifier`` (fresh litter is not the deep freeze-protected SOC
     reservoir this fix targets).
+
+    ``m`` is an ENVIRONMENTAL ACCELERATION factor, NOT a bounded [0, 1]
+    fraction, and ROUTINELY EXCEEDS 1: warm/wet soils decompose FASTER than
+    the reference-condition base rate ``tor_som_X`` (at ``T_ref``/
+    ``precip_ref``) -- this is the intended Q10/moisture control that
+    produces the observed warm-fast / cold-slow SOC gradient (see
+    ``TestColdWarmSocRealism``).  Only ``f_freeze in (0, 1]`` is a bounded
+    SUPPRESSION term; ``f_temp`` (Q10 exponential, unbounded above) and
+    ``f_moist`` (clipped to ``[moist_modifier_min, moist_modifier_max]``,
+    default max 3.0) are both free to exceed 1, so ``m`` has no upper bound.
+
+    DO NOT clip ``m`` to [0, 1] -- that would remove the temperature
+    acceleration and give every soil the same turnover regardless of
+    climate, which is wrong.  Numerical safety does NOT depend on bounding
+    ``m``: :func:`_effective_rate` clips ``rate = m * tor_som_X`` to
+    ``[0, 1 - 1e-10]`` before computing ``1 - (1 - rate)**dt_days``, so the
+    DECOMPOSED FRACTION of a pool lost per step is always in ``[0, 1)``
+    regardless of how large ``m`` grows -- a modifier > 1 can never overdraw
+    a pool.
     """
     return _temperate_modifier(T, precip, config) * _freeze_modifier(T, config)
 
@@ -316,6 +341,11 @@ def step_carbon_differland(
     co2_flux  : Net CO2 flux [kgCO2/m2/s], positive up.
     diag      : (only when ``return_diagnostics``) CarbonDiagnostics.
     """
+    # Fail-early validation on the STATIC config value (dispatch-hardening
+    # discipline; see config.validate_som_transfer_fractions for why this
+    # cannot rely on the __param_spec__ training bounds alone).
+    validate_som_transfer_fractions(
+        config.f_active_to_slow, config.f_slow_to_passive)
     dt_days = dt / _SPD
 
     # LAI from foliar carbon

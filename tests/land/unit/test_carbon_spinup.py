@@ -132,6 +132,36 @@ class TestAnalyticSlowPoolEquilibrium(unittest.TestCase):
         # Active still solved: 6789 * 23/10 = 15614.7.
         npt.assert_allclose(out.C_som_active, 6789.0 * 23.0 / 10.0, rtol=1e-9)
 
+    def test_degenerate_active_feeds_zero_transfer_downstream(self):
+        """FIX #4 (codex A2): a dead/collapsed active pool (loss <= eps,
+        itself left unchanged) must NOT hand its raw litter/CWD forcing
+        input downstream unconditionally.  The transfer INTO slow (and
+        cascading into passive) is the upstream pool's ACTUAL (realised)
+        equilibrium loss, which is 0 when the upstream is degenerate -- so
+        with slow/passive's OWN loss still > eps (i.e. themselves alive, NOT
+        protected by their own zero-loss guard), their correct zero-input
+        linear equilibrium is ``C * 0 / loss == 0``, NOT the spurious
+        ``C * f * i_active / loss`` the un-gated (pre-fix) formula
+        manufactured from a transfer the dead active pool cannot actually
+        produce."""
+        st = _state(C_som_active=6789.0, C_som_slow=1111.0, C_som_passive=2222.0)
+        # Active dead (loss <= eps); slow/passive keep the _fx() defaults
+        # (som_slow_loss=5, som_passive_loss=3), i.e. themselves alive, so
+        # their OWN per-pool zero-loss guard does NOT already protect them --
+        # only the upstream input-gating fix does.
+        fx = _fx(som_active_loss=0.0)
+        out = _solve(st, fx)
+        # Active itself: unaffected by this fix, still left at its spun-up
+        # value (som_active_loss <= eps triggers the pre-existing guard).
+        npt.assert_allclose(out.C_som_active, 6789.0, rtol=0, atol=0)
+        self.assertTrue(jnp.all(jnp.isfinite(out.C_som_slow)))
+        self.assertTrue(jnp.all(jnp.isfinite(out.C_som_passive)))
+        # Correct zero-input equilibrium -- NOT the pre-fix spurious values
+        # (i_active=23, i_slow=0.3*23=6.9: C_slow_spurious=1111*6.9/5=1533.18;
+        # i_passive=0.3*6.9=2.07: C_passive_spurious=2222*2.07/3=1533.18).
+        npt.assert_allclose(out.C_som_slow, 0.0, rtol=0, atol=1e-9)
+        npt.assert_allclose(out.C_som_passive, 0.0, rtol=0, atol=1e-9)
+
     def test_batched(self):
         st = CarbonState(
             C_lab=jnp.full((3,), 100.0), C_fol=jnp.full((3,), 200.0),
@@ -170,6 +200,20 @@ class TestAnalyticSlowPoolEquilibrium(unittest.TestCase):
         self.assertGreater(float(som_total(cold)[0]), float(som_total(warm)[0]))
         self.assertGreater(float(som_total(cold)[0]) / float(som_total(warm)[0]),
                            10.0)
+
+    def test_out_of_range_transfer_fraction_raises(self):
+        """codex A2 follow-up: analytic_slow_pool_equilibrium is a public
+        entry point called DIRECTLY by run_lmip.py (bypassing
+        step_carbon_differland's guard), so it must independently validate
+        f_active_to_slow/f_slow_to_passive to [0, 1]."""
+        with self.assertRaises(ValueError):
+            _solve(_state(), _fx(), f_as=1.5)
+        with self.assertRaises(ValueError):
+            _solve(_state(), _fx(), f_as=-0.1)
+        with self.assertRaises(ValueError):
+            _solve(_state(), _fx(), f_sp=1.5)
+        with self.assertRaises(ValueError):
+            _solve(_state(), _fx(), f_sp=-0.1)
 
 
 def _const_diag(ncol, **over):
@@ -291,6 +335,15 @@ class TestRunSemiAnalyticSpinupGuards(unittest.TestCase):
     def test_zero_steps_per_year_raises(self):
         with self.assertRaises(ValueError):
             run_semi_analytic_spinup(**self._kwargs(steps_per_year=0))
+
+    def test_out_of_range_transfer_fraction_raises(self):
+        """codex A2 follow-up: this guard must fire BEFORE the expensive
+        Phase-1 transient scan, not only inside
+        analytic_slow_pool_equilibrium after the scan has already run."""
+        with self.assertRaises(ValueError):
+            run_semi_analytic_spinup(**self._kwargs(f_active_to_slow=1.5))
+        with self.assertRaises(ValueError):
+            run_semi_analytic_spinup(**self._kwargs(f_slow_to_passive=-0.1))
 
 
 class TestIntegrateAnnualPools(unittest.TestCase):

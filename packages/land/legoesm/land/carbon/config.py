@@ -214,6 +214,46 @@ def som_total(state: CarbonState) -> jax.Array:
     return state.C_som_active + state.C_som_slow + state.C_som_passive
 
 
+def validate_som_transfer_fractions(
+    f_active_to_slow: float, f_slow_to_passive: float,
+) -> None:
+    """Fail-early validation for the SOM cascade's inter-pool humification
+    fractions (dispatch-hardening discipline: a plain Python
+    ``if ... raise ValueError`` on the STATIC value, matching
+    ``carbon_cycle._freeze_modifier``'s ``som_freeze_width_K > 0`` guard --
+    NOT a traced ``jnp`` check).
+
+    The ``__param_spec__`` bounds above (0.1-0.5) only constrain the
+    TRAINING search range and are never enforced at runtime, so a direct
+    ``CarbonConfig(f_active_to_slow=1.5)`` construction (or an out-of-range
+    float threaded straight into the spin-up solver) bypasses them entirely.
+    An out-of-[0, 1] transfer fraction breaks the cascade's "carbon into a
+    pool is positive" sign convention (``carbon_cycle.step_carbon_differland``):
+    the pool's OWN heterotrophic respiration ``(1 - f) * D_X`` goes NEGATIVE
+    for ``f > 1``, and a downstream transfer INPUT goes negative for ``f < 0``.
+
+    Lives here in ``config`` (the same import-cycle-free leaf module as
+    :func:`som_total`) so every public entry point that consumes these
+    fractions shares ONE check instead of re-deriving it:
+    ``carbon_cycle.step_carbon_differland``,
+    ``spinup.run_semi_analytic_spinup`` (fails before the expensive
+    transient scan) and ``spinup.analytic_slow_pool_equilibrium`` (the
+    direct ``run_lmip.py`` call site that bypasses the step-level guard).
+    """
+    if not (0.0 <= f_active_to_slow <= 1.0):
+        raise ValueError(
+            "f_active_to_slow must be in [0, 1] (the fraction of "
+            "active-SOM decomposition humified onward to the slow pool), "
+            f"got {f_active_to_slow!r}."
+        )
+    if not (0.0 <= f_slow_to_passive <= 1.0):
+        raise ValueError(
+            "f_slow_to_passive must be in [0, 1] (the fraction of "
+            "slow-SOM decomposition humified onward to the passive pool), "
+            f"got {f_slow_to_passive!r}."
+        )
+
+
 class CarbonDiagnostics(NamedTuple):
     """Instantaneous carbon-flux breakdown for one DifferLand step.
 

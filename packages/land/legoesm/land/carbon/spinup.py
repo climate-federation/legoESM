@@ -36,7 +36,11 @@ from typing import Callable, NamedTuple
 import jax
 import jax.numpy as jnp
 
-from legoesm.land.carbon.config import CarbonState, som_total
+from legoesm.land.carbon.config import (
+    CarbonState,
+    som_total,
+    validate_som_transfer_fractions,
+)
 
 # --- time conversions (exact) ---
 _SECS_PER_DAY = 86400.0
@@ -94,11 +98,15 @@ def analytic_slow_pool_equilibrium(
              ``I_active = lit_to_som + cwd_humification_eff*a_wood`` and
              ``C_active_eq = C_active * I_active / som_active_loss``.
              (at equilibrium the active LOSS == ``I_active``.)
-    Slow:    input = ``f_active_to_slow * I_active`` (the transfer out of the
-             equilibrated active pool), so
-             ``C_slow_eq = C_slow * (f_active_to_slow*I_active) / som_slow_loss``.
-    Passive: input = ``f_slow_to_passive * (f_active_to_slow*I_active)``
-             (transfer out of the equilibrated slow pool), so
+    Slow:    input = ``f_active_to_slow * I_active_eq``, where ``I_active_eq``
+             is the active pool's REALISED equilibrium loss -- ``I_active``
+             when active is alive (``som_active_loss > eps``), exactly 0 when
+             active is degenerate (left unchanged above).  A dead/collapsed
+             active pool therefore hands the slow pool NOTHING, so
+             ``C_slow_eq = C_slow * (f_active_to_slow*I_active_eq) / som_slow_loss``.
+    Passive: input = ``f_slow_to_passive * I_slow_eq``, where ``I_slow_eq`` is
+             the slow pool's OWN realised equilibrium loss (0 if slow itself
+             received no realisable transfer), so
              ``C_passive_eq = C_passive * I_passive / som_passive_loss``.
 
     Each ``C_X_eq`` is a TRUE fixed point of the cascade: by construction the new
@@ -108,7 +116,17 @@ def analytic_slow_pool_equilibrium(
     A pool whose LOSS flux is ~0 (a dead/collapsed or masked column) has no
     inferable turnover ``k``, hence no finite analytic equilibrium, so it is
     LEFT UNCHANGED at its spun-up value rather than reset to an artefact
-    (0 or ``C*I/eps``).  The fast pools are always returned unchanged.
+    (0 or ``C*I/eps``).  Critically, that degeneracy also propagates FORWARD
+    through the cascade: the transfer a degenerate pool hands to the pool
+    below it is gated to 0 (the pool's REALISED loss), never the raw,
+    ungated forcing input.  Without this gate a dead/collapsed upstream pool
+    (left unchanged, correctly) would still hand its would-be litter/CWD or
+    humification input downstream unconditionally, manufacturing a spurious
+    nonzero equilibrium for slow/passive from a transfer the (dead) upstream
+    pool cannot actually sustain -- e.g. a boreal column with a frozen,
+    non-decomposing active pool must NOT spuriously equilibrate its slow/
+    passive pools from the active pool's raw litter input (codex finding #4).
+    The fast pools are always returned unchanged.
 
     Parameters
     ----------
@@ -133,6 +151,11 @@ def analytic_slow_pool_equilibrium(
         (per-pool, only where that pool's loss flux is > ``eps``); the fast
         pools unchanged.
     """
+    # Fail-early on the STATIC fraction values (dispatch-hardening
+    # discipline): this function is a public entry point called DIRECTLY by
+    # ``run_lmip.py`` (not only via run_semi_analytic_spinup), so it cannot
+    # rely on the step-level guard in carbon_cycle.step_carbon_differland.
+    validate_som_transfer_fractions(f_active_to_slow, f_slow_to_passive)
     C_wood_eq = jnp.where(
         fluxes.wood_litter > eps,
         carbon_state.C_wood * fluxes.a_wood / jnp.maximum(fluxes.wood_litter, eps),
@@ -148,17 +171,26 @@ def analytic_slow_pool_equilibrium(
         carbon_state.C_som_active,
     )
     # Slow pool: input = the humified transfer out of the equilibrated active
-    # pool (at active equilibrium its total loss == i_active).
-    i_slow = f_active_to_slow * i_active
+    # pool.  Gate on active's REALISED loss (0 if active is degenerate, i.e.
+    # left unchanged above) rather than the raw ``i_active`` unconditionally --
+    # a dead/collapsed active pool cannot actually sustain a steady transfer
+    # to slow, so feeding it the raw litter/CWD input would manufacture a
+    # spurious slow-pool equilibrium the (dead) active pool never produces
+    # (codex finding #4).  A no-op when active is alive: at active equilibrium
+    # its total loss == i_active, so i_active_eq == i_active exactly.
+    i_active_eq = jnp.where(fluxes.som_active_loss > eps, i_active, 0.0)
+    i_slow = f_active_to_slow * i_active_eq
     C_som_slow_eq = jnp.where(
         fluxes.som_slow_loss > eps,
         carbon_state.C_som_slow * i_slow
         / jnp.maximum(fluxes.som_slow_loss, eps),
         carbon_state.C_som_slow,
     )
-    # Passive pool: input = the humified transfer out of the equilibrated slow
-    # pool (at slow equilibrium its total loss == i_slow).
-    i_passive = f_slow_to_passive * i_slow
+    # Passive pool: same gating one level down -- input = the humified
+    # transfer out of the equilibrated slow pool, using slow's OWN REALISED
+    # loss (0 if slow is itself degenerate) rather than the raw ``i_slow``.
+    i_slow_eq = jnp.where(fluxes.som_slow_loss > eps, i_slow, 0.0)
+    i_passive = f_slow_to_passive * i_slow_eq
     C_som_passive_eq = jnp.where(
         fluxes.som_passive_loss > eps,
         carbon_state.C_som_passive * i_passive
@@ -278,7 +310,10 @@ def run_semi_analytic_spinup(
     # Fail early on degenerate run controls (dispatch-hardening discipline): the
     # analytic reset reads the LAST spin-up year's fluxes (needs n_spinup >= 1),
     # the drift diagnostic needs >= 2 verification years, and each year is a
-    # sub-daily scan of steps_per_year >= 1 steps (F7).
+    # sub-daily scan of steps_per_year >= 1 steps (F7).  The transfer-fraction
+    # check also lives here (not just inside analytic_slow_pool_equilibrium)
+    # so an invalid config fails BEFORE the expensive Phase-1 transient scan,
+    # not after it.
     if n_spinup < 1:
         raise ValueError(
             f"run_semi_analytic_spinup: n_spinup must be >= 1 (the analytic "
@@ -292,6 +327,7 @@ def run_semi_analytic_spinup(
         raise ValueError(
             f"run_semi_analytic_spinup: steps_per_year must be >= 1, got "
             f"{steps_per_year}.")
+    validate_som_transfer_fractions(f_active_to_slow, f_slow_to_passive)
     dt_days = dt / _SECS_PER_DAY
 
     def _inner_step(carry, step_idx):
