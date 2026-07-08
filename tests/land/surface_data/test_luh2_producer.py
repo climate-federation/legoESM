@@ -109,3 +109,86 @@ def test_luh2_producer_cli_parser():
     assert args.year_start == 1850 and args.year_end == 2014
     with pytest.raises(SystemExit):
         ap.parse_args(["--luh2-states", "l.nc"])   # missing required --base-surfdata/--out
+
+
+def _write_hyde_states(path, lat, lon, nyear=3):
+    """A synthetic HYDE states NetCDF on the same grid (regrid = identity)."""
+    import xarray as xr
+    ny, nx = lat.size, lon.size
+    data = {
+        "cropland": (("time", "lat", "lon"), np.full((nyear, ny, nx), 20.0)),   # km²
+        "pasture": (("time", "lat", "lon"), np.full((nyear, ny, nx), 10.0)),
+        "rangeland": (("time", "lat", "lon"), np.full((nyear, ny, nx), 5.0)),
+        "built_up": (("time", "lat", "lon"), np.full((nyear, ny, nx), 2.0)),
+        "garea": (("lat", "lon"), np.full((ny, nx), 100.0)),                    # km²/cell
+    }
+    xr.Dataset(
+        data,
+        coords={"time": np.array([1900.0, 1950.0, 2000.0]), "lat": lat, "lon": lon},
+    ).to_netcdf(path)
+
+
+def test_build_anthropogenic_transient_surfdata_hyde(tmp_path):
+    import xarray as xr
+    from legoesm.land.surface_data.assemble import build_anthropogenic_transient_surfdata
+
+    lat = np.linspace(-30.0, 30.0, 3)
+    lon = np.linspace(0.0, 240.0, 4)
+    base_nc = tmp_path / "base.nc"
+    hyde_nc = tmp_path / "hyde.nc"
+    out_nc = tmp_path / "transient_hyde.nc"
+    _write_base_surfdata(base_nc, lat, lon)
+    _write_hyde_states(hyde_nc, lat, lon, nyear=3)
+
+    build_anthropogenic_transient_surfdata(
+        str(base_nc), str(hyde_nc), str(out_nc), dataset="hyde")
+
+    ds = xr.open_dataset(out_nc, decode_times=False)
+    try:
+        assert ds["pft_frac"].dims == ("year", "npft", "lat", "lon")
+        assert ds.sizes["year"] == 3 and ds.sizes["npft"] == N_PFT_CLM5
+        assert ds["year"].values.tolist() == [1900, 1950, 2000]
+        pft = ds["pft_frac"].values                    # percent
+        # Anthropogenic overlay conserves area: every cell/year sums to 100% land.
+        np.testing.assert_allclose(pft.sum(axis=1), 100.0, atol=1e-6)
+        # crop 20/100=0.2 -> crop_c3 (base C4-crop frac 0); PNV puts nothing on
+        # crop rows, so crop_c3 is exactly the crop fraction.
+        np.testing.assert_allclose(pft[:, _IDX["crop_c3"]], 20.0, atol=1e-6)
+        np.testing.assert_allclose(pft[:, _IDX["crop_c4"]], 0.0, atol=1e-6)
+        # bare_soil: PNV shape has no bare weight, so bare == urban (built_up) only.
+        np.testing.assert_allclose(pft[:, _IDX["bare_soil"]], 2.0, atol=1e-6)
+        # Grass rows carry BOTH the pasture overlay AND the natural residual routed
+        # by the PNV shape (base grass is part of PNV): natural residual
+        # 1-0.2-0.15-0.02=0.63, PNV c3/c4-grass weight 10/50=0.2 -> 0.126, plus
+        # pasture 0.15 split 0.5 -> 0.075; total 0.201 each (base C4 ratio 0.5).
+        np.testing.assert_allclose(pft[:, _IDX["c3_grass"]], 20.1, atol=1e-6)
+        np.testing.assert_allclose(pft[:, _IDX["c4_grass"]], 20.1, atol=1e-6)
+    finally:
+        ds.close()
+
+
+def test_build_anthropogenic_transient_surfdata_unknown_dataset(tmp_path):
+    from legoesm.land.surface_data.assemble import build_anthropogenic_transient_surfdata
+
+    lat = np.linspace(-30.0, 30.0, 3)
+    lon = np.linspace(0.0, 240.0, 4)
+    base_nc = tmp_path / "base.nc"
+    _write_base_surfdata(base_nc, lat, lon)
+    with pytest.raises(ValueError, match="unknown dataset"):
+        build_anthropogenic_transient_surfdata(
+            str(base_nc), "x.nc", str(tmp_path / "o.nc"), dataset="bogus")
+
+
+def test_anthropogenic_producer_cli_parser():
+    from scripts.data.build_anthropogenic_surfdata import build_arg_parser
+
+    ap = build_arg_parser()
+    args = ap.parse_args(
+        ["--base-surfdata", "b.nc", "--anthro", "a.nc", "--dataset", "hyde",
+         "--out", "o.nc", "--year-start", "1850", "--year-end", "2016",
+         "--crop-share", "0.6"])
+    assert args.dataset == "hyde" and args.anthro == "a.nc"
+    assert args.year_start == 1850 and args.crop_share == 0.6
+    with pytest.raises(SystemExit):
+        ap.parse_args(["--dataset", "nope", "--base-surfdata", "b.nc",
+                       "--anthro", "a.nc", "--out", "o.nc"])   # bad dataset choice

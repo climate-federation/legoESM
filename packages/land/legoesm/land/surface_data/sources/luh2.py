@@ -51,6 +51,19 @@ from typing import NamedTuple
 
 import numpy as np
 
+# 17-PFT axis indices + the PNV shape / C4-grass math are shared with the
+# anthropogenic overlay (HYDE/Pongratz/KK10) — single source, no re-derivation.
+from legoesm.land.surface_data.sources.anthropogenic import (
+    PFT_IDX_BARE as _IDX_BARE,
+    PFT_IDX_C3_GRASS as _IDX_C3_GRASS,
+    PFT_IDX_C4_GRASS as _IDX_C4_GRASS,
+    PFT_IDX_CROP_C3 as _IDX_CROP_C3,
+    PFT_IDX_CROP_C4 as _IDX_CROP_C4,
+    PFT_IDX_NATURAL as _IDX_NATURAL,
+    c4_grass_fraction_from_base,
+    normalised_pnv_shape,
+)
+
 # LUH2 state variable names, grouped by how they map to the 17-PFT axis.
 LUH2_NATURAL_STATES = ("primf", "secdf", "primn", "secdn")
 LUH2_C3_CROP_STATES = ("c3ann", "c3per", "c3nfx")
@@ -64,14 +77,6 @@ LUH2_STATE_NAMES = (
     + LUH2_C4_CROP_STATES
     + (LUH2_URBAN_STATE,)
 )
-
-# 17-PFT axis indices this crosswalk writes into (subscripts, not coefficients).
-_IDX_BARE = 0
-_IDX_NATURAL = slice(0, 15)   # 15 natural PFTs (bare + trees/shrubs/grass)
-_IDX_C3_GRASS = 13
-_IDX_C4_GRASS = 14
-_IDX_CROP_C3 = 15
-_IDX_CROP_C4 = 16
 
 
 class LUH2Config(NamedTuple):
@@ -150,30 +155,6 @@ def read_luh2_states(
             ds.close()
 
 
-def _normalised_pnv_shape(pnv_natural: np.ndarray) -> np.ndarray:
-    """Per-cell natural-PFT shape (15, lat, lon) summing to 1, bare where empty.
-
-    ``pnv_natural`` is the base surfdata natural-PFT distribution (its first 15
-    PFT rows); its per-cell sum is arbitrary (it is a *shape*).  Cells whose
-    natural shape is empty (desert / no reference vegetation) fall back to pure
-    bare soil so a natural LUH2 fraction there lands on a valid PFT row instead
-    of vanishing.
-    """
-    shape = np.asarray(pnv_natural, dtype=np.float64)[:15]
-    # A NaN PFT band at an otherwise-valid cell must contribute ZERO weight, not
-    # poison the whole column: sanitise BEFORE normalising so the finite rows
-    # carry the full natural fraction and area stays conserved.  Ocean cells (all
-    # bands NaN) collapse to the bare-soil fallback here but still emit NaN in the
-    # output via the NaN LUH2 state fractions themselves.
-    shape = np.where(np.isfinite(shape), shape, 0.0)
-    total = shape.sum(axis=0, keepdims=True)                 # (1, lat, lon)
-    empty = total <= 0.0
-    norm = np.where(empty, 0.0, np.divide(shape, np.where(empty, 1.0, total)))
-    # Empty-PNV cells -> bare soil carries the whole natural fraction.
-    norm[_IDX_BARE] = np.where(empty[0], 1.0, norm[_IDX_BARE])
-    return norm
-
-
 def luh2_states_to_pft_frac(
     states: dict,
     pnv_natural: np.ndarray,
@@ -198,7 +179,7 @@ def luh2_states_to_pft_frac(
 
     nyear = next(iter(states.values())).shape[0]
     ny, nx = pnv_natural.shape[1], pnv_natural.shape[2]
-    shape = _normalised_pnv_shape(pnv_natural)               # (15, lat, lon)
+    shape = normalised_pnv_shape(pnv_natural)                # (15, lat, lon)
     c4f = np.asarray(c4_grass_frac, dtype=np.float64)        # (lat, lon)
 
     def _sum(names):
@@ -222,19 +203,6 @@ def luh2_states_to_pft_frac(
     # Urban -> bare soil (no urban landunit; documented v1 proxy).
     out[:, _IDX_BARE, :, :] += urban
     return out
-
-
-def c4_grass_fraction_from_base(base_pft_frac: np.ndarray) -> np.ndarray:
-    """Per-cell C4 fraction of grass from a base surfdata PFT distribution.
-
-    ``c4_grass / (c3_grass + c4_grass)`` from the base 17-PFT map; cells with no
-    grass in the base default to all-C3 (0.0).  Used to route LUH2 managed grass.
-    """
-    base = np.asarray(base_pft_frac, dtype=np.float64)
-    c3g = base[_IDX_C3_GRASS]
-    c4g = base[_IDX_C4_GRASS]
-    denom = c3g + c4g
-    return np.where(denom > 0.0, np.divide(c4g, np.where(denom > 0.0, denom, 1.0)), 0.0)
 
 
 def build_transient_pft_frac(luh2: dict, base_pft_frac: np.ndarray) -> np.ndarray:

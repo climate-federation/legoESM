@@ -130,6 +130,7 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         output_config="",                        # embedded output block is used directly
         _cfg_output_tapes=cfg.output,            # -> load_output_config indirection below
         _cfg_luc=cfg.raw.get("land_use_change") or {},   # E_LUC bookkeeping block
+        _cfg_land_cover_dataset=cfg.surfdata.get("land_cover_dataset", "clm5"),
     )
     return ns
 
@@ -162,6 +163,14 @@ def _report_eluc(args, gsd) -> None:
     print(f"E_LUC (bookkeeping): {int(years[0])}-{int(years[-1])} | "
           f"cumulative {eluc.sum():.4f} PgC | mean {eluc.mean():.4f} PgC/yr | "
           f"final year {eluc[-1]:.4f} PgC/yr")
+    # Fidelity: the bookkeeping is driven by NET year-to-year cover change. For a
+    # dataset that natively carries gross transitions (LUH2/LUH3) this understates
+    # shifting-cultivation emissions until the gross-transition path is wired.
+    from legoesm.land.surface_data.datasets import has_gross_transitions
+    dataset = getattr(args, "_cfg_land_cover_dataset", "clm5")
+    if has_gross_transitions(dataset):
+        print(f"  NOTE: {dataset} carries native gross transitions, but E_LUC here "
+              f"uses NET cover change — gross-transition emissions are understated.")
     out = Path(f"{args.output}.eluc_annual.txt")
     out.parent.mkdir(parents=True, exist_ok=True)
     np.savetxt(out, np.column_stack([years, eluc]),

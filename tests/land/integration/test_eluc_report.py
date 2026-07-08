@@ -50,3 +50,18 @@ def test_report_eluc_single_year_no_file(tmp_path, capsys):
     _report_eluc(args, _gsd(pft))
     assert not (tmp_path / "run.eluc_annual.txt").exists()
     assert "single-year" in capsys.readouterr().out
+
+
+def test_report_eluc_gross_transition_note(tmp_path, capsys):
+    # A gross-transition dataset (LUH2) gets the net-vs-gross understatement note;
+    # an anthropogenic dataset (HYDE, net-only) does not.
+    pft = np.zeros((2, 1, N_PFT_CLM5)); pft[0, 0, _FOREST] = 1.0; pft[1, 0, 0] = 1.0
+    luh2 = SimpleNamespace(_cfg_luc={"scheme": "bookkeeping"},
+                           _cfg_land_cover_dataset="luh2", output=str(tmp_path / "l"))
+    _report_eluc(luh2, _gsd(pft))
+    assert "gross-transition emissions are understated" in capsys.readouterr().out
+
+    hyde = SimpleNamespace(_cfg_luc={"scheme": "bookkeeping"},
+                           _cfg_land_cover_dataset="hyde", output=str(tmp_path / "h"))
+    _report_eluc(hyde, _gsd(pft))
+    assert "understated" not in capsys.readouterr().out
