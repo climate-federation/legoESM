@@ -38,6 +38,7 @@ CLIM="${CLIM:-results/land_forcing/era5_land_forcing_clim_2deg.nc}"
 : "${DT:=7200}"
 : "${MAX_ARCH:=16}"
 : "${LR:=0.03}"
+: "${WARMUP:=2}"                 # short warmup so a short run isn't wasted ramping LR
 # CLM5 surfdata ORGANIC is organic MATTER density [kg/m3] with carbon fraction
 # 0.58 gC/gOM (van Bemmelen 1/1.724; per the file's own units attribute) -> convert
 # to organic CARBON so the observed target is carbon-consistent with som_total.
@@ -59,6 +60,7 @@ $PY scripts/run/train_carbon_params.py \
     --max-archetypes "$MAX_ARCH" \
     --om-to-oc "$OM_TO_OC" \
     --lr "$LR" \
+    --warmup-steps "$WARMUP" \
     --optimizer muon \
     --output "$OUTDIR"
 RC=$?

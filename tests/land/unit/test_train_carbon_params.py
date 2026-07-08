@@ -89,9 +89,17 @@ def test_overrides_roundtrip_into_carbon_config():
         CarbonConfig().som_freeze_floor, rtol=1e-6)
 
 
-def test_som_only_filter_selects_exactly_eight():
+def test_som_only_filter_selects_exactly_seven_and_excludes_q10():
+    """The fast-analytic-valid SOM set is the 7 SOM-pool-only fields; codex fix:
+    ``Q10_het_exp`` is deliberately EXCLUDED (its fast-mode gradient would be
+    partial -- see the comment on ``SOM_FIELDS``), even though it is a genuine
+    tier-2 ``land.carbon`` trainable (it remains available via
+    ``--slow-spinup-grad``)."""
     params = tcp.build_carbon_trainables(som_only=True)
-    assert len(params.constraints) == len(tcp.SOM_FIELDS) == 8
+    names = {c.field for c in params.constraints}
+    assert len(params.constraints) == len(tcp.SOM_FIELDS) == 7
+    assert "Q10_het_exp" not in tcp.SOM_FIELDS
+    assert "Q10_het_exp" not in names
 
 
 def test_quick_dry_run_writes_wellformed_json(tmp_path):
@@ -124,6 +132,57 @@ def test_quick_dry_run_writes_wellformed_json(tmp_path):
     rmse = scorecard["cover_weighted_soc_rmse_kgC_m2"]
     assert np.isfinite(rmse["default"]) and np.isfinite(rmse["tuned"])
     # A single MUON line-search step must not INCREASE the loss.
+    assert hist[-1] <= hist[0] + 1e-9
+    # --quick uses the DEFAULT fast-analytic forward: the run records the forward
+    # kind + the analytic-vs-spin-up match, and the closed form must be finite.
+    training = tuned["training"]
+    assert training["forward"] == "fast_analytic"
+    match = training["analytic_vs_spinup_match"]
+    assert match["n_archetypes"] >= 1
+    assert np.isfinite(match["mean_abs_rel_err"]) and match["mean_abs_rel_err"] >= 0.0
+
+
+def test_fast_analytic_is_default_and_slow_flag_flips_it():
+    """--fast-analytic (default True) trains the closed form; --slow-spinup-grad
+    selects the B1 grad-through-spin-up forward."""
+    p = tcp.build_arg_parser()
+    assert p.parse_args(["--dry-run-synthetic"]).fast_analytic is True
+    assert p.parse_args(["--dry-run-synthetic", "--fast-analytic"]).fast_analytic is True
+    assert p.parse_args(
+        ["--dry-run-synthetic", "--slow-spinup-grad"]).fast_analytic is False
+
+
+def test_fast_analytic_and_all_carbon_params_raises():
+    """codex fix: --fast-analytic (default True) + --all-carbon-params must raise
+    -- the fast closed form freezes every non-SOM tier-2 input (GPP/phenology/
+    allocation) at the DEFAULT params in the one-time precompute, so those fields
+    would get a stale/zero gradient, not a real calibration signal.
+    --slow-spinup-grad --all-carbon-params (the correct grad-through-spin-up
+    forward) is the valid way to train the full tier-2 set and must NOT raise."""
+    with pytest.raises(SystemExit, match="not supported"):
+        tcp.main(["--dry-run-synthetic", "--fast-analytic", "--all-carbon-params",
+                  "--steps", "1"])
+    # --fast-analytic defaults True, so omitting it still hits the same guard.
+    with pytest.raises(SystemExit, match="not supported"):
+        tcp.main(["--dry-run-synthetic", "--all-carbon-params", "--steps", "1"])
+    # The slow-path + --all-carbon-params combo remains valid: _finalize_args
+    # must NOT raise for it.
+    args = tcp._finalize_args(tcp.build_arg_parser().parse_args(
+        ["--dry-run-synthetic", "--slow-spinup-grad", "--all-carbon-params"]))
+    assert args.fast_analytic is False
+    assert args.all_carbon_params is True
+
+
+def test_quick_slow_spinup_grad_path_still_runs(tmp_path):
+    """The slow grad-through-spin-up forward remains available + monotone (one
+    optimizer step on a tiny synthetic world)."""
+    outdir = tmp_path / "carbon_calib_slow"
+    rc = tcp.main(["--quick", "--slow-spinup-grad", "--output", str(outdir)])
+    assert rc == 0
+    tuned = json.loads((outdir / "tuned_carbon_parameters.json").read_text())
+    assert tuned["training"]["forward"] == "slow_spinup_grad"
+    hist = tuned["loss_history"]
+    assert len(hist) >= 1 and all(np.isfinite(x) for x in hist)
     assert hist[-1] <= hist[0] + 1e-9
 
 

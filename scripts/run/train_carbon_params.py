@@ -77,10 +77,27 @@ _VAN_BEMMELEN_OC_PER_OM = 0.58
 
 # The SOM fields Stage-B v1 calibrates (traced through the spin-up); the same set
 # B1's gradient smoke proved a finite, non-zero jax.grad for.
+#
+# ``Q10_het_exp`` is EXCLUDED here (unlike the B1 slow/--slow-spinup-grad set,
+# which keeps it -- see tests/land/validation/test_carbon_calibration_gradient.py).
+# Reason: Q10_het_exp enters carbon_cycle._temperate_modifier, which sets BOTH
+# (a) the SOM cascade decomposition rate (captured live -- fast_analytic.
+# analytic_som_soc calls som_decomposition_rate on the traced config every
+# step) and (b) the litter -> SOM decomposition flux lit_to_som (carbon_cycle.py
+# ~L565-595) -- part of the SOM active-pool INPUT.  Fast mode PRECOMPUTES
+# lit_to_som_annual ONCE at default parameters
+# (global_init.precompute_fast_analytic_inputs) and freezes it, so path (b) is
+# invisible to jax.grad here: training Q10_het_exp in fast mode would see only a
+# partial/biased gradient (path (a) only).  The remaining seven fields never
+# appear in the litter equations, so their fast-mode gradient is the full
+# gradient.  (cwd_humification_eff is unaffected: its wood input is stored
+# SEPARATELY as a_wood_annual -- the NPP-to-wood allocation, independent of
+# every SOM param, no approximation at all -- with the cwd_humification_eff
+# multiply applied LIVE in analytic_som_soc, so its gradient is exact too.)
 SOM_FIELDS: tuple[str, ...] = (
     "tor_som_active", "tor_som_slow", "tor_som_passive",
     "f_active_to_slow", "f_slow_to_passive", "som_freeze_floor",
-    "Q10_het_exp", "cwd_humification_eff",
+    "cwd_humification_eff",
 )
 
 # --- training defaults (modest; a compute-node short calibration) --------------
@@ -96,6 +113,11 @@ DEFAULT_SOIL_DEPTH = 3.0          # soil column depth [m]
 DEFAULT_MAX_ARCHETYPES = 40       # representative-subset cap (0 = keep all)
 DEFAULT_OUTDIR = Path("results/carbon_calibration")
 GRAD_NONZERO_TOL = 1.0e-14
+# Mean analytic-vs-spin-up SOC relative error above which the fast forward is
+# flagged as an unreliable proxy for the model (a loud run-log warning, not a
+# hard fail: the unit test gates the tiny-world match; the run surfaces the
+# production-scale fidelity so a large mismatch is never silently trusted).
+_MATCH_WARN_REL = 0.15
 # Line-search scales for a monotone-decreasing MUON step (mirrors the SCM-RCE
 # trainer): try the full step first, then progressively shorter ones.
 _LINE_SEARCH_SCALES = (1.0, 0.5, 0.25, 0.1, 0.05, 0.02, 0.01)
@@ -175,10 +197,13 @@ def build_carbon_trainables(*, som_only: bool = True) -> TrainablePhysicsParams:
     ``CarbonConfig`` production defaults (``build_trainable_params`` seeds each raw
     leaf from the live NamedTuple default via the inverse sigmoid).
 
-    ``som_only`` (default) restricts to the eight SOM fields (:data:`SOM_FIELDS`)
-    -- the Stage-B v1 calibration target -- so the optimizer is not handed the
-    ~30 DALEC phenology/allocation leaves that barely move equilibrium SOC.  Pass
-    ``som_only=False`` to expose the full tier-2 carbon set.
+    ``som_only`` (default) restricts to the seven fast-analytic-valid SOM fields
+    (:data:`SOM_FIELDS`) -- the Stage-B v1 calibration target -- so the optimizer
+    is not handed the ~30 DALEC phenology/allocation leaves that barely move
+    equilibrium SOC (nor ``Q10_het_exp``, whose fast-mode gradient is partial --
+    see the comment on :data:`SOM_FIELDS`).  Pass ``som_only=False`` to expose the
+    full tier-2 carbon set (only valid with ``--slow-spinup-grad``; see
+    :func:`_finalize_args`).
     """
     params = build_trainable_params(
         active_scheme_keys={CARBON_SCHEME_KEY}, tier="extended", dtype=jnp.float64)
@@ -233,6 +258,69 @@ def make_loss_fn(
         return _total_loss(eq, losses, cover_weight)
 
     return loss_fn
+
+
+# ===========================================================================
+# Fast closed-form forward (B2-fast): differentiate the analytic SOM
+# equilibrium, NOT the coupled spin-up.  The spin-up is run ONCE (no grad) to
+# record the SOM-parameter-INDEPENDENT inputs; each optimizer step then costs a
+# handful of vector ops instead of ~tens of minutes of grad-through-spin-up.
+# ===========================================================================
+def make_fast_analytic_forward(precomputed) -> Callable[[TrainablePhysicsParams], jax.Array]:
+    """Build ``model_soc(params) -> (n_arch,)`` SOC [kgC/m2] from the closed-form
+    SOM equilibrium.
+
+    The trained SOM overrides are spliced into ``CarbonConfig`` via
+    ``apply_param_overrides`` INSIDE the returned closure (traced --
+    SegmentForcing/SCM-RCE override doctrine), then
+    :func:`legoesm.land.carbon.fast_analytic.analytic_som_soc` forward-substitutes
+    the cascade equilibrium from the precomputed inputs.  Production defaults are
+    untouched (a fresh ``CarbonConfig`` per call; the overrides are the only
+    substituted leaves).
+    """
+    from legoesm.land.carbon.config import CarbonConfig
+    from legoesm.land.carbon.fast_analytic import analytic_som_soc
+    from legoesm.training.param_collector import apply_param_overrides
+
+    def model_soc(params: TrainablePhysicsParams) -> jax.Array:
+        # Fresh CarbonConfig per call, overrides spliced in via _replace (traced,
+        # immutable NamedTuple): production defaults are never mutated.
+        cfg = apply_param_overrides(
+            CarbonConfig(scheme="differland"), _carbon_overrides(params))
+        return analytic_som_soc(precomputed, cfg) / _G_PER_KG   # gC/m2 -> kgC/m2
+
+    return model_soc
+
+
+def make_fast_loss_fn(
+    precomputed, *, target: jax.Array, cover_weight: jax.Array,
+) -> Callable[[TrainablePhysicsParams], jax.Array]:
+    """Fast-analytic SOC calibration loss: cover-weighted MSE of the closed-form
+    per-archetype SOM SOC vs the observed SOC.
+
+    SOC-only by construction (the closed form is SOM-specific); the modular
+    ``biomass`` / ``lai`` terms remain a slow-path / v2 concern.  ``jax.grad`` of
+    this loss flows to the seven fast-valid SOM leaves (:data:`SOM_FIELDS`)
+    through the analytic cascade at ~zero cost -- no spin-up in the gradient loop.
+    """
+    model_soc = make_fast_analytic_forward(precomputed)
+
+    def loss_fn(params: TrainablePhysicsParams) -> jax.Array:
+        return cover_weighted_mse(model_soc(params), target, cover_weight)
+
+    return loss_fn
+
+
+def _build_loss_fn(args, target_bundle, spin, precomputed):
+    """Return ``loss_fn(params) -> scalar`` for the active forward -- the fast
+    closed-form SOC loss when ``--fast-analytic``, else the slow spin-up loss."""
+    if args.fast_analytic:
+        return make_fast_loss_fn(
+            precomputed, target=target_bundle["losses"]["soc"].target,
+            cover_weight=target_bundle["cover_weight"])
+    return make_loss_fn(
+        table=target_bundle["table"], losses=target_bundle["losses"],
+        cover_weight=target_bundle["cover_weight"], **spin)
 
 
 def _grad_stats(grads: TrainablePhysicsParams, *, tol: float) -> dict[str, dict]:
@@ -501,8 +589,9 @@ def _per_pft_soc(pft_id, values, cover_weight) -> dict[str, float]:
     return out
 
 
-def _model_soc(params, target_bundle, spin) -> np.ndarray:
-    """Per-archetype modelled SOC [kgC/m2] for a given parameter set (no grad)."""
+def _slow_model_soc(params, target_bundle, spin) -> np.ndarray:
+    """Per-archetype modelled SOC [kgC/m2] via the SLOW grad-through-spin-up
+    forward (no grad here -- scorecard evaluation only)."""
     from legoesm.land.carbon.global_init import equilibrate_archetypes_traced
     eq = equilibrate_archetypes_traced(
         target_bundle["table"], _carbon_overrides(params),
@@ -511,13 +600,67 @@ def _model_soc(params, target_bundle, spin) -> np.ndarray:
     return np.asarray(_soc_extractor(eq))
 
 
+def _build_model_soc_fn(args, target_bundle, spin, precomputed):
+    """Return ``model_soc_fn(params) -> (n_arch,) kgC/m2`` for the active forward
+    (fast closed-form when ``--fast-analytic``, else the slow spin-up)."""
+    if args.fast_analytic:
+        fwd = make_fast_analytic_forward(precomputed)
+        return lambda params: np.asarray(fwd(params))
+    return lambda params: _slow_model_soc(params, target_bundle, spin)
+
+
+def _precompute_and_check(table, initial_params, spin):
+    """Run the ONE-TIME default-parameter precompute spin-up and VERIFY the
+    closed-form SOM SOC reproduces the spin-up equilibrium at the defaults.
+
+    Returns ``(FastAnalyticInputs, match_dict)``.  The match is reported (mean /
+    max absolute relative error over archetypes) but never auto-fails here -- the
+    calibration proceeds and the scorecard/report surface the fidelity so a large
+    mismatch is visible rather than silently shipped.
+    """
+    from legoesm.land.carbon.global_init import precompute_fast_analytic_inputs
+
+    t0 = time.time()
+    precomputed, real_som = precompute_fast_analytic_inputs(
+        table, n_spinup=spin["n_spinup"], n_verify=spin["n_verify"],
+        dt=spin["dt"], n_layers=spin["n_layers"], soil_depth=spin["soil_depth"])
+    # Closed-form SOC at the warm-started production defaults vs the spin-up
+    # equilibrium SOM, both in kgC/m2 (the warm start reproduces the defaults to
+    # sigmoid-clamp precision, so this is the analytic-vs-spin-up fidelity).
+    model_soc = make_fast_analytic_forward(precomputed)
+    analytic_kg = np.asarray(model_soc(initial_params))
+    real_kg = np.asarray(real_som) / _G_PER_KG
+    denom = np.maximum(np.abs(real_kg), 1e-6)
+    rel = np.abs(analytic_kg - real_kg) / denom
+    match = {
+        "n_archetypes": int(real_kg.shape[0]),
+        "mean_abs_rel_err": float(np.mean(rel)),
+        "max_abs_rel_err": float(np.max(rel)),
+        "max_abs_err_kgC_m2": float(np.max(np.abs(analytic_kg - real_kg))),
+        "spinup_som_kgC_m2_range": [float(np.min(real_kg)), float(np.max(real_kg))],
+        "precompute_seconds": float(time.time() - t0),
+    }
+    print(f"[fast-analytic] precompute {match['precompute_seconds']:.1f}s; "
+          f"analytic-vs-spin-up SOC match over {match['n_archetypes']} archetypes: "
+          f"mean|rel|={match['mean_abs_rel_err']:.2%}  "
+          f"max|rel|={match['max_abs_rel_err']:.2%}  "
+          f"(spin-up SOM {match['spinup_som_kgC_m2_range'][0]:.1f}..."
+          f"{match['spinup_som_kgC_m2_range'][1]:.1f} kgC/m2)")
+    if match["mean_abs_rel_err"] > _MATCH_WARN_REL:
+        print(f"[WARN] fast-analytic forward diverges from the spin-up "
+              f"(mean|rel|={match['mean_abs_rel_err']:.1%} > {_MATCH_WARN_REL:.0%}); "
+              f"the closed form may not faithfully track the model -- inspect "
+              f"before trusting the tuned parameters (raise --n-spinup / --dt).")
+    return precomputed, match
+
+
 def _write_scorecard(path: Path, *, target_bundle, initial_params, tuned_params,
-                     spin) -> dict[str, Any]:
+                     model_soc_fn) -> dict[str, Any]:
     pft_id = target_bundle["pft_id"]
     cover = np.asarray(target_bundle["cover_weight"])
     observed = target_bundle["observed_soc"]
-    soc_default = _model_soc(initial_params, target_bundle, spin)
-    soc_tuned = _model_soc(tuned_params, target_bundle, spin)
+    soc_default = model_soc_fn(initial_params)
+    soc_tuned = model_soc_fn(tuned_params)
 
     obs_pft = _per_pft_soc(pft_id, observed, cover)
     def_pft = _per_pft_soc(pft_id, soc_default, cover)
@@ -635,12 +778,19 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     initial_params = build_carbon_trainables(som_only=not args.all_carbon_params)
     params = initial_params
     print(f"[preflight] {len(params.constraints)} trainable carbon params "
-          f"(SOM-only={not args.all_carbon_params}); n_spinup={args.n_spinup}, "
-          f"max_archetypes={args.max_archetypes}")
+          f"(SOM-only={not args.all_carbon_params}); mode="
+          f"{'fast-analytic' if args.fast_analytic else 'slow-spinup-grad'}; "
+          f"n_spinup={args.n_spinup}, max_archetypes={args.max_archetypes}")
 
-    loss_fn = make_loss_fn(
-        table=target_bundle["table"], losses=target_bundle["losses"],
-        cover_weight=target_bundle["cover_weight"], **spin)
+    # Fast-analytic: run the spin-up ONCE (no grad) to record the SOM-parameter-
+    # INDEPENDENT inputs, then differentiate the closed-form cascade equilibrium.
+    precomputed = None
+    match_info: dict[str, Any] = {}
+    if args.fast_analytic:
+        precomputed, match_info = _precompute_and_check(
+            target_bundle["table"], initial_params, spin)
+
+    loss_fn = _build_loss_fn(args, target_bundle, spin, precomputed)
 
     # Preflight: finite + non-zero gradient gate (drop dead DOFs before MUON).
     t0 = time.time()
@@ -662,9 +812,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     print(f"[preflight] loss={pre_loss_val:.8g}  trainable={len(params.constraints)}  "
           f"({time.time() - t0:.1f}s)")
 
-    loss_fn = make_loss_fn(
-        table=target_bundle["table"], losses=target_bundle["losses"],
-        cover_weight=target_bundle["cover_weight"], **spin)
+    loss_fn = _build_loss_fn(args, target_bundle, spin, precomputed)
     optimizer = create_optimizer(TrainingConfig(
         lr=args.lr, warmup_steps=args.warmup_steps,
         total_steps=max(args.steps, 1), grad_clip_norm=args.grad_clip_norm,
@@ -715,6 +863,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "schedule": "linear warmup then cosine decay to zero",
         },
         "training": {
+            "forward": "fast_analytic" if args.fast_analytic else "slow_spinup_grad",
             "n_spinup": args.n_spinup, "n_verify": args.n_verify, "dt": args.dt,
             "n_layers": args.n_layers, "soil_depth": args.soil_depth,
             "max_archetypes": args.max_archetypes,
@@ -725,15 +874,18 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "frozen_params": sorted(frozen),
             "initial_loss": loss_history[0], "final_loss": loss_history[-1],
             "loss_improved": bool(improved),
+            "analytic_vs_spinup_match": match_info,
         },
     }
+    model_soc_fn = _build_model_soc_fn(args, target_bundle, spin, precomputed)
     tuned_json = args.outdir / "tuned_carbon_parameters.json"
     payload = _write_tuned_json(
         tuned_json, tuned_params=params, initial_params=initial_params,
         loss_history=loss_history, meta=meta)
     scorecard = _write_scorecard(
         args.outdir / "scorecard.json", target_bundle=target_bundle,
-        initial_params=initial_params, tuned_params=params, spin=spin)
+        initial_params=initial_params, tuned_params=params,
+        model_soc_fn=model_soc_fn)
     _plot_loss(args.outdir / "loss_curve.png", loss_history)
 
     print(f"[done] wrote {tuned_json}")
@@ -819,7 +971,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    default="muon")
     p.add_argument("--grad-nonzero-tol", type=float, default=GRAD_NONZERO_TOL)
     p.add_argument("--all-carbon-params", action="store_true",
-                   help="train the full tier-2 carbon set, not just the 8 SOM fields")
+                   help="train the full tier-2 carbon set, not just the 7 "
+                        "fast-analytic-valid SOM fields (requires "
+                        "--slow-spinup-grad; see SOM_FIELDS)")
+    # --- forward map: fast closed-form (default) vs slow grad-through-spin-up ---
+    p.add_argument("--fast-analytic", dest="fast_analytic", action="store_true",
+                   default=True,
+                   help="DEFAULT: differentiate the closed-form SOM-cascade "
+                        "equilibrium (one no-grad precompute spin-up, then many "
+                        "cheap optimizer steps). The spin-up (n-spinup/n-verify/dt/"
+                        "n-layers/soil-depth) is run ONCE to record the "
+                        "SOM-parameter-independent inputs.")
+    p.add_argument("--slow-spinup-grad", dest="fast_analytic", action="store_false",
+                   help="use the B1 grad-through-coupled-spin-up forward "
+                        "(equilibrate_archetypes_traced); correct but ~tens of "
+                        "minutes per optimizer step.")
     # --- output ---
     p.add_argument("--output", "--outdir", dest="outdir", type=Path,
                    default=DEFAULT_OUTDIR)
@@ -829,6 +995,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _finalize_args(args: argparse.Namespace) -> argparse.Namespace:
+    # --fast-analytic (default True) is only gradient-valid for the seven
+    # SOM_FIELDS: precompute_fast_analytic_inputs freezes every non-SOM (GPP /
+    # phenology / allocation) input at the DEFAULT tier-2 params, so a tier-2
+    # field --all-carbon-params would additionally expose has its effect baked
+    # into that frozen precompute -- its fast-mode gradient would be stale or
+    # exactly zero (dead DOF), not a real calibration signal.  Fail loudly
+    # instead of silently training on a wrong/zero gradient; the full tier-2 set
+    # remains available via the correct (but slow) grad-through-spin-up forward.
+    if args.fast_analytic and args.all_carbon_params:
+        raise SystemExit(
+            "--fast-analytic --all-carbon-params is not supported: the fast "
+            "closed-form forward has a valid gradient only for the SOM-pool-only "
+            "fields in SOM_FIELDS. The non-SOM tier-2 params --all-carbon-params "
+            "adds (GPP/phenology/allocation) have their effects baked into the "
+            "frozen precompute, so their fast-mode gradient would be stale/zero. "
+            "Use --slow-spinup-grad --all-carbon-params to train the full "
+            "tier-2 carbon set with the correct (grad-through-spin-up) forward.")
     if args.quick:
         args.dry_run_synthetic = True
         args.steps = min(args.steps, QUICK_STEPS)

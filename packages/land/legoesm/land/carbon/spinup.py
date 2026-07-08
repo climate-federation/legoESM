@@ -223,14 +223,16 @@ def _total_carbon(carbon_state: CarbonState) -> jnp.ndarray:
     )
 
 
-def _step_doy_hour(step_idx, dt):
+def step_doy_hour(step_idx, dt):
     """Day-of-year and hour-of-day for sub-daily ``step_idx`` at timestep ``dt``.
 
     The repeating-annual-climate time convention shared by every forward
     integrator in this module (the transient/verify scans in
     :func:`run_semi_analytic_spinup` and the raw transient in
-    :func:`integrate_annual_pools`), so the time-of-year mapping is defined
-    ONCE rather than re-derived per caller.
+    :func:`integrate_annual_pools`) AND the offline fast-analytic precompute's
+    stationary-year recording scan
+    (:func:`legoesm.land.carbon.global_init.precompute_fast_analytic_inputs`), so
+    the time-of-year mapping is defined ONCE rather than re-derived per caller.
     """
     t_day = step_idx * (dt / _SECS_PER_DAY)
     doy = jnp.mod(t_day, _YEAR_DAYS)
@@ -347,7 +349,7 @@ def run_semi_analytic_spinup(
 
     def _inner_step(carry, step_idx):
         state, carbon = carry
-        doy, hour = _step_doy_hour(step_idx, dt)
+        doy, hour = step_doy_hour(step_idx, dt)
         forcing = forcing_fn(doy, hour)
         new_state, new_carbon, diag = step_fn(state, carbon, forcing, doy)
         return (new_state, new_carbon), diag
@@ -467,7 +469,7 @@ def integrate_annual_pools(
     """
     def _inner_step(carry, step_idx):
         state, carbon = carry
-        doy, hour = _step_doy_hour(step_idx, dt)
+        doy, hour = step_doy_hour(step_idx, dt)
         forcing = forcing_fn(doy, hour)
         new_state, new_carbon, _diag = step_fn(state, carbon, forcing, doy)
         return (new_state, new_carbon), None

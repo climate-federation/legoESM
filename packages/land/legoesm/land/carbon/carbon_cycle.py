@@ -357,6 +357,33 @@ def _effective_rate(rate: jnp.ndarray, dt_days: jnp.ndarray) -> jnp.ndarray:
     return (1.0 - (1.0 - rate) ** dt_days) / jnp.maximum(dt_days, 1e-10)
 
 
+def som_decomposition_rate(
+    T: jnp.ndarray,
+    precip: jnp.ndarray,
+    tor_som: jnp.ndarray,
+    config: CarbonConfig,
+    dt_days: jnp.ndarray,
+) -> jnp.ndarray:
+    """Effective per-day SOM decomposition FRACTION for a pool whose base
+    (reference-T, unfrozen) turnover is *tor_som* under conditions ``(T, precip)``.
+
+    Public wrapper reusing the EXACT kinetics the prognostic step applies to each
+    SOM pool (see :func:`step_carbon_differland`)::
+
+        r = _effective_rate(_som_decomp_modifier(T, precip, config) * tor_som, dt_days)
+
+    i.e. the shared ``f_temp * f_moist * f_freeze`` environmental modifier
+    (:func:`_som_decomp_modifier`) scales the base rate, then
+    :func:`_effective_rate` maps it through the exact finite-dt exponential-decay
+    handling.  Exposed so the offline differentiable fast-analytic SOC calibration
+    (:mod:`legoesm.land.carbon.fast_analytic`) computes the per-pool turnover from
+    the SAME modifier + finite-dt convention as the model, rather than importing
+    the private helpers or re-deriving the numerics.  ``T``/``precip`` broadcast
+    together; ``tor_som`` is a scalar (or broadcastable) base turnover [1/day].
+    """
+    return _effective_rate(_som_decomp_modifier(T, precip, config) * tor_som, dt_days)
+
+
 # ===================================================================
 # DifferLand prognostic step
 # ===================================================================

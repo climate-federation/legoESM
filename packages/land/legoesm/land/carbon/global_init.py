@@ -768,6 +768,129 @@ def equilibrate_archetypes_traced(
     return CarbonState(**pools_out)
 
 
+def precompute_fast_analytic_inputs(
+    table: ArchetypeTable,
+    *,
+    n_spinup: int = _N_SPINUP_DEFAULT,
+    n_verify: int = _N_VERIFY_DEFAULT,
+    dt: float = _DT_DEFAULT,
+    n_layers: int = _N_LAYERS_DEFAULT,
+    soil_depth: float = _SOIL_DEPTH_DEFAULT,
+):
+    """Record the SOM-parameter-INDEPENDENT inputs for the fast closed-form SOC
+    forward (:func:`legoesm.land.carbon.fast_analytic.analytic_som_soc`).
+
+    Runs ONE DEFAULT-parameter verified semi-analytic spin-up per
+    ``(is_woody, is_evergreen, soil_class)`` group (NO grad -- the SAME
+    :func:`iter_archetype_batches` construction, :func:`make_archetype_step_fn`
+    coupled step, and :func:`~legoesm.land.carbon.spinup.run_semi_analytic_spinup`
+    driver as :func:`equilibrate_archetypes`), then re-integrates ONE stationary
+    year from the verified equilibrium recording, per sub-daily step:
+
+    * the top-soil-layer temperature the SOM decomposition modifier sees
+      (``new_state.T_soil[:, 0]`` -- the ``T`` passed to the coupled carbon step),
+    * the litter -> SOM decomposition flux ``lit_to_som`` and the NPP-to-wood
+      allocation ``a_wood`` (the CWD->SOM input driver the reference reset
+      :func:`~legoesm.land.carbon.spinup.analytic_slow_pool_equilibrium` uses),
+      summed to annual [gC/m2/yr].
+
+    Because the tunable SOM parameters have NO feedback onto GPP / litterfall /
+    soil energy, this trajectory + these inputs are independent of them, so
+    :func:`~legoesm.land.carbon.fast_analytic.analytic_som_soc` can vary the SOM
+    parameters at ~zero cost while reproducing the model's equilibrium SOC at the
+    defaults.  The stationary year is re-integrated from the RETURNED equilibrium
+    so the recorded turnover is evaluated at exactly the equilibrium pools (a
+    tight match to the returned ``som_total``).
+
+    Parameters mirror :func:`equilibrate_archetypes` (the precompute should use a
+    healthy ``n_spinup`` for a well-settled equilibrium; it is a ONE-TIME forward
+    pass, not in the gradient loop).
+
+    Returns
+    -------
+    (FastAnalyticInputs, som_total_equilibrium)
+        The per-archetype fast-analytic inputs and the per-archetype REAL
+        verified-equilibrium total SOM ``(n_arch,)`` [gC/m2]
+        (``som_total(final_carbon)``) for the analytic-vs-spin-up match check.
+    """
+    # Deferred (function-scope) imports: keep Stage-A / module import numpy-only.
+    import jax
+    import jax.numpy as jnp
+
+    from legoesm.land.carbon.carbon_cycle import init_carbon_state
+    from legoesm.land.carbon.config import som_total
+    from legoesm.land.carbon.fast_analytic import FastAnalyticInputs
+    from legoesm.land.carbon.spinup import run_semi_analytic_spinup, step_doy_hour
+    from legoesm.land.multilayer_land import init_multilayer_land_state
+
+    pft_id = np.asarray(table.pft_id, int)
+    n_arch = pft_id.shape[0]
+    steps_per_year = int(round(_SECONDS_PER_YEAR / dt))
+    dt_days = dt / _SECS_PER_DAY
+
+    # DEFAULT-parameter batches (carbon_overrides=None): the recorded inputs are
+    # deliberately at the production defaults -- the SOM parameters are varied
+    # later ONLY inside the closed form, never re-run.
+    batches = iter_archetype_batches(
+        table, n_layers=n_layers, soil_depth=soil_depth, dt=dt)
+
+    lit_to_som_annual = np.zeros(n_arch)
+    a_wood_annual = np.zeros(n_arch)
+    soil_T_traj = np.zeros((n_arch, steps_per_year))
+    real_som = np.zeros(n_arch)
+
+    for batch in batches:
+        g_idx = np.asarray(batch.g_idx, int)
+        ncol_g = g_idx.shape[0]
+        step_fn = make_archetype_step_fn(batch.config, batch.land_params, dt=dt)
+        state0 = init_multilayer_land_state(
+            ncol_g, batch.config, T_init=batch.t_init)
+        carbon0 = init_carbon_state((ncol_g,), batch.config.carbon)
+        final_state, final_carbon, _annual = run_semi_analytic_spinup(
+            step_fn, state0, carbon0, batch.forcing_fn,
+            n_spinup=n_spinup, n_verify=n_verify,
+            steps_per_year=batch.steps_per_year, dt=dt,
+            cwd_humification_eff=batch.config.carbon.cwd_humification_eff,
+            f_active_to_slow=batch.config.carbon.f_active_to_slow,
+            f_slow_to_passive=batch.config.carbon.f_slow_to_passive,
+            remat=False)
+
+        # Record ONE stationary year from the verified equilibrium: the top-soil
+        # temperature the modifier sees + the param-independent SOM inputs.  The
+        # state/carbon evolve through the byte-identical coupled step_fn; only the
+        # recorded diagnostics differ from the spin-up scans.
+        def _record_step(carry, step_idx):
+            st, cb = carry
+            doy, hour = step_doy_hour(step_idx, dt)
+            forcing = batch.forcing_fn(doy, hour)
+            st_new, cb_new, diag = step_fn(st, cb, forcing, doy)
+            return (st_new, cb_new), (
+                st_new.T_soil[:, 0], diag.lit_to_som, diag.a_wood)
+
+        _carry, (t_seq, lit_seq, awood_seq) = jax.lax.scan(
+            _record_step, (final_state, final_carbon),
+            jnp.arange(batch.steps_per_year))
+        # Annual SOM inputs [gC/m2/yr] = sum over the year of the per-day rate.
+        lit_ann = jnp.sum(lit_seq * dt_days, axis=0)         # (ncol_g,)
+        awood_ann = jnp.sum(awood_seq * dt_days, axis=0)     # (ncol_g,)
+
+        lit_to_som_annual[g_idx] = np.asarray(lit_ann)
+        a_wood_annual[g_idx] = np.asarray(awood_ann)
+        soil_T_traj[g_idx, :] = np.asarray(t_seq).T          # (ncol_g, steps_per_year)
+        real_som[g_idx] = np.asarray(som_total(final_carbon))
+
+    # Per-archetype precip [kg/m2/s] matches the archetype forcing
+    # (map_yr / seconds_per_year -- constant over the year, drives f_moist).
+    precip = np.asarray(table.map_yr, float) / _SECONDS_PER_YEAR
+    inputs = FastAnalyticInputs(
+        lit_to_som_annual=jnp.asarray(lit_to_som_annual),
+        a_wood_annual=jnp.asarray(a_wood_annual),
+        soil_T_traj=jnp.asarray(soil_T_traj),
+        precip=jnp.asarray(precip),
+        dt_days=float(dt_days))
+    return inputs, jnp.asarray(real_som)
+
+
 def map_to_grid(cell_archetype_id, cell_archetype_weight, archetype_equilibria):
     """Cover-weighted map of per-archetype equilibrium pools onto the grid.
 
