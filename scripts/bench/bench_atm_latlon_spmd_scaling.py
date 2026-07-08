@@ -113,29 +113,15 @@ def main() -> int:
     args = p.parse_args()
 
     if args.multicontroller:
-        # MUST run before any other JAX use (backend init). SLURM auto-detects;
-        # mpiexec needs the explicit coordinator + launcher env vars (OpenMPI
-        # OMPI_*, or Cray PALS PMI_* on Derecho).
-        if args.coordinator is not None:
-            n_procs = int(os.environ.get(
-                "OMPI_COMM_WORLD_SIZE", os.environ.get("PMI_SIZE", "0")))
-            proc_id = int(os.environ.get(
-                "OMPI_COMM_WORLD_RANK", os.environ.get("PMI_RANK", "-1")))
-            if n_procs < 1 or proc_id < 0:
-                raise SystemExit(
-                    "--coordinator given but no launcher rank env found "
-                    "(OMPI_COMM_WORLD_SIZE/RANK or PMI_SIZE/PMI_RANK).")
-            jax.distributed.initialize(
-                coordinator_address=args.coordinator,
-                num_processes=n_procs, process_id=proc_id)
-        else:
-            # Environment-routed: SLURM/OMPI -> bare auto-detect; PALS/PMI
-            # (Derecho mpiexec) -> mpi4py bootstrap. Real init failures
-            # re-raise loudly.
-            from legoesm.parallel.early_init import (
-                init_jax_distributed_with_fallback,
-            )
-            init_jax_distributed_with_fallback()
+        # MUST run before any other JAX use (backend init).  The SHARED
+        # helper owns the launcher-env contract (SLURM/OMPI auto-detect,
+        # PALS mpi4py bootstrap, explicit-coordinator path) AND the
+        # hardening: post-init silent-fallback guard + NCCL net-plugin
+        # warning — an inline init here would bypass both (codex).
+        from legoesm.parallel.early_init import (
+            init_multicontroller_distributed,
+        )
+        init_multicontroller_distributed(args.coordinator)
 
     from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
         make_sharded_atm_latlon_step, shard_state_atm_latlon)
