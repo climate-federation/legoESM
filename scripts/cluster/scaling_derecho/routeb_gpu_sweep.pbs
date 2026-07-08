@@ -112,11 +112,20 @@ mkdir -p "$OUTDIR"
 echo "=== route-B GPU sweep ($GRID): mode=$MODE res=[$RES_LIST] gpus=[$GPU_RANKS] (cap=$TOTAL_GPUS) nlev=$NLEV ==="
 echo "    nodes=$_n_nodes  outdir=$OUTDIR"
 
-# rank -> local GPU pin (PALS exports PALS_LOCAL_RANKID; python auto-pin misses it).
-PIN='export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-${OMPI_COMM_WORLD_LOCAL_RANK:-0}}; exec "$@"'
+# rank -> local GPU pin + PALS->OMPI rank bridge.  jax.distributed's
+# multicontroller init reads OMPI_COMM_WORLD_RANK/SIZE, but Cray PALS exposes
+# only PALS_* -- so bridge PALS_RANKID -> OMPI_COMM_WORLD_RANK (SIZE is set
+# per-N in the loop).  The mc_nccl canary proves this bridge + an explicit
+# --coordinator is what federates route-B on Derecho; without it the mpi4py
+# auto-detect returns jax.process_count()=1 and every rung runs un-federated.
+PIN='export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-0}; '\
+'export OMPI_COMM_WORLD_RANK=${PALS_RANKID:-${OMPI_COMM_WORLD_RANK:-0}}; exec "$@"'
+# Coordinator host = the first node in the allocation (rank 0).
+COORD_HOST="$(head -n 1 "${PBS_NODEFILE:-/dev/null}" 2>/dev/null || true)"
+[ -n "$COORD_HOST" ] || COORD_HOST="$(hostname)"
 
 # Distinct coordinator port per launch (sequential inits on one port hit a
-# TIME_WAIT re-bind flake).  early_init.resolve_coordinator_port reads this.
+# TIME_WAIT re-bind flake).
 _port="${COORD_PORT_BASE:-29800}"
 
 rc_all=0
@@ -132,7 +141,9 @@ for RES in $RES_LIST; do
     _nodes_needed=$(( (N + _gpus_per_node - 1) / _gpus_per_node ))
     PPN=$(( (N + _nodes_needed - 1) / _nodes_needed ))
     export LEGOESM_COORDINATOR_PORT="$_port"; _port=$(( _port + 1 ))
-    echo "=== route-B GPU $GRID res=$RES N=$N (ppn=$PPN, coord_port=$LEGOESM_COORDINATOR_PORT) ==="
+    export OMPI_COMM_WORLD_SIZE="$N"     # world size for the PALS->OMPI bridge
+    _coord="${COORD_HOST}:${LEGOESM_COORDINATOR_PORT}"
+    echo "=== route-B GPU $GRID res=$RES N=$N (ppn=$PPN, coord=$_coord) ==="
     # Per-grid SPMD bench argv (mpiexec + PIN wrapper is shared).  latlon sweeps
     # n_lat; icosahedral sweeps subdivision level with reorder_for pinned to the
     # shared padded mesh.  The mpas bench is inherently strong (fixed mesh, vary
@@ -140,13 +151,14 @@ for RES in $RES_LIST; do
     case "$GRID" in
       latlon)
         BENCH=( "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py
-                --multicontroller --n-devices "$N"
+                --multicontroller --n-devices "$N" --coordinator "$_coord"
                 --mode "$MODE" --n-lat "$RES" --n-lon $(( 2 * RES )) --nlev "$NLEV"
                 --steps $(( N_WARMUP + N_TIMING )) --warmup "$N_WARMUP"
                 --out "$OUTDIR/${_sub}/spmd_R${RES}_N${N}.jsonl" ) ;;
       icosahedral)
         BENCH=( "$PY" scripts/bench/bench_mpas_spmd_scaling.py
                 --multicontroller --n-devices "$N" --reorder-for "$_reorder_for"
+                --coordinator "$_coord"
                 --subdivision "$RES" --nlev "$NLEV" --partition-method sfc
                 --steps $(( N_WARMUP + N_TIMING )) --warmup "$N_WARMUP"
                 --out "$OUTDIR/${_sub}/spmd_L${RES}_N${N}.jsonl" ) ;;
@@ -155,7 +167,7 @@ for RES in $RES_LIST; do
         # --output-dir (grid_type=cubed-sphere + sypd) -> aggregator _row_from_json.
         # Uses --n-levels/--n-warmup/--n-timing (not --nlev/--steps/--warmup).
         BENCH=( "$PY" scripts/bench/run_cpu_mpi_scaling.py
-                --grid cubed-sphere --cs-spmd --device gpu
+                --grid cubed-sphere --cs-spmd --device gpu --coordinator "$_coord"
                 --physics "$PHYSICS" --mode "$MODE" --resolution "$RES"
                 --precision "$PRECISION" --n-levels "$NLEV"
                 --n-warmup "$N_WARMUP" --n-timing "$N_TIMING"

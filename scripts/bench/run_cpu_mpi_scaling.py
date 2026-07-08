@@ -1397,6 +1397,15 @@ def build_parser() -> argparse.ArgumentParser:
              "(shard-local vs serial = 6.7e-10 @5 steps, job 8462928).",
     )
     p.add_argument(
+        "--coordinator", type=str, default=None,
+        help="host:port for jax.distributed on the --cs-spmd route-B path "
+             "(mpiexec/PALS).  When given, federate via the EXPLICIT-coordinator "
+             "init (reads OMPI_COMM_WORLD_SIZE/RANK) -- the reliable Cray-PALS "
+             "recipe the SPMD benches + mc_nccl canary use; it avoids the flaky "
+             "mpi4py auto-detect that returned jax.process_count()=1 on Derecho.  "
+             "Omit for SLURM/OpenMPI auto-detection.",
+    )
+    p.add_argument(
         "--latlon-2d", action="store_true",
         help="Lat-lon C-grid 2-D pencil decomposition (proc_lat x proc_lon "
              "factored from the rank count to minimise the per-rank halo "
@@ -1505,13 +1514,18 @@ def main() -> int:
         # never federated).
         _nproc = _launcher_world_size()
         if _nproc > 1:
-            # PBS/PALS has no bare-initialize auto-detection; the helper
-            # falls back to the mpi4py bootstrap (plain MPI, mpi4jax
-            # never armed on the --cs-spmd path).
+            # Federate via the SHARED multicontroller init (the same entry point
+            # the SPMD benches use).  With --coordinator + the launcher's
+            # OMPI/PMI rank-size env it takes the EXPLICIT-coordinator path,
+            # the reliable Cray-PALS recipe (mc_nccl canary).  Without a
+            # coordinator it delegates to the SLURM/OMPI auto-detect or mpi4py
+            # bootstrap -- but that mpi4py auto-detect returned
+            # jax.process_count()=1 on Derecho, so the sweep passes --coordinator.
+            # (mpi4jax is never armed on the --cs-spmd path.)
             from legoesm.parallel.early_init import (
-                init_jax_distributed_with_fallback,
+                init_multicontroller_distributed,
             )
-            init_jax_distributed_with_fallback()
+            init_multicontroller_distributed(args.coordinator)
 
     # --- GPU backend assertion (DEFERRED past --cs-spmd init) ---
     # Now safe to touch the backend: jax.distributed.initialize() (if any) has

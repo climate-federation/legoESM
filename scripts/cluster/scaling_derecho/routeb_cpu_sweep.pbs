@@ -114,8 +114,16 @@ echo "=== route-B CPU sweep ($GRID): mode=$MODE res=[$RES_LIST] nodes=[$NODE_RAN
 echo "    outdir=$OUTDIR"
 
 # Distinct coordinator port per launch (sequential inits on one port hit a
-# TIME_WAIT re-bind flake).  early_init.resolve_coordinator_port reads this.
+# TIME_WAIT re-bind flake).
 _port="${COORD_PORT_BASE:-29900}"
+# Coordinator host = the first node (rank 0).  Per-rank SHIM bridges PALS_RANKID
+# -> OMPI_COMM_WORLD_RANK that jax.distributed's multicontroller init reads
+# (Cray PALS exposes only PALS_*; SIZE is set per-N in the loop).  This bridge +
+# an explicit --coordinator is the proven mc_nccl-canary federation recipe;
+# without it the mpi4py auto-detect returns jax.process_count()=1.
+COORD_HOST="$(head -n 1 "${PBS_NODEFILE:-/dev/null}" 2>/dev/null || true)"
+[ -n "$COORD_HOST" ] || COORD_HOST="$(hostname)"
+SHIM='export OMPI_COMM_WORLD_RANK=${PALS_RANKID:-${OMPI_COMM_WORLD_RANK:-0}}; exec "$@"'
 
 rc_all=0
 for RES in $RES_LIST; do
@@ -125,32 +133,35 @@ for RES in $RES_LIST; do
         continue
     fi
     export LEGOESM_COORDINATOR_PORT="$_port"; _port=$(( _port + 1 ))
-    echo "=== route-B CPU $GRID res=$RES N=$N nodes (1 proc/node, coord_port=$LEGOESM_COORDINATOR_PORT) ==="
-    # Per-grid SPMD bench argv (mpiexec --ppn 1 wrapper shared).  cube uses
+    export OMPI_COMM_WORLD_SIZE="$N"     # world size for the PALS->OMPI bridge
+    _coord="${COORD_HOST}:${LEGOESM_COORDINATOR_PORT}"
+    echo "=== route-B CPU $GRID res=$RES N=$N nodes (1 proc/node, coord=$_coord) ==="
+    # Per-grid SPMD bench argv (mpiexec --ppn 1 + SHIM wrapper shared).  cube uses
     # run_cpu_mpi_scaling --cs-spmd --device cpu (flat JSON, --n-levels/--n-warmup/
     # --n-timing); latlon/ico use the SPMD benches (--nlev/--steps/--warmup, JSONL).
     case "$GRID" in
       latlon)
         BENCH=( "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py
-                --multicontroller --n-devices "$N"
+                --multicontroller --n-devices "$N" --coordinator "$_coord"
                 --mode "$MODE" --n-lat "$RES" --n-lon $(( 2 * RES )) --nlev "$NLEV"
                 --steps $(( N_WARMUP + N_TIMING )) --warmup "$N_WARMUP"
                 --out "$OUTDIR/${_sub}/spmd_R${RES}_N${N}.jsonl" ) ;;
       icosahedral)
         BENCH=( "$PY" scripts/bench/bench_mpas_spmd_scaling.py
                 --multicontroller --n-devices "$N" --reorder-for "$_reorder_for"
+                --coordinator "$_coord"
                 --subdivision "$RES" --nlev "$NLEV" --partition-method sfc
                 --steps $(( N_WARMUP + N_TIMING )) --warmup "$N_WARMUP"
                 --out "$OUTDIR/${_sub}/spmd_L${RES}_N${N}.jsonl" ) ;;
       cubed-sphere|cubed_sphere)
         BENCH=( "$PY" scripts/bench/run_cpu_mpi_scaling.py
-                --grid cubed-sphere --cs-spmd --device cpu
+                --grid cubed-sphere --cs-spmd --device cpu --coordinator "$_coord"
                 --physics "$PHYSICS" --mode "$MODE" --resolution "$RES"
                 --precision "$PRECISION" --n-levels "$NLEV"
                 --n-warmup "$N_WARMUP" --n-timing "$N_TIMING"
                 --output-dir "$OUTDIR/${_sub}" ) ;;
     esac
-    mpiexec -n "$N" --ppn 1 "${BENCH[@]}" < /dev/null \
+    mpiexec -n "$N" --ppn 1 bash -c "$SHIM" _ "${BENCH[@]}" < /dev/null \
       || { echo "route-B CPU $GRID res=$RES N=$N FAILED rc=$?"; rc_all=1; }
   done
 done
