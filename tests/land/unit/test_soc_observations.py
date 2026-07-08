@@ -11,6 +11,7 @@ import pytest
 
 from legoesm.land.carbon.soc_observations import (
     column_soc,
+    per_archetype_cover_weight,
     per_archetype_observed_soc,
 )
 
@@ -71,6 +72,37 @@ def test_zero_cover_archetype_is_nan_not_zero():
     out = per_archetype_observed_soc(organic, dz, cid, cw, n_arch=2)
     npt.assert_allclose(out[0], 1.0, rtol=1e-12)
     assert np.isnan(out[1])            # archetype 1 unassigned -> NaN, never 0
+
+
+def test_cover_weight_sums_assigned_cover():
+    # Same membership as test_per_archetype_cover_weighted_mean.
+    #   archetype 0 <- (cell0,pft0) 0.75 + (cell1,pft1) 0.25 = 1.0
+    #   archetype 1 <- (cell1,pft0) 1.0                       = 1.0
+    cid = np.array([[0, -1], [1, 0]])
+    cw = np.array([[0.75, 0.0], [1.0, 0.25]])
+    out = per_archetype_cover_weight(cid, cw, n_arch=2)
+    npt.assert_allclose(out, [1.0, 1.0], rtol=1e-12)
+
+
+def test_cover_weight_unassigned_is_zero():
+    cid = np.array([[0, -1]])
+    cw = np.array([[1.0, 0.0]])
+    out = per_archetype_cover_weight(cid, cw, n_arch=3)
+    npt.assert_allclose(out, [1.0, 0.0, 0.0], rtol=1e-12)
+
+
+def test_cover_weight_matches_observed_denominator():
+    # per_archetype_observed_soc uses per_archetype_cover_weight as its
+    # denominator: an archetype with zero cover weight -> NaN observed SOC.
+    organic = np.array([[1.0], [3.0]])
+    dz = np.array([1.0])
+    cid = np.array([[0, -1], [1, -1]])
+    cw = np.array([[2.0, 0.0], [0.0, 0.0]])
+    weight = per_archetype_cover_weight(cid, cw, n_arch=2)
+    soc = per_archetype_observed_soc(organic, dz, cid, cw, n_arch=2)
+    npt.assert_allclose(weight, [2.0, 0.0], rtol=1e-12)
+    npt.assert_allclose(soc[0], 1.0, rtol=1e-12)   # cover>0 -> finite
+    assert np.isnan(soc[1])                         # cover==0 -> NaN
 
 
 def test_shape_mismatch_raises():

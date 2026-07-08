@@ -18,12 +18,16 @@ OBSERVED per-archetype SOC derived from the surfdata organic-carbon field:
 Pure NumPy: this is a FIXED target (built once, never inside a JAX-traced model
 step), mirroring the Stage-A archetype build so it stays cheap and non-diff.
 
-Units convention: ``ORGANIC`` is taken as the organic-*carbon* density [kgC/m3]
-per the Stage-B plan (``docs/land/stageB_carbon_calibration_plan.md``), so the
-column integral is already [kgC/m2] with NO organic-matter->carbon rescale.  If a
-source reports organic MATTER instead of carbon, convert it to carbon (e.g. the
-van Bemmelen factor) BEFORE calling -- the archetype SOC target must be
-carbon-consistent with the model's ``som_total`` [gC/m2 -> kgC/m2].
+Units convention: :func:`column_soc` takes ``organic`` as an organic-*carbon*
+density [kgC/m3], so the column integral is already [kgC/m2] with NO further
+rescale.  A source that reports organic MATTER must be converted to carbon BEFORE
+calling.  In particular the raw CLM5 surfdata ``ORGANIC`` [kg/m3] is organic
+MATTER (its own units attribute states an assumed carbon content 0.58 gC/gOM = the
+van Bemmelen 1/1.724 factor; ORGANIC saturates at 130 kg/m3 = pure-peat OM
+density), so the Stage-B trainer's ``_load_surfdata_organic`` multiplies it by
+``om_to_oc`` (0.58 for CLM5; 1.0 for a source already in carbon such as HWSD
+``ORG_CARBON``) -- the archetype SOC target must be carbon-consistent with the
+model's ``som_total`` [gC/m2 -> kgC/m2].
 """
 
 from __future__ import annotations
@@ -54,6 +58,54 @@ def column_soc(organic, dz):
             f"organic layer axis {organic.shape[-1]} != dz layer axis "
             f"{dz.shape[-1]}; both must be n_layer.")
     return np.sum(organic * dz, axis=-1)
+
+
+def per_archetype_cover_weight(
+    cell_archetype_id,
+    cell_archetype_weight,
+    *,
+    n_arch=None,
+):
+    """Total assigned land cover per archetype [dimensionless cover fraction sum].
+
+    ``cover[a] = sum_{(c,p): id[c,p]==a} w[c,p]`` -- the denominator of the
+    cover-weighted per-archetype mean in :func:`per_archetype_observed_soc`,
+    factored out so the Stage-B calibration loss can weight each archetype's SOC
+    residual by exactly the SAME total-cover measure the observed target averages
+    over (no duplicated ``bincount`` numerics).  An archetype with no assigned
+    (cell, PFT) pair gets ``0.0`` (never member cells -> zero cover).
+
+    Parameters
+    ----------
+    cell_archetype_id : array (ncell, npft) int
+        Archetype index per (cell, PFT); ``-1`` where absent / below threshold /
+        bare (see :func:`legoesm.land.carbon.global_init.build_archetypes`).
+    cell_archetype_weight : array (ncell, npft) float
+        PFT cover weight per (cell, PFT); ``0`` where the id is ``-1``.
+    n_arch : int, optional
+        Number of archetypes.  Defaults to ``cell_archetype_id.max() + 1``.
+
+    Returns
+    -------
+    array (n_arch,)
+        Per-archetype summed cover weight [-]; ``0.0`` for an unassigned archetype.
+    """
+    cid = np.asarray(cell_archetype_id)
+    cw = np.asarray(cell_archetype_weight, dtype=float)
+    if cid.shape != cw.shape:
+        raise ValueError(
+            f"cell_archetype_id {cid.shape} and cell_archetype_weight "
+            f"{cw.shape} must have the same (ncell, npft) shape.")
+    if cid.ndim != 2:
+        raise ValueError(
+            f"cell_archetype_id must be 2-D (ncell, npft); got shape {cid.shape}.")
+    if n_arch is None:
+        n_arch = int(cid.max()) + 1 if (cid.size and cid.max() >= 0) else 0
+    n_arch = int(n_arch)
+    valid = cid >= 0
+    flat_id = cid[valid].astype(int)
+    flat_w = cw[valid]
+    return np.bincount(flat_id, weights=flat_w, minlength=n_arch)[:n_arch]
 
 
 def per_archetype_observed_soc(
@@ -125,7 +177,10 @@ def per_archetype_observed_soc(
     flat_w = cw[valid]
     flat_soc = col_bcast[valid]
     num = np.bincount(flat_id, weights=flat_w * flat_soc, minlength=n_arch)[:n_arch]
-    den = np.bincount(flat_id, weights=flat_w, minlength=n_arch)[:n_arch]
+    # Denominator = total assigned cover per archetype (the SAME measure the
+    # Stage-B loss weights each archetype's SOC residual by); factored into the
+    # shared helper so the cover-weight bincount is defined once.
+    den = per_archetype_cover_weight(cid, cw, n_arch=n_arch)
 
     out = np.full(n_arch, np.nan, dtype=float)
     nz = den > 0.0
