@@ -66,14 +66,26 @@ def test_get_gwd_fn_resolves_composite():
 
 
 @pytest.mark.parametrize("bad", [
-    "hines+prognostic_spectral",   # non-composable member
-    "mcfarlane+mcfarlane",         # duplicate
-    "hines+",                      # empty part
-    "e3sm_cam+hines",              # stateful member
+    "e3sm_cam+hines",              # e3sm_cam not composable (#834)
+    "ml_emulator+hines",          # ml_emulator not composable
+    "hines+",                     # empty part -> non-composable ""
+    "prognostic_spectral+prognostic_spectral",  # >1 stateful carry
 ])
 def test_get_gwd_fn_rejects_invalid_composites(bad):
-    with pytest.raises(ValueError, match="composite GWD"):
+    # main's #834 factory guard (_validate_gwd_composite): non-composable
+    # parts, or more than one stateful (spectrum-carrying) source.
+    with pytest.raises(ValueError):
         get_gwd_fn(GravityWaveDragConfig(scheme=bad))
+
+
+@pytest.mark.parametrize("ok", [
+    "hines+mcfarlane",                 # non-oro + orographic
+    "hines+prognostic_spectral",       # non-oro + one stateful source (#834)
+    "mcfarlane+prognostic_spectral",   # orographic + one stateful source
+])
+def test_get_gwd_fn_accepts_valid_composites(ok):
+    name, fn, sub = get_gwd_fn(GravityWaveDragConfig(scheme=ok))
+    assert name == ok and callable(fn)
 
 
 def test_validate_strict_rejects_duplicate_composite():
