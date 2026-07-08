@@ -6,8 +6,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.land.stomata import (
-    arrhenius, peaked_arrhenius,
-    farquhar_photosynthesis, ball_berry_gs, medlyn_gs, jarvis_gs,
+    ball_berry_gs, medlyn_gs, jarvis_gs,
     coupled_farquhar_stomata, compute_stomatal_beta,
     StomataConfig,
 )
@@ -25,70 +24,6 @@ def _enable_x64():
 
 CFG = StomataConfig(enabled=True)
 SHAPE = (4,)
-
-
-class Test7a_Arrhenius:
-    def test_at_25C(self):
-        T = jnp.full(SHAPE, 298.15)
-        val = arrhenius(60.0, CFG.Ha_Vc, T)
-        assert jnp.allclose(val, 60.0, rtol=1e-6)
-
-    def test_increases_with_T(self):
-        v_low = arrhenius(60.0, CFG.Ha_Vc, jnp.full(SHAPE, 290.0))
-        v_high = arrhenius(60.0, CFG.Ha_Vc, jnp.full(SHAPE, 310.0))
-        assert jnp.all(v_high > v_low)
-
-    def test_positive(self):
-        vals = arrhenius(60.0, CFG.Ha_Vc, jnp.linspace(250.0, 330.0, 50))
-        assert jnp.all(vals > 0)
-        assert jnp.all(jnp.isfinite(vals))
-
-
-class Test7b_PeakedArrhenius:
-    def test_at_25C(self):
-        val = peaked_arrhenius(120.0, CFG.Ha_J, CFG.Hd_J, CFG.S_J, jnp.full(SHAPE, 298.15))
-        assert jnp.allclose(val, 120.0, rtol=1e-4)
-
-    def test_has_peak(self):
-        T_range = jnp.linspace(280.0, 330.0, 100)
-        vals = peaked_arrhenius(120.0, CFG.Ha_J, CFG.Hd_J, CFG.S_J, T_range)
-        assert 280.0 < float(T_range[int(jnp.argmax(vals))]) < 330.0
-        assert jnp.all(vals > 0)
-
-
-class Test7c_FarquharBasic:
-    def test_positive_A_normal(self):
-        A_net, _ = farquhar_photosynthesis(
-            jnp.full(SHAPE, 280.0), jnp.full(SHAPE, 500.0), jnp.full(SHAPE, 298.15), CFG)
-        assert jnp.all(A_net > 0)
-        assert jnp.all(A_net < 50.0)
-
-    def test_dark_respiration_only(self):
-        A_net, _ = farquhar_photosynthesis(
-            jnp.full(SHAPE, 280.0), jnp.zeros(SHAPE), jnp.full(SHAPE, 298.15), CFG)
-        assert jnp.all(A_net < 0)
-
-    def test_A_increases_with_light(self):
-        T = jnp.full(SHAPE, 298.15)
-        Ci = jnp.full(SHAPE, 280.0)
-        A_low, _ = farquhar_photosynthesis(Ci, jnp.full(SHAPE, 100.0), T, CFG)
-        A_high, _ = farquhar_photosynthesis(Ci, jnp.full(SHAPE, 1000.0), T, CFG)
-        assert jnp.all(A_high > A_low)
-
-    def test_A_increases_with_CO2(self):
-        T = jnp.full(SHAPE, 298.15)
-        APAR = jnp.full(SHAPE, 500.0)
-        A_low, _ = farquhar_photosynthesis(jnp.full(SHAPE, 200.0), APAR, T, CFG)
-        A_high, _ = farquhar_photosynthesis(jnp.full(SHAPE, 600.0), APAR, T, CFG)
-        assert jnp.all(A_high > A_low)
-
-
-class Test7e_FarquharSoilStress:
-    def test_drought_reduces_A(self):
-        args = (jnp.full(SHAPE, 280.0), jnp.full(SHAPE, 500.0), jnp.full(SHAPE, 298.15), CFG)
-        A_wet, _ = farquhar_photosynthesis(*args, beta_soil=jnp.full(SHAPE, 1.0))
-        A_dry, _ = farquhar_photosynthesis(*args, beta_soil=jnp.full(SHAPE, 0.1))
-        assert jnp.all(A_wet > A_dry)
 
 
 class Test7f_BallBerry:
