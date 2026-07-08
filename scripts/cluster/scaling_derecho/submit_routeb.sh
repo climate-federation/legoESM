@@ -1,18 +1,24 @@
 #!/bin/bash
 # ===========================================================================
-# Submit the route-B (SPMD) CPU-node-vs-A100 THROUGHPUT comparison, latlon.
-# Fires BOTH sweeps into ONE outdir so a single finalize_scaling.sh aggregates +
-# plots them together (CPU column vs GPU column, Mcells/s):
-#   routeb_cpu_sweep.pbs  -- 1..16 NODES (1 proc/node), legoesm-mpi
-#   routeb_gpu_sweep.pbs  -- 1..16 A100  (1 proc/GPU),  legoesm-gpu + aws-ofi-nccl
-# Both run the identical SPMD lat-band code path, so it is a like-for-like
-# CPU-vs-GPU comparison.  (Route B has no icosahedral path; MPAS ico uses route
-# A -> submit_scaling.sh.)
+# Submit the route-B (SPMD/NCCL-fabric) THROUGHPUT campaign into ONE outdir so a
+# single finalize_scaling.sh aggregates + plots everything (per-grid Mcells/s):
+#   routeb_gpu_sweep.pbs  -- FANS OUT one GPU job per grid (GRIDS, default all 3):
+#                            latlon | icosahedral | cubed-sphere (1 proc/GPU,
+#                            legoesm-gpu + aws-ofi-nccl).  Each grid uses its OWN
+#                            resolution axis + device ladder, so they land as
+#                            SEPARATE curves (never overlaid).
+#   routeb_cpu_sweep.pbs  -- latlon CPU-node curve (1..16 NODES) for the
+#                            CPU-node-vs-A100 comparison.  ico/cube CPU lanes are
+#                            not built yet -> CPU is latlon-only for now.
 #
 # Usage:
 #   LEGOESM_NCCL_OFI_LIB=/glade/work/$USER/nccl-ofi/<tag>/lib \
 #     scripts/cluster/scaling_derecho/submit_routeb.sh <outdir> [res1 res2 res3]
-#   DRYRUN=1 ... submit_routeb.sh <outdir>      # preview, no jobs
+#   GRIDS="icosahedral" ... submit_routeb.sh <outdir> 7 8   # one grid + custom res
+#   RUN_CPU=0 ... submit_routeb.sh <outdir>                 # GPU curves only
+#   DRYRUN=1 ... submit_routeb.sh <outdir>                  # preview, no jobs
+# A shared RES_LIST is passed to the GPU sweep ONLY for a single-grid run (the
+# resolution axes differ per grid); multi-grid runs use each grid's own default.
 # Accounts: PBS_ACCOUNT sets both; PBS_ACCOUNT_CPU / PBS_ACCOUNT_GPU override per
 # backend (CPU and GPU often bill to different Derecho allocations), e.g.
 #   PBS_ACCOUNT_CPU=UABC0001 PBS_ACCOUNT_GPU=UABC0002 LEGOESM_NCCL_OFI_LIB=... \
@@ -40,8 +46,14 @@ shift || true
 # COLON-joined -- a comma is PBS's `-v` list delimiter, so a comma-joined value
 # would be misparsed as extra variable names ("cannot send environment").  The
 # PBS scripts translate ':' back to spaces.
+# Track whether the user gave explicit positional RES args (only meaningful for
+# a single-grid run -- per-grid default resolution axes differ).
+_res_explicit=0; if [ "$#" -gt 0 ]; then _res_explicit=1; fi
 RES_LIST="${*:-${RES_LIST:-128 256 512}}"
 RES_JOINED="$(echo "$RES_LIST" | tr ' ' ':')"
+# Grids to fan the GPU sweep across (each -> its own job + subdir + curve).
+GRIDS="${GRIDS:-latlon icosahedral cubed-sphere}"
+_n_grids="$(echo $GRIDS | wc -w | tr -d ' ')"
 [ "${DRYRUN:-0}" = "1" ] || mkdir -p "$OUT"
 
 if [ -z "${LEGOESM_NCCL_OFI_LIB:-}" ]; then
@@ -65,12 +77,34 @@ _sub() {  # _sub <acct> <label> <pbs> <-v vars>
     fi
 }
 
-echo "=== route-B CPU-vs-A100 throughput (latlon), res=[${RES_LIST}] -> ${OUT} ==="
+echo "=== route-B throughput campaign: GPU grids=[${GRIDS}] -> ${OUT} ==="
 echo "    accounts: CPU=${ACCT_CPU}  GPU=${ACCT_GPU}"
-_sub "${ACCT_CPU}" "route-B CPU (1..16 nodes)" "${SCRIPT_DIR}/routeb_cpu_sweep.pbs" \
-     "RES_LIST=${RES_JOINED},OUTDIR=${OUT}/routeb_cpu"
-_sub "${ACCT_GPU}" "route-B GPU (1..16 A100)"  "${SCRIPT_DIR}/routeb_gpu_sweep.pbs" \
-     "RES_LIST=${RES_JOINED},OUTDIR=${OUT}/routeb_gpu,LEGOESM_NCCL_OFI_LIB=${LEGOESM_NCCL_OFI_LIB:-}"
 
-echo "=== when both finish:  scripts/cluster/scaling_derecho/finalize_scaling.sh ${OUT} ==="
-echo "    -> ${OUT}/all_tidy.csv + ${OUT}/plots/cpu_vs_gpu_scaling_latlon.png (Mcells/s panels)"
+# --- GPU: one job per grid (each grid its own resolution axis + device ladder) --
+for g in $GRIDS; do
+    case "$g" in
+      latlon|icosahedral|cubed-sphere|cubed_sphere) ;;
+      *) echo "  !!! SKIP unknown GRID='$g' (latlon|icosahedral|cubed-sphere)" >&2; continue ;;
+    esac
+    vars="OUTDIR=${OUT}/routeb_gpu_${g},LEGOESM_NCCL_OFI_LIB=${LEGOESM_NCCL_OFI_LIB:-},GRID=${g}"
+    # Shared RES override is only meaningful for a single-grid run (the axes
+    # differ across grids); multi-grid uses each grid's per-grid default.
+    if [ "$_res_explicit" = 1 ] && [ "$_n_grids" -eq 1 ]; then
+        vars="RES_LIST=${RES_JOINED},${vars}"
+    fi
+    _sub "${ACCT_GPU}" "route-B GPU ${g}" "${SCRIPT_DIR}/routeb_gpu_sweep.pbs" "$vars"
+done
+
+# --- CPU: latlon-node curve for the CPU-vs-A100 comparison (ico/cube CPU lanes
+#     are not built yet, so CPU stays latlon-only).  Skip with RUN_CPU=0. -------
+if [ "${RUN_CPU:-1}" = "1" ] && printf ' %s ' $GRIDS | grep -q ' latlon '; then
+    _cpu_res="${RES_JOINED}"
+    [ "$_res_explicit" = 1 ] && [ "$_n_grids" -eq 1 ] || _cpu_res="$(echo "${RES_LIST:-128 256 512}" | tr ' ' ':')"
+    _sub "${ACCT_CPU}" "route-B CPU latlon (1..16 nodes)" "${SCRIPT_DIR}/routeb_cpu_sweep.pbs" \
+         "RES_LIST=${_cpu_res},OUTDIR=${OUT}/routeb_cpu"
+else
+    echo "    (CPU lane skipped: RUN_CPU=${RUN_CPU:-1}, latlon in GRIDS=$(printf ' %s ' $GRIDS | grep -q ' latlon ' && echo yes || echo no))"
+fi
+
+echo "=== when the jobs finish:  scripts/cluster/scaling_derecho/finalize_scaling.sh ${OUT} ==="
+echo "    -> ${OUT}/all_tidy.csv + ${OUT}/plots/  (per-grid Mcells/s panels)"
