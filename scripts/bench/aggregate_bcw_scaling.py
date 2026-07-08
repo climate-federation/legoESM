@@ -144,16 +144,43 @@ def _row_from_json(d: dict, source: Path) -> dict | None:
     }
 
 
+_SPMD_GRID_ALIASES = {"cubed_sphere": "cubed-sphere"}
+
+
+def _spmd_grid_and_resolution(rec: dict) -> tuple[str, object]:
+    """``(grid, resolution)`` for a route-B SPMD record, grid-generically.
+
+    All route-B SPMD benches carry the grid under ``metadata.grid``
+    (``bench_atm_latlon_spmd_scaling`` -> "latlon", ``bench_mpas_spmd_scaling``
+    -> "icosahedral").  Legacy records without metadata default to latlon (the
+    only grid the sweep originally emitted).  The *resolution* field is
+    per-grid: latlon -> ``n_lat``, icosahedral -> ``subdivision`` (SCVT level),
+    cubed-sphere -> ``resolution``/``n_face`` (cells per face-edge).  Without
+    this, an icosahedral record was silently relabelled "latlon" with an empty
+    resolution, polluting the latlon curve.
+    """
+    meta = rec.get("metadata") or {}
+    grid = meta.get("grid") or "latlon"
+    grid = _SPMD_GRID_ALIASES.get(grid, grid)
+    if grid == "icosahedral":
+        return grid, rec.get("subdivision")
+    if grid == "cubed-sphere":
+        return grid, rec.get("resolution") or rec.get("n_face")
+    return "latlon", rec.get("n_lat")
+
+
 def _row_from_spmd_record(rec: dict, source: Path) -> dict | None:
     """Tidy row from a route-B SPMD bench JSONL record.
 
     ``bench_atm_latlon_spmd_scaling.py`` / ``bench_ocean_latlon_spmd_scaling.py``
-    (the ``--multicontroller`` NCCL lanes, swept by ``routeb_sweep.pbs``) emit a
-    THROUGHPUT-only record: ``steady_median_ms`` + ``cells`` but NO ``sypd``/dt
-    (no timestep is simulated).  So ``mcells_per_s`` is computed here and ``sypd``
-    is left empty -- the plotter shows route B on the throughput panels only.
-    Component/case come from the source path (``ocean_*`` -> ocean).  Returns
-    ``None`` for any JSONL line that is not this schema.
+    / ``bench_mpas_spmd_scaling.py`` (the ``--multicontroller`` NCCL lanes,
+    swept by ``routeb_sweep.pbs``) emit a THROUGHPUT-only record:
+    ``steady_median_ms`` + ``cells`` but NO ``sypd``/dt (no timestep is
+    simulated).  So ``mcells_per_s`` is computed here and ``sypd`` is left empty
+    -- the plotter shows route B on the throughput panels only.  Grid +
+    resolution are read grid-generically (``metadata.grid``); component/case
+    come from the source path (``ocean_*`` -> ocean).  Returns ``None`` for any
+    JSONL line that is not this schema.
     """
     nd, ms, cells = rec.get("n_devices"), rec.get("steady_median_ms"), rec.get("cells")
     if nd is None or ms is None or cells is None:
@@ -169,7 +196,7 @@ def _row_from_spmd_record(rec: dict, source: Path) -> dict | None:
                else "CPU" if plat == "cpu" else backend_from_path(source))
     ocean = "ocean" in str(source).lower()
     phys = rec.get("physics", "none")
-    n_lat = rec.get("n_lat")
+    grid, res = _spmd_grid_and_resolution(rec)
     # x-axis resource: GPU -> A100 (=process) count; CPU route-B is 1 proc/full
     # node, so express it in CORES (nd * cores/node) for the cores-based CPU axis.
     if backend == "CPU":
@@ -181,17 +208,17 @@ def _row_from_spmd_record(rec: dict, source: Path) -> dict | None:
     return {
         "component": "ocean" if ocean else "atm",
         "backend": backend,
-        "grid": "latlon",
+        "grid": grid,
         "case": "ocean" if ocean else _CASE.get(phys, phys),
-        "precision": rec.get("precision", ""),
+        "precision": rec.get("precision") or (rec.get("metadata") or {}).get("precision", ""),
         "mode": rec.get("mode", "strong"),
         "n_devices": nd,
         "cpus_per_task": 1,
         "n_cores": n_cores,
         "n_resource": n_resource,
         "fix_mass": rec.get("fix_mass", True),
-        "resolution": n_lat,
-        "resolution_km": round(resolution_km("latlon", n_lat), 3) if n_lat else "",
+        "resolution": res,
+        "resolution_km": round(resolution_km(grid, res), 3) if res else "",
         "n_levels": rec.get("nlev", ""),
         "sypd": None,                           # throughput-only bench (no dt)
         "time_per_step_ms": ms,

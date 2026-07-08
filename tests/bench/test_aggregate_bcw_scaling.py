@@ -202,6 +202,45 @@ def test_collect_ingests_routeb_spmd_jsonl(tmp_path):
     assert r8["mcells_per_s"] == pytest.approx(cells / 5.0e-3 / 1e6, rel=1e-3)
 
 
+def test_collect_ingests_routeb_icosahedral_spmd_jsonl(tmp_path):
+    # bench_mpas_spmd_scaling (route-B ico) emits a DIFFERENT schema than latlon:
+    # grid under metadata.grid + `subdivision` (no n_lat).  collect() must label
+    # it "icosahedral" with a real resolution_km -- NOT silently relabel latlon.
+    d = tmp_path / "routeb_sweep_x" / "mpas_multicontroller"
+    cells = 163842 * 8                                   # L7 nCells * nlev
+    recs = [
+        {"n_devices": n, "subdivision": 7, "nlev": 8, "physics": "none",
+         "platform": "gpu", "multicontroller": True, "steady_median_ms": ms,
+         "cells": cells, "metadata": {"grid": "icosahedral", "precision": "float32"}}
+        for n, ms in ((6, 4.0), (3, 7.0), (1, 20.0))
+    ]
+    _write_jsonl(d, "mpas_spmd_scaling.jsonl", recs)
+    rows, _ = agg.collect(tmp_path)
+    ico = {r["n_devices"]: r for r in rows if r["grid"] == "icosahedral"}
+    assert set(ico) == {1, 3, 6}                         # face-divisor ladder ingested
+    assert not [r for r in rows if r["grid"] == "latlon"]  # NOT mislabelled latlon
+    r6 = ico[6]
+    assert r6["backend"] == "GPU" and r6["component"] == "atm"
+    assert r6["resolution"] == 7 and r6["precision"] == "float32"
+    assert r6["sypd"] is None                            # throughput-only
+    # icosahedral L7: nCells=163842 -> R*sqrt(4pi/N) ~ 55 km nominal spacing
+    assert 40.0 < r6["resolution_km"] < 75.0
+    assert r6["mcells_per_s"] == pytest.approx(cells / 4.0e-3 / 1e6, rel=1e-3)
+
+
+def test_spmd_latlon_without_metadata_still_latlon(tmp_path):
+    # Legacy latlon SPMD records (no metadata block) must still default to
+    # grid="latlon" via n_lat -- the generalization is backward-compatible.
+    d = tmp_path / "routeb_sweep_x" / "atm_latlon"
+    rec = {"mode": "strong", "n_devices": 8, "n_lat": 256, "n_lon": 512, "nlev": 26,
+           "physics": "none", "platform": "gpu", "steady_median_ms": 5.0,
+           "cells": 256 * 512 * 26}
+    _write_jsonl(d, "spmd_N8.jsonl", [rec])
+    rows, _ = agg.collect(tmp_path)
+    r = next(r for r in rows if r["n_devices"] == 8)
+    assert r["grid"] == "latlon" and r["resolution"] == 256
+
+
 def test_collect_routeb_cpu_jsonl_n_resource_in_cores(tmp_path):
     # route-B CPU sweep is 1 process per full node (platform=cpu), so n_resource
     # is expressed in CORES (n_devices * 128) -> the "CPU nodes" plot axis
