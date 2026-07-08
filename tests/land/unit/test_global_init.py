@@ -78,8 +78,8 @@ def test_bare_cover_yields_no_archetype_and_zero_pools():
                         for f in CarbonState._fields})
     out = map_to_grid(cid, cw, eq)
     # Cell 0's pools come ONLY from PFT 1's 0.3 cover (bare's 0.7 adds nothing).
-    npt.assert_allclose(np.asarray(out.C_som)[0], 0.3 * 100.0, rtol=1e-9)
-    npt.assert_allclose(np.asarray(out.C_som)[1], 1.0 * 100.0, rtol=1e-9)
+    npt.assert_allclose(np.asarray(out.C_som_active)[0], 0.3 * 100.0, rtol=1e-9)
+    npt.assert_allclose(np.asarray(out.C_som_active)[1], 1.0 * 100.0, rtol=1e-9)
 
 
 def test_archetype_climate_mean_is_cover_weighted():
@@ -122,26 +122,28 @@ def test_dropped_cover_fraction_audit():
 
 def _cs(vals):  # vals: (n_arch,) per pool identical for simplicity
     a = lambda: jnp.asarray(vals, float)
-    return CarbonState(a(), a(), a(), a(), a(), a())
+    # 8 positional args (6->8 after the SOM split); no CarbonState defaults, so
+    # a missed arg fails loudly with TypeError.
+    return CarbonState(a(), a(), a(), a(), a(), a(), a(), a())
 
 def test_single_pft_cell_equals_archetype():
     eq = _cs([10.0, 20.0])
     cid = np.array([[0, -1], [1, -1]]); cw = np.array([[1.0, 0.0], [1.0, 0.0]])
     out = map_to_grid(cid, cw, eq)
-    npt.assert_allclose(np.asarray(out.C_som), [10.0, 20.0], rtol=1e-9)
+    npt.assert_allclose(np.asarray(out.C_som_active), [10.0, 20.0], rtol=1e-9)
 
 def test_mixed_cell_is_cover_weighted_mix():
     eq = _cs([10.0, 30.0])
     cid = np.array([[0, 1]]); cw = np.array([[0.25, 0.75]])
     out = map_to_grid(cid, cw, eq)
-    npt.assert_allclose(np.asarray(out.C_som), [0.25 * 10 + 0.75 * 30], rtol=1e-9)
+    npt.assert_allclose(np.asarray(out.C_som_active), [0.25 * 10 + 0.75 * 30], rtol=1e-9)
 
 def test_absent_pft_contributes_zero_and_pools_nonneg():
     eq = _cs([10.0, 30.0])
     cid = np.array([[-1, 1]]); cw = np.array([[0.0, 0.5]])
     out = map_to_grid(cid, cw, eq)
-    npt.assert_allclose(np.asarray(out.C_som), [0.5 * 30], rtol=1e-9)
-    assert (np.asarray(out.C_som) >= 0).all()
+    npt.assert_allclose(np.asarray(out.C_som_active), [0.5 * 30], rtol=1e-9)
+    assert (np.asarray(out.C_som_active) >= 0).all()
 
 
 # ---------------------------------------------------------------------------
@@ -161,8 +163,8 @@ def test_core_pipeline_synthetic_world():
     tab, cid, cw = build_archetypes(w, feats, soil, np.ones(ncell, bool), k_per_pft=1, seed=0)
     eq, qc = equilibrate_archetypes(tab, n_spinup=15, n_verify=5, dt=7200.0, n_layers=6, soil_depth=2.0)
     grid = map_to_grid(cid, cw, eq)
-    assert grid.C_som.shape == (ncell,)
-    assert np.all(np.isfinite(np.asarray(grid.C_som)))
+    assert grid.C_som_active.shape == (ncell,)
+    assert np.all(np.isfinite(np.asarray(grid.C_som_active)))
     # Mixed cell 2 is between the two pure cells for total ecosystem C.
     tot = lambda i: sum(float(np.asarray(getattr(grid, f))[i]) for f in grid._fields)
     assert min(tot(0), tot(1)) - 1.0 <= tot(2) <= max(tot(0), tot(1)) + 1.0

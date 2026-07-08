@@ -278,7 +278,12 @@ def assess_pixel(name: str, biome: str, annual: dict, final_carbon) -> dict:
     alloc_resid = float(annual["alloc_resid"][last])
 
     pools = {k: float(annual[k][last]) / 1000.0  # kgC/m2
-             for k in ("C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som")}
+             for k in ("C_lab", "C_fol", "C_root", "C_wood", "C_lit")}
+    # Total SOM = active + slow + passive (slow/passive inert == 0 in phase A1);
+    # the downstream realism/equilibrium diagnostics use bulk SOM.
+    pools["C_som"] = float(
+        annual["C_som_active"][last] + annual["C_som_slow"][last]
+        + annual["C_som_passive"][last]) / 1000.0
     biomass = pools["C_lab"] + pools["C_fol"] + pools["C_root"] + pools["C_wood"]
     total_c = biomass + pools["C_lit"] + pools["C_som"]
 
@@ -303,7 +308,9 @@ def assess_pixel(name: str, biome: str, annual: dict, final_carbon) -> dict:
     # Drift over the last min(20, ny//2) years (fractional per year) for total C.
     win = max(2, min(20, ny // 2))
     tc_series = (annual["C_lab"] + annual["C_fol"] + annual["C_root"]
-                 + annual["C_wood"] + annual["C_lit"] + annual["C_som"]) / 1000.0
+                 + annual["C_wood"] + annual["C_lit"]
+                 + annual["C_som_active"] + annual["C_som_slow"]
+                 + annual["C_som_passive"]) / 1000.0
     tc0, tc1 = float(tc_series[-win]), float(tc_series[-1])
     total_c_drift_frac_per_yr = (tc1 - tc0) / (win * max(tc1, 1e-9))
 
@@ -376,7 +383,7 @@ def make_plots(out_dir: Path, results: list[dict], annuals: dict[str, dict]):
         yrs = np.arange(a["gpp"].shape[0])
         for pool, lab in [("C_fol", "foliage"), ("C_root", "root"),
                           ("C_wood", "wood"), ("C_lit", "litter"),
-                          ("C_som", "SOM")]:
+                          ("C_som_active", "SOM")]:
             ax.plot(yrs, a[pool] / 1000.0, label=lab, lw=1.3)
         ax.set_title(f"{r['name']}\n({r['biome']})", fontsize=8)
         ax.set_xlabel("year"); ax.set_ylabel("kgC/m²")

@@ -405,7 +405,7 @@ def step_carbon_differland(
     lit_to_som_demand = state.C_lit * _effective_rate(
         tempmod * config.decomp_rate, dt_days,
     )
-    R_het_som = state.C_som * _effective_rate(
+    R_het_som = state.C_som_active * _effective_rate(
         tempmod * config.tor_som, dt_days,
     )
     lit_total_demand = R_het_lit_demand + lit_to_som_demand  # gC/m2/day
@@ -462,9 +462,15 @@ def step_carbon_differland(
         C_lit=_soft_pos(
             state.C_lit + (leaf_litter + root_litter
                            - R_het_lit - lit_to_som) * dt_days),
-        C_som=_soft_pos(
-            state.C_som + (lit_to_som + wood_to_som
-                           - R_het_som) * dt_days),
+        # SOM cascade (phase A1, behaviour-preserving): all litter/CWD humified
+        # input and the R_het_som sink flow through the ACTIVE pool exactly as
+        # the former single C_som pool did.  The slow/passive pools are inert —
+        # carried through unchanged (zero flux) until the A2 forward cascade.
+        C_som_active=_soft_pos(
+            state.C_som_active + (lit_to_som + wood_to_som
+                                  - R_het_som) * dt_days),
+        C_som_slow=state.C_som_slow,
+        C_som_passive=state.C_som_passive,
     )
 
     # --- NEE: positive = source to atmosphere ------------------------------
@@ -622,11 +628,16 @@ def init_carbon_state(
     use ``C_wood_init`` unchanged.
     """
     C_wood_init = config.C_wood_init if config.woody else 0.0
+    # Phase A1: all of ``C_som_init`` seeds the ACTIVE pool; the slow/passive
+    # pools start empty (inert this phase).  A2 will repartition ``C_som_init``
+    # across the three pools by CENTURY equilibrium fractions.
     return CarbonState(
         C_lab=jnp.full(shape, config.C_lab_init),
         C_fol=jnp.full(shape, config.C_fol_init),
         C_root=jnp.full(shape, config.C_root_init),
         C_wood=jnp.full(shape, C_wood_init),
         C_lit=jnp.full(shape, config.C_lit_init),
-        C_som=jnp.full(shape, config.C_som_init),
+        C_som_active=jnp.full(shape, config.C_som_init),
+        C_som_slow=jnp.zeros(shape),
+        C_som_passive=jnp.zeros(shape),
     )

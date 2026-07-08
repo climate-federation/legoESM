@@ -157,13 +157,37 @@ class CarbonState(NamedTuple):
     All fields share the land model's spatial shape (e.g. (6,n,n)
     for cubed-sphere slab land or (ncol,) for columnar).
     Units: gC/m2.
+
+    Soil organic matter is resolved as three pools of increasing turnover time
+    (CENTURY / CLM4.5 topology).  **Phase A1 is behaviour-preserving**: only
+    ``C_som_active`` carries flux (exactly as the former single ``C_som`` pool
+    did); ``C_som_slow`` / ``C_som_passive`` are INERT placeholders — initialised
+    to 0 and receiving/emitting zero flux — for the forward-cascade dynamics
+    added in phase A2.  Use :func:`som_total` for any total-SOM context.
     """
     C_lab: jax.Array     # Labile carbon
     C_fol: jax.Array     # Foliar carbon
     C_root: jax.Array    # Root carbon
     C_wood: jax.Array    # Wood carbon
     C_lit: jax.Array     # Litter (dead foliage + roots)
-    C_som: jax.Array     # Soil organic matter
+    C_som_active: jax.Array   # Active soil organic matter (fast turnover, ~1-5 yr)
+    C_som_slow: jax.Array     # Slow soil organic matter (~20-50 yr; INERT in A1)
+    C_som_passive: jax.Array  # Passive soil organic matter (~500-1000 yr; INERT in A1)
+
+
+def som_total(state: CarbonState) -> jax.Array:
+    """Total soil organic matter = active + slow + passive pools [gC/m2].
+
+    Single source of truth for the many total-SOM call sites (diagnostics,
+    conservation sums, IC mapping, plotting).  Lives here in ``config`` — the
+    leaf module that defines :class:`CarbonState` and imports nothing else from
+    the package — so every caller (carbon_cycle, spinup, global_init, run
+    scripts, validators, tests) can import it without an import cycle.  In phase
+    A1 the slow/passive pools are inert (== 0), so ``som_total == C_som_active``;
+    the helper keeps every total-context site correct once the cascade is
+    populated in A2.
+    """
+    return state.C_som_active + state.C_som_slow + state.C_som_passive
 
 
 class CarbonDiagnostics(NamedTuple):

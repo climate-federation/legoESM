@@ -23,8 +23,8 @@ def test_equilibrate_two_archetypes():
         soil_class=np.array(["clay_loam", "loam"], dtype=object))
     eq, qc = equilibrate_archetypes(
         tab, n_spinup=20, n_verify=6, dt=7200.0, n_layers=6, soil_depth=2.0)
-    assert isinstance(eq, CarbonState) and eq.C_som.shape == (2,)
-    assert np.all(np.isfinite(np.asarray(eq.C_som)))
+    assert isinstance(eq, CarbonState) and eq.C_som_active.shape == (2,)
+    assert np.all(np.isfinite(np.asarray(eq.C_som_active)))
     assert (np.asarray(qc["gpp"]) >= 0).all()
     # Tropical archetype fixes more C than the temperate one.
     assert float(np.asarray(eq.C_wood)[0]) > 0.0
@@ -97,6 +97,14 @@ def _load():
     sys.modules["gcicv"] = m
     s.loader.exec_module(m)
     return m
+
+
+def test_pool_fields_matches_carbon_state():
+    """The validator's hardcoded ``_POOL_FIELDS`` copy MUST track
+    ``CarbonState._fields`` (Risk #1/#4): the drift + total-carbon metrics sum
+    over it, so a drift after the 6->8 SOM split would silently mis-total."""
+    v = _load()
+    assert tuple(v._POOL_FIELDS) == CarbonState._fields
 
 
 # --- pure-logic drift metric (no model; verbatim from the Task-7 brief) ---

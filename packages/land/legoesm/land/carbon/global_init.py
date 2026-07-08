@@ -521,13 +521,13 @@ def equilibrate_archetypes(
     # validator), so this function only orchestrates + scatters.
     import jax.numpy as jnp
 
-    from legoesm.land.carbon.config import CarbonState
+    from legoesm.land.carbon.config import CarbonState, som_total
     from legoesm.land.carbon.carbon_cycle import init_carbon_state
     from legoesm.land.carbon.spinup import run_semi_analytic_spinup
     from legoesm.land.multilayer_land import init_multilayer_land_state
 
     n_arch = np.asarray(table.pft_id, int).shape[0]
-    pool_fields = CarbonState._fields  # ("C_lab", ..., "C_som")
+    pool_fields = CarbonState._fields  # ("C_lab", ..., "C_som_passive")
     batches = iter_archetype_batches(
         table, n_layers=n_layers, soil_depth=soil_depth, dt=dt)
 
@@ -563,7 +563,7 @@ def equilibrate_archetypes(
 
         qc["gpp"][g_idx] = np.asarray(annual["gpp"])[-1]
         qc["npp"][g_idx] = np.asarray(annual["npp"])[-1]
-        qc["som_kgC"][g_idx] = np.asarray(final_carbon.C_som) / _G_PER_KG
+        qc["som_kgC"][g_idx] = np.asarray(som_total(final_carbon)) / _G_PER_KG
         qc["biomass_kgC"][g_idx] = biomass / _G_PER_KG
         qc["drift_frac_per_yr"][g_idx] = drift
 

@@ -24,6 +24,7 @@ from legoesm.land.carbon.config import (
     CarbonConfig,
     CarbonDiagnostics,
     CarbonState,
+    som_total,
 )
 from legoesm.land.carbon.carbon_cycle import (
     compute_gpp,
@@ -54,7 +55,9 @@ def _make_carbon_state(shape=(4,), **overrides):
         C_root=jnp.full(shape, 300.0),
         C_wood=jnp.full(shape, 10000.0),
         C_lit=jnp.full(shape, 100.0),
-        C_som=jnp.full(shape, 10000.0),
+        C_som_active=jnp.full(shape, 10000.0),
+        C_som_slow=jnp.zeros(shape),      # inert in A1
+        C_som_passive=jnp.zeros(shape),   # inert in A1
     )
     defaults.update(overrides)
     return CarbonState(**defaults)
@@ -84,8 +87,15 @@ class TestCarbonConfig(unittest.TestCase):
 
     def test_carbon_state_fields(self):
         state = _make_carbon_state()
-        self.assertEqual(len(state), 6)
+        # 8 pools since the A1 SOM split (C_som -> active/slow/passive).
+        self.assertEqual(len(state), 8)
+        self.assertEqual(
+            state._fields[-3:],
+            ("C_som_active", "C_som_slow", "C_som_passive"))
         self.assertEqual(state.C_lab.shape, (4,))
+        # Slow/passive SOM pools are inert (0) in phase A1.
+        self.assertTrue(jnp.all(state.C_som_slow == 0.0))
+        self.assertTrue(jnp.all(state.C_som_passive == 0.0))
 
 
 # ===================================================================
@@ -288,9 +298,15 @@ class TestDifferLandStep(unittest.TestCase):
 
     def test_pools_stay_positive(self):
         new_state, _ = self._step_once()
+        # Live pools stay above the floor; the inert SOM sub-pools are exactly
+        # 0 in phase A1 (zero flux), so they are checked for inertness instead.
         for name in new_state._fields:
             arr = getattr(new_state, name)
-            self.assertTrue(jnp.all(arr >= 1.0), f"{name} below floor")
+            if name in ("C_som_slow", "C_som_passive"):
+                self.assertTrue(jnp.all(arr == 0.0),
+                                f"{name} should be inert (0) in A1")
+            else:
+                self.assertTrue(jnp.all(arr >= 1.0), f"{name} below floor")
 
     def test_co2_flux_units(self):
         """CO2 flux should be in kgCO2/m2/s — typical magnitude ~1e-8 to 1e-6."""
@@ -438,7 +454,9 @@ class TestDifferLandStep(unittest.TestCase):
             C_root=jnp.full((ncol,), 400.0),
             C_wood=jnp.full((ncol,), 10000.0),
             C_lit=jnp.full((ncol,), 600.0),
-            C_som=jnp.full((ncol,), 12000.0),
+            C_som_active=jnp.full((ncol,), 12000.0),
+            C_som_slow=jnp.zeros((ncol,)),
+            C_som_passive=jnp.zeros((ncol,)),
         )
         sw = jnp.zeros(ncol)            # no GPP
         T = jnp.full(ncol, 290.0)
@@ -480,7 +498,9 @@ class TestDifferLandStep(unittest.TestCase):
             C_root=jnp.full((ncol,), 400.0),
             C_wood=jnp.full((ncol,), 10000.0),
             C_lit=jnp.full((ncol,), 600.0),
-            C_som=jnp.full((ncol,), 12000.0),
+            C_som_active=jnp.full((ncol,), 12000.0),
+            C_som_slow=jnp.zeros((ncol,)),
+            C_som_passive=jnp.zeros((ncol,)),
         )
         sw = jnp.zeros(ncol)            # no GPP
         T = jnp.full(ncol, 290.0)
@@ -794,7 +814,11 @@ class TestInitCarbonState(unittest.TestCase):
         cfg = _default_config(C_lab_init=50.0, C_som_init=5000.0)
         state = init_carbon_state((3,), cfg)
         npt.assert_allclose(state.C_lab, 50.0)
-        npt.assert_allclose(state.C_som, 5000.0)
+        # A1: all of C_som_init seeds the active pool; slow/passive start at 0.
+        npt.assert_allclose(som_total(state), 5000.0)
+        npt.assert_allclose(state.C_som_active, 5000.0)
+        npt.assert_allclose(state.C_som_slow, 0.0)
+        npt.assert_allclose(state.C_som_passive, 0.0)
 
     def test_woody_init_keeps_wood_pool(self):
         cfg = _default_config(woody=True, C_wood_init=8000.0)

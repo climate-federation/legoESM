@@ -17,9 +17,24 @@ from legoesm.land.carbon.spinup import (
 )
 
 
+class TestPoolFieldsGuard(unittest.TestCase):
+    """The hardcoded ``spinup._POOL_FIELDS`` copy MUST track
+    ``CarbonState._fields``.  The closed-column mass balance
+    (``_total_carbon`` / annual-pool dict) is keyed off it, so a drift after
+    the 6->8 SOM split (or any future pool change) would silently break
+    conservation.  Guards Risk #1/#4 of the multi-pool-SOM plan."""
+
+    def test_pool_fields_matches_carbon_state(self):
+        from legoesm.land.carbon.spinup import _POOL_FIELDS
+        self.assertEqual(tuple(_POOL_FIELDS), CarbonState._fields)
+
+
 def _state(**kw):
+    # SOM slow/passive are inert (0) in phase A1; the analytic solve targets
+    # the active pool, so tests pass ``C_som_active=`` to set the SOM stock.
     d = dict(C_lab=100.0, C_fol=200.0, C_root=300.0,
-             C_wood=1000.0, C_lit=400.0, C_som=5000.0)
+             C_wood=1000.0, C_lit=400.0,
+             C_som_active=5000.0, C_som_slow=0.0, C_som_passive=0.0)
     d.update(kw)
     return CarbonState(**{k: jnp.array([v]) for k, v in d.items()})
 
@@ -38,17 +53,17 @@ class TestAnalyticSlowPoolEquilibrium(unittest.TestCase):
 
     def test_som_equilibrium_includes_humified_cwd(self):
         """C_som_eq uses lit_to_som + cwd_humification_eff*a_wood as input."""
-        st = _state(C_som=5000.0)
+        st = _state(C_som_active=5000.0)
         fx = SlowPoolFluxes(
             a_wood=jnp.array([10.0]), wood_litter=jnp.array([5.0]),
             lit_to_som=jnp.array([20.0]), r_het_som=jnp.array([10.0]))
         out = analytic_slow_pool_equilibrium(st, fx, cwd_humification_eff=0.3)
-        # som_in = 20 + 0.3*10 = 23; C_som_eq = 5000 * 23/10 = 11500
-        npt.assert_allclose(out.C_som, 11500.0, rtol=1e-9)
+        # som_in = 20 + 0.3*10 = 23; C_som_active_eq = 5000 * 23/10 = 11500
+        npt.assert_allclose(out.C_som_active, 11500.0, rtol=1e-9)
 
     def test_reset_pool_is_a_fixed_point(self):
         """At the analytic equilibrium, input == loss (steady state)."""
-        st = _state(C_som=5000.0, C_wood=1000.0)
+        st = _state(C_som_active=5000.0, C_wood=1000.0)
         fx = SlowPoolFluxes(
             a_wood=jnp.array([12.0]), wood_litter=jnp.array([7.0]),
             lit_to_som=jnp.array([15.0]), r_het_som=jnp.array([9.0]))
@@ -58,10 +73,10 @@ class TestAnalyticSlowPoolEquilibrium(unittest.TestCase):
         k_wood = float(fx.wood_litter[0]) / float(st.C_wood[0])
         npt.assert_allclose(k_wood * float(out.C_wood[0]), float(fx.a_wood[0]),
                             rtol=1e-9)
-        # SOM: k*C_som_eq == som_in_eq (input).
-        k_som = float(fx.r_het_som[0]) / float(st.C_som[0])
+        # SOM: k*C_som_active_eq == som_in_eq (input).
+        k_som = float(fx.r_het_som[0]) / float(st.C_som_active[0])
         som_in_eq = float(fx.lit_to_som[0]) + cwd * float(fx.a_wood[0])
-        npt.assert_allclose(k_som * float(out.C_som[0]), som_in_eq, rtol=1e-9)
+        npt.assert_allclose(k_som * float(out.C_som_active[0]), som_in_eq, rtol=1e-9)
 
     def test_fast_pools_unchanged(self):
         st = _state()
@@ -75,27 +90,29 @@ class TestAnalyticSlowPoolEquilibrium(unittest.TestCase):
     def test_zero_loss_leaves_pool_unchanged(self):
         """Zero loss flux (no inferable turnover) => pool left as-is, not an
         artefact (0 or C/eps)."""
-        st = _state(C_wood=1234.0, C_som=6789.0)
+        st = _state(C_wood=1234.0, C_som_active=6789.0)
         # Zero loss but NON-zero input: no finite equilibrium -> leave unchanged.
         fx = SlowPoolFluxes(
             a_wood=jnp.array([5.0]), wood_litter=jnp.array([0.0]),
             lit_to_som=jnp.array([7.0]), r_het_som=jnp.array([0.0]))
         out = analytic_slow_pool_equilibrium(st, fx, cwd_humification_eff=0.3)
         self.assertTrue(jnp.all(jnp.isfinite(out.C_wood)))
-        self.assertTrue(jnp.all(jnp.isfinite(out.C_som)))
+        self.assertTrue(jnp.all(jnp.isfinite(out.C_som_active)))
         npt.assert_allclose(out.C_wood, 1234.0, rtol=0, atol=0)
-        npt.assert_allclose(out.C_som, 6789.0, rtol=0, atol=0)
+        npt.assert_allclose(out.C_som_active, 6789.0, rtol=0, atol=0)
 
     def test_batched(self):
         st = CarbonState(
             C_lab=jnp.full((3,), 100.0), C_fol=jnp.full((3,), 200.0),
             C_root=jnp.full((3,), 300.0), C_wood=jnp.full((3,), 1000.0),
-            C_lit=jnp.full((3,), 400.0), C_som=jnp.full((3,), 5000.0))
+            C_lit=jnp.full((3,), 400.0),
+            C_som_active=jnp.full((3,), 5000.0),
+            C_som_slow=jnp.zeros((3,)), C_som_passive=jnp.zeros((3,)))
         fx = SlowPoolFluxes(
             a_wood=jnp.full((3,), 10.0), wood_litter=jnp.full((3,), 5.0),
             lit_to_som=jnp.full((3,), 20.0), r_het_som=jnp.full((3,), 10.0))
         out = analytic_slow_pool_equilibrium(st, fx, cwd_humification_eff=0.3)
-        self.assertEqual(out.C_som.shape, (3,))
+        self.assertEqual(out.C_som_active.shape, (3,))
         npt.assert_allclose(out.C_wood, 2000.0, rtol=1e-9)
 
 
@@ -129,7 +146,9 @@ class TestRunSemiAnalyticSpinup(unittest.TestCase):
         carbon0 = CarbonState(
             C_lab=jnp.full((ncol,), 100.0), C_fol=jnp.full((ncol,), 200.0),
             C_root=jnp.full((ncol,), 300.0), C_wood=jnp.full((ncol,), 1000.0),
-            C_lit=jnp.full((ncol,), 400.0), C_som=jnp.full((ncol,), 5000.0))
+            C_lit=jnp.full((ncol,), 400.0),
+            C_som_active=jnp.full((ncol,), 5000.0),
+            C_som_slow=jnp.zeros((ncol,)), C_som_passive=jnp.zeros((ncol,)))
         state0 = jnp.zeros((ncol,))  # opaque dummy state
 
         def forcing_fn(doy, hour):
@@ -149,15 +168,18 @@ class TestRunSemiAnalyticSpinup(unittest.TestCase):
         # Wood: C_wood_eq = 1000 * a_wood/wood_litter = 1000 * 10/5 = 2000.
         npt.assert_allclose(np.asarray(fc.C_wood), 2000.0, rtol=1e-6)
         # SOM: som_in = lit_to_som + cwd*a_wood = 20 + 0.3*10 = 23; loss 10.
-        #      C_som_eq = 5000 * 23/10 = 11500.
-        npt.assert_allclose(np.asarray(fc.C_som), 11500.0, rtol=1e-6)
+        #      C_som_active_eq = 5000 * 23/10 = 11500.
+        npt.assert_allclose(np.asarray(fc.C_som_active), 11500.0, rtol=1e-6)
+        # Inert SOM sub-pools untouched (zero flux) in phase A1.
+        npt.assert_allclose(np.asarray(fc.C_som_slow), 0.0, atol=0.0)
+        npt.assert_allclose(np.asarray(fc.C_som_passive), 0.0, atol=0.0)
         # Fast pools untouched by the reset and frozen by the toy step.
         for f, v in (("C_lab", 100.0), ("C_fol", 200.0),
                      ("C_root", 300.0), ("C_lit", 400.0)):
             npt.assert_allclose(np.asarray(getattr(fc, f)), v, rtol=1e-6)
         # Per-verify-year annual dict, shape (n_verify, ncol).
         for key in ("gpp", "npp", "nee_model", "alloc_resid", "lai_sum",
-                    "lai_max", "nsteps", "C_som"):
+                    "lai_max", "nsteps", "C_som_active"):
             self.assertIn(key, annual)
             self.assertEqual(np.asarray(annual[key]).shape, (2, 1), key)
         # Allocation closes -> residual ~0; LAI reductions; steps counted.
@@ -171,7 +193,7 @@ class TestRunSemiAnalyticSpinup(unittest.TestCase):
 
     def test_batched_over_columns(self):
         _fs, fc, annual = self._run(ncol=3)
-        self.assertEqual(fc.C_som.shape, (3,))
+        self.assertEqual(fc.C_som_active.shape, (3,))
         npt.assert_allclose(np.asarray(fc.C_wood), 2000.0, rtol=1e-6)
         self.assertEqual(np.asarray(annual["gpp"]).shape, (2, 3))
 
@@ -220,7 +242,9 @@ class TestIntegrateAnnualPools(unittest.TestCase):
         carbon0 = CarbonState(
             C_lab=jnp.full((ncol,), 100.0), C_fol=jnp.full((ncol,), 200.0),
             C_root=jnp.full((ncol,), 300.0), C_wood=jnp.full((ncol,), 1000.0),
-            C_lit=jnp.full((ncol,), 400.0), C_som=jnp.full((ncol,), 5000.0))
+            C_lit=jnp.full((ncol,), 400.0),
+            C_som_active=jnp.full((ncol,), 5000.0),
+            C_som_slow=jnp.zeros((ncol,)), C_som_passive=jnp.zeros((ncol,)))
         state0 = jnp.zeros((ncol,))  # opaque dummy state
 
         def forcing_fn(doy, hour):
@@ -233,7 +257,7 @@ class TestIntegrateAnnualPools(unittest.TestCase):
         out = integrate_annual_pools(
             step_fn, state0, carbon0, forcing_fn,
             n_years=n_years, steps_per_year=steps_per_year, dt=dt)
-        for p in ("C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som"):
+        for p in CarbonState._fields:
             arr = np.asarray(out[p])
             # One (n_years+1, ncol) array per pool; row 0 == the IC.
             self.assertEqual(arr.shape, (n_years + 1, ncol), p)

@@ -64,7 +64,10 @@ def _steady_annual(ny=6):
         alloc_resid=const(0.0),
         lai_sum=const(4.0 * 100), lai_max=const(4.0), nsteps=const(100.0),
         C_lab=const(500.0), C_fol=const(400.0), C_root=const(1500.0),
-        C_wood=const(18000.0), C_lit=const(800.0), C_som=const(11000.0),
+        C_wood=const(18000.0), C_lit=const(800.0),
+        # SOM resolved into active/slow/passive (A1: slow/passive inert == 0).
+        C_som_active=const(11000.0), C_som_slow=const(0.0),
+        C_som_passive=const(0.0),
     )
     return d
 

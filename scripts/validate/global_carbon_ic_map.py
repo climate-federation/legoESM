@@ -59,8 +59,13 @@ _DRIFT_EPS = 1e-9
 _DRIFT_PASS_THRESHOLD = 0.05
 _G_PER_KG = 1000.0
 # CarbonState pool order (== CarbonState._fields; kept literal so the metric
-# helpers stay JAX-free at import).
-_POOL_FIELDS = ("C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som")
+# helpers stay JAX-free at import).  Guarded against drift by
+# test_global_carbon_ic_map.test_pool_fields_matches_carbon_state.  SOM is
+# resolved into active/slow/passive since phase A1.
+_POOL_FIELDS = (
+    "C_lab", "C_fol", "C_root", "C_wood", "C_lit",
+    "C_som_active", "C_som_slow", "C_som_passive",
+)
 
 # Soil-column geometry fallbacks (only used when an OLD archetypes.npz predates
 # geometry persistence; a Task-8h npz carries n_layers/soil_depth/dt).  Match the
@@ -125,7 +130,9 @@ def _per_pft_realism(pft_id, pft_names, eq_np, ranges, pft_biome):
     stocks but no pass/fail.
     """
     pft_id = np.asarray(pft_id, int)
-    soc = eq_np["C_som"] / _G_PER_KG
+    # Total SOM = active + slow + passive (slow/passive inert == 0 in phase A1).
+    soc = (eq_np["C_som_active"] + eq_np["C_som_slow"]
+           + eq_np["C_som_passive"]) / _G_PER_KG
     biomass = (eq_np["C_lab"] + eq_np["C_fol"]
                + eq_np["C_root"] + eq_np["C_wood"]) / _G_PER_KG
     out: dict = {}

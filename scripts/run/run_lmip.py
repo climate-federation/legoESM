@@ -58,7 +58,7 @@ from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
 from legoesm.land.richards import RichardsConfig
-from legoesm.land.carbon.config import CarbonConfig
+from legoesm.land.carbon.config import CarbonConfig, som_total
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
 from legoesm.land.lmip_forcing import make_synthetic_lmip_forcing
 from legoesm.land.multilayer_land import (
@@ -442,7 +442,8 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
     carbon_state = None
     if config.carbon.scheme == "differland":
         carbon_fields = [
-            "C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som",
+            "C_lab", "C_fol", "C_root", "C_wood", "C_lit",
+            "C_som_active", "C_som_slow", "C_som_passive",
         ]
         if all(f"carbon_{field}" in data for field in carbon_fields):
             from legoesm.land.carbon.config import CarbonState
@@ -907,7 +908,7 @@ def main() -> None:
     if (status == "PASS" and args.carbon_spinup == "semi_analytic"
             and config.carbon.scheme == "differland" and carbon_state is not None):
         c_wood0 = float(np.asarray(carbon_state.C_wood).reshape(-1)[0])
-        c_som0 = float(np.asarray(carbon_state.C_som).reshape(-1)[0])
+        c_som0 = float(np.asarray(som_total(carbon_state)).reshape(-1)[0])
         # Diagnostic year must be in seasonal phase with the state, i.e. start
         # on the day-of-year the transient ended (state advances through the
         # diagnostic year, so the returned state is saved with the reset carbon).
@@ -916,7 +917,7 @@ def main() -> None:
             state, carbon_state, config, lat_rad, lon_rad, lat_jnp, dt,
             _final_doy, args.precip_rate)
         c_wood1 = float(np.asarray(carbon_state.C_wood).reshape(-1)[0])
-        c_som1 = float(np.asarray(carbon_state.C_som).reshape(-1)[0])
+        c_som1 = float(np.asarray(som_total(carbon_state)).reshape(-1)[0])
         print(f"[semi-analytic spin-up] C_wood {c_wood0:.0f}->{c_wood1:.0f}, "
               f"C_som {c_som0:.0f}->{c_som1:.0f} gC/m2 (analytic slow-pool "
               f"equilibrium; Xia et al. 2012)", flush=True)

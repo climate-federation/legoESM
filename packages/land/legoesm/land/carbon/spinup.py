@@ -31,7 +31,7 @@ from typing import Callable, NamedTuple
 import jax
 import jax.numpy as jnp
 
-from legoesm.land.carbon.config import CarbonState
+from legoesm.land.carbon.config import CarbonState, som_total
 
 # --- time conversions (exact) ---
 _SECS_PER_DAY = 86400.0
@@ -39,8 +39,14 @@ _SECS_PER_HOUR = 3600.0
 _HOURS_PER_DAY = 24.0
 _YEAR_DAYS = 365.0
 
-# Prognostic carbon pools summed for the closed-column mass balance.
-_POOL_FIELDS = ("C_lab", "C_fol", "C_root", "C_wood", "C_lit", "C_som")
+# Prognostic carbon pools summed for the closed-column mass balance.  MUST equal
+# ``CarbonState._fields`` (guarded by
+# ``test_carbon_spinup.test_pool_fields_matches_carbon_state``); the SOM pool is
+# resolved into active/slow/passive since phase A1.
+_POOL_FIELDS = (
+    "C_lab", "C_fol", "C_root", "C_wood", "C_lit",
+    "C_som_active", "C_som_slow", "C_som_passive",
+)
 
 
 class SlowPoolFluxes(NamedTuple):
@@ -61,16 +67,19 @@ def analytic_slow_pool_equilibrium(
     cwd_humification_eff: float,
     eps: float = 1e-9,
 ) -> CarbonState:
-    """Reset the slow pools (wood, SOM) of *carbon_state* to their analytic
-    linear-pool steady state given stationary mean-annual *fluxes*.
+    """Reset the slow pools (wood, active SOM) of *carbon_state* to their
+    analytic linear-pool steady state given stationary mean-annual *fluxes*.
 
     Wood:  loss = wood_litter = k_wood * C_wood, input = a_wood, so
            ``C_wood_eq = C_wood * a_wood / wood_litter``.
     SOM :  at wood equilibrium the wood -> SOM humified input is
            ``cwd_humification_eff * a_wood`` (wood in == out), so the total SOM
            input is ``lit_to_som + cwd_humification_eff*a_wood``; with
-           loss = r_het_som = k_som * C_som,
-           ``C_som_eq = C_som * som_input_eq / r_het_som``.
+           loss = r_het_som = k_som * C_som_active,
+           ``C_som_active_eq = C_som_active * som_input_eq / r_het_som``.
+
+    Phase A1: only the ACTIVE SOM pool receives flux, so only ``C_som_active``
+    is reset; the inert slow/passive pools are left unchanged (still 0).
 
     A pool whose LOSS flux is ~0 (a dead/collapsed or masked column) has no
     inferable turnover ``k``, hence no finite analytic equilibrium, so it is
@@ -91,9 +100,9 @@ def analytic_slow_pool_equilibrium(
     Returns
     -------
     CarbonState
-        A copy of *carbon_state* with ``C_wood`` and ``C_som`` set to their
-        analytic equilibrium (where the loss flux is > ``eps``); all other
-        pools unchanged.
+        A copy of *carbon_state* with ``C_wood`` and ``C_som_active`` set to
+        their analytic equilibrium (where the loss flux is > ``eps``); all other
+        pools (fast pools + inert slow/passive SOM) unchanged.
     """
     C_wood_eq = jnp.where(
         fluxes.wood_litter > eps,
@@ -102,16 +111,17 @@ def analytic_slow_pool_equilibrium(
     )
     wood_to_som_eq = cwd_humification_eff * fluxes.a_wood
     som_in_eq = fluxes.lit_to_som + wood_to_som_eq
-    C_som_eq = jnp.where(
+    C_som_active_eq = jnp.where(
         fluxes.r_het_som > eps,
-        carbon_state.C_som * som_in_eq / jnp.maximum(fluxes.r_het_som, eps),
-        carbon_state.C_som,
+        carbon_state.C_som_active * som_in_eq / jnp.maximum(fluxes.r_het_som, eps),
+        carbon_state.C_som_active,
     )
-    return carbon_state._replace(C_wood=C_wood_eq, C_som=C_som_eq)
+    return carbon_state._replace(C_wood=C_wood_eq, C_som_active=C_som_active_eq)
 
 
 def _total_carbon(carbon_state: CarbonState) -> jnp.ndarray:
-    """Column total of the six prognostic pools [gC/m2].
+    """Column total of every prognostic pool [gC/m2] (biomass + litter + all
+    three SOM sub-pools via :func:`som_total`).
 
     The DifferLand column is closed (the only exchange with the atmosphere is
     NEE), so ``sum(dC_pools) == -NEE_day*dt`` exactly (see
@@ -122,7 +132,7 @@ def _total_carbon(carbon_state: CarbonState) -> jnp.ndarray:
     """
     return (
         carbon_state.C_lab + carbon_state.C_fol + carbon_state.C_root
-        + carbon_state.C_wood + carbon_state.C_lit + carbon_state.C_som
+        + carbon_state.C_wood + carbon_state.C_lit + som_total(carbon_state)
     )
 
 
@@ -204,7 +214,7 @@ def run_semi_analytic_spinup(
         [gC/m2/yr] (``sum(rate*dt_days)``), ``lai_sum``/``lai_max``, the
         allocation residual ``alloc_resid``, ``nsteps``, the model's
         mass-balance annual ``nee_model``, and the end-of-year pools
-        ``C_lab``..``C_som``.
+        ``C_lab``..``C_som_passive`` (the eight ``_POOL_FIELDS``).
     """
     # Fail early on degenerate run controls (dispatch-hardening discipline): the
     # analytic reset reads the LAST spin-up year's fluxes (needs n_spinup >= 1),
@@ -303,7 +313,7 @@ def integrate_annual_pools(
     dt: float,
 ):
     """Forward-integrate the coupled step ``n_years`` under the repeating annual
-    ``forcing_fn``, recording the six carbon pools at the END of each year.
+    ``forcing_fn``, recording the eight carbon pools at the END of each year.
 
     Unlike :func:`run_semi_analytic_spinup` this performs NO analytic slow-pool
     reset -- it is the RAW transient used to MEASURE how far a given IC drifts
@@ -348,7 +358,7 @@ def integrate_annual_pools(
         (state_end, carbon_end), _ = jax.lax.scan(
             _inner_step, carry, jnp.arange(steps_per_year))
         pools = jnp.stack(
-            [getattr(carbon_end, p) for p in _POOL_FIELDS], axis=0)  # (6, ncol)
+            [getattr(carbon_end, p) for p in _POOL_FIELDS], axis=0)  # (8, ncol)
         return (state_end, carbon_end), pools
 
     (_final_state, _final_carbon), pools_seq = jax.lax.scan(
@@ -356,5 +366,5 @@ def integrate_annual_pools(
     # pools_seq: (n_years, 6, ncol).  Prepend the IC as year 0 so the trajectory
     # spans the whole run (drift is measured over IC -> final).
     ic = jnp.stack([getattr(carbon0, p) for p in _POOL_FIELDS], axis=0)
-    allp = jnp.concatenate([ic[None], pools_seq], axis=0)  # (n_years+1, 6, ncol)
+    allp = jnp.concatenate([ic[None], pools_seq], axis=0)  # (n_years+1, 8, ncol)
     return {p: allp[:, i, :] for i, p in enumerate(_POOL_FIELDS)}
