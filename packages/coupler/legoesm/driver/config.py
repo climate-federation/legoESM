@@ -1671,7 +1671,7 @@ class ExperimentConfig(NamedTuple):
         export) — not in core runtime paths.
         """
         from legoesm.forcing.amip_config import AMIPExperimentConfig
-        return AMIPExperimentConfig(
+        _amip_kwargs = dict(
             resolution=self.grid.resolution,
             nlev=self.grid.nlev,
             dt=self.dycore.dt,
@@ -1767,6 +1767,7 @@ class ExperimentConfig(NamedTuple):
             sbm_RH_ref=self.sbm_RH_ref,
             sbm_cape_threshold=self.sbm_cape_threshold,
             bechtold_cape_threshold=self.bechtold_cape_threshold,
+            convective_precip_efficiency=self.convective_precip_efficiency,
             bechtold_conv_top_pa=self.bechtold_conv_top_pa,
             sigma_b=self.sigma_b,
             k_BL_max_per_day=self.k_BL_max_per_day,
@@ -1785,6 +1786,12 @@ class ExperimentConfig(NamedTuple):
             ensemble_size=self.ensemble_size,
             output_dir=self.output.output_dir,
         )
+        # Filter to the legacy AMIP schema's fields — ExperimentConfig has
+        # accreted many newer knobs the flat AMIPExperimentConfig never
+        # mirrored; drop those instead of raising (drift-proof round-trip).
+        return AMIPExperimentConfig(**{
+            k: v for k, v in _amip_kwargs.items()
+            if k in AMIPExperimentConfig._fields})
 
 
 # ======================================================================
