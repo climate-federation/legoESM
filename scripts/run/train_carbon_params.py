@@ -609,14 +609,25 @@ def _build_model_soc_fn(args, target_bundle, spin, precomputed):
     return lambda params: _slow_model_soc(params, target_bundle, spin)
 
 
-def _precompute_and_check(table, initial_params, spin):
+def _precompute_and_check(table, initial_params, spin, cover_weight=None):
     """Run the ONE-TIME default-parameter precompute spin-up and VERIFY the
     closed-form SOM SOC reproduces the spin-up equilibrium at the defaults.
 
-    Returns ``(FastAnalyticInputs, match_dict)``.  The match is reported (mean /
-    max absolute relative error over archetypes) but never auto-fails here -- the
-    calibration proceeds and the scorecard/report surface the fidelity so a large
-    mismatch is visible rather than silently shipped.
+    Returns ``(FastAnalyticInputs, match_dict)``.  The match is reported but never
+    auto-fails here -- the calibration proceeds and the scorecard/report surface
+    the fidelity so a large mismatch is visible rather than silently shipped.
+
+    Reports THREE fidelity metrics because the raw per-archetype mean relative
+    error over-states the surrogate's error for the calibration's purpose:
+    * ``mean_abs_rel_err`` -- raw mean |analytic-real|/|real|; INFLATED by
+      near-zero-SOM (cold/dead) archetypes (a tiny absolute miss on a ~0 pool is a
+      huge %), which contribute ~0 to the cover-weighted loss.
+    * ``cover_weighted_rel_err`` -- the LOSS-RELEVANT metric:
+      ``sqrt(Σ w·(analytic-real)²/Σ w) / (Σ w·real/Σ w)`` -- the cover-weighted
+      RMS SOC error relative to the cover-weighted mean SOC, i.e. how well the
+      surrogate tracks the actual cover-weighted-MSE objective.
+    * ``high_som_mean_rel_err`` -- mean |rel| over archetypes with real SOC > 5
+      kgC/m2 (the meaningful-stock cells).
     """
     from legoesm.land.carbon.global_init import precompute_fast_analytic_inputs
 
@@ -630,20 +641,36 @@ def _precompute_and_check(table, initial_params, spin):
     model_soc = make_fast_analytic_forward(precomputed)
     analytic_kg = np.asarray(model_soc(initial_params))
     real_kg = np.asarray(real_som) / _G_PER_KG
+    abs_err = np.abs(analytic_kg - real_kg)
     denom = np.maximum(np.abs(real_kg), 1e-6)
-    rel = np.abs(analytic_kg - real_kg) / denom
+    rel = abs_err / denom
+    # Loss-relevant: cover-weighted RMS SOC error / cover-weighted mean SOC.
+    if cover_weight is not None:
+        w = np.asarray(cover_weight, float)
+        wsum = float(np.sum(w)) or 1.0
+        cw_rmse = float(np.sqrt(np.sum(w * (analytic_kg - real_kg) ** 2) / wsum))
+        cw_mean_real = float(np.sum(w * real_kg) / wsum)
+        cover_weighted_rel = cw_rmse / max(abs(cw_mean_real), 1e-6)
+    else:
+        cover_weighted_rel = float("nan")
+    hi = real_kg > 5.0  # meaningful-stock archetypes
+    high_som_mean_rel = float(np.mean(rel[hi])) if bool(np.any(hi)) else float("nan")
     match = {
         "n_archetypes": int(real_kg.shape[0]),
         "mean_abs_rel_err": float(np.mean(rel)),
         "max_abs_rel_err": float(np.max(rel)),
-        "max_abs_err_kgC_m2": float(np.max(np.abs(analytic_kg - real_kg))),
+        "cover_weighted_rel_err": cover_weighted_rel,
+        "high_som_mean_rel_err": high_som_mean_rel,
+        "n_high_som": int(np.sum(hi)),
+        "max_abs_err_kgC_m2": float(np.max(abs_err)),
         "spinup_som_kgC_m2_range": [float(np.min(real_kg)), float(np.max(real_kg))],
         "precompute_seconds": float(time.time() - t0),
     }
     print(f"[fast-analytic] precompute {match['precompute_seconds']:.1f}s; "
           f"analytic-vs-spin-up SOC match over {match['n_archetypes']} archetypes: "
-          f"mean|rel|={match['mean_abs_rel_err']:.2%}  "
-          f"max|rel|={match['max_abs_rel_err']:.2%}  "
+          f"raw-mean|rel|={match['mean_abs_rel_err']:.2%} (inflated by near-zero cells)  "
+          f"COVER-WEIGHTED|rel|={match['cover_weighted_rel_err']:.2%}  "
+          f"high-SOM(>5)|rel|={match['high_som_mean_rel_err']:.2%} (n={match['n_high_som']})  "
           f"(spin-up SOM {match['spinup_som_kgC_m2_range'][0]:.1f}..."
           f"{match['spinup_som_kgC_m2_range'][1]:.1f} kgC/m2)")
     if match["mean_abs_rel_err"] > _MATCH_WARN_REL:
@@ -788,7 +815,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     match_info: dict[str, Any] = {}
     if args.fast_analytic:
         precomputed, match_info = _precompute_and_check(
-            target_bundle["table"], initial_params, spin)
+            target_bundle["table"], initial_params, spin,
+            cover_weight=target_bundle["cover_weight"])
 
     loss_fn = _build_loss_fn(args, target_bundle, spin, precomputed)
 
