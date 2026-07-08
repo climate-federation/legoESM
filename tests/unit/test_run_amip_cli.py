@@ -49,6 +49,19 @@ def test_no_use_multilayer_land_overrides_yaml_default():
     assert cfg.use_multilayer_land is False
 
 
+def test_no_surface_tiled_overrides_yaml_default():
+    """--no-surface-tiled flips a set_defaults(True) (a --config YAML enabling
+    the tiled mosaic surface) back off — same MPAS/spectral escape hatch as
+    --no-use-multilayer-land (the standalone backends don't run the tiled
+    coupled pipeline; validate_strict otherwise demands an active land tile)."""
+    parser = build_arg_parser()
+    parser.set_defaults(surface_tiled=True)  # what a YAML would do
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-surface-tiled",
+    ]), parser))
+    assert cfg.surface_tiled is False
+
+
 def test_multilayer_land_rejected_on_mpas():
     """use_multilayer_land + MPAS grid must fail EARLY at argparse with a clear
     message (not an AttributeError deep in _setup_multilayer_land: VoronoiMesh

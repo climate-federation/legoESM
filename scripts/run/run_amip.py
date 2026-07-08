@@ -729,7 +729,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Activate the slab-land SEB tile using the "
                              "topography-derived land fraction (requires "
                              "--topography). No separate LSM file needed.")
-    parser.add_argument("--surface-tiled", action="store_true", default=False,
+    parser.add_argument("--surface-tiled", default=False,
+                        action=argparse.BooleanOptionalAction,
                         help="Tiled (mosaic) surface fluxes: run --surface-bulk-scheme "
                              "(e.g. coare3) on the OCEAN tile and the fixed-roughness "
                              "land Monin-Obukhov scheme on the LAND tile, then "
@@ -737,7 +738,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "surface (which runs the ocean scheme over land). "
                              "Requires --slab-land-active and --turbulence in "
                              "{louis, clubb_lite, clubb} (the kernels that consume "
-                             "the injected tiled surface flux).")
+                             "the injected tiled surface flux). "
+                             "--no-surface-tiled turns it back off when a --config "
+                             "YAML enables it (e.g. for the MPAS/spectral backends, "
+                             "which do not run the tiled coupled pipeline).")
     parser.add_argument("--surface-z0-land", type=float,
                         default=_EXPERIMENT_DEFAULTS.surface_z0_land,
                         dest="surface_z0_land",
