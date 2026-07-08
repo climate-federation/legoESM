@@ -347,3 +347,79 @@ def make_sfno_step_unified(
         return corrected, held_new, _trad_T_land
 
     return step_unified
+
+
+def make_sfno_step_unified_latlon(
+    sfno_physics: SFNOPhysics,
+    w_latlon_to_gauss,
+    w_gauss_to_latlon,
+):
+    """step_unified for a LAT-LON model grid with the SFNO on a Gaussian grid.
+
+    The SFNO's spherical-harmonic transforms need Gaussian quadrature
+    latitudes, so the model's lat-lon prognostics are remapped onto the
+    SFNO's own Gaussian grid, the SFNO predicts tendencies there, and the
+    dT/dt, dq_v/dt tendencies are remapped back to the lat-lon grid.
+    Replacement mode only (the SFNO IS the physics; there is no lat-lon
+    traditional pipeline to correct against in the WB scale trainer).
+
+    Parameters
+    ----------
+    sfno_physics : SFNOPhysics
+        Wrapper whose ``grid`` is the Gaussian grid the weights target.
+    w_latlon_to_gauss, w_gauss_to_latlon : RegridWeights
+        Precomputed IDW weights (``compute_latlon_to_voronoi_weights``)
+        with ``target_shape`` set to the 2-D destination grid shape, so
+        ``regrid_scalar`` returns (n_lat, n_lon[, nlev]) fields directly.
+    """
+    from legoesm.grids.regridding import regrid_scalar
+
+    def step_unified(need_rad, T, p_s, q_v, q_c, q_r, *args, **kwargs):
+        conv_prog, tail = _parse_step_unified_tail(args)
+        (
+            u, v, sst, sic, lat, lon,
+            day_of_year, seconds_of_day, dt,
+            solar_weights, s_0, o3_vmr, aerosol_od,
+            held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+            held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+        ) = tail
+
+        phis = kwargs.get("phis", jnp.zeros_like(p_s))
+
+        def to_gauss(f):
+            return regrid_scalar(f, w_latlon_to_gauss)
+
+        sfno_out = sfno_physics(
+            to_gauss(T), to_gauss(u), to_gauss(v), to_gauss(q_v),
+            to_gauss(p_s), to_gauss(phis), dt,
+        )
+
+        def to_latlon(f):
+            return regrid_scalar(f, w_gauss_to_latlon)
+
+        zeros_3d = jnp.zeros_like(T)
+        zeros_2d = jnp.zeros_like(p_s)
+        out = PhysicsOutput(
+            **_physics_output_kwargs(
+                dT_dt=to_latlon(sfno_out.dT_dt),
+                dq_v_dt=to_latlon(sfno_out.dq_v_dt),
+                dq_c_dt=zeros_3d,
+                dq_r_dt=zeros_3d,
+                precip=zeros_2d,
+                sw_net_sfc=zeros_2d,
+                lw_net_sfc=zeros_2d,
+                sw_up_toa=zeros_2d,
+                lw_up_toa=zeros_2d,
+                sw_down_toa=zeros_2d,
+                reference_3d=T,
+            )
+        )
+        if "conv_prog" in _PHYSICS_OUTPUT_FIELDS and conv_prog is not None:
+            out = out._replace(conv_prog=conv_prog)
+        held_new = (
+            held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+            held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+        )
+        return out, held_new
+
+    return step_unified

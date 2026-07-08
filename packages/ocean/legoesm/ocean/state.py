@@ -860,6 +860,23 @@ class BarotropicConfig(NamedTuple):
     # by the island line-integral constraints (see rigid_lid_islands.py).
     rigid_lid_cg_tol: float = 1.0e-11
     rigid_lid_cg_maxiter: int = 1000
+    # Wide-halo split-explicit barotropic (scaling-audit item 3; only used
+    # when ``barotropic_solver = 'explicit_substep'``).  When True and a
+    # lat-band decomposition is active, the substep loop exchanges ONE wide
+    # halo (width = substeps-per-exchange x per-substep stencil reach) and
+    # runs the substeps communication-free on the extended band, instead of
+    # ~4 halo pads per substep — the latency lever at >=16 ranks (audit:
+    # net-NEGATIVE at 2-GPU scale, where bandwidth beats message count; keep
+    # it opt-in, flip per deck only with an A/B receipt).  Serial results are
+    # value-identical; per-substep eta clamping runs in the LOCAL mode on
+    # this path (see barotropic_substeps_wide_halo_latlon_cgrid's contract).
+    barotropic_wide_halo: bool = False
+    # Substeps per wide exchange (0 = auto: as many as the local band height
+    # allows, i.e. floor(n_lat_local / stencil_reach), capped at the loop
+    # length).  With strongly UNEVEN bands (--wet-balance) set this so
+    # ``chunk x reach <= min band height`` across ranks — the halo pulls
+    # rows from ONE neighbour only.
+    barotropic_wide_halo_chunk: int = 0
 
 
 class RuntimeChecksConfig(NamedTuple):

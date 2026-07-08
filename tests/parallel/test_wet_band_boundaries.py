@@ -213,3 +213,59 @@ def test_wet_balanced_bands_reassemble_grid():
         np.testing.assert_array_equal(
             np.asarray(bg.lat), lat_c[lo.lat_start:lo.lat_end])
         assert int(bg.n_lat) == lo.n_lat_local
+
+
+def test_wet_balance_on_etopo_mask_beats_row_split():
+    """Realistic-continents gate (scaling-audit item 4): on the shipped
+    ETOPO mask the wet-balanced boundaries must (a) be deterministic,
+    (b) respect the halo floor, and (c) cut the wet-cell imbalance
+    (max/mean) vs the even row split by a real margin — the whole point
+    of the flag.  Skips cleanly if the shipped file is absent."""
+    import numpy as np
+    import pytest
+
+    from pathlib import Path
+
+    bathy = Path(__file__).resolve().parents[2] / "data" / "bathymetry" / "etopo_1deg.nc"
+    if not bathy.exists():
+        pytest.skip("shipped etopo_1deg.nc not present")
+
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.bathymetry import (
+        BathymetryConfig,
+        load_bathymetry_latlon_cgrid,
+    )
+    from legoesm.parallel.latlon_mpi import (
+        validate_band_boundaries,
+        wet_band_boundaries,
+    )
+
+    grid = create_latlon_grid(n_lat=48, n_lon=96)
+    _, mask = load_bathymetry_latlon_cgrid(
+        grid, BathymetryConfig(source="file", path=str(bathy)))
+    wet_rows = np.asarray(mask).sum(axis=1)
+    n_ranks = 8
+
+    b1 = wet_band_boundaries(wet_rows, n_ranks, min_rows=2)
+    b2 = wet_band_boundaries(wet_rows, n_ranks, min_rows=2)
+    assert b1 == b2, "wet boundaries must be deterministic"
+    validate_band_boundaries(b1, n_ranks, 48)
+    rows = np.diff(b1)
+    assert rows.min() >= 2, "halo floor violated"
+
+    def imbalance(bounds):
+        wet = np.array([wet_rows[bounds[r]:bounds[r + 1]].sum()
+                        for r in range(n_ranks)])
+        return float(wet.max() / max(wet.mean(), 1.0))
+
+    base, rem = divmod(48, n_ranks)
+    even = tuple(np.concatenate(
+        [[0], np.cumsum([base + 1 if r < rem else base
+                         for r in range(n_ranks)])]).astype(int))
+    imb_row, imb_wet = imbalance(even), imbalance(b1)
+    # The ETOPO land distribution is strongly asymmetric by latitude; the
+    # wet split must recover most of the imbalance (empirically ~1.0x vs
+    # ~1.4x at this size — assert a conservative margin, not the exact
+    # numbers, so coarse-grid regridding changes don't flake the gate).
+    assert imb_wet < imb_row - 0.05, (imb_row, imb_wet)
+    assert imb_wet < 1.15, imb_wet

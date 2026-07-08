@@ -141,8 +141,21 @@ def ventilation_factor(
     schmidt = nu / D
     r = radius_from_mass(masses, rho_bulk)
     reynolds = 2.0 * r * v_term / nu
-    x = jnp.sqrt(reynolds) * schmidt ** (1.0 / 3.0)
-    f = jnp.where(reynolds < _VENT_RE_THRESHOLD, 1.0 + _VENT_LOW_C * x * x, _VENT_HIGH_C0 + _VENT_HIGH_C1 * x)
+    # AD guard: ``sqrt`` has an unbounded derivative at 0, and the shipped
+    # condensation path calls this with v_term = 0 ⇒ reynolds ≡ 0.  A shared
+    # ``x = sqrt(reynolds)`` fed to BOTH jnp.where branches routes a
+    # 0·inf = NaN cotangent into ``reynolds`` in reverse mode (same masked-
+    # branch trap as nucleation.critical_dry_radius).  Fix: the low-Re branch
+    # uses ``x² = reynolds·Sc^(2/3)`` directly (identical primal, smooth in
+    # reynolds), and the high-Re branch clamps the sqrt argument — inactive
+    # for its selected domain (Re ≥ 2.5), finite gradient when masked.
+    sc13 = schmidt ** (1.0 / 3.0)
+    x_high = jnp.sqrt(jnp.maximum(reynolds, 1e-30)) * sc13
+    f = jnp.where(
+        reynolds < _VENT_RE_THRESHOLD,
+        1.0 + _VENT_LOW_C * reynolds * sc13 * sc13,
+        _VENT_HIGH_C0 + _VENT_HIGH_C1 * x_high,
+    )
     return jnp.minimum(f, config.ventilation_max)
 
 

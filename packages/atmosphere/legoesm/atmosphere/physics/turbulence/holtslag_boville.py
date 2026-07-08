@@ -54,8 +54,11 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.atmosphere.physics._shared import exner_function, virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import HoltslagBovilleConfig
+from legoesm.atmosphere.physics.turbulence.pbl_height import (
+    first_crossing_height,
+)
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     compute_surface_fluxes,
@@ -234,8 +237,9 @@ def holtslag_boville_turbulence(
     # the implicit diffusion, so they are not duplicated here.
 
     # ----- Virtual potential temperature theta_v (oracle thv) -----
-    # Exner Pi = (p/p_ref)^kappa ; potential temperature theta = T/Pi.
-    exner = (jnp.clip(p_full, 1.0, None) / constants.p_ref) ** constants.kappa
+    # Exner Pi = (p/p_ref)^kappa via the canonical helper (identical 1 Pa
+    # pressure floor); potential temperature theta = T/Pi.
+    exner = exner_function(p_full)
     theta = T / jnp.clip(exner, 1.0e-6, None)
     theta_v = virtual_temperature(theta, q_v)  # thv on theta (oracle uses thv=virtem(th,q))
 
@@ -526,11 +530,16 @@ def _pbl_height(
     edge_w = jnp.maximum(d_search, 0.0) + 1.0e-20
     z_top_search = jnp.sum(edge_w * z_full, axis=1) / jnp.sum(edge_w, axis=1)
 
-    # Pass 1 bulk Ri (rino) relative to thv_bot.
+    # Pass 1 bulk Ri (rino) relative to thv_bot.  The oracle first-crossing
+    # scan + linear interpolation is the SHARED differentiable
+    # ``first_crossing_height`` kernel (pbl_height.py, also used by YSU),
+    # with the HB-specific ``search_ok`` region mask and ``z_top_search``
+    # fallback (oracle ``pblh = z(pverp-npbl)``).
     rino1 = g * (theta_v - thv_bot_c) * dz_sfc / (jnp.clip(thv_bot_c, 1.0, None) * vvk)
 
-    h1 = _crossing_height(
-        rino1, z_full, ricr, config.pbl_crossing_sharpness, search_ok, z_top_search,
+    h1 = first_crossing_height(
+        rino1, z_full, ricr, config.pbl_crossing_sharpness,
+        search_ok=search_ok, z_top=z_top_search,
     )
 
     # Unstable surface-excess correction (oracle): only where kbfs>0.
@@ -538,8 +547,9 @@ def _pbl_height(
     phiminv1 = _safe_cbrt(1.0 - binm * h1 / obklen)
     tlv = thv_bot + kbfs * fak / jnp.clip(ustar * phiminv1, 1.0e-6, None)
     rino2 = g * (theta_v - tlv[:, None]) * dz_sfc / (jnp.clip(thv_bot_c, 1.0, None) * vvk)
-    h2 = _crossing_height(
-        rino2, z_full, ricr, config.pbl_crossing_sharpness, search_ok, z_top_search,
+    h2 = first_crossing_height(
+        rino2, z_full, ricr, config.pbl_crossing_sharpness,
+        search_ok=search_ok, z_top=z_top_search,
     )
 
     # Use pass-2 height in unstable columns, pass-1 otherwise.
@@ -564,75 +574,6 @@ def _pbl_height(
     phihinv = _safe_sqrt(1.0 - binh * h_pbl / obklen)
     wm = ustar * phiminv
     return h_pbl, wstar, phiminv, phihinv, wm
-
-
-def _crossing_height(rino, z_full, ricr, sharpness, search_ok, z_top_search):
-    """Smooth lowest-crossing height where ``rino`` first reaches ``ricr``.
-
-    Mirrors the oracle linear interpolation::
-
-        pblh = z(k+1) + (ricr - rino(k+1))/(rino(k) - rino(k+1))*(z(k)-z(k+1))
-
-    but selects the LOWEST (closest-to-surface) crossing in a differentiable
-    way.  Levels are top-first (index ``nlev-1`` = surface).  We scan from
-    the surface upward: a column is "still searching" until ``rino`` first
-    reaches ``ricr``; the crossing is weighted by the product of "below at
-    the lower interface" and "at/above at the upper interface", combined
-    with a cumulative "not yet crossed below" gate so only the first
-    crossing contributes.  ``search_ok`` (per-level, top-first) limits
-    crossings to the allowed PBL region (oracle ``npbl`` limit); when no
-    crossing is found there, the height defaults to ``z_top_search`` (oracle
-    ``pblh = z(pverp-npbl)``).
-    """
-    ncol, nlev = rino.shape
-    # Reverse to surface-first ordering.
-    rino_s = rino[:, ::-1]   # (ncol, nlev), index 0 = surface
-    z_s = z_full[:, ::-1]
-    search_s = search_ok[:, ::-1]
-
-    rino_lo = rino_s[:, :-1]   # lower interface of each pair (closer to sfc)
-    rino_hi = rino_s[:, 1:]
-    z_lo = z_s[:, :-1]
-    z_hi = z_s[:, 1:]
-    # Pair is in the search region only if BOTH levels are allowed.
-    pair_ok = search_s[:, :-1] * search_s[:, 1:]
-
-    # First-crossing weight, robust to tight straddles (codex iter-2
-    # finding 1).  Define a single per-pair indicator
-    #   crossed[k] = P(rino >= ricr at the UPPER level of pair k)
-    #              = sigmoid(sharpness*(rino_hi - ricr))
-    # and the EXCLUSIVE "not yet crossed below pair k"
-    #   not_crossed[k] = prod_{j<k} (1 - crossed[j]).
-    # The first-crossing weight w[k] = not_crossed[k] * crossed[k] selects
-    # exactly the FIRST pair whose upper level reaches ricr.  Using a single
-    # indicator (no below_lo*above_hi product at the same interface) makes the
-    # weight near-unit even for a tight straddle, and collapses to the next
-    # pair correctly because crossed[k] enters not_crossed[k+1].
-    crossed = jax.nn.sigmoid(sharpness * (rino_hi - ricr)) * pair_ok
-    not_crossed = jnp.cumprod(
-        jnp.concatenate(
-            [jnp.ones((ncol, 1), rino.dtype), 1.0 - crossed[:, :-1]], axis=1,
-        ),
-        axis=1,
-    )
-    w = not_crossed * crossed  # first-crossing weight per pair
-
-    # Interpolated crossing height per pair.
-    dRi = rino_hi - rino_lo
-    frac = jnp.clip(
-        (ricr - rino_lo) / jnp.where(jnp.abs(dRi) > 1.0e-12, dRi, 1.0e-12),
-        0.0, 1.0,
-    )
-    z_cross = z_lo + frac * (z_hi - z_lo)
-
-    # Fallback weight = P(no in-region pair ever crossed) = not_crossed past
-    # the top in-region pair = prod over all pairs of (1 - crossed).  ~0 as
-    # soon as ANY in-region interface crosses, ~1 only when rino < ricr
-    # everywhere in-region -> h = z_top_search (oracle z(pverp-npbl)).
-    fallback_w = jnp.prod(1.0 - crossed, axis=1)
-    num = jnp.sum(w * z_cross, axis=1) + fallback_w * z_top_search
-    den = jnp.sum(w, axis=1) + fallback_w + 1.0e-30
-    return num / den
 
 
 def diffuse_theta_with_countergradient(
@@ -665,8 +606,8 @@ def diffuse_theta_with_countergradient(
     F_T_sfc / exner_sfc is biased slightly HIGH; threading a true p_surface
     and using (p_sfc/p_ref)^κ would remove the bias.
     """
-    p_safe = jnp.clip(p_full, 1.0, None)
-    exner = (p_safe / constants.p_ref) ** constants.kappa
+    # Exner Pi = (p/p_ref)^kappa via the canonical helper (same 1 Pa floor).
+    exner = exner_function(p_full)
     exner_safe = jnp.clip(exner, 1.0e-6, None)
     theta = T / exner_safe
     exner_sfc = exner_safe[:, -1]

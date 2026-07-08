@@ -256,6 +256,95 @@ def make_latlon_band_wall_pad_body(mesh, halo: int = 1,
     return body
 
 
+def make_latlon_band_wall_multi_pad_body(mesh, halo: int = 1,
+                                         south_values=None,
+                                         north_values=None,
+                                         n_fields: int = 0):
+    """FUSED multi-field twin of :func:`make_latlon_band_wall_pad_body`.
+
+    One ``ppermute`` pair per DIRECTION for the whole field GROUP instead of
+    one pair per field: each band's ``halo`` edge rows of every field are
+    flattened on the trailing axes, concatenated into a single
+    ``(halo, sum_flat)`` buffer per direction, exchanged once, then split
+    and reshaped back — value-identical to the per-field pads (the exchange
+    is a bit-copy; flatten/concat/split are layout ops).  This is the SPMD
+    leg of the message-aggregation lever (audit item 7): the mpi4jax leg
+    already fuses via ``pad_with_pole_bc_lat_multi_mpi``, the SPMD leg
+    expanded per field.
+
+    STATIC group signature: ``n_fields`` (+ each field's dtype/shape at
+    trace time) describes the group (shard_map bodies must be one uniform
+    program).  Mixed dtypes are grouped by dtype internally — one buffer
+    (and one ppermute pair) per dtype group, matching the MPI fused path's
+    "per dtype group" contract.
+
+    Returns ``body(*fields) -> tuple(padded_fields)``.
+    """
+    n_dev = mesh.devices.size
+    if tuple(mesh.devices.shape) != (n_dev,):
+        raise ValueError(
+            f"make_latlon_band_wall_multi_pad_body: needs a 1-D mesh; got "
+            f"shape {tuple(mesh.devices.shape)}")
+    if n_fields < 1:
+        raise ValueError("n_fields must be >= 1")
+    south_values = tuple(south_values or (0.0,) * n_fields)
+    north_values = tuple(north_values or (0.0,) * n_fields)
+    if len(south_values) != n_fields or len(north_values) != n_fields:
+        raise ValueError("boundary value tuples must match n_fields")
+    axis = mesh.axis_names[0]
+    perm_north, perm_south = latlon_band_perms(n_dev)
+
+    def body(*fields):
+        if len(fields) != n_fields:
+            raise ValueError(
+                f"fused pad body built for {n_fields} fields, got "
+                f"{len(fields)}")
+        b = jax.lax.axis_index(axis)
+
+        # Group by dtype (static: dtypes are trace-time facts of the args).
+        groups: dict = {}
+        for i, f in enumerate(fields):
+            groups.setdefault(str(f.dtype), []).append(i)
+
+        south_ghosts: list = [None] * n_fields
+        north_ghosts: list = [None] * n_fields
+        for _, idxs in sorted(groups.items()):
+            flats = []
+            widths = []
+            for i in idxs:
+                edge_shape = fields[i][:halo].shape
+                w = 1
+                for s in edge_shape[1:]:
+                    w *= int(s)
+                widths.append(w)
+                flats.append((fields[i][:halo].reshape(halo, w),
+                              fields[i][-halo:].reshape(halo, w)))
+            south_buf = jnp.concatenate([s for s, _ in flats], axis=1)
+            north_buf = jnp.concatenate([n for _, n in flats], axis=1)
+            # ONE ppermute pair for the whole dtype group.
+            north_recv = jax.lax.ppermute(south_buf, axis, perm_north)
+            south_recv = jax.lax.ppermute(north_buf, axis, perm_south)
+            off = 0
+            for k, i in enumerate(idxs):
+                w = widths[k]
+                tail = fields[i].shape[1:]
+                sr = south_recv[:, off:off + w].reshape((halo,) + tail)
+                nr = north_recv[:, off:off + w].reshape((halo,) + tail)
+                s_wall = jnp.full_like(sr, south_values[i])
+                n_wall = jnp.full_like(nr, north_values[i])
+                south_ghosts[i] = jnp.where(b == 0, s_wall, sr)
+                north_ghosts[i] = jnp.where(b == n_dev - 1, n_wall, nr)
+                off += w
+
+        return tuple(
+            jnp.concatenate([south_ghosts[i], fields[i], north_ghosts[i]],
+                            axis=0)
+            for i in range(n_fields)
+        )
+
+    return body
+
+
 def spmd_pole_end_masks():
     """``(south_mask, north_mask)`` TRACED scalar booleans for the active band
     under the armed lat-band SPMD backend, or ``None`` if SPMD is not active.

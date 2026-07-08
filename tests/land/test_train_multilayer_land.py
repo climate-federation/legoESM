@@ -12,7 +12,7 @@ from legoesm.core.coupling_fields import AtmToSurface
 from scripts.run.train_land_params_era5 import _N_PFT
 from scripts.run.train_multilayer_land_era5 import (
     forward_ml, loss_ml, constrain_ext, init_ext_params, baked_init_params, BOUNDS_EXT,
-    build_multilayer_cfg, _split_cells)
+    build_multilayer_cfg, _split_cells, json_init_params)
 
 
 def _synthetic_data(ncol=12):
@@ -76,6 +76,34 @@ def test_baked_warm_start_roundtrips_to_production_params():
     assert abs(float(cp["snow_max"]) - C.TUNED_SNOW_ALBEDO_MAX_MULTILAYER) < 2e-6
     # differs from the CLM5 prior (it is a genuine warm start, not the default init)
     assert abs(float(cp["glac_alb"]) - float(constrain_ext(init_ext_params())["glac_alb"])) > 1e-3
+
+
+def test_json_init_params_round_trips_a_saved_checkpoint(tmp_path):
+    """--init-json must START the tune AT a saved CONSTRAINED tuned JSON (inverse of the
+    constrain applied at save time), so a re-tune REFINES the current best.  A key absent
+    from an older checkpoint keeps its baked default (layered), and forward() of the
+    warm-started constrained params reproduces the saved values."""
+    import json
+    raw = baked_init_params()
+    saved = {k: np.asarray(v).tolist() for k, v in constrain_ext(raw).items()}
+    p = tmp_path / "tuned.json"
+    p.write_text(json.dumps(saved))
+    back = json_init_params(str(p))
+    # every baked key present + constrain(json_init) reproduces the saved constrained JSON
+    assert set(back) == set(raw)
+    cp = constrain_ext(back)
+    for k in saved:
+        np.testing.assert_allclose(np.asarray(cp[k]), np.asarray(saved[k]), rtol=1e-4,
+                                   atol=1e-4, err_msg=k)
+    # layering: a JSON with only a subset of keys keeps baked for the rest
+    subset = {k: saved[k] for k in list(saved)[:3]}
+    p2 = tmp_path / "partial.json"
+    p2.write_text(json.dumps(subset))
+    back2 = json_init_params(str(p2))
+    assert set(back2) == set(raw)
+    missing = [k for k in raw if k not in subset]
+    np.testing.assert_allclose(np.asarray(back2[missing[0]]), np.asarray(raw[missing[0]]),
+                               rtol=1e-6, atol=1e-6)
 
 
 def test_forward_finite_and_physical():
@@ -145,12 +173,27 @@ def test_lam_sm_zero_is_true_noop():
     aux smse is exactly 0 and the total loss equals the sum of the other terms."""
     data = _synthetic_data()
     p = init_ext_params()
-    l, (tm, am, pp, sa, sm) = loss_ml(p, data, lam_sm=0.0)
+    l, (tm, am, pp, sa, sm, gb) = loss_ml(p, data, lam_sm=0.0)
     assert float(sm) == 0.0
     # the SM term contributes nothing: loss == tmse + lam_alb*amse + lam_pft*pp + lam_amp*sa
     import scripts.run.train_multilayer_land_era5 as _M
     expect = float(tm) + _M._LAM_ALB * float(am) + _M._LAM_PFT * float(pp) + _M._LAM_AMP * float(sa)
     assert abs(float(l) - expect) < 1e-6
+
+
+def test_lam_tbias_penalizes_global_bias():
+    """--lam-tbias adds an area-weighted global skin-T BIAS penalty on top of the RMSE
+    term: the aux exposes the signed bias (weight-independent), and a positive lam_tbias
+    raises the loss by exactly lam_tbias * gbias**2, differentiably."""
+    data = _synthetic_data()
+    p = init_ext_params()
+    l0, aux0 = loss_ml(p, data, lam_tbias=0.0)
+    l1, aux1 = loss_ml(p, data, lam_tbias=50.0)
+    gbias = float(aux0[-1])                                  # signed global skin-T bias [K]
+    assert float(aux1[-1]) == gbias                          # diagnostic independent of the weight
+    assert abs((float(l1) - float(l0)) - 50.0 * gbias ** 2) < 1e-5
+    g = jax.grad(lambda q: loss_ml(q, data, lam_tbias=50.0)[0])(p)
+    assert all(jnp.all(jnp.isfinite(v)) for v in g.values())
 
 
 def test_soil_moisture_loss_is_nan_safe():
@@ -170,7 +213,7 @@ def test_all_nan_soil_moisture_target_is_fully_masked():
     data = dict(_synthetic_data())
     data["sm"] = jnp.full_like(data["sm"], jnp.nan)
     l, aux = loss_ml(init_ext_params(), data)
-    assert float(aux[-1]) == 0.0 and jnp.isfinite(l)         # smse masked to 0
+    assert float(aux[4]) == 0.0 and jnp.isfinite(l)          # smse (index 4) masked to 0
     g = jax.grad(lambda q: loss_ml(q, data)[0])(init_ext_params())
     assert all(jnp.all(jnp.isfinite(v)) for v in g.values())
 

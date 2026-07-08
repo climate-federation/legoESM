@@ -1326,6 +1326,83 @@ class DiagnosticCollector:
         if self.cf_writer is not None:
             self._write_cmip_fixed_files()
 
+    def save_cmor_accumulators(self, path: str | Path) -> None:
+        """Persist the CMOR accumulator state to an additive sidecar ``.npz``.
+
+        Serializes the spatial-monthly, spatial-daily, and zonal-monthly
+        accumulators — each namespaced with a ``"monthly."`` / ``"daily."`` /
+        ``"zonal."`` key prefix — into a single ``np.savez`` file written next
+        to the model checkpoint.  This lets a calendar month split across
+        restart-chain links (each link is only ~10 days; a month is ~30) be
+        completed on resume; without it the monthly accumulator is recreated
+        empty every link and the CMOR ``Amon`` means are never written.
+
+        Additive by design: it does NOT touch the checkpoint ``.npz`` schema.
+        No-op when CMIP output is inactive (no ``cf_writer`` / accumulators).
+
+        The write is ATOMIC (``<name>.tmp`` then ``Path.replace``): a partial
+        write can never leave a corrupt sidecar, and a re-persist that fails
+        never clobbers the previous (e.g. drained) sidecar with a half-file.
+        """
+        if self.cf_writer is None:
+            return
+        merged: dict[str, np.ndarray] = {}
+        for prefix, accum in (
+            ("monthly.", self._spatial_monthly),
+            ("daily.", self._spatial_daily),
+            ("zonal.", self.monthly_accum),
+        ):
+            if accum is None:
+                continue
+            for key, arr in accum.get_state().items():
+                merged[prefix + key] = arr
+        if not merged:
+            return
+        path = Path(path)
+        tmp_path = path.parent / (path.name + ".tmp")
+        try:
+            # Write via a file handle so ``np.savez`` does not append a second
+            # ``.npz`` to the ``.tmp`` name, then atomically move into place.
+            with open(tmp_path, "wb") as fh:
+                np.savez(fh, **merged)
+            tmp_path.replace(path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)  # never leave a partial temp
+            raise
+
+    def load_cmor_accumulators(self, path: str | Path) -> bool:
+        """Restore CMOR accumulator state from a sidecar written by
+        :meth:`save_cmor_accumulators`.
+
+        Splits the merged ``.npz`` back into the ``"monthly."`` / ``"daily."`` /
+        ``"zonal."`` namespaces and calls ``set_state`` on each active
+        accumulator.  Returns ``True`` if any state was restored, ``False`` if
+        the sidecar is absent or CMIP output is inactive — an older run with no
+        sidecar simply resumes with empty accumulators (backward-compatible).
+        """
+        path = Path(path)
+        if self.cf_writer is None or not path.exists():
+            return False
+        namespaced = {
+            "monthly.": self._spatial_monthly,
+            "daily.": self._spatial_daily,
+            "zonal.": self.monthly_accum,
+        }
+        substates: dict[str, dict] = {prefix: {} for prefix in namespaced}
+        with np.load(str(path), allow_pickle=False) as npz:
+            for full_key in npz.files:
+                for prefix in namespaced:
+                    if full_key.startswith(prefix):
+                        substates[prefix][full_key[len(prefix):]] = npz[full_key]
+                        break
+        restored = False
+        for prefix, accum in namespaced.items():
+            sub = substates[prefix]
+            if accum is not None and sub:
+                accum.set_state(sub)
+                restored = True
+        return restored
+
     def save(self, output_dir: str | Path) -> None:
         """Save all accumulated diagnostics to disk."""
         output_dir = Path(output_dir)

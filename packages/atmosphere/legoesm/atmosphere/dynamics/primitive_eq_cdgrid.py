@@ -613,9 +613,8 @@ def fv3_hydrostatic_tendencies(
 
         # FV3_3D iter 18: del-(2*(nord+1)) damping (FV3 sw_core.F90:1725-1822, nord>0 path)
         # dd8 = (da_min_c*d4_bg)^(nord+1); ke_corr = damp2*delpc + dd8*divg_d
-        # FV3_3D iter 893: nord-loop preserved inline (1-ULP trace-reorder
-        # diff vs fv3_corner_laplacian_nord wrapper would break iter-22
-        # bit-for-bit test).  The wrapper is for unit tests only.
+        # FV3_3D iter 893: nord-loop preserved inline (a 1-ULP trace-reorder
+        # would break the iter-22 bit-for-bit test).
         if config.corner_div_damp_d4_bg > 0.0 and config.corner_div_damp_nord > 0:
             from legoesm.core._fv3_divergence_corner import (
                 fv3_corner_laplacian_iteration,
@@ -1373,33 +1372,36 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
 
     @staticmethod
     def _flux_form_scatter_blocked(backend, topo, spmd_mesh, state_lead) -> bool:
-        """True iff the ``moisture_flux_form`` substep must fail-closed (#771).
+        """True iff the ``moisture_flux_form`` substep must fail-closed.
 
-        ``flux_form_tracer_step`` (and ``transport_step`` + the reconcile fixer)
-        do their mass conservation with a rank/shard-LOCAL ``jnp.sum``, which is
-        the true global sum ONLY when a rank holds the full 6-face cube.
+        The #811 unblock has BOTH halves now: (1) the mass-conservation
+        reductions are allreduce-aware (``conservation.global_face_sum_if_
+        scattered``), and (2) the transport + wind reconstruction are 4D-halo
+        (``transport_step_4d`` / ``d2a2c_vect_4d`` — ONE ``pad_halo_4d`` /
+        ``pad_halo_vector_4d`` per exchange for all levels, so there is no
+        ``vmap(pad_halo)`` cross-face ``sendrecv``).  So:
 
-        * MPI: ``initialize_distributed`` runs for ANY cube MPI run, so a rank's
-          topology can report ``< 6`` owned faces even in REPLICATED dynamics —
-          which keeps the FULL ``(6, …)`` state and whose local sum IS the global
-          sum.  Disambiguate by the state's leading FACE dim exactly as
-          ``core.conservation._total_area``: genuinely scattered ⟺ the topology
-          owns ``< 6`` faces AND the state is sliced to those faces
-          (``state_lead == n_local``).  Replicated keeps ``state_lead == 6`` and
-          is left running; single-rank has ``n_local == 6``.
-        * SPMD: fail-closed whenever a mesh is active — over-conservative (GSPMD
-          may auto-reduce a top-level ``jnp.sum`` over the sharded face axis) but
-          safe, and ``moisture_flux_form`` (default off) is unvalidated across
-          face shards.
+        * MPI FACE-ONLY (single-rank, REPLICATED, or face-SCATTERED with
+          ``tiling == (1, 1)``): **allowed** — certified replicated-vs-scattered
+          equivalent (fwd + grad) by
+          ``tests/distributed/test_cube_face_scatter_mpi.py`` (#811 / #771).
+        * MPI SUB-FACE TILING (``tiling != (1, 1)``): fail-closed — the 4D halos
+          reject ``interp_offsets`` under sub-face tiling
+          (``pad_halo_mpi_4d``), so this path is unsupported (codex #811 review).
+        * SPMD: still fail-closed whenever a mesh is active.  The 4D halos
+          dispatch to explicit SPMD exchanges, but that combination is
+          unvalidated here (#811 SPMD follow-up).
 
-        Extracted + pure so the guard is unit-tested (a prefix/shape rename then
-        breaks the test loudly instead of silently disabling the guard).
+        ``state_lead`` is retained for signature + unit-test stability.
+        Extracted + pure so the guard is unit-tested (a rename then breaks the
+        test loudly instead of silently disabling it).
         """
+        del state_lead
         if backend == "mpi":
-            if topo is not None and hasattr(topo, "local_face_ids"):
-                n_local = len(topo.local_face_ids)
-                return n_local < 6 and state_lead == n_local
-            return False
+            # Face-only MPI is supported; sub-face tiling is not (the 4D halo
+            # rejects interp_offsets when tiling != (1, 1)).
+            tiling = getattr(topo, "tiling", (1, 1))
+            return tiling is not None and tuple(tiling) != (1, 1)
         if backend == "spmd" and spmd_mesh is not None:
             return True
         return False
@@ -1437,16 +1439,24 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         continuity itself FV-flux-form (transport ``δp`` with the same operator)
         — a much larger dycore change tracked separately (#771 follow-up).
         """
-        from legoesm.core.fv3_sw_core import d2a2c_vect
+        from legoesm.core.fv3_sw_core import d2a2c_vect_4d
         from legoesm.atmosphere.dynamics.flux_form_tracer_transport import (
             flux_form_tracer_step,
         )
-        from legoesm.core.conservation import conservation_accumulator
+        from legoesm.core.conservation import (
+            conservation_accumulator,
+            global_face_sum_if_scattered,
+        )
 
-        # FAIL-CLOSED under cubed-sphere face-scatter / SPMD face-sharding — the
-        # flux-form mass reductions are rank/shard-LOCAL (see the predicate).
-        # Static-config check at trace time (globals + static shape), so the
-        # raise is a hard compile-time refusal, not traced control flow.
+        # MPI face-scatter is now SUPPORTED (#811): the mass reductions are
+        # allreduce-aware (global_face_sum_if_scattered), the transport is
+        # 4D-halo (transport_step_4d — one pad_halo_4d per exchange for all
+        # levels), and the wind reconstruction is 4D (d2a2c_vect_4d — one
+        # pad_halo_vector_4d).  Certified replicated-vs-scattered equivalent by
+        # tests/distributed/test_cube_face_scatter_mpi.py.  SPMD face-sharding is
+        # still fail-closed (the 4D halos dispatch to explicit SPMD exchanges,
+        # but that path is unvalidated here — #811 SPMD follow-up).  Static-config
+        # check at trace time, so the raise is a hard compile-time refusal.
         from legoesm.grids.halo import (
             get_halo_backend, get_mpi_topology, get_spmd_mesh,
         )
@@ -1454,12 +1464,11 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 get_halo_backend(), get_mpi_topology(), get_spmd_mesh(),
                 state_out.u_d.data.shape[0]):
             raise NotImplementedError(
-                "moisture_flux_form is not supported under cubed-sphere "
-                "face-scatter / SPMD face-sharding: the flux-form "
-                "mass-conservation reductions are rank/shard-LOCAL, so they "
-                "would silently break global moisture conservation. Run "
-                "replicated / single-rank, or await the allreduce-aware "
-                "flux-form reductions (#771 follow-up).")
+                "moisture_flux_form is not supported under SPMD face-sharding: "
+                "the 4D-halo transport + wind reconstruction dispatch to explicit "
+                "SPMD exchanges but that path is unvalidated. Run MPI "
+                "(single-rank / replicated / face-scatter, all supported) or "
+                "single-device SPMD (#811 SPMD follow-up).")
 
         cdgrid = self.cdgrid
         sigma = self.sigma_coord
@@ -1467,18 +1476,16 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
 
         # Contravariant transport winds from the STEP-INPUT corner D-grid winds
         # (the SW split transports mass with the step-input winds): corner ->
-        # edge (0.5-average, as in the del-n path) -> d2a2c_vect per level.
+        # edge (0.5-average, as in the del-n path) -> d2a2c_vect_4d (ONE vector
+        # halo for ALL levels, so the reconstruction is MPI face-scatter safe —
+        # no vmap(pad_halo_vector); #811).
         u_d = state_in.u_d.data
         v_d = state_in.v_d.data
         u_edge = 0.5 * (u_d[:, :-1, :, :] + u_d[:, 1:, :, :])   # (6,n,n+1,nlev)
         v_edge = 0.5 * (v_d[:, :, :-1, :] + v_d[:, :, 1:, :])   # (6,n+1,n,nlev)
 
-        def _winds_level(uk, vk):
-            _o = d2a2c_vect(uk, vk, cdgrid)
-            return _o[4], _o[5]                                # ut, vt contravar
-
-        ut, vt = jax.vmap(_winds_level, in_axes=(-1, -1), out_axes=-1)(
-            u_edge, v_edge)
+        _o = d2a2c_vect_4d(u_edge, v_edge, cdgrid)
+        ut, vt = _o[4], _o[5]                                  # ut, vt contravar
 
         # Layer mass on the dynamics' post-step p_s (what the moisture lives
         # on).  ``layer_thickness_dp`` is polymorphic over the sigma / hybrid
@@ -1509,6 +1516,19 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
              * delp[..., None].astype(acc))                    # (6,n,n,nlev,1)
         tgt = jnp.sum(w * q.astype(acc), axis=(0, 1, 2, 3))     # (ntr,)
         cur = jnp.sum(w * q_new.astype(acc), axis=(0, 1, 2, 3))
+        # Under MPI face-scatter tgt/cur are owned-face PARTIALS; allreduce the
+        # (numerator, denominator) pair to the true global tracer masses BEFORE
+        # the per-tracer scale — else each rank divides by its own partial and
+        # the rescales diverge, silently breaking global conservation.  Identity
+        # on single-rank / replicated / SPMD, keyed off cdgrid.base.area (#811).
+        # differentiable_broadcast=True: this scale rescales EVERY owned face
+        # (q_fixed = q_new * scale), so the reduction's VJP must allreduce the
+        # cotangent — else the cross-rank gradient through the shared scale is
+        # dropped (the same uniform ~1e-3 cotangent leak the flux_form_tracer_step
+        # rescale had; the full-step gradient gate exposes THIS second one, #811).
+        tgt, cur = global_face_sum_if_scattered(
+            jnp.stack([tgt, cur], axis=0), cdgrid.base.area,
+            differentiable_broadcast=True)
         scale = (tgt / jnp.maximum(cur, jnp.asarray(1e-30, acc))).astype(_dt)
         q_fixed = q_new * scale
 

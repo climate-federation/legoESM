@@ -30,9 +30,14 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.land.canopy.config import CLMMLCanopyConfig
+from legoesm.land.canopy.sif import SIFConfig, multilayer_canopy_sif
 from legoesm.land.canopy.state import CanopyState
 from legoesm.land.surface_scheme import SurfaceFluxOutput
 from legoesm.thermo import saturation_mixing_ratio
+
+# CLM-ML unfilled array elements carry spval = 1e36; treat anything above this
+# guard (or non-finite) as invalid padding and drop it from the SIF sum.
+_SPVAL_GUARD = 1.0e30
 
 if TYPE_CHECKING:
     from legoesm.core.coupling_fields import AtmToSurface
@@ -73,7 +78,7 @@ __physics_contract__ = {
 # collapses to a zero-thickness canopy.  Floor ``htop`` to this small positive
 # value so the geometry stays valid — LAI is 0 on those columns, so the canopy
 # contributes no fluxes regardless of the nominal height.  Matches the two-leaf
-# path's ``_HC_MIN_M`` (0.1 m) in ``boundary_data/_internals``.
+# path's ``HC_MIN_M`` (0.1 m) in ``boundary_data/_internals``.
 _HTOP_GEOM_MIN_M: float = 0.1
 
 _CLM_INITIALIZED: bool = False
@@ -858,12 +863,72 @@ def _init_mlcanopy(ncol: int, stubs: dict, canopy_config: CLMMLCanopyConfig) -> 
     return mlcanopy
 
 
+def _extract_clm_ml_sif(
+    mlcanopy: Any, ncol: int, sif_cfg: SIFConfig,
+) -> jnp.ndarray | None:
+    """Top-of-canopy SIF from the CLM-ML per-(layer, leaf) photosynthesis.
+
+    Reads the ``mlcanopy_inst`` per-(patch, layer, leaf) arrays ``je_leaf``
+    (the model's native electron-transport rate) and ``apar_leaf`` (absorbed
+    PAR per unit leaf area), plus the per-(patch, layer) ``dpai_profile`` /
+    ``fracsun_profile`` — the CLM-ml ``MLCanopyFluxesType`` names the
+    ``multilayer_canopy`` JAX port mirrors faithfully.  SIF is a **pure
+    consumer** of the Bonan model's Farquhar solution: it uses ``je_leaf``
+    directly and never re-inverts ``je`` from ``An``/``Ci`` (nor re-derives
+    ``Gamma*``).  Sums the per-leaf SIF weighted by leaf area (``dpai *
+    fracsun`` sunlit, ``dpai * (1 - fracsun)`` shaded) the SAME way CLM-ML sums
+    ``anet_leaf * dpai`` into canopy GPP, via the shared
+    :func:`~legoesm.land.canopy.sif.multilayer_canopy_sif` core.
+
+    hasattr-guarded: any missing field returns ``None`` (SIF is opt-in and must
+    never crash the flux path if a port version renames a field).  Unfilled
+    layers/leaves carry ``spval = 1e36`` and are masked to zero leaf area with a
+    sanitised ``je``/``apar`` so they drop out of the sum cleanly.
+    """
+    required = ("je_leaf", "apar_leaf", "dpai_profile", "fracsun_profile")
+    if not all(hasattr(mlcanopy, f) for f in required):
+        return None
+
+    # Patch axis is 1-based here: the legoESM interface builds mlcanopy via
+    # create_mlcanopy(1, ncol) (begp=1), so column i (0..ncol-1) lives at array
+    # index i+1 and index 0 is the unused pad — matching every sibling read in
+    # _extract_surface_fluxes.  The layer (1:nlevmlcan) and leaf (1:nleaf) blocks
+    # likewise skip index 0.  Leaf order: il=1 sunlit, il=2 shaded.
+    def _lv(name):  # (ncol, nlev, nleaf)
+        return jnp.stack([getattr(mlcanopy, name)[i + 1, 1:, 1:] for i in range(ncol)])
+
+    def _pr(name):  # (ncol, nlev)
+        return jnp.stack([getattr(mlcanopy, name)[i + 1, 1:] for i in range(ncol)])
+
+    je, apar = _lv("je_leaf"), _lv("apar_leaf")
+    dpai, fracsun = _pr("dpai_profile"), _pr("fracsun_profile")
+
+    # Per-(layer, leaf) leaf-area weight from the layer PAI and sunlit fraction.
+    leaf_area = jnp.stack([dpai * fracsun, dpai * (1.0 - fracsun)], axis=-1)  # (ncol,nlev,nleaf)
+
+    # Mask unfilled / spval elements: zero their leaf area and sanitise je/apar
+    # so nothing non-finite reaches the SIF core.
+    valid = (
+        jnp.isfinite(je) & jnp.isfinite(apar) & jnp.isfinite(leaf_area)
+        & (jnp.abs(je) < _SPVAL_GUARD) & (apar < _SPVAL_GUARD) & (jnp.abs(leaf_area) < _SPVAL_GUARD)
+    )
+    je = jnp.where(valid, je, 0.0)
+    apar = jnp.where(valid, jnp.maximum(apar, 0.0), 0.0)
+    leaf_area = jnp.where(valid, jnp.maximum(leaf_area, 0.0), 0.0)
+
+    def _flat(a):  # (ncol, nlev*nleaf)
+        return a.reshape(a.shape[0], -1)
+
+    return multilayer_canopy_sif(_flat(je), _flat(apar), _flat(leaf_area), sif_cfg)
+
+
 def _extract_surface_fluxes(
     mlcanopy: Any,
     ncol: int,
     forcing: AtmToSurface,
     land_config: "MultiLayerLandConfig",
     land_params: Any | None,
+    canopy_config: CLMMLCanopyConfig | None = None,
 ) -> SurfaceFluxOutput:
     """Map ``mlcanopy_type`` output fields to a ``SurfaceFluxOutput``.
 
@@ -939,6 +1004,13 @@ def _extract_surface_fluxes(
     emissivity = jnp.full(ncol, float(land_config.emissivity_land))
     z0 = jnp.stack([mlcanopy.z0m_canopy[i + 1] for i in range(ncol)])
 
+    # Optional solar-induced fluorescence (passive TOC diagnostic).  Static gate
+    # on the config leaf; per-(layer,leaf) sum shares the two-leaf/big-leaf core.
+    sif = None
+    sif_cfg = getattr(canopy_config, "sif", None) if canopy_config is not None else None
+    if sif_cfg is not None:
+        sif = _extract_clm_ml_sif(mlcanopy, ncol, sif_cfg)
+
     # Canopy heat storage: needed for energy balance closure in the coupler.
     # Rnet = SH + LH + G_soil + stflx_air + stflx_veg
     # Extract from mlcanopy if the fields exist (they are always computed by
@@ -981,6 +1053,7 @@ def _extract_surface_fluxes(
         emissivity=emissivity,
         z0=z0,
         gpp=gpp,
+        sif=sif,
         T_canopy_air=T_canopy_air,
         stomatal_ratio=jnp.ones(ncol),
         stflx_air=stflx_air,
@@ -1207,6 +1280,7 @@ def compute_clm_ml_canopy_fluxes(
 
     # ---- Extract SurfaceFluxOutput ----
     surface_out = _extract_surface_fluxes(
-        mlcanopy_new, ncol, forcing, land_config, land_params)
+        mlcanopy_new, ncol, forcing, land_config, land_params,
+        canopy_config=canopy_config)
 
     return surface_out, CanopyState(mlcanopy=mlcanopy_new, t_a10_arr=t_a10_now)

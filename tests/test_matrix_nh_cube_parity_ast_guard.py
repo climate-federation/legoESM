@@ -600,10 +600,11 @@ def test_sw_cube_propagating_tests_have_hyperdiff_override():
     )
     # The canonical values: 1.0x biharmonic (the #521 sweep optimum: 0.5x erupts
     # at the collision transient, 0x blows up ~day 40 even with duogrid) + the
-    # (ref/n)^4 law (scaling 4; ^2 is opt-in for C96+, #753) + the tuned
-    # div_damp/damp_v.
+    # (ref/n)^2 law (scaling 2, the #753 item-1 default: C96 erupts under ^4 but
+    # is stable under ^2, validated 100 days at C36/C48/C96; ^4 is now the opt-in
+    # for pre-#753 byte-identical behaviour) + the tuned div_damp/damp_v.
     assert MODON_HYPERDIFF_FACTOR == 1.0
-    assert MODON_HYPERDIFF_SCALING == 4
+    assert MODON_HYPERDIFF_SCALING == 2
     assert MODON_DIV_DAMP_FACTOR == 8.0
     assert MODON_DAMP_V == 0.010, (
         "MODON_* modon config drifted — this is the #800 desync class; the "

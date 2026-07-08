@@ -64,7 +64,10 @@ class Test11a_Smoke:
         assert jnp.all(jnp.isfinite(new_state.T_epi.data))
         assert jnp.all(jnp.isfinite(new_state.T_hypo.data))
         for name in TileResponse._fields:
-            assert jnp.all(jnp.isfinite(getattr(resp, name)))
+            arr = getattr(resp, name)
+            if arr is None:            # optional fields (e.g. T_rad on non-canopy tiles)
+                continue
+            assert jnp.all(jnp.isfinite(arr))
 
 
 class Test11e_MixingDirection:

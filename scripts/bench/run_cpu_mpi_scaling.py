@@ -1257,6 +1257,14 @@ def write_result_json(
         payload["backend"] = jax.default_backend()
     except Exception:
         payload["backend"] = ""
+
+    def _live_process_count() -> int:
+        try:
+            import jax
+
+            return int(jax.process_count())
+        except Exception:
+            return 1
     # Record the hybrid layout so scaling can be plotted vs CORES, not ranks:
     # a hybrid 8r x 4c run and a packed 32r x 1c run both report n_ranks but use
     # 32 vs 128 cores. cpus_per_task * n_ranks = the true resource count.
@@ -1287,10 +1295,22 @@ def write_result_json(
         n_levels=result.n_levels,
         precision=result.precision,
         n_ranks=_md_n_ranks,
+        # Non-cs-spmd multi-rank = route-A mpi4jax halos; pin the transport
+        # so a run that also initialized jax.distributed (process_count ==
+        # world size) cannot auto-resolve to nccl/gloo (codex finding 1).
+        # cs-spmd (route-B) keeps auto-resolution.
+        transport=("mpi4jax" if (not cs_spmd and result.n_ranks > 1)
+                   else None),
         n_gpus=(result.n_ranks
                 if payload["backend"] in ("gpu", "cuda", "rocm") else 0),
         decomposition=result.decomposition,
-        cells_per_rank=result.cells_per_rank,
+        # cells_per_rank is per PROCESS (n_ranks semantics).  cs-spmd:
+        # result.cells_per_rank is per global DEVICE (total // n_global),
+        # while metadata n_ranks defaults to jax.process_count() — divide
+        # the total by the live process count instead and keep the
+        # per-device share in extra (codex finding 3, cs-spmd leg).
+        cells_per_rank=(result.total_cells // max(_live_process_count(), 1)
+                        if cs_spmd else result.cells_per_rank),
         scaling_kind=os.environ.get("LEGOESM_SCALING_KIND") or None,
         partition_metrics=_part_metrics,
         extra={
@@ -1299,6 +1319,7 @@ def write_result_json(
             "cpus_per_task": payload["cpus_per_task"],
             "n_cores": payload["n_cores"],
             "fix_mass": payload["fix_mass"],
+            "cells_per_device": result.cells_per_rank if cs_spmd else None,
         },
     ))
     with open(path, "w", encoding="utf-8") as f:
