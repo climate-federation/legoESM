@@ -3846,8 +3846,16 @@ def main() -> int:
                     _ice_conc = jnp.sum(_ice_conc, axis=-1)  # multi-cat (n/a here)
                 sf, fw = _route_ice_response_to_ocean(
                     sf, fw, ice_resp, state.land_mask.data, _ice_conc)
-            state = model.step(state, dt, surface_forcing=sf, freshwater=fw,
-                               t_seconds=_t_sec)
+            if app_grid_type == "mpas":
+                # MPASOceanModel.step has no t_seconds (the dm2dc diurnal-SW
+                # window is the only consumer and --dm2dc is gated to
+                # tripole/latlon at arg-validation) -- passing it would
+                # TypeError; omitting it drops nothing on MPAS.
+                state = model.step(state, dt, surface_forcing=sf,
+                                   freshwater=fw)
+            else:
+                state = model.step(state, dt, surface_forcing=sf,
+                                   freshwater=fw, t_seconds=_t_sec)
         if sss_restore_cfg is not None:
             # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS restoring
             # under sea ice).  Feed the SAME prescribed siconc the albedo uses

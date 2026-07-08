@@ -197,3 +197,43 @@ def test_manifest_write_read_digest_roundtrip_ocean(tmp_path):
     # Post-run digest recording (the reproduce reference).
     record_state_digest(path, "deadbeefcafe")
     assert recorded_state_digest(read_run_manifest(path)) == "deadbeefcafe"
+
+
+def test_manifest_write_survives_array_config_leaf(tmp_path):
+    """A config carrying an ARRAY leaf (the per-cell NEMO ln_rnf_depth_ini
+    runoff_depth_spread_map) must not crash write_run_manifest with
+    'Object of type ArrayImpl is not JSON serializable' -- the dump summarises
+    array-likes as shape/dtype/min/max (best-effort provenance; the ico7_dm30
+    MPAS run lost its whole manifest to this)."""
+    import json as _json
+    import numpy as np
+
+    from legoesm.driver.restart import write_run_manifest
+
+    cfg = _latlon_cfg()._replace(
+        runoff_depth_spread_map=np.linspace(1.0, 150.0, 7))
+    rec = _run_record(runtime_config=cfg)
+    path = write_run_manifest(tmp_path, rec, config_kind="ocean",
+                              runner_tag="test")
+    data = _json.loads(path.read_text())
+    blob = _json.dumps(data)
+    assert "ArrayImpl" not in blob
+    assert "__array_summary__" in blob
+    # locate the summary and check the numbers survived
+    def _find(d):
+        if isinstance(d, dict):
+            if "__array_summary__" in d:
+                return d["__array_summary__"]
+            for v in d.values():
+                r = _find(v)
+                if r is not None:
+                    return r
+        elif isinstance(d, list):
+            for v in d:
+                r = _find(v)
+                if r is not None:
+                    return r
+        return None
+    s = _find(data)
+    assert s is not None and s["shape"] == [7]
+    assert s["min"] == 1.0 and s["max"] == 150.0

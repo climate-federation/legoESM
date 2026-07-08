@@ -713,6 +713,20 @@ def _encode_config(obj):
         return {k: _encode_config(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_encode_config(v) for v in obj]
+    if hasattr(obj, "shape") and hasattr(obj, "dtype"):
+        # Array-valued config leaf (e.g. runoff_depth_spread_map, the per-cell
+        # NEMO ln_rnf_depth_ini map): summarise ONCE here so BOTH the config
+        # hash (json.dumps at compute_config_hash) and the manifest dump see
+        # the same JSON-safe value -- a raw ndarray/ArrayImpl crashed the
+        # whole provenance write.  Lossy by design: the map is derived from
+        # input files; reconstruction keeps the summary dict (documented).
+        import numpy as _np
+        arr = _np.asarray(obj)
+        return {"__array_summary__": {
+            "shape": list(arr.shape), "dtype": str(arr.dtype),
+            "min": float(arr.min()) if arr.size else None,
+            "max": float(arr.max()) if arr.size else None,
+        }}
     return obj
 
 

@@ -580,3 +580,4 @@ def test_validate_run_manifest_rejects_hash_config_mismatch() -> None:
     m["config"]["config_hash"] = "deadbeef"  # no longer matches resolved_config
     with pytest.raises(ValueError, match="does not match"):
         validate_run_manifest(m)
+
