@@ -584,8 +584,16 @@ def make_sharded_ocean_step(model, mesh):
         forcing_ndims = tuple(
             int(getattr(leaf, "ndim", np.ndim(leaf)))
             for leaf in jax.tree.leaves(forcing))
+        # The SPMD fused-halo switch is read at TRACE time inside the pad
+        # dispatch — flipping LEGOESM_LATLON_SPMD_FUSED_HALO on a reused
+        # step object must rebuild the shard_map, not reuse a stale jaxpr
+        # (codex, audit item 7).
+        import os as _os
+
+        _fused_halo = _os.environ.get(
+            "LEGOESM_LATLON_SPMD_FUSED_HALO", "0") != "0"
         key = (jax.tree.structure(state), jax.tree.structure(forcing),
-               forcing_ndims)
+               forcing_ndims, _fused_halo)
         fn = _cache.get(key)
         if fn is None:
             in_spec = jax.tree.map(_lat_spec, state)

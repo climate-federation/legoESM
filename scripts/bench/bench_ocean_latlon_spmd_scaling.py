@@ -159,6 +159,14 @@ def main() -> int:
         "--cons-rtol", type=float, default=None,
         help="Conservation tolerance (default: 1e-9 f64 / 1e-4 f32; the "
              "raw scheme drifts ~1e-8/step — calibrate to the window).")
+    p.add_argument("--fused-halo", action="store_true",
+                   help="Opt-in SPMD halo message aggregation "
+                        "(LEGOESM_LATLON_SPMD_FUSED_HALO=1): one ppermute "
+                        "pair per direction per dtype group at every "
+                        "pad_multi site instead of one per field — "
+                        "measured 25% fewer static collective-permutes on "
+                        "this step, bit-identical results. A/B against "
+                        "the default run.")
     p.add_argument("--wide-halo", action="store_true",
                    help="Opt-in wide-halo split-explicit barotropic: one "
                         "fused wide lat-halo exchange per chunk of substeps "
@@ -223,6 +231,10 @@ def main() -> int:
             f"--parity-gate is a smoke gate (re-association floor grows "
             f"with steps); --steps {args.steps} > {SPMD_PARITY_MAX_STEPS} "
             f"cap.")
+
+    if args.fused_halo:
+        # Trace-time switch — set BEFORE the sharded step is built/jitted.
+        os.environ["LEGOESM_LATLON_SPMD_FUSED_HALO"] = "1"
 
     model, s0 = build_model_and_state(
         n_lat, args.n_lon, args.nlev,
@@ -364,6 +376,8 @@ def main() -> int:
             "steps": args.steps,
             "warmup": args.warmup,
             "multicontroller": bool(args.multicontroller),
+            "fused_halo": os.environ.get(
+                "LEGOESM_LATLON_SPMD_FUSED_HALO", "0") != "0",
             # Route-B transport facts (socket-fallback flag): a
             # multi-node row without an NCCL net plugin is
             # falsifiable from the record alone.

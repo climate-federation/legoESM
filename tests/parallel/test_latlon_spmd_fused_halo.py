@@ -87,6 +87,30 @@ def test_fused_bit_identical_to_per_field():
         assert f_out.dtype == fields[i].dtype
 
 
+@pytest.mark.parametrize("halo", [2, 3])
+def test_fused_bit_identical_wide_halo(halo):
+    """halo>1 parity: the wide-halo helpers route their W / W+1 exchanges
+    through the same dispatch (codex) — the packing must hold at any
+    width."""
+    mesh = _mesh()
+    fields = _fields()[:3]
+    fused_body = make_latlon_band_wall_multi_pad_body(
+        mesh, halo=halo, n_fields=len(fields))
+    per_bodies = [make_latlon_band_wall_pad_body(mesh, halo=halo)
+                  for _ in fields]
+    specs = tuple(P("lat", *((None,) * (f.ndim - 1))) for f in fields)
+    fused = shard_map(lambda *fs: fused_body(*fs), mesh=mesh,
+                      in_specs=specs, out_specs=specs,
+                      check_vma=False)(*fields)
+    per = shard_map(
+        lambda *fs: tuple(per_bodies[i](fs[i]) for i in range(len(fs))),
+        mesh=mesh, in_specs=specs, out_specs=specs,
+        check_vma=False)(*fields)
+    for i, (f_out, p_out) in enumerate(zip(fused, per)):
+        np.testing.assert_array_equal(np.asarray(f_out), np.asarray(p_out),
+                                      err_msg=f"halo={halo} field {i}")
+
+
 def test_fused_wrong_arity_raises():
     mesh = _mesh()
     body = make_latlon_band_wall_multi_pad_body(mesh, n_fields=2)
@@ -183,3 +207,22 @@ def test_ocean_step_bit_identical_with_fusion(monkeypatch, n_steps):
             np.asarray(getattr(outs["0"], nm).data),
             err_msg=f"fused-halo step diverged on {nm}")
     assert hlo_counts["1"] < hlo_counts["0"], hlo_counts
+
+    # Flag flip on a REUSED step object must rebuild the shard_map (the
+    # switch is trace-time; the step wrapper's per-CALL cache key carries
+    # it — codex).  Fresh outer lambdas per lowering: jax.jit caches on
+    # the callable identity, so re-jitting the SAME step object would
+    # freeze the wrapper's python body and never re-evaluate the key
+    # (an outer-jit artifact, not the production call pattern — the
+    # driver calls step() directly each step).
+    _env_flag(monkeypatch, "0")
+    step = make_sharded_ocean_step(model, dev.mesh)
+    ss = shard_state_latlon(state0, dev.mesh)
+    n_off = _count_ppermutes(
+        jax.jit(lambda s, d: step(s, d)).lower(ss, 600.0)
+        .compile().as_text())
+    _env_flag(monkeypatch, "1")
+    n_on = _count_ppermutes(
+        jax.jit(lambda s, d: step(s, d)).lower(ss, 600.0)
+        .compile().as_text())
+    assert n_on < n_off, (n_off, n_on)
