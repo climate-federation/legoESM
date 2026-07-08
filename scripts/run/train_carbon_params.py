@@ -820,6 +820,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     opt_state = optimizer.init(eqx.filter(params, eqx.is_array))
 
     loss_history = [pre_loss_val]
+    no_improve = 0
     print(f"[train] step=0 loss={pre_loss_val:.8g}")
     for step in range(1, args.steps + 1):
         ts = time.time()
@@ -843,14 +844,26 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             if np.isfinite(cand_loss) and cand_loss < best_loss:
                 best_params, best_loss, accepted = cand, cand_loss, True
                 break
-        if not accepted:
-            print(f"[train] converged step={step}: no reducing step "
-                  f"(loss={loss_val:.8g}, |g|={grad_norm:.3e})")
-            break
-        params, opt_state = best_params, opt_state_next
-        loss_history.append(best_loss)
-        print(f"[train] step={step} loss={best_loss:.8g} |g|={grad_norm:.3e} "
-              f"time={time.time() - ts:.1f}s")
+        # ALWAYS advance the optimizer schedule + momentum so the LR warmup can
+        # ramp: a non-reducing EARLY step (tiny warmup LR, or a first step before
+        # MUON momentum builds) must NOT be mistaken for convergence. Only stop
+        # after ``--patience`` CONSECUTIVE non-reducing steps.
+        opt_state = opt_state_next
+        if accepted:
+            params = best_params
+            loss_history.append(best_loss)
+            no_improve = 0
+            print(f"[train] step={step} loss={best_loss:.8g} |g|={grad_norm:.3e} "
+                  f"time={time.time() - ts:.1f}s")
+        else:
+            no_improve += 1
+            loss_history.append(loss_val)
+            print(f"[train] step={step} no-reduce {no_improve}/{args.patience} "
+                  f"loss={loss_val:.8g} |g|={grad_norm:.3e} time={time.time() - ts:.1f}s")
+            if no_improve >= args.patience:
+                print(f"[train] stop step={step}: no reduction for "
+                      f"{args.patience} consecutive steps (loss={loss_val:.8g})")
+                break
 
     _assert_bounds(params)
     improved = loss_history[-1] < loss_history[0]
@@ -966,6 +979,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--steps", type=int, default=DEFAULT_STEPS)
     p.add_argument("--lr", type=float, default=DEFAULT_LR)
     p.add_argument("--warmup-steps", type=int, default=DEFAULT_WARMUP_STEPS)
+    p.add_argument("--patience", type=int, default=25,
+                   help="stop after this many CONSECUTIVE non-reducing steps "
+                        "(guards the warmup ramp from a premature stop)")
     p.add_argument("--grad-clip-norm", type=float, default=DEFAULT_GRAD_CLIP)
     p.add_argument("--optimizer", choices=("muon", "muon_partitioned", "adam", "adamw"),
                    default="muon")
