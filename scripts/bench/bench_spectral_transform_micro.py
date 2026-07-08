@@ -34,17 +34,19 @@ from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
 def transform_flops(n_lat: int, n_lon: int, n_sh: int, nlev: int) -> dict:
     """Analytic cost model of ONE analysis+synthesis round trip.
 
-    Legendre leg = dense complex GEMM pair, ``(n_lat x n_sh) @ (n_sh x
-    nlev-batch)`` per longitudinal wavenumber block (implemented as one
-    einsum over the packed ``(n_lat, n_sh, nlev)`` tensor): 8 real FLOPs
-    per complex MAC.  FFT leg: ``5 * n * log2(n)`` per real transform row.
+    Legendre leg = dense GEMM pair, ``(n_lat x n_sh) @ (n_sh x
+    nlev-batch)`` per longitudinal wavenumber block (one einsum over the
+    packed ``(n_lat, n_sh, nlev)`` tensor).  The Legendre matrices are
+    REAL and the spectral fields complex: a real x complex MAC is 4 real
+    FLOPs (2 mul + 2 add), not 8 (codex).  FFT leg: ``5 * n * log2(n)``
+    per real transform row.
     Arithmetic intensity vs the ``(n_lat, n_sh, nlev)`` working set is the
     GPU-viability number (fp64 GEMM runs at tensor-core-less rates on most
     consumer parts, 1:2..1:64 of fp32 — shapes must be fat enough to be
     compute-bound to benefit at all).
     """
     gemm_macs = 2 * n_lat * n_sh * nlev          # analysis + synthesis
-    gemm_flops = 8 * gemm_macs                    # complex MAC = 8 real ops
+    gemm_flops = 4 * gemm_macs                    # real x complex MAC = 4
     fft_flops = 2 * nlev * n_lat * 5 * n_lon * int(np.log2(max(n_lon, 2)))
     bytes_ws = (n_lat * n_sh + n_sh * nlev + n_lat * nlev) * 16  # complex128
     return {

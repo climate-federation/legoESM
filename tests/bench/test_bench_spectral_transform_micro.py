@@ -21,7 +21,7 @@ def test_cost_model_scaling():
     # EXACT constants locked (codex: monotonicity alone lets a
     # denominator drift pass): 8 real FLOPs per complex MAC, analysis +
     # synthesis = 2 * n_lat * n_sh * nlev MACs.
-    assert a["gemm_flops"] == 8 * 2 * 64 * 946 * 30
+    assert a["gemm_flops"] == 4 * 2 * 64 * 946 * 30  # real x complex MAC
     assert a["fft_flops"] == 2 * 30 * 64 * 5 * 128 * 7  # log2(128)=7
     # GEMM grows ~ n_lat*n_sh; fraction of FLOPs grows with truncation.
     assert b["gemm_flops"] > 4 * a["gemm_flops"]

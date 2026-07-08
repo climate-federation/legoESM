@@ -31,17 +31,21 @@ the A100/H100 answer; the backend is on every row):
 
 | T | grid | n_sh | legacy round trip | **GEMM round trip** | GEMM share of model FLOPs | AI |
 |---|------|------|------------------:|--------------------:|--------------------------:|---:|
-| T42 | 64×128 | 946 | 2.70 ms | 2.93 ms | 63% | 20.0 F/B |
-| T85 | 130×260 | 3,741 | 22.1 ms | 20.6 ms | 74% | 24.2 F/B |
-| T170 | 256×512 | 14,706 | 160.6 ms | **52.1 ms** | 84% | 26.8 F/B |
+| T42 | 64×128 | 946 | 5.34 ms | 3.04 ms | 46% | 10.0 F/B |
+| T85 | 130×260 | 3,741 | 33.5 ms | 20.5 ms | 59% | 12.1 F/B |
+| T170 | 256×512 | 14,706 | 145.6 ms | **43.2 ms** | 72% | 13.4 F/B |
 
-Reading: (a) the opt-in GEMM path is already **3.1× faster than the
-legacy path at T170 on CPU alone** (identical band-limited round-trip
-error, 4.2e-12) — the audit's own review of this bench caught the first
-draft measuring the legacy path while labeling it GEMM; (b) the transform
-is GEMM-dominated (84% of model FLOPs at T170) with AI 20–27 F/B —
-compute-bound territory; (c) the FFT leg is ≤37% of FLOPs and shrinking
-with T — **cuFFT/layout work is not the lever**.
+(FLOP model: the Legendre matrices are REAL against complex fields — a
+real×complex MAC is 4 real FLOPs; the first draft double-counted at 8.)
+
+Reading: (a) the opt-in GEMM path is **3.4× faster than the legacy path
+at T170 on CPU alone** (identical band-limited round-trip error,
+4.2e-12) — this audit's own adversarial review caught the first draft
+measuring the legacy path while labeling it GEMM; (b) the transform is
+GEMM-dominated (72% of model FLOPs at T170, share growing with T) with
+AI 10–13 F/B — compute-bound on fp64-weak parts, near the roofline knee
+on fp64-strong parts; (c) the FFT leg shrinks with T —
+**cuFFT/layout work is not the lever**.
 
 ## The consumer-vs-datacenter fp64 split (revises the prior reading)
 
@@ -51,7 +55,7 @@ part — 1:64 fp64:fp32**. That measurement says consumer GPUs are bad at
 fp64 GEMM, not that the transform is GPU-hostile:
 
 - A100 fp64: 9.7 TF/s (19.5 TF/s tensor-core DGEMM). Against the measured
-  T170 GEMM-path round trip (1.81 GF model / 52.1 ms ≈ 35 GF/s equivalent),
+  T170 GEMM-path round trip (0.90 GF model / 43.2 ms ≈ 21 GF/s equivalent),
   the GEMM-roofline headroom is **roughly two orders of magnitude** — a
   ROUGH UPPER BOUND, not a prediction: the model FLOPs are the triangular
   count, the FFT leg and launch overheads are outside the GEMM roofline,
@@ -71,10 +75,10 @@ JAX_ENABLE_X64=1 python scripts/bench/bench_spectral_transform_micro.py \
 
 | option | verdict | why |
 |---|---|---|
-| **Batched GEMM on datacenter GPU** (existing code path) | **GO — measure first** | Transform is GEMM-bound (84% at T170, AI 27); A100-class fp64 GEMM headroom is orders of magnitude; zero integration work. Run the one-command microbench above before ANY further investment. |
+| **Batched GEMM on datacenter GPU** (existing code path) | **GO — measure first** | Transform is GEMM-bound (72% at T170, AI 13); A100-class fp64 GEMM headroom is orders of magnitude; zero integration work. Run the one-command microbench above before ANY further investment. |
 | **SHTns (GPU build)** | **NO-GO now** | External C dependency via FFI custom-call: breaks `jax.grad` without a hand-written custom_vjp pair, adds a build dependency to every cluster, and its GPU path targets the same GEMM/FFT arithmetic the einsum already reaches through cuBLAS. Revisit only if the GEMM microbench shows the einsum path leaving >2–3× on the table. |
 | **sphericart** | **NO-GO** | Real-SH evaluation for point clouds (derivatives of Y_lm at scattered points) — not a Gauss–Legendre grid transform; wrong tool. |
-| **cuFFT/cuBLAS layout surgery** | **NO-GO** | FFT ≤37% of FLOPs and falling with T; the packed `(n_lat, n_sh, nlev)` GEMM layout is already the batched-GEMM-friendly one (`_maybe_chunk_trailing` handles memory). |
+| **cuFFT/cuBLAS layout surgery** | **NO-GO** | FFT share falls with T (28% at T170); the packed `(n_lat, n_sh, nlev)` GEMM layout is already the batched-GEMM-friendly one (`_maybe_chunk_trailing` handles memory). |
 | **CPU-only status quo** | **Default pending measurement** | Correct, validated, and the SI solve keeps the dycore single-device anyway (below). |
 
 ## Multi-device: stays N/A (unchanged)
