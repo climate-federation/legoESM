@@ -62,6 +62,7 @@ __param_spec__ = {
             "lcl_membership_sharpness": "numerics: sigmoid sharpness on the below-LCL level membership [1/level index]",
             "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
             "precip_efficiency": "default 0 = disabled (legacy no rain-split, shared split_convective_rain gated `if > 0.0`); enable + retune via config, not sigmoid-trained from the off state (mirrors Tiedtke)",
+            "p_conv_top_pa": "numerics: convective-top pressure [Pa] terminating the plume/subsidence gate (stability, not a trained closure); 150 hPa deep-convection top",
             "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
@@ -1387,6 +1388,14 @@ class BechtoldConfig(NamedTuple):
     # condensate directly (the coarse-grid over-bright-anvil / dry-column
     # runaway lever — Bechtold detrains 100% to cloud otherwise).
     precip_efficiency: float = 0.0
+    # Convective-top pressure [Pa]: the plume mass-flux carry AND the shared
+    # kernel's compensating-subsidence gate vanish above this cutoff, so the
+    # (non-self-detraining) Bechtold plume terminates here instead of
+    # plateauing at M_b_max to the model top. 150 hPa is a physical deep-
+    # convection top, TIGHTER than the kernel's 100 hPa default — required
+    # because Bechtold's plume does not decay at its LNB; the top-heavy
+    # subsidence otherwise bakes the lower stratosphere into a slow blow-up.
+    p_conv_top_pa: float = 15000.0
 
 
 class ConvectiveEDMFConfig(NamedTuple):

@@ -513,6 +513,23 @@ def bechtold_convection(
     M_u_cap = (cape_weight ** 2)[:, None] * config.M_b_max
     M_u_new = jnp.clip(M_u_new, 0.0, M_u_cap)
 
+    # Terminate the plume at the convective-top pressure ``p_conv_top_pa``.
+    # Bechtold's entraining plume does NOT self-detrain to zero at its LNB —
+    # the relaxed carry plateaus at ``M_b_max`` all the way to the model top
+    # (confirmed in a C24 AMIP checkpoint: M_u == M_b_max at level 0, a
+    # non-detraining profile).  The shared kernel gates only at the fixed
+    # 100 hPa stratosphere cutoff, which still leaves the plateaued mass flux
+    # at ~cap through the 50-100 hPa levels; the compensating subsidence from
+    # that top-heavy profile bakes the upper troposphere / lower stratosphere
+    # (+70..86 K over 15 days -> a slow blow-up that #856's cloud-base fix
+    # only DELAYED, day 15 -> day 40).  Gating the carry at ``p_conv_top_pa``
+    # (default 150 hPa — a physical deep-convection top; tighter than the
+    # kernel's 100 hPa) makes the plume terminate there, and threading the
+    # SAME cutoff into the kernel keeps the tendency subsidence consistent
+    # with the carry.  Tiedtke does not need this — its plume decays.
+    M_u_new = M_u_new * stratosphere_mass_flux_gate(
+        p_full, config.p_conv_top_pa)
+
     # -- Environmental tendencies (using relaxed M_u) ---------------------
     # The detrainment rate that feeds the *environmental* tendencies
     # (heat/vapor/cloud-water detrained from the plume) MUST be the SAME
@@ -537,9 +554,10 @@ def bechtold_convection(
         p_half=p_half,
         dt=dt,
         theta_implicit=config.theta_implicit,
+        p_min_convection=config.p_conv_top_pa,
     )
     rho_safe = jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
-    p_gate_qc = stratosphere_mass_flux_gate(p_full)
+    p_gate_qc = stratosphere_mass_flux_gate(p_full, config.p_conv_top_pa)
     dq_c_conv_dt = (
         dlt_profile * M_u_new * p_gate_qc * plume.q_c_u / rho_safe
     )
