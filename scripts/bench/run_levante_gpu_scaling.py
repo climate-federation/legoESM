@@ -2330,6 +2330,14 @@ def write_json(
     """
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    def _live_process_count() -> int:
+        try:
+            import jax
+
+            return int(jax.process_count())
+        except Exception:
+            return 1
+
     def _decomp(grid: str) -> str:
         # MPI route-A (world size > 1): grid-specific domain decomposition;
         # single-process runs shard via SPMD.
@@ -2365,12 +2373,19 @@ def write_json(
             n_gpus=r.n_gpus,
             decomposition=os.environ.get("LEGOESM_DECOMPOSITION")
             or _decomp(r.grid_type),
-            cells_per_rank=r.cells_per_gpu,
+            # cells_per_rank is per PROCESS (n_ranks semantics): route-A
+            # divides by the true MPI world; otherwise by the live process
+            # count (1 for single-process SPMD — that one rank owns ALL
+            # cells).  The per-device share stays in extra.cells_per_device.
+            cells_per_rank=r.total_cells // max(
+                n_ranks_true if (n_ranks_true and n_ranks_true > 1)
+                else _live_process_count(), 1),
             scaling_kind=os.environ.get("LEGOESM_SCALING_KIND") or None,
             extra={
                 "physics_level": r.physics_level,
                 "mode": r.mode,
                 "hlo_collective_permute": r.hlo_collective_permute,
+                "cells_per_device": r.cells_per_gpu,
             },
         )
         if metadata_overrides:
