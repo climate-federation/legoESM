@@ -137,6 +137,12 @@ def make_step_land_params_updater(gsd, surface_scheme):
     fracs_jnp = jnp.asarray(fracs)
     ncol = int(fracs.shape[0])
     bare_fb = bare_land_surface_params(ncol)
+    # Dominant-PFT C4 flag (0/1) — the in-scan twin of surface_data_param_provider's
+    # fc4_col (see the rationale there: a big leaf is a single pathway). Folded onto
+    # base_lp so the SEB LandSurfaceParams carries fC4 (structure matches bare_fb for
+    # the gap_fill_tree tree-map) and the big-leaf FvCB path runs the right pathway.
+    fc4_col = jnp.asarray(np.asarray(pft_lookup_arrays()["fc4"])[dominant_pft_index(gsd)])
+    base_lp = base_lp._replace(fC4=fc4_col)
 
     def _update_seb(theta_top: jnp.ndarray, doy: jnp.ndarray):
         """Return ``(LandSurfaceParams, lai_col)``: ``lai_col`` is the

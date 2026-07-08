@@ -321,8 +321,16 @@ def _bigleaf_assimilation(
     :func:`~legoesm.land.canopy.photosynthesis.c4_assimilation` kernels (the same
     ones the two-leaf canopy uses), so the big-leaf and two-leaf paths cannot
     drift.  ``Vcmax25_eff`` and ``APAR_umol`` are already canopy-scaled (per unit
-    ground area), so the C3/C4 rates are per ground area; the C4 fraction ``fC4``
-    blends the two continuously (differentiable, matching ``canopy.photosynthesis``).
+    ground area), so the C3/C4 rates are per ground area; ``fC4`` area-weights them
+    (differentiable, matching ``canopy.photosynthesis``).
+
+    Both branches share the single column capacity ``Vcmax25_eff``.  In production
+    ``fC4`` is the DOMINANT-PFT C4 flag (0 or 1; see the boundary-data providers),
+    so a column is pure C3 or pure C4 with its own Vcmax — the natural big-leaf
+    interpretation (a single leaf is one pathway).  Intermediate ``fC4`` is
+    supported for testing / smooth gradients but then shares one Vcmax across both
+    branches (an approximation); genuine sub-grid C3/C4 mixing with separate C3/C4
+    capacities is the two-leaf canopy's role, not this simple scheme's.
 
     Returns
     -------
