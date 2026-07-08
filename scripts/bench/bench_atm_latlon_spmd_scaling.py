@@ -206,6 +206,8 @@ def main() -> int:
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=n_lat * args.n_lon * args.nlev,
     )
+    from legoesm.parallel.early_init import nccl_transport_report
+    _nccl_report = nccl_transport_report()
     rec["metadata"] = annotate_incomplete(scaling_metadata(
         grid="latlon",
         component="atmosphere",
@@ -226,6 +228,11 @@ def main() -> int:
             "steps": args.steps,
             "warmup": args.warmup,
             "multicontroller": bool(args.multicontroller),
+            # Route-B transport facts (socket-fallback flag): a
+            # multi-node row without an NCCL net plugin is
+            # falsifiable from the record alone.
+            "nccl": (_nccl_report if args.multicontroller
+                     else None),
             "cells_per_device": (n_lat // nd) * args.n_lon * args.nlev,
         },
     ))

@@ -339,6 +339,8 @@ def main() -> int:
     )
     _halo_est = estimate_barotropic_halo_messages(
         model.config, model.config.barotropic.n_barotropic_substeps)
+    from legoesm.parallel.early_init import nccl_transport_report
+    _nccl_report = nccl_transport_report()
     rec["metadata"] = annotate_incomplete(scaling_metadata(
         grid="latlon",
         component="ocean",
@@ -362,6 +364,11 @@ def main() -> int:
             "steps": args.steps,
             "warmup": args.warmup,
             "multicontroller": bool(args.multicontroller),
+            # Route-B transport facts (socket-fallback flag): a
+            # multi-node row without an NCCL net plugin is
+            # falsifiable from the record alone.
+            "nccl": (_nccl_report if args.multicontroller
+                     else None),
             "parity_gate": bool(args.parity_gate),
             "check_conservation": bool(args.check_conservation),
             "cells_per_device": (n_lat // nd) * args.n_lon * args.nlev,

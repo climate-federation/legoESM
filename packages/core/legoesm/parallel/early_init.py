@@ -57,6 +57,119 @@ def resolve_coordinator_port(default: int = _LEGACY_COORDINATOR_PORT) -> int:
     return default
 
 
+def launcher_world_size() -> int:
+    """World size DECLARED by the job launcher's environment (0 = none).
+
+    Reads the union of the launcher families every entry point supports:
+    SLURM (``SLURM_NTASKS``), Open MPI (``OMPI_COMM_WORLD_SIZE``), and
+    PMI/PALS (``PMI_SIZE``).  Used by the post-init fallback guard — the
+    launcher's declaration is the ground truth a federated runtime must
+    match.
+    """
+    for var in ("SLURM_NTASKS", "OMPI_COMM_WORLD_SIZE", "PMI_SIZE"):
+        v = os.environ.get(var)
+        if v and v.isdigit():
+            return int(v)
+    return 0
+
+
+def check_no_silent_process_fallback() -> None:
+    """Fail LOUDLY when the federated process count disagrees with the
+    launcher's declared world size.
+
+    The route-B hazard this guards: ``jax.distributed.initialize`` (or an
+    auto-detect miss) silently federates FEWER processes than the launcher
+    started — N un-federated copies then run the same program, clobber each
+    other's output, and a bench records a fake single-process row as an
+    N-rank result.  Mirror of the route-A ``check_no_silent_mpi_fallback``
+    (runtime.py); same override env for emergencies:
+    ``LEGOESM_ALLOW_SINGLE_PROCESS_UNDER_MPI=1``.
+
+    Call AFTER ``jax.distributed.initialize`` — ``jax.process_count()`` is
+    then safe (the backend is already federated).
+    """
+    if os.environ.get("LEGOESM_ALLOW_SINGLE_PROCESS_UNDER_MPI") == "1":
+        return
+    declared = launcher_world_size()
+    if declared <= 1:
+        return
+    import jax
+
+    actual = int(jax.process_count())
+    if actual != declared:
+        raise RuntimeError(
+            f"jax.distributed federated {actual} process(es) but the "
+            f"launcher declared {declared} (SLURM_NTASKS / "
+            f"OMPI_COMM_WORLD_SIZE / PMI_SIZE): a silent fallback would run "
+            f"{declared} un-federated copies and record fake scaling rows. "
+            f"Fix the launch (coordinator/port/env) or set "
+            f"LEGOESM_ALLOW_SINGLE_PROCESS_UNDER_MPI=1 to override.")
+
+
+def _pals_local_device_ids() -> list[int]:
+    """Per-process ``local_device_ids`` for a PALS launch.
+
+    When the job shim already pinned ``CUDA_VISIBLE_DEVICES`` to one device
+    (the #693 convention), the process sees exactly one visible device →
+    ``[0]``.  When NOT pinned (bare ``mpiexec`` without a shim), every
+    process sees all node GPUs — index by ``PALS_LOCAL_RANKID`` so ranks
+    sharing a node bind DIFFERENT devices instead of all contending for
+    GPU 0 (the fake/contended-GPU row).  Falls back to ``[0]``.
+    """
+    if os.environ.get("CUDA_VISIBLE_DEVICES"):
+        return [0]
+    local = os.environ.get("PALS_LOCAL_RANKID")
+    if local is not None and local.isdigit():
+        return [int(local)]
+    return [0]
+
+
+def nccl_transport_report() -> dict:
+    """Best-effort NCCL transport facts for run metadata (route-B analog of
+    the mpi4jax GPU-direct preflight).
+
+    NCCL has no Python-queryable transport API; what IS knowable up front:
+    the fabric env knobs and whether an OFI/net plugin library
+    (``libnccl-net*``) is discoverable on ``LD_LIBRARY_PATH``/``LD_PRELOAD``
+    / ``NCCL_NET_PLUGIN``.  ``likely_socket_fallback`` flags the documented
+    Derecho failure shape: a MULTI-NODE launch with no net plugin visible —
+    NCCL then silently runs correct-but-slow TCP sockets (git cba9715b2:
+    'route-B NCCL works cross-node but socket-bound').  Advisory (the
+    definitive check stays ``NCCL_DEBUG=INFO`` in the job log); recorded so
+    a socket-bound row is falsifiable from the record.
+    """
+    import glob
+
+    plugin_hit = None
+    if os.environ.get("NCCL_NET_PLUGIN"):
+        plugin_hit = os.environ["NCCL_NET_PLUGIN"]
+    else:
+        paths = (os.environ.get("LD_PRELOAD", "").split(":")
+                 + os.environ.get("LD_LIBRARY_PATH", "").split(":"))
+        for d in (p for p in paths if p):
+            if os.path.isfile(d) and "libnccl-net" in os.path.basename(d):
+                plugin_hit = d
+                break
+            hits = glob.glob(os.path.join(d, "libnccl-net*"))
+            if hits:
+                plugin_hit = hits[0]
+                break
+    n_nodes = 0
+    for var in ("SLURM_NNODES", "SLURM_JOB_NUM_NODES", "PALS_NNODES"):
+        v = os.environ.get(var)
+        if v and v.isdigit():
+            n_nodes = int(v)
+            break
+    multi_node = n_nodes > 1
+    return {
+        "nccl_net_plugin": plugin_hit,
+        "nccl_socket_ifname": os.environ.get("NCCL_SOCKET_IFNAME"),
+        "nccl_debug": os.environ.get("NCCL_DEBUG"),
+        "n_nodes_declared": n_nodes,
+        "likely_socket_fallback": bool(multi_node and plugin_hit is None),
+    }
+
+
 def init_jax_distributed_with_fallback() -> None:
     """``jax.distributed.initialize()`` with a PBS/PALS-safe fallback.
 
@@ -107,9 +220,13 @@ def init_jax_distributed_with_fallback() -> None:
     if pals_only and importlib.util.find_spec("mpi4py") is not None:
         jax.distributed.initialize(
             cluster_detection_method="mpi4py",
-            local_device_ids=[0],
+            # Shim-pinned CUDA_VISIBLE_DEVICES -> [0]; unpinned bare
+            # mpiexec -> index by PALS_LOCAL_RANKID so node-sharing ranks
+            # bind DIFFERENT GPUs (contended-GPU-0 hazard).
+            local_device_ids=_pals_local_device_ids(),
         )
         _INITIALIZED = True
+        check_no_silent_process_fallback()
         return
     try:
         jax.distributed.initialize()
@@ -119,6 +236,7 @@ def init_jax_distributed_with_fallback() -> None:
             return
         raise
     _INITIALIZED = True
+    check_no_silent_process_fallback()
 
 
 def init_multicontroller_distributed(coordinator: str | None = None) -> None:
@@ -165,6 +283,19 @@ def init_multicontroller_distributed(coordinator: str | None = None) -> None:
         coordinator_address=coordinator,
         num_processes=n_procs, process_id=proc_id)
     _INITIALIZED = True
+    check_no_silent_process_fallback()
+    # Route-B transport visibility: a multi-node GPU launch without an
+    # NCCL net plugin silently runs correct-but-slow TCP sockets — warn
+    # once (rank 0) so the job log carries the flag next to the timings.
+    report = nccl_transport_report()
+    if proc_id == 0 and report["likely_socket_fallback"]:
+        print(
+            "[early_init] WARNING: multi-node launch with no NCCL net "
+            "plugin visible (libnccl-net*/NCCL_NET_PLUGIN): cross-node "
+            "collectives will likely run on TCP SOCKETS (correct but "
+            "slow — the documented Derecho socket-bound shape). Verify "
+            "with NCCL_DEBUG=INFO; build/load the aws-ofi-nccl plugin "
+            "for fabric speed.", flush=True)
 
 
 def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
@@ -226,4 +357,5 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
         local_device_ids=[0],
     )
     _INITIALIZED = True
+    check_no_silent_process_fallback()
     return True
