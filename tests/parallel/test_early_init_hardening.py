@@ -15,6 +15,8 @@ from legoesm.parallel import early_init as ei
 
 _ALL_ENV = (
     "SLURM_NTASKS", "OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "PALS_LOCAL_RANKID",
+    "OMPI_COMM_WORLD_LOCAL_RANK", "MV2_COMM_WORLD_LOCAL_RANK",
+    "SLURM_LOCALID",
     "CUDA_VISIBLE_DEVICES", "NCCL_NET_PLUGIN", "LD_LIBRARY_PATH",
     "LD_PRELOAD", "NCCL_SOCKET_IFNAME", "NCCL_DEBUG", "SLURM_NNODES",
     "SLURM_JOB_NUM_NODES", "PALS_NNODES",
@@ -61,6 +63,20 @@ def test_pals_local_device_ids(monkeypatch):
     monkeypatch.setenv("PALS_LOCAL_RANKID", "7")
     with pytest.raises(RuntimeError, match="more local ranks"):
         ei._pals_local_device_ids()
+
+
+def test_local_rank_launcher_families(monkeypatch):
+    # Open MPI local rank serves the explicit-coordinator path too (codex:
+    # multi-GPU CVD + OMPI multi-rank nodes must not all bind GPU 0).
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
+    monkeypatch.setenv("OMPI_COMM_WORLD_LOCAL_RANK", "2")
+    assert ei._pals_local_device_ids() == [2]
+    monkeypatch.delenv("OMPI_COMM_WORLD_LOCAL_RANK")
+    # SLURM_LOCALID honored only on a genuine multi-task launch.
+    monkeypatch.setenv("SLURM_LOCALID", "1")
+    assert ei._pals_local_device_ids() == [0]  # single-task: ignored
+    monkeypatch.setenv("SLURM_NTASKS", "4")
+    assert ei._pals_local_device_ids() == [1]
 
 
 def _stub_jax(monkeypatch, process_count: int):

@@ -106,30 +106,53 @@ def check_no_silent_process_fallback() -> None:
             f"LEGOESM_ALLOW_SINGLE_PROCESS_UNDER_MPI=1 to override.")
 
 
+def _launcher_local_rank() -> tuple[str, str] | None:
+    """(env var, value) of the launcher's NODE-LOCAL rank, or ``None``.
+
+    Union of the launcher families the init paths serve: Cray PALS,
+    Open MPI, MVAPICH, and SLURM (SLURM_LOCALID only on a genuine
+    multi-task launch — on a single-task sbatch step it is exported too
+    and pinning on it would hide all but GPU 0 from a single-process
+    multi-GPU run, the documented silent eff=0.5 bug).
+    """
+    for var in ("PALS_LOCAL_RANKID", "OMPI_COMM_WORLD_LOCAL_RANK",
+                "MV2_COMM_WORLD_LOCAL_RANK"):
+        v = os.environ.get(var)
+        if v is not None and v.isdigit():
+            return var, v
+    slid = os.environ.get("SLURM_LOCALID")
+    nt = os.environ.get("SLURM_NTASKS", "1")
+    if slid is not None and slid.isdigit() and nt.isdigit() and int(nt) > 1:
+        return "SLURM_LOCALID", slid
+    return None
+
+
 def _pals_local_device_ids() -> list[int]:
-    """Per-process ``local_device_ids`` for a PALS launch.
+    """Per-process ``local_device_ids`` for a multicontroller launch.
 
     When the job shim already pinned ``CUDA_VISIBLE_DEVICES`` to ONE device
     (the #693 convention), the process sees exactly one visible device →
     ``[0]``.  Otherwise (unpinned, or a MULTI-device visible list) index by
-    ``PALS_LOCAL_RANKID`` within the visible list so ranks sharing a node
-    bind DIFFERENT devices instead of all contending for GPU 0 (the
+    the launcher's node-local rank (PALS / Open MPI / MVAPICH / guarded
+    SLURM — see :func:`_launcher_local_rank`) so ranks sharing a node bind
+    DIFFERENT devices instead of all contending for GPU 0 (the
     fake/contended-GPU row).  Falls back to ``[0]``.
     """
     cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     n_visible = len([x for x in cvd.split(",") if x.strip()]) if cvd else 0
     if n_visible == 1:
         return [0]  # shim-pinned: exactly one visible device
-    local = os.environ.get("PALS_LOCAL_RANKID")
-    if local is not None and local.isdigit():
-        idx = int(local)
+    local = _launcher_local_rank()
+    if local is not None:
+        var, val = local
+        idx = int(val)
         if n_visible > 1 and idx >= n_visible:
             # More local ranks than visible devices is a LAUNCH error —
             # clamping would silently oversubscribe the last GPU (codex).
             raise RuntimeError(
-                f"PALS_LOCAL_RANKID={idx} but CUDA_VISIBLE_DEVICES exposes "
-                f"only {n_visible} device(s): more local ranks than visible "
-                f"GPUs. Fix the mpiexec ppn / CUDA_VISIBLE_DEVICES shim "
+                f"{var}={idx} but CUDA_VISIBLE_DEVICES exposes only "
+                f"{n_visible} device(s): more local ranks than visible "
+                f"GPUs. Fix the launcher ppn / CUDA_VISIBLE_DEVICES shim "
                 f"(one rank per GPU).")
         return [idx]
     return [0]
