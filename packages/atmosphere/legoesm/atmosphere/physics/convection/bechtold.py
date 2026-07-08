@@ -122,6 +122,14 @@ __physics_contract__ = {
 _BECHTOLD_RH_CAP = 1.3
 _BECHTOLD_RH_ENTR = 1.3
 _BECHTOLD_RH_DETR = 1.6
+# Finite/physical guards on the output tendencies fed to the dynamics. Day-4 of
+# a C48 AMIP is fully normal, then a rare degenerate column produces a
+# non-finite tendency at day 5 -> non-finite winds (the #856 plume rewrite
+# exposes this only at C48's finer grid). nan_to_num maps NaN->0 and Inf->finite;
+# the clip bounds far above any real convective rate (86 K/day, ~9 g/kg/day) so
+# only the numerical spike is removed, real convection untouched.
+_BECHTOLD_DTDT_MAX = 1.0e-3     # K/s (~86 K/day)
+_BECHTOLD_DQVDT_MAX = 1.0e-4    # kg/kg/s (~9 g/kg/day, well above real conv drying)
 
 def bechtold_convection(
     T: jax.Array,
@@ -651,6 +659,14 @@ def bechtold_convection(
     # precipitating rain fraction + suspended anvil remainder via the shared
     # helper (same knob + mass proof as Tiedtke). precip_efficiency=0
     # (default) ⇒ no split, byte-identical to the pre-split Bechtold.
+    # Finite guard (before the rain split so it gets finite input): a rare
+    # degenerate C48 column can emit a non-finite thermal/moisture/condensate
+    # tendency that the dynamics amplify to non-finite winds; bound it. nan_to_num
+    # maps NaN->0, Inf->finite; the clip is far above any real convective rate.
+    dT_dt = jnp.clip(jnp.nan_to_num(dT_dt), -_BECHTOLD_DTDT_MAX, _BECHTOLD_DTDT_MAX)
+    dq_v_dt = jnp.clip(jnp.nan_to_num(dq_v_dt), -_BECHTOLD_DQVDT_MAX, _BECHTOLD_DQVDT_MAX)
+    dq_c_conv_dt = jnp.nan_to_num(jnp.maximum(dq_c_conv_dt, 0.0))
+
     dq_c_conv_dt, dq_r_conv_dt = split_convective_rain(
         dq_c_conv_dt, config.precip_efficiency)
 
