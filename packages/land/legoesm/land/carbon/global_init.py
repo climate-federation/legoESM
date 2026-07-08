@@ -547,7 +547,9 @@ def equilibrate_archetypes(
             step_fn, state0, carbon0, batch.forcing_fn,
             n_spinup=n_spinup, n_verify=n_verify,
             steps_per_year=batch.steps_per_year, dt=dt,
-            cwd_humification_eff=batch.config.carbon.cwd_humification_eff)
+            cwd_humification_eff=batch.config.carbon.cwd_humification_eff,
+            f_active_to_slow=batch.config.carbon.f_active_to_slow,
+            f_slow_to_passive=batch.config.carbon.f_slow_to_passive)
 
         # Scatter the verified equilibrium pools back to archetype order.
         for p in pool_fields:

@@ -182,12 +182,10 @@ class Test6g_PoolsPositive:
 
         for name in CarbonState._fields:
             arr = getattr(state, name)
-            # Inert SOM sub-pools stay at 0 (zero flux) in phase A1; the live
-            # pools stay above the 1 gC/m2 floor.
-            if name in ("C_som_slow", "C_som_passive"):
-                assert jnp.all(arr == 0.0), f"{name} should be inert (0) in A1"
-            else:
-                assert jnp.all(arr >= 1.0), f"{name} dropped below 1 gC/m2"
+            # A2: all eight pools (incl. the live active/slow/passive SOM
+            # cascade, seeded by the CENTURY init partition) stay above the
+            # 1 gC/m2 floor and finite.
+            assert jnp.all(arr >= 1.0), f"{name} dropped below 1 gC/m2"
             assert jnp.all(jnp.isfinite(arr)), f"{name} has NaN"
 
 

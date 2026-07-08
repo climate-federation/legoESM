@@ -501,9 +501,13 @@ def semi_analytic_carbon_spinup(state, carbon_state, config, lat_rad, lon_rad,
             config.theta_fc, config.beta_min, lat_jnp, doy, dt, spatial=False)
         return new_state, carbon_new, diag
 
-    # Accumulate per-column (works for any ncol) annual fluxes [gC/m2/yr].
+    # Accumulate per-column (works for any ncol) annual fluxes [gC/m2/yr].  The
+    # three ``som_*_loss`` fields are each SOM pool's total decomposition D_X,
+    # the denominators of the forward-substitution cascade equilibrium.
     zeros = jnp.zeros_like(carbon_state.C_wood)
-    acc = {k: zeros for k in ("a_wood", "wood_litter", "lit_to_som", "r_het_som")}
+    acc = {k: zeros for k in ("a_wood", "wood_litter", "lit_to_som",
+                              "som_active_loss", "som_slow_loss",
+                              "som_passive_loss")}
     for s in range(steps_per_year):
         doy = jnp.asarray((start_doy + s * dt_days) % 365.0)
         hour = jnp.asarray((s * dt / 3600.0) % 24.0)
@@ -513,9 +517,12 @@ def semi_analytic_carbon_spinup(state, carbon_state, config, lat_rad, lon_rad,
 
     fluxes = SlowPoolFluxes(
         a_wood=acc["a_wood"], wood_litter=acc["wood_litter"],
-        lit_to_som=acc["lit_to_som"], r_het_som=acc["r_het_som"])
+        lit_to_som=acc["lit_to_som"], som_active_loss=acc["som_active_loss"],
+        som_slow_loss=acc["som_slow_loss"],
+        som_passive_loss=acc["som_passive_loss"])
     carbon_eq = analytic_slow_pool_equilibrium(
-        carbon_state, fluxes, config.carbon.cwd_humification_eff)
+        carbon_state, fluxes, config.carbon.cwd_humification_eff,
+        config.carbon.f_active_to_slow, config.carbon.f_slow_to_passive)
     return state, carbon_eq
 
 

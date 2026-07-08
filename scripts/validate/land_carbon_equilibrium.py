@@ -250,7 +250,9 @@ def run_pixel(config: MultiLayerLandConfig, lat_deg: float, lon_deg: float,
     final_state, final_carbon, annual = run_semi_analytic_spinup(
         step_fn, state0, carbon0, forcing_fn,
         n_spinup=n_spinup, n_verify=n_verify, steps_per_year=steps_per_year,
-        dt=dt, cwd_humification_eff=config.carbon.cwd_humification_eff)
+        dt=dt, cwd_humification_eff=config.carbon.cwd_humification_eff,
+        f_active_to_slow=config.carbon.f_active_to_slow,
+        f_slow_to_passive=config.carbon.f_slow_to_passive)
 
     annual = {k: np.asarray(v).reshape(n_verify, -1).squeeze()
               for k, v in annual.items()}
@@ -382,9 +384,11 @@ def make_plots(out_dir: Path, results: list[dict], annuals: dict[str, dict]):
         a = annuals[r["name"]]
         yrs = np.arange(a["gpp"].shape[0])
         for pool, lab in [("C_fol", "foliage"), ("C_root", "root"),
-                          ("C_wood", "wood"), ("C_lit", "litter"),
-                          ("C_som_active", "SOM")]:
+                          ("C_wood", "wood"), ("C_lit", "litter")]:
             ax.plot(yrs, a[pool] / 1000.0, label=lab, lw=1.3)
+        # Total SOM = active + slow + passive (the passive pool dominates).
+        som = a["C_som_active"] + a["C_som_slow"] + a["C_som_passive"]
+        ax.plot(yrs, som / 1000.0, label="SOM", lw=1.3)
         ax.set_title(f"{r['name']}\n({r['biome']})", fontsize=8)
         ax.set_xlabel("year"); ax.set_ylabel("kgC/m²")
         ax.set_yscale("symlog", linthresh=1.0)

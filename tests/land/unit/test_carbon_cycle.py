@@ -36,8 +36,11 @@ from legoesm.land.carbon.carbon_cycle import (
     _GC_TO_KG_CO2,
     _SPD,
     _temperate_modifier,
+    _freeze_modifier,
+    _som_decomp_modifier,
     _effective_rate,
 )
+from legoesm import constants
 
 
 # ===================================================================
@@ -49,15 +52,18 @@ def _default_config(**overrides):
 
 
 def _make_carbon_state(shape=(4,), **overrides):
+    # A2: the three SOM pools are live; seed them with a realistic CENTURY-like
+    # partition of a 10000 gC/m2 bulk stock (active small, passive dominant) so
+    # the cascade is exercised.  som_total == 10000 either way.
     defaults = dict(
         C_lab=jnp.full(shape, 100.0),
         C_fol=jnp.full(shape, 200.0),
         C_root=jnp.full(shape, 300.0),
         C_wood=jnp.full(shape, 10000.0),
         C_lit=jnp.full(shape, 100.0),
-        C_som_active=jnp.full(shape, 10000.0),
-        C_som_slow=jnp.zeros(shape),      # inert in A1
-        C_som_passive=jnp.zeros(shape),   # inert in A1
+        C_som_active=jnp.full(shape, 300.0),
+        C_som_slow=jnp.full(shape, 3200.0),
+        C_som_passive=jnp.full(shape, 6500.0),
     )
     defaults.update(overrides)
     return CarbonState(**defaults)
@@ -87,15 +93,16 @@ class TestCarbonConfig(unittest.TestCase):
 
     def test_carbon_state_fields(self):
         state = _make_carbon_state()
-        # 8 pools since the A1 SOM split (C_som -> active/slow/passive).
+        # 8 pools since the SOM split (C_som -> active/slow/passive).
         self.assertEqual(len(state), 8)
         self.assertEqual(
             state._fields[-3:],
             ("C_som_active", "C_som_slow", "C_som_passive"))
         self.assertEqual(state.C_lab.shape, (4,))
-        # Slow/passive SOM pools are inert (0) in phase A1.
-        self.assertTrue(jnp.all(state.C_som_slow == 0.0))
-        self.assertTrue(jnp.all(state.C_som_passive == 0.0))
+        # A2: all three SOM pools are live (non-zero) and sum to the bulk stock.
+        self.assertTrue(jnp.all(state.C_som_slow > 0.0))
+        self.assertTrue(jnp.all(state.C_som_passive > 0.0))
+        npt.assert_allclose(som_total(state), 10000.0, rtol=1e-9)
 
 
 # ===================================================================
@@ -269,6 +276,179 @@ class TestDecomposition(unittest.TestCase):
 
 
 # ===================================================================
+# Freeze suppression modifier (the high-latitude SOC control)
+# ===================================================================
+
+class TestFreezeModifier(unittest.TestCase):
+
+    def test_freeze_bounds_and_limits(self):
+        """f_freeze in (0, 1]; ->1 warm, ->0 deep-frozen, ==0.5 at T_freeze."""
+        cfg = _default_config()
+        T = jnp.linspace(240.0, 320.0, 60)
+        ff = _freeze_modifier(T, cfg)
+        self.assertTrue(jnp.all(ff > 0.0))
+        self.assertTrue(jnp.all(ff <= 1.0))
+        self.assertGreater(float(_freeze_modifier(jnp.array([300.0]), cfg)[0]), 0.99)
+        self.assertLess(float(_freeze_modifier(jnp.array([255.0]), cfg)[0]), 0.01)
+        npt.assert_allclose(
+            _freeze_modifier(jnp.array([constants.T_freeze]), cfg), 0.5, atol=1e-6)
+
+    def test_freeze_monotonic_increasing(self):
+        cfg = _default_config()
+        ff = _freeze_modifier(jnp.linspace(250.0, 300.0, 50), cfg)
+        self.assertTrue(jnp.all(jnp.diff(ff) > 0.0))
+
+    def test_freeze_width_positive_required(self):
+        with self.assertRaises(ValueError):
+            _freeze_modifier(jnp.array([275.0]),
+                             _default_config(som_freeze_width_K=0.0))
+
+    def test_som_modifier_suppressed_relative_to_temperate(self):
+        """m_som == f_temp*f_moist*f_freeze <= the freeze-free _temperate_modifier,
+        strictly smaller when cold, ~equal when warm."""
+        cfg = _default_config()
+        precip = jnp.array([cfg.precip_ref])
+        for T in (jnp.array([263.0]), jnp.array([290.0]), jnp.array([305.0])):
+            m_som = _som_decomp_modifier(T, precip, cfg)
+            m_temp = _temperate_modifier(T, precip, cfg)
+            self.assertTrue(jnp.all(m_som <= m_temp + 1e-12))
+        Tc = jnp.array([263.0])
+        self.assertLess(
+            float(_som_decomp_modifier(Tc, precip, cfg)[0]),
+            0.5 * float(_temperate_modifier(Tc, precip, cfg)[0]))
+        Tw = jnp.array([300.0])
+        npt.assert_allclose(_som_decomp_modifier(Tw, precip, cfg),
+                            _temperate_modifier(Tw, precip, cfg), rtol=1e-3)
+
+    def test_som_modifier_differentiable(self):
+        cfg = _default_config()
+
+        def loss(T):
+            return jnp.sum(_som_decomp_modifier(T, jnp.array([3e-5]), cfg))
+
+        g = jax.grad(loss)(jnp.array([274.0]))
+        self.assertTrue(jnp.all(jnp.isfinite(g)))
+        self.assertFalse(jnp.allclose(g, 0.0))
+
+
+# ===================================================================
+# Multi-pool SOM cascade (active -> slow -> passive)
+# ===================================================================
+
+class TestSomCascade(unittest.TestCase):
+
+    def _cascade_step(self, dt=86400.0, T=290.0, sw=0.0, **state_over):
+        cfg = _default_config(scheme="differland")
+        state = _make_carbon_state(shape=(1,), **state_over)
+        new_state, co2_flux, diag = step_carbon_differland(
+            state, jnp.full(1, sw), jnp.full(1, T), jnp.full(1, 400.0),
+            jnp.full(1, 0.8), jnp.full(1, 0.7), 180.0, jnp.full(1, 3e-5),
+            cfg, dt, return_diagnostics=True)
+        return cfg, state, new_state, co2_flux, diag
+
+    def test_losses_nonneg_and_bounded_by_stock(self):
+        """Each pool's decomposition D_X is >= 0 and never exceeds its stock
+        (the _effective_rate loss fraction is <= 1), so no pool goes negative."""
+        cfg, state, new, _flux, diag = self._cascade_step()
+        dt_days = 86400.0 / _SPD
+        for pool, loss in (("C_som_active", diag.som_active_loss),
+                           ("C_som_slow", diag.som_slow_loss),
+                           ("C_som_passive", diag.som_passive_loss)):
+            self.assertTrue(jnp.all(loss >= 0.0), f"{pool} loss < 0")
+            self.assertTrue(
+                jnp.all(loss * dt_days <= getattr(state, pool) + 1e-9),
+                f"{pool} over-drained")
+        for f in new._fields:
+            self.assertTrue(jnp.all(getattr(new, f) >= 0.0), f"{f} negative")
+
+    def test_transfers_flow_downward(self):
+        """With a big active + tiny slow/passive, the humified transfer grows
+        the slow AND passive pools (active->slow->passive direction)."""
+        _c, st, new, _f, _d = self._cascade_step(
+            C_som_active=jnp.full((1,), 10000.0),
+            C_som_slow=jnp.full((1,), 1.0),
+            C_som_passive=jnp.full((1,), 1.0))
+        self.assertGreater(float(new.C_som_slow[0]), float(st.C_som_slow[0]))
+        self.assertGreater(float(new.C_som_passive[0]), float(st.C_som_passive[0]))
+
+    def test_respiration_accounting(self):
+        """r_het_som == (1-f_as)*D_active + (1-f_sp)*D_slow + D_passive >= 0."""
+        cfg, _st, _new, _flux, diag = self._cascade_step()
+        expected = ((1.0 - cfg.f_active_to_slow) * diag.som_active_loss
+                    + (1.0 - cfg.f_slow_to_passive) * diag.som_slow_loss
+                    + diag.som_passive_loss)
+        npt.assert_allclose(diag.r_het_som, expected, rtol=1e-9, atol=1e-12)
+        self.assertTrue(jnp.all(diag.r_het_som >= 0.0))
+
+    def test_som_subcolumn_conserves(self):
+        """SOM sub-budget: humified input - sum(dC_som)/dt - R_het_som == 0
+        (every gram of input stays in a SOM pool or respires)."""
+        cfg, state, new, _flux, diag = self._cascade_step()
+        dt_days = 86400.0 / _SPD
+        dC_som = ((new.C_som_active - state.C_som_active)
+                  + (new.C_som_slow - state.C_som_slow)
+                  + (new.C_som_passive - state.C_som_passive))
+        som_input = diag.lit_to_som + diag.wood_to_som
+        residual = som_input - dC_som / dt_days - diag.r_het_som
+        npt.assert_allclose(residual, 0.0, atol=1e-9)
+
+    def test_full_column_conservation_all_pools_live(self):
+        """Full 8-pool closure sum(dC) == -NEE*dt at machine precision with all
+        three SOM pools live and evolving (day and night)."""
+        for sw in (0.0, 400.0):
+            cfg, state, new, flux, _d = self._cascade_step(sw=sw)
+            dC = sum(getattr(new, f) - getattr(state, f) for f in state._fields)
+            expected = -(flux / _GC_TO_KG_CO2) * 86400.0
+            npt.assert_allclose(dC, expected, rtol=1e-9, atol=1e-9,
+                                err_msg=f"multipool column not closed (sw={sw})")
+
+
+# ===================================================================
+# Cold-vs-warm SOC realism (the scientific point of the change)
+# ===================================================================
+
+class TestColdWarmSocRealism(unittest.TestCase):
+    """A COLD soil equilibrates to MORE total SOC than a WARM soil with the SAME
+    litter input (freeze + temperature suppression -> carbon retained), and more
+    than the former single bulk pool held for a cold case."""
+
+    @staticmethod
+    def _cascade_soc_eq(cfg, T, precip, som_input_per_day):
+        """Analytic total SOM equilibrium of the live cascade for a constant
+        input and (T, precip), using the model's OWN modifier + config rates:
+        C_active_eq = I/(m*k_a); C_slow_eq = f_as*I/(m*k_s);
+        C_passive_eq = f_as*f_sp*I/(m*k_p) (derived in step_carbon_differland)."""
+        m = float(_som_decomp_modifier(
+            jnp.array([T]), jnp.array([precip]), cfg)[0])
+        i = som_input_per_day
+        f_as, f_sp = cfg.f_active_to_slow, cfg.f_slow_to_passive
+        return (i / (m * cfg.tor_som_active)
+                + f_as * i / (m * cfg.tor_som_slow)
+                + f_as * f_sp * i / (m * cfg.tor_som_passive))
+
+    def test_cold_holds_more_soc_than_warm(self):
+        cfg = _default_config(scheme="differland")
+        i, precip = 0.2, _default_config().precip_ref
+        soc_cold = self._cascade_soc_eq(cfg, 270.0, precip, i)   # -3 C, frozen
+        soc_warm = self._cascade_soc_eq(cfg, 298.0, precip, i)   # +25 C
+        self.assertGreater(soc_cold, soc_warm)
+        self.assertGreater(soc_cold / soc_warm, 10.0)
+
+    def test_cold_multipool_exceeds_old_single_pool(self):
+        """The cold multi-pool SOC exceeds what the former single bulk pool
+        (tor_som=4e-5/day, NO freeze control) held at the same input — the fix
+        direction for high-latitude / grassland SOC underestimation."""
+        cfg = _default_config(scheme="differland")
+        i, precip, T = 0.2, _default_config().precip_ref, 270.0
+        soc_multi = self._cascade_soc_eq(cfg, T, precip, i)
+        # Old single pool: freeze-free _temperate_modifier, bulk 4e-5/day turnover.
+        m_old = float(_temperate_modifier(
+            jnp.array([T]), jnp.array([precip]), cfg)[0])
+        soc_old_single = i / (m_old * 4e-5)   # legacy tor_som default
+        self.assertGreater(soc_multi, soc_old_single)
+
+
+# ===================================================================
 # DifferLand step
 # ===================================================================
 
@@ -298,15 +478,11 @@ class TestDifferLandStep(unittest.TestCase):
 
     def test_pools_stay_positive(self):
         new_state, _ = self._step_once()
-        # Live pools stay above the floor; the inert SOM sub-pools are exactly
-        # 0 in phase A1 (zero flux), so they are checked for inertness instead.
+        # A2: all eight pools (incl. the live slow/passive SOM pools) stay above
+        # the 1 gC/m2 floor for a well-stocked column at a realistic dt.
         for name in new_state._fields:
             arr = getattr(new_state, name)
-            if name in ("C_som_slow", "C_som_passive"):
-                self.assertTrue(jnp.all(arr == 0.0),
-                                f"{name} should be inert (0) in A1")
-            else:
-                self.assertTrue(jnp.all(arr >= 1.0), f"{name} below floor")
+            self.assertTrue(jnp.all(arr >= 1.0), f"{name} below floor")
 
     def test_co2_flux_units(self):
         """CO2 flux should be in kgCO2/m2/s — typical magnitude ~1e-8 to 1e-6."""
@@ -814,11 +990,12 @@ class TestInitCarbonState(unittest.TestCase):
         cfg = _default_config(C_lab_init=50.0, C_som_init=5000.0)
         state = init_carbon_state((3,), cfg)
         npt.assert_allclose(state.C_lab, 50.0)
-        # A1: all of C_som_init seeds the active pool; slow/passive start at 0.
-        npt.assert_allclose(som_total(state), 5000.0)
-        npt.assert_allclose(state.C_som_active, 5000.0)
-        npt.assert_allclose(state.C_som_slow, 0.0)
-        npt.assert_allclose(state.C_som_passive, 0.0)
+        # A2: C_som_init is partitioned across the three pools by CENTURY
+        # fractions (0.03 / 0.32 / 0.65); som_total is preserved exactly.
+        npt.assert_allclose(som_total(state), 5000.0, rtol=1e-9)
+        npt.assert_allclose(state.C_som_active, 0.03 * 5000.0, rtol=1e-9)
+        npt.assert_allclose(state.C_som_slow, 0.32 * 5000.0, rtol=1e-9)
+        npt.assert_allclose(state.C_som_passive, 0.65 * 5000.0, rtol=1e-9)
 
     def test_woody_init_keeps_wood_pool(self):
         cfg = _default_config(woody=True, C_wood_init=8000.0)

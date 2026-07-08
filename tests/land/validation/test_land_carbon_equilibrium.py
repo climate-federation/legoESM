@@ -157,6 +157,15 @@ class TestSmokeIntegration(unittest.TestCase):
         self.assertTrue(np.isfinite(rec["gpp"]) and rec["gpp"] >= 0.0)
         for v in final_carbon:
             self.assertTrue(np.all(np.isfinite(np.asarray(v))))
+        # A2: the three live SOM pools are all positive after the analytic
+        # forward-substitution reset + verify segment, and the total exceeds the
+        # active pool alone (the slow/passive pools carry real stock).
+        for p in ("C_som_active", "C_som_slow", "C_som_passive"):
+            self.assertTrue(np.all(np.asarray(getattr(final_carbon, p)) > 0.0), p)
+        from legoesm.land.carbon.config import som_total
+        self.assertGreater(
+            float(np.asarray(som_total(final_carbon)).reshape(-1)[0]),
+            float(np.asarray(final_carbon.C_som_active).reshape(-1)[0]))
 
 
 if __name__ == "__main__":

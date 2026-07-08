@@ -1,9 +1,10 @@
 """Land carbon cycle: DifferLand prognostic model and seasonal cycle.
 
 DifferLand (Fang & Gentine, Columbia) — DALEC990-based:
-    6 carbon pools (labile, foliage, root, wood, litter, SOM) driven by a
-    light-use-efficiency GPP with temperature/moisture responses.  Phenology
-    follows DALEC990 Gaussian seasonal forcing.
+    8 carbon pools (labile, foliage, root, wood, litter, and a 3-pool CENTURY
+    SOM cascade: active/slow/passive) driven by a light-use-efficiency GPP with
+    temperature/moisture responses.  Phenology follows DALEC990 Gaussian
+    seasonal forcing.
 
 Seasonal cycle:
     Prescribed sinusoidal NEE with latitude-dependent amplitude and phase.
@@ -12,6 +13,7 @@ Seasonal cycle:
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -32,6 +34,18 @@ _SEASONAL_YEAR_DAYS = 365.0    # year length for the NEE seasonal phase [days]
 # ---------------------------------------------------------------------------
 _GC_TO_KG_CO2 = (44.0 / 12.0) * 1e-3   # gC -> kgCO2
 _SPD = 86400.0                            # seconds per day
+
+# ---------------------------------------------------------------------------
+# CENTURY-like SOM equilibrium partition (Parton et al. 1987; Koven et al. 2013)
+# ---------------------------------------------------------------------------
+# Steady-state stock FRACTIONS used to split ``C_som_init`` across the three SOM
+# pools at initialisation: the active pool is small and fast, the passive
+# (mineral-stabilised) pool holds the bulk.  The three sum to 1 so ``som_total``
+# equals ``C_som_init`` exactly (the partition moves carbon between pools, never
+# creates or destroys it).
+_SOM_INIT_FRAC_ACTIVE = 0.03
+_SOM_INIT_FRAC_SLOW = 0.32
+_SOM_INIT_FRAC_PASSIVE = 0.65
 
 # ---------------------------------------------------------------------------
 # Phenology offset polynomial coefficients (DALEC990)
@@ -200,6 +214,48 @@ def _temperate_modifier(
     return temp_factor * moist
 
 
+def _freeze_modifier(
+    T: jnp.ndarray,
+    config: CarbonConfig,
+) -> jnp.ndarray:
+    """Freeze suppression of soil decomposition, ``f_freeze`` in (0, 1].
+
+    Reuses the smooth sigmoid freezing characteristic of
+    ``soil_thermal.liquid_water_content`` (the unfrozen-liquid-water fraction
+    that microbial decomposition tracks) — NOT a re-derived curve::
+
+        f_freeze(T) = sigmoid((T - T_freeze) / som_freeze_width_K)
+
+    -> 1 for warm soil (T >> T_freeze, no suppression), -> 0 for frozen soil
+    (T << T_freeze, decomposition shut off), monotonically INCREASING in T and
+    bounded in (0, 1].  Frozen soils therefore retain their organic carbon (the
+    high-latitude / grassland SOC fix).  ``som_freeze_width_K`` is a fixed
+    NUMERICS half-width [K]; validated > 0 (a static Python float, so a bare
+    Python branch is safe — feature-gating exception).
+    """
+    w = config.som_freeze_width_K
+    if not w > 0.0:
+        raise ValueError(f"som_freeze_width_K must be > 0, got {w!r}.")
+    return jax.nn.sigmoid((T - constants.T_freeze) / w)
+
+
+def _som_decomp_modifier(
+    T: jnp.ndarray,
+    precip: jnp.ndarray,
+    config: CarbonConfig,
+) -> jnp.ndarray:
+    """SOM decomposition-rate modifier ``m = f_temp * f_moist * f_freeze``.
+
+    EXTENDS the shared litter/soil :func:`_temperate_modifier` (temperature Q10
+    + moisture) with the :func:`_freeze_modifier` freeze suppression, so cold /
+    frozen soils turn their organic matter over slowly.  Applied to all three
+    SOM cascade pools; the surface-litter path keeps the freeze-free
+    ``_temperate_modifier`` (fresh litter is not the deep freeze-protected SOC
+    reservoir this fix targets).
+    """
+    return _temperate_modifier(T, precip, config) * _freeze_modifier(T, config)
+
+
 # ===================================================================
 # Effective turnover for finite timestep
 # ===================================================================
@@ -235,7 +291,7 @@ def step_carbon_differland(
     tuple[CarbonState, jnp.ndarray]
     | tuple[CarbonState, jnp.ndarray, CarbonDiagnostics]
 ):
-    """Advance all six carbon pools by *dt* seconds.
+    """Advance all eight carbon pools by *dt* seconds.
 
     Parameters
     ----------
@@ -405,9 +461,6 @@ def step_carbon_differland(
     lit_to_som_demand = state.C_lit * _effective_rate(
         tempmod * config.decomp_rate, dt_days,
     )
-    R_het_som = state.C_som_active * _effective_rate(
-        tempmod * config.tor_som, dt_days,
-    )
     lit_total_demand = R_het_lit_demand + lit_to_som_demand  # gC/m2/day
     lit_net_avail = jnp.maximum(
         state.C_lit + (leaf_litter + root_litter) * dt_days, 0.0,
@@ -431,6 +484,46 @@ def step_carbon_differland(
     # C_som gains wood_to_som, and the atmosphere gains R_het_cwd (added to NEE).
     wood_to_som = config.cwd_humification_eff * wood_litter
     R_het_cwd = wood_litter - wood_to_som
+
+    # --- Multi-pool SOM cascade (active -> slow -> passive) -----------------
+    # SIGN CONVENTION: carbon INTO a pool is POSITIVE; every term below is walked
+    # against it.  Each SOM pool decomposes at its base rate ``k_X`` scaled by the
+    # shared modifier ``som_mod = f_temp * f_moist * f_freeze`` (temperature Q10 *
+    # moisture * FREEZE suppression).  Of that decomposition ``D_X`` a humified
+    # fraction transfers to the NEXT-SLOWER pool and the remainder respires to the
+    # atmosphere; there is NO back-transfer (lower-triangular, forward cascade):
+    #   active input  = lit_to_som + wood_to_som          (litter + CWD humif.)
+    #   slow   input  = f_active_to_slow  * D_active       (active -> slow)
+    #   passive input = f_slow_to_passive * D_slow         (slow -> passive)
+    # ``_effective_rate`` is the EXACT exponential-decay loss fraction over dt, so
+    # ``D_X * dt_days = C_X * (1 - (1 - som_mod*k_X)^dt_days) <= C_X``.  With every
+    # input >= 0 this guarantees each pool stays >= 0 WITHOUT clipping (the
+    # ``_soft_pos`` below is a defensive no-op for the SOM pools), so the SOM
+    # sub-column conserves to machine precision:
+    #   d(C_active + C_slow + C_passive) == (som_active_input - R_het_som) * dt.
+    # Frozen/cold soils have a SMALL ``som_mod`` (freeze suppression) -> small
+    # decomposition -> carbon accumulates, chiefly in the millennial passive pool
+    # = the high-latitude / grassland SOC fix
+    # (docs/land/multipool_som_phenology_plan.md).
+    som_mod = _som_decomp_modifier(T, precip, config)
+    D_active = state.C_som_active * _effective_rate(
+        som_mod * config.tor_som_active, dt_days)    # gC/m2/day (active out)
+    D_slow = state.C_som_slow * _effective_rate(
+        som_mod * config.tor_som_slow, dt_days)      # gC/m2/day (slow out)
+    D_passive = state.C_som_passive * _effective_rate(
+        som_mod * config.tor_som_passive, dt_days)   # gC/m2/day (passive out)
+    # Humification transfers to the next-slower pool (fraction of D_X, positive).
+    som_active_to_slow = config.f_active_to_slow * D_active
+    som_slow_to_passive = config.f_slow_to_passive * D_slow
+    # Heterotrophic respiration = the decomposition NOT transferred onward.  The
+    # three respiration terms sum to ``R_het_som`` (kept as this SUM so the
+    # r_het == r_het_lit + r_het_som + r_het_cwd identity and NEE still hold).
+    R_het_active = D_active - som_active_to_slow      # (1 - f_active_to_slow)*D_active
+    R_het_slow = D_slow - som_slow_to_passive         # (1 - f_slow_to_passive)*D_slow
+    R_het_passive = D_passive                         # passive fully respires
+    R_het_som = R_het_active + R_het_slow + R_het_passive
+    # Active-pool input: litter decomposition + humified coarse woody debris.
+    som_active_input = lit_to_som + wood_to_som
 
     # --- Pool updates (Euler, gC/m2/day rates * dt_days) -------------------
     # Hard non-negativity ``jnp.maximum(x, 0)``.  The iter-64 cap
@@ -462,15 +555,18 @@ def step_carbon_differland(
         C_lit=_soft_pos(
             state.C_lit + (leaf_litter + root_litter
                            - R_het_lit - lit_to_som) * dt_days),
-        # SOM cascade (phase A1, behaviour-preserving): all litter/CWD humified
-        # input and the R_het_som sink flow through the ACTIVE pool exactly as
-        # the former single C_som pool did.  The slow/passive pools are inert —
-        # carried through unchanged (zero flux) until the A2 forward cascade.
+        # SOM cascade (phase A2, live).  Each pool gains its input and loses its
+        # own total decomposition D_X; the slow/passive pools gain the humified
+        # transfer from the pool above.  Sign walk (carbon in = +):
+        #   active : + som_active_input (litter+CWD in), - D_active (out)
+        #   slow   : + som_active_to_slow (from active),  - D_slow (out)
+        #   passive: + som_slow_to_passive (from slow),   - D_passive (out)
         C_som_active=_soft_pos(
-            state.C_som_active + (lit_to_som + wood_to_som
-                                  - R_het_som) * dt_days),
-        C_som_slow=state.C_som_slow,
-        C_som_passive=state.C_som_passive,
+            state.C_som_active + (som_active_input - D_active) * dt_days),
+        C_som_slow=_soft_pos(
+            state.C_som_slow + (som_active_to_slow - D_slow) * dt_days),
+        C_som_passive=_soft_pos(
+            state.C_som_passive + (som_slow_to_passive - D_passive) * dt_days),
     )
 
     # --- NEE: positive = source to atmosphere ------------------------------
@@ -511,6 +607,9 @@ def step_carbon_differland(
         wood_litter=wood_litter,
         wood_to_som=wood_to_som,
         lit_to_som=lit_to_som,
+        som_active_loss=D_active,
+        som_slow_loss=D_slow,
+        som_passive_loss=D_passive,
         lai=LAI,
     )
     return new_state, co2_flux, diag
@@ -628,16 +727,20 @@ def init_carbon_state(
     use ``C_wood_init`` unchanged.
     """
     C_wood_init = config.C_wood_init if config.woody else 0.0
-    # Phase A1: all of ``C_som_init`` seeds the ACTIVE pool; the slow/passive
-    # pools start empty (inert this phase).  A2 will repartition ``C_som_init``
-    # across the three pools by CENTURY equilibrium fractions.
+    # Partition ``C_som_init`` across the three SOM pools by CENTURY-like
+    # steady-state stock fractions (active small, passive dominant; Parton et al.
+    # 1987, Koven et al. 2013).  The fractions sum to 1, so ``som_total`` of the
+    # returned state equals ``C_som_init`` exactly.  Seeding all three pools
+    # non-zero also lets the semi-analytic slow-pool solve infer each pool's
+    # turnover (its degenerate-column guard needs a non-zero loss flux).
+    C_som = config.C_som_init
     return CarbonState(
         C_lab=jnp.full(shape, config.C_lab_init),
         C_fol=jnp.full(shape, config.C_fol_init),
         C_root=jnp.full(shape, config.C_root_init),
         C_wood=jnp.full(shape, C_wood_init),
         C_lit=jnp.full(shape, config.C_lit_init),
-        C_som_active=jnp.full(shape, config.C_som_init),
-        C_som_slow=jnp.zeros(shape),
-        C_som_passive=jnp.zeros(shape),
+        C_som_active=jnp.full(shape, C_som * _SOM_INIT_FRAC_ACTIVE),
+        C_som_slow=jnp.full(shape, C_som * _SOM_INIT_FRAC_SLOW),
+        C_som_passive=jnp.full(shape, C_som * _SOM_INIT_FRAC_PASSIVE),
     )

@@ -30,76 +30,107 @@ class TestPoolFieldsGuard(unittest.TestCase):
 
 
 def _state(**kw):
-    # SOM slow/passive are inert (0) in phase A1; the analytic solve targets
-    # the active pool, so tests pass ``C_som_active=`` to set the SOM stock.
+    # A2: all three SOM pools are live and the analytic solve resets each of
+    # them, so they are seeded non-zero (a zero loss flux would trip the
+    # degenerate-column guard and leave that pool unchanged).
     d = dict(C_lab=100.0, C_fol=200.0, C_root=300.0,
              C_wood=1000.0, C_lit=400.0,
-             C_som_active=5000.0, C_som_slow=0.0, C_som_passive=0.0)
+             C_som_active=5000.0, C_som_slow=2000.0, C_som_passive=4000.0)
     d.update(kw)
     return CarbonState(**{k: jnp.array([v]) for k, v in d.items()})
+
+
+_CWD, _F_AS, _F_SP = 0.3, 0.3, 0.3
+
+
+def _fx(ncol=1, **over):
+    """Stationary mean-annual SlowPoolFluxes for the cascade solve.
+
+    Defaults (per column): a_wood=10, wood_litter=5, lit_to_som=20 and per-pool
+    SOM losses som_active_loss=10, som_slow_loss=5, som_passive_loss=3.
+    """
+    z = lambda v: jnp.full((ncol,), float(v))
+    d = dict(a_wood=10.0, wood_litter=5.0, lit_to_som=20.0,
+             som_active_loss=10.0, som_slow_loss=5.0, som_passive_loss=3.0)
+    d.update(over)
+    return SlowPoolFluxes(**{k: z(v) for k, v in d.items()})
+
+
+def _solve(st, fx, cwd=_CWD, f_as=_F_AS, f_sp=_F_SP):
+    return analytic_slow_pool_equilibrium(
+        st, fx, cwd_humification_eff=cwd,
+        f_active_to_slow=f_as, f_slow_to_passive=f_sp)
 
 
 class TestAnalyticSlowPoolEquilibrium(unittest.TestCase):
 
     def test_wood_equilibrium_is_input_over_rate(self):
         """C_wood_eq = C_wood * a_wood / wood_litter."""
-        st = _state(C_wood=1000.0)
-        fx = SlowPoolFluxes(
-            a_wood=jnp.array([10.0]), wood_litter=jnp.array([5.0]),
-            lit_to_som=jnp.array([20.0]), r_het_som=jnp.array([10.0]))
-        out = analytic_slow_pool_equilibrium(st, fx, cwd_humification_eff=0.3)
-        # 1000 * 10/5 = 2000
-        npt.assert_allclose(out.C_wood, 2000.0, rtol=1e-9)
+        out = _solve(_state(C_wood=1000.0), _fx())
+        npt.assert_allclose(out.C_wood, 2000.0, rtol=1e-9)  # 1000 * 10/5
 
-    def test_som_equilibrium_includes_humified_cwd(self):
-        """C_som_eq uses lit_to_som + cwd_humification_eff*a_wood as input."""
-        st = _state(C_som_active=5000.0)
-        fx = SlowPoolFluxes(
-            a_wood=jnp.array([10.0]), wood_litter=jnp.array([5.0]),
-            lit_to_som=jnp.array([20.0]), r_het_som=jnp.array([10.0]))
-        out = analytic_slow_pool_equilibrium(st, fx, cwd_humification_eff=0.3)
-        # som_in = 20 + 0.3*10 = 23; C_som_active_eq = 5000 * 23/10 = 11500
+    def test_active_equilibrium_includes_humified_cwd(self):
+        """C_active_eq uses lit_to_som + cwd*a_wood as input, som_active_loss out."""
+        out = _solve(_state(C_som_active=5000.0), _fx())
+        # i_active = 20 + 0.3*10 = 23; C_active_eq = 5000 * 23/10 = 11500.
         npt.assert_allclose(out.C_som_active, 11500.0, rtol=1e-9)
 
-    def test_reset_pool_is_a_fixed_point(self):
-        """At the analytic equilibrium, input == loss (steady state)."""
-        st = _state(C_som_active=5000.0, C_wood=1000.0)
-        fx = SlowPoolFluxes(
-            a_wood=jnp.array([12.0]), wood_litter=jnp.array([7.0]),
-            lit_to_som=jnp.array([15.0]), r_het_som=jnp.array([9.0]))
-        cwd = 0.3
-        out = analytic_slow_pool_equilibrium(st, fx, cwd_humification_eff=cwd)
-        # Wood: loss rate k = wood_litter/C_wood; at eq, k*C_wood_eq == a_wood.
+    def test_slow_and_passive_forward_substitution(self):
+        """Slow/passive equilibria cascade from the pool above:
+        C_slow_eq = C_slow * (f_as*i_active) / som_slow_loss;
+        C_passive_eq = C_passive * (f_sp*i_slow) / som_passive_loss."""
+        out = _solve(_state(C_som_slow=2000.0, C_som_passive=4000.0), _fx())
+        # i_active=23; i_slow=0.3*23=6.9; C_slow_eq=2000*6.9/5=2760.
+        npt.assert_allclose(out.C_som_slow, 2760.0, rtol=1e-9)
+        # i_passive=0.3*6.9=2.07; C_passive_eq=4000*2.07/3=2760.
+        npt.assert_allclose(out.C_som_passive, 2760.0, rtol=1e-9)
+
+    def test_every_pool_is_a_fixed_point(self):
+        """At the reset, each pool's inferred loss k_X*C_X_eq == its input I_X
+        (the forward-substitution fixed-point condition, all three SOM pools)."""
+        st = _state(C_wood=1000.0, C_som_active=5000.0,
+                    C_som_slow=2000.0, C_som_passive=4000.0)
+        fx = _fx(a_wood=12.0, wood_litter=7.0, lit_to_som=15.0,
+                 som_active_loss=9.0, som_slow_loss=4.0, som_passive_loss=2.5)
+        out = _solve(st, fx)
+        # Wood.
         k_wood = float(fx.wood_litter[0]) / float(st.C_wood[0])
         npt.assert_allclose(k_wood * float(out.C_wood[0]), float(fx.a_wood[0]),
                             rtol=1e-9)
-        # SOM: k*C_som_active_eq == som_in_eq (input).
-        k_som = float(fx.r_het_som[0]) / float(st.C_som_active[0])
-        som_in_eq = float(fx.lit_to_som[0]) + cwd * float(fx.a_wood[0])
-        npt.assert_allclose(k_som * float(out.C_som_active[0]), som_in_eq, rtol=1e-9)
+        # Active: input = lit_to_som + cwd*a_wood.
+        i_active = float(fx.lit_to_som[0]) + _CWD * float(fx.a_wood[0])
+        k_a = float(fx.som_active_loss[0]) / float(st.C_som_active[0])
+        npt.assert_allclose(k_a * float(out.C_som_active[0]), i_active, rtol=1e-9)
+        # Slow: input = f_as * i_active.
+        i_slow = _F_AS * i_active
+        k_s = float(fx.som_slow_loss[0]) / float(st.C_som_slow[0])
+        npt.assert_allclose(k_s * float(out.C_som_slow[0]), i_slow, rtol=1e-9)
+        # Passive: input = f_sp * i_slow.
+        i_passive = _F_SP * i_slow
+        k_p = float(fx.som_passive_loss[0]) / float(st.C_som_passive[0])
+        npt.assert_allclose(k_p * float(out.C_som_passive[0]), i_passive,
+                            rtol=1e-9)
 
     def test_fast_pools_unchanged(self):
-        st = _state()
-        fx = SlowPoolFluxes(
-            a_wood=jnp.array([10.0]), wood_litter=jnp.array([5.0]),
-            lit_to_som=jnp.array([20.0]), r_het_som=jnp.array([10.0]))
-        out = analytic_slow_pool_equilibrium(st, fx, cwd_humification_eff=0.3)
+        out = _solve(_state(), _fx())
         for f in ("C_lab", "C_fol", "C_root", "C_lit"):
-            npt.assert_allclose(getattr(out, f), getattr(st, f), rtol=0, atol=0)
+            npt.assert_allclose(getattr(out, f), getattr(_state(), f),
+                                rtol=0, atol=0)
 
-    def test_zero_loss_leaves_pool_unchanged(self):
-        """Zero loss flux (no inferable turnover) => pool left as-is, not an
-        artefact (0 or C/eps)."""
-        st = _state(C_wood=1234.0, C_som_active=6789.0)
-        # Zero loss but NON-zero input: no finite equilibrium -> leave unchanged.
-        fx = SlowPoolFluxes(
-            a_wood=jnp.array([5.0]), wood_litter=jnp.array([0.0]),
-            lit_to_som=jnp.array([7.0]), r_het_som=jnp.array([0.0]))
-        out = analytic_slow_pool_equilibrium(st, fx, cwd_humification_eff=0.3)
-        self.assertTrue(jnp.all(jnp.isfinite(out.C_wood)))
-        self.assertTrue(jnp.all(jnp.isfinite(out.C_som_active)))
+    def test_zero_loss_leaves_each_pool_unchanged(self):
+        """A per-pool zero loss flux (no inferable turnover) leaves THAT pool as
+        is, not an artefact (0 or C/eps); other pools still solve."""
+        st = _state(C_wood=1234.0, C_som_active=6789.0,
+                    C_som_slow=1111.0, C_som_passive=2222.0)
+        # Wood + slow have zero loss; active + passive solve normally.
+        fx = _fx(wood_litter=0.0, som_slow_loss=0.0)
+        out = _solve(st, fx)
+        for f in ("C_wood", "C_som_slow"):
+            self.assertTrue(jnp.all(jnp.isfinite(getattr(out, f))))
         npt.assert_allclose(out.C_wood, 1234.0, rtol=0, atol=0)
-        npt.assert_allclose(out.C_som_active, 6789.0, rtol=0, atol=0)
+        npt.assert_allclose(out.C_som_slow, 1111.0, rtol=0, atol=0)
+        # Active still solved: 6789 * 23/10 = 15614.7.
+        npt.assert_allclose(out.C_som_active, 6789.0 * 23.0 / 10.0, rtol=1e-9)
 
     def test_batched(self):
         st = CarbonState(
@@ -107,28 +138,56 @@ class TestAnalyticSlowPoolEquilibrium(unittest.TestCase):
             C_root=jnp.full((3,), 300.0), C_wood=jnp.full((3,), 1000.0),
             C_lit=jnp.full((3,), 400.0),
             C_som_active=jnp.full((3,), 5000.0),
-            C_som_slow=jnp.zeros((3,)), C_som_passive=jnp.zeros((3,)))
-        fx = SlowPoolFluxes(
-            a_wood=jnp.full((3,), 10.0), wood_litter=jnp.full((3,), 5.0),
-            lit_to_som=jnp.full((3,), 20.0), r_het_som=jnp.full((3,), 10.0))
-        out = analytic_slow_pool_equilibrium(st, fx, cwd_humification_eff=0.3)
-        self.assertEqual(out.C_som_active.shape, (3,))
+            C_som_slow=jnp.full((3,), 2000.0),
+            C_som_passive=jnp.full((3,), 4000.0))
+        out = _solve(st, _fx(ncol=3))
+        self.assertEqual(out.C_som_passive.shape, (3,))
         npt.assert_allclose(out.C_wood, 2000.0, rtol=1e-9)
+        npt.assert_allclose(out.C_som_passive, 2760.0, rtol=1e-9)
+
+    def test_cold_column_equilibrates_higher_than_warm(self):
+        """REALISM via the production solver: two columns with identical SOM
+        INPUTS (same a_wood/lit_to_som) but the cold column's smaller
+        decomposition (freeze + temperature suppression -> smaller per-pool loss
+        flux) equilibrates to MORE total SOC.  Losses scaled by the modifier
+        ratio m_cold/m_warm reproduce the cold column's slower turnover."""
+        from legoesm.land.carbon.carbon_cycle import _som_decomp_modifier
+        from legoesm.land.carbon.config import CarbonConfig, som_total
+        cfg = CarbonConfig(scheme="differland")
+        precip = jnp.array([cfg.precip_ref])
+        m_cold = float(_som_decomp_modifier(jnp.array([270.0]), precip, cfg)[0])
+        m_warm = float(_som_decomp_modifier(jnp.array([298.0]), precip, cfg)[0])
+        # Same stocks + same SOM inputs; per-pool loss flux scales with m
+        # (loss = C * m * k * yr).  Warm -> larger loss -> smaller equilibrium.
+        st = _state(C_som_active=5000.0, C_som_slow=2000.0, C_som_passive=4000.0)
+        base = dict(a_wood=10.0, wood_litter=5.0, lit_to_som=20.0)
+        warm = _solve(st, _fx(som_active_loss=10.0 * m_warm,
+                              som_slow_loss=5.0 * m_warm,
+                              som_passive_loss=3.0 * m_warm, **base))
+        cold = _solve(st, _fx(som_active_loss=10.0 * m_cold,
+                              som_slow_loss=5.0 * m_cold,
+                              som_passive_loss=3.0 * m_cold, **base))
+        self.assertGreater(float(som_total(cold)[0]), float(som_total(warm)[0]))
+        self.assertGreater(float(som_total(cold)[0]) / float(som_total(warm)[0]),
+                           10.0)
 
 
 def _const_diag(ncol, **over):
     """A stationary CarbonDiagnostics (per-day rates) with closed allocation.
 
-    Defaults: a_wood=10, wood_litter=5, lit_to_som=20, r_het_som=10 so the
-    analytic slow-pool reset is analytically checkable; allocation closes
-    (a_fol+a_lab+a_root+a_wood == max(npp,0)) with npp=10, r_auto=5.
+    Defaults: a_wood=10, wood_litter=5, lit_to_som=20 with per-pool SOM losses
+    som_active_loss=10, som_slow_loss=5, som_passive_loss=3 so the analytic
+    forward-substitution cascade reset is analytically checkable; allocation
+    closes (a_fol+a_lab+a_root+a_wood == max(npp,0)) with npp=10, r_auto=5.
     """
     z = lambda v: jnp.full((ncol,), float(v))
     d = dict(gpp=15.0, npp=10.0, r_maint=3.0, r_growth=2.0, r_auto=5.0,
              r_het_lit=0.0, r_het_som=10.0, r_het_cwd=0.0, r_het=10.0, nee=0.0,
              unmet_npp_deficit=0.0, a_fol=0.0, a_lab=0.0, a_root=0.0, a_wood=10.0,
              lab_release=0.0, leaf_litter=0.0, root_litter=0.0, wood_litter=5.0,
-             wood_to_som=1.5, lit_to_som=20.0, lai=4.0)
+             wood_to_som=1.5, lit_to_som=20.0,
+             som_active_loss=10.0, som_slow_loss=5.0, som_passive_loss=3.0,
+             lai=4.0)
     d.update(over)
     return CarbonDiagnostics(**{k: z(v) for k, v in d.items()})
 
@@ -148,7 +207,8 @@ class TestRunSemiAnalyticSpinup(unittest.TestCase):
             C_root=jnp.full((ncol,), 300.0), C_wood=jnp.full((ncol,), 1000.0),
             C_lit=jnp.full((ncol,), 400.0),
             C_som_active=jnp.full((ncol,), 5000.0),
-            C_som_slow=jnp.zeros((ncol,)), C_som_passive=jnp.zeros((ncol,)))
+            C_som_slow=jnp.full((ncol,), 2000.0),
+            C_som_passive=jnp.full((ncol,), 4000.0))
         state0 = jnp.zeros((ncol,))  # opaque dummy state
 
         def forcing_fn(doy, hour):
@@ -161,18 +221,21 @@ class TestRunSemiAnalyticSpinup(unittest.TestCase):
         return run_semi_analytic_spinup(
             step_fn, state0, carbon0, forcing_fn,
             n_spinup=3, n_verify=2, steps_per_year=steps_per_year, dt=dt,
-            cwd_humification_eff=0.3)
+            cwd_humification_eff=0.3, f_active_to_slow=0.3, f_slow_to_passive=0.3)
 
     def test_analytic_reset_and_shapes(self):
         _fs, fc, annual = self._run(ncol=1)
         # Wood: C_wood_eq = 1000 * a_wood/wood_litter = 1000 * 10/5 = 2000.
         npt.assert_allclose(np.asarray(fc.C_wood), 2000.0, rtol=1e-6)
-        # SOM: som_in = lit_to_som + cwd*a_wood = 20 + 0.3*10 = 23; loss 10.
-        #      C_som_active_eq = 5000 * 23/10 = 11500.
+        # Active: i_active = lit_to_som + cwd*a_wood = 20 + 0.3*10 = 23; loss 10.
+        #         C_som_active_eq = 5000 * 23/10 = 11500.
         npt.assert_allclose(np.asarray(fc.C_som_active), 11500.0, rtol=1e-6)
-        # Inert SOM sub-pools untouched (zero flux) in phase A1.
-        npt.assert_allclose(np.asarray(fc.C_som_slow), 0.0, atol=0.0)
-        npt.assert_allclose(np.asarray(fc.C_som_passive), 0.0, atol=0.0)
+        # Slow: i_slow = f_as*i_active = 0.3*23 = 6.9; loss 5.
+        #       C_som_slow_eq = 2000 * 6.9/5 = 2760.
+        npt.assert_allclose(np.asarray(fc.C_som_slow), 2760.0, rtol=1e-6)
+        # Passive: i_passive = f_sp*i_slow = 0.3*6.9 = 2.07; loss 3.
+        #          C_som_passive_eq = 4000 * 2.07/3 = 2760.
+        npt.assert_allclose(np.asarray(fc.C_som_passive), 2760.0, rtol=1e-6)
         # Fast pools untouched by the reset and frozen by the toy step.
         for f, v in (("C_lab", 100.0), ("C_fol", 200.0),
                      ("C_root", 300.0), ("C_lit", 400.0)):
@@ -213,7 +276,7 @@ class TestRunSemiAnalyticSpinupGuards(unittest.TestCase):
             state0=jnp.zeros((ncol,)), carbon0=carbon0,
             forcing_fn=lambda doy, hour: None,
             n_spinup=3, n_verify=2, steps_per_year=steps_per_year, dt=dt,
-            cwd_humification_eff=0.3)
+            cwd_humification_eff=0.3, f_active_to_slow=0.3, f_slow_to_passive=0.3)
         kw.update(over)
         return kw
 

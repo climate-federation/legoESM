@@ -18,6 +18,7 @@ __param_spec__ = {
             "C_som_init": "initial condition: carbon pool [gC/m2]",
             "C_wood_init": "initial condition: carbon pool [gC/m2]",
             "T_ref": "reference temperature [K]",
+            "som_freeze_width_K": "numerics: SOM freeze-suppression curve half-width [K]",
         },
         "params": {
             "Bday": {"units": "1", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
@@ -51,7 +52,11 @@ __param_spec__ = {
             "r_maint_wood": {"units": "1", "bounds": (1.65e-05, 0.00015), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "tor_litter": {"units": "1", "bounds": (0.00066, 0.006), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "tor_root": {"units": "1", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
-            "tor_som": {"units": "1", "bounds": (1.65e-06, 8e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "bulk-soil MRT decades-century (Jobbagy & Jackson 2000; He et al. 2016)", "shape": None},
+            "tor_som_active": {"units": "1/day", "bounds": (3e-04, 3e-03), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CENTURY/CLM4.5 active-SOM MRT ~1-5 yr (Parton et al. 1987; Koven et al. 2013)", "shape": None, "legacy_name": "tor_som"},
+            "tor_som_slow": {"units": "1/day", "bounds": (4e-05, 2e-04), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CENTURY/CLM4.5 slow-SOM MRT ~20-50 yr (Parton et al. 1987; Koven et al. 2013)", "shape": None},
+            "tor_som_passive": {"units": "1/day", "bounds": (1.5e-06, 1e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CENTURY/CLM4.5 passive-SOM MRT ~500-1000 yr (Parton et al. 1987; Koven et al. 2013)", "shape": None},
+            "f_active_to_slow": {"units": "1", "bounds": (0.1, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CENTURY inter-pool humification fraction ~0.1-0.5 (Parton et al. 1987)", "shape": None},
+            "f_slow_to_passive": {"units": "1", "bounds": (0.1, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CENTURY inter-pool humification fraction ~0.1-0.5 (Parton et al. 1987)", "shape": None},
             "tor_wood": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
         },
     },
@@ -93,15 +98,35 @@ class CarbonConfig(NamedTuple):
     tor_wood: float = 1e-4
     tor_root: float = 1e-3
     tor_litter: float = 2e-3
-    tor_som: float = 4e-5         # Bulk SOM turnover [day^-1] (~68 yr at
-    # T_ref).  Raised from the old 5e-6 (~550 yr): a single effective soil-C
-    # pool at millennial turnover, driven by realistic litter+CWD inputs from
-    # a productive canopy, equilibrated to an unphysically large stock
-    # (tropical SOM ~46 kgC/m2 at true equilibrium vs observed ~10-15).  A
-    # ~68 yr reference residence time -> ~17 yr in warm tropical soil via the
-    # Q10 below, matching the fast bulk (active+slow) turnover of warm-wet
-    # topsoil; the passive millennial fraction is not resolved by a single
-    # pool (see the multi-pool follow-up in docs/land/carbon_equilibrium_audit).
+    # --- Multi-pool SOM turnover [day^-1] (CENTURY / CLM4.5 topology) ---
+    # Three soil-organic-matter pools of increasing residence time in a FORWARD
+    # cascade active -> slow -> passive (Parton et al. 1987; Koven et al. 2013):
+    # each pool's decomposition partly humifies to the next-slower pool and
+    # partly respires to the atmosphere.  These are the BASE (reference-T,
+    # unfrozen) turnover rates; the realised rate is scaled by the shared
+    # modifier f_temp * f_moist * f_freeze (see carbon_cycle._som_decomp_modifier)
+    # so cold/frozen soils turn SOM over slowly and RETAIN carbon.
+    #   active  : MRT ~3 yr   (1-5 yr)     -- fast, unprotected topsoil carbon
+    #   slow    : MRT ~25 yr  (20-50 yr)   -- physically protected carbon
+    #   passive : MRT ~600 yr (500-1000 yr)-- mineral-stabilised carbon
+    # Replaces the former single bulk ``tor_som`` (legacy_name preserved in the
+    # param spec): a single ~68-yr pool with no freeze control could not hold the
+    # deep, freeze-protected high-latitude / grassland SOC that observations show
+    # (docs/land/multipool_som_phenology_plan.md).
+    tor_som_active: float = 9e-4
+    tor_som_slow: float = 1.1e-4
+    tor_som_passive: float = 4.5e-6
+    # Inter-pool humification (transfer) fractions: of a pool's decomposition,
+    # this fraction moves to the next-slower pool; the remainder respires.
+    # CENTURY microbial/stabilisation efficiencies span ~0.1-0.5.
+    f_active_to_slow: float = 0.30
+    f_slow_to_passive: float = 0.30
+    # Half-width [K] of the smooth SOM freeze-suppression curve
+    # f_freeze = sigmoid((T - T_freeze) / som_freeze_width_K): warm soil -> 1
+    # (no suppression), frozen soil -> 0 (decomposition shut off, carbon
+    # retained).  A fixed NUMERICS smoothing width (never trained), mirroring
+    # soil_thermal.freeze_curve_width_K.
+    som_freeze_width_K: float = 2.0
     decomp_rate: float = 5e-4     # Litter -> SOM transfer [day^-1]
     # Coarse-woody-debris humification efficiency: the fraction of wood
     # turnover that becomes stable SOM.  The remainder respires to the
@@ -159,11 +184,10 @@ class CarbonState(NamedTuple):
     Units: gC/m2.
 
     Soil organic matter is resolved as three pools of increasing turnover time
-    (CENTURY / CLM4.5 topology).  **Phase A1 is behaviour-preserving**: only
-    ``C_som_active`` carries flux (exactly as the former single ``C_som`` pool
-    did); ``C_som_slow`` / ``C_som_passive`` are INERT placeholders — initialised
-    to 0 and receiving/emitting zero flux — for the forward-cascade dynamics
-    added in phase A2.  Use :func:`som_total` for any total-SOM context.
+    (CENTURY / CLM4.5 topology) in a FORWARD cascade active -> slow -> passive
+    (phase A2, live): litter decomposition + coarse-woody-debris humification
+    feed the active pool; each pool's decomposition partly humifies to the next
+    pool and partly respires.  Use :func:`som_total` for any total-SOM context.
     """
     C_lab: jax.Array     # Labile carbon
     C_fol: jax.Array     # Foliar carbon
@@ -171,8 +195,8 @@ class CarbonState(NamedTuple):
     C_wood: jax.Array    # Wood carbon
     C_lit: jax.Array     # Litter (dead foliage + roots)
     C_som_active: jax.Array   # Active soil organic matter (fast turnover, ~1-5 yr)
-    C_som_slow: jax.Array     # Slow soil organic matter (~20-50 yr; INERT in A1)
-    C_som_passive: jax.Array  # Passive soil organic matter (~500-1000 yr; INERT in A1)
+    C_som_slow: jax.Array     # Slow soil organic matter (~20-50 yr)
+    C_som_passive: jax.Array  # Passive soil organic matter (~500-1000 yr)
 
 
 def som_total(state: CarbonState) -> jax.Array:
@@ -204,6 +228,11 @@ class CarbonDiagnostics(NamedTuple):
         r_het == r_het_lit + r_het_som + r_het_cwd
         a_fol + a_lab + a_root + a_wood == max(npp, 0)   (allocation closes)
         npp == gpp - r_auto
+        r_het_som == (1 - f_active_to_slow)*som_active_loss
+                     + (1 - f_slow_to_passive)*som_slow_loss + som_passive_loss
+    ``som_active_loss``/``som_slow_loss``/``som_passive_loss`` are each pool's
+    TOTAL decomposition D_X [gC/m2/day] (transfer to the next pool + respiration);
+    the semi-analytic slow-pool solve reads them to infer each pool's turnover.
     """
     gpp: jax.Array          # Gross primary production
     npp: jax.Array          # Net primary production (gpp - r_auto; may be <0)
@@ -226,4 +255,7 @@ class CarbonDiagnostics(NamedTuple):
     wood_litter: jax.Array  # Wood turnover (total leaving the wood pool)
     wood_to_som: jax.Array  # Humified fraction of wood turnover -> SOM
     lit_to_som: jax.Array   # Litter -> SOM (decomposition)
+    som_active_loss: jax.Array   # Active SOM total decomposition D_active
+    som_slow_loss: jax.Array     # Slow SOM total decomposition D_slow
+    som_passive_loss: jax.Array  # Passive SOM total decomposition D_passive
     lai: jax.Array          # Leaf area index (C_fol / LCMA)

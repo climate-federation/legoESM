@@ -19,8 +19,13 @@ Given a spun-up pool ``C`` and its stationary annual input ``I_annual`` and loss
 
     C_eq = I_annual / k = C * (I_annual / loss_annual).
 
-The DifferLand slow pools are wood (~decades) and SOM (~centuries); the fast
-pools (labile/foliage/root/litter, sub-decadal) equilibrate within the
+The DifferLand slow pools are wood (~decades) and the 3-pool SOM cascade
+active/slow/passive (~yrs / ~decades / ~centuries).  Because the SOM transfer
+matrix is lower-triangular (forward cascade active->slow->passive, no
+back-transfer), the coupled steady state is exact FORWARD SUBSTITUTION: solve
+the active pool, feed its equilibrium transfer into the slow pool, then the
+slow transfer into the passive pool (:func:`analytic_slow_pool_equilibrium`).
+The fast pools (labile/foliage/root/litter, sub-decadal) equilibrate within the
 transient and are left untouched.
 """
 
@@ -53,33 +58,52 @@ class SlowPoolFluxes(NamedTuple):
     """Stationary mean-annual carbon fluxes for the slow-pool analytic solve.
 
     All fields are per-column arrays (or scalars) in [gC/m2/yr], taken as the
-    mean over the final stationary year(s) of the transient spin-up.
+    total over the final stationary year of the transient spin-up.  The three
+    ``som_*_loss`` fields are each SOM pool's TOTAL decomposition ``D_X``
+    (transfer to the next pool + respiration), used to infer that pool's
+    turnover for the forward-substitution cascade equilibrium.
     """
-    a_wood: jnp.ndarray       # NPP allocated to wood  (wood input)
-    wood_litter: jnp.ndarray  # wood turnover          (wood loss)
-    lit_to_som: jnp.ndarray   # litter -> SOM          (SOM input from litter)
-    r_het_som: jnp.ndarray    # SOM heterotrophic resp (SOM loss)
+    a_wood: jnp.ndarray            # NPP allocated to wood   (wood input)
+    wood_litter: jnp.ndarray       # wood turnover           (wood loss)
+    lit_to_som: jnp.ndarray        # litter -> active SOM    (active input from litter)
+    som_active_loss: jnp.ndarray   # active SOM decomposition D_active (active loss)
+    som_slow_loss: jnp.ndarray     # slow SOM decomposition   D_slow   (slow loss)
+    som_passive_loss: jnp.ndarray  # passive SOM decomposition D_passive (passive loss)
 
 
 def analytic_slow_pool_equilibrium(
     carbon_state: CarbonState,
     fluxes: SlowPoolFluxes,
     cwd_humification_eff: float,
+    f_active_to_slow: float,
+    f_slow_to_passive: float,
     eps: float = 1e-9,
 ) -> CarbonState:
-    """Reset the slow pools (wood, active SOM) of *carbon_state* to their
-    analytic linear-pool steady state given stationary mean-annual *fluxes*.
+    """Reset the slow pools (wood + the 3-pool SOM cascade) of *carbon_state* to
+    their analytic linear steady state given stationary mean-annual *fluxes*.
 
-    Wood:  loss = wood_litter = k_wood * C_wood, input = a_wood, so
-           ``C_wood_eq = C_wood * a_wood / wood_litter``.
-    SOM :  at wood equilibrium the wood -> SOM humified input is
-           ``cwd_humification_eff * a_wood`` (wood in == out), so the total SOM
-           input is ``lit_to_som + cwd_humification_eff*a_wood``; with
-           loss = r_het_som = k_som * C_som_active,
-           ``C_som_active_eq = C_som_active * som_input_eq / r_het_som``.
+    The SOM transfer matrix is LOWER-TRIANGULAR (forward cascade, no
+    back-transfer), so the coupled steady state is exact FORWARD SUBSTITUTION —
+    no singular 3x3 inverse.  Each pool's turnover ``k_X`` is inferred from its
+    spun-up loss/stock (``k_X = D_X / C_X``), so the modifier (temperature *
+    moisture * freeze) baked into the spun-up loss is carried through exactly:
 
-    Phase A1: only the ACTIVE SOM pool receives flux, so only ``C_som_active``
-    is reset; the inert slow/passive pools are left unchanged (still 0).
+    Wood:    ``C_wood_eq = C_wood * a_wood / wood_litter``.
+    Active:  at wood equilibrium the humified wood input is
+             ``cwd_humification_eff * a_wood`` (wood in == out), so
+             ``I_active = lit_to_som + cwd_humification_eff*a_wood`` and
+             ``C_active_eq = C_active * I_active / som_active_loss``.
+             (at equilibrium the active LOSS == ``I_active``.)
+    Slow:    input = ``f_active_to_slow * I_active`` (the transfer out of the
+             equilibrated active pool), so
+             ``C_slow_eq = C_slow * (f_active_to_slow*I_active) / som_slow_loss``.
+    Passive: input = ``f_slow_to_passive * (f_active_to_slow*I_active)``
+             (transfer out of the equilibrated slow pool), so
+             ``C_passive_eq = C_passive * I_passive / som_passive_loss``.
+
+    Each ``C_X_eq`` is a TRUE fixed point of the cascade: by construction the new
+    loss ``k_X * C_X_eq`` equals the new input ``I_X`` per pool (verified by the
+    drift-> 0 verification segment and the fixed-point unit test).
 
     A pool whose LOSS flux is ~0 (a dead/collapsed or masked column) has no
     inferable turnover ``k``, hence no finite analytic equilibrium, so it is
@@ -89,34 +113,64 @@ def analytic_slow_pool_equilibrium(
     Parameters
     ----------
     carbon_state : CarbonState
-        The spun-up state (fast pools + wood already ~stationary).
+        The spun-up state (fast pools + wood + SOM pools already ~stationary in
+        turnover, i.e. each ``som_*_loss`` reflects the true turnover).
     fluxes : SlowPoolFluxes
         Stationary mean-annual slow-pool fluxes [gC/m2/yr].
     cwd_humification_eff : float
         Fraction of wood turnover that humifies to SOM (``CarbonConfig``).
+    f_active_to_slow, f_slow_to_passive : float
+        Inter-pool humification fractions (``CarbonConfig``) that set the
+        cascade transfers active->slow->passive.
     eps : float
         Threshold below which a loss flux is treated as ~0 (pool left as is).
 
     Returns
     -------
     CarbonState
-        A copy of *carbon_state* with ``C_wood`` and ``C_som_active`` set to
-        their analytic equilibrium (where the loss flux is > ``eps``); all other
-        pools (fast pools + inert slow/passive SOM) unchanged.
+        A copy of *carbon_state* with ``C_wood``, ``C_som_active``,
+        ``C_som_slow`` and ``C_som_passive`` set to their analytic equilibrium
+        (per-pool, only where that pool's loss flux is > ``eps``); the fast
+        pools unchanged.
     """
     C_wood_eq = jnp.where(
         fluxes.wood_litter > eps,
         carbon_state.C_wood * fluxes.a_wood / jnp.maximum(fluxes.wood_litter, eps),
         carbon_state.C_wood,
     )
+    # Active pool: input = litter->SOM + humified CWD (at wood equilibrium).
     wood_to_som_eq = cwd_humification_eff * fluxes.a_wood
-    som_in_eq = fluxes.lit_to_som + wood_to_som_eq
+    i_active = fluxes.lit_to_som + wood_to_som_eq
     C_som_active_eq = jnp.where(
-        fluxes.r_het_som > eps,
-        carbon_state.C_som_active * som_in_eq / jnp.maximum(fluxes.r_het_som, eps),
+        fluxes.som_active_loss > eps,
+        carbon_state.C_som_active * i_active
+        / jnp.maximum(fluxes.som_active_loss, eps),
         carbon_state.C_som_active,
     )
-    return carbon_state._replace(C_wood=C_wood_eq, C_som_active=C_som_active_eq)
+    # Slow pool: input = the humified transfer out of the equilibrated active
+    # pool (at active equilibrium its total loss == i_active).
+    i_slow = f_active_to_slow * i_active
+    C_som_slow_eq = jnp.where(
+        fluxes.som_slow_loss > eps,
+        carbon_state.C_som_slow * i_slow
+        / jnp.maximum(fluxes.som_slow_loss, eps),
+        carbon_state.C_som_slow,
+    )
+    # Passive pool: input = the humified transfer out of the equilibrated slow
+    # pool (at slow equilibrium its total loss == i_slow).
+    i_passive = f_slow_to_passive * i_slow
+    C_som_passive_eq = jnp.where(
+        fluxes.som_passive_loss > eps,
+        carbon_state.C_som_passive * i_passive
+        / jnp.maximum(fluxes.som_passive_loss, eps),
+        carbon_state.C_som_passive,
+    )
+    return carbon_state._replace(
+        C_wood=C_wood_eq,
+        C_som_active=C_som_active_eq,
+        C_som_slow=C_som_slow_eq,
+        C_som_passive=C_som_passive_eq,
+    )
 
 
 def _total_carbon(carbon_state: CarbonState) -> jnp.ndarray:
@@ -162,6 +216,8 @@ def run_semi_analytic_spinup(
     steps_per_year: int,
     dt: float,
     cwd_humification_eff: float,
+    f_active_to_slow: float,
+    f_slow_to_passive: float,
 ):
     """Run a verified semi-analytic soil-carbon spin-up (Xia et al. 2012, GMD).
 
@@ -204,6 +260,9 @@ def run_semi_analytic_spinup(
     cwd_humification_eff : float
         Fraction of wood turnover humified to SOM (``CarbonConfig``), for the
         analytic SOM-input balance.
+    f_active_to_slow, f_slow_to_passive : float
+        Inter-pool humification fractions (``CarbonConfig``) that drive the
+        forward-substitution active->slow->passive cascade equilibrium.
 
     Returns
     -------
@@ -291,10 +350,13 @@ def run_semi_analytic_spinup(
         a_wood=annual_spin["a_wood"][-1],
         wood_litter=annual_spin["wood_litter"][-1],
         lit_to_som=annual_spin["lit_to_som"][-1],
-        r_het_som=annual_spin["r_het_som"][-1],
+        som_active_loss=annual_spin["som_active_loss"][-1],
+        som_slow_loss=annual_spin["som_slow_loss"][-1],
+        som_passive_loss=annual_spin["som_passive_loss"][-1],
     )
     carbon_eq = analytic_slow_pool_equilibrium(
-        carbon_spun, fluxes, cwd_humification_eff)
+        carbon_spun, fluxes, cwd_humification_eff,
+        f_active_to_slow, f_slow_to_passive)
 
     # --- Phase 3: verification segment from the analytic equilibrium ---
     (final_state, final_carbon), annual_verify = jax.lax.scan(
