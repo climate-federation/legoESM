@@ -323,7 +323,11 @@ def main() -> int:
                 else 0),
         decomposition="band" if nd > 1 else "none",
         solver_variant=model.config.barotropic.barotropic_solver,
-        cells_per_rank=(n_lat // nd) * args.n_lon * args.nlev,
+        # cells_per_rank is per PROCESS (n_ranks semantics); the per-device
+        # share lives in extra.cells_per_device — a single-process 4-device
+        # SPMD run has 1 rank owning ALL cells (codex finding 3).
+        cells_per_rank=(n_lat * args.n_lon * args.nlev)
+        // max(jax.process_count(), 1),
         scaling_kind=args.mode,
         extra={
             "steps": args.steps,
@@ -331,6 +335,7 @@ def main() -> int:
             "multicontroller": bool(args.multicontroller),
             "parity_gate": bool(args.parity_gate),
             "check_conservation": bool(args.check_conservation),
+            "cells_per_device": (n_lat // nd) * args.n_lon * args.nlev,
         },
     ))
     # Multi-controller: every process times the same program; process 0 owns

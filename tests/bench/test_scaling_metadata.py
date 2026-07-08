@@ -290,6 +290,21 @@ def test_launcher_detection_priority(monkeypatch):
     assert md.detect_launcher() == "slurm"
 
 
+def test_host_staged_semantics_gated_on_mpi4jax_transport(monkeypatch):
+    # A route-B NCCL (or intra-process xla-local) GPU row has NO mpi4jax halo
+    # to host-stage: neither gpu_direct_active nor host_staged_halo may fire
+    # (codex: an NCCL row must not look like a broken host-staged MPI row).
+    monkeypatch.delenv("MPI4JAX_USE_CUDA_MPI", raising=False)
+    monkeypatch.setattr(md, "mpi4jax_cuda_support", lambda: False)
+    for t in ("nccl", "gloo", "xla-local", "none"):
+        g = md.gpu_direct_mode(backend="gpu", transport=t)
+        assert g["gpu_direct_active"] is False, t
+        assert g["host_staged_halo"] is False, t
+    # Default transport (mpi4jax) keeps the fail-loud host-staged semantics.
+    g = md.gpu_direct_mode(backend="gpu")
+    assert g["host_staged_halo"] is True
+
+
 def test_validate_catches_missing_v2_keys():
     for k in ("transport", "virtual_cpu_devices", "launcher"):
         rec = _record()

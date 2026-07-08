@@ -215,13 +215,18 @@ def main() -> int:
         n_gpus=(nd if jax.default_backend() in ("gpu", "cuda", "rocm")
                 else 0),
         decomposition="band" if nd > 1 else "none",
-        cells_per_rank=(n_lat // nd) * args.n_lon * args.nlev,
+        # cells_per_rank is per PROCESS (n_ranks semantics); the per-device
+        # share lives in extra.cells_per_device — a single-process 4-device
+        # SPMD run has 1 rank owning ALL cells (codex finding 3).
+        cells_per_rank=(n_lat * args.n_lon * args.nlev)
+        // max(jax.process_count(), 1),
         scaling_kind=args.mode,
         extra={
             "physics": args.physics,
             "steps": args.steps,
             "warmup": args.warmup,
             "multicontroller": bool(args.multicontroller),
+            "cells_per_device": (n_lat // nd) * args.n_lon * args.nlev,
         },
     ))
     # Multi-controller: every process times the same program; process 0 owns

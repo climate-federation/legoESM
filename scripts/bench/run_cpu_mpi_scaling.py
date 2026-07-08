@@ -1287,6 +1287,12 @@ def write_result_json(
         n_levels=result.n_levels,
         precision=result.precision,
         n_ranks=_md_n_ranks,
+        # Non-cs-spmd multi-rank = route-A mpi4jax halos; pin the transport
+        # so a run that also initialized jax.distributed (process_count ==
+        # world size) cannot auto-resolve to nccl/gloo (codex finding 1).
+        # cs-spmd (route-B) keeps auto-resolution.
+        transport=("mpi4jax" if (not cs_spmd and result.n_ranks > 1)
+                   else None),
         n_gpus=(result.n_ranks
                 if payload["backend"] in ("gpu", "cuda", "rocm") else 0),
         decomposition=result.decomposition,

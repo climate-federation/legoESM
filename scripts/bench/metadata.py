@@ -224,7 +224,9 @@ def resolve_transport(
     return "none"
 
 
-def gpu_direct_mode(backend: str | None = None) -> dict[str, Any]:
+def gpu_direct_mode(
+    backend: str | None = None, transport: str = "mpi4jax"
+) -> dict[str, Any]:
     """Device-direct MPI configuration for the record.
 
     ``gpu_direct_active`` is ``True`` ONLY when a GPU backend is live, the
@@ -233,17 +235,24 @@ def gpu_direct_mode(backend: str | None = None) -> dict[str, Any]:
     silently host-staged one.  ``host_staged_halo`` flags the dangerous case: a
     GPU run whose halos are NOT device-direct (a scaling bug hiding as a valid
     row).  On CPU/TPU the toggle is moot, so both are ``False``.
+
+    Both flags describe the **mpi4jax halo path only**: on any other
+    ``transport`` (route-B NCCL, gloo, intra-process ``xla-local``, serial)
+    there IS no mpi4jax halo to host-stage, so a GPU row must not be flagged
+    ``host_staged_halo`` (codex: an NCCL row would otherwise look like a
+    broken MPI row).  The raw request/support facts stay recorded verbatim.
     """
     b = (backend or detect_backend()).lower()
     on_gpu = b in _GPU_BACKENDS
     requested = _env_flag_true(GPU_DIRECT_ENV)
     cuda = mpi4jax_cuda_support()
     device_direct = bool(requested and cuda is True)
+    mpi4jax_halo = transport == "mpi4jax"
     return {
         "gpu_direct_requested": requested,
         "mpi4jax_cuda_support": cuda,
-        "gpu_direct_active": bool(on_gpu and device_direct),
-        "host_staged_halo": bool(on_gpu and not device_direct),
+        "gpu_direct_active": bool(on_gpu and mpi4jax_halo and device_direct),
+        "host_staged_halo": bool(on_gpu and mpi4jax_halo and not device_direct),
     }
 
 
@@ -301,6 +310,9 @@ def scaling_metadata(
     backend = detect_backend()
     device_count = _jax_count("device_count", -1)
     process_count = _jax_count("process_count", 1)
+    # Resolve the transport BEFORE gpu_direct_mode: host_staged_halo /
+    # gpu_direct_active are mpi4jax-halo semantics and must not fire on a
+    # route-B NCCL / xla-local / serial row (codex finding 2).
     # ``n_ranks`` = number of MPI processes.  Default to the auto-detected
     # process count so a single-process SPMD run (1 process, N GPUs) records
     # ``n_ranks=1`` (truthful) while the device parallelism lives in
@@ -310,6 +322,13 @@ def scaling_metadata(
         n_ranks = process_count
     if devices_per_rank is None and device_count > 0 and process_count > 0:
         devices_per_rank = device_count // process_count
+    resolved_transport = resolve_transport(
+        transport,
+        n_ranks=int(n_ranks),
+        process_count=process_count,
+        device_count=device_count,
+        backend=backend,
+    )
 
     md: dict[str, Any] = {
         "schema_version": METADATA_SCHEMA_VERSION,
@@ -335,20 +354,14 @@ def scaling_metadata(
         # --- runtime facts (auto-detected) ---
         "backend": backend,
         "precision_knobs": precision_knobs(),
-        "transport": resolve_transport(
-            transport,
-            n_ranks=int(n_ranks),
-            process_count=process_count,
-            device_count=device_count,
-            backend=backend,
-        ),
+        "transport": resolved_transport,
         "virtual_cpu_devices": detect_virtual_cpu_devices(backend),
         "launcher": detect_launcher(),
         "hostname": os.environ.get("HOSTNAME")
         or os.environ.get("SLURMD_NODENAME", ""),
         "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
     }
-    md.update(gpu_direct_mode(backend))
+    md.update(gpu_direct_mode(backend, transport=resolved_transport))
     if partition_metrics:
         md["partition_metrics"] = partition_metrics
     if extra:

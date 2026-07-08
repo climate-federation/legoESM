@@ -2356,6 +2356,12 @@ def write_json(
             n_levels=r.n_levels,
             precision=r.precision,
             n_ranks=n_ranks_true,
+            # n_ranks_true>1 is by contract the route-A MPI path (mpi4jax
+            # halos) — pin the transport explicitly, because a multi-node
+            # route-A run may ALSO have jax.distributed initialized
+            # (process_count == n_ranks), which would auto-resolve to
+            # nccl/gloo and mislabel the fabric (codex finding 1).
+            transport=("mpi4jax" if (n_ranks_true or 1) > 1 else None),
             n_gpus=r.n_gpus,
             decomposition=os.environ.get("LEGOESM_DECOMPOSITION")
             or _decomp(r.grid_type),
