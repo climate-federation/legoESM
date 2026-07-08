@@ -39,11 +39,26 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.land.leaf_biophysics import (
+    GAMMA_STAR25_UMOL_MOL,
+    HA_GAMMA,
+    HA_KC,
+    HA_KO,
+    KC25_UMOL_MOL,
+    KO25_UMOL_MOL,
+    O2_UMOL_MOL,
+    T_REF_K,
+    arrhenius_factor,
+    peaked_arrhenius_factor,
+)
 
 
-# --- gas constant / reference temperatures ---
-_R = 8.314          # [J K-1 mol-1] universal gas constant
-_T_REF = 298.15     # [K] reference temperature (25 degC)
+# --- reference temperatures ---
+# Gas constant + 25 degC reference come from leaf_biophysics (shared with the
+# big-leaf carbon/stomata FvCB path); the gas constant was previously hardcoded
+# as 8.314 here, which both drifted from constants.R_universal and duplicated
+# the sibling path's Arrhenius helper.
+_T_REF = T_REF_K    # [K] reference temperature (25 degC)
 _T0_C = 25.0        # [degC] reference for dark respiration
 
 # --- quadratic curvatures (CLM5 default / Sellers 1996b / Bonan ch. 11) ---
@@ -56,16 +71,16 @@ _THETA_IP_C4 = 0.95    # C4 stage-2 colimitation
 # --- C3 photosystem (Bonan eq. 11.23, CLM5 §2.9) ---
 _PHI_PSII = 0.85       # PSII quantum yield
 
-# --- Bernacchi (2001) Rubisco kinetics at 25 degC ---
-_KC25 = 404.9      # [umol mol-1] Michaelis constant for CO2
-_KO25 = 278.4      # [mmol mol-1] Michaelis constant for O2
-_GS25 = 42.75      # [umol mol-1] CO2 compensation point Gamma_star at 25 degC
-_OI = 209.0        # [mmol mol-1] intercellular O2 (atmospheric)
+# --- Bernacchi (2001) Rubisco kinetics at 25 degC (shared block, umol/mol) ---
+_KC25 = KC25_UMOL_MOL          # [umol mol-1] Michaelis constant for CO2
+_KO25 = KO25_UMOL_MOL          # [umol mol-1] Michaelis constant for O2
+_GS25 = GAMMA_STAR25_UMOL_MOL  # [umol mol-1] Gamma_star at 25 degC
+_OI = O2_UMOL_MOL              # [umol mol-1] intercellular O2 (atmospheric)
 
 # --- activation/deactivation energies [J mol-1] (Bernacchi 2001 + Kattge & Knorr 2007) ---
-_HA_KC = 79430.0
-_HA_KO = 36380.0
-_HA_GS = 37830.0
+_HA_KC = HA_KC
+_HA_KO = HA_KO
+_HA_GS = HA_GAMMA
 _HA_VCMAX = 72000.0    # Kattge & Knorr 2007 (CLM5 Table 2.9.2)
 _HA_JMAX = 50000.0     # Kattge & Knorr 2007 (CLM5 Table 2.9.2)
 _HD_VCMAX = 200000.0
@@ -111,16 +126,21 @@ _TF_C_HI = 45.0
 # ---------------------------------------------------------------------------
 
 def _arrhenius(Tf: jax.Array, dHa: float) -> jax.Array:
-    """Arrhenius temperature response (Bonan eq. 11.34), normalised to 1 at 25 degC."""
-    return jnp.exp(dHa / (_T_REF * _R) * (1.0 - _T_REF / Tf))
+    """Arrhenius temperature response (Bonan eq. 11.34), normalised to 1 at 25 degC.
+
+    Thin wrapper over the shared ``leaf_biophysics.arrhenius_factor`` so the
+    two-leaf and big-leaf photosynthesis paths share one Arrhenius definition
+    and one gas constant.
+    """
+    return arrhenius_factor(Tf, dHa)
 
 
 def _arrhenius_peaked(Tf: jax.Array, dHa: float, dHd: float, dS: jax.Array) -> jax.Array:
-    """Peaked Arrhenius (Bonan eq. 11.34 * 11.36), normalised to 1 at 25 degC."""
-    f = _arrhenius(Tf, dHa)
-    num = 1.0 + jnp.exp((_T_REF * dS - dHd) / (_T_REF * _R))
-    den = 1.0 + jnp.exp((Tf * dS - dHd) / (Tf * _R))
-    return f * num / den
+    """Peaked Arrhenius (Bonan eq. 11.34 * 11.36), normalised to 1 at 25 degC.
+
+    Thin wrapper over the shared ``leaf_biophysics.peaked_arrhenius_factor``.
+    """
+    return peaked_arrhenius_factor(Tf, dHa, dHd, dS)
 
 
 def _smaller_root_quadratic(theta: float, A: jax.Array, B: jax.Array,

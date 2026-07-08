@@ -41,6 +41,10 @@ from legoesm.land.surface_scheme import (
     TwoLeafCanopyConfig,
     compute_two_leaf_canopy_fluxes,
 )
+from legoesm.land.surface_scheme.simple_seb import (
+    LAND_CONDENSATION_FLOOR_W,
+    LAND_MAX_EXCHANGE_COEFF,
+)
 from legoesm.land.surface_scheme.two_leaf_canopy import (
     advance_TgC_ema,
     compute_prognostic_lai,
@@ -189,6 +193,7 @@ def step_land(
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
             L_latent=L_eff,
+            max_exchange_coeff=LAND_MAX_EXCHANGE_COEFF,
         )
     else:
         tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
@@ -198,6 +203,13 @@ def step_land(
             config.Cd_land, config.Ch_land,
             L_latent=L_eff,
         )
+
+    # Cold-start condensation floor (issue #730): bound the spurious (negative)
+    # condensation shock before it enters Q_net / the water budget, matching the
+    # canonical compute_simple_seb_fluxes path (the slab previously omitted this
+    # guard).  Evaporation (positive lhflx) stays free.  See simple_seb.py.
+    if LAND_CONDENSATION_FLOOR_W is not None:
+        lhflx = jnp.maximum(lhflx, LAND_CONDENSATION_FLOOR_W)
 
     # Radiation
     sw_net, lw_net, _ = surface_radiation_fluxes(
@@ -452,6 +464,12 @@ def _step_land_canopy(
     pseudo-columnar ``(6*n*n,)`` axis for the duration of the canopy
     closure (which uses ``jax.vmap`` over the leading axis) and
     reshaped back on return.  1D slab states pass through unchanged.
+
+    Latent-flux cold-start guarding differs from the SimpleSEB slab path
+    (``step_land``): the two-leaf canopy bounds spurious condensation via its
+    own ``le_cap_mode`` latent-energy cap in ``two_leaf_canopy.py``, so the
+    ``LAND_CONDENSATION_FLOOR_W`` floor used on the bulk SimpleSEB path is not
+    applied here.
     """
     lp = land_params
     T_soil = state.T_soil.data

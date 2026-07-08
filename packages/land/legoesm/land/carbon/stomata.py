@@ -47,11 +47,25 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.land.canopy.sif import SIFConfig
+from legoesm.land.canopy.stomatal import ball_berry_gs as _ball_berry_core
+from legoesm.land.canopy.stomatal import medlyn_gs as _medlyn_core
+from legoesm.land.leaf_biophysics import (
+    DIFFUSIVITY_RATIO_H2O_CO2,
+    GAMMA_STAR25_UMOL_MOL,
+    HA_GAMMA,
+    HA_KC,
+    HA_KO,
+    KC25_UMOL_MOL,
+    KO25_UMOL_MOL,
+    O2_UMOL_MOL,
+    arrhenius_factor,
+    peaked_arrhenius_factor,
+)
 from legoesm.thermo import saturation_vapor_pressure
 
-# Fixed Farquhar / gas-exchange constants (not tunable).
+# Fixed Farquhar / gas-exchange constants (not tunable).  The H2O:CO2
+# diffusivity ratio is shared via leaf_biophysics.DIFFUSIVITY_RATIO_H2O_CO2.
 _FARQUHAR_WJ_GAMMA_COEFF = 8.0      # 4*Ci + 8*Gamma* electron-transport denominator
-_DIFFUSIVITY_RATIO_H2O_CO2 = 1.6    # H2O:CO2 stomatal diffusivity ratio
 _CI_CA_INIT_RATIO = 0.7             # initial intercellular:ambient CO2 guess
 
 
@@ -59,9 +73,9 @@ _CI_CA_INIT_RATIO = 0.7             # initial intercellular:ambient CO2 guess
 # Constants
 # =====================================================================
 
-# Universal gas constant lives in legoesm.constants (CODATA 2018, exact).
-_R_GAS = constants.R_universal     # [J/(mol·K)]
-_T_REF = 298.15    # Reference temperature 25 deg C [K]
+# Gas constant, T reference, and Bernacchi kinetics now come from
+# legoesm.land.leaf_biophysics (shared with the two-leaf FvCB path) so the
+# two photosynthesis paths cannot drift.
 _PAR_FRAC = 0.48   # Fraction of shortwave that is PAR
 _PAR_CONV = 4.6    # umol photons per J of PAR
 _MC = 12.0e-6      # g C per umol CO2
@@ -144,12 +158,14 @@ class StomataConfig(NamedTuple):
     Ha_Rd: float = 46390.0
 
     # --- Kinetic constants at 25 C (Bernacchi et al. 2001) ---
-    Kc25: float = 404.9          # Michaelis for CO2 [umol/mol]
-    Ko25: float = 278400.0       # Michaelis for O2 [umol/mol]
-    Gamma_star25: float = 42.75  # CO2 compensation point [umol/mol]
-    Ha_Kc: float = 79430.0
-    Ha_Ko: float = 36380.0
-    Ha_Gamma: float = 37830.0
+    # Defaults reference the shared Bernacchi block in leaf_biophysics so the
+    # big-leaf and two-leaf FvCB paths cannot drift; still tunable-excluded.
+    Kc25: float = KC25_UMOL_MOL          # Michaelis for CO2 [umol/mol]
+    Ko25: float = KO25_UMOL_MOL          # Michaelis for O2 [umol/mol]
+    Gamma_star25: float = GAMMA_STAR25_UMOL_MOL  # CO2 compensation point [umol/mol]
+    Ha_Kc: float = HA_KC
+    Ha_Ko: float = HA_KO
+    Ha_Gamma: float = HA_GAMMA
 
     # --- Ball-Berry (Ball et al. 1987) ---
     g0: float = 0.01             # Residual conductance [mol/m2/s]
@@ -173,7 +189,7 @@ class StomataConfig(NamedTuple):
     n_iter_ags: int = _N_AGS_ITER_DEFAULT
 
     # --- Other ---
-    O2_conc: float = 209000.0    # Atmospheric O2 [umol/mol]
+    O2_conc: float = O2_UMOL_MOL  # Atmospheric O2 [umol/mol]
     k_ext: float = 0.5           # Beer-law extinction coefficient [-]
     gs_ref: float = 0.3          # Reference max gs for beta [mol/m2/s]
 
@@ -201,7 +217,7 @@ def arrhenius(
     T: jnp.ndarray,
 ) -> jnp.ndarray:
     """Arrhenius temperature dependence relative to 25 deg C."""
-    return param25 * jnp.exp(Ha * (T - _T_REF) / (_T_REF * _R_GAS * T))
+    return param25 * arrhenius_factor(T, Ha)
 
 
 def peaked_arrhenius(
@@ -212,10 +228,7 @@ def peaked_arrhenius(
     T: jnp.ndarray,
 ) -> jnp.ndarray:
     """Peaked Arrhenius for parameters that decline at high T."""
-    f_T = jnp.exp(Ha * (T - _T_REF) / (_T_REF * _R_GAS * T))
-    num = 1.0 + jnp.exp((S * _T_REF - Hd) / (_R_GAS * _T_REF))
-    den = 1.0 + jnp.exp((S * T - Hd) / (_R_GAS * T))
-    return param25 * f_T * num / den
+    return param25 * peaked_arrhenius_factor(T, Ha, Hd, S)
 
 
 # =====================================================================
@@ -323,14 +336,11 @@ def ball_berry_gs(
 ) -> jnp.ndarray:
     """Ball-Berry (1987) stomatal conductance [mol H2O/m2/s].
 
-    gs = g0 + g1 * max(A, 0) * RH / Cs
+    Config wrapper over the shared leaf-level primitive in
+    ``legoesm.land.canopy.stomatal`` (single source of the gs numerics):
+    gs = g0 + g1_bb * max(A, 0) * RH / Cs.
     """
-    A_pos = jnp.maximum(A, 0.0)
-    Cs_safe = jnp.maximum(Cs, 1.0)
-    return jnp.maximum(
-        config.g0 + config.g1_bb * A_pos * RH / Cs_safe,
-        config.g0,
-    )
+    return _ball_berry_core(A, RH, Cs, config.g1_bb, config.g0)
 
 
 def medlyn_gs(
@@ -341,16 +351,11 @@ def medlyn_gs(
 ) -> jnp.ndarray:
     """Medlyn et al. (2011) optimal stomatal conductance [mol H2O/m2/s].
 
-    gs = g0 + 1.6 * (1 + g1 / sqrt(VPD)) * max(A, 0) / Cs
+    Config wrapper over the shared leaf-level primitive in
+    ``legoesm.land.canopy.stomatal`` (single source of the gs numerics):
+    gs = g0 + 1.6 * (1 + g1_med / sqrt(VPD)) * max(A, 0) / Cs.
     """
-    A_pos = jnp.maximum(A, 0.0)
-    Cs_safe = jnp.maximum(Cs, 1.0)
-    VPD_safe = jnp.maximum(VPD_kPa, 0.05)  # coeff-ok: VPD floor [kPa]
-    return jnp.maximum(
-        config.g0 + _DIFFUSIVITY_RATIO_H2O_CO2 * (1.0 + config.g1_med / jnp.sqrt(VPD_safe))
-        * A_pos / Cs_safe,
-        config.g0,
-    )
+    return _medlyn_core(A, VPD_kPa, Cs, config.g1_med, config.g0)
 
 
 def jarvis_gs(
@@ -479,7 +484,7 @@ def solve_coupled_farquhar_ci(
         # Update Ci via stomatal diffusion (1.6 = H2O/CO2 ratio)
         gs_safe = jnp.maximum(gs, config.g0)
         A_pos = jnp.maximum(A_net, 0.0)
-        Ci = Ca - _DIFFUSIVITY_RATIO_H2O_CO2 * A_pos / gs_safe
+        Ci = Ca - DIFFUSIVITY_RATIO_H2O_CO2 * A_pos / gs_safe
         Ci = jnp.clip(Ci, 1.0, Ca)
 
     # Final evaluation

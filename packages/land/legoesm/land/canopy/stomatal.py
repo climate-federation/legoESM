@@ -24,9 +24,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-
-# Ratio of H2O to CO2 molecular diffusivity in air (Medlyn USO prefactor).
-_DIFFUSIVITY_RATIO_H2O_CO2 = 1.6
+from legoesm.land.leaf_biophysics import DIFFUSIVITY_RATIO_H2O_CO2
 
 
 def ball_berry_gs(
@@ -87,7 +85,7 @@ def medlyn_gs(
     VPD_safe = jnp.maximum(VPD_kPa, 0.05)  # coeff-ok: VPD floor guarding 1/sqrt(VPD) blow-up
     return jnp.maximum(
         g0
-        + _DIFFUSIVITY_RATIO_H2O_CO2
+        + DIFFUSIVITY_RATIO_H2O_CO2
         * (1.0 + g1 / jnp.sqrt(VPD_safe))
         * A_pos
         / Cs_safe,
