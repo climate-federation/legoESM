@@ -85,3 +85,64 @@ def test_main_rejects_bad_args(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["bench", "--rank-counts", "1"])
     with pytest.raises(SystemExit):
         mod.main()
+
+
+class _SyntheticMesh:
+    """4-cell ring: cells 0-1-2-3 cyclic (each cell has 2 neighbors).
+
+    Edges: (0,1) (1,2) (2,3) (3,0) + one INVALID edge (-1,-1) to lock the
+    valid-edge masking in the edge-cut denominator.
+    """
+    nCells = 4
+    nEdges = 5
+    maxEdges = 2
+    cellsOnEdge = np.array([[0, 1, 2, 3, -1],
+                            [1, 2, 3, 0, -1]])
+    cellsOnCell = np.array([[1, 2, 3, 0],    # neighbor k=0
+                            [3, 0, 1, 2]])   # neighbor k=1
+
+
+def test_metric_definitions_locked_on_synthetic_mesh():
+    """Exact edge cut / halo / neighbor values on a hand-built ring —
+    a denominator or halo-construction drift fails HERE, not in a range
+    check (codex finding 3)."""
+    mesh = _SyntheticMesh()
+    owner = np.array([0, 0, 1, 1])  # cells 0,1 -> rank0; 2,3 -> rank1
+    q = mod.partition_quality(mesh, owner, 2, halo_depth=1)
+    # Cut edges: (1,2) and (3,0) -> 2 of 4 VALID edges (invalid edge
+    # excluded from the denominator).
+    assert q["edge_cut"] == 2
+    assert q["edge_cut_fraction"] == pytest.approx(0.5)
+    # halo_depth=1: each rank's halo = the 2 cells of the other rank that
+    # touch it (ring: both of them).
+    assert q["halo_cells_max"] == 2
+    assert q["halo_cells_mean"] == pytest.approx(2.0)
+    assert q["halo_owned_ratio_max"] == pytest.approx(1.0)
+    assert q["neighbor_ranks_max"] == 1
+    assert q["cells_per_rank_min"] == q["cells_per_rank_max"] == 2
+    assert q["load_imbalance_max_over_mean"] == pytest.approx(1.0)
+
+
+def test_empty_rank_rejected():
+    mesh = _SyntheticMesh()
+    owner = np.array([0, 0, 0, 0])  # rank 1 skipped
+    with pytest.raises(AssertionError, match="empty rank"):
+        mod.partition_quality(mesh, owner, 2)
+
+
+def test_halo_matches_runtime_partition():
+    """Real-mesh lock: the bench's halo size equals the RUNTIME partition's
+    (n_local - n_owned) for the same owner array — the bench reports the
+    runtime's halos, not an estimate (codex finding 3)."""
+    from legoesm.parallel.voronoi_partition import partition_voronoi_mesh
+
+    mesh = _mesh()
+    owner = mod.owner_for(mesh, "geometric", 4)
+    q = mod.partition_quality(mesh, owner, 4, halo_depth=2)
+    halos = []
+    for r in range(4):
+        part = partition_voronoi_mesh(
+            mesh, 4, r, method="geometric", halo_depth=2, cell_owner=owner)
+        halos.append(int(part.n_local_cells) - int(part.n_owned_cells))
+    assert q["halo_cells_max"] == max(halos)
+    assert q["halo_cells_mean"] == pytest.approx(float(np.mean(halos)))

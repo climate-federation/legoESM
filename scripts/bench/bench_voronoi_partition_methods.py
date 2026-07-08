@@ -63,7 +63,11 @@ def partition_quality(mesh, cell_owner: np.ndarray, n_ranks: int,
     from legoesm.parallel.voronoi_partition import compute_halo_cells
 
     n_cells = int(mesh.nCells)
-    # Correctness: every cell owned exactly once, owners in range.
+    # Correctness: every cell owned exactly once, owners in range, no
+    # empty rank (an empty rank would silently deflate the halo/owned
+    # ratio through the max(counts, 1) guard).
+    if n_cells == 0 or cell_owner.size == 0:
+        raise AssertionError("empty mesh / owner array")
     if cell_owner.shape != (n_cells,):
         raise AssertionError(f"owner shape {cell_owner.shape} != ({n_cells},)")
     if cell_owner.min() < 0 or cell_owner.max() >= n_ranks:
@@ -71,6 +75,10 @@ def partition_quality(mesh, cell_owner: np.ndarray, n_ranks: int,
     counts = np.bincount(cell_owner, minlength=n_ranks).astype(float)
     if int(counts.sum()) != n_cells:
         raise AssertionError("ownership does not cover the mesh")
+    if counts.min() <= 0:
+        raise AssertionError(
+            f"empty rank in partition (counts.min()={counts.min():.0f}) — "
+            f"a skipped rank corrupts every per-rank metric")
 
     # Edge cut: edges whose two cells have different owners.
     c1, c2 = np.asarray(mesh.cellsOnEdge[0]), np.asarray(mesh.cellsOnEdge[1])
@@ -142,10 +150,15 @@ def main() -> int:
     if not rank_counts or any(n < 2 for n in rank_counts):
         raise SystemExit("--rank-counts needs integers >= 2")
 
+
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.parallel.voronoi_partition import resolve_partition_method
 
     mesh = create_voronoi_mesh(subdivision_level=args.subdivision)
+    if max(rank_counts) > int(mesh.nCells):
+        raise SystemExit(
+            f"--rank-counts max {max(rank_counts)} exceeds the mesh's "
+            f"{int(mesh.nCells)} cells (empty ranks are meaningless).")
     print(f"mesh L{args.subdivision}: {int(mesh.nCells)} cells, "
           f"{int(mesh.nEdges)} edges; auto -> "
           f"{resolve_partition_method('auto')!r}")
