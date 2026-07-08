@@ -337,7 +337,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   mle=None, dz_ref_override=None,
                   bottom_drag_scheme=None, bottom_drag_cd0=None,
                   bottom_drag_cdmax=None, bottom_drag_z0=None,
-                  bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None):
+                  bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
+                  prescribed_flow=None, no_gm_redi=False):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -400,7 +401,17 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("ew_cyclic_overlap", ew_cyclic_overlap),
                               ("runoff_depth_spread_m", runoff_depth_spread_m),
                               ("tracer_advection", tracer_advection),
+                              ("prescribed_flow", prescribed_flow),
                               ) if v is not None}
+    if no_gm_redi:
+        # Disable the recipe's GM/Redi (NEMOMatchTripoleRecipeConfig ships
+        # gm_redi=True, kappa=600).  Appended AFTER the not-None filter above
+        # because the override VALUE here is None.  REQUIRED under
+        # --prescribed-flow (validate_prescribed_flow_args): GM bolus is
+        # parameterized advection the lever cannot pin, and the model
+        # constructor rejects the combination.
+        _ovr["gm_redi"] = None
+        print("[setup] tripole GM/Redi DISABLED (--no-gm-redi)")
     # IMPLICIT vertical mixing (NEMO ln_zdf*, MOM6 CVMix, MPAS all do this; the
     # config default is True). _create_setup()'s arg default is False (explicit) --
     # at the NEMO 75-level grid the explicit KPP vertical-viscosity CFL blows the
@@ -603,7 +614,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   mle=None, dz_ref_override=None, mask_marginal_seas=False,
                   bottom_drag_scheme=None, bottom_drag_cd0=None,
                   bottom_drag_cdmax=None, bottom_drag_z0=None,
-                  bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None):
+                  bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
+                  prescribed_flow=None, no_gm_redi=False):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -621,6 +633,11 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         "latlon", res, nlev, H_max, physics_preset="full", water_type="II",
         use_bathymetry=True, pgf_scheme=pgf_scheme,
         A_h_override=A_h, B_h_override=B_h,
+        # _create_setup's bathy branch builds gm_redi=None when no_gm_redi
+        # (else the _DEFAULT_BATHY_GM_REDI Visbeck config).  REQUIRED under
+        # --prescribed-flow: GM bolus is parameterized advection the lever
+        # cannot pin, and the model constructor rejects the combination.
+        no_gm_redi=no_gm_redi,
         dz_ref_override=dz_ref_override,
     )
     _ovr = {k: v for k, v in (("K_bih", K_bih),
@@ -649,6 +666,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("freeze_floor", freeze_floor),
                               ("runoff_depth_spread_m", runoff_depth_spread_m),
                               ("tracer_advection", tracer_advection),
+                              ("prescribed_flow", prescribed_flow),
                               ("use_polar_filter", use_polar_filter),
                               ("polar_filter_cutoff_lat_deg",
                                polar_filter_cutoff_lat_deg),
@@ -2149,6 +2167,47 @@ def _record_final_state_digest(manifest_path, state) -> None:
         print(f"[warn] state_digest not recorded: {type(exc).__name__}: {exc}")
 
 
+def validate_prescribed_flow_args(prescribed_flow, grid: str,
+                                  spinup_drag_tau_days: float,
+                                  no_gm_redi: bool = False) -> None:
+    """Arg-validation gates for --prescribed-flow (pure; unit-testable).
+
+    The lever is IN-MODEL config (``LatLonCGridOceanConfig.prescribed_flow``,
+    pinned inside ``_step_impl`` where the tracer mass fluxes are built), NOT
+    a host-loop post-step reset — so it composes with ``--scan-block`` (the
+    scan body calls ``_step_impl`` directly and the pin rides inside it) and
+    needs no reference-state capture.  Only the lat-lon C-grid model
+    implements it (grid=tripole|latlon_bathy); the cube/MPAS models have no
+    ``prescribed_flow`` field and would silently ignore the request.
+    """
+    if prescribed_flow is None:
+        return
+    if grid not in ("tripole", "latlon_bathy"):
+        raise SystemExit(
+            "--prescribed-flow is implemented by the lat-lon C-grid model "
+            "only (LatLonCGridOceanConfig.prescribed_flow): use --grid "
+            f"tripole or latlon_bathy; got --grid {grid!r}.")
+    if float(spinup_drag_tau_days) > 0.0:
+        raise SystemExit(
+            "--prescribed-flow cannot combine with --spinup-drag-tau-days: "
+            "the spin-up Rayleigh drag rescales u/v post-step in the host "
+            "loop while the lever pins them in-model — the interaction is "
+            "undefined (the drag would be a silent no-op at best). Drop one.")
+    if not no_gm_redi:
+        # Both supported builders ship GM/Redi ON unconditionally (tripole:
+        # NEMOMatchTripoleRecipeConfig.gm_redi=True; latlon_bathy:
+        # _DEFAULT_BATHY_GM_REDI), and the model constructor REJECTS
+        # prescribed_flow+GM/Redi (bolus transport is parameterized advection
+        # the pin cannot isolate).  Require the explicit disable here so the
+        # job dies at arg parse, not after the grid/mesh/IC build.
+        raise SystemExit(
+            "--prescribed-flow requires --no-gm-redi: the tripole and "
+            "latlon_bathy configs enable GM/Redi by default, and GM bolus "
+            "transport is parameterized ADVECTION that bypasses the pinned "
+            "mass-flux block (the model constructor rejects the combination)."
+            " Pass --no-gm-redi to run the circulation-isolation experiment.")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -2650,6 +2709,28 @@ def main() -> int:
                         "per-term momentum-tendency breakdown (PGF/Coriolis/advection/"
                         "viscosity/...) global-max + location, to pin the term driving "
                         "a cold-start blowup. -1=off.")
+    p.add_argument("--prescribed-flow", choices=("zero", "frozen"), default=None,
+                   help="Vertical-physics isolation (IN-MODEL lever: threads "
+                        "LatLonCGridOceanConfig.prescribed_flow, pinned inside "
+                        "the step where the tracer mass fluxes are built) -- "
+                        "'zero' (u=v=eta=0, mass fluxes and w vanish: pure "
+                        "column physics on the full grid) or 'frozen' (tracers "
+                        "advected by the step-entry flow; u/v/eta never "
+                        "evolve). T/S still evolve by vertical mixing, "
+                        "convection, surface fluxes, penetrating SW and "
+                        "restoring, so vertical-structure changes are isolated "
+                        "from circulation feedback. tripole/latlon_bathy only; "
+                        "scan-block compatible; rejects --spinup-drag-tau-days; "
+                        "REQUIRES --no-gm-redi (GM bolus = parameterized "
+                        "advection the pin cannot isolate).")
+    p.add_argument("--no-gm-redi", action="store_true",
+                   help="Disable GM/Redi isopycnal mixing (tripole recipe and "
+                        "latlon_bathy production config ship it ON: kappa=600 "
+                        "tripole, Visbeck _DEFAULT_BATHY_GM_REDI latlon). "
+                        "REQUIRED with --prescribed-flow: the GM bolus (skew) "
+                        "transport is parameterized tracer ADVECTION applied "
+                        "outside the pinned mass-flux block, so the model "
+                        "constructor rejects prescribed_flow+GM/Redi.")
     p.add_argument("--scan-block", type=int, default=0,
                    help="Issue #354: wrap the time loop in jax.lax.scan, "
                         "fusing this many steps per block (CORE-II forcing "
@@ -2774,6 +2855,14 @@ def main() -> int:
                 "--prognostic-sea-ice cannot run under --scan-block: the ice step "
                 "pulls ocean SST to the host each step (like SSS restoring / "
                 "ice-thermo), so it is host-loop only. Set --scan-block 0.")
+
+    # --prescribed-flow gates (PRE-BUILD, on the static args): grid support +
+    # the --spinup-drag rejection + the --no-gm-redi requirement.  NB: no
+    # --scan-block gate — the lever is in-model (inside _step_impl), so the
+    # lax.scan block path pins correctly.
+    validate_prescribed_flow_args(args.prescribed_flow, args.grid,
+                                  args.spinup_drag_tau_days,
+                                  no_gm_redi=args.no_gm_redi)
 
     from legoesm.core.precision import PrecisionPolicy, set_policy
     set_policy(PrecisionPolicy.fp64())
@@ -2901,6 +2990,8 @@ def main() -> int:
             bottom_drag_z0=args.bottom_drag_z0,
             bottom_drag_ke0=args.bottom_drag_ke0,
             iwm=_iwm_cfg, iwm_forcing_file=args.iwm_forcing_file,
+            prescribed_flow=args.prescribed_flow,
+            no_gm_redi=args.no_gm_redi,
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":
@@ -2983,6 +3074,8 @@ def main() -> int:
             bottom_drag_z0=args.bottom_drag_z0,
             bottom_drag_ke0=args.bottom_drag_ke0,
             iwm=_iwm_cfg, iwm_forcing_file=args.iwm_forcing_file,
+            prescribed_flow=args.prescribed_flow,
+            no_gm_redi=args.no_gm_redi,
         )
         app_grid_type = "latlon"
 
@@ -3073,6 +3166,8 @@ def main() -> int:
         except Exception as _e:  # noqa: BLE001 — provenance best-effort
             print(f"[warn] visc_schedule sidecar not written: {_e}")
 
+    # (--prescribed-flow gates ran PRE-BUILD via validate_prescribed_flow_args;
+    # the lever itself was threaded into the model config at build.)
     if args.dm2dc and app_grid_type not in ("tripole", "latlon"):
         raise SystemExit(
             "--dm2dc is wired for tripole/latlon (the applicator needs the "
@@ -3687,6 +3782,14 @@ def main() -> int:
     # the call is byte-identical to before.
     _tf_cfg = getattr(model.config, "tidal_forcing", None)
     _tide_on = _tf_cfg is not None and _tf_cfg.enabled
+
+    # --prescribed-flow is IN-MODEL (LatLonCGridOceanConfig.prescribed_flow,
+    # threaded at build): the pin happens INSIDE _step_impl where the tracer
+    # mass fluxes are built, so no host-loop reset / reference capture here.
+    if args.prescribed_flow is not None:
+        print(f"[prescribed-flow] mode={args.prescribed_flow} (in-model): "
+              f"circulation pinned inside every step -- vertical physics "
+              f"isolated from circulation feedback.", flush=True)
 
     for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)

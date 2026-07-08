@@ -1693,6 +1693,42 @@ class LatLonCGridOceanConfig(NamedTuple):
     # the barotropic momentum step (see that module's wiring note). Appended at the
     # NamedTuple tail so positional construction for legacy callers is preserved.
     tidal_forcing: TidalForcingConfig = TidalForcingConfig()
+    # --- Prescribed-flow science lever (vertical-physics isolation) ---------
+    # Pin the CIRCULATION (u, v, eta) each step so T/S evolve WITHOUT
+    # circulation feedback — isolating where vertical-structure differences
+    # (vs e.g. NEMO) originate.  Values (validated at model construction;
+    # unknown -> ValueError):
+    #   None      (default) — normal prognostic flow; the lever is a STATIC
+    #             Python gate, so the traced graph is byte-identical.
+    #   "zero"    — advecting velocities for the tracer step are ZERO (the
+    #             tracer mass fluxes and the continuity-diagnosed w vanish; no
+    #             advection at all) and the returned u/v/eta are zeros: pure
+    #             column physics (vertical mixing, convection, penetrating SW,
+    #             surface fluxes, virtual salt, restoring) on the full grid.
+    #   "frozen"  — tracers are advected by the step-ENTRY u/v (the held
+    #             flow); the returned u/v/eta are the entry values exactly, so
+    #             the flow never evolves (no external reference state needed).
+    # In both modes the momentum/barotropic solves still RUN (their T/S/TKE
+    # couplings — e.g. TKE shear production — see the prescribed flow, which
+    # is the intended physics) but their momentum result is DISCARDED by the
+    # pin, and the outer-AB2 momentum carries u_incr_prev/v_incr_prev (plus
+    # F_slow_{u,v}_prev when barotropic_slow_forcing_ab2) are stored as ZEROS
+    # so discarded-momentum history is never re-injected.  Under the inner
+    # tracer AB2 (tracer_time_integrator="ab2") the ADVECTIVE flux-div
+    # extrapolation is disabled (the current pinned flux-div is used
+    # directly and stored as the carry — zeros for "zero"), so a pre-lever
+    # T/S_flux_div_prev never leaks stale advection.  Implemented for
+    # the forward_euler and ab2 outer integrators; REJECTED at construction
+    # with barotropic_solver="implicit_unsplit" (that path advects tracers
+    # inside the tendency, not via the shared mass-flux block) and with any
+    # parameterized ADVECTIVE tracer transport that bypasses the pinned
+    # mass-flux block: GM/Redi — model-level ``gm_redi`` (incl. the
+    # prognostic-EKE closure riding on it) or the physics pipeline's
+    # ``lateral_mixing.scheme="gm_redi"`` — and Fox-Kemper MLE
+    # (``physics.mle``).  ``ew_cyclic_overlap`` slaves TRACERS only under
+    # the lever (it runs after the final re-pin).  T/S column budgets are
+    # unchanged except through the (zeroed/held) advection.
+    prescribed_flow: str | None = None
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
