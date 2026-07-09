@@ -210,7 +210,13 @@ def make_tiled_cc_step(model, mesh, kt: int, dt: float):
     return step
 
 
-def make_tiled_cc_loop(model, mesh, kt: int, dt: float):
+#: Tracer names + packing order of the tiled moist q_pack (matches the moist
+#: step stages' ``[q_v, q_c, q_r]`` contract and the Kessler bridge).
+_TILED_TRACERS = ("q_v", "q_c", "q_r")
+
+
+def make_tiled_cc_loop(model, mesh, kt: int, dt: float,
+                       column_physics_fn=None):
     """Closed-loop tiled stepping: state stays TILE-SHARDED across steps.
 
     The single-shot ``make_tiled_cc_step`` re-replicates per call (its exit
@@ -233,6 +239,15 @@ def make_tiled_cc_loop(model, mesh, kt: int, dt: float):
       Field wrappers, normally the state passed to ``enter``); for
       I/O/diagnostics only (a global gather — never call it inside the
       loop).
+
+    MOIST (``column_physics_fn`` given — e.g. the Kessler bridge
+    ``make_kessler_column_physics_fn``): the state MUST carry exactly the
+    ``q_v``/``q_c``/``q_r`` tracers; ``enter`` packs them into the blocked
+    ``q_pack`` (cc 5-D, ``[q_v, q_c, q_r]`` order), ``step`` threads it
+    through the moist blocked step (dynamics advection + injected column
+    physics + the post-step ``max(q, 0)`` floor), and ``exit_`` unpacks
+    them back into the tracer Fields.  Dry mode refuses tracer-carrying
+    states (silently freezing them would be divergence-by-omission).
 
     Unlike the single-shot adapter, the default production config's
     ``use_conservation_fixer+fix_mass`` is INSIDE this envelope: the
@@ -272,39 +287,51 @@ def make_tiled_cc_loop(model, mesh, kt: int, dt: float):
     n = int(model.grid.n)
     nlev = int(model.sigma_coord.n_levels)
     nl = n // kt
+    _moist = column_physics_fn is not None
     tiled = make_tiled_fv3_hydrostatic_step_blocked_2d(
         mesh, cdgrid, model.sigma_coord, n, kt, nlev,
         p_floor=float(cfg.p_floor), dt=float(dt),
         sponge_sigma=float(getattr(cfg, "sponge_sigma", 0.0)),
         sponge_tau_sec=float(getattr(cfg, "sponge_tau_sec", 0.0)),
+        column_physics_fn=column_physics_fn,
         fix_mass=_fix_mass,
     )
 
     import jax
+    import jax.numpy as jnp
     from jax.sharding import NamedSharding, PartitionSpec as P
 
     cz = NamedSharding(mesh, P("face", "tile_i", "tile_j", None))
     co = NamedSharding(mesh, P("face", "tile_i", "tile_j"))
+    cz5 = NamedSharding(mesh, P("face", "tile_i", "tile_j", None, None))
 
     def enter(state):
         """cc HydrostaticState -> blocked pytree (dict) on the tiled mesh."""
-        # The loop advances DRY fields only; silently freezing a tracer
-        # dict across steps while serial advances/floors it would be a
-        # divergence-by-omission (codex BLOCKER) — refuse until the moist
-        # blocked wiring (q_pack pack/step/unpack) lands in this adapter.
-        if getattr(state, "tracers", None):
+        tracers = getattr(state, "tracers", None)
+        if _moist:
+            # The moist blocked step advances EXACTLY [q_v, q_c, q_r];
+            # extra/missing tracers would silently freeze/invent fields.
+            got = tuple(sorted(tracers)) if tracers else ()
+            if got != tuple(sorted(_TILED_TRACERS)):
+                raise NotImplementedError(
+                    "make_tiled_cc_loop (moist): state must carry exactly "
+                    f"the {_TILED_TRACERS} tracers (the tiled q_pack "
+                    f"contract); got {got or None}.")
+        elif tracers:
+            # Dry loop must not silently freeze a tracer dict across steps
+            # while serial advances/floors it (codex BLOCKER) — refuse.
             raise NotImplementedError(
-                "make_tiled_cc_loop: state carries tracers, but the blocked "
-                "loop adapter is dry-only for now (the core moist blocked "
-                "step exists; the adapter q_pack wiring is the remaining "
-                "increment). Drop the tracers or run the face-only path.")
+                "make_tiled_cc_loop: state carries tracers but no "
+                "column_physics_fn was given — the dry loop would freeze "
+                "them (divergence-by-omission). Pass the column physics "
+                "(e.g. make_kessler_column_physics_fn) or drop the tracers.")
         u_d, v_d = center_to_dgrid_vector(
             state.u.data, state.v.data, cdgrid)
         # Serial _step_fv3 entry cast (see make_tiled_cc_step's note).
         u_d, v_d, T_in, ps_in, phis_in = cast_pytree(
             (u_d, v_d, state.T.data, state.p_s.data, state.phis.data),
             None, "compute")
-        return {
+        blocked = {
             "u_d": jax.device_put(
                 expand_corners_to_blocks(u_d, kt, nl), cz),
             "v_d": jax.device_put(
@@ -313,8 +340,20 @@ def make_tiled_cc_loop(model, mesh, kt: int, dt: float):
             "p_s": jax.device_put(ps_in, co),
             "phis": jax.device_put(phis_in, co),
         }
+        if _moist:
+            q_pack = jnp.stack(
+                [state.tracers[nm].data for nm in _TILED_TRACERS], axis=-1)
+            (q_pack,) = cast_pytree((q_pack,), None, "compute")
+            blocked["q_pack"] = jax.device_put(q_pack, cz5)
+        return blocked
 
     def step(blocked):
+        if _moist:
+            u2, v2, T2, ps2, q2 = tiled(
+                blocked["u_d"], blocked["v_d"], blocked["T"],
+                blocked["p_s"], blocked["phis"], blocked["q_pack"])
+            return {"u_d": u2, "v_d": v2, "T": T2, "p_s": ps2,
+                    "phis": blocked["phis"], "q_pack": q2}
         u2, v2, T2, ps2 = tiled(blocked["u_d"], blocked["v_d"],
                                 blocked["T"], blocked["p_s"],
                                 blocked["phis"])
@@ -325,13 +364,20 @@ def make_tiled_cc_loop(model, mesh, kt: int, dt: float):
         """Blocked -> cc HydrostaticState (GLOBAL GATHER — I/O only)."""
         u_d = dedup_tiled_corners(blocked["u_d"], kt, nl)
         v_d = dedup_tiled_corners(blocked["v_d"], kt, nl)
+        tracers = getattr(template_state, "tracers", None)
+        if _moist:
+            tracers = {
+                nm: template_state.tracers[nm].replace(
+                    data=blocked["q_pack"][..., i])
+                for i, nm in enumerate(_TILED_TRACERS)
+            }
         fv3 = FV3HydrostaticState(
             u_d=template_state.u.replace(data=u_d, name="u_d"),
             v_d=template_state.v.replace(data=v_d, name="v_d"),
             T=template_state.T.replace(data=blocked["T"]),
             p_s=template_state.p_s.replace(data=blocked["p_s"]),
             phis=template_state.phis,
-            tracers=getattr(template_state, "tracers", None),
+            tracers=tracers,
         )
         return fv3_to_hydrostatic(fv3, cdgrid)
 

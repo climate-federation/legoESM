@@ -287,6 +287,78 @@ def test_moist_blocked_step_bit_identical_to_shipped_moist_stage():
     assert float(jnp.min(b[4])) >= 0.0
 
 
+def test_adapter_moist_loop_kessler_matches_serial():
+    """MOIST closed loop with the PRODUCTION Kessler bridge vs the serial
+    ``model.step(physics_fn=make_kessler_forcing_cube)`` trajectory from
+    the SAME entry conversion — the drivers' moist np>6 lane end to end
+    (dynamics tracer advection + per-stage column Kessler + q floor +
+    in-stage mass fixer)."""
+    from legoesm.core.field import Field
+    from legoesm.core.operators_cdgrid import center_to_dgrid_vector
+    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.kessler_forcing import (
+        make_kessler_column_physics_fn, make_kessler_forcing_cube,
+    )
+    from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+        _TILED_TRACERS, make_tiled_cc_loop,
+    )
+
+    mesh = _mesh()
+    grid = create_cubed_sphere(N)
+    coord = create_sigma_coordinate(NLEV)
+    cfg = CDGridPrimitiveEquationConfig(
+        use_conservation_fixer=True, fix_mass=True,
+        anchor_mass_to_initial=False, zero_mean_ps_tendency=True)
+    model = CDGridPrimitiveEquationModel(grid, coord, cfg)
+    hs = held_suarez_init(grid, coord)
+    rng = np.random.default_rng(21)
+    d3 = ("face", "x", "y", "level")
+    tracers = {
+        nm: Field(data=jnp.asarray(np.abs(
+                s + 1e-4 * rng.standard_normal((6, N, N, NLEV)))),
+                  name=nm, dims=d3, units="kg/kg")
+        for nm, s in zip(_TILED_TRACERS, (5e-3, 5e-4, 5e-5))
+    }
+    hs = hs._replace(tracers=tracers)
+
+    # Serial: same entry conversion, then the production step with the
+    # grid-space Kessler physics_fn (the np<=6 lane) — SAME shared column
+    # core as the tiled bridge.
+    u_d0, v_d0 = center_to_dgrid_vector(hs.u.data, hs.v.data, model.cdgrid)
+    ref = _fv3_state(u_d0, v_d0, hs.T.data, hs.p_s.data, hs.phis.data)
+    ref = ref._replace(tracers=tracers)
+    phys_serial = make_kessler_forcing_cube(DT)
+    for _ in range(N_STEPS):
+        ref = model.step(ref, DT, physics_fn=phys_serial)
+
+    col_fn = make_kessler_column_physics_fn(coord, DT)
+    enter, step, exit_ = make_tiled_cc_loop(
+        model, mesh, kt=KT, dt=DT, column_physics_fn=col_fn)
+    step_jit = jax.jit(step)
+    blk = enter(hs)
+    for _ in range(N_STEPS):
+        blk = step_jit(blk)
+
+    # ABS bounds in the shipped adapter-gate class (see the dry loop gate's
+    # rationale — the pre-existing face-corner wind term).
+    def _abs(t, g):
+        return float(np.max(np.abs(np.asarray(t) - np.asarray(g))))
+
+    assert _abs(blk["T"], ref.T.data) < 1e-4
+    assert _abs(blk["p_s"], ref.p_s.data) < 0.06
+    for i, nm in enumerate(_TILED_TRACERS):
+        d_q = _abs(blk["q_pack"][..., i], ref.tracers[nm].data)
+        assert d_q < 1e-7, f"{nm} abs {d_q:.3e}"
+    assert float(jnp.min(blk["q_pack"])) >= 0.0   # floor held
+
+    # exit_ unpacks the advanced tracers (not the template's).
+    out = exit_(blk, hs)
+    for i, nm in enumerate(_TILED_TRACERS):
+        np.testing.assert_array_equal(
+            np.asarray(out.tracers[nm].data),
+            np.asarray(blk["q_pack"][..., i]))
+
+
 def test_adapter_loop_refuses_tracer_state():
     """The loop adapter is dry-only: silently freezing tracers while the
     serial step advances them is a divergence-by-omission (codex BLOCKER)."""
@@ -305,8 +377,16 @@ def test_adapter_loop_refuses_tracer_state():
     hs = held_suarez_init(grid, coord)
     enter, _, _ = make_tiled_cc_loop(model, mesh, kt=KT, dt=DT)
     hs_q = hs._replace(tracers={"q_v": hs.T})   # any non-empty tracer dict
-    with pytest.raises(NotImplementedError, match="dry-only"):
+    with pytest.raises(NotImplementedError,
+                       match="no column_physics_fn"):
         enter(hs_q)
+    # Moist mode with the WRONG tracer set refuses too.
+    enter_m, _, _ = make_tiled_cc_loop(
+        model, mesh, kt=KT, dt=DT,
+        column_physics_fn=lambda T, ps, qv, qc, qr: (
+            0.0 * T, 0.0 * qv, 0.0 * qc, 0.0 * qr))
+    with pytest.raises(NotImplementedError, match="exactly"):
+        enter_m(hs_q)
 
 
 def test_blocked_step_refuses_q_physics_mismatch():

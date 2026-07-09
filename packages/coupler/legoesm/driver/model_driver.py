@@ -2821,13 +2821,14 @@ class ModelDriver:
             # hides that a tiled run gets degraded (non-SPMD) halos.
             # Warn loudly instead of returning silently (codex P1,
             # 2026-06-13).
-            logger.warning(
-                "SPMD halo backend NOT activated for sub-face tiling "
-                "%s (%d devices): the tiled dycore STEP is unwired "
-                "(P4 milestone) — this run uses the LOCAL halo backend "
-                "and will NOT strong-scale past 6 devices.  Use "
-                "face-only sharding (1/2/3/6 devices) or multi-node "
-                "1-process-per-node SPMD for production strong scaling.",
+            logger.info(
+                "SPMD halo backend not armed for sub-face tiling %s "
+                "(%d devices): run() dispatches these device counts to "
+                "the BLOCKED tiled cube loop (_run_tiled_cube_spmd), "
+                "whose in-stage ppermute pads are mesh-bound and do not "
+                "use the global halo backend.  Out-of-envelope configs "
+                "(full unified physics, diagnostics writers) are refused "
+                "loudly there — nothing silently degrades to local halos.",
                 dc.tiling, dc.n_devices,
             )
             return
@@ -4324,6 +4325,17 @@ class ModelDriver:
                 # from the jitted compiled_segments scan (zero surgical risk to
                 # the shared hot loop).
                 status = self._run_compiled_latlon_spmd(start_step, start_day)
+            elif (self.config.grid.grid_type == "cubed_sphere"
+                    and self._device_config is not None
+                    and self._device_config.mesh is not None
+                    and tuple(getattr(self._device_config, "tiling",
+                                      (1, 1))) != (1, 1)):
+                # Sub-face-tiled cube SPMD (6*kt^2 > 6 devices): the BLOCKED
+                # persistent tiled loop (same dedicated-lane precedent as the
+                # lat-lon branch above).  Out-of-envelope configs are refused
+                # loudly inside — never a silent fall-through to the
+                # non-tile-aware compiled path.
+                status = self._run_tiled_cube_spmd(start_step, start_day)
             elif compiled:
                 status = self._run_compiled(start_step, start_day)
             else:
@@ -6064,6 +6076,181 @@ class ModelDriver:
         self.state = hs_final
         logger.info("lat-lon SPMD run: %s (%.1fs)", status, time.time() - t0)
         return status
+
+    def _tiled_cube_column_physics_fn(self):
+        """Select the per-tile COLUMN physics for the tiled cube SPMD run,
+        or raise if the configured physics is outside the tiled envelope.
+
+        Supported: dynamics-only (all parameterizations ``'none'``) ->
+        ``None``; Kessler warm-rain microphysics ALONE -> the shared
+        column bridge (``make_kessler_column_physics_fn`` — the SAME
+        ``kessler_column_tendencies`` core the face-sharded lanes run).
+        Anything else (the stateful unified pipeline, Held-Suarez on the
+        cube) is not tiled-routed — refuse loudly, never silently drop a
+        parameterization.
+        """
+        cfg = self.config
+        active = {
+            name: val for name, val in (
+                ("radiation", cfg.radiation),
+                ("convection", cfg.convection),
+                ("turbulence", cfg.turbulence),
+                ("microphysics", cfg.microphysics),
+                ("gravity_wave_drag", cfg.gravity_wave_drag),
+                ("cloud_scheme", cfg.cloud_scheme),
+            ) if val not in (None, "none")
+        }
+        if getattr(cfg, "held_suarez_forcing", False):
+            raise NotImplementedError(
+                "tiled cube SPMD: held_suarez_forcing is not tiled-routed "
+                "(the HS closure is a full-state physics_fn, not a column "
+                "fn); run dynamics-only or <=6 devices.")
+        if not active:
+            return None                     # dynamics-only (dry)
+        if active == {"microphysics": "kessler"}:
+            from legoesm.atmosphere.kessler_forcing import (
+                make_kessler_column_physics_fn,
+            )
+            return make_kessler_column_physics_fn(
+                self.sigma, float(cfg.dycore.dt))
+        raise NotImplementedError(
+            "tiled cube SPMD (6*kt^2 devices) supports dynamics-only (all "
+            "parameterizations 'none') or Kessler microphysics alone; the "
+            f"configured physics {active} is not tiled-routed. Set those "
+            "schemes to 'none' or run <=6 devices (face sharding).")
+
+    def _run_tiled_cube_spmd(self, start_step: int = 0,
+                             start_day: float | None = None) -> str:
+        """Sub-face-tiled cube SPMD run (``n_devices = 6*kt^2 > 6``).
+
+        Integrates via the BLOCKED persistent tiled loop
+        (:func:`legoesm.atmosphere.dynamics.tiled_step_adapter.make_tiled_cc_loop`):
+        state stays TILE-SHARDED across steps (no per-step gather); a
+        cell-centred ``HydrostaticState`` is gathered once per SEGMENT for
+        the coupler callback + a host-side NaN-blowup guard.  A dedicated
+        path, NOT the jitted ``compiled_segments`` scan — the exact
+        precedent of ``_run_compiled_latlon_spmd`` (zero surgical risk to
+        the shared hot loop).
+
+        Supports DYNAMICS-ONLY or Kessler-microphysics-only configs (the
+        tiled envelope; anything else is refused loudly by
+        ``_tiled_cube_column_physics_fn`` / the adapter's envelope
+        validation).  Diagnostics/checkpoint writers are follow-ups
+        (rejected loudly); a coupled driver consumes the per-segment state
+        via ``segment_callback``.
+        """
+        import time as _time
+
+        import jax
+        import numpy as _np
+
+        from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+            make_tiled_cc_loop,
+        )
+
+        cfg = self.config
+        if cfg.output.checkpoint_days > 0 or cfg.output.diag_days > 0:
+            raise NotImplementedError(
+                "the tiled cube SPMD run does not yet support the "
+                "diagnostics / checkpoint writers (set diag_days=0, "
+                "checkpoint_days=0); use the segment_callback hook for I/O.")
+        dc = self._device_config
+        tiling = tuple(getattr(dc, "tiling", (1, 1)))
+        kt = int(tiling[0])
+        if (tiling[0] != tiling[1] or kt < 2
+                or dc.n_devices != 6 * kt * kt):
+            raise ValueError(
+                f"tiled cube SPMD: device config tiling={tiling}, "
+                f"n_devices={dc.n_devices} is not a (kt, kt) sub-face "
+                f"tiling with 6*kt^2 devices.")
+        mesh = dc.mesh
+        if tuple(getattr(mesh, "axis_names", ())) != (
+                "face", "tile_i", "tile_j"):
+            raise ValueError(
+                f"tiled cube SPMD: mesh axes {getattr(mesh, 'axis_names', None)} "
+                f"!= ('face', 'tile_i', 'tile_j') — build the device mesh "
+                f"via create_device_mesh(n_devices=6*kt^2).")
+
+        column_physics_fn = self._tiled_cube_column_physics_fn()
+        DT = cfg.dycore.dt
+        n_steps_total = int(cfg.days * 86400.0 / DT)
+        START_DAY = start_day if start_day is not None else cfg.start_day
+        # Restart-time normalization (mirrors _run_compiled_latlon_spmd).
+        if (start_day is not None and start_step > 0
+                and getattr(self, "_loaded_checkpoint_step_day", None)
+                == (start_step, start_day)):
+            START_DAY = start_day - start_step * DT / 86400.0
+        seg_len = max(1, int(86400.0 / DT))
+        n_run = n_steps_total - start_step
+        if n_run < 1:
+            return "COMPLETED"
+
+        logger.info(
+            "tiled cube SPMD run: %d steps, %d-step segments, kt=%d "
+            "(%d devices), physics=%s",
+            n_run, seg_len, kt, dc.n_devices,
+            "kessler" if column_physics_fn is not None else "dynamics-only")
+
+        enter, tiled_step, tiled_exit = make_tiled_cc_loop(
+            self.model, mesh, kt=kt, dt=float(DT),
+            column_physics_fn=column_physics_fn)
+        step_jit = jax.jit(tiled_step)   # eager shard_map re-lowers per call
+        # Moist: the driver keeps tracers in ``self.tracers`` (raw arrays,
+        # the tracer-property store) — ``self.state.tracers`` is None after
+        # cube setup.  Attach exact {q_v,q_c,q_r} Fields for the loop's
+        # tracer contract (codex BLOCKER: without this, a REAL driver init
+        # can never enter the advertised Kessler lane).
+        if (column_physics_fn is not None
+                and getattr(self.state, "tracers", None) is None):
+            from legoesm.core.field import Field
+
+            missing = [nm for nm in ("q_v", "q_c", "q_r")
+                       if self.tracers.get(nm) is None]
+            if missing:
+                raise NotImplementedError(
+                    f"tiled cube SPMD (kessler): driver tracers missing "
+                    f"{missing} — initialize a moist cube state (moist IC) "
+                    f"or run dynamics-only.")
+            self.state = self.state._replace(tracers={
+                nm: Field(data=self.tracers[nm], name=nm,
+                          dims=self.state.T.dims, units="kg/kg")
+                for nm in ("q_v", "q_c", "q_r")
+            })
+        template = self.state
+        blocked = enter(self.state)
+
+        t0 = _time.time()
+        step_done = 0
+        while step_done < n_run:
+            seg_n = min(seg_len, n_run - step_done)
+            for _ in range(seg_n):
+                blocked = step_jit(blocked)
+            step_done += seg_n
+            # Per-SEGMENT gather: coupler callback + host blowup guard
+            # (the in-loop state never gathers).  Callbacks CONSUME the
+            # gathered state (the lat-lon SPMD lane's contract); mutations
+            # are NOT folded back into the blocked loop state.
+            self.state = tiled_exit(blocked, template)
+            if self.state.tracers is not None:
+                # Keep the canonical driver tracer-property store
+                # (self.tracers -> q_v/q_c/q_r properties, used by
+                # callbacks/diagnostics) in sync with the advanced
+                # moisture (codex MAJOR: it otherwise holds the INITIAL
+                # fields for the whole run).
+                for _nm, _f in self.state.tracers.items():
+                    self.tracers[_nm] = _f.data
+            day = START_DAY + (start_step + step_done) * DT / 86400.0
+            self._current_day = day
+            if not bool(_np.all(_np.isfinite(
+                    _np.asarray(self.state.T.data)))):
+                logger.error("tiled cube SPMD: non-finite T at day %.3f",
+                             day)
+                return f"BLOWUP at day {day:.3f}"
+            if self._segment_callback is not None:
+                self._segment_callback(self, day, DT * seg_n)
+        logger.info("tiled cube SPMD run: COMPLETED (%.1fs)",
+                    _time.time() - t0)
+        return "COMPLETED"
 
     def _operator_split_spmd_active(self) -> bool:
         """True when the lat-band SPMD run must use the OPERATOR-SPLIT lane — the
