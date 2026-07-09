@@ -1538,13 +1538,19 @@ def load_training_data(
     # read stale for the others.  ensure_local_cache is idempotent (skips if the
     # store already exists), so only the first call pays the download.
     store = era5_config.zarr_store
-    if cache_dir:
+    # OPT-IN (default OFF -> byte-identical to the old GCS-every-epoch path):
+    # set LEGOESM_ERA5_LOCAL_CACHE=1 to materialise each span to a local zarr
+    # once and read it locally thereafter (#895, ~50 h/run).  Gated behind an
+    # env flag rather than on by default because the ensure_local_cache path is
+    # unexercised on this repo and its speedup + output compatibility must be
+    # validated on the target cluster (Derecho/GCS) — not reachable from CI.
+    import os
+    if cache_dir and os.environ.get("LEGOESM_ERA5_LOCAL_CACHE"):
         # Year-SCOPE the cache store.  ensure_local_cache keys only on path
         # existence — it does NOT verify an existing store covers the requested
         # years — so a shared cache_dir reused across runs/phases with different
         # spans would silently read a stale/narrow subset (codex).  Give each
         # distinct span its own subdir so the existence check is never stale.
-        import os
         _yrs = _training_year_range(windows, config)
         _scoped = os.path.join(os.fspath(cache_dir), f"y{_yrs[0]}_{_yrs[1]}")
         store = str(ensure_local_cache(era5_config, _scoped, years=_yrs))
