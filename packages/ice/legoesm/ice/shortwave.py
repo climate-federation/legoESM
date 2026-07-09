@@ -163,14 +163,29 @@ def _band_albedo_bare_ice(
 
 def _band_albedo_pond(
     h_pond: jnp.ndarray,
+    alpha_ice_vis: jnp.ndarray,
+    alpha_ice_nir: jnp.ndarray,
     *,
-    alpha_max_vis: float,
-    alpha_max_nir: float,
+    alpha_deep_vis: float,
+    alpha_deep_nir: float,
     h_pond_sat: float = _H_POND_SAT_M,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Melt-pond two-band albedo (saturates with depth)."""
-    ramp = jnp.clip(h_pond / jnp.maximum(h_pond_sat, 1e-6), 0.0, 1.0)
-    return alpha_max_vis * ramp, alpha_max_nir * ramp
+    """Melt-pond two-band albedo — DECREASES with depth.
+
+    A shallow pond looks like the wet ice it sits on; deepening water
+    absorbs more in the column and darkens toward the deep-pond floor
+    ``alpha_deep_*`` (Ebert & Curry 1993; Briegleb & Light 2007).  The
+    old form ramped UP with depth (a zero-depth pond went perfectly
+    black, a deep pond was brightest) — the sign was inverted.
+    """
+    # depth 0 -> ice albedo (fresh pond ~ wet ice); depth >= h_sat -> deep floor.
+    # Clamp the deep floor to the underlying ice albedo so thin (dark) ice can't
+    # brighten as the pond deepens — monotone non-increasing in depth (codex).
+    decay = jnp.clip(h_pond / jnp.maximum(h_pond_sat, 1e-6), 0.0, 1.0)
+    deep_vis = jnp.minimum(alpha_deep_vis, alpha_ice_vis)
+    deep_nir = jnp.minimum(alpha_deep_nir, alpha_ice_nir)
+    return (alpha_ice_vis + (deep_vis - alpha_ice_vis) * decay,
+            alpha_ice_nir + (deep_nir - alpha_ice_nir) * decay)
 
 
 def delta_eddington_albedo(
@@ -236,9 +251,9 @@ def delta_eddington_albedo(
         alpha_melt_nir=constants.alpha_ice_melt_nir,
     )
     pond_vis, pond_nir = _band_albedo_pond(
-        pond_depth,
-        alpha_max_vis=constants.alpha_pond_max_vis,
-        alpha_max_nir=constants.alpha_pond_max_nir,
+        pond_depth, ice_vis, ice_nir,
+        alpha_deep_vis=constants.alpha_pond_max_vis,
+        alpha_deep_nir=constants.alpha_pond_max_nir,
     )
 
     # Coverage fractions (snow on top wins; ponds occupy a fraction of

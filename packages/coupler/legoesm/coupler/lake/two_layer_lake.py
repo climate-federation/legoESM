@@ -88,9 +88,12 @@ def step_lake(
             L_latent=L_eff,
         )
 
-    # Radiation
+    # Radiation.  A frozen lake reflects like ice/snow, not open water —
+    # completes the ``is_frozen`` switch already applied to q_sfc and L_eff.
+    # (Diagnostic-only ice: no prognostic thickness yet; upgrade = FLake ice.)
+    albedo_eff = jnp.where(is_frozen, config.albedo_lake_ice, config.albedo_lake)
     sw_net, lw_net, lw_up = surface_radiation_fluxes(
-        forcing.sw_down, forcing.lw_down, T_epi, config.albedo_lake,
+        forcing.sw_down, forcing.lw_down, T_epi, albedo_eff,
         config.emissivity_lake,
     )
 
@@ -202,7 +205,11 @@ def step_lake(
     freshwater_flux = forcing.precip_total - evap_rate
     response = TileResponse(
         T_sfc=T_epi_new,
-        albedo=jnp.full(T_epi.shape, config.albedo_lake, dtype=_t_dtype),
+        # Reported albedo tracks the POST-step phase (like q_surface_new): the
+        # atmosphere sees the end-of-step surface next.  (SW absorbed THIS step
+        # used the pre-step albedo_eff above — correct for the state it had.)
+        albedo=jnp.where(is_frozen_new, config.albedo_lake_ice,
+                         config.albedo_lake).astype(_t_dtype),
         emissivity=jnp.full(T_epi.shape, config.emissivity_lake, dtype=_t_dtype),
         z0=jnp.full(T_epi.shape, config.z0_lake, dtype=_t_dtype),
         q_surface=q_sfc_new,
