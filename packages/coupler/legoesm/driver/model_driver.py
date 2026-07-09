@@ -7235,10 +7235,13 @@ class ModelDriver:
             solar_weights=ctx["solar_weights"], s_0=ctx["current_s_0"],
             o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
             ghg_vmr=ctx["ghg_vmr"],
-            # Transient land-use cover for the training segment (None when off); the
-            # training step is un-jitted (run_segment.raw) but honouring the traced
-            # cover keeps training and production on the same land path.
-            land_ml_params=self._transient_land_ml_params(day),
+            # NOTE: transient cover is deliberately NOT injected here.  The training
+            # segment returns run_segment.raw (un-jitted), so the land calibration
+            # differentiates w.r.t. the ``pipe.land_ml_params`` ATTRIBUTE (read fresh
+            # each trace — see test_build_training_segment_land_gradient); a non-None
+            # land_ml_params forcing leaf would SHADOW that attribute and break the
+            # gradient.  The un-jitted path never had the closure-bake problem the
+            # traced arg fixes (that is a production-only, jitted _run_compiled fix).
         )
         # SPMD: commit grid-shaped forcing leaves to the state's sharding
         # (no-op single-device / mpi4jax-distributed) — see shard_forcing.
