@@ -3267,6 +3267,82 @@ class ModelDriver:
                 global_arr, self._layout,
             )
 
+    def _write_blowup_state(self, step: int, day: float) -> None:
+        """Persist the FAILING state as ``blowup_state_day_XXXX.npz`` for autopsy.
+
+        Blowups used to discard the non-finite state ("caught at checkpoint;
+        not written"), leaving nothing to inspect — the #871 hunt had only the
+        last *healthy* checkpoint.  Reuse the canonical writer, then RENAME the
+        produced ``checkpoint_day_XXXX.npz`` (+ ``.meta.json``) so (a) every
+        backend branch of ``save_checkpoint`` is covered without touching its
+        naming, and (b) the restart-chain glob (``checkpoint_day_*.npz``) can
+        NEVER auto-resume from the poisoned state.  Fail-open: a dump failure
+        must not mask the BLOWUP status itself.
+        """
+        # ``save_checkpoint`` branches use TWO filename conventions (codex):
+        # the MPAS branch writes the ABSOLUTE rounded day, the generic branch
+        # writes the ELAPSED truncated day (day - config.start_day).  Don't
+        # guess which fires — protect BOTH candidates, then detect which one
+        # the writer actually produced.
+        _start = float(getattr(self.config, "start_day", 0.0) or 0.0)
+        _days = {int(round(day)), int(day - _start)}
+        # Both filename CONVENTIONS x both FORMS: single-file ``.npz`` and the
+        # distributed per-rank checkpoint DIRECTORY (``checkpoint_day_NNNN/``)
+        # — Path.rename moves a directory just like a file.
+        candidates = [self._output_dir / f"checkpoint_day_{d:04d}{suf}"
+                      for d in sorted(_days) for suf in (".npz", "")]
+        # Filesystem ops are ROOT-ONLY and BEST-EFFORT (each in its own try):
+        # under MPI every rank calls this helper (post-bcast) and the writer
+        # is collective, so a rename raced/failed on one rank must NEVER make
+        # that rank skip ``save_checkpoint`` while the others enter it — that
+        # hangs the collective (codex critical).  All ranks always reach the
+        # save call; only root touches files.
+        _is_root = getattr(self, "_mpi_rank", None) in (None, 0)
+        backups: list[tuple] = []
+        if _is_root:
+            # A HEALTHY checkpoint can already exist under a candidate name
+            # (daily-print blowup at day N.x after the periodic write at N.0).
+            # Move every existing candidate (+meta) aside so the sick-state
+            # write can't clobber it; restored below.
+            try:
+                for c in candidates:
+                    for p in (c, c.with_name(c.stem + ".meta.json")):
+                        if p.exists():
+                            b = p.with_name(p.name + ".pre_blowup")
+                            p.rename(b)
+                            backups.append((b, p))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"Blow-up dump: backup step failed: {exc!r}")
+        try:
+            self.save_checkpoint(step, day)
+        except Exception as exc:  # noqa: BLE001 — forensics must never mask the blowup
+            logger.warning(f"Blow-up dump: state write failed (non-fatal): {exc!r}")
+        if _is_root:
+            try:
+                src = next((c for c in candidates if c.exists()), None)
+                if src is not None:
+                    dst = src.with_name(src.name.replace(
+                        "checkpoint_day_", "blowup_state_day_"))
+                    src.rename(dst)
+                    src_meta = src.with_name(src.stem + ".meta.json")
+                    if src_meta.exists():
+                        src_meta.rename(dst.with_name(dst.stem + ".meta.json"))
+                    logger.error(f"Blow-up state written for autopsy: {dst}")
+                else:
+                    logger.warning(
+                        "Blow-up dump: writer produced none of "
+                        f"{[c.name for c in candidates]} (distributed/custom "
+                        "layout?); state not saved.")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"Blow-up dump failed (non-fatal): {exc!r}")
+            for b, p in backups:   # ALWAYS restore the healthy checkpoints
+                try:
+                    b.rename(p)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        f"Blow-up dump: could not restore {p.name} from "
+                        f"{b.name}: {exc!r}")
+
     def save_checkpoint(self, step: int, day: float) -> None:
         """Save checkpoint to output directory using unified restart API.
 
@@ -5263,6 +5339,9 @@ class ModelDriver:
                 if not T_finite:
                     run_status = f"BLOWUP at day {elapsed_day:.1f}"
                     logger.error(run_status)
+                    self._write_blowup_state(
+                        start_step + step + 1,
+                        START_DAY + (step + 1) * DT / 86400.0)
                     break
 
             # Periodic checkpoint for the 100-yr restart chain — cadence is
@@ -5288,7 +5367,10 @@ class ModelDriver:
                 if not bool(_finite):
                     _bad_day = START_DAY + (step + 1) * DT / 86400.0
                     run_status = f"BLOWUP at day {_bad_day - START_DAY:.1f}"
-                    logger.error(f"{run_status} (caught at checkpoint; not written)")
+                    logger.error(
+                        f"{run_status} (not a resumable checkpoint; writing "
+                        "blowup_state for autopsy)")
+                    self._write_blowup_state(start_step + step + 1, _bad_day)
                     break
                 _ckpt_day = START_DAY + (step + 1) * DT / 86400.0
                 _ckpt = getattr(self, "_checkpoint_callback", None) or self.save_checkpoint
@@ -5798,6 +5880,7 @@ class ModelDriver:
                 if not T_finite:
                     run_status = f"BLOWUP at day {elapsed_day:.1f}"
                     logger.error(run_status)
+                    self._write_blowup_state(step + 1, self._current_day)
                     break
 
             # Periodic checkpoint (FIX_RESTART_TIME iteration 4) —
@@ -5824,7 +5907,9 @@ class ModelDriver:
                     run_status = (
                         f"BLOWUP at day {self._current_day - START_DAY:.1f}")
                     logger.error(
-                        f"{run_status} (caught at checkpoint; not written)")
+                        f"{run_status} (not a resumable checkpoint; writing "
+                        "blowup_state for autopsy)")
+                    self._write_blowup_state(step + 1, self._current_day)
                     break
                 self.save_checkpoint(step + 1, self._current_day)
 
@@ -6412,6 +6497,7 @@ class ModelDriver:
                 status = f"BLOWUP at step {current_step}"
                 logger.info("operator-split tiled cube: %s (%.1fs)",
                             status, time.time() - t0)
+                self._write_blowup_state(current_step, day)
                 return status
             self._current_day = day
             if self._segment_callback is not None:
@@ -6609,6 +6695,9 @@ class ModelDriver:
                 if diag_steps > 0:
                     self._save_lightweight_timeseries(
                         _ts, f"BLOWUP at day {day:.3f}", t0)
+                # State is gathered at this point (tiled_exit above), so the
+                # forensic dump sees the full failing state.
+                self._write_blowup_state(start_step + step_done, day)
                 return f"BLOWUP at day {day:.3f}"
             abs_step = start_step + step_done
             if diag_steps > 0 and abs_step % diag_steps == 0:
@@ -6934,6 +7023,9 @@ class ModelDriver:
                 if _io_rank:
                     logger.info("operator-split SPMD run: %s (%.1fs)",
                                 status, time.time() - t0)
+                # Replicated verdict -> all ranks call in lockstep; the
+                # helper's filesystem ops are root-gated internally.
+                self._write_blowup_state(current_step, day)
                 return status
             # current_step == seg_end_step now, so ``day`` is the segment-end day.
             self._current_day = day
@@ -8141,6 +8233,9 @@ class ModelDriver:
                 if _is_root_seg:
                     logger.warning(f"  {error}")
                 run_status = error
+                # All ranks reach here post-bcast, so the (possibly
+                # collective) checkpoint write inside the dump is consistent.
+                self._write_blowup_state(current_step, day)
                 break
 
             # Diagnostics
@@ -8787,6 +8882,7 @@ class ModelDriver:
                 if error:
                     logger.warning(f"  {error}")
                     run_status = error
+                    self._write_blowup_state(step + 1, day)
                     break
 
                 # Refresh coupling-facing carry_aux entries.  UPDATE —
