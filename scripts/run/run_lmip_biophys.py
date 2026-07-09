@@ -50,7 +50,7 @@ from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
 from legoesm.land.canopy import CanopyConfig
 from legoesm.land.surface_scheme import SimpleSEBConfig
-from legoesm.land.carbon.stomata import StomataConfig
+from legoesm.land.stomata import StomataConfig
 from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
 from legoesm.land.slab_land import step_land
 from legoesm.land.boundary_data import init_land_surface_data, make_step_land_params_updater
