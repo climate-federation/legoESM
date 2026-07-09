@@ -94,6 +94,13 @@ class LandSurfaceParams(NamedTuple):
     SAI: jax.Array | None = None   # Stem area index [0, 3] m2/m2
     htop: jax.Array | None = None  # Canopy foliage top height [0.1, 50] m
     hbot: jax.Array | None = None  # Canopy foliage bottom height [0, 10] m
+    # Big-leaf (SimpleSEB) C4 flag — the DOMINANT PFT's C4 flag (0/1) in
+    # production, matching the two-leaf canopy's fC4 origin. Selects the pure C3
+    # or pure C4 canonical-FvCB pathway in the coupled A-gs solver
+    # (``land/stomata.py::solve_coupled_farquhar_ci``); a single big leaf is one
+    # pathway. None => pure C3 (the correct default for a column with no C4 data;
+    # e.g. the prescribed-PFT / idealized paths that do not populate it).
+    fC4: jax.Array | None = None   # dominant-PFT C4 flag [0, 1]
 
 
 # =====================================================================
@@ -233,7 +240,7 @@ CLM5_PFT_NAMES: tuple[str, ...] = (
 
 # Each row: one PFT; each column: one parameter in PARAM_NAMES order
 # NOTE: the C4 PFT rows (c4_grass, crop_c4) are consumed by the C3-only
-# Farquhar biochemistry in land/carbon/stomata.py -- their photosynthesis is
+# Farquhar biochemistry in land/stomata.py -- their photosynthesis is
 # run through C3 kinetics as a documented approximation, NOT a Collatz (1992)
 # C4 scheme, so C4 CO2 sensitivity / compensation point are not represented.
 _CLM5_PFT_TABLE_RAW: list[list[float]] = [

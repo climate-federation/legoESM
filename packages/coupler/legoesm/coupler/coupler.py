@@ -473,8 +473,14 @@ def make_coupler(
         ocean_v_sfc: jnp.ndarray,
         dt: float,
         doy: float = 0.0,
+        year: float | None = None,
     ) -> tuple[SurfaceState, SurfaceToAtm]:
-        """Step all surface tiles and return blended response."""
+        """Step all surface tiles and return blended response.
+
+        ``year`` (optional calendar year) is forwarded to a year-varying land
+        param provider (``year_varying=True``, e.g. transient land-use cover) so
+        the vegetation params track the segment's year; ignored by static
+        providers, so a normal run is byte-identical."""
         if dt <= 0.0:
             raise ValueError(f"dt must be > 0, got {dt!r}")
         if tile_config.f_land.shape != atm_forcing.sw_down.shape:
@@ -492,6 +498,10 @@ def make_coupler(
         if _land_param_provider is not None:
             if _land_features is not None:
                 _lp = _land_param_provider(_land_features)
+            elif year is not None and getattr(_land_param_provider, "year_varying", False):
+                # Transient land-use cover: re-weight vegetation params at this
+                # segment's year (soil frozen).  Only a year-varying provider opts in.
+                _lp = _land_param_provider(year=year)
             else:
                 _lp = _land_param_provider()
             # For slab land: reshape (ncol,) -> spatial shape (e.g. (6,n,n))

@@ -348,3 +348,8 @@ def make_sharded_operator_split_step(
             set_halo_backend(_prev_backend, _prev_topo)
 
     return sharded_split_step
+
+
+# Public alias for the tiled operator-split lane (tiled_operator_split_step)
+# — the no-private-cross-imports ratchet's sanctioned surface.  Same object.
+need_rad_and_time = _need_rad_and_time

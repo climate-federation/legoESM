@@ -483,7 +483,7 @@ Alongside the cube pair above, three further jobs + a build script:
 |---|---|
 | `ocean_gpu_scaling.pbs` | OCEAN weak+strong on one GPU node via `scripts/bench/bench_ocean_latlon_spmd_scaling.py` (full lat-lon C-grid step sharded over 1/2/4 A100; fail-fast `--parity-gate` + `--check-conservation` smoke first). Plain GPU env — no mpi4jax. |
 | `ocean_cpu_scaling.pbs` | OCEAN weak+strong CPU-MPI rank ladder (`bench_ocean_mpi_scaling.py`, `legoesm-mpi` env), with a 2-rank parity+conservation smoke. |
-| `gpu_multinode_scaling.pbs` | MULTI-NODE GPU lanes over jax.distributed + NCCL: A = cube `--cs-spmd` (6 GPU / 2 nodes), C = atm lat-lon `--multicontroller` (8 GPU), D = ocean `--multicontroller` (8 GPU); plus the optional route-A CUDA-aware mpi4jax lane (`RUN_ROUTEA=1`, needs the overlay env). |
+| `gpu_multinode_scaling.pbs` | MULTI-NODE GPU lanes over jax.distributed + NCCL: A = cube `--cs-spmd` (6 GPU / 2 nodes), C = atm lat-lon `--multicontroller` (8 GPU), D = ocean `--multicontroller` (8 GPU); plus the optional route-A CUDA-aware mpi4jax lane (`RUN_ROUTEA=1`, needs the overlay env) and the comm-tuning A/B ladder (`RUN_TUNE=1`, lane T below). |
 | `build_nccl_ofi.sh` | Login-node build of **aws-ofi-nccl** against Derecho's Cray libfabric (no NCCL build dep — the plugin vendors the net-API headers and is dlopen'd by the jax-wheel NCCL). |
 
 NCCL on Slingshot-11 has NO native CXI support: without the plugin the
@@ -515,3 +515,33 @@ every level. A subdiv-4 smoke with `--parity-gate --check-conservation`
 runs before the timed `ICO_LEVEL` (default L7 = 163842 cells, ~27k
 cells/GPU at np=6) case. 2-process CPU federation gate:
 `tests/parallel/test_mpas_spmd_multicontroller_selfspawn.py`.
+
+
+## 2026-07 lane T: comm-tuning A/B ladder (`RUN_TUNE=1`)
+
+Once the route-B lanes are green on this machine, the remaining strong-
+scaling headroom at small tiles is **per-step message count × latency**
+(census: cube 46 collective-permutes/step at 6 devices with field packing
+already at floor; atm latlon 41 → 29 behind the fused-halo flag — see
+`docs/performance/scaling/spmd_message_census_2026-07-08.md`). Lane T runs
+the ranked rungs as same-allocation A/B arms (a fresh `base` control arm is
+re-run in the same job — never compare against an earlier job's numbers):
+
+1. `fused` — `LEGOESM_LATLON_SPMD_FUSED_HALO=1` (bit-identical multi-pad
+   packing; the flag's default flips only on this wall-clock receipt).
+2. `xla` — `--xla_gpu_collective_permute_combine_threshold_bytes=32MiB` +
+   `--xla_gpu_enable_pipelined_p2p=true` (merge the SPMD partitioner's
+   independent ppermute rounds; overlap them with compute).
+3. `pgle` — `JAX_ENABLE_PGLE=true JAX_PGLE_PROFILING_RUNS=3` (profile-guided
+   collective scheduling; recompiles after the profiling runs, so it stays
+   per-run opt-in — never a `backend.py` default).
+4. If still send/recv-bound: sweep `NCCL_NCHANNELS_PER_NET_PEER` 4→8/16.
+
+```bash
+qsub -v RUN_TUNE=1,RUN_NCCL=0,RUN_LATLON=0,RUN_OCEAN=0,RUN_MPAS=0 \
+     scripts/cluster/scaling_derecho/gpu_multinode_scaling.pbs
+```
+
+Outputs land under `$OUTDIR/_ab_tuning/` — a path the tidy-CSV aggregator
+deliberately skips, so A/B receipts never contaminate the scaling curves;
+read the per-arm `steady_median_ms` / `sypd` straight from the JSONL rows.
