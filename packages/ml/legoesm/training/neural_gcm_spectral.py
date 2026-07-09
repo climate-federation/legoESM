@@ -1462,6 +1462,29 @@ def spectral_state_vs_carry_loss(
 # Data loading
 # =============================================================================
 
+def _training_year_range(windows, config) -> tuple[int, int]:
+    """``(min_year, max_year + 1)`` spanned by the windows THIS call loads.
+
+    Prefer the explicit ``windows`` argument (the data ``load_training_data``
+    actually reads this call) over ``config.windows`` — a caller can pass a
+    ``windows`` set that differs from ``config.windows``, and the cache must
+    cover what is read, not what is configured.  Falls back to
+    ``start_year`` + ``n_train_days`` when neither is given.
+
+    The ``+1`` on the max year covers TARGET snapshots that spill into the
+    following year (the rollout lead / ``n_days`` stride).  The cache store is
+    scoped by this range, so each distinct span is its own store and
+    ``ensure_local_cache``'s existence check is never stale across spans.
+    """
+    wins = windows or getattr(config, "windows", None) or ()
+    if wins:
+        years = [int(w[0]) for w in wins]
+        return (min(years), max(years) + 1)
+    start = int(getattr(config, "start_year", 2015) or 2015)
+    n_days = int(getattr(config, "n_train_days", 0) or 0)
+    return (start, start + max(0, (n_days - 1) // 365) + 1)
+
+
 def load_training_data(
     config: NeuralGCMSpectralConfig,
     grid: GaussianGrid,
@@ -1503,12 +1526,28 @@ def load_training_data(
     """
     import numpy as np
     from legoesm.training.era5_to_state import (
-        open_era5_zarr, resolve_var, ERA5Slice,
+        open_era5_zarr, resolve_var, ERA5Slice, ensure_local_cache,
     )
     era5_config = TrainingERA5Config(dt_hours=6)
 
-    # Open store once
+    # Open store once.  Wire the (previously DEAD) ``cache_dir`` to the local
+    # ERA5 zarr cache: without it every epoch re-fetched the SAME windows from
+    # GCS (#895, ~50 h/run wasted).  Scope the one-time download to the FULL
+    # training span (``config.windows``, NOT the per-chunk ``windows`` arg) so
+    # the single shared cache store is not built for one chunk's years and then
+    # read stale for the others.  ensure_local_cache is idempotent (skips if the
+    # store already exists), so only the first call pays the download.
     store = era5_config.zarr_store
+    if cache_dir:
+        # Year-SCOPE the cache store.  ensure_local_cache keys only on path
+        # existence — it does NOT verify an existing store covers the requested
+        # years — so a shared cache_dir reused across runs/phases with different
+        # spans would silently read a stale/narrow subset (codex).  Give each
+        # distinct span its own subdir so the existence check is never stale.
+        import os
+        _yrs = _training_year_range(windows, config)
+        _scoped = os.path.join(os.fspath(cache_dir), f"y{_yrs[0]}_{_yrs[1]}")
+        store = str(ensure_local_cache(era5_config, _scoped, years=_yrs))
     ds = open_era5_zarr(store)
 
     # Resolve start offset from config.start_year (defaults to 2015).
