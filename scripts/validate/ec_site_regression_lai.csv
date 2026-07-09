@@ -1,0 +1,12 @@
+# EC-site regression-probe inputs for scripts/validate/ec_site_bigleaf_regression_probe.py
+# lai_median / lai_p90: median and 90th percentile of the finite `lai` variable in
+#   scripts/validate/ec_site_example_data/<site>.nc on branch feat/ec-site-canopy-validation
+#   (those DifferBESS-derived example NetCDFs are NOT on this branch; this row is the
+#   committed, reproducible provenance record of the values used here).
+# T_air_K / q_kgkg: representative summer-noon regime values (hand-chosen, not from data),
+#   held identical across the two revisions compared so they are not a confound.
+site,pft,T_air_K,q_kgkg,lai_median,lai_p90
+US-MMS,DBF,298.0,9.0e-3,3.19,5.92
+DE-Obe,ENF,288.0,6.0e-3,2.33,4.16
+US-Ton,SAV,303.0,7.0e-3,1.02,2.12
+DE-Hai,DBF,293.0,7.0e-3,2.82,5.79
