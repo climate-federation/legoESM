@@ -95,3 +95,24 @@ ppermute halos), 6 tasks = 2 nodes x 3 GPUs (`nCells = 10*4^L + 2` splits
 evenly for 1/2/3/6). Subdiv-4 parity+conservation smoke gates the timed
 `ICO_LEVEL` (default L7) case. Federation gate:
 `tests/parallel/test_mpas_spmd_multicontroller_selfspawn.py`.
+
+
+## 2026-07 lane T: comm-tuning A/B ladder (`RUN_TUNE=1`)
+
+Derecho-twin of the tuning ladder (full rationale + census numbers:
+`docs/performance/scaling/spmd_message_census_2026-07-08.md` and the
+Derecho README's lane-T section). Arms on the atm latlon (np=8), ocean
+(np=8) and cube cs-spmd (np=6, `base`/`xla` only) lanes, all within ONE
+allocation against a fresh `base` control arm:
+`fused` (`LEGOESM_LATLON_SPMD_FUSED_HALO=1`, bit-identical packing,
+trace receipt 41→29 CPs/step), `xla`
+(`--xla_gpu_collective_permute_combine_threshold_bytes=32MiB` +
+`--xla_gpu_enable_pipelined_p2p=true`), `pgle`
+(`JAX_ENABLE_PGLE=true`, per-run opt-in — recompiles after profiling).
+
+```bash
+sbatch --export=ALL,RUN_TUNE=1,RUN_NCCL=0,RUN_LATLON=0,RUN_OCEAN=0,RUN_MPAS=0 \
+    scripts/cluster/scaling_levante/gpu_multinode_scaling.sbatch
+```
+
+Outputs under `$OUTDIR/_ab_tuning/` (aggregator-skipped by design).

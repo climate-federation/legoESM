@@ -53,7 +53,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
+from metadata import annotate_incomplete, scaling_metadata, tidy_throughput_fields  # noqa: E402
 
 #: Parity tolerances vs the serial untiled step — the adapter gate's
 #: f32-honest bounds (exact f32 ulps of the field scales; a real stage
@@ -268,6 +268,18 @@ def main() -> int:
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=total_cells,
         hlo_collective_permutes=n_ppermute,
+    )
+    # Flat aggregator-compatible identity + metric fields (see the latlon
+    # twin).  grid_type (not just rec["grid"]) is the aggregator's key.
+    rec.update(
+        grid_type="cubed-sphere",
+        n_levels=args.nlev,
+        precision="float64" if jax.config.jax_enable_x64 else "float32",
+        physics_level="none",
+        backend=jax.default_backend(),
+        **tidy_throughput_fields(
+            dt_seconds=args.dt, time_per_step_ms=med,
+            total_cells=total_cells),
     )
     from legoesm.parallel.early_init import nccl_transport_report
     _nccl_report = nccl_transport_report()

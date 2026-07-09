@@ -63,7 +63,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # under rec["metadata"] so a virtual-CPU-device proxy, a gloo/TCP fabric run,
 # or an f32 ablation is falsifiable from the JSONL row alone.  metadata.py
 # imports JAX lazily, so this is safe before jax.distributed.initialize.
-from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
+from metadata import annotate_incomplete, scaling_metadata, tidy_throughput_fields  # noqa: E402
 
 # SPMD full-step parity tolerances — the FLOATING-POINT RE-ASSOCIATION floor
 # of the sharded step (ppermute halo + mass-fix psum reduction-order change),
@@ -398,6 +398,21 @@ def main() -> int:
         steady_min_ms=round(float(np.min(steady)), 2),
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=int(mesh.nCells) * args.nlev,
+    )
+    # Flat aggregator-compatible identity + metric fields (see the latlon
+    # twin): resolution = subdivision level, matching run_cpu_mpi_scaling's
+    # icosahedral convention so both lanes land on the same plot curves.
+    rec.update(
+        grid_type="icosahedral",
+        resolution=args.subdivision,
+        n_levels=args.nlev,
+        mode="strong",  # this bench fixes the mesh and sweeps devices
+        precision="float64" if jax.config.jax_enable_x64 else "float32",
+        physics_level=args.physics,
+        backend=jax.default_backend(),
+        **tidy_throughput_fields(
+            dt_seconds=dt, time_per_step_ms=med,
+            total_cells=int(mesh.nCells) * args.nlev),
     )
     rec["metadata"] = annotate_incomplete(scaling_metadata(
         grid="icosahedral",

@@ -2,7 +2,10 @@
 
 Walks a results root (default ``results/bcw_scaling``), reads every flat
 per-case JSON written by ``run_cpu_mpi_scaling.py`` (and the equivalent
-single-process ``run_levante_gpu_scaling.py`` rows), and emits one tidy row per
+single-process ``run_levante_gpu_scaling.py`` rows), plus the ``.jsonl``
+records appended by the SPMD bench lanes (``bench_atm_latlon_spmd_scaling``,
+``bench_mpas_spmd_scaling``, ``bench_ocean_latlon_spmd_scaling``,
+``bench_cube_tiled_step_scaling``), and emits one tidy row per
 measured point with the columns the publication plotter consumes:
 
     backend, grid, case, precision, mode, n_devices, resolution,
@@ -94,7 +97,7 @@ def resolve_backend(d: dict, source: Path) -> str:
     Newer runs serialize ``backend`` (cpu/gpu/cuda/tpu); older ones don't, so
     we still infer CPU-vs-GPU from the output-dir name as a fallback.
     """
-    jb = str(d.get("backend", "") or "").lower()
+    jb = str(d.get("backend", "") or d.get("platform", "") or "").lower()
     if jb in ("gpu", "cuda", "rocm"):
         return "GPU"
     if jb == "cpu":
@@ -105,11 +108,22 @@ def resolve_backend(d: dict, source: Path) -> str:
 
 
 def _row_from_json(d: dict, source: Path) -> dict | None:
-    """Build a tidy row from one flat per-case JSON, or None if not a case."""
+    """Build a tidy row from one flat per-case JSON, or None if not a case.
+
+    Serves BOTH the run_cpu_mpi_scaling flat JSONs (n_ranks semantics) and
+    the SPMD bench-lane JSONL records (n_devices semantics; single-process
+    multi-device, so n_ranks would collapse the whole ladder to 1).
+    Virtual-CPU-device proxy rows (forced host-platform devices) are
+    communication-overhead probes, NOT hardware scaling — skipped so they
+    never contaminate a CPU curve.
+    """
     if "sypd" not in d or "grid_type" not in d:
         return None
+    md = d.get("metadata")
+    if isinstance(md, dict) and md.get("virtual_cpu_devices"):
+        return None
     grid = d["grid_type"]
-    n_dev = d.get("n_ranks", d.get("n_gpus"))
+    n_dev = d.get("n_devices", d.get("n_ranks", d.get("n_gpus")))
     if n_dev is None:
         return None
     phys = d.get("physics_level", "none")
@@ -117,11 +131,12 @@ def _row_from_json(d: dict, source: Path) -> dict | None:
     backend = resolve_backend(d, source)
     cpt = int(d.get("cpus_per_task") or 1)
     n_cores = int(d.get("n_cores") or (int(n_dev) * cpt))
+    is_ocean = str(d.get("component", "")).lower() == "ocean"
     return {
-        "component": "atm",
+        "component": "ocean" if is_ocean else "atm",
         "backend": backend,
         "grid": grid,
-        "case": _CASE.get(phys, phys),
+        "case": "ocean" if is_ocean else _CASE.get(phys, phys),
         "precision": d.get("precision", ""),
         "mode": d.get("mode", ""),
         "n_devices": int(n_dev),
@@ -400,26 +415,30 @@ def collect(roots) -> tuple[list[dict], int]:
                         _add(row)
             else:
                 _add(_row_from_json(d, jf))
-        # Route-B SPMD throughput records (bench_{atm,ocean}_latlon_spmd_scaling
-        # --multicontroller, swept by routeb_sweep.pbs) are JSONL, one record per
-        # line -- ingested so they plot through the same finalize pipeline.
+        # SPMD bench lanes (bench_atm_latlon_spmd_scaling, bench_mpas_spmd_scaling,
+        # bench_ocean_latlon_spmd_scaling, bench_cube_tiled_step_scaling) append
+        # one flat record per line to a .jsonl.  Post-#894 they emit canonical
+        # top-level sypd/grid_type (tidy_throughput_fields) -> the SHARED
+        # _row_from_json builds the row.  Legacy records (pre-#894: throughput-only
+        # steady_median_ms + metadata.grid, no top-level sypd) fall back to
+        # _row_from_spmd_record so existing result dirs still aggregate.
         for jf in sorted(rp.rglob("*.jsonl")):
             if any(part.startswith(("val_", "_ab_")) for part in jf.parts):
                 continue
             try:
-                text = jf.read_text()
+                lines = jf.read_text().splitlines()
             except OSError:
                 continue
-            for line in text.splitlines():
+            for line in lines:
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    rec = json.loads(line)
+                    d = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if isinstance(rec, dict):
-                    _add(_row_from_spmd_record(rec, jf))
+                if isinstance(d, dict):
+                    _add(_row_from_json(d, jf) or _row_from_spmd_record(d, jf))
     rows = sorted(
         best.values(),
         key=lambda r: (r["backend"], r["grid"], r["case"], r["precision"],

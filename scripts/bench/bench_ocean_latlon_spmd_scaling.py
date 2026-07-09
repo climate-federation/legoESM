@@ -55,7 +55,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 # under rec["metadata"] so a virtual-CPU-device proxy, a gloo/TCP fabric run,
 # or an f32 ablation is falsifiable from the JSONL row alone.  metadata.py
 # imports JAX lazily, so this is safe before jax.distributed.initialize.
-from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
+from metadata import annotate_incomplete, scaling_metadata, tidy_throughput_fields  # noqa: E402
 
 # SPMD full-step parity tolerances — the FLOATING-POINT RE-ASSOCIATION floor
 # of the sharded split-explicit barotropic (ppermute/psum reduction-order
@@ -377,6 +377,20 @@ def main() -> int:
         steady_min_ms=round(float(np.min(steady)), 2),
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=n_lat * args.n_lon * args.nlev,
+    )
+    # Flat aggregator-compatible identity + metric fields (see the atm
+    # latlon twin): rows become visible to aggregate_bcw_scaling.py /
+    # the CPU-vs-GPU plots, keyed as component="ocean" (already in rec).
+    rec.update(
+        grid_type="tripole" if args.tripole else "latlon",
+        resolution=n_lat,
+        n_levels=args.nlev,
+        precision="float64" if jax.config.jax_enable_x64 else "float32",
+        physics_level="none",
+        backend=jax.default_backend(),
+        **tidy_throughput_fields(
+            dt_seconds=args.dt, time_per_step_ms=med,
+            total_cells=n_lat * args.n_lon * args.nlev),
     )
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
         estimate_barotropic_halo_messages,
