@@ -21,9 +21,12 @@ mutates the production ``CarbonConfig`` defaults (production keeps static
 Python-float leaves).
 
 Modular loss registry: ``LOSSES = {obs_name: LossTerm(target, extractor, weight)}``
--- v1 is ``soc`` (``som_total`` vs observed SOC, cover-weighted MSE via
-``legoesm.ml.loss.area_weighted_mse``).  ``biomass`` / ``lai`` / ``sif`` / ``d13c``
-plug in later by adding a registry entry, WITHOUT touching the loop.
+-- ``soc`` (``som_total`` vs observed SOC, cover-weighted MSE via
+``legoesm.ml.loss.area_weighted_mse``) plus, under ``--with-sif``, ``sif`` (a
+single-step per-archetype simulated-SIF forward vs observed SIF -- constrains
+photosynthesis/GPP, the boreal-productivity lever).  Both are summed by ``_total_loss``
+WITHOUT touching the loop; ``biomass`` / ``lai`` / ``d13c`` plug in the same way (add a
+registry entry).
 
 Login-node policy: the archetype spin-up JIT-compiles the coupled land+carbon
 model and its reverse-mode; run this via ``sbatch`` / ``srun`` on a compute node,
@@ -69,6 +72,7 @@ from legoesm.training.trainable_params import TrainablePhysicsParams
 # --- units / identifiers -------------------------------------------------------
 _G_PER_KG = 1000.0                 # gC/m2 -> kgC/m2 (exact conversion)
 CARBON_SCHEME_KEY = "land.carbon"  # param_collector scheme_key for CarbonConfig
+SIF_SCHEME_KEY = "land.canopy.sif"  # param_collector scheme_key for SIFConfig (--with-sif)
 # Organic-CARBON per organic-MATTER fraction (van Bemmelen 1/1.724 = 0.58): the
 # raw CLM5 surfdata ORGANIC field is organic MATTER density (its units attribute
 # declares 0.58 gC/gOM). The harmonized legoesm_surfdata "organic" derives from
@@ -120,6 +124,10 @@ DEFAULT_MAX_ARCHETYPES = 40       # representative-subset cap (0 = keep all)
 # path for fast mode / tiny runs.
 DEFAULT_GRAD_CHUNK = 4
 DEFAULT_OUTDIR = Path("results/carbon_calibration")
+# Loss-term weights. SOC (kgC/m2, O(10)) and SIF (umol/m2/s, O(10)) live on different
+# scales, so the summed cover-weighted MSE weights each term; SOC is the reference (1).
+W_SOC = 1.0
+DEFAULT_SIF_WEIGHT = 1.0           # --sif-weight; balances the sif MSE against soc
 GRAD_NONZERO_TOL = 1.0e-14
 # Mean analytic-vs-spin-up SOC relative error above which the fast forward is
 # flagged as an unreliable proxy for the model (a loud run-log warning, not a
@@ -146,20 +154,48 @@ class LossTerm(NamedTuple):
     """One observation term of the calibration loss.
 
     ``target`` is the per-archetype observed value (``(n_arch,)`` in the same
-    units as ``extractor``'s output).  ``extractor(CarbonState) -> (n_arch,)``
-    pulls the modelled counterpart from the equilibrium pools.  ``weight`` is the
-    scalar term weight in the summed loss.  The registry is a dict of these so
+    units as ``extractor``'s output).  ``extractor(preds) -> (n_arch,)`` pulls the
+    modelled counterpart from the predictions bundle.  ``weight`` is the scalar term
+    weight in the summed loss.  The registry is a dict of these so
     ``biomass`` / ``lai`` / ``sif`` / ``d13c`` add WITHOUT touching the loop.
-    """
+
+    ``mask`` (optional ``(n_arch,)`` of 1.0/0.0) marks archetypes where THIS term's
+    observation is present.  It multiplies the term's per-archetype squared error, so an
+    archetype missing THIS observable (but present in another) contributes 0 to this term
+    yet still counts in the SINGLE shared cover-weight denominator -- letting one stream's
+    gaps not discard another stream's signal (the observations need not overlap).  ``None``
+    = every archetype observed (the default / SOC-only path)."""
     target: jax.Array
     extractor: Callable[[Any], jax.Array]
     weight: float
+    mask: Any = None
 
 
-def _soc_extractor(eq) -> jax.Array:
-    """Model per-archetype SOC [kgC/m2] = total SOM / 1000 (gC/m2 -> kgC/m2)."""
+def _soc_extractor(preds) -> jax.Array:
+    """Model per-archetype SOC [kgC/m2] = total SOM / 1000 (gC/m2 -> kgC/m2).
+
+    Reads the SLOW forward's equilibrium ``CarbonState`` from the predictions bundle
+    (``preds["eq"]``); the FAST closed-form path supplies SOC directly via
+    :func:`_fast_soc_extractor`.
+    """
     from legoesm.land.carbon.config import som_total
-    return som_total(eq) / _G_PER_KG
+    return som_total(preds["eq"]) / _G_PER_KG
+
+
+def _fast_soc_extractor(preds) -> jax.Array:
+    """Model per-archetype SOC [kgC/m2] from the FAST closed-form forward.
+
+    The fast-analytic path computes SOC (``analytic_som_soc / 1000``) directly, so the
+    predictions bundle carries it under ``preds["soc"]`` (already kgC/m2)."""
+    return preds["soc"]
+
+
+def _sif_extractor(preds) -> jax.Array:
+    """Model per-archetype simulated SIF [umol/m2/s] from the predictions bundle.
+
+    The (single-step, spin-up-free) SIF forward is evaluated in the loss and stored under
+    ``preds["sif"]`` (see :func:`legoesm.land.carbon.sif_forward.simulate_archetype_sif`)."""
+    return preds["sif"]
 
 
 def cover_weighted_mse(
@@ -179,17 +215,29 @@ def cover_weighted_mse(
     return area_weighted_mse(pred3, target3, jnp.asarray(cover_weight))
 
 
-def _total_loss(eq, losses: dict[str, LossTerm], cover_weight: jax.Array) -> jax.Array:
-    """Sum the registry: ``sum_k w_k * cover_weighted_mse(extractor_k(eq), target_k)``."""
+def _total_loss(preds, losses: dict[str, LossTerm], cover_weight: jax.Array) -> jax.Array:
+    """Sum the registry: ``sum_k w_k * cover_weighted_mse(extractor_k(preds), target_k)``.
+
+    ``preds`` is the loss's predictions bundle (``{"eq": CarbonState}`` /
+    ``{"soc": ...}`` for the SOC forward, plus ``{"sif": ...}`` when ``--with-sif``); each
+    term's ``extractor`` pulls the modelled counterpart it needs.  Adding a term is a
+    registry entry -- this summation never changes."""
     total = jnp.asarray(0.0, dtype=cover_weight.dtype)
+    csum = jnp.sum(cover_weight)
     for term in losses.values():
-        pred = term.extractor(eq)
-        total = total + term.weight * cover_weighted_mse(
-            pred, term.target, cover_weight)
+        pred = term.extractor(preds)
+        if term.mask is None:
+            total = total + term.weight * cover_weighted_mse(
+                pred, term.target, cover_weight)
+        else:
+            # Masked term: single GLOBAL cover-weight denominator (sum over ALL active
+            # archetypes), numerator masked to this term's observed archetypes.
+            total = total + term.weight * jnp.sum(
+                cover_weight * term.mask * (pred - term.target) ** 2) / csum
     return total
 
 
-def _weighted_sse(eq, losses: dict[str, LossTerm], cover_weight: jax.Array) -> jax.Array:
+def _weighted_sse(preds, losses: dict[str, LossTerm], cover_weight: jax.Array) -> jax.Array:
     """UN-normalized cover-weighted SSE: ``sum_k w_k sum_a cover_a (pred_{k,a}-obs_{k,a})^2``.
 
     The NUMERATOR of :func:`_total_loss` (which divides this by ``sum_a cover_a``):
@@ -206,8 +254,11 @@ def _weighted_sse(eq, losses: dict[str, LossTerm], cover_weight: jax.Array) -> j
     cover = jnp.asarray(cover_weight)
     total = jnp.asarray(0.0, dtype=cover.dtype)
     for term in losses.values():
-        pred = term.extractor(eq)
-        total = total + term.weight * jnp.sum(cover * (pred - term.target) ** 2)
+        pred = term.extractor(preds)
+        sq = cover * (pred - term.target) ** 2
+        if term.mask is not None:
+            sq = sq * term.mask     # zero this term's missing-observation archetypes
+        total = total + term.weight * jnp.sum(sq)
     return total
 
 
@@ -222,26 +273,45 @@ def _filter_params(
     return TrainablePhysicsParams(raw_values=raw_values, constraints=constraints)
 
 
-def build_carbon_trainables(*, som_only: bool = True) -> TrainablePhysicsParams:
-    """Tier-``extended`` ``land.carbon`` trainables, warm-started from the
-    ``CarbonConfig`` production defaults (``build_trainable_params`` seeds each raw
-    leaf from the live NamedTuple default via the inverse sigmoid).
+def build_carbon_trainables(
+    *, som_only: bool = True, with_sif: bool = False,
+) -> TrainablePhysicsParams:
+    """Tier-``extended`` ``land.carbon`` (+ optional ``land.canopy.sif``) trainables,
+    warm-started from the production ``CarbonConfig`` / ``SIFConfig`` defaults
+    (``build_trainable_params`` seeds each raw leaf from the live NamedTuple default via
+    the inverse sigmoid).
 
-    ``som_only`` (default) restricts to the seven fast-analytic-valid SOM fields
-    (:data:`SOM_FIELDS`) -- the Stage-B v1 calibration target -- so the optimizer
-    is not handed the ~30 DALEC phenology/allocation leaves that barely move
-    equilibrium SOC (nor ``Q10_het_exp``, whose fast-mode gradient is partial --
-    see the comment on :data:`SOM_FIELDS`).  Pass ``som_only=False`` to expose the
-    full tier-2 carbon set (only valid with ``--slow-spinup-grad``; see
-    :func:`_finalize_args`).
+    ``som_only`` (default) restricts the CARBON set to the seven fast-analytic-valid SOM
+    fields (:data:`SOM_FIELDS`) -- the Stage-B v1 calibration target -- so the optimizer
+    is not handed the ~30 DALEC phenology/allocation leaves that barely move equilibrium
+    SOC (nor ``Q10_het_exp``, whose fast-mode gradient is partial -- see the comment on
+    :data:`SOM_FIELDS`).  Pass ``som_only=False`` to expose the full tier-2 carbon set
+    (only valid with ``--slow-spinup-grad``; see :func:`_finalize_args`).
+
+    ``with_sif`` additionally includes the tier-1/2 ``SIFConfig`` fluorescence params
+    (``kn0``/``kn_beta``/``kn_gamma``/``max_electron_yield``/``escape_probability``/
+    ``kf``/``kd``/``kp``) -- ALWAYS kept in full (the SIF forward is a separate single-step
+    diagnostic, not a SOM-pool field, so ``som_only`` never filters them).  Overrides are
+    applied traced INSIDE the loss; production defaults are untouched.
     """
+    scheme_keys = {CARBON_SCHEME_KEY}
+    if with_sif:
+        scheme_keys.add(SIF_SCHEME_KEY)
     params = build_trainable_params(
-        active_scheme_keys={CARBON_SCHEME_KEY}, tier="extended", dtype=jnp.float64)
+        active_scheme_keys=scheme_keys, tier="extended", dtype=jnp.float64)
+    sif_names = {c.name for c in params.constraints
+                 if c.name.startswith(SIF_SCHEME_KEY + ".")}
+    if with_sif and not sif_names:
+        raise ValueError(
+            f"--with-sif requested but no {SIF_SCHEME_KEY} trainables at tier 'extended'; "
+            f"is the spec module registered in param_collector.SPEC_MODULES?")
     if not som_only:
+        # Full tier-2 carbon set (+ all SIF fluorescence params when --with-sif).
         return params
-    keep = {f"{CARBON_SCHEME_KEY}.{f}" for f in SOM_FIELDS}
+    # SOM-only carbon subset, PLUS all SIF fluorescence params.
+    keep = {f"{CARBON_SCHEME_KEY}.{f}" for f in SOM_FIELDS} | sif_names
     have = {c.name for c in params.constraints}
-    missing = keep - have
+    missing = {f"{CARBON_SCHEME_KEY}.{f}" for f in SOM_FIELDS} - have
     if missing:
         raise ValueError(
             f"SOM fields absent from the land.carbon tier-extended trainables: "
@@ -252,6 +322,33 @@ def build_carbon_trainables(*, som_only: bool = True) -> TrainablePhysicsParams:
 def _carbon_overrides(params: TrainablePhysicsParams) -> dict[str, jax.Array]:
     """``{CarbonConfig field -> traced constrained scalar}`` for the loss."""
     return params.to_overrides().get(CARBON_SCHEME_KEY, {})
+
+
+def _sif_overrides(params: TrainablePhysicsParams) -> dict[str, jax.Array]:
+    """``{SIFConfig field -> traced constrained scalar}`` for the sif loss term (empty
+    when ``--with-sif`` is off / no SIF params are trained)."""
+    return params.to_overrides().get(SIF_SCHEME_KEY, {})
+
+
+def _make_sif_forward(table):
+    """Build ``sif_forward(sif_overrides) -> (n_arch,)`` simulated SIF [umol/m2/s] for the
+    given (possibly chunk-sliced) archetype table.
+
+    Precomputes the static per-archetype coupled-Farquhar leaf state ONCE
+    (:func:`legoesm.land.carbon.sif_forward.build_sif_forward`), then each call splices the
+    TRACED SIF overrides into a fresh ``SIFConfig`` (production defaults untouched) and
+    applies the differentiable ``leaf_sif`` kernel -- a single-step graph, no spin-up."""
+    from legoesm.land.canopy.sif import SIFConfig
+    from legoesm.land.carbon.sif_forward import build_sif_forward
+    from legoesm.training.param_collector import apply_param_overrides
+
+    sif_fn = build_sif_forward(table)
+
+    def sif_forward(sif_overrides):
+        cfg = apply_param_overrides(SIFConfig(), sif_overrides)
+        return sif_fn(cfg)
+
+    return sif_forward
 
 
 def _param_values(params: TrainablePhysicsParams) -> dict[str, float]:
@@ -268,6 +365,7 @@ def make_loss_fn(
     table,
     losses: dict[str, LossTerm],
     cover_weight: jax.Array,
+    sif_forward=None,
     n_spinup: int,
     n_verify: int,
     dt: float,
@@ -277,6 +375,12 @@ def make_loss_fn(
     """Build ``loss_fn(params) -> scalar`` with the overrides applied INSIDE
     (traced) via ``equilibrate_archetypes_traced`` -- ``jax.grad`` flows to the SOM
     leaves through the coupled ``lax.scan`` spin-up + the analytic slow-pool reset.
+
+    ``sif_forward`` (when ``--with-sif``) is the single-step SIF forward evaluated on the
+    TRACED SIF overrides; its prediction is added to the bundle under ``preds["sif"]`` and
+    the ``sif`` registry term sums into the loss.  The SIF forward has NO spin-up scan (it
+    does not touch ``equilibrate_archetypes_traced``), and the SIF params do not enter the
+    SOC forward, so the two gradients are block-independent.
     """
     from legoesm.land.carbon.global_init import equilibrate_archetypes_traced
 
@@ -285,7 +389,10 @@ def make_loss_fn(
         eq = equilibrate_archetypes_traced(
             table, overrides, n_spinup=n_spinup, n_verify=n_verify,
             dt=dt, n_layers=n_layers, soil_depth=soil_depth)
-        return _total_loss(eq, losses, cover_weight)
+        preds = {"eq": eq}
+        if sif_forward is not None:
+            preds["sif"] = sif_forward(_sif_overrides(params))
+        return _total_loss(preds, losses, cover_weight)
 
     return loss_fn
 
@@ -345,6 +452,10 @@ def _make_chunked_slow(target_bundle, spin, *, chunk: int):
     # chunk).  Concrete (built from the fixed cover weights, not traced).
     total_w = jnp.sum(cover_weight)
     bounds = _chunk_bounds(n_arch, chunk)
+    # Optional single-step SIF forward per chunk (--with-sif); the SIF forward is
+    # per-archetype + spin-up-free, so slicing it to the chunk's archetypes is exact and
+    # adds no coupled-model VJP (the crash was the spin-up batch, not this leaf-sif graph).
+    make_sif = target_bundle.get("make_sif_forward")
 
     # Pre-slice each chunk's STATIC table + its cover-weight / per-term target
     # slices ONCE (the archetype table + membership are non-differentiated).
@@ -353,24 +464,29 @@ def _make_chunked_slow(target_bundle, spin, *, chunk: int):
         ctable = _slice_table(table, np.arange(s, e))
         cw = cover_weight[s:e]
         cterms = {k: LossTerm(target=t.target[s:e], extractor=t.extractor,
-                              weight=t.weight)
+                              weight=t.weight,
+                              mask=(None if t.mask is None else t.mask[s:e]))
                   for k, t in losses.items()}
-        chunk_specs.append((ctable, cw, cterms))
+        csif = make_sif(ctable) if make_sif is not None else None
+        chunk_specs.append((ctable, cw, cterms, csif))
 
-    def _chunk_sse(ctable, cw, cterms):
+    def _chunk_sse(ctable, cw, cterms, csif):
         """UN-normalized cover-weighted SSE over ONLY this chunk's archetypes."""
         def sse(params: TrainablePhysicsParams) -> jax.Array:
             overrides = _carbon_overrides(params)
             eq = equilibrate_archetypes_traced(ctable, overrides, **spin)
-            return _weighted_sse(eq, cterms, cw)
+            preds = {"eq": eq}
+            if csif is not None:
+                preds["sif"] = csif(_sif_overrides(params))
+            return _weighted_sse(preds, cterms, cw)
         return sse
 
     def value_and_grad_fn(params: TrainablePhysicsParams):
         total_sse = jnp.asarray(0.0, dtype=cover_weight.dtype)
         total_grad = None
-        for (ctable, cw, cterms) in chunk_specs:
+        for (ctable, cw, cterms, csif) in chunk_specs:
             sse, grad = eqx.filter_value_and_grad(
-                _chunk_sse(ctable, cw, cterms))(params)
+                _chunk_sse(ctable, cw, cterms, csif))(params)
             total_sse = total_sse + sse
             total_grad = grad if total_grad is None else jax.tree_util.tree_map(
                 lambda a, b: a + b, total_grad, grad)
@@ -380,8 +496,8 @@ def _make_chunked_slow(target_bundle, spin, *, chunk: int):
 
     def loss_eval_fn(params: TrainablePhysicsParams) -> jax.Array:
         total_sse = jnp.asarray(0.0, dtype=cover_weight.dtype)
-        for (ctable, cw, cterms) in chunk_specs:
-            total_sse = total_sse + _chunk_sse(ctable, cw, cterms)(params)
+        for (ctable, cw, cterms, csif) in chunk_specs:
+            total_sse = total_sse + _chunk_sse(ctable, cw, cterms, csif)(params)
         return total_sse / total_w
 
     return value_and_grad_fn, loss_eval_fn
@@ -437,34 +553,45 @@ def make_fast_analytic_forward(precomputed) -> Callable[[TrainablePhysicsParams]
 
 
 def make_fast_loss_fn(
-    precomputed, *, target: jax.Array, cover_weight: jax.Array,
+    precomputed, *, losses: dict[str, LossTerm], cover_weight: jax.Array,
+    sif_forward=None,
 ) -> Callable[[TrainablePhysicsParams], jax.Array]:
-    """Fast-analytic SOC calibration loss: cover-weighted MSE of the closed-form
-    per-archetype SOM SOC vs the observed SOC.
+    """Fast-analytic calibration loss, routed through the SAME registry as the slow path.
 
-    SOC-only by construction (the closed form is SOM-specific); the modular
-    ``biomass`` / ``lai`` terms remain a slow-path / v2 concern.  ``jax.grad`` of
-    this loss flows to the seven fast-valid SOM leaves (:data:`SOM_FIELDS`)
-    through the analytic cascade at ~zero cost -- no spin-up in the gradient loop.
+    The SOC term is the closed-form per-archetype SOM SOC (``make_fast_analytic_forward``,
+    stored under ``preds["soc"]`` for :func:`_fast_soc_extractor`); ``jax.grad`` flows to
+    the seven fast-valid SOM leaves (:data:`SOM_FIELDS`) through the analytic cascade at
+    ~zero cost -- no spin-up in the gradient loop.  The SOM ``biomass`` / ``lai`` terms
+    remain a v2 concern (the closed form is SOM-specific), but the single-step ``sif`` term
+    (``--with-sif``) composes here too: it is spin-up-free, so it adds ``preds["sif"]`` and
+    sums via ``_total_loss`` exactly as in the slow path.  With ``sif_forward=None`` and
+    only ``soc`` in the registry this equals the prior SOC-only fast loss.
     """
     model_soc = make_fast_analytic_forward(precomputed)
 
     def loss_fn(params: TrainablePhysicsParams) -> jax.Array:
-        return cover_weighted_mse(model_soc(params), target, cover_weight)
+        preds = {"soc": model_soc(params)}
+        if sif_forward is not None:
+            preds["sif"] = sif_forward(_sif_overrides(params))
+        return _total_loss(preds, losses, cover_weight)
 
     return loss_fn
 
 
 def _build_loss_fn(args, target_bundle, spin, precomputed):
     """Return ``loss_fn(params) -> scalar`` for the active forward -- the fast
-    closed-form SOC loss when ``--fast-analytic``, else the slow spin-up loss."""
+    closed-form SOC loss when ``--fast-analytic``, else the slow spin-up loss.  Both
+    route through the registry ``_total_loss``; ``--with-sif`` adds the single-step SIF
+    forward (built on the full table) to the predictions bundle in either mode."""
+    make_sif = target_bundle.get("make_sif_forward")
+    sif_forward = make_sif(target_bundle["table"]) if make_sif is not None else None
     if args.fast_analytic:
         return make_fast_loss_fn(
-            precomputed, target=target_bundle["losses"]["soc"].target,
-            cover_weight=target_bundle["cover_weight"])
+            precomputed, losses=target_bundle["losses"],
+            cover_weight=target_bundle["cover_weight"], sif_forward=sif_forward)
     return make_loss_fn(
         table=target_bundle["table"], losses=target_bundle["losses"],
-        cover_weight=target_bundle["cover_weight"], **spin)
+        cover_weight=target_bundle["cover_weight"], sif_forward=sif_forward, **spin)
 
 
 def _grad_stats(grads: TrainablePhysicsParams, *, tol: float) -> dict[str, dict]:
@@ -674,39 +801,117 @@ def build_target(args) -> dict[str, Any]:
         observed_full = per_archetype_observed_soc(
             organic, dz, cell_id, cell_w, n_arch=n_arch_full)
 
+    # Observed SIF target (--with-sif): a per-archetype cover-weighted mean, mirroring
+    # the SOC target.  Synthetic in the dry-run; else a gridded satellite SIF product,
+    # which (like the SOC organic column) is only wired for the native-grid clm5_surfdata
+    # cover.  Built on the FULL table (subsample below).
+    observed_sif_full = None
+    if args.with_sif:
+        from legoesm.land.carbon.sif_observations import (
+            load_gridded_sif, per_archetype_observed_sif, synthetic_observed_sif,
+        )
+        if args.dry_run_synthetic:
+            observed_sif_full = synthetic_observed_sif(table)
+        else:
+            if args.surfdata_preset != "clm5_surfdata":
+                raise SystemExit(
+                    "--with-sif observed SIF is only wired for the native-grid "
+                    "'clm5_surfdata' preset (the gridded SIF must match the cover grid); "
+                    f"'{args.surfdata_preset}' regrids the cover. Use clm5_surfdata.")
+            ncell = int(inputs.pft_weights.shape[0])
+            sif_cell = load_gridded_sif(
+                args.sif_obs, ncell=ncell, sif_var=(args.sif_var or None))
+            observed_sif_full = per_archetype_observed_sif(
+                sif_cell, cell_id, cell_w, n_arch=n_arch_full)
+
     keep = _stratified_subsample(table, args.max_archetypes, seed=args.seed)
     table = _slice_table(table, keep)
     observed = np.asarray(observed_full)[keep]
     cover = np.asarray(cover_full)[keep]
+    observed_sif = (np.asarray(observed_sif_full)[keep]
+                    if observed_sif_full is not None else None)
 
-    # Sanitise: an archetype with no assigned cover has NaN observed SOC -> drop
-    # it from the fit by zeroing its weight (and its target, so 0*NaN never
-    # poisons the sum).  finite-cover archetypes keep their cover weight.
-    finite = np.isfinite(observed)
-    cover = np.where(finite & (cover > 0.0), cover, 0.0)
-    observed = np.where(finite, observed, 0.0)
+    # Sanitise with PER-STREAM finite masks.  The cover weight is SHARED across registry
+    # terms, so an archetype is ACTIVE if it has ANY finite observation (finite_any) with
+    # positive cover; each term then MASKS the archetypes where ITS OWN observation is
+    # missing.  So a SOC-observed-but-SIF-missing archetype keeps its SOC signal (and vice
+    # versa) -- the streams need not overlap -- while the single global active-cover sum
+    # stays the denominator (preserving the chunked-gradient exactness).  Targets are
+    # sanitised NaN->0 where their own mask is 0, so 0*mask never poisons the sum.
+    finite_soc = np.isfinite(observed)
+    finite_any = finite_soc
+    finite_sif = None
+    if observed_sif is not None:
+        finite_sif = np.isfinite(observed_sif)
+        finite_any = finite_soc | finite_sif
+    cover = np.where(finite_any & (cover > 0.0), cover, 0.0)
+    observed = np.where(finite_soc, observed, 0.0)
+    if observed_sif is not None:
+        observed_sif = np.where(finite_sif, observed_sif, 0.0)
     if not np.any(cover > 0.0):
         raise SystemExit(
-            "no archetype has finite observed SOC + positive cover; cannot fit.")
+            "no archetype has a finite observed "
+            + ("SOC or SIF" if observed_sif is not None else "SOC")
+            + " with positive cover; cannot fit.")
+    if observed_sif is not None and not np.any(finite_sif & (cover > 0.0)):
+        # --with-sif was requested but NO archetype has a usable SIF observation (an
+        # all-gap product, or a grid that does not overlap the land cover). Fail loud
+        # rather than silently train a dead SIF term that reports a fake 0 RMSE.
+        raise SystemExit(
+            "--with-sif but no archetype has a finite observed SIF with positive cover "
+            "(the gridded SIF product may be all-gap over the land cover or on a "
+            "mismatched grid); provide a SIF product overlapping the surfdata cover, or "
+            "drop --with-sif.")
 
-    target = jnp.asarray(observed, dtype=jnp.float64)
+    # Mode-aware SOC extractor: the FAST closed form supplies SOC directly (preds["soc"]);
+    # the SLOW forward supplies the equilibrium CarbonState (preds["eq"]).
+    soc_extractor = _fast_soc_extractor if args.fast_analytic else _soc_extractor
+    # SOC mask only matters when another stream keeps an archetype active where SOC is
+    # missing; SOC-only, the cover-zeroing already drops NaN-SOC archetypes (mask=None,
+    # the unchanged single-stream path).
+    soc_mask = (jnp.asarray(finite_soc, dtype=jnp.float64)
+                if observed_sif is not None else None)
     losses = {
-        "soc": LossTerm(target=target, extractor=_soc_extractor, weight=1.0),
-        # TODO (Stage-B v2): add `biomass` (CLM5 monthly biomass), `lai`, `sif`,
-        # `d13c` entries here -- each a LossTerm(target, extractor, weight) -- and
-        # the loop picks them up with no further change.
+        "soc": LossTerm(target=jnp.asarray(observed, dtype=jnp.float64),
+                        extractor=soc_extractor, weight=W_SOC, mask=soc_mask),
+        # TODO (Stage-B v2): add `biomass` (CLM5 monthly biomass), `lai`, `d13c` entries
+        # here -- each a LossTerm(target, extractor, weight[, mask]) -- and the loop picks
+        # them up with no further change.
     }
+    make_sif_forward = None
+    if observed_sif is not None:
+        # SIF is added to the SAME registry (summed via _total_loss, no loop change); its
+        # simulated forward is the single-step, spin-up-free _make_sif_forward.
+        losses["sif"] = LossTerm(
+            target=jnp.asarray(observed_sif, dtype=jnp.float64),
+            extractor=_sif_extractor, weight=args.sif_weight,
+            mask=jnp.asarray(finite_sif, dtype=jnp.float64))
+        make_sif_forward = _make_sif_forward
+
     n_kept = int(table.pft_id.shape[0])
     n_active = int(np.sum(cover > 0.0))
+    soc_active = finite_soc & (cover > 0.0)
+    sif_note = ""
+    if observed_sif is not None:
+        sif_active = finite_sif & (cover > 0.0)
+        n_soc = int(np.sum(soc_active))
+        n_sif = int(np.sum(sif_active))
+        sif_lo, sif_hi = ((np.min(observed_sif[sif_active]),
+                           np.max(observed_sif[sif_active])) if n_sif else (float("nan"),) * 2)
+        sif_note = (f"; SOC obs on {n_soc}, SIF obs on {n_sif} of {n_active}; "
+                    f"observed SIF [{sif_lo:.2f}, {sif_hi:.2f}] umol/m2/s (w={args.sif_weight:g})")
+    soc_lo, soc_hi = ((np.min(observed[soc_active]), np.max(observed[soc_active]))
+                      if np.any(soc_active) else (float("nan"),) * 2)
     print(f"[target] source={source} archetypes: {n_arch_full} built -> "
-          f"{n_kept} kept ({n_active} with observed SOC); "
-          f"observed SOC [{np.nanmin(observed[cover > 0]):.2f}, "
-          f"{np.nanmax(observed[cover > 0]):.2f}] kgC/m2")
+          f"{n_kept} kept ({n_active} active); "
+          f"observed SOC [{soc_lo:.2f}, {soc_hi:.2f}] kgC/m2{sif_note}")
     return {
         "table": table,
         "losses": losses,
         "cover_weight": jnp.asarray(cover, dtype=jnp.float64),
         "observed_soc": observed,
+        "observed_sif": observed_sif,
+        "make_sif_forward": make_sif_forward,
         "pft_id": np.asarray(table.pft_id, int),
         "source": source,
         "n_arch_full": n_arch_full,
@@ -750,7 +955,7 @@ def _slow_model_soc(params, target_bundle, spin, *, grad_chunk: int = 0) -> np.n
     for (s, e) in _chunk_bounds(n_arch, grad_chunk):
         ctable = _slice_table(table, np.arange(s, e))
         eq = equilibrate_archetypes_traced(ctable, overrides, **spin)
-        socs.append(np.asarray(_soc_extractor(eq)))
+        socs.append(np.asarray(_soc_extractor({"eq": eq})))
     return np.concatenate(socs) if len(socs) > 1 else socs[0]
 
 
@@ -845,9 +1050,13 @@ def _write_scorecard(path: Path, *, target_bundle, initial_params, tuned_params,
     soc_default = model_soc_fn(initial_params)
     soc_tuned = model_soc_fn(tuned_params)
 
-    obs_pft = _per_pft_soc(pft_id, observed, cover)
-    def_pft = _per_pft_soc(pft_id, soc_default, cover)
-    tuned_pft = _per_pft_soc(pft_id, soc_tuned, cover)
+    # Weight SOC diagnostics by cover MASKED to the SOC-observed archetypes (matches the
+    # loss's soc mask); mask=None (SOC-only path) -> cover unchanged.
+    soc_mask = target_bundle["losses"]["soc"].mask
+    w_soc = cover if soc_mask is None else cover * np.asarray(soc_mask)
+    obs_pft = _per_pft_soc(pft_id, observed, w_soc)
+    def_pft = _per_pft_soc(pft_id, soc_default, w_soc)
+    tuned_pft = _per_pft_soc(pft_id, soc_tuned, w_soc)
     per_pft = {
         name: {
             "observed_kgC_m2": obs_pft.get(name),
@@ -857,12 +1066,14 @@ def _write_scorecard(path: Path, *, target_bundle, initial_params, tuned_params,
         for name in sorted(set(obs_pft) | set(def_pft) | set(tuned_pft))
     }
 
-    w = cover
-    wsum = float(np.sum(w))
-    def _wrmse(a, b):
-        return float(np.sqrt(np.sum(w * (np.asarray(a) - np.asarray(b)) ** 2) / wsum))
-    rmse_default = _wrmse(soc_default, observed)
-    rmse_tuned = _wrmse(soc_tuned, observed)
+    def _wrmse(a, b, weight):
+        wsum = float(np.sum(weight))
+        if wsum <= 0.0:
+            return float("nan")     # no scored archetypes -> "no score", never a fake 0
+        return float(np.sqrt(np.sum(
+            weight * (np.asarray(a) - np.asarray(b)) ** 2) / wsum))
+    rmse_default = _wrmse(soc_default, observed, w_soc)
+    rmse_tuned = _wrmse(soc_tuned, observed, w_soc)
 
     init_vals = _param_values(initial_params)
     tuned_vals = _param_values(tuned_params)
@@ -881,18 +1092,43 @@ def _write_scorecard(path: Path, *, target_bundle, initial_params, tuned_params,
         "per_pft_soc": per_pft,
         "parameters_default_vs_tuned": params_delta,
     }
+    # Optional SIF scorecard (--with-sif): cover-weighted simulated-SIF RMSE vs observed,
+    # default vs tuned (single-step forward; surfaces whether the sif term improved).
+    make_sif = target_bundle.get("make_sif_forward")
+    observed_sif = target_bundle.get("observed_sif")
+    if make_sif is not None and observed_sif is not None:
+        sif_fwd = make_sif(target_bundle["table"])
+        sif_default = np.asarray(sif_fwd(_sif_overrides(initial_params)))
+        sif_tuned = np.asarray(sif_fwd(_sif_overrides(tuned_params)))
+        # Weight by cover MASKED to the SIF-observed archetypes (matches the loss's sif
+        # mask) so missing-SIF cells never enter the RMSE.
+        sif_mask = np.asarray(target_bundle["losses"]["sif"].mask)
+        w_sif = cover * sif_mask
+        scorecard["cover_weighted_sif_rmse_umol_m2_s"] = {
+            "default": _wrmse(sif_default, observed_sif, w_sif),
+            "tuned": _wrmse(sif_tuned, observed_sif, w_sif),
+            "improvement": (_wrmse(sif_default, observed_sif, w_sif)
+                            - _wrmse(sif_tuned, observed_sif, w_sif)),
+        }
     path.write_text(json.dumps(scorecard, indent=2, sort_keys=True) + "\n")
     return scorecard
 
 
 def _write_tuned_json(path: Path, *, tuned_params, initial_params, loss_history,
                       meta) -> dict[str, Any]:
-    """Human-readable RECOMMENDED tuned params (never mutates CarbonConfig)."""
+    """Human-readable RECOMMENDED tuned params (never mutates CarbonConfig/SIFConfig)."""
     from legoesm.training.param_collector import build_registry
     from legoesm.land.carbon.config import CarbonConfig
+    from legoesm.land.canopy.sif import SIFConfig
 
     registry = {m.qualified_name: m for m in build_registry()}
-    defaults = CarbonConfig()._asdict()
+    # Per-scheme production defaults (carbon + SIF); a field is looked up in the config
+    # its scheme_key names, so SIF fields (kn0, ...) resolve against SIFConfig, not
+    # CarbonConfig (which would KeyError).
+    defaults_by_scheme = {
+        CARBON_SCHEME_KEY: CarbonConfig()._asdict(),
+        SIF_SCHEME_KEY: SIFConfig()._asdict(),
+    }
     tuned_vals = _param_values(tuned_params)
     init_vals = _param_values(initial_params)
     rows = []
@@ -907,16 +1143,20 @@ def _write_tuned_json(path: Path, *, tuned_params, initial_params, loss_history,
             "field": c.field,
             "scheme_key": c.scheme_key,
             "units": meta_c.units,
-            "production_default": float(defaults[c.field]),
+            "production_default": float(defaults_by_scheme[c.scheme_key][c.field]),
             "warm_start": init_vals[c.field],
             "tuned": tuned,
             "lower": float(c.min_val),
             "upper": float(c.max_val),
         })
+    scheme_keys = sorted({c.scheme_key for c in tuned_params.constraints})
     payload = {
-        "note": ("RECOMMENDED DifferLand SOM carbon calibration -- a recommendation, "
-                 "NOT a mutation of production CarbonConfig defaults."),
+        "note": ("RECOMMENDED DifferLand carbon"
+                 + ("+SIF" if SIF_SCHEME_KEY in scheme_keys else "")
+                 + " calibration -- a recommendation, NOT a mutation of the production "
+                 "CarbonConfig/SIFConfig defaults."),
         "scheme_key": CARBON_SCHEME_KEY,
+        "scheme_keys": scheme_keys,
         "optimizer": meta["optimizer"],
         "training": meta["training"],
         "tuned_carbon_parameters": tuned_fields,
@@ -935,7 +1175,7 @@ def _plot_loss(path: Path, losses: list[float]) -> None:
     fig, ax = plt.subplots(figsize=(6.4, 4.0))
     ax.plot(np.arange(len(losses)), losses, marker="o", color="#1f4e79")
     ax.set_xlabel("optimizer step")
-    ax.set_ylabel("cover-weighted SOC MSE  [(kgC/m2)^2]")
+    ax.set_ylabel("cover-weighted calibration MSE  (soc[+sif], summed)")
     ax.set_title("Carbon SOM calibration loss")
     ax.grid(alpha=0.25)
     fig.tight_layout()
@@ -958,10 +1198,13 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     target_bundle = build_target(args)
     print(f"[target] assembled in {time.time() - t_assemble:.1f}s")
 
-    initial_params = build_carbon_trainables(som_only=not args.all_carbon_params)
+    initial_params = build_carbon_trainables(
+        som_only=not args.all_carbon_params, with_sif=args.with_sif)
     params = initial_params
-    print(f"[preflight] {len(params.constraints)} trainable carbon params "
-          f"(SOM-only={not args.all_carbon_params}); mode="
+    n_sif = sum(c.name.startswith(SIF_SCHEME_KEY + ".") for c in params.constraints)
+    print(f"[preflight] {len(params.constraints)} trainable params "
+          f"(SOM-only={not args.all_carbon_params}, with_sif={args.with_sif}"
+          f"{f', {n_sif} SIF' if args.with_sif else ''}); mode="
           f"{'fast-analytic' if args.fast_analytic else 'slow-spinup-grad'}; "
           f"n_spinup={args.n_spinup}, max_archetypes={args.max_archetypes}")
 
@@ -1077,6 +1320,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "max_archetypes": args.max_archetypes,
             "grad_chunk": (args.grad_chunk if not args.fast_analytic else 0),
             "som_only": not args.all_carbon_params,
+            "with_sif": bool(args.with_sif),
+            "sif_weight": (args.sif_weight if args.with_sif else None),
+            "loss_terms": sorted(target_bundle["losses"]),
             "source": target_bundle["source"],
             "n_archetypes_full": target_bundle["n_arch_full"],
             "n_archetypes_kept": target_bundle["n_arch_kept"],
@@ -1165,6 +1411,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "(default: preset-aware -- 0.58 van Bemmelen for "
                         "clm5_surfdata organic MATTER, 1.0 for legoesm_surfdata "
                         "HWSD carbon)")
+    # --- observed-SIF target (--with-sif) ---
+    p.add_argument("--with-sif", dest="with_sif", action="store_true",
+                   help="add the SIF (solar-induced fluorescence) observation stream: a "
+                        "per-archetype simulated-SIF forward vs observed SIF, summed with "
+                        "the SOC term (cover-weighted MSE), and train the SIFConfig "
+                        "fluorescence params. Constrains photosynthesis/GPP (the "
+                        "boreal-productivity lever). Works in fast OR slow mode (the SIF "
+                        "forward is single-step, spin-up-free).")
+    p.add_argument("--sif-obs", type=str, default="",
+                   help="gridded SIF NetCDF on the surfdata grid [model photon-flux units] "
+                        "(required for the REAL --with-sif path; --dry-run-synthetic uses "
+                        "a fabricated target). Real source = TROPOMI/OCO-2/GOME-2 gridded "
+                        "SIF (radiance->photon-flux + regrid is a data-prep follow-up).")
+    p.add_argument("--sif-var", type=str, default="",
+                   help="SIF variable name in --sif-obs (auto-detected if omitted)")
+    p.add_argument("--sif-weight", type=float, default=DEFAULT_SIF_WEIGHT,
+                   help="weight of the sif MSE term relative to soc (soc weight = 1; "
+                        f"default {DEFAULT_SIF_WEIGHT}). SOC/SIF live on different scales.")
     # --- spin-up geometry (training forward pass) ---
     p.add_argument("--n-spinup", type=int, default=DEFAULT_N_SPINUP)
     p.add_argument("--n-verify", type=int, default=DEFAULT_N_VERIFY)
@@ -1256,6 +1520,12 @@ def _finalize_args(args: argparse.Namespace) -> argparse.Namespace:
     if not args.dry_run_synthetic and not args.surf_path:
         raise SystemExit("--surf-path is required for the real (--rebuild/"
                          "--archetypes) path.")
+    # --with-sif REAL path needs a gridded SIF product; the dry-run fabricates one.
+    if args.with_sif and not args.dry_run_synthetic and not args.sif_obs:
+        raise SystemExit(
+            "--with-sif on the real (--rebuild/--archetypes) path requires --sif-obs "
+            "<gridded SIF NetCDF on the surfdata grid>; --dry-run-synthetic uses a "
+            "fabricated SIF target instead.")
     return args
 
 

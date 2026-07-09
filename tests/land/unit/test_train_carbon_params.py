@@ -322,3 +322,139 @@ def test_input_mode_required():
     """No input mode -> a clear SystemExit (never a silent empty run)."""
     with pytest.raises(SystemExit):
         tcp.main(["--steps", "1"])
+
+
+# ---------------------------------------------------------------------------
+# SIF observation stream (--with-sif)
+# ---------------------------------------------------------------------------
+def test_total_loss_sums_soc_and_sif_from_bundle():
+    """The registry sums soc + sif from ONE predictions bundle, without touching the
+    loop: each extractor pulls its own key (``preds["soc"]`` / ``preds["sif"]``)."""
+    import jax.numpy as jnp
+
+    preds = {"soc": jnp.asarray([1.0, 2.0]), "sif": jnp.asarray([0.5, 1.5])}
+    cover = jnp.asarray([1.0, 1.0])
+    losses = {
+        "soc": tcp.LossTerm(target=jnp.asarray([1.5, 2.0]),
+                            extractor=tcp._fast_soc_extractor, weight=1.0),
+        "sif": tcp.LossTerm(target=jnp.asarray([0.0, 1.0]),
+                            extractor=tcp._sif_extractor, weight=2.0),
+    }
+    total = float(tcp._total_loss(preds, losses, cover))
+    # soc MSE = mean(0.25, 0) = 0.125 ; sif MSE = mean(0.25, 0.25) = 0.25
+    # total = 1.0*0.125 + 2.0*0.25 = 0.625
+    npt.assert_allclose(total, 0.125 + 2.0 * 0.25, rtol=1e-12)
+    assert np.isfinite(total)
+
+
+def test_per_term_mask_isolates_missing_streams():
+    """A per-term finite mask lets one stream's missing archetype NOT discard another
+    stream's signal, over the SINGLE global cover denominator; the masked archetype's
+    (bogus) target is ignored, and _total_loss == _weighted_sse / sum(cover) still holds."""
+    import jax.numpy as jnp
+
+    cover = jnp.asarray([1.0, 1.0])
+    preds = {"soc": jnp.asarray([1.0, 2.0]), "sif": jnp.asarray([0.5, 1.5])}
+    losses = {
+        # soc present at both archetypes.
+        "soc": tcp.LossTerm(target=jnp.asarray([1.5, 2.0]),
+                            extractor=tcp._fast_soc_extractor, weight=1.0,
+                            mask=jnp.asarray([1.0, 1.0])),
+        # sif MISSING at archetype 0 (mask 0 -> its bogus 9.9 target is ignored), present at 1.
+        "sif": tcp.LossTerm(target=jnp.asarray([9.9, 1.0]),
+                            extractor=tcp._sif_extractor, weight=1.0,
+                            mask=jnp.asarray([0.0, 1.0])),
+    }
+    # soc = sum(cover*[(1-1.5)^2, 0])/2 = 0.125 ; sif = sum(cover*mask*[(.5-9.9)^2,(1.5-1)^2])/2
+    #     = (0 + 1*0.25)/2 = 0.125 ; total = 0.25 (the masked-out arch0 sif is ignored).
+    total = float(tcp._total_loss(preds, losses, cover))
+    npt.assert_allclose(total, 0.25, rtol=1e-12)
+    sse = float(tcp._weighted_sse(preds, losses, cover))
+    npt.assert_allclose(sse / float(jnp.sum(cover)), total, rtol=1e-12)
+
+
+def test_build_carbon_trainables_with_sif_includes_fluorescence():
+    """--with-sif adds the tier-1/2 SIFConfig fluorescence params ALONGSIDE the SOM set;
+    the SOM-only filter never drops them.  sif OFF (default) -> no SIF params."""
+    params = tcp.build_carbon_trainables(som_only=True, with_sif=True)
+    names = {c.name for c in params.constraints}
+    assert {f"{tcp.CARBON_SCHEME_KEY}.{f}" for f in tcp.SOM_FIELDS} <= names
+    sif = {n for n in names if n.startswith(tcp.SIF_SCHEME_KEY + ".")}
+    assert {f"{tcp.SIF_SCHEME_KEY}.{f}" for f in
+            ("kn0", "max_electron_yield", "escape_probability", "kf", "kd", "kp")} <= sif
+
+    off = {c.name for c in tcp.build_carbon_trainables(som_only=True).constraints}
+    assert not any(n.startswith(tcp.SIF_SCHEME_KEY + ".") for n in off)
+
+
+def test_sif_overrides_selects_only_sif_scheme():
+    """``_sif_overrides`` returns the SIF slice; ``_carbon_overrides`` the carbon slice
+    (disjoint, both traceable into their own config)."""
+    params = tcp.build_carbon_trainables(som_only=True, with_sif=True)
+    sif_ov = tcp._sif_overrides(params)
+    car_ov = tcp._carbon_overrides(params)
+    assert set(sif_ov) and set(car_ov)
+    assert set(sif_ov).isdisjoint(car_ov)
+    assert set(car_ov) == set(tcp.SOM_FIELDS)
+
+
+def test_sif_cli_flags_roundtrip():
+    p = tcp.build_arg_parser()
+    a = p.parse_args(["--dry-run-synthetic"])
+    assert a.with_sif is False and a.sif_obs == "" and a.sif_weight == tcp.DEFAULT_SIF_WEIGHT
+    b = p.parse_args(["--dry-run-synthetic", "--with-sif", "--sif-weight", "0.3",
+                      "--sif-obs", "x.nc", "--sif-var", "SIF_740"])
+    assert b.with_sif is True and b.sif_weight == 0.3
+    assert b.sif_obs == "x.nc" and b.sif_var == "SIF_740"
+
+
+def test_with_sif_real_path_requires_sif_obs():
+    """--with-sif on the real path without --sif-obs -> a clear SystemExit; the dry-run
+    fabricates the target instead (no error)."""
+    with pytest.raises(SystemExit, match="requires --sif-obs"):
+        tcp._finalize_args(tcp.build_arg_parser().parse_args(
+            ["--rebuild", "--surf-path", "x.nc", "--with-sif"]))
+    args = tcp._finalize_args(tcp.build_arg_parser().parse_args(
+        ["--dry-run-synthetic", "--with-sif"]))
+    assert args.with_sif is True
+
+
+def test_with_sif_all_gap_sif_rejected(monkeypatch):
+    """--with-sif but an all-missing (NaN) SIF product -> a clear SystemExit at build,
+    never a dead SIF term reporting a fake 0 RMSE."""
+    import legoesm.land.carbon.sif_observations as sifobs
+
+    def _all_nan(table):
+        return np.full(np.asarray(table.pft_id).shape[0], np.nan)
+
+    monkeypatch.setattr(sifobs, "synthetic_observed_sif", _all_nan)
+    args = tcp._finalize_args(tcp.build_arg_parser().parse_args(["--quick", "--with-sif"]))
+    with pytest.raises(SystemExit, match="no archetype has a finite observed SIF"):
+        tcp.build_target(args)
+
+
+def test_quick_with_sif_sums_registry_and_writes_json(tmp_path):
+    """One optimizer step on a tiny synthetic world with --with-sif: the registry sums
+    soc + sif, the 1-step line-search never increases the summed loss, and the tuned JSON
+    + scorecard carry the trained SIF params + a SIF RMSE (fast-analytic default mode)."""
+    outdir = tmp_path / "carbon_sif"
+    rc = tcp.main(["--quick", "--with-sif", "--output", str(outdir)])
+    assert rc == 0
+
+    tuned = json.loads((outdir / "tuned_carbon_parameters.json").read_text())
+    training = tuned["training"]
+    assert training["with_sif"] is True
+    assert set(training["loss_terms"]) == {"soc", "sif"}
+    assert training["sif_weight"] == tcp.DEFAULT_SIF_WEIGHT
+    # At least one SIF fluorescence param survived preflight + is finite/in-bounds.
+    sif_rows = [r for r in tuned["parameters"] if r["scheme_key"] == tcp.SIF_SCHEME_KEY]
+    assert sif_rows, "no SIF params in the tuned JSON"
+    for r in sif_rows:
+        assert np.isfinite(r["tuned"]) and r["lower"] <= r["tuned"] <= r["upper"]
+    hist = tuned["loss_history"]
+    assert len(hist) >= 1 and all(np.isfinite(x) for x in hist)
+    assert hist[-1] <= hist[0] + 1e-9      # summed soc+sif line-search is monotone
+
+    scorecard = json.loads((outdir / "scorecard.json").read_text())
+    sif_rmse = scorecard["cover_weighted_sif_rmse_umol_m2_s"]
+    assert np.isfinite(sif_rmse["default"]) and np.isfinite(sif_rmse["tuned"])
