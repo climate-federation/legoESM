@@ -51,7 +51,12 @@ from legoesm.land.soil_thermal import SoilThermalConfig
 from legoesm.land.canopy import CanopyConfig
 from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.land.stomata import StomataConfig
-from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
+from legoesm import constants
+from legoesm.land.multilayer_land import (
+    step_multilayer_land,
+    step_multilayer_land_with_diagnostics,
+    init_multilayer_land_state,
+)
 from legoesm.land.slab_land import step_land
 from legoesm.land.boundary_data import init_land_surface_data, make_step_land_params_updater
 from legoesm.land.forcing import stage_forcing, stage_forcing_years
@@ -303,7 +308,11 @@ def run(args) -> int:
             # heat; on stabilises freezing boreal/Arctic columns.  Preserved
             # through init_land_surface_data (which only _replace()s hydraulics).
             thermal=SoilThermalConfig(enable_freeze_thaw=bool(args.enable_freeze_thaw)))
-        step_fn = step_multilayer_land
+        # Diagnostics variant so the scan can tape GPP (the canopy's surface_out.gpp
+        # is dropped from the TileResponse when carbon is off).  Same _impl as
+        # step_multilayer_land — the 4th return (SurfaceFluxOutput) is already
+        # computed, so this adds no cost.
+        step_fn = step_multilayer_land_with_diagnostics
     elif args.land_mode == "slab":
         base_cfg = LandConfig(surface_scheme=surf)
         step_fn = step_land
@@ -471,8 +480,27 @@ def run(args) -> int:
         forcing_t, doy_t, year_t, per_tape_slot = xs
         theta_top_t = (state.theta_soil[:, 0] if is_multilayer else jnp.full(ncol, 0.2))
         land_params_t, lai_diag = update_land_params(theta_top_t, doy_t, year_t)
-        new_state, resp, _ = step_fn(state, forcing_t, config, U_MIN, dt,
-                                     lat=lat_rad, land_params=land_params_t, doy=doy_t)
+        # Multilayer uses the diagnostics variant (4-tuple) so surface_out.gpp is
+        # reachable; slab keeps the 3-tuple.  ``is_multilayer`` is static.
+        if is_multilayer:
+            new_state, resp, _, surf_out = step_fn(
+                state, forcing_t, config, U_MIN, dt,
+                lat=lat_rad, land_params=land_params_t, doy=doy_t)
+        else:
+            new_state, resp, _ = step_fn(
+                state, forcing_t, config, U_MIN, dt,
+                lat=lat_rad, land_params=land_params_t, doy=doy_t)
+            surf_out = None
+        # GPP [gC/m2/day]: the canopy's gross primary production (surface_out.gpp,
+        # gC/m2/s).  None for schemes that don't produce it (simple_seb biophysics)
+        # -> reported as 0.  ET [mm/day]: latent-heat-equivalent evapotranspiration
+        # lhflx / L_v (positive = surface -> atmosphere; over snow this is the
+        # sublimation-equivalent water flux).
+        if surf_out is not None and surf_out.gpp is not None:
+            gpp_day = surf_out.gpp * _SEC_PER_DAY
+        else:
+            gpp_day = _ZEROS
+        et_mmday = resp.lhflx / constants.L_v * _SEC_PER_DAY
         # Available variables per step -> selected by each tape's spec.
         values = {
             "T_sfc": resp.T_sfc, "albedo": resp.albedo,
@@ -480,6 +508,8 @@ def run(args) -> int:
             "runoff": resp.freshwater_flux,
             "precip": forcing_t.precip_total,
             "LAI": lai_diag,
+            "GPP": gpp_day,
+            "ET": et_mmday,
         }
         if is_multilayer:
             values["T_soil_top"] = new_state.T_soil[:, 0]

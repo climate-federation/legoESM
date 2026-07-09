@@ -109,6 +109,41 @@ def test_biophys_driver_synthetic_smoke(tmp_path):
     assert float(ds["T_sfc"].max()) < 360.0
 
 
+def test_canopy_run_tapes_gpp_and_et(tmp_path):
+    """A two-leaf-canopy run tapes GPP [gC/m2/day] and ET [mm/day]: GPP is finite,
+    never negative (gross uptake), and positive where the lit canopy photosynthesises;
+    ET is finite.  Covers the surface_out.gpp -> tape path (dropped from the
+    TileResponse when carbon is off)."""
+    import yaml
+    import xarray as xr
+    from legoesm.land.lmip_config import validate_config
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    out = tmp_path / "out"
+    cfg = validate_config({
+        "grid": {"type": "latlon", "resolution": 4},
+        "physics": {"land_mode": "multilayer",
+                    "surface_scheme": "two_leaf_canopy", "bulk_scheme": "most"},
+        "forcing": {"source": "synthetic", "data_dir": "",
+                    "year_start": 2000, "year_end": 2000},
+        "surfdata": {"path": str(sd)},
+        "time": {"dt": 3600.0, "n_steps": 48, "start_doy": 0.0},  # 2 days -> daylight
+        "output": {"tapes": [{"name": "step", "freq": "step", "average": "inst",
+                              "vars": ["GPP", "ET", "lhflx", "LAI"]}]},
+    }).raw
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    assert _run_config(mod, cfg_path, out) == 0
+
+    ds = xr.open_dataset(out / "lmip_biophys.step.nc")
+    gpp = np.asarray(ds["GPP"].values)
+    et = np.asarray(ds["ET"].values)
+    assert np.all(np.isfinite(gpp)) and np.all(np.isfinite(et))
+    assert (gpp >= 0.0).all()                 # gross primary production is uptake, never negative
+    assert gpp.max() > 0.0                     # some lit, vegetated canopy photosynthesises
+    assert np.abs(et).max() < 50.0             # mm/day, sane bound
+
+
 def test_build_model_times_synthetic_starts_at_zero():
     mod = _load_driver()
     t = mod.build_model_times(196.0, 3600.0, 5, synthetic=True)
