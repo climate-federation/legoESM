@@ -50,9 +50,30 @@ BIT-IDENTITY vs the global `_step_fv3` base cut, never a wall-clock number.
 >   decaying, step-constant) — invisible on the gentle-random stage gates,
 >   bounded at TILED_PARITY_ATOL in the adapter gates.
 >
-> Remaining under this track: the Kessler column bridge for the moist
-> blocked loop in the drivers, and `ModelDriver` (full-model coupling)
-> hookup — the dynamics-only envelope is deliberate until then.
+> **UPDATE (2026-07-09b) — the two remaining hookups shipped:**
+>
+> * **Kessler bridge**: `make_kessler_column_physics_fn`
+>   (kessler_forcing.py) — the per-tile column contract over the SAME
+>   shared `kessler_column_tendencies` core the face-sharded
+>   `make_kessler_forcing_cube` lane runs (one controlled comparison
+>   across the device ladder).  `make_tiled_cc_loop` gained the moist
+>   mode (q_pack pack/step/unpack, exact-{q_v,q_c,q_r} refusals);
+>   `run_cpu_mpi_scaling --cs-spmd --physics moist` now dispatches at
+>   6·kt² devices.  Gate: `test_adapter_moist_loop_kessler_matches_serial`
+>   (vs serial `model.step(physics_fn=make_kessler_forcing_cube)`).
+> * **ModelDriver hookup**: `run()` dispatches cube runs with a sub-face
+>   device tiling to `_run_tiled_cube_spmd` — a dedicated segment loop
+>   over the blocked tiled loop (the `_run_compiled_latlon_spmd`
+>   precedent; state tile-sharded across steps, per-SEGMENT gather for
+>   the coupler callback + blowup guard).  Envelope: dynamics-only or
+>   Kessler-microphysics-only (`_tiled_cube_column_physics_fn`); the
+>   unified physics pipeline, Held-Suarez-on-cube, and the
+>   diagnostics/checkpoint writers refuse loudly.  Gates:
+>   `tests/parallel/test_tiled_cube_spmd_driver.py`.
+>
+> Remaining under this track: diagnostics/checkpoint writers for the
+> tiled driver lane; unified-pipeline physics tiling (a separate
+> project — the PhysicsState carry needs a tile-aware shard).
 
 ## The layout problem (the crux)
 

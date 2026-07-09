@@ -693,14 +693,13 @@ def _build_cubed_sphere_tiled_loop(resolution, nlev, dt, physics_level,
     )
     from tests.test_cases.baroclinic_wave import baroclinic_wave_init
 
-    if physics_level != "none":
+    if physics_level not in ("none", "moist"):
         raise ValueError(
-            f"cs-spmd at 6*kt^2 devices (kt={kt}) runs the BLOCKED tiled "
-            f"step, whose moist column-physics wiring is not hooked up in "
-            f"this driver yet (the core moist blocked step exists; the "
-            f"Kessler column bridge is the remaining increment) — got "
-            f"physics {physics_level!r}. Run --physics none, or <=6 devices."
+            f"cs-spmd at 6*kt^2 devices (kt={kt}) supports physics 'none' "
+            f"or 'moist' (the Kessler column bridge); got "
+            f"{physics_level!r}. Run <=6 devices for other physics."
         )
+    _moist = physics_level == "moist"
     if resolution % kt:
         raise ValueError(
             f"cs-spmd tiled lane: resolution {resolution} must divide by "
@@ -724,7 +723,7 @@ def _build_cubed_sphere_tiled_loop(resolution, nlev, dt, physics_level,
     )
 
     fv3 = hydrostatic_to_fv3(
-        baroclinic_wave_init(grid, sigma, perturbed=True, moist=False),
+        baroclinic_wave_init(grid, sigma, perturbed=True, moist=_moist),
         cdgrid)
     fv3 = jax.tree.map(cast_fn, fv3)
 
@@ -733,16 +732,30 @@ def _build_cubed_sphere_tiled_loop(resolution, nlev, dt, physics_level,
     mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
     nl = resolution // kt
 
+    # Moist: the Kessler COLUMN bridge — the SAME shared
+    # kessler_column_tendencies core the np<=6 lane's
+    # make_kessler_forcing_cube physics_fn runs, so the device ladder
+    # stays one controlled comparison (per-tile column-local physics
+    # inside the blocked step, tracer floor included).
+    column_physics_fn = None
+    if _moist:
+        from legoesm.atmosphere.kessler_forcing import (
+            make_kessler_column_physics_fn,
+        )
+        column_physics_fn = make_kessler_column_physics_fn(sigma, dt)
+
     tiled = make_tiled_fv3_hydrostatic_step_blocked_2d(
         mesh, cdgrid, sigma, resolution, kt, nlev,
         p_floor=float(config.p_floor), dt=float(dt),
         sponge_sigma=float(config.sponge_sigma),
         sponge_tau_sec=float(config.sponge_tau_sec),
+        column_physics_fn=column_physics_fn,
         fix_mass=True)
-    tiled_jit = jax.jit(lambda u, v, T, ps, ph: tiled(u, v, T, ps, ph))
+    tiled_jit = jax.jit(tiled)
 
     cz = NamedSharding(mesh, P("face", "tile_i", "tile_j", None))
     co = NamedSharding(mesh, P("face", "tile_i", "tile_j"))
+    cz5 = NamedSharding(mesh, P("face", "tile_i", "tile_j", None, None))
     state = {
         "u_d": jax.device_put(
             expand_corners_to_blocks(fv3.u_d.data, kt, nl), cz),
@@ -752,6 +765,13 @@ def _build_cubed_sphere_tiled_loop(resolution, nlev, dt, physics_level,
         "p_s": jax.device_put(fv3.p_s.data, co),
         "phis": jax.device_put(fv3.phis.data, co),
     }
+    if _moist:
+        import jax.numpy as jnp
+
+        # q_pack order [q_v, q_c, q_r] — the tiled moist contract.
+        q_pack = jnp.stack(
+            [fv3.tracers[nm].data for nm in ("q_v", "q_c", "q_r")], axis=-1)
+        state["q_pack"] = jax.device_put(q_pack, cz5)
 
     _dt_built = float(dt)
 
@@ -763,6 +783,11 @@ def _build_cubed_sphere_tiled_loop(resolution, nlev, dt, physics_level,
             raise ValueError(
                 f"tiled cube step compiled for dt={_dt_built}; got "
                 f"{dt_arg}.")
+        if _moist:
+            u, v, T, ps, q = tiled_jit(s["u_d"], s["v_d"], s["T"],
+                                       s["p_s"], s["phis"], s["q_pack"])
+            return {"u_d": u, "v_d": v, "T": T, "p_s": ps,
+                    "phis": s["phis"], "q_pack": q}
         u, v, T, ps = tiled_jit(s["u_d"], s["v_d"], s["T"], s["p_s"],
                                 s["phis"])
         return {"u_d": u, "v_d": v, "T": T, "p_s": ps, "phis": s["phis"]}
