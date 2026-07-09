@@ -2479,6 +2479,21 @@ def _tile_fix_ps_mass_delta(p_s_new_t, p_s_old_t, ar_t, total_area, acc):
     return p_s_new_t + g_delta / total_area
 
 
+def _tile_fix_ps_mass_target(p_s_new_t, target_mass, ar_t, total_area, acc):
+    """TARGET-anchored per-tile dry-mass fix (the compiled-segment driver's
+    ``fix_ps_mass_target`` semantics — the operator-split lane externalizes
+    the fixer with a fixed t=0 target): uniform additive correction
+    ``(target - psum(sum(p_s*area))) / total_area``.  Shares the psum axes /
+    closed-over ``total_area`` doctrine of :func:`_tile_fix_ps_mass_delta`
+    (see its docstring); a zero target disables the fix (the serial
+    ``target_mass=0`` convention).  Must be called INSIDE a shard_map over
+    the tiled mesh."""
+    local_mass = jnp.sum(p_s_new_t.astype(acc) * ar_t.astype(acc))
+    g_mass = jax.lax.psum(local_mass, axis_name=("face", "tile_i", "tile_j"))
+    correction = (target_mass.astype(acc) - g_mass) / total_area
+    return jnp.where(target_mass > 0, p_s_new_t + correction, p_s_new_t)
+
+
 def make_tiled_fix_ps_mass_stage_2d(mesh, grid, n: int, kt: int):
     """Tiled ``fix_ps_mass`` (non-anchor dry-mass fixer) on a ``(6, kt, kt)`` mesh.
 
@@ -3301,3 +3316,17 @@ def make_tiled_fv3_sw_tendencies_stage_2d(mesh, cdgrid, n: int, kt: int,
                      cos_a, sin_a, cap, sap, offsets)
 
     return stage
+
+
+# ---------------------------------------------------------------------------
+# Public re-exports of the shared tile-step building blocks for the
+# OPERATOR-SPLIT tiled lane (driver/tiled_operator_split_step.py) — the
+# no-private-cross-imports ratchet forbids importing the underscore names
+# across modules; these aliases are the sanctioned surface.  Same objects,
+# no wrappers: the tendency/RK3/fixer numerics stay single-source.
+# ---------------------------------------------------------------------------
+build_hydro_tile_tendency_fns = _build_hydro_tile_tendency_fns
+sponge_rate_from_config = _sponge_rate_from_config
+ssp_rk3_tile_step = _ssp_rk3_tile_step
+tile_fix_ps_mass_target = _tile_fix_ps_mass_target
+validate_tiled_step_factory_args = _validate_tiled_step_factory_args

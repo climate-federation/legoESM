@@ -45,6 +45,7 @@ class _DriverStub:
     pattern)."""
     _tiled_cube_column_physics_fn = ModelDriver._tiled_cube_column_physics_fn
     _run_tiled_cube_spmd = ModelDriver._run_tiled_cube_spmd
+    _save_lightweight_timeseries = ModelDriver._save_lightweight_timeseries
 
     def __init__(self, model, state, cfg, device_config, tracers=None):
         self.config = cfg
@@ -215,13 +216,71 @@ def test_run_tiled_cube_spmd_refusals():
     dc = _device_config()
     model, hs = _model_and_state()
 
-    # Diagnostics/checkpoint writers are follow-ups — refuse loudly.
-    cfg = _exp_cfg(3)
-    cfg = cfg._replace(output=cfg.output._replace(diag_days=1.0))
-    with pytest.raises(NotImplementedError, match="diagnostics"):
-        _DriverStub(model, hs, cfg, dc)._run_tiled_cube_spmd()
-
     # Unified physics refuses via the selector.
     with pytest.raises(NotImplementedError, match="not tiled-routed"):
         _DriverStub(model, hs, _exp_cfg(3, radiation="gray"),
                     dc)._run_tiled_cube_spmd()
+
+
+def test_run_tiled_cube_spmd_writers(tmp_path):
+    """Diagnostics + checkpoint writers fire on segment boundaries.
+
+    4 steps at DT with diag every 2 steps and checkpoint every 4: the
+    segment gcd drops to 2 steps, the lightweight ``timeseries.npz``
+    collects 2 samples, and the checkpoint hook (run()'s
+    ``_checkpoint_callback``-or-``save_checkpoint`` contract) fires once
+    at the absolute step 4 boundary."""
+    dc = _device_config()
+    model, hs = _model_and_state()
+    n_steps = 4
+    cfg = _exp_cfg(n_steps)
+    cfg = cfg._replace(output=cfg.output._replace(
+        diag_days=2 * DT / 86400.0, checkpoint_days=4 * DT / 86400.0))
+    stub = _DriverStub(model, hs, cfg, dc)
+    stub._output_dir = tmp_path
+    ckpts = []
+    stub._checkpoint_callback = lambda step, day: ckpts.append((step, day))
+
+    status = stub._run_tiled_cube_spmd()
+    assert status == "COMPLETED"
+
+    ts = np.load(tmp_path / "timeseries.npz")
+    np.testing.assert_allclose(
+        np.asarray(ts["days"]),
+        [2 * DT / 86400.0, 4 * DT / 86400.0], rtol=1e-9)
+    for key in ("T_atm", "max_wind", "dry_mass_ps"):
+        assert np.all(np.isfinite(np.asarray(ts[key]))), key
+    assert (tmp_path / "results.txt").exists()
+    assert len(ckpts) == 1
+    step_at, day_at = ckpts[0]
+    assert step_at == 4
+    assert day_at == pytest.approx(cfg.start_day + 4 * DT / 86400.0)
+
+
+def test_run_tiled_cube_spmd_checkpoint_falls_back_to_save_checkpoint():
+    """No ``_checkpoint_callback`` set -> the lane invokes the driver's own
+    ``save_checkpoint(step, day)`` on the gathered state (run()'s
+    ``callback-or-save_checkpoint`` contract).  The writer itself is the
+    SHARED driver method every run path uses — its serialization is
+    covered by the driver's own restart tests; here we pin the lane's
+    dispatch + cadence."""
+    dc = _device_config()
+    model, hs = _model_and_state()
+    n_steps = 2
+    cfg = _exp_cfg(n_steps)
+    cfg = cfg._replace(output=cfg.output._replace(
+        checkpoint_days=2 * DT / 86400.0))
+
+    calls = []
+
+    class _CkptStub(_DriverStub):
+        def save_checkpoint(self, step, day):
+            # The gathered cc state must exist and be current when the
+            # writer fires (never the blocked in-loop state).
+            assert self.state.T.data.shape == (6, N, N, NLEV)
+            calls.append((step, day))
+
+    stub = _CkptStub(model, hs, cfg, dc)
+    status = stub._run_tiled_cube_spmd()
+    assert status == "COMPLETED"
+    assert calls == [(2, pytest.approx(cfg.start_day + 2 * DT / 86400.0))]
