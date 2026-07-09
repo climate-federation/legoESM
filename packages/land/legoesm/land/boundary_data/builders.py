@@ -209,6 +209,7 @@ class SurfaceDataParamProvider(eqx.Module):
     soil_bg: jax.Array              # (ncol,) broadband soil-colour albedo
     f_veg: jax.Array               # (ncol,) canopy cover fraction 1-exp(-0.5*LAI)
     is_glacier: jax.Array          # (ncol,) 1.0 where glacier-dominant
+    fc4: jax.Array                 # (ncol,) PFT-weighted C4 area fraction [0,1]
     glacier_albedo: float = eqx.field(static=True)
 
     def __call__(self, features=None) -> LandSurfaceParams:
@@ -216,9 +217,12 @@ class SurfaceDataParamProvider(eqx.Module):
         soil_bg = jax.lax.stop_gradient(self.soil_bg)
         f_veg = jax.lax.stop_gradient(self.f_veg)
         is_glacier = jax.lax.stop_gradient(self.is_glacier)
+        # C4 fraction is boundary data (PFT flags), not a knob -> stop_gradient,
+        # mirroring soil_bg / f_veg / pft_fractions.
+        fc4 = jax.lax.stop_gradient(self.fc4)
         alb = lp.albedo_veg * f_veg + soil_bg * (1.0 - f_veg)
         alb = jnp.where(is_glacier > 0.0, self.glacier_albedo, alb)
-        return lp._replace(albedo_veg=alb)
+        return lp._replace(albedo_veg=alb, fC4=fc4)
 
 
 def surface_data_param_provider(
@@ -254,11 +258,18 @@ def surface_data_param_provider(
     soil_bg = np.asarray(
         soil_albedo_broadband(jnp.asarray(np.asarray(gsd.soil_color)), jnp.asarray(theta_top)))
     f_veg = 1.0 - np.exp(-0.5 * lai_col)
+    # Big-leaf C4 flag from the DOMINANT PFT (0/1), matching build_canopy_params'
+    # ``lut["fc4"][dom]``. A big leaf is a single photosynthetic pathway, so the
+    # column runs pure C3 or pure C4 with its (PFT-weighted) Vcmax — not a
+    # blend of both branches sharing one capacity. Continuous sub-grid C3/C4
+    # mixing with separate C3/C4 capacities is the two-leaf canopy's role.
+    fc4_col = np.asarray(pft_lookup_arrays()["fc4"])[dominant_pft_index(gsd)]   # (ncol,) 0/1
     return SurfaceDataParamProvider(
         pft_provider=pft_provider,
         soil_bg=jnp.asarray(soil_bg),
         f_veg=jnp.asarray(f_veg),
         is_glacier=jnp.asarray(glacier_mask(gsd).astype(float)),
+        fc4=jnp.asarray(fc4_col),
         glacier_albedo=float(glacier_albedo),
     )
 

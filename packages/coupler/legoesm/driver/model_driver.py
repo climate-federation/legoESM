@@ -1458,11 +1458,11 @@ class ModelDriver:
                     getattr(self.config, "land_infiltration_excess", True)
                 )
                 # Stomatal soil-water limitation: route beta_soil through the
-                # shared land Jarvis model (legoesm.land.carbon.stomata).
+                # shared land Jarvis model (legoesm.land.stomata).
                 _stomatal = bool(getattr(self.config, "land_stomatal_beta", False))
                 self.physics.land_stomatal_beta = _stomatal
                 if _stomatal:
-                    from legoesm.land.carbon.stomata import StomataConfig
+                    from legoesm.land.stomata import StomataConfig
                     self.physics.stomata_config = StomataConfig(
                         gs_max=self.config.land_gs_max,
                     )
@@ -1518,7 +1518,7 @@ class ModelDriver:
         from legoesm.land.clm_surface_map import (
             load_clm_surface, download_clm_surfdata, clm_multilayer_setup,
         )
-        from legoesm.land.carbon.stomata import StomataConfig
+        from legoesm.land.stomata import StomataConfig
         from legoesm.land.config import MultiLayerLandConfig
         from legoesm.land.soil_grid import SoilGridConfig
         from legoesm.land.surface_scheme import (

@@ -798,7 +798,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         dest="land_stomatal_beta",
                         help="Route the soil-water availability through the shared "
                              "land Jarvis (1976) stomatal model "
-                             "(legoesm.land.carbon.stomata) instead of the bare "
+                             "(legoesm.land.stomata) instead of the bare "
                              "bucket ramp: beta=min(beta_soil, beta_canopy), closing "
                              "stomata in low light / high VPD. Requires "
                              "--land-soil-bucket.")

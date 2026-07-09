@@ -145,7 +145,7 @@ def test_build_training_segment_land_gradient(monkeypatch, tmp_path):
     van-Genuchten backward inside float32 (real stiff-clay soils need fp64)."""
     import jax
     import jax.numpy as jnp
-    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.land.stomata import StomataConfig
     from legoesm.land.carbon.config import CarbonConfig
     from legoesm.land.carbon.carbon_cycle import init_carbon_state
 
