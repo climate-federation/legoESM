@@ -57,7 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # under rec["metadata"] so a virtual-CPU-device proxy, a gloo/TCP fabric run,
 # or an f32 ablation is falsifiable from the JSONL row alone.  metadata.py
 # imports JAX lazily, so this is safe before jax.distributed.initialize.
-from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
+from metadata import annotate_incomplete, scaling_metadata, tidy_throughput_fields  # noqa: E402
 
 
 def _build(n_lat, n_lon, nlev):
@@ -191,6 +191,20 @@ def main() -> int:
         steady_min_ms=round(float(np.min(steady)), 2),
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=n_lat * args.n_lon * args.nlev,
+    )
+    # Flat aggregator-compatible identity + metric fields: without a
+    # top-level ``sypd``/``grid_type`` this lane's rows are invisible to
+    # aggregate_bcw_scaling.py → empty SYPD panels in the CPU-vs-GPU plots.
+    rec.update(
+        grid_type="latlon",
+        resolution=n_lat,
+        n_levels=args.nlev,
+        precision="float64" if jax.config.jax_enable_x64 else "float32",
+        physics_level=args.physics,
+        backend=jax.default_backend(),
+        **tidy_throughput_fields(
+            dt_seconds=args.dt, time_per_step_ms=med,
+            total_cells=n_lat * args.n_lon * args.nlev),
     )
     from legoesm.parallel.early_init import nccl_transport_report
     _nccl_report = nccl_transport_report()

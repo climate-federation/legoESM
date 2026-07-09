@@ -37,10 +37,17 @@
 #   Lane B: `legoesm-gpu` WITH the route-A overlay (README Step 1b).
 # The job runs lane A by default; enable lanes via qsub -v:
 #   RUN_NCCL=1 (default 1)   RUN_ROUTEA=1 (default 0 — needs overlay)
+#   RUN_TUNE=1 (default 0)   — lane T comm-tuning A/B ladder (fused-halo /
+#     XLA collective-permute combining + pipelined p2p / PGLE) on the latlon
+#     + cube lanes; outputs under _ab_tuning/ (excluded from the curves).
+#     Run it AFTER the main lanes are green on this machine; see
+#     docs/performance/scaling/spmd_message_census_2026-07-08.md.
 #
 # SUBMIT:
 #   qsub scripts/cluster/scaling_derecho/gpu_multinode_scaling.pbs
 #   qsub -v RUN_ROUTEA=1,LEGOESM_NCCL_OFI_LIB=/path/to/nccl-ofi/lib \
+#        scripts/cluster/scaling_derecho/gpu_multinode_scaling.pbs
+#   qsub -v RUN_TUNE=1,RUN_NCCL=0,RUN_LATLON=0,RUN_OCEAN=0,RUN_MPAS=0 \
 #        scripts/cluster/scaling_derecho/gpu_multinode_scaling.pbs
 # ===========================================================================
 set -uo pipefail
@@ -253,7 +260,89 @@ if [ "$RUN_ROUTEA" = "1" ]; then
     done
 fi
 
+# --------------------------------------------------------------------------
+# Lane T: comm-tuning A/B ladder (qsub -v RUN_TUNE=1) — the census-ranked
+# next rungs now that the route-B lanes are green (see
+# docs/performance/scaling/spmd_message_census_2026-07-08.md):
+#   base  : lane-C/D env exactly as above (the control arm — re-run so every
+#           arm shares one allocation/fabric state; NEVER compare to an
+#           earlier job's numbers)
+#   fused : LEGOESM_LATLON_SPMD_FUSED_HALO=1 (bit-identical multi-pad packing;
+#           trace-level receipt: atm 41->29 CPs/step, ocean 25% fewer)
+#   xla   : collective-permute combining + pipelined p2p — the cube/latlon
+#           rounds are data-independent, so the GPU combiner can merge what
+#           the SPMD partitioner emits separately (code round floor = 4)
+#   pgle  : profile-guided latency estimation (recompiles after profiling
+#           runs — bench-jit-safe, NOT for AOT jobs; that is why it is not a
+#           backend.py default)
+# Outputs land under _ab_tuning/ which aggregate_bcw_scaling SKIPS by design
+# (A/B receipts must never contaminate the scaling curves). Compare arms with
+# the per-record steady_median_ms / sypd printed in each JSONL row.
+# --------------------------------------------------------------------------
+RUN_TUNE="${RUN_TUNE:-0}"
+if [ "$RUN_TUNE" = "1" ]; then
+    echo "=== LANE T: comm-tuning A/B (latlon atm np=8; cube np=6) ==="
+    _XLA_COMM_FLAGS="--xla_gpu_collective_permute_combine_threshold_bytes=33554432 --xla_gpu_enable_pipelined_p2p=true"
+    for ARM in base fused xla pgle; do
+        echo "--- lane T arm=$ARM: atm latlon LL$LL_RES np=8 ---"
+        (
+            nccl_env
+            case "$ARM" in
+              fused) export LEGOESM_LATLON_SPMD_FUSED_HALO=1 ;;
+              xla)   export XLA_FLAGS="${XLA_FLAGS:-} ${_XLA_COMM_FLAGS}" ;;
+              pgle)  export JAX_ENABLE_PGLE=true JAX_PGLE_PROFILING_RUNS=3 ;;
+            esac
+            mpiexec -n 8 --ppn 4 bash -c "$PIN" _ \
+                "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
+                --multicontroller --n-devices 8 \
+                --mode strong --n-lat "$LL_RES" --n-lon $((2 * LL_RES)) \
+                --nlev "$NLEV" \
+                --steps $((N_WARMUP + N_TIMING)) --warmup "$N_WARMUP" \
+                --out "$OUTDIR/_ab_tuning/latlon_${ARM}.jsonl" < /dev/null
+        )
+        rc=$?
+        [ "$rc" -ne 0 ] && { echo "LANE T latlon arm=$ARM FAILED rc=$rc"; rc_all=$rc; }
+    done
+    # Cube arms: base vs xla only (no latlon flag; PGLE covered above — add
+    # it here too once the xla arm shows movement on the 46-CP/step census).
+    for ARM in base xla; do
+        echo "--- lane T arm=$ARM: cube cs-spmd C$CS_RES np=6 ---"
+        (
+            nccl_env
+            [ "$ARM" = xla ] && export XLA_FLAGS="${XLA_FLAGS:-} ${_XLA_COMM_FLAGS}"
+            mpiexec -n 6 --ppn 3 bash -c "$PIN" _ \
+                "$PY" scripts/bench/run_cpu_mpi_scaling.py \
+                --grid cubed-sphere --cs-spmd --device gpu \
+                --physics moist \
+                --mode strong --resolution "$CS_RES" \
+                --precision "$PRECISION" --n-levels "$NLEV" \
+                --n-warmup "$N_WARMUP" --n-timing "$N_TIMING" \
+                --output-dir "$OUTDIR/_ab_tuning/cube_${ARM}" < /dev/null
+        )
+        rc=$?
+        [ "$rc" -ne 0 ] && { echo "LANE T cube arm=$ARM FAILED rc=$rc"; rc_all=$rc; }
+    done
+    # Ocean arms: base vs fused — the flag's original 25%-fewer-ppermutes
+    # receipt is an ocean trace-level number; this is its wall-clock A/B.
+    for ARM in base fused; do
+        echo "--- lane T arm=$ARM: ocean latlon LL$OC_RES np=8 ---"
+        (
+            nccl_env
+            [ "$ARM" = fused ] && export LEGOESM_LATLON_SPMD_FUSED_HALO=1
+            mpiexec -n 8 --ppn 4 bash -c "$PIN" _ \
+                "$PY" scripts/bench/bench_ocean_latlon_spmd_scaling.py \
+                --multicontroller --n-devices 8 \
+                --mode strong --n-lat "$OC_RES" --n-lon $((2 * OC_RES)) \
+                --nlev "$OC_NLEV" \
+                --steps $((N_WARMUP + N_TIMING)) --warmup "$N_WARMUP" \
+                --out "$OUTDIR/_ab_tuning/ocean_${ARM}.jsonl" < /dev/null
+        )
+        rc=$?
+        [ "$rc" -ne 0 ] && { echo "LANE T ocean arm=$ARM FAILED rc=$rc"; rc_all=$rc; }
+    done
+fi
+
 echo "=== RESULTS ==="
-find "$OUTDIR" -name "*.csv" -o -name "*.json" | head -40
+find "$OUTDIR" \( -name "*.csv" -o -name "*.json" -o -name "*.jsonl" \) | head -40
 echo "=== DONE rc=$rc_all ==="
 exit "$rc_all"

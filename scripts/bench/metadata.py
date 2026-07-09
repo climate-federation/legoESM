@@ -414,3 +414,43 @@ def annotate_incomplete(md: dict[str, Any], *, warn: bool = True) -> dict[str, A
                 stacklevel=2,
             )
     return md
+
+
+def tidy_throughput_fields(
+    *,
+    dt_seconds: float,
+    time_per_step_ms: float,
+    total_cells: int,
+) -> dict[str, Any]:
+    """Flat SYPD/throughput metrics for a bench record, aggregator-ready.
+
+    The SPMD bench lanes (``bench_atm_latlon_spmd_scaling``,
+    ``bench_mpas_spmd_scaling``, ``bench_ocean_latlon_spmd_scaling``,
+    ``bench_cube_tiled_step_scaling``) historically recorded only
+    ``steady_median_ms`` + ``cells`` — no top-level ``sypd`` — so
+    ``aggregate_bcw_scaling.py`` dropped their rows and the CPU-vs-GPU
+    plots showed empty SYPD panels for those lanes.  Merge this dict into
+    the record (``rec.update(...)``) alongside the identity fields
+    (``grid_type``, ``resolution``, ``n_levels``, ``precision``,
+    ``physics_level``, ``mode``, ``backend``) the aggregator keys on.
+
+    Formulas are the CANONICAL ones from ``run_cpu_mpi_scaling.py`` (365.25
+    sim-days/yr) so SPMD rows and MPI rows are directly comparable:
+
+        sypd         = (dt / t_step) / (365.25 * 86400) * 86400
+        mcells_per_s = total_cells / t_step / 1e6
+    """
+    t_step = float(time_per_step_ms) * 1e-3
+    if t_step > 0.0:
+        sypd = (float(dt_seconds) / t_step) / (365.25 * 86400.0) * 86400.0
+        mcells_per_s = float(total_cells) / t_step / 1e6
+    else:  # degenerate timing (clock resolution) — flag, never divide by 0
+        sypd = 0.0
+        mcells_per_s = 0.0
+    return {
+        "dt_seconds": float(dt_seconds),
+        "time_per_step_ms": float(time_per_step_ms),
+        "total_cells": int(total_cells),
+        "sypd": sypd,
+        "mcells_per_s": mcells_per_s,
+    }
