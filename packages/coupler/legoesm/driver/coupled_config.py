@@ -100,6 +100,13 @@ class CoupledConfig(NamedTuple):
     # Source of the spatial land parameters when use_pft: "analytical" (latitude
     # bands) or "clm" (the CLM reference surfdata: real PFT map + reference soil).
     land_param_source: str = "analytical"
+    # Transient land-use cover (opt-in; requires land_param_source="clm").  When
+    # True with land_cover_surfdata set, the CLM path's PFT-weighted VEGETATION
+    # params re-weight each segment from the transient legoesm_surfdata cover
+    # (LUH2/HYDE/...); the CLM soil (hydraulics/thermal) stays frozen.  Empty
+    # land_cover_surfdata → static cover (byte-identical to a normal run).
+    transient_land_cover: bool = False
+    land_cover_surfdata: str = ""
     # Coupled DIURNAL surface model for multilayer land (default ON): use the
     # physical Monin-Obukhov surface exchange + Farquhar photosynthesis-stomata
     # coupling (vs a constant bulk coefficient + soil-only beta).  Well-posed in the

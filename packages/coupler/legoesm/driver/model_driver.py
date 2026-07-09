@@ -1695,9 +1695,12 @@ class ModelDriver:
         radiation step blends land albedo by ``f_land``) but keeps the field finite
         and smooth everywhere.
 
-        Static snapshot at ``config.start_day`` day-of-year.  Seasonal-LAI /
-        soil-wetness evolution of the albedo is a follow-up (it would thread
-        per-step ``land_params`` through the integration scan).
+        Static snapshot at ``config.start_day`` day-of-year and the run's
+        ``config.start_year`` cover slice (a transient LUH2/HYDE/... surfdata is
+        sampled at the start year, not collapsed to a nonsensical multi-century
+        year-mean).  Within-run seasonal-LAI / soil-wetness / transient-cover
+        evolution of the albedo is a follow-up (it would rebuild ``land_params``
+        per segment, as the GHG hook already does for ``current_year``).
         """
         from legoesm.land.config import LandConfig
         from legoesm.land.boundary_data import (
@@ -1706,8 +1709,12 @@ class ModelDriver:
 
         # LandConfig defaults to SimpleSEBConfig -> LandSurfaceParams with albedo_veg.
         land_cfg = LandConfig()
+        # Sample transient cover at the run start year; a config without start_year
+        # (or a static single-year surfdata) falls back to the legacy year-mean.
+        _start_year = getattr(self.config, "start_year", None)
         _, land_params, gsd = init_land_surface_data(
             surfdata_path, self.grid, land_cfg, float(self.config.start_day),
+            year=None if _start_year is None else float(_start_year),
         )
         # Reconcile to the driver's AUTHORITATIVE land mask (not surfdata's own
         # cover): surfdata properties are kept only where _f_land > 0, so the

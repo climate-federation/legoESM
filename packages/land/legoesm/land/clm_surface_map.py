@@ -501,3 +501,107 @@ def clm_multilayer_setup(surface_map: dict, base_config=None, variant: str = "mu
         thermal=clm_multilayer_thermal_config(surface_map),
         land_albedo=land_albedo, snow_albedo_feedback=True)
     return provider(), cfg
+
+
+# ===========================================================================
+# Transient land-use cover (LULC): re-weight the vegetation params by year
+# ===========================================================================
+# The CLM map above bakes a single-year PFT cover.  For a transient land-use run
+# the annual cover comes from a harmonized ``legoesm_surfdata`` (LUH2/HYDE/... —
+# see ``surface_data/``), whose ``pft_frac(year, npft, lat, lon)`` is nearest-
+# regridded onto the SAME model columns as ``load_clm_surface`` (identical
+# ``_nearest_regrid`` targets => cell-for-cell aligned).  Only the PFT-weighted
+# VEGETATION params (albedo/z0/root/emissivity/stomata + the plant btran
+# thresholds) re-derive from the year's cover; per-cell SOIL hydraulics/thermal/
+# Ch and the prescribed LAI stay frozen from the base map (land use changes
+# vegetation, not soil texture; transient LAI is a documented follow-up).
+
+
+def load_transient_cover_on_columns(surfdata_path, tgt_lat_deg, tgt_lon_deg):
+    """Read a transient ``legoesm_surfdata`` cover and regrid it onto columns.
+
+    Returns ``(cover, years)`` with ``cover`` shape ``(nyear, ncol, 17)`` — a
+    per-column within-land PFT composition summing to 1 (bare-soil floor for empty
+    columns), matching :func:`load_clm_surface`'s ``fr`` so the two are
+    interchangeable in :class:`CLMSurfaceParamProvider` — and integer ``years``.
+    """
+    import xarray as xr
+
+    ds = xr.open_dataset(surfdata_path, decode_times=False)
+    try:
+        slat = np.asarray(ds["lat"].values, dtype=np.float64)
+        slon = np.asarray(ds["lon"].values, dtype=np.float64)
+        years = np.rint(np.asarray(ds["year"].values)).astype(int)
+        # Transpose by NAME to the documented (year, npft, lat, lon): a file stored
+        # with a different axis order (or where lat happens to be length 17) would
+        # otherwise be silently mis-indexed by the positional regrid below.
+        da = ds["pft_frac"].transpose("year", "npft", "lat", "lon")
+        pft = np.asarray(da.values, dtype=np.float64)               # (nyear,17,nlat,nlon) %
+        if pft.shape[1] != _N_PFT:
+            raise ValueError(
+                f"transient cover has {pft.shape[1]} PFTs on the npft axis; expected "
+                f"the CLM5 {_N_PFT}-PFT axis (same order as load_clm_surface).")
+    finally:
+        ds.close()
+
+    cov = _nearest_regrid(slat, slon, pft, tgt_lat_deg, tgt_lon_deg)  # (nyear,17,ncol)
+    cov = np.moveaxis(cov, 1, -1) / 100.0                            # (nyear,ncol,17) frac
+    # Per-column within-land composition (sum 1), bare-soil floor where the cover
+    # is short of a full cell — identical to load_clm_surface's normalisation.
+    cov = np.nan_to_num(cov, nan=0.0)
+    short = np.maximum(1.0 - cov.sum(axis=-1), 0.0)                  # (nyear,ncol)
+    cov[..., 0] += short
+    cov = cov / np.maximum(cov.sum(axis=-1, keepdims=True), 1e-12)
+    return jnp.asarray(cov), jnp.asarray(years, dtype=float)
+
+
+def clm_provider_rebuild(surface_map: dict, variant: str = "multilayer",
+                         *, include_soil_albedo: bool = True):
+    """Return ``rebuild(fracs) -> CLMSurfaceParamProvider``: the SAME per-cell soil,
+    glacier, soil-colour albedo and prescribed LAI as ``surface_map`` (frozen),
+    with only the PFT cover ``fracs`` (ncol, 17) swapped in.
+
+    Used to re-weight the vegetation params at a new land-use year.  The PFT-
+    weighted params (incl. the plant btran wilting/field-capacity thresholds)
+    re-derive from ``fracs``; soil texture stays fixed.  ``include_soil_albedo``
+    mirrors the consumer's non-transient provider so enabling transient cover with
+    an unchanged slice is a no-op: ``clm_multilayer_setup`` uses the soil-colour
+    albedo (True), the coupled ``clm_surface_provider`` omits it (pass False)."""
+    _soil_albedo = surface_map.get("soil_albedo") if include_soil_albedo else None
+
+    def rebuild(fracs):
+        return CLMSurfaceParamProvider(
+            jnp.asarray(fracs), surface_map["theta_wp"], surface_map["theta_fc"],
+            surface_map["glacier_frac"], variant=variant,
+            soil_albedo=_soil_albedo, lai=surface_map.get("lai"))
+    return rebuild
+
+
+class TransientCoverProvider(eqx.Module):
+    """Land-param provider whose PFT cover varies by calendar year.
+
+    Wraps a reference provider ``base`` (used when ``year`` is None) plus an annual
+    cover series; ``__call__(year=...)`` re-weights the vegetation params at that
+    year via a ``rebuild`` closure (soil frozen).  Mirrors the provider protocol
+    (callable -> ``LandSurfaceParams``) so it drops into
+    ``make_coupler(land_param_provider=...)`` unchanged; ``year_varying`` marks it
+    so the coupler forwards the per-segment year."""
+    base: eqx.Module
+    cover: jax.Array                                  # (nyear, ncol, 17)
+    years: jax.Array                                  # (nyear,)
+    _rebuild: object = eqx.field(static=True)         # fracs -> provider
+    year_varying: bool = eqx.field(static=True, default=True)
+
+    def __call__(self, *, year=None):
+        if year is None:
+            return self.base()
+        from legoesm.land.global_surface_data import interp_annual
+        fracs = interp_annual(self.cover, self.years, jnp.asarray(float(year)))
+        return self._rebuild(fracs)()
+
+    def at_year(self, year):
+        """The reference provider re-baked at ``year`` (for drivers that swap the
+        whole provider rather than pass a year each call, e.g. the AMIP attribute)."""
+        from legoesm.land.global_surface_data import interp_annual
+        fracs = interp_annual(self.cover, self.years, jnp.asarray(float(year)))
+        return self._rebuild(fracs)
