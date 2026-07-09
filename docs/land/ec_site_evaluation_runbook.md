@@ -1,6 +1,6 @@
 # EC-site (flux-tower) evaluation of the two-leaf canopy — runbook
 
-**Audience:** Pierre / anyone reproducing the offline land site-level validation.
+**Audience:** anyone reproducing the offline land site-level validation.
 **What it does:** runs the prognostic multilayer land model with the two-leaf canopy
 surface scheme at four FLUXNET eddy-covariance sites and compares modelled vs observed
 latent heat, sensible heat, gross primary productivity, and soil moisture across the

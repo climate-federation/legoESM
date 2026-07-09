@@ -1,6 +1,6 @@
 # Land surface scheme de-duplication: audit and modularization plan
 
-**Audience:** Pierre (and anyone touching the land surface schemes)
+**Audience:** anyone touching the land surface schemes
 **Status:** design proposal — no code changed yet
 **Scope:** identify and de-duplicate numerics shared across the land surface stacks — the simpler
 AMIP energy-balance path (`SimpleSEB`, via `land/carbon/stomata.py`), the two-leaf canopy module
@@ -21,7 +21,7 @@ kernel (CLAUDE.md: *"Shared utilities — never re-derive"*, *"No duplicate nume
 dycores/physics/grids/tests"*). Today two land surface stacks re-implement the same leaf
 equations:
 
-- the **SimpleSEB** column path Pierre developed for AMIP/AIMIP — a bulk-flux surface energy
+- the **SimpleSEB** column path developed for AMIP/AIMIP — a bulk-flux surface energy
   balance whose transpiration/GPP come from `land/carbon/stomata.py`; and
 - the **two-leaf canopy** (`TwoLeafCanopyConfig`) — a sunlit/shaded leaf energy-balance Newton
   closure whose leaf physics live in `land/canopy/`.
@@ -199,7 +199,7 @@ only safe Phase-2 contents are the handful of truly closed-form identical helper
 Michaelis–Menten Kc/Ko term) — audit first, factor only what passes, keep the two canopy-scaling
 wrappers (two-leaf sunlit/shaded C3+C4 vs big-leaf C3) distinct.
 
-### Phase 3 — converge SimpleSEB photosynthesis? (physics decision — Pierre's call)
+### Phase 3 — converge SimpleSEB photosynthesis? (physics decision — model-owner call)
 
 The remaining question is whether SimpleSEB's C3-only big-leaf photosynthesis should adopt the
 canonical FvCB C3+C4 two-leaf kinetics. This **changes AMIP results** and therefore requires full
@@ -289,7 +289,7 @@ for a deliberate result change.
 stomatal kernels and should land first behind the `SurfaceFluxOutput` oracle + the new dedup test.
 Phase 2 realistically factors little (the Farquhar primitives are already numerically divergent).
 Phase 3 — whether SimpleSEB adopts the canonical C3+C4 photosynthesis — is a physics choice for
-Pierre, gated by the AMIP battery.
+the model owner, gated by the AMIP battery.
 
 ---
 
@@ -447,7 +447,7 @@ each gated by the relevant battery, leaving EC-site untouched:
   differences; multilayer-AMIP is unaffected either way.
 - **Soil-evap fidelity** (give SimpleSEB the bare-soil Sellers dry-surface-layer resistance — the
   multilayer SimpleSEB already has the Kelvin `h_r`): changes AMIP
-  latent heat / near-surface T. Pierre's own sweep bounds the sign (strengthening the throttle warms
+  latent heat / near-surface T. An independent sweep bounds the sign (strengthening the throttle warms
   JJA +1.0→+2.5 K and barely moves soil moisture 0.215→0.219). It is **fidelity, not the fix for the
   dry/warm bias** (that is a water-budget issue, out of scope here), and must expose the **bare-soil**
   efficiency only — SimpleSEB currently throttles *total* LE, so a naive stronger resistance would
@@ -495,5 +495,5 @@ improved); for Phase 1 and the §9.1 set, it means **identical**.
 | — | SimpleSEB → canonical C3+C4 photosynthesis | Phase 3 | **AMIP** (decision) | High |
 
 Ranks 1–7 are safe, mostly bit-for-bit de-duplications (start with #1). The two unranked items are
-physics decisions for Pierre, each gated by the AMIP-vs-ERA5 battery; neither affects site-level
+physics decisions for the model owner, each gated by the AMIP-vs-ERA5 battery; neither affects site-level
 validation.
