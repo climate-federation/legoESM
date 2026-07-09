@@ -44,3 +44,13 @@ def test_canopy_4deg_smoke_defaults():
     assert cfg.physics["enable_freeze_thaw"] is True
     assert cfg.physics["snow_albedo_feedback"] is True
     assert cfg.grid["resolution"] == 45
+
+
+def test_lulcc_template_declares_transient_cover_and_eluc():
+    """The LULCC option template declares a transient reconstruction dataset + the
+    E_LUC bookkeeping block (the schema accepts it; the driver validates the
+    surfdata is actually transient at run time)."""
+    path = _TEMPLATE_DIR / "lmip_canopy_lulcc.yaml"
+    cfg = validate_config(yaml.safe_load(path.read_text()))
+    assert cfg.surfdata["land_cover_dataset"] != "clm5"        # a real reconstruction
+    assert cfg.raw.get("land_use_change", {}).get("scheme") == "bookkeeping"

@@ -73,6 +73,18 @@ def _run_config(mod, cfg_path, out_dir, restart_from=""):
     ])
 
 
+def test_declared_reconstruction_on_static_surfdata_fails_fast(tmp_path):
+    """LULCC guard through the driver: declaring a transient reconstruction on a
+    single-year surfdata must raise BEFORE the run (silent no-LULCC is forbidden)."""
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))          # single cover year
+    out = tmp_path / "out"
+    cfg_path = _write_smoke_config(
+        tmp_path, sd, extra_overrides=["surfdata.land_cover_dataset=hyde"])
+    with pytest.raises(SystemExit, match="single cover year"):
+        _run_config(mod, cfg_path, out)
+
+
 def test_biophys_driver_synthetic_smoke(tmp_path):
     mod = _load_driver()
     sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))

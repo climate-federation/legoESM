@@ -251,6 +251,44 @@ machine + env.
 
 ---
 
+## Transient land-use / land-cover change (LULCC)
+
+LULCC is an **option**: the per-column PFT fractions evolve year-by-year from a
+reconstruction (re-weighting LAI, canopy params, and albedo each step), with
+optional E_LUC land-use-change carbon booked as a post-run diagnostic. The
+transient-cover engine (`make_step_land_params_updater` + per-step `year`
+threading) is the same machinery the coupled/AMIP path uses; it keys off the
+**surfdata's number of cover years**, so LULCC is enabled by handing the driver a
+*transient* surfdata (multi-year `pft_frac`) rather than a runtime switch.
+
+To turn it on:
+
+1. **Bake a transient surfdata** from a reconstruction (HYDE / Pongratz / KK10):
+   ```bash
+   python scripts/data/build_anthropogenic_surfdata.py --dataset hyde \
+     --base data/legoesm_surfdata_c250617.nc \
+     --year-start 1920 --year-end 1929 \
+     --out data/legoesm_surfdata_hyde_1920-1929.nc
+   ```
+   LUH2/LUH3 (native **gross** transitions → best E_LUC fidelity) go through
+   `build_luh2_transient_surfdata` instead.
+2. **Declare it in the config** (see template `biophysics/lmip_canopy_lulcc`):
+   ```yaml
+   surfdata:
+     path: data/legoesm_surfdata_hyde_1920-1929.nc
+     land_cover_dataset: hyde          # clm5 (static) | luh2 | luh3 | hyde | pongratz | kk10
+   land_use_change:
+     scheme: bookkeeping               # writes <output>.eluc_annual.txt; omit to skip
+   ```
+   The cover years must span the forcing years.
+
+The run banner prints `cover=transient LULCC ON (hyde, N cover years Y0-Y1)` and
+`E_LUC=on`. **Fail-fast guard:** declaring a reconstruction (`land_cover_dataset`
+≠ `clm5`) while pointing `surfdata.path` at a single-year surfdata is a hard error
+(it would silently apply no land-use change) — build the transient surfdata first.
+`land_cover_dataset: clm5` = static cover (the default, byte-identical to a
+non-LULCC run).
+
 ## Known limitations (current infrastructure phase)
 
 These are physics gaps, not code bugs. The next physics workstream will address

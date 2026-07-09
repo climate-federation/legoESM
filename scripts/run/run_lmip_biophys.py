@@ -150,6 +150,43 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
     return ns
 
 
+def resolve_lulcc(land_cover_dataset: str, n_cover_years: int, cover_years) -> str:
+    """Validate the declared land-cover dataset against the loaded surfdata and
+    return a one-line transient-cover status for the run banner.
+
+    ``land_cover_dataset`` (from ``surfdata.land_cover_dataset``) is the config's
+    declared cover source: ``clm5`` = the static single-year base; any of
+    ``luh2|luh3|hyde|pongratz|kk10`` = a transient anthropogenic reconstruction.
+
+    The transient-cover engine (``make_step_land_params_updater`` +
+    per-step ``year`` threading) keys off the surfdata's NUMBER OF COVER YEARS,
+    not off this field — so a run that *declares* a reconstruction but is handed a
+    single-year surfdata would SILENTLY apply no land-use change.  That is the
+    "no silent no-op" failure the codebase forbids, so raise instead: the
+    reconstruction must first be baked into a transient surfdata
+    (``scripts/data/build_anthropogenic_surfdata.py --dataset <name>`` for
+    HYDE/Pongratz/KK10, or ``build_luh2_transient_surfdata`` for LUH2/3) and
+    ``surfdata.path`` pointed at it.  ``clm5`` + a multi-year surfdata is allowed
+    (transient cover still applies) but the banner flags the provenance mismatch.
+    """
+    from legoesm.land.surface_data.datasets import validate_land_cover_dataset
+    validate_land_cover_dataset(land_cover_dataset)          # known-name guard (raises)
+    transient = n_cover_years > 1
+    if land_cover_dataset != "clm5" and not transient:
+        raise SystemExit(
+            f"land_cover_dataset={land_cover_dataset!r} declares a transient LULCC "
+            f"reconstruction, but the surfdata carries a single cover year — no "
+            f"land-use change would be applied (silent no-op).  Build a transient "
+            f"surfdata first (scripts/data/build_anthropogenic_surfdata.py "
+            f"--dataset {land_cover_dataset}) and set surfdata.path to it, or use "
+            f"land_cover_dataset=clm5 for a static-cover run.")
+    if transient:
+        y0, y1 = int(cover_years[0]), int(cover_years[-1])
+        prov = "" if land_cover_dataset != "clm5" else " [dataset=clm5 but surfdata is transient]"
+        return f"transient LULCC ON ({land_cover_dataset}, {n_cover_years} cover years {y0}-{y1}){prov}"
+    return f"static cover ({land_cover_dataset})"
+
+
 def _report_eluc(args, gsd) -> None:
     """Compute + report annual E_LUC when land-use-change bookkeeping is enabled.
 
@@ -322,8 +359,23 @@ def run(args) -> int:
                     else f"CRU-JRA {year_start}"
                     + (f"-{year_end}" if multi_year else ""))
     _ft = bool(getattr(getattr(config, "thermal", None), "enable_freeze_thaw", False))
+    # --- LULCC option: validate the declared land-cover dataset against the loaded
+    # surfdata (fail fast on a declared-reconstruction / static-surfdata mismatch),
+    # and validate the E_LUC bookkeeping config UP FRONT so a bad knob fails before
+    # the run instead of in the post-run _report_eluc. ---
+    _lc_dataset = getattr(args, "_cfg_land_cover_dataset", "clm5")
+    _n_cover_years = int(np.asarray(gsd.pft_frac).shape[0])
+    _lulcc_status = resolve_lulcc(_lc_dataset, _n_cover_years, np.asarray(gsd.years))
+    _luc_block = getattr(args, "_cfg_luc", None) or {}
+    _eluc_on = _luc_block.get("scheme", "none") == "bookkeeping"
+    if _eluc_on:
+        from legoesm.land.land_use_change import LandUseChangeConfig, validate_luc_config
+        _fields = LandUseChangeConfig._fields
+        validate_luc_config(
+            LandUseChangeConfig(**{k: v for k, v in _luc_block.items() if k in _fields}))
     print(f"grid={args.grid_type} | {ncol} columns | surface={args.surface_scheme} | "
           f"carbon={config.carbon.scheme} | freeze_thaw={'on' if _ft else 'off'} | "
+          f"cover={_lulcc_status} | E_LUC={'on' if _eluc_on else 'off'} | "
           f"dt={dt:.0f}s | n_steps={args.n_steps} | forcing={forcing_desc}")
 
     # Precompute per-year masks over model_times_s.  We stage forcing +
