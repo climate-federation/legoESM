@@ -382,3 +382,8 @@ def make_tiled_cc_loop(model, mesh, kt: int, dt: float,
         return fv3_to_hydrostatic(fv3, cdgrid)
 
     return enter, step, exit_
+
+
+# Public alias for the tiled operator-split driver lane (the
+# no-private-cross-imports ratchet's sanctioned surface).  Same object.
+validate_tiled_envelope = _validate_tiled_envelope
