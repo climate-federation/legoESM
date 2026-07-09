@@ -56,6 +56,72 @@ def _refuse(cond: bool, what: str) -> None:
         )
 
 
+def _validate_tiled_envelope(cfg, cdgrid, *, inner_fix_mass_ok: bool) -> None:
+    """Envelope refusals shared by the single-shot cc step and the closed
+    loop (dispatch-hardening — a config outside the proven base cut must
+    fail LOUDLY, never silently integrate different numerics).  Defaults
+    are all inside the envelope.
+
+    ``inner_fix_mass_ok``: the closed-loop step applies the serial
+    post-step dry-mass fixer IN-STAGE (telescoping ``fix_ps_mass``), so
+    ``use_conservation_fixer+fix_mass`` is inside ITS envelope; the
+    single-shot cc step has no fixer, so there it must be refused.
+    """
+    _refuse(getattr(cdgrid.base, "duogrid", None) is not None, "duogrid")
+    # The serial step honours config.time_integrator; the tiled stage is
+    # hardwired SSP-RK3 — only the names that dispatch to the SAME
+    # integrator are accepted (codex round-13 HIGH #2).
+    _refuse(getattr(cfg, "time_integrator", "ssp_rk3")
+            not in ("ssp_rk3", "ssp3", "rk3"),
+            f"time_integrator={getattr(cfg, 'time_integrator', None)!r} "
+            "(tiled step is SSP-RK3)")
+    # The inner mass fixer: the compiled-segment driver externalizes it
+    # (inner model runs fix_mass=False); a DIRECT default-config caller
+    # would silently lose the per-step fix_ps_mass (codex round-13 HIGH
+    # #1) — refuse so the caller must disable it explicitly.  The closed
+    # loop instead RUNS the tiled in-stage fixer for this config.
+    if not inner_fix_mass_ok:
+        _refuse(bool(getattr(cfg, "use_conservation_fixer", False))
+                and bool(getattr(cfg, "fix_mass", False)),
+                "the inner mass fixer (use_conservation_fixer+fix_mass; the "
+                "segment driver applies the target-anchored fixer OUTSIDE "
+                "the step — pass a config with fix_mass=False)")
+    # Every non-default tendency/damping term the tiled base cut omits
+    # (codex round-13 HIGH #3 — the tiled module's own scope note).
+    for _f, _lbl in (
+        ("damp_v", "damp_v del-6 damping"),
+        ("damp_v_d_con", "damp_v_d_con heating"),
+        ("div_damp_d_con", "div_damp_d_con"),
+        ("corner_div_damp_d_con", "corner_div_damp_d_con"),
+        ("div_damp_coeff", "divergence damping"),
+        ("corner_div_damp_d2_bg", "corner div damping (d2)"),
+        ("corner_div_damp_d4_bg", "corner div damping (d4)"),
+        ("A_h", "Laplacian viscosity A_h"),
+        ("smagorinsky_cs", "Smagorinsky viscosity"),
+        ("hyperdiff_coeff", "hyperdiffusion"),
+        ("hyperdiff_ps_coeff", "p_s hyperdiffusion"),
+        ("T_diss_coeff", "T dissipation"),
+        ("implicit_grav_wave_damping",
+         "implicit gravity-wave damping (the p_s damp + p_floor clamp "
+         "post-step)"),
+        # Ray_fast post-step Rayleigh damping (u_d/v_d *= rff above
+        # rf_cutoff_pa) — a serial post-step op neither tiled path runs; a
+        # nonzero value would silently diverge (envelope hardening, this
+        # increment).
+        ("rf_tau_days", "Ray_fast Rayleigh damping (rf_tau_days)"),
+    ):
+        _refuse(getattr(cfg, _f, 0.0) > 0.0, _lbl)
+    _refuse(bool(getattr(cfg, "sponge_implicit", False)),
+            "the implicit sponge")
+    _refuse(bool(getattr(cfg, "use_fv3_a2b_zeta_corner", False)),
+            "use_fv3_a2b_zeta_corner")
+    # Serial tracer/moisture semantics (flux-form substep, post-RK3
+    # moisture handling) are outside BOTH tiled cuts — the tiled moist
+    # contract is the injected column_physics_fn path only (codex).
+    _refuse(bool(getattr(cfg, "moisture_flux_form", False)),
+            "moisture_flux_form tracer transport")
+
+
 def make_tiled_cc_step(model, mesh, kt: int, dt: float):
     """Build ``step(state) -> state`` running one ``dt`` of the cube
     hydrostatic dycore sub-face-tiled on a ``(6, kt, kt)`` mesh.
@@ -89,50 +155,7 @@ def make_tiled_cc_step(model, mesh, kt: int, dt: float):
 
     cfg = model.config
     cdgrid = model.cdgrid
-    # Envelope refusals (dispatch-hardening — a config outside the proven
-    # base cut must fail LOUDLY, never silently integrate different
-    # numerics).  Defaults are all inside the envelope.
-    _refuse(getattr(cdgrid.base, "duogrid", None) is not None, "duogrid")
-    # The serial step honours config.time_integrator; the tiled stage is
-    # hardwired SSP-RK3 — only the names that dispatch to the SAME
-    # integrator are accepted (codex round-13 HIGH #2).
-    _refuse(getattr(cfg, "time_integrator", "ssp_rk3")
-            not in ("ssp_rk3", "ssp3", "rk3"),
-            f"time_integrator={getattr(cfg, 'time_integrator', None)!r} "
-            "(tiled step is SSP-RK3)")
-    # The inner mass fixer: the compiled-segment driver externalizes it
-    # (inner model runs fix_mass=False); a DIRECT default-config caller
-    # would silently lose the per-step fix_ps_mass (codex round-13 HIGH
-    # #1) — refuse so the caller must disable it explicitly.
-    _refuse(bool(getattr(cfg, "use_conservation_fixer", False))
-            and bool(getattr(cfg, "fix_mass", False)),
-            "the inner mass fixer (use_conservation_fixer+fix_mass; the "
-            "segment driver applies the target-anchored fixer OUTSIDE the "
-            "step — pass a config with fix_mass=False)")
-    # Every non-default tendency/damping term the tiled base cut omits
-    # (codex round-13 HIGH #3 — the tiled module's own scope note).
-    for _f, _lbl in (
-        ("damp_v", "damp_v del-6 damping"),
-        ("damp_v_d_con", "damp_v_d_con heating"),
-        ("div_damp_d_con", "div_damp_d_con"),
-        ("corner_div_damp_d_con", "corner_div_damp_d_con"),
-        ("div_damp_coeff", "divergence damping"),
-        ("corner_div_damp_d2_bg", "corner div damping (d2)"),
-        ("corner_div_damp_d4_bg", "corner div damping (d4)"),
-        ("A_h", "Laplacian viscosity A_h"),
-        ("smagorinsky_cs", "Smagorinsky viscosity"),
-        ("hyperdiff_coeff", "hyperdiffusion"),
-        ("hyperdiff_ps_coeff", "p_s hyperdiffusion"),
-        ("T_diss_coeff", "T dissipation"),
-        ("implicit_grav_wave_damping",
-         "implicit gravity-wave damping (the p_s damp + p_floor clamp "
-         "post-step)"),
-    ):
-        _refuse(getattr(cfg, _f, 0.0) > 0.0, _lbl)
-    _refuse(bool(getattr(cfg, "sponge_implicit", False)),
-            "the implicit sponge")
-    _refuse(bool(getattr(cfg, "use_fv3_a2b_zeta_corner", False)),
-            "use_fv3_a2b_zeta_corner")
+    _validate_tiled_envelope(cfg, cdgrid, inner_fix_mass_ok=False)
 
     n = int(model.grid.n)
     nlev = int(model.sigma_coord.n_levels)
@@ -185,3 +208,131 @@ def make_tiled_cc_step(model, mesh, kt: int, dt: float):
         return fv3_to_hydrostatic(fv3_new, cdgrid)
 
     return step
+
+
+def make_tiled_cc_loop(model, mesh, kt: int, dt: float):
+    """Closed-loop tiled stepping: state stays TILE-SHARDED across steps.
+
+    The single-shot ``make_tiled_cc_step`` re-replicates per call (its exit
+    dedup is a full-cube gather) — valid for one-step parity/bench probes,
+    invalid as a production loop.  This builder returns the persistent
+    variant over the blocked layout
+    (:func:`legoesm.parallel.tiled_production_cdgrid.
+    make_tiled_fv3_hydrostatic_step_blocked_2d`):
+
+    ``(enter, step, exit_)`` with
+
+    * ``enter(state: HydrostaticState) -> blocked`` — ONE-TIME layout
+      conversion: the serial entry conversions verbatim
+      (``center_to_dgrid_vector`` + the serial compute-dtype cast), then
+      corner block-expansion + device placement on the tiled mesh.
+    * ``step(blocked) -> blocked`` — one ``dt``; input layout == output
+      layout, so ``s = step(s)`` iterates with NO per-step gather.
+    * ``exit_(blocked, template_state) -> HydrostaticState`` — dedup + the
+      serial ``fv3_to_hydrostatic`` exit (``template_state`` supplies the
+      Field wrappers, normally the state passed to ``enter``); for
+      I/O/diagnostics only (a global gather — never call it inside the
+      loop).
+
+    Unlike the single-shot adapter, the default production config's
+    ``use_conservation_fixer+fix_mass`` is INSIDE this envelope: the
+    blocked step applies the serial telescoping post-step ``fix_ps_mass``
+    in-stage (the anchor path threads the per-call pre-step mass under an
+    outer jit, which telescopes identically — primitive_eq_cdgrid step()
+    docstring).  ``zero_mean_ps_tendency`` composes exactly as serial: with
+    the end-step fixer active the serial step SKIPS the per-stage zero-mean
+    (``_apply_zero_mean_per_stage=False``), which is the blocked body's
+    base cut; without the fixer that config is outside the envelope —
+    refused loudly below.
+    """
+    from legoesm.core.operators_cdgrid import center_to_dgrid_vector
+    from legoesm.core.precision import cast_pytree
+    from legoesm.parallel.tiled_production_cdgrid import (
+        expand_corners_to_blocks,
+        make_tiled_fv3_hydrostatic_step_blocked_2d,
+    )
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        FV3HydrostaticState, fv3_to_hydrostatic,
+    )
+
+    cfg = model.config
+    cdgrid = model.cdgrid
+    _validate_tiled_envelope(cfg, cdgrid, inner_fix_mass_ok=True)
+    _fix_mass = (bool(getattr(cfg, "use_conservation_fixer", False))
+                 and bool(getattr(cfg, "fix_mass", False)))
+    # Per-stage zero-mean runs only when the end-step fixer is OFF
+    # (primitive_eq_cdgrid._apply_zero_mean_per_stage); the blocked base
+    # cut has no per-stage zero-mean, so that combination must refuse.
+    _refuse(bool(getattr(cfg, "zero_mean_ps_tendency", False))
+            and not _fix_mass,
+            "zero_mean_ps_tendency without the end-step mass fixer (the "
+            "serial step then zero-means dp_s/dt EVERY RK stage; the "
+            "blocked base cut does not)")
+
+    n = int(model.grid.n)
+    nlev = int(model.sigma_coord.n_levels)
+    nl = n // kt
+    tiled = make_tiled_fv3_hydrostatic_step_blocked_2d(
+        mesh, cdgrid, model.sigma_coord, n, kt, nlev,
+        p_floor=float(cfg.p_floor), dt=float(dt),
+        sponge_sigma=float(getattr(cfg, "sponge_sigma", 0.0)),
+        sponge_tau_sec=float(getattr(cfg, "sponge_tau_sec", 0.0)),
+        fix_mass=_fix_mass,
+    )
+
+    import jax
+    from jax.sharding import NamedSharding, PartitionSpec as P
+
+    cz = NamedSharding(mesh, P("face", "tile_i", "tile_j", None))
+    co = NamedSharding(mesh, P("face", "tile_i", "tile_j"))
+
+    def enter(state):
+        """cc HydrostaticState -> blocked pytree (dict) on the tiled mesh."""
+        # The loop advances DRY fields only; silently freezing a tracer
+        # dict across steps while serial advances/floors it would be a
+        # divergence-by-omission (codex BLOCKER) — refuse until the moist
+        # blocked wiring (q_pack pack/step/unpack) lands in this adapter.
+        if getattr(state, "tracers", None):
+            raise NotImplementedError(
+                "make_tiled_cc_loop: state carries tracers, but the blocked "
+                "loop adapter is dry-only for now (the core moist blocked "
+                "step exists; the adapter q_pack wiring is the remaining "
+                "increment). Drop the tracers or run the face-only path.")
+        u_d, v_d = center_to_dgrid_vector(
+            state.u.data, state.v.data, cdgrid)
+        # Serial _step_fv3 entry cast (see make_tiled_cc_step's note).
+        u_d, v_d, T_in, ps_in, phis_in = cast_pytree(
+            (u_d, v_d, state.T.data, state.p_s.data, state.phis.data),
+            None, "compute")
+        return {
+            "u_d": jax.device_put(
+                expand_corners_to_blocks(u_d, kt, nl), cz),
+            "v_d": jax.device_put(
+                expand_corners_to_blocks(v_d, kt, nl), cz),
+            "T": jax.device_put(T_in, cz),
+            "p_s": jax.device_put(ps_in, co),
+            "phis": jax.device_put(phis_in, co),
+        }
+
+    def step(blocked):
+        u2, v2, T2, ps2 = tiled(blocked["u_d"], blocked["v_d"],
+                                blocked["T"], blocked["p_s"],
+                                blocked["phis"])
+        return {"u_d": u2, "v_d": v2, "T": T2, "p_s": ps2,
+                "phis": blocked["phis"]}
+
+    def exit_(blocked, template_state):
+        """Blocked -> cc HydrostaticState (GLOBAL GATHER — I/O only)."""
+        u_d = dedup_tiled_corners(blocked["u_d"], kt, nl)
+        v_d = dedup_tiled_corners(blocked["v_d"], kt, nl)
+        fv3 = FV3HydrostaticState(
+            u_d=template_state.u.replace(data=u_d, name="u_d"),
+            v_d=template_state.v.replace(data=v_d, name="v_d"),
+            T=template_state.T.replace(data=blocked["T"]),
+            p_s=template_state.p_s.replace(data=blocked["p_s"]),
+            phis=template_state.phis,
+            tracers=getattr(template_state, "tracers", None),
+        )
+        return fv3_to_hydrostatic(fv3, cdgrid)
+
+    return enter, step, exit_

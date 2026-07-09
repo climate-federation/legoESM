@@ -14,10 +14,45 @@ BIT-IDENTITY vs the global `_step_fv3` base cut, never a wall-clock number.
 > b66f82bb7) are all in `parallel/tiled_production_cdgrid.py`, bit-identity- /
 > conservation-gated (np24/np54), cavecrew-clean and codex-reviewed (3 findings
 > fixed: mesh/kt + nl≥2 guards 0f50c4afe, f32 delta-first fixer b66f82bb7).
-> **Still UNWIRED into production** (`ModelDriver` / `make_sharded_step` do not
-> call the tiled step — the driver warns) — by design: np>6 anti-scales on Gloo,
-> so wiring is deferred to NVLink/IB/TPU hardware. The capability exists and is
-> verified; the production hookup is the remaining future-HW task.
+>
+> **UPDATE (2026-07-09) — WIRED (the production assembly).** The fast-
+> interconnect hardware arrived (Derecho A100 + NCCL/Slingshot route-B), so
+> the deferred hookup shipped, closing the single-shot gap (the step stages
+> consume face-replicated state and emit tile-sharded state — feeding back
+> required a full-cube gather per step):
+>
+> * `make_tiled_fv3_hydrostatic_step_blocked_2d` (tiled_production_cdgrid):
+>   BLOCKED persistent layout, input layout == output layout, so
+>   `s = step(s)` closes the loop with no per-step gather; optional
+>   in-stage telescoping `fix_ps_mass` (shared `_tile_fix_ps_mass_delta`
+>   psum) matching the serial `use_conservation_fixer+fix_mass` branch;
+>   optional moist `column_physics_fn` (same contract as the moist stage).
+>   BIT-IDENTICAL to the gated single-shot stage
+>   (`test_tiled_blocked_loop.py::test_blocked_step_bit_identical_to_
+>   shipped_stage`, Held-Suarez state, exact zeros).
+> * `make_tiled_cc_loop` (tiled_step_adapter): `enter/step/exit_` over the
+>   blocked layout (`expand_corners_to_blocks` at entry, adapter dedup at
+>   exit — both one-time); production conservation config INSIDE its
+>   envelope (unlike the single-shot adapter).
+> * Wiring: `run_cpu_mpi_scaling --cs-spmd` at 6·kt² devices dispatches to
+>   the blocked loop (kt≥2 previously fell into the non-tile-aware generic
+>   `make_sharded_step`); `bench_cube_tiled_step_scaling --closed-loop` is
+>   the honest feedback-timed lane (the prior lane could only time repeated
+>   single shots on the pristine input); `cube_tiled_step.pbs/.sbatch` run
+>   both parity + timed arms.
+> * Gates: `tests/parallel/test_tiled_blocked_loop.py` — np24 multi-step
+>   parity vs serial `model.step` (production conservation config, mass
+>   conserved to 1e-12, duplicated shared faces bit-identical after N
+>   steps), expand/dedup round-trip, envelope refusals.
+> * Known pre-existing class (NOT introduced by the loop; bounded by the
+>   shipped adapter gate): on production-magnitude states the tiled step
+>   differs from serial by an O(1e-6 abs) face-corner wind term (level-
+>   decaying, step-constant) — invisible on the gentle-random stage gates,
+>   bounded at TILED_PARITY_ATOL in the adapter gates.
+>
+> Remaining under this track: the Kessler column bridge for the moist
+> blocked loop in the drivers, and `ModelDriver` (full-model coupling)
+> hookup — the dynamics-only envelope is deliberate until then.
 
 ## The layout problem (the crux)
 
