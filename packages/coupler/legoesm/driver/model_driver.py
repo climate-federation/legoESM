@@ -6123,8 +6123,14 @@ class ModelDriver:
         raise NotImplementedError(
             "tiled cube SPMD (6*kt^2 devices) supports dynamics-only (all "
             "parameterizations 'none') or Kessler microphysics alone; the "
-            f"configured physics {active} is not tiled-routed. Set those "
-            "schemes to 'none' or run <=6 devices (face sharding).")
+            f"configured physics {active} is not tiled-routed in THIS lane. "
+            "The unified-pipeline tiled step EXISTS "
+            "(driver/tiled_operator_split_step.make_tiled_operator_split_"
+            "step: tile-sharded SegmentCarry/PhysicsState, column physics + "
+            "tile-psum fixers, np24-parity-gated) — the remaining driver "
+            "increment is building its statics with a TILE-ncol "
+            "step_unified. Set those schemes to 'none' or run <=6 devices "
+            "(face sharding).")
 
     def _run_tiled_cube_spmd(self, start_step: int = 0,
                              start_day: float | None = None) -> str:
@@ -6142,9 +6148,13 @@ class ModelDriver:
         Supports DYNAMICS-ONLY or Kessler-microphysics-only configs (the
         tiled envelope; anything else is refused loudly by
         ``_tiled_cube_column_physics_fn`` / the adapter's envelope
-        validation).  Diagnostics/checkpoint writers are follow-ups
-        (rejected loudly); a coupled driver consumes the per-segment state
-        via ``segment_callback``.
+        validation).  Writers: the lightweight ``timeseries.npz``
+        diagnostics (``diag_days``) and the checkpoint writer
+        (``checkpoint_days``, via the ``_checkpoint_callback``-or-
+        ``save_checkpoint`` hook contract) fire on segment boundaries —
+        the segment length is the gcd of the active cadences with the
+        1-day coupling cadence, so every writer sees the gathered cc
+        state, never the blocked in-loop state.
         """
         import time as _time
 
@@ -6156,11 +6166,6 @@ class ModelDriver:
         )
 
         cfg = self.config
-        if cfg.output.checkpoint_days > 0 or cfg.output.diag_days > 0:
-            raise NotImplementedError(
-                "the tiled cube SPMD run does not yet support the "
-                "diagnostics / checkpoint writers (set diag_days=0, "
-                "checkpoint_days=0); use the segment_callback hook for I/O.")
         dc = self._device_config
         tiling = tuple(getattr(dc, "tiling", (1, 1)))
         kt = int(tiling[0])
@@ -6187,10 +6192,37 @@ class ModelDriver:
                 and getattr(self, "_loaded_checkpoint_step_day", None)
                 == (start_step, start_day)):
             START_DAY = start_day - start_step * DT / 86400.0
-        seg_len = max(1, int(86400.0 / DT))
+        # Writer cadences (steps).  0 = off.  The segment length is the gcd
+        # of the ACTIVE cadences with the 1-day coupling cadence, so every
+        # writer fires exactly on a segment boundary (where the gathered cc
+        # state exists) — never mid-loop on the blocked state.
+        import math as _math
+
+        day_steps = max(1, int(86400.0 / DT))
+        diag_steps = (int(cfg.output.diag_days * 86400.0 / DT)
+                      if cfg.output.diag_days > 0 else 0)
+        ckpt_steps = (int(cfg.output.checkpoint_days * 86400.0 / DT)
+                      if cfg.output.checkpoint_days > 0 else 0)
+        for _nm, _cad in (("diag_days", diag_steps),
+                          ("checkpoint_days", ckpt_steps)):
+            if _cad < 0 or (getattr(cfg.output, _nm) > 0 and _cad == 0):
+                raise ValueError(
+                    f"tiled cube SPMD: {_nm}={getattr(cfg.output, _nm)} is "
+                    f"shorter than one step (dt={DT}s).")
+        seg_len = day_steps
+        for _cad in (diag_steps, ckpt_steps):
+            if _cad > 0:
+                seg_len = _math.gcd(seg_len, _cad)
+        seg_len = max(1, seg_len)
         n_run = n_steps_total - start_step
         if n_run < 1:
             return "COMPLETED"
+        # Lightweight timeseries (the spectral/MPAS fallback writer's schema
+        # — the AMIP validation harness's minimum contract).
+        _ts: dict[str, list] = {
+            "days": [], "T_atm": [], "T_min": [], "T_max": [],
+            "max_wind": [], "dry_mass_ps": [], "T_finite": [],
+        }
 
         logger.info(
             "tiled cube SPMD run: %d steps, %d-step segments, kt=%d "
@@ -6252,9 +6284,37 @@ class ModelDriver:
                     _np.asarray(self.state.T.data)))):
                 logger.error("tiled cube SPMD: non-finite T at day %.3f",
                              day)
+                if diag_steps > 0:
+                    self._save_lightweight_timeseries(
+                        _ts, f"BLOWUP at day {day:.3f}", t0)
                 return f"BLOWUP at day {day:.3f}"
+            abs_step = start_step + step_done
+            if diag_steps > 0 and abs_step % diag_steps == 0:
+                s = self.state
+                _stats = _np.asarray(jnp.stack([
+                    jnp.mean(s.T.data), jnp.min(s.T.data),
+                    jnp.max(s.T.data), jnp.mean(s.p_s.data),
+                    jnp.max(jnp.sqrt(s.u.data ** 2 + s.v.data ** 2)),
+                ]))
+                _ts["days"].append(day - self.config.start_day)
+                _ts["T_atm"].append(float(_stats[0]))
+                _ts["T_min"].append(float(_stats[1]))
+                _ts["T_max"].append(float(_stats[2]))
+                _ts["dry_mass_ps"].append(float(_stats[3]))
+                _ts["max_wind"].append(float(_stats[4]))
+                _ts["T_finite"].append(True)   # guarded above
+            if ckpt_steps > 0 and abs_step % ckpt_steps == 0:
+                # run()'s established hook contract (the _run_compiled
+                # pattern): a coupled driver's _checkpoint_callback owns the
+                # FULL coupled state; else the driver's own writer on the
+                # gathered cc state.
+                _ckpt = (getattr(self, "_checkpoint_callback", None)
+                         or self.save_checkpoint)
+                _ckpt(abs_step, day)
             if self._segment_callback is not None:
                 self._segment_callback(self, day, DT * seg_n)
+        if diag_steps > 0:
+            self._save_lightweight_timeseries(_ts, "COMPLETED", t0)
         logger.info("tiled cube SPMD run: COMPLETED (%.1fs)",
                     _time.time() - t0)
         return "COMPLETED"

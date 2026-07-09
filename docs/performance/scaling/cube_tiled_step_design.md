@@ -71,9 +71,41 @@ BIT-IDENTITY vs the global `_step_fv3` base cut, never a wall-clock number.
 >   diagnostics/checkpoint writers refuse loudly.  Gates:
 >   `tests/parallel/test_tiled_cube_spmd_driver.py`.
 >
-> Remaining under this track: diagnostics/checkpoint writers for the
-> tiled driver lane; unified-pipeline physics tiling (a separate
-> project — the PhysicsState carry needs a tile-aware shard).
+> **UPDATE (2026-07-09c) — writers + unified-physics tiling core:**
+>
+> * **Writers**: `_run_tiled_cube_spmd` now runs the lightweight
+>   `timeseries.npz` diagnostics (`diag_days`) and the checkpoint hook
+>   (`checkpoint_days`, run()'s `_checkpoint_callback`-or-
+>   `save_checkpoint` contract) — segment length = gcd of the active
+>   cadences with the 1-day coupling cadence, so writers only ever see
+>   the gathered cc state.
+> * **Unified-pipeline physics tiling
+>   (`driver/tiled_operator_split_step.py`)** — the tiled-cube twin of
+>   the lat-band `sharded_operator_split_step`: ONE shard_map runs the
+>   serial `_single_step` composition (cc→D dynamics RK3 → target-mass
+>   fixer → `step_unified` column physics → Euler write-back →
+>   saturation/moisture-fixer/Rayleigh tail → carry pack) per tile.
+>   The **tile-aware SegmentCarry/PhysicsState shard**
+>   (`shard_tiled_split_carry` + `pack_carry_tiled`/`unpack_carry_tiled`)
+>   reshapes the FLATTENED per-column leaves (conv_prog, held radiation,
+>   accumulators) grid-shaped — the row-major ncol order is not
+>   tile-contiguous, so grid-shaped is the only shardable layout — and
+>   the conservation reductions gained a tiled-mesh psum branch
+>   (`conservation._spmd_lat_psum_or_none`), so the moisture/mass fixers
+>   reduce correctly inside the tiled shard_map.  np24 gate
+>   (`test_tiled_operator_split_step.py`): 2-step parity vs the serial
+>   composition with a shape-agnostic column mock (the lat-band lane's
+>   "2b" staging) — dynamics fields in the documented corner class,
+>   physics carry/held/accumulators at 1e-12, global moisture conserved
+>   to 1e-9.  Envelope refusals: `qv_smooth_coeff != 0` (full-cube ∇⁴
+>   halo), `owned_mask` (MPI-replicated semantics).
+>
+> Remaining under this track: the driver statics build for the REAL
+> PhysicsPipeline through the tiled operator-split step (a
+> `step_unified` built at TILE ncol + per-tile forcing stacking — the
+> lat-band lane's Phase-3 pattern), then flipping
+> `_tiled_cube_column_physics_fn`'s unified-pipeline refusal into a
+> dispatch.
 
 ## The layout problem (the crux)
 
