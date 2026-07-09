@@ -111,6 +111,14 @@ DEFAULT_DT = 3600.0               # sub-daily spin-up timestep [s]
 DEFAULT_N_LAYERS = 10
 DEFAULT_SOIL_DEPTH = 3.0          # soil column depth [m]
 DEFAULT_MAX_ARCHETYPES = 40       # representative-subset cap (0 = keep all)
+# Default chunk size for the --slow-spinup-grad EXACT chunked gradient
+# accumulation: the batched coupled-model reverse-mode VJP SEGFAULTS on the CPU
+# XLA backend at >=8 archetypes (a crash, not OOM), so each per-chunk VJP is
+# bounded to this many archetypes.  Value = the LARGEST crash-free CPU chunk size
+# from the Step-0 bisect (scripts/tmp/_bisect_carbon_chunk.py); fewer chunks =
+# fewer sequential VJPs = faster.  0 (or --grad-chunk 0) keeps the single-batch
+# path for fast mode / tiny runs.
+DEFAULT_GRAD_CHUNK = 4
 DEFAULT_OUTDIR = Path("results/carbon_calibration")
 GRAD_NONZERO_TOL = 1.0e-14
 # Mean analytic-vs-spin-up SOC relative error above which the fast forward is
@@ -178,6 +186,28 @@ def _total_loss(eq, losses: dict[str, LossTerm], cover_weight: jax.Array) -> jax
         pred = term.extractor(eq)
         total = total + term.weight * cover_weighted_mse(
             pred, term.target, cover_weight)
+    return total
+
+
+def _weighted_sse(eq, losses: dict[str, LossTerm], cover_weight: jax.Array) -> jax.Array:
+    """UN-normalized cover-weighted SSE: ``sum_k w_k sum_a cover_a (pred_{k,a}-obs_{k,a})^2``.
+
+    The NUMERATOR of :func:`_total_loss` (which divides this by ``sum_a cover_a``):
+    ``_total_loss(eq, losses, cover) == _weighted_sse(eq, losses, cover) /
+    sum(cover)`` because every term shares the SAME cover-weight denominator.  The
+    chunked EXACT-gradient accumulation (:func:`_make_chunked_slow`) sums this
+    per-chunk UN-normalized SSE (+ its grad) across chunks and divides by the
+    GLOBAL cover-weight sum ONCE at the end, so the chunked gradient equals the
+    unchunked cover-weighted-MSE gradient exactly.  Kept un-normalized (a direct
+    ``sum(cover*(pred-obs)^2)`` rather than ``cover_weighted_mse * sum_chunk_cover``)
+    so a chunk whose archetypes ALL have zero cover contributes a clean 0, not a
+    0/0 NaN from a per-chunk normalisation.
+    """
+    cover = jnp.asarray(cover_weight)
+    total = jnp.asarray(0.0, dtype=cover.dtype)
+    for term in losses.values():
+        pred = term.extractor(eq)
+        total = total + term.weight * jnp.sum(cover * (pred - term.target) ** 2)
     return total
 
 
@@ -258,6 +288,120 @@ def make_loss_fn(
         return _total_loss(eq, losses, cover_weight)
 
     return loss_fn
+
+
+def _chunk_bounds(n: int, chunk: int) -> list[tuple[int, int]]:
+    """Contiguous ``[start, stop)`` archetype-index chunks of at most ``chunk``.
+
+    ``chunk <= 0`` or ``chunk >= n`` -> ONE chunk ``[(0, n)]`` (the single-batch
+    path).  A chunk bounds the number of archetypes in one
+    :func:`~legoesm.land.carbon.global_init.equilibrate_archetypes_traced` call
+    (hence one reverse-mode VJP): each archetype's coupled spin-up is INDEPENDENT
+    of the others (its own PFT physiology + climate forcing column; the batched
+    ``vmap`` is per-column elementwise), so any contiguous partition yields the
+    identical per-archetype equilibrium SOC.
+    """
+    if chunk <= 0 or chunk >= n:
+        return [(0, n)]
+    return [(s, min(s + chunk, n)) for s in range(0, n, chunk)]
+
+
+def _make_chunked_slow(target_bundle, spin, *, chunk: int):
+    """EXACT chunked value-and-grad + loss for the slow grad-through-spin-up forward.
+
+    The cover-weighted-MSE loss is LINEAR over archetypes with a SINGLE global
+    denominator ``sum_a cover_a`` (shared by every loss term)::
+
+        grad = (1/sum_w) * sum_chunk grad[ sum_{a in chunk} cover_a (pred_a-obs_a)^2 ]
+
+    so each per-chunk term is a coupled-spin-up VJP over ONLY that chunk's
+    archetypes.  This pre-splits the archetype table (+ its cover weights + each
+    loss term's target) into contiguous chunks of ``chunk`` archetypes; no
+    reverse-mode VJP ever spans more than ``chunk`` archetypes (the CPU batched VJP
+    segfaults at >=8).  Each chunk's UN-normalized weighted SSE (:func:`_weighted_sse`)
+    + its gradient are accumulated (scalar add; pytree add), and the total is
+    divided by the GLOBAL cover-weight sum ONCE at the end.  The result EQUALS the
+    unchunked ``eqx.filter_value_and_grad`` of the cover-weighted MSE exactly (to
+    floating point) -- the ``sum_w`` normalisation is applied once, never per chunk.
+
+    Returns ``(value_and_grad_fn, loss_eval_fn)``:
+      * ``value_and_grad_fn(params) -> (loss, grads)`` -- ``grads`` is a
+        ``TrainablePhysicsParams`` pytree with the SAME structure
+        ``eqx.filter_value_and_grad`` returns (static ``constraints`` intact,
+        ``raw_values`` = summed/normalised grad arrays), so the training loop's
+        ``_grad_stats`` / ``optax.global_norm`` / ``optimizer.update`` consume it
+        unchanged.
+      * ``loss_eval_fn(params) -> loss`` -- the chunked FORWARD-only loss for the
+        backtracking line search (so it never batches more than ``chunk``
+        archetypes either); numerically identical to the ``loss`` above.
+    """
+    from legoesm.land.carbon.global_init import equilibrate_archetypes_traced
+
+    table = target_bundle["table"]
+    losses = target_bundle["losses"]
+    cover_weight = target_bundle["cover_weight"]
+    n_arch = int(np.asarray(table.pft_id).shape[0])
+    # GLOBAL cover-weight sum -- the single normaliser, applied ONCE (never per
+    # chunk).  Concrete (built from the fixed cover weights, not traced).
+    total_w = jnp.sum(cover_weight)
+    bounds = _chunk_bounds(n_arch, chunk)
+
+    # Pre-slice each chunk's STATIC table + its cover-weight / per-term target
+    # slices ONCE (the archetype table + membership are non-differentiated).
+    chunk_specs = []
+    for (s, e) in bounds:
+        ctable = _slice_table(table, np.arange(s, e))
+        cw = cover_weight[s:e]
+        cterms = {k: LossTerm(target=t.target[s:e], extractor=t.extractor,
+                              weight=t.weight)
+                  for k, t in losses.items()}
+        chunk_specs.append((ctable, cw, cterms))
+
+    def _chunk_sse(ctable, cw, cterms):
+        """UN-normalized cover-weighted SSE over ONLY this chunk's archetypes."""
+        def sse(params: TrainablePhysicsParams) -> jax.Array:
+            overrides = _carbon_overrides(params)
+            eq = equilibrate_archetypes_traced(ctable, overrides, **spin)
+            return _weighted_sse(eq, cterms, cw)
+        return sse
+
+    def value_and_grad_fn(params: TrainablePhysicsParams):
+        total_sse = jnp.asarray(0.0, dtype=cover_weight.dtype)
+        total_grad = None
+        for (ctable, cw, cterms) in chunk_specs:
+            sse, grad = eqx.filter_value_and_grad(
+                _chunk_sse(ctable, cw, cterms))(params)
+            total_sse = total_sse + sse
+            total_grad = grad if total_grad is None else jax.tree_util.tree_map(
+                lambda a, b: a + b, total_grad, grad)
+        # Normalise ONCE by the global cover-weight sum: loss = sum_SSE / sum_w,
+        # grad = sum_grad / sum_w -> exactly the unchunked cover-weighted-MSE grad.
+        return total_sse / total_w, _scale_updates(total_grad, 1.0 / total_w)
+
+    def loss_eval_fn(params: TrainablePhysicsParams) -> jax.Array:
+        total_sse = jnp.asarray(0.0, dtype=cover_weight.dtype)
+        for (ctable, cw, cterms) in chunk_specs:
+            total_sse = total_sse + _chunk_sse(ctable, cw, cterms)(params)
+        return total_sse / total_w
+
+    return value_and_grad_fn, loss_eval_fn
+
+
+def _build_grad_and_loss_fns(args, target_bundle, spin, precomputed):
+    """Return ``(value_and_grad_fn, loss_eval_fn)`` for the active forward.
+
+    Slow forward with ``--grad-chunk C > 0`` AND more than ``C`` archetypes ->
+    the EXACT chunked accumulation (:func:`_make_chunked_slow`; bounds every
+    coupled-spin-up VJP to <=C archetypes, past the CPU batched-VJP crash).  Fast
+    forward, ``--grad-chunk 0``, or a table already <= C archetypes -> the
+    single-batch ``eqx.filter_value_and_grad`` of the full loss (the unchanged
+    production path -- fast mode is never chunked).
+    """
+    n_arch = int(np.asarray(target_bundle["table"].pft_id).shape[0])
+    if (not args.fast_analytic) and args.grad_chunk > 0 and n_arch > args.grad_chunk:
+        return _make_chunked_slow(target_bundle, spin, chunk=args.grad_chunk)
+    loss_fn = _build_loss_fn(args, target_bundle, spin, precomputed)
+    return eqx.filter_value_and_grad(loss_fn), loss_fn
 
 
 # ===========================================================================
@@ -589,24 +733,36 @@ def _per_pft_soc(pft_id, values, cover_weight) -> dict[str, float]:
     return out
 
 
-def _slow_model_soc(params, target_bundle, spin) -> np.ndarray:
+def _slow_model_soc(params, target_bundle, spin, *, grad_chunk: int = 0) -> np.ndarray:
     """Per-archetype modelled SOC [kgC/m2] via the SLOW grad-through-spin-up
-    forward (no grad here -- scorecard evaluation only)."""
+    forward (no grad here -- scorecard evaluation only).
+
+    ``grad_chunk > 0`` chunks the forward the SAME way the chunked trainer chunks
+    the VJP, so the scorecard never batches more than ``grad_chunk`` archetypes
+    either (the batched coupled model is the CPU crash risk).  The per-archetype
+    SOC is concatenated in table order and is identical to a single-batch forward
+    (independent columns)."""
     from legoesm.land.carbon.global_init import equilibrate_archetypes_traced
-    eq = equilibrate_archetypes_traced(
-        target_bundle["table"], _carbon_overrides(params),
-        n_spinup=spin["n_spinup"], n_verify=spin["n_verify"],
-        dt=spin["dt"], n_layers=spin["n_layers"], soil_depth=spin["soil_depth"])
-    return np.asarray(_soc_extractor(eq))
+    table = target_bundle["table"]
+    n_arch = int(np.asarray(table.pft_id).shape[0])
+    overrides = _carbon_overrides(params)
+    socs = []
+    for (s, e) in _chunk_bounds(n_arch, grad_chunk):
+        ctable = _slice_table(table, np.arange(s, e))
+        eq = equilibrate_archetypes_traced(ctable, overrides, **spin)
+        socs.append(np.asarray(_soc_extractor(eq)))
+    return np.concatenate(socs) if len(socs) > 1 else socs[0]
 
 
 def _build_model_soc_fn(args, target_bundle, spin, precomputed):
     """Return ``model_soc_fn(params) -> (n_arch,) kgC/m2`` for the active forward
-    (fast closed-form when ``--fast-analytic``, else the slow spin-up)."""
+    (fast closed-form when ``--fast-analytic``, else the slow spin-up -- chunked to
+    ``--grad-chunk`` archetypes so the scorecard forward matches the trainer)."""
     if args.fast_analytic:
         fwd = make_fast_analytic_forward(precomputed)
         return lambda params: np.asarray(fwd(params))
-    return lambda params: _slow_model_soc(params, target_bundle, spin)
+    return lambda params: _slow_model_soc(
+        params, target_bundle, spin, grad_chunk=args.grad_chunk)
 
 
 def _precompute_and_check(table, initial_params, spin, cover_weight=None):
@@ -818,11 +974,23 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             target_bundle["table"], initial_params, spin,
             cover_weight=target_bundle["cover_weight"])
 
-    loss_fn = _build_loss_fn(args, target_bundle, spin, precomputed)
+    # (value_and_grad_fn, loss_eval_fn) for the active forward. In --slow-spinup-grad
+    # with --grad-chunk C>0 and >C archetypes these are the EXACT chunked
+    # accumulation (each per-chunk VJP <=C archetypes, past the CPU batched-VJP
+    # crash); otherwise the single-batch eqx.filter_value_and_grad of the full loss.
+    # Neither closes over `params`, so both survive the preflight param filter below.
+    value_and_grad_fn, loss_eval_fn = _build_grad_and_loss_fns(
+        args, target_bundle, spin, precomputed)
+    if not args.fast_analytic and args.grad_chunk > 0:
+        n_arch_kept = target_bundle["n_arch_kept"]
+        n_chunks = len(_chunk_bounds(n_arch_kept, args.grad_chunk))
+        print(f"[preflight] slow-spinup-grad chunked: {n_chunks} chunk(s) of "
+              f"<= {args.grad_chunk} archetypes over {n_arch_kept} kept "
+              f"(EXACT cover-weighted-MSE gradient, normalised once at the end)")
 
     # Preflight: finite + non-zero gradient gate (drop dead DOFs before MUON).
     t0 = time.time()
-    pre_loss, pre_grads = eqx.filter_value_and_grad(loss_fn)(params)
+    pre_loss, pre_grads = value_and_grad_fn(params)
     pre_loss_val = float(pre_loss)
     if not np.isfinite(pre_loss_val):
         raise RuntimeError(f"preflight loss non-finite: {pre_loss_val}")
@@ -840,7 +1008,6 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     print(f"[preflight] loss={pre_loss_val:.8g}  trainable={len(params.constraints)}  "
           f"({time.time() - t0:.1f}s)")
 
-    loss_fn = _build_loss_fn(args, target_bundle, spin, precomputed)
     optimizer = create_optimizer(TrainingConfig(
         lr=args.lr, warmup_steps=args.warmup_steps,
         total_steps=max(args.steps, 1), grad_clip_norm=args.grad_clip_norm,
@@ -852,7 +1019,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     print(f"[train] step=0 loss={pre_loss_val:.8g}")
     for step in range(1, args.steps + 1):
         ts = time.time()
-        loss, grads = eqx.filter_value_and_grad(loss_fn)(params)
+        loss, grads = value_and_grad_fn(params)
         loss_val = float(loss)
         gstats = _grad_stats(grads, tol=args.grad_nonzero_tol)
         bad = {n: s for n, s in gstats.items() if not s["finite"]}
@@ -868,7 +1035,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         for scale in _LINE_SEARCH_SCALES:
             cand = eqx.apply_updates(params, _scale_updates(updates, scale))
             _assert_bounds(cand)
-            cand_loss = float(loss_fn(cand))
+            cand_loss = float(loss_eval_fn(cand))
             if np.isfinite(cand_loss) and cand_loss < best_loss:
                 best_params, best_loss, accepted = cand, cand_loss, True
                 break
@@ -908,6 +1075,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "n_spinup": args.n_spinup, "n_verify": args.n_verify, "dt": args.dt,
             "n_layers": args.n_layers, "soil_depth": args.soil_depth,
             "max_archetypes": args.max_archetypes,
+            "grad_chunk": (args.grad_chunk if not args.fast_analytic else 0),
             "som_only": not args.all_carbon_params,
             "source": target_bundle["source"],
             "n_archetypes_full": target_bundle["n_arch_full"],
@@ -1003,6 +1171,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--dt", type=float, default=DEFAULT_DT)
     p.add_argument("--n-layers", type=int, default=DEFAULT_N_LAYERS)
     p.add_argument("--soil-depth", type=float, default=DEFAULT_SOIL_DEPTH)
+    p.add_argument("--grad-chunk", type=int, default=DEFAULT_GRAD_CHUNK,
+                   help="--slow-spinup-grad ONLY: accumulate the EXACT "
+                        "cover-weighted-MSE gradient over contiguous archetype "
+                        "chunks of this many archetypes, bounding each coupled-"
+                        "spin-up reverse-mode VJP to <=grad_chunk archetypes (the "
+                        "CPU batched VJP segfaults at >=8). Each chunk's "
+                        "UN-normalized weighted SSE grad sums, divided ONCE by the "
+                        "global cover-weight sum -> EXACTLY the unchunked gradient. "
+                        f"Default {DEFAULT_GRAD_CHUNK}; 0 = single batch (fast mode "
+                        "/ tiny runs); ignored under --fast-analytic.")
     # --- optimizer ---
     p.add_argument("--steps", type=int, default=DEFAULT_STEPS)
     p.add_argument("--lr", type=float, default=DEFAULT_LR)
@@ -1066,6 +1244,10 @@ def _finalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.max_archetypes = min(args.max_archetypes, QUICK_MAX_ARCHETYPES) \
             if args.max_archetypes > 0 else QUICK_MAX_ARCHETYPES
         args.warmup_steps = min(args.warmup_steps, 0)
+        # A --quick world is a handful of archetypes -- one batch fits; keep the
+        # single-batch path (the chunked accumulation is exercised by its own
+        # direct unit test, not the quick smoke).
+        args.grad_chunk = 0
     if not (args.dry_run_synthetic or args.rebuild or args.archetypes):
         raise SystemExit(
             "choose an input mode: --dry-run-synthetic, --rebuild "

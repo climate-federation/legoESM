@@ -186,6 +186,125 @@ def test_quick_slow_spinup_grad_path_still_runs(tmp_path):
     assert hist[-1] <= hist[0] + 1e-9
 
 
+def test_chunk_bounds_partitions_exactly():
+    """``_chunk_bounds`` tiles ``[0, n)`` with contiguous ``<=chunk`` blocks;
+    ``chunk<=0`` or ``chunk>=n`` collapses to a single batch."""
+    assert tcp._chunk_bounds(4, 2) == [(0, 2), (2, 4)]
+    assert tcp._chunk_bounds(5, 2) == [(0, 2), (2, 4), (4, 5)]
+    assert tcp._chunk_bounds(4, 0) == [(0, 4)]      # disabled -> single batch
+    assert tcp._chunk_bounds(4, 9) == [(0, 4)]      # chunk>=n -> single batch
+    assert tcp._chunk_bounds(4, 1) == [(0, 1), (1, 2), (2, 3), (3, 4)]
+    # Every archetype index is covered exactly once (no gap, no overlap).
+    for n, c in [(7, 3), (10, 4), (1, 5), (16, 4)]:
+        covered = [i for (s, e) in tcp._chunk_bounds(n, c) for i in range(s, e)]
+        assert covered == list(range(n)), (n, c)
+
+
+def test_weighted_sse_is_the_unnormalized_mse_numerator():
+    """``_weighted_sse`` is the numerator of ``cover_weighted_mse``:
+    ``_total_loss == _weighted_sse / sum(cover)``; a zero-cover chunk contributes a
+    clean 0 (no 0/0 NaN), which is why the chunked accumulation uses it."""
+    import jax.numpy as jnp
+
+    fake_eq = jnp.asarray([1.0, 2.0, 3.0])
+    target = jnp.asarray([1.5, 2.0, 5.0])
+    cover = jnp.asarray([1.0, 3.0, 0.0])
+    losses = {"soc": tcp.LossTerm(target=target, extractor=lambda x: x, weight=2.0)}
+    # 2.0 * (1*0.25 + 3*0 + 0*4) = 0.5
+    sse = float(tcp._weighted_sse(fake_eq, losses, cover))
+    npt.assert_allclose(sse, 0.5, rtol=1e-12)
+    # numerator / sum(cover) == the normalised registry loss.
+    total = float(tcp._total_loss(fake_eq, losses, cover))
+    npt.assert_allclose(sse / float(jnp.sum(cover)), total, rtol=1e-12)
+    # an all-zero-cover chunk -> exactly 0, never NaN.
+    assert float(tcp._weighted_sse(fake_eq, losses, jnp.zeros(3))) == 0.0
+
+
+def test_grad_chunk_cli_and_quick_disables_it():
+    """``--grad-chunk`` parses to the default; ``--quick`` forces the single-batch
+    path (0) so a tiny world is never chunked."""
+    p = tcp.build_arg_parser()
+    assert p.parse_args(["--dry-run-synthetic"]).grad_chunk == tcp.DEFAULT_GRAD_CHUNK
+    assert p.parse_args(["--dry-run-synthetic", "--grad-chunk", "6"]).grad_chunk == 6
+    q = tcp._finalize_args(p.parse_args(["--quick", "--grad-chunk", "6"]))
+    assert q.grad_chunk == 0
+
+
+def test_chunked_grad_equals_single_batch_slow():
+    """EXACTness gate: on a tiny 4-archetype table where the SINGLE-batch
+    slow-spinup-grad works, the CHUNKED value-and-grad (chunk in {2,3} -- an even
+    2+2 split and an uneven 3+1 split) equals the single-batch value-and-grad to
+    rtol 1e-6 for EVERY SOM param -- the per-chunk UN-normalized weighted SSE grads
+    sum and are divided by the GLOBAL cover-weight sum exactly once (the
+    accumulation is exact).  The chunked forward-only loss (line-search path)
+    matches too.  (``_chunk_bounds`` covers the partition arithmetic incl. single
+    archetypes; ``_weighted_sse`` covers the zero-cover case -- both pure/cheap.)
+
+    Compute-node scale (JIT-compiles the coupled land+carbon spin-up + its
+    reverse-mode over up to 4 archetypes); run via the sbatch/srun wrapper, NOT the
+    login node.  ``JAX_ENABLE_X64=1``; CPU here.  ``jax.clear_caches()`` is called
+    between the single-batch and each chunked build so the retained coupled-model
+    executables do not accumulate and exhaust the XLA/LLVM compile memory."""
+    import equinox as eqx
+    import jax
+    import jax.numpy as jnp
+
+    jax.config.update("jax_enable_x64", True)
+    # Drop any coupled-model executables compiled by earlier tests in this process
+    # so their retained code does not stack with this test's compiles.
+    jax.clear_caches()
+
+    # A tiny REAL synthetic target, reusing the trainer's own build_target
+    # assembly, sliced to exactly 4 archetypes so the single batch is crash-free.
+    argv = ["--dry-run-synthetic", "--slow-spinup-grad",
+            "--max-archetypes", "0", "--steps", "1"]
+    args = tcp._finalize_args(tcp.build_arg_parser().parse_args(argv))
+    full = tcp.build_target(args)
+    n_full = int(np.asarray(full["table"].pft_id).shape[0])
+    n = 4
+    assert n_full >= n, f"synthetic built only {n_full} archetypes (< {n})"
+    idx = np.arange(n)
+    table = tcp._slice_table(full["table"], idx)
+    cover = jnp.asarray(np.asarray(full["cover_weight"])[idx], dtype=jnp.float64)
+    observed = np.asarray(full["observed_soc"])[idx]
+    losses = {"soc": tcp.LossTerm(
+        target=jnp.asarray(observed, dtype=jnp.float64),
+        extractor=tcp._soc_extractor, weight=1.0)}
+    bundle = {"table": table, "losses": losses, "cover_weight": cover}
+    spin = {"n_spinup": 4, "n_verify": 2, "dt": 7200.0, "n_layers": 6,
+            "soil_depth": 2.0}
+    params = tcp.build_carbon_trainables(som_only=True)
+
+    # SINGLE-batch reference: the existing full-table slow loss + its grad.  Cache
+    # the grad as plain numpy so the compiled executable can be released before the
+    # chunked builds compile.
+    loss_fn = tcp.make_loss_fn(table=table, losses=losses, cover_weight=cover, **spin)
+    ref_loss, ref_grad = eqx.filter_value_and_grad(loss_fn)(params)
+    ref_loss = float(ref_loss)
+    assert np.isfinite(ref_loss)
+    ref_grad_vals = {c.name: np.asarray(ref_grad.raw_values[c.name])
+                     for c in params.constraints}
+    del loss_fn, ref_grad
+    jax.clear_caches()
+
+    for chunk in (2, 3):
+        vg, le = tcp._make_chunked_slow(bundle, spin, chunk=chunk)
+        c_loss, c_grad = vg(params)
+        npt.assert_allclose(float(c_loss), ref_loss, rtol=1e-6,
+                            err_msg=f"chunk={chunk} loss")
+        # The forward-only line-search loss must match the value-and-grad value.
+        npt.assert_allclose(float(le(params)), ref_loss, rtol=1e-6,
+                            err_msg=f"chunk={chunk} loss_eval")
+        for c in params.constraints:
+            npt.assert_allclose(
+                np.asarray(c_grad.raw_values[c.name]),
+                ref_grad_vals[c.name],
+                rtol=1e-6, atol=1e-12,
+                err_msg=f"chunk={chunk} grad[{c.field}]")
+        del vg, le, c_grad
+        jax.clear_caches()
+
+
 def test_resolve_om_to_oc_is_preset_aware():
     """Default om_to_oc: 0.58 (van Bemmelen) for CLM5 organic MATTER, 1.0 for the
     HWSD-carbon legoesm_surfdata; an explicit --om-to-oc overrides either."""
