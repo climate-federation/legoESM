@@ -63,6 +63,28 @@ def test_out_of_bounds_T_fails(tmp_path):
     assert "max" in r["fields"]["T"]["reason"]
 
 
+def test_nan_sentinel_field_passes(tmp_path):
+    """surface_T_sfc_override is all-NaN BY DESIGN (the documented "no
+    override" sentinel, physics_state.py) — the NaN gate must not fire on it
+    (it flagged every MPAS checkpoint as failing)."""
+    r = mod.inspect_checkpoint_realism(_write(
+        tmp_path,
+        physstate_surface_T_sfc_override=np.full((32,), np.nan)))
+    assert r["passed"] is True
+    assert r["fields"]["physstate_surface_T_sfc_override"]["within"] is True
+
+
+def test_nan_sentinel_field_still_gates_inf(tmp_path):
+    """Inf in a NaN-sentinel field is a real defect: only the NaN half of the
+    finiteness gate is exempt (synthetic-violation self-test)."""
+    bad = np.full((32,), np.nan)
+    bad[3] = np.inf
+    r = mod.inspect_checkpoint_realism(_write(
+        tmp_path, physstate_surface_T_sfc_override=bad))
+    assert r["passed"] is False
+    assert "Inf" in r["fields"]["physstate_surface_T_sfc_override"]["reason"]
+
+
 def test_negative_humidity_fails(tmp_path):
     q = np.full((2, 4, 4, 5), 0.005)
     q[0, 0, 0, 0] = -1e-4

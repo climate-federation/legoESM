@@ -36,6 +36,17 @@ from pathlib import Path
 
 import numpy as np
 
+# --- Fields whose NaN is a DOCUMENTED sentinel, not corruption: NaN means
+#     "unset / fall back" by design, so the NaN gate must not fire on them
+#     (it cried wolf on every MPAS checkpoint).  Inf is still gated — an Inf
+#     in a sentinel field is a real defect.  Keep this list tiny and only add
+#     a field whose writer documents the NaN sentinel (e.g.
+#     ``physics_state.py``: surface_T_sfc_override = jnp.full(..., nan),
+#     consumed via ``jnp.where(jnp.isnan(...), fallback, override)``). ---
+_NAN_SENTINEL_FIELDS = {
+    "physstate_surface_T_sfc_override",
+}
+
 # --- Per-field physical sanity bounds: (lo, hi).  ``hi=None`` means "no upper
 #     bound beyond finiteness"; a ``lo`` of 0.0 enforces non-negativity.  Applied
 #     by field NAME, so the gate is grid-agnostic (cubed-sphere, lat-lon,
@@ -149,7 +160,12 @@ def inspect_checkpoint_realism(path: str | Path) -> dict:
         amean = float(mag.mean()) if mag.size else float("nan")
 
         reason = ""
-        within = (n_nan == 0 and n_inf == 0)
+        # NaN-sentinel fields: NaN is the documented "unset" marker, not
+        # corruption — gate only Inf there.  Everything else gates both.
+        if name in _NAN_SENTINEL_FIELDS:
+            within = (n_inf == 0)
+        else:
+            within = (n_nan == 0 and n_inf == 0)
         # Normalise a "trc_" tracer-array prefix (MPAS/spectral store q_v as
         # trc_q_v) to the base name so tracer bounds apply on every grid.
         base = name[4:] if name.startswith("trc_") else name
