@@ -77,6 +77,11 @@ _CARRY_REPLICATED_FIELDS = frozenset(("land_ml",))
 
 _TILE_AXES = ("face", "tile_i", "tile_j")
 
+#: Carry fields the physics pipeline consumes at their FLAT per-column
+#: layout (shape-validated (ncol, ...) — issue #405/#413): flattened to the
+#: tile's ncol inside the body, re-gridded after the finalize pack.
+_PER_COLUMN_FLAT_FIELDS = ("conv_prog", "tke", "qke", "gwd_spectrum")
+
 
 class TileGridView(tuple):
     """Minimal per-tile grid view for the conservation reductions inside the
@@ -147,9 +152,17 @@ def pack_forcing_tiled(forcing, n: int):
     flat ``T_sfc`` overrides) at ``(ncol[, nlev])`` (codex: replicating
     those into a tile body hands full-cube columns to a tile-ncol
     ``step_unified``).  Small replicated vectors (``solar_weights``,
-    scalars) and ``None`` pass through; the column physics flattens
-    grid-shaped input right back, so the pack is layout-only."""
+    scalars) and ``None`` pass through.
+
+    Returns ``(packed_forcing, flat_names)`` — ``flat_names`` records
+    which leaves were COLUMN-format at pack time: the pipeline consumes
+    those in column layout (``radiation_fn`` / the aerosol-CCN paths read
+    them as ``(ncol[, nlev])`` WITHOUT an adapter flatten — codex), so
+    the tile body must re-flatten exactly those to the tile's
+    ``(nl*nl, ...)`` before the physics call, while grid-native surface
+    fields (sst/sic/overrides) stay grid-shaped for the adapter."""
     out = {}
+    flat_names = []
     for name in type(forcing)._fields:
         v = getattr(forcing, name)
         if v is None or not hasattr(v, "shape"):
@@ -160,7 +173,8 @@ def pack_forcing_tiled(forcing, n: int):
             out[name] = v
         else:
             out[name] = arr.reshape((6, n, n) + tuple(arr.shape[1:]))
-    return type(forcing)(**out)
+            flat_names.append(name)
+    return type(forcing)(**out), tuple(flat_names)
 
 
 def _tile_carry_spec(name, arr, n: int):
@@ -205,22 +219,106 @@ def shard_tiled_split_carry(carry: SegmentCarry, mesh, n: int) -> SegmentCarry:
     })
 
 
+class _TilePhysicsGrid(tuple):
+    """Shape-only grid view for building the physics pipeline at TILE ncol.
+
+    ``make_adapter`` reads exactly ``grid_n_columns`` + ``grid_lat.shape``
+    (ColumnAdapter bakes STATIC ncol/shape_2d); the pipeline's runtime
+    ``self._grid`` branches (w-grid / moisture-convergence convection) are
+    horizontal-operator consumers a tile cannot serve —
+    :func:`build_tile_step_unified` refuses those schemes up front, so this
+    view is never asked for real geometry."""
+    __slots__ = ()
+
+    def __new__(cls, nl: int):
+        z = jnp.zeros((1, nl, nl))
+        return tuple.__new__(cls, (z,))
+
+    @property
+    def grid_lat(self):
+        return self[0]
+
+    @property
+    def grid_lon(self):
+        return self[0]
+
+    @property
+    def grid_n_columns(self) -> int:
+        return int(self[0].shape[1] * self[0].shape[2])
+
+
+def build_tile_step_unified(grid, sigma, config, kt: int):
+    """Build the unified physics ``step_unified`` at TILE ncol — the
+    tiled-cube analogue of the lat-band lane's band-grid build ("ONE
+    band-grid build serves every band"; cube tiles are uniform windows,
+    so one tile-ncol build serves every tile).
+
+    Refusals (loud — decomposition-VARIANT physics):
+    * a land-active pipeline (``f_land`` per-column bake differs per tile);
+    * convection schemes whose traits consume HORIZONTAL grid operators
+      (w-grid / moisture-convergence) — those read ``pipeline._grid`` at
+      runtime and are not column-local.
+
+    Returns ``(step_unified, pipeline)``.
+    """
+    from legoesm.driver.physics_pipeline import build_physics_pipeline
+    from legoesm.atmosphere.physics.convection.integration import (
+        convection_scheme_traits,
+    )
+
+    if getattr(config, "convection", "none") != "none":
+        traits = convection_scheme_traits(config.convection)
+        if (getattr(traits, "is_w_grid_consumer", False)
+                or getattr(traits, "is_mc_consumer", False)
+                or getattr(traits, "is_simple_mc_consumer", False)):
+            raise NotImplementedError(
+                f"build_tile_step_unified: convection={config.convection!r} "
+                "consumes horizontal grid operators (w-grid / moisture "
+                "convergence) — not column-local, cannot run per tile. "
+                "Use a column-local convection scheme or the face-only "
+                "lane.")
+    if getattr(config, "shard_radiation_columns", False):
+        raise NotImplementedError(
+            "build_tile_step_unified: shard_radiation_columns builds a "
+            "GLOBAL column mesh against the pipeline ncol — nested inside "
+            "the per-tile shard_map that is either a false divisibility "
+            "refusal or a wrong nested sharding (codex). The tile mesh IS "
+            "the column decomposition here; disable "
+            "shard_radiation_columns for the tiled lane.")
+    nl = int(grid.n) // kt
+    pipeline = build_physics_pipeline(_TilePhysicsGrid(nl), sigma, config)
+    if pipeline.f_land is not None:
+        raise NotImplementedError(
+            "build_tile_step_unified: land-active pipeline (f_land is a "
+            "per-column bake that differs per tile) — no tile-wise land "
+            "packing yet; run land-free or the face-only lane.")
+    return pipeline.build_step_unified(static_need_rad=True), pipeline
+
+
 def make_tiled_operator_split_step(
     model, mesh, statics, *, fix_mass, rad_update_steps, start_day,
-    kt: int,
+    kt: int, ghg_keys=None,
 ):
-    """Build ``tiled_split_step(carry) -> carry`` — one operator-split
-    atmosphere step on the ``(6, kt, kt)`` tiled mesh.
+    """Build ``tiled_split_step(carry, forcing) -> carry`` — one
+    operator-split atmosphere step on the ``(6, kt, kt)`` tiled mesh.
 
     ``carry`` is a PACKED, tile-sharded :class:`SegmentCarry`
     (:func:`shard_tiled_split_carry`); input layout == output layout, so
-    ``carry = step(carry)`` iterates gather-free (the blocked-loop
-    contract).  ``statics`` is a :class:`_SplitStepStatics` whose
-    ``step_unified`` is built at TILE ncol and whose ``lat``/``lon``/
-    grid-shaped ``forcing`` fields are FULL-cube ``(6, n, n[, ...])``
-    arrays — the body slices the tile's window from each (the lat-band
-    lane's stacked-statics pattern, expressed as slicing because cube
-    tiles are uniform windows of face-major arrays).
+    ``carry = step(carry, forcing)`` iterates gather-free (the
+    blocked-loop contract).  ``forcing`` is a PER-CALL traced
+    :class:`SegmentForcing` (the SegmentForcing doctrine: the driver
+    re-samples it per segment and the same step object serves every
+    segment) — flat ``(ncol, ...)`` leaves are packed grid-shaped per
+    call (:func:`pack_forcing_tiled`).  ``statics`` is a
+    :class:`_SplitStepStatics` whose ``step_unified`` is built at TILE
+    ncol (``build_tile_step_unified``) and whose ``lat``/``lon`` are the
+    FULL-cube ``(6, n, n)`` cell fields — the body slices the tile's
+    window (the lat-band lane's stacked-statics pattern, expressed as
+    slicing because cube tiles are uniform windows of face-major
+    arrays); ``statics.forcing`` is unused (per-call arg wins).
+    ``ghg_keys`` mirrors the lat-band factory: rebuild
+    ``ghg_vmr_override`` per step from ``forcing.ghg_vmr`` for transient
+    GHG; ``None`` leaves the statics value untouched.
 
     ENVELOPE refusals (loud): ``statics.qv_smooth_coeff != 0`` (full-cube
     ∇⁴ halo), ``statics.owned_mask is not None`` (MPI-replicated
@@ -234,6 +332,16 @@ def make_tiled_operator_split_step(
     validate_tiled_step_factory_args(
         "make_tiled_operator_split_step", mesh, cdgrid, coord, n, kt,
         nlev, cfg.p_floor, statics.dt)
+    # The serial _single_step's DYNAMICS is the driver model's step — the
+    # tiled base-cut RK3 omits every optional damp, so a model config with
+    # any of them nonzero (driver hyperdiff_scale > 0 etc.) would silently
+    # integrate different dynamics.  Same envelope as the blocked-loop
+    # adapter; the fixer flags are irrelevant here (this lane externalizes
+    # the fixer like the compiled-segment driver).
+    from legoesm.atmosphere.dynamics.tiled_step_adapter import (
+        validate_tiled_envelope,
+    )
+    validate_tiled_envelope(cfg, cdgrid, inner_fix_mass_ok=True)
     if getattr(statics, "qv_smooth_coeff", 0.0) != 0.0:
         raise NotImplementedError(
             "make_tiled_operator_split_step: qv_smooth_coeff != 0 needs the "
@@ -273,13 +381,13 @@ def make_tiled_operator_split_step(
     m_fco, m_cosau = cdgrid.f_corner, cdgrid.cosa_u
     m_dx, m_dy = grid.dx, grid.dy
 
-    # Grid-shaped statics the physics reads per tile: lat/lon 2D cell fields
-    # ((6, n, n)) + every grid-shaped forcing field.  lat/lon slice inside
-    # the body; forcing fields shard by tile spec directly.  FLAT (ncol,...)
-    # forcing leaves (the driver's per-column radiation forcing) are packed
-    # grid-shaped first — same rule as the carry (codex round-2).
-    f_named = pack_forcing_tiled(statics.forcing, n)
-
+    # Forcing is a PER-CALL traced argument (the SegmentForcing doctrine —
+    # the driver re-samples SST/solar/ozone per segment and the SAME step
+    # object must serve every segment without a rebuild); statics.forcing
+    # stays None/unused here.  Grid-shaped forcing fields shard by tile
+    # spec; FLAT (ncol,...) leaves (the driver's per-column radiation
+    # forcing) are packed grid-shaped per call — same rule as the carry
+    # (codex round-2).
     def _forcing_spec(v):
         if v is None:
             return None
@@ -291,7 +399,7 @@ def make_tiled_operator_split_step(
     fo = P("face", None, None)
 
     def _one_tile_step(carry_t, lat_t, lon_t, forcing_t, ar_t, mt,
-                       angle_t, offs):
+                       angle_t, offs, flat_forcing_names):
         """The serial _single_step composition on ONE tile."""
         ca_t, sa_t, cap_t, sap_t = angle_t
 
@@ -327,23 +435,69 @@ def make_tiled_operator_split_step(
         tile_statics = dataclasses.replace(
             statics, grid=TileGridView(ar_t),
             lat=lat_t, lon=lon_t, forcing=forcing_t)
+        if ghg_keys is not None:
+            # Transient GHG: rebuild the override from THIS segment's
+            # forcing (the lat-band factory's contract — a baked statics
+            # value would freeze GHG for the whole run).
+            from legoesm.driver.compiled_segments import ghg_array_to_dict
+            tile_statics = dataclasses.replace(
+                tile_statics,
+                ghg_vmr_override=ghg_array_to_dict(
+                    forcing_t.ghg_vmr, ghg_keys))
+
+        # The pipeline's per-column-NATIVE fields travel the tile mesh
+        # grid-shaped (the only shardable layout) — flatten them to the
+        # tile's (nl*nl, ...) for the physics call and (for carry fields)
+        # re-grid after the finalize pack, so the carry out-spec stays
+        # tile-shaped:
+        #   * carry: tke/qke/gwd_spectrum (shape-VALIDATED at (ncol, ...)
+        #     in physics_step_no_rad) + conv_prog (consumed flat);
+        #   * forcing: the leaves that were COLUMN-format at pack time
+        #     (o3_vmr / aerosol_od / aerosol_lw_od / flat overrides) —
+        #     radiation_fn + the aerosol-CCN paths read them WITHOUT an
+        #     adapter flatten (codex).
+        def _flt(v):
+            return (None if v is None
+                    else v.reshape((v.shape[1] * v.shape[2],)
+                                   + tuple(v.shape[3:])))
+
+        def _grd(v):
+            return (None if v is None
+                    else v.reshape((1, nl, nl) + tuple(v.shape[1:])))
+
+        if flat_forcing_names:
+            forcing_flat = forcing_t._replace(**{
+                nm: _flt(getattr(forcing_t, nm))
+                for nm in flat_forcing_names})
+            tile_statics = dataclasses.replace(
+                tile_statics, forcing=forcing_flat)
+
+        carry_phys = carry_t._replace(**{
+            nm: _flt(getattr(carry_t, nm))
+            for nm in _PER_COLUMN_FLAT_FIELDS})
         lz = split_physics_single_rank(
-            carry_t, T_new, u_new, v_new, ps_new, need_rad, doy, sod,
+            carry_phys, T_new, u_new, v_new, ps_new, need_rad, doy, sod,
             tile_statics)
-        return finalize_split_step(carry_t, lz, tile_statics)
+        out = finalize_split_step(carry_phys, lz, tile_statics)
+        return out._replace(**{
+            nm: _grd(getattr(out, nm))
+            for nm in _PER_COLUMN_FLAT_FIELDS})
 
     _cache = {}
 
-    def tiled_split_step(carry: SegmentCarry) -> SegmentCarry:
+    def tiled_split_step(carry: SegmentCarry, forcing) -> SegmentCarry:
         if getattr(carry, "land_ml", None) is not None:
             raise NotImplementedError(
                 "make_tiled_operator_split_step: land_ml has no tile-wise "
                 "packing yet (see shard_tiled_split_carry).")
+        f_named, flat_forcing_names = pack_forcing_tiled(forcing, n)
 
         def _leaf_sig(pytree):
             return tuple((getattr(x, "shape", ()), getattr(x, "dtype", None))
                          for x in jax.tree.leaves(pytree))
-        key = (jax.tree.structure(carry), _leaf_sig(carry))
+        key = (jax.tree.structure(carry), _leaf_sig(carry),
+               jax.tree.structure(f_named), _leaf_sig(f_named),
+               flat_forcing_names)
         fn = _cache.get(key)
         if fn is None:
             c_spec = _tile_carry_specs(carry, n)
@@ -374,7 +528,7 @@ def make_tiled_operator_split_step(
                 lon_t = _s(lon_b, nl, nl)
                 return _one_tile_step(
                     carry_b, lat_t, lon_t, forcing_b, m["ar_t"], mt,
-                    angle_t, offs_b)
+                    angle_t, offs_b, flat_forcing_names)
 
             fn = jax.jit(shard_map(
                 _body, mesh=mesh,

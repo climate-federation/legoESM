@@ -100,12 +100,36 @@ BIT-IDENTITY vs the global `_step_fv3` base cut, never a wall-clock number.
 >   to 1e-9.  Envelope refusals: `qv_smooth_coeff != 0` (full-cube ∇⁴
 >   halo), `owned_mask` (MPI-replicated semantics).
 >
-> Remaining under this track: the driver statics build for the REAL
-> PhysicsPipeline through the tiled operator-split step (a
-> `step_unified` built at TILE ncol + per-tile forcing stacking — the
-> lat-band lane's Phase-3 pattern), then flipping
-> `_tiled_cube_column_physics_fn`'s unified-pipeline refusal into a
-> dispatch.
+> **UPDATE (2026-07-09d) — the REAL unified pipeline runs tiled.**  The
+> driver statics build shipped: `build_tile_step_unified` constructs the
+> PhysicsPipeline at TILE ncol (`_TilePhysicsGrid` shape-only view —
+> `make_adapter` bakes ncol/shape_2d from it; land-active pipelines and
+> horizontal-operator convection (w-grid / moisture-convergence traits)
+> refuse loudly).  `make_tiled_operator_split_step` now takes the
+> per-segment `forcing` as a per-call traced argument (SegmentForcing
+> doctrine) with flat per-column forcing packed per call, validates the
+> model's dynamics envelope (`validate_tiled_envelope` — driver
+> `hyperdiff_scale`>0 etc. refuse), rebuilds transient GHG per step
+> (`ghg_keys`), and flatten/re-grid-brackets the pipeline's per-column-
+> NATIVE carry fields (`conv_prog`/`tke`/`qke`/`gwd_spectrum`, shape-
+> validated at (ncol,...)) around the physics call.  The driver
+> dispatches: `_tiled_cube_unified_active` (unified schemes or HS, minus
+> Kessler-alone which keeps the simple blocked lane) routes
+> `_run_tiled_cube_spmd` into `_run_operator_split_tiled_cube` — the
+> full `_run_operator_split_spmd` mirror (tile-ncol `step_unified`,
+> carry seed/shard/thread, per-segment forcing resample, gather for
+> callback + blowup only).  END-TO-END GATE
+> (`test_operator_split_tiled_cube_driver_parity.py`): full
+> `ModelDriver.setup()+run()` with REAL gray radiation + prognostic-TKE
+> turbulence, serial `_run_compiled` vs the np24 tiled lane — parity in
+> the documented corner/abs classes, q_v 1e-8; hyperdiff refusal;
+> dispatch predicate units.
+>
+> Remaining (refused loudly where reachable): multicontroller
+> (cross-process) tiled operator-split; land-active / multilayer-land
+> tiling; resolved-wind moisture advection under tiles; the writers in
+> the operator-split lane (the simple tiled lane has them); w-grid /
+> moisture-convergence convection schemes per tile.
 
 ## The layout problem (the crux)
 

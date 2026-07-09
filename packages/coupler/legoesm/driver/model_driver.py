@@ -6168,16 +6168,282 @@ class ModelDriver:
             return make_kessler_column_physics_fn(
                 self.sigma, float(cfg.dycore.dt))
         raise NotImplementedError(
-            "tiled cube SPMD (6*kt^2 devices) supports dynamics-only (all "
-            "parameterizations 'none') or Kessler microphysics alone; the "
-            f"configured physics {active} is not tiled-routed in THIS lane. "
-            "The unified-pipeline tiled step EXISTS "
-            "(driver/tiled_operator_split_step.make_tiled_operator_split_"
-            "step: tile-sharded SegmentCarry/PhysicsState, column physics + "
-            "tile-psum fixers, np24-parity-gated) — the remaining driver "
-            "increment is building its statics with a TILE-ncol "
-            "step_unified. Set those schemes to 'none' or run <=6 devices "
-            "(face sharding).")
+            "tiled cube SPMD (6*kt^2 devices): this SIMPLE lane supports "
+            "dynamics-only (all parameterizations 'none') or Kessler "
+            f"microphysics alone; the configured physics {active} should "
+            "have dispatched to the operator-split tiled lane "
+            "(_run_operator_split_tiled_cube) — reaching this raise means "
+            "the dispatch predicate and this selector disagree (a bug).")
+
+    def _tiled_cube_unified_active(self) -> bool:
+        """True when a tiled cube run must use the OPERATOR-SPLIT lane —
+        the general run_amip column-local unified physics (or Held-Suarez,
+        which rides the operator-split statics' hs_newtonian_relax) is
+        active.  False for dynamics-only and for Kessler-ALONE, which the
+        simple blocked-loop lane handles (its shipped parity gates)."""
+        cfg = self.config
+        if getattr(cfg, "held_suarez_forcing", False):
+            return True
+        active = {
+            name: val for name, val in (
+                ("radiation", cfg.radiation),
+                ("convection", cfg.convection),
+                ("turbulence", cfg.turbulence),
+                ("microphysics", cfg.microphysics),
+                ("gravity_wave_drag", cfg.gravity_wave_drag),
+                ("cloud_scheme", cfg.cloud_scheme),
+            ) if val not in (None, "none")
+        }
+        return bool(active) and active != {"microphysics": "kessler"}
+
+    def _run_operator_split_tiled_cube(self, start_step, start_day,
+                                       mesh, kt: int) -> str:
+        """Sub-face-TILED operator-split run: the cube twin of
+        :meth:`_run_operator_split_spmd` (the faithful multi-device
+        ``_run_compiled`` twin) over
+        ``driver/tiled_operator_split_step.make_tiled_operator_split_step``
+        — the REAL unified PhysicsPipeline built at TILE ncol
+        (``build_tile_step_unified``), the ``SegmentCarry`` tile-sharded
+        and THREADED across segments, per-segment external forcing as a
+        traced argument, per-segment gather for the callback + blowup
+        guard only.
+
+        Refused loudly: ensembles, multilayer land, the diagnostics /
+        checkpoint writers (this lane; the simple tiled lane has them),
+        and — inside ``build_tile_step_unified`` — land-active pipelines
+        and horizontal-operator convection schemes.
+        """
+        import time
+        from legoesm.forcing.external import get_solar_forcing_at_time
+        from legoesm.driver.compiled_segments import (
+            pack_carry, pack_forcing, unpack_carry,
+            build_operator_split_statics, GHG_SPECIES_ORDER,
+        )
+        from legoesm.driver.tiled_operator_split_step import (
+            build_tile_step_unified, make_tiled_operator_split_step,
+            shard_tiled_split_carry, unpack_carry_tiled,
+        )
+        from legoesm.core.conservation import (
+            compute_global_moisture, global_area_sum,
+        )
+
+        cfg = self.config
+        n = int(self.grid.n)
+        if jax.process_count() > 1:
+            raise NotImplementedError(
+                "operator-split tiled cube: multicontroller (route-B "
+                "cross-process) is a follow-up; run single-process "
+                "multi-device.")
+        if self._ensemble_size > 1:
+            raise NotImplementedError(
+                "operator-split tiled cube does not support ensembles "
+                "(the vmap'd carry's leading axis is the ensemble, not a "
+                "tile).")
+        if self._land_ml_state is not None:
+            raise NotImplementedError(
+                "operator-split tiled cube does not support multilayer "
+                "(Richards) land (land_ml has no tile packing).")
+        if self._moisture_advection_active():
+            raise NotImplementedError(
+                "operator-split tiled cube: resolved-wind moisture "
+                "advection (moisture_advection=True) is not tiled — the "
+                "tiled dynamics advects no tracers, so the serial and "
+                "tiled trajectories would diverge O(1). Run column-locked "
+                "moisture or <=6 devices.")
+        if cfg.output.checkpoint_days > 0 or cfg.output.diag_days > 0:
+            raise NotImplementedError(
+                "operator-split tiled cube does not yet run the "
+                "diagnostics / checkpoint writers (set diag_days=0, "
+                "checkpoint_days=0; use the segment_callback for I/O).")
+
+        ctx = self._prepare_run_context(start_step, start_day,
+                                        restore_carry=True)
+        DT = ctx["DT"]
+        START_DAY = ctx["START_DAY"]
+        n_steps_total = ctx["n_steps_total"]
+        dsigma = ctx["dsigma"]
+        shape_2d = ctx["shape_2d"]
+        _sd = ctx["_sd"]
+
+        # REAL unified physics at TILE ncol (refuses land / horizontal-
+        # operator convection inside).
+        tile_su, _tile_pipeline = build_tile_step_unified(
+            self.grid, self.sigma, cfg, kt)
+
+        ghg_vmr = ctx["ghg_vmr"]
+        ghg_keys: tuple = ()
+        if isinstance(ghg_vmr, dict):
+            ghg_keys = tuple(k for k in GHG_SPECIES_ORDER if k in ghg_vmr)
+        ghg_keys = ghg_keys or None
+
+        _carry_aux = self._carry_aux
+        _target_moisture = _carry_aux.get("target_moisture",
+                                          jnp.asarray(0.0))
+        if cfg.fix_moisture and float(_target_moisture) == 0.0:
+            _target_moisture = compute_global_moisture(
+                self.q_v, self.state.p_s.data, dsigma, self.grid)
+        _target_mass = _carry_aux.get("target_mass", jnp.asarray(0.0))
+        if cfg.dycore.fix_mass and float(_target_mass) == 0.0:
+            _target_mass = global_area_sum(self.state.p_s.data, self.grid)
+
+        statics = build_operator_split_statics(
+            step_unified=tile_su, forcing=None,
+            lat=self.grid.grid_lat, lon=self.grid.grid_lon, dt=DT,
+            tau_equator=cfg.tau_equator, tau_pole=cfg.tau_pole,
+            sbm_tau_c=cfg.sbm_tau_c, sbm_RH_ref=cfg.sbm_RH_ref,
+            C_H=cfg.C_H, C_E=cfg.C_E,
+            albedo_ice=cfg.albedo_ice, albedo_ocean=cfg.albedo_ocean,
+            ghg_vmr_override=None,
+            hs_newtonian_relax=self._hs_newtonian_relax,
+            energy_consistent_moisture_clip=(
+                cfg.energy_consistent_moisture_clip),
+            do_sat_adjust=(cfg.microphysics == "none"),
+            fix_moisture=cfg.fix_moisture,
+            sigma_full=ctx["sigma_full"], dsigma=dsigma, grid=self.grid,
+            owned_mask=None, qv_smooth_coeff=self._qv_smooth_coeff,
+            fric_decay=self._fric_decay,
+            hyperdiffusion_3d=self._hyperdiffusion_3d_fn,
+        )
+        tiled_step = make_tiled_operator_split_step(
+            self.model, mesh, statics,
+            fix_mass=cfg.dycore.fix_mass,
+            rad_update_steps=ctx["RAD_UPDATE_STEPS"],
+            start_day=START_DAY, kt=kt, ghg_keys=ghg_keys)
+
+        _dm = ({k: self.tracers.get(k)
+                for k in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")}
+               if isinstance(self.tracers, dict) else {})
+        carry = pack_carry(
+            self.state, self.q_v, self.q_c, self.q_r,
+            conv_prog=ctx["conv_prog"],
+            held_dT_rad=ctx["held_dT_rad"],
+            held_sw_net_sfc=ctx["held_sw_net_sfc"],
+            held_lw_net_sfc=ctx["held_lw_net_sfc"],
+            held_sw_up_toa=ctx["held_sw_up_toa"],
+            held_lw_up_toa=ctx["held_lw_up_toa"],
+            held_sw_down_toa=ctx["held_sw_down_toa"],
+            step_index=start_step,
+            conv_precip_prev=getattr(self, "_conv_precip_prev", None),
+            target_moisture=_target_moisture, target_mass=_target_mass,
+            precip_accum=jnp.zeros(shape_2d, dtype=_sd),
+            T_land=ctx["T_land"], w_land=ctx["w_land"],
+            snow=ctx.get("snow"),
+            tke=ctx["tke"], qke=ctx["qke"],
+            gwd_spectrum=ctx["gwd_spectrum"],
+            **_dm,
+        )
+        carry_template = carry
+        carry = shard_tiled_split_carry(carry, mesh, n)
+
+        logger.info(
+            "operator-split TILED cube: (6, %d, %d) tiles over %d devices "
+            "(%s).", kt, kt, mesh.devices.size, jax.default_backend())
+
+        current_s_0 = ctx["current_s_0"]
+        solar_weights = ctx["solar_weights"]
+        o3_vmr, aerosol_od = ctx["o3_vmr"], ctx["aerosol_od"]
+
+        seg_len = max(1, int(86400.0 / DT))
+        current_step = start_step
+        status = "COMPLETED"
+        seg_idx = -1
+        t0 = time.time()
+        while current_step < n_steps_total:
+            seg_idx += 1
+            seg_steps = min(seg_len, n_steps_total - current_step)
+            seg_end_step = current_step + seg_steps
+            day = START_DAY + seg_end_step * DT / 86400.0
+            doy, sod = self._calendar_for_radiation(day)
+            sst, sic = self.get_sst_sic(day)
+            if seg_idx > 0 or start_step > 0:
+                _solar_now = get_solar_forcing_at_time(
+                    self._solar_config, day)
+                current_s_0 = float(_solar_now["tsi"])
+                if self._use_solar_spectral:
+                    solar_weights = jnp.asarray(
+                        _solar_now["solar_fraction_by_gpt"])
+                _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
+                o3_vmr, aerosol_od, ghg_vmr = (
+                    self._precompute_external_forcing(
+                        day, _phys_p_s, _phys_lat))
+            _alb, _T, _emis = (None, None, None)
+            if self.get_sfc_override is not None:
+                _alb, _T, _emis = self.get_sfc_override(day)
+            _shflx, _lhflx = (None, None)
+            if self.get_sfc_flux_override is not None:
+                _shflx, _lhflx = self.get_sfc_flux_override(day)
+            forcing = pack_forcing(
+                sst=jnp.asarray(sst), sic=jnp.asarray(sic),
+                day_of_year=doy, seconds_of_day=sod,
+                solar_weights=solar_weights, s_0=current_s_0,
+                o3_vmr=o3_vmr, aerosol_od=aerosol_od,
+                aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
+                ghg_vmr=ghg_vmr,
+                sfc_albedo_override=_alb, sfc_T_override=_T,
+                sfc_emissivity_override=_emis,
+                sfc_shflx_override=_shflx, sfc_lhflx_override=_lhflx,
+            )
+
+            if seg_idx == 0:
+                _t_jit = time.time()
+            for _ in range(seg_steps):
+                carry = tiled_step(carry, forcing)
+            if seg_idx == 0:
+                jax.block_until_ready(carry.u)
+                logger.info("  operator-split tiled segment 0 (incl. JIT) "
+                            "in %.1fs", time.time() - _t_jit)
+            current_step += seg_steps
+
+            # Gather: tile layout -> serial layout -> cc state for the
+            # callback + blowup guard (the threaded carry never gathers).
+            carry_serial = unpack_carry_tiled(carry, n, carry_template)
+            state, self.q_v, self.q_c, self.q_r = unpack_carry(
+                carry_serial, self.state)[:4]
+            self.state = state
+            self._conv_precip_prev = carry_serial.conv_precip_prev
+            if isinstance(self.tracers, dict):
+                for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                    _v = getattr(carry_serial, _nm)
+                    if _v is not None:
+                        self.tracers[_nm] = _v
+            finite = bool(jnp.isfinite(state.p_s.data).all()
+                          & jnp.isfinite(state.T.data).all())
+            if not finite:
+                status = f"BLOWUP at step {current_step}"
+                logger.info("operator-split tiled cube: %s (%.1fs)",
+                            status, time.time() - t0)
+                return status
+            self._current_day = day
+            if self._segment_callback is not None:
+                self._segment_callback(self, day, DT * seg_steps)
+                # Fold callback mutations back into the threaded tiled
+                # carry (the lat-band lane's contract — _run_compiled
+                # re-packs from self.* every segment; codex).  The
+                # driver-visible fields are grid-shaped carry leaves
+                # (exact tile partition), so a per-leaf device_put onto
+                # the carry's existing sharding suffices; a no-op
+                # resharding when the callback does not mutate.  The
+                # threaded physics carry (held radiation / tke /
+                # conv_prog) keeps its sharded values.
+                _fold = dict(
+                    u=jax.device_put(self.state.u.data, carry.u.sharding),
+                    v=jax.device_put(self.state.v.data, carry.v.sharding),
+                    T=jax.device_put(self.state.T.data, carry.T.sharding),
+                    p_s=jax.device_put(self.state.p_s.data,
+                                       carry.p_s.sharding),
+                    q_v=jax.device_put(self.q_v, carry.q_v.sharding),
+                    q_c=jax.device_put(self.q_c, carry.q_c.sharding),
+                    q_r=jax.device_put(self.q_r, carry.q_r.sharding))
+                if isinstance(self.tracers, dict):
+                    for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                        _cv = getattr(carry, _nm)
+                        _sv = self.tracers.get(_nm)
+                        if _cv is not None and _sv is not None:
+                            _fold[_nm] = jax.device_put(_sv, _cv.sharding)
+                carry = carry._replace(**_fold)
+        logger.info("operator-split tiled cube: %s (%.1fs)", status,
+                    time.time() - t0)
+        return status
 
     def _run_tiled_cube_spmd(self, start_step: int = 0,
                              start_day: float | None = None) -> str:
@@ -6229,6 +6495,15 @@ class ModelDriver:
                 f"tiled cube SPMD: mesh axes {getattr(mesh, 'axis_names', None)} "
                 f"!= ('face', 'tile_i', 'tile_j') — build the device mesh "
                 f"via create_device_mesh(n_devices=6*kt^2).")
+
+        # Unified-pipeline physics (anything beyond dynamics-only /
+        # Kessler-alone / HS) routes to the OPERATOR-SPLIT tiled lane —
+        # the faithful _run_compiled twin (tile-sharded SegmentCarry,
+        # real step_unified built at tile ncol).  Kessler-alone stays on
+        # this simple blocked-loop lane (its shipped parity gates).
+        if self._tiled_cube_unified_active():
+            return self._run_operator_split_tiled_cube(
+                start_step, start_day, mesh, kt)
 
         column_physics_fn = self._tiled_cube_column_physics_fn()
         DT = cfg.dycore.dt

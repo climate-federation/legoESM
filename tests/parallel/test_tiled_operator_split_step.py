@@ -80,15 +80,20 @@ def _mock_step_unified(need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
     the split_physics_single_rank call; held fields ride ``args[4:10]``.
     """
     held = args[4:10]
+    o3 = args[2]
     lat_b = lat[..., None]
-    # ``sst`` exercises the FLAT->grid-shaped forcing pack (codex round-2):
-    # the driver builds per-column forcing at (ncol,...); by the time it
-    # reaches this body it must be tile-local grid-shaped, broadcastable
-    # against T.
-    sst_b = sst[..., None]
+    # ``sst`` (surface-native) may arrive grid-shaped (tile) or flat
+    # (serial production layout) — normalize against T's leading dims,
+    # exactly how the adapter-flattened consumers see it.
+    sst_b = sst.reshape(T.shape[:-1])[..., None]
+    # ``o3_vmr`` is a COLUMN-format forcing leaf: the pipeline's radiation
+    # consumers read it at (ncol, nlev) WITHOUT an adapter flatten (codex
+    # round-3 High) — assert the tile body re-flattened it.
+    assert o3.ndim == 2, f"o3_vmr must be column-format, got {o3.shape}"
+    o3_g = o3.reshape(T.shape)
     phys_out = types.SimpleNamespace(
         dT_dt=(1e-4 * (300.0 - T) + 1e-2 * q_v * jnp.cos(lat_b)
-               + 1e-6 * sst_b),
+               + 1e-6 * sst_b + 1e-3 * o3_g),
         dq_v_dt=-1e-3 * q_v + 1e-9 * jnp.sin(lat_b),
         dq_c_dt=5e-4 * q_v - 2e-4 * q_c,
         dq_r_dt=2e-4 * q_c - 1e-4 * q_r,
@@ -165,11 +170,14 @@ def _build(seed=3):
     # flattens either way; the pack is layout-only).
     rng_f = np.random.default_rng(seed + 100)
     sst_flat = jnp.asarray(290.0 + rng_f.standard_normal(NCOL))
+    o3_flat = jnp.asarray(np.abs(
+        1e-6 + 1e-7 * rng_f.standard_normal((NCOL, NLEV))))
     forcing = SegmentForcing(**{
-        nm: (sst_flat if nm == "sst" else None)
+        nm: (sst_flat if nm == "sst"
+             else o3_flat if nm == "o3_vmr" else None)
         for nm in SegmentForcing._fields})
     statics = build_operator_split_statics(
-        step_unified=_mock_step_unified, forcing=forcing,
+        step_unified=_mock_step_unified, forcing=None,
         lat=grid.grid_lat, lon=grid.grid_lon, dt=DT,
         tau_equator=None, tau_pole=None, sbm_tau_c=None, sbm_RH_ref=None,
         C_H=None, C_E=None, albedo_ice=None, albedo_ocean=None,
@@ -179,7 +187,7 @@ def _build(seed=3):
         sigma_full=coord.sigma_full, dsigma=coord.dsigma, grid=grid,
         owned_mask=None, qv_smooth_coeff=0.0, fric_decay=0.9999,
         hyperdiffusion_3d=None)
-    return model, cdgrid, coord, cfg, carry, statics
+    return model, cdgrid, coord, cfg, carry, statics, forcing
 
 
 def _serial_split_step(carry, model, cdgrid, coord, cfg, statics):
@@ -224,7 +232,7 @@ def _serial_split_step(carry, model, cdgrid, coord, cfg, statics):
 # ---------------------------------------------------------------------------
 
 def test_pack_unpack_carry_roundtrip():
-    model, cdgrid, coord, cfg, carry, statics = _build()
+    model, cdgrid, coord, cfg, carry, statics, forcing = _build()
     assert carry.conv_prog.shape == (NCOL,)           # flattened per-column
     packed = pack_carry_tiled(carry, N)
     assert packed.conv_prog.shape == (6, N, N)        # grid-shaped
@@ -245,16 +253,14 @@ def test_pack_unpack_carry_roundtrip():
 def test_tiled_operator_split_matches_serial():
     import dataclasses
 
-    from legoesm.driver.tiled_operator_split_step import pack_forcing_tiled
-
     mesh = _mesh()
-    model, cdgrid, coord, cfg, carry0, statics = _build()
+    model, cdgrid, coord, cfg, carry0, statics, forcing = _build()
 
-    # Serial reference consumes the PACKED (grid-shaped) forcing — the
-    # layout the tiled factory feeds its tiles; the shape-agnostic mock
-    # then broadcasts identically on both sides (see _build's sst note).
-    statics_ref = dataclasses.replace(
-        statics, forcing=pack_forcing_tiled(statics.forcing, N))
+    # Serial reference consumes the ORIGINAL (production, flat-per-column)
+    # forcing layout; the tile body re-flattens the column-format leaves,
+    # so BOTH sides feed the mock identical column arrays (see the mock's
+    # o3 layout assertion — the codex round-3 contract).
+    statics_ref = dataclasses.replace(statics, forcing=forcing)
     ref = carry0
     for _ in range(N_STEPS):
         ref = _serial_split_step(ref, model, cdgrid, coord, cfg,
@@ -265,7 +271,7 @@ def test_tiled_operator_split_matches_serial():
         rad_update_steps=RAD_UPDATE_STEPS, start_day=START_DAY, kt=KT)
     tc = shard_tiled_split_carry(carry0, mesh, N)
     for _ in range(N_STEPS):
-        tc = step(tc)
+        tc = step(tc, forcing)
     got = unpack_carry_tiled(tc, N, carry0)
 
     def _abs(name):
@@ -335,7 +341,7 @@ def test_tiled_psum_branch_requires_explicit_scope():
 
 def test_tiled_operator_split_refuses_land_ml():
     mesh = _mesh()
-    model, cdgrid, coord, cfg, carry0, statics = _build()
+    model, cdgrid, coord, cfg, carry0, statics, forcing = _build()
     carry_land = carry0._replace(land_ml={"T_soil": jnp.zeros((NCOL, 4))})
     with pytest.raises(NotImplementedError, match="land_ml"):
         shard_tiled_split_carry(carry_land, mesh, N)
@@ -343,12 +349,12 @@ def test_tiled_operator_split_refuses_land_ml():
         model, mesh, statics, fix_mass=True,
         rad_update_steps=1, start_day=0.0, kt=KT)
     with pytest.raises(NotImplementedError, match="land_ml"):
-        step(carry_land)
+        step(carry_land, forcing)
 
 
 def test_tiled_operator_split_envelope_refusals():
     mesh = _mesh()
-    model, cdgrid, coord, cfg, carry0, statics = _build()
+    model, cdgrid, coord, cfg, carry0, statics, forcing = _build()
     import dataclasses
     with pytest.raises(NotImplementedError, match="qv_smooth_coeff"):
         make_tiled_operator_split_step(
@@ -361,3 +367,25 @@ def test_tiled_operator_split_envelope_refusals():
             dataclasses.replace(statics,
                                 owned_mask=jnp.ones((6,))),
             fix_mass=True, rad_update_steps=1, start_day=0.0, kt=KT)
+
+
+def test_build_tile_step_unified_refuses_column_sharding():
+    """shard_radiation_columns builds a GLOBAL column mesh against the
+    pipeline ncol — nested inside the per-tile shard_map it is wrong or
+    a false refusal (codex round-3 Medium)."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.tiled_operator_split_step import (
+        build_tile_step_unified,
+    )
+
+    grid = create_cubed_sphere(N)
+    coord = create_sigma_coordinate(NLEV)
+    cfg = ExperimentConfig()
+    cfg = cfg._replace(
+        grid=cfg.grid._replace(grid_type="cubed_sphere"),
+        radiation="gray", convection="none", turbulence="none",
+        microphysics="none", gravity_wave_drag="none", cloud_scheme="none",
+        shard_radiation_columns=True)
+    with pytest.raises(NotImplementedError,
+                       match="shard_radiation_columns"):
+        build_tile_step_unified(grid, coord, cfg, KT)

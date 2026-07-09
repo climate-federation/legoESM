@@ -44,6 +44,7 @@ class _DriverStub:
     with the real ModelDriver methods bound (test_atm_latlon_spmd_driver
     pattern)."""
     _tiled_cube_column_physics_fn = ModelDriver._tiled_cube_column_physics_fn
+    _tiled_cube_unified_active = ModelDriver._tiled_cube_unified_active
     _run_tiled_cube_spmd = ModelDriver._run_tiled_cube_spmd
     _save_lightweight_timeseries = ModelDriver._save_lightweight_timeseries
 
@@ -122,7 +123,10 @@ def test_physics_fn_kessler_alone_builds_bridge():
 
 
 def test_physics_fn_rejects_unified_physics_and_hs():
-    with pytest.raises(NotImplementedError, match="not tiled-routed"):
+    # Unified physics now DISPATCHES to the operator-split lane before the
+    # selector runs; calling the selector directly hits its dispatch-
+    # disagreement bug guard (unified configs must never reach it).
+    with pytest.raises(NotImplementedError, match="dispatch"):
         ModelDriver._tiled_cube_column_physics_fn(
             _CfgStub(_exp_cfg(3, radiation="gray")))
     with pytest.raises(NotImplementedError, match="held_suarez"):
@@ -212,14 +216,20 @@ def test_run_tiled_cube_spmd_moist_missing_tracers_refuses():
         stub._run_tiled_cube_spmd()
 
 
-def test_run_tiled_cube_spmd_refusals():
+def test_run_tiled_cube_spmd_dispatches_unified_to_operator_split():
     dc = _device_config()
     model, hs = _model_and_state()
+    calls = []
 
-    # Unified physics refuses via the selector.
-    with pytest.raises(NotImplementedError, match="not tiled-routed"):
-        _DriverStub(model, hs, _exp_cfg(3, radiation="gray"),
-                    dc)._run_tiled_cube_spmd()
+    class _Stub(_DriverStub):
+        def _run_operator_split_tiled_cube(self, start_step, start_day,
+                                           mesh, kt):
+            calls.append((mesh.devices.shape, kt))
+            return "COMPLETED"
+
+    stub = _Stub(model, hs, _exp_cfg(3, radiation="gray"), dc)
+    assert stub._run_tiled_cube_spmd() == "COMPLETED"
+    assert calls == [((6, KT, KT), KT)]
 
 
 def test_run_tiled_cube_spmd_writers(tmp_path):
