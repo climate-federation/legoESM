@@ -318,6 +318,127 @@ def make_partial_cell(z_coord, H_bathy, land_mask, thin_threshold=0.3,
     return zc, H_snapped, lm_out
 
 
+def orca1_zdftke_config(iwm_enabled: bool = False):
+    """NEMO ORCA1 ``&namzdf_tke`` mapped onto :class:`TKEConfig`, value by value.
+
+    Source of truth: ``cfgs/ORCA1/EXP00/RUN_REF/namelist_cfg`` overrides on top
+    of ``namelist_ref`` defaults (NEMO 5.0.1).  Structural conventions
+    (diagnostic Mode-B TKE, insitu N², gaspar amplitude, Veros mixing-length
+    construction) follow the validated DINO NEMO-faithful recipe
+    (``ocean/experiments/dino.py::_dino_vertical_mixing_config``); ONLY the
+    namelist values change for ORCA1.
+
+    Mapping (namelist -> field):
+      rn_ediff = 0.1   -> c_k          (avm = c·mxl·sqrt(e); see amplitude note)
+      rn_ediss = 0.7   -> c_eps        (Kolmogorov dissipation coefficient)
+      rn_emin  = 1e-6  -> tke_background   [m²/s²]
+      rn_emin0 = 1e-4  -> tke_surface_min  [m²/s²]
+      nn_pdl   = 1     -> prandtl_mode="richardson" with prandtl_ri_coeff =
+                          1/ri_cri, ri_cri = 2/(2 + rn_ediss/rn_ediff) = 2/9
+                          (zdftke.F90:772,399: Pr = clamp(Ri/ri_cri, 1, 10) ==
+                          clamp(4.5·Ri, 1, 10) — exactly _prandtl_number's form)
+      nn_mxl   = 2     -> tke_mxl_choice=2 (closest construction; see gaps)
+      ln_lc    = T     -> lc=True
+      rn_lc    = 0.25  -> lc_coeff       (namelist_cfg override of 0.15)
+      nn_etau  = 1     -> etau_mode="below_ml"
+      rn_efr   = 0.08  -> etau_frac      (namelist_cfg override of 0.05)
+      nn_htau  = 1     -> etau_htau_mode="latitude" (0.5–30 m, 45·|sinφ|)
+      rn_ebb   = 67.83 -> tke.py module constant _NEMO_TKE_EBB (etau e_sfc;
+                          identical value, no config field)
+      &namzdf rn_avm0/rn_avt0 (1.2e-4/1.2e-5 backgrounds) -> kappaM_min /
+                          kappaH_min.  NEMO composes avm = max(closure, avmb)
+                          and avt = max(pdl·avt, avtb) (zdftke.F90:715,723);
+                          compute_K_from_tke applies EXACTLY that max via the
+                          kappaM_min/kappaH_min floors, so the namzdf
+                          backgrounds live INSIDE the closure and build_tripole
+                          forces the model-level additive A_v/K_v to molecular
+                          (residual +1.4e-6/+1e-10 add — negligible, flagged).
+                          With --iwm, NEMO's zdfiwm_init forces avmb/avtb to
+                          molecular (rnu=1.4e-6, 1e-10): ``iwm_enabled=True``
+                          switches the floors to those values so the wave
+                          field is the interior background, as in NEMO.
+      nn_avb   = 0     -> bg_diff_scale=0.0 (no Bryan-Lewis depth profile;
+                          abyssal mixing comes from zdfiwm as in NEMO)
+
+    NO TKEConfig counterpart (fidelity gaps, flagged not stubbed):
+      ln_mxl0=T / rn_mxl0=0.04  surface mixing length = F(wind stress);
+      nn_mxlice=2               under-ice mixing-length scaling;
+      nn_eice=3                 under-ice attenuation of lc/etau (no ice_frac
+                                threaded on this path);
+      rn_bshear=1e-20           background-shear floor (legoESM uses 1e-12);
+      surface TKE BC            NEMO Dirichlet e_sfc=rn_ebb·|τ|/ρ0 vs legoESM
+                                flux (|τ|/ρ0)^{3/2} (Veros/Wallace form);
+      prognostic en carry       NEMO integrates en prognostically; this runs
+                                the DINO-validated quasi-steady diagnostic
+                                Mode-B (3 backward-Euler iterations).
+    """
+    from legoesm import constants as _const
+    from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+
+    rn_ediff = 0.1        # namelist_ref &namzdf_tke default (ORCA1 keeps it)
+    rn_ediss = 0.7        # namelist_ref &namzdf_tke default (ORCA1 keeps it)
+    # zdftke.F90:772 — ri_cri deduced from rn_ediff/rn_ediss; Pr slope = 1/ri_cri.
+    pr_ri_slope = (2.0 + rn_ediss / rn_ediff) / 2.0     # = 4.5
+    if iwm_enabled:
+        # zdfiwm_init: avmb = rnu = 1.4e-6 m²/s, avtb = 1e-10 m²/s — the
+        # wave field IS the interior background (matches the model-level
+        # A_v/K_v override in the build_tripole iwm block).
+        avmb, avtb = _const.nu_ocean_molecular, 1.0e-10
+    else:
+        avmb, avtb = 1.2e-4, 1.2e-5     # &namzdf rn_avm0 / rn_avt0
+    return TKEConfig(
+        c_k=rn_ediff,
+        c_eps=rn_ediss,
+        tke_background=1.0e-6,          # rn_emin
+        tke_surface_min=1.0e-4,         # rn_emin0
+        tke_mxl_choice=2,               # nn_mxl=2 (closest; see docstring gaps)
+        prandtl_mode="richardson",      # nn_pdl=1
+        prandtl_ri_coeff=pr_ri_slope,   # 1/ri_cri = 4.5 (NOT the Veros 6.6)
+        lc=True,                        # ln_lc
+        lc_coeff=0.25,                  # rn_lc (namelist_cfg override)
+        etau_mode="below_ml",           # nn_etau=1
+        etau_frac=0.08,                 # rn_efr (namelist_cfg override)
+        etau_htau_mode="latitude",      # nn_htau=1 (namelist_ref default)
+        kappaM_min=avmb,                # NEMO avm = max(closure, avmb)
+        kappaH_min=avtb,                # NEMO avt = max(pdl·avt, avtb)
+        bg_diff_scale=0.0,              # nn_avb=0 — no depth-profile background
+    )
+
+
+def build_tripole_vmix_config(tripole_vmix: str, iwm=None):
+    """``VerticalMixingConfig`` for ``--tripole-vmix`` (+ optional zdfiwm).
+
+    ``tripole_vmix``: "none" (byte-identical no-closure default), "tke"
+    (ORCA1 ``&namzdf_tke`` mapping, :func:`orca1_zdftke_config`) or "kpp"
+    (scheme defaults).  Unknown selections raise (dispatch hardening).
+
+    ``iwm`` (an enabled ``IWMConfig`` or None) rides the SAME config: zdfiwm
+    is ADDITIVE on top of the closure inside ``compute_vertical_K_profiles``
+    — exactly NEMO's zdfphy ordering (zdf_tke computes avt/avm first, zdf_iwm
+    then adds onto them), and the same contract the latlon path uses when it
+    attaches iwm onto its KPP config.  So ``--tripole-vmix tke --iwm``
+    composes; it is NOT an error.
+    """
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        KPPConfig, VerticalMixingConfig,
+    )
+    _iwm_on = iwm is not None and iwm.enabled
+    if tripole_vmix == "none":
+        vm = VerticalMixingConfig(scheme="none")
+    elif tripole_vmix == "tke":
+        vm = VerticalMixingConfig(
+            scheme="tke", tke=orca1_zdftke_config(iwm_enabled=_iwm_on))
+    elif tripole_vmix == "kpp":
+        vm = VerticalMixingConfig(scheme="kpp", kpp=KPPConfig())
+    else:
+        raise ValueError(
+            f"unknown --tripole-vmix {tripole_vmix!r}; expected 'none', "
+            "'tke' or 'kpp'.")
+    if _iwm_on:
+        vm = vm._replace(iwm=iwm)
+    return vm
+
+
 def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   woa_init: bool = False, woa_t=None, woa_s=None,
                   pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None,
@@ -338,7 +459,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   bottom_drag_scheme=None, bottom_drag_cd0=None,
                   bottom_drag_cdmax=None, bottom_drag_z0=None,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
-                  prescribed_flow=None, no_gm_redi=False):
+                  prescribed_flow=None, no_gm_redi=False,
+                  tripole_vmix="none"):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -351,6 +473,12 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
     confounds model differences with IC differences over a few-year spinup. (WOA18 is
     a close stand-in for NEMO's exact Gouretski IC, which is the further refinement.)
     """
+    # Dispatch hardening at the programmatic surface too (argparse `choices`
+    # only guards the CLI): ""/None/typos must not silently run as "none".
+    if tripole_vmix not in ("none", "tke", "kpp"):
+        raise ValueError(
+            f"unknown tripole_vmix {tripole_vmix!r}; expected 'none', 'tke' "
+            "or 'kpp'.")
     from scripts.run import run_omip
     # Pick the tripole resolution from the mesh file: eORCA025 (1/4 deg) vs the
     # default eORCA1 (1 deg). create_tripole_grid reads the grid (glamt/e1t.../
@@ -428,13 +556,11 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
     # faithful config untouched.
     _use_convection = bool(convection and convection != "none")
     _use_iwm = iwm is not None and iwm.enabled
-    if _use_convection or mle is not None or _use_iwm:
+    _use_vmix = bool(tripole_vmix and tripole_vmix != "none")
+    if _use_convection or mle is not None or _use_iwm or _use_vmix:
         from legoesm.ocean.physics.combined import OceanPhysicsConfig
         from legoesm.ocean.physics.convection.config import (
             OceanConvectionConfig, EnhancedDiffusionConfig,
-        )
-        from legoesm.ocean.physics.vertical_mixing.config import (
-            VerticalMixingConfig,
         )
         from legoesm.ocean.physics.lateral_mixing.config import (
             LateralMixingConfig,
@@ -458,23 +584,48 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                 K_conv=convection_K_conv, K_bg=convection_K_bg,
             ),
         ) if _use_convection else OceanConvectionConfig(scheme="none")
-        _vm_cfg = VerticalMixingConfig(scheme="none")
-        if _use_iwm:
-            # zdfiwm rides the vertical-mixing config; scheme stays "none"
-            # (the tripole oracle has no closure scheme in the pipeline —
-            # backgrounds + convection EVD), the additive wave K enters in
-            # compute_vertical_K_profiles.  implicit_vertical_mixing is
-            # already forced True above.
-            _vm_cfg = _vm_cfg._replace(iwm=iwm)
+        # --tripole-vmix: NEMO's vertical-mixing CLOSURE on the tripole (the
+        # last audited namelist gap — NEMO ORCA1 runs zdftke).  "none"
+        # (default) keeps the byte-identical no-closure pipeline; "tke"
+        # attaches the ORCA1 &namzdf_tke mapping (orca1_zdftke_config);
+        # "kpp" attaches KPP defaults.  TKE/CATKE K-profiles are computed
+        # inside the implicit solve's compute_vertical_K_profiles fallback
+        # (combined.py keeps the pipeline factory a deliberate no-op), which
+        # receives the step-time surface_forcing (CORE-II tau_x/tau_y) — so
+        # the surface TKE input sees the real wind stress.
+        _vm_cfg = build_tripole_vmix_config(
+            tripole_vmix, iwm=iwm if _use_iwm else None)
+        if _use_vmix:
+            print(f"[setup] tripole vertical-mixing closure: {tripole_vmix}"
+                  + (" (ORCA1 namzdf_tke namelist mapping)"
+                     if tripole_vmix == "tke" else ""))
+        if _use_iwm or _use_vmix:
+            # zdfiwm rides the vertical-mixing config (attached above by
+            # build_tripole_vmix_config); with --tripole-vmix none the
+            # scheme stays "none" (backgrounds + convection EVD only), with
+            # tke/kpp the additive wave K enters compute_vertical_K_profiles
+            # AFTER the closure — NEMO's zdfphy ordering.
+            # implicit_vertical_mixing is already forced True above.
             # NEMO zdfiwm_init FORCES the model backgrounds to molecular
             # values (avmb = rnu = 1.4e-6 m²/s, avtb = 1e-10 m²/s): the wave
             # field IS the interior background.  Mirror that (codex r1 #2) —
             # keeping the OMIP A_v/K_v floors would double-count backgrounds.
+            # Same when a CLOSURE is attached (codex tke r1 #1/#2): NEMO
+            # composes avm = max(closure, avmb) / avt = max(pdl·avt, avtb)
+            # (zdftke.F90:715,723) — exactly what the closure-internal
+            # kappaM_min/kappaH_min floors do (orca1_zdftke_config carries
+            # rn_avm0/rn_avt0, or the molecular pair under --iwm; KPP carries
+            # its A_bg/K_bg) — while compute_vertical_K_profiles ADDS the
+            # model-level A_v/K_v on top.  Keeping the OMIP floors there
+            # would double-count the background, so force them molecular
+            # (the residual +1.4e-6/+1e-10 additive term is negligible).
             from legoesm import constants as _const
             _ovr["A_v"] = _const.nu_ocean_molecular
             _ovr["K_v"] = 1.0e-10   # NEMO avtb with ln_zdfiwm
-            print("[setup] zdfiwm: model backgrounds forced to molecular "
-                  f"(A_v={_ovr['A_v']:g}, K_v={_ovr['K_v']:g}) per zdfiwm_init")
+            print("[setup] model additive backgrounds forced to molecular "
+                  f"(A_v={_ovr['A_v']:g}, K_v={_ovr['K_v']:g}) — "
+                  f"{'zdfiwm_init' if _use_iwm else 'closure floors'} own "
+                  "the NEMO avmb/avtb backgrounds")
         _ovr["physics"] = OceanPhysicsConfig(
             vertical_mixing=_vm_cfg,
             lateral_mixing=LateralMixingConfig(scheme="none"),
@@ -492,6 +643,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         if _use_convection:
             _ovr["implicit_vertical_mixing"] = True
         print(f"[setup] tripole physics ENABLED: "
+              f"vmix={tripole_vmix} "
               f"convection={convection if _use_convection else 'none'} "
               f"(K_conv={convection_K_conv} K_bg={convection_K_bg}) "
               f"MLE={'ce=%g' % mle.ce if mle is not None else 'off'} "
@@ -1693,6 +1845,60 @@ def _ice_state_spatial_shape(grid, app_grid_type):
         "ice-state spatial shape (supported: mpas, tripole, latlon).")
 
 
+def _apply_ice_init(ice_state, ic):
+    """Overwrite the zero-ice cold-start state with the NEMO SI3 ice IC.
+
+    ``ic`` is a :class:`legoesm.ocean.forcing.nemo_native_fields.NemoIceInit`
+    already on the model T-grid (clamped, coherent, land-masked — see the
+    loader).  Maps only the fields the file AND the state carry:
+
+      at_i -> concentration, ht_i -> h_ice, ht_s -> h_snow, sm_i -> S_ice,
+      tmsu -> T_ice (only where a valid on-ice reading exists; elsewhere the
+      state keeps its own default so ice-free cells are untouched).
+
+    Dynamics fields (u_ice/v_ice/sigma_*) and melt ponds have no SI3-IC
+    counterpart and stay zero (Jan-1 start: ponds are a melt-season
+    feature; ice velocity spins up from the ocean/wind stress in a few
+    days).  Single-category states only — the OMIP runner always builds
+    n_categories=1; a trailing category axis raises rather than guessing
+    an ITD split.
+    """
+    h_old = ice_state.h_ice.data
+    conc_np = np.asarray(ic.concentration)
+    if h_old.ndim != conc_np.ndim:
+        raise ValueError(
+            f"--ice-init: ice state h_ice has rank {h_old.ndim} but the "
+            f"regridded IC has rank {conc_np.ndim}; multi-category ice "
+            "states are not supported (the SI3 IC file carries aggregate "
+            "fields only — initialise single-category, or add an ITD "
+            "distribution step).")
+    for _nm in ("concentration", "h_ice", "h_snow", "S_ice", "T_su"):
+        _arr = getattr(ic, _nm)
+        if _arr is not None and np.asarray(_arr).shape != tuple(h_old.shape):
+            raise ValueError(
+                f"--ice-init: regridded IC field {_nm!r} shape "
+                f"{np.asarray(_arr).shape} does not match the ice-state "
+                f"spatial shape {tuple(h_old.shape)}.")
+    dtype = h_old.dtype
+    conc = jnp.asarray(conc_np, dtype=dtype)
+    upd = dict(
+        concentration=ice_state.concentration.replace(data=conc),
+        h_ice=ice_state.h_ice.replace(
+            data=jnp.asarray(ic.h_ice, dtype=dtype)),
+    )
+    if ic.h_snow is not None:
+        upd["h_snow"] = ice_state.h_snow.replace(
+            data=jnp.asarray(ic.h_snow, dtype=dtype))
+    if ic.S_ice is not None:
+        upd["S_ice"] = ice_state.S_ice.replace(
+            data=jnp.asarray(ic.S_ice, dtype=dtype))
+    if ic.T_su is not None:
+        T_ic = jnp.asarray(ic.T_su, dtype=dtype)
+        upd["T_ice"] = ice_state.T_ice.replace(
+            data=jnp.where(jnp.isfinite(T_ic), T_ic, ice_state.T_ice.data))
+    return ice_state._replace(**upd)
+
+
 def _surface_currents(state, grid, app_grid_type):
     """Top-level ocean currents (u_east, v_north) at T points / cells [m/s].
 
@@ -1833,16 +2039,26 @@ def _route_ice_response_to_ocean(sf, fw, resp, ocean_mask, ice_conc):
     return sf, fw
 
 
-def _prognostic_ice_diag(ice_state, resp, grid, app_grid_type, ocean_mask):
-    """One-line verifiable summary over OCEAN cells: ice AREA [10^6 km2], mean
-    concentration, max thickness, and the area-mean salt flux over ice-covered
-    cells.
+def _ice_global_stats(ice_state, grid, ocean_mask):
+    """Global prognostic-ice scalars over OCEAN cells:
+    ``(ice_area_m2, mean_conc, max_thick_m, conc_masked)``.
 
-    ``grid.area`` is the per-cell area [m2] on all three supported grids
-    (VoronoiMesh exposes it as ``areaCell``; the C-grid families as the
-    ``.area`` property).  ``ocean_mask`` restricts the summary to wet cells so a
-    spurious land-ice growth (masked out of the ocean budget) does not inflate
-    the reported area."""
+    ``ice_area_m2`` = sum(conc * cell_area) [m2]; ``mean_conc`` = mean
+    concentration over the ice-covered (conc > 0) wet cells (0.0 when
+    ice-free); ``max_thick_m`` = max ice thickness [m] over wet cells.
+    ``conc_masked`` is the wet-masked concentration array (reused by the
+    stdout diag so the numbers cannot drift apart).  ``grid.area`` is the
+    per-cell area [m2] on all three supported grids (VoronoiMesh exposes
+    it as ``areaCell``; the C-grid families as the ``.area`` property).
+    ``ocean_mask`` restricts the summary to wet cells so a spurious
+    land-ice growth (masked out of the ocean budget) does not inflate
+    the reported area.
+
+    NOTE (tripole): the sum runs over the FULL array incl. the ORCA
+    cyclic-overlap columns + north halo row, so duplicated seam cells
+    overcount ``ice_area_m2`` by <~0.6%.  Kept deliberately: it is the
+    convention every prior [ice] stdout line used (A/B-comparable run
+    logs); the day-90 scoring reads snapshots, never these scalars."""
     conc = np.asarray(ice_state.concentration.data, dtype=np.float64)
     h = np.asarray(ice_state.h_ice.data, dtype=np.float64)
     if conc.ndim > h.ndim:  # safety (single-category here)
@@ -1857,12 +2073,23 @@ def _prognostic_ice_diag(ice_state, resp, grid, app_grid_type, ocean_mask):
         _area = grid.areaCell
     area = np.asarray(_area, dtype=np.float64)
     ice_area_m2 = float(np.sum(conc * area))
+    mean_conc = (float(conc[conc > 0].mean()) if (conc > 0).any() else 0.0)
+    return ice_area_m2, mean_conc, float(h.max()), conc
+
+
+def _prognostic_ice_diag(ice_state, resp, grid, app_grid_type, ocean_mask):
+    """One-line verifiable summary over OCEAN cells: ice AREA [10^6 km2], mean
+    concentration, max thickness, and the area-mean salt flux over ice-covered
+    cells.  Scalars come from :func:`_ice_global_stats` (the same numbers the
+    diag CSV logs)."""
+    ice_area_m2, mean_conc, max_h, conc = _ice_global_stats(
+        ice_state, grid, ocean_mask)
     icy = conc > 1.0e-3
     salt = np.asarray(resp.salt_flux, dtype=np.float64)
     salt_mean = float(salt[icy].mean()) if icy.any() else 0.0
     return (f"ice_area={ice_area_m2 / 1.0e12:.3f}e6 km2 "
-            f"mean_conc={float(conc[conc > 0].mean()) if (conc > 0).any() else 0.0:.3f} "
-            f"max_h={float(h.max()):.3f} m "
+            f"mean_conc={mean_conc:.3f} "
+            f"max_h={max_h:.3f} m "
             f"mean_salt_flux(icy)={salt_mean:.3e} kg/m2/s "
             f"icy_cells={int(icy.sum())}")
 
@@ -2067,7 +2294,8 @@ def _mht_diag(state, grid, z_coord, app_grid_type, out_dir):
         print(f"[transports] MHT diag skipped: {type(e).__name__}: {e}")
 
 
-def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None):
+def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
+                   ice_state=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     save_kw = dict(
         T=np.asarray(state.T.data), S=np.asarray(state.S.data),
@@ -2075,6 +2303,22 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None):
         land_mask=np.asarray(state.land_mask.data),
         lat_T=np.asarray(lat2d), lon_T=np.asarray(lon2d),
     )
+    # Prognostic sea ice (--prognostic-sea-ice): concentration + thickness on
+    # the T-grid, ocean-masked (audited output gap — ice growth was invisible
+    # in snapshots).  Cell areas are derivable from lat_T/lon_T (or grid
+    # files) downstream, so raw per-cell fields keep the npz area-weighting-
+    # safe.  EXTRA keys only: the scorers read explicit keys, so old readers
+    # are unaffected and old snapshots (without these keys) stay loadable.
+    if ice_state is not None:
+        _lm = np.asarray(state.land_mask.data, dtype=np.float64)
+        _ic = np.asarray(ice_state.concentration.data, dtype=np.float64)
+        _ih = np.asarray(ice_state.h_ice.data, dtype=np.float64)
+        if _ic.ndim > _lm.ndim:  # multi-category: aggregate (n/a in this runner)
+            _vol = (_ic * _ih).sum(axis=-1)
+            _ic = _ic.sum(axis=-1)
+            _ih = np.where(_ic > 0.0, _vol / np.maximum(_ic, 1.0e-12), 0.0)
+        save_kw["ice_concentration"] = _ic * _lm
+        save_kw["ice_thickness"] = _ih * _lm
     # MPAS has no separate v field; the scorer reads T/S/land_mask/lat_T/lon_T only.
     if getattr(state, "v", None) is not None:
         save_kw["v"] = np.asarray(state.v.data)
@@ -2486,6 +2730,17 @@ def main() -> int:
                    help="Bulk salinity of newly-frozen lead/basal ice [PSU] for the "
                         "--prognostic-sea-ice brine closure (BrineConfig.S_ice_new; "
                         "default constants.S_ice_bulk_default ~4 PSU).")
+    p.add_argument("--ice-init", type=str, default=None,
+                   help="NEMO SI3 ice initial-state file (Ice_initialization.nc: "
+                        "at_i/ht_i[/ht_s/sm_i/tmsu]) — start --prognostic-sea-ice "
+                        "from NEMO's Jan-1 ice cover instead of the zero-ice cold "
+                        "start.  Native eORCA1 embeds exactly on the tripole grid; "
+                        "other grids regrid nearest-wet (same convention as "
+                        "--nemo-monthly-init).  Fixes the Arctic brine bias: "
+                        "freezing ~1.5 m of NEW ice in 90 d over 10-20 m Siberian "
+                        "shelf columns injects +1.2..+3.5 PSU brine that NEMO "
+                        "(starting WITH that ice) never sees.  Default None = "
+                        "byte-identical zero-ice cold start.")
     p.add_argument("--visc-schedule", type=str, default=None,
                    help="Piecewise viscosity schedule 'day:A_h:C_smag_lap,...'"
                         " e.g. '0:1e5:3.0,90:5e4:1.0,180:2e4:0.33' — start at "
@@ -2763,6 +3018,20 @@ def main() -> int:
                         "--convection enhanced_diffusion (default 1.0).")
     p.add_argument("--convection-K-bg", type=float, default=1e-5,
                    help="Background diffusivity K_bg [m^2/s] for convection.")
+    p.add_argument("--tripole-vmix", type=str, default="none",
+                   choices=["none", "tke", "kpp"],
+                   help="Vertical-mixing CLOSURE on the tripole grid (the "
+                        "last audited NEMO ORCA1 namelist gap: NEMO runs "
+                        "zdftke; the faithful tripole default runs only the "
+                        "dynamics-core implicit backgrounds). 'tke' = NEMO "
+                        "&namzdf_tke mapped from the ORCA1 namelist "
+                        "(rn_ediff/rn_ediss/rn_emin/rn_emin0/nn_pdl/ln_lc/"
+                        "rn_lc=0.25/nn_etau=1/rn_efr=0.08/nn_htau=1); 'kpp' = "
+                        "KPP defaults. Composes ADDITIVELY with --iwm "
+                        "(NEMO zdfphy order: closure first, zdfiwm adds on "
+                        "top). Default 'none' is byte-identical. "
+                        "STABILITY: TKE x superbee tracer advection blew up "
+                        "on DINO in ~15 days — smoke-gate before long runs.")
     p.add_argument("--mle", action="store_true",
                    help="Enable the Fox-Kemper mixed-layer-eddy (MLE) "
                         "restratification (NEMO tramle nn_mle=1): a bolus "
@@ -2856,6 +3125,12 @@ def main() -> int:
                 "pulls ocean SST to the host each step (like SSS restoring / "
                 "ice-thermo), so it is host-loop only. Set --scan-block 0.")
 
+    if args.ice_init is not None and not args.prognostic_sea_ice:
+        raise ValueError(
+            "--ice-init initialises the PROGNOSTIC ice state and requires "
+            "--prognostic-sea-ice (the surrogate paths read the prescribed "
+            "NEMO siconc climatology, not this file).")
+
     # --prescribed-flow gates (PRE-BUILD, on the static args): grid support +
     # the --spinup-drag rejection + the --no-gm-redi requirement.  NB: no
     # --scan-block gate — the lever is in-model (inside _step_impl), so the
@@ -2906,6 +3181,13 @@ def main() -> int:
             "--ew-cyclic-overlap is ORCA-cyclic-overlap-specific (the eORCA1 "
             "tripole); it is WRONG on a regular period-nx lat-lon grid. "
             f"Got --grid {args.grid!r}.")
+    if args.tripole_vmix != "none" and args.grid != "tripole":
+        raise ValueError(
+            "--tripole-vmix wires the vertical-mixing closure onto the "
+            "TRIPOLE physics-attach block only; other grids configure their "
+            "closure through their own builders (latlon_bathy ships KPP+EVD). "
+            f"Got --tripole-vmix {args.tripole_vmix!r} with --grid "
+            f"{args.grid!r}.")
     if args.river_mouth_restoring_gate and not args.runoff:
         raise ValueError(
             "--river-mouth-restoring-gate requires --runoff (the gate masks "
@@ -2992,6 +3274,7 @@ def main() -> int:
             iwm=_iwm_cfg, iwm_forcing_file=args.iwm_forcing_file,
             prescribed_flow=args.prescribed_flow,
             no_gm_redi=args.no_gm_redi,
+            tripole_vmix=args.tripole_vmix,
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":
@@ -3548,6 +3831,27 @@ def main() -> int:
         ice_state = ice_state._replace(
             concentration=ice_state.concentration.replace(
                 data=jnp.zeros_like(ice_state.concentration.data)))
+        if args.ice_init is not None:
+            # NEMO SI3 ice IC (at_i/ht_i/ht_s/sm_i/tmsu) -> the prognostic
+            # state, replacing the zero-ice cold start.  Same embed /
+            # nearest-wet convention as --nemo-monthly-init; zero-ice cells
+            # stay zero (incl. S_ice=0, matching the fresh cold-start seed).
+            from legoesm.ocean.forcing.nemo_native_fields import (
+                load_nemo_ice_init,
+            )
+            _ice_ic = load_nemo_ice_init(
+                args.ice_init, lat2d, lon2d,
+                np.asarray(state.land_mask.data))
+            ice_state = _apply_ice_init(ice_state, _ice_ic)
+            _a0, _c0, _h0, _ = _ice_global_stats(
+                ice_state, grid, state.land_mask.data)
+            print(f"[setup] ICE INIT from "
+                  f"{args.ice_init.rsplit('/', 1)[-1]}: "
+                  f"area={_a0 / 1.0e12:.3f}e6 km2 mean_conc={_c0:.3f} "
+                  f"max_h={_h0:.3f} m (fields: at_i,ht_i"
+                  f"{',ht_s' if _ice_ic.h_snow is not None else ''}"
+                  f"{',sm_i' if _ice_ic.S_ice is not None else ''}"
+                  f"{',tmsu' if _ice_ic.T_su is not None else ''})")
         from legoesm import constants as _ice_const
         _ice_T_freeze = float(_ice_const.T_freeze)   # degC ocean T -> K for ice
         print(f"[setup] PROGNOSTIC SEA ICE: step_sea_ice dynamics={_ice_dyn!r} "
@@ -3642,17 +3946,32 @@ def main() -> int:
 
     _csv_cols = ["step", "day", "mean_sst_C", "mean_sss", "max_abs_u",
                  "max_abs_v", "umax_lat", "umax_lon", "umax_lev", "steps_per_s"]
+    # Prognostic-ice columns (audited output gap: ice growth was invisible in
+    # the run record): global ice area [m2], mean concentration over the
+    # ice-covered wet cells, max thickness [m] — the _ice_global_stats trio
+    # the stdout [ice] line also reports.  Added ONLY under
+    # --prognostic-sea-ice so ice-free runs keep the legacy header.
+    if ice_config is not None:
+        _csv_cols += ["ice_area_m2", "ice_mean_conc", "ice_max_thick_m"]
+        _lm_csv = np.asarray(state.land_mask.data)
     _csv = open(out_dir / "diag_timeseries.csv", "w")
     _csv.write(",".join(_csv_cols) + "\n")
 
-    def _log_diag_csv(step, day, d, rate):
-        _csv.write(
+    def _log_diag_csv(step, day, d, rate, ice=None):
+        row = (
             f"{step},{day:.3f},{d['mean_sst_C']:.4f},{d['mean_sss']:.4f},"
             f"{d['max_abs_u']:.6e},{d['max_abs_v']:.6e},{d['umax_lat']},"
-            f"{d['umax_lon']},{d['umax_lev']},{rate:.3f}\n")
+            f"{d['umax_lon']},{d['umax_lev']},{rate:.3f}")
+        if ice_config is not None:
+            if ice is not None:
+                _ia, _ic, _ih, _ = _ice_global_stats(ice, grid, _lm_csv)
+                row += f",{_ia:.6e},{_ic:.4f},{_ih:.4f}"
+            else:  # defensive: header promised the columns — never misalign
+                row += ",nan,nan,nan"
+        _csv.write(row + "\n")
         _csv.flush()
 
-    _log_diag_csv(0, 0.0, d0, 0.0)
+    _log_diag_csv(0, 0.0, d0, 0.0, ice=ice_state)
 
     t_wall = time.time()
 
@@ -4104,7 +4423,7 @@ def main() -> int:
             day = step * dt / _SEC_PER_DAY
             print(f"[diag] step {step} (day {day:.0f}): {d} | {rate:.2f} steps/s",
                   flush=True)
-            _log_diag_csv(step, day, d, rate)
+            _log_diag_csv(step, day, d, rate, ice=ice_state)
             if ice_resp is not None:
                 _ice_diag = _prognostic_ice_diag(ice_state, ice_resp, grid,
                                                  app_grid_type,
@@ -4112,20 +4431,24 @@ def main() -> int:
                 print(f"[ice]  step {step}: {_ice_diag}", flush=True)
             if not d["finite"]:
                 print("[ABORT] non-finite state", flush=True)
-                _save_snapshot(out_dir, f"blowup_step{step}", state, lat2d, lon2d)
+                _save_snapshot(out_dir, f"blowup_step{step}", state, lat2d, lon2d,
+                               ice_state=ice_state)
                 _csv.close()
                 return 1
         if snap_every > 0 and step % snap_every == 0 and step != n_steps:
             day = step * dt / _SEC_PER_DAY
-            _save_snapshot(out_dir, f"day{int(round(day)):04d}", state, lat2d, lon2d, z_coord=z_coord)
+            _save_snapshot(out_dir, f"day{int(round(day)):04d}", state, lat2d, lon2d, z_coord=z_coord,
+                           ice_state=ice_state)
             print(f"[snapshot] day {day:.0f} saved", flush=True)
         if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
             yr = step // steps_per_year
-            _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d, z_coord=z_coord)
+            _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d, z_coord=z_coord,
+                           ice_state=ice_state)
             print(f"[snapshot] year {yr} saved", flush=True)
 
     state = jax.block_until_ready(state)
-    _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord)
+    _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord,
+                   ice_state=ice_state)
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir)
     _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir)

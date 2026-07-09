@@ -3820,9 +3820,13 @@ class LatLonCGridOceanModel:
                     eos_fn=_vmix_eos_fn,
                     tke_old=tke_old, dt_tke=dt_mom,
                     tke_source=tke_source, return_tke=True,
-                    # Column latitudes [deg] for the NEMO etau_htau_mode=
+                    # T-point latitudes [deg] for the NEMO etau_htau_mode=
                     # "latitude" penetration profile (unused otherwise).
-                    lat_deg=jnp.degrees(self.grid.lat),
+                    # 2-D lat_T (exact on the tripole, where rows curve and
+                    # the legacy 1-D grid.lat is a row mean) — a 1-D (n_lat,)
+                    # array cannot right-broadcast against the (n_lat, n_lon,
+                    # nlev-1) columns inside nemo_etau_injection.
+                    lat_deg=jnp.degrees(self.grid.lat_T),
                     iwm_fields=self._iwm_forcing,
                 )
                 if _post_mixing:
@@ -3837,7 +3841,7 @@ class LatLonCGridOceanModel:
                     A_v_background=float(self.config.A_v),
                     K_v_background=float(self.config.K_v),
                     eos_fn=_vmix_eos_fn,
-                    lat_deg=jnp.degrees(self.grid.lat),
+                    lat_deg=jnp.degrees(self.grid.lat_T),
                     iwm_fields=self._iwm_forcing,
                 )
 
