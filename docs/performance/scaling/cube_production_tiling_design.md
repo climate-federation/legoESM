@@ -139,13 +139,22 @@ numerics).
   full stage under REAL multi-controller `jax.distributed` across 2 nodes (np24,
   in-stage ppermutes -> cross-NODE collective-permute); each process
   self-validates its local tile vs serial (rel<1e-9). Correctness, not a bench.
+- **PRODUCTION ASSEMBLY WIRED (2026-07-09)** — the blocked persistent step
+  (`make_tiled_fv3_hydrostatic_step_blocked_2d`, input layout == output
+  layout, in-stage telescoping mass fixer, optional moist column physics)
+  + `make_tiled_cc_loop` (adapter enter/step/exit_) + the
+  `run_cpu_mpi_scaling --cs-spmd` 6·kt² dispatch and
+  `bench_cube_tiled_step_scaling --closed-loop` lane.  Bitwise-identical to
+  the gated step stages (dry + moist gates in
+  `tests/parallel/test_tiled_blocked_loop.py`).  See
+  `cube_tiled_step_design.md` (2026-07-09 update) for the full contract.
 - **REMAINING (later increments, NOT base-case-blocking):**
   - Optional momentum terms (div damp / hyperdiff / boundary smoothing /
     Fortran corner specials) — each rides the shipped per-op kernels + one more
     in-stage halo; their own increments.
   - The Fortran xppm boundary overrides (`n_interior` keyed to GLOBAL face
     index) + duogrid `synchronize_cgrid_fluxes` for the mass tile.
-  - 3D `fv3_hydrostatic_tendencies` (the `(F,n,n,nlev)` 4D analogue) — the same
-    ops + the vertical trailing axis (all kernels already 4D-native).
+  - Kessler column bridge for the moist blocked loop in the drivers +
+    `ModelDriver` (full-model coupling) hookup.
 - LESSON: a prior session built tiling infra; ALWAYS grep `tests/parallel/
   test_tiled_*` + `parallel.mesh` before tiling a cube op.
