@@ -158,11 +158,49 @@ _VARIANT_TUNED = {
 _GLACIER_ALBEDO = TUNED_GLACIER_ALBEDO
 
 
+def _surfdata_candidates(cache: str) -> list[str]:
+    """Ordered local paths to probe for the CLM surfdata before any network I/O.
+
+    ``cache`` (node-local /tmp by default) first, then the ``LEGOESM_CLM_SURFDATA``
+    env override, then shared-filesystem ``data/clm/surfdata_*.nc`` under the repo
+    root and the CWD.  A fresh compute node has an empty /tmp, and worktrees do
+    not carry the (gitignored) ``data/`` tree — without these probes every such
+    run fell through to the UCAR SVN download, which currently dies with an SSL
+    hostname-mismatch and killed whole SLURM jobs at startup (#869/#847 probes).
+    """
+    import glob
+    cands = [cache, os.environ.get("LEGOESM_CLM_SURFDATA", "")]
+    repo_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), *[os.pardir] * 4))
+    for base in (repo_root, os.getcwd()):
+        # sorted() -> deterministic pick if several surfdata files coexist
+        cands.extend(sorted(glob.glob(os.path.join(base, "data", "clm",
+                                                   "surfdata_*.nc"))))
+    return [c for c in cands if c]
+
+
 def download_clm_surfdata(cache: str = "/tmp/clm_surfdata.nc") -> str:
-    """Download the CLM surfdata file to ``cache`` (skip if present). Returns path."""
-    if not os.path.exists(cache):
-        import urllib.request
+    """Return a local CLM surfdata path, downloading to ``cache`` as a last resort.
+
+    Probes local/shared-filesystem candidates first (see
+    :func:`_surfdata_candidates`); only if none exists is the UCAR SVN download
+    attempted.  A download failure raises an actionable error instead of a bare
+    urllib traceback.
+    """
+    for cand in _surfdata_candidates(cache):
+        if os.path.exists(cand):
+            return cand
+    import urllib.request
+    try:
         urllib.request.urlretrieve(_SURFDATA_URL, cache)
+    except Exception as exc:
+        raise RuntimeError(
+            f"CLM surfdata not found locally and the download failed ({exc!r}).\n"
+            f"Tried: {_surfdata_candidates(cache)}\n"
+            f"URL: {_SURFDATA_URL}\n"
+            "Fix: pass --clm-surfdata-path (run scripts), set LEGOESM_CLM_SURFDATA "
+            "to an existing surfdata NetCDF, or place one under <repo>/data/clm/."
+        ) from exc
     return cache
 
 
