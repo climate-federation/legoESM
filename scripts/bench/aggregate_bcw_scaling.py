@@ -220,6 +220,13 @@ def _row_from_spmd_record(rec: dict, source: Path) -> dict | None:
     else:
         n_cores = nd
         n_resource = nd
+    # Backfill sypd for legacy records that recorded a model dt (mpas/ico do; the
+    # throughput-only latlon lane does not) -- canonical 365.25-day formula, same
+    # as metadata.tidy_throughput_fields.  Lets a re-aggregate fill the SYPD panel
+    # for existing ico runs without re-running the bench.
+    _dt = rec.get("dt")
+    _sypd = (round((float(_dt) / (ms * 1e-3)) / (365.25 * 86400.0) * 86400.0, 4)
+             if _dt else None)
     return {
         "component": "ocean" if ocean else "atm",
         "backend": backend,
@@ -235,12 +242,12 @@ def _row_from_spmd_record(rec: dict, source: Path) -> dict | None:
         "resolution": res,
         "resolution_km": round(resolution_km(grid, res), 3) if res else "",
         "n_levels": rec.get("nlev", ""),
-        "sypd": None,                           # throughput-only bench (no dt)
+        "sypd": _sypd,                          # from dt if recorded, else None
         "time_per_step_ms": ms,
         "total_cells": cells,
         "mcells_per_s": round(cells / (ms * 1e-3) / 1e6, 2),
         "scaling_efficiency": None,
-        "dt_seconds": None,
+        "dt_seconds": (float(_dt) if _dt else None),
         "physics_level": phys,
         "compile_time_s": (rec.get("compile_ms") or 0) / 1000.0,
         "source": str(source),

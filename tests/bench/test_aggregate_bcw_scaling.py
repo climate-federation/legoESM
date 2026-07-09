@@ -241,6 +241,24 @@ def test_spmd_latlon_without_metadata_still_latlon(tmp_path):
     assert r["grid"] == "latlon" and r["resolution"] == 256
 
 
+def test_legacy_spmd_record_with_dt_backfills_sypd(tmp_path):
+    # A legacy (pre-#894) SPMD record that recorded a model `dt` (mpas/ico do)
+    # but no top-level sypd must have sypd BACKFILLED via the fallback parser
+    # (canonical 365.25-day formula), so a re-aggregate fills the SYPD panel for
+    # existing ico runs without re-running.  latlon (no dt) stays None.
+    d = tmp_path / "routeb_sweep_x" / "mpas_atm"
+    cells = 163842 * 8
+    rec = {"n_devices": 6, "subdivision": 7, "nlev": 8, "physics": "none",
+           "platform": "gpu", "steady_median_ms": 4.0, "cells": cells, "dt": 2400.0,
+           "metadata": {"grid": "icosahedral"}}
+    _write_jsonl(d, "mpas_spmd_scaling.jsonl", [rec])
+    rows, _ = agg.collect(tmp_path)
+    r = next(r for r in rows if r["grid"] == "icosahedral")
+    # sypd = (dt / t_step) / (365.25*86400) * 86400, t_step = 4.0ms = 4e-3 s
+    assert r["sypd"] == pytest.approx((2400.0 / 4e-3) / (365.25 * 86400.0) * 86400.0, rel=1e-6)
+    assert r["dt_seconds"] == 2400.0
+
+
 def test_collect_routeb_cpu_jsonl_n_resource_in_cores(tmp_path):
     # route-B CPU sweep is 1 process per full node (platform=cpu), so n_resource
     # is expressed in CORES (n_devices * 128) -> the "CPU nodes" plot axis
