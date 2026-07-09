@@ -1607,6 +1607,32 @@ class ModelDriver:
         self.physics.land_ml_lat = jnp.asarray(lat_rad, dtype=storage_dtype)
         self.physics.land_ml_doy = 0.0
 
+        # Transient land-use cover (LULC): load the annual cover series onto the SAME
+        # model columns (identical _nearest_regrid targets => cell-for-cell aligned
+        # with surface_map) and build the per-year vegetation-param rebuild (soil /
+        # LAI frozen).  ``params`` above is the year=None fallback baked on the
+        # pipeline; the run loop re-weights per segment via
+        # ``_transient_land_ml_params`` and passes the result as a TRACED
+        # SegmentForcing arg so the jitted step reads the evolving cover (not the
+        # closure-baked attribute).  ``include_soil_albedo=True`` mirrors
+        # clm_multilayer_setup (which weights the soil-colour albedo), so the
+        # rebuild at the base cover reproduces ``params`` exactly.
+        self._land_cover_transient = None
+        if getattr(self.config, "transient_land_cover", False):
+            from legoesm.land.clm_surface_map import (
+                load_transient_cover_on_columns, clm_provider_rebuild,
+            )
+            _cover, _years = load_transient_cover_on_columns(
+                self.config.land_cover_surfdata, lat_deg, lon_deg)
+            _rebuild = clm_provider_rebuild(
+                surface_map, variant="multilayer", include_soil_albedo=True)
+            self._land_cover_transient = (_cover, _years, _rebuild)
+            logger.info(
+                "  Land tile: TRANSIENT cover ACTIVE (%d cover years, %d..%d) "
+                "from %s", int(_years.shape[0]), int(_years[0]), int(_years[-1]),
+                self.config.land_cover_surfdata,
+            )
+
         ncol = lat_deg.shape[0]
         T_init = ad.flatten_2d(self.state.T.data[..., -1]).reshape(-1).astype(
             storage_dtype)
@@ -1683,6 +1709,27 @@ class ModelDriver:
                 "  Land tile: MULTILAYER override ACTIVE (%d soil layers, %d columns)",
                 cfg.soil_grid.n_layers, ncol,
             )
+
+    def _transient_land_ml_params(self, day: float):
+        """Per-segment multilayer ``LandSurfaceParams`` at the segment's calendar
+        year, or ``None`` when transient cover is inactive.
+
+        ``cover_year = start_year + day/365`` selects the annual cover
+        (``interp_annual``, clamped to the series endpoints), which re-weights the
+        PFT-dependent vegetation params (soil/LAI frozen).  Host-side + concrete
+        (cheap, like ``_precompute_external_forcing``); the returned pytree has a
+        STABLE structure across segments, so feeding it as a traced ``SegmentForcing``
+        leaf changes only leaf *values* — no retrace.  ``None`` (transient cover off)
+        lets the jitted step fall back to the closure-baked
+        ``pipeline.land_ml_params`` (byte-identical static path)."""
+        _trans = getattr(self, "_land_cover_transient", None)
+        if _trans is None:
+            return None
+        from legoesm.land.global_surface_data import interp_annual
+        cover, years, rebuild = _trans
+        cover_year = float(self._start_year) + day / 365.0
+        fracs = interp_annual(cover, years, jnp.asarray(cover_year))
+        return rebuild(fracs)()
 
     def _surfdata_land_albedo(self, surfdata_path: str, lat_albedo):
         """Static land albedo field from harmonized surface data.
@@ -7188,6 +7235,10 @@ class ModelDriver:
             solar_weights=ctx["solar_weights"], s_0=ctx["current_s_0"],
             o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
             ghg_vmr=ctx["ghg_vmr"],
+            # Transient land-use cover for the training segment (None when off); the
+            # training step is un-jitted (run_segment.raw) but honouring the traced
+            # cover keeps training and production on the same land path.
+            land_ml_params=self._transient_land_ml_params(day),
         )
         # SPMD: commit grid-shaped forcing leaves to the state's sharding
         # (no-op single-device / mpi4jax-distributed) — see shard_forcing.
@@ -7532,6 +7583,10 @@ class ModelDriver:
                 sfc_emissivity_override=_sfc_emis_ovr,
                 sfc_shflx_override=_sfc_shflx_ovr,
                 sfc_lhflx_override=_sfc_lhflx_ovr,
+                # Transient land-use cover: this segment's re-weighted multilayer
+                # land params (None unless transient_land_cover is active), fed as a
+                # traced arg so the jitted step follows the cover — the 5th-issue fix.
+                land_ml_params=self._transient_land_ml_params(day),
             )
             # SPMD: commit grid-shaped forcing leaves to the state's
             # sharding (no-op single-device / mpi4jax-distributed).
