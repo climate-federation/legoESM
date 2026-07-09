@@ -2549,6 +2549,13 @@ def _resolve_convection(config):
             p_conv_top_pa=getattr(config, 'bechtold_conv_top_pa', 15000.0),
             precip_efficiency=getattr(
                 config, 'convective_precip_efficiency', 0.0),
+            # Bechtold takes this dedicated branch (never the shared _split block
+            # below), so thread the precip-split selector + autoconv params HERE
+            # or "--convection bechtold --convective-precip-split autoconversion"
+            # silently runs the constant split (codex HIGH).
+            precip_split_scheme=getattr(config, 'convective_precip_split', 'constant'),
+            autoconv_q_c_crit=getattr(config, 'autoconv_q_c_crit', 5.0e-4),
+            autoconv_pe_max=getattr(config, 'autoconv_pe_max', 0.9),
         )
     else:
         cc = ConvectionConfig(scheme=scheme)
@@ -2564,6 +2571,27 @@ def _resolve_convection(config):
         _pe = getattr(config, "convective_precip_efficiency", 0.0)
         if _pe > 0.0 and hasattr(conv_config, "precip_efficiency"):
             conv_config = conv_config._replace(precip_efficiency=_pe)
+
+        # Convective precip-split SCHEME (Bechtold / Tiedtke expose
+        # ``precip_split_scheme`` + the autoconv params).  "autoconversion"
+        # replaces the constant ``precip_efficiency`` with the PHYSICAL
+        # Sundqvist-1978 split on the plume updraft cloud water.  hasattr-guarded
+        # so a scheme without the field keeps its default "constant"; the scheme
+        # body raises on an unknown value (dispatch-hardening).
+        _split = getattr(config, "convective_precip_split", "constant")
+        if _split != "constant":
+            if not hasattr(conv_config, "precip_split_scheme"):
+                # A requested non-constant split on a scheme that cannot honour
+                # it must fail loudly, not silently run constant physics (codex
+                # MED). Only bechtold/tiedtke expose the plume q_c_u it needs.
+                raise ValueError(
+                    f"convective_precip_split={_split!r} requires a convection "
+                    "scheme with the physical autoconversion split (bechtold or "
+                    f"tiedtke); scheme {scheme!r} does not support it")
+            conv_config = conv_config._replace(
+                precip_split_scheme=_split,
+                autoconv_q_c_crit=getattr(config, "autoconv_q_c_crit", 5.0e-4),
+                autoconv_pe_max=getattr(config, "autoconv_pe_max", 0.9))
 
     _check_pipeline_convection_supported(scheme, conv_config)
 

@@ -1822,3 +1822,46 @@ def test_new_convection_knobs_validate_bounds():
     # in-range passes
     ExperimentConfig(convective_precip_efficiency=0.6,
                      bechtold_conv_top_pa=15000.0).validate_strict()
+
+
+def test_convective_precip_split_round_trips():
+    """--convective-precip-split + autoconv params round-trip into
+    ExperimentConfig (the physical Sundqvist autoconversion selector)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.convective_precip_split == "constant"
+    assert cfg_default.autoconv_q_c_crit == 5.0e-4
+    assert cfg_default.autoconv_pe_max == 0.9
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--convection", "bechtold",
+        "--convective-precip-split", "autoconversion",
+        "--autoconv-q-c-crit", "8e-4",
+        "--autoconv-pe-max", "0.8",
+    ]), parser))
+    assert cfg.convective_precip_split == "autoconversion"
+    assert cfg.autoconv_q_c_crit == 8e-4
+    assert cfg.autoconv_pe_max == 0.8
+
+    # an unknown selector is rejected at parse time (argparse choices)
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            "--dataset", "analytical",
+            "--convective-precip-split", "garbage",
+        ])
+
+
+def test_convective_precip_split_validate_bounds():
+    """validate_strict rejects an unknown split scheme + out-of-range autoconv
+    params; the in-range physical config passes."""
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="convective_precip_split"):
+        ExperimentConfig(convective_precip_split="garbage").validate_strict()
+    with pytest.raises(ValueError, match="autoconv_q_c_crit"):
+        ExperimentConfig(autoconv_q_c_crit=0.0).validate_strict()
+    with pytest.raises(ValueError, match="autoconv_pe_max"):
+        ExperimentConfig(autoconv_pe_max=1.5).validate_strict()
+    ExperimentConfig(convective_precip_split="autoconversion",
+                     autoconv_q_c_crit=5.0e-4, autoconv_pe_max=0.9).validate_strict()

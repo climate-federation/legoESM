@@ -45,6 +45,7 @@ from legoesm.atmosphere.physics.thermodynamics import (
 from legoesm.atmosphere.physics.convection.config import BechtoldConfig
 from legoesm.atmosphere.physics.convection.output import (
     ConvectionOutput,
+    convective_autoconversion_split,
     split_convective_rain,
 )
 from legoesm.atmosphere.physics.convection.mass_flux import (
@@ -668,8 +669,22 @@ def bechtold_convection(
     dq_c_conv_dt = jnp.clip(jnp.nan_to_num(jnp.maximum(dq_c_conv_dt, 0.0)),
                             0.0, _BECHTOLD_DQVDT_MAX)
 
-    dq_c_conv_dt, dq_r_conv_dt = split_convective_rain(
-        dq_c_conv_dt, config.precip_efficiency)
+    # Precip split dispatch (validated on the STATIC config value at scheme
+    # entry — dispatch-hardening: an unknown value runs different physics, so
+    # raise rather than silently defaulting). "autoconversion" derives the
+    # precip fraction from the plume updraft cloud water q_c_u (the same field
+    # dq_c_conv_dt is built from at L571), so the two are per-level aligned.
+    if config.precip_split_scheme == "constant":
+        dq_c_conv_dt, dq_r_conv_dt = split_convective_rain(
+            dq_c_conv_dt, config.precip_efficiency)
+    elif config.precip_split_scheme == "autoconversion":
+        dq_c_conv_dt, dq_r_conv_dt = convective_autoconversion_split(
+            dq_c_conv_dt, plume.q_c_u,
+            config.autoconv_q_c_crit, config.autoconv_pe_max)
+    else:
+        raise ValueError(
+            f"unknown precip_split_scheme {config.precip_split_scheme!r}; "
+            "expected 'constant' or 'autoconversion'")
 
     # Sanitize the returned carry + diagnostics too — M_u_new is a real
     # physics-state carry (feeds next step's relaxation), so a non-finite here

@@ -42,6 +42,7 @@ from legoesm.atmosphere.physics.thermodynamics import (
 from legoesm.atmosphere.physics.convection.config import TiedtkeConfig
 from legoesm.atmosphere.physics.convection.output import (
     ConvectionOutput,
+    convective_autoconversion_split,
     split_convective_rain,
 )
 from legoesm.atmosphere.physics.convection.mass_flux import (
@@ -491,10 +492,22 @@ def tiedtke_convection(
 
     # -- In-updraft precipitation (convective precipitation efficiency) ---
     # Split the detrained condensate into a precipitating rain fraction and
-    # the suspended anvil remainder via the shared helper (same split used by
-    # Bechtold) — see split_convective_rain for the rationale + mass proof.
-    dq_c_pos, dq_r_conv_dt = split_convective_rain(
-        dq_c_conv_dt, config.precip_efficiency)
+    # the suspended anvil remainder (same split used by Bechtold — see
+    # split_convective_rain for the rationale + mass proof).  Dispatch is on the
+    # STATIC config value at scheme entry (dispatch-hardening: raise on unknown).
+    # "autoconversion" derives the precip fraction physically from the plume
+    # updraft cloud water q_c_u (the field dq_c_conv_dt is built from at L366).
+    if config.precip_split_scheme == "constant":
+        dq_c_pos, dq_r_conv_dt = split_convective_rain(
+            dq_c_conv_dt, config.precip_efficiency)
+    elif config.precip_split_scheme == "autoconversion":
+        dq_c_pos, dq_r_conv_dt = convective_autoconversion_split(
+            dq_c_conv_dt, plume.q_c_u,
+            config.autoconv_q_c_crit, config.autoconv_pe_max)
+    else:
+        raise ValueError(
+            f"unknown precip_split_scheme {config.precip_split_scheme!r}; "
+            "expected 'constant' or 'autoconversion'")
 
     # -- Convective mask ---------------------------------------------------
     convective_mask = cape_weight * (deep_weight + shallow_weight + midlevel_weight)

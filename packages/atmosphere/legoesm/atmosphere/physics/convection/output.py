@@ -126,3 +126,61 @@ def split_convective_rain(dq_c_conv_dt, precip_efficiency):
         pe = jnp.clip(precip_efficiency, 0.0, 1.0)
         return dq_c_pos * (1.0 - pe), dq_c_pos * pe
     return dq_c_pos, None
+
+
+def convective_autoconversion_split(dq_c_conv_dt, q_c_u, q_c_crit, pe_max):
+    """Physical (Sundqvist 1978) autoconversion split of the detrained
+    convective condensate source into surface rain + suspended anvil.
+
+    Replaces the CONSTANT ``precip_efficiency`` of :func:`split_convective_rain`:
+    the precipitating fraction at each level EMERGES from the updraft
+    cloud-water content ``q_c_u`` (the plume's ``Plume.q_c_u``) instead of being
+    imposed uniformly.  Sundqvist (1978) smooth autoconversion threshold:
+
+    .. math::
+
+        pe(z) = pe_{max}\\,\\bigl(1 - e^{-(q_{c,u}(z)/q_{c,crit})^2}\\bigr)
+
+    so a thin updraft (``q_c_u`` \\ll ``q_c_crit``) detrains its condensate as
+    suspended anvil (``pe`` -> 0), while a water-loaded updraft (``q_c_u``
+    \\gg ``q_c_crit``) autoconverts nearly all of it to rain (``pe`` ->
+    ``pe_max``).  This is the physically-motivated in-plume microphysics the
+    constant knob approximates: precip efficiency rises with the updraft
+    condensate loading rather than being a single tuned number.
+
+    SIGN / UNITS (positive-source convention): ``dq_c_conv_dt`` [kg/kg/s] and
+    ``q_c_u`` [kg/kg] are non-negative (a convective source / a water content);
+    the rain source ``dq_r`` [kg/kg/s] >= 0 is column-integrated DIRECTLY to
+    positive-down surface precip by the pipeline (as for
+    :func:`split_convective_rain`).  MASS is conserved exactly — per level
+    ``dq_c_new + dq_r == max(dq_c_conv_dt, 0)`` — the split adds no source/sink.
+
+    Parameters
+    ----------
+    dq_c_conv_dt : jax.Array
+        Convective cloud-water source [kg/kg/s], shape (ncol, nlev). Clamped to
+        its non-negative part.
+    q_c_u : jax.Array
+        Updraft cloud-water mixing ratio [kg/kg], shape (ncol, nlev), from the
+        plume.  Non-negative; clamped defensively.
+    q_c_crit : float
+        Critical updraft cloud water [kg/kg] setting the Sundqvist threshold —
+        the loading at which ~63 % of the condensate precipitates.
+    pe_max : float
+        Ceiling on the precipitating fraction, in [0, 1].
+
+    Returns
+    -------
+    (dq_c_new, dq_r) : tuple[jax.Array, jax.Array]
+        Anvil cloud-water remainder ``(1 - pe(z))`` and rain source ``pe(z)`` of
+        the positive condensate.  Unlike :func:`split_convective_rain`, ``dq_r``
+        is ALWAYS an array (never ``None``): the physical efficiency is a field,
+        not a scheme-level on/off — it is simply ~0 wherever ``q_c_u`` -> 0.
+    """
+    dq_c_pos = jnp.maximum(dq_c_conv_dt, 0.0)
+    # Sundqvist (1978) smooth threshold on the updraft cloud-water loading;
+    # jnp.maximum(q_c_crit, tiny) is a divide-by-zero floor, not a tunable.
+    ratio = jnp.maximum(q_c_u, 0.0) / jnp.maximum(q_c_crit, 1e-30)
+    pe = pe_max * (1.0 - jnp.exp(-(ratio * ratio)))
+    pe = jnp.clip(pe, 0.0, 1.0)
+    return dq_c_pos * (1.0 - pe), dq_c_pos * pe

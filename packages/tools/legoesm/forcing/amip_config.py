@@ -85,6 +85,13 @@ class AMIPExperimentConfig(NamedTuple):
     # Convective in-updraft rain-split efficiency [0,1] (shared across the
     # mass-flux schemes); 0 = disabled (legacy no split).
     convective_precip_efficiency: float = 0.0
+    # Convective precip-split scheme (Bechtold / Tiedtke): "constant" uses the
+    # fixed convective_precip_efficiency above; "autoconversion" derives the
+    # precip fraction PHYSICALLY from the plume updraft cloud water via the
+    # Sundqvist-1978 split (autoconv_q_c_crit / autoconv_pe_max).
+    convective_precip_split: str = "constant"
+    autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
+    autoconv_pe_max: float = 0.9        # [1] ceiling on the emergent precip fraction
     C_H: float = 1.5e-3
     C_E: float = 1.5e-3
     k_free_per_day: float = 0.1

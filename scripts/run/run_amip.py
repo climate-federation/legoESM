@@ -671,6 +671,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "suspended cloud. Observed CPE ~0.5-0.9. Requires "
                              "--convection tiedtke or bechtold (shared "
                              "split_convective_rain).")
+    parser.add_argument("--convective-precip-split", type=str, default="constant",
+                        choices=["constant", "autoconversion"],
+                        help="Convective precip-split scheme (Bechtold/Tiedtke): "
+                             "'constant' uses the fixed "
+                             "--convective-precip-efficiency; 'autoconversion' "
+                             "derives the precip fraction PHYSICALLY from the "
+                             "plume updraft cloud water (Sundqvist-1978), so the "
+                             "efficiency emerges from the updraft loading instead "
+                             "of a tuned constant.")
+    parser.add_argument("--autoconv-q-c-crit", type=float, default=5.0e-4,
+                        help="Autoconversion critical updraft cloud water [kg/kg] "
+                             "for --convective-precip-split autoconversion "
+                             "(Sundqvist 1978). Default 5e-4.")
+    parser.add_argument("--autoconv-pe-max", type=float, default=0.9,
+                        help="Ceiling on the emergent convective precip fraction "
+                             "for --convective-precip-split autoconversion. "
+                             "Default 0.9.")
     parser.add_argument("--convective-buoyancy-death-memory",
                         action="store_true",
                         help="Tiedtke plume buoyancy-death memory: once a "
@@ -1190,6 +1207,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         nc_from_aerosol=args.aerosol_ccn,
         subgrid_autoconversion=args.subgrid_autoconversion,
         convective_precip_efficiency=args.convective_precip_efficiency,
+        convective_precip_split=args.convective_precip_split,
+        autoconv_q_c_crit=args.autoconv_q_c_crit,
+        autoconv_pe_max=args.autoconv_pe_max,
         convective_buoyancy_death_memory=args.convective_buoyancy_death_memory,
         convection=args.convection,
         turbulence=args.turbulence,

@@ -66,6 +66,8 @@ __param_spec__ = {
             "theta_implicit": "numerics: off-centering of the implicit_flux backward-Euler subsidence solve (stability, iteration-coupled; clamped to [0.5,1.0], not trainable)",
         },
         "params": {
+            "autoconv_q_c_crit": {"units": "kg/kg", "bounds": (1.0e-4, 2.0e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Sundqvist (1978) autoconversion critical cloud water", "shape": None},
+            "autoconv_pe_max": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "convective precip-efficiency ceiling (Sundqvist 1978 form)", "shape": None},
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Bechtold et al. (2008) stability cap", "shape": None},
             "cape_pbl_depth": {"units": "m", "bounds": (200.0, 1500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Bechtold et al. (2008)", "shape": None},
             "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Bechtold et al. (2008)", "shape": None},
@@ -268,6 +270,8 @@ __param_spec__ = {
             "precip_efficiency": "default 0 = disabled (legacy no rain-split, gated `if > 0.0` in tiedtke.py); enable + retune via config, not sigmoid-trained from the off state",
         },
         "params": {
+            "autoconv_q_c_crit": {"units": "kg/kg", "bounds": (1.0e-4, 2.0e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Sundqvist (1978) autoconversion critical cloud water", "shape": None},
+            "autoconv_pe_max": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "convective precip-efficiency ceiling (Sundqvist 1978 form)", "shape": None},
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Tiedtke (1989) stability cap", "shape": None},
             "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Tiedtke (1989)", "shape": None},
             "cloud_depth_deep": {"units": "m", "bounds": (1500.0, 5000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
@@ -1240,6 +1244,12 @@ class TiedtkeConfig(NamedTuple):
     # existing behaviour); without it 100% of convective condensate loads the
     # grid-scale cloud + radiation, which microphysics cannot drain.
     precip_efficiency: float = 0.0
+    # Precipitation split scheme (see BechtoldConfig): "constant" (fixed
+    # precip_efficiency, legacy) or "autoconversion" (physical Sundqvist-1978
+    # split on the plume updraft cloud water q_c_u). Unknown => raise at entry.
+    precip_split_scheme: str = "constant"
+    autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
+    autoconv_pe_max: float = 0.9        # [1] ceiling on the precipitating fraction
 
 
 class BechtoldConfig(NamedTuple):
@@ -1388,6 +1398,18 @@ class BechtoldConfig(NamedTuple):
     # condensate directly (the coarse-grid over-bright-anvil / dry-column
     # runaway lever — Bechtold detrains 100% to cloud otherwise).
     precip_efficiency: float = 0.0
+    # Precipitation split scheme for the detrained condensate:
+    #   "constant"       — fixed `precip_efficiency` fraction (above; legacy).
+    #   "autoconversion" — PHYSICAL Sundqvist (1978) autoconversion on the
+    #                      plume updraft cloud water q_c_u (convective_
+    #                      autoconversion_split): the precip efficiency EMERGES
+    #                      from the updraft loading (thin updraft -> anvil,
+    #                      loaded updraft -> rain) instead of a tuned constant.
+    # Unknown values raise at scheme entry (dispatch-hardening).
+    precip_split_scheme: str = "constant"
+    # Autoconversion params (used only when precip_split_scheme="autoconversion"):
+    autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
+    autoconv_pe_max: float = 0.9        # [1] ceiling on the precipitating fraction
     # Convective-top pressure [Pa]: the plume mass-flux carry AND the shared
     # kernel's compensating-subsidence gate vanish above this cutoff, so the
     # (non-self-detraining) Bechtold plume terminates here instead of

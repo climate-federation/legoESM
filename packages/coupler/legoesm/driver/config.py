@@ -460,6 +460,14 @@ class ExperimentConfig(NamedTuple):
     # kain_fritsch, mass_flux, edmf — the shared split_convective_rain);
     # guarded in _resolve_convection + the run_amip CLI gate.
     convective_precip_efficiency: float = 0.0
+    # Convective precip-split scheme (Bechtold / Tiedtke): "constant" uses the
+    # fixed convective_precip_efficiency above; "autoconversion" derives the
+    # precip fraction PHYSICALLY from the plume updraft cloud water (Sundqvist
+    # 1978, convective_autoconversion_split), threaded to conv_config in
+    # physics_pipeline; the scheme body raises on an unknown value.
+    convective_precip_split: str = "constant"
+    autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
+    autoconv_pe_max: float = 0.9        # [1] ceiling on the emergent precip fraction
 
     # Tiedtke plume buoyancy-death memory: when True the entraining plume,
     # once it exhausts its cumulative buoyancy budget, stays dead instead of
@@ -1005,6 +1013,20 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"convective_precip_efficiency must be in [0, 1], got "
                 f"{self.convective_precip_efficiency}"
+            )
+        if self.convective_precip_split not in ("constant", "autoconversion"):
+            errors.append(
+                "convective_precip_split must be 'constant' or 'autoconversion', "
+                f"got {self.convective_precip_split!r}"
+            )
+        if not (0.0 < self.autoconv_q_c_crit <= 1.0e-2):
+            errors.append(
+                f"autoconv_q_c_crit must be in (0, 1e-2] kg/kg, got "
+                f"{self.autoconv_q_c_crit}"
+            )
+        if not (0.0 <= self.autoconv_pe_max <= 1.0):
+            errors.append(
+                f"autoconv_pe_max must be in [0, 1], got {self.autoconv_pe_max}"
             )
         if self.bechtold_conv_top_pa <= 0.0:
             errors.append(
@@ -1635,6 +1657,15 @@ class ExperimentConfig(NamedTuple):
                 amip_cfg, 'bechtold_cape_threshold', 70.0),
             bechtold_conv_top_pa=getattr(
                 amip_cfg, 'bechtold_conv_top_pa', 15000.0),
+            # Convective precip split family — copy through AMIP/checkpoint
+            # restore so the physical autoconversion isn't dropped to defaults
+            # (codex MED; convective_precip_efficiency was a pre-existing gap).
+            convective_precip_efficiency=getattr(
+                amip_cfg, 'convective_precip_efficiency', 0.0),
+            convective_precip_split=getattr(
+                amip_cfg, 'convective_precip_split', 'constant'),
+            autoconv_q_c_crit=getattr(amip_cfg, 'autoconv_q_c_crit', 5.0e-4),
+            autoconv_pe_max=getattr(amip_cfg, 'autoconv_pe_max', 0.9),
             sigma_b=amip_cfg.sigma_b,
             k_BL_max_per_day=amip_cfg.k_BL_max_per_day,
             k_free_per_day=amip_cfg.k_free_per_day,
@@ -1768,6 +1799,9 @@ class ExperimentConfig(NamedTuple):
             sbm_cape_threshold=self.sbm_cape_threshold,
             bechtold_cape_threshold=self.bechtold_cape_threshold,
             convective_precip_efficiency=self.convective_precip_efficiency,
+            convective_precip_split=self.convective_precip_split,
+            autoconv_q_c_crit=self.autoconv_q_c_crit,
+            autoconv_pe_max=self.autoconv_pe_max,
             bechtold_conv_top_pa=self.bechtold_conv_top_pa,
             sigma_b=self.sigma_b,
             k_BL_max_per_day=self.k_BL_max_per_day,
