@@ -7,6 +7,7 @@ the per-field diffusion function and the viscosity/diffusivity coefficients).
 
 from __future__ import annotations
 
+import math
 from typing import Callable
 
 import jax
@@ -28,6 +29,23 @@ _EOS_SALINITY_FLOOR = 1.0e-3
 
 # Shared float32-eps floor for the vertical-mixing kernels.
 _EPS = float(jnp.finfo(jnp.float32).eps)
+
+# --- Latitude-dependent internal-wave background (Gregg et al. 2003 / CVMix) ---
+# Reference latitude at which the Henyey-Wright-Flatte scaling is normalised to
+# 1 (Gregg et al. 2003; MOM6 MOM_bkgnd_mixing.F90 Henyey_IGW_background).
+_GREGG_REF_LAT_DEG = 30.0
+# |f_30| = |2 Omega sin(30 deg)| — the Coriolis magnitude at the reference lat.
+_F_CORIOLIS_REF = 2.0 * constants.Omega * math.sin(math.radians(_GREGG_REF_LAT_DEG))
+# Floor on |sin(lat)| so |f| never vanishes at the equator (avoids 0/0 and an
+# unbounded acosh argument); tiny, so the equatorial value is set by K_bg_eq.
+_SIN_LAT_FLOOR = 1.0e-6
+# acosh(x) has an INFINITE slope at x = 1; clamp its argument to 1 + this eps so
+# the domain guard (x >= 1) stays autodiff-safe (finite reverse-mode gradient).
+_ACOSH_ARG_EPS = 1.0e-6
+# N^2 [1/s^2] floor before sqrt: keeps the sqrt gradient finite at N2 -> 0 while
+# staying far below any real oceanic N^2 (so N -> ~0 in an unstratified column,
+# driving the Gregg scaling L -> 0 => K_bg -> K_bg_eq there).
+_N2_FLOOR = 1.0e-12
 
 
 def vertical_shear_squared(
@@ -161,6 +179,90 @@ def compute_N2(
         f"Unknown n2_mode={n2_mode!r}; expected 'insitu', 'insitu_signed' "
         f"or 'adiabatic'."
     )
+
+
+def _safe_acosh(x: jnp.ndarray) -> jnp.ndarray:
+    """``arccosh`` clamped into its domain with a finite edge slope.
+
+    ``acosh`` is defined for ``x >= 1`` and has an INFINITE derivative at
+    ``x = 1``.  Clamp the argument to ``1 + _ACOSH_ARG_EPS`` so the reverse-mode
+    gradient stays finite (no ``0*inf`` NaN) while preserving the physical floor
+    ``acosh -> 0`` as ``x -> 1`` (weak stratification / near the equator).
+    """
+    return jnp.arccosh(jnp.maximum(x, 1.0 + _ACOSH_ARG_EPS))
+
+
+def latitude_background_diffusivity(lat_deg, N2, cfg):
+    r"""Latitude / stratification-scaled background diffusivity ``K_bg(lat, N)``.
+
+    Gregg et al. (2003) Henyey-Wright-Flatte internal-wave scaling, as used by
+    CVMix ``bkgnd`` (``lvary_horizontal``) and MOM6 ``Henyey_IGW_background``:
+    the diapycnal background diffusivity is REDUCED toward the equator, where
+    the Coriolis parameter vanishes and internal-wave breaking is suppressed::
+
+        f          = 2 Omega sin(theta)                 (Coriolis parameter)
+        L(theta,N) = |f| acosh(N/|f|)
+                     / ( |f_30| acosh(N_ref/|f_30|) )    (Gregg 2003 shape)
+        K_bg       = K_bg_eq + (K_bg_pole - K_bg_eq) * clip(L, 0, 1)
+
+    with ``|f_30| = |2 Omega sin(30 deg)|`` the Coriolis magnitude at the 30-deg
+    normalisation latitude, ``N = sqrt(max(N2, 0))`` the local buoyancy
+    frequency and ``N_ref = cfg.N_ref`` the Gregg reference stratification.
+    ``L`` -> 0 at the equator (``|f| acosh(N/|f|) -> 0`` as ``|f| -> 0``), ``~1``
+    near +/-30 deg for ``N ~ N_ref`` and ``> 1`` poleward (clipped), so ``K_bg``
+    rises from ``K_bg_eq`` (equator) toward ``K_bg_pole``.  In the WELL-
+    STRATIFIED regime ``|f| << N`` (typical ocean) the shape ``|f| acosh(N/|f|)``
+    is monotone increasing in ``|f|`` (hence non-decreasing in ``|lat|`` up to
+    the ``K_bg_pole`` cap).  For WEAK stratification ``N ~ |f|`` the raw
+    Henyey shape turns over at high latitude (a known property of the Gregg
+    formula), so ``K_bg`` is not strictly monotone there — but it always stays
+    BOUNDED in ``[K_bg_eq, K_bg_pole]`` and finite.
+
+    Sign / range: ``K_bg >= 0`` (``0 <= clip(L) <= 1``, ``K_bg_eq, K_bg_pole >
+    0``).  A scalar diffusivity magnitude — no directional sign convention.
+
+    Guards (traced-safe, differentiable):
+      * ``|sin(lat)|`` floored at ``_SIN_LAT_FLOOR`` so ``|f|`` never vanishes at
+        the equator (no ``0/0``, no unbounded acosh argument);
+      * both ``acosh`` arguments clamped to ``>= 1 + _ACOSH_ARG_EPS`` (domain +
+        finite gradient at the ``x = 1`` cusp, via :func:`_safe_acosh`);
+      * ``N2`` floored at ``_N2_FLOOR`` before the sqrt (finite sqrt gradient in
+        ``N2 -> 0`` convecting columns; the floor is far below any real oceanic
+        ``N^2`` so an unstratified column returns ``K_bg_eq``).
+
+    Parameters
+    ----------
+    lat_deg : (col...,) column latitudes [deg].  Aligned with the LEADING
+        column axes of ``N2`` (latitude varies over axis 0), so both a 1-D
+        ``(n_lat,)`` and a full 2-D ``(n_lat, n_lon)`` field broadcast correctly.
+    N2 : (col..., nlev-1) buoyancy frequency squared at interior interfaces
+        [1/s^2].
+    cfg : ``ConstantVerticalMixingConfig`` — reads ``K_bg_eq``, ``K_bg_pole``
+        [m^2/s] and ``N_ref`` [1/s].
+
+    Returns
+    -------
+    K_bg : (col..., nlev-1) latitude/N-scaled background diffusivity [m^2/s].
+    """
+    dtype = N2.dtype
+    ncol = N2.ndim - 1
+    lat = jnp.asarray(lat_deg, dtype)
+    # Align latitude with the LEADING column axes, then add the interface axis
+    # so it broadcasts against N2 (col..., nlev-1) for a 1-D or 2-D lat input.
+    lat = lat.reshape(lat.shape + (1,) * (ncol - lat.ndim))[..., None]
+    sin_abs = jnp.maximum(jnp.abs(jnp.sin(jnp.deg2rad(lat))), _SIN_LAT_FLOOR)
+    f_abs = 2.0 * constants.Omega * sin_abs
+    # Local buoyancy frequency; N2 may be <= 0 in convecting columns -> the
+    # acosh domain clamp then sends L -> 0 (so K_bg -> K_bg_eq).
+    N_local = jnp.sqrt(jnp.maximum(N2, _N2_FLOOR))
+    num = f_abs * _safe_acosh(N_local / f_abs)
+    # Normalisation at (30 deg, N_ref).  N_ref is a fixed reference (excluded
+    # from training) so this folds to a compile-time scalar.
+    denom = _F_CORIOLIS_REF * _safe_acosh(
+        jnp.asarray(cfg.N_ref, dtype) / _F_CORIOLIS_REF)
+    s = jnp.clip(num / denom, 0.0, 1.0)
+    K_bg = cfg.K_bg_eq + (cfg.K_bg_pole - cfg.K_bg_eq) * s
+    return K_bg.astype(dtype)
 
 
 def surface_buoyancy_flux(

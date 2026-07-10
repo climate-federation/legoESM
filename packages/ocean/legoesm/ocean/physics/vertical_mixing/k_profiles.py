@@ -36,7 +36,13 @@ from legoesm.ocean.vertical import (
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 from legoesm.ocean.physics.vertical_mixing._shared import (
     surface_buoyancy_flux,
+    compute_N2,
+    latitude_background_diffusivity,
 )
+
+# Floor on the constant diffusivity K_v when deriving the background Prandtl
+# ratio A_v/K_v for the latitude-dependent viscosity (avoids /0 if K_v -> 0).
+_KV_PRANDTL_FLOOR = 1e-30
 
 __physics_contract__ = {
     "summary": (
@@ -347,6 +353,30 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         nlev = state.T.data.shape[-1]
         shape = state.T.data.shape[:-1] + (nlev - 1,)
         dtype = state.T.data.dtype
+        if getattr(cfg, "lat_dependent", False):
+            # Latitude-dependent internal-wave background (Gregg 2003 / CVMix
+            # bkgnd): REPLACE the spatially-constant K_v/A_v floor with the
+            # latitude/stratification-scaled field.  Needs the column latitude
+            # and N^2, so compute rho + N^2 here (the constant branch otherwise
+            # skips the EOS).  K_v, A_v >= 0; z positive up.
+            if lat_deg is None:
+                raise ValueError(
+                    "ConstantVerticalMixingConfig.lat_dependent=True requires "
+                    "lat_deg (column latitudes in degrees) to be threaded to "
+                    "compute_vertical_K_profiles; got None.")
+            rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
+            dz_half = z_coord.dz_half_ref * J[..., jnp.newaxis]
+            N2 = compute_N2(
+                rho, dz_half, constants_config.rho_0,
+                g=constants_config.g, n2_mode="insitu")
+            K_v = latitude_background_diffusivity(lat_deg, N2, cfg)
+            # Momentum viscosity carries the SAME latitude scaling, preserving
+            # the configured background Prandtl ratio A_v/K_v (trace-safe floor
+            # on K_v so the ratio is finite even if K_v -> 0).
+            prandtl = cfg.A_v / jnp.maximum(
+                jnp.asarray(cfg.K_v, dtype), _KV_PRANDTL_FLOOR)
+            A_v = K_v * prandtl
+            return K_v, A_v, None
         K_v = jnp.full(shape, cfg.K_v, dtype=dtype)
         A_v = jnp.full(shape, cfg.A_v, dtype=dtype)
         return K_v, A_v, None
