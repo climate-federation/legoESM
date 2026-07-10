@@ -1190,6 +1190,14 @@ def _thermo_single(
 
     freeze_flux_open = jnp.maximum(-Q_sfc, 0.0)
     dh_dt_open_raw = freeze_flux_open / (config.rho_ice * config.L_f)
+    # Lead ice can form only where the ocean mixed layer is already at (or
+    # below) its freezing point.  The atmospheric surface deficit
+    # ``freeze_flux_open`` alone will otherwise grow ice over an
+    # above-freezing ocean (audit finding #2: ~8 cm/day on a +3.6 K ocean),
+    # because ``Q_sfc`` here is the ICE-skin balance and never sees the warm
+    # SST.  Gate on ``ocean_sst <= T_freeze_ocean`` (data-dependent select).
+    ocean_at_freezing = ocean_sst <= config.T_freeze_ocean
+    dh_dt_open_raw = jnp.where(ocean_at_freezing, dh_dt_open_raw, 0.0)
     # Multi-category: only deposit lead-freeze in category 0.  Cats
     # with ``enable_lead_freeze=False`` see ``dh_dt_open = 0`` so the
     # same open-water freeze does not fire per-category.
@@ -1835,6 +1843,13 @@ def _thermo_v2(
     # ``dh_dt_open`` is the local lead-ice thickening rate per unit
     # lead area, driven by the destabilising surface flux.
     dh_dt_open_raw = freeze_flux_open / (config.rho_ice * config.L_f)
+    # Gate on ocean supercooling: lead ice cannot form over an above-freezing
+    # mixed layer.  ``freeze_flux_open`` is the ICE-skin atmospheric deficit and
+    # never sees the SST, so without this gate ice grows over warm water (audit
+    # finding #2).  ``ocean_sst <= T_freeze_ocean`` (data-dependent select).
+    dh_dt_open_raw = jnp.where(
+        ocean_sst <= config.T_freeze_ocean, dh_dt_open_raw, 0.0,
+    )
     dh_dt_open = dh_dt_open_raw if enable_lead_freeze else jnp.zeros_like(dh_dt_open_raw)
     # Per-grid-cell new volume contributed by lead-freezing this step.
     delta_V_lead_freeze = jnp.maximum(dh_dt_open * lead_area * dt, 0.0)
@@ -2117,9 +2132,26 @@ def _thermo_v2(
     #     the ocean — sign convention: positive = ocean LOSES energy
     #     to the ice tile.  The lead-freeze contribution removes L_f
     #     per kg of ice formed from the ocean.
+    #   * Melt-pond REFREEZE re-forms ice and must RELEASE its latent heat of
+    #     fusion, otherwise the melt->pond->refreeze cycle destroys energy: the
+    #     surface melt that filled the pond already CREDITED the ocean via
+    #     ``surface_melt_ocean_gain`` (ocean gained L_f), so refreezing that
+    #     water must DEBIT the same L_f back (positive extraction) to close the
+    #     cycle (audit HIGH: pond refreeze deleted latent every diurnal cycle).
+    #     ``refreeze_ice_m`` is per-ice-area; weight by ``conc_new`` so the heat
+    #     frame MATCHES the volume/salt budget (``delta_V_fresh_refreeze =
+    #     refreeze_ice_m * conc_new`` above) — using the pre-step ``conc`` would
+    #     over/under-charge the latent when the ice area changed this step
+    #     (codex).
+    #     ponytail: the physically-exact sink is the atmosphere (refreeze is
+    #     driven by cold air); routing to the ocean mirrors the melt-surplus
+    #     channel and closes the energy budget without a skin re-solve — upgrade
+    #     to an atmospheric credit if/when the 0-layer skin gains an enthalpy
+    #     channel.
     ocean_heat_extraction = (
         F_ocean * conc * ocean_heat_scale
         + delta_V_lead_freeze * config.rho_ice * config.L_f / dt
+        + refreeze_ice_m * config.rho_ice * config.L_f / dt * conc_new
         # Surplus surface-melt heat from a melt-out step warms the ocean
         # (ocean GAINS -> NEGATIVE extraction); previously this energy was
         # dropped on the floor (finding #6).

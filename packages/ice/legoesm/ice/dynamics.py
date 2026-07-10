@@ -9,6 +9,17 @@ where m = rho_ice * h is ice mass per unit area, tau_air and tau_ocean
 are wind and ocean drag stresses, f is the Coriolis parameter,
 and sigma is the internal stress tensor from the VP/EVP rheology.
 
+NOTE (audit): the sea-surface-tilt / ocean-pressure-gradient term
+``- m g grad(eta_ocean)`` (H&D97 eq. 2; CICE ``strtltx``) is intentionally
+OMITTED here.  With the prescribed/slab ocean the geostrophic surface
+current enters only through ``tau_ocean``, so drag captures part of the
+tilt signal but the direct pressure force on the ice mass is absent.  This
+biases drift under strong SSH gradients (e.g. the Beaufort Gyre).  Wiring
+requires the ocean's sea-surface-height gradient at the ice C-grid; it is
+a prognostic-ocean follow-up, not a mis-signed term.
+# ponytail: add ``-m*g*grad(eta)`` once the coupler plumbs ocean SSH to the
+# ice grid; until then the omission is documented, not silently wrong.
+
 The EVP solver subcycles N_evp times per dynamical timestep. Each
 subcycle updates stress via elastic relaxation toward the VP solution,
 then advances velocity semi-implicitly.

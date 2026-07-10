@@ -2829,6 +2829,32 @@ class TestAllOceanGridsCoupled:
         self._run_grid(mesh, (mesh.nCells,), "free_drift")
 
 
+class TestVoronoiTransportUpwind:
+    """First-order upwind Voronoi transport must be POSITIVITY-preserving: a
+    non-negative scalar advected at CFL<=1 stays >= 0.  The old centered
+    0.5*(q1+q2) edge reconstruction undershoots to negative volume, which the
+    downstream jnp.maximum(vol,0)/clip(conc,0,1) silently turn into a mass
+    SOURCE (audit finding #1)."""
+
+    def test_upwind_preserves_positivity(self):
+        import numpy as np
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.ice.transport import fv_flux_divergence_voronoi
+        mesh = create_voronoi_mesh(subdivision_level=2, lloyd_iterations=5)
+        nC = int(mesh.nCells)
+        # Sharp step field in [0,1] -> strong gradients at every interface.
+        q = jnp.asarray((np.arange(nC) % 2).astype(np.float64))
+        u = jnp.ones((nC,)); v = jnp.zeros((nC,))   # uniform east, |u_edge|<=1
+        # CFL ~ 0.5: |u|=1 m/s, dx = smallest cell spacing.
+        dt = 0.5 * float(jnp.min(mesh.dcEdge))
+        q_new = q + dt * fv_flux_divergence_voronoi(q, u, v, mesh)
+        # Positivity is the property the audit bug violated (negative volume).
+        # (No upper-bound check: uniform east flow on a sphere is not
+        # divergence-free, so flux-form legitimately amplifies converging cells.)
+        assert float(jnp.min(q_new)) >= -1e-9, (
+            f"upwind produced negative volume: {float(jnp.min(q_new)):.3e}")
+
+
 # ==============================================================================
 # #28 multicat ITD bin-accuracy of the overfill cap + Lipscomb remap
 # ==============================================================================
