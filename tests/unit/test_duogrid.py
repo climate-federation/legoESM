@@ -1817,6 +1817,7 @@ class TestBgridNeCornerSync:
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from legoesm.core.fv3_sw_core import (
             _bgrid_ke_transport, ppm_transport_1d, _pad_halo_dgrid_for_ppm,
+            _pad_halo_uc_vc_new_via_neighbor_delta,
         )
         from legoesm.grids.halo import synchronize_corner_scalar
 
@@ -1847,9 +1848,14 @@ class TestBgridNeCornerSync:
         dt5 = 0.5 * dt
         cosa = cdgrid.cosa_corner
         rsina = cdgrid.rsin2_corner
-        vc_pad = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        # 2026-07-10 convention-fix sweep: the integrated path now uses the
+        # neighbor-delta uc/vc cross-face halo + the Fortran d_sw3 one-sided
+        # boundary overrides (sw_core.F90 ytp_v/xtp_u, always-on).  The
+        # control MUST mirror both (same reason as the iter-945 halo note
+        # above) or the interior comparison is meaningless.
+        uc_pad, vc_pad = _pad_halo_uc_vc_new_via_neighbor_delta(
+            uc, vc, u_d, v_d, cdgrid)
         vc_sum = vc_pad[:, :-1, :] + vc_pad[:, 1:, :]
-        uc_pad = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')
         uc_sum = uc_pad[:, :, :-1] + uc_pad[:, :, 1:]
         vb_ctrl = dt5 * (vc_sum - uc_sum * cosa) * rsina
         ub_ctrl = dt5 * (uc_sum - vc_sum * cosa) * rsina
@@ -1857,8 +1863,14 @@ class TestBgridNeCornerSync:
         rdx = 1.0 / jnp.maximum(cdgrid.dx_edge_y, 1e-30)
         h_dg = 2
         u_d_ihalo, v_d_jhalo = _pad_halo_dgrid_for_ppm(u_d, v_d, cdgrid, halo=h_dg)
-        ty_ctrl = ppm_transport_1d(v_d_jhalo, vb_ctrl, rdy, axis=2, external_halo=h_dg)
-        tx_ctrl = ppm_transport_1d(u_d_ihalo, ub_ctrl, rdx, axis=1, external_halo=h_dg)
+        ty_ctrl = ppm_transport_1d(v_d_jhalo, vb_ctrl, rdy, axis=2,
+                                   external_halo=h_dg,
+                                   apply_d_sw3_boundary_fix=True,
+                                   boundary_fix_dx_field=cdgrid.dy_edge_x)
+        tx_ctrl = ppm_transport_1d(u_d_ihalo, ub_ctrl, rdx, axis=1,
+                                   external_halo=h_dg,
+                                   apply_d_sw3_boundary_fix=True,
+                                   boundary_fix_dx_field=cdgrid.dx_edge_y)
         ke_scalar_sync = 0.5 * (ty_ctrl * vb_ctrl + ub_ctrl * tx_ctrl)
         ke_scalar_sync = synchronize_corner_scalar(ke_scalar_sync, n)
 
@@ -2046,8 +2058,14 @@ class TestBgridNeCornerSync:
         # the exact non-orthogonal z-matrix conversion (was orthogonal, which
         # corrupted the 8 cube vertices by O(1)).  The component-vs-scalar
         # propagated wind diff shifted 5.58e-2→5.05e-2 (u), 5.65e-2→4.61e-2 (v).
-        expected_u_diff = 5.05e-2
-        expected_v_diff = 4.61e-2
+        # 2026-07-10: recalibrated after the FB covariant-convention fix
+        # (fb_v_d_to_covariant entry/exit) + the always-on Fortran d_sw3
+        # one-sided edge overrides + neighbor-delta uc/vc halo — an
+        # intentional numerics change of the FB chain (see
+        # fv3_sw_core.py module header).  5.05e-2→7.76e-2 (u),
+        # 4.61e-2→6.62e-2 (v).
+        expected_u_diff = 7.7558e-2
+        expected_v_diff = 6.6233e-2
         tol = 2e-3  # covers float32 metric precision
 
         assert abs(u_diff - expected_u_diff) < tol, (

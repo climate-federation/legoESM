@@ -1699,9 +1699,16 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         )
 
     def test_d_sw5_iterated_laplacian_halo_gap_documentation_marker(self):
-        """Iter-132 / iter-133 (FB-path fidelity gap, simplified):
-        document the `d_sw5_corner_divergence` halo-mode='edge' gap
-        as a Fortran-fidelity marker.
+        """Iter-132 / iter-133 documentation marker, UPDATED 2026-07-10:
+        the duogrid iterated-Laplacian cross-face ghost ring is PORTED
+        as an OPT-IN (`cross_face_halo=True`, via
+        `_pad_corner_scalar_cross_face`, mirroring the Fortran
+        dyn_core.F90:651-652 ext_scalar B-grid exchange of the
+        attenuated divgd).  The DEFAULT remains the zero ghost ring:
+        measured 2026-07-10, the faithful ghost destabilises the C48
+        colliding-modon FB run at day ~60-65 while the zero-ring runs
+        120 days clean.  This marker guards the PORT note (same oracle
+        citation).
 
         Earlier iterations attempted to bind the source code structure
         (loop identity, `mode='edge'` pad count, absence of proper
@@ -1736,13 +1743,14 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         self.assertIn(
             "sw_core.F90:1737-1785", src,
             "The `d_sw5_corner_divergence` iterated-Laplacian halo "
-            "gap note was removed without updating this test.  The "
-            "note cited Fortran `sw_core.F90:1737-1785` as the "
-            "oracle for proper corner-staggered halo exchange.  If "
-            "the gap has been closed (proper halo ported), update "
-            "this test to reflect the new state.  If not, restore "
-            "the note.  See docs/fv3_fortran_fidelity_review.md for "
-            "the iter-132 context.",
+            "PORT note was removed without updating this test.  The "
+            "note cites Fortran `sw_core.F90:1737-1785` as the "
+            "oracle for the duogrid corner-staggered ghost ring "
+            "(ported 2026-07-10 via _pad_corner_scalar_cross_face). "
+            "If the implementation changes again, update the source "
+            "note and this test together.  See "
+            "docs/fv3_fortran_fidelity_review.md for the iter-132 "
+            "context.",
         )
 
     def test_corner_vorticity_zero_flow_yields_f_corner(self):
@@ -2899,8 +2907,12 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         After the iter-79 fix, they must route through the duogrid
         remap when duogrid is active on the grid.
 
-        `_c_sw` re-imports `pad_halo` from `legoesm.grids.halo` locally,
-        so we patch the source module rather than a module-level symbol.
+        2026-07-10: patch BOTH the fv3_sw_core module-level `pad_halo`
+        binding (the one the sin_sg pads actually use) and the halo module
+        (function-scope re-imports).  The previous halo-module-only patch
+        never intercepted the sin_sg pads; it was accidentally counting
+        `_corner_vorticity`'s internal `pad_halo_vector` halo=1 calls,
+        which the FB covariant corner-vorticity halo fix removed.
         """
         from unittest import mock
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -2932,7 +2944,8 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                                  interp_offsets=interp_offsets,
                                  duogrid=duogrid, **kwargs)
 
-        with mock.patch.object(halo_mod, 'pad_halo', recording):
+        with mock.patch.object(halo_mod, 'pad_halo', recording), \
+                mock.patch.object(fv3_sw_core_mod, 'pad_halo', recording):
             fv3_sw_core_mod._c_sw(h, u_d, v_d, h_s, cdgrid_dg, dt=300.0, g=constants.g)
 
         # Expect at least the 4 sin_sg E/W/N/S halos that iter-79 fixed.
