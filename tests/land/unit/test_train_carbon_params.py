@@ -797,3 +797,136 @@ def test_quick_with_lai_and_biomass_sums_registry_and_writes_json(tmp_path):
     match = training["analytic_vs_spinup_match"]
     assert np.isfinite(match["biomass_cover_weighted_rel_err"])
     assert np.isfinite(match["lai_cover_weighted_rel_err"])
+
+
+# ---------------------------------------------------------------------------
+# Leaf carbon-isotope discrimination stream (--with-d13c)
+# ---------------------------------------------------------------------------
+def test_total_loss_sums_soc_and_d13c_from_bundle():
+    """The registry sums soc + d13c from ONE predictions bundle without touching the loop:
+    each extractor pulls its own key (``preds["soc"]`` / ``preds["d13c"]``)."""
+    import jax.numpy as jnp
+
+    preds = {"soc": jnp.asarray([1.0, 2.0]), "d13c": jnp.asarray([-27.0, -29.0])}
+    cover = jnp.asarray([1.0, 1.0])
+    losses = {
+        "soc": tcp.LossTerm(target=jnp.asarray([1.5, 2.0]),
+                            extractor=tcp._fast_soc_extractor, weight=1.0),
+        "d13c": tcp.LossTerm(target=jnp.asarray([-28.0, -29.0]),
+                             extractor=tcp._d13c_extractor, weight=0.5),
+    }
+    total = float(tcp._total_loss(preds, losses, cover))
+    # soc MSE = mean(.25, 0) = .125 ; d13c MSE = mean(1, 0) = 0.5
+    # total = 1*.125 + 0.5*0.5 = 0.375
+    npt.assert_allclose(total, 0.125 + 0.5 * 0.5, rtol=1e-12)
+    assert np.isfinite(total)
+
+
+def test_build_carbon_trainables_with_d13c_includes_only_stomata_wue():
+    """--with-d13c adds ONLY the stomata WUE subset (g0/g1_bb) ALONGSIDE the SOM set -- never
+    the per-archetype-incompatible Vc_max25 or the other stomata kinetics; OFF -> none."""
+    params = tcp.build_carbon_trainables(som_only=True, with_d13c=True)
+    names = {c.name for c in params.constraints}
+    assert {f"{tcp.CARBON_SCHEME_KEY}.{f}" for f in tcp.SOM_FIELDS} <= names
+    stomata = {n for n in names if n.startswith(tcp.STOMATA_SCHEME_KEY + ".")}
+    assert stomata == {f"{tcp.STOMATA_SCHEME_KEY}.{f}" for f in tcp.STOMATA_WUE_FIELDS}
+    # The full stomata set (Vc_max25 / J_max25 / kinetics) is NOT pulled in.
+    assert f"{tcp.STOMATA_SCHEME_KEY}.Vc_max25" not in stomata
+
+    off = {c.name for c in tcp.build_carbon_trainables(som_only=True).constraints}
+    assert not any(n.startswith(tcp.STOMATA_SCHEME_KEY + ".") for n in off)
+
+
+def test_stomata_overrides_selects_only_stomata_scheme():
+    """``_stomata_overrides`` returns the stomata WUE slice; ``_carbon_overrides`` the carbon
+    slice (disjoint, each traceable into its own config)."""
+    params = tcp.build_carbon_trainables(som_only=True, with_d13c=True)
+    st_ov = tcp._stomata_overrides(params)
+    car_ov = tcp._carbon_overrides(params)
+    assert set(st_ov) == set(tcp.STOMATA_WUE_FIELDS)
+    assert set(car_ov) == set(tcp.SOM_FIELDS)
+    assert set(st_ov).isdisjoint(car_ov)
+
+
+def test_d13c_cli_flags_roundtrip():
+    p = tcp.build_arg_parser()
+    a = p.parse_args(["--dry-run-synthetic"])
+    assert a.with_d13c is False and a.d13c_obs == ""
+    assert a.d13c_weight == tcp.DEFAULT_D13C_WEIGHT and a.d13c_var == ""
+    b = p.parse_args(["--dry-run-synthetic", "--with-d13c", "--d13c-weight", "0.4",
+                      "--d13c-obs", "x.nc", "--d13c-var", "delta13C"])
+    assert b.with_d13c is True and b.d13c_weight == 0.4
+    assert b.d13c_obs == "x.nc" and b.d13c_var == "delta13C"
+
+
+def test_with_d13c_real_path_requires_d13c_obs():
+    """--with-d13c on the real path without --d13c-obs -> a clear SystemExit; the dry-run
+    fabricates the target instead (no error)."""
+    with pytest.raises(SystemExit, match="requires --d13c-obs"):
+        tcp._finalize_args(tcp.build_arg_parser().parse_args(
+            ["--rebuild", "--surf-path", "x.nc", "--with-d13c"]))
+    args = tcp._finalize_args(tcp.build_arg_parser().parse_args(
+        ["--dry-run-synthetic", "--with-d13c"]))
+    assert args.with_d13c is True
+
+
+def test_build_observed_d13c_masks_c4_archetypes():
+    """C4 archetypes are NaN-masked out of the observed delta13C (model Farquhar is C3-only),
+    while C3 archetypes keep a finite target -- so the finite-mask drops ONLY the C4 cells."""
+    from legoesm.land.carbon.global_init import ArchetypeTable
+
+    args = tcp._finalize_args(tcp.build_arg_parser().parse_args(
+        ["--dry-run-synthetic", "--with-d13c"]))
+    # A table mixing C3 trees/grass with the two C4 PFTs (14 c4_grass, 16 crop_c4).
+    pft = np.array([4, 13, 14, 16])
+    n = pft.shape[0]
+    table = ArchetypeTable(
+        pft_id=pft, mat_k=np.array([298.0, 288.0, 300.0, 299.0]),
+        map_yr=np.array([1200.0] * n), t_seasonal_amp_k=np.array([3.0] * n),
+        aridity=np.array([1.0] * n), sw_mean_w=np.array([220.0] * n),
+        soil_class=np.array(["loam"] * n, dtype=object))
+    obs = tcp._build_observed_d13c(args, table, None, None, None, n)
+    assert np.all(np.isfinite(obs[[0, 1]]))       # C3 archetypes keep a finite target
+    assert np.all(np.isnan(obs[[2, 3]]))          # C4 archetypes masked out (NaN)
+
+
+def test_with_d13c_all_gap_d13c_rejected(monkeypatch):
+    """--with-d13c but an all-missing (NaN) delta13C target -> a clear SystemExit at build,
+    never a dead d13c term reporting a fake 0 RMSE."""
+    import legoesm.land.carbon.d13c_observations as d13cobs
+
+    def _all_nan(table):
+        return np.full(np.asarray(table.pft_id).shape[0], np.nan)
+
+    monkeypatch.setattr(d13cobs, "synthetic_observed_d13c", _all_nan)
+    args = tcp._finalize_args(tcp.build_arg_parser().parse_args(["--quick", "--with-d13c"]))
+    with pytest.raises(SystemExit, match="no archetype has a finite observed D13C"):
+        tcp.build_target(args)
+
+
+def test_quick_with_d13c_sums_registry_and_writes_json(tmp_path):
+    """One optimizer step on a tiny synthetic world with --with-d13c: the registry sums
+    soc + d13c, the 1-step line-search never increases the summed loss, and the tuned JSON +
+    scorecard carry the trained stomata WUE params + a delta13C RMSE (fast default mode)."""
+    outdir = tmp_path / "carbon_d13c"
+    rc = tcp.main(["--quick", "--with-d13c", "--output", str(outdir)])
+    assert rc == 0
+
+    tuned = json.loads((outdir / "tuned_carbon_parameters.json").read_text())
+    training = tuned["training"]
+    assert training["with_d13c"] is True
+    assert set(training["loss_terms"]) == {"soc", "d13c"}
+    assert training["d13c_weight"] == tcp.DEFAULT_D13C_WEIGHT
+    # At least one stomata WUE param survived preflight + is finite/in-bounds.
+    st_rows = [r for r in tuned["parameters"] if r["scheme_key"] == tcp.STOMATA_SCHEME_KEY]
+    assert st_rows, "no stomata WUE params in the tuned JSON"
+    assert {r["field"] for r in st_rows} <= set(tcp.STOMATA_WUE_FIELDS)
+    for r in st_rows:
+        assert np.isfinite(r["tuned"]) and r["lower"] <= r["tuned"] <= r["upper"]
+    hist = tuned["loss_history"]
+    assert len(hist) >= 1 and all(np.isfinite(x) for x in hist)
+    assert hist[-1] <= hist[0] + 1e-9      # summed soc+d13c line-search is monotone
+
+    scorecard = json.loads((outdir / "scorecard.json").read_text())
+    d13c_rmse = scorecard["cover_weighted_d13c_rmse_permil"]
+    assert np.isfinite(d13c_rmse["default"]) and np.isfinite(d13c_rmse["tuned"])

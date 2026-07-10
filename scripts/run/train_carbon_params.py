@@ -22,11 +22,14 @@ Python-float leaves).
 
 Modular loss registry: ``LOSSES = {obs_name: LossTerm(target, extractor, weight)}``
 -- ``soc`` (``som_total`` vs observed SOC, cover-weighted MSE via
-``legoesm.ml.loss.area_weighted_mse``) plus, under ``--with-sif``, ``sif`` (a
-single-step per-archetype simulated-SIF forward vs observed SIF -- constrains
-photosynthesis/GPP, the boreal-productivity lever).  Both are summed by ``_total_loss``
-WITHOUT touching the loop; ``biomass`` / ``lai`` / ``d13c`` plug in the same way (add a
-registry entry).
+``legoesm.ml.loss.area_weighted_mse``) plus optional single-step streams: ``sif``
+(``--with-sif``; simulated-SIF vs observed SIF -- photosynthesis/GPP, the boreal-
+productivity lever), ``biomass`` / ``lai`` (``--with-biomass`` / ``--with-lai``;
+closed-form live-pool vs observed biomass/LAI -- DALEC allocation/residence), and ``d13c``
+(``--with-d13c``; simulated leaf carbon-isotope discrimination vs observed leaf delta13C --
+constrains Ci/Ca, training the stomatal water-use-efficiency params, C4 archetypes masked
+since the model Farquhar is C3-only).  All are summed by ``_total_loss`` WITHOUT touching
+the loop; a new stream plugs in the same way (add a registry entry).
 
 Login-node policy: the archetype spin-up JIT-compiles the coupled land+carbon
 model and its reverse-mode; run this via ``sbatch`` / ``srun`` on a compute node,
@@ -79,6 +82,7 @@ from legoesm.training.trainable_params import TrainablePhysicsParams
 _G_PER_KG = 1000.0                 # gC/m2 -> kgC/m2 (exact conversion)
 CARBON_SCHEME_KEY = "land.carbon"  # param_collector scheme_key for CarbonConfig
 SIF_SCHEME_KEY = "land.canopy.sif"  # param_collector scheme_key for SIFConfig (--with-sif)
+STOMATA_SCHEME_KEY = "land.stomata"  # param_collector scheme_key for StomataConfig (--with-d13c)
 # Organic-CARBON per organic-MATTER fraction (van Bemmelen 1/1.724 = 0.58): the
 # raw CLM5 surfdata ORGANIC field is organic MATTER density (its units attribute
 # declares 0.58 gC/gOM). The harmonized legoesm_surfdata "organic" derives from
@@ -143,6 +147,18 @@ LIVE_POOL_FIELDS: tuple[str, ...] = (
     "f_fol", "f_root", "leaf_lifespan", "tor_root", "tor_wood", "LCMA",
 )
 
+# The STOMATAL water-use-efficiency (WUE) fields the leaf-delta13C stream (--with-d13c)
+# calibrates through the single-step leaf-isotope-discrimination forward
+# (legoesm.land.carbon.d13c_forward): the Ball-Berry residual conductance g0 and slope g1_bb.
+# Leaf delta13C constrains Ci/Ca (a NEW lever vs SIF/live-pool), and Ci depends on these
+# conductance parameters, so the gradient reaches them through the coupled Farquhar solve
+# (re-solved per step -- the forward CANNOT freeze Ci, unlike SIF).  Restricted to the WUE
+# knobs on purpose: the rest of the tier-2 StomataConfig set is photosynthetic capacity /
+# kinetics (Vc_max25 is applied PER-ARCHETYPE in the d13c forward, so a scalar override would
+# be wrong; J_max25 / Arrhenius / Jarvis fields are not WUE).  A Medlyn forward would train
+# g1_med instead -- a documented follow-up (the forward uses the Ball-Berry path here).
+STOMATA_WUE_FIELDS: tuple[str, ...] = ("g0", "g1_bb")
+
 # --- training defaults (modest; a compute-node short calibration) --------------
 DEFAULT_STEPS = 60
 DEFAULT_LR = 3.0e-2
@@ -204,6 +220,10 @@ DEFAULT_SIF_WEIGHT = 1.0           # --sif-weight; balances the sif MSE against 
 # is weighted against the reference SOC term (weight 1); tune per run if a term dominates.
 DEFAULT_BIOMASS_WEIGHT = 1.0       # --biomass-weight; balances the biomass MSE against soc
 DEFAULT_LAI_WEIGHT = 1.0           # --lai-weight; balances the lai MSE against soc
+# leaf delta13C (permil, O(-25 to -30)) lives on its own (negative) scale; weight it against
+# the reference SOC term (weight 1). A residual of a few permil vs a SOC residual of O(10)
+# kgC/m2 -> the default weight keeps the delta13C term from being swamped; tune per run.
+DEFAULT_D13C_WEIGHT = 1.0          # --d13c-weight; balances the d13c MSE against soc
 GRAD_NONZERO_TOL = 1.0e-14
 # Mean analytic-vs-spin-up SOC relative error above which the fast forward is
 # flagged as an unreliable proxy for the model (a loud run-log warning, not a
@@ -287,6 +307,15 @@ def _lai_extractor(preds) -> jax.Array:
     """Model per-archetype simulated LAI [m2/m2] from the predictions bundle
     (``preds["lai"]``; the closed-form ``C_fol / LCMA``)."""
     return preds["lai"]
+
+
+def _d13c_extractor(preds) -> jax.Array:
+    """Model per-archetype simulated leaf delta13C [permil] from the predictions bundle.
+
+    The (single-step, spin-up-free) leaf carbon-isotope-discrimination forward is evaluated
+    in the loss and stored under ``preds["d13c"]`` (see
+    :func:`legoesm.land.carbon.d13c_forward.simulate_archetype_d13c`)."""
+    return preds["d13c"]
 
 
 def cover_weighted_mse(
@@ -383,12 +412,12 @@ def _filter_params(
 
 def build_carbon_trainables(
     *, som_only: bool = True, with_sif: bool = False,
-    with_biomass: bool = False, with_lai: bool = False,
+    with_biomass: bool = False, with_lai: bool = False, with_d13c: bool = False,
 ) -> TrainablePhysicsParams:
-    """Tier-``extended`` ``land.carbon`` (+ optional ``land.canopy.sif``) trainables,
-    warm-started from the production ``CarbonConfig`` / ``SIFConfig`` defaults
-    (``build_trainable_params`` seeds each raw leaf from the live NamedTuple default via
-    the inverse sigmoid).
+    """Tier-``extended`` ``land.carbon`` (+ optional ``land.canopy.sif`` / ``land.stomata``)
+    trainables, warm-started from the production ``CarbonConfig`` / ``SIFConfig`` /
+    ``StomataConfig`` defaults (``build_trainable_params`` seeds each raw leaf from the live
+    NamedTuple default via the inverse sigmoid).
 
     ``som_only`` (default) restricts the CARBON set to the seven fast-analytic-valid SOM
     fields (:data:`SOM_FIELDS`) -- the Stage-B v1 calibration target -- so the optimizer
@@ -407,30 +436,50 @@ def build_carbon_trainables(
     ``with_sif`` additionally includes the tier-1/2 ``SIFConfig`` fluorescence params
     (``kn0``/``kn_beta``/``kn_gamma``/``max_electron_yield``/``escape_probability``/
     ``kf``/``kd``/``kp``) -- ALWAYS kept in full (the SIF forward is a separate single-step
-    diagnostic, not a SOM-pool field, so ``som_only`` never filters them).  Overrides are
-    applied traced INSIDE the loss; production defaults are untouched.
+    diagnostic, not a SOM-pool field, so ``som_only`` never filters them).
+
+    ``with_d13c`` additionally includes the ``StomataConfig`` water-use-efficiency subset
+    (:data:`STOMATA_WUE_FIELDS`: ``g0`` / ``g1_bb``) -- and ONLY that subset (the rest of the
+    tier-2 stomata set is photosynthetic capacity / kinetics, and ``Vc_max25`` is applied
+    per-archetype in the delta13C forward, so a scalar override would be wrong).  All
+    overrides are applied traced INSIDE the loss; production defaults are untouched.
     """
     scheme_keys = {CARBON_SCHEME_KEY}
     if with_sif:
         scheme_keys.add(SIF_SCHEME_KEY)
+    if with_d13c:
+        scheme_keys.add(STOMATA_SCHEME_KEY)
     params = build_trainable_params(
         active_scheme_keys=scheme_keys, tier="extended", dtype=jnp.float64)
-    sif_names = {c.name for c in params.constraints
-                 if c.name.startswith(SIF_SCHEME_KEY + ".")}
+    have = {c.name for c in params.constraints}
+    sif_names = {n for n in have if n.startswith(SIF_SCHEME_KEY + ".")}
     if with_sif and not sif_names:
         raise ValueError(
             f"--with-sif requested but no {SIF_SCHEME_KEY} trainables at tier 'extended'; "
             f"is the spec module registered in param_collector.SPEC_MODULES?")
+    # Stomata WATER-USE-EFFICIENCY subset only (the d13c lever); never the full stomata set.
+    stomata_wue = {f"{STOMATA_SCHEME_KEY}.{f}" for f in STOMATA_WUE_FIELDS}
+    if with_d13c:
+        missing_st = stomata_wue - have
+        if missing_st:
+            raise ValueError(
+                f"--with-d13c requested but stomata WUE fields {sorted(missing_st)} absent "
+                f"from the {STOMATA_SCHEME_KEY} tier-extended trainables; known="
+                f"{sorted(n for n in have if n.startswith(STOMATA_SCHEME_KEY + '.'))}. "
+                f"Is the spec module registered in param_collector.SPEC_MODULES?")
+    keep_stomata = stomata_wue if with_d13c else set()
     if not som_only:
-        # Full tier-2 carbon set (+ all SIF fluorescence params when --with-sif).
-        return params
+        # Full tier-2 carbon set (+ all SIF fluorescence params when --with-sif), but the
+        # stomata part restricted to the WUE subset (never the per-archetype-incompatible
+        # Vc_max25 / kinetics).  With --with-d13c off this returns the prior full set.
+        keep_non_stomata = {n for n in have if not n.startswith(STOMATA_SCHEME_KEY + ".")}
+        return _filter_params(params, keep_non_stomata | keep_stomata)
     # SOM-only carbon subset, PLUS all SIF fluorescence params, PLUS the live-pool fields
-    # when a biomass/LAI stream is on (fast-valid through the closed-form live-pool forward).
+    # when a biomass/LAI stream is on, PLUS the stomata WUE subset when --with-d13c.
     carbon_fields = set(SOM_FIELDS)
     if with_biomass or with_lai:
         carbon_fields |= set(LIVE_POOL_FIELDS)
-    keep = {f"{CARBON_SCHEME_KEY}.{f}" for f in carbon_fields} | sif_names
-    have = {c.name for c in params.constraints}
+    keep = {f"{CARBON_SCHEME_KEY}.{f}" for f in carbon_fields} | sif_names | keep_stomata
     missing = {f"{CARBON_SCHEME_KEY}.{f}" for f in carbon_fields} - have
     if missing:
         raise ValueError(
@@ -448,6 +497,12 @@ def _sif_overrides(params: TrainablePhysicsParams) -> dict[str, jax.Array]:
     """``{SIFConfig field -> traced constrained scalar}`` for the sif loss term (empty
     when ``--with-sif`` is off / no SIF params are trained)."""
     return params.to_overrides().get(SIF_SCHEME_KEY, {})
+
+
+def _stomata_overrides(params: TrainablePhysicsParams) -> dict[str, jax.Array]:
+    """``{StomataConfig field -> traced constrained scalar}`` for the d13c loss term (empty
+    when ``--with-d13c`` is off / no stomata WUE params are trained)."""
+    return params.to_overrides().get(STOMATA_SCHEME_KEY, {})
 
 
 def _make_sif_forward(table):
@@ -469,6 +524,31 @@ def _make_sif_forward(table):
         return sif_fn(cfg)
 
     return sif_forward
+
+
+def _make_d13c_forward(table):
+    """Build ``d13c_forward(stomata_overrides) -> (n_arch,)`` simulated leaf delta13C [permil]
+    for the given (possibly chunk-sliced) archetype table.
+
+    Precomputes the static per-archetype CLIMATE forcing ONCE
+    (:func:`legoesm.land.carbon.d13c_forward.build_d13c_forward`), then each call splices the
+    TRACED stomata WUE overrides (``g0`` / ``g1_bb``) into a fresh ``StomataConfig``
+    (production defaults untouched) and RE-SOLVES the coupled Farquhar system -- ``Ci`` (hence
+    the C3 discrimination) depends on the trained conductance, so it cannot be frozen like the
+    SIF leaf state, but it is still a single-step graph, no spin-up.  ``Vc_max25`` is applied
+    per-archetype inside the forward (NOT a trained scalar)."""
+    from legoesm.land.carbon.d13c_forward import build_d13c_forward
+    from legoesm.land.carbon.stomata import StomataConfig
+    from legoesm.training.param_collector import apply_param_overrides
+
+    d13c_fn = build_d13c_forward(table)
+
+    def d13c_forward(stomata_overrides):
+        cfg = apply_param_overrides(
+            StomataConfig(enabled=True, stomata_model="ball_berry"), stomata_overrides)
+        return d13c_fn(cfg)
+
+    return d13c_forward
 
 
 def _make_live_pool_forward(precomputed):
@@ -509,6 +589,7 @@ def make_loss_fn(
     losses: dict[str, LossTerm],
     cover_weight: jax.Array,
     sif_forward=None,
+    d13c_forward=None,
     n_spinup: int,
     n_verify: int,
     dt: float,
@@ -521,9 +602,11 @@ def make_loss_fn(
 
     ``sif_forward`` (when ``--with-sif``) is the single-step SIF forward evaluated on the
     TRACED SIF overrides; its prediction is added to the bundle under ``preds["sif"]`` and
-    the ``sif`` registry term sums into the loss.  The SIF forward has NO spin-up scan (it
-    does not touch ``equilibrate_archetypes_traced``), and the SIF params do not enter the
-    SOC forward, so the two gradients are block-independent.
+    the ``sif`` registry term sums into the loss.  ``d13c_forward`` (when ``--with-d13c``) is
+    the single-step leaf-delta13C forward on the TRACED stomata WUE overrides, added under
+    ``preds["d13c"]``.  Both single-step forwards have NO spin-up scan (they do not touch
+    ``equilibrate_archetypes_traced``) and their params do not enter the SOC forward, so the
+    gradients are block-independent.
     """
     from legoesm.land.carbon.global_init import equilibrate_archetypes_traced
 
@@ -535,6 +618,8 @@ def make_loss_fn(
         preds = {"eq": eq}
         if sif_forward is not None:
             preds["sif"] = sif_forward(_sif_overrides(params))
+        if d13c_forward is not None:
+            preds["d13c"] = d13c_forward(_stomata_overrides(params))
         return _total_loss(preds, losses, cover_weight)
 
     return loss_fn
@@ -595,10 +680,12 @@ def _make_chunked_slow(target_bundle, spin, *, chunk: int):
     # chunk).  Concrete (built from the fixed cover weights, not traced).
     total_w = jnp.sum(cover_weight)
     bounds = _chunk_bounds(n_arch, chunk)
-    # Optional single-step SIF forward per chunk (--with-sif); the SIF forward is
-    # per-archetype + spin-up-free, so slicing it to the chunk's archetypes is exact and
-    # adds no coupled-model VJP (the crash was the spin-up batch, not this leaf-sif graph).
+    # Optional single-step SIF / leaf-delta13C forwards per chunk (--with-sif / --with-d13c);
+    # both are per-archetype + spin-up-free, so slicing them to the chunk's archetypes is exact
+    # and adds no coupled-model VJP (the crash was the spin-up batch, not the leaf-sif / small
+    # Farquhar-resolve graphs).
     make_sif = target_bundle.get("make_sif_forward")
+    make_d13c = target_bundle.get("make_d13c_forward")
 
     # Pre-slice each chunk's STATIC table + its cover-weight / per-term target
     # slices ONCE (the archetype table + membership are non-differentiated).
@@ -611,9 +698,10 @@ def _make_chunked_slow(target_bundle, spin, *, chunk: int):
                               mask=(None if t.mask is None else t.mask[s:e]))
                   for k, t in losses.items()}
         csif = make_sif(ctable) if make_sif is not None else None
-        chunk_specs.append((ctable, cw, cterms, csif))
+        cd13c = make_d13c(ctable) if make_d13c is not None else None
+        chunk_specs.append((ctable, cw, cterms, csif, cd13c))
 
-    def _chunk_sse(ctable, cw, cterms, csif):
+    def _chunk_sse(ctable, cw, cterms, csif, cd13c):
         """UN-normalized cover-weighted SSE over ONLY this chunk's archetypes."""
         def sse(params: TrainablePhysicsParams) -> jax.Array:
             overrides = _carbon_overrides(params)
@@ -621,15 +709,17 @@ def _make_chunked_slow(target_bundle, spin, *, chunk: int):
             preds = {"eq": eq}
             if csif is not None:
                 preds["sif"] = csif(_sif_overrides(params))
+            if cd13c is not None:
+                preds["d13c"] = cd13c(_stomata_overrides(params))
             return _weighted_sse(preds, cterms, cw)
         return sse
 
     def value_and_grad_fn(params: TrainablePhysicsParams):
         total_sse = jnp.asarray(0.0, dtype=cover_weight.dtype)
         total_grad = None
-        for (ctable, cw, cterms, csif) in chunk_specs:
+        for (ctable, cw, cterms, csif, cd13c) in chunk_specs:
             sse, grad = eqx.filter_value_and_grad(
-                _chunk_sse(ctable, cw, cterms, csif))(params)
+                _chunk_sse(ctable, cw, cterms, csif, cd13c))(params)
             total_sse = total_sse + sse
             total_grad = grad if total_grad is None else jax.tree_util.tree_map(
                 lambda a, b: a + b, total_grad, grad)
@@ -639,8 +729,8 @@ def _make_chunked_slow(target_bundle, spin, *, chunk: int):
 
     def loss_eval_fn(params: TrainablePhysicsParams) -> jax.Array:
         total_sse = jnp.asarray(0.0, dtype=cover_weight.dtype)
-        for (ctable, cw, cterms, csif) in chunk_specs:
-            total_sse = total_sse + _chunk_sse(ctable, cw, cterms, csif)(params)
+        for (ctable, cw, cterms, csif, cd13c) in chunk_specs:
+            total_sse = total_sse + _chunk_sse(ctable, cw, cterms, csif, cd13c)(params)
         return total_sse / total_w
 
     return value_and_grad_fn, loss_eval_fn
@@ -697,7 +787,7 @@ def make_fast_analytic_forward(precomputed) -> Callable[[TrainablePhysicsParams]
 
 def make_fast_loss_fn(
     precomputed, *, losses: dict[str, LossTerm], cover_weight: jax.Array,
-    sif_forward=None, live_pool_forward=None,
+    sif_forward=None, d13c_forward=None, live_pool_forward=None,
 ) -> Callable[[TrainablePhysicsParams], jax.Array]:
     """Fast-analytic calibration loss, routed through the SAME registry as the slow path.
 
@@ -705,11 +795,12 @@ def make_fast_loss_fn(
     stored under ``preds["soc"]`` for :func:`_fast_soc_extractor`); ``jax.grad`` flows to
     the seven fast-valid SOM leaves (:data:`SOM_FIELDS`) through the analytic cascade at
     ~zero cost -- no spin-up in the gradient loop.  The single-step ``sif`` term
-    (``--with-sif``) and ``biomass`` / ``lai`` terms (``--with-biomass`` / ``--with-lai``)
-    compose here too: each is spin-up-free, so ``sif_forward`` adds ``preds["sif"]`` and
-    ``live_pool_forward`` adds ``preds["biomass"]`` + ``preds["lai"]`` (both from the SAME
-    traced CARBON overrides the SOC forward uses), summed via ``_total_loss`` exactly as in
-    the slow path.  With every optional forward ``None`` and only ``soc`` in the registry
+    (``--with-sif``), ``d13c`` term (``--with-d13c``) and ``biomass`` / ``lai`` terms
+    (``--with-biomass`` / ``--with-lai``) compose here too: each is spin-up-free, so
+    ``sif_forward`` adds ``preds["sif"]``, ``d13c_forward`` adds ``preds["d13c"]`` (from the
+    traced STOMATA overrides), and ``live_pool_forward`` adds ``preds["biomass"]`` +
+    ``preds["lai"]`` (from the traced CARBON overrides), summed via ``_total_loss`` exactly as
+    in the slow path.  With every optional forward ``None`` and only ``soc`` in the registry
     this equals the prior SOC-only fast loss.
     """
     model_soc = make_fast_analytic_forward(precomputed)
@@ -718,6 +809,8 @@ def make_fast_loss_fn(
         preds = {"soc": model_soc(params)}
         if sif_forward is not None:
             preds["sif"] = sif_forward(_sif_overrides(params))
+        if d13c_forward is not None:
+            preds["d13c"] = d13c_forward(_stomata_overrides(params))
         if live_pool_forward is not None:
             biomass, lai = live_pool_forward(_carbon_overrides(params))
             preds["biomass"] = biomass
@@ -735,15 +828,18 @@ def _build_loss_fn(args, target_bundle, spin, precomputed):
     add the single-step live-pool forward (fast mode only -- it needs the NPP precompute)."""
     make_sif = target_bundle.get("make_sif_forward")
     sif_forward = make_sif(target_bundle["table"]) if make_sif is not None else None
+    make_d13c = target_bundle.get("make_d13c_forward")
+    d13c_forward = make_d13c(target_bundle["table"]) if make_d13c is not None else None
     live_pool_forward = target_bundle.get("live_pool_forward")
     if args.fast_analytic:
         return make_fast_loss_fn(
             precomputed, losses=target_bundle["losses"],
             cover_weight=target_bundle["cover_weight"], sif_forward=sif_forward,
-            live_pool_forward=live_pool_forward)
+            d13c_forward=d13c_forward, live_pool_forward=live_pool_forward)
     return make_loss_fn(
         table=target_bundle["table"], losses=target_bundle["losses"],
-        cover_weight=target_bundle["cover_weight"], sif_forward=sif_forward, **spin)
+        cover_weight=target_bundle["cover_weight"], sif_forward=sif_forward,
+        d13c_forward=d13c_forward, **spin)
 
 
 def _grad_stats(grads: TrainablePhysicsParams, *, tol: float) -> dict[str, dict]:
@@ -962,6 +1058,53 @@ def _build_observed_lai(args, table, inputs, cell_id, cell_w, n_arch_full):
     return per_archetype_observed_lai(lai_cell_pft, cell_id, cell_w, n_arch=n_arch_full)
 
 
+def _build_observed_d13c(args, table, inputs, cell_id, cell_w, n_arch_full):
+    """Per-archetype observed leaf delta13C [permil] (``--with-d13c``), or ``None``.
+
+    Synthetic in the dry-run; else a gridded leaf-delta13C product cover-weighted per archetype
+    (native-grid ``clm5_surfdata`` only).  The real sparse leaf-delta13C fetcher (a Cornwell-
+    style leaf-delta13C compilation / a global ecosystem-delta13C map, + the ecosystem->leaf
+    reconciliation) is a documented FOLLOW-UP (see
+    :mod:`legoesm.land.carbon.d13c_observations`); ``--d13c-obs`` supplies a pre-regridded
+    LEAF-delta13C product.
+
+    C4 archetypes are MASKED OUT (set to ``NaN``): the model's Farquhar is C3-only, so the C3
+    discrimination forward is not valid for them (their C3-kinetics Ci is not a faithful C4
+    leaf state) -- the trainer's finite-mask then drops them from the d13c term.  A faithful
+    C4 discrimination is a documented follow-up.
+    """
+    if not args.with_d13c:
+        return None
+    from legoesm.land.carbon.d13c_observations import (
+        c4_archetype_mask,
+        load_gridded_d13c,
+        per_archetype_observed_d13c,
+        synthetic_observed_d13c,
+    )
+    if args.dry_run_synthetic:
+        observed = np.asarray(synthetic_observed_d13c(table), dtype=float)
+    else:
+        if args.surfdata_preset != "clm5_surfdata":
+            raise SystemExit(
+                "--with-d13c observed leaf delta13C is only wired for the native-grid "
+                f"'clm5_surfdata' preset (the gridded delta13C must match the cover grid); "
+                f"'{args.surfdata_preset}' regrids the cover. Use clm5_surfdata.")
+        ncell = int(inputs.pft_weights.shape[0])
+        d13c_cell = load_gridded_d13c(
+            args.d13c_obs, ncell=ncell, d13c_var=(args.d13c_var or None))
+        observed = np.asarray(
+            per_archetype_observed_d13c(d13c_cell, cell_id, cell_w, n_arch=n_arch_full),
+            dtype=float)
+    # C3-only model -> exclude C4 archetypes (NaN so the finite-mask drops them).
+    c4 = c4_archetype_mask(table.pft_id)
+    n_c4 = int(np.sum(c4))
+    if n_c4:
+        print(f"[target] masking {n_c4} C4 archetype(s) from the delta13C term (model "
+              f"Farquhar is C3-only; C4 discrimination is a follow-up)")
+        observed = np.where(c4, np.nan, observed)
+    return observed
+
+
 def build_target(args) -> dict[str, Any]:
     """Assemble the calibration target: the (possibly subsampled) ArchetypeTable,
     the observed per-archetype SOC [kgC/m2], and the per-archetype cover weight.
@@ -1038,6 +1181,8 @@ def build_target(args) -> dict[str, Any]:
         args, table, inputs, cell_id, cell_w, n_arch_full)
     observed_lai_full = _build_observed_lai(
         args, table, inputs, cell_id, cell_w, n_arch_full)
+    observed_d13c_full = _build_observed_d13c(
+        args, table, inputs, cell_id, cell_w, n_arch_full)
 
     keep = _stratified_subsample(table, args.max_archetypes, seed=args.seed)
     table = _slice_table(table, keep)
@@ -1049,7 +1194,7 @@ def build_target(args) -> dict[str, Any]:
 
     # Optional single-step streams: (name, observed, extractor, weight, units, forward-tag).
     # ``forward`` = "sif" builds the SIF forward; "live_pool" builds the live-pool forward
-    # (shared by biomass + lai).
+    # (shared by biomass + lai); "d13c" builds the leaf-isotope-discrimination forward.
     extra_specs = [
         ("sif", _sub(observed_sif_full), _sif_extractor, args.sif_weight,
          "umol/m2/s", "sif"),
@@ -1057,6 +1202,8 @@ def build_target(args) -> dict[str, Any]:
          args.biomass_weight, "kgC/m2", "live_pool"),
         ("lai", _sub(observed_lai_full), _lai_extractor, args.lai_weight,
          "m2/m2", "live_pool"),
+        ("d13c", _sub(observed_d13c_full), _d13c_extractor, args.d13c_weight,
+         "permil", "d13c"),
     ]
     present = [s for s in extra_specs if s[1] is not None]
 
@@ -1109,6 +1256,7 @@ def build_target(args) -> dict[str, Any]:
     # no loop change); its simulated forward is the spin-up-free _make_sif_forward /
     # _make_live_pool_forward.  ``d13c`` etc. plug in the same way.
     make_sif_forward = None
+    make_d13c_forward = None
     needs_live_pool = False
     for (name, obs, ext, w, _units, fwd) in present:
         losses[name] = LossTerm(
@@ -1116,6 +1264,8 @@ def build_target(args) -> dict[str, Any]:
             mask=jnp.asarray(finite[name], dtype=jnp.float64))
         if fwd == "sif":
             make_sif_forward = _make_sif_forward
+        elif fwd == "d13c":
+            make_d13c_forward = _make_d13c_forward
         elif fwd == "live_pool":
             needs_live_pool = True
 
@@ -1144,7 +1294,9 @@ def build_target(args) -> dict[str, Any]:
         "observed_sif": by_name.get("sif"),
         "observed_biomass": by_name.get("biomass"),
         "observed_lai": by_name.get("lai"),
+        "observed_d13c": by_name.get("d13c"),
         "make_sif_forward": make_sif_forward,
+        "make_d13c_forward": make_d13c_forward,
         "needs_live_pool": needs_live_pool,
         "pft_id": np.asarray(table.pft_id, int),
         "source": source,
@@ -1547,6 +1699,24 @@ def _write_scorecard(path: Path, *, target_bundle, initial_params, tuned_params,
             "improvement": (_wrmse(sif_default, observed_sif, w_sif)
                             - _wrmse(sif_tuned, observed_sif, w_sif)),
         }
+    # Optional leaf-delta13C scorecard (--with-d13c): cover-weighted simulated-delta13C RMSE
+    # vs observed, default vs tuned (single-step forward; surfaces whether the d13c term
+    # improved).  Weighted by cover MASKED to the delta13C-observed archetypes (matches the
+    # loss's d13c mask, which already excludes C4), so missing/C4 cells never enter the RMSE.
+    make_d13c = target_bundle.get("make_d13c_forward")
+    observed_d13c = target_bundle.get("observed_d13c")
+    if make_d13c is not None and observed_d13c is not None:
+        d13c_fwd = make_d13c(target_bundle["table"])
+        d13c_default = np.asarray(d13c_fwd(_stomata_overrides(initial_params)))
+        d13c_tuned = np.asarray(d13c_fwd(_stomata_overrides(tuned_params)))
+        d13c_mask = np.asarray(target_bundle["losses"]["d13c"].mask)
+        w_d13c = cover * d13c_mask
+        scorecard["cover_weighted_d13c_rmse_permil"] = {
+            "default": _wrmse(d13c_default, observed_d13c, w_d13c),
+            "tuned": _wrmse(d13c_tuned, observed_d13c, w_d13c),
+            "improvement": (_wrmse(d13c_default, observed_d13c, w_d13c)
+                            - _wrmse(d13c_tuned, observed_d13c, w_d13c)),
+        }
     # Optional biomass/LAI scorecard (--with-biomass/--with-lai): cover-weighted RMSE of the
     # single-step live-pool forward vs observed, default vs tuned (surfaces whether the term
     # improved).  Both share ONE live-pool forward (biomass, lai) from the bundle.
@@ -1584,14 +1754,17 @@ def _write_tuned_json(path: Path, *, tuned_params, initial_params, loss_history,
     from legoesm.training.param_collector import build_registry
     from legoesm.land.carbon.config import CarbonConfig
     from legoesm.land.canopy.sif import SIFConfig
+    from legoesm.land.carbon.stomata import StomataConfig
 
     registry = {m.qualified_name: m for m in build_registry()}
-    # Per-scheme production defaults (carbon + SIF); a field is looked up in the config
-    # its scheme_key names, so SIF fields (kn0, ...) resolve against SIFConfig, not
-    # CarbonConfig (which would KeyError).
+    # Per-scheme production defaults (carbon + SIF + stomata); a field is looked up in the
+    # config its scheme_key names, so SIF fields (kn0, ...) resolve against SIFConfig and
+    # stomata WUE fields (g0, g1_bb) against StomataConfig, not CarbonConfig (which would
+    # KeyError).
     defaults_by_scheme = {
         CARBON_SCHEME_KEY: CarbonConfig()._asdict(),
         SIF_SCHEME_KEY: SIFConfig()._asdict(),
+        STOMATA_SCHEME_KEY: StomataConfig()._asdict(),
     }
     tuned_vals = _param_values(tuned_params)
     init_vals = _param_values(initial_params)
@@ -1617,8 +1790,9 @@ def _write_tuned_json(path: Path, *, tuned_params, initial_params, loss_history,
     payload = {
         "note": ("RECOMMENDED DifferLand carbon"
                  + ("+SIF" if SIF_SCHEME_KEY in scheme_keys else "")
+                 + ("+d13c-stomata" if STOMATA_SCHEME_KEY in scheme_keys else "")
                  + " calibration -- a recommendation, NOT a mutation of the production "
-                 "CarbonConfig/SIFConfig defaults."),
+                 "CarbonConfig/SIFConfig/StomataConfig defaults."),
         "scheme_key": CARBON_SCHEME_KEY,
         "scheme_keys": scheme_keys,
         "optimizer": meta["optimizer"],
@@ -1676,15 +1850,18 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
 
     initial_params = build_carbon_trainables(
         som_only=not args.all_carbon_params, with_sif=args.with_sif,
-        with_biomass=args.with_biomass, with_lai=args.with_lai)
+        with_biomass=args.with_biomass, with_lai=args.with_lai,
+        with_d13c=args.with_d13c)
     params = initial_params
     n_sif = sum(c.name.startswith(SIF_SCHEME_KEY + ".") for c in params.constraints)
+    n_d13c = sum(c.name.startswith(STOMATA_SCHEME_KEY + ".") for c in params.constraints)
     stream_note = "".join(
         f", {s}" for s, on in (("sif", args.with_sif), ("biomass", args.with_biomass),
-                               ("lai", args.with_lai)) if on)
+                               ("lai", args.with_lai), ("d13c", args.with_d13c)) if on)
     print(f"[preflight] {len(params.constraints)} trainable params "
           f"(SOM-only={not args.all_carbon_params}, streams=soc{stream_note}"
-          f"{f', {n_sif} SIF' if args.with_sif else ''}); mode="
+          f"{f', {n_sif} SIF' if args.with_sif else ''}"
+          f"{f', {n_d13c} stomata' if args.with_d13c else ''}); mode="
           f"{'fast-analytic' if args.fast_analytic else 'slow-spinup-grad'}; "
           f"n_spinup={args.n_spinup}, max_archetypes={args.max_archetypes}")
 
@@ -1813,6 +1990,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "biomass_weight": (args.biomass_weight if args.with_biomass else None),
             "with_lai": bool(args.with_lai),
             "lai_weight": (args.lai_weight if args.with_lai else None),
+            "with_d13c": bool(args.with_d13c),
+            "d13c_weight": (args.d13c_weight if args.with_d13c else None),
             "loss_terms": sorted(target_bundle["losses"]),
             "source": target_bundle["source"],
             "n_archetypes_full": target_bundle["n_arch_full"],
@@ -1956,6 +2135,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--lai-weight", type=float, default=DEFAULT_LAI_WEIGHT,
                    help="weight of the lai MSE term relative to soc (soc weight = 1; "
                         f"default {DEFAULT_LAI_WEIGHT}).")
+    # --- observed leaf-delta13C target (--with-d13c) ---
+    p.add_argument("--with-d13c", dest="with_d13c", action="store_true",
+                   help="add the leaf carbon-isotope discrimination (delta13C) observation "
+                        "stream: a per-archetype simulated leaf-delta13C forward [permil] vs "
+                        "observed leaf delta13C, summed with the SOC term (cover-weighted MSE), "
+                        "and train the StomataConfig water-use-efficiency params (Ball-Berry "
+                        "g0/g1_bb). Constrains Ci/Ca (a NEW lever vs SIF/biomass). Works in "
+                        "fast OR slow mode (the forward is single-step, spin-up-free). C4 "
+                        "archetypes are MASKED (model Farquhar is C3-only; C4 is a follow-up).")
+    p.add_argument("--d13c-obs", type=str, default="",
+                   help="gridded leaf-delta13C NetCDF on the surfdata grid [permil] (required "
+                        "for the REAL --with-d13c path; --dry-run-synthetic uses a fabricated "
+                        "target). Real source = a sparse leaf-delta13C compilation (e.g. "
+                        "Cornwell 2018) / ecosystem-delta13C map (regrid + ecosystem->leaf "
+                        "reconciliation is a data-prep follow-up).")
+    p.add_argument("--d13c-var", type=str, default="",
+                   help="delta13C variable name in --d13c-obs (auto-detected if omitted)")
+    p.add_argument("--d13c-weight", type=float, default=DEFAULT_D13C_WEIGHT,
+                   help="weight of the d13c MSE term relative to soc (soc weight = 1; "
+                        f"default {DEFAULT_D13C_WEIGHT}). SOC/delta13C live on different scales.")
     # --- spin-up geometry (training forward pass) ---
     p.add_argument("--n-spinup", type=int, default=DEFAULT_N_SPINUP)
     p.add_argument("--n-verify", type=int, default=DEFAULT_N_VERIFY)
@@ -2090,6 +2289,12 @@ def _finalize_args(args: argparse.Namespace) -> argparse.Namespace:
             "--with-sif on the real (--rebuild/--archetypes) path requires --sif-obs "
             "<gridded SIF NetCDF on the surfdata grid>; --dry-run-synthetic uses a "
             "fabricated SIF target instead.")
+    # --with-d13c REAL path needs a gridded leaf-delta13C product; the dry-run fabricates one.
+    if args.with_d13c and not args.dry_run_synthetic and not args.d13c_obs:
+        raise SystemExit(
+            "--with-d13c on the real (--rebuild/--archetypes) path requires --d13c-obs "
+            "<gridded leaf-delta13C NetCDF [permil] on the surfdata grid>; "
+            "--dry-run-synthetic uses a fabricated delta13C target instead.")
     # --with-biomass/--with-lai need the FAST closed-form live-pool forward, which is built
     # from the one-time NPP precompute recorded ONLY in --fast-analytic mode.  Fail loudly
     # rather than register a biomass/lai loss term whose prediction the slow path never
