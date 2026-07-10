@@ -3788,8 +3788,37 @@ class LatLonCGridOceanModel:
                 # interfaces, same (n_lat, n_lon, nlev-1) shape as K_v_cell.  TRACERS
                 # ONLY — momentum uses A_v_cell, which is untouched.
                 K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)
+            # Double diffusion (NEMO zdfddm): salt fingering / diffusive
+            # convection add a SEPARATE heat (avt) and salt (avs) diffusivity.
+            # avt folds into K_v_cell (heat) HERE — before the wet-interface
+            # mask below — so the seafloor guard applies to it too; the
+            # salt-heat delta ``dK_ddm_salt = avs - avt`` is carried to the
+            # tracer solve so S diffuses with ``K_v + (avs - avt)``.  Momentum
+            # (A_v_cell) is untouched, matching zdfddm.  Static Python gate
+            # (feature-gating exception): None ⇒ bit-identical legacy pair solve.
+            dK_ddm_salt = None
+            _ddm_cfg = getattr(
+                getattr(getattr(self.config, "physics", None),
+                        "vertical_mixing", None), "ddm", None)
+            if _ddm_cfg is not None and _ddm_cfg.enabled:
+                from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+                    ddm_K_profile,
+                )
+                from legoesm.ocean.eos import make_eos_fn as _mk_eos_ddm
+                _avt_ddm, _avs_ddm = ddm_K_profile(
+                    state, self.z_coord, self.config.physics, _ddm_cfg,
+                    eos_fn=_mk_eos_ddm(eos=self.config.eos,
+                                       eos_linear=self.config.eos_linear),
+                )
+                _dt_dtype = state.T.data.dtype
+                _avt_ddm = _avt_ddm.astype(_dt_dtype)
+                _avs_ddm = _avs_ddm.astype(_dt_dtype)
+                K_v_cell = K_v_cell + _avt_ddm
+                dK_ddm_salt = _avs_ddm - _avt_ddm
             if _wet_if_vmix is not None:
                 K_v_cell = K_v_cell * _wet_if_vmix
+                if dK_ddm_salt is not None:
+                    dK_ddm_salt = dK_ddm_salt * _wet_if_vmix
             # IMPLICIT surface TRACER forcing (Veros placement): add dt·S_surf
             # (masked) to the solve INPUT so the backward-Euler tridiagonal solve
             # realises ``(I − dt·L)·X_new = X_old + dt·S_surf`` at weight 1.0.  dt
@@ -3876,11 +3905,15 @@ class LatLonCGridOceanModel:
             os.environ.get("LEGOESM_VMIX_BATCHED", "0") == "1"
             and do_tracers and do_momentum
         )
+        # Double-diffusion salinity diffusivity: K_v (heat) + (avs - avt).
+        # ``dK_ddm_salt is None`` (ddm off) ⇒ K_s_cell IS K_v_cell (same
+        # object) ⇒ the shared-K pair fast path stays BYTE-IDENTICAL.
+        K_s_cell = K_v_cell if dK_ddm_salt is None else (K_v_cell + dK_ddm_salt)
         if _vmix_batched:
             T_new, S_new, u_new, v_new = (
                 implicit_vertical_diffusion_ocean_batched([
                     (T_solve_in, K_v_cell, dz_cell, dz_half_cell, dt),
-                    (S_solve_in, K_v_cell, dz_cell, dz_half_cell, dt),
+                    (S_solve_in, K_s_cell, dz_cell, dz_half_cell, dt),
                     (state.u.data, A_v_u, dz_u, dz_half_u, dt_mom),
                     (state.v.data, A_v_v, dz_v, dz_half_v, dt_mom),
                 ])
@@ -3896,17 +3929,21 @@ class LatLonCGridOceanModel:
                 # field-batching ADDED it).  LEGOESM_VMIX_TSPAIR=0
                 # restores the two separate solves (trace-time switch,
                 # same caveat as above).
-                if os.environ.get("LEGOESM_VMIX_TSPAIR", "1") != "0":
+                if (dK_ddm_salt is None
+                        and os.environ.get("LEGOESM_VMIX_TSPAIR", "1") != "0"):
                     T_new, S_new = implicit_vertical_diffusion_ocean_pair(
                         T_solve_in, S_solve_in,
                         K_v_cell, dz_cell, dz_half_cell, dt,
                     )
                 else:
+                    # Separate T (K_v_cell) and S (K_s_cell) solves — required
+                    # when double diffusion is active (avs != avt); byte-identical
+                    # to the pair when dK_ddm_salt is None (K_s_cell is K_v_cell).
                     T_new = implicit_vertical_diffusion_ocean(
                         T_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
                     )
                     S_new = implicit_vertical_diffusion_ocean(
-                        S_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
+                        S_solve_in, K_s_cell, dz_cell, dz_half_cell, dt,
                     )
             if do_momentum:
                 u_new = implicit_vertical_diffusion_ocean(
