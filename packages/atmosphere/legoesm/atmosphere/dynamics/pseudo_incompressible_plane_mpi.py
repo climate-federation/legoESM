@@ -115,6 +115,14 @@ def _euler_then_project_mpi(su, sv, sw, sth, str_, thp, trp, pi_prev, dt, g, com
 def step_mpi(state, g, dt, comm, ny_global, forcing=None):
     """SSP-RK3 distributed step (mirrors serial :func:`pseudo_incompressible_plane.step`),
     projection per stage. ``state`` carries local y-slabs. Returns a new local state."""
+    if g.cfg.shapiro_coeff > 0.0:
+        # The serial post-projection [1,2,1] scalar de-noiser rolls in y; under the
+        # y-slab decomposition that crosses ranks → needs a 1-cell y-halo exchange
+        # (not yet wired). Guard so a distributed run can't SILENTLY diverge from
+        # serial (same doctrine as the once-serial LASD/dealias MPI guards).
+        raise NotImplementedError(
+            "shapiro_coeff>0 is not supported under MPI yet (step_mpi): the [1,2,1] "
+            "y-filter needs a haloed exchange. Run serial, or set shapiro_coeff=0.")
     u0, v0, w0, th0, tr0 = state.u, state.v, state.w, state.theta, state.tracers
     pi0 = state.pi_prev
     nyg = ny_global
