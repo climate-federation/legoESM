@@ -16,13 +16,20 @@ resolution_deg: 0.7
 
 # --- spectral training core (--training-core spectral) ---
 # n_max stays derived (max(21, n_lat//3) -> T85 here; the --smoke 32x64 grid
-# derives T21). dt MUST be set: the builder's 1800 s SI default is only
-# CFL-safe at smoke truncation — at T85 (~130 km) the advective CFL blows up
-# the pure dycore in the first rollout (job 6687785, loss=nan from epoch 0).
-# 450 s scales the AIMIP-proven T106 dt=400 s (x106/85 ~ 500) with margin AND
-# divides both multi_step_hours leads exactly (6 h = 48 steps, 12 h = 96 —
-# the trainer truncates roll_steps with int(), so dt must divide the lead).
+# derives T21).
+# semi_implicit OFF (#920): the Hoskins-Simmons SI step diverges at T>=85
+# for EVERY dt/nlev tried (x500/step at dt=450; NaN by 4 h even at the
+# AIMIP-proven T106/dt=400) — it was only ever validated at smoke truncation.
+# The explicit ssp_rk3 path is probe-verified stable+physical at T85/32lev
+# (scripts/tmp/diag_wb_spectral_nan.py; controlled A/B in the issue).
+# Revert to the SI default once #920's fix lands (adjoint-depth win: 6 h
+# lead = 12 steps at dt=1800 instead of 48).
+# dt=450 s: explicit gravity-wave CFL ~0.87 at T85 (RK3 limit ~1.7), scales
+# the AIMIP-proven T106 dt=400 s, and divides both multi_step_hours leads
+# exactly (6 h = 48 steps, 12 h = 96 — the trainer truncates roll_steps
+# with int(), so dt must divide the lead).
 spectral:
+  semi_implicit: false
   dt: 450.0
 
 # --- ERA5 ---
