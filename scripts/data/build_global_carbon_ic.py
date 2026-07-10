@@ -81,6 +81,11 @@ Outputs (both under ``<--output>/``)
 from __future__ import annotations
 
 import argparse
+import hashlib
+import os
+import tempfile
+import time
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -127,6 +132,40 @@ _PRECIP_STORM_WIDTH_DEG = 15.0  # storm-track Gaussian half-width [deg]
 # is ~0.5-0.6 of down-SW (Trenberth et al. 2009 global energy budget); one
 # fraction is adequate for the aridity feature in this DEMONSTRATION climate.
 _NETRAD_OVER_SW_LAND = 0.55    # [-] land net-radiation / down-SW fraction
+
+# --- persistent-cache policy (compile cache + equilibrium RESULT cache) --------
+# Both caches MIRROR scripts/run/train_carbon_params.py (the Stage-B calibration
+# trainer) so the caching policy never drifts between the two carbon drivers; the
+# shared XLA compile cache is legoesm.ml.training.configure_jax_compilation_cache.
+_CACHE_MIN_COMPILE_SECS_DEFAULT = 1.0   # only cache XLA compiles slower than this [s]
+# BUMP _EQUILIBRIUM_CACHE_VERSION on ANY change to the archetype spin-up / coupled-
+# carbon-step physics -- equilibrate_archetypes / iter_archetype_batches /
+# _spinup_batch, run_semi_analytic_spinup, make_archetype_step_fn /
+# carbon_cycle.step_carbon -- OR the DEFAULT CarbonConfig / MultiLayerLandConfig
+# parameter VALUES those consume: the cached (eq, qc) is the DEFAULT-parameter
+# equilibrium, so a changed default silently changes it and this INPUT-keyed cache
+# would otherwise serve a STALE result.  Mirrors _PRECOMPUTE_CACHE_VERSION in the
+# trainer and the XLA cache's HLO-in-key safety.
+# PARAMS CAVEAT: the key intentionally hashes ONLY the archetype table + spin
+# config, NOT any CarbonConfig, because this build always equilibrates at the
+# PRODUCTION DEFAULT CarbonConfig (equilibrate_archetypes takes no params).  If a
+# `--tuned-params` argument is EVER added here, the tuned params change eq, so the
+# key MUST then also hash them (add a params digest term) -- otherwise two
+# different parameterisations would alias to one digest and serve a wrong cache.
+# REGIME: the numeric equilibrium is precision- and backend-dependent, so the cache
+# is scoped to ONE regime rather than cross-serving float32/float64 or CPU/GPU
+# results (which would break the byte-identical contract).  main() PINS x64 before
+# any JAX op (like the trainer's train()), so precision is invariant; the result
+# cache is additionally namespaced by jax.default_backend() (a `<backend>/`
+# subdir), so a CPU-built cache never serves a GPU run or vice versa.  A jaxlib
+# upgrade that alters bits on the SAME backend is the user's responsibility (bump
+# the version), mirroring the trainer's documented same-code/backend assumption.
+_EQUILIBRIUM_CACHE_VERSION = "v1"
+# The QC bundle equilibrate_archetypes returns, in CANONICAL order.  The result
+# cache requires EXACTLY these members on load (a file missing one is treated as
+# corrupt and recomputed, never served as a partial hit); keep in sync with
+# equilibrate_archetypes (bump _EQUILIBRIUM_CACHE_VERSION if this set changes).
+_QC_KEYS = ("gpp", "npp", "som_kgC", "biomass_kgC", "drift_frac_per_yr")
 
 
 class GlobalCarbonInputs:
@@ -645,6 +684,181 @@ def _write_outputs(out_dir, inputs, grid_state, table, eq, qc, w_min, res_deg,
 
 
 # ===========================================================================
+# Deterministic equilibrium RESULT cache (driver-level; global_init stays PURE)
+# ===========================================================================
+def _check_cached_array(a, name: str, n_arch: int):
+    """Validate a cached-npz member: numeric dtype + per-archetype ``(n_arch,)``.
+
+    Raised ``ValueError`` propagates into ``_load_or_equilibrate``'s cache-read
+    ``except`` so a structurally-invalid file (wrong shape, or an object/complex
+    dtype ``jnp.asarray`` would otherwise ``TypeError`` on) is DROPPED and
+    recomputed -- never served as a silently-wrong hit.  Returns the array.
+    """
+    a = np.asarray(a)
+    if a.dtype.kind not in "fiu" or a.shape != (n_arch,):
+        raise ValueError(
+            f"cached {name!r}: dtype {a.dtype} shape {a.shape} "
+            f"(expected a numeric (n_arch={n_arch},) array)")
+    return a
+
+
+def _equilibrium_cache_key(table, spin: dict) -> str:
+    """Stable SHA-256 digest over the equilibration's INPUTS.
+
+    The ``equilibrate_archetypes`` output (``(eq, qc)``) is DETERMINISTIC given
+    the ``ArchetypeTable`` + the spin config, evaluated at the PRODUCTION DEFAULT
+    ``CarbonConfig`` (this build passes no tuned params).  Key components, in a
+    FIXED and documented order (any reorder changes the digest, so it must never
+    be reordered):
+
+      1. ``_EQUILIBRIUM_CACHE_VERSION`` -- the stale-physics guard (bump on any
+         spin-up / coupled-carbon-step or default-parameter change; see its
+         definition, including the ``--tuned-params`` caveat).
+      2. the six NUMERIC ``ArchetypeTable`` fields in declaration order
+         (``pft_id, mat_k, map_yr, t_seasonal_amp_k, aridity, sw_mean_w``), each
+         as ``np.ascontiguousarray(...).tobytes()`` -- tagged with the field name,
+         dtype, and shape so two distinct tables can never alias to one digest.
+      3. the string ``soil_class`` field as ``"|".join(...)`` (per-archetype
+         texture keys; ``|`` is not a soil-class token).
+      4. the spin config ``(n_spinup, n_verify, dt, n_layers, soil_depth)``
+         (``repr`` on the floats keeps full precision stable).
+
+    Mirrors ``train_carbon_params._precompute_cache_key``; the only differences
+    are the domain-separation prefix and the version constant, because the two
+    caches store DIFFERENT artifacts and must never collide on a shared dir.
+    """
+    h = hashlib.sha256()
+    h.update(b"GLOBAL_CARBON_EQUILIBRIUM")
+    h.update(_EQUILIBRIUM_CACHE_VERSION.encode())
+    for name in ("pft_id", "mat_k", "map_yr", "t_seasonal_amp_k", "aridity",
+                 "sw_mean_w"):
+        arr = np.ascontiguousarray(getattr(table, name))
+        h.update(f"|{name}:{arr.dtype}:{arr.shape}|".encode())
+        h.update(arr.tobytes())
+    soil_class = "|".join(str(s) for s in np.asarray(table.soil_class).ravel())
+    h.update(b"|soil_class|")
+    h.update(soil_class.encode("utf-8"))
+    spin_key = (f"|spin|{spin['n_spinup']}|{spin['n_verify']}|{spin['dt']!r}|"
+                f"{spin['n_layers']}|{spin['soil_depth']!r}|")
+    h.update(spin_key.encode("utf-8"))
+    return h.hexdigest()
+
+
+def _load_or_equilibrate(table, spin: dict, *, cache_dir: str, rebuild: bool):
+    """Deterministic RESULT cache around :func:`equilibrate_archetypes`.
+
+    ``equilibrate_archetypes`` cold-compiles + spins ONE coupled-land-model graph
+    per ``(is_woody, is_evergreen, soil_class)`` group (~19 min/group on a diverse
+    real archetype set); its ``(eq, qc)`` is a PURE function of the archetype
+    table + spin config at the default ``CarbonConfig``.  We cache that result to
+    ``<cache_dir>/<backend>/<key>.npz`` (key from :func:`_equilibrium_cache_key`;
+    ``<backend>`` = :func:`jax.default_backend` -- see REGIME below) so a re-run
+    with the same inputs reloads the WHOLE result in ~1 s -- skipping every
+    per-group compile + spin -- instead of re-computing it.
+
+    ``equilibrate_archetypes`` (in ``global_init``) stays PURE (no disk I/O): the
+    cache is a driver concern and lives here.  ``rebuild=True``
+    (``--rebuild-equilibrium``) forces a recompute + overwrite; an empty
+    ``cache_dir`` disables the cache (recompute every launch, unchanged behavior).
+
+    A cache HIT reconstructs the SAME ``(eq, qc)`` the compute returns EXACTLY --
+    ``eq`` as a :class:`CarbonState` of per-archetype pools and ``qc`` as the QC
+    dict of ``(n_arch,)`` arrays -- so the downstream ``map_to_grid`` and the two
+    written ``.npz`` files are byte-identical to a from-scratch build.
+
+    REGIME: the numeric equilibrium is precision- and backend-dependent.  main()
+    PINS x64 (so precision is invariant), and the cache path is namespaced by
+    ``jax.default_backend()`` so a CPU-built cache never serves a GPU run (or vice
+    versa) -- either would break the byte-identical contract.
+
+    A cache file that is corrupt / truncated (a writer killed under an old
+    non-atomic version, a disk fault) OR STRUCTURALLY INCOMPLETE (missing an eq
+    pool or a QC member, wrong shape/dtype -- validated on read) is DROPPED and
+    recomputed rather than crashing every future run OR being served as a partial
+    hit (self-healing).
+    """
+    # Deferred (function-scope) imports keep module import numpy-only and match
+    # the equilibration's own deferred-import discipline.
+    import jax
+    import jax.numpy as jnp
+
+    from legoesm.land.carbon.config import CarbonState
+
+    n_arch = int(np.asarray(table.pft_id).shape[0])
+    key = _equilibrium_cache_key(table, spin)
+    key8 = key[:8]
+    # Namespace by backend so a CPU cache and a GPU cache never cross-serve (their
+    # equilibria can differ in the last bits); x64 is pinned in main(), so a
+    # `<backend>/` subdir fully scopes the regime.
+    path = (Path(cache_dir) / jax.default_backend() / f"{key}.npz"
+            if cache_dir else None)
+
+    if path is not None and path.exists() and not rebuild:
+        t0 = time.time()
+        try:
+            with np.load(path) as z:
+                # Require EXACTLY the eight equilibrium pools and the five QC
+                # members, each a numeric (n_arch,) array (validated), rebuilt in
+                # canonical order -- a KeyError (missing member) / ValueError (bad
+                # shape or dtype) drops the file and recomputes (never a partial
+                # hit).  jnp.asarray happens only AFTER validation, so a bad-dtype
+                # array can't slip through as an uncaught TypeError.
+                eq = CarbonState(**{
+                    p: jnp.asarray(_check_cached_array(z[f"eq_{p}"], f"eq_{p}", n_arch))
+                    for p in CarbonState._fields})
+                qc = {k: _check_cached_array(z[f"qc_{k}"], f"qc_{k}", n_arch)
+                      for k in _QC_KEYS}
+        except (OSError, ValueError, KeyError, EOFError, TypeError,
+                zipfile.BadZipFile) as exc:
+            print(f"[global_carbon_ic] equilibrium cache {key8} unreadable "
+                  f"({type(exc).__name__}); recomputing", flush=True)
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        else:
+            print(f"[global_carbon_ic] equilibrium CACHE HIT ({key8}) loaded in "
+                  f"{time.time() - t0:.1f}s", flush=True)
+            return eq, qc
+
+    # MISS (absent / unreadable / --rebuild-equilibrium) or cache disabled: compute.
+    t0 = time.time()
+    eq, qc = equilibrate_archetypes(
+        table, n_spinup=spin["n_spinup"], n_verify=spin["n_verify"],
+        dt=spin["dt"], n_layers=spin["n_layers"], soil_depth=spin["soil_depth"])
+    elapsed = time.time() - t0
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Save the eight equilibrium pools (eq_<field>) + the five QC members
+        # (qc_<key>, canonical order); reading qc[k] for the fixed _QC_KEYS keeps
+        # save + load symmetric and fails LOUD if the compute ever drops a member.
+        arrays = {f"eq_{p}": np.asarray(getattr(eq, p)) for p in eq._fields}
+        arrays.update({f"qc_{k}": np.asarray(qc[k]) for k in _QC_KEYS})
+        # Write to an EXCLUSIVELY-created unique temp file in the same directory,
+        # then os.replace (ATOMIC within a dir) onto the final path.  tempfile
+        # guarantees the temp name is unique even across nodes/containers sharing a
+        # PID on the advertised SHARED filesystem (os.getpid() alone is not), so
+        # concurrent writers own distinct complete files and a reader only ever
+        # sees a complete file or none -- never a truncated npz.
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(path.parent), prefix=f"{path.stem}.", suffix=".tmp.npz")
+        os.close(fd)  # np.savez reopens by name
+        tmp = Path(tmp_name)
+        try:
+            np.savez(tmp, **arrays)
+            os.replace(tmp, path)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+        print(f"[global_carbon_ic] equilibrated {elapsed:.1f}s (saved cache {key8})",
+              flush=True)
+    else:
+        print(f"[global_carbon_ic] equilibrated {elapsed:.1f}s (cache disabled)",
+              flush=True)
+    return eq, qc
+
+
+# ===========================================================================
 # CLI + orchestration
 # ===========================================================================
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -704,12 +918,68 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="climatology T is in Celsius (add constants.T_freeze)")
     p.add_argument("--dry-run-synthetic", action="store_true",
                    help="fabricate a tiny world and run the full pipeline with no files")
+    # --- persistent caches (mirror scripts/run/train_carbon_params.py) ---
+    p.add_argument("--compilation-cache-dir",
+                   default=os.environ.get("JAX_COMPILATION_CACHE_DIR", ""),
+                   help="dir for JAX's PERSISTENT on-disk compilation cache so the "
+                        "~19-min COLD compile of the per-(is_woody,is_evergreen,"
+                        "soil_class)-group coupled-land-model graphs is written ONCE "
+                        "and reused across launches (a re-run with the same code/backend "
+                        "drops to seconds). MUST be a SHARED-filesystem path when a "
+                        "compute node writes it. Defaults to $JAX_COMPILATION_CACHE_DIR; "
+                        "empty = disabled (unchanged behavior).")
+    p.add_argument("--cache-min-compile-secs", type=float,
+                   default=_CACHE_MIN_COMPILE_SECS_DEFAULT,
+                   help="(--compilation-cache-dir) cache only XLA compiles slower than "
+                        f"this [s] (default {_CACHE_MIN_COMPILE_SECS_DEFAULT:g}); the "
+                        "per-group coupled-land graphs are the slow ones, so keep this "
+                        "small or the cache stays empty.")
+    p.add_argument("--equilibrium-cache-dir",
+                   default=os.environ.get("CARBON_EQUILIBRIUM_CACHE_DIR", ""),
+                   help="dir for the deterministic RESULT cache of the archetype "
+                        "equilibration: its (eq, qc) is a PURE function of the archetype "
+                        "table + spin config at the DEFAULT CarbonConfig, cached per "
+                        "(table + spin) key so a re-run reloads the whole result in ~1 s "
+                        "instead of re-spinning every group. Defaults to "
+                        "$CARBON_EQUILIBRIUM_CACHE_DIR; empty = disabled (always "
+                        "recompute, unchanged behavior).")
+    p.add_argument("--rebuild-equilibrium", action="store_true",
+                   help="force a recompute + overwrite of the equilibrium RESULT cache "
+                        "(--equilibrium-cache-dir). Also bump _EQUILIBRIUM_CACHE_VERSION "
+                        "when the spin-up physics or default params change (the key is "
+                        "over inputs, not code).")
     return p
 
 
 def main(argv=None):
     """Build the global carbon IC and write both .npz files; returns their paths."""
     args = build_arg_parser().parse_args(argv)
+
+    # PIN x64 BEFORE any JAX op: the semi-analytic carbon spin-up is a float64
+    # pipeline (like the calibration trainer's train(), which pins the same), and
+    # pinning here makes the equilibrium precision INVARIANT regardless of the
+    # JAX_ENABLE_X64 env -- so the deterministic result cache can never serve a
+    # float32-built equilibrium into a float64 run (or vice versa), which would
+    # violate its byte-identical contract.  Must precede every JAX op below.
+    import jax
+    jax.config.update("jax_enable_x64", True)
+
+    # Enable JAX's PERSISTENT on-disk compilation cache BEFORE the first JAX op
+    # (zonal_monthly_climate's vmap on the real path; the per-group coupled-land
+    # graph in equilibrate_archetypes). The equilibration cold-compiles a separate
+    # coupled-land-model XLA graph per (is_woody, is_evergreen, soil_class) group --
+    # ~19 min/group on a diverse real archetype set -- so a shared on-disk cache
+    # turns every re-run's compile into a seconds-long disk reuse. Empty dir =>
+    # no-op (default behavior). Deferred import keeps module import numpy-only.
+    # Mirrors scripts/run/train_carbon_params.py.
+    from legoesm.ml.training import configure_jax_compilation_cache
+    compile_cache_dir = configure_jax_compilation_cache(
+        args.compilation_cache_dir, args.cache_min_compile_secs)
+    if compile_cache_dir is not None:
+        print(f"[global_carbon_ic] JAX persistent compilation cache: "
+              f"{compile_cache_dir} (caching compiles > "
+              f"{args.cache_min_compile_secs:g}s) — per-group coupled-land-model "
+              "compiles are written once and reused across launches.", flush=True)
 
     if args.dry_run_synthetic:
         print("[global_carbon_ic] --dry-run-synthetic: fabricating a tiny world")
@@ -742,13 +1012,20 @@ def main(argv=None):
           f"the map): mean {mean_drop * 100.0:.2f}%, max {max_drop * 100.0:.2f}% "
           f"of land area (known Stage-A approximation)")
 
-    # Stage B: spin every archetype to a verified equilibrium.
+    # Stage B: spin every archetype to a verified equilibrium, THROUGH the
+    # deterministic result cache -- a re-run with the same archetype table + spin
+    # config reloads the (eq, qc) in ~1 s instead of re-paying the per-group cold
+    # compile + spin-up (the load-bearing shield; see _load_or_equilibrate).
     print(f"[global_carbon_ic] equilibrating (n_spinup={args.n_spinup}, "
           f"n_verify={args.n_verify}, dt={args.dt}s, n_layers={args.n_layers}, "
           f"soil_depth={args.soil_depth}m) ...")
-    eq, qc = equilibrate_archetypes(
-        table, n_spinup=args.n_spinup, n_verify=args.n_verify, dt=args.dt,
-        n_layers=args.n_layers, soil_depth=args.soil_depth)
+    spin = {
+        "n_spinup": args.n_spinup, "n_verify": args.n_verify, "dt": args.dt,
+        "n_layers": args.n_layers, "soil_depth": args.soil_depth,
+    }
+    eq, qc = _load_or_equilibrate(
+        table, spin, cache_dir=args.equilibrium_cache_dir,
+        rebuild=args.rebuild_equilibrium)
 
     # Stage C: cover-weighted map of archetype equilibria onto the grid.
     grid_state = map_to_grid(cell_id, cell_w, eq)
