@@ -31,16 +31,12 @@ class GWDOutput(NamedTuple):
         Temperature tendency from wave breaking [K/s], shape (ncol, nlev).
     eps_gwd : jax.Array
         Column-integrated wave energy dissipation [W/m^2], shape (ncol,).
-        For the wind-opposing diagnostic schemes
-        (rayleigh/lindzen/mcfarlane/hines) this is the mean-flow KE loss
-        eps_gwd = -sum(rho * (u*du_dt + v*dv_dt) * dz) >= 0 (drag removes
-        KE from the mean flow).  The experimental ``prognostic_spectral``
-        scheme instead reports the column wave-dissipation (frictional
-        heating) integral, >= 0 by construction, because with its two-sided
-        prognostic spectrum (deposition sign ``sign(c - U_proj)`` fixed at
-        launch, F-GWD-1) waves faster than the wind can accelerate the mean
-        flow — the KE-loss form is NOT guaranteed positive there and is
-        deliberately not what it reports.
+        eps_gwd = -sum(rho * (u*du_dt + v*dv_dt) * dz).  Positive for the
+        wind-opposing diagnostic schemes (rayleigh/lindzen/mcfarlane/hines),
+        where drag removes KE from the mean flow; ``prognostic_spectral``
+        is positive by construction since the launch-level
+        ``sign(c - U_launch)`` deposition factor landed (#856 closed
+        F-GWD-1 -- the earlier deposition could accelerate the mean flow).
     """
     du_dt: jax.Array
     dv_dt: jax.Array
