@@ -110,6 +110,39 @@ SOM_FIELDS: tuple[str, ...] = (
     "cwd_humification_eff",
 )
 
+# The LIVE-pool (foliage/root/wood) fields the biomass/LAI streams (--with-biomass/
+# --with-lai) calibrate through the closed-form live-pool forward
+# (legoesm.land.carbon.live_pool_forward): the DALEC allocation partition (f_fol/f_root),
+# the live-pool residence rates (leaf_lifespan / tor_root / tor_wood) and the leaf-mass-per-
+# area LCMA.  Their gradient flows analytically through the single-step live-pool
+# equilibrium C_pool = a_pool*NPP/k_pool, so they are FAST-valid (like SOM_FIELDS through
+# analytic_som_soc) and added to the fast trainable set only when a live-pool stream is on.
+# The preflight freezes any that the requested stream(s) leave with a zero gradient (e.g.
+# tor_wood under --with-lai alone: LAI depends only on C_fol).
+#
+# EXCLUDED (deliberately, like Q10_het_exp is from SOM_FIELDS):
+#   * ``f_lab`` -- the labile fraction.  The closed-form foliage uses the DIRECT allocation
+#     a_fol only (the labile buffer's NET annual contribution to the standing foliage is
+#     second-order and largely drained to nighttime respiration -- verified by the fidelity
+#     gate), so LAI is INSENSITIVE to f_lab, and f_lab's only biomass effect (diluting the
+#     structural root/wood allocation) goes through a DIFFERENT pathway than the model's
+#     labile-buffer respiration.  Its fast-mode gradient is therefore unreliable; train it
+#     via the slow grad-through-spin-up path (--slow-spinup-grad --all-carbon-params) instead.
+#
+# APPROXIMATION (frozen-NPP partial gradient, documented): npp_pos_annual is recorded ONCE
+# at the DEFAULT physiology and held fixed while these leaves vary.  NPP is UPSTREAM of
+# allocation, so freezing it is EXACT for the direct allocation/residence/LCMA -> pool
+# effect the gradient follows.  It omits a SECOND-ORDER feedback (the pools set LAI = C_fol/
+# LCMA -> GPP and the maintenance respiration -> NPP), exactly the partial-gradient class
+# that excludes Q10_het_exp from the fast SOM set and freezes the SIF forward's leaf state;
+# the fidelity gate (_live_pool_match) confirms the closed form tracks the spin-up
+# equilibrium at the defaults, so the calibration follows the correct leading-order
+# gradient direction.  A fully-coupled NPP feedback needs the slow forward (out of scope --
+# the fast live-pool forward is single-step by design).
+LIVE_POOL_FIELDS: tuple[str, ...] = (
+    "f_fol", "f_root", "leaf_lifespan", "tor_root", "tor_wood", "LCMA",
+)
+
 # --- training defaults (modest; a compute-node short calibration) --------------
 DEFAULT_STEPS = 60
 DEFAULT_LR = 3.0e-2
@@ -159,7 +192,7 @@ DEFAULT_CACHE_MIN_COMPILE_SECS = 1.0
 # a change with UNCHANGED table+spin inputs would otherwise serve a STALE precompute;
 # the version bump forces a MISS (recompute).  Mirrors the XLA compilation cache's
 # HLO-in-key safety (see configure_jax_compilation_cache).
-_PRECOMPUTE_CACHE_VERSION = "v1"
+_PRECOMPUTE_CACHE_VERSION = "v3"  # v3: + npp_pos_annual/is_woody/is_evergreen/live_ref_* (live-pool forward)
 DEFAULT_PRECOMPUTE_CACHE_DIR = (
     os.environ.get("CARBON_PRECOMPUTE_CACHE_DIR", "")
     or str(REPO_ROOT / ".cache" / "carbon_precompute"))
@@ -167,6 +200,10 @@ DEFAULT_PRECOMPUTE_CACHE_DIR = (
 # scales, so the summed cover-weighted MSE weights each term; SOC is the reference (1).
 W_SOC = 1.0
 DEFAULT_SIF_WEIGHT = 1.0           # --sif-weight; balances the sif MSE against soc
+# biomass (kgC/m2, O(1-10)) and LAI (m2/m2, O(1)) live on their own scales, so each term
+# is weighted against the reference SOC term (weight 1); tune per run if a term dominates.
+DEFAULT_BIOMASS_WEIGHT = 1.0       # --biomass-weight; balances the biomass MSE against soc
+DEFAULT_LAI_WEIGHT = 1.0           # --lai-weight; balances the lai MSE against soc
 GRAD_NONZERO_TOL = 1.0e-14
 # Mean analytic-vs-spin-up SOC relative error above which the fast forward is
 # flagged as an unreliable proxy for the model (a loud run-log warning, not a
@@ -237,6 +274,21 @@ def _sif_extractor(preds) -> jax.Array:
     return preds["sif"]
 
 
+def _biomass_extractor(preds) -> jax.Array:
+    """Model per-archetype live biomass [kgC/m2] from the predictions bundle.
+
+    The (single-step, spin-up-free) closed-form live-pool forward is evaluated in the loss
+    and stores ``(biomass, lai)`` under ``preds["biomass"]`` / ``preds["lai"]`` (see
+    :func:`legoesm.land.carbon.live_pool_forward.compute_biomass_lai`)."""
+    return preds["biomass"]
+
+
+def _lai_extractor(preds) -> jax.Array:
+    """Model per-archetype simulated LAI [m2/m2] from the predictions bundle
+    (``preds["lai"]``; the closed-form ``C_fol / LCMA``)."""
+    return preds["lai"]
+
+
 def cover_weighted_mse(
     pred: jax.Array, target: jax.Array, cover_weight: jax.Array,
 ) -> jax.Array:
@@ -252,6 +304,23 @@ def cover_weighted_mse(
     pred3 = jnp.reshape(pred, (-1, 1, 1))
     target3 = jnp.reshape(target, (-1, 1, 1))
     return area_weighted_mse(pred3, target3, jnp.asarray(cover_weight))
+
+
+def _cover_weighted_rel_err(pred, ref, cover_weight=None) -> float:
+    """Cover-weighted RMS error relative to the cover-weighted mean reference (numpy).
+
+    ``sqrt(sum w (pred-ref)^2 / sum w) / |sum w ref / sum w|`` -- the loss-relevant fidelity
+    metric shared by the analytic-vs-spin-up SOC and live-pool (biomass/LAI) match checks
+    (:func:`_precompute_and_check`): how well a closed-form surrogate tracks the actual
+    cover-weighted-MSE objective, normalised so near-zero cells do not inflate it.  A
+    uniform weight (``cover_weight=None``) reduces to the plain RMS / mean."""
+    p = np.asarray(pred, float)
+    r = np.asarray(ref, float)
+    w = np.ones_like(r) if cover_weight is None else np.asarray(cover_weight, float)
+    wsum = float(np.sum(w)) or 1.0
+    rmse = float(np.sqrt(np.sum(w * (p - r) ** 2) / wsum))
+    mean_ref = float(np.sum(w * r) / wsum)
+    return rmse / max(abs(mean_ref), 1e-6)
 
 
 def _total_loss(preds, losses: dict[str, LossTerm], cover_weight: jax.Array) -> jax.Array:
@@ -314,6 +383,7 @@ def _filter_params(
 
 def build_carbon_trainables(
     *, som_only: bool = True, with_sif: bool = False,
+    with_biomass: bool = False, with_lai: bool = False,
 ) -> TrainablePhysicsParams:
     """Tier-``extended`` ``land.carbon`` (+ optional ``land.canopy.sif``) trainables,
     warm-started from the production ``CarbonConfig`` / ``SIFConfig`` defaults
@@ -326,6 +396,13 @@ def build_carbon_trainables(
     SOC (nor ``Q10_het_exp``, whose fast-mode gradient is partial -- see the comment on
     :data:`SOM_FIELDS`).  Pass ``som_only=False`` to expose the full tier-2 carbon set
     (only valid with ``--slow-spinup-grad``; see :func:`_finalize_args`).
+
+    ``with_biomass`` / ``with_lai`` additionally include the seven live-pool
+    allocation/residence/LCMA fields (:data:`LIVE_POOL_FIELDS`) -- the biomass/LAI streams'
+    calibration target -- which are FAST-valid through the closed-form live-pool forward
+    (their gradient is analytic; NPP is frozen upstream of allocation).  Kept in the
+    ``som_only`` set so the fast path can train them; the preflight freezes any left with a
+    zero gradient by the requested stream(s).
 
     ``with_sif`` additionally includes the tier-1/2 ``SIFConfig`` fluorescence params
     (``kn0``/``kn_beta``/``kn_gamma``/``max_electron_yield``/``escape_probability``/
@@ -347,13 +424,17 @@ def build_carbon_trainables(
     if not som_only:
         # Full tier-2 carbon set (+ all SIF fluorescence params when --with-sif).
         return params
-    # SOM-only carbon subset, PLUS all SIF fluorescence params.
-    keep = {f"{CARBON_SCHEME_KEY}.{f}" for f in SOM_FIELDS} | sif_names
+    # SOM-only carbon subset, PLUS all SIF fluorescence params, PLUS the live-pool fields
+    # when a biomass/LAI stream is on (fast-valid through the closed-form live-pool forward).
+    carbon_fields = set(SOM_FIELDS)
+    if with_biomass or with_lai:
+        carbon_fields |= set(LIVE_POOL_FIELDS)
+    keep = {f"{CARBON_SCHEME_KEY}.{f}" for f in carbon_fields} | sif_names
     have = {c.name for c in params.constraints}
-    missing = {f"{CARBON_SCHEME_KEY}.{f}" for f in SOM_FIELDS} - have
+    missing = {f"{CARBON_SCHEME_KEY}.{f}" for f in carbon_fields} - have
     if missing:
         raise ValueError(
-            f"SOM fields absent from the land.carbon tier-extended trainables: "
+            f"carbon fields absent from the land.carbon tier-extended trainables: "
             f"{sorted(missing)}; known={sorted(have)}")
     return _filter_params(params, keep)
 
@@ -388,6 +469,29 @@ def _make_sif_forward(table):
         return sif_fn(cfg)
 
     return sif_forward
+
+
+def _make_live_pool_forward(precomputed):
+    """Build ``live_pool_forward(carbon_overrides) -> (biomass, lai)`` [kgC/m2, m2/m2] from
+    the precomputed live-pool inputs (``npp_pos_annual`` + ``is_woody``).
+
+    Precomputes nothing new (the NPP + woody flag are recorded ONCE by the fast-analytic
+    precompute, param-independent), then each call splices the TRACED CARBON overrides into
+    a fresh ``CarbonConfig`` (production defaults untouched) and applies the differentiable
+    closed-form live-pool equilibrium -- a single-step graph, no spin-up.  Uses the SAME
+    ``land.carbon`` overrides as the SOC forward (biomass/LAI train the allocation/residence/
+    LCMA leaves), mirroring :func:`_make_sif_forward` (which uses the disjoint SIF slice)."""
+    from legoesm.land.carbon.config import CarbonConfig
+    from legoesm.land.carbon.live_pool_forward import build_live_pool_forward
+    from legoesm.training.param_collector import apply_param_overrides
+
+    live_fn = build_live_pool_forward(precomputed)
+
+    def live_pool_forward(carbon_overrides):
+        cfg = apply_param_overrides(CarbonConfig(scheme="differland"), carbon_overrides)
+        return live_fn(cfg)   # (biomass, lai)
+
+    return live_pool_forward
 
 
 def _param_values(params: TrainablePhysicsParams) -> dict[str, float]:
@@ -593,18 +697,20 @@ def make_fast_analytic_forward(precomputed) -> Callable[[TrainablePhysicsParams]
 
 def make_fast_loss_fn(
     precomputed, *, losses: dict[str, LossTerm], cover_weight: jax.Array,
-    sif_forward=None,
+    sif_forward=None, live_pool_forward=None,
 ) -> Callable[[TrainablePhysicsParams], jax.Array]:
     """Fast-analytic calibration loss, routed through the SAME registry as the slow path.
 
     The SOC term is the closed-form per-archetype SOM SOC (``make_fast_analytic_forward``,
     stored under ``preds["soc"]`` for :func:`_fast_soc_extractor`); ``jax.grad`` flows to
     the seven fast-valid SOM leaves (:data:`SOM_FIELDS`) through the analytic cascade at
-    ~zero cost -- no spin-up in the gradient loop.  The SOM ``biomass`` / ``lai`` terms
-    remain a v2 concern (the closed form is SOM-specific), but the single-step ``sif`` term
-    (``--with-sif``) composes here too: it is spin-up-free, so it adds ``preds["sif"]`` and
-    sums via ``_total_loss`` exactly as in the slow path.  With ``sif_forward=None`` and
-    only ``soc`` in the registry this equals the prior SOC-only fast loss.
+    ~zero cost -- no spin-up in the gradient loop.  The single-step ``sif`` term
+    (``--with-sif``) and ``biomass`` / ``lai`` terms (``--with-biomass`` / ``--with-lai``)
+    compose here too: each is spin-up-free, so ``sif_forward`` adds ``preds["sif"]`` and
+    ``live_pool_forward`` adds ``preds["biomass"]`` + ``preds["lai"]`` (both from the SAME
+    traced CARBON overrides the SOC forward uses), summed via ``_total_loss`` exactly as in
+    the slow path.  With every optional forward ``None`` and only ``soc`` in the registry
+    this equals the prior SOC-only fast loss.
     """
     model_soc = make_fast_analytic_forward(precomputed)
 
@@ -612,6 +718,10 @@ def make_fast_loss_fn(
         preds = {"soc": model_soc(params)}
         if sif_forward is not None:
             preds["sif"] = sif_forward(_sif_overrides(params))
+        if live_pool_forward is not None:
+            biomass, lai = live_pool_forward(_carbon_overrides(params))
+            preds["biomass"] = biomass
+            preds["lai"] = lai
         return _total_loss(preds, losses, cover_weight)
 
     return loss_fn
@@ -621,13 +731,16 @@ def _build_loss_fn(args, target_bundle, spin, precomputed):
     """Return ``loss_fn(params) -> scalar`` for the active forward -- the fast
     closed-form SOC loss when ``--fast-analytic``, else the slow spin-up loss.  Both
     route through the registry ``_total_loss``; ``--with-sif`` adds the single-step SIF
-    forward (built on the full table) to the predictions bundle in either mode."""
+    forward (built on the full table) in either mode, and ``--with-biomass`` / ``--with-lai``
+    add the single-step live-pool forward (fast mode only -- it needs the NPP precompute)."""
     make_sif = target_bundle.get("make_sif_forward")
     sif_forward = make_sif(target_bundle["table"]) if make_sif is not None else None
+    live_pool_forward = target_bundle.get("live_pool_forward")
     if args.fast_analytic:
         return make_fast_loss_fn(
             precomputed, losses=target_bundle["losses"],
-            cover_weight=target_bundle["cover_weight"], sif_forward=sif_forward)
+            cover_weight=target_bundle["cover_weight"], sif_forward=sif_forward,
+            live_pool_forward=live_pool_forward)
     return make_loss_fn(
         table=target_bundle["table"], losses=target_bundle["losses"],
         cover_weight=target_bundle["cover_weight"], sif_forward=sif_forward, **spin)
@@ -774,6 +887,81 @@ def _slice_table(table, idx: np.ndarray):
                              for f in table._fields})
 
 
+def _build_observed_sif(args, table, inputs, cell_id, cell_w, n_arch_full):
+    """Per-archetype observed SIF [umol/m2/s] (``--with-sif``), or ``None``.
+
+    Synthetic in the dry-run; else a gridded satellite SIF product cover-weighted per
+    archetype (native-grid ``clm5_surfdata`` only, like the SOC organic column)."""
+    if not args.with_sif:
+        return None
+    from legoesm.land.carbon.sif_observations import (
+        load_gridded_sif, per_archetype_observed_sif, synthetic_observed_sif,
+    )
+    if args.dry_run_synthetic:
+        return synthetic_observed_sif(table)
+    if args.surfdata_preset != "clm5_surfdata":
+        raise SystemExit(
+            "--with-sif observed SIF is only wired for the native-grid 'clm5_surfdata' "
+            f"preset (the gridded SIF must match the cover grid); '{args.surfdata_preset}' "
+            "regrids the cover. Use clm5_surfdata.")
+    ncell = int(inputs.pft_weights.shape[0])
+    sif_cell = load_gridded_sif(args.sif_obs, ncell=ncell, sif_var=(args.sif_var or None))
+    return per_archetype_observed_sif(sif_cell, cell_id, cell_w, n_arch=n_arch_full)
+
+
+def _build_observed_biomass(args, table, inputs, cell_id, cell_w, n_arch_full):
+    """Per-archetype observed live biomass [kgC/m2] (``--with-biomass``), or ``None``.
+
+    Synthetic in the dry-run; else a gridded biomass product cover-weighted per archetype
+    (native-grid ``clm5_surfdata`` only).  The real ESA-CCI Biomass / GEDI AGB fetcher +
+    AGB->carbon / above-ground->total conversion is a documented FOLLOW-UP (see
+    :mod:`legoesm.land.carbon.biomass_observations`); ``--biomass-obs`` supplies a
+    pre-regridded product in carbon units."""
+    if not args.with_biomass:
+        return None
+    from legoesm.land.carbon.biomass_observations import (
+        load_gridded_biomass, per_archetype_observed_biomass, synthetic_observed_biomass,
+    )
+    if args.dry_run_synthetic:
+        return synthetic_observed_biomass(table)
+    if args.surfdata_preset != "clm5_surfdata":
+        raise SystemExit(
+            "--with-biomass observed biomass is only wired for the native-grid "
+            f"'clm5_surfdata' preset; '{args.surfdata_preset}' regrids the cover. "
+            "Use clm5_surfdata.")
+    ncell = int(inputs.pft_weights.shape[0])
+    bio_cell = load_gridded_biomass(
+        args.biomass_obs, ncell=ncell, biomass_var=(args.biomass_var or None))
+    return per_archetype_observed_biomass(bio_cell, cell_id, cell_w, n_arch=n_arch_full)
+
+
+def _build_observed_lai(args, table, inputs, cell_id, cell_w, n_arch_full):
+    """Per-archetype observed LAI [m2/m2] (``--with-lai``), or ``None``.
+
+    Synthetic in the dry-run; else the CLM5 surfdata ``MONTHLY_LAI`` (annual-mean, per-PFT)
+    cover-weighted per archetype (native-grid ``clm5_surfdata`` only).  ``MONTHLY_LAI``
+    lives in the surfdata itself, so ``--lai-obs`` defaults to ``--surf-path`` (no new
+    download)."""
+    if not args.with_lai:
+        return None
+    from legoesm.land.carbon.lai_observations import (
+        load_surfdata_lai, per_archetype_observed_lai, synthetic_observed_lai,
+    )
+    if args.dry_run_synthetic:
+        return synthetic_observed_lai(table)
+    if args.surfdata_preset != "clm5_surfdata":
+        raise SystemExit(
+            "--with-lai observed LAI is only wired for the native-grid 'clm5_surfdata' "
+            f"preset (MONTHLY_LAI on the cover grid); '{args.surfdata_preset}' regrids the "
+            "cover. Use clm5_surfdata.")
+    ncell = int(inputs.pft_weights.shape[0])
+    n_pft = int(inputs.pft_weights.shape[1])
+    lai_path = args.lai_obs or args.surf_path   # MONTHLY_LAI lives in the surfdata itself
+    lai_cell_pft = load_surfdata_lai(
+        lai_path, ncell=ncell, n_pft=n_pft, lai_var=(args.lai_var or None))
+    return per_archetype_observed_lai(lai_cell_pft, cell_id, cell_w, n_arch=n_arch_full)
+
+
 def build_target(args) -> dict[str, Any]:
     """Assemble the calibration target: the (possibly subsampled) ArchetypeTable,
     the observed per-archetype SOC [kgC/m2], and the per-archetype cover weight.
@@ -840,35 +1028,37 @@ def build_target(args) -> dict[str, Any]:
         observed_full = per_archetype_observed_soc(
             organic, dz, cell_id, cell_w, n_arch=n_arch_full)
 
-    # Observed SIF target (--with-sif): a per-archetype cover-weighted mean, mirroring
-    # the SOC target.  Synthetic in the dry-run; else a gridded satellite SIF product,
-    # which (like the SOC organic column) is only wired for the native-grid clm5_surfdata
-    # cover.  Built on the FULL table (subsample below).
-    observed_sif_full = None
-    if args.with_sif:
-        from legoesm.land.carbon.sif_observations import (
-            load_gridded_sif, per_archetype_observed_sif, synthetic_observed_sif,
-        )
-        if args.dry_run_synthetic:
-            observed_sif_full = synthetic_observed_sif(table)
-        else:
-            if args.surfdata_preset != "clm5_surfdata":
-                raise SystemExit(
-                    "--with-sif observed SIF is only wired for the native-grid "
-                    "'clm5_surfdata' preset (the gridded SIF must match the cover grid); "
-                    f"'{args.surfdata_preset}' regrids the cover. Use clm5_surfdata.")
-            ncell = int(inputs.pft_weights.shape[0])
-            sif_cell = load_gridded_sif(
-                args.sif_obs, ncell=ncell, sif_var=(args.sif_var or None))
-            observed_sif_full = per_archetype_observed_sif(
-                sif_cell, cell_id, cell_w, n_arch=n_arch_full)
+    # Observed SIF / biomass / LAI targets (--with-sif / --with-biomass / --with-lai): each
+    # a per-archetype cover-weighted mean mirroring the SOC target.  Synthetic in the
+    # dry-run; else a gridded product / surfdata field, which (like the SOC organic column)
+    # is only wired for the native-grid clm5_surfdata cover.  Built on the FULL table
+    # (subsample below).  ``units`` is only for the run-log note.
+    observed_sif_full = _build_observed_sif(args, table, inputs, cell_id, cell_w, n_arch_full)
+    observed_biomass_full = _build_observed_biomass(
+        args, table, inputs, cell_id, cell_w, n_arch_full)
+    observed_lai_full = _build_observed_lai(
+        args, table, inputs, cell_id, cell_w, n_arch_full)
 
     keep = _stratified_subsample(table, args.max_archetypes, seed=args.seed)
     table = _slice_table(table, keep)
     observed = np.asarray(observed_full)[keep]
     cover = np.asarray(cover_full)[keep]
-    observed_sif = (np.asarray(observed_sif_full)[keep]
-                    if observed_sif_full is not None else None)
+
+    def _sub(arr):
+        return np.asarray(arr)[keep] if arr is not None else None
+
+    # Optional single-step streams: (name, observed, extractor, weight, units, forward-tag).
+    # ``forward`` = "sif" builds the SIF forward; "live_pool" builds the live-pool forward
+    # (shared by biomass + lai).
+    extra_specs = [
+        ("sif", _sub(observed_sif_full), _sif_extractor, args.sif_weight,
+         "umol/m2/s", "sif"),
+        ("biomass", _sub(observed_biomass_full), _biomass_extractor,
+         args.biomass_weight, "kgC/m2", "live_pool"),
+        ("lai", _sub(observed_lai_full), _lai_extractor, args.lai_weight,
+         "m2/m2", "live_pool"),
+    ]
+    present = [s for s in extra_specs if s[1] is not None]
 
     # Sanitise with PER-STREAM finite masks.  The cover weight is SHARED across registry
     # terms, so an archetype is ACTIVE if it has ANY finite observation (finite_any) with
@@ -878,29 +1068,31 @@ def build_target(args) -> dict[str, Any]:
     # stays the denominator (preserving the chunked-gradient exactness).  Targets are
     # sanitised NaN->0 where their own mask is 0, so 0*mask never poisons the sum.
     finite_soc = np.isfinite(observed)
+    finite = {name: np.isfinite(obs) for (name, obs, *_rest) in present}
     finite_any = finite_soc
-    finite_sif = None
-    if observed_sif is not None:
-        finite_sif = np.isfinite(observed_sif)
-        finite_any = finite_soc | finite_sif
+    for name in finite:
+        finite_any = finite_any | finite[name]
     cover = np.where(finite_any & (cover > 0.0), cover, 0.0)
     observed = np.where(finite_soc, observed, 0.0)
-    if observed_sif is not None:
-        observed_sif = np.where(finite_sif, observed_sif, 0.0)
+    # Re-materialise each present stream's sanitised target (NaN->0 where masked out).
+    present = [
+        (name, np.where(finite[name], np.asarray(obs), 0.0), ext, w, units, fwd)
+        for (name, obs, ext, w, units, fwd) in present
+    ]
     if not np.any(cover > 0.0):
+        streams = "/".join(["SOC"] + [n.upper() for (n, *_r) in present])
         raise SystemExit(
-            "no archetype has a finite observed "
-            + ("SOC or SIF" if observed_sif is not None else "SOC")
-            + " with positive cover; cannot fit.")
-    if observed_sif is not None and not np.any(finite_sif & (cover > 0.0)):
-        # --with-sif was requested but NO archetype has a usable SIF observation (an
-        # all-gap product, or a grid that does not overlap the land cover). Fail loud
-        # rather than silently train a dead SIF term that reports a fake 0 RMSE.
-        raise SystemExit(
-            "--with-sif but no archetype has a finite observed SIF with positive cover "
-            "(the gridded SIF product may be all-gap over the land cover or on a "
-            "mismatched grid); provide a SIF product overlapping the surfdata cover, or "
-            "drop --with-sif.")
+            f"no archetype has a finite observed {streams} with positive cover; cannot fit.")
+    for (name, obs, *_rest) in present:
+        if not np.any(finite[name] & (cover > 0.0)):
+            # The stream was requested but NO archetype has a usable observation (an all-gap
+            # product, or a grid that does not overlap the land cover). Fail loud rather than
+            # silently train a dead term that reports a fake 0 RMSE.
+            raise SystemExit(
+                f"--with-{name} but no archetype has a finite observed {name.upper()} with "
+                f"positive cover (the product may be all-gap over the land cover or on a "
+                f"mismatched grid); provide a {name.upper()} product overlapping the "
+                f"surfdata cover, or drop --with-{name}.")
 
     # Mode-aware SOC extractor: the FAST closed form supplies SOC directly (preds["soc"]);
     # the SLOW forward supplies the equilibrium CarbonState (preds["eq"]).
@@ -908,49 +1100,52 @@ def build_target(args) -> dict[str, Any]:
     # SOC mask only matters when another stream keeps an archetype active where SOC is
     # missing; SOC-only, the cover-zeroing already drops NaN-SOC archetypes (mask=None,
     # the unchanged single-stream path).
-    soc_mask = (jnp.asarray(finite_soc, dtype=jnp.float64)
-                if observed_sif is not None else None)
+    soc_mask = (jnp.asarray(finite_soc, dtype=jnp.float64) if present else None)
     losses = {
         "soc": LossTerm(target=jnp.asarray(observed, dtype=jnp.float64),
                         extractor=soc_extractor, weight=W_SOC, mask=soc_mask),
-        # TODO (Stage-B v2): add `biomass` (CLM5 monthly biomass), `lai`, `d13c` entries
-        # here -- each a LossTerm(target, extractor, weight[, mask]) -- and the loop picks
-        # them up with no further change.
     }
+    # Each present single-step stream is added to the SAME registry (summed via _total_loss,
+    # no loop change); its simulated forward is the spin-up-free _make_sif_forward /
+    # _make_live_pool_forward.  ``d13c`` etc. plug in the same way.
     make_sif_forward = None
-    if observed_sif is not None:
-        # SIF is added to the SAME registry (summed via _total_loss, no loop change); its
-        # simulated forward is the single-step, spin-up-free _make_sif_forward.
-        losses["sif"] = LossTerm(
-            target=jnp.asarray(observed_sif, dtype=jnp.float64),
-            extractor=_sif_extractor, weight=args.sif_weight,
-            mask=jnp.asarray(finite_sif, dtype=jnp.float64))
-        make_sif_forward = _make_sif_forward
+    needs_live_pool = False
+    for (name, obs, ext, w, _units, fwd) in present:
+        losses[name] = LossTerm(
+            target=jnp.asarray(obs, dtype=jnp.float64), extractor=ext, weight=w,
+            mask=jnp.asarray(finite[name], dtype=jnp.float64))
+        if fwd == "sif":
+            make_sif_forward = _make_sif_forward
+        elif fwd == "live_pool":
+            needs_live_pool = True
 
     n_kept = int(table.pft_id.shape[0])
     n_active = int(np.sum(cover > 0.0))
     soc_active = finite_soc & (cover > 0.0)
-    sif_note = ""
-    if observed_sif is not None:
-        sif_active = finite_sif & (cover > 0.0)
-        n_soc = int(np.sum(soc_active))
-        n_sif = int(np.sum(sif_active))
-        sif_lo, sif_hi = ((np.min(observed_sif[sif_active]),
-                           np.max(observed_sif[sif_active])) if n_sif else (float("nan"),) * 2)
-        sif_note = (f"; SOC obs on {n_soc}, SIF obs on {n_sif} of {n_active}; "
-                    f"observed SIF [{sif_lo:.2f}, {sif_hi:.2f}] umol/m2/s (w={args.sif_weight:g})")
+    notes = []
+    for (name, obs, _ext, w, units, _fwd) in present:
+        act = finite[name] & (cover > 0.0)
+        n_obs = int(np.sum(act))
+        lo, hi = ((np.min(obs[act]), np.max(obs[act])) if n_obs else (float("nan"),) * 2)
+        notes.append(f"{name.upper()} obs on {n_obs} [{lo:.2f}, {hi:.2f}] {units} "
+                     f"(w={w:g})")
+    extra_note = ("; " + "; ".join(notes)) if notes else ""
     soc_lo, soc_hi = ((np.min(observed[soc_active]), np.max(observed[soc_active]))
                       if np.any(soc_active) else (float("nan"),) * 2)
     print(f"[target] source={source} archetypes: {n_arch_full} built -> "
           f"{n_kept} kept ({n_active} active); "
-          f"observed SOC [{soc_lo:.2f}, {soc_hi:.2f}] kgC/m2{sif_note}")
+          f"observed SOC [{soc_lo:.2f}, {soc_hi:.2f}] kgC/m2{extra_note}")
+    by_name = {name: obs for (name, obs, *_r) in present}
     return {
         "table": table,
         "losses": losses,
         "cover_weight": jnp.asarray(cover, dtype=jnp.float64),
         "observed_soc": observed,
-        "observed_sif": observed_sif,
+        "observed_sif": by_name.get("sif"),
+        "observed_biomass": by_name.get("biomass"),
+        "observed_lai": by_name.get("lai"),
         "make_sif_forward": make_sif_forward,
+        "needs_live_pool": needs_live_pool,
         "pft_id": np.asarray(table.pft_id, int),
         "source": source,
         "n_arch_full": n_arch_full,
@@ -1085,6 +1280,12 @@ def _load_or_precompute(table, spin: dict, *, cache_dir: str, rebuild: bool):
                     soil_T_traj=jnp.asarray(z["soil_T_traj"]),
                     precip=jnp.asarray(z["precip"]),
                     dt_days=float(z["dt_days"]),
+                    npp_pos_annual=jnp.asarray(z["npp_pos_annual"]),
+                    is_woody=jnp.asarray(z["is_woody"]),
+                    is_evergreen=jnp.asarray(z["is_evergreen"]),
+                    live_ref_C_fol=jnp.asarray(z["live_ref_C_fol"]),
+                    live_ref_C_root=jnp.asarray(z["live_ref_C_root"]),
+                    live_ref_C_wood=jnp.asarray(z["live_ref_C_wood"]),
                 )
                 real_som = jnp.asarray(z["real_som"])
         except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile) as exc:
@@ -1111,7 +1312,8 @@ def _load_or_precompute(table, spin: dict, *, cache_dir: str, rebuild: bool):
     elapsed = time.time() - t0
     if path is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Save all four FastAnalyticInputs arrays + the dt_days scalar + real_som.
+        # Save the FastAnalyticInputs arrays + the dt_days scalar + real_som + the
+        # live-pool inputs/reference (npp_pos_annual / is_woody / live_ref_*).
         # dt_days is a Python float -> a 0-d float64 array round-trips back to
         # float() exactly.  Write to a unique temp file then os.replace onto the
         # final path: os.replace is ATOMIC within a directory, so a crashed or
@@ -1129,6 +1331,12 @@ def _load_or_precompute(table, spin: dict, *, cache_dir: str, rebuild: bool):
                 precip=np.asarray(precomputed.precip),
                 dt_days=np.asarray(precomputed.dt_days, dtype=np.float64),
                 real_som=np.asarray(real_som),
+                npp_pos_annual=np.asarray(precomputed.npp_pos_annual),
+                is_woody=np.asarray(precomputed.is_woody),
+                is_evergreen=np.asarray(precomputed.is_evergreen),
+                live_ref_C_fol=np.asarray(precomputed.live_ref_C_fol),
+                live_ref_C_root=np.asarray(precomputed.live_ref_C_root),
+                live_ref_C_wood=np.asarray(precomputed.live_ref_C_wood),
             )
             os.replace(tmp, path)
         finally:
@@ -1140,6 +1348,39 @@ def _load_or_precompute(table, spin: dict, *, cache_dir: str, rebuild: bool):
         print(f"[fast-analytic] precompute {elapsed:.1f}s (cache disabled)",
               flush=True)
     return precomputed, real_som
+
+
+def _live_pool_match(precomputed, initial_params, cover_weight) -> dict[str, Any]:
+    """Closed-form live-pool (biomass/LAI) vs the spin-up's annual-mean equilibrium.
+
+    Builds the closed-form live-pool forward at the warm-started production defaults and
+    compares its biomass [kgC/m2] / LAI [m2/m2] against the precompute's recorded annual-mean
+    reference pools (``live_ref_*``), cover-weighted (the SAME metric the SOC gate uses).
+    ``ref_biomass`` uses the SAME pool set as the forward (``C_fol + C_root + C_wood``) and
+    ``ref_lai = C_fol / LCMA`` at the default LCMA, so this is an apples-to-apples
+    closed-form-vs-spin-up fidelity.  Returns the fidelity-gate metrics for match_info / the
+    run log."""
+    from legoesm.land.carbon.config import CarbonConfig
+    from legoesm.land.carbon.live_pool_forward import build_live_pool_forward
+    from legoesm.training.param_collector import apply_param_overrides
+
+    live_fwd = build_live_pool_forward(precomputed)
+    cfg_def = apply_param_overrides(
+        CarbonConfig(scheme="differland"), _carbon_overrides(initial_params))
+    biomass_cf, lai_cf = (np.asarray(x) for x in live_fwd(cfg_def))
+    ref_C_fol = np.asarray(precomputed.live_ref_C_fol)
+    ref_C_root = np.asarray(precomputed.live_ref_C_root)
+    ref_C_wood = np.asarray(precomputed.live_ref_C_wood)
+    ref_biomass = (ref_C_fol + ref_C_root + ref_C_wood) / _G_PER_KG      # kgC/m2
+    ref_lai = ref_C_fol / float(cfg_def.LCMA)                            # m2/m2
+    w = np.asarray(cover_weight, float) if cover_weight is not None else None
+    return {
+        "biomass_cover_weighted_rel_err": _cover_weighted_rel_err(biomass_cf, ref_biomass, w),
+        "lai_cover_weighted_rel_err": _cover_weighted_rel_err(lai_cf, ref_lai, w),
+        "spinup_biomass_kgC_m2_range": [float(np.min(ref_biomass)),
+                                        float(np.max(ref_biomass))],
+        "spinup_lai_range": [float(np.min(ref_lai)), float(np.max(ref_lai))],
+    }
 
 
 def _precompute_and_check(table, initial_params, spin, cover_weight=None, *,
@@ -1201,6 +1442,14 @@ def _precompute_and_check(table, initial_params, spin, cover_weight=None, *,
         "spinup_som_kgC_m2_range": [float(np.min(real_kg)), float(np.max(real_kg))],
         "precompute_seconds": float(time.time() - t0),
     }
+    # --- Live-pool (biomass/LAI) closed-form-vs-spin-up fidelity gate ---------------
+    # The closed-form live pools at the warm-started defaults vs the spin-up's ANNUAL-MEAN
+    # equilibrium live pools (precomputed.live_ref_*), cover-weighted (same metric as SOC).
+    # ALWAYS reported (cheap, single-step) so the live-pool forward's fidelity is visible
+    # even without --with-biomass/--with-lai; a large mismatch means the closed form or the
+    # NPP/allocation wiring is wrong -- surfaced (loud WARN), never silently shipped.
+    lp_match = _live_pool_match(precomputed, initial_params, cover_weight)
+    match.update(lp_match)
     print(f"[fast-analytic] precompute {match['precompute_seconds']:.1f}s; "
           f"analytic-vs-spin-up SOC match over {match['n_archetypes']} archetypes: "
           f"raw-mean|rel|={match['mean_abs_rel_err']:.2%} (inflated by near-zero cells)  "
@@ -1208,6 +1457,20 @@ def _precompute_and_check(table, initial_params, spin, cover_weight=None, *,
           f"high-SOM(>5)|rel|={match['high_som_mean_rel_err']:.2%} (n={match['n_high_som']})  "
           f"(spin-up SOM {match['spinup_som_kgC_m2_range'][0]:.1f}..."
           f"{match['spinup_som_kgC_m2_range'][1]:.1f} kgC/m2)")
+    print(f"[fast-analytic] live-pool closed-form vs spin-up (annual-mean): biomass "
+          f"COVER-WEIGHTED|rel|={lp_match['biomass_cover_weighted_rel_err']:.2%} (spin-up "
+          f"{lp_match['spinup_biomass_kgC_m2_range'][0]:.1f}.."
+          f"{lp_match['spinup_biomass_kgC_m2_range'][1]:.1f} kgC/m2)  LAI "
+          f"COVER-WEIGHTED|rel|={lp_match['lai_cover_weighted_rel_err']:.2%} (spin-up "
+          f"{lp_match['spinup_lai_range'][0]:.2f}..{lp_match['spinup_lai_range'][1]:.2f} "
+          f"m2/m2)")
+    if max(lp_match["biomass_cover_weighted_rel_err"],
+           lp_match["lai_cover_weighted_rel_err"]) > _MATCH_WARN_REL:
+        print(f"[WARN] live-pool closed form diverges from the spin-up "
+              f"(biomass|rel|={lp_match['biomass_cover_weighted_rel_err']:.1%}, "
+              f"lai|rel|={lp_match['lai_cover_weighted_rel_err']:.1%} > {_MATCH_WARN_REL:.0%}); "
+              f"the closed-form live-pool equilibrium may not faithfully track the model -- "
+              f"inspect before trusting --with-biomass/--with-lai tuned parameters.")
     if match["mean_abs_rel_err"] > _MATCH_WARN_REL:
         print(f"[WARN] fast-analytic forward diverges from the spin-up "
               f"(mean|rel|={match['mean_abs_rel_err']:.1%} > {_MATCH_WARN_REL:.0%}); "
@@ -1284,6 +1547,33 @@ def _write_scorecard(path: Path, *, target_bundle, initial_params, tuned_params,
             "improvement": (_wrmse(sif_default, observed_sif, w_sif)
                             - _wrmse(sif_tuned, observed_sif, w_sif)),
         }
+    # Optional biomass/LAI scorecard (--with-biomass/--with-lai): cover-weighted RMSE of the
+    # single-step live-pool forward vs observed, default vs tuned (surfaces whether the term
+    # improved).  Both share ONE live-pool forward (biomass, lai) from the bundle.
+    live_pool_forward = target_bundle.get("live_pool_forward")
+    if live_pool_forward is not None:
+        biomass_def, lai_def = (np.asarray(x) for x in
+                                live_pool_forward(_carbon_overrides(initial_params)))
+        biomass_tun, lai_tun = (np.asarray(x) for x in
+                                live_pool_forward(_carbon_overrides(tuned_params)))
+        for name, key, obs, pred_def, pred_tun in (
+            ("biomass", "cover_weighted_biomass_rmse_kgC_m2",
+             target_bundle.get("observed_biomass"), biomass_def, biomass_tun),
+            ("lai", "cover_weighted_lai_rmse_m2_m2",
+             target_bundle.get("observed_lai"), lai_def, lai_tun),
+        ):
+            if obs is None:
+                continue
+            obs = np.asarray(obs)
+            # Weight by cover MASKED to this stream's observed archetypes (matches the loss
+            # mask) so missing cells never enter the RMSE.
+            w_term = cover * np.asarray(target_bundle["losses"][name].mask)
+            scorecard[key] = {
+                "default": _wrmse(pred_def, obs, w_term),
+                "tuned": _wrmse(pred_tun, obs, w_term),
+                "improvement": (_wrmse(pred_def, obs, w_term)
+                                - _wrmse(pred_tun, obs, w_term)),
+            }
     path.write_text(json.dumps(scorecard, indent=2, sort_keys=True) + "\n")
     return scorecard
 
@@ -1385,11 +1675,15 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     print(f"[target] assembled in {time.time() - t_assemble:.1f}s")
 
     initial_params = build_carbon_trainables(
-        som_only=not args.all_carbon_params, with_sif=args.with_sif)
+        som_only=not args.all_carbon_params, with_sif=args.with_sif,
+        with_biomass=args.with_biomass, with_lai=args.with_lai)
     params = initial_params
     n_sif = sum(c.name.startswith(SIF_SCHEME_KEY + ".") for c in params.constraints)
+    stream_note = "".join(
+        f", {s}" for s, on in (("sif", args.with_sif), ("biomass", args.with_biomass),
+                               ("lai", args.with_lai)) if on)
     print(f"[preflight] {len(params.constraints)} trainable params "
-          f"(SOM-only={not args.all_carbon_params}, with_sif={args.with_sif}"
+          f"(SOM-only={not args.all_carbon_params}, streams=soc{stream_note}"
           f"{f', {n_sif} SIF' if args.with_sif else ''}); mode="
           f"{'fast-analytic' if args.fast_analytic else 'slow-spinup-grad'}; "
           f"n_spinup={args.n_spinup}, max_archetypes={args.max_archetypes}")
@@ -1404,6 +1698,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             cover_weight=target_bundle["cover_weight"],
             cache_dir=args.precompute_cache_dir,
             rebuild=args.rebuild_precompute)
+    # Build the single-step live-pool forward ONCE (from the precomputed NPP + woody flag)
+    # and attach it to the bundle -- shared by the fast loss (biomass/lai preds) and the
+    # scorecard.  Requires the precompute (fast mode); --finalize gates biomass/lai to fast.
+    if target_bundle.get("needs_live_pool") and precomputed is not None:
+        target_bundle["live_pool_forward"] = _make_live_pool_forward(precomputed)
 
     # (value_and_grad_fn, loss_eval_fn) for the active forward. In --slow-spinup-grad
     # with --grad-chunk C>0 and >C archetypes these are the EXACT chunked
@@ -1510,6 +1809,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "som_only": not args.all_carbon_params,
             "with_sif": bool(args.with_sif),
             "sif_weight": (args.sif_weight if args.with_sif else None),
+            "with_biomass": bool(args.with_biomass),
+            "biomass_weight": (args.biomass_weight if args.with_biomass else None),
+            "with_lai": bool(args.with_lai),
+            "lai_weight": (args.lai_weight if args.with_lai else None),
             "loss_terms": sorted(target_bundle["losses"]),
             "source": target_bundle["source"],
             "n_archetypes_full": target_bundle["n_arch_full"],
@@ -1617,6 +1920,42 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--sif-weight", type=float, default=DEFAULT_SIF_WEIGHT,
                    help="weight of the sif MSE term relative to soc (soc weight = 1; "
                         f"default {DEFAULT_SIF_WEIGHT}). SOC/SIF live on different scales.")
+    # --- observed-biomass target (--with-biomass); FAST mode only (needs the NPP precompute) ---
+    p.add_argument("--with-biomass", dest="with_biomass", action="store_true",
+                   help="add the live-biomass observation stream: a per-archetype "
+                        "closed-form live-pool biomass forward [kgC/m2] vs observed biomass, "
+                        "summed with the SOC term (cover-weighted MSE), training the DALEC "
+                        "allocation/residence/LCMA params. Constrains the standing-biomass "
+                        "carbon. FAST-analytic mode only (the live-pool forward needs the "
+                        "one-time NPP precompute). Real ESA-CCI/GEDI AGB is a fetcher "
+                        "follow-up; --dry-run-synthetic fabricates a target.")
+    p.add_argument("--biomass-obs", type=str, default="",
+                   help="gridded biomass NetCDF on the surfdata grid [kgC/m2] (required for "
+                        "the REAL --with-biomass path; --dry-run-synthetic fabricates one). "
+                        "Real source = ESA-CCI Biomass / GEDI L4B AGB (AGB->carbon + "
+                        "above-ground->total + regrid is a data-prep follow-up).")
+    p.add_argument("--biomass-var", type=str, default="",
+                   help="biomass variable name in --biomass-obs (auto-detected if omitted)")
+    p.add_argument("--biomass-weight", type=float, default=DEFAULT_BIOMASS_WEIGHT,
+                   help="weight of the biomass MSE term relative to soc (soc weight = 1; "
+                        f"default {DEFAULT_BIOMASS_WEIGHT}).")
+    # --- observed-LAI target (--with-lai); FAST mode only; MONTHLY_LAI is in the surfdata ---
+    p.add_argument("--with-lai", dest="with_lai", action="store_true",
+                   help="add the LAI observation stream: a per-archetype closed-form LAI "
+                        "forward (C_fol/LCMA) vs observed LAI, summed with the SOC term "
+                        "(cover-weighted MSE), training the DALEC allocation/leaf-residence/"
+                        "LCMA params. Observed = the CLM5 surfdata MONTHLY_LAI (annual-mean, "
+                        "per-PFT) already in --surf-path (NO new download). FAST-analytic "
+                        "mode only (the live-pool forward needs the NPP precompute).")
+    p.add_argument("--lai-obs", type=str, default="",
+                   help="surfdata/NetCDF carrying MONTHLY_LAI on the cover grid (defaults to "
+                        "--surf-path, where MONTHLY_LAI lives); --dry-run-synthetic "
+                        "fabricates a target.")
+    p.add_argument("--lai-var", type=str, default="",
+                   help="LAI variable name in --lai-obs (default MONTHLY_LAI)")
+    p.add_argument("--lai-weight", type=float, default=DEFAULT_LAI_WEIGHT,
+                   help="weight of the lai MSE term relative to soc (soc weight = 1; "
+                        f"default {DEFAULT_LAI_WEIGHT}).")
     # --- spin-up geometry (training forward pass) ---
     p.add_argument("--n-spinup", type=int, default=DEFAULT_N_SPINUP)
     p.add_argument("--n-verify", type=int, default=DEFAULT_N_VERIFY)
@@ -1751,6 +2090,26 @@ def _finalize_args(args: argparse.Namespace) -> argparse.Namespace:
             "--with-sif on the real (--rebuild/--archetypes) path requires --sif-obs "
             "<gridded SIF NetCDF on the surfdata grid>; --dry-run-synthetic uses a "
             "fabricated SIF target instead.")
+    # --with-biomass/--with-lai need the FAST closed-form live-pool forward, which is built
+    # from the one-time NPP precompute recorded ONLY in --fast-analytic mode.  Fail loudly
+    # rather than register a biomass/lai loss term whose prediction the slow path never
+    # populates (a KeyError in the loss).  The allocation/residence/LCMA leaves are
+    # fast-valid through the closed-form live-pool equilibrium (NPP frozen upstream), so
+    # fast mode is the correct home; the slow grad-through-spin-up path trains them via
+    # --slow-spinup-grad --all-carbon-params (SOC only, no biomass/lai term).
+    if (args.with_biomass or args.with_lai) and not args.fast_analytic:
+        raise SystemExit(
+            "--with-biomass / --with-lai require --fast-analytic (default): the closed-form "
+            "live-pool biomass/LAI forward is built from the one-time NPP precompute that "
+            "only the fast path records. Drop --slow-spinup-grad, or drop "
+            "--with-biomass/--with-lai.")
+    # --with-biomass REAL path needs a gridded biomass product; the dry-run fabricates one.
+    # (--with-lai reads MONTHLY_LAI from --surf-path, already required on the real path.)
+    if args.with_biomass and not args.dry_run_synthetic and not args.biomass_obs:
+        raise SystemExit(
+            "--with-biomass on the real (--rebuild/--archetypes) path requires --biomass-obs "
+            "<gridded biomass NetCDF [kgC/m2] on the surfdata grid>; --dry-run-synthetic "
+            "uses a fabricated biomass target instead.")
     return args
 
 

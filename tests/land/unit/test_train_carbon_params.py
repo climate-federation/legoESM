@@ -280,6 +280,12 @@ def _stub_precompute_result(n_arch: int = 3):
         soil_T_traj=np.full((n_arch, 4), 285.0),
         precip=np.full(n_arch, 3.0e-5),
         dt_days=0.0833333333,
+        npp_pos_annual=np.linspace(300.0, 900.0, n_arch),
+        is_woody=np.array([1.0, 0.0, 1.0][:n_arch]),
+        is_evergreen=np.array([1.0, 0.0, 0.0][:n_arch]),
+        live_ref_C_fol=np.linspace(100.0, 300.0, n_arch),
+        live_ref_C_root=np.linspace(200.0, 500.0, n_arch),
+        live_ref_C_wood=np.linspace(1000.0, 5000.0, n_arch),
     )
     return fai, np.linspace(5000.0, 9000.0, n_arch)
 
@@ -317,7 +323,9 @@ def test_load_or_precompute_hit_miss_and_roundtrip(tmp_path, monkeypatch):
     # call #2 -> CACHE HIT: stub NOT called again; arrays reconstruct exactly
     p2, s2 = tcp._load_or_precompute(table, _SPIN, cache_dir=cache_dir, rebuild=False)
     assert calls["n"] == 1  # unchanged -> served from disk
-    for f in ("lit_to_som_annual", "a_wood_annual", "soil_T_traj", "precip"):
+    for f in ("lit_to_som_annual", "a_wood_annual", "soil_T_traj", "precip",
+              "npp_pos_annual", "is_woody", "is_evergreen", "live_ref_C_fol",
+              "live_ref_C_root", "live_ref_C_wood"):
         a1, a2 = np.asarray(getattr(p1, f)), np.asarray(getattr(p2, f))
         npt.assert_array_equal(a1, a2)
         assert a1.dtype == a2.dtype, f
@@ -657,3 +665,135 @@ def test_quick_with_sif_sums_registry_and_writes_json(tmp_path):
     scorecard = json.loads((outdir / "scorecard.json").read_text())
     sif_rmse = scorecard["cover_weighted_sif_rmse_umol_m2_s"]
     assert np.isfinite(sif_rmse["default"]) and np.isfinite(sif_rmse["tuned"])
+
+
+# ---------------------------------------------------------------------------
+# Biomass + LAI observation streams (--with-biomass / --with-lai)
+# ---------------------------------------------------------------------------
+def test_total_loss_sums_soc_biomass_lai_from_bundle():
+    """The registry sums soc + biomass + lai from ONE predictions bundle without touching
+    the loop: each extractor pulls its own key (preds["soc"]/["biomass"]/["lai"])."""
+    import jax.numpy as jnp
+
+    preds = {"soc": jnp.asarray([1.0, 2.0]), "biomass": jnp.asarray([3.0, 5.0]),
+             "lai": jnp.asarray([1.0, 2.0])}
+    cover = jnp.asarray([1.0, 1.0])
+    losses = {
+        "soc": tcp.LossTerm(target=jnp.asarray([1.5, 2.0]),
+                            extractor=tcp._fast_soc_extractor, weight=1.0),
+        "biomass": tcp.LossTerm(target=jnp.asarray([3.0, 4.0]),
+                                extractor=tcp._biomass_extractor, weight=2.0),
+        "lai": tcp.LossTerm(target=jnp.asarray([0.0, 2.0]),
+                            extractor=tcp._lai_extractor, weight=0.5),
+    }
+    total = float(tcp._total_loss(preds, losses, cover))
+    # soc MSE = mean(.25,0)=.125 ; biomass MSE = mean(0,1)=.5 ; lai MSE = mean(1,0)=.5
+    # total = 1*.125 + 2*.5 + 0.5*.5 = 1.375
+    npt.assert_allclose(total, 0.125 + 2.0 * 0.5 + 0.5 * 0.5, rtol=1e-12)
+    assert np.isfinite(total)
+
+
+def test_build_carbon_trainables_with_live_pool_streams_includes_fields():
+    """--with-biomass / --with-lai add the seven live-pool allocation/residence/LCMA fields
+    ALONGSIDE the SOM set; OFF (default) -> none of them."""
+    for kw in ({"with_biomass": True}, {"with_lai": True}):
+        params = tcp.build_carbon_trainables(som_only=True, **kw)
+        names = {c.field for c in params.constraints}
+        assert set(tcp.SOM_FIELDS) <= names
+        assert set(tcp.LIVE_POOL_FIELDS) <= names, (kw, names)
+    off = {c.field for c in tcp.build_carbon_trainables(som_only=True).constraints}
+    assert not (set(tcp.LIVE_POOL_FIELDS) & off)   # no live-pool fields when both off
+    assert set(off) == set(tcp.SOM_FIELDS)
+
+
+def test_make_live_pool_forward_matches_module_forward():
+    """The trainer's _make_live_pool_forward(precomputed)(carbon_overrides) equals the
+    module compute_biomass_lai for the applied CarbonConfig (overrides traced INSIDE)."""
+    import jax.numpy as jnp
+    from legoesm.land.carbon.config import CarbonConfig
+    from legoesm.land.carbon.live_pool_forward import compute_biomass_lai
+    from legoesm.training.param_collector import apply_param_overrides
+
+    fai, _real = _stub_precompute_result(n_arch=3)
+    live_fwd = tcp._make_live_pool_forward(fai)
+    params = tcp.build_carbon_trainables(som_only=True, with_biomass=True, with_lai=True)
+    ov = tcp._carbon_overrides(params)
+    b1, l1 = live_fwd(ov)
+    cfg = apply_param_overrides(CarbonConfig(scheme="differland"), ov)
+    b2, l2 = compute_biomass_lai(np.asarray(fai.npp_pos_annual),
+                                 np.asarray(fai.is_woody),
+                                 np.asarray(fai.is_evergreen), cfg)
+    npt.assert_allclose(np.asarray(b1), np.asarray(b2), rtol=1e-10)
+    npt.assert_allclose(np.asarray(l1), np.asarray(l2), rtol=1e-10)
+
+
+def test_live_pool_cli_flags_roundtrip():
+    p = tcp.build_arg_parser()
+    a = p.parse_args(["--dry-run-synthetic"])
+    assert a.with_biomass is False and a.with_lai is False
+    assert a.biomass_weight == tcp.DEFAULT_BIOMASS_WEIGHT
+    assert a.lai_weight == tcp.DEFAULT_LAI_WEIGHT
+    assert a.biomass_obs == "" and a.lai_obs == "" and a.lai_var == "" and a.biomass_var == ""
+    b = p.parse_args(["--dry-run-synthetic", "--with-biomass", "--biomass-weight", "0.4",
+                      "--biomass-obs", "b.nc", "--biomass-var", "AGB",
+                      "--with-lai", "--lai-weight", "0.7", "--lai-obs", "s.nc",
+                      "--lai-var", "MONTHLY_LAI"])
+    assert b.with_biomass is True and b.biomass_weight == 0.4 and b.biomass_obs == "b.nc"
+    assert b.biomass_var == "AGB"
+    assert b.with_lai is True and b.lai_weight == 0.7 and b.lai_obs == "s.nc"
+    assert b.lai_var == "MONTHLY_LAI"
+
+
+def test_live_pool_streams_require_fast_analytic():
+    """--with-biomass / --with-lai need the FAST NPP precompute; --slow-spinup-grad -> a
+    clear SystemExit (never a slow-path KeyError on the unpopulated biomass/lai pred)."""
+    with pytest.raises(SystemExit, match="require --fast-analytic"):
+        tcp._finalize_args(tcp.build_arg_parser().parse_args(
+            ["--dry-run-synthetic", "--slow-spinup-grad", "--with-biomass"]))
+    with pytest.raises(SystemExit, match="require --fast-analytic"):
+        tcp._finalize_args(tcp.build_arg_parser().parse_args(
+            ["--dry-run-synthetic", "--slow-spinup-grad", "--with-lai"]))
+
+
+def test_with_biomass_real_path_requires_biomass_obs():
+    """--with-biomass on the real path without --biomass-obs -> a clear SystemExit; the
+    dry-run fabricates the target instead."""
+    with pytest.raises(SystemExit, match="requires --biomass-obs"):
+        tcp._finalize_args(tcp.build_arg_parser().parse_args(
+            ["--rebuild", "--surf-path", "x.nc", "--with-biomass"]))
+    args = tcp._finalize_args(tcp.build_arg_parser().parse_args(
+        ["--dry-run-synthetic", "--with-biomass"]))
+    assert args.with_biomass is True
+
+
+def test_quick_with_lai_and_biomass_sums_registry_and_writes_json(tmp_path):
+    """One optimizer step on a tiny synthetic world with --with-lai --with-biomass: the
+    registry sums soc + biomass + lai, the line-search is monotone, and the tuned JSON +
+    scorecard carry the trained live-pool params + biomass/LAI RMSEs (fast default mode)."""
+    outdir = tmp_path / "carbon_live"
+    rc = tcp.main(["--quick", "--with-lai", "--with-biomass", "--output", str(outdir)])
+    assert rc == 0
+
+    tuned = json.loads((outdir / "tuned_carbon_parameters.json").read_text())
+    training = tuned["training"]
+    assert training["with_biomass"] is True and training["with_lai"] is True
+    assert set(training["loss_terms"]) == {"soc", "biomass", "lai"}
+    # At least one live-pool allocation/residence/LCMA param survived preflight, finite,
+    # in-bounds.
+    live_fields = set(tcp.LIVE_POOL_FIELDS)
+    live_rows = [r for r in tuned["parameters"] if r["field"] in live_fields]
+    assert live_rows, "no live-pool params in the tuned JSON"
+    for r in live_rows:
+        assert np.isfinite(r["tuned"]) and r["lower"] <= r["tuned"] <= r["upper"]
+    hist = tuned["loss_history"]
+    assert len(hist) >= 1 and all(np.isfinite(x) for x in hist)
+    assert hist[-1] <= hist[0] + 1e-9
+
+    scorecard = json.loads((outdir / "scorecard.json").read_text())
+    for key in ("cover_weighted_biomass_rmse_kgC_m2", "cover_weighted_lai_rmse_m2_m2"):
+        assert key in scorecard, key
+        assert np.isfinite(scorecard[key]["default"]) and np.isfinite(scorecard[key]["tuned"])
+    # The live-pool closed-form-vs-spin-up fidelity is recorded in the tuned-JSON meta.
+    match = training["analytic_vs_spinup_match"]
+    assert np.isfinite(match["biomass_cover_weighted_rel_err"])
+    assert np.isfinite(match["lai_cover_weighted_rel_err"])
