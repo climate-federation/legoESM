@@ -171,6 +171,99 @@ def dm95_taper_scalar(
 
 
 # ---------------------------------------------------------------------------
+# Hallberg (2013) mesoscale-eddy resolution function for kappa_GM
+# ---------------------------------------------------------------------------
+
+# |f| floor [s^-1] for the deformation-radius denominator ``L_d = c/|f|`` near
+# the equator.  1e-5 s^-1 is |f| at ~4 deg latitude, capping ``L_d`` at
+# ``c/1e-5 ~ 2e5 m`` (~200 km for c ~ 2 m/s) -- the equatorial first-baroclinic
+# deformation-radius scale (Chelton et al. 1998, JPO 28, 433) -- so the
+# resolution function stays physical (~coarse limit, f_res -> 1 on a coarse
+# grid) across the equator instead of collapsing to 0 as |f| -> 0.  This is a
+# PHYSICAL cap on the equatorial band width, deliberately far larger than the
+# 1e-10 denominator-safety floors (_TREGUIER_F_MIN / eke._DENOM_FLOOR) used
+# elsewhere in this stack -- a 1e-10 floor would let L_d blow up to ~2e13 m and
+# spuriously switch GM OFF (f_res -> 0) in a wide equatorial band.
+_RESFN_F_FLOOR_S = 1.0e-5
+
+
+def gm_resolution_function(
+    L_d: jnp.ndarray, dx: jnp.ndarray, gamma: float,
+) -> jnp.ndarray:
+    r"""Hallberg (2013) mesoscale-eddy resolution function.
+
+    .. math::
+
+        f_{res} = \frac{1}{1 + \left(L_d / (\gamma\,\Delta)\right)^2}
+
+    with ``L_d`` the first-baroclinic deformation radius [m], ``dx`` = Delta the
+    local grid spacing [m], and ``gamma`` (~2) the number of grid points per
+    deformation radius at which GM is half-suppressed.
+
+    Asymptotics (physically-correct sense; NOTE the MED-3 spec prose swapped the
+    coarse/fine word-labels -- this FORMULA and the 1deg / (1/12)deg test are the
+    authoritative statement):
+
+    - ``Delta >> L_d`` (COARSE grid, eddies unresolved): ``L_d/(gamma*Delta) ->
+      0`` so ``f_res -> 1`` (full GM).
+    - ``Delta << L_d`` (FINE / eddy-resolving grid): ``L_d/(gamma*Delta) ->
+      inf`` so ``f_res -> 0`` (GM off; the resolved eddies do the transport).
+
+    ``f_res`` is bounded in ``(0, 1]`` for any finite ``L_d >= 0``, ``dx > 0``,
+    ``gamma > 0``; the denominator ``gamma*Delta`` is floored at ``EPS`` so a
+    degenerate zero-area (land) cell gives ``f_res -> 0`` rather than a NaN.
+    Smooth and differentiable in ``L_d`` and ``dx``.
+    """
+    denom = jnp.maximum(gamma * dx, EPS)
+    ratio = L_d / denom
+    return 1.0 / (1.0 + ratio * ratio)
+
+
+def gm_resolution_scaled_kappa(
+    kappa_GM,
+    f_coriolis: jnp.ndarray,
+    dx: jnp.ndarray,
+    gamma: float,
+    c_bcl_ms: float,
+):
+    """Scale the effective GM coefficient by the Hallberg (2013) resolution fn.
+
+    ``kappa_GM_eff = f_res * kappa_GM`` with ``f_res`` from
+    :func:`gm_resolution_function` and the first-baroclinic deformation radius
+
+        ``L_d = c_bcl_ms / max(|f|, _RESFN_F_FLOOR_S)``      [m]
+
+    a FIXED gravity-wave-speed bound (``c_bcl_ms`` [m/s]; Chelton et al. 1998
+    give ``c1 ~ 2 m/s`` in the open ocean).  A fixed ``c`` is used -- rather than
+    the flow-dependent ``int(N dz)/pi`` deformation radius the EKE / GEOMETRIC
+    closures already build via :func:`eke.eke_deformation_radius` -- so the taper
+    applies UNIFORMLY to every closure, INCLUDING the constant-kappa path, which
+    never computes ``int(N dz)``.  The equatorial |f| floor caps ``L_d`` (see
+    ``_RESFN_F_FLOOR_S``).
+
+    Applies to GM ONLY; the caller leaves the Redi isopycnal diffusivity
+    ``kappa_Redi`` unscaled -- NEMO ``ldf_eiv`` / MOM6 resolution-scaled
+    ``KhTh`` scale the eddy-transport (bolus) coefficient, not the
+    along-isopycnal tracer diffusion.  As ``f_res -> 0`` (eddy-resolving) the
+    GM/Redi tensor therefore reduces to pure Redi isopycnal diffusion.
+
+    ``kappa_GM`` may be a Python/JAX scalar, a horizontal field matching
+    ``f_coriolis`` / ``dx``, or a depth-resolved field with one extra trailing
+    (level) axis (the 3-D prognostic-EKE skew coefficient); ``f_res`` is
+    broadcast over that trailing axis.  Returns the same kind (scalar in ->
+    field out, since ``f_res`` is a field).
+    """
+    f_abs = jnp.maximum(jnp.abs(f_coriolis), _RESFN_F_FLOOR_S)
+    L_d = c_bcl_ms / f_abs
+    f_res = gm_resolution_function(L_d, dx, gamma)
+    if isinstance(kappa_GM, jnp.ndarray) and kappa_GM.ndim > f_res.ndim:
+        # Depth-resolved kappa (..., nlev-1): broadcast f_res over the trailing
+        # (level) axis it lacks.
+        f_res = f_res.reshape(f_res.shape + (1,) * (kappa_GM.ndim - f_res.ndim))
+    return kappa_GM * f_res
+
+
+# ---------------------------------------------------------------------------
 # Vertical flux divergence with zero-flux BCs
 # ---------------------------------------------------------------------------
 
