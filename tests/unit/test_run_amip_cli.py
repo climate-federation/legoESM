@@ -1865,3 +1865,25 @@ def test_convective_precip_split_validate_bounds():
         ExperimentConfig(autoconv_pe_max=1.5).validate_strict()
     ExperimentConfig(convective_precip_split="autoconversion",
                      autoconv_q_c_crit=5.0e-4, autoconv_pe_max=0.9).validate_strict()
+
+
+def test_cloud_inhomogeneity_factor_round_trips():
+    """--cloud-inhomogeneity-factor (Cahalan 1994 plane-parallel correction)
+    round-trips into ExperimentConfig; default None => CloudConfig default."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--cloud-inhomogeneity-factor", "0.7",
+    ]), parser))
+    assert cfg.cloud_inhomogeneity_factor == 0.7
+    d = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert d.cloud_inhomogeneity_factor is None
+
+
+def test_cloud_inhomogeneity_validate_bounds():
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="cloud_inhomogeneity_factor"):
+        ExperimentConfig(cloud_inhomogeneity_factor=0.1).validate_strict()  # < 0.3
+    with pytest.raises(ValueError, match="cloud_inhomogeneity_factor"):
+        ExperimentConfig(cloud_inhomogeneity_factor=1.5).validate_strict()  # > 1.0
+    ExperimentConfig(cloud_inhomogeneity_factor=0.7).validate_strict()

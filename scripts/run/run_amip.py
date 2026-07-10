@@ -560,6 +560,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[kg/kg] (None=CloudConfig default; tuned slab 3e-4).")
     parser.add_argument("--rh-crit", dest="cloud_rh_crit", type=float, default=None,
                         help="Critical RH for cloud onset (None=scheme default).")
+    parser.add_argument("--cloud-inhomogeneity-factor",
+                        dest="cloud_inhomogeneity_factor", type=float, default=None,
+                        help="Cahalan (1994) horizontal-inhomogeneity factor chi "
+                             "[0.3,1.0] scaling the radiative cloud water path "
+                             "(plane-parallel albedo bias). LOWER => thinner "
+                             "optics => lower albedo. None=CloudConfig default 1.0 "
+                             "(homogeneous). ~0.7 is the observed correction.")
     parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
                         help="Xu-Randall cloud-fraction RH exponent p_xr (None="
                              "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
@@ -1220,6 +1227,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         surface_thermo_convention=args.bulk_thermo_convention,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_rh_crit=args.cloud_rh_crit,
+        cloud_inhomogeneity_factor=args.cloud_inhomogeneity_factor,
         cloud_p_xr=args.cloud_p_xr,
         cloud_alpha_xr=args.cloud_alpha_xr,
         convective_cloud=args.convective_cloud,

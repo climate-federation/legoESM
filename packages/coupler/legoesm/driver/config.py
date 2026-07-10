@@ -417,6 +417,10 @@ class ExperimentConfig(NamedTuple):
     # These are the SW/LW knob for the coare3 moisture-driven albedo overshoot.
     cloud_rh_crit: float | None = None
     cloud_q_c_diagnostic: float | None = None
+    # Cahalan (1994) horizontal-inhomogeneity factor chi on the radiative cloud
+    # water path (plane-parallel albedo bias); LOWER => thinner optics => lower
+    # albedo. None => CloudConfig default 1.0 (homogeneous, no change).
+    cloud_inhomogeneity_factor: float | None = None
     #   cloud_p_xr / cloud_alpha_xr — Xu-Randall cloud-fraction sensitivity
     #   knobs; HIGHER p_xr / LOWER alpha_xr => fraction stays fractional as
     #   moisture rises (flattens the overcast runaway).
@@ -1238,6 +1242,7 @@ class ExperimentConfig(NamedTuple):
             ("cloud_q_c_diagnostic", 5.0e-5, 1.0e-3),
             ("cloud_conv_cloud_max", 0.1, 1.0),
             ("cloud_conv_cloud_condensate", 1.0e-5, 1.0e-3),
+            ("cloud_inhomogeneity_factor", 0.3, 1.0),
             ("cloud_p_xr", 0.05, 1.0),
             ("cloud_alpha_xr", 10.0, 1000.0),
         ):

@@ -455,8 +455,14 @@ def compute_cloud_properties(
     # Grid-mean water/ice paths: q * dp / g
     # These are grid-mean (not in-cloud) values, which is what RRTMGP expects
     # when treating each layer independently (no overlap assumption).
-    lwp = q_c * dp / constants.g
-    iwp = q_i * dp / constants.g
+    # The Cahalan et al. (1994) inhomogeneity factor scales the RADIATIVE water
+    # path down to account for horizontal cloud-water variability: a patchy real
+    # cloud is less reflective than a plane-parallel homogeneous layer of the
+    # same mean water (the plane-parallel albedo bias).  chi = 1.0 (default) is
+    # the legacy homogeneous path (byte-identical); chi < 1 thins the optics.
+    _chi = getattr(config, "cloud_inhomogeneity_factor", 1.0)
+    lwp = q_c * dp / constants.g * _chi
+    iwp = q_i * dp / constants.g * _chi
 
     # Effective radii (constant for now): ``broadcast_to`` produces a
     # zero-copy logical view, whereas ``jnp.full_like(T, scalar)``

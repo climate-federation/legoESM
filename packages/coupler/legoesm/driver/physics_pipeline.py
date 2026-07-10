@@ -275,6 +275,7 @@ class PhysicsPipeline:
         self._cloud_q_c_diagnostic = None
         self._cloud_conv_cloud_max = None
         self._cloud_conv_cloud_condensate = None
+        self._cloud_inhomogeneity_factor = None
         self._cloud_p_xr = None
         self._cloud_alpha_xr = None
         # Convection scheme name + grid/vertical-coordinate objects for
@@ -1741,6 +1742,8 @@ class PhysicsPipeline:
                 conv_cloud_max=getattr(self, "_cloud_conv_cloud_max", None),
                 conv_cloud_condensate=getattr(
                     self, "_cloud_conv_cloud_condensate", None),
+                cloud_inhomogeneity_factor=getattr(
+                    self, "_cloud_inhomogeneity_factor", None),
                 p_xr=getattr(self, "_cloud_p_xr", None),
                 alpha_xr=getattr(self, "_cloud_alpha_xr", None),
             )
@@ -3078,6 +3081,8 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline._cloud_conv_cloud_max = getattr(config, 'cloud_conv_cloud_max', None)
     pipeline._cloud_conv_cloud_condensate = getattr(
         config, 'cloud_conv_cloud_condensate', None)
+    pipeline._cloud_inhomogeneity_factor = getattr(
+        config, 'cloud_inhomogeneity_factor', None)
     pipeline._cloud_p_xr = getattr(config, 'cloud_p_xr', None)
     pipeline._cloud_alpha_xr = getattr(config, 'cloud_alpha_xr', None)
     pipeline._conv_scheme = getattr(config, 'convection', 'none')

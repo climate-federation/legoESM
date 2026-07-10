@@ -36,6 +36,7 @@ __param_spec__ = {
             # --- optical_radius: fixed-fallback effective radii [m] for RRTMGP cloud optics ---
             "r_eff_liq": {"units": "m", "bounds": (4.0e-6, 30.0e-6), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "cloud-optics fallback default", "shape": None},
             "r_eff_ice": {"units": "m", "bounds": (10.0e-6, 90.0e-6), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "cloud-optics fallback default", "shape": None},
+            "cloud_inhomogeneity_factor": {"units": "1", "bounds": (0.3, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "Cahalan et al. (1994) plane-parallel albedo bias", "shape": None},
             # --- droplet_psd: Morrison M2005 liquid effective-radius PSD (gamma-shape from Nc) ---
             "Nc_default": {"units": "1/m^3", "bounds": (1.0e7, 1.0e9), "tunable_tier": 2, "transform": "sigmoid", "category": "droplet_psd", "reference": "Morrison et al. (2005) M2005 (SAM Nc_0)", "shape": None},
             "martin_pgam_slope": {"units": "cm^3", "bounds": (1.0e-4, 2.0e-3), "tunable_tier": 3, "transform": "sigmoid", "category": "droplet_psd", "reference": "Martin et al. (1994)", "shape": None},
@@ -121,6 +122,13 @@ class CloudConfig(NamedTuple):
     gamma_xr: float = 0.49
     r_eff_liq: float = 10.0e-6
     r_eff_ice: float = 30.0e-6
+    # Cahalan et al. (1994) horizontal-inhomogeneity factor on the radiative
+    # in-cloud water path: real clouds are horizontally PATCHY, so a plane-
+    # parallel HOMOGENEOUS layer carrying the same mean water is systematically
+    # too reflective (the plane-parallel albedo bias).  Operational GCMs scale
+    # LWP/IWP by chi ~ 0.7 to correct it.  1.0 = homogeneous (legacy, no change);
+    # < 1 reduces the effective optical depth (both SW + LW).
+    cloud_inhomogeneity_factor: float = 1.0
     Nc_default: float = 1.0e8        # fallback cloud-droplet number [1/m³] for the
                                      # gamma-PSD liquid effective radius when the
                                      # passed n_cloud is 0/garbage — e.g. SAM
@@ -195,6 +203,7 @@ def build_cloud_config(
     q_c_diagnostic: float | None = None,
     conv_cloud_max: float | None = None,
     conv_cloud_condensate: float | None = None,
+    cloud_inhomogeneity_factor: float | None = None,
     p_xr: float | None = None,
     alpha_xr: float | None = None,
 ) -> "CloudConfig":
@@ -217,6 +226,8 @@ def build_cloud_config(
         overrides["conv_cloud_max"] = conv_cloud_max
     if conv_cloud_condensate is not None:
         overrides["conv_cloud_condensate"] = conv_cloud_condensate
+    if cloud_inhomogeneity_factor is not None:
+        overrides["cloud_inhomogeneity_factor"] = cloud_inhomogeneity_factor
     if p_xr is not None:
         overrides["p_xr"] = p_xr
     if alpha_xr is not None:
