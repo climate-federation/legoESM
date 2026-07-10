@@ -75,6 +75,7 @@ def _cube_area_sum(x, area):
 from legoesm.core.fv3_sw_core import (
     d2a2c_vect,
     d_sw5_corner_divergence,
+    fb_v_d_to_covariant,
     fv3_csw_tendencies,
 )
 from legoesm.core.fv_tp_2d import transport_step
@@ -1706,10 +1707,17 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             # update structure, not a continuous RK3 tendency."
             if self.config.use_fv3_dsw5_corner_damping:
                 _EPS = 1e-30
-                ua, va, _, _, _, _ = d2a2c_vect(
+                # Convention (2026-07-10 review): d_sw5_corner_divergence +
+                # d2a2c_vect are COVARIANT-convention (FV3 Fortran verbatim);
+                # the state winds are the model's ORTHOGONAL pair — convert v
+                # at entry (u identical in both).  The hook only consumes the
+                # scalar ke_damping, so no exit conversion is needed.
+                v_cov = fb_v_d_to_covariant(
                     state_new.u_d, state_new.v_d, self.cdgrid)
+                ua, va, _, _, _, _ = d2a2c_vect(
+                    state_new.u_d, v_cov, self.cdgrid)
                 ke_damping = d_sw5_corner_divergence(
-                    state_new.u_d, state_new.v_d, ua, va,
+                    state_new.u_d, v_cov, ua, va,
                     self.cdgrid, dt,
                     d2_bg=self.config.d2_bg,
                     dddmp=self.config.dddmp,
