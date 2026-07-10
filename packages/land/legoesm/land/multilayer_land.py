@@ -118,15 +118,13 @@ def root_zone_moisture_stress(theta, beta_min, root_depth, theta_wp, theta_fc,
 
     root_frac = jnp.exp(-z_centers[None, :] / root_depth_c[:, None])
     root_frac = root_frac / jnp.sum(root_frac, axis=-1, keepdims=True)
-    # Audit #6 / Iter-65: floor the (theta_fc - theta_wp) range at 1e-3 m^3/m^3
-    # (~1 % of theta_sat) so a pathological PFT row (theta_fc ~ theta_wp) cannot
-    # explode beta_root through a ~0 denominator.
-    _denom = jnp.maximum(
-        theta_fc_c[:, None] - theta_wp_c[:, None], 1e-3,  # coeff-ok: floor (theta_fc - theta_wp) range to avoid /~0 in beta_root
-    )
-    beta_root = jnp.clip((theta - theta_wp_c[:, None]) / _denom, 0.0, 1.0)
+    # Delegate the moisture-stress arithmetic (beta_root, beta_soil, and the
+    # audit-#6 theta_fc-theta_wp range floor) to the single kernel
+    # root_zone_beta_soil so the formula lives in exactly one place; add
+    # root_frac + w_frac_rz here for callers that need the per-layer pieces.
+    beta_soil, beta_root = root_zone_beta_soil(
+        theta, root_frac, theta_wp_c, theta_fc_c, beta_min, spatial=True)
     w_frac_rz = jnp.clip(jnp.sum(root_frac * beta_root, axis=-1), 0.0, 1.0)
-    beta_soil = beta_min + (1.0 - beta_min) * w_frac_rz
     return beta_soil, root_frac, beta_root, w_frac_rz
 
 

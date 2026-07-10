@@ -51,6 +51,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
+from legoesm.thermo import moist_air_density
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.grids.regridding import (
     RegridWeights,
@@ -86,10 +87,7 @@ _CRUJRA_STEPS_PER_YEAR = 1460    # 365 noleap days x 4 (6-hourly)
 
 # --- variable-map parameters ---
 _DEFAULT_CO2_PPMV = 412.0        # constant CO2 this push (transient series = carbon WS)
-_SNOW_RAIN_RAMP_K = 2.0          # rain/snow partition ramp width above T_freeze (CLM convention)
-# Virtual-temperature coefficient (1/epsilon - 1 = R_v/R_d - 1 ~ 0.608); derived
-# from constants so no 0.608 literal appears in a function body.
-_VIRT_T_COEF = 1.0 / constants.epsilon - 1.0
+SNOW_RAIN_RAMP_K = 2.0           # rain/snow partition ramp width above T_freeze (CLM convention)
 
 # --- synthetic fallback climatology (no external data needed for smoke/tests) ---
 _SYN_T_EQUATOR_K = 300.0         # equatorial air temperature
@@ -276,11 +274,15 @@ def synthetic_land_forcing(
         _SYN_T_POLE_K + (_SYN_T_EQUATOR_K - _SYN_T_POLE_K) * cos_lat, shape
     ).astype(np.float32)
     psrf = np.full(shape, _SYN_PSRF, dtype=np.float32)
-    # q = RH * q_sat(T, p); canonical saturation (legoesm.thermo, no re-derivation).
-    from legoesm.thermo import saturation_mixing_ratio
+    # q = RH * q_sat(T, p); canonical SPECIFIC-humidity saturation (legoesm.thermo,
+    # no re-derivation).  qbot is consumed as specific humidity (the moist-air
+    # density uses virtual_temperature(t, q)) and the real QBOT stream is
+    # specific humidity, so the
+    # synthetic field must be q_sat, not the mixing ratio r_sat.
+    from legoesm.thermo import saturation_specific_humidity
     qsat = np.asarray(
-        saturation_mixing_ratio(jnp.asarray(tbot, dtype=jnp.float64),
-                                jnp.asarray(psrf, dtype=jnp.float64))
+        saturation_specific_humidity(jnp.asarray(tbot, dtype=jnp.float64),
+                                     jnp.asarray(psrf, dtype=jnp.float64))
     )
     qbot = (_SYN_RH * qsat).astype(np.float32)
     fsds = np.broadcast_to(
@@ -384,9 +386,13 @@ def regrid_forcing(
     )
 
 
-def _snow_fraction(t_air, *, ramp_k: float):
+def snow_fraction(t_air, *, ramp_k: float):
     """Liquid/solid precipitation split: all snow <= T_freeze, all rain at
-    ``T_freeze + ramp_k``, linear between (CLM convention)."""
+    ``T_freeze + ramp_k``, linear between (CLM convention).
+
+    The one land snow/rain partition, shared by the gridded CRU-JRA path and the
+    eddy-covariance single-site loader so both use the identical CLM ramp.
+    """
     frac = (constants.T_freeze + ramp_k - t_air) / ramp_k
     return jnp.clip(frac, 0.0, 1.0)
 
@@ -420,10 +426,9 @@ def _assemble_atm_surface(
     wind = jnp.asarray(wind, dtype=dtype)
     cos_z = jnp.asarray(cos_z, dtype=dtype)
 
-    # Moist-air density: rho = p / (R_d * T_v), T_v = T (1 + (1/eps - 1) q).
-    t_virtual = t_air * (1.0 + _VIRT_T_COEF * q_air)
-    rho = p_sfc / (constants.R_d * t_virtual)
-    snow_frac = _snow_fraction(t_air, ramp_k=snow_ramp_k).astype(dtype)
+    # Moist-air density rho = p / (R_d * T_v) via the shared thermo helper.
+    rho = moist_air_density(t_air, p_sfc, q_air)
+    snow_frac = snow_fraction(t_air, ramp_k=snow_ramp_k).astype(dtype)
     one = jnp.ones_like(t_air)
     return AtmToSurface(
         sw_down=sw,
@@ -453,7 +458,7 @@ def forcing_to_atm_surface(
     model_time_s: float,
     *,
     co2_ppmv: float = _DEFAULT_CO2_PPMV,
-    snow_ramp_k: float = _SNOW_RAIN_RAMP_K,
+    snow_ramp_k: float = SNOW_RAIN_RAMP_K,
     dtype=jnp.float64,
 ) -> AtmToSurface:
     """Build :class:`AtmToSurface` from regridded forcing at ``model_time_s``.
@@ -511,7 +516,7 @@ def disaggregate_forcing(
     model_times_s,
     *,
     co2_ppmv: float = _DEFAULT_CO2_PPMV,
-    snow_ramp_k: float = _SNOW_RAIN_RAMP_K,
+    snow_ramp_k: float = SNOW_RAIN_RAMP_K,
     freq_hours: int = CRUJRA_FREQ_HOURS,
     dtype=jnp.float64,
 ) -> AtmToSurface:
@@ -608,7 +613,7 @@ def stage_forcing(
     suffix: str = "",
     k_neighbors: int = 4,
     co2_ppmv: float = _DEFAULT_CO2_PPMV,
-    snow_ramp_k: float = _SNOW_RAIN_RAMP_K,
+    snow_ramp_k: float = SNOW_RAIN_RAMP_K,
     freq_hours: int = CRUJRA_FREQ_HOURS,
     allow_synthetic: bool = True,
     dtype=jnp.float64,
@@ -653,7 +658,7 @@ def stage_forcing_years(
     suffix: str = "",
     k_neighbors: int = 4,
     co2_ppmv: float = _DEFAULT_CO2_PPMV,
-    snow_ramp_k: float = _SNOW_RAIN_RAMP_K,
+    snow_ramp_k: float = SNOW_RAIN_RAMP_K,
     freq_hours: int = CRUJRA_FREQ_HOURS,
     allow_synthetic: bool = True,
     dtype=jnp.float64,

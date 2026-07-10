@@ -462,6 +462,69 @@ def saturation_specific_humidity(
     return w_sat / (1.0 + w_sat)
 
 
+def vapor_pressure_from_specific_humidity(
+    q: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Vapor pressure [Pa] from specific humidity and total pressure.
+
+    ``e = q · p / (ε + (1 − ε) · q)`` — the inverse of the specific-humidity
+    definition ``q = ε e / (p − (1 − ε) e)`` (NOT the mixing-ratio form
+    ``q p / (ε + q)``, which biases e by ~1% at tropical q).  Centralised here
+    so the canopy stomatal (Jarvis / coupled-Farquhar) and canopy-air
+    energy-balance VPD paths share one derivation.
+
+    Parameters
+    ----------
+    q : jax.Array
+        Specific humidity [kg/kg].
+    p : jax.Array
+        Total pressure [Pa].
+
+    Returns
+    -------
+    jax.Array
+        Vapor pressure [Pa].
+    """
+    return q * p / (constants.epsilon + (1.0 - constants.epsilon) * q)
+
+
+def virtual_temperature(
+    T: jax.Array,
+    q: jax.Array,
+) -> jax.Array:
+    """Virtual temperature [K] from temperature and specific humidity.
+
+    ``T_v = T (1 + (1/ε − 1) q)`` — the specific-humidity form (ε = R_d/R_v so
+    1/ε − 1 = R_v/R_d − 1).  Centralised for the land surface-forcing paths
+    (CRU-JRA assembly, eddy-covariance site loader) that form moist-air density
+    from it; mirrors ``atmosphere.physics._shared.virtual_temperature``.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+    q : jax.Array
+        Specific humidity [kg/kg].
+
+    Returns
+    -------
+    jax.Array
+        Virtual temperature [K].
+    """
+    return T * (1.0 + (1.0 / constants.epsilon - 1.0) * q)
+
+
+def moist_air_density(
+    T: jax.Array,
+    p: jax.Array,
+    q: jax.Array,
+) -> jax.Array:
+    """Moist-air density [kg/m3]: ``ρ = p / (R_d T_v)`` with virtual temperature
+    ``T_v`` from :func:`virtual_temperature`."""
+    return p / (constants.R_d * virtual_temperature(T, q))
+
+
 def mixing_ratio_to_specific_humidity(
     mixing_ratio: jax.Array,
 ) -> jax.Array:

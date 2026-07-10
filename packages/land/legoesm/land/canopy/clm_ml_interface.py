@@ -33,7 +33,7 @@ from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.canopy.sif import SIFConfig, multilayer_canopy_sif
 from legoesm.land.canopy.state import CanopyState
 from legoesm.land.surface_scheme import SurfaceFluxOutput
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 
 # CLM-ML unfilled array elements carry spval = 1e36; treat anything above this
 # guard (or non-finite) as invalid padding and drop it from the SIF sum.
@@ -991,7 +991,7 @@ def _extract_surface_fluxes(
     # soil surface relative humidity.  Using qsat(Tg) ignores this and
     # overestimates soil evaporation by ~30% at smp=-50000 mm (rhg≈0.70).
     # Use rhg_soil from mlcanopy if available; fall back to qsat only if absent.
-    q_sat_surface = saturation_mixing_ratio(T_surface, forcing.p_surface)
+    q_sat_surface = saturation_specific_humidity(T_surface, forcing.p_surface)
     if hasattr(mlcanopy, "rhg_soil"):
         rhg = jnp.stack([mlcanopy.rhg_soil[i + 1] for i in range(ncol)])
         # Clamp rhg to [0, 1] — spval=1e36 indicates uninitialised
