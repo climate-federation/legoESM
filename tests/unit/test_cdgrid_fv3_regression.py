@@ -10455,22 +10455,32 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
         # vertex preservation 1e-7).  The INTERIOR ke[0,4,4] is UNCHANGED
         # bit-for-bit (sync is identity off the seams) — guards against an
         # interior regression.  ke[3,2,6] shifted ~1e-9 (FP-order, near-seam).
+        # 2026-07-10 REBASELINE (commit f3031be24 + follow-ups): the FB
+        # covariant-convention change made the d_sw3 one-sided edge PPM
+        # overrides + cube-vertex bl=br=0 zeroing always-on and switched
+        # the uc/vc pad to the neighbor-delta cross-face halo — an
+        # INTENTIONAL numerics change of edge/vertex corners.  The
+        # VERTEX pins (ke[0,0,0], ke[5,8,8]) and the near-seam pin
+        # (ke[3,2,6], row 2 = inside the d_sw3 override reach, Δ~2e-10)
+        # shifted; the INTERIOR pin ke[0,4,4] is UNCHANGED BIT-FOR-BIT,
+        # proving the change is edge/vertex-scoped.
         self.assertEqual(ke.shape, (6, n + 1, n + 1))
-        self.assertAlmostEqual(float(ke[0, 0, 0]), -0.09303437519154842,
+        self.assertAlmostEqual(float(ke[0, 0, 0]), 0.11092502374782362,
             places=10, msg="ke[0,0,0] gold fingerprint changed.")
         self.assertAlmostEqual(float(ke[0, 4, 4]), -0.049255759396560087,
             places=10, msg="ke[0,4,4] INTERIOR fingerprint changed (should be "
-                           "corner-sync-invariant — a shift here is a real bug).")
-        self.assertAlmostEqual(float(ke[3, 2, 6]), -0.10461388079530494,
+                           "edge/vertex-treatment-invariant — a shift here is "
+                           "a real bug).")
+        self.assertAlmostEqual(float(ke[3, 2, 6]), -0.10461388058171352,
             places=10, msg="ke[3,2,6] gold fingerprint changed.")
-        self.assertAlmostEqual(float(ke[5, 8, 8]), -0.03480824827396059,
+        self.assertAlmostEqual(float(ke[5, 8, 8]), -0.019580517691310993,
             places=10, msg="ke[5,8,8] gold fingerprint changed.")
         # Global reductions (catch bugs that average out pointwise).
-        self.assertAlmostEqual(float(ke.sum()), 1.7479846058190205,
-            places=10, msg="ke.sum() gold fingerprint changed (2026-06-04 "
-                           "rebaseline: exact non-orthogonal corner-sync fix "
-                           "shifts the cube-vertex KE).")
-        self.assertAlmostEqual(float((ke ** 2).sum()), 4.779474897706146,
+        self.assertAlmostEqual(float(ke.sum()), 2.130029968514436,
+            places=10, msg="ke.sum() gold fingerprint changed (2026-07-10 "
+                           "rebaseline: FB covariant-convention + d_sw3 edge "
+                           "overrides shift edge/vertex KE).")
+        self.assertAlmostEqual(float((ke ** 2).sum()), 4.421875130553118,
             places=10, msg="ke L2² gold fingerprint changed.")
 
 
@@ -11049,11 +11059,18 @@ class TestCosineBellGoldFileIter712(unittest.TestCase):
             (h_np[3, 26 - 3:26 + 4, 27 - 3:27 + 4]
              * area_np[3, 26 - 3:26 + 4, 27 - 3:27 + 4]).sum())
         # Iter-914 rebaseline values (post-iter-878 limiter).
-        self.assertAlmostEqual(box_mass, 2303295666257920.0, places=-8,
+        # 2026-07-10 REBASELINE (commit f3031be24 + follow-ups): the FB
+        # covariant-convention change shifted the box mass by 2.7e8 on
+        # 2.3e15 = 1.2e-7 RELATIVE — the exact drift predicted for this
+        # intentional edge-treatment change; all shape/peak fingerprints
+        # above are unchanged at places=2.
+        self.assertAlmostEqual(box_mass, 2303295397822464.0, places=-8,
             msg=f"7x7 box MASS around peak drifted: {box_mass:.3e}")
         # Face 3 mass (bell-carrying face, area-weighted).
+        # 2026-07-10 REBASELINE: 1.9e-7 relative drift (same intentional
+        # FB covariant-convention edge-treatment change as box_mass above).
         face3_mass = float((h_np[3] * area_np[3]).sum())
-        self.assertAlmostEqual(face3_mass, 4191834930675712.0,
+        self.assertAlmostEqual(face3_mass, 4191834125369344.0,
             places=-8,
             msg=f"face-3 area-weighted mass drifted: {face3_mass:.3e}")
         # Face 4 mass (tail only, area-weighted).  Iter-914 also
