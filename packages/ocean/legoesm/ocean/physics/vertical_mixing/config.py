@@ -15,10 +15,13 @@ __param_spec__ = {
     "ConstantVerticalMixingConfig": {
         "scheme_key": "ocean.vm.constant",
         "excluded": {
+            "N_ref": "Gregg et al. (2003) fixed published reference stratification N_0 (5.24e-3 1/s); the latitude-scaling normalisation, not a trained closure knob",
         },
         "params": {
             "A_v": {"units": "m^2/s", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "constant vertical mixing", "shape": None},
             "K_v": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "constant vertical mixing", "shape": None},
+            "K_bg_eq": {"units": "m^2/s", "bounds": (3.3e-06, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gregg et al. (2003) latitude-dependent internal-wave background (CVMix bkgnd) — equatorial diffusivity", "shape": None},
+            "K_bg_pole": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gregg et al. (2003) latitude-dependent internal-wave background (CVMix bkgnd) — polar diffusivity", "shape": None},
         },
     },
     "RichardsonVerticalMixingConfig": {
@@ -138,9 +141,29 @@ __param_spec__ = {
 
 
 class ConstantVerticalMixingConfig(NamedTuple):
-    """Constant-coefficient vertical mixing."""
+    """Constant-coefficient vertical mixing.
+
+    With ``lat_dependent=False`` (default) the vertical viscosity ``A_v`` and
+    diffusivity ``K_v`` are spatial constants (BIT-IDENTICAL legacy).  With
+    ``lat_dependent=True`` the background is REPLACED, on the IMPLICIT
+    vertical-mixing path (``k_profiles.compute_vertical_K_profiles``), by the
+    Gregg et al. (2003) latitude/stratification-scaled internal-wave background
+    (CVMix ``bkgnd`` / MOM6 ``Henyey_IGW_background``): the diapycnal
+    diffusivity is reduced toward the equator — where the Coriolis parameter
+    vanishes and internal-wave breaking is suppressed — ranging from
+    ``K_bg_eq`` (equator) to ``K_bg_pole`` (poleward); the momentum viscosity is
+    scaled by the SAME factor, preserving the configured Prandtl ratio
+    ``A_v/K_v``.  The EXPLICIT ``constant_vertical_mixing`` tendency path cannot
+    apply a latitude field and RAISES if ``lat_dependent=True`` (no silent
+    no-op).  See ``_shared.latitude_background_diffusivity``.
+    """
     A_v: float = 1e-3   # Vertical viscosity [m^2/s]
     K_v: float = 1e-4   # Vertical diffusivity [m^2/s]
+    # --- Latitude-dependent internal-wave background (Gregg 2003 / CVMix bkgnd) ---
+    lat_dependent: bool = False   # opt-in; False => spatial-constant A_v/K_v (legacy)
+    K_bg_eq: float = 1e-5         # equatorial background diffusivity [m^2/s]
+    K_bg_pole: float = 1e-4       # polar background diffusivity [m^2/s]
+    N_ref: float = 5.24e-3        # Gregg (2003) reference stratification N_0 [1/s]
 
 
 class RichardsonVerticalMixingConfig(NamedTuple):
