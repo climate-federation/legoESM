@@ -313,6 +313,26 @@ def is_evergreen(pft_name: str) -> bool:
     return "evergreen" in pft_name
 
 
+def is_c4(pft_name: str) -> bool:
+    """True for C4-pathway PFTs (``c4_grass`` / ``crop_c4``); False for C3 (all others).
+
+    The photosynthetic pathway is encoded in the CLM5 PFT name (``c4_grass`` / ``crop_c4``
+    carry the ``c4`` tag; every other name -- including the ``c3_*`` / ``crop_c3`` C3
+    grasses/crops -- does not), so a substring match on ``c4`` cleanly separates the two.
+    Agrees with the per-PFT C4 flag in the canopy biome table
+    (``boundary_data._internals._CLM5_TO_BIOME``).
+
+    Why it matters: the Farquhar biochemistry in ``carbon.stomata`` is **C3-only** -- the
+    C4 rows are run through C3 kinetics as a documented approximation, so the leaf
+    intercellular CO2 (``Ci``) it returns for a C4 PFT does NOT represent the true C4
+    CO2-concentrating leaf state.  Any diagnostic that reads ``Ci`` as a C3 quantity (e.g.
+    the leaf carbon-isotope discrimination in ``carbon.d13c_forward``, where C4 plants
+    discriminate FAR less than C3) must MASK the C4 PFTs rather than apply the C3 form to
+    them -- a C3 formula on a C4 leaf is a magnitude error.
+    """
+    return "c4" in pft_name
+
+
 # Lazy-converted to jnp array on first use to avoid import-time JAX init
 _clm5_table_cache: jnp.ndarray | None = None
 

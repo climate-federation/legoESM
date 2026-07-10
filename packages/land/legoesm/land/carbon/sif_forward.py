@@ -29,11 +29,11 @@ Assumptions (documented, refinements deferred like the SIF-obs fetcher):
 * Leaf temperature ~ the representative near-surface air temperature (growing-season
   peak day, local solar noon); a full leaf-energy balance is out of scope for this
   archetype diagnostic.
-* A single representative growing-season canopy LAI (``_SIF_REF_LAI``) sets fAPAR; the
-  archetype-to-archetype SIF contrast is then carried by climate + ``Vc_max25``.  A
-  per-archetype LAI (from the CLM MONTHLY_LAI climatology) is a documented refinement.
-* Well-watered growing season (``_SIF_REF_BETA = 1``); soil-moisture down-regulation is
-  a documented refinement (the ArchetypeTable carries ``aridity``).
+* A single representative growing-season canopy LAI (``archetype_forcing.REF_LAI``) sets
+  fAPAR; the archetype-to-archetype SIF contrast is then carried by climate + ``Vc_max25``.
+  A per-archetype LAI (from the CLM MONTHLY_LAI climatology) is a documented refinement.
+* Well-watered growing season (``archetype_forcing.REF_BETA = 1``); soil-moisture
+  down-regulation is a documented refinement (the ArchetypeTable carries ``aridity``).
 
 UNITS: the returned SIF is the model's NATIVE emitted/observed-top-of-canopy fluorescence
 PHOTON FLUX [umol m-2 s-1] (the :func:`leaf_sif` unit), NOT a satellite spectral radiance
@@ -50,75 +50,34 @@ functions are pure JAX and differentiable in the SIFConfig fluorescence params.
 
 from __future__ import annotations
 
-import numpy as np
-
-# --- representative growing-season sampling point (NH-phased, like the model forcing) ---
-# Peak day of the annual temperature/insolation cycle used by
-# ``climate_forcing.make_climatological_forcing`` (NH summer); local solar noon for the
-# peak-insolation daytime SIF.  Sampling parameters (WHEN/HOW the representative canopy is
-# probed), not empirical coefficients.
-_SIF_REF_DOY = 200.0        # day-of-year of the representative growing-season sample [-]
-_SIF_REF_HOUR = 12.0        # local solar hour of the representative sample [h]
-
-# --- representative canopy structure / water status for the standalone diagnostic ---
-# A canonical growing-season canopy LAI (fAPAR = 1 - exp(-k_ext*LAI)); the per-archetype
-# LAI climatology is a documented refinement.  Well-watered growing season (no soil-
-# moisture stress) -> beta = 1.  Reference values, not tuned coefficients.
-_SIF_REF_LAI = 3.0          # representative growing-season canopy LAI [m2/m2]
-_SIF_REF_BETA = 1.0         # well-watered growing-season soil-moisture factor [-]
-
 
 def _archetype_leaf_state(table):
     """Per-archetype coupled-Farquhar leaf state at the representative growing-season
     climate: ``(An, Ci, gamma_star, apar)`` each ``(n_arch,)``.
 
     Runs the model's OWN :func:`solve_coupled_farquhar_ci` (no re-implemented
-    photosynthesis) at the ArchetypeTable climate + PFT ``Vc_max25``; these are the
-    electron-transport inputs :func:`leaf_sif` inverts ``je`` from.  Independent of any
-    trained SIF parameter, so the trainer precomputes it ONCE (see
-    :func:`build_sif_forward`) and the SIF-parameter gradient then flows only through
-    :func:`leaf_sif`.
+    photosynthesis) at the SHARED per-archetype growing-season forcing + PFT ``Vc_max25``
+    (:func:`legoesm.land.carbon.archetype_forcing.build_archetype_forcing`, also used by the
+    isotope forward -- one forcing definition, no copy-paste); these are the electron-
+    transport inputs :func:`leaf_sif` inverts ``je`` from.  Independent of any trained SIF
+    parameter, so the trainer precomputes it ONCE (see :func:`build_sif_forward`) and the
+    SIF-parameter gradient then flows only through :func:`leaf_sif`.
     """
-    import jax
-    import jax.numpy as jnp
-    from legoesm.land.carbon.stomata import StomataConfig, solve_coupled_farquhar_ci
-    from legoesm.land.climate_forcing import make_climatological_forcing
-    from legoesm.land.surface_params import (
-        PARAM_NAMES,
-        array_to_params,
-        clm5_pft_table,
+    from legoesm.land.carbon.archetype_forcing import (
+        REF_BETA,
+        REF_LAI,
+        build_archetype_forcing,
     )
+    from legoesm.land.carbon.stomata import StomataConfig, solve_coupled_farquhar_ci
 
-    pft_id = jnp.asarray(np.asarray(table.pft_id, dtype=int))
-    mat_k = jnp.asarray(np.asarray(table.mat_k, dtype=float))
-    t_seas = jnp.asarray(np.asarray(table.t_seasonal_amp_k, dtype=float))
-    sw_mean = jnp.asarray(np.asarray(table.sw_mean_w, dtype=float))
-    n_arch = int(pft_id.shape[0])
-    # Precipitation does not enter the Farquhar inputs (only precip_total/snow), so a
-    # zero rate keeps the growing-season forcing minimal without a spurious constant.
-    precip = jnp.zeros((n_arch,), dtype=mat_k.dtype)
-
-    # Representative growing-season forcing per archetype: vmap the single-column model
-    # builder over the archetype axis, then drop the trailing length-1 column axis
-    # (matches ``iter_archetype_batches._build_forcing_fn``).
-    forcing = jax.vmap(
-        make_climatological_forcing, in_axes=(0, 0, 0, 0, None, None),
-    )(mat_k, t_seas, sw_mean, precip, _SIF_REF_DOY, _SIF_REF_HOUR)
-    forcing = jax.tree_util.tree_map(
-        lambda x: jnp.squeeze(x, axis=1) if x.ndim >= 2 else x, forcing)
-
-    # Per-archetype PFT physiology (Vc_max25) via the SAME CLM5 table + column order
-    # ``iter_archetype_batches`` uses -- no re-derived physiology.
-    rows = clm5_pft_table()[pft_id]                    # (n_arch, 12)
-    land_params = array_to_params(rows, PARAM_NAMES)
+    forcing = build_archetype_forcing(table)
     stomata = StomataConfig(
         enabled=True, stomata_model="ball_berry",
-        Vc_max25=land_params.Vc_max25)                 # per-archetype (n_arch,) capacity
-
+        Vc_max25=forcing.Vc_max25)                     # per-archetype (n_arch,) capacity
     leaf = solve_coupled_farquhar_ci(
-        forcing.T_lowest, forcing.sw_down, forcing.co2_ppmv,
-        forcing.q_lowest, forcing.p_surface,
-        _SIF_REF_LAI, _SIF_REF_BETA, stomata)
+        forcing.T_leaf, forcing.sw_down, forcing.co2_ppmv,
+        forcing.q_air, forcing.p_surface,
+        REF_LAI, REF_BETA, stomata)
     return leaf.A_net, leaf.Ci, leaf.gamma_star, leaf.APAR_umol
 
 

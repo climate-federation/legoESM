@@ -60,7 +60,7 @@ GROWING SEASON, not an annual mean diluted by dormant / polar-night months.
 :data:`_GROWING_SEASON_ACTIVE_FRACTION` of that cell's own annual maximum (a standard
 amplitude-threshold phenology definition), NaN-aware.  ``--aggregate annual`` selects a
 plain annual mean instead.  This matches the model SIF forward, which samples a
-REPRESENTATIVE GROWING-SEASON canopy (``sif_forward._SIF_REF_DOY`` = peak insolation).
+REPRESENTATIVE GROWING-SEASON canopy (``archetype_forcing.REF_DOY`` = peak insolation).
 
 Login-node policy: the FTP fetch is a networked compute-node job -- run via ``sbatch`` /
 ``srun``, never on the login node.
