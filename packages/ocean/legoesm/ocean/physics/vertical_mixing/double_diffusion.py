@@ -88,6 +88,12 @@ __physics_contract__ = {
         "column heat and salt via flux-form implicit diffusion, no-flux BC)."
     ),
     "conserves": ["energy", "salt"],
+    # JAX-differentiable everywhere (grad flows; no stop_gradient / nondiff
+    # ops) — the codebase convention for where/clip-based closures. It is
+    # piecewise-C0 (not C1) at the regime boundaries (R_rho = 1, R_c, 0.5) BY
+    # NEMO CONSTRUCTION: the Merryfield/Kelley fits are piecewise, so smoothing
+    # the joins would break oracle fidelity. Subgradients at the kinks are
+    # well-defined and finite (codex r1 differentiability note).
     "differentiable": True,
     "reference": "Merryfield, Holloway & Gargett (1999), JPO 29, 1124-1142",
     "idealized_test": "tests/ocean/unit/test_double_diffusion.py",
@@ -150,7 +156,13 @@ def compute_ddm_diffusivity(
     Rf = jnp.clip(R_rho, 1.0 + _EPS, Rc - _EPS)
     frac = (Rf - 1.0) / (Rc - 1.0)                       # in (0,1)
     avs_finger = cfg.rn_avts * (1.0 - frac * frac) ** 3   # >= 0
-    avt_finger = _FINGER_HEAT_RATIO * avs_finger / Rf
+    # Heat ratio uses the ACTUAL in-window R_rho (Merryfield: 0.7*avs/R_rho),
+    # NOT the clipped Rf (which would err by ~_EPS within eps of 1 / Rc — codex
+    # r1).  In-window R_rho>1 so the divide is safe; out-of-window lanes divide
+    # by 1.0 (finite, AD-safe — a raw R_rho there could be 0/negative and, though
+    # masked below, would poison reverse-mode grads via 0*inf).
+    R_finger = jnp.where(finger, R_rho, 1.0)
+    avt_finger = _FINGER_HEAT_RATIO * avs_finger / R_finger
 
     # --- Diffusive convection: 0 < R_rho < 1 ---
     dc = stable & (R_rho > 0.0) & (R_rho < 1.0)
