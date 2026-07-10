@@ -199,45 +199,6 @@ def _pad_halo_uc_vc_via_d2a2c(u_d, v_d, cdgrid):
     return uc_jhalo, vc_ihalo
 
 
-def _pad_halo_uc_vc_new_via_old_delta(uc, vc, u_d, v_d, cdgrid):
-    """iter-947: NEW uc/vc halo via NEW_boundary + OLD cross-face delta.
-
-    uc_NEW_halo[H] = uc[B]_NEW + (uc_OLD_halo[H] - uc_OLD[B]).
-    OLD delta carries cross-face rotation; NEW anchor keeps c_sw+p_grad_c consistent.
-    Fixes iter-946 OLD/NEW mismatch. Requires duogrid ng>=3.
-
-    Returns
-    -------
-    uc_pad : (6, n+1, n+2) — uc with NEW-consistent j-halo (j=-1, j=n)
-    vc_pad : (6, n+2, n+1) — vc with NEW-consistent i-halo (i=-1, i=n)
-    """
-    n = cdgrid.n
-
-    # OLD halo via iter-946 d2a2c machinery
-    uc_old_jhalo, vc_old_ihalo = _pad_halo_uc_vc_via_d2a2c(u_d, v_d, cdgrid)
-
-    # OLD interior uc/vc for cross-face delta only. iter-948 NEGATIVE: linear extrap worsens W2 |v_max| 75→87.
-    _, _, uc_old_int, vc_old_int, _, _ = d2a2c_vect(u_d, v_d, cdgrid)
-
-    # uc south/north halo delta
-    delta_uc_south = uc_old_jhalo[:, :, 0:1] - uc_old_int[:, :, 0:1]
-    delta_uc_north = uc_old_jhalo[:, :, n + 1:n + 2] - uc_old_int[:, :, n - 1:n]
-
-    uc_new_south = uc[:, :, 0:1] + delta_uc_south
-    uc_new_north = uc[:, :, n - 1:n] + delta_uc_north
-    uc_pad = jnp.concatenate([uc_new_south, uc, uc_new_north], axis=2)  # (6, n+1, n+2)
-
-    # vc west/east halo delta
-    delta_vc_west = vc_old_ihalo[:, 0:1, :] - vc_old_int[:, 0:1, :]
-    delta_vc_east = vc_old_ihalo[:, n + 1:n + 2, :] - vc_old_int[:, n - 1:n, :]
-
-    vc_new_west = vc[:, 0:1, :] + delta_vc_west
-    vc_new_east = vc[:, n - 1:n, :] + delta_vc_east
-    vc_pad = jnp.concatenate([vc_new_west, vc, vc_new_east], axis=1)  # (6, n+2, n+1)
-
-    return uc_pad, vc_pad
-
-
 def _pad_halo_uc_vc_new_via_neighbor_delta(uc, vc, u_d, v_d, cdgrid):
     """Faithful ext_vector halo semantics for the updated C winds.
 
@@ -314,7 +275,7 @@ def _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt,
 
     # Part 1: Interior ut/vt from 4-cell vc/uc avg.
     # ut(I,j) = (uc - 0.25*cosa_u*(vc(I-1,j)+vc(I,j)+vc(I-1,j+1)+vc(I,j+1)))*rsin_u
-    # iter-947: NEW-corrected duogrid halo via _pad_halo_uc_vc_new_via_old_delta (carries OLD cross-face delta).
+    # iter-947 → 2026-07-10: NEW-corrected duogrid halo via _pad_halo_uc_vc_new_via_neighbor_delta (neighbour-side increment).
     # iter-946 d2a2c-only halo regressed W2 (OLD/NEW mismatch with c_sw+p_grad_c increments).
     if (use_duogrid and dg.ng >= 3
             and u_d_old is not None and v_d_old is not None):
@@ -2963,7 +2924,7 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
 
     # Step 1: B-grid contravariant v-velocity Courant number.
     # vb = dt/2 * (vc_sum - uc_sum*cosa)*rsina at corners.
-    # iter-947: NEW-corrected cross-face halo via _pad_halo_uc_vc_new_via_old_delta (ng>=3)
+    # iter-947 → 2026-07-10: NEW-corrected cross-face halo via _pad_halo_uc_vc_new_via_neighbor_delta (ng>=3)
     if use_duogrid and dg.ng >= 3:
         uc_pad, vc_pad = _pad_halo_uc_vc_new_via_neighbor_delta(
             uc, vc, u_d, v_d, cdgrid)
@@ -3049,7 +3010,7 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     """
 
     # Step 1: contravariant transport velocity (FV3 d_sw1).
-    # iter-947: forward OLD u_d/v_d for duogrid NEW-corrected halo via _pad_halo_uc_vc_new_via_old_delta
+    # iter-947 → 2026-07-10: forward OLD u_d/v_d for duogrid NEW-corrected halo via _pad_halo_uc_vc_new_via_neighbor_delta
     ut, vt = _d_sw1_recompute_ut_vt(
         uc, vc, cdgrid, dt, u_d_old=u_d, v_d_old=v_d)
     # iter-944b: REVERTED iter-944 CGRID_NE (ut, vt) sync — Fortran only syncs MASS flux

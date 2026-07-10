@@ -258,7 +258,7 @@ def make_tiled_transport_sweep_stage_2d(
 # is DISTINCT from the d2a2c ut/vt (d2a2c_tile_unified:1225/1235 uses the
 # D-grid wind directly, `ut = (uc - v_d*cosa_u)*rsin_u`).  The box stencil is
 # fully LOCAL once uc/vc carry their 1-cell cross halo — supplied by the
-# GLOBAL face-replicated pre-pad `_pad_halo_uc_vc_new_via_old_delta` (the same
+# GLOBAL face-replicated pre-pad `_pad_halo_uc_vc_new_via_neighbor_delta` (the same
 # pre-pad proven in U3f) — so each tile only dynamic_slices, NO in-stage
 # exchange.  Reassembly: lower tile owns the shared staggered face (ut: i-axis
 # n+1; vt: j-axis n+1), the cell axis tiles exactly across kt.
@@ -272,7 +272,7 @@ def dsw1_ut_vt_tile_2d(uc, vc, uc_pad, vc_pad,
     ``uc`` ``(F, n+1, n)``, ``vc`` ``(F, n, n+1)`` are the (face-replicated)
     UPDATED C-grid winds; ``uc_pad`` ``(F, n+1, n+2)`` / ``vc_pad``
     ``(F, n+2, n+1)`` are their GLOBAL cross-halo pre-pad
-    (``_pad_halo_uc_vc_new_via_old_delta``).  ``cosa_u``/``rsin_u``
+    (``_pad_halo_uc_vc_new_via_neighbor_delta``).  ``cosa_u``/``rsin_u``
     ``(F, n+1, n)`` and ``cosa_v``/``rsin_v`` ``(F, n, n+1)`` are the static
     metrics.  Slices the tile at start ``(a_i, a_j)`` (``axis_index*nl`` in a
     shard, ``t*nl`` in a host test) and returns the staggered tile blocks
@@ -361,7 +361,7 @@ def make_tiled_dsw1_ut_vt_stage_2d(mesh, cdgrid, n: int, kt: int):
     ``cosa_v``/``rsin_v``) like :func:`tiled_d2a2c.make_tiled_d2a2c_stage`.
     Returns ``stage(uc, vc, uc_pad, vc_pad) -> (ut, vt)`` where the four
     inputs are FACE-REPLICATED (``uc``/``vc`` the updated C-grid winds,
-    ``uc_pad``/``vc_pad`` their global ``_pad_halo_uc_vc_new_via_old_delta``
+    ``uc_pad``/``vc_pad`` their global ``_pad_halo_uc_vc_new_via_neighbor_delta``
     pre-pad) and the outputs are tile-sharded
     ``P("face","tile_i","tile_j")`` with gathered extents
     ``ut (6, kt*(nl+1), kt*nl)`` / ``vt (6, kt*nl, kt*(nl+1))`` (the staggered
@@ -394,7 +394,7 @@ def make_tiled_dsw1_ut_vt_stage_2d(mesh, cdgrid, n: int, kt: int):
 
     def stage(uc, vc, uc_pad, vc_pad):
         """uc/vc the updated C-grid winds; uc_pad/vc_pad their global
-        ``_pad_halo_uc_vc_new_via_old_delta`` pre-pad — all FACE-REPLICATED."""
+        ``_pad_halo_uc_vc_new_via_neighbor_delta`` pre-pad — all FACE-REPLICATED."""
         return _body(uc, vc, uc_pad, vc_pad,
                      cosa_u, rsin_u, cosa_v, rsin_v)
 
