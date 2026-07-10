@@ -530,6 +530,7 @@ _AEROSOL_CCN_BASE = [
     "--dataset", "analytical",
     "--aerosol-ccn",
     "--aerosol-forcing", "external",
+    "--aerosol-file", "/tmp/aer.nc",   # external forcing requires a file
     "--microphysics", "morrison",
 ]
 
@@ -814,6 +815,7 @@ def test_issue484_new_amip_flags_flow_to_config():
         "--k-bl-max-per-day", "1.5",
         "--k-free-per-day", "0.2",
         "--aerosol-forcing", "external",
+        "--aerosol-file", "/dummy/aero.nc",   # external forcing requires a file
         "--microphysics", "morrison",
         "--nc-from-aerosol",
     ])
@@ -1938,3 +1940,53 @@ def test_latlon24_production_variant_pins_polar_filter():
     cfg = build_config_from_args(args)
     assert cfg.convection == "sbm" and cfg.gravity_wave_drag == "mcfarlane"
     assert cfg.convective_precip_efficiency == 0.0  # sbm rejects the bechtold knob
+
+
+def test_explicit_zero_sic_scale_and_sst_offset_preserved():
+    """An explicit ``--sic-scale 0.0`` / ``--sst-offset 0.0`` must reach the
+    config as 0.0 — the builder uses ``is not None``, not ``or``, so a
+    legitimate no-sea-ice / no-conversion sensitivity value is not silently
+    replaced by the fallback default (1.0 / 0.0)."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--sic-scale", "0.0", "--sst-offset", "0.0",
+    ]), parser))
+    assert cfg.sic_scale == 0.0
+    assert cfg.sst_offset == 0.0
+    # The default path still yields the fallbacks.
+    cfg_def = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_def.sic_scale == 1.0 and cfg_def.sst_offset == 0.0
+
+
+def test_preset_dataset_defaults_and_override():
+    """A preset dataset defaults sic_scale/sst_offset to the preset's own unit
+    conversions (cobe SIC is percent -> 0.01), so a bare ``--dataset cobe`` keeps
+    correct units without needing --sic-scale. An explicit ``--sic-scale 0`` (a
+    no-sea-ice run) still overrides — the value model_driver forwards into the
+    preset config, which used to be dropped by ``_replace(path, T_ice)``."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "cobe", "--forcing-path", "/tmp/cobe.nc",
+    ]), parser))
+    assert cfg.sic_scale == 0.01          # cobe percent -> fraction (preset default)
+    assert cfg.sst_offset == 0.0          # cobe already Kelvin
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "cobe", "--forcing-path", "/tmp/cobe.nc", "--sic-scale", "0",
+    ]), parser))
+    assert cfg0.sic_scale == 0.0          # explicit no-ice override honored
+
+
+def test_external_ozone_aerosol_require_a_file():
+    """``--ozone-forcing external`` / ``--aerosol-forcing external`` without a
+    file must fail loudly rather than silently substitute the built-in reference
+    climatology (parity with the solar/ghg guards)."""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--ozone-forcing", "external",
+        ]), parser)
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--aerosol-forcing", "external",
+        ]), parser)

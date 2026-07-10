@@ -221,3 +221,59 @@ class TestCollectTLowMean:
         tas_mean = self._monthly_tas_sum(coll_mean)
 
         np.testing.assert_allclose(tas_mean - tas_inst, offset, rtol=1e-6)
+
+
+class _Field:
+    def __init__(self, arr):
+        import jax.numpy as _jnp
+        self.data = _jnp.asarray(arr, dtype=_jnp.float64)
+
+
+class _FakeState:
+    """Duck-typed state exposing just the fields check_stability reads."""
+    def __init__(self, u, T, p_s):
+        self.u = _Field(u)
+        self.T = _Field(T)
+        self.p_s = _Field(p_s)
+
+
+def test_check_stability_flags_nonfinite_p_s(collector):
+    """A NaN surface pressure with finite, in-bounds winds/T must be caught.
+    Before the fix, min/max p_s were NaN and both ``NaN < lo`` and ``NaN > hi``
+    were False, so the state passed the blow-up probe and could be checkpointed
+    at a wallclock-graceful exit — the chain would then restart from garbage."""
+    healthy = _FakeState(
+        u=np.full((4, 8), 5.0),        # finite, calm
+        T=np.full((4, 8), 288.0),      # finite, in-bounds
+        p_s=np.full((6,), 1.0e5),      # healthy
+    )
+    assert collector.check_stability(healthy, 5.0) is None
+
+    nan_ps = _FakeState(
+        u=np.full((4, 8), 5.0),
+        T=np.full((4, 8), 288.0),
+        p_s=np.array([1.0e5, np.nan, 1.0e5, 1.0e5, 1.0e5, 1.0e5]),
+    )
+    reason = collector.check_stability(nan_ps, 5.0)
+    assert reason is not None and "surface pressure" in reason
+
+
+def test_check_stability_flags_nonfinite_v(collector):
+    """A NaN in the meridional wind v must be caught. wind_term =
+    max(sqrt(u^2+v^2)) is NaN, and NaN > 500 is False, so a v-only blow-up would
+    pass the max-wind check unless v's finiteness is checked explicitly."""
+    class _StateUV:
+        def __init__(self, u, v, T, p_s):
+            self.u = _Field(u)
+            self.v = _Field(v)
+            self.T = _Field(T)
+            self.p_s = _Field(p_s)
+
+    v = np.full((4, 8), 3.0)
+    v[1, 1] = np.nan
+    st = _StateUV(
+        u=np.full((4, 8), 5.0), v=v,
+        T=np.full((4, 8), 288.0), p_s=np.full((6,), 1.0e5),
+    )
+    reason = collector.check_stability(st, 5.0)
+    assert reason is not None and "wind" in reason

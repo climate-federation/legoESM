@@ -1684,13 +1684,20 @@ class DiagnosticCollector:
         # integration loop) costs one GPU stall per call instead of
         # 6-7.  The boolean ``isfinite`` checks on u and T are folded
         # into the same stack as 0/1 floats.
+        # Wind finiteness covers BOTH components: a NaN in v makes
+        # wind_term = max(sqrt(u^2+v^2)) NaN, and NaN > 500 is False, so a
+        # v-only blow-up would otherwise pass the max-wind check silently.
         if hasattr(state, 'v'):
             wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
+            wind_finite = jnp.logical_and(
+                jnp.all(jnp.isfinite(state.u.data)),
+                jnp.all(jnp.isfinite(state.v.data)))
         else:
             wind_term = jnp.max(jnp.abs(state.u.data))
+            wind_finite = jnp.all(jnp.isfinite(state.u.data))
         has_p_s = hasattr(state, 'p_s')
         terms = [
-            jnp.all(jnp.isfinite(state.u.data)).astype(state.T.data.dtype),
+            wind_finite.astype(state.T.data.dtype),
             jnp.all(jnp.isfinite(state.T.data)).astype(state.T.data.dtype),
             wind_term.astype(state.T.data.dtype),
             jnp.min(state.T.data).astype(state.T.data.dtype),
@@ -1699,19 +1706,27 @@ class DiagnosticCollector:
         if has_p_s:
             terms.append(jnp.min(state.p_s.data).astype(state.T.data.dtype))
             terms.append(jnp.max(state.p_s.data).astype(state.T.data.dtype))
+            # Finiteness of p_s explicitly: a NaN p_s makes BOTH bound
+            # comparisons below False and would otherwise pass the probe (the
+            # min/max are NaN, and NaN < lo / NaN > hi are both False), letting
+            # a garbage state be checkpointed at a wallclock-graceful exit.
+            terms.append(
+                jnp.all(jnp.isfinite(state.p_s.data)).astype(state.T.data.dtype))
         host = np.asarray(jnp.stack(terms))
-        u_finite = bool(host[0] > 0.5)
+        wind_finite = bool(host[0] > 0.5)
         T_finite = bool(host[1] > 0.5)
         max_v = float(host[2])
         T_min_val = float(host[3])
         T_max_val = float(host[4])
 
-        if not u_finite:
+        if not wind_finite:
             return f"BLOWUP at day {elapsed_day:.0f}: non-finite winds"
         if max_v > 500:
             return f"BLOWUP at day {elapsed_day:.0f}: max wind {max_v:.1f} m/s"
         if not T_finite:
             return f"BLOWUP at day {elapsed_day:.0f}: non-finite T"
+        if has_p_s and not bool(host[7] > 0.5):
+            return f"BLOWUP at day {elapsed_day:.0f}: non-finite surface pressure"
 
         # Physical-plausibility bounds (shared helper — one source of truth).
         ps_min = float(host[5]) if has_p_s else None
