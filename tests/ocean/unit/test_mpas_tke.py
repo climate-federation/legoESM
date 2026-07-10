@@ -85,10 +85,16 @@ def tke_cfg():
     return VerticalMixingConfig(scheme="tke", tke=TKEConfig())
 
 
-def _wind_forcing(state):
-    """Uniform eastward wind stress (Pa) over all cells — spins up TKE."""
+def _wind_forcing(state, tau_x_pa=0.1):
+    """Uniform eastward wind stress (Pa) over all cells — spins up TKE.
+
+    ``tau_x_pa`` defaults to a light 0.1 Pa (enough for the finiteness / CFL /
+    equivalence checks, which are magnitude-agnostic).  The spin-up check passes
+    a stronger stress — see ``test_wind_spins_up_tke_mixing`` for why the coarse
+    fixture needs it.
+    """
     nCells = state.T.data.shape[0]
-    tau_x = jnp.full((nCells,), 0.1, dtype=state.T.data.dtype)
+    tau_x = jnp.full((nCells,), tau_x_pa, dtype=state.T.data.dtype)
     tau_y = jnp.zeros((nCells,), dtype=state.T.data.dtype)
     return OceanSurfaceForcing(tau_x=tau_x, tau_y=tau_y)
 
@@ -147,9 +153,19 @@ class TestTKEDispatchBuilds:
         interior interface, so the wind's effect is strongest there.  More
         surface TKE -> larger K_M (monotone), so the forced top-interface
         viscosity must strictly exceed the unforced one.
+
+        A STRONG stress (10 Pa) is used deliberately: this coarse 6-level /
+        4000 m fixture has a ~63 m top layer, so the diagnostic surface TKE
+        from a light 0.1 Pa wind lands at/below the ``tke_surface_min`` floor
+        (1e-4 m^2/s^2) and is bit-identical to calm — the wind signal only
+        clears the floor above ~a few Pa here (verified: 0.1/1 Pa sit on the
+        floor; >=~10 Pa lift K_M[:, 0] to ~8x calm).  This probes the surface-
+        flux WIRING (correctly threaded through the shared bridge), not a
+        realistic wind magnitude.
         """
         profiles_fn = make_tke_profiles_mpas(tke_cfg)
-        A_v_forced, _ = profiles_fn(state, mesh, z_coord, _wind_forcing(state))
+        A_v_forced, _ = profiles_fn(
+            state, mesh, z_coord, _wind_forcing(state, tau_x_pa=10.0))
         A_v_calm, _ = profiles_fn(state, mesh, z_coord, None)
         assert float(jnp.max(A_v_forced[:, 0])) > float(jnp.max(A_v_calm[:, 0]))
 

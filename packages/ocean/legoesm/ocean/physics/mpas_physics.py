@@ -78,10 +78,10 @@ def make_mpas_ocean_physics(
     # closed rather than silently mis-run (dispatch discipline; codex review).
     if vm_config is not None and vm_scheme == "catke":
         raise ValueError(
-            "vertical_mixing.scheme='catke' is not supported on the MPAS "
-            "ocean (CATKE is wired for the lat-lon C-grid only) and would "
-            "silently no-op here. Use 'kpp', or run CATKE on the lat-lon "
-            "C-grid."
+            "vertical_mixing.scheme='catke' is an unsupported vertical-mixing "
+            "scheme on the MPAS ocean (CATKE is wired for the lat-lon C-grid "
+            "only) and would silently no-op here. Use 'kpp', or run CATKE on "
+            "the lat-lon C-grid."
         )
 
     # TKE (Gaspar/Burchard) on MPAS runs through the implicit vertical solver

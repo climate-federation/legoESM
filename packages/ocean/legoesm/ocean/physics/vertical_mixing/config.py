@@ -40,6 +40,7 @@ __param_spec__ = {
             "bg_diff_arctan_coeff": "Bryan-Lewis 1979 fixed published arctan amplitude",
             "bg_diff_depth_m": "Bryan-Lewis 1979 fixed published transition depth",
             "bg_diff_width_m": "Bryan-Lewis 1979 fixed published transition width",
+            "cfl_cap_dt_s": "numerics: solver/CFL/smoothing parameter",
             "kappaH_min": "numerics: floor/cap",
             "kappaM_max": "numerics: floor/cap",
             "kappaM_min": "numerics: floor/cap",
@@ -444,6 +445,14 @@ class TKEConfig(NamedTuple):
     #   step, like Veros's zero-initialised dtke[taum1]). Requires
     #   ``prognostic=True`` (advecting a diagnostic TKE is a config error).
     advection_scheme: str = "none"
+    # Timestep [s] used to derive the explicit-diffusion CFL ceiling
+    # A_v_max = 0.25 * min(dz_k, dz_k+1)^2 / cfl_cap_dt_s on the MPAS path
+    # (make_tke_profiles_mpas caps the diagnostic K_M / K_H; mirrors the KPP
+    # MPAS bridge's KPPConfig.cfl_cap_dt_s exactly — same numerics parameter).
+    # MUST be set to the ocean dynamics dt for the cap to be correct: a
+    # value smaller than the real dt over-damps; larger risks instability.
+    # Default 300.0 preserves the historical hard-coded estimate.
+    cfl_cap_dt_s: float = 300.0
 
 
 class KPPConfig(NamedTuple):
