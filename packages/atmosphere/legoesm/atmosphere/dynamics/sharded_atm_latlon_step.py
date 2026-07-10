@@ -330,6 +330,46 @@ def _make_band_step_body(model, template, array_field_names, axis,
     return band_step
 
 
+def _dtype_sig(tree) -> tuple:
+    """Trace-time dtype signature of a pytree (leaf dtypes, flattened order)."""
+    return tuple(str(leaf.dtype) for leaf in jax.tree_util.tree_leaves(tree)
+                 if hasattr(leaf, "dtype"))
+
+
+def _unroll_to_dtype_fixed_point(step1, state, n_left: int):
+    """Unroll ``step1`` applications until the state's dtype signature is a
+    FIXED POINT of the step (bounded by ``n_left``); returns
+    ``(state, n_left_remaining)``.
+
+    Why: ``lax.scan`` needs carry-in == carry-out dtypes.  A mixed-precision
+    IC (f32 grid/init-derived leaves beside the step's f64 sources under
+    x64 — the f64 sigma-coordinate arrays and the strong-f64
+    ``jnp.asarray(dt)`` operand) promotes over the first stepS exactly as
+    the per-step Python loop absorbs silently: observed on the bench IC
+    (jobs 8916406/8916740), ``p_s`` promotes f32->f64 in step 1 and
+    ``u/v/T`` follow in step 2 by mixing the now-f64 ``p_s`` — the fixed
+    point can take MORE than one application, and no role-based cast can
+    express it (the default f32 policy no-ops while the promotion is
+    mixed-LEAF arithmetic).
+
+    ``jax.eval_shape`` probes the step's output dtypes ABSTRACTLY at trace
+    time (zero FLOPs), so exactly the needed number of steps is unrolled —
+    NONE for an already dtype-stable state (the parity-gate f64 states scan
+    all ``n_steps``).  The unroll count is a trace-time constant baked into
+    the compiled program: every segment call executes the same
+    ``k unrolled + scan(n_left)`` schedule with ``k + n_left == n_steps``.
+    Zero extra casts, zero numerical difference vs the per-step lane;
+    strictly monotone leaf promotion over a finite dtype lattice guarantees
+    termination, and the ``n_left`` bound caps the unroll at the segment
+    length (a 1-step segment simply runs its single step unrolled).
+    """
+    while (n_left > 0
+           and _dtype_sig(jax.eval_shape(step1, state)) != _dtype_sig(state)):
+        state = step1(state)
+        n_left -= 1
+    return state, n_left
+
+
 def _refuse_unsupported_spmd_config(model) -> None:
     """Dispatch-hardening shared by the step + segment factories: only a
     non-fold lat-lon grid with an SPMD-safe mass path is supported.  Fail
@@ -569,17 +609,15 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
     per distinct segment length (``run_atm_latlon_spmd`` caches per length —
     at most two: the regular segment and the final remainder).
 
-    Carry dtype: the FIRST step is unrolled outside the ``lax.scan`` and the
-    scan covers the remaining ``n_steps - 1``.  A mixed-precision IC (e.g. an
-    f32 grid-derived ``p_s`` beside f64 dynamics fields under x64) promotes
-    to the step's own output dtypes DURING that first step — exactly the
-    one-time promotion the per-step Python loop absorbs at its first
-    iteration.  Role-based entry casts cannot express this fixed point (the
-    default f32 policy no-ops while the promotion comes from mixed-LEAF
-    arithmetic, e.g. ``p_s[f32] + dt*dps[f64]``).  Zero extra casts, zero
-    numerical difference vs the per-step lane; if a state ever failed to
-    reach its dtype fixed point in one step, ``lax.scan`` still raises its
-    carry-type error LOUDLY at trace time — never a silent precision change.
+    Carry dtype: leading steps are UNROLLED outside the ``lax.scan`` until
+    the state's dtype signature is a fixed point of the step
+    (:func:`_unroll_to_dtype_fixed_point` — ``jax.eval_shape`` probe, zero
+    FLOPs, trace-time constant).  A mixed-precision IC promotes over the
+    first stepS (``p_s`` first, ``u/v/T`` next via the promoted ``p_s`` —
+    observed jobs 8916406/8916740) exactly as the per-step Python loop
+    absorbs silently; an already-stable state unrolls NOTHING and scans all
+    ``n_steps``.  Zero extra casts, zero numerical difference vs the
+    per-step lane — never a silent precision change.
     """
     from legoesm.parallel.latlon_spmd import latlon_band_perms
     from legoesm.parallel.shard_map_compat import shard_map
@@ -605,12 +643,12 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
                 out, _ps = model._step_cgrid_impl(
                     s, dt, physics_fn=physics_fn, phys_state=None)
                 return out
-            # Step 1 UNROLLED: its output carries the step's own (promoted)
-            # leaf dtypes — the scan-carry dtype fixed point (docstring).
-            out = _step1(c_state)
-            if n_steps > 1:
+            # Unroll to the scan-carry dtype fixed point (helper docstring).
+            out, n_left = _unroll_to_dtype_fixed_point(
+                _step1, c_state, n_steps)
+            if n_left > 0:
                 out, _ = jax.lax.scan(lambda s, _x: (_step1(s), None),
-                                      out, xs=None, length=n_steps - 1)
+                                      out, xs=None, length=n_left)
             return out, state_finite_scalar(out)
 
         fn_serial = jax.jit(_serial_seg)
@@ -637,12 +675,12 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
         def _step1(s):
             out, _ps = band_step(s, stacks_local, dt, None)
             return out
-        # Step 1 UNROLLED: its output carries the step's own (promoted) leaf
-        # dtypes — the scan-carry dtype fixed point (docstring).
-        out = _step1(state_local)
-        if n_steps > 1:
+        # Unroll to the scan-carry dtype fixed point (helper docstring).
+        out, n_left = _unroll_to_dtype_fixed_point(
+            _step1, state_local, n_steps)
+        if n_left > 0:
             out, _ = jax.lax.scan(lambda s, _x: (_step1(s), None),
-                                  out, xs=None, length=n_steps - 1)
+                                  out, xs=None, length=n_left)
         return out, state_finite_scalar(out, axis=axis)
 
     _cache = {}
