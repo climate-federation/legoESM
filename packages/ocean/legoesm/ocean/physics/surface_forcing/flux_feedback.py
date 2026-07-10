@@ -83,6 +83,8 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm import constants
+from legoesm.ocean.eos import freezing_point
 from legoesm.ocean.physics.shortwave_penetration import (
     ShortwavePenetrationConfig,
     shortwave_penetration_tendency,
@@ -116,7 +118,8 @@ __physics_contract__ = {
         "cfg.c_sw": "J/(kg K)",
         "cfg.rho_0": "kg/m^3",
         "cfg.tau_restore_s": "s",
-        "cfg.ice_threshold_C": "degC",
+        "cfg.ice_threshold_C": "degC (fixed ice-mask threshold; used when cfg.freezing.scheme == 'constant')",
+        "cfg.freezing.scheme": "1 (liquidus selector; != 'constant' replaces ice_threshold_C with the local freezing_point(S_surf) [degC])",
         "dz_ref": "m", "z_half_ref": "m", "jacobian": "1", "wet_3d": "1",
     },
     "outputs": {
@@ -130,7 +133,10 @@ __physics_contract__ = {
         "(scalar 1/tau_restore_s form, or piston*(S_target - S_surf)/dz_0 when "
         "the per-cell piston channel is active). "
         "Ice mask zeroes BOTH tendencies (and the solar column) where "
-        "(T_surf < ice_threshold_C) AND (total heat flux incl. q_solar < 0). "
+        "(T_surf < threshold) AND (total heat flux incl. q_solar < 0); the "
+        "threshold is the fixed cfg.ice_threshold_C under "
+        "cfg.freezing.scheme='constant' (byte-identical default) or the "
+        "local per-cell liquidus freezing_point(S_surf) [degC] otherwise. "
         "q_solar >= 0 deposits 100% of its energy in the wet column "
         "(rho_0*c_sw*sum_k dz_k*dT_k == q_solar on full-depth columns, the "
         "shared Jerlov kernel's closure)."
@@ -373,8 +379,22 @@ def flux_feedback_surface_forcing(
     #     jnp.where. ---
     if cfg.ice_mask:
         q_for_ice = q_total if q_sol_m is None else q_total + q_sol_m
+        # Ice threshold [°C]: the fixed cfg.ice_threshold_C (Veros comparison,
+        # byte-identical default) or, under a liquidus scheme (MED-1
+        # follow-up), the LOCAL freezing point from the surface salinity.
+        # ``freezing_point`` returns KELVIN and T here is °C, so subtract
+        # ``constants.T_freeze`` (the 0 °C reference).  ``scheme`` is a static
+        # config field ⇒ feature-gating Python branch, not a traced select
+        # (an unknown scheme raises inside freezing_point at trace time).
+        if cfg.freezing.scheme == "constant":
+            ice_threshold_C = cfg.ice_threshold_C
+        else:
+            ice_threshold_C = (
+                freezing_point(S_surf, 0.0, scheme=cfg.freezing.scheme)
+                - constants.T_freeze
+            ).astype(dtype)
         ice = jnp.logical_and(
-            T_surf * mask < cfg.ice_threshold_C, q_for_ice < 0.0
+            T_surf * mask < ice_threshold_C, q_for_ice < 0.0
         )
         dT_top = jnp.where(ice, 0.0, dT_top)
         dS_top = jnp.where(ice, 0.0, dS_top)

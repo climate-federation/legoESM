@@ -20,7 +20,7 @@ from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.core.bulk_flux import apply_gustiness, ocean_surface_q_sat
-from legoesm.ocean.eos import FreezingPointConfig, freezing_point
+from legoesm.ocean.eos import FreezingPointConfig, slab_freeze_point_K
 
 
 # ============================================================================
@@ -195,22 +195,6 @@ def _ocean_turbulent_fluxes(
     )
 
 
-def _slab_freeze_point_K(config: SimpleOceanConfig):
-    """Effective seawater freezing point [K] for the slab/two-layer freeze clamp.
-
-    ``"constant"`` (default) returns the user-set ``config.T_freeze``
-    byte-identical.  A liquidus scheme (``config.freezing.scheme``) is evaluated
-    at the reference ocean salinity ``constants.S_ocean_ref`` (an environmental
-    reference, NOT a tunable) because the slab carries no prognostic salinity.
-    ``scheme`` is a static NamedTuple field, so the branch is feature-gating, not
-    a data-dependent traced select.  Factored so the slab and two-layer clamps
-    share ONE liquidus path (no duplicate numerics).  MED-1.
-    """
-    if config.freezing.scheme == "constant":
-        return config.T_freeze
-    return freezing_point(constants.S_ocean_ref, 0.0, scheme=config.freezing.scheme)
-
-
 def _slab_step(
     state: SlabOceanState,
     forcing: AtmToSurface,
@@ -249,8 +233,10 @@ def _slab_step(
     # Diagnose this as ``Q_freeze`` on the new state instead of letting
     # the clamp silently destroy the energy.  The two-layer lake uses
     # the same pattern (two_layer_lake.py:84-99).  Coupler-conservation
-    # audit F6.
-    T_freeze_eff = _slab_freeze_point_K(config)
+    # audit F6.  Freeze point: shared single owner ``eos.slab_freeze_point_K``
+    # ("constant" default returns config.T_freeze byte-identical; a liquidus
+    # scheme is evaluated at constants.S_ocean_ref -- no prognostic S).  MED-1.
+    T_freeze_eff = slab_freeze_point_K(config.T_freeze, config.freezing.scheme)
     T_sfc_new = jnp.maximum(T_sfc_trial, T_freeze_eff)
     Q_freeze = C_mix * jnp.maximum(T_freeze_eff - T_sfc_trial, 0.0) / dt
 
@@ -320,8 +306,8 @@ def _two_layer_step(
     T_deep_new = T_deep + dt * dT_deep_dt
 
     # Freezing clamp on surface — diagnose Q_freeze (see _slab_step
-    # docstring + audit F6).
-    T_freeze_eff = _slab_freeze_point_K(config)
+    # docstring + audit F6).  Shared owner: eos.slab_freeze_point_K.
+    T_freeze_eff = slab_freeze_point_K(config.T_freeze, config.freezing.scheme)
     T_sfc_new = jnp.maximum(T_sfc_trial, T_freeze_eff)
     Q_freeze = C_mix * jnp.maximum(T_freeze_eff - T_sfc_trial, 0.0) / dt
 
