@@ -257,14 +257,18 @@ class TestRootZoneDelegation(unittest.TestCase):
 
 
 class TestCanopyLatentHeatOverSnow(unittest.TestCase):
-    """F13: the driver charges each scheme's latent flux at the latent heat that
-    scheme baked, and routes it to the matching reservoir.
+    """F13: the driver splits each scheme's surface latent flux into a SNOWPACK
+    sublimation stream (L_s) and a SOIL / plant-water evaporation stream (L_v),
+    by COMPONENT and phase, and routes each to the matching reservoir.
 
-    * SimpleSEB uses L_eff = where(has_snow, L_s, L_v) internally, so over snow its
-      vapor mass = lhflx / L_s (snowpack sublimation).
-    * The two-leaf / CLM-ML canopy bake lam = L_v, so their latent flux is L_v
-      transpiration drawn from soil water — over snow its vapor mass = lhflx / L_v
-      (NOT L_s), and it must not deplete the snowpack.
+    * SimpleSEB: the whole lhflx is the bare-ground flux -> snowpack (L_s) over
+      snow, else soil (L_v); vapor mass over snow = lhflx / L_s.
+    * Two-leaf canopy: lhflx = LE_canopy (transpiration, L_v soil) + LE_soil
+      (below-canopy GROUND latent).  Over snow the ground IS the snowpack, so
+      LE_soil sublimates from the pack at L_s while LE_canopy still draws soil
+      water at L_v.  Vapor mass over snow = LE_soil/L_s + LE_canopy/L_v (neither
+      the old all-L_s reading NOR the first-pass all-L_v reading).
+    * Negative canopy latent over snow (dew/frost) accretes on the pack at L_s.
     """
 
     def _snow_forcing(self, ncol=1):
@@ -278,36 +282,84 @@ class TestCanopyLatentHeatOverSnow(unittest.TestCase):
             cos_zenith=0.6 * o, co2_ppmv=412.0 * o,
             has_radiation=o, has_precipitation=o)
 
-    def _step(self, cfg, snow_kg=25.0):
+    def _step(self, cfg, snow_kg=25.0, forcing=None):
         from legoesm.land.multilayer_land import (
             init_multilayer_land_state, step_multilayer_land_with_diagnostics,
         )
         s0 = init_multilayer_land_state(1, cfg, T_init=283.0,
                                         theta_init=0.30, TgC_init=15.0)
         s0 = s0._replace(snow_depth=jnp.full(1, snow_kg))
-        ns, resp, _c, _out = step_multilayer_land_with_diagnostics(
-            s0, self._snow_forcing(), cfg, 1.0, 1800.0,
+        ns, resp, _c, out = step_multilayer_land_with_diagnostics(
+            s0, forcing if forcing is not None else self._snow_forcing(),
+            cfg, 1.0, 1800.0,
             lat=jnp.array([0.6]), carbon_state=None, doy=180.0, land_params=None)
-        return ns, resp, s0
+        return ns, resp, s0, out
 
-    def test_canopy_reports_vapor_mass_at_L_v(self):
+    def test_canopy_over_snow_splits_ground_L_s_and_transp_L_v(self):
+        """Two-leaf over snow: the reported vapor mass is the phase-split sum
+        LE_soil/L_s + LE_canopy/L_v — NOT the all-L_v (first audit pass) NOR the
+        all-L_s (pre-audit) aggregate reading."""
         from legoesm.land.config import MultiLayerLandConfig
         from legoesm.land.surface_scheme import TwoLeafCanopyConfig
         cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(max_iters=40))
-        ns, resp, s0 = self._step(cfg)
+        ns, resp, s0, out = self._step(cfg)
         mass = float(resp.surface_mass_flux[0])
-        lhflx = float(resp.lhflx[0])
-        # Low wind -> no blowing-snow term, so vapor mass == lhflx / L_v exactly.
-        if abs(lhflx) > 1e-6:
-            npt.assert_allclose(mass, lhflx / constants.L_v, rtol=1e-6)
-            # And it is NOT the L_s reading the old code produced.
-            self.assertGreater(abs(mass - lhflx / constants.L_s), 0.0)
+        le_soil = float(out.LE_soil[0])
+        le_tot = float(out.lhflx[0])            # LE_canopy + LE_soil (demand)
+        le_canopy = le_tot - le_soil
+        # Deep pack + moist soil -> no reservoir cap, so both components pass at
+        # their demanded rate and phase.
+        expected = le_soil / constants.L_s + le_canopy / constants.L_v
+        npt.assert_allclose(mass, expected, rtol=1e-5)
+        # Non-vacuous: the below-canopy ground component is a real positive
+        # fraction routed to L_s (sublimation), not folded into L_v soil evap.
+        self.assertGreater(le_soil, 1e-3)
+        self.assertGreater(le_canopy, 1e-3)
+        # The split lies strictly between the all-L_v and all-L_s readings.
+        self.assertGreater(abs(expected - le_tot / constants.L_v), 1e-9)
+        self.assertGreater(abs(expected - le_tot / constants.L_s), 1e-9)
+
+    def test_canopy_over_snow_ground_drains_pack_soil_spared(self):
+        """Codex F13 regression: with LE_soil > 0 and snow present, the ground
+        component drains the SNOWPACK (L_s), not liquid soil water — so the soil
+        loses only the (small, night-time) transpiration, and the pack loses the
+        ground sublimation.  Cold night forcing keeps snow melt ~ 0 so the pack
+        change isolates sublimation."""
+        from legoesm.core.coupling_fields import AtmToSurface
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+        from legoesm.land.multilayer_land import make_soil_grid
+        o = jnp.ones(1)
+        # Night (no sun -> no melt, tiny transpiration), warm-ish DRY air over a
+        # moist below-canopy soil surface -> positive ground evaporation LE_soil.
+        f = AtmToSurface(
+            sw_down=0.0 * o, lw_down=250.0 * o, precip_total=0.0 * o, precip_snow=0.0 * o,
+            T_lowest=283.0 * o, q_lowest=0.001 * o, u_lowest=2.0 * o, v_lowest=0.0 * o,
+            p_lowest=9.9e4 * o, p_surface=1.0e5 * o, rho_lowest=1.2 * o,
+            cos_zenith=0.0 * o, co2_ppmv=412.0 * o, has_radiation=o, has_precipitation=o)
+        cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(max_iters=40))
+        dz = jnp.asarray(make_soil_grid(cfg.soil_grid).dz)
+        ns, resp, s0, out = self._step(cfg, snow_kg=25.0, forcing=f)
+        le_soil = float(out.LE_soil[0])
+        le_tot = float(out.lhflx[0])
+        le_canopy = le_tot - le_soil
+        dt = 1800.0
+        self.assertGreater(le_soil, 1e-3, "forcing must drive positive ground evap")
+        # Pack loses the ground sublimation (no melt at night): dSWE ~ -LE_soil/L_s*dt.
+        d_snow = float(ns.snow_depth[0]) - float(s0.snow_depth[0])
+        npt.assert_allclose(d_snow, -le_soil / constants.L_s * dt, rtol=0.0, atol=0.05)
+        # Soil column loses only the transpiration (L_v), NOT the ground component:
+        # |dSoil| ~ LE_canopy/L_v*dt << LE_soil/L_s*dt would have been if mis-routed.
+        d_soil = float(jnp.sum(dz * ns.theta_soil[0]) - jnp.sum(dz * s0.theta_soil[0]))
+        rho_w = float(constants.rho_water)
+        npt.assert_allclose(d_soil * rho_w, -le_canopy / constants.L_v * dt,
+                            rtol=0.0, atol=0.05)
 
     def test_simple_seb_over_snow_reports_vapor_mass_at_L_s(self):
         from legoesm.land.config import MultiLayerLandConfig
         from legoesm.land.surface_scheme import SimpleSEBConfig
         cfg = MultiLayerLandConfig(surface_scheme=SimpleSEBConfig())
-        ns, resp, s0 = self._step(cfg)
+        ns, resp, s0, out = self._step(cfg)
         mass = float(resp.surface_mass_flux[0])
         lhflx = float(resp.lhflx[0])
         if abs(lhflx) > 1e-6:
