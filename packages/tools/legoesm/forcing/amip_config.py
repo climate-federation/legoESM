@@ -82,6 +82,10 @@ class AMIPExperimentConfig(NamedTuple):
     # crashed; add both).
     bechtold_cape_threshold: float = 70.0
     bechtold_conv_top_pa: float = 15000.0
+    # Bechtold convective-downdraft strength (marine humid-BL evaporation lever).
+    bechtold_downdraft_evap: float = 0.05
+    bechtold_downdraft_alpha: float = 0.3
+    bechtold_downdraft_rh_min: float = 0.2
     # Convective in-updraft rain-split efficiency [0,1] (shared across the
     # mass-flux schemes); 0 = disabled (legacy no split).
     convective_precip_efficiency: float = 0.0

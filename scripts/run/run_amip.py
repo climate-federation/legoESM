@@ -612,6 +612,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "tighter-than-kernel cap; raise toward 10000 (100 hPa) "
                              "if deep tropical tops are clipped. "
                              f"Default {_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa}.")
+    parser.add_argument("--bechtold-downdraft-evap", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_evap,
+                        dest="bechtold_downdraft_evap",
+                        help="Bechtold convective-downdraft evaporation efficiency "
+                             "[0,0.5] (marine humid-BL evaporation lever, #847): "
+                             "higher => the downdraft evaporates more rain => "
+                             "cools+dries the sub-cloud layer => larger sea-air "
+                             "humidity gradient => higher surface evaporation + "
+                             f"precip. Default {_EXPERIMENT_DEFAULTS.bechtold_downdraft_evap} "
+                             "(weak); Tiedtke ~0.3.")
+    parser.add_argument("--bechtold-downdraft-alpha", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_alpha,
+                        dest="bechtold_downdraft_alpha",
+                        help="Bechtold downdraft mass-flux fraction [0,0.9]. "
+                             f"Default {_EXPERIMENT_DEFAULTS.bechtold_downdraft_alpha}.")
+    parser.add_argument("--bechtold-downdraft-rh-min", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_rh_min,
+                        dest="bechtold_downdraft_rh_min",
+                        help="Bechtold downdraft column-RH suppression threshold "
+                             f"[0,1]. Default {_EXPERIMENT_DEFAULTS.bechtold_downdraft_rh_min}.")
 
     # Joint ML physics parameterization
     parser.add_argument("--physics-parameterization", type=str, default="none",
@@ -1287,6 +1307,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sbm_cape_threshold=args.sbm_cape_threshold,
         bechtold_cape_threshold=args.bechtold_cape_threshold,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
+        bechtold_downdraft_evap=args.bechtold_downdraft_evap,
+        bechtold_downdraft_alpha=args.bechtold_downdraft_alpha,
+        bechtold_downdraft_rh_min=args.bechtold_downdraft_rh_min,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         physics_parameterization=args.physics_parameterization,

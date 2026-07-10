@@ -1867,6 +1867,43 @@ def test_convective_precip_split_validate_bounds():
                      autoconv_q_c_crit=5.0e-4, autoconv_pe_max=0.9).validate_strict()
 
 
+def test_bechtold_downdraft_round_trips_and_threads():
+    """--bechtold-downdraft-evap/-alpha/-rh-min round-trip into ExperimentConfig
+    and thread into the hot-loop BechtoldConfig (the marine humid-BL evaporation
+    lever, #847)."""
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-downdraft-evap", "0.3",
+        "--bechtold-downdraft-alpha", "0.5",
+        "--bechtold-downdraft-rh-min", "0.6",
+    ]), parser))
+    assert (cfg.bechtold_downdraft_evap, cfg.bechtold_downdraft_alpha,
+            cfg.bechtold_downdraft_rh_min) == (0.3, 0.5, 0.6)
+    _fn, cc = _resolve_convection(cfg)
+    assert (cc.downdraft_evap_efficiency, cc.downdraft_alpha,
+            cc.downdraft_RH_min) == (0.3, 0.5, 0.6)
+    # default keeps the weak BechtoldConfig defaults (byte-identical)
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    dcc = _resolve_convection(d)[1]
+    assert (dcc.downdraft_evap_efficiency, dcc.downdraft_alpha,
+            dcc.downdraft_RH_min) == (0.05, 0.3, 0.2)
+
+
+def test_bechtold_downdraft_validate_bounds():
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match="bechtold_downdraft_evap"):
+        ExperimentConfig(bechtold_downdraft_evap=0.9).validate_strict()   # > 0.5
+    with pytest.raises(ValueError, match="bechtold_downdraft_alpha"):
+        ExperimentConfig(bechtold_downdraft_alpha=1.5).validate_strict()  # > 0.9
+    with pytest.raises(ValueError, match="bechtold_downdraft_rh_min"):
+        ExperimentConfig(bechtold_downdraft_rh_min=1.5).validate_strict()  # > 1.0
+    ExperimentConfig(bechtold_downdraft_evap=0.3, bechtold_downdraft_alpha=0.5,
+                     bechtold_downdraft_rh_min=0.6).validate_strict()
+
+
 def test_cloud_inhomogeneity_factor_round_trips():
     """--cloud-inhomogeneity-factor (Cahalan 1994 plane-parallel correction)
     round-trips into ExperimentConfig; default None => CloudConfig default."""

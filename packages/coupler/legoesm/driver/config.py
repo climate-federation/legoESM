@@ -791,6 +791,16 @@ class ExperimentConfig(NamedTuple):
     # plume + subsidence gate. 150 hPa stability cap (see BechtoldConfig.
     # p_conv_top_pa); raise toward 100 hPa if deep tropical tops are clipped.
     bechtold_conv_top_pa: float = 15000.0
+    # Bechtold convective-downdraft strength (marine humid-BL evaporation lever,
+    # #847): raise downdraft_evap (0.05 default -> ~0.3 Tiedtke) to evaporate
+    # more rain in the downdraft -> cool+dry the sub-cloud layer -> larger
+    # sea-air humidity gradient -> higher surface evaporation + precip.
+    # downdraft_rh_min = column-mean RH threshold above which the downdraft is
+    # suppressed; RAISE it so the downdraft fires in the humid marine BL. None-
+    # equivalent defaults reproduce BechtoldConfig (byte-identical).
+    bechtold_downdraft_evap: float = 0.05
+    bechtold_downdraft_alpha: float = 0.3
+    bechtold_downdraft_rh_min: float = 0.2
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -1037,6 +1047,14 @@ class ExperimentConfig(NamedTuple):
                 f"bechtold_conv_top_pa must be > 0 Pa (the convective-top gate "
                 f"cutoff), got {self.bechtold_conv_top_pa}"
             )
+        for _f, _lo, _hi in (
+            ("bechtold_downdraft_evap", 0.0, 0.5),
+            ("bechtold_downdraft_alpha", 0.0, 0.9),
+            ("bechtold_downdraft_rh_min", 0.0, 1.0),
+        ):
+            _v = getattr(self, _f)
+            if not (_lo <= _v <= _hi):
+                errors.append(f"{_f}={_v!r} out of range [{_lo}, {_hi}]")
         if self.physics_parameterization not in ("none", "ml"):
             errors.append(
                 "physics_parameterization must be 'none' or 'ml', "
@@ -1662,6 +1680,12 @@ class ExperimentConfig(NamedTuple):
                 amip_cfg, 'bechtold_cape_threshold', 70.0),
             bechtold_conv_top_pa=getattr(
                 amip_cfg, 'bechtold_conv_top_pa', 15000.0),
+            bechtold_downdraft_evap=getattr(
+                amip_cfg, 'bechtold_downdraft_evap', 0.05),
+            bechtold_downdraft_alpha=getattr(
+                amip_cfg, 'bechtold_downdraft_alpha', 0.3),
+            bechtold_downdraft_rh_min=getattr(
+                amip_cfg, 'bechtold_downdraft_rh_min', 0.2),
             # Convective precip split family — copy through AMIP/checkpoint
             # restore so the physical autoconversion isn't dropped to defaults
             # (codex MED; convective_precip_efficiency was a pre-existing gap).
@@ -1808,6 +1832,9 @@ class ExperimentConfig(NamedTuple):
             autoconv_q_c_crit=self.autoconv_q_c_crit,
             autoconv_pe_max=self.autoconv_pe_max,
             bechtold_conv_top_pa=self.bechtold_conv_top_pa,
+            bechtold_downdraft_evap=self.bechtold_downdraft_evap,
+            bechtold_downdraft_alpha=self.bechtold_downdraft_alpha,
+            bechtold_downdraft_rh_min=self.bechtold_downdraft_rh_min,
             sigma_b=self.sigma_b,
             k_BL_max_per_day=self.k_BL_max_per_day,
             k_free_per_day=self.k_free_per_day,

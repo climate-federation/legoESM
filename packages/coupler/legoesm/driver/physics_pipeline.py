@@ -2559,6 +2559,15 @@ def _resolve_convection(config):
             precip_split_scheme=getattr(config, 'convective_precip_split', 'constant'),
             autoconv_q_c_crit=getattr(config, 'autoconv_q_c_crit', 5.0e-4),
             autoconv_pe_max=getattr(config, 'autoconv_pe_max', 0.9),
+            # Convective-downdraft strength (marine humid-BL evaporation lever,
+            # #847): a stronger downdraft evaporates rain -> cools+dries the
+            # sub-cloud layer -> larger sea-air humidity gradient -> higher
+            # surface evaporation + precip. Defaults reproduce BechtoldConfig
+            # (byte-identical when unset).
+            downdraft_evap_efficiency=getattr(
+                config, 'bechtold_downdraft_evap', 0.05),
+            downdraft_alpha=getattr(config, 'bechtold_downdraft_alpha', 0.3),
+            downdraft_RH_min=getattr(config, 'bechtold_downdraft_rh_min', 0.2),
         )
     else:
         cc = ConvectionConfig(scheme=scheme)
