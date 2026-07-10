@@ -257,15 +257,26 @@ class TestSnowKernels:
         assert jnp.isfinite(ohe)
 
     def test_flooding_mass_conservation(self):
+        """Convention-B flooding: snow-ice = snow + seawater filling the pores.
+        The ice+snow column GAINS exactly the seawater ``(rho_ice-rho_snow)*d``
+        drawn from the ocean, snow consumed == ice formed == d, and the
+        freeboard is raised to ~0."""
+        ri, rs, rw = 917.0, 330.0, 1025.0
         h_ice = jnp.array([1.0, 0.3])
-        h_snow = jnp.array([0.5, 0.5])
+        h_snow = jnp.array([0.5, 0.9])
         hi, hs, h_si = snow_ice_flooding(
-            h_ice, h_snow, rho_ice=917.0, rho_snow=330.0, rho_ocean=1025.0,
+            h_ice, h_snow, rho_ice=ri, rho_snow=rs, rho_ocean=rw,
         )
-        mass_before = 917.0 * h_ice + 330.0 * h_snow
-        mass_after = 917.0 * hi + 330.0 * hs
-        # Mass-neutral conversion within fp roundoff.
-        assert jnp.all(jnp.abs(mass_after - mass_before) < 1e-2)
+        seawater = (ri - rs) * h_si              # ocean water drawn into pores
+        col_after = ri * hi + rs * hs
+        col_before = ri * h_ice + rs * h_snow
+        # Column ice+snow mass gains exactly the seawater drawn from the ocean.
+        assert jnp.allclose(col_after - col_before, seawater, atol=1e-6)
+        # Snow consumed == snow-ice formed == d.
+        assert jnp.allclose(h_snow - hs, h_si, atol=1e-9)
+        # Freeboard raised to ~0 where flooding occurred (snow was sufficient).
+        fb_after = ((rw - ri) * hi - rs * hs) / rw
+        assert jnp.all(jnp.where(h_si > 1e-9, jnp.abs(fb_after) < 1e-9, True))
 
     def test_flooding_only_when_freeboard_negative(self):
         """Thick ice + thin snow has positive freeboard — no flooding."""
@@ -1389,6 +1400,48 @@ class TestThinIceAblationClosure:
         cold = _thermo_v2(*base, f(270.0), cfg, 1.0, 3600.0, enable_lead_freeze=True)
         assert float(jnp.max(warm["conc"])) <= 1e-12, "lead ice grew over warm ocean"
         assert float(jnp.max(cold["conc"])) > 1e-6, "supercooled lead failed to freeze"
+
+    def test_rain_on_ice_reaches_ocean_without_ponds(self):
+        """Audit HIGH: with no pond scheme, rain falling on the ice fraction
+        must run off to the ocean (snow instead enters the pack).  The ocean
+        tile only delivers the open-water (f_ocean) precip share, so the ice
+        tile must deliver rain*conc.  Two-point (rain vs no-rain) isolates it.
+        """
+        from legoesm.ice.sea_ice import _thermo_v2
+        from legoesm.ice.config import SeaIceConfig
+        from legoesm.core.coupling_fields import AtmToSurface
+        from legoesm.thermo import saturation_mixing_ratio_ice
+        from legoesm import constants
+        n = 4
+        shape = (6, n, n)
+        f = lambda v: jnp.full(shape, v)
+        cfg = SeaIceConfig()  # ponds + snow OFF by default
+        assert not cfg.ponds.enabled
+        T_air, conc0, rain = 250.0, 0.8, 1.0e-4  # kg/m^2/s rain, cold (no melt)
+        qsat = float(saturation_mixing_ratio_ice(jnp.array(T_air), jnp.array(1.0e5)))
+
+        def run(precip_total):
+            forcing = AtmToSurface(
+                sw_down=f(0.0), lw_down=f(constants.sigma_sb * T_air ** 4),
+                precip_total=f(precip_total), precip_snow=f(0.0), T_lowest=f(T_air),
+                q_lowest=f(qsat), u_lowest=f(0.01), v_lowest=f(0.0),
+                p_lowest=f(1.0e5), p_surface=f(1.0e5), rho_lowest=f(1.3),
+                cos_zenith=f(0.0), co2_ppmv=f(400.0), has_radiation=f(1.0),
+                has_precipitation=f(1.0),
+            )
+            # sst at freezing -> no basal; lead-freeze disabled -> isolate rain.
+            res = _thermo_v2(f(1.0), f(constants.T_freeze_ocean), f(conc0), f(0.0),
+                             f(0.0), f(0.0), f(0.0), forcing,
+                             f(constants.T_freeze_ocean), cfg, 1.0, 3600.0,
+                             enable_lead_freeze=False)
+            return float(jnp.mean(res["freshwater_to_ocean"]))
+
+        d_fw = run(rain) - run(0.0)
+        # Ice-fraction rain delivered per water-area = rain * conc_new (~conc0;
+        # a hair below because mild sublimation shrinks the ice area slightly).
+        assert d_fw == pytest.approx(rain * conc0, rel=1e-3), (
+            f"rain-on-ice runoff not delivered: got {d_fw:.3e}, "
+            f"expected ~{rain * conc0:.3e}")
 
     def test_subgrid_ablation_water_closure(self):
         """Codex repro: thin ice (h<h_ice_min) fully ablating must route ALL

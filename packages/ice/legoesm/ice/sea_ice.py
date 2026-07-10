@@ -1591,19 +1591,38 @@ def _closing_rate_from_velocity(
     v_ice: jnp.ndarray,
     grid,
     cap: float,
+    cs_shear: float = 0.0,
+    e_yield: float = 2.0,
 ) -> jnp.ndarray:
-    """Net convergence rate ``max(0, −div(u_ice))`` from the velocity field.
+    """Ridging closing rate from the velocity field (Rothrock 1975 / CICE).
+
+    Combines CONVERGENCE and SHEAR deformation, not convergence alone::
+
+        div     = eps_11 + eps_22
+        shear   = sqrt((eps_11 - eps_22)^2 + 4 eps_12^2)
+        Delta   = sqrt(div^2 + shear^2 / e^2)
+        closing = 0.5 * Cs * (Delta - |div|) + max(0, -div)
+
+    The first term is shear ridging (``Delta >= |div|`` so it is ``>= 0``);
+    without it pure-shear deformation produced ZERO ridging -> under-ridged,
+    over-thin ice in shear zones (audit).  ``e_yield`` is the VP yield-curve
+    ellipse ratio; ``cs_shear`` (Cs) the shear-ridging participation fraction
+    (0 recovers the old convergence-only closing).
 
     The grid is validated for operator support at ``step_sea_ice`` entry
     (``_grid_supports_ice_dynamics``), so ``strain_rates`` is called
     directly — no exception-swallowing fallback, which would silently
     disable ridging and detach the gradient w.r.t. velocity (forbidden by
-    the repo AD rules).
+    the repo AD rules).  The ``1e-20`` sqrt floors keep the gradient finite at
+    zero deformation (numerics floor, not tunable).
     """
     from legoesm.ice.rheology import strain_rates
-    eps_11, eps_22, _eps_12 = strain_rates(u_ice, v_ice, grid)
+    eps_11, eps_22, eps_12 = strain_rates(u_ice, v_ice, grid)
     div = eps_11 + eps_22
-    return jnp.clip(-div, 0.0, cap)
+    shear = jnp.sqrt((eps_11 - eps_22) ** 2 + 4.0 * eps_12 ** 2 + 1e-20)
+    delta = jnp.sqrt(div ** 2 + (shear / e_yield) ** 2 + 1e-20)
+    closing = 0.5 * cs_shear * (delta - jnp.abs(div)) + jnp.maximum(-div, 0.0)
+    return jnp.clip(closing, 0.0, cap)
 
 
 def _thermo_v2(
@@ -2047,7 +2066,24 @@ def _thermo_v2(
             rho_ice=config.rho_ice,
             dt=dt,
             S_lead_ice=config.brine.S_ice_new,
-            S_white_ice=0.5 * config.brine.S_ocean_ref,
+            # White ice forms by seawater flooding the snow pores.  Its salinity
+            # is the salt the drawn seawater would leave if fully retained,
+            # S_pore = S_ocean * (rho_ice - rho_snow)/rho_ice (the pore-water
+            # mass fraction of the new ice) — paired with the ``(rho_ice -
+            # rho_snow)*ΔV_white`` seawater WATER debited from the ocean
+            # freshwater below.  The brine step then clamps the stored salinity
+            # at S_ice_max and REJECTS the excess brine back to the ocean
+            # (physical snow-ice brine drainage): the ocean loses the pore water
+            # but keeps most of its salt, so it SALINIFIES.  Water and salt are
+            # each conserved between ice and ocean by construction (the brine
+            # salt flux is the drop in stored salt).  This replaces the old
+            # hardcoded 0.5*S_ocean that had NO matching ocean water withdrawal
+            # (the salt-without-water freshening bug).
+            S_white_ice=(
+                config.brine.S_ocean_ref
+                * (config.rho_ice - config.snow.rho_snow)
+                / config.rho_ice
+            ),
             # Basal congelation freezes seawater onto the ice base — a
             # salty-ice source.  Pass the per-cell basal-freeze volume
             # (per-ice-area growth × ice fraction) at the first-year
@@ -2110,15 +2146,44 @@ def _thermo_v2(
             pond_captured_melt_m_liquid * constants.rho_water * conc_new / dt
         )
         pond_drain_per_cell = pond_drain_to_ocean_kg_s * conc_new
+        # Rain over the ice fraction is collected by the ponds (captured or
+        # drained) — no separate runoff channel needed.
+        rain_runoff_per_cell = jnp.zeros_like(h_new)
     else:
         pond_drain_per_cell = pond_drain_to_ocean_kg_s  # zero array
+        # No pond scheme: rain falling on the ice fraction runs off directly to
+        # the ocean this step (snow instead enters the pack via
+        # ``accumulate_snowfall`` and returns on melt).  Without this the f_ice
+        # share of rain vanished from the water budget — the ocean tile only
+        # delivers the OPEN-water (f_ocean) precip share (audit HIGH:
+        # precip-on-ice leak).  ``precip_total - precip_snow`` is the rain MASS
+        # flux [kg/m^2/s]; gate by ``has_precipitation`` (like the snow path) so
+        # no phantom rain is injected, and weight by ``conc_new`` so only the
+        # ice-fraction rain is delivered (× f_water in ``blend_tiles`` = f_ice).
+        rain_rate = jnp.maximum(
+            forcing.precip_total - forcing.precip_snow, 0.0,
+        ) * jnp.asarray(forcing.has_precipitation, dtype=h_new.dtype)
+        rain_runoff_per_cell = rain_rate * conc_new
     fw_from_lead_freeze_per_cell = -delta_V_lead_freeze * config.rho_ice / dt
+    # Snow-ice flooding draws seawater ``(rho_ice - rho_snow)*ΔV_white`` [kg/m^2
+    # per ice area] into the snow pores; the ocean LOSES that water (negative
+    # freshwater flux), paired with the pore salt charged in the brine step so
+    # flooding removes pure seawater instead of spuriously freshening the ocean
+    # (audit: salt-without-water).  Per-cell via ``conc_new`` (the frame
+    # ``delta_V_white_ice`` is weighted into for the brine budget above).
+    fw_from_flooding_per_cell = -(
+        (config.rho_ice - config.snow.rho_snow)
+        * delta_V_white_ice * conc_new / dt
+    )
     freshwater_to_ocean = (
         fw_from_melt_per_cell
         # NOTE: open-water snowfall is intentionally NOT included here — the
         # ocean tile delivers it via ``precip_total`` (F11; see snow step).
         + pond_drain_per_cell
+        # Rain runoff over the ice fraction (no-pond path; zero when ponds on).
+        + rain_runoff_per_cell
         + fw_from_lead_freeze_per_cell
+        + fw_from_flooding_per_cell
         # Orphaned ice/snow/pond mass from fully-ablated cells (11b) — sent
         # to the ocean as freshwater so the column mass budget closes.
         + ablation_fw_per_cell
@@ -2593,6 +2658,7 @@ def _step_dynamic_v2(
     if config.ridging.enabled and is_multicat and grid is not None:
         closing_rate = _closing_rate_from_velocity(
             u_ice, v_ice, grid, cap=config.ridging.closing_rate_max,
+            cs_shear=config.ridging.cs_shear_ridging, e_yield=config.e_yield,
         )
         ridge_result = apply_ridging(
             conc, h, h_snow * conc, S_ice, closing_rate,

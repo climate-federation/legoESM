@@ -119,11 +119,36 @@ def _ridging_column_kernel(
     # Area available to ridge this step (cap at total area present).
     a_total = jnp.sum(a_cat)
     da_ridged_request = closing_rate * dt
-    da_ridged = jnp.minimum(da_ridged_request, a_total)
 
     # Participation weights (per category) — fraction of total
-    # ridging area drawn from each category.
+    # ridging area drawn from each category (normalised, sum to 1).
     weights = participation_weights(a_cat, h_cat, e_star)
+
+    # aksum normalization (audit): the redistribution compresses the
+    # participating area ``a_part`` into a SMALLER ridge area ``a_ridge =
+    # a_part * h_part / H_mean`` (ridges are thicker than donors), so the NET
+    # area removed is only ``a_part * (1 - h_part/H_mean)``.  Without correcting
+    # for this the net closing under-delivers (50-100% of the requested
+    # ``closing_rate*dt``) and the documented ``ΔA = -closing_rate*dt`` invariant
+    # is false.  Scale the participating draw up by ``1/(1 - h_part/H_mean)`` so
+    # the net closing MATCHES the dynamics-requested value (CICE ``aksum``).
+    # ``h_part`` / ``H_mean`` depend only on the participation weights and
+    # category thicknesses (NOT on the draw magnitude), so the compression
+    # factor is computed here from the weights before the draw; the exact
+    # per-cat-capped ``h_part`` / ``H_mean`` are recomputed below for the ridge
+    # distribution.  ``1 - h_part/H_mean`` is bounded in [0.5, 1] since
+    # ``H_mean >= H_min = 2*h_part`` (clipped for the over-thick collapse case).
+    h_part_est = jnp.sum(weights * h_cat) / jnp.maximum(jnp.sum(weights), 1e-30)
+    H_min_est = 2.0 * h_part_est
+    H_max_est = jnp.minimum(mu_rdg * jnp.sqrt(jnp.maximum(h_part_est, 1e-6)), H_star)
+    H_max_est = jnp.minimum(H_max_est, hi[-1])
+    H_max_est = jnp.maximum(H_max_est, H_min_est + _MIN_RIDGE_WIDTH_M)
+    H_mean_est = 0.5 * (jnp.minimum(H_min_est, hi[-1]) + jnp.minimum(H_max_est, hi[-1]))
+    comp = jnp.clip(
+        1.0 - h_part_est / jnp.maximum(H_mean_est, 1e-6), 0.5, 1.0,
+    )
+    da_ridged = jnp.minimum(da_ridged_request / comp, a_total)
+
     da_per_cat = da_ridged * weights
     # Limit per-cat draw to its available area.
     da_per_cat = jnp.minimum(da_per_cat, a_cat)
@@ -289,7 +314,10 @@ def apply_ridging(
     """Apply Lipscomb 2007 mechanical ridging to a multi-category state.
 
     Conservation invariants (per column):
-        * Total ice area is *reduced* by net convergence: ΔA = −closing_rate·dt.
+        * Total ice area is *reduced* by net convergence: ΔA = −closing_rate·dt
+          (the aksum normalization scales the participating draw so the NET
+          closing matches the requested rate), UNLESS limited by the available
+          area ``a_total`` (all ice ridged), where the net closing saturates.
         * Total ice volume is conserved (donor volume = ridge volume).
         * Total snow volume is **not** conserved when
           ``snow_fraction_retained < 1`` — the difference is reported
