@@ -617,6 +617,17 @@ def test_pad_corner_scalar_cross_face_ghost_is_attenuated_neighbour_row():
     assert np.array_equal(np.asarray(padded[:, 1:-1, 1:-1]), np.asarray(att))
 
 
+def test_d_sw5_cross_face_halo_non_duogrid_raises():
+    """Dispatch hardening (2026-07-10 review): cross_face_halo=True on a
+    non-duogrid grid must raise, not silently fall back to the zero ring."""
+    n = 8
+    cdgrid = _legacy_cdgrid(n)
+    u_d, v_d, ua, va = _make_inputs(n, seed=5)
+    with pytest.raises(ValueError, match="cross_face_halo"):
+        d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, 300.0,
+                                d4_bg=0.16, nord=1, cross_face_halo=True)
+
+
 def test_d_sw5_cross_face_halo_gating_and_interior_invariance():
     """The cross-face ghost ring is OPT-IN: the default must be the
     zero-ring (measured stable — C48 modon 120 days clean — while the

@@ -2062,6 +2062,15 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
     test_d_sw5_iterated_laplacian_halo_gap_documentation_marker test
     together with this note.
     """
+    # Dispatch hardening (2026-07-10 review): the cross-face ghost ring is
+    # built from duogrid tables — silently no-opping on a non-duogrid grid
+    # would run different physics than requested.  Static config → fn-entry
+    # raise (repo dispatch doctrine).
+    if cross_face_halo and cdgrid.base.duogrid is None:
+        raise ValueError(
+            "d_sw5_corner_divergence: cross_face_halo=True requires a "
+            "duogrid grid (create_cubed_sphere(..., use_duogrid=True)).")
+
     n = cdgrid.n
     cosa_u = cdgrid.cosa_u
     cosa_v = cdgrid.cosa_v
@@ -2124,7 +2133,8 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
         # cross_face_halo=True (Fortran ext_scalar-faithful attenuated
         # ghost) destabilises at day ~60-65 in the FB chain.  Stability
         # (truth tier) outranks oracle-matching -> default stays False.
-        use_cross_face_halo = cross_face_halo and cdgrid.base.duogrid is not None
+        # (non-duogrid + cross_face_halo=True raises at fn entry.)
+        use_cross_face_halo = cross_face_halo
         divg_d = _divergence_corner_duo(u_d, v_d, ua, va, cdgrid)
         delpc = divg_d
 
