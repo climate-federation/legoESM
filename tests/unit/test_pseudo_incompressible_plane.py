@@ -94,6 +94,46 @@ def test_projection_makes_rho_divergence_machine_zero():
     assert div < 1e-3 * div0, f"div/div0={div / div0}"
 
 
+def test_velocity_shapiro_commutes_with_divergence():
+    """The velocity [1,2,1] de-noiser (momentum_shapiro_coeff) is a horizontal
+    convolution that COMMUTES with the C-grid ρ-weighted divergence: div(H·u)=H(div u)
+    to machine precision. So filtering the projected velocity does NOT reintroduce
+    divergence (no re-projection) — this is what makes the non-dissipative 'central'
+    momentum clean while keeping the flow divergence-free."""
+    g = pip.make_grid(_cfg(nx=16, ny=8, nz=12, Lx=1600.0, Ly=800.0, Lz=2400.0))
+    ku, kv, kw = jax.random.split(jax.random.PRNGKey(1), 3)
+    sh = (g.cfg.ny, g.cfg.nx, g.cfg.nz)
+    u = jax.random.normal(ku, sh); v = jax.random.normal(kv, sh)
+    w = jax.random.normal(kw, (g.cfg.ny, g.cfg.nx, g.cfg.nz + 1))
+    w = w.at[..., 0].set(0.0).at[..., -1].set(0.0)
+    theta = jnp.broadcast_to(g.theta0[None, None, :], sh)
+    un, vn, wn, _pi = pip.project(u, v, w, theta, None, jnp.zeros(sh), 1.0, g)
+    s, order = 0.3, 8                       # the production high-order de-noiser
+    H = lambda f: f + s * (pip._shapiro_h(f, order) - f)
+    div_of_filtered = pip._rho_weighted_divergence(H(un), H(vn), H(wn), g)   # div(H·u)
+    filtered_div = H(pip._rho_weighted_divergence(un, vn, wn, g))            # H(div u)
+    assert float(jnp.abs(div_of_filtered - filtered_div).max()) < 1e-10      # they COMMUTE (any order)
+    assert float(jnp.abs(H(un) - un).max()) > 1e-6                           # filter is active
+    assert float(jnp.abs(H(wn)[..., 0]).max()) < 1e-12                       # w walls preserved
+    with pytest.raises(ValueError, match="momentum_shapiro_coeff"):
+        pip.make_grid(_cfg(momentum_shapiro_coeff=2.0))
+
+
+def test_high_order_shapiro_flat_passband():
+    """The Shapiro ORDER controls passband flatness: a well-resolved mode is barely
+    touched at high order (response ≈1) but damped by the order-1 [1,2,1]. Per-step
+    velocity de-noising with order-1 would COMPOUND that damping and erode the resolved
+    eddies (over-damp central momentum to laminar); a high order stays flat in the
+    passband so only the 2Δ mode is removed — this is what makes central momentum clean."""
+    nx = 64
+    x = 2.0 * np.pi * np.arange(nx) / nx
+    f = jnp.broadcast_to(jnp.asarray(np.sin(4.0 * x))[None, :, None], (1, nx, 1))  # 16 pts/wave
+    resp = lambda o: float(jnp.sum(pip._shapiro_h(f, o) * f) / jnp.sum(f * f))
+    assert resp(8) > 0.999                       # order-8: passband ≈ flat (resolved scale kept)
+    assert resp(1) < 0.98                         # order-1: damps it (would compound to laminar)
+    assert resp(8) > resp(4) > resp(1)            # order raises passband flatness
+
+
 def test_divergence_stays_bounded_over_steps():
     """The approximate projection keeps the ρ-weighted divergence BOUNDED (no
     checkerboard runaway) over many steps — the physically relevant stability test."""

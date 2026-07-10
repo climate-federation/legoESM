@@ -69,7 +69,14 @@ class PseudoIncompressibleConfig(NamedTuple):
     Ly: float
     Lz: float
     theta_ref0: float = 300.0        # base-state (isentropic) potential temperature [K]
-    scheme: str = "weno5"            # advection: "weno5" | "van_leer" | "upwind"
+    scheme: str = "weno5"            # SCALAR advection: "weno5" | "van_leer" | "upwind"
+    momentum_scheme: str | None = None  # MOMENTUM advection: as `scheme`, plus "weno7"/
+    #                                  "weno9" (less upwind diffusion) and "central" (non-
+    #                                  dissipative, for sharp LES — WENO5's upwind k⁴-k⁶
+    #                                  diffusion over-smooths the resolved eddies vs the
+    #                                  spectral core; "central" needs a 2Δ de-noiser, see
+    #                                  momentum_shapiro_coeff). None ⇒ FOLLOW `scheme`
+    #                                  (bit-identical to before this field existed).
     moist: bool = False              # θ_ρ buoyancy from tracer slot 0 (q_v)
     n_tracers: int = 0               # water-tracer slots (0 ⇒ dry)
     poisson_tol: float = 1e-6
@@ -103,6 +110,20 @@ class PseudoIncompressibleConfig(NamedTuple):
     #                                  f32 within its stability window). Scalars only ⇒ the
     #                                  projection is untouched (velocity stays div-free).
     #                                  0 ⇒ off (bit-identical). s≈0.05–0.5 typical.
+    momentum_shapiro_coeff: float = 0.0  # OPT-IN per-step [1,2,1] horizontal low-pass on
+    #                                  VELOCITY (u,v,w), blend s∈[0,1] — the CFL-unlimited
+    #                                  2Δ de-noiser that makes NON-dissipative momentum
+    #                                  (momentum_scheme="central") clean, mirroring the
+    #                                  spectral core's sharp-filter pairing. The horizontal
+    #                                  [1,2,1] convolution COMMUTES with the C-grid divergence
+    #                                  (periodic x,y), so div(H·u)=H(div u)=0 ⇒ divergence-free
+    #                                  is PRESERVED with NO re-projection. 0 ⇒ off (bit-identical).
+    momentum_shapiro_order: int = 1  # Shapiro ORDER for the velocity de-noiser (response
+    #                                  1−sin^(2·order)). order=1 ([1,2,1]) over-damps the
+    #                                  resolved eddies under per-step use (its passband
+    #                                  response <1 compounds); a HIGH order (8–16) is FLAT in
+    #                                  the passband so only the 2Δ mode is removed. Use 8–16
+    #                                  with momentum_shapiro_coeff for clean central momentum.
     surface: str = "free"            # surface BC: "free"|"flux"|"most_cooling"
     z0: float = 0.1                  # roughness length z0=z0h [m]
     sfc_theta_flux: float = 0.0      # prescribed kinematic heat flux ⟨w'θ'⟩₀ [K m/s]
@@ -150,6 +171,9 @@ def make_grid(cfg: PseudoIncompressibleConfig, dtype=jnp.float64
               ) -> PseudoIncompressibleGrid:
     if cfg.scheme not in _adv._SCHEMES:
         raise ValueError(f"scheme must be one of {_adv._SCHEMES}, got {cfg.scheme!r}.")
+    if cfg.momentum_scheme is not None and cfg.momentum_scheme not in _adv._SCHEMES:
+        raise ValueError(f"momentum_scheme must be None or one of {_adv._SCHEMES}, "
+                         f"got {cfg.momentum_scheme!r}.")
     if cfg.moist and cfg.n_tracers < 1:
         raise ValueError("cfg.moist=True requires n_tracers>=1 (slot 0 = q_v).")
     if cfg.sgs not in _SGS:
@@ -160,6 +184,12 @@ def make_grid(cfg: PseudoIncompressibleConfig, dtype=jnp.float64
         # outside [0,1] the [1,2,1] blend stops being a convex low-pass (s>2 even
         # amplifies the 2Δ mode and breaks tracer positivity).
         raise ValueError(f"shapiro_coeff must be in [0,1], got {cfg.shapiro_coeff}.")
+    if not 0.0 <= cfg.momentum_shapiro_coeff <= 1.0:
+        raise ValueError(f"momentum_shapiro_coeff must be in [0,1], "
+                         f"got {cfg.momentum_shapiro_coeff}.")
+    if not isinstance(cfg.momentum_shapiro_order, int) or cfg.momentum_shapiro_order < 1:
+        raise ValueError(f"momentum_shapiro_order must be an int >= 1, "
+                         f"got {cfg.momentum_shapiro_order!r}.")
     nz = cfg.nz
     dx, dy, dz = cfg.Lx / cfg.nx, cfg.Ly / cfg.ny, cfg.Lz / nz
     z_c = (jnp.arange(nz, dtype=dtype) + 0.5) * dz
@@ -287,16 +317,24 @@ def _hyperdiff(f, g: PseudoIncompressibleGrid):
     return -g.cfg.hyperdiff_coeff * _hlap(_hlap(f, g), g)
 
 
-def _shapiro_h(f):
-    """Separable [1,2,1]/4 horizontal low-pass (Shapiro) on periodic x,y (roll).
+def _shapiro_h(f, order=1):
+    """Separable order-2·``order`` Shapiro horizontal low-pass on periodic x,y (roll).
 
-    A MULTIPLICATIVE filter: per-axis response cos²(kΔ/2) ∈ [0,1], exactly zeroing
-    the 2Δ mode and leaving k→0 untouched. Because it is a bounded filter (not a
-    diffusion tendency) it is NOT CFL-limited — it de-noises at any dt/resolution,
-    unlike the explicit biharmonic ``_hyperdiff``. Vertical untouched (applies to
-    centre (…,nz) and z-face (…,nz+1) fields alike)."""
-    fx = (jnp.roll(f, 1, axis=_AX) + 2.0 * f + jnp.roll(f, -1, axis=_AX)) * 0.25
-    return (jnp.roll(fx, 1, axis=_AY) + 2.0 * fx + jnp.roll(fx, -1, axis=_AY)) * 0.25
+    Per-axis response ``1 − sin^(2·order)(kΔ/2) ∈ [0,1]`` — zero at the 2Δ Nyquist
+    mode, ``1`` at ``k→0``. ``order=1`` is the classic [1,2,1]/4 (cos²); HIGHER order
+    ⇒ a FLATTER passband (resolved scales barely eroded under repeated per-step use,
+    which a single [1,2,1] would over-damp) with the same sharp 2Δ removal. A bounded
+    filter (not a diffusion tendency) ⇒ NOT CFL-limited. It is a horizontal convolution
+    (polynomial in x/y rolls), so it commutes with the C-grid divergence (div-free-
+    preserving on velocity). Vertical untouched (centre (…,nz) and z-face (…,nz+1) alike)."""
+    coeff = (-1.0) ** order / 4.0 ** order          # response 1 − sin^(2·order)
+    out = f
+    for axis in (_AX, _AY):
+        d = out
+        for _ in range(order):                      # (∂²)^order via the [1,−2,1] stencil
+            d = jnp.roll(d, 1, axis=axis) - 2.0 * d + jnp.roll(d, -1, axis=axis)
+        out = out - coeff * d
+    return out
 
 
 def _centre_velocities(u, v, w):
@@ -479,8 +517,8 @@ def tendencies(u, v, w, theta, tracers, g: PseudoIncompressibleGrid, forcing=Non
     NO pressure gradient (applied by the projection). ``sfc_means=(spd_mean, th1_mean)``
     injects GLOBAL surface planar means for the MPI path; None ⇒ local (serial)."""
     cfg = g.cfg
-    au, av, aw = _adv.advect_momentum(u, v, w, g.dx, g.dy, g.dz, cfg.scheme,
-                                      vel_at_faces=True)
+    au, av, aw = _adv.advect_momentum(u, v, w, g.dx, g.dy, g.dz,
+                                      cfg.momentum_scheme or cfg.scheme, vel_at_faces=True)
     aw = aw + buoyancy_faces(theta, tracers, g)
     ath = _adv.advect_scalar(theta, u, v, w, g.dx, g.dy, g.dz, cfg.scheme,
                              vel_at_faces=True)
@@ -594,6 +632,16 @@ def step(state: PseudoIncompressibleState, g: PseudoIncompressibleGrid, dt,
     th3 = a * th0 + b * eth
     tr3 = None if tr0 is None else a * tr0 + b * etr
     u3, v3, w3, pi3 = project(u3, v3, w3, th3, tr3, pi2, dt, g)
+    # CFL-unlimited [1,2,1] de-noiser on VELOCITY — removes the 2Δ grid noise that
+    # NON-dissipative (central) momentum generates. The horizontal filter commutes
+    # with the C-grid divergence (periodic x,y), so div(H·u)=H(div u)=0 ⇒ divergence-
+    # free is PRESERVED with no re-projection (mirrors the spectral sharp-filter pairing).
+    sm = g.cfg.momentum_shapiro_coeff
+    if sm > 0.0:
+        mo = g.cfg.momentum_shapiro_order
+        u3 = u3 + sm * (_shapiro_h(u3, mo) - u3)
+        v3 = v3 + sm * (_shapiro_h(v3, mo) - v3)
+        w3 = w3 + sm * (_shapiro_h(w3, mo) - w3)
     # Per-step [1,2,1] de-noiser on the SCALARS only (θ, tracers) — kills the
     # fine-res stable-BL 2Δ θ-mode without touching the div-free velocity
     # (no re-projection needed). Static gate ⇒ default (s=0) is bit-identical.
