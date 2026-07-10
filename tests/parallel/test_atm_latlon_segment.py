@@ -303,8 +303,11 @@ def test_atm_latlon_geometry_bytes_shrinks_by_ndev():
     assert geo["sharded_per_device_bytes"] * N_DEV == \
         geo["replicated_per_device_bytes"]
     assert geo["sharded_per_device_bytes"] < geo["replicated_per_device_bytes"]
-    # At least the five (n_lat, n_lon) f64 fields (lat2d, lon2d, f, dx, area).
-    assert geo["replicated_per_device_bytes"] >= N_LAT * N_LON * 8 * 5
+    # At least the five (n_lat, n_lon) 2-D fields (lat2d, lon2d, f, dx, area)
+    # at the grid's ACTUAL dtype — LatLonGrid arrays follow the finite-volume
+    # precision policy (f32 today), so never hardcode an 8-byte itemsize.
+    itemsize = np.asarray(grid.area).dtype.itemsize
+    assert geo["replicated_per_device_bytes"] >= N_LAT * N_LON * itemsize * 5
 
 
 # ==============================================================================

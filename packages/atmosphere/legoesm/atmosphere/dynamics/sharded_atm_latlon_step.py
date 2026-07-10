@@ -568,7 +568,17 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
     ``n_steps`` is STATIC (the compiled scan length): one compiled program
     per distinct segment length (``run_atm_latlon_spmd`` caches per length —
     at most two: the regular segment and the final remainder).
+
+    Carry dtype: the init carry is cast to the STORAGE dtype once at segment
+    entry.  ``_step_cgrid_impl`` returns storage-dtype arrays, so a
+    lower-precision IC (e.g. an f32 grid-derived state under an f64 storage
+    policy) would otherwise trip ``lax.scan``'s carry-type check on the very
+    promotion the per-step Python loop absorbs silently after its first
+    step.  The cast is UPCAST-ONLY and value-exact (f32 embeds exactly in
+    f64), so the segment trajectory stays bit-identical to the per-step
+    path; no precision is ever dropped.
     """
+    from legoesm.core.precision import cast_pytree
     from legoesm.parallel.latlon_spmd import latlon_band_perms
     from legoesm.parallel.shard_map_compat import shard_map
     from legoesm.timestepping.integration import (
@@ -589,6 +599,10 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
 
     if mesh is None:                       # single-device compiled segment
         def _serial_seg(c_state, dt):
+            # Storage-dtype carry (upcast-only, value-exact): the scan carry
+            # must match the step's storage-dtype output — see the docstring.
+            c_state = cast_pytree(c_state, None, "storage")
+
             def _one(s, _):
                 out, _ps = model._step_cgrid_impl(
                     s, dt, physics_fn=physics_fn, phys_state=None)
@@ -617,6 +631,10 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
         shard_geometry)
 
     def _seg_body(state_local, stacks_local, dt):
+        # Storage-dtype carry (upcast-only, value-exact): the scan carry must
+        # match the band step's storage-dtype output — see the docstring.
+        state_local = cast_pytree(state_local, None, "storage")
+
         def _one(s, _):
             out, _ps = band_step(s, stacks_local, dt, None)
             return out, None
