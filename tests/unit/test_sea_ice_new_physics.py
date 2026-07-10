@@ -257,15 +257,26 @@ class TestSnowKernels:
         assert jnp.isfinite(ohe)
 
     def test_flooding_mass_conservation(self):
+        """Convention-B flooding: snow-ice = snow + seawater filling the pores.
+        The ice+snow column GAINS exactly the seawater ``(rho_ice-rho_snow)*d``
+        drawn from the ocean, snow consumed == ice formed == d, and the
+        freeboard is raised to ~0."""
+        ri, rs, rw = 917.0, 330.0, 1025.0
         h_ice = jnp.array([1.0, 0.3])
-        h_snow = jnp.array([0.5, 0.5])
+        h_snow = jnp.array([0.5, 0.9])
         hi, hs, h_si = snow_ice_flooding(
-            h_ice, h_snow, rho_ice=917.0, rho_snow=330.0, rho_ocean=1025.0,
+            h_ice, h_snow, rho_ice=ri, rho_snow=rs, rho_ocean=rw,
         )
-        mass_before = 917.0 * h_ice + 330.0 * h_snow
-        mass_after = 917.0 * hi + 330.0 * hs
-        # Mass-neutral conversion within fp roundoff.
-        assert jnp.all(jnp.abs(mass_after - mass_before) < 1e-2)
+        seawater = (ri - rs) * h_si              # ocean water drawn into pores
+        col_after = ri * hi + rs * hs
+        col_before = ri * h_ice + rs * h_snow
+        # Column ice+snow mass gains exactly the seawater drawn from the ocean.
+        assert jnp.allclose(col_after - col_before, seawater, atol=1e-6)
+        # Snow consumed == snow-ice formed == d.
+        assert jnp.allclose(h_snow - hs, h_si, atol=1e-9)
+        # Freeboard raised to ~0 where flooding occurred (snow was sufficient).
+        fb_after = ((rw - ri) * hi - rs * hs) / rw
+        assert jnp.all(jnp.where(h_si > 1e-9, jnp.abs(fb_after) < 1e-9, True))
 
     def test_flooding_only_when_freeboard_negative(self):
         """Thick ice + thin snow has positive freeboard — no flooding."""
@@ -727,6 +738,79 @@ class TestShortwave:
         # Energy still closes exactly (no creation).
         total = 0.30 * 400.0 + res.sw_absorbed_surface[0] + res.sw_penetrated[0]
         assert jnp.isclose(total, 400.0, rtol=1e-12)
+
+    def test_pond_albedo_decreases_with_depth(self):
+        """Fix #1: pond albedo must DECREASE with depth (Briegleb-Light) — a
+        shallow pond looks like bare ice, a deep pond decays toward the dark
+        deep-pond floor.  The old ramp inverted this (shallow -> ~0)."""
+        T = jnp.full((1,), 272.0)
+        h_ice = jnp.full((1,), 1.5)
+        h_snow = jnp.zeros((1,))       # snow-free so ponds are visible
+        full_pond = jnp.full((1,), 1.0)  # cell fully ponded -> albedo == pond albedo
+        a_shallow, _ = delta_eddington_albedo(
+            T, h_ice, h_snow, full_pond, jnp.full((1,), 0.02),
+        )
+        a_deep, _ = delta_eddington_albedo(
+            T, h_ice, h_snow, full_pond, jnp.full((1,), 0.3),
+        )
+        assert float(a_shallow[0]) > float(a_deep[0])
+        # Both stay in the physical band [deep-pond floor, bare-ice albedo].
+        alpha_deep_floor = (
+            constants.alpha_pond_max_vis * 0.52
+            + constants.alpha_pond_max_nir * 0.48
+        )
+        assert alpha_deep_floor - 1e-6 <= float(a_deep[0]) <= 1.0
+        assert 0.0 <= float(a_shallow[0]) <= 1.0
+
+    def test_penetration_beer_lambert_attenuates_with_thickness(self):
+        """Fix #2: the penetrating fraction decays as exp(-kappa*h_ice), so
+        thick (2 m) bare ice transmits far less than thin (0.1 m) ice, and the
+        penetrated flux never exceeds the net (1-alpha)*sw column input."""
+        sw = jnp.full((1,), 300.0)
+        T = jnp.full((1,), 255.0)      # cold, bare ice
+        h_snow = jnp.zeros((1,))
+        pa = jnp.zeros((1,))
+        pd = jnp.zeros((1,))
+        res_thin = compute_ice_sw(
+            sw, T, jnp.full((1,), 0.1), h_snow, pa, pd,
+            scheme="delta_eddington", albedo_const=0.65,
+        )
+        res_thick = compute_ice_sw(
+            sw, T, jnp.full((1,), 2.0), h_snow, pa, pd,
+            scheme="delta_eddington", albedo_const=0.65,
+        )
+        pen_thin = float(res_thin.sw_penetrated[0])
+        pen_thick = float(res_thick.sw_penetrated[0])
+        # Thick-ice penetration is an order of magnitude smaller.
+        assert pen_thick < 0.2 * pen_thin
+        # Penetration never exceeds the net SW into the column.
+        for res in (res_thin, res_thick):
+            net = float((1.0 - res.albedo_eff[0]) * sw[0])
+            assert float(res.sw_penetrated[0]) <= net + 1e-9
+
+    def test_melt_fraction_reaches_one_at_freezing(self):
+        """Fix #3: the melt ramp spans [T_melt - width, T_melt] and reaches 1.0
+        at T_melt (skin T is clamped there), so the melting albedo is fully
+        reached — the old 0.5-centred ramp topped out at 0.5."""
+        # Thick ice (ramp == 1) so albedo == alpha_regime at melt_fraction=1.0.
+        alpha = maykut_untersteiner_albedo(
+            jnp.full((1,), constants.T_freeze), jnp.full((1,), 2.0),
+        )
+        assert jnp.isclose(alpha[0], 0.5, atol=1e-6)  # _ALBEDO_MELT_BARE_DEFAULT
+
+    def test_thin_ice_albedo_floored_at_ocean(self):
+        """Fix #4: 1 mm ice must not be darker than the open water it replaces;
+        the thin-ice albedo is floored at the ocean albedo."""
+        h_1mm = jnp.full((1,), 1e-3)
+        # Maykut-Untersteiner broadband path.
+        alpha_mu = maykut_untersteiner_albedo(jnp.full((1,), 260.0), h_1mm)
+        assert float(alpha_mu[0]) >= constants.alpha_ocean_broadband - 1e-9
+        # Delta-Eddington bare-ice path (no snow, no pond).
+        alpha_de, _ = delta_eddington_albedo(
+            jnp.full((1,), 260.0), h_1mm,
+            jnp.zeros((1,)), jnp.zeros((1,)), jnp.zeros((1,)),
+        )
+        assert float(alpha_de[0]) >= constants.alpha_ocean_broadband - 1e-9
 
 
 # ==============================================================================
@@ -1281,6 +1365,83 @@ class TestThinIceAblationClosure:
             f"pond ablation water not closed: residual={residual:.4e} "
             f"(m0={m_before:.3f}, fw*dt={fw*3600.0:.4f})"
         )
+
+    def test_lead_freeze_gated_on_ocean_supercooling(self):
+        """Audit #2: lead ice must NOT form over an above-freezing ocean.
+
+        Cold dry air drives a freezing surface deficit (Q_sfc < 0) over an
+        ice-free cell.  With a warm mixed layer (sst > T_freeze_ocean) the
+        atmospheric-deficit lead-freeze is gated OFF; a supercooled ocean
+        (sst <= T_freeze_ocean) still freezes.  Same forcing, only sst varies.
+        """
+        from legoesm.ice.sea_ice import _thermo_v2
+        from legoesm.ice.config import SeaIceConfig
+        from legoesm.core.coupling_fields import AtmToSurface
+        from legoesm.thermo import saturation_mixing_ratio_ice
+        from legoesm import constants
+        n = 4
+        shape = (6, n, n)
+        f = lambda v: jnp.full(shape, v)
+        cfg = SeaIceConfig()
+        T_air = 240.0
+        qsat = float(saturation_mixing_ratio_ice(jnp.array(T_air), jnp.array(1.0e5)))
+        forcing = AtmToSurface(
+            sw_down=f(0.0), lw_down=f(150.0),
+            precip_total=f(0.0), precip_snow=f(0.0), T_lowest=f(T_air),
+            q_lowest=f(qsat * 0.3), u_lowest=f(5.0), v_lowest=f(0.0),
+            p_lowest=f(1.0e5), p_surface=f(1.0e5), rho_lowest=f(1.3),
+            cos_zenith=f(0.0), co2_ppmv=f(400.0), has_radiation=f(1.0),
+            has_precipitation=f(0.0),
+        )
+        # Ice-free cell (conc=0 -> full lead), skin at freezing.
+        base = (f(0.0), f(constants.T_freeze_ocean), f(0.0), f(0.0), f(0.0),
+                f(0.0), f(0.0), forcing)
+        warm = _thermo_v2(*base, f(290.0), cfg, 1.0, 3600.0, enable_lead_freeze=True)
+        cold = _thermo_v2(*base, f(270.0), cfg, 1.0, 3600.0, enable_lead_freeze=True)
+        assert float(jnp.max(warm["conc"])) <= 1e-12, "lead ice grew over warm ocean"
+        assert float(jnp.max(cold["conc"])) > 1e-6, "supercooled lead failed to freeze"
+
+    def test_rain_on_ice_reaches_ocean_without_ponds(self):
+        """Audit HIGH: with no pond scheme, rain falling on the ice fraction
+        must run off to the ocean (snow instead enters the pack).  The ocean
+        tile only delivers the open-water (f_ocean) precip share, so the ice
+        tile must deliver rain*conc.  Two-point (rain vs no-rain) isolates it.
+        """
+        from legoesm.ice.sea_ice import _thermo_v2
+        from legoesm.ice.config import SeaIceConfig
+        from legoesm.core.coupling_fields import AtmToSurface
+        from legoesm.thermo import saturation_mixing_ratio_ice
+        from legoesm import constants
+        n = 4
+        shape = (6, n, n)
+        f = lambda v: jnp.full(shape, v)
+        cfg = SeaIceConfig()  # ponds + snow OFF by default
+        assert not cfg.ponds.enabled
+        T_air, conc0, rain = 250.0, 0.8, 1.0e-4  # kg/m^2/s rain, cold (no melt)
+        qsat = float(saturation_mixing_ratio_ice(jnp.array(T_air), jnp.array(1.0e5)))
+
+        def run(precip_total):
+            forcing = AtmToSurface(
+                sw_down=f(0.0), lw_down=f(constants.sigma_sb * T_air ** 4),
+                precip_total=f(precip_total), precip_snow=f(0.0), T_lowest=f(T_air),
+                q_lowest=f(qsat), u_lowest=f(0.01), v_lowest=f(0.0),
+                p_lowest=f(1.0e5), p_surface=f(1.0e5), rho_lowest=f(1.3),
+                cos_zenith=f(0.0), co2_ppmv=f(400.0), has_radiation=f(1.0),
+                has_precipitation=f(1.0),
+            )
+            # sst at freezing -> no basal; lead-freeze disabled -> isolate rain.
+            res = _thermo_v2(f(1.0), f(constants.T_freeze_ocean), f(conc0), f(0.0),
+                             f(0.0), f(0.0), f(0.0), forcing,
+                             f(constants.T_freeze_ocean), cfg, 1.0, 3600.0,
+                             enable_lead_freeze=False)
+            return float(jnp.mean(res["freshwater_to_ocean"]))
+
+        d_fw = run(rain) - run(0.0)
+        # Ice-fraction rain delivered per water-area = rain * conc_new (~conc0;
+        # a hair below because mild sublimation shrinks the ice area slightly).
+        assert d_fw == pytest.approx(rain * conc0, rel=1e-3), (
+            f"rain-on-ice runoff not delivered: got {d_fw:.3e}, "
+            f"expected ~{rain * conc0:.3e}")
 
     def test_subgrid_ablation_water_closure(self):
         """Codex repro: thin ice (h<h_ice_min) fully ablating must route ALL

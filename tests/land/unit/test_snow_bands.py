@@ -213,20 +213,24 @@ class TestBandStep(unittest.TestCase):
         self.assertLess(float(out.ice_bands.max()), 500.0)      # reservoir shrank
 
     def test_fresh_snow_brightens_glaciated_band(self):
-        """Fresh snow on a glaciated band resets that band's snow age to 0 (bright fresh
-        snow) even though the deep ice persists -- codex finding 2: capped/perennial ice
-        must still brighten when it snows (the separate ice reservoir carries the
-        perennial darkening, not a frozen age clock)."""
+        """Fresh snow on a glaciated band strongly rejuvenates that band's snow age
+        (bright fresh snow) even though the deep ice persists -- codex finding 2:
+        capped/perennial ice must still brighten when it snows (the separate ice
+        reservoir carries the perennial darkening, not a frozen age clock).  With
+        mass-weighted grain-age mixing, a heavy fresh dump onto a thin seasonal layer
+        drops the age far below the aged firn value (does not need an exact-0 reset)."""
         cfg = _band_cfg([1000.0])
-        swe0 = jnp.full((1, 5), 0.5 * cfg.swe_snow_cap)
+        age0_val = 60.0 * 86400.0
+        swe0 = jnp.full((1, 5), 2.0)                            # thin seasonal snow on ice
         ice0 = jnp.full((1, 5), 5000.0)                         # thick perennial ice
-        age0 = jnp.full((1, 5), 60.0 * 86400.0)                # old firn
-        snowfall = jnp.full((1, 5), 1e-3)
+        age0 = jnp.full((1, 5), age0_val)                      # old firn
+        snowfall = jnp.full((1, 5), 5e-3)                      # 18 kg/m2 fresh over the step
         out = step_snow_bands(
             swe0, age0, ice0, jnp.array([constants.T_freeze - 20.0]), snowfall, 3600.0,
             Q_net=jnp.zeros(1), cfg=cfg,
         )
-        npt.assert_allclose(out.snow_age_bands, 0.0, atol=1e-9)  # snowed -> fresh/bright
+        # Heavy fresh (18 kg/m2) >> old (2 kg/m2) -> age drops to ~0.1*(age+dt).
+        self.assertLess(float(out.snow_age_bands.max()), 0.2 * age0_val)  # snowed -> bright
         self.assertGreater(float(out.ice_bands.min()), 5000.0 - 1.0)  # ice persists
 
     def test_cold_bands_hold_snow_warm_bands_melt(self):
@@ -304,6 +308,26 @@ class TestBandStep(unittest.TestCase):
             Q_net=jnp.zeros(1), cfg=cfg, precip_rain_bands=rain)
         self.assertEqual(float(out_warm.refreeze[0]), 0.0)          # no snow -> no refreeze
 
+    def test_refreeze_bounded_by_cold_content(self):
+        """A thin, barely sub-freezing band cannot refreeze more rain than its cold
+        content c_pi*swe*(Tf - T_band)/L_f allows; the residual rain stays liquid
+        (runs off/infiltrates) instead of releasing unbounded latent heat."""
+        cfg = _band_cfg([0.0])
+        swe0 = jnp.full((1, 5), 0.5)                        # thin cold band
+        dT = 1.0                                            # 1 K below freezing
+        heavy_rain = jnp.full((1, 5), 1e-2)                # 36 kg/m2 over the step
+        out = step_snow_bands(
+            swe0, jnp.zeros((1, 5)), jnp.zeros((1, 5)),
+            jnp.array([constants.T_freeze - dT]), jnp.zeros((1, 5)), 3600.0,
+            Q_net=jnp.zeros(1), cfg=cfg, precip_rain_bands=heavy_rain)
+        # Cold-content cap [kg/m2] = c_pi*swe*dT/L_f -- far below the 36 kg/m2 rain.
+        cap = float(constants.c_pi * 0.5 * dT / constants.L_f)
+        rain_mass = float(heavy_rain[0, 0]) * 3600.0
+        self.assertLess(cap, rain_mass)                    # cap actually binds
+        npt.assert_allclose(out.refreeze, cap, rtol=1e-6)  # capped at cold content
+        # SWE grew by exactly the (capped) refrozen mass, not by the whole rain flux.
+        npt.assert_allclose(out.swe_total, 0.5 + cap, rtol=1e-6)
+
     def test_blowing_snow_sublimation(self):
         """Gap 5: wind above the mobilisation threshold sublimes SWE (opt-in rate)."""
         cfg = ElevationSnowBandConfig(
@@ -323,27 +347,34 @@ class TestBandStep(unittest.TestCase):
         self.assertEqual(float(out_calm.blow_subl[0]), 0.0)
 
     def test_per_band_age_fresh_and_perennial_coexist(self):
-        """Fresh snowfall on the LOW band resets only that band's age; the cold high
-        bands (no fresh snow) keep aging -- perennial firn and fresh snow coexist
-        radiatively (codex finding: one cell clock cannot represent this)."""
+        """Fresh snowfall on the high bands REJUVENATES only those bands' age while the
+        snow-free bands (no fresh snow) keep aging -- perennial firn and fresh snow
+        coexist radiatively (codex finding: one cell clock cannot represent this).  With
+        mass-weighted grain-age mixing the fresh bands are younger than the aged clock
+        and strictly younger than the no-snow bands (which age up by dt)."""
         cfg = _band_cfg([1500.0])
-        swe0 = jnp.full((1, 5), 40.0)
-        age0 = jnp.full((1, 5), 30.0 * 86400.0)               # 30-day-old pack
-        # Warm cell +2 C: only the low bands are below the freezing height for fresh
-        # snow; make the lowest band snow, the top bands get none.
+        age0_val = 30.0 * 86400.0
+        swe0 = jnp.full((1, 5), 10.0)
+        age0 = jnp.full((1, 5), age0_val)                     # 30-day-old pack
+        # Cold cell: the high (colder) bands stay below freezing and get fresh snow; the
+        # low warm bands get rain (no fresh snow).  18 kg/m2 fresh over the step.
         snowfall = band_precip_snow(
-            jnp.array([constants.T_freeze - 0.5]), jnp.array([5e-4]),
-            jnp.array([5e-4]), cfg,
+            jnp.array([constants.T_freeze - 0.5]), jnp.array([5e-3]),
+            jnp.array([5e-3]), cfg,
         )
         out = step_snow_bands(
             swe0, age0, jnp.zeros((1, 5)), jnp.array([constants.T_freeze - 5.0]),
             snowfall, 3600.0, Q_net=jnp.zeros(1), cfg=cfg,
         )
-        # Bands that received fresh snow reset to age 0; bands that did not keep aging
         got_snow = snowfall[0] > 1e-10
         self.assertTrue(bool(jnp.any(got_snow)) and bool(jnp.any(~got_snow)))
-        npt.assert_allclose(out.snow_age_bands[0][got_snow], 0.0, atol=1e-9)
-        self.assertTrue(bool(jnp.all(out.snow_age_bands[0][~got_snow] > 30.0 * 86400.0)))
+        # Bands that received fresh snow are rejuvenated (younger than the aged clock);
+        # bands that did not keep aging past the initial age.
+        self.assertTrue(bool(jnp.all(out.snow_age_bands[0][got_snow] < age0_val)))
+        self.assertTrue(bool(jnp.all(out.snow_age_bands[0][~got_snow] > age0_val)))
+        # Fresh bands are strictly younger than the still-aging snow-free bands.
+        self.assertLess(float(out.snow_age_bands[0][got_snow].max()),
+                        float(out.snow_age_bands[0][~got_snow].min()))
 
 
 class TestBandAlbedo(unittest.TestCase):

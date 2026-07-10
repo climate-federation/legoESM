@@ -262,3 +262,118 @@ class Test11j_AlbedoEmissivity:
             + (1.0 - CONFIG.emissivity_lake) * forcing.lw_down
         )
         assert jnp.allclose(resp.lw_up, expected_lw, rtol=1e-3)
+
+
+class Test11k_FreezeThawEnergyConservation:
+    """The freezing clamp must NOT create energy.
+
+    The lake stores an ice latent-heat reservoir E_ice [J/m²] in the
+    Q_freeze slot; column enthalpy H = cap_epi*T_epi + cap_hypo*T_hypo
+    - E_ice evolves ONLY by the net surface flux, so a freeze step
+    followed by a thaw step conserves total energy (heat banked on
+    freeze == heat re-absorbed on thaw).
+    """
+
+    def _cfg(self):
+        return LakeConfig(h_epi=0.5)  # thin epilimnion → freezes fast
+
+    def _H(self, state, cfg):
+        cap_epi = cfg.rho_water * cfg.c_water_mass * cfg.h_epi
+        cap_hypo = cfg.rho_water * cfg.c_water_mass * cfg.h_hypo
+        e = state.Q_freeze.data if state.Q_freeze is not None else 0.0
+        return cap_epi * state.T_epi.data + cap_hypo * state.T_hypo.data - e
+
+    def _qnet_dt(self, state_in, resp, forcing, cfg, dt):
+        # sw_down = 0 in these steps, so albedo drops out.  lw_net uses
+        # the SAME formula/inputs as surface_radiation_fluxes at the
+        # pre-step T_epi, so this reconstructs the model's net column
+        # flux exactly.  F_mix is internal and cancels in the column sum.
+        T_old = state_in.T_epi.data
+        lw_net = (
+            cfg.emissivity_lake * forcing.lw_down
+            - cfg.emissivity_lake * constants.sigma_sb * T_old ** 4
+        )
+        return (lw_net - resp.shflx - resp.lhflx) * dt
+
+    def test_freeze_then_thaw_conserves_energy(self):
+        cfg = self._cfg()
+        dt = 3600.0
+
+        # --- Freeze step: just above freezing, cold dry air, no sun ---
+        s0 = make_lake_state(T_epi=273.30, T_hypo=273.30)
+        f_cold = make_forcing(
+            sw_down=0.0, lw_down=150.0, T_lowest=230.0, q_lowest=1e-4)
+        s1, r1 = step_lake(s0, f_cold, cfg, 1.0, dt)
+
+        E1 = s1.Q_freeze.data
+        assert jnp.all(E1 >= 0.0), "ice reservoir must be non-negative"
+        assert jnp.any(E1 > 1.0), "strong cooling should bank ice latent heat"
+        # Step-1 column energy closure.
+        assert jnp.allclose(
+            self._H(s1, cfg) - self._H(s0, cfg),
+            self._qnet_dt(s0, r1, f_cold, cfg, dt),
+            rtol=1e-7, atol=1.0,
+        )
+
+        # --- Thaw step: strong warm air melts the banked ice back ---
+        f_warm = make_forcing(
+            sw_down=0.0, lw_down=500.0, T_lowest=320.0, q_lowest=2e-2)
+        s2, r2 = step_lake(s1, f_warm, cfg, 1.0, dt)
+
+        E2 = s2.Q_freeze.data
+        # Melt cost is PAID (reservoir drawn down), not free re-warming.
+        assert jnp.all(E2 <= E1 + 1e-6)
+        assert jnp.any(E2 < E1), "thaw must repay the banked ice latent heat"
+        # Step-2 column energy closure.
+        assert jnp.allclose(
+            self._H(s2, cfg) - self._H(s1, cfg),
+            self._qnet_dt(s1, r2, f_warm, cfg, dt),
+            rtol=1e-7, atol=1.0,
+        )
+
+        # --- Full-cycle: injected on freeze == absorbed on thaw, res≈0 ---
+        total_flux = (
+            self._qnet_dt(s0, r1, f_cold, cfg, dt)
+            + self._qnet_dt(s1, r2, f_warm, cfg, dt)
+        )
+        assert jnp.allclose(
+            self._H(s2, cfg) - self._H(s0, cfg), total_flux,
+            rtol=1e-7, atol=1.0,
+        ), "freeze/thaw clamp must not create or destroy energy"
+
+    def test_reservoir_persists_and_survives_restep(self):
+        """E_ice carried through the returned state (Q_freeze slot)."""
+        cfg = self._cfg()
+        s0 = make_lake_state(T_epi=273.30, T_hypo=273.30)
+        f_cold = make_forcing(
+            sw_down=0.0, lw_down=150.0, T_lowest=230.0, q_lowest=1e-4)
+        s1, _ = step_lake(s0, f_cold, cfg, 1.0, 3600.0)
+        assert s1.Q_freeze is not None
+        # Re-stepping with the reservoir present preserves pytree aux.
+        s2, _ = step_lake(s1, f_cold, cfg, 1.0, 3600.0)
+        assert s2.Q_freeze.units == s1.Q_freeze.units
+        assert s2.Q_freeze.name == s1.Q_freeze.name
+
+
+class Test11l_FrozenAlbedo:
+    """A frozen lake wears its ice/snow albedo, not open-water 0.08."""
+
+    def test_frozen_albedo_exceeds_liquid_and_in_range(self):
+        cfg = LakeConfig()
+        # Frozen: start at freezing, cold forcing → stays clamped at T_freeze.
+        frozen = make_lake_state(T_epi=cfg.T_freeze, T_hypo=cfg.T_freeze)
+        f_cold = make_forcing(
+            sw_down=0.0, lw_down=100.0, T_lowest=230.0, q_lowest=1e-4)
+        _, r_frozen = step_lake(frozen, f_cold, cfg, 1.0, DT)
+
+        # Liquid: warm lake, warm forcing → stays open water.
+        liquid = make_lake_state(T_epi=290.0, T_hypo=285.0)
+        f_warm = make_forcing(sw_down=300.0, T_lowest=290.0)
+        _, r_liquid = step_lake(liquid, f_warm, cfg, 1.0, DT)
+
+        a_frozen = float(r_frozen.albedo.flatten()[0])
+        a_liquid = float(r_liquid.albedo.flatten()[0])
+        assert a_frozen > a_liquid
+        assert 0.4 <= a_frozen <= 0.7
+        assert a_frozen == pytest.approx(cfg.albedo_lake_ice)
+        assert a_liquid == pytest.approx(cfg.albedo_lake)

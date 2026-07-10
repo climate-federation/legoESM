@@ -9,6 +9,16 @@ where m = rho_ice * h is ice mass per unit area, tau_air and tau_ocean
 are wind and ocean drag stresses, f is the Coriolis parameter,
 and sigma is the internal stress tensor from the VP/EVP rheology.
 
+The sea-surface-tilt / ocean-pressure-gradient force ``- m g grad(eta_ocean)``
+(H&D97 eq. 2; CICE ``strtltx``) is implemented as an OPTIONAL ``-g grad(eta)``
+acceleration on both the EVP and mEVP velocity updates (``ssh_grad_x/y``,
+default None -> no tilt).  Without it, drift is biased under strong SSH
+gradients (e.g. the Beaufort Gyre) because only the geostrophic-current part
+enters, via ``tau_ocean``.
+# ponytail: the ice-side term + its unit test are in place; the remaining wire
+# is the coupler passing the prognostic ocean SSH gradient at the ice C-grid
+# (a 3D-ocean-coupling follow-up).  Until then ssh_grad defaults None (no-op).
+
 The EVP solver subcycles N_evp times per dynamical timestep. Each
 subcycle updates stress via elastic relaxation toward the VP solution,
 then advances velocity semi-implicitly.
@@ -391,6 +401,8 @@ def evp_solver(
     C_oi: float = _DYN_DEFAULTS.drag_ocean,
     differentiable: bool = False,
     h_ice_min: float = _DYN_DEFAULTS.h_ice_min,
+    ssh_grad_x: jnp.ndarray | None = None,
+    ssh_grad_y: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Run the EVP subcycled momentum solver.
 
@@ -477,7 +489,6 @@ def evp_solver(
     # Coriolis parameter at cell centers
     f = _grid_coriolis(grid).astype(u_ice.dtype)
     alpha = 0.5 * f * dt_s
-    coriolis_denom = 1.0 + alpha ** 2
 
     # Ice mask: only compute dynamics where ice exists
     ice_mask = concentration > _ICE_PRESENCE_THRESHOLD
@@ -498,23 +509,57 @@ def evp_solver(
         # 3. Stress divergence
         Fx, Fy = stress_divergence(s11_new, s22_new, s12_new, grid)
 
-        # 4. External forces (recomputed with current velocity)
+        # 4. External forces (recomputed with current velocity).  Air
+        #    stress stays explicit.  Ocean drag is split (Hunke &
+        #    Dukowicz 1997 / CICE ``stepu``): the magnitude ``vrel`` is
+        #    evaluated at the OLD velocity u^n (explicit), but the linear
+        #    u^{n+1} factor is treated IMPLICITLY by folding ``vrel`` into
+        #    the 2x2 diagonal below.  This removes the explicit stability
+        #    bound dt_s < 2 m / vrel that blows up in thin-ice MIZ cells.
         tau_air_x, tau_air_y = air_ice_stress(
             u_c, v_c, wind_u, wind_v, rho_air, C_ai,
         )
-        tau_ocean_x, tau_ocean_y = ocean_ice_stress(
-            u_c, v_c, ocean_u, ocean_v, rho_ocean, C_oi,
-        )
+        du_ocn = ocean_u - u_c
+        dv_ocn = ocean_v - v_c
+        # vrel = rho_ocean · C_oi · |u_ocn − u^n|  [kg m^-2 s^-1].  The
+        # 1e-10 floor keeps the sqrt gradient finite at zero shear
+        # (AD-safe), matching ocean_ice_stress.
+        vrel = rho_ocean * C_oi * jnp.sqrt(
+            du_ocn ** 2 + dv_ocn ** 2 + 1e-10)
 
-        # 5. Total force per unit mass (excluding Coriolis)
-        ax = (tau_air_x + tau_ocean_x + Fx) / m_ice
-        ay = (tau_air_y + tau_ocean_y + Fy) / m_ice
+        # 5. Explicit force per unit mass = air stress + internal-stress
+        #    divergence ONLY (ocean drag enters implicitly in step 6).
+        ax = (tau_air_x + Fx) / m_ice
+        ay = (tau_air_y + Fy) / m_ice
+        # Sea-surface-tilt / ocean-pressure-gradient force (H&D97 eq. 2; CICE
+        # ``strtltx``): ``-m g grad(eta)`` per unit area -> ``-g grad(eta)`` per
+        # unit mass (mass cancels).  ``eta`` is the ocean SSH; the ice drifts
+        # DOWN the sea-surface slope.  ``ssh_grad_*`` default None (no tilt)
+        # until the coupler plumbs ocean SSH to the ice C-grid; supplied as a
+        # prescribed gradient it is exercised directly (unit test).  The
+        # ``is not None`` check is a static feature gate (not a traced branch).
+        if ssh_grad_x is not None:
+            ax = ax - constants.g * ssh_grad_x
+        if ssh_grad_y is not None:
+            ay = ay - constants.g * ssh_grad_y
 
-        # 6. Semi-implicit velocity update with Coriolis
-        rhs_u = u_c + dt_s * ax + alpha * v_c
-        rhs_v = v_c + dt_s * ay - alpha * u_c
-        u_new = (rhs_u + alpha * rhs_v) / coriolis_denom
-        v_new = (rhs_v - alpha * rhs_u) / coriolis_denom
+        # 6. Semi-implicit velocity update.  Sign convention (per-area
+        #    momentum, k = up):
+        #      m (u^{n+1}-u^n)/dt_s = tau_air + vrel (u_ocn - u^{n+1})
+        #                             + F - m f k×u  (+f v in u-eq,
+        #                             -f u in v-eq; Coriolis unchanged).
+        #    The implicit drag adds r = dt_s vrel / m_ice to the diagonal:
+        #      D u^{n+1} - alpha v^{n+1} = rhs_u
+        #      alpha u^{n+1} + D v^{n+1} = rhs_v
+        #    with D = 1 + r, alpha = 0.5 f dt_s, det = D^2 + alpha^2.
+        #    r = 0 recovers the original Coriolis-only solve exactly.
+        drag = dt_s * vrel / m_ice
+        D = 1.0 + drag
+        rhs_u = u_c + dt_s * ax + drag * ocean_u + alpha * v_c
+        rhs_v = v_c + dt_s * ay + drag * ocean_v - alpha * u_c
+        det = D ** 2 + alpha ** 2
+        u_new = (D * rhs_u + alpha * rhs_v) / det
+        v_new = (D * rhs_v - alpha * rhs_u) / det
 
         # Zero velocity / stress where no ice.  Cast the boolean mask
         # to float once and multiply — fuses naturally with the
@@ -579,6 +624,8 @@ def mevp_solver(
     C_oi: float = _DYN_DEFAULTS.drag_ocean,
     differentiable: bool = False,
     h_ice_min: float = _DYN_DEFAULTS.h_ice_min,
+    ssh_grad_x: jnp.ndarray | None = None,
+    ssh_grad_y: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     r"""Run the modified-EVP pseudo-time momentum solver.
 
@@ -715,14 +762,17 @@ def mevp_solver(
     # (depends only on the start-of-step h, A).
     P = ice_strength(h_ice, concentration, P_star, C_strength)
 
-    # Implicit Coriolis: solve the 2x2 system
+    # Implicit Coriolis AND implicit ocean drag: solve the 2x2 system
     #   A · u^(p+1) − B · v^(p+1) = rhs_u
     #   B · u^(p+1) + A · v^(p+1) = rhs_v
-    # with A = β + 1 and B = Δt · f.
+    # with B = Δt · f (Coriolis) and A = β + 1 + Δt·vrel/m (base mEVP
+    # damping β+1 plus the IMPLICIT ocean-drag rate; Hunke & Dukowicz
+    # 1997 / CICE ``stepu``).  ``vrel`` (the drag magnitude) is evaluated
+    # at the current pseudo-velocity u^p and so ``A`` and the determinant
+    # are recomputed inside the subcycle body below.
     f = _grid_coriolis(grid).astype(u_ice.dtype)
     A_cor = beta_mevp + 1.0
     B_cor = dt * f
-    inv_det = 1.0 / (A_cor ** 2 + B_cor ** 2)
 
     # u^n (held fixed during pseudo-time iteration)
     u_n = u_ice
@@ -747,24 +797,45 @@ def mevp_solver(
         # 3. Stress divergence
         Fx, Fy = stress_divergence(s11_new, s22_new, s12_new, grid)
 
-        # 4. External stresses at u^p (Picard linearisation)
+        # 4. External stresses at u^p (Picard linearisation).  Air stress
+        #    stays explicit; ocean drag is split — magnitude ``vrel`` at
+        #    the current pseudo-velocity u^p (explicit), linear u^(p+1)
+        #    factor IMPLICIT via the 2x2 diagonal below.
         tau_air_x, tau_air_y = air_ice_stress(
             u_p, v_p, wind_u, wind_v, rho_air, C_ai,
         )
-        tau_ocean_x, tau_ocean_y = ocean_ice_stress(
-            u_p, v_p, ocean_u, ocean_v, rho_ocean, C_oi,
-        )
+        du_ocn = ocean_u - u_p
+        dv_ocn = ocean_v - v_p
+        # vrel = rho_ocean · C_oi · |u_ocn − u^p|  [kg m^-2 s^-1]; 1e-10
+        # floor keeps the sqrt gradient finite (AD-safe).
+        vrel = rho_ocean * C_oi * jnp.sqrt(
+            du_ocn ** 2 + dv_ocn ** 2 + 1e-10)
 
-        # 5. RHS forcing / unit mass
-        ax = (tau_air_x + tau_ocean_x + Fx) / m_ice
-        ay = (tau_air_y + tau_ocean_y + Fy) / m_ice
+        # 5. Explicit RHS forcing / unit mass = air stress + internal
+        #    stress divergence ONLY (ocean drag enters implicitly below).
+        ax = (tau_air_x + Fx) / m_ice
+        ay = (tau_air_y + Fy) / m_ice
+        # Sea-surface-tilt force ``-g grad(eta)`` per unit mass (H&D97 eq. 2;
+        # CICE ``strtltx``); default None -> no tilt until the coupler plumbs
+        # ocean SSH.  Static feature gate (not a traced branch).
+        if ssh_grad_x is not None:
+            ax = ax - constants.g * ssh_grad_x
+        if ssh_grad_y is not None:
+            ay = ay - constants.g * ssh_grad_y
 
         # 6. mEVP velocity update (Kimmritz 2015 eq. 8) with implicit
-        #    Coriolis — solve the 2x2 system in closed form.
-        rhs_u = beta_mevp * u_p + u_n + dt * ax
-        rhs_v = beta_mevp * v_p + v_n + dt * ay
-        u_new = (A_cor * rhs_u + B_cor * rhs_v) * inv_det
-        v_new = (-B_cor * rhs_u + A_cor * rhs_v) * inv_det
+        #    Coriolis AND implicit ocean drag.  Sign convention (k = up):
+        #    beta(u^(p+1)-u^p) + (u^(p+1)-u^n) = dt/m [tau_air + F
+        #      + vrel(u_ocn - u^(p+1))] - dt f k×u^(p+1); Coriolis +f v
+        #    in u-eq, -f u in v-eq (unchanged).  drag = dt·vrel/m adds to
+        #    the diagonal A; drag = 0 recovers the Coriolis-only solve.
+        drag = dt * vrel / m_ice
+        A_drag = A_cor + drag
+        inv_det = 1.0 / (A_drag ** 2 + B_cor ** 2)
+        rhs_u = beta_mevp * u_p + u_n + dt * ax + drag * ocean_u
+        rhs_v = beta_mevp * v_p + v_n + dt * ay + drag * ocean_v
+        u_new = (A_drag * rhs_u + B_cor * rhs_v) * inv_det
+        v_new = (-B_cor * rhs_u + A_drag * rhs_v) * inv_det
 
         # Zero in ice-free cells (smooth-grad multiply, as in evp_solver)
         ice_mask_f = ice_mask.astype(u_new.dtype)
