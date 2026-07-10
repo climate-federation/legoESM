@@ -439,6 +439,14 @@ class MPASSimpleOceanConfig(NamedTuple):
         Deep layer reference temperature [K].
     tau_deep : float
         Deep layer restoring timescale [s].
+    freezing : FreezingPointConfig
+        Seawater freezing-point (liquidus) scheme for the slab/two-layer
+        freeze clamp AND its ``Q_freeze`` diagnostic.  ``"constant"``
+        (default) keeps ``T_freeze`` above byte-identical; a liquidus scheme
+        is evaluated at ``constants.S_ocean_ref`` (the slab carries no
+        prognostic salinity) via the shared owner
+        ``eos.slab_freeze_point_K`` — mirrors
+        ``SimpleOceanConfig.freezing``.  MED-1 follow-up.
     """
     mode: str = "fixed"
     sst_constant: float = 300.0
@@ -457,3 +465,6 @@ class MPASSimpleOceanConfig(NamedTuple):
     restore_deep: bool = False
     T_deep_ref: float = 278.0
     tau_deep: float = 365.25 * 86400.0
+    # Appended at the END to preserve positional construction (same convention
+    # as LatLonCGridOceanConfig field additions).
+    freezing: FreezingPointConfig = FreezingPointConfig()

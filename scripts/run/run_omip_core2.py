@@ -51,6 +51,8 @@ if not _FP32:
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm.ocean.eos import VALID_FREEZE_SCHEMES
+
 _SEC_PER_DAY = 86400.0
 _SEC_PER_6H = 21600.0
 _YEAR_S = 365.0 * _SEC_PER_DAY
@@ -383,7 +385,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   min_levels=1, div_damp_2=None, div_damp_4=None,
                   smag_cfl_safety=None, convection="none",
                   convection_K_conv=1.0, convection_K_bg=1e-5,
-                  freeze_floor=None, ew_cyclic_overlap=None,
+                  freeze_floor=None, freezing=None, ew_cyclic_overlap=None,
                   runoff_depth_spread_m=None, tracer_advection=None,
                   mle=None, dz_ref_override=None,
                   bottom_drag_scheme=None, bottom_drag_cd0=None,
@@ -450,6 +452,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("div_damp_4", div_damp_4),
                               ("smag_cfl_safety", smag_cfl_safety),
                               ("freeze_floor", freeze_floor),
+                              ("freezing", freezing),
                               ("ew_cyclic_overlap", ew_cyclic_overlap),
                               ("runoff_depth_spread_m", runoff_depth_spread_m),
                               ("tracer_advection", tracer_advection),
@@ -664,7 +667,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   momentum_advection=None, slope_foot_alpha=None,
                   slope_foot_n_levels=None, slope_foot_threshold=None,
                   min_levels=1, div_damp_2=None, div_damp_4=None,
-                  smag_cfl_safety=None, freeze_floor=None,
+                  smag_cfl_safety=None, freeze_floor=None, freezing=None,
                   use_polar_filter=None, polar_filter_cutoff_lat_deg=None,
                   polar_filter_max_wave_speed=None,
                   polar_filter_safety_factor=None,
@@ -716,6 +719,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("div_damp_4", div_damp_4),
                               ("smag_cfl_safety", smag_cfl_safety),
                               ("freeze_floor", freeze_floor),
+                              ("freezing", freezing),
                               ("runoff_depth_spread_m", runoff_depth_spread_m),
                               ("tracer_advection", tracer_advection),
                               ("use_polar_filter", use_polar_filter),
@@ -1109,7 +1113,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      bottom_drag_bbl_thickness=None, bottom_drag_bg_velocity=None,
                      partial_cell=False, dz_ref_override=None,
                      n_barotropic_substeps=None,
-                     barotropic_solver=None, freeze_floor=None,
+                     barotropic_solver=None, freeze_floor=None, freezing=None,
                      runoff_depth_spread_m=None, mle=None,
                      bottom_drag_scheme=None, bottom_drag_cd0=None,
                      bottom_drag_cdmax=None, bottom_drag_z0=None,
@@ -1172,6 +1176,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                               ("n_barotropic_substeps", n_barotropic_substeps),
                               ("barotropic_solver", barotropic_solver),
                               ("freeze_floor", freeze_floor),
+                              ("freezing", freezing),
                               ("runoff_depth_spread_m", runoff_depth_spread_m))
             if v is not None}
     if _ovr:
@@ -2692,6 +2697,17 @@ def main() -> int:
                         "prognostic ice, so high-lat (esp. Arctic) cells over-cool "
                         "3-5 C below NEMO (LIM ice caps SST). NEMO-faithful; removes "
                         "~half the Arctic SST RMSE. Off = bit-exact legacy.")
+    p.add_argument("--freeze-scheme", type=str, default="constant",
+                   choices=sorted(VALID_FREEZE_SCHEMES),
+                   help="Seawater freezing-point (liquidus) scheme (MED-1) for the "
+                        "freeze surrogates: 'constant' (default, byte-exact -1.8 C), "
+                        "'linear_S' (MOM6 linear liquidus), 'unesco' (UNESCO/Millero, "
+                        "NEMO eos_fzp EOS-80: ~-1.92 C at S=35). Non-constant makes "
+                        "BOTH the --freeze-floor model clamp AND the --ice-thermo "
+                        "under-ice relaxation track the LOCAL surface salinity "
+                        "(Arctic-relevant: fresher shelf water freezes warmer). "
+                        "Requires --freeze-floor and/or --ice-thermo (else no "
+                        "consumer -> hard error).")
     p.add_argument("--prognostic-sea-ice", action="store_true",
                    help="Wire legoESM's REAL prognostic sea-ice model "
                         "(legoesm.ice.step_sea_ice: thermo + dynamics + brine) into "
@@ -3073,6 +3089,21 @@ def main() -> int:
             raise ValueError("--ice-thermo-tau-days must be > 0 (freezing-relaxation "
                              f"timescale [days]); got {args.ice_thermo_tau_days}.")
 
+    if args.freeze_scheme != "constant":
+        # The liquidus scheme only feeds the freeze surrogates -- with neither
+        # enabled it would be a silent no-op (dispatch-hardening: fail loud).
+        if not (args.freeze_floor or args.ice_thermo):
+            raise ValueError(
+                f"--freeze-scheme {args.freeze_scheme!r} has no consumer without "
+                "--freeze-floor (salinity-dependent model freeze floor) and/or "
+                "--ice-thermo (salinity-dependent under-ice relaxation target). "
+                "Add one of those flags or drop --freeze-scheme.")
+        if args.grid == "cubed_sphere":
+            raise ValueError(
+                "--freeze-scheme is not wired for --grid cubed_sphere (the cube "
+                "builder does not thread the freeze-floor config; matching its "
+                "existing --freeze-floor gap). Use tripole/latlon_bathy/mpas.")
+
     if args.prognostic_sea_ice:
         # The REAL prognostic ice model REPLACES the surrogates — never combine
         # (double counting / inconsistent SST clamps).  Fail loud.
@@ -3234,6 +3265,12 @@ def main() -> int:
     # so the builders' iwm-block stays fully inert on legacy runs).
     from scripts.run.run_omip import build_iwm_config_from_args as _build_iwm
     _iwm_cfg = _build_iwm(args) if args.iwm else None
+    # --freeze-scheme -> model-config freezing override (MED-1): None keeps the
+    # builders' validated default config untouched (byte-exact legacy).
+    _freezing_ovr = None
+    if args.freeze_scheme != "constant":
+        from legoesm.ocean.eos import FreezingPointConfig
+        _freezing_ovr = FreezingPointConfig(scheme=args.freeze_scheme)
     if args.grid == "tripole":
         grid, z_coord, model, state, H_bathy = build_tripole(
             args.nlev, args.H_max, args.mesh,
@@ -3247,6 +3284,7 @@ def main() -> int:
             bathy_smoothing_passes=args.bathy_smoothing_passes,
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
             freeze_floor=(True if args.freeze_floor else None),
+            freezing=_freezing_ovr,
             runoff_depth_spread_m=args.runoff_depth_spread_m,
             barotropic_solver=args.barotropic_solver,
             barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
@@ -3305,6 +3343,7 @@ def main() -> int:
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
             flat_bottom=args.flat_bottom, partial_cell=args.partial_cell,
             freeze_floor=(True if args.freeze_floor else None),
+            freezing=_freezing_ovr,
             runoff_depth_spread_m=args.runoff_depth_spread_m,
             mle=mle_cfg, dz_ref_override=_nemo_dz,
             bottom_drag_scheme=args.bottom_drag_scheme,
@@ -3341,6 +3380,7 @@ def main() -> int:
             bathy_smoothing_passes=args.bathy_smoothing_passes,
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
             freeze_floor=(True if args.freeze_floor else None),
+            freezing=_freezing_ovr,
             runoff_depth_spread_m=args.runoff_depth_spread_m,
             tracer_advection=args.tracer_advection,
             barotropic_solver=args.barotropic_solver,
@@ -4320,8 +4360,14 @@ def main() -> int:
             # top-cell update (same host-state pattern as the SSS restoring).
             from legoesm.ocean.coupler.omip2_applicator import under_ice_freeze_relax
             Tn = np.asarray(state.T.data).copy()   # copy: device arrays alias / are read-only
+            # --freeze-scheme != constant: per-cell liquidus target from the
+            # LOCAL surface salinity (MED-1); constant keeps the fixed -1.8 C
+            # scalar byte-identical (S_top=None short-circuits inside).
             Tn[..., 0] = under_ice_freeze_relax(
-                Tn[..., 0], _sic, dt, tau_ice_days=args.ice_thermo_tau_days)
+                Tn[..., 0], _sic, dt, tau_ice_days=args.ice_thermo_tau_days,
+                S_top=(np.asarray(state.S.data)[..., 0]
+                       if args.freeze_scheme != "constant" else None),
+                freeze_scheme=args.freeze_scheme)
             state = state._replace(
                 T=Field(jnp.asarray(Tn), name=state.T.name,
                         dims=state.T.dims, units=state.T.units))
