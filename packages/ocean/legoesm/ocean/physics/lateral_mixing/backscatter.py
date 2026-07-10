@@ -110,6 +110,7 @@ __param_spec__ = {
         "scheme_key": "ocean.backscatter",
         "excluded": {
             "E_min": "default 0 = disabled/off (enable via config, not training)",
+            "nu_bs_cfl_safety": "numerics viscous-CFL safety factor that BOUNDS the negative viscosity (a stability cap, not a tunable closure knob)",
         },
         "params": {
             "E_max": {"units": "m^2/s^2", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Jansen-Held energy backscatter", "shape": None},
@@ -146,6 +147,13 @@ class BackscatterConfig(NamedTuple):
         Fraction of the resolved viscous dissipation routed into ``E``
         (the remainder is treated as genuine dissipation).  Default
         0.9 following Jansen & Held 2014.  Must be in ``[0, 1]``.
+    nu_bs_cfl_safety : float
+        Viscous-CFL safety factor bounding the backscatter viscosity
+        ``ν_bs`` [-].  The negative Laplacian is destabilising, so ``ν_bs``
+        is capped per-cell at ``nu_bs_cfl_safety · Δ² / Δt`` (the SAME
+        Laplacian viscous-CFL ceiling used by the Smagorinsky closure via
+        ``laplacian_smag_cfl_cap``) in addition to the ``E_max`` clamp.
+        This is a numerics stability floor, NOT a tunable closure knob.
     """
     enabled: bool = False
     c_bs: float = 0.01
@@ -153,6 +161,7 @@ class BackscatterConfig(NamedTuple):
     E_min: float = 0.0
     E_max: float = 0.1
     efficiency: float = 0.9
+    nu_bs_cfl_safety: float = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -451,3 +460,141 @@ def update_eddy_energy(
     dE = eta * eps_dissipation - eps_backscatter - E / jnp.maximum(tau, _EPS)
     E_new = E + dt * dE
     return jnp.clip(E_new, cfg.E_min, cfg.E_max)
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic (no-carry) reservoir + CFL bound + C-grid wiring
+# ---------------------------------------------------------------------------
+#
+# The production momentum update wires backscatter through a DIAGNOSTIC
+# (standing-equilibrium) reservoir E rather than the prognostic, time-
+# integrated E of ``update_eddy_energy``.  A carried E would need a new field
+# threaded through the outer ``lax.scan`` and seeded to a constant pytree
+# BEFORE the scan — the None→Field carry-structure hazard documented in
+# ``ocean_pe_latlon_cgrid`` (the F_slow_prev seed).  The diagnostic reservoir
+# needs NO carry: it is the local equilibrium of the reservoir budget, so the
+# wiring is a pure function of the instantaneous state.  FOLLOW-UP: swap
+# ``diagnostic_eddy_energy`` for a carried E updated by ``update_eddy_energy``
+# (constant-pytree seed, mirroring the ``state.eke`` carry) once an eddy-
+# permitting stability validation of the prognostic path is available.
+
+
+def diagnostic_eddy_energy(
+    eps_diss: jnp.ndarray, cfg: BackscatterConfig
+) -> jnp.ndarray:
+    """DIAGNOSTIC (no-carry) subgrid-KE reservoir from the instantaneous
+    resolved scale-selective dissipation.
+
+    Local-equilibrium closure of the prognostic reservoir budget
+    ``dE/dt = η·ε_diss − ε_bs − E/τ``: dropping the (small) backscatter
+    return ``ε_bs`` and setting ``dE/dt = 0`` gives the standing reservoir
+    ``E_eq = η·τ·ε_diss`` [m²/s²] (units: [1]·[s]·[m²/s³]).  Used INSTEAD of a
+    carried, time-integrated ``E`` (``update_eddy_energy``) so the closure
+    needs NO prognostic field threaded through the outer ``lax.scan`` —
+    avoiding the None→Field carry-structure hazard.  Clamped to
+    ``[E_min, E_max]``.
+
+    Parameters
+    ----------
+    eps_diss : resolved scale-selective (biharmonic/Leith) dissipation power
+        density [m²/s³], ``≥ 0`` (energy REMOVED from the resolved flow).
+    cfg : BackscatterConfig.
+
+    Returns
+    -------
+    E : subgrid-KE reservoir [m²/s²], clamped to ``[E_min, E_max]``.
+    """
+    tau = cfg.tau_relax_days * 86400.0
+    E = cfg.efficiency * tau * jnp.maximum(eps_diss, 0.0)
+    return jnp.clip(E, cfg.E_min, cfg.E_max)
+
+
+def cfl_cap_eddy_energy(
+    E: jnp.ndarray,
+    nu_max: jnp.ndarray,
+    delta: jnp.ndarray,
+    cfg: BackscatterConfig,
+) -> jnp.ndarray:
+    """Cap ``E`` so the backscatter viscosity ``ν_bs = c_bs·Δ·√E`` never
+    exceeds the per-cell viscous-CFL ceiling ``nu_max`` [m²/s].
+
+    A negative Laplacian is destabilising (module docstring), so ``ν_bs``
+    MUST be bounded.  ``ν_bs ≤ nu_max`` ⇔ ``E ≤ (nu_max/(c_bs·Δ))²``; the
+    returned ``min(E, E_cap)`` enforces this POINTWISE, while the ``E_max``
+    clamp in ``diagnostic_eddy_energy``/``update_eddy_energy`` supplies the
+    second, dt-INDEPENDENT ceiling.  ``Δ`` MUST be the SAME grid length the
+    operator uses (``√area`` at the C-grid h-points, ``_A_bs_h_cgrid``), so
+    the cap cancels the operator's ``Δ`` exactly and bounds ``ν_bs`` to
+    ``nu_max`` regardless of the metric ``nu_max`` was built from.
+
+    Parameters
+    ----------
+    E : candidate reservoir [m²/s²] (e.g. from ``diagnostic_eddy_energy``).
+    nu_max : per-cell viscous-CFL ceiling on ``ν_bs`` [m²/s]
+        (e.g. ``laplacian_smag_cfl_cap(grid, dt, cfg.nu_bs_cfl_safety)[0]``).
+    delta : grid length ``Δ`` [m] at the same points ``E`` lives on.
+    cfg : BackscatterConfig.
+    """
+    denom = jnp.maximum(cfg.c_bs * delta, _EPS)
+    E_cap = (nu_max / denom) ** 2
+    return jnp.minimum(E, E_cap)
+
+
+def diagnostic_backscatter_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    diss_u: jnp.ndarray,
+    diss_v: jnp.ndarray,
+    nu_max_h: jnp.ndarray,
+    grid,
+    cfg: BackscatterConfig,
+    *,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+    dz: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Diagnostic-``E`` (no-carry), CFL-bounded Jansen–Held backscatter
+    momentum tendency on the lat-lon C-grid.
+
+    Orchestrates the reuse-only pipeline (no new numerics):
+
+    1. resolved scale-selective dissipation power ``ε_diss = −⟨u·D_diss⟩``
+       [m²/s³] at cell centres from the APPLIED biharmonic/Leith tendency
+       ``(diss_u, diss_v)`` via :func:`backscatter_power_density_cgrid`;
+    2. standing-equilibrium reservoir ``E = clamp(η·τ·ε_diss)`` via
+       :func:`diagnostic_eddy_energy`;
+    3. per-cell CFL cap ``ν_bs ≤ nu_max_h`` via :func:`cfl_cap_eddy_energy`
+       (``Δ = √area``, the h-point grid length
+       :func:`backscatter_tendency_cgrid` uses);
+    4. the negative-Laplacian tendency via the existing
+       :func:`backscatter_tendency_cgrid` (UNCHANGED).
+
+    ``diss_u/diss_v`` are the APPLIED (already-signed, dissipative) lateral
+    tendencies [m/s²]; a dissipative tendency gives ``⟨u·D⟩ ≤ 0`` so
+    ``ε_diss ≥ 0`` and backscatter injects ONLY where a scale-selective sink
+    is active — the Jansen & Held (2014) energetic-consistency requirement
+    (and the stability pairing the module docstring mandates).
+
+    Returns ``(tend_u, tend_v, E)`` — add ``tend_u/tend_v`` to ``du/dt``,
+    ``dv/dt``; ``E`` [m²/s²] is the CFL-capped reservoir (diagnostic output).
+    A no-op (zeros) when ``cfg.enabled`` is False or ``cfg.c_bs == 0``.
+    """
+    if not cfg.enabled or cfg.c_bs == 0.0:
+        return (jnp.zeros_like(u), jnp.zeros_like(v),
+                jnp.zeros_like(grid.area))
+    # (1) resolved scale-selective dissipation power ε_diss ≥ 0 [m²/s³].
+    #     ⟨u·D⟩ ≤ 0 for a dissipative tendency ⇒ ε_diss = −⟨u·D⟩ ≥ 0.
+    power = backscatter_power_density_cgrid(
+        u, v, diss_u, diss_v, grid,
+        u_mask=u_mask, v_mask=v_mask, dz=dz)
+    eps_diss = jnp.maximum(-power, 0.0)                  # (n_lat, n_lon)
+    # (2) standing-equilibrium reservoir E = clamp(η·τ·ε_diss, E_min, E_max).
+    E = diagnostic_eddy_energy(eps_diss, cfg)
+    # (3) per-cell CFL cap: ν_bs = c_bs·√area·√E ≤ nu_max_h.
+    delta_h = jnp.sqrt(grid.area)                        # h-point Δ [m]
+    E = cfl_cap_eddy_energy(E, nu_max_h, delta_h, cfg)
+    # (4) negative-Laplacian backscatter tendency (existing operator).
+    tend_u, tend_v = backscatter_tendency_cgrid(
+        u, v, E, grid, cfg, mask=mask, u_mask=u_mask, v_mask=v_mask)
+    return tend_u, tend_v, E
