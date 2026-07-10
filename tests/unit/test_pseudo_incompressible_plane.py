@@ -47,6 +47,32 @@ def _bubble_state(g, dtheta=2.0, xc=6400.0, zc=2000.0, r=2000.0):
     return s._replace(theta=s.theta + pert)
 
 
+def test_shapiro_denoiser_kills_2dx_and_is_gated():
+    """The CFL-unlimited [1,2,1] scalar de-noiser: exactly zeros the 2Δ checkerboard,
+    preserves a constant, is wired into step() on θ, and is off (no-op) at s=0."""
+    ny, nx, nz = 8, 8, 4
+    yy, xx = jnp.meshgrid(jnp.arange(ny), jnp.arange(nx), indexing="ij")
+    checker = ((-1.0) ** (xx + yy))[:, :, None] * jnp.ones((ny, nx, nz))
+    assert float(jnp.abs(pip._shapiro_h(checker)).max()) < 1e-12   # 2Δ mode removed
+    const = jnp.full((ny, nx, nz), 3.0)
+    assert float(jnp.abs(pip._shapiro_h(const) - const).max()) < 1e-12  # k→0 preserved
+    # wired into step + gated: with 2Δ θ-noise present, s>0 damps it (θ differs),
+    # s=0 is a no-op (default path unchanged). Velocity path stays finite/div-free.
+    mk = lambda s: pip.make_grid(_cfg(nx=16, ny=8, nz=12, Lx=1600.0, Ly=800.0,
+                                      Lz=2400.0, shapiro_coeff=s))
+    g0, gs = mk(0.0), mk(0.3)
+    yy2, xx2 = jnp.meshgrid(jnp.arange(8), jnp.arange(16), indexing="ij")
+    noise = 0.5 * ((-1.0) ** (xx2 + yy2))[:, :, None] * jnp.ones((8, 16, 12))
+    st0 = _rest_state(g0)._replace(theta=_rest_state(g0).theta + noise)
+    sts = _rest_state(gs)._replace(theta=_rest_state(gs).theta + noise)
+    th_off = pip.step(st0, g0, 0.5).theta
+    st_on = pip.step(sts, gs, 0.5)
+    assert float(jnp.abs(st_on.theta - th_off).max()) > 1e-6      # filter active when on
+    assert bool(jnp.all(jnp.isfinite(st_on.w)))                   # velocity path intact
+    with pytest.raises(ValueError, match="shapiro_coeff"):        # range enforced (s>1 unsafe)
+        pip.make_grid(_cfg(shapiro_coeff=1.5))
+
+
 def test_projection_makes_rho_divergence_machine_zero():
     """EXACT C-grid projection: the post-correction ρ-weighted divergence is machine
     zero (to the BiCGSTAB tolerance), because the compact divergence/gradient and the

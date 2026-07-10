@@ -163,7 +163,12 @@ _CASES = {
         ug=-8.0, vg=0.0, z0=0.1,
         moist=True,
         nx=48, ny=48, nlev=50, dx=100.0, H=2500.0, dz_sfc=20.0,
-        dt=1.0, hours=4.0,
+        # dt=0.5 not 1.0: dz_sfc=20 m is the tight direction (dx=100 m is loose).
+        # At dt=1.0 the vertical acoustic CFL c·(dt/n)/dz_sfc ≈ 340·(1.0/8)/20 ≈
+        # 2.1 > 1 at the default n_acoustic_substeps=8 → step-1 blow-up
+        # (max|w|~316). dt=0.5 runs clean (verified f32 GPU); raise dt only with a
+        # matching --n-acoustic-substeps bump.
+        dt=0.5, hours=4.0,
     ),
 }
 
@@ -596,7 +601,31 @@ def main():
                         "cross-sections at surface+4 heights and mean profiles) "
                         "for the publication diagnostics. 0 disables recording.")
     p.add_argument("--output", type=Path, default=None)
+    p.add_argument("--research-only", action="store_true",
+                   help="Acknowledge that the compressible core CANNOT sustain LES "
+                        "turbulence (relaminarises; some cases NaN) and run anyway. "
+                        "Required — this driver is research-only; use run_spectral_les.py "
+                        "or run_pseudo_les.py for real turbulent LES.")
     args = p.parse_args()
+    # This core does NOT sustain resolved ABL LES turbulence: the numerical
+    # dissipation (acoustic off-centring + biharmonic hyperdiff) caps the
+    # effective Re below transition, so the BL relaminarises (u*→~0), and some
+    # cases hit a destructive acoustic burst → NaN. Confirmed + documented in
+    # docs/physics-notes/les_crossgrid_regression_2026-07.md. Gate it behind an
+    # explicit opt-in so its (laminar / NaN) output is never mistaken for LES.
+    if not args.research_only:
+        sys.stderr.write(
+            "\n*** run_les_plane.py drives the COMPRESSIBLE plane core, which does "
+            "NOT sustain resolved LES turbulence — it relaminarises (u*→~0) and some "
+            "cases hit an acoustic burst → NaN. RESEARCH-ONLY / non-standard.\n"
+            "    For real turbulent LES use the spectral core (run_spectral_les.py / "
+            "run_spectral_sbl.py / run_spectral_cbl.py) or the pseudo-incompressible "
+            "core (run_pseudo_les.py).\n"
+            "    Re-run with --research-only to proceed anyway. "
+            "See docs/physics-notes/les_crossgrid_regression_2026-07.md ***\n\n")
+        raise SystemExit(2)
+    sys.stderr.write("*** COMPRESSIBLE LES (--research-only): relaminarises / may "
+                     "NaN; output is NOT validated turbulent LES. ***\n")
     # Fill unset args from the per-case defaults.
     spec = _CASES[args.case]
     spec["case"] = args.case
