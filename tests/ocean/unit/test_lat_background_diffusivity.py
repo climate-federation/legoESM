@@ -338,6 +338,117 @@ class TestConstantSchemeWiring:
             compute_vertical_K_profiles(state, z, None, cfg, lat_deg=None)
 
 
+class TestFullModelRouting:
+    """END-TO-END through ``LatLonCGridOceanModel.step`` (codex batch2 r2
+    BLOCKER): the lat-dependent background must actually be reachable in a
+    real implicit model step.
+
+    Pre-fix failure modes pinned here:
+      * the implicit physics composition built the explicit constant vmix fn,
+        whose ``constant_vertical_mixing`` raises unconditionally on
+        ``lat_dependent=True`` -> every production step crashed;
+      * with another scheme surfacing K/A on the tendencies (enhanced-
+        diffusion convection), the dynamics fast path added the model floors
+        and DROPPED the Gregg field entirely.
+    """
+
+    @staticmethod
+    def _build(lat_dependent, *, K0=5e-4, Pr=10.0, convection=False,
+               K_v_floor=1e-4, A_v_floor=1e-3, n_lev=6):
+        import numpy as np
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        from legoesm.ocean.physics.convection.config import (
+            EnhancedDiffusionConfig,
+        )
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+
+        grid = create_latlon_grid(n_lat=12, n_lon=16)
+        z = create_ocean_z_star(n_levels=n_lev, H_max=400.0)
+        state = rest_state_latlon_cgrid_ocean(
+            grid, z, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+            H_max=400.0)
+        # Deterministic small T noise so diffusion has structure to act on.
+        rng = np.random.RandomState(0)
+        T = np.asarray(state.T.data).copy()
+        T += rng.normal(0, 0.05, T.shape).astype(T.dtype)
+        state = state._replace(T=state.T.replace(data=jnp.asarray(T)))
+
+        if lat_dependent:
+            # Degenerate band K_bg_eq == K_bg_pole == K0: the Gregg field is
+            # EXACTLY the constant K0 (clip to [K0, K0]), so a legacy
+            # constant-K0 reference model must reproduce the same step.
+            const = ConstantVerticalMixingConfig(
+                A_v=K0 * Pr, K_v=K0, lat_dependent=True,
+                K_bg_eq=K0, K_bg_pole=K0)
+        else:
+            const = ConstantVerticalMixingConfig(A_v=K0 * Pr, K_v=K0)
+        physics = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="constant", constant=const),
+            convection=OceanConvectionConfig(
+                scheme="enhanced_diffusion" if convection else "none",
+                enhanced_diffusion=EnhancedDiffusionConfig(
+                    K_conv=1.0, K_bg=1e-5, smooth_transition=False),
+            ),
+            lateral_mixing=type(OceanPhysicsConfig().lateral_mixing)(
+                scheme="none"),
+            surface_forcing=type(OceanPhysicsConfig().surface_forcing)(
+                scheme="none"),
+            shortwave_penetration=None,
+        )
+        cfg = LatLonCGridOceanConfig.from_flat(
+            A_h=0.0, B_h=0.0, K_h=0.0, K_bih=0.0,
+            bottom_drag_r=0.0, hyperdiff_coeff=0.0,
+            A_v=A_v_floor, K_v=K_v_floor,
+            n_barotropic_substeps=5,
+            physics=physics,
+            implicit_vertical_mixing=True,
+            barotropic_solver="explicit_substep",
+        )
+        return LatLonCGridOceanModel(grid, z, cfg), state
+
+    def test_step_completes_and_composition_defers_K(self):
+        # Pre-fix: the FIRST model step raised ValueError from
+        # constant_vertical_mixing ("only honoured on the IMPLICIT path")
+        # even though implicit_vertical_mixing=True — the feature was
+        # unreachable end-to-end.  The composition strip must (a) let the
+        # step run and (b) surface NO K/A on the tendencies (K comes from
+        # the compute_vertical_K_profiles fallback instead).
+        model, state = self._build(lat_dependent=True,
+                                   K_v_floor=1e-4, A_v_floor=1e-3)
+        tend = model._physics_fn(state, model.grid, model.z_coord, None)
+        assert tend.K_v is None and tend.A_v is None   # deferred to fallback
+        out = model.step(state, 600.0)
+        assert bool(jnp.all(jnp.isfinite(out.T.data)))
+
+    def test_step_matches_legacy_reference_despite_surfaced_convection_K(self):
+        # The fast-path hazard: enhanced-diffusion convection SURFACES K/A on
+        # the tendencies, which pre-fix routed the implicit solve onto the
+        # fast path — adding the model floors (K_v_floor=1e-4) and dropping
+        # the Gregg background (K0=5e-4) entirely.  With the degenerate band
+        # (K_bg_eq == K_bg_pole == K0) the lat-dependent model must reproduce
+        # a legacy constant-K0 reference (identical total K = K0 + K_conv;
+        # the reference gets zero floors so nothing is double-added there).
+        dt = 1800.0
+        model_lat, state = self._build(lat_dependent=True, convection=True,
+                                       K_v_floor=1e-4, A_v_floor=1e-3)
+        model_ref, _ = self._build(lat_dependent=False, convection=True,
+                                   K_v_floor=0.0, A_v_floor=0.0)
+        out_lat = model_lat.step(state, dt)
+        out_ref = model_ref.step(state, dt)
+        T_lat = jnp.asarray(out_lat.T.data)
+        T_ref = jnp.asarray(out_ref.T.data)
+        assert bool(jnp.all(jnp.isfinite(T_lat)))
+        # Identical mixing totals -> the states agree to rounding.  A fast-
+        # path regression (floor added / Gregg dropped: ΔK ~ 4e-4 m²/s on a
+        # ~0.045 K/m thermocline) shifts T by O(1e-4..1e-3) K in one step —
+        # orders of magnitude above this tolerance.
+        assert bool(jnp.allclose(T_lat, T_ref, rtol=0.0, atol=5e-6)), (
+            f"max |dT| = {float(jnp.max(jnp.abs(T_lat - T_ref)))}")
+
+
 class TestExplicitPathFailsLoud:
     def test_explicit_constant_path_raises_on_lat_dependent(self):
         z = create_ocean_z_star(n_levels=4, H_max=1000.0)

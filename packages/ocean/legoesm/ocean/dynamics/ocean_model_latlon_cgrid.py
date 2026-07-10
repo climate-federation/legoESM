@@ -828,12 +828,45 @@ class LatLonCGridOceanModel:
                 physics_for_combined = self.config.physics._replace(
                     surface_forcing=_sf_none,
                 )
+            # MED-2 latitude-dependent constant background (codex batch2
+            # BLOCKER): the Gregg (2003) lat/N-scaled field can only be
+            # assembled by the IMPLICIT fallback (compute_vertical_K_profiles
+            # needs the column latitudes + N²).  The explicit constant physics
+            # fn cannot represent it (constant_vertical_mixing raises,
+            # fail-loud), and any spatially-constant K/A it surfaced would
+            # take the fast path in _apply_implicit_vertical_mixing, which
+            # adds the model floors the REPLACE semantics forbids.  Strip the
+            # vmix scheme from the EXPLICIT composition (its tendencies are
+            # zero under implicit mixing anyway) and let the implicit solve
+            # recompute K/A via the fallback — the same pattern as the
+            # surface_forcing_implicit strip above.  Explicit-mixing configs
+            # (implicit_vertical_mixing=False) keep the loud ValueError.
+            if (self.config.implicit_vertical_mixing
+                    and self._lat_dependent_constant_vmix()):
+                physics_for_combined = physics_for_combined._replace(
+                    vertical_mixing=physics_for_combined.vertical_mixing
+                    ._replace(scheme="none"))
             self._physics_fn = make_ocean_physics(
                 physics_for_combined,
                 apply_vertical_diffusion=not self.config.implicit_vertical_mixing,
             )
         else:
             self._physics_fn = None
+
+    def _lat_dependent_constant_vmix(self) -> bool:
+        """Static predicate: the MED-2 latitude-dependent CONSTANT background
+        is selected (``vertical_mixing.scheme="constant"`` with
+        ``constant.lat_dependent=True`` on the physics config).
+
+        Centralised so the explicit-composition strip (``__init__``) and the
+        implicit-solve fallback force (``_apply_implicit_vertical_mixing``)
+        can never drift apart.  Pure Python on static config — jit-safe.
+        """
+        _pc = self.config.physics
+        return (_pc is not None
+                and _pc.vertical_mixing.scheme == "constant"
+                and bool(getattr(_pc.vertical_mixing.constant,
+                                 "lat_dependent", False)))
 
     def _ensure_vertex_mask(self, state) -> None:
         """Fill (or refresh) the vertex-mask cache from CONCRETE state.
@@ -3618,6 +3651,16 @@ class LatLonCGridOceanModel:
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             interp_cell_to_uface,
         )
+
+        # MED-2 (codex batch2 BLOCKER): the latitude-dependent constant
+        # background must come from the fallback recompute below.  A surfaced
+        # K/A (e.g. from enhanced_diffusion convection, whose profile the
+        # fallback recomputes bit-identically) would otherwise take the fast
+        # path, which ADDS the model floors and DROPS the Gregg field
+        # entirely.  Static config gate (pure Python bool) — no traced branch.
+        if self._lat_dependent_constant_vmix():
+            K_v_phys = None
+            A_v_phys = None
 
         if K_v_phys is not None and A_v_phys is not None:
             # Fast path: use K profiles already computed by the physics

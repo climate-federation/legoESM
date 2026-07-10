@@ -156,9 +156,13 @@ class ConstantVerticalMixingConfig(NamedTuple):
     ``A_v/K_v``.  REPLACED means end-to-end: the model-level fallback floors
     the dynamics caller passes (``K_v_background``/``A_v_background``, i.e.
     ``LatLonCGridOceanConfig.K_v``/``A_v``) are suppressed as well, so the
-    delivered field lies EXACTLY in ``[K_bg_eq, K_bg_pole]`` with the
-    configured Prandtl ratio (no double-added constant floor).  The EXPLICIT
-    ``constant_vertical_mixing`` tendency path cannot
+    constant-BACKGROUND contribution lies exactly in ``[K_bg_eq, K_bg_pole]``
+    with the configured Prandtl ratio (no double-added constant floor).
+    Additive closures configured on top (``enhanced_diffusion`` convection,
+    internal-wave mixing) still stack onto that background, and non-wet
+    (sub-seafloor) interfaces are zeroed — the exact-range guarantee is for
+    the background term at wet interfaces, not the total after other
+    closures.  The EXPLICIT ``constant_vertical_mixing`` tendency path cannot
     apply a latitude field and RAISES if ``lat_dependent=True`` (no silent
     no-op).  See ``_shared.latitude_background_diffusivity``.
     """
