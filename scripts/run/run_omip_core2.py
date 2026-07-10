@@ -4086,7 +4086,12 @@ def main() -> int:
     #     addressable sharded array assembles to the identical host values,
     #     and the drag's v touch operates on ``v_lower`` exactly (the dropped
     #     pole row is identically 0 and 0*decay == 0); the jnp per-column BCs
-    #     (geothermal / ISF / BBL) are sharding-transparent under GSPMD; the
+    #     (geothermal / ISF) are sharding-transparent under GSPMD; BBL is
+    #     value-exact too, but its static lat-neighbour slice updates may make
+    #     XLA insert device-side collectives / replicate T,S under eager GSPMD
+    #     (correct, device-resident — NOT a host-layout flip, so it is
+    #     intentionally outside the gather counters, which track full-state
+    #     LAYOUT flips only); the
     #     forcing builders (compute_omip2_surface_forcing / _freshwater_)
     #     np.asarray-read state.T identically (pre-existing per-step host
     #     read, both lanes); _diag is EXACT on the sharded layout (the v top

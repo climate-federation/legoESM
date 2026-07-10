@@ -88,7 +88,13 @@ def test_persistent_loop_matches_wrapper_loop_and_gather_counts(monkeypatch):
 
     n_lat, n_lon, nlev = 48, 96, 10          # the calibrated sibling-gate size
     dt, n_steps = 600.0, 10
-    bc_step = n_steps // 2                   # host-BC + snapshot boundary step
+    # DISTINCT steps (codex r1): the host-BC leaf write must land on a step
+    # WITHOUT the gather round-trip, so the UNSHARDED written-back leaf feeds
+    # the NEXT sharded step directly (the production SSS-restore condition —
+    # an immediate re-shard would mask it); the snapshot boundary follows two
+    # steps later.
+    bc_step = 3                              # leaf-wise host BC write-back
+    snap_step = 5                            # gather-for-output round-trip
 
     grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
@@ -129,9 +135,11 @@ def test_persistent_loop_matches_wrapper_loop_and_gather_counts(monkeypatch):
     for k in range(1, n_steps + 1):
         sg = glob(sg, dt, surface_forcing=sf, freshwater=fw)
         if k == bc_step:
-            # host BC on the (gathered) global state + the snapshot host read
+            # host BC on the (gathered) global state
             S_new = _bc_touch_S(np.asarray(sg.S.data))
             sg = sg._replace(S=sg.S.replace(data=jnp.asarray(S_new)))
+        if k == snap_step:
+            # the snapshot host read
             v_out = np.asarray(sg.v.data)
             assert v_out.shape[0] == n_lat + 1   # full staggered v for output
     sg = jax.block_until_ready(sg)
@@ -146,14 +154,17 @@ def test_persistent_loop_matches_wrapper_loop_and_gather_counts(monkeypatch):
     for k in range(1, n_steps + 1):
         ss = inner(ss, dt, surface_forcing=sf, freshwater=fw)
         if k == bc_step:
-            # (1) host BC leaf-wise ON THE SHARDED STATE (driver semantics:
-            #     np.asarray assembles the addressable sharded leaf to the
-            #     identical host values; the write-back leaf is UNSHARDED and
-            #     the next inner step reshards it per its in_specs).
+            # host BC leaf-wise ON THE SHARDED STATE (driver semantics:
+            # np.asarray assembles the addressable sharded leaf to the
+            # identical host values; the write-back leaf is UNSHARDED and the
+            # NEXT inner step — with NO intervening re-shard — consumes the
+            # mixed-sharding state and reshards it per its in_specs, exactly
+            # the per-step production SSS-restore condition).
             S_new = _bc_touch_S(np.asarray(ss.S.data))
             ss = ss._replace(S=ss.S.replace(data=jnp.asarray(S_new)))
-            # (2) the snapshot output boundary: ONE gather-for-output
-            #     round-trip; the gathered view carries the full staggered v.
+        if k == snap_step:
+            # the snapshot output boundary: ONE gather-for-output round-trip;
+            # the gathered view carries the full staggered v.
             ss = sos.gather_state_latlon(ss, mesh)
             v_out = np.asarray(ss.v.data)
             assert v_out.shape[0] == n_lat + 1
