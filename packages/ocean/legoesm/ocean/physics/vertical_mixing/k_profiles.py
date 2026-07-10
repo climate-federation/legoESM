@@ -759,9 +759,24 @@ def ddm_K_profile(state, z_coord, physics_config, ddm_cfg, *, eos_fn):
     from legoesm.ocean.physics.vertical_mixing.double_diffusion import (
         compute_ddm_diffusivity,
     )
-    from legoesm.ocean.vertical import OceanPartialCellCoordinate
+    from legoesm.ocean.vertical import (
+        OceanPartialCellCoordinate, extrapolate_below_seafloor,
+    )
 
     cc = physics_config.constants
+    # Extrapolate T/S into the below-seafloor cells BEFORE any EOS / gradient
+    # math (same guard as compute_vertical_K_profiles): partial-cell dry cells
+    # carry T=S=0, which would give spurious R_rho / poison reverse-mode grads
+    # (0*NaN) even though the caller's wet-interface mask zeroes the RESULT
+    # later — too late for the nonlinear EOS/gradient ops here (codex r2).
+    # No-op (bit-identical) for pure z-star coords (no ``is_active``).
+    if getattr(z_coord, "is_active", None) is not None:
+        state = state._replace(
+            T=state.T.replace(data=extrapolate_below_seafloor(
+                state.T.data, z_coord)),
+            S=state.S.replace(data=extrapolate_below_seafloor(
+                state.S.data, z_coord)),
+        )
     T = state.T.data
     S = state.S.data
     dtype = T.dtype

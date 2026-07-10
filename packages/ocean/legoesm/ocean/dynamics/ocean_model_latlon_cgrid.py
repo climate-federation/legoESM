@@ -781,6 +781,16 @@ class LatLonCGridOceanModel:
                 "implicit_vertical_mixing=True (zdfiwm contributes to the "
                 "implicit avt/avm profiles; the explicit path cannot apply "
                 "its momentum part).")
+        if (_vmix_cfg_init is not None
+                and getattr(_vmix_cfg_init, "ddm", None) is not None
+                and _vmix_cfg_init.ddm.enabled
+                and not getattr(self.config, "implicit_vertical_mixing", False)):
+            raise ValueError(
+                "vertical_mixing.ddm.enabled=True requires "
+                "implicit_vertical_mixing=True (zdfddm routes the SALINITY "
+                "solve through a separate diffusivity K_v + (avs - avt) in the "
+                "implicit path; the explicit / shared-K pair path cannot carry "
+                "avs != avt — codex r2).")
         # Static rigid-lid data (islands, basis, depths), built eagerly from the
         # first concrete state (host-side flood-fill).  None until built.
         self.rigid_lid_data = None
@@ -3780,6 +3790,11 @@ class LatLonCGridOceanModel:
 
         # ---- Tracers (cell-centered: K aligns with T, S directly) ----
         T_new, S_new = state.T.data, state.S.data
+        # Double-diffusion salt-heat delta — MUST be defined on every path
+        # (the momentum-only friction call has do_tracers=False, yet the
+        # K_s_cell construction below reads dK_ddm_salt unconditionally;
+        # codex r2 UnboundLocalError fix).  None ⇒ salt uses K_v (no ddm).
+        dK_ddm_salt = None
         if do_tracers:
             K_v_cell = K_v_cell.astype(state.T.data.dtype)
             if K33_iso is not None:
@@ -3796,7 +3811,6 @@ class LatLonCGridOceanModel:
             # tracer solve so S diffuses with ``K_v + (avs - avt)``.  Momentum
             # (A_v_cell) is untouched, matching zdfddm.  Static Python gate
             # (feature-gating exception): None ⇒ bit-identical legacy pair solve.
-            dK_ddm_salt = None
             _ddm_cfg = getattr(
                 getattr(getattr(self.config, "physics", None),
                         "vertical_mixing", None), "ddm", None)
