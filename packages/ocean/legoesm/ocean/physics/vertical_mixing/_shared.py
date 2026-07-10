@@ -262,6 +262,13 @@ def latitude_background_diffusivity(lat_deg, N2, cfg):
         jnp.asarray(cfg.N_ref, dtype) / _F_CORIOLIS_REF)
     s = jnp.clip(num / denom, 0.0, 1.0)
     K_bg = cfg.K_bg_eq + (cfg.K_bg_pole - cfg.K_bg_eq) * s
+    # Exact physical bound: the affine interpolation leaves a ~5e-13 float
+    # residual above K_bg_pole at a saturated column even in x64 (clip(s)
+    # bounds s, not the rounded product+sum).  K_bg_pole IS the maximum
+    # background, so clamp K itself — the test asserts the bound to 1e-15
+    # (codex batch2 catch: the clip was lost to a worktree race and the
+    # merged #926 carried the strict test WITHOUT it).
+    K_bg = jnp.clip(K_bg, cfg.K_bg_eq, cfg.K_bg_pole)
     return K_bg.astype(dtype)
 
 
