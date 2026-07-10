@@ -468,5 +468,51 @@ class TestCanopyLatentHeatOverSnow(unittest.TestCase):
         self.assertLess(abs(dW + out), 1e-3 * abs(out) + 1e-4)
 
 
+class TestClmMlGroundLatentWiring(unittest.TestCase):
+    """F13 CLM-ML coverage: ``_extract_surface_fluxes`` must expose the CLM-ML
+    below-canopy ground latent (``lhsoi_soil``) as ``SurfaceFluxOutput.LE_soil``,
+    with ``LE_canopy = lhflx - LE_soil``, so the multilayer driver routes the
+    ground component to snowpack sublimation (L_s) over snow exactly as it does
+    for the two-leaf scheme — no silent all-L_v soil fallback for CLM-ML."""
+
+    def test_extract_populates_le_soil_from_lhsoi_soil(self):
+        try:
+            import clm_src_main  # noqa: F401
+        except Exception:
+            self.skipTest("clm-ml-jax not importable")
+        import types
+        from legoesm.core.coupling_fields import AtmToSurface
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.canopy.clm_ml_interface import _extract_surface_fluxes
+        ncol = 1
+        # begp=1 indexing: element 0 is the spval slot, element 1 is the column.
+        band = jnp.array([[0.0, 0.0, 0.0], [0.0, 100.0, 50.0]])  # [_, ivis, inir]
+        lhflx_val, lhsoi_val = 120.0, 30.0
+        ml = types.SimpleNamespace(
+            shflx_canopy=jnp.array([0.0, 40.0]),
+            lhflx_canopy=jnp.array([0.0, lhflx_val]),
+            lhsoi_soil=jnp.array([0.0, lhsoi_val]),
+            gsoi_soil=jnp.array([0.0, 10.0]),
+            lwup_canopy=jnp.array([0.0, 400.0]),
+            gppveg_canopy=jnp.array([0.0, 5.0]),
+            ustar_canopy=jnp.array([0.0, 0.3]),
+            rnet_canopy=jnp.array([0.0, 200.0]),
+            swveg_canopy=band, swsoi_soil=band,
+            tg_soil=jnp.array([0.0, 285.0]),
+            z0m_canopy=jnp.array([0.0, 0.1]),
+        )
+        o = jnp.ones(ncol)
+        f = AtmToSurface(
+            sw_down=300.0 * o, lw_down=320.0 * o, precip_total=0.0 * o, precip_snow=0.0 * o,
+            T_lowest=288.0 * o, q_lowest=0.006 * o, u_lowest=2.0 * o, v_lowest=1.0 * o,
+            p_lowest=9.9e4 * o, p_surface=1.0e5 * o, rho_lowest=1.2 * o,
+            cos_zenith=0.6 * o, co2_ppmv=412.0 * o, has_radiation=o, has_precipitation=o)
+        out = _extract_surface_fluxes(ml, ncol, f, MultiLayerLandConfig(), None)
+        self.assertIsNotNone(out.LE_soil)
+        self.assertIsNotNone(out.LE_canopy)
+        npt.assert_allclose(float(out.LE_soil[0]), lhsoi_val, rtol=1e-6)
+        npt.assert_allclose(float(out.LE_canopy[0]), lhflx_val - lhsoi_val, rtol=1e-6)
+
+
 if __name__ == "__main__":
     unittest.main()

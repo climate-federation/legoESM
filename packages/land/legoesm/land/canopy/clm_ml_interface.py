@@ -1038,6 +1038,20 @@ def _extract_surface_fluxes(
     else:
         T_canopy_air = T_surface  # fallback: tg_soil
 
+    # Below-canopy GROUND latent heat [W/m²]: CLM-ML's soil-surface evaporation
+    # (``lhsoi_soil``, throttled by the Philip rhg_soil humidity), separate from
+    # the leaf transpiration + canopy-water evaporation folded into ``lhflx``.
+    # Exposing it lets the multilayer driver route the ground component to
+    # snowpack sublimation (L_s) over snow while leaf transpiration (LE_canopy =
+    # lhflx − LE_soil) draws soil water at L_v — the same phase-split the two-leaf
+    # scheme gets.  hasattr-guarded for older clm-ml-jax versions that lack it.
+    if hasattr(mlcanopy, "lhsoi_soil"):
+        LE_soil = jnp.stack([mlcanopy.lhsoi_soil[i + 1] for i in range(ncol)])
+        LE_canopy = lhflx - LE_soil
+    else:
+        LE_soil = None
+        LE_canopy = None
+
     return SurfaceFluxOutput(
         shflx=shflx,
         lhflx=lhflx,
@@ -1058,6 +1072,8 @@ def _extract_surface_fluxes(
         stomatal_ratio=jnp.ones(ncol),
         stflx_air=stflx_air,
         stflx_veg=stflx_veg,
+        LE_canopy=LE_canopy,
+        LE_soil=LE_soil,
     )
 
 

@@ -675,11 +675,11 @@ def _step_multilayer_land_impl(
     #     Charging the WHOLE canopy latent at L_s (pre-audit) mis-phased the
     #     transpiration (~12% mass error, wrong reservoir); charging it all at
     #     L_v soil (first audit pass) mis-routed the ground sublimation off the
-    #     pack.  ``surface_out.LE_soil`` is populated by the two-leaf scheme;
-    #     CLM-ML does not expose it (its rhg_soil-throttled soil evaporation is
-    #     folded into lhflx and is small over snow), so there the whole positive
-    #     canopy latent draws soil water at L_v -- exact for the dominant
-    #     transpiration term, a bounded approximation for the ground component.
+    #     pack.  ``surface_out.LE_soil`` carries the ground component for BOTH
+    #     canopy schemes (two-leaf ``LE_Soil``; CLM-ML ``lhsoi_soil``).  The
+    #     ``LE_soil is None`` fallback (whole positive latent -> L_v soil) is a
+    #     bounded last resort for a canopy scheme that does not expose a ground
+    #     component (e.g. an older clm-ml-jax lacking ``lhsoi_soil``).
     # ``scheme_is_seb`` and ``LE_soil is None`` are STATIC (trace-time) branches;
     # ``transp_to_snow`` is the (traced) canopy-dew-over-snow mask.
     rho_w = constants.rho_water
