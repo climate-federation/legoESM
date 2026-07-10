@@ -255,6 +255,23 @@ class MPASOceanModel:
                 self._kpp_profiles_fn = make_kpp_profiles_mpas(
                     _vm_cfg, eos_fn=self._eos_fn)
 
+        # Build TKE profile function for the implicit vertical mixing path.
+        # Like KPP, TKE returns raw (A_v, K_v) cell profiles that feed the
+        # backward-Euler implicit solver; UNLIKE KPP it has no explicit-
+        # tendency path on MPAS (implicit-only — enforced in
+        # make_mpas_ocean_physics).  Diagnostic quasi-steady Gaspar/Burchard
+        # closure: no prognostic tke field is carried on MPASOceanState (the
+        # lat-lon prognostic carry is not wired on MPAS yet).
+        self._tke_profiles_fn = None
+        if self.config.implicit_vertical_mixing and self.config.physics is not None:
+            _vm_cfg_tke = getattr(self.config.physics, "vertical_mixing", None)
+            if _vm_cfg_tke is not None and _vm_cfg_tke.scheme == "tke":
+                from legoesm.ocean.physics.vertical_mixing.mpas_integration import (
+                    make_tke_profiles_mpas,
+                )
+                self._tke_profiles_fn = make_tke_profiles_mpas(
+                    _vm_cfg_tke, eos_fn=self._eos_fn)
+
         # Cache convection config for implicit vertical mixing path.
         self._conv_config = None
         if self.config.implicit_vertical_mixing and self.config.physics is not None:
@@ -411,7 +428,7 @@ class MPASOceanModel:
         # profiles are added to the background K_v here so that ALL
         # vertical mixing goes through the unconditionally stable
         # implicit solver — no explicit CFL constraint on K_conv.
-        A_v_kpp_cells = None  # KPP viscosity at cells; shared with momentum solve
+        A_v_kpp_cells = None  # KPP/TKE scheme viscosity at cells; shared with momentum solve
         if config.implicit_vertical_mixing:
             h_k_impl = compute_layer_thickness(
                 state.eta.data, state.H_bathy.data, z_coord,
@@ -443,6 +460,18 @@ class MPASOceanModel:
                     state, mesh, z_coord, surface_forcing,
                 )
                 K_v_cell = K_v_cell + K_v_kpp_cells
+
+            # --- TKE K profile (diagnostic Gaspar/Burchard; implicit-only) ---
+            # TKE and KPP are mutually exclusive (a single vertical_mixing.scheme),
+            # so the shared ``A_v_kpp_cells`` momentum-viscosity carrier holds
+            # whichever scheme is active — the momentum implicit solve (step 3a)
+            # interpolates it to edges the same way for both.  A_v = K_M (TKE
+            # momentum viscosity), K_v_tke = K_H (tracer diffusivity).
+            if self._tke_profiles_fn is not None:
+                A_v_kpp_cells, K_v_tke_cells = self._tke_profiles_fn(
+                    state, mesh, z_coord, surface_forcing,
+                )
+                K_v_cell = K_v_cell + K_v_tke_cells
 
             # --- Convective-adjustment K profile (where N²<0) ---
             if self._conv_config is not None:
