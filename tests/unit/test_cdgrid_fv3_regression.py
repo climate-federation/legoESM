@@ -11272,6 +11272,20 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
         # 2026-06-04 exact non-orthogonal BGRID_NE corner-sync fix, which only
         # perturbs face-boundary cells by ~7e-5 — interior u_new[0,4,4] is
         # identical with the old orthogonal sync.)
+        # 2026-07-10 REBASELINE (f3031be24, FB covariant-convention fix):
+        # the d_sw3 one-sided edge PPM overrides + cube-vertex bl=br=0
+        # zeroing are now ALWAYS-ON in _bgrid_ke_transport (Fortran
+        # hardcodes bounded_domain=.false. for d_sw3), and the uc/vc
+        # cross-face halo moved to _pad_halo_uc_vc_new_via_neighbor_delta
+        # (faithful ext_vector semantics, dyn_core.F90:655) — an
+        # INTENTIONAL numerics change.  Sanity-checked vs the parent
+        # commit (3fe4b41e5): |new−old| is seam-concentrated and decays
+        # away from face edges (h: exactly 0 in interior[2:-2]; winds:
+        # ~5e-3 at boundary rows → ~1e-4 one row in → 2.4e-5 deep
+        # interior), i.e. O(seam-adjacent stencil reach), NOT face-wide.
+        # h_new[0,4,4], u_new[0,4,4] and h_new.sum() are bit-unchanged;
+        # v_new[3,2,6] (1-2 cells from edges at n=8), the wind sums and
+        # KE shift accordingly.
         with self.subTest("interior cell fingerprints"):
             self.assertAlmostEqual(float(h_new[0, 4, 4]),
                 998.8888029113577, places=6,
@@ -11281,8 +11295,9 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
                 0.6053432751353012, places=8,
                 msg="u_new[0,4,4] fingerprint changed.")
             self.assertAlmostEqual(float(v_new[3, 2, 6]),
-                -0.15150722361555094, places=8,
-                msg="v_new[3,2,6] fingerprint changed.")
+                -0.15149887167688317, places=8,
+                msg="v_new[3,2,6] fingerprint changed (2026-07-10 f3031be24 "
+                    "rebaseline — seam-adjacent cell).")
         # iter-866: h_new.sum rebaselined to the post-iter-808 value
         # after bisect identified iter-807/808 as the root cause of
         # the prior ~1.4 drift from the original iter-710 fingerprint.
@@ -11306,20 +11321,20 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
         # after step 1.  Both sums and KE shift by ~5e-2 / ~4e-1
         # respectively.  Interior point fingerprints are unchanged
         # (sync only touches cube-edge cells).
-        with self.subTest("u/v wind sum fingerprints (2026-06-04 rebaseline)"):
+        with self.subTest("u/v wind sum fingerprints (2026-07-10 rebaseline)"):
             self.assertAlmostEqual(float(u_new.sum()),
-                -14.940765830794964, places=6,
-                msg="u_new.sum() fingerprint changed (2026-06-04 wind "
-                    "rebaseline — see interior-cell note for the bisect).")
+                -14.911488137049478, places=6,
+                msg="u_new.sum() fingerprint changed (2026-07-10 f3031be24 "
+                    "rebaseline — see interior-cell note).")
             self.assertAlmostEqual(float(v_new.sum()),
-                18.174770242658717, places=6,
-                msg="v_new.sum() fingerprint changed (2026-06-04 wind rebaseline).")
-        with self.subTest("kinetic energy fingerprint (2026-06-04 rebaseline)"):
+                18.171990202952124, places=6,
+                msg="v_new.sum() fingerprint changed (2026-07-10 f3031be24 rebaseline).")
+        with self.subTest("kinetic energy fingerprint (2026-07-10 rebaseline)"):
             self.assertAlmostEqual(
                 float((u_new ** 2).sum() + (v_new ** 2).sum()),
-                828.6212067527553, places=4,
-                msg="u/v kinetic energy fingerprint changed (2026-06-04 "
-                    "wind rebaseline — see interior-cell note for the bisect).")
+                828.5756039833157, places=4,
+                msg="u/v kinetic energy fingerprint changed (2026-07-10 "
+                    "f3031be24 rebaseline — see interior-cell note).")
 
     def test_d_sw_native_gold_file_damp_v_iter727(self):
         """Iter-727 lock: ``_d_sw_native`` with ``damp_v=0.06,
@@ -11397,9 +11412,15 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
             self.assertAlmostEqual(float(u_new[0, 4, 4]),
                 0.5728457957142952, places=8,
                 msg="iter-727: u_new[0,4,4] fingerprint changed.")
+            # 2026-07-10 f3031be24 rebaseline (always-on d_sw3 edge
+            # overrides + neighbor-delta uc/vc halo; seam-decay
+            # sanity-checked — see the nord1 sibling's note).  [3,2,6]
+            # is 1-2 cells from face edges at n=8; h/h.sum/u[0,4,4]
+            # bit-unchanged.
             self.assertAlmostEqual(float(v_new[3, 2, 6]),
-                -0.13133050999681445, places=8,
-                msg="iter-727: v_new[3,2,6] fingerprint changed.")
+                -0.13132215805814668, places=8,
+                msg="iter-727: v_new[3,2,6] fingerprint changed "
+                    "(2026-07-10 f3031be24 rebaseline).")
         # iter-866: same rationale as nord1 sibling — h_new.sum
         # rebaselined to the post-iter-808 value 383993.7414 after
         # bisect identified iter-807/808's sign-aware DUOGRID flux
@@ -11418,12 +11439,12 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
         # at step 7 and `(ut, vt)` at step 1.  Interior point
         # fingerprints at [0,4,4] and [3,2,6] unchanged (sync only
         # touches cube-edge cells).
-        with self.subTest("kinetic energy fingerprint (iter-944 vortflux)"):
+        with self.subTest("kinetic energy fingerprint (2026-07-10 rebaseline)"):
             self.assertAlmostEqual(
                 float((u_new ** 2).sum() + (v_new ** 2).sum()),
-                803.0334094645063, places=4,
+                802.9881441925331, places=4,
                 msg="iter-727: u/v kinetic energy fingerprint changed "
-                    "(2026-06-04 wind rebaseline).")
+                    "(2026-07-10 f3031be24 rebaseline).")
 
         # Delta check: assert this result DIFFERS from the damp_v=0
         # baseline at `test_d_sw_native_gold_file_nord1` above.  A
