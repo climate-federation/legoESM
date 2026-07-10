@@ -101,6 +101,28 @@ def _not_implemented(name: str) -> None:
     )
 
 
+def _validate_slope_density(cfg: "GMRediConfig") -> None:
+    """Fail fast if a caller requests an unsupported ``slope_density``.
+
+    ``GMRediConfig.slope_density`` offers ``"neutral"`` (Veros-faithful
+    locally-referenced neutral-density slope gradients) on the lat-lon
+    C-grid path only.  The MPAS/Voronoi path builds the isoneutral slopes
+    from the IN-SITU density ``rho`` exclusively (see
+    ``compute_isopycnal_slopes_mpas``).  A ``"neutral"`` request here would
+    otherwise be SILENTLY ignored and run in-situ physics — dispatch
+    hardening: an unsupported option must raise, never no-op.  Validated on
+    the static Python config value at function entry (not in a traced
+    branch).
+    """
+    slope_density = getattr(cfg, "slope_density", "in_situ")
+    if slope_density != "in_situ":
+        raise NotImplementedError(
+            "gm_redi MPAS path only supports slope_density='in_situ'; got "
+            f"{slope_density!r} (neutral-density slopes are not implemented "
+            "on the MPAS/Voronoi grid)."
+        )
+
+
 def voronoi_neumann_fill(
     f: jnp.ndarray,
     mask: jnp.ndarray,
@@ -221,6 +243,10 @@ def compute_isopycnal_slopes_mpas(
     taper : (nEdges, nlev-1)
         Danabasoglu-McWilliams 1995 taper factor in [0, 1].
     """
+    # Dispatch hardening: the MPAS slope build only supports in-situ-density
+    # slopes; a 'neutral' request must raise rather than silently run in-situ.
+    _validate_slope_density(cfg)
+
     rho_filled = voronoi_neumann_fill(rho, mask, mesh)
 
     # --- Horizontal edge-normal density gradient at full levels ---
@@ -474,6 +500,25 @@ def gm_redi_tracer_tendency_centered_mpas(
         + kappa_Redi * S_sq_cell * dq_dz_cell
     )                                                          # (nCells, nlev-1)
 
+    # No-flux SEAFLOOR boundary on partial-cell coordinates (z positive up).
+    # F_z lives at the nlev-1 interior interfaces; interface j is the
+    # interface between cells j and j+1.  Zero F_z on any interface whose
+    # LOWER cell is below the seafloor (inactive) BEFORE it enters the
+    # vertical divergence: interface j is active iff BOTH adjacent cells are
+    # wet (mirrors the horizontal ``edge_mask_3d`` seafloor cut above and the
+    # lat-lon centered path's zero-flux seafloor BC).  Without this, the
+    # seafloor interface F_z[:, bottom_level] — reconstructed via Perot from
+    # the sub-seafloor (filled) side of a step edge and from the S²·∂_z q
+    # term — carries a spurious diapycnal flux into the DEEPEST ACTIVE cell
+    # (k = bottom_level).  The caller's final-tendency active mask never
+    # removes it because that cell IS active, so it must be cut here.
+    if hasattr(z_coord, "is_active"):
+        _active = z_coord.is_active                            # (nCells, nlev) bool
+        interface_active = (
+            _active[:, :-1] & _active[:, 1:]
+        ).astype(F_z.dtype)                                    # (nCells, nlev-1)
+        F_z = F_z * interface_active
+
     dq_vert = vertical_flux_divergence(F_z, dz_actual)         # (nCells, nlev)
 
     # ------------------------------------------------------------------
@@ -588,6 +633,11 @@ def gm_redi_tracer_tendency_mpas(
     -------
     dT_dt, dS_dt : (nCells, nlev)
     """
+    # Dispatch hardening (static config value, at function entry): the MPAS
+    # path builds isoneutral slopes from in-situ density only.  A 'neutral'
+    # slope_density request would be silently ignored below, so raise.
+    _validate_slope_density(cfg)
+
     if mask is None:
         mask = jnp.ones((mesh.nCells,), dtype=T.dtype)
     if edge_mask is None:

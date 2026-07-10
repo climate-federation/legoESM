@@ -726,6 +726,20 @@ class LatLonCGridOceanModel:
         # paths consume the stored mask and need the pre-set).
         from legoesm.grids.halo_latlon import set_meridionally_flat
         set_meridionally_flat(bool(getattr(self.config, "meridionally_flat", False)))
+        # Wide-halo barotropic refuses tripolar folds — fail at construction
+        # with the config knob named, not at the first traced step deep in
+        # widen_cgrid_geometry_band (codex: CLI accepted a tripole + wide
+        # combination that only failed mid-run).
+        if self.config.barotropic.barotropic_wide_halo:
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                is_tripolar,
+            )
+            if is_tripolar(self.grid):
+                raise ValueError(
+                    "barotropic_wide_halo=True is not supported on tripolar "
+                    "grids (the fold row needs a permuted, sign-flipped wide "
+                    "exchange — follow-up); disable the wide-halo barotropic "
+                    "for eORCA/tripole runs.")
         # GEOMETRIC EKE closure (Torres et al. 2025) needs the regular-grid
         # B_T operator (flux_divergence_viscosity_cgrid raises on tripolar);
         # fail at construction, not at the first traced step.
@@ -1062,6 +1076,29 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"n_barotropic_substeps must be >= 1, got "
                 f"{config.barotropic.n_barotropic_substeps!r}",
+            )
+        if config.barotropic.barotropic_wide_halo_chunk < 0:
+            raise ValueError(
+                f"barotropic_wide_halo_chunk must be >= 0 (0 = auto), got "
+                f"{config.barotropic.barotropic_wide_halo_chunk!r}",
+            )
+        if (config.barotropic.barotropic_wide_halo
+                and config.barotropic.barotropic_solver != "explicit_substep"):
+            raise ValueError(
+                "barotropic_wide_halo=True requires "
+                "barotropic_solver='explicit_substep' (the wide-halo path "
+                "replaces the substep loop's per-substep exchanges), got "
+                f"{config.barotropic.barotropic_solver!r}",
+            )
+        if (config.barotropic.barotropic_wide_halo
+                and not config.barotropic.barotropic_local_subcycle_clamp):
+            raise ValueError(
+                "barotropic_wide_halo=True requires "
+                "barotropic_local_subcycle_clamp=True: the wide path's "
+                "per-substep clamp is LOCAL by construction (a per-substep "
+                "global redistribute over the extended band would "
+                "double-count the halo overlap), so the local-clamp scheme "
+                "must be the EXPLICIT choice, never a silent flip.",
             )
         if config.barotropic.barotropic_diffusion_dt_ref <= 0.0:
             raise ValueError(
@@ -2172,7 +2209,19 @@ class LatLonCGridOceanModel:
             _add_bt_cor = (
                 getattr(self.config, "coriolis_scheme", "matsuno_split")
                 != "explicit_ab2")
-            state_new, (Hu_avg, Hv_avg) = barotropic_substeps_latlon_cgrid(
+            if self.config.barotropic.barotropic_wide_halo:
+                # Opt-in wide-halo subcycle: one fused wide exchange per
+                # chunk of substeps instead of ~4 pads/substep (scaling-
+                # audit item 3).  Static config gate — serial results are
+                # value-identical; parity gated in
+                # tests/ocean/unit/test_barotropic_wide_halo.py.
+                from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+                    barotropic_substeps_wide_halo_latlon_cgrid,
+                )
+                _baro_fn = barotropic_substeps_wide_halo_latlon_cgrid
+            else:
+                _baro_fn = barotropic_substeps_latlon_cgrid
+            state_new, (Hu_avg, Hv_avg) = _baro_fn(
                 state_mid, dt_s, self.config.barotropic.n_barotropic_substeps,
                 _grid, self.z_coord, self.config,
                 F_slow_eta=F_slow_eta,

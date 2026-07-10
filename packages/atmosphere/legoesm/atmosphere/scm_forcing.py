@@ -407,19 +407,31 @@ def inject_prescribed_T_sfc_into_phys_state(phys_state, T_s_value):
     override_dtype = phys_state.surface_T_sfc_override.dtype
     override_shape = phys_state.surface_T_sfc_override.shape
     T_s_arr = jnp.asarray(T_s_value, dtype=override_dtype)
-    # Fail-fast on non-finite values to prevent silent collision with
-    # the NaN sentinel inside ``_resolve_T_sfc``.  Materialise to NumPy
-    # for the host-side check; the SCM driver is not jit-traced so
-    # this is concrete by construction.
+    # Fail-fast on non-finite values.  A NaN/Inf override fails the
+    # ``override > threshold`` test in ``_resolve_T_sfc`` (``NaN > x`` is
+    # False), so it would SILENTLY disable the prescribed surface forcing for
+    # the affected column — and re-introduce a non-finite value into the state
+    # (the #911 sentinel is finite precisely to avoid that).  Materialise to
+    # NumPy for the host-side check; the SCM driver is not jit-traced so this
+    # is concrete by construction.
+    from legoesm.atmosphere.physics.physics_state import (
+        SFC_T_OVERRIDE_VALID_MIN,
+    )
     import numpy as _np
     T_s_host = _np.asarray(T_s_arr)
-    if not _np.all(_np.isfinite(T_s_host)):
+    # Reject anything the resolvers would treat as "no override": non-finite
+    # (also re-poisons the finite state) OR <= the validity threshold.  Both
+    # the turbulence and radiation resolvers use ``> SFC_T_OVERRIDE_VALID_MIN``,
+    # so a value at/below it would SILENTLY disable the prescribed forcing —
+    # never a valid physical surface temperature [K] anyway.
+    if not (_np.all(_np.isfinite(T_s_host))
+            and _np.all(T_s_host > SFC_T_OVERRIDE_VALID_MIN)):
         raise ValueError(
-            "SCMForcing.T_s(t) returned non-finite value(s) "
-            f"({T_s_host!r}).  NaN/Inf collide with the no-override "
-            "sentinel used by the turbulence T_sfc resolver and would "
-            "silently disable the prescribed surface forcing for the "
-            "affected column.  Supply a clean numeric time series."
+            "SCMForcing.T_s(t) returned value(s) that are non-finite or "
+            f"<= {SFC_T_OVERRIDE_VALID_MIN} K ({T_s_host!r}).  Such values are "
+            "indistinguishable from the no-override sentinel and would "
+            "silently disable the prescribed surface forcing.  Supply a clean "
+            "physical surface-temperature series."
         )
     new_override = jnp.broadcast_to(T_s_arr, override_shape)
     return phys_state._replace(surface_T_sfc_override=new_override)

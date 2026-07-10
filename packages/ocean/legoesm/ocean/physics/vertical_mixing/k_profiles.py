@@ -357,10 +357,25 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         from legoesm.ocean.physics.vertical_mixing.richardson import (
             richardson_vertical_mixing,
         )
+        # Adiabatic PP81 N² (Veros parcel displacement) needs the cell-centre
+        # hydrostatic pressure + the same EOS as the dynamical core. Only
+        # computed when the config opts in (n2_mode="adiabatic") so the default
+        # in-situ path is unchanged (mirrors the tke branch below).
+        rich_p_cell = None
+        if getattr(vmix_cfg.richardson, "n2_mode", "insitu") == "adiabatic":
+            from legoesm.ocean.eos import (
+                compute_hydrostatic_pressure, maybe_partial_h_actual,
+            )
+            rich_h_actual = maybe_partial_h_actual(state, z_coord)
+            rich_p_cell = compute_hydrostatic_pressure(
+                rho, state.eta.data, z_coord.dz_ref, J,
+                constants_config.rho_0, h_actual=rich_h_actual,
+            )
         out = richardson_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             rho, z_coord, J, vmix_cfg.richardson,
             apply_diffusion=False,
+            p_cell=rich_p_cell, eos_fn=eos_fn,
         )
         return out.K_v, out.A_v, None
 
@@ -632,12 +647,29 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
     cfg = conv_cfg.enhanced_diffusion
     J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
     rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
+    # Adiabatic N² trigger (cfg.n2_mode == "adiabatic") needs the cell-centre
+    # hydrostatic pressure + the model EOS; computed only when opted in so the
+    # default in-situ path is bit-identical (mirrors the richardson/tke branches
+    # in _vmix_K_profiles).
+    ed_p_cell = None
+    if getattr(cfg, "n2_mode", "insitu") == "adiabatic":
+        from legoesm.ocean.eos import (
+            compute_hydrostatic_pressure, maybe_partial_h_actual,
+        )
+        ed_h_actual = maybe_partial_h_actual(state, z_coord)
+        ed_p_cell = compute_hydrostatic_pressure(
+            rho, state.eta.data, z_coord.dz_ref, J,
+            ConstantsConfig().rho_0, h_actual=ed_h_actual,
+        )
     # Shared, AD-safe helper — bit-for-bit identical to the explicit
     # ``enhanced_diffusion_convection`` path (no duplicated numerics).
     # Returns the full K / A (including the scheme's own backgrounds);
     # summing across schemes here is the *same* operation as the explicit
     # path: ``div(K1·∇T) + div(K2·∇T) = div((K1+K2)·∇T)``.
-    K, A, _ = convective_K_A_flag(rho, z_coord.dz_ref, J, cfg)
+    K, A, _ = convective_K_A_flag(
+        rho, z_coord.dz_ref, J, cfg,
+        T=state.T.data, S=state.S.data, p_cell=ed_p_cell, eos_fn=eos_fn,
+    )
     return K, A
 
 

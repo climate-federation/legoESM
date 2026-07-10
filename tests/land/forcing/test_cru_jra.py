@@ -199,10 +199,10 @@ def test_forcing_to_atm_surface(tmp_path):
 
 def test_snow_partition_sign():
     # Below freezing -> all snow; well above -> all rain.
-    cold = float(cru_jra._snow_fraction(jnp.asarray(constants.T_freeze - 5.0),
-                                        ramp_k=cru_jra._SNOW_RAIN_RAMP_K))
-    warm = float(cru_jra._snow_fraction(jnp.asarray(constants.T_freeze + 5.0),
-                                        ramp_k=cru_jra._SNOW_RAIN_RAMP_K))
+    cold = float(cru_jra.snow_fraction(jnp.asarray(constants.T_freeze - 5.0),
+                                        ramp_k=cru_jra.SNOW_RAIN_RAMP_K))
+    warm = float(cru_jra.snow_fraction(jnp.asarray(constants.T_freeze + 5.0),
+                                        ramp_k=cru_jra.SNOW_RAIN_RAMP_K))
     assert cold == 1.0
     assert warm == 0.0
 

@@ -122,59 +122,20 @@ def test_port_pbs_jobid_honored(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# resolve_local_device_ids: device binding from the launcher env (#693).
-# ---------------------------------------------------------------------------
-
-_DEVICE_ENV_VARS = (
-    "CUDA_VISIBLE_DEVICES", "SLURM_LOCALID",
-    "OMPI_COMM_WORLD_LOCAL_RANK", "PALS_LOCAL_RANKID",
-)
-
-
-def _clear_device_env(monkeypatch):
-    for var in _DEVICE_ENV_VARS:
-        monkeypatch.delenv(var, raising=False)
-
-
-def test_device_ids_single_visible_gpu_is_index_zero(monkeypatch):
-    # Convention 1 (one GPU pinned per task): local index 0 regardless of
-    # the node-local rank — CUDA_VISIBLE_DEVICES renumbers from 0.
-    _clear_device_env(monkeypatch)
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
-    monkeypatch.setenv("SLURM_LOCALID", "2")
-    assert early_init.resolve_local_device_ids() == [0]
-
-
-def test_device_ids_multi_visible_uses_local_rank(monkeypatch):
-    # Convention 2 (all node GPUs visible, plain srun, no --gpu-bind): pick
-    # by SLURM_LOCALID. The hardcoded [0] here was the 2-node x 3-GPU NCCL
-    # 'invalid device ordinal' failure (jobs 26030299/26030422).
-    _clear_device_env(monkeypatch)
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
-    monkeypatch.setenv("SLURM_LOCALID", "2")
-    assert early_init.resolve_local_device_ids() == [2]
-
-
-def test_device_ids_no_visible_env_uses_local_rank(monkeypatch):
-    # No CUDA_VISIBLE_DEVICES at all (cgroup-only or bare node): trust the
-    # launcher local rank.
-    _clear_device_env(monkeypatch)
-    monkeypatch.setenv("OMPI_COMM_WORLD_LOCAL_RANK", "1")
-    assert early_init.resolve_local_device_ids() == [1]
-
-
-def test_device_ids_no_env_falls_back_to_zero(monkeypatch):
-    # Serial / unknown launcher: historical behaviour, first visible device.
-    _clear_device_env(monkeypatch)
-    assert early_init.resolve_local_device_ids() == [0]
-
-
-# ---------------------------------------------------------------------------
 # init_jax_distributed_with_fallback: transport chosen by ENVIRONMENT.
 # ---------------------------------------------------------------------------
 
 _LAUNCHER_ENV_VARS = (
     "SLURM_JOB_ID", "OMPI_COMM_WORLD_SIZE", "PALS_RANKID", "PMI_RANK",
+    # World-size vars too: a test suite RUNNING INSIDE a SLURM job inherits
+    # SLURM_NTASKS/SLURM_STEP_NUM_TASKS from the host job; leaving them set
+    # makes the fake-jax process_count and the guard's launcher_world_size
+    # disagree (host SLURM_NTASKS=1 vs the test's OMPI=4) and the
+    # silent-fallback guard fires on a correctly-federated fake (found
+    # running the suite under sbatch on Ginsburg).
+    "SLURM_NTASKS", "SLURM_STEP_NUM_TASKS", "PMI_SIZE",
+    "OMPI_COMM_WORLD_RANK", "SLURM_PROCID", "PALS_LOCAL_RANKID",
+    "SLURM_LOCALID", "OMPI_COMM_WORLD_LOCAL_RANK", "MV2_COMM_WORLD_LOCAL_RANK",
 )
 
 
@@ -194,11 +155,28 @@ class _FakeDistributed:
             raise RuntimeError(self._fail_bare_with)
 
 
-def _with_fake_jax(monkeypatch, fake):
+def _with_fake_jax(monkeypatch, fake, process_count: int | None = None):
+    import os
     import sys
     import types
 
-    fake_jax = types.SimpleNamespace(distributed=fake)
+    # The post-init silent-fallback guard compares jax.process_count()
+    # against the launcher-declared world size; the fake federation
+    # matches the declared size by default so guarded paths pass.
+    if process_count is None:
+        # SAME precedence as early_init.launcher_world_size (step size, then
+        # the MPI launcher's world, allocation-wide SLURM_NTASKS last) so the
+        # fake federation always matches what the guard will declare.
+        for var in ("SLURM_STEP_NUM_TASKS", "OMPI_COMM_WORLD_SIZE",
+                    "PMI_SIZE", "SLURM_NTASKS"):
+            v = os.environ.get(var)
+            if v and v.isdigit():
+                process_count = int(v)
+                break
+        else:
+            process_count = 1
+    fake_jax = types.SimpleNamespace(
+        distributed=fake, process_count=lambda: process_count)
     monkeypatch.setitem(sys.modules, "jax", fake_jax)
 
 
@@ -220,7 +198,6 @@ def test_fallback_pals_only_uses_mpi4py_bootstrap(monkeypatch):
 
         pytest.skip("mpi4py not installed")
     _clear_launcher_env(monkeypatch)
-    _clear_device_env(monkeypatch)
     monkeypatch.setenv("PALS_RANKID", "0")
     fake = _FakeDistributed()
     _with_fake_jax(monkeypatch, fake)
@@ -293,7 +270,10 @@ def test_multicontroller_coordinator_uses_launcher_env(monkeypatch):
     early_init.init_multicontroller_distributed("host:5000")
     assert fake.calls == [
         {"coordinator_address": "host:5000",
-         "num_processes": 4, "process_id": 2},
+         "num_processes": 4, "process_id": 2,
+         # Per-rank device binding applied on the explicit-coordinator
+         # path too (clean env -> default [0]).
+         "local_device_ids": [0]},
     ]
     assert early_init._INITIALIZED is True
 

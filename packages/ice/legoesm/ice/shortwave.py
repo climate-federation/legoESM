@@ -49,7 +49,14 @@ _H_RAMP_M = 0.5                   # thickness saturating the thin-ice albedo ram
 _H_BARE_SAT_M = 0.5               # bare-ice thickness ramp saturation [m]
 _F_VIS = 0.52                     # visible-band fraction of incident SW (Briegleb-Light)
 _H_SNOW_MASK_M = 0.02             # snow depth fully masking bare-ice albedo [m]
-_T_MELT_WIDTH_K = 1.0            # smooth melt-transition half-width [K]
+_T_MELT_WIDTH_K = 1.0            # melt-transition width below T_melt [K]
+
+# Bulk shortwave extinction coefficient of sea ice for the penetrating (i0)
+# fraction, used in the Beer-Lambert decay exp(-kappa_ice*h_ice).  ~1.4 1/m is
+# the CICE bare-ice interior value (Briegleb & Light 2007, following Grenfell &
+# Maykut 1977): the i0 fraction that enters the ice column is attenuated by the
+# ice above the base so that thick ice transmits ~nothing to the ocean.
+_KAPPA_ICE_M_INV = 1.4          # sea-ice SW extinction coefficient [1/m]
 
 
 # ==============================================================================
@@ -83,15 +90,18 @@ def maykut_untersteiner_albedo(
     h_ramp: float = _H_RAMP_M,
     T_melt: float = constants.T_freeze,
     T_width: float = _T_MELT_WIDTH_K,
+    albedo_ocean: float = constants.alpha_ocean_broadband,
 ) -> jnp.ndarray:
     """Temperature- and thickness-dependent broadband ice albedo.
 
     Smooth interpolation between two regimes:
-        * Cold (T_sfc < T_melt − T_width/2): albedo = α_cold
-        * Melting (T_sfc ≥ T_melt):           albedo = α_melt
+        * Cold (T_sfc ≤ T_melt − T_width): albedo = α_cold
+        * Melting (T_sfc ≥ T_melt):        albedo = α_melt
     multiplied by a thickness ramp ``(h / h_ramp)^0.5`` saturating
     at 1 once ``h ≥ h_ramp`` — thin growing ice has a smaller
-    albedo because some shortwave penetrates the thin column.
+    albedo because some shortwave penetrates the thin column — and
+    floored at the open-water albedo so vanishing ice asymptotes to
+    ocean, not black.
 
     Parameters
     ----------
@@ -104,9 +114,17 @@ def maykut_untersteiner_albedo(
     h_ramp : float
         Thickness above which the thickness factor saturates [m].
     T_melt, T_width : float
-        Centre and width of the smooth melt transition [K].
+        Upper edge and width of the smooth melt transition [K]; the
+        ramp spans ``[T_melt − T_width, T_melt]``.
+    albedo_ocean : float
+        Open-water albedo used as the thin-ice floor.
     """
-    melt_fraction = jnp.clip(0.5 + (T_sfc - T_melt) / T_width, 0.0, 1.0)
+    # Sign/formula walk: the skin temperature is clamped at T_melt elsewhere, so
+    # the melt ramp must reach 1.0 *at* T_melt (not 0.5).  Ramp linearly over
+    # [T_melt − T_width, T_melt]: melt_fraction = 0 at the cold edge, = 1 at
+    # T_melt, monotonically increasing with T_sfc (warmer -> more melting ->
+    # lower albedo).
+    melt_fraction = jnp.clip(1.0 + (T_sfc - T_melt) / T_width, 0.0, 1.0)
     alpha_regime = (
         (1.0 - melt_fraction) * albedo_cold_bare
         + melt_fraction * albedo_melt_bare
@@ -116,7 +134,10 @@ def maykut_untersteiner_albedo(
         0.0,
         1.0,
     )
-    return alpha_regime * thickness_factor
+    # Sign/formula walk: the sqrt ramp -> 0 as h_ice -> 0 drives the albedo below
+    # the open-water value (1 mm ice would be darker than the ocean it sits in).
+    # Floor at albedo_ocean so thin ice asymptotes to open water, never darker.
+    return jnp.maximum(alpha_regime * thickness_factor, albedo_ocean)
 
 
 # ==============================================================================
@@ -149,8 +170,13 @@ def _band_albedo_bare_ice(
     alpha_cold_nir: float,
     alpha_melt_nir: float,
     h_sat: float = _H_BARE_SAT_M,
+    albedo_ocean: float = constants.alpha_ocean_broadband,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Bare-ice two-band albedo with thickness ramp."""
+    """Bare-ice two-band albedo with thickness ramp.
+
+    Floored per band at the open-water albedo: the sqrt ramp -> 0 as
+    h_ice -> 0 would otherwise make vanishing ice darker than the ocean.
+    """
     ramp = jnp.clip(
         jnp.sqrt(jnp.maximum(h_ice, _H_SQRT_FLOOR) / jnp.maximum(h_sat, 1e-6)),
         0.0,
@@ -158,19 +184,39 @@ def _band_albedo_bare_ice(
     )
     alpha_vis = (1.0 - melt_fraction) * alpha_cold_vis + melt_fraction * alpha_melt_vis
     alpha_nir = (1.0 - melt_fraction) * alpha_cold_nir + melt_fraction * alpha_melt_nir
-    return alpha_vis * ramp, alpha_nir * ramp
+    # Sign/formula walk: floor each band at albedo_ocean so thin ice asymptotes
+    # to open water (both bands), never below the ocean it replaces.
+    return (
+        jnp.maximum(alpha_vis * ramp, albedo_ocean),
+        jnp.maximum(alpha_nir * ramp, albedo_ocean),
+    )
 
 
 def _band_albedo_pond(
     h_pond: jnp.ndarray,
+    alpha_ice_vis: jnp.ndarray,
+    alpha_ice_nir: jnp.ndarray,
     *,
-    alpha_max_vis: float,
-    alpha_max_nir: float,
+    alpha_deep_vis: float,
+    alpha_deep_nir: float,
     h_pond_sat: float = _H_POND_SAT_M,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Melt-pond two-band albedo (saturates with depth)."""
-    ramp = jnp.clip(h_pond / jnp.maximum(h_pond_sat, 1e-6), 0.0, 1.0)
-    return alpha_max_vis * ramp, alpha_max_nir * ramp
+    """Melt-pond two-band albedo — DECREASES with depth.
+
+    A shallow pond looks like the wet ice it sits on; deepening water
+    absorbs more in the column and darkens toward the deep-pond floor
+    ``alpha_deep_*`` (Ebert & Curry 1993; Briegleb & Light 2007).  The
+    old form ramped UP with depth (a zero-depth pond went perfectly
+    black, a deep pond was brightest) — the sign was inverted.
+    """
+    # depth 0 -> ice albedo (fresh pond ~ wet ice); depth >= h_sat -> deep floor.
+    # Clamp the deep floor to the underlying ice albedo so thin (dark) ice can't
+    # brighten as the pond deepens — monotone non-increasing in depth (codex).
+    decay = jnp.clip(h_pond / jnp.maximum(h_pond_sat, 1e-6), 0.0, 1.0)
+    deep_vis = jnp.minimum(alpha_deep_vis, alpha_ice_vis)
+    deep_nir = jnp.minimum(alpha_deep_nir, alpha_ice_nir)
+    return (alpha_ice_vis + (deep_vis - alpha_ice_vis) * decay,
+            alpha_ice_nir + (deep_nir - alpha_ice_nir) * decay)
 
 
 def delta_eddington_albedo(
@@ -208,18 +254,22 @@ def delta_eddington_albedo(
 
     Notes
     -----
-    Surrogate-fidelity limitation (disclosed): ``i0_vis`` is applied as a
-    fraction of *incident* SW with no in-ice Beer-Lambert attenuation,
-    whereas full CICE6 delta-Eddington defines ``I0`` as a fraction of the
-    *net-absorbed* SW that then decays as ``exp(-κ_ice·h_ice)`` through the
-    ice.  Column energy is still conserved (``compute_ice_sw`` sets
-    ``absorbed = (1-α)·F - penetrated``), but the surface/ocean *partition*
-    is biased toward the ocean for thick bare ice.  A faithful upgrade
-    needs the CICE ``I0`` convention + an ice extinction coefficient
-    ``κ_ice`` (reference value required — not guessed) + validation.
-    Opt-in scheme; default ice SW is ``constant``.
+    The penetrating (``i0``) fraction is attenuated by an in-ice Beer-Lambert
+    factor ``exp(-κ_ice·h_ice)`` (``κ_ice = _KAPPA_ICE_M_INV``, CICE bare-ice
+    value) so that thick bare ice transmits ~nothing to the ocean, while thin /
+    marginal ice still lets a physical fraction through.  Column energy is
+    conserved by ``compute_ice_sw`` (``absorbed = (1-α)·F - penetrated`` with
+    ``penetrated`` capped at the column input).  Remaining surrogate
+    simplification vs full CICE6: ``i0`` is scaled off *incident* rather than
+    *net-absorbed* SW, a small partition difference now that the dominant thick-
+    ice over-transmission is removed.  Opt-in scheme; default ice SW is
+    ``constant``.
     """
-    melt_fraction = jnp.clip(0.5 + (T_sfc - T_melt) / T_width, 0.0, 1.0)
+    # Sign/formula walk (matches maykut_untersteiner_albedo): skin T is clamped
+    # at T_melt elsewhere, so ramp melt_fraction over [T_melt − T_width, T_melt]
+    # to reach 1.0 *at* T_melt (a 0.5-centred ramp would top out at 0.5, so the
+    # melting albedos were never fully reached).
+    melt_fraction = jnp.clip(1.0 + (T_sfc - T_melt) / T_width, 0.0, 1.0)
 
     snow_vis, snow_nir = _band_albedo_snow(
         melt_fraction, h_snow,
@@ -236,9 +286,9 @@ def delta_eddington_albedo(
         alpha_melt_nir=constants.alpha_ice_melt_nir,
     )
     pond_vis, pond_nir = _band_albedo_pond(
-        pond_depth,
-        alpha_max_vis=constants.alpha_pond_max_vis,
-        alpha_max_nir=constants.alpha_pond_max_nir,
+        pond_depth, ice_vis, ice_nir,
+        alpha_deep_vis=constants.alpha_pond_max_vis,
+        alpha_deep_nir=constants.alpha_pond_max_nir,
     )
 
     # Coverage fractions (snow on top wins; ponds occupy a fraction of
@@ -259,7 +309,17 @@ def delta_eddington_albedo(
     # *bare-ice* portion that is not snow-covered.  Pond surfaces
     # are also transparent in VIS but pond water re-absorbs, so we
     # approximate this with the bare ice transparency only.
-    transmittance = f_vis * f_bare * i0_vis + (1.0 - f_vis) * f_bare * i0_nir
+    #
+    # Sign/formula walk (Beer-Lambert): the i0 fraction that enters the ice
+    # base decays as exp(-kappa_ice*h_ice) through the ice column, so only a
+    # thin/marginal ice layer transmits appreciable SW to the ocean.  Without
+    # this factor a fixed ~i0 fraction of *incident* SW was dumped through
+    # arbitrarily thick ice into the ocean.  h_ice >= 0 => attenuation in (0,1],
+    # so the transmitted fraction is strictly reduced, never amplified.
+    attenuation = jnp.exp(-_KAPPA_ICE_M_INV * jnp.maximum(h_ice, 0.0))
+    transmittance = (
+        f_vis * f_bare * i0_vis + (1.0 - f_vis) * f_bare * i0_nir
+    ) * attenuation
     return alpha_total, transmittance
 
 

@@ -57,44 +57,175 @@ def resolve_coordinator_port(default: int = _LEGACY_COORDINATOR_PORT) -> int:
     return default
 
 
-def resolve_local_device_ids() -> list[int]:
-    """Local CUDA device index this process should claim, from the launcher env.
+def launcher_world_size() -> int:
+    """World size DECLARED by the job launcher's environment (0 = none).
 
-    Two supported launch conventions (#693):
-
-    1. **One GPU visible per task** (``CUDA_VISIBLE_DEVICES`` pinned to a
-       single device by the job script): local index 0 IS the pinned GPU.
-    2. **All node GPUs visible to every task** (plain ``srun`` with a
-       job-level ``--gres`` allocation, no ``--gpu-bind``): pick by the
-       launcher's node-local rank (``SLURM_LOCALID`` /
-       ``OMPI_COMM_WORLD_LOCAL_RANK`` / ``PALS_LOCAL_RANKID``).
-
-    Convention 2 is the one that works with >1 GPU task per node: SLURM's
-    ``--gpu-bind`` isolates each task's GPU in its own cgroup, which blocks
-    the CUDA IPC that NCCL needs between on-node peers — every 2-node x
-    3-GPU smoke died with ``Cuda failure 101 'invalid device ordinal'``
-    inside ``ncclGroupEnd``/``ncclCommInitRankConfig`` (jobs 26030299,
-    26030422). Un-isolated GPUs + local-rank binding is the standard
-    JAX-on-SLURM recipe and what ``jax.distributed``'s own SLURM cluster
-    auto-detection does.
-
-    Falls back to ``[0]`` when no local-rank variable exists (serial or
-    unknown launcher: claim the first visible device, the historical
-    behaviour).
+    Reads the union of the launcher families every entry point supports:
+    SLURM step (``SLURM_STEP_NUM_TASKS``), Open MPI
+    (``OMPI_COMM_WORLD_SIZE``), PMI/PALS (``PMI_SIZE``), then the
+    allocation-wide ``SLURM_NTASKS`` last.  Used by the post-init fallback
+    guard — the launcher's declaration is the ground truth a federated
+    runtime must match.
     """
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if visible is not None:
-        n_visible = len([d for d in visible.split(",") if d.strip()])
-        if n_visible == 1:
-            return [0]  # convention 1: the pinned GPU is local index 0
-    local_rank = (
-        os.environ.get("SLURM_LOCALID")
-        or os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
-        or os.environ.get("PALS_LOCAL_RANKID")
-    )
-    if local_rank is not None:
-        return [int(local_rank)]
+    # Precedence = closeness to THIS process's launcher: the srun STEP
+    # size, then the MPI launcher's own world (mpiexec inside a SLURM
+    # allocation exports OMPI/PMI sizes — the truth), and only then the
+    # allocation-wide SLURM_NTASKS (weakest: it describes the allocation,
+    # not necessarily this launch; codex).
+    for var in ("SLURM_STEP_NUM_TASKS", "OMPI_COMM_WORLD_SIZE",
+                "PMI_SIZE", "SLURM_NTASKS"):
+        v = os.environ.get(var)
+        if v and v.isdigit():
+            return int(v)
+    return 0
+
+
+def check_no_silent_process_fallback() -> None:
+    """Fail LOUDLY when the federated process count disagrees with the
+    launcher's declared world size.
+
+    The route-B hazard this guards: ``jax.distributed.initialize`` (or an
+    auto-detect miss) silently federates FEWER processes than the launcher
+    started — N un-federated copies then run the same program, clobber each
+    other's output, and a bench records a fake single-process row as an
+    N-rank result.  Mirror of the route-A ``check_no_silent_mpi_fallback``
+    (runtime.py); same override env for emergencies:
+    ``LEGOESM_ALLOW_SINGLE_PROCESS_UNDER_MPI=1``.
+
+    Call AFTER ``jax.distributed.initialize`` — ``jax.process_count()`` is
+    then safe (the backend is already federated).
+    """
+    if os.environ.get("LEGOESM_ALLOW_SINGLE_PROCESS_UNDER_MPI") == "1":
+        return
+    declared = launcher_world_size()
+    if declared <= 1:
+        return
+    import jax
+
+    actual = int(jax.process_count())
+    if actual != declared:
+        raise RuntimeError(
+            f"jax.distributed federated {actual} process(es) but the "
+            f"launcher declared {declared} (SLURM_NTASKS / "
+            f"OMPI_COMM_WORLD_SIZE / PMI_SIZE): a silent fallback would run "
+            f"{declared} un-federated copies and record fake scaling rows. "
+            f"Fix the launch (coordinator/port/env) or set "
+            f"LEGOESM_ALLOW_SINGLE_PROCESS_UNDER_MPI=1 to override.")
+
+
+def _launcher_local_rank() -> tuple[str, str] | None:
+    """(env var, value) of the launcher's NODE-LOCAL rank, or ``None``.
+
+    Union of the launcher families the init paths serve: Cray PALS,
+    Open MPI, MVAPICH, and SLURM (SLURM_LOCALID only on a genuine
+    multi-task launch — on a single-task sbatch step it is exported too
+    and pinning on it would hide all but GPU 0 from a single-process
+    multi-GPU run, the documented silent eff=0.5 bug).
+    """
+    for var in ("PALS_LOCAL_RANKID", "OMPI_COMM_WORLD_LOCAL_RANK",
+                "MV2_COMM_WORLD_LOCAL_RANK"):
+        v = os.environ.get(var)
+        if v is not None and v.isdigit():
+            return var, v
+    slid = os.environ.get("SLURM_LOCALID")
+    # Step-scoped multi-task guard (launcher_world_size prefers
+    # SLURM_STEP_NUM_TASKS): a single-task step inside a larger
+    # allocation must not bind on SLURM_LOCALID.
+    if slid is not None and slid.isdigit() and launcher_world_size() > 1:
+        return "SLURM_LOCALID", slid
+    return None
+
+
+def _pals_local_device_ids() -> list[int]:
+    """Per-process ``local_device_ids`` for a multicontroller launch.
+
+    When the job shim already pinned ``CUDA_VISIBLE_DEVICES`` to ONE device
+    (the #693 convention), the process sees exactly one visible device →
+    ``[0]``.  Otherwise (unpinned, or a MULTI-device visible list) index by
+    the launcher's node-local rank (PALS / Open MPI / MVAPICH / guarded
+    SLURM — see :func:`_launcher_local_rank`) so ranks sharing a node bind
+    DIFFERENT devices instead of all contending for GPU 0 (the
+    fake/contended-GPU row).  Falls back to ``[0]``.
+    """
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    n_visible = len([x for x in cvd.split(",") if x.strip()]) if cvd else 0
+    if n_visible == 1:
+        return [0]  # shim-pinned: exactly one visible device
+    local = _launcher_local_rank()
+    if local is not None:
+        var, val = local
+        idx = int(val)
+        if n_visible > 1 and idx >= n_visible:
+            # More local ranks than visible devices is a LAUNCH error —
+            # clamping would silently oversubscribe the last GPU (codex).
+            raise RuntimeError(
+                f"{var}={idx} but CUDA_VISIBLE_DEVICES exposes only "
+                f"{n_visible} device(s): more local ranks than visible "
+                f"GPUs. Fix the launcher ppn / CUDA_VISIBLE_DEVICES shim "
+                f"(one rank per GPU).")
+        return [idx]
     return [0]
+
+
+def nccl_transport_report() -> dict:
+    """Best-effort NCCL transport facts for run metadata (route-B analog of
+    the mpi4jax GPU-direct preflight).
+
+    NCCL has no Python-queryable transport API; what IS knowable up front:
+    the fabric env knobs and whether an OFI/net plugin library
+    (``libnccl-net*``) is discoverable on ``LD_LIBRARY_PATH``/``LD_PRELOAD``
+    / ``NCCL_NET_PLUGIN``.  ``missing_net_plugin_multi_node`` records the
+    FACT of a multi-node launch with no net plugin visible — on OFI fabrics
+    (Derecho Slingshot) that means NCCL silently runs correct-but-slow TCP
+    sockets (git cba9715b2: 'route-B NCCL works cross-node but
+    socket-bound'); native-IB fabrics run fine without a plugin, which is
+    why the field states the fact, not the inference.  Advisory (the
+    definitive check stays ``NCCL_DEBUG=INFO`` in the job log); recorded so
+    a socket-bound row is falsifiable from the record.
+    """
+    import glob
+
+    plugin_hit = None
+    if os.environ.get("NCCL_NET_PLUGIN"):
+        plugin_hit = os.environ["NCCL_NET_PLUGIN"]
+    else:
+        # LD_PRELOAD entries are separated by SPACES or colons (ld.so(8));
+        # a colon-only split records nccl_net_plugin=None for the canonical
+        # space-separated form and falsely flags a multi-node socket fallback
+        # (pre-merge codex finding).  LD_LIBRARY_PATH stays colon-only.
+        _preload = os.environ.get("LD_PRELOAD", "").replace(":", " ").split()
+        paths = _preload + os.environ.get("LD_LIBRARY_PATH", "").split(":")
+        for d in (p for p in paths if p):
+            if os.path.isfile(d) and "libnccl-net" in os.path.basename(d):
+                plugin_hit = d
+                break
+            hits = glob.glob(os.path.join(d, "libnccl-net*"))
+            if hits:
+                plugin_hit = hits[0]
+                break
+    n_nodes = 0
+    for var in ("SLURM_NNODES", "SLURM_JOB_NUM_NODES", "PALS_NNODES"):
+        v = os.environ.get(var)
+        if v and v.isdigit():
+            n_nodes = int(v)
+            break
+    multi_node = n_nodes > 1
+    return {
+        "nccl_net_plugin": plugin_hit,
+        "nccl_net": os.environ.get("NCCL_NET"),
+        "nccl_ib_disable": os.environ.get("NCCL_IB_DISABLE"),
+        "nccl_ib_hca": os.environ.get("NCCL_IB_HCA"),
+        "nccl_socket_ifname": os.environ.get("NCCL_SOCKET_IFNAME"),
+        "nccl_debug": os.environ.get("NCCL_DEBUG"),
+        "n_nodes_declared": n_nodes,
+        # The FACT (no net plugin visible on a multi-node launch), not an
+        # inference: fabrics with native IB verbs run fine without a
+        # plugin — 'sockets likely' is the DERECHO (Slingshot/OFI) reading
+        # of this flag, stated in the warning text, not the field name
+        # (codex).
+        "missing_net_plugin_multi_node": bool(
+            multi_node and plugin_hit is None),
+    }
 
 
 def init_jax_distributed_with_fallback() -> None:
@@ -111,10 +242,9 @@ def init_jax_distributed_with_fallback() -> None:
       local-rank variable); any failure re-raises loudly.
     - PALS/PMI-only env (Derecho ``mpiexec``): the mpi4py bootstrap
       (``cluster_detection_method="mpi4py"``, the documented ALCF Cray-EX
-      recipe) with :func:`resolve_local_device_ids` — the repo's PALS job
-      shims pin ``CUDA_VISIBLE_DEVICES`` to ONE device per rank, so this
-      resolves to local index 0 (the #693 device-binding convention).
-      Plain-MPI
+      recipe) with ``local_device_ids=[0]`` — the repo's PALS job shims pin
+      ``CUDA_VISIBLE_DEVICES`` to ONE device per rank, so local index 0 is
+      the pinned GPU (the #693 device-binding convention).  Plain-MPI
       bootstrap only; mpi4jax is never armed here, so the
       jax.distributed-vs-mpi4jax mixed-stack hazard does not apply.
 
@@ -134,9 +264,13 @@ def init_jax_distributed_with_fallback() -> None:
     # Cross-path idempotency: an OUTER bootstrap
     # (initialize_jax_distributed_multiprocess / a launcher script) may have
     # federated the processes without setting THIS module's flag.
-    # is_initialized() is the supported check (#749).
+    # is_initialized() is the supported check (#749).  Still verify the
+    # OUTER federation against the launcher's declared world size — a
+    # pre-initialized 1-process runtime under N launcher ranks is the same
+    # silent-fallback hazard (codex).
     if jax.distributed.is_initialized():
         _INITIALIZED = True
+        check_no_silent_process_fallback()
         return
 
     auto_detectable = any(
@@ -148,18 +282,49 @@ def init_jax_distributed_with_fallback() -> None:
     if pals_only and importlib.util.find_spec("mpi4py") is not None:
         jax.distributed.initialize(
             cluster_detection_method="mpi4py",
-            local_device_ids=resolve_local_device_ids(),
+            # Shim-pinned CUDA_VISIBLE_DEVICES -> [0]; unpinned bare
+            # mpiexec -> index by PALS_LOCAL_RANKID so node-sharing ranks
+            # bind DIFFERENT GPUs (contended-GPU-0 hazard).
+            local_device_ids=_pals_local_device_ids(),
         )
         _INITIALIZED = True
+        check_no_silent_process_fallback()
         return
     try:
         jax.distributed.initialize()
     except RuntimeError as e:
         if "already" in str(e).lower():
             _INITIALIZED = True
+            check_no_silent_process_fallback()
             return
         raise
     _INITIALIZED = True
+    check_no_silent_process_fallback()
+
+
+def _warn_missing_nccl_plugin(rank: int | None = None) -> None:
+    """Rank-0 warning when a multi-node launch has no NCCL net plugin
+    visible — cross-node collectives then likely run correct-but-slow TCP
+    sockets (the documented Derecho shape).  ``rank=None`` derives the rank
+    from the federated runtime (safe post-init)."""
+    report = nccl_transport_report()
+    if not report["missing_net_plugin_multi_node"]:
+        return
+    if rank is None:
+        try:
+            import jax
+
+            rank = int(jax.process_index())
+        except Exception:
+            rank = 0
+    if rank == 0:
+        print(
+            "[early_init] WARNING: multi-node launch with no NCCL net "
+            "plugin visible (libnccl-net*/NCCL_NET_PLUGIN): cross-node "
+            "collectives will likely run on TCP SOCKETS (correct but "
+            "slow — the documented Derecho socket-bound shape). Verify "
+            "with NCCL_DEBUG=INFO; build/load the aws-ofi-nccl plugin "
+            "for fabric speed.", flush=True)
 
 
 def init_multicontroller_distributed(coordinator: str | None = None) -> None:
@@ -190,9 +355,18 @@ def init_multicontroller_distributed(coordinator: str | None = None) -> None:
         return
     if coordinator is None:
         init_jax_distributed_with_fallback()
+        _warn_missing_nccl_plugin()
         return
 
     import jax
+
+    # Cross-path idempotency on the explicit-coordinator path too: an
+    # out-of-band bootstrap may have federated already — a second
+    # initialize() raises (codex).  Still verify the federation size.
+    if jax.distributed.is_initialized():
+        _INITIALIZED = True
+        check_no_silent_process_fallback()
+        return
 
     n_procs = int(os.environ.get(
         "OMPI_COMM_WORLD_SIZE", os.environ.get("PMI_SIZE", "0")))
@@ -204,8 +378,14 @@ def init_multicontroller_distributed(coordinator: str | None = None) -> None:
             "(OMPI_COMM_WORLD_SIZE/RANK or PMI_SIZE/PMI_RANK).")
     jax.distributed.initialize(
         coordinator_address=coordinator,
-        num_processes=n_procs, process_id=proc_id)
+        num_processes=n_procs, process_id=proc_id,
+        # Same per-rank device binding as the PALS bootstrap path: a bare
+        # multi-device CUDA_VISIBLE_DEVICES must not bind every local rank
+        # to GPU 0 (codex).
+        local_device_ids=_pals_local_device_ids())
     _INITIALIZED = True
+    check_no_silent_process_fallback()
+    _warn_missing_nccl_plugin(rank=proc_id)
 
 
 def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
@@ -230,12 +410,10 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
     if _INITIALIZED:
         return False
 
-    ntasks = int(
-        os.environ.get(
-            "SLURM_NTASKS",
-            os.environ.get("PMI_SIZE", os.environ.get("OMPI_COMM_WORLD_SIZE", "1")),
-        )
-    )
+    # Shared precedence (step > OMPI/PMI > allocation-wide NTASKS): an
+    # `srun -n1` inside a larger allocation must NOT enter the MPI path
+    # (codex).
+    ntasks = launcher_world_size()
     if ntasks <= 1:
         return False
 
@@ -253,18 +431,18 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
     if coordinator_port is None:
         coordinator_port = resolve_coordinator_port()
     coordinator = f"{hosts[0]}:{coordinator_port}"
-    # Device binding derived from the launcher env (resolve_local_device_ids):
-    # [0] when the job script pins one GPU per task via CUDA_VISIBLE_DEVICES,
-    # [SLURM_LOCALID] when all node GPUs are visible to every task. The former
-    # hardcoded [0] broke >1-GPU-per-node launches (issue #693: either "no
-    # supported devices found for platform CUDA" under rank-indexed
-    # auto-assignment, or NCCL 'invalid device ordinal' under --gpu-bind cgroup
-    # isolation — jobs 26030299/26030422).
+    # Per-rank device binding via the shared launcher-family helper: a
+    # shim-pinned CUDA_VISIBLE_DEVICES (the SLURM --gpu-bind=single:1
+    # standard, #693) resolves to [0] exactly as before; an UNPINNED or
+    # multi-device visible list indexes by the launcher's node-local rank
+    # (guarded SLURM_LOCALID / OMPI / PALS) instead of piling every local
+    # rank onto GPU 0 (codex).
     jax.distributed.initialize(
         coordinator_address=coordinator,
         num_processes=size,
         process_id=rank,
-        local_device_ids=resolve_local_device_ids(),
+        local_device_ids=_pals_local_device_ids(),
     )
     _INITIALIZED = True
+    check_no_silent_process_fallback()
     return True

@@ -1,0 +1,498 @@
+"""Weak/strong scaling bench for the MPAS/Voronoi OCEAN (CPU-MPI route-A).
+
+The scaling-status audit tagged MPAS-ocean "(c) infrastructure-ready,
+unmeasured — missing bench lane, not missing capability": ``MPASOceanModel``
+steps rank-locally on a ``VoronoiPartitionLayout`` local mesh (mpi4jax halo
+exchange; owned-cell-masked global reductions), but no harness drove it
+multi-rank.  This is that lane — BENCHMARK ONLY, no numerics touched.
+
+  strong: fixed subdivision level, vary np  -> speedup = t(1)/t(np).
+  weak:   pick the level whose cells/rank best matches --cells-per-rank
+          (icosahedral levels quantize by 4x per level — the ACHIEVED
+          cells/rank is recorded on the row; never compare rows without it).
+
+Correctness gates (fail-fast, BEFORE any timing is reported):
+  --parity-gate         gathered owned cells vs the serial trajectory at the
+                        re-association floor (smoke windows only).
+  --check-conservation  global volume/heat/salt drift over the run.
+
+Anti-fake-scaling guards: multi-rank REQUIRES an armed VoronoiPartitionLayout
+(a replicated global-mesh run cannot masquerade as decomposed); rows carry
+the shared self-describing metadata (transport resolves to mpi4jax via
+n_ranks > process_count) + voronoi partition-quality metrics.
+
+Run (CPU-MPI):
+  mpirun -np 4 python scripts/bench/bench_ocean_mpas_scaling.py \
+      --mode strong --subdivision 4 --nlev 10 --steps 12
+GPU: this lane is route-A (one rank per GPU pinned via CUDA_VISIBLE_DEVICES,
+same convention as bench_ocean_mpi_scaling --device gpu); a single-process
+multi-device SPMD ocean-voronoi path does not exist (the sharded step builder
+is the ATMOSPHERE TRiSK model) — this bench REFUSES to fake one.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+
+# Bench dir for the shared metadata module (sibling-script import pattern).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from metadata import annotate_incomplete, scaling_metadata  # noqa: E402
+
+#: Parity tolerances (gathered MPI vs serial, f64/f32) — the re-association
+#: floor of the rank-local step + owned-masked reductions over a SMOKE
+#: window (measured np=2 L2 x 2 steps: eta ~9e-9 f64); a real halo/partition
+#: defect is orders above.  The floor grows with steps, hence the cap.
+MPAS_OCEAN_PARITY_TOLS = {  # precision -> (rtol, atol)
+    "float64": (1.0e-6, 1.0e-6),
+    "float32": (1.0e-3, 1.0e-3),
+}
+PARITY_MAX_STEPS = 8
+PARITY_FIELDS = ("eta", "T", "S")
+#: Conservation drift tolerances over the timed window (volume: mean-eta
+#: drift in METERS; heat/salt: relative).  Calibrated to the scheme's own
+#: smoke-window floor (measured L2 x 4 steps f64: volume 2.4e-11 m,
+#: heat 0, salt 1.2e-7 — identical with the serial model, i.e. SCHEME
+#: drift, owned by the conservation suite, not this gate).  This gate
+#: exists to catch DISTRIBUTED breakage — a halo double-count in the
+#: reductions is O(halo/owned ~ 10%), five orders above the tolerance.
+CONS_RTOL_DEFAULTS = {"float64": 1.0e-6, "float32": 1.0e-3}
+
+#: Icosahedral subdivision levels this lane will consider for weak mode.
+WEAK_LEVELS = (2, 3, 4, 5, 6, 7)
+
+
+def _ncells(level: int) -> int:
+    """Cells of the icosahedral bisection at ``level`` (10*4^L + 2)."""
+    return 10 * 4 ** level + 2
+
+
+def weak_level_for(cells_per_rank: int, n_ranks: int) -> int:
+    """Subdivision level whose cells/rank best matches the target.
+
+    Icosahedral meshes quantize by 4x per level, so exact weak scaling is
+    impossible — pick the closest RATIO (mirrors run_cpu_mpi_scaling's
+    ``_weak_resolution_ico``) and record the achieved value on the row.
+    """
+    best, best_ratio = WEAK_LEVELS[0], float("inf")
+    for lv in WEAK_LEVELS:
+        cpr = _ncells(lv) / n_ranks
+        ratio = max(cpr / cells_per_rank, cells_per_rank / cpr)
+        if ratio < best_ratio:
+            best, best_ratio = lv, ratio
+    return best
+
+
+def build_global_problem(subdivision: int, nlev: int, seed: int = 0):
+    """Global mesh + z-coordinate + config + perturbed global IC.
+
+    Deterministic and mesh-cache-backed, so every rank derives the
+    IDENTICAL global problem before the partition is armed.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+    from legoesm.ocean.mpas_config import MPASOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    mesh = create_voronoi_mesh(subdivision_level=subdivision)
+    z_coord = create_ocean_z_star(
+        n_levels=nlev, H_max=4000.0, dz_surface=20.0, dz_deep=400.0)
+    config = MPASOceanConfig(
+        A_h=1e3, K_h=1e2, A_v=1e-3, K_v=1e-4,
+        n_barotropic_substeps=10,
+        # Production-like conservation fixers: without them the explicit
+        # subcycle's raw volume drift (~1e-4 over a smoke window) would
+        # trip the gate — and their global reductions are exactly the
+        # collective cost a scaling row should include.
+        use_conservation_fixer=True,
+        fix_volume=True, fix_heat=True, fix_salt=True,
+    )
+    state = rest_state_mpas_ocean(
+        mesh, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+        H_max=4000.0, land_lat_threshold=85.0)
+    # Perturbation exercising advection/PGF/barotropic (the conservation
+    # test's recipe): zonal-wavenumber eta + latitude-structured T.
+    mask = state.land_mask.data
+    T_pert = state.T.data + 0.5 * jnp.sin(
+        4 * mesh.latCell)[:, None] * mask[:, None]
+    eta_pert = state.eta.data + 0.01 * jnp.sin(3 * mesh.lonCell) * mask
+    state = state._replace(
+        T=state.T.replace(data=T_pert),
+        eta=state.eta.replace(data=eta_pert))
+    return mesh, z_coord, config, state
+
+
+def slice_state_to_local(state, mesh, part):
+    """Rank-local state: index every leaf by owned+halo cell/edge ids.
+
+    Leaf classification by LEADING DIM against the global mesh (the same
+    convention the PCG parity test uses): nCells -> ``local_cells``,
+    nEdges -> ``local_edges``, anything else replicated (scalars, per-level
+    reference arrays).
+    """
+    import jax
+    import jax.numpy as jnp
+
+    lc = np.asarray(part.local_cells)
+    le = np.asarray(part.local_edges)
+    nC, nE = int(mesh.nCells), int(mesh.nEdges)
+
+    def _slice(x):
+        a = np.asarray(x)
+        if a.ndim >= 1 and a.shape[0] == nC:
+            return jnp.asarray(a[lc])
+        if a.ndim >= 1 and a.shape[0] == nE:
+            return jnp.asarray(a[le])
+        return x
+
+    return jax.tree.map(_slice, state)
+
+
+def gather_owned_cells(field_local, part, comm, n_global: int):
+    """Gather a rank-local CELL field's OWNED entries to rank 0 (None on
+    other ranks).  NaN-filled destination proves full coverage."""
+    n_owned = int(part.n_owned_cells)
+    ids = np.asarray(part.local_cells)[:n_owned]
+    vals = np.asarray(field_local)[:n_owned]
+    pieces = comm.gather((ids, vals), root=0)
+    if comm.Get_rank() != 0:
+        return None
+    out = np.full((n_global,) + vals.shape[1:], np.nan, dtype=vals.dtype)
+    for i, v in pieces:
+        out[i] = v
+    if np.isnan(out).any():
+        raise RuntimeError("gather left unowned cells (partition coverage)")
+    return out
+
+
+def ocean_invariants(state, mesh, z_coord, config, layout=None, comm=None):
+    """Global volume/heat/salt integrals, OWNED-cell-masked under MPI.
+
+    Same integrals as the serial conservation suite (eta / T·h_k / S·h_k,
+    area-weighted, via the shared ``compute_layer_thickness``), but summed
+    over OWNED cells only and allreduced host-side (diagnostics-only, not
+    differentiable, outside the timed loop) — a halo-including sum would
+    double-count ghost cells.  Collective when ``comm`` is given: every
+    rank must call it."""
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    eta = np.asarray(state.eta.data)
+    H_bathy = np.asarray(state.H_bathy.data)
+    mask = np.asarray(state.land_mask.data)
+    area = np.asarray(mesh.areaCell)
+    h_k = np.asarray(compute_layer_thickness(
+        state.eta.data, state.H_bathy.data, z_coord,
+        min_water_column_m=config.min_water_column_m))
+    own = (np.asarray(layout.owned_mask_cells, dtype=np.float64)
+           if layout is not None else np.ones_like(mask))
+    w = own * mask * area
+    vals = np.array([
+        float((w * eta).sum()),
+        float((w[:, None] * h_k * np.asarray(state.T.data)).sum()),
+        float((w[:, None] * h_k * np.asarray(state.S.data)).sum()),
+        float(w.sum()),
+    ])
+    _ = H_bathy  # consumed via compute_layer_thickness above
+    if comm is not None:
+        vals = comm.allreduce(vals)
+    return {"volume": vals[0], "heat": vals[1], "salt": vals[2],
+            "ocean_area": vals[3]}
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--subdivision", type=int, default=4,
+                   help="Icosahedral level (strong mode; L4=2,562 cells, "
+                        "L6=40,962, L8=655,362).")
+    p.add_argument("--mode", choices=["strong", "weak"], default="strong")
+    p.add_argument("--cells-per-rank", type=int, default=2562,
+                   help="weak mode: target cells/rank (level quantized; "
+                        "achieved value recorded).")
+    p.add_argument("--nlev", type=int, default=10)
+    p.add_argument("--steps", type=int, default=12)
+    p.add_argument("--warmup", type=int, default=2,
+                   help="Steps excluded from the steady median (step 0 is "
+                        "the JIT compile).")
+    p.add_argument("--dt", type=float, default=60.0)
+    p.add_argument("--precision", choices=["float32", "float64"],
+                   default="float64")
+    p.add_argument("--device", choices=["cpu", "gpu"], default="cpu",
+                   help="gpu: each MPI rank pins to ONE local GPU "
+                        "(CUDA_VISIBLE_DEVICES=local-rank, "
+                        "bench_ocean_mpi_scaling convention) BEFORE the "
+                        "first JAX import; halos stay on mpi4jax "
+                        "(route-A).")
+    p.add_argument("--partition-method",
+                   choices=["auto", "geometric", "metis", "sfc"],
+                   default="auto")
+    p.add_argument("--parity-gate", action="store_true",
+                   help="Gathered-vs-serial gate (smoke windows only; the "
+                        "re-association floor grows with steps).")
+    p.add_argument("--check-conservation", action="store_true")
+    p.add_argument("--cons-rtol", type=float, default=None)
+    p.add_argument("--out", type=str,
+                   default="results/a1/ocean_mpas_scaling.jsonl")
+    args = p.parse_args()
+
+    if args.steps < 1:
+        raise SystemExit(f"--steps must be >= 1, got {args.steps}")
+    if not (0 <= args.warmup < args.steps):
+        raise SystemExit(
+            f"--warmup must satisfy 0 <= warmup < steps "
+            f"(got warmup={args.warmup}, steps={args.steps})")
+
+    if args.device == "gpu":
+        # Pin BEFORE the first JAX import (sibling-bench convention: local
+        # rank from the MPI launcher env; never SLURM_LOCALID on a
+        # single-task step — the documented silent eff=0.5 bug).  An
+        # EXISTING CUDA_VISIBLE_DEVICES (external wrapper pin, e.g. a PALS
+        # shim exporting $PALS_LOCAL_RANKID) is respected — clobbering it
+        # with "0" binds every rank to GPU 0, the exact contended-GPU fake
+        # row this pin exists to prevent (codex).
+        if os.environ.get("CUDA_VISIBLE_DEVICES"):
+            pass  # external wrapper already pinned this rank — respect it
+        else:
+            local = (os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
+                     or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK")
+                     or os.environ.get("PALS_LOCAL_RANKID"))
+            if local is None:
+                slid = os.environ.get("SLURM_LOCALID")
+                nt = os.environ.get("SLURM_NTASKS", "1")
+                if slid is not None and nt.isdigit() and int(nt) > 1:
+                    local = slid
+            os.environ["CUDA_VISIBLE_DEVICES"] = local or "0" 
+        os.environ["JAX_PLATFORMS"] = "cuda"
+        os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    if args.precision == "float64":
+        import jax
+
+        jax.config.update("jax_enable_x64", True)
+    import jax
+    import jax.numpy as jnp  # noqa: F401  (post-x64 config)
+
+    if args.device == "gpu" and jax.default_backend() not in (
+            "gpu", "cuda", "rocm"):
+        raise SystemExit(
+            "--device gpu requested but the JAX backend is "
+            f"{jax.default_backend()!r} — refusing to record a mislabeled "
+            "GPU scaling row.")
+
+    try:
+        from mpi4py import MPI
+
+        comm = MPI.COMM_WORLD
+        rank, n_ranks = comm.Get_rank(), comm.Get_size()
+    except Exception:
+        comm, rank, n_ranks = None, 0, 1
+
+    subdivision = args.subdivision
+    if args.mode == "weak":
+        subdivision = weak_level_for(args.cells_per_rank, n_ranks)
+
+    if args.parity_gate and args.steps > PARITY_MAX_STEPS:
+        raise SystemExit(
+            f"--parity-gate is a smoke gate; --steps {args.steps} > "
+            f"{PARITY_MAX_STEPS} cap.")
+
+    from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+
+    mesh, z_coord, config, state_global = build_global_problem(
+        subdivision, args.nlev)
+    is_rank0 = rank == 0
+
+    # Serial reference for the parity gate: EVERY rank, BEFORE arming MPI
+    # (a rank-0-only reference traced after arming embeds collectives no
+    # other rank matches — the band-MPI deadlock discipline).
+    serial_ref = None
+    if args.parity_gate:
+        m_ser = MPASOceanModel(mesh, z_coord, config)
+        s = state_global
+        for _ in range(args.steps):
+            s = m_ser.step(s, args.dt)
+        jax.block_until_ready(jax.tree.leaves(s))
+        serial_ref = {nm: np.asarray(getattr(s, nm).data)
+                      for nm in PARITY_FIELDS}
+
+    part_metrics = None
+    if n_ranks > 1:
+        from legoesm.parallel.voronoi_mpi import (
+            initialize_voronoi_mpi,
+            reduce_partition_metrics,
+            voronoi_partition_metrics,
+        )
+
+        _r, _n, layout = initialize_voronoi_mpi(
+            mesh, method=args.partition_method)
+        # Anti-fake-scaling guard: multi-rank REQUIRES the armed partition
+        # (initialize raises on failure; belt-and-braces assert here so a
+        # future refactor can never fall back to a replicated global mesh
+        # and report it as a scaling row).
+        if layout is None or layout.partition is None:
+            raise SystemExit(
+                "voronoi partition layout not armed at n_ranks > 1 — "
+                "refusing to time a replicated global-mesh run.")
+        part = layout.partition
+        model = MPASOceanModel(layout.local_mesh, z_coord, config)
+        state = slice_state_to_local(state_global, mesh, part)
+        part_metrics = reduce_partition_metrics(
+            voronoi_partition_metrics(layout))
+    else:
+        model = MPASOceanModel(mesh, z_coord, config)
+        state = state_global
+
+    _layout = layout if n_ranks > 1 else None
+    inv_before = None
+    if args.check_conservation:
+        inv_before = ocean_invariants(
+            state, model.mesh, z_coord, config, layout=_layout, comm=comm)
+
+    # Per-step timing with MPI barriers bracketing (route-A convention).
+    per_step_ms = []
+    for _ in range(args.steps):
+        if comm is not None:
+            comm.Barrier()
+        t0 = time.perf_counter()
+        state = model.step(state, args.dt)
+        jax.block_until_ready(jax.tree.leaves(state))
+        if comm is not None:
+            comm.Barrier()
+        step_ms = (time.perf_counter() - t0) * 1e3
+        if comm is not None:
+            # Barrier-release skew means rank 0's local elapsed can
+            # undercount the slowest rank — record the MAX (codex).
+            from mpi4py import MPI as _MPI
+
+            step_ms = comm.allreduce(step_ms, op=_MPI.MAX)
+        per_step_ms.append(step_ms)
+
+    # --- Correctness gates (before any timing is reported) -----------------
+    if args.check_conservation:
+        inv_after = ocean_invariants(
+            state, model.mesh, z_coord, config, layout=_layout, comm=comm)
+        tol = (args.cons_rtol if args.cons_rtol is not None
+               else CONS_RTOL_DEFAULTS[args.precision])
+        breach = False
+        for k in ("volume", "heat", "salt"):
+            if k == "volume":
+                # Sigma(eta) of a wave IC is ~0, so a relative-to-itself
+                # drift is degenerate — normalize by the ocean AREA
+                # instead: mean-eta drift in METERS (the bench_ocean_mpi
+                # convention).
+                rel = (abs(inv_after[k] - inv_before[k])
+                       / max(inv_before["ocean_area"], 1e-30))
+                label = "mean-eta drift [m]"
+            else:
+                rel = (abs(inv_after[k] - inv_before[k])
+                       / max(abs(inv_before[k]), 1e-30))
+                label = "rel drift"
+            if is_rank0:
+                print(f"    conservation {k}: {label}={rel:.3e} "
+                      f"(tol {tol:.1e})", flush=True)
+            breach |= rel > tol
+        if breach:
+            if is_rank0:
+                print("ERROR: conservation gate BREACHED.", flush=True)
+            return 4
+
+    if args.parity_gate:
+        rtol, atol = MPAS_OCEAN_PARITY_TOLS[args.precision]
+        ok = True
+        for nm in PARITY_FIELDS:
+            if n_ranks > 1:
+                got = gather_owned_cells(
+                    getattr(state, nm).data, part, comm, int(mesh.nCells))
+            else:
+                got = np.asarray(getattr(state, nm).data)
+            if is_rank0:
+                want = serial_ref[nm]
+                field_ok = bool(np.allclose(got, want, rtol=rtol, atol=atol))
+                ok &= field_ok
+                mx = float(np.max(np.abs(got - want))) if want.size else 0.0
+                print(f"    parity {nm:>4s}: max|diff|={mx:.3e} "
+                      f"{'OK' if field_ok else 'MISMATCH'}", flush=True)
+        if comm is not None:
+            ok = comm.bcast(ok, root=0)
+        if not ok:
+            if is_rank0:
+                print("ERROR: MPI parity gate MISMATCH vs the serial "
+                      "reference.", flush=True)
+            return 5
+
+    steady = per_step_ms[args.warmup:]
+    med = float(np.median(steady))
+    rec = dict(
+        component="ocean",
+        grid="voronoi",
+        mode=args.mode, subdivision=subdivision, n_ranks=n_ranks,
+        n_cells=int(mesh.nCells), n_edges=int(mesh.nEdges), nlev=args.nlev,
+        partition_method=args.partition_method,
+        steps=args.steps, dt=args.dt,
+        platform=jax.default_backend(),
+        compile_ms=round(per_step_ms[0], 1),
+        steady_median_ms=round(med, 2),
+        steady_min_ms=round(float(np.min(steady)), 2),
+        per_step_ms=[round(x, 1) for x in per_step_ms],
+        cells=int(mesh.nCells) * args.nlev,
+        # HORIZONTAL cells/rank — the same unit as --cells-per-rank, so a
+        # weak-mode row is comparable to its target (codex: the 3-D count
+        # made rows look nlev-x larger).
+        cells_per_rank_achieved=int(mesh.nCells) // n_ranks,
+        # Fix 4 honesty flag: at np=1 the parity reference pre-runs the
+        # SAME shape before the timed loop, so per_step_ms[0] may not
+        # contain the real JIT compile.
+        compile_prewarmed_by_parity_ref=bool(
+            args.parity_gate and n_ranks == 1),
+    )
+    rec["metadata"] = annotate_incomplete(scaling_metadata(
+        grid="voronoi",
+        component="ocean",
+        resolution=f"L{subdivision}",
+        n_levels=args.nlev,
+        precision=args.precision,
+        n_ranks=n_ranks,
+        decomposition="cell_partition" if n_ranks > 1 else "none",
+        # Route-A pin: a multi-node run that ALSO initialized
+        # jax.distributed would auto-resolve to nccl/gloo and mislabel the
+        # mpi4jax halo fabric (codex).
+        transport=("mpi4jax" if n_ranks > 1 else None),
+        n_gpus=(n_ranks if args.device == "gpu" else 0),
+        solver_variant="mpas_ocean_default",
+        cells_per_rank=int(mesh.nCells) * args.nlev // n_ranks,
+        scaling_kind=args.mode,
+        partition_metrics=(dict(part_metrics) if part_metrics else None),
+        extra={
+            "partition_method": args.partition_method,
+            "steps": args.steps,
+            "warmup": args.warmup,
+            "parity_gate": bool(args.parity_gate),
+            "check_conservation": bool(args.check_conservation),
+        },
+    ))
+    if is_rank0:
+        _outdir = os.path.dirname(args.out)
+        if _outdir:
+            os.makedirs(_outdir, exist_ok=True)
+        with open(args.out, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+        print(json.dumps(rec))
+        print(f"[mpas-ocean np={n_ranks} L{subdivision} "
+              f"nCells={mesh.nCells} nlev={args.nlev}] "
+              f"compile={rec['compile_ms']}ms steady_median={med:.2f}ms/step")
+        if rec["metadata"]["virtual_cpu_devices"]:
+            print("[virtual-cpu] forced host-platform CPU devices: this row "
+                  "is a communication-overhead / correctness proxy, NOT "
+                  "hardware scaling — do not report it as a speedup.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

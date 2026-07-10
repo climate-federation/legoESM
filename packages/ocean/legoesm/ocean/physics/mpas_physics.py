@@ -400,9 +400,23 @@ def make_mpas_ocean_physics(
             # (du/dv = None).  Convective momentum on MPAS is a separate
             # follow-up (like its KPP edge-momentum path); nu_conv only
             # affects the lat-lon / cubed-sphere cell-centred grids.
-            c_out = enhanced_diffusion_convection(
-                state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
-            )
+            # ``n2_mode='adiabatic'`` computes the true static-stability
+            # trigger from T/S/p_cell via the EOS, so it needs cell-centre
+            # pressure; compute it ONLY on that path (default 'insitu' path
+            # stays byte-identical — no extra pressure solve).
+            if getattr(cfg_c, "n2_mode", "insitu") == "adiabatic":
+                from legoesm.ocean.eos import compute_ocean_rho_and_pressure
+                _, p_cell = compute_ocean_rho_and_pressure(
+                    state, z_coord, jacobian, eos_fn=eos_fn,
+                )
+                c_out = enhanced_diffusion_convection(
+                    state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
+                    p_cell=p_cell, eos_fn=eos_fn,
+                )
+            else:
+                c_out = enhanced_diffusion_convection(
+                    state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
+                )
             dT_dt = dT_dt + c_out.dT_dt * mask[:, None]
             dS_dt = dS_dt + c_out.dS_dt * mask[:, None]
 

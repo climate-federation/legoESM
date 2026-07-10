@@ -32,7 +32,7 @@ _GRID = create_gaussian_grid(N_MAX, dealiasing="quadratic")
 _SIGMA = create_sigma_coordinate(NLEV, sigma_top=0.1)
 
 
-def _make_gaussian_carry(T_val=280.0, p_s_val=101325.0):
+def _make_gaussian_carry(T_val=280.0, p_s_val=101325.0, q_v_val=0.005):
     """Create a synthetic SegmentCarry on the Gaussian grid."""
     n_lat = _GRID.lat.shape[0]
     n_lon = _GRID.lon.shape[0]
@@ -48,7 +48,7 @@ def _make_gaussian_carry(T_val=280.0, p_s_val=101325.0):
     )
     return pack_carry(
         state,
-        q_v=jnp.ones(s3) * 0.005,
+        q_v=jnp.ones(s3) * q_v_val,
         q_c=jnp.zeros(s3),
         q_r=jnp.zeros(s3),
         held_dT_rad=jnp.zeros(s3),
@@ -672,6 +672,164 @@ class TestAreaWeightedLoss:
             f"area-weighting should down-weight polar error: polar={loss_polar:.6e} "
             f">= equator={loss_equator:.6e} (plain jnp.mean would make them equal)"
         )
+
+
+# ---------------------------------------------------------------------------
+# ACE2-gap fixes: budget constraints, curriculum, chunked streaming
+# ---------------------------------------------------------------------------
+
+class TestBudgetConstraints:
+
+    def test_sfno_tendency_conserves_dry_mass(self):
+        """The (l=0,m=0) spectral coefficient of the SFNO's dlnps/dt — the
+        global-mean surface-pressure (mass) tendency — must be projected
+        to zero (ACE2-style dry-mass fixer)."""
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state, make_sfno_spectral_physics,
+        )
+        import numpy as np
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        physics_fn = make_sfno_spectral_physics(_make_small_sfno(), _GRID)
+        tend = physics_fn(state, _GRID, _SIGMA)
+        mean_idx = np.where(
+            (np.asarray(_GRID.ls) == 0) & (np.asarray(_GRID.ms) == 0)
+        )[0]
+        assert mean_idx.size == 1
+        coeff = tend.lnps_hat.data[mean_idx[0]]
+        assert float(jnp.abs(coeff)) == 0.0, (
+            f"global-mean lnps tendency not projected out ({coeff})"
+        )
+
+    def test_forced_rollout_keeps_qv_nonnegative(self):
+        """Moisture positivity on forced learned-physics runs: q_v must be
+        clipped >= 0 after every step (negative water fed the *1e3 NN
+        feature and drove the runaway class).
+
+        Deterministic (non-vacuous): the physics fn applies a constant
+        negative q_v tendency that would drive q_v to ~-7e-5 over the
+        rollout absent the clip, so removing the clip fails the assert.
+        """
+        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state, spectral_rollout,
+        )
+        carry = _make_gaussian_carry(q_v_val=1.0e-6)  # near-zero: clip bites
+        state = carry_to_spectral_state(carry, _GRID)
+
+        def _neg_qv_physics(st, grid_, sigma_, **_kw):  # forced path passes forcing=
+            # Zero every tendency except a constant drying of q_v strong
+            # enough to cross zero on step 1 (1e-8/s * 1800s >> 1e-6).
+            tend = jax.tree.map(jnp.zeros_like, st)
+            qv = st.tracers["q_v"]
+            drying = jnp.full_like(qv.data, -1.0e-8)
+            return tend._replace(
+                tracers=dict(tend.tracers, q_v=qv.replace(data=drying)),
+            )
+
+        ncol = len(_GRID.lat) * len(_GRID.lon)
+        fb = {
+            "T_sfc": jnp.full((ncol,), 290.0, dtype=jnp.float64),
+            "sic": jnp.zeros((ncol,), dtype=jnp.float64),
+            "day_of_year": jnp.asarray(1.0),
+            "seconds_of_day": jnp.asarray(0.0),
+        }
+        out = spectral_rollout(
+            state, _neg_qv_physics, _GRID, _SIGMA,
+            SpectralPEConfig(time_integrator="ssp_rk3"),
+            dt=1800.0, n_steps=4, forcing_base=fb,
+        )
+        qv = out.tracers["q_v"]
+        qv = qv.data if hasattr(qv, "data") else qv
+        assert float(jnp.min(qv)) >= 0.0, "q_v went negative on a forced run"
+        # The drying really was applied: without the clip the mean would
+        # be ~-7e-5; with it the column must sit essentially at zero,
+        # far below the 1e-6 initial value.
+        assert float(jnp.mean(qv)) < 5.0e-7
+
+
+class TestRolloutCurriculum:
+
+    def _cfg(self, curriculum, leads):
+        from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
+        from legoesm.training.losses import LossConfig
+        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+        return NeuralGCMSpectralConfig(
+            n_max=N_MAX, n_levels=NLEV, dt=1800.0,
+            pe_config=SpectralPEConfig(time_integrator="ssp_rk3"),
+            n_epochs=1, lr=1e-4, warmup_steps=0,  # total_steps=1: keep decay_steps>0
+            rollout_curriculum=curriculum,
+            loss_config=LossConfig(
+                multi_step_hours=leads,
+                multi_step_weights=(1.0,) * len(leads) if leads else None,
+            ),
+            log_every=1, checkpoint_dir="/tmp/_curr_test_ckpt",
+        )
+
+    def test_missing_lead_target_raises(self):
+        """A curriculum lead without a loaded target must be a hard error."""
+        from legoesm.training.neural_gcm_spectral import (
+            _train_spectral_loop, carry_to_spectral_state,
+            make_sfno_spectral_physics,
+        )
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        cfg = self._cfg(((24, 1),), (1,))  # 24h lead, only 1h target loaded
+        with pytest.raises(ValueError, match="no loaded target"):
+            _train_spectral_loop(
+                _make_small_sfno(), make_sfno_spectral_physics,
+                _GRID, _SIGMA, [state], [(carry,)], cfg,
+            )
+
+    def test_single_phase_curriculum_trains(self):
+        """A 1-epoch curriculum phase runs end-to-end: one rollout to the
+        phase lead, scored against that lead's target, finite loss."""
+        from legoesm.training.neural_gcm_spectral import (
+            _train_spectral_loop, carry_to_spectral_state,
+            make_sfno_spectral_physics,
+        )
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        cfg = self._cfg(((1, 1),), (1,))  # one 1h-lead epoch (2 steps)
+        model, hist = _train_spectral_loop(
+            _make_small_sfno(), make_sfno_spectral_physics,
+            _GRID, _SIGMA, [state], [(carry,)], cfg,
+        )
+        assert len(hist) == 1 and jnp.isfinite(hist[0])
+
+
+class TestChunkLoader:
+
+    def test_partitioning_and_total(self, monkeypatch):
+        """_make_chunk_loader partitions windows into <=chunk_windows groups
+        and reports samples/epoch = sum(n_days)*4 (6-hourly cadence)."""
+        import legoesm.training.neural_gcm_spectral as mod
+        calls = []
+
+        def _fake_load(config, grid, sigma, cache_dir, windows=None):
+            calls.append(tuple(windows))
+            n = sum(w[2] for w in windows) * 4
+            return ["ic"] * n, ["tgt"] * n, [None] * n
+
+        monkeypatch.setattr(mod, "load_training_data", _fake_load)
+        cfg = mod.NeuralGCMSpectralConfig(
+            windows=tuple((1979 + i, 0, 1) for i in range(5)),
+            chunk_windows=2,
+        )
+        loader, n_total = mod._make_chunk_loader(
+            cfg, _GRID, _SIGMA, "unused", None, None,
+        )
+        assert n_total == 5 * 4
+        chunks = list(loader())
+        assert len(chunks) == 3           # 2 + 2 + 1 windows
+        assert len(calls) == 3
+        assert sum(len(c[0]) for c in chunks) == n_total
+
+    def test_requires_windows(self):
+        import legoesm.training.neural_gcm_spectral as mod
+        cfg = mod.NeuralGCMSpectralConfig(windows=None, chunk_windows=4)
+        with pytest.raises(ValueError, match="requires config.windows"):
+            mod._make_chunk_loader(cfg, _GRID, _SIGMA, "unused", None, None)
 
 
 # ---------------------------------------------------------------------------

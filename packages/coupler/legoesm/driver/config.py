@@ -527,7 +527,7 @@ class ExperimentConfig(NamedTuple):
     land_infil_suction_boost: float = 2.0   # Green-Ampt suction enhancement psi_f/L_f [-]
     land_infiltration_excess: bool = True   # enable Hortonian infiltration-excess runoff
     # Route the soil-water availability through the SHARED land Jarvis (1976)
-    # stomatal model (legoesm.land.carbon.stomata) instead of the bare bucket
+    # stomatal model (legoesm.land.stomata) instead of the bare bucket
     # ramp: beta = min(beta_soil, beta_canopy), the canopy term closing
     # stomata in low light / high VPD.  Requires land_soil_bucket (which
     # supplies beta_soil).  Off → soil-only bucket beta (byte-identical).
@@ -655,6 +655,24 @@ class ExperimentConfig(NamedTuple):
     # outbound internet, so stage the file and set this).  Ignored unless
     # use_multilayer_land is True.
     clm_surfdata_path: str = ""
+
+    # Transient land-use/land-cover (LULC).  ``land_cover_surfdata`` is a harmonized
+    # transient legoesm_surfdata NetCDF (``pft_frac(year, npft, lat, lon)`` in
+    # percent on the CLM5 17-PFT axis; built by ``scripts/data/build_*_surfdata.py``
+    # from LUH2/HYDE/Pongratz/KK10).  When ``transient_land_cover`` is True (and
+    # use_multilayer_land is True) the per-column multilayer VEGETATION params
+    # (albedo / z0 / root / emissivity / stomata + the plant btran wilting/field-
+    # capacity thresholds) are re-weighted every segment at
+    # ``cover_year = start_year + elapsed_days/365`` (``interp_annual`` on the annual
+    # cover); per-cell SOIL texture/hydraulics/thermal + prescribed LAI stay frozen
+    # (land use changes vegetation, not soil; transient LAI is a documented
+    # follow-up).  The rebuilt ``LandSurfaceParams`` is passed to the jitted step as
+    # a TRACED per-segment ``SegmentForcing`` arg (not the closure-baked
+    # ``pipeline.land_ml_params``), so the compiled AMIP step follows the evolving
+    # cover with NO retrace.  Off (default) => static single-year cover, byte-
+    # identical to the pre-transient behaviour.  Ignored unless use_multilayer_land.
+    transient_land_cover: bool = False
+    land_cover_surfdata: str = ""
 
     # Diagnostic T-based ice partition.  At every radiation call the
     # grid-mean cloud water q_c is split into liquid + ice via
@@ -1125,6 +1143,23 @@ class ExperimentConfig(NamedTuple):
                 "land-mask file has NO land (elevation-derived f_land is 0 "
                 "everywhere) — pass a real --topography or a --land-mask-file."
             )
+        # Transient land-use cover re-weights the MULTILAYER land vegetation params
+        # from a transient surfdata; without both signals it would silently no-op
+        # (there is no slab-land transient-cover path).  Fail early rather than run
+        # a static-cover land while the user believes cover is evolving.
+        if self.transient_land_cover:
+            if not self.use_multilayer_land:
+                errors.append(
+                    "transient_land_cover=True requires use_multilayer_land=True: "
+                    "the transient cover re-weights the multilayer LandSurfaceParams "
+                    "(there is no slab-land transient-cover path)."
+                )
+            if not self.land_cover_surfdata:
+                errors.append(
+                    "transient_land_cover=True requires land_cover_surfdata to point "
+                    "at a transient legoesm_surfdata NetCDF (pft_frac(year, npft, "
+                    "lat, lon) in percent, CLM5 17-PFT axis); none was set."
+                )
         if not (self.surface_z0_land > 0.0):
             errors.append(
                 f"surface_z0_land must be a positive roughness length [m]; "

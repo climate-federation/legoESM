@@ -158,10 +158,16 @@ def fv_flux_divergence_voronoi(
     # No-flux closure at boundary edges.
     u_edge_normal = jnp.where(interior_edge, u_edge_normal, 0.0)
 
-    # Boundary-safe edge reconstruction of the transported scalar.
-    q_edge = jnp.where(
-        interior_edge, 0.5 * (q[c1_safe] + q[c2_safe]), q[c1_safe],
-    )
+    # Boundary-safe FIRST-ORDER UPWIND edge reconstruction of the transported
+    # scalar.  The MPAS edge normal points c1 -> c2, so a positive normal
+    # velocity makes c1 the upstream donor.  Centered 0.5*(q1+q2) is dispersive
+    # on unstructured meshes and drives q negative / conc>1, which the
+    # downstream jnp.maximum(vol,0)/clip(conc,0,1) silently turn into a mass
+    # SOURCE (audit finding #1); upwind is monotone and positivity-preserving.
+    # ponytail: first-order upwind; add a slope-limited (van Leer) edge value if
+    # the numerical diffusion is too strong for MPAS sea-ice production.
+    q_upwind = jnp.where(u_edge_normal >= 0.0, q[c1_safe], q[c2_safe])
+    q_edge = jnp.where(interior_edge, q_upwind, q[c1_safe])
     flux_edge = q_edge * u_edge_normal
 
     div = divergence_cell(flux_edge, mesh)

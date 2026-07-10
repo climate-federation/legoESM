@@ -248,6 +248,24 @@ def shard_state_latlon(state, mesh):
     expects; the test uses it instead of a uniform ``tree.map(P("lat"))`` (which
     fails on ``v`` because ``n_lat+1`` is not divisible by ``N``).
     """
+    # v-carrier contract (see make_sharded_ocean_step's fold note): the TOP
+    # v-face row (regular pole wall OR tripole seam/cap row) must be
+    # wall-masked — the carrier drops it and reconstructs it as zero, which
+    # would silently delete a LIVE seam row.  Host-side check on the
+    # concrete state (this fn runs outside jit).
+    vm = getattr(state, "v_mask", None)
+    if vm is not None:
+        import numpy as _np
+
+        if _np.asarray(vm.data)[-1].any():
+            raise ValueError(
+                "shard_state_latlon: the state's TOP v-face row is LIVE "
+                "(v_mask[-1] has ocean faces) — the lat-band v-carrier "
+                "drops that row and reconstructs it as the pole/cap wall "
+                "zero, which would silently delete seam velocities. "
+                "Mask the cap row (the tripole cap convention) or extend "
+                "the carrier before sharding this state.")
+
     def _shard_cell(field):
         if field is None:
             return None
@@ -452,11 +470,21 @@ def make_sharded_ocean_step(model, mesh):
     n_dev = mesh.devices.size
     axis = mesh.axis_names[0]
 
-    # Tripole north-fold is a separate follow-up: the regular grid has the fold
-    # INACTIVE.  Fail loud rather than silently mis-folding the north band.
-    fold = getattr(model.grid, "fold", None)
-    if fold is not None and bool(getattr(fold, "is_active", False)):
-        raise NotImplementedError("tripole north-fold: follow-up")
+    # Tripole north-fold (scaling-audit item 4): SUPPORTED under the same
+    # v-carrier contract as the regular grid.  Every fold-touching operator
+    # is already uniform-program fold-capable (the data-dependent
+    # ``north_fold_mask``/``apply_north_fold`` selection on
+    # ``axis_index == N-1`` — gated by test_latlon_spmd_northfold), and
+    # ``build_band_grids``' slicer keeps ``is_active`` rank-consistent with
+    # the ``fold_j=-1`` sentinel off the north band.  The one structural
+    # assumption is the v-carrier's: the TOP v-face row (the seam/cap row,
+    # ``v[n_lat]``) must be WALL-MASKED so the in-body reconstruction's
+    # zero row is exact — true for the cap-row convention of
+    # ``create_synthetic_tripole`` and the eORCA masks (``v_mask[-1] == 0``;
+    # the serial step keeps ``v[-1] == 0`` identically).  That contract is
+    # asserted on the CONCRETE state in :func:`shard_state_latlon` — a live
+    # (unmasked) seam v-row refuses loudly there instead of silently
+    # reconstructing zeros here.
 
     # --- host-side band geometries + vertex masks (replicated, indexed in-body) ---
     band_grids = build_band_grids(model.grid, n_dev)
@@ -584,8 +612,16 @@ def make_sharded_ocean_step(model, mesh):
         forcing_ndims = tuple(
             int(getattr(leaf, "ndim", np.ndim(leaf)))
             for leaf in jax.tree.leaves(forcing))
+        # The SPMD fused-halo switch is read at TRACE time inside the pad
+        # dispatch — flipping LEGOESM_LATLON_SPMD_FUSED_HALO on a reused
+        # step object must rebuild the shard_map, not reuse a stale jaxpr
+        # (codex, audit item 7).
+        import os as _os
+
+        _fused_halo = _os.environ.get(
+            "LEGOESM_LATLON_SPMD_FUSED_HALO", "0") != "0"
         key = (jax.tree.structure(state), jax.tree.structure(forcing),
-               forcing_ndims)
+               forcing_ndims, _fused_halo)
         fn = _cache.get(key)
         if fn is None:
             in_spec = jax.tree.map(_lat_spec, state)

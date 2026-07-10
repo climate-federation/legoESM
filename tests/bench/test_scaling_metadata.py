@@ -215,3 +215,136 @@ def test_devices_per_rank_defaults_from_jax_counts():
     assert dpr is None or (isinstance(dpr, int) and dpr >= 1)
     # Explicit override is honored verbatim.
     assert _record(devices_per_rank=4)["devices_per_rank"] == 4
+
+
+# --------------------------------------------------------------------------
+# schema v2: transport / virtual_cpu_devices / launcher (anti-fake-scaling)
+# --------------------------------------------------------------------------
+
+def test_schema_v2_required_keys_present():
+    rec = _record()
+    for k in ("transport", "virtual_cpu_devices", "launcher"):
+        assert k in rec, f"v2 key {k!r} absent"
+    assert rec["schema_version"] >= 2
+    assert md.validate_scaling_metadata(rec) == []
+
+
+def test_transport_explicit_wins_and_unknown_raises():
+    assert _record(transport="nccl")["transport"] == "nccl"
+    with pytest.raises(ValueError, match="unknown transport"):
+        _record(transport="carrier-pigeon")
+
+
+def test_transport_route_a_inferred_from_rank_excess():
+    # mpirun -np 8 route-A: each rank is a single-process JAX
+    # (process_count()==1) but the driver records n_ranks=8 — the world JAX
+    # cannot see is exactly the mpi4jax signature.
+    t = md.resolve_transport(
+        None, n_ranks=8, process_count=1, device_count=1, backend="cpu")
+    assert t == "mpi4jax"
+
+
+def test_transport_route_b_nccl_on_gpu_gloo_on_cpu():
+    kw = dict(n_ranks=4, process_count=4, device_count=4)
+    assert md.resolve_transport(None, backend="gpu", **kw) == "nccl"
+    assert md.resolve_transport(None, backend="cpu", **kw) == "gloo"
+
+
+def test_transport_single_process_spmd_and_serial():
+    assert md.resolve_transport(
+        None, n_ranks=1, process_count=1, device_count=4,
+        backend="cpu") == "xla-local"
+    assert md.resolve_transport(
+        None, n_ranks=1, process_count=1, device_count=1,
+        backend="cpu") == "none"
+
+
+def test_virtual_cpu_devices_detected_from_xla_flags(monkeypatch):
+    monkeypatch.setenv(
+        "XLA_FLAGS", "--xla_force_host_platform_device_count=8")
+    assert md.detect_virtual_cpu_devices(backend="cpu") is True
+    # A GPU backend with the flag set is NOT a virtual-CPU proxy.
+    assert md.detect_virtual_cpu_devices(backend="gpu") is False
+    # count=1 is the serial default, not forced parallelism.
+    monkeypatch.setenv(
+        "XLA_FLAGS", "--xla_force_host_platform_device_count=1")
+    assert md.detect_virtual_cpu_devices(backend="cpu") is False
+    monkeypatch.delenv("XLA_FLAGS")
+    assert md.detect_virtual_cpu_devices(backend="cpu") is False
+
+
+def test_launcher_detection_priority(monkeypatch):
+    for var in ("SLURM_JOB_ID", "PALS_RANKID", "PALS_NODEID", "PBS_JOBID",
+                "OMPI_COMM_WORLD_SIZE", "PMI_SIZE"):
+        monkeypatch.delenv(var, raising=False)
+    assert md.detect_launcher() == "none"
+    monkeypatch.setenv("OMPI_COMM_WORLD_SIZE", "4")
+    assert md.detect_launcher() == "openmpi"
+    # PALS jobs also carry PBS_JOBID — PALS must win over plain PBS.
+    monkeypatch.setenv("PBS_JOBID", "12345.desched1")
+    assert md.detect_launcher() == "pbs"
+    monkeypatch.setenv("PALS_RANKID", "0")
+    assert md.detect_launcher() == "pbs-pals"
+    # SLURM outranks all (SLURM steps may export OMPI vars via plugins).
+    monkeypatch.setenv("SLURM_JOB_ID", "999")
+    assert md.detect_launcher() == "slurm"
+
+
+def test_host_staged_semantics_gated_on_mpi4jax_transport(monkeypatch):
+    # A route-B NCCL (or intra-process xla-local) GPU row has NO mpi4jax halo
+    # to host-stage: neither gpu_direct_active nor host_staged_halo may fire
+    # (codex: an NCCL row must not look like a broken host-staged MPI row).
+    monkeypatch.delenv("MPI4JAX_USE_CUDA_MPI", raising=False)
+    monkeypatch.setattr(md, "mpi4jax_cuda_support", lambda: False)
+    for t in ("nccl", "gloo", "xla-local", "none"):
+        g = md.gpu_direct_mode(backend="gpu", transport=t)
+        assert g["gpu_direct_active"] is False, t
+        assert g["host_staged_halo"] is False, t
+    # Default transport (mpi4jax) keeps the fail-loud host-staged semantics.
+    g = md.gpu_direct_mode(backend="gpu")
+    assert g["host_staged_halo"] is True
+
+
+def test_validate_catches_missing_v2_keys():
+    for k in ("transport", "virtual_cpu_devices", "launcher"):
+        rec = _record()
+        del rec[k]
+        assert k in md.validate_scaling_metadata(rec, strict=False)
+        with pytest.raises(ValueError):
+            md.validate_scaling_metadata(rec)
+
+
+# ---------------------------------------------------------------------------
+# tidy_throughput_fields: flat SYPD/throughput metrics for SPMD bench lanes
+# ---------------------------------------------------------------------------
+
+def test_tidy_throughput_fields_canonical_formulas():
+    # 600 s of model time per 50 ms wall step: sypd = (600/0.05)/(365.25*
+    # 86400)*86400 = 12000/365.25; mcells = 1e6 cells / 0.05 s / 1e6.
+    out = md.tidy_throughput_fields(
+        dt_seconds=600.0, time_per_step_ms=50.0, total_cells=1_000_000)
+    assert out["sypd"] == pytest.approx(12000.0 / 365.25)
+    assert out["mcells_per_s"] == pytest.approx(20.0)
+    assert out["dt_seconds"] == 600.0
+    assert out["time_per_step_ms"] == 50.0
+    assert out["total_cells"] == 1_000_000
+
+
+def test_tidy_throughput_fields_matches_run_cpu_mpi_formula():
+    # Parity with the canonical run_cpu_mpi_scaling.py computation so SPMD
+    # rows and MPI rows are directly comparable on one plot.
+    dt_used, time_per_step, total_cells = 390.0, 0.123, 6 * 48 * 48 * 26
+    expect_sypd = (dt_used / time_per_step) / (365.25 * 86400) * 86400.0
+    expect_mcells = (total_cells / time_per_step) / 1e6
+    out = md.tidy_throughput_fields(
+        dt_seconds=dt_used, time_per_step_ms=time_per_step * 1e3,
+        total_cells=total_cells)
+    assert out["sypd"] == pytest.approx(expect_sypd, rel=1e-12)
+    assert out["mcells_per_s"] == pytest.approx(expect_mcells, rel=1e-12)
+
+
+def test_tidy_throughput_fields_zero_time_is_flagged_not_inf():
+    out = md.tidy_throughput_fields(
+        dt_seconds=600.0, time_per_step_ms=0.0, total_cells=10)
+    assert out["sypd"] == 0.0
+    assert out["mcells_per_s"] == 0.0

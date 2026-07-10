@@ -72,7 +72,7 @@ def reconstruct_carbon_diagnostics(
     beta_soil_new, _ = root_zone_beta_soil(
         new_state.theta_soil, root_frac, theta_wp, theta_fc, beta_min,
         spatial=spatial)
-    _, gpp_override = compute_effective_beta(
+    _, gpp_override, _ = compute_effective_beta(
         T_sfc_new, forcing, beta_soil_new, config, carbon_state, dt)
     _, _, diag = step_carbon_differland(
         carbon_state, forcing.sw_down, T_sfc_new, forcing.co2_ppmv,

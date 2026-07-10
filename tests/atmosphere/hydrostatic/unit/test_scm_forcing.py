@@ -747,14 +747,16 @@ def test_prescribe_T_s_drives_sensible_flux_with_turbulence():
 
 
 def test_phys_state_default_override_is_nan():
-    """The default ``PhysicsState.surface_T_sfc_override`` must be NaN
-    so that turbulence's ``_resolve_T_sfc`` falls back to the lowest
-    air temperature for every 3-D run (bit-for-bit preservation of
-    legacy behaviour)."""
+    """The default ``PhysicsState.surface_T_sfc_override`` must be the finite
+    ``NO_SFC_T_OVERRIDE`` sentinel (#911, was NaN) so that turbulence's
+    ``_resolve_T_sfc`` falls back to the lowest air temperature for every 3-D
+    run — while keeping the state finite."""
+    from legoesm.atmosphere.physics.physics_state import NO_SFC_T_OVERRIDE
     scm = _make_scm()
     override = np.asarray(scm.phys_state.surface_T_sfc_override)
     assert override.shape == (1,)
-    assert np.isnan(override).all()
+    assert np.all(np.isfinite(override))
+    assert np.allclose(override, NO_SFC_T_OVERRIDE)
 
 
 def test_prescribe_T_s_populates_phys_state_override():

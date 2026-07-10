@@ -904,17 +904,18 @@ def make_aimip_classical_spectral_physics(
         # synthesise a zero-tendency tracer dict here when the input
         # state carries tracers, keeping the rad and non-rad
         # tendency pytrees structurally identical.
-        if forcing is not None:
-            # AMIP-inference path: prescribed SST + calendar arrive via the
-            # per-step TRACED forcing dict (forcing['T_sfc'/'day_of_year'/
-            # 'seconds_of_day']) so the JIT'd dycore step never retraces when
-            # the monthly SST / day-of-year changes (radiation/integration.py
-            # documents this as "the AMIP path").
-            rad_out = rad_only_raw(state, grid_, sigma_coord, forcing=forcing)
-        else:
-            rad_out = rad_only_raw(
-                state, grid_, sigma_coord, sim_time_seconds=sim_time_seconds,
-            )
+        # Always forward BOTH the in-rollout elapsed time and the traced
+        # forcing dict.  The spectral radiation kernel resolves precedence
+        # per key: forcing['day_of_year'/'seconds_of_day'] (AMIP-inference
+        # path) override the sim_time thread ONLY when present, so a
+        # forcing dict carrying just ghg_vmr (the classical-training GHG
+        # pin) keeps the diurnal/seasonal sim_time cycle intact.  The old
+        # either/or branch dropped sim_time_seconds whenever any forcing
+        # arrived, freezing radiation time at the closure default.
+        rad_out = rad_only_raw(
+            state, grid_, sigma_coord,
+            sim_time_seconds=sim_time_seconds, forcing=forcing,
+        )
         if rad_out.tracers is None and state.tracers is not None:
             zero_tracers = {}
             for k, f in state.tracers.items():

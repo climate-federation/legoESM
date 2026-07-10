@@ -94,7 +94,14 @@ def _make_enhanced_diffusion(config: OceanConvectionConfig,
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
         # #518: use the threaded recipe EOS (None → wright, byte-identical)
         # so the convective trigger/K profiles match the dynamics EOS.
-        rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
+        # The adiabatic N² trigger (cfg.n2_mode == "adiabatic") also needs the
+        # cell-centre hydrostatic pressure; compute it only when opted in so
+        # the default in-situ path stays bit-identical.
+        if cfg.n2_mode == "adiabatic":
+            rho, p_cell = _compute_rho_and_pressure(state, z_coord, J, eos_fn=eos_fn)
+        else:
+            rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
+            p_cell = None
         # Suppress momentum mixing (no u/v) when KPP owns interior momentum
         # convection — avoids the A_v double-count flagged in the combiner
         # fast path.  Tracers (K_v) are unaffected.
@@ -136,6 +143,7 @@ def _make_enhanced_diffusion(config: OceanConvectionConfig,
             state.T.data, state.S.data, rho, z_coord, J, cfg,
             apply_diffusion=apply_diffusion,
             u=u_in, v=v_in,
+            p_cell=p_cell, eos_fn=eos_fn,
         )
         du = out.du_dt if out.du_dt is not None else None
         dv = out.dv_dt if out.dv_dt is not None else None

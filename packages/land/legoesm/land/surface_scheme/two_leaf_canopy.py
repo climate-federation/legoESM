@@ -75,8 +75,9 @@ _DEFAULT_PICARD_OMEGA = 0.15
 # callers can stay consistent.
 TGC_EMA_TAU_S: float = 30.0 * 86400.0
 
-# Virtual-temperature coefficient (≈ 1/ε − 1, rounded).
-_VIRT_T_COEF = 0.61
+# Virtual-temperature coefficient (1−ε)/ε ≈ 0.608, derived from the repo epsilon
+# (never hardcoded per CLAUDE.md constants hygiene).
+_VIRT_T_COEF = (1.0 - constants.epsilon) / constants.epsilon
 
 # Initial intercellular-CO2 ratio Ci/Ca: chi = _CI_CA_C3 − _CI_CA_C3_MINUS_C4·fC4
 # → 0.7 for C3 (fC4=0), 0.4 for C4 (fC4=1).
@@ -231,7 +232,10 @@ def compute_two_leaf_canopy_fluxes(
     the canopy computes LE from leaf-level humidity gradients directly
     (no ``beta * q_sat`` proxy).
     """
-    cc = canopy_config
+    # Fail-early dispatch check on the static string fields (stomatal_model):
+    # this runs at land-component setup, before any jitted canopy solve, so a
+    # typo aborts here with a clear message rather than deep in the JAX kernel.
+    cc = canopy_config.validate()
     lp = canopy_params
     ncol = T_soil_top.shape[0]
 
@@ -353,7 +357,10 @@ def compute_two_leaf_canopy_fluxes(
 
     # ---- SW decomposition ----
     cos_zenith = forcing.cos_zenith
-    SZA = jnp.degrees(jnp.arccos(jnp.clip(cos_zenith, 0.0, 1.0)))
+    # Clip strictly below 1 before arccos: d/dx arccos(x) = -1/sqrt(1-x^2)
+    # diverges at x=1 (subsolar point) and clip zeroes the subgradient above 1,
+    # so the reverse-mode VJP would give 0*inf = NaN in the cos_zenith cotangent.
+    SZA = jnp.degrees(jnp.arccos(jnp.clip(cos_zenith, 0.0, 1.0 - 1e-7)))
     PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV = split_sw_components(
         forcing.sw_down, cos_zenith)
 

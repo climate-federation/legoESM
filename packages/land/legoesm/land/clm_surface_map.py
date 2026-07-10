@@ -79,58 +79,52 @@ TUNED_CH = 0.004425              # LandConfig.Ch_land / Cd_land bulk transfer
 # NH>55 -0.060 -> +0.019, Sahara -0.066 -> -0.007 (soil colour), Tibet -0.088 -> -0.106
 # (worse: the correct dark Tibetan soil now shows through the sub-grid-snow deficit).
 # (pft_ch is inert under MOST -> kept from the constant-Ch bake.)
-_TUNED_PFT_ALBEDO_MULTILAYER = (0.3000, 0.1191, 0.1288, 0.1376, 0.1393, 0.1468, 0.1598,
-                                0.1700, 0.1700, 0.1810, 0.1771, 0.1931, 0.1979, 0.2055,
-                                0.1995, 0.1805, 0.1800)
-_TUNED_PFT_EMISSIVITY_MULTILAYER = (0.9591, 0.9569, 0.9581, 0.9571, 0.9594, 0.9612,
-                                    0.9599, 0.9575, 0.9585, 0.9644, 0.9636, 0.9583,
-                                    0.9586, 0.9634, 0.9614, 0.9605, 0.9600)
-_TUNED_PFT_ROOT_DEPTH_MULTILAYER = (0.095, 1.929, 1.478, 1.448, 1.634, 1.678, 1.512, 1.423,
-                                    1.099, 0.723, 0.701, 0.703, 0.461, 0.521, 0.515, 0.506, 0.500)
+# 2026-07 recalibration (v5): re-tuned WITH the field-capacity gravity-drainage limiter
+# on (RichardsConfig.fc_drain_saturation=0.5, #862), warm-started from the v4 tune via the
+# new --init-json path (#891) — the correct "beat the current best" baseline (from the
+# baked prior the offline loss is flat).  Full-grid controlled eval (era5_hourly, limiter
+# on): global skin-T bias +0.682 -> +0.589 K, N-America JJA +1.365 -> +1.188, Sahara
+# +2.072 -> +1.877, T-RMSE 2.478 -> 2.470; cost albedo RMSE +0.0026 (the optimizer's
+# endorsed trade-off).  Soil moisture unchanged (structural, not param-tunable).  smscale +
+# elevation-band params left at v4 defaults (worth only +0.001 K, not baked here).
+_TUNED_PFT_ALBEDO_MULTILAYER = (0.3000, 0.1159, 0.1312, 0.1340, 0.1396, 0.1471, 0.1601, 0.1700, 0.1700, 0.1804, 0.1646, 0.1964, 0.2019, 0.1870, 0.1982, 0.1763, 0.1770)
+_TUNED_PFT_EMISSIVITY_MULTILAYER = (0.9594, 0.9554, 0.9602, 0.9546, 0.9597, 0.9616, 0.9604, 0.9581, 0.9599, 0.9648, 0.9621, 0.9587, 0.9596, 0.9567, 0.9609, 0.9590, 0.9588)
+_TUNED_PFT_ROOT_DEPTH_MULTILAYER = (0.088, 1.706, 1.469, 1.414, 1.631, 1.675, 1.527, 1.408, 1.088, 0.716, 0.622, 0.723, 0.457, 0.507, 0.504, 0.488, 0.477)
 # per-PFT roughness length z0 [m] (drives the MOST surface exchange -> tall forests
 # rough ~1-2 m, grass/crop/bare smooth ~0.02-0.23 m).  Calibrated under MOST (the
 # coupled diurnal-surface default); the constant-bulk fallback ignores it.
-_TUNED_PFT_Z0_MULTILAYER = (0.0051, 1.0405, 0.9045, 0.9886, 1.7948, 1.4540, 1.8456, 1.0617,
-                            0.9284, 0.0726, 0.1454, 0.1156, 0.0343, 0.0317, 0.0357, 0.0714, 0.0600)
+_TUNED_PFT_Z0_MULTILAYER = (0.0051, 1.2527, 1.1261, 1.1740, 1.8157, 1.4970, 1.8389, 1.0654, 1.0933, 0.0707, 0.1802, 0.1522, 0.0472, 0.0433, 0.0387, 0.0781, 0.0672)
 # per-PFT bulk heat/moisture exchange coefficient [-] (constant-bulk fallback only;
 # inert under the MOST default -> retained from the constant-Ch calibration).
-_TUNED_PFT_CH_MULTILAYER = (0.003113, 0.005482, 0.004555, 0.005126, 0.005625, 0.005629,
-                            0.005195, 0.005527, 0.004722, 0.002040, 0.005474, 0.004351,
-                            0.005020, 0.004351, 0.005545, 0.004121, 0.003000)
+_TUNED_PFT_CH_MULTILAYER = (0.003113, 0.005482, 0.004555, 0.005126, 0.005625, 0.005629, 0.005195, 0.005527, 0.004722, 0.002040, 0.005474, 0.004351, 0.005020, 0.004351, 0.005545, 0.004121, 0.003000)
 # per-PFT calibration SCALE on the per-cell texture-derived soil thermal properties
 # (k_solid / C_solid from sand/clay, Oleson 2013): the per-cell texture sets the
 # spatial pattern, the per-PFT scale sets the magnitude.  k_scale ~0.2-0.5 brings the
 # physical mineral k (3-9 W/m/K) down to the effective seasonal-cycle value.
-_TUNED_PFT_KSCALE_MULTILAYER = (0.3196, 0.3772, 0.3737, 0.3409, 0.3421, 0.3169, 0.3724,
-                                0.3653, 0.3220, 0.2770, 0.2988, 0.3253, 0.3316, 0.2843,
-                                0.3360, 0.3067, 0.3500)
-_TUNED_PFT_CSCALE_MULTILAYER = (0.8843, 0.8574, 0.9185, 0.9487, 0.9196, 0.7587, 0.8861,
-                                0.8508, 0.8471, 0.7360, 0.8229, 0.8752, 0.8811, 0.7078,
-                                0.8789, 0.8299, 0.9000)
+_TUNED_PFT_KSCALE_MULTILAYER = (0.3407, 0.3592, 0.5414, 0.3000, 0.3504, 0.3195, 0.3666, 0.3892, 0.4704, 0.2726, 0.2842, 0.4871, 0.4506, 0.2359, 0.3414, 0.3109, 0.3615)
+_TUNED_PFT_CSCALE_MULTILAYER = (0.9667, 0.7929, 1.2015, 0.8780, 0.9405, 0.7792, 0.8785, 0.8328, 1.1022, 0.7266, 0.8066, 1.1616, 1.1277, 0.5978, 0.8958, 0.8324, 0.9134)
 # per-PFT PLANT btran water-stress thresholds (wilting / field capacity) [m3/m3]
-_TUNED_PFT_WP_MULTILAYER = (0.0850, 0.0925, 0.0945, 0.0917, 0.1168, 0.1000, 0.1176, 0.1075,
-                            0.1045, 0.1000, 0.0847, 0.0845, 0.0861, 0.0883, 0.0878, 0.0830, 0.1000)
-_TUNED_PFT_FC_MULTILAYER = (0.1705, 0.2278, 0.2359, 0.2282, 0.2924, 0.2523, 0.2952, 0.2709,
-                            0.2625, 0.2666, 0.2021, 0.2063, 0.2153, 0.2199, 0.2221, 0.2150, 0.2500)
-TUNED_GLACIER_ALBEDO_MULTILAYER = 0.7203    # snow-free ice-sheet base (raised: ERA5 ~0.85)
-TUNED_SNOW_ALBEDO_MAX_MULTILAYER = 0.7964
+_TUNED_PFT_WP_MULTILAYER = (0.0846, 0.0915, 0.0942, 0.0907, 0.1154, 0.0988, 0.1162, 0.1062, 0.1035, 0.0988, 0.0838, 0.0839, 0.0865, 0.0874, 0.0869, 0.0822, 0.0988)
+_TUNED_PFT_FC_MULTILAYER = (0.1706, 0.2249, 0.2351, 0.2253, 0.2890, 0.2492, 0.2918, 0.2676, 0.2599, 0.2635, 0.1995, 0.2045, 0.2164, 0.2171, 0.2193, 0.2123, 0.2469)
+TUNED_GLACIER_ALBEDO_MULTILAYER = 0.7178    # snow-free ice-sheet base (raised: ERA5 ~0.85)
+TUNED_SNOW_ALBEDO_MAX_MULTILAYER = 0.8077
 # aged-snow albedo floor, tanh snow-cover SWE half-scale [kg/m2], snow-albedo age
 # e-folding [days], and the CLM dry-soil albedo brightening (deserts) — the snow/soil
 # albedo processes the v3 recalibration made trainable to close the high-lat / ice-sheet
 # / desert albedo bias.  snow_dcrit is now the Niu-Yang tanh half-cover scale (NOT the
 # old linear full-cover depth).
-TUNED_SNOW_ALBEDO_MIN_MULTILAYER = 0.5223
-TUNED_SNOW_DCRIT_MULTILAYER = 17.2850
-TUNED_SNOW_TAU_DAYS_MULTILAYER = 3.7417
-TUNED_SOIL_DRY_BOOST_MULTILAYER = 0.1247
+TUNED_SNOW_ALBEDO_MIN_MULTILAYER = 0.5207
+TUNED_SNOW_DCRIT_MULTILAYER = 15.4229
+TUNED_SNOW_TAU_DAYS_MULTILAYER = 3.6739
+TUNED_SOIL_DRY_BOOST_MULTILAYER = 0.1458
 # scale on the per-cell CLM soil-COLOUR bare-soil albedo (~1 -> the raw MODIS-calibrated
 # soil colour is right; gives the model CLM's bright-desert skill).
-TUNED_SOIL_ALB_SCALE_MULTILAYER = 1.0397
+TUNED_SOIL_ALB_SCALE_MULTILAYER = 1.0436
 # deep-ice thermal-inertia boost on glacier cells (on top of pure-ice C=rho_ice*c_pi):
 # parameterises the large thermal mass of a deep ice sheet that the finite 3 m soil
 # column under-represents -> damps the polar seasonal over-amplitude.  Calibrated:
 # fixes the Antarctica seasonal-amplitude bias +2.62 -> -0.02 K.
-TUNED_GLACIER_CBOOST_MULTILAYER = 4.1471
+TUNED_GLACIER_CBOOST_MULTILAYER = 4.0693
 # scalar fallback Ch (PFT mean) for the rare no-grid path where the per-cell map
 # (clm_multilayer_ch) cannot be built; the per-cell value is used when a grid exists.
 TUNED_CH_MULTILAYER = float(np.mean(_TUNED_PFT_CH_MULTILAYER))
@@ -164,11 +158,49 @@ _VARIANT_TUNED = {
 _GLACIER_ALBEDO = TUNED_GLACIER_ALBEDO
 
 
+def _surfdata_candidates(cache: str) -> list[str]:
+    """Ordered local paths to probe for the CLM surfdata before any network I/O.
+
+    ``cache`` (node-local /tmp by default) first, then the ``LEGOESM_CLM_SURFDATA``
+    env override, then shared-filesystem ``data/clm/surfdata_*.nc`` under the repo
+    root and the CWD.  A fresh compute node has an empty /tmp, and worktrees do
+    not carry the (gitignored) ``data/`` tree — without these probes every such
+    run fell through to the UCAR SVN download, which currently dies with an SSL
+    hostname-mismatch and killed whole SLURM jobs at startup (#869/#847 probes).
+    """
+    import glob
+    cands = [cache, os.environ.get("LEGOESM_CLM_SURFDATA", "")]
+    repo_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), *[os.pardir] * 4))
+    for base in (repo_root, os.getcwd()):
+        # sorted() -> deterministic pick if several surfdata files coexist
+        cands.extend(sorted(glob.glob(os.path.join(base, "data", "clm",
+                                                   "surfdata_*.nc"))))
+    return [c for c in cands if c]
+
+
 def download_clm_surfdata(cache: str = "/tmp/clm_surfdata.nc") -> str:
-    """Download the CLM surfdata file to ``cache`` (skip if present). Returns path."""
-    if not os.path.exists(cache):
-        import urllib.request
+    """Return a local CLM surfdata path, downloading to ``cache`` as a last resort.
+
+    Probes local/shared-filesystem candidates first (see
+    :func:`_surfdata_candidates`); only if none exists is the UCAR SVN download
+    attempted.  A download failure raises an actionable error instead of a bare
+    urllib traceback.
+    """
+    for cand in _surfdata_candidates(cache):
+        if os.path.exists(cand):
+            return cand
+    import urllib.request
+    try:
         urllib.request.urlretrieve(_SURFDATA_URL, cache)
+    except Exception as exc:
+        raise RuntimeError(
+            f"CLM surfdata not found locally and the download failed ({exc!r}).\n"
+            f"Tried: {_surfdata_candidates(cache)}\n"
+            f"URL: {_SURFDATA_URL}\n"
+            "Fix: pass --clm-surfdata-path (run scripts), set LEGOESM_CLM_SURFDATA "
+            "to an existing surfdata NetCDF, or place one under <repo>/data/clm/."
+        ) from exc
     return cache
 
 
@@ -507,3 +539,107 @@ def clm_multilayer_setup(surface_map: dict, base_config=None, variant: str = "mu
         thermal=clm_multilayer_thermal_config(surface_map),
         land_albedo=land_albedo, snow_albedo_feedback=True)
     return provider(), cfg
+
+
+# ===========================================================================
+# Transient land-use cover (LULC): re-weight the vegetation params by year
+# ===========================================================================
+# The CLM map above bakes a single-year PFT cover.  For a transient land-use run
+# the annual cover comes from a harmonized ``legoesm_surfdata`` (LUH2/HYDE/... —
+# see ``surface_data/``), whose ``pft_frac(year, npft, lat, lon)`` is nearest-
+# regridded onto the SAME model columns as ``load_clm_surface`` (identical
+# ``_nearest_regrid`` targets => cell-for-cell aligned).  Only the PFT-weighted
+# VEGETATION params (albedo/z0/root/emissivity/stomata + the plant btran
+# thresholds) re-derive from the year's cover; per-cell SOIL hydraulics/thermal/
+# Ch and the prescribed LAI stay frozen from the base map (land use changes
+# vegetation, not soil texture; transient LAI is a documented follow-up).
+
+
+def load_transient_cover_on_columns(surfdata_path, tgt_lat_deg, tgt_lon_deg):
+    """Read a transient ``legoesm_surfdata`` cover and regrid it onto columns.
+
+    Returns ``(cover, years)`` with ``cover`` shape ``(nyear, ncol, 17)`` — a
+    per-column within-land PFT composition summing to 1 (bare-soil floor for empty
+    columns), matching :func:`load_clm_surface`'s ``fr`` so the two are
+    interchangeable in :class:`CLMSurfaceParamProvider` — and integer ``years``.
+    """
+    import xarray as xr
+
+    ds = xr.open_dataset(surfdata_path, decode_times=False)
+    try:
+        slat = np.asarray(ds["lat"].values, dtype=np.float64)
+        slon = np.asarray(ds["lon"].values, dtype=np.float64)
+        years = np.rint(np.asarray(ds["year"].values)).astype(int)
+        # Transpose by NAME to the documented (year, npft, lat, lon): a file stored
+        # with a different axis order (or where lat happens to be length 17) would
+        # otherwise be silently mis-indexed by the positional regrid below.
+        da = ds["pft_frac"].transpose("year", "npft", "lat", "lon")
+        pft = np.asarray(da.values, dtype=np.float64)               # (nyear,17,nlat,nlon) %
+        if pft.shape[1] != _N_PFT:
+            raise ValueError(
+                f"transient cover has {pft.shape[1]} PFTs on the npft axis; expected "
+                f"the CLM5 {_N_PFT}-PFT axis (same order as load_clm_surface).")
+    finally:
+        ds.close()
+
+    cov = _nearest_regrid(slat, slon, pft, tgt_lat_deg, tgt_lon_deg)  # (nyear,17,ncol)
+    cov = np.moveaxis(cov, 1, -1) / 100.0                            # (nyear,ncol,17) frac
+    # Per-column within-land composition (sum 1), bare-soil floor where the cover
+    # is short of a full cell — identical to load_clm_surface's normalisation.
+    cov = np.nan_to_num(cov, nan=0.0)
+    short = np.maximum(1.0 - cov.sum(axis=-1), 0.0)                  # (nyear,ncol)
+    cov[..., 0] += short
+    cov = cov / np.maximum(cov.sum(axis=-1, keepdims=True), 1e-12)
+    return jnp.asarray(cov), jnp.asarray(years, dtype=float)
+
+
+def clm_provider_rebuild(surface_map: dict, variant: str = "multilayer",
+                         *, include_soil_albedo: bool = True):
+    """Return ``rebuild(fracs) -> CLMSurfaceParamProvider``: the SAME per-cell soil,
+    glacier, soil-colour albedo and prescribed LAI as ``surface_map`` (frozen),
+    with only the PFT cover ``fracs`` (ncol, 17) swapped in.
+
+    Used to re-weight the vegetation params at a new land-use year.  The PFT-
+    weighted params (incl. the plant btran wilting/field-capacity thresholds)
+    re-derive from ``fracs``; soil texture stays fixed.  ``include_soil_albedo``
+    mirrors the consumer's non-transient provider so enabling transient cover with
+    an unchanged slice is a no-op: ``clm_multilayer_setup`` uses the soil-colour
+    albedo (True), the coupled ``clm_surface_provider`` omits it (pass False)."""
+    _soil_albedo = surface_map.get("soil_albedo") if include_soil_albedo else None
+
+    def rebuild(fracs):
+        return CLMSurfaceParamProvider(
+            jnp.asarray(fracs), surface_map["theta_wp"], surface_map["theta_fc"],
+            surface_map["glacier_frac"], variant=variant,
+            soil_albedo=_soil_albedo, lai=surface_map.get("lai"))
+    return rebuild
+
+
+class TransientCoverProvider(eqx.Module):
+    """Land-param provider whose PFT cover varies by calendar year.
+
+    Wraps a reference provider ``base`` (used when ``year`` is None) plus an annual
+    cover series; ``__call__(year=...)`` re-weights the vegetation params at that
+    year via a ``rebuild`` closure (soil frozen).  Mirrors the provider protocol
+    (callable -> ``LandSurfaceParams``) so it drops into
+    ``make_coupler(land_param_provider=...)`` unchanged; ``year_varying`` marks it
+    so the coupler forwards the per-segment year."""
+    base: eqx.Module
+    cover: jax.Array                                  # (nyear, ncol, 17)
+    years: jax.Array                                  # (nyear,)
+    _rebuild: object = eqx.field(static=True)         # fracs -> provider
+    year_varying: bool = eqx.field(static=True, default=True)
+
+    def __call__(self, *, year=None):
+        if year is None:
+            return self.base()
+        from legoesm.land.global_surface_data import interp_annual
+        fracs = interp_annual(self.cover, self.years, jnp.asarray(float(year)))
+        return self._rebuild(fracs)()
+
+    def at_year(self, year):
+        """The reference provider re-baked at ``year`` (for drivers that swap the
+        whole provider rather than pass a year each call, e.g. the AMIP attribute)."""
+        from legoesm.land.global_surface_data import interp_annual
+        fracs = interp_annual(self.cover, self.years, jnp.asarray(float(year)))
+        return self._rebuild(fracs)

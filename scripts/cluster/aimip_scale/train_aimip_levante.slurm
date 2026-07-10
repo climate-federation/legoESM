@@ -32,7 +32,7 @@ set -uo pipefail
 
 VARIANT="${VARIANT:-sfno_physics}"     # classical | column_nn | sfno_physics
 CHAIN="${CHAIN:-0}"
-CHAIN_MAX="${CHAIN_MAX:-12}"
+CHAIN_MAX="${CHAIN_MAX:-24}"  # v2 curriculum (72h/120h phases) needs more links
 
 source scripts/cluster/scaling_levante/_env.sh    # REPO, PY, conda, JAX env
 cd "$REPO"

@@ -26,21 +26,22 @@ from legoesm.thermo import (
     saturation_vapor_pressure_aerk,
     d_saturation_vapor_pressure_aerk,
     dd_saturation_vapor_pressure_aerk,
+    vapor_pressure_from_specific_humidity,
 )
-from legoesm.land.canopy.stomatal import ball_berry_gs, medlyn_gs
+from legoesm.land.leaf_biophysics import DIFFUSIVITY_RATIO_H2O_CO2
+from legoesm.land.stomata import ball_berry_gs, medlyn_gs
 
 # Module-local constants.
 # NOTE: Stefan-Boltzmann, freezing point, latent heat of vaporisation, etc.
 # are imported from ``legoesm.constants`` — do not redefine them here.
+# The leaf H2O:CO2 diffusivity ratio (Fick's law; Ci = Ca − ratio·An/gs) is the
+# single-source DIFFUSIVITY_RATIO_H2O_CO2 imported from leaf_biophysics above.
 _Ps0   = 101325.0    # IUPAC STP pressure [Pa] used in the mol → m/s
                      # unit conversion factor _CF_MOLAR_VOLUME; distinct from
                      # ``constants.p_ref`` (1e5 Pa hydrostatic reference).
 # mol m-2 s-1 → m s-1 leaf-conductance prefactor at IUPAC STP (encodes the
 # reference molar volume 22.4 L/mol); scaled by (T_freeze/Tf)·(Ps/_Ps0).
 _CF_MOLAR_VOLUME = 0.446
-
-# Leaf H2O:CO2 molecular-diffusivity ratio (Fick's law; Ci = Ca − ratio·An/gs).
-_DIFFUSIVITY_RATIO_H2O_CO2 = 1.6
 
 # Latent-heat-of-vaporisation temperature slope −dλ/dT [J kg-1 K-1], used as
 # λ(T) = L_v − _LAMBDA_T_SLOPE·(T − T_freeze). DifferBESS canopy value; distinct
@@ -165,7 +166,7 @@ def canopy_met_variables(
       All in Pa (or Pa K-1 for derivatives; Pa K-2 for second derivative).
     """
     # Vapour pressure from specific humidity
-    e_c  = q_c * Ps / (constants.epsilon + (1.0 - constants.epsilon) * q_c)
+    e_c  = vapor_pressure_from_specific_humidity(q_c, Ps)
     TcC  = Tc - constants.T_freeze
     # Saturation vapour pressure + its analytic derivatives from the shared AERK
     # water+ice curve (one consistent curve; over-ice below freezing).  ddesTc
@@ -227,11 +228,18 @@ def _compute_gs_and_ci(
     -------
     (rs [s m-1], gs [m s-1], Ci [μmol mol-1])
     """
+    # ``stomatal_model`` is a static Python string (see the jitting caller's
+    # static_argnames), so this dispatch is resolved at trace time — a typo must
+    # raise, not silently run the other model (matches solve_coupled_farquhar_ci).
     if stomatal_model == "medlyn":
         VPD_kPa = jnp.maximum(VPD_c, 50.0) / 1000.0  # coeff-ok: 50 Pa (0.05 kPa) VPD floor; Pa→kPa
         gs_mol = medlyn_gs(An, VPD_kPa, Ca, m, b0)
-    else:
+    elif stomatal_model == "ball_berry":
         gs_mol = ball_berry_gs(An, RH_c, Ca, m, b0)
+    else:
+        raise ValueError(
+            f"unknown stomatal_model {stomatal_model!r}; the stomatal "
+            "conductance scheme must be one of {'ball_berry', 'medlyn'}")
 
     # Minimum cuticular conductance: keep gs > 0 even at full water stress with
     # the legacy ``stress_b0=True`` (m = b0 = 0), otherwise the leaf gs/Ci/An
@@ -240,7 +248,7 @@ def _compute_gs_and_ci(
     # ``_GS_MIN_MOL``.
     gs_mol = jnp.maximum(gs_mol, _GS_MIN_MOL)
 
-    Ci = Ca - _DIFFUSIVITY_RATIO_H2O_CO2 * An / jnp.maximum(gs_mol, 1e-9)
+    Ci = Ca - DIFFUSIVITY_RATIO_H2O_CO2 * An / jnp.maximum(gs_mol, 1e-9)
     # Clip Ci to the physically reasonable C3 range; mixed-PFT C3/C4
     # is handled upstream in ``photosynthesis()`` via the continuous fC4
     # fraction, so the C4 bounds are not needed here.

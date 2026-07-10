@@ -190,7 +190,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # modes near the poles, so ``--dt`` can be set by the equatorial
     # CFL.  Essential for 1° AMIP runs spanning >10 yr.
     parser.add_argument(
-        "--use-polar-filter", action="store_true",
+        "--use-polar-filter", action=argparse.BooleanOptionalAction,
         help="Enable Fourier polar filter for lat-lon C-grid (lifts "
              "pole-cell CFL → enables larger --dt at high resolution).",
     )
@@ -393,16 +393,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "(legacy default).  Useful for CPU benchmarking."
         ),
     )
-    parser.add_argument("--diurnal-cycle", action="store_true", default=False)
+    parser.add_argument("--diurnal-cycle", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
-        "--orbital-insolation", action="store_true", default=False,
+        "--orbital-insolation", action=argparse.BooleanOptionalAction, default=False,
         dest="orbital_insolation",
         help="Use realistic (Berger 1978) orbital insolation for AMIP-II: "
              "present-day orbital declination + Earth-Sun distance factor "
              "(a/r)^2 eccentricity asymmetry (~+/-3.4%%). Default off = "
              "circular orbit (idealized).",
     )
-    parser.add_argument("--dynamic-albedo", action="store_true", default=False,
+    parser.add_argument("--dynamic-albedo", action=argparse.BooleanOptionalAction, default=False,
                         help="Zenith-angle-dependent ocean albedo "
                              "(Briegleb 1992) instead of the constant "
                              "ocean albedo; sea-ice/land blends unchanged.")
@@ -638,7 +638,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         type=float, default=None,
                         help="Sundqvist autoconversion rate c_0 [1/s] (None="
                              "default 1e-3; bounds 1e-4..1e-2).")
-    parser.add_argument("--aerosol-ccn", action="store_true", default=False,
+    parser.add_argument("--aerosol-ccn", action=argparse.BooleanOptionalAction, default=False,
                         help="Diagnose the specified cloud-droplet number "
                              "from the prescribed aerosol optical depth "
                              "(Andreae 2009 AOT-CCN inversion) instead of "
@@ -707,6 +707,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "for --use-multilayer-land. Required on compute nodes "
                              "with no outbound internet (empty => download from UCAR "
                              "to /tmp, which fails there).")
+    parser.add_argument("--transient-land-cover", action="store_true",
+                        default=_EXPERIMENT_DEFAULTS.transient_land_cover,
+                        help="Enable transient land-use/land-cover (LULC): re-weight "
+                             "the multilayer land vegetation params every segment at "
+                             "cover_year=start_year+elapsed/365 from "
+                             "--land-cover-surfdata (soil/LAI frozen). Requires "
+                             "--use-multilayer-land.")
+    parser.add_argument("--land-cover-surfdata", type=str,
+                        default=_EXPERIMENT_DEFAULTS.land_cover_surfdata,
+                        help="Transient legoesm_surfdata NetCDF "
+                             "(pft_frac(year, npft, lat, lon) in percent on the CLM5 "
+                             "17-PFT axis; built by scripts/data/build_*_surfdata.py "
+                             "from LUH2/HYDE/Pongratz/KK10) for "
+                             "--transient-land-cover.")
     parser.add_argument("--land-ic", type=str,
                         default=_EXPERIMENT_DEFAULTS.land_ic_path,
                         help="Spun-up land IC (#746): a MultiLayerLandState "
@@ -725,7 +739,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--albedo-land-month", type=int, default=0,
                         help="Month (1-12) to pick from a monthly land-albedo "
                              "climatology; 0 = annual mean (default).")
-    parser.add_argument("--slab-land-active", action="store_true", default=False,
+    parser.add_argument("--slab-land-active", action=argparse.BooleanOptionalAction, default=False,
                         help="Activate the slab-land SEB tile using the "
                              "topography-derived land fraction (requires "
                              "--topography). No separate LSM file needed.")
@@ -794,11 +808,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Disable Hortonian infiltration-excess runoff on the "
                              "bucket (keep saturation excess only; all rain "
                              "infiltrates up to capacity). Default: enabled.")
-    parser.add_argument("--land-stomatal-beta", action="store_true", default=False,
+    parser.add_argument("--land-stomatal-beta", action=argparse.BooleanOptionalAction, default=False,
                         dest="land_stomatal_beta",
                         help="Route the soil-water availability through the shared "
                              "land Jarvis (1976) stomatal model "
-                             "(legoesm.land.carbon.stomata) instead of the bare "
+                             "(legoesm.land.stomata) instead of the bare "
                              "bucket ramp: beta=min(beta_soil, beta_canopy), closing "
                              "stomata in low light / high VPD. Requires "
                              "--land-soil-bucket.")
@@ -834,7 +848,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "stomatal transpiration) that holds land ET below "
                              "potential and breaks the over-evaporation wet loop. "
                              "Only affects --use-multilayer-land runs.")
-    parser.add_argument("--snow-albedo-feedback", action="store_true",
+    parser.add_argument("--snow-albedo-feedback", action=argparse.BooleanOptionalAction,
                         default=False, dest="snow_albedo_feedback",
                         help="Prognostic snow + snow-albedo feedback on the "
                              "slab-land tile: snow water (SWE) accumulates from "
@@ -896,7 +910,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "curve.")
 
     # Surface / diagnostics
-    parser.add_argument("--monthly-means", action="store_true", default=False)
+    parser.add_argument("--monthly-means", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--t-ice-k", type=float,
                         default=constants.T_freeze_ocean,
                         help="SST floor / sea-ice ramp threshold [K]")
@@ -943,8 +957,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Host-side forcing update cadence [days]")
     parser.add_argument("--seed", type=int, default=_EXPERIMENT_DEFAULTS.seed,
                         help="Master RNG seed for reproducibility")
-    parser.add_argument("--cmip-output", action="store_true", default=False)
-    parser.add_argument("--clear-sky-diag", action="store_true", default=False)
+    parser.add_argument("--cmip-output", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--clear-sky-diag", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
         "--evaluate", action="store_true", default=False,
         help="Run ClimateEval after a successful AMIP run to compare "
@@ -1233,6 +1247,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         multilayer_n_layers=args.multilayer_n_layers,
         multilayer_soil_depth=args.multilayer_soil_depth,
         clm_surfdata_path=args.clm_surfdata_path,
+        transient_land_cover=args.transient_land_cover,
+        land_cover_surfdata=args.land_cover_surfdata,
         albedo_land_path=args.albedo_land_file,
         albedo_land_month=args.albedo_land_month,
         subgrid_orography_path=args.subgrid_orography_file,
@@ -1740,22 +1756,18 @@ def _validate_sundqvist_flags(args, parser) -> None:
 
 
 def _validate_cloud_sensitivity_flags(args, parser) -> None:
-    """Refuse --cloud-p-xr / --cloud-alpha-xr on backends that rebuild CloudConfig
-    at run() and ignore the pipeline override (MPAS / spectral) — the same
-    silent-ignore failure mode guarded for the sundqvist micro override.  Bounds
-    are enforced by ExperimentConfig.validate_strict.
+    """--cloud-p-xr / --cloud-alpha-xr are valid on EVERY backend since #870
+    Phase 1: the FV pipeline threads them via ``build_cloud_config`` and the
+    standalone MPAS/spectral paths via ``model_driver._standalone_cloud_config``
+    (which reads the same experiment fields).  The pre-#870 hard rejection on
+    MPAS/spectral ("they rebuild CloudConfig at run() and would ignore them")
+    is retired — that rebuild now CARRIES the override, so rejecting the flags
+    there blocked a working feature with a false message (pre-merge codex
+    review).  Bounds are enforced by ``ExperimentConfig.validate_strict``.
+    The sundqvist micro overrides remain FV-only and keep their guard
+    (``_validate_sundqvist_flags``) — those are still not threaded standalone.
     """
-    if (getattr(args, "cloud_p_xr", None) is None
-            and getattr(args, "cloud_alpha_xr", None) is None):
-        return
-    disc = getattr(args, "discretization", "centered")
-    grid = getattr(args, "grid_type", "")
-    if disc in ("mpas", "spectral") or grid in (
-            "voronoi", "icosahedral", "mpas_voronoi", "mpas"):
-        parser.error(
-            "--cloud-p-xr / --cloud-alpha-xr apply only on the finite-volume "
-            "PhysicsPipeline (cubed_sphere / latlon); MPAS and spectral rebuild "
-            "CloudConfig at run() and would ignore them.")
+    return
 
 
 def _require_full_physics_for_amip(args, parser) -> None:

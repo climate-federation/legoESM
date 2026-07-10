@@ -343,8 +343,43 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callable
             _kpp_mask_full = _kpp_mask_3d * _active_3d
         else:
             _kpp_mask_full = _kpp_mask_3d
-        dT_dt = jnp.where(_kpp_mask_full > 0.5, kpp_out.dT_dt, 0.0)
-        dS_dt = jnp.where(_kpp_mask_full > 0.5, kpp_out.dS_dt, 0.0)
+
+        # --- Partial-cell conservation rescale (tracer tendencies) ---
+        # ``kpp_vertical_mixing`` builds dT/dt, dS/dt as flux-form vertical
+        # divergences divided by the REFERENCE-grid thickness ``dz_ref * J``
+        # (kpp.py ``dz_actual``; both the local diffusion AND the non-local
+        # counter-gradient term use it).  The dycore, however, advances heat
+        # / salt content weighted by the LIVE partial-cell thickness
+        # ``h_k = compute_layer_thickness(eta, H_bathy, z_coord)``
+        # (ocean_model_mpas.py: ``T_new = T + dt*dT_dt`` with the budget
+        # measured as ``sum(dT_dt * h_k * area)``).  On a partial bottom cell
+        # ``dz_ref*J > h_partial*J = h_k``, so the LIVE-thickness column
+        # integral of a purely REDISTRIBUTIVE (interior-mixing) tendency is
+        # NONZERO — a spurious heat/salt source/sink on partial/live cells.
+        #
+        # Convention: z positive up; the vertical flux is down-gradient
+        # (``F = -K dT/dz``) with zero flux at the surface AND at the seafloor
+        # (the sub-seafloor T/S fill above makes the seafloor-interface
+        # gradient — hence its flux — exactly zero).  Rescaling by
+        # ``dz_used / h_k`` turns ``dT/dt = D / dz_used`` into ``D / h_k``
+        # (``D`` = interface-flux divergence, thickness-independent), so
+        # ``sum_k h_k * dT/dt = sum_k D = F_surface - F_seafloor = 0`` is
+        # conserved to machine precision.  On full cells (and on any
+        # non-partial z*/z-level coord) ``dz_used == h_k`` exactly, so
+        # ``thickness_rescale == 1`` and this is a byte-exact no-op — mirroring
+        # the live-thickness edge-momentum path (``_vertical_diffusion_edge_partial``)
+        # applied below.
+        if isinstance(z_coord, OceanPartialCellCoordinate):
+            h_live = compute_layer_thickness(eta, H_bathy, z_coord)  # (nCells, nlev)
+            dz_used = z_coord.dz_ref * J[:, jnp.newaxis]  # what KPP divided by
+            thickness_rescale = dz_used / jnp.maximum(h_live, 1.0e-10)
+            dT_dt = kpp_out.dT_dt * thickness_rescale
+            dS_dt = kpp_out.dS_dt * thickness_rescale
+        else:
+            dT_dt = kpp_out.dT_dt
+            dS_dt = kpp_out.dS_dt
+        dT_dt = jnp.where(_kpp_mask_full > 0.5, dT_dt, 0.0)
+        dS_dt = jnp.where(_kpp_mask_full > 0.5, dS_dt, 0.0)
 
         # A_v is at half-levels (nCells, nlev-1).  Mask land cells.
         # Cap A_v to CFL-safe maximum based on the thinner of the two

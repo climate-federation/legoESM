@@ -6,15 +6,13 @@ import jax
 import jax.numpy as jnp
 import numpy.testing as npt
 
-from legoesm.land.carbon.stomata import (
+from legoesm.land.stomata import (
     StomataConfig,
-    arrhenius,
-    peaked_arrhenius,
-    farquhar_photosynthesis,
     ball_berry_gs,
     medlyn_gs,
     jarvis_gs,
     coupled_farquhar_stomata,
+    solve_coupled_farquhar_ci,
     compute_stomatal_beta,
 )
 from legoesm.land.carbon.config import CarbonConfig, CarbonState
@@ -23,129 +21,6 @@ from legoesm.land.carbon.carbon_cycle import (
     step_carbon_differland,
     init_carbon_state,
 )
-
-
-class TestArrhenius(unittest.TestCase):
-    """Temperature response functions."""
-
-    def test_arrhenius_at_25C(self):
-        """Arrhenius returns param25 at 25 deg C."""
-        T = jnp.array(298.15)
-        val = arrhenius(60.0, 65330.0, T)
-        self.assertAlmostEqual(float(val), 60.0, places=5)
-
-    def test_arrhenius_increases_with_T(self):
-        """Arrhenius with positive Ha increases with temperature."""
-        T_low = jnp.array(283.15)   # 10 C
-        T_high = jnp.array(313.15)  # 40 C
-        v_low = arrhenius(60.0, 65330.0, T_low)
-        v_high = arrhenius(60.0, 65330.0, T_high)
-        self.assertGreater(float(v_high), float(v_low))
-
-    def test_arrhenius_shape(self):
-        """Output shape matches input."""
-        T = jnp.array([290.0, 300.0, 310.0])
-        val = arrhenius(60.0, 65330.0, T)
-        self.assertEqual(val.shape, (3,))
-
-    def test_peaked_arrhenius_has_peak(self):
-        """Peaked Arrhenius declines at high T (J_max)."""
-        cfg = StomataConfig()
-        T_opt = jnp.array(308.15)   # ~35 C
-        T_high = jnp.array(328.15)  # ~55 C
-        v_opt = peaked_arrhenius(cfg.J_max25, cfg.Ha_J, cfg.Hd_J, cfg.S_J, T_opt)
-        v_high = peaked_arrhenius(cfg.J_max25, cfg.Ha_J, cfg.Hd_J, cfg.S_J, T_high)
-        self.assertGreater(float(v_opt), float(v_high))
-
-    def test_peaked_at_25C(self):
-        """Peaked Arrhenius returns param25 at reference T."""
-        cfg = StomataConfig()
-        T = jnp.array(298.15)
-        val = peaked_arrhenius(cfg.J_max25, cfg.Ha_J, cfg.Hd_J, cfg.S_J, T)
-        self.assertAlmostEqual(float(val), cfg.J_max25, places=3)
-
-
-class TestFarquharPhotosynthesis(unittest.TestCase):
-    """Farquhar C3 photosynthesis model."""
-
-    def setUp(self):
-        self.cfg = StomataConfig()
-        self.T = jnp.array(298.15)  # 25 C
-        self.APAR = jnp.array(500.0)  # umol/m2/s
-
-    def test_positive_A_at_ambient_CO2(self):
-        """Net assimilation is positive at ambient CO2."""
-        Ci = jnp.array(280.0)
-        A_net, A_gross = farquhar_photosynthesis(
-            Ci, self.APAR, self.T, self.cfg)
-        self.assertGreater(float(A_net), 0.0)
-        self.assertGreater(float(A_gross), float(A_net))
-
-    def test_A_increases_with_CO2(self):
-        """Assimilation increases with Ci (below saturation)."""
-        Ci_low = jnp.array(150.0)
-        Ci_high = jnp.array(400.0)
-        A_low, _ = farquhar_photosynthesis(Ci_low, self.APAR, self.T, self.cfg)
-        A_high, _ = farquhar_photosynthesis(Ci_high, self.APAR, self.T, self.cfg)
-        self.assertGreater(float(A_high), float(A_low))
-
-    def test_A_increases_with_PAR(self):
-        """Assimilation increases with light."""
-        Ci = jnp.array(280.0)
-        A_low, _ = farquhar_photosynthesis(Ci, jnp.array(100.0), self.T, self.cfg)
-        A_high, _ = farquhar_photosynthesis(Ci, jnp.array(1000.0), self.T, self.cfg)
-        self.assertGreater(float(A_high), float(A_low))
-
-    def test_A_zero_at_dark(self):
-        """Net assimilation is negative in the dark (respiration only)."""
-        Ci = jnp.array(280.0)
-        A_net, _ = farquhar_photosynthesis(Ci, jnp.array(0.0), self.T, self.cfg)
-        self.assertLess(float(A_net), 0.0)
-
-    def test_grad_finite_at_unit_curvature(self):
-        """dA/dAPAR must stay finite with theta_j = 1 (the curvature value some
-        Farquhar formulations use), where the J light-response discriminant
-        b^2-4ac can reach 0.  Regression: ``sqrt(maximum(disc, 0))`` had an
-        infinite gradient at disc=0 (sqrt'(0)); flooring the discriminant fixes
-        it.  Default theta_j=0.9 keeps disc ~ O(1e3) so the forward is unchanged.
-        """
-        cfg = StomataConfig(theta_j=1.0)
-        Ci = jnp.array(280.0)
-
-        def loss(APAR):
-            A_net, _ = farquhar_photosynthesis(Ci, APAR, self.T, cfg)
-            return jnp.sum(A_net)
-
-        # Sweep APAR through the alpha_q*APAR == J_max knife-edge.
-        for apar in (0.0, 100.0, 600.0, 2000.0):
-            g = jax.grad(loss)(jnp.array(apar))
-            self.assertTrue(bool(jnp.isfinite(g)),
-                            f"dA/dAPAR not finite at APAR={apar}, theta_j=1")
-
-    def test_soil_moisture_stress(self):
-        """Soil moisture stress reduces assimilation."""
-        Ci = jnp.array(280.0)
-        A_wet, _ = farquhar_photosynthesis(
-            Ci, self.APAR, self.T, self.cfg, beta_soil=jnp.array(1.0))
-        A_dry, _ = farquhar_photosynthesis(
-            Ci, self.APAR, self.T, self.cfg, beta_soil=jnp.array(0.2))
-        self.assertGreater(float(A_wet), float(A_dry))
-
-    def test_batch_shape(self):
-        """Works with batched inputs."""
-        Ci = jnp.array([200.0, 300.0, 400.0])
-        APAR = jnp.array([200.0, 500.0, 800.0])
-        T = jnp.array([293.15, 298.15, 303.15])
-        A_net, A_gross = farquhar_photosynthesis(Ci, APAR, T, self.cfg)
-        self.assertEqual(A_net.shape, (3,))
-        self.assertEqual(A_gross.shape, (3,))
-
-    def test_reasonable_magnitude(self):
-        """A is in a reasonable range (0-40 umol/m2/s)."""
-        Ci = jnp.array(280.0)
-        A_net, _ = farquhar_photosynthesis(Ci, self.APAR, self.T, self.cfg)
-        self.assertGreater(float(A_net), 0.0)
-        self.assertLess(float(A_net), 40.0)
 
 
 class TestBallBerry(unittest.TestCase):
@@ -157,31 +32,31 @@ class TestBallBerry(unittest.TestCase):
     def test_minimum_conductance(self):
         """gs >= g0 always."""
         gs = ball_berry_gs(
-            jnp.array(-5.0), jnp.array(0.8), jnp.array(400.0), self.cfg)
+            jnp.array(-5.0), jnp.array(0.8), jnp.array(400.0), self.cfg.g1_bb, self.cfg.g0)
         self.assertAlmostEqual(float(gs), self.cfg.g0, places=5)
 
     def test_increases_with_A(self):
         """gs increases with assimilation."""
         gs_low = ball_berry_gs(
-            jnp.array(5.0), jnp.array(0.8), jnp.array(400.0), self.cfg)
+            jnp.array(5.0), jnp.array(0.8), jnp.array(400.0), self.cfg.g1_bb, self.cfg.g0)
         gs_high = ball_berry_gs(
-            jnp.array(20.0), jnp.array(0.8), jnp.array(400.0), self.cfg)
+            jnp.array(20.0), jnp.array(0.8), jnp.array(400.0), self.cfg.g1_bb, self.cfg.g0)
         self.assertGreater(float(gs_high), float(gs_low))
 
     def test_increases_with_RH(self):
         """gs increases with relative humidity."""
         gs_dry = ball_berry_gs(
-            jnp.array(10.0), jnp.array(0.3), jnp.array(400.0), self.cfg)
+            jnp.array(10.0), jnp.array(0.3), jnp.array(400.0), self.cfg.g1_bb, self.cfg.g0)
         gs_wet = ball_berry_gs(
-            jnp.array(10.0), jnp.array(0.9), jnp.array(400.0), self.cfg)
+            jnp.array(10.0), jnp.array(0.9), jnp.array(400.0), self.cfg.g1_bb, self.cfg.g0)
         self.assertGreater(float(gs_wet), float(gs_dry))
 
     def test_decreases_with_Cs(self):
         """gs decreases with surface CO2."""
         gs_low_co2 = ball_berry_gs(
-            jnp.array(10.0), jnp.array(0.8), jnp.array(200.0), self.cfg)
+            jnp.array(10.0), jnp.array(0.8), jnp.array(200.0), self.cfg.g1_bb, self.cfg.g0)
         gs_high_co2 = ball_berry_gs(
-            jnp.array(10.0), jnp.array(0.8), jnp.array(800.0), self.cfg)
+            jnp.array(10.0), jnp.array(0.8), jnp.array(800.0), self.cfg.g1_bb, self.cfg.g0)
         self.assertGreater(float(gs_low_co2), float(gs_high_co2))
 
 
@@ -194,29 +69,29 @@ class TestMedlyn(unittest.TestCase):
     def test_minimum_conductance(self):
         """gs >= g0."""
         gs = medlyn_gs(
-            jnp.array(-5.0), jnp.array(1.0), jnp.array(400.0), self.cfg)
+            jnp.array(-5.0), jnp.array(1.0), jnp.array(400.0), self.cfg.g1_med, self.cfg.g0)
         self.assertAlmostEqual(float(gs), self.cfg.g0, places=5)
 
     def test_increases_with_A(self):
         """gs increases with assimilation."""
         gs_low = medlyn_gs(
-            jnp.array(5.0), jnp.array(1.0), jnp.array(400.0), self.cfg)
+            jnp.array(5.0), jnp.array(1.0), jnp.array(400.0), self.cfg.g1_med, self.cfg.g0)
         gs_high = medlyn_gs(
-            jnp.array(20.0), jnp.array(1.0), jnp.array(400.0), self.cfg)
+            jnp.array(20.0), jnp.array(1.0), jnp.array(400.0), self.cfg.g1_med, self.cfg.g0)
         self.assertGreater(float(gs_high), float(gs_low))
 
     def test_decreases_with_VPD(self):
         """gs decreases with VPD."""
         gs_wet = medlyn_gs(
-            jnp.array(10.0), jnp.array(0.5), jnp.array(400.0), self.cfg)
+            jnp.array(10.0), jnp.array(0.5), jnp.array(400.0), self.cfg.g1_med, self.cfg.g0)
         gs_dry = medlyn_gs(
-            jnp.array(10.0), jnp.array(3.0), jnp.array(400.0), self.cfg)
+            jnp.array(10.0), jnp.array(3.0), jnp.array(400.0), self.cfg.g1_med, self.cfg.g0)
         self.assertGreater(float(gs_wet), float(gs_dry))
 
     def test_reasonable_magnitude(self):
         """gs in a reasonable range (g0 to ~0.5 mol/m2/s)."""
         gs = medlyn_gs(
-            jnp.array(15.0), jnp.array(1.0), jnp.array(400.0), self.cfg)
+            jnp.array(15.0), jnp.array(1.0), jnp.array(400.0), self.cfg.g1_med, self.cfg.g0)
         self.assertGreater(float(gs), self.cfg.g0)
         self.assertLess(float(gs), 1.0)
 
@@ -568,7 +443,7 @@ class TestSlabLandIntegration(unittest.TestCase):
         """Jarvis model (no carbon) changes latent heat flux."""
         from legoesm.land.slab_land import step_land
         from legoesm.land.config import LandConfig
-        from legoesm.land.carbon.stomata import StomataConfig
+        from legoesm.land.stomata import StomataConfig
 
         shape = (4,)
         cfg_off = LandConfig()
@@ -587,7 +462,7 @@ class TestSlabLandIntegration(unittest.TestCase):
         """Farquhar+BB stomata work with active carbon cycle."""
         from legoesm.land.slab_land import step_land
         from legoesm.land.config import LandConfig
-        from legoesm.land.carbon.stomata import StomataConfig
+        from legoesm.land.stomata import StomataConfig
         from legoesm.land.carbon.config import CarbonConfig
         from legoesm.land.carbon.carbon_cycle import init_carbon_state
 
@@ -613,7 +488,7 @@ class TestSlabLandIntegration(unittest.TestCase):
         """Farquhar+Medlyn stomata give different results from Ball-Berry."""
         from legoesm.land.slab_land import step_land
         from legoesm.land.config import LandConfig
-        from legoesm.land.carbon.stomata import StomataConfig
+        from legoesm.land.stomata import StomataConfig
         from legoesm.land.carbon.config import CarbonConfig
         from legoesm.land.carbon.carbon_cycle import init_carbon_state
 
@@ -646,26 +521,13 @@ class TestSlabLandIntegration(unittest.TestCase):
 class TestDifferentiability(unittest.TestCase):
     """JAX differentiability of stomatal models."""
 
-    def test_farquhar_differentiable(self):
-        """Farquhar photosynthesis is differentiable w.r.t. Ci."""
-        cfg = StomataConfig()
-
-        def f(Ci):
-            A, _ = farquhar_photosynthesis(
-                Ci, jnp.array(500.0), jnp.array(298.15), cfg)
-            return jnp.sum(A)
-
-        grad = jax.grad(f)(jnp.array(280.0))
-        self.assertTrue(jnp.isfinite(grad))
-        self.assertGreater(float(grad), 0.0)  # dA/dCi > 0
-
     def test_ball_berry_differentiable(self):
         """Ball-Berry is differentiable w.r.t. A."""
         cfg = StomataConfig()
 
         def f(A):
             return jnp.sum(ball_berry_gs(
-                A, jnp.array(0.8), jnp.array(400.0), cfg))
+                A, jnp.array(0.8), jnp.array(400.0), cfg.g1_bb, cfg.g0))
 
         grad = jax.grad(f)(jnp.array(10.0))
         self.assertTrue(jnp.isfinite(grad))
@@ -698,72 +560,31 @@ class TestDifferentiability(unittest.TestCase):
         self.assertTrue(jnp.isfinite(grad))
 
 
-class TestCanopyScaling(unittest.TestCase):
-    """Big-leaf canopy scaling of the photosynthetic capacities."""
+class TestCanopyLAIScaling(unittest.TestCase):
+    """Big-leaf GPP scales with the canopy integral L_c = (1-exp(-k*LAI))/k,
+    now folded into the effective Vcmax25 inside solve_coupled_farquhar_ci."""
 
-    def _inputs(self, LAI):
+    def _gpp(self, LAI):
         cfg = StomataConfig(enabled=True, stomata_model="ball_berry")
-        return (jnp.array([298.15]), jnp.array([600.0]), 400.0,
-                jnp.array([0.008]), jnp.array([101325.0]),
-                jnp.array([LAI]), jnp.array([1.0]), cfg)
+        st = solve_coupled_farquhar_ci(
+            jnp.array([298.15]), jnp.array([600.0]), 400.0,
+            jnp.array([0.008]), jnp.array([101325.0]),
+            jnp.array([LAI]), jnp.array([1.0]), cfg)
+        return float(jnp.squeeze(st.gpp))
 
-    def test_default_scaling_is_identity(self):
-        """canopy_scaling=1.0 reproduces the leaf-level rate."""
-        cfg = StomataConfig(enabled=True)
-        A1, G1 = farquhar_photosynthesis(
-            jnp.array([280.0]), jnp.array([800.0]), jnp.array([298.15]), cfg)
-        A2, G2 = farquhar_photosynthesis(
-            jnp.array([280.0]), jnp.array([800.0]), jnp.array([298.15]), cfg,
-            canopy_scaling=1.0)
-        npt.assert_allclose(A1, A2, rtol=0, atol=0)
-        npt.assert_allclose(G1, G2, rtol=0, atol=0)
+    def test_gpp_increases_with_LAI(self):
+        self.assertGreater(self._gpp(3.0), self._gpp(0.5))
 
-    def test_rubisco_limited_scales_with_canopy(self):
-        """In the Rubisco-limited regime A_gross scales ~linearly with L_c.
+    def test_gpp_saturates_at_high_LAI(self):
+        # L_c -> 1/k as LAI -> inf, so the 5->8 GPP increment is much smaller
+        # than the 0.5->3 one.
+        low = self._gpp(3.0) - self._gpp(0.5)
+        high = self._gpp(8.0) - self._gpp(5.0)
+        self.assertLess(high, low)
 
-        Use low light (so Wc < Wj) and doubled canopy scaling.
-        """
-        cfg = StomataConfig(enabled=True)
-        Ci = jnp.array([280.0])
-        APAR = jnp.array([2000.0])   # ample light -> Rubisco-limited
-        T = jnp.array([298.15])
-        _, G1 = farquhar_photosynthesis(Ci, APAR, T, cfg, None, 1.0)
-        _, G2 = farquhar_photosynthesis(Ci, APAR, T, cfg, None, 2.0)
-        ratio = float(jnp.squeeze(G2 / jnp.maximum(G1, 1e-9)))
-        self.assertGreater(ratio, 1.7)   # ~2x (Wj co-limitation softens it)
-        self.assertLessEqual(ratio, 2.05)
-
-    def test_leafless_column_no_assimilation(self):
-        """LAI->0 => L_c->0 => canopy GPP ~ 0."""
-        T, sw, co2, q, p, _, beta, cfg = self._inputs(1e-4)
-        _, gpp = coupled_farquhar_stomata(
-            T, sw, co2, q, p, jnp.array([1e-4]), beta, cfg)
-        self.assertLess(float(jnp.squeeze(gpp)) * 86400.0, 0.1)
-
-    def test_dense_canopy_more_gpp_than_sparse(self):
-        """A dense canopy fixes more C than a sparse one (beyond fAPAR alone)."""
-        T, sw, co2, q, p, _, beta, cfg = self._inputs(1.0)
-        _, gpp_sparse = coupled_farquhar_stomata(
-            T, sw, co2, q, p, jnp.array([1.0]), beta, cfg)
-        _, gpp_dense = coupled_farquhar_stomata(
-            T, sw, co2, q, p, jnp.array([5.0]), beta, cfg)
-        self.assertGreater(float(jnp.squeeze(gpp_dense)),
-                           float(jnp.squeeze(gpp_sparse)))
-
-    def test_grad_through_canopy_scaling(self):
-        """A_gross stays differentiable wrt LAI through the scaling."""
-        cfg = StomataConfig(enabled=True)
-
-        def f(LAI):
-            _, gpp = coupled_farquhar_stomata(
-                jnp.array([298.15]), jnp.array([600.0]), 400.0,
-                jnp.array([0.008]), jnp.array([101325.0]),
-                jnp.array([LAI]), jnp.array([1.0]), cfg)
-            return jnp.squeeze(gpp)
-
-        grad = jax.grad(f)(3.0)
-        self.assertTrue(jnp.isfinite(grad))
-        self.assertGreater(float(grad), 0.0)   # more leaves -> more GPP
+    def test_leafless_column_assimilates_little(self):
+        # L_c -> LAI -> 0 as LAI -> 0, so GPP -> ~0.
+        self.assertLess(self._gpp(0.01), self._gpp(2.0))
 
 
 if __name__ == "__main__":

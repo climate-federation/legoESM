@@ -115,6 +115,20 @@ class NeuralGCMSpectralConfig(NamedTuple):
     # leakage across windows.  ``None`` falls back to legacy
     # single-window behaviour (``start_year``+``n_train_days``).
     windows: tuple | None = None
+    # NeuralGCM-style rollout curriculum INSIDE the main training loop:
+    # ``((lead_hours, n_epochs), ...)`` phases, short leads first. Each
+    # phase supervises a single autoregressive rollout to ``lead_hours``
+    # against the ERA5 target at that lead (targets for every phase lead
+    # are loaded up front). This is where fleet models get their
+    # free-running stability — as part of TRAINING, not a bolt-on
+    # fine-tune. ``None`` keeps the fixed ``loss_config.multi_step_hours``
+    # behaviour. Overrides ``n_epochs`` (total = sum of phase epochs).
+    rollout_curriculum: tuple | None = None
+    # Streaming/chunked data: when >0, the windowed training set is loaded
+    # and trained in chunks of this many WINDOWS per chunk (dense all-years
+    # sampling would not fit in host RAM as one list). 0 = load everything
+    # at once (legacy).
+    chunk_windows: int = 0
 
     # Data
     n_train_days: int = 365      # Number of daily IC/target pairs
@@ -537,9 +551,26 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
         output_norm = sfno(packed_norm.astype(jnp.float32), grid_)
         # Scale to physical tendency magnitudes
         output = output_norm * out_scale
-        return unpack_pe_output(
+        tend = unpack_pe_output(
             output.astype(jnp.float64), state, grid_, mode="tendencies",
         )
+        # DRY-MASS constraint (ACE2-style budget fixer): physics must not
+        # create or destroy air. The SFNO's raw dlnps/dt carries a nonzero
+        # global mean -> a secular surface-pressure (mass) drift that
+        # compounds over climate-length integrations and feeds the
+        # radiative-runaway class. Project out the (l=0, m=0) spectral
+        # coefficient = the global mean of the lnps tendency (the standard
+        # lnps-mean proxy for dry-mass conservation on sigma coordinates).
+        # NOTE: this is an APPROXIMATE fixer — dry mass ∝ ∫p_s dA, so the
+        # exact constraint is area_mean(p_s·dlnps/dt)=0; zeroing the
+        # area-mean dlnps/dt leaves a residual O(p_s') where p_s' is the
+        # spatial p_s anomaly (~5%). It removes the secular global-mean
+        # drift mode (the instability driver) and stays differentiable.
+        _mean_mask = jnp.asarray(
+            (grid.ls == 0) & (grid.ms == 0), dtype=tend.lnps_hat.data.dtype,
+        )
+        lnps_fixed = tend.lnps_hat.data * (1.0 - _mean_mask)
+        return tend._replace(lnps_hat=tend.lnps_hat.replace(data=lnps_fixed))
 
     return physics_fn
 
@@ -900,6 +931,23 @@ def spectral_rollout(
                     )
                 )
 
+            # MOISTURE POSITIVITY (ACE2-style budget fixer) on forced
+            # learned-physics runs: a q_v gone negative feeds the *1e3
+            # normalized NN feature with huge negative values, saturating
+            # the net into the runaway class. Clip at zero after the step
+            # (physics has no negative-water state). Kept off the classical/
+            # legacy paths, which conserve by construction.
+            if forcing_base is not None and new_state.tracers is not None \
+                    and "q_v" in new_state.tracers:
+                _qv = new_state.tracers["q_v"]
+                if hasattr(_qv, "data"):
+                    _qv = _qv.replace(data=jnp.maximum(_qv.data, 0.0))
+                else:
+                    _qv = jnp.maximum(_qv, 0.0)
+                _tr = dict(new_state.tracers)
+                _tr["q_v"] = _qv
+                new_state = new_state._replace(tracers=_tr)
+
             return new_state, None
 
         # ``prevent_cse=True`` plus ``policy=nothing_saveable`` is the
@@ -1080,7 +1128,14 @@ def spectral_amip_rollout(
     tracer_filter = _compute_tracer_filter(grid, pe_config, spectral_filter, dt)
 
     # Inject the (traced) prescribed SST as the surface-temperature anchor.
-    phys_state = sizing_phys_state._replace(surface_T_sfc_override=sst_col)
+    # Prescribed SST is NaN over land; map those to the finite no-override
+    # sentinel so the PERSISTED physics state stays finite (#911) — land
+    # columns then fall back to the model surface T in both resolvers.
+    from legoesm.atmosphere.physics.physics_state import NO_SFC_T_OVERRIDE
+    # isfinite (not isnan): map NaN AND +/-Inf to the sentinel so the persisted
+    # state is strictly finite (codex).
+    _sst_override = jnp.where(jnp.isfinite(sst_col), sst_col, NO_SFC_T_OVERRIDE)
+    phys_state = sizing_phys_state._replace(surface_T_sfc_override=_sst_override)
     _doy0 = jnp.asarray(day_of_year_base, dtype=jnp.float64)
     _off = jnp.asarray(seconds_offset, dtype=jnp.float64)
 
@@ -1414,6 +1469,29 @@ def spectral_state_vs_carry_loss(
 # Data loading
 # =============================================================================
 
+def _training_year_range(windows, config) -> tuple[int, int]:
+    """``(min_year, max_year + 1)`` spanned by the windows THIS call loads.
+
+    Prefer the explicit ``windows`` argument (the data ``load_training_data``
+    actually reads this call) over ``config.windows`` — a caller can pass a
+    ``windows`` set that differs from ``config.windows``, and the cache must
+    cover what is read, not what is configured.  Falls back to
+    ``start_year`` + ``n_train_days`` when neither is given.
+
+    The ``+1`` on the max year covers TARGET snapshots that spill into the
+    following year (the rollout lead / ``n_days`` stride).  The cache store is
+    scoped by this range, so each distinct span is its own store and
+    ``ensure_local_cache``'s existence check is never stale across spans.
+    """
+    wins = windows or getattr(config, "windows", None) or ()
+    if wins:
+        years = [int(w[0]) for w in wins]
+        return (min(years), max(years) + 1)
+    start = int(getattr(config, "start_year", 2015) or 2015)
+    n_days = int(getattr(config, "n_train_days", 0) or 0)
+    return (start, start + max(0, (n_days - 1) // 365) + 1)
+
+
 def load_training_data(
     config: NeuralGCMSpectralConfig,
     grid: GaussianGrid,
@@ -1455,12 +1533,34 @@ def load_training_data(
     """
     import numpy as np
     from legoesm.training.era5_to_state import (
-        open_era5_zarr, resolve_var, ERA5Slice,
+        open_era5_zarr, resolve_var, ERA5Slice, ensure_local_cache,
     )
     era5_config = TrainingERA5Config(dt_hours=6)
 
-    # Open store once
+    # Open store once.  Wire the (previously DEAD) ``cache_dir`` to the local
+    # ERA5 zarr cache: without it every epoch re-fetched the SAME windows from
+    # GCS (#895, ~50 h/run wasted).  Scope the one-time download to the FULL
+    # training span (``config.windows``, NOT the per-chunk ``windows`` arg) so
+    # the single shared cache store is not built for one chunk's years and then
+    # read stale for the others.  ensure_local_cache is idempotent (skips if the
+    # store already exists), so only the first call pays the download.
     store = era5_config.zarr_store
+    # OPT-IN (default OFF -> byte-identical to the old GCS-every-epoch path):
+    # set LEGOESM_ERA5_LOCAL_CACHE=1 to materialise each span to a local zarr
+    # once and read it locally thereafter (#895, ~50 h/run).  Gated behind an
+    # env flag rather than on by default because the ensure_local_cache path is
+    # unexercised on this repo and its speedup + output compatibility must be
+    # validated on the target cluster (Derecho/GCS) — not reachable from CI.
+    import os
+    if cache_dir and os.environ.get("LEGOESM_ERA5_LOCAL_CACHE"):
+        # Year-SCOPE the cache store.  ensure_local_cache keys only on path
+        # existence — it does NOT verify an existing store covers the requested
+        # years — so a shared cache_dir reused across runs/phases with different
+        # spans would silently read a stale/narrow subset (codex).  Give each
+        # distinct span its own subdir so the existence check is never stale.
+        _yrs = _training_year_range(windows, config)
+        _scoped = os.path.join(os.fspath(cache_dir), f"y{_yrs[0]}_{_yrs[1]}")
+        store = str(ensure_local_cache(era5_config, _scoped, years=_yrs))
     ds = open_era5_zarr(store)
 
     # Resolve start offset from config.start_year (defaults to 2015).
@@ -1716,6 +1816,8 @@ def _train_spectral_loop(
     *,
     start_epoch: int = 0,
     sample_forcings: list | None = None,
+    chunk_loader=None,
+    n_samples_total: int | None = None,
 ):
     """Shared training loop for any learned-physics model coupled to the
     spectral PE dycore.
@@ -1740,17 +1842,32 @@ def _train_spectral_loop(
         values change per sample).  ``None`` = legacy unforced
         training (idealized inputs; physics_fn falls back to its
         internal proxies).
+    chunk_loader : callable or None
+        Streaming/chunked data source: a zero-arg callable returning a
+        fresh iterator of ``(ic_states, target_carries, sample_forcings)``
+        chunks each time it is called (one full pass = one epoch). Used
+        for DENSE all-years sampling that does not fit in host RAM as a
+        single list. When set, ``ic_states``/``target_carries``/
+        ``sample_forcings`` may be None; ``n_samples_total`` must give
+        the per-epoch sample count (optimizer schedule). Every chunk
+        must produce samples of identical shapes so the jitted train
+        step is reused across chunks (no retrace).
+    n_samples_total : int or None
+        Per-epoch sample count when ``chunk_loader`` is used.
 
     Returns
     -------
     model : updated eqx.Module
     loss_history : list[float]
     """
-    if sample_forcings is not None and len(sample_forcings) != len(ic_states):
+    if chunk_loader is None and sample_forcings is not None \
+            and len(sample_forcings) != len(ic_states):
         raise ValueError(
             f"sample_forcings length {len(sample_forcings)} != "
             f"n_samples {len(ic_states)}."
         )
+    if chunk_loader is not None and not n_samples_total:
+        raise ValueError("chunk_loader requires n_samples_total.")
     sigma_full = jnp.asarray(sigma.sigma_full)
     pe_config = config.pe_config
 
@@ -1775,7 +1892,32 @@ def _train_spectral_loop(
     rollout_hours_cfg = int(getattr(config, "rollout_hours", 0) or 0)
     rollout_hours = rollout_hours_cfg if rollout_hours_cfg > 0 else rollout_days * 24
     n_steps_rollout = int(round(rollout_hours * 3600.0 / config.dt))
-    total_steps = max(1, config.n_epochs * max(1, len(ic_states)))
+    n_samples_epoch = int(n_samples_total or len(ic_states))
+    curriculum = tuple(
+        (int(h), int(ep)) for h, ep in (config.rollout_curriculum or ())
+    ) or None
+    n_epochs_total = (
+        sum(ep for _, ep in curriculum) if curriculum else config.n_epochs
+    )
+    # Fail-early curriculum validation (before the optimizer schedule is
+    # built, so a bad curriculum surfaces as ITS error, not a schedule
+    # side-effect like decay_steps=0).
+    if curriculum:
+        _leads_loaded = tuple(
+            int(h) for h in (config.loss_config.multi_step_hours or ())
+        )
+        if not _leads_loaded:
+            raise ValueError(
+                "rollout_curriculum needs loss_config.multi_step_hours to "
+                "carry the curriculum leads (targets per lead)."
+            )
+        for h, _ in curriculum:
+            if h not in _leads_loaded:
+                raise ValueError(
+                    f"Curriculum lead {h}h has no loaded target "
+                    f"(multi_step_hours={_leads_loaded})."
+                )
+    total_steps = max(1, n_epochs_total * max(1, n_samples_epoch))
     base_optimizer = create_optimizer(TrainingConfig(
         lr=config.lr,
         warmup_steps=config.warmup_steps,
@@ -1827,11 +1969,21 @@ def _train_spectral_loop(
         optimizer = base_optimizer
 
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+    if start_epoch > 0:
+        # Only model weights are checkpointed: a resumed run re-inits the
+        # optimizer, so the warmup+cosine schedule replays from step 0
+        # while the epoch counter skips ahead (extra warmup at resume,
+        # decay horizon restarts). Known limitation of chained SLURM
+        # resumes — harmless for weights, but LR != the unbroken run.
+        logger.warning(
+            f"Resume at epoch {start_epoch}: optimizer state is fresh; "
+            f"the LR schedule restarts from step 0 (weights unaffected)."
+        )
     loss_history = []
 
     logger.info(
         f"Training: {config.n_epochs} epochs, "
-        f"{len(ic_states)} samples/epoch, "
+        f"{n_samples_epoch} samples/epoch, "
         f"{n_steps_per_day} dycore steps/day (dt={config.dt}s), "
         f"rollout_hours={rollout_hours} -> {n_steps_rollout} steps/sample"
     )
@@ -1950,111 +2102,188 @@ def _train_spectral_loop(
             forcing_base=forcing_base,
         )
 
-    def _train_step(model, opt_state, ic_spectral, target_carry, forcing_base):
-        def loss_fn(m):
-            physics = make_physics_fn(m, grid)
-            if segment_steps:
-                state = ic_spectral
-                total = jnp.float32(0.0)
-                comp_total = {
-                    "mse": jnp.float32(0.0),
-                    "bias": jnp.float32(0.0),
-                    "crps": jnp.float32(0.0),
-                    "spec_crps": jnp.float32(0.0),
-                }
-                t_offset = 0.0
-                for k, n_seg in enumerate(segment_steps):
-                    state = _rollout_one_segment(
-                        state, physics, n_seg, t_offset,
+    # --- rollout curriculum (NeuralGCM-style stability training) ---
+    # Each phase supervises ONE autoregressive rollout to phase_lead hours
+    # against the ERA5 target at that lead (single-lead loss).  Targets for
+    # every phase lead were loaded up front: the caller must set
+    # ``loss_config.multi_step_hours`` to the sorted set of curriculum
+    # leads so ``load_training_data`` builds a target tuple per sample.
+    if curriculum:
+        if not multi_step_hours_train:
+            raise ValueError(
+                "rollout_curriculum needs loss_config.multi_step_hours to "
+                "carry the curriculum leads (targets per lead)."
+            )
+        for h, _ in curriculum:
+            if h not in multi_step_hours_train:
+                raise ValueError(
+                    f"Curriculum lead {h}h has no loaded target "
+                    f"(multi_step_hours={multi_step_hours_train})."
+                )
+        # Flat epoch plan: (phase_lead_hours, target_index, n_steps) per
+        # global epoch — resume (start_epoch) indexes into this plan.
+        epoch_plan = []
+        for h, ep in curriculum:
+            spec = (h, multi_step_hours_train.index(h),
+                    int(round(h * 3600.0 / config.dt)))
+            epoch_plan.extend([spec] * ep)
+        logger.info(
+            f"Rollout curriculum active: "
+            + ", ".join(f"{h}h x{ep}" for h, ep in curriculum)
+            + f" ({len(epoch_plan)} epochs total)"
+        )
+    else:
+        epoch_plan = [(None, None, None)] * n_epochs_total
+
+    def _make_train_step(phase_spec):
+        """Jitted train step for one epoch-plan spec.
+
+        ``(None, None, None)`` = the default path (chained multi-step or
+        legacy single-rollout).  A curriculum spec = single rollout of
+        ``n_steps_phase`` scored against target index ``k_target``.
+        """
+        _, k_target, n_steps_phase = phase_spec
+
+        def _train_step(model, opt_state, ic_spectral, target_carry, forcing_base):
+            def loss_fn(m):
+                physics = make_physics_fn(m, grid)
+                if k_target is not None:
+                    # Curriculum phase: one rollout to the phase lead.
+                    tgt = (target_carry[k_target]
+                           if type(target_carry) is tuple else target_carry)
+                    pred = _rollout_one_segment(
+                        ic_spectral, physics, n_steps_phase, 0.0,
                         forcing_base=forcing_base,
                     )
-                    seg_loss, seg_comp = _spectral_state_loss_components(
-                        state, target_carry[k], grid, sigma,
-                        sigma_full, loss_cfg_train,
+                    return _spectral_state_loss_components(
+                        pred, tgt, grid, sigma, sigma_full, loss_cfg_train,
                     )
-                    total = total + ms_weights[k] * seg_loss
-                    for key in comp_total:
-                        comp_total[key] = comp_total[key] + ms_weights[k] * seg_comp[key]
-                    t_offset = t_offset + float(n_seg) * config.dt
-                inv = 1.0 / ms_weight_sum
-                return total * inv, {k: v * inv for k, v in comp_total.items()}
-            # Legacy single-step path.
-            pred = _rollout_one_segment(
-                ic_spectral, physics, n_steps_rollout, 0.0,
-                forcing_base=forcing_base,
+                if segment_steps:
+                    state = ic_spectral
+                    total = jnp.float32(0.0)
+                    comp_total = {
+                        "mse": jnp.float32(0.0),
+                        "bias": jnp.float32(0.0),
+                        "crps": jnp.float32(0.0),
+                        "spec_crps": jnp.float32(0.0),
+                    }
+                    t_offset = 0.0
+                    for k, n_seg in enumerate(segment_steps):
+                        state = _rollout_one_segment(
+                            state, physics, n_seg, t_offset,
+                            forcing_base=forcing_base,
+                        )
+                        seg_loss, seg_comp = _spectral_state_loss_components(
+                            state, target_carry[k], grid, sigma,
+                            sigma_full, loss_cfg_train,
+                        )
+                        total = total + ms_weights[k] * seg_loss
+                        for key in comp_total:
+                            comp_total[key] = comp_total[key] + ms_weights[k] * seg_comp[key]
+                        t_offset = t_offset + float(n_seg) * config.dt
+                    inv = 1.0 / ms_weight_sum
+                    return total * inv, {k: v * inv for k, v in comp_total.items()}
+                # Legacy single-step path.
+                pred = _rollout_one_segment(
+                    ic_spectral, physics, n_steps_rollout, 0.0,
+                    forcing_base=forcing_base,
+                )
+                return _spectral_state_loss_components(
+                    pred, target_carry, grid, sigma,
+                    sigma_full, loss_cfg_train,
+                )
+            (loss, components), grads = eqx.filter_value_and_grad(
+                loss_fn, has_aux=True,
+            )(model)
+            grad_norm = optax.global_norm(eqx.filter(grads, eqx.is_array))
+            updates, new_opt_state = optimizer.update(
+                eqx.filter(grads, eqx.is_array),
+                opt_state,
+                eqx.filter(model, eqx.is_array),
             )
-            return _spectral_state_loss_components(
-                pred, target_carry, grid, sigma,
-                sigma_full, loss_cfg_train,
-            )
-        (loss, components), grads = eqx.filter_value_and_grad(
-            loss_fn, has_aux=True,
-        )(model)
-        grad_norm = optax.global_norm(eqx.filter(grads, eqx.is_array))
-        updates, new_opt_state = optimizer.update(
-            eqx.filter(grads, eqx.is_array),
-            opt_state,
-            eqx.filter(model, eqx.is_array),
-        )
-        new_model = eqx.apply_updates(model, updates)
-        return new_model, new_opt_state, loss, grad_norm, components
+            new_model = eqx.apply_updates(model, updates)
+            return new_model, new_opt_state, loss, grad_norm, components
 
-    train_step = eqx.filter_jit(_train_step)
+        return eqx.filter_jit(_train_step)
+
+    # One jitted step per distinct phase spec (compile once, reuse across
+    # that phase's epochs AND across chunks — shapes are constant).
+    _step_cache: dict = {}
+
+    def _train_step_for(spec):
+        if spec not in _step_cache:
+            _step_cache[spec] = _make_train_step(spec)
+        return _step_cache[spec]
+
+    def _iter_epoch_data():
+        """Yield (ic_states, target_carries, sample_forcings) chunks."""
+        if chunk_loader is None:
+            yield ic_states, target_carries, sample_forcings
+        else:
+            yield from chunk_loader()
 
     best_loss = float("inf")
     patience_counter = 0
     early_stop_patience = int(getattr(config, "early_stop_patience", 0) or 0)
     early_stop_min_delta = float(getattr(config, "early_stop_min_delta", 1.0e-3))
 
-    if start_epoch >= config.n_epochs:
+    if start_epoch >= n_epochs_total:
         logger.info(
-            f"Resume: start_epoch={start_epoch} >= n_epochs={config.n_epochs}; "
+            f"Resume: start_epoch={start_epoch} >= n_epochs={n_epochs_total}; "
             f"skipping training loop (already complete)."
         )
         return model, loss_history
 
-    for epoch in range(start_epoch, config.n_epochs):
+    for epoch in range(start_epoch, n_epochs_total):
+        phase_spec = epoch_plan[epoch]
+        train_step = _train_step_for(phase_spec)
         epoch_loss = 0.0
         epoch_components = {"mse": 0.0, "bias": 0.0, "crps": 0.0, "spec_crps": 0.0}
         t0 = time.time()
         grad_norm_val = 0.0
 
-        for sample_idx, (ic, target) in enumerate(zip(ic_states, target_carries)):
-            model, opt_state, loss, grad_norm, components = train_step(
-                model, opt_state, ic, target,
-                sample_forcings[sample_idx] if sample_forcings is not None
-                else None,
-            )
-
-            # --- NaN / Inf detection (outside JIT, values are materialized) ---
-            loss_val = float(loss)
-            if jnp.isnan(loss) or jnp.isinf(loss):
-                raise RuntimeError(
-                    f"NaN/Inf loss detected at epoch {epoch}, sample {sample_idx} "
-                    f"(loss={loss_val}). "
-                    "Check CFL conditions, parameter bounds, and input data."
-                )
-            grad_norm_val = float(grad_norm)
-            if jnp.isnan(grad_norm) or jnp.isinf(grad_norm):
-                raise RuntimeError(
-                    f"NaN/Inf gradient detected at epoch {epoch}, sample "
-                    f"{sample_idx} (grad_norm={grad_norm_val}). "
-                    "Consider reducing learning rate or adding gradient clipping."
+        sample_idx = -1
+        for chunk_ics, chunk_targets, chunk_forcings in _iter_epoch_data():
+            for chunk_i, (ic, target) in enumerate(
+                    zip(chunk_ics, chunk_targets)):
+                sample_idx += 1
+                model, opt_state, loss, grad_norm, components = train_step(
+                    model, opt_state, ic, target,
+                    chunk_forcings[chunk_i] if chunk_forcings is not None
+                    else None,
                 )
 
-            epoch_loss += loss_val
-            for key in epoch_components:
-                epoch_components[key] += float(components[key])
+                # --- NaN / Inf detection (outside JIT, values materialized) ---
+                loss_val = float(loss)
+                if jnp.isnan(loss) or jnp.isinf(loss):
+                    raise RuntimeError(
+                        f"NaN/Inf loss detected at epoch {epoch}, sample {sample_idx} "
+                        f"(loss={loss_val}). "
+                        "Check CFL conditions, parameter bounds, and input data."
+                    )
+                grad_norm_val = float(grad_norm)
+                if jnp.isnan(grad_norm) or jnp.isinf(grad_norm):
+                    raise RuntimeError(
+                        f"NaN/Inf gradient detected at epoch {epoch}, sample "
+                        f"{sample_idx} (grad_norm={grad_norm_val}). "
+                        "Consider reducing learning rate or adding gradient clipping."
+                    )
 
-        n_samples = max(len(ic_states), 1)
+                epoch_loss += loss_val
+                for key in epoch_components:
+                    epoch_components[key] += float(components[key])
+
+        n_samples = max(sample_idx + 1, 1)
         avg_loss = epoch_loss / n_samples
         avg_components = {k: v / n_samples for k, v in epoch_components.items()}
         loss_history.append(avg_loss)
 
-        if epoch % config.log_every == 0 or epoch == config.n_epochs - 1:
+        if epoch % config.log_every == 0 or epoch == n_epochs_total - 1:
             elapsed = time.time() - t0
+            _lead_tag = (f" [lead={phase_spec[0]}h]"
+                         if phase_spec[0] is not None else "")
             logger.info(
-                f"Epoch {epoch:4d}: loss={avg_loss:.6f} "
+                f"Epoch {epoch:4d}{_lead_tag}: loss={avg_loss:.6f} "
                 f"(mse={avg_components['mse']:.4f} "
                 f"bias={avg_components['bias']:.4f} "
                 f"crps={avg_components['crps']:.4f} "
@@ -2074,8 +2303,12 @@ def _train_spectral_loop(
 
         # AIMIP-style early stopping.  Stop when the rolling loss has
         # not improved by more than ``early_stop_min_delta`` for
-        # ``early_stop_patience`` consecutive epochs.
-        if early_stop_patience > 0:
+        # ``early_stop_patience`` consecutive epochs.  DISABLED under a
+        # rollout curriculum: loss magnitudes are not comparable across
+        # phases (longer lead = bigger loss) and a stop would silently
+        # skip the remaining — most stability-critical — phases; phase
+        # epoch counts are the explicit budget instead.
+        if early_stop_patience > 0 and not curriculum:
             if best_loss - avg_loss > early_stop_min_delta:
                 best_loss = avg_loss
                 patience_counter = 0
@@ -2091,6 +2324,49 @@ def _train_spectral_loop(
                     break
 
     return model, loss_history
+
+
+def _make_chunk_loader(config, grid, sigma, cache_dir,
+                       surface_forcing_path, forcing_cache_path):
+    """Streaming/chunked data source for DENSE all-years training.
+
+    Partitions ``config.windows`` into groups of ``config.chunk_windows``
+    windows; each chunk is loaded (ERA5 zarr read + regrid), trained on,
+    and freed before the next — so a dense sample set that would not fit
+    in host RAM as one list (ACE2 trains on every 6-hour snapshot of
+    decades; one T63 snapshot-carry is ~MBs) streams through a bounded
+    footprint. Chunks share sample shapes, so the jitted train step is
+    reused across chunks (no retrace).
+
+    Returns ``(chunk_loader, n_samples_total)`` for
+    ``_train_spectral_loop(chunk_loader=..., n_samples_total=...)``.
+    """
+    windows = [tuple(int(x) for x in w[:3]) for w in (config.windows or ())]
+    if not windows:
+        raise ValueError("chunk_windows > 0 requires config.windows.")
+    cw = int(config.chunk_windows)
+    groups = [tuple(windows[i:i + cw]) for i in range(0, len(windows), cw)]
+    # Pairs per window = n_days * snapshots/day; the loader's ERA5 cadence
+    # is fixed at 6 h (TrainingERA5Config(dt_hours=6)) -> 4/day.
+    _SNAPSHOTS_PER_DAY = 4
+    n_total = sum(n_days * _SNAPSHOTS_PER_DAY for (_, _, n_days) in windows)
+    logger.info(
+        f"Chunked training data: {len(windows)} windows -> "
+        f"{len(groups)} chunks of <= {cw} windows "
+        f"({n_total} samples/epoch)"
+    )
+
+    def _chunks():
+        for group in groups:
+            ics, tgts, times = load_training_data(
+                config, grid, sigma, cache_dir, windows=group,
+            )
+            forcings = _maybe_build_sample_forcings(
+                surface_forcing_path, times, grid, forcing_cache_path,
+            )
+            yield ics, tgts, forcings
+
+    return _chunks, n_total
 
 
 def _maybe_build_sample_forcings(surface_forcing_path, ic_times, grid,
@@ -2168,6 +2444,18 @@ def train_neural_gcm_spectral(
                 f"{config.sfno_n_blocks} blocks, {n_p:,} params")
 
     sfno, start_epoch = maybe_resume_model(sfno, resume_from_dir)
+
+    if int(config.chunk_windows or 0) > 0:
+        chunk_loader, n_total = _make_chunk_loader(
+            config, grid, sigma, cache_dir,
+            surface_forcing_path, forcing_cache_path,
+        )
+        return _train_spectral_loop(
+            sfno, make_sfno_spectral_physics,
+            grid, sigma, None, None, config,
+            start_epoch=start_epoch,
+            chunk_loader=chunk_loader, n_samples_total=n_total,
+        )
 
     ic_states, target_carries, ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
@@ -2532,6 +2820,18 @@ def train_column_mlp_spectral(
                 f"{n_layers} layers, {n_p:,} params")
 
     nn_phys, start_epoch = maybe_resume_model(nn_phys, resume_from_dir)
+
+    if int(config.chunk_windows or 0) > 0:
+        chunk_loader, n_total = _make_chunk_loader(
+            config, grid, sigma, cache_dir,
+            surface_forcing_path, forcing_cache_path,
+        )
+        return _train_spectral_loop(
+            nn_phys, make_column_mlp_spectral_physics,
+            grid, sigma, None, None, config,
+            start_epoch=start_epoch,
+            chunk_loader=chunk_loader, n_samples_total=n_total,
+        )
 
     ic_states, target_carries, ic_times = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,

@@ -65,10 +65,11 @@ def _write_spatially_varying_surfdata(path, nlat=8, nlon=16, nlev=7):
     )
 
 
-def _fake_driver(grid, f_land, start_day=196.0):
+def _fake_driver(grid, f_land, start_day=196.0, start_year=2015.0):
     """Minimal duck-typed ModelDriver for calling _surfdata_land_albedo unbound."""
     return SimpleNamespace(grid=grid, _f_land=f_land,
-                           config=SimpleNamespace(start_day=start_day))
+                           config=SimpleNamespace(start_day=start_day,
+                                                  start_year=start_year))
 
 
 def test_surfdata_albedo_is_spatial_finite_and_bounded(tmp_path):
