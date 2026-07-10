@@ -1688,6 +1688,16 @@ class LatLonCGridOceanConfig(NamedTuple):
     # the barotropic momentum step (see that module's wiring note). Appended at the
     # NamedTuple tail so positional construction for legacy callers is preserved.
     tidal_forcing: TidalForcingConfig = TidalForcingConfig()
+    # --- Jansen–Held (2014) energy backscatter (OPT-IN negative viscosity) ---
+    # Nested opt-in config (like `gm_redi`/`tidal_forcing`): default None ⇒
+    # BIT-IDENTICAL (the momentum RHS skips the whole block when None or when
+    # `backscatter.enabled` is False). When enabled it adds the diagnostic-E
+    # (no-carry), CFL-bounded negative-Laplacian tendency
+    # (ocean.physics.lateral_mixing.backscatter.diagnostic_backscatter_cgrid)
+    # to du/dt, dv/dt in _bc_horizontal_viscosity's caller, sourced from the
+    # resolved biharmonic/Leith dissipation. Appended at the NamedTuple tail so
+    # positional construction for legacy callers is preserved.
+    backscatter: object = None   # BackscatterConfig or None
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
