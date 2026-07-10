@@ -183,7 +183,7 @@ class TestExtVectorDgridDispatch:
             ext_vector_dgrid(
                 utmp, utmp, grid.duogrid,
                 grid.cos_angle, grid.sin_angle,
-                cdgrid.cos_sg[:, :, :, 4], cdgrid.rsin2_cell,
+                cdgrid.cos_sg[:, :, :, 4],
                 halo=H, basis="typo")
 
     def test_covariant_default_unchanged(self, w2_setup):
@@ -200,7 +200,7 @@ class TestExtVectorDgridDispatch:
         vtmp = (wv[:, :-1, :] + wv[:, 1:, :]) / (
             dy_v[:, :-1, :] + dy_v[:, 1:, :])
         args = (utmp, vtmp, dg, grid.cos_angle, grid.sin_angle,
-                cdgrid.cos_sg[:, :, :, 4], cdgrid.rsin2_cell)
+                cdgrid.cos_sg[:, :, :, 4])
         ud_default, vd_default = ext_vector_dgrid(*args, halo=H)
         ud_cov, vd_cov = ext_vector_dgrid(*args, halo=H, basis="covariant")
         np.testing.assert_array_equal(

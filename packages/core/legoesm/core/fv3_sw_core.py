@@ -90,7 +90,6 @@ def _pad_halo_dgrid_for_ppm(u_d, v_d, cdgrid, halo: int = 2,
     vtmp_2nd = (wv[:, :-1, :] + wv[:, 1:, :]) / (
         dy_v[:, :-1, :] + dy_v[:, 1:, :])  # (6, n, n)
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
-    rsin2 = cdgrid.rsin2_cell
 
     # 2026-07-10 FIX (FB panel-edge instability root cause): the halo basis
     # must match the wind convention of the inputs.  The model's prognostic
@@ -103,7 +102,7 @@ def _pad_halo_dgrid_for_ppm(u_d, v_d, cdgrid, halo: int = 2,
     u_d_full, v_d_full = ext_vector_dgrid(
         utmp_2nd, vtmp_2nd, dg,
         grid.cos_angle, grid.sin_angle,
-        cos_sg5, rsin2,
+        cos_sg5,
         halo=h,
         basis=basis,
     )  # u_d_full: (6, n+2h, n+2h-1); v_d_full: (6, n+2h-1, n+2h)
@@ -148,14 +147,13 @@ def _pad_halo_uc_vc_via_d2a2c(u_d, v_d, cdgrid):
     vtmp_2nd = (wv[:, :-1, :] + wv[:, 1:, :]) / (
         dy_v[:, :-1, :] + dy_v[:, 1:, :])  # (6, n, n)
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
-    rsin2 = cdgrid.rsin2_cell
 
     # Covariant halo: the FB-internal winds are true FV3 covariant post the
     # 2026-07-10 entry conversion (see _pad_halo_dgrid_for_ppm note).
     u_d_full, v_d_full = ext_vector_dgrid(
         utmp_2nd, vtmp_2nd, dg,
         grid.cos_angle, grid.sin_angle,
-        cos_sg5, rsin2,
+        cos_sg5,
         halo=h,
         basis="covariant",
     )  # u_d_full: (6, n+2h, n+2h-1); v_d_full: (6, n+2h-1, n+2h)
@@ -484,7 +482,7 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
     u_d_full, v_d_full = ext_vector_dgrid(
         utmp_2nd, vtmp_2nd, dg,
         grid.cos_angle, grid.sin_angle,
-        cos_sg5, rsin2,
+        cos_sg5,
         halo=h,
     )  # u_d_full: (6, n+2h, n+2h-1), v_d_full: (6, n+2h-1, n+2h)
 

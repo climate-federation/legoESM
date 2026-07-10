@@ -1267,7 +1267,6 @@ def ext_vector_dgrid(
     cos_angle: jax.Array,
     sin_angle: jax.Array,
     cosa_s: jax.Array,
-    rsin2: jax.Array,
     halo: int = 2,
     basis: str = "covariant",
 ) -> tuple[jax.Array, jax.Array]:
@@ -1308,7 +1307,6 @@ def ext_vector_dgrid(
     cos_angle, sin_angle : (6, n, n) — grid rotation angle at A-grid
     cosa_s : (6, n, n) — cos(angle) between grid axes (non-orthogonality;
         unused for ``basis="orthogonal"``)
-    rsin2 : (6, n, n) — 1/sin²(angle) (kept for signature stability; unused)
     halo : int — halo width (default 2)
     basis : str — ``"covariant"`` or ``"orthogonal"`` (see above)
 

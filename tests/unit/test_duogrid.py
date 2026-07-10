@@ -545,9 +545,8 @@ class TestExtVector:
         utmp = jnp.ones((6, n, n))
         vtmp = jnp.zeros((6, n, n))
         cosa_s = cdgrid.cos_sg[:, :, :, 4]
-        rsin2 = cdgrid.rsin2_cell
         ud, vd = ext_vector_dgrid(utmp, vtmp, dg, grid.cos_angle,
-                                   grid.sin_angle, cosa_s, rsin2, halo=h)
+                                   grid.sin_angle, cosa_s, halo=h)
         n_p = n + 2 * h
         assert ud.shape == (6, n_p, n_p - 1)
         assert vd.shape == (6, n_p - 1, n_p)
