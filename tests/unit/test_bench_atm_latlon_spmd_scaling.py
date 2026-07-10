@@ -46,3 +46,41 @@ def test_main_rejects_device_oversubscription(monkeypatch):
          "--nlev", "4", "--steps", "2"])
     with pytest.raises(SystemExit):
         mod.main()
+
+
+def test_main_rejects_negative_segment_steps(monkeypatch):
+    """--segment-steps < 0 must SystemExit, not silently fall back."""
+    mod = _load()
+    monkeypatch.setattr(
+        "sys.argv",
+        ["bench", "--n-devices", "1", "--n-lat", "8", "--n-lon", "8",
+         "--nlev", "4", "--steps", "2", "--segment-steps", "-1"])
+    with pytest.raises(SystemExit):
+        mod.main()
+
+
+def test_main_segment_mode_single_device(tmp_path, monkeypatch):
+    """M2b --segment-steps lane end-to-end (nd=1, tiny grid): the record
+    carries the segment receipt fields (segment_mode, per_block_ms, per-step
+    derivation, metadata.extra facts)."""
+    import json
+    mod = _load()
+    out = tmp_path / "seg.jsonl"
+    monkeypatch.setattr(
+        "sys.argv",
+        ["bench", "--n-devices", "1", "--n-lat", "8", "--n-lon", "8",
+         "--nlev", "4", "--steps", "3", "--warmup", "1",
+         "--segment-steps", "2", "--dt", "60", "--out", str(out)])
+    assert mod.main() == 0
+    rec = json.loads(out.read_text().strip().splitlines()[-1])
+    assert rec["segment_mode"] is True
+    assert rec["segment_steps"] == 2
+    assert len(rec["per_block_ms"]) == 3
+    assert len(rec["per_step_ms"]) == 3
+    # per-step numbers derive from whole blocks: block_ms / segment_steps.
+    assert rec["per_step_ms"][1] == pytest.approx(
+        rec["per_block_ms"][1] / 2.0, rel=0.05)
+    assert rec["metadata"]["extra"]["segment_mode"] is True
+    assert rec["metadata"]["extra"]["segment_steps"] == 2
+    # nd=1: no mesh, no geometry stacks -> residency field is None.
+    assert rec["metadata"]["extra"]["geometry_bytes_per_device"] is None
