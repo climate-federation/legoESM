@@ -42,12 +42,17 @@ def _synthetic_inputs(*, n_arch, temp, precip, lit, a_wood, n_samples, dt_days):
     from legoesm.land.carbon.fast_analytic import FastAnalyticInputs
 
     T = jnp.full((n_arch, n_samples), float(temp))
+    # The live-pool fields are irrelevant to analytic_som_soc; fill placeholders so the
+    # (now 10-field) NamedTuple constructs.
+    z = jnp.zeros((n_arch,))
     return FastAnalyticInputs(
         lit_to_som_annual=jnp.full((n_arch,), float(lit)),
         a_wood_annual=jnp.full((n_arch,), float(a_wood)),
         soil_T_traj=T,
         precip=jnp.full((n_arch,), float(precip)),
         dt_days=float(dt_days),
+        npp_pos_annual=z, is_woody=jnp.ones((n_arch,)), is_evergreen=z,
+        live_ref_C_fol=z, live_ref_C_root=z, live_ref_C_wood=z,
     )
 
 
@@ -131,12 +136,15 @@ def test_analytic_som_soc_grad_finite_nonzero():
     n_arch, n_samples = 2, 240
     phase = np.linspace(0.0, 2 * np.pi, n_samples, endpoint=False)
     temp = 276.0 + 14.0 * np.cos(phase)                # crosses freezing
+    _z = jnp.zeros((n_arch,))
     pre = FastAnalyticInputs(
         lit_to_som_annual=jnp.full((n_arch,), 250.0),
         a_wood_annual=jnp.full((n_arch,), 300.0),
         soil_T_traj=jnp.asarray(np.tile(temp, (n_arch, 1))),
         precip=jnp.full((n_arch,), 3e-5),
-        dt_days=1.0 / 24.0)
+        dt_days=1.0 / 24.0,
+        npp_pos_annual=_z, is_woody=jnp.ones((n_arch,)), is_evergreen=_z,
+        live_ref_C_fol=_z, live_ref_C_root=_z, live_ref_C_wood=_z)
 
     defaults = jnp.asarray([float(getattr(cfg0, f)) for f in SOM_FIELDS])
 
@@ -164,12 +172,15 @@ def test_som_freeze_floor_lowers_cold_soc():
     phase = np.linspace(0.0, 2 * np.pi, n_samples, endpoint=False)
     temp = 272.0 + 12.0 * np.cos(phase)                # cold, frozen much of year
     from legoesm.land.carbon.fast_analytic import FastAnalyticInputs
+    _z = jnp.zeros((1,))
     pre = FastAnalyticInputs(
         lit_to_som_annual=jnp.asarray([250.0]),
         a_wood_annual=jnp.asarray([300.0]),
         soil_T_traj=jnp.asarray(temp[None, :]),
         precip=jnp.asarray([3e-5]),
-        dt_days=1.0 / 24.0)
+        dt_days=1.0 / 24.0,
+        npp_pos_annual=_z, is_woody=jnp.ones((1,)), is_evergreen=_z,
+        live_ref_C_fol=_z, live_ref_C_root=_z, live_ref_C_wood=_z)
     base = CarbonConfig(scheme="differland")
     soc_lo = float(np.asarray(analytic_som_soc(pre, base._replace(som_freeze_floor=0.02)))[0])
     soc_hi = float(np.asarray(analytic_som_soc(pre, base._replace(som_freeze_floor=0.25)))[0])

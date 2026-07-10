@@ -384,6 +384,42 @@ def som_decomposition_rate(
     return _effective_rate(_som_decomp_modifier(T, precip, config) * tor_som, dt_days)
 
 
+def sequential_allocation(
+    npp_pos: jnp.ndarray,
+    f_fol: jnp.ndarray,
+    f_lab: jnp.ndarray,
+    f_root: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """DALEC990 sequential NPP partition: absolute allocation fluxes
+    ``(A_fol, A_lab, A_root_base, A_wood_raw)`` from a positive NPP throughput.
+
+    The single definition of the DifferLand allocation cascade, shared by the
+    prognostic step (:func:`step_carbon_differland`, which multiplies the per-day
+    ``NPP_pos`` rate) and the offline closed-form live-pool equilibrium
+    (:func:`legoesm.land.carbon.live_pool_forward.compute_live_pools`, which
+    multiplies the ANNUAL allocatable NPP) -- one cascade, never re-derived.  Each
+    fraction takes a slice of the REMAINDER after the previous pool, so the four
+    fluxes sum to ``npp_pos`` EXACTLY (telescoping)::
+
+        A_fol       = npp_pos * f_fol
+        A_lab       = (npp_pos - A_fol) * f_lab
+        A_root_base = (npp_pos - A_fol - A_lab) * f_root
+        A_wood_raw  = npp_pos - A_fol - A_lab - A_root_base      # = the remainder
+
+    ``A_wood_raw`` is the STRUCTURAL remainder BEFORE the woody/herbaceous routing
+    (the caller decides whether it forms wood or is invested belowground); it is
+    ``>= 0`` for ``npp_pos >= 0`` and fractions in ``[0, 1]``.  All arguments
+    broadcast together; ``f_*`` may be static Python floats (production) or traced
+    ``CarbonConfig`` overrides (calibration).  Sign convention: every returned flux
+    is a POSITIVE carbon INPUT to its pool [same units as ``npp_pos``].
+    """
+    A_fol = npp_pos * f_fol
+    A_lab = (npp_pos - A_fol) * f_lab
+    A_root_base = (npp_pos - A_fol - A_lab) * f_root
+    A_wood_raw = npp_pos - A_fol - A_lab - A_root_base
+    return A_fol, A_lab, A_root_base, A_wood_raw
+
+
 # ===================================================================
 # DifferLand prognostic step
 # ===================================================================
@@ -467,10 +503,13 @@ def step_carbon_differland(
     # Allocation only occurs when NPP > 0 (growth); maintenance losses are
     # already accounted for in R_auto_day and flow directly to atmosphere.
     NPP_pos = jnp.maximum(NPP_day, 0.0)
-    A_fol = NPP_pos * config.f_fol
-    A_lab = (NPP_pos - A_fol) * config.f_lab
-    A_root_base = (NPP_pos - A_fol - A_lab) * config.f_root
-    A_wood_raw = jnp.maximum(NPP_pos - A_fol - A_lab - A_root_base, 0.0)
+    # Shared DALEC cascade (identical to the closed-form live-pool forward's
+    # allocation) -- the telescoping A_wood_raw = NPP_pos - A_fol - A_lab -
+    # A_root_base is the same expression as before, so the pool update is
+    # byte-identical; only a defensive non-negativity clip is applied here.
+    A_fol, A_lab, A_root_base, A_wood_raw = sequential_allocation(
+        NPP_pos, config.f_fol, config.f_lab, config.f_root)
+    A_wood_raw = jnp.maximum(A_wood_raw, 0.0)
     # Woodiness is a static per-PFT flag -> Python branch (feature-gating
     # exception, not a data-dependent jnp.where).  Herbaceous PFTs (grass,
     # crop, tundra) have no wood: the structural fraction that would form wood

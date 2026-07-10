@@ -1061,6 +1061,40 @@ class TestWoodyAllocation(unittest.TestCase):
                                 err_msg=f"allocation not closed (woody={woody})")
 
 
+class TestSequentialAllocation(unittest.TestCase):
+    """Direct test of the shared DALEC allocation helper (also used by the closed-form
+    live-pool forward) -- the exact telescoping partition step_carbon_differland uses."""
+
+    def test_partition_matches_hand_value_and_closes(self):
+        from legoesm.land.carbon.carbon_cycle import sequential_allocation
+        npp = jnp.asarray([100.0, 0.0])
+        A_fol, A_lab, A_root_base, A_wood_raw = sequential_allocation(
+            npp, 0.15, 0.10, 0.25)
+        # a_fol=.15; a_lab=(1-.15)*.10=.085; a_root_base=(1-.15)(1-.10)*.25=.19125;
+        # a_wood_raw = 1 - .15 - .085 - .19125 = .57375 (of NPP).
+        npt.assert_allclose(A_fol, [15.0, 0.0], rtol=1e-12)
+        npt.assert_allclose(A_lab, [8.5, 0.0], rtol=1e-12)
+        npt.assert_allclose(A_root_base, [19.125, 0.0], rtol=1e-12)
+        npt.assert_allclose(A_wood_raw, [57.375, 0.0], rtol=1e-12)
+        # The four fluxes sum to NPP EXACTLY (telescoping remainder).
+        npt.assert_allclose(A_fol + A_lab + A_root_base + A_wood_raw, npp,
+                            rtol=0, atol=0)
+
+    def test_matches_step_carbon_allocation(self):
+        """The helper reproduces the step's absolute allocation fluxes (shared numerics)."""
+        from legoesm.land.carbon.carbon_cycle import sequential_allocation
+        cfg = _default_config(scheme="differland", woody=True)
+        diag = TestWoodyAllocation()._diag(woody=True)
+        npp_pos = jnp.maximum(diag.npp, 0.0)
+        A_fol, A_lab, A_root_base, A_wood_raw = sequential_allocation(
+            npp_pos, cfg.f_fol, cfg.f_lab, cfg.f_root)
+        npt.assert_allclose(A_fol, diag.a_fol, rtol=1e-12)
+        npt.assert_allclose(A_lab, diag.a_lab, rtol=1e-12)
+        # Woody: a_root == A_root_base, a_wood == max(A_wood_raw, 0).
+        npt.assert_allclose(A_root_base, diag.a_root, rtol=1e-12)
+        npt.assert_allclose(jnp.maximum(A_wood_raw, 0.0), diag.a_wood, rtol=1e-12)
+
+
 # ===================================================================
 # Seasonal Cycle
 # ===================================================================

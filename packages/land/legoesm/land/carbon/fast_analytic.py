@@ -76,7 +76,10 @@ _K_FLOOR_PER_YR = 1e-12
 
 
 class FastAnalyticInputs(NamedTuple):
-    """Per-archetype, SOM-parameter-INDEPENDENT inputs for :func:`analytic_som_soc`.
+    """Per-archetype, tunable-parameter-INDEPENDENT inputs for the fast closed-form
+    forwards -- the SOM-SOC cascade (:func:`analytic_som_soc`) AND the live-pool
+    biomass/LAI equilibrium
+    (:func:`legoesm.land.carbon.live_pool_forward.build_live_pool_forward`).
 
     Recorded ONCE by
     :func:`legoesm.land.carbon.global_init.precompute_fast_analytic_inputs` from a
@@ -109,12 +112,46 @@ class FastAnalyticInputs(NamedTuple):
     dt_days : float
         Sub-daily timestep [day], used both by ``_effective_rate`` and to weight
         the per-step turnover into an annual total (``k_X = sum_t r_X * dt_days``).
+    npp_pos_annual : (n_arch,) [gC/m2/yr]
+        Stationary annual ALLOCATABLE NPP ``sum_t max(NPP_day, 0) dt`` -- the
+        positive net primary production the model PARTITIONS in
+        ``step_carbon_differland`` (``A_x = a_x * max(NPP_day, 0)``).  The frozen
+        driver of the closed-form LIVE pools
+        (:func:`legoesm.land.carbon.live_pool_forward.compute_live_pools`): NPP is
+        upstream of the trained allocation/residence/LCMA leaves, so freezing it at
+        the defaults is EXACT for the DIRECT pool effect their gradient follows
+        (mirroring ``lit_to_som_annual`` and the SIF forward's frozen leaf state); a
+        SECOND-ORDER pools->LAI/respiration->NPP feedback is omitted (a documented
+        partial gradient, like ``Q10_het_exp`` in the fast SOM set -- see
+        ``live_pool_forward``).
+    is_woody : (n_arch,) [-]
+        Per-archetype woody flag (``1.0`` woody / ``0.0`` herbaceous), the STATIC
+        per-group ``CarbonConfig.woody`` used to route the structural allocation
+        remainder in the live-pool forward (woody -> wood; herbaceous -> roots).
+    is_evergreen : (n_arch,) [-]
+        Per-archetype evergreen flag (``1.0`` evergreen / ``0.0`` deciduous), the STATIC
+        per-group ``CarbonConfig.evergreen`` selecting the live-pool leaf-turnover branch
+        (continuous ``1/leaf_lifespan`` vs the DALEC990 Gaussian leaf-fall year-integral).
+    live_ref_C_fol, live_ref_C_root, live_ref_C_wood : each (n_arch,) [gC/m2]
+        The default-parameter spin-up's ANNUAL-MEAN equilibrium live pools (averaged
+        over the recorded stationary year), the REFERENCE the closed-form live-pool
+        forward is checked against (the biomass/LAI fidelity gate) -- the live-pool
+        analogue of ``som_total_equilibrium`` for SOC.  Annual-MEAN (not an
+        end-of-year snapshot) because the closed form is a throughput x residence
+        annual-mean stock, so the fair comparison for the seasonal foliage pool is
+        the annual mean.
     """
     lit_to_som_annual: jax.Array
     a_wood_annual: jax.Array
     soil_T_traj: jax.Array
     precip: jax.Array
     dt_days: float
+    npp_pos_annual: jax.Array
+    is_woody: jax.Array
+    is_evergreen: jax.Array
+    live_ref_C_fol: jax.Array
+    live_ref_C_root: jax.Array
+    live_ref_C_wood: jax.Array
 
 
 def _forward_substitute_cascade(

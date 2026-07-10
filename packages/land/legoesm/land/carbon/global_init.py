@@ -792,15 +792,22 @@ def precompute_fast_analytic_inputs(
     * the litter -> SOM decomposition flux ``lit_to_som`` and the NPP-to-wood
       allocation ``a_wood`` (the CWD->SOM input driver the reference reset
       :func:`~legoesm.land.carbon.spinup.analytic_slow_pool_equilibrium` uses),
-      summed to annual [gC/m2/yr].
+      summed to annual [gC/m2/yr],
+    * the model's own annual ALLOCATABLE NPP ``npp_pos_annual = sum_t max(NPP_day,
+      0) dt`` [gC/m2/yr], the per-group ``is_woody`` / ``is_evergreen`` flags, and the
+      ANNUAL-MEAN equilibrium LIVE pools ``live_ref_C_fol/C_root/C_wood`` [gC/m2] -- the
+      inputs + reference for the closed-form live-pool (biomass/LAI) forward
+      (:func:`legoesm.land.carbon.live_pool_forward.build_live_pool_forward`).
 
-    Because the tunable SOM parameters have NO feedback onto GPP / litterfall /
-    soil energy, this trajectory + these inputs are independent of them, so
-    :func:`~legoesm.land.carbon.fast_analytic.analytic_som_soc` can vary the SOM
-    parameters at ~zero cost while reproducing the model's equilibrium SOC at the
-    defaults.  The stationary year is re-integrated from the RETURNED equilibrium
-    so the recorded turnover is evaluated at exactly the equilibrium pools (a
-    tight match to the returned ``som_total``).
+    Because the tunable SOM AND live-pool (allocation/residence/LCMA) parameters have
+    NO feedback onto GPP / litterfall / soil energy / NPP, this trajectory + these
+    inputs are independent of them, so
+    :func:`~legoesm.land.carbon.fast_analytic.analytic_som_soc` and the live-pool
+    forward can vary those parameters at ~zero cost while reproducing the model's
+    equilibrium at the defaults.  The stationary year is re-integrated from the
+    RETURNED equilibrium so the recorded turnover / annual-mean pools are evaluated at
+    exactly the equilibrium (a tight match to the returned ``som_total`` and the
+    live-pool reference).
 
     Parameters mirror :func:`equilibrate_archetypes` (the precompute should use a
     healthy ``n_spinup`` for a well-settled equilibrium; it is a ONE-TIME forward
@@ -838,6 +845,19 @@ def precompute_fast_analytic_inputs(
     a_wood_annual = np.zeros(n_arch)
     soil_T_traj = np.zeros((n_arch, steps_per_year))
     real_som = np.zeros(n_arch)
+    # Live-pool (biomass/LAI) forward inputs + reference (all param-independent):
+    #   npp_pos_annual -- the model's own annual ALLOCATABLE NPP driving the pools;
+    #   is_woody       -- the static per-group woody flag routing the structural
+    #                     allocation remainder;
+    #   live_ref_*     -- the spin-up's ANNUAL-MEAN equilibrium live pools, the
+    #                     reference the closed-form live-pool forward is checked
+    #                     against (the biomass/LAI fidelity gate).
+    npp_pos_annual = np.zeros(n_arch)
+    is_woody = np.zeros(n_arch)
+    is_evergreen = np.zeros(n_arch)
+    live_ref_C_fol = np.zeros(n_arch)
+    live_ref_C_root = np.zeros(n_arch)
+    live_ref_C_wood = np.zeros(n_arch)
 
     for batch in batches:
         g_idx = np.asarray(batch.g_idx, int)
@@ -856,28 +876,44 @@ def precompute_fast_analytic_inputs(
             remat=False)
 
         # Record ONE stationary year from the verified equilibrium: the top-soil
-        # temperature the modifier sees + the param-independent SOM inputs.  The
-        # state/carbon evolve through the byte-identical coupled step_fn; only the
-        # recorded diagnostics differ from the spin-up scans.
+        # temperature the modifier sees + the param-independent SOM/live-pool inputs.
+        # The state/carbon evolve through the byte-identical coupled step_fn; only the
+        # recorded diagnostics differ from the spin-up scans.  ``max(diag.npp, 0)`` is
+        # the model's OWN allocatable NPP (NPP_pos in step_carbon_differland), and the
+        # per-step live pools ``cb_new.C_fol/C_root/C_wood`` are averaged over the year.
         def _record_step(carry, step_idx):
             st, cb = carry
             doy, hour = step_doy_hour(step_idx, dt)
             forcing = batch.forcing_fn(doy, hour)
             st_new, cb_new, diag = step_fn(st, cb, forcing, doy)
+            npp_pos = jnp.maximum(diag.npp, 0.0)             # gC/m2/day allocatable NPP
             return (st_new, cb_new), (
-                st_new.T_soil[:, 0], diag.lit_to_som, diag.a_wood)
+                st_new.T_soil[:, 0], diag.lit_to_som, diag.a_wood,
+                npp_pos, cb_new.C_fol, cb_new.C_root, cb_new.C_wood)
 
-        _carry, (t_seq, lit_seq, awood_seq) = jax.lax.scan(
+        _carry, (t_seq, lit_seq, awood_seq,
+                 npp_seq, cfol_seq, croot_seq, cwood_seq) = jax.lax.scan(
             _record_step, (final_state, final_carbon),
             jnp.arange(batch.steps_per_year))
-        # Annual SOM inputs [gC/m2/yr] = sum over the year of the per-day rate.
+        # Annual SOM/NPP inputs [gC/m2/yr] = sum over the year of the per-day rate;
+        # live pools = ANNUAL MEAN over the stationary year [gC/m2].
         lit_ann = jnp.sum(lit_seq * dt_days, axis=0)         # (ncol_g,)
         awood_ann = jnp.sum(awood_seq * dt_days, axis=0)     # (ncol_g,)
+        npp_ann = jnp.sum(npp_seq * dt_days, axis=0)         # (ncol_g,)
+        cfol_mean = jnp.mean(cfol_seq, axis=0)               # (ncol_g,)
+        croot_mean = jnp.mean(croot_seq, axis=0)             # (ncol_g,)
+        cwood_mean = jnp.mean(cwood_seq, axis=0)             # (ncol_g,)
 
         lit_to_som_annual[g_idx] = np.asarray(lit_ann)
         a_wood_annual[g_idx] = np.asarray(awood_ann)
         soil_T_traj[g_idx, :] = np.asarray(t_seq).T          # (ncol_g, steps_per_year)
         real_som[g_idx] = np.asarray(som_total(final_carbon))
+        npp_pos_annual[g_idx] = np.asarray(npp_ann)
+        is_woody[g_idx] = float(bool(batch.config.carbon.woody))
+        is_evergreen[g_idx] = float(bool(batch.config.carbon.evergreen))
+        live_ref_C_fol[g_idx] = np.asarray(cfol_mean)
+        live_ref_C_root[g_idx] = np.asarray(croot_mean)
+        live_ref_C_wood[g_idx] = np.asarray(cwood_mean)
 
     # Per-archetype precip [kg/m2/s] matches the archetype forcing
     # (map_yr / seconds_per_year -- constant over the year, drives f_moist).
@@ -887,7 +923,13 @@ def precompute_fast_analytic_inputs(
         a_wood_annual=jnp.asarray(a_wood_annual),
         soil_T_traj=jnp.asarray(soil_T_traj),
         precip=jnp.asarray(precip),
-        dt_days=float(dt_days))
+        dt_days=float(dt_days),
+        npp_pos_annual=jnp.asarray(npp_pos_annual),
+        is_woody=jnp.asarray(is_woody),
+        is_evergreen=jnp.asarray(is_evergreen),
+        live_ref_C_fol=jnp.asarray(live_ref_C_fol),
+        live_ref_C_root=jnp.asarray(live_ref_C_root),
+        live_ref_C_wood=jnp.asarray(live_ref_C_wood))
     return inputs, jnp.asarray(real_som)
 
 
