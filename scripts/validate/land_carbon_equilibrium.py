@@ -51,7 +51,7 @@ from legoesm.land.surface_params import (
     PARAM_NAMES,
 )
 from legoesm.land.carbon.config import CarbonConfig
-from legoesm.land.carbon.stomata import StomataConfig
+from legoesm.land.stomata import StomataConfig
 from legoesm.land.carbon.carbon_cycle import (
     init_carbon_state,
     _GC_TO_KG_CO2,

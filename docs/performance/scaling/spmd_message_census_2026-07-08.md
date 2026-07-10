@@ -77,6 +77,32 @@ iter-58/60-style "operators accept pre-padded fields" surgery — a separate
 project, only worth it if the GPU A/B on the flag shows the count term
 dominating.
 
+## MEASURED lane-T verdicts (Derecho, 2026-07-09, 8×A100 route-B NCCL,
+## same-allocation A/B — latlon LL512-class atm, ocean LL288-class)
+
+| arm | latlon ms/step | latlon SYPD | ocean ms/step | verdict |
+|---|---|---|---|---|
+| base | 6.48 | 25.4 | 33.09 | control |
+| fused (`LEGOESM_LATLON_SPMD_FUSED_HALO=1`) | 7.36 | 22.3 | 32.72 | **latlon −12 % — default stays OFF**; ocean +1 % (noise) |
+| xla (CP-combine 32 MiB + pipelined p2p) | 7.22 | 22.8 | — | **−10 % — not recommended as-is**; split the two flags in a follow-up arm before discarding |
+| pgle (`JAX_ENABLE_PGLE=true`) | **5.97** | **27.5** | — | **+8.5 % — the winner**; recommend per-run on route-B latlon lanes |
+
+Readings:
+1. **Fused multi-pad loses at this size/count**: −29 % messages, but each
+   message ~4× larger plus the pack/unpack concats — at LL512/np8 the
+   per-message latency saved is smaller than the copy overhead added.
+   The flag stays opt-in (it may still win at higher rank counts /
+   smaller per-rank tiles where latency dominates — re-A/B there before
+   discarding).
+2. **PGLE's profile-guided re-scheduling is the real overlap win** —
+   +8.5 % without touching the model.  Keep it per-run opt-in
+   (recompiles after the profiling runs; AOT-incompatible), and wire it
+   into the production route-B job env for latlon-class lanes.
+3. **The combined xla arm hurt**; pipelined-p2p and the CP-combiner need
+   separate arms to attribute (follow-up lane-T variant).
+4. Caveats: one size per component, one repeat — treat sub-5 % deltas as
+   noise; the cube base/xla arms and np16/24 rungs are still pending.
+
 ## Consequences — what to run next on Derecho/Levante
 
 The count floor being (near-)reached in code moves the lever to the GPU

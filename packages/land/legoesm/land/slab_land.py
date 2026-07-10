@@ -24,21 +24,18 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-
-from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
-from legoesm.core.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
 from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.core.surface_energy import surface_radiation_fluxes
-from legoesm.land.carbon.config import CarbonState
-from legoesm.land.carbon.carbon_cycle import step_carbon
 from legoesm.land.bucket_hydrology import partition_bucket_runoff
+from legoesm.land.carbon.carbon_cycle import step_carbon
+from legoesm.land.carbon.config import CarbonState
 from legoesm.land.config import LandConfig
 from legoesm.land.snow_budget import update_snow
 from legoesm.land.state import LandState
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.surface_scheme import (
     TwoLeafCanopyConfig,
+    compute_simple_seb_fluxes,
     compute_two_leaf_canopy_fluxes,
 )
 from legoesm.land.surface_scheme.two_leaf_canopy import (
@@ -46,6 +43,9 @@ from legoesm.land.surface_scheme.two_leaf_canopy import (
     compute_prognostic_lai,
 )
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
+from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
+
+from legoesm import constants
 
 
 def _get(lp, name: str, fallback):
@@ -104,109 +104,47 @@ def step_land(
     K_infiltration = config.K_infiltration
     infil_suction_boost = config.infil_suction_boost
 
-    # Account for fresh snowfall that will survive this step when the
-    # surface is below freezing.  Used both by the albedo block here
-    # AND by the later ``has_snow`` dispatch — they must agree.  Codex
-    # iter-44 #1: previously the albedo block used only the pre-step
-    # ``snow`` while later latent fluxes treated ``precip_snow*dt`` as
-    # snow-covered, so a snow-free cell receiving fresh snow absorbed
-    # bare-land SW for one timestep.
-    fresh_snow_mass = forcing.precip_snow * dt
-    fresh_snow_surviving = jnp.where(
-        T_soil < constants.T_freeze, fresh_snow_mass, 0.0,
-    )
-    snow_for_albedo = snow + fresh_snow_surviving
-
-    # --- Surface albedo (from current snow state + surviving fresh snow) ---
-    if config.snow_albedo_feedback and lat is not None:
-        # Snow-free base = per-cell map albedo (CLM PFT) when land_params supplied,
-        # else the latitude-band default; snow albedo blends on top either way.
-        _base = None if lp is None else jnp.broadcast_to(albedo_land, T_soil.shape)
-        alpha = compute_land_albedo(
-            lat, snow_for_albedo, snow_age, config.land_albedo, base_albedo=_base,
-        )
-    else:
-        alpha = jnp.full(T_soil.shape, albedo_land, dtype=T_soil.dtype)
-
-    # Smooth wind speed floor
-    wind_speed = jnp.sqrt(
-        forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2
-    )
-
     # Moisture availability: smooth ramp from beta_min to 1
     w_frac = jnp.clip(W / W_max, 0.0, 1.0)
     beta_soil = config.beta_min + (1.0 - config.beta_min) * w_frac
 
-    # --- Stomatal conductance (if enabled) ---
-    beta, _, _ = compute_effective_beta(
-        T_soil, forcing, beta_soil, config, carbon_state, dt,
+    # Shared SimpleSEB surface closure.  Keep the slab-specific post-flux
+    # pipeline below, but do not reimplement bulk fluxes / snow-phase humidity /
+    # albedo here: the multilayer SimpleSEB path uses this same helper, and it is
+    # where the land MOST exchange cap, condensation floor, and albedo fixes live.
+    surface_out = compute_simple_seb_fluxes(
+        T_surface=T_soil,
+        snow=snow,
+        snow_age=snow_age,
+        beta_soil=beta_soil,
+        forcing=forcing,
+        land_config=config,
+        U_min=U_min,
+        lat=lat,
+        carbon_state=carbon_state,
+        dt=dt,
         land_params=lp,
+        albedo_land=albedo_land,
+        emissivity=emissivity,
+        z0=z0,
     )
+    tau_x = surface_out.tau_x
+    tau_y = surface_out.tau_y
+    shflx = surface_out.shflx
+    lhflx = surface_out.lhflx
+    alpha = surface_out.albedo
+    Q_net = surface_out.G_soil
+    stomatal_ratio = surface_out.stomatal_ratio
 
-    # Stomatal reduction factor: ratio of effective beta to soil-only beta.
-    # This captures the stomatal limitation independent of soil moisture,
-    # so it can be applied to updated soil moisture later.
-    stomatal_ratio = beta / jnp.maximum(beta_soil, 1e-10)
-
-    # Surface saturation humidity: use ice saturation over snow-covered ground.
-    # ``has_snow`` includes fresh snowfall when the surface is below
-    # freezing (so the snow survives the step) — same rule as
-    # multilayer_land.py iter-68 fix.  Without this, a warm-surface
-    # column receiving precip_snow would have routed L_v vapour with
-    # a liquid q_sat for the whole step even though the surface is
-    # snow-covered.
-    q_sat_liq = saturation_mixing_ratio(T_soil, forcing.p_surface)
-    q_sat_ice = saturation_mixing_ratio_ice(T_soil, forcing.p_surface)
-    # ``fresh_snow_mass`` already computed for the albedo block above.
+    # Match compute_simple_seb_fluxes' snow-phase gate for water/energy
+    # partitioning after the flux demand has been computed.
+    fresh_snow_mass = forcing.precip_snow * dt
     has_existing_snow = snow > 1e-6
     has_surviving_fresh_snow = (fresh_snow_mass > 1e-6) & (T_soil < constants.T_freeze)
     has_snow = has_existing_snow | has_surviving_fresh_snow
-    q_sat_sfc = jnp.where(has_snow, q_sat_ice, q_sat_liq)
-    # Over snow, moisture is freely available from the snowpack (beta=1);
-    # water-limiting is applied later via snow mass.  Over bare soil,
-    # beta reflects bucket moisture and stomatal limitation.
-    beta_effective = jnp.where(has_snow, 1.0, beta)
-    q_sfc = beta_effective * q_sat_sfc
 
     # Phase-appropriate latent heat: sublimation (L_s) over snow, vaporisation (L_v) over bare soil
     L_eff = jnp.where(has_snow, constants.L_s, constants.L_v)
-
-    # Bulk fluxes
-    rho = forcing.rho_lowest
-
-    _valid_bulk = ("constant", "most", "coare3", "large_yeager")
-    if config.bulk_scheme not in _valid_bulk:
-        raise ValueError(
-            f"Unknown bulk_scheme {config.bulk_scheme!r}; expected one of {_valid_bulk}."
-        )
-    if config.bulk_scheme in ("most", "coare3", "large_yeager"):
-        tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
-            forcing.u_lowest, forcing.v_lowest,
-            forcing.T_lowest, forcing.q_lowest,
-            T_soil, q_sfc, rho,
-            z_ref=config.z_ref,
-            z0_init=z0,
-            scheme=config.bulk_scheme,
-            n_iter=config.bulk_n_iter,
-            L_latent=L_eff,
-        )
-    else:
-        tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
-            forcing.u_lowest, forcing.v_lowest,
-            forcing.T_lowest, forcing.q_lowest,
-            T_soil, q_sfc, rho, wind_speed,
-            config.Cd_land, config.Ch_land,
-            L_latent=L_eff,
-        )
-
-    # Radiation
-    sw_net, lw_net, _ = surface_radiation_fluxes(
-        forcing.sw_down, forcing.lw_down, T_soil, alpha,
-        emissivity,
-    )
-
-    # --- Net surface energy flux (positive = energy into soil) ---
-    Q_net = sw_net + lw_net - shflx - lhflx
 
     # --- Snow budget (energy-limited melt) ---
     # Q_net drives the melt rate: M = max(0, Q_net * dt / L_f)
@@ -452,6 +390,12 @@ def _step_land_canopy(
     pseudo-columnar ``(6*n*n,)`` axis for the duration of the canopy
     closure (which uses ``jax.vmap`` over the leading axis) and
     reshaped back on return.  1D slab states pass through unchanged.
+
+    Latent-flux cold-start guarding differs from the SimpleSEB slab path
+    (``step_land``): the two-leaf canopy bounds spurious condensation via its
+    own ``le_cap_mode`` latent-energy cap in ``two_leaf_canopy.py``, so the
+    ``LAND_CONDENSATION_FLOOR_W`` floor used on the bulk SimpleSEB path is not
+    applied here.
     """
     lp = land_params
     T_soil = state.T_soil.data
@@ -463,7 +407,6 @@ def _step_land_canopy(
     is_flat = (T_soil.ndim == 1)
 
     # --- Spatial parameters (for slab post-flux pipeline) ---
-    emissivity = _get(lp, "emissivity", config.emissivity_land)
     W_max  = _get(lp, "W_max", config.W_max)
     C_soil = _get(lp, "C_soil", config.C_soil)
     d_soil = _get(lp, "d_soil", config.d_soil)
@@ -572,16 +515,29 @@ def _step_land_canopy(
     melt_rate = snow_melt / dt
 
     soil_evap_demand = jnp.where(has_snow, 0.0, evap_rate_demand)
-    max_soil_evap = jnp.maximum(W_flat / dt + precip_rain + melt_rate, 0.0)
-    soil_evap_actual = jnp.minimum(soil_evap_demand, max_soil_evap)
+    P_input = precip_rain + melt_rate
+    _runoff_scheme = config.runoff_scheme
+    if _runoff_scheme == "topmodel":
+        from legoesm.land.topmodel_runoff import partition_topmodel_runoff
+        W_new, soil_evap_actual, runoff, _runoff_inf, _runoff_sat = partition_topmodel_runoff(
+            W_flat, P_input, soil_evap_demand, dt, W_max,
+            config.K_infiltration, config.infil_suction_boost, config.topmodel,
+            infiltration_excess=config.infiltration_excess,
+        )
+    elif _runoff_scheme == "bucket":
+        W_new, soil_evap_actual, runoff, _runoff_inf, _runoff_sat = partition_bucket_runoff(
+            W_flat, P_input, soil_evap_demand, dt, W_max,
+            config.K_infiltration, config.infil_suction_boost,
+            infiltration_excess=config.infiltration_excess,
+        )
+    else:
+        raise ValueError(
+            f"Unknown land runoff_scheme {_runoff_scheme!r}; "
+            "expected one of: 'bucket', 'topmodel'."
+        )
     evap_rate_actual = jnp.where(has_snow, sublim_actual, soil_evap_actual)
     evap_excess_energy = (evap_rate_demand - evap_rate_actual) * L_eff
     lhflx_actual = evap_rate_actual * L_eff
-
-    dW_dt = precip_rain + melt_rate - soil_evap_actual
-    W_unclamped = W_flat + dt * dW_dt
-    runoff = jnp.maximum(W_unclamped - W_max, 0.0) / dt
-    W_new = jnp.clip(W_unclamped, 0.0, W_max)
 
     # Excess (unrealised) latent flux warms the slab.
     T_soil_new = T_soil_new + dt * evap_excess_energy / heat_cap_total

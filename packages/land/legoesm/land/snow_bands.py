@@ -347,9 +347,31 @@ def step_snow_bands(
     #     liquid store, so this is the dominant cold-content path (multi-layer retained
     #     liquid is the upgrade).
     if precip_rain_bands is not None:
+        # Sign/energy walk (energy convention: L_f RELEASED into the pack, +into surface;
+        # T_freeze convention, no z-axis here).  Rain freezing releases L_f [J/kg] which
+        # the caller adds to the ground heat flux G (+into surface) -- so refreezing is
+        # bounded by how much cold the pack can absorb.  A single-layer band carries NO
+        # thermal state, so we bound the refrozen mass by a COLD-CONTENT proxy from the
+        # band skin temperature: the energy to warm the SWE to freezing is
+        #   Q_cold = c_snow * swe * max(T_freeze - T_band, 0)   [J/m2],
+        # and it can refreeze at most Q_cold / L_f [kg/m2] of rain.  Without this bound
+        # refreeze_frac=1 refroze ALL band rain every step, releasing L_f UNBOUNDED by
+        # the pack cold content (a thin, barely sub-freezing band would "absorb" arbitrary
+        # latent heat).  Residual rain above the cap stays liquid -> runoff/infiltration.
         _cold_snow = (T_sfc_band < T_snow_melt) & (swe_after_melt > 1e-6)
+        # ponytail: cap refreeze at the pack cold content so the released
+        # L_f can't exceed swe*c_ice*(Tf - T_skin).  Uncapped, 20 mm/hr rain
+        # on cold thin snow released ~1850 W/m2 of spurious surface heating.
+        # Single-layer band has no pack T, so T_sfc_band is the proxy; the
+        # multi-layer retained-liquid store is the upgrade.
+        _refreeze_max = (
+            swe_after_melt * constants.c_pi
+            * jnp.maximum(T_snow_melt - T_sfc_band, 0.0) / constants.L_f
+        )
         refreeze_bands = jnp.where(
-            _cold_snow, _refreeze_frac * precip_rain_bands * dt, 0.0)
+            _cold_snow,
+            jnp.minimum(_refreeze_frac * precip_rain_bands * dt, _refreeze_max),
+            0.0)
         swe_after_melt = swe_after_melt + refreeze_bands
     else:
         refreeze_bands = jnp.zeros_like(swe_after_melt)

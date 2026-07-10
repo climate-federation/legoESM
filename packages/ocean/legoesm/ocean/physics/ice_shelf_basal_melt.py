@@ -99,6 +99,15 @@ _L_F: float = constants.L_f                    # J/kg latent heat of fusion
 _C_P_SW: float = constants.c_p_seawater_isomip  # J/kg/K seawater cp (Jenkins 1991 / ISOMIP+)
 _RHO_FW: float = constants.rho_water            # kg/m^3 freshwater density
 
+# ponytail: this module's linearised Jenkins melt duplicates the melt physics
+# in ice_shelf.py (three_equation_melt / linear_melt). It is kept separate only
+# because its live callers (ocean/experiments/isomip_plus.py + the Phase-D
+# tests) return a *freshwater-equivalent* rate [m/s] with rho_fw=1000 and a
+# deliberately hand-tuned gamma_T that drops the rho_sw/rho_fw factor to land in
+# the ISOMIP+ 0.1-10 m/yr range. A future cleanup should route these callers
+# through ice_shelf.py's three_equation_melt/linear_melt (re-tuning gamma_T +
+# reconciling the rho_fw vs rho_ice convention) and delete this closure.
+
 
 @dataclass
 class IceShelfMeltConfig:

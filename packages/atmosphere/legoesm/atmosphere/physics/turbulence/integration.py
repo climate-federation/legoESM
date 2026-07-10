@@ -214,7 +214,11 @@ def _resolve_T_sfc(T_col, phys_state):
     T_col[:, -1]`` — the lowest air temperature stands in for the
     surface skin temperature.  The SCM driver may override this on a
     per-column basis by writing ``phys_state.surface_T_sfc_override``;
-    the override uses ``NaN`` as the sentinel for "fall back".
+    the override uses the finite ``NO_SFC_T_OVERRIDE`` sentinel (a large
+    negative value below any physical surface temperature) for "fall
+    back" — keeping the state finite (#911).  Legacy checkpoints written
+    with the old ``NaN`` sentinel still resolve to the fallback here
+    (``NaN > min`` is False), so restarts stay backward-compatible.
 
     This is what gives ``SCMForcing(prescribe="T_s")`` a non-zero
     bulk-flux gradient when paired with a turbulence scheme: anchoring
@@ -222,13 +226,18 @@ def _resolve_T_sfc(T_col, phys_state):
     ``T_sfc − T[..., -1]`` to zero and silently suppress the sensible
     heat flux (Phase B codex iter-1 high finding).
     """
+    from legoesm.atmosphere.physics.physics_state import (
+        SFC_T_OVERRIDE_VALID_MIN,
+    )
     fallback = T_col[:, -1]
     if phys_state is None:
         return fallback
     override = getattr(phys_state, "surface_T_sfc_override", None)
     if override is None:
         return fallback
-    return jnp.where(jnp.isnan(override), fallback, override)
+    # A physical override exceeds the threshold; the sentinel (and any legacy
+    # NaN) does not -> fall back.  ``NaN > x`` is False, so old checkpoints work.
+    return jnp.where(override > SFC_T_OVERRIDE_VALID_MIN, override, fallback)
 
 
 def make_turbulence_physics(

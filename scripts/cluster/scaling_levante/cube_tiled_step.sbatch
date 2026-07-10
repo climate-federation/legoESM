@@ -45,16 +45,24 @@ if [ "${KT}" != "2" ]; then
     exit 1
 fi
 
-echo "== Stage A: CPU-virtual parity gate =="
+echo "== Stage A: CPU-virtual parity gates =="
 JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=24 \
 srun -N1 -n1 "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
     --kt "${KT}" --resolution 48 --nlev 10 --steps 4 --warmup 1 \
     --parity-gate --out "${OUT%.jsonl}_parity.jsonl"
+JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=24 \
+srun -N1 -n1 "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
+    --kt "${KT}" --resolution 48 --nlev 10 --steps 4 --warmup 1 \
+    --closed-loop --parity-gate --out "${OUT%.jsonl}_loop_parity.jsonl"
 
-echo "== Stage B: 24-GPU multicontroller timed run =="
+echo "== Stage B: 24-GPU multicontroller timed runs =="
 export JAX_PLATFORMS=cuda
 srun "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
     --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
     --steps 12 --warmup 2 --multicontroller --out "${OUT}"
+# Closed-loop production lane (state resident tile-sharded across steps).
+srun "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
+    --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
+    --steps 12 --warmup 2 --multicontroller --closed-loop --out "${OUT}"
 
 echo "done: ${OUT}"

@@ -52,13 +52,20 @@ if [ "${KT}" != "2" ]; then
     exit 1
 fi
 
-echo "== Stage A: CPU-virtual parity gate (24 virtual devices) =="
+echo "== Stage A: CPU-virtual parity gates (24 virtual devices) =="
+# Single-shot adapter parity AND the closed-loop (production assembly)
+# parity — the loop feeds the step its own tile-sharded output, with the
+# in-stage telescoping mass fixer (production conservation config).
 JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=24 \
 "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
     --kt "${KT}" --resolution 48 --nlev 10 --steps 4 --warmup 1 \
     --parity-gate --out "${OUT%.jsonl}_parity.jsonl"
+JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=24 \
+"$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
+    --kt "${KT}" --resolution 48 --nlev 10 --steps 4 --warmup 1 \
+    --closed-loop --parity-gate --out "${OUT%.jsonl}_loop_parity.jsonl"
 
-echo "== Stage B: 24-GPU multicontroller timed run =="
+echo "== Stage B: 24-GPU multicontroller timed runs =="
 # Per-rank GPU pinning: PALS_LOCAL_RANKID -> CUDA_VISIBLE_DEVICES via the
 # shim (mc_nccl_canary convention); NCCL over Slingshot needs the OFI
 # plugin on LD_LIBRARY_PATH (build_nccl_ofi.sh) — the bench records
@@ -71,5 +78,12 @@ mpiexec -n $((6 * KT * KT)) --ppn 4 \
     "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
     --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
     --steps 12 --warmup 2 --multicontroller --out "${OUT}"
+# Closed-loop production lane: the np>6 number that matters (real
+# multi-step integration, state resident tile-sharded across steps).
+mpiexec -n $((6 * KT * KT)) --ppn 4 \
+    sh -c 'export CUDA_VISIBLE_DEVICES=$PALS_LOCAL_RANKID; exec "$@"' -- \
+    "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
+    --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
+    --steps 12 --warmup 2 --multicontroller --closed-loop --out "${OUT}"
 
 echo "done: ${OUT}"

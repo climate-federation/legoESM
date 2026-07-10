@@ -74,6 +74,12 @@ def _prev(shape=(3, 4), *, river=0.0, ice_lake=0.0):
         freshwater_flux=z,  # unused by the split now, kept for realism
         river_runoff_flux=jnp.full(shape, river),
         ice_lake_freshwater_flux=jnp.full(shape, ice_lake),
+        # Ice->ocean back-reaction channels (zero for the no-ice aquaplanet path
+        # these tests exercise) — a real SurfaceToAtm always carries them.
+        ocean_heat_extraction=z,
+        salt_flux=z,
+        ocean_stress_x=z,
+        ocean_stress_y=z,
     )
 
 

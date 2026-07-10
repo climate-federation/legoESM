@@ -1128,7 +1128,14 @@ def spectral_amip_rollout(
     tracer_filter = _compute_tracer_filter(grid, pe_config, spectral_filter, dt)
 
     # Inject the (traced) prescribed SST as the surface-temperature anchor.
-    phys_state = sizing_phys_state._replace(surface_T_sfc_override=sst_col)
+    # Prescribed SST is NaN over land; map those to the finite no-override
+    # sentinel so the PERSISTED physics state stays finite (#911) — land
+    # columns then fall back to the model surface T in both resolvers.
+    from legoesm.atmosphere.physics.physics_state import NO_SFC_T_OVERRIDE
+    # isfinite (not isnan): map NaN AND +/-Inf to the sentinel so the persisted
+    # state is strictly finite (codex).
+    _sst_override = jnp.where(jnp.isfinite(sst_col), sst_col, NO_SFC_T_OVERRIDE)
+    phys_state = sizing_phys_state._replace(surface_T_sfc_override=_sst_override)
     _doy0 = jnp.asarray(day_of_year_base, dtype=jnp.float64)
     _off = jnp.asarray(seconds_offset, dtype=jnp.float64)
 
@@ -1462,6 +1469,29 @@ def spectral_state_vs_carry_loss(
 # Data loading
 # =============================================================================
 
+def _training_year_range(windows, config) -> tuple[int, int]:
+    """``(min_year, max_year + 1)`` spanned by the windows THIS call loads.
+
+    Prefer the explicit ``windows`` argument (the data ``load_training_data``
+    actually reads this call) over ``config.windows`` — a caller can pass a
+    ``windows`` set that differs from ``config.windows``, and the cache must
+    cover what is read, not what is configured.  Falls back to
+    ``start_year`` + ``n_train_days`` when neither is given.
+
+    The ``+1`` on the max year covers TARGET snapshots that spill into the
+    following year (the rollout lead / ``n_days`` stride).  The cache store is
+    scoped by this range, so each distinct span is its own store and
+    ``ensure_local_cache``'s existence check is never stale across spans.
+    """
+    wins = windows or getattr(config, "windows", None) or ()
+    if wins:
+        years = [int(w[0]) for w in wins]
+        return (min(years), max(years) + 1)
+    start = int(getattr(config, "start_year", 2015) or 2015)
+    n_days = int(getattr(config, "n_train_days", 0) or 0)
+    return (start, start + max(0, (n_days - 1) // 365) + 1)
+
+
 def load_training_data(
     config: NeuralGCMSpectralConfig,
     grid: GaussianGrid,
@@ -1503,12 +1533,34 @@ def load_training_data(
     """
     import numpy as np
     from legoesm.training.era5_to_state import (
-        open_era5_zarr, resolve_var, ERA5Slice,
+        open_era5_zarr, resolve_var, ERA5Slice, ensure_local_cache,
     )
     era5_config = TrainingERA5Config(dt_hours=6)
 
-    # Open store once
+    # Open store once.  Wire the (previously DEAD) ``cache_dir`` to the local
+    # ERA5 zarr cache: without it every epoch re-fetched the SAME windows from
+    # GCS (#895, ~50 h/run wasted).  Scope the one-time download to the FULL
+    # training span (``config.windows``, NOT the per-chunk ``windows`` arg) so
+    # the single shared cache store is not built for one chunk's years and then
+    # read stale for the others.  ensure_local_cache is idempotent (skips if the
+    # store already exists), so only the first call pays the download.
     store = era5_config.zarr_store
+    # OPT-IN (default OFF -> byte-identical to the old GCS-every-epoch path):
+    # set LEGOESM_ERA5_LOCAL_CACHE=1 to materialise each span to a local zarr
+    # once and read it locally thereafter (#895, ~50 h/run).  Gated behind an
+    # env flag rather than on by default because the ensure_local_cache path is
+    # unexercised on this repo and its speedup + output compatibility must be
+    # validated on the target cluster (Derecho/GCS) — not reachable from CI.
+    import os
+    if cache_dir and os.environ.get("LEGOESM_ERA5_LOCAL_CACHE"):
+        # Year-SCOPE the cache store.  ensure_local_cache keys only on path
+        # existence — it does NOT verify an existing store covers the requested
+        # years — so a shared cache_dir reused across runs/phases with different
+        # spans would silently read a stale/narrow subset (codex).  Give each
+        # distinct span its own subdir so the existence check is never stale.
+        _yrs = _training_year_range(windows, config)
+        _scoped = os.path.join(os.fspath(cache_dir), f"y{_yrs[0]}_{_yrs[1]}")
+        store = str(ensure_local_cache(era5_config, _scoped, years=_yrs))
     ds = open_era5_zarr(store)
 
     # Resolve start offset from config.start_year (defaults to 2015).

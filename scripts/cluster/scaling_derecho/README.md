@@ -533,15 +533,18 @@ already at floor; atm latlon 41 → 29 behind the fused-halo flag — see
 the ranked rungs as same-allocation A/B arms (a fresh `base` control arm is
 re-run in the same job — never compare against an earlier job's numbers):
 
-1. `fused` — `LEGOESM_LATLON_SPMD_FUSED_HALO=1` (bit-identical multi-pad
-   packing; the flag's default flips only on this wall-clock receipt).
-2. `xla` — `--xla_gpu_collective_permute_combine_threshold_bytes=32MiB` +
-   `--xla_gpu_enable_pipelined_p2p=true` (merge the SPMD partitioner's
-   independent ppermute rounds; overlap them with compute).
-3. `pgle` — `JAX_ENABLE_PGLE=true JAX_PGLE_PROFILING_RUNS=3` (profile-guided
-   collective scheduling; recompiles after the profiling runs, so it stays
-   per-run opt-in — never a `backend.py` default).
+1. `fused` — `LEGOESM_LATLON_SPMD_FUSED_HALO=1`.  **MEASURED 2026-07-09
+   (8×A100): latlon −12 %, ocean +1 % (noise) — the default stays OFF**
+   (bigger messages + pack/unpack copies outweigh the −29 % message count
+   at LL512/np8; re-A/B at higher rank counts before discarding).
+2. `xla` — CP-combine 32 MiB + pipelined p2p.  **MEASURED: −10 % — not
+   recommended combined; split the two flags in a follow-up arm.**
+3. `pgle` — `JAX_ENABLE_PGLE=true JAX_PGLE_PROFILING_RUNS=3`.  **MEASURED:
+   +8.5 % (5.97 vs 6.48 ms/step) — the winner; recommend per-run on
+   route-B latlon lanes.**  Stays per-run opt-in (recompiles after the
+   profiling runs — AOT-incompatible, never a `backend.py` default).
 4. If still send/recv-bound: sweep `NCCL_NCHANNELS_PER_NET_PEER` 4→8/16.
+   Full numbers: `docs/performance/scaling/spmd_message_census_2026-07-08.md`.
 
 ```bash
 qsub -v RUN_TUNE=1,RUN_NCCL=0,RUN_LATLON=0,RUN_OCEAN=0,RUN_MPAS=0 \

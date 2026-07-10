@@ -654,6 +654,19 @@ class SegmentForcing(NamedTuple):
     # pytree carries no spurious empty leaf.
     sfc_shflx_override: jax.Array | None = None
     sfc_lhflx_override: jax.Array | None = None
+    # Transient land-use cover — the per-segment multilayer land surface params
+    # (``LandSurfaceParams`` pytree: per-column albedo_veg / emissivity / LAI /
+    # canopy-structure) a coupled or AMIP driver re-materialises each segment as
+    # the cover map advances in time (interp_annual on the legoesm_surfdata
+    # pft_frac).  Passed as a TRACED arg (SegmentForcing doctrine) so the jitted
+    # production step reads the evolving cover instead of the closure-baked
+    # ``pipeline.land_ml_params`` captured at first trace.  ``None`` (default)
+    # for static-cover / uncoupled runs ⇒ the step falls back to the baked
+    # ``self.land_ml_params`` (byte-identical to the pre-transient behaviour).
+    # A nested pytree, not a plain array; left out of GRID_SHAPED_FORCING_FIELDS
+    # (transient cover is the lat-lon multilayer-land path, not SPMD cube) so it
+    # is pinned replicated by the segment JIT.
+    land_ml_params: object | None = None
 
 
 # Canonical GHG species ordering for the ghg_vmr array.
@@ -699,6 +712,7 @@ def pack_forcing(
     sfc_emissivity_override=None,
     sfc_shflx_override=None,
     sfc_lhflx_override=None,
+    land_ml_params=None,
 ) -> SegmentForcing:
     """Pack per-segment forcing into a SegmentForcing pytree.
 
@@ -772,6 +786,9 @@ def pack_forcing(
             None if sfc_lhflx_override is None
             else jnp.asarray(sfc_lhflx_override)
         ),
+        # LandSurfaceParams pytree (or None) — passed through as-is; its leaves
+        # are already jax arrays from the provider rebuild, no jnp.asarray coerce.
+        land_ml_params=land_ml_params,
     )
 
 
@@ -1073,6 +1090,7 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         sfc_shflx_override=statics.forcing.sfc_shflx_override,
         sfc_lhflx_override=statics.forcing.sfc_lhflx_override,
         T_land=carry.T_land, land_ml=carry.land_ml,
+        land_ml_params=statics.forcing.land_ml_params,
         conv_precip=carry.conv_precip_prev,
         w_land=carry.w_land, snow=carry.snow,
         **_dm_in,
@@ -1116,6 +1134,7 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
                 cloud_scheme="none",
                 u=u_new, v=v_new, dt=statics.dt,
                 T_land=carry.T_land, land_ml=carry.land_ml,
+                land_ml_params=statics.forcing.land_ml_params,
                 sfc_albedo_override=statics.forcing.sfc_albedo_override,
                 sfc_T_override=statics.forcing.sfc_T_override,
                 sfc_emissivity_override=statics.forcing.sfc_emissivity_override,
@@ -1808,6 +1827,7 @@ def build_segment_fn(
                     sfc_shflx_override=forcing.sfc_shflx_override,
                     sfc_lhflx_override=forcing.sfc_lhflx_override,
                     T_land=_T_land_in, land_ml=carry.land_ml,
+                    land_ml_params=forcing.land_ml_params,
                     conv_precip=carry.conv_precip_prev[_ofi],
                     w_land=_w_land_in, snow=_snow_in,
                     **_dm_in,
@@ -1837,6 +1857,7 @@ def build_segment_fn(
                             cloud_scheme="none",
                             u=u_new[_ofi], v=v_new[_ofi], dt=_dt,
                             T_land=_T_land_in, land_ml=carry.land_ml,
+                            land_ml_params=forcing.land_ml_params,
                             sfc_albedo_override=forcing.sfc_albedo_override,
                             sfc_T_override=forcing.sfc_T_override,
                             sfc_emissivity_override=forcing.sfc_emissivity_override,
@@ -2186,6 +2207,7 @@ def build_segment_fn(
                     cloud_scheme=pipeline._cloud_scheme,
                     u=carry.u[_ofi], v=carry.v[_ofi], dt=_dt,
                     T_land=_T_land_in, land_ml=carry.land_ml,
+                    land_ml_params=forcing.land_ml_params,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
                     conv_precip=_own(carry.conv_precip_prev),
@@ -2208,6 +2230,7 @@ def build_segment_fn(
                         cloud_scheme="none",
                         u=carry.u[_ofi], v=carry.v[_ofi], dt=_dt,
                         T_land=_T_land_in, land_ml=carry.land_ml,
+                        land_ml_params=forcing.land_ml_params,
                         sfc_albedo_override=forcing.sfc_albedo_override,
                         sfc_T_override=forcing.sfc_T_override,
                         conv_precip=_own(carry.conv_precip_prev),
@@ -2251,6 +2274,7 @@ def build_segment_fn(
                     cloud_scheme=pipeline._cloud_scheme,
                     u=carry.u, v=carry.v, dt=_dt,
                     T_land=carry.T_land, land_ml=carry.land_ml,
+                    land_ml_params=forcing.land_ml_params,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
                     conv_precip=carry.conv_precip_prev,
@@ -2273,6 +2297,7 @@ def build_segment_fn(
                         cloud_scheme="none",
                         u=carry.u, v=carry.v, dt=_dt,
                         T_land=carry.T_land, land_ml=carry.land_ml,
+                        land_ml_params=forcing.land_ml_params,
                         sfc_albedo_override=forcing.sfc_albedo_override,
                         sfc_T_override=forcing.sfc_T_override,
                         conv_precip=carry.conv_precip_prev,

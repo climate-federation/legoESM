@@ -901,6 +901,15 @@ class CoupledESMDriver:
 
         # getattr: optional-config compat gate (land_param_source selector)
         source = getattr(self.coupled_cfg, "land_param_source", "analytical")
+        # Transient cover only rides the CLM path (it needs the CLM soil map to
+        # freeze around).  Fail loudly rather than silently ignore the request.
+        if (getattr(self.coupled_cfg, "transient_land_cover", False)
+                and getattr(self.coupled_cfg, "land_cover_surfdata", "")
+                and source != "clm"):
+            raise ValueError(
+                "transient_land_cover with land_cover_surfdata requires "
+                f"land_param_source='clm' (got {source!r}); transient cover overlays "
+                "the CLM reference soil map.")
         if source == "clm":
             from legoesm.land.clm_surface_map import clm_surface_provider
             lon = self._atm._grid_lon
@@ -910,6 +919,36 @@ class CoupledESMDriver:
             # surface-energy params against a different soil forward).
             variant = ("multilayer" if self.coupled_cfg.land_mode == "multilayer"
                        else "slab")
+            # Transient land-use cover (opt-in): the vegetation params re-weight per
+            # segment from a transient legoesm_surfdata cover; soil frozen.  Base +
+            # per-year both go through clm_provider_rebuild so their albedo treatment
+            # is consistent (a normal run without land_cover_surfdata is unchanged).
+            cover_path = getattr(self.coupled_cfg, "land_cover_surfdata", "")
+            if getattr(self.coupled_cfg, "transient_land_cover", False) and cover_path:
+                from legoesm.land.clm_surface_map import (
+                    clm_provider_rebuild, download_clm_surfdata, load_clm_surface,
+                    load_transient_cover_on_columns, TransientCoverProvider)
+                clm_path = getattr(self.coupled_cfg, "clm_surfdata_path", "") \
+                    or download_clm_surfdata()
+                m = load_clm_surface(clm_path, lat_deg, lon_deg)
+                # Match the non-transient coupled provider (clm_surface_provider omits
+                # the soil-colour albedo) so an unchanged cover slice is a no-op.
+                rebuild = clm_provider_rebuild(m, variant=variant,
+                                               include_soil_albedo=False)
+                cover, years = load_transient_cover_on_columns(
+                    cover_path, lat_deg, lon_deg)
+                if cover.shape[1] != np.asarray(m["pft_fractions"]).shape[0]:
+                    raise ValueError(
+                        f"transient cover has {cover.shape[1]} columns but the CLM "
+                        f"map has {np.asarray(m['pft_fractions']).shape[0]}; mismatch.")
+                provider = TransientCoverProvider(
+                    base=rebuild(m["pft_fractions"]), cover=cover, years=years,
+                    _rebuild=rebuild)
+                logger.info(
+                    f"  Land params: CLM soil + TRANSIENT cover ({cover_path}, "
+                    f"{cover.shape[0]} years {int(years[0])}-{int(years[-1])}, "
+                    f"{variant} tuning), {lat_deg.size} columns")
+                return provider
             provider = clm_surface_provider(lat_deg, lon_deg, variant=variant)
             logger.info(f"  Land params: CLM reference surfdata (real PFT map + "
                         f"reference soil, {variant} tuning), {lat_deg.size} columns")
@@ -1502,12 +1541,19 @@ class CoupledESMDriver:
         is the downwelling SW for sub-surface penetration; ``tau`` is in the
         ATMOSPHERIC convention (the ocean core applies ``-tau`` + grid rotation);
         freshwater is passed via the ``freshwater=`` arg (NOT ``sf.freshwater``,
-        which is the cube-only channel).  Ice→ocean channels (freshwater_flux /
-        ocean_heat_extraction / salt_flux / ice stress) are Phase 3 — an
-        aquaplanet Phase-1 run has no ice tile."""
+        which is the cube-only channel).  Over an ice-covered cell the open-water
+        atmospheric fluxes (q_net, sw, tau, evap, precip) are scaled by the
+        open-water fraction ``f_ocean = f_water*(1 - ice_concentration)`` and the
+        ice→ocean back-reaction (basal heat, brine salt, ice-ocean stress) that
+        the ice model already computed on ``self._last_sfc_response`` is added —
+        so the ocean is NOT forced as ice-free and the melt/freeze freshwater
+        arrives WITH its heat and salt.  The KPP ice-buoyancy ``sf.freshwater``
+        channel stays cube-only (left None; the lat-lon P-E enters via the
+        ``freshwater=`` FreshwaterForcing arg)."""
         from legoesm.coupler.config import CouplerConfig
         from legoesm.coupler.coupler import ocean_tile_response
         from legoesm.coupler.grid_remap import remap_field
+        from legoesm.coupler.tile_fractions import compute_tile_fractions
         from legoesm.ocean.freshwater import FreshwaterForcing
         from legoesm.ocean.state import OceanSurfaceForcing
 
@@ -1516,34 +1562,67 @@ class CoupledESMDriver:
         sst_K, u_o, v_o = self._ocean_surface_KuvC()
         ccfg = getattr(self, "_coupler_cfg", None) or CouplerConfig()
         tile = ocean_tile_response(atm_forcing, sst_K, u_o, v_o, ccfg)
-        # Net surface shortwave (positive INTO ocean).  Use the radiation's
-        # ACTUAL net surface SW -- the value the atmosphere SW solver removed
-        # from TOA using the blended surface albedo it was given -- NOT a
-        # second albedo round-trip.  ``_build_atm_forcing`` reconstructs
-        # ``sw_down = sw_net_sfc / (1 - albedo_eff)`` with the BLENDED albedo;
-        # re-netting that gross ``sw_down`` here with the OCEAN-tile albedo
-        # (a DIFFERENT albedo over sea-ice / zenith-dependent ocean) made the
-        # ocean absorb a non-physical amount of SW (energy non-conservation:
-        # the ocean got MORE SW than radiation took out of the column over a
-        # bright ice cell).  Reading the radiation net SW (remapped onto the
-        # ocean grid; identity for the shared-grid Phase-1 ocean) closes the
-        # SW budget: ocean-absorbed SW == radiation surface-net SW, and over an
-        # all-ocean cell albedo_eff == ocean albedo so this is byte-identical to
-        # the old round-trip.  Fall back to the round-trip only if radiation has
-        # not run yet (segment 0 before the first physics step).
-        _atm = getattr(self, "_atm", None)
-        _aux = getattr(_atm, "_carry_aux", {}) if _atm is not None else {}
-        _sw_net_atm = _aux.get("held_sw_net_sfc", None)
+        # Net surface shortwave into the OCEAN tile (positive INTO ocean).  With
+        # the ``f_ocean`` open-water scaling below, the correct per-tile share is
+        # ``f_ocean * sw_down * (1 - alpha_ocean)`` (ocean-tile albedo): the
+        # ocean and ice tile shares sum to ``sw_down * (1 - alpha_blended)`` =
+        # the radiation net SW, so the SW budget closes by construction.  Do NOT
+        # use the radiation aux ``held_sw_net_sfc`` here — that is already the
+        # TILE-BLENDED net SW, and multiplying it by ``f_ocean`` would
+        # double-apply the partition and under-heat the open ocean over
+        # ice-covered cells (codex).  The pre-``f_ocean`` code used the blended
+        # net as a full-cell workaround for the (then) missing ice fraction; the
+        # scaling makes the ocean-tile albedo the right choice.  ``sw_down`` is
+        # the reconstructed gross incident (``_build_atm_forcing``), so over an
+        # all-ocean cell (f_ocean==1) this is byte-identical to the legacy net.
         _remapper = getattr(self, "_grid_remapper", None)
-        if _sw_net_atm is not None and _remapper is not None:
-            sw_net = remap_field(_sw_net_atm, _remapper.a2o)
+        # Open-water net shortwave uses the OCEAN-TILE albedo, ``sw_down*(1 -
+        # alpha_ocean)``, and is scaled by ``f_ocean`` below.  Do NOT use the
+        # radiation aux ``held_sw_net_sfc`` here: that is the TILE-BLENDED net SW
+        # (f_ocean*ocean + f_ice*ice partition already applied), so multiplying
+        # it by ``f_ocean`` again would double-count the partition and under-heat
+        # the open ocean over ice-covered cells (codex).  ``tile`` is the ocean
+        # tile, so ``tile.albedo`` is the open-water albedo; f_ocean==1 (no ice)
+        # recovers the legacy full-cell value byte-identically.
+        sw_net = atm_forcing.sw_down * (1.0 - tile.albedo)
+        # --- Open-water fraction: the open-ocean bulk fluxes act ONLY on the
+        #     ice-free part of the cell.  The ice-covered fraction is forced by
+        #     the ICE tile (its own surface energy balance); its back-reaction on
+        #     the ocean (basal heat, brine salt, ice-ocean stress) is ADDED below.
+        #     Without this an ice-covered cell was heated / evaporated / wind-
+        #     stressed as if ICE-FREE — a full-cell energy+moisture leak. ---
+        # f_ocean = f_water*(1 - ice_concentration) from the SHARED tile-fraction
+        # helper (``compute_tile_fractions``) on the ATM grid — the SAME partition
+        # the tile blender used to weight the ice back-reaction channels below —
+        # remapped onto the ocean grid.  No ice tile (aquaplanet Phase-1) ⇒
+        # concentration == 0 and (over a wet ocean cell) f_water == 1 ⇒
+        # f_ocean == 1 ⇒ byte-identical to the legacy full-cell assembly.
+        _sfc = getattr(self, "_sfc_state", None)
+        _tile_cfg = getattr(self, "_tile_config", None)
+        if (_sfc is not None and getattr(_sfc, "ice", None) is not None
+                and _tile_cfg is not None):
+            _sic = jnp.clip(_sfc.ice.concentration.data, 0.0, 1.0)
+            f_ocean_atm = compute_tile_fractions(_tile_cfg, _sic).f_ocean
+            f_ocean = (remap_field(f_ocean_atm, _remapper.a2o)
+                       if _remapper is not None else f_ocean_atm)
         else:
-            # Radiation has not run yet (segment 0 before the first physics step)
-            # -- fall back to the single-albedo net of the gross sw_down.
-            sw_net = atm_forcing.sw_down * (1.0 - tile.albedo)
-        q_net = (sw_net + atm_forcing.lw_down
-                 - tile.lw_up - tile.shflx - tile.lhflx)
-        evap = tile.lhflx / constants.L_v            # [kg/m²/s], positive up
+            f_ocean = 1.0
+        # Open-water fluxes scaled to the ice-free fraction.  Sign conventions
+        # (ocean-consumer frame): q_net +into ocean; sw_pen +into ocean
+        # (penetrating solar, post-albedo); tau_x/y in the ATMOSPHERIC convention
+        # (the ocean core applies -tau); evap +up (removed from ocean; enters
+        # ocean P-E with the -evap sign in FreshwaterForcing); precip +into ocean.
+        q_net = f_ocean * (sw_net + atm_forcing.lw_down
+                           - tile.lw_up - tile.shflx - tile.lhflx)
+        sw_pen = f_ocean * sw_net                    # +into ocean (penetrating SW)
+        tau_x = f_ocean * tile.tau_x                 # atmospheric convention (-tau)
+        tau_y = f_ocean * tile.tau_y
+        evap = f_ocean * (tile.lhflx / constants.L_v)  # [kg/m²/s], +up (open water)
+        # precip over ice is intercepted by the ice tile (snow reservoir) and
+        # returned to the ocean as melt via ``ice_fw`` below, so only the open-
+        # water precip enters the ocean P-E directly (pairs with the scaled evap;
+        # avoids double-counting the ice-routed water).  f_ocean==1 ⇒ full precip.
+        precip = f_ocean * atm_forcing.precip_total  # +into ocean (open water)
         z = jnp.zeros_like(sw_net)
         # Freshwater into the ocean, SPLIT by vertical-injection channel so each
         # term lands where it physically belongs:
@@ -1587,21 +1666,52 @@ class CoupledESMDriver:
                 river = remap_field(river, _remapper.a2o)
                 surface_extra = remap_field(surface_extra, _remapper.a2o)
         fw = FreshwaterForcing(
-            precip=atm_forcing.precip_total, evap=evap, runoff=river,
+            precip=precip, evap=evap, runoff=river,
             ice_fw=surface_extra,
         )
+        # --- Ice → ocean back-reaction: the melt/freeze water in ``ice_fw`` must
+        #     arrive WITH its melt/freeze HEAT + brine SALT + ice-ocean STRESS,
+        #     else the ocean gets freshwater without its energy/salt (a mass↔heat
+        #     inconsistency).  These blended channels are already tile-weighted by
+        #     ``blend_tiles`` on the ATM grid (ocean_heat_extraction / salt_flux =
+        #     f_water·ice, ocean_stress = f_ice·ice), matching
+        #     ``ocean_forcing.ice_ocean_forcing_from_ice_response``; remap to the
+        #     ocean grid and apply with the SAME signs.  prev is None on segment 0
+        #     (fall through: no back-reaction yet); a run with no ice tile carries
+        #     these channels as zeros ⇒ byte-identical to the legacy assembly. ---
+        salt_flux = None
+        if prev is not None:
+            ohe = prev.ocean_heat_extraction        # [W/m², +ocean LOSES heat]
+            salt = prev.salt_flux                   # [kg/m²/s, +INTO ocean]
+            ice_tau_x = prev.ocean_stress_x         # [Pa, +eastward force ON ocean]
+            ice_tau_y = prev.ocean_stress_y         # [Pa, +northward force ON ocean]
+            if _remapper is not None:
+                ohe = remap_field(ohe, _remapper.a2o)
+                salt = remap_field(salt, _remapper.a2o)
+                ice_tau_x = remap_field(ice_tau_x, _remapper.a2o)
+                ice_tau_y = remap_field(ice_tau_y, _remapper.a2o)
+            # ocean_heat_extraction is +ocean-LOSES; q_net is +into ocean ⇒ subtract
+            # (the ocean loses this basal heat to melting ice = pairs with ice_fw).
+            q_net = q_net - ohe
+            # ocean_stress_* is the force ON the ocean, but the ocean consumer
+            # applies external tau as (ocean force = -tau); feed -stress so the NET
+            # applied force equals the on-ocean ice stress (matches the -(f_ice·
+            # stress) sign in ice_ocean_forcing_from_ice_response).
+            tau_x = tau_x - ice_tau_x
+            tau_y = tau_y - ice_tau_y
+            salt_flux = salt                        # real brine salt (+INTO ocean)
         # ``OceanSurfaceForcing.sw_down`` is the NET (post-albedo) surface SW the
         # ocean PENETRATES (``shortwave_penetration``: "net shortwave INTO the
         # ocean (post-albedo)"; the lat-lon core forms q_nonsolar = q_net -
         # 0.94*sw_down).  Passing the GROSS downwelling here treated reflected SW
         # as penetrating solar and compensated it with an artificially reduced
         # non-solar surface flux -- the column total still telescoped to q_net but
-        # the vertical heating profile was wrong.  Use the SAME ``sw_net`` that
-        # built q_net so the solar/non-solar split is consistent (matches the
-        # canonical OMIP-2 applicator, which passes sw_net as sw_down).
+        # the vertical heating profile was wrong.  Use the SAME (f_ocean-scaled)
+        # ``sw_pen`` that built q_net so the solar/non-solar split is consistent
+        # (matches the canonical OMIP-2 applicator, which passes sw_net as sw_down).
         sf = OceanSurfaceForcing(
-            sw_down=sw_net, q_net=q_net,
-            tau_x=tile.tau_x, tau_y=tile.tau_y, freshwater=None,
+            sw_down=sw_pen, q_net=q_net,
+            tau_x=tau_x, tau_y=tau_y, salt_flux=salt_flux, freshwater=None,
         )
         return sf, fw
 
@@ -1658,6 +1768,12 @@ class CoupledESMDriver:
             # step's day-of-year matches the atmosphere's season; offset 0 => identical.
             doy, _ = self._atm._calendar_for_radiation(day)
 
+            # Transient land-use cover: the segment's calendar year (from the atm
+            # sub-driver's start year); a year-varying land provider re-weights its
+            # vegetation params, static providers ignore it (byte-identical).
+            _sy = getattr(self._atm, "_start_year", None)
+            cover_year = None if _sy is None else float(_sy) + day / 365.0
+
             self._sfc_state, sfc_response = self._step_surface(
                 self._sfc_state,
                 atm_forcing,
@@ -1667,6 +1783,7 @@ class CoupledESMDriver:
                 ocean_v_sfc=v_sfc,
                 dt=sub_dt,
                 doy=float(doy),
+                year=cover_year,
             )
             self._last_sfc_response = sfc_response
 

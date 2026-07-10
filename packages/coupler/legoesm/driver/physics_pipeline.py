@@ -358,7 +358,7 @@ class PhysicsPipeline:
         soil availability is routed through the SHARED land Jarvis (1976)
         stomatal model: ``beta = compute_stomatal_beta(jarvis_gs(...),
         beta_soil)`` = ``min(beta_soil, clip(gs/gs_ref))`` — REUSING
-        ``legoesm.land.carbon.stomata`` (no re-derived conductance numerics,
+        ``legoesm.land.stomata`` (no re-derived conductance numerics,
         the same fallback path ``compute_effective_beta`` takes when the
         carbon state is unavailable).  ``gs`` closes the canopy term in low
         light (so ``beta -> 0`` at night) and high VPD.  Without the forcing
@@ -374,7 +374,7 @@ class PhysicsPipeline:
             return beta_soil
         # Shared Jarvis stomatal limitation (carbon state unavailable on the
         # AMIP slab path -> LAI=None -> min(beta_soil, beta_canopy)).
-        from legoesm.land.carbon.stomata import (
+        from legoesm.land.stomata import (
             compute_stomatal_beta,
             jarvis_gs,
         )
@@ -491,7 +491,8 @@ class PhysicsPipeline:
         return T_land + dt_rad * flux / (self.C_land - dt_rad * dflux_dT)
 
     def _step_multilayer_land_tile(self, land_ml, sw_down_col, lw_down_col,
-                                   T, p_s, q_v, u, v, precip_col, dt):
+                                   T, p_s, q_v, u, v, precip_col, dt,
+                                   land_ml_params=None):
         """Advance the MULTILAYER (Richards) land tile one radiation step and return
         ``(land_ml_new, T_sfc_col, albedo_col)`` — all in flattened COLUMN space.
 
@@ -521,13 +522,17 @@ class PhysicsPipeline:
         # carbon_state is PRESCRIBED (fixed LAI) when set — the returned, evolved
         # carbon pools are discarded so the prescribed leaf carbon is reused every
         # step (no carbon spin-up), activating the Farquhar Vc_max25/g1/LCMA path.
+        # Transient land-use cover threads the per-segment params as a traced arg
+        # (SegmentForcing doctrine); None -> the baked self.land_ml_params, so the
+        # static path is byte-identical.
+        _lmp = land_ml_params if land_ml_params is not None else self.land_ml_params
         land_new, resp, _ = step_multilayer_land(
             land_ml, forcing, self.land_ml_cfg, self.land_ml_u_min, dt_rad,
             lat=self.land_ml_lat, doy=self.land_ml_doy,
-            land_params=self.land_ml_params, carbon_state=self.land_ml_carbon)
+            land_params=_lmp, carbon_state=self.land_ml_carbon)
         return land_new, resp.T_sfc, resp.albedo
 
-    def _land_qsfc_multilayer(self, land_ml, T_land, p_s):
+    def _land_qsfc_multilayer(self, land_ml, T_land, p_s, land_ml_params=None):
         """Effective land-tile surface humidity for the multilayer land tile,
         ``q_sfc = beta_soil * q_sat(T_land)`` (the alpha-method, matching
         ``simple_seb``'s ``q_sfc = beta_effective * q_sat_sfc``), in GRID format.
@@ -545,8 +550,9 @@ class PhysicsPipeline:
         """
         from legoesm.land.multilayer_land import land_tile_beta_soil
         ad = self.adapter
+        _lmp = land_ml_params if land_ml_params is not None else self.land_ml_params
         beta_col = land_tile_beta_soil(
-            land_ml.theta_soil, self.land_ml_cfg, self.land_ml_params)
+            land_ml.theta_soil, self.land_ml_cfg, _lmp)
         q_sat_land_col = ad.flatten_2d(
             saturation_specific_humidity(T_land, p_s))
         return ad.unflatten_2d(beta_col * q_sat_land_col)
@@ -648,7 +654,8 @@ class PhysicsPipeline:
                             T_land=None, aerosol_od=None,
                             sfc_shflx_override=None, sfc_lhflx_override=None,
                             tke=None, qke=None, gwd_spectrum=None,
-                            w_land=None, snow=None, land_ml=None):
+                            w_land=None, snow=None, land_ml=None,
+                            land_ml_params=None):
         """Convection + microphysics + BL exchange with held radiation.
 
         ``T_land`` is the slab-land skin temperature.  When the land tile
@@ -1304,7 +1311,8 @@ class PhysicsPipeline:
                 # the land model's soil-moisture-throttled q_sfc so the BL
                 # latent flux is not the beta=1 saturated potential rate.
                 _q_sfc_land_ml = (
-                    self._land_qsfc_multilayer(land_ml, T_land, p_s)
+                    self._land_qsfc_multilayer(land_ml, T_land, p_s,
+                                               land_ml_params=land_ml_params)
                     if land_ml is not None else None
                 )
                 _turb_kwargs["surface_flux"] = self._tiled_surface_flux(
@@ -1555,7 +1563,7 @@ class PhysicsPipeline:
                                sfc_T_override=None,
                                sfc_emissivity_override=None,
                                conv_precip=None, land_ml=None, w_land=None,
-                               snow=None):
+                               snow=None, land_ml_params=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns ``(dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
@@ -1624,11 +1632,17 @@ class PhysicsPipeline:
         # per-column albedo/emissivity; else the scalar-T_land slab.
         _ml_active = self.land_ml_cfg is not None and land_ml is not None
         _land_active = self.f_land is not None and (T_land is not None or _ml_active)
+        # Transient land-use cover: per-segment traced multilayer params (None ->
+        # the baked self.land_ml_params, byte-identical static path).  Resolved
+        # once here so it is in scope for BOTH the radiation-albedo blend and the
+        # land skin-T update below whenever the multilayer tile is active.
+        _lmp_rad = (land_ml_params if land_ml_params is not None
+                    else self.land_ml_params) if _ml_active else None
         if _land_active:
             if _ml_active:
                 T_land_grid = ad.unflatten_2d(land_ml.T_soil[:, 0])
-                alb_land = ad.unflatten_2d(self.land_ml_params.albedo_veg)
-                emis_land = ad.unflatten_2d(self.land_ml_params.emissivity)
+                alb_land = ad.unflatten_2d(_lmp_rad.albedo_veg)
+                emis_land = ad.unflatten_2d(_lmp_rad.emissivity)
             else:
                 # Snow-brightened land albedo (snow-albedo feedback); the
                 # static vegetation albedo when off (byte-identical).
@@ -1860,7 +1874,7 @@ class PhysicsPipeline:
                           if conv_precip is not None else None)
             land_ml_new, T_sfc_ml_col, _ = self._step_multilayer_land_tile(
                 land_ml, rad_out.sw_flux_down[:, -1], rad_out.lw_flux_down[:, -1],
-                T, p_s, q_v, u, v, precip_col, dt)
+                T, p_s, q_v, u, v, precip_col, dt, land_ml_params=_lmp_rad)
             # Couple the multilayer land SKIN TEMPERATURE back to T_land so the
             # atmospheric BL surface fluxes (tiled _tiled_surface_flux / the non-
             # tiled T_sfc blend) see the EVOLVING Richards soil column.  Previously
@@ -1999,7 +2013,7 @@ class PhysicsPipeline:
                          sfc_lhflx_override=None,
                          tke=None, qke=None, gwd_spectrum=None,
                          conv_precip=None, land_ml=None, w_land=None,
-                         snow=None):
+                         snow=None, land_ml_params=None):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -2014,7 +2028,7 @@ class PhysicsPipeline:
                  sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                  sfc_shflx_override, sfc_lhflx_override,
                  tke, qke, gwd_spectrum,
-                 conv_precip, land_ml, w_land, snow) = args
+                 conv_precip, land_ml, w_land, snow, land_ml_params) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa, T_land_new, land_ml_new) = \
@@ -2033,7 +2047,7 @@ class PhysicsPipeline:
                         sfc_T_override=sfc_T_override,
                         sfc_emissivity_override=sfc_emissivity_override,
                         conv_precip=conv_precip, land_ml=land_ml, w_land=w_land,
-                        snow=snow,
+                        snow=snow, land_ml_params=land_ml_params,
                     )
 
                 # Radiation-as-forcing: cut radiation's reverse-mode so the
@@ -2061,6 +2075,7 @@ class PhysicsPipeline:
                     sfc_lhflx_override=sfc_lhflx_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     w_land=w_land, snow=snow, land_ml=land_ml,
+                    land_ml_params=land_ml_params,
                 )
 
                 # Cast to storage dtype so both lax.cond branches match.
@@ -2099,7 +2114,7 @@ class PhysicsPipeline:
                  sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                  sfc_shflx_override, sfc_lhflx_override,
                  tke, qke, gwd_spectrum,
-                 conv_precip, land_ml, w_land, snow) = args
+                 conv_precip, land_ml, w_land, snow, land_ml_params) = args
                 del conv_precip  # radiation-only input; unused on the no-rad path
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -2114,6 +2129,7 @@ class PhysicsPipeline:
                     sfc_lhflx_override=sfc_lhflx_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     w_land=w_land, snow=snow, land_ml=land_ml,
+                    land_ml_params=land_ml_params,
                 )
 
                 # Cast to storage dtype — must match _rad_branch
@@ -2150,7 +2166,7 @@ class PhysicsPipeline:
                     sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                     sfc_shflx_override, sfc_lhflx_override,
                     tke, qke, gwd_spectrum,
-                    conv_precip, land_ml, w_land, snow)
+                    conv_precip, land_ml, w_land, snow, land_ml_params)
 
             # Issue #316 fix: when the caller knows at build time which
             # branch to take, skip the cond — keeps only the live branch

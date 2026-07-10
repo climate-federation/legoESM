@@ -82,8 +82,8 @@ def _land_mean(field_col, land_mask):
     return float(np.mean(a[land_mask]))
 
 
-def _build_year_scan(smoke, step_fn, config, update_land_params, lat_rad, lon_rad,
-                     ncol, dt, is_multilayer, steps_per_year):
+def _build_year_scan(smoke, step_fn, config, update_land_params, cover_year,
+                     lat_rad, lon_rad, ncol, dt, is_multilayer, steps_per_year):
     """A JAX ``lax.scan`` over one year's land steps (year-relative step index).
 
     ``t0_s`` (seconds since the run's Jan 1) sets the absolute calendar so
@@ -101,7 +101,7 @@ def _build_year_scan(smoke, step_fn, config, update_land_params, lat_rad, lon_ra
         forcing_t = smoke.make_global_forcing(lat_rad, lon_rad, doy_t, hour_t)
         theta_top_t = (state.theta_soil[:, 0] if is_multilayer
                        else jnp.full(ncol, 0.2))
-        land_params_t, _lai = update_land_params(theta_top_t, doy_t)
+        land_params_t, _lai = update_land_params(theta_top_t, doy_t, cover_year)
         new_state, _resp, _ = step_fn(
             state, forcing_t, config, U_MIN, dt,
             lat=lat_rad, land_params=land_params_t, doy=doy_t)
@@ -234,8 +234,11 @@ def main(argv=None) -> int:
     else:
         state = init_multilayer_land_state(ncol, config, T_init=288.0)
 
+    # S3 spin-up cycles a fixed climate at FIXED cover; single-year surfdata makes
+    # interp_annual return the one slice for any year.
+    cover_year = jnp.asarray(float(np.asarray(gsd.years)[0]))
     run_year = _build_year_scan(
-        smoke, step_multilayer_land, config, update_land_params,
+        smoke, step_multilayer_land, config, update_land_params, cover_year,
         lat_rad, lon_rad, ncol, dt, True, steps_per_year)
 
     print(f"spin-up: {args.grid_type} res{args.resolution} | {ncol} cols "

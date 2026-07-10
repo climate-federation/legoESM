@@ -18,7 +18,7 @@ import jax.numpy as jnp
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.canopy.sif import leaf_sif
 from legoesm.land.carbon.config import CarbonState
-from legoesm.land.carbon.stomata import (
+from legoesm.land.stomata import (
     compute_stomatal_beta,
     jarvis_gs,
     solve_coupled_farquhar_ci,
@@ -70,15 +70,22 @@ def compute_effective_beta(
         has no Ci/An to invert).
     """
     # Override stomatal / carbon config fields with spatial arrays if provided.
+    # ``_fC4`` (per-column C4 area fraction) drives the canonical-FvCB C3/C4 blend
+    # in the coupled solver; it is a per-cell PFT-derived field, so it is carried
+    # on ``land_params`` (not a scalar config knob). A column with no C4 data
+    # (land_params is None, or its fC4 is None on the prescribed-PFT path) runs
+    # pure C3 — the correct default, and identical to the pre-FvCB behaviour.
     if land_params is not None:
         _stomata = config.stomata._replace(
             Vc_max25=land_params.Vc_max25,
             g1_bb=land_params.g1,
         )
         _carbon = config.carbon._replace(LCMA=land_params.LCMA)
+        _fC4 = land_params.fC4 if land_params.fC4 is not None else 0.0
     else:
         _stomata = config.stomata
         _carbon = config.carbon
+        _fC4 = 0.0
 
     gpp_farq = None
     sif = None
@@ -89,14 +96,16 @@ def compute_effective_beta(
             leaf = solve_coupled_farquhar_ci(
                 T_sfc, forcing.sw_down, forcing.co2_ppmv,
                 forcing.q_lowest, forcing.p_surface, LAI, beta_soil,
-                _stomata)
+                _stomata, _fC4)
             gs, gpp_farq = leaf.gs, leaf.gpp
             beta = compute_stomatal_beta(
                 gs, LAI, beta_soil, _stomata)
             # SIF from the same solve (big-leaf).  Static gate on _stomata.sif.
             # fesc clamped to [0,1] (a probability) so a hand-set / perturbed
-            # config can't produce negative or amplified SIF. C3-style inversion
-            # (Farquhar here is C3-only), consistent with the big-leaf photosyn.
+            # config can't produce negative or amplified SIF. C3-style electron-
+            # transport inversion (a documented approximation for the C4-blended
+            # fraction, whose SIF physics differ), consistent with the two-leaf
+            # canopy's passive SIF diagnostic.
             if _stomata.sif is not None:
                 fesc = jnp.clip(_stomata.sif.escape_probability, 0.0, 1.0)
                 sif = leaf_sif(

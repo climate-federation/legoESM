@@ -418,14 +418,16 @@ def test_run_atm_latlon_spmd_segment_matches_serial(use_polar_filter):
 def _mk_phys_state(ncol, nlev):
     """Minimal all-zeros PhysicsState with a nonzero deterministic tke seed."""
     import jax as _jax
-    from legoesm.atmosphere.physics.physics_state import PhysicsState
+    from legoesm.atmosphere.physics.physics_state import (
+        NO_SFC_T_OVERRIDE, PhysicsState,
+    )
     return PhysicsState(
         tke=jnp.full((ncol, nlev), 0.01),
         conv_prog_profile=jnp.zeros((ncol, nlev)),
         conv_stoch_state=jnp.zeros((ncol,)),
         gwd_spectrum=jnp.zeros((ncol, 1, 1)),
         prng_key=_jax.random.PRNGKey(0),
-        surface_T_sfc_override=jnp.full((ncol,), jnp.nan),
+        surface_T_sfc_override=jnp.full((ncol,), NO_SFC_T_OVERRIDE),  # #911 finite sentinel
         qke=jnp.zeros((ncol, nlev)),
         clubb_moments=jnp.zeros((ncol, 15, nlev + 1)),
         rad_heating=jnp.zeros((ncol, nlev)),

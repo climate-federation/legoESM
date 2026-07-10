@@ -103,6 +103,45 @@ def test_clm_surfdata_path_flows_to_config():
     assert cfg.clm_surfdata_path == "/data/clm_surfdata.nc"
 
 
+def test_transient_land_cover_flags_flow_to_config():
+    """--transient-land-cover / --land-cover-surfdata round-trip into
+    ExperimentConfig (off + empty by default => static single-year cover)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.transient_land_cover is False
+    assert cfg_default.land_cover_surfdata == ""
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--land-mask-file", "lsm.nc", "--use-multilayer-land",
+        "--transient-land-cover",
+        "--land-cover-surfdata", "/data/luh2_transient_surfdata.nc",
+    ]), parser))
+    assert cfg.transient_land_cover is True
+    assert cfg.land_cover_surfdata == "/data/luh2_transient_surfdata.nc"
+
+
+def test_transient_land_cover_validate_strict_requires_multilayer_and_surfdata():
+    """validate_strict() rejects transient cover without a multilayer tile or
+    without a surfdata path — both would silently no-op the requested LULC."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--land-mask-file", "lsm.nc", "--use-multilayer-land",
+        "--transient-land-cover",
+        "--land-cover-surfdata", "/data/luh2_transient_surfdata.nc",
+    ]), parser))
+    cfg.validate_strict()  # complete config: no error
+
+    # transient cover but no surfdata path -> reject
+    with pytest.raises(ValueError, match="land_cover_surfdata"):
+        cfg._replace(land_cover_surfdata="").validate_strict()
+    # transient cover but slab land (no multilayer) -> reject
+    with pytest.raises(ValueError, match="use_multilayer_land"):
+        cfg._replace(use_multilayer_land=False).validate_strict()
+
+
 def test_land_ic_path_flows_to_config():
     """--land-ic round-trips into ExperimentConfig.land_ic_path (#746): a
     spun-up MultiLayerLandState restart from run_land_spinup replaces the
@@ -1891,6 +1930,11 @@ def test_latlon24_production_variant_pins_polar_filter():
     assert args.dt == 600.0
     assert args.grid_type == "latlon" and args.discretization == "latlon_cgrid"
     assert args.resolution == 24 and args.nlev == 20
-    # Physics inherited from the production include (one source of truth).
+    # Physics inherited from the production include (one source of truth),
+    # except convection: this lane pins `sbm` (#869) because bechtold
+    # re-develops a polar-night temperature runaway that blows the run at day
+    # ~47 regardless of every numerics lever, while sbm is stable (95-day soak)
+    # and lifts hfls 40->70 (#847).  The cube lane keeps bechtold.
     cfg = build_config_from_args(args)
-    assert cfg.convection == "bechtold" and cfg.gravity_wave_drag == "mcfarlane"
+    assert cfg.convection == "sbm" and cfg.gravity_wave_drag == "mcfarlane"
+    assert cfg.convective_precip_efficiency == 0.0  # sbm rejects the bechtold knob

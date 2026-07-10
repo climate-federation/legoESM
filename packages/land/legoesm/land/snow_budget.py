@@ -19,7 +19,9 @@ import jax.numpy as jnp
 
 from legoesm import constants
 
-# Degree-day-style snow melt rate default [m w.e./s/K] (scheme default).
+# Degree-day-style snow melt rate default [kg/m2/s/K] (scheme default).  Used as
+# ``rate*dt`` subtracted from SWE in kg/m2, so its unit is kg/m2 per second per kelvin
+# above T_melt (NOT m w.e./s/K — the SWE budget is mass, kg/m2).
 _SNOW_MELT_RATE_DEFAULT = 5.0e-6
 
 
@@ -101,13 +103,37 @@ def update_snow_age(
     precip_snow: jnp.ndarray,
     dt: float,
 ) -> jnp.ndarray:
-    """Snow-age clock: reset on fresh snowfall, age otherwise, zero when no snow.
+    """Snow-age clock: mass-weighted grain-age mixing of fresh + existing snow.
 
     Shared by the cell-mean budget (:func:`update_snow`) and the elevation-band
     scheme (``snow_bands``), which keeps a single cell-level age for the albedo
     decay while banding the mass budget.
+
+    Fresh snowfall must NOT hard-reset the albedo age to zero on a trace flurry: the
+    old ``precip_snow > 1e-10`` FULL reset drove the albedo to its bright maximum on
+    any dusting over a deep aged pack (a large spring warm-side bias).  Instead the
+    grain age mixes by MASS (CLM/BATS): existing snow ages by ``dt`` while fresh snow
+    enters at age 0, so
+
+        new_age = (snow_age + dt) * swe_old / (swe_old + fresh_swe)
+
+    with ``fresh_swe = precip_snow*dt`` [kg/m2] the fresh snow added this step and
+    ``swe_old = snow_new - fresh_swe`` [kg/m2] the pre-existing snow surviving this
+    step's melt (melt removes mass but does not change grain age, so ``swe_old`` is
+    ``snow_new`` net of the fresh addition).  Trace snow on a deep aged pack barely
+    moves the age (``swe_old >> fresh_swe``); fresh snow on bare/thin ground drives
+    it to ~0 (``swe_old -> 0``, exact for accumulation from zero SWE).  Age is forced
+    to 0 once the pack has fully melted (``snow_new == 0``).
     """
-    is_snowing = precip_snow > 1e-10
-    snow_age_new = jnp.where(is_snowing, 0.0, snow_age + dt)
+    # Units: fresh_swe, swe_old, denom all [kg/m2]; snow_age, dt [s]; ratio is
+    # dimensionless in [0, 1], so new_age stays in [0, snow_age + dt] -- age never
+    # grows past the aged clock and never goes negative (monotone, positivity kept).
+    fresh_swe = jnp.maximum(precip_snow, 0.0) * dt           # kg/m2 fresh this step
+    swe_old = jnp.maximum(snow_new - fresh_swe, 0.0)         # kg/m2 old snow surviving melt
+    denom = swe_old + fresh_swe                              # kg/m2 (== snow_new where >=0)
+    aged = snow_age + dt                                     # existing snow ages by dt
+    # Guard the divide (denom>0 whenever snow_new>0; the snow_new==0 rows are masked
+    # out below, so the where only prevents a 0/0 NaN gradient on those dead rows).
+    mixed = aged * swe_old / jnp.where(denom > 0.0, denom, 1.0)
     # If all snow has melted, reset age to zero
-    return jnp.where(snow_new > 0.0, snow_age_new, 0.0)
+    return jnp.where(snow_new > 0.0, mixed, 0.0)
