@@ -46,8 +46,10 @@ def test_metrics_shape_and_separation():
     # single process: max == median, imbalance exactly 1.0
     assert m["block_ms_max"] == m["block_ms_median"]
     assert m["rank_imbalance"] == 1.0
-    # fused number derives from the block, not the probe
-    assert abs(m["fused_step_ms"] - m["block_ms_max"] / 4) < 1e-6
+    # fused number derives from the block, not the probe (both fields are
+    # independently rounded — fused to 4 dp, block to 2 dp — so compare at
+    # the rounding granularity, not machine precision)
+    assert abs(m["fused_step_ms"] - m["block_ms_max"] / 4) < 5e-3
 
 
 def test_zero_block_steps_no_div0():
