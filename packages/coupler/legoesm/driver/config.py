@@ -791,13 +791,16 @@ class ExperimentConfig(NamedTuple):
     # plume + subsidence gate. 150 hPa stability cap (see BechtoldConfig.
     # p_conv_top_pa); raise toward 100 hPa if deep tropical tops are clipped.
     bechtold_conv_top_pa: float = 15000.0
-    # Bechtold convective-downdraft strength (marine humid-BL evaporation lever,
-    # #847): raise downdraft_evap (0.05 default -> ~0.3 Tiedtke) to evaporate
-    # more rain in the downdraft -> cool+dry the sub-cloud layer -> larger
-    # sea-air humidity gradient -> higher surface evaporation + precip.
-    # downdraft_rh_min = column-mean RH threshold above which the downdraft is
-    # suppressed; RAISE it so the downdraft fires in the humid marine BL. None-
-    # equivalent defaults reproduce BechtoldConfig (byte-identical).
+    # Bechtold convective-downdraft strength (marine-evaporation / precip lever,
+    # #847). The downdraft's sub-cloud effect is rain re-evaporation only — it
+    # COOLS + locally moistens (no dry-air advection; see physics_pipeline note).
+    # Raising downdraft_evap (0.05 -> ~0.3 Tiedtke) increases that cooling, which
+    # drives cold pools that ENHANCE convective triggering -> more precip -> net
+    # column drying -> larger sea-air gradient -> higher surface evaporation.
+    # downdraft_rh_min gates the trigger sigmoid((rh_min - rh_below)·sharpness):
+    # the downdraft fires where the below-LCL RH < rh_min, so RAISING rh_min
+    # activates it in more (moister) columns. Defaults reproduce BechtoldConfig
+    # (byte-identical).
     bechtold_downdraft_evap: float = 0.05
     bechtold_downdraft_alpha: float = 0.3
     bechtold_downdraft_rh_min: float = 0.2

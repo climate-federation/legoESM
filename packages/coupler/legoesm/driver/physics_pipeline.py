@@ -2559,10 +2559,17 @@ def _resolve_convection(config):
             precip_split_scheme=getattr(config, 'convective_precip_split', 'constant'),
             autoconv_q_c_crit=getattr(config, 'autoconv_q_c_crit', 5.0e-4),
             autoconv_pe_max=getattr(config, 'autoconv_pe_max', 0.9),
-            # Convective-downdraft strength (marine humid-BL evaporation lever,
-            # #847): a stronger downdraft evaporates rain -> cools+dries the
-            # sub-cloud layer -> larger sea-air humidity gradient -> higher
-            # surface evaporation + precip. Defaults reproduce BechtoldConfig
+            # Convective-downdraft strength (marine-evaporation / precip lever,
+            # #847). MECHANISM (per codex review of bechtold.py:~624): the
+            # downdraft's only sub-cloud thermodynamic term is rain re-evaporation
+            # (dq_v += evap, dT -= L_v/c_pd·evap) — it COOLS + locally MOISTENS
+            # (it does NOT advect dry mid-level air; M_d is momentum/CMT only).
+            # A stronger downdraft therefore acts INDIRECTLY: the extra sub-cloud
+            # COOLING drives cold pools that enhance convective triggering
+            # (Tompkins 2001) -> more convection + precip -> net column drying ->
+            # larger sea-air gradient -> higher surface evaporation. Empirically
+            # (A/B evap 0.3, rh_min 0.6) q_air 13.7->10.6 g/kg, precip 0.52->3.28.
+            # Defaults reproduce BechtoldConfig
             # (byte-identical when unset).
             downdraft_evap_efficiency=getattr(
                 config, 'bechtold_downdraft_evap', 0.05),

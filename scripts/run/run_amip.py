@@ -616,11 +616,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_evap,
                         dest="bechtold_downdraft_evap",
                         help="Bechtold convective-downdraft evaporation efficiency "
-                             "[0,0.5] (marine humid-BL evaporation lever, #847): "
-                             "higher => the downdraft evaporates more rain => "
-                             "cools+dries the sub-cloud layer => larger sea-air "
-                             "humidity gradient => higher surface evaporation + "
-                             f"precip. Default {_EXPERIMENT_DEFAULTS.bechtold_downdraft_evap} "
+                             "[0,0.5] (marine-evaporation / precip lever, #847): "
+                             "higher => the downdraft re-evaporates more rain => "
+                             "more sub-cloud COOLING => cold pools enhance "
+                             "convective triggering => more precip => net column "
+                             "drying => larger sea-air gradient => higher surface "
+                             f"evaporation. Default {_EXPERIMENT_DEFAULTS.bechtold_downdraft_evap} "
                              "(weak); Tiedtke ~0.3.")
     parser.add_argument("--bechtold-downdraft-alpha", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_downdraft_alpha,
