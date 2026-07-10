@@ -388,7 +388,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   mle=None, dz_ref_override=None,
                   bottom_drag_scheme=None, bottom_drag_cd0=None,
                   bottom_drag_cdmax=None, bottom_drag_z0=None,
-                  bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None):
+                  bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
+                  ddm=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -470,7 +471,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
     # faithful config untouched.
     _use_convection = bool(convection and convection != "none")
     _use_iwm = iwm is not None and iwm.enabled
-    if _use_convection or mle is not None or _use_iwm:
+    _use_ddm = ddm is not None and ddm.enabled
+    if _use_convection or mle is not None or _use_iwm or _use_ddm:
         from legoesm.ocean.physics.combined import OceanPhysicsConfig
         from legoesm.ocean.physics.convection.config import (
             OceanConvectionConfig, EnhancedDiffusionConfig,
@@ -517,6 +519,12 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             _ovr["K_v"] = 1.0e-10   # NEMO avtb with ln_zdfiwm
             print("[setup] zdfiwm: model backgrounds forced to molecular "
                   f"(A_v={_ovr['A_v']:g}, K_v={_ovr['K_v']:g}) per zdfiwm_init")
+        if _use_ddm:
+            # zdfddm double-diffusive mixing rides the vertical-mixing config
+            # (additive avt/avs in compute_vertical_K_profiles); unlike zdfiwm
+            # it is purely additive -- NO molecular-background override.
+            # implicit_vertical_mixing is already forced True above.
+            _vm_cfg = _vm_cfg._replace(ddm=ddm)
         _ovr["physics"] = OceanPhysicsConfig(
             vertical_mixing=_vm_cfg,
             lateral_mixing=LateralMixingConfig(scheme="none"),
@@ -537,7 +545,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
               f"convection={convection if _use_convection else 'none'} "
               f"(K_conv={convection_K_conv} K_bg={convection_K_bg}) "
               f"MLE={'ce=%g' % mle.ce if mle is not None else 'off'} "
-              f"IWM={'on' if _use_iwm else 'off'}")
+              f"IWM={'on' if _use_iwm else 'off'} "
+              f"DDM={'on' if _use_ddm else 'off'}")
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -673,7 +682,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   bottom_drag_scheme=None, bottom_drag_cd0=None,
                   bottom_drag_cdmax=None, bottom_drag_z0=None,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
-                  vertical_mixing=None):
+                  ddm=None, vertical_mixing=None):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -790,6 +799,28 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
             A_v=_const.nu_ocean_molecular, K_v=1.0e-10)
         print("[setup] zdfiwm: model backgrounds forced to molecular "
               f"(A_v={_const.nu_ocean_molecular:g}, K_v=1e-10) per zdfiwm_init")
+    if ddm is not None and ddm.enabled:
+        # zdfddm double-diffusive mixing rides the vertical-mixing config
+        # inside the EXISTING latlon-bathy physics (KPP + convection) -- merge,
+        # don't replace (same doctrine as the --mle / --iwm blocks above).
+        # Unlike zdfiwm it is purely additive (no molecular-background
+        # override) and has NO forcing file, so -- like --mle -- the model is
+        # rebuilt here; the partial-cell / iwm rebuilds below re-use this same
+        # config, preserving ddm.  Requires implicit vertical mixing (forced
+        # True above via _ovr).
+        if config.physics is None:
+            raise ValueError(
+                "--double-diffusion on latlon_bathy expected a physics config "
+                "(KPP/convection) but config.physics is None.")
+        _vm_ddm = config.physics.vertical_mixing._replace(ddm=ddm)
+        config = config._replace(
+            physics=config.physics._replace(vertical_mixing=_vm_ddm))
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        model = LatLonCGridOceanModel(grid, z_coord, config)
+        print(f"[setup] latlon zdfddm ENABLED "
+              f"(rn_avts={ddm.rn_avts:g} rn_hsbfr={ddm.rn_hsbfr:g})")
     e_mask, e_H = read_mesh_mask_bathy(mesh_path)
     ds = xr.open_dataset(mesh_path)
     src_lat = _squeeze2d(ds["gphit"].values)
@@ -1120,7 +1151,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      runoff_depth_spread_m=None, mle=None,
                      bottom_drag_scheme=None, bottom_drag_cd0=None,
                      bottom_drag_cdmax=None, bottom_drag_z0=None,
-                     bottom_drag_ke0=None, iwm=None,
+                     bottom_drag_ke0=None, iwm=None, ddm=None,
                      vertical_mixing=None, ew_cyclic_overlap=False):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
@@ -1166,6 +1197,10 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
         raise SystemExit(
             "--iwm is not wired on the MPAS vertical-mixing bridge yet "
             "(lat-lon / tripole only)")
+    if ddm is not None and ddm.enabled:
+        raise SystemExit(
+            "--double-diffusion is not wired on the MPAS vertical-mixing "
+            "bridge yet (lat-lon / tripole only)")
     _ovr = {k: v for k, v in (("A_h", A_h), ("B_h", B_h), ("K_bih", K_bih),
                               ("C_smag_lap", C_smag_lap), ("pgf_scheme", pgf_scheme),
                               ("bottom_drag_r", bottom_drag_r),
@@ -2611,6 +2646,17 @@ def main() -> int:
                    help="Uniform-fallback abyssal-hill decay scale [m]")
     p.add_argument("--iwm-scale-cri", type=float, default=100.0,
                    help="Uniform-fallback critical-slope decay scale [m]")
+    p.add_argument("--double-diffusion", action="store_true",
+                   help="Double-diffusive mixing (NEMO zdfddm, Merryfield "
+                        "1999; salt-fingering avt/avs).  ADDITIVE on top of the "
+                        "vertical-mixing K like --iwm.  lat-lon/tripole only.")
+    p.add_argument("--ddm-avts", type=float, default=None,
+                   help="zdfddm rn_avts: max salt-fingering salt diffusivity "
+                        "[m^2/s] (NEMO namzdf_ddm default 1e-4).  None keeps the "
+                        "DoubleDiffusionConfig default.")
+    p.add_argument("--ddm-rc", type=float, default=None,
+                   help="zdfddm rn_hsbfr: salt-fingering cutoff density ratio "
+                        "R_c [1] (NEMO default 1.6).  None keeps the default.")
     p.add_argument("--barotropic-solver", default=None, choices=[None,"explicit_substep","implicit_cn"],
                    help="Override barotropic solver. NEMO uses split-explicit forward-backward "
                         "(=explicit_substep here, with a dissipative cosine time filter); OMIP "
@@ -3153,6 +3199,21 @@ def main() -> int:
     # so the builders' iwm-block stays fully inert on legacy runs).
     from scripts.run.run_omip import build_iwm_config_from_args as _build_iwm
     _iwm_cfg = _build_iwm(args) if args.iwm else None
+    # zdfddm CLI -> DoubleDiffusionConfig (None when --double-diffusion absent
+    # so the builders' ddm-block stays fully inert on legacy runs).  Additive
+    # salt-fingering avt/avs; rides the same implicit-vertical-mixing paths as
+    # --iwm (lat-lon/tripole force implicit mixing on).
+    from legoesm.ocean.physics.vertical_mixing.double_diffusion import (
+        DoubleDiffusionConfig as _DDMConfig,
+    )
+    _ddm_cfg = None
+    if args.double_diffusion:
+        _ddm_kw = {}
+        if args.ddm_avts is not None:
+            _ddm_kw["rn_avts"] = args.ddm_avts
+        if args.ddm_rc is not None:
+            _ddm_kw["rn_hsbfr"] = args.ddm_rc
+        _ddm_cfg = _DDMConfig(enabled=True, **_ddm_kw)
     if args.grid == "tripole":
         grid, z_coord, model, state, H_bathy = build_tripole(
             args.nlev, args.H_max, args.mesh,
@@ -3192,6 +3253,7 @@ def main() -> int:
             bottom_drag_z0=args.bottom_drag_z0,
             bottom_drag_ke0=args.bottom_drag_ke0,
             iwm=_iwm_cfg, iwm_forcing_file=args.iwm_forcing_file,
+            ddm=_ddm_cfg,
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":
@@ -3231,7 +3293,7 @@ def main() -> int:
             bottom_drag_cdmax=args.bottom_drag_cdmax,
             bottom_drag_z0=args.bottom_drag_z0,
             bottom_drag_ke0=args.bottom_drag_ke0,
-            iwm=_iwm_cfg,
+            iwm=_iwm_cfg, ddm=_ddm_cfg,
             vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv),
             ew_cyclic_overlap=bool(args.ew_cyclic_overlap),
         )
@@ -3287,6 +3349,7 @@ def main() -> int:
             bottom_drag_z0=args.bottom_drag_z0,
             bottom_drag_ke0=args.bottom_drag_ke0,
             iwm=_iwm_cfg, iwm_forcing_file=args.iwm_forcing_file,
+            ddm=_ddm_cfg,
             # KPP Ri_crit/Cv override (shoal the too-deep winter ML). None
             # unless --kpp-ri-crit/--kpp-cv given -> default KPPConfig unchanged.
             vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv),
