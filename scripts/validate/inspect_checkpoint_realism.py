@@ -36,15 +36,14 @@ from pathlib import Path
 
 import numpy as np
 
-# --- Fields whose NaN is a DOCUMENTED sentinel, not corruption: NaN means
-#     "unset / fall back" by design, so the NaN gate must not fire on them
-#     (it cried wolf on every MPAS checkpoint).  Inf is still gated — an Inf
-#     in a sentinel field is a real defect.  Keep this list tiny and only add
-#     a field whose writer documents the NaN sentinel (e.g.
-#     ``physics_state.py``: surface_T_sfc_override = jnp.full(..., nan),
-#     consumed via ``jnp.where(jnp.isnan(...), fallback, override)``). ---
+# --- LEGACY NaN-sentinel fields.  #911 replaced the NaN "no override" sentinel
+#     with a FINITE value, so checkpoints written after #911 never carry NaN
+#     here.  This exemption remains only so PRE-#911 checkpoints (whose field
+#     really is NaN by the old design) still inspect cleanly; Inf is always
+#     gated.  Do NOT add new entries — a NaN sentinel is the anti-pattern #911
+#     removed. ---
 _NAN_SENTINEL_FIELDS = {
-    "physstate_surface_T_sfc_override",
+    "physstate_surface_T_sfc_override",   # legacy pre-#911 checkpoints only
 }
 
 # --- Per-field physical sanity bounds: (lo, hi).  ``hi=None`` means "no upper
