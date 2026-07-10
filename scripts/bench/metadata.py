@@ -487,6 +487,239 @@ def tidy_throughput_fields(
     }
 
 
+#: Placeholder comm-fabric numbers for :func:`calibrated_bound` when the
+#: caller passes no measured values.  Ballpark single-node GPU-interconnect
+#: figures (order NVLink/PCIe), NOT measurements of THIS machine —
+#: MACHINE-CALIBRATED-REQUIRED: any bound built on them is emitted with
+#: ``bound_calibrated=False`` and must never be quoted as a hardware
+#: roofline.  Calibrate with a ping-pong / allreduce microbenchmark on the
+#: actual fabric and pass ``latency_us`` / ``bandwidth_GBs`` explicitly.
+DEFAULT_COMM_LATENCY_US = 25.0
+DEFAULT_COMM_BANDWIDTH_GBS = 10.0
+
+
+def comm_accounting(
+    *,
+    halo_messages_per_step: int | None,
+    n_lon: int | None = None,
+    nlev: int = 1,
+    dtype_bytes: int = 8,
+    rows_per_message: int = 1,
+    bytes_per_message: int | None = None,
+    full_state_gathers_per_step: int = 0,
+    scope_note: str | None = None,
+) -> dict[str, Any]:
+    """Per-step communication VOLUME fields for a scaling record (audit item 4).
+
+    ``halo_bytes_per_step = messages x bytes_per_message`` where the
+    per-message payload is either given explicitly (``bytes_per_message``)
+    or sized as a lat-row slab ``n_lon * nlev * dtype_bytes *
+    rows_per_message`` (the lat-band halo exchanges whole latitude rows;
+    2-D barotropic slabs pass ``nlev=1``, 3-D baroclinic slabs the real
+    level count).  ``halo_messages_per_step=None`` means the census is
+    genuinely unknown for this configuration: every derived byte field is
+    emitted ``None`` — never fabricated.
+
+    ``full_state_gathers_per_step`` exists so drivers that DO gather the
+    full state every step (e.g. run_omip-style host loops: 2 gathers) can
+    report it; a fused-scan bench reports 0.  ``scope_note`` should say
+    what the census covers (e.g. "barotropic solver only") so a partial
+    count is never mistaken for total traffic.
+    """
+    out: dict[str, Any] = {
+        "full_state_gathers_per_step": int(full_state_gathers_per_step),
+    }
+    if halo_messages_per_step is None:
+        out.update(
+            halo_messages_per_step=None,
+            halo_bytes_per_message=None,
+            halo_bytes_per_step=None,
+        )
+    else:
+        if bytes_per_message is None:
+            if n_lon is None:
+                raise ValueError(
+                    "comm_accounting: pass bytes_per_message OR the slab "
+                    "dimensions (n_lon [+ nlev/dtype_bytes/rows_per_message]) "
+                    "— a message count without a payload size cannot yield "
+                    "bytes."
+                )
+            bytes_per_message = (
+                int(n_lon) * int(nlev) * int(dtype_bytes)
+                * int(rows_per_message)
+            )
+        out.update(
+            halo_messages_per_step=int(halo_messages_per_step),
+            halo_bytes_per_message=int(bytes_per_message),
+            halo_bytes_per_step=(
+                int(halo_messages_per_step) * int(bytes_per_message)
+            ),
+        )
+    if scope_note:
+        out["comm_scope_note"] = scope_note
+    return out
+
+
+def wet_cell_metrics(
+    *,
+    wet_columns: float,
+    nlev: int,
+    total_cells: int,
+    n_devices: int,
+    wet_columns_per_device: list[float] | None = None,
+) -> dict[str, Any]:
+    """Wet-cell weak-scaling metric (audit item 9): ACTIVE cell-levels.
+
+    Weak-scaling rows historically report TOTAL cells; on a masked ocean
+    the work is proportional to WET cell-levels, so per-device totals can
+    look balanced while wet work is not.  z-star column-mask semantics
+    (the lat-lon C-grid backend: ``land_mask`` is 2-D, a wet column is wet
+    at all ``nlev`` levels — the same convention as
+    ``bench_ocean_mpi_scaling``'s ``wet_band_boundaries`` accounting):
+    ``wet_cell_levels = wet_columns * nlev``.
+
+    ``wet_columns_per_device`` (optional, one entry per device in band
+    order) adds min/max per-device wet cell-levels — the imbalance signal.
+    ``wet_equals_total`` flags the metric as NON-INFORMATIVE (all-wet IC,
+    e.g. a flat-bottom benchmark state); callers should print a loud note.
+    """
+    if int(nlev) <= 0:
+        raise ValueError(f"wet_cell_metrics: nlev must be >= 1, got {nlev}")
+    if int(n_devices) <= 0:
+        raise ValueError(
+            f"wet_cell_metrics: n_devices must be >= 1, got {n_devices}")
+    wet_cols = int(round(float(wet_columns)))
+    wcl = wet_cols * int(nlev)
+    total = int(total_cells)
+    out: dict[str, Any] = {
+        "wet_cell_levels": wcl,
+        "wet_cell_levels_per_device": wcl / int(n_devices),
+        "wet_fraction": (wcl / total) if total > 0 else None,
+        "wet_equals_total": bool(wcl == total),
+    }
+    if wet_columns_per_device is not None:
+        per = [int(round(float(w))) * int(nlev)
+               for w in wet_columns_per_device]
+        if len(per) != int(n_devices):
+            raise ValueError(
+                "wet_cell_metrics: wet_columns_per_device has "
+                f"{len(per)} entries for n_devices={n_devices}")
+        out["wet_cell_levels_per_device_min"] = min(per)
+        out["wet_cell_levels_per_device_max"] = max(per)
+    return out
+
+
+def calibrated_bound(
+    *,
+    measured_fused_step_ms: float | None = None,
+    single_device_fused_step_ms: float | None = None,
+    halo_messages_per_step: int | None = None,
+    halo_bytes_per_step: int | None = None,
+    n_reductions_per_step: int | None = None,
+    rank_imbalance: float | None = None,
+    latency_us: float | None = None,
+    bandwidth_GBs: float | None = None,
+    launch_host_ms: float = 0.0,
+) -> dict[str, Any]:
+    """Calibrated per-fused-step time bound (audit item 8).
+
+        T_bound = max(compute, comm) + reduction + launch_host + imbalance
+
+    Ingredients (all MEASURABLE, none fabricated):
+
+    - ``compute``   = single-device ``fused_step_ms`` at the SAME
+      per-device size (the caller passes its nd=1 row; ``None`` -> the
+      bound is emitted null and flagged incomplete).
+    - ``comm``      = ``messages x latency + bytes / bandwidth`` — halo
+      traffic, modeled as overlappable with compute, hence the ``max``.
+      A census that omits traffic (e.g. barotropic-only) UNDERestimates
+      comm; the bound stays a valid LOWER bound on the step time.
+    - ``reduction`` = ``n_reductions x latency`` — sequentially DEPENDENT
+      allreduce-type collectives (CG dot products); latency-bound at
+      bench scales, so bytes are neglected (small-message model).
+    - ``imbalance`` = ``(rank_imbalance - 1) x compute`` from the
+      MEASURED max/median block ratio.
+    - ``launch_host`` — per-step dispatch overhead; ~0 inside a fused
+      ``lax.scan`` block (amortized), so benches pass the default 0.0;
+      drivers stepping one-at-a-time should pass their measured
+      ``step_latency_ms - fused_step_ms``.
+
+    ``latency_us`` / ``bandwidth_GBs`` default to the
+    MACHINE-CALIBRATED-REQUIRED placeholders
+    (:data:`DEFAULT_COMM_LATENCY_US` / :data:`DEFAULT_COMM_BANDWIDTH_GBS`);
+    whenever either default is used the result carries
+    ``bound_calibrated=False`` and must not be quoted as a machine
+    roofline.  Any missing ingredient -> ``t_bound_ms=None`` +
+    ``bound_incomplete_reason`` naming it — an incomplete bound is
+    reported as incomplete, never invented.
+    """
+    calibrated = latency_us is not None and bandwidth_GBs is not None
+    lat_us = (DEFAULT_COMM_LATENCY_US if latency_us is None
+              else float(latency_us))
+    bw_gbs = (DEFAULT_COMM_BANDWIDTH_GBS if bandwidth_GBs is None
+              else float(bandwidth_GBs))
+    if lat_us < 0.0:
+        raise ValueError(f"calibrated_bound: latency_us must be >= 0, "
+                         f"got {lat_us}")
+    if bw_gbs <= 0.0:
+        raise ValueError(f"calibrated_bound: bandwidth_GBs must be > 0, "
+                         f"got {bw_gbs}")
+
+    missing = [name for name, v in (
+        ("single_device_fused_step_ms", single_device_fused_step_ms),
+        ("halo_messages_per_step", halo_messages_per_step),
+        ("halo_bytes_per_step", halo_bytes_per_step),
+        ("n_reductions_per_step", n_reductions_per_step),
+        ("rank_imbalance", rank_imbalance),
+    ) if v is None]
+
+    compute_ms = (None if single_device_fused_step_ms is None
+                  else float(single_device_fused_step_ms))
+    comm_ms = None
+    if halo_messages_per_step is not None and halo_bytes_per_step is not None:
+        comm_ms = (float(halo_messages_per_step) * lat_us * 1e-3
+                   + float(halo_bytes_per_step) / (bw_gbs * 1e9) * 1e3)
+    reduction_ms = (None if n_reductions_per_step is None
+                    else float(n_reductions_per_step) * lat_us * 1e-3)
+    imbalance_ms = None
+    if rank_imbalance is not None and compute_ms is not None:
+        imbalance_ms = max(float(rank_imbalance) - 1.0, 0.0) * compute_ms
+
+    if missing:
+        t_bound_ms = None
+        measured_over_bound = None
+    else:
+        t_bound_ms = (max(compute_ms, comm_ms) + reduction_ms
+                      + float(launch_host_ms) + imbalance_ms)
+        measured_over_bound = (
+            float(measured_fused_step_ms) / t_bound_ms
+            if measured_fused_step_ms is not None and t_bound_ms > 0.0
+            else None)
+
+    return {
+        "t_bound_ms": (None if t_bound_ms is None else round(t_bound_ms, 4)),
+        "measured_over_bound": (None if measured_over_bound is None
+                                else round(measured_over_bound, 4)),
+        "bound_calibrated": bool(calibrated),
+        "bound_incomplete_reason": (missing or None),
+        "bound_ingredients": {
+            "compute_ms": compute_ms,
+            "comm_ms": (None if comm_ms is None else round(comm_ms, 6)),
+            "reduction_ms": (None if reduction_ms is None
+                             else round(reduction_ms, 6)),
+            "imbalance_ms": (None if imbalance_ms is None
+                             else round(imbalance_ms, 6)),
+            "launch_host_ms": float(launch_host_ms),
+            "latency_us": lat_us,
+            "bandwidth_GBs": bw_gbs,
+            "halo_messages_per_step": halo_messages_per_step,
+            "halo_bytes_per_step": halo_bytes_per_step,
+            "n_reductions_per_step": n_reductions_per_step,
+            "rank_imbalance": rank_imbalance,
+        },
+    }
+
+
 def timed_scan_blocks(
     advance,
     state,

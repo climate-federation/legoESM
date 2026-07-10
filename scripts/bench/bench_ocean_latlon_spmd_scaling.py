@@ -55,7 +55,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 # under rec["metadata"] so a virtual-CPU-device proxy, a gloo/TCP fabric run,
 # or an f32 ablation is falsifiable from the JSONL row alone.  metadata.py
 # imports JAX lazily, so this is safe before jax.distributed.initialize.
-from metadata import annotate_incomplete, scaling_metadata, tidy_throughput_fields  # noqa: E402
+from metadata import (  # noqa: E402
+    annotate_incomplete,
+    calibrated_bound,
+    comm_accounting,
+    scaling_metadata,
+    tidy_throughput_fields,
+    wet_cell_metrics,
+)
 
 # SPMD full-step parity tolerances — the FLOATING-POINT RE-ASSOCIATION floor
 # of the sharded split-explicit barotropic (ppermute/psum reduction-order
@@ -176,6 +183,23 @@ def main() -> int:
                         "bench measure a non-production configuration "
                         "(scaling audit, bottleneck 4).")
     p.add_argument("--dt", type=float, default=600.0)
+    p.add_argument("--single-dev-fused-ms", type=float, default=None,
+                   help="fused_step_ms of the nd=1 row at the SAME per-device "
+                        "size (the compute ingredient of the calibrated "
+                        "T_bound, audit item 8). Omitted at nd>1 -> the bound "
+                        "is emitted null + flagged incomplete (never "
+                        "fabricated); nd=1 rows use their own measurement.")
+    p.add_argument("--comm-latency-us", type=float, default=None,
+                   help="MEASURED per-message latency [us] of THIS machine's "
+                        "fabric (ping-pong microbenchmark). Default: the "
+                        "MACHINE-CALIBRATED-REQUIRED placeholder in "
+                        "metadata.py -> the record carries "
+                        "bound_calibrated=false.")
+    p.add_argument("--comm-bandwidth-gbs", type=float, default=None,
+                   help="MEASURED link bandwidth [GB/s] of THIS machine's "
+                        "fabric. Default: the MACHINE-CALIBRATED-REQUIRED "
+                        "placeholder in metadata.py -> "
+                        "bound_calibrated=false.")
     p.add_argument("--out", type=str,
                    default="results/a1/ocean_spmd_scaling.jsonl")
     p.add_argument(
@@ -300,6 +324,22 @@ def main() -> int:
     # wrapper can build the per-band vertex masks host-side.
     model._ensure_vertex_mask(s0)
 
+    # Wet-cell weak metric (audit item 9): ACTIVE cell-levels from the state
+    # land mask (2-D column mask, z-star: a wet column is wet at all nlev
+    # levels — the bench_ocean_mpi_scaling wet-count convention).  Computed
+    # host-side from the pre-shard global state; bands are contiguous
+    # equal-row blocks, so the per-device split is an exact reshape.
+    _mask_np = np.asarray(s0.land_mask.data)
+    _wet_cols_per_dev = _mask_np.reshape(
+        nd, n_lat // nd, args.n_lon).sum(axis=(1, 2))
+    wet_rec = wet_cell_metrics(
+        wet_columns=float(_mask_np.sum()),
+        nlev=args.nlev,
+        total_cells=n_lat * args.n_lon * args.nlev,
+        n_devices=nd,
+        wet_columns_per_device=[float(w) for w in _wet_cols_per_dev],
+    )
+
     # Parity reference: the plain single-device trajectory, computed BEFORE
     # any sharding (deterministic identical build on every process).
     serial_final = None
@@ -346,13 +386,22 @@ def main() -> int:
         block_steps=_blk, n_blocks=_nblk, probe_steps=_probe,
         sync_label="ocean_latlon_spmd_bench")
 
-    # --- Correctness gates (before any timing is reported) -----------------
-    if args.parity_gate or args.check_conservation:
+    # Post-run solver-residual probe eligibility (audit item 6): needs the
+    # gathered global final state on ONE process; multicontroller runs skip
+    # it (recorded as residual_measured=False, never faked).
+    _probe_residual = (args.baro_solver == "implicit_cn"
+                       and jax.process_count() == 1)
+
+    final_global = None
+    if args.parity_gate or args.check_conservation or _probe_residual:
         from legoesm.ocean.dynamics.sharded_ocean_step import (
             gather_state_latlon,
         )
         final_global = (gather_state_latlon(s, mesh) if mesh is not None
                         else s)
+
+    # --- Correctness gates (before any timing is reported) -----------------
+    if args.parity_gate or args.check_conservation:
         prec = "float64" if jax.config.jax_enable_x64 else "float32"
         rank0 = jax.process_index() == 0
         if args.check_conservation:
@@ -391,11 +440,139 @@ def main() -> int:
                           "single-device reference.", flush=True)
                 return 5
 
+    # --- Solver iterations + post-run residual (audit item 6) --------------
+    # implicit_cn dispatch (barotropic_implicit_latlon_cgrid): the SPMD /
+    # distributed / force_pcg path runs a FIXED-iteration PCG
+    # (barotropic_implicit_pcg_fixed_iters, static fori_loop); the plain
+    # single-device path runs the stock adaptive jax.scipy CG whose
+    # iteration count is not exposed (tol/maxiter recorded instead).
+    _baro_cfg = model.config.barotropic
+    _pcg_fixed_path = (args.baro_solver == "implicit_cn"
+                       and (nd > 1
+                            or bool(_baro_cfg.barotropic_implicit_force_pcg)))
+    if _pcg_fixed_path:
+        solver_iters = int(_baro_cfg.barotropic_implicit_pcg_fixed_iters)
+        solver_iters_mode = (
+            f"fixed_pcg[{_baro_cfg.barotropic_implicit_pcg_variant},"
+            f"{_baro_cfg.barotropic_implicit_preconditioner}]")
+    elif args.baro_solver == "implicit_cn":
+        solver_iters = None
+        solver_iters_mode = (
+            "adaptive_stock_cg(maxiter="
+            f"{int(_baro_cfg.barotropic_implicit_pcg_maxiter)},"
+            f"tol={_baro_cfg.barotropic_implicit_pcg_tol:g}) — iteration "
+            "count not exposed by jax.scipy CG")
+    else:
+        solver_iters = None
+        solver_iters_mode = "explicit_substep (no iterative solve)"
+
+    solver_residual = None
+    residual_measured = False
+    residual_reason = None
+    if args.baro_solver != "implicit_cn":
+        residual_reason = ("explicit_substep barotropic has no iterative "
+                           "solve — no solver residual exists to measure")
+    elif not _probe_residual:
+        residual_reason = ("multicontroller run: the residual probe needs "
+                           "the gathered global state on one process; "
+                           "skipped (not faked)")
+    else:
+        # ONE extra implicit free-surface solve on the gathered FINAL state,
+        # OUTSIDE the timing loop, using the solver's return_residual
+        # diagnostic mode — the GLOBAL relative Helmholtz residual of the
+        # returned eta.  At nd>1 the timed run took the fixed-iteration PCG
+        # path (SPMD), so the probe forces the SAME fixed-M PCG body
+        # (force_pcg; its global dots reduce locally single-process) — the
+        # residual measured is that of the solver configuration actually
+        # benchmarked.  Probe state is discarded; F_slow terms are zero
+        # (standalone solve at the final state, not a step replay).
+        from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
+            barotropic_implicit_latlon_cgrid,
+        )
+        _probe_cfg = model.config
+        if nd > 1:
+            _probe_cfg = _probe_cfg._replace(
+                barotropic=_probe_cfg.barotropic._replace(
+                    barotropic_implicit_force_pcg=True))
+        _probe_out = barotropic_implicit_latlon_cgrid(
+            final_global, args.dt, model.grid, model.z_coord, _probe_cfg,
+            return_residual=True)
+        solver_residual = float(jax.block_until_ready(_probe_out[2]))
+        residual_measured = True
+
+    # --- Communication accounting (audit item 4) + calibrated bound (8) ----
+    # Analytic INTER-DEVICE census, barotropic-solver scope ONLY (the
+    # baroclinic 3-D pads are not counted -> bytes/comm are a LOWER bound;
+    # T_bound below therefore stays a valid lower bound on the step time).
+    # implicit_cn PCG: each Helmholtz apply pads eta N+S (gradient stencil)
+    # + the v-face flux row (divergence) ~= 2 exchanges/apply, applied
+    # iters + 1 times (incl. the initial residual); reductions = the dot
+    # batches (2/iter standard, 1/iter single_reduce) + the initial batch
+    # + the mass-projection psum + the eta-floor clamp psum.
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        estimate_barotropic_halo_messages,
+    )
+    _halo_est = estimate_barotropic_halo_messages(
+        model.config, model.config.barotropic.n_barotropic_substeps)
+    _dtype_bytes = 8 if jax.config.jax_enable_x64 else 4
+    _n_reductions = None
+    if nd <= 1:
+        _msgs, _n_reductions = 0, 0
+        _comm_note = ("single device: no inter-device halo/reduction "
+                      "traffic")
+    elif _pcg_fixed_path:
+        _msgs = 2 * (solver_iters + 1)
+        _per_iter = (1 if _baro_cfg.barotropic_implicit_pcg_variant
+                     == "single_reduce" else 2)
+        _n_reductions = _per_iter * solver_iters + 3
+        _comm_note = ("analytic, barotropic implicit-CN PCG scope only; "
+                      "2-D eta row slabs (nlev=1), one row per direction "
+                      "(rows_per_message=2); baroclinic 3-D pads NOT "
+                      "counted — bytes are a lower bound")
+    elif args.wide_halo:
+        _msgs = None
+        _comm_note = ("wide-halo arm: per-chunk exchange count depends on "
+                      "the auto chunk size; census in "
+                      "extra.barotropic_halo_messages — bytes not derived "
+                      "(not fabricated)")
+    else:
+        # explicit_substep standard path: the analytic per-substep pad
+        # census (also recorded verbatim in extra.barotropic_halo_messages).
+        _msgs = int(_halo_est["standard_messages"])
+        _comm_note = ("analytic, explicit-substep barotropic scope only "
+                      "(2-D slabs, one row per direction); reduction census "
+                      "not derived for this path; baroclinic 3-D pads NOT "
+                      "counted")
+    comm_rec = comm_accounting(
+        halo_messages_per_step=_msgs,
+        n_lon=args.n_lon, nlev=1, dtype_bytes=_dtype_bytes,
+        rows_per_message=2,   # a pad exchange moves one row N + one row S
+        full_state_gathers_per_step=0,   # fused scan: no per-step gather
+        scope_note=_comm_note,
+    )
+
     # Headline number = the fused-scan per-step time from the SLOWEST process
     # (measurement contract).  ``steady_median_ms`` keeps its aggregator-facing
     # name but now carries the fused number; the individually-synced dispatch
     # latency is reported separately as ``step_latency_ms``.
     med = float(timing["fused_step_ms"])
+
+    # Calibrated T_bound (audit item 8): nd=1 rows ARE their own compute
+    # ingredient; nd>1 rows need the nd=1 fused number passed in (else the
+    # bound is emitted null + flagged).  launch_host_ms=0: per-step launch
+    # cost inside a fused lax.scan block is amortized to ~0.
+    bound_rec = calibrated_bound(
+        measured_fused_step_ms=med,
+        single_device_fused_step_ms=(med if nd == 1
+                                     else args.single_dev_fused_ms),
+        halo_messages_per_step=comm_rec["halo_messages_per_step"],
+        halo_bytes_per_step=comm_rec["halo_bytes_per_step"],
+        n_reductions_per_step=_n_reductions,
+        rank_imbalance=float(timing["rank_imbalance"]),
+        latency_us=args.comm_latency_us,
+        bandwidth_GBs=args.comm_bandwidth_gbs,
+    )
+
     rec = dict(
         component="ocean",
         mode=args.mode, n_devices=nd, n_lat=n_lat, n_lon=args.n_lon,
@@ -421,11 +598,18 @@ def main() -> int:
             dt_seconds=args.dt, time_per_step_ms=med,
             total_cells=n_lat * args.n_lon * args.nlev),
     )
-    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-        estimate_barotropic_halo_messages,
+    # Increment-2 accounting (audit items 4/6/8/9): flat fields so
+    # aggregators read them without descending into metadata/extra.
+    rec.update(
+        solver_iters=solver_iters,
+        solver_iters_mode=solver_iters_mode,
+        solver_residual=solver_residual,
+        residual_measured=residual_measured,
+        residual_reason=residual_reason,
+        **wet_rec,
+        **comm_rec,
+        **bound_rec,
     )
-    _halo_est = estimate_barotropic_halo_messages(
-        model.config, model.config.barotropic.n_barotropic_substeps)
     from legoesm.parallel.early_init import nccl_transport_report
     _nccl_report = nccl_transport_report()
     rec["metadata"] = annotate_incomplete(scaling_metadata(
@@ -441,6 +625,9 @@ def main() -> int:
         # with the per-substep-pad baseline.
         solver_variant=(model.config.barotropic.barotropic_solver
                         + ("+wide_halo" if args.wide_halo else "")),
+        # MEASURED post-run relative Helmholtz residual (audit item 6);
+        # None when not measurable — see rec.residual_reason.
+        solver_residual=solver_residual,
         # cells_per_rank is per PROCESS (n_ranks semantics); the per-device
         # share lives in extra.cells_per_device — a single-process 4-device
         # SPMD run has 1 rank owning ALL cells (codex finding 3).
@@ -465,6 +652,10 @@ def main() -> int:
             # audit item's halo-count metric): standard per-substep pads
             # vs the wide path's fused per-chunk exchanges.
             "barotropic_halo_messages": _halo_est,
+            # Solver-iteration facts next to the residual (audit item 6).
+            "solver_iters": solver_iters,
+            "solver_iters_mode": solver_iters_mode,
+            "residual_measured": residual_measured,
         },
     ))
     # Multi-controller: every process times the same program; process 0 owns
@@ -478,6 +669,20 @@ def main() -> int:
               f"compile={rec['compile_ms']}ms fused={med:.3f}ms/step "
               f"latency={rec['step_latency_ms']}ms/step "
               f"imbalance={rec['rank_imbalance']} blocks={rec['block_ms']}")
+        _res_txt = (f"{solver_residual:.3e}" if solver_residual is not None
+                    else f"n/a ({residual_reason})")
+        print(f"[solver] {args.baro_solver} iters={solver_iters} "
+              f"({solver_iters_mode}) post-run rel_residual={_res_txt}")
+        print(f"[bound] t_bound_ms={rec['t_bound_ms']} "
+              f"measured_over_bound={rec['measured_over_bound']} "
+              f"calibrated={rec['bound_calibrated']}"
+              + (f" incomplete={rec['bound_incomplete_reason']}"
+                 if rec["bound_incomplete_reason"] else ""))
+        if rec["wet_equals_total"]:
+            print("[wet-metric] NOTE: wet_cell_levels == total cells — this "
+                  "bench IC is ALL-WET flat-bottom, so the wet-cell weak "
+                  "metric is NON-INFORMATIVE here; it becomes meaningful "
+                  "with a real land mask / bathymetry.")
         if rec["metadata"]["virtual_cpu_devices"]:
             print("[virtual-cpu] forced host-platform CPU devices: this row "
                   "is a communication-overhead / correctness proxy, NOT "

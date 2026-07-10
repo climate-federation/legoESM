@@ -82,6 +82,32 @@ def test_single_process_two_virtual_devices_with_gates(tmp_path):
     assert rec["n_devices"] == 2
     assert "parity" in proc.stdout and "MISMATCH" not in proc.stdout
 
+    # --- increment-2 fields (M1 audit items 4/6/8/9) present + HONEST ---
+    # item 6: default implicit_cn at nd=2 runs the fixed-iteration PCG;
+    # the post-run residual probe must have MEASURED a converged residual.
+    assert rec["residual_measured"] is True
+    assert rec["solver_iters"] >= 1
+    assert rec["solver_iters_mode"].startswith("fixed_pcg")
+    assert rec["solver_residual"] is not None
+    assert rec["solver_residual"] < 1e-6
+    assert rec["metadata"]["solver_residual"] == rec["solver_residual"]
+    # item 4: bytes arithmetic consistent; fused scan never gathers.
+    assert rec["full_state_gathers_per_step"] == 0
+    assert rec["halo_messages_per_step"] > 0
+    assert (rec["halo_bytes_per_step"]
+            == rec["halo_messages_per_step"] * rec["halo_bytes_per_message"])
+    # item 8: nd=2 without --single-dev-fused-ms -> the bound must be NULL
+    # + named-incomplete + uncalibrated, never fabricated.
+    assert rec["t_bound_ms"] is None
+    assert rec["measured_over_bound"] is None
+    assert rec["bound_calibrated"] is False
+    assert "single_device_fused_step_ms" in rec["bound_incomplete_reason"]
+    # item 9: this bench IC is all-wet flat-bottom -> wet == total and the
+    # loud non-informative note is printed.
+    assert rec["wet_cell_levels"] == rec["cells"]
+    assert rec["wet_equals_total"] is True
+    assert "NON-INFORMATIVE" in proc.stdout
+
 
 def test_parity_gate_refuses_long_windows(tmp_path):
     env = dict(os.environ)

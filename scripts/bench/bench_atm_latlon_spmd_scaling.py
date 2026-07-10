@@ -57,7 +57,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # under rec["metadata"] so a virtual-CPU-device proxy, a gloo/TCP fabric run,
 # or an f32 ablation is falsifiable from the JSONL row alone.  metadata.py
 # imports JAX lazily, so this is safe before jax.distributed.initialize.
-from metadata import annotate_incomplete, scaling_metadata, tidy_throughput_fields  # noqa: E402
+from metadata import (  # noqa: E402
+    annotate_incomplete,
+    calibrated_bound,
+    comm_accounting,
+    scaling_metadata,
+    tidy_throughput_fields,
+)
 
 
 def _build(n_lat, n_lon, nlev):
@@ -107,6 +113,19 @@ def main() -> int:
                         "dispatch-latency probe (step_latency_ms).")
     p.add_argument("--physics", choices=["none", "held_suarez"], default="none")
     p.add_argument("--dt", type=float, default=60.0)
+    p.add_argument("--single-dev-fused-ms", type=float, default=None,
+                   help="fused_step_ms of the nd=1 row at the SAME per-device "
+                        "size (compute ingredient of the calibrated T_bound, "
+                        "audit item 8). Omitted at nd>1 -> bound emitted null "
+                        "+ flagged incomplete; nd=1 uses its own measurement.")
+    p.add_argument("--comm-latency-us", type=float, default=None,
+                   help="MEASURED per-message latency [us] of THIS machine's "
+                        "fabric. Default: MACHINE-CALIBRATED-REQUIRED "
+                        "placeholder in metadata.py -> bound_calibrated=false.")
+    p.add_argument("--comm-bandwidth-gbs", type=float, default=None,
+                   help="MEASURED link bandwidth [GB/s] of THIS machine's "
+                        "fabric. Default: MACHINE-CALIBRATED-REQUIRED "
+                        "placeholder in metadata.py -> bound_calibrated=false.")
     p.add_argument("--out", type=str, default="results/a1/spmd_scaling.jsonl")
     p.add_argument("--multicontroller", action="store_true",
                    help="Route-B multi-controller: jax.distributed.initialize "
@@ -182,6 +201,40 @@ def main() -> int:
     # Headline = fused per-step time from the SLOWEST process; key name kept
     # for the aggregators.
     med = float(timing["fused_step_ms"])
+
+    # Communication accounting (audit item 4) + calibrated T_bound (item 8).
+    # nd=1: zero inter-device traffic is a FACT (recorded as 0), so the
+    # bound is complete and trivially equals the measured compute.  nd>1:
+    # there is no analytic halo-message census for the atm latlon step yet
+    # (the ocean twin derives one from its barotropic solver) — the comm
+    # ingredients are recorded null with this reason and the bound is
+    # emitted incomplete rather than fabricated.
+    if nd <= 1:
+        _msgs, _bytes_msg, _nred = 0, 0, 0
+        _comm_note = "single device: no inter-device halo/reduction traffic"
+    else:
+        _msgs, _bytes_msg, _nred = None, None, None
+        _comm_note = ("no analytic halo-message census for the atm latlon "
+                      "step yet (audit item 4 follow-up) — comm fields null, "
+                      "not fabricated")
+    comm_rec = comm_accounting(
+        halo_messages_per_step=_msgs,
+        bytes_per_message=_bytes_msg,
+        full_state_gathers_per_step=0,   # fused scan: no per-step gather
+        scope_note=_comm_note,
+    )
+    bound_rec = calibrated_bound(
+        measured_fused_step_ms=med,
+        single_device_fused_step_ms=(med if nd == 1
+                                     else args.single_dev_fused_ms),
+        halo_messages_per_step=comm_rec["halo_messages_per_step"],
+        halo_bytes_per_step=comm_rec["halo_bytes_per_step"],
+        n_reductions_per_step=_nred,
+        rank_imbalance=float(timing["rank_imbalance"]),
+        latency_us=args.comm_latency_us,
+        bandwidth_GBs=args.comm_bandwidth_gbs,
+    )
+
     rec = dict(
         mode=args.mode, n_devices=nd, n_lat=n_lat, n_lon=args.n_lon,
         nlev=args.nlev, physics=args.physics, steps=args.steps,
@@ -206,6 +259,8 @@ def main() -> int:
             dt_seconds=args.dt, time_per_step_ms=med,
             total_cells=n_lat * args.n_lon * args.nlev),
     )
+    # Increment-2 accounting fields (audit items 4/8), flat for aggregators.
+    rec.update(**comm_rec, **bound_rec)
     from legoesm.parallel.early_init import nccl_transport_report
     _nccl_report = nccl_transport_report()
     rec["metadata"] = annotate_incomplete(scaling_metadata(
