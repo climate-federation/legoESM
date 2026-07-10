@@ -19,7 +19,8 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 
-def _make_driver(preset="aquaplanet", days=1, resolution=8, nlev=5, dt=600.0):
+def _make_driver(preset="aquaplanet", days=1, resolution=8, nlev=5, dt=600.0,
+                 output_dir=None):
     """Helper: create a CoupledESMDriver with minimal config."""
     from legoesm.driver.config import (
         ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
@@ -35,7 +36,7 @@ def _make_driver(preset="aquaplanet", days=1, resolution=8, nlev=5, dt=600.0):
         days=days,
     )
     coupled_cfg = PRESETS[preset]()
-    driver = CoupledESMDriver(atm_config, coupled_cfg)
+    driver = CoupledESMDriver(atm_config, coupled_cfg, output_dir=output_dir)
     driver.setup()
     return driver
 
@@ -201,6 +202,106 @@ class TestCoupledCheckpointValidation(unittest.TestCase):
             self._write_coupled_npz(tmp, cur)
             driver.load_coupled_checkpoint(0.0, checkpoint_dir=tmp)  # no raise
             self.assertEqual(tuple(driver._ocean_state.T_sfc.data.shape), cur)
+
+
+class TestCoupledResumeStatePersistence(unittest.TestCase):
+    """Ckpt v3 (C8/C9): the coupling-lag surface response
+    (``_last_sfc_response``) and the SST-drift reference (``_sst_mean_init``)
+    survive a save -> fresh driver -> load round trip, so a resumed run's
+    first coupled sub-step delivers the SAME lagged
+    runoff/ice-freshwater/CO2 fluxes as the uninterrupted run and
+    ``sst_drift_K`` stays referenced to the ORIGINAL run start."""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        cls._tmp = tempfile.TemporaryDirectory()
+        # slab_simple has land, so the lagged runoff channel is genuinely
+        # nonzero — the round-trip equality below is not vacuous.
+        cls.driver = _make_driver("slab_simple", days=1,
+                                  output_dir=cls._tmp.name)
+        cls.driver.run()
+        cls.driver.save_checkpoint(step=1, day=1.0)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_resume_restores_lag_buffer_and_drift_reference(self):
+        import numpy as np
+        from legoesm.core.coupling_fields import SurfaceToAtm
+
+        ref = self.driver._last_sfc_response
+        self.assertIsNotNone(ref)
+        self.assertIsNotNone(self.driver._sst_mean_init)
+        self.assertTrue(bool(jnp.any(ref.river_runoff_flux != 0.0)))
+
+        resumed = _make_driver("slab_simple", days=1)  # fresh: lag buffer None
+        self.assertIsNone(resumed._last_sfc_response)
+        self.assertIsNone(resumed._sst_mean_init)
+        resumed.load_coupled_checkpoint(1.0, checkpoint_dir=self._tmp.name)
+
+        # Interrupted == uninterrupted on the lagged flux channels: the
+        # restored buffer is bit-identical, so the first coupled sub-step
+        # after resume consumes the SAME runoff / ice-lake-freshwater / CO2
+        # fluxes (every SurfaceToAtm channel checked).
+        self.assertIsNotNone(resumed._last_sfc_response)
+        for field in SurfaceToAtm._fields:
+            np.testing.assert_array_equal(
+                np.asarray(getattr(ref, field)),
+                np.asarray(getattr(resumed._last_sfc_response, field)),
+                err_msg=f"lag-buffer channel '{field}' did not round-trip")
+
+        # SST-drift reference: referenced to the ORIGINAL run start, and the
+        # next diagnostic record computes the identical drift on both drivers
+        # (the slab ocean state was restored alongside it).
+        self.assertEqual(resumed._sst_mean_init, self.driver._sst_mean_init)
+        self.driver._log_coupled_diag(1.0)
+        resumed._log_coupled_diag(1.0)
+        self.assertEqual(self.driver.coupled_diagnostics[-1]["sst_drift_K"],
+                         resumed.coupled_diagnostics[-1]["sst_drift_K"])
+
+    def test_sfcresp_structure_drift_falls_back_to_none(self):
+        """A checkpoint whose SurfaceToAtm layout drifted (a field missing)
+        must NOT partially restore the lag buffer (silently zeroed channels);
+        it falls back to a fresh (None) buffer — the pre-v3 resume behavior —
+        while the independent sst_mean_init still restores."""
+        import tempfile
+        from pathlib import Path
+
+        import numpy as np
+
+        src = np.load(Path(self._tmp.name) / "coupled_day_0001.npz")
+        drift_key = next(k for k in src.files if k.startswith("sfcresp_"))
+        arrays = {k: src[k] for k in src.files if k != drift_key}
+        with tempfile.TemporaryDirectory() as tmp2:
+            np.savez(Path(tmp2) / "coupled_day_0001.npz", **arrays)
+            resumed = _make_driver("slab_simple", days=1)
+            resumed.load_coupled_checkpoint(1.0, checkpoint_dir=tmp2)
+            self.assertIsNone(resumed._last_sfc_response)
+            self.assertEqual(resumed._sst_mean_init,
+                             self.driver._sst_mean_init)
+
+    def test_pre_v3_checkpoint_keeps_fresh_lag_and_drift(self):
+        """Backward compat: a pre-v3 checkpoint (no sfcresp_*/sst_mean_init
+        keys) loads without raising and keeps the documented fallback — fresh
+        lag buffer (None => one zero-flux land/ice/CO2 sub-step) and drift
+        re-referenced at the restart point (None until the first diag)."""
+        import tempfile
+        from pathlib import Path
+
+        import numpy as np
+
+        src = np.load(Path(self._tmp.name) / "coupled_day_0001.npz")
+        arrays = {k: src[k] for k in src.files
+                  if not k.startswith("sfcresp_") and k != "sst_mean_init"}
+        arrays["_ckpt_version"] = np.asarray(2, dtype=np.int64)
+        with tempfile.TemporaryDirectory() as tmp2:
+            np.savez(Path(tmp2) / "coupled_day_0001.npz", **arrays)
+            resumed = _make_driver("slab_simple", days=1)
+            resumed.load_coupled_checkpoint(1.0, checkpoint_dir=tmp2)  # no raise
+            self.assertIsNone(resumed._last_sfc_response)
+            self.assertIsNone(resumed._sst_mean_init)
 
 
 class TestUnfusedRadiation(unittest.TestCase):

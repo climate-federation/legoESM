@@ -1,23 +1,29 @@
 """YSU (Yonsei University) PBL turbulence scheme — differentiable variant.
 
-Nonlocal K-profile with entrainment near the PBL top. The K-profile
-follows the same structure as Holtslag-Boville.
+Nonlocal K-profile with an explicit entrainment flux at the PBL top.
+The K-profile follows the same structure as Holtslag-Boville but adds
+the Hong et al. (2006) prescribed PBL-top entrainment heat flux
+``(w'θ')_h = −e_ratio·(w'θ')_0``, applied as a flux-matched diffusivity
+localized at the inversion (see the entrainment block in
+:func:`ysu_turbulence`).
 
 .. note::
 
-   **Disclosed variant vs published YSU.** Published YSU (Hong et al.
-   2006) prescribes entrainment as an explicit *gradient-independent*
-   flux at the inversion (proportional to the surface buoyancy flux,
-   ``w'θ'_h ≈ -0.15·w'θ'_0``), applied as a flux boundary condition at
-   PBL top.  This implementation instead models entrainment as an
-   intentional **down-gradient** eddy-diffusivity bump — a Gaussian
-   envelope ``K_ent`` in height centred on ``h_pbl`` (scaled by
-   ``w*·h``) added to the K-profile — so the entrainment flux here is
-   ``-K_ent·∂φ/∂z`` (down-gradient), NOT a prescribed
-   gradient-independent flux.  This trades exact YSU fidelity for a
-   smooth, fully differentiable closure (no flux-BC branch) at
-   GCM-typical vertical resolution; the bump width is exposed as
-   ``config.entrainment_width_frac``.
+   **Implementation note vs published YSU.** Published YSU (Hong et al.
+   2006) prescribes the PBL-top entrainment as an explicit
+   *gradient-independent* flux boundary condition at the inversion
+   (proportional to the surface buoyancy flux,
+   ``w'θ'_h ≈ -0.15·w'θ'_0``).  Because this module builds K profiles
+   and integrates them with implicit vertical diffusion, the prescribed
+   flux enters instead as a FLUX-MATCHED eddy diffusivity
+   ``K_h,ent = e_ratio·(w'θ')_0 / max(∂θ_v/∂z, floor)`` under a
+   Gaussian envelope centred on ``h_pbl`` (width
+   ``config.entrainment_width_frac``): the resulting down-gradient flux
+   ``−K_ent·∂θ_v/∂z`` at the inversion reproduces the prescribed
+   ``(w'θ')_h`` exactly where the inversion gradient exceeds the floor,
+   and saturates (stability-capped) in weakly stratified interfaces.
+   Chosen as a smooth, fully differentiable closure (no flux-BC
+   branch) at GCM-typical vertical resolution.
 
 References
 ----------
@@ -36,9 +42,14 @@ from legoesm.atmosphere.physics._shared import (
     virtual_temperature,
     mixing_length,
     buoyancy_coefficient,
+    exner_function,
+    louis_stability_functions,
 )
 from legoesm.atmosphere.physics.turbulence.config import YSUConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
+from legoesm.atmosphere.physics.turbulence.pbl_height import (
+    first_crossing_height,
+)
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     compute_surface_fluxes,
 )
@@ -54,8 +65,9 @@ __physics_contract__ = {
     "summary": (
         "YSU (Yonsei University) nonlocal K-profile PBL scheme: a convective "
         "mixed-layer K-profile with a countergradient nonlocal heat flux and "
-        "an explicit Gaussian entrainment K at the PBL top, applied by "
-        "implicit vertical diffusion with surface-flux BCs."
+        "the Hong06 prescribed PBL-top entrainment flux (w'th')_h = "
+        "-e_ratio*(w'th')_0 applied as a flux-matched K at the inversion, "
+        "all applied by implicit vertical diffusion with surface-flux BCs."
     ),
     "inputs": {
         "u": "m/s", "v": "m/s", "T": "K", "q_v": "kg/kg",
@@ -72,9 +84,14 @@ __physics_contract__ = {
         "gamma_c) with countergradient gamma_c >= 0 (upward heat transport in "
         "the convective BL, gated to unstable surface forcing). Km, Kh >= 0; "
         "an unstable surface heat flux (shflx > 0 upward) deepens h_pbl via a "
-        "thermal-excess parcel. shflx, lhflx positive UPWARD and injected as "
-        "the lower boundary condition (a source), so the column is NOT closed. "
-        "z increases upward; level index 0 is the top, -1 the surface."
+        "thermal-excess parcel. The prescribed PBL-top entrainment flux "
+        "(w'th')_h = -e_ratio*(w'th')_0 is NEGATIVE (downward) for unstable "
+        "surface forcing — warm air entrained down across the inversion, "
+        "warming the PBL top region — and is realized down-gradient via a "
+        "flux-matched K_ent >= 0 at the inversion. shflx, lhflx positive "
+        "UPWARD and injected as the lower boundary condition (a source), so "
+        "the column is NOT closed. z increases upward; level index 0 is the "
+        "top, -1 the surface."
     ),
     "conserves": ["none"],
     "differentiable": True,
@@ -92,53 +109,17 @@ __physics_contract__ = {
 }
 
 
-def _crossing_pbl_height(Ri_b, z_full, ricr, sharpness):
-    """Lowest height where the bulk Richardson number ``Ri_b`` first reaches
-    ``ricr``, by smooth first-crossing interpolation (differentiable).
-
-    Levels are top-first (index ``nlev-1`` = surface).  We scan surface-up and
-    select the FIRST pair of adjacent levels whose UPPER member reaches
-    ``ricr`` (smooth indicator), then linearly interpolate the crossing height
-    inside that pair.  When ``Ri_b`` never reaches ``ricr`` (a fully unstable /
-    unbounded column) the height defaults to the model-top level.  Robust to an
-    arbitrarily sharp inversion because the crossing is detected per-pair, not
-    by sampling a single level at ``Ri_b == ricr``.  Mirrors the
-    Holtslag-Boville ``_crossing_height`` structure.
-    """
-    ncol, nlev = Ri_b.shape
-    # Surface-first ordering.
-    Ri_s = Ri_b[:, ::-1]
-    z_s = z_full[:, ::-1]
-    Ri_lo = Ri_s[:, :-1]   # lower (closer to surface) member of each pair
-    Ri_hi = Ri_s[:, 1:]
-    z_lo = z_s[:, :-1]
-    z_hi = z_s[:, 1:]
-
-    # crossed[k] = P(Ri >= ricr at the UPPER level of pair k).
-    crossed = jax.nn.sigmoid(sharpness * (Ri_hi - ricr))
-    # Exclusive "not yet crossed below pair k".
-    not_crossed = jnp.cumprod(
-        jnp.concatenate(
-            [jnp.ones((ncol, 1), Ri_b.dtype), 1.0 - crossed[:, :-1]], axis=1,
-        ),
-        axis=1,
-    )
-    w = not_crossed * crossed  # first-crossing weight per pair
-
-    # Linear interpolation of the crossing height inside the pair.
-    dRi = Ri_hi - Ri_lo
-    frac = jnp.clip(
-        (ricr - Ri_lo) / jnp.where(jnp.abs(dRi) > 1.0e-12, dRi, 1.0e-12),
-        0.0, 1.0,
-    )
-    z_cross = z_lo + frac * (z_hi - z_lo)
-
-    # Fallback (no in-column crossing) -> model-top height.
-    z_top = z_full[:, 0]
-    fallback_w = jnp.prod(1.0 - crossed, axis=1)
-    num = jnp.sum(w * z_cross, axis=1) + fallback_w * z_top
-    den = jnp.sum(w, axis=1) + fallback_w + 1.0e-30
-    return jnp.clip(num / den, 100.0, None)
+# --- PBL-top entrainment guards (Hong et al. 2006 flux-matched K) ----------
+# Floor [K/m] on the inversion theta_v gradient in
+# K_h,ent = e_ratio*(w'th')_0 / max(dtheta_v/dz, floor): below it (a well-mixed
+# or unstably-stratified interface at GCM vertical resolution) the flux-matched
+# K saturates and the cap below takes over.  Numerics guard, not a tunable.
+_ENTRAIN_DTHDZ_FLOOR = 1.0e-4
+# Cap fraction for the entrainment diffusivity: the interior K-profile shape
+# (z/h)*(1 - z/h)^2 peaks at exactly 4/27 (at z = h/3, exact math), so
+# kappa*w_s(h)*h*(4/27) is the peak mixed-layer diffusivity magnitude —
+# the entrainment K may not exceed it (stability guard, not a tunable).
+_KPROFILE_PEAK_FRAC = 4.0 / 27.0
 
 
 def ysu_turbulence(
@@ -199,9 +180,10 @@ def ysu_turbulence(
     S2 = du_dz ** 2 + dv_dz ** 2 + 1e-10
     S = jnp.sqrt(S2)
 
-    # Virtual potential temperature
-    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
-    theta_v = virtual_temperature(T, q_v) * exner
+    # Virtual potential temperature via the canonical inverse-Exner helper
+    # (exner_pref = 1/Π = (p_ref/p)^κ; the helper applies the same 1 Pa floor).
+    exner_pref = 1.0 / exner_function(p_full)
+    theta_v = virtual_temperature(T, q_v) * exner_pref
 
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
@@ -253,12 +235,16 @@ def ysu_turbulence(
         # excess-parcel fix exposed this, yielding a 7 km PBL above a 2 km
         # inversion).  A first-crossing interpolation is robust to an
         # arbitrarily sharp inversion and is the standard bulk-Ri PBL diagnosis
-        # (matches the HB ``_crossing_height`` structure).
+        # (the shared ``first_crossing_height`` kernel, also used by
+        # Holtslag-Boville).  The 100 m floor is this scheme's h_pbl floor.
         Ri_b = g_over_thbar[:, None] * (
             (dtheta_v_bulk - excess_theta[:, None]) * dz_from_sfc / dV2
         )
-        return _crossing_pbl_height(
-            Ri_b, z_full, config.Ri_crit, config.pbl_smooth_sharpness,
+        return jnp.clip(
+            first_crossing_height(
+                Ri_b, z_full, config.Ri_crit, config.pbl_smooth_sharpness,
+            ),
+            100.0, None,
         )
 
     # Pass 1: no excess.
@@ -317,48 +303,72 @@ def ysu_turbulence(
     # Local Ri-based Km above PBL: shared Blackadar mixing-length helper
     # (same expression as Louis/TKE/CLUBB-lite/EDMF/Smagorinsky).
     l_mix = mixing_length(z_half_inner, config.l_mix_max)
-    # Louis (1982) stability constants come from config; the previous
-    # hardcoded ``b_louis = 5.0`` and ``5.0`` literals violated the
-    # constant-discipline rule (CLAUDE.md).  Note that Louis (1982)
-    # distinguishes three coefficients (b, c, d): ``b`` enters both
-    # branches, ``d`` is the stable-branch sqrt coefficient, and ``c``
-    # is the unstable-branch denominator coefficient — the repository's
-    # louis.py already follows this split, and YSU now does too.
-    b_louis = config.louis_b
-    c_louis = config.louis_c
-    d_louis = config.louis_d
-    Ri_pos = jnp.maximum(Ri, 0.0)
-    f_stable = 1.0 / (1.0 + 2.0 * b_louis * Ri_pos / jnp.sqrt(1.0 + d_louis * Ri_pos))
-    Ri_neg = jnp.minimum(Ri, 0.0)
-    f_unstable = 1.0 - 2.0 * b_louis * Ri_neg / (
-        1.0 + 3.0 * b_louis * c_louis * l_mix ** 2
-        * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz_half ** 2 + 1e-10)
+    # Louis (1982) stability functions via the SHARED helper
+    # (physics._shared.louis_stability_functions — identical b/c/d coefficient
+    # split and sigmoid stable/unstable blend as louis.py; YSU consumes only
+    # the momentum function f_m).  Coefficients config.louis_b /
+    # config.louis_c / config.louis_d and config.blend_ri_sharpness.
+    f_m, _ = louis_stability_functions(
+        Ri, l_mix, dz_half,
+        config.louis_b, config.louis_c, config.louis_d,
+        config.blend_ri_sharpness,
     )
-    blend_ri = jax.nn.sigmoid(config.blend_ri_sharpness * Ri)
-    f_m = (1.0 - blend_ri) * f_unstable + blend_ri * f_stable
     Km_local = l_mix ** 2 * S * f_m
 
     # Smooth blend from K-profile to local
     blend_pbl = jax.nn.sigmoid(config.blend_pbl_sharpness * (z_norm - 1.0))
 
-    # ----- Entrainment near PBL top (down-gradient variant) -----
-    # (w*, wtheta_sfc, theta_bar computed above with the K-profile.)
-    # DISCLOSED VARIANT (see module docstring): published YSU prescribes a
-    # gradient-independent entrainment flux at the inversion; here we instead
-    # add a down-gradient eddy-diffusivity bump
-    # K_ent = c_ent * w* * h * exp(-((z-h)/(f*h))^2), so the entrainment flux
-    # is -K_ent*dφ/dz.  Chosen for a smooth, fully differentiable closure.
-    # Width fraction f (default 0.3) is used for robustness at GCM-typical
-    # vertical resolution; exposed as config.entrainment_width_frac.
+    # ----- Entrainment flux at PBL top (Hong et al. 2006, explicit closure) --
+    # YSU's defining innovation over Holtslag-Boville: a PRESCRIBED entrainment
+    # heat flux at the inversion, tied to the surface flux
+    #     (w'θ')_h = −e_ratio · (w'θ')_0,   e_ratio = config.entrainment_ratio.
+    # Sign convention (flux positive-UP, z up): unstable surface forcing
+    # (w'θ')_0 > 0 gives (w'θ')_h < 0 — the entrainment flux at h is DOWNWARD
+    # (warm free-tropospheric air entrained down across the inversion, warming
+    # the PBL-top region).  This module builds K profiles and then runs
+    # implicit vertical diffusion, so the prescribed flux enters as a
+    # FLUX-MATCHED diffusivity at the PBL-top interfaces:
+    #     K_h,ent = −(w'θ')_h / max(∂θ_v/∂z, floor)
+    #             =  e_ratio·(w'θ')_0 / max(∂θ_v/∂z, floor)  ≥ 0,
+    # so the down-gradient flux −K_h,ent·∂θ_v/∂z at the inversion (where
+    # ∂θ_v/∂z ≫ floor) equals the prescribed (w'θ')_h EXACTLY — pinned to the
+    # surface flux, independent of the resolved gradient (the previous Gaussian
+    # K_ent = c·w*·h blob produced an ordinary down-gradient flux whose
+    # magnitude scaled with the local gradient, NOT Hong06's ratio closure).
+    # A Gaussian envelope centered at h (width config.entrainment_width_frac·h)
+    # localizes the entrainment K to the inversion; moisture entrains
+    # down-gradient with the same K (Hong06 applies w_e to all scalars).
     width = config.entrainment_width_frac * h_pbl[:, None]  # (ncol, 1)
-    K_ent = (
-        config.entrainment_coeff * w_star[:, None] * h_pbl[:, None]
-        * jnp.exp(-((z_half_inner - h_pbl[:, None]) / jnp.clip(width, 1.0, None)) ** 2)
+    envelope = jnp.exp(
+        -((z_half_inner - h_pbl[:, None]) / jnp.clip(width, 1.0, None)) ** 2
     )
+    # Inversion θ_v gradient, floored (see _ENTRAIN_DTHDZ_FLOOR): below the
+    # floor the flux-matched K saturates and the stability cap takes over.
+    dthdz_inv = jnp.maximum(dtheta_v_dz, _ENTRAIN_DTHDZ_FLOOR)
+    K_ent_h = (
+        config.entrainment_ratio
+        * jnp.maximum(wtheta_sfc, 0.0)[:, None] / dthdz_inv
+    )
+    # Stability cap: entrainment K may not exceed the peak mixed-layer
+    # K-profile magnitude κ·w_s(h)·h·(4/27) (see _KPROFILE_PEAK_FRAC), with
+    # w_s(h) the mixed-layer velocity scale evaluated at z = h.
+    w_s_h = jnp.cbrt(
+        ustar ** 3 + config.ws_conv_coeff * constants.kappa_vk * w_star ** 3
+    )
+    K_ent_cap = (
+        _KPROFILE_PEAK_FRAC * constants.kappa_vk * w_s_h * h_pbl
+    )[:, None]
+    K_ent_h = jnp.minimum(K_ent_h, K_ent_cap) * envelope
 
     # Combined: profile inside PBL, local above, entrainment added everywhere
-    # (entrainment Gaussian is self-localizing around PBL top)
-    Km_half = (1.0 - blend_pbl) * Km_profile + blend_pbl * Km_local + K_ent
+    # (the flux-matched entrainment K is self-localizing around the PBL top).
+    # Momentum analog per Hong06 (Prandtl number at h, here the scheme Pr_t):
+    # Km carries Pr_t·K_ent_h so heat receives exactly the flux-matched
+    # K_ent_h after the Kh = Km/Pr_t division.
+    Km_half = (
+        (1.0 - blend_pbl) * Km_profile + blend_pbl * Km_local
+        + config.Pr_t * K_ent_h
+    )
     Kh_half = Km_half / config.Pr_t
 
     # Interpolate to full levels for diagnostics — single concat per
@@ -383,22 +393,27 @@ def ysu_turbulence(
     sflx_q = lhflx / constants.L_v
 
     # ----- Nonlocal countergradient (Troen-Mahrt 1986 / Hong et al. 2006) -----
-    # γ_c = b·(w'θ')_0 / (w_*·h)  [K/m] (Troen & Mahrt 1986; Hong et al. 2006),
-    # YSU's defining nonlocal upward heat transport in the convective BL.  Gated
-    # to unstable surface forcing via max(w'θ', 0) (zero for neutral/stable),
-    # with the convective velocity scale w* in the denominator (⇒ the usual
-    # γ_c ∝ (w'θ')^{2/3} convective scaling).  The previous YSU lumped the
-    # entire countergradient into the lowest-level surface BC (an enhanced
-    # surface flux with a single column-mean Kh), depositing all the nonlocal
-    # heating in the surface-adjacent layer instead of distributing it through
-    # the mixed layer.  Per Troen-Mahrt/Hong the nonlocal term enters the heat
-    # equation as the modified flux F = −Kh·(∂θ/∂z − γ_c) whose vertical
-    # divergence redistributes heat across the BL — apply it that way via the
-    # shared HB countergradient diffusion, with γ_c as a half-level field gated
-    # to inside the PBL (1 − blend_pbl ≈ 1 below h_pbl, ≈ 0 above).
-    counter_grad = config.countergrad_coeff * jnp.maximum(wtheta_sfc, 0.0) / (
-        jnp.clip(w_star, 1e-6, None) * h_pbl
-    )  # (ncol,) [K/m]
+    # γ_c = b·(w'θ')_0 / (w_s0·h)  [K/m] (Troen & Mahrt 1986; Hong et al.
+    # 2006), YSU's defining nonlocal upward heat transport in the convective
+    # BL.  w_s0 is the MIXED-LAYER velocity scale evaluated at the top of the
+    # surface layer, w_s0 = w_s(0.1h) = (u*³ + c·κ·w*³·0.1)^{1/3} — the SAME
+    # ``w_s_sfc`` already used for the surface thermal-excess parcel
+    # θ_T = b·(w'θ')_0/w_s0 above, so γ_c = θ_T/h BY CONSTRUCTION (the papers
+    # tie both to w_s0; ``excess_theta`` carries the same clip floor).  The
+    # previous code divided by the PURE convective w*, which overestimates γ_c
+    # in windy, weakly-convective columns (u* ≫ w*, where w_s0 → u* but
+    # w* → 0) and breaks the γ_c = θ_T/h identity.  Gated to unstable surface
+    # forcing via max(w'θ', 0) inside θ_T (zero for neutral/stable).  The
+    # previous YSU lumped the entire countergradient into the lowest-level
+    # surface BC (an enhanced surface flux with a single column-mean Kh),
+    # depositing all the nonlocal heating in the surface-adjacent layer
+    # instead of distributing it through the mixed layer.  Per Troen-Mahrt/
+    # Hong the nonlocal term enters the heat equation as the modified flux
+    # F = −Kh·(∂θ/∂z − γ_c) whose vertical divergence redistributes heat
+    # across the BL — apply it that way via the shared HB countergradient
+    # diffusion, with γ_c as a half-level field gated to inside the PBL
+    # (1 − blend_pbl ≈ 1 below h_pbl, ≈ 0 above).
+    counter_grad = excess_theta / h_pbl  # (ncol,) [K/m] = b·(w'θ')_0/(w_s0·h)
     gamma_theta_half = counter_grad[:, None] * (1.0 - blend_pbl)  # (ncol, nlev-1) [K/m]
 
     # Implicit vertical diffusion.  Heat in θ-space (dry-adiabat neutral),

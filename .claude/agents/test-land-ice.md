@@ -401,36 +401,18 @@ Read `src/legoesm/land/carbon/carbon_cycle.py` and `src/legoesm/land/carbon/conf
 
 ---
 
-# CATEGORY 7: Stomatal Conductance & Farquhar Photosynthesis
+# CATEGORY 7: Stomatal Conductance & Leuning Farquhar Photosynthesis
 **File:** `tests/unit/test_land_ice_stomata.py`
 
-**7a) Arrhenius temperature response**
-- At T = 298.15 K (25°C): arrhenius(param25, Ha, T) ≈ param25.
-- Higher T: arrhenius value increases (activation energy positive).
-- Assert: always positive. Finite for T ∈ [250, 330] K.
-
-**7b) Peaked Arrhenius**
-- At 25°C: peaked_arrhenius ≈ param25.
-- Has a peak (maximum) at some T above 25°C.
-- Decreases at very high T (deactivation energy kicks in).
-- Assert: peaked_arrhenius > 0 for all reasonable T.
-
-**7c) Farquhar photosynthesis — basic behavior**
-- At ambient CO2 (400 ppm) and moderate light: A_net > 0.
-- At zero light (APAR=0): A_net < 0 (dark respiration only).
-- A increases with CO2 (fertilization effect).
-- A increases with light (up to saturation).
-- Assert: A_net ∈ [-5, 50] μmol/m²/s for realistic conditions.
-
-**7d) Farquhar — Rubisco vs RuBP limitation**
-- At low CO2: Rubisco-limited (Wc < Wj).
-- At high CO2: RuBP-limited (Wj < Wc).
-- Smooth transition (no discontinuity).
-
-**7e) Farquhar — soil moisture stress**
-- beta_soil=1.0: full photosynthesis.
-- beta_soil=0.0: Vc_max scaled down → A reduced.
-- Assert: A(beta=0) < A(beta=1).
+**NOTE — Phase 1 canopy refactor**: the Bernacchi Farquhar
+(``arrhenius`` / ``peaked_arrhenius`` / ``farquhar_photosynthesis``) was
+removed.  The **Leuning C3 + Q10 C4** model in
+``src/legoesm/land/canopy/photosynthesis.py`` is now the single Farquhar
+implementation, and the stomatal conductance functions live in
+``packages/land/legoesm/land/stomata.py``.  The legacy Bernacchi
+test cases (7a–7e) are gone; the canopy Farquhar is covered by
+``tests/land/unit/test_canopy_photosynthesis.py``.  This category focuses
+on the stomatal conductance models and the coupled Leuning A-gs solver.
 
 **7f) Ball-Berry stomatal conductance**
 - gs = g0 + g1 * A * RH / Cs.
@@ -477,15 +459,17 @@ Read `src/legoesm/land/carbon/carbon_cycle.py` and `src/legoesm/land/carbon/conf
 
 **Key imports:**
 ```python
-from legoesm.land.carbon.stomata import (
-    arrhenius, peaked_arrhenius,
-    farquhar_photosynthesis, ball_berry_gs, medlyn_gs, jarvis_gs,
+from legoesm.land.stomata import (
+    ball_berry_gs, medlyn_gs, jarvis_gs,
     coupled_farquhar_stomata, compute_stomatal_beta,
-    StomataConfig,
 )
+from legoesm.land.carbon.config import StomataConfig
 ```
 
-Read `src/legoesm/land/carbon/stomata.py` first.
+Read ``packages/land/legoesm/land/stomata.py`` and
+``src/legoesm/land/canopy/photosynthesis.py`` first — the
+``coupled_farquhar_stomata`` solver uses the Leuning C3/C4 Farquhar
+model from the latter via a Newton A-gs root-find.
 
 ---
 
@@ -931,7 +915,8 @@ from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_l
 from legoesm.land.config import LandConfig, MultiLayerLandConfig
 from legoesm.land.carbon.config import CarbonConfig, CarbonState
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
-from legoesm.land.carbon.stomata import StomataConfig
+from legoesm.land.carbon.config import StomataConfig
+from legoesm.land.stomata import ball_berry_gs
 from legoesm.ice.sea_ice import step_sea_ice
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.state import SeaIceState, DynamicSeaIceState

@@ -133,15 +133,19 @@ def _load_column_nn(ckpt_path: Path, spec_cfg):
     return load_checkpoint(template, ckpt_path)
 
 
-def _load_sfno(ckpt_path: Path, spec_cfg, grid):
+def _load_sfno(ckpt_path: Path, spec_cfg, grid, variant="sfno_physics"):
     from legoesm.ml.channel_packing import PE3DChannelSpec
     from legoesm.ml.sfno import SFNO, SFNOConfig
     from legoesm.ml.training import load_checkpoint
+    from legoesm.training.neural_gcm_spectral import N_SFNO_FORCING_CHANNELS
+    # sfno_physics inputs carry the surface-forcing planes (T_sfc/sic/
+    # insolation); sfno_full (whole-atmosphere emulator) stays state-only.
+    n_forcing = N_SFNO_FORCING_CHANNELS if variant == "sfno_physics" else 0
 
     spec = PE3DChannelSpec(nlev=spec_cfg.n_levels)
     template = SFNO(
         SFNOConfig(
-            in_channels=spec.n_channels,
+            in_channels=spec.n_channels + n_forcing,
             out_channels=spec.n_channels,
             embed_dim=spec_cfg.sfno_embed_dim,
             n_blocks=spec_cfg.sfno_n_blocks,
@@ -253,7 +257,7 @@ def _compute_bias_for_variant(
             f"[{variant}] loading {period_name} windows "
             f"({len(years)} years × {n_days_per_year} days)..."
         )
-        ic_states, target_carries = load_training_data(
+        ic_states, target_carries, _ic_times = load_training_data(
             period_cfg, grid, sigma, cache_dir, windows=windows,
         )
 
@@ -427,7 +431,7 @@ def main():
         elif variant == "column_nn":
             model = _load_column_nn(ckpt, spec_cfg)
         else:
-            model = _load_sfno(ckpt, spec_cfg, grid)
+            model = _load_sfno(ckpt, spec_cfg, grid, variant)
 
         biases[variant] = _compute_bias_for_variant(
             variant, model, grid, sigma, spec_cfg, base,

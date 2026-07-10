@@ -13,8 +13,6 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import pytest
-
 _SCRIPT = (Path(__file__).resolve().parents[2]
            / "scripts" / "validate" / "validate_driver_cs_spmd_parity.py")
 

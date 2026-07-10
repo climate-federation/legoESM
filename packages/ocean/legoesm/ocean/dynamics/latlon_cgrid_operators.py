@@ -2887,13 +2887,22 @@ def qg_leith_viscosity_tendency_cgrid(
     u_eff = u if _um is None else u * _um
     v_eff = v if _vm is None else v * _vm
 
-    # Absolute vorticity Q = ζ + f at vertices.
+    # Absolute vorticity Q = ζ + f at vertices.  Use the GRID's stored staggered
+    # Coriolis (``_vertex_coriolis`` → ``grid.f_v`` at the corners): correct on
+    # β-plane / f-plane geometries (f = f0 + β·y), and — since ``f_v`` is built
+    # from the grid's own rotation scalar — still exactly non-rotating for an
+    # omega=0 grid (#521).  A minimal duck without stored ``f_v``/``f`` falls
+    # back to the spherical reconstruction from the grid's rotation scalar.
     zeta_q = curl_vertex_cgrid(u_eff, v_eff, grid)              # (n_lat+1,n_lon+1,...)
-    lat = grid.lat
-    lat_v = jnp.concatenate([lat[:1], 0.5 * (lat[:-1] + lat[1:]), lat[-1:]])
-    f_v = 2.0 * constants.Omega * jnp.sin(lat_v)               # (n_lat+1,)
-    f_v = f_v[:, jnp.newaxis] if zeta_q.ndim == 2 else f_v[:, jnp.newaxis, jnp.newaxis]
-    absvort_q = zeta_q + f_v
+    if hasattr(grid, "f_v") or hasattr(grid, "f"):
+        f_q = _vertex_coriolis(grid)                           # (n_lat+1,n_lon+1)
+    else:
+        lat = grid.lat
+        lat_v = jnp.concatenate([lat[:1], 0.5 * (lat[:-1] + lat[1:]), lat[-1:]])
+        f_q = (2.0 * getattr(grid, "omega", constants.Omega)
+               * jnp.sin(lat_v))[:, jnp.newaxis]               # (n_lat+1,1)
+    f_q = f_q if zeta_q.ndim == 2 else f_q[..., jnp.newaxis]
+    absvort_q = zeta_q + f_q
 
     qx, qy = _grad_vertex_vec_h(absvort_q, grid)               # vector ∇(ζ+f)
     grad_Q = jnp.sqrt(qx ** 2 + qy ** 2 + 1e-30)               # |∇(ζ+f)|_h
@@ -2905,7 +2914,11 @@ def qg_leith_viscosity_tendency_cgrid(
     # the buoyancy field is supplied (else the barotropic ∇(ζ+f) is used and the
     # bounds are inert — see `bound_qg_pv_gradient`).
     if buoyancy is not None and h_k is not None and is_3d:
-        f_h = (2.0 * constants.Omega * jnp.sin(grid.lat))[:, jnp.newaxis, jnp.newaxis]
+        if hasattr(grid, "f_T"):
+            f_h = grid.f_T[..., jnp.newaxis]                    # (n_lat,n_lon,1)
+        else:
+            f_h = (2.0 * getattr(grid, "omega", constants.Omega)
+                   * jnp.sin(grid.lat))[:, jnp.newaxis, jnp.newaxis]
         sx, sy = qg_pv_stretching_vec(buoyancy, h_k, f_h, grid)
         grad_q1 = jnp.sqrt((qx + sx) ** 2 + (qy + sy) ** 2 + 1e-30)
         Delta_bu = jnp.sqrt(grid.area)[..., jnp.newaxis]

@@ -50,6 +50,47 @@ import jax.numpy as jnp
 from legoesm import constants
 
 
+__physics_contract__ = {
+    "summary": (
+        "Ice-shelf basal melt at the ice-ocean interface (Holland & Jenkins "
+        "1999 three-equation thermodynamic boundary layer, or Beckmann-Goosse "
+        "2003 one-equation): compute the melt rate, interface T/S, and the "
+        "freshwater + heat fluxes it drives into the ocean cavity."
+    ),
+    "inputs": {
+        "T_amb_C": "degC", "S_amb_PSU": "psu", "p_ice_dbar": "dbar",
+        "config.gamma_T": "m/s", "config.gamma_S": "m/s",
+    },
+    "outputs": {
+        "m_dot_m_s": "m/s", "T_b_C": "degC", "S_b_PSU": "psu",
+        "freshwater_to_ocean": "kg/m^2/s", "heat_extracted_from_ocean": "W/m^2",
+    },
+    "sign_convention": (
+        "m_dot > 0 = MELT (ice -> water), < 0 = freeze-on; melt is a freshwater "
+        "SOURCE into the ocean (freshwater_to_ocean = rho_i*m_dot > 0) that "
+        "dilutes salinity, and a latent-heat SINK "
+        "(heat_extracted_from_ocean = rho_w*c_w*gamma_T*(T_a - T_b) > 0 = the "
+        "ocean LOSES heat to the cavity); a cavity boundary source/sink, not "
+        "interior-conservative; depths positive downward."
+    ),
+    # Adds freshwater + extracts latent heat at the cavity: a boundary
+    # source/sink, not a conservative interior operator.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Holland, D. M. & Jenkins, A. (1999), JPO 29, 1787-1800; Jenkins "
+        "(1991) JGR 96, 20671-20677; Beckmann & Goosse (2003), Ocean Modelling "
+        "5, 157-170"
+    ),
+    "idealized_test": (
+        "tests/unit/test_ice_shelf.py + "
+        "tests/ocean/unit/test_isf_prescribed_melt.py — warm ambient water "
+        "(T_a > T_freeze) melts (m_dot>0, freshwater in, heat out); T_a at the "
+        "freezing point gives ~zero melt; freeze-on flips the signs."
+    ),
+}
+
+
 __param_spec__ = {
     "IceShelfConfig": {
         "scheme_key": "ocean.ice_shelf",
@@ -137,6 +178,136 @@ def ice_base_pressure_dbar(
 
 
 # ==============================================================================
+# NEMO 'spe' prescribed melt (parametrised cavity, Mathiot et al. 2017)
+# ==============================================================================
+
+def isf_prescribed_melt_tendencies(
+    S: jnp.ndarray,
+    dz_live: jnp.ndarray,
+    wet_cell: jnp.ndarray,
+    fwf_kg_m2_s: jnp.ndarray,
+    zmin_m: jnp.ndarray,
+    zmax_m: jnp.ndarray,
+    *,
+    rho_0: float,
+    c_sw: float,
+    L_fus: float,
+    config: IceShelfConfig = IceShelfConfig(),
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """NEMO ISF 'spe' prescribed-melt tendencies (isfparmlt.F90 spe case).
+
+    Coordinate convention: depths positive DOWN, ``dz_live`` positive
+    thickness, fluxes positive INTO the ocean.  Per column with melt
+    ``fwf > 0`` [kg/m²/s], NEMO deposits over the depth band
+    ``[zmin, zmax]`` (parametrised cavity):
+
+    * ``pqoce = −fwf · L_fus`` — latent heat drawn from the band
+      (COOLING: melting consumes heat; a heat sink, negative into-ocean).
+    * ``pqhc  = +fwf · c_sw · T_frz`` — heat content of the melt water
+      entering AT the in-situ freezing temperature (°C; a negative
+      ``T_frz`` also cools).
+    * salinity: melt water is fresh — virtual-salt dilution
+      ``dS = −S · fwf/(ρ0·h)`` per band cell.
+    * volume: ``+fwf/ρ0`` [m/s] free-surface source (sea level RISES).
+
+    Each TBL cell takes the NEMO full+fraction share of the column
+    fluxes, so the column budget closes exactly:
+    ``ρ0·c_sw·Σ dT_k·h_k = pqoce + pqhc`` and
+    ``ρ0·Σ dS_k·h_k = −fwf·⟨S⟩_w`` (locked by tests).
+
+    TBL construction (EXACT NEMO isftbl semantics — isfpar.F90 +
+    isftbl.F90, codex r3 #3):
+
+    1. ``zmax`` is clamped to the column depth (isfpar: MIN(ztblmax,
+       bathy)); ``ktop`` is the cell CONTAINING ``zmin`` (isf_tbl_ktop:
+       last level whose top interface depth <= zmin) and ``zmin`` is
+       SNAPPED UP to that cell's top interface.
+    2. TBL thickness ``htbl = max(min(zmax − zmin_snap, depth below
+       zmin_snap), e3t(ktop))`` — at least the top cell, at most the
+       water below.
+    3. ``kbot`` = first level where the cumulative thickness from
+       ``ktop`` reaches ``htbl``; the bottom cell enters with the
+       FRACTION ``(htbl − Σe3(ktop..kbot−1))/e3(kbot)`` (isf_tbl_lvl).
+       Cells ``ktop..kbot−1`` enter FULL — no top/bottom geometric
+       overlap weighting.
+    4. The freezing point is evaluated PER LEVEL with the NEMO TEOS-10
+       ``eos_fzp`` at the cell-centre depth and TBL-averaged with the
+       same full+fraction weights over ``htbl`` (isf_tbl_avg), exactly
+       NEMO's ``ztfrz3d`` → ``ztfrz`` construction.
+
+    Returns ``(dT_dt [°C/s], dS_dt [PSU/s], eta_dot [m/s])``; all zero
+    where ``fwf <= 0`` or the column is dry.
+    """
+    from legoesm.ocean.eos import nemo_eos_fzp
+
+    S = jnp.asarray(S)
+    dz = jnp.asarray(dz_live) * jnp.asarray(wet_cell)
+    nlev = dz.shape[-1]
+    fwf = jnp.maximum(jnp.asarray(fwf_kg_m2_s), 0.0)
+    zmin = jnp.asarray(zmin_m)
+    zmax = jnp.asarray(zmax_m)
+
+    # Interface depths (positive down) from the live thicknesses.
+    z_bot = jnp.cumsum(dz, axis=-1)
+    z_top = z_bot - dz
+    col_depth = z_bot[..., -1]
+
+    # (1) clamp zmax to bathy; ktop = cell containing zmin; snap zmin.
+    zmax_c = jnp.minimum(zmax, col_depth)
+    # count wet interfaces at-or-above zmin among WET cells only (dry
+    # cells have z_top == col_depth; exclude them so ktop stays wet).
+    is_wet = dz > 0.0
+    below = (z_top <= zmin[..., jnp.newaxis]) & is_wet
+    ktop = jnp.maximum(jnp.sum(below, axis=-1) - 1, 0)
+    ktop_idx = ktop[..., jnp.newaxis]
+    zmin_snap = jnp.take_along_axis(z_top, ktop_idx, axis=-1)[..., 0]
+    e3_ktop = jnp.take_along_axis(dz, ktop_idx, axis=-1)[..., 0]
+
+    # (2) TBL thickness bounds (isfpar rhisf_tbl construction).
+    htbl = jnp.maximum(
+        jnp.minimum(zmax_c - zmin_snap, col_depth - zmin_snap), e3_ktop)
+
+    # (3) kbot + bottom fraction (isf_tbl_lvl).  For k >= ktop the
+    # cumulative thickness from ktop is z_bot_k − zmin_snap.
+    idx = jnp.arange(nlev)
+    cum = z_bot - zmin_snap[..., jnp.newaxis]
+    reach = (cum >= htbl[..., jnp.newaxis] - 1.0e-9) & (idx >= ktop_idx)
+    # first reaching level; fall back to the last wet cell if roundoff
+    # leaves none (htbl <= water below zmin_snap by construction).
+    kbot = jnp.where(jnp.any(reach, axis=-1),
+                     jnp.argmax(reach, axis=-1),
+                     jnp.sum(is_wet, axis=-1) - 1)
+    kbot = jnp.maximum(kbot, ktop)
+    kbot_idx = kbot[..., jnp.newaxis]
+    e3_kbot = jnp.take_along_axis(dz, kbot_idx, axis=-1)[..., 0]
+    cum_above = jnp.take_along_axis(
+        z_top, kbot_idx, axis=-1)[..., 0] - zmin_snap
+    frac = jnp.where(e3_kbot > 0.0, (htbl - cum_above)
+                     / jnp.where(e3_kbot > 0.0, e3_kbot, 1.0), 0.0)
+    frac = jnp.clip(frac, 0.0, 1.0)
+
+    full = (idx >= ktop_idx) & (idx < kbot_idx)
+    at_bot = idx == kbot_idx
+    w = dz * full + frac[..., jnp.newaxis] * dz * at_bot   # Σw = htbl
+
+    has_melt = (fwf > 0.0) & (col_depth > 0.0)
+    htbl_safe = jnp.where(htbl > 0.0, htbl, 1.0)
+    w_norm = jnp.where(has_melt[..., jnp.newaxis], w / htbl_safe[..., jnp.newaxis], 0.0)
+
+    # (4) per-level NEMO eos_fzp at cell-centre depth, TBL-averaged.
+    tfrz_lvl = nemo_eos_fzp(S, 0.5 * (z_top + z_bot))
+    T_frz = jnp.sum(tfrz_lvl * w_norm, axis=-1)
+
+    # Fluxes (isfparmlt spe): qoce = −fwf·L, qhc = +fwf·cp·tfrz.
+    q_net = fwf * (c_sw * T_frz - L_fus)
+    dz_safe = jnp.maximum(dz, 1.0e-10)
+    dT_dt = q_net[..., jnp.newaxis] * w_norm / (rho_0 * c_sw) / dz_safe
+    dS_dt = -S * fwf[..., jnp.newaxis] * w_norm / rho_0 / dz_safe
+    eta_dot = jnp.where(has_melt, fwf / rho_0, 0.0)
+    return dT_dt, dS_dt, eta_dot
+
+
+# ==============================================================================
 # Three-equation system (Holland & Jenkins 1999)
 # ==============================================================================
 
@@ -202,8 +373,13 @@ def three_equation_melt(
     # γ_T·c_w·ρ_w·θ / (ρ_i·L_f)) in the small-melt limit, matching
     # the Beckmann-Goosse linearisation.
     disc = B * B - 4.0 * A * C
-    disc_safe = jnp.maximum(disc, 0.0)
-    m_dot = (-B + jnp.sqrt(disc_safe)) / (2.0 * A)
+    # AD-safe sqrt of the discriminant: ``d/dx sqrt(x) = 1/(2 sqrt(x))`` is
+    # +inf at x=0, so ``sqrt(max(disc, 0))`` produces a NaN GRADIENT whenever
+    # disc <= 0 (physical roots, freeze-on edge cases).  The double-``where``
+    # keeps the primal BIT-IDENTICAL to ``sqrt(max(disc, 0))`` (sqrt(disc) for
+    # disc > 0, exactly 0 for disc <= 0) while making the reverse pass finite.
+    sqrt_disc = jnp.where(disc > 0.0, jnp.sqrt(jnp.where(disc > 0.0, disc, 1.0)), 0.0)
+    m_dot = (-B + sqrt_disc) / (2.0 * A)
 
     # Salt balance: S_b = β·S_a / (δ·m + β).
     denom = delta * m_dot + beta

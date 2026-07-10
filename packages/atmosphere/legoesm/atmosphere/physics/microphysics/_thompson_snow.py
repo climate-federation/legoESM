@@ -179,15 +179,24 @@ def snow_deposition(q_v, q_s, q_sat_i, T, p_full, rho, dt):
     Ventilated capacitance growth (Pruppacher-Klett) with Thompson's snow
     ventilation constants:
 
-        PRDS = 4π·C_sqrd·(q_v−q_sat_i)/(A+B)
-               · [ t1_qs_sd·I(1) + t2_qs_sd·ρ_f^½·I(c_vent) ],
+        PRDS = 4π·C_sqrd·(S_i−1)/(A+B)
+               · [ t1_qs_sd·I(1) + t2_qs_sd·ρ_f^¼·I(c_vent) ] / ρ,
 
-    ``t1_qs_sd = 0.86``, ``t2_qs_sd = 0.28·Sc^⅓·√av_s``, ventilation moment
-    order ``c_vent = 1 + (1+bv_s)/2`` (= ``cse(16)`` in WRF), with the
-    half-slope ventilation exp folded into ``I``.  ``A+B`` is the standard
-    thermodynamic resistance to ice vapour diffusion.  Deposition (S_i>0) is
-    capped at the available supersaturation; sublimation (S_i<0) is donor-
-    clamped to the snow mass.
+    driven by the DIMENSIONLESS ice supersaturation ratio ``S_i−1 =
+    q_v/q_sat_i − 1`` (WRF ``ssati``) — the numerator that pairs with the
+    ``A+B`` thermodynamic-resistance denominator (Rogers-Yau 9.4 /
+    Pruppacher-Klett 13-76).  ``t1_qs_sd = 0.86``, ``t2_qs_sd =
+    0.28·Sc^⅓·√av_s``, ventilation moment order ``c_vent = 1 + (1+bv_s)/2``
+    (= ``cse(16)`` in WRF), with the half-slope ventilation exp folded into
+    ``I``; the ventilation density correction is WRF ``rhof2 = √rhof =
+    (ρ0/ρ)^¼`` (ventilation ∝ √Re, Re carries ONE fall-speed factor ρ_f).
+    Dimensional closure to [kg/kg/s]: 4πC(S_i−1)/(A+B) is a per-particle
+    growth rate [kg/s]; the moment sum ``vent`` [1/m²] integrates it over the
+    per-volume PSD (M2 = ρ·q_s/am_s) giving [kg m⁻³ s⁻¹]; the trailing 1/ρ
+    converts to mixing ratio.  WRF's diffusion form carries the same closure
+    implicitly — its prefactor ``rvs = ρ·qvsi`` cancels the 1/ρ.  Deposition
+    (S_i>1) is capped at the available supersaturation EXCESS ``q_v−q_sat_i``
+    [kg/kg]; sublimation (S_i<1) is donor-clamped to the snow mass.
     """
     M2, M3, ratio = _snow_moments(q_s, rho, T)
     lam0 = _LAM0 * ratio
@@ -201,7 +210,14 @@ def snow_deposition(q_v, q_s, q_sat_i, T, p_full, rho, dt):
     A = constants.L_s ** 2 / (jnp.clip(ka, 1.0e-6) * constants.R_v * T ** 2)
     B = constants.R_v * T / (jnp.clip(e_si, 1.0) * jnp.clip(dv, 1.0e-12))
     abi = jnp.clip(A + B, 1.0e-6)
-    s_i = q_v - q_sat_i
+    # DIMENSIONLESS ice supersaturation ratio (WRF ``ssati = qv/qvsi − 1``).
+    # The A+B resistances above pair with S_i−1, NOT the mixing-ratio excess
+    # q_v−q_sat_i = q_sat_i·(S_i−1): using the excess made snow deposition
+    # weaker by a factor q_sat_i (~1e3-1e4 at cold upper-tropospheric T),
+    # effectively disabling the stated major upper-tropospheric vapour sink.
+    s_i = q_v / jnp.clip(q_sat_i, 1.0e-12) - 1.0
+    # Mixing-ratio excess [kg/kg] — used only for the deposition availability cap.
+    excess_i = q_v - q_sat_i
     # Ventilation integrals: t1 term ~ ∫ D N dD = I(1); t2 term ~ ventilation
     # moment with the half-slope ventilation exp(-fv_s D/2).
     I1 = _psd_integral(1.0, M2, M3, ratio)
@@ -222,11 +238,20 @@ def snow_deposition(q_v, q_s, q_sat_i, T, p_full, rho, dt):
     # ``t2_qs_sd·rhof2·vsc2·smof`` (codex/WRF audit). μ via Sutherland.
     mu_air = _MU_PREFACTOR * safe_pow(T, _MU_T_EXP) / (T + _MU_SUTHERLAND_T)
     vsc2 = jnp.sqrt(jnp.clip(rho, _RHO_VISC_FLOOR) / jnp.clip(mu_air, 1.0e-8))
-    vent = t1 * I1 + t2 * rhof * vsc2 * I_vent
-    prds = 4.0 * jnp.pi * _C_SQRD * s_i / abi * vent
-    # Cap deposition at available supersaturation; donor-clamp sublimation to q_s.
+    # WRF ``rhof2(k) = SQRT(rhof(k)) = (ρ0/ρ)^¼`` — the VENTILATION density
+    # correction (ventilation ∝ √Re, Re ∝ fall speed ∝ rhof), distinct from
+    # the fall-speed correction rhof used in ``snow_fall_speed``.
+    rhof2 = jnp.sqrt(rhof)
+    vent = t1 * I1 + t2 * rhof2 * vsc2 * I_vent
+    # Sign convention: prds > 0 = DEPOSITION (q_v sink, snow source, +L_s
+    # heating upstream); prds < 0 = SUBLIMATION (q_v source, snow sink).
+    # 1/ρ closes the per-volume PSD integral to [kg/kg/s] (see docstring).
+    prds = (4.0 * jnp.pi * _C_SQRD * s_i / abi * vent
+            / jnp.clip(rho, _RHO_FLOOR))
+    # Cap deposition at the available supersaturation excess [kg/kg];
+    # donor-clamp sublimation to q_s.
     dep_pos = jnp.minimum(jnp.maximum(prds, 0.0),
-                          jnp.maximum(s_i, 0.0) / jnp.clip(dt, 1.0))
+                          jnp.maximum(excess_i, 0.0) / jnp.clip(dt, 1.0))
     subl_neg = jnp.maximum(jnp.minimum(prds, 0.0),
                            -jnp.clip(q_s, 0.0) / jnp.clip(dt, 1.0))
     out = dep_pos + subl_neg

@@ -12,7 +12,7 @@ Two flavours of the fill:
     surfdata-covered mask from the gsd via :func:`surfdata_covered`, builds a
     per-scheme bare fallback, and ``jnp.where`` -fills the leaves.  Used at
     simulation start by :func:`~legoesm.land.boundary_data.init_land_surface_data`.
-  - :func:`_gap_fill_tree` — internal, JAX-pure: takes a *precomputed* covered
+  - :func:`gap_fill_tree` — internal, JAX-pure: takes a *precomputed* covered
     mask and bare-fallback tree, so it can run inside a ``lax.scan`` body
     without a host roundtrip.  Used by
     :func:`~legoesm.land.boundary_data.make_step_land_params_updater`.
@@ -31,31 +31,38 @@ from legoesm.land.surface_params import (
 from legoesm.land.canopy.config import CanopyLandParams
 
 from legoesm.land.boundary_data._internals import (
-    _CI_DEFAULT, _KN_DEFAULT, _ALF_DEFAULT,
-    _M_C3, _M_C4, _B0_C3, _B0_C4,
-    _TGC_DEFAULT_C, _HC_MIN_M,
-    _EMISS_BARE, _RZ0M_BARE,
-    _ALB_VIS_BARE, _ALB_NIR_BARE,
+    CI_DEFAULT, KN_DEFAULT, ALF_DEFAULT,
+    M_C3, M_C4, B0_C3, B0_C4,
+    TGC_DEFAULT_C, HC_MIN_M,
+    EMISS_BARE, RZ0M_BARE,
+    ALB_VIS_BARE, ALB_NIR_BARE,
 )
 
 
-def _bare_land_surface_params(ncol: int):
-    """Bare-soil :class:`LandSurfaceParams` (CLM5 PFT 0 row) broadcast to ncol."""
+def bare_land_surface_params(ncol: int):
+    """Bare-soil :class:`LandSurfaceParams` (CLM5 PFT 0 row) broadcast to ncol.
+
+    ``fC4`` is set to 0 (bare soil is not C4) so this fallback's pytree structure
+    matches the surfdata provider's output (which always populates ``fC4``); a
+    ``None`` here would break the ``jax.tree.map`` gap-fill against a populated
+    ``fC4`` leaf.
+    """
     row = np.asarray(clm5_pft_table())[0]                    # bare_soil (12,)
-    return array_to_params(jnp.broadcast_to(jnp.asarray(row), (ncol, row.shape[0])), PARAM_NAMES)
+    p = array_to_params(jnp.broadcast_to(jnp.asarray(row), (ncol, row.shape[0])), PARAM_NAMES)
+    return p._replace(fC4=jnp.zeros(ncol))
 
 
-def _bare_canopy_params(ncol: int) -> CanopyLandParams:
+def bare_canopy_params(ncol: int) -> CanopyLandParams:
     """Bare (no-vegetation) :class:`CanopyLandParams` broadcast to ncol."""
     full = lambda v: jnp.full(ncol, v)
     return CanopyLandParams(
-        LAI=full(0.0), hc=full(_HC_MIN_M), fC4=full(0.0), FNonVeg=full(1.0),
-        CI=full(_CI_DEFAULT), kn=full(_KN_DEFAULT),
+        LAI=full(0.0), hc=full(HC_MIN_M), fC4=full(0.0), FNonVeg=full(1.0),
+        CI=full(CI_DEFAULT), kn=full(KN_DEFAULT),
         Vcmax25_C3_leaf=full(0.0), Vcmax25_C4_leaf=full(0.0),
-        m_C3=full(_M_C3), m_C4=full(_M_C4), b0_C3=full(_B0_C3), b0_C4=full(_B0_C4),
-        alf=full(_ALF_DEFAULT), TgC=full(_TGC_DEFAULT_C),
-        ALB_VIS=full(_ALB_VIS_BARE), ALB_NIR=full(_ALB_NIR_BARE),
-        emissivity=full(_EMISS_BARE), rz0m=full(_RZ0M_BARE), rd=full(0.0),
+        m_C3=full(M_C3), m_C4=full(M_C4), b0_C3=full(B0_C3), b0_C4=full(B0_C4),
+        alf=full(ALF_DEFAULT), TgC=full(TGC_DEFAULT_C),
+        ALB_VIS=full(ALB_VIS_BARE), ALB_NIR=full(ALB_NIR_BARE),
+        emissivity=full(EMISS_BARE), rz0m=full(RZ0M_BARE), rd=full(0.0),
     )
 
 
@@ -95,8 +102,8 @@ def fill_land_param_gaps(land_params, gsd, f_land=None):
                 f"{ncol}; ravel / grid-column mismatch."
             )
         keep_col = keep_col & (f_land > 0.0)                # surfdata only on driver-land
-    fb = (_bare_canopy_params(ncol) if isinstance(land_params, CanopyLandParams)
-          else _bare_land_surface_params(ncol))
+    fb = (bare_canopy_params(ncol) if isinstance(land_params, CanopyLandParams)
+          else bare_land_surface_params(ncol))
 
     def _fill(v, f):
         v = jnp.asarray(v)
@@ -106,7 +113,7 @@ def fill_land_param_gaps(land_params, gsd, f_land=None):
     return jax.tree.map(_fill, land_params, fb)
 
 
-def _gap_fill_tree(land_params, fb, covered_jnp):
+def gap_fill_tree(land_params, fb, covered_jnp):
     """Mask-fill helper: same logic as :func:`fill_land_param_gaps` but with
     pre-computed (JAX-side) ``covered`` mask, so it runs inside a ``lax.scan``
     body without a host roundtrip."""

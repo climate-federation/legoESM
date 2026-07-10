@@ -328,6 +328,11 @@ class SeaIceConfig(NamedTuple):
     h_new_ice: float = 0.05         # Thickness for new ice formation [m]
     # Bulk flux algorithm
     bulk_scheme: str = "constant"   # "constant" or "most"
+    # Stable-regime (zeta>0) MOST similarity functions for the MOST-family
+    # bulk schemes: "dyer1974" (default -5*zeta) | "beljaars_holtslag1991" |
+    # "grachev2007_sheba" (SHEBA — the Arctic sea-ice reference) |
+    # "gryanik2020".  Unknown -> ValueError at dispatch.
+    stability_scheme: str = "dyer1974"
     z_ref: float = 10.0             # Reference height for MOST [m]
     bulk_n_iter: int = 5            # MOST iterations
     # Temperature-dependent albedo (Task 10)

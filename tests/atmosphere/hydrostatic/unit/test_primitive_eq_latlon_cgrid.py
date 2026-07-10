@@ -1078,3 +1078,61 @@ class TestTracerMassConservation:
             f"Hybrid tracer mass conservation error: {rel_err:.4e} "
             f"(init={mass_init:.6e}, final={mass_final:.6e})"
         )
+
+
+# ==============================================================================
+# #836: top sponge (Rayleigh damping increasing toward the model lid)
+# ==============================================================================
+
+class TestTopSponge:
+    """The hydrostatic lat-lon C-grid dycore gains a config-gated top sponge that
+    damps horizontal momentum toward rest in the upper levels (absorbs
+    gravity-wave energy that would else reflect off the rigid lid — #836)."""
+
+    def _uniform_wind_state(self, grid, sigma, u0=20.0):
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        nlev = sigma.n_levels
+        return CGridLatLonHydrostaticState(
+            u=jnp.full((n_lat, n_lon + 1, nlev), u0),
+            v=jnp.full((n_lat + 1, n_lon, nlev), 5.0),
+            T=jnp.full((n_lat, n_lon, nlev), 300.0),
+            p_s=jnp.full((n_lat, n_lon), 1.0e5),
+            phis=jnp.zeros((n_lat, n_lon)),
+        )
+
+    def test_sponge_off_is_byte_identical(self, grid, sigma):
+        """sponge_coeff=0 (default) is bit-for-bit the no-sponge tendency."""
+        state = self._uniform_wind_state(grid, sigma)
+        cfg_off = CGridLatLonPrimitiveEquationConfig(sponge_coeff=0.0)
+        du0, dv0, *_ = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma, cfg_off)
+        du_def, dv_def, *_ = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma)
+        assert jnp.array_equal(du0, du_def)
+        assert jnp.array_equal(dv0, dv_def)
+
+    def test_sponge_damps_top_toward_rest_and_leaves_surface(self, grid, sigma):
+        """The sponge contribution du_on - du_off = -k(z)*u is: negative for u>0
+        (damps toward rest), NONZERO at the top level, ZERO at the surface (below
+        the sponge base), and increasing toward the lid."""
+        state = self._uniform_wind_state(grid, sigma, u0=20.0)
+        cfg_off = CGridLatLonPrimitiveEquationConfig(sponge_coeff=0.0)
+        cfg_on = CGridLatLonPrimitiveEquationConfig(
+            sponge_coeff=1.0 / 86400.0, sponge_width_m=10000.0)
+        du_off, dv_off, *_ = cgrid_latlon_hydrostatic_tendencies(
+            state, grid, sigma, cfg_off)
+        du_on, dv_on, *_ = cgrid_latlon_hydrostatic_tendencies(
+            state, grid, sigma, cfg_on)
+
+        d_du = du_on - du_off        # == -k(z) * u,  (n_lat, n_lon+1, nlev)
+        # SIGN: u = +20 > 0 -> sponge tendency is <= 0 everywhere (toward rest).
+        assert float(jnp.max(d_du)) <= 1e-12
+        assert float(jnp.min(d_du)) < 0.0
+        # TOP level (index 0 = smallest sigma) is damped; SURFACE (index -1) is not.
+        per_lev = jnp.max(jnp.abs(d_du), axis=(0, 1))   # (nlev,)
+        assert float(per_lev[0]) > 0.0, "top level not damped by the sponge"
+        assert float(per_lev[-1]) == 0.0, "surface level should be below the sponge base"
+        # Ramp increases toward the lid (top >= a mid level >= surface).
+        assert float(per_lev[0]) >= float(per_lev[-1])
+        # v is damped by the SAME profile (momentum, not just u).
+        d_dv = dv_on - dv_off
+        assert float(jnp.min(d_dv)) < 0.0     # v = +5 > 0 -> damped negative
+        assert float(jnp.max(jnp.abs(d_dv[..., -1]))) == 0.0

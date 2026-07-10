@@ -491,7 +491,7 @@ from legoesm.land.soil_thermal import soil_thermal_diffusion
 from legoesm.land.soil_hydraulics import van_genuchten_K, van_genuchten_psi
 from legoesm.land.config import LandConfig, MultiLayerLandConfig
 from legoesm.land.carbon.carbon_cycle import carbon_cycle_step
-from legoesm.land.carbon.stomata import ball_berry_conductance
+from legoesm.land.stomata import ball_berry_gs
 from legoesm.ice.sea_ice import sea_ice_step
 from legoesm.ice.dynamics import ice_dynamics_step
 from legoesm.ice.config import SeaIceConfig

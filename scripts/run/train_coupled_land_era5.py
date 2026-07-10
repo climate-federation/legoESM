@@ -51,7 +51,7 @@ from legoesm.driver.config import (
 from legoesm.driver.model_driver import ModelDriver
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
 from legoesm.land.carbon.config import CarbonConfig
-from legoesm.land.carbon.stomata import StomataConfig
+from legoesm.land.stomata import StomataConfig
 from legoesm.land.clm_surface_map import (
     load_clm_surface, download_clm_surfdata, _nearest_regrid,
 )

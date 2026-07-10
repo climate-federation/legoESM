@@ -57,6 +57,40 @@ if TYPE_CHECKING:
     from legoesm.ocean.vertical import OceanZStarCoordinate
 
 
+__physics_contract__ = {
+    "summary": (
+        "GM/Redi isopycnal mixing on the MPAS Voronoi mesh (centred small-slope "
+        "scheme): density -> isoneutral slopes -> optional Visbeck kappa -> "
+        "adiabatic eddy advection + isoneutral diffusion tendencies for T and S "
+        "via edge fluxes and a cell divergence."
+    ),
+    "inputs": {
+        "T": "degC", "S": "psu", "eta": "m", "H_bathy": "m",
+        "cfg.kappa_GM": "m^2/s", "cfg.kappa_Redi": "m^2/s",
+    },
+    "outputs": {"dT_dt": "degC/s", "dS_dt": "psu/s"},
+    "sign_convention": (
+        "kappa_GM, kappa_Redi >= 0; slopes DM95-tapered; GM skew flux adiabatic "
+        "+ Redi along-isopycnal down-gradient; edge fluxes summed into a cell "
+        "divergence so the cell-area/volume-integrated tracer is conserved; "
+        "edge/land masks give no-flux boundaries; z positive up. (The triad "
+        "slope-limited path raises NotImplementedError.)"
+    ),
+    # Adiabatic tracer redistribution: conserves cell-volume-integrated tracer.
+    "conserves": ["tracer"],
+    "differentiable": True,
+    "reference": (
+        "Griffies (1998) JPO 28, 831-841; Gent & McWilliams (1990); Redi "
+        "(1982); MPAS-Ocean (Ringler et al. 2013, Ocean Modelling 69)"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_gm_redi_mpas.py — the centred MPAS tendency "
+        "matches the lat-lon C-grid path on an equivalent slope and conserves "
+        "cell-area-integrated T, S; the triads path raises NotImplementedError."
+    ),
+}
+
+
 _PLAN = "docs/ocean/experiments/gm_redi_mpas_plan.md"
 
 
@@ -65,6 +99,28 @@ def _not_implemented(name: str) -> None:
         f"GM/Redi on MPAS is not yet implemented (called: {name}). "
         f"See {_PLAN} for the design and phasing."
     )
+
+
+def _validate_slope_density(cfg: "GMRediConfig") -> None:
+    """Fail fast if a caller requests an unsupported ``slope_density``.
+
+    ``GMRediConfig.slope_density`` offers ``"neutral"`` (Veros-faithful
+    locally-referenced neutral-density slope gradients) on the lat-lon
+    C-grid path only.  The MPAS/Voronoi path builds the isoneutral slopes
+    from the IN-SITU density ``rho`` exclusively (see
+    ``compute_isopycnal_slopes_mpas``).  A ``"neutral"`` request here would
+    otherwise be SILENTLY ignored and run in-situ physics — dispatch
+    hardening: an unsupported option must raise, never no-op.  Validated on
+    the static Python config value at function entry (not in a traced
+    branch).
+    """
+    slope_density = getattr(cfg, "slope_density", "in_situ")
+    if slope_density != "in_situ":
+        raise NotImplementedError(
+            "gm_redi MPAS path only supports slope_density='in_situ'; got "
+            f"{slope_density!r} (neutral-density slopes are not implemented "
+            "on the MPAS/Voronoi grid)."
+        )
 
 
 def voronoi_neumann_fill(
@@ -187,6 +243,10 @@ def compute_isopycnal_slopes_mpas(
     taper : (nEdges, nlev-1)
         Danabasoglu-McWilliams 1995 taper factor in [0, 1].
     """
+    # Dispatch hardening: the MPAS slope build only supports in-situ-density
+    # slopes; a 'neutral' request must raise rather than silently run in-situ.
+    _validate_slope_density(cfg)
+
     rho_filled = voronoi_neumann_fill(rho, mask, mesh)
 
     # --- Horizontal edge-normal density gradient at full levels ---
@@ -440,6 +500,25 @@ def gm_redi_tracer_tendency_centered_mpas(
         + kappa_Redi * S_sq_cell * dq_dz_cell
     )                                                          # (nCells, nlev-1)
 
+    # No-flux SEAFLOOR boundary on partial-cell coordinates (z positive up).
+    # F_z lives at the nlev-1 interior interfaces; interface j is the
+    # interface between cells j and j+1.  Zero F_z on any interface whose
+    # LOWER cell is below the seafloor (inactive) BEFORE it enters the
+    # vertical divergence: interface j is active iff BOTH adjacent cells are
+    # wet (mirrors the horizontal ``edge_mask_3d`` seafloor cut above and the
+    # lat-lon centered path's zero-flux seafloor BC).  Without this, the
+    # seafloor interface F_z[:, bottom_level] — reconstructed via Perot from
+    # the sub-seafloor (filled) side of a step edge and from the S²·∂_z q
+    # term — carries a spurious diapycnal flux into the DEEPEST ACTIVE cell
+    # (k = bottom_level).  The caller's final-tendency active mask never
+    # removes it because that cell IS active, so it must be cut here.
+    if hasattr(z_coord, "is_active"):
+        _active = z_coord.is_active                            # (nCells, nlev) bool
+        interface_active = (
+            _active[:, :-1] & _active[:, 1:]
+        ).astype(F_z.dtype)                                    # (nCells, nlev-1)
+        F_z = F_z * interface_active
+
     dq_vert = vertical_flux_divergence(F_z, dz_actual)         # (nCells, nlev)
 
     # ------------------------------------------------------------------
@@ -554,6 +633,11 @@ def gm_redi_tracer_tendency_mpas(
     -------
     dT_dt, dS_dt : (nCells, nlev)
     """
+    # Dispatch hardening (static config value, at function entry): the MPAS
+    # path builds isoneutral slopes from in-situ density only.  A 'neutral'
+    # slope_density request would be silently ignored below, so raise.
+    _validate_slope_density(cfg)
+
     if mask is None:
         mask = jnp.ones((mesh.nCells,), dtype=T.dtype)
     if edge_mask is None:
@@ -597,6 +681,11 @@ def gm_redi_tracer_tendency_mpas(
     )
 
     # GM coefficient.
+    if getattr(cfg, "treguier", None) is not None and cfg.treguier.enabled:
+        raise NotImplementedError(
+            "GMRediConfig.treguier (NEMO nn_aei_ijk_t=21 adaptive kappa) is "
+            "implemented on the lat-lon C-grid path only; the MPAS GM/Redi "
+            "would silently fall back. Use visbeck or constant kappa_GM here.")
     if cfg.visbeck.enabled:
         if f_coriolis is None:
             f_coriolis = 2.0 * constants.Omega * jnp.sin(mesh.latCell)

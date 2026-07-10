@@ -58,6 +58,7 @@ from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
     atm_grid_array_field_names,
     lat_spec,
 )
+from legoesm.parallel.latlon_spmd import replicate_leaf
 from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
     cgrid_to_hydrostatic,
 )
@@ -271,6 +272,32 @@ def test_atm_latlon_spmd_step_matches_serial(use_polar_filter):
                 f"denominator, or v-face reconstruction)."))
 
 
+def test_replicate_leaf_multiprocess_branch_matches_device_put():
+    """The multi-controller gather branch (jit-compiled identity with
+    replicated out_shardings) must produce the SAME replicated array as the
+    single-process device_put branch — on values, sharding, and for both a
+    lat-sharded and an already-replicated input. This exercises the
+    ``multiprocess=True`` code path for real on a single process (where both
+    mechanisms are legal), so the route-B gather cannot silently diverge.
+    Covers the primitive SHARED by the atm and ocean gathers
+    (``legoesm.parallel.latlon_spmd.replicate_leaf``)."""
+    from jax.sharding import NamedSharding, PartitionSpec as P
+    mesh = _mesh()
+    rep = NamedSharding(mesh, P())
+    rng = np.random.default_rng(7)
+    full = jnp.asarray(rng.standard_normal((N_LAT, N_LON, NLEV)))
+    sharded = jax.device_put(full, NamedSharding(mesh, P("lat", None, None)))
+
+    for arr in (sharded, jax.device_put(full, rep)):
+        a = replicate_leaf(arr, rep, multiprocess=False)
+        b = replicate_leaf(arr, rep, multiprocess=True)
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(full))
+        assert b.sharding.is_fully_replicated, (
+            "multiprocess replicate branch did not produce a fully "
+            "replicated sharding")
+
+
 def test_make_sharded_atm_step_rejects_anchor_mass():
     """Dispatch-hardening: anchor_mass_to_initial uses a band-local sum target
     not yet SPMD-routed -> must raise loudly, not silently mis-anchor."""
@@ -391,14 +418,16 @@ def test_run_atm_latlon_spmd_segment_matches_serial(use_polar_filter):
 def _mk_phys_state(ncol, nlev):
     """Minimal all-zeros PhysicsState with a nonzero deterministic tke seed."""
     import jax as _jax
-    from legoesm.atmosphere.physics.physics_state import PhysicsState
+    from legoesm.atmosphere.physics.physics_state import (
+        NO_SFC_T_OVERRIDE, PhysicsState,
+    )
     return PhysicsState(
         tke=jnp.full((ncol, nlev), 0.01),
         conv_prog_profile=jnp.zeros((ncol, nlev)),
         conv_stoch_state=jnp.zeros((ncol,)),
         gwd_spectrum=jnp.zeros((ncol, 1, 1)),
         prng_key=_jax.random.PRNGKey(0),
-        surface_T_sfc_override=jnp.full((ncol,), jnp.nan),
+        surface_T_sfc_override=jnp.full((ncol,), NO_SFC_T_OVERRIDE),  # #911 finite sentinel
         qke=jnp.zeros((ncol, nlev)),
         clubb_moments=jnp.zeros((ncol, 15, nlev + 1)),
         rad_heating=jnp.zeros((ncol, nlev)),

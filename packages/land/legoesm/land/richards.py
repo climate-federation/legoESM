@@ -51,6 +51,14 @@ __param_spec__ = {
             "pond_max": "numerics: surface ponding cap before overland runoff [m]",
         },
         "params": {
+            "fc_drain_saturation": {
+                "units": "1", "bounds": (0.0, 0.8), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "effective field-capacity gravity-drainage limiter — "
+                "suppress gravity drainage below S_e_fc so the root zone retains water "
+                "to the field-observed / HTESSEL-CLM5 effective fc (wetter than the "
+                "-33 kPa van-Genuchten point)",
+                "shape": None},
         },
     },
 }
@@ -102,6 +110,16 @@ class RichardsConfig(NamedTuple):
     # runoff (overland flow).  Excess precip ponds up to this depth (a coupled
     # surface cell) and infiltrates on later steps; above it, overflows to runoff.
     pond_max: float = 0.05
+    # Field-capacity drainage limiter.  Effective saturation S_e = (theta - theta_r)/
+    # (theta_sat - theta_r) below which the GRAVITY-drainage flux is suppressed (linear
+    # ramp to 0 as S_e -> fc_drain_saturation).  Capillary redistribution + root/evap
+    # sinks are untouched.  The unsaturated van-Genuchten K(theta) only becomes small
+    # near the -33 kPa point (S_e ~ 0.24 for loam), so the column drains ~0.1 m3/m3 below
+    # the field-observed / HTESSEL-CLM5 effective field capacity (S_e ~ 0.55, theta ~0.27
+    # for loam); this suppresses gravity drainage at the wetter effective fc so the root
+    # zone retains realistic water.  0.0 = OFF (unbounded gravity drainage, backward-
+    # compatible).  ~0.5-0.6 = a loam-like effective field capacity.
+    fc_drain_saturation: float = 0.0
 
 
 class RichardsOutput(NamedTuple):
@@ -281,6 +299,28 @@ def solve_richards(
         # simply deferred to the next step, not discarded).
         K_half = jnp.minimum(K_half, _CFL_SAFETY * jnp.minimum(dz[:-1], dz[1:]) / dt)
 
+        # Field-capacity gravity-drainage limiter (config-gated; 0.0 = off, exact no-op).
+        # Suppress the GRAVITY flux below the effective field capacity S_e so the root
+        # zone retains realistic water: the van-Genuchten K(theta) only vanishes near the
+        # -33 kPa point (S_e ~ 0.24 for loam), ~0.1 m3/m3 drier than the field-observed /
+        # HTESSEL-CLM5 effective fc (S_e ~ 0.55).  Capillary redistribution + root/evap
+        # sinks are UNTOUCHED (only K_grav, not coeff/K_half, is scaled).  Linear ramp
+        # K_grav: 0 at S_e = fc_drain_saturation -> K_half at S_e = 1.  Since K_grav <=
+        # K_half, the explicit gravity flux stays CFL-bounded.
+        if richards_config.fc_drain_saturation > 0.0:
+            _se = jnp.clip(
+                (theta_m - hydro_config.theta_r)
+                / jnp.maximum(hydro_config.theta_sat - hydro_config.theta_r, 1e-6),
+                0.0, 1.0)                                         # (ncol, nlayers)
+            _f_drain = jnp.clip(
+                (_se - richards_config.fc_drain_saturation)
+                / (1.0 - richards_config.fc_drain_saturation), 0.0, 1.0)
+            # downward gravity flux at interface k+1/2 drains the UPPER layer k
+            K_grav = K_half * _f_drain[:, :-1]                    # (ncol, nlayers-1)
+        else:
+            _f_drain = None
+            K_grav = K_half
+
         # Build tridiagonal system: [C/dt + A] * dpsi = rhs
         # A is the diffusion operator from Darcy's law
 
@@ -330,8 +370,10 @@ def solve_richards(
         # Use ``jnp.pad`` instead of ``zeros + .at[].set`` — one Pad
         # HLO op vs alloc-then-scatter.  This block fires every Picard
         # iteration (up to 10) inside the land step.
-        K_half_in = K_half / dz[1:]
-        K_half_out = K_half / dz[:-1]
+        # Gravity flux uses K_grav (= K_half, or field-capacity-limited when the drainage
+        # limiter is on).  The capillary diffusion above keeps the full K_half (coeff).
+        K_half_in = K_grav / dz[1:]
+        K_half_out = K_grav / dz[:-1]
         grav_flux_in = jnp.pad(K_half_in, ((0, 0), (1, 0)))
         grav_flux_out = jnp.pad(K_half_out, ((0, 0), (0, 1)))
         rhs = rhs + (grav_flux_in - grav_flux_out)
@@ -360,6 +402,8 @@ def solve_richards(
             # dz_N is the thick bottom layer, so this rarely bites, but keeps every
             # explicit K path bounded so a high-K profile cannot drain > one cell/step.
             K_bot = jnp.minimum(K_m[:, -1], _CFL_SAFETY * dz[-1] / dt)
+            if _f_drain is not None:
+                K_bot = K_bot * _f_drain[:, -1]   # field-capacity limit at the bottom too
             rhs = rhs.at[:, -1].add(-K_bot / dz[-1])
         # zero_flux: no additional term (natural BC)
 
@@ -398,8 +442,13 @@ def solve_richards(
         # (ncol, nlayers) state, so layer-varying K_sat configs pair the bottom psi
         # with the RIGHT layer's K_sat.  (Capped value is inert for the zero_flux BC,
         # whose runoff_subsurface is 0 regardless.)
-        return h_s_new, psi_new, theta_new, jnp.minimum(
-            K_m[:, -1], _CFL_SAFETY * dz[-1] / dt)
+        # Diagnostic bottom drainage MUST equal the flux the rhs actually debited above
+        # (incl. the field-capacity limiter), else runoff_subsurface over-reports and the
+        # water budget (in - out - dstorage) leaves a residual.
+        _k_bot_diag = jnp.minimum(K_m[:, -1], _CFL_SAFETY * dz[-1] / dt)
+        if _f_drain is not None:
+            _k_bot_diag = _k_bot_diag * _f_drain[:, -1]
+        return h_s_new, psi_new, theta_new, _k_bot_diag
 
     theta_m_init = theta_from_psi(psi_m, hydro_config)
 

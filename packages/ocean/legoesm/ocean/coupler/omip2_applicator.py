@@ -731,7 +731,8 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
                                   rho_air: float = constants.rho_air,
                                   ice_albedo=None,
                                   under_ice: bool = False,
-                                  tau_ice_sw: float = 0.03):
+                                  tau_ice_sw: float = 0.03,
+                                  dm2dc_window=None):
     """Build an :class:`OceanSurfaceForcing` (tau_x, tau_y, q_net, sw_down) on
     the model grid from CORE-II / JRA55 forcing, for INTEGRATION INSIDE
     ``model.step(state, dt, surface_forcing=...)`` -- the dynamics-core
@@ -769,6 +770,28 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
     T_freeze = float(constants.T_freeze)
 
     forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type)
+
+    if dm2dc_window is not None:
+        # NEMO ln_dm2dc (sbcdcy, Bernie et al. 2007): modulate the DAILY-MEAN
+        # downwelling SW with the analytic diurnal shape for this step's
+        # window.  Mean-preserving by construction; applied to the raw
+        # sw_down so BOTH q_net and the penetrative channel see it (exactly
+        # where NEMO applies sbc_dcy to qsr).
+        from legoesm.ocean.forcing.diurnal_cycle import diurnal_sw_factor
+        _day_of_year, _year_len, _t_lo, _t_up = dm2dc_window
+        _lat_T = getattr(grid, "lat_T", None)
+        if _lat_T is not None:            # tripole family (2-D, radians)
+            _lat_deg = np.degrees(np.asarray(_lat_T))
+            _lon_deg = np.degrees(np.asarray(grid.lon_T))
+        else:                             # regular lat-lon (1-D, radians)
+            _lat_deg = np.degrees(np.asarray(grid.lat))[:, None]
+            _lon_deg = np.degrees(np.asarray(grid.lon))[None, :]
+        _fac = np.asarray(diurnal_sw_factor(
+            _lon_deg, _lat_deg,
+            day_of_year=_day_of_year, year_len_days=_year_len,
+            t_frac_lo=_t_lo, t_frac_up=_t_up))
+        forc = dict(forc)
+        forc["sw_down"] = np.asarray(forc["sw_down"], dtype=np.float64) * _fac
 
     # Top-cell ocean temperature (state stored in degC) -> K.
     T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + T_freeze

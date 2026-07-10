@@ -53,9 +53,6 @@ import numpy as np
 # legoESM imports
 # ===========================================================================
 
-from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
-from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
@@ -63,10 +60,17 @@ from legoesm.land.soil_thermal import SoilThermalConfig
 from legoesm.land.richards import RichardsConfig
 from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
+from legoesm.land.lmip_forcing import make_synthetic_lmip_forcing
 from legoesm.land.multilayer_land import (
     step_multilayer_land,
     init_multilayer_land_state,
 )
+from legoesm.land.soil_grid import make_soil_grid
+from legoesm.land.carbon.spinup import (
+    SlowPoolFluxes,
+    analytic_slow_pool_equilibrium,
+)
+from legoesm.land.carbon_diagnostics import reconstruct_carbon_diagnostics
 from legoesm.land.surface_params import (
     CLM5_PFT_NAMES,
     _CLM5_PFT_TABLE_RAW,
@@ -199,7 +203,12 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
         hydraulics=SoilHydraulicsConfig(**texture_kwargs),
         thermal=SoilThermalConfig(enable_freeze_thaw=args.freeze_thaw),
         richards=RichardsConfig(),
-        carbon=CarbonConfig(scheme=args.carbon_scheme),
+        carbon=CarbonConfig(
+            scheme=args.carbon_scheme,
+            woody=args.carbon_woody,
+            cwd_humification_eff=args.cwd_humification_eff,
+            Q10_het_exp=args.carbon_q10_het,
+        ),
     )
     # Sub-grid elevation-band snow (opt-in): for an offline column, the sub-grid
     # relief std [m] is supplied directly (--elev-std-m); a coarse gridded run gets
@@ -214,120 +223,6 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
         max_wallclock_seconds=args.max_wallclock_seconds,
         restart_buffer_seconds=args.restart_buffer_seconds,
         seed=args.seed,
-    )
-
-
-# ===========================================================================
-# Synthetic atmospheric forcing
-# ===========================================================================
-
-def _make_forcing(
-    lat_rad: float,
-    lon_rad: float,
-    day: float,
-    hour: float,
-    *,
-    dtype=jnp.float64,
-    precip_rate: float = 2e-5,
-) -> AtmToSurface:
-    """Construct synthetic single-column atmospheric forcing.
-
-    Parameters
-    ----------
-    lat_rad : float
-        Latitude in radians.
-    lon_rad : float
-        Longitude in radians (used to compute local solar hour angle).
-    day : float
-        Day of year [0, 365).
-    hour : float
-        UTC hour of day [0, 24).
-    dtype :
-        JAX dtype (default float64).
-    precip_rate : float
-        Constant precipitation rate [kg/m2/s].
-
-    Returns
-    -------
-    AtmToSurface
-        Forcing with shape (1,) for all fields.
-
-    Notes
-    -----
-    Atmospheric temperature includes three components:
-    1. Latitudinal mean: T_base = 288 - 30·|φ|/(π/2)
-    2. Seasonal: amplitude ~15 K × |φ|/(π/2), NH peak at doy≈200 (July)
-    3. Diurnal: ±3 K, peak at local hour 14
-    This produces physically realistic annual mean and seasonal cycle
-    across latitudes. At 45.5°N: T_atm ≈ 265 K (Jan) to 280 K (Jul).
-    """
-    # --- Solar geometry ---
-    # Solar declination (degrees → radians)
-    decl_rad = 23.45 * jnp.pi / 180.0 * jnp.sin(
-        2.0 * jnp.pi * (day - 80.0) / 365.0
-    )
-    # Local hour angle: UTC hour shifted by longitude (15 deg/hour)
-    local_hour = hour + lon_rad * (180.0 / jnp.pi) / 15.0
-    ha = (local_hour - 12.0) * 15.0 * jnp.pi / 180.0
-    cos_sza = (
-        jnp.sin(lat_rad) * jnp.sin(decl_rad)
-        + jnp.cos(lat_rad) * jnp.cos(decl_rad) * jnp.cos(ha)
-    )
-    cos_sza = jnp.maximum(cos_sza, 0.0)
-
-    sw_down = jnp.asarray([constants.S_0 * cos_sza], dtype=dtype)
-
-    # --- Atmospheric temperature: latitudinal baseline + seasonal + diurnal ---
-    # Latitudinal mean (from test forcing, adapted from CLM convention)
-    T_base = 288.0 - 30.0 * abs(lat_rad) / (jnp.pi / 2.0)
-    # Seasonal: amplitude proportional to |latitude|, NH peak at doy≈200 (July).
-    # cos(2π*(day-200)/365)=1 at doy=200 (summer peak),
-    # ≈ -1 at doy=15 (winter minimum).
-    T_seasonal_amp = 15.0 * abs(lat_rad) / (jnp.pi / 2.0)
-    T_season = T_seasonal_amp * jnp.cos(2.0 * jnp.pi * (day - 200.0) / 365.0)
-    # Diurnal: ±3 K, peak at local solar noon + 2 h
-    diurnal_amp = 3.0
-    T_atm = jnp.asarray(
-        [T_base + T_season
-         + diurnal_amp * jnp.cos(2.0 * jnp.pi * (local_hour - 14.0) / 24.0)],
-        dtype=dtype,
-    )
-
-    # --- LW down: effective emissivity ~0.75 of blackbody ---
-    lw_down = jnp.asarray([0.75 * constants.sigma_sb * T_atm[0] ** 4], dtype=dtype)
-
-    # --- Humidity: ~60% RH using model's saturation_mixing_ratio ---
-    # saturation_mixing_ratio requires p [Pa]; use standard surface pressure
-    p_sfc = jnp.asarray([1.0e5], dtype=dtype)
-    q_sat = saturation_mixing_ratio(T_atm, p_sfc)
-    q_atm = (0.6 * q_sat).astype(dtype)
-
-    # --- Precipitation: rain below 275 K threshold becomes snow ---
-    precip_total = jnp.asarray([precip_rate], dtype=dtype)
-    precip_snow = jnp.where(
-        T_atm < 275.0,
-        precip_total,
-        jnp.zeros(1, dtype=dtype),
-    )
-
-    rho = jnp.asarray([1.2], dtype=dtype)
-
-    return AtmToSurface(
-        sw_down=sw_down,
-        lw_down=lw_down,
-        precip_total=precip_total,
-        precip_snow=precip_snow,
-        T_lowest=T_atm,
-        q_lowest=q_atm,
-        u_lowest=jnp.asarray([3.0], dtype=dtype),
-        v_lowest=jnp.asarray([2.0], dtype=dtype),
-        p_lowest=jnp.asarray([9.5e4], dtype=dtype),
-        p_surface=p_sfc,
-        rho_lowest=rho,
-        cos_zenith=jnp.asarray([cos_sza], dtype=dtype),
-        co2_ppmv=jnp.asarray([412.0], dtype=dtype),
-        has_radiation=jnp.ones(1, dtype=dtype),
-        has_precipitation=jnp.ones(1, dtype=dtype),
     )
 
 
@@ -563,6 +458,67 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
 
 
 # ===========================================================================
+# Semi-analytic soil-carbon spin-up (standard practice; Xia et al. 2012)
+# ===========================================================================
+
+def semi_analytic_carbon_spinup(state, carbon_state, config, lat_rad, lon_rad,
+                                lat_jnp, dt, start_doy, precip_rate):
+    """Finish a land-carbon spin-up with the semi-analytic soil-C equilibrium.
+
+    A single soil-C pool (~68-270-yr turnover) needs millennia to equilibrate
+    by brute-force integration.  After the transient spin-up has stationarised
+    the fast pools + wood, run ONE more stationary year to accumulate the mean
+    slow-pool fluxes, then reset wood + SOM to their analytic linear-pool
+    steady state via ``legoesm.land.carbon.spinup`` (Xia et al. 2012, GMD;
+    cf. accelerated decomposition, Thornton & Rosenbloom 2005; Koven 2013).
+
+    ``start_doy`` must be the day-of-year the transient ENDED on (so the
+    diagnostic year is in seasonal phase with the state).
+
+    Returns ``(state_after_diagnostic_year, equilibrated_carbon_state)`` — BOTH
+    must be persisted together: the reset only touches the slow carbon pools
+    (wood/SOM, which do not feed back into the land state within a step), so the
+    advanced land state and the reset carbon are mutually consistent.
+    """
+    import jax
+
+    grid = make_soil_grid(config.soil_grid)
+    root_frac = jnp.exp(-grid.z_node / config.root_depth)
+    root_frac = root_frac / jnp.sum(root_frac)
+    steps_per_year = int(round(_SECS_PER_DAY * 365.0 / dt))
+    dt_days = dt / _SECS_PER_DAY
+
+    @jax.jit
+    def _diag_step(state, carbon, doy, hour):
+        forcing = make_synthetic_lmip_forcing(
+            lat_rad, lon_rad, doy, hour, precip_rate=precip_rate)
+        new_state, _resp, carbon_new = step_multilayer_land(
+            state, forcing, config, U_MIN, dt,
+            lat=lat_jnp, carbon_state=carbon, doy=doy)
+        diag = reconstruct_carbon_diagnostics(
+            new_state, forcing, carbon, config, root_frac, config.theta_wp,
+            config.theta_fc, config.beta_min, lat_jnp, doy, dt, spatial=False)
+        return new_state, carbon_new, diag
+
+    # Accumulate per-column (works for any ncol) annual fluxes [gC/m2/yr].
+    zeros = jnp.zeros_like(carbon_state.C_wood)
+    acc = {k: zeros for k in ("a_wood", "wood_litter", "lit_to_som", "r_het_som")}
+    for s in range(steps_per_year):
+        doy = jnp.asarray((start_doy + s * dt_days) % 365.0)
+        hour = jnp.asarray((s * dt / 3600.0) % 24.0)
+        state, carbon_state, diag = _diag_step(state, carbon_state, doy, hour)
+        for k in acc:
+            acc[k] = acc[k] + getattr(diag, k) * dt_days
+
+    fluxes = SlowPoolFluxes(
+        a_wood=acc["a_wood"], wood_litter=acc["wood_litter"],
+        lit_to_som=acc["lit_to_som"], r_het_som=acc["r_het_som"])
+    carbon_eq = analytic_slow_pool_equilibrium(
+        carbon_state, fluxes, config.carbon.cwd_humification_eff)
+    return state, carbon_eq
+
+
+# ===========================================================================
 # Main driver
 # ===========================================================================
 
@@ -647,6 +603,27 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--carbon-scheme", default="none",
                    choices=_VALID_CARBON_SCHEMES,
                    help="Land carbon cycle scheme")
+    p.add_argument("--carbon-woody",
+                   action=argparse.BooleanOptionalAction,
+                   default=CarbonConfig().woody,
+                   help="Woody PFT (allocate structural C to wood). Use "
+                        "--no-carbon-woody for herbaceous PFTs (grass/crop): "
+                        "the wood fraction is invested in roots instead.")
+    p.add_argument("--cwd-humification-eff", type=float,
+                   default=CarbonConfig().cwd_humification_eff,
+                   help="Fraction of coarse-woody-debris turnover that "
+                        "humifies to stable SOM (the rest respires).")
+    p.add_argument("--carbon-q10-het", type=float,
+                   default=CarbonConfig().Q10_het_exp,
+                   help="Soil heterotrophic-decomposition temperature "
+                        "sensitivity exp(Q10_het_exp*(T-T_ref)); higher = "
+                        "faster warm-soil SOM turnover (Q10~2.5 at 0.09).")
+    p.add_argument("--carbon-spinup", default="none",
+                   choices=("none", "semi_analytic"),
+                   help="Soil-carbon spin-up mode after the transient run. "
+                        "semi_analytic: solve the linear slow-pool (wood/SOM) "
+                        "steady state analytically (Xia et al. 2012) instead of "
+                        "the millennia a ~270-yr pool would need by brute force.")
     p.add_argument("--snow-albedo-feedback",
                    action=argparse.BooleanOptionalAction,
                    default=True,
@@ -814,7 +791,7 @@ def main() -> None:
             doy = (args.start_day + t_sim / _SECS_PER_DAY) % 365.0
             hour = (t_sim / 3600.0) % 24.0
 
-            forcing = _make_forcing(
+            forcing = make_synthetic_lmip_forcing(
                 lat_rad, lon_rad, doy, hour,
                 precip_rate=args.precip_rate,
             )
@@ -925,6 +902,24 @@ def main() -> None:
         status = "FAIL"
         error_msg = traceback.format_exc()
         print(f"\nERROR:\n{error_msg}", file=sys.stderr)
+
+    # --- Semi-analytic soil-carbon equilibrium (standard spin-up practice) ---
+    if (status == "PASS" and args.carbon_spinup == "semi_analytic"
+            and config.carbon.scheme == "differland" and carbon_state is not None):
+        c_wood0 = float(np.asarray(carbon_state.C_wood).reshape(-1)[0])
+        c_som0 = float(np.asarray(carbon_state.C_som).reshape(-1)[0])
+        # Diagnostic year must be in seasonal phase with the state, i.e. start
+        # on the day-of-year the transient ended (state advances through the
+        # diagnostic year, so the returned state is saved with the reset carbon).
+        _final_doy = (args.start_day + args.days) % 365.0
+        state, carbon_state = semi_analytic_carbon_spinup(
+            state, carbon_state, config, lat_rad, lon_rad, lat_jnp, dt,
+            _final_doy, args.precip_rate)
+        c_wood1 = float(np.asarray(carbon_state.C_wood).reshape(-1)[0])
+        c_som1 = float(np.asarray(carbon_state.C_som).reshape(-1)[0])
+        print(f"[semi-analytic spin-up] C_wood {c_wood0:.0f}->{c_wood1:.0f}, "
+              f"C_som {c_som0:.0f}->{c_som1:.0f} gC/m2 (analytic slow-pool "
+              f"equilibrium; Xia et al. 2012)", flush=True)
 
     # --- Save final restart ---
     final_restart = out_dir / "restart_final.npz"

@@ -111,7 +111,78 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 
+__physics_contract__ = {
+    "summary": (
+        "Prognostic TKE vertical mixing (Gaspar 1990 / Burchard 2002, Veros "
+        "enable_tke): advance a turbulent-kinetic-energy budget (shear + "
+        "buoyancy production, dissipation, TKE diffusion) with "
+        "Bougeault-Lacarrere mixing lengths, then set K_M = c_k*l_k*sqrt(2e) "
+        "and K_H = K_M/Pr."
+    ),
+    "inputs": {
+        "u_cell": "m/s", "v_cell": "m/s", "T_cell": "degC", "S_cell": "psu",
+        "rho_cell": "kg/m^3", "dz_half": "m", "tke_old": "m^2/s^2",
+        "tau_x_surface": "N/m^2", "tau_y_surface": "N/m^2", "dt": "s",
+    },
+    "outputs": {
+        "K_M": "m^2/s", "K_H": "m^2/s", "tke_new": "m^2/s^2",
+    },
+    "sign_convention": (
+        "TKE e >= tke_background >= 0; K_M, K_H >= 0; shear production P_s >= 0, "
+        "dissipation eps >= 0 (a sink), buoyancy work P_b = -K_H*N^2 (a source "
+        "when N^2<0); surface TKE flux (|tau|/rho_0)^{3/2} injected as a flux BC "
+        "at the top interface; z positive up. The TKE budget has genuine "
+        "sources/sinks so nothing is conserved; K_M/K_H close the momentum and "
+        "tracer budgets in the solver."
+    ),
+    # Prognostic-TKE diffusivity producer (like CATKE); dissipative budget, so
+    # nothing is conserved by the closure itself.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Gaspar, P. et al. (1990), JGR 95, 16179-16193; Burchard, H. (2002); "
+        "Bougeault & Lacarrere (1989), MWR 117, 1872-1890"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_tke_closure.py + "
+        "tests/ocean/unit/test_tke_prognostic.py — wind-forced surface layer "
+        "builds TKE and K_M; a stratified quiescent column decays toward "
+        "background TKE; Kato-Phillips mixed-layer deepening."
+    ),
+}
+
 _EPS = float(jnp.finfo(jnp.float32).eps)
+
+# --- NEMO zdftke surface-term constants (NEMO 5.0.1 src/OCE/ZDF/zdftke.F90) ---
+# Fixed published scheme constants, NOT tunables (the tunables are
+# TKEConfig.lc_coeff / etau_frac — NEMO rn_lc / rn_efr).
+_NEMO_TKE_RHO_AIR = 1.22       # zrhoa  [kg/m³] air density         (zdftke.F90:221)
+_NEMO_TKE_CDRAG = 1.5e-3       # zcdrag [-] surface drag coeff      (zdftke.F90:222)
+# ½·0.016² / (ρ_air·C_d): surface stress → ½W_lc² (Axell 2002 Eq. 44, via
+# |τ| = ρ_air·C_d·U₁₀² and the Stokes drift u_s = 0.016·U₁₀) (zdftke.F90:243)
+_NEMO_TKE_LC_CSD = 0.5 * 0.016 * 0.016 / (_NEMO_TKE_RHO_AIR * _NEMO_TKE_CDRAG)
+_NEMO_TKE_EBB = 67.83          # rn_ebb  namelist_ref default — surface TKE input coef
+_NEMO_TKE_EMIN0 = 1.0e-4       # rn_emin0 [m²/s²] surface TKE minimum
+# nn_htau=1 latitude profile: h_tau = max(0.5, min(30, 45·|sin φ|)) m
+_NEMO_TKE_HTAU_CONST_M = 10.0  # nn_htau=0 constant penetration depth [m]
+_NEMO_TKE_HTAU_MIN_M = 0.5
+_NEMO_TKE_HTAU_MAX_M = 30.0
+_NEMO_TKE_HTAU_SLOPE_M = 45.0
+
+
+def _safe_stress_modulus(tx: jnp.ndarray, ty: jnp.ndarray) -> jnp.ndarray:
+    """AD-safe |τ| = sqrt(τx² + τy²) with a finite (zero) gradient at τ=0.
+
+    The plain ``jnp.sqrt(tx*tx + ty*ty)`` has a NaN reverse-mode gradient at
+    ``tx = ty = 0`` (``d/dx sqrt(x) = 1/(2 sqrt(x))`` → ``0 * inf`` in the VJP),
+    though the analytic limit of the stress modulus and its contribution to the
+    surface TKE flux ``(|τ|/ρ₀)^{3/2}`` is 0 there. The double-``where`` keeps
+    the primal BIT-IDENTICAL to the plain form where ``|τ|² > 0`` and yields a
+    finite 0 (with 0 gradient) at zero stress — the same pattern used for the
+    AD-safe sqrt elsewhere in this module (see ``_veros_buoyancy_length``).
+    """
+    t2 = tx * tx + ty * ty
+    return jnp.where(t2 > 0.0, jnp.sqrt(jnp.where(t2 > 0.0, t2, 1.0)), 0.0)
 
 
 class TKEOutput(NamedTuple):
@@ -911,6 +982,131 @@ def compute_K_from_tke(
 
 
 # ---------------------------------------------------------------------------
+# NEMO zdftke surface terms: Langmuir source (ln_lc) + sub-ML penetration
+# (nn_etau).  Faithful ports of NEMO 5.0.1 zdftke.F90; see TKEConfig.
+# ---------------------------------------------------------------------------
+
+
+def nemo_langmuir_tke_source(
+    taum: jnp.ndarray,
+    N2: jnp.ndarray,
+    depth_w: jnp.ndarray,
+    dz_w: jnp.ndarray,
+    cfg: TKEConfig,
+    ice_frac: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    r"""Langmuir-circulation TKE source [m²/s³] (Axell 2002; NEMO ln_lc).
+
+    Faithful port of ``zdftke.F90`` lines 305-370 (the no-Stokes-coupling
+    branch — Stokes drift deduced from the surface stress):
+
+    1. ``½W_lc² = ½·0.016²·|τ| / (ρ_air·C_d)``   (Axell Eq. 44 via
+       ``|τ| = ρ_air·C_d·U₁₀²`` and ``u_s = 0.016·U₁₀``);
+    2. LC depth ``h_lc`` = shallowest interface where the cumulative
+       potential energy ``Σ_k max(N²,0)·z_w·Δz_w`` exceeds ``½W_lc²``
+       (Axell Eq. 47; whole column stable ⇒ deepest interface);
+    3. source(k) = ``u_s³ · (lc_coeff·sin(π z_k/h_lc))³ / h_lc`` for
+       ``z_k < h_lc``, else 0 — with ``u_s = √(2·½W_lc²)`` and an
+       ice-fraction attenuation ``(1-fice)`` (0 when ``ice_frac=None``).
+
+    Sign convention: z positive DOWN (``depth_w`` > 0 below the surface);
+    the source is ≥ 0 (sin > 0 on (0, h_lc)) — pure TKE production.
+
+    Parameters
+    ----------
+    taum : (...,) surface stress modulus |τ| [N/m²] (≥ 0).
+    N2 : (..., nlev-1) buoyancy frequency² at interior interfaces
+        (may be signed; clipped ≥ 0 as NEMO uses ``MAX(rn2b, 0)``).
+    depth_w : (nlev-1,) or (..., nlev-1) interface depths [m, positive down].
+    dz_w : (..., nlev-1) interface control-volume thicknesses (≈ e3w).
+    cfg : TKEConfig (uses ``lc_coeff``).
+
+    Returns
+    -------
+    (..., nlev-1) TKE source, feedable as ``external_source`` (the RHS gets
+    ``+dt·source``, exactly NEMO's ``en += rn_Dt·source``).
+    """
+    half_wlc2 = _NEMO_TKE_LC_CSD * jnp.maximum(taum, 0.0)         # ½W_lc² ≥ 0
+    # Axell Eq. 47 LHS: cumulative PE from the surface down (z positive down).
+    pe = jnp.cumsum(jnp.maximum(N2, 0.0) * depth_w * dz_w, axis=-1)
+    # h_lc: first (shallowest) interface where PE exceeds ½W_lc²; fall back to
+    # the deepest interface when the whole column's PE is below it (NEMO
+    # initialises imlc to the bottom).  argmax(mask) returns the FIRST True.
+    exceeded = pe > half_wlc2[..., None]
+    first = jnp.argmax(exceeded, axis=-1)
+    depth_b = jnp.broadcast_to(depth_w, pe.shape)
+    h_first = jnp.take_along_axis(depth_b, first[..., None], axis=-1)[..., 0]
+    h_lc = jnp.where(jnp.any(exceeded, axis=-1), h_first, depth_b[..., -1])
+    h_lc = jnp.maximum(h_lc, _EPS)
+    # u_s³ = (2·½W_lc²)^{3/2}; d/dx x^{3/2} → 0 at 0, AD-safe without a guard.
+    us3 = (2.0 * half_wlc2) ** 1.5
+    if ice_frac is not None:
+        us3 = us3 * jnp.maximum(0.0, 1.0 - ice_frac)
+    w_lc = cfg.lc_coeff * jnp.sin(jnp.pi * depth_b / h_lc[..., None])
+    src = us3[..., None] * (w_lc ** 3) / h_lc[..., None]
+    return jnp.where(depth_b < h_lc[..., None], src, 0.0)
+
+
+def nemo_etau_injection(
+    e: jnp.ndarray,
+    taum: jnp.ndarray,
+    depth_w: jnp.ndarray,
+    cfg: TKEConfig,
+    rho_0: float = constants.rho_ocean,
+    lat_deg: jnp.ndarray | None = None,
+    ice_frac: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    r"""Sub-ML penetration of surface TKE (NEMO nn_etau=1, zdftke.F90:492-496).
+
+    ``e(k) += etau_frac · e_sfc · exp(-z_k / h_tau) · (1-fice)`` at every
+    interior interface, with the NEMO surface-TKE Dirichlet value
+    ``e_sfc = max(rn_emin0, rn_ebb·|τ|/ρ0)`` (zdftke.F90:265) and
+
+    - ``etau_htau_mode="constant10m"`` (nn_htau=0): h_tau = 10 m;
+    - ``etau_htau_mode="latitude"``   (nn_htau=1):
+      h_tau = max(0.5, min(30, 45·|sin φ|)) m — requires ``lat_deg``.
+
+    Applied AFTER the TKE solve and BEFORE the K_M/K_H computation (the
+    NEMO step order: ``tke_tke`` ends with the etau block, then ``tke_avn``
+    derives the mixing coefficients).  Additive and ≥ 0 ⇒ preserves TKE
+    positivity.  Unknown modes raise (dispatch hardening).
+    """
+    mode = cfg.etau_mode
+    if mode == "none":
+        return e
+    if mode != "below_ml":
+        raise ValueError(
+            f"Unknown TKEConfig.etau_mode={mode!r}; expected 'none' or "
+            f"'below_ml' (NEMO nn_etau 0/1).")
+    htau_mode = cfg.etau_htau_mode
+    if htau_mode == "constant10m":
+        htau = jnp.asarray(_NEMO_TKE_HTAU_CONST_M, dtype=e.dtype)
+    elif htau_mode == "latitude":
+        if lat_deg is None:
+            raise ValueError(
+                "TKEConfig.etau_htau_mode='latitude' requires lat_deg (the "
+                "column latitudes in degrees) to be threaded to the TKE "
+                "closure; got None. Use 'constant10m' or pass lat_deg.")
+        htau = jnp.maximum(
+            _NEMO_TKE_HTAU_MIN_M,
+            jnp.minimum(
+                _NEMO_TKE_HTAU_MAX_M,
+                _NEMO_TKE_HTAU_SLOPE_M
+                * jnp.abs(jnp.sin(jnp.deg2rad(lat_deg)))),
+        )[..., None]
+    else:
+        raise ValueError(
+            f"Unknown TKEConfig.etau_htau_mode={htau_mode!r}; expected "
+            f"'constant10m' or 'latitude' (NEMO nn_htau 0/1).")
+    e_sfc = jnp.maximum(_NEMO_TKE_EMIN0, _NEMO_TKE_EBB / rho_0
+                        * jnp.maximum(taum, 0.0))
+    inj = cfg.etau_frac * e_sfc[..., None] * jnp.exp(-depth_w / htau)
+    if ice_frac is not None:
+        inj = inj * jnp.maximum(0.0, 1.0 - ice_frac[..., None])
+    return e + inj
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
@@ -939,6 +1135,7 @@ def tke_vertical_mixing(
     external_source: jnp.ndarray | None = None,
     dz_surface: jnp.ndarray | None = None,
     boundary_cap: jnp.ndarray | None = None,
+    lat_deg: jnp.ndarray | None = None,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -1079,10 +1276,32 @@ def tke_vertical_mixing(
 
     if tau_x_surface is None and tau_y_surface is None:
         surface_flux = jnp.zeros(rho_cell.shape[:-1], dtype=rho_cell.dtype)
+        taum = surface_flux  # |τ| = 0 (unforced)
     else:
         tx = tau_x_surface if tau_x_surface is not None else jnp.zeros_like(rho_cell[..., 0])
         ty = tau_y_surface if tau_y_surface is not None else jnp.zeros_like(rho_cell[..., 0])
-        surface_flux = (jnp.sqrt(tx * tx + ty * ty) / rho_0) ** 1.5
+        taum = _safe_stress_modulus(tx, ty)
+        surface_flux = (taum / rho_0) ** 1.5
+
+    # --- NEMO zdftke surface terms (static feature gates; see TKEConfig) ---
+    _lc_on = bool(getattr(cfg, "lc", False))
+    _etau_on = getattr(cfg, "etau_mode", "none") != "none"
+    if _lc_on or _etau_on:
+        if z_interface is None:
+            raise ValueError(
+                "TKEConfig.lc / etau_mode require z_interface (the interior "
+                "interface reference heights) so the NEMO surface terms know "
+                "the interface depths; the k_profiles caller passes "
+                "z_coord.z_half_ref[1:-1].")
+        # z_interface holds NEGATIVE reference heights; NEMO's gdepw is
+        # positive-down depth.
+        _depth_w = -z_interface
+    if _lc_on:
+        # Langmuir source enters the RHS as +dt·source — exactly NEMO's
+        # pre-solve ``en += rn_Dt·source`` (zdftke.F90:367).
+        _lc_src = nemo_langmuir_tke_source(taum, N2, _depth_w, dz_half, cfg)
+        external_source = (_lc_src if external_source is None
+                           else external_source + _lc_src)
 
     # Sub-iteration loop (Mode B convergence; Mode A uses n_iterations=1).
     tke_curr = tke_old
@@ -1105,6 +1324,16 @@ def tke_vertical_mixing(
             dz_cell=dz_cell,
             dz_surface=dz_surface if veros_slots else None,
         )
+
+    if _etau_on:
+        # NEMO step order: the etau injection closes tke_tke (AFTER the
+        # implicit solve), then tke_avn derives K_M/K_H from the updated
+        # field (zdftke.F90:492-496). Applied ONCE per call — NOT per
+        # Mode-B sub-iteration (that would triple the non-time-scaled
+        # injection in the diagnostic n_iterations=3 chain; codex P1/P2
+        # review finding #2). Prognostic mode (n_iterations=1) identical.
+        tke_curr = nemo_etau_injection(
+            tke_curr, taum, _depth_w, cfg, rho_0=rho_0, lat_deg=lat_deg)
 
     # Final K from converged TKE.
     l_k_final, l_eps_final = compute_mixing_lengths(
@@ -1158,6 +1387,19 @@ def _validate_post_mixing_cfg(cfg: TKEConfig) -> None:
         # distance-to-boundary cap (veros_mxl_choice1_boundary_cap, wired in by
         # the orchestrator). Both match Veros (only global_1deg selects
         # choice=1). compute_mixing_lengths raises on any other value.
+        #
+        # Mixed-oracle guard: the NEMO zdftke surface terms (lc / etau) are
+        # implemented on the standard orchestrator path only — the Veros
+        # post-mixing step order has no such terms (Veros has no ln_lc /
+        # nn_etau). Combining them would silently no-op (this path never
+        # calls the injections) or mix oracle semantics — raise instead.
+        if getattr(cfg, "lc", False) or getattr(cfg, "etau_mode", "none") != "none":
+            raise ValueError(
+                "TKEConfig.lc / etau_mode (NEMO zdftke surface terms) are "
+                "not supported with buoyancy_timing='post_mixing_veros' "
+                "(the Veros-faithful step order has no Langmuir/etau terms; "
+                "they would silently not be applied). Disable lc/etau or "
+                "use the standard pre_mixing path.")
     elif shear == "realized_veros":
         raise ValueError(
             "TKEConfig.shear_production='realized_veros' requires "
@@ -1224,7 +1466,7 @@ def tke_set_diffusivities(
               else jnp.zeros_like(rho_cell[..., 0]))
         ty = (tau_y_surface if tau_y_surface is not None
               else jnp.zeros_like(rho_cell[..., 0]))
-        surface_flux = (jnp.sqrt(tx * tx + ty * ty) / rho_0) ** 1.5
+        surface_flux = (_safe_stress_modulus(tx, ty) / rho_0) ** 1.5
 
     l_k, _l_eps = compute_mixing_lengths(
         tke_old, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell,

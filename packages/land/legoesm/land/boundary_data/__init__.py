@@ -36,6 +36,7 @@ from legoesm.land.boundary_data.builders import (
     glacier_mask,
     build_canopy_params,
     build_soil_hydraulics,
+    cover_fracs,
     SurfaceDataParamProvider,
     surface_data_param_provider,
     surface_data_to_land_params,
@@ -56,7 +57,7 @@ from legoesm.land.boundary_data.point import (
 
 __all__ = [
     # builders
-    "dominant_pft_index", "glacier_mask",
+    "cover_fracs", "dominant_pft_index", "glacier_mask",
     "build_canopy_params", "build_soil_hydraulics",
     "SurfaceDataParamProvider", "surface_data_param_provider",
     "surface_data_to_land_params", "prescribed_canopy_structure",

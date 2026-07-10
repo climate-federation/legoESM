@@ -14,6 +14,43 @@ from legoesm.ocean.physics.vertical_mixing.config import ConstantVerticalMixingC
 from legoesm.ocean.physics.vertical_mixing.output import VerticalMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
+__physics_contract__ = {
+    "summary": (
+        "Constant-coefficient vertical mixing: apply a uniform vertical "
+        "viscosity A_v to (u, v) and diffusivity K_v to (T, S) as "
+        "down-gradient diffusion with no-flux top/bottom boundaries."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "degC", "S": "psu",
+        "jacobian": "1 (z-star dimensionless)",
+        "cfg.A_v": "m^2/s", "cfg.K_v": "m^2/s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "degC/s", "dS_dt": "psu/s",
+        "K_v": "m^2/s", "A_v": "m^2/s",
+    },
+    "sign_convention": (
+        "A_v, K_v >= 0; Fickian down-gradient flux F = -K dq/dz; z positive up; "
+        "no-flux top and bottom BC, so the dz-weighted column integral of each "
+        "diffused field is invariant; surface fluxes applied separately. With "
+        "apply_diffusion=False the tendencies are zero and only K_v/A_v are "
+        "returned for the implicit solver."
+    ),
+    # Flux-form diffusion with no-flux BC conserves the column integral of the
+    # diffused heat (energy), salt and momentum.
+    "conserves": ["energy", "salt", "momentum"],
+    "differentiable": True,
+    "reference": (
+        "Fickian vertical diffusion; Griffies (2004) Fundamentals of Ocean "
+        "Climate Models (constant-coefficient vertical mixing)"
+    ),
+    "idealized_test": (
+        "rest / vertically uniform column -> zero tendency; a two-layer step "
+        "relaxes toward the column mean while the dz-weighted column integral "
+        "of T, S, u, v is conserved (no-flux BC)."
+    ),
+}
+
 
 def constant_vertical_mixing(
     u: jnp.ndarray,

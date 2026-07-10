@@ -266,7 +266,7 @@ TURB_GRAD_PARAMS = {
     "smagorinsky": ["C_s", "l_mix_max", "Pr_t"],
     "louis": ["b_louis", "b_heat_ratio", "l_mix_max", "Ri_crit"],
     "holtslag_boville": ["fak", "fakn", "betam", "betah", "sffrac", "Ri_crit"],
-    "ysu": ["entrainment_coeff", "countergrad_coeff", "Pr_t", "louis_b",
+    "ysu": ["entrainment_ratio", "countergrad_coeff", "Pr_t", "louis_b",
             "entrainment_width_frac"],
 }
 

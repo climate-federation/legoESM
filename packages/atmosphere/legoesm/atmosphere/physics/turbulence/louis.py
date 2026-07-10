@@ -21,7 +21,13 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import virtual_temperature, mixing_length
+from legoesm.atmosphere.physics._shared import (
+    buoyancy_coefficient,
+    exner_function,
+    louis_stability_functions,
+    mixing_length,
+    virtual_temperature,
+)
 from legoesm.atmosphere.physics.turbulence.config import LouisConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import (
@@ -155,51 +161,35 @@ def louis_turbulence(
 
     # Virtual potential temperature for buoyancy:
     # theta_v = T_v(T, q_v) · (p_ref / p)^kappa, with the canonical
-    # T_v factor 1 + (R_v/R_d - 1) q_v ≈ 1 + 0.6078 q_v.
-    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
-    theta_v = virtual_temperature(T, q_v) * exner
+    # T_v factor 1 + (R_v/R_d - 1) q_v ≈ 1 + 0.6078 q_v, and the canonical
+    # inverse-Exner helper (same 1 Pa pressure floor).
+    exner_pref = 1.0 / exner_function(p_full)
+    theta_v = virtual_temperature(T, q_v) * exner_pref
 
-    # Gradient Richardson number at half-levels
+    # Gradient Richardson number at half-levels; N² = (g/θ_v)·∂θ_v/∂z via the
+    # shared buoyancy coefficient (clip kept at the call site).
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
-    N2 = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz  # Brunt-Väisälä
+    N2 = buoyancy_coefficient(jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz  # Brunt-Väisälä
     Ri = N2 / S2  # (ncol, nlev-1)
 
     # Louis stability functions (Louis 1979; separate heat function per
-    # Louis, Tiedtke & Geleyn 1982).  Smooth sigmoid blend avoids if/else.
-    #   Unstable (Ri<0): f = 1 - 2b·Ri / (1 + 3b·c·l²·|Ri|^½ / dz²)
-    #   Stable   (Ri≥0): f = 1 / (1 + 2b·Ri / sqrt(1 + d·Ri))
+    # Louis, Tiedtke & Geleyn 1982) via the SHARED helper
+    # ``physics._shared.louis_stability_functions`` (also used by YSU's
+    # free-atmosphere branch — one home, no verbatim copy).
     # Momentum uses b_m = b_louis; heat uses b_h = b_heat_ratio·b_louis
-    # (LTG82: 3b heat vs 2b momentum ⇒ ratio 1.5).  The denominators are
-    # SHARED between momentum and heat so only the numerator coefficient
-    # differs: K_m is then exactly independent of b_heat_ratio, and
-    # b_heat_ratio = 1 recovers the Louis (1979) f_h = f_m form.  The
-    # heat function is *more* enhanced when unstable (Pr_t = K_m/K_h < 1)
-    # and *more* suppressed when stable (Pr_t > 1), as observed.
-    b_louis = config.b_louis
-    c_louis = config.c_louis
-    d_louis = config.d_louis
-    b_heat = config.b_heat_ratio * b_louis
-
-    # Unstable branch — denominator shared between momentum and heat.
-    Ri_neg = jnp.minimum(Ri, 0.0)
-    denom_unstable = (
-        1.0 + 3.0 * b_louis * c_louis * l_mix ** 2
-        * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz_half ** 2 + 1e-10)
+    # (LTG82: 3b heat vs 2b momentum ⇒ ratio 1.5).  The branch denominators
+    # are SHARED between momentum and heat inside the helper so only the
+    # numerator coefficient differs: K_m is then exactly independent of
+    # b_heat_ratio, and b_heat_ratio = 1 recovers the Louis (1979)
+    # f_h = f_m form.  The heat function is *more* enhanced when unstable
+    # (Pr_t = K_m/K_h < 1) and *more* suppressed when stable (Pr_t > 1).
+    f_m, f_h = louis_stability_functions(
+        Ri, l_mix, dz_half,
+        config.b_louis, config.c_louis, config.d_louis,
+        config.blend_ri_sharpness,
+        b_heat=config.b_heat_ratio * config.b_louis,
     )
-    f_unstable_m = 1.0 - 2.0 * b_louis * Ri_neg / denom_unstable
-    f_unstable_h = 1.0 - 2.0 * b_heat * Ri_neg / denom_unstable
-
-    # Stable branch — sqrt denominator shared between momentum and heat.
-    Ri_pos = jnp.maximum(Ri, 0.0)
-    sqrt_stable = jnp.sqrt(1.0 + d_louis * Ri_pos)
-    f_stable_m = 1.0 / (1.0 + 2.0 * b_louis * Ri_pos / sqrt_stable)
-    f_stable_h = 1.0 / (1.0 + 2.0 * b_heat * Ri_pos / sqrt_stable)
-
-    # Smooth blending: sigmoid transitions from unstable to stable
-    blend = jax.nn.sigmoid(config.blend_ri_sharpness * Ri)
-    f_m = (1.0 - blend) * f_unstable_m + blend * f_stable_m
-    f_h = (1.0 - blend) * f_unstable_h + blend * f_stable_h
 
     # Eddy diffusivities at half-levels
     Km_half = l_mix ** 2 * S * f_m  # (ncol, nlev-1)

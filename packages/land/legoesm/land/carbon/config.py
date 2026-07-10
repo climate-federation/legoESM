@@ -25,9 +25,11 @@ __param_spec__ = {
             "K_CO2": {"units": "1", "bounds": (132.0, 1200.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "LCMA": {"units": "1", "bounds": (16.5, 150.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "Q10_exp": {"units": "1", "bounds": (0.0132, 0.12), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
+            "Q10_het_exp": {"units": "1", "bounds": (0.023, 0.14), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "soil-respiration Q10 2-3 (Bond-Lamberty & Thomson 2010)", "shape": None},
             "T_opt_C": {"units": "degC", "bounds": (8.25, 75.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None, "legacy_name": "T_opt"},
             "T_width_C": {"units": "degC", "bounds": (4.95, 45.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None, "legacy_name": "T_width"},
             "clab_release_period": {"units": "1", "bounds": (16.5, 150.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
+            "cwd_humification_eff": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "Harmon et al. 1986 (CWD humification)", "shape": None},
             "decomp_rate": {"units": "1", "bounds": (0.000165, 0.0015), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "epsilon": {"units": "1", "bounds": (0.3, 2.0), "tunable_tier": 1, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "f_auto": {"units": "1", "bounds": (0.0924, 0.84), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
@@ -35,9 +37,9 @@ __param_spec__ = {
             "f_lab": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "f_root": {"units": "1", "bounds": (0.0825, 0.75), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "k_ext": {"units": "1", "bounds": (0.165, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
-            "lab_lifespan": {"units": "1", "bounds": (0.495, 4.5), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
+            "lab_lifespan": {"units": "1", "bounds": (1.05, 4.5), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990; lo>1 required (log(L-1) phenology undefined at L<=1)", "shape": None},
             "leaf_fall_period": {"units": "1", "bounds": (16.5, 150.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
-            "leaf_lifespan": {"units": "1", "bounds": (0.495, 4.5), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
+            "leaf_lifespan": {"units": "1", "bounds": (1.05, 4.5), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990; lo>1 required (log(L-1) phenology undefined at L<=1)", "shape": None},
             "moist_modifier_max": {"units": "1", "bounds": (0.99, 9.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "moist_modifier_min": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "moisture_factor": {"units": "1", "bounds": (0.165, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
@@ -49,7 +51,7 @@ __param_spec__ = {
             "r_maint_wood": {"units": "1", "bounds": (1.65e-05, 0.00015), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "tor_litter": {"units": "1", "bounds": (0.00066, 0.006), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "tor_root": {"units": "1", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
-            "tor_som": {"units": "1", "bounds": (1.65e-06, 1.5e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
+            "tor_som": {"units": "1", "bounds": (1.65e-06, 8e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "bulk-soil MRT decades-century (Jobbagy & Jackson 2000; He et al. 2016)", "shape": None},
             "tor_wood": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
         },
     },
@@ -82,17 +84,42 @@ class CarbonConfig(NamedTuple):
     f_fol: float = 0.15           # Fraction NPP -> foliage
     f_lab: float = 0.10           # Fraction (NPP-fol) -> labile
     f_root: float = 0.25          # Fraction (NPP-fol-lab) -> roots
-    # remainder -> wood
+    # remainder -> wood (woody PFTs) or roots (herbaceous PFTs)
+    woody: bool = True            # False for herbaceous PFTs (grass/crop):
+    # no wood pool — the structural fraction that would form wood is invested
+    # belowground (roots) instead, so a grassland does not grow a phantom tree.
 
     # --- Turnover rates [day^-1] ---
     tor_wood: float = 1e-4
     tor_root: float = 1e-3
     tor_litter: float = 2e-3
-    tor_som: float = 5e-6
+    tor_som: float = 4e-5         # Bulk SOM turnover [day^-1] (~68 yr at
+    # T_ref).  Raised from the old 5e-6 (~550 yr): a single effective soil-C
+    # pool at millennial turnover, driven by realistic litter+CWD inputs from
+    # a productive canopy, equilibrated to an unphysically large stock
+    # (tropical SOM ~46 kgC/m2 at true equilibrium vs observed ~10-15).  A
+    # ~68 yr reference residence time -> ~17 yr in warm tropical soil via the
+    # Q10 below, matching the fast bulk (active+slow) turnover of warm-wet
+    # topsoil; the passive millennial fraction is not resolved by a single
+    # pool (see the multi-pool follow-up in docs/land/carbon_equilibrium_audit).
     decomp_rate: float = 5e-4     # Litter -> SOM transfer [day^-1]
+    # Coarse-woody-debris humification efficiency: the fraction of wood
+    # turnover that becomes stable SOM.  The remainder respires to the
+    # atmosphere (CWD heterotrophic respiration).  Without this split wood
+    # turnover humified 100 % into the millennial SOM pool, giving an
+    # unphysically large soil-carbon stock; ~0.3 matches the litter pathway's
+    # ~0.2 SOM yield and typical CWD humification (Harmon et al. 1986).
+    cwd_humification_eff: float = 0.3
 
     # --- Decomposition sensitivity ---
-    Q10_exp: float = 0.04         # exp(Q10_exp * (T - T_ref))
+    Q10_exp: float = 0.04         # AUTOTROPHIC maint. resp.: exp(Q10_exp*(T-T_ref))
+    # Heterotrophic (soil) decomposition temperature sensitivity, DECOUPLED
+    # from the autotrophic Q10 above.  0.09 -> Q10 ~= 2.5, the upper-realistic
+    # soil-respiration range (Q10 2-3).  A strong soil Q10 makes WARM tropical
+    # soils turn SOM over fast (low equilibrium SOM despite high productivity)
+    # while COLD high-latitude soils retain carbon (high SOM) — the observed
+    # SOC gradient the old weak, shared Q10=0.04 (Q10~1.5) could not produce.
+    Q10_het_exp: float = 0.09
     moisture_factor: float = 0.5  # Moisture scaling strength
     T_ref: float = 283.15         # Reference temperature [K]
     precip_ref: float = 3e-5      # Reference precipitation rate [kg/m2/s]
@@ -137,3 +164,42 @@ class CarbonState(NamedTuple):
     C_wood: jax.Array    # Wood carbon
     C_lit: jax.Array     # Litter (dead foliage + roots)
     C_som: jax.Array     # Soil organic matter
+
+
+class CarbonDiagnostics(NamedTuple):
+    """Instantaneous carbon-flux breakdown for one DifferLand step.
+
+    Optional output of :func:`step_carbon_differland` (``return_diagnostics=
+    True``).  Purely diagnostic — does NOT feed the state update.  Every flux
+    is a per-day rate [gC/m2/day] (the internal working units of the
+    DifferLand step); ``lai`` is [m2/m2].  Sign convention for ``nee``:
+    positive = source to the atmosphere (same as the returned ``co2_flux``).
+
+    The breakdown satisfies, by construction (see ``step_carbon_differland``):
+        nee == r_auto - unmet_npp_deficit + r_het - gpp
+        r_het == r_het_lit + r_het_som + r_het_cwd
+        a_fol + a_lab + a_root + a_wood == max(npp, 0)   (allocation closes)
+        npp == gpp - r_auto
+    """
+    gpp: jax.Array          # Gross primary production
+    npp: jax.Array          # Net primary production (gpp - r_auto; may be <0)
+    r_maint: jax.Array      # Maintenance (autotrophic) respiration
+    r_growth: jax.Array     # Growth (autotrophic) respiration
+    r_auto: jax.Array       # Total autotrophic respiration
+    r_het_lit: jax.Array    # Heterotrophic respiration from litter
+    r_het_som: jax.Array    # Heterotrophic respiration from SOM
+    r_het_cwd: jax.Array    # Heterotrophic respiration from coarse woody debris
+    r_het: jax.Array        # Total heterotrophic respiration
+    nee: jax.Array          # Net ecosystem exchange (positive up)
+    unmet_npp_deficit: jax.Array  # Respiration demand no pool could supply
+    a_fol: jax.Array        # NPP allocated to foliage
+    a_lab: jax.Array        # NPP allocated to labile
+    a_root: jax.Array       # NPP allocated to roots
+    a_wood: jax.Array       # NPP allocated to wood
+    lab_release: jax.Array  # Labile -> foliage (phenology)
+    leaf_litter: jax.Array  # Foliage -> litter (phenology)
+    root_litter: jax.Array  # Root -> litter (turnover)
+    wood_litter: jax.Array  # Wood turnover (total leaving the wood pool)
+    wood_to_som: jax.Array  # Humified fraction of wood turnover -> SOM
+    lit_to_som: jax.Array   # Litter -> SOM (decomposition)
+    lai: jax.Array          # Leaf area index (C_fol / LCMA)

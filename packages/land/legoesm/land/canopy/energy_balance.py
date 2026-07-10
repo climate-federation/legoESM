@@ -27,20 +27,20 @@ from legoesm.thermo import (
     d_saturation_vapor_pressure_aerk,
     dd_saturation_vapor_pressure_aerk,
 )
-from legoesm.land.canopy.stomatal import ball_berry_gs, medlyn_gs
+from legoesm.land.leaf_biophysics import DIFFUSIVITY_RATIO_H2O_CO2
+from legoesm.land.stomata import ball_berry_gs, medlyn_gs
 
 # Module-local constants.
 # NOTE: Stefan-Boltzmann, freezing point, latent heat of vaporisation, etc.
 # are imported from ``legoesm.constants`` — do not redefine them here.
+# The leaf H2O:CO2 diffusivity ratio (Fick's law; Ci = Ca − ratio·An/gs) is the
+# single-source DIFFUSIVITY_RATIO_H2O_CO2 imported from leaf_biophysics above.
 _Ps0   = 101325.0    # IUPAC STP pressure [Pa] used in the mol → m/s
                      # unit conversion factor _CF_MOLAR_VOLUME; distinct from
                      # ``constants.p_ref`` (1e5 Pa hydrostatic reference).
 # mol m-2 s-1 → m s-1 leaf-conductance prefactor at IUPAC STP (encodes the
 # reference molar volume 22.4 L/mol); scaled by (T_freeze/Tf)·(Ps/_Ps0).
 _CF_MOLAR_VOLUME = 0.446
-
-# Leaf H2O:CO2 molecular-diffusivity ratio (Fick's law; Ci = Ca − ratio·An/gs).
-_DIFFUSIVITY_RATIO_H2O_CO2 = 1.6
 
 # Latent-heat-of-vaporisation temperature slope −dλ/dT [J kg-1 K-1], used as
 # λ(T) = L_v − _LAMBDA_T_SLOPE·(T − T_freeze). DifferBESS canopy value; distinct
@@ -49,12 +49,14 @@ _LAMBDA_T_SLOPE = 2.361e3
 
 # Minimum cuticular (residual) stomatal conductance [mol m-2 s-1].  Stomata
 # never fully close — the leaf cuticle always leaks a little — so the conductance
-# has a small floor.  Numerically this is essential: under full water stress the
-# stress factor scales the Ball-Berry slope AND intercept to zero (m = b0 = 0 ⇒
-# gs = 0), which makes the leaf gs/Ci/An subsystem degenerate and the canopy
-# Newton Jacobian singular → NaN fluxes (seen at dry FLUXNET sites, e.g. US-Ton
-# savanna at SWC near wilting point).  Value matches the DifferBESS ``g0`` default
-# (CarbonWaterFluxes.py).  Binds only at near-complete stomatal closure.
+# has a small floor.  Numerically this is essential under the legacy default
+# ``CanopyConfig.stress_b0=True``: there the stress factor scales the Ball-Berry
+# slope AND intercept to zero (m = b0 = 0 ⇒ gs = 0), which makes the leaf
+# gs/Ci/An subsystem degenerate and the canopy Newton Jacobian singular → NaN
+# fluxes (seen at dry FLUXNET sites, e.g. US-Ton savanna at SWC near wilting
+# point).  With ``stress_b0=False`` b0 stays > 0, so gs is already floored above
+# this value and the guard is inactive.  Value matches the DifferBESS ``g0``
+# default (CarbonWaterFluxes.py).  Binds only at near-complete stomatal closure.
 _GS_MIN_MOL = 1.0e-4
 
 # Saturation vapour pressure and its first/second temperature derivatives come
@@ -225,18 +227,27 @@ def _compute_gs_and_ci(
     -------
     (rs [s m-1], gs [m s-1], Ci [μmol mol-1])
     """
+    # ``stomatal_model`` is a static Python string (see the jitting caller's
+    # static_argnames), so this dispatch is resolved at trace time — a typo must
+    # raise, not silently run the other model (matches solve_coupled_farquhar_ci).
     if stomatal_model == "medlyn":
         VPD_kPa = jnp.maximum(VPD_c, 50.0) / 1000.0  # coeff-ok: 50 Pa (0.05 kPa) VPD floor; Pa→kPa
         gs_mol = medlyn_gs(An, VPD_kPa, Ca, m, b0)
-    else:
+    elif stomatal_model == "ball_berry":
         gs_mol = ball_berry_gs(An, RH_c, Ca, m, b0)
+    else:
+        raise ValueError(
+            f"unknown stomatal_model {stomatal_model!r}; the stomatal "
+            "conductance scheme must be one of {'ball_berry', 'medlyn'}")
 
-    # Minimum cuticular conductance: keep gs > 0 even at full water stress
-    # (m = b0 = 0), otherwise the leaf gs/Ci/An subsystem degenerates and the
-    # canopy Newton Jacobian goes singular → NaN.  See ``_GS_MIN_MOL``.
+    # Minimum cuticular conductance: keep gs > 0 even at full water stress with
+    # the legacy ``stress_b0=True`` (m = b0 = 0), otherwise the leaf gs/Ci/An
+    # subsystem degenerates and the canopy Newton Jacobian goes singular → NaN.
+    # With ``stress_b0=False`` b0 stays > 0 and this floor is inactive.  See
+    # ``_GS_MIN_MOL``.
     gs_mol = jnp.maximum(gs_mol, _GS_MIN_MOL)
 
-    Ci = Ca - _DIFFUSIVITY_RATIO_H2O_CO2 * An / jnp.maximum(gs_mol, 1e-9)
+    Ci = Ca - DIFFUSIVITY_RATIO_H2O_CO2 * An / jnp.maximum(gs_mol, 1e-9)
     # Clip Ci to the physically reasonable C3 range; mixed-PFT C3/C4
     # is handled upstream in ``photosynthesis()`` via the continuous fC4
     # fraction, so the C4 bounds are not needed here.
@@ -406,6 +417,88 @@ def leaf_energy_balance_pm(
     Tf_new = Tc + Rb * H / (rhoa * Cp)
 
     return Rn, LE, H, Tf_new, gs, Ci
+
+
+# ---------------------------------------------------------------------------
+# Below-canopy soil-surface evaporation resistance
+# ---------------------------------------------------------------------------
+# Sellers et al. (1992, J. Climate 5:1531) top-layer soil-surface resistance to
+# bare-soil evaporation, ``r_ss = exp(a - b * W_1)`` [s/m], with ``W_1 =
+# theta_1/theta_sat`` the top-layer RELATIVE saturation.  This is the RESISTANCE-
+# method counterpart of the ``S_top**exp`` beta EFFICIENCY (same paper, its
+# eq. for the surface resistance) — the two are alternative parameterisations of
+# the SAME soil-moisture control on evaporation, so they are used mutually
+# exclusively (never both, or the moisture limitation double-counts).
+#
+# Why a resistance (not the beta) below a canopy: the canopy soil energy balance
+# limits soil evaporation with ONLY the below-canopy aerodynamic resistance
+# (``raw_soil = 1/(Cs*ustar)``, ~50-100 s/m under a closed canopy).  A wet forest
+# floor (W_1~0.8) then evaporates at near-potential rate — LE_soil measured at
+# ~185 W/m2 midday at US-MMS (LAI~6 DBF), i.e. ~57% of total LE where <15% is
+# physical.  The beta efficiency multiplies the (already too-small) conductance
+# and barely helps because the surface frequently rewets to W_1~1.  Adding r_ss in
+# SERIES with raw_soil supplies the soil-side vapour-diffusion resistance the
+# aerodynamic-only path omits, and — unlike the beta — throttles a WET surface.
+_SELLERS_RSS_A   = 8.206    # [-]  Sellers et al. (1992) intercept
+_SELLERS_RSS_B   = 4.255    # [-]  Sellers et al. (1992) wetness slope
+_SELLERS_RSS_MAX = 5.0e3    # [s/m] cap on r_ss (W_1->0 gives exp(8.206)~3.7e3);
+                            #       bounds the AD Jacobian at the residual boundary.
+
+
+@jax.jit
+def soil_surface_evap_resistance(
+    theta_rel: jax.Array,
+    LAI: jax.Array,
+    litter_resistance_s_m: jax.Array,
+    litter_LAI: jax.Array | None = None,
+) -> jax.Array:
+    """Below-canopy soil-surface resistance to evaporation [s/m], added in
+    SERIES with the below-canopy aerodynamic resistance in the soil energy
+    balance.
+
+    Two additive, physically-distinct mechanisms:
+
+    * ``r_ss`` — Sellers et al. (1992) dry-surface-layer resistance
+      ``exp(a - b * W_1)`` from the top-layer relative saturation
+      ``W_1 = theta_1/theta_sat``; the vapour-diffusion resistance of the
+      drying skin.  Rises as the surface dries (W_1 -> 0) and is a finite
+      ~52 s/m even when saturated (W_1 = 1).
+
+    * ``r_litter`` — Sakaguchi & Zeng (2009, JGR 114:D01107) forest-floor
+      litter resistance, ``litter_resistance_s_m * (1 - exp(-0.5 LAI))``: the
+      litter fractional cover ``1 - exp(-0.5 LAI)`` grows from ~0 (bare soil)
+      to ~1 (closed canopy), so the resistance self-scales with canopy
+      density across biomes (grassland litter << forest litter) from a single
+      reference value — not a per-site tuning.
+
+    Parameters
+    ----------
+    theta_rel : top-layer relative saturation ``theta_1/theta_sat`` [-], (ncol,)
+    LAI       : leaf area index [m2 m-2], (ncol,)
+    litter_resistance_s_m : reference forest-floor litter resistance [s/m]
+    litter_LAI : STRUCTURAL leaf area index driving the litter cover [m2 m-2],
+                 (ncol,).  Defaults to ``LAI`` (live).  A deciduous forest floor
+                 keeps its leaf litter through the leaf-off season, so the litter
+                 cover must be driven by a slowly-varying / seasonal-maximum LAI
+                 rather than the instantaneous live LAI (which collapses to ~0 in
+                 winter and lets the bare soil evaporate spuriously).  When the
+                 caller supplies a persistent LAI here the litter cover no longer
+                 vanishes in winter; when it does not, behaviour is unchanged.
+
+    Returns
+    -------
+    r_soil_surface : (ncol,) soil-surface resistance [s/m]
+    """
+    w1 = jnp.clip(theta_rel, 1e-6, 1.0)
+    r_ss = jnp.minimum(
+        jnp.exp(_SELLERS_RSS_A - _SELLERS_RSS_B * w1), _SELLERS_RSS_MAX)
+    # Litter fractional cover (0.5 is the standard LAI extinction coefficient,
+    # matching the below-canopy Cs clumping weight exp(-0.5*CI*LAI)); driven by the
+    # STRUCTURAL LAI (persistent forest-floor litter), falling back to live LAI.
+    _lai_cover = LAI if litter_LAI is None else litter_LAI
+    litter_frac = 1.0 - jnp.exp(-0.5 * jnp.maximum(_lai_cover, 0.0))
+    r_litter = litter_resistance_s_m * litter_frac
+    return r_ss + r_litter
 
 
 # ---------------------------------------------------------------------------

@@ -38,6 +38,51 @@ from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
 from legoesm.ocean.physics.vertical_mixing.output import VerticalMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
+__physics_contract__ = {
+    "summary": (
+        "LMD94 K-Profile Parameterization: diagnose the boundary-layer depth "
+        "from a bulk Richardson criterion, set K_v/A_v in the boundary layer "
+        "from similarity velocity scales and a cubic shape function, add "
+        "non-local (counter-gradient) tracer transport for convective columns, "
+        "and Ri-dependent interior mixing below."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "degC", "S": "psu", "rho": "kg/m^3",
+        "eta": "m", "jacobian": "1 (z-star dimensionless)",
+        "tau_x": "N/m^2", "tau_y": "N/m^2", "B_f": "m^2/s^3",
+        "Q_sfc_T": "degC m/s", "Q_sfc_S": "psu m/s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "degC/s", "dS_dt": "psu/s",
+        "K_v": "m^2/s", "A_v": "m^2/s",
+    },
+    "sign_convention": (
+        "Diffusivities K_v, A_v >= 0; B_f>0 is destabilising (convective) and "
+        "wind/buoyancy forcing set the boundary-layer depth; the down-gradient "
+        "diffusion and the non-local (counter-gradient) transport it applies "
+        "are flux-form redistributions (the non-local flux vanishes at the "
+        "surface and BL base), with surface fluxes applied separately; z "
+        "positive up. The non-local (counter-gradient) tracer tendencies are "
+        "ALWAYS applied; the local down-gradient diffusion is applied when "
+        "apply_diffusion=True, otherwise the K_v/A_v profiles are handed to the "
+        "implicit solver (which applies them conservatively)."
+    ),
+    # Both the always-applied non-local transport (vanishing at the surface and
+    # BL base) and the flux-form local diffusion (no-flux interior BC, surface
+    # fluxes separate) are conservative redistributions, so the scheme conserves
+    # column-integrated heat (energy), salt and momentum whether the local
+    # diffusion is applied here or deferred to the implicit solver.
+    "conserves": ["energy", "salt", "momentum"],
+    "differentiable": True,
+    "reference": "Large, McWilliams & Doney (1994), Rev. Geophys. 32, 363-403",
+    "idealized_test": (
+        "tests/ocean/unit/test_kpp_langmuir.py + "
+        "tests/ocean/unit/test_vmix_k_profiles_direct.py — wind/convective "
+        "forcing deepens the boundary layer and enhances K within it; a "
+        "stratified rest column gives near-background K."
+    ),
+}
+
 _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 
 
@@ -257,6 +302,7 @@ def kpp_vertical_mixing(
     apply_diffusion: bool = True,
     dt: float | None = None,
     eos_fn=None,
+    u_stokes: jnp.ndarray | None = None,
 ) -> VerticalMixingOutput:
     """Apply LMD94-style KPP vertical mixing.
 
@@ -346,6 +392,39 @@ def kpp_vertical_mixing(
     w_m, w_s = _kpp_velocity_scales(
         u_star, B_f, d, h_bl[..., jnp.newaxis], cfg, eps,
     )
+
+    # --- Langmuir turbulence enhancement (KPP-Langmuir) ---
+    # Langmuir circulations (wind + Stokes-drift shear) enhance surface
+    # boundary-layer mixing.  Multiply the KPP velocity scales by the
+    # enhancement factor eps_L = sqrt(1 + C_L / La_t^2) >= 1, where La_t =
+    # sqrt(u* / u_s0) is the turbulent Langmuir number (McWilliams & Sullivan
+    # 2000; Li et al. 2016 CVMix).  With a surface Stokes-drift input
+    # ``u_stokes`` (from a wave model / forcing) La_t is spatially resolved;
+    # without one it falls back to the fully-developed-sea value
+    # ``langmuir_number_default`` (~0.3, Van Roekel et al. 2012) — a uniform
+    # enhancement where wind mixing dominates.  eps_L >= 1 always (C_L, La_t >
+    # 0) so this only ENHANCES mixing, never reduces it; it scales the BL
+    # diffusivity K = h*w*G (conservation of the implicit solve is unaffected).
+    # Gated on the static config bool (feature gating); default off leaves
+    # w_m / w_s byte-identical to classical KPP.  The bulk-Richardson MLD
+    # diagnosis (V_t^2) is intentionally NOT enhanced here — Langmuir
+    # boundary-layer deepening is a documented refinement.
+    if cfg.enable_langmuir:
+        if u_stokes is not None:
+            la_t = jnp.sqrt(u_star / jnp.maximum(u_stokes, 1e-4))  # coeff-ok: Stokes floor [m/s]
+        else:
+            la_t = jnp.full_like(u_star, cfg.langmuir_number_default)
+        # Floor the radicand at 1.0 so eps_L >= 1 for ANY config value (a
+        # traced-safe safety floor: Langmuir must ENHANCE, never reduce, mixing,
+        # and it avoids a NaN sqrt if langmuir_coeff is set negative).  Both
+        # langmuir params are tunable (tier 2) so they may be traced — a Python
+        # branch/raise would break the training trace; the floor is a no-op for
+        # the spec-bounded positive range.
+        eps_langmuir = jnp.sqrt(jnp.maximum(
+            1.0, 1.0 + cfg.langmuir_coeff / jnp.maximum(la_t, 1e-3) ** 2  # coeff-ok: La_t floor
+        ))[..., jnp.newaxis]
+        w_m = w_m * eps_langmuir
+        w_s = w_s * eps_langmuir
 
     # --- BL viscosity (momentum, w_m) and diffusivity (scalar, w_s) ---
     K_bl_m_full = jnp.minimum(h_bl[..., jnp.newaxis] * w_m * G, cfg.K_max)

@@ -373,7 +373,8 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
         # SIC→100×, masked by the [0,1] clip).  Cross-check the file's
         # ``units`` attribute against the configured conversion and
         # raise a precise error instead of silently mis-forcing.
-        _norm = lambda s: s.strip().lower().replace("_", " ").replace("-", " ")
+        def _norm(s):
+            return s.strip().lower().replace("_", " ").replace("-", " ")
         _sst_units = _norm(str(ds_sst[config.sst_var].attrs.get("units", "")))
         _sic_units = _norm(str(ds_sic[config.sic_var].attrs.get("units", "")))
         _sst_is_celsius = _sst_units in (
@@ -422,7 +423,11 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
         # Empty/unknown units are AMBIGUOUS (codex review): do not assume
         # fraction — the converted-value sanity below catches a bad scale.
         _sic_is_percent = _sic_units in ("%", "percent")
-        _sic_is_fraction = _sic_units in ("1", "fraction", "dimensionless")
+        # "(0 1)" is the NCAR-RDA ERA5 sea-ice (ci) units string "(0-1)" after _norm's
+        # "-"->" " — an unambiguous [0,1] fraction, so positively validate it (else a wrong
+        # sic_scale=0.01 on a real ERA5 file would slip past, all-zeros*0.01 masking it in
+        # the value-sanity floor) (codex-review iter 420).
+        _sic_is_fraction = _sic_units in ("1", "fraction", "dimensionless", "(0 1)")
         if _sic_is_percent and abs(config.sic_scale - 0.01) > 1e-6:
             raise ValueError(
                 f"SIC file {config.sic_var!r} has units={_sic_units!r} "

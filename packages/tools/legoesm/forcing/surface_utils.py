@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm import constants
+
 
 def blend_surface_temperature(
     sst: jnp.ndarray,
@@ -61,6 +63,95 @@ def blend_surface_property(
     return sic * value_ice + (1.0 - sic) * value_ocean
 
 
+def surface_temperature_for_lw_boundary(
+    radiation: str,
+    *,
+    T_rad: jnp.ndarray,
+    lw_up: jnp.ndarray,
+) -> jnp.ndarray:
+    """Surface temperature to feed a scheme's longwave boundary.
+
+    A scheme reproduces the surface's true upward LW flux ``LW_out`` only if it
+    is fed the temperature consistent with its OWN emissivity convention:
+
+    * ``rrtmgp`` / ``rrtmg`` — use the radiative-equivalent ``T_rad`` paired with
+      the tile-blended ``eps_col`` (``eps_col*sigma*T_rad^4 = LW_emit``); the
+      ``(1-eps_col)*La`` reflection term then completes ``LW_out``.
+    * ``gray`` / ``none`` — gray emits as a BLACK surface (``eps = 1``) and
+      cannot honour ``eps_col``, so feeding it ``T_rad`` would emit
+      ``sigma*T_rad^4 = LW_emit/eps_col`` and OVERSTATE the flux by ``1/eps_col``.
+      Instead derive a black-surface BRIGHTNESS temperature from the complete
+      upward flux, ``T_bb = (lw_up/sigma)^0.25``, so ``sigma*T_bb^4 = LW_out``
+      exactly.
+
+    Parameters
+    ----------
+    radiation : str
+        Active radiation scheme.
+    T_rad : array
+        Radiative-equivalent skin temperature (``eps_col*sigma*T_rad^4 =
+        LW_emit``).
+    lw_up : array
+        Total upward LW flux at the surface (``LW_out``) [W/m^2].
+
+    Returns
+    -------
+    T : array
+        Surface temperature to hand the LW boundary.
+    """
+    if radiation in ("rrtmgp", "rrtmg"):
+        return T_rad
+    # gray / none: black-surface brightness temperature from the full upward flux.
+    return (jnp.maximum(lw_up, 1.0e-6) / constants.sigma_sb) ** 0.25
+
+
+def surface_emissivity_for_lw_inversion(
+    radiation: str,
+    *,
+    dynamic_emissivity: jnp.ndarray | None,
+    static_sfc_emissivity: float | jnp.ndarray,
+) -> float | jnp.ndarray:
+    """Surface emissivity to invert a held ``lw_net`` back to gross ``lw_down``.
+
+    The coupled drivers reconstruct gross ``lw_down`` from the held net surface
+    longwave via ``lw_down = (lw_net + eps*sigma*T^4) / eps``.  For that round
+    trip to be exact, ``eps`` MUST equal the emissivity the radiation scheme
+    actually EMITTED the boundary with — otherwise a persistent O(1 W/m^2)
+    surface-energy bias leaks in (the emissivity mismatch is independent of the
+    skin temperature used).  This returns that matching emissivity:
+
+    * ``rrtmgp`` / ``rrtmg`` WITH the dynamic surface-radiation feedback — the
+      tile-blended ``eps_col`` (``dynamic_emissivity``, not ``None``), exactly
+      what ``solve_columns(sfc_emissivity=emis_col)`` used.
+    * ``rrtmgp`` / ``rrtmg`` WITHOUT the feedback (or before the first coupler
+      response) — the static config surface emissivity it emitted with.
+    * ``gray`` / ``none`` — an idealized BLACK surface (``eps = 1.0``).  Gray
+      radiation keeps ``GrayRadiationConfig.sfc_emissivity = 1.0`` and the
+      dynamic ``emis_col`` is intentionally NOT threaded into it, so the
+      reconstruction must also use ``1.0`` regardless of any config emissivity.
+
+    Parameters
+    ----------
+    radiation : str
+        Active radiation scheme (``"rrtmgp"``, ``"rrtmg"``, ``"gray"``,
+        ``"none"``, ...).
+    dynamic_emissivity : array or None
+        The coupler's tile-blended surface emissivity for this segment, or
+        ``None`` when the dynamic feedback is off / unavailable.
+    static_sfc_emissivity : float or array
+        The static config surface emissivity the scheme falls back to.
+
+    Returns
+    -------
+    eps : float or array
+        Emissivity to use for the ``lw_net`` -> ``lw_down`` inversion.
+    """
+    if radiation in ("rrtmgp", "rrtmg"):
+        if dynamic_emissivity is not None:
+            return dynamic_emissivity
+        return static_sfc_emissivity
+    # gray / none: idealized black surface (emit with eps = 1.0).
+    return 1.0
 def snow_fraction(
     T_low: jnp.ndarray,
     T_freeze: float,

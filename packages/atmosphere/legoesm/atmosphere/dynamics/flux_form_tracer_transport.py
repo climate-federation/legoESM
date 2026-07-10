@@ -47,8 +47,11 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.conservation import conservation_accumulator
-from legoesm.core.fv_tp_2d import transport_step
+from legoesm.core.conservation import (
+    conservation_accumulator,
+    global_face_sum_if_scattered,
+)
+from legoesm.core.fv_tp_2d import transport_step_4d
 
 
 def flux_form_tracer_step(
@@ -108,32 +111,67 @@ def flux_form_tracer_step(
     acc = conservation_accumulator()
     area_e = cdgrid.base.area.astype(acc)             # (6, n, n)
 
-    def _mass2d(field2d: jax.Array) -> jax.Array:     # ∑ area·field on a level
-        return jnp.sum(field2d.astype(acc) * area_e)
+    # transport_step_4d does not apply del-n damping; raise only when damping
+    # would ACTUALLY fire (matching fv_tp_2d's `nord and damp_c and damp_c>1e-4`
+    # gate) so an explicit no-op `damp_c=0.0` still works (codex #811 review).
+    if nord is not None and damp_c is not None and damp_c > 1e-4:
+        raise NotImplementedError(
+            "flux_form_tracer_step's 4D-halo transport (#811) does not apply "
+            "del-n damping; the moisture substep passes no (or off) damping.")
 
-    def _transport_conserving(field2d, ut_k, vt_k):
-        return transport_step(
-            field2d, ut_k, vt_k, dt, cdgrid,
-            mass_target=_mass2d(field2d),
-            nord=nord, damp_c=damp_c, hord=hord)
+    def _conserving_rescale(field_in, field_raw, red_area):
+        # Mirror ``_finalize_transport``'s clip + mass-conserving rescale
+        # (``h_pos = max(h,0); scale = mass_in / max(mass_pos, 1); h_pos*scale``)
+        # but BATCHED over the leading level (and tracer) axes and face-scatter
+        # aware.  ``red_area`` = ``area_e`` broadcast to ``field_in``'s trailing
+        # axes; reduce the spatial (face, i, j) axes, keeping level[, tracer].
+        # BIT-IDENTICAL to the per-level internal rescale on single-rank /
+        # replicated (``global_face_sum_if_scattered`` is then identity); under
+        # MPI face-scatter it allreduces the owned-face partials to the true
+        # global masses so ``scale`` is uniform across ranks (else each rank
+        # rescales to its own partial and silently breaks conservation — #811).
+        pos = jnp.maximum(field_raw, 0.0)
+        mass_in = jnp.sum(field_in.astype(acc) * red_area, axis=(0, 1, 2))
+        mass_pos = jnp.sum(pos.astype(acc) * red_area, axis=(0, 1, 2))
+        # ONE allreduce for the (numerator, denominator) pair — never divide a
+        # pre-reduced ratio (Σ of a ratio ≠ ratio of Σ); clamp the REDUCED
+        # denominator, not the local partial.  differentiable_broadcast=True: the
+        # reduced masses feed the shared ``scale`` that rescales EVERY face, so
+        # the reduction's VJP must allreduce the cotangent (else the cross-rank
+        # gradient through ``scale`` is dropped — a uniform ~1e-3 cotangent error
+        # in the scattered-vs-replicated gradient gate; #811).
+        mass_in, mass_pos = global_face_sum_if_scattered(
+            jnp.stack([mass_in, mass_pos], axis=0), area_e,
+            differentiable_broadcast=True)
+        scale = mass_in / jnp.maximum(mass_pos, 1.0)  # fp64, per level[, tracer]
+        return pos * scale.astype(pos.dtype)
 
-    # --- Co-transport the layer mass δp, one level at a time. ---
-    delp_new = jax.vmap(
-        _transport_conserving, in_axes=(-1, -1, -1), out_axes=-1)(delp, ut, vt)
+    # --- Co-transport the layer mass δp (all levels, ONE 4D halo exchange). ---
+    # transport_step_4d does the two field halos with pad_halo_4d (a single
+    # message for all levels each) and vmaps only the pure-local PPM sweeps, so
+    # the moisture substep is MPI face-scatter safe (no vmap(pad_halo); #811).
+    # BIT-IDENTICAL to the prior per-level vmap(transport_step) on single-rank
+    # (pad_halo_4d local == per-level pad_halo stacked).  mass_target=None; the
+    # conservation is done in _conserving_rescale (batched + allreduce-aware).
+    delp_raw = transport_step_4d(delp, ut, vt, dt, cdgrid, hord=hord)
+    delp_new = _conserving_rescale(delp, delp_raw, area_e[..., None])
 
-    # --- Co-transport the tracer mass δp·q, per (level, tracer). ---
-    # δp·q for EVERY tracer rides the SAME per-level winds; vmap the tracer axis
-    # inside the level vmap so the winds broadcast correctly and are not tiled.
+    # --- Co-transport the tracer mass δp·q (all levels × tracers, ONE 4D halo).
+    # Every tracer rides the SAME per-level winds; fold (nlev, ntr) into one
+    # trailing column axis (level-major, tracer fastest) and TILE the winds over
+    # tracers so the exchange + PPM run once for all (level, tracer) columns.
+    # Column c = level*ntr + tracer, so ut_t[..., c] = ut[..., level] — exactly
+    # the per-(level, tracer) transport of the old nested vmap.
     qmass = delp[..., None] * q                       # (6, n, n, nlev, ntr)
-
-    def _transport_level_tracers(qm_k, ut_k, vt_k):   # qm_k: (6, n, n, ntr)
-        return jax.vmap(
-            lambda qm1: _transport_conserving(qm1, ut_k, vt_k),
-            in_axes=-1, out_axes=-1)(qm_k)
-
-    qmass_new = jax.vmap(
-        _transport_level_tracers, in_axes=(3, -1, -1), out_axes=3)(
-            qmass, ut, vt)                            # (6, n, n, nlev, ntr)
+    f6, nx, ny, nlev, ntr = qmass.shape
+    qmass_f = qmass.reshape(f6, nx, ny, nlev * ntr)
+    ut_t = jnp.broadcast_to(
+        ut[..., None], ut.shape + (ntr,)).reshape(ut.shape[:3] + (nlev * ntr,))
+    vt_t = jnp.broadcast_to(
+        vt[..., None], vt.shape + (ntr,)).reshape(vt.shape[:3] + (nlev * ntr,))
+    qmass_raw = transport_step_4d(
+        qmass_f, ut_t, vt_t, dt, cdgrid, hord=hord).reshape(qmass.shape)
+    qmass_new = _conserving_rescale(qmass, qmass_raw, area_e[..., None, None])
 
     # Recover the mixing ratio.  PRECONDITION: δp is a physical layer thickness
     # [Pa], so δp★ ≫ the 1e-30 floor everywhere in any real atmosphere — the

@@ -14,10 +14,10 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
 from legoesm.core.precision import get_policy
 from legoesm.core.bulk_flux import (
     simple_bulk_fluxes, compute_most_fluxes, apply_gustiness,
+    ocean_surface_q_sat,
 )
 from legoesm.land.multilayer_land import init_multilayer_land_state
 from legoesm.land.surface_params import reshape_params
@@ -221,18 +221,38 @@ def ocean_tile_response(
     MOST algorithms (COARE 3.0 or Large & Yeager 2004).
     """
     shape = ocean_sst.shape
-    q_sfc = _Q_SAT_SALINE_FACTOR * saturation_mixing_ratio(
-        ocean_sst, forcing.p_surface,
-    )
+    # Resolve the thermodynamic convention ONCE (getattr-safe for any
+    # config lacking the field) and validate it, so the q_sat curve and
+    # the MOST call below never disagree (#762, codex round-20).
+    _thermo_conv = getattr(config, "thermo_convention", "legoesm")
+    if _thermo_conv not in ("legoesm", "aerobulk"):
+        raise ValueError(
+            f"Unknown thermo_convention {_thermo_conv!r}; expected "
+            "'legoesm' or 'aerobulk'."
+        )
     rho = forcing.rho_lowest
 
-    valid_schemes = ("constant", "coare3", "large_yeager")
+    valid_schemes = ("constant", "most", "coare3", "large_yeager")
     if config.bulk_scheme not in valid_schemes:
         raise ValueError(
             f"Unknown coupler bulk_scheme {config.bulk_scheme!r}; "
             f"expected one of {valid_schemes}."
         )
-    if config.bulk_scheme in ("coare3", "large_yeager"):
+    # The aerobulk convention (SST-dependent L_vap, moist cp_air, Goff
+    # q_sat) is the NEMO/AeroBulk MOST set — it engages ONLY on the MOST
+    # solver schemes ("most"/"coare3"/"large_yeager").  The 'constant'
+    # fixed-coefficient closure is a different closure entirely (constant
+    # C_H/C_E, constant L_v/c_pd in simple_bulk_fluxes), so applying Goff
+    # q_sat there alone would be a HALF-convention; keep it on Tetens
+    # (codex round-20).  ``most`` = iterative MOST at the fixed ``ocean_z0``
+    # roughness (parity with the sea-ice/land/lake dispatchers).
+    _is_most = config.bulk_scheme in ("most", "coare3", "large_yeager")
+    q_sfc = ocean_surface_q_sat(
+        ocean_sst, forcing.p_surface,
+        thermo_convention=_thermo_conv, bulk_scheme=config.bulk_scheme,
+        saline_factor=_Q_SAT_SALINE_FACTOR)
+
+    if _is_most:
         # Use wind relative to ocean surface current
         u_rel = forcing.u_lowest - ocean_u
         v_rel = forcing.v_lowest - ocean_v
@@ -252,6 +272,8 @@ def ocean_tile_response(
             # layer (which already carries gustiness_w_zi) and lets a calm warm
             # ocean evaporate realistically.  0.0 => off => byte-identical.
             gustiness_w_zi=config.gustiness_w_zi,
+            thermo_convention=_thermo_conv,
+            stability_scheme=config.stability_scheme,
         )
     else:
         # Constant neutral coefficients (original behavior).  Sub-grid
@@ -451,8 +473,14 @@ def make_coupler(
         ocean_v_sfc: jnp.ndarray,
         dt: float,
         doy: float = 0.0,
+        year: float | None = None,
     ) -> tuple[SurfaceState, SurfaceToAtm]:
-        """Step all surface tiles and return blended response."""
+        """Step all surface tiles and return blended response.
+
+        ``year`` (optional calendar year) is forwarded to a year-varying land
+        param provider (``year_varying=True``, e.g. transient land-use cover) so
+        the vegetation params track the segment's year; ignored by static
+        providers, so a normal run is byte-identical."""
         if dt <= 0.0:
             raise ValueError(f"dt must be > 0, got {dt!r}")
         if tile_config.f_land.shape != atm_forcing.sw_down.shape:
@@ -470,6 +498,10 @@ def make_coupler(
         if _land_param_provider is not None:
             if _land_features is not None:
                 _lp = _land_param_provider(_land_features)
+            elif year is not None and getattr(_land_param_provider, "year_varying", False):
+                # Transient land-use cover: re-weight vegetation params at this
+                # segment's year (soil frozen).  Only a year-varying provider opts in.
+                _lp = _land_param_provider(year=year)
             else:
                 _lp = _land_param_provider()
             # For slab land: reshape (ncol,) -> spatial shape (e.g. (6,n,n))

@@ -13,6 +13,52 @@ from legoesm.ocean.physics.surface_forcing.config import BulkFormulaConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
+__physics_contract__ = {
+    "summary": (
+        "COARE-like bulk air-sea flux surface forcing: turbulent (sensible + "
+        "latent) heat and wind stress from a prescribed near-surface "
+        "atmospheric state, applied as sources to the top ocean layer "
+        "(constant-Cd or MOST/COARE-3.0/Large-Yeager stability-dependent "
+        "exchange coefficients). Salinity tendency is identically 0 here: the "
+        "evaporative virtual-salt flux is applied via the dedicated freshwater "
+        "channel (not this module) to avoid double-counting."
+    ),
+    "inputs": {
+        "T": "degC (SST)", "S": "psu", "jacobian": "1 (z-star dimensionless)",
+        "cfg.U_a": "m/s", "cfg.T_a": "K", "cfg.q_a": "kg/kg",
+        "cfg.C_H": "1 (dimensionless exchange coeff)",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "degC/s",
+        "dS_dt": "psu/s (identically 0; salinity via the freshwater channel)",
+        "Q_net": "W/m^2", "tau_x": "N/m^2", "tau_y": "N/m^2",
+    },
+    "sign_convention": (
+        "Surface boundary fluxes deposited in the TOP layer only (sources/sinks, "
+        "NOT interior-conservative); Q_net > 0 warms the ocean "
+        "(dT/dt = Q_net/(rho_0*c_sw*dz_0)); wind stress accelerates the surface "
+        "layer in the stress direction; dS_dt = 0 in this module (the "
+        "evaporative virtual-salt flux is handled by the freshwater channel); "
+        "exchange coefficients C_D,C_H,C_E >= 0; z positive up. An unknown "
+        "bulk_scheme raises ValueError."
+    ),
+    # Air-sea boundary source/sink; not a conservative interior operator.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Fairall et al. (2003) COARE 3.0, J. Climate 16, 571-591; Large & "
+        "Yeager (2004/2009) CORE-II bulk formulae"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_bulk_flux_ly09.py + "
+        "tests/ocean/unit/test_ncar_bulk.py + "
+        "tests/ocean/unit/test_surface_forcing_sign_convention.py — warm/humid "
+        "air over cool water gives downward (warming) Q_net; the wind-stress "
+        "sign matches convention; an unknown bulk_scheme raises."
+    ),
+}
+
+
 def bulk_formula_surface_forcing(
     T: jnp.ndarray,
     S: jnp.ndarray,
@@ -78,8 +124,14 @@ def bulk_formula_surface_forcing(
             scheme=cfg.bulk_scheme,
             n_iter=cfg.bulk_n_iter,
         )
-        # Fluxes are positive upward; stress opposes wind
-        tau_x = -tau_x  # flip to positive eastward
+        # ``compute_most_fluxes`` returns stress in the ATMOSPHERIC convention
+        # (tau = -rho*u*^2 * u/|U|, i.e. it OPPOSES the wind — drag on the air).
+        # The ocean is forced by the stress in the WIND direction, so flip the
+        # sign of BOTH components consistently: positive = stress into the ocean
+        # along the wind (eastward for u_a>0, northward for v_a>0).  Flipping
+        # only tau_x (leaving tau_y in the atmospheric convention) would drive
+        # the ocean the WRONG way meridionally once v_a != 0.
+        tau_x, tau_y = -tau_x, -tau_y
     else:
         # Constant coefficients: wind is zonal-only (u_a = U_a, v_a = 0)
         # to match the directional convention used in the MOST path.

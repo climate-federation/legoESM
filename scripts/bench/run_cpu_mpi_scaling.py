@@ -86,13 +86,20 @@ def _configure_jax_cpu(precision: str) -> None:
     if precision == "float64":
         os.environ["JAX_ENABLE_X64"] = "1"
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-    # Threads per rank = SLURM cpus-per-task (cpu-bind confines them to THIS
-    # rank's cores).  ==1 (the default packing, one rank per core) => force
+    # Threads per rank = cpus-per-task (cpu-bind confines them to THIS rank's
+    # cores).  ==1 (the default packing, one rank per core) => force
     # single-threaded Eigen so packed ranks never oversubscribe.  >1 (hybrid:
     # fewer ranks x more cores/rank) => let Eigen multi-thread so each rank uses
     # its allocated cores -- fewer ranks means fewer halo messages, the codex
-    # MPI-improve lever, without idling cores.  Honors an explicit OMP override.
-    n_thr = int(os.environ.get("SLURM_CPUS_PER_TASK", "1") or "1")
+    # MPI-improve lever, without idling cores.
+    #
+    # SLURM sets SLURM_CPUS_PER_TASK; PBS/PALS (Derecho route-B) does NOT — it
+    # exports the per-rank thread count as OMP_NUM_THREADS (see
+    # cube_scaling_cpu_routeb.sh).  Fall back to it (matching write_result_json's
+    # n_cores accounting) so the cube route-B lane does not silently single-
+    # thread XLA while the JSON reports a full-node core count.
+    n_thr = int(os.environ.get("SLURM_CPUS_PER_TASK")
+                or os.environ.get("OMP_NUM_THREADS") or "1")
     for _v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
         os.environ.setdefault(_v, str(n_thr))
     if n_thr <= 1:
@@ -144,13 +151,48 @@ def _configure_jax_gpu(precision: str) -> None:
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 
+def _launcher_world_size() -> int:
+    """World size the MPI/SLURM/PALS launcher env reports (1 = no launcher)."""
+    for var in ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "PALS_LOCAL_SIZE",
+                "SLURM_NTASKS"):
+        val = os.environ.get(var)
+        if val and val.isdigit():
+            return int(val)
+    return 1
+
+
+def _under_mpi_launcher() -> bool:
+    """True when an MPI launcher started this process.
+
+    Size vars alone under-detect Cray PALS (PALS_LOCAL_SIZE is per-node;
+    a job can expose only per-rank ids) — so the PRESENCE of a per-rank id
+    counts as launcher evidence too (codex round-2).
+    """
+    if _launcher_world_size() > 1:
+        return True
+    return any(
+        v in os.environ
+        for v in ("PALS_RANKID", "PMI_RANK", "OMPI_COMM_WORLD_RANK")
+    )
+
+
 def _init_mpi() -> tuple[int, int]:
     """Initialize MPI and return (rank, n_ranks)."""
     try:
         from mpi4py import MPI
         comm = MPI.COMM_WORLD
         return comm.Get_rank(), comm.Get_size()
-    except ImportError:
+    except (ImportError, RuntimeError) as e:
+        # RuntimeError: mpi4py installed but no loadable libmpi (common in
+        # a GPU-only venv). A single-process run must not require MPI —
+        # BUT under a real MPI launcher a broken mpi4py must fail LOUDLY
+        # here, or every rank silently runs duplicated serial work
+        # reporting n_ranks=1 (codex finding).
+        if _under_mpi_launcher():
+            raise RuntimeError(
+                f"MPI launcher detected (world size "
+                f"{_launcher_world_size()}) but mpi4py is unusable: {e}"
+            ) from e
         return 0, 1
 
 
@@ -568,6 +610,17 @@ def _build_cubed_sphere_spmd(resolution, nlev, dt, dtype, physics_level,
             f"@5 steps, job 8465445."
         )
 
+    # Sub-face tiling (n_global = 6*kt^2, kt >= 2): the generic
+    # make_sharded_step path is NOT tile-aware (full-face operator
+    # indexing + staggered leaves cannot shard over tile axes — its own
+    # scope note), so >6 devices dispatch to the BLOCKED persistent tiled
+    # step (tiled_production_cdgrid; np24/np54 parity-gated) instead of
+    # silently building a broken/replicated program.
+    if n_global > 6:
+        kt = int(round((n_global // 6) ** 0.5))
+        return _build_cubed_sphere_tiled_loop(
+            resolution, nlev, dt, physics_level, cast_fn, kt)
+
     cfg_mesh = create_device_mesh(n_devices=n_global, devices=gdev)
     grid = create_cubed_sphere(resolution)
     sigma = create_sigma_coordinate(nlev)
@@ -604,6 +657,140 @@ def _build_cubed_sphere_spmd(resolution, nlev, dt, dtype, physics_level,
     else:
         step_fn = sharded_step
     state = shard_pytree(state, cfg_mesh)
+
+    total_cells = 6 * resolution * resolution * nlev
+    cells_per_rank = total_cells // n_global
+    return step_fn, state, dt, total_cells, cells_per_rank
+
+
+def _build_cubed_sphere_tiled_loop(resolution, nlev, dt, physics_level,
+                                   cast_fn, kt):
+    """np>6 cube lane: the BLOCKED persistent tiled step (6*kt^2 devices).
+
+    State stays TILE-SHARDED across steps (input layout == output layout,
+    ``s = step_fn(s, dt)`` feedback with NO per-step gather); the serial
+    post-step telescoping dry-mass fixer runs IN-STAGE, matching the np<=6
+    lane's conservation config (whose anchor path threads the per-call
+    pre-step mass under the outer jit and telescopes identically).  Same
+    baroclinic-wave IC + config as the np<=6 cs-spmd lane so the ladder is
+    one controlled comparison.  Parity gates:
+    tests/parallel/test_tiled_blocked_loop.py (np24, vs serial model.step).
+    """
+    import jax
+    import numpy as np
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.parallel.tiled_production_cdgrid import (
+        expand_corners_to_blocks,
+        make_tiled_fv3_hydrostatic_step_blocked_2d,
+    )
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationConfig,
+        hydrostatic_to_fv3,
+        create_cubed_sphere_cdgrid,
+    )
+    from tests.test_cases.baroclinic_wave import baroclinic_wave_init
+
+    if physics_level not in ("none", "moist"):
+        raise ValueError(
+            f"cs-spmd at 6*kt^2 devices (kt={kt}) supports physics 'none' "
+            f"or 'moist' (the Kessler column bridge); got "
+            f"{physics_level!r}. Run <=6 devices for other physics."
+        )
+    _moist = physics_level == "moist"
+    if resolution % kt:
+        raise ValueError(
+            f"cs-spmd tiled lane: resolution {resolution} must divide by "
+            f"kt={kt} (tile edge = n/kt).")
+
+    grid = create_cubed_sphere(resolution)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    sigma = create_sigma_coordinate(nlev)
+    # IDENTICAL config to the np<=6 cs-spmd lane (controlled comparison).
+    # This literal is inside the tiled envelope by construction (every damp
+    # at its 0 default, hyperdiff pinned 0, end-step fixer ON so the serial
+    # per-stage zero-mean is skipped); the blocked factory validates its
+    # own grid/coord args below.
+    config = CDGridPrimitiveEquationConfig(
+        hyperdiff_coeff=0.0,
+        hyperdiff_ps_coeff=0.0,
+        use_conservation_fixer=True,
+        fix_mass=True,
+        anchor_mass_to_initial=True,
+        zero_mean_ps_tendency=True,
+    )
+
+    fv3 = hydrostatic_to_fv3(
+        baroclinic_wave_init(grid, sigma, perturbed=True, moist=_moist),
+        cdgrid)
+    fv3 = jax.tree.map(cast_fn, fv3)
+
+    n_global = 6 * kt * kt
+    dev = np.array(jax.devices()[:n_global]).reshape(6, kt, kt)
+    mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
+    nl = resolution // kt
+
+    # Moist: the Kessler COLUMN bridge — the SAME shared
+    # kessler_column_tendencies core the np<=6 lane's
+    # make_kessler_forcing_cube physics_fn runs, so the device ladder
+    # stays one controlled comparison (per-tile column-local physics
+    # inside the blocked step, tracer floor included).
+    column_physics_fn = None
+    if _moist:
+        from legoesm.atmosphere.kessler_forcing import (
+            make_kessler_column_physics_fn,
+        )
+        column_physics_fn = make_kessler_column_physics_fn(sigma, dt)
+
+    tiled = make_tiled_fv3_hydrostatic_step_blocked_2d(
+        mesh, cdgrid, sigma, resolution, kt, nlev,
+        p_floor=float(config.p_floor), dt=float(dt),
+        sponge_sigma=float(config.sponge_sigma),
+        sponge_tau_sec=float(config.sponge_tau_sec),
+        column_physics_fn=column_physics_fn,
+        fix_mass=True)
+    tiled_jit = jax.jit(tiled)
+
+    cz = NamedSharding(mesh, P("face", "tile_i", "tile_j", None))
+    co = NamedSharding(mesh, P("face", "tile_i", "tile_j"))
+    cz5 = NamedSharding(mesh, P("face", "tile_i", "tile_j", None, None))
+    state = {
+        "u_d": jax.device_put(
+            expand_corners_to_blocks(fv3.u_d.data, kt, nl), cz),
+        "v_d": jax.device_put(
+            expand_corners_to_blocks(fv3.v_d.data, kt, nl), cz),
+        "T": jax.device_put(fv3.T.data, cz),
+        "p_s": jax.device_put(fv3.p_s.data, co),
+        "phis": jax.device_put(fv3.phis.data, co),
+    }
+    if _moist:
+        import jax.numpy as jnp
+
+        # q_pack order [q_v, q_c, q_r] — the tiled moist contract.
+        q_pack = jnp.stack(
+            [fv3.tracers[nm].data for nm in ("q_v", "q_c", "q_r")], axis=-1)
+        state["q_pack"] = jax.device_put(q_pack, cz5)
+
+    _dt_built = float(dt)
+
+    def step_fn(s, dt_arg):
+        # dt is compiled into the tiled stage (static); the harness always
+        # passes the dt this builder returned — refuse anything else
+        # rather than silently integrating with the wrong step.
+        if float(dt_arg) != _dt_built:
+            raise ValueError(
+                f"tiled cube step compiled for dt={_dt_built}; got "
+                f"{dt_arg}.")
+        if _moist:
+            u, v, T, ps, q = tiled_jit(s["u_d"], s["v_d"], s["T"],
+                                       s["p_s"], s["phis"], s["q_pack"])
+            return {"u_d": u, "v_d": v, "T": T, "p_s": ps,
+                    "phis": s["phis"], "q_pack": q}
+        u, v, T, ps = tiled_jit(s["u_d"], s["v_d"], s["T"], s["p_s"],
+                                s["phis"])
+        return {"u_d": u, "v_d": v, "T": T, "p_s": ps, "phis": s["phis"]}
 
     total_cells = 6 * resolution * resolution * nlev
     cells_per_rank = total_cells // n_global
@@ -1051,7 +1238,8 @@ def run_single_benchmark(
         if _MPI.COMM_WORLD.Get_size() > 1:
             jax.block_until_ready(jax.tree.leaves(state))
             _MPI.COMM_WORLD.Barrier()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # broken/absent mpi4py must not break a single-process run
         pass
 
     t0 = time.perf_counter()
@@ -1063,7 +1251,8 @@ def run_single_benchmark(
         from mpi4py import MPI as _MPI
         if _MPI.COMM_WORLD.Get_size() > 1:
             _MPI.COMM_WORLD.Barrier()
-    except ImportError:
+    except (ImportError, RuntimeError):
+        # broken/absent mpi4py must not break a single-process run
         pass
 
     t1 = time.perf_counter()
@@ -1213,10 +1402,25 @@ def write_result_json(
         payload["backend"] = jax.default_backend()
     except Exception:
         payload["backend"] = ""
+
+    def _live_process_count() -> int:
+        try:
+            import jax
+
+            return int(jax.process_count())
+        except Exception:
+            return 1
     # Record the hybrid layout so scaling can be plotted vs CORES, not ranks:
     # a hybrid 8r x 4c run and a packed 32r x 1c run both report n_ranks but use
     # 32 vs 128 cores. cpus_per_task * n_ranks = the true resource count.
-    _cpt = int(os.environ.get("SLURM_CPUS_PER_TASK", "1") or "1")
+    # cpus_per_task: SLURM sets SLURM_CPUS_PER_TASK, but on PBS/PALS (Derecho)
+    # that is absent — fall back to the per-rank thread pool the launcher
+    # bound (OMP_NUM_THREADS), so n_cores reflects the true full-node
+    # resource, not 1 (#764: else n_resource / the CPU resource axis is
+    # wrong for the route-B cube lane on PBS).
+    _cpt = int(os.environ.get("SLURM_CPUS_PER_TASK")
+               or os.environ.get("OMP_NUM_THREADS")
+               or "1")
     payload["cpus_per_task"] = _cpt
     payload["n_cores"] = result.n_ranks * _cpt
     # Record conservation mode so a LEGOESM_NO_MASS_FIX ablation never dedups
@@ -1236,10 +1440,22 @@ def write_result_json(
         n_levels=result.n_levels,
         precision=result.precision,
         n_ranks=_md_n_ranks,
+        # Non-cs-spmd multi-rank = route-A mpi4jax halos; pin the transport
+        # so a run that also initialized jax.distributed (process_count ==
+        # world size) cannot auto-resolve to nccl/gloo (codex finding 1).
+        # cs-spmd (route-B) keeps auto-resolution.
+        transport=("mpi4jax" if (not cs_spmd and result.n_ranks > 1)
+                   else None),
         n_gpus=(result.n_ranks
                 if payload["backend"] in ("gpu", "cuda", "rocm") else 0),
         decomposition=result.decomposition,
-        cells_per_rank=result.cells_per_rank,
+        # cells_per_rank is per PROCESS (n_ranks semantics).  cs-spmd:
+        # result.cells_per_rank is per global DEVICE (total // n_global),
+        # while metadata n_ranks defaults to jax.process_count() — divide
+        # the total by the live process count instead and keep the
+        # per-device share in extra (codex finding 3, cs-spmd leg).
+        cells_per_rank=(result.total_cells // max(_live_process_count(), 1)
+                        if cs_spmd else result.cells_per_rank),
         scaling_kind=os.environ.get("LEGOESM_SCALING_KIND") or None,
         partition_metrics=_part_metrics,
         extra={
@@ -1248,6 +1464,7 @@ def write_result_json(
             "cpus_per_task": payload["cpus_per_task"],
             "n_cores": payload["n_cores"],
             "fix_mass": payload["fix_mass"],
+            "cells_per_device": result.cells_per_rank if cs_spmd else None,
         },
     ))
     with open(path, "w", encoding="utf-8") as f:
@@ -1416,14 +1633,21 @@ def main() -> int:
             return 2
         import jax as _jax
         import os as _os
-        # Launcher-agnostic process count: SLURM (srun) or OpenMPI
-        # (mpirun) — gating on SLURM_NTASKS alone would silently skip
-        # initialize() under mpirun and leave N independent local
-        # meshes all reporting n_ranks=N.
-        _nproc = int(_os.environ.get(
-            "SLURM_NTASKS", _os.environ.get("OMPI_COMM_WORLD_SIZE", "1")))
+        # Launcher-agnostic process count via the canonical helper, which
+        # covers OpenMPI / PMI / Cray PALS / SLURM (#764: the prior inline
+        # subset omitted PALS_LOCAL_SIZE, so a Derecho mpiexec route-B
+        # launch skipped initialize() and each rank ran an independent np1
+        # mesh — caught loudly by the consistency gate below, but the sweep
+        # never federated).
+        _nproc = _launcher_world_size()
         if _nproc > 1:
-            _jax.distributed.initialize()
+            # PBS/PALS has no bare-initialize auto-detection; the helper
+            # falls back to the mpi4py bootstrap (plain MPI, mpi4jax
+            # never armed on the --cs-spmd path).
+            from legoesm.parallel.early_init import (
+                init_jax_distributed_with_fallback,
+            )
+            init_jax_distributed_with_fallback()
 
     # --- GPU backend assertion (DEFERRED past --cs-spmd init) ---
     # Now safe to touch the backend: jax.distributed.initialize() (if any) has

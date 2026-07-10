@@ -49,6 +49,7 @@ from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     EPS,
     EPS_DIV as _EPS_DIV,
     compute_eke_kappa_gm,
+    compute_treguier_kappa_gm,
     compute_visbeck_kappa_gm,
     dm95_taper,
     dm95_taper_scalar,
@@ -58,6 +59,43 @@ from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
 from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
 from legoesm.ocean.physics.lateral_mixing.output import LateralMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
+
+__physics_contract__ = {
+    "summary": (
+        "GM/Redi isopycnal mixing on the lat-lon Arakawa C-grid (Griffies 1998 "
+        "skew-flux tensor): per-tracer adiabatic eddy advection + isoneutral "
+        "diffusion via a single divergence of the combined face fluxes, with "
+        "DM95 tapering, optional Visbeck kappa, and land face-mask / Neumann-"
+        "fill treatment."
+    ),
+    "inputs": {
+        "q": "degC or psu (tracer)", "S_x": "1 (isopycnal slope)",
+        "S_y": "1 (isopycnal slope)", "mask": "1 (1=ocean)",
+        "u_mask": "1 (u-face)", "v_mask": "1 (v-face)",
+        "jacobian": "1 (z-star dimensionless)",
+        "kappa_GM": "m^2/s", "kappa_Redi": "m^2/s",
+    },
+    "outputs": {"dq_dt": "degC/s or psu/s (tracer tendency)"},
+    "sign_convention": (
+        "kappa_GM, kappa_Redi >= 0; isopycnal slopes S_x,S_y tapered (DM95); GM "
+        "skew flux adiabatic + Redi along-isopycnal down-gradient; fluxes are "
+        "combined at faces and passed through ONE divergence_cgrid so the "
+        "(mask-weighted) volume integral of the tracer is conserved; land faces "
+        "carry no flux; z positive up."
+    ),
+    # Adiabatic tracer redistribution: conserves volume-integrated tracer.
+    "conserves": ["tracer"],
+    "differentiable": True,
+    "reference": (
+        "Griffies (1998) JPO 28, 831-841; Danabasoglu & McWilliams (1995) "
+        "J. Climate 8, 2967-2987; Visbeck et al. (1997) JPO 27, 381-402"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_gm_redi_latlon_cgrid.py — sloping isopycnals "
+        "give a slope-flattening tendency conserving the volume-integrated "
+        "tracer; zero slope gives zero tendency; land faces carry no flux."
+    ),
+}
 
 # Division-guard epsilon (shared _gm_redi_common.EPS_DIV = 1e-10, #518 item 11):
 # larger than float32 machine eps to prevent intermediate blow-up in the
@@ -1618,8 +1656,20 @@ def gm_redi_tracer_tendency_latlon(
 
     # GM coefficient. Precedence: prognostic-EKE override (computed by the step
     # from the evolving eddy-energy field) > Visbeck diagnostic > constant.
+    _treg = getattr(cfg, "treguier", None)
+    if _treg is not None and _treg.enabled and cfg.visbeck.enabled:
+        raise ValueError(
+            "GMRediConfig: visbeck.enabled and treguier.enabled are mutually "
+            "exclusive adaptive-kappa diagnostics — enable exactly one.")
     if kappa_gm_override is not None:
         kappa_GM = kappa_gm_override
+    elif _treg is not None and _treg.enabled:
+        # Treguier-1997 / NEMO nn_aei_ijk_t=21 adaptive κ (the oracle scaling).
+        if f_coriolis is None:
+            f_coriolis = jnp.broadcast_to(grid.f, mask.shape)
+        kappa_GM = compute_treguier_kappa_gm(
+            rho, S_x, S_y, z_coord, jacobian, f_coriolis, _treg,
+        )
     elif cfg.visbeck.enabled:
         if f_coriolis is None:
             # Use the grid's Coriolis field (f = 2·Ω·sin(lat), already built

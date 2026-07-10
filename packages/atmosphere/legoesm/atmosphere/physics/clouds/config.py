@@ -194,6 +194,7 @@ def build_cloud_config(
     rh_crit: float | None = None,
     q_c_diagnostic: float | None = None,
     conv_cloud_max: float | None = None,
+    conv_cloud_condensate: float | None = None,
     p_xr: float | None = None,
     alpha_xr: float | None = None,
 ) -> "CloudConfig":
@@ -214,6 +215,8 @@ def build_cloud_config(
         overrides["q_c_diagnostic"] = q_c_diagnostic
     if conv_cloud_max is not None:
         overrides["conv_cloud_max"] = conv_cloud_max
+    if conv_cloud_condensate is not None:
+        overrides["conv_cloud_condensate"] = conv_cloud_condensate
     if p_xr is not None:
         overrides["p_xr"] = p_xr
     if alpha_xr is not None:

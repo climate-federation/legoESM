@@ -30,6 +30,8 @@ from legoesm.driver.compiled_segments import (
     compute_segment_length,
     build_segment_fn,
     pack_forcing,
+    _sqrt_checkpointed_scan,
+    _NESTED_CKPT_STEPS,
 )
 from legoesm.driver.physics_pipeline import PhysicsOutput
 from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -752,6 +754,13 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
         lw_up_toa_accum = carry.lw_up_toa_accum + held_new[4] * dt
         sw_down_toa_accum = carry.sw_down_toa_accum + held_new[5] * dt
         t_low_accum = carry.t_low_accum + T_upd[..., -1] * dt
+        # Clear-sky TOA accumulation (#843): the mock has no pipeline, so the
+        # compiled path runs in "hold" mode — the held clear-sky (zeros)
+        # passes through and integrates unchanged.  Mirror that here.
+        sw_up_toa_clr_accum = (
+            carry.sw_up_toa_clr_accum + carry.held_sw_up_toa_clr * dt)
+        lw_up_toa_clr_accum = (
+            carry.lw_up_toa_clr_accum + carry.held_lw_up_toa_clr * dt)
 
         # Saturation adjustment
         if do_sat_adjust:
@@ -788,6 +797,8 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             held_lw_net_sfc=held_new[2],
             held_sw_up_toa=held_new[3],
             held_lw_up_toa=held_new[4],
+            held_sw_up_toa_clr=carry.held_sw_up_toa_clr,
+            held_lw_up_toa_clr=carry.held_lw_up_toa_clr,
             held_sw_down_toa=held_new[5],
             step_index=step_idx + 1,
             target_moisture=carry.target_moisture,
@@ -798,6 +809,8 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             lhflx_accum=carry.lhflx_accum,
             sw_up_toa_accum=sw_up_toa_accum,
             lw_up_toa_accum=lw_up_toa_accum,
+            sw_up_toa_clr_accum=sw_up_toa_clr_accum,
+            lw_up_toa_clr_accum=lw_up_toa_clr_accum,
             sw_down_toa_accum=sw_down_toa_accum,
             sw_net_sfc_accum=sw_net_sfc_accum,
             lw_net_sfc_accum=lw_net_sfc_accum,
@@ -1863,6 +1876,108 @@ class TestDoubleMomentCarry:
         assert all(isinstance(x, jax.Array) for x in leaves)
 
 
+class TestQvSmoothingGate:
+    """Direct leaf tests for the fix-5 moisture-smoothing static gate
+    (``_apply_qv_smoothing``), the only operator-split-tail hot-loop change in
+    PR #798 (#797). The gate skips the cube-only ∇⁴ operator when
+    ``qv_smooth_coeff == 0`` so the lat-lon training rollout does not crash on
+    ``grid.halo_interp_offsets``, while the nonzero path stays bit-identical to
+    the former nested ``max(q + dt·∇⁴, 0)``."""
+
+    def test_zero_coeff_skips_operator_and_only_floors(self):
+        from types import SimpleNamespace
+
+        from legoesm.driver.compiled_segments import _apply_qv_smoothing
+
+        def _boom(*args, **kwargs):
+            raise AssertionError(
+                "hyperdiffusion_3d must NOT be called when qv_smooth_coeff == 0 "
+                "(that call is what crashes lat-lon on grid.halo_interp_offsets)")
+
+        q = jnp.array([[-1.0, 2.0, 0.0, 0.5]])
+        # grid deliberately has NO halo_interp_offsets — mimics a lat-lon grid.
+        statics = SimpleNamespace(
+            qv_smooth_coeff=0.0, dt=100.0, grid=object(), hyperdiffusion_3d=_boom)
+        out = _apply_qv_smoothing(q, statics)
+        # operator skipped; only the positivity floor applied.
+        assert jnp.array_equal(out, jnp.maximum(q, 0.0))
+
+    def test_nonzero_coeff_is_bit_identical_to_former_nested_max(self):
+        from types import SimpleNamespace
+
+        from legoesm.driver.compiled_segments import _apply_qv_smoothing
+
+        seen = {}
+
+        def _hd(field, grid, coeff):
+            seen["coeff"] = coeff
+            seen["grid"] = grid
+            return jnp.full_like(field, 1.0e-3)  # arbitrary ∇⁴ tendency
+
+        q = jnp.array([[0.01, -0.002, 0.5, 3.0e-4]])
+        dt, coeff, grid = 90.0, 0.25, object()
+        statics = SimpleNamespace(
+            qv_smooth_coeff=coeff, dt=dt, grid=grid, hyperdiffusion_3d=_hd)
+        out = _apply_qv_smoothing(q, statics)
+        # Former inline form: max(q + dt*hyperdiffusion_3d(q, grid, coeff), 0).
+        expected = jnp.maximum(q + dt * jnp.full_like(q, 1.0e-3), 0.0)
+        assert jnp.array_equal(out, expected)
+        # The real operator was invoked with the configured coeff + grid.
+        assert seen["coeff"] == coeff and seen["grid"] is grid
+
+
+class TestNestedCheckpointedScan:
+    """#841: nested (Griewank / sqrt-N) checkpointing of the rollout scan is a
+    reverse-mode MEMORY SCHEDULE only — the forward is bit-identical and the
+    gradient is EXACT vs a plain ``lax.scan``.  This is what lets the WB scale
+    trainer's ~6000-step 0.7-deg rollout fit (O(sqrt N) carries instead of the
+    O(N) ~1 TB trajectory that OOMs)."""
+
+    @staticmethod
+    def _step(c, _):
+        # A coupled nonlinear recurrence so the adjoint is sensitive to every
+        # step (a decoupled map could pass even with a dropped-step bug).
+        x = jnp.tanh(1.03 * c + 0.1) + 0.02 * jnp.roll(c, 1)
+        return x, None
+
+    @pytest.mark.parametrize("n_steps", [289, 300, _NESTED_CKPT_STEPS])
+    def test_forward_and_gradient_match_plain_scan(self, n_steps):
+        x0 = jnp.linspace(-1.0, 1.0, 8)
+
+        def plain(x):
+            c, _ = jax.lax.scan(self._step, x, None, length=n_steps)
+            return jnp.sum(c ** 2)
+
+        def nested(x):
+            c = _sqrt_checkpointed_scan(self._step, x, n_steps)
+            return jnp.sum(c ** 2)
+
+        # Forward: same op sequence (chunk boundaries do not reorder steps).
+        np.testing.assert_allclose(
+            float(nested(x0)), float(plain(x0)), rtol=1e-6,
+            err_msg="nested checkpointed scan changed the forward value")
+        # Gradient: EXACT — checkpointing recomputes the same math.  A broken
+        # chunking (dropped/duplicated steps, wrong boundary carry) gives an
+        # O(1) relative error, far above this tolerance.
+        g_nested = jax.grad(nested)(x0)
+        g_plain = jax.grad(plain)(x0)
+        np.testing.assert_allclose(
+            np.asarray(g_nested), np.asarray(g_plain), rtol=1e-5, atol=1e-8,
+            err_msg="nested checkpointed scan gradient != plain scan gradient")
+
+    def test_remainder_steps_are_not_dropped(self):
+        """A step count that is NOT a multiple of the chunk size must still run
+        EXACTLY n_steps (the trailing remainder scan) — a count regression would
+        change the forward."""
+        # 290 = 17*17 + 1: inner=17, n_outer=17 (289 steps) + 1 remainder.
+        n_steps = 290
+        x0 = jnp.linspace(0.0, 1.0, 6)
+        ref, _ = jax.lax.scan(self._step, x0, None, length=n_steps)
+        got = _sqrt_checkpointed_scan(self._step, x0, n_steps)
+        np.testing.assert_allclose(np.asarray(got), np.asarray(ref), rtol=1e-6,
+                                   err_msg="remainder steps dropped/miscounted")
+
+
 class TestTiledStepFnRouting:
     """P4 increment 1b: ``tiled_step_fn`` replaces ONLY the dynamics core
     of the scan body — same cc HydrostaticState contract; everything else
@@ -1925,53 +2040,3 @@ class TestTiledStepFnRouting:
         b = self._run(None, explicit_none=True)
         assert float(jnp.max(jnp.abs(a.T - b.T))) == 0.0
         assert float(jnp.max(jnp.abs(a.p_s - b.p_s))) == 0.0
-
-
-class TestQvSmoothingGate:
-    """Direct leaf tests for the fix-5 moisture-smoothing static gate
-    (``_apply_qv_smoothing``), the only operator-split-tail hot-loop change in
-    PR #798 (#797). The gate skips the cube-only ∇⁴ operator when
-    ``qv_smooth_coeff == 0`` so the lat-lon training rollout does not crash on
-    ``grid.halo_interp_offsets``, while the nonzero path stays bit-identical to
-    the former nested ``max(q + dt·∇⁴, 0)``."""
-
-    def test_zero_coeff_skips_operator_and_only_floors(self):
-        from types import SimpleNamespace
-
-        from legoesm.driver.compiled_segments import _apply_qv_smoothing
-
-        def _boom(*args, **kwargs):
-            raise AssertionError(
-                "hyperdiffusion_3d must NOT be called when qv_smooth_coeff == 0 "
-                "(that call is what crashes lat-lon on grid.halo_interp_offsets)")
-
-        q = jnp.array([[-1.0, 2.0, 0.0, 0.5]])
-        # grid deliberately has NO halo_interp_offsets — mimics a lat-lon grid.
-        statics = SimpleNamespace(
-            qv_smooth_coeff=0.0, dt=100.0, grid=object(), hyperdiffusion_3d=_boom)
-        out = _apply_qv_smoothing(q, statics)
-        # operator skipped; only the positivity floor applied.
-        assert jnp.array_equal(out, jnp.maximum(q, 0.0))
-
-    def test_nonzero_coeff_is_bit_identical_to_former_nested_max(self):
-        from types import SimpleNamespace
-
-        from legoesm.driver.compiled_segments import _apply_qv_smoothing
-
-        seen = {}
-
-        def _hd(field, grid, coeff):
-            seen["coeff"] = coeff
-            seen["grid"] = grid
-            return jnp.full_like(field, 1.0e-3)  # arbitrary ∇⁴ tendency
-
-        q = jnp.array([[0.01, -0.002, 0.5, 3.0e-4]])
-        dt, coeff, grid = 90.0, 0.25, object()
-        statics = SimpleNamespace(
-            qv_smooth_coeff=coeff, dt=dt, grid=grid, hyperdiffusion_3d=_hd)
-        out = _apply_qv_smoothing(q, statics)
-        # Former inline form: max(q + dt*hyperdiffusion_3d(q, grid, coeff), 0).
-        expected = jnp.maximum(q + dt * jnp.full_like(q, 1.0e-3), 0.0)
-        assert jnp.array_equal(out, expected)
-        # The real operator was invoked with the configured coeff + grid.
-        assert seen["coeff"] == coeff and seen["grid"] is grid

@@ -12,40 +12,70 @@
 # physics config stays machine-independent and reproducible across deployments.
 #
 # Provenance: derived from Pierre's tuned CMIP-realism config
-# config/cmip/cmip_ocean_slab.yaml (SBM + Morrison + Sundqvist + COARE3 +
-# gustiness + q_c_diagnostic 3e-4), ported to prescribed-SST AMIP. VALIDATED at
-# C48/L40 (job 25918469, 10-day): planetary albedo 0.292 (target ~0.29), rsut
-# 99, precip 3.2 mm/d (target ~2.8), rlut 234, net TOA +6 — SBM fixes the
-# structural over-bright (~2x) and too-dry (~4x) biases that Bechtold did NOT
-# (Bechtold: albedo 0.57 / precip 0.81). Land kept as our tiled COARE3/MOST +
-# soil bucket + Jarvis stomatal (Pierre-directed for AMIP, 2026-06-24/25); Louis
-# turbulence (required by the tiled surface).
-# Tracking: GitHub issue #636.
+# config/cmip/cmip_ocean_slab.yaml (Morrison + Sundqvist + COARE3 +
+# gustiness + q_c_diagnostic 3e-4), ported to prescribed-SST AMIP. Land = the
+# SOTA multilayer Richards soil + CLM PFT/texture + prognostic snow, tiled
+# COARE3/MOST surface fluxes, stomatal-beta OFF (#741); Louis turbulence
+# (required by the tiled surface). Upgraded from the Manabe slab bucket 2026-07-07.
+#
+# Convection = BECHTOLD (mass-flux, IFS lineage; directive 2026-07-06): mass
+# flux is column-water-conserving BY CONSTRUCTION, unlike the SBM relaxation
+# whose net-moistening leak (+0.5 mm/day, #771) drove the pilot's day-150
+# blowup (gated fix: PR #819). CAVEAT: the earlier 10-day A/B (job 25918469,
+# pre-McFarlane, pre-#613 subgrid autoconversion) measured Bechtold at
+# albedo 0.57 / precip 0.81 vs SBM's on-target 0.292 / 3.2 — the C24
+# physics-combo screen (bechtold vs fixed-sbm under this exact suite,
+# /scratch amip_physcombo_c24, 2026-07-06) is the revalidation gate; revisit
+# this choice against its verdict before the 36-yr launch (#811 Gate 2).
+# GWD = McFarlane (orographic wave breaking, same directive; was hines).
+# Tracking: GitHub issues #636, #811.
 # =============================================================================
 
-# --- Grid + dycore: cubed-sphere C48 / L40 hybrid, cd-grid, dt 150 s ----------
+# --- Grid + dycore: cubed-sphere C48 / L40, cd-grid, dt 150 s -----------------
+# Publication-grade AMIP resolution (restored from #821's C12/L20 dt450 screen,
+# which was for cheap land-switch turnaround only).
+# NOTE: bechtold convection at C48 REQUIRES precision fp64 (below) — fp32 overflows
+# in the cd-grid barotropic subcycle (XLA fusion) and blows up ~day 5; `mixed`
+# does NOT cover that subcycle (it promotes only the spectral-dycore kernels).
 grid_type: cubed_sphere
 resolution: 48
 nlev: 40
 discretization: cdgrid
 dt: 150.0
+precision: fp64             # bechtold @ C48/L40 needs full fp64 (see note above)
 
-# --- Atmospheric physics (SBM convection = the structural-bias fix) -----------
+# --- Atmospheric physics (Bechtold mass-flux convection, directive 2026-07-06)
 radiation: rrtmg            # rrtmg = the rrtmgp builder alias (true CMIP6 RT)
 rad_update_steps: 12
 clouds: sundqvist
 microphysics: morrison
-convection: sbm             # confirmed fixes albedo+precip (job 25918469)
+convection: bechtold        # mass-flux (IFS lineage), water-conserving by
+                            # construction; C24 screen = revalidation gate
 turbulence: louis           # Louis required by the tiled surface
-gravity_wave_drag: hines
+gravity_wave_drag: mcfarlane  # orographic wave breaking (was hines)
 diurnal_cycle: true
 orbital_insolation: true    # AMIP-II realistic orbit (Berger 1978): orbital
                             # declination + (a/r)^2 eccentricity asymmetry
 
-# --- Cloud tuning -------------------------------------------------------------
-# rh_crit intentionally left at the calibrated default (0.77, commit 3f376730e)
-# — NOT pinned here.
-cloud_q_c_diagnostic: 3.0e-4   # tuned "thinner cloud" value (== cmip_tuned_physics.yaml)
+# --- Cloud tuning (mass-flux over-bright-anvil fix — PROVISIONAL) --------------
+# The mass-flux schemes (bechtold/edmf/tiedtke) over-cloud the AMIP troposphere.
+# A day-90 pe=0 scorecard: edmf clt 85% (ref 67), albedo 0.60-0.71 (ref 0.29),
+# from excessive sundqvist stratiform cloud over an over-moist column. Two levers:
+#   cloud_rh_crit        — Sundqvist critical RH; RAISE => less stratiform cloud
+#                          FRACTION (edmf clt 85.5 -> 63.5 at 0.85, day-35 partial).
+#   cloud_q_c_diagnostic — in-cloud condensate / optical THICKNESS; LOWER => less
+#                          reflective cloud (targets the residual albedo that
+#                          rh_crit alone leaves, 0.695 -> 0.637).
+# PROVISIONAL: values are day-35 partials; day-90 validation (edmf full-recipe
+# run) in progress. To restore the prior default: rh_crit 0.77, q_c 3.0e-4,
+# convective_precip_efficiency 0.0.
+cloud_rh_crit: 0.85            # was the calibrated default 0.77 (commit 3f376730e)
+cloud_q_c_diagnostic: 1.0e-4   # was 3.0e-4 ("thinner cloud" -> lower albedo)
+convective_precip_efficiency: 0.5  # detrained-condensate -> convective-rain split
+                            # (raises pr, drains column moisture). REQUIRES the
+                            # split_convective_rain scheme code to be active for
+                            # the chosen convection scheme; a no-op until that
+                            # lands on main (bechtold rain-split is not yet here).
 # convective_cloud (Slingo-1987 cumulus cloud fraction): ON, to MIRROR the
 # canonical tuned-physics base (config/cmip/cmip_tuned_physics.yaml ships
 # convective_cloud: true) so this AMIP runs the SAME tuned slab parameters as the
@@ -62,20 +92,31 @@ cloud_q_c_diagnostic: 3.0e-4   # tuned "thinner cloud" value (== cmip_tuned_phys
 #   SST-drift compensator. Kept ON here for parameter-identity with the tuned base.
 convective_cloud: true
 
-# --- Tiled surface + interactive land -----------------------------------------
-# COARE3 ocean / land-MOST surface fluxes + Manabe soil bucket + Jarvis stomatal.
-slab_land_active: true
-surface_bulk_scheme: coare3
+# --- Tiled surface + interactive REAL land (multilayer Richards, SOTA) ---------
+# COARE3 ocean / land-MOST surface fluxes + multilayer Richards soil + CLM
+# PFT/texture surface map + prognostic snow.  Replaces the Manabe slab bucket
+# with the physical land model (use_multilayer_land, PR #715: land skin-T drives
+# the atmospheric BL, land MOST + CLM per-cell z0, snow-albedo + stomata threaded).
+# Needs the CLM surfdata staged (--clm-surfdata-path; compute nodes have no
+# internet).  Deep 3 m / 10-layer soil needs a multi-year cold spin-up before its
+# T/moisture fields are trustworthy.
+use_multilayer_land: true
+multilayer_n_layers: 10
+multilayer_soil_depth: 3.0
+# Drier soil cold-start (theta_init = 0.25*theta_sat, vs 0.5 default): the deep
+# 3 m soil cold-starts too wet, feeding over-evaporation cold-cloudy land (#730).
+land_soil_moisture_init_frac: 0.25
+# Jarvis/Farquhar interactive stomata (#715): DISABLED (#741). On the multilayer
+# soil it over-transpires (effective beta stays near-potential in the moist root
+# zone), driving a large over-evaporation/moistening drift. With it off the
+# multilayer uses the beta_soil root-zone moisture-stress path, which is realistic.
+land_stomatal_beta: false
+snow_albedo_feedback: true  # prognostic SWE snow-albedo feedback, threaded into
+                            # the multilayer land (#715)
+surface_bulk_scheme: coare3   # OCEAN tile (land tile uses MOST via #715)
 surface_gustiness_zi: 300.0  # == cmip_tuned_physics.yaml (run_coupled-mirrored #647 dest)
 surface_tiled: true
 surface_z0_land: 0.1
-land_soil_bucket: true
-land_stomatal_beta: true
-snow_albedo_feedback: true  # prognostic SWE snow brightens land albedo (SOTA
-                            # AMIP snow-albedo feedback; needs the active tile)
-land_bucket_w_max: 150.0    # bucket field capacity [kg/m^2]
-land_beta_min: 0.1          # minimum evaporative efficiency
-land_bucket_w_init_frac: 0.5
 
 # --- Forcing selectors (observed SST/SIC + full CMIP6 external forcing) --------
 # File PATHS are supplied at runtime (see amip_production.sh); these are the

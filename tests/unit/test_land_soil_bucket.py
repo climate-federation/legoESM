@@ -104,7 +104,7 @@ class TestStomatalBeta:
 
     @staticmethod
     def _stomatal_pipe(beta_min=0.1, w_max=150.0):
-        from legoesm.land.carbon.stomata import StomataConfig
+        from legoesm.land.stomata import StomataConfig
         pipe = _bucket_pipeline(active=True, w_max=w_max, beta_min=beta_min)
         pipe.land_stomatal_beta = True
         pipe.stomata_config = StomataConfig()

@@ -16,7 +16,10 @@ from legoesm.ocean.eos import (
     compute_buoyancy_frequency_adiabatic,
     rho_0 as _RHO_0_DEFAULT,
 )
-from legoesm.ocean.physics.lateral_mixing.config import VisbeckConfig
+from legoesm.ocean.physics.lateral_mixing.config import (
+    TreguierConfig,
+    VisbeckConfig,
+)
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
 EPS = float(jnp.finfo(jnp.float32).eps)  # ~1.19e-7
@@ -245,7 +248,7 @@ def compute_visbeck_kappa_gm(
     kappa : (...,) horizontally-varying kappa_GM [m^2/s], clamped to
         the configured bounds.
     """
-    sigma_bar, L, wet_col, _int_N_dz, _sigma_local = _eady_growth_and_length(
+    sigma_bar, L, wet_col, _int_N_dz, _sigma_local, _dzh = _eady_growth_and_length(
         rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg, rho_ref,
         n2_mode=getattr(cfg, "n2_mode", "insitu"),
         n2_over_dzw=getattr(cfg, "n2_over_dzw", False),
@@ -257,6 +260,84 @@ def compute_visbeck_kappa_gm(
     # so it cannot leak gradients through the GM/Redi tendencies.
     kappa = jnp.clip(cfg.alpha * L ** 2 * sigma_bar, cfg.kappa_min, cfg.kappa_max)
     return jnp.where(wet_col, kappa, 0.0)
+
+
+# --- NEMO ldf_eiv fixed scheme constants (ldftra.F90, nn_aei_ijk_t=21) ---
+# Fixed values hard-coded in the NEMO source (not namelist tunables); the ONE
+# genuine tunable is the cap aei0 = rn_Ue*rn_Le (TreguierConfig.aei0).
+_TREGUIER_RO_FACTOR = 0.4          # Ro = 0.4*(integral N dz)/|f|   (ldf_eiv "zRo = .4*zn/zfw")
+_TREGUIER_RO_MIN_M = 2.0e3         # Rossby-radius clamp, lower [m]
+_TREGUIER_RO_MAX_M = 4.0e4         # Rossby-radius clamp, upper [m]
+_TREGUIER_F_MIN = 1.0e-10          # |f| floor in the Ro division  (ldf_eiv zfw MAX)
+_TREGUIER_ZHW_OFFSET_M = 5.0       # zhw initialisation offset [m] (ldf_eiv "zhw(:,:) = 5.")
+_TREGUIER_TAPER_LAT_DEG = 20.0     # tropical taper reference latitude (z1_f20)
+
+
+def compute_treguier_kappa_gm(
+    rho: jnp.ndarray,
+    S_x: jnp.ndarray,
+    S_y: jnp.ndarray,
+    z_coord: OceanZStarCoordinate,
+    jacobian: jnp.ndarray,
+    f_coriolis: jnp.ndarray,
+    cfg: TreguierConfig,
+    rho_ref: float = _RHO_0_DEFAULT,
+) -> jnp.ndarray:
+    r"""Treguier et al. (1997) / Held-Larichev (1996) eddy-induced-velocity
+    coefficient — faithful port of NEMO 5.0.1 ``ldftra.F90::ldf_eiv``
+    (``nn_aei_ijk_t = 21``, the DINO **and** ORCA1 oracle setting):
+
+    .. math::
+
+        \kappa = \min\big(\;\min(1, |f/f_{20}|)\cdot Ro^2\,T^{-1},\; aei0\big)
+
+    with (all reductions over the interior interfaces, weights = the
+    interface thickness ``dz_half`` ≙ NEMO ``e3w``):
+
+    - ``Ro = clip(0.4\cdot\int N\,dz / \max(|f|,10^{-10}),\ 2\,\mathrm{km},\ 40\,\mathrm{km})``
+      (internal Rossby radius, ldf_eiv ``zRo``);
+    - ``T^{-1} = \sqrt{\;\Sigma\,N^2(S_x^2+S_y^2)\,dz\;/\;(5 + \Sigma\,dz)\;}``
+      — the inverse baroclinic-instability timescale from the isopycnal
+      slopes (ldf_eiv ``zah``/``zhw``; the ``+5`` m is NEMO's ``zhw``
+      initialisation offset, kept for bit-faithfulness);
+    - the tropical taper ``min(1, |f/f_{20}|)`` with ``f_{20} =
+      2\Omega\sin 20^\circ``;
+    - the cap ``aei0 = rn_Ue\cdot rn_Le`` (the ONE namelist tunable —
+      ``TreguierConfig.aei0``; DINO: 0.03·100 km = 3000 m²/s).
+
+    NEMO evaluates this at the surface and copies it down the column; ours
+    is the 2-D ``kappa_GM(x, y)`` consumed by the GM/Redi operator — the
+    same depth-independent semantics.  Reuses the SHARED
+    ``_eady_growth_and_length`` chain for N²/N/σ (no duplicate numerics);
+    N² is the in-situ model N² (NEMO uses its native ``rn2b``).
+
+    Returns the 2-D ``kappa_GM`` [m²/s], exactly 0 on dry columns.
+    """
+    # The shared helper needs a Visbeck-shaped cfg ONLY for its mixing-length
+    # branch (L is discarded here — Treguier builds its own Rossby radius from
+    # the returned integral N dz). Default VisbeckConfig() supplies those
+    # length fields; none of its values reach the Treguier formula.
+    sigma_bar, _L, wet_col, int_N_dz, sigma, dz_half = _eady_growth_and_length(
+        rho, S_x, S_y, z_coord, jacobian, f_coriolis,
+        _TREGUIER_LENGTH_STUB, rho_ref,
+    )
+    del sigma_bar, _L
+    f_abs = jnp.maximum(jnp.abs(f_coriolis), _TREGUIER_F_MIN)
+    ro = jnp.clip(_TREGUIER_RO_FACTOR * int_N_dz / f_abs,
+                  _TREGUIER_RO_MIN_M, _TREGUIER_RO_MAX_M)
+    # T^-1 from the slope-weighted N² integral: sigma = N|S| at interfaces,
+    # so sigma^2·dz = N²·(S_x²+S_y²)·dz  (ldf_eiv zah accumulation).
+    zah = jnp.sum(sigma ** 2 * dz_half, axis=-1)
+    zhw = _TREGUIER_ZHW_OFFSET_M + jnp.sum(dz_half, axis=-1)
+    t_inv = jnp.sqrt(zah / zhw)
+    f20 = 2.0 * constants.Omega * jnp.sin(
+        jnp.deg2rad(_TREGUIER_TAPER_LAT_DEG))
+    taper = jnp.minimum(1.0, jnp.abs(f_coriolis) / f20)
+    kappa = jnp.minimum(taper * ro ** 2 * t_inv, cfg.aei0)
+    return jnp.where(wet_col, kappa, 0.0)
+
+
+_TREGUIER_LENGTH_STUB = VisbeckConfig()
 
 
 def _eady_growth_and_length(
@@ -390,7 +471,7 @@ def _eady_growth_and_length(
     else:
         L = jnp.full_like(sigma_bar, cfg.L_fixed)
 
-    return sigma_bar, L, wet_col, int_N_dz, sigma
+    return sigma_bar, L, wet_col, int_N_dz, sigma, dz_half
 
 
 def compute_geometric_column_integrals(
@@ -435,7 +516,7 @@ def compute_geometric_column_integrals(
 
     Returns ``(int_sigma2_dz, int_sigma_dz, int_N_dz, H_col, wet_col)``.
     """
-    _sigma_bar, _L, wet_col, int_N_dz, sigma = _eady_growth_and_length(
+    _sigma_bar, _L, wet_col, int_N_dz, sigma, _dzh = _eady_growth_and_length(
         rho, S_x, S_y, z_coord, jacobian, f_coriolis, visbeck_cfg, rho_ref,
         n2_mode=n2_mode, n2_over_dzw=n2_over_dzw,
         T=T, S=S, p_cell=p_cell, eos_fn=eos_fn,
@@ -502,7 +583,7 @@ def compute_eke_kappa_gm(
     # config's — the Visbeck diagnostic and the prognostic EKE may opt in
     # independently. ``visbeck_cfg`` is still used for the LENGTH params
     # (L_min/L_max/f_min/use_rossby_radius/L_fixed).
-    sigma_bar, L_rossby, wet_col, int_N_dz, sigma_local = _eady_growth_and_length(
+    sigma_bar, L_rossby, wet_col, int_N_dz, sigma_local, _dzh = _eady_growth_and_length(
         rho, S_x, S_y, z_coord, jacobian, f_coriolis, visbeck_cfg, rho_ref,
         n2_mode=getattr(eke_cfg, "n2_mode", "insitu"),
         n2_over_dzw=getattr(eke_cfg, "n2_over_dzw", False),

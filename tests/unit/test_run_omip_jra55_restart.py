@@ -93,6 +93,32 @@ def test_save_restart_filename_zero_pads_to_six_digits(tmp_path):
     assert fname.exists()
 
 
+def test_save_restart_labels_non_latlon_grid_type(tmp_path):
+    """The npz grid_type label matches the run's grid selection (S10).
+
+    Historically _save_restart hardcoded 'latlon', mislabeling MPAS/tripole
+    checkpoints.  The label is provenance-only (nothing reads it on load),
+    so we exercise the label selection directly on a cheap state: the field
+    dump is grid-agnostic and only the label depends on grid_type.
+    """
+    grid, z_coord, _, _, _ = _make_tiny_latlon_setup(n_lat=4, n_lon=8)
+    state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
+    for gt in ("tripole", "mpas"):
+        out = tmp_path / gt
+        fname = run_omip._save_restart(state, day=1.0, step=1, output_dir=out,
+                                       grid_type=gt)
+        data = np.load(fname, allow_pickle=False)
+        assert str(data["grid_type"]) == gt
+
+
+def test_save_restart_rejects_unknown_grid_type(tmp_path):
+    grid, z_coord, _, _, _ = _make_tiny_latlon_setup(n_lat=4, n_lon=8)
+    state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
+    with pytest.raises(ValueError, match="grid_type"):
+        run_omip._save_restart(state, day=1.0, step=1, output_dir=tmp_path,
+                               grid_type="ico")
+
+
 # ============================================================================
 # _run_omip_loop checkpointing
 # ============================================================================
@@ -109,7 +135,7 @@ def test_run_omip_loop_requires_checkpoint_dir(tmp_path):
         )
 
 
-def test_run_omip_loop_writes_restarts_at_cadence(tmp_path):
+def test_run_omip_loop_writes_restarts_at_cadence(tmp_path, monkeypatch):
     """Cadence ⇒ N restart files at the right simulation days."""
     n_lat, n_lon = 4, 8
     cache = _make_synthetic_cache(tmp_path, n_lat=n_lat, n_lon=n_lon,
@@ -124,6 +150,18 @@ def test_run_omip_loop_writes_restarts_at_cadence(tmp_path):
         args, grid, "latlon",
         z_coord=z_coord, T_woa=T_woa, S_woa=S_woa,
     )
+
+    # S10 threading spy: the loop must pass its grid_type explicitly to
+    # _save_restart (latlon equals the legacy default, so asserting the
+    # npz label alone would not prove the loop threads it).
+    seen_grid_types = []
+    real_save = run_omip._save_restart
+
+    def _spy_save(state, day, step, output_dir, **kwargs):
+        seen_grid_types.append(kwargs.get("grid_type"))
+        return real_save(state, day, step, output_dir, **kwargs)
+
+    monkeypatch.setattr(run_omip, "_save_restart", _spy_save)
 
     out = tmp_path / "run_out"
     # 6-hour runs at dt=10800 s = 3 h: 2 steps = 6 hours = 0.25 day.
@@ -143,6 +181,11 @@ def test_run_omip_loop_writes_restarts_at_cadence(tmp_path):
     days_written = sorted(int(p.stem.removeprefix("restart_day")) for p in files)
     # At least one restart for the final day (day 0 = step 2 × 3h = 0.25 d ≈ 0)
     assert ok, "loop reported failure"
+    # S10: every save call received the loop's grid_type explicitly.
+    assert seen_grid_types, "spy never saw a _save_restart call"
+    assert all(g == "latlon" for g in seen_grid_types), seen_grid_types
+    data = np.load(files[-1], allow_pickle=False)
+    assert str(data["grid_type"]) == "latlon"
 
 
 def test_run_omip_loop_no_checkpoint_when_disabled(tmp_path):
@@ -233,3 +276,75 @@ def test_progress_plotter_handles_empty_run_dir(tmp_path):
     empty.mkdir()
     rc = plot_mod.main(["--run-dir", str(empty)])
     assert rc == 1
+
+
+# ============================================================================
+# FIX 2 (gridgate): _load_restart must refuse a cross-grid restart.
+#
+# _save_restart records the run's grid_type in the npz.  _load_restart
+# reconstructs the pytree from the run's template state; loading an MPAS
+# restart into a latlon run (or vice-versa) can silently mismatch if per-field
+# shapes coincide.  The load now compares the npz grid_type against the run's
+# grid_type and raises on disagreement.  Legacy restarts (written before the
+# grid_type key existed) lack the key and keep the prior behavior.
+# ============================================================================
+
+def test_gridgate_load_rejects_mismatched_grid_type(tmp_path):
+    """A restart saved on one grid must NOT load into a run on another grid."""
+    grid, z_coord, _, _, _ = _make_tiny_latlon_setup(n_lat=4, n_lon=8)
+    state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
+    # Saved as a latlon restart (grid_type='latlon' recorded in the npz).
+    fname = run_omip._save_restart(state, day=3.0, step=7, output_dir=tmp_path,
+                                   grid_type="latlon")
+    with pytest.raises(ValueError, match="grid_type"):
+        run_omip._load_restart(fname, state, grid_type="mpas")
+
+
+def test_gridgate_load_accepts_matching_grid_type(tmp_path):
+    """A matching grid_type loads without error and returns the saved
+    provenance (day/step)."""
+    grid, z_coord, _, _, _ = _make_tiny_latlon_setup(n_lat=4, n_lon=8)
+    state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
+    fname = run_omip._save_restart(state, day=3.0, step=7, output_dir=tmp_path,
+                                   grid_type="latlon")
+    loaded, restart_day, restart_step = run_omip._load_restart(
+        fname, state, grid_type="latlon")
+    assert restart_day == 3.0
+    assert restart_step == 7
+    # Prognostic fields round-trip.
+    np.testing.assert_array_equal(
+        np.asarray(loaded.T.data), np.asarray(state.T.data))
+
+
+def test_gridgate_load_legacy_npz_without_key_no_raise(tmp_path):
+    """A restart written before the grid_type key existed lacks the key;
+    loading it under any grid_type keeps the prior best-effort behavior
+    (no raise) so old checkpoints still resume."""
+    grid, z_coord, _, _, _ = _make_tiny_latlon_setup(n_lat=4, n_lon=8)
+    state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
+    fname = run_omip._save_restart(state, day=3.0, step=7, output_dir=tmp_path,
+                                   grid_type="latlon")
+    # Rewrite the npz without the grid_type key (legacy format).
+    payload = dict(np.load(fname, allow_pickle=False))
+    payload.pop("grid_type")
+    legacy = tmp_path / "restart_legacy.npz"
+    np.savez_compressed(legacy, **payload)
+
+    # No raise even under a different run grid_type.
+    loaded, restart_day, restart_step = run_omip._load_restart(
+        legacy, state, grid_type="mpas")
+    assert restart_day == 3.0
+    assert restart_step == 7
+
+
+def test_gridgate_load_default_grid_type_none_skips_check(tmp_path):
+    """Back-compat: called without a grid_type (default None) the check is
+    skipped — existing positional callers are unaffected."""
+    grid, z_coord, _, _, _ = _make_tiny_latlon_setup(n_lat=4, n_lon=8)
+    state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
+    fname = run_omip._save_restart(state, day=2.0, step=5, output_dir=tmp_path,
+                                   grid_type="mpas")
+    # Even though the npz says 'mpas', a None run grid_type skips the guard.
+    loaded, restart_day, restart_step = run_omip._load_restart(fname, state)
+    assert restart_day == 2.0
+    assert restart_step == 5

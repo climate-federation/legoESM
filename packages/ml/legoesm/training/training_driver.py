@@ -80,7 +80,7 @@ def _make_driver_optimizer(
 # Shared helpers (avoid copy-paste across modes)
 # ======================================================================
 
-def _build_training_segment(model, step_unified, grid, sigma, dt,
+def build_training_segment(model, step_unified, grid, sigma, dt,
                             fric_decay=None, **extra_kwargs):
     """Build a segment function with standard training defaults.
 
@@ -411,7 +411,7 @@ def train_physics_params(
         # ``step_unified`` is param-independent (built once above); only the
         # segment kwargs carry the (traced) trainable values, so the gradient
         # path to ``trainable`` runs through ``build_segment_fn``.
-        return _build_training_segment(
+        return build_training_segment(
             model, step_unified, grid, sigma, dt,
             **trainable.to_segment_kwargs(),
         )
@@ -473,7 +473,7 @@ def train_neural_gcm(
 
     def make_run_seg(nn_phys):
         step_unified = make_neural_step_unified(nn_phys, adapter)
-        return _build_training_segment(model, step_unified, grid, sigma, dt)
+        return build_training_segment(model, step_unified, grid, sigma, dt)
 
     optimizer = _make_driver_optimizer(
         lr, "adamw", n_epochs, len(initial_carries),
@@ -551,7 +551,7 @@ def train_sfno_coupled(
             mode=coupling_mode,
             traditional_step_unified=traditional_step,
         )
-        return _build_training_segment(model, step_unified, grid, sigma, dt)
+        return build_training_segment(model, step_unified, grid, sigma, dt)
 
     optimizer = _make_driver_optimizer(
         lr, "adamw", n_epochs, len(initial_carries),

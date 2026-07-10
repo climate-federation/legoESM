@@ -156,6 +156,20 @@ def _run_slab(n_days, config=None, start_day=0.0, T_init=285.0, carbon=False):
     sw_acc = jnp.zeros(NCOL)
     lw_net_acc = jnp.zeros(NCOL)
 
+    # Compile the step ONCE and reuse it across all timesteps.  The eager
+    # per-step call path re-lowers the soil solver's ``lax.scan`` sweeps on
+    # every iteration under jax>=0.9, leaking compiled executables per step —
+    # a multi-day (hundreds-of-steps) run otherwise grows unbounded and
+    # segfaults.  Production time-stepping runs inside a jitted ``scan``, so
+    # this matches it.  ``config``/``U_MIN``/``dt``/``LATITUDES`` are captured
+    # as constants; ``carbon_state`` (None or pytree) is a traced argument.
+    @jax.jit
+    def _step(state, forcing, carbon_state, doy):
+        return step_land(
+            state, forcing, config, U_MIN, dt,
+            lat=LATITUDES, carbon_state=carbon_state, doy=doy,
+        )
+
     for i in range(n_steps):
         t = start_day * 86400.0 + i * dt
         day = (t / 86400.0) % 365.0
@@ -164,10 +178,7 @@ def _run_slab(n_days, config=None, start_day=0.0, T_init=285.0, carbon=False):
         forcing = _make_forcing(NCOL, LATITUDES, day, hour)
         doy = day
 
-        state, response, carbon_state = step_land(
-            state, forcing, config, U_MIN, dt,
-            lat=LATITUDES, carbon_state=carbon_state, doy=doy,
-        )
+        state, response, carbon_state = _step(state, forcing, carbon_state, doy)
 
         T_history.append(np.asarray(state.T_soil.data))
         W_history.append(np.asarray(state.W_bucket.data))
@@ -219,6 +230,17 @@ def _run_multilayer(n_days, config=None, start_day=0.0, carbon=False):
     snow_history = []
     runoff_history = []
 
+    # Compile the step ONCE and reuse it across all timesteps (see _run_slab):
+    # the eager per-step path re-lowers the soil solver's ``lax.scan`` sweeps
+    # every iteration under jax>=0.9, leaking executables and segfaulting a
+    # multi-day run.  Production runs inside a jitted ``scan``; this matches it.
+    @jax.jit
+    def _step(state, forcing, carbon_state, doy):
+        return step_multilayer_land(
+            state, forcing, config, U_MIN, dt,
+            lat=LATITUDES, carbon_state=carbon_state, doy=doy,
+        )
+
     for i in range(n_steps):
         t = start_day * 86400.0 + i * dt
         day = (t / 86400.0) % 365.0
@@ -227,10 +249,7 @@ def _run_multilayer(n_days, config=None, start_day=0.0, carbon=False):
         forcing = _make_forcing(NCOL, LATITUDES, day, hour)
         doy = day
 
-        state, response, carbon_state = step_multilayer_land(
-            state, forcing, config, U_MIN, dt,
-            lat=LATITUDES, carbon_state=carbon_state, doy=doy,
-        )
+        state, response, carbon_state = _step(state, forcing, carbon_state, doy)
 
         T_top_history.append(np.asarray(state.T_soil[:, 0]))
         theta_top_history.append(np.asarray(state.theta_soil[:, 0]))

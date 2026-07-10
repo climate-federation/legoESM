@@ -341,3 +341,27 @@ def test_dynamic_ocean_shape_mismatch_raises(tmp_path):
     np.savez(tmp_path / "coupled_day_0002.npz", **arrays)
     with pytest.raises(ValueError, match="3D-ocean shape"):
         drv.load_coupled_checkpoint(2.0, checkpoint_dir=str(tmp_path))
+
+
+# ---------------------------------------------------------------------------
+# Dynamic-ocean cold-start stack wiring: _init_dynamic_ocean forces the
+# OMIP-validated CFL-capped Laplacian-Smagorinsky eddy viscosity + implicit_cn
+# barotropic solver via LatLonCGridOceanConfig.replace_flat(...) (~line 337).
+# replace_flat routes the flat names into their nested sub-configs
+# (C_smag_lap / smag_cfl_safety -> LateralViscosityConfig; barotropic_solver ->
+# BarotropicConfig); this pins that the overrides actually land there on the
+# built model (the smag cap is what keeps the WOA/geostrophic cold start from
+# blowing up, so a broken route would silently un-stabilise the run).
+# ---------------------------------------------------------------------------
+
+
+def test_dynamic_ocean_config_wires_smag_cap_and_implicit_barotropic(tmp_path):
+    """The dynamic 3D-ocean build wires the cold-start viscosity cap +
+    implicit_cn barotropic into the model config's nested sub-configs."""
+    drv = _make_dynamic_driver(tmp_path)
+    ocfg = drv._ocean_model.config
+    # CFL-capped Laplacian-Smagorinsky (LateralViscosityConfig).
+    assert ocfg.lateral_viscosity.C_smag_lap == 3.0
+    assert ocfg.lateral_viscosity.smag_cfl_safety == 0.125
+    # Implicit Crank-Nicolson barotropic solver (BarotropicConfig).
+    assert ocfg.barotropic.barotropic_solver == "implicit_cn"

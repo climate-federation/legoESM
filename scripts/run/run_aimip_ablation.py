@@ -163,7 +163,7 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
         for w in (base_cfg.get("eval_windows") or ())
     ) or None
 
-    train_ic, train_targ = load_training_data(
+    train_ic, train_targ, _ic_times = load_training_data(
         spec_cfg, grid, sigma, cache_dir, windows=spec_cfg.windows,
     )
 
@@ -190,7 +190,7 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
         start_year=int(base_cfg.get("eval_year", 2017)),
         windows=eval_windows,
     )
-    ic_states, target_carries = load_training_data(
+    ic_states, target_carries, _ic_times = load_training_data(
         eval_cfg, grid, sigma, cache_dir, windows=eval_windows,
     )
 

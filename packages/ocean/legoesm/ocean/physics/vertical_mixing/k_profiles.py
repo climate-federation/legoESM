@@ -38,6 +38,43 @@ from legoesm.ocean.physics.vertical_mixing._shared import (
     surface_buoyancy_flux,
 )
 
+__physics_contract__ = {
+    "summary": (
+        "Assemble the total vertical (K_v, A_v) at interior interfaces for the "
+        "implicit solver by SUMMING the active closures (vertical-mixing scheme "
+        "+ convection + internal-wave mixing), capped at KPP K_max; no tendency "
+        "is applied here."
+    ),
+    "inputs": {
+        "state.u": "m/s", "state.v": "m/s", "state.T": "degC", "state.S": "psu",
+        "surface_forcing.tau_x": "N/m^2", "surface_forcing.q_net": "W/m^2",
+    },
+    "outputs": {
+        "K_v": "m^2/s", "A_v": "m^2/s", "tke_new": "m^2/s^2",
+    },
+    "sign_convention": (
+        "K_v, A_v >= 0 at interior interfaces; combined by SUM across the active "
+        "closures then min-capped at KPP K_max (when KPP is active); zeroed at "
+        "non-wet (sub-seafloor) interfaces; z positive up. No flux is applied "
+        "here — the implicit solver applies the diffusion and closes the budget; "
+        "an unknown scheme raises ValueError."
+    ),
+    # Pure diffusivity/viscosity producer: nothing conserved here; the budget
+    # closes in the implicit diffusion solver.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": (
+        "Composition of Large-McWilliams-Doney (1994) KPP, Pacanowski-Philander "
+        "(1981), Gaspar (1990)/Burchard (2002) TKE and de Lavergne et al. (2020) "
+        "internal-wave mixing; budget closed by the implicit solver"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_vmix_k_profiles_direct.py — the summed profile "
+        "equals the explicit schemes' K_v/A_v; K/A zeroed at dry interfaces; "
+        "an unknown vertical_mixing scheme raises ValueError."
+    ),
+}
+
 
 def compute_vertical_K_profiles(
     state,
@@ -52,6 +89,8 @@ def compute_vertical_K_profiles(
     dt_tke: float | None = None,
     tke_source=None,
     return_tke: bool = False,
+    lat_deg=None,
+    iwm_fields=None,
 ) -> (
     tuple[jnp.ndarray, jnp.ndarray]
     | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -149,7 +188,8 @@ def compute_vertical_K_profiles(
         K_vmix, A_vmix, tke_new = _vmix_K_profiles(
             state, z_coord, surface_forcing, vmix, physics_config.constants,
             eos_fn=eos_fn,
-            tke_old=tke_old, dt_tke=dt_tke, tke_source=tke_source)
+            tke_old=tke_old, dt_tke=dt_tke, tke_source=tke_source,
+            lat_deg=lat_deg)
         K_v_total = K_v_total + K_vmix
         A_v_total = A_v_total + A_vmix
 
@@ -191,6 +231,32 @@ def compute_vertical_K_profiles(
         K_max = vmix.kpp.K_max
         K_v_total = jnp.minimum(K_v_total, K_max)
         A_v_total = jnp.minimum(A_v_total, K_max)
+
+    # Internal wave-driven mixing (NEMO zdfiwm, de Lavergne 2020) —
+    # ADDITIVE on top of the closure, AFTER the KPP saturation clip so the
+    # wave contribution keeps its own [k_min, k_max] bounds (NEMO's
+    # zdfphy order: the closure runs first, zdf_iwm then ADDS onto
+    # avt/avs/avm with no combined cap).  Contributes to BOTH tracer
+    # diffusivity and momentum viscosity.  The wet-interface mask below
+    # zeroes it at the seafloor (NEMO's wmask factor).
+    iwm_cfg = getattr(vmix, "iwm", None)
+    if iwm_cfg is not None and iwm_cfg.enabled:
+        if iwm_cfg.tsdiff:
+            # avs = avt * ratio needs a SEPARATE salinity diffusivity
+            # channel through the implicit tracer solve; the lat-lon
+            # solve shares one K between T and S.  Fail loud rather than
+            # silently ignoring the requested differential mixing.  (The
+            # ORCA1 oracle runs ln_tsdiff = .false., so the faithful
+            # comparison path is unaffected.)
+            raise ValueError(
+                "IWMConfig.tsdiff=True (differential T/S wave-driven "
+                "mixing) is not supported on the shared-K implicit tracer "
+                "solve; set tsdiff=False (the ORCA1 oracle value).")
+        K_iwm = iwm_K_profile(
+            state, z_coord, physics_config, iwm_cfg,
+            eos_fn=eos_fn, iwm_fields=iwm_fields)
+        K_v_total = K_v_total + K_iwm
+        A_v_total = A_v_total + K_iwm
 
     # Zero K/A (and the prognostic TKE) at non-wet interfaces (partial-cell
     # coords only; see the dry-cell guard above).  The implicit solve then
@@ -254,7 +320,8 @@ def _surface_buoyancy_flux(surface_forcing, state, constants_config,
 
 def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                      constants_config=ConstantsConfig(), eos_fn=None,
-                     *, tke_old=None, dt_tke=None, tke_source=None):
+                     *, tke_old=None, dt_tke=None, tke_source=None,
+                     lat_deg=None):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
     For ``constant`` / ``richardson`` this duplicates only the K
@@ -290,10 +357,25 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         from legoesm.ocean.physics.vertical_mixing.richardson import (
             richardson_vertical_mixing,
         )
+        # Adiabatic PP81 N² (Veros parcel displacement) needs the cell-centre
+        # hydrostatic pressure + the same EOS as the dynamical core. Only
+        # computed when the config opts in (n2_mode="adiabatic") so the default
+        # in-situ path is unchanged (mirrors the tke branch below).
+        rich_p_cell = None
+        if getattr(vmix_cfg.richardson, "n2_mode", "insitu") == "adiabatic":
+            from legoesm.ocean.eos import (
+                compute_hydrostatic_pressure, maybe_partial_h_actual,
+            )
+            rich_h_actual = maybe_partial_h_actual(state, z_coord)
+            rich_p_cell = compute_hydrostatic_pressure(
+                rho, state.eta.data, z_coord.dz_ref, J,
+                constants_config.rho_0, h_actual=rich_h_actual,
+            )
         out = richardson_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             rho, z_coord, J, vmix_cfg.richardson,
             apply_diffusion=False,
+            p_cell=rich_p_cell, eos_fn=eos_fn,
         )
         return out.K_v, out.A_v, None
 
@@ -420,6 +502,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 z_interface=z_coord.z_half_ref[1:-1],
                 external_source=tke_source,
                 dz_surface=dz_surface, boundary_cap=_mxl1_cap,
+                lat_deg=lat_deg,
             )
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
@@ -440,6 +523,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             # downward, interior interfaces drop the surface (k=0) + bottom.
             z_interface=z_coord.z_half_ref[1:-1],
             dz_surface=dz_surface, boundary_cap=_mxl1_cap,
+            lat_deg=lat_deg,
         )
         return tke_out.K_H, tke_out.K_M, None
 
@@ -563,10 +647,93 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
     cfg = conv_cfg.enhanced_diffusion
     J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
     rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
+    # Adiabatic N² trigger (cfg.n2_mode == "adiabatic") needs the cell-centre
+    # hydrostatic pressure + the model EOS; computed only when opted in so the
+    # default in-situ path is bit-identical (mirrors the richardson/tke branches
+    # in _vmix_K_profiles).
+    ed_p_cell = None
+    if getattr(cfg, "n2_mode", "insitu") == "adiabatic":
+        from legoesm.ocean.eos import (
+            compute_hydrostatic_pressure, maybe_partial_h_actual,
+        )
+        ed_h_actual = maybe_partial_h_actual(state, z_coord)
+        ed_p_cell = compute_hydrostatic_pressure(
+            rho, state.eta.data, z_coord.dz_ref, J,
+            ConstantsConfig().rho_0, h_actual=ed_h_actual,
+        )
     # Shared, AD-safe helper — bit-for-bit identical to the explicit
     # ``enhanced_diffusion_convection`` path (no duplicated numerics).
     # Returns the full K / A (including the scheme's own backgrounds);
     # summing across schemes here is the *same* operation as the explicit
     # path: ``div(K1·∇T) + div(K2·∇T) = div((K1+K2)·∇T)``.
-    K, A, _ = convective_K_A_flag(rho, z_coord.dz_ref, J, cfg)
+    K, A, _ = convective_K_A_flag(
+        rho, z_coord.dz_ref, J, cfg,
+        T=state.T.data, S=state.S.data, p_cell=ed_p_cell, eos_fn=eos_fn,
+    )
     return K, A
+
+
+def iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
+                   eos_fn=None, iwm_fields=None):
+    """Internal wave-driven diffusivity at interior interfaces (zdfiwm).
+
+    Assembles the column geometry (NEMO gdept / e3w / ht analogues) and
+    the interface N², then delegates the physics to
+    :func:`..internal_wave_mixing.compute_iwm_diffusivity` (single-owner
+    numerics).  ``iwm_fields`` is an :class:`..internal_wave_mixing.
+    IWMForcing` of static 2-D maps (the de Lavergne product regridded to
+    the model grid); ``None`` falls back to the uniform constant-power
+    maps built from the config scalars.
+
+    Geometry note: on an :class:`OceanPartialCellCoordinate` the depths
+    and spacings come from the partial thicknesses (``h_partial·J`` —
+    exactly NEMO's partial-aware e3t/gdept construction); on a pure
+    z-star coordinate they are the reference geometry stretched by the
+    Jacobian.  ``N²`` uses the shared ``compute_N2`` in-situ mode
+    (clipped >= 0) — the same construction as NEMO's ``MAX(0, rn2)``
+    usage in every zdfiwm structure function.
+    """
+    from legoesm.ocean.physics.vertical_mixing._shared import compute_N2
+    from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+        compute_iwm_diffusivity, uniform_iwm_forcing,
+    )
+    from legoesm.ocean.vertical import OceanPartialCellCoordinate
+
+    constants_config = physics_config.constants
+    T = state.T.data
+    dtype = T.dtype
+    J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
+    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
+
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        # Partial-aware geometry: actual per-cell thickness (0 below the
+        # seafloor), centre depths from its cumsum (NEMO gdept), column
+        # depth = wet-column sum (NEMO ht).
+        h_act = z_coord.h_partial * J[..., jnp.newaxis]
+        depth_cell = jnp.cumsum(h_act, axis=-1) - 0.5 * h_act
+        H_col = jnp.sum(h_act, axis=-1)
+        dz_w = 0.5 * (h_act[..., :-1] + h_act[..., 1:])
+    else:
+        depth_cell = -z_coord.z_full_ref * J[..., jnp.newaxis]
+        H_col = -z_coord.z_half_ref[-1] * J
+        dz_w = z_coord.dz_half_ref * J[..., jnp.newaxis]
+    depth_cell = depth_cell.astype(dtype)
+    dz_w = dz_w.astype(dtype)
+
+    N2 = compute_N2(
+        rho, dz_w, constants_config.rho_0, g=constants_config.g,
+        n2_mode="insitu",
+    )
+
+    if iwm_fields is None:
+        iwm_fields = uniform_iwm_forcing(iwm_cfg, H_col.shape, dtype=dtype)
+
+    K_iwm, _ratio = compute_iwm_diffusivity(
+        iwm_fields, depth_cell, dz_w, H_col, N2,
+        cfg=iwm_cfg, rho_0=constants_config.rho_0,
+    )
+    # NEMO applies wmask inside zdf_iwm; here the caller's wet-interface
+    # guard (compute_vertical_K_profiles tail) zeroes non-wet interfaces,
+    # and dry COLUMNS (H = 0) already produce the k_min floor which the
+    # land mask removes in the tracer/momentum solves.
+    return K_iwm.astype(dtype)

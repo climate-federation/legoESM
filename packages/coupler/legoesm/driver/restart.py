@@ -68,6 +68,11 @@ class RestartMetadata(NamedTuple):
     step: int
     day: float
     git_hash: str               # empty string if not in a git repo
+    # Storage dtype the digest was computed at (e.g. "float32").  Empty for
+    # legacy checkpoints written before this field existed; the validator then
+    # falls back to probing the active policy dtype and its fp32/fp64 sibling
+    # (a cross-precision restart re-hashes losslessly at the SAVED dtype).
+    storage_dtype: str = ""
 
 
 class ReproducibilityReport(NamedTuple):
@@ -711,6 +716,7 @@ def save_restart(
         step=step,
         day=day,
         git_hash=_get_git_hash(),
+        storage_dtype=np.dtype(_sd).name,
     )
 
     # 5. Write companion JSON
@@ -747,11 +753,65 @@ def load_restart(
     Returns
     -------
     tuple
-        ``(state, q_v, step, day, loaded_config, diag_accumulators, q_c, q_r, metadata)``
-        where *metadata* is a :class:`RestartMetadata` (or ``None`` if the
+        ``(state, q_v, step, day, loaded_config, diag_accumulators, q_c, q_r,
+        metadata, carry_aux)`` where *metadata* is a :class:`RestartMetadata` (or ``None`` if the
         companion ``.meta.json`` is absent).
     """
     path = Path(path)
+
+    # 0. Spectral checkpoint (iter 92): a discretization='spectral' run's
+    #    ``ModelDriver.save_checkpoint`` writes the five ``*_hat`` coefficient arrays
+    #    + a ``spectral_layout`` marker via ``np.savez`` — NOT the grid layout
+    #    ``load_checkpoint_auto`` reads.  Reconstruct the ``SpectralHydrostaticState``
+    #    directly (the SAME canonical helper the in-driver restart uses, template=None
+    #    ⇒ plain Field coefficients) so an offline caller (the one-shot compare CLI,
+    #    which then synthesizes grid winds via ``grid_winds_from_spectral``) can load
+    #    it.  The spectral save carries no config / diag / q_c/q_r / carry_aux and no
+    #    companion ``.meta.json`` → those are ``None``; q_v is the grid-space tracer.
+    if path.is_file() and path.suffix == ".npz":
+        with np.load(path) as d:
+            if "spectral_layout" in d.files:
+                from legoesm.atmosphere.dynamics.spectral_pe import (
+                    reconstruct_spectral_state_from_npz,
+                )
+                # strict (default): validate the coefficient shapes against the
+                # configured grid (n_sh = grid.lap) + sigma (nlev) BEFORE
+                # reconstructing — the template=None path can't, and the downstream
+                # spectral→grid synthesis would otherwise fail with a less clear
+                # error.  Skipped only when grid/sigma are absent (unit harness); a
+                # SUPPLIED non-spectral grid (no .lap) is a config error → raise
+                # rather than silently skip (Codex iter 92).
+                if strict and grid is not None and sigma is not None:
+                    lap = getattr(grid, "lap", None)
+                    if lap is None:
+                        raise ValueError(
+                            f"spectral checkpoint loaded with a non-spectral grid "
+                            f"({type(grid).__name__} has no .lap) — --grid-type must "
+                            "be spectral/gaussian for a spectral restart."
+                        )
+                    n_sh = int(np.asarray(lap).shape[0])
+                    nlev = int(np.asarray(sigma.sigma_full).shape[0])
+                    expected = {
+                        "vor_hat": (n_sh, nlev), "div_hat": (n_sh, nlev),
+                        "T_hat": (n_sh, nlev), "lnps_hat": (n_sh,),
+                        "phis_hat": (n_sh,),
+                    }
+                    for nm, sh in expected.items():
+                        got = tuple(np.asarray(d[nm]).shape)
+                        if got != sh:
+                            raise ValueError(
+                                f"spectral restart {nm} shape {got} != expected {sh} "
+                                f"for the configured grid (n_sh={n_sh}) + sigma "
+                                f"(nlev={nlev}); --grid-type/--resolution/--nlev must "
+                                "match the run."
+                            )
+                state, step, day = reconstruct_spectral_state_from_npz(d)
+                q_v = (
+                    state.tracers["q_v"].data
+                    if state.tracers is not None and "q_v" in state.tracers
+                    else None
+                )
+                return state, q_v, step, day, None, None, None, None, None, None
 
     # 1. Delegate to auto-detecting loader (handles both .npz and .zarr).
     #    load_checkpoint_auto returns ExperimentConfig regardless of
@@ -830,20 +890,76 @@ def _validate_metadata(
             f"{metadata.nlev} but loaded state has nlev={loaded_nlev}."
         )
 
-    # State digest verification. Cast to storage_dtype to match save_restart.
+    # State digest verification (cross-precision aware).
     from legoesm.core.precision import get_policy
-    _sd = get_policy().storage
-    state_arrays = {
-        k: np.asarray(v, dtype=_sd)
-        for k, v in _state_arrays_from_checkpoint_args(state, q_v, q_c, q_r).items()
-    }
-    current_digest = compute_state_digest(state_arrays)
-    if current_digest != metadata.state_digest:
-        raise ValueError(
-            "State digest mismatch: the loaded arrays do not match the "
-            "SHA-256 digest recorded at save time. The checkpoint may be "
-            "corrupted or was modified after saving."
-        )
+    raw_arrays = _state_arrays_from_checkpoint_args(state, q_v, q_c, q_r)
+    _verify_state_digest(raw_arrays, metadata, np.dtype(get_policy().storage))
+
+
+def _verify_state_digest(raw_arrays, metadata, active_dtype) -> None:
+    """Verify ``metadata.state_digest`` against ``raw_arrays``.
+
+    The digest was computed at SAVE time at the then-active storage dtype.
+    Loading under a different precision policy up-casts the arrays, so hashing
+    at the ACTIVE dtype spuriously failed every cross-precision restart (e.g.
+    an fp32-written checkpoint resumed under ``--precision fp64``).  Re-casting
+    the loaded arrays back to the SAVED dtype is lossless for an up-cast, so
+    the digest can still be verified exactly.
+
+    - ``metadata.storage_dtype`` recorded (new checkpoints): hash at that dtype.
+    - Legacy metadata (field empty): try the active dtype, then its
+      fp32/fp64 sibling; a sibling match is a verified cross-precision restart
+      (warn, accept).
+    - A LOSSY path (saved wider than loaded, e.g. fp64 checkpoint under fp32)
+      cannot be verified — the load itself discarded bits; warn, don't raise.
+    - No candidate matches at the saved/candidate dtypes: corruption -> raise.
+    """
+    def _digest_at(dt) -> str:
+        return compute_state_digest(
+            {k: np.asarray(v, dtype=dt) for k, v in raw_arrays.items()})
+
+    active_dtype = np.dtype(active_dtype)
+    if metadata.storage_dtype:
+        saved_dtype = np.dtype(metadata.storage_dtype)
+        if saved_dtype.itemsize > active_dtype.itemsize:
+            warnings.warn(
+                f"Cross-precision restart: checkpoint saved at "
+                f"{saved_dtype.name} but loaded under {active_dtype.name}; the "
+                "load discarded precision, so the state digest cannot be "
+                "verified.",
+                stacklevel=4,
+            )
+            return
+        if _digest_at(saved_dtype) == metadata.state_digest:
+            if saved_dtype != active_dtype:
+                warnings.warn(
+                    f"Cross-precision restart: digest verified at the saved "
+                    f"dtype {saved_dtype.name}; arrays were up-cast to "
+                    f"{active_dtype.name}.",
+                    stacklevel=4,
+                )
+            return
+    else:
+        # Legacy metadata: dtype unknown.  Probe the active dtype, then its
+        # fp32/fp64 sibling (the only storage dtypes the policy system uses).
+        if _digest_at(active_dtype) == metadata.state_digest:
+            return
+        sibling = np.dtype(
+            np.float64 if active_dtype == np.float32 else np.float32)
+        if sibling.itemsize <= active_dtype.itemsize and \
+                _digest_at(sibling) == metadata.state_digest:
+            warnings.warn(
+                f"Cross-precision restart (legacy metadata): digest verified "
+                f"at {sibling.name}; arrays were up-cast to "
+                f"{active_dtype.name}.",
+                stacklevel=4,
+            )
+            return
+    raise ValueError(
+        "State digest mismatch: the loaded arrays do not match the "
+        "SHA-256 digest recorded at save time. The checkpoint may be "
+        "corrupted or was modified after saving."
+    )
 
 
 # ---------------------------------------------------------------------------

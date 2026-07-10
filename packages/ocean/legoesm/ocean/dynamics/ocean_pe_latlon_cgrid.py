@@ -56,10 +56,13 @@ from legoesm.ocean.state import (
     OMp25Config,
     SurfaceTracerForcing,
 )
+from legoesm import constants
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     apply_sponge_tracer_relaxation,
     bbl_distributed_drag_face_column,
     iterate_eos_and_pressure_anomaly,
+    nemo_effective_bottom_drag_r,
+    validate_bottom_drag_scheme,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     biharmonic_scaling_factor,
@@ -2777,18 +2780,75 @@ def _bc_horizontal_viscosity(
             diag_Cl_leith_v, kdiss_h_cell)
 
 
-def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid):
-    """Bottom drag: linear or quadratic-with-floor (DRAG_BG_VEL), distributed
-    over a BBL thickness or applied at the partial-cell seafloor / deepest
-    level. Pure verbatim extraction (Q8). Returns ``(du_dt, dv_dt,
+def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid,
+                    h_k=None):
+    """Bottom drag: linear or quadratic-with-floor (DRAG_BG_VEL), NEMO
+    zdfdrg drag laws (``bottom_drag_scheme`` = "nemo_quadratic" /
+    "nemo_loglayer"), distributed over a BBL thickness or applied at the
+    partial-cell seafloor / deepest level. Pure verbatim extraction (Q8) +
+    the NEMO branch. ``h_k`` is the cell-centre actual layer thickness
+    (NEMO e3t) required by the NEMO schemes. Returns ``(du_dt, dv_dt,
     diag_botdrag_u, diag_botdrag_v)``."""
     diag_botdrag_u = jnp.zeros_like(du_dt)
     diag_botdrag_v = jnp.zeros_like(dv_dt)
-    if config.bottom_drag.bottom_drag_r > 0:
+    _scheme = validate_bottom_drag_scheme(
+        str(getattr(config.bottom_drag, "bottom_drag_scheme", "legacy")))
+    _nemo_drag = _scheme != "legacy"
+    u_bg = float(getattr(config.bottom_drag, "bottom_drag_bg_velocity", 0.0))
+    if config.bottom_drag.bottom_drag_r > 0 or _nemo_drag:
         # Drag acts on the full velocity (not perturbation) — the ocean
         # floor sees the total flow.  Consistent with MPAS and MOM6.
         # r is in [m/s]: du/dt = -r * u / dz_bottom  (resolution-independent stress).
         H_BBL = getattr(config.bottom_drag, "bottom_drag_bbl_thickness", 0.0)
+        if _nemo_drag:
+            # NEMO zdfdrg drag law (np_non_lin / np_loglayer): r = Cd·|U|
+            # from the BOTTOM-cell velocity at the tracer point, then a
+            # 2-point average of r back to the u/v faces — exactly NEMO's
+            # rCdU_bot at t-points averaged in dynzdf.  |U| uses the FULL
+            # speed √(ū²+v̄²+ke0); Cd is constant (nemo_quadratic) or the
+            # log-layer clip((κ/ln(½e3t_bot/z0))², cd0, cdmax) from the
+            # ACTUAL (partial, η-stretched) bottom-cell thickness h_k.
+            if h_k is None:
+                raise ValueError(
+                    "bottom_drag_scheme='nemo_*' requires the cell-centre "
+                    "layer thickness h_k to be passed to _bc_bottom_drag.")
+            u_c = 0.5 * (u[:, :-1, :] + u[:, 1:, :])   # (n_lat, n_lon, nlev)
+            v_c = 0.5 * (v[:-1, :, :] + v[1:, :, :])
+            if isinstance(z_coord, OceanPartialCellCoordinate):
+                _bl = jnp.maximum(z_coord.bottom_level, 0)   # -1 (land) -> 0
+                _bl_idx = _bl[..., jnp.newaxis]
+                u_bot = jnp.take_along_axis(u_c, _bl_idx, axis=-1)[..., 0]
+                v_bot = jnp.take_along_axis(v_c, _bl_idx, axis=-1)[..., 0]
+                h_bot = jnp.take_along_axis(h_k, _bl_idx, axis=-1)[..., 0]
+            else:
+                u_bot = u_c[..., -1]
+                v_bot = v_c[..., -1]
+                h_bot = h_k[..., -1]
+            r_t = nemo_effective_bottom_drag_r(
+                u_bot, v_bot, h_bot,
+                scheme=_scheme,
+                cd0=float(config.bottom_drag.bottom_drag_cd0),
+                cd_max=float(config.bottom_drag.bottom_drag_cdmax),
+                z0=float(config.bottom_drag.bottom_drag_z0),
+                ke0=float(config.bottom_drag.bottom_drag_ke0),
+                von_karman=constants.kappa_von_karman,
+            )
+            # t-point -> face 2-point averages (NEMO dynzdf:
+            # zCdu = 0.5*(rCdU(ji+1,jj)+rCdU(ji,jj))).  u-faces are
+            # lon-periodic (face l couples cells l-1, l; face n_lon
+            # repeats face 0, mirroring the bot_lev_u construction
+            # below); v walls take the adjacent interior value (v=0
+            # there, so the coefficient is inert).
+            r_u_inner = 0.5 * (jnp.roll(r_t, 1, axis=1) + r_t)
+            r_u = jnp.concatenate([r_u_inner, r_u_inner[:, 0:1]], axis=1)
+            r_v_int = 0.5 * (r_t[:-1, :] + r_t[1:, :])
+            r_v = jnp.pad(r_v_int, ((1, 1), (0, 0)), mode="edge")
+            # Broadcast over the level axis: the coefficient is a
+            # bottom-speed property (NEMO applies it to the bottom cell;
+            # the H_BBL>0 branch spreads the same stress over the K&E99
+            # band).
+            r_eff_u = r_u[..., jnp.newaxis]
+            r_eff_v = r_v[..., jnp.newaxis]
         # MOM6-style background-velocity floor (DRAG_BG_VEL).  When >0,
         # the linear-in-u drag is upgraded to quadratic-with-floor:
         #   r_eff = (bottom_drag_r / u_bg) · √(u² + u_bg²)
@@ -2797,8 +2857,7 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid):
         # quadratic Cd · |u| at |u| ≫ u_bg (production-equivalent
         # to MOM6 OM4's `BOTTOMDRAGLAW="quadratic"` with `DRAG_BG_VEL`).
         # u_bg=0 → exactly the legacy linear formula (bit-exact path).
-        u_bg = float(getattr(config.bottom_drag, "bottom_drag_bg_velocity", 0.0))
-        if u_bg > 0.0:
+        elif u_bg > 0.0:
             Cd_eq = config.bottom_drag.bottom_drag_r / u_bg
             r_eff_u = Cd_eq * jnp.sqrt(u * u + u_bg * u_bg)
             r_eff_v = Cd_eq * jnp.sqrt(v * v + u_bg * u_bg)
@@ -2881,8 +2940,9 @@ def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid):
             dz_bot_u = z_coord.dz_ref[-1] * jnp.maximum(interp_cell_to_uface(J), 1e-10)
             dz_bot_v = z_coord.dz_ref[-1] * jnp.maximum(interp_to_v_points(J, grid=grid), 1e-10)
             # Capture only at the bottom level; zeros elsewhere.
-            r_eff_u_bot = r_eff_u[..., -1] if u_bg > 0.0 else r_eff_u
-            r_eff_v_bot = r_eff_v[..., -1] if u_bg > 0.0 else r_eff_v
+            _r_is_3d = u_bg > 0.0 or _nemo_drag
+            r_eff_u_bot = r_eff_u[..., -1] if _r_is_3d else r_eff_u
+            r_eff_v_bot = r_eff_v[..., -1] if _r_is_3d else r_eff_v
             diag_botdrag_u = diag_botdrag_u.at[..., -1].set(
                 -r_eff_u_bot * u[..., -1] / dz_bot_u)
             diag_botdrag_v = diag_botdrag_v.at[..., -1].set(
@@ -3641,7 +3701,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
     # --- Bottom drag. ---
     du_dt, dv_dt, diag_botdrag_u, diag_botdrag_v = _bc_bottom_drag(
-        du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid,
+        du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid, h_k=h_k,
     )
 
     # --- Explicit background vertical viscosity (A_v). ---

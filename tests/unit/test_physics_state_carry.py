@@ -1225,3 +1225,30 @@ def test_nonhydrostatic_cdgrid_step_refuses_stateful_physics():
         nh.step(None, 1.0, physics_fn=fn)
     with pytest.raises(NotImplementedError, match="405"):
         nh.step_with_physics(None, 1.0, physics_fn=fn)
+
+
+def test_requires_phys_state_gwd_composite():
+    """#834 (codex code-review): a '+'-composite containing prognostic_spectral
+    carries a wave-action spectrum, so it MUST require a threaded PhysicsState;
+    a stateless composite must not.  Regresses the exact-string
+    ``== "prognostic_spectral"`` statefulness check that misclassified
+    ``mcfarlane+prognostic_spectral`` as stateless (dropping the spectrum carry
+    -> per-step reseed / seed shape mismatch)."""
+    from legoesm.atmosphere.physics.combined import (
+        PhysicsConfig, physics_config_requires_phys_state,
+    )
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        GravityWaveDragConfig,
+    )
+
+    def _req(scheme):
+        return physics_config_requires_phys_state(
+            PhysicsConfig(
+                gravity_wave_drag=GravityWaveDragConfig(scheme=scheme)))
+
+    assert _req("prognostic_spectral") is True
+    assert _req("mcfarlane+prognostic_spectral") is True
+    assert _req("prognostic_spectral+hines") is True
+    assert _req("hines+mcfarlane") is False
+    assert _req("mcfarlane") is False
+    assert _req("none") is False

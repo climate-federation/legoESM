@@ -40,7 +40,10 @@ import sys
 def _build_config(workdir: str):
     """Tiny C8/L4 gray-radiation dry config — identical for both modes."""
     from legoesm.driver.config import (
-        ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
+        DycoreConfig,
+        ExperimentConfig,
+        GridConfig,
+        OutputConfig,
     )
     return ExperimentConfig(
         grid=GridConfig(
@@ -48,8 +51,9 @@ def _build_config(workdir: str):
             vertical_coord="hybrid", p_top_Pa=200.0, stretching=2.0,
         ),
         dycore=DycoreConfig(discretization="centered", dt=600.0),
-        # diag/checkpoint OFF: required by the spmd milestone-1 refusal and
-        # keeps the serial reference byte-comparable (no host cadence).
+        # diag/checkpoint OFF by default: keeps the serial reference
+        # byte-comparable (no host cadence).  The 5a/5b/5c IO gates opt in
+        # via --checkpoint-days / --diag-days / --full-collect.
         output=OutputConfig(output_dir=workdir, diag_days=0,
                             checkpoint_days=0),
         days=1, dataset="analytical", radiation="gray",
@@ -62,8 +66,8 @@ def _final_state_arrays(driver) -> dict:
     """Pull the driver's final prognostic state to host numpy, gathering
     sharded leaves to the GLOBAL array first (multi-controller: every
     process must dispatch the same gather)."""
-    import numpy as np
     import jax
+    import numpy as np
     from jax.experimental import multihost_utils
 
     out = {}
@@ -135,8 +139,8 @@ def main(argv=None) -> int:
     )
     rank, n_procs = initialize_jax_distributed_multiprocess()
 
-    import numpy as np
     import jax
+    import numpy as np
 
     workdir = f"{args.workdir}/{args.mode}"
     cfg = _build_config(workdir)

@@ -73,7 +73,7 @@ from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.surface_albedo import LandAlbedoConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
 from legoesm.land.soil_thermal import SoilThermalConfig
-from legoesm.land.carbon.stomata import StomataConfig
+from legoesm.land.stomata import StomataConfig
 from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
 from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
@@ -131,6 +131,12 @@ _LAM_AMP = 1.5
 # 3e3 ~ 30 vs tmse~O(100-1000)) so it actually constrains the porosity scale + plant
 # water-stress thresholds without swamping the skin-T fit.  Tune via --lam-sm.
 _LAM_SM = 3.0e3
+# Global skin-T BIAS penalty (area-weighted mean of T_model - T_era, squared).  The
+# tmse term penalises the space-time RMSE, which a structured warm bias can survive; this
+# term drives the GLOBAL-MEAN skin-T bias toward 0 without distorting the spatial fit (the
+# RMSE term still holds the pattern).  Default 0 = OFF (no change to existing behaviour);
+# raise via --lam-tbias to explicitly target a low global skin-T bias.
+_LAM_TBIAS = 0.0
 # Per-cell gradient-norm cap for the pre-train pathological-cell filter.  Healthy land
 # cells have a per-cell |grad| ~ 1e1-1e3 (logged p90 ~ 3e3); a near-singular stiff-clay/
 # saturated cell whose MOST flux backward is approaching the overflow reads 1e5-1e41.
@@ -287,6 +293,24 @@ def baked_init_params() -> dict:
         th_glacier_cboost=_inv_ext(C.TUNED_GLACIER_CBOOST_MULTILAYER, "th_glacier_cboost"),
     )
     p.update({k: jnp.asarray(v) for k, v in over.items()})
+    return p
+
+
+def json_init_params(path: str) -> dict:
+    """Raw (unconstrained) params warm-started from a saved CONSTRAINED tuned JSON
+    (the inverse of the ``constrain_ext`` applied at save time), layered over the baked
+    raw defaults so any key absent from an older checkpoint keeps its baked value.
+
+    Lets a re-tune REFINE an existing tuned checkpoint (e.g. ``land_tuned_allgaps.json``,
+    the current production params) instead of restarting from the baked/CLM5 prior — the
+    correct warm start when the point of the re-tune is to beat the CURRENT best.
+    """
+    p = baked_init_params()
+    with open(path) as f:
+        cp = json.load(f)
+    for k, v in cp.items():
+        if k in BOUNDS_EXT:
+            p[k] = jnp.asarray(_inv_ext(np.asarray(v, dtype=float), k))
     return p
 
 
@@ -470,13 +494,14 @@ def forward_ml(cp, data):
     return Tsum / spm, Asum / jnp.maximum(Wsum, 1e-6), W_sm
 
 
-def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None):
+def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None, lam_tbias=None):
     # weights default to the module globals (CLI-tunable) so the jitted
     # value_and_grad picks up an updated lam_amp without re-partialling.
     lam_alb = _LAM_ALB if lam_alb is None else lam_alb
     lam_pft = _LAM_PFT if lam_pft is None else lam_pft
     lam_amp = _LAM_AMP if lam_amp is None else lam_amp
     lam_sm = _LAM_SM if lam_sm is None else lam_sm
+    lam_tbias = _LAM_TBIAS if lam_tbias is None else lam_tbias
     cp = constrain_ext(p)
     T, A, W = forward_ml(cp, data)
     w = data["w"][None, :]
@@ -513,8 +538,11 @@ def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None):
     # seasonal-amplitude term: penalise model monthly amplitude away from ERA5
     amp = (T.max(0) - T.min(0)) - (data["skt"].max(0) - data["skt"].min(0))
     samp = jnp.sum(data["w"] * amp ** 2) / jnp.sum(data["w"])
-    loss = (tmse + lam_alb * amse + lam_pft * ppft + lam_amp * samp + lam_sm * smse)
-    return loss, (tmse, amse, ppft, samp, smse)
+    # Global (area-weighted) skin-T bias [K].  ``ann`` is the per-cell annual bias above.
+    gbias = jnp.sum(data["w"] * ann) / jnp.sum(data["w"])
+    loss = (tmse + lam_alb * amse + lam_pft * ppft + lam_amp * samp + lam_sm * smse
+            + lam_tbias * gbias ** 2)
+    return loss, (tmse, amse, ppft, samp, smse, gbias)
 
 
 def _params_dict(p):
@@ -661,9 +689,9 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
         # Score + rank on the FULL training set at the log/checkpoint cadence (the batch
         # loss is too noisy to rank iterates); p here is the PRE-update iterate.
         if not use_batch:
-            score, (tm, am, pp, sa, sm) = float(l), aux
+            score, (tm, am, pp, sa, sm, gb) = float(l), aux
         elif log or (ckpt_path and it > 0 and it % ckpt_every == 0):
-            fl, (tm, am, pp, sa, sm) = fscore(p); score = float(fl)
+            fl, (tm, am, pp, sa, sm, gb) = fscore(p); score = float(fl)
         else:
             score = None
         if score is not None and np.isfinite(score) and score < best_l:
@@ -671,6 +699,7 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
         upd, state = opt.update(g, state); p = optax.apply_updates(p, upd)
         if log:
             print(f"# it {it:3d} loss {score:.3f} T-RMSE {float(jnp.sqrt(tm)):.3f} "
+                  f"T-bias {float(gb):+.3f} "
                   f"alb-RMSE {float(jnp.sqrt(am)):.4f} sm-RMSE {float(jnp.sqrt(sm)):.4f} "
                   f"perPFT {float(jnp.sqrt(pp)):.3f} seas-amp {float(jnp.sqrt(sa)):.3f}",
                   flush=True)
@@ -825,8 +854,13 @@ def _pack(g, latc, cmap, sub, lonc=None, hours=None, nh=_NH) -> dict:
 
 def main():
     global _BULK_SCHEME, _STOMATA_ON, _ELEV_BANDS_ON, _LAM_AMP, _LAM_SM, _LAM_PFT, _LAM_ALB
+    global _LAM_TBIAS
     jax.config.update("jax_enable_x64", True)
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--lam-tbias", type=float, default=_LAM_TBIAS,
+                    help="global skin-T BIAS penalty (area-weighted mean bias squared); "
+                         "raise to drive the global-mean warm/cold bias toward 0 without "
+                         "distorting the spatial fit (the RMSE term holds the pattern)")
     ap.add_argument("--lam-amp", type=float, default=_LAM_AMP,
                     help="seasonal-amplitude loss weight (raise to tighten the "
                          "seasonal cycle at some cost to the annual-mean fit)")
@@ -885,11 +919,17 @@ def main():
                          "production _TUNED_*_MULTILAYER params -> REFINE the well-tuned "
                          "model with the elevation bands active, instead of climbing "
                          "from the prior)")
+    ap.add_argument("--init-json", default=None,
+                    help="warm start from a saved CONSTRAINED tuned JSON (e.g. "
+                         "results/land_tuned_allgaps.json), inverse-constrained to raw "
+                         "and layered over the baked defaults; overrides --init-from so a "
+                         "re-tune REFINES the current best instead of the baked prior")
     args = ap.parse_args()
     _BULK_SCHEME, _STOMATA_ON = args.bulk, args.stomata
     _ELEV_BANDS_ON = args.elev_bands
     _LAM_AMP = args.lam_amp
     _LAM_SM = args.lam_sm
+    _LAM_TBIAS = args.lam_tbias
     _LAM_PFT = args.lam_pft
     _LAM_ALB = args.lam_alb
     data = load_training_data(args.diurnal_npz, args.n_sub, args.seed, args.days)
@@ -915,9 +955,13 @@ def main():
               f"{int(test_data['lat'].shape[0])} test (holdout {args.holdout:.0%}, "
               f"seed {args.seed})", flush=True)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    init_params = baked_init_params() if args.init_from == "baked" else None
-    if init_params is not None:
-        print("# warm-start: refining the production baked multilayer params", flush=True)
+    if args.init_json:
+        init_params = json_init_params(args.init_json)
+        print(f"# warm-start: refining tuned checkpoint {args.init_json}", flush=True)
+    else:
+        init_params = baked_init_params() if args.init_from == "baked" else None
+        if init_params is not None:
+            print("# warm-start: refining the production baked multilayer params", flush=True)
     tuned = train(data, n_iter=args.iters, lr=args.lr, ckpt_path=args.out, clip=args.clip,
                   prefilter=prefilter, batch=args.batch, init_params=init_params)
     with open(args.out, "w") as f:

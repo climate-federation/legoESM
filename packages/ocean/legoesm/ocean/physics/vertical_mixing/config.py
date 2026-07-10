@@ -6,6 +6,9 @@ from typing import NamedTuple
 
 from legoesm import constants
 from legoesm.ocean.physics.vertical_mixing.tidal import TidalMixingConfig
+from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+    IWMConfig,
+)
 
 
 __param_spec__ = {
@@ -47,6 +50,8 @@ __param_spec__ = {
         },
         "params": {
             "Prandtl_tke0": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
+            "lc_coeff": {"units": "1", "bounds": (0.05, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "NEMO zdftke rn_lc / Axell 2002 Langmuir cells", "shape": None},
+            "etau_frac": {"units": "1", "bounds": (0.01, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "NEMO zdftke rn_efr sub-ML TKE penetration", "shape": None},
             "alpha_tke": {"units": "1", "bounds": (9.9, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
             "bg_diff_scale": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Bryan-Lewis (1979) background-diffusivity amplitude", "shape": None},
             "c_eps": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
@@ -124,6 +129,8 @@ __param_spec__ = {
             "Ri_0": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
             "Ri_crit": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
             "ustar_speed_ratio": {"units": "1", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP u* surface-speed proxy (Large et al. 1994)", "shape": None},
+            "langmuir_coeff": {"units": "1", "bounds": (0.02, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP-Langmuir enhancement C_L (McWilliams & Sullivan 2000; Li et al. 2016 CVMix)", "shape": None},
+            "langmuir_number_default": {"units": "1", "bounds": (0.2, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "fully-developed-sea turbulent Langmuir number ~0.3 (Van Roekel et al. 2012)", "shape": None},
         },
     },
 }
@@ -143,6 +150,18 @@ class RichardsonVerticalMixingConfig(NamedTuple):
     K_bg: float = 1e-5   # Background diffusivity [m^2/s]
     A_bg: float = 1e-4   # Background viscosity [m^2/s]
     Pr_t: float = 10.0   # Turbulent Prandtl number
+    # ----- Static-stability N^2 mode for the gradient Richardson number -----
+    # ``"insitu"`` (default, BIT-IDENTICAL legacy) / ``"insitu_signed"``: N^2
+    #   from the in-situ density difference (``eos.compute_buoyancy_frequency``,
+    #   already signed/unclipped here — the downstream ``richardson_number``
+    #   clips Ri>=0), which carries the compressibility bias (~too stable).
+    # ``"adiabatic"``: PP81's TRUE static stability via adiabatic parcel
+    #   displacement to the upper cell's pressure
+    #   (``eos.compute_buoyancy_frequency_adiabatic``), SIGNED. Requires the
+    #   caller to thread cell-centre pressure ``p_cell`` (+ the model EOS) to
+    #   ``richardson_vertical_mixing``. Both integration factory and the
+    #   implicit k_profiles path supply it when this is selected.
+    n2_mode: str = "insitu"
 
 
 class TKEConfig(NamedTuple):
@@ -339,6 +358,31 @@ class TKEConfig(NamedTuple):
     #   convective K_M). This is the Veros ACC default.
     prandtl_mode: str = "unit"
     Prandtl_tke0: float = 10.0           # constant Prandtl number (Veros Prandtl_tke0)
+    # ----- NEMO zdftke surface terms (Langmuir + sub-ML TKE penetration) -----
+    # Faithful ports of NEMO 5.0.1 ``zdftke.F90``. BOTH are ON in NEMO's
+    # ``namelist_ref`` defaults, hence active in the DINO and ORCA1 oracles;
+    # both default OFF here (bit-identical legacy) and are enabled by the
+    # NEMO-faithful recipes (DINO).
+    # ``lc``: Langmuir-circulation TKE source (Axell 2002; NEMO ln_lc).
+    #   Stokes drift from the surface stress (Axell Eq. 44 via |τ| =
+    #   ρ_air·C_d·U₁₀²): ½W_lc² = ½·0.016²·|τ|/(ρ_air·C_d); LC depth h_lc
+    #   from the cumulative-PE criterion (Axell Eq. 47, zdftke.F90:338-356);
+    #   source u_s³·(lc_coeff·sin(πz/h_lc))³/h_lc added to the TKE RHS at
+    #   interfaces shallower than h_lc (zdftke.F90:358-370).
+    # ``etau_mode``: penetration of surface TKE below the mixed layer due to
+    #   near-inertial waves (NEMO nn_etau): "none" (=0, default) |
+    #   "below_ml" (=1): e(k) += etau_frac·e_sfc·exp(-z/h_tau) with
+    #   e_sfc = max(emin0, ebb·|τ|/ρ0) (zdftke.F90:265,492-496); applied
+    #   AFTER the TKE solve, BEFORE the K_M/K_H computation (NEMO step
+    #   order: tke_tke ends with etau, then tke_avn computes the K's).
+    # ``etau_htau_mode``: h_tau profile (NEMO nn_htau): "constant10m" (=0,
+    #   10 m everywhere — the namelist_ref/DINO default) | "latitude" (=1,
+    #   max(0.5, min(30, 45·|sin φ|)) m — requires ``lat_deg`` threading).
+    lc: bool = False
+    lc_coeff: float = 0.15               # NEMO rn_lc — LC vertical-velocity coefficient
+    etau_mode: str = "none"              # "none" | "below_ml"  (NEMO nn_etau 0/1)
+    etau_frac: float = 0.05              # NEMO rn_efr — fraction of surface TKE penetrating
+    etau_htau_mode: str = "constant10m"  # "constant10m" | "latitude" (NEMO nn_htau 0/1)
     # ----- Prognostic TKE carry (Veros enable_tke PROGNOSTIC form) -----
     # ``prognostic=False`` (default, BIT-IDENTICAL): the Mode-B quasi-steady
     #   diagnostic chain runs in ``compute_vertical_K_profiles`` — ``tke_old=None``
@@ -463,6 +507,14 @@ class KPPConfig(NamedTuple):
     # u_star proxy ratio when wind stress is absent: u* ~ ratio*|U_surface|
     # (~sqrt(C_d) drag-like closure knob).
     ustar_speed_ratio: float = 0.01
+    # --- Langmuir turbulence (KPP-Langmuir wave-enhanced surface mixing) ---
+    # Langmuir circulations (wind + Stokes-drift shear) enhance surface
+    # boundary-layer mixing. Enhancement factor eps_L = sqrt(1 + C_L/La_t^2)
+    # (>= 1) on the KPP velocity scales, where La_t is the turbulent Langmuir
+    # number. Opt-in; default off is byte-identical to classical KPP.
+    enable_langmuir: bool = False    # opt-in Langmuir enhancement
+    langmuir_coeff: float = 0.08     # C_L in eps_L = sqrt(1 + C_L/La_t^2)
+    langmuir_number_default: float = 0.3  # fallback La_t when no Stokes-drift input
 
 
 class CATKEConfig(NamedTuple):
@@ -555,3 +607,13 @@ class VerticalMixingConfig(NamedTuple):
     # ``ocean.coupler.tidal_mixing_apply.apply_tidal_mixing_step`` so it cannot
     # silently no-op inside the physics composition.
     tidal: TidalMixingConfig = TidalMixingConfig()
+    # Internal wave-driven mixing (NEMO zdfiwm, de Lavergne 2020) is
+    # ADDITIVE like tidal, but — unlike tidal — it contributes to BOTH the
+    # tracer diffusivity and the momentum viscosity, so it is applied
+    # inside ``k_profiles.compute_vertical_K_profiles`` (the implicit
+    # vertical-mixing path), AFTER the primary closure — exactly NEMO's
+    # zdfphy ordering (zdf_tke, then zdf_iwm adds onto avt/avs/avm).
+    # ``make_vertical_mixing_physics`` / ``make_ocean_physics`` RAISE if
+    # ``iwm.enabled=True`` (the explicit-tendency path cannot honour it),
+    # mirroring the tidal guard above.  Default off ⇒ bit-exact legacy.
+    iwm: IWMConfig = IWMConfig()

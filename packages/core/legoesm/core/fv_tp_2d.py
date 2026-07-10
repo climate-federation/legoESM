@@ -15,9 +15,17 @@ References
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
+import jax
 import jax.numpy as jnp
 
-from legoesm.grids.halo import pad_halo, pad_halo_pair_h2, synchronize_cgrid_fluxes
+from legoesm.grids.halo import (
+    pad_halo,
+    pad_halo_4d,
+    pad_halo_pair_h2,
+    synchronize_cgrid_fluxes,
+)
 
 _R3 = 1.0 / 3.0
 
@@ -919,6 +927,141 @@ def _deln_flux(nord, damp, q, fx, fy, cdgrid, mass=None):
     return fx, fy
 
 
+class _TpSetup(NamedTuple):
+    """Level-INDEPENDENT ``fv_tp_2d`` setup (grid geometry + PPM boundary offsets).
+
+    Extracted so the PURE-LOCAL PPM sweeps (:func:`_fv_tp_2d_sweep1` /
+    :func:`_fv_tp_2d_sweep2`) can be shared bit-for-bit between the 2D
+    :func:`fv_tp_2d` (one ``pad_halo`` per exchange) and the 4D-halo transport
+    (one ``pad_halo_4d`` for ALL levels — #811).  All fields are grid constants,
+    so under ``vmap(level)`` they are captured (unbatched) and vmap-safe.
+    """
+    n: int
+    area: jax.Array
+    use_duogrid: bool
+    halo_offsets: jax.Array | None
+    halo_dg: object
+    bounded_domain: bool
+    ox_L0: jax.Array | None
+    ox_R0: jax.Array | None
+    oy_L0: jax.Array | None
+    oy_R0: jax.Array | None
+    ox_L1: jax.Array | None
+    ox_R1: jax.Array | None
+    oy_L1: jax.Array | None
+    oy_R1: jax.Array | None
+
+
+def _fv_tp_2d_setup(cdgrid) -> _TpSetup:
+    """Grid-derived, level-independent ``fv_tp_2d`` config (see :class:`_TpSetup`).
+
+    Byte-identical to the inline setup that used to live at the top of
+    ``fv_tp_2d`` (the duogrid gate, ``bounded_domain`` flag, and the
+    ``halo_interp_offsets_h2`` extraction)."""
+    n = cdgrid.n
+    grid = cdgrid.base
+    area = grid.area
+    offsets_h2 = grid.halo_interp_offsets_h2
+
+    # bounded_domain = (regional | nested | duogrid); duogrid also switches
+    # pad_halo from interp_offsets mode to full duogrid mode.
+    dg = grid.duogrid
+    use_duogrid = dg is not None and dg.ng >= 2
+    halo_offsets = None if use_duogrid else offsets_h2
+    halo_dg = dg if use_duogrid else None
+    bounded_domain = bool(grid.bounded_domain)
+
+    # #811 MPI face-scatter: ``halo_interp_offsets_h2`` is KEPT FULL ``(6, ...)``
+    # by the scatter (it is GLOBAL-face-indexed — ``pad_halo_mpi`` /
+    # ``pad_halo_mpi_4d`` index it by global face id inside their per-owned-face
+    # loop, so ``halo_offsets`` above MUST stay full).  But the PPM boundary
+    # offsets ``ox_*``/``oy_*`` below feed the PURE-LOCAL, vectorised-over-all-
+    # faces ``_ppm_1d`` / ``_correct_dm``, which multiply SAME-FACE PPM slopes
+    # (sliced to the rank's OWNED faces under scatter) by these offsets — so they
+    # must carry the owned faces ONLY, else a ``(n_owned, n) x (6, n)`` broadcast
+    # error (the #811 blocker: the flux-form moisture substep is the first
+    # transport run under face-scatter on the non-duogrid grid).  Detect scatter
+    # by the grid's own (already-sliced) face count and slice the offsets to the
+    # owned GLOBAL faces; a no-op on single-rank / replicated (face count == 6),
+    # preserving bit-identity there.
+    ppm_offsets_h2 = offsets_h2
+    if offsets_h2 is not None and area.shape[0] != offsets_h2.shape[0]:
+        from legoesm.grids.halo import get_mpi_topology
+        topo = get_mpi_topology()
+        owned = (getattr(topo, "local_face_ids", None)
+                 if topo is not None else None)
+        if owned is None:
+            raise RuntimeError(
+                "fv_tp_2d setup: grid is face-sliced "
+                f"(faces={area.shape[0]}) but halo_interp_offsets_h2 is full "
+                f"(faces={offsets_h2.shape[0]}) with no active MPI topology to "
+                "identify the owned faces — cannot align the PPM boundary "
+                "offsets to the transported data (#811).")
+        ppm_offsets_h2 = offsets_h2[jnp.asarray(list(owned), dtype=jnp.int32)]
+
+    if ppm_offsets_h2 is not None:
+        # offsets_h2: (n_faces, 4, 2, n) — [face, edge, depth, cell]; WEST=0
+        # EAST=1 SOUTH=2 NORTH=3; depth 0 = adjacent to interior.  n_faces is the
+        # rank's owned-face count under scatter (== 6 single-rank/replicated).
+        ox_L0 = ppm_offsets_h2[:, 0, 0, :]
+        ox_R0 = ppm_offsets_h2[:, 1, 0, :]
+        oy_L0 = ppm_offsets_h2[:, 2, 0, :]
+        oy_R0 = ppm_offsets_h2[:, 3, 0, :]
+        ox_L1 = ppm_offsets_h2[:, 0, 1, :]
+        ox_R1 = ppm_offsets_h2[:, 1, 1, :]
+        oy_L1 = ppm_offsets_h2[:, 2, 1, :]
+        oy_R1 = ppm_offsets_h2[:, 3, 1, :]
+    else:
+        # Regional/nested: offsets unused (the bounded_domain gate in _ppm_1d
+        # short-circuits the offset path); None so any accidental use raises.
+        ox_L0 = ox_R0 = oy_L0 = oy_R0 = None
+        ox_L1 = ox_R1 = oy_L1 = oy_R1 = None
+
+    return _TpSetup(n, area, use_duogrid, halo_offsets, halo_dg, bounded_domain,
+                    ox_L0, ox_R0, oy_L0, oy_R0, ox_L1, ox_R1, oy_L1, oy_R1)
+
+
+def _fv_tp_2d_sweep1(q_full, q, crx, cry, xfx, yfx, ra_x, ra_y, s: _TpSetup,
+                     hord, apply_fortran_xppm_boundary):
+    """PURE-LOCAL first pass of ``fv_tp_2d``: the Y- and X-sweeps on the
+    PRE-HALOED ``q_full`` → the intermediate ``q_i``, ``q_j`` (+ the ``fx2``,
+    ``fy2`` reused by :func:`_fv_tp_2d_sweep2`).  No ``pad_halo`` — safe to
+    ``vmap`` over levels on a pre-4D-haloed ``q_full`` (#811)."""
+    fy2 = _yppm(q_full[:, 2:-2, :], cry, s.n, s.oy_L0, s.oy_R0, s.oy_L1, s.oy_R1,
+                use_duogrid=s.use_duogrid,
+                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+                bounded_domain=s.bounded_domain, hord=hord)
+    fyy = yfx * fy2
+    q_i = (q * s.area + fyy[:, :, :-1] - fyy[:, :, 1:]) / ra_y
+
+    fx2 = _xppm(q_full[:, :, 2:-2], crx, s.n, s.ox_L0, s.ox_R0, s.ox_L1, s.ox_R1,
+                use_duogrid=s.use_duogrid,
+                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+                bounded_domain=s.bounded_domain, hord=hord)
+    fxx = xfx * fx2
+    q_j = (q * s.area + fxx[:, :-1, :] - fxx[:, 1:, :]) / ra_x
+    return q_i, q_j, fx2, fy2
+
+
+def _fv_tp_2d_sweep2(q_i_pad, q_j_pad, fx2, fy2, crx, cry, xfx, yfx, s: _TpSetup,
+                     hord, apply_fortran_xppm_boundary):
+    """PURE-LOCAL second pass of ``fv_tp_2d``: the cross-sweeps on the PRE-HALOED
+    ``q_i_pad`` / ``q_j_pad`` and the flux combine ``0.5*(fx1+fx2)*xfx``.  The
+    ``mass`` branch of the original was identical to the ``else`` (both
+    ``*xfx``/``*yfx``), so it collapses here.  No ``pad_halo`` — vmap-safe."""
+    fx1 = _xppm(q_i_pad[:, :, 2:-2], crx, s.n, s.ox_L0, s.ox_R0, s.ox_L1, s.ox_R1,
+                use_duogrid=s.use_duogrid,
+                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+                bounded_domain=s.bounded_domain, hord=hord)
+    fy1 = _yppm(q_j_pad[:, 2:-2, :], cry, s.n, s.oy_L0, s.oy_R0, s.oy_L1, s.oy_R1,
+                use_duogrid=s.use_duogrid,
+                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
+                bounded_domain=s.bounded_domain, hord=hord)
+    fx = 0.5 * (fx1 + fx2) * xfx
+    fy = 0.5 * (fy1 + fy2) * yfx
+    return fx, fy
+
+
 def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
              nord=None, damp_c=None, mass=None,
              apply_cgrid_flux_sync=True,
@@ -956,125 +1099,25 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
         preserves prior behaviour bit-for-bit.  See iter-888 doc entry
         for scope and the uniform-grid simplification rationale.
     """
-    n = cdgrid.n
-    grid = cdgrid.base
-    area = grid.area
-    offsets_h2 = grid.halo_interp_offsets_h2
+    # Level-independent setup (grid geometry + PPM boundary offsets) and the two
+    # PURE-LOCAL sweeps are factored into shared helpers so the 4D-halo transport
+    # (#811) can reuse them bit-for-bit with ONE pad_halo_4d per exchange.
+    s = _fv_tp_2d_setup(cdgrid)
 
-    # Matches Fortran bounded_domain = (regional .or. nested .or. duogrid)
-    # (fv_arrays.F90:1512).  The flag gates face-boundary specials in
-    # tp_core.F90 and sw_core.F90 away from duogrid/bounded-domain paths.
-    #
-    # When duogrid is active we also switch `pad_halo` from interp_offsets
-    # mode to full duogrid mode so the halo quality that justifies the iv=1
-    # gate is actually delivered (mirrors the _pad_halo_auto_h2 pattern in
-    # operators_cdgrid.py).  pad_halo rejects both kwargs simultaneously.
-    dg = grid.duogrid
-    use_duogrid = dg is not None and dg.ng >= 2
-    halo_offsets = None if use_duogrid else offsets_h2
-    halo_dg = dg if use_duogrid else None
+    # Exchange 1: the transported field.
+    q_full = pad_halo(q, halo=2, interp_offsets=s.halo_offsets, duogrid=s.halo_dg)
+    q_i, q_j, fx2, fy2 = _fv_tp_2d_sweep1(
+        q_full, q, crx, cry, xfx, yfx, ra_x, ra_y, s,
+        hord, apply_fortran_xppm_boundary)
 
-    # Iter-890 (Codex iter-889b stop-time follow-up): the FB-chain
-    # `_ppm_1d` legacy face-boundary specials must also be bypassed on
-    # regional / nested bounded-domain panels (where `bounded_domain`
-    # is True but `use_duogrid` is False).  Forward `bounded_domain`
-    # to `_xppm` / `_yppm` so they can hand it through to `_ppm_1d`.
-    bounded_domain = bool(grid.bounded_domain)
-
-    # Iter-890c (Codex iter-890b stop-time fix).  Pre-iter-890b the
-    # offset extraction below would crash on regional / nested panels
-    # because `cubed_sphere.py:783` sets `halo_interp_offsets_h2=None`
-    # for single-face panels (`_pad_halo_wall` is the wall-BC path
-    # that makes the offsets unnecessary in the first place).
-    # iter-890b added a `NotImplementedError` guard, which Codex
-    # correctly noted converted a silent TypeError into an explicit
-    # crash on a path that should ACTUALLY work — the iter-890 gate
-    # already ensures the legacy boundary specials are bypassed for
-    # `bounded_domain=True`, so the offsets are unused on the regional
-    # path anyway.  iter-890c replaces the guard with conditional
-    # extraction: when `offsets_h2 is None` we set every offset to
-    # ``None`` and rely on `_ppm_1d`'s `fortran_legacy_face` gate
-    # (which is False for `bounded_domain=True`) to skip the offset-
-    # consuming code path entirely.  `pad_halo` already dispatches to
-    # `_pad_halo_wall` for single-face inputs regardless of
-    # `interp_offsets`, so the halo padding is correct on regional
-    # grids without further changes.
-
-    # Extract boundary offsets for sweep directions when available.
-    # offsets_h2: (6, 4, 2, n) — [face, edge, depth, cell_along_edge]
-    # WEST=0, EAST=1, SOUTH=2, NORTH=3; depth 0 = adjacent to interior
-    if offsets_h2 is not None:
-        ox_L0 = offsets_h2[:, 0, 0, :]   # WEST depth=0
-        ox_R0 = offsets_h2[:, 1, 0, :]   # EAST depth=0
-        oy_L0 = offsets_h2[:, 2, 0, :]   # SOUTH depth=0
-        oy_R0 = offsets_h2[:, 3, 0, :]   # NORTH depth=0
-        ox_L1 = offsets_h2[:, 0, 1, :]   # WEST depth=1
-        ox_R1 = offsets_h2[:, 1, 1, :]   # EAST depth=1
-        oy_L1 = offsets_h2[:, 2, 1, :]   # SOUTH depth=1
-        oy_R1 = offsets_h2[:, 3, 1, :]   # NORTH depth=1
-    else:
-        # Regional / nested panel: offsets are unused because the
-        # iter-890 `bounded_domain=True` gate inside `_ppm_1d` short-
-        # circuits the offset-consuming code path.  Set all offsets to
-        # None so any accidental use (which would indicate a gate
-        # regression) raises a clear AttributeError.
-        ox_L0 = ox_R0 = oy_L0 = oy_R0 = None
-        ox_L1 = ox_R1 = oy_L1 = oy_R1 = None
-
-    q_full = pad_halo(q, halo=2, interp_offsets=halo_offsets, duogrid=halo_dg)
-
-    # Pass 1: Y-sweep on q to produce q_i.
-    fy2 = _yppm(q_full[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
-                use_duogrid=use_duogrid,
-                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
-                bounded_domain=bounded_domain,
-                hord=hord)
-    fyy = yfx * fy2
-    q_i = (q * area + fyy[:, :, :-1] - fyy[:, :, 1:]) / ra_y
-
-    # Pass 2: X-sweep on q to produce q_j.  fx2 depends only on q_full
-    # (already padded), not on q_i, so this can be reordered up to here
-    # — letting us pack the q_i and q_j halos into a single SPMD
-    # collective below.
-    fx2 = _xppm(q_full[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
-                use_duogrid=use_duogrid,
-                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
-                bounded_domain=bounded_domain,
-                hord=hord)
-    fxx = xfx * fx2
-    q_j = (q * area + fxx[:, :-1, :] - fxx[:, 1:, :]) / ra_x
-
-    # Pack q_i and q_j into a single halo=2 exchange under SPMD; the
-    # MPI / local fallbacks reduce to two sequential ``pad_halo`` calls
-    # with identical arithmetic.  Mass conservation requires both halos
-    # to be filled before the cross-sweeps; the pair-pack drops the
-    # per-PPM halo=2 collective count from 3 → 2.
+    # Exchange 2: pack q_i and q_j into a single halo=2 exchange (mass
+    # conservation requires both halos filled before the cross-sweeps).
     q_i_pad, q_j_pad = pad_halo_pair_h2(
-        q_i, q_j, interp_offsets=halo_offsets, duogrid=halo_dg,
+        q_i, q_j, interp_offsets=s.halo_offsets, duogrid=s.halo_dg,
     )
-
-    fx1 = _xppm(q_i_pad[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
-                use_duogrid=use_duogrid,
-                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
-                bounded_domain=bounded_domain,
-                hord=hord)
-
-    fy1 = _yppm(q_j_pad[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
-                use_duogrid=use_duogrid,
-                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
-                bounded_domain=bounded_domain,
-                hord=hord)
-
-    if mass is not None:
-        # With mass: fx = 0.5*(fx1+fx2)*mfx, fy = 0.5*(fy1+fy2)*mfy
-        # (tp_core.F90:188-196).  Here mfx/mfy are the mass fluxes = xfx/yfx.
-        fx = 0.5 * (fx1 + fx2) * xfx
-        fy = 0.5 * (fy1 + fy2) * yfx
-    else:
-        # Without mass: fx = 0.5*(fx1+fx2)*xfx, fy = 0.5*(fy1+fy2)*yfx
-        # (tp_core.F90:207-216)
-        fx = 0.5 * (fx1 + fx2) * xfx
-        fy = 0.5 * (fy1 + fy2) * yfx
+    fx, fy = _fv_tp_2d_sweep2(
+        q_i_pad, q_j_pad, fx2, fy2, crx, cry, xfx, yfx, s,
+        hord, apply_fortran_xppm_boundary)
 
     # Del-n damping (tp_core.F90:197-201 and 217-222)
     if nord is not None and damp_c is not None and damp_c > 1e-4:
@@ -1089,7 +1132,7 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     # active for the mass-flux callers (`transport_step`).
     dg = cdgrid.base.duogrid
     if apply_cgrid_flux_sync and dg is not None and dg.ng >= 2:
-        fx, fy = synchronize_cgrid_fluxes(fx, fy, n)
+        fx, fy = synchronize_cgrid_fluxes(fx, fy, s.n)
 
     return fx, fy
 
@@ -1160,6 +1203,87 @@ def _finalize_transport(h, fx, fy, area, mass_target):
         h_new = h_pos * scale.astype(h_pos.dtype)
 
     return h_new
+
+
+def transport_step_4d(h_4d, ut_4d, vt_4d, dt, cdgrid, hord: int = 12):
+    """4D-halo (all-levels-one-message) MPI-aware ``transport_step`` (#811).
+
+    The per-level ``jax.vmap(transport_step)`` used by the flux-form moisture
+    substep makes ``fv_tp_2d``'s internal ``pad_halo`` a *vmapped* cross-face
+    ``sendrecv`` — a ``batch_axes`` failure under MPI face-scatter (CLAUDE.md:
+    never ``vmap(pad_halo)``).  This routes the TWO field halos through
+    ``pad_halo_4d`` (ONE message for all levels each) and ``vmap``s only the
+    PURE-LOCAL PPM sweeps (``_fv_tp_2d_sweep1``/``_fv_tp_2d_sweep2`` — the SAME
+    helpers ``fv_tp_2d`` uses, no numeric duplication).
+
+    ``compute_transport_quantities`` is ``vmap``ped UNCHANGED and is MPI-safe:
+    its only ``pad_halo`` calls are on ``cdgrid`` grid constants (``rdxa`` /
+    ``sin_sg``), which under ``vmap`` are captured (batch-dim ``not_mapped``) →
+    a SINGLE unbatched ``pad_halo`` per constant, never vmapped.
+
+    Raw closure only (``mass_target=None``): the moisture substep does its mass
+    conservation in the caller's batched, allreduce-aware ``_conserving_rescale``
+    (#811 first half).  BIT-IDENTICAL to
+    ``jax.vmap(transport_step(..., mass_target=None))`` on single-rank
+    (``pad_halo_4d`` local == per-level ``pad_halo`` stacked; a halo is a pure
+    index gather, no reduction → no fp-associativity change) — locked by
+    ``test_transport_step_4d_matches_vmap``.
+
+    NON-duogrid only: ``fv_tp_2d``'s duogrid ``synchronize_cgrid_fluxes`` /
+    del-n damping are not on the flux-form path and are not 4D-ified — a duogrid
+    grid raises here.
+
+    Parameters
+    ----------
+    h_4d : (6, n, n, nlev) — transported field (level trailing).
+    ut_4d, vt_4d : (6, n+1, n, nlev) / (6, n, n+1, nlev) — contravariant winds.
+
+    Returns
+    -------
+    (6, n, n, nlev) — the raw flux-form transported field.
+    """
+    s = _fv_tp_2d_setup(cdgrid)
+    if s.use_duogrid:
+        raise NotImplementedError(
+            "transport_step_4d does not support duogrid grids (the cgrid "
+            "flux-sync + duogrid PPM boundary path is not 4D-ified); the "
+            "flux-form moisture substep runs on the non-duogrid grid (#811).")
+
+    area = cdgrid.base.area
+
+    # Per-level Courant numbers / area fluxes.  vmap is MPI-safe (grid-constant
+    # pads are captured => a single unbatched pad_halo each).
+    crx, cry, xfx, yfx, ra_x, ra_y = jax.vmap(
+        lambda utk, vtk: compute_transport_quantities(utk, vtk, dt, cdgrid),
+        in_axes=(-1, -1), out_axes=-1)(ut_4d, vt_4d)
+
+    # Exchange 1 (field) — one message for all levels — then the pure-local
+    # first sweeps per level.
+    q_full = pad_halo_4d(h_4d, halo=2, interp_offsets=s.halo_offsets,
+                         duogrid=s.halo_dg)
+    q_i, q_j, fx2, fy2 = jax.vmap(
+        lambda qf, qk, cx, cy, xf, yf, rx, ry: _fv_tp_2d_sweep1(
+            qf, qk, cx, cy, xf, yf, rx, ry, s, hord, False),
+        in_axes=(-1, -1, -1, -1, -1, -1, -1, -1), out_axes=-1)(
+        q_full, h_4d, crx, cry, xfx, yfx, ra_x, ra_y)
+
+    # Exchange 2 (the q_i / q_j pair — two pad_halo_4d == pad_halo_pair_h2's two
+    # sequential calls with identical arithmetic) — then the cross-sweeps.
+    q_i_pad = pad_halo_4d(q_i, halo=2, interp_offsets=s.halo_offsets,
+                          duogrid=s.halo_dg)
+    q_j_pad = pad_halo_4d(q_j, halo=2, interp_offsets=s.halo_offsets,
+                          duogrid=s.halo_dg)
+    fx, fy = jax.vmap(
+        lambda qip, qjp, f2, g2, cx, cy, xf, yf: _fv_tp_2d_sweep2(
+            qip, qjp, f2, g2, cx, cy, xf, yf, s, hord, False),
+        in_axes=(-1, -1, -1, -1, -1, -1, -1, -1), out_axes=-1)(
+        q_i_pad, q_j_pad, fx2, fy2, crx, cry, xfx, yfx)
+
+    # Raw fp64 flux closure (mass_target=None), per level — reuses the shared
+    # _finalize_transport (no numeric duplication).
+    return jax.vmap(
+        lambda hk, fxk, fyk: _finalize_transport(hk, fxk, fyk, area, None),
+        in_axes=(-1, -1, -1), out_axes=-1)(h_4d, fx, fy)
 
 
 def streamfunction_mass_fluxes(cdgrid, psi_corner, dt):

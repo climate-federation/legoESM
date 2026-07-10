@@ -114,7 +114,7 @@
 
 2. **Sea-ice dynamics with EVP rheology** (`ice/sea_ice.py`): Three dynamics modes — slab (thermodynamic-only, backward compatible), free-drift (diagnostic velocity + optional tracer advection), and EVP (Elastic-Viscous-Plastic, Hunke & Dukowicz 1997) with subcycled momentum solver. Multi-category ice (CICE framework, Lipscomb 2001 linear remapping). State types: `SeaIceState` (slab) and `DynamicSeaIceState` (with u_ice, v_ice, sigma fields, per-category arrays). See §4.4.
 
-3. **Plant physiology / stomatal conductance** (`land/carbon/stomata.py`): Farquhar (1980) C3 photosynthesis with Arrhenius/peaked-Arrhenius temperature responses (Bernacchi 2001), Ball-Berry (1987) and Medlyn (2011) stomatal conductance models. Jarvis (1976) multiplicative model as CO₂-independent fallback when carbon cycle is inactive. Coupled A-gs-Ci solver via 5-iteration fixed-point loop (unrolled for JIT). Soil moisture stress on Vc_max (CLM approach). Beer-law canopy fraction blending. See §4.3.
+3. **Plant physiology / stomatal conductance** (`land/stomata.py`): Farquhar (1980) C3 photosynthesis with Arrhenius/peaked-Arrhenius temperature responses (Bernacchi 2001), Ball-Berry (1987) and Medlyn (2011) stomatal conductance models. Jarvis (1976) multiplicative model as CO₂-independent fallback when carbon cycle is inactive. Coupled A-gs-Ci solver via 5-iteration fixed-point loop (unrolled for JIT). Soil moisture stress on Vc_max (CLM approach). Beer-law canopy fraction blending. See §4.3.
 
 4. **CMOR/CF-compliant output pipeline** (`io/cmor_output.py`): `CFWriter` class producing CF-1.8 / CMOR 3.x compliant NetCDF4 output with CMIP6 DRS naming convention. 27 CMOR variables across 2 tables (Amon: 21 vars, Lmon: 6 vars). Standard 19-level pressure grid (CMIP6_PLEV19). See §7.
 
@@ -124,7 +124,7 @@
 
 7. **Documented tuning guide** (`tuning.py`): Registry of 16 tunable parameters across 5 categories (dynamics, radiation, convection, diffusion, surface) with valid ranges, sensitivities, and physical notes. `validate_tuning()` checks an `AMIPExperimentConfig` for potentially problematic settings. `recommended_params()` suggests resolution-appropriate defaults. `print_tuning_guide()` outputs formatted table. See §7.
 
-8. **Land carbon cycle** (`land/carbon/`): DALEC-990 six-pool carbon model (labile, foliage, root, wood, litter, SOM) with LUE-based GPP and Q10 decomposition. Seasonal simplified scheme as alternative. Both slab and multi-layer land models return carbon state. 43 tests.
+8. **Land carbon cycle** (`land/carbon/`): DALEC-990 six-pool carbon model (labile, foliage, root, wood, litter, SOM) with `gpp_override` plumbing so the canopy two-leaf Farquhar GPP (or the SimpleSEB scalar-Newton A-gs GPP) replaces the LUE fallback when available. Q10 decomposition with moisture limitation, Gaussian phenology (DifferLand-identical offset polynomial), differentiable softplus non-negativity. Seasonal simplified scheme as alternative. Both slab and multi-layer land models return carbon state. 50 tests (43 carbon-cycle unit + 7 canopy-carbon integration).
 
 9. **New tests**: 47 stomata tests, 43 CMOR/experiments/restart/tuning tests, 43 carbon cycle tests. Total test count: 208 test files, 2949 tests.
 
@@ -1236,24 +1236,63 @@ Two schemes controlled by `BiogeoConfig.scheme`:
 
 #### 4.3.1 Overview
 
-Two land models: slab (`land/slab_land.py`) for simple experiments and multi-layer (`land/multilayer_land.py`) with Richards equation soil hydrology, soil thermal diffusion, and full surface energy balance. Both include snow budget and optional dynamic albedo via `surface_albedo.py`.
+Two soil models (slab and multi-layer) crossed with two surface schemes (SimpleSEB and TwoLeafCanopy) give four land configurations, all driven by the same `step_land()` / `step_multilayer_land()` entry points:
 
-#### 4.3.2 Slab Land Model
+| Soil model | File | Default surface scheme | Notes |
+|---|---|---|---|
+| Slab (bucket + single thermal layer) | `land/slab_land.py` | `SimpleSEBConfig` | Fast; appropriate for small experiments. Supports canopy surface scheme with an explicit single-layer thermal Picard callback. |
+| Multi-layer (Richards + thermal diffusion) | `land/multilayer_land.py` | `SimpleSEBConfig` | Default for production runs. Full soil column + snow + carbon. |
 
-- Surface energy balance: `R_net = H + LE + G`
-- Single-layer soil moisture bucket
+Both soil models include the snow budget and dynamic albedo via `surface_albedo.py`, run the same post-flux pipeline (snow → Richards/bucket → soil thermal → carbon cycle → TileResponse), and accept an optional `TgC` state field (30-day EMA of near-surface air T) for the Leuning Vcmax acclimation term.
+
+**Configuration master table** — every user-selectable option across the land stack:
+
+| Axis | Options | Dispatch via | Dependencies |
+|---|---|---|---|
+| **Soil model** | slab \| multilayer | Type of `land_config`: `LandConfig` → `step_land`; `MultiLayerLandConfig` → `step_multilayer_land` (dispatched in `driver/component_factory.py`) | — |
+| **Surface scheme** | `SimpleSEBConfig` (default) \| `TwoLeafCanopyConfig` | `config.surface_scheme` — `isinstance` branch inside `step_*_land` | TwoLeafCanopy needs `CanopyLandParams` for non-trivial runs; slab+canopy flattens cubed-sphere state `(6, n, n)` to a pseudo-columnar axis for the inner `vmap` |
+| **LE module** (canopy only) | `"BT"` (default) \| `"PM"` | `TwoLeafCanopyConfig.LE_module` | BT = bulk transfer, PM = second-order Penman-Monteith; physically equivalent at convergence, BT cheaper |
+| **Canopy ↔ soil coupling** (canopy only) | `FULLY_COUPLED` (only option in this branch) | — | Leaves and soil share the canopy air space `(Tc, q_c)` with clumping-weighted below-canopy resistance. `VEG_ONLY` and `LEAVES_ATMO` variants were removed in Phase 1 for solver simplicity; re-add via a new static string if needed |
+| **Stomatal conductance** | `"ball_berry"` (default) \| `"medlyn"` \| `"jarvis"` (fallback) | `TwoLeafCanopyConfig.stomatal_model` for canopy; `StomataConfig.stomata_model` for SimpleSEB; Jarvis used when stomata enabled + carbon off | Medlyn needs VPD (Pa → kPa conversion inside `_compute_gs_and_ci`); Jarvis is the only option when the Farquhar coupling is unavailable |
+| **b0 soil-moisture stress** (canopy only) | `True` (default, legacy) \| `False` | `TwoLeafCanopyConfig.stress_b0: bool = True` | Whether root-zone soil-moisture stress down-regulates the Ball-Berry intercept `b0` (cuticular / residual conductance) as well as the slope `m`. `True` scales both (legacy). `False` keeps `b0` unstressed so the cuticle keeps leaking under drought — raises dry-season LE at evergreen / phreatophytic sites and floors `gs` at `b0>0` (avoids the `gs→0` Newton degeneracy); light/LAI-limited GPP essentially unchanged since `Vcmax` is still stressed. Apply PFT-conditionally. The slope `m` is stressed in both modes |
+| **Photosynthesis (Farquhar)** | Leuning C3 \| Q10 C4 \| mixed C3/C4 via continuous `fC4` fraction | Always Leuning (`canopy/photosynthesis.py::photosynthesis()`). Bernacchi formulation was removed in Phase 1 | Inputs: `Tf`, `Ci`, `APAR`, `Vcmax25_C3`, `Vcmax25_C4`, `fC4`, `Ps`, `alf`, `TgC`. Growth temperature `TgC` priority: state EMA > `CanopyLandParams.TgC` > instantaneous `forcing.T_lowest - 273.15` |
+| **A ↔ gs coupling** | Two-leaf 6-var Newton (canopy) \| scalar Newton per column (SimpleSEB with carbon on) \| Jarvis-only (SimpleSEB with carbon off) | Automatic based on surface scheme + stomata + carbon config | Two-leaf Newton uses custom_vjp with implicit-function-theorem reverse mode. Scalar Newton uses `jax.jvp` with unit tangent for element-wise `dF/dCi` (Phase 2) |
+| **Carbon cycle** | `"none"` (default) \| `"differland"` \| `"seasonal"` | `CarbonConfig.scheme` | `"differland"` requires a `CarbonState` passed into the step function; `"seasonal"` returns a prescribed sinusoid; `"none"` returns `co2_flux = 0` |
+| **GPP source for carbon cycle** | canopy Farquhar (via `gpp_override`) \| SimpleSEB coupled Newton Farquhar \| LUE fallback | Automatic: `surface_out.gpp` when populated, else `compute_effective_beta` re-derives on post-step state | Coupled canopy path always wins when both the canopy surface scheme AND carbon are enabled |
+| **TgC growth temperature** | state-carried 30-day EMA \| `CanopyLandParams.TgC` (prescribed) \| instantaneous fallback | `state.TgC` > `land_params.TgC` > `forcing.T_lowest - 273.15` | EMA opt-in via `init_*_land_state(..., TgC_init=value)`; advances each step via `advance_TgC_ema(TgC, T_air, dt)` in `surface_scheme/two_leaf_canopy.py` |
+| **LAI feedback** (canopy only) | prescribed (default) \| prognostic `C_fol / LCMA` (opt-in) | `TwoLeafCanopyConfig.use_prognostic_lai: bool = False` | When `True` **and** `CarbonConfig.scheme == "differland"`, `compute_prognostic_lai` overrides `CanopyLandParams.LAI` with the foliar carbon pool divided by leaf carbon mass per area. Forward pass is fully differentiable; `jax.grad` through the full `C_fol → LAI → canopy Newton` loop currently NaNs in the MOST scan (xfail tracked in `test_prognostic_lai_jax_grad_through_feedback`), which is why the flag defaults to off until the `monin_obukhov_stability` custom-VJP follow-up lands |
+| **Soil retention curve** (multilayer only) | van Genuchten (default) \| Clapp-Hornberger \| Brooks-Corey \| Campbell \| PDI \| Lu | `SoilHydraulicsConfig.retention_curve` | Six options, all analytically differentiable |
+| **Bulk flux scheme** (SimpleSEB only) | `"constant"` (default) \| `"most"` \| `"coare3"` \| `"large_yeager"` | `LandConfig.bulk_scheme` / `MultiLayerLandConfig.bulk_scheme` | Constant-coefficient is fastest; MOST iterates stability internally |
+| **Snow-albedo feedback** | on \| off | `config.snow_albedo_feedback: bool` | Requires `lat` argument when enabled |
+
+Dependencies worth highlighting:
+
+1. **Canopy surface scheme + differland carbon** is the fully-coupled C-W-E pipeline. Canopy GPP flows into `step_carbon` via `gpp_override`, bypassing both the LUE fallback and DifferLand's ACM.
+2. **Canopy surface scheme + `"none"` carbon** runs the canopy closure but reports `co2_flux = 0` — useful for energy/water-only studies.
+3. **SimpleSEB + differland** uses the `compute_effective_beta` path — this runs a scalar Newton A-gs solver per column via `coupled_farquhar_stomata` (Phase 2 replaced the earlier fixed-point iteration, which stalled at high VPD).
+4. **SimpleSEB + stomata off + differland** falls back to the light-use-efficiency GPP inside `step_carbon_differland` — crude but keeps the pool dynamics running.
+5. **TwoLeafCanopyConfig** needs `CanopyLandParams` for production runs (scalar fallbacks exist for smoke testing). The params container holds LAI, hc, fC4, Vcmax25 per-leaf, Ball-Berry slopes, quantum yield, albedo, and aerodynamic ratios — see `canopy/config.py`.
+
+#### 4.3.2 Slab Soil Model (`land/slab_land.py`)
+
+- Single-layer soil temperature with explicit forward Euler: `C_soil · d_soil · dT/dt = Q_net`
+- Bucket soil moisture with overflow → surface runoff
 - Snow budget: accumulation from precipitation, melt proportional to T above T_melt
 - Optional snow-albedo feedback via `LandAlbedoConfig`
-- `step_land(state, forcing, config, dt) → (LandState, TileResponse)`
+- **Surface scheme dispatch** (Phase 3b): `isinstance(config.surface_scheme, TwoLeafCanopyConfig)` routes to `_step_land_canopy`, which flattens cubed-sphere state `(6, n, n) → (6·n·n,)` for the canopy `vmap`, supplies an explicit single-layer thermal Picard callback (`Ts_new = Ts + dt · G / (C_soil · d_soil)`), and synthesises `w_frac_rz` from `W / W_max` since slab has no per-layer `theta` profile.
+- `step_land(state, forcing, config, dt) → (LandState, TileResponse, CarbonState | None)`
 
-#### 4.3.3 Multi-Layer Land Model (`land/multilayer_land.py`)
+#### 4.3.3 Multi-Layer Soil Model (`land/multilayer_land.py`)
 
 - Multi-layer soil temperature (backward Euler thermal diffusion, Johansen 1975 conductivity)
 - Multi-layer soil moisture (Richards equation, Celia et al. 1990 mixed-form Picard iteration)
 - 6 retention curves: van Genuchten, Clapp-Hornberger, Brooks-Corey, Campbell, PDI, Lu
 - Surface and subsurface runoff generation
 - Snow budget with aging and dynamic albedo
-- `step_multilayer_land(state, forcing, config, dt) → (MultiLayerLandState, TileResponse)`
+- **Surface scheme dispatch** (Phase 3a): single-body `step_multilayer_land` with `isinstance(config.surface_scheme, TwoLeafCanopyConfig)` branching around the surface flux block. Pre-flux (root-zone stress) and post-flux (snow → Richards → soil thermal → carbon → TileResponse) are shared between both schemes.
+- The canopy Picard loop receives a `solve_soil_thermal` closure as its `soil_thermal_fn` callback and reuses `config.hydraulics` and `config.thermal` directly — no duplicated soil physics.
+- `step_multilayer_land(state, forcing, config, dt) → (MultiLayerLandState, TileResponse, CarbonState | None)`
+- `step_multilayer_land_with_diagnostics(...)` returns an extra 4th element (`SurfaceFluxOutput`) with all canopy-only diagnostic fields populated (`Tf_Sun`, `Tf_Sh`, `gs_Sun`, `gs_Sh`, `n_iters`, `f_veg`, `fSun`, `Ts_solve`, per-component LE/H/Rn, `residual_int`, `residual_ext`). Intended for offline diagnostic drivers (`scripts/run_canopy_diagnostic.py`, `scripts/test_canopy_stress.py`).
 
 #### 4.3.4 Surface Albedo (`surface_albedo.py`)
 
@@ -1279,6 +1318,14 @@ class LandState(NamedTuple):
     snow_depth: Field         # Snow water equivalent [kg/m²]
     snow_age: Field           # Time since last snowfall [s]
 
+class LandState(NamedTuple):             # slab
+    T_soil: Field             # Soil temperature [K]
+    W_bucket: Field           # Soil moisture [kg/m²]
+    snow_depth: Field         # Snow water equivalent [kg/m²]
+    snow_age: Field           # Time since last snowfall [s]
+    runoff: jax.Array | None = None        # Surface runoff [kg/m²/s]
+    TgC: jax.Array | None = None           # 30-day EMA of T_air [°C]; opt-in
+
 class MultiLayerLandState(NamedTuple):
     T_soil: jax.Array         # (ncol, n_layers)
     psi_soil: jax.Array       # Matric potential [m]
@@ -1287,42 +1334,75 @@ class MultiLayerLandState(NamedTuple):
     runoff_subsurface: jax.Array
     snow_depth: jax.Array
     snow_age: jax.Array
+    TgC: jax.Array | None = None           # 30-day EMA of T_air [°C]; opt-in
 ```
 
-#### 4.3.6 Land Carbon Cycle (`land/carbon/`)
+#### 4.3.6 Surface Scheme Abstraction (`land/surface_scheme/`, Phase 3)
 
-Two carbon cycle schemes integrated into both slab and multi-layer land:
+Two surface schemes share a common `SurfaceFluxOutput` NamedTuple interface:
 
-- **DifferLand** (`carbon_cycle.py`): DALEC-990 six-pool model (labile, foliage, root, wood, litter, SOM). Light-use-efficiency GPP with DALEC phenology. Q10 decomposition with moisture limitation. Full carbon-water coupling.
-- **Seasonal** (`carbon_cycle.py`): Sinusoidal NEE with latitude-dependent amplitude/phase (quick-look carbon diagnostics).
+| Scheme | File | What it does |
+|---|---|---|
+| `SimpleSEBConfig` | `surface_scheme/simple_seb.py` | Bulk aerodynamic flux on the top-layer skin temperature with optional Jarvis or coupled Leuning Farquhar + Ball-Berry / Medlyn via `land/stomata_utils.py::compute_effective_beta`. |
+| `TwoLeafCanopyConfig` | `surface_scheme/two_leaf_canopy.py` (alias of `canopy.config.CanopyConfig`) | DifferBESS-style two-leaf canopy Newton + Picard closure (Phase 1). 6-variable state `[Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c]` with `Ts` prescribed from the top soil layer and updated between Picard passes via a caller-supplied soil thermal callback. |
 
-`step_land()` and `step_multilayer_land()` return 3-tuples: `(state, response, carbon_state)`.
+**`SurfaceFluxOutput` fields** (see `surface_scheme/base.py`):
+- Common to both schemes: `shflx`, `lhflx`, `tau_x`, `tau_y`, `sw_net`, `lw_net`, `lw_up`, `G_soil`, `T_surface`, `q_surface`, `albedo`, `emissivity`, `z0`, `gpp` (optional), `stomatal_ratio` (optional).
+- Canopy-only diagnostics: `Tf_Sun`, `Tf_Sh`, `gs_Sun`, `gs_Sh`, `n_iters`, `f_veg`, `fSun`, `Ts_solve`, `LE_canopy`, `LE_soil`, `H_canopy`, `H_soil`, `Rn_canopy`, `Rn_soil`, `Rn_int`, `residual_int`, `Rn_ext`, `residual_ext`.
 
-#### 4.3.7 Plant Physiology (`land/carbon/stomata.py`)
+The post-flux pipeline in `step_multilayer_land` (snow → Richards → soil thermal → carbon → TileResponse) is **shared** between both surface schemes — there is no duplicated block. The slab model's canopy branch `_step_land_canopy` has its own post-flux code because the slab needs a single-layer explicit thermal update instead of Richards / multi-layer thermal.
 
-Stomatal conductance and photosynthesis module, activated when `StomataConfig.enabled = True`:
+#### 4.3.7 Land Carbon Cycle (`land/carbon/`)
 
-**Farquhar (1980) C3 photosynthesis:**
-- Rubisco-limited (Wc) and RuBP-regeneration-limited (Wj) rates with smooth minimum
-- Arrhenius and peaked-Arrhenius temperature responses (Bernacchi et al. 2001 parameters)
-- Soil moisture stress on Vc_max (CLM approach: Vc_max × β_soil)
+Three schemes, selected via `CarbonConfig.scheme`:
 
-**Stomatal conductance models:**
+- **`"none"`** (default): carbon cycle disabled, `co2_flux` is zero.
+- **`"differland"`** (`carbon_cycle.py::step_carbon_differland`): DALEC-990 six-pool prognostic model (labile, foliage, root, wood, litter, SOM). Sequential NPP allocation (`f_fol` → `f_lab` → `f_root` → wood remainder). Gaussian phenology (`lab_release_factor` / `leaf_fall_factor`, offset polynomial matches DifferLand bit-for-bit). Q10 decomposition with moisture limitation. Softplus non-negativity for AD smoothness. Accepts a `gpp_override` argument from the surface scheme to bypass the LUE fallback.
+- **`"seasonal"`** (`seasonal_co2_flux`): prescribed sinusoidal NEE with latitude-dependent amplitude and phase. No prognostic pools — quick-look diagnostic.
 
-| Model | Formula | Activation |
+**Coupling with the surface scheme** (Phase 4):
+- `TwoLeafCanopyConfig` + `"differland"` → canopy per-leaf Farquhar GPP flows into `step_carbon` via `gpp_override`. This is the fully-coupled C-W-E path.
+- `SimpleSEBConfig` + `"differland"` + `stomata.enabled = True` → `compute_effective_beta` runs the coupled Leuning A-gs Newton solver and feeds `gpp_farq` as `gpp_override`.
+- `SimpleSEBConfig` + `"differland"` + `stomata.enabled = False` → `step_carbon_differland` runs its internal light-use-efficiency GPP (crude fallback).
+
+**DifferLand consistency** (audited Phase 4, `memory/reference_differland_vs_legoesm_carbon.md`): pool topology, phenology formulas (incl. offset polynomial), sequential NPP allocation, exact `_effective_rate` for finite-Δt turnover, and litter→SOM transfer are **bit-identical** to the authoritative `DALEC993.py`. Intentional divergences: legoESM delegates soil water + ET to Richards / surface scheme (DifferLand bundles both into the carbon step); legoESM uses differentiable softplus for non-negativity (DifferLand uses hard-clamp flux redirection). **Missing features** (future stages): fire / `burned_area`, SIF / VOD diagnostics, per-biome `T_ref` climatology.
+
+`step_land()` and `step_multilayer_land()` return 3-tuples: `(new_state, TileResponse, carbon_state_new)`.
+
+#### 4.3.8 Plant Physiology (`land/canopy/`, Phase 1–2)
+
+The Bernacchi C3 Farquhar implementation was removed in Phase 1. The **Leuning C3 + Q10 C4** model in `canopy/photosynthesis.py` is now the single Farquhar implementation used by both the two-leaf canopy Newton closure and the SimpleSEB A-gs coupled solver.
+
+**Leuning Farquhar** (`canopy/photosynthesis.py`):
+- `farquhar_c3_leuning(Tf, Ci, APAR, Vcmax25, Ps, alf, TgC)` — Rubisco-limited (JC), RuBP-regeneration-limited (JE), sink-limited (JS) rates with **two-stage quadratic colimitation** (DePury & Farquhar 1997).
+- `farquhar_c4_q10(Tf, Ci, APAR, Vcmax25)` — simplified C4 model with Q10 temperature response.
+- `photosynthesis(...)` — mixed C3/C4 via continuous `fC4` fraction (differentiable).
+- **Growth-temperature acclimation**: `vcmax_temperature_response(Tf, TgC)` applies the Leuning 2002 peaked Arrhenius with a 30-day running-mean air temperature `TgC`.
+- **Q10 numerical floor** (Phase 1): `jnp.maximum(Q10, 1.2)` in `rd_temperature_response` prevents near-singular Jacobian contamination at Tf ≳ 43 °C.
+
+**Stomatal conductance** (`land/stomata.py`, Phase 1):
+
+| Model | Formula | Used by |
 |-------|---------|------------|
-| Ball-Berry (1987) | gs = g0 + g1·A·RH/Cs | Carbon cycle active |
-| Medlyn (2011) | gs = g0 + 1.6·(1 + g1/√VPD)·A/Cs | Carbon cycle active |
-| Jarvis (1976) | gs = gs_max·f(PAR)·f(T)·f(VPD)·f(soil) | Carbon cycle inactive |
+| Ball-Berry (1987) | gs = b0 + m · A · RH / Cs | canopy (default), SimpleSEB A-gs |
+| Medlyn (2011) | gs = g0 + 1.6 · (1 + g1 / √VPD) · A / Cs | canopy (alternative), SimpleSEB A-gs |
+| Jarvis (1976) | gs = gs_max · f(PAR) · f(T) · f(VPD) · f(soil) | SimpleSEB fallback when carbon off |
 
-**Coupled solver:** Fixed-point A-gs-Ci iteration (5 steps, unrolled for JIT). Farquhar GPP passed as `gpp_override` to carbon cycle (avoids double-counting).
+All three models live in a single module and are used by both the canopy and the SimpleSEB A-gs path — there are no duplicated implementations. The canopy leaf energy balance dispatches between Ball-Berry and Medlyn via a static `stomatal_model` string on `TwoLeafCanopyConfig`, threaded through `leaf_energy_balance_bt` / `leaf_energy_balance_pm` via `functools.partial(jax.jit, static_argnames=("stomatal_model",))`.
 
-**ET coupling:** Beer-law canopy fraction blends bare-soil evaporation with canopy transpiration. `compute_stomatal_beta()` returns effective β for surface flux computation.
+**Coupled solver** (`land/stomata.py::coupled_farquhar_stomata`, Phase 2): **Newton** root-find on the diffusion constraint `F(Ci) = Ci - (Ca - 1.6 · max(A_n, 0) / max(gs, g0)) = 0`. Element-wise `dF/dCi` is extracted in O(n) via `jax.jvp` with a unit tangent. Damped Newton (factor 0.8) converges in 3–5 iterations for any VPD. Replaces the earlier fixed-point iteration which stalled or oscillated at high VPD (the `1/√VPD` Medlyn term amplified small Ci perturbations into large gs changes).
 
-#### 4.3.8 Future Phases
+**Two-leaf canopy Newton closure** (`canopy/solver.py`, Phase 1): 6-variable state `[Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c]` with `Ts` prescribed from the top soil layer. Solver uses `jax.custom_vjp` with **implicit function theorem reverse mode** — `dx*/dθ = −(∂F/∂x)⁻¹ · ∂F/∂θ` — for differentiability. Forward pass uses damped Newton via `jax.lax.while_loop` for true early stopping. Outer **Picard loop** (n = 6, ω = 0.15) reconciles the canopy's sub-minute turbulent response with the soil column's ~hour thermal time constant; the soil thermal update is injected via a caller-supplied `soil_thermal_fn(G, dt) → Ts_new` callback, so the solver is agnostic to slab vs multi-layer soil.
+
+**ET coupling**: the canopy scheme computes LE directly from leaf ↔ canopy-air humidity gradients (no `β · q_sat` proxy). The SimpleSEB path uses `compute_stomatal_beta()` with a Beer-law canopy fraction blending bare-soil evaporation and canopy transpiration via `compute_effective_beta` in `land/stomata_utils.py`.
+
+#### 4.3.9 Future Phases
 
 **Remaining:**
-- Dynamic LAI (currently prescribed)
+- Reverse-mode `jax.grad` through the prognostic LAI feedback loop — implemented (`TwoLeafCanopyConfig.use_prognostic_lai`, Phase 6 / Stage 2b) and forward-pass-differentiable, but `jax.grad` through the full `C_fol → LAI → canopy Newton → surface fluxes` chain NaNs in the MOST stability scan. The flag defaults to `False` until a `monin_obukhov_stability` custom-VJP follow-up routes reverse mode through forward-mode JVPs.
+- Fire / `burned_area` module (port from DifferLand DALEC993)
+- SIF / VOD diagnostic outputs
+- Per-biome `T_ref` climatology for heterotrophic Q10 baseline
 - Vegetation dynamics and competition
 - Carbon-nitrogen coupling
 - Groundwater and runoff routing
@@ -2185,7 +2265,7 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
 
 **Delivered:**
 - **Ocean**: Full 3D PE with z-star coordinates, Wright EOS, split-explicit barotropic, spectral variant, SFNO variant, comprehensive physics (vertical mixing: constant/Richardson/KPP; lateral mixing: harmonic/biharmonic/GM-Redi; surface forcing: prescribed/restoring/bulk; bottom drag: linear/quadratic; convection: enhanced diffusion/plume)
-- **Land**: Slab + multi-layer land, Richards equation, 6 retention curves, carbon cycle (DALEC-990 6-pool + seasonal), Farquhar photosynthesis + Ball-Berry/Medlyn/Jarvis stomata
+- **Land**: Slab + multi-layer soil crossed with SimpleSEB + TwoLeafCanopy surface schemes (4 configurations). Richards equation with 6 retention curves. Carbon cycle (DALEC-990 6-pool + seasonal). Leuning C3 + Q10 C4 Farquhar + Ball-Berry / Medlyn / Jarvis stomata. Newton A-gs coupling for both the canopy 6-var closure (custom_vjp + IFT) and the SimpleSEB scalar per-column path. Optional 30-day TgC EMA accumulator in state for Vcmax acclimation.
 - **Sea ice**: Thermodynamic slab + EVP rheology (Hunke & Dukowicz 1997) + multi-category (Lipscomb 2001)
 - **Lake**: Two-layer lake model
 - **Coupler**: Tile-based surface exchange with flux accumulation, conservation enforcement
@@ -2235,8 +2315,9 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
 - C-grid variants: true C-grid on lat-lon, divergence-damped on cubed-sphere (4 models)
 - External forcing framework (GHG, ozone, aerosol, solar)
 - Checkpoint/restart for AMIP experiments
-- Land carbon cycle (DALEC-990 6-pool + seasonal scheme)
-- Plant physiology (Farquhar + Ball-Berry/Medlyn + Jarvis stomata)
+- Land carbon cycle (DALEC-990 6-pool + seasonal scheme) with canopy-GPP coupling
+- Plant physiology (Leuning C3 + Q10 C4 Farquhar + Ball-Berry / Medlyn / Jarvis stomata)
+- Two-leaf canopy surface scheme (DifferBESS-style two-leaf Newton + Picard closure, IFT-differentiable)
 - Ocean biogeochemistry (abiotic DIC/ALK + NPZD ecosystem)
 - Sea-ice dynamics (EVP rheology + multi-category ice)
 - CMOR/CF-compliant output pipeline (27 variables, CMIP6 DRS naming)
@@ -2403,18 +2484,30 @@ legoESM/
 │   │       └── npzd.py                    # NPZD ecosystem model
 │   │
 │   ├── land/                               # Land component
-│   │   ├── state.py                        # LandState
-│   │   ├── config.py                       # LandConfig, MultiLayerLandConfig
-│   │   ├── slab_land.py                    # Slab land model + stomata coupling
-│   │   ├── multilayer_land.py              # Multi-layer Richards + thermal diffusion
+│   │   ├── state.py                        # LandState, MultiLayerLandState (incl. optional TgC EMA)
+│   │   ├── config.py                       # LandConfig, MultiLayerLandConfig (both carry surface_scheme field)
+│   │   ├── slab_land.py                    # Slab soil + SimpleSEB | TwoLeafCanopy surface scheme dispatch
+│   │   ├── multilayer_land.py              # Multi-layer soil + surface scheme dispatch (Phase 3a, single-body)
+│   │   ├── stomata_utils.py                # compute_effective_beta: SimpleSEB A-gs dispatch (Jarvis | coupled Leuning Newton)
 │   │   ├── soil_grid.py                    # SoilGrid geometry
 │   │   ├── soil_hydraulics.py              # 6 retention curves (VG, CH, BC, Campbell, PDI, Lu)
 │   │   ├── richards.py                     # Mixed-form Richards equation solver
 │   │   ├── soil_thermal.py                 # Soil thermal diffusion (Johansen 1975)
-│   │   └── carbon/                         # Carbon cycle + plant physiology
-│   │       ├── config.py                   # CarbonConfig, CarbonState
-│   │       ├── carbon_cycle.py             # DALEC-990 6-pool + seasonal schemes
-│   │       └── stomata.py                  # Farquhar, Ball-Berry, Medlyn, Jarvis
+│   │   ├── surface_scheme/                 # Phase 3 surface scheme abstraction
+│   │   │   ├── base.py                     # SurfaceFluxOutput NamedTuple
+│   │   │   ├── simple_seb.py               # SimpleSEBConfig + compute_simple_seb_fluxes
+│   │   │   └── two_leaf_canopy.py          # TwoLeafCanopyConfig (alias of CanopyConfig) + compute_two_leaf_canopy_fluxes + TgC EMA helper
+│   │   ├── canopy/                         # Two-leaf canopy biophysics (DifferBESS-style)
+│   │   │   ├── config.py                   # CanopyConfig, CanopyLandParams, PFT lookup tables
+│   │   │   ├── photosynthesis.py           # Leuning C3 + Q10 C4 Farquhar (single Farquhar implementation)
+│   │   │   ├── stomatal.py                 # Ball-Berry, Medlyn, Jarvis, coupled_farquhar_stomata (Newton A-gs)
+│   │   │   ├── radiative_transfer.py       # Two-leaf SW/LW RT (Sellers/Ryu 2-stream)
+│   │   │   ├── stability.py                # Monin-Obukhov, boundary layer resistance
+│   │   │   ├── energy_balance.py           # Leaf/soil EB (BT + PM), canopy air update
+│   │   │   └── solver.py                   # 6-var Newton closure w/ IFT custom_vjp + Picard loop
+│   │   └── carbon/                         # Carbon cycle
+│   │       ├── config.py                   # CarbonConfig, CarbonState, StomataConfig (Leuning scalar defaults)
+│   │       └── carbon_cycle.py             # DALEC-990 6-pool + seasonal schemes (consumes gpp_override from surface scheme)
 │   │
 │   ├── ice/                                # Cryosphere
 │   │   ├── state.py                        # SeaIceState, DynamicSeaIceState

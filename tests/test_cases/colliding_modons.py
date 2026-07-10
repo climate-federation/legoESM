@@ -31,11 +31,11 @@ functions only set the prognostic fields, not the Coriolis parameter.
 from __future__ import annotations
 
 import jax.numpy as jnp
-
-from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.state import MPASShallowWaterState, ShallowWaterState
 from legoesm.grids.cubed_sphere import great_circle_distance
+
+from legoesm import constants
 
 # --- FV3 case-8 soliton defaults (test_cases.F90) ---
 _MODON_UMAX = 50.0         # peak jet speed Umax [m/s]
@@ -64,11 +64,14 @@ def _modon_winds_geo(
     """
     r1 = great_circle_distance(lon, lat, _MODON_LON1, _MODON_LAT0, radius)
     r2 = great_circle_distance(lon, lat, _MODON_LON2, _MODON_LAT0, radius)
-    # Sign convention = the FV3 reference in issue #521: burst #1 at
-    # lon=pi/2 is WESTERLY (+u_east, ``u += utmp``), burst #2 at 3*pi/2 is
-    # EASTERLY (-u_east, ``u -= utmp``).  This is also what the pinning
-    # tests (test_winds_peak_at_centres...) and the docstring assert;
-    # commit ba28d8b2b briefly inverted it (tests went red on merge).
+    # FV3 test_cases.F90 case-8 convention: burst #1 at lon = pi/2 is
+    # WESTERLY (``u += utmp`` at p0 = (pi/2, 0)), burst #2 at 3*pi/2 is
+    # easterly (``u -= utmp``), so the modons collide at lon = 180 as in
+    # Lin et al. (2017).  Inverting the signs (commit ba28d8b2b) is a
+    # global 180-degree longitude mirror — identical dynamics, but every
+    # position disagrees with the paper's figures, this docstring, and
+    # the sign-pinning IC tests (test_colliding_modons_ic.py), which
+    # that commit left red.  Keep FV3's orientation.
     u_east = (
         u_max * jnp.exp(-(r1 / r0) ** 2)
         - u_max * jnp.exp(-(r2 / r0) ** 2)

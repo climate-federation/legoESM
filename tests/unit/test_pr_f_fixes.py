@@ -25,6 +25,22 @@ def test_pe_configs_expose_p_ceil_default():
         MPASPrimitiveEquationConfig,
     )
 
+    # Positional-ABI invariant (codex PR F): existing positional callers pass
+    # args up to and including ``p_ceil``, so nothing may be INSERTED before it
+    # (that shifts every later field's positional binding).  APPENDING new fields
+    # AFTER ``p_ceil`` WITH DEFAULTS is ABI-safe — those callers simply omit them.
+    # So the fields after ``p_ceil`` must be EMPTY or exactly a known append-only
+    # tail.  #836 appended the lat-lon C-grid top-sponge knobs after ``p_ceil``.
+    _APPENDED_AFTER_P_CEIL = {
+        # #771: moisture flux-form flag appended after p_ceil (default False).
+        "CDGridPrimitiveEquationConfig": ("moisture_flux_form",),
+        # #836: lat-lon C-grid top-sponge knobs appended after p_ceil (default OFF).
+        "CGridLatLonPrimitiveEquationConfig": (
+            "sponge_coeff", "sponge_width_m", "sponge_shape",
+            "sponge_scale_height_m",
+        ),
+        # MPAS: nothing appended -> p_ceil is still last (allowed default ()).
+    }
     for cfg_cls in (
         CDGridPrimitiveEquationConfig,
         CGridLatLonPrimitiveEquationConfig,
@@ -32,12 +48,14 @@ def test_pe_configs_expose_p_ceil_default():
     ):
         assert cfg_cls().p_ceil == 2.0e6              # default == former literal
         assert cfg_cls(p_ceil=1.5e6).p_ceil == 1.5e6  # tunable
-        # Positional-ABI guard (codex PR F): p_ceil was APPENDED, so it must be
-        # the LAST field — otherwise inserting it would shift the positional
-        # binding of every later field for existing positional callers.
-        assert cfg_cls._fields[-1] == "p_ceil", (
-            f"{cfg_cls.__name__}: p_ceil must remain the LAST NamedTuple field "
-            "to preserve the positional constructor ABI"
+        fields = cfg_cls._fields
+        tail = fields[fields.index("p_ceil") + 1:]
+        allowed = _APPENDED_AFTER_P_CEIL.get(cfg_cls.__name__, ())
+        assert tail == allowed, (
+            f"{cfg_cls.__name__}: only the append-only tail {allowed} may follow "
+            f"p_ceil (positional constructor ABI); got trailing fields {tail}. "
+            "Inserting a field BEFORE p_ceil, or appending one without recording "
+            "it here, breaks existing positional callers."
         )
 
 

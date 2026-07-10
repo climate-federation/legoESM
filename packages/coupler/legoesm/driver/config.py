@@ -152,6 +152,17 @@ class DycoreConfig(NamedTuple):
     polar_filter_cutoff_deg: float = 60.0
     polar_filter_max_wave_speed: float = 300.0
 
+    # #836: hydrostatic lat-lon C-grid top sponge (Rayleigh damping increasing
+    # toward the model lid; absorbs upward gravity-wave energy that would else
+    # reflect off the rigid lid).  ``sponge_coeff=0`` (default) is OFF and
+    # bit-identical.  Threaded into ``CGridLatLonPrimitiveEquationConfig`` by
+    # ``component_factory`` (mirrors the polar-filter passthrough).
+    sponge_coeff: float = 0.0             # Rayleigh damping scale [1/s] (exact lid
+    #                                      value for 'sin2'; 'sam_rational' -> *100/101)
+    sponge_width_m: float = 10000.0       # sponge-layer depth below the top [m]
+    sponge_shape: str = "sin2"            # "sin2" | "sam_rational"
+    sponge_scale_height_m: float = 7500.0  # log-pressure scale height for sigma->z
+
     # Task #25: time integrator override.  Lat-lon C-grid uses
     # ``ssp_rk3`` by default — three RK3 stages unrolled with the
     # tendency function inlined 3×.  Setting
@@ -399,6 +410,10 @@ class ExperimentConfig(NamedTuple):
     #                          optically THINNER cloud (lower albedo, still
     #                          LW-active).  Bounds (5e-5, 1e-3).
     #   cloud_conv_cloud_max — convective (Slingo) cover cap.  Bounds (0.1, 1.0).
+    #   cloud_conv_cloud_condensate — convective anvil in-cloud condensate
+    #                          [kg/kg]; LOWER => optically THINNER / more realistic
+    #                          anvil (lower albedo, still LW-active).  Bounds
+    #                          (1e-5, 1e-3).
     # These are the SW/LW knob for the coare3 moisture-driven albedo overshoot.
     cloud_rh_crit: float | None = None
     cloud_q_c_diagnostic: float | None = None
@@ -408,6 +423,7 @@ class ExperimentConfig(NamedTuple):
     cloud_p_xr: float | None = None
     cloud_alpha_xr: float | None = None
     cloud_conv_cloud_max: float | None = None
+    cloud_conv_cloud_condensate: float | None = None
     microphysics: str = "none"
     # Number of microphysics sub-steps inside one dynamics step.  Morrison's
     # double-moment product terms (q_c·q_r, q_i·q_c) run away at the
@@ -511,7 +527,7 @@ class ExperimentConfig(NamedTuple):
     land_infil_suction_boost: float = 2.0   # Green-Ampt suction enhancement psi_f/L_f [-]
     land_infiltration_excess: bool = True   # enable Hortonian infiltration-excess runoff
     # Route the soil-water availability through the SHARED land Jarvis (1976)
-    # stomatal model (legoesm.land.carbon.stomata) instead of the bare bucket
+    # stomatal model (legoesm.land.stomata) instead of the bare bucket
     # ramp: beta = min(beta_soil, beta_canopy), the canopy term closing
     # stomata in low light / high VPD.  Requires land_soil_bucket (which
     # supplies beta_soil).  Off → soil-only bucket beta (byte-identical).
@@ -624,11 +640,39 @@ class ExperimentConfig(NamedTuple):
     # stl1-4, swvl1-4, sd on a regular lat-lon grid.  Ignored when
     # use_multilayer_land is False.
     era5_land_ic_path: str = ""
+    # Spun-up land INITIAL CONDITION (#746 item 1): a MultiLayerLandState
+    # restart (.npz) written by ``scripts/run/run_land_spinup.py`` after an
+    # offline multi-year land spin-up.  When set (and use_multilayer_land is
+    # True) it REPLACES the cold-start ``init_multilayer_land_state`` +
+    # aridity-theta seed with the equilibrated soil column, so a coupled AMIP
+    # run starts from a settled deep-soil temperature/moisture instead of the
+    # day-0 cold-start shock that drives the land cloud-albedo cold trap.  The
+    # restart's ncol / n_layers must match the run's grid (validated on load).
+    # Takes precedence over era5_land_ic_path when both are set.
+    land_ic_path: str = ""
     # Pre-staged CLM surfdata NetCDF (PFT/texture/glacier maps) for the multilayer
     # land.  Empty => download from UCAR to /tmp (fails on compute nodes with no
     # outbound internet, so stage the file and set this).  Ignored unless
     # use_multilayer_land is True.
     clm_surfdata_path: str = ""
+
+    # Transient land-use/land-cover (LULC).  ``land_cover_surfdata`` is a harmonized
+    # transient legoesm_surfdata NetCDF (``pft_frac(year, npft, lat, lon)`` in
+    # percent on the CLM5 17-PFT axis; built by ``scripts/data/build_*_surfdata.py``
+    # from LUH2/HYDE/Pongratz/KK10).  When ``transient_land_cover`` is True (and
+    # use_multilayer_land is True) the per-column multilayer VEGETATION params
+    # (albedo / z0 / root / emissivity / stomata + the plant btran wilting/field-
+    # capacity thresholds) are re-weighted every segment at
+    # ``cover_year = start_year + elapsed_days/365`` (``interp_annual`` on the annual
+    # cover); per-cell SOIL texture/hydraulics/thermal + prescribed LAI stay frozen
+    # (land use changes vegetation, not soil; transient LAI is a documented
+    # follow-up).  The rebuilt ``LandSurfaceParams`` is passed to the jitted step as
+    # a TRACED per-segment ``SegmentForcing`` arg (not the closure-baked
+    # ``pipeline.land_ml_params``), so the compiled AMIP step follows the evolving
+    # cover with NO retrace.  Off (default) => static single-year cover, byte-
+    # identical to the pre-transient behaviour.  Ignored unless use_multilayer_land.
+    transient_land_cover: bool = False
+    land_cover_surfdata: str = ""
 
     # Diagnostic T-based ice partition.  At every radiation call the
     # grid-mean cloud water q_c is split into liquid + ice via
@@ -759,6 +803,17 @@ class ExperimentConfig(NamedTuple):
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
+    # Top-of-atmosphere sponge (#836): a Rayleigh damping increasing toward the
+    # model lid to absorb upward-propagating gravity-/convective-wave energy.
+    # The k_BL drag above is maximal at the SURFACE, so the hydrostatic
+    # latlon-cgrid dycore otherwise has NO top sponge -> waves reflect off the
+    # rigid ~35 hPa lid (upper-level noise; blocks aggressive cloud-thinning
+    # calibration).  OFF by default (byte-identical); enabled in the reference
+    # AMIP config.  sin^2 ramp from 0 at sigma=sponge_sigma_top to
+    # sponge_coeff_per_day at the model top; folded into the existing fric_decay.
+    sponge_enabled: bool = False
+    sponge_coeff_per_day: float = 2.0   # Rayleigh damping rate at the model top [1/day]
+    sponge_sigma_top: float = 0.15      # sponge base: sigma below which damping ramps up
 
     # Held-Suarez forcing
     held_suarez_forcing: bool = False  # add HS Newtonian relaxation + Rayleigh drag
@@ -843,6 +898,15 @@ class ExperimentConfig(NamedTuple):
     # STATELESS physics (Held-Suarez / per-column); a stateful PhysicsState
     # carry is not yet SPMD-routed.  Default off preserves all existing paths.
     enable_latlon_spmd: bool = False
+    # P4 (cube >6 devices): opt-in sub-face-TILED dynamics — the compiled
+    # segment's dynamics core routes through
+    # ``make_tiled_cc_step`` (tiled D-grid SSP-RK3 on a (6,kt,kt) mesh)
+    # when the device layout is sub-face tiled (n_devices = 6*kt^2 > 6).
+    # Dynamics-only swap: physics/fixers/tracers in the segment are
+    # untouched.  The adapter refuses configs outside the tiled base-cut
+    # envelope (non-ssp_rk3 integrator, any extra damping term, duogrid)
+    # LOUDLY.  Default off preserves every existing path.
+    enable_tiled_dycore: bool = False
 
     # Optional explicit turbulence scheme config (a
     # ``atmosphere.physics.turbulence.config.TurbulenceConfig``) overriding the
@@ -856,15 +920,6 @@ class ExperimentConfig(NamedTuple):
     # ``Any`` to avoid importing the atmosphere physics config into the driver
     # config module.
     turbulence_override: Any = None
-    # P4 (cube >6 devices): opt-in sub-face-TILED dynamics — the compiled
-    # segment's dynamics core routes through
-    # ``make_tiled_cc_step`` (tiled D-grid SSP-RK3 on a (6,kt,kt) mesh)
-    # when the device layout is sub-face tiled (n_devices = 6*kt^2 > 6).
-    # Dynamics-only swap: physics/fixers/tracers in the segment are
-    # untouched.  The adapter refuses configs outside the tiled base-cut
-    # envelope (non-ssp_rk3 integrator, any extra damping term, duogrid)
-    # LOUDLY.  Default off preserves every existing path.
-    enable_tiled_dycore: bool = False
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -1115,6 +1170,23 @@ class ExperimentConfig(NamedTuple):
                 "land-mask file has NO land (elevation-derived f_land is 0 "
                 "everywhere) — pass a real --topography or a --land-mask-file."
             )
+        # Transient land-use cover re-weights the MULTILAYER land vegetation params
+        # from a transient surfdata; without both signals it would silently no-op
+        # (there is no slab-land transient-cover path).  Fail early rather than run
+        # a static-cover land while the user believes cover is evolving.
+        if self.transient_land_cover:
+            if not self.use_multilayer_land:
+                errors.append(
+                    "transient_land_cover=True requires use_multilayer_land=True: "
+                    "the transient cover re-weights the multilayer LandSurfaceParams "
+                    "(there is no slab-land transient-cover path)."
+                )
+            if not self.land_cover_surfdata:
+                errors.append(
+                    "transient_land_cover=True requires land_cover_surfdata to point "
+                    "at a transient legoesm_surfdata NetCDF (pft_frac(year, npft, "
+                    "lat, lon) in percent, CLM5 17-PFT axis); none was set."
+                )
         if not (self.surface_z0_land > 0.0):
             errors.append(
                 f"surface_z0_land must be a positive roughness length [m]; "
@@ -1198,6 +1270,7 @@ class ExperimentConfig(NamedTuple):
             ("cloud_rh_crit", 0.5, 0.99),
             ("cloud_q_c_diagnostic", 5.0e-5, 1.0e-3),
             ("cloud_conv_cloud_max", 0.1, 1.0),
+            ("cloud_conv_cloud_condensate", 1.0e-5, 1.0e-3),
             ("cloud_p_xr", 0.05, 1.0),
             ("cloud_alpha_xr", 10.0, 1000.0),
         ):
@@ -1225,19 +1298,34 @@ class ExperimentConfig(NamedTuple):
             "rayleigh", "lindzen", "mcfarlane", "hines",
             "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",
         )
-        # A ``+``-joined string (e.g. ``hines+mcfarlane``) composes multiple
-        # GWD sources whose tendencies are summed — orographic (mcfarlane) and
-        # non-orographic (hines) parameterize distinct wave sources and are run
-        # together in CMIP-class GCMs.  ``prognostic_spectral`` / ``e3sm_cam``
-        # carry per-step state and are not composable here.
+        # A ``+``-joined string composes multiple GWD sources whose tendencies
+        # are summed — orographic (mcfarlane/lindzen) and non-orographic
+        # (hines/rayleigh/prognostic_spectral) parameterize distinct wave
+        # populations and are run together in CMIP-class GCMs
+        # (e.g. ``hines+mcfarlane`` or ``mcfarlane+prognostic_spectral``,
+        # issue #834).  ``prognostic_spectral`` is the one STATEFUL composable
+        # source — its wave-action spectrum threads through the physics carry,
+        # so at most one stateful source may appear.  ``e3sm_cam`` /
+        # ``ml_emulator`` need extra per-column source fields / a network
+        # module the composite path does not carry and are NOT composable.
+        _composable_stateless = ("rayleigh", "lindzen", "mcfarlane", "hines")
+        _composable_stateful = ("prognostic_spectral",)
+        _composable = _composable_stateless + _composable_stateful
         _gwd_parts = self.gravity_wave_drag.split("+")
-        _composable = ("rayleigh", "lindzen", "mcfarlane", "hines")
         if len(_gwd_parts) > 1:
             bad = [p for p in _gwd_parts if p not in _composable]
             if bad:
                 errors.append(
                     f"composite gravity_wave_drag parts must each be one of "
                     f"{_composable}, got invalid {bad} in "
+                    f"{self.gravity_wave_drag!r}"
+                )
+            _n_stateful = sum(p in _composable_stateful for p in _gwd_parts)
+            if _n_stateful > 1:
+                errors.append(
+                    f"composite gravity_wave_drag may contain at most one "
+                    f"stateful source {_composable_stateful} (its wave-action "
+                    f"spectrum is a single carry), got {_n_stateful} in "
                     f"{self.gravity_wave_drag!r}"
                 )
         elif self.gravity_wave_drag not in _valid_gwd:
@@ -1596,6 +1684,9 @@ class ExperimentConfig(NamedTuple):
             sigma_b=amip_cfg.sigma_b,
             k_BL_max_per_day=amip_cfg.k_BL_max_per_day,
             k_free_per_day=amip_cfg.k_free_per_day,
+            sponge_enabled=getattr(amip_cfg, 'sponge_enabled', False),
+            sponge_coeff_per_day=getattr(amip_cfg, 'sponge_coeff_per_day', 2.0),
+            sponge_sigma_top=getattr(amip_cfg, 'sponge_sigma_top', 0.15),
             held_suarez_forcing=getattr(amip_cfg, 'held_suarez_forcing', False),
             physics_parameterization=getattr(
                 amip_cfg, 'physics_parameterization', 'none',

@@ -6,16 +6,21 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
-from legoesm import constants
 from legoesm.atmosphere.dynamics.cfl_diagnostic import (
-    assert_courant_below, compute_courant_numbers_plane, suggest_stable_dt,
+    acoustic_courant_horizontal,
+    assert_courant_below,
+    column_sound_speed_upper_bound,
+    compute_courant_numbers_plane,
+    suggest_stable_dt,
 )
 from legoesm.atmosphere.dynamics.compressible_euler_plane import (
-    make_flat_plane_terrain_metric, make_rest_state,
+    make_flat_plane_terrain_metric,
+    make_rest_state,
 )
 from legoesm.grids.plane import create_plane_grid
 from legoesm.grids.vertical import create_height_coordinate
+
+from legoesm import constants
 
 jax.config.update("jax_enable_x64", True)
 
@@ -210,3 +215,47 @@ def test_compute_courant_is_jit_compilable():
     assert bool(jnp.all(jnp.isfinite(out.horizontal_advective)))
     assert bool(jnp.all(jnp.isfinite(out.vertical_advective)))
     assert bool(jnp.all(jnp.isfinite(out.acoustic)))
+
+
+def test_column_sound_speed_upper_bound_matches_formula():
+    """c_s = sqrt(gamma*R_d*T_max), T_max = max(theta_ref+|theta'|)*max(exner_ref);
+    theta_prime=None uses the REST bound (theta_ref only) (iter 103)."""
+    _, hc, _ = _setup(dx=1_000.0)
+    gamma = constants.c_pd / constants.c_vd
+    # rest bound (theta_prime None)
+    t_rest = float(jnp.max(hc.theta_ref)) * float(jnp.max(hc.exner_ref))
+    np.testing.assert_allclose(
+        float(column_sound_speed_upper_bound(hc)),
+        (gamma * constants.R_d * t_rest) ** 0.5, rtol=1e-12)
+    # a warm perturbation (+5 K) raises c_s above the rest bound.
+    theta_prime = jnp.full(hc.theta_ref.shape, 5.0)
+    assert float(column_sound_speed_upper_bound(hc, theta_prime)) > \
+        float(column_sound_speed_upper_bound(hc))
+
+
+def test_acoustic_courant_horizontal_uses_dx_not_dz():
+    """The horizontal acoustic Courant uses min(dx,dy) — NOT the small dz that
+    compute_courant_numbers_plane's `acoustic` uses — so a semi-implicit-vertical
+    dycore is not falsely over-constrained by a thin surface layer (iter 103)."""
+    state, hc, grid = _setup(dx=2_000.0, dz_levels=10, H=10_000.0)
+    dz_min = float(jnp.min(hc.dz))
+    assert dz_min < float(grid.dx)                    # vertical IS the smaller spacing
+    c_s = float(column_sound_speed_upper_bound(hc))
+    dt, n_sub = 4.0, 6
+    c_horiz = float(acoustic_courant_horizontal(
+        hc, grid, dt, n_acoustic_substeps=n_sub))
+    np.testing.assert_allclose(
+        c_horiz, c_s * (dt / n_sub) / float(grid.dx), rtol=1e-12)
+    # the full (delta_min) acoustic is LARGER (it uses the smaller dz).
+    full = compute_courant_numbers_plane(
+        state, hc, grid, dt=dt, n_acoustic_substeps=n_sub)
+    assert float(full.acoustic) > c_horiz
+
+
+def test_acoustic_courant_horizontal_substep_scaling_and_guard():
+    _, hc, grid = _setup(dx=1_000.0)
+    c1 = float(acoustic_courant_horizontal(hc, grid, dt=6.0, n_acoustic_substeps=1))
+    c6 = float(acoustic_courant_horizontal(hc, grid, dt=6.0, n_acoustic_substeps=6))
+    np.testing.assert_allclose(c6, c1 / 6.0, rtol=1e-12)
+    with pytest.raises(ValueError, match=">= 1"):
+        acoustic_courant_horizontal(hc, grid, dt=1.0, n_acoustic_substeps=0)

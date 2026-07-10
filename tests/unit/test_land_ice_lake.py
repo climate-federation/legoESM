@@ -64,7 +64,10 @@ class Test11a_Smoke:
         assert jnp.all(jnp.isfinite(new_state.T_epi.data))
         assert jnp.all(jnp.isfinite(new_state.T_hypo.data))
         for name in TileResponse._fields:
-            assert jnp.all(jnp.isfinite(getattr(resp, name)))
+            arr = getattr(resp, name)
+            if arr is None:            # optional fields (e.g. T_rad on non-canopy tiles)
+                continue
+            assert jnp.all(jnp.isfinite(arr))
 
 
 class Test11e_MixingDirection:
@@ -141,6 +144,29 @@ class Test11g_FreezingFloor:
             f"got {q_actual:.6e}, ice={q_ice_expected:.6e}, "
             f"liq={q_liq_expected:.6e}"
         )
+
+    def test_frozen_lake_uses_ice_albedo_not_water(self):
+        """A frozen lake reflects like ice/snow, not open water: the is_frozen
+        switch must gate albedo (it already gates q_sfc and L_eff).  Higher ice
+        albedo -> less absorbed SW -> less warming; an unfrozen lake ignores
+        albedo_lake_ice entirely."""
+        forcing = make_forcing(T_lowest=272.0, sw_down=1000.0, lw_down=340.0)
+        frozen = make_lake_state(T_epi=CONFIG.T_freeze, T_hypo=CONFIG.T_freeze)
+        cfg_ice = CONFIG._replace(albedo_lake_ice=0.6)
+        cfg_wat = CONFIG._replace(albedo_lake_ice=CONFIG.albedo_lake)
+        s_ice, _ = step_lake(frozen, forcing, cfg_ice, 1.0, DT)
+        s_wat, _ = step_lake(frozen, forcing, cfg_wat, 1.0, DT)
+        assert float(s_ice.T_epi.data.mean()) < float(s_wat.T_epi.data.mean())
+        # Unfrozen lake never touches albedo_lake_ice: identical result.
+        warm = make_lake_state(T_epi=290.0, T_hypo=285.0)
+        w_ice, _ = step_lake(warm, forcing, cfg_ice, 1.0, DT)
+        w_wat, _ = step_lake(warm, forcing, cfg_wat, 1.0, DT)
+        assert bool(jnp.allclose(w_ice.T_epi.data, w_wat.T_epi.data))
+        # Reported albedo tracks the POST-step phase (like q_surface_new): a
+        # lake that stays frozen must report the ice albedo, not open water.
+        cold = make_forcing(T_lowest=230.0, sw_down=0.0, lw_down=150.0)
+        _, resp = step_lake(frozen, cold, cfg_ice, 1.0, DT)
+        assert abs(float(resp.albedo.mean()) - cfg_ice.albedo_lake_ice) < 1e-6
 
 
 class Test11h_ConvectiveOverturn:

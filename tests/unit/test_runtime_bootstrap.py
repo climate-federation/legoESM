@@ -226,8 +226,22 @@ class TestDistributedGuardrails:
             mock_init.assert_called_once()
             assert rc.distributed is True
 
-    def test_distributed_mpi_coordinator_setup_multinode(self):
-        """Multi-node MPI should call jax.distributed.initialize with coordinator."""
+    def test_distributed_mpi_coordinator_setup_multinode(self, monkeypatch):
+        """Multi-node MPI should call jax.distributed.initialize with coordinator.
+
+        The multi-node branch delegates to
+        ``initialize_jax_distributed_multiprocess`` (#749), whose mpi4py hook
+        is ``_require_mpi4py`` — mocked here alongside ``require_mpi_stack``.
+        Launcher-size env vars are cleared so the helper probes the mocked
+        COMM_WORLD instead of short-circuiting to single-process, and the
+        scheduler-jobid vars so ``resolve_coordinator_port`` (env override /
+        job-id-derived / legacy 1234) pins the legacy port the assertion
+        expects.
+        """
+        for var in ("LEGOESM_COORDINATOR_PORT", "SLURM_JOB_ID", "PBS_JOBID",
+                    "OMPI_COMM_WORLD_SIZE", "PMI_SIZE",
+                    "SLURM_STEP_NUM_TASKS", "SLURM_NTASKS", "SLURM_LOCALID"):
+            monkeypatch.delenv(var, raising=False)
         mock_comm = MagicMock()
         mock_comm.Get_rank.return_value = 0
         mock_comm.Get_size.return_value = 2
@@ -243,8 +257,14 @@ class TestDistributedGuardrails:
             "legoesm.parallel.distributed.require_mpi_stack",
             return_value=(mock_mpi4jax, mock_MPI),
         ), patch(
+            "legoesm.parallel.distributed._require_mpi4py",
+            return_value=mock_MPI,
+        ), patch(
             "legoesm.parallel.distributed.jax.distributed.initialize",
         ) as mock_jax_init, patch(
+            "legoesm.parallel.distributed.jax.distributed.is_initialized",
+            return_value=False,
+        ), patch(
             "legoesm.parallel.distributed.jax.local_devices",
             return_value=[MagicMock()],
         ), patch(

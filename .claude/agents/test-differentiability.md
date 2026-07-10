@@ -166,8 +166,11 @@ Test `jax.grad` through each physics parameterization independently.
 - These use smooth approximations (no hard switches), so gradients should flow.
 
 **4e) Stomatal conductance**
-- `from legoesm.land.carbon.stomata import ...`
+- ``from legoesm.land.stomata import ball_berry_gs, medlyn_gs, jarvis_gs, coupled_farquhar_stomata``
 - Gradient w.r.t. VPD (vapor pressure deficit) and PAR (photosynthetically active radiation).
+- The coupled A-gs Newton solver (Phase 2 refactor) uses ``jax.jvp``
+  with a unit tangent for the element-wise ``dF/dCi`` — verify ``jax.grad``
+  through the full ``coupled_farquhar_stomata`` with 5 Newton iters.
 
 ---
 

@@ -63,7 +63,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ml = ["imageio>=2.30", "equinox>=0.11", "optax>=0.2"]
+canopy = ["clm-ml-jax>=0.1.0"]
+# gcsfs/fsspec included: the ML training lane's DEFAULT ERA5 path is a gs://
+# zarr store (load_era5_samples / era5_to_state), so the ml extra must open it
+# without also requesting [data] (#817 papercut: the WB runbook env built
+# --extras dev only and hit ModuleNotFoundError: gcsfs at first data load).
+ml = ["imageio>=2.30", "equinox>=0.11", "optax>=0.2",
+      "gcsfs>=2024.2", "fsspec>=2024.2"]
 mesh = ["pymetis>=1.2", "scipy>=1.10"]
 viz = ["matplotlib>=3.9", "cartopy>=0.23"]
 data = [
@@ -164,6 +170,44 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # clubb_lite.py (already clean) only incidentally — relaxing naming there is
 # harmless. N815 covers the config symbol fields; N803/N806 the kernel args/vars.
 "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb*.py" = ["N802", "N803", "N806", "N815"]
+# Column-LES diagnosis/pipeline: physical symbol names (C_K, K_m, Pr_t, N_sq,
+# cape_J_kg) + CLAUDE.md-mandated unit suffixes (_K for Kelvin) read clearer than
+# snake_case; same rationale as the clubb modules.
+"packages/atmosphere/legoesm/atmosphere/dynamics/column_les_diagnosis.py" = ["N803", "N806", "N815"]
+"packages/atmosphere/legoesm/atmosphere/dynamics/column_les.py" = ["N803", "N806", "N815"]
+# Column large-scale extractor: physical symbol names (T, T_v for temperature /
+# virtual temperature) read clearer than snake_case; same rationale. Test files
+# use the same symbols (T) + set jax_enable_x64 before importing (E402).
+"packages/atmosphere/legoesm/atmosphere/dynamics/column_large_scale_extract.py" = ["N803", "N806"]
+"tests/atmosphere/test_column_large_scale_extract*.py" = ["E402", "N806"]
+# Compare-to-reanalysis bridge + its tests: physical symbol names (T for
+# temperature, T_v for virtual temperature) + CLAUDE.md-mandated unit suffixes
+# (sst_K) read clearer than snake_case. N815 covers the ColumnState.sst_K field.
+"packages/ml/legoesm/training/compare_reanalysis.py" = ["N803", "N806", "N815"]
+"tests/unit/test_compare_reanalysis.py" = ["N803", "N806"]
+# compare-reanalysis e2e: the SST-in-Kelvin local var sst_K carries the model's _K unit
+# suffix (CLAUDE.md naming) — the same convention as compare_reanalysis.py above.
+"tests/run/test_correction_e2e_integration.py" = ["N806"]
+# bias_metrics: PerVariableBias unit-suffixed global-scalar fields (global_T_rmse_K,
+# global_qv_rmse_kg_kg, ...) — CLAUDE.md-mandated unit suffixes read clearer than
+# snake_case and are kept DISTINCT from the per-column ColumnErrorFields names.
+"packages/ml/legoesm/training/bias_metrics.py" = ["N815"]
+# LES-closure diagnosis tests: physical symbol names (Km, Kh, S2, N2, P, C_K,
+# Pr_t) match the clubb_lite budget + diagnosis kernels they exercise.
+"tests/unit/test_les_closure_diagnosis.py" = ["N803", "N806"]
+"scripts/validate/compare_amip_era5.py" = ["N803", "N806", "N815"]
+# The canonical SST symbol is ``sst_K`` (used 100s of times); N806/N803 flag the local
+# variable / monkeypatch arg in the cross-grid deploy CLI + its test (not CI-enforced).
+"scripts/experiment/check_cross_grid_deploy.py" = ["N806"]
+"tests/unit/test_check_cross_grid_deploy.py" = ["N803"]
+# Run-as-a-script sys.path bootstrap (iter 321) must precede the ``scripts.*`` import, so the
+# subsequent module-level imports trip E402; the bootstrap makes ``python scripts/...`` work.
+"scripts/validate/run_perfect_model_osse.py" = ["E402"]
+# ERA5->model regridders + their tests: physical symbol names (T, u, v, q) +
+# field-name vars (T_cell, T_model) read clearer than snake_case; E402 covers the
+# x64-before-import idiom / logging setup.
+"packages/ml/legoesm/training/era5_to_state.py" = ["E402", "N803", "N806", "N815"]
+"tests/unit/test_era5_mpas_carry.py" = ["N806"]
 # CLUBB port tests use the same physical symbol names as the modules under test
 # (T for temperature, Tc for deg C, etc.) — clearer than snake_case here. E402:
 # these tests set jax_enable_x64 before importing the modules under test (a

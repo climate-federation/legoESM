@@ -66,3 +66,240 @@ def test_already_initialized_is_noop_without_jax_probe(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", _guarded_import)
     assert early_init.maybe_init_jax_distributed() is False
+
+
+# ---------------------------------------------------------------------------
+# resolve_coordinator_port: env override > job-id-derived > legacy default.
+# ---------------------------------------------------------------------------
+
+_PORT_ENV_VARS = ("LEGOESM_COORDINATOR_PORT", "SLURM_JOB_ID", "PBS_JOBID")
+
+
+def _clear_port_env(monkeypatch):
+    for var in _PORT_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_port_env_override_wins(monkeypatch):
+    _clear_port_env(monkeypatch)
+    monkeypatch.setenv("LEGOESM_COORDINATOR_PORT", "23456")
+    monkeypatch.setenv("SLURM_JOB_ID", "8888")  # must lose to the override
+    assert early_init.resolve_coordinator_port() == 23456
+
+
+def test_port_no_jobid_falls_back_to_legacy(monkeypatch):
+    _clear_port_env(monkeypatch)
+    assert early_init.resolve_coordinator_port() == 1234
+    assert early_init.resolve_coordinator_port(default=4321) == 4321
+
+
+def test_port_jobid_derivation_deterministic_and_in_range(monkeypatch):
+    _clear_port_env(monkeypatch)
+    monkeypatch.setenv("SLURM_JOB_ID", "8523462")
+    p1 = early_init.resolve_coordinator_port()
+    p2 = early_init.resolve_coordinator_port()
+    # Every rank of one job must compute the SAME port with no communication.
+    assert p1 == p2
+    assert 20000 <= p1 < 60000
+
+
+def test_port_differs_across_jobs(monkeypatch):
+    # Two jobs sharing a node must not collide on the coordinator port
+    # (the historical hardcoded 1234 EADDRINUSE failure mode).
+    _clear_port_env(monkeypatch)
+    monkeypatch.setenv("SLURM_JOB_ID", "1000001")
+    p_a = early_init.resolve_coordinator_port()
+    monkeypatch.setenv("SLURM_JOB_ID", "1000002")
+    p_b = early_init.resolve_coordinator_port()
+    assert p_a != p_b
+
+
+def test_port_pbs_jobid_honored(monkeypatch):
+    _clear_port_env(monkeypatch)
+    monkeypatch.setenv("PBS_JOBID", "1234567.desched1")
+    p = early_init.resolve_coordinator_port()
+    assert 20000 <= p < 60000
+
+
+# ---------------------------------------------------------------------------
+# init_jax_distributed_with_fallback: transport chosen by ENVIRONMENT.
+# ---------------------------------------------------------------------------
+
+_LAUNCHER_ENV_VARS = (
+    "SLURM_JOB_ID", "OMPI_COMM_WORLD_SIZE", "PALS_RANKID", "PMI_RANK",
+    # World-size vars too: a test suite RUNNING INSIDE a SLURM job inherits
+    # SLURM_NTASKS/SLURM_STEP_NUM_TASKS from the host job; leaving them set
+    # makes the fake-jax process_count and the guard's launcher_world_size
+    # disagree (host SLURM_NTASKS=1 vs the test's OMPI=4) and the
+    # silent-fallback guard fires on a correctly-federated fake (found
+    # running the suite under sbatch on Ginsburg).
+    "SLURM_NTASKS", "SLURM_STEP_NUM_TASKS", "PMI_SIZE",
+    "OMPI_COMM_WORLD_RANK", "SLURM_PROCID", "PALS_LOCAL_RANKID",
+    "SLURM_LOCALID", "OMPI_COMM_WORLD_LOCAL_RANK", "MV2_COMM_WORLD_LOCAL_RANK",
+)
+
+
+class _FakeDistributed:
+    def __init__(self, fail_bare_with: str | None = None):
+        self.calls = []
+        self._fail_bare_with = fail_bare_with
+
+    def is_initialized(self):
+        # The helper's cross-path idempotency probe (never initialized in
+        # these unit tests — the federation itself is faked).
+        return False
+
+    def initialize(self, *args, **kwargs):
+        self.calls.append(kwargs)
+        if not kwargs and self._fail_bare_with is not None:
+            raise RuntimeError(self._fail_bare_with)
+
+
+def _with_fake_jax(monkeypatch, fake, process_count: int | None = None):
+    import os
+    import sys
+    import types
+
+    # The post-init silent-fallback guard compares jax.process_count()
+    # against the launcher-declared world size; the fake federation
+    # matches the declared size by default so guarded paths pass.
+    if process_count is None:
+        # SAME precedence as early_init.launcher_world_size (step size, then
+        # the MPI launcher's world, allocation-wide SLURM_NTASKS last) so the
+        # fake federation always matches what the guard will declare.
+        for var in ("SLURM_STEP_NUM_TASKS", "OMPI_COMM_WORLD_SIZE",
+                    "PMI_SIZE", "SLURM_NTASKS"):
+            v = os.environ.get(var)
+            if v and v.isdigit():
+                process_count = int(v)
+                break
+        else:
+            process_count = 1
+    fake_jax = types.SimpleNamespace(
+        distributed=fake, process_count=lambda: process_count)
+    monkeypatch.setitem(sys.modules, "jax", fake_jax)
+
+
+def _clear_launcher_env(monkeypatch):
+    for var in _LAUNCHER_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    # Shared idempotency flag with maybe_init_jax_distributed.
+    monkeypatch.setattr(early_init, "_INITIALIZED", False)
+
+
+def test_fallback_pals_only_uses_mpi4py_bootstrap(monkeypatch):
+    # PALS/PMI launcher, no SLURM/OMPI -> mpi4py bootstrap directly (bare
+    # initialize has no PALS auto-detection), with the #693 one-device
+    # binding. mpi4py is only find_spec'd; skip if entirely absent.
+    import importlib.util
+
+    if importlib.util.find_spec("mpi4py") is None:
+        import pytest
+
+        pytest.skip("mpi4py not installed")
+    _clear_launcher_env(monkeypatch)
+    monkeypatch.setenv("PALS_RANKID", "0")
+    fake = _FakeDistributed()
+    _with_fake_jax(monkeypatch, fake)
+    early_init.init_jax_distributed_with_fallback()
+    assert fake.calls == [
+        {"cluster_detection_method": "mpi4py", "local_device_ids": [0]},
+    ]
+    assert early_init._INITIALIZED is True
+
+
+def test_fallback_slurm_uses_bare_initialize(monkeypatch):
+    _clear_launcher_env(monkeypatch)
+    monkeypatch.setenv("SLURM_JOB_ID", "42")
+    fake = _FakeDistributed()
+    _with_fake_jax(monkeypatch, fake)
+    early_init.init_jax_distributed_with_fallback()
+    assert fake.calls == [{}]
+    assert early_init._INITIALIZED is True
+
+
+def test_fallback_real_failure_reraises(monkeypatch):
+    # A genuine initialize() failure under an auto-detectable launcher must
+    # NOT be masked by a second attempt — even when the message mentions
+    # cluster/coordinator words.
+    import pytest
+
+    _clear_launcher_env(monkeypatch)
+    monkeypatch.setenv("SLURM_JOB_ID", "42")
+    fake = _FakeDistributed(
+        fail_bare_with="failed to connect to cluster coordinator",
+    )
+    _with_fake_jax(monkeypatch, fake)
+    with pytest.raises(RuntimeError, match="cluster coordinator"):
+        early_init.init_jax_distributed_with_fallback()
+    assert fake.calls == [{}]  # exactly one attempt, no silent fallback
+    assert early_init._INITIALIZED is False
+
+
+def test_fallback_already_initialized_is_noop(monkeypatch):
+    _clear_launcher_env(monkeypatch)
+    fake = _FakeDistributed(fail_bare_with="already initialized")
+    _with_fake_jax(monkeypatch, fake)
+    early_init.init_jax_distributed_with_fallback()  # no raise
+    assert fake.calls == [{}]
+    assert early_init._INITIALIZED is True
+
+
+def test_fallback_respects_shared_initialized_flag(monkeypatch):
+    _clear_launcher_env(monkeypatch)
+    monkeypatch.setattr(early_init, "_INITIALIZED", True)
+    fake = _FakeDistributed()
+    _with_fake_jax(monkeypatch, fake)
+    early_init.init_jax_distributed_with_fallback()
+    assert fake.calls == []  # idempotent no-op, no jax.distributed touch
+
+
+# ---------------------------------------------------------------------------
+# init_multicontroller_distributed: the shared --multicontroller entry point
+# (ocean/atm SPMD benches + the run_omip route-B driver).
+# ---------------------------------------------------------------------------
+
+def test_multicontroller_coordinator_uses_launcher_env(monkeypatch):
+    # Explicit coordinator -> read rank/size from the OMPI launcher env and
+    # call initialize() directly (the mpiexec / self-spawn path).
+    _clear_launcher_env(monkeypatch)
+    monkeypatch.setenv("OMPI_COMM_WORLD_SIZE", "4")
+    monkeypatch.setenv("OMPI_COMM_WORLD_RANK", "2")
+    fake = _FakeDistributed()
+    _with_fake_jax(monkeypatch, fake)
+    early_init.init_multicontroller_distributed("host:5000")
+    assert fake.calls == [
+        {"coordinator_address": "host:5000",
+         "num_processes": 4, "process_id": 2,
+         # Per-rank device binding applied on the explicit-coordinator
+         # path too (clean env -> default [0]).
+         "local_device_ids": [0]},
+    ]
+    assert early_init._INITIALIZED is True
+
+
+def test_multicontroller_coordinator_missing_env_raises(monkeypatch):
+    # A coordinator without a launcher rank env is a HARD error — never a
+    # silent single-process fallback (that would run N un-federated copies
+    # clobbering each other's output).
+    import pytest
+
+    _clear_launcher_env(monkeypatch)
+    monkeypatch.delenv("OMPI_COMM_WORLD_RANK", raising=False)
+    monkeypatch.delenv("PMI_SIZE", raising=False)
+    fake = _FakeDistributed()
+    _with_fake_jax(monkeypatch, fake)
+    with pytest.raises(SystemExit, match="no launcher rank env"):
+        early_init.init_multicontroller_distributed("host:5000")
+    assert fake.calls == []  # never initialized on a bad env
+
+
+def test_multicontroller_no_coordinator_delegates_to_fallback(monkeypatch):
+    # No coordinator -> environment-routed fallback (here SLURM -> bare init).
+    _clear_launcher_env(monkeypatch)
+    monkeypatch.setenv("SLURM_JOB_ID", "7")
+    fake = _FakeDistributed()
+    _with_fake_jax(monkeypatch, fake)
+    early_init.init_multicontroller_distributed(None)
+    assert fake.calls == [{}]  # bare auto-detect via init_..._with_fallback
+    assert early_init._INITIALIZED is True

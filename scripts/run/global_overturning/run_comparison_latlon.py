@@ -639,7 +639,8 @@ def main():
 
     # Print key parameters (from actual config, not constants)
     print(f"  Config:")
-    print(f"    A_h={ocean_config.A_h:.0e}, C_smag_lap={ocean_config.C_smag_lap}")
+    print(f"    A_h={ocean_config.lateral_viscosity.A_h:.0e}, "
+          f"C_smag_lap={ocean_config.lateral_viscosity.C_smag_lap}")
     print(f"    A_v={ocean_config.A_v:.0e}, K_v={ocean_config.K_v:.0e}")
     print(f"    GM/Redi: κ_GM={ocean_config.gm_redi.kappa_GM}, "
           f"κ_Redi={ocean_config.gm_redi.kappa_Redi}, "

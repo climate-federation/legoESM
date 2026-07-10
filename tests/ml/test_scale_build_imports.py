@@ -19,7 +19,7 @@ def test_scale_build_module_imports():
 def test_physics_mode_symbols_resolve():
     from legoesm.driver.model_driver import ModelDriver          # noqa: F401
     from legoesm.driver.physics_pipeline import build_physics_pipeline  # noqa: F401
-    from legoesm.training.training_driver import _build_training_segment  # noqa: F401
+    from legoesm.training.training_driver import build_training_segment  # noqa: F401
     from legoesm.training.trainable_params import TrainablePhysicsParams  # noqa: F401
     from legoesm.core.cfl import cfl_max_dt                      # noqa: F401
     from legoesm.training.dycore_rollout import single_day_rollout  # noqa: F401
@@ -42,13 +42,22 @@ def test_era5_symbols_resolve():
 
 
 def test_sfno_mode_symbols_resolve():
-    # make_sfno_step_unified_latlon is current-main API; skip on a stale checkout
-    # (this worktree is 842 commits behind main). Present on the clusters.
-    coupling = importlib.import_module("legoesm.training.sfno_dycore_coupling")
-    if not hasattr(coupling, "make_sfno_step_unified_latlon"):
-        pytest.skip("needs current-main API make_sfno_step_unified_latlon (stale worktree)")
-    from legoesm.training.sfno_dycore_coupling import SFNOPhysics  # noqa: F401
-    from legoesm.grids.gaussian import create_gaussian_grid        # noqa: F401
+    # HARD assertion, no skip: the old skip-on-missing masked the sfno
+    # factory referencing a nonexistent API for weeks (the symbol was never
+    # on main; the "stale worktree" comment was wrong) — the sfno smoke then
+    # died on ImportError (#797). Every symbol the factory uses must import.
+    from legoesm.training.sfno_dycore_coupling import (      # noqa: F401
+        SFNOPhysics, make_sfno_step_unified_latlon,
+    )
+    from legoesm.grids.gaussian import create_gaussian_grid  # noqa: F401
+    from legoesm.grids.regridding import (                   # noqa: F401
+        compute_latlon_to_voronoi_weights, regrid_scalar,
+    )
+    from legoesm.ml.sfno import SFNO, SFNOConfig             # noqa: F401
+    # the wired signature: (sfno_physics, w_ll2g, w_g2ll)
+    import inspect
+    params = list(inspect.signature(make_sfno_step_unified_latlon).parameters)
+    assert params == ["sfno_physics", "w_latlon_to_gauss", "w_gauss_to_latlon"]
 
 
 def test_run_amip_parser_available():

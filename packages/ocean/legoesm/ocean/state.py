@@ -208,6 +208,15 @@ class OceanConfig(NamedTuple):
     bottom_drag_r: float = 0.0
     bottom_drag_bg_velocity: float = 0.0
     bottom_drag_bbl_thickness: float = 0.0
+    # NEMO zdfdrg drag laws (mirror of DynBottomDragConfig; see there):
+    # "legacy" keeps the r/bg_velocity path bit-exact; "nemo_quadratic" /
+    # "nemo_loglayer" compute r = Cd·√(u²+v²+ke0) from the bottom-cell
+    # speed (loglayer: Cd = clip((κ/ln(½h_bot/z0))², cd0, cdmax)).
+    bottom_drag_scheme: str = "legacy"
+    bottom_drag_cd0: float = 1.0e-3     # NEMO rn_Cd0 [-]
+    bottom_drag_cdmax: float = 0.1      # NEMO rn_Cdmax [-]
+    bottom_drag_z0: float = 3.0e-3      # NEMO rn_z0 [m]
+    bottom_drag_ke0: float = 2.5e-3     # NEMO rn_ke0 [m²/s²]
     # smc03 PGF: use the 3-point 2nd-order backward bottom-cell density slope
     # (curvature-accurate under a pressure-dependent EOS) instead of the
     # O(dz)-biased one-sided slope.  Default False keeps the proven smc03 path
@@ -698,6 +707,23 @@ class DynBottomDragConfig(NamedTuple):
                                            # tau ∝ √(u²+v²+u_bg²) · u, with
                                            # the linear-in-u limit set to
                                            # bottom_drag_r at |u|→0.
+    # --- NEMO zdfdrg drag laws (nemo_5.0.1 zdfdrg.F90) ---
+    # "legacy" (default) = the historical r/bg_velocity/BBL path above,
+    # bit-exact.  "nemo_quadratic" (zdfdrg np_non_lin — the ORCA1
+    # namelist selection) and "nemo_loglayer" (np_loglayer) instead
+    # compute r = Cd·√(ū²+v̄²+ke0) from the BOTTOM-cell velocity at the
+    # tracer point (full speed, background KE in quadrature) with, for
+    # the log-layer, Cd = clip((κ/ln(½h_bot/z0))², cd0, cdmax).  The
+    # NEMO schemes ignore ``bottom_drag_r``/``bottom_drag_bg_velocity``
+    # and are enabled by the scheme string alone;
+    # ``bottom_drag_bbl_thickness`` still selects the K&E99 spread
+    # (NEMO applies drag to the bottom cell only: set it to 0 for
+    # strict NEMO behaviour).
+    bottom_drag_scheme: str = "legacy"
+    bottom_drag_cd0: float = 1.0e-3     # NEMO rn_Cd0 [-] (loglayer: Cd min)
+    bottom_drag_cdmax: float = 0.1      # NEMO rn_Cdmax [-] (loglayer Cd cap)
+    bottom_drag_z0: float = 3.0e-3      # NEMO rn_z0 [m] bottom roughness
+    bottom_drag_ke0: float = 2.5e-3     # NEMO rn_ke0 [m²/s²] background KE
 
 
 class BarotropicConfig(NamedTuple):
@@ -834,6 +860,23 @@ class BarotropicConfig(NamedTuple):
     # by the island line-integral constraints (see rigid_lid_islands.py).
     rigid_lid_cg_tol: float = 1.0e-11
     rigid_lid_cg_maxiter: int = 1000
+    # Wide-halo split-explicit barotropic (scaling-audit item 3; only used
+    # when ``barotropic_solver = 'explicit_substep'``).  When True and a
+    # lat-band decomposition is active, the substep loop exchanges ONE wide
+    # halo (width = substeps-per-exchange x per-substep stencil reach) and
+    # runs the substeps communication-free on the extended band, instead of
+    # ~4 halo pads per substep — the latency lever at >=16 ranks (audit:
+    # net-NEGATIVE at 2-GPU scale, where bandwidth beats message count; keep
+    # it opt-in, flip per deck only with an A/B receipt).  Serial results are
+    # value-identical; per-substep eta clamping runs in the LOCAL mode on
+    # this path (see barotropic_substeps_wide_halo_latlon_cgrid's contract).
+    barotropic_wide_halo: bool = False
+    # Substeps per wide exchange (0 = auto: as many as the local band height
+    # allows, i.e. floor(n_lat_local / stencil_reach), capped at the loop
+    # length).  With strongly UNEVEN bands (--wet-balance) set this so
+    # ``chunk x reach <= min band height`` across ranks — the halo pulls
+    # rows from ONE neighbour only.
+    barotropic_wide_halo_chunk: int = 0
 
 
 class RuntimeChecksConfig(NamedTuple):
@@ -1009,6 +1052,16 @@ class PolarFilterConfig(NamedTuple):
     polar_filter_max_wave_speed: float = 300.0
     # Fraction of the theoretical CFL wavenumber kept (<1 for margin).
     polar_filter_safety_factor: float = 0.85
+
+
+# Deferred to break the state <-> physics import cycle: importing
+# ``legoesm.ocean.physics.tidal_forcing`` runs ``ocean/physics/__init__`` ->
+# ``combined`` -> ``from legoesm.ocean.state import OceanState, OceanSurfaceForcing,
+# OceanTendencies``. Those three (the ONLY state symbols the physics package
+# imports) are all defined ABOVE, so by this point the cycle resolves cleanly —
+# whereas a top-of-file import would fault (state mid-init). Needed at class-def
+# time for the ``tidal_forcing`` default below.
+from legoesm.ocean.physics.tidal_forcing import TidalForcingConfig  # noqa: E402
 
 
 class LatLonCGridOceanConfig(NamedTuple):
@@ -1629,6 +1682,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # ``halo_latlon.set_meridionally_flat`` (the grid-operators backend flag, same
     # pattern as the halo backend) at construction.  Default False ⇒ BIT-IDENTICAL.
     meridionally_flat: bool = False
+    # --- Astronomical (equilibrium) tidal forcing (OPT-IN barotropic body force) ---
+    # Nested opt-in config (like `physics`/`gm_redi`): default-disabled instance =>
+    # BIT-IDENTICAL. Consumed by ocean.physics.tidal_forcing.apply_tidal_forcing in
+    # the barotropic momentum step (see that module's wiring note). Appended at the
+    # NamedTuple tail so positional construction for legacy callers is preserved.
+    tidal_forcing: TidalForcingConfig = TidalForcingConfig()
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

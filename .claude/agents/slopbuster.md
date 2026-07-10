@@ -108,7 +108,7 @@ For every test file under `tests/`:
 Check these known supersession patterns:
 - `atmosphere/physics/kessler.py` vs `microphysics/kessler.py`
 - `thermo.py` vs `atmosphere/physics/thermodynamics.py`
-- `land/stomata_utils.py` vs `land/carbon/stomata.py`
+- `land/stomata_utils.py` vs `land/stomata.py`
 - Any top-level `.py` that has a counterpart inside a subpackage
 
 For each pair: which one is imported? Which has tests? The one with more coverage wins. Remove the other if unused.

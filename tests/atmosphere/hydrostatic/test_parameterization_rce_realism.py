@@ -17,6 +17,13 @@ import pytest
 
 from scripts.run import run_scm_rce_campaign as campaign
 from legoesm.training.scm_rce_metrics import (
+    COLD_POINT_MAX_K,
+    COLD_POINT_MIN_K,
+    MADIAB_MAX_TOL_K,
+    MADIAB_MEAN_TOL_K,
+    MIN_FREE_TROP_LEVELS,
+    TROP_MAX_Z_KM,
+    TROP_MIN_Z_KM,
     moist_adiabat_diagnostics_jax,
     realism_reasons_from_diagnostics,
 )
@@ -67,6 +74,67 @@ def test_realism_gate_rejects_synthetic_unphysical_profile():
     reasons = realism_reasons_from_diagnostics(scalar_diag)
     assert reasons
     assert any("moist adiabat" in reason or "cold point" in reason for reason in reasons)
+
+
+def _realistic_scalar_diag() -> dict[str, float]:
+    """A diagnostics dict comfortably INSIDE every realism bound (a healthy RCE column).
+
+    Built from the published thresholds (not magic numbers) so a future threshold change keeps
+    this fixture centred."""
+    return {
+        "n_free_trop_levels": float(MIN_FREE_TROP_LEVELS + 2),
+        "mean_abs_K": MADIAB_MEAN_TOL_K * 0.25,
+        "max_abs_K": MADIAB_MAX_TOL_K * 0.25,
+        "cold_point_T_K": 0.5 * (COLD_POINT_MIN_K + COLD_POINT_MAX_K),
+        "cold_point_z_km": 0.5 * (TROP_MIN_Z_KM + TROP_MAX_Z_KM),
+    }
+
+
+def test_realism_gate_accepts_a_healthy_profile_nonvacuously():
+    """Non-vacuity: a diagnostics dict inside EVERY bound yields ZERO reasons.
+
+    Without this the gate could silently drift to reject-EVERYTHING (a refactor inverting a
+    comparison), which would make the correction loop NEVER trust an LES → never correct a
+    bias.  This is the lower fence; the rejection tests are the upper one."""
+    assert realism_reasons_from_diagnostics(_realistic_scalar_diag()) == []
+
+
+@pytest.mark.parametrize("mode", ["missing", "nan"])
+def test_realism_gate_fails_closed_on_missing_or_nan_diagnostics(mode):
+    """Fail-CLOSED safety: a degenerate LES whose diagnostics are MISSING (empty dict) or NaN is
+    REJECTED, never silently trusted.
+
+    This is the precise property that throws out a tiny / dead LES — and therefore WHY a
+    realistic (HPC-scale) LES is required to demonstrate the empirical clause: a cheap degenerate
+    LES cannot sneak a coefficient into the model.  A regression changing the ``diag.get(key,
+    nan)`` default to a passing value (e.g. ``0.0``) would let a missing cold point clear its
+    lower bound and slip a garbage LES through; here it must produce ≥1 reason.  (NaN comparisons
+    are False, so ``not (lo <= nan <= hi)`` is True → a reason is appended.)"""
+    if mode == "missing":
+        diag: dict[str, float] = {}                       # every key absent → all defaults fire
+    else:
+        diag = {k: float("nan") for k in _realistic_scalar_diag()}   # present but NaN
+    reasons = realism_reasons_from_diagnostics(diag)
+    assert reasons, f"the realism gate trusted a degenerate ({mode}) LES diagnostic set"
+
+
+@pytest.mark.parametrize("field, bad_value, needle", [
+    ("n_free_trop_levels", float(MIN_FREE_TROP_LEVELS - 1), "free-troposphere"),
+    ("mean_abs_K", MADIAB_MEAN_TOL_K + 1.0, "moist adiabat"),          # space → the MEAN reason
+    ("max_abs_K", MADIAB_MAX_TOL_K + 1.0, "moist-adiabat deviation"),  # hyphen → the MAX reason
+    ("cold_point_T_K", COLD_POINT_MIN_K - 1.0, "cold point T"),
+    ("cold_point_z_km", TROP_MAX_Z_KM + 1.0, "cold point z"),
+])
+def test_realism_gate_each_dimension_is_load_bearing(field, bad_value, needle):
+    """Every gate dimension independently rejects: from a healthy dict, push ONE field past its
+    bound and assert the matching reason fires.  Proves no check is dead code — deleting any one
+    would drop its row and fail here (the gate is a genuine 5-dimensional fence, not 1 real
+    check + 4 decorative)."""
+    diag = _realistic_scalar_diag()
+    diag[field] = bad_value
+    reasons = realism_reasons_from_diagnostics(diag)
+    assert any(needle in r for r in reasons), (
+        f"pushing {field} to {bad_value} did not raise a '{needle}' realism failure: {reasons}")
 
 
 def test_crm_clear_sky_subsidence_profile_is_area_weighted_and_closed(tmp_path):

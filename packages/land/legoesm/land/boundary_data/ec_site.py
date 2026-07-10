@@ -55,12 +55,12 @@ _KN_LAI_INTERCEPT = 0.98
 # --- Canopy stomatal / emissivity defaults (Ball-Berry; CLM/DifferBESS).
 #     Mirror legoesm.land.boundary_data._internals; defined locally to avoid a
 #     private cross-module import (test_no_private_cross_imports).
-_M_C3 = 9.0                  # Ball-Berry slope, C3 [-]
-_M_C4 = 4.0                  # Ball-Berry slope, C4 [-]
-_B0_C3 = 0.01               # Ball-Berry intercept, C3 [mol m-2 s-1]
-_B0_C4 = 0.04               # Ball-Berry intercept, C4 [mol m-2 s-1]
-_ALF_DEFAULT = 0.3          # quantum yield [mol CO2 / mol photon]
-_EMISS_VEG = 0.97           # vegetated-surface emissivity [-]
+M_C3 = 9.0                  # Ball-Berry slope, C3 [-]
+M_C4 = 4.0                  # Ball-Berry slope, C4 [-]
+B0_C3 = 0.01               # Ball-Berry intercept, C3 [mol m-2 s-1]
+B0_C4 = 0.04               # Ball-Berry intercept, C4 [mol m-2 s-1]
+ALF_DEFAULT = 0.3          # quantum yield [mol CO2 / mol photon]
+EMISS_VEG = 0.97           # vegetated-surface emissivity [-]
 # --- Diagnostic moisture-stress proxy defaults (texture-independent) -----------
 _THETA_WP_DEFAULT = 0.10     # wilting-point volumetric water content [m3/m3]
 _THETA_FC_DEFAULT = 0.35     # field-capacity volumetric water content [m3/m3]
@@ -76,6 +76,28 @@ _VCMAX_COVERAGE_MIN = 0.5
 _KPA_TO_PA = 1000.0
 _HPA_TO_PA = 100.0
 _SECONDS_PER_DAY = 86400.0
+# Forest-floor litter persistence timescale [days].  The litter cover in the
+# soil-evaporation resistance is driven by a running maximum of LAI that relaxes
+# back over this timescale, so a deciduous forest keeps its floor litter through
+# the leaf-off season (litter decomposes over months, not with the live canopy).
+_LITTER_TAU_DAYS = 180.0
+
+
+def _persistent_litter_lai(lai, dt_s):
+    """Running maximum of LAI with slow exponential relaxation (litter persistence).
+
+    Rises immediately to the live LAI and decays back over ``_LITTER_TAU_DAYS``,
+    giving the structural LAI that drives the forest-floor litter cover.  Pure
+    NumPy (reader-side, not traced); the recurrence is inherently sequential.
+    """
+    decay = float(np.exp(-(dt_s / _SECONDS_PER_DAY) / _LITTER_TAU_DAYS))
+    out = np.empty(lai.shape[0], dtype=float)
+    acc = float(lai[0]) if np.isfinite(lai[0]) else 0.0
+    for i in range(lai.shape[0]):
+        li = float(lai[i]) if np.isfinite(lai[i]) else acc
+        acc = max(li, acc * decay)
+        out[i] = acc
+    return out
 # --- Time-axis validation ------------------------------------------------------
 _DT_UNIFORM_TOL_S = 1.0      # max allowed spread in the timestep [s] (uniform grid)
 _DT_FALLBACK_S = 1800.0      # safe positive dt for malformed-time arrays (gated invalid)
@@ -382,21 +404,26 @@ def read_ec_site_driver(
     alb_nir = (1.0 - fdiff) * fil["Albedo_BSA_nir"] + fdiff * fil["Albedo_WSA_nir"]
 
     # Emissivity production fallback: observed where present, else the site-mean
-    # of observed values, else _EMISS_VEG (0.97).  Gaps do NOT invalidate the
+    # of observed values, else EMISS_VEG (0.97).  Gaps do NOT invalidate the
     # step (EMISSIVITY is excluded from _REQUIRED), matching DifferBESS.
     emiss_mean = (np.nanmean(np.where(obs["EMISSIVITY"], fil["EMISSIVITY"], np.nan))
-                  if obs["EMISSIVITY"].any() else _EMISS_VEG)
+                  if obs["EMISSIVITY"].any() else EMISS_VEG)
     emissivity_arr = np.where(obs["EMISSIVITY"], fil["EMISSIVITY"], emiss_mean)
 
     def colf(a):  # scalar -> (n, 1) jnp, broadcasting over time
         return jnp.broadcast_to(jnp.asarray(a, dtype=jnp.float64), (n,))[:, None]
 
+    # Persistent structural LAI for the forest-floor litter cover (see
+    # _persistent_litter_lai): keeps a deciduous forest's litter suppression active
+    # through the leaf-off season instead of collapsing with the bare canopy.
+    litter_LAI = _persistent_litter_lai(LAI, dt_s)
+
     canopy_params = CanopyLandParams(
-        LAI=col(LAI), hc=colf(hc),
+        LAI=col(LAI), hc=colf(hc), litter_LAI=col(litter_LAI),
         fC4=colf(fC4), FNonVeg=col(FNonVeg), CI=col(CI), kn=colf(kn_site),
         Vcmax25_C3_leaf=col(vc3), Vcmax25_C4_leaf=col(vc4),
-        m_C3=colf(_M_C3), m_C4=colf(_M_C4), b0_C3=colf(_B0_C3), b0_C4=colf(_B0_C4),
-        alf=colf(_ALF_DEFAULT), TgC=col(fil["T_GROWTH"]),
+        m_C3=colf(M_C3), m_C4=colf(M_C4), b0_C3=colf(B0_C3), b0_C4=colf(B0_C4),
+        alf=colf(ALF_DEFAULT), TgC=col(fil["T_GROWTH"]),
         ALB_VIS=col(np.clip(alb_vis, 0.0, 1.0)), ALB_NIR=col(np.clip(alb_nir, 0.0, 1.0)),
         emissivity=col(emissivity_arr),
         rz0m=colf(aero["rz0m"]), rd=colf(aero["rd"]),

@@ -1961,5 +1961,239 @@ def test_prognostic_clubb_prescribed_momentum_flux_is_magnitude_only_drag():
                   > np.abs(np.asarray(out_x.du_dt)[:, -1]))
 
 
+# ===========================================================================
+# Tiled (mosaic) surface-flux injection — the COARE/MOST coupling that lets
+# clubb_lite / clubb run in surface_tiled production exactly like Louis.
+# The driver injects ``surface_flux=(tau_x, tau_y, shflx, lhflx, ustar)`` (the
+# DYNAMIC convention, identical to compute_surface_fluxes) as the BL bottom BC.
+# ===========================================================================
+
+def _injected_surface_flux(ncol, dtype):
+    """A known bottom-BC tuple, distinct from anything the internal bulk formula
+    would produce, so the kernel's USE of it is observable in the diagnostics.
+    Same units/sign convention as compute_surface_fluxes: tau [Pa] (tau_x<0 =
+    drag on u>0), shflx/lhflx [W/m^2] (positive up), ustar [m/s]."""
+    return (
+        jnp.full((ncol,), -0.20, dtype=dtype),   # tau_x [Pa]
+        jnp.full((ncol,), 0.05, dtype=dtype),    # tau_y [Pa]
+        jnp.full((ncol,), 140.0, dtype=dtype),   # shflx [W/m^2]
+        jnp.full((ncol,), 90.0, dtype=dtype),    # lhflx [W/m^2]
+        jnp.full((ncol,), 0.42, dtype=dtype),    # ustar [m/s]
+    )
+
+
+def test_clubb_lite_consumes_injected_surface_flux():
+    """clubb_lite uses the driver-injected tiled surface_flux as its bottom BC
+    (mirrors louis): the reported shflx/lhflx/ustar ARE the injected values, and
+    the tendencies differ from the self-computed-bulk call (the BC is live)."""
+    from legoesm.atmosphere.physics.turbulence.clubb_lite import (
+        clubb_lite_turbulence, CLUBBLiteConfig,
+    )
+    kw = _column(ncol=3, nlev=20)
+    lkw = dict(
+        u=kw["u"], v=kw["v"], T=kw["T"], q_v=kw["q_v"], tke=kw["tke"],
+        p_full=kw["p_full"], p_half=kw["p_half"], z_full=kw["z_full"],
+        z_half=kw["z_half"], T_sfc=kw["T_sfc"], q_sfc=kw["q_sfc"],
+        rho=kw["rho"], dt=kw["dt"], config=CLUBBLiteConfig(),
+    )
+    sf = _injected_surface_flux(3, kw["T"].dtype)
+    out_inj, _ = clubb_lite_turbulence(**lkw, surface_flux=sf)
+    out_def, _ = clubb_lite_turbulence(**lkw)
+    np.testing.assert_allclose(np.asarray(out_inj.shflx), np.asarray(sf[2]))
+    np.testing.assert_allclose(np.asarray(out_inj.lhflx), np.asarray(sf[3]))
+    np.testing.assert_allclose(np.asarray(out_inj.ustar), np.asarray(sf[4]))
+    assert not np.allclose(np.asarray(out_inj.dT_dt), np.asarray(out_def.dT_dt))
+    assert np.all(np.isfinite(np.asarray(out_inj.dT_dt)))
+    # Sign check: a positive (upward) injected shflx warms the near-surface layer
+    # (sflx_T = shflx/c_pd enters the implicit θ-diffusion as a +source at the
+    # bottom), so dT_dt[:, -1] exceeds the zero-flux baseline.
+    out_zero, _ = clubb_lite_turbulence(
+        **lkw, surface_flux=tuple(jnp.zeros_like(s) for s in sf))
+    assert np.all(np.asarray(out_inj.dT_dt)[:, -1]
+                  > np.asarray(out_zero.dT_dt)[:, -1])
+
+
+def test_clubb_diagnostic_consumes_injected_surface_flux():
+    """The DEFAULT diagnostic scheme="clubb" uses the injected tiled flux too."""
+    kw = _column(ncol=3, nlev=20)
+    sf = _injected_surface_flux(3, kw["T"].dtype)
+    out_inj, _ = clubb_turbulence(**kw, surface_flux=sf)
+    out_def, _ = clubb_turbulence(**kw)
+    np.testing.assert_allclose(np.asarray(out_inj.shflx), np.asarray(sf[2]))
+    np.testing.assert_allclose(np.asarray(out_inj.lhflx), np.asarray(sf[3]))
+    np.testing.assert_allclose(np.asarray(out_inj.ustar), np.asarray(sf[4]))
+    assert not np.allclose(np.asarray(out_inj.dT_dt), np.asarray(out_def.dT_dt))
+
+
+def test_clubb_prognostic_injected_flux_equals_kinematic_prescription():
+    """Prognostic clubb converts the injected DYNAMIC surface_flux to the
+    kinematic sfc_* BC EXACTLY (the inverse of clubb_step's bulk->kinematic map),
+    so passing surface_flux is bit-identical to passing the equivalent
+    sfc_wpthlp/sfc_wprtp/sfc_upwp/sfc_vpwp directly."""
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        exner_function, init_clubb_moments, pack_clubb_moments,
+    )
+    kw = _column(ncol=3, nlev=18)
+    kw.pop("tke")
+    ncol, nlev = kw["T"].shape
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    carry = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg))
+    sf = _injected_surface_flux(ncol, kw["T"].dtype)
+    tau_x, tau_y, shflx, lhflx, _ = sf
+    rho_sfc = kw["rho"][:, -1]
+    exner_sfc = exner_function(kw["p_full"][:, -1])
+    # The exact inverse map clubb_turbulence_prognostic applies internally.
+    sfc_wpthlp = shflx / (rho_sfc * constants.c_pd * exner_sfc)
+    sfc_wprtp = lhflx / (rho_sfc * constants.L_v)
+    sfc_upwp = tau_x / rho_sfc
+    sfc_vpwp = tau_y / rho_sfc
+    base = (kw["u"], kw["v"], kw["T"], kw["q_v"], carry, kw["p_full"],
+            kw["p_half"], kw["z_full"], kw["z_half"], kw["T_sfc"], kw["q_sfc"],
+            kw["rho"], 300.0, cfg)
+    out_inj, c_inj = clubb_turbulence_prognostic(*base, surface_flux=sf)
+    out_kin, c_kin = clubb_turbulence_prognostic(
+        *base, sfc_wpthlp=sfc_wpthlp, sfc_wprtp=sfc_wprtp,
+        sfc_upwp=sfc_upwp, sfc_vpwp=sfc_vpwp)
+    for a, b in ((out_inj.du_dt, out_kin.du_dt), (out_inj.dv_dt, out_kin.dv_dt),
+                 (out_inj.dT_dt, out_kin.dT_dt), (out_inj.dq_v_dt, out_kin.dq_v_dt)):
+        assert np.array_equal(np.asarray(a), np.asarray(b))
+    assert np.array_equal(np.asarray(c_inj), np.asarray(c_kin))
+    # The reported surface diagnostics ARE the injected dynamic values directly
+    # (Louis-equivalent), including ustar (NOT clubb_step's stress-reconstruction).
+    np.testing.assert_allclose(np.asarray(out_inj.shflx), np.asarray(shflx))
+    np.testing.assert_allclose(np.asarray(out_inj.lhflx), np.asarray(lhflx))
+    np.testing.assert_allclose(np.asarray(out_inj.ustar), np.asarray(sf[4]))
+
+
+def test_clubb_prognostic_injected_dynamic_flux_conserved():
+    """Prognostic clubb applies EXACTLY the injected DYNAMIC surface flux, at the
+    correct (sub-)step density — the coupler energy-budget contract.
+
+    (1) Single step: the exner-corrected potential-temperature column budget — the
+        true flux-form invariant ``c_pd*Π_sfc*∫ rho*(dT_dt/Π) dz`` — closes to the
+        injected ``shflx`` to round-off, proving the dynamic->kinematic conversion
+        imposes exactly ``shflx`` W/m^2 at that density (the raw T-energy budget
+        does NOT close — heating lands at heights with Π != Π_sfc).
+    (2) Sub-cycled: converting the dynamic flux at EACH sub-step's evolving density
+        (the fix) gives a DIFFERENT result from converting ONCE with the host
+        density and holding the kinematic BC constant (the pre-fix behaviour),
+        proving the per-sub-step re-conversion that keeps the applied W/m^2 flux on
+        target as the column density drifts. The reported shflx/lhflx/ustar are the
+        injected dynamic values directly (Louis-equivalent)."""
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        integrate_clubb_column, pack_clubb_moments,
+    )
+    kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    # Spin up a stable moment state (same recipe as the moisture-conservation test).
+    u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
+        **kw, dt=150.0, nsteps=40, config=cfg)
+    tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
+    rho = kw["p_full"] / (constants.R_d * tv)
+    carry = pack_clubb_moments(m_f)
+    sf = _injected_surface_flux(2, T_f.dtype)
+    shflx_inj, ustar_inj = np.asarray(sf[2]), np.asarray(sf[4])
+    base = (u_f, v_f, T_f, q_f, carry, kw["p_full"], kw["p_half"],
+            kw["z_full"], kw["z_half"], T_f[:, -1], q_f[:, -1], rho)
+    dz = np.abs(np.asarray(kw["z_half"])[:, :-1] - np.asarray(kw["z_half"])[:, 1:])
+    mass = np.asarray(rho) * dz
+    exner = (np.asarray(kw["p_full"]) / constants.p_ref) ** constants.kappa
+    exner_sfc = exner[:, -1]
+
+    # (1) Single step (n_sub=1): exact flux-form theta-budget closure.
+    out1, _ = clubb_turbulence_prognostic(*base, 300.0, cfg, surface_flux=sf)
+    col_theta = constants.c_pd * exner_sfc * np.sum(
+        mass * np.asarray(out1.dT_dt) / exner, axis=1)
+    assert np.all(np.abs(col_theta - shflx_inj) / shflx_inj < 1e-6), (
+        f"theta-budget {col_theta} W/m^2 != injected shflx {shflx_inj}")
+
+    # (2) Sub-cycled (dt=1500 -> n_sub=5): per-sub-step re-conversion differs from
+    # the once-host-converted constant kinematic BC (the pre-fix path).
+    out5p, _ = clubb_turbulence_prognostic(*base, 1500.0, cfg, surface_flux=sf)
+    rho_s = rho[:, -1]
+    once = (sf[2] / (rho_s * constants.c_pd * exner_sfc),
+            sf[3] / (rho_s * constants.L_v), sf[0] / rho_s, sf[1] / rho_s)
+    out5o, _ = clubb_turbulence_prognostic(
+        *base, 1500.0, cfg, sfc_wpthlp=once[0], sfc_wprtp=once[1],
+        sfc_upwp=once[2], sfc_vpwp=once[3])
+    assert not np.allclose(np.asarray(out5p.dT_dt), np.asarray(out5o.dT_dt)), (
+        "per-sub-step conversion did not change the result vs the once-converted "
+        "constant BC — the density-tracking fix is inert")
+    # Fix 2: reported diagnostics are the injected dynamic values (Louis-equivalent).
+    np.testing.assert_allclose(np.asarray(out5p.shflx), shflx_inj)
+    np.testing.assert_allclose(np.asarray(out5p.ustar), ustar_inj)
+
+
+def test_clubb_prognostic_wind_antiparallel_stress_conserved_componentwise():
+    """The injected tiled stress is WIND-ANTIPARALLEL by construction — each tile's
+    bulk stress is ``tau = -rho*Cd*|V|*(u, v)`` at the SAME column wind, so the
+    area blend ``(sum -rho*f*Cd*|V|)*(u, v)`` has NO cross-wind component. clubb's
+    surface-momentum path (advance_windm_edsclrm) reapplies the stress MAGNITUDE
+    antiparallel to the wind; for a wind-antiparallel input that reproduces BOTH
+    (tau_x, tau_y) components — nothing is lost. This certifies the precondition
+    (codex round-2): the magnitude-only momentum BC is exact for the tiled bulk
+    flux (it is NOT for a fixed cross-wind LES stress, which this coupling never
+    injects). Column momentum budget ``∫ rho*du_dt dz = tau_x`` (no top stress;
+    fcor=0 in clubb_step) closes for both components."""
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        integrate_clubb_column, pack_clubb_moments,
+    )
+    kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
+        **kw, dt=150.0, nsteps=40, config=cfg)
+    tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
+    rho = kw["p_full"] / (constants.R_d * tv)
+    rho_s = rho[:, -1]
+    # Wind-antiparallel stress with a non-trivial cross-stream (v) component,
+    # exactly as the tiled bulk blend forms it from the near-surface wind.
+    u_sfc, v_sfc = u_f[:, -1], v_f[:, -1]
+    vmag = jnp.sqrt(u_sfc ** 2 + v_sfc ** 2)
+    cbulk = 1.5e-3
+    tau_x = -rho_s * cbulk * vmag * u_sfc
+    tau_y = -rho_s * cbulk * vmag * v_sfc
+    # Antiparallel <=> tau x V (z-component) == 0 and tau . V < 0.
+    cross = np.asarray(tau_x * v_sfc - tau_y * u_sfc)
+    assert np.allclose(cross, 0.0, atol=1e-12)
+    assert np.all(np.asarray(tau_x * u_sfc + tau_y * v_sfc) < 0.0)
+    ustar = jnp.maximum(tau_x ** 2 + tau_y ** 2, 1e-30) ** 0.25 / jnp.sqrt(rho_s)
+    sf = (tau_x, tau_y, jnp.full(2, 120.0, dtype=T_f.dtype),
+          jnp.full(2, 80.0, dtype=T_f.dtype), ustar)
+    out, _ = clubb_turbulence_prognostic(
+        u_f, v_f, T_f, q_f, pack_clubb_moments(m_f), kw["p_full"], kw["p_half"],
+        kw["z_full"], kw["z_half"], T_f[:, -1], q_f[:, -1], rho, 300.0, cfg,
+        surface_flux=sf)
+    dz = np.abs(np.asarray(kw["z_half"])[:, :-1] - np.asarray(kw["z_half"])[:, 1:])
+    mass = np.asarray(rho) * dz
+    col_du = np.sum(mass * np.asarray(out.du_dt), axis=1)
+    col_dv = np.sum(mass * np.asarray(out.dv_dt), axis=1)
+    # BOTH stress components are reproduced (the ~0.8% residual is the within-step
+    # wind evolution under the implicit drag, physically correct for a bulk drag).
+    assert np.all(np.abs(col_du - np.asarray(tau_x)) / np.abs(np.asarray(tau_x)) < 1.5e-2)
+    assert np.all(np.abs(col_dv - np.asarray(tau_y)) / np.abs(np.asarray(tau_y)) < 1.5e-2)
+
+
+def test_clubb_prognostic_rejects_surface_flux_and_explicit_sfc_together():
+    """surface_flux (driver BC) and the explicit sfc_* prescriptions are mutually
+    exclusive — passing both is a hard error, not a silent precedence pick."""
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        init_clubb_moments, pack_clubb_moments,
+    )
+    kw = _column(ncol=2, nlev=16)
+    kw.pop("tke")
+    ncol, nlev = kw["T"].shape
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    carry = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg))
+    sf = _injected_surface_flux(ncol, kw["T"].dtype)
+    with pytest.raises(ValueError, match="not both"):
+        clubb_turbulence_prognostic(
+            kw["u"], kw["v"], kw["T"], kw["q_v"], carry, kw["p_full"],
+            kw["p_half"], kw["z_full"], kw["z_half"], kw["T_sfc"], kw["q_sfc"],
+            kw["rho"], 300.0, cfg,
+            sfc_wpthlp=jnp.zeros((ncol,)), surface_flux=sf)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

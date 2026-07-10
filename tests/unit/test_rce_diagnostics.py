@@ -18,6 +18,7 @@ from legoesm.atmosphere.dynamics.rce_diagnostics import (
     crm_comparison_profiles_plane, domain_mean_profiles_plane,
     precipitation_rate_proxy_plane,
     pseudo_equivalent_potential_temperature,
+    resolved_turbulent_fluxes_plane,
     updraft_mass_flux_plane, vertical_velocity_variance_plane,
 )
 from legoesm.grids.plane import create_plane_grid
@@ -394,6 +395,120 @@ def test_crm_comparison_bundle_jit_and_grad():
     def loss(w_data):
         s = state._replace(w=state.w.replace(data=w_data))
         return jnp.sum(crm_comparison_profiles_plane(s, hc).w_var_half)
+
+    g = jax.grad(loss)(state.w.data)
+    assert g.shape == state.w.data.shape
+    assert bool(jnp.all(jnp.isfinite(g)))
+
+
+# ---------------------------------------------------------------------------
+# Resolved turbulent fluxes (stage 5 of docs/COMPARE_REANALYSIS.md)
+# ---------------------------------------------------------------------------
+
+def _checkerboard_sign(ny=4, nx=4):
+    ii, jj = np.meshgrid(np.arange(nx), np.arange(ny), indexing="xy")
+    return np.where((ii + jj) % 2 == 0, 1.0, -1.0)  # (ny,nx), zero mean
+
+
+def _correlated_flux_state(W=2.0, A=0.5, B=1e-3, C=3.0):
+    """Checkerboard w=W·s, theta_prime=A·s, q_v=q0+B·s, u=C·s, v=0.
+
+    Perfectly (anti)correlated ⇒ analytic <w'φ'> = W·A_phi at every interior
+    interface (s²=1, zero horizontal means)."""
+    state, grid, hc, tm = _setup_convective()
+    s2d = _checkerboard_sign()
+    s_full = jnp.asarray(s2d)[:, :, None] * jnp.ones((4, 4, 8))
+    s_half = jnp.asarray(s2d)[:, :, None] * jnp.ones((4, 4, 9))
+    tracers = state.tracers.data.at[..., 0].set(0.01 + B * np.asarray(s_full))
+    state = state._replace(
+        w=state.w.replace(data=W * s_half),
+        theta_prime=state.theta_prime.replace(data=A * s_full),
+        u=state.u.replace(data=C * s_full),
+        v=state.v.replace(data=jnp.zeros((4, 4, 8))),
+        tracers=state.tracers.replace(data=tracers),
+    )
+    return state, hc, dict(W=W, A=A, B=B, C=C)
+
+
+def test_resolved_fluxes_shapes_and_zhalf():
+    state, hc, _ = _correlated_flux_state()
+    f = resolved_turbulent_fluxes_plane(state, hc)
+    for arr in (f.z_half_interior, f.w_theta, f.w_qv, f.w_u, f.w_v, f.w_thetav):
+        assert arr.shape == (7,)  # nlev-1 interior interfaces
+    np.testing.assert_allclose(
+        np.asarray(f.z_half_interior), np.asarray(hc.z_half)[1:-1])
+
+
+def test_resolved_fluxes_analytic_covariance():
+    state, hc, p = _correlated_flux_state()
+    f = resolved_turbulent_fluxes_plane(state, hc)
+    # <w'θ'> = W·A, <w'q'> = W·B, <w'u'> = W·C, <w'v'> = 0, all interfaces.
+    np.testing.assert_allclose(np.asarray(f.w_theta), p["W"] * p["A"], rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(f.w_qv), p["W"] * p["B"], rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(f.w_u), p["W"] * p["C"], rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(f.w_v), 0.0, atol=1e-12)
+
+
+def test_resolved_buoyancy_flux_exact_cross_term():
+    state, hc, p = _correlated_flux_state()
+    f = resolved_turbulent_fluxes_plane(state, hc)
+    # Exact nonlinear-product result for w=W·s, θ=θ_ref+A·s, q=q0+B·s, <s>=0:
+    #   <w'θ_v'> = W·[ A·(1 + c·q0) + c·θ0·B ],  θ0 = θ_ref at the interface.
+    coeff = 1.0 / constants.epsilon - 1.0
+    q0, W, A, B = 0.01, p["W"], p["A"], p["B"]
+    theta_ref = np.asarray(hc.theta_ref)
+    theta_ref_iface = 0.5 * (theta_ref[:-1] + theta_ref[1:])  # (nlev-1,)
+    expected = W * (A * (1.0 + coeff * q0) + coeff * theta_ref_iface * B)
+    np.testing.assert_allclose(np.asarray(f.w_thetav), expected, rtol=1e-12)
+    assert bool(jnp.all(f.w_thetav > 0.0))
+
+
+def test_resolved_flux_bad_uv_shape_raises():
+    state, hc, _ = _correlated_flux_state()
+    state = state._replace(u=state.u.replace(data=jnp.zeros((4, 4, 9))))
+    with pytest.raises(ValueError, match="full-level layout"):
+        resolved_turbulent_fluxes_plane(state, hc)
+
+
+def test_resolved_flux_zero_for_uniform_w():
+    state, hc, _ = _correlated_flux_state()
+    state = state._replace(w=state.w.replace(data=jnp.full((4, 4, 9), 1.5)))
+    f = resolved_turbulent_fluxes_plane(state, hc)
+    for arr in (f.w_theta, f.w_qv, f.w_u, f.w_thetav):
+        np.testing.assert_allclose(np.asarray(arr), 0.0, atol=1e-12)
+
+
+def test_resolved_flux_zero_for_uniform_scalar():
+    state, hc, _ = _correlated_flux_state()
+    state = state._replace(
+        theta_prime=state.theta_prime.replace(data=jnp.zeros((4, 4, 8))))
+    f = resolved_turbulent_fluxes_plane(state, hc)
+    np.testing.assert_allclose(np.asarray(f.w_theta), 0.0, atol=1e-12)
+
+
+def test_resolved_flux_bad_w_shape_raises():
+    state, hc, _ = _correlated_flux_state()
+    # w on full levels (nlev) instead of half (nlev+1) must be rejected.
+    state = state._replace(w=state.w.replace(data=jnp.zeros((4, 4, 8))))
+    with pytest.raises(ValueError, match="half levels"):
+        resolved_turbulent_fluxes_plane(state, hc)
+
+
+def test_resolved_flux_bad_qv_slot_raises():
+    state, hc, _ = _correlated_flux_state()
+    with pytest.raises(ValueError):
+        resolved_turbulent_fluxes_plane(state, hc, qv_slot=99)
+
+
+def test_resolved_flux_jit_and_grad():
+    state, hc, _ = _correlated_flux_state()
+    out = jax.jit(lambda s: resolved_turbulent_fluxes_plane(s, hc))(state)
+    for arr in jax.tree_util.tree_leaves(out):
+        assert bool(jnp.all(jnp.isfinite(arr)))
+
+    def loss(w_data):
+        s = state._replace(w=state.w.replace(data=w_data))
+        return jnp.sum(resolved_turbulent_fluxes_plane(s, hc).w_theta)
 
     g = jax.grad(loss)(state.w.data)
     assert g.shape == state.w.data.shape

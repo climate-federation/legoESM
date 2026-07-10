@@ -18,12 +18,14 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.config import MultiLayerLandConfig, RichardsConfig
 from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
-from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
+from legoesm.land.soil_hydraulics import (
+    SoilHydraulicsConfig, psi_from_theta, theta_from_psi, hydraulic_conductivity)
 from legoesm.land.richards import solve_richards
 from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
 
@@ -120,6 +122,56 @@ def test_evaporation_conserves_with_and_without_pond():
     assert abs(_richards_residual(loam, evap, 0.0, pond0_val=0.02)) < 1.0e-3  # standing pond
 
 
+def test_richards_drainage_reported_at_solver_debited_K():
+    """Reported subsurface drainage must be the K the last Picard iteration's rhs
+    actually DEBITED (the free-drainage bottom BC is explicit, evaluated at the
+    carry entering that iteration) — not K re-evaluated at psi_final.  The two
+    differ by O(last dpsi), and that mismatch showed up 1:1 as a spurious column
+    budget residual: on this draining wet column, drainage-at-psi_final leaves
+    ~6.1e-6 kg/m2/step while the solve-consistent report leaves ~4.6e-8 kg/m2
+    (only the last iteration's O(dpsi^2) linearization error remains).  The soil
+    STATE is untouched by the fix (bit-identical psi/theta/pond/runoff_surface,
+    probe-verified in x64 and float32); only the diagnostic moved.
+
+    The 5e-7 budget gate is an fp64 tolerance (the Picard residual floor is well
+    below fp32 roundoff on this column), so this node runs under x64; the fp32
+    carry-dtype path is exercised separately by
+    ``test_richards_free_drainage_runs_under_fp32_policy`` in the x64-off lane."""
+    if not jax.config.read("jax_enable_x64"):
+        pytest.skip("budget-closure gate needs fp64; run this node with "
+                    "JAX_ENABLE_X64=1")
+    loam = SoilHydraulicsConfig()
+    theta_wet = float(loam.theta_sat) - 0.005
+
+    # (a) budget gate: draining wet column closes far below the pre-fix mismatch.
+    resid = _richards_residual(loam, 0.0, 0.0, theta_init=theta_wet)
+    assert abs(resid) < 5.0e-7, resid   # pre-fix (K at psi_final): ~6.1e-6 kg/m2
+
+    # (b) semantics pin: the reported drainage equals K at the carry ENTERING the
+    # last iteration — recoverable as the raw psi of a (max_iter-1) run, since the
+    # Picard body is deterministic (the layer-0 pond-deficit debit only touches the
+    # RETURNED theta, so recompute theta from psi).  And it must NOT be K(psi_final)
+    # (the old evaluation) on this still-draining column.
+    grid = _grid()
+    theta0 = jnp.full((1, 8), theta_wet)
+    psi0 = psi_from_theta(theta0, loam)
+    flux = jnp.zeros(1)
+    sink = jnp.zeros((1, 8))
+    pond0 = jnp.zeros(1)
+    out = solve_richards(psi0, theta0, grid, loam, RichardsConfig(max_iter=10),
+                         flux, sink, 3600.0, surface_water=pond0)
+    out_m1 = solve_richards(psi0, theta0, grid, loam, RichardsConfig(max_iter=9),
+                            flux, sink, 3600.0, surface_water=pond0)
+    K_carry = hydraulic_conductivity(
+        out_m1.psi_new, theta_from_psi(out_m1.psi_new, loam), loam)[:, -1]
+    K_final = hydraulic_conductivity(out.psi_new, out.theta_new, loam)[:, -1]
+    reported = np.asarray(out.runoff_subsurface) / _RHO   # [m/s]
+    np.testing.assert_allclose(reported, np.asarray(K_carry), rtol=1e-12, atol=0.0)
+    assert float(jnp.max(jnp.abs(out.runoff_subsurface / _RHO - K_final))) > 0.0, (
+        "vacuous pin: K(psi_final) coincides with the debited K on the "
+        "draining column; pick a wetter/faster-draining scenario")
+
+
 def test_stiff_clay_conserves_after_specific_storage_switch():
     """A very stiff clay (n_vg~1.09) — whose drying step formerly leaked ~0.7 kg/m2
     at the default iteration count — now CONSERVES at the same max_iter=10, wetting
@@ -177,10 +229,68 @@ def test_full_step_conserves_water_drying_and_wetting():
         assert th_min >= tr - 1e-6, th_min
 
 
+# ── float32-only Richards free-drainage carry (the _K_bot0 seed fix) ────────
+def test_richards_free_drainage_runs_under_fp32_policy():
+    """solve_richards seeds a 4th fori_loop carry slot (_K_bot0) cast to the
+    working dtype so the scan carry input/output dtypes AGREE under a pure
+    float32 run — otherwise the free-drainage K_bot diagnostic seed (float32)
+    would mismatch the loop-body output and fail at compile ("scan body carry
+    input and output must have equal types").  Only x64 was exercised; this
+    pins the fp32-only path.
+
+    MUST run with x64 DISABLED (do NOT set JAX_ENABLE_X64=1) so the default
+    dtype — and hence the solver working dtype — is genuinely float32.  If the
+    suite is run under x64 everything upcasts to float64 and there is no fp32
+    carry to test, so we skip rather than give a false green."""
+    if jax.config.read("jax_enable_x64"):
+        pytest.skip(
+            "fp32 carry path needs x64 OFF; run this node without "
+            "JAX_ENABLE_X64=1")
+
+    from legoesm.core.precision import get_policy, set_policy, PrecisionPolicy
+
+    saved_policy = get_policy()
+    set_policy(PrecisionPolicy.fp32())
+    try:
+        grid = _grid()                      # 8-layer soil grid (float32 under x64-off)
+        assert grid.dz.dtype == jnp.float32, grid.dz.dtype
+        hyd = SoilHydraulicsConfig()
+        cfg = RichardsConfig()              # default bottom_bc == "free_drainage"
+        assert cfg.bottom_bc == "free_drainage"
+
+        theta0 = jnp.full((1, 8), 0.30, dtype=jnp.float32)
+        psi0 = psi_from_theta(theta0, hyd).astype(jnp.float32)
+        flux_top = jnp.asarray([5.0e-6], dtype=jnp.float32)   # net infiltration [m/s]
+        sink = jnp.zeros((1, 8), dtype=jnp.float32)
+        pond0 = jnp.zeros((1,), dtype=jnp.float32)
+
+        # A float32-mismatched carry would raise at trace/compile time here.
+        out = solve_richards(psi0, theta0, grid, hyd, cfg,
+                             flux_top, sink, 3600.0, surface_water=pond0)
+
+        # The fp32 path is genuinely exercised (no silent float64 widening).
+        assert out.runoff_subsurface.dtype == jnp.float32, out.runoff_subsurface.dtype
+        assert bool(jnp.all(jnp.isfinite(out.runoff_subsurface)))
+        assert bool(jnp.all(jnp.isfinite(out.theta_new)))
+        assert bool(jnp.all(jnp.isfinite(out.psi_new)))
+        # Free drainage on a wet column drains DOWN: subsurface runoff > 0.
+        assert float(jnp.sum(out.runoff_subsurface)) > 0.0
+    finally:
+        set_policy(saved_policy)
+
+
 # ── surface soil resistance (the user-requested physics) ────────────────────
 def test_surface_resistance_throttles_dry_soil_evaporation():
     """A drying surface forms a crust: bare-soil evaporation with the resistance
-    (exp>0) is strictly less than with none (exp=0) from a dry top layer."""
+    (exp>0) is strictly less than with none (exp=0) from a dry top layer.
+
+    Was xfail'd: the extreme 60-step dry+hot scenario also tripped a SimpleSEB
+    surface-energy <-> soil-T thermal runaway (the ``S_top**exp`` resistance buries the
+    un-evaporated energy in ``G_surface``, which the EXPLICIT surface coupling amplified
+    to NaN).  The semi-implicit surface conductance ported from origin/main
+    (``compute_simple_seb_fluxes`` -> ``solve_soil_thermal(surface_conductance=...)``, a
+    Robin BC) damps that feedback, so the run now stays finite and the resistance-
+    throttling physics is directly testable — this doubles as the regression guard."""
     base = MultiLayerLandConfig(soil_grid=SoilGridConfig(n_layers=8, total_depth=3.0))
     f = _forcing(4, T_air=305.0, q_air=0.002, precip=0.0)
     dry = 0.10

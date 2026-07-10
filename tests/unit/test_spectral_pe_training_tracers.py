@@ -82,9 +82,11 @@ def _make_gaussian_carry(T_val=280.0, p_s_val=101325.0, q_v_val=0.005):
 
 def _make_small_sfno():
     """Create a small SFNO for testing."""
+    from legoesm.training.neural_gcm_spectral import N_SFNO_FORCING_CHANNELS
     spec = PE3DChannelSpec(nlev=NLEV)
     config = SFNOConfig(
-        in_channels=spec.n_channels,
+        # state channels + the surface-forcing input planes
+        in_channels=spec.n_channels + N_SFNO_FORCING_CHANNELS,
         out_channels=spec.n_channels,
         embed_dim=16,
         n_blocks=1,
@@ -632,9 +634,11 @@ class TestColumnMLPTracers:
         )
 
     def test_column_mlp_mirrors_tracer_pytree(self):
-        """The column MLP only predicts dT/dt but must mirror the input
-        state's tracer pytree as zero tendencies so downstream
-        ``jax.tree.map(state, tendency)`` works."""
+        """The column MLP tendency must mirror the input state's tracer
+        pytree (q_v carries the moisture head's dq_v/dt; q_c/q_r zeros)
+        so downstream ``jax.tree.map(state, tendency)`` works.  With
+        ``residual_scale=0.0`` every head is exactly zero, so all
+        tracer tendencies here are zero-valued."""
         from legoesm.training.neural_gcm_spectral import (
             carry_to_spectral_state,
             make_column_mlp_spectral_physics,

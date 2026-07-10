@@ -198,35 +198,21 @@ EXCLUDED: frozenset[str] = frozenset(
 
 # Scheme modules not yet carrying a contract (iter 2026-06-09). SHRINK-ONLY.
 CONTRACT_TODO: frozenset[str] = frozenset(
-    (
-        "packages/ocean/legoesm/ocean/physics/convection/enhanced_diffusion.py",
-        "packages/ocean/legoesm/ocean/physics/convection/plume.py",
-        "packages/ocean/legoesm/ocean/physics/ice_shelf.py",
-        "packages/ocean/legoesm/ocean/physics/ice_shelf_basal_melt.py",
+    {
+        # (All atmosphere physics scheme modules now carry __physics_contract__
+        # as of 2026-07-02. Shared primitive libraries were moved to EXCLUDED:
+        # convection/_plume.py, convection/_triggers.py,
+        # microphysics/_warm_rain.py, microphysics/_thompson_snow.py.)
+        # Ocean shared-core holdouts (NOT single-tendency schemes; the concrete
+        # grid schemes carry the __physics_contract__). The 24 ocean scheme
+        # modules formerly listed here were annotated 2026-07-02 (shrink-only).
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/_gm_redi_common.py",
-        "packages/ocean/legoesm/ocean/physics/lateral_mixing/backscatter.py",
-        "packages/ocean/legoesm/ocean/physics/lateral_mixing/biharmonic.py",
-        "packages/ocean/legoesm/ocean/physics/lateral_mixing/eke.py",
-        "packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi.py",
-        "packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py",
-        "packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_mpas.py",
-        "packages/ocean/legoesm/ocean/physics/lateral_mixing/harmonic.py",
+        # MLE shared core: config + Fox-Kemper formulas/helpers (coefficient,
+        # vertical structure, MLE-MLD + buoyancy), NOT a single-tendency scheme.
+        # The scheme (mle_latlon_cgrid.py) carries the __physics_contract__.
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/mle.py",
         "packages/ocean/legoesm/ocean/physics/mixing.py",
-        "packages/ocean/legoesm/ocean/physics/surface_forcing/bulk_formulas.py",
-        "packages/ocean/legoesm/ocean/physics/surface_forcing/external.py",
-        "packages/ocean/legoesm/ocean/physics/surface_forcing/prescribed.py",
-        "packages/ocean/legoesm/ocean/physics/surface_forcing/restoring.py",
-        "packages/ocean/legoesm/ocean/physics/surface_forcing/wind_profiles.py",
-        "packages/ocean/legoesm/ocean/physics/vertical_mixing/constant.py",
-        "packages/ocean/legoesm/ocean/physics/vertical_mixing/implicit_solver.py",
-        "packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py",
-        "packages/ocean/legoesm/ocean/physics/vertical_mixing/kpp.py",
-        "packages/ocean/legoesm/ocean/physics/vertical_mixing/mpas_integration.py",
-        "packages/ocean/legoesm/ocean/physics/vertical_mixing/richardson.py",
-        "packages/ocean/legoesm/ocean/physics/vertical_mixing/tidal.py",
-        "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py",
-    )
+    }
 )
 
 

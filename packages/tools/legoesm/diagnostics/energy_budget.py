@@ -283,30 +283,6 @@ def toa_net_radiation(
     return sw_flux_down_toa - sw_flux_up_toa - lw_flux_up_toa
 
 
-def toa_net_radiation_from_output(rad_out, shape_2d: tuple[int, ...]) -> jax.Array:
-    """Extract TOA net radiation from RadiationOutput.
-
-    Parameters
-    ----------
-    rad_out : RadiationOutput
-        Radiation output with fluxes at interfaces (ncol, nlev+1).
-        Index 0 = TOA.
-    shape_2d : tuple
-        Spatial shape to reshape to (e.g., (6, n, n)).
-    """
-    # Incoming SW = the prescribed TOA insolation (#620), not the clamped
-    # top-halo `sw_flux_down[:, 0]` (the `_replace_top_flux` BUG-B guard caps
-    # it ~15% low, biasing R_TOA).  Fall back to the halo when a radiation_fn
-    # does not populate `toa_insolation` (e.g. the no-radiation stub).
-    sw_down_toa = (
-        rad_out.toa_insolation if rad_out.toa_insolation is not None
-        else rad_out.sw_flux_down[:, 0]
-    ).reshape(shape_2d)
-    sw_up_toa = rad_out.sw_flux_up[:, 0].reshape(shape_2d)
-    lw_up_toa = rad_out.lw_flux_up[:, 0].reshape(shape_2d)
-    return toa_net_radiation(sw_down_toa, sw_up_toa, lw_up_toa)
-
-
 def surface_net_radiation(
     sw_net_sfc: jax.Array,
     lw_net_sfc: jax.Array,

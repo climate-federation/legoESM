@@ -8,6 +8,39 @@ from legoesm.ocean.physics.surface_forcing.config import RestoringConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 from legoesm.ocean.physics.surface_forcing._shared import linear_relaxation
 
+__physics_contract__ = {
+    "summary": (
+        "Newtonian (Haney) SST/SSS restoring: relax surface temperature and "
+        "salinity toward prescribed target profiles, dT/dt = -(T - T*)/tau_T "
+        "and dS/dt = -(S - S*)/tau_S, applied in the top ocean layer."
+    ),
+    "inputs": {
+        "T": "degC", "S": "psu", "grid.grid_lat": "rad",
+        "cfg.T_star_eq": "degC", "cfg.S_star": "psu",
+        "cfg.tau_T": "s", "cfg.tau_S": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "degC/s", "dS_dt": "psu/s",
+        "Q_net": "W/m^2", "tau_x": "N/m^2", "tau_y": "N/m^2",
+    },
+    "sign_convention": (
+        "Relaxation OPPOSES the anomaly — the tendency has the opposite sign to "
+        "(T - T*) and (S - S*), so it always drives T, S toward the target; "
+        "relaxation timescales tau_T, tau_S > 0; a non-conservative surface "
+        "source/sink (adds/removes heat & salt to reach the target); z positive "
+        "up. An unknown T_profile raises ValueError."
+    ),
+    # Restoring is a surface source/sink toward a target; not conservative.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": "Haney, R. L. (1971), JPO 1, 241-248 (Newtonian surface relaxation)",
+    "idealized_test": (
+        "tests/ocean/unit/test_restoring_extension.py — T above target cools, "
+        "below target warms, magnitude ~ |T - T*|/tau; T = T* gives zero "
+        "tendency; an unknown T_profile raises."
+    ),
+}
+
 
 def _make_target(cfg: RestoringConfig, lat, dtype, kind: str):
     """Resolve the restoring target. ``kind`` ∈ {"T", "S"}.

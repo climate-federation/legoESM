@@ -31,13 +31,15 @@ from legoesm.surface_albedo import land_albedo as compute_land_albedo
 
 
 # --- SimpleSEB cold-start numerics safety guards (peers; NOT climate-tuning knobs) ---
+# Public so the slab-land inline flux path (slab_land.step_land) applies the SAME
+# two guards instead of carrying its own copy (single source of truth).
 # Ceiling on the neutral-equivalent bulk transfer coefficient for the MOST land
 # fluxes: the default floor lets C_e reach ~0.64 at extreme cold-start instability,
 # turning a ~0.6 g/kg humidity gradient into a spurious ~4900 W/m2 latent shock that
 # NaNs the thin top soil layer.  0.02 is a generous strong-instability bound (>> the
 # ~3.4e-3 neutral value), so it binds ONLY on pathological cold-start columns and is
 # climatologically inert (byte-identical) once the surface has spun up.
-_MAX_LAND_EXCHANGE_COEFF = 0.02
+LAND_MAX_EXCHANGE_COEFF = 0.02
 # Floor on the CONDENSATION (negative) latent flux [W/m2] (issue #730): a cold/dry
 # surface under moister advected air can produce a spurious ~-3000 W/m2 condensation
 # flux (vs real frost/dew ~O(10-100)) which the SEB balances at an unphysical hot skin
@@ -45,7 +47,7 @@ _MAX_LAND_EXCHANGE_COEFF = 0.02
 # it).  -150 W/m2 is safely ABOVE any real frost/dew, so near-inert; only CONDENSATION
 # is floored (evaporation stays free so the SEB keeps its self-limiting feedback).
 # None disables it.
-_LAND_CONDENSATION_FLOOR_W = -150.0
+LAND_CONDENSATION_FLOOR_W = -150.0
 # Perturbation [K] for the one-sided finite-difference linearisation of the turbulent
 # fluxes when building the semi-implicit surface conductance (Robin BC).  Small enough
 # for an accurate slope, large enough to stay above bulk-flux round-off.
@@ -118,7 +120,7 @@ def compute_simple_seb_fluxes(
         forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2)
 
     # --- Stomatal + Farquhar beta (uses forcing.sw_down, co2, q_lowest) ---
-    beta, gpp_farq = compute_effective_beta(
+    beta, gpp_farq, sif_farq = compute_effective_beta(
         T_surface, forcing, beta_soil, land_config, carbon_state, dt,
         land_params=land_params)
 
@@ -170,7 +172,7 @@ def compute_simple_seb_fluxes(
             scheme=land_config.bulk_scheme,
             n_iter=land_config.bulk_n_iter,
             L_latent=L_eff,
-            max_exchange_coeff=_MAX_LAND_EXCHANGE_COEFF,
+            max_exchange_coeff=LAND_MAX_EXCHANGE_COEFF,
         )
     else:
         tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
@@ -183,9 +185,9 @@ def compute_simple_seb_fluxes(
 
     # Cold-start condensation floor (issue #730): bound the spurious (negative)
     # condensation shock BEFORE it enters G_soil / the returned demand; evaporation
-    # (positive lhflx) stays free.  See _LAND_CONDENSATION_FLOOR_W.
-    if _LAND_CONDENSATION_FLOOR_W is not None:
-        lhflx = jnp.maximum(lhflx, _LAND_CONDENSATION_FLOOR_W)
+    # (positive lhflx) stays free.  See LAND_CONDENSATION_FLOOR_W.
+    if LAND_CONDENSATION_FLOOR_W is not None:
+        lhflx = jnp.maximum(lhflx, LAND_CONDENSATION_FLOOR_W)
 
     # --- Surface albedo (iter-71 audit fix ported from main 2026-06-03) ---
     # Use the SAME effective snow mass as the iter-68 bulk-flux phase
@@ -239,7 +241,7 @@ def compute_simple_seb_fluxes(
             T_sfc_lin, q_sfc_lin, rho,
             z_ref=land_config.z_ref, z0_init=z0,
             scheme=land_config.bulk_scheme, n_iter=land_config.bulk_n_iter,
-            L_latent=L_eff, max_exchange_coeff=_MAX_LAND_EXCHANGE_COEFF,
+            L_latent=L_eff, max_exchange_coeff=LAND_MAX_EXCHANGE_COEFF,
         )
     else:
         _, _, shflx_lin, lhflx_lin = simple_bulk_fluxes(
@@ -248,8 +250,8 @@ def compute_simple_seb_fluxes(
             T_sfc_lin, q_sfc_lin, rho, wind_speed,
             land_config.Cd_land, land_config.Ch_land, L_latent=L_eff,
         )
-    if _LAND_CONDENSATION_FLOOR_W is not None:
-        lhflx_lin = jnp.maximum(lhflx_lin, _LAND_CONDENSATION_FLOOR_W)
+    if LAND_CONDENSATION_FLOOR_W is not None:
+        lhflx_lin = jnp.maximum(lhflx_lin, LAND_CONDENSATION_FLOOR_W)
     _emis_b = jnp.broadcast_to(jnp.asarray(emissivity), T_surface.shape)
     lambda_lw = 4.0 * _emis_b * constants.sigma_sb * T_surface ** 3
     lambda_sh = jnp.maximum((shflx_lin - shflx) / _SURFACE_LIN_DT_K, 0.0)
@@ -267,6 +269,7 @@ def compute_simple_seb_fluxes(
         emissivity=jnp.broadcast_to(jnp.asarray(emissivity), T_surface.shape),
         z0=jnp.broadcast_to(jnp.asarray(z0), T_surface.shape),
         gpp=gpp_farq,
+        sif=sif_farq,
         stomatal_ratio=stomatal_ratio,
         surface_conductance=surface_conductance,
         # Canopy-specific diagnostics left as None

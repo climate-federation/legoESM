@@ -234,3 +234,37 @@ start-of-step `theta` for the dry-brightening while `T_surface_new`/`snow_new` w
 end-of-step → fixed by re-brightening the post-step base with `richards_out.theta_new[:,0]`
 (`albedo_land_post`, lines 607-608; pre-step SEB path unchanged). Re-review **CLEAN**.
 Numerically negligible (theta ~constant over 6 h; Sahara bias identical) but state-consistent.
+
+## v5 albedo re-tune post-mortem (2026-07-09): params proven dead, N-latitude added
+
+Re-diagnosed the two residual albedo biases on the v5-baked model (#892; `era5_hourly`,
+drainage limiter on). **N-latitude is a NEW finding beside Tibet — the opposite spin-up
+artifact of the same annual-mean Stage-A limit:**
+
+- **N-lat >55N: too BRIGHT, summer-worst** (ANN +0.060, DJF +0.042, **JJA +0.085**; model
+  albedo 0.44 vs ERA5 0.38). Cause = residual *summer* snow: SWE ~13 kg/m² / f_snow 0.29
+  lingers into JJA when the boreal/tundra should be bare. The annual-mean Stage-A builds a
+  cold static northern pack the single seasonal Stage-B year cannot melt out.
+- **Tibet box (28–40N, 75–103E): too DARK, winter** (ANN −0.120, **DJF −0.209**; model 0.28
+  vs ERA5 0.49). SWE stuck ~7 kg/m² and NON-seasonal (DJF 6.8 ≈ JJA 7.3) → f_snow 0.17 →
+  dark plateau soil (0.27) shows through. Confirms + quantifies the reason-(1)+(2) diagnosis
+  above.
+
+**Both offline param levers proven dead (direct sweep, not asserted):**
+- `snow_dcrit` (SWE half-cover, GLOBAL scalar): lowering it to brighten Tibet barely helps
+  (−0.209 → −0.135 even at dcrit=3, SWE too low to cover) and WRECKS N-lat winter
+  (DJF +0.042 → **+0.201**). Hard conflict — one global knob cannot serve both.
+- `snow_melt_rate` ×2/×4/×8: **zero effect**. The residual summer snow is energy-limited
+  (northern summer skin-T barely crosses freezing), not rate-limited.
+
+**Seasonal multi-year spin-up (annual-mean Stage-A → N seasonal years) only half-works:**
+halves N-lat (JJA +0.124 → +0.066, DJF +0.061 → +0.027) but WORSENS Tibet (−0.166 → −0.226
+even as Tibet SWE climbs 6.8 → 20.5 kg/m²) — the extra snow accumulates on the cold high
+peaks while the broad plateau floor stays bare, because the `_DAYS` subsample lacks the
+snowfall events to build the floor pack.
+
+**Bottom line: both biases are largely OFFLINE-EVAL artifacts** of the annual-mean Stage-A +
+`_DAYS` subsampled forcing — the production COUPLED model runs continuous forcing that builds
+the seasonal snowpack naturally, so it would not inherit either. No offline param re-tune
+helps; the faithful fix is the coupled AMIP run (the standing forcing conclusion). A seasonal
+offline spin-up is a partial N-latitude stopgap only, not a Tibet fix.

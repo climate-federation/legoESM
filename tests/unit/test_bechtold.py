@@ -625,3 +625,45 @@ def test_bechtold_mse_conservation_within_tolerance():
         f"Bechtold (implicit_flux) MSE residual {H+Q+C:.1f} W/m^2 "
         f"({rel*100:.1f}% of total)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Trigger sharpness fields (fix 2026-07) — same defect class as Tiedtke:
+# BechtoldConfig.smooth_trigger_sharpness was dead; the downdraft RH trigger
+# and below-LCL membership hardcoded 10.0 / 2.0.
+# ---------------------------------------------------------------------------
+
+def test_bechtold_smooth_trigger_sharpness_removed():
+    cfg = BechtoldConfig()
+    assert not hasattr(cfg, "smooth_trigger_sharpness")
+    assert cfg.downdraft_rh_sharpness == 10.0
+    assert cfg.lcl_membership_sharpness == 2.0
+
+
+def test_bechtold_downdraft_sharpness_fields_wired():
+    """Perturbing either new sharpness field changes the downdraft-branch
+    tendencies (both were hardcoded literals before)."""
+    T, q, pf, ph, u, v = _column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    stoch = jnp.zeros((ncol,))
+    out_default, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(enable_downdraft=True),
+    )
+    out_rh_flat, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(enable_downdraft=True,
+                              downdraft_rh_sharpness=1e-6),
+    )
+    out_lcl_flat, _, _ = bechtold_convection(
+        T, q, pf, ph, u, v, cpp, stoch, None, dt=300.0,
+        config=BechtoldConfig(enable_downdraft=True,
+                              lcl_membership_sharpness=1e-6),
+    )
+    assert float(jnp.max(jnp.abs(out_rh_flat.dT_dt - out_default.dT_dt))) > 1e-10, (
+        "downdraft_rh_sharpness is not wired"
+    )
+    assert float(jnp.max(jnp.abs(out_lcl_flat.dT_dt - out_default.dT_dt))) > 1e-10, (
+        "lcl_membership_sharpness is not wired"
+    )

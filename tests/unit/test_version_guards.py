@@ -99,6 +99,53 @@ class TestValidate:
         with pytest.raises(RuntimeError, match="mpi4jax==0.10.0"):
             _validate_mpi_runtime_versions("0.8.0", "0.10.0", strict=True)
 
+    # --- FFI generation (the SECOND compatible regime; iter 333) -------------
+    @pytest.mark.parametrize("mpi4jax_v", ["0.9.0", "0.9.0.post1", "0.9.5"])
+    def test_ffi_generation_passes_silently(self, mpi4jax_v):
+        """jax 0.10.x PAIRED WITH mpi4jax 0.9.x (the FFI-based line) is verified-working
+        (the distributed compare-reanalysis suite passes on jax 0.10.0 + mpi4jax
+        0.9.0.post1) and must NOT warn — it is a compatible generation, not 'outside the
+        tested range'. Pinning jax<0.10 (the legacy advice) would BREAK this stack."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # any warning → exception
+            _validate_mpi_runtime_versions("0.10.0", mpi4jax_v)
+
+    def test_cross_pairing_ffi_jax_legacy_mpi4jax_warns(self):
+        """jax 0.10 (FFI-era) with mpi4jax 0.8 (legacy custom-call, removed in jax 0.10)
+        is the genuinely-incompatible CROSS pairing — it must still warn, not be silently
+        accepted by the FFI short-circuit."""
+        with pytest.warns(RuntimeWarning, match="outside legoESM's tested MPI range"):
+            _validate_mpi_runtime_versions("0.10.0", "0.8.0")
+
+    def test_cross_pairing_legacy_jax_ffi_mpi4jax_warns(self):
+        """jax 0.8 (legacy) with mpi4jax 0.9 (FFI, needs jax>=0.10) is the other
+        incompatible CROSS pairing — must still warn."""
+        with pytest.warns(RuntimeWarning, match="outside legoESM's tested MPI range"):
+            _validate_mpi_runtime_versions("0.8.0", "0.9.0")
+
+    def test_future_jax_with_ffi_mpi4jax_warns_conservatively(self):
+        """A jax beyond the verified FFI minor (0.11) warns again until re-verified — the
+        FFI acceptance is capped at the tested versions' next minor (the safe direction)."""
+        with pytest.warns(RuntimeWarning, match="outside legoESM's tested MPI range"):
+            _validate_mpi_runtime_versions("0.11.0", "0.9.0")
+
+    def test_remediation_is_jax_generation_aware_ffi_era(self):
+        """A jax>=0.10 user with an incompatible mpi4jax must be told to install the FFI line
+        (mpi4jax>=0.9), NOT the legacy `mpi4jax>=0.8,<0.9` (which is removed-API on jax 0.10)
+        — the iter-334 fix to the stale remediation."""
+        with pytest.warns(RuntimeWarning) as rec:
+            _validate_mpi_runtime_versions("0.10.0", "0.8.0")    # FFI-era jax + legacy mpi4jax
+        msg = str(rec[0].message)
+        assert "mpi4jax>=0.9,<0.10" in msg                       # FFI line recommended
+        assert "mpi4jax>=0.8,<0.9'" not in msg                   # NOT the legacy line
+
+    def test_remediation_is_jax_generation_aware_legacy_era(self):
+        """A jax<0.10 user is still guided to the legacy mpi4jax line."""
+        with pytest.warns(RuntimeWarning) as rec:
+            _validate_mpi_runtime_versions("0.7.0", "0.8.0")     # pre-tested jax
+        msg = str(rec[0].message)
+        assert "mpi4jax>=0.8,<0.9" in msg                        # legacy line recommended
+
 
 # -----------------------------------------------------------------------
 # Consistency: constants match pyproject.toml
@@ -118,9 +165,15 @@ class TestConstantsConsistency:
         )
 
     def test_mpi4jax_max_excl(self):
-        assert _TESTED_MPI4JAX_MAX_EXCL == (0, 10, 0), (
-            "_TESTED_MPI4JAX_MAX_EXCL must match pyproject.toml mpi4jax<0.10 "
-            "(mpi4jax 0.9.0 = the FFI rewrite, issue #567)"
+        # _TESTED_* is the LEGACY (custom-call) generation's upper bound: mpi4jax
+        # 0.8.x paired with jax 0.8-0.9.  mpi4jax 0.9.0 (the FFI rewrite, #567)
+        # is the SECOND generation, validated separately via _FFI_MPI4JAX_* and
+        # paired with jax 0.10+.  Their union [0.8, 0.10) is the pyproject pin
+        # mpi4jax<0.10, so the legacy max stays 0.9 while packaging allows 0.9.
+        assert _TESTED_MPI4JAX_MAX_EXCL == (0, 9, 0), (
+            "_TESTED_MPI4JAX_MAX_EXCL is the legacy-generation upper bound (<0.9); "
+            "the FFI generation (mpi4jax 0.9.x) is covered by _FFI_MPI4JAX_* and the "
+            "pyproject mpi4jax<0.10 pin is the union of both generations"
         )
 
     def test_jax_tested_range(self):

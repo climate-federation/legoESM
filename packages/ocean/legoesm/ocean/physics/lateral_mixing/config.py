@@ -8,6 +8,13 @@ from legoesm.ocean.physics.lateral_mixing.eke import EKEConfig
 
 
 __param_spec__ = {
+    "TreguierConfig": {
+        "scheme_key": "ocean.lat.treguier",
+        "excluded": {},
+        "params": {
+            "aei0": {"units": "m2 s-1", "bounds": (500.0, 10000.0), "tunable_tier": 2, "transform": "softplus", "category": "lateral_mixing", "reference": "NEMO ldftra nn_aei_ijk_t=21 (Treguier 1997); aei0=rn_Ue*rn_Le", "shape": None},
+        },
+    },
     "HarmonicConfig": {
         "scheme_key": "ocean.lat.harmonic",
         "excluded": {
@@ -81,13 +88,26 @@ class BiharmonicConfig(NamedTuple):
     """Biharmonic lateral mixing.
 
     Explicit biharmonic CFL is ``B_h · dt / dx⁴ ≤ 1/16`` (2-D, with a
-    safety factor).  See ``HarmonicConfig`` for the analogous CFL knobs.
+    safety factor) for the legacy wide outer stencil; the compact outer
+    stencil (``compact_outer=True``) has a tighter ``≤ 1/512`` bound
+    (its 2Δx eigenvalue is ~1024/dx⁴, vs ~0 for the wide form).  See
+    ``HarmonicConfig`` for the analogous CFL knobs.
+
+    ``compact_outer`` selects the outer Laplacian of ``∇⁴ = ∇²(∇²)``:
+    ``False`` (default) keeps the legacy wide ``div(grad)`` outer stage,
+    which has an EXACT 2Δx null (does NOT damp the grid-scale checkerboard
+    the biharmonic exists to remove) — retained as the default so
+    coefficients tuned against it stay bit-identical.  ``True`` uses the
+    compact outer Laplacian (``(1,-4,6,-4,1)`` stencil, maximal 2Δx
+    damping, MOM/MPAS-faithful) and correspondingly narrows the coastal
+    Neumann fill reach and the CFL cap.
     """
     B_h_momentum: float = 0.0   # Biharmonic viscosity [m^4/s]
     B_h_tracer: float = 0.0     # Biharmonic tracer diffusivity [m^4/s]
     enforce_cfl: bool = False
     cfl_dt_estimate: float = 3600.0
     cfl_safety: float = 0.05    # Margin below 1/16 stability bound
+    compact_outer: bool = False  # Compact 2Δx-damping outer ∇² (MOM/MPAS del4)
 
 
 class VisbeckConfig(NamedTuple):
@@ -139,6 +159,28 @@ class VisbeckConfig(NamedTuple):
     n2_over_dzw: bool = False
 
 
+class TreguierConfig(NamedTuple):
+    """Treguier et al. (1997) / Held-Larichev (1996) adaptive GM coefficient —
+    the NEMO ``nn_aei_ijk_t = 21`` scaling (``ldftra.F90::ldf_eiv``), used by
+    BOTH the DINO and ORCA1 oracle configurations:
+
+        κ(x, y) = min( min(1, |f/f₂₀|) · Ro² · T⁻¹ ,  aei0 )
+
+    with the internal Rossby radius ``Ro = clip(0.4·∫N dz/|f|, 2 km, 40 km)``
+    and the inverse baroclinic-instability timescale
+    ``T⁻¹ = √(Σ N²(S_x²+S_y²)dz / (5 m + Σ dz))`` built from the isopycnal
+    slopes.  The fixed factors (0.4, 2/40 km, 20°, +5 m) are hard-coded in the
+    NEMO source (module constants in ``_gm_redi_common``); the ONE namelist
+    tunable is the cap ``aei0 = rn_Ue·rn_Le`` (DINO: 0.03·100 km = 3000 m²/s;
+    ORCA1: 0.018·100 km = 1800 m²/s).
+
+    Mutually exclusive with ``VisbeckConfig.enabled`` (both are adaptive-κ
+    diagnostics; the GM/Redi dispatch raises if both are on).
+    """
+    enabled: bool = False
+    aei0: float = 3000.0     # κ cap [m²/s] = rn_Ue·rn_Le (DINO namelist value)
+
+
 class GMRediConfig(NamedTuple):
     """Gent-McWilliams / Redi isopycnal mixing (small-slope formulation).
 
@@ -182,6 +224,9 @@ class GMRediConfig(NamedTuple):
     # ``taper_width_frac = iso_dslope / iso_slopec``. For DINO's
     # ``iso_slopec=0.01, iso_dslope=0.005`` this is ``0.5``.
     visbeck: VisbeckConfig = VisbeckConfig()
+    # Treguier-1997 adaptive κ (NEMO nn_aei_ijk_t=21, the oracle scaling) —
+    # mutually exclusive with visbeck.enabled (dispatch raises on both).
+    treguier: TreguierConfig = TreguierConfig()
     slope_scheme: str = "triads"     # "triads" (default) or "centered"
     slope_density: str = "in_situ"   # "in_situ" (default) or "neutral"
     # ^ Density gradient used to build the isoneutral SLOPES (NOT the tracer

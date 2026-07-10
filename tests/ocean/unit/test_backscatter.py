@@ -488,10 +488,12 @@ class TestPowerDensity:
             u, v, tu, tv, grid, u_mask=u_mask, v_mask=v_mask)
         assert jnp.allclose(p, 0.0)
 
-    def test_dz_weighted_integration(self, latlon_grid):
-        """When a per-level ``dz`` array is provided, the 3-D power is
-        depth-integrated against those thicknesses.  Uniform
-        ``dz = 2`` doubles the result vs the default unit spacing.
+    def test_dz_weighted_mean(self, latlon_grid):
+        """The 3-D power is the depth-MEAN (per-mass) power, not the
+        depth-integral (#backscatter dimensional-consistency fix).  A
+        UNIFORM ``dz`` cancels in the thickness-weighted mean, so
+        ``dz = 2`` gives the SAME result as the default unit spacing
+        (an integral would double).
         """
         grid, mask, u_mask, v_mask = latlon_grid
         u2, v2 = _random_velocity_latlon(grid, mask, u_mask, v_mask)
@@ -505,13 +507,34 @@ class TestPowerDensity:
         p_dz2 = backscatter_power_density_cgrid(
             u3, v3, tu3, tv3, grid, u_mask=u_mask, v_mask=v_mask,
             dz=jnp.full((nlev,), 2.0))
-        assert jnp.allclose(p_dz2, 2.0 * p_default, rtol=1e-10)
+        # Depth-MEAN is invariant to a uniform thickness rescale.
+        assert jnp.allclose(p_dz2, p_default, rtol=1e-10)
 
-    def test_3d_input_sums_over_levels(self, latlon_grid):
-        """For 3-D inputs the reservoir sees the depth-integrated
-        column power (SUM of layers), not the average — because
-        ``E(x, y)`` is documented as *depth-integrated* subgrid KE.
-        The same 2-D mask should broadcast against 3-D fields.
+    def test_nonuniform_dz_is_thickness_weighted_mean(self, latlon_grid):
+        """With non-uniform ``dz`` the result is the thickness-weighted
+        MEAN ``Σ p_k dz_k / Σ dz_k`` — bounded by the per-level values,
+        never their sum.
+        """
+        grid, mask, u_mask, v_mask = latlon_grid
+        u2, v2 = _random_velocity_latlon(grid, mask, u_mask, v_mask)
+        nlev = 3
+        u3 = jnp.broadcast_to(u2[..., None], u2.shape + (nlev,))
+        v3 = jnp.broadcast_to(v2[..., None], v2.shape + (nlev,))
+        # Identical levels ⇒ the weighted mean equals the single-level
+        # power regardless of the (non-uniform) weights.
+        p1 = backscatter_power_density_cgrid(
+            u2, v2, u2, v2, grid, u_mask=u_mask, v_mask=v_mask)
+        p3 = backscatter_power_density_cgrid(
+            u3, v3, u3, v3, grid, u_mask=u_mask, v_mask=v_mask,
+            dz=jnp.asarray([1.0, 5.0, 2.0]))
+        assert jnp.allclose(p3, p1, rtol=1e-12)
+
+    def test_3d_input_is_depth_mean_not_sum(self, latlon_grid):
+        """For 3-D inputs the reservoir sees the depth-MEAN per-mass
+        power (matching the per-mass EKE reservoir budget), NOT the
+        depth-integrated SUM of layers.  With ``nlev`` identical levels
+        the 3-D result equals the single 2-D level (a sum would give
+        ``nlev ×``).  The 2-D face masks broadcast internally.
         """
         grid, mask, u_mask, v_mask = latlon_grid
         u2, v2 = _random_velocity_latlon(grid, mask, u_mask, v_mask)
@@ -520,13 +543,10 @@ class TestPowerDensity:
         v3 = jnp.broadcast_to(v2[..., None], v2.shape + (nlev,))
         tu3 = jnp.broadcast_to(u2[..., None], u2.shape + (nlev,))
         tv3 = jnp.broadcast_to(v2[..., None], v2.shape + (nlev,))
-        # Pass the ordinary 2-D face masks — the helper must broadcast
-        # internally.
         p3 = backscatter_power_density_cgrid(
             u3, v3, tu3, tv3, grid, u_mask=u_mask, v_mask=v_mask)
         p2 = backscatter_power_density_cgrid(
             u2, v2, u2, v2, grid, u_mask=u_mask, v_mask=v_mask)
         assert p3.shape == grid.grid_shape_2d
-        # Each of nlev identical levels contributes p2 ⇒ 3-D result
-        # is nlev · p2.
-        assert jnp.allclose(p3, nlev * p2, rtol=1e-12)
+        # Depth-mean of nlev identical levels == the single level.
+        assert jnp.allclose(p3, p2, rtol=1e-12)

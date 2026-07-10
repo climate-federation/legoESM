@@ -1,0 +1,5 @@
+# AIMIP-at-scale T106 all-years suite: sfno_physics. See base_t106_allyears.yaml.
+base: config/aimip/scale/base_t106_allyears.yaml
+variants:
+- sfno_physics
+output_dir: results/aimip_scale_t106/sfno_physics

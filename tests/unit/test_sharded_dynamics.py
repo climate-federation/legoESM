@@ -527,3 +527,68 @@ class TestMakeVoronoiShardedStep:
         model = _MockModel()
         with pytest.raises(ValueError, match="voronoi_dims"):
             make_voronoi_sharded_step(model, config)
+
+
+# ---------------------------------------------------------------------------
+# #852: global_integral must be shard-count-invariant (conservation mass sum)
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(
+    len(jax.devices()) < 3,
+    reason="needs >=3 emulated devices "
+           "(XLA_FLAGS=--xla_force_host_platform_device_count=6)",
+)
+def test_global_integral_shard_count_invariant():
+    """A global conserved integral must NOT depend on the device count (#852).
+
+    The cube conservation reductions (``global_integral``, ``global_area_sum``,
+    ``batch_global_area_sums`` — the mass/energy fixers' global sums) on a
+    face-sharded field previously reduced each shard's faces locally then
+    all-reduced the partials; float32 addition is non-associative, so the result
+    differed between 1 / 2 / 3-faces-per-shard layouts by ~1 ulp — which the mass
+    fixer amplified into a shard-count-dependent p_s correction (the symptom
+    reported in #852, wrongly attributed to the ppermute halo — the halo is
+    bit-exact).  The fixed per-face fixed-order reduction must be BIT-IDENTICAL
+    across single-device and every whole-face sharding, even in float32, for ALL
+    three entry points.
+    """
+    from legoesm.core.field import Field
+    from legoesm.core.operators import global_integral
+    from legoesm.core.conservation import global_area_sum, batch_global_area_sums
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+
+    n_grid = 48
+    grid = create_cubed_sphere(n_grid)
+    base = np.arange(6 * n_grid * n_grid, dtype=np.float64).reshape(6, n_grid, n_grid)
+    # p_s-like extensive field (~1e5 Pa) — the mass fixer's integrand.
+    data = jnp.asarray(
+        (1.0e5 + 500.0 * np.sin(0.01 * base)).astype(np.float32))
+    data2 = jnp.asarray(
+        (0.9e5 + 300.0 * np.cos(0.02 * base)).astype(np.float32))
+
+    def _gi(d):
+        return global_integral(
+            Field(data=d, name="p_s", dims=("face", "x", "y"), units="Pa"), grid)
+
+    def _gas(d):
+        return global_area_sum(d, grid)
+
+    def _batch(d, e):
+        # The default (non-anchor) mass fixer path — fix_ps_mass.
+        return jnp.stack(batch_global_area_sums([d, e], grid))
+
+    reductions = {
+        "global_integral": (_gi, (data,)),
+        "global_area_sum": (_gas, (data,)),
+        "batch_global_area_sums": (_batch, (data, data2)),
+    }
+    for name, (fn, args) in reductions.items():
+        serial = np.asarray(jax.jit(fn)(*args))
+        for nd in (2, 3):
+            dev = create_device_mesh(n_devices=nd)
+            args_sh = tuple(jax.device_put(a, dev.face_sharding) for a in args)
+            sharded = np.asarray(jax.jit(fn)(*args_sh))
+            # BIT-exact: a global conserved integral is decomposition-independent.
+            assert np.array_equal(sharded, serial), (
+                f"{name} n_devices={nd} differs from single-device: "
+                f"{sharded!r} != {serial!r} "
+                f"(maxΔ={float(np.max(np.abs(sharded - serial))):.3e})")

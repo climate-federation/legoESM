@@ -146,29 +146,6 @@ def _gdepw_w(dz_live: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([zero, jnp.cumsum(dz_live, axis=-1)], axis=-1)
 
 
-def _column_min_n2(N2: jnp.ndarray, wet3d: jnp.ndarray) -> jnp.ndarray:
-    """Column-min N^2 ``(n_lat, n_lon)`` for the convection gate (NEMO nn_conv=1).
-
-    ``N2`` lives at the ``nlev-1`` interior interfaces.  NEMO accumulates an
-    ML-mean ``zn2`` and zeros the streamfunction where a neighbour column's
-    ``zn2 < 0`` (a statically-unstable column ⇒ convection ⇒ no MLE).  We take
-    the MINIMUM interface N^2 over the wet interfaces of the column: if ANY wet
-    interface is statically unstable the column min is < 0 and MLE is gated off
-    there — a conservative (stricter) reading of NEMO's intent that needs no ML
-    depth to evaluate.  Dry interfaces are excluded by setting them to +inf so
-    they never dominate the min.
-    """
-    # Interface k (0..nlev-2) is wet iff both adjacent cells are wet.
-    iface_wet = (wet3d[:, :, :-1] > 0.5) & (wet3d[:, :, 1:] > 0.5)
-    big = jnp.full_like(N2, jnp.inf)
-    n2_wet = jnp.where(iface_wet, N2, big)
-    col_min = jnp.min(n2_wet, axis=-1)
-    # A fully-dry / single-wet-level column has no wet interface -> min is +inf;
-    # clamp to 0 so the >=0 convection test treats it as neutral (MLE magnitude
-    # there is already ~0 via H/bm, and the cell mask zeroes the flux anyway).
-    return jnp.where(jnp.isfinite(col_min), col_min, 0.0)
-
-
 def mle_tracer_tendency_latlon_cgrid(
     T: jnp.ndarray,
     S: jnp.ndarray,

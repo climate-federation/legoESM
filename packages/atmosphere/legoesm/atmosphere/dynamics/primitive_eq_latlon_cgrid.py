@@ -168,7 +168,22 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     by ``tests/parallel/test_latlon_mpi_step_serial.py`` on Stage-2
     smoke).
     """
-    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p). Last field to preserve positional ABI.
+    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p).
+    # --- Top sponge (Rayleigh damping increasing toward the model lid, #836) ---
+    # The hydrostatic lat-lon C-grid dycore otherwise has NO absorbing layer at
+    # the rigid lid, so upward gravity-wave / convective energy reflects and
+    # contaminates the upper levels (the nonhydrostatic cores already carry
+    # ``sponge_profile``; the hydrostatic path dropped it).  ``sponge_coeff == 0``
+    # (default) is OFF and byte-identical.  ``sponge_coeff > 0`` damps u/v toward
+    # REST over the top ``sponge_width_m`` metres via the SHARED
+    # ``compressible_euler.sponge_profile`` fed a log-pressure height proxy.
+    # Appended after ``p_ceil`` (defaults => positional-ABI-safe for old callers).
+    sponge_coeff: float = 0.0          # Rayleigh damping SCALE [1/s]: the exact lid
+    #                                   value for shape='sin2'; 'sam_rational' peaks
+    #                                   at sponge_coeff*100/101 (see sponge_profile)
+    sponge_width_m: float = 10000.0    # sponge-layer depth below the top [m]
+    sponge_shape: str = "sin2"         # "sin2" | "sam_rational" (see sponge_profile)
+    sponge_scale_height_m: float = 7500.0  # log-pressure scale height for sigma->z. Last field to preserve positional ABI.
 
 
 def _zero_v_at_pole(v, *, south: bool, north: bool, offset: int = 0):
@@ -643,6 +658,31 @@ def cgrid_latlon_hydrostatic_tendencies(
         dv_dt = dv_dt + config.A_h * lap_v
         lap_T = laplacian_cgrid(T, grid)
         dT_dt = dT_dt + config.A_h * lap_T
+
+    # --- 13b. Top sponge (Rayleigh damping increasing toward the lid, #836) ---
+    # Absorb upward-propagating gravity-wave / convective energy that would else
+    # reflect off the rigid model lid and contaminate the upper levels.  Gated on
+    # config.sponge_coeff (0 -> OFF, byte-identical).  Reuse the SHARED
+    # sponge_profile (no re-derivation): it ramps 0 -> sponge_coeff over the top
+    # sponge_width_m metres, so feed it a log-pressure height proxy
+    # z = -H_scale * ln(sigma_full), which increases UPWARD (small sigma = high
+    # altitude).  SIGN: du/dt gets a -k*u term with k >= 0 -> damps u toward REST
+    # (an absorbing sponge, matching the compressible core's -sponge*w); level-
+    # only profile broadcasts over the horizontal (u/v have level as the last
+    # axis).  OFF path adds nothing, so production stays bit-for-bit unchanged.
+    if config.sponge_coeff > 0.0:
+        from legoesm.atmosphere.dynamics.compressible_euler import (
+            sponge_profile,
+        )
+        z_full = -config.sponge_scale_height_m * jnp.log(
+            jnp.clip(sigma_coord.sigma_full, 1e-30, None))  # (nlev,), up = large z
+        H_top = z_full[0]   # top level has the smallest sigma -> the largest z
+        spge = sponge_profile(
+            z_full, H_top, config.sponge_width_m, config.sponge_coeff,
+            shape=config.sponge_shape,
+        ).astype(du_dt.dtype)   # (nlev,), 0 below the sponge base
+        du_dt = du_dt - spge * u
+        dv_dt = dv_dt - spge * v
 
     # Enforce zero tendency at poles (wall BC) so that intermediate RK
     # stages never see nonzero v at poles feeding into divergence/Coriolis.

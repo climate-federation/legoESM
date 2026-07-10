@@ -17,10 +17,9 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
 from legoesm.core.field import Field
 from legoesm.core.coupling_fields import AtmToSurface
-from legoesm.core.bulk_flux import apply_gustiness
+from legoesm.core.bulk_flux import apply_gustiness, ocean_surface_q_sat
 
 
 # ============================================================================
@@ -64,9 +63,17 @@ class SimpleOceanConfig(NamedTuple):
     # ``compute_most_fluxes`` defaults (10 m / 5), matching SurfaceLayerConfig.
     bulk_scheme: str = "constant"
     # COARE convective-gustiness BL depth z_i [m] for the slab heat budget's
-    # coare3/large_yeager fluxes (0 = off; ~600 = enable w*).  Kept consistent
-    # with the atmosphere SurfaceLayerConfig.gustiness_w_zi by run_coupled.
-    gustiness_w_zi: float = 0.0
+    # coare3/large_yeager fluxes.  None (default) = scheme-native (600 m for
+    # coare3, off otherwise — AeroBulk parity); explicit 0.0 = off.  Kept
+    # consistent with the atmosphere SurfaceLayerConfig.gustiness_w_zi by
+    # run_coupled.
+    gustiness_w_zi: float | None = None
+    # Thermodynamic constants set for the slab's coare3/large_yeager fluxes
+    # (#762): "legoesm" (default) = constant L_v / dry c_pd; "aerobulk" =
+    # NEMO/AeroBulk/COARE parity (SST-dependent L_vap(T_sfc), moist
+    # cp_air(q_atm)).  Kept consistent with the atmosphere
+    # SurfaceLayerConfig.thermo_convention by run_coupled.
+    thermo_convention: str = "legoesm"
     T_freeze: float = constants.T_freeze_ocean
     # Two-layer additions
     h_deep: float = 200.0            # Deep layer depth [m]
@@ -172,7 +179,8 @@ def _ocean_turbulent_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             forcing.T_lowest, forcing.q_lowest, T_sfc, q_sfc, rho,
             scheme=config.bulk_scheme,
-            gustiness_w_zi=getattr(config, "gustiness_w_zi", 0.0),
+            gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
+            thermo_convention=getattr(config, "thermo_convention", "legoesm"),
         )
         return shflx, lhflx
     raise ValueError(
@@ -190,8 +198,14 @@ def _slab_step(
     """Single mixed-layer energy balance step."""
     T_sfc = state.T_sfc.data
 
-    # Surface humidity: saturated
-    q_sfc = saturation_mixing_ratio(T_sfc, forcing.p_surface)
+    # Surface humidity: saturated, on the same thermodynamic convention as the
+    # flux formation (#762) — Goff under aerobulk+MOST, else Tetens (default
+    # legoesm / 'constant' scheme byte-identical).  Matches the coupler ocean
+    # tile so the air-sea interface q_sfc is single-valued.
+    q_sfc = ocean_surface_q_sat(
+        T_sfc, forcing.p_surface,
+        thermo_convention=getattr(config, "thermo_convention", "legoesm"),
+        bulk_scheme=config.bulk_scheme)
 
     # Bulk turbulent fluxes (positive upward); scheme-consistent with the
     # atmosphere surface layer (see _ocean_turbulent_fluxes).
@@ -244,8 +258,14 @@ def _two_layer_step(
     T_sfc = state.T_sfc.data
     T_deep = state.T_deep.data
 
-    # Surface humidity: saturated
-    q_sfc = saturation_mixing_ratio(T_sfc, forcing.p_surface)
+    # Surface humidity: saturated, on the same thermodynamic convention as the
+    # flux formation (#762) — Goff under aerobulk+MOST, else Tetens (default
+    # legoesm / 'constant' scheme byte-identical).  Matches the coupler ocean
+    # tile so the air-sea interface q_sfc is single-valued.
+    q_sfc = ocean_surface_q_sat(
+        T_sfc, forcing.p_surface,
+        thermo_convention=getattr(config, "thermo_convention", "legoesm"),
+        bulk_scheme=config.bulk_scheme)
 
     # Bulk turbulent fluxes (positive upward); scheme-consistent with the
     # atmosphere surface layer (see _ocean_turbulent_fluxes).

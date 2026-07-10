@@ -12,8 +12,10 @@
 #      spin-up before its T/moisture fields are trustworthy.
 #   2. AEROSOL-CLOUD INTERACTION (aerosol_ccn) — the 1st (Twomey) + 2nd (lifetime)
 #      indirect effects via Andreae-2009 AOT->CCN->Nc feeding morrison r_eff +
-#      KK2000 autoconversion.  A whole SOTA process that was OFF; prereqs (morrison
-#      + external aerosol) are already in the production config.
+#      KK2000 autoconversion.  Wired + validated but currently DISABLED: as coupled
+#      it is ~15x too strong (-24 W/m^2 vs IPCC -1 to -1.7); re-enable after the
+#      Twomey/lifetime split + autoconv calibration (issue #730).  See the flag
+#      block below for the measured numbers.
 #   3. convective_cloud OFF — AMIP-optimal (PR #709): under prescribed SST
 #      conv-cloud is an inert SST-drift compensator that only adds planetary albedo.
 #
@@ -37,7 +39,8 @@ dt: 150.0
 radiation: rrtmg            # true CMIP6 correlated-k RT
 rad_update_steps: 12
 clouds: sundqvist
-microphysics: morrison      # two-moment (predicts Nc) — REQUIRED for aerosol_ccn
+microphysics: morrison      # two-moment SOTA microphysics (predicts hydrometeors;
+                            # also the aerosol_ccn prereq when that is re-enabled)
 convection: sbm             # the structural-bias fix (albedo+precip)
 turbulence: louis
 gravity_wave_drag: hines
@@ -45,7 +48,19 @@ diurnal_cycle: true
 orbital_insolation: true
 
 # --- SOTA lever 2: aerosol-cloud interaction (1st + 2nd indirect effect) -------
-aerosol_ccn: true
+# Andreae-2009 AOD->CCN->Nc coupling: DISABLED in the shipped config. As wired it
+# feeds the AOD-diagnosed Nc to BOTH the radiation r_eff (1st/Twomey) and the
+# KK2000 autoconversion Nc^-1.79 (2nd/lifetime) off the single flag. The combined
+# indirect effect measures a net -24 W/m^2 (C12/30d <R_TOA> -32.8 with it ON vs
+# -8.8 with it OFF, two runs), ~15x the IPCC AR6 ERFaci central estimate
+# (-1 to -1.7 W/m^2) -- unphysically strong, dominated by the lifetime effect
+# (KK2000 Nc-susceptibility builds excessive LWP, a well-known GCM over-sensitivity).
+# The AOD->CCN inversion itself is physical (AOT 0.075 -> 200 cm^-3). Re-enable
+# after splitting the flag into radiation (Twomey) vs microphysics (lifetime) gates
+# and calibrating the autoconv susceptibility to the IPCC range (issue #730). This
+# mirrors the land_stomatal_beta decision below: a mis-calibrated SOTA process is
+# turned OFF for realism until it is calibrated, not shipped over-strong.
+aerosol_ccn: false
 
 # --- Cloud tuning -------------------------------------------------------------
 cloud_q_c_diagnostic: 3.0e-4
@@ -55,9 +70,22 @@ convective_cloud: false     # SOTA lever 3: AMIP-optimal (prescribed-SST) — #7
 use_multilayer_land: true
 multilayer_n_layers: 10
 multilayer_soil_depth: 3.0
+# Drier soil cold-start (theta_init = 0.25*theta_sat, vs the 0.5 default) — the
+# deep 3 m soil cold-starts too wet, feeding the over-evaporation cold-cloudy
+# land. A C12/30d A/B (issue #730) measured land R_TOA -82.6 -> -76.2 (+6.4),
+# land +2.2 K, cloud 69->62% at 0.25; 0.10 saturates (+0.6 more). Mitigates the
+# cold-start; the residual over-evaporation is the DifferLand ET-closure follow-up.
+land_soil_moisture_init_frac: 0.25
 # clm_surfdata_path is a machine path — pass --clm-surfdata-path at runtime.
 snow_albedo_feedback: true  # threaded into the multilayer land (#715)
-land_stomatal_beta: true    # Jarvis stomata, threaded into the multilayer land (#715)
+# Jarvis/Farquhar interactive stomata (#715): DISABLED. On the multilayer soil it
+# over-transpires (effective beta stays near-potential in the moist root zone),
+# driving a large over-evaporation / moistening drift (C12/30d CWV 176 & R_TOA
+# -108 with it ON, vs a realistic CWV 30 & R_TOA -33 with it OFF -- isolated as
+# the drift cause, issue #730). With it off the multilayer uses the beta_soil
+# root-zone moisture-stress path, which is realistic. Re-enable once the stomatal
+# conductance (Vc_max25/g1/gs_max) is calibrated to be moisture-limited.
+land_stomatal_beta: false
 
 # --- Tiled surface + interactive land -----------------------------------------
 surface_bulk_scheme: coare3   # OCEAN tile (land tile uses MOST via #715)
@@ -76,7 +104,8 @@ solar_source: file
 solar_tsi_var: TSI
 ozone_forcing: external
 ghg_forcing: external
-aerosol_forcing: external   # REQUIRED for aerosol_ccn
+aerosol_forcing: external   # drives the radiation direct effect; also the
+                            # aerosol_ccn indirect prereq when that is re-enabled
 start_year: 1979
 
 # --- Diagnostics / output (CMIP6-protocol CMOR) -------------------------------

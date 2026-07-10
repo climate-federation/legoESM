@@ -170,4 +170,38 @@ def load_land_restart(
     return state, meta
 
 
-__all__ = ["save_land_restart", "load_land_restart"]
+def merge_land_restart_into_template(loaded, template):
+    """Return ``template`` with its prognostic fields replaced by ``loaded``'s.
+
+    A restart round-trips only the core prognostic fields (``_MULTILAYER_FIELDS``
+    + ``TgC``); the OPTIONAL structural fields (``surface_water``,
+    ``snow_bands``, ``ice_bands``, ``canopy_state``, …) come back at their
+    NamedTuple ``None`` defaults.  But ``step_multilayer_land`` populates those
+    as arrays, so feeding a bare loaded state straight into a ``lax.scan`` (the
+    coupled-AMIP segment, or a chained spin-up) raises a carry input/output
+    pytree-structure mismatch.  Building from a freshly-initialised ``template``
+    (which has the canonical structure) and grafting the restart's prognostic
+    columns onto it fixes the structure while keeping the equilibrated values.
+
+    Mirrors the land-ml CHECKPOINT restore in ``model_driver`` (``template.
+    _replace(**fields)``), with a shape check per field so a resolution /
+    soil-layer skew fails loudly rather than silently reshaping.
+    """
+    fields = {}
+    for name in _MULTILAYER_FIELDS:
+        arr = getattr(loaded, name)
+        ref = getattr(template, name)
+        if ref is not None and hasattr(arr, "shape") and arr.shape != ref.shape:
+            raise ValueError(
+                f"land restart field '{name}' has shape {tuple(arr.shape)}, "
+                f"expected {tuple(ref.shape)} (resolution / soil-layer skew)")
+        fields[name] = arr
+    if getattr(loaded, "TgC", None) is not None:
+        fields["TgC"] = loaded.TgC
+    return template._replace(**fields)
+
+
+__all__ = [
+    "save_land_restart", "load_land_restart",
+    "merge_land_restart_into_template",
+]

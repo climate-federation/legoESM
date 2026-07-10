@@ -111,3 +111,47 @@ class TestGridResolutions:
         assert grid.n_lon == 2 * n_lat
         assert jnp.all(jnp.isfinite(grid.area))
         assert jnp.all(grid.area > 0)
+
+
+class TestGridOmega:
+    """LatLonGrid stores its construction rotation rate (#521)."""
+
+    def test_omega_stored_and_default(self):
+        from legoesm import constants
+        grid = create_latlon_grid(8)
+        assert grid.omega == constants.Omega
+        grid0 = create_latlon_grid(8, omega=0.0)
+        assert grid0.omega == 0.0
+        assert float(jnp.max(jnp.abs(grid0.f))) == 0.0
+
+    def test_ensure_geometry_inherits_grid_omega(self):
+        """ensure_geometry must not silently re-rotate an omega=0 grid
+        (codex 2026-07-03 round-4 HIGH: the old constants.Omega default
+        rebuilt f_T/f_u/f_v with Earth rotation)."""
+        from legoesm import constants
+        from legoesm.grids.latlon import ensure_geometry
+
+        geom0 = ensure_geometry(create_latlon_grid(8, omega=0.0))
+        assert float(jnp.max(jnp.abs(geom0.f_T))) == 0.0
+        assert float(jnp.max(jnp.abs(geom0.f_u))) == 0.0
+        assert float(jnp.max(jnp.abs(geom0.f_v))) == 0.0
+
+        geom_e = ensure_geometry(create_latlon_grid(8))
+        assert float(jnp.max(jnp.abs(geom_e.f_T))) > 0.0
+        # Explicit override still wins over the stored scalar.
+        geom_o = ensure_geometry(create_latlon_grid(8),
+                                 omega=constants.Omega)
+        assert float(jnp.max(jnp.abs(geom_o.f_T))) > 0.0
+
+    def test_geometry_carries_omega_for_operators(self):
+        """The operational path (ensure_geometry -> LatLonCGridGeometry)
+        must expose the same omega scalar so stagger-rebuilding operators
+        (QG-Leith vertex absolute vorticity) see the true rotation
+        (codex 2026-07-03 round-6)."""
+        from legoesm.grids.latlon import ensure_geometry
+
+        geom0 = ensure_geometry(create_latlon_grid(8, omega=0.0))
+        assert geom0.omega == 0.0
+        geom_e = ensure_geometry(create_latlon_grid(8))
+        from legoesm import constants
+        assert geom_e.omega == constants.Omega

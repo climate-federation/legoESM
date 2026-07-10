@@ -28,6 +28,21 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+# "No surface-T override" sentinel for ``surface_T_sfc_override``.  Formerly
+# ``jnp.nan``, which left the state non-finite EVERY step and poisoned two
+# debug tools (JAX_DEBUG_NANS tripped on step 1; the realism inspector
+# false-positived every checkpoint) — see #911.  ``-1e4`` is unambiguously
+# below any physical surface temperature [K] (coldest Earth surface ~180 K),
+# so the resolver selects the fallback with a simple threshold while the state
+# stays finite.  Kept well within fp16 range (max ~6.5e4) so the sentinel is
+# representable — and stays finite — in every supported storage dtype (a
+# larger magnitude overflowed fp16 to -inf; codex).
+NO_SFC_T_OVERRIDE: float = -1.0e4
+# A real override is a physical surface temperature (> 0 K); anything at or
+# below this threshold means "no override".  Well clear of both the sentinel
+# and any physical value.
+SFC_T_OVERRIDE_VALID_MIN: float = 1.0
+
 
 class PhysicsState(NamedTuple):
     """Prognostic physics state — passed through time loop, checkpointable.
@@ -74,10 +89,12 @@ class PhysicsState(NamedTuple):
         stochastic modules are disabled the key is carried unchanged.
     surface_T_sfc_override : jax.Array, shape (ncol,)
         Per-column override for the surface temperature seen by the
-        turbulence scheme's bulk-flux call.  ``NaN`` (the default) is
-        the sentinel for "no override — fall back to ``T_col[:, -1]``",
-        preserving the legacy ``T_sfc = lowest air temp`` convention
-        for every 3-D run.  The single-column model populates this
+        turbulence scheme's bulk-flux call.  The finite
+        ``NO_SFC_T_OVERRIDE`` value (the default) is the sentinel for
+        "no override — fall back to ``T_col[:, -1]``", preserving the
+        legacy ``T_sfc = lowest air temp`` convention for every 3-D run
+        while keeping the state finite (#911; was ``NaN``).  The
+        single-column model populates this
         from ``SCMForcing.T_s(t)`` when ``prescribe="T_s"`` so that the
         bulk-flux gradient ``T_sfc − T[..., -1]`` is non-zero (without
         this override, anchoring ``T[..., -1]`` to the prescribed value
@@ -245,8 +262,13 @@ def init_physics_state(
     conv_stoch_state = jnp.zeros((ncol,), dtype=dtype)
 
     # --- GWD wave action spectrum ---
+    # Seeded for prognostic_spectral AND any '+'-composite that contains it
+    # (issue #834) — both thread the wave-action spectrum through the carry.
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+        gwd_carries_spectrum,
+    )
     gwd_cfg = physics_config.gravity_wave_drag
-    if gwd_cfg.scheme == "prognostic_spectral":
+    if gwd_carries_spectrum(gwd_cfg.scheme):
         sc = gwd_cfg.prognostic_spectral
         gwd_spectrum = jnp.full(
             (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux,
@@ -263,11 +285,13 @@ def init_physics_state(
     prng_key = jax.random.PRNGKey(int(prng_seed))
 
     # --- Surface-temperature override (SCM forcing hook) ---
-    # NaN sentinel = "no override; turbulence falls back to ``T[:, -1]``".
-    # This preserves all existing 3-D behaviour bit-for-bit while letting
-    # the single-column driver inject a separate skin-temperature value
-    # when ``SCMForcing.prescribe == "T_s"``.
-    surface_T_sfc_override = jnp.full((ncol,), jnp.nan, dtype=dtype)
+    # Finite ``NO_SFC_T_OVERRIDE`` sentinel = "no override; turbulence falls
+    # back to ``T[:, -1]``".  Preserves all existing 3-D behaviour (the
+    # resolver still selects the fallback for every unset column) while
+    # keeping the state finite (#911).  The single-column driver overwrites
+    # this with a physical skin temperature when ``SCMForcing.prescribe ==
+    # "T_s"``.
+    surface_T_sfc_override = jnp.full((ncol,), NO_SFC_T_OVERRIDE, dtype=dtype)
 
     # --- Radiation sub-cycle cache (held heating tendency) ---
     # Zero before the first solve; populated on sub-cycle step 0 (which is

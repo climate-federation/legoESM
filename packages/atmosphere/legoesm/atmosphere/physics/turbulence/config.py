@@ -209,7 +209,7 @@ __param_spec__ = {
             "Pr_t": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "turbulent Prandtl number Kh = Km/Pr_t", "shape": None},
             "Ri_crit": {"units": "1", "bounds": (0.1, 0.75), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_richardson", "reference": "Hong et al. (2006) YSU critical Richardson number", "shape": None},
             "countergrad_coeff": {"units": "1", "bounds": (2.0, 19.5), "tunable_tier": 1, "transform": "sigmoid", "category": "countergradient", "reference": "Troen & Mahrt (1986); Hong et al. (2006) YSU nonlocal countergradient coeff b", "shape": None},
-            "entrainment_coeff": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Hong et al. (2006) YSU PBL-top entrainment coefficient", "shape": None},
+            "entrainment_ratio": {"units": "1", "bounds": (0.05, 0.5), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Hong et al. (2006) prescribed PBL-top entrainment flux ratio (w'th_v')_h = -0.15*(w'th_v')_0", "shape": None, "legacy_name": "entrainment_coeff"},
             "entrainment_width_frac": {"units": "1", "bounds": (0.05, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "Hong et al. (2006) YSU Gaussian entrainment width fraction of h_pbl", "shape": None},
             "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length (free-atm local-Ri K)", "shape": None},
             "louis_b": {"units": "1", "bounds": (1.5, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1982) stability-function coefficient b (YSU free-atm local Ri)", "shape": None},
@@ -581,8 +581,12 @@ class YSUConfig(NamedTuple):
         Maximum mixing length [m] (default 100.0).
     Pr_t : float
         Turbulent Prandtl number (default 1.0).
-    entrainment_coeff : float
-        Entrainment coefficient at PBL top (default 0.2).
+    entrainment_ratio : float
+        Prescribed PBL-top entrainment flux ratio ``e_ratio`` in
+        ``(w'θ_v')_h = −e_ratio·(w'θ_v')_0`` (Hong et al. 2006 entrainment
+        closure; default 0.15).  Applied as a flux-matched diffusivity at
+        the inversion (see ``ysu.py``).  Renamed from ``entrainment_coeff``
+        (the old Gaussian-K magnitude coefficient, a different quantity).
     Ri_crit : float
         Critical Richardson number (default 0.25).
     pbl_smooth_sharpness : float
@@ -626,7 +630,7 @@ class YSUConfig(NamedTuple):
     """
     l_mix_max: float = 100.0
     Pr_t: float = 1.0
-    entrainment_coeff: float = 0.2
+    entrainment_ratio: float = 0.15  # Hong06 (w'th_v')_h = -e_ratio*(w'th_v')_0
     entrainment_width_frac: float = 0.3  # Gaussian entrainment width as fraction of h_pbl
     Ri_crit: float = 0.25
     pbl_smooth_sharpness: float = 20.0

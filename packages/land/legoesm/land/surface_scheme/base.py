@@ -57,6 +57,12 @@ class SurfaceFluxOutput(NamedTuple):
     # ---- Photosynthesis (None if stomata disabled / carbon off) ----
     gpp: jax.Array | None = None  # gross primary production [gC/m^2/s]
 
+    # ---- Solar-induced fluorescence (None unless a SIFConfig is attached) ----
+    # Observed top-of-canopy SIF photon flux [umol/m^2/s] (sunlit+shaded sum for
+    # the two-leaf canopy, single leaf for SimpleSEB), scaled by the escape
+    # probability fesc.  Passive diagnostic — no feedback into the land state.
+    sif: jax.Array | None = None
+
     # ---- Canopy-specific diagnostics (None for SimpleSEB) ----
     Tf_Sun: jax.Array | None = None        # sunlit leaf T [K]
     Tf_Sh: jax.Array | None = None         # shaded leaf T [K]

@@ -24,10 +24,13 @@ export JAX_ENABLE_X64=1
 echo "[$(date)] Levante WB scale train: ${SLURM_NTASKS} ranks (1 GPU each)"
 
 # one rank per GPU (--gpu-bind=single:1); SLURM_LOCALID pins rank->GPU in the code.
+# WB_CORE selects the training core (#817): latlon (default) or spectral
+# (Gaussian semi-implicit — bounded adjoint, no pole dt clamp).
 srun --ntasks="${SLURM_NTASKS}" --gpu-bind=single:1 --cpu-bind=cores --mpi=pmix \
   python scripts/run/train_weatherbench_scale.py \
     --config config/wb/scale/train_07deg.yaml \
     --mode "${WB_MODE:-neural_gcm}" \
-    --out "${SCRATCH:-.}/wb_scale_${WB_MODE:-neural_gcm}" \
+    --training-core "${WB_CORE:-latlon}" \
+    --out "${SCRATCH:-.}/wb_scale_${WB_MODE:-neural_gcm}_${WB_CORE:-latlon}" \
     --resume --eval-wb2
 echo "[$(date)] done"

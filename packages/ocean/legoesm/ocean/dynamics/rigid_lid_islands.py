@@ -38,6 +38,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
 )
 from legoesm.ocean.dynamics.rigid_lid_latlon_cgrid import (
     RigidLidStaticData,
+    assert_rigid_lid_single_rank,
     barotropic_face_depths,
     solve_streamfunction_interior,
     island_line_integrals,
@@ -231,6 +232,12 @@ def build_rigid_lid_data(H_bathy, land_mask, u_mask, v_mask, config, grid,
     -------
     RigidLidStaticData with islands, basis functions and the coupling matrix.
     """
+    # Fail fast BEFORE any island labelling / basis solve: the whole build is
+    # single-rank only (the psin basis calls the global streamfunction CG, and
+    # the line-integral coupling matrix sums over the whole domain). Guards
+    # direct callers; the model's _ensure_rigid_lid_data also guards upstream.
+    assert_rigid_lid_single_rank()
+
     np.asarray(H_bathy)
     land_np = np.asarray(land_mask)
     cell_land = land_np < 0.5

@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -114,26 +115,19 @@ def _make_tiny_latlon_setup(n_lat: int = 8, n_lon: int = 16):
 
 
 def _argparse_namespace(**kwargs):
-    """Build an argparse-like Namespace for the helpers."""
-    import types
-    defaults = dict(
-        grid="latlon",
-        forcing_mode="jra55_do_tropical",
-        jra55_cache=None,
-        jra55_co2_ppmv=400.0,
-        jra55_cycle=False,    # RYF mode is opt-in
-        # Day-3 closure-domain defaults (match parse_args defaults).
-        sponge_lat_min=-60.0,
-        sponge_lat_max=60.0,
-        sponge_width_deg=5.0,
-        sponge_tau_days=5.0,
-        sss_piston_velocity=5.0e-7,
-        jra55_no_sponge=False,
-        jra55_no_sss_restoring=False,
-        jra55_no_freeze_cap=False,
-    )
-    defaults.update(kwargs)
-    return types.SimpleNamespace(**defaults)
+    """Argparse-like Namespace seeded from the REAL parser defaults.
+
+    The previous hand-built ``SimpleNamespace`` dict rotted every time a
+    new flag landed (``--surface-stability-scheme`` broke 32 tests with
+    ``AttributeError`` — the setup helpers read ``args.<new_flag>``
+    directly).  Seeding from ``parse_args`` keeps every current AND
+    future flag present at its production default; ``kwargs`` override.
+    """
+    args = run_omip.parse_args(
+        ["--grid", "latlon", "--forcing-mode", "jra55_do_tropical"])
+    for k, v in kwargs.items():
+        setattr(args, k, v)
+    return args
 
 
 # ============================================================================
@@ -488,8 +482,14 @@ def test_setup_with_woa_enables_all_closure_features(tmp_path):
 
 
 def test_setup_without_woa_disables_closure_features(tmp_path):
-    """If WOA targets aren't passed, sponge/SSS/freeze are silently
-    disabled even when the --jra55-no-... flags aren't set."""
+    """If WOA targets aren't passed, sponge/SSS are silently disabled
+    even when the --jra55-no-... flags aren't set.
+
+    The freeze cap stays ON: since commit 2d343dfdc it no longer
+    depends on the sponge mask/WOA data — with no sponge it caps
+    globally over all ocean cells via the state's own land mask
+    (see ``_apply_freeze_cap`` and the ``_ocean_mask_2d`` block path).
+    """
     cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8)
     grid, z_coord, *_ = _make_tiny_latlon_setup(n_lat=4, n_lon=8)
     args = _argparse_namespace(jra55_cache=str(cache))
@@ -498,12 +498,14 @@ def test_setup_without_woa_disables_closure_features(tmp_path):
     )
     assert state["enable_sponge"] is False
     assert state["enable_sss_restoring"] is False
-    assert state["enable_freeze_cap"] is False
+    assert state["enable_freeze_cap"] is True
 
 
-def test_setup_freeze_cap_requires_sponge():
-    """Freeze cap is gated on the sponge mask — disabling sponge
-    auto-disables freeze cap."""
+def test_setup_freeze_cap_independent_of_sponge():
+    """Freeze cap is NOT gated on the sponge (commit 2d343dfdc):
+    disabling the sponge keeps the cap on, scoped globally over all
+    ocean cells instead of the sponge zone. Only --jra55-no-freeze-cap
+    (or --jra55-sea-ice, see the sea-ice setup test) turns it off."""
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -518,7 +520,7 @@ def test_setup_freeze_cap_requires_sponge():
             z_coord=z_coord, T_woa=T_woa, S_woa=S_woa,
         )
         assert state["enable_sponge"] is False
-        assert state["enable_freeze_cap"] is False
+        assert state["enable_freeze_cap"] is True
 
 
 def test_setup_can_disable_individual_features(tmp_path):
@@ -704,6 +706,334 @@ def test_jra55_step_with_closure_features_advances_without_nans(tiny_jra55_run_f
         assert bool(jnp.all(jnp.isfinite(arr))), "non-finite state after step"
 
 
+# ============================================================================
+# F1 — cycled GPU-interp forcing clock (record window + scan-body clock)
+# ============================================================================
+
+class _ForcingProbeField(NamedTuple):
+    data: jnp.ndarray
+
+
+class _ForcingProbeState(NamedTuple):
+    T: _ForcingProbeField
+
+
+def _make_forcing_probe_model():
+    """Minimal stand-in for the ocean model inside the GPU-interp block fn.
+
+    ``_step_impl`` encodes the interpolated shortwave forcing it receives
+    into the carried state (``sf.sw_down`` is the raw interpolated
+    ``rsds`` — untouched by the ocean state), so the block's final state
+    exposes the LAST step's selected/interpolated forcing for assertion.
+    """
+    import types
+
+    def _step_impl(state_in, dt, freshwater=None, surface_forcing=None,
+                   sponge=None):
+        probe = surface_forcing.sw_down[..., None] * 1e-3
+        return _ForcingProbeState(
+            T=_ForcingProbeField(
+                data=jnp.broadcast_to(probe, state_in.T.data.shape),
+            ),
+        )
+
+    return types.SimpleNamespace(
+        config=types.SimpleNamespace(
+            barotropic=types.SimpleNamespace(maxvel_barotropic=0.0),
+        ),
+        _step_impl=_step_impl,
+    )
+
+
+def test_preload_raw_records_second_cycle_meta_and_indices(tmp_path):
+    """F1: in the SECOND repeat-year cycle the preloader must return the
+    CYCLED block-start day for the interpolation clock (raw day is kept
+    separately for solar zenith) and record days aligned with it."""
+    n_records = 16  # 2.0-day cache at 8 records/day
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8,
+                                  n_records=n_records)
+    js = {"cache_path": str(cache), "ref_year": 1958, "cycle": True}
+    dt = 5400.0          # 0.0625 day = half a 3-hourly record interval
+    start_step_idx = 41  # day 2.5625 -> cycled 0.5625 (second cycle)
+
+    raw_stack, _, meta = run_omip._preload_jra55_raw_records(
+        start_step_idx, 1, dt, js)
+
+    # Raw day preserved for the solar-zenith clock.
+    assert meta["block_start_day"] == pytest.approx(2.5625)
+    # Cycled forcing clock: 2.5625 mod 2.0.
+    assert meta["block_start_day_forcing"] == pytest.approx(0.5625)
+    days = np.asarray(meta["record_days"])
+    np.testing.assert_allclose(days, [0.5, 0.625])
+    # The forcing clock must be bracketed by the returned record days.
+    assert days[0] <= meta["block_start_day_forcing"] <= days[-1]
+    # Selected raw records are cache records 4 and 5.
+    ds = xr.open_zarr(str(cache), decode_times=False)
+    np.testing.assert_allclose(
+        np.asarray(raw_stack["tas"]), ds["tas"].isel(time=[4, 5]).values)
+
+
+def test_preload_raw_records_unwraps_record_days_across_cache_wrap(tmp_path):
+    """F1: a block straddling the repeat-year wrap gets MONOTONIC record
+    days (post-wrap entries shifted by +cache_length_days) so linear
+    interpolation stays correct across the boundary."""
+    n_records = 16  # 2.0-day cache
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8,
+                                  n_records=n_records)
+    js = {"cache_path": str(cache), "ref_year": 1958, "cycle": True}
+    dt = 5400.0
+    # Steps 63, 64: days 3.9375, 4.0 -> cycled 1.9375, 2.0 (straddles wrap).
+    raw_stack, _, meta = run_omip._preload_jra55_raw_records(63, 2, dt, js)
+
+    days = np.asarray(meta["record_days"])
+    assert np.all(np.diff(days) > 0), f"record_days not monotonic: {days}"
+    np.testing.assert_allclose(days, [1.875, 2.0, 2.125])
+    assert meta["block_start_day_forcing"] == pytest.approx(1.9375)
+    ds = xr.open_zarr(str(cache), decode_times=False)
+    np.testing.assert_allclose(
+        np.asarray(raw_stack["rsds"]),
+        ds["rsds"].isel(time=[15, 0, 1]).values)
+
+
+def test_slice_preloaded_records_second_cycle_matches_raw_preloader(tmp_path):
+    """F1: the in-RAM slicer must produce the same window/meta as the
+    Zarr preloader (float32 staging tolerance) in the second cycle."""
+    n_records = 16
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8,
+                                  n_records=n_records)
+    js = {"cache_path": str(cache), "ref_year": 1958, "cycle": True}
+    full = run_omip._preload_jra55_full_cache(js)
+
+    raw_a, _, meta_a = run_omip._slice_preloaded_records(
+        41, 4, 5400.0, js, *full)
+    raw_b, _, meta_b = run_omip._preload_jra55_raw_records(41, 4, 5400.0, js)
+
+    np.testing.assert_allclose(np.asarray(meta_a["record_days"]),
+                               np.asarray(meta_b["record_days"]))
+    assert (meta_a["block_start_day_forcing"]
+            == meta_b["block_start_day_forcing"])
+    assert meta_a["block_start_day"] == meta_b["block_start_day"]
+    for var in raw_b:
+        np.testing.assert_allclose(
+            np.asarray(raw_a[var]), np.asarray(raw_b[var]), rtol=1e-6)
+
+
+def test_gpu_interp_block_uses_cycled_forcing_clock_second_cycle(tmp_path):
+    """F1 end-to-end: the jitted interp scan body must select the
+    analytically expected bracketing records + alpha in the SECOND
+    repeat-year cycle.
+
+    Before the fix the RAW simulation day was compared against
+    cache-relative record_days, so ``i_lo`` clipped to the last slice
+    record and ``alpha`` clamped to 1 — every step read one stale
+    record instead of interpolating."""
+    n_lat, n_lon, n_records = 4, 8, 16  # 2.0-day cache
+    cache = _make_synthetic_cache(tmp_path, n_lat=n_lat, n_lon=n_lon,
+                                  n_records=n_records)
+    grid, *_ = _make_tiny_latlon_setup(n_lat=n_lat, n_lon=n_lon)
+    args = _argparse_namespace(jra55_cache=str(cache), jra55_cycle=True)
+    js = run_omip._setup_jra55_forcing_state(args, grid, "latlon")
+    js["enable_freeze_cap"] = False  # probe state carries no land mask
+
+    dt = 5400.0  # half a record interval
+    probe_model = _make_forcing_probe_model()
+    get_bfn = run_omip._build_jra55_block_fn_interp(probe_model, js, dt)
+    state0 = _ForcingProbeState(
+        T=_ForcingProbeField(data=jnp.zeros((n_lat, n_lon, 1))))
+    ds = xr.open_zarr(str(cache), decode_times=False)
+
+    # (a) Single-step block at raw day 2.5625 (cycled 0.5625): midway
+    # between records 4 (day 0.5) and 5 (day 0.625) -> alpha = 0.5.
+    raw_stack, runoff, meta = run_omip._preload_jra55_raw_records(
+        41, 1, dt, js)
+    final = get_bfn(1)(
+        state0, raw_stack, runoff, meta["record_days"],
+        jnp.float64(meta["block_start_day"]),
+        jnp.float64(meta["block_start_day_forcing"]),
+    )
+    probed_sw = np.asarray(final.T.data[..., 0]) * 1e3
+    expected = 0.5 * (ds["rsds"].isel(time=4).values
+                      + ds["rsds"].isel(time=5).values)
+    np.testing.assert_allclose(probed_sw, expected, rtol=1e-9)
+
+    # (b) Two-step block straddling the wrap (raw days 3.9375, 4.0):
+    # the final step lands exactly ON the wrap record -> rsds[0].
+    raw_stack, runoff, meta = run_omip._preload_jra55_raw_records(
+        63, 2, dt, js)
+    final = get_bfn(2)(
+        state0, raw_stack, runoff, meta["record_days"],
+        jnp.float64(meta["block_start_day"]),
+        jnp.float64(meta["block_start_day_forcing"]),
+    )
+    probed_sw = np.asarray(final.T.data[..., 0]) * 1e3
+    np.testing.assert_allclose(
+        probed_sw, ds["rsds"].isel(time=0).values, rtol=1e-9)
+
+
+def test_loop_gpu_interp_cycled_second_cycle_runs_finite(tmp_path):
+    """F1 integration: the block-scan loop on the GPU-interp path with
+    repeat-year cycling runs blocks entirely inside the SECOND cycle
+    (including the full-cache slicer) and stays finite."""
+    n_lat, n_lon = 4, 8
+    cache = _make_synthetic_cache(tmp_path, n_lat=n_lat, n_lon=n_lon,
+                                  n_records=16)  # 2-day cache
+    grid, z_coord, _, model, _ = _make_tiny_latlon_setup(
+        n_lat=n_lat, n_lon=n_lon)
+    state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
+    args = _argparse_namespace(jra55_cache=str(cache), jra55_cycle=True)
+    js = run_omip._setup_jra55_forcing_state(args, grid, "latlon")
+    js["_gpu_interp"] = True
+    # Global freeze cap needs the ocean mask (run_omip_single wires this).
+    js["_ocean_mask_2d"] = state.land_mask.data > 0.5
+    # dt=10800 s (3 h) -> 8 steps/day; the second cycle starts at step 16.
+    state_out, _, _, ok, _ = run_omip._run_omip_loop(
+        model, state, "latlon", grid, z_coord,
+        dt=10800.0, n_steps=20, diag_every=2, jra55_state=js,
+        checkpoint_days=None, checkpoint_dir=None, start_step=16,
+    )
+    assert ok
+    assert bool(jnp.all(jnp.isfinite(state_out.T.data)))
+
+
+# ============================================================================
+# F2 — non-cycled preloaders must raise past the cache end (no silent clamp)
+# ============================================================================
+
+def test_preload_raw_records_noncycle_past_cache_end_raises(tmp_path):
+    """F2: cycle=False + block past the cache end must raise IndexError
+    (matching the jra55_do loader's no-silent-synthetic contract), not
+    silently clamp to the last record."""
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8,
+                                  n_records=8)  # 1-day cache
+    js = {"cache_path": str(cache), "ref_year": 1958, "cycle": False}
+    with pytest.raises(IndexError, match="exceeds cache length"):
+        # start day 1.25 > 1.0-day cache.
+        run_omip._preload_jra55_raw_records(10, 4, 10800.0, js)
+
+
+def test_slice_preloaded_records_noncycle_past_cache_end_raises(tmp_path):
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8, n_records=8)
+    js = {"cache_path": str(cache), "ref_year": 1958, "cycle": False}
+    full = run_omip._preload_jra55_full_cache(js)
+    with pytest.raises(IndexError, match="exceeds cache length"):
+        run_omip._slice_preloaded_records(10, 4, 10800.0, js, *full)
+
+
+def test_preload_raw_records_noncycle_exact_last_record_ok(tmp_path):
+    """Loader parity: a block whose final step lands EXACTLY on the last
+    cache record needs no upper bracket beyond it and must NOT raise."""
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8, n_records=8)
+    js = {"cache_path": str(cache), "ref_year": 1958, "cycle": False}
+    # dt=10800 s (3 h): steps 0..7 -> last day 0.875 == final record.
+    _, _, meta = run_omip._preload_jra55_raw_records(0, 8, 10800.0, js)
+    days = np.asarray(meta["record_days"])
+    assert days[-1] == pytest.approx(0.875)
+    assert meta["block_start_day_forcing"] == meta["block_start_day"]
+
+
+# ============================================================================
+# F3 — --no-gpu-interp round trip (flag must reach the dispatch)
+# ============================================================================
+
+def test_cli_gpu_interp_flag_round_trip():
+    import sys as _sys
+    saved = _sys.argv
+    try:
+        _sys.argv = ["run_omip.py", "--grid", "latlon"]
+        assert run_omip.parse_args().gpu_interp is True
+        _sys.argv = ["run_omip.py", "--grid", "latlon", "--no-gpu-interp"]
+        assert run_omip.parse_args().gpu_interp is False
+    finally:
+        _sys.argv = saved
+
+
+class _LoopCapturedError(Exception):
+    """Sentinel: short-circuit run_omip_single at the time-loop boundary."""
+
+
+@pytest.mark.parametrize("extra_argv,expected", [
+    ([], True),
+    (["--no-gpu-interp"], False),
+])
+def test_no_gpu_interp_flag_reaches_jra55_dispatch(tmp_path, monkeypatch,
+                                                   extra_argv, expected):
+    """F3: run_omip_single must wire args.gpu_interp into
+    jra55_state['_gpu_interp'] (it was hardcoded True, making
+    --no-gpu-interp a silent no-op)."""
+    cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8, n_records=8)
+    captured = {}
+
+    def _spy_loop(*a, **kw):
+        captured["jra55_state"] = kw.get("jra55_state")
+        raise _LoopCapturedError()
+
+    monkeypatch.setattr(run_omip, "_run_omip_loop", _spy_loop)
+
+    import sys as _sys
+    saved = _sys.argv
+    try:
+        _sys.argv = [
+            "run_omip.py", "--grid", "latlon", "--resolution", "4x8",
+            "--nlev", "4", "--dt", "10800", "--days", "1",
+            "--forcing-mode", "jra55_do_tropical",
+            "--jra55-cache", str(cache),
+            "--output", str(tmp_path / "out"),
+        ] + extra_argv
+        args = run_omip.parse_args()
+    finally:
+        _sys.argv = saved
+
+    with pytest.raises(_LoopCapturedError):
+        run_omip.run_omip_single("latlon", args)
+    assert captured["jra55_state"]["_gpu_interp"] is expected
+
+
+@pytest.mark.parametrize("gpu_interp,expected_calls", [
+    (False, {"cpu": 1, "gpu": 0}),
+    (True, {"cpu": 0, "gpu": 1}),
+])
+def test_loop_dispatch_honors_gpu_interp_flag(tmp_path, monkeypatch,
+                                              gpu_interp, expected_calls):
+    """F3: _gpu_interp=False must route to the CPU-interp block path
+    (_build_jra55_block_fn) and the run must complete finite — the CPU
+    path stays exercised, not just reachable."""
+    n_lat, n_lon = 4, 8
+    cache = _make_synthetic_cache(tmp_path, n_lat=n_lat, n_lon=n_lon,
+                                  n_records=16)
+    grid, z_coord, _, model, _ = _make_tiny_latlon_setup(
+        n_lat=n_lat, n_lon=n_lon)
+    state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
+    args = _argparse_namespace(jra55_cache=str(cache))
+    js = run_omip._setup_jra55_forcing_state(args, grid, "latlon")
+    js["_gpu_interp"] = gpu_interp
+    # Global freeze cap needs the ocean mask (run_omip_single wires this).
+    js["_ocean_mask_2d"] = state.land_mask.data > 0.5
+
+    calls = {"cpu": 0, "gpu": 0}
+    real_cpu = run_omip._build_jra55_block_fn
+    real_gpu = run_omip._build_jra55_block_fn_interp
+
+    def _spy_cpu(*a, **k):
+        calls["cpu"] += 1
+        return real_cpu(*a, **k)
+
+    def _spy_gpu(*a, **k):
+        calls["gpu"] += 1
+        return real_gpu(*a, **k)
+
+    monkeypatch.setattr(run_omip, "_build_jra55_block_fn", _spy_cpu)
+    monkeypatch.setattr(run_omip, "_build_jra55_block_fn_interp", _spy_gpu)
+
+    state_out, _, _, ok, _ = run_omip._run_omip_loop(
+        model, state, "latlon", grid, z_coord,
+        dt=10800.0, n_steps=4, diag_every=2, jra55_state=js,
+        checkpoint_days=None, checkpoint_dir=None,
+    )
+    assert ok
+    assert calls == expected_calls
+    assert bool(jnp.all(jnp.isfinite(state_out.T.data)))
+
+
 def test_jra55_step_runs_with_features_disabled(tmp_path):
     """When all closure features are disabled, the step still works
     (matches the Day-2 path bit-equivalently)."""
@@ -738,3 +1068,298 @@ def test_jra55_step_runs_with_features_disabled(tmp_path):
     # And they should differ — the closure features do something
     assert not np.array_equal(np.asarray(s_full.T.data),
                                np.asarray(s_off.T.data))
+
+
+# ============================================================================
+# FIX 1 (zenithfix): cycled JRA55 insolation clock must follow the FORCING
+# clock, not the raw sim day.
+#
+# In ``_build_jra55_block_fn_interp`` the recent forcing-clock fix split
+# ``day`` (RAW sim day) from ``day_f`` (CYCLED forcing clock).  The solar
+# zenith's ``doy``/``hour`` must be locked to the repeated forcing (``day_f``)
+# when cycling, otherwise the seasonal (and, for a non-integer cache length,
+# diurnal) solar phase drifts relative to the prescribed rsds whenever the
+# repeat-year cache length is not a whole multiple of 365 days.
+#
+# Observable probe: monkeypatch ``ocean_tile_response`` to route the block's
+# real computed ``cos_zenith`` into ``tile.tau_x`` (all other tile fields
+# zero); a probe ``_step_impl`` encodes ``surface_forcing.tau_x`` into the
+# carried state, so the block's final state exposes the LAST step's zenith.
+# ``T_ramp_seconds=0`` fixes the spinup ramp at 1 so ``tau_x == cos_zenith``.
+# ============================================================================
+
+_JRA55_RAW_VARS = ("uas", "vas", "tas", "huss", "psl",
+                   "rsds", "rlds", "prra", "prsn")
+
+
+class _ZenithProbeField(NamedTuple):
+    data: jnp.ndarray
+
+
+class _ZenithProbeState(NamedTuple):
+    T: _ZenithProbeField
+
+
+def _make_zenith_probe_model():
+    """Ocean-model stand-in that surfaces the block's solar zenith.
+
+    The fake ``ocean_tile_response`` routes ``cos_zenith`` into ``tau_x``;
+    with the spinup ramp fixed at 1, ``surface_forcing.tau_x`` equals the
+    step's ``cos_zenith``.  ``_step_impl`` copies it into the carried state.
+    """
+    import types
+
+    def _step_impl(state_in, dt, freshwater=None, surface_forcing=None,
+                   sponge=None):
+        probe = surface_forcing.tau_x[..., None]
+        return _ZenithProbeState(
+            T=_ZenithProbeField(
+                data=jnp.broadcast_to(probe, state_in.T.data.shape)))
+
+    return types.SimpleNamespace(
+        config=types.SimpleNamespace(
+            barotropic=types.SimpleNamespace(maxvel_barotropic=0.0)),
+        _step_impl=_step_impl,
+    )
+
+
+def _install_cos_zenith_tile_probe(monkeypatch):
+    """Patch ``ocean_tile_response`` to expose the block's ``cos_zenith``.
+
+    Must run BEFORE ``_build_jra55_block_fn_interp`` is called — the builder
+    does a function-scope ``from legoesm.coupler.coupler import
+    ocean_tile_response`` that binds this module attribute at call time.
+    """
+    import types
+    import legoesm.coupler.coupler as _cc
+
+    def _fake_tile(forcing, sst, u, v, config):
+        cos_z = forcing.cos_zenith
+        zeros = jnp.zeros_like(cos_z)
+        return types.SimpleNamespace(
+            albedo=zeros, lw_up=zeros, shflx=zeros, lhflx=zeros,
+            tau_x=cos_z, tau_y=zeros)
+
+    monkeypatch.setattr(_cc, "ocean_tile_response", _fake_tile)
+
+
+def _zenith_js(tmp_path, n_lat=4, n_lon=8, cycle=True):
+    """Build a real JRA55 forcing state, then neutralise everything except
+    the solar-zenith clock (ramp off, freeze-cap off)."""
+    cache = _make_synthetic_cache(tmp_path, n_lat=n_lat, n_lon=n_lon,
+                                  n_records=8)
+    grid, *_ = _make_tiny_latlon_setup(n_lat=n_lat, n_lon=n_lon)
+    args = _argparse_namespace(jra55_cache=str(cache), jra55_cycle=cycle)
+    js = run_omip._setup_jra55_forcing_state(args, grid, "latlon")
+    js["T_ramp_seconds"] = 0.0        # ramp == 1 -> tau_x == cos_zenith
+    js["enable_freeze_cap"] = False    # probe state carries no land mask
+    return js
+
+
+def _mini_raw_stack(day_f, n_lat=4, n_lon=8):
+    """Three JRA55 records on the 1/8-day grid bracketing ``day_f``.
+
+    Forcing values are irrelevant (the tile is faked) — only the record
+    days matter for the block's interpolation window.
+    """
+    from legoesm.forcing.jra55_do import RECORDS_PER_DAY
+    i0 = int(np.floor(day_f * RECORDS_PER_DAY))
+    record_days = jnp.asarray(
+        [(i0 + k) / RECORDS_PER_DAY for k in range(3)], dtype=jnp.float64)
+    vals = {"uas": 1.0, "vas": 1.0, "tas": 290.0, "huss": 0.01,
+            "psl": 101325.0, "rsds": 300.0, "rlds": 350.0,
+            "prra": 0.0, "prsn": 0.0}
+    raw_stack = {v: jnp.full((3, n_lat, n_lon), val, dtype=jnp.float64)
+                 for v, val in vals.items()}
+    runoff = jnp.zeros((3, n_lat, n_lon), dtype=jnp.float64)
+    return raw_stack, runoff, record_days
+
+
+def _run_zenith_block(js, block_start_day, block_start_day_forcing,
+                      monkeypatch, n_lat=4, n_lon=8):
+    """Drive one production block step and return its selected cos_zenith."""
+    _install_cos_zenith_tile_probe(monkeypatch)
+    probe_model = _make_zenith_probe_model()
+    get_bfn = run_omip._build_jra55_block_fn_interp(probe_model, js, dt=5400.0)
+    raw_stack, runoff, record_days = _mini_raw_stack(
+        block_start_day_forcing, n_lat, n_lon)
+    state0 = _ZenithProbeState(
+        T=_ZenithProbeField(data=jnp.zeros((n_lat, n_lon, 1))))
+    final = get_bfn(1)(
+        state0, raw_stack, runoff, record_days,
+        jnp.float64(block_start_day),
+        jnp.float64(block_start_day_forcing))
+    return np.asarray(final.T.data[..., 0])
+
+
+def _expected_cos_zenith(js, day):
+    """Reference cos_zenith from a given clock day (same helper the block
+    uses internally)."""
+    from legoesm.atmosphere.physics.radiation.solar import cos_zenith_angle
+    doy = np.mod(day, 365.0) + 1.0
+    hour = np.mod(day, 1.0) * 24.0
+    return np.asarray(cos_zenith_angle(js["lat_2d"], js["lon_2d"], doy, hour))
+
+
+def test_zenithfix_second_cycle_uses_forcing_clock_not_raw_day(
+        tmp_path, monkeypatch):
+    """FIX 1 (RED before fix): in the SECOND repeat-year cycle of a cache
+    whose length is NOT a whole multiple of 365 days, the solar-zenith
+    ``doy``/``hour`` must come from the CYCLED forcing clock (``day_f``),
+    NOT the raw sim day.
+
+    Proxy for a 366-day (leap-year) RYF cache: a 2.125-day cache (17
+    records at 8/day).  In the second cycle raw day 2.5625 maps to forcing
+    day 0.4375; the 2.125-day offset shifts BOTH the seasonal doy (by 2.125
+    days) and the diurnal hour (by 0.125*24 = 3 h).  Before the fix the raw
+    day drove the zenith, drifting it away from the prescribed forcing.
+    """
+    js = _zenith_js(tmp_path, cycle=True)
+    raw_day = 2.5625
+    forcing_day = 0.4375   # 2.5625 mod 2.125
+    probed = _run_zenith_block(js, raw_day, forcing_day, monkeypatch)
+
+    expected_forcing = _expected_cos_zenith(js, forcing_day)
+    expected_raw = _expected_cos_zenith(js, raw_day)
+    # Guard against a vacuous test: the two clocks must be observably apart.
+    assert not np.allclose(expected_forcing, expected_raw, atol=1e-6), (
+        "raw and forcing clocks coincide — test would be vacuous")
+    # The fix: zenith is locked to the forcing clock ...
+    np.testing.assert_allclose(probed, expected_forcing, rtol=0, atol=1e-12)
+    # ... and no longer drifts with the raw sim day.
+    assert not np.allclose(probed, expected_raw, atol=1e-6)
+
+
+def test_zenithfix_noncycle_byte_identical_to_raw_clock(tmp_path, monkeypatch):
+    """FIX 1 byte-identity (non-cycled path): with cycle=False the insolation
+    clock is the raw day (``block_start_day_forcing == block_start_day``,
+    proven by ``test_preload_raw_records_noncycle_exact_last_record_ok``),
+    exactly as before the fix.
+
+    The cycle gate is a BIT-EXACT no-op whenever the forcing clock coincides
+    with the raw day: a cycle=True block driven with forcing==raw and a
+    cycle=False block produce identical cos_zenith (both through the same
+    fused graph).  Both also match the raw-day reference to machine precision
+    (the ~1e-15 residual is jit-vs-eager transcendental rounding in the
+    reference, NOT a change introduced by the fix — the cycle=False branch is
+    the identical ``jnp.mod(day, ...)`` expression the original code used)."""
+    day = 1.7
+    js = _zenith_js(tmp_path, cycle=False)
+    probed_off = _run_zenith_block(js, day, day, monkeypatch)
+    js_on = dict(js)
+    js_on["cycle"] = True
+    probed_on = _run_zenith_block(js_on, day, day, monkeypatch)
+    # EXACT: the cycle gate changes nothing when day_f == day.
+    np.testing.assert_array_equal(probed_on, probed_off)
+    # Physical: the non-cycled zenith IS the raw-day zenith (machine precision).
+    expected_raw = _expected_cos_zenith(js, day)
+    np.testing.assert_allclose(probed_off, expected_raw, rtol=0, atol=1e-12)
+
+
+def test_zenithfix_365day_ryf_preserves_seasonal_phase(tmp_path, monkeypatch):
+    """FIX 1: the standard 365-day RYF cache is NOT perturbed.  ``day_f =
+    day mod 365`` differs from the raw day by an exact multiple of 365, so
+    the seasonal doy and diurnal hour are identical — the second-cycle
+    zenith matches the raw-day zenith to machine precision (the reduced
+    magnitude of ``day_f`` is, if anything, more accurate)."""
+    js = _zenith_js(tmp_path, cycle=True)
+    raw_day = 365.5        # second cycle of a 365-day cache
+    forcing_day = 0.5      # 365.5 mod 365
+    probed = _run_zenith_block(js, raw_day, forcing_day, monkeypatch)
+    expected_raw = _expected_cos_zenith(js, raw_day)
+    np.testing.assert_allclose(probed, expected_raw, rtol=0, atol=1e-12)
+
+
+# ============================================================================
+# GAP 1 — MPAS/tripole regrid branch of the raw-record preloader
+#
+# ``_preload_jra55_raw_records`` has an ``if "regrid_weights" in jra55_state:``
+# branch (regrid each lat-lon record onto the unstructured target cells) that
+# every existing dispatch test misses because they all use --grid latlon (no
+# regrid weights).  Put a REAL lat-lon -> unstructured RegridWeights (the same
+# object the MPAS/tripole setup builds via compute_latlon_to_voronoi_weights)
+# into jra55_state and confirm the block preloader regrids each raw record to
+# (n_window_records, nCells) and stays finite.
+# ============================================================================
+
+def _make_regrid_weights_from_cache(cache_path, n_cells=5):
+    """Build a real lat-lon -> unstructured (MPAS-cell-like) ``RegridWeights``
+    whose SOURCE grid matches the synthetic cache, targeting a few scattered
+    points — the smallest valid weights object the regrid branch accepts."""
+    from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
+    ds = xr.open_zarr(str(cache_path), decode_times=False)
+    src_lat_rad = np.deg2rad(np.asarray(ds["lat"]))
+    src_lon_rad = np.deg2rad(np.asarray(ds["lon"]))
+    ds.close()
+    rng = np.random.default_rng(1)
+    tgt_lat_rad = np.deg2rad(rng.uniform(-80.0, 80.0, n_cells))
+    tgt_lon_rad = np.deg2rad(rng.uniform(0.0, 360.0, n_cells))
+    return compute_latlon_to_voronoi_weights(
+        src_lat_rad, src_lon_rad, tgt_lat_rad, tgt_lon_rad,
+    )
+
+
+def test_preload_raw_records_regrids_to_unstructured_cells(tmp_path):
+    """GAP 1: the regrid branch maps each raw lat-lon record onto the target
+    cells → (n_window_records, nCells), all finite (winds, T, q, radiation,
+    precip AND the friver runoff channel)."""
+    from legoesm.forcing.jra55_do import JRA55_VARIABLES
+
+    n_lat, n_lon, n_cells = 8, 16, 5
+    cache = _make_synthetic_cache(tmp_path, n_lat=n_lat, n_lon=n_lon,
+                                  n_records=8)
+    rw = _make_regrid_weights_from_cache(cache, n_cells=n_cells)
+    assert rw.target_shape == (n_cells,)
+    js = {
+        "cache_path": str(cache),
+        "ref_year": 1958,
+        "cycle": False,
+        "regrid_weights": rw,
+    }
+    # start_step_idx=0, n_steps=4, dt=3 h → window records [0..4] (5 records).
+    raw_stack, runoff_stack, meta = run_omip._preload_jra55_raw_records(
+        0, 4, 10800.0, js)
+
+    n_window = len(np.asarray(meta["record_days"]))
+    assert n_window >= 2
+
+    for var in JRA55_VARIABLES:
+        arr = np.asarray(raw_stack[var])
+        assert arr.shape == (n_window, n_cells), (var, arr.shape)
+        assert np.all(np.isfinite(arr)), var
+
+    runoff = np.asarray(runoff_stack)
+    assert runoff.shape == (n_window, n_cells)
+    assert np.all(np.isfinite(runoff))
+
+
+# ============================================================================
+# GAP 4 — _jra55_block_record_window ValueError guard paths
+#
+# Neither the "block spans >= a full cache cycle" nor the "wraps more than
+# once" ValueError was covered.  Call the window helper directly (it takes
+# n_cache_records as an int, so no cache file is needed) with args that trip
+# each guard.  Both fire only in cycle=True mode.
+# ============================================================================
+
+def test_block_window_raises_when_span_exceeds_full_cache_cycle():
+    """GAP 4a: a cycle=True block whose duration reaches the full cache length
+    cannot define a monotone forcing clock → ValueError before any wrap logic.
+
+    1-day cache (n_cache_records=8); dt=3 h, n_steps=9 → span = 8·0.125 =
+    1.0 day == cache length → raise."""
+    with pytest.raises(ValueError, match="full cache cycle"):
+        run_omip._jra55_block_record_window(
+            0, 9, 10800.0, 8, True)
+
+
+def test_block_window_raises_when_block_wraps_more_than_once():
+    """GAP 4b: a cycle=True block that would wrap the repeat-year boundary
+    twice (upper bracket lands a full cache past the start) → ValueError.
+
+    2-record cache (0.25-day cycle); start_step_idx=3, n_steps=4, dt=1.5 h.
+    span = 3·0.0625 = 0.1875 day < 0.25 (clears the span guard); start_day_f =
+    0.1875, end_day_f = 0.375 → i_last = 4 = 2·n_cache_records → wraps twice."""
+    with pytest.raises(ValueError, match="more than once"):
+        run_omip._jra55_block_record_window(
+            3, 4, 5400.0, 2, True)

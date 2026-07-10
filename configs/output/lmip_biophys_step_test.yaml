@@ -1,0 +1,15 @@
+# Per-step output config used by the driver's integration tests.
+# Every step is its own slot -> reproduces the pre-tape behaviour for
+# short 4-step smoke tests.
+
+tapes:
+  - name: step
+    freq: step
+    average: inst
+    vars:
+      - T_sfc
+      - shflx
+      - lhflx
+      - LAI
+      - T_soil_top
+      - snow_depth

@@ -74,6 +74,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
+from legoesm.atmosphere.physics.thermodynamics import latent_heat_vaporization
 from legoesm.atmosphere.physics.convection._triggers import (
     smooth_lowest_crossing_index,
 )
@@ -187,7 +188,8 @@ def _moist_entropy(T: jax.Array, p_pa: jax.Array, qtot: jax.Array) -> jax.Array:
     qv = jnp.minimum(qtot, q_sat)
     # Numerical floor so ln(qv/qs) is finite for a bone-dry parcel.
     qv_safe = jnp.maximum(qv, 1.0e-12)
-    L = constants.L_v - (constants.c_pw - constants.c_pv) * (T - constants.T_freeze)
+    # Kirchhoff L(T) via the shared helper (thermodynamics module).
+    L = latent_heat_vaporization(T)
     e = qv * p_pa / (constants.epsilon + qv)
     # Floor the dry partial pressure (p − e) away from zero before the log:
     # a cold, moist parcel at very low total pressure can drive e → p, and

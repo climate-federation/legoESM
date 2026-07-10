@@ -222,3 +222,172 @@ def test_coupled_rigid_lid_runs_eta_unchanged_and_differentiable():
         return jnp.sum(f.u.data ** 2)
     g = jax.grad(loss)(1.0)
     assert bool(jnp.isfinite(g))
+
+
+# ----------------------------------------------- MPI/SPMD dispatch guard ----
+# The rigid-lid streamfunction solve is single-rank only (global elliptic CG
+# with rank-local dots + domain-wide island line integrals). The guard must
+# FAIL LOUDLY on a decomposed domain instead of returning a per-rank-wrong
+# answer. These tests exercise the predicate's serial / MPI / SPMD branches
+# and confirm the guard is wired at the solver entry.
+import types  # noqa: E402
+
+from legoesm.ocean.dynamics import rigid_lid_latlon_cgrid as _rll  # noqa: E402
+import legoesm.grids.halo as _halo  # noqa: E402
+
+
+def test_guard_predicate_serial_is_false():
+    """Serial (single rank, no SPMD backend) is NOT decomposed."""
+    assert _rll.rigid_lid_is_decomposed() is False
+    _rll.assert_rigid_lid_single_rank()  # must not raise
+
+
+def test_guard_predicate_true_under_multiprocess(monkeypatch):
+    """is_multi_process() True (mpi4jax / multi-host / Voronoi) ⇒ decomposed."""
+    monkeypatch.setattr(_rll, "is_multi_process", lambda: True)
+    assert _rll.rigid_lid_is_decomposed() is True
+    with pytest.raises(NotImplementedError, match="single-rank only"):
+        _rll.assert_rigid_lid_single_rank()
+
+
+def test_guard_predicate_spmd_latband(monkeypatch):
+    """SPMD lat-band mesh with >1 device ⇒ decomposed (is_multi_process False)."""
+    monkeypatch.setattr(_rll, "is_multi_process", lambda: False)
+    monkeypatch.setattr(_halo, "get_halo_backend", lambda: "spmd")
+    # >1 device on "lat" is a real decomposition.
+    monkeypatch.setattr(_halo, "get_spmd_mesh",
+                        lambda: types.SimpleNamespace(shape={"lat": 2}))
+    assert _rll.rigid_lid_is_decomposed() is True
+    # A single-device "lat" axis is NOT a decomposition (falls through to
+    # is_multi_process, here False).
+    monkeypatch.setattr(_halo, "get_spmd_mesh",
+                        lambda: types.SimpleNamespace(shape={"lat": 1}))
+    assert _rll.rigid_lid_is_decomposed() is False
+    # A cube-atm SPMD mesh (no "lat" axis) also falls through.
+    monkeypatch.setattr(_halo, "get_spmd_mesh",
+                        lambda: types.SimpleNamespace(shape={"face": 6}))
+    assert _rll.rigid_lid_is_decomposed() is False
+
+
+def test_guard_spmd_backend_without_mesh_raises(monkeypatch):
+    """Backend armed 'spmd' but no mesh set is an invalid state ⇒ fail fast."""
+    monkeypatch.setattr(_halo, "get_halo_backend", lambda: "spmd")
+    monkeypatch.setattr(_halo, "get_spmd_mesh", lambda: None)
+    with pytest.raises(RuntimeError, match="no SPMD mesh"):
+        _rll.rigid_lid_is_decomposed()
+
+
+def test_guard_wired_at_solver_entry_integration(monkeypatch):
+    """Full coupled rigid-lid step raises (not silently wrong) when decomposed."""
+    grid = create_latlon_grid(n_lat=N_LAT, n_lon=N_LON)
+    z = create_ocean_z_star(n_levels=4)
+    lm = np.ones((N_LAT, N_LON)); lm[:2] = 0.0; lm[-2:] = 0.0
+    Hb = np.full((N_LAT, N_LON), 4000.0)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z, land_mask_override=jnp.asarray(lm), H_bathy_override=jnp.asarray(Hb))
+    cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="rigid_lid")
+    model = LatLonCGridOceanModel(grid, z, cfg)
+    monkeypatch.setattr(_rll, "is_multi_process", lambda: True)
+    with pytest.raises(NotImplementedError, match="single-rank only"):
+        model.integrate_scan(state, n_steps=1, dt=3600.0)
+
+
+def _rigid_lid_model():
+    grid = create_latlon_grid(n_lat=N_LAT, n_lon=N_LON)
+    z = create_ocean_z_star(n_levels=4)
+    lm = np.ones((N_LAT, N_LON))
+    lm[:2] = 0.0
+    lm[-2:] = 0.0
+    Hb = np.full((N_LAT, N_LON), 4000.0)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z, land_mask_override=jnp.asarray(lm), H_bathy_override=jnp.asarray(Hb))
+    cfg = LatLonCGridOceanConfig.from_flat(barotropic_solver="rigid_lid")
+    return LatLonCGridOceanModel(grid, z, cfg), state
+
+
+def test_guard_fires_before_rigid_lid_data_build(monkeypatch):
+    """Decomposition is caught BEFORE _ensure_rigid_lid_data builds the ψ-basis.
+
+    build_rigid_lid_data itself runs the global streamfunction-basis solves +
+    island line integrals, so the guard must fire before construction, not only
+    inside the solver body (codex finding 1).
+    """
+    model, state = _rigid_lid_model()
+    assert model.rigid_lid_data is None
+    monkeypatch.setattr(_rll, "is_multi_process", lambda: True)
+    with pytest.raises(NotImplementedError, match="single-rank only"):
+        model._ensure_rigid_lid_data(state)
+    # No per-rank-wrong basis was constructed.
+    assert model.rigid_lid_data is None
+
+
+def test_guard_eager_survives_jit_cache_reuse(monkeypatch):
+    """A serially-compiled step still refuses to run once decomposed.
+
+    The in-body guard is host-Python at trace time, so a step traced+compiled
+    serially would be reused verbatim if the process later goes distributed
+    (codex finding 2). The eager guard in step() fires on every call, before
+    the cached _step_jitted, so the reuse is refused.
+    """
+    model, state = _rigid_lid_model()
+    # Build the rigid-lid data eagerly from concrete masks (documented contract:
+    # the in-jit build cannot np.asarray traced masks), then warm the compiled
+    # step on a single rank.
+    model._ensure_rigid_lid_data(state)
+    state1 = model.step(state, 3600.0)
+    assert bool(jnp.all(jnp.isfinite(state1.psi)))
+    assert model.rigid_lid_data is not None            # cache is warm
+    # Now the process "becomes distributed": the compiled step is cached, but
+    # the eager guard must still fire.
+    monkeypatch.setattr(_rll, "is_multi_process", lambda: True)
+    with pytest.raises(NotImplementedError, match="single-rank only"):
+        model.step(state1, 3600.0)
+
+
+def test_guard_leaf_solve_streamfunction_interior(monkeypatch):
+    """Direct solve_streamfunction_interior refuses a decomposed domain.
+
+    Covers a direct/library call (and rigid_lid_step, which reaches it) that
+    bypasses the model wrapper (codex round-2 finding).
+    """
+    grid, lm, Hb, u_mask, v_mask, cfg, rl = _channel()
+    rhs = jnp.zeros((N_LAT + 1, N_LON + 1))
+    monkeypatch.setattr(_rll, "is_multi_process", lambda: True)
+    with pytest.raises(NotImplementedError, match="single-rank only"):
+        solve_streamfunction_interior(
+            rhs, rl, grid, jnp.zeros_like(rhs), tol=1e-10, maxiter=100)
+
+
+def test_guard_leaf_build_rigid_lid_data(monkeypatch):
+    """Direct build_rigid_lid_data refuses a decomposed domain BEFORE building.
+
+    The basis build runs the global CG + domain-wide line integrals, so the
+    guard fires at the TOP of build_rigid_lid_data (codex round-2 finding).
+    Non-vacuous for the TOP guard specifically: _label_islands is booby-trapped
+    so that if the top guard were removed (and the raise instead came from the
+    downstream solve_streamfunction_interior guard), the build would first reach
+    _label_islands and surface a different error — failing this test.
+    """
+    import legoesm.ocean.dynamics.rigid_lid_islands as _isl
+    grid, lm, Hb, u_mask, v_mask, cfg, rl = _channel()   # serial build OK
+
+    def _boom(*a, **k):
+        raise AssertionError("build reached _label_islands — top-of-build guard missing")
+    monkeypatch.setattr(_isl, "_label_islands", _boom)
+    monkeypatch.setattr(_rll, "is_multi_process", lambda: True)
+    with pytest.raises(NotImplementedError, match="single-rank only"):
+        build_rigid_lid_data(Hb, lm, u_mask, v_mask, cfg, grid, periodic_x=True)
+
+
+def test_guard_leaf_island_line_integrals(monkeypatch):
+    """Direct island_line_integrals refuses a decomposed domain.
+
+    The domain-wide island jnp.sum is rank-local under decomposition; guard
+    covers direct callers such as build_line_psin (codex round-3 finding).
+    """
+    grid, lm, Hb, u_mask, v_mask, cfg, rl = _channel()
+    u_f = jnp.zeros((N_LAT, N_LON + 1))
+    v_f = jnp.zeros((N_LAT + 1, N_LON))
+    monkeypatch.setattr(_rll, "is_multi_process", lambda: True)
+    with pytest.raises(NotImplementedError, match="single-rank only"):
+        _rll.island_line_integrals(u_f, v_f, rl, grid)

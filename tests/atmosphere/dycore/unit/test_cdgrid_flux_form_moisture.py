@@ -28,14 +28,16 @@ from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
 
 
 def test_flux_form_scatter_guard_predicate():
-    """The fail-closed predicate: refuse cube face-scatter / SPMD face-shard
-    (rank/shard-local flux-form reductions) but NOT replicated / single-rank."""
+    """The fail-closed predicate: MPI (single-rank / replicated / face-scatter) is
+    now ALLOWED — the reductions are allreduce-aware AND the transport + wind
+    reconstruction are 4D-halo (transport_step_4d / d2a2c_vect_4d), so there is no
+    vmap(pad_halo).  Only SPMD face-sharding still fails closed (#811)."""
     f = CDGridPrimitiveEquationModel._flux_form_scatter_blocked
     _topo3 = SimpleNamespace(local_face_ids=(0, 1, 2))   # rank owns 3 of 6 faces
     _topo6 = SimpleNamespace(local_face_ids=(0, 1, 2, 3, 4, 5))
     _band = SimpleNamespace(band_id=0)                   # lat-lon: no faces attr
-    # Genuinely scattered: <6 owned faces AND state sliced to them (lead==3).
-    assert f("mpi", _topo3, None, 3) is True
+    # Genuinely scattered MPI: now ALLOWED (4D-halo transport + winds, #811).
+    assert f("mpi", _topo3, None, 3) is False
     # Replicated cube MPI: <6 owned faces but FULL 6-face state (lead==6).
     assert f("mpi", _topo3, None, 6) is False
     # Single-rank MPI: owns all 6 faces.

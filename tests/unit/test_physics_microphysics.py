@@ -1279,3 +1279,451 @@ def test_p3_column_water_budget_closes():
         f"P3: column water budget unclosed.  max |imbalance| = "
         f"{max_imbalance:.3e} kg/m²/s, max precip = {max_precip:.3e}."
     )
+
+
+def test_p3_melting_transfers_number_to_rain():
+    """Melting must transfer NUMBER as well as mass (Morrison & Milbrandt
+    2015): dN_i sink and dN_r source in proportion to the melted mass
+    fraction.  Pre-fix, q_i melted away while N_i stayed fixed (mean crystal
+    mass q_i/N_i collapsed) and the melted crystals never appeared in N_r.
+    """
+    ncol, nlev = 1, 5
+    T = jnp.full((ncol, nlev), 280.0)   # above freezing: melt-only ice path
+    p_full = jnp.full((ncol, nlev), 5e4)
+    p_half = jnp.broadcast_to(
+        jnp.linspace(4e4, 6e4, nlev + 1)[None, :], (ncol, nlev + 1),
+    )
+    rho = p_full / (constants.R_d * T)
+    dz  = jnp.full((ncol, nlev), 10_000.0)
+    q_i = jnp.full((ncol, nlev), 5e-4)
+    hydro = HydrometeorState(
+        q_c=jnp.zeros((ncol, nlev)), q_r=jnp.zeros((ncol, nlev)),
+        q_i=q_i, q_s=jnp.zeros((ncol, nlev)), q_g=jnp.zeros((ncol, nlev)),
+        N_c=1e8 * jnp.ones((ncol, nlev)),
+        N_r=jnp.zeros((ncol, nlev)),
+        N_i=1e4 * jnp.ones((ncol, nlev)),   # [1/kg]
+    )
+    q_v = 0.8 * saturation_mixing_ratio(T, p_full)
+    dt  = 300.0
+    out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt, P3Config())
+    # Melting is active (mass moves ice -> rain) ...
+    assert float(jnp.min(out.dq_i_dt)) < 0.0
+    # ... and so does NUMBER: N_i sink, N_r source.
+    assert float(jnp.max(out.dN_i_dt)) < 0.0, (
+        "P3: melting removed ice mass but not ice number (dN_i melt sink missing)."
+    )
+    assert float(jnp.min(out.dN_r_dt)) > 0.0, (
+        "P3: melted crystals never appear as rain drops (dN_r melt source missing)."
+    )
+    # In this warm setup melting is the ONLY number pathway (nucleation and
+    # aggregation are f_ice-gated off; q_c = N_r = 0 kills the warm-rain
+    # number terms), so the rain-number source must equal the ice-number
+    # sink converted per-mass [1/kg] -> per-volume [1/m^3] with rho.
+    assert bool(jnp.allclose(out.dN_r_dt, -out.dN_i_dt * rho, rtol=1e-3)), (
+        "P3: melt number transfer ice->rain is not conservative "
+        "(dN_r_dt != -dN_i_dt * rho)."
+    )
+
+
+def test_p3_melt_number_bounded_and_conservative_for_tiny_crystals():
+    """The melt-number transfer is bounded to the available N_i and the SAME
+    count is removed from ice / added to rain even when the unbounded melt rate
+    (melt_ice*N_i/q_i) would exceed N_i/dt (tiny mean crystal mass).  Guards the
+    codex fix: the net-N_i floor must not shrink the ice sink without shrinking
+    the rain source (which would mint spurious rain drops) and N_i must stay
+    >= 0 after the step.
+    """
+    ncol, nlev = 1, 4
+    T = jnp.full((ncol, nlev), 282.0)            # above freezing: melt-only
+    p_full = jnp.full((ncol, nlev), 5e4)
+    p_half = jnp.broadcast_to(
+        jnp.linspace(4e4, 6e4, nlev + 1)[None, :], (ncol, nlev + 1),
+    )
+    rho = p_full / (constants.R_d * T)
+    dz = jnp.full((ncol, nlev), 10_000.0)
+    q_i = jnp.full((ncol, nlev), 5e-4)
+    hydro = HydrometeorState(
+        q_c=jnp.zeros((ncol, nlev)), q_r=jnp.zeros((ncol, nlev)),
+        q_i=q_i, q_s=jnp.zeros((ncol, nlev)), q_g=jnp.zeros((ncol, nlev)),
+        N_c=1e8 * jnp.ones((ncol, nlev)),
+        N_r=jnp.zeros((ncol, nlev)),
+        N_i=1e9 * jnp.ones((ncol, nlev)),        # huge N_i, tiny mean mass
+    )
+    q_v = 0.8 * saturation_mixing_ratio(T, p_full)
+    # Cover a normal step AND a subsecond LES step (dt < 1): the mass<->number
+    # cap must key off the PHYSICAL dt, not clip(dt, 1.0), else subsecond steps
+    # melt all the mass but transfer only dt*N_i crystals (stale ice number).
+    for dt in (300.0, 0.5):
+        out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt,
+                              P3Config())
+        # Ice-number sink and rain-number source stay exactly equal (per-mass ->
+        # per-volume with rho) even though the raw melt rate is capped.
+        assert bool(jnp.allclose(out.dN_r_dt, -out.dN_i_dt * rho, rtol=1e-3)), (
+            f"P3: bounded melt transfer broke ice->rain number equality (dt={dt})."
+        )
+        # Post-step ice number is non-negative (bound respected).
+        N_i_next = hydro.N_i + out.dN_i_dt * dt
+        assert float(jnp.min(N_i_next)) >= -1e-6, (
+            f"P3: melt bound let N_i go negative (dt={dt})."
+        )
+        # Subsecond step must still melt a MEANINGFUL fraction of the crystals
+        # when all the mass melts (not throttled to ~dt*N_i by a clip-at-1 cap).
+        if dt < 1.0:
+            frac_removed = float(-jnp.max(out.dN_i_dt) * dt / 1e9)
+            assert frac_removed > 1e-3, (
+                "P3: subsecond melt transferred negligible ice number "
+                "(dt_floor over-throttled the cap)."
+            )
+
+
+def test_p3_rain_riming_sinks_rain_number():
+    """Rain riming (rain mass collected onto ice) must remove rain NUMBER in
+    proportion to the rimed rain-mass fraction (whole drops leave the rain
+    category).  Controlled comparison: adding ice (riming on) vs no ice
+    (riming off) at fixed rain leaves every warm-rain number term identical, so
+    the delta in dN_r_dt must equal -dN_r_rime and track the delta in dq_r_dt at
+    the mean rain mass q_r/N_r.
+    """
+    ncol, nlev = 1, 4
+    T = jnp.full((ncol, nlev), 262.0)            # cold: no melt, riming active
+    p_full = jnp.full((ncol, nlev), 6e4)
+    p_half = jnp.broadcast_to(
+        jnp.linspace(5e4, 7e4, nlev + 1)[None, :], (ncol, nlev + 1),
+    )
+    rho = p_full / (constants.R_d * T)
+    dz = jnp.full((ncol, nlev), 8_000.0)
+    q_r = jnp.full((ncol, nlev), 3e-4)
+    N_r = jnp.full((ncol, nlev), 5e3)            # [1/kg]
+    # At liquid saturation rain evaporation ~ 0, so the rain-mass sink budget is
+    # not donor-saturated and rain_rime shows up directly in dq_r_dt.
+    q_v = saturation_mixing_ratio(T, p_full)
+    dt = 300.0
+    base_kw = dict(
+        q_c=jnp.zeros((ncol, nlev)), q_r=q_r, q_s=jnp.zeros((ncol, nlev)),
+        q_g=jnp.zeros((ncol, nlev)), N_c=jnp.zeros((ncol, nlev)), N_r=N_r,
+    )
+    no_ice = HydrometeorState(q_i=jnp.zeros((ncol, nlev)),
+                              N_i=jnp.zeros((ncol, nlev)), **base_kw)
+    with_ice = HydrometeorState(q_i=jnp.full((ncol, nlev), 5e-4),
+                                N_i=jnp.full((ncol, nlev), 1e4), **base_kw)
+    cfg = P3Config()
+    o0 = p3_microphysics(T, q_v, no_ice, p_full, p_half, rho, dz, dt, cfg)
+    o1 = p3_microphysics(T, q_v, with_ice, p_full, p_half, rho, dz, dt, cfg)
+    d_qr = o1.dq_r_dt - o0.dq_r_dt          # extra rain-mass sink from riming
+    d_Nr = o1.dN_r_dt - o0.dN_r_dt          # must be a matching number sink
+    assert float(jnp.min(-d_qr)) > 0.0, "no rain riming fired in the with-ice run"
+    assert float(jnp.max(d_Nr)) < 0.0, (
+        "P3: rain riming removed rain mass but not rain number (stale N_r)."
+    )
+    # Whole-drop removal: dN_r_rime / rain_rime == N_r / q_r.
+    assert bool(jnp.allclose(d_Nr / d_qr, N_r / q_r, rtol=1e-3)), (
+        "P3: rain-riming number sink is not at the mean rain mass q_r/N_r."
+    )
+
+
+def test_p3_nucleation_seeds_ice_mass_from_vapor():
+    """Ice nucleation must add the seed mass m_i0 per crystal to q_i, taken
+    from q_v with L_s heating (mirrors morrison.py MNUCCD = NNUCCD*MI0).
+    Pre-fix nucleation was number-only: q_i/N_i -> 0 right after nucleation.
+    """
+    from legoesm.atmosphere.physics.microphysics import p3 as p3_mod
+    from legoesm.thermo import saturation_mixing_ratio_ice
+
+    cfg = P3Config()
+    ncol, nlev = 1, 4
+    T = jnp.full((ncol, nlev), 230.0)   # cold: f_ice ~ 1
+    p_full = jnp.full((ncol, nlev), 3e4)
+    p_half = jnp.broadcast_to(
+        jnp.linspace(2e4, 4e4, nlev + 1)[None, :], (ncol, nlev + 1),
+    )
+    rho = p_full / (constants.R_d * T)
+    dz  = jnp.full((ncol, nlev), 500.0)
+    # Ice-supersaturated but liquid-subsaturated (e_sw/e_si ~ 1.5 at 230 K),
+    # with NO pre-existing ice: deposition needs N_i > 0 so it is exactly 0,
+    # leaving nucleation as the only vapour->ice pathway.
+    q_sat_i = saturation_mixing_ratio_ice(T, p_full)
+    q_v = 1.2 * q_sat_i
+    hydro = HydrometeorState(
+        q_c=jnp.zeros((ncol, nlev)), q_r=jnp.zeros((ncol, nlev)),
+        q_i=jnp.zeros((ncol, nlev)), q_s=jnp.zeros((ncol, nlev)),
+        q_g=jnp.zeros((ncol, nlev)),
+        N_c=1e8 * jnp.ones((ncol, nlev)),
+        N_r=jnp.zeros((ncol, nlev)),
+        N_i=jnp.zeros((ncol, nlev)),
+    )
+    out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, 300.0, cfg)
+    assert float(jnp.min(out.dN_i_dt)) > 0.0, "no Cooper nucleation fired"
+    # Mass source = number source x seed mass m_i0 (only active ice term).
+    assert bool(jnp.allclose(out.dq_i_dt, out.dN_i_dt * p3_mod._M_I0,
+                             rtol=1e-6)), (
+        "P3: nucleated crystals carry no seed mass (dq_i_nuc = dN_i_nuc*m_i0 "
+        "missing)."
+    )
+    assert float(jnp.min(out.dq_i_dt)) > 0.0
+    # Seed mass comes FROM vapour and heats with L_s (budget closes).
+    assert bool(jnp.allclose(out.dq_v_dt, -out.dq_i_dt, rtol=1e-6)), (
+        "P3: nucleation seed mass not removed from vapour."
+    )
+    assert bool(jnp.allclose(
+        out.dT_dt, constants.L_s * out.dq_i_dt / constants.c_pd, rtol=1e-6,
+    )), "P3: nucleation seed mass missing its L_s heating."
+
+
+def test_p3_riming_and_accretion_sink_cloud_number():
+    """Riming (and accretion) sweep up WHOLE cloud droplets: N_c must sink in
+    proportion to the cloud mass consumed (rate * N_c/q_c), not just via
+    autoconversion (SAM NPSACWS/NPRA; mirrors morrison.py dN_c_riming).
+    """
+    cfg = P3Config()
+    ncol, nlev = 1, 4
+    T_val = 255.0
+    T = jnp.full((ncol, nlev), T_val)   # mixed phase: riming active
+    p_full = jnp.full((ncol, nlev), 5e4)
+    p_half = jnp.broadcast_to(
+        jnp.linspace(4e4, 6e4, nlev + 1)[None, :], (ncol, nlev + 1),
+    )
+    rho = p_full / (constants.R_d * T)
+    dz  = jnp.full((ncol, nlev), 500.0)
+    q_c = jnp.full((ncol, nlev), 1e-4)
+    q_i = jnp.full((ncol, nlev), 3e-4)
+    # HIGH droplet number => mean droplet mass x_c << x_star => the SB
+    # autoconversion onset sigmoid ~ 0, isolating the riming N_c sink.
+    N_c = 1e9 * jnp.ones((ncol, nlev))
+    hydro = HydrometeorState(
+        q_c=q_c, q_r=jnp.zeros((ncol, nlev)), q_i=q_i,
+        q_s=jnp.zeros((ncol, nlev)), q_g=jnp.zeros((ncol, nlev)),
+        N_c=N_c, N_r=jnp.zeros((ncol, nlev)),
+        N_i=1e4 * jnp.ones((ncol, nlev)),
+    )
+    q_v = saturation_mixing_ratio(T, p_full)   # saturated: cond ~ 0
+    out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, 300.0, cfg)
+    # Closed form: riming = rime_coeff*q_i*q_c*f_ice, N_c sink = riming*N_c/q_c.
+    f_ice = jax.nn.sigmoid(cfg.ice_sigmoid_sharpness * (cfg.cooper_T_act - T_val))
+    expected = -cfg.rime_coeff * q_i * f_ice * N_c
+    assert float(jnp.max(out.dN_c_dt)) < 0.0, (
+        "P3: riming consumes cloud mass without any N_c sink."
+    )
+    assert bool(jnp.allclose(out.dN_c_dt, expected, rtol=0.05)), (
+        f"P3: dN_c riming sink {float(out.dN_c_dt[0, 0]):.3e} != expected "
+        f"{float(expected[0, 0]):.3e} (riming * N_c/q_c)."
+    )
+    # Adding rain switches on accretion, which must deepen the N_c sink.
+    hydro_qr = hydro._replace(q_r=jnp.full((ncol, nlev), 5e-4))
+    out_qr = p3_microphysics(T, q_v, hydro_qr, p_full, p_half, rho, dz, 300.0, cfg)
+    assert float(jnp.max(out_qr.dN_c_dt - out.dN_c_dt)) < 0.0, (
+        "P3: accretion of cloud water by rain does not sink N_c."
+    )
+
+
+# ============================================================================
+# Kessler saturation adjustment routes through the shared fp64 helper (#618)
+# ============================================================================
+
+def test_kessler_saturation_adjustment_uses_shared_fp64_helper():
+    """Kessler must route saturation adjustment through
+    ``_warm_rain.saturation_adjustment`` (which computes q_sat AND the
+    supersaturation residual in fp64 when x64 is available — issue #618)
+    plus its extra positive q_v donor clamp, NOT an inline fp32 copy.
+
+    The fixture is a marginal supersaturation (5e-6 relative), where the
+    fp32-computed q_sat carries an absolute error comparable to the residual
+    itself — exactly the regime where the pre-fix inline fp32 copy diverges
+    from the shared helper.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires JAX_ENABLE_X64=1 for the #618 fp64 q_sat path")
+    from legoesm.atmosphere.physics.microphysics._warm_rain import (
+        saturation_adjustment,
+    )
+
+    ncol, nlev = 1, 4
+    T32 = jnp.full((ncol, nlev), 285.0, dtype=jnp.float32)
+    p32 = jnp.full((ncol, nlev), 9e4, dtype=jnp.float32)
+    p_half32 = jnp.broadcast_to(
+        jnp.linspace(8.5e4, 9.5e4, nlev + 1, dtype=jnp.float32)[None, :],
+        (ncol, nlev + 1),
+    )
+    rho32 = (p32 / (constants.R_d * T32)).astype(jnp.float32)
+    dz32 = jnp.full((ncol, nlev), 500.0, dtype=jnp.float32)
+    # Marginal supersaturation relative to the fp64 q_sat of the STORED
+    # fp32 (T, p) — the #618 regime.
+    q_sat64 = saturation_mixing_ratio(
+        T32.astype(jnp.float64), p32.astype(jnp.float64),
+    )
+    q_v32 = (q_sat64 * (1.0 + 5.0e-6)).astype(jnp.float32)
+    q_c32 = jnp.full((ncol, nlev), 1e-4, dtype=jnp.float32)
+    z32 = jnp.zeros((ncol, nlev), dtype=jnp.float32)
+    hydro = HydrometeorState(
+        q_c=q_c32, q_r=z32, q_i=z32, q_s=z32, q_g=z32,
+        N_c=z32, N_r=z32, N_i=z32,
+    )
+    dt = 300.0
+    cfg = KesslerConfig()
+
+    cond_ref, _ = saturation_adjustment(
+        T32, q_v32, p32, jnp.maximum(dt, 1e-10),
+        cfg.saturation_sharpness, q_c=q_c32,
+    )
+    cond_ref = jnp.minimum(cond_ref, jnp.clip(q_v32, 0.0) / dt)
+
+    out = kessler_microphysics(
+        T32, q_v32, hydro, p32, p_half32, rho32, dz32, dt, cfg,
+    )
+    # The marginal supersaturation actually condenses under the fp64 path.
+    assert float(jnp.min(cond_ref)) > 0.0
+    # Positive saturation-adjustment condensation is exported unscaled as
+    # dq_v_to_qc_dt — it must be the shared helper's value exactly.
+    assert bool(jnp.allclose(
+        out.dq_v_to_qc_dt, jnp.maximum(cond_ref, 0.0), rtol=1e-6, atol=0.0,
+    )), (
+        "Kessler saturation adjustment diverges from the shared "
+        "_warm_rain.saturation_adjustment helper — the #618 fp64 q_sat "
+        "routing regressed."
+    )
+    # Nothing fp64 leaks into the fp32 state tendencies.
+    assert out.dq_c_dt.dtype == jnp.float32
+
+
+# ============================================================================
+# Sundqvist SBK89 coalescence + Bergeron precipitation-release enhancement
+# ============================================================================
+
+def _sundqvist_two_layer(T_val, q_c_col, q_v_frac=0.5):
+    """Minimal 2-layer sundqvist fixture (level 0 = top, level 1 = bottom)."""
+    ncol, nlev = 1, 2
+    T = jnp.full((ncol, nlev), T_val)
+    p_full = jnp.broadcast_to(jnp.array([[5e4, 7e4]]), (ncol, nlev))
+    p_half = jnp.broadcast_to(jnp.array([[4e4, 6e4, 8e4]]), (ncol, nlev + 1))
+    rho = p_full / (constants.R_d * T)
+    dz = jnp.full((ncol, nlev), 1000.0)
+    q_sat = saturation_mixing_ratio(T, p_full)
+    q_v = q_v_frac * q_sat   # below rh_crit: no condensation feeds q_c
+    q_c = jnp.asarray(q_c_col)[None, :]
+    hydro = HydrometeorState(
+        q_c=q_c, q_r=jnp.zeros_like(q_c),
+        q_i=jnp.zeros_like(q_c), q_s=jnp.zeros_like(q_c),
+        q_g=jnp.zeros_like(q_c),
+        N_c=jnp.zeros_like(q_c), N_r=jnp.zeros_like(q_c),
+        N_i=jnp.zeros_like(q_c),
+    )
+    return T, q_v, hydro, p_full, p_half, rho, dz
+
+
+def test_sundqvist_sbk89_coalescence_enhances_release_below_precip():
+    """SBK89 F1: precipitation falling in from above accelerates the
+    precipitation release in the layer below (coalescence).  Two columns
+    with IDENTICAL q_c in the bottom layer, one with a precipitating layer
+    above: the bottom-layer autoconversion must be larger under the falling
+    precipitation, and must reduce to the base Sundqvist form when nothing
+    falls in from above.
+    """
+    from legoesm.atmosphere.physics.microphysics.sundqvist import (
+        diagnose_sundqvist_process_rates,
+    )
+    cfg = SundqvistConfig()
+    dt = 300.0
+    q_c_low = 2e-4
+    # Warm column: Bergeron F2 ~ 1, isolating the coalescence term.
+    args_precip = _sundqvist_two_layer(290.0, [1e-3, q_c_low])
+    args_clear = _sundqvist_two_layer(290.0, [0.0, q_c_low])
+    r_precip = diagnose_sundqvist_process_rates(*args_precip, dt=dt, config=cfg)
+    r_clear = diagnose_sundqvist_process_rates(*args_clear, dt=dt, config=cfg)
+    auto_below_precip = float(r_precip.autoconversion[0, 1])
+    auto_below_clear = float(r_clear.autoconversion[0, 1])
+    assert auto_below_precip > 1.5 * auto_below_clear, (
+        f"SBK89 coalescence enhancement missing: autoconversion below a "
+        f"precipitating layer ({auto_below_precip:.3e}) should exceed the "
+        f"no-precip value ({auto_below_clear:.3e})."
+    )
+    # No precip from above => F1 = 1 => base Sundqvist release exactly.
+    base = float(jnp.minimum(
+        cfg.auto_rate * q_c_low
+        * (1.0 - jnp.exp(-(q_c_low / cfg.qc_crit) ** 2)),
+        q_c_low / dt,
+    ))
+    assert auto_below_clear == pytest.approx(base, rel=1e-6), (
+        "top-of-precip layer must reduce to the base Sundqvist release "
+        "(F1 = 1 with zero incoming flux; warm F2 ~ 1)."
+    )
+
+
+def test_sundqvist_sbk89_bergeron_enhances_mixed_phase_release():
+    """SBK89 F2: the same cloud water releases precipitation faster in the
+    mixed-phase Bergeron window (~-15 C) than in warm cloud, following
+    F2 = 1 + c2*exp(-((T - T_peak)/T_width)^2) applied to both the rate and
+    the threshold.
+    """
+    from legoesm.atmosphere.physics.microphysics.sundqvist import (
+        diagnose_sundqvist_process_rates,
+    )
+    cfg = SundqvistConfig()
+    dt = 300.0
+    q_c_val = 2e-4
+    T_cold = float(cfg.bergeron_T_peak_K)
+    r_cold = diagnose_sundqvist_process_rates(
+        *_sundqvist_two_layer(T_cold, [0.0, q_c_val]), dt=dt, config=cfg,
+    )
+    r_warm = diagnose_sundqvist_process_rates(
+        *_sundqvist_two_layer(295.0, [0.0, q_c_val]), dt=dt, config=cfg,
+    )
+    auto_cold = float(r_cold.autoconversion[0, 1])
+    auto_warm = float(r_warm.autoconversion[0, 1])
+    assert auto_cold > 2.0 * auto_warm, (
+        f"SBK89 Bergeron enhancement missing: mixed-phase autoconversion "
+        f"({auto_cold:.3e}) should exceed warm-cloud ({auto_warm:.3e})."
+    )
+    # Closed form at the Gaussian peak: enh = 1 + c2 (F1 = 1, no precip above).
+    enh = 1.0 + cfg.bergeron_enh_coeff
+    expected_cold = float(jnp.minimum(
+        cfg.auto_rate * enh * q_c_val
+        * (1.0 - jnp.exp(-(q_c_val * enh / cfg.qc_crit) ** 2)),
+        q_c_val / dt,
+    ))
+    assert auto_cold == pytest.approx(expected_cold, rel=1e-6)
+
+
+def test_sundqvist_sbk89_enhancements_off_recover_base_scheme():
+    """coalescence_enh_coeff = bergeron_enh_coeff = 0 must reproduce the
+    plain Sundqvist (1989) base autoconversion everywhere (F1 = F2 = 1),
+    including under falling precipitation and in cold layers.
+    """
+    from legoesm.atmosphere.physics.microphysics.sundqvist import (
+        diagnose_sundqvist_process_rates,
+    )
+    cfg_off = SundqvistConfig(
+        coalescence_enh_coeff=0.0, bergeron_enh_coeff=0.0,
+    )
+    dt = 300.0
+    args = _sundqvist_two_layer(258.15, [1e-3, 2e-4])
+    rates = diagnose_sundqvist_process_rates(*args, dt=dt, config=cfg_off)
+    _, _, hydro, _, _, _, _ = args
+    qc_avail = jnp.maximum(hydro.q_c + rates.condensation * dt, 0.0)
+    base = jnp.minimum(
+        cfg_off.auto_rate * qc_avail
+        * (1.0 - jnp.exp(-(qc_avail / cfg_off.qc_crit) ** 2)),
+        qc_avail / dt,
+    )
+    assert bool(jnp.allclose(rates.autoconversion, base, rtol=1e-12)), (
+        "with both SBK89 coefficients zeroed the release must equal the "
+        "base Sundqvist form exactly."
+    )
+
+
+def test_sundqvist_sbk89_grad_finite_at_zero_precip():
+    """The F1 = 1 + c1*sqrt(P_above) coalescence term must be AD-safe at
+    P_above = 0 (clear columns): safe_pow guards the sqrt(0) trap.
+    """
+    T, q_v, hydro, p_full, p_half, rho, dz = _make_column(q_c_val=0.0)
+
+    def objective(q_c):
+        h = hydro._replace(q_c=q_c)
+        out = sundqvist_microphysics(
+            T, q_v, h, p_full, p_half, rho, dz, 300.0, SundqvistConfig(),
+        )
+        return jnp.sum(out.precipitation) + jnp.sum(out.dq_c_dt)
+
+    g = jax.grad(objective)(jnp.zeros_like(hydro.q_c))
+    assert bool(jnp.all(jnp.isfinite(g))), (
+        "Sundqvist SBK89 coalescence sqrt(P) gradient not finite at "
+        "zero precipitation."
+    )

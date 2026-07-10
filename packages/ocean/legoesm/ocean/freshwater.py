@@ -224,8 +224,27 @@ def normalize_freshwater_net(
     """
     w = area * mask
     if owned_mask is None:
-        # Single-rank / shard-replicated: local sum is the global sum.
-        F_mean = jnp.sum(F_fw * w) / jnp.maximum(jnp.sum(w), 1.0e-10)
+        num_local = jnp.sum(F_fw * w)
+        den_local = jnp.sum(w)
+        # Lat-band shard_map body (ARMED lat SPMD halo backend): the sums
+        # above are per-band PARTIALS over exact shards (band arrays carry no
+        # halo rows — the halo is exchanged transiently inside the pad ops),
+        # so psum them to the true global mean; a band-local mean would give
+        # every band a different correction, breaking global salt
+        # conservation and cross-band consistency.  Deliberately NOT
+        # ``ocean_global_sum``: its ``is_distributed()`` arm would ALSO
+        # allreduce route-A MPI rank-local sums, double-counting halo rows
+        # (route-A threads ``owned_mask`` instead — the branch below).
+        # Serial / MPI / cube-spmd ("face" mesh): inert -> the legacy
+        # bit-identical local sum.
+        from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+        if get_halo_backend() == "spmd":
+            _mesh = get_spmd_mesh()
+            if _mesh is not None and "lat" in tuple(_mesh.axis_names):
+                import jax
+                num_local, den_local = jax.lax.psum(
+                    jnp.stack([num_local, den_local]), "lat")
+        F_mean = num_local / jnp.maximum(den_local, 1.0e-10)
     else:
         # MPI/SPMD: restrict local accumulators to OWNED cells (no halo
         # double-count) then reduce globally.  Use the MPAS-AWARE reduction

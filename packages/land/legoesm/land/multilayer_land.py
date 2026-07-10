@@ -84,6 +84,73 @@ def _get(lp, name: str, fallback):
     return getattr(lp, name, fallback)
 
 
+def root_zone_moisture_stress(theta, beta_min, root_depth, theta_wp, theta_fc,
+                              z_centers, ncol):
+    """Root-zone soil-moisture evaporative efficiency ``beta_soil`` in
+    ``[beta_min, 1]`` plus its per-layer pieces.
+
+    Single source of the moisture-stress formula, shared by the land surface
+    energy balance (:func:`_step_multilayer_land_impl`, pre- AND post-step) and
+    the coupler's atmospheric land tile (via :func:`land_tile_beta_soil`) so
+    BOTH throttle land evaporation by the IDENTICAL stress.  Previously the
+    atmosphere re-derived the land surface humidity at ``beta = 1`` (a saturated
+    swamp surface) while the land model throttled internally, giving a land
+    latent flux ~10x too large (hfls ~775 W/m^2, Bowen ~0.04).
+
+        beta_root  = clip((theta - theta_wp) / max(theta_fc - theta_wp, 1e-3), 0, 1)
+        w_frac_rz  = clip(sum_layers(root_frac * beta_root), 0, 1)
+        beta_soil  = beta_min + (1 - beta_min) * w_frac_rz
+
+    ``root_frac`` is the exponential root density normalised over the column.
+    ``root_depth``/``theta_wp``/``theta_fc`` may be scalars (config) or
+    per-column arrays (``LandSurfaceParams``); both are promoted to ``(ncol,)``.
+    Returns ``(beta_soil, root_frac, beta_root, w_frac_rz)``.
+    """
+    def _to_ncol(v):
+        arr = jnp.asarray(v)
+        if arr.ndim == 0:
+            return jnp.broadcast_to(arr, (ncol,))
+        return arr
+
+    root_depth_c = _to_ncol(root_depth)
+    theta_wp_c   = _to_ncol(theta_wp)
+    theta_fc_c   = _to_ncol(theta_fc)
+
+    root_frac = jnp.exp(-z_centers[None, :] / root_depth_c[:, None])
+    root_frac = root_frac / jnp.sum(root_frac, axis=-1, keepdims=True)
+    # Audit #6 / Iter-65: floor the (theta_fc - theta_wp) range at 1e-3 m^3/m^3
+    # (~1 % of theta_sat) so a pathological PFT row (theta_fc ~ theta_wp) cannot
+    # explode beta_root through a ~0 denominator.
+    _denom = jnp.maximum(
+        theta_fc_c[:, None] - theta_wp_c[:, None], 1e-3,  # coeff-ok: floor (theta_fc - theta_wp) range to avoid /~0 in beta_root
+    )
+    beta_root = jnp.clip((theta - theta_wp_c[:, None]) / _denom, 0.0, 1.0)
+    w_frac_rz = jnp.clip(jnp.sum(root_frac * beta_root, axis=-1), 0.0, 1.0)
+    beta_soil = beta_min + (1.0 - beta_min) * w_frac_rz
+    return beta_soil, root_frac, beta_root, w_frac_rz
+
+
+def land_tile_beta_soil(theta_soil, config, land_params=None):
+    """Root-zone ``beta_soil`` for the coupler's atmospheric land tile, resolved
+    from the SAME ``config`` / ``land_params`` thresholds the land SEB uses.
+
+    The coupler forms the land-tile effective surface humidity
+    ``q_sfc = beta_soil * q_sat(T_land)`` (the alpha-method, matching
+    ``simple_seb`` ``q_sfc = beta_effective * q_sat_sfc``) so the atmospheric
+    land latent flux is throttled by soil moisture instead of running at the
+    saturated-surface potential rate.  ``theta_soil`` is the ``(ncol, n_layers)``
+    soil-moisture field from the carried multilayer land state.
+    """
+    grid = make_soil_grid(config.soil_grid)
+    root_depth = _get(land_params, "root_depth", config.root_depth)
+    theta_wp   = _get(land_params, "theta_wp", config.theta_wp)
+    theta_fc   = _get(land_params, "theta_fc", config.theta_fc)
+    beta_soil, _, _, _ = root_zone_moisture_stress(
+        theta_soil, config.beta_min, root_depth, theta_wp, theta_fc,
+        grid.z_node, theta_soil.shape[0])
+    return beta_soil
+
+
 def step_multilayer_land_with_diagnostics(
     state: MultiLayerLandState,
     forcing: AtmToSurface,
@@ -107,6 +174,64 @@ def step_multilayer_land_with_diagnostics(
     return _step_multilayer_land_impl(
         state, forcing, config, U_min, dt,
         lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params)
+
+
+def root_zone_beta_soil(
+    theta: jnp.ndarray,
+    root_frac: jnp.ndarray,
+    theta_wp,
+    theta_fc,
+    beta_min: float,
+    spatial: bool,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Root-zone soil-moisture stress: ``(beta_soil, beta_root)``.
+
+    Single source of truth for the moisture-stress factor used both at the
+    start of a step (from the incoming ``theta``) and at the end (from the
+    Richards-updated ``theta_new``); the carbon-equilibrium validator reuses
+    it so the diagnostic GPP sees exactly the model's beta_soil (no
+    re-derived numerics).
+
+    Parameters
+    ----------
+    theta : (ncol, n_layers) volumetric water content [m3/m3].
+    root_frac : root-density weights summing to 1 along the layer axis;
+        shape (n_layers,) (scalar params) or (ncol, n_layers) (spatial).
+    theta_wp, theta_fc : wilting-point / field-capacity water content
+        [m3/m3]; scalar when ``spatial`` is False, else (ncol,) arrays.
+    beta_min : floor on availability [-].
+    spatial : True when ``theta_wp``/``theta_fc`` are per-column arrays.
+
+    Returns
+    -------
+    beta_soil : (ncol,) root-zone-weighted availability in [beta_min, 1],
+        used for stomatal / GPP moisture stress.
+    beta_root : (ncol, n_layers) per-layer stress in [0, 1], reused for the
+        root-water-uptake sink partition.
+
+    Notes
+    -----
+    The field-capacity minus wilting-point range is floored at 1e-3 m3/m3
+    (~1 % of theta_sat) so even a pathological PFT lookup with
+    ``theta_fc <= theta_wp`` cannot blow ``beta_root`` up: the denominator
+    would otherwise go near-zero on the same scale as theta itself.  Audit
+    finding #6.
+    """
+    if spatial:
+        denom = jnp.maximum(
+            theta_fc[:, None] - theta_wp[:, None], 1e-3,  # coeff-ok: theta-range divide-safety floor
+        )
+        beta_root = jnp.clip((theta - theta_wp[:, None]) / denom, 0.0, 1.0)
+    else:
+        denom = jnp.maximum(theta_fc - theta_wp, 1e-3)  # coeff-ok: theta-range divide-safety floor
+        beta_root = jnp.clip((theta - theta_wp) / denom, 0.0, 1.0)
+    # Root-zone weighted beta: integrates moisture stress across layers
+    # weighted by root density, so a dry top with wet deeper layers still
+    # permits transpiration.  Numpy broadcasting handles both ``root_frac``
+    # shapes uniformly, no per-branch reduction needed.
+    w_frac_rz = jnp.clip(jnp.sum(root_frac * beta_root, axis=-1), 0.0, 1.0)
+    beta_soil = beta_min + (1.0 - beta_min) * w_frac_rz
+    return beta_soil, beta_root
 
 
 def step_multilayer_land(
@@ -245,22 +370,25 @@ def _step_multilayer_land_impl(
 
     root_frac = jnp.exp(-z_centers[None, :] / root_depth_c[:, None])
     root_frac = root_frac / jnp.sum(root_frac, axis=-1, keepdims=True)
-    # Audit #6 / Iter-65: floor the (theta_fc - theta_wp) range at 1e-3
-    # m³/m³ (~1 % of theta_sat).  Earlier ``+ 1e-10`` only protected against
-    # exact equality; a misconfigured cell with theta_fc ≈ theta_wp (e.g. a
-    # pathological PFT lookup row) still produced exploding beta_root because
-    # the denominator could go ~O(theta).  Ported from main during the
-    # jianing/land ↔ main sync (2026-06-03).
-    _denom = jnp.maximum(
-        theta_fc_c[:, None] - theta_wp_c[:, None], 1e-3,  # coeff-ok: floor (theta_fc - theta_wp) range to avoid /~0 in beta_root
-    )
-    beta_root = jnp.clip(
-        (theta - theta_wp_c[:, None]) / _denom,
-        0.0, 1.0,
-    )
-    w_frac_rz = jnp.clip(jnp.sum(root_frac * beta_root, axis=-1), 0.0, 1.0)
 
-    beta_soil = config.beta_min + (1.0 - config.beta_min) * w_frac_rz
+    # --- Moisture availability from root-zone water content ---
+    # Root-zone moisture stress via the shared helper (single source of truth;
+    # see root_zone_beta_soil for the audit-#6 / iter-65 theta_fc-theta_wp
+    # range floor).  theta_wp_c / theta_fc_c are already promoted to (ncol,),
+    # so use the spatial (per-column) path.  beta_root (per-layer) is reused
+    # below for the root-water-uptake sink partition.  (#823 keeps this
+    # root_zone_beta_soil path — numerically identical to main's canonical
+    # root_zone_moisture_stress, which stays available for the coupler land
+    # tile via land_tile_beta_soil — because the soil-C-spin-up + carbon audit
+    # downstream reuse the inline root_frac / theta_wp_c / theta_fc_c / w_frac_rz.)
+    beta_soil, beta_root = root_zone_beta_soil(
+        theta, root_frac, theta_wp_c, theta_fc_c, config.beta_min,
+        spatial=True,
+    )
+    # Root-zone-integrated wetness (vegetation-cover proxy), reused downstream
+    # for the transpiration/bare-soil evaporation partition (f_veg).  Same
+    # reduction the helper applies internally for beta_soil.
+    w_frac_rz = jnp.clip(jnp.sum(root_frac * beta_root, axis=-1), 0.0, 1.0)
 
     # Top-layer effective saturation S_top = (theta0 - theta_r)/(theta_sat - theta_r),
     # used by BOTH surface schemes' bare-soil-evaporation resistance.  Compute it in
@@ -304,6 +432,19 @@ def _step_multilayer_land_impl(
         LAI_override = compute_prognostic_lai(
             carbon_state, config, config.surface_scheme)
 
+        # Kelvin pore relative humidity h_r = exp(psi_top g/(R_v T)) — the
+        # thermodynamic vapour-pressure lowering of the drying surface (bites only
+        # near residual water).  Shape (ncol,), in state precision.
+        _h_r_top = jnp.exp(jnp.minimum(
+            psi[:, 0] * constants.g
+            / (constants.R_v * jnp.maximum(T_soil[:, 0], 1.0)), 0.0)).astype(theta.dtype)
+        # Top-layer RELATIVE saturation W_1 = theta_1/theta_sat for the Sellers-1992
+        # surface resistance (computed in layer space then sliced, same broadcast-safe
+        # pattern as _S_top above).
+        _W1_top = jnp.clip(
+            theta / jnp.maximum(config.hydraulics.theta_sat, 1e-6),
+            1e-6, 1.0)[:, 0].astype(theta.dtype)
+
         surface_out = compute_two_leaf_canopy_fluxes(
             T_soil_top=T_surface,
             forcing=forcing,
@@ -325,22 +466,27 @@ def _step_multilayer_land_impl(
             #   * Kelvin pore RELATIVE HUMIDITY  h_r = exp(psi_top g /(R_v T))
             #     — thermodynamic vapour-pressure lowering; only bites as the
             #     surface approaches residual (psi -> -inf).
-            #   * Sellers-1992 / Lee-Pielke-1992 diffusion-crust resistance,
-            #     S_top**soil_evap_resistance_exp with S_top the top-layer
-            #     effective saturation — throttles evaporation even when the
-            #     surface is WET (S_top<1), the regime the EC + DifferBESS
-            #     comparison showed over-predicts soil evaporation several-fold.
-            # This is the canopy-path counterpart of the SimpleSEB S_top**exp
-            # throttle (#671); exp=0 recovers the Kelvin-only behaviour.
+            #   * Soil-moisture control, ONE of two mutually-exclusive forms
+            #     (never both — same Sellers-1992 physics, or the limitation
+            #     double-counts):
+            #       - series_resistance ON (default): Kelvin h_r ONLY here; the
+            #         moisture control is the Sellers-1992 SURFACE RESISTANCE r_ss
+            #         (+ SZ09 litter), added in SERIES with raw_below inside the
+            #         canopy soil energy balance via ``soil_surface_relsat`` below.
+            #         Fixes the aerodynamic-only path that let a wet forest floor
+            #         evaporate at near-potential rate (LE_soil ~57% of total at
+            #         US-MMS; <15% is physical).
+            #       - series_resistance OFF (legacy): the beta EFFICIENCY
+            #         S_top**soil_evap_resistance_exp (Sellers-1992 / Lee-Pielke-1992
+            #         diffusion crust; the SimpleSEB #671 counterpart), which
+            #         throttles the conductance but barely helps a surface that
+            #         rewets to S_top~1.  exp=0 recovers Kelvin-only.
             w_frac_soil_evap=(
-                jnp.exp(jnp.minimum(
-                    psi[:, 0] * constants.g
-                    / (constants.R_v * jnp.maximum(T_soil[:, 0], 1.0)), 0.0))
-                # _S_top (top-layer effective saturation) is floored at 1e-6 (not 0)
-                # in its shared definition above: keeps d(S_top**exp)/dS_top finite at
-                # the residual-water boundary for a trainable exp < 1 (0**exp has an
-                # infinite gradient) — AD-safe, negligible forward effect.
-                * _S_top ** config.soil_evap_resistance_exp),
+                _h_r_top if config.soil_evap_series_resistance
+                # _S_top floored at 1e-6 keeps d(S_top**exp)/dS_top finite at the
+                # residual boundary for a trainable exp<1 (AD-safe; see above).
+                else _h_r_top * _S_top ** config.soil_evap_resistance_exp),
+            soil_surface_relsat=_W1_top,
         )
     elif isinstance(config.surface_scheme, CLMMLCanopyConfig):
         # CLM-ML-JAX multilayer canopy scheme (Phase 3 implementation).
@@ -555,10 +701,18 @@ def _step_multilayer_land_impl(
     # so the third scheme, CLMMLCanopyConfig, is correctly excluded too.  Dew
     # (demand<0) left un-throttled.
     if isinstance(config.surface_scheme, SimpleSEBConfig):
-        # _S_top (top-layer effective saturation, floored at 1e-6 in its shared
-        # definition above so d(S_top**exp)/dS_top stays finite at the residual-water
-        # boundary for a trainable exp < 1; AD-safe, negligible fwd).
-        _beta_surf = (_S_top ** config.soil_evap_resistance_exp).astype(
+        # Bare-soil evaporation efficiency = Kelvin pore RELATIVE HUMIDITY x diffusion-crust
+        # resistance, matching the two-leaf-canopy path (above) and CLM5 (Oleson 2013):
+        #   * h_r = exp(psi_top g /(R_v T_top)) — pore-space vapour-pressure lowering; ~1
+        #     except as the surface nears residual (psi -> -inf), where it shuts evap off.
+        #     Previously MISSING on the SimpleSEB path (only S_top**exp), unlike the canopy.
+        #   * _S_top (top-layer effective saturation, floored at 1e-6 in its shared
+        #     definition above so d(S_top**exp)/dS_top stays finite at the residual-water
+        #     boundary for a trainable exp < 1; AD-safe, negligible fwd).
+        _h_r = jnp.exp(jnp.minimum(
+            psi[:, 0] * constants.g
+            / (constants.R_v * jnp.maximum(T_soil[:, 0], 1.0)), 0.0))
+        _beta_surf = (_h_r * _S_top ** config.soil_evap_resistance_exp).astype(
             soil_evap_demand.dtype)
         soil_evap_demand = jnp.where(
             soil_evap_demand > 0.0, soil_evap_demand * _beta_surf, soil_evap_demand)
@@ -711,24 +865,19 @@ def _step_multilayer_land_impl(
         )
 
     # --- Post-step q_surface ---
-    # Reuse the same Audit #6 / Iter-65 1e-3 floor as the pre-step branch
-    # above so degenerate PFT cells cannot blow up beta_root_new propagating
-    # into the q_surface reported back to the atmosphere.  Computed
-    # UNCONDITIONALLY (not folded into the non-canopy branch): the carbon
-    # cycle below consumes ``beta_soil_new`` for EVERY surface scheme,
-    # including CLM-ML canopy — moving it inside ``else`` leaves it undefined
-    # for canopy + carbon runs.
+    # Reuse the same Audit #6 / Iter-65 range floor as the pre-step branch
+    # above (now inside root_zone_beta_soil) so degenerate PFT cells cannot
+    # blow up beta_soil_new propagating into the q_surface reported back to
+    # the atmosphere.  Computed UNCONDITIONALLY (not folded into the
+    # non-canopy branch): the carbon cycle below consumes ``beta_soil_new``
+    # for EVERY surface scheme, including CLM-ML canopy — moving it inside
+    # ``else`` leaves it undefined for canopy + carbon runs.  theta_wp_c /
+    # theta_fc_c are already (ncol,), so use the spatial path.
     theta_new = richards_out.theta_new
-    _denom_new = jnp.maximum(
-        theta_fc_c[:, None] - theta_wp_c[:, None], 1e-3,  # coeff-ok: floor (theta_fc - theta_wp) range to avoid /~0 in beta_root
+    beta_soil_new, _ = root_zone_beta_soil(
+        theta_new, root_frac, theta_wp_c, theta_fc_c, config.beta_min,
+        spatial=True,
     )
-    beta_root_new = jnp.clip(
-        (theta_new - theta_wp_c[:, None]) / _denom_new,
-        0.0, 1.0,
-    )
-    w_frac_rz_new = jnp.clip(
-        jnp.sum(root_frac * beta_root_new, axis=-1), 0.0, 1.0)
-    beta_soil_new = config.beta_min + (1.0 - config.beta_min) * w_frac_rz_new
     # SimpleSEB: stomatal_ratio carries the stomatal limitation through
     # the updated moisture state.  Canopy: stomatal_ratio = 1 (LE is
     # computed from leaf-level gradients, not via beta * q_sat).
@@ -763,7 +912,7 @@ def _step_multilayer_land_impl(
             # Neither scheme produced GPP (stomata disabled, carbon=none?).
             # Re-derive via compute_effective_beta on post-step state so
             # the carbon cycle sees a consistent end-of-step GPP.
-            _, gpp_override = compute_effective_beta(
+            _, gpp_override, _ = compute_effective_beta(
                 T_surface_new, forcing, beta_soil_new, config, carbon_state,
                 dt, land_params=lp)
         carbon_state_new, co2_flux = step_carbon(
@@ -931,3 +1080,51 @@ def init_multilayer_land_state(
         ice_bands=ice_bands,
         canopy_state=canopy_state,
     )
+
+
+def aridity_theta_init(rh_surface, theta_wp, theta_fc):
+    """Aridity-aware initial soil moisture from near-surface relative humidity.
+
+    Cold-starting the deep Richards column at the moisture-uniform
+    ``0.5 * theta_sat`` default (a soil *porosity* fraction, aridity-blind)
+    leaves subtropical deserts holding rainforest-scale water — ~375 kg/m^2 in a
+    3 m column.  A hot bare-soil skin then drives runaway *potential*
+    evaporation: the supply limiter never binds because the water is there, the
+    atmosphere moistens without bound, and the coupled AMIP run blows up after
+    ~a week (issue #730, day-8 non-finite winds).
+
+    Anchor the initial plant-available water to atmospheric aridity instead.  Map
+    the near-surface relative humidity of the IC atmosphere linearly into the
+    plant-available range ``[theta_wp, theta_fc]``::
+
+        theta_init = theta_wp + clip(rh_surface, 0, 1) * (theta_fc - theta_wp)
+
+    Arid columns (low near-surface RH) start near the wilting point, so from step
+    one the root-zone ``beta`` is at its floor (``beta`` multiplies
+    ``q_sat(T_skin)`` in the surface specific humidity) AND the extractable water
+    is small — the evaporation limiter binds immediately.  Humid columns start
+    near field capacity (the physical drained equilibrium).
+
+    ``theta_wp`` / ``theta_fc`` MUST be the SAME per-column thresholds the tile's
+    ``beta`` reads (``LandSurfaceParams.theta_wp`` / ``theta_fc``) so the seed is
+    consistent with the running physics.  CLM setup enforces
+    ``theta_fc > theta_wp``, and physically ``theta_wp >= theta_r``, so the result
+    lies in ``[theta_wp, theta_fc] ⊂ [theta_r, theta_sat]`` — a valid Richards
+    state for ``psi_from_theta``.
+
+    Parameters
+    ----------
+    rh_surface : array
+        Near-surface relative-humidity proxy ``q_v / q_sat`` (per column).
+        Clipped to ``[0, 1]``.
+    theta_wp, theta_fc : array or float
+        Per-column wilting-point / field-capacity volumetric water content
+        [m^3/m^3].
+
+    Returns
+    -------
+    array
+        Per-column initial volumetric water content (broadcast of the inputs).
+    """
+    rh = jnp.clip(rh_surface, 0.0, 1.0)
+    return theta_wp + rh * (theta_fc - theta_wp)

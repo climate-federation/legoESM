@@ -44,6 +44,46 @@ from legoesm.ocean.vertical import (
     compute_ocean_jacobian,
 )
 
+__physics_contract__ = {
+    "summary": (
+        "MPAS Voronoi-mesh adapters wiring KPP vertical mixing onto the C-grid: "
+        "tracers at cells, edge-normal momentum via TRiSK cell-velocity "
+        "reconstruction; produce cell/edge (K_v, A_v) profiles and the "
+        "edge-normal momentum + cell tracer tendencies."
+    ),
+    "inputs": {
+        "state.T": "degC", "state.S": "psu", "state.u": "m/s (edge-normal)",
+        "surface_forcing.tau_x": "N/m^2", "surface_forcing.q_net": "W/m^2",
+    },
+    "outputs": {
+        "du_dt_edge": "m/s^2", "dT_dt": "degC/s", "dS_dt": "psu/s",
+        "A_v_cells": "m^2/s", "K_v_cells": "m^2/s",
+    },
+    "sign_convention": (
+        "K_v, A_v >= 0; KPP diffusivities diagnosed at cells then interpolated "
+        "to edges; edge-normal momentum diffusion is flux-form with a zero-flux "
+        "seafloor (partial-cell masking); z positive up. A coefficient producer "
+        "+ flux-form applier — the budget closes in the diffusion solver; an "
+        "unknown scheme raises ValueError."
+    ),
+    # make_kpp_physics_mpas applies flux-form edge-momentum + cell-tracer
+    # tendencies (zero-flux seafloor, surface fluxes separate) = conservative
+    # redistribution of column-integrated heat (energy), salt and momentum; the
+    # sibling make_kpp_profiles_mpas is a coefficient-only producer (applies
+    # nothing, so conserves/violates nothing).
+    "conserves": ["energy", "salt", "momentum"],
+    "differentiable": True,
+    "reference": (
+        "Large, McWilliams & Doney (1994) KPP on the MPAS/TRiSK C-grid "
+        "(Perot 2000 reconstruction; Ringler et al. 2013, Ocean Modelling 69)"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_vmix_mpas_integration.py — cell-reconstructed "
+        "KPP viscosity applied to edge-normal u matches the lat-lon path; an "
+        "unknown scheme raises ValueError."
+    ),
+}
+
 
 # Placeholder salinity for dry cells so the EOS stays well-defined [PSU].
 _EOS_SAFE_SALINITY_PSU = 35.0
@@ -255,6 +295,11 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callable
         returning (du_dt_edge, dT_dt_cell, dS_dt_cell, A_v_cell, K_v_cell).
         The model assembles these into MPASOceanTendencies.
     """
+    if getattr(config, "iwm", None) is not None and config.iwm.enabled:
+        raise NotImplementedError(
+            "VerticalMixingConfig.iwm.enabled=True is not wired on the MPAS "
+            "vertical-mixing bridge yet (lat-lon / tripole only) — reject "
+            "rather than silently drop the wave-driven mixing.")
     cfg = config.kpp
 
     def physics_fn(
@@ -298,8 +343,43 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callable
             _kpp_mask_full = _kpp_mask_3d * _active_3d
         else:
             _kpp_mask_full = _kpp_mask_3d
-        dT_dt = jnp.where(_kpp_mask_full > 0.5, kpp_out.dT_dt, 0.0)
-        dS_dt = jnp.where(_kpp_mask_full > 0.5, kpp_out.dS_dt, 0.0)
+
+        # --- Partial-cell conservation rescale (tracer tendencies) ---
+        # ``kpp_vertical_mixing`` builds dT/dt, dS/dt as flux-form vertical
+        # divergences divided by the REFERENCE-grid thickness ``dz_ref * J``
+        # (kpp.py ``dz_actual``; both the local diffusion AND the non-local
+        # counter-gradient term use it).  The dycore, however, advances heat
+        # / salt content weighted by the LIVE partial-cell thickness
+        # ``h_k = compute_layer_thickness(eta, H_bathy, z_coord)``
+        # (ocean_model_mpas.py: ``T_new = T + dt*dT_dt`` with the budget
+        # measured as ``sum(dT_dt * h_k * area)``).  On a partial bottom cell
+        # ``dz_ref*J > h_partial*J = h_k``, so the LIVE-thickness column
+        # integral of a purely REDISTRIBUTIVE (interior-mixing) tendency is
+        # NONZERO — a spurious heat/salt source/sink on partial/live cells.
+        #
+        # Convention: z positive up; the vertical flux is down-gradient
+        # (``F = -K dT/dz``) with zero flux at the surface AND at the seafloor
+        # (the sub-seafloor T/S fill above makes the seafloor-interface
+        # gradient — hence its flux — exactly zero).  Rescaling by
+        # ``dz_used / h_k`` turns ``dT/dt = D / dz_used`` into ``D / h_k``
+        # (``D`` = interface-flux divergence, thickness-independent), so
+        # ``sum_k h_k * dT/dt = sum_k D = F_surface - F_seafloor = 0`` is
+        # conserved to machine precision.  On full cells (and on any
+        # non-partial z*/z-level coord) ``dz_used == h_k`` exactly, so
+        # ``thickness_rescale == 1`` and this is a byte-exact no-op — mirroring
+        # the live-thickness edge-momentum path (``_vertical_diffusion_edge_partial``)
+        # applied below.
+        if isinstance(z_coord, OceanPartialCellCoordinate):
+            h_live = compute_layer_thickness(eta, H_bathy, z_coord)  # (nCells, nlev)
+            dz_used = z_coord.dz_ref * J[:, jnp.newaxis]  # what KPP divided by
+            thickness_rescale = dz_used / jnp.maximum(h_live, 1.0e-10)
+            dT_dt = kpp_out.dT_dt * thickness_rescale
+            dS_dt = kpp_out.dS_dt * thickness_rescale
+        else:
+            dT_dt = kpp_out.dT_dt
+            dS_dt = kpp_out.dS_dt
+        dT_dt = jnp.where(_kpp_mask_full > 0.5, dT_dt, 0.0)
+        dS_dt = jnp.where(_kpp_mask_full > 0.5, dS_dt, 0.0)
 
         # A_v is at half-levels (nCells, nlev-1).  Mask land cells.
         # Cap A_v to CFL-safe maximum based on the thinner of the two
@@ -416,6 +496,11 @@ def make_kpp_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
         ``profiles_fn(state, mesh, z_coord, surface_forcing=None)``
         returning ``(A_v_cells, K_v_cells)`` both shape (nCells, nlev-1).
     """
+    if getattr(config, "iwm", None) is not None and config.iwm.enabled:
+        raise NotImplementedError(
+            "VerticalMixingConfig.iwm.enabled=True is not wired on the MPAS "
+            "vertical-mixing bridge yet (lat-lon / tripole only) — reject "
+            "rather than silently drop the wave-driven mixing.")
     cfg = config.kpp
 
     def profiles_fn(

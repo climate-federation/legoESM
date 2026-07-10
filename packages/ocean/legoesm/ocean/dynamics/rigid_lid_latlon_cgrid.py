@@ -78,9 +78,74 @@ from legoesm.ocean.dynamics.ocean_tendency_common import (
     column_depth,
     depth_average_to_faces,
 )
+from legoesm.parallel.reductions import is_multi_process
 
 # Numerical floor for reciprocal depths / empty cells.
 _DEPTH_FLOOR = 1.0e-10
+
+
+def rigid_lid_is_decomposed() -> bool:
+    """True if the domain is split across MPI ranks or an SPMD latitude-band mesh.
+
+    The rigid-lid streamfunction solve is GLOBAL and single-rank only:
+    ``solve_streamfunction_interior`` calls the stock
+    ``jax.scipy.sparse.linalg.cg``, whose dot products are rank-local and whose
+    residual-terminated ``while_loop`` runs a data-dependent iteration count, and
+    ``island_line_integrals`` / ``_solve_island_constants`` reduce over the whole
+    domain with a plain ``jnp.sum``.  None of these is MPI/SPMD-reduced, so a
+    decomposed run silently converges each rank/band to its OWN sub-system (and
+    the residual-dependent ``while_loop`` can desynchronise the collective
+    schedule / deadlock).  This mirrors the multi-rank predicate used by
+    ``barotropic_common._global_dot_batch`` / ``eta_floor._global_sum_pair`` —
+    the SPMD lat-band shard_map path (single process, ``is_multi_process()`` is
+    False) is caught FIRST via the ``"spmd"`` halo backend, then the mpi4jax /
+    multi-host / Voronoi paths via ``is_multi_process()``.
+    """
+    # Function-scope import (matches eta_floor / barotropic_common): the halo
+    # accessors live in ``grids.halo`` and are imported lazily to avoid an
+    # import cycle at module load.
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+
+    if get_halo_backend() == "spmd":
+        mesh = get_spmd_mesh()
+        # Backend armed "spmd" but no mesh set is an invalid state; the ocean
+        # SPMD reductions FAIL FAST on it, so mirror that rather than silently
+        # treating it as single-rank.
+        if mesh is None:
+            raise RuntimeError(
+                "rigid_lid_is_decomposed: halo backend is 'spmd' but no SPMD "
+                "mesh is set; arm it via activate_latlon_spmd_halo(mesh).")
+        # A >1-device latitude axis is a real decomposition.  Keyed on "lat" BY
+        # NAME so a coupled cube-atm SPMD mesh (ocean is never cube-sharded)
+        # falls through to the is_multi_process() check below.
+        if dict(mesh.shape).get("lat", 1) > 1:
+            return True
+    return is_multi_process()
+
+
+def assert_rigid_lid_single_rank() -> None:
+    """Raise if the rigid-lid barotropic solver is used on a decomposed domain.
+
+    Fail-fast dispatch hardening: converts a silent wrong-answer / potential
+    collective deadlock (see ``rigid_lid_is_decomposed``) into a loud error,
+    pointing the user at the barotropic solvers that DO support MPI/SPMD
+    decomposition.  Call it EAGERLY (host-side, before the jitted step / the
+    rigid-lid data build) so a distributed run cannot reuse a serially-traced
+    compiled step, and also in-body so direct traced entry points are covered.
+    """
+    if rigid_lid_is_decomposed():
+        raise NotImplementedError(
+            "barotropic_solver='rigid_lid' is single-rank only: the global "
+            "streamfunction elliptic solve uses rank-local CG dot products in a "
+            "residual-terminated while_loop, and the island line integrals sum "
+            "over the whole domain — neither is MPI/SPMD-reduced, so a "
+            "decomposed run silently converges each rank/band to its own "
+            "sub-system (and the residual-dependent while_loop can desynchronise "
+            "the collective schedule / deadlock). Use "
+            "barotropic_solver='implicit_cn' (distributed fixed-iteration PCG) "
+            "or 'explicit_substep' for multi-rank / SPMD-sharded ocean runs, or "
+            "run the rigid lid on a single rank with an undecomposed mesh."
+        )
 
 
 class RigidLidStaticData(NamedTuple):
@@ -272,6 +337,11 @@ def solve_streamfunction_interior(rhs, rl_data, grid, x0, *, tol, maxiter):
     ever does, add a paired ``custom_jvp`` solving the tangent system with
     the same reduced operator.
     """
+    # Leaf-level dispatch hardening: the stock CG below (and rigid_lid_step,
+    # which reaches here) is single-rank only. Guard here so a DIRECT call
+    # under decomposition also fails loudly, not just the model wrapper.
+    assert_rigid_lid_single_rank()
+
     sm = rl_data.solve_mask
     rhs_sym = jnp.where(sm > 0.5, -rl_data.A_vertex * rhs, 0.0)
     x0_in = x0 * sm
@@ -378,6 +448,11 @@ def island_line_integrals(u_face, v_face, rl_data, grid):
     circ : (nisle,) circulation per island [m^3/s^2 for a forcing field; m^3/s
         for a velocity field].
     """
+    # Leaf-level dispatch hardening: the jnp.sum below is a domain-wide island
+    # reduction (rank-local under decomposition). Guard direct callers
+    # (build_line_psin reaches here); rigid_lid_step hits the solve guard first.
+    assert_rigid_lid_single_rank()
+
     zeta = curl_vertex_cgrid(u_face, v_face, grid)        # (n_lat+1, n_lon+1)
     contrib = zeta * rl_data.A_vertex                      # circulation density
     # Σ over (lat, lon) for each island: (nisle, n_lat+1, n_lon+1) · (n_lat+1, n_lon+1)
@@ -508,6 +583,14 @@ def barotropic_rigid_lid_latlon_cgrid(state, dt, grid, z_coord, config, rl_data,
     -------
     (state_new, (Hu_avg, Hv_avg)).
     """
+    # Dispatch hardening: the streamfunction solve is single-rank only (global
+    # elliptic CG with rank-local dots + domain-wide island line integrals).
+    # Fail LOUDLY at trace time rather than return a silently per-rank-wrong
+    # answer under MPI / SPMD decomposition.  (Also guarded EAGERLY at the
+    # model's step / rigid-lid-data-build entry points; this in-body call covers
+    # direct/shard_map traces of the solver.)
+    assert_rigid_lid_single_rank()
+
     u_3d = state.u.data
     v_3d = state.v.data
     u_mask = state.u_mask.data

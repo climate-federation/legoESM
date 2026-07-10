@@ -463,3 +463,91 @@ class TestPerColumnAlbedo:
         # surface and a different heating profile.
         assert float(jnp.max(out_ocean[1] - out_ice[1])) > 1.0  # sw_net_sfc
         assert float(jnp.max(jnp.abs(out_ocean[0] - out_ice[0]))) > 0.0
+
+
+class TestSfcEmissivityOverrideThreading:
+    """Coupler-threaded dynamic surface emissivity reaches the radiation solver.
+
+    The land tile exports a LAI-dependent ``eps_eff`` (consistent with its
+    conservative ``LW_out`` / emission-weighted ``T_surface``); the coupler
+    tile-blends it and threads it as ``sfc_emissivity_override`` so the
+    atmospheric LW boundary uses the SAME emissivity.  Gray radiation ignores
+    surface emissivity, so we assert at the solver boundary: the emissivity
+    array passed to ``radiation_fn`` (position 10, consumed by RRTMGP as
+    ``sfc_emissivity``) equals the override, and the static config blend when
+    no override is supplied.
+    """
+
+    def _build(self):
+        import numpy as np
+        from legoesm.driver.config import (
+            DycoreConfig, ExperimentConfig, GridConfig,
+        )
+        from legoesm.driver.physics_pipeline import build_physics_pipeline
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import make_hybrid_levels
+
+        nlev = 8
+        grid = create_cubed_sphere(4)
+        sigma = make_hybrid_levels(nlev)
+        s2 = grid.grid_lat.shape
+        s3 = (*s2, nlev)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=nlev),
+            dycore=DycoreConfig(
+                model_type="hydrostatic", discretization="cdgrid"),
+            convection="none", radiation="gray", microphysics="none",
+        )
+        config.validate_strict()
+        pipe = build_physics_pipeline(grid, sigma, config)
+        T = jnp.asarray(np.broadcast_to(
+            300.0 - 60.0 * np.linspace(0, 1, nlev)[::-1], s3).copy())
+        p_s = jnp.full(s2, 1.0e5)
+        q_v = jnp.full(s3, 5e-3)
+        sst = jnp.full(s2, 290.0)
+        lat = jnp.asarray(grid.grid_lat)
+        lon = jnp.asarray(grid.grid_lon)
+        ncol = int(np.prod(s2))
+        return pipe, (T, p_s, q_v, sst, jnp.zeros(s2), lat, lon), s2, (ncol, nlev)
+
+    def _capture_solver_emissivity(self, pipe, args, emis_ovr, ncol_nlev):
+        from types import SimpleNamespace
+        ncol, nlev = ncol_nlev
+        captured = {}
+
+        def stub(*a, **k):
+            captured["emis"] = a[10]  # emis_col is the 11th positional arg
+            z2 = jnp.zeros((ncol, nlev))
+            z3 = jnp.zeros((ncol, nlev + 1))
+            return SimpleNamespace(
+                heating_rate=z2, sw_flux_down=z3, sw_flux_up=z3,
+                lw_flux_down=z3, lw_flux_up=z3,
+            )
+
+        T, p_s, q_v, sst, sic, lat, lon = args
+        orig = pipe.radiation_fn
+        pipe.radiation_fn = stub
+        try:
+            pipe.compute_radiation_core(
+                T, p_s, q_v, sst, sic, lat, lon,
+                jnp.asarray(80.0), jnp.asarray(43200.0),
+                None, jnp.asarray(1361.0), None, None,
+                sfc_emissivity_override=emis_ovr,
+            )
+        finally:
+            pipe.radiation_fn = orig
+        return captured["emis"]
+
+    def test_override_controls_solver_emissivity(self):
+        pipe, args, s2, ncol_nlev = self._build()
+        emis = self._capture_solver_emissivity(
+            pipe, args, jnp.full(s2, 0.80), ncol_nlev)
+        assert jnp.allclose(emis, 0.80)
+
+    def test_none_uses_static_config_blend(self):
+        pipe, args, s2, ncol_nlev = self._build()
+        emis = self._capture_solver_emissivity(pipe, args, None, ncol_nlev)
+        # Static all-ocean blend = config ocean emissivity, NOT the override,
+        # and physical.  (Byte-identical to the pre-feedback behaviour.)
+        assert not jnp.allclose(emis, 0.80)
+        assert bool(jnp.all(emis > 0.0)) and bool(jnp.all(emis <= 1.0))

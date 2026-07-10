@@ -348,8 +348,19 @@ def step_snow_bands(
     #     liquid is the upgrade).
     if precip_rain_bands is not None:
         _cold_snow = (T_sfc_band < T_snow_melt) & (swe_after_melt > 1e-6)
+        # ponytail: cap refreeze at the pack cold content so the released
+        # L_f can't exceed swe*c_ice*(Tf - T_skin).  Uncapped, 20 mm/hr rain
+        # on cold thin snow released ~1850 W/m2 of spurious surface heating.
+        # Single-layer band has no pack T, so T_sfc_band is the proxy; the
+        # multi-layer retained-liquid store is the upgrade.
+        _refreeze_max = (
+            swe_after_melt * constants.c_pi
+            * jnp.maximum(T_snow_melt - T_sfc_band, 0.0) / constants.L_f
+        )
         refreeze_bands = jnp.where(
-            _cold_snow, _refreeze_frac * precip_rain_bands * dt, 0.0)
+            _cold_snow,
+            jnp.minimum(_refreeze_frac * precip_rain_bands * dt, _refreeze_max),
+            0.0)
         swe_after_melt = swe_after_melt + refreeze_bands
     else:
         refreeze_bands = jnp.zeros_like(swe_after_melt)

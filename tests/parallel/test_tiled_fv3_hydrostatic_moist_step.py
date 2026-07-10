@@ -63,18 +63,14 @@ def _inputs(n, nlev, seed):
 
 
 def _phys_injected(coord, dt, cfg):
-    """Per-tile Kessler column physics for the tiled step: (dT, dq_v, dq_c, dq_r),
-    each (1,nl,nl,nlev), via the shared column core on the tile's local columns."""
-    def fn(T_t, p_s_t, qv, qc, qr):
-        shp = T_t.shape
-        nlev = shp[-1]
-        dT, dqv, dqc, dqr = kessler_column_tendencies(
-            T_t.reshape(-1, nlev), p_s_t.reshape(-1),
-            qv.reshape(-1, nlev), qc.reshape(-1, nlev), qr.reshape(-1, nlev),
-            coord, dt=dt, config=cfg)
-        return (dT.reshape(shp), dqv.reshape(shp), dqc.reshape(shp),
-                dqr.reshape(shp))
-    return fn
+    """Per-tile Kessler column physics — the PRODUCTION bridge (this test's
+    helper was promoted into ``make_kessler_column_physics_fn``; keep the
+    test on the shipped factory so there is exactly one copy of the
+    reshape-wrap numerics)."""
+    from legoesm.atmosphere.kessler_forcing import (
+        make_kessler_column_physics_fn,
+    )
+    return make_kessler_column_physics_fn(coord, dt, config=cfg)
 
 
 def _global_moist_step(u_d, v_d, T, p_s, phis, q_pack, cdgrid, coord, dt):

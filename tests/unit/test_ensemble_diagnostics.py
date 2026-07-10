@@ -131,6 +131,8 @@ class TestEnsembleDiagnosticCollector:
             held_lw_net_sfc=jnp.zeros(s2),
             held_sw_up_toa=jnp.zeros(s2),
             held_lw_up_toa=jnp.zeros(s2),
+            held_sw_up_toa_clr=jnp.zeros(s2),
+            held_lw_up_toa_clr=jnp.zeros(s2),
             held_sw_down_toa=jnp.zeros(s2),
             step_index=jnp.zeros(3, dtype=jnp.int32),  # batched scalar
             target_moisture=jnp.zeros(3),
@@ -141,6 +143,8 @@ class TestEnsembleDiagnosticCollector:
             lhflx_accum=jnp.zeros(s2),
             sw_up_toa_accum=jnp.zeros(s2),
             lw_up_toa_accum=jnp.zeros(s2),
+            sw_up_toa_clr_accum=jnp.zeros(s2),
+            lw_up_toa_clr_accum=jnp.zeros(s2),
             sw_down_toa_accum=jnp.zeros(s2),
             sw_net_sfc_accum=jnp.zeros(s2),
             lw_net_sfc_accum=jnp.zeros(s2),

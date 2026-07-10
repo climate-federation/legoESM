@@ -388,12 +388,15 @@ class TestTurbulenceAudit:
             HoltslagBovilleConfig()._replace(fakn=x), False), 7.2,
             "holtslag_boville.fakn")
 
-    def test_ysu_entrainment_coeff(self):
+    def test_ysu_entrainment_ratio(self):
+        # entrainment_coeff (Gaussian-K magnitude) was renamed/redefined to
+        # entrainment_ratio (Hong06 prescribed entrainment-flux ratio,
+        # (w'th_v')_h = -e_ratio*(w'th_v')_0); verify grad still flows.
         from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
         from legoesm.atmosphere.physics.turbulence.config import YSUConfig
         assert_grad_ok(lambda x: _turb_call(ysu_turbulence,
-            YSUConfig()._replace(entrainment_coeff=x), False), 0.2,
-            "ysu.entrainment_coeff")
+            YSUConfig()._replace(entrainment_ratio=x), False), 0.15,
+            "ysu.entrainment_ratio")
 
     def test_edmf_turbulence_Ck(self):
         from legoesm.atmosphere.physics.turbulence.edmf import edmf_turbulence

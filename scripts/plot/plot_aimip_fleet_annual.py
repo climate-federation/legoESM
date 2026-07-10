@@ -142,6 +142,23 @@ def _global_annual(ds: xr.Dataset, varname: str = "tas") -> xr.DataArray:
     return annual
 
 
+# Our variants' overlay colors on the fleet figure.
+LEGOESM_VARIANT_COLORS = {
+    "classical": "#AA3377", "column_nn": "#EE7733", "sfno_physics": "#009988",
+}
+
+
+def _legoesm_variant_from_stem(stem: str) -> str:
+    """Parse the variant out of a legoesm_<variant>_amip*.csv stem.
+
+    Falls back to the raw stem for a non-conforming name (still plotted,
+    labelled by filename).
+    """
+    return next(
+        (v for v in LEGOESM_VARIANT_COLORS if f"_{v}_" in f"_{stem}_"), stem,
+    )
+
+
 def _subtract_baseline(arr: xr.DataArray, b0: int, b1: int) -> xr.DataArray:
     """Return ``arr`` as an anomaly from its mean over calendar years [b0, b1].
 
@@ -210,13 +227,17 @@ def main():
              "period ends 2014).",
     )
     parser.add_argument(
-        "--legoesm-csv", type=Path, default=None,
-        help="Optional annual CSV (year,annual_global_mean_surfT_K) from "
-             "scripts/run/run_aimip_amip_inference.py -> overlays our trained "
-             "classical model's prescribed-SST AMIP run on the fleet figure. "
-             "Plotted as an anomaly from its OWN baseline window (so the "
-             "near-surface-vs-2m absolute offset drops out, leaving a "
-             "like-for-like trend/variability comparison).",
+        "--legoesm-csv", type=Path, default=None, action="append",
+        dest="legoesm_csvs",
+        help="Annual CSV (year,annual_global_mean_surfT_K) from "
+             "scripts/run/run_aimip_amip_inference.py -> overlays a trained "
+             "legoESM variant's prescribed-SST AMIP run on the fleet figure. "
+             "REPEATABLE (one per variant: classical / column_nn / "
+             "sfno_physics — the variant is parsed from the filename "
+             "legoesm_<variant>_amip*.csv). Plotted as an anomaly from its "
+             "OWN baseline window (so the near-surface-vs-2m absolute offset "
+             "drops out, leaving a like-for-like trend/variability "
+             "comparison); bias/RMSE vs ERA5 join the metrics CSV.",
     )
     args = parser.parse_args()
 
@@ -325,37 +346,54 @@ def main():
         for y, v in zip(years, vals):
             rows.append(("ERA5", int(y), float("nan"), float(v), float("nan")))
 
-    # legoESM (our trained classical model, prescribed-SST AMIP inference)
-    # overlay. Plotted as an anomaly from the model's OWN baseline-window mean:
-    # the near-surface sigma-level T carries a constant offset vs ERA5 2-m tas,
+    # legoESM (our trained variants, prescribed-SST AMIP inference) overlays.
+    # Plotted as an anomaly from each model's OWN baseline-window mean: the
+    # near-surface sigma-level T carries a constant offset vs ERA5 2-m tas,
     # so removing each series' own baseline leaves a like-for-like trend +
     # variability comparison (the honest way to place a free-of-absolute-bias
-    # model on the fleet figure).
-    if args.legoesm_csv is not None and args.legoesm_csv.exists():
-        _d = np.genfromtxt(args.legoesm_csv, delimiter=",", names=True)
+    # model on the fleet figure).  bias/RMSE vs ERA5 (on the plotted anomaly)
+    # join the metrics CSV so our variants rank against the fleet.
+    for lcsv in (args.legoesm_csvs or []):
+        if not lcsv.exists():
+            logger.warning(f"--legoesm-csv not found: {lcsv}")
+            continue
+        _variant = _legoesm_variant_from_stem(lcsv.stem)
+        _d = np.genfromtxt(lcsv, delimiter=",", names=True)
         ly = np.atleast_1d(_d["year"]).astype(int)
         lt = np.atleast_1d(_d["annual_global_mean_surfT_K"]).astype(float)
-        if ly.size:
-            if args.anomaly:
-                _m = (ly >= args.anomaly_base_start) & (ly <= args.anomaly_base_end)
-                _base = float(lt[_m].mean()) if _m.any() else float(lt.mean())
-                lt = lt - _base
-            ax.plot(
-                ly, lt, color="#AA3377", linewidth=2.5, marker="o",
-                markersize=3,
-                label="legoESM classical (AMIP, prescribed ERA5 SST)",
+        if not ly.size:
+            continue
+        if args.anomaly:
+            _m = (ly >= args.anomaly_base_start) & (ly <= args.anomaly_base_end)
+            _base = float(lt[_m].mean()) if _m.any() else float(lt.mean())
+            lt = lt - _base
+        _mname = f"legoESM-{_variant}"
+        if era5_year_map is not None:
+            # finite-only: one NaN year (e.g. a mid-chain partial CSV) must
+            # not turn the whole bias/RMSE into NaN (codex LOW).
+            _diffs = np.asarray([
+                v - era5_year_map[int(y)]
+                for y, v in zip(ly, lt)
+                if int(y) in era5_year_map and np.isfinite(v)
+            ])
+            if _diffs.size:
+                metrics[_mname] = {
+                    "bias": float(_diffs.mean()),
+                    "rmse": float(np.sqrt(np.mean(_diffs ** 2))),
+                }
+        _label = f"{_mname} (AMIP, prescribed ERA5 SST)"
+        if _mname in metrics:
+            _label += (
+                f"  (bias={metrics[_mname]['bias']:+.2f} K, "
+                f"RMSE={metrics[_mname]['rmse']:.2f} K)"
             )
-            for y, v in zip(ly, lt):
-                rows.append(
-                    ("legoESM-classical", int(y), float("nan"), float(v),
-                     float("nan"))
-                )
-            logger.info(
-                f"Overlaid legoESM classical: {ly.size} years "
-                f"from {args.legoesm_csv}"
-            )
-    elif args.legoesm_csv is not None:
-        logger.warning(f"--legoesm-csv not found: {args.legoesm_csv}")
+        ax.plot(
+            ly, lt, color=LEGOESM_VARIANT_COLORS.get(_variant, "#AA3377"),
+            linewidth=2.5, marker="o", markersize=3, label=_label,
+        )
+        for y, v in zip(ly, lt):
+            rows.append((_mname, int(y), float("nan"), float(v), float("nan")))
+        logger.info(f"Overlaid {_mname}: {ly.size} years from {lcsv}")
 
     ax.set_xlabel("year")
     ax.set_ylabel(

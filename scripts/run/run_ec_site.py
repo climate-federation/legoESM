@@ -61,11 +61,60 @@ _SOIL_HYDRAULICS = {
 _SOIL_FC_WP = {"siltloam": (0.33, 0.13), "sandyloam": (0.21, 0.10)}
 
 
+# ---------------------------------------------------------------------------
+# Per-site tower + hydrology metadata for the offline EC-site validation.
+# Single source of truth for the site-level physical settings that were
+# previously passed by hand / environment overrides, so a site run is
+# reproducible from this one table.
+#   z_ref [m]      : wind and flux measurement height = FLUXNET BADM
+#                    Reference_height_v (from
+#                    flux_tower_site_attributes/<SITE>_*_ReferenceHeight.nc).
+#                    Anchors the Monin-Obukhov surface-layer profile / u* at the
+#                    true tower height rather than a generic 10 m default.
+#   root_depth [m] : root-density e-folding depth (root_frac = exp(-z/root_depth));
+#                    deepened for phreatophytic vegetation that taps deep soil /
+#                    weathered-bedrock water through the dry season (US-Ton blue
+#                    oaks, AU-How savanna).  1.0 m elsewhere.
+#   soil_depth_m   : soil-column depth [m]; deepened so the deep roots reach the
+#                    retained deep-column water (0 => model default ~6.4 m column).
+# Aerodynamic roughness (rz0m/rd) is deliberately NOT here: it is assigned
+# per-PFT by the driver reader (canopy.config.PFT_AERO_PARAMS), so the tower
+# height is the only site-specific aerodynamic input.  The Ball-Berry intercept
+# stress (stress_b0) is set globally (cuticular conductance persists on live
+# leaves; a dormant/deciduous canopy self-limits via LAI -> 0), not per site.
+# root_depth reflects the rooting depth the site's soil profile actually permits:
+# a deep glacial-till loam (US-MMS) roots deeper than a shallow montane podzol
+# (DE-Obe) or an annual grassland (US-Var), while phreatophytes tapping deep soil /
+# weathered-bedrock water through the dry season (US-Ton oaks, AU-How savanna) root
+# far deeper.  These are the per-site values validated against the FLUXNET fluxes.
+EC_SITE_PHYSICS: dict[str, dict[str, float]] = {
+    "US-MMS": {"z_ref": 46.0, "root_depth": 2.0},                     # deep loam, DBF
+    "DE-Obe": {"z_ref": 30.0, "root_depth": 1.0},                     # shallow montane ENF
+    "US-Ton": {"z_ref": 23.5, "root_depth": 5.0, "soil_depth_m": 10.0},  # phreatophyte oak
+    "US-Var": {"z_ref": 2.0,  "root_depth": 1.0},                     # shallow annual grass
+    "AU-How": {"z_ref": 23.0, "root_depth": 5.0, "soil_depth_m": 10.0},  # phreatophyte savanna
+}
+# Generic fallbacks for a site not in the table (matches the model/CLI defaults).
+_EC_SITE_DEFAULTS = {"z_ref": 10.0, "root_depth": 1.0, "soil_depth_m": 0.0}
+
+
+def ec_site_physics(site: str) -> dict[str, float]:
+    """Tower height + root/column depth for ``site`` (BADM-anchored; see table).
+
+    Returns a dict with keys ``z_ref``/``root_depth``/``soil_depth_m``, filling
+    the generic defaults (10 m reference height, 1 m rooting, model-default
+    column) for any key a site does not override — and for a site absent from
+    :data:`EC_SITE_PHYSICS` entirely.
+    """
+    return {**_EC_SITE_DEFAULTS, **EC_SITE_PHYSICS.get(site, {})}
+
+
 def _build_land_config(canopy_config: TwoLeafCanopyConfig, soil: str,
                        bottom_bc: str, depth_m: float,
                        k_sat_decay_m: float = 0.0,
                        soil_evap_resistance_exp: float = 2.0,
                        root_depth: float = 1.0,
+                       z_ref: float = 10.0,
                        texture: tuple[float, float] | None = None
                        ) -> MultiLayerLandConfig:
     """Assemble the multilayer land config for the offline EC-site run.
@@ -80,7 +129,7 @@ def _build_land_config(canopy_config: TwoLeafCanopyConfig, soil: str,
     """
     kw = dict(surface_scheme=canopy_config,
               soil_evap_resistance_exp=soil_evap_resistance_exp,
-              root_depth=root_depth)
+              root_depth=root_depth, z_ref=z_ref)
     if depth_m > 0:
         kw["soil_grid"] = SoilGridConfig(total_depth=depth_m)
     if bottom_bc != "free_drainage":
@@ -401,13 +450,21 @@ def _best_year_slice(driver_nc: str, d) -> tuple[int, int, int]:
 def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              max_steps: int | None = None, start_step: int = 0,
              soil: str = "default", bottom_bc: str = "free_drainage",
-             soil_depth_m: float = 0.0, nudge_tau_days: float = 0.0,
+             soil_depth_m: float | None = None, nudge_tau_days: float = 0.0,
              k_sat_decay_m: float = 0.0, soil_evap_resistance_exp: float = 2.0,
-             root_depth: float = 1.0, select_best_year: bool = False,
+             root_depth: float | None = None, z_ref: float | None = None,
+             stress_b0: bool = False, select_best_year: bool = False,
              texture_csv: str = _DEFAULT_TEXTURE_CSV) -> dict:
     if mode not in ("diagnostic", "prognostic"):
         raise ValueError(f"mode {mode!r} not supported (diagnostic|prognostic)")
     d = read_ec_site_driver(driver_nc)
+    # Site-level physics from the consolidated table (tower height, phreatophyte
+    # root/column depth).  An explicit non-None argument (CLI override) wins; a
+    # None falls back to the per-site table value for reproducibility.
+    phys = ec_site_physics(d.site_id)
+    z_ref = phys["z_ref"] if z_ref is None else z_ref
+    root_depth = phys["root_depth"] if root_depth is None else root_depth
+    soil_depth_m = phys["soil_depth_m"] if soil_depth_m is None else soil_depth_m
     if select_best_year:
         start_step, max_steps, _yr = _best_year_slice(driver_nc, d)
         print(f"  select-best-year: {_yr} (steps {start_step}..{start_step + max_steps}, "
@@ -423,12 +480,17 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
             print(f"  texture=auto: {d.site_id} not in {texture_csv}; using loam default")
         else:
             print(f"  texture=auto: sand={texture[0]:.0f}% clay={texture[1]:.0f}%")
-    canopy_config = TwoLeafCanopyConfig(max_iters=30)
+    # stress_b0=False keeps the Ball-Berry cuticular intercept b0 unstressed:
+    # the leaf cuticle keeps leaking under drought, so a live (evergreen /
+    # phreatophytic) canopy sustains a baseline transpiration, while a
+    # deciduous / senescent canopy self-limits because its LAI -> 0.  This is
+    # the physically-general default for the offline sites (see EC_SITE_PHYSICS).
+    canopy_config = TwoLeafCanopyConfig(max_iters=30, stress_b0=stress_b0)
     land_config = _build_land_config(
         canopy_config, soil, bottom_bc, soil_depth_m,
         k_sat_decay_m=k_sat_decay_m,
         soil_evap_resistance_exp=soil_evap_resistance_exp,
-        root_depth=root_depth, texture=texture)
+        root_depth=root_depth, z_ref=z_ref, texture=texture)
 
     reverted = None
     ts_soil = swc_soil = ustar = None
@@ -519,8 +581,18 @@ def main() -> int:
     ap.add_argument("--bottom-bc", default="free_drainage",
                     choices=["free_drainage", "zero_flux"],
                     help="Richards bottom boundary condition (prognostic)")
-    ap.add_argument("--soil-depth-m", type=float, default=0.0,
-                    help="total soil column depth [m] (0 = legoESM default ~6.4 m)")
+    ap.add_argument("--soil-depth-m", type=float, default=None,
+                    help="total soil column depth [m] (default: per-site "
+                         "EC_SITE_PHYSICS table, else legoESM ~6.4 m column)")
+    ap.add_argument("--z-ref", type=float, default=None,
+                    help="wind/flux reference (tower) height [m] for the "
+                         "Monin-Obukhov surface layer (default: per-site BADM "
+                         "Reference_height_v from EC_SITE_PHYSICS, else 10 m)")
+    ap.add_argument("--stress-b0", dest="stress_b0", action="store_true",
+                    default=False,
+                    help="down-regulate the Ball-Berry cuticular intercept b0 by "
+                         "soil-moisture stress too (legacy); default leaves b0 "
+                         "unstressed so live canopies keep a baseline transpiration")
     ap.add_argument("--nudge-tau-days", type=float, default=0.0,
                     help="prognostic mode: relax soil moisture toward observed SWC "
                          "with this e-folding timescale [days] (0 = free-running)")
@@ -530,8 +602,9 @@ def main() -> int:
     ap.add_argument("--soil-evap-resistance-exp", type=float, default=2.0,
                     help="S_top**exp bare-soil evaporation throttle on the canopy path "
                          "(0 = Kelvin-h_r only; 2 = #671 default; 3-4 = stronger)")
-    ap.add_argument("--root-depth", type=float, default=1.0,
-                    help="root e-folding depth [m] (deeper => more deep-water access)")
+    ap.add_argument("--root-depth", type=float, default=None,
+                    help="root e-folding depth [m] (deeper => more deep-water "
+                         "access; default: per-site EC_SITE_PHYSICS table, else 1 m)")
     ap.add_argument("--select-best-year", action="store_true",
                     help="run only the calendar year with the most observed flux "
                          "steps (contiguous, spans both seasons) — ~12-24x faster "
@@ -544,7 +617,8 @@ def main() -> int:
                  soil_depth_m=args.soil_depth_m, nudge_tau_days=args.nudge_tau_days,
                  k_sat_decay_m=args.k_sat_decay_m,
                  soil_evap_resistance_exp=args.soil_evap_resistance_exp,
-                 root_depth=args.root_depth, select_best_year=args.select_best_year,
+                 root_depth=args.root_depth, z_ref=args.z_ref,
+                 stress_b0=args.stress_b0, select_best_year=args.select_best_year,
                  texture_csv=args.texture_csv)
     return 0
 

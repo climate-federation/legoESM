@@ -282,24 +282,22 @@ def _build_test_matrix() -> list[TestCase]:
                 "shallow_water", "williamson6", g, res[g], "none", 14, 1,
                 {"test_num": 6}))
         # Colliding modons (#521, Lin et al. 2017) — non-rotating two-soliton
-        # collision; wired for cubed_sphere (FV3 case 8) via the edge-midpoint
-        # analytic init, and for latlon (C-grid) via the face-midpoint
-        # analytic init (the W6 pattern — winds depend on lon AND lat; the
-        # non-rotating grid comes from ``create_latlon_grid(omega=0)``).
+        # collision, wired as a STANDARD case on ALL FOUR grids:
+        # cubed_sphere (FV3 case 8, edge-midpoint analytic init), latlon
+        # (C-grid face-midpoint init, the W6 pattern), icosahedral (MPAS
+        # edge-normal projection) and spectral (vor/div analysis of the
+        # analytic winds).  Every grid takes its non-rotating planet from
+        # the grid factory's ``omega=0`` (f derives from the grid omega).
         # Full return-to-IC is ~100 days; quick smoke = 2 days.
-        # ico/spectral: IC helpers exist in
-        # tests/test_cases/colliding_modons.py but their non-rotating run
-        # paths are not yet wired (follow-up).
-        if g in ("cubed_sphere", "latlon"):
-            # Full duration: cube runs the paper's ~100-day return-to-IC;
-            # latlon caps at 20 days — its pole-CFL dt (~13.7 s at 72x144)
-            # would make 100 days ~631k host-loop steps (codex round-12
-            # Medium), and the collision/exchange phase this case gates
-            # happens well inside 20 days.
-            matrix.append(TestCase(
-                "shallow_water", "colliding_modons", g, res[g], "none",
-                100 if g == "cubed_sphere" else 20, 1,
-                {"test_num": 8}))
+        # Full duration: cube/ico/spectral run the paper's ~100-day
+        # return-to-IC; latlon caps at 20 days — its pole-CFL dt (~13.7 s
+        # at 72x144) would make 100 days ~631k host-loop steps (codex
+        # round-12 Medium), and the collision/exchange phase this case
+        # gates happens well inside 20 days.
+        matrix.append(TestCase(
+            "shallow_water", "colliding_modons", g, res[g], "none",
+            20 if g == "latlon" else 100, 1,
+            {"test_num": 8}))
 
     # --- Hydrostatic: all grids, sigma + hybrid ---
     for g in GRID_TYPES:
@@ -606,10 +604,13 @@ def _modon_hyperdiff_coeff(n: int) -> float:
     ``LEGOESM_SW_MODON_HYPERDIFF_FACTOR`` (default ``MODON_HYPERDIFF_FACTOR`` ==
     1.0) scales the ``cdgrid_hyperdiff_cube`` base;
     ``LEGOESM_SW_MODON_HYPERDIFF_SCALING`` (default ``MODON_HYPERDIFF_SCALING``
-    == 4) selects the resolution law — ``4`` == the calibrated ``(ref_n/n)^4``
-    grid-scale-damping-time-constant law (byte-identical at every resolution to
-    the pre-#753 expression), ``2`` == the ``(ref_n/n)^2`` FV3 div-damp law the
-    #753 diagnosis wants at C96+ (unchanged at C48).  The ``SCALING`` env is an
+    == 2) selects the resolution law — ``2`` == the ``(ref_n/n)^2`` FV3 div-damp
+    law (the #753 item-1 default: C96 erupts at the face seams under ^4 but is
+    stable under ^2, validated 100 days at C36/C48/C96 with mass drift 0;
+    exponent-invariant at C48, and note the matrix cube default C36 DOES change
+    — 0.56x, validated PASS), ``4`` == the ``(ref_n/n)^4`` grid-scale-damping-time-
+    constant law (byte-identical at every resolution to the pre-#753 expression).
+    The ``SCALING`` env is an
     open-ended sensitivity probe (any positive int), unlike the
     ``run_colliding_modons.py`` CLI which restricts to the two documented laws
     ``{2, 4}``.  Defaults come from the shared ``MODON_*`` constants so the
@@ -1404,6 +1405,40 @@ def _get_cs_weights(n: int, n_lat: int = 181, n_lon: int = 360):
     return get_cubedsphere_to_latlon_weights(n, n_lon=n_lon, n_lat=n_lat)
 
 
+def _latlon_curl(u_ll: np.ndarray, v_ll: np.ndarray, radius: float,
+                 lat_deg: np.ndarray | None = None,
+                 dlon_deg: float = 1.0,
+                 dlat_deg: float = 1.0) -> np.ndarray:
+    """Relative vorticity [1/s] from geographic winds on a lat-lon grid.
+
+    Spherical curl on a uniform lat-lon grid (default: the common
+    (181, 360) snapshot canvas, lat -90..90 x 1 deg, lon x 1 deg):
+        zeta = (dv/dlon - d(u cos(lat))/dlat) / (R cos(lat)).
+    ``lat_deg``/``dlon_deg``/``dlat_deg`` override the row latitudes and
+    spacings for a NATIVE uniform lat-lon grid (e.g. the 72x144 C-grid
+    cell centres).  The two rows nearest each pole are zeroed — the
+    1/cos(lat) metric is singular there and the centred gradient is
+    meaningless.  Used for the colliding-modons vorticity snapshots
+    (#521); diagnostic only.
+    """
+    u = np.asarray(u_ll, dtype=np.float64)
+    v = np.asarray(v_ll, dtype=np.float64)
+    if lat_deg is None:
+        lat1d = np.linspace(-90.0, 90.0, u.shape[0])
+    else:
+        lat1d = np.asarray(lat_deg, dtype=np.float64).ravel()
+    coslat = np.cos(np.radians(lat1d))[:, None]
+    # Longitude is periodic: wrap-pad one column each side so the
+    # dateline columns get a centred (not one-sided) derivative.
+    v_wrap = np.concatenate([v[:, -1:], v, v[:, :1]], axis=1)
+    dv_dlam = np.gradient(v_wrap, np.radians(dlon_deg), axis=1)[:, 1:-1]
+    ducos_dphi = np.gradient(u * coslat, np.radians(dlat_deg), axis=0)
+    zeta = (dv_dlam - ducos_dphi) / (radius * np.maximum(coslat, 1e-3))
+    zeta[:2, :] = 0.0
+    zeta[-2:, :] = 0.0
+    return zeta
+
+
 def _regrid_latlon_to_181x360(arr: np.ndarray, lon_deg: np.ndarray,
                               lat_deg: np.ndarray) -> np.ndarray:
     """Regrid a native lat-lon field to the common (181, 360) [-180,180) canvas.
@@ -1721,6 +1756,69 @@ def _save_conservation(output_dir: Path, case_name: str, diag: dict,
         output_dir / "conservation_timeseries.png", dpi=150,
         bbox_inches="tight")
     plt.close(fig)
+
+
+def _save_snapshot_gifs(output_dir: Path, case_name: str, snapshots: dict,
+                        dt: float, field_specs: list[tuple[str, str, str]],
+                        coord_kind: str, lon_deg: np.ndarray,
+                        lat_deg: np.ndarray, frame_ms: int = 600):
+    """Animated GIF of each 2D field's snapshot evolution.
+
+    One frame per stored snapshot on the common regridded lat-lon canvas
+    (same ``_regrid_2d`` path as the ``snapshots_<field>.png`` mosaics,
+    so EVERY grid type gets the animation), with color limits fixed
+    across frames so the animation does not flicker.  Written as
+    ``animation_<field>.gif`` via Pillow.  Requested for the standard SW
+    cases (#521 colliding modons alongside Williamson / cosine bell) —
+    wired in the shared output path so every case carries it.
+    """
+    if not snapshots:
+        return
+    from PIL import Image
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    valid_steps = sorted(snapshots.keys())
+
+    for field_key, field_label, cmap in field_specs:
+        steps = [s for s in valid_steps if field_key in snapshots[s]]
+        if len(steps) < 2:
+            continue
+        regridded = [
+            _regrid_2d(
+                np.asarray(snapshots[s][field_key], dtype=np.float64),
+                lon_deg, lat_deg, coord_kind,
+            ) for s in steps
+        ]
+        all_vals = np.concatenate([r.ravel() for r in regridded])
+        all_vals = all_vals[np.isfinite(all_vals)]
+        if all_vals.size == 0:
+            continue
+        vmin, vmax = float(all_vals.min()), float(all_vals.max())
+        if vmin == vmax:
+            vmax = vmin + 1.0
+
+        frames = []
+        for step, arr in zip(steps, regridded):
+            fig, ax = plt.subplots(figsize=(7.2, 4.0), dpi=110)
+            im = ax.imshow(
+                arr, origin="lower", aspect="auto", cmap=cmap,
+                extent=[-180, 180, -90, 90], vmin=vmin, vmax=vmax)
+            day = step * dt / 86400.0
+            ax.set_title(f"{case_name} — {field_key}  t={day:.2f} d",
+                         fontsize=10)
+            ax.set_xlabel("Longitude")
+            ax.set_ylabel("Latitude")
+            fig.colorbar(im, ax=ax, label=field_label, shrink=0.9)
+            fig.tight_layout()
+            fig.canvas.draw()
+            rgba = np.asarray(fig.canvas.buffer_rgba())
+            frames.append(Image.fromarray(rgba[..., :3].copy()))
+            plt.close(fig)
+
+        frames[0].save(
+            output_dir / f"animation_{field_key}.gif",
+            save_all=True, append_images=frames[1:],
+            duration=frame_ms, loop=0)
 
 
 def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
@@ -2163,6 +2261,9 @@ def _save_case_diagnostics(
     _save_snapshot_plots(
         output_dir, case_name, snapshots, dt, field_specs_2d,
         coord_kind, lon_deg, lat_deg)
+    _save_snapshot_gifs(
+        output_dir, case_name, snapshots, dt, field_specs_2d,
+        coord_kind, lon_deg, lat_deg)
     # Native-grid rendering (cube faces, icosa cells, Gaussian lats).
     # For ``latlon`` the native and regridded views are identical, but we
     # still emit the ``_native`` variant so every case carries the full
@@ -2300,8 +2401,20 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # Colliding modons (#521, FV3 case 8) run on a NON-ROTATING planet
         # (f=0); every other SW case is rotating.  The cdgrid infers omega
         # from base.f, so a base grid with omega=0 yields f=0 throughout.
-        grid = (create_cubed_sphere(n, omega=0.0) if test_num == 8
-                else create_cubed_sphere(n))
+        #
+        # use_duogrid=True (#521 sweep, 2026-07-03): the modon IC is
+        # strongly UNBALANCED (constant depth + wind bursts) and its
+        # gravity-wave adjustment front crossing the cube face seams
+        # erupts into spurious vortex dipoles at modon amplitude with
+        # the default low-order halo interpolation (day-5 eruption at
+        # every equatorial face edge; rest state is clean at 1e-13, so
+        # the source is flow-triggered seam truncation).  The duogrid
+        # higher-order cross-face interpolation removes that eruption
+        # (day-10 max|u| 18 m/s vs 111 m/s, peak vorticity 0.7x vs 6.6x
+        # initial).  Williamson cases keep the production non-duogrid
+        # path (balanced flows; calibrated separately).
+        grid = (create_cubed_sphere(n, omega=0.0, use_duogrid=True)
+                if test_num == 8 else create_cubed_sphere(n))
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 300.0
         # Iter-760: switch to Fortran-faithful del-n vorticity damping
@@ -2376,10 +2489,11 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             _m_dv = float(os.environ.get(
                 "LEGOESM_SW_MODON_DAMP_V", str(MODON_DAMP_V)))
             # #521/#753: biharmonic backstop from the env knobs (default env ->
-            # the calibrated (ref/n)^4 law, byte-identical at every resolution;
-            # LEGOESM_SW_MODON_HYPERDIFF_SCALING=2 opts into the (ref/n)^2 law
-            # for C96+, physics-validation cluster-pending).  See
-            # ``_modon_hyperdiff_coeff``.
+            # the (ref/n)^2 law, the #753 item-1 default: C96 erupts at the face
+            # seams under ^4 but is stable under ^2, validated 100 days at
+            # C36/C48/C96 with mass drift 0; C48 is exponent-invariant.
+            # LEGOESM_SW_MODON_HYPERDIFF_SCALING=4 opts back into the pre-#753
+            # (ref/n)^4 law.  See ``_modon_hyperdiff_coeff``.
             config = iter1009_dual_target_config(
                 n, div_damp_factor=_m_dd, damp_v=_m_dv,
                 hyperdiff_coeff=_modon_hyperdiff_coeff(n),
@@ -2548,6 +2662,12 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             return {"u": u_ll, "v": v_ll,
                     "wind_speed": np.sqrt(u_ll ** 2 + v_ll ** 2),
                     "height": np.asarray(s.h, dtype=np.float64),
+                    # Relative vorticity on the snapshot canvas — the
+                    # cleanest modon signature (#521); cheap for every
+                    # cube SW case, plotted where a case lists it in
+                    # COMPARISON_FIELDS.
+                    "vorticity": _latlon_curl(
+                        u_ll, v_ll, float(grid.radius)),
                     "u_cc_east": np.asarray(u_east, dtype=np.float64),
                     "v_cc_north": np.asarray(v_north, dtype=np.float64)}
 
@@ -2674,9 +2794,19 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         def extract_fn(s):
             u = np.asarray(0.5 * (s.u[:, :-1] + s.u[:, 1:]), dtype=np.float64)
             v = np.asarray(0.5 * (s.v[:-1] + s.v[1:]), dtype=np.float64)
-            return {"u": u, "v": v,
-                    "wind_speed": np.sqrt(u ** 2 + v ** 2),
-                    "height": np.asarray(s.h, dtype=np.float64)}
+            out = {"u": u, "v": v,
+                   "wind_speed": np.sqrt(u ** 2 + v ** 2),
+                   "height": np.asarray(s.h, dtype=np.float64)}
+            # Relative vorticity (#521 cross-grid signature) — NATIVE
+            # shaped like u/v (the snapshot pipeline regrids it with the
+            # same latlon path; an already-regridded (181,360) array
+            # would be mis-regridded against the native coords).
+            out["vorticity"] = _latlon_curl(
+                u, v, float(grid.radius),
+                lat_deg=lat_deg,
+                dlon_deg=float(np.degrees(grid.dlon)),
+                dlat_deg=float(np.degrees(grid.dlat)))
+            return out
 
         key_array_fn = lambda s: s.h
         coord_kind = "latlon"
@@ -2693,7 +2823,13 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.ocean.init_mpas import reconstruct_cell_velocity
 
         level = int(tc.resolution.replace("ico", ""))
-        mesh = create_voronoi_mesh(level)
+        # Colliding modons (#521) run NON-ROTATING: fEdge/fVertex derive
+        # from the mesh omega, so an omega=0 mesh zeroes Coriolis
+        # everywhere (mirrors the cube/latlon omega=0 branches; the mesh
+        # cache key includes omega, so this never collides with the
+        # rotating Williamson meshes).
+        mesh = (create_voronoi_mesh(level, omega=0.0) if test_num == 8
+                else create_voronoi_mesh(level))
         dt = 300.0
         config = MPASShallowWaterConfig(
             nu_del4=_hyperdiff_ico(mesh), anchor_mass_to_initial=True,
@@ -2703,6 +2839,12 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             from tests.test_cases.williamson_extended import (
                 williamson_test6_mpas)
             init_fns = {6: williamson_test6_mpas}
+        elif test_num == 8:
+            # Colliding modons: geographic winds projected onto edge
+            # normals (same pattern as the Williamson MPAS ICs).
+            from tests.test_cases.colliding_modons import (
+                colliding_modons_mpas)
+            init_fns = {8: colliding_modons_mpas}
         else:
             init_fns = {2: williamson_test2_mpas, 5: williamson_test5_mpas}
         state = init_fns[test_num](mesh)
@@ -2728,14 +2870,19 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             u_e, v_n = reconstruct_cell_velocity(s.u.data, mesh)
             u = np.asarray(u_e, dtype=np.float64)
             v = np.asarray(v_n, dtype=np.float64)
+            u_ll = _bin_to_latlon(u, lon_cell, lat_cell)
+            v_ll = _bin_to_latlon(v, lon_cell, lat_cell)
             return {
-                "u": _bin_to_latlon(u, lon_cell, lat_cell),
-                "v": _bin_to_latlon(v, lon_cell, lat_cell),
+                "u": u_ll,
+                "v": v_ll,
                 "wind_speed": _bin_to_latlon(
                     np.sqrt(u ** 2 + v ** 2), lon_cell, lat_cell),
                 "height": _bin_to_latlon(
                     np.asarray(s.h.data, dtype=np.float64),
                     lon_cell, lat_cell),
+                # #521 cross-grid vorticity signature: the binned winds
+                # already live on the (181, 360) canvas.
+                "vorticity": _latlon_curl(u_ll, v_ll, float(mesh.radius)),
             }
 
         key_array_fn = lambda s: s.h.data
@@ -2753,19 +2900,31 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm import constants
 
         n_max = int(tc.resolution.replace("T", ""))
-        grid = create_gaussian_grid(n_max)
+        # Colliding modons (#521) run NON-ROTATING: the grid's planetary
+        # vorticity f = 2*omega*sin(lat) derives from the grid omega
+        # (mirrors the cube/latlon/ico omega=0 branches).
+        grid = (create_gaussian_grid(n_max, omega=0.0) if test_num == 8
+                else create_gaussian_grid(n_max))
         # CFL-safe dt for explicit SSP-RK3: gravity wave CFL ≈ 0.5
         import math
         _c_gw = math.sqrt(constants.g * 5960.0)  # shallow-water wave speed
         dt = min(600.0, 0.5 * grid.radius / (n_max * _c_gw))
         config = SpectralSWConfig(
-            spectral_filter_order=8 if test_num in (5, 6) else 0,
+            # Modons (8) get the same order-8 filter as W5/W6: the
+            # r0 = 750 km Gaussian jets are near the T21 grid scale, so
+            # unfiltered Gibbs ringing contaminates the vorticity field.
+            spectral_filter_order=8 if test_num in (5, 6, 8) else 0,
         )
         model = SpectralShallowWaterModel(grid, config)
         if test_num == 6:
             from tests.test_cases.williamson_extended import (
                 williamson_test6_spectral)
             state = williamson_test6_spectral(grid)
+            state = model.filter_initial_state(state)
+        elif test_num == 8:
+            from tests.test_cases.colliding_modons import (
+                colliding_modons_spectral)
+            state = colliding_modons_spectral(grid)
             state = model.filter_initial_state(state)
         elif test_num == 2:
             state = williamson_test2_spectral(grid)
@@ -2808,6 +2967,11 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 "v": v,
                 "wind_speed": np.sqrt(u ** 2 + v ** 2),
                 "height": phi / float(constants.g),
+                # #521 cross-grid vorticity: the spectral state carries
+                # relative vorticity natively — synthesize it exactly
+                # (no finite-difference curl needed).
+                "vorticity": np.asarray(
+                    sh_synthesis(grid, s.vor_hat.data), dtype=np.float64),
             }
 
         key_array_fn = lambda s: s.phi_hat.data
@@ -2960,6 +3124,10 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             ("height", "Fluid depth h (m)", "viridis"),
             # Rendered only when present in the snapshot (W6); see above.
             ("p_s", "Surface pressure (Pa)", "viridis"),
+            # Rendered only when the extract emits it (all four grids do
+            # for colliding modons — the #521 signature field; the cube
+            # extract emits it for every SW case).
+            ("vorticity", "Relative vorticity (1/s)", "RdBu_r"),
         ],
         mass_key="mean_height", energy_key="max_wind",
         scalar_units={"mean_height": "m", "max_wind": "m/s"})
@@ -5909,10 +6077,12 @@ ATMOSPHERE_COMPARISON_FIELDS: dict[str, list[dict]] = {
     ],
     # Colliding modons (issue 521): two zonal Gaussian jets roll up into
     # counter-rotating dipoles that collide and depart.  Zonal wind shows the
-    # westerly/easterly bursts; autoscale height/wind so the collision is
-    # visible.  (Relative vorticity — the cleanest modon signature — is a
-    # follow-up diagnostic; the cube extract_fn currently emits u/v/speed/h.)
+    # westerly/easterly bursts; relative vorticity (cube extract_fn via
+    # ``_latlon_curl``) is the cleanest modon signature — the field
+    # JosephMouallem's reference figures plot; snapshots land in
+    # ``results/.../snapshots_vorticity.png`` + ``snapshots_latlon.npz``.
     "colliding_modons": [
+        {"field": "vorticity",  "vmin": -3e-5, "vmax": 3e-5,  "cmap": "RdBu_r",  "units": "1/s"},
         {"field": "u",          "vmin": -50,   "vmax": 50,    "cmap": "RdBu_r",  "units": "m/s"},
         {"field": "v",          "vmin": None,  "vmax": None,  "cmap": "RdBu_r",  "units": "m/s"},
         {"field": "wind_speed", "vmin": 0,     "vmax": None,  "cmap": "viridis", "units": "m/s"},

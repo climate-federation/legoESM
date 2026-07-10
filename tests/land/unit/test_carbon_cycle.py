@@ -20,7 +20,11 @@ import jax
 import jax.numpy as jnp
 import numpy.testing as npt
 
-from legoesm.land.carbon.config import CarbonConfig, CarbonState
+from legoesm.land.carbon.config import (
+    CarbonConfig,
+    CarbonDiagnostics,
+    CarbonState,
+)
 from legoesm.land.carbon.carbon_cycle import (
     compute_gpp,
     compute_phenology,
@@ -28,6 +32,8 @@ from legoesm.land.carbon.carbon_cycle import (
     seasonal_co2_flux,
     step_carbon,
     step_carbon_differland,
+    _GC_TO_KG_CO2,
+    _SPD,
     _temperate_modifier,
     _effective_rate,
 )
@@ -231,6 +237,18 @@ class TestDecomposition(unittest.TestCase):
         mod_cold = _temperate_modifier(jnp.array([270.0]), precip, cfg)
         mod_warm = _temperate_modifier(jnp.array([300.0]), precip, cfg)
         self.assertTrue(float(mod_warm[0]) > float(mod_cold[0]))
+
+    def test_het_modifier_uses_q10_het_not_autotrophic_q10(self):
+        """Decomposition modifier responds to Q10_het_exp, NOT Q10_exp."""
+        precip = jnp.array([3e-5])
+        T = jnp.array([300.0])   # warm, above T_ref
+        base = _temperate_modifier(T, precip, _default_config(Q10_het_exp=0.09))
+        stronger = _temperate_modifier(T, precip, _default_config(Q10_het_exp=0.12))
+        weaker = _temperate_modifier(T, precip, _default_config(Q10_het_exp=0.04))
+        self.assertTrue(float(stronger[0]) > float(base[0]) > float(weaker[0]))
+        # Changing the AUTOTROPHIC Q10_exp must NOT change the het modifier.
+        alt_auto = _temperate_modifier(T, precip, _default_config(Q10_exp=0.11))
+        npt.assert_allclose(base, alt_auto, rtol=1e-9)
 
     def test_effective_rate_small_dt(self):
         """For small dt, effective rate ≈ raw rate."""
@@ -488,6 +506,183 @@ class TestDifferLandStep(unittest.TestCase):
 
 
 # ===================================================================
+# DifferLand diagnostics (return_diagnostics=True)
+# ===================================================================
+
+class TestCarbonDiagnostics(unittest.TestCase):
+
+    def _step_diag(self, **forcing_overrides):
+        cfg = _default_config(scheme="differland")
+        ncol = 3
+        state = _make_carbon_state(shape=(ncol,))
+        args = dict(
+            sw_down=jnp.full(ncol, 350.0),
+            T=jnp.full(ncol, 293.0),
+            co2_ppmv=jnp.full(ncol, 400.0),
+            beta=jnp.full(ncol, 0.8),
+            lat=jnp.full(ncol, 0.7),
+            precip=jnp.full(ncol, 3e-5),
+        )
+        args.update(forcing_overrides)
+        new_state, co2_flux, diag = step_carbon_differland(
+            state, args["sw_down"], args["T"], args["co2_ppmv"], args["beta"],
+            args["lat"], 160.0, args["precip"], cfg, 1800.0,
+            return_diagnostics=True,
+        )
+        return state, new_state, co2_flux, diag
+
+    def test_returns_three_tuple_and_type(self):
+        _, new_state, co2_flux, diag = self._step_diag()
+        self.assertIsInstance(diag, CarbonDiagnostics)
+        self.assertIsInstance(new_state, CarbonState)
+        for name in diag._fields:
+            self.assertTrue(jnp.all(jnp.isfinite(getattr(diag, name))),
+                            f"diag.{name} not finite")
+
+    def test_state_update_unchanged_by_diag_flag(self):
+        """return_diagnostics must not alter the state update or flux."""
+        cfg = _default_config(scheme="differland")
+        ncol = 3
+        state = _make_carbon_state(shape=(ncol,))
+        common = (state, jnp.full(ncol, 350.0), jnp.full(ncol, 293.0),
+                  jnp.full(ncol, 400.0), jnp.full(ncol, 0.8),
+                  jnp.full(ncol, 0.7), 160.0, jnp.full(ncol, 3e-5), cfg, 1800.0)
+        s2, f2 = step_carbon_differland(*common)
+        s3, f3, _ = step_carbon_differland(*common, return_diagnostics=True)
+        npt.assert_allclose(f2, f3, rtol=0, atol=0)
+        for name in s2._fields:
+            npt.assert_allclose(getattr(s2, name), getattr(s3, name),
+                                rtol=0, atol=0)
+
+    def test_allocation_closes_to_npp(self):
+        """a_fol + a_lab + a_root + a_wood == max(npp, 0), exactly."""
+        _, _, _, diag = self._step_diag()
+        alloc_sum = diag.a_fol + diag.a_lab + diag.a_root + diag.a_wood
+        npp_pos = jnp.maximum(diag.npp, 0.0)
+        npt.assert_allclose(alloc_sum, npp_pos, rtol=1e-6, atol=1e-9)
+        # Every allocation flux is non-negative (no pool "steals" carbon).
+        for name in ("a_fol", "a_lab", "a_root", "a_wood"):
+            self.assertTrue(jnp.all(getattr(diag, name) >= 0.0),
+                            f"{name} negative")
+
+    def test_npp_and_rauto_identities(self):
+        """npp == gpp - r_auto and r_auto == r_maint + r_growth."""
+        _, _, _, diag = self._step_diag()
+        npt.assert_allclose(diag.npp, diag.gpp - diag.r_auto, rtol=1e-6, atol=1e-9)
+        npt.assert_allclose(diag.r_auto, diag.r_maint + diag.r_growth,
+                            rtol=1e-6, atol=1e-9)
+        npt.assert_allclose(
+            diag.r_het, diag.r_het_lit + diag.r_het_som + diag.r_het_cwd,
+            rtol=1e-6, atol=1e-9)
+
+    def test_cwd_humification_split(self):
+        """Wood turnover splits into humified SOM input + CWD respiration."""
+        cfg = _default_config(scheme="differland", cwd_humification_eff=0.3)
+        ncol = 2
+        state = _make_carbon_state(shape=(ncol,))
+        _, _, diag = step_carbon_differland(
+            state, jnp.full(ncol, 300.0), jnp.full(ncol, 293.0),
+            jnp.full(ncol, 400.0), jnp.full(ncol, 0.8), jnp.full(ncol, 0.7),
+            160.0, jnp.full(ncol, 3e-5), cfg, 1800.0, return_diagnostics=True)
+        # wood_to_som + r_het_cwd == wood_litter (conserved split)
+        npt.assert_allclose(diag.wood_to_som + diag.r_het_cwd, diag.wood_litter,
+                            rtol=1e-9, atol=1e-12)
+        npt.assert_allclose(diag.wood_to_som, 0.3 * diag.wood_litter,
+                            rtol=1e-6, atol=1e-12)
+
+    def test_nee_matches_co2_flux(self):
+        """diag.nee [gC/m2/day] converts to the returned co2_flux exactly."""
+        _, _, co2_flux, diag = self._step_diag()
+        expected_flux = diag.nee / _SPD * _GC_TO_KG_CO2
+        npt.assert_allclose(co2_flux, expected_flux, rtol=1e-9, atol=1e-30)
+
+    def test_nee_budget_identity(self):
+        """nee == r_auto - unmet_npp_deficit + r_het - gpp (definition)."""
+        _, _, _, diag = self._step_diag()
+        expected = (diag.r_auto - diag.unmet_npp_deficit
+                    + diag.r_het - diag.gpp)
+        npt.assert_allclose(diag.nee, expected, rtol=1e-6, atol=1e-9)
+
+    def test_diag_conservation(self):
+        """Pool change equals -nee*dt_days using the diagnostics only."""
+        state, new_state, _, diag = self._step_diag()
+        dt_days = 1800.0 / _SPD
+        dC = sum(getattr(new_state, f) - getattr(state, f)
+                 for f in state._fields)
+        npt.assert_allclose(dC, -diag.nee * dt_days, rtol=1e-6, atol=1e-9)
+
+    def test_lai_definition(self):
+        cfg = _default_config(scheme="differland")
+        _, _, _, diag = self._step_diag()
+        state = _make_carbon_state(shape=(3,))
+        npt.assert_allclose(diag.lai, state.C_fol / cfg.LCMA, rtol=1e-6)
+
+    def test_dispatcher_diag_differland(self):
+        cfg = _default_config(scheme="differland")
+        state = _make_carbon_state()
+        out = step_carbon(
+            state, sw_down=jnp.full(4, 300.0), T=jnp.full(4, 290.0),
+            co2_ppmv=jnp.full(4, 400.0), beta=jnp.full(4, 0.8),
+            lat=jnp.full(4, 0.7), doy=150.0, precip=jnp.full(4, 3e-5),
+            config=cfg, dt=600.0, return_diagnostics=True,
+        )
+        self.assertEqual(len(out), 3)
+        self.assertIsInstance(out[2], CarbonDiagnostics)
+
+    def test_dispatcher_diag_raises_for_non_differland(self):
+        for scheme in ("none", "seasonal"):
+            cfg = _default_config(scheme=scheme)
+            with self.assertRaises(ValueError):
+                step_carbon(
+                    None, sw_down=jnp.full(2, 300.0), T=jnp.full(2, 290.0),
+                    co2_ppmv=jnp.full(2, 400.0), beta=jnp.full(2, 0.8),
+                    lat=jnp.full(2, 0.7), doy=150.0, precip=jnp.full(2, 3e-5),
+                    config=cfg, dt=600.0, return_diagnostics=True,
+                )
+
+
+# ===================================================================
+# Woody vs herbaceous allocation
+# ===================================================================
+
+class TestWoodyAllocation(unittest.TestCase):
+
+    def _diag(self, woody):
+        cfg = _default_config(scheme="differland", woody=woody)
+        ncol = 2
+        state = _make_carbon_state(shape=(ncol,))
+        _, _, diag = step_carbon_differland(
+            state, jnp.full(ncol, 400.0), jnp.full(ncol, 295.0),
+            jnp.full(ncol, 400.0), jnp.full(ncol, 1.0), jnp.full(ncol, 0.5),
+            180.0, jnp.full(ncol, 3e-5), cfg, 1800.0, return_diagnostics=True)
+        return diag
+
+    def test_woody_allocates_to_wood(self):
+        diag = self._diag(woody=True)
+        self.assertTrue(jnp.all(diag.a_wood > 0.0))
+
+    def test_herbaceous_no_wood_allocation(self):
+        diag = self._diag(woody=False)
+        npt.assert_allclose(diag.a_wood, 0.0, atol=1e-15)
+
+    def test_herbaceous_redirects_wood_to_root(self):
+        """The structural (wood) fraction is invested in roots instead."""
+        dw = self._diag(woody=True)
+        dh = self._diag(woody=False)
+        self.assertTrue(jnp.all(dh.a_root > dw.a_root))
+        # The extra root allocation equals the woody-case wood allocation.
+        npt.assert_allclose(dh.a_root - dw.a_root, dw.a_wood, rtol=1e-6, atol=1e-9)
+
+    def test_allocation_closes_both_woodiness(self):
+        for woody in (True, False):
+            diag = self._diag(woody=woody)
+            alloc = diag.a_fol + diag.a_lab + diag.a_root + diag.a_wood
+            npt.assert_allclose(alloc, jnp.maximum(diag.npp, 0.0),
+                                rtol=1e-6, atol=1e-9,
+                                err_msg=f"allocation not closed (woody={woody})")
+
+
+# ===================================================================
 # Seasonal Cycle
 # ===================================================================
 
@@ -600,6 +795,17 @@ class TestInitCarbonState(unittest.TestCase):
         state = init_carbon_state((3,), cfg)
         npt.assert_allclose(state.C_lab, 50.0)
         npt.assert_allclose(state.C_som, 5000.0)
+
+    def test_woody_init_keeps_wood_pool(self):
+        cfg = _default_config(woody=True, C_wood_init=8000.0)
+        state = init_carbon_state((3,), cfg)
+        npt.assert_allclose(state.C_wood, 8000.0)
+
+    def test_herbaceous_init_zeroes_wood_pool(self):
+        """woody=False must start with NO wood, not the C_wood_init default."""
+        cfg = _default_config(woody=False, C_wood_init=10000.0)
+        state = init_carbon_state((3,), cfg)
+        npt.assert_allclose(state.C_wood, 0.0)
 
 
 # ===================================================================

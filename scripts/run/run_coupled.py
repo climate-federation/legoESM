@@ -346,7 +346,7 @@ def build_parser():
     # MOST vs atmosphere constant) — the exact inconsistency validate() below
     # rejects for turbulence="none".
     parser.add_argument("--surface-bulk-scheme", default="constant",
-                        choices=["constant", "coare3", "large_yeager"],
+                        choices=["constant", "most", "coare3", "large_yeager"],
                         help="AIR-SEA surface bulk-flux algorithm for the "
                              "atmosphere surface layer + the coupler OCEAN tile "
                              "(the 3D-ocean air-sea flux). 'coare3' is the "
@@ -447,6 +447,14 @@ def build_parser():
                         help="Override convective (Slingo) cloud-cover cap "
                              "(CloudConfig.conv_cloud_max). Range [0.1, 1.0]. "
                              "Default: CloudConfig default.")
+    parser.add_argument("--conv-cloud-condensate",
+                        dest="cloud_conv_cloud_condensate",
+                        type=float, default=None,
+                        help="Override in-cloud condensate [kg/kg] of the "
+                             "convective anvil deck "
+                             "(CloudConfig.conv_cloud_condensate). LOWER => "
+                             "optically THINNER / more realistic anvil. Range "
+                             "[1e-5, 1e-3]. Default: CloudConfig default.")
     parser.add_argument("--microphysics", default="morrison",
                         choices=list(VALID_MICROPHYSICS),
                         help="Microphysics scheme (default: morrison — the "
@@ -506,6 +514,14 @@ def build_parser():
                              "classification + reference soil map (downloaded + "
                              "cached on first use). 'analytical' = latitude-band "
                              "PFT fractions, no soil map.")
+    parser.add_argument("--transient-land-cover", dest="transient_land_cover",
+                        action="store_true", default=False,
+                        help="Re-weight the CLM land vegetation params each segment "
+                             "from --land-cover-surfdata's transient pft_frac(year,...) "
+                             "(LUH2/HYDE/...); soil frozen.  Requires --land-params clm.")
+    parser.add_argument("--land-cover-surfdata", dest="land_cover_surfdata", default="",
+                        help="Transient legoesm_surfdata NetCDF (multi-year "
+                             "pft_frac) for --transient-land-cover.")
     parser.add_argument("--land-diurnal-surface", dest="land_diurnal_surface",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="Coupled diurnal surface model for multilayer land (ON "
@@ -864,6 +880,7 @@ def main():
         cloud_rh_crit=args.cloud_rh_crit,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_conv_cloud_max=args.cloud_conv_cloud_max,
+        cloud_conv_cloud_condensate=args.cloud_conv_cloud_condensate,
         microphysics=args.microphysics,
         days=args.days,
         experiment=args.experiment,
@@ -952,7 +969,8 @@ def main():
             mode="two_layer", h_mix=args.ocean_h_mix, restore_deep=True,
             # The SLAB/two-layer ocean uses its own bulk scheme (default MOST);
             # the prognostic 3D ocean is what gets COARE on the coupler tile.
-            # The thermo convention still matches the atmosphere surface layer.
+            # thermo_convention keeps the slab heat-budget turbulent fluxes
+            # constant-set-consistent with the atmosphere surface layer.
             bulk_scheme=args.slab_bulk_scheme,
             gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
             thermo_convention=args.bulk_thermo_convention,
@@ -976,6 +994,8 @@ def main():
         overrides["use_pft"] = True
     overrides["land_diurnal_surface"] = args.land_diurnal_surface
     overrides["land_elev_bands"] = args.land_elev_bands
+    overrides["transient_land_cover"] = args.transient_land_cover
+    overrides["land_cover_surfdata"] = args.land_cover_surfdata
 
     # Explicit --land-scheme overrides the preset's land model for ANY ocean mode
     # (the woa branch already applied its own default above; re-applying the same
@@ -1067,14 +1087,13 @@ def main():
         # the 3D-ocean q_net used the non-gusty tile flux -> weak evaporation
         # -> dry atmosphere -> cold collapse (cmip_air_sea_decoupling).
         coupler_config = CouplerConfig(
-            bulk_scheme=args.surface_bulk_scheme,
             gustiness_w_zi=(args.surface_gustiness_zi or 0.0),
             thermo_convention=args.bulk_thermo_convention,
             stability_scheme=args.surface_stability_scheme,
         )
         logger.info("  Surface bulk-flux scheme: %s (thermo: %s; stability: %s; "
-                    "atmosphere + coupler ocean tile); convective gustiness "
-                    "z_i=%.0f m",
+                    "atmosphere + coupler ocean tile); convective "
+                    "gustiness z_i=%.0f m",
                     args.surface_bulk_scheme, args.bulk_thermo_convention,
                     args.surface_stability_scheme,
                     (args.surface_gustiness_zi or 0.0))

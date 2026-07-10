@@ -386,3 +386,78 @@ def test_tally_batch_direct():
   total = (float(res.vol_abs_total) + float(res.sfc_abs_total)
            + float(res.tod_up_frac))
   assert abs(total - 1.0) < 1e-12
+
+
+# ---------------------------------------------------------------------------
+# HG mixture sampling: g_cloud clip must stay STRICTLY inside (-1, 1)
+# (FIX: an inclusive clip to +-1.0 feeds henyey_greenstein_mu its g=+1
+# singularity s = (1-g^2)/(1-g+2gu) = 0/0 at the attainable draw u=0).
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_scatter_clipped_g_finite_directions():
+  """Cloud-dominated cell with g/(1-rayleigh_frac) > 1 (clip engaged at
+  _HG_G_MAX): every sampled direction is a finite unit vector."""
+  from legoesm.atmosphere.physics.radiation.mc3d import sampling
+  direction = jnp.array([0.0, 0.0, -1.0])
+  g = jnp.asarray(0.95)
+  rayleigh_frac = jnp.asarray(0.1)   # g/one_m = 1.055... -> clipped
+  keys = jax.random.split(jax.random.PRNGKey(7), 512)
+  dirs = jax.vmap(
+      lambda k: sampling.scatter_direction_mixed(k, direction, g,
+                                                 rayleigh_frac))(keys)
+  assert bool(jnp.all(jnp.isfinite(dirs)))
+  np.testing.assert_allclose(
+      np.asarray(jnp.linalg.norm(dirs, axis=-1)), 1.0, atol=1e-6)
+
+
+def test_mixed_scatter_clipped_g_grad_finite():
+  """The clipped extreme stays differentiable: d(direction)/dg finite (the
+  clip VJP is zero past the bound, never NaN -- and jnp.where's both-branch
+  evaluation must not leak a NaN from the cloud branch)."""
+  from legoesm.atmosphere.physics.radiation.mc3d import sampling
+  direction = jnp.array([0.0, 0.0, -1.0])
+  rayleigh_frac = jnp.asarray(0.1)
+  key = jax.random.PRNGKey(3)
+
+  def loss(g):
+    d = sampling.scatter_direction_mixed(key, direction, g, rayleigh_frac)
+    return jnp.sum(d * jnp.array([1.0, 2.0, 3.0]))
+
+  for g0 in (0.95, 0.89):   # clipped (0.95/0.9 > 1) and un-clipped
+    grad = jax.grad(loss)(jnp.asarray(g0))
+    assert bool(jnp.isfinite(grad)), f"non-finite grad at g={g0}"
+
+
+def test_hg_mu_finite_at_clip_bound_worst_case_u0(monkeypatch):
+  """Non-vacuous singularity guard: at the worst-case uniform draw u = 0.0
+  (attainable from jax.random.uniform's [0,1) range) the HG inversion stays
+  finite for ANY g in [-1, 1] because henyey_greenstein_mu clips g at the
+  SOURCE. Both the pure-HG path (scatter_direction) and the direct call are
+  protected, and the raw (unclipped) formula at g=1.0, u=0 is shown to NaN so
+  the clip is provably load-bearing."""
+  from legoesm.atmosphere.physics.radiation.mc3d import sampling
+
+  def _u_zero(key, *args, dtype=jnp.float64, **kwargs):
+    return jnp.zeros((), dtype=dtype)
+
+  monkeypatch.setattr(jax.random, "uniform", _u_zero)
+  # Source clip: even a caller passing exactly g = 1.0 gets a finite mu = -1
+  # (analytic u=0 limit, s = 1 + g), not the 0/0 NaN.
+  mu_boundary = sampling.henyey_greenstein_mu(
+      jax.random.PRNGKey(0), jnp.asarray(1.0))
+  assert bool(jnp.isfinite(mu_boundary))
+  np.testing.assert_allclose(float(mu_boundary), -1.0, atol=1e-9)
+  # The default (rayleigh_frac=None) pure-HG scatter path is finite at g=1.0
+  # too — the HIGH-severity gap the source clip closes.
+  new_dir = sampling.scatter_direction(
+      jax.random.PRNGKey(0), jnp.asarray([0.0, 0.0, 1.0]), jnp.asarray(1.0))
+  assert bool(jnp.all(jnp.isfinite(new_dir)))
+  np.testing.assert_allclose(float(jnp.linalg.norm(new_dir)), 1.0, atol=1e-9)
+  # Hazard is real: the RAW unclipped HG inversion at g=1.0, u=0 is 0/0 = NaN
+  # (IEEE), proving the source clip is load-bearing (not a no-op).
+  g_raw = jnp.asarray(1.0)
+  u0 = jnp.asarray(0.0)
+  s_raw = (1.0 - g_raw * g_raw) / (1.0 - g_raw + 2.0 * g_raw * u0)
+  mu_raw = (1.0 + g_raw * g_raw - s_raw * s_raw) / (2.0 * g_raw)
+  assert bool(jnp.isnan(mu_raw))

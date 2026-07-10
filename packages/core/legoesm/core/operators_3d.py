@@ -173,11 +173,32 @@ def hyperdiffusion_3d(
     field_3d: jax.Array, grid: CubedSphereGrid, coeff: float,
     padded: jax.Array | None = None,
     inner_lap: jax.Array | None = None,
+    compact_outer: bool = False,
 ) -> jax.Array:
     """Compute hyperdiffusion at all levels using native 4D halo.
 
-    -coeff * nabla^4(field) where the inner Laplacian is the compact
-    stencil and the outer is the standard div(grad) form.
+    ``-coeff * nabla^4(field)``.  The inner Laplacian is always the
+    compact (reach-1) stencil; the OUTER Laplacian is selected by
+    ``compact_outer``:
+
+    - ``compact_outer=False`` (default): the outer ``∇²`` is the wide
+      ``div(grad)`` form.  ``gradient_x/y_3d`` use the centred reach-2
+      difference ``(f[i+1]-f[i-1])/dx``, which is IDENTICALLY ZERO on a
+      ``(-1)^i`` grid mode, so the composite ``∇⁴`` has an exact 2Δx
+      NULL — it does not damp the grid-scale checkerboard the biharmonic
+      exists to remove (contract's "grid-scale noise damped far faster"
+      is vacuous on this path).  Kept as the default only so that dycore
+      coefficients tuned against this (grid-scale-blind) operator stay
+      bit-identical; flipping the global default needs a coefficient
+      re-tune + atm/ocean matrix + visual-regression campaign.
+    - ``compact_outer=True``: the outer ``∇²`` is ALSO the compact
+      stencil, so ``∇⁴ = ∇²_compact(∇²_compact(field))`` — the
+      ``(1,-4,6,-4,1)`` stencil whose transfer symbol ``16 sin⁴(k dx/2)``
+      is MAXIMAL at 2Δx (matches MOM5/MOM6 ``delsq`` twice, MPAS-O
+      ``del4=del2(del2)``, Griffies 2004).  On the cubed sphere its
+      area-integral non-conservation (~1e-3) is bounded by the same
+      halo-interp limit as the wide form (in practice slightly SMALLER),
+      and it damps the 2Δx mode by ~1024·coeff/dx⁴ instead of ~0.
 
     Parameters
     ----------
@@ -195,6 +216,10 @@ def hyperdiffusion_3d(
         Laplacian on the same input and wants to reuse it for the
         biharmonic.  ``padded`` is then ignored for the inner stage
         (still does not affect the outer halo).
+    compact_outer : bool
+        Select the compact (2Δx-damping) outer Laplacian.  Default
+        ``False`` preserves the legacy wide ``div(grad)`` outer stage
+        bit-identically.
 
     Returns
     -------
@@ -206,16 +231,20 @@ def hyperdiffusion_3d(
         lap1 = inner_lap
     else:
         lap1 = laplacian_compact_3d(field_3d, grid, padded=padded)
-    # Outer ∇² = div(grad).  Pad lap1 once and feed it to both
-    # gradient_x_3d and gradient_y_3d via their ``padded=`` kwarg —
-    # otherwise each grad call would emit its own pad_halo_4d MPI
-    # exchange on the same lap1 (saves 1 halo MPI call per hyperdiff).
+    # Pad lap1 once and reuse for the outer stage — otherwise each
+    # gradient / compact-Laplacian call would emit its own pad_halo_4d
+    # MPI exchange on the same lap1 (saves 1 halo MPI call per hyperdiff).
     dg = getattr(grid, 'duogrid', None)
     offsets = None if dg is not None else grid.halo_interp_offsets
     lap1_pad = pad_halo_4d(lap1, interp_offsets=offsets, duogrid=dg)
-    gx = gradient_x_3d(lap1, grid, padded=lap1_pad)
-    gy = gradient_y_3d(lap1, grid, padded=lap1_pad)
-    lap2 = divergence_3d(gx, gy, grid)
+    if compact_outer:
+        # Compact outer ∇² -> ∇⁴ = compact(compact): maximal 2Δx damping.
+        lap2 = laplacian_compact_3d(lap1, grid, padded=lap1_pad)
+    else:
+        # Wide outer ∇² = div(grad): legacy path (2Δx null, see docstring).
+        gx = gradient_x_3d(lap1, grid, padded=lap1_pad)
+        gy = gradient_y_3d(lap1, grid, padded=lap1_pad)
+        lap2 = divergence_3d(gx, gy, grid)
     return -coeff * lap2
 
 

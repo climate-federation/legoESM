@@ -199,18 +199,22 @@ def latent_heat_vaporization_sst(T_sfc_K):
     """SST-dependent latent heat of vaporization [J/kg] (NEMO ``L_vap``).
 
     ``L = (2.501 - 0.00237 (T - T_freeze)) 1e6``; equals ``constants.L_v``
-    at 0 degC by construction.
+    at 0 degC by construction.  NEMO-parity float64 pin around the shared
+    :func:`legoesm.thermo.latent_heat_vaporization_sst` (#762 — one
+    formula, two dtype contracts).
     """
-    return constants.L_v - 2.370e3 * (
-        jnp.asarray(T_sfc_K, dtype=jnp.float64) - constants.T_freeze
-    )
+    from legoesm.thermo import latent_heat_vaporization_sst as _l_sst
+    return _l_sst(jnp.asarray(T_sfc_K, dtype=jnp.float64))
 
 
 def moist_air_cp(q_air):
-    """Moist-air specific heat [J/(kg K)] (NEMO ``cp_air``)."""
-    return constants.c_p_dry_air_nemo + constants.c_p_vapor_nemo * jnp.asarray(
-        q_air, dtype=jnp.float64
-    )
+    """Moist-air specific heat [J/(kg K)] (NEMO ``cp_air``).
+
+    NEMO-parity float64 pin around the shared
+    :func:`legoesm.thermo.moist_air_cp` (#762).
+    """
+    from legoesm.thermo import moist_air_cp as _cp_moist
+    return _cp_moist(jnp.asarray(q_air, dtype=jnp.float64))
 
 
 def _virt_temp(T_K, q):

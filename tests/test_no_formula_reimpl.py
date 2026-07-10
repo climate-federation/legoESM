@@ -242,18 +242,15 @@ CANONICAL_FORMULAS = {
             # GWD hines/lindzen/mcfarlane/prognostic_spectral migrated their
             # inline g/θ·∂θ/∂z N² to physics._shared.brunt_vaisala_n_full
             # (ponytail dedup 2026-06-17) → budget ratcheted to 0 (entries removed).
-            # clubb_lite keeps its single inline g/θ N² term by decision (the
-            # buoyancy_coefficient wrapper was judged superfluous there —
-            # docs/dev-notes/clubb_port_history.md); this restores the pre-CLUBB-port
-            # main baseline value, it is NOT new debt.
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_lite.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py": 3,
+            # Turbulence dedup 2026-07-07: the N²/bulk-Ri g/θ sites in
+            # clubb_lite / louis / pbl_height / smagorinsky / tke and edmf's
+            # N²_half migrated to physics._shared.buoyancy_coefficient →
+            # budgets ratcheted (entries removed / edmf 3 → 2).  edmf keeps
+            # its two anelastic parcel-buoyancy g·θ'/θ sites (updraft buoy +
+            # mf_buoyancy), a genuinely different (non-N²) form.
+            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py": 2,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/holtslag_boville.py": 4,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/louis.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/mynn25.py": 3,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/pbl_height.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/smagorinsky.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/tke.py": 1,
             # ysu.py: 4 inline g/θ buoyancy/N² re-derivations migrated to
             # physics._shared.buoyancy_coefficient (audit item 7) → budget 0
             # (entry removed; was 3, which had already gone stale at 4 actual).
@@ -298,16 +295,12 @@ CANONICAL_FORMULAS = {
             # New on main while this branch was in flight (rebase 2026-06-12
             # baseline seed, not branch debt): 3 inline (p/p0)^κ sites.
             "packages/atmosphere/legoesm/atmosphere/dynamics/spectral_les_moist.py": 3,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py": 2,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/holtslag_boville.py": 2,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/louis.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/mynn25.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/pbl_height.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/smagorinsky.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/tke.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/vertical_diffusion.py": 1,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/ysu.py": 1,
+            # Turbulence dedup 2026-07-07: every turbulence-module inline
+            # (p/p0)^κ / (p0/p)^κ site (edmf, holtslag_boville, integration,
+            # louis, mynn25, pbl_height, smagorinsky, tke, vertical_diffusion,
+            # ysu) migrated to physics._shared.exner_function (forward Π or
+            # 1/Π for the inverse direction) → budgets ratcheted to 0
+            # (entries removed).
             "packages/atmosphere/legoesm/atmosphere/sam_case_forcing.py": 2,
             "packages/atmosphere/legoesm/atmosphere/scm_forcing.py": 1,
             "packages/core/legoesm/grids/vertical.py": 4,

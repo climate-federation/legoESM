@@ -130,9 +130,18 @@ def ssp_rk3_step_scan(
         # ``_pytree_linear_combination`` but dtype-stable for mixed-
         # precision pytrees.
         def _comb(si, ki):
+            # Cast BOTH the RK coefficients AND the tendency leaf ``ki`` to the
+            # STATE leaf dtype.  The hydrostatic lat-lon C-grid dycore emits a
+            # float64 ``p_s`` tendency against a float32 state; without casting
+            # ``ki``, ``b_typed(f32) * ki(f64)`` upcasts the stage to float64 and
+            # ``jax.lax.scan`` refuses to close (carry-in float32 != carry-out
+            # float64).  Casting to ``si.dtype`` keeps the combination dtype-
+            # stable at the storage precision, matching the non-scan ssp_rk3
+            # (which has no carry-type check) bit-for-bit on equal-dtype leaves.
+            # See #835.
             a_typed = a.astype(si.dtype)
             b_typed = b.astype(si.dtype)
-            return a_typed * si + b_typed * ki
+            return a_typed * si + b_typed * ki.astype(si.dtype)
 
         k_new = jax.tree.map(_comb, state_init, k_axpy)
         return (k_new, state_init), None

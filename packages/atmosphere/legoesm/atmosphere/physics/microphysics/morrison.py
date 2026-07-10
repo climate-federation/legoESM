@@ -1298,9 +1298,9 @@ def morrison_microphysics(
     # conservation holds exactly when the CFL limiter fires.
     precipitation = precip_r + precip_i + precip_s + precip_g
 
-    # Pin dtype to the input precision so we never silently promote
-    # the unused-species placeholders to f64 under x64 mode.
-    jnp.zeros((ncol, nlev), dtype=T.dtype)
+    # (No placeholder outputs here — every MicrophysicsOutput field below is
+    # a computed tendency, so no dtype pin is needed; a former bare
+    # ``jnp.zeros(...)`` expression at this point was dead code.)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,

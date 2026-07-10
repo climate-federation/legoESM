@@ -350,10 +350,12 @@ def global_integral(field: Field, grid: CubedSphereGrid) -> jax.Array:
     -------
     scalar : The global integral.
     """
-    from legoesm.core.conservation import conservation_accumulator
+    from legoesm.core.conservation import (
+        conservation_accumulator, shard_invariant_cube_face_sum,
+        cube_faces_are_whole_on_shards,
+    )
     acc = conservation_accumulator()
     prod = field.data.astype(acc) * grid.area.astype(acc)
-    local_sum = jnp.sum(prod)
 
     if is_distributed():
         # iter-169: deferred import (avoids eager top-level
@@ -362,13 +364,21 @@ def global_integral(field: Field, grid: CubedSphereGrid) -> jax.Array:
         # that the previous code path would hit at runtime as
         # NameError).
         from legoesm.parallel.reductions import global_sum_mpi
-        return global_sum_mpi(local_sum)
+        return global_sum_mpi(jnp.sum(prod))
 
-    # For multi-device (non-MPI, NamedSharding-based SPMD): jnp.sum on
-    # a face-sharded array already produces the correct global sum —
-    # JAX/XLA automatically inserts an all-reduce when the reduction
-    # spans a sharded axis.  No explicit psum is needed.
-    return local_sum
+    # Shard-count-invariant reduction for the cube face axis (issue #852): a
+    # face-sharded jnp.sum reduces per-shard then all-reduces, and float32 is
+    # non-associative, so the bare sum depends on the device count and diverges
+    # from single-device — which the mass fixer amplifies.  The shared helper
+    # reduces each whole face then combines the 6 partials in a fixed order, so
+    # the integral is bit-identical across single-device and every whole-face
+    # sharding.  Gated on the cube face axis (leading dim 6) AND a whole-face
+    # decomposition (a (6,kt,kt) tiled mesh splits faces → not invariant); a
+    # non-cube grid keeps the plain sum.
+    if (prod.shape[0] == 6 and prod.ndim >= 3
+            and cube_faces_are_whole_on_shards()):
+        return shard_invariant_cube_face_sum(prod)
+    return jnp.sum(prod)
 
 
 def is_distributed() -> bool:

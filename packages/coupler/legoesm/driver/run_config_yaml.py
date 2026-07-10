@@ -159,60 +159,50 @@ def load_params_config(path) -> dict:
     return dict(doc)
 
 
-# The atmosphere ExperimentConfig FLATTENS its (curated) tunable scheme
-# parameters to scalar fields named ``<prefix>_<field>`` (e.g.
-# ``cloud_q_c_diagnostic`` <- CloudConfig.q_c_diagnostic) instead of nesting the
-# scheme ``*Config`` NamedTuples, so the class-router below cannot reach them.
-# This maps each scheme config class to its ExperimentConfig scalar prefix; the
-# qualified_name -> ExperimentConfig-field map is then auto-derived + validated
-# (only params whose ``<prefix>_<field>`` is a real ExperimentConfig field are
-# included), so a calibration file keyed by the registry's qualified name still
-# drops into run_amip / run_coupled unchanged (issue #691).
-_ATM_PARAM_PREFIX: dict[str, str] = {
-    "CloudConfig": "cloud",
-    "LouisConfig": "louis",
-    "McFarlaneConfig": "mcfarlane",
-    "MorrisonConfig": "morrison",
-    "SBMConfig": "sbm",
-    "BechtoldConfig": "bechtold",
-    "KuoConfig": "kuo",
-    "YSUConfig": "ysu",
-    "ThompsonConfig": "thompson",
+# The atmosphere ExperimentConfig FLATTENS a curated set of tunable scheme
+# parameters to scalar fields (e.g. ``cloud_q_c_diagnostic`` <-
+# CloudConfig.q_c_diagnostic) instead of nesting the scheme ``*Config``
+# NamedTuples, so the class-router cannot reach them.  This maps each registry
+# qualified name to its ExperimentConfig scalar — but ONLY for parameters the
+# physics pipeline ACTUALLY threads from that scalar into the resolved scheme
+# config (``build_cloud_config`` for clouds; ``_resolve_convection`` for
+# sbm/bechtold).  Many ``<prefix>_<field>`` scalars EXIST on ExperimentConfig
+# yet are never read (``_resolve_turbulence``/``_resolve_microphysics``/
+# ``_resolve_gwd`` build default configs and patch only a few fields), so a
+# name-convention map would silently claim dead overrides.  The membership here
+# is machine-verified end-to-end by ``test_atm_scalar_map_is_pipeline_threaded``
+# (builds a pipeline per entry, asserts the resolved scheme config carries the
+# value) — extend this dict only when the pipeline threads a new scalar
+# (issue #691, codex audit).
+_ATM_SCALAR_PARAM_MAP: dict[str, str] = {
+    # clouds -> build_cloud_config (physics_pipeline)
+    "atm.clouds.CloudConfig.rh_crit": "cloud_rh_crit",
+    "atm.clouds.CloudConfig.q_c_diagnostic": "cloud_q_c_diagnostic",
+    "atm.clouds.CloudConfig.conv_cloud_max": "cloud_conv_cloud_max",
+    "atm.clouds.CloudConfig.conv_cloud_condensate": "cloud_conv_cloud_condensate",
+    "atm.clouds.CloudConfig.p_xr": "cloud_p_xr",
+    "atm.clouds.CloudConfig.alpha_xr": "cloud_alpha_xr",
+    # convection -> _resolve_convection (physics_pipeline)
+    "atm.conv.SBMConfig.tau_c": "sbm_tau_c",
+    "atm.conv.SBMConfig.rh_ref": "sbm_RH_ref",
+    "atm.conv.SBMConfig.cape_threshold": "sbm_cape_threshold",
+    "atm.conv.BechtoldConfig.cape_threshold": "bechtold_cape_threshold",
+    # NOTE: the idealized GRAY radiation scheme threads a few of its params
+    # (tau_equator, tau_pole via same-named scalars; sfc_albedo via the shared
+    # `albedo_ocean` scalar) — deliberately NOT in this map.  Gray is not the
+    # production radiation (rrtmgp is), and its scalars are set via `--config`
+    # directly; the reachability audit baselines them under a documented
+    # "idealized / --config-only" reason rather than the qualified-name loader.
 }
 
 
 def build_atm_scalar_param_map() -> dict[str, str]:
     """Return ``{registry qualified_name: ExperimentConfig scalar field}`` for
-    the curated atmosphere tunable parameters ExperimentConfig exposes as flat
-    scalars (issue #691).
-
-    Auto-derived from :data:`_ATM_PARAM_PREFIX` + the live parameter registry +
-    the live ExperimentConfig fields, so a newly-exposed ``<prefix>_<field>``
-    scalar is picked up automatically.  Only pairs whose ExperimentConfig field
-    actually exists are included (a scheme param with no exposed scalar stays
-    unreachable via ``--params`` for atmosphere, by design)."""
-    from legoesm.driver.config import ExperimentConfig
-    from legoesm.training.param_collector import build_registry
-    ec_fields = set(ExperimentConfig._fields)
-    # Case-insensitive index, restricted to UNAMBIGUOUS lowercase keys, so the
-    # fallback below cannot cross-map two distinct fields.  Lets the convention
-    # tolerate an ExperimentConfig scalar that capitalises a symbol in the
-    # scheme field name (e.g. SBMConfig.rh_ref -> ``sbm_RH_ref``).
-    _lower_counts: dict[str, int] = {}
-    for f in ec_fields:
-        _lower_counts[f.lower()] = _lower_counts.get(f.lower(), 0) + 1
-    ec_ci = {f.lower(): f for f in ec_fields if _lower_counts[f.lower()] == 1}
-    out: dict[str, str] = {}
-    for meta in build_registry():
-        prefix = _ATM_PARAM_PREFIX.get(meta.config_class)
-        if prefix is None or not meta.module.startswith("legoesm.atmosphere"):
-            continue
-        candidate = f"{prefix}_{meta.field}"
-        if candidate in ec_fields:
-            out[meta.qualified_name] = candidate
-        elif candidate.lower() in ec_ci:
-            out[meta.qualified_name] = ec_ci[candidate.lower()]
-    return out
+    the atmosphere tunable parameters that ExperimentConfig exposes as a flat
+    scalar AND the physics pipeline actually threads into the scheme config
+    (issue #691).  See :data:`_ATM_SCALAR_PARAM_MAP` for why this is a verified
+    allowlist rather than a name-convention derivation."""
+    return dict(_ATM_SCALAR_PARAM_MAP)
 
 
 def _route_overrides_by_class(node, by_key: dict, *, applied: set):
@@ -272,7 +262,7 @@ def apply_params_to_config(config, params: dict, *, driver: str = "run",
 
     Note (soft limitation): a union config that holds ALL of a family's scheme
     sub-configs simultaneously (``VerticalMixingConfig`` carries kpp/tke/catke;
-    ``MultiLayerLandConfig`` carries carbon/stomata) is always "present", so an
+    ``MultiLayerLandConfig`` carries carbon + stomata) is always "present", so an
     override for a scheme that is not the *selected* one is applied to that
     (inert) sub-config rather than raising — it simply has no effect on the run.
     The strict absent-raise still catches wrong-component params (e.g. an

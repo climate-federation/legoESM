@@ -44,10 +44,10 @@ def test_rad_update_steps_roundtrip():
     # plumbs into train_physics_params + build_training_segment signatures
     import inspect
     from legoesm.training.training_driver import (
-        train_physics_params, _build_training_segment,
+        train_physics_params, build_training_segment,
     )
     assert "rad_update_steps" in inspect.signature(train_physics_params).parameters
-    assert "rad_update_steps" in inspect.signature(_build_training_segment).parameters
+    assert "rad_update_steps" in inspect.signature(build_training_segment).parameters
 
 
 def test_radiation_as_forcing_threads():

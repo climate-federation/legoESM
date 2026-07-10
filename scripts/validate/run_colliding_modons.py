@@ -58,9 +58,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--damp-v", type=float, default=MODON_DAMP_V)
     p.add_argument("--hyperdiff-factor", type=float,
                    default=MODON_HYPERDIFF_FACTOR)  # x cdgrid_hyperdiff_cube(n)
-    # #753: resolution law for the biharmonic backstop. 4 == (ref/n)^4 (default,
-    # grid-scale-damping-time constant); 2 == (ref/n)^2 (FV3 div-damp law) which
-    # the diagnosis showed the modon needs at C96+ (unchanged at C48).
+    # #753: resolution law for the biharmonic backstop. 2 == (ref/n)^2 (default,
+    # FV3 div-damp law; C96 erupts under ^4 but is stable under ^2, validated
+    # 100 days at C36/C48/C96); 4 == (ref/n)^4 grid-scale-damping-time constant
+    # (pre-#753 byte-identical; unchanged at C48 either way).
     p.add_argument("--hyperdiff-scaling", type=int,
                    default=MODON_HYPERDIFF_SCALING, choices=(2, 4))
     # Cube-seam duogrid ON by default: the modon IC's sharp vortex gradients

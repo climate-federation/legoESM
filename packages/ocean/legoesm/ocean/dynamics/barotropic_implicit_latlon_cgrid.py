@@ -980,13 +980,28 @@ def _make_multigrid_preconditioner_banded(
             "multigrid_banded: coarse-grid construction does not handle the "
             "tripolar north-fold; use 'zonal_line' or 'chebyshev'.")
     n_ranks = layout.n_ranks
-    if n_ranks > 1 and layout.n_lat_global % n_ranks != 0:
+    if n_ranks > 1:
         # Unequal bands => ranks would coarsen to different depths (some bands
-        # odd) and the V-cycle would deadlock on mismatched halo schedules.
-        raise ValueError(
-            "multigrid_banded: requires EQUAL bands for lock-step coarsening "
-            f"(n_lat_global={layout.n_lat_global} % n_ranks={n_ranks} != 0); "
-            "use 'zonal_line' (comm-free) under this decomposition.")
+        # odd/unaligned) and the V-cycle would deadlock on mismatched halo
+        # schedules. Divisibility alone no longer proves equal bands now that
+        # make_latlon_band_layout accepts EXPLICIT boundaries (wet-cell
+        # balancing, codex): check the ACTUAL band this rank owns is the
+        # uniform even split. Non-uniform boundaries make at least one rank
+        # fail this and raise BEFORE any collective — a loud abort, never a
+        # mismatched schedule.
+        base, rem = divmod(layout.n_lat_global, n_ranks)
+        uniform = (rem == 0
+                   and layout.n_lat_local == base
+                   and layout.lat_start == layout.rank * base)
+        if not uniform:
+            raise ValueError(
+                "multigrid_banded: requires EQUAL bands (the uniform even "
+                f"split) for lock-step coarsening (n_lat_global="
+                f"{layout.n_lat_global}, n_ranks={n_ranks}, this rank owns "
+                f"[{layout.lat_start}, {layout.lat_end}) = "
+                f"{layout.n_lat_local} rows); wet-cell-balanced / explicit "
+                "band boundaries are not supported here — use 'zonal_line' "
+                "(comm-free) under this decomposition.")
 
     band_layouts = _coarse_band_hierarchy(layout, min_coarse_rows=min_coarse_rows)
     n_levels = len(band_layouts)

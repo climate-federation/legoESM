@@ -479,3 +479,43 @@ def make_kessler_forcing_cube(dt, config: KesslerConfig | None = None):
     return make_kessler_forcing_gridspace(
         dt, dims_3d=_DIMS_CUBE_3D, dims_2d=_DIMS_CUBE_2D, config=config,
     )
+
+
+def make_kessler_column_physics_fn(sigma_coord, dt,
+                                   config: KesslerConfig | None = None):
+    """Per-tile Kessler ``column_physics_fn`` for the TILED cube steps.
+
+    The tiled moist steps (``make_tiled_fv3_hydrostatic_moist_step_stage_2d``
+    / ``make_tiled_fv3_hydrostatic_step_blocked_2d``) inject column physics
+    with the raw-array contract ``fn(T_t, p_s_t, q_v, q_c, q_r) -> (dT,
+    dq_v, dq_c, dq_r)`` (each leading-shape-preserving, tile-local).  This
+    factory is the Kessler bridge for that contract: it flattens the tile's
+    horizontal axes to ``(ncol, nlev)``, runs the SAME shared
+    :func:`kessler_column_tendencies` core that
+    :func:`make_kessler_forcing_cube` (the np<=6 ``physics_fn`` lane) uses,
+    and reshapes back — so the face-sharded and sub-face-tiled lanes run
+    IDENTICAL microphysics (the controlled-comparison requirement for the
+    cube device ladder).
+
+    Same ``dt`` contract as every Kessler adapter: bound into the closure;
+    the caller MUST step with this ``dt`` (saturation adjustment is an
+    increment/``dt`` rate).
+    """
+    if not (float(dt) > 0.0):
+        raise ValueError(
+            f"make_kessler_column_physics_fn: dt must be a positive physics "
+            f"step [s]; got {dt}")
+    cfg = config if config is not None else KesslerConfig()
+
+    def fn(T_t, p_s_t, q_v, q_c, q_r):
+        shp = T_t.shape
+        nlev = shp[-1]
+        dT, dq_v, dq_c, dq_r = kessler_column_tendencies(
+            T_t.reshape(-1, nlev), p_s_t.reshape(-1),
+            q_v.reshape(-1, nlev), q_c.reshape(-1, nlev),
+            q_r.reshape(-1, nlev),
+            sigma_coord, dt=dt, config=cfg)
+        return (dT.reshape(shp), dq_v.reshape(shp), dq_c.reshape(shp),
+                dq_r.reshape(shp))
+
+    return fn

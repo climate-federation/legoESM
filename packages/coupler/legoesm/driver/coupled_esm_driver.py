@@ -901,6 +901,15 @@ class CoupledESMDriver:
 
         # getattr: optional-config compat gate (land_param_source selector)
         source = getattr(self.coupled_cfg, "land_param_source", "analytical")
+        # Transient cover only rides the CLM path (it needs the CLM soil map to
+        # freeze around).  Fail loudly rather than silently ignore the request.
+        if (getattr(self.coupled_cfg, "transient_land_cover", False)
+                and getattr(self.coupled_cfg, "land_cover_surfdata", "")
+                and source != "clm"):
+            raise ValueError(
+                "transient_land_cover with land_cover_surfdata requires "
+                f"land_param_source='clm' (got {source!r}); transient cover overlays "
+                "the CLM reference soil map.")
         if source == "clm":
             from legoesm.land.clm_surface_map import clm_surface_provider
             lon = self._atm._grid_lon
@@ -910,6 +919,36 @@ class CoupledESMDriver:
             # surface-energy params against a different soil forward).
             variant = ("multilayer" if self.coupled_cfg.land_mode == "multilayer"
                        else "slab")
+            # Transient land-use cover (opt-in): the vegetation params re-weight per
+            # segment from a transient legoesm_surfdata cover; soil frozen.  Base +
+            # per-year both go through clm_provider_rebuild so their albedo treatment
+            # is consistent (a normal run without land_cover_surfdata is unchanged).
+            cover_path = getattr(self.coupled_cfg, "land_cover_surfdata", "")
+            if getattr(self.coupled_cfg, "transient_land_cover", False) and cover_path:
+                from legoesm.land.clm_surface_map import (
+                    clm_provider_rebuild, download_clm_surfdata, load_clm_surface,
+                    load_transient_cover_on_columns, TransientCoverProvider)
+                clm_path = getattr(self.coupled_cfg, "clm_surfdata_path", "") \
+                    or download_clm_surfdata()
+                m = load_clm_surface(clm_path, lat_deg, lon_deg)
+                # Match the non-transient coupled provider (clm_surface_provider omits
+                # the soil-colour albedo) so an unchanged cover slice is a no-op.
+                rebuild = clm_provider_rebuild(m, variant=variant,
+                                               include_soil_albedo=False)
+                cover, years = load_transient_cover_on_columns(
+                    cover_path, lat_deg, lon_deg)
+                if cover.shape[1] != np.asarray(m["pft_fractions"]).shape[0]:
+                    raise ValueError(
+                        f"transient cover has {cover.shape[1]} columns but the CLM "
+                        f"map has {np.asarray(m['pft_fractions']).shape[0]}; mismatch.")
+                provider = TransientCoverProvider(
+                    base=rebuild(m["pft_fractions"]), cover=cover, years=years,
+                    _rebuild=rebuild)
+                logger.info(
+                    f"  Land params: CLM soil + TRANSIENT cover ({cover_path}, "
+                    f"{cover.shape[0]} years {int(years[0])}-{int(years[-1])}, "
+                    f"{variant} tuning), {lat_deg.size} columns")
+                return provider
             provider = clm_surface_provider(lat_deg, lon_deg, variant=variant)
             logger.info(f"  Land params: CLM reference surfdata (real PFT map + "
                         f"reference soil, {variant} tuning), {lat_deg.size} columns")
@@ -1658,6 +1697,12 @@ class CoupledESMDriver:
             # step's day-of-year matches the atmosphere's season; offset 0 => identical.
             doy, _ = self._atm._calendar_for_radiation(day)
 
+            # Transient land-use cover: the segment's calendar year (from the atm
+            # sub-driver's start year); a year-varying land provider re-weights its
+            # vegetation params, static providers ignore it (byte-identical).
+            _sy = getattr(self._atm, "_start_year", None)
+            cover_year = None if _sy is None else float(_sy) + day / 365.0
+
             self._sfc_state, sfc_response = self._step_surface(
                 self._sfc_state,
                 atm_forcing,
@@ -1667,6 +1712,7 @@ class CoupledESMDriver:
                 ocean_v_sfc=v_sfc,
                 dt=sub_dt,
                 doy=float(doy),
+                year=cover_year,
             )
             self._last_sfc_response = sfc_response
 

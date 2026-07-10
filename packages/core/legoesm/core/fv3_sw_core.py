@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -30,6 +31,7 @@ from legoesm.grids.duogrid import ext_vector_dgrid
 from legoesm.grids.halo import (
     pad_halo,
     pad_halo_vector,
+    pad_halo_vector_4d,
     synchronize_bgrid_ne_corner_geo,
     synchronize_cgrid_fluxes,
 )
@@ -588,6 +590,42 @@ def d2a2c_d_to_a(u_d, v_d, cdgrid):
         vtmp = vtmp.at[:, npt:n - npt, :].set(v4[:, npt - 1:n - npt - 1, :])
     grid = cdgrid.base
     return pad_halo_vector(
+        utmp, vtmp,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
+        interp_offsets=grid.halo_interp_offsets_h2,
+        halo=2,
+    )
+
+
+def d2a2c_d_to_a_4d(u_d, v_d, cdgrid):
+    """4D (all-levels-one-message) :func:`d2a2c_d_to_a` (#811).
+
+    The D→A covariant averages are pure-local — they slice ``u_d``/``v_d`` on the
+    horizontal axes and ride the trailing level axis via broadcasting — and the
+    halo=2 VECTOR exchange is done ONCE for all levels with
+    :func:`pad_halo_vector_4d` (rotation angles broadcast over levels).  This is
+    what lets the moisture substep reconstruct the transport winds without a
+    ``vmap(pad_halo_vector)`` (the wind-halo ``batch_axes`` failure under MPI
+    face-scatter; #811).  BIT-IDENTICAL to per-level ``d2a2c_d_to_a`` on
+    single-rank.
+
+    u_d : (6, n, n+1, nlev); v_d : (6, n+1, n, nlev).  Returns
+    ``(utmp_pad, vtmp_pad)`` each ``(6, n+4, n+4, nlev)``.
+    """
+    n = cdgrid.n
+    npt = min(4, n // 2)
+    utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n, nlev)
+    vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
+    if n > 2 * npt and npt > 0:
+        u4 = (_A2 * (u_d[:, :, :-3] + u_d[:, :, 3:])
+              + _A1 * (u_d[:, :, 1:-2] + u_d[:, :, 2:-1]))
+        utmp = utmp.at[:, :, npt:n - npt].set(u4[:, :, npt - 1:n - npt - 1])
+        v4 = (_A2 * (v_d[:, :-3, :] + v_d[:, 3:, :])
+              + _A1 * (v_d[:, 1:-2, :] + v_d[:, 2:-1, :]))
+        vtmp = vtmp.at[:, npt:n - npt, :].set(v4[:, npt - 1:n - npt - 1, :])
+    grid = cdgrid.base
+    return pad_halo_vector_4d(
         utmp, vtmp,
         grid.cos_angle, grid.sin_angle,
         grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
@@ -1289,6 +1327,40 @@ def d2a2c_global_fields(u_d, v_d, cdgrid):
                         sn_pad_y, ss_pad_y)
 
 
+def d2a2c_global_fields_4d(u_d, v_d, cdgrid):
+    """4D (all-levels-one-message) :func:`d2a2c_global_fields` (#811).
+
+    The single VECTOR wind halo is done once via :func:`d2a2c_d_to_a_4d`; every
+    other pad is on a grid CONSTANT (level-independent) so it stays 2D and
+    broadcasts over the level axis.  The returned :class:`_D2A2CFields` has 4D
+    wind fields (``utmp_pad``/``vtmp_pad``/``ua_pad``/``va_pad``, shape
+    ``(6, n+4, n+4, nlev)``) and the SAME 2D grid-constant fields as the
+    per-level version — so ``jax.vmap`` can map the wind fields (axis -1) and
+    capture the constants (``None``) when running ``d2a2c_vect``'s A→C tail via
+    its ``global_fields=`` fast path.
+    """
+    grid = cdgrid.base
+    h = 2
+    utmp_pad, vtmp_pad = d2a2c_d_to_a_4d(u_d, v_d, cdgrid)   # (6, n+4, n+4, nlev)
+    cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
+    rsin2 = cdgrid.rsin2_cell
+    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
+    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
+    # [..., None] broadcasts the 2D grid constant over the trailing level axis.
+    ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad[..., None]) * rsin2_pad[..., None]
+    va_pad = (vtmp_pad - utmp_pad * cos_sg5_pad[..., None]) * rsin2_pad[..., None]
+    dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (h, h), (0, 0)], mode='edge')
+    dyc_pad_y = jnp.pad(grid.dy, [(0, 0), (0, 0), (h, h)], mode='edge')
+    offsets = grid.halo_interp_offsets
+    se_pad_x = pad_halo(cdgrid.sin_sg[:, :, :, 2], interp_offsets=offsets)
+    sw_pad_x = pad_halo(cdgrid.sin_sg[:, :, :, 0], interp_offsets=offsets)
+    sn_pad_y = pad_halo(cdgrid.sin_sg[:, :, :, 3], interp_offsets=offsets)
+    ss_pad_y = pad_halo(cdgrid.sin_sg[:, :, :, 1], interp_offsets=offsets)
+    return _D2A2CFields(utmp_pad, vtmp_pad, cos_sg5, rsin2, ua_pad, va_pad,
+                        dxc_pad_x, dyc_pad_y, se_pad_x, sw_pad_x,
+                        sn_pad_y, ss_pad_y)
+
+
 def d2a2c_adjacent_strips(uc, vc, ut, vt, cosa_u, cosa_v, n):
     """Non-duogrid adjacent-strip recompute of the transport winds at the
     face edges (FV3 sw_core.F90:670-722): vt at i=0/n-1 and ut at j=0/n-1,
@@ -1391,11 +1463,18 @@ def d2a2c_tile_strips(uc, vc, ut, vt, ut_lo, ut_hi, vt_lo, vt_hi,
     return ut, vt
 
 
-def d2a2c_vect(u_d, v_d, cdgrid):
+def d2a2c_vect(u_d, v_d, cdgrid, global_fields=None):
     """FV3 D-grid → A-grid → C-grid (covariant). FV3 sw_core.F90 d2a2c_vect.
 
     Dispatches to _d2a2c_vect_duogrid when dg.ng>=2 (FV3 dg%is_initialized branch).
     Returns ua/va (A-cov), uc/vc (C-cov), ut/vt (C-contravariant transport).
+
+    ``global_fields`` (#811): a precomputed :class:`_D2A2CFields` (the sole
+    cross-face wind halo).  When provided the internal ``d2a2c_global_fields``
+    call is SKIPPED and the pure-local A→C tail runs on the supplied fields —
+    the fast path :func:`d2a2c_vect_4d` uses to reconstruct the transport winds
+    for all levels from ONE ``pad_halo_vector_4d`` (no ``vmap(pad_halo)``).
+    Mirrors the ``padded=`` kwarg idiom on the ``operators_3d`` stencils.
     """
     # Duogrid path: 4th-order everywhere, skip edge/corner specials (FV3 sw_core.F90:3419)
     dg = cdgrid.base.duogrid
@@ -1424,7 +1503,8 @@ def d2a2c_vect(u_d, v_d, cdgrid):
     # Steps 1-3 global fields (D→A covariant winds + halo, A-grid
     # contravariant ua/va, staggered dx/dy, halo-padded sin_sg) — the single
     # source shared with the tiled per-tile stage (d2a2c_global_fields).
-    F = d2a2c_global_fields(u_d, v_d, cdgrid)
+    F = (global_fields if global_fields is not None
+         else d2a2c_global_fields(u_d, v_d, cdgrid))
     utmp_pad, vtmp_pad = F.utmp_pad, F.vtmp_pad  # each (6, n+4, n+4)
 
     # iter-938: Fortran cube-corner sign-flip overrides (sw_core.F90:3527-3545, 3620-3639) available
@@ -1538,6 +1618,43 @@ def d2a2c_vect(u_d, v_d, cdgrid):
         uc, vc, ut, vt, cdgrid.cosa_u, cdgrid.cosa_v, n)
 
     return ua, va, uc, vc, ut, vt
+
+
+def d2a2c_vect_4d(u_d, v_d, cdgrid):
+    """4D (all-levels-one-message) :func:`d2a2c_vect` for the flux-form moisture
+    substep (#811).
+
+    Does the ONE cross-face wind halo (+ grid-constant halos) globally via
+    :func:`d2a2c_global_fields_4d`, then ``vmap``s the PURE-LOCAL A→C tail of
+    ``d2a2c_vect`` over levels (through its ``global_fields=`` fast path, so the
+    A→C numerics are shared bit-for-bit — no duplication).  This replaces the
+    per-level ``vmap(d2a2c_vect)`` whose internal ``pad_halo_vector`` was a
+    vmapped cross-face ``sendrecv`` (``batch_axes`` failure under MPI
+    face-scatter).  BIT-IDENTICAL to ``jax.vmap(d2a2c_vect)`` on single-rank.
+
+    NON-duogrid only (the duogrid ``_d2a2c_vect_duogrid`` path is not 4D-ified;
+    the moisture substep runs on the non-duogrid grid).
+
+    u_d : (6, n, n+1, nlev); v_d : (6, n+1, n, nlev).  Returns
+    ``(ua, va, uc, vc, ut, vt)``, each with a trailing level axis.
+    """
+    dg = cdgrid.base.duogrid
+    if dg is not None and dg.ng >= 2:
+        raise NotImplementedError(
+            "d2a2c_vect_4d does not support duogrid grids (the 4th-order-"
+            "everywhere duogrid A→C path is not 4D-ified); the flux-form "
+            "moisture substep runs on the non-duogrid grid (#811).")
+
+    F = d2a2c_global_fields_4d(u_d, v_d, cdgrid)
+    # Map the 4D wind fields over the trailing level axis; capture the 2D grid
+    # constants (None).  Mirrors _D2A2CFields' field order.
+    f_axes = _D2A2CFields(
+        utmp_pad=-1, vtmp_pad=-1, cos_sg5=None, rsin2=None,
+        ua_pad=-1, va_pad=-1, dxc_pad_x=None, dyc_pad_y=None,
+        se_pad_x=None, sw_pad_x=None, sn_pad_y=None, ss_pad_y=None)
+    return jax.vmap(
+        lambda fk, udk, vdk: d2a2c_vect(udk, vdk, cdgrid, global_fields=fk),
+        in_axes=(f_axes, -1, -1), out_axes=-1)(F, u_d, v_d)
 
 
 # ==============================================================================

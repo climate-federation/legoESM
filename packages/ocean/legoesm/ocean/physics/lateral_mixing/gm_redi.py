@@ -40,6 +40,45 @@ from legoesm.core.operators_3d import gradient_x_3d, gradient_y_3d, divergence_3
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
 
+__physics_contract__ = {
+    "summary": (
+        "Gent-McWilliams / Redi isopycnal mixing (Griffies 1998 small-slope "
+        "skew-flux tensor) on the cubed sphere: adiabatic eddy (bolus) "
+        "advection + isoneutral diffusion of T and S, with DM95 slope tapering "
+        "and optional Visbeck adaptive kappa."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "degC", "S": "psu", "rho": "kg/m^3",
+        "jacobian": "1 (z-star dimensionless)",
+        "cfg.kappa_GM": "m^2/s", "cfg.kappa_Redi": "m^2/s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "degC/s", "dS_dt": "psu/s",
+    },
+    "sign_convention": (
+        "kappa_GM, kappa_Redi >= 0; the GM skew flux is adiabatic "
+        "(streamfunction psi = kappa_GM*S along isopycnals, flattening slopes) "
+        "and Redi diffuses down-gradient ALONG isopycnals; both are "
+        "flux-divergence form so the volume integral of T and S is conserved "
+        "(adiabatic redistribution; no momentum tendency, du_dt=dv_dt=0); slopes "
+        "tapered (DM95) where steep; z positive up."
+    ),
+    # Adiabatic tracer redistribution: conserves volume-integrated tracer.
+    "conserves": ["tracer"],
+    "differentiable": True,
+    "reference": (
+        "Gent & McWilliams (1990) JPO 20, 150-155; Redi (1982) JPO 12, "
+        "1154-1158; Griffies (1998) JPO 28, 831-841; Danabasoglu & McWilliams "
+        "(1995) J. Climate 8, 2967-2987"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_visbeck_gm.py + "
+        "tests/ocean/unit/test_gm_redi_eady_physics.py — GM flattens an "
+        "isopycnal slope (releasing APE) while conserving volume-integrated T, "
+        "S; flat isopycnals give zero tendency."
+    ),
+}
+
 
 def _pad_for_gradient(field, grid):
     """Single-call pad for gradient_x_3d/gradient_y_3d sharing.
@@ -324,6 +363,12 @@ def gm_redi_lateral_mixing(
     S_x, S_y, taper = _compute_tapered_slopes(rho, z_coord, jacobian, grid, cfg)
 
     # GM coefficient: scalar from config, or Visbeck-adaptive field.
+    if getattr(cfg, "treguier", None) is not None and cfg.treguier.enabled:
+        raise NotImplementedError(
+            "GMRediConfig.treguier (NEMO nn_aei_ijk_t=21 adaptive kappa) is "
+            "implemented on the lat-lon C-grid path only; the cubed-sphere "
+            "GM/Redi would silently fall back to constant kappa. Use "
+            "visbeck or constant kappa_GM here.")
     if cfg.visbeck.enabled:
         f_coriolis = jnp.asarray(grid.grid_coriolis)
         kappa_GM = compute_visbeck_kappa_gm(

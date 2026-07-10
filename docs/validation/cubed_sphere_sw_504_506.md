@@ -189,8 +189,8 @@ Scope (what is and isn't certified): free-stream `h≡1` certifies GCL /
 divergence-freeness across all seams/corners for all time; the α=π/4 cosine bell
 certifies a real non-constant gradient transported *over* the corners. Neither
 probes filamentary tracers or sign-changing fields — the colliding-modons test
-(issue #521) is the intended nonlinear seam stress test and is NOT yet
-implemented. Regression pin:
+(issue #521) is the intended nonlinear seam stress test (now implemented and
+matrix-registered; see the #521 section below). Regression pin:
 `test_streamfunction_freestream.py::test_freestream_bounded_over_many_revolutions`
 (h≡1 over 2 revolutions, `max|h−1|` < 1e-5). Diagnostic:
 `scripts/tmp/diag_cosine_bell_longrun.py`. Codex-reviewed (5 adversarial
@@ -217,22 +217,53 @@ faithfulness + short non-rotating prognostic run: stable, mass-conserving,
 modons evolve, h>0). Driver `scripts/validate/run_colliding_modons.py`
 (collision/conservation/symmetry diagnostics).
 
-**Status — works, stable, faithful IC; long-run damping calibration is open.**
-C48 60-day non-rotating run (`--dt 150 --div-damp 10 --damp-v 0.04
---hyperdiff-factor 2`): **mass conserved to machine (1e-15)**, energy bounded
-(slow creep to 3.4e-3 over 60 d, no blow-up), **h>0 throughout** (4438–5763 m),
-the two modons persist (17–27 m/s after the initial f=0 gravity-wave adjustment
-from the unbalanced flat-h IC) and visibly **collide / exchange / propagate**
-(tracked vortex longitudes orbit), with NO cube-seam grid noise (per-face height
-std smooth across all six faces). The damping is a bracket: the W2/W5-tuned
-`iter1009` preset is **under-damped** for this nonlinear case (C24 blows up by
-day ~3, max|u|→1000), heavy hyperdiff×4 is **over-damped** (modons decay to
-~6 m/s); hyperdiff×2 / div-damp 10 is the stable middle.
-OPEN (separate calibration effort, like the W2/W5 iter-985..1030 narrative):
-the exact ~100-day return-to-initial-position acceptance + a per-resolution
-damping calibration (C96+ to resolve the 750 km cores) + matrix-runner case
-registration. Not claimed here — only a stable, conservative, artifact-free
-60-day demonstration.
+**Status — matrix-registered, stable 100 days at C36/C48/C96 (#521 + #753
+item 1 landed; #753 item-2 return metric open).** The case is a standard
+matrix-runner case (`test_num == 8`, `--only sw --test =colliding_modons
+--grid cubed_sphere`). The validated stable config is the shared `MODON_*`
+constants (single source of truth for the matrix and `run_colliding_modons.py`,
+so they cannot drift — the #800 desync class): `use_duogrid=True` cube seams,
+`damp_v=0.010`, `hyperdiff_factor=1.0×`, and the **`(ref/n)^2` biharmonic law**
+(`MODON_HYPERDIFF_SCALING=2`).
+
+- **The (ref/n)^2 default (#753 item 1).** The earlier `(ref/n)^4`
+  grid-scale-damping-time-constant law is under-damped at the C96+ face seams
+  (the collision drives an enstrophy cascade whose grid-scale delivery rate
+  rises with resolution), so **C96 erupts under `^4`** (max|u| 309–449 m/s by
+  day ~5–50) but is stable under `^2` (which delivers 4× the backstop at C96 =
+  (96/48)²). Every exponent returns `ref_coeff` at `n == ref_n == 48`, so **C48
+  is exponent-invariant** (byte-identical to the pre-#753 code there); at C36
+  `^2` gives 0.56× — LESS damping than `^4`, so the flip cannot over-damp the
+  coarse cores. `LEGOESM_SW_MODON_HYPERDIFF_SCALING=4` opts back into `^4`.
+- **100-day validation (matrix runner, non-rotating, mass fixer on).** C36
+  (`^2` = 0.56×, the regression gate): **PASS, mass drift 0.00e+00**, max|u|
+  ~9 m/s. C96 (`^2` = 4×, the fix): **PASS, mass drift 0.00e+00**, max|u|
+  oscillates ~18–40 m/s through the collision (day-100 ~33) — it does NOT decay
+  monotonically toward zero, i.e. the cores survive the run (not over-damped to
+  death). C48: invariant, PASS. C192 (`^2` = 16×): also **PASS, mass drift
+  0.00e+00**, max|u| ~40 m/s at day 100 — the law holds at the highest
+  resolution probed. Head-to-head, C96 under the old `^4` default erupts to
+  max|u| 274–410 m/s by day 5–10 (energy_err 2.4e-2, cores destroyed).
+
+**Automated coverage caveat — C96 is the resolution that exercises the fix.**
+The default matrix cube resolution is **C36** (`GRID_RESOLUTIONS["cubed_sphere"]`),
+which is stable under BOTH `^2` and `^4`, so the standard
+`--only sw --test =colliding_modons --grid cubed_sphere` run does NOT exercise
+the eruption. The fast unit tests
+(`test_run_colliding_modons_cli.py`, `test_williamson_cli_calibration.py`,
+`test_matrix_nh_cube_parity_ast_guard.py`) pin the constant + the coefficient
+ratios, so they catch a silent revert of the default to `^4` — but the
+*physical* C96 seam stability rests on the **100-day matrix integration at
+`--resolution C96`** above, which must be run in the nightly/manual matrix (the
+same convention as the cube visual-regression gate). A future maintainer should
+not assume the default C36 run guards the C96 fix.
+
+OPEN — **#753 item 2 (return metric, resolution-bound).** The matrix PASS gate
+is finite + blow-up-threshold + conservation; it certifies seam stability, NOT
+the exact ~100-day return-to-initial-position (the driver prints the tracked
+vortex longitudes `lon_W`/`lon_E`, but there is no coded return-window/core-
+amplitude acceptance yet). Closing the day-100 return gap needs resolved 750 km
+cores → C96/C192 core-strength preservation, tracked separately in #753.
 
 ## Visual verification (no artifacts)
 

@@ -155,6 +155,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # 2026-06-10); the unknown-scheme raise itself is unchanged.
         ("packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/integration.py", "get_gwd_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/integration.py", "make_gwd_physics"),
+        # Aerosol -> cloud-droplet activation scheme selector (proxy vs ARG2000);
+        # a typo'd scheme must raise, not silently run different activation.
+        ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/arg_activation.py", "activated_nc_field"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py", "_get_microphysics_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py", "make_microphysics_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py", "morrison_microphysics"),
@@ -168,6 +171,12 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py", "make_turbulence_physics"),
         ("packages/atmosphere/legoesm/atmosphere/scm.py", "__init__"),
         ("packages/core/legoesm/core/bulk_flux.py", "validate_bulk_scheme"),
+        # Stable-regime MOST stability-function dispatch (stability_scheme):
+        # the validator + the psi_m/psi_h else-raise twins (grow-only lock so
+        # a silent-Dyer fallback can't be reintroduced).
+        ("packages/core/legoesm/core/bulk_flux.py", "validate_stability_scheme"),
+        ("packages/core/legoesm/core/bulk_flux.py", "psi_m"),
+        ("packages/core/legoesm/core/bulk_flux.py", "psi_h"),
         ("packages/core/legoesm/core/tracers.py", "index"),
         ("packages/core/legoesm/grids/capability.py", "instantiate"),
         ("packages/core/legoesm/grids/capability.py", "validate_runtime"),
@@ -198,8 +207,21 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ice/legoesm/ice/sea_ice.py", "step_sea_ice"),
         ("packages/ice/legoesm/ice/shortwave.py", "compute_ice_sw"),
         ("packages/land/legoesm/land/carbon/carbon_cycle.py", "step_carbon"),
-        ("packages/land/legoesm/land/multilayer_land.py", "step_multilayer_land"),
+        # The multilayer-land bulk dispatch moved into the pluggable surface
+        # scheme (surface_scheme/simple_seb.py) in the land/stable refactor
+        # and LOST its unknown-scheme raise on the way; the guard is restored
+        # there (fn-entry validate_bulk_scheme) and the baseline entry follows
+        # the code.
+        ("packages/land/legoesm/land/surface_scheme/simple_seb.py",
+         "compute_simple_seb_fluxes"),
         ("packages/land/legoesm/land/slab_land.py", "step_land"),
+        # Two-leaf canopy stomatal-model dispatch (ball_berry|medlyn): hardened
+        # 2026-07-08 during the stomata consolidation — a bare ``else`` used to
+        # silently run Ball-Berry on any typo. Guarded at BOTH ends: a fail-early
+        # CanopyConfig.validate() at the non-jitted setup entry, and the leaf
+        # kernel _compute_gs_and_ci as a trace-time backstop.
+        ("packages/land/legoesm/land/canopy/config.py", "validate"),
+        ("packages/land/legoesm/land/canopy/energy_balance.py", "_compute_gs_and_ci"),
         ("packages/ml/legoesm/ml/physics/model.py", "_validate_microphysics_scheme"),
         ("packages/ml/legoesm/ml/training.py", "create_optimizer"),
         ("packages/ml/legoesm/training/aimip_params.py", "make_aimip_classical_spectral_physics"),
@@ -213,6 +235,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_cdgrid.py", "ocean_baroclinic_tendencies_cdgrid"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_ke_and_pressure_gradients"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_mpas.py", "mpas_ocean_baroclinic_tendencies"),
+        # (nemo_drag_r_from_speed_sq's internal legacy-rejection raise is not
+        # scanner-shaped; the canonical unknown-scheme guard is the validator.)
+        ("packages/ocean/legoesm/ocean/dynamics/ocean_tendency_common.py", "validate_bottom_drag_scheme"),
         ("packages/ocean/legoesm/ocean/eos.py", "make_eos_fn"),
         ("packages/ocean/legoesm/ocean/experiments/dino.py", "create_forcings"),
         ("packages/ocean/legoesm/ocean/experiments/dino.py", "create_initial_conditions"),
