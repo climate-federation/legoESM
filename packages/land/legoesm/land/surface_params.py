@@ -333,6 +333,31 @@ def is_c4(pft_name: str) -> bool:
     return "c4" in pft_name
 
 
+def is_c4_pft_id(pft_id):
+    """Vectorized per-id C4 mask ``(n,)`` bool from integer CLM5 PFT ids.
+
+    The array companion to :func:`is_c4`: maps each integer CLM5 PFT id to its
+    name (:data:`CLM5_PFT_NAMES`) and returns ``True`` where that name is C4
+    (``c4_grass`` / ``crop_c4``).  Out-of-range ids (``< 0`` or ``>= N_PFT_CLM5``)
+    map to ``False`` (never crashes).  Pure NumPy -- a STATIC classifier on the
+    static PFT id, so it can be materialised once and used as a compile-time
+    selector in a JAX forward.
+
+    SINGLE source of truth for the per-id C4 split, shared by both sides of the
+    leaf carbon-isotope-discrimination calibration: the modelled forward
+    (:mod:`legoesm.land.carbon.d13c_forward`, which selects the FAITHFUL C4
+    Farquhar-Cerling discrimination for these ids via ``jnp.where``) and the
+    observed loader (:func:`legoesm.land.carbon.d13c_observations.c4_archetype_mask`).
+    """
+    import numpy as np
+
+    pid = np.asarray(pft_id, dtype=int).ravel()
+    return np.array(
+        [bool(0 <= int(p) < N_PFT_CLM5 and is_c4(CLM5_PFT_NAMES[int(p)])) for p in pid],
+        dtype=bool,
+    )
+
+
 # Lazy-converted to jnp array on first use to avoid import-time JAX init
 _clm5_table_cache: jnp.ndarray | None = None
 

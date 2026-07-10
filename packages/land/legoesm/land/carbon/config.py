@@ -61,6 +61,22 @@ __param_spec__ = {
             "tor_wood": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
         },
     },
+    "D13CConfig": {
+        "scheme_key": "land.d13c",
+        "excluded": {
+            "ci_ca_c4": (
+                "C4-characteristic intercellular:ambient CO2 setpoint [-]; FIXED (not "
+                "trained). The model's Farquhar is C3-only, so the C4 branch regulates to a "
+                "prescribed C4 Ci/Ca (~0.4) rather than a solved leaf state; in the C4 form "
+                "the trained part enters ONLY through the product (b4 + (b3-s)*phi - a)*Ci/Ca, "
+                "so freeing BOTH phi and Ci/Ca is a non-identifiable degeneracy -- phi is the "
+                "sole exposed C4 lever."
+            ),
+        },
+        "params": {
+            "phi_c4_leakiness": {"units": "1", "bounds": (0.1, 0.4), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "Henderson, von Caemmerer & Farquhar (1992), C4 bundle-sheath leakiness phi ~ 0.2-0.3", "shape": None},
+        },
+    },
 }
 
 
@@ -205,6 +221,34 @@ class CarbonConfig(NamedTuple):
     # --- Seasonal cycle (scheme="seasonal") ---
     nee_amplitude: float = 5e-8   # Peak NEE amplitude [kgCO2/m2/s]
     nee_peak_day: float = 200.0   # Day of peak uptake (NH)
+
+
+class D13CConfig(NamedTuple):
+    """Leaf carbon-isotope (delta13C) discrimination forward configuration.
+
+    Threads the two C4-pathway leaf-delta13C knobs into
+    :mod:`legoesm.land.carbon.d13c_forward`.  The C3 branch carries NO free
+    config -- its diffusion ``a``, Rubisco ``b`` and boundary-condition
+    ``delta13C_air`` are FIXED published Farquhar-1989 constants living in the
+    forward's provenance block.  The C4 branch (Farquhar 1983 / Henderson 1992 /
+    Cerling 1997) reads the bundle-sheath leakiness ``phi_c4_leakiness`` -- the
+    natural C4 water-use-efficiency / delta13C lever -- and a C4-characteristic
+    intercellular:ambient CO2 ratio ``ci_ca_c4``.
+
+    C4 Ci/Ca treatment (option (a) -- fixed setpoint).  The model's Farquhar
+    biochemistry is C3-only, so it supplies no FAITHFUL C4 leaf Ci (a C3-kinetics
+    Ci run for a C4 PFT is not the true CO2-concentrated bundle-sheath state).
+    The C4 branch therefore uses a prescribed C4-characteristic Ci/Ca (~0.4; C4
+    leaves regulate Ci/Ca relatively tightly) rather than the solved C3 Ci, so
+    the C4 delta13C depends MAINLY on ``phi``.  ``ci_ca_c4`` is FIXED (excluded
+    from training): in the C4 discrimination form the trained part enters ONLY
+    through the product ``(b4 + (b3 - s) * phi - a) * (Ci/Ca)``, so exposing BOTH
+    ``phi`` and ``Ci/Ca`` as free parameters would be a non-identifiable
+    degeneracy (many ``(phi, Ci/Ca)`` pairs give the same delta13C).  ``phi``
+    (leakiness, Henderson 1992) is the single, physically-primary C4 lever.
+    """
+    phi_c4_leakiness: float = 0.21  # C4 bundle-sheath leakiness [-] (Henderson 1992)
+    ci_ca_c4: float = 0.4           # C4-characteristic intercellular:ambient CO2 ratio [-]
 
 
 class CarbonState(NamedTuple):
