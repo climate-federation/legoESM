@@ -2414,6 +2414,60 @@ def _validate_spmd_persistent_state(persistent: bool, n_gpus: int,
             "--spmd-persistent-state, or single-process with it.")
 
 
+class _PersistentStateResidency:
+    """Residency tracker for the ``--spmd-persistent-state`` lane (scaling-M2).
+
+    Owns the ONLY mutable residency flag: the persistent lane's ``state`` is
+    either lat-band SHARDED (``v``/``v_mask`` carried as the n_lat-row
+    ``v_lower``) or GLOBAL (full staggered ``v``), and every layout flip goes
+    through :meth:`ensure_sharded` / :meth:`ensure_global` — which also COUNT
+    each full-state transfer (the honest-cost contract: a forced per-step
+    gather is announced + counted, never silent).  ``enabled=False`` (flag
+    off, the default) makes both methods exact identity no-ops, so the
+    default driver path is byte-identical.
+
+    The flag cannot desync from the state: it flips only here, both methods
+    are no-ops unless the flag is in the opposite residency, and every loop
+    reassignment of ``state`` either preserves residency (the sharded inner
+    step: sharded in -> sharded out; leaf-wise host BCs: layout-preserving
+    leaf replaces) or routes through these methods.  Module-level (not a
+    ``main()`` closure) so the interleavings are directly unit-tested
+    (tests/unit/test_run_omip_core2_spmd_persistent_cli.py — supplementary
+    review finding: closure-only bookkeeping was untestable).
+    """
+
+    def __init__(self, enabled: bool, shard_fn=None, gather_fn=None):
+        if enabled and (shard_fn is None or gather_fn is None):
+            raise ValueError(
+                "_PersistentStateResidency: enabled=True requires both "
+                "shard_fn and gather_fn (the lat-band layout flips).")
+        self.enabled = bool(enabled)
+        self._shard_fn = shard_fn
+        self._gather_fn = gather_fn
+        self.sharded = False           # current residency of the loop state
+        self.gathers = 0               # full-state sharded->global transfers
+        self.shards = 0                # full-state global->sharded transfers
+
+    def ensure_sharded(self, st):
+        """Lay ``st`` out lat-band sharded (identity when disabled or
+        already sharded)."""
+        if not self.enabled or self.sharded:
+            return st
+        self.sharded = True
+        self.shards += 1
+        return self._shard_fn(st)
+
+    def ensure_global(self, st):
+        """Gather ``st`` back to the global single-device layout (full
+        staggered v) for host-global consumers / I-O (identity when disabled
+        or already global)."""
+        if not self.enabled or not self.sharded:
+            return st
+        self.sharded = False
+        self.gathers += 1
+        return self._gather_fn(st)
+
+
 def _record_final_state_digest(manifest_path, state) -> None:
     """Record the final ocean state digest into the run manifest (#376 Phase 4).
 
@@ -4104,27 +4158,15 @@ def main() -> int:
     #     boundaries (snapshot / blowup abort / final diags+digest) — these
     #     gather via _ensure_global_state below (counted; snapshot-cadence
     #     ones re-shard lazily at the next step).
+    # The residency STATE MACHINE itself is the module-level, unit-tested
+    # ``_PersistentStateResidency`` (flag/counter interleavings gated in
+    # tests/unit/test_run_omip_core2_spmd_persistent_cli.py); main() only
+    # binds it to this run's shard/gather layout flips.
     # ------------------------------------------------------------------
-    _pers_res = {"sharded": False, "gathers": 0, "shards": 0}
-
-    def _ensure_sharded_state(st):
-        """Persistent lane: lay ``state`` out lat-band sharded (no-op when the
-        flag is off or it already is)."""
-        if not _spmd_persistent or _pers_res["sharded"]:
-            return st
-        _pers_res["sharded"] = True
-        _pers_res["shards"] += 1
-        return _pers_shard_fn(st)
-
-    def _ensure_global_state(st):
-        """Persistent lane: gather ``state`` back to the global single-device
-        layout (full staggered v) for host-global consumers / I-O (no-op when
-        the flag is off or it already is global)."""
-        if not _spmd_persistent or not _pers_res["sharded"]:
-            return st
-        _pers_res["sharded"] = False
-        _pers_res["gathers"] += 1
-        return _pers_gather_fn(st)
+    _pers_res = _PersistentStateResidency(
+        _spmd_persistent, _pers_shard_fn, _pers_gather_fn)
+    _ensure_sharded_state = _pers_res.ensure_sharded
+    _ensure_global_state = _pers_res.ensure_global
 
     t_wall = time.time()
 
@@ -4704,9 +4746,9 @@ def main() -> int:
         # lane actually performed (the old wrapper does 2 per step: scatter +
         # gather).  Includes the snapshot/abort/final cadence gathers and any
         # forced per-step ones announced at setup.
-        print(f"[spmd-persistent] full-state gathers={_pers_res['gathers']} "
-              f"shards={_pers_res['shards']} over {n_steps} steps "
-              f"({_pers_res['gathers'] / max(1, n_steps):.4f} gathers/step; "
+        print(f"[spmd-persistent] full-state gathers={_pers_res.gathers} "
+              f"shards={_pers_res.shards} over {n_steps} steps "
+              f"({_pers_res.gathers / max(1, n_steps):.4f} gathers/step; "
               f"wrapper lane would be {n_steps} + {n_steps})", flush=True)
     print(f"[done] {n_steps} steps @ {rate:.2f} steps/s; final: {_diag(state, lat2d, lon2d)}")
     if args.smoke:
