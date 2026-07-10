@@ -16,8 +16,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.AhmedNeelinDCAConfig.tau_adjust_s',
     'atm.conv.AhmedNeelinDCAConfig.w_b',
     'atm.conv.AhmedNeelinDCAConfig.w_l',
-    # atm: BechtoldConfig (13)
-    'atm.conv.BechtoldConfig.M_b_max',
+    # atm: BechtoldConfig (12) — M_b_max wired 2026-07-10 (#869 campaign lever)
     'atm.conv.BechtoldConfig.cape_pbl_depth',
     'atm.conv.BechtoldConfig.cloud_depth_deep',
     'atm.conv.BechtoldConfig.cloud_depth_shallow_max',

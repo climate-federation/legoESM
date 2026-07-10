@@ -800,6 +800,15 @@ class ExperimentConfig(NamedTuple):
     # the lever for the AMIP convective-precipitation deficit.  Default matches
     # BechtoldConfig.cape_threshold (byte-identical when unset).
     bechtold_cape_threshold: float = 70.0
+    # Remaining spec'd Bechtold tunables threaded through the pipeline
+    # (#869 polar-night campaign levers): cloud-base mass-flux stability cap
+    # [kg/m^2/s] and the Gregory-1997 CMT coefficients.  Defaults match
+    # BechtoldConfig (byte-identical when unset).  M_b_max's default 0.02
+    # sits at the BOTTOM of its __param_spec__ bounds (0.02-0.15) and the
+    # mass flux runs pinned there — a first-class tuning lever.
+    bechtold_m_b_max: float = 0.02
+    bechtold_cmt_c_u: float = 0.7
+    bechtold_cmt_c_d: float = 0.7
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -1021,6 +1030,18 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"bechtold_cape_threshold must be >= 0, got "
                 f"{self.bechtold_cape_threshold}"
+            )
+        if self.bechtold_m_b_max <= 0:
+            errors.append(
+                f"bechtold_m_b_max must be > 0, got {self.bechtold_m_b_max}"
+            )
+        if self.bechtold_cmt_c_u < 0:
+            errors.append(
+                f"bechtold_cmt_c_u must be >= 0, got {self.bechtold_cmt_c_u}"
+            )
+        if self.bechtold_cmt_c_d < 0:
+            errors.append(
+                f"bechtold_cmt_c_d must be >= 0, got {self.bechtold_cmt_c_d}"
             )
         if self.physics_parameterization not in ("none", "ml"):
             errors.append(
@@ -1654,6 +1675,9 @@ class ExperimentConfig(NamedTuple):
             sbm_cape_threshold=getattr(amip_cfg, 'sbm_cape_threshold', 70.0),
             bechtold_cape_threshold=getattr(
                 amip_cfg, 'bechtold_cape_threshold', 70.0),
+            bechtold_m_b_max=getattr(amip_cfg, 'bechtold_m_b_max', 0.02),
+            bechtold_cmt_c_u=getattr(amip_cfg, 'bechtold_cmt_c_u', 0.7),
+            bechtold_cmt_c_d=getattr(amip_cfg, 'bechtold_cmt_c_d', 0.7),
             sigma_b=amip_cfg.sigma_b,
             k_BL_max_per_day=amip_cfg.k_BL_max_per_day,
             k_free_per_day=amip_cfg.k_free_per_day,

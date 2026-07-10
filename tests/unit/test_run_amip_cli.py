@@ -1543,6 +1543,39 @@ def test_params_calibration_applies_to_atm_experimentconfig(tmp_path):
     assert out.cloud_q_c_diagnostic == 3.0e-4
 
 
+def test_params_calibration_reaches_bechtold_tunables(tmp_path):
+    """The Bechtold mass-flux cap + CMT coefficients round-trip from a --params
+    file through the atm scalar-param map to the ExperimentConfig scalars AND
+    into the pipeline-resolved BechtoldConfig (#869 campaign levers; the
+    class-router cannot reach BechtoldConfig, which is built inside
+    _resolve_convection)."""
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    from legoesm.driver.run_config_yaml import (
+        apply_params_to_config,
+        build_atm_scalar_param_map,
+        load_params_config,
+    )
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(_AMIP_DUMMY_PATHS + ["--convection", "bechtold"]),
+        parser))
+    p = tmp_path / "params.yaml"
+    p.write_text(
+        "atm.conv.BechtoldConfig.M_b_max: 0.08\n"
+        "atm.conv.BechtoldConfig.cmt_c_u: 0.5\n"
+        "atm.conv.BechtoldConfig.cmt_c_d: 0.4\n")
+    out = apply_params_to_config(
+        cfg, load_params_config(str(p)), driver="run_amip",
+        scalar_param_map=build_atm_scalar_param_map())
+    assert out.bechtold_m_b_max == 0.08
+    assert out.bechtold_cmt_c_u == 0.5
+    assert out.bechtold_cmt_c_d == 0.4
+    _, conv_config = _resolve_convection(out)
+    assert conv_config.M_b_max == 0.08
+    assert conv_config.cmt_c_u == 0.5
+    assert conv_config.cmt_c_d == 0.4
+
+
 def test_aimip_louis_preserves_resolved_surface_scheme():
     """The AIMIP Louis injection must KEEP the run-resolved surface bulk_scheme +
     gustiness (coare3/300) rather than reverting to to_louis_config's default
