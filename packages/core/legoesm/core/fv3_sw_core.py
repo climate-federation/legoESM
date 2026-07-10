@@ -3164,10 +3164,13 @@ def fb_v_d_to_covariant(u_d, v_d, cdgrid):
 def fb_v_d_to_orthogonal(u_d, v_cov, cdgrid):
     """Inverse of :func:`fb_v_d_to_covariant` for the FB exit.
 
-    Two-pass: the cross-face u halo needs the orthogonal pair, so pass 1
-    inverts with an edge-pad ū (exact in the interior), pass 2 rebuilds ū
-    with the proper orthogonal halo.  Interior: exact inverse (same ū);
-    seams: residual is 2nd order (halo-u sensitivity × pass-1 seam error).
+    Fixed-point: the cross-face u halo needs the orthogonal pair, so pass 1
+    inverts with an edge-pad ū (exact in the interior), later passes rebuild
+    ū with the proper orthogonal halo using the previous v estimate.
+    Interior: exact inverse (same ū); seams: the residual contracts by
+    ≤~0.15 per pass (halo-u sensitivity × previous seam error).  Three
+    passes (2026-07-10 review follow-up) push the dt-independent per-step
+    seam kick from ~7e-4 to ~1e-4 m/s (W2 C36).
     """
     sina_u, _ = _sina_u_v_from_sin_sg(cdgrid)
     rs = 1.0 / jnp.maximum(sina_u, _EPS)
@@ -3175,12 +3178,14 @@ def fb_v_d_to_orthogonal(u_d, v_cov, cdgrid):
     u_pad0 = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
     ubar0 = 0.25 * (u_pad0[:, :n + 1, :-1] + u_pad0[:, 1:n + 2, :-1]
                     + u_pad0[:, :n + 1, 1:] + u_pad0[:, 1:n + 2, 1:])
-    v0 = (v_cov - cdgrid.cosa_u * ubar0) * rs
+    v = (v_cov - cdgrid.cosa_u * ubar0) * rs
     dg = cdgrid.base.duogrid
     if dg is None or dg.ng < 2:
-        return v0
-    ubar = _u_orth_at_v_points(u_d, v0, cdgrid)
-    return (v_cov - cdgrid.cosa_u * ubar) * rs
+        return v
+    for _ in range(2):
+        ubar = _u_orth_at_v_points(u_d, v, cdgrid)
+        v = (v_cov - cdgrid.cosa_u * ubar) * rs
+    return v
 
 
 def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,

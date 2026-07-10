@@ -152,12 +152,21 @@ class TestFBCovariantConversion:
 
     def test_roundtrip_identity(self, w2_setup):
         """to_orthogonal(to_covariant(v_d)) == v_d (interior exact; seam
-        residual 2nd order in the halo interpolation)."""
+        residual contracts ≤~0.15 per fixed-point pass).  Seam rows asserted
+        SPECIFICALLY: the residual is a dt-INDEPENDENT per-step kick there —
+        the 2-pass inverse left ~7e-4 m/s at seams (would fail the 5e-4
+        gate); the 3-pass inverse measures ~7e-5 (W2 C36, 2026-07-10)."""
         _, cdgrid, u_d, v_d, _, _ = w2_setup
         v_rt = fb_v_d_to_orthogonal(
             u_d, fb_v_d_to_covariant(u_d, v_d, cdgrid), cdgrid)
-        err = float(jnp.max(jnp.abs(v_rt - v_d)))
-        assert err < 5e-3, f"roundtrip err {err:.2e} m/s"
+        err = jnp.abs(v_rt - v_d)   # v_d (6, n+1, n)
+        seam_err = float(jnp.max(jnp.stack([
+            jnp.max(err[:, :2, :]), jnp.max(err[:, -2:, :]),   # i seam rows
+            jnp.max(err[:, :, :2]), jnp.max(err[:, :, -2:]),   # j seam rows
+        ])))
+        assert seam_err < 5e-4, f"seam-row roundtrip err {seam_err:.2e} m/s"
+        assert float(jnp.max(err)) < 5e-4, (
+            f"roundtrip err {float(jnp.max(err)):.2e} m/s")
 
     def test_fb_step_w2_near_steady(self, w2_setup):
         """One fv3_fb_sw_step on steady W2: the one-step wind increment must
