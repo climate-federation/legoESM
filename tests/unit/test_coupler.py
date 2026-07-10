@@ -1028,6 +1028,81 @@ def test_full_coupler_step_multilayer_richards():
     assert float(sfc_state.accumulator.total_dt) == pytest.approx(3 * DT, abs=1e-6)
 
 
+def _slab_transient_cover_provider(ncol):
+    """A slab TransientCoverProvider: forest cover at 2000 -> crop at 2010 (crop
+    is brighter), on ``ncol`` columns.  Mirrors the coupled driver's
+    _build_pft_provider transient branch (variant='slab', soil-colour albedo
+    off)."""
+    import numpy as np
+    from legoesm.land.surface_params import CLM5_PFT_NAMES, N_PFT_CLM5
+    from legoesm.land.clm_surface_map import (
+        clm_provider_rebuild, TransientCoverProvider)
+    idx = {n: i for i, n in enumerate(CLM5_PFT_NAMES)}
+
+    def _cover(i):
+        c = np.zeros((ncol, N_PFT_CLM5)); c[:, i] = 0.9; c[:, 0] = 0.1
+        return jnp.asarray(c)
+    o = jnp.ones(ncol)
+    sm = dict(theta_wp=0.12 * o, theta_fc=0.30 * o, glacier_frac=0.0 * o,
+              soil_albedo=0.15 * o, lai=2.0 * o)
+    rebuild = clm_provider_rebuild(sm, variant="slab", include_soil_albedo=False)
+    forest, crop = _cover(idx["broadleaf_evergreen_tropical"]), _cover(idx["crop_c3"])
+    return TransientCoverProvider(
+        base=rebuild(forest), cover=jnp.stack([forest, crop]),
+        years=jnp.asarray([2000.0, 2010.0]), _rebuild=rebuild), rebuild(forest)
+
+
+def test_step_surface_forwards_year_to_transient_cover_provider():
+    """Coupled-driver transient LULC path: step_surface(year=Y) forwards the
+    calendar year to a year_varying land provider so the vegetation params track
+    the segment's year (transient cover drives the surface), and year=None reuses
+    the base provider byte-for-byte."""
+    import numpy as np
+    ncol = 6 * 4 * 4
+    provider, _base = _slab_transient_cover_provider(ncol)
+    # crop (2010) cover is brighter than forest (2000): the forwarded year must
+    # change the materialised vegetation albedo the tiles see.
+    assert (float(jnp.mean(provider(year=2010.0).albedo_veg))
+            > float(jnp.mean(provider(year=2000.0).albedo_veg)))
+
+    step_fn = make_coupler(CouplerConfig(coupling_dt=600.0), LandConfig(),
+                           SeaIceConfig(dynamics="none"), LakeConfig(),
+                           land_param_provider=provider)
+    forcing = _make_forcing(sw=400.0)
+    tile_cfg = TileConfig(f_land=jnp.ones(SHAPE), f_lake=jnp.zeros(SHAPE))  # all land
+    sst = jnp.full(SHAPE, 290.0); zu = jnp.zeros(SHAPE)
+
+    def _run(year):
+        return step_fn(init_surface_state(SHAPE), forcing, tile_cfg, sst, zu, zu,
+                       DT, year=year)[1]
+    r_2000, r_2010, r_none = _run(2000.0), _run(2010.0), _run(None)
+    # year forwarded -> brighter 2010 cover shifts the blended surface temperature
+    assert float(jnp.max(jnp.abs(r_2000.T_sfc - r_2010.T_sfc))) > 1e-6
+    # year=None reuses the base provider (year 2000) -> byte-identical static path
+    np.testing.assert_array_equal(np.asarray(r_none.T_sfc), np.asarray(r_2000.T_sfc))
+
+
+def test_step_surface_static_provider_ignores_year():
+    """A static (non year_varying) provider IGNORES year, so a normal coupled run
+    is byte-identical regardless of the year kwarg the driver forwards."""
+    import numpy as np
+    _provider, static_provider = _slab_transient_cover_provider(6 * 4 * 4)
+    # static_provider is a plain CLMSurfaceParamProvider (no year_varying attr).
+    assert getattr(static_provider, "year_varying", False) is False
+    step_fn = make_coupler(CouplerConfig(coupling_dt=600.0), LandConfig(),
+                           SeaIceConfig(dynamics="none"), LakeConfig(),
+                           land_param_provider=static_provider)
+    forcing = _make_forcing(sw=400.0)
+    tile_cfg = TileConfig(f_land=jnp.ones(SHAPE), f_lake=jnp.zeros(SHAPE))
+    sst = jnp.full(SHAPE, 290.0); zu = jnp.zeros(SHAPE)
+
+    def _run(year):
+        return step_fn(init_surface_state(SHAPE), forcing, tile_cfg, sst, zu, zu,
+                       DT, year=year)[1]
+    np.testing.assert_array_equal(np.asarray(_run(2010.0).T_sfc),
+                                  np.asarray(_run(2000.0).T_sfc))
+
+
 def test_coupler_multiple_steps():
     """Multiple coupler steps stay finite and accumulator grows."""
     coupler_cfg = CouplerConfig()

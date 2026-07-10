@@ -139,6 +139,11 @@ PFT_CANOPY_HEIGHT: dict[str, float] = {
 # ---------------------------------------------------------------------------
 # CanopyConfig — scalar physics settings (static Python values, not traced)
 # ---------------------------------------------------------------------------
+# Valid values for the static leaf-gas-exchange dispatch field.  Kept next to
+# the config so the fail-early validator and the config default cannot drift.
+_VALID_STOMATAL_MODELS = ("ball_berry", "medlyn")
+
+
 class CanopyConfig(NamedTuple):
     """Physics settings for the canopy energy balance solver."""
 
@@ -218,6 +223,21 @@ class CanopyConfig(NamedTuple):
     # positional / tuple reconstruction of a pre-field CanopyConfig stays aligned
     # and defaults this to the legacy True.
     stress_b0: bool = True
+
+    def validate(self) -> "CanopyConfig":
+        """Fail-early check of the static string-dispatch fields.
+
+        Called at the non-jitted two-leaf entry (``compute_two_leaf_canopy_
+        fluxes``) so a typo'd ``stomatal_model`` aborts at land-component setup
+        with a clear message, instead of dying deep inside the JAX leaf kernel
+        ``energy_balance._compute_gs_and_ci`` on the first solve/trace (which
+        keeps its own raise as a backstop).  Returns ``self`` for chaining.
+        """
+        if self.stomatal_model not in _VALID_STOMATAL_MODELS:
+            raise ValueError(
+                f"unknown stomatal_model {self.stomatal_model!r}; the stomatal "
+                f"conductance scheme must be one of {_VALID_STOMATAL_MODELS}")
+        return self
 
 
 # Machine-readable tunable/fixed classification for every ``: float`` field of

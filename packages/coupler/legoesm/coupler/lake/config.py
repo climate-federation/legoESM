@@ -46,6 +46,11 @@ __param_spec__ = {
                 "transform": "sigmoid", "category": "radiation",
                 "reference": "lake surface broadband albedo", "shape": None,
             },
+            "albedo_lake_ice": {
+                "units": "1", "bounds": (0.3, 0.7), "tunable_tier": 1,
+                "transform": "sigmoid", "category": "radiation",
+                "reference": "frozen-lake (ice/snow) broadband albedo", "shape": None,
+            },
             "emissivity_lake": {
                 "units": "1", "bounds": (0.9, 1.0), "tunable_tier": 2,
                 "transform": "sigmoid", "category": "radiation",
@@ -70,6 +75,7 @@ class LakeConfig(NamedTuple):
     k_mix: float = 1.0e-2           # Vertical mixing coefficient [m2/s]
     wind_mix_alpha: float = 0.1     # Wind-driven mixing enhancement factor
     albedo_lake: float = 0.08
+    albedo_lake_ice: float = 0.6    # frozen-lake ice/snow broadband albedo
     emissivity_lake: float = 0.97
     z0_lake: float = 1e-4           # Roughness length [m]
     Cd_lake: float = 1.5e-3         # Drag coefficient (constant scheme)

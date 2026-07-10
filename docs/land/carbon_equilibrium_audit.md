@@ -31,6 +31,23 @@ was capped at a single leaf's assimilation. Tropical GPP came out ~5 gC/m²/day
 `L_c = (1−e^{−k·LAI})/k` (Sellers 1992; Bonan 2011). Tropical GPP → ~9–10
 gC/m²/day. `L_c→LAI→0` for a leafless column, so it degrades correctly.
 
+> **Update (Phase 3 canonical-FvCB adoption):** the C3-only
+> `farquhar_photosynthesis` described here has since been retired. The big-leaf
+> coupled solver now delegates to the canonical FvCB kernels
+> (`canopy.photosynthesis.c3_assimilation` / `c4_assimilation`), and the
+> canopy-integral scaling `L_c` is preserved by folding it (with the soil-water
+> stress) into an effective `Vcmax25` passed to those kernels — see
+> `land/stomata.py::solve_coupled_farquhar_ci`.
+>
+> **Param migration:** the big-leaf FvCB kinetics no longer live in
+> `StomataConfig`. The retired tunables `J_max25`, `Rd25`, `alpha_q`, `theta_j`
+> (and the Bernacchi constants `Kc25`/`Ko25`/`Gamma_star25`/`O2_conc`/`Ha_*`/
+> `Hd_J`/`S_J`/`co_limitation_eps`) are now the canonical module-level constants
+> in `canopy/photosynthesis.py`. Any externally-saved tuned-params JSON keyed on
+> `land.stomata.J_max25` (etc.) will no longer resolve — the surviving big-leaf
+> photosynthesis tunable is `land.stomata.Vc_max25` (Jmax/Rd derive from it via
+> the fixed canonical ratios). `Vcmax25` remains the trainable capacity knob.
+
 ### 2. Sub-daily maintenance-respiration death-spiral — FIXED
 DifferLand is a daily-timestep DALEC model run here at the land model's hourly
 `dt`. Every night GPP=0 while the biomass-proportional maintenance respiration

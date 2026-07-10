@@ -40,9 +40,16 @@ from legoesm.land.boundary_data._internals import (
 
 
 def bare_land_surface_params(ncol: int):
-    """Bare-soil :class:`LandSurfaceParams` (CLM5 PFT 0 row) broadcast to ncol."""
+    """Bare-soil :class:`LandSurfaceParams` (CLM5 PFT 0 row) broadcast to ncol.
+
+    ``fC4`` is set to 0 (bare soil is not C4) so this fallback's pytree structure
+    matches the surfdata provider's output (which always populates ``fC4``); a
+    ``None`` here would break the ``jax.tree.map`` gap-fill against a populated
+    ``fC4`` leaf.
+    """
     row = np.asarray(clm5_pft_table())[0]                    # bare_soil (12,)
-    return array_to_params(jnp.broadcast_to(jnp.asarray(row), (ncol, row.shape[0])), PARAM_NAMES)
+    p = array_to_params(jnp.broadcast_to(jnp.asarray(row), (ncol, row.shape[0])), PARAM_NAMES)
+    return p._replace(fC4=jnp.zeros(ncol))
 
 
 def bare_canopy_params(ncol: int) -> CanopyLandParams:

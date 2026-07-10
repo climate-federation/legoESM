@@ -114,7 +114,7 @@
 
 2. **Sea-ice dynamics with EVP rheology** (`ice/sea_ice.py`): Three dynamics modes — slab (thermodynamic-only, backward compatible), free-drift (diagnostic velocity + optional tracer advection), and EVP (Elastic-Viscous-Plastic, Hunke & Dukowicz 1997) with subcycled momentum solver. Multi-category ice (CICE framework, Lipscomb 2001 linear remapping). State types: `SeaIceState` (slab) and `DynamicSeaIceState` (with u_ice, v_ice, sigma fields, per-category arrays). See §4.4.
 
-3. **Plant physiology / stomatal conductance** (`land/carbon/stomata.py`): Farquhar (1980) C3 photosynthesis with Arrhenius/peaked-Arrhenius temperature responses (Bernacchi 2001), Ball-Berry (1987) and Medlyn (2011) stomatal conductance models. Jarvis (1976) multiplicative model as CO₂-independent fallback when carbon cycle is inactive. Coupled A-gs-Ci solver via 5-iteration fixed-point loop (unrolled for JIT). Soil moisture stress on Vc_max (CLM approach). Beer-law canopy fraction blending. See §4.3.
+3. **Plant physiology / stomatal conductance** (`land/stomata.py`): Farquhar (1980) C3 photosynthesis with Arrhenius/peaked-Arrhenius temperature responses (Bernacchi 2001), Ball-Berry (1987) and Medlyn (2011) stomatal conductance models. Jarvis (1976) multiplicative model as CO₂-independent fallback when carbon cycle is inactive. Coupled A-gs-Ci solver via 5-iteration fixed-point loop (unrolled for JIT). Soil moisture stress on Vc_max (CLM approach). Beer-law canopy fraction blending. See §4.3.
 
 4. **CMOR/CF-compliant output pipeline** (`io/cmor_output.py`): `CFWriter` class producing CF-1.8 / CMOR 3.x compliant NetCDF4 output with CMIP6 DRS naming convention. 27 CMOR variables across 2 tables (Amon: 21 vars, Lmon: 6 vars). Standard 19-level pressure grid (CMIP6_PLEV19). See §7.
 
@@ -1380,7 +1380,7 @@ The Bernacchi C3 Farquhar implementation was removed in Phase 1. The **Leuning C
 - **Growth-temperature acclimation**: `vcmax_temperature_response(Tf, TgC)` applies the Leuning 2002 peaked Arrhenius with a 30-day running-mean air temperature `TgC`.
 - **Q10 numerical floor** (Phase 1): `jnp.maximum(Q10, 1.2)` in `rd_temperature_response` prevents near-singular Jacobian contamination at Tf ≳ 43 °C.
 
-**Stomatal conductance** (`canopy/stomatal.py`, Phase 1):
+**Stomatal conductance** (`land/stomata.py`, Phase 1):
 
 | Model | Formula | Used by |
 |-------|---------|------------|
@@ -1390,7 +1390,7 @@ The Bernacchi C3 Farquhar implementation was removed in Phase 1. The **Leuning C
 
 All three models live in a single module and are used by both the canopy and the SimpleSEB A-gs path — there are no duplicated implementations. The canopy leaf energy balance dispatches between Ball-Berry and Medlyn via a static `stomatal_model` string on `TwoLeafCanopyConfig`, threaded through `leaf_energy_balance_bt` / `leaf_energy_balance_pm` via `functools.partial(jax.jit, static_argnames=("stomatal_model",))`.
 
-**Coupled solver** (`canopy/stomatal.py::coupled_farquhar_stomata`, Phase 2): **Newton** root-find on the diffusion constraint `F(Ci) = Ci - (Ca - 1.6 · max(A_n, 0) / max(gs, g0)) = 0`. Element-wise `dF/dCi` is extracted in O(n) via `jax.jvp` with a unit tangent. Damped Newton (factor 0.8) converges in 3–5 iterations for any VPD. Replaces the earlier fixed-point iteration which stalled or oscillated at high VPD (the `1/√VPD` Medlyn term amplified small Ci perturbations into large gs changes).
+**Coupled solver** (`land/stomata.py::coupled_farquhar_stomata`, Phase 2): **Newton** root-find on the diffusion constraint `F(Ci) = Ci - (Ca - 1.6 · max(A_n, 0) / max(gs, g0)) = 0`. Element-wise `dF/dCi` is extracted in O(n) via `jax.jvp` with a unit tangent. Damped Newton (factor 0.8) converges in 3–5 iterations for any VPD. Replaces the earlier fixed-point iteration which stalled or oscillated at high VPD (the `1/√VPD` Medlyn term amplified small Ci perturbations into large gs changes).
 
 **Two-leaf canopy Newton closure** (`canopy/solver.py`, Phase 1): 6-variable state `[Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c]` with `Ts` prescribed from the top soil layer. Solver uses `jax.custom_vjp` with **implicit function theorem reverse mode** — `dx*/dθ = −(∂F/∂x)⁻¹ · ∂F/∂θ` — for differentiability. Forward pass uses damped Newton via `jax.lax.while_loop` for true early stopping. Outer **Picard loop** (n = 6, ω = 0.15) reconciles the canopy's sub-minute turbulent response with the soil column's ~hour thermal time constant; the soil thermal update is injected via a caller-supplied `soil_thermal_fn(G, dt) → Ts_new` callback, so the solver is agnostic to slab vs multi-layer soil.
 

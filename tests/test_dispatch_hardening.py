@@ -215,6 +215,13 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/land/legoesm/land/surface_scheme/simple_seb.py",
          "compute_simple_seb_fluxes"),
         ("packages/land/legoesm/land/slab_land.py", "step_land"),
+        # Two-leaf canopy stomatal-model dispatch (ball_berry|medlyn): hardened
+        # 2026-07-08 during the stomata consolidation — a bare ``else`` used to
+        # silently run Ball-Berry on any typo. Guarded at BOTH ends: a fail-early
+        # CanopyConfig.validate() at the non-jitted setup entry, and the leaf
+        # kernel _compute_gs_and_ci as a trace-time backstop.
+        ("packages/land/legoesm/land/canopy/config.py", "validate"),
+        ("packages/land/legoesm/land/canopy/energy_balance.py", "_compute_gs_and_ci"),
         ("packages/ml/legoesm/ml/physics/model.py", "_validate_microphysics_scheme"),
         ("packages/ml/legoesm/ml/training.py", "create_optimizer"),
         ("packages/ml/legoesm/training/aimip_params.py", "make_aimip_classical_spectral_physics"),

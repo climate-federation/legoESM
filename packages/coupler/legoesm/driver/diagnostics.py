@@ -133,6 +133,39 @@ def _apply_structured_regrid_3d(
     )
 
 
+# --- Run-time blow-up bounds (physical Earth-atmosphere range).  A state
+#     outside these is a blow-up, not a bias.  ONE source of truth shared by the
+#     compiled ``check_stability`` and the raw MPAS/spectral daily checks — the
+#     #871 MPAS autopsy found an 8e8 K state that ran 1138 steps under a
+#     finiteness-only guard because those daily checks lacked bounds. ---
+_T_BLOWUP_MIN_K = 100.0
+_T_BLOWUP_MAX_K = 400.0
+_PS_BLOWUP_MIN_PA = 40000.0
+_PS_BLOWUP_MAX_PA = 115000.0
+
+
+def physical_state_blowup_reason(elapsed_day, T_min, T_max,
+                                 ps_min=None, ps_max=None):
+    """BLOWUP reason string if T (and optional p_s) are outside the physical
+    Earth-atmosphere range, else ``None``.  Pure/scalar so every run-time
+    detector shares the SAME bounds — a runaway T aborts at the first daily
+    check instead of running hundreds of steps under a finiteness-only guard."""
+    if T_min < _T_BLOWUP_MIN_K or T_max > _T_BLOWUP_MAX_K:
+        return (
+            f"BLOWUP at day {elapsed_day:.0f}: temperature out of physical "
+            f"bounds (min={T_min:.1f}K, max={T_max:.1f}K). "
+            "Check dt, hyperdiffusion, and physics configuration."
+        )
+    if ps_min is not None and ps_max is not None:
+        if ps_min < _PS_BLOWUP_MIN_PA or ps_max > _PS_BLOWUP_MAX_PA:
+            return (
+                f"BLOWUP at day {elapsed_day:.0f}: surface pressure out of "
+                f"bounds (min={ps_min:.0f}Pa, max={ps_max:.0f}Pa). "
+                "Check dt and dynamics configuration."
+            )
+    return None
+
+
 class DiagnosticCollector:
     """Accumulates diagnostics during a simulation.
 
@@ -1680,26 +1713,11 @@ class DiagnosticCollector:
         if not T_finite:
             return f"BLOWUP at day {elapsed_day:.0f}: non-finite T"
 
-        # Temperature bounds (physical range for Earth atmosphere)
-        if T_min_val < 100.0 or T_max_val > 400.0:
-            return (
-                f"BLOWUP at day {elapsed_day:.0f}: temperature out of physical bounds "
-                f"(min={T_min_val:.1f}K, max={T_max_val:.1f}K). "
-                f"Check dt, hyperdiffusion, and physics configuration."
-            )
-
-        # Surface pressure bounds
-        if has_p_s:
-            ps_min = float(host[5])
-            ps_max = float(host[6])
-            if ps_min < 40000.0 or ps_max > 115000.0:
-                return (
-                    f"BLOWUP at day {elapsed_day:.0f}: surface pressure out of bounds "
-                    f"(min={ps_min:.0f}Pa, max={ps_max:.0f}Pa). "
-                    f"Check dt and dynamics configuration."
-                )
-
-        return None
+        # Physical-plausibility bounds (shared helper — one source of truth).
+        ps_min = float(host[5]) if has_p_s else None
+        ps_max = float(host[6]) if has_p_s else None
+        return physical_state_blowup_reason(
+            elapsed_day, T_min_val, T_max_val, ps_min=ps_min, ps_max=ps_max)
 
 
 class EnsembleDiagnosticCollector:

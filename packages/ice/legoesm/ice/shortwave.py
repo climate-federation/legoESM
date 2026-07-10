@@ -194,27 +194,29 @@ def _band_albedo_bare_ice(
 
 def _band_albedo_pond(
     h_pond: jnp.ndarray,
+    alpha_ice_vis: jnp.ndarray,
+    alpha_ice_nir: jnp.ndarray,
     *,
-    alpha_bare_vis: jnp.ndarray,
-    alpha_bare_nir: jnp.ndarray,
     alpha_deep_vis: float,
     alpha_deep_nir: float,
-    h_pond_scale: float = _H_POND_SAT_M,
+    h_pond_sat: float = _H_POND_SAT_M,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Melt-pond two-band albedo (decreases with depth, Briegleb-Light 2007).
+    """Melt-pond two-band albedo — DECREASES with depth.
 
-    Sign/formula walk: pond albedo DECREASES with depth.  A shallow (thin-film)
-    pond looks like the bare ice underneath (high albedo); as the pond deepens
-    the water column absorbs more and the albedo decays toward the deep-pond
-    asymptote ``alpha_deep`` (< bare).  ``exp(-h/scale)`` = 1 at h=0 (bare) and
-    -> 0 as h -> inf (deep), so the result stays in ``[alpha_deep, alpha_bare]``.
-    The previous ``alpha_deep * (h/scale)`` ramp was INVERTED — it drove shallow
-    ponds to albedo -> 0 (darker than deep ponds), the opposite of the physics.
+    A shallow pond looks like the wet ice it sits on; deepening water
+    absorbs more in the column and darkens toward the deep-pond floor
+    ``alpha_deep_*`` (Ebert & Curry 1993; Briegleb & Light 2007).  The
+    old form ramped UP with depth (a zero-depth pond went perfectly
+    black, a deep pond was brightest) — the sign was inverted.
     """
-    decay = jnp.exp(-jnp.maximum(h_pond, 0.0) / jnp.maximum(h_pond_scale, 1e-6))
-    alpha_vis = alpha_deep_vis + (alpha_bare_vis - alpha_deep_vis) * decay
-    alpha_nir = alpha_deep_nir + (alpha_bare_nir - alpha_deep_nir) * decay
-    return alpha_vis, alpha_nir
+    # depth 0 -> ice albedo (fresh pond ~ wet ice); depth >= h_sat -> deep floor.
+    # Clamp the deep floor to the underlying ice albedo so thin (dark) ice can't
+    # brighten as the pond deepens — monotone non-increasing in depth (codex).
+    decay = jnp.clip(h_pond / jnp.maximum(h_pond_sat, 1e-6), 0.0, 1.0)
+    deep_vis = jnp.minimum(alpha_deep_vis, alpha_ice_vis)
+    deep_nir = jnp.minimum(alpha_deep_nir, alpha_ice_nir)
+    return (alpha_ice_vis + (deep_vis - alpha_ice_vis) * decay,
+            alpha_ice_nir + (deep_nir - alpha_ice_nir) * decay)
 
 
 def delta_eddington_albedo(
@@ -284,9 +286,7 @@ def delta_eddington_albedo(
         alpha_melt_nir=constants.alpha_ice_melt_nir,
     )
     pond_vis, pond_nir = _band_albedo_pond(
-        pond_depth,
-        alpha_bare_vis=ice_vis,
-        alpha_bare_nir=ice_nir,
+        pond_depth, ice_vis, ice_nir,
         alpha_deep_vis=constants.alpha_pond_max_vis,
         alpha_deep_nir=constants.alpha_pond_max_nir,
     )

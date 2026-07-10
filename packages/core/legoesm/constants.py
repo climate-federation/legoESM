@@ -148,6 +148,13 @@ emissivity_seawater_lw = 0.98   # [-] NEMO sbc_phy emiss_w
 # heat-content terms of the non-solar flux so they match NEMO bit-for-bit.
 c_p_seawater = 3991.86795711963  # [J/(kg*K)] NEMO TEOS-10 rcp
 
+# Seawater specific heat used by the Jenkins (1991) / ISOMIP+ ice-shelf
+# basal-melt intercomparison (Asay-Davis et al. 2016, GMD 9, 2471-2497).
+# Deliberately the ISOMIP+ reference value (distinct from Gill-1982 ``c_sw``
+# and NEMO's ``c_p_seawater``) so the linearised Jenkins melt rate reproduces
+# the ISOMIP+ intercomparison numbers bit-for-bit.
+c_p_seawater_isomip = 3974.0     # [J/(kg*K)] Jenkins 1991 / ISOMIP+
+
 # NEMO/aerobulk moist-air heat-capacity pair (sbc_phy.F90 rCp_dry/rCp_vap),
 # used by the NCAR bulk algorithm's sensible-heat flux
 # ``cp_air(q) = rCp_dry + rCp_vap*q``.  Deliberately separate from the

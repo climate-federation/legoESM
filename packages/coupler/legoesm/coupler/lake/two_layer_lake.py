@@ -28,18 +28,6 @@ from legoesm.coupler.lake.config import LakeConfig
 from legoesm.coupler.lake.state import LakeState
 
 
-# --- Lake-ice surface albedo (broadband, dimensionless) ---
-# A frozen lake is far brighter than open water (``LakeConfig.albedo_lake``
-# ≈ 0.08).  Bare lake ice ≈ 0.35–0.45 and snow-covered ice ≈ 0.6–0.8; 0.5
-# is a representative mid-range value consistent with the FLake / CLM4.5
-# lake-ice treatment (Subin et al. 2012, J. Adv. Model. Earth Syst.,
-# doi:10.1029/2011MS000072, frozen-lake albedo).
-# ponytail: promote to a ``LakeConfig.albedo_lake_ice`` field (radiation
-# tier-1, alongside ``albedo_lake``) once a config-schema edit is in scope;
-# a module constant is used here to keep the fix within this one file.
-_LAKE_ICE_ALBEDO = 0.5
-
-
 def step_lake(
     state: LakeState,
     forcing: AtmToSurface,
@@ -77,7 +65,7 @@ def step_lake(
     # q_sat / L_s switch above (not the open-water 0.08).  Keeps the
     # in-step energy budget consistent with the albedo reported to the
     # atmosphere in the response below.
-    albedo_eff = jnp.where(is_frozen, _LAKE_ICE_ALBEDO, config.albedo_lake)
+    albedo_eff = jnp.where(is_frozen, config.albedo_lake_ice, config.albedo_lake)
 
     # Bulk fluxes
     rho = forcing.rho_lowest
@@ -107,7 +95,10 @@ def step_lake(
             L_latent=L_eff,
         )
 
-    # Radiation
+    # Radiation.  A frozen lake reflects like ice/snow, not open water —
+    # completes the ``is_frozen`` switch already applied to q_sfc and L_eff.
+    # (Diagnostic-only ice: no prognostic thickness yet; upgrade = FLake ice.)
+    albedo_eff = jnp.where(is_frozen, config.albedo_lake_ice, config.albedo_lake)
     sw_net, lw_net, lw_up = surface_radiation_fluxes(
         forcing.sw_down, forcing.lw_down, T_epi, albedo_eff,
         config.emissivity_lake,
@@ -266,15 +257,11 @@ def step_lake(
     freshwater_flux = forcing.precip_total - evap_rate
     response = TileResponse(
         T_sfc=T_epi_new,
-        # Frozen lakes report their ice/snow albedo, not open-water 0.08
-        # (matches the q_sat/L_s ice switch and this step's absorbed SW).
-        # ``is_frozen_new`` (post-step T ≤ T_freeze) was computed just
-        # above for q_surface.
-        albedo=jnp.where(
-            is_frozen_new,
-            jnp.asarray(_LAKE_ICE_ALBEDO, dtype=_t_dtype),
-            jnp.asarray(config.albedo_lake, dtype=_t_dtype),
-        ),
+        # Reported albedo tracks the POST-step phase (like q_surface_new): the
+        # atmosphere sees the end-of-step surface next.  (SW absorbed THIS step
+        # used the pre-step albedo_eff above — correct for the state it had.)
+        albedo=jnp.where(is_frozen_new, config.albedo_lake_ice,
+                         config.albedo_lake).astype(_t_dtype),
         emissivity=jnp.full(T_epi.shape, config.emissivity_lake, dtype=_t_dtype),
         z0=jnp.full(T_epi.shape, config.z0_lake, dtype=_t_dtype),
         q_surface=q_sfc_new,

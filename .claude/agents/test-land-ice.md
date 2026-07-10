@@ -409,7 +409,7 @@ Read `src/legoesm/land/carbon/carbon_cycle.py` and `src/legoesm/land/carbon/conf
 removed.  The **Leuning C3 + Q10 C4** model in
 ``src/legoesm/land/canopy/photosynthesis.py`` is now the single Farquhar
 implementation, and the stomatal conductance functions live in
-``src/legoesm/land/canopy/stomatal.py``.  The legacy Bernacchi
+``packages/land/legoesm/land/stomata.py``.  The legacy Bernacchi
 test cases (7a–7e) are gone; the canopy Farquhar is covered by
 ``tests/land/unit/test_canopy_photosynthesis.py``.  This category focuses
 on the stomatal conductance models and the coupled Leuning A-gs solver.
@@ -459,14 +459,14 @@ on the stomatal conductance models and the coupled Leuning A-gs solver.
 
 **Key imports:**
 ```python
-from legoesm.land.canopy.stomatal import (
+from legoesm.land.stomata import (
     ball_berry_gs, medlyn_gs, jarvis_gs,
     coupled_farquhar_stomata, compute_stomatal_beta,
 )
 from legoesm.land.carbon.config import StomataConfig
 ```
 
-Read ``src/legoesm/land/canopy/stomatal.py`` and
+Read ``packages/land/legoesm/land/stomata.py`` and
 ``src/legoesm/land/canopy/photosynthesis.py`` first — the
 ``coupled_farquhar_stomata`` solver uses the Leuning C3/C4 Farquhar
 model from the latter via a Newton A-gs root-find.
@@ -916,7 +916,7 @@ from legoesm.land.config import LandConfig, MultiLayerLandConfig
 from legoesm.land.carbon.config import CarbonConfig, CarbonState
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
 from legoesm.land.carbon.config import StomataConfig
-from legoesm.land.canopy.stomatal import ball_berry_gs
+from legoesm.land.stomata import ball_berry_gs
 from legoesm.ice.sea_ice import step_sea_ice
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.state import SeaIceState, DynamicSeaIceState

@@ -310,7 +310,7 @@ class TestBandStep(unittest.TestCase):
 
     def test_refreeze_bounded_by_cold_content(self):
         """A thin, barely sub-freezing band cannot refreeze more rain than its cold
-        content c_snow*swe*(Tf - T_band)/L_f allows; the residual rain stays liquid
+        content c_pi*swe*(Tf - T_band)/L_f allows; the residual rain stays liquid
         (runs off/infiltrates) instead of releasing unbounded latent heat."""
         cfg = _band_cfg([0.0])
         swe0 = jnp.full((1, 5), 0.5)                        # thin cold band
@@ -320,8 +320,8 @@ class TestBandStep(unittest.TestCase):
             swe0, jnp.zeros((1, 5)), jnp.zeros((1, 5)),
             jnp.array([constants.T_freeze - dT]), jnp.zeros((1, 5)), 3600.0,
             Q_net=jnp.zeros(1), cfg=cfg, precip_rain_bands=heavy_rain)
-        # Cold-content cap [kg/m2] = c_snow*swe*dT/L_f -- far below the 36 kg/m2 rain.
-        cap = float(constants.c_snow * 0.5 * dT / constants.L_f)
+        # Cold-content cap [kg/m2] = c_pi*swe*dT/L_f -- far below the 36 kg/m2 rain.
+        cap = float(constants.c_pi * 0.5 * dT / constants.L_f)
         rain_mass = float(heavy_rain[0, 0]) * 3600.0
         self.assertLess(cap, rain_mass)                    # cap actually binds
         npt.assert_allclose(out.refreeze, cap, rtol=1e-6)  # capped at cold content

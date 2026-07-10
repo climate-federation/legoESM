@@ -231,7 +231,10 @@ def compute_two_leaf_canopy_fluxes(
     the canopy computes LE from leaf-level humidity gradients directly
     (no ``beta * q_sat`` proxy).
     """
-    cc = canopy_config
+    # Fail-early dispatch check on the static string fields (stomatal_model):
+    # this runs at land-component setup, before any jitted canopy solve, so a
+    # typo aborts here with a clear message rather than deep in the JAX kernel.
+    cc = canopy_config.validate()
     lp = canopy_params
     ncol = T_soil_top.shape[0]
 

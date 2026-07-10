@@ -42,7 +42,7 @@ from legoesm.land.multilayer_land import (
 from legoesm.land.snow_budget import update_snow
 from legoesm.land.carbon.carbon_cycle import compute_gpp
 from legoesm.land.carbon.config import CarbonConfig
-from legoesm.land.carbon.stomata import (
+from legoesm.land.stomata import (
     StomataConfig,
     coupled_farquhar_stomata,
     jarvis_gs,

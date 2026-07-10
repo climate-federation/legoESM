@@ -37,6 +37,56 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_no_use_multilayer_land_overrides_yaml_default():
+    """--no-use-multilayer-land flips a set_defaults(True) (i.e. a --config YAML
+    that enables the multilayer land) back off — needed to run a production
+    YAML on the MPAS/spectral standalone backends (#869 MPAS probe)."""
+    parser = build_arg_parser()
+    parser.set_defaults(use_multilayer_land=True)  # what a YAML would do
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-use-multilayer-land",
+    ]), parser))
+    assert cfg.use_multilayer_land is False
+
+
+def test_no_sponge_overrides_yaml_default():
+    """--no-sponge flips a set_defaults(True) (a --config YAML enabling the
+    #836 top sponge) back off — needed for the #847 drift-lever walk's
+    sponge-off leg against amip_production.yaml."""
+    parser = build_arg_parser()
+    parser.set_defaults(sponge_enabled=True)  # what a YAML would do
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-sponge",
+    ]), parser))
+    assert cfg.sponge_enabled is False
+
+
+def test_no_surface_tiled_overrides_yaml_default():
+    """--no-surface-tiled flips a set_defaults(True) (a --config YAML enabling
+    the tiled mosaic surface) back off — same MPAS/spectral escape hatch as
+    --no-use-multilayer-land (the standalone backends don't run the tiled
+    coupled pipeline; validate_strict otherwise demands an active land tile)."""
+    parser = build_arg_parser()
+    parser.set_defaults(surface_tiled=True)  # what a YAML would do
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-surface-tiled",
+    ]), parser))
+    assert cfg.surface_tiled is False
+
+
+def test_multilayer_land_rejected_on_mpas():
+    """use_multilayer_land + MPAS grid must fail EARLY at argparse with a clear
+    message (not an AttributeError deep in _setup_multilayer_land: VoronoiMesh
+    has no lat/lat2d — the crash mode of the first MPAS AMIP probe)."""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical",
+            "--grid-type", "mpas", "--discretization", "mpas",
+            "--use-multilayer-land",
+        ]), parser)
+
+
 def test_clm_surfdata_path_flows_to_config():
     """--clm-surfdata-path round-trips into ExperimentConfig (empty default =>
     UCAR download; a set path lets a compute node with no internet use a staged
@@ -51,6 +101,45 @@ def test_clm_surfdata_path_flows_to_config():
         "--clm-surfdata-path", "/data/clm_surfdata.nc",
     ]), parser))
     assert cfg.clm_surfdata_path == "/data/clm_surfdata.nc"
+
+
+def test_transient_land_cover_flags_flow_to_config():
+    """--transient-land-cover / --land-cover-surfdata round-trip into
+    ExperimentConfig (off + empty by default => static single-year cover)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.transient_land_cover is False
+    assert cfg_default.land_cover_surfdata == ""
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--land-mask-file", "lsm.nc", "--use-multilayer-land",
+        "--transient-land-cover",
+        "--land-cover-surfdata", "/data/luh2_transient_surfdata.nc",
+    ]), parser))
+    assert cfg.transient_land_cover is True
+    assert cfg.land_cover_surfdata == "/data/luh2_transient_surfdata.nc"
+
+
+def test_transient_land_cover_validate_strict_requires_multilayer_and_surfdata():
+    """validate_strict() rejects transient cover without a multilayer tile or
+    without a surfdata path — both would silently no-op the requested LULC."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--land-mask-file", "lsm.nc", "--use-multilayer-land",
+        "--transient-land-cover",
+        "--land-cover-surfdata", "/data/luh2_transient_surfdata.nc",
+    ]), parser))
+    cfg.validate_strict()  # complete config: no error
+
+    # transient cover but no surfdata path -> reject
+    with pytest.raises(ValueError, match="land_cover_surfdata"):
+        cfg._replace(land_cover_surfdata="").validate_strict()
+    # transient cover but slab land (no multilayer) -> reject
+    with pytest.raises(ValueError, match="use_multilayer_land"):
+        cfg._replace(use_multilayer_land=False).validate_strict()
 
 
 def test_land_ic_path_flows_to_config():
@@ -1684,19 +1773,24 @@ def test_cloud_sensitivity_flags_round_trip_and_validate():
             bad.validate_strict()
 
 
-def test_cloud_sensitivity_flags_rejected_on_mpas_spectral():
-    """--cloud-p-xr/--cloud-alpha-xr are refused on MPAS/spectral (they rebuild
-    CloudConfig at run() and would silently ignore the pipeline override)."""
+def test_cloud_sensitivity_flags_allowed_on_mpas_spectral():
+    """#870 Phase 1 FLIPS the old rejection: --cloud-p-xr/--cloud-alpha-xr now
+    REACH the standalone MPAS/spectral radiation (via
+    model_driver._standalone_cloud_config reading the same experiment fields),
+    so the guard must accept them on every backend — the pre-#870 hard
+    rejection blocked a working feature with a false message."""
     from scripts.run.run_amip import _validate_cloud_sensitivity_flags
     parser = build_arg_parser()
+    # MPAS + the flags: NO raise (they thread via _standalone_cloud_config).
     mpas = parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi",
                               "--cloud-p-xr", "0.7"])
-    with pytest.raises(SystemExit):
-        _validate_cloud_sensitivity_flags(mpas, parser)
-    # FV path + no flags: no raise
-    _validate_cloud_sensitivity_flags(
-        parser.parse_args(["--dataset", "analytical", "--grid-type", "voronoi"]),
-        parser)
+    _validate_cloud_sensitivity_flags(mpas, parser)
+    # And the values flow into ExperimentConfig on the MPAS path too.
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--grid-type", "voronoi",
+         "--cloud-p-xr", "0.7", "--cloud-alpha-xr", "20.0"]), parser))
+    assert cfg.cloud_p_xr == 0.7 and cfg.cloud_alpha_xr == 20.0
+    # FV path unchanged: no raise with or without flags.
     _validate_cloud_sensitivity_flags(
         parser.parse_args(["--dataset", "analytical", "--cloud-p-xr", "0.7"]),
         parser)
@@ -1790,3 +1884,57 @@ def test_top_sponge_flags_flow_to_dycore_config():
     assert cfg_on.dycore.sponge_width_m == 12000.0
     assert cfg_on.dycore.sponge_shape == "sam_rational"
     assert cfg_on.dycore.sponge_scale_height_m == 8000.0
+
+
+def test_yaml_settable_bools_have_no_switches():
+    """#872 sweep: every store_true flag a shipped YAML can set true is now
+    BooleanOptionalAction, so a --config that enables it stays CLI-overridable
+    (--no-<flag> => False). The old store_true form made a YAML-true value
+    permanently un-overridable (no negative form), breaking one-lever A/B legs
+    — hit three times on 2026-07-08 alone (#873 converted the first three)."""
+    swept = [
+        "aerosol_ccn", "clear_sky_diag", "cmip_output", "diurnal_cycle",
+        "land_stomatal_beta", "monthly_means", "orbital_insolation",
+        "snow_albedo_feedback", "slab_land_active", "dynamic_albedo",
+        # amip_production_latlon24.yaml sets it true (#869) — the filter-off
+        # A/B leg needs --no-use-polar-filter (codex: the variant YAML created
+        # a fresh instance of exactly this pattern).
+        "use_polar_filter",
+    ]
+    for dest in swept:
+        parser = build_arg_parser()
+        # Simulate the YAML layer enabling the flag (load_yaml_config applies
+        # file values via parser.set_defaults).
+        parser.set_defaults(**{dest: True})
+        flag = "--no-" + dest.replace("_", "-")
+        args = parser.parse_args(["--dataset", "analytical", flag])
+        assert getattr(args, dest) is False, (
+            f"{flag} must override a YAML-set {dest}=true")
+        # And the positive default still holds without the switch.
+        args = parser.parse_args(["--dataset", "analytical"])
+        assert getattr(args, dest) is True
+
+
+def test_latlon24_production_variant_pins_polar_filter():
+    """#869: the lat-lon production lane variant MUST carry the polar filter
+    (the 12-day one-variable A/B convicted filter-off: blowup day 1 vs
+    COMPLETED) and the filter-enabled dt=600 (pole clamp lifted, ~10x
+    throughput, 30-day soak clean). A silent drop of either re-opens the
+    day-9/10 blowup."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    cfg_file = _repo_root() / "config" / "amip" / "amip_production_latlon24.yaml"
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
+    args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
+    assert args.use_polar_filter is True
+    assert args.dt == 600.0
+    assert args.grid_type == "latlon" and args.discretization == "latlon_cgrid"
+    assert args.resolution == 24 and args.nlev == 20
+    # Physics inherited from the production include (one source of truth),
+    # except convection: this lane pins `sbm` (#869) because bechtold
+    # re-develops a polar-night temperature runaway that blows the run at day
+    # ~47 regardless of every numerics lever, while sbm is stable (95-day soak)
+    # and lifts hfls 40->70 (#847).  The cube lane keeps bechtold.
+    cfg = build_config_from_args(args)
+    assert cfg.convection == "sbm" and cfg.gravity_wave_drag == "mcfarlane"
+    assert cfg.convective_precip_efficiency == 0.0  # sbm rejects the bechtold knob

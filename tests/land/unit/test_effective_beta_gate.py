@@ -33,7 +33,7 @@ def test_stomata_off_returns_bare_soil_beta():
     cfg = LandConfig()
     assert cfg.stomata.enabled is False               # default
     beta_soil = jnp.full((4, 4), 0.7)
-    beta, gpp = compute_effective_beta(
+    beta, gpp, _sif = compute_effective_beta(
         jnp.full((4, 4), 298.0), _forcing(), beta_soil, cfg,
         carbon_state=None, dt=3600.0)
     np.testing.assert_allclose(np.asarray(beta), np.asarray(beta_soil))
@@ -47,10 +47,73 @@ def test_stomata_on_applies_conductance_limit():
     cfg = LandConfig()._replace(
         stomata=LandConfig().stomata._replace(enabled=True))
     beta_soil = jnp.full((4, 4), 0.7)
-    beta, _ = compute_effective_beta(
+    beta, _, _ = compute_effective_beta(
         jnp.full((4, 4), 298.0), _forcing(), beta_soil, cfg,
         carbon_state=None, dt=3600.0)
     beta = np.asarray(beta)
     assert np.all(np.isfinite(beta))
     assert np.all(beta <= np.asarray(beta_soil) + 1e-9)   # stomata can only limit
     assert not np.allclose(beta, np.asarray(beta_soil))   # genuinely active
+
+
+def _land_params(shape, fc4):
+    """Minimal shape-matched LandSurfaceParams with a prescribed C4 fraction."""
+    from legoesm.land.surface_params import LandSurfaceParams
+    f = lambda v: jnp.full(shape, v)
+    return LandSurfaceParams(
+        albedo_veg=f(0.15), emissivity=f(0.97), z0=f(0.1),
+        W_max=f(200.0), C_soil=f(2.0e6), d_soil=f(1.0),
+        root_depth=f(1.0), theta_wp=f(0.15), theta_fc=f(0.30),
+        Vc_max25=f(60.0), LCMA=f(50.0), g1=f(9.0),
+        fC4=f(fc4),
+    )
+
+
+def test_c4_fraction_changes_gpp_through_dispatch():
+    """A C4-dominated column (land_params.fC4=1) yields a DIFFERENT coupled-
+    Farquhar GPP than a C3 column (fC4=0) through compute_effective_beta —
+    proving the canonical C3/C4 blend is wired end-to-end, not silently pure-C3
+    (the pre-canonical-FvCB behaviour ran every column as C3)."""
+    from legoesm.land.carbon.carbon_cycle import init_carbon_state
+    shape = (4, 4)
+    base = LandConfig()
+    cfg = base._replace(
+        stomata=base.stomata._replace(enabled=True),
+        carbon=base.carbon._replace(scheme="differland"),
+    )
+    carbon = init_carbon_state(shape, cfg.carbon)
+
+    def _gpp(fc4):
+        _beta, gpp, _sif = compute_effective_beta(
+            jnp.full(shape, 298.0), _forcing(), jnp.full(shape, 0.7), cfg,
+            carbon_state=carbon, dt=3600.0, land_params=_land_params(shape, fc4))
+        return np.asarray(gpp)
+
+    gpp_c3 = _gpp(0.0)
+    gpp_c4 = _gpp(1.0)
+    assert np.all(np.isfinite(gpp_c3)) and np.all(np.isfinite(gpp_c4))
+    # The C4 branch (Collatz) genuinely changes GPP vs pure C3 at these
+    # conditions — the blend is live, not a silent fC4=0 fallback.
+    assert not np.allclose(gpp_c3, gpp_c4)
+
+
+def test_c4_fraction_defaults_to_c3_when_unset():
+    """land_params with fC4=None (prescribed-PFT path) runs pure C3 — the
+    documented default, matching the no-land_params path."""
+    from legoesm.land.carbon.carbon_cycle import init_carbon_state
+    from legoesm.land.surface_params import LandSurfaceParams
+    shape = (4, 4)
+    base = LandConfig()
+    cfg = base._replace(
+        stomata=base.stomata._replace(enabled=True),
+        carbon=base.carbon._replace(scheme="differland"),
+    )
+    carbon = init_carbon_state(shape, cfg.carbon)
+    lp_none = _land_params(shape, 0.0)._replace(fC4=None)
+    lp_zero = _land_params(shape, 0.0)
+    args = (jnp.full(shape, 298.0), _forcing(), jnp.full(shape, 0.7), cfg)
+    _, gpp_none, _ = compute_effective_beta(
+        *args, carbon_state=carbon, dt=3600.0, land_params=lp_none)
+    _, gpp_zero, _ = compute_effective_beta(
+        *args, carbon_state=carbon, dt=3600.0, land_params=lp_zero)
+    np.testing.assert_allclose(np.asarray(gpp_none), np.asarray(gpp_zero))

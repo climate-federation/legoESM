@@ -91,13 +91,13 @@ __physics_contract__ = {
 
 
 # --- Thermodynamic constants ---
-# Latent heat of fusion + seawater heat capacity: use the canonical substrate
-# constants (redundancy audit) instead of locally-rounded literals (the old
-# 3.34e5 drifted 0.09% from constants.L_f; the old 3974.0 drifted 0.5% from
-# constants.c_sw and matches the sibling ice_shelf.py c_w).
-_L_F: float = constants.L_f    # J/kg latent heat of fusion
-_C_P_SW: float = constants.c_sw  # J/kg/K seawater heat capacity (Gill 1982)
-_RHO_FW: float = 1000.0         # kg/m^3 freshwater density
+# All three reference the canonical substrate constants (redundancy audit)
+# instead of local literals: L_f avoids a rounded 3.34e5 (0.09% drift);
+# c_p_sw uses the ISOMIP+ / Jenkins-1991 seawater heat capacity; rho_fw is the
+# freshwater density.
+_L_F: float = constants.L_f                    # J/kg latent heat of fusion
+_C_P_SW: float = constants.c_p_seawater_isomip  # J/kg/K seawater cp (Jenkins 1991 / ISOMIP+)
+_RHO_FW: float = constants.rho_water            # kg/m^3 freshwater density
 
 # ponytail: this module's linearised Jenkins melt duplicates the melt physics
 # in ice_shelf.py (three_equation_melt / linear_melt). It is kept separate only

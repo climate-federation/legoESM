@@ -85,6 +85,19 @@ class EnhancedDiffusionConfig(NamedTuple):
     sigmoid_sharpness: float = 1e6
     cfl_dt_estimate: float = 3600.0  # Reference dt for explicit-CFL cap [s]
     cfl_safety: float = 0.45         # Stability margin (≤ 0.5)
+    # ----- Static-stability N^2 mode for the convective trigger -----
+    # ``"insitu"`` (default, BIT-IDENTICAL legacy) / ``"insitu_signed"``: the
+    #   convective trigger uses the in-situ density N^2
+    #   (``eos.compute_buoyancy_frequency``). Compressibility can leave a
+    #   statically-unstable column with N^2 > 0, so convection is MISSED.
+    # ``"adiabatic"``: the TRUE static stability via adiabatic parcel
+    #   displacement (``eos.compute_buoyancy_frequency_adiabatic``), SIGNED —
+    #   a compressibility-masked unstable column then gives N^2 < 0 and the
+    #   trigger fires. Requires the caller to thread T, S, cell-centre
+    #   pressure ``p_cell`` (+ the model EOS) to ``convective_K_A_flag`` /
+    #   ``enhanced_diffusion_convection``; both integration factory and the
+    #   implicit k_profiles path supply them when this is selected.
+    n2_mode: str = "insitu"
 
 
 class PlumeConfig(NamedTuple):

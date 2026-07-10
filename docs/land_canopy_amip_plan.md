@@ -202,7 +202,7 @@ The vendored canopy provides, in a single integration step:
 | Roughness-sublayer turbulence (Harman-Finnigan) | `MLCanopyTurbulenceMod.py` | Single-level MOST flux (which still runs for soil/snow patch) |
 | Per-layer leaf boundary-layer conductance | `MLLeafBoundaryLayerMod.py` | (no analogue) |
 | Per-layer leaf energy balance (sunlit + shaded T_leaf, q_leaf) | `MLLeafFluxesMod.py`, `MLCanopyFluxesMod.py` | Single-leaf `T_can ≡ T_soil[0]` assumption |
-| Coupled Farquhar + Ball-Berry/Medlyn stomata | `MLLeafPhotosynthesisMod.py` | `legoesm.land.carbon.stomata` (kept for non-canopy path; bypassed for canopy) |
+| Coupled Farquhar + Ball-Berry/Medlyn stomata | `MLLeafPhotosynthesisMod.py` | `legoesm.land.stomata` (kept for non-canopy path; bypassed for canopy) |
 | Multi-layer canopy water (interception, drip, dew) | `MLCanopyWaterMod.py` | Would-be single `canopy_water` store |
 | Plant hydraulics (ψ_stem, ψ_leaf, xylem cavitation) | `MLPlantHydraulicsMod.py` | (no analogue) |
 | Canopy-aware soil temperature top BC | `MLSoilTemperatureMod.py` | Used as canopy-bottom flux into legoesm's `soil_thermal.py` |
