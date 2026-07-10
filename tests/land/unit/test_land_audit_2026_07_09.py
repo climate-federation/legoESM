@@ -256,5 +256,165 @@ class TestRootZoneDelegation(unittest.TestCase):
         npt.assert_allclose(np.asarray(beta_root), np.asarray(beta_root2), rtol=1e-12)
 
 
+class TestCanopyLatentHeatOverSnow(unittest.TestCase):
+    """F13: the driver charges each scheme's latent flux at the latent heat that
+    scheme baked, and routes it to the matching reservoir.
+
+    * SimpleSEB uses L_eff = where(has_snow, L_s, L_v) internally, so over snow its
+      vapor mass = lhflx / L_s (snowpack sublimation).
+    * The two-leaf / CLM-ML canopy bake lam = L_v, so their latent flux is L_v
+      transpiration drawn from soil water — over snow its vapor mass = lhflx / L_v
+      (NOT L_s), and it must not deplete the snowpack.
+    """
+
+    def _snow_forcing(self, ncol=1):
+        from legoesm.core.coupling_fields import AtmToSurface
+        o = jnp.ones(ncol)
+        return AtmToSurface(
+            sw_down=400.0 * o, lw_down=320.0 * o, precip_total=0.0 * o,
+            precip_snow=0.0 * o, T_lowest=288.0 * o, q_lowest=0.006 * o,
+            u_lowest=1.0 * o, v_lowest=0.0 * o,   # low wind: no blowing-snow sublimation
+            p_lowest=9.9e4 * o, p_surface=1.0e5 * o, rho_lowest=1.2 * o,
+            cos_zenith=0.6 * o, co2_ppmv=412.0 * o,
+            has_radiation=o, has_precipitation=o)
+
+    def _step(self, cfg, snow_kg=25.0):
+        from legoesm.land.multilayer_land import (
+            init_multilayer_land_state, step_multilayer_land_with_diagnostics,
+        )
+        s0 = init_multilayer_land_state(1, cfg, T_init=283.0,
+                                        theta_init=0.30, TgC_init=15.0)
+        s0 = s0._replace(snow_depth=jnp.full(1, snow_kg))
+        ns, resp, _c, _out = step_multilayer_land_with_diagnostics(
+            s0, self._snow_forcing(), cfg, 1.0, 1800.0,
+            lat=jnp.array([0.6]), carbon_state=None, doy=180.0, land_params=None)
+        return ns, resp, s0
+
+    def test_canopy_reports_vapor_mass_at_L_v(self):
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+        cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(max_iters=40))
+        ns, resp, s0 = self._step(cfg)
+        mass = float(resp.surface_mass_flux[0])
+        lhflx = float(resp.lhflx[0])
+        # Low wind -> no blowing-snow term, so vapor mass == lhflx / L_v exactly.
+        if abs(lhflx) > 1e-6:
+            npt.assert_allclose(mass, lhflx / constants.L_v, rtol=1e-6)
+            # And it is NOT the L_s reading the old code produced.
+            self.assertGreater(abs(mass - lhflx / constants.L_s), 0.0)
+
+    def test_simple_seb_over_snow_reports_vapor_mass_at_L_s(self):
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.surface_scheme import SimpleSEBConfig
+        cfg = MultiLayerLandConfig(surface_scheme=SimpleSEBConfig())
+        ns, resp, s0 = self._step(cfg)
+        mass = float(resp.surface_mass_flux[0])
+        lhflx = float(resp.lhflx[0])
+        if abs(lhflx) > 1e-6:
+            npt.assert_allclose(mass, lhflx / constants.L_s, rtol=1e-6)
+
+    def test_canopy_dew_over_snow_frosts_snow_not_soil(self):
+        """A NEGATIVE canopy latent flux over snow (dew/frost) must accrete on the
+        snowpack, not add liquid water to the soil top (codex F13 edge case)."""
+        from legoesm.core.coupling_fields import AtmToSurface
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+        from legoesm.land.multilayer_land import (
+            init_multilayer_land_state, step_multilayer_land_with_diagnostics,
+            make_soil_grid,
+        )
+        o = jnp.ones(1)
+        # Night, warm moist air over a cold snow-covered surface -> condensation.
+        f = AtmToSurface(
+            sw_down=0.0 * o, lw_down=300.0 * o, precip_total=0.0 * o, precip_snow=0.0 * o,
+            T_lowest=278.0 * o, q_lowest=0.020 * o, u_lowest=1.0 * o, v_lowest=0.0 * o,
+            p_lowest=9.9e4 * o, p_surface=1.0e5 * o, rho_lowest=1.2 * o,
+            cos_zenith=0.0 * o, co2_ppmv=412.0 * o, has_radiation=o, has_precipitation=o)
+        cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(max_iters=40))
+        dz = jnp.asarray(make_soil_grid(cfg.soil_grid).dz)
+        s0 = init_multilayer_land_state(1, cfg, T_init=271.0, theta_init=0.30, TgC_init=5.0)
+        s0 = s0._replace(snow_depth=jnp.full(1, 25.0))
+        W0 = float(jnp.sum(dz * s0.theta_soil[0]))
+        ns, resp, _c, _out = step_multilayer_land_with_diagnostics(
+            s0, f, cfg, 1.0, 1800.0, lat=jnp.array([0.6]), carbon_state=None,
+            doy=15.0, land_params=None)
+        lhflx = float(resp.lhflx[0])
+        self.assertLess(lhflx, 0.0, "expected condensation (lhflx<0) for this forcing")
+        # Deposition accretes on the snowpack (frost, charged at L_s)...
+        self.assertGreater(float(ns.snow_depth[0]), float(s0.snow_depth[0]))
+        npt.assert_allclose(float(resp.surface_mass_flux[0]), lhflx / constants.L_s, rtol=1e-6)
+        # ...and does NOT inject liquid water into the soil top.
+        self.assertLessEqual(float(jnp.sum(dz * ns.theta_soil[0])), W0 + 1e-9)
+
+    def test_canopy_transpiration_over_snow_dry_soil_stays_valid(self):
+        """Positive canopy latent over snow is now capped by max_soil_evap (kg/m2/s;
+        extractable_water carries rho_w).  A near-dry column under strong demand must
+        never drive soil moisture below residual or non-finite."""
+        from legoesm.core.coupling_fields import AtmToSurface
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+        from legoesm.land.multilayer_land import (
+            init_multilayer_land_state, step_multilayer_land, make_soil_grid,
+        )
+        o = jnp.ones(1)
+        f = AtmToSurface(
+            sw_down=800.0 * o, lw_down=350.0 * o, precip_total=0.0 * o, precip_snow=0.0 * o,
+            T_lowest=300.0 * o, q_lowest=0.003 * o, u_lowest=3.0 * o, v_lowest=1.0 * o,
+            p_lowest=9.9e4 * o, p_surface=1.0e5 * o, rho_lowest=1.2 * o,
+            cos_zenith=0.9 * o, co2_ppmv=412.0 * o, has_radiation=o, has_precipitation=o)
+        cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(max_iters=40))
+        tr = float(cfg.hydraulics.theta_r)
+        s = init_multilayer_land_state(1, cfg, T_init=290.0, theta_init=tr + 0.005, TgC_init=20.0)
+        s = s._replace(snow_depth=jnp.full(1, 15.0))
+
+        def body(st, _):
+            st2, _r, _c = step_multilayer_land(st, f, cfg, 1.0, 1800.0, lat=jnp.array([0.6]))
+            return st2, jnp.min(st2.theta_soil)
+
+        sf, th_min = jax.lax.scan(body, s, None, length=48)  # 24 h
+        self.assertGreaterEqual(float(jnp.min(th_min)), tr - 1e-9)
+        self.assertFalse(bool(jnp.any(~jnp.isfinite(sf.theta_soil))))
+
+    def test_canopy_over_snow_conserves_total_column_water(self):
+        """Total column water (soil + pond + snow SWE) balances precip - ET - runoff
+        for a partially-vegetated canopy column over snow.  ET = surface_mass_flux is
+        the only vapor sink; snow melt keeps water in the column (snow -> soil)."""
+        from legoesm.core.coupling_fields import AtmToSurface
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+        from legoesm.land.multilayer_land import (
+            init_multilayer_land_state, step_multilayer_land, make_soil_grid,
+        )
+        rho_w = float(constants.rho_water)
+        o = jnp.ones(1)
+        # Moderate soil moisture -> partial vegetation fraction f_veg ~ 0.5; some
+        # radiation drives transpiration; no precip so the budget has one input.
+        f = AtmToSurface(
+            sw_down=500.0 * o, lw_down=330.0 * o, precip_total=0.0 * o, precip_snow=0.0 * o,
+            T_lowest=288.0 * o, q_lowest=0.006 * o, u_lowest=2.0 * o, v_lowest=1.0 * o,
+            p_lowest=9.9e4 * o, p_surface=1.0e5 * o, rho_lowest=1.2 * o,
+            cos_zenith=0.6 * o, co2_ppmv=412.0 * o, has_radiation=o, has_precipitation=o)
+        cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(max_iters=40))
+        dz = jnp.asarray(make_soil_grid(cfg.soil_grid).dz)
+        s0 = init_multilayer_land_state(1, cfg, T_init=284.0, theta_init=0.24, TgC_init=15.0)
+        s0 = s0._replace(snow_depth=jnp.full(1, 20.0))
+
+        def storage(st):
+            return float((jnp.sum(dz * st.theta_soil[0]) + st.surface_water[0]) * rho_w
+                         + st.snow_depth[0])
+
+        def body(st, _):
+            st2, r, _c = step_multilayer_land(st, f, cfg, 1.0, 1800.0, lat=jnp.array([0.6]))
+            return st2, (r.surface_mass_flux[0], st2.runoff_surface[0], st2.runoff_subsurface[0])
+
+        W0 = storage(s0)
+        sf, (ET, RS, RD) = jax.lax.scan(body, s0, None, length=48)
+        dt = 1800.0
+        dW = storage(sf) - W0
+        out = (float(jnp.sum(ET)) + float(jnp.sum(RS)) + float(jnp.sum(RD))) * dt
+        # Closed column (no precip): dStorage == -(ET + runoff).
+        self.assertLess(abs(dW + out), 1e-3 * abs(out) + 1e-4)
+
+
 if __name__ == "__main__":
     unittest.main()

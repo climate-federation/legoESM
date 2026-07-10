@@ -658,13 +658,34 @@ def _step_multilayer_land_impl(
     G_surface = G_surface - melt_energy
 
     # --- Latent mass partition (sublimation vs soil evap, water-limited) ---
+    # The latent flux is charged at the SAME latent heat the active surface
+    # scheme used to produce ``lhflx``, and routed to the matching reservoir:
+    #   * SimpleSEB (bare surface) uses L_eff = where(has_snow, L_s, L_v)
+    #     internally, so over snow its lhflx IS snowpack sublimation (L_s).
+    #   * The two-leaf and CLM-ML canopy schemes bake L_v (lam = L_v) and their
+    #     POSITIVE latent flux is transpiration + canopy-water evaporation drawn
+    #     from soil / plant water ABOVE the snow, NOT snowpack sublimation.
+    #     Charging positive canopy latent at L_s (the old code) both under-counted
+    #     the vapour mass by L_v/L_s (~12%) and mis-charged the snow fusion energy
+    #     while depleting the wrong reservoir, so positive canopy latent is L_v
+    #     soil evaporation independent of snow cover.
+    #   * A NEGATIVE canopy latent flux over snow is dew / frost DEPOSITION, which
+    #     must accrete on the snowpack (L_s) — as the original code did — not add
+    #     liquid water to the soil top; so it stays on the sublimation/snow path.
+    # ``scheme_is_seb`` is STATIC; for canopy schemes ``latent_is_sublimation`` is
+    # the (traced) "dew over snow" mask, all-False otherwise.
     rho_w = constants.rho_water
-    L_eff = jnp.where(has_snow, constants.L_s, constants.L_v)
+    scheme_is_seb = isinstance(config.surface_scheme, SimpleSEBConfig)
+    if scheme_is_seb:
+        latent_is_sublimation = has_snow
+    else:
+        latent_is_sublimation = has_snow & (lhflx < 0.0)
+    L_eff = jnp.where(latent_is_sublimation, constants.L_s, constants.L_v)
     evap_rate_demand = lhflx / L_eff
 
     snow_after_melt = snow_new
     max_sublim = jnp.maximum(snow_after_melt / dt, 0.0)
-    sublim_demand = jnp.where(has_snow, evap_rate_demand, 0.0)
+    sublim_demand = jnp.where(latent_is_sublimation, evap_rate_demand, 0.0)
     sublim_actual = jnp.minimum(sublim_demand, max_sublim)
     sublim_actual = jnp.where(sublim_demand < 0.0, sublim_demand, sublim_actual)
     snow_new = jnp.maximum(snow_new - sublim_actual * dt, 0.0)
@@ -685,7 +706,7 @@ def _step_multilayer_land_impl(
     # Rain that refroze into the pack (gap 6) is now snow, so it no longer infiltrates.
     precip_rain = forcing.precip_total - precip_snow_eff - refreeze / dt
     melt_rate = snow_melt / dt
-    soil_evap_demand = jnp.where(has_snow, 0.0, evap_rate_demand)
+    soil_evap_demand = jnp.where(latent_is_sublimation, 0.0, evap_rate_demand)
     # Bare-soil evaporation resistance (#671, Sellers 1992 / Lee & Pielke 1992):
     # throttle the (positive, evaporative) bare-soil demand by the TOP-layer
     # effective saturation S_top**exp — the surface dries into a high-resistance
@@ -718,7 +739,7 @@ def _step_multilayer_land_impl(
         extractable_water / dt + precip_rain + melt_rate, 0.0)
     soil_evap = jnp.minimum(soil_evap_demand, max_soil_evap)
 
-    evap_rate = jnp.where(has_snow, sublim_actual, soil_evap)
+    evap_rate = jnp.where(latent_is_sublimation, sublim_actual, soil_evap)
     evap_excess_energy = (evap_rate_demand - evap_rate) * L_eff
     lhflx_actual = evap_rate * L_eff
 
@@ -735,8 +756,12 @@ def _step_multilayer_land_impl(
     #     sink is set to 0.  Vegetated-fraction dew on a snow-free cell
     #     is treated as bare-soil input (no separate canopy-storage
     #     reservoir in this model).
+    # Keyed on ``latent_is_sublimation`` (not ``has_snow``): when the snowpack
+    # swallowed the flux as sublimation (SimpleSEB over snow) the soil sees
+    # nothing, but a canopy's L_v transpiration over snow IS drawn from soil
+    # water and must reach the Richards sink / flux_top.
     f_veg = jnp.clip(w_frac_rz, 0.0, 1.0)
-    soil_flux = jnp.where(has_snow, 0.0, evap_rate)
+    soil_flux = jnp.where(latent_is_sublimation, 0.0, evap_rate)
     is_dew = soil_flux < 0.0
     evap_bare = jnp.where(is_dew, soil_flux, soil_flux * (1.0 - f_veg))
     evap_transp = jnp.where(is_dew, 0.0, soil_flux * f_veg)
