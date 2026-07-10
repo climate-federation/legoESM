@@ -792,7 +792,12 @@ def ddm_K_profile(state, z_coord, physics_config, ddm_cfg, *, eos_fn):
         depth_if = jnp.cumsum(h_act, axis=-1)[..., :-1]
     else:
         dz_w = z_coord.dz_half_ref * J[..., jnp.newaxis]
-        depth_if = jnp.cumsum(dz_w, axis=-1)
+        # Interior interface depths from the REFERENCE half-levels (z up:
+        # z_half_ref[1:-1] are the nlev-1 interior interfaces), stretched by J
+        # — NOT cumsum(dz_half), which drifts from the true depth on a
+        # non-uniform grid (codex r2).  Matches iwm_K_profile's use of the
+        # reference levels rather than a running sum.
+        depth_if = -z_coord.z_half_ref[1:-1] * J[..., jnp.newaxis]
     dz_w = jnp.maximum(dz_w.astype(dtype), _eps)
 
     # Local reference pressure at the interface [Pa] (hydrostatic proxy, same
