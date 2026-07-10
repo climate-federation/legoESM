@@ -186,7 +186,7 @@ class TestConfigSurface:
 class TestLatLonWiring:
     """Exercise the REAL wired lat-lon GM/Redi path on a DINO state."""
 
-    def _dino_call(self, resfn_cfg_kwargs):
+    def _dino_call(self, resfn_cfg_kwargs, **call_kwargs):
         from legoesm.ocean.experiments.dino import (
             DINOConfig, create_dino_z_star, dino_lat_lon_grid,
             dino_lat_lon_state,
@@ -202,6 +202,7 @@ class TestLatLonWiring:
         dT, dS = gm_redi_tracer_tendency_latlon(
             st.T.data, st.S.data, st.eta.data, st.H_bathy.data, g, z, cfg,
             mask=st.land_mask.data, u_mask=st.u_mask.data, v_mask=st.v_mask.data,
+            **call_kwargs,
         )
         return np.asarray(dT), np.asarray(dS)
 
@@ -214,13 +215,39 @@ class TestLatLonWiring:
         np.testing.assert_array_equal(dS_default, dS_off)
 
     def test_on_changes_tendency_non_vacuous(self):
-        dT_off, dS_off = self._dino_call({})
-        # Amplified suppression (small gamma) guarantees f_res < 1 across the
-        # basin so the wiring is non-vacuously exercised regardless of the
-        # grid's latitude band.
-        dT_on, dS_on = self._dino_call(
+        """resolution_function=True must non-vacuously scale the GM (bolus) flux.
+
+        The Hallberg taper scales the GM (skew/bolus) coefficient ONLY --
+        ``kappa_Redi`` is deliberately left unscaled (NEMO ldf_eiv / MOM6
+        RESOLN_SCALED_KHTH scale the eddy-transport coefficient, not the
+        along-isopycnal diffusion).  On the coarse DINO grid the FULL tracer
+        tendency is Redi/diagonal-dominated -- Visbeck's ``kappa_GM`` floors at
+        ``kappa_min = 100 m^2/s`` on the quiescent initial state, an order of
+        magnitude below ``kappa_Redi = 1000`` -- so the GM skew flux is only
+        ~2% of the total and a GM-only taper is invisible under a full-tendency
+        ``np.allclose`` (its absolute change ~1e-9 sits below the default
+        ``atol = 1e-8``).  So isolate the GM skew flux by zeroing the Redi
+        diffusivity (``kappa_redi_override = 0``): that tendency is linear in
+        ``kappa_GM``, so applying ``f_res < 1`` (``gamma = 0.1`` =>
+        ``f_res ~ 0.003-0.14`` across the basin) must suppress it by the same
+        factor.  This exercises the SAME wired ``kappa_GM`` the full tendency
+        consumes -- a genuine, tolerance-independent wiring check.
+        """
+        dT_gm_off, dS_gm_off = self._dino_call({}, kappa_redi_override=0.0)
+        dT_gm_on, dS_gm_on = self._dino_call(
             {"resolution_function": True, "resfn_gamma": 0.1,
-             "resfn_cbcl_ms": 2.0})
-        assert np.all(np.isfinite(dT_on)) and np.all(np.isfinite(dS_on))
-        assert not np.allclose(dT_on, dT_off), (
+             "resfn_cbcl_ms": 2.0}, kappa_redi_override=0.0)
+        assert np.all(np.isfinite(dT_gm_on)) and np.all(np.isfinite(dS_gm_on))
+        off_mag = float(np.max(np.abs(dT_gm_off)))
+        on_mag = float(np.max(np.abs(dT_gm_on)))
+        assert off_mag > 0.0, (
+            "GM-only tendency is identically zero -- test is vacuous")
+        # f_res < 1 across the basin => the GM bolus tendency is strongly
+        # suppressed (measured max ratio ~0.13; assert a robust < 0.5).
+        assert on_mag < 0.5 * off_mag, (
+            f"resolution_function=True did not suppress the GM bolus tendency "
+            f"(max on={on_mag:.3e} vs off={off_mag:.3e})")
+        # ... and it is a genuine, tolerance-independent relative change (the
+        # unscaled Redi part is absent here, so atol=0 is the right comparison).
+        assert not np.allclose(dT_gm_on, dT_gm_off, atol=0.0), (
             "resolution_function=True did not change the GM/Redi tendency")
