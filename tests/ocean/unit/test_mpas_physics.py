@@ -128,16 +128,20 @@ class TestUnsupportedScheme:
 
     def test_unimplemented_vmix_scheme_raises_on_mpas(self):
         """Finding #4: a vertical_mixing scheme MPAS does not wire in
-        (constant/richardson/tke) must RAISE NotImplementedError, not just warn
+        (richardson, or a typo) must RAISE NotImplementedError, not just warn
         and silently drop the K-profile (which runs DIFFERENT physics than
-        requested).  'none'/'kpp' are supported; 'catke' is rejected separately."""
+        requested).  'none'/'kpp'/'tke' are supported ('tke' via the diagnostic
+        quasi-steady closure + implicit solver, covered in test_mpas_tke.py);
+        'catke' is rejected separately (ValueError)."""
         from legoesm.ocean.physics.vertical_mixing.config import (
             VerticalMixingConfig,
         )
-        # 'richardson'/'tke' compute a scheme-specific K-profile MPAS would
-        # silently drop; a typo must also raise.  ('constant' is the DEFAULT and
-        # is handled by the MPASOceanConfig background -> accepted, tested below.)
-        for bad in ("richardson", "tke", "kpp_typo"):
+        # 'richardson' computes a scheme-specific K-profile MPAS would silently
+        # drop; a typo must also raise.  ('constant' is the DEFAULT, handled by
+        # the MPASOceanConfig background -> accepted, tested below; 'tke' is now
+        # SUPPORTED via make_tke_profiles_mpas and is tested in test_mpas_tke.py,
+        # incl. its implicit-required ValueError guard.)
+        for bad in ("richardson", "kpp_typo"):
             cfg = OceanPhysicsConfig(
                 surface_forcing=SurfaceForcingConfig(scheme="none"),
                 vertical_mixing=VerticalMixingConfig(scheme=bad),

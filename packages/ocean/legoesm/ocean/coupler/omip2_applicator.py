@@ -564,7 +564,9 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
                                      runoff_R=None,
                                      emp: bool = True,
                                      ramp: float = 1.0,
-                                     rho_air: float = constants.rho_air):
+                                     rho_air: float = constants.rho_air,
+                                     u_oce=None, v_oce=None,
+                                     wind_current_feedback_vfac: float = 0.0):
     """Build a :class:`FreshwaterForcing` (P, E, runoff) for the OMIP-2 run.
 
     Delivered to the ocean via the in-core channel
@@ -596,6 +598,14 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
     ramp : float
         Cold-start spin-up scale in [0, 1] applied to ALL freshwater components
         (matches the tau/q_net ramp).
+    u_oce, v_oce, wind_current_feedback_vfac :
+        NEMO ``ln_crt_dwn`` / ``rn_vfac`` relative-wind current feedback, passed
+        straight through to :func:`air_sea_fluxes` (geographic-frame currents;
+        see :func:`compute_omip2_surface_forcing`).  MUST match the ``vfac`` /
+        currents used for the heat + momentum forcing so the evaporative MASS
+        flux ``E`` (P - E salinity) stays the SAME physical flux as the latent
+        HEAT flux in ``q_net`` (``E = -lhflx / L_vap``).  ``vfac == 0.0``
+        (default) is byte-identical.
     """
     from legoesm.ocean.freshwater import FreshwaterForcing
 
@@ -611,6 +621,7 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
         T_air_K=jnp.asarray(forc["T_air"]), q_air=jnp.asarray(forc["q_air"]),
         T_sfc_K=jnp.asarray(T_sfc_K),
         slp_Pa=None if slp is None else jnp.asarray(slp),
+        u_oce=u_oce, v_oce=v_oce, vfac=wind_current_feedback_vfac,
     )
     if emp:
         precip = np.asarray(forc["precip"], dtype=np.float64)
@@ -732,7 +743,9 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
                                   ice_albedo=None,
                                   under_ice: bool = False,
                                   tau_ice_sw: float = 0.03,
-                                  dm2dc_window=None):
+                                  dm2dc_window=None,
+                                  u_oce=None, v_oce=None,
+                                  wind_current_feedback_vfac: float = 0.0):
     """Build an :class:`OceanSurfaceForcing` (tau_x, tau_y, q_net, sw_down) on
     the model grid from CORE-II / JRA55 forcing, for INTEGRATION INSIDE
     ``model.step(state, dt, surface_forcing=...)`` -- the dynamics-core
@@ -764,6 +777,16 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
 
     Supports the lat-lon C-grid family (``latlon`` / ``latlon_regional`` via
     conservative regrid; ``tripole`` via nearest-neighbour on the 2-D T grid).
+
+    ``u_oce`` / ``v_oce`` / ``wind_current_feedback_vfac`` (NEMO ``ln_crt_dwn`` /
+    ``rn_vfac``): when ``vfac > 0`` the caller-supplied ocean surface current is
+    subtracted from the wind inside :func:`air_sea_fluxes` (relative-wind stress
+    + turbulent fluxes).  The current MUST already be in the wind frame
+    (GEOGRAPHIC east/north) -- the caller does the grid->geographic rotation (the
+    ``legoesm.ocean`` package may not import the coupler rotation helper under the
+    import-linter layering contract, so the top-layer run driver rotates and
+    passes geographic currents here).  ``vfac == 0.0`` (default) with
+    ``u_oce=v_oce=None`` is BYTE-IDENTICAL to the absolute-wind behaviour.
     """
     from legoesm.ocean.state import OceanSurfaceForcing
     sigma_sb = float(constants.sigma_sb)
@@ -803,6 +826,7 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
         q_air=jnp.asarray(forc["q_air"]),
         T_sfc_K=jnp.asarray(T_sfc_K),
         slp_Pa=None if slp is None else jnp.asarray(slp),
+        u_oce=u_oce, v_oce=v_oce, vfac=wind_current_feedback_vfac,
     )
     # Non-solar open-water heat flux, assembled EXACTLY like NEMO blk_oce_2:
     #   qns = eps_w*(LW_down - sigma*T_s^4)            net LW (Kirchhoff: the

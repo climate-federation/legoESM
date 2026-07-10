@@ -62,6 +62,8 @@ __param_spec__ = {
             "kappa_GM": {"units": "m^2/s", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
             "kappa_Redi": {"units": "m^2/s", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
             "surface_complement_depth": {"units": "m", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
+            "resfn_gamma": {"units": "1", "bounds": (1.0, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Hallberg 2013 (Ocean Modelling 72, 92) resolution function: grid points per deformation radius at half-suppression", "shape": None},
+            "resfn_cbcl_ms": {"units": "m s-1", "bounds": (0.5, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Hallberg 2013 / Chelton et al. 1998 (JPO 28, 433): fixed first-baroclinic gravity-wave speed for L_d = c/|f|", "shape": None},
         },
     },
 }
@@ -361,6 +363,32 @@ class GMRediConfig(NamedTuple):
     # NOT for forward-only runs (no effect); select it for long-horizon
     # gradient-based calibration/DA through GM/Redi. Validated fail-fast by
     # ``validate_adjoint_stabilization`` at every GM/Redi entry point.
+    # --- Hallberg (2013) resolution function for kappa_GM (default off) ---
+    resolution_function: bool = False
+    # ^ When True, multiply the EFFECTIVE GM coefficient ``kappa_GM`` (whatever
+    # the active closure produced -- constant / Visbeck / Treguier / prognostic
+    # EKE / GEOMETRIC) by the Hallberg (2013) resolution function
+    #     f_res = 1 / (1 + (L_d / (resfn_gamma * Delta))**2),
+    # with ``Delta = sqrt(cell area)`` the local grid spacing and the
+    # first-baroclinic deformation radius ``L_d = resfn_cbcl_ms / |f|`` (|f|
+    # floored near the equator).  ``f_res -> 1`` where ``Delta >> L_d`` (coarse,
+    # eddies unresolved: full GM) and ``-> 0`` where ``Delta << L_d`` (eddy-
+    # resolving: GM off, let the resolved eddies act), matching NEMO5 ldf_eiv /
+    # MOM6 resolution-scaled KhTh.  Applied to GM ONLY -- the Redi isopycnal
+    # diffusivity ``kappa_Redi`` is NOT scaled (NEMO/MOM6 scale the eddy-
+    # transport bolus coefficient, not the along-isopycnal tracer diffusion), so
+    # as ``f_res -> 0`` the scheme reduces to pure Redi.  Shared by the lat-lon
+    # C-grid, MPAS and cubed-sphere GM/Redi paths.  Default False => the
+    # kappa_GM object is returned untouched => BYTE-IDENTICAL.
+    resfn_gamma: float = 2.0
+    # ^ Resolution-function width gamma (Hallberg 2013): grid points per
+    # deformation radius at which GM is half-suppressed (~1-2 typical).
+    resfn_cbcl_ms: float = 2.0
+    # ^ Fixed first-baroclinic gravity-wave speed c [m/s] for ``L_d = c/|f|``
+    # (Chelton et al. 1998: c1 ~ 2 m/s open-ocean).  A FIXED c bound is used
+    # (rather than the flow-dependent ``int(N dz)/pi``) so the resolution
+    # function applies uniformly to ALL closures incl. constant-kappa, which
+    # never computes ``int(N dz)``.
 
 
 class LateralMixingConfig(NamedTuple):

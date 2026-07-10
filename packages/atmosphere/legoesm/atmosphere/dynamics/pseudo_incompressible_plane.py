@@ -95,6 +95,14 @@ class PseudoIncompressibleConfig(NamedTuple):
     #                                  resolved eddies lightly), for fine-res stable-BL /
     #                                  moist robustness. 0 ⇒ off (the core's default
     #                                  "no numerical hyperdiffusion, sustain turbulence").
+    shapiro_coeff: float = 0.0       # OPT-IN per-step [1,2,1] horizontal low-pass on
+    #                                  θ (+tracers), blend strength s∈[0,1]. A MULTIPLICATIVE
+    #                                  filter (response cos²(kΔ/2)∈[0,1]) ⇒ NOT CFL-limited,
+    #                                  unlike hyperdiff_coeff — de-noises the fine-res
+    #                                  stable-BL 2Δ θ-mode (which biharmonic can't reach in
+    #                                  f32 within its stability window). Scalars only ⇒ the
+    #                                  projection is untouched (velocity stays div-free).
+    #                                  0 ⇒ off (bit-identical). s≈0.05–0.5 typical.
     surface: str = "free"            # surface BC: "free"|"flux"|"most_cooling"
     z0: float = 0.1                  # roughness length z0=z0h [m]
     sfc_theta_flux: float = 0.0      # prescribed kinematic heat flux ⟨w'θ'⟩₀ [K m/s]
@@ -148,6 +156,10 @@ def make_grid(cfg: PseudoIncompressibleConfig, dtype=jnp.float64
         raise ValueError(f"sgs must be one of {_SGS}, got {cfg.sgs!r}.")
     if cfg.surface not in _SURFACE:
         raise ValueError(f"surface must be one of {_SURFACE}, got {cfg.surface!r}.")
+    if not 0.0 <= cfg.shapiro_coeff <= 1.0:
+        # outside [0,1] the [1,2,1] blend stops being a convex low-pass (s>2 even
+        # amplifies the 2Δ mode and breaks tracer positivity).
+        raise ValueError(f"shapiro_coeff must be in [0,1], got {cfg.shapiro_coeff}.")
     nz = cfg.nz
     dx, dy, dz = cfg.Lx / cfg.nx, cfg.Ly / cfg.ny, cfg.Lz / nz
     z_c = (jnp.arange(nz, dtype=dtype) + 0.5) * dz
@@ -273,6 +285,18 @@ def _hyperdiff(f, g: PseudoIncompressibleGrid):
     """Horizontal biharmonic de-noiser tendency −coeff·∇⁴_h f (FD analogue of the
     spectral core's sharp cutoff). coeff=0 ⇒ exactly zero (default path bit-identical)."""
     return -g.cfg.hyperdiff_coeff * _hlap(_hlap(f, g), g)
+
+
+def _shapiro_h(f):
+    """Separable [1,2,1]/4 horizontal low-pass (Shapiro) on periodic x,y (roll).
+
+    A MULTIPLICATIVE filter: per-axis response cos²(kΔ/2) ∈ [0,1], exactly zeroing
+    the 2Δ mode and leaving k→0 untouched. Because it is a bounded filter (not a
+    diffusion tendency) it is NOT CFL-limited — it de-noises at any dt/resolution,
+    unlike the explicit biharmonic ``_hyperdiff``. Vertical untouched (applies to
+    centre (…,nz) and z-face (…,nz+1) fields alike)."""
+    fx = (jnp.roll(f, 1, axis=_AX) + 2.0 * f + jnp.roll(f, -1, axis=_AX)) * 0.25
+    return (jnp.roll(fx, 1, axis=_AY) + 2.0 * fx + jnp.roll(fx, -1, axis=_AY)) * 0.25
 
 
 def _centre_velocities(u, v, w):
@@ -570,5 +594,13 @@ def step(state: PseudoIncompressibleState, g: PseudoIncompressibleGrid, dt,
     th3 = a * th0 + b * eth
     tr3 = None if tr0 is None else a * tr0 + b * etr
     u3, v3, w3, pi3 = project(u3, v3, w3, th3, tr3, pi2, dt, g)
+    # Per-step [1,2,1] de-noiser on the SCALARS only (θ, tracers) — kills the
+    # fine-res stable-BL 2Δ θ-mode without touching the div-free velocity
+    # (no re-projection needed). Static gate ⇒ default (s=0) is bit-identical.
+    s = g.cfg.shapiro_coeff
+    if s > 0.0:
+        th3 = th3 + s * (_shapiro_h(th3) - th3)
+        if tr3 is not None:
+            tr3 = tr3 + s * (_shapiro_h(tr3) - tr3)
     return PseudoIncompressibleState(u=u3, v=v3, w=w3, theta=th3, pi_prev=pi3,
                                      tracers=tr3)

@@ -98,6 +98,7 @@ from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     EPS,
     compute_visbeck_kappa_gm,
     dm95_taper,
+    gm_resolution_scaled_kappa,
     validate_adjoint_stabilization,
     vertical_flux_divergence,
 )
@@ -117,6 +118,11 @@ _CUBED_SPHERE_SUPPORTED_FIELDS = frozenset({
     "taper_width_frac",
     "visbeck",
     "adjoint_stabilization",
+    # Hallberg (2013) resolution taper -- honored on the cube (wired below),
+    # so it is a supported (not silently-inert) field.
+    "resolution_function",
+    "resfn_gamma",
+    "resfn_cbcl_ms",
 })
 
 
@@ -376,6 +382,16 @@ def gm_redi_lateral_mixing(
         )
     else:
         kappa_GM = cfg.kappa_GM
+
+    # Hallberg (2013) resolution taper of the GM coefficient (default off =>
+    # byte-identical). Static Python gate on the config bool. GM-only: the Redi
+    # diffusivity cfg.kappa_Redi is left unscaled. dx = sqrt(cell area).
+    if getattr(cfg, "resolution_function", False):
+        f_coriolis = jnp.asarray(grid.grid_coriolis)
+        kappa_GM = gm_resolution_scaled_kappa(
+            kappa_GM, f_coriolis, jnp.sqrt(jnp.asarray(grid.grid_area)),
+            cfg.resfn_gamma, cfg.resfn_cbcl_ms,
+        )
 
     # Tracer tendencies with full GM+Redi tensor
     dT_dt = _tracer_tendency_gm_redi(
