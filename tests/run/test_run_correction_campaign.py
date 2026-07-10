@@ -3563,12 +3563,15 @@ def test_align_insolation_sets_start_doy_from_offline_date():
         ["--config", "x.json", "--align-insolation"]).align_insolation is True
 
 
-def test_configure_jax_compilation_cache(tmp_path):
+def test_configure_jax_compilation_cache(tmp_path, monkeypatch):
     """The persistent compilation-cache config (iter 453): empty dir => no-op (None, no JAX
-    mutation); a dir => sets jax_compilation_cache_dir + the min-compile-time threshold;
+    mutation); on CPU a real dir is a SAFETY-GATED no-op (the compile-cache key omits the CPU
+    microarch, so a cross-node AOT load risks SIGILL); on a non-CPU backend (device arch IS in
+    the key => safe) a dir => sets jax_compilation_cache_dir + the min-compile-time threshold;
     parser defaults (env-driven dir, 30 s)."""
     import jax
 
+    from legoesm.ml.training import _CPU_COMPILE_CACHE_OPT_IN_ENV
     from scripts.run.run_correction_campaign import (
         _build_arg_parser,
         _configure_jax_compilation_cache,
@@ -3576,11 +3579,19 @@ def test_configure_jax_compilation_cache(tmp_path):
 
     before_dir = jax.config.jax_compilation_cache_dir
     before_secs = jax.config.jax_persistent_cache_min_compile_time_secs
-    # empty => no-op, no mutation
+    monkeypatch.delenv(_CPU_COMPILE_CACHE_OPT_IN_ENV, raising=False)
+    # empty => no-op, no mutation (backend-independent; the probe is not reached)
     assert _configure_jax_compilation_cache("", 30.0) is None
     assert jax.config.jax_compilation_cache_dir == before_dir
+
+    d = str(tmp_path / "jaxcache")
+    # CPU backend => DISABLED no-op even with a real dir (no homogeneous-pool opt-in).
+    monkeypatch.setattr(jax, "default_backend", lambda: "cpu")
+    assert _configure_jax_compilation_cache(d, 45.0) is None
+    assert jax.config.jax_compilation_cache_dir == before_dir  # untouched
     try:
-        d = str(tmp_path / "jaxcache")
+        # non-CPU backend => ENABLED: sets dir + threshold, returns the dir.
+        monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
         assert _configure_jax_compilation_cache(d, 45.0) == d
         assert jax.config.jax_compilation_cache_dir == d
         assert jax.config.jax_persistent_cache_min_compile_time_secs == 45.0

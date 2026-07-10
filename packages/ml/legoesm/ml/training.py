@@ -14,6 +14,7 @@ References
 
 from __future__ import annotations
 
+import os
 from typing import NamedTuple
 from pathlib import Path
 
@@ -28,7 +29,8 @@ from legoesm.ml.loss import area_weighted_mse, weighted_mae
 
 def configure_jax_compilation_cache(cache_dir, min_compile_secs: float = 30.0):
     """Enable JAX's PERSISTENT on-disk compilation cache so an EXPENSIVE XLA
-    compile is written to disk ONCE and REUSED across process launches.
+    compile is written to disk ONCE and REUSED across process launches -- EXCEPT
+    on the CPU backend, where the cache is DISABLED for safety (see below).
 
     This is the single shared implementation used by every legoESM driver that
     pays a large cold-compile cost -- the correction campaign (rrtmgp radiation
@@ -45,8 +47,9 @@ def configure_jax_compilation_cache(cache_dir, min_compile_secs: float = 30.0):
         Directory for JAX's persistent compilation cache.  MUST live on a
         SHARED filesystem when compute nodes write it (never node-local
         ``/local``).  An empty / falsy value is a NO-OP: the function returns
-        ``None`` WITHOUT mutating any ``jax.config`` state, so the default
-        (cache-disabled) JAX behavior is preserved exactly.
+        ``None`` WITHOUT mutating any ``jax.config`` state (and without even
+        probing the backend), so the default (cache-disabled) JAX behavior is
+        preserved exactly.
     min_compile_secs : float, default 30.0
         Only compiles SLOWER than this [s] are written to the cache, so trivial
         sub-second kernels never churn it; 30 s targets the genuinely expensive
@@ -55,7 +58,9 @@ def configure_jax_compilation_cache(cache_dir, min_compile_secs: float = 30.0):
     Returns
     -------
     str or None
-        ``str(cache_dir)`` when the cache is enabled, otherwise ``None``.
+        ``str(cache_dir)`` when the persistent cache is ENABLED, otherwise
+        ``None`` -- either because ``cache_dir`` was empty/falsy OR because the
+        active backend is CPU (the CPU safety gate below).
 
     Notes
     -----
@@ -63,15 +68,80 @@ def configure_jax_compilation_cache(cache_dir, min_compile_secs: float = 30.0):
     very top of their entry point, before any driver build / precompute.  The
     persistent-cache KEY includes the serialized HLO, the jaxlib version, and
     the backend/platform, so a code change, a jaxlib upgrade, or a different
-    node architecture MISSES (recompiles) rather than serving a stale or
-    wrong-arch binary -- the cache is therefore always safe to leave enabled.
+    accelerator MISSES (recompiles) rather than serving a stale binary.
+
+    CPU SAFETY GATE.  That key does NOT include the specific CPU FEATURE set
+    (avx512, ...).  On a HETEROGENEOUS CPU partition (e.g. Ginsburg ``short``)
+    an AOT binary compiled on an avx512 node can be loaded on a node without it,
+    which JAX warns "could lead to execution errors such as SIGILL" (observed
+    live on a real global-IC build).  GPU/TPU keys DO include the device arch
+    and stay safe, so their behavior is UNCHANGED.  We therefore DISABLE the
+    persistent COMPILE cache when the active backend is CPU
+    (``jax.default_backend() == "cpu"``, probed here AFTER the caller configured
+    x64; a failed probe fails SAFE == treated as CPU == disabled).  Disabling
+    only forgoes recompilation -- the deterministic RESULT caches (the trainer's
+    precompute cache and the build's equilibrium cache) already amortize CPU
+    re-run cost.  A user whose CPU pool is PROVEN homogeneous (identical
+    microarch on every node sharing ``cache_dir``) can opt back in by setting
+    ``LEGOESM_ALLOW_CPU_COMPILE_CACHE=1``.
     """
     if not cache_dir:
         return None
+
+    # CPU SAFETY GATE: the persistent-cache key is NOT microarch-specific, so a
+    # binary AOT-compiled on one CPU can be loaded on a different CPU that lacks
+    # its target features -> SIGILL / silently-wrong results on a heterogeneous
+    # partition.  Disable on CPU (unless the homogeneous-pool opt-in is set);
+    # GPU/TPU keep the arch in the key and stay enabled.  Probe is fail-safe.
+    if _active_backend_is_cpu() and not _cpu_compile_cache_opt_in():
+        print(
+            "[compile-cache] disabled on the CPU backend: JAX's persistent "
+            "compile cache is not keyed on the CPU microarchitecture, so a "
+            "cross-node AOT load risks SIGILL / silently-wrong results; the "
+            "deterministic result caches cover CPU re-run cost. "
+            f"Set {_CPU_COMPILE_CACHE_OPT_IN_ENV}=1 to override on a "
+            "homogeneous CPU pool.",
+            flush=True,
+        )
+        return None
+
     jax.config.update("jax_compilation_cache_dir", str(cache_dir))
     jax.config.update(
         "jax_persistent_cache_min_compile_time_secs", float(min_compile_secs))
     return str(cache_dir)
+
+
+# Opt-in env override: force-enable the persistent COMPILE cache on the CPU
+# backend for a user who KNOWS every node sharing ``cache_dir`` has the SAME
+# CPU microarchitecture (so a wrong-arch AOT load cannot happen).  Default OFF
+# -> CPU is disabled (cross-microarch SIGILL risk).  GPU/TPU ignore this.
+_CPU_COMPILE_CACHE_OPT_IN_ENV = "LEGOESM_ALLOW_CPU_COMPILE_CACHE"
+
+
+def _cpu_compile_cache_opt_in() -> bool:
+    """Return whether the user opted into the CPU persistent COMPILE cache."""
+    return (
+        os.environ.get(_CPU_COMPILE_CACHE_OPT_IN_ENV, "0").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+
+
+def _active_backend_is_cpu() -> bool:
+    """Return whether the active JAX backend is CPU (fail-SAFE).
+
+    Probes ``jax.default_backend()`` -- the same call as the canonical
+    :func:`legoesm.runtime.backend.get_backend` -- AFTER the caller has already
+    configured x64.  Any probe failure returns ``True`` ("treat as CPU"): the
+    microarch-mismatch SIGILL hazard is CPU-specific, so when we cannot
+    POSITIVELY confirm a non-CPU accelerator we fail SAFE and let the caller
+    disable the persistent compile cache.  This never degrades a WORKING
+    GPU/TPU launch, which reports ``"gpu"``/``"tpu"`` here; a throw means JAX is
+    unusable in this process (the run fails regardless of the cache).
+    """
+    try:
+        return jax.default_backend().lower() == "cpu"
+    except Exception:
+        return True
 
 
 class TrainingConfig(NamedTuple):
