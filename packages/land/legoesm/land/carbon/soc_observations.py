@@ -115,38 +115,45 @@ def per_archetype_cover_weighted_mean(
     *,
     n_arch=None,
 ):
-    """Cover-weighted per-archetype mean of a PER-CELL scalar.
+    """Cover-weighted per-archetype mean of a per-cell OR per-(cell, PFT) scalar.
 
     For archetype ``a``::
 
-        mean[a] = ( sum_{(c,p): id[c,p]==a} w[c,p] * cell_values[c] )
+        mean[a] = ( sum_{(c,p): id[c,p]==a} w[c,p] * V[c,p] )
                   / ( sum_{(c,p): id[c,p]==a} w[c,p] )
 
-    ``cell_values`` is a per-cell quantity (independent of PFT) -- e.g. a column SOC
-    (:func:`per_archetype_observed_soc`) or a per-cell observed SIF
-    (:func:`legoesm.land.carbon.sif_observations.per_archetype_observed_sif`) -- so a
-    cell's value is shared by every (cell, PFT) pair that maps to an archetype there,
-    each weighted by that PFT's cover ``cell_archetype_weight``.  This is the SHARED
-    cover-weighted-mean core behind BOTH the observed-SOC and observed-SIF targets (one
-    ``bincount`` definition, no duplicated numerics), mirroring the cover-weighted
+    ``cell_values`` may be:
+
+    * PER-CELL ``(ncell,)`` -- a quantity independent of PFT (a column SOC,
+      :func:`per_archetype_observed_soc`, or a per-cell SIF,
+      :func:`legoesm.land.carbon.sif_observations.per_archetype_observed_sif`); it is
+      broadcast so ``V[c,p] = cell_values[c]`` (shared by every (cell, PFT) pair that
+      maps to an archetype there); OR
+    * PER-(CELL, PFT) ``(ncell, npft)`` -- a PFT-specific quantity (a per-PFT observed
+      LAI, :func:`legoesm.land.carbon.lai_observations.per_archetype_observed_lai`, whose
+      value at a cell differs by PFT); it is used directly, ``V[c,p] = cell_values[c,p]``.
+
+    This is the SHARED cover-weighted-mean core behind the observed SOC / SIF / LAI targets
+    (one ``bincount`` definition, no duplicated numerics), mirroring the cover-weighted
     archetype climate means in
     :func:`legoesm.land.carbon.global_init.build_archetypes`.
 
-    MISSING DATA: cells with a NON-FINITE ``cell_values`` (e.g. a gridded satellite SIF
-    gap -- cloud, high-latitude/ocean) are EXCLUDED from BOTH the numerator AND the
-    denominator, so a partly-observed archetype averages only its observed cells (never a
-    fabricated 0).  An archetype whose members are ALL missing (or which has no members)
-    returns ``NaN``.  The denominator is therefore the FINITE-value-weighted cover, which
-    differs from the loss cover weight
-    (:func:`per_archetype_cover_weight`, value-independent) only when some cells are
+    MISSING DATA: (cell, PFT) pairs with a NON-FINITE ``V[c,p]`` (e.g. a gridded satellite
+    SIF gap -- cloud, high-latitude/ocean -- or an absent/degenerate PFT LAI) are EXCLUDED
+    from BOTH the numerator AND the denominator, so a partly-observed archetype averages
+    only its observed members (never a fabricated 0).  An archetype whose members are ALL
+    missing (or which has no members) returns ``NaN``.  The denominator is therefore the
+    FINITE-value-weighted cover, which differs from the loss cover weight
+    (:func:`per_archetype_cover_weight`, value-independent) only when some members are
     missing; for SOC (the surfdata organic column is gap-filled to finite) the two
     coincide exactly.
 
     Parameters
     ----------
-    cell_values : array (ncell,)
-        Per-cell scalar to average over each archetype's member cells; ``NaN`` where the
-        observation is missing (excluded from the mean).
+    cell_values : array (ncell,) or (ncell, npft)
+        Per-cell (broadcast over PFT) or per-(cell, PFT) scalar to average over each
+        archetype's member (cell, PFT) pairs; ``NaN`` where the observation is missing
+        (excluded from the mean).
     cell_archetype_id : array (ncell, npft) int
         Archetype index per (cell, PFT); ``-1`` where the PFT is absent / below the
         occupancy threshold / bare (see ``build_archetypes``).
@@ -158,9 +165,9 @@ def per_archetype_cover_weighted_mean(
     Returns
     -------
     array (n_arch,)
-        Per-archetype cover-weighted mean over the archetype's FINITE-value member cells.
-        ``NaN`` for an archetype with no finite-value member cover -- surfaced, never
-        silently 0.
+        Per-archetype cover-weighted mean over the archetype's FINITE-value member (cell,
+        PFT) pairs.  ``NaN`` for an archetype with no finite-value member cover -- surfaced,
+        never silently 0.
     """
     vals = np.asarray(cell_values, dtype=float)
     cid = np.asarray(cell_archetype_id)
@@ -172,22 +179,32 @@ def per_archetype_cover_weighted_mean(
     if cid.ndim != 2:
         raise ValueError(
             f"cell_archetype_id must be 2-D (ncell, npft); got shape {cid.shape}.")
-    if vals.ndim != 1:
-        raise ValueError(
-            f"cell_values must be 1-D (ncell,); got shape {vals.shape}.")
-    if vals.shape[0] != cid.shape[0]:
-        raise ValueError(
-            f"cell_values ncell {vals.shape[0]} != membership ncell {cid.shape[0]}.")
 
     if n_arch is None:
         n_arch = int(cid.max()) + 1 if (cid.size and cid.max() >= 0) else 0
     n_arch = int(n_arch)
 
-    # Broadcast the per-cell scalar over the PFT axis, then accumulate the cover-weighted
+    # Materialise V[c,p]: broadcast a per-cell (ncell,) scalar over the PFT axis, or use a
+    # per-(cell, PFT) (ncell, npft) array directly.  Then accumulate the cover-weighted
     # numerator / denominator per archetype over the valid pairs -- EXCLUDING (cell, PFT)
-    # pairs whose cell value is non-finite (missing) from BOTH sums, so a gap never
-    # contributes a fabricated 0 and never inflates the denominator.
-    vals_bcast = np.broadcast_to(vals[:, None], cid.shape)
+    # pairs whose value is non-finite (missing) from BOTH sums, so a gap never contributes
+    # a fabricated 0 and never inflates the denominator.
+    if vals.ndim == 1:
+        if vals.shape[0] != cid.shape[0]:
+            raise ValueError(
+                f"per-cell cell_values ncell {vals.shape[0]} != membership ncell "
+                f"{cid.shape[0]}.")
+        vals_bcast = np.broadcast_to(vals[:, None], cid.shape)
+    elif vals.ndim == 2:
+        if vals.shape != cid.shape:
+            raise ValueError(
+                f"per-(cell, PFT) cell_values {vals.shape} must match the membership "
+                f"(ncell, npft) shape {cid.shape}.")
+        vals_bcast = vals
+    else:
+        raise ValueError(
+            f"cell_values must be 1-D (ncell,) or 2-D (ncell, npft); got shape "
+            f"{vals.shape}.")
     valid = (cid >= 0) & np.isfinite(vals_bcast)
     flat_id = cid[valid].astype(int)
     flat_w = cw[valid]
