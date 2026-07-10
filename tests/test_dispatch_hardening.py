@@ -239,6 +239,7 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # scanner-shaped; the canonical unknown-scheme guard is the validator.)
         ("packages/ocean/legoesm/ocean/dynamics/ocean_tendency_common.py", "validate_bottom_drag_scheme"),
         ("packages/ocean/legoesm/ocean/eos.py", "make_eos_fn"),
+        ("packages/ocean/legoesm/ocean/eos.py", "freezing_point"),
         ("packages/ocean/legoesm/ocean/experiments/dino.py", "create_forcings"),
         ("packages/ocean/legoesm/ocean/experiments/dino.py", "create_initial_conditions"),
         ("packages/ocean/legoesm/ocean/physics/bottom_drag/integration.py", "make_bottom_drag_physics"),

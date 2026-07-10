@@ -981,8 +981,24 @@ class MPASOceanModel:
             # non-conservative heat source applied AFTER the conservation fixer
             # (matches LatLonCGridOceanModel._apply_freeze_floor).
             T = state_new.T.data
-            T_floored = T.at[..., 0].set(
-                jnp.maximum(T[..., 0], config.freeze_floor_temp_c))
+            # Freeze-point floor [degC].  Default ("constant") keeps the scalar
+            # freeze_floor_temp_c byte-identical; a liquidus scheme
+            # (config.freezing.scheme) floors each surface cell at its own
+            # freezing point from the local surface salinity.  freezing_point
+            # returns KELVIN; state T is degC, so subtract constants.T_freeze.
+            # scheme is static => feature-gating branch (matches the latlon
+            # LatLonCGridOceanModel._apply_freeze_floor).  MED-1.
+            if config.freezing.scheme == "constant":
+                floor_c = config.freeze_floor_temp_c
+            else:
+                from legoesm import constants as _consts
+                from legoesm.ocean.eos import freezing_point
+                S_sfc = state_new.S.data[..., 0]
+                floor_c = (
+                    freezing_point(S_sfc, 0.0, scheme=config.freezing.scheme)
+                    - _consts.T_freeze
+                )
+            T_floored = T.at[..., 0].set(jnp.maximum(T[..., 0], floor_c))
             state_new = state_new._replace(T=state_new.T.replace(data=T_floored))
 
         return cast_pytree(state_new, None, "storage")

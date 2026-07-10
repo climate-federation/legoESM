@@ -12,6 +12,7 @@ from typing import NamedTuple
 from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.ocean.constants_config import ConstantsConfig
+from legoesm.ocean.eos import FreezingPointConfig
 
 # Seawater freezing point in degC (model T is in degC), captured at MODULE scope
 # where ``constants`` is the module.  Inside ``LatLonCGridOceanConfig`` the field
@@ -1480,6 +1481,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Freezing point of seawater in degC (model T is in degC).  Defaults to
     # ``T_freeze_ocean - T_freeze`` = -1.8 C (constants, not a literal).
     freeze_floor_temp_c: float = _T_FREEZE_OCEAN_C
+    # Seawater freezing-point (liquidus) scheme for the freeze_floor above.
+    # "constant" (default) keeps freeze_floor_temp_c byte-identical; "linear_S"/
+    # "unesco" make the surface floor track the LOCAL surface salinity (fresher
+    # water freezes warmer, more saline colder).  Consumed by
+    # ocean_model_latlon_cgrid._apply_freeze_floor.  MED-1.
+    freezing: FreezingPointConfig = FreezingPointConfig()
     # --- Fourier polar filter (#501 grouped into PolarFilterConfig) ---
     polar_filter: PolarFilterConfig = PolarFilterConfig()
 
