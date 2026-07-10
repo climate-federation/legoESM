@@ -1576,6 +1576,27 @@ def test_params_calibration_reaches_bechtold_tunables(tmp_path):
     assert conv_config.cmt_c_d == 0.4
 
 
+def test_bechtold_precip_efficiency_flag_flows_to_scheme_config():
+    """--bechtold-precip-efficiency reaches the pipeline-resolved
+    BechtoldConfig (the #929 isolation lever); default 0.7 = scheme default
+    (byte-identical when unset); 0.0 = legacy detrain-all."""
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(_AMIP_DUMMY_PATHS + ["--convection", "bechtold"]),
+        parser))
+    assert cfg.bechtold_precip_efficiency == 0.7
+    _, conv_default = _resolve_convection(cfg)
+    assert conv_default.precip_efficiency == 0.7
+    cfg0 = build_config_from_args(_postprocess_args(
+        parser.parse_args(_AMIP_DUMMY_PATHS + [
+            "--convection", "bechtold",
+            "--bechtold-precip-efficiency", "0.0"]),
+        parser))
+    _, conv_off = _resolve_convection(cfg0)
+    assert conv_off.precip_efficiency == 0.0
+
+
 def test_aimip_louis_preserves_resolved_surface_scheme():
     """The AIMIP Louis injection must KEEP the run-resolved surface bulk_scheme +
     gustiness (coare3/300) rather than reverting to to_louis_config's default

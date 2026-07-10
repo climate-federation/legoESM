@@ -2541,6 +2541,8 @@ def _resolve_convection(config):
             M_b_max=getattr(config, 'bechtold_m_b_max', 0.02),
             cmt_c_u=getattr(config, 'bechtold_cmt_c_u', 0.7),
             cmt_c_d=getattr(config, 'bechtold_cmt_c_d', 0.7),
+            precip_efficiency=getattr(
+                config, 'bechtold_precip_efficiency', 0.7),
         )
     else:
         cc = ConvectionConfig(scheme=scheme)

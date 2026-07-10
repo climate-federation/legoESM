@@ -809,6 +809,11 @@ class ExperimentConfig(NamedTuple):
     bechtold_m_b_max: float = 0.02
     bechtold_cmt_c_u: float = 0.7
     bechtold_cmt_c_d: float = 0.7
+    # In-updraft rain split (BechtoldConfig.precip_efficiency; default matches
+    # the scheme's 0.7).  0.0 reproduces the legacy detrain-all behaviour —
+    # the #929 polar-night A/B's unstable mode; exposed for the isolation legs
+    # and for reproducing pre-split runs.
+    bechtold_precip_efficiency: float = 0.7
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -1042,6 +1047,11 @@ class ExperimentConfig(NamedTuple):
         if self.bechtold_cmt_c_d < 0:
             errors.append(
                 f"bechtold_cmt_c_d must be >= 0, got {self.bechtold_cmt_c_d}"
+            )
+        if not (0.0 <= self.bechtold_precip_efficiency <= 1.0):
+            errors.append(
+                f"bechtold_precip_efficiency must be in [0, 1], got "
+                f"{self.bechtold_precip_efficiency}"
             )
         if self.physics_parameterization not in ("none", "ml"):
             errors.append(
@@ -1678,6 +1688,8 @@ class ExperimentConfig(NamedTuple):
             bechtold_m_b_max=getattr(amip_cfg, 'bechtold_m_b_max', 0.02),
             bechtold_cmt_c_u=getattr(amip_cfg, 'bechtold_cmt_c_u', 0.7),
             bechtold_cmt_c_d=getattr(amip_cfg, 'bechtold_cmt_c_d', 0.7),
+            bechtold_precip_efficiency=getattr(
+                amip_cfg, 'bechtold_precip_efficiency', 0.7),
             sigma_b=amip_cfg.sigma_b,
             k_BL_max_per_day=amip_cfg.k_BL_max_per_day,
             k_free_per_day=amip_cfg.k_free_per_day,

@@ -596,6 +596,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[J/kg]; lower it to trigger convection more readily "
                              "at coarse resolution (the AMIP precip-deficit lever). "
                              f"Default {_EXPERIMENT_DEFAULTS.bechtold_cape_threshold}.")
+    parser.add_argument("--bechtold-precip-efficiency", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_precip_efficiency,
+                        dest="bechtold_precip_efficiency",
+                        help="Bechtold in-updraft rain split "
+                             "(BechtoldConfig.precip_efficiency): fraction of "
+                             "detrained condensate diverted to convective rain. "
+                             "0.0 reproduces the legacy detrain-all mode — the "
+                             "#929 polar-night-unstable behaviour. Distinct from "
+                             "--convective-precip-efficiency (Tiedtke-only). "
+                             f"Default {_EXPERIMENT_DEFAULTS.bechtold_precip_efficiency}.")
 
     # Joint ML physics parameterization
     parser.add_argument("--physics-parameterization", type=str, default="none",
@@ -1295,6 +1305,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sbm_RH_ref=args.sbm_rh_ref,
         sbm_cape_threshold=args.sbm_cape_threshold,
         bechtold_cape_threshold=args.bechtold_cape_threshold,
+        bechtold_precip_efficiency=args.bechtold_precip_efficiency,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
         physics_parameterization=args.physics_parameterization,
