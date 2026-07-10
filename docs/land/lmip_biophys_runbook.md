@@ -168,7 +168,13 @@ Variables available (defaults; add more via `output.tapes[*].vars` in the YAML):
 | `albedo` | [0, 1] | mean |
 | `GPP` | gC/m²/day (canopy gross primary production; 0 for simple_seb) | mean |
 | `ET` | mm/day (latent-heat-equivalent evapotranspiration, lhflx / L_v) | mean |
+| `transp` | mm/day (canopy transpiration, LE_canopy / L_v; canopy only) | mean |
+| `soil_evap` | mm/day (ground evaporation, LE_soil / L_v; canopy only) | mean |
+| `Rnet` | W/m² (net radiation into surface = sw_down·(1−α) + lw_down − lw_up) | mean |
 | `T_soil_top`, `theta_soil_top`, `snow_depth` | K, m³/m³, kg/m² | inst |
+
+`transp + soil_evap ≈ ET` (they partition total evapotranspiration); the split is
+the key diagnostic for the #730 over-transpiration calibration.
 
 ### The restart file
 Model-time-stamped: `restart_<YEAR>_d<DDD>h<HH>.npz` — chronological on `ls`.

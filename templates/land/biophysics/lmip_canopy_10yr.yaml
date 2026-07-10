@@ -69,7 +69,7 @@ output:
     - name: monthly
       freq: monthly
       average: mean
-      vars: [T_sfc, shflx, lhflx, albedo, LAI, GPP, ET, runoff, precip]
+      vars: [T_sfc, Rnet, shflx, lhflx, albedo, LAI, GPP, ET, transp, soil_evap, runoff, precip]
 
     - name: monthly_state
       freq: monthly

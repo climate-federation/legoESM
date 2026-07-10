@@ -129,7 +129,8 @@ def test_canopy_run_tapes_gpp_and_et(tmp_path):
         "surfdata": {"path": str(sd)},
         "time": {"dt": 3600.0, "n_steps": 48, "start_doy": 0.0},  # 2 days -> daylight
         "output": {"tapes": [{"name": "step", "freq": "step", "average": "inst",
-                              "vars": ["GPP", "ET", "lhflx", "LAI"]}]},
+                              "vars": ["GPP", "ET", "transp", "soil_evap", "Rnet",
+                                       "lhflx", "LAI"]}]},
     }).raw
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
@@ -138,10 +139,22 @@ def test_canopy_run_tapes_gpp_and_et(tmp_path):
     ds = xr.open_dataset(out / "lmip_biophys.step.nc")
     gpp = np.asarray(ds["GPP"].values)
     et = np.asarray(ds["ET"].values)
-    assert np.all(np.isfinite(gpp)) and np.all(np.isfinite(et))
+    transp = np.asarray(ds["transp"].values)
+    soil_evap = np.asarray(ds["soil_evap"].values)
+    rnet = np.asarray(ds["Rnet"].values)
+    for name, a in (("GPP", gpp), ("ET", et), ("transp", transp),
+                    ("soil_evap", soil_evap), ("Rnet", rnet)):
+        assert np.all(np.isfinite(a)), f"{name} non-finite"
     assert (gpp >= 0.0).all()                 # gross primary production is uptake, never negative
     assert gpp.max() > 0.0                     # some lit, vegetated canopy photosynthesises
     assert np.abs(et).max() < 50.0             # mm/day, sane bound
+    assert np.abs(rnet).max() < 1500.0         # W/m2, sane bound
+    # transpiration + soil evaporation partition the total ET (warm synthetic run:
+    # no snow, so L_eff = L_v throughout and the two components sum to ET).
+    assert abs(np.nanmean(transp + soil_evap) - np.nanmean(et)) < 1.0   # mm/day
+    # both components are physically bounded; either can be slightly negative
+    # (canopy or soil dew / condensation), so bound the magnitude, not the sign.
+    assert np.abs(transp).max() < 50.0 and np.abs(soil_evap).max() < 50.0   # mm/day
 
 
 def test_build_model_times_synthetic_starts_at_zero():

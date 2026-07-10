@@ -501,6 +501,21 @@ def run(args) -> int:
         else:
             gpp_day = _ZEROS
         et_mmday = resp.lhflx / constants.L_v * _SEC_PER_DAY
+        # Transpiration + soil-evaporation split [mm/day]: the canopy's per-component
+        # latent (LE_canopy = sunlit+shaded leaf transpiration, LE_soil = ground
+        # evaporation), converted to a water flux.  None for simple_seb (single skin,
+        # no canopy/soil partition) -> 0.  transp + soil_evap ~ ET (modulo snow
+        # sublimation).  Net radiation [W/m2], positive INTO the surface = absorbed
+        # SW + net LW = sw_down*(1-albedo) + lw_down - lw_up (scheme-agnostic; the
+        # reported albedo/lw_up already reflect the canopy RT).
+        if surf_out is not None and surf_out.LE_canopy is not None:
+            transp = surf_out.LE_canopy / constants.L_v * _SEC_PER_DAY
+            soil_evap = surf_out.LE_soil / constants.L_v * _SEC_PER_DAY
+        else:
+            transp = _ZEROS
+            soil_evap = _ZEROS
+        rnet = (forcing_t.sw_down * (1.0 - resp.albedo)
+                + forcing_t.lw_down - resp.lw_up)
         # Available variables per step -> selected by each tape's spec.
         values = {
             "T_sfc": resp.T_sfc, "albedo": resp.albedo,
@@ -510,6 +525,9 @@ def run(args) -> int:
             "LAI": lai_diag,
             "GPP": gpp_day,
             "ET": et_mmday,
+            "transp": transp,
+            "soil_evap": soil_evap,
+            "Rnet": rnet,
         }
         if is_multilayer:
             values["T_soil_top"] = new_state.T_soil[:, 0]
