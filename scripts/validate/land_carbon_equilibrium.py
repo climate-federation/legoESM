@@ -245,7 +245,7 @@ def run_pixel(config: MultiLayerLandConfig, lat_deg: float, lon_deg: float,
     # in the shared driver (legoesm.land.carbon.spinup); this validator and the
     # batched archetype map (global_init.equilibrate_archetypes) do not
     # re-derive it.  It returns per-verify-year annual diagnostics.
-    final_state, final_carbon, annual = run_semi_analytic_spinup(
+    final_state, final_carbon, annual, _reset_fluxes = run_semi_analytic_spinup(
         step_fn, state0, carbon0, forcing_fn,
         n_spinup=n_spinup, n_verify=n_verify, steps_per_year=steps_per_year,
         dt=dt, cwd_humification_eff=config.carbon.cwd_humification_eff,

@@ -10,11 +10,14 @@ cost, exploiting one structural fact of DifferLand:
 
     the tunable SOM parameters (``tor_som_active/slow/passive``,
     ``f_active_to_slow`` / ``f_slow_to_passive``, ``som_freeze_floor``,
-    ``Q10_het_exp``, ``cwd_humification_eff``) affect ONLY the SOM decomposition.
-    There is NO SOM -> GPP feedback, so the SOM active-pool INPUTS
-    (litter -> SOM decomposition ``lit_to_som`` + wood allocation ``a_wood``) and
-    the soil-temperature trajectory the decomposition modifier sees are
-    INDEPENDENT of those parameters.
+    ``Q10_het_exp``, ``cwd_humification_eff``) act on the SOM cascade with NO
+    SOM -> GPP feedback, so the wood allocation ``a_wood`` and the soil-temperature
+    trajectory the decomposition modifier sees are INDEPENDENT of them.  The
+    litter -> SOM decomposition input ``lit_to_som`` is independent of the SEVEN
+    fast-trained params; ``Q10_het_exp`` DOES also enter the litter modifier
+    (``_temperate_modifier`` sets ``lit_to_som``), so freezing ``lit_to_som`` at the
+    defaults gives ``Q10_het_exp`` only a PARTIAL fast-mode gradient -- which is why
+    the calibration's fast trainable set excludes it (see below).
 
 So a SINGLE default-parameter forward spin-up per archetype
 (:func:`legoesm.land.carbon.global_init.precompute_fast_analytic_inputs`, no
@@ -39,12 +42,32 @@ than a single mean-annual T) is REQUIRED: the modifier is convex in T (Q10
 exponential + freeze sigmoid), so ``<m(T(t))>`` far exceeds ``m(<T>)`` for the
 large seasonal amplitude of cold archetypes — a mean-T closed form would
 over-predict cold-soil SOC by a large factor.  The residual vs the stepped model
-(~6-8% of total SOC at the defaults; verified) is the dropped within-year
-COVARIANCE between ``C_X(t)``, the input timing, and ``r_X(t)`` — chiefly the
-~annual active pool — NOT a sign/unit error; it does not compromise the gradient
-directions the calibration follows.
+is the dropped within-year COVARIANCE between ``C_X(t)``, the input timing, and
+``r_X(t)`` — largest for the ~annual active pool, but that pool is only ~5% of
+total SOC and its ~3-yr residence averages the annual cycle so its covariance
+correction is a fraction of a % of SOC (an EXACT periodic active-pool solve was
+verified fidelity-neutral).  NOT a sign/unit error; it does not compromise the
+gradient directions the calibration follows.
 
-Which parameters are fast-trainable.  ALL EIGHT SOM fields.  ``lit_to_som`` is
+The DOMINANT residual is instead the CWD-humification input consistency, now
+fixed (see ``a_wood_annual``): the reference reset
+:func:`analytic_slow_pool_equilibrium` builds ``I_active = lit_to_som +
+cwd_humification_eff * a_wood`` from the LAST-TRANSIENT-year fluxes, and the closed
+form now records ``lit_to_som``/``a_wood`` from THOSE SAME reset fluxes rather than
+a post-verify stationary year.  Sampling ``a_wood`` post-verify had shifted it
+~8-11% below the reset value on the still-equilibrating ~27-yr wood pool (the reset
+boosts ``C_wood`` -> higher maintenance respiration -> lower NPP/allocation), which
+propagated through the whole active->slow->passive cascade and made the closed form
+systematically UNDER-predict the passive pool (the bulk of SOC) for woody
+archetypes — the passive/slow bias this record-source fix removes.
+
+Which parameters are fast-differentiable.  The closed form is differentiable in
+all EIGHT SOM leaves (verified: :func:`jax.grad` of the SOC loss is finite and
+non-zero for each).  The calibration's fast trainable SET is the SEVEN excluding
+``Q10_het_exp`` (see ``train_carbon_params.SOM_FIELDS``): ``Q10_het_exp`` also
+enters the PRECOMPUTED (frozen) ``lit_to_som`` litter input, so its fast-mode
+gradient is only PARTIAL (the live SOM-cascade path, not the frozen-litter path)
+-- the seven kept fields have their FULL gradient.  ``lit_to_som`` is
 param-independent at the litter steady state (its throughput is set by the
 litterfall input and the ``decomp_rate``/``tor_litter`` split, in which the
 shared temperature modifier cancels), so it is precomputed once.  The
@@ -76,10 +99,12 @@ _K_FLOOR_PER_YR = 1e-12
 
 
 class FastAnalyticInputs(NamedTuple):
-    """Per-archetype, tunable-parameter-INDEPENDENT inputs for the fast closed-form
-    forwards -- the SOM-SOC cascade (:func:`analytic_som_soc`) AND the live-pool
-    biomass/LAI equilibrium
-    (:func:`legoesm.land.carbon.live_pool_forward.build_live_pool_forward`).
+    """Per-archetype inputs for the fast closed-form forwards -- the SOM-SOC cascade
+    (:func:`analytic_som_soc`) AND the live-pool biomass/LAI equilibrium
+    (:func:`legoesm.land.carbon.live_pool_forward.build_live_pool_forward`) --
+    independent of the SEVEN fast-trained SOM params.  (``Q10_het_exp`` also enters
+    the frozen ``lit_to_som`` litter modifier, so it is NOT in the fast trainable
+    set -- a documented partial gradient; see the module docstring.)
 
     Recorded ONCE by
     :func:`legoesm.land.carbon.global_init.precompute_fast_analytic_inputs` from a
@@ -87,21 +112,39 @@ class FastAnalyticInputs(NamedTuple):
     archetype array (leading axis ``n_arch``) except ``dt_days`` (scalar):
 
     lit_to_som_annual : (n_arch,) [gC/m2/yr]
-        Stationary annual litter -> active-SOM decomposition flux.  Independent of
-        the tunable SOM parameters (litter-pool throughput = litterfall * the
-        fixed ``decomp_rate``/``tor_litter`` split; the shared modifier cancels).
+        Annual litter -> active-SOM decomposition flux, taken from the
+        LAST-TRANSIENT-year fluxes the reference reset
+        :func:`analytic_slow_pool_equilibrium` consumes (``SlowPoolFluxes.lit_to_som``,
+        exposed by :func:`~legoesm.land.carbon.spinup.run_semi_analytic_spinup`), NOT
+        a separate post-verify stationary year.  Recording the SAME flux the reset
+        uses makes the closed form reproduce the reset's active-pool INPUT chain
+        exactly, removing the input-phase bias (the residual vs the spin-up is only
+        the ``k_X`` turnover, evaluated on the post-verify soil-T -- ~0.5% on the
+        tiny-world CRUX test, was ~7.5%).  Independent of the SEVEN fast-trained SOM
+        params (litter-pool throughput = litterfall * the fixed ``decomp_rate``/
+        ``tor_litter`` split; the shared modifier cancels).  ``Q10_het_exp`` DOES
+        scale the litter modifier, so freezing this input gives it only a partial
+        fast gradient -- hence its exclusion from the fast trainable set.
     a_wood_annual : (n_arch,) [gC/m2/yr]
-        Stationary annual NPP allocation to wood, used as the wood->SOM input
-        driver ``wood_to_som = cwd_humification_eff * a_wood`` -- EXACTLY as the
-        reference reset :func:`analytic_slow_pool_equilibrium` does (it takes
-        ``a_wood`` as the wood turnover at wood equilibrium).  Kept SEPARATE from
-        ``lit_to_som_annual`` so ``cwd_humification_eff`` enters the active-pool
-        input analytically.  Using the raw per-step wood TURNOVER instead
-        REGRESSES the analytic-vs-spin-up match (7.5% -> 13.9%): the coupled wood
-        pool is a small net sink in the recorded year (``a_wood > wood_litter``,
-        wood not perfectly equilibrated), and the reference equilibrium is built
-        from ``a_wood`` -- so ``a_wood`` is the faithful reproduction.  At TRUE
-        wood equilibrium the two coincide.
+        Annual NPP allocation to wood the wood->SOM humification input driver
+        ``wood_to_som = cwd_humification_eff * a_wood`` uses, taken from the SAME
+        LAST-TRANSIENT-year reset fluxes (``SlowPoolFluxes.a_wood``) so it MATCHES
+        the value the reference reset :func:`analytic_slow_pool_equilibrium` built
+        ``real_som`` from (the reset takes ``a_wood`` as the wood turnover at wood
+        equilibrium).  Kept SEPARATE from ``lit_to_som_annual`` so
+        ``cwd_humification_eff`` enters the active-pool input analytically.  Two
+        reasons this exact source matters (both verified):
+          * Using the raw per-step wood TURNOVER ``wood_litter`` instead of ``a_wood``
+            regresses the match (the reference reset is built from ``a_wood``, so the
+            surrogate must use ``a_wood`` too; at TRUE wood equilibrium they coincide).
+          * Recording ``a_wood`` from a POST-VERIFY stationary year instead of the
+            reset year sampled a DIFFERENT phase of the ~27-yr (``tor_wood=1e-4/day``)
+            wood pool: the reset boosts ``C_wood`` -> raises maintenance respiration ->
+            lowers NPP/allocation, so post-verify ``a_wood`` ran ~8-11% BELOW the
+            transient value the reset used, and the surrogate systematically
+            UNDER-predicted the CWD-fed active->slow->passive cascade (a passive-pool
+            bias of ~10-15% cover-weighted for woody archetypes).  Recording the reset
+            flux removes that inconsistency; grasses (``a_wood==0``) are unaffected.
     soil_T_traj : (n_arch, n_samples) [K]
         Top-soil-layer temperature the SOM decomposition modifier sees, sampled
         every sub-daily step over ONE stationary year (the full seasonal +
@@ -214,9 +257,14 @@ def analytic_som_soc(
     :func:`analytic_slow_pool_equilibrium` infers from a spun-up pool, and the
     constant-within-year balance ``C_X = i_X / k_X`` is the SAME algebra it uses.
     This is an ANNUAL-EQUILIBRIUM APPROXIMATION of the stepped periodic fixed
-    point (see the module docstring), NOT an exact solve; at the default
-    parameters it tracks ``som_total(equilibrate_archetypes)`` per archetype to
-    ~6-8% (verified), the residual being the dropped within-year covariance.
+    point (see the module docstring), NOT an exact solve; with the SOM active-pool
+    inputs recorded from the reset's own fluxes (see ``FastAnalyticInputs.
+    a_wood_annual``) it tracks ``som_total(equilibrate_archetypes)`` per archetype to
+    ~0.5-1.5% at the default parameters (verified; cover-weighted ~1.2% on the 24-
+    archetype world, was ~13-16% when ``a_wood`` was sampled post-verify).  The small
+    residual is the ``k_X`` turnover, evaluated on the post-verify soil-T rather than
+    the reset's realised loss (the dropped within-year covariance, chiefly the
+    ~annual active pool -- a fraction of a % of SOC).
 
     Differentiability.  ``config`` carries the eight TRACED SOM leaves
     (``tor_som_active`` / ``tor_som_slow`` / ``tor_som_passive`` /

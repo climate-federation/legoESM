@@ -542,7 +542,7 @@ def _spinup_batch(batch: ArchetypeBatch, *, n_spinup, n_verify, dt,
     step_fn = make_archetype_step_fn(batch.config, batch.land_params, dt=dt)
     state0 = init_multilayer_land_state(ncol_g, batch.config, T_init=batch.t_init)
     carbon0 = init_carbon_state((ncol_g,), batch.config.carbon)
-    _final_state, final_carbon, annual = run_semi_analytic_spinup(
+    _final_state, final_carbon, annual, _reset_fluxes = run_semi_analytic_spinup(
         step_fn, state0, carbon0, batch.forcing_fn,
         n_spinup=n_spinup, n_verify=n_verify,
         steps_per_year=batch.steps_per_year, dt=dt,
@@ -789,10 +789,17 @@ def precompute_fast_analytic_inputs(
 
     * the top-soil-layer temperature the SOM decomposition modifier sees
       (``new_state.T_soil[:, 0]`` -- the ``T`` passed to the coupled carbon step),
-    * the litter -> SOM decomposition flux ``lit_to_som`` and the NPP-to-wood
-      allocation ``a_wood`` (the CWD->SOM input driver the reference reset
-      :func:`~legoesm.land.carbon.spinup.analytic_slow_pool_equilibrium` uses),
-      summed to annual [gC/m2/yr],
+
+    and takes the litter -> SOM decomposition flux ``lit_to_som`` and the NPP-to-wood
+    allocation ``a_wood`` (the CWD->SOM input driver, annual [gC/m2/yr]) from the
+    LAST-TRANSIENT-year fluxes the analytic reset
+    :func:`~legoesm.land.carbon.spinup.analytic_slow_pool_equilibrium` consumed
+    (``run_semi_analytic_spinup``'s exposed ``reset_fluxes``), NOT the post-verify
+    stationary year -- so the closed form reproduces that reset's active-pool INPUT
+    (which sets the ``real_som`` target) exactly, rather than sampling a shifted
+    phase of the still-equilibrating ~27-yr wood pool (leaving only the small ``k_X``
+    soil-T residual; the passive-bias fix, see
+    ``FastAnalyticInputs.a_wood_annual``).  It also records, per sub-daily step:
     * the model's own annual ALLOCATABLE NPP ``npp_pos_annual = sum_t max(NPP_day,
       0) dt`` [gC/m2/yr], the per-group ``is_woody`` / ``is_evergreen`` flags, and the
       ANNUAL-MEAN equilibrium LIVE pools ``live_ref_C_fol/C_root/C_wood`` [gC/m2] -- the
@@ -866,7 +873,7 @@ def precompute_fast_analytic_inputs(
         state0 = init_multilayer_land_state(
             ncol_g, batch.config, T_init=batch.t_init)
         carbon0 = init_carbon_state((ncol_g,), batch.config.carbon)
-        final_state, final_carbon, _annual = run_semi_analytic_spinup(
+        final_state, final_carbon, _spin_annual, reset_fluxes = run_semi_analytic_spinup(
             step_fn, state0, carbon0, batch.forcing_fn,
             n_spinup=n_spinup, n_verify=n_verify,
             steps_per_year=batch.steps_per_year, dt=dt,
@@ -874,13 +881,29 @@ def precompute_fast_analytic_inputs(
             f_active_to_slow=batch.config.carbon.f_active_to_slow,
             f_slow_to_passive=batch.config.carbon.f_slow_to_passive,
             remat=False)
+        # The SOM active-pool inputs ``lit_to_som``/``a_wood`` are taken from the
+        # LAST-TRANSIENT-year fluxes the analytic reset consumed (``reset_fluxes``,
+        # the 4th return of run_semi_analytic_spinup), NOT from the post-verify
+        # stationary year below.  ``analytic_slow_pool_equilibrium`` (which sets
+        # ``real_som``, the target the closed form is checked against) builds
+        # ``i_active = lit_to_som + cwd_humification_eff * a_wood`` from THESE fluxes,
+        # so recording them makes ``analytic_som_soc`` reproduce that reference
+        # reset's active-pool INPUT chain exactly (the residual is only the small
+        # ``k_X`` soil-T difference).  Recording the post-verify ``a_wood`` instead
+        # sampled a DIFFERENT
+        # phase of the ~27-yr wood pool (the reset boosts ``C_wood`` -> higher
+        # maintenance respiration -> lower NPP/allocation), so the surrogate's
+        # ``a_wood`` ran ~8-11% below the value that built ``real_som`` for woody
+        # columns and systematically UNDER-predicted the CWD-fed
+        # active->slow->passive cascade -- the passive-pool bias this fixes.
 
         # Record ONE stationary year from the verified equilibrium: the top-soil
-        # temperature the modifier sees + the param-independent SOM/live-pool inputs.
+        # temperature the modifier sees + the param-independent live-pool inputs.
         # The state/carbon evolve through the byte-identical coupled step_fn; only the
         # recorded diagnostics differ from the spin-up scans.  ``max(diag.npp, 0)`` is
         # the model's OWN allocatable NPP (NPP_pos in step_carbon_differland), and the
         # per-step live pools ``cb_new.C_fol/C_root/C_wood`` are averaged over the year.
+        # (``lit_to_som``/``a_wood`` come from ``reset_fluxes`` above, NOT from here.)
         def _record_step(carry, step_idx):
             st, cb = carry
             doy, hour = step_doy_hour(step_idx, dt)
@@ -888,24 +911,23 @@ def precompute_fast_analytic_inputs(
             st_new, cb_new, diag = step_fn(st, cb, forcing, doy)
             npp_pos = jnp.maximum(diag.npp, 0.0)             # gC/m2/day allocatable NPP
             return (st_new, cb_new), (
-                st_new.T_soil[:, 0], diag.lit_to_som, diag.a_wood,
+                st_new.T_soil[:, 0],
                 npp_pos, cb_new.C_fol, cb_new.C_root, cb_new.C_wood)
 
-        _carry, (t_seq, lit_seq, awood_seq,
-                 npp_seq, cfol_seq, croot_seq, cwood_seq) = jax.lax.scan(
+        _carry, (t_seq, npp_seq, cfol_seq, croot_seq, cwood_seq) = jax.lax.scan(
             _record_step, (final_state, final_carbon),
             jnp.arange(batch.steps_per_year))
-        # Annual SOM/NPP inputs [gC/m2/yr] = sum over the year of the per-day rate;
+        # Annual NPP input [gC/m2/yr] = sum over the year of the per-day rate;
         # live pools = ANNUAL MEAN over the stationary year [gC/m2].
-        lit_ann = jnp.sum(lit_seq * dt_days, axis=0)         # (ncol_g,)
-        awood_ann = jnp.sum(awood_seq * dt_days, axis=0)     # (ncol_g,)
         npp_ann = jnp.sum(npp_seq * dt_days, axis=0)         # (ncol_g,)
         cfol_mean = jnp.mean(cfol_seq, axis=0)               # (ncol_g,)
         croot_mean = jnp.mean(croot_seq, axis=0)             # (ncol_g,)
         cwood_mean = jnp.mean(cwood_seq, axis=0)             # (ncol_g,)
 
-        lit_to_som_annual[g_idx] = np.asarray(lit_ann)
-        a_wood_annual[g_idx] = np.asarray(awood_ann)
+        # Reset-consistent SOM active-pool inputs (last-transient-year fluxes the
+        # analytic reset consumed) -- see ``reset_fluxes`` note above.
+        lit_to_som_annual[g_idx] = np.asarray(reset_fluxes.lit_to_som)
+        a_wood_annual[g_idx] = np.asarray(reset_fluxes.a_wood)
         soil_T_traj[g_idx, :] = np.asarray(t_seq).T          # (ncol_g, steps_per_year)
         real_som[g_idx] = np.asarray(som_total(final_carbon))
         npp_pos_annual[g_idx] = np.asarray(npp_ann)

@@ -314,7 +314,7 @@ def run_semi_analytic_spinup(
 
     Returns
     -------
-    (final_state, final_carbon, annual)
+    (final_state, final_carbon, annual, reset_fluxes)
         ``final_carbon`` is the verified-equilibrium :class:`CarbonState`
         ``(ncol,)``.  ``annual`` is a dict of per-verify-year ``(n_verify,
         ncol)`` arrays: every ``diag`` flux field as an annual total
@@ -322,6 +322,10 @@ def run_semi_analytic_spinup(
         allocation residual ``alloc_resid``, ``nsteps``, the model's
         mass-balance annual ``nee_model``, and the end-of-year pools
         ``C_lab``..``C_som_passive`` (the eight ``_POOL_FIELDS``).
+        ``reset_fluxes`` is the :class:`SlowPoolFluxes` (per-column ``(ncol,)``)
+        the analytic reset consumed -- the LAST-TRANSIENT-year slow-pool fluxes --
+        so a caller can reproduce that exact reset (used by the fast-analytic SOC
+        precompute; see the return statement's comment).
     """
     # Fail early on degenerate run controls (dispatch-hardening discipline): the
     # analytic reset reads the LAST spin-up year's fluxes (needs n_spinup >= 1),
@@ -419,7 +423,24 @@ def run_semi_analytic_spinup(
     # --- Phase 3: verification segment from the analytic equilibrium ---
     (final_state, final_carbon), annual_verify = jax.lax.scan(
         year_step, (state_spun, carbon_eq), jnp.arange(n_verify))
-    return final_state, final_carbon, annual_verify
+    # Return the LAST-TRANSIENT-year slow-pool ``fluxes`` the analytic reset
+    # consumed (a :class:`SlowPoolFluxes` of per-column ``(ncol,)`` gC/m2/yr) as an
+    # explicit 4th element, so a caller can reproduce that reset's INPUT chain.  The
+    # fast-analytic SOC precompute
+    # (:func:`legoesm.land.carbon.global_init.precompute_fast_analytic_inputs`)
+    # records the SURROGATE's ``lit_to_som``/``a_wood`` inputs from THESE reset
+    # fluxes (not from a separate post-verify stationary year), so the closed-form
+    # ``analytic_som_soc`` reproduces ``analytic_slow_pool_equilibrium`` rather than
+    # sampling a DIFFERENT phase of the still-equilibrating decadal wood pool: the
+    # ~27-yr wood pool's NPP-to-wood allocation ``a_wood`` shifts between the
+    # transient (pre-reset) and post-verify states (the reset boosts ``C_wood`` ->
+    # raises maintenance respiration -> depresses NPP/allocation), so the two phases
+    # differ by ~8-11% for woody columns and drive the whole active->slow->passive
+    # CWD-humification cascade off (the systematic passive under-prediction).  Kept
+    # OUT of the per-verify-year ``annual`` dict on purpose (it is a single reset-time
+    # ``(ncol,)`` flux, not an ``(n_verify, ncol)`` series -- callers that reshape the
+    # whole dict per verify year must not see it).
+    return final_state, final_carbon, annual_verify, fluxes
 
 
 def integrate_annual_pools(

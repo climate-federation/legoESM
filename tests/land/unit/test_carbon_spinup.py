@@ -269,7 +269,7 @@ class TestRunSemiAnalyticSpinup(unittest.TestCase):
             remat=remat)
 
     def test_analytic_reset_and_shapes(self):
-        _fs, fc, annual = self._run(ncol=1)
+        _fs, fc, annual, reset_fluxes = self._run(ncol=1)
         # Wood: C_wood_eq = 1000 * a_wood/wood_litter = 1000 * 10/5 = 2000.
         npt.assert_allclose(np.asarray(fc.C_wood), 2000.0, rtol=1e-6)
         # Active: i_active = lit_to_som + cwd*a_wood = 20 + 0.3*10 = 23; loss 10.
@@ -285,6 +285,19 @@ class TestRunSemiAnalyticSpinup(unittest.TestCase):
         for f, v in (("C_lab", 100.0), ("C_fol", 200.0),
                      ("C_root", 300.0), ("C_lit", 400.0)):
             npt.assert_allclose(np.asarray(getattr(fc, f)), v, rtol=1e-6)
+        # 4th return: the LAST-TRANSIENT-year SlowPoolFluxes the reset consumed
+        # (constant stationary toy diagnostics) -- exposed so the fast-analytic SOC
+        # precompute records the reset-consistent lit_to_som/a_wood (not a shifted
+        # post-verify phase of the wood pool).  These are ANNUAL totals
+        # ``sum_t(rate*dt_days)`` = per-day toy rate * 365 (one clean model year), so
+        # a_wood=10*365, wood_litter=5*365, lit_to_som=20*365, and the SOM losses
+        # 10/5/3 * 365 -- the SAME fluxes ``analytic_slow_pool_equilibrium`` consumed.
+        npt.assert_allclose(np.asarray(reset_fluxes.a_wood), 10.0 * 365.0, rtol=1e-6)
+        npt.assert_allclose(np.asarray(reset_fluxes.wood_litter), 5.0 * 365.0, rtol=1e-6)
+        npt.assert_allclose(np.asarray(reset_fluxes.lit_to_som), 20.0 * 365.0, rtol=1e-6)
+        npt.assert_allclose(np.asarray(reset_fluxes.som_active_loss), 10.0 * 365.0, rtol=1e-6)
+        npt.assert_allclose(np.asarray(reset_fluxes.som_slow_loss), 5.0 * 365.0, rtol=1e-6)
+        npt.assert_allclose(np.asarray(reset_fluxes.som_passive_loss), 3.0 * 365.0, rtol=1e-6)
         # Per-verify-year annual dict, shape (n_verify, ncol).
         for key in ("gpp", "npp", "nee_model", "alloc_resid", "lai_sum",
                     "lai_max", "nsteps", "C_som_active"):
@@ -300,7 +313,7 @@ class TestRunSemiAnalyticSpinup(unittest.TestCase):
         npt.assert_allclose(np.asarray(annual["gpp"]), 15.0 * 365.0, rtol=1e-6)
 
     def test_batched_over_columns(self):
-        _fs, fc, annual = self._run(ncol=3)
+        _fs, fc, annual, _reset = self._run(ncol=3)
         self.assertEqual(fc.C_som_active.shape, (3,))
         npt.assert_allclose(np.asarray(fc.C_wood), 2000.0, rtol=1e-6)
         self.assertEqual(np.asarray(annual["gpp"]).shape, (2, 3))
@@ -309,8 +322,8 @@ class TestRunSemiAnalyticSpinup(unittest.TestCase):
         # The opt-in `remat` kwarg (jax.checkpoint on the per-year body) only
         # changes the store-vs-recompute schedule for reverse-mode AD, never the
         # forward values -- so remat=True must reproduce remat=False exactly.
-        _fs0, fc0, annual0 = self._run(ncol=2, remat=False)
-        _fs1, fc1, annual1 = self._run(ncol=2, remat=True)
+        _fs0, fc0, annual0, _r0 = self._run(ncol=2, remat=False)
+        _fs1, fc1, annual1, _r1 = self._run(ncol=2, remat=True)
         for field in CarbonState._fields:
             npt.assert_allclose(
                 np.asarray(getattr(fc1, field)),

@@ -229,5 +229,12 @@ def test_analytic_matches_equilibrate_at_defaults():
     print(f"\n[match] analytic={np.round(analytic, 2)} gC/m2  real={np.round(real, 2)}"
           f"  rel={np.round(rel, 4)}  mean={np.mean(rel):.4f} max={np.max(rel):.4f}")
     assert np.all(np.isfinite(analytic))
-    assert float(np.mean(rel)) < 0.10, (analytic, real, rel)
-    assert float(np.max(rel)) < 0.20, (analytic, real, rel)
+    # Recording the SOM active-pool inputs (lit_to_som / a_wood) from the reset's
+    # own last-transient-year fluxes makes the closed form reproduce
+    # analytic_slow_pool_equilibrium's INPUT chain exactly (residual only the small
+    # k_X soil-T term) -- was ~7.5% when a_wood was sampled from a shifted post-verify
+    # phase of the ~27-yr wood pool.  Tightened to LOCK the gain: measured mean 0.5% /
+    # max 1.0% on this tiny world (small headroom for cross-hardware float variance in
+    # the coupled spin-up).
+    assert float(np.mean(rel)) < 0.03, (analytic, real, rel)
+    assert float(np.max(rel)) < 0.05, (analytic, real, rel)
