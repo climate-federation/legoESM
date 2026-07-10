@@ -4352,7 +4352,25 @@ class LatLonCGridOceanModel:
         conserving runs are unaffected.
         """
         T = state.T.data
-        T_sfc_floored = jnp.maximum(T[..., 0], self.config.freeze_floor_temp_c)
+        # Freeze-point floor [degC].  Default ("constant") keeps the historical
+        # scalar ``freeze_floor_temp_c`` byte-identical.  A liquidus scheme
+        # (``config.freezing.scheme``) instead floors each surface cell at ITS
+        # OWN freezing point using the local surface salinity — fresher water
+        # freezes warmer, more saline colder (the -1.8 -> ~-1.92 C S-dependence).
+        # ``freezing_point`` returns KELVIN and the ocean state T is in degC, so
+        # subtract ``constants.T_freeze`` (the 0 degC reference).  ``scheme`` is a
+        # static config field => feature-gating branch, not a traced select.
+        if self.config.freezing.scheme == "constant":
+            floor_c = self.config.freeze_floor_temp_c
+        else:
+            from legoesm import constants as _consts
+            from legoesm.ocean.eos import freezing_point
+            S_sfc = state.S.data[..., 0]
+            floor_c = (
+                freezing_point(S_sfc, 0.0, scheme=self.config.freezing.scheme)
+                - _consts.T_freeze
+            )
+        T_sfc_floored = jnp.maximum(T[..., 0], floor_c)
         T_floored = T.at[..., 0].set(T_sfc_floored)
         return state._replace(T=state.T.replace(data=T_floored))
 
