@@ -14,6 +14,17 @@ nlev: 32
 dt: 300.0                 # CFL-conservative for 0.7 deg; smoke-tune before scale
 resolution_deg: 0.7
 
+# --- spectral training core (--training-core spectral) ---
+# n_max stays derived (max(21, n_lat//3) -> T85 here; the --smoke 32x64 grid
+# derives T21). dt MUST be set: the builder's 1800 s SI default is only
+# CFL-safe at smoke truncation — at T85 (~130 km) the advective CFL blows up
+# the pure dycore in the first rollout (job 6687785, loss=nan from epoch 0).
+# 450 s scales the AIMIP-proven T106 dt=400 s (x106/85 ~ 500) with margin AND
+# divides both multi_step_hours leads exactly (6 h = 48 steps, 12 h = 96 —
+# the trainer truncates roll_steps with int(), so dt must divide the lead).
+spectral:
+  dt: 450.0
+
 # --- ERA5 ---
 era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
 cache_dir: ".cache/wb_scale_era5"
