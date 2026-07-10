@@ -27,8 +27,9 @@ Modular loss registry: ``LOSSES = {obs_name: LossTerm(target, extractor, weight)
 productivity lever), ``biomass`` / ``lai`` (``--with-biomass`` / ``--with-lai``;
 closed-form live-pool vs observed biomass/LAI -- DALEC allocation/residence), and ``d13c``
 (``--with-d13c``; simulated leaf carbon-isotope discrimination vs observed leaf delta13C --
-constrains Ci/Ca, training the stomatal water-use-efficiency params, C4 archetypes masked
-since the model Farquhar is C3-only).  All are summed by ``_total_loss`` WITHOUT touching
+constrains Ci/Ca, training the C3 stomatal water-use-efficiency params AND the C4 bundle-sheath
+leakiness phi; C4 archetypes use a FAITHFUL C4 Farquhar-Cerling discrimination and CONTRIBUTE
+to the loss -- no longer masked).  All are summed by ``_total_loss`` WITHOUT touching
 the loop; a new stream plugs in the same way (add a registry entry).
 
 Login-node policy: the archetype spin-up JIT-compiles the coupled land+carbon
@@ -83,6 +84,7 @@ _G_PER_KG = 1000.0                 # gC/m2 -> kgC/m2 (exact conversion)
 CARBON_SCHEME_KEY = "land.carbon"  # param_collector scheme_key for CarbonConfig
 SIF_SCHEME_KEY = "land.canopy.sif"  # param_collector scheme_key for SIFConfig (--with-sif)
 STOMATA_SCHEME_KEY = "land.stomata"  # param_collector scheme_key for StomataConfig (--with-d13c)
+D13C_SCHEME_KEY = "land.d13c"        # param_collector scheme_key for D13CConfig (--with-d13c; C4 phi)
 # Organic-CARBON per organic-MATTER fraction (van Bemmelen 1/1.724 = 0.58): the
 # raw CLM5 surfdata ORGANIC field is organic MATTER density (its units attribute
 # declares 0.58 gC/gOM). The harmonized legoesm_surfdata "organic" derives from
@@ -158,6 +160,15 @@ LIVE_POOL_FIELDS: tuple[str, ...] = (
 # be wrong; J_max25 / Arrhenius / Jarvis fields are not WUE).  A Medlyn forward would train
 # g1_med instead -- a documented follow-up (the forward uses the Ball-Berry path here).
 STOMATA_WUE_FIELDS: tuple[str, ...] = ("g0", "g1_bb")
+
+# The C4 leaf-delta13C lever the --with-d13c stream calibrates through the FAITHFUL C4
+# discrimination branch (legoesm.land.carbon.d13c_forward.leaf_d13c_c4_from_ci_ca): the
+# bundle-sheath leakiness phi.  A NEW, INDEPENDENT lever vs the C3 stomatal WUE fields above
+# (g0/g1_bb move ONLY the C3 archetypes' Ci/Ca; phi moves ONLY the C4 archetypes' fixed-Ci/Ca
+# discrimination), so the two are trained together but decoupled by the is_c4 selector.  Only
+# phi is tunable; the C4 Ci/Ca setpoint (D13CConfig.ci_ca_c4) is FIXED (spec-excluded) to
+# avoid a non-identifiable (phi, Ci/Ca) degeneracy -- see legoesm.land.carbon.config.D13CConfig.
+D13C_LEAKINESS_FIELDS: tuple[str, ...] = ("phi_c4_leakiness",)
 
 # --- training defaults (modest; a compute-node short calibration) --------------
 DEFAULT_STEPS = 60
@@ -448,7 +459,8 @@ def build_carbon_trainables(
     if with_sif:
         scheme_keys.add(SIF_SCHEME_KEY)
     if with_d13c:
-        scheme_keys.add(STOMATA_SCHEME_KEY)
+        scheme_keys.add(STOMATA_SCHEME_KEY)   # C3 WUE (g0/g1_bb)
+        scheme_keys.add(D13C_SCHEME_KEY)      # C4 leakiness (phi)
     params = build_trainable_params(
         active_scheme_keys=scheme_keys, tier="extended", dtype=jnp.float64)
     have = {c.name for c in params.constraints}
@@ -457,8 +469,11 @@ def build_carbon_trainables(
         raise ValueError(
             f"--with-sif requested but no {SIF_SCHEME_KEY} trainables at tier 'extended'; "
             f"is the spec module registered in param_collector.SPEC_MODULES?")
-    # Stomata WATER-USE-EFFICIENCY subset only (the d13c lever); never the full stomata set.
+    # Stomata WATER-USE-EFFICIENCY subset only (the C3 d13c lever); never the full stomata set.
     stomata_wue = {f"{STOMATA_SCHEME_KEY}.{f}" for f in STOMATA_WUE_FIELDS}
+    # C4 bundle-sheath leakiness phi (the C4 d13c lever); ci_ca_c4 is spec-excluded, so it is
+    # never a trainable here.
+    d13c_leak = {f"{D13C_SCHEME_KEY}.{f}" for f in D13C_LEAKINESS_FIELDS}
     if with_d13c:
         missing_st = stomata_wue - have
         if missing_st:
@@ -467,19 +482,30 @@ def build_carbon_trainables(
                 f"from the {STOMATA_SCHEME_KEY} tier-extended trainables; known="
                 f"{sorted(n for n in have if n.startswith(STOMATA_SCHEME_KEY + '.'))}. "
                 f"Is the spec module registered in param_collector.SPEC_MODULES?")
+        missing_d = d13c_leak - have
+        if missing_d:
+            raise ValueError(
+                f"--with-d13c requested but C4 leakiness field(s) {sorted(missing_d)} absent "
+                f"from the {D13C_SCHEME_KEY} tier-extended trainables; known="
+                f"{sorted(n for n in have if n.startswith(D13C_SCHEME_KEY + '.'))}. "
+                f"Is the spec module (legoesm.land.carbon.config:D13CConfig) registered in "
+                f"param_collector.SPEC_MODULES?")
     keep_stomata = stomata_wue if with_d13c else set()
+    keep_d13c = d13c_leak if with_d13c else set()
     if not som_only:
         # Full tier-2 carbon set (+ all SIF fluorescence params when --with-sif), but the
         # stomata part restricted to the WUE subset (never the per-archetype-incompatible
-        # Vc_max25 / kinetics).  With --with-d13c off this returns the prior full set.
+        # Vc_max25 / kinetics).  keep_non_stomata already carries the land.d13c phi.  With
+        # --with-d13c off this returns the prior full set.
         keep_non_stomata = {n for n in have if not n.startswith(STOMATA_SCHEME_KEY + ".")}
-        return _filter_params(params, keep_non_stomata | keep_stomata)
+        return _filter_params(params, keep_non_stomata | keep_stomata | keep_d13c)
     # SOM-only carbon subset, PLUS all SIF fluorescence params, PLUS the live-pool fields
-    # when a biomass/LAI stream is on, PLUS the stomata WUE subset when --with-d13c.
+    # when a biomass/LAI stream is on, PLUS the stomata WUE + C4 phi subsets when --with-d13c.
     carbon_fields = set(SOM_FIELDS)
     if with_biomass or with_lai:
         carbon_fields |= set(LIVE_POOL_FIELDS)
-    keep = {f"{CARBON_SCHEME_KEY}.{f}" for f in carbon_fields} | sif_names | keep_stomata
+    keep = ({f"{CARBON_SCHEME_KEY}.{f}" for f in carbon_fields}
+            | sif_names | keep_stomata | keep_d13c)
     missing = {f"{CARBON_SCHEME_KEY}.{f}" for f in carbon_fields} - have
     if missing:
         raise ValueError(
@@ -500,9 +526,15 @@ def _sif_overrides(params: TrainablePhysicsParams) -> dict[str, jax.Array]:
 
 
 def _stomata_overrides(params: TrainablePhysicsParams) -> dict[str, jax.Array]:
-    """``{StomataConfig field -> traced constrained scalar}`` for the d13c loss term (empty
-    when ``--with-d13c`` is off / no stomata WUE params are trained)."""
+    """``{StomataConfig field -> traced constrained scalar}`` for the d13c loss term's C3
+    branch (empty when ``--with-d13c`` is off / no stomata WUE params are trained)."""
     return params.to_overrides().get(STOMATA_SCHEME_KEY, {})
+
+
+def _d13c_config_overrides(params: TrainablePhysicsParams) -> dict[str, jax.Array]:
+    """``{D13CConfig field -> traced constrained scalar}`` for the d13c loss term's C4 branch
+    (the leakiness ``phi_c4_leakiness``; empty when ``--with-d13c`` is off)."""
+    return params.to_overrides().get(D13C_SCHEME_KEY, {})
 
 
 def _make_sif_forward(table):
@@ -527,26 +559,38 @@ def _make_sif_forward(table):
 
 
 def _make_d13c_forward(table):
-    """Build ``d13c_forward(stomata_overrides) -> (n_arch,)`` simulated leaf delta13C [permil]
-    for the given (possibly chunk-sliced) archetype table.
+    """Build ``d13c_forward(params) -> (n_arch,)`` simulated leaf delta13C [permil] for the
+    given (possibly chunk-sliced) archetype table (BOTH C3 and C4 pathways).
 
-    Precomputes the static per-archetype CLIMATE forcing ONCE
+    Precomputes the static per-archetype CLIMATE forcing + the static ``is_c4`` selector ONCE
     (:func:`legoesm.land.carbon.d13c_forward.build_d13c_forward`), then each call splices the
-    TRACED stomata WUE overrides (``g0`` / ``g1_bb``) into a fresh ``StomataConfig``
-    (production defaults untouched) and RE-SOLVES the coupled Farquhar system -- ``Ci`` (hence
-    the C3 discrimination) depends on the trained conductance, so it cannot be frozen like the
-    SIF leaf state, but it is still a single-step graph, no spin-up.  ``Vc_max25`` is applied
-    per-archetype inside the forward (NOT a trained scalar)."""
+    TRACED overrides into fresh configs (production defaults untouched) and evaluates the
+    per-archetype C3/C4 discrimination:
+
+    * C3 archetypes -- the stomata WUE overrides (``g0`` / ``g1_bb``) go into a ``StomataConfig``
+      and the forward RE-SOLVES the coupled Farquhar system (``Ci`` depends on the trained
+      conductance, so it cannot be frozen like the SIF leaf state); ``Vc_max25`` is applied
+      per-archetype inside the forward (NOT a trained scalar).
+    * C4 archetypes -- the leakiness override (``phi_c4_leakiness``) goes into a ``D13CConfig``
+      and drives the fixed-Ci/Ca Farquhar-Cerling C4 discrimination.
+
+    Takes the full ``params`` (not a single scheme slice like the SIF forward) because the two
+    pathways draw from two schemes (``land.stomata`` + ``land.d13c``).  Still a single-step
+    graph, no spin-up; the g1_bb gradient flows through the C3 archetypes and the phi gradient
+    through the C4 archetypes."""
+    from legoesm.land.carbon.config import D13CConfig
     from legoesm.land.carbon.d13c_forward import build_d13c_forward
     from legoesm.land.carbon.stomata import StomataConfig
     from legoesm.training.param_collector import apply_param_overrides
 
     d13c_fn = build_d13c_forward(table)
 
-    def d13c_forward(stomata_overrides):
-        cfg = apply_param_overrides(
-            StomataConfig(enabled=True, stomata_model="ball_berry"), stomata_overrides)
-        return d13c_fn(cfg)
+    def d13c_forward(params):
+        st_cfg = apply_param_overrides(
+            StomataConfig(enabled=True, stomata_model="ball_berry"),
+            _stomata_overrides(params))
+        d13c_cfg = apply_param_overrides(D13CConfig(), _d13c_config_overrides(params))
+        return d13c_fn(st_cfg, d13c_cfg)
 
     return d13c_forward
 
@@ -619,7 +663,7 @@ def make_loss_fn(
         if sif_forward is not None:
             preds["sif"] = sif_forward(_sif_overrides(params))
         if d13c_forward is not None:
-            preds["d13c"] = d13c_forward(_stomata_overrides(params))
+            preds["d13c"] = d13c_forward(params)
         return _total_loss(preds, losses, cover_weight)
 
     return loss_fn
@@ -710,7 +754,7 @@ def _make_chunked_slow(target_bundle, spin, *, chunk: int):
             if csif is not None:
                 preds["sif"] = csif(_sif_overrides(params))
             if cd13c is not None:
-                preds["d13c"] = cd13c(_stomata_overrides(params))
+                preds["d13c"] = cd13c(params)
             return _weighted_sse(preds, cterms, cw)
         return sse
 
@@ -810,7 +854,7 @@ def make_fast_loss_fn(
         if sif_forward is not None:
             preds["sif"] = sif_forward(_sif_overrides(params))
         if d13c_forward is not None:
-            preds["d13c"] = d13c_forward(_stomata_overrides(params))
+            preds["d13c"] = d13c_forward(params)
         if live_pool_forward is not None:
             biomass, lai = live_pool_forward(_carbon_overrides(params))
             preds["biomass"] = biomass
@@ -1068,10 +1112,10 @@ def _build_observed_d13c(args, table, inputs, cell_id, cell_w, n_arch_full):
     :mod:`legoesm.land.carbon.d13c_observations`); ``--d13c-obs`` supplies a pre-regridded
     LEAF-delta13C product.
 
-    C4 archetypes are MASKED OUT (set to ``NaN``): the model's Farquhar is C3-only, so the C3
-    discrimination forward is not valid for them (their C3-kinetics Ci is not a faithful C4
-    leaf state) -- the trainer's finite-mask then drops them from the d13c term.  A faithful
-    C4 discrimination is a documented follow-up.
+    C4 archetypes are NO LONGER masked: the simulated forward now applies a FAITHFUL C4
+    Farquhar-Cerling discrimination (:mod:`legoesm.land.carbon.d13c_forward`), so a C4
+    archetype WITH an observation CONTRIBUTES to the d13c term (calibrating the C4 leakiness
+    ``phi``).  The per-term finite-mask still drops genuinely-missing (NaN) observations only.
     """
     if not args.with_d13c:
         return None
@@ -1095,13 +1139,13 @@ def _build_observed_d13c(args, table, inputs, cell_id, cell_w, n_arch_full):
         observed = np.asarray(
             per_archetype_observed_d13c(d13c_cell, cell_id, cell_w, n_arch=n_arch_full),
             dtype=float)
-    # C3-only model -> exclude C4 archetypes (NaN so the finite-mask drops them).
+    # C4 archetypes are INCLUDED (faithful C4 forward); report how many now contribute (a
+    # finite observed target with the C4 branch active) instead of being masked out.
     c4 = c4_archetype_mask(table.pft_id)
-    n_c4 = int(np.sum(c4))
-    if n_c4:
-        print(f"[target] masking {n_c4} C4 archetype(s) from the delta13C term (model "
-              f"Farquhar is C3-only; C4 discrimination is a follow-up)")
-        observed = np.where(c4, np.nan, observed)
+    n_c4_obs = int(np.sum(c4 & np.isfinite(observed)))
+    if n_c4_obs:
+        print(f"[target] {n_c4_obs} C4 archetype(s) CONTRIBUTE to the delta13C term via the "
+              f"faithful C4 Farquhar-Cerling discrimination (calibrates C4 leakiness phi)")
     return observed
 
 
@@ -1702,13 +1746,15 @@ def _write_scorecard(path: Path, *, target_bundle, initial_params, tuned_params,
     # Optional leaf-delta13C scorecard (--with-d13c): cover-weighted simulated-delta13C RMSE
     # vs observed, default vs tuned (single-step forward; surfaces whether the d13c term
     # improved).  Weighted by cover MASKED to the delta13C-observed archetypes (matches the
-    # loss's d13c mask, which already excludes C4), so missing/C4 cells never enter the RMSE.
+    # loss's d13c finite-mask, which now drops only genuinely-missing observations -- C4
+    # archetypes with an observation ARE included via the faithful C4 forward), so only
+    # unobserved cells are excluded from the RMSE.
     make_d13c = target_bundle.get("make_d13c_forward")
     observed_d13c = target_bundle.get("observed_d13c")
     if make_d13c is not None and observed_d13c is not None:
         d13c_fwd = make_d13c(target_bundle["table"])
-        d13c_default = np.asarray(d13c_fwd(_stomata_overrides(initial_params)))
-        d13c_tuned = np.asarray(d13c_fwd(_stomata_overrides(tuned_params)))
+        d13c_default = np.asarray(d13c_fwd(initial_params))
+        d13c_tuned = np.asarray(d13c_fwd(tuned_params))
         d13c_mask = np.asarray(target_bundle["losses"]["d13c"].mask)
         w_d13c = cover * d13c_mask
         scorecard["cover_weighted_d13c_rmse_permil"] = {
@@ -1854,14 +1900,16 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         with_d13c=args.with_d13c)
     params = initial_params
     n_sif = sum(c.name.startswith(SIF_SCHEME_KEY + ".") for c in params.constraints)
-    n_d13c = sum(c.name.startswith(STOMATA_SCHEME_KEY + ".") for c in params.constraints)
+    # d13c stream trains TWO schemes: C3 stomata WUE (land.stomata) + C4 leakiness (land.d13c).
+    n_d13c_stomata = sum(c.name.startswith(STOMATA_SCHEME_KEY + ".") for c in params.constraints)
+    n_d13c_phi = sum(c.name.startswith(D13C_SCHEME_KEY + ".") for c in params.constraints)
     stream_note = "".join(
         f", {s}" for s, on in (("sif", args.with_sif), ("biomass", args.with_biomass),
                                ("lai", args.with_lai), ("d13c", args.with_d13c)) if on)
     print(f"[preflight] {len(params.constraints)} trainable params "
           f"(SOM-only={not args.all_carbon_params}, streams=soc{stream_note}"
           f"{f', {n_sif} SIF' if args.with_sif else ''}"
-          f"{f', {n_d13c} stomata' if args.with_d13c else ''}); mode="
+          f"{f', {n_d13c_stomata} stomata + {n_d13c_phi} C4-phi' if args.with_d13c else ''}); mode="
           f"{'fast-analytic' if args.fast_analytic else 'slow-spinup-grad'}; "
           f"n_spinup={args.n_spinup}, max_archetypes={args.max_archetypes}")
 

@@ -822,9 +822,10 @@ def test_total_loss_sums_soc_and_d13c_from_bundle():
     assert np.isfinite(total)
 
 
-def test_build_carbon_trainables_with_d13c_includes_only_stomata_wue():
-    """--with-d13c adds ONLY the stomata WUE subset (g0/g1_bb) ALONGSIDE the SOM set -- never
-    the per-archetype-incompatible Vc_max25 or the other stomata kinetics; OFF -> none."""
+def test_build_carbon_trainables_with_d13c_includes_stomata_wue_and_c4_leakiness():
+    """--with-d13c adds the stomata WUE subset (g0/g1_bb; the C3 lever) AND the C4 leakiness phi
+    ALONGSIDE the SOM set -- never the per-archetype-incompatible Vc_max25 / other stomata
+    kinetics, and never the FIXED C4 Ci/Ca setpoint; OFF -> neither scheme."""
     params = tcp.build_carbon_trainables(som_only=True, with_d13c=True)
     names = {c.name for c in params.constraints}
     assert {f"{tcp.CARBON_SCHEME_KEY}.{f}" for f in tcp.SOM_FIELDS} <= names
@@ -832,20 +833,29 @@ def test_build_carbon_trainables_with_d13c_includes_only_stomata_wue():
     assert stomata == {f"{tcp.STOMATA_SCHEME_KEY}.{f}" for f in tcp.STOMATA_WUE_FIELDS}
     # The full stomata set (Vc_max25 / J_max25 / kinetics) is NOT pulled in.
     assert f"{tcp.STOMATA_SCHEME_KEY}.Vc_max25" not in stomata
+    # The C4 leakiness phi IS pulled in; the fixed Ci/Ca setpoint is spec-excluded (absent).
+    d13c = {n for n in names if n.startswith(tcp.D13C_SCHEME_KEY + ".")}
+    assert d13c == {f"{tcp.D13C_SCHEME_KEY}.{f}" for f in tcp.D13C_LEAKINESS_FIELDS}
+    assert f"{tcp.D13C_SCHEME_KEY}.ci_ca_c4" not in d13c
 
     off = {c.name for c in tcp.build_carbon_trainables(som_only=True).constraints}
     assert not any(n.startswith(tcp.STOMATA_SCHEME_KEY + ".") for n in off)
+    assert not any(n.startswith(tcp.D13C_SCHEME_KEY + ".") for n in off)
 
 
-def test_stomata_overrides_selects_only_stomata_scheme():
-    """``_stomata_overrides`` returns the stomata WUE slice; ``_carbon_overrides`` the carbon
-    slice (disjoint, each traceable into its own config)."""
+def test_stomata_and_d13c_overrides_select_only_their_scheme():
+    """``_stomata_overrides`` returns the C3 stomata WUE slice; ``_d13c_config_overrides`` the
+    C4 leakiness slice; ``_carbon_overrides`` the carbon slice (disjoint, each traceable into
+    its own config)."""
     params = tcp.build_carbon_trainables(som_only=True, with_d13c=True)
     st_ov = tcp._stomata_overrides(params)
+    d13c_ov = tcp._d13c_config_overrides(params)
     car_ov = tcp._carbon_overrides(params)
     assert set(st_ov) == set(tcp.STOMATA_WUE_FIELDS)
+    assert set(d13c_ov) == set(tcp.D13C_LEAKINESS_FIELDS)
     assert set(car_ov) == set(tcp.SOM_FIELDS)
     assert set(st_ov).isdisjoint(car_ov)
+    assert set(d13c_ov).isdisjoint(st_ov) and set(d13c_ov).isdisjoint(car_ov)
 
 
 def test_d13c_cli_flags_roundtrip():
@@ -870,10 +880,12 @@ def test_with_d13c_real_path_requires_d13c_obs():
     assert args.with_d13c is True
 
 
-def test_build_observed_d13c_masks_c4_archetypes():
-    """C4 archetypes are NaN-masked out of the observed delta13C (model Farquhar is C3-only),
-    while C3 archetypes keep a finite target -- so the finite-mask drops ONLY the C4 cells."""
+def test_build_observed_d13c_keeps_c4_archetypes():
+    """C4 archetypes are NO LONGER NaN-masked: the model now has a FAITHFUL C4 Farquhar-Cerling
+    discrimination, so a C4 archetype WITH an observation CONTRIBUTES (finite target).  The
+    synthetic C4 target sits in the C4 band (distinctly less negative than the C3 targets)."""
     from legoesm.land.carbon.global_init import ArchetypeTable
+    from legoesm.land.surface_params import is_c4_pft_id
 
     args = tcp._finalize_args(tcp.build_arg_parser().parse_args(
         ["--dry-run-synthetic", "--with-d13c"]))
@@ -886,8 +898,12 @@ def test_build_observed_d13c_masks_c4_archetypes():
         aridity=np.array([1.0] * n), sw_mean_w=np.array([220.0] * n),
         soil_class=np.array(["loam"] * n, dtype=object))
     obs = tcp._build_observed_d13c(args, table, None, None, None, n)
-    assert np.all(np.isfinite(obs[[0, 1]]))       # C3 archetypes keep a finite target
-    assert np.all(np.isnan(obs[[2, 3]]))          # C4 archetypes masked out (NaN)
+    assert np.all(np.isfinite(obs))               # NO archetype is NaN-masked now
+    is_c4 = is_c4_pft_id(pft)
+    # C4 targets are C4-banded, C3 targets C3-banded, cleanly separated -> C4 contributes
+    assert np.all(obs[is_c4] > -16.0) and np.all(obs[is_c4] < -10.0), obs
+    assert np.all(obs[~is_c4] < -20.0), obs
+    assert obs[is_c4].min() > obs[~is_c4].max()
 
 
 def test_with_d13c_all_gap_d13c_rejected(monkeypatch):
