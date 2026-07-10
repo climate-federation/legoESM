@@ -194,6 +194,17 @@ def open_era5_zarr(zarr_path: str):
 
 
 # Extended config with surface variables needed for dycore IC + forcing
+# Public ARCO-ERA5 store (Analysis-Ready Cloud-Optimized ERA5 on GCS,
+# anon-readable).  Source of the radiation-flux TARGETS: the default WB2
+# state store's ``mean_*_radiation_flux`` variables are NaN at every
+# analysis time (probe 8533800 — 0/20 sampled times populated), but
+# ARCO-ERA5 carries the same ERA5 fields with clean W/m² mean-rate fluxes
+# (probe 8533818).  Same 0.25° 1440×721 grid as the WB2 state store.
+ARCO_ERA5_ZARR = (
+    "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
+)
+
+
 class TrainingERA5Config(NamedTuple):
     """ERA5 config extended with surface variables for dycore training."""
     zarr_store: str = WB2_ERA5_ZARR
@@ -212,6 +223,21 @@ class TrainingERA5Config(NamedTuple):
     time_range: tuple = ("1979-01-01", "2020-12-31")
     dt_hours: int = 6
     local_cache_dir: str = ""     # empty = no cache
+    # Radiation-flux targets for AIMIP TOA + surface flux supervision.
+    # When True, ``load_era5_slice`` also loads ERA5 TOA/surface radiation
+    # and derives the four model-comparable fluxes (rsut, OLR, surface net
+    # SW, surface net LW) so the target carry's ``held_*`` fields hold real
+    # observations instead of zeros.  Default False → byte-identical legacy.
+    load_radiation_fluxes: bool = False
+    # Radiation-flux TARGETS come from a SEPARATE store: the WB2 state
+    # store's flux vars are all-NaN, so fluxes are read from ARCO-ERA5
+    # (clean ``mean_*_radiation_flux`` in W/m², same 0.25° grid).  Set to
+    # "" to read fluxes from the state ``zarr_store`` instead (only valid
+    # if that store actually populates them).
+    flux_zarr: str = ARCO_ERA5_ZARR
+    # ARCO ``mean_*_radiation_flux`` are W/m² mean rates → divide by 1.0
+    # (no-op).  A store accumulating J/m² over the hour would need 3600.0.
+    flux_accum_seconds: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +317,17 @@ class ERA5Slice(NamedTuple):
     lat: np.ndarray        # (n_lat,) latitude [rad]
     lon: np.ndarray        # (n_lon,) longitude [rad]
     plev_Pa: np.ndarray    # (n_plev,) pressure levels [Pa], ascending
+    # Optional radiation-flux targets [W/m²] (None unless
+    # ``config.load_radiation_fluxes``).  Conventions match the model's
+    # ``SegmentCarry.held_*`` fields:
+    #   rsut       = TOA outgoing (reflected) SW, positive up
+    #   olr        = TOA outgoing LW (OLR/rlut), positive up
+    #   sfc_net_sw = surface net SW (down − up), positive down
+    #   sfc_net_lw = surface net LW (down − up), positive down (usually <0)
+    rsut: np.ndarray = None        # (n_lat, n_lon)
+    olr: np.ndarray = None         # (n_lat, n_lon)
+    sfc_net_sw: np.ndarray = None  # (n_lat, n_lon)
+    sfc_net_lw: np.ndarray = None  # (n_lat, n_lon)
 
 
 def _assert_required_era5_vars(ds_t, ds) -> None:
@@ -318,7 +355,8 @@ def _assert_required_era5_vars(ds_t, ds) -> None:
 
 
 def load_era5_slice(
-    config: TrainingERA5Config, time_idx: int, *, ds: Any = None
+    config: TrainingERA5Config, time_idx: int, *, ds: Any = None,
+    flux_ds: Any = None,
 ) -> ERA5Slice:
     """Load a single ERA5 time slice with all fields needed for IC + forcing.
 
@@ -333,13 +371,17 @@ def load_era5_slice(
         by a local-archive adapter (e.g. per-variable NetCDF merged into one dataset)
         to feed REAL ERA5 through the SAME extraction/regrid chain WITHOUT a Zarr store
         or network.  ``None`` (default) opens the configured store as before.
+    flux_ds : xarray.Dataset, optional
+        A PRE-OPENED radiation-flux store (see ``config.flux_zarr``); pass it
+        when looping over many snapshots so the flux zarr is opened once.
+        Only consulted when ``config.load_radiation_fluxes`` is True.
 
     Returns
     -------
     ERA5Slice with all fields on the native ERA5 lat-lon grid.
     """
+    store = config.local_cache_dir if config.local_cache_dir else config.zarr_store
     if ds is None:
-        store = config.local_cache_dir if config.local_cache_dir else config.zarr_store
         ds = open_era5_zarr(store)
     else:
         # Normalize a PRE-OPENED ds the same way open_era5_zarr does, so a local-archive
@@ -472,6 +514,67 @@ def load_era5_slice(
             "2m_temperature; sst zero-filled (0 K) — unusable as SST forcing")
         return np.zeros((len(lat), len(lon)), dtype=np.float32)
 
+    # Optional radiation-flux targets (TOA + surface) for AIMIP flux
+    # supervision.  Derive the four model-comparable fluxes:
+    #   rsut       = top_downward_SW − top_net_SW   (reflected up, +up)
+    #   OLR        = −top_net_LW                     (TOA net LW = −OLR)
+    #   sfc_net_sw = surface_net_SW                  (down − up, +down)
+    #   sfc_net_lw = surface_net_LW                  (down − up, +down)
+    # ``flux_accum_seconds`` (default 1.0) converts an accumulated-J/m²
+    # store to W/m²; it is a no-op for the W/m² ARCO store.
+    rsut = olr = sfc_net_sw = sfc_net_lw = None
+    if config.load_radiation_fluxes:
+        fzarr = config.flux_zarr or store
+        if flux_ds is None:
+            flux_ds = open_era5_zarr(fzarr) if config.flux_zarr else ds
+        # Select the flux-store snapshot at the SAME timestamp as the state
+        # slice (ARCO is hourly; the WB2 6h analysis times are a subset,
+        # matched exactly by datetime).
+        fds_t = flux_ds.sel(time=ds_t.time.values, method="nearest")
+        # Align the flux-store lat ordering to the state grid: the fluxes
+        # are regridded later with era5.lat/era5.lon, so they must share
+        # that ordering.  Same 0.25° ERA5 grid + same 0..360 lon origin, so
+        # only the lat sense can differ (ARCO is N->S, WB2 may be S->N).
+        flux_lat_deg = np.asarray(flux_ds.lat.values, dtype=np.float64)
+        state_lat_deg = np.rad2deg(lat)
+        flip_lat = (np.sign(flux_lat_deg[1] - flux_lat_deg[0])
+                    != np.sign(state_lat_deg[1] - state_lat_deg[0]))
+
+        def _flux_2d(name):
+            r = resolve_var(fds_t, name)
+            src = fds_t
+            if r is None:
+                r = resolve_var(flux_ds, name)
+                src = flux_ds
+            if r is None:
+                raise ValueError(
+                    f"load_radiation_fluxes=True but flux variable {name!r} "
+                    f"is absent from {fzarr}."
+                )
+            d = np.asarray(src[r].values).squeeze()
+            while d.ndim > 2:
+                d = d[0]
+            if d.shape != (len(lat), len(lon)):
+                raise ValueError(
+                    f"flux field {name!r} grid {d.shape} != state grid "
+                    f"{(len(lat), len(lon))}; flux_zarr must match the state "
+                    f"store resolution (both 0.25° ERA5)."
+                )
+            if flip_lat:
+                d = d[::-1]
+            return d.astype(np.float32)
+
+        acc = np.float32(config.flux_accum_seconds)
+        toa_dn_sw = _flux_2d("mean_top_downward_short_wave_radiation_flux")
+        toa_net_sw = _flux_2d("mean_top_net_short_wave_radiation_flux")
+        toa_net_lw = _flux_2d("mean_top_net_long_wave_radiation_flux")
+        sfc_net_sw_v = _flux_2d("mean_surface_net_short_wave_radiation_flux")
+        sfc_net_lw_v = _flux_2d("mean_surface_net_long_wave_radiation_flux")
+        rsut = (toa_dn_sw - toa_net_sw) / acc
+        olr = (-toa_net_lw) / acc
+        sfc_net_sw = sfc_net_sw_v / acc
+        sfc_net_lw = sfc_net_lw_v / acc
+
     return ERA5Slice(
         T=_get_3d("temperature"),
         u=_get_3d("u_component_of_wind"),
@@ -483,6 +586,10 @@ def load_era5_slice(
         lat=lat,
         lon=lon,
         plev_Pa=plev_Pa,
+        rsut=rsut,
+        olr=olr,
+        sfc_net_sw=sfc_net_sw,
+        sfc_net_lw=sfc_net_lw,
     )
 
 
@@ -541,10 +648,115 @@ def load_era5_time_mean(
         name: (acc[name] / n).astype(getattr(first, name).dtype) for name in data_fields})
 
 
+def _era5_held_fluxes(era5: ERA5Slice, regrid_2d_fn, shape_2d):
+    """Regrid ERA5 radiation-flux targets onto the model grid for the carry.
+
+    Returns ``(held_sw_up_toa, held_lw_up_toa, held_sw_net_sfc,
+    held_lw_net_sfc)`` — i.e. (rsut, OLR, surface net SW, surface net LW) —
+    each mapped to the model 2D layout by ``regrid_2d_fn`` (a grid-specific
+    callback: Gaussian/lat-lon interpolation or cubed-sphere ``regrid_scalar``).
+    When the slice carries no fluxes (``load_radiation_fluxes=False``) returns
+    four ``jnp.zeros(shape_2d)`` — byte-identical to the legacy zero-fill.
+
+    ``held_sw_down_toa`` (rsdt) is intentionally NOT set from ERA5: it is
+    prescribed insolation that the dycore computes each step, and the flux
+    loss does not penalize it.  One shared implementation so the spectral /
+    lat-lon / cubed-sphere builders never re-derive flux-target packing.
+    """
+    if era5.rsut is None:
+        z = jnp.zeros(shape_2d)
+        return z, z, z, z
+    return (
+        jnp.asarray(regrid_2d_fn(era5.rsut)),
+        jnp.asarray(regrid_2d_fn(era5.olr)),
+        jnp.asarray(regrid_2d_fn(era5.sfc_net_sw)),
+        jnp.asarray(regrid_2d_fn(era5.sfc_net_lw)),
+    )
+
+
+def prognostic_carry_seeds(
+    microphysics: str,
+    turbulence: str,
+    shape_3d,
+):
+    """Extra ``pack_carry`` kwargs seeding the conditional prognostic carries.
+
+    The warm-rain carry (``q_v``/``q_c``/``q_r`` + diagnostic turbulence)
+    needs nothing beyond the three microphysics slots every ERA5 carry
+    already passes, so for ``kessler``/``sundqvist`` + a diagnostic
+    turbulence scheme this returns ``{}`` and the carry pytree is
+    BYTE-IDENTICAL to the legacy warm-rain carry (``q_i``…``N_i``/``tke``/
+    ``qke`` stay ``None`` ⇒ the ``lax.scan`` carry structure and the
+    ``_dm_upd(None tendency)`` path are unchanged).  Seeding non-``None``
+    extras would flip the carry structure, so the warm-rain branch must
+    return ``{}``.
+
+    Two conditions add seeds (mirroring the production driver's
+    ``ModelDriver`` IC seeding, model_driver.py): a double-moment /
+    bin microphysics scheme that writes more than the three warm-rain
+    tracer slots gets ``q_i``…``N_i`` seeded as ``jnp.zeros(shape_3d)``;
+    a STATEFUL turbulence scheme (``carries_energy`` — tke / mynn25 /
+    clubb* / edmf) gets its prognostic energy carry (``tke`` or ``qke``)
+    seeded as ``jnp.zeros(shape_3d)``.  All double-moment schemes guard
+    their mean-size / fall-speed divides with ``jnp.where(q>eps,…)`` /
+    ``safe_divide`` / number floors, so a zero seed is forward- and
+    gradient-safe (produces zero tendencies at ``t=0``).
+
+    Parameters
+    ----------
+    microphysics : str
+        Microphysics scheme name (``ExperimentConfig.microphysics``).
+    turbulence : str
+        Turbulence scheme name (``ExperimentConfig.turbulence``).
+    shape_3d : tuple
+        Model 3-D field shape ``(..., nlev)`` — the shape of ``q_v``.
+
+    Returns
+    -------
+    dict
+        Keyword arguments to splat into :func:`pack_carry`.
+    """
+    from legoesm.driver.physics_pipeline import (
+        required_microphysics_tracer_slots,
+    )
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        turbulence_scheme_traits,
+    )
+
+    seeds: dict = {}
+
+    # Double-moment / bin microphysics: seed the hydrometeor + number
+    # carries the scheme writes beyond the warm-rain [q_v, q_c, q_r]
+    # slots.  Slot layout (see validate_microphysics_tracer_slots):
+    # [3]=q_i [4]=q_s [5]=q_g [6]=N_c [7]=N_r [8]=N_i.  ``>3`` is the
+    # warm-rain guard: kessler / sundqvist (3 slots) and SDM's default
+    # condensation-only path (2 slots) keep these ``None``.
+    if required_microphysics_tracer_slots(microphysics) > 3:
+        for _name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+            seeds[_name] = jnp.zeros(shape_3d)
+
+    # Stateful turbulence: seed the prognostic energy carry (tke or qke).
+    # Diagnostic schemes (louis / smagorinsky / ysu / holtslag_boville /
+    # vreman) report carries_energy=False ⇒ no seed, carry unchanged.
+    # NB the tke/qke carry is stored FLATTENED per-column (ncol, nlev) — NOT
+    # the grid-shaped (n_lat, n_lon, nlev) layout the microphysics tracers
+    # use — so a grid-shaped seed fails the scheme's carry-shape check
+    # (issue #405/#413: "expected (ncol, nlev)").  ncol = product of the
+    # horizontal dims (n_lat*n_lon for lat-lon, 6*n*n for cubed-sphere).
+    _traits = turbulence_scheme_traits(turbulence)
+    if _traits.carries_energy:
+        _ncol = int(np.prod(shape_3d[:-1]))
+        seeds[_traits.energy_field] = jnp.zeros((_ncol, shape_3d[-1]))
+
+    return seeds
+
+
 def era5_to_spectral_carry(
     era5: ERA5Slice,
     grid,
     sigma,
+    microphysics: str = "none",
+    turbulence: str = "none",
 ):
     """Convert ERA5 slice to SegmentCarry on a spectral (Gaussian) grid.
 
@@ -617,22 +829,27 @@ def era5_to_spectral_carry(
         phis=Field(phis_jax, name="phis", dims=dims_2d, units="m2/s2"),
     )
 
-    # Pack into SegmentCarry with zero held fields
+    # Pack into SegmentCarry (held flux targets from ERA5 when loaded,
+    # zeros otherwise — see _era5_held_fluxes)
     shape_3d = T_model.shape
     shape_2d = p_s_jax.shape
 
+    rsut_m, olr_m, snsw_m, snlw_m = _era5_held_fluxes(
+        era5, lambda f: regrid_2d_to_gaussian(f, era5.lat, era5.lon, grid), shape_2d,
+    )
     return pack_carry(
         state,
         q_v=q_model,
         q_c=jnp.zeros(shape_3d),
         q_r=jnp.zeros(shape_3d),
         held_dT_rad=jnp.zeros(shape_3d),
-        held_sw_net_sfc=jnp.zeros(shape_2d),
-        held_lw_net_sfc=jnp.zeros(shape_2d),
-        held_sw_up_toa=jnp.zeros(shape_2d),
-        held_lw_up_toa=jnp.zeros(shape_2d),
+        held_sw_net_sfc=snsw_m,
+        held_lw_net_sfc=snlw_m,
+        held_sw_up_toa=rsut_m,
+        held_lw_up_toa=olr_m,
         held_sw_down_toa=jnp.zeros(shape_2d),
         step_index=0,
+        **prognostic_carry_seeds(microphysics, turbulence, shape_3d),
     )
 
 
@@ -641,6 +858,8 @@ def era5_to_cubedsphere_carry(
     grid,
     sigma,
     target_phis=None,
+    microphysics: str = "none",
+    turbulence: str = "none",
 ):
     """Convert ERA5 slice to SegmentCarry on a cubed-sphere grid.
 
@@ -786,18 +1005,22 @@ def era5_to_cubedsphere_carry(
     shape_3d = T_model.shape
     shape_2d = p_s_cs.shape
 
+    rsut_m, olr_m, snsw_m, snlw_m = _era5_held_fluxes(
+        era5, lambda f: regrid_scalar(jnp.asarray(f.ravel()), weights), shape_2d,
+    )
     return pack_carry(
         state,
         q_v=q_model,
         q_c=jnp.zeros(shape_3d),
         q_r=jnp.zeros(shape_3d),
         held_dT_rad=jnp.zeros(shape_3d),
-        held_sw_net_sfc=jnp.zeros(shape_2d),
-        held_lw_net_sfc=jnp.zeros(shape_2d),
-        held_sw_up_toa=jnp.zeros(shape_2d),
-        held_lw_up_toa=jnp.zeros(shape_2d),
+        held_sw_net_sfc=snsw_m,
+        held_lw_net_sfc=snlw_m,
+        held_sw_up_toa=rsut_m,
+        held_lw_up_toa=olr_m,
         held_sw_down_toa=jnp.zeros(shape_2d),
         step_index=0,
+        **prognostic_carry_seeds(microphysics, turbulence, shape_3d),
     )
 
 
@@ -917,6 +1140,8 @@ def era5_to_latlon_carry(
     era5: ERA5Slice,
     grid,
     sigma,
+    microphysics: str = "none",
+    turbulence: str = "none",
 ):
     """Convert ERA5 slice to a SegmentCarry on the lat-lon C-grid.
 
@@ -1012,18 +1237,22 @@ def era5_to_latlon_carry(
 
     shape_3d = T_model.shape
     shape_2d = p_s_jax.shape
+    rsut_m, olr_m, snsw_m, snlw_m = _era5_held_fluxes(
+        era5, lambda f: regrid_2d_to_gaussian(f, era5.lat, era5.lon, grid), shape_2d,
+    )
     return pack_carry(
         state,
         q_v=q_model,
         q_c=jnp.zeros(shape_3d),
         q_r=jnp.zeros(shape_3d),
         held_dT_rad=jnp.zeros(shape_3d),
-        held_sw_net_sfc=jnp.zeros(shape_2d),
-        held_lw_net_sfc=jnp.zeros(shape_2d),
-        held_sw_up_toa=jnp.zeros(shape_2d),
-        held_lw_up_toa=jnp.zeros(shape_2d),
+        held_sw_net_sfc=snsw_m,
+        held_lw_net_sfc=snlw_m,
+        held_sw_up_toa=rsut_m,
+        held_lw_up_toa=olr_m,
         held_sw_down_toa=jnp.zeros(shape_2d),
         step_index=0,
+        **prognostic_carry_seeds(microphysics, turbulence, shape_3d),
     )
 
 
