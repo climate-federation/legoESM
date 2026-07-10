@@ -1128,7 +1128,14 @@ def spectral_amip_rollout(
     tracer_filter = _compute_tracer_filter(grid, pe_config, spectral_filter, dt)
 
     # Inject the (traced) prescribed SST as the surface-temperature anchor.
-    phys_state = sizing_phys_state._replace(surface_T_sfc_override=sst_col)
+    # Prescribed SST is NaN over land; map those to the finite no-override
+    # sentinel so the PERSISTED physics state stays finite (#911) — land
+    # columns then fall back to the model surface T in both resolvers.
+    from legoesm.atmosphere.physics.physics_state import NO_SFC_T_OVERRIDE
+    # isfinite (not isnan): map NaN AND +/-Inf to the sentinel so the persisted
+    # state is strictly finite (codex).
+    _sst_override = jnp.where(jnp.isfinite(sst_col), sst_col, NO_SFC_T_OVERRIDE)
+    phys_state = sizing_phys_state._replace(surface_T_sfc_override=_sst_override)
     _doy0 = jnp.asarray(day_of_year_base, dtype=jnp.float64)
     _off = jnp.asarray(seconds_offset, dtype=jnp.float64)
 
