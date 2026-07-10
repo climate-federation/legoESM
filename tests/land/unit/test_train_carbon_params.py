@@ -230,6 +230,205 @@ def test_grad_chunk_cli_and_quick_disables_it():
     assert q.grad_chunk == 0
 
 
+def test_compilation_cache_cli_flags_roundtrip(monkeypatch):
+    """--compilation-cache-dir / --cache-min-compile-secs parse and default
+    correctly: the threshold default is the small carbon floor (NOT the campaign's
+    30 s), the dir defaults to $JAX_COMPILATION_CACHE_DIR (empty when unset), and
+    both round-trip from explicit CLI values."""
+    # default threshold is the carbon floor, dir empty when the env is unset
+    monkeypatch.delenv("JAX_COMPILATION_CACHE_DIR", raising=False)
+    a = tcp.build_arg_parser().parse_args(["--dry-run-synthetic"])
+    assert a.cache_min_compile_secs == tcp.DEFAULT_CACHE_MIN_COMPILE_SECS
+    assert tcp.DEFAULT_CACHE_MIN_COMPILE_SECS < 30.0  # must beat the rrtmgp floor
+    assert a.compilation_cache_dir == ""
+    # env-driven default for the dir
+    monkeypatch.setenv("JAX_COMPILATION_CACHE_DIR", "/shared/jaxcache")
+    b = tcp.build_arg_parser().parse_args(["--dry-run-synthetic"])
+    assert b.compilation_cache_dir == "/shared/jaxcache"
+    # explicit values round-trip and override the env default
+    c = tcp.build_arg_parser().parse_args(
+        ["--dry-run-synthetic", "--compilation-cache-dir", "/x/y", "--cache-min-compile-secs", "7.5"])
+    assert c.compilation_cache_dir == "/x/y"
+    assert c.cache_min_compile_secs == 7.5
+
+
+# ---------------------------------------------------------------------------
+# Deterministic precompute RESULT cache (_load_or_precompute / cache key).
+# Pure + fast: the expensive precompute is STUBBED with a counter, so these run
+# with no model compile and prove the cache hit/miss/round-trip contract.
+# ---------------------------------------------------------------------------
+def _tiny_archetype_table(n_arch: int = 3):
+    """Minimal real ArchetypeTable (fixed values -> a stable key)."""
+    from legoesm.land.carbon.global_init import ArchetypeTable
+    return ArchetypeTable(
+        pft_id=np.arange(n_arch, dtype=np.int64),
+        mat_k=np.linspace(280.0, 300.0, n_arch),
+        map_yr=np.linspace(0.2, 2.0, n_arch),
+        t_seasonal_amp_k=np.linspace(2.0, 20.0, n_arch),
+        aridity=np.linspace(0.1, 0.9, n_arch),
+        sw_mean_w=np.linspace(100.0, 300.0, n_arch),
+        soil_class=np.array(["loam", "sand", "clay"][:n_arch], dtype=object),
+    )
+
+
+def _stub_precompute_result(n_arch: int = 3):
+    """Fixed (FastAnalyticInputs, real_som) the stub returns (dt_days a float)."""
+    from legoesm.land.carbon.fast_analytic import FastAnalyticInputs
+    fai = FastAnalyticInputs(
+        lit_to_som_annual=np.linspace(1.0, 3.0, n_arch),
+        a_wood_annual=np.linspace(0.5, 1.5, n_arch),
+        soil_T_traj=np.full((n_arch, 4), 285.0),
+        precip=np.full(n_arch, 3.0e-5),
+        dt_days=0.0833333333,
+    )
+    return fai, np.linspace(5000.0, 9000.0, n_arch)
+
+
+def _counting_stub(fai, real_som, calls):
+    def stub(table, *, n_spinup, n_verify, dt, n_layers, soil_depth):
+        calls["n"] += 1
+        return fai, real_som
+    return stub
+
+
+_SPIN = {"n_spinup": 20, "n_verify": 4, "dt": 7200.0, "n_layers": 8, "soil_depth": 3.0}
+
+
+def test_load_or_precompute_hit_miss_and_roundtrip(tmp_path, monkeypatch):
+    """Call #1 computes + writes the npz; call #2 (same table+spin) is a CACHE HIT
+    (the wrapped precompute is NOT called again) reconstructing the SAME arrays
+    EXACTLY (dtypes, dt_days as float, real_som shape); a changed spin and a bumped
+    _PRECOMPUTE_CACHE_VERSION both MISS (recompute)."""
+    calls = {"n": 0}
+    fai, real_som = _stub_precompute_result()
+    monkeypatch.setattr(
+        "legoesm.land.carbon.global_init.precompute_fast_analytic_inputs",
+        _counting_stub(fai, real_som, calls))
+
+    table = _tiny_archetype_table()
+    cache_dir = str(tmp_path / "pc")
+
+    # call #1 -> MISS: computes and writes the npz
+    p1, s1 = tcp._load_or_precompute(table, _SPIN, cache_dir=cache_dir, rebuild=False)
+    assert calls["n"] == 1
+    key = tcp._precompute_cache_key(table, _SPIN)
+    assert os.path.exists(os.path.join(cache_dir, key + ".npz"))
+
+    # call #2 -> CACHE HIT: stub NOT called again; arrays reconstruct exactly
+    p2, s2 = tcp._load_or_precompute(table, _SPIN, cache_dir=cache_dir, rebuild=False)
+    assert calls["n"] == 1  # unchanged -> served from disk
+    for f in ("lit_to_som_annual", "a_wood_annual", "soil_T_traj", "precip"):
+        a1, a2 = np.asarray(getattr(p1, f)), np.asarray(getattr(p2, f))
+        npt.assert_array_equal(a1, a2)
+        assert a1.dtype == a2.dtype, f
+    npt.assert_array_equal(np.asarray(s1), np.asarray(s2))
+    assert np.asarray(s2).shape == np.asarray(real_som).shape
+    # dt_days round-trips as a Python float, bit-for-bit.
+    assert isinstance(p2.dt_days, float)
+    assert p2.dt_days == fai.dt_days
+
+    # a changed spin param -> MISS (recompute)
+    tcp._load_or_precompute(table, dict(_SPIN, n_spinup=40),
+                            cache_dir=cache_dir, rebuild=False)
+    assert calls["n"] == 2
+
+    # bump the stale-physics guard -> MISS even with identical table+spin
+    monkeypatch.setattr(tcp, "_PRECOMPUTE_CACHE_VERSION", "v2-test")
+    tcp._load_or_precompute(table, _SPIN, cache_dir=cache_dir, rebuild=False)
+    assert calls["n"] == 3
+
+
+def test_load_or_precompute_rebuild_bypasses_cache(tmp_path, monkeypatch):
+    """rebuild=True (--rebuild-precompute) recomputes + overwrites even on a hit."""
+    calls = {"n": 0}
+    fai, real_som = _stub_precompute_result()
+    monkeypatch.setattr(
+        "legoesm.land.carbon.global_init.precompute_fast_analytic_inputs",
+        _counting_stub(fai, real_som, calls))
+    table = _tiny_archetype_table()
+    cache_dir = str(tmp_path / "pc")
+    tcp._load_or_precompute(table, _SPIN, cache_dir=cache_dir, rebuild=False)  # writes
+    assert calls["n"] == 1
+    tcp._load_or_precompute(table, _SPIN, cache_dir=cache_dir, rebuild=True)   # forced
+    assert calls["n"] == 2
+
+
+def test_load_or_precompute_empty_dir_disables_cache(tmp_path, monkeypatch):
+    """cache_dir='' always recomputes and writes NOTHING to disk."""
+    calls = {"n": 0}
+    fai, real_som = _stub_precompute_result()
+    monkeypatch.setattr(
+        "legoesm.land.carbon.global_init.precompute_fast_analytic_inputs",
+        _counting_stub(fai, real_som, calls))
+    table = _tiny_archetype_table()
+    tcp._load_or_precompute(table, _SPIN, cache_dir="", rebuild=False)
+    tcp._load_or_precompute(table, _SPIN, cache_dir="", rebuild=False)
+    assert calls["n"] == 2  # never cached
+
+
+def test_load_or_precompute_recovers_from_corrupt_npz(tmp_path, monkeypatch):
+    """A corrupt/truncated npz at the cache path is dropped + recomputed (never a
+    hard crash on every future run), then re-saved as a clean cache."""
+    calls = {"n": 0}
+    fai, real_som = _stub_precompute_result()
+    monkeypatch.setattr(
+        "legoesm.land.carbon.global_init.precompute_fast_analytic_inputs",
+        _counting_stub(fai, real_som, calls))
+    table = _tiny_archetype_table()
+    cache_dir = str(tmp_path / "pc")
+    os.makedirs(cache_dir, exist_ok=True)
+    key = tcp._precompute_cache_key(table, _SPIN)
+    with open(os.path.join(cache_dir, key + ".npz"), "wb") as fh:
+        fh.write(b"not a real npz zip archive")  # garbage -> BadZipFile on load
+    # must NOT raise: drops the bad file and recomputes
+    _p, s = tcp._load_or_precompute(table, _SPIN, cache_dir=cache_dir, rebuild=False)
+    assert calls["n"] == 1
+    npt.assert_array_equal(np.asarray(s), np.asarray(real_som))
+    # a GOOD file was re-saved atomically -> the next call is a clean CACHE HIT
+    tcp._load_or_precompute(table, _SPIN, cache_dir=cache_dir, rebuild=False)
+    assert calls["n"] == 1
+
+
+def test_precompute_cache_key_deterministic_and_input_sensitive():
+    """Same inputs -> same key (deterministic); any table/spin change -> a new key.
+
+    (Guards collision-safety: distinct inputs must not alias to one digest.)"""
+    t = _tiny_archetype_table()
+    k = tcp._precompute_cache_key(t, _SPIN)
+    assert k == tcp._precompute_cache_key(t, _SPIN)          # deterministic
+    assert len(k) == 64                                       # sha256 hexdigest
+    assert tcp._precompute_cache_key(t._replace(mat_k=t.mat_k + 1.0), _SPIN) != k
+    assert tcp._precompute_cache_key(
+        t._replace(soil_class=np.array(["sand", "sand", "clay"], dtype=object)),
+        _SPIN) != k
+    for f, v in [("n_spinup", 21), ("n_verify", 5), ("dt", 3600.0),
+                 ("n_layers", 6), ("soil_depth", 2.0)]:
+        assert tcp._precompute_cache_key(t, dict(_SPIN, **{f: v})) != k, f
+
+
+def test_precompute_cache_cli_flags_roundtrip(monkeypatch):
+    """--precompute-cache-dir defaults to $CARBON_PRECOMPUTE_CACHE_DIR (else the
+    repo .cache path), round-trips an explicit value, and --rebuild-precompute is
+    a store_true default-False; --quick disables the cache (hermetic smoke)."""
+    a = tcp.build_arg_parser().parse_args(["--dry-run-synthetic"])
+    # default cache dir is the module default (import-time: $CARBON_PRECOMPUTE_CACHE_DIR
+    # or the repo .cache/carbon_precompute fallback -- ON by default, unlike the
+    # compile cache which is off by default).
+    assert a.precompute_cache_dir == tcp.DEFAULT_PRECOMPUTE_CACHE_DIR
+    assert isinstance(a.precompute_cache_dir, str) and a.precompute_cache_dir
+    assert a.rebuild_precompute is False
+    # explicit dir + --rebuild-precompute round-trip
+    b = tcp.build_arg_parser().parse_args(
+        ["--dry-run-synthetic", "--precompute-cache-dir", "/x/pc",
+         "--rebuild-precompute"])
+    assert b.precompute_cache_dir == "/x/pc"
+    assert b.rebuild_precompute is True
+    # --quick makes the smoke hermetic: the result cache is disabled.
+    q = tcp._finalize_args(tcp.build_arg_parser().parse_args(
+        ["--quick", "--precompute-cache-dir", "/x/pc"]))
+    assert q.precompute_cache_dir == ""
+
+
 def test_chunked_grad_equals_single_batch_slow():
     """EXACTness gate: on a tiny 4-archetype table where the SINGLE-batch
     slow-spinup-grad works, the CHUNKED value-and-grad (chunk in {2,3} -- an even

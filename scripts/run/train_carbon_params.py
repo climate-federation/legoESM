@@ -42,10 +42,12 @@ PFT / climate range).  The tuned parameters apply globally.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 import time
+import zipfile
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
@@ -64,7 +66,11 @@ import optax
 
 from legoesm import constants
 from legoesm.ml.loss import area_weighted_mse
-from legoesm.ml.training import TrainingConfig, create_optimizer
+from legoesm.ml.training import (
+    TrainingConfig,
+    configure_jax_compilation_cache,
+    create_optimizer,
+)
 from legoesm.training.param_collector import build_trainable_params
 from legoesm.training.trainable_params import TrainablePhysicsParams
 
@@ -124,6 +130,39 @@ DEFAULT_MAX_ARCHETYPES = 40       # representative-subset cap (0 = keep all)
 # path for fast mode / tiny runs.
 DEFAULT_GRAD_CHUNK = 4
 DEFAULT_OUTDIR = Path("results/carbon_calibration")
+# Persistent-compilation-cache floor [s]: only XLA compiles SLOWER than this are
+# written to disk.  The per-archetype-group coupled-land-model compiles are the
+# expensive graphs here but each is only ~O(10 s) -- well BELOW the correction
+# campaign's 30 s rrtmgp-tuned floor, which would cache NOTHING for the carbon
+# trainer.  1 s (JAX's own default) caches every non-trivial carbon graph while
+# still skipping sub-second kernels that are not worth the cache I/O.
+DEFAULT_CACHE_MIN_COMPILE_SECS = 1.0
+# --- fast-analytic precompute RESULT cache ------------------------------------
+# The one-time default-parameter precompute (precompute_fast_analytic_inputs)
+# runs ONE coupled-land spin-up per (is_woody, is_evergreen, soil_class) group
+# -- ~150 s at 12 archetypes, ~22 min at 40 -- and its output (the FastAnalyticInputs
+# AND the reference `real_som` equilibrium) is DETERMINISTIC and independent of the
+# TUNABLE/trained SOM parameters: the precompute always runs at the PRODUCTION
+# DEFAULTS and the trained params are varied only later in the closed form, never
+# re-spun.  We therefore cache the RESULT arrays to disk keyed on the archetype
+# table + spin config and reload them on a re-run (seconds) instead of re-spinning.
+#
+# BUMP _PRECOMPUTE_CACHE_VERSION whenever the spin-up / coupled-land carbon step
+# physics OR its default parameters change -- specifically
+# packages/land/legoesm/land/carbon/spinup.py (run_semi_analytic_spinup /
+# analytic_slow_pool_equilibrium), the coupled carbon step (make_archetype_step_fn
+# / carbon_cycle.step_carbon), the stationary-year re-integration in
+# precompute_fast_analytic_inputs itself, the archetype-batch construction
+# (iter_archetype_batches), OR the DEFAULT CarbonConfig / multilayer-land parameter
+# VALUES those consume (the recorded result is the DEFAULT-parameter equilibrium, so
+# a changed default silently changes it).  The key is over INPUTS not code, so such
+# a change with UNCHANGED table+spin inputs would otherwise serve a STALE precompute;
+# the version bump forces a MISS (recompute).  Mirrors the XLA compilation cache's
+# HLO-in-key safety (see configure_jax_compilation_cache).
+_PRECOMPUTE_CACHE_VERSION = "v1"
+DEFAULT_PRECOMPUTE_CACHE_DIR = (
+    os.environ.get("CARBON_PRECOMPUTE_CACHE_DIR", "")
+    or str(REPO_ROOT / ".cache" / "carbon_precompute"))
 # Loss-term weights. SOC (kgC/m2, O(10)) and SIF (umol/m2/s, O(10)) live on different
 # scales, so the summed cover-weighted MSE weights each term; SOC is the reference (1).
 W_SOC = 1.0
@@ -970,7 +1009,141 @@ def _build_model_soc_fn(args, target_bundle, spin, precomputed):
         params, target_bundle, spin, grad_chunk=args.grad_chunk)
 
 
-def _precompute_and_check(table, initial_params, spin, cover_weight=None):
+def _precompute_cache_key(table, spin: dict) -> str:
+    """Stable SHA-256 digest over the precompute's INPUTS (never its tunable SOM
+    parameters -- the cached result is SOM-parameter-INDEPENDENT by construction).
+
+    Key components, in a FIXED and documented order (any change of order changes
+    the key, so it must never be reordered):
+
+      1. ``_PRECOMPUTE_CACHE_VERSION`` -- the stale-physics guard (bump on any
+         spin-up / coupled-carbon-step change; see its definition).
+      2. the six NUMERIC ``ArchetypeTable`` fields in declaration order
+         (``pft_id, mat_k, map_yr, t_seasonal_amp_k, aridity, sw_mean_w``), each
+         as ``np.ascontiguousarray(...).tobytes()`` -- tagged with the field name,
+         dtype, and shape so two distinct tables can never alias to one digest
+         (a raw byte concatenation without tags could).
+      3. the string ``soil_class`` field as ``"|".join(soil_class)`` (per-archetype
+         texture keys; ``|`` is not a soil-class token).
+      4. the spin config ``(n_spinup, n_verify, dt, n_layers, soil_depth)`` formatted
+         deterministically (``repr`` on the floats keeps full precision stable).
+
+    The digest is a pure function of these inputs, so it is identical across
+    processes/hosts for the same table+spin (deterministic hashing).
+    """
+    h = hashlib.sha256()
+    h.update(b"CARBON_PRECOMPUTE")
+    h.update(_PRECOMPUTE_CACHE_VERSION.encode())
+    for name in ("pft_id", "mat_k", "map_yr", "t_seasonal_amp_k", "aridity",
+                 "sw_mean_w"):
+        arr = np.ascontiguousarray(getattr(table, name))
+        h.update(f"|{name}:{arr.dtype}:{arr.shape}|".encode())
+        h.update(arr.tobytes())
+    soil_class = "|".join(str(s) for s in np.asarray(table.soil_class).ravel())
+    h.update(b"|soil_class|")
+    h.update(soil_class.encode("utf-8"))
+    spin_key = (f"|spin|{spin['n_spinup']}|{spin['n_verify']}|{spin['dt']!r}|"
+                f"{spin['n_layers']}|{spin['soil_depth']!r}|")
+    h.update(spin_key.encode("utf-8"))
+    return h.hexdigest()
+
+
+def _load_or_precompute(table, spin: dict, *, cache_dir: str, rebuild: bool):
+    """Deterministic RESULT cache around ``precompute_fast_analytic_inputs``.
+
+    The precompute is a PURE, SOM-parameter-INDEPENDENT function of the archetype
+    table + spin config that runs one default-parameter coupled-land spin-up per
+    ``(is_woody, is_evergreen, soil_class)`` group -- ~150 s at 12 archetypes,
+    ~22 min at 40.  Its ``(FastAnalyticInputs, real_som)`` result is cached to
+    ``<cache_dir>/<key>.npz`` (key from :func:`_precompute_cache_key`) so a re-run
+    with the same inputs reloads in ~1 s instead of re-spinning.
+
+    ``precompute_fast_analytic_inputs`` stays PURE (no disk I/O): the cache is a
+    driver concern and lives here.  ``rebuild=True`` (``--rebuild-precompute``)
+    forces a recompute + overwrite; an empty ``cache_dir`` disables the cache.
+
+    Returns ``(FastAnalyticInputs, real_som)`` -- the SAME contract as the wrapped
+    precompute, reconstructed EXACTLY (dtypes, ``dt_days`` as a Python float,
+    ``real_som`` shape) on a cache hit.
+    """
+    # Deferred imports keep module import cheap and match the precompute's own
+    # (function-scope) import discipline.
+    from legoesm.land.carbon.fast_analytic import FastAnalyticInputs
+    from legoesm.land.carbon.global_init import precompute_fast_analytic_inputs
+
+    key = _precompute_cache_key(table, spin)
+    key8 = key[:8]
+    path = Path(cache_dir) / f"{key}.npz" if cache_dir else None
+
+    if path is not None and path.exists() and not rebuild:
+        t0 = time.time()
+        try:
+            with np.load(path) as z:
+                precomputed = FastAnalyticInputs(
+                    lit_to_som_annual=jnp.asarray(z["lit_to_som_annual"]),
+                    a_wood_annual=jnp.asarray(z["a_wood_annual"]),
+                    soil_T_traj=jnp.asarray(z["soil_T_traj"]),
+                    precip=jnp.asarray(z["precip"]),
+                    dt_days=float(z["dt_days"]),
+                )
+                real_som = jnp.asarray(z["real_som"])
+        except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile) as exc:
+            # A corrupt / truncated / partially-written npz (a writer killed under an
+            # OLD non-atomic version, a disk fault, or a missing key from a schema
+            # change) must NOT crash every future run: drop the bad file and fall
+            # through to a clean recompute (which re-saves a good one atomically).
+            print(f"[fast-analytic] precompute cache {key8} unreadable "
+                  f"({type(exc).__name__}); recomputing", flush=True)
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        else:
+            print(f"[fast-analytic] precompute CACHE HIT ({key8}) loaded in "
+                  f"{time.time() - t0:.1f}s", flush=True)
+            return precomputed, real_som
+
+    # MISS (absent / unreadable / --rebuild-precompute) or cache disabled: recompute.
+    t0 = time.time()
+    precomputed, real_som = precompute_fast_analytic_inputs(
+        table, n_spinup=spin["n_spinup"], n_verify=spin["n_verify"],
+        dt=spin["dt"], n_layers=spin["n_layers"], soil_depth=spin["soil_depth"])
+    elapsed = time.time() - t0
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Save all four FastAnalyticInputs arrays + the dt_days scalar + real_som.
+        # dt_days is a Python float -> a 0-d float64 array round-trips back to
+        # float() exactly.  Write to a unique temp file then os.replace onto the
+        # final path: os.replace is ATOMIC within a directory, so a crashed or
+        # concurrent writer can never leave a TRUNCATED npz that a later run would
+        # np.load into a corrupt-cache crash (the reader only ever sees a complete
+        # file or none).  The '.npz' suffix on the temp keeps np.savez from
+        # appending a second one.
+        tmp = path.with_name(f"{path.stem}.tmp.{os.getpid()}.npz")
+        try:
+            np.savez(
+                tmp,
+                lit_to_som_annual=np.asarray(precomputed.lit_to_som_annual),
+                a_wood_annual=np.asarray(precomputed.a_wood_annual),
+                soil_T_traj=np.asarray(precomputed.soil_T_traj),
+                precip=np.asarray(precomputed.precip),
+                dt_days=np.asarray(precomputed.dt_days, dtype=np.float64),
+                real_som=np.asarray(real_som),
+            )
+            os.replace(tmp, path)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+        print(f"[fast-analytic] precompute {elapsed:.1f}s (saved cache {key8})",
+              flush=True)
+    else:
+        print(f"[fast-analytic] precompute {elapsed:.1f}s (cache disabled)",
+              flush=True)
+    return precomputed, real_som
+
+
+def _precompute_and_check(table, initial_params, spin, cover_weight=None, *,
+                          cache_dir: str = "", rebuild: bool = False):
     """Run the ONE-TIME default-parameter precompute spin-up and VERIFY the
     closed-form SOM SOC reproduces the spin-up equilibrium at the defaults.
 
@@ -990,12 +1163,13 @@ def _precompute_and_check(table, initial_params, spin, cover_weight=None):
     * ``high_som_mean_rel_err`` -- mean |rel| over archetypes with real SOC > 5
       kgC/m2 (the meaningful-stock cells).
     """
-    from legoesm.land.carbon.global_init import precompute_fast_analytic_inputs
-
     t0 = time.time()
-    precomputed, real_som = precompute_fast_analytic_inputs(
-        table, n_spinup=spin["n_spinup"], n_verify=spin["n_verify"],
-        dt=spin["dt"], n_layers=spin["n_layers"], soil_depth=spin["soil_depth"])
+    # Load the SOM-parameter-INDEPENDENT precompute from the deterministic result
+    # cache (or run + save it on a miss / --rebuild-precompute); the cache prints
+    # its own CACHE HIT / saved line.  `precompute_seconds` below therefore times
+    # the load-or-compute (seconds on a hit, ~150 s on a cold miss).
+    precomputed, real_som = _load_or_precompute(
+        table, spin, cache_dir=cache_dir, rebuild=rebuild)
     # Closed-form SOC at the warm-started production defaults vs the spin-up
     # equilibrium SOM, both in kgC/m2 (the warm start reproduces the defaults to
     # sigmoid-clamp precision, so this is the analytic-vs-spin-up fidelity).
@@ -1188,6 +1362,18 @@ def _plot_loss(path: Path, losses: list[float]) -> None:
 # ===========================================================================
 def train(args: argparse.Namespace) -> dict[str, Any]:
     jax.config.update("jax_enable_x64", True)
+    # Enable JAX's PERSISTENT compilation cache BEFORE the first compile (build_target
+    # / the fast-analytic precompute below): the archetype spin-up compiles a separate
+    # coupled-land-model XLA graph per (is_woody, is_evergreen, soil_class) group, so a
+    # diverse real archetype set costs ~20 min of COLD compiles every launch. With a
+    # shared on-disk cache those compiles are written once and reused -> seconds on a
+    # re-run. Empty dir => no-op (default behavior). Must precede any JAX compilation.
+    cache_dir = configure_jax_compilation_cache(
+        args.compilation_cache_dir, args.cache_min_compile_secs)
+    if cache_dir is not None:
+        print(f"[carbon] JAX persistent compilation cache: {cache_dir} (caching compiles > "
+              f"{args.cache_min_compile_secs:g}s) — per-archetype coupled-land-model compiles "
+              "are written once and reused across launches.", flush=True)
     args.outdir.mkdir(parents=True, exist_ok=True)
     spin = {
         "n_spinup": args.n_spinup, "n_verify": args.n_verify, "dt": args.dt,
@@ -1215,7 +1401,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     if args.fast_analytic:
         precomputed, match_info = _precompute_and_check(
             target_bundle["table"], initial_params, spin,
-            cover_weight=target_bundle["cover_weight"])
+            cover_weight=target_bundle["cover_weight"],
+            cache_dir=args.precompute_cache_dir,
+            rebuild=args.rebuild_precompute)
 
     # (value_and_grad_fn, loss_eval_fn) for the active forward. In --slow-spinup-grad
     # with --grad-chunk C>0 and >C archetypes these are the EXACT chunked
@@ -1477,6 +1665,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    default=DEFAULT_OUTDIR)
     p.add_argument("--quick", action="store_true",
                    help="tiny smoke config (unit test): 1 step, small spin-up")
+    # --- compute / JAX ---
+    p.add_argument("--compilation-cache-dir",
+                   default=os.environ.get("JAX_COMPILATION_CACHE_DIR", ""),
+                   help="dir for JAX's PERSISTENT on-disk compilation cache so the "
+                        "~20-min cold compile of the per-archetype coupled-land-model "
+                        "graphs is written ONCE and reused across launches (a re-run "
+                        "with the same code/backend drops to seconds). MUST be a SHARED-"
+                        "filesystem path when a compute node writes it. Defaults to "
+                        "$JAX_COMPILATION_CACHE_DIR; empty = disabled (unchanged behavior).")
+    p.add_argument("--cache-min-compile-secs", type=float,
+                   default=DEFAULT_CACHE_MIN_COMPILE_SECS,
+                   help="(--compilation-cache-dir) cache only XLA compiles slower than "
+                        f"this [s] (default {DEFAULT_CACHE_MIN_COMPILE_SECS:g}). The carbon "
+                        "coupled-land-model per-group graphs are ~O(10 s) each, well below "
+                        "the correction campaign's 30 s rrtmgp floor, so keep this small or "
+                        "the cache stays empty.")
+    p.add_argument("--precompute-cache-dir",
+                   default=DEFAULT_PRECOMPUTE_CACHE_DIR,
+                   help="dir for the deterministic RESULT cache of the fast-analytic "
+                        "precompute (the SOM-parameter-INDEPENDENT default-parameter "
+                        "spin-up, ~150 s at 12 archetypes / ~22 min at 40). Its result "
+                        "arrays are cached per (archetype-table + spin-config) key so a "
+                        "re-run reloads in ~1 s instead of re-spinning. Defaults to "
+                        "$CARBON_PRECOMPUTE_CACHE_DIR or <repo>/.cache/carbon_precompute "
+                        "(gitignored); empty = disabled (always recompute).")
+    p.add_argument("--rebuild-precompute", action="store_true",
+                   help="force a recompute + overwrite of the precompute RESULT cache "
+                        "(--precompute-cache-dir). SEPARATE from --rebuild: --rebuild "
+                        "selects the archetype-table INPUT mode and is REQUIRED on the "
+                        "real path (so overloading it would disable the cache on every "
+                        "real run); --rebuild-precompute bypasses ONLY the result cache. "
+                        "Also bump _PRECOMPUTE_CACHE_VERSION when the spin-up physics "
+                        "changes (the key is over inputs, not code).")
     return p
 
 
@@ -1512,6 +1733,10 @@ def _finalize_args(args: argparse.Namespace) -> argparse.Namespace:
         # single-batch path (the chunked accumulation is exercised by its own
         # direct unit test, not the quick smoke).
         args.grad_chunk = 0
+        # Keep the smoke HERMETIC: exercise the REAL (fast) precompute and never
+        # read/write the shared repo result cache (its hit/miss logic has its own
+        # direct unit test).  A fabricated world's precompute is sub-second anyway.
+        args.precompute_cache_dir = ""
     if not (args.dry_run_synthetic or args.rebuild or args.archetypes):
         raise SystemExit(
             "choose an input mode: --dry-run-synthetic, --rebuild "
