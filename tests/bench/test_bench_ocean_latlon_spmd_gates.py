@@ -55,7 +55,10 @@ def test_gate_symbols_and_flags_exist():
         assert flag in Path(_BENCH).read_text()
 
 
-@pytest.mark.timeout(600)
+# Budget: the smoke compiles the serial reference, the SPMD step, the fused
+# scan AND (increment-2) the post-run residual-probe solve — ~9.5 min x64 on
+# a shared 4-core CPU allocation (job 8914967); 570 s timed out there.
+@pytest.mark.timeout(1300)
 def test_single_process_two_virtual_devices_with_gates(tmp_path):
     out = tmp_path / "ocean_spmd.jsonl"
     env = dict(os.environ)
@@ -71,7 +74,7 @@ def test_single_process_two_virtual_devices_with_gates(tmp_path):
             "--parity-gate", "--check-conservation", "--cons-rtol", "1e-6",
             "--out", str(out),
         ],
-        env=env, capture_output=True, text=True, timeout=570,
+        env=env, capture_output=True, text=True, timeout=1200,
     )
     assert proc.returncode == 0, (
         f"rc={proc.returncode}\nstdout:\n{proc.stdout[-3000:]}\n"
@@ -102,11 +105,16 @@ def test_single_process_two_virtual_devices_with_gates(tmp_path):
     assert rec["measured_over_bound"] is None
     assert rec["bound_calibrated"] is False
     assert "single_device_fused_step_ms" in rec["bound_incomplete_reason"]
-    # item 9: this bench IC is all-wet flat-bottom -> wet == total and the
-    # loud non-informative note is printed.
-    assert rec["wet_cell_levels"] == rec["cells"]
-    assert rec["wet_equals_total"] is True
-    assert "NON-INFORMATIVE" in proc.stdout
+    # item 9: IC-agnostic invariants (the default latlon rest state is
+    # flat-bottom but NOT all-wet — the polar land-cap rows are masked, so
+    # wet_fraction < 1 here; measured 0.875 on 16 lat rows = 2 cap rows).
+    assert 0 < rec["wet_cell_levels"] <= rec["cells"]
+    assert rec["wet_cell_levels"] == round(rec["wet_fraction"] * rec["cells"])
+    assert (rec["wet_cell_levels_per_device_min"]
+            <= rec["wet_cell_levels_per_device_max"])
+    # The loud non-informative note fires IFF wet == total.
+    assert (("NON-INFORMATIVE" in proc.stdout)
+            == bool(rec["wet_equals_total"]))
 
 
 def test_parity_gate_refuses_long_windows(tmp_path):

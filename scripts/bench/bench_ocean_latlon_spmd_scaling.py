@@ -680,9 +680,10 @@ def main() -> int:
                  if rec["bound_incomplete_reason"] else ""))
         if rec["wet_equals_total"]:
             print("[wet-metric] NOTE: wet_cell_levels == total cells — this "
-                  "bench IC is ALL-WET flat-bottom, so the wet-cell weak "
-                  "metric is NON-INFORMATIVE here; it becomes meaningful "
-                  "with a real land mask / bathymetry.")
+                  "run's state is ALL-WET, so the wet-cell weak metric is "
+                  "NON-INFORMATIVE here; it becomes meaningful with a real "
+                  "land mask / bathymetry. (The default latlon rest state "
+                  "carries polar land-cap rows, so wet < total there.)")
         if rec["metadata"]["virtual_cpu_devices"]:
             print("[virtual-cpu] forced host-platform CPU devices: this row "
                   "is a communication-overhead / correctness proxy, NOT "
