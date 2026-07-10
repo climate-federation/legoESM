@@ -1346,6 +1346,36 @@ def _area_conservative_scale(field, cell_area, wet_mask, target_integral):
 _KPP_RI_CRIT_RANGE = (0.099, 0.9)
 _KPP_CV_RANGE = (0.5, 5.0)
 
+# NEMO rn_vfac (ln_crt_dwn current feedback): fraction of the surface current
+# subtracted from the wind before the bulk. NEMO bound is [0, 1] (0 = absolute
+# wind = default; 1 = full feedback).
+_WIND_VFAC_RANGE = (0.0, 1.0)
+
+
+def _resolve_wind_vfac(relative_winds: bool, wind_vfac):
+    """Resolve the NEMO ``rn_vfac`` current-feedback fraction from the CLI flags.
+
+    ``--wind-vfac X`` sets it explicitly; ``--relative-winds`` is the shorthand
+    for the NEMO ``ln_crt_dwn`` default ``rn_vfac = 1.0``.  Passing BOTH is only
+    accepted when they agree (``--wind-vfac 1.0``); a contradictory pair is a
+    user error and raises (never silently pick one -- the dispatch-hardening
+    rule).  Returns ``0.0`` (absolute wind, the byte-identical default) when
+    neither is given.  Validated finite and within ``_WIND_VFAC_RANGE``."""
+    if wind_vfac is None:
+        vfac = 1.0 if relative_winds else 0.0
+    else:
+        vfac = float(wind_vfac)
+        if relative_winds and vfac != 1.0:
+            raise SystemExit(
+                f"--relative-winds (rn_vfac=1.0) conflicts with --wind-vfac "
+                f"{wind_vfac}; pass only one (or --wind-vfac 1.0).")
+    lo, hi = _WIND_VFAC_RANGE
+    if not (np.isfinite(vfac) and lo <= vfac <= hi):
+        raise SystemExit(
+            f"--wind-vfac must be finite and within [{lo}, {hi}] (NEMO rn_vfac "
+            f"current-feedback fraction); got {vfac!r}.")
+    return vfac
+
 
 def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None):
     """Build a KPP ``VerticalMixingConfig`` overriding ONLY the CLI-set knobs.
@@ -1850,6 +1880,48 @@ def _surface_currents(state, grid, app_grid_type):
     u_sfc = u_face[:, :-1]                      # drop the periodic wrap column
     v_sfc = 0.5 * (v_face[:-1, :] + v_face[1:, :])
     return u_sfc, v_sfc
+
+
+def _surface_currents_geographic(state, grid, app_grid_type):
+    """Top-layer ocean surface current in GEOGRAPHIC (east, north) [m/s] for the
+    NEMO ``ln_crt_dwn`` relative-wind subtraction (``rn_vfac``).
+
+    The CORE-II wind (``u10``/``v10``) arrives GEOGRAPHIC, so the current
+    subtracted from it in ``air_sea_fluxes`` MUST be geographic too -- subtracting
+    a grid-aligned current from a geographic wind corrupts the tripole-fold /
+    high-lat stress (the frame-consistency correctness point).  Frame handling:
+
+    * ``mpas`` -- ``_surface_currents`` already reconstructs geographic
+      (u_east, v_north) via the Perot ``reconstruct_cell_velocity``; pass through.
+    * lat-lon C-grid family (``latlon`` / ``latlon_regional`` / ``tripole``) --
+      average the two bracketing faces of each cell to the T-centre (grid-aligned
+      i-, j-components) and rotate to geographic with the canonical
+      ``coupler.grid_remap.rotate_tpoint_currents_to_geographic`` (angle from the
+      grid's ``cos_alpha_u`` / ``sin_alpha_u``; the IDENTITY outside the tripole
+      bipolar cap, so a regular lat-lon grid is exact).
+
+    The rotation lives HERE (the top-layer run driver), not in
+    ``compute_omip2_surface_forcing``, because the ``legoesm.ocean`` package may
+    not import ``legoesm.coupler`` under the import-linter component-independence
+    contract; the driver is above both layers and may.  Unsupported grids raise
+    (fail loud, never a silent absolute-wind fall-through)."""
+    if app_grid_type == "mpas":
+        return _surface_currents(state, grid, app_grid_type)
+    if app_grid_type not in ("latlon", "latlon_regional", "tripole"):
+        raise NotImplementedError(
+            f"--relative-winds (ln_crt_dwn) is wired for the lat-lon C-grid "
+            f"family + mpas; got app_grid_type={app_grid_type!r}.")
+    u_face = jnp.asarray(state.u.data)[..., 0]      # (n_lat, n_lon+1), grid-i
+    v_face = jnp.asarray(state.v.data)[..., 0]      # (n_lat+1, n_lon), grid-j
+    u_c = 0.5 * (u_face[:, :-1] + u_face[:, 1:])     # -> (n_lat, n_lon) T-centre
+    v_c = 0.5 * (v_face[:-1, :] + v_face[1:, :])     # -> (n_lat, n_lon) T-centre
+    cos_a_u = getattr(grid, "cos_alpha_u", None)
+    sin_a_u = getattr(grid, "sin_alpha_u", None)
+    if cos_a_u is None or sin_a_u is None:
+        # Regular lat-lon: grid-i == geographic east, grid-j == north (identity).
+        return u_c, v_c
+    from legoesm.coupler.grid_remap import rotate_tpoint_currents_to_geographic
+    return rotate_tpoint_currents_to_geographic(u_c, v_c, cos_a_u, sin_a_u)
 
 
 def _build_atm_to_surface_core2(forc, ramp=1.0):
@@ -2875,6 +2947,18 @@ def main() -> int:
                         "(default 1.6). RAISING it increases V_t^2 -> deeper "
                         "boundary layer (same MLD-deepening lever as "
                         "--kpp-ri-crit). --grid mpas only.")
+    p.add_argument("--relative-winds", action="store_true",
+                   help="NEMO ln_crt_dwn current feedback: subtract the ocean "
+                        "surface current from the 10-m wind before the bulk "
+                        "stress + turbulent fluxes (rn_vfac=1.0). Reduces "
+                        "tropical stress by ~20-30 percent, realigns the EUC and "
+                        "damps mesoscale (eddy-killing). Shorthand for "
+                        "--wind-vfac 1.0. lat-lon / tripole / mpas only "
+                        "(cubed_sphere parked). Default off (absolute wind).")
+    p.add_argument("--wind-vfac", type=float, default=None,
+                   help="NEMO rn_vfac current-feedback fraction in [0, 1] "
+                        "(0=absolute wind=default; 1=full feedback="
+                        "--relative-winds). Set BOTH only if equal to 1.0.")
     p.add_argument("--mle", action="store_true",
                    help="Enable the Fox-Kemper mixed-layer-eddy (MLE) "
                         "restratification (NEMO tramle nn_mle=1): a bolus "
@@ -2929,6 +3013,16 @@ def main() -> int:
 
     # KPP MLD-deepening sensitivity flags are mpas-only (fail loud, never silent).
     _validate_kpp_grid(args.grid, args.kpp_ri_crit, args.kpp_cv)
+
+    # NEMO ln_crt_dwn relative-wind current feedback (rn_vfac): resolve + range-
+    # check the CLI up front (fail before the expensive setup).  0.0 = absolute
+    # wind (byte-identical default).  cubed_sphere is parked -> reject early
+    # rather than crash mid-loop (the applicator has no cube current rotation).
+    _wind_vfac = _resolve_wind_vfac(args.relative_winds, args.wind_vfac)
+    if _wind_vfac != 0.0 and args.grid == "cubed_sphere":
+        raise SystemExit(
+            "--relative-winds/--wind-vfac is not wired for --grid cubed_sphere "
+            "(parked); supported grids: tripole / latlon_bathy / mpas.")
 
     # ------------------------------------------------------------------
     # Multi-PROCESS jax.distributed bootstrap (--distributed): MUST run BEFORE any
@@ -3878,6 +3972,16 @@ def main() -> int:
                     "enabled (those need per-step host updates)")
         print(f"[scan] --scan-block ignored: {why}.", flush=True)
     if use_scan:
+        # NEMO ln_crt_dwn relative winds are host-loop only: the on-device scan
+        # body (compute_omip2_surface_forcing_jax) has no current-feedback wiring,
+        # so --relative-winds under --scan-block would SILENTLY drop the feedback.
+        # Refuse rather than mislead (dispatch hardening).
+        if _wind_vfac != 0.0:
+            raise SystemExit(
+                "[scan] --relative-winds/--wind-vfac is not applied on the "
+                "--scan-block fast path (the on-device forcing kernel has no "
+                "current-feedback wiring); use the host Python loop "
+                "(omit --scan-block).")
         # The scan path applies NONE of the host-loop surface forcing extensions:
         # P - E (precip is not in the on-device stack), Dai-Trenberth runoff, SSS
         # restoring, OR the --ice-albedo SW reduction (siconc not on device).
@@ -4057,12 +4161,25 @@ def main() -> int:
                 _t_lo,
                 _t_lo + dt / _SEC_PER_DAY,
             )
+        # NEMO ln_crt_dwn relative-wind current feedback (rn_vfac): rotate the
+        # beginning-of-step ocean surface current to GEOGRAPHIC (the frame the
+        # CORE-II u10/v10 arrive in) and pass it to the bulk.  Computed ONCE and
+        # shared with the freshwater (evap) forcing below so the latent HEAT
+        # (q_net) and the evaporative MASS (P - E) stay the SAME physical flux
+        # (E = -lhflx / L_vap).  _wind_vfac == 0.0 (default) => None, no state
+        # pull, byte-identical to the absolute-wind path.
+        _u_oce = _v_oce = None
+        if _wind_vfac != 0.0:
+            _u_oce, _v_oce = _surface_currents_geographic(
+                state, grid, app_grid_type)
         sf = compute_omip2_surface_forcing(
             state, forcing=forcing, idx_t=it,
             grid=grid, grid_type=app_grid_type,
             ice_albedo=_ice_alb,
             under_ice=_under_ice, tau_ice_sw=args.ice_thermo_sw_trans,
             dm2dc_window=_dm2dc_win,
+            u_oce=_u_oce, v_oce=_v_oce,
+            wind_current_feedback_vfac=_wind_vfac,
         )
         if ramp < 1.0:
             sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
@@ -4118,7 +4235,9 @@ def main() -> int:
                 fw = compute_omip2_freshwater_forcing(
                     state, forcing=forcing, idx_t=it, grid=grid,
                     grid_type=app_grid_type, runoff_R=_R,
-                    emp=args.emp_freshwater, ramp=ramp)
+                    emp=args.emp_freshwater, ramp=ramp,
+                    u_oce=_u_oce, v_oce=_v_oce,
+                    wind_current_feedback_vfac=_wind_vfac)
                 sf = sf._replace(freshwater=net_freshwater_flux(fw))
             state = model.step(state, dt, surface_forcing=sf,
                                t_seconds=_t_sec)
@@ -4131,7 +4250,9 @@ def main() -> int:
                 fw = compute_omip2_freshwater_forcing(
                     state, forcing=forcing, idx_t=it, grid=grid,
                     grid_type=app_grid_type, runoff_R=_R,
-                    emp=args.emp_freshwater, ramp=ramp)
+                    emp=args.emp_freshwater, ramp=ramp,
+                    u_oce=_u_oce, v_oce=_v_oce,
+                    wind_current_feedback_vfac=_wind_vfac)
             if ice_resp is not None:
                 _ice_conc = ice_state.concentration.data
                 if _ice_conc.ndim > np.asarray(state.land_mask.data).ndim:
