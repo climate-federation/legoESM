@@ -160,7 +160,7 @@ _CACHE_MIN_COMPILE_SECS_DEFAULT = 1.0   # only cache XLA compiles slower than th
 # subdir), so a CPU-built cache never serves a GPU run or vice versa.  A jaxlib
 # upgrade that alters bits on the SAME backend is the user's responsibility (bump
 # the version), mirroring the trainer's documented same-code/backend assumption.
-_EQUILIBRIUM_CACHE_VERSION = "v1"
+_EQUILIBRIUM_CACHE_VERSION = "v2"  # v2: decoupled autotrophic maint-resp reference T_ref_ra=298.15K (25 degC) -> R_maint down, NPP/CUE up; default-parameter equilibrium changes
 # The QC bundle equilibrate_archetypes returns, in CANONICAL order.  The result
 # cache requires EXACTLY these members on load (a file missing one is treated as
 # corrupt and recomputed, never served as a partial hit); keep in sync with

@@ -17,7 +17,8 @@ __param_spec__ = {
             "C_root_init": "initial condition: carbon pool [gC/m2]",
             "C_som_init": "initial condition: carbon pool [gC/m2]",
             "C_wood_init": "initial condition: carbon pool [gC/m2]",
-            "T_ref": "reference temperature [K]",
+            "T_ref": "heterotrophic (soil-decomposition) reference temperature [K]",
+            "T_ref_ra": "autotrophic maintenance-respiration reference temperature [K] (measurement convention, 25 degC; not trained)",
             "som_freeze_width_K": "numerics: SOM freeze-suppression curve half-width [K]",
         },
         "params": {
@@ -174,7 +175,7 @@ class CarbonConfig(NamedTuple):
     cwd_humification_eff: float = 0.3
 
     # --- Decomposition sensitivity ---
-    Q10_exp: float = 0.04         # AUTOTROPHIC maint. resp.: exp(Q10_exp*(T-T_ref))
+    Q10_exp: float = 0.04         # AUTOTROPHIC maint. resp.: exp(Q10_exp*(T-T_ref_ra))
     # Heterotrophic (soil) decomposition temperature sensitivity, DECOUPLED
     # from the autotrophic Q10 above.  0.09 -> Q10 ~= 2.5, the upper-realistic
     # soil-respiration range (Q10 2-3).  A strong soil Q10 makes WARM tropical
@@ -183,7 +184,22 @@ class CarbonConfig(NamedTuple):
     # SOC gradient the old weak, shared Q10=0.04 (Q10~1.5) could not produce.
     Q10_het_exp: float = 0.09
     moisture_factor: float = 0.5  # Moisture scaling strength
-    T_ref: float = 283.15         # Reference temperature [K]
+    T_ref: float = 283.15         # HETEROTROPHIC (soil-decomposition) reference T [K]
+    # Autotrophic maintenance-respiration reference temperature [K], DECOUPLED
+    # from the heterotrophic ``T_ref`` above.  Set to the canonical 25 degC at
+    # which plant tissue maintenance / dark respiration coefficients (leaf R_d,
+    # and the DALEC990 ``r_maint_*`` base rates) are conventionally reported
+    # (Ryan 1991; Atkin & Tjoelker 2003).  Sharing the 10 degC (283.15 K)
+    # heterotrophic CENTURY reference for the AUTOTROPHIC term inflated warm-land
+    # maintenance respiration by exp(Q10_exp*(T-283.15)) ~ 1.8-2.2x in the
+    # tropics, over-consuming GPP: carbon-use efficiency (NPP/GPP) collapsed to an
+    # unphysical ~0.11 (obs ~0.45) with 49/187 archetypes at NEGATIVE NPP.
+    # Referencing ``r_maint_*`` at 25 degC removes that warm-land amplification,
+    # RAISING NPP (and, through the litter input, soil carbon) without touching
+    # the calibrated heterotrophic SOC gradient (which keeps ``T_ref``).  A fixed
+    # measurement-convention reference (NOT trained; see __param_spec__ excluded),
+    # mirroring the heterotrophic ``T_ref``.
+    T_ref_ra: float = 298.15
     precip_ref: float = 3e-5      # Reference precipitation rate [kg/m2/s]
     moist_modifier_min: float = 0.1  # Lower clip on moisture modifier
     moist_modifier_max: float = 3.0  # Upper clip on moisture modifier
