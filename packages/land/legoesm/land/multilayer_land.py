@@ -773,14 +773,23 @@ def _step_multilayer_land_impl(
     # is dew / downward deposition on bare soil, which routes ENTIRELY to
     # ``flux_top`` (transpiration sink = 0) so the column water budget closes;
     # vegetated-fraction dew on a snow-free cell is treated as bare-soil input
-    # (no separate canopy-storage reservoir in this model).  Over snow the soil
-    # stream carries only the canopy L_v transpiration (LE_canopy); the ground
-    # component (LE_soil) has already left via the snowpack sublimation stream.
+    # (no separate canopy-storage reservoir in this model).
+    #
+    # Bare-soil-top vs root-sink partition: the snow-free MIXED stream (bare-soil
+    # surface evaporation + transpiration) is split by the root-zone wetness
+    # ``f_veg`` heuristic, sending (1 - f_veg) through the top boundary.  OVER SNOW
+    # the soil stream is PURE canopy transpiration — the below-canopy ground
+    # component (LE_soil) has already sublimated from the pack — so it must be
+    # drawn from the ROOT ZONE in full (transp_frac = 1), never partly through the
+    # top-soil boundary (which would corrupt the surface water balance under
+    # snow).  SimpleSEB over snow leaves soil_flux == 0, so the branch is a no-op
+    # for it.
     f_veg = jnp.clip(w_frac_rz, 0.0, 1.0)
+    transp_frac = jnp.where(has_snow, 1.0, f_veg)
     soil_flux = soil_evap
     is_dew = soil_flux < 0.0
-    evap_bare = jnp.where(is_dew, soil_flux, soil_flux * (1.0 - f_veg))
-    evap_transp = jnp.where(is_dew, 0.0, soil_flux * f_veg)
+    evap_bare = jnp.where(is_dew, soil_flux, soil_flux * (1.0 - transp_frac))
+    evap_transp = jnp.where(is_dew, 0.0, soil_flux * transp_frac)
     flux_top = (precip_rain + melt_rate - evap_bare) / rho_w
 
     E_pot_transp = jnp.maximum(evap_transp, 0.0) / rho_w

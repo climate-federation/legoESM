@@ -513,6 +513,20 @@ class TestClmMlGroundLatentWiring(unittest.TestCase):
         npt.assert_allclose(float(out.LE_soil[0]), lhsoi_val, rtol=1e-6)
         npt.assert_allclose(float(out.LE_canopy[0]), lhflx_val - lhsoi_val, rtol=1e-6)
 
+    def test_real_mlcanopy_type_carries_lhsoi_soil(self):
+        """Live compatibility guard: the installed clm-ml-jax ``mlcanopy_type``
+        MUST expose ``lhsoi_soil`` — the field _extract_surface_fluxes now reads
+        unconditionally (no silent None fallback).  If a future clm-ml-jax renames
+        or drops it, this fails loudly instead of the driver reverting to the pre-
+        F13 all-L_v-soil routing."""
+        try:
+            from multilayer_canopy.MLCanopyFluxesType import create_mlcanopy
+        except Exception:
+            self.skipTest("clm-ml-jax not importable")
+        mlcanopy = create_mlcanopy(1, 1)  # begp=1, ncol=1
+        self.assertTrue(hasattr(mlcanopy, "lhsoi_soil"),
+                        "clm-ml-jax mlcanopy_type must expose lhsoi_soil for F13")
+
 
 if __name__ == "__main__":
     unittest.main()

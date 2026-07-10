@@ -1044,13 +1044,13 @@ def _extract_surface_fluxes(
     # Exposing it lets the multilayer driver route the ground component to
     # snowpack sublimation (L_s) over snow while leaf transpiration (LE_canopy =
     # lhflx − LE_soil) draws soil water at L_v — the same phase-split the two-leaf
-    # scheme gets.  hasattr-guarded for older clm-ml-jax versions that lack it.
-    if hasattr(mlcanopy, "lhsoi_soil"):
-        LE_soil = jnp.stack([mlcanopy.lhsoi_soil[i + 1] for i in range(ncol)])
-        LE_canopy = lhflx - LE_soil
-    else:
-        LE_soil = None
-        LE_canopy = None
+    # scheme gets.  ``lhsoi_soil`` is a CORE MLSoilFluxes output (always present
+    # in a compatible clm-ml-jax), so read it directly: a missing field raises
+    # loudly here rather than silently reverting the driver to the pre-F13 all-
+    # L_v-soil routing (which would drain soil water for ground evaporation that
+    # should sublimate from the snowpack).
+    LE_soil = jnp.stack([mlcanopy.lhsoi_soil[i + 1] for i in range(ncol)])
+    LE_canopy = lhflx - LE_soil
 
     return SurfaceFluxOutput(
         shflx=shflx,
