@@ -1930,6 +1930,11 @@ def test_latlon24_production_variant_pins_polar_filter():
     assert args.dt == 600.0
     assert args.grid_type == "latlon" and args.discretization == "latlon_cgrid"
     assert args.resolution == 24 and args.nlev == 20
-    # Physics inherited from the production include (one source of truth).
+    # Physics inherited from the production include (one source of truth),
+    # except convection: this lane pins `sbm` (#869) because bechtold
+    # re-develops a polar-night temperature runaway that blows the run at day
+    # ~47 regardless of every numerics lever, while sbm is stable (95-day soak)
+    # and lifts hfls 40->70 (#847).  The cube lane keeps bechtold.
     cfg = build_config_from_args(args)
-    assert cfg.convection == "bechtold" and cfg.gravity_wave_drag == "mcfarlane"
+    assert cfg.convection == "sbm" and cfg.gravity_wave_drag == "mcfarlane"
+    assert cfg.convective_precip_efficiency == 0.0  # sbm rejects the bechtold knob
