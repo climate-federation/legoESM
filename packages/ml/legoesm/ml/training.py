@@ -26,6 +26,54 @@ from legoesm.grids.gaussian import GaussianGrid
 from legoesm.ml.loss import area_weighted_mse, weighted_mae
 
 
+def configure_jax_compilation_cache(cache_dir, min_compile_secs: float = 30.0):
+    """Enable JAX's PERSISTENT on-disk compilation cache so an EXPENSIVE XLA
+    compile is written to disk ONCE and REUSED across process launches.
+
+    This is the single shared implementation used by every legoESM driver that
+    pays a large cold-compile cost -- the correction campaign (rrtmgp radiation
+    graph, >16 min) and the Stage-B carbon calibration (the per-archetype-group
+    coupled-land-model graph, ~20 min cold across a diverse real archetype set).
+    With the cache each distinct graph is compiled once and every later launch
+    with the same code/backend reuses the on-disk binary, so a re-run drops from
+    minutes to seconds.  Keep it in ONE place so the caching policy (and its
+    safety key) never drifts between callers.
+
+    Parameters
+    ----------
+    cache_dir : str or os.PathLike
+        Directory for JAX's persistent compilation cache.  MUST live on a
+        SHARED filesystem when compute nodes write it (never node-local
+        ``/local``).  An empty / falsy value is a NO-OP: the function returns
+        ``None`` WITHOUT mutating any ``jax.config`` state, so the default
+        (cache-disabled) JAX behavior is preserved exactly.
+    min_compile_secs : float, default 30.0
+        Only compiles SLOWER than this [s] are written to the cache, so trivial
+        sub-second kernels never churn it; 30 s targets the genuinely expensive
+        physics / coupled graphs.
+
+    Returns
+    -------
+    str or None
+        ``str(cache_dir)`` when the cache is enabled, otherwise ``None``.
+
+    Notes
+    -----
+    MUST be called BEFORE the first JAX compilation -- callers invoke it at the
+    very top of their entry point, before any driver build / precompute.  The
+    persistent-cache KEY includes the serialized HLO, the jaxlib version, and
+    the backend/platform, so a code change, a jaxlib upgrade, or a different
+    node architecture MISSES (recompiles) rather than serving a stale or
+    wrong-arch binary -- the cache is therefore always safe to leave enabled.
+    """
+    if not cache_dir:
+        return None
+    jax.config.update("jax_compilation_cache_dir", str(cache_dir))
+    jax.config.update(
+        "jax_persistent_cache_min_compile_time_secs", float(min_compile_secs))
+    return str(cache_dir)
+
+
 class TrainingConfig(NamedTuple):
     """Configuration for SFNO training.
 

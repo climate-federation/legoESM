@@ -25,6 +25,12 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export PYTHONPATH="$REPO:$(ls -d "$REPO"/packages/*/ | sed 's:/$::' | tr '\n' ':')${PYTHONPATH:-}"
 export JAX_PLATFORMS=cpu
 export JAX_ENABLE_X64=1
+# Persistent JAX compilation cache on the SHARED filesystem (under .cache/, gitignored):
+# train_carbon_params.py --compilation-cache-dir defaults to $JAX_COMPILATION_CACHE_DIR, so
+# the ~20-min COLD compile of the per-archetype coupled-land-model graphs is written ONCE
+# and reused across launches (a re-run with the same code/backend drops to seconds).
+export JAX_COMPILATION_CACHE_DIR="$REPO/.cache/jax_compile_cache_carbon"
+mkdir -p "$JAX_COMPILATION_CACHE_DIR"
 export PYTHONUNBUFFERED=1        # stream [target]/[preflight]/[train] progress
 
 CLM5="${CLM5:-/burg-archive/glab/users/pg2328/legoESM/data/clm/surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc}"
