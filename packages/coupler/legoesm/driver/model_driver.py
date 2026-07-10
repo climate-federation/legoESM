@@ -5335,9 +5335,17 @@ class ModelDriver:
                     + f"  ({rate:.1f} sim-days/s)"
                 )
 
-                # Blowup detection
-                if not T_finite:
-                    run_status = f"BLOWUP at day {elapsed_day:.1f}"
+                # Blowup detection: finiteness AND physical bounds (#871 — a
+                # runaway to 8e8 K was finite for 1138 steps under a
+                # finiteness-only guard; the T_min floor masked its low side).
+                from legoesm.driver.diagnostics import (
+                    physical_state_blowup_reason,
+                )
+                _bounds_reason = physical_state_blowup_reason(
+                    elapsed_day, T_min, T_max)
+                if (not T_finite) or _bounds_reason is not None:
+                    run_status = (_bounds_reason
+                                  or f"BLOWUP at day {elapsed_day:.1f}")
                     logger.error(run_status)
                     self._write_blowup_state(
                         start_step + step + 1,
@@ -5877,8 +5885,14 @@ class ModelDriver:
                     f"|v|_max={max_wind:.1f}m/s  ({rate:.1f} sim-days/s)"
                 )
 
-                if not T_finite:
-                    run_status = f"BLOWUP at day {elapsed_day:.1f}"
+                from legoesm.driver.diagnostics import (
+                    physical_state_blowup_reason,
+                )
+                _bounds_reason = physical_state_blowup_reason(
+                    elapsed_day, T_min, T_max)
+                if (not T_finite) or _bounds_reason is not None:
+                    run_status = (_bounds_reason
+                                  or f"BLOWUP at day {elapsed_day:.1f}")
                     logger.error(run_status)
                     self._write_blowup_state(step + 1, self._current_day)
                     break
