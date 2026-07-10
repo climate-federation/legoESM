@@ -4047,10 +4047,13 @@ def main() -> int:
             _ocean_step = (lambda st, sf, fw, t_sec=None:
                            _spmd_inner(st, dt, surface_forcing=sf,
                                        freshwater=fw))
-            _pers_shard_fn = (lambda st:
-                              shard_state_latlon(st, _spmd_mesh))
-            _pers_gather_fn = (lambda st:
-                               gather_state_latlon(st, _spmd_mesh))
+
+            def _pers_shard_fn(st, _mesh=_spmd_mesh):
+                return shard_state_latlon(st, _mesh)
+
+            def _pers_gather_fn(st, _mesh=_spmd_mesh):
+                return gather_state_latlon(st, _mesh)
+
             _spmd_persistent = True
             print(f"[setup] multi-GPU lat-band SPMD: {args.n_gpus} devices, "
                   f"n_lat={n_lat_final} ({n_lat_final // args.n_gpus} "
