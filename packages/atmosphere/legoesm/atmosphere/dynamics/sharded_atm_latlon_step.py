@@ -569,16 +569,18 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
     per distinct segment length (``run_atm_latlon_spmd`` caches per length —
     at most two: the regular segment and the final remainder).
 
-    Carry dtype: the init carry is cast to the STORAGE dtype once at segment
-    entry.  ``_step_cgrid_impl`` returns storage-dtype arrays, so a
-    lower-precision IC (e.g. an f32 grid-derived state under an f64 storage
-    policy) would otherwise trip ``lax.scan``'s carry-type check on the very
-    promotion the per-step Python loop absorbs silently after its first
-    step.  The cast is UPCAST-ONLY and value-exact (f32 embeds exactly in
-    f64), so the segment trajectory stays bit-identical to the per-step
-    path; no precision is ever dropped.
+    Carry dtype: the FIRST step is unrolled outside the ``lax.scan`` and the
+    scan covers the remaining ``n_steps - 1``.  A mixed-precision IC (e.g. an
+    f32 grid-derived ``p_s`` beside f64 dynamics fields under x64) promotes
+    to the step's own output dtypes DURING that first step — exactly the
+    one-time promotion the per-step Python loop absorbs at its first
+    iteration.  Role-based entry casts cannot express this fixed point (the
+    default f32 policy no-ops while the promotion comes from mixed-LEAF
+    arithmetic, e.g. ``p_s[f32] + dt*dps[f64]``).  Zero extra casts, zero
+    numerical difference vs the per-step lane; if a state ever failed to
+    reach its dtype fixed point in one step, ``lax.scan`` still raises its
+    carry-type error LOUDLY at trace time — never a silent precision change.
     """
-    from legoesm.core.precision import cast_pytree
     from legoesm.parallel.latlon_spmd import latlon_band_perms
     from legoesm.parallel.shard_map_compat import shard_map
     from legoesm.timestepping.integration import (
@@ -599,15 +601,16 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
 
     if mesh is None:                       # single-device compiled segment
         def _serial_seg(c_state, dt):
-            # Storage-dtype carry (upcast-only, value-exact): the scan carry
-            # must match the step's storage-dtype output — see the docstring.
-            c_state = cast_pytree(c_state, None, "storage")
-
-            def _one(s, _):
+            def _step1(s):
                 out, _ps = model._step_cgrid_impl(
                     s, dt, physics_fn=physics_fn, phys_state=None)
-                return out, None
-            out, _ = jax.lax.scan(_one, c_state, xs=None, length=n_steps)
+                return out
+            # Step 1 UNROLLED: its output carries the step's own (promoted)
+            # leaf dtypes — the scan-carry dtype fixed point (docstring).
+            out = _step1(c_state)
+            if n_steps > 1:
+                out, _ = jax.lax.scan(lambda s, _x: (_step1(s), None),
+                                      out, xs=None, length=n_steps - 1)
             return out, state_finite_scalar(out)
 
         fn_serial = jax.jit(_serial_seg)
@@ -631,14 +634,15 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
         shard_geometry)
 
     def _seg_body(state_local, stacks_local, dt):
-        # Storage-dtype carry (upcast-only, value-exact): the scan carry must
-        # match the band step's storage-dtype output — see the docstring.
-        state_local = cast_pytree(state_local, None, "storage")
-
-        def _one(s, _):
+        def _step1(s):
             out, _ps = band_step(s, stacks_local, dt, None)
-            return out, None
-        out, _ = jax.lax.scan(_one, state_local, xs=None, length=n_steps)
+            return out
+        # Step 1 UNROLLED: its output carries the step's own (promoted) leaf
+        # dtypes — the scan-carry dtype fixed point (docstring).
+        out = _step1(state_local)
+        if n_steps > 1:
+            out, _ = jax.lax.scan(lambda s, _x: (_step1(s), None),
+                                  out, xs=None, length=n_steps - 1)
         return out, state_finite_scalar(out, axis=axis)
 
     _cache = {}
