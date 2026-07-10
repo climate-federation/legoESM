@@ -141,6 +141,15 @@ Each `output.tapes` entry produces its own file: `lmip_biophys.<tape_name>.nc`.
 Shipped defaults: `monthly` (time-mean fluxes) + `monthly_state` (instantaneous
 soil snapshot). Layout is `(time, lat, lon)` for latlon grids.
 
+**Annual files (multi-year runs).** A run spanning more than one year ALSO writes
+one file per completed year — `lmip_biophys.<tape_name>.<year>.nc` — flushed right
+after that year's scan, together with a resumable restart. So if a job hits its
+wall-clock limit, every FINISHED year is already on disk (and resumable via
+`--restart-from` the last year's `.npz`); you don't lose the whole run. The
+combined `lmip_biophys.<tape_name>.nc` is still written at the end for a run that
+finishes. `ncrcat lmip_biophys.monthly.*.nc combined.nc` stitches the annual files
+if you only have those.
+
 ```python
 import xarray as xr
 ds = xr.open_dataset("lmip_biophys.monthly.nc")
@@ -157,12 +166,15 @@ Variables available (defaults; add more via `output.tapes[*].vars` in the YAML):
 | `precip` | kg/m²/s | mean |
 | `LAI` | m²/m² | mean |
 | `albedo` | [0, 1] | mean |
+| `GPP` | gC/m²/day (canopy gross primary production; 0 for simple_seb) | mean |
+| `ET` | mm/day (latent-heat-equivalent evapotranspiration, lhflx / L_v) | mean |
 | `T_soil_top`, `theta_soil_top`, `snow_depth` | K, m³/m³, kg/m² | inst |
 
 ### The restart file
-Model-time-stamped: `restart_<YEAR>_d<DDD>h<HH>.npz` — one per run, chronological
-on `ls`. Contains the full `MultiLayerLandState` + INI-blob metadata
-(`land_mode`, `t_end_s`, `n_steps_completed`, config snapshot).
+Model-time-stamped: `restart_<YEAR>_d<DDD>h<HH>.npz` — chronological on `ls`.
+Contains the full `MultiLayerLandState` + INI-blob metadata (`land_mode`,
+`t_end_s`, `n_steps_completed`, config snapshot). A multi-year run writes ONE per
+completed year (a resume trail); a single-year run writes one at the end.
 
 ### `experiment.tag`
 INI-format provenance. The minimum you need for reproducibility months later:

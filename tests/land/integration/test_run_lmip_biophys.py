@@ -182,12 +182,18 @@ def test_chunked_scan_straddles_year_boundary(tmp_path):
     assert np.isfinite(T[0]).sum() > 0
     assert np.isfinite(T[1]).sum() > 0
 
-    # Restart filename encodes total model time elapsed: 8764 h = 1 year + 4 h
-    # → year 2001, doy 0, hour 4.  Proves the chunked loop bookkept time
-    # correctly across the boundary.
-    restarts = list(out.glob("restart_*.npz"))
-    assert len(restarts) == 1
-    assert restarts[0].name == "restart_2001_d000h04.npz"
+    # Per-year annual NetCDFs + resumable restarts are flushed inside the loop so
+    # a wall-clock timeout keeps every FINISHED year.  Year 2000 (8760 h = 1 exact
+    # year) -> the annual file + restart_2001_d000h00 (a clean resume seed); year
+    # 2001 (+4 h) and the final end-of-run restart -> restart_2001_d000h04 (total
+    # time = 1 year + 4 h, proving the chunked loop bookkept time across the
+    # boundary).
+    assert (out / "lmip_biophys.annual.2000.nc").exists()
+    assert (out / "lmip_biophys.annual.2001.nc").exists()
+    assert xr.open_dataset(out / "lmip_biophys.annual.2000.nc").sizes["time"] == 1
+    restarts = {p.name for p in out.glob("restart_*.npz")}
+    assert "restart_2001_d000h00.npz" in restarts        # resume seed after year 2000
+    assert "restart_2001_d000h04.npz" in restarts        # after year 2001 / final (total time)
 
 
 def test_oversize_forcing_estimate_fails_fast(tmp_path):

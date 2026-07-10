@@ -551,6 +551,107 @@ def run(args) -> int:
     print(f"stepping {total_steps} timestep(s) across {len(year_masks)} year chunk(s) "
           f"(lax.scan per year) ...")
 
+    # ---- output setup + per-year flush helpers ----
+    # A multi-year run flushes each COMPLETED year to its own annual NetCDF
+    # (lmip_biophys.<tape>.<year>.nc) + a resumable restart right after that
+    # year's scan, so a wall-clock timeout keeps every finished year instead of
+    # losing the whole run.  The final combined file (lmip_biophys.<tape>.nc) is
+    # still written at the end for a run that finishes.
+    lat_deg = np.rad2deg(np.asarray(lat_rad)); lon_deg = np.rad2deg(np.asarray(lon_rad))
+    is_latlon = args.grid_type == "latlon"
+    if is_latlon:
+        nlat, nlon = args.resolution, 2 * args.resolution
+        assert nlat * nlon == ncol, f"latlon reshape mismatch: {nlat}*{nlon} != {ncol}"
+        lat_1d = lat_deg.reshape(nlat, nlon)[:, 0]
+        lon_1d = lon_deg.reshape(nlat, nlon)[0, :]
+
+    def _cover1d(a):
+        a = np.asarray(a)
+        return a[0] if a.ndim == 2 else a
+    if args.land_mask_file:
+        from legoesm.grids.topography import load_land_fraction
+        land_fraction = np.asarray(load_land_fraction(grid, args.land_mask_file)).ravel()
+    else:
+        land_fraction = (_cover1d(gsd.f_land) + _cover1d(gsd.f_lake)
+                         + _cover1d(gsd.f_glacier))
+    land = land_fraction >= args.land_frac_min
+
+    def _flush_tapes(accums, slot_ids_by_tape, label):
+        """Write each tape's selected slots to ``lmip_biophys.<tape>[.<label>].nc``.
+        ``label`` empty -> the combined whole-run file; a year string -> that
+        year's annual file.  Latlon uses the (time, lat, lon) rectangular layout;
+        other grids fall back to (time, ncol)."""
+        import xarray as xr
+        masked = lambda a: np.where(land, np.asarray(a, np.float64), np.nan)
+        dims = ("time", "lat", "lon") if is_latlon else ("time", "ncol")
+        for tape in tape_specs:
+            ids = np.asarray(slot_ids_by_tape[tape.name])
+            if ids.size == 0:
+                continue
+            finalized = finalize_tape(accums[tape.name], tape)   # var -> (n_slots, ncol)
+            _, _, slot_times = tape_slots[tape.name]
+            st = np.asarray(slot_times)[ids]
+
+            def pack(arr):
+                arr2 = np.stack([masked(arr[i]) for i in ids])
+                return arr2.reshape(ids.size, nlat, nlon) if is_latlon else arr2
+
+            data_vars = {v: (dims, pack(finalized[v])) for v in tape.vars}
+            coords = {"time": (("time",), st / _SEC_PER_DAY)}
+            if is_latlon:
+                coords.update({"lat": (("lat",), lat_1d), "lon": (("lon",), lon_1d)})
+            else:
+                coords.update({"lat": (("ncol",), lat_deg), "lon": (("ncol",), lon_deg)})
+            attrs = {
+                "forcing": "synthetic" if synthetic else f"CRU-JRA {year_start}"
+                           + (f"-{year_end}" if year_end > year_start else ""),
+                "dt": dt, "start_doy": args.start_doy,
+                "grid_type": args.grid_type, "surface_scheme": args.surface_scheme,
+                "carbon": config.carbon.scheme,
+                "tape_name": tape.name, "tape_freq": tape.freq, "tape_average": tape.average,
+                "time_units": "days since year_start Jan 1 (noleap)",
+                "year_label": label or "all",
+            }
+            ds = xr.Dataset(data_vars, coords=coords, attrs=attrs)
+            suffix = f".{label}" if label else ""
+            nc = out_dir / f"lmip_biophys.{tape.name}{suffix}.nc"
+            ds.to_netcdf(nc)
+            print(f"wrote {nc} ({ids.size} {tape.freq} slots, "
+                  f"layout={'lat,lon' if is_latlon else 'ncol'})")
+
+    def _save_restart(cur_state, t_end_s, n_completed):
+        """Save a chained-run seed named by the model time it represents
+        (restart_<YEAR>_d<DDD>h<HH>.npz, noleap).  Multilayer only."""
+        if not is_multilayer:
+            return
+        try:
+            days_since_start = t_end_s / _SEC_PER_DAY
+            year_offset = int(days_since_start // 365)
+            year_final = year_start + year_offset
+            doy_float = days_since_start - year_offset * 365.0
+            doy_int = int(doy_float)
+            hour_of_day = int(round((doy_float - doy_int) * 24.0)) % 24
+            restart_name = f"restart_{year_final:04d}_d{doy_int:03d}h{hour_of_day:02d}.npz"
+            restart_meta = {
+                "grid_type": args.grid_type, "resolution": args.resolution,
+                "surface_scheme": args.surface_scheme, "bulk_scheme": args.bulk,
+                # Sourced from the CONSTRUCTED config (not args) so provenance
+                # reflects the physics actually run.
+                "enable_freeze_thaw": bool(config.thermal.enable_freeze_thaw),
+                "year": year_start, "year_end": year_end, "dt": dt,
+                "n_steps": args.n_steps, "start_doy": args.start_doy,
+                "forcing": ("synthetic" if synthetic else "CRU-JRA"),
+                "year_final": year_final, "doy_final": doy_int, "hour_final": hour_of_day,
+            }
+            rp = save_land_restart(
+                out_dir / restart_name, cur_state,
+                land_mode="multilayer", t_end_s=t_end_s,
+                n_steps_completed=n_completed, metadata=restart_meta)
+            print(f"wrote {rp}")
+        except Exception as e:  # noqa: BLE001
+            print(f"(restart write skipped: {e})")
+
+    steps_done = 0
     for k, (year, mask) in enumerate(year_masks):
         # Year-local model times: the year's forcing clock resets to 0 at Jan 1.
         tq_year = tq[mask]
@@ -574,23 +675,25 @@ def run(args) -> int:
             _step_body, (state, tape_accums),
             (forcing_year, doy_year, year_xs, slot_year_xs))
         del forcing_year, doy_year, year_xs, slot_year_xs      # free before next year
+        steps_done += n_step_year
+        # Flush THIS year's completed tape slots + a resumable restart, so a
+        # wall-clock timeout keeps every finished year (annual output).  Only for
+        # multi-year runs; a single-year run gets the combined file below.
+        if multi_year:
+            try:
+                year_ids = {
+                    t.name: np.unique(np.asarray(slot_idx_global[t.name])[np.asarray(mask)])
+                    for t in tape_specs}
+                _flush_tapes(tape_accums, year_ids, f"{year:04d}")
+                _save_restart(state, float(tq_year[-1] + dt), steps_done)
+            except Exception as e:  # noqa: BLE001
+                print(f"(year {year} annual flush skipped: {e})")
 
     # --- E_LUC land-use-change bookkeeping (post-run annual diagnostic). ---
     _report_eluc(args, gsd)
 
-    # --- land mask + NaN-over-land validation (the smoke PASS/FAIL). ---
-    def cover1d(a):
-        a = np.asarray(a)
-        return a[0] if a.ndim == 2 else a
-    if args.land_mask_file:
-        from legoesm.grids.topography import load_land_fraction
-        land_fraction = np.asarray(load_land_fraction(grid, args.land_mask_file)).ravel()
-    else:
-        land_fraction = (cover1d(gsd.f_land) + cover1d(gsd.f_lake)
-                         + cover1d(gsd.f_glacier))
-    land = land_fraction >= args.land_frac_min
-
-    # --- PASS/FAIL: final soil top-layer T must be finite over land. ---
+    # --- PASS/FAIL: final soil top-layer T must be finite over land (uses the
+    #     ``land`` mask computed before the year loop). ---
     # Multilayer T_soil is a raw (ncol, n_layers) array; slab T_soil is a 1-D
     # Field (.data holds the (ncol,) array).  Validate the REAL slab state, not a
     # zeros placeholder — otherwise a slab NaN blow-up would silently PASS.
@@ -607,92 +710,16 @@ def run(args) -> int:
               f"theta_top {rng(np.asarray(state.theta_soil[:, 0]))} | "
               f"snow_depth {rng(np.asarray(state.snow_depth))} kg/m2")
 
-    # --- per-tape NetCDF writers ---
-    #
-    # Latlon output uses the standard (time, lat, lon) rectangular layout, so
-    # tools like ``xr.plot`` / ncview / panoply just work.  Non-rectangular
-    # grids (cubed-sphere, MPAS Voronoi, gaussian) can't be reshape'd cleanly,
-    # so they fall back to (time, ncol) with lat/lon as coord vars on ncol.
-    lat_deg = np.rad2deg(np.asarray(lat_rad)); lon_deg = np.rad2deg(np.asarray(lon_rad))
-    is_latlon = args.grid_type == "latlon"
-    if is_latlon:
-        nlat, nlon = args.resolution, 2 * args.resolution
-        assert nlat * nlon == ncol, f"latlon reshape mismatch: {nlat}*{nlon} != {ncol}"
-        lat_1d = lat_deg.reshape(nlat, nlon)[:, 0]
-        lon_1d = lon_deg.reshape(nlat, nlon)[0, :]
-
+    # --- final COMBINED whole-run NetCDF (lmip_biophys.<tape>.nc) + end-of-run
+    #     restart.  A multi-year run already flushed per-year annual files +
+    #     restarts inside the loop; this combined file is the convenience output
+    #     for a finished run (and the sole output for a single-year run). ---
     try:
-        import xarray as xr
-        masked = lambda a: np.where(land, np.asarray(a, np.float64), np.nan)
-        for tape in tape_specs:
-            finalized = finalize_tape(tape_accums[tape.name], tape)   # var -> (n_slots, ncol)
-            _, n_slots, slot_times = tape_slots[tape.name]
-            dims = ("time", "lat", "lon") if is_latlon else ("time", "ncol")
-
-            def pack(arr):
-                arr2 = np.stack([masked(arr[i]) for i in range(n_slots)])
-                return arr2.reshape(n_slots, nlat, nlon) if is_latlon else arr2
-
-            data_vars = {v: (dims, pack(finalized[v])) for v in tape.vars}
-            coords = {"time": (("time",), slot_times / _SEC_PER_DAY)}   # doy since year_start
-            if is_latlon:
-                coords.update({"lat": (("lat",), lat_1d), "lon": (("lon",), lon_1d)})
-            else:
-                coords.update({"lat": (("ncol",), lat_deg), "lon": (("ncol",), lon_deg)})
-            attrs = {
-                "forcing": "synthetic" if synthetic else f"CRU-JRA {year_start}"
-                           + (f"-{year_end}" if year_end > year_start else ""),
-                "dt": dt, "start_doy": args.start_doy,
-                "grid_type": args.grid_type, "surface_scheme": args.surface_scheme,
-                "carbon": config.carbon.scheme,
-                "tape_name": tape.name, "tape_freq": tape.freq, "tape_average": tape.average,
-                "time_units": "days since year_start Jan 1 (noleap)",
-            }
-            ds = xr.Dataset(data_vars, coords=coords, attrs=attrs)
-            nc = out_dir / f"lmip_biophys.{tape.name}.nc"
-            ds.to_netcdf(nc)
-            print(f"wrote {nc} ({n_slots} {tape.freq} slots, "
-                  f"layout={'lat,lon' if is_latlon else 'ncol'})")
+        all_ids = {t.name: np.arange(tape_slots[t.name][1]) for t in tape_specs}
+        _flush_tapes(tape_accums, all_ids, "")
     except Exception as e:  # noqa: BLE001
         print(f"(netcdf write skipped: {e})")
-
-    # --- auto-save the end-of-run state as a chained-run seed (Phase C). ---
-    #
-    # Filename embeds the model time the state represents so a directory of
-    # end-states is an audit trail (chronological on `ls`).  Format:
-    #   restart_<YEAR>_d<DDD>h<HH>.npz   (noleap 365-day calendar)
-    # where YEAR = year_start + full_365-day-years elapsed, DDD is day-of-year
-    # in that year (0-364), HH is hour-of-day (0-23).
-    if is_multilayer:
-        try:
-            t_end_s = float(model_times_s[-1] + dt)
-            days_since_start = t_end_s / _SEC_PER_DAY
-            year_offset = int(days_since_start // 365)
-            year_final = year_start + year_offset
-            doy_float = days_since_start - year_offset * 365.0
-            doy_int = int(doy_float)
-            hour_of_day = int(round((doy_float - doy_int) * 24.0)) % 24
-            restart_name = f"restart_{year_final:04d}_d{doy_int:03d}h{hour_of_day:02d}.npz"
-            restart_meta = {
-                "grid_type": args.grid_type, "resolution": args.resolution,
-                "surface_scheme": args.surface_scheme, "bulk_scheme": args.bulk,
-                # Sourced from the CONSTRUCTED config (not args) so provenance
-                # reflects the physics actually run — makes the YAML->config
-                # freeze/thaw wiring observable end-to-end.
-                "enable_freeze_thaw": bool(config.thermal.enable_freeze_thaw),
-                "year": year_start, "year_end": year_end, "dt": dt,
-                "n_steps": args.n_steps, "start_doy": args.start_doy,
-                "forcing": ("synthetic" if synthetic else "CRU-JRA"),
-                "year_final": year_final, "doy_final": doy_int,
-                "hour_final": hour_of_day,
-            }
-            rp = save_land_restart(
-                out_dir / restart_name, state,
-                land_mode="multilayer", t_end_s=t_end_s,
-                n_steps_completed=args.n_steps, metadata=restart_meta)
-            print(f"wrote {rp}")
-        except Exception as e:  # noqa: BLE001
-            print(f"(restart write skipped: {e})")
+    _save_restart(state, float(model_times_s[-1] + dt), args.n_steps)
 
     return 0 if status == "PASS" else 1
 
