@@ -199,9 +199,18 @@ class TestConstantSchemeWiring:
         assert bool(jnp.all(jnp.isfinite(K))) and bool(jnp.all(jnp.isfinite(A)))
         # Rows (S->N): idx 3 ~ -11.25 deg (near equator), idx 0 ~ -78.75 deg.
         assert bool(jnp.all(K[3] < K[0]))               # equatorward reduced
-        # Bounded within the configured [eq, pole] range.
-        assert bool(jnp.all(K >= 1e-5 - 1e-15))
-        assert bool(jnp.all(K <= 1e-4 + 1e-15))
+        # Bounded within the configured [eq, pole] range.  latitude_background_
+        # diffusivity clamps K EXACTLY to [K_bg_eq, K_bg_pole], so assert the
+        # cap at the DATA's precision.  The lat-lon ocean state is float32
+        # (finite-volume): the 1e-4 cap is representable only as
+        # float32(1e-4) ~= 1.00000005e-4, so a float64 ``1e-4 + 1e-15`` bound
+        # would reject that exact-cap value.  Compare against the cap cast to
+        # K's own dtype (an EXACT bound, not a loosened tolerance — the clamp
+        # guarantees it, and it still catches a real over-cap such as a
+        # background floor double-count -> ~2e-4).
+        K_bg_eq, K_bg_pole = 1e-5, 1e-4
+        assert bool(jnp.all(K >= jnp.asarray(K_bg_eq, K.dtype)))
+        assert bool(jnp.all(K <= jnp.asarray(K_bg_pole, K.dtype)))
 
     def test_viscosity_preserves_prandtl_ratio(self, grid_z_state):
         grid, z, state = grid_z_state
