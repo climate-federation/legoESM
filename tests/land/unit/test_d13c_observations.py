@@ -64,6 +64,21 @@ def test_synthetic_observed_d13c_warmer_less_negative():
     assert obs[1] > obs[0]      # warmer -> less negative
 
 
+def test_synthetic_observed_d13c_is_pathway_aware_c3_vs_c4():
+    """The synthetic target is C3/C4-aware (matching the forward's two faithful pathways): C4
+    PFTs (14=c4_grass, 16=crop_c4) get a C4-BAND target (~ -11..-14 permil, distinctly less
+    negative), C3 PFTs stay in the C3 band, so the C4 leakiness lever fits a small residual
+    (not the ~15 permil a stale C3-band target on a C4 archetype would fabricate)."""
+    # broadleaf tree (C3), c3_grass (C3), c4_grass (C4), crop_c4 (C4)
+    obs = synthetic_observed_d13c(_table([4, 13, 14, 16], [298.0, 288.0, 300.0, 299.0]))
+    mask = c4_archetype_mask(np.array([4, 13, 14, 16]))
+    assert np.all(np.isfinite(obs))
+    # C4 archetypes in the C4 band, C3 archetypes in the C3 band, cleanly separated
+    assert np.all(obs[mask] > -16.0) and np.all(obs[mask] < -10.0), obs
+    assert np.all(obs[~mask] <= -22.0) and np.all(obs[~mask] >= -34.0), obs
+    assert obs[mask].min() > obs[~mask].max()   # every C4 target less negative than every C3
+
+
 def test_observed_d13c_delegates_to_shared_mean():
     """The per-archetype observed delta13C is the SHARED cover-weighted mean (no duplicated
     numerics)."""

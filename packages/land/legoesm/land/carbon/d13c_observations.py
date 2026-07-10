@@ -17,12 +17,15 @@ derived from a GRIDDED leaf/ecosystem delta13C product, cover-weighted per arche
 
 Pure NumPy: a FIXED target (built once, never inside a JAX-traced model step).
 
-C4 MASKING (correctness).  The model photosynthesis is C3-only and the simulated forward
-applies the C3 discrimination form; C4 plants discriminate FAR less (leaf delta13C ~
--11..-14 permil vs C3 -25..-32 permil).  :func:`c4_archetype_mask` flags the C4 archetypes
-so the trainer EXCLUDES them from the delta13C term rather than fitting the C3 forward to a
-C4 observation (a magnitude error).  A faithful C4 discrimination (Farquhar-Cerling with a
-Collatz C4 ``Ci``) is a documented FOLLOW-UP.
+C3 vs C4 (NOT masked).  The simulated forward (:mod:`legoesm.land.carbon.d13c_forward`) now
+applies a FAITHFUL C4 discrimination (Farquhar-Cerling) for C4 archetypes -- distinctly less
+negative (leaf delta13C ~ -11..-14 permil) than C3 (~ -25..-32 permil) -- so C4 archetypes
+are INCLUDED in the delta13C calibration term (their observed target is retained, NOT
+NaN-masked).  :func:`c4_archetype_mask` remains a PUBLIC per-archetype C4 classifier (shared
+with the forward via :func:`legoesm.land.surface_params.is_c4_pft_id`) used to keep the
+synthetic target physically C4-banded and for diagnostics; it no longer drives a loss mask.
+The per-term finite-mask still drops genuinely-missing (NaN) observations, but a C4 archetype
+WITH an observation now contributes.
 
 REAL SOURCE / FOLLOW-UP.  A gridded leaf/ecosystem delta13C product is SPARSE: options are a
 leaf-economics delta13C compilation regridded to a global field (e.g. the Cornwell et al.
@@ -43,32 +46,35 @@ from legoesm.land.carbon.soc_observations import per_archetype_cover_weighted_me
 from legoesm import constants
 
 # --- synthetic (test-only) observed leaf-delta13C field [permil]; NOT a real product ---
-# Physically-oriented: warmer/drier archetypes run a lower Ci/Ca (more water-stressed
-# stomata), discriminate LESS, and so have a LESS NEGATIVE leaf delta13C.  Values stay in the
-# physical C3 leaf band (~ -22..-34 permil) and are deliberately offset from the
-# default-parameter simulated delta13C so the synthetic dry-run has a residual for the
-# water-use-efficiency params to fit.
-_D13C_SYNTH_BASE_PERMIL = -28.0   # baseline leaf delta13C at the freezing reference [permil]
+# Physically-oriented + PATHWAY-AWARE: C3 archetypes -- warmer/drier archetypes run a lower
+# Ci/Ca (more water-stressed stomata), discriminate LESS, and so have a LESS NEGATIVE leaf
+# delta13C, staying in the physical C3 band (~ -22..-34 permil); C4 archetypes stay in the
+# distinctly-less-negative C4 band (~ -11..-14 permil, see below).  Both are deliberately
+# offset from the default-parameter simulated delta13C so the synthetic dry-run has a residual
+# for the pathway's water-use-efficiency lever (C3 g1_bb / C4 phi) to fit.
+_D13C_SYNTH_BASE_PERMIL = -28.0   # baseline C3 leaf delta13C at the freezing reference [permil]
 _D13C_SYNTH_PER_K = 0.12          # less negative per degC of growing-season warmth [permil/K]
-_D13C_SYNTH_MAX_WARM_K = 30.0     # cap the warmth term so the target stays in the C3 band [K]
+_D13C_SYNTH_MAX_WARM_K = 30.0     # cap the warmth term so the target stays in-band [K]
+# C4 synthetic band: distinctly less negative than C3 (the CO2-concentrating mechanism), only
+# WEAKLY climate-dependent -- keeps the fabricated C4 target in the physical C4 leaf band
+# (~ -11..-14 permil) so the C4 leakiness lever has a small residual to fit (NOT a real product).
+_D13C_SYNTH_C4_BASE_PERMIL = -12.5   # baseline C4 leaf delta13C at the freezing reference [permil]
+_D13C_SYNTH_C4_PER_K = 0.05          # less negative per degC warmth (weak, C4) [permil/K]
 
 
 def c4_archetype_mask(pft_id):
     """Per-archetype C4 flag ``(n_arch,)`` bool -- ``True`` where the archetype's PFT is C4.
 
-    The model's Farquhar is C3-only, so the C3 discrimination forward is NOT valid for these
-    archetypes (their C3-kinetics ``Ci`` is not a faithful C4 leaf state); the trainer uses
-    this mask to EXCLUDE them from the ``d13c`` calibration term.  Uses the shared PFT-name
-    classifier :func:`legoesm.land.surface_params.is_c4` (single source of truth).
+    A PUBLIC per-archetype C4 classifier (``c4_grass`` / ``crop_c4``).  The simulated forward
+    now computes a FAITHFUL C4 discrimination for these archetypes, so this NO LONGER drives a
+    loss mask; it keeps the synthetic target physically C4-banded (:func:`synthetic_observed_d13c`)
+    and is available for diagnostics.  Delegates to the SHARED PFT classifier
+    :func:`legoesm.land.surface_params.is_c4_pft_id` (single source of truth with the forward's
+    C3/C4 selector -- no duplicated pft_id->C4 numerics).
     """
-    from legoesm.land.surface_params import CLM5_PFT_NAMES, is_c4
+    from legoesm.land.surface_params import is_c4_pft_id
 
-    n_names = len(CLM5_PFT_NAMES)
-    pid = np.asarray(pft_id, dtype=int).ravel()
-    return np.array(
-        [bool(0 <= int(p) < n_names and is_c4(CLM5_PFT_NAMES[int(p)])) for p in pid],
-        dtype=bool,
-    )
+    return is_c4_pft_id(pft_id)
 
 
 def per_archetype_observed_d13c(
@@ -170,12 +176,19 @@ def synthetic_observed_d13c(table):
     """Deterministic per-archetype observed leaf delta13C [permil] for ``--dry-run-synthetic``
     (no data files).
 
-    Warmer/drier archetypes run a lower Ci/Ca (more water-stressed stomata), discriminate
-    less, and so have a LESS NEGATIVE leaf delta13C, so the water-use-efficiency parameters
-    have signal to fit.  Values stay in the physical C3 leaf band; NOT a real product -- see
-    :func:`load_gridded_d13c` for the sparse leaf-delta13C source + the ecosystem->leaf
-    reconciliation follow-up.
+    C3 archetypes: warmer/drier archetypes run a lower Ci/Ca (more water-stressed stomata),
+    discriminate less, and so have a LESS NEGATIVE leaf delta13C, so the water-use-efficiency
+    params have signal to fit; values stay in the physical C3 leaf band (~ -22..-34 permil).
+    C4 archetypes (``c4_grass`` / ``crop_c4``, via :func:`c4_archetype_mask`): the CO2-
+    concentrating mechanism holds them distinctly LESS negative (~ -11..-14 permil) and only
+    weakly climate-dependent, so the C4 leakiness lever (``D13CConfig.phi_c4_leakiness``) has a
+    small residual to fit against the FAITHFUL C4 forward.  A C3-band target on a C4 archetype
+    (the old masked behaviour) would drive a spurious O(15 permil) residual, so the synthetic
+    target IS pathway-aware.  NOT a real product -- see :func:`load_gridded_d13c` for the
+    sparse leaf-delta13C source + the ecosystem->leaf reconciliation follow-up.
     """
     mat_c = np.asarray(table.mat_k, dtype=float) - constants.T_freeze
     warmth = np.clip(mat_c, 0.0, _D13C_SYNTH_MAX_WARM_K)
-    return _D13C_SYNTH_BASE_PERMIL + _D13C_SYNTH_PER_K * warmth
+    d13c_c3 = _D13C_SYNTH_BASE_PERMIL + _D13C_SYNTH_PER_K * warmth
+    d13c_c4 = _D13C_SYNTH_C4_BASE_PERMIL + _D13C_SYNTH_C4_PER_K * warmth
+    return np.where(c4_archetype_mask(table.pft_id), d13c_c4, d13c_c3)
