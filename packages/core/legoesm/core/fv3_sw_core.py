@@ -2604,7 +2604,8 @@ def _p_grad_c(h_star, h_s, cdgrid, dt2, g):
 
 def ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
                       apply_d_sw3_boundary_fix: bool = False,
-                      boundary_fix_dx_field=None, rd_prepadded: bool = False):
+                      boundary_fix_dx_field=None, rd_prepadded: bool = False,
+                      boundary_fix_edges=None):
     """PPM hord=9 staggered-field transport (FV3 ytp_v/xtp_u, sw_core.F90:2897-3353, 2540-2894 jord=9).
 
     Used for B-grid KE transport in d_sw3. N cells → N+1 interface fluxes.
@@ -2617,6 +2618,16 @@ def ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
     a REAL depth-1 neighbour-tile halo at interior cuts (the global edge-pad
     is wrong there — the upwind CFL cell lives in the neighbour tile).
     Default False is BIT-IDENTICAL to the prior behaviour.
+
+    boundary_fix_edges (2026-07-10 tiled follow-up): the d_sw3 one-sided
+    overrides + cube-vertex bl=br=0 zeroing are only valid at GLOBAL
+    cube-face boundaries.  Static 4-tuple of Python bools
+    ``(sweep_lo, sweep_hi, cross_lo, cross_hi)`` gating, respectively, the
+    south/north sweep-axis override blocks and the M-axis-endpoint vertex
+    zeroing at M index 0 / -1.  ``None`` (the serial full-face default)
+    applies all four — bit-identical to the previous always-on behaviour.
+    A sub-face TILE passes the flags for the global edges its window
+    touches (see ``legoesm.parallel.tiled_transport``).
     """
     # Transpose so sweep axis is axis 1 for uniform indexing
     if axis == 1:
@@ -2744,6 +2755,11 @@ def ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
     #   bl(1) = xt - v(1);  br(0) = xt - v(0)
     #   pert_ppm(v(2), bl(2), br(2), iv=-1) → standard PPM constraint
     if apply_d_sw3_boundary_fix:
+        # Global-edge gating (see docstring): static Python bools, so the
+        # serial default (None → all True) traces the identical graph.
+        sweep_lo, sweep_hi, cross_lo, cross_hi = (
+            (True, True, True, True) if boundary_fix_edges is None
+            else boundary_fix_edges)
         s11_c = 11.0 / 14.0
         s14_c = 4.0 / 7.0
         s15_c = 3.0 / 14.0
@@ -2790,62 +2806,64 @@ def ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
             dx_m2 = dx_m1 = dx_1 = dx_2 = None
             dx_npy_m2 = dx_npy_m1 = dx_npy = dx_npy_p1 = None
 
-        # SOUTH boundary fix (overrides bl/br at k=0,1,2)
-        br = br.at[:, 2, :].set(al_j3 - v_j2)
-        # xt = s15*v(1) + s11*v(2) - s14*dm(2)
-        xt_s = s15_c * v_j1 + s11_c * v_j2 - s14_c * dm_j2
-        br = br.at[:, 1, :].set(xt_s - v_j1)
-        bl = bl.at[:, 2, :].set(xt_s - v_j2)
-        # bl(0) = s14*dm(-1) - s11*dq(-1)
-        bl = bl.at[:, 0, :].set(s14_c * dm_jm1 - s11_c * dq_jm1)
-        # ELSE branch (length-weighted xt for bl(1), br(0)):
-        if dx_m1 is not None:
-            x0L = 0.5 * (
-                ((2.0 * dx_m1 + dx_m2) * v_j0 - dx_m1 * v_jm1)
-                / jnp.maximum(dx_m1 + dx_m2, _EPS)
-            )
-            x0R = 0.5 * (
-                ((2.0 * dx_1 + dx_2) * v_j1 - dx_1 * v_j2)
-                / jnp.maximum(dx_1 + dx_2, _EPS)
-            )
-            xt_s2 = x0L + x0R
-        else:
-            xt_s2 = 0.5 * ((1.5 * v_j0 - 0.5 * v_jm1)
-                            + (1.5 * v_j1 - 0.5 * v_j2))
-        bl = bl.at[:, 1, :].set(xt_s2 - v_j1)
-        br = br.at[:, 0, :].set(xt_s2 - v_j0)
+        # SOUTH boundary fix (overrides bl/br at k=0,1,2) — global lo edge only
+        if sweep_lo:
+            br = br.at[:, 2, :].set(al_j3 - v_j2)
+            # xt = s15*v(1) + s11*v(2) - s14*dm(2)
+            xt_s = s15_c * v_j1 + s11_c * v_j2 - s14_c * dm_j2
+            br = br.at[:, 1, :].set(xt_s - v_j1)
+            bl = bl.at[:, 2, :].set(xt_s - v_j2)
+            # bl(0) = s14*dm(-1) - s11*dq(-1)
+            bl = bl.at[:, 0, :].set(s14_c * dm_jm1 - s11_c * dq_jm1)
+            # ELSE branch (length-weighted xt for bl(1), br(0)):
+            if dx_m1 is not None:
+                x0L = 0.5 * (
+                    ((2.0 * dx_m1 + dx_m2) * v_j0 - dx_m1 * v_jm1)
+                    / jnp.maximum(dx_m1 + dx_m2, _EPS)
+                )
+                x0R = 0.5 * (
+                    ((2.0 * dx_1 + dx_2) * v_j1 - dx_1 * v_j2)
+                    / jnp.maximum(dx_1 + dx_2, _EPS)
+                )
+                xt_s2 = x0L + x0R
+            else:
+                xt_s2 = 0.5 * ((1.5 * v_j0 - 0.5 * v_jm1)
+                                + (1.5 * v_j1 - 0.5 * v_j2))
+            bl = bl.at[:, 1, :].set(xt_s2 - v_j1)
+            br = br.at[:, 0, :].set(xt_s2 - v_j0)
 
-        # NORTH boundary fix (overrides bl/br at k=N-1,N,N+1)
+        # NORTH boundary fix (overrides bl/br at k=N-1,N,N+1) — global hi edge
         k_nm2 = nn - 1
         k_nm1 = nn
         k_n = nn + 1
 
-        # bl(npy-2) = al(npy-2) - v(npy-2)
-        bl = bl.at[:, k_nm2, :].set(al_npy_m2 - v_npy_m2)
-        # xt = s15*v(npy-1) + s11*v(npy-2) + s14*dm(npy-2)
-        xt_n = s15_c * v_npy_m1 + s11_c * v_npy_m2 + s14_c * dm_npy_m2
-        br = br.at[:, k_nm2, :].set(xt_n - v_npy_m2)
-        bl = bl.at[:, k_nm1, :].set(xt_n - v_npy_m1)
-        # br(npy) = s11*dq(npy) - s14*dm(npy+1)
-        br = br.at[:, k_n, :].set(s11_c * dq_npy - s14_c * dm_npy_p1)
-        # ELSE branch (length-weighted xt for br(npy-1), bl(npy)):
-        if dx_npy_m1 is not None:
-            x0L_n = 0.5 * (
-                ((2.0 * dx_npy_m1 + dx_npy_m2) * v_npy_m1
-                  - dx_npy_m1 * v_npy_m2)
-                / jnp.maximum(dx_npy_m1 + dx_npy_m2, _EPS)
-            )
-            x0R_n = 0.5 * (
-                ((2.0 * dx_npy + dx_npy_p1) * v_npy
-                  - dx_npy * v_npy_p1)
-                / jnp.maximum(dx_npy + dx_npy_p1, _EPS)
-            )
-            xt_n2 = x0L_n + x0R_n
-        else:
-            xt_n2 = 0.5 * ((1.5 * v_npy_m1 - 0.5 * v_npy_m2)
-                            + (1.5 * v_npy - 0.5 * v_npy_p1))
-        br = br.at[:, k_nm1, :].set(xt_n2 - v_npy_m1)
-        bl = bl.at[:, k_n, :].set(xt_n2 - v_npy)
+        if sweep_hi:
+            # bl(npy-2) = al(npy-2) - v(npy-2)
+            bl = bl.at[:, k_nm2, :].set(al_npy_m2 - v_npy_m2)
+            # xt = s15*v(npy-1) + s11*v(npy-2) + s14*dm(npy-2)
+            xt_n = s15_c * v_npy_m1 + s11_c * v_npy_m2 + s14_c * dm_npy_m2
+            br = br.at[:, k_nm2, :].set(xt_n - v_npy_m2)
+            bl = bl.at[:, k_nm1, :].set(xt_n - v_npy_m1)
+            # br(npy) = s11*dq(npy) - s14*dm(npy+1)
+            br = br.at[:, k_n, :].set(s11_c * dq_npy - s14_c * dm_npy_p1)
+            # ELSE branch (length-weighted xt for br(npy-1), bl(npy)):
+            if dx_npy_m1 is not None:
+                x0L_n = 0.5 * (
+                    ((2.0 * dx_npy_m1 + dx_npy_m2) * v_npy_m1
+                      - dx_npy_m1 * v_npy_m2)
+                    / jnp.maximum(dx_npy_m1 + dx_npy_m2, _EPS)
+                )
+                x0R_n = 0.5 * (
+                    ((2.0 * dx_npy + dx_npy_p1) * v_npy
+                      - dx_npy * v_npy_p1)
+                    / jnp.maximum(dx_npy + dx_npy_p1, _EPS)
+                )
+                xt_n2 = x0L_n + x0R_n
+            else:
+                xt_n2 = 0.5 * ((1.5 * v_npy_m1 - 0.5 * v_npy_m2)
+                                + (1.5 * v_npy - 0.5 * v_npy_p1))
+            br = br.at[:, k_nm1, :].set(xt_n2 - v_npy_m1)
+            bl = bl.at[:, k_n, :].set(xt_n2 - v_npy)
 
         # Cube-VERTEX zeroing (sw_core.F90 ytp_v:3263-3274/3302-3313,
         # xtp_u:2824-2829/2847-2852): at the two perpendicular panel-edge
@@ -2853,23 +2871,31 @@ def ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
         # (bl=br=0) — FV3's reflection control at the 3-face cube vertex.
         # Overwrites the two-sided x0L+x0R blend at those 4 points per
         # edge-end, exactly as the Fortran if(j==1 .or. j==npy) branch does.
-        for _kk in (0, 1, k_nm1, k_n):
-            bl = bl.at[:, _kk, 0].set(0.0)
-            bl = bl.at[:, _kk, -1].set(0.0)
-            br = br.at[:, _kk, 0].set(0.0)
-            br = br.at[:, _kk, -1].set(0.0)
+        # Gated to the sweep blocks that fired AND the M endpoints that are
+        # GLOBAL perpendicular edges (a tile-interior M endpoint is a
+        # neighbour-tile cut, not a cube vertex).
+        for _kk in (([0, 1] if sweep_lo else [])
+                    + ([k_nm1, k_n] if sweep_hi else [])):
+            if cross_lo:
+                bl = bl.at[:, _kk, 0].set(0.0)
+                br = br.at[:, _kk, 0].set(0.0)
+            if cross_hi:
+                bl = bl.at[:, _kk, -1].set(0.0)
+                br = br.at[:, _kk, -1].set(0.0)
 
         # pert_ppm(iv=1) at j=2 and j=npy-2
-        bl_2 = bl[:, 2, :]
-        br_2 = br[:, 2, :]
-        bl_2_new, br_2_new = pert_ppm(bl_2, br_2)
-        bl = bl.at[:, 2, :].set(bl_2_new)
-        br = br.at[:, 2, :].set(br_2_new)
-        bl_nm2 = bl[:, k_nm2, :]
-        br_nm2 = br[:, k_nm2, :]
-        bl_nm2_new, br_nm2_new = pert_ppm(bl_nm2, br_nm2)
-        bl = bl.at[:, k_nm2, :].set(bl_nm2_new)
-        br = br.at[:, k_nm2, :].set(br_nm2_new)
+        if sweep_lo:
+            bl_2 = bl[:, 2, :]
+            br_2 = br[:, 2, :]
+            bl_2_new, br_2_new = pert_ppm(bl_2, br_2)
+            bl = bl.at[:, 2, :].set(bl_2_new)
+            br = br.at[:, 2, :].set(br_2_new)
+        if sweep_hi:
+            bl_nm2 = bl[:, k_nm2, :]
+            br_nm2 = br[:, k_nm2, :]
+            bl_nm2_new, br_nm2_new = pert_ppm(bl_nm2, br_nm2)
+            bl = bl.at[:, k_nm2, :].set(bl_nm2_new)
+            br = br.at[:, k_nm2, :].set(br_nm2_new)
 
     # Flux evaluation (FV3 sw_core.F90:3339-3349). cfl = c*rdy_upwind
     # rd_prepadded (task #3 U1): a sub-face tile supplies rd ALREADY depth-1

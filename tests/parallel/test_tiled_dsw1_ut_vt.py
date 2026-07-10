@@ -6,7 +6,7 @@ ut/vt are re-derived from the UPDATED C-grid winds by a 4-cell box average of
 the OTHER component (``_d_sw1_recompute_ut_vt`` duogrid Part 1) — DISTINCT
 from the d2a2c ut/vt (which uses the D-grid wind directly).  The box stencil
 is fully LOCAL once uc/vc carry their 1-cell cross halo (the GLOBAL
-face-replicated ``_pad_halo_uc_vc_new_via_old_delta`` pre-pad, proven in
+face-replicated ``_pad_halo_uc_vc_new_via_neighbor_delta`` pre-pad, proven in
 U3f), so each tile only ``dynamic_slice``s — NO in-stage exchange.
 
 Two checks (tight tol ``rtol=0, atol=1e-12`` — the tiled and global scalar
@@ -32,7 +32,7 @@ import numpy as np
 import pytest
 
 from legoesm.core.fv3_sw_core import (
-    _d_sw1_recompute_ut_vt, _pad_halo_uc_vc_new_via_old_delta,
+    _d_sw1_recompute_ut_vt, _pad_halo_uc_vc_new_via_neighbor_delta,
 )
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -51,7 +51,7 @@ def _setup(kt, nl, seed):
     grid = create_cubed_sphere(n=n, use_duogrid=True)
     assert grid.duogrid is not None and grid.duogrid.ng >= 3, (
         "test needs ng>=3 so _d_sw1_recompute_ut_vt takes the "
-        "_pad_halo_uc_vc_new_via_old_delta path")
+        "_pad_halo_uc_vc_new_via_neighbor_delta path")
     cd = create_cubed_sphere_cdgrid(grid)
     state = cosine_bell_cubesphere(grid, cd)
     u_d_old, v_d_old = state.u_d, state.v_d
@@ -62,7 +62,7 @@ def _setup(kt, nl, seed):
     # Global oracle (duogrid Part 1 — returns at the `if use_duogrid` line).
     ut_g, vt_g = _d_sw1_recompute_ut_vt(uc, vc, cd, dt, u_d_old, v_d_old)
     # The SAME pre-pad the oracle used internally (ng>=3 + old fields present).
-    uc_pad, vc_pad = _pad_halo_uc_vc_new_via_old_delta(
+    uc_pad, vc_pad = _pad_halo_uc_vc_new_via_neighbor_delta(
         uc, vc, u_d_old, v_d_old, cd)
     return cd, uc, vc, uc_pad, vc_pad, np.asarray(ut_g), np.asarray(vt_g)
 
