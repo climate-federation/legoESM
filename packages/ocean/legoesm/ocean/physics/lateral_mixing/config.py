@@ -12,7 +12,7 @@ __param_spec__ = {
         "scheme_key": "ocean.lat.treguier",
         "excluded": {},
         "params": {
-            "aei0": {"units": "m2 s-1", "bounds": (500.0, 10000.0), "tunable_tier": 2, "transform": "softplus", "category": "lateral_mixing", "reference": "NEMO ldftra nn_aei_ijk_t=21 (Treguier 1997); aei0=rn_Ue*rn_Le", "shape": None},
+            "aei0": {"units": "m2 s-1", "bounds": (500.0, 10000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "NEMO ldftra nn_aei_ijk_t=21 (Treguier 1997); aei0=rn_Ue*rn_Le", "shape": None},
         },
     },
     "HarmonicConfig": {
