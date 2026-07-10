@@ -3707,7 +3707,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # removed -- the Jansen-Held energetic-consistency + stability pairing (see
     # lateral_mixing/backscatter.py). ``nu_bs`` is bounded by BOTH ``E_max`` and
     # the per-cell Laplacian viscous-CFL ceiling (``laplacian_smag_cfl_cap`` --
-    # the SAME cap the Smagorinsky closure uses). Feature-gated on the STATIC
+    # the SAME cap the Smagorinsky closure uses), enforced EXACTLY at BOTH the
+    # h- and q-point coefficients. Feature-gated on the STATIC
     # config (Python ``if`` on a compile-time bool, NOT ``jnp.where``): the whole
     # block is skipped when off. ``diag_Bh_bilap``/``diag_Cl_leith`` are the
     # APPLIED biharmonic + Leith tendencies returned above (no recompute); the
@@ -3720,13 +3721,21 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         from legoesm.ocean.physics.lateral_mixing.backscatter import (
             diagnostic_backscatter_cgrid,
         )
-        _bs_nu_max_h, _ = laplacian_smag_cfl_cap(
-            grid, dt, _bscfg.nu_bs_cfl_safety)
+        # The backscatter increment is applied to MOMENTUM, which steps with
+        # dt_mom = dt / dt_mom_ratio (model step; also the AB2 weight-1.0
+        # dissipative bucket) -- so the viscous-CFL ceiling must be built
+        # from dt_mom, NOT the tracer ``dt`` this function receives (codex
+        # MED-4 r2). Default dt_mom_ratio=1.0 => dt_mom == dt, bit-identical.
+        # Both the h- AND q-point ceilings are threaded so the independently
+        # interpolated vertex coefficient is capped too.
+        _bs_dt_mom = dt / getattr(config, "dt_mom_ratio", 1.0)
+        _bs_nu_max_h, _bs_nu_max_q = laplacian_smag_cfl_cap(
+            grid, _bs_dt_mom, _bscfg.nu_bs_cfl_safety)
         _bs_u, _bs_v, _ = diagnostic_backscatter_cgrid(
             u, v,
             diag_Bh_bilap_u + diag_Cl_leith_u,
             diag_Bh_bilap_v + diag_Cl_leith_v,
-            _bs_nu_max_h, grid, _bscfg,
+            _bs_nu_max_h, _bs_nu_max_q, grid, _bscfg,
             mask=mask, u_mask=u_mask, v_mask=v_mask, dz=h_k,
         )
         du_dt = du_dt + _bs_u

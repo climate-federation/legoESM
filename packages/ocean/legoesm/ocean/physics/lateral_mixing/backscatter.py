@@ -38,10 +38,11 @@ operators are the same order, so the flow noises up at the grid scale.
     purpose and worse at the grid scale than the negative Laplacian it was
     meant to tame.  Corrected here to the faithful negative-Laplacian form.
 
-STATUS: opt-in (``BackscatterConfig.enabled=False`` by default) and NOT yet
-wired into the production momentum update — the operators here are exercised
-by the unit tests only, pending an eddy-permitting stability validation
-before coupling into the ocean dynamics.
+STATUS: opt-in (``BackscatterConfig.enabled=False`` by default).  The lat-lon
+C-grid production momentum update wires the DIAGNOSTIC-``E`` path
+(:func:`diagnostic_backscatter_cgrid` in ``ocean_pe_latlon_cgrid``); the MPAS
+momentum wiring and the prognostic (carried-``E``) path remain unwired,
+pending an eddy-permitting stability validation.
 
 References
 ----------
@@ -138,7 +139,13 @@ class BackscatterConfig(NamedTuple):
     tau_relax_days : float
         e-folding timescale for the linear damping of ``E`` [days].
     E_min : float
-        Floor on the reservoir energy [m²/s²]; 0.0 is fine.
+        Floor on the PROGNOSTIC reservoir energy [m²/s²]
+        (``update_eddy_energy``); 0.0 is fine.  Deliberately NOT applied by
+        the diagnostic (standing-equilibrium) path
+        (``diagnostic_eddy_energy``), which floors at 0 so a zero
+        dissipation sink produces EXACTLY zero backscatter — a positive
+        diagnostic floor would manufacture reservoir energy with no paired
+        dissipation.
     E_max : float
         Ceiling on the reservoir energy [m²/s²].  The exact value is
         not critical; it only prevents runaway if the dissipation
@@ -164,6 +171,24 @@ class BackscatterConfig(NamedTuple):
     nu_bs_cfl_safety: float = 0.5
 
 
+def _sqrt_reservoir(E: jnp.ndarray) -> jnp.ndarray:
+    """AD-safe ``sqrt(max(E, 0))`` that is EXACTLY zero at ``E <= 0``.
+
+    The double-``where`` keeps reverse-mode AD finite at ``E = 0`` (gradient
+    exactly 0 instead of the ``sqrt'(0) = inf`` trap) WITHOUT the additive
+    ``+ 1e-30`` guard a prior version used.  That epsilon returned
+    ``sqrt(1e-30) ~ 1e-15`` at ``E = 0`` — a small but NONZERO negative
+    viscosity applied where the scale-selective sink vanished, breaking the
+    "zero sink => exactly zero backscatter" safety property — and it pushed
+    an exactly saturated CFL cap slightly ABOVE ``nu_max``
+    (``sqrt(E_cap + eps) > sqrt(E_cap)``).  Codex MED-4 r2.
+    """
+    E_pos = jnp.maximum(E, 0.0)
+    return jnp.where(E_pos > 0.0,
+                     jnp.sqrt(jnp.where(E_pos > 0.0, E_pos, 1.0)),
+                     0.0)
+
+
 # ---------------------------------------------------------------------------
 # LatLon C-grid backscatter
 # ---------------------------------------------------------------------------
@@ -175,9 +200,10 @@ def _A_bs_h_cgrid(E: jnp.ndarray, grid, c_bs: float) -> jnp.ndarray:
     Units: ``Δ = √area`` is in m, ``√E`` is in m/s, so ``ν_bs`` has
     harmonic-viscosity units m²/s — consumed by the SINGLE (negated)
     stress-divergence to give the negative-Laplacian ``-ν_bs ∇²u``.
+    EXACTLY zero where ``E <= 0`` (``_sqrt_reservoir``).
     """
     Delta = jnp.sqrt(grid.area)                         # Δ = length [m]
-    return c_bs * Delta * jnp.sqrt(jnp.maximum(E, 0.0) + 1e-30)
+    return c_bs * Delta * _sqrt_reservoir(E)
 
 
 def _A_bs_q_cgrid(E: jnp.ndarray, grid, c_bs: float) -> jnp.ndarray:
@@ -186,7 +212,8 @@ def _A_bs_q_cgrid(E: jnp.ndarray, grid, c_bs: float) -> jnp.ndarray:
     Interpolates ``E`` from cell centres to vertices via the 4-cell
     average, pads pole rows with zero, and appends the wrap column so
     the shape matches ``(n_lat+1, n_lon+1)``.  Uses ``Δ_q = √A_vertex``
-    (length) to match ``_A_bs_h_cgrid``.
+    (length) to match ``_A_bs_h_cgrid``.  EXACTLY zero where the
+    interpolated ``E_q <= 0`` (``_sqrt_reservoir``).
     """
     n_lat, n_lon = E.shape[-2:]
     # 4-cell average interior
@@ -201,7 +228,48 @@ def _A_bs_q_cgrid(E: jnp.ndarray, grid, c_bs: float) -> jnp.ndarray:
 
     A_vert = vertex_area_1d(grid)                         # (n_lat+1,) [m²]
     Delta_q = jnp.sqrt(A_vert)[:, jnp.newaxis]           # length [m]
-    return c_bs * Delta_q * jnp.sqrt(jnp.maximum(E_q, 0.0) + 1e-30)
+    return c_bs * Delta_q * _sqrt_reservoir(E_q)
+
+
+def backscatter_coefficients_cgrid(
+    E: jnp.ndarray,
+    grid,
+    cfg: BackscatterConfig,
+    *,
+    nu_max_h: jnp.ndarray | None = None,
+    nu_max_q: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Capped backscatter viscosities ``(A_h, A_q)`` at h- and q-points.
+
+    Builds ``ν_bs = c_bs · Δ · √E`` at BOTH stress points and applies the
+    per-point viscous-CFL ceilings with an elementwise ``jnp.minimum``
+    AFTER the sqrt, so ``ν_bs <= nu_max`` holds EXACTLY pointwise —
+    including at the q (vertex) point, whose coefficient is interpolated
+    INDEPENDENTLY of the h point (a cap on the h field or on ``E`` alone
+    does NOT bound it: ``Δ_q != Δ_h`` and the 4-cell ``E`` average is not
+    order-preserving w.r.t. the two ceilings), and including a saturated
+    cap (capping ``E`` alone bounds the coefficient only up to sqrt
+    rounding).  Codex MED-4 r2: previously only the h-point coefficient
+    was (indirectly, via ``cfl_cap_eddy_energy``) capped.
+
+    Parameters
+    ----------
+    E : (n_lat, n_lon) subgrid-KE reservoir [m²/s²].
+    grid : LatLonGrid.
+    cfg : BackscatterConfig.
+    nu_max_h : (n_lat, n_lon) cell-centre viscous-CFL ceiling [m²/s], or
+        ``None`` to skip the h cap (bounded only by the ``E_max`` clamp).
+    nu_max_q : (n_lat+1, n_lon+1) vertex viscous-CFL ceiling [m²/s], or
+        ``None`` to skip the q cap.  E.g. the ``(cap_h, cap_q)`` pair from
+        ``laplacian_smag_cfl_cap``.
+    """
+    A_h = _A_bs_h_cgrid(E, grid, cfg.c_bs)               # (n_lat, n_lon)
+    A_q = _A_bs_q_cgrid(E, grid, cfg.c_bs)               # (n_lat+1, n_lon+1)
+    if nu_max_h is not None:
+        A_h = jnp.minimum(A_h, nu_max_h)
+    if nu_max_q is not None:
+        A_q = jnp.minimum(A_q, nu_max_q)
+    return A_h, A_q
 
 
 def backscatter_tendency_cgrid(
@@ -214,6 +282,8 @@ def backscatter_tendency_cgrid(
     mask: jnp.ndarray | None = None,
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
+    nu_max_h: jnp.ndarray | None = None,
+    nu_max_q: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Energy-backscatter momentum tendency on the lat-lon C-grid.
 
@@ -233,15 +303,21 @@ def backscatter_tendency_cgrid(
     E : (n_lat, n_lon) — depth-mean (per-mass) subgrid KE reservoir [m²/s²].
     grid : LatLonGrid.
     cfg : BackscatterConfig.
+    nu_max_h, nu_max_q : optional per-point viscous-CFL ceilings [m²/s]
+        applied EXACTLY (elementwise ``minimum`` after the sqrt) to the h-
+        and q-point coefficients — see
+        :func:`backscatter_coefficients_cgrid`.  ``None`` (default) leaves
+        that point bounded only by the ``E_max`` reservoir clamp.
     """
     if not cfg.enabled or cfg.c_bs == 0.0:
         return jnp.zeros_like(u), jnp.zeros_like(v)
 
     is_3d = u.ndim == 3
 
-    # A_bs at h-points and q-points.
-    A_h = _A_bs_h_cgrid(E, grid, cfg.c_bs)              # (n_lat, n_lon)
-    A_q = _A_bs_q_cgrid(E, grid, cfg.c_bs)              # (n_lat+1, n_lon+1)
+    # A_bs at h-points and q-points, each capped EXACTLY at its own
+    # viscous-CFL ceiling when supplied (codex MED-4 r2).
+    A_h, A_q = backscatter_coefficients_cgrid(
+        E, grid, cfg, nu_max_h=nu_max_h, nu_max_q=nu_max_q)
 
     if is_3d:
         # ``viscous_tendency_cgrid`` vmaps over the last axis of 3-D
@@ -336,8 +412,10 @@ def backscatter_tendency_mpas(
     # edge-coefficient viscosity here, the net injection is bounded globally
     # by the ``E_max`` reservoir cap rather than guaranteed pointwise.
     delta_edge = jnp.sqrt(mesh.dcEdge * mesh.dvEdge)     # Δ [m]
-    nu_bs = cfg.c_bs * delta_edge[:, jnp.newaxis] * jnp.sqrt(
-        jnp.maximum(E_edge, 0.0) + 1e-30)                # (nEdges, nlev) [m²/s]
+    # _sqrt_reservoir: EXACTLY zero coefficient at E = 0 (zero sink =>
+    # zero backscatter), AD-safe without the former +1e-30 shift.
+    nu_bs = (cfg.c_bs * delta_edge[:, jnp.newaxis]
+             * _sqrt_reservoir(E_edge))                  # (nEdges, nlev) [m²/s]
 
     del2_u = vector_laplacian_del2_3d(u_edge_3d, mesh)   # ∇²u  [u/m²]
     return -nu_bs * del2_u                                # -ν_bs ∇²u  [u/s]
@@ -492,7 +570,7 @@ def diagnostic_eddy_energy(
     carried, time-integrated ``E`` (``update_eddy_energy``) so the closure
     needs NO prognostic field threaded through the outer ``lax.scan`` —
     avoiding the None→Field carry-structure hazard.  Clamped to
-    ``[E_min, E_max]``.
+    ``[0, E_max]`` — ``cfg.E_min`` is deliberately NOT applied (see below).
 
     Parameters
     ----------
@@ -502,11 +580,19 @@ def diagnostic_eddy_energy(
 
     Returns
     -------
-    E : subgrid-KE reservoir [m²/s²], clamped to ``[E_min, E_max]``.
+    E : subgrid-KE reservoir [m²/s²], clamped to ``[0, E_max]``.
     """
     tau = cfg.tau_relax_days * 86400.0
     E = cfg.efficiency * tau * jnp.maximum(eps_diss, 0.0)
-    return jnp.clip(E, cfg.E_min, cfg.E_max)
+    # ``E_min`` is deliberately NOT applied here (codex MED-4 r2): the
+    # DIAGNOSTIC reservoir must vanish where the scale-selective sink
+    # vanishes (zero sink => exactly zero backscatter).  A positive floor
+    # would manufacture standing reservoir energy with NO paired
+    # dissipation — a permanent, unstabilised negative viscosity that
+    # violates the Jansen-Held energetic-consistency + stability pairing.
+    # ``E_min`` remains meaningful only for the PROGNOSTIC reservoir
+    # (``update_eddy_energy``), where it floors a carried, damped field.
+    return jnp.clip(E, 0.0, cfg.E_max)
 
 
 def cfl_cap_eddy_energy(
@@ -527,6 +613,13 @@ def cfl_cap_eddy_energy(
     the cap cancels the operator's ``Δ`` exactly and bounds ``ν_bs`` to
     ``nu_max`` regardless of the metric ``nu_max`` was built from.
 
+    This is the RESERVOIR-side bound (it keeps the returned diagnostic
+    ``E`` consistent with the applied h-point coefficient).  It bounds the
+    h coefficient only up to sqrt rounding and does NOT bound the
+    independently interpolated q/vertex coefficient at all; the EXACT
+    pointwise coefficient ceiling at BOTH stress points is the elementwise
+    ``minimum`` in :func:`backscatter_coefficients_cgrid` (codex MED-4 r2).
+
     Parameters
     ----------
     E : candidate reservoir [m²/s²] (e.g. from ``diagnostic_eddy_energy``).
@@ -546,6 +639,7 @@ def diagnostic_backscatter_cgrid(
     diss_u: jnp.ndarray,
     diss_v: jnp.ndarray,
     nu_max_h: jnp.ndarray,
+    nu_max_q: jnp.ndarray,
     grid,
     cfg: BackscatterConfig,
     *,
@@ -562,19 +656,31 @@ def diagnostic_backscatter_cgrid(
     1. resolved scale-selective dissipation power ``ε_diss = −⟨u·D_diss⟩``
        [m²/s³] at cell centres from the APPLIED biharmonic/Leith tendency
        ``(diss_u, diss_v)`` via :func:`backscatter_power_density_cgrid`;
-    2. standing-equilibrium reservoir ``E = clamp(η·τ·ε_diss)`` via
-       :func:`diagnostic_eddy_energy`;
-    3. per-cell CFL cap ``ν_bs ≤ nu_max_h`` via :func:`cfl_cap_eddy_energy`
-       (``Δ = √area``, the h-point grid length
-       :func:`backscatter_tendency_cgrid` uses);
-    4. the negative-Laplacian tendency via the existing
-       :func:`backscatter_tendency_cgrid` (UNCHANGED).
+    2. standing-equilibrium reservoir ``E = clamp(η·τ·ε_diss, 0, E_max)``
+       via :func:`diagnostic_eddy_energy` (``E_min`` NOT applied — zero
+       sink must give exactly zero backscatter);
+    3. reservoir-side CFL cap ``E ≤ (nu_max_h/(c_bs·Δ))²`` via
+       :func:`cfl_cap_eddy_energy` (``Δ = √area``, the h-point grid length)
+       so the RETURNED diagnostic ``E`` is consistent with the applied
+       h-point coefficient;
+    4. the negative-Laplacian tendency via
+       :func:`backscatter_tendency_cgrid` with BOTH per-point ceilings
+       (``nu_max_h``, ``nu_max_q``) — the elementwise, post-sqrt
+       ``minimum`` making ``ν_bs ≤ nu_max`` EXACT at the h AND the
+       independently interpolated q/vertex stress points (codex MED-4 r2).
 
     ``diss_u/diss_v`` are the APPLIED (already-signed, dissipative) lateral
     tendencies [m/s²]; a dissipative tendency gives ``⟨u·D⟩ ≤ 0`` so
     ``ε_diss ≥ 0`` and backscatter injects ONLY where a scale-selective sink
     is active — the Jansen & Held (2014) energetic-consistency requirement
-    (and the stability pairing the module docstring mandates).
+    (and the stability pairing the module docstring mandates).  When the
+    sink is zero everywhere, the returned tendency is EXACTLY zero.
+
+    ``nu_max_h``/``nu_max_q`` are the cell-centre/vertex viscous-CFL
+    ceilings [m²/s] — the ``(cap_h, cap_q)`` pair of
+    ``laplacian_smag_cfl_cap`` evaluated at the MOMENTUM timestep
+    ``dt_mom = dt / dt_mom_ratio`` (momentum increments step with
+    ``dt_mom``, not the tracer ``dt``).
 
     Returns ``(tend_u, tend_v, E)`` — add ``tend_u/tend_v`` to ``du/dt``,
     ``dv/dt``; ``E`` [m²/s²] is the CFL-capped reservoir (diagnostic output).
@@ -589,12 +695,15 @@ def diagnostic_backscatter_cgrid(
         u, v, diss_u, diss_v, grid,
         u_mask=u_mask, v_mask=v_mask, dz=dz)
     eps_diss = jnp.maximum(-power, 0.0)                  # (n_lat, n_lon)
-    # (2) standing-equilibrium reservoir E = clamp(η·τ·ε_diss, E_min, E_max).
+    # (2) standing-equilibrium reservoir E = clamp(η·τ·ε_diss, 0, E_max).
     E = diagnostic_eddy_energy(eps_diss, cfg)
-    # (3) per-cell CFL cap: ν_bs = c_bs·√area·√E ≤ nu_max_h.
+    # (3) reservoir-side CFL cap: keeps the RETURNED E consistent with the
+    #     applied h coefficient (the exact coefficient bound is step 4).
     delta_h = jnp.sqrt(grid.area)                        # h-point Δ [m]
     E = cfl_cap_eddy_energy(E, nu_max_h, delta_h, cfg)
-    # (4) negative-Laplacian backscatter tendency (existing operator).
+    # (4) negative-Laplacian backscatter tendency, with the EXACT per-point
+    #     coefficient ceilings at BOTH the h and q stress points.
     tend_u, tend_v = backscatter_tendency_cgrid(
-        u, v, E, grid, cfg, mask=mask, u_mask=u_mask, v_mask=v_mask)
+        u, v, E, grid, cfg, mask=mask, u_mask=u_mask, v_mask=v_mask,
+        nu_max_h=nu_max_h, nu_max_q=nu_max_q)
     return tend_u, tend_v, E
