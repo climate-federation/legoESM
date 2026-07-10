@@ -72,7 +72,7 @@ SPMD_PARITY_MAX_STEPS = 8
 
 def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
                           wide_halo=False, wide_halo_chunk=0,
-                          tripole=False):
+                          tripole=False, baro_solver="implicit_cn"):
     """Ocean model + gently perturbed rest state (flat 4000 m bottom).
 
     The perturbation (small u/v/eta/T noise on the rest stratification)
@@ -103,9 +103,18 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
     # barotropic substeps instead of ~4 ppermute pads per substep.  The wide
     # path's per-substep clamp is local by contract, so pin local clamping
     # in BOTH arms for a controlled comparison.
-    flat = {}
+    # Production-matching solver (scaling audit, bottleneck 4): OMIP runs
+    # implicit_cn (run_omip.py full preset); the config-dataclass default
+    # is explicit_substep, so it MUST be set explicitly here or the bench
+    # measures a non-production step.
+    flat = {"barotropic_solver": baro_solver}
     if wide_halo:
-        flat = dict(barotropic_wide_halo=True,
+        if baro_solver != "explicit_substep":
+            raise SystemExit(
+                "--wide-halo is a split-explicit barotropic lever; it "
+                "requires --baro-solver explicit_substep (implicit_cn has "
+                "no substep halo to widen).")
+        flat.update(barotropic_wide_halo=True,
                     barotropic_wide_halo_chunk=int(wide_halo_chunk),
                     barotropic_local_subcycle_clamp=True)
     model = LatLonCGridOceanModel(grid, z_coord,
@@ -148,8 +157,24 @@ def main() -> int:
     p.add_argument("--mode", choices=["strong", "weak"], default="strong")
     p.add_argument("--nlat-per-dev", type=int, default=24,
                    help="weak mode: lat rows per device")
-    p.add_argument("--steps", type=int, default=12)
-    p.add_argument("--warmup", type=int, default=2)
+    p.add_argument("--steps", type=int, default=12,
+                   help="Steps per fused lax.scan timing block.")
+    p.add_argument("--warmup", type=int, default=2,
+                   help="(retained for CLI compat; fused-block timing "
+                        "separates compile/probe/blocks explicitly).")
+    p.add_argument("--blocks", type=int, default=2,
+                   help="Timed fused blocks (per-block times expose drift).")
+    p.add_argument("--probe-steps", type=int, default=3,
+                   help="Individually-synced steps for the SEPARATE "
+                        "dispatch-latency probe (step_latency_ms).")
+    p.add_argument("--baro-solver",
+                   choices=["implicit_cn", "explicit_substep"],
+                   default="implicit_cn",
+                   help="Barotropic solver. Default implicit_cn MATCHES "
+                        "production OMIP (run_omip.py full preset); the "
+                        "previous silent explicit_substep default made the "
+                        "bench measure a non-production configuration "
+                        "(scaling audit, bottleneck 4).")
     p.add_argument("--dt", type=float, default=600.0)
     p.add_argument("--out", type=str,
                    default="results/a1/ocean_spmd_scaling.jsonl")
@@ -270,7 +295,7 @@ def main() -> int:
     model, s0 = build_model_and_state(
         n_lat, args.n_lon, args.nlev,
         wide_halo=args.wide_halo, wide_halo_chunk=args.wide_halo_chunk,
-        tripole=args.tripole)
+        tripole=args.tripole, baro_solver=args.baro_solver)
     # Prime the build-once vertex-mask cache from the CONCRETE state so the
     # wrapper can build the per-band vertex masks host-side.
     model._ensure_vertex_mask(s0)
@@ -300,23 +325,26 @@ def main() -> int:
         step = make_sharded_ocean_step(model, mesh)
         s = shard_state_latlon(s0, mesh)
 
-    # Multi-controller: align every process around the timed loop.
-    if jax.process_count() > 1:
-        from jax.experimental import multihost_utils
-        multihost_utils.sync_global_devices("ocean_latlon_spmd_bench_start")
-
-    # Per-step timing: step 0 includes compile; record each step so re-trace
-    # (every step slow) is visible vs steady-state (steps 1.. fast).
-    per_step_ms = []
-    for _ in range(args.steps):
-        t0 = time.perf_counter()
-        s = step(s, args.dt)
-        _block(s)
-        per_step_ms.append((time.perf_counter() - t0) * 1e3)
-
-    if jax.process_count() > 1:
-        from jax.experimental import multihost_utils
-        multihost_utils.sync_global_devices("ocean_latlon_spmd_bench_end")
+    # Measurement contract (scaling audit gaps #1/#2): fused ``lax.scan``
+    # blocks with sync only AROUND the block — the previous per-step
+    # host-synced loop measured dispatch+sync latency, not fused device
+    # throughput.  Per-step dispatch latency is still measured, SEPARATELY,
+    # by an individually-synced probe (``step_latency_ms``); multi-controller
+    # runs record the SLOWEST-process block time + imbalance ratio (a
+    # straggler band is invisible to a single process's clock).
+    from metadata import timed_scan_blocks
+    # Under --parity-gate the serial reference above ran EXACTLY args.steps
+    # steps, so the SPMD arm must execute the same count: 1 compile step +
+    # one (args.steps - 1)-long block, no probe.  Timing from a parity smoke
+    # run is not reported as a scaling number anyway (steps are capped).
+    if args.parity_gate:
+        _blk, _nblk, _probe = max(0, args.steps - 1), 1, 0
+    else:
+        _blk, _nblk, _probe = args.steps, args.blocks, args.probe_steps
+    s, timing = timed_scan_blocks(
+        lambda st: step(st, args.dt), s,
+        block_steps=_blk, n_blocks=_nblk, probe_steps=_probe,
+        sync_label="ocean_latlon_spmd_bench")
 
     # --- Correctness gates (before any timing is reported) -----------------
     if args.parity_gate or args.check_conservation:
@@ -363,8 +391,11 @@ def main() -> int:
                           "single-device reference.", flush=True)
                 return 5
 
-    steady = per_step_ms[args.warmup:]
-    med = float(np.median(steady))
+    # Headline number = the fused-scan per-step time from the SLOWEST process
+    # (measurement contract).  ``steady_median_ms`` keeps its aggregator-facing
+    # name but now carries the fused number; the individually-synced dispatch
+    # latency is reported separately as ``step_latency_ms``.
+    med = float(timing["fused_step_ms"])
     rec = dict(
         component="ocean",
         mode=args.mode, n_devices=nd, n_lat=n_lat, n_lon=args.n_lon,
@@ -372,11 +403,9 @@ def main() -> int:
         platform=jax.default_backend(),
         n_processes=jax.process_count(),
         multicontroller=bool(args.multicontroller),
-        compile_ms=round(per_step_ms[0], 1),
-        steady_median_ms=round(med, 2),
-        steady_min_ms=round(float(np.min(steady)), 2),
-        per_step_ms=[round(x, 1) for x in per_step_ms],
+        steady_median_ms=round(med, 4),
         cells=n_lat * args.n_lon * args.nlev,
+        **timing,
     )
     # Flat aggregator-compatible identity + metric fields (see the atm
     # latlon twin): rows become visible to aggregate_bcw_scaling.py /
@@ -446,8 +475,9 @@ def main() -> int:
             f.write(json.dumps(rec) + "\n")
         print(json.dumps(rec))
         print(f"[ocean nd={nd} {args.mode} {n_lat}x{args.n_lon}x{args.nlev}] "
-              f"compile={rec['compile_ms']}ms steady_median={med:.2f}ms/step "
-              f"(per-step: {rec['per_step_ms']})")
+              f"compile={rec['compile_ms']}ms fused={med:.3f}ms/step "
+              f"latency={rec['step_latency_ms']}ms/step "
+              f"imbalance={rec['rank_imbalance']} blocks={rec['block_ms']}")
         if rec["metadata"]["virtual_cpu_devices"]:
             print("[virtual-cpu] forced host-platform CPU devices: this row "
                   "is a communication-overhead / correctness proxy, NOT "

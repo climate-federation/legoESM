@@ -112,6 +112,36 @@ def _is_empty(v: Any) -> bool:
     return False
 
 
+def git_sha(short: bool = True) -> str:
+    """Best-effort git commit SHA of THIS source tree (repro signature).
+
+    Every scaling row must be attributable to an exact code state — a
+    measurement without a SHA cannot be reproduced or compared across
+    branches (audit item 7: no harness recorded one).  A dirty working
+    tree is marked ``<sha>-dirty`` so the SHA never over-claims
+    reproducibility.  Fail-open (``"unknown"``): a missing git binary or
+    a non-repo run directory must never kill a benchmark.
+    """
+    import subprocess
+
+    cwd = os.path.dirname(os.path.abspath(__file__))
+    try:
+        cmd = ["git", "rev-parse"] + (["--short"] if short else []) + ["HEAD"]
+        out = subprocess.run(cmd, capture_output=True, text=True,
+                             timeout=5, cwd=cwd)
+        sha = out.stdout.strip()
+        if out.returncode != 0 or not sha:
+            return "unknown"
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True, text=True, timeout=5, cwd=cwd)
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            return sha + "-dirty"
+        return sha
+    except Exception:
+        return "unknown"
+
+
 def detect_backend() -> str:
     """Live JAX backend ("cpu"/"gpu"/"tpu"), or "unknown" if JAX is absent."""
     try:
@@ -360,6 +390,7 @@ def scaling_metadata(
         "hostname": os.environ.get("HOSTNAME")
         or os.environ.get("SLURMD_NODENAME", ""),
         "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
+        "git_sha": git_sha(),
     }
     md.update(gpu_direct_mode(backend, transport=resolved_transport))
     if partition_metrics:
@@ -454,3 +485,153 @@ def tidy_throughput_fields(
         "sypd": sypd,
         "mcells_per_s": mcells_per_s,
     }
+
+
+def timed_scan_blocks(
+    advance,
+    state,
+    *,
+    block_steps: int,
+    n_blocks: int = 2,
+    probe_steps: int = 3,
+    sync_label: str = "timed_scan_blocks",
+):
+    """Measurement-contract timing: fused ``lax.scan`` blocks + probe latency.
+
+    The trustworthy production-like number is a MULTI-STEP ``lax.scan`` block
+    with device synchronization only AROUND the block (per-step host sync in a
+    Python loop measures dispatch+sync latency, not fused device throughput —
+    the audited anti-pattern in the SPMD benches).  Per-step dispatch latency
+    is still physically meaningful (drivers that must step one-at-a-time pay
+    it), so it is measured SEPARATELY by a short individually-synced probe and
+    reported as ``step_latency_ms`` — never mixed into the fused number.
+
+    Multi-controller runs additionally record the SLOWEST-process block time
+    and the imbalance ratio (max/median across processes): with a single
+    process's clock a straggler band is invisible and the reported time
+    understates the true parallel step time.
+
+    Parameters
+    ----------
+    advance
+        ``advance(state) -> state`` — ONE production step with all static
+        knobs (dt, forcing, ...) closed over.  May itself be jitted; it is
+        re-traced INTO the fused scan (same graph, no double-jit penalty).
+    state
+        Initial (already sharded, post-seed) model state pytree.
+    block_steps
+        Steps per fused ``lax.scan`` block (the amortizing window).
+    n_blocks
+        Timed blocks; per-block times expose block-to-block drift.
+    probe_steps
+        Individually host-synced steps for the separate dispatch-latency
+        probe (small: each one costs a full device round-trip).
+    sync_label
+        Base label for the multi-controller ``sync_global_devices`` fences.
+
+    Returns
+    -------
+    (state, metrics) — final state (compile + probe + all blocks advanced)
+    and a dict:
+      ``compile_ms``           first-call cost of ``advance`` (trace+compile)
+      ``scan_compile_ms``      first-call cost of the fused scan itself
+      ``step_latency_ms``      median individually-synced per-step wall time
+      ``block_ms``             per-block wall times, THIS process (list)
+      ``fused_step_ms``        median(block_ms)/block_steps — the headline
+      ``block_ms_max``/``block_ms_median``  slowest/median across processes
+                               (equal to this process's for 1 process)
+      ``rank_imbalance``       block_ms_max / block_ms_median  (>= 1.0)
+      ``block_steps``/``n_blocks``/``probe_steps``  the schedule itself
+    """
+    import time
+
+    import jax
+    import numpy as np
+
+    def _block(tree):
+        jax.block_until_ready(jax.tree_util.tree_leaves(tree))
+
+    multi = jax.process_count() > 1
+
+    def _fence(tag: str):
+        if multi:
+            from jax.experimental import multihost_utils
+            multihost_utils.sync_global_devices(f"{sync_label}_{tag}")
+
+    # --- 1. compile (first call of advance, separated from all timing) ---
+    _fence("compile_start")
+    t0 = time.perf_counter()
+    state = advance(state)
+    _block(state)
+    compile_ms = (time.perf_counter() - t0) * 1e3
+
+    # --- 2. dispatch-latency probe: individually synced steps, reported
+    # separately (NEVER mixed into the fused number) ---
+    probe_ms = []
+    for _ in range(max(0, probe_steps)):
+        t0 = time.perf_counter()
+        state = advance(state)
+        _block(state)
+        probe_ms.append((time.perf_counter() - t0) * 1e3)
+    step_latency_ms = float(np.median(probe_ms)) if probe_ms else float("nan")
+
+    # --- 3. fused scan block (dtype-stable carry, the OM pattern) ---
+    input_dtypes = jax.tree_util.tree_map(
+        lambda x: x.dtype if hasattr(x, "dtype") else None, state)
+
+    @jax.jit
+    def _scan_run(st):
+        def _body(carry, _):
+            new = advance(carry)
+            new = jax.tree_util.tree_map(
+                lambda x, d: x.astype(d)
+                if d is not None and hasattr(x, "astype") else x,
+                new, input_dtypes)
+            return new, None
+        return jax.lax.scan(_body, st, None, length=block_steps)[0]
+
+    # Pre-compile the scan on cloned leaves (seed state untouched; every
+    # process executes the same collective schedule — counts stay matched).
+    _pre = jax.tree_util.tree_map(lambda x: x, state)
+    t0 = time.perf_counter()
+    _pre_out = _scan_run(_pre)
+    _block(_pre_out)
+    scan_compile_ms = (time.perf_counter() - t0) * 1e3
+    del _pre, _pre_out
+
+    block_ms = []
+    for b in range(max(1, n_blocks)):
+        _fence(f"block{b}_start")
+        t0 = time.perf_counter()
+        state = _scan_run(state)
+        _block(state)
+        block_ms.append((time.perf_counter() - t0) * 1e3)
+    _fence("blocks_end")
+
+    my_median = float(np.median(block_ms))
+    if multi:
+        from jax.experimental import multihost_utils
+        all_medians = np.asarray(
+            multihost_utils.process_allgather(np.float64(my_median)))
+        block_ms_max = float(np.max(all_medians))
+        block_ms_median = float(np.median(all_medians))
+    else:
+        block_ms_max = my_median
+        block_ms_median = my_median
+    rank_imbalance = (block_ms_max / block_ms_median
+                      if block_ms_median > 0 else float("nan"))
+
+    metrics = {
+        "compile_ms": round(compile_ms, 1),
+        "scan_compile_ms": round(scan_compile_ms, 1),
+        "step_latency_ms": round(step_latency_ms, 3),
+        "block_ms": [round(b, 2) for b in block_ms],
+        "fused_step_ms": round(block_ms_max / max(1, block_steps), 4),
+        "block_ms_max": round(block_ms_max, 2),
+        "block_ms_median": round(block_ms_median, 2),
+        "rank_imbalance": round(rank_imbalance, 4),
+        "block_steps": int(block_steps),
+        "n_blocks": int(n_blocks),
+        "probe_steps": int(probe_steps),
+    }
+    return state, metrics

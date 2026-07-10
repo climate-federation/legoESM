@@ -95,8 +95,16 @@ def main() -> int:
     p.add_argument("--mode", choices=["strong", "weak"], default="strong")
     p.add_argument("--nlat-per-dev", type=int, default=32,
                    help="weak mode: lat rows per device")
-    p.add_argument("--steps", type=int, default=12)
-    p.add_argument("--warmup", type=int, default=2)
+    p.add_argument("--steps", type=int, default=12,
+                   help="Steps per fused lax.scan timing block.")
+    p.add_argument("--warmup", type=int, default=2,
+                   help="(retained for CLI compat; fused-block timing "
+                        "separates compile/probe/blocks explicitly).")
+    p.add_argument("--blocks", type=int, default=2,
+                   help="Timed fused blocks (per-block times expose drift).")
+    p.add_argument("--probe-steps", type=int, default=3,
+                   help="Individually-synced steps for the SEPARATE "
+                        "dispatch-latency probe (step_latency_ms).")
     p.add_argument("--physics", choices=["none", "held_suarez"], default="none")
     p.add_argument("--dt", type=float, default=60.0)
     p.add_argument("--out", type=str, default="results/a1/spmd_scaling.jsonl")
@@ -158,39 +166,31 @@ def main() -> int:
         step = make_sharded_atm_latlon_step(model, mesh, physics_fn=physics_fn)
         c = shard_state_atm_latlon(c0, mesh)
 
-    # Multi-controller: align every process before the timed loop so per-step
-    # wall times aren't skewed by startup jitter (and once after, so no
-    # process exits while peers still hold collectives in flight).
-    if jax.process_count() > 1:
-        from jax.experimental import multihost_utils
-        multihost_utils.sync_global_devices("atm_latlon_spmd_bench_start")
+    # Measurement contract (scaling audit gaps #1/#2): fused ``lax.scan``
+    # blocks with sync only AROUND the block — the previous per-step
+    # host-synced loop measured dispatch+sync latency, not fused device
+    # throughput.  Dispatch latency stays measured SEPARATELY
+    # (``step_latency_ms``); multi-controller runs record the slowest-process
+    # block time + imbalance ratio.
+    from metadata import timed_scan_blocks
+    c, timing = timed_scan_blocks(
+        lambda st: step(st, args.dt), c,
+        block_steps=args.steps, n_blocks=args.blocks,
+        probe_steps=args.probe_steps,
+        sync_label="atm_latlon_spmd_bench")
 
-    # Per-step timing: step 0 includes compile; record each step so re-trace
-    # (every step slow) is visible vs steady-state (steps 1.. fast).
-    per_step_ms = []
-    for i in range(args.steps):
-        t0 = time.perf_counter()
-        c = step(c, args.dt)
-        _block(c)
-        per_step_ms.append((time.perf_counter() - t0) * 1e3)
-
-    if jax.process_count() > 1:
-        from jax.experimental import multihost_utils
-        multihost_utils.sync_global_devices("atm_latlon_spmd_bench_end")
-
-    steady = per_step_ms[args.warmup:]
-    med = float(np.median(steady))
+    # Headline = fused per-step time from the SLOWEST process; key name kept
+    # for the aggregators.
+    med = float(timing["fused_step_ms"])
     rec = dict(
         mode=args.mode, n_devices=nd, n_lat=n_lat, n_lon=args.n_lon,
         nlev=args.nlev, physics=args.physics, steps=args.steps,
         platform=jax.default_backend(),
         n_processes=jax.process_count(),
         multicontroller=bool(args.multicontroller),
-        compile_ms=round(per_step_ms[0], 1),
-        steady_median_ms=round(med, 2),
-        steady_min_ms=round(float(np.min(steady)), 2),
-        per_step_ms=[round(x, 1) for x in per_step_ms],
+        steady_median_ms=round(med, 4),
         cells=n_lat * args.n_lon * args.nlev,
+        **timing,
     )
     # Flat aggregator-compatible identity + metric fields: without a
     # top-level ``sypd``/``grid_type`` this lane's rows are invisible to
@@ -244,8 +244,9 @@ def main() -> int:
             f.write(json.dumps(rec) + "\n")
         print(json.dumps(rec))
         print(f"[nd={nd} {args.mode} {n_lat}x{args.n_lon}x{args.nlev}] "
-              f"compile={rec['compile_ms']}ms steady_median={med:.2f}ms/step "
-              f"(per-step: {rec['per_step_ms']})")
+              f"compile={rec['compile_ms']}ms fused={med:.3f}ms/step "
+              f"latency={rec['step_latency_ms']}ms/step "
+              f"imbalance={rec['rank_imbalance']} blocks={rec['block_ms']}")
         if rec["metadata"]["virtual_cpu_devices"]:
             print("[virtual-cpu] forced host-platform CPU devices: this row "
                   "is a communication-overhead / correctness proxy, NOT "
