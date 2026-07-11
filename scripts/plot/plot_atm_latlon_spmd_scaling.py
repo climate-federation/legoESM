@@ -20,10 +20,27 @@ def _load(path):
         return [json.loads(l) for l in f if l.strip()]
 
 
+def _row_time_ms(r):
+    """Per-step time of a bench row.
+
+    M1 measurement-contract rows carry ``fused_step_ms`` (and the canonical
+    ``time_per_step_ms``); pre-M1 rows carried ``steady_min_ms`` — accepted
+    as a legacy fallback so old JSONL ladders still plot (codex batch4:
+    this plotter previously REQUIRED the removed ``steady_min_ms``).
+    """
+    for key in ("fused_step_ms", "time_per_step_ms", "steady_min_ms"):
+        v = r.get(key)
+        if v is not None:
+            return float(v)
+    raise KeyError(
+        "bench row has none of fused_step_ms/time_per_step_ms/"
+        f"steady_min_ms: {sorted(r)}")
+
+
 def _by_dev(rows):
     rows = sorted(rows, key=lambda r: r["n_devices"])
     nd = [r["n_devices"] for r in rows]
-    t = [r["steady_min_ms"] for r in rows]
+    t = [_row_time_ms(r) for r in rows]
     return nd, t
 
 
