@@ -469,7 +469,8 @@ class TestFv3ForwardBackwardSmoke(unittest.TestCase):
         from legoesm.core.fv3_sw_core import fv3_forward_backward_step
 
         n = 8
-        grid = create_cubed_sphere(n)
+        # 2026-07-11 codex F1: FB entry points are duogrid-only (guarded).
+        grid = create_cubed_sphere(n, use_duogrid=True)
         cdgrid = create_cubed_sphere_cdgrid(grid)
 
         h, u_d, v_d, h_s = _make_tc2_state_edge(cdgrid)
@@ -492,7 +493,8 @@ class TestFv3ForwardBackwardSmoke(unittest.TestCase):
         from legoesm.core.fv3_sw_core import fv3_forward_backward_step
 
         n = 8
-        grid = create_cubed_sphere(n)
+        # 2026-07-11 codex F1: FB entry points are duogrid-only (guarded).
+        grid = create_cubed_sphere(n, use_duogrid=True)
         cdgrid = create_cubed_sphere_cdgrid(grid)
 
         h, u_d, v_d, h_s = _make_tc2_state_edge(cdgrid)
@@ -1679,7 +1681,10 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         )
 
         # Path 2: FV3FBShallowWaterModel (forward-backward experimental model)
-        fb_model = FV3FBShallowWaterModel(grid)
+        # 2026-07-11 codex F1: FB entry points are duogrid-only (guarded),
+        # so the FB model needs its own duogrid grid.
+        fb_grid = create_cubed_sphere(n, use_duogrid=True)
+        fb_model = FV3FBShallowWaterModel(fb_grid)
         fb_model.set_initial_mass(state)
         fb_hits = {"n": 0}
 

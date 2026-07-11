@@ -2543,6 +2543,30 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=constants.g,
 # Complete forward-backward step
 # ==============================================================================
 
+def _require_duogrid_fb(cdgrid, entry_name):
+    """Fn-entry guard: the FB chain is DUOGRID-ONLY (codex 2026-07-10 F1).
+
+    On non-duogrid grids the covariant-wind FB chain mixes conventions at
+    panel seams: the D→A halo in ``d2a2c_d_to_a`` falls back to an
+    orthogonal-rotation cross-face copy (no cos_theta/sin_theta covariant
+    rotation) and ``_u_orth_at_v_points`` falls back to a same-face
+    edge-pad — both silently wrong at seams.  All FB validation (W2,
+    colliding modons) ran duogrid; non-duogrid FB was already
+    known-degraded.  Dispatch-hardening doctrine: raise loudly instead of
+    running silently-wrong seam numerics.
+    """
+    dg = cdgrid.base.duogrid
+    if dg is None or dg.ng < 2:
+        raise ValueError(
+            f"{entry_name} requires a duogrid cubed-sphere grid "
+            f"(create_cubed_sphere(..., use_duogrid=True) with ng >= 2); "
+            f"got duogrid="
+            f"{'None' if dg is None else f'ng={dg.ng}'}. The FB "
+            f"covariant-wind chain mixes conventions at panel seams on "
+            f"non-duogrid grids. Use fv3_sw_tendencies + RK3 "
+            f"(FV3EdgeShallowWaterModel) for non-duogrid grids.")
+
+
 def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
                                div_damp=0.0, hyperdiff_coeff=0.0,
                                apply_legacy_d_sw4_corner_ke_fix=False,
@@ -2552,7 +2576,10 @@ def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
 
     Phase 1: c_sw (C-grid half). Phase 2: p_grad_c. Phase 3: _d_sw_native (FV3 PPM + KE/vort transport).
     div_damp here is LEGACY/UNUSED (FB chain uses d_sw5 d2_bg/dddmp/d4_bg/nord instead).
+    DUOGRID-ONLY: raises ValueError on non-duogrid grids (see _require_duogrid_fb).
     """
+    _require_duogrid_fb(cdgrid, "fv3_forward_backward_step")
+
     # Phase 0: model-orthogonal → covariant v (see fv3_fb_sw_step)
     v_d = fb_v_d_to_covariant(u_d, v_d, cdgrid)
 
@@ -3227,7 +3254,9 @@ def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
 
     Phase 1: c_sw (dt/2). Phase 2: p_grad_c (dt/2). Phase 3: _d_sw_native d_sw1-6 chain.
     div_damp LEGACY/UNUSED (FB uses d_sw5 d2_bg/dddmp/d4_bg/nord); damp_v / nord_v for vorticity damping.
+    DUOGRID-ONLY: raises ValueError on non-duogrid grids (see _require_duogrid_fb).
     """
+    _require_duogrid_fb(cdgrid, "fv3_fb_sw_step")
     dt2 = 0.5 * dt
 
     # Phase 0 (2026-07-10 wind-convention fix): the prognostic winds are the
