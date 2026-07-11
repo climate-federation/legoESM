@@ -635,6 +635,23 @@ def _make_hydrostatic_convection(
         if conv_fn is not None:
             dq_v_dt = conv_out.dq_v_dt.reshape(shape_3d)
             dq_c_conv_dt = conv_out.dq_c_conv_dt.reshape(shape_3d)
+            # #929 in-updraft rain split: mass-flux schemes (bechtold/tiedtke)
+            # emit an in-updraft RAIN source ``dq_r_conv_dt`` (the fraction of
+            # detrained condensate diverted to precipitation by
+            # ``precip_efficiency``) alongside the anvil-cloud source
+            # ``dq_c_conv_dt``.  The unified PhysicsPipeline column-integrates
+            # dq_r into same-step surface precip; this standalone bridge has no
+            # surface-precip accumulator, so we CONSERVE it: route it to the
+            # ``q_r`` rain tracer when the state has one (microphysics sediments
+            # it), else fold it back into ``q_c`` so total convective condensate
+            # (dq_c + dq_r) is preserved — byte-identical to the pre-split
+            # all-condensate-to-cloud routing.  SIGN: ``dq_r_conv_dt >= 0`` is a
+            # condensate SOURCE, the SAME sign as ``dq_c_conv_dt``.  Schemes with
+            # no rain split emit ``None`` -> no-op (byte-identical).
+            _dq_r_conv = conv_out.dq_r_conv_dt
+            _has_qr = state.tracers is not None and "q_r" in state.tracers
+            if _dq_r_conv is not None and not _has_qr:
+                dq_c_conv_dt = dq_c_conv_dt + _dq_r_conv.reshape(shape_3d)
             tracer_tends = {
                 "q_v": Field(
                     data=dq_v_dt, name="dq_v_dt_conv",
@@ -645,6 +662,11 @@ def _make_hydrostatic_convection(
                     dims=dims_3d, units="kg/kg/s",
                 ),
             }
+            if _dq_r_conv is not None and _has_qr:
+                tracer_tends["q_r"] = Field(
+                    data=_dq_r_conv.reshape(shape_3d), name="dq_r_conv_dt",
+                    dims=dims_3d, units="kg/kg/s",
+                )
 
         # Convective momentum transport (CMT): use the scheme's optional
         # ``du_dt_conv``/``dv_dt_conv`` when present (Zhang-McFarlane,
@@ -1008,6 +1030,22 @@ def _make_nonhydrostatic_convection(
             # retains the q_c route (no surface-precip accumulator here — an
             # AMIP/idealized follow-up).
             dq_c_conv_dt = conv_out.dq_c_conv_dt.reshape(shape_3d)
+            # #929 in-updraft rain split: mass-flux schemes (bechtold/tiedtke)
+            # also emit an in-updraft RAIN source ``dq_r_conv_dt``.  Slot 2 is
+            # q_rain (state.py tracer ordering), so route the rain there when it
+            # exists (microphysics sediments it — matches the unified pipeline's
+            # precip routing); otherwise fold it into q_c (slot 1) so total
+            # convective condensate (dq_c + dq_r) is CONSERVED, not dropped.
+            # SIGN: ``dq_r_conv_dt >= 0`` is a condensate SOURCE, same sign as
+            # ``dq_c_conv_dt``.  Schemes with no rain split emit ``None`` ->
+            # no-op (byte-identical).
+            _dq_r_conv = conv_out.dq_r_conv_dt
+            if _dq_r_conv is not None:
+                _dq_r_conv = _dq_r_conv.reshape(shape_3d)
+                if n_tracers > 2:
+                    dtracers = dtracers.at[..., 2].set(_dq_r_conv)
+                else:
+                    dq_c_conv_dt = dq_c_conv_dt + _dq_r_conv
             dtracers = dtracers.at[..., 1].set(dq_c_conv_dt)
 
         # CMT plumbing — see hydrostatic bridge for rationale.
@@ -1359,6 +1397,34 @@ def _make_spectral_pe_convection(
                     )
                 else:
                     tt["q_c"] = dq_c_dt_grid.astype(_qc_template.dtype)
+            # #929 in-updraft rain split: route the mass-flux rain source
+            # ``dq_r_conv_dt`` (bechtold/tiedtke).  If the state has a ``q_r``
+            # rain tracer, emit it there (microphysics sediments it — matches
+            # the unified pipeline's precip routing); otherwise fold it into the
+            # ``q_c`` tendency so total convective condensate (dq_c + dq_r) is
+            # CONSERVED, not dropped (no surface-precip path in this bridge).
+            # SIGN: ``dq_r_conv_dt >= 0`` is a condensate SOURCE, same sign as
+            # ``dq_c_conv_dt``.  Schemes with no rain split emit ``None`` ->
+            # no-op (byte-identical).
+            _dq_r_conv = conv_out.dq_r_conv_dt
+            if _dq_r_conv is not None:
+                _dq_r_grid = _dq_r_conv.reshape(n_lat, n_lon, nlev)
+                if "q_r" in _state_tracers:
+                    _qr_template = _state_tracers["q_r"]
+                    if hasattr(_qr_template, "data") and hasattr(_qr_template, "replace"):
+                        tt["q_r"] = _qr_template.replace(
+                            data=_dq_r_grid.astype(_qr_template.data.dtype)
+                        )
+                    else:
+                        tt["q_r"] = _dq_r_grid.astype(_qr_template.dtype)
+                elif "q_c" in tt:
+                    _qc_t = tt["q_c"]
+                    if hasattr(_qc_t, "data") and hasattr(_qc_t, "replace"):
+                        tt["q_c"] = _qc_t.replace(
+                            data=(_qc_t.data + _dq_r_grid.astype(_qc_t.data.dtype))
+                        )
+                    else:
+                        tt["q_c"] = _qc_t + _dq_r_grid.astype(_qc_t.dtype)
             # Mirror untouched tracers as zeros so the dycore RHS sees a
             # complete tracer pytree (the orchestrator's accumulation
             # also requires matching keys across modules).

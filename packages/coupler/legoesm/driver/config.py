@@ -450,13 +450,17 @@ class ExperimentConfig(NamedTuple):
     # morrison microphysics.  Physics-fidelity correction (no tunable knob).
     subgrid_autoconversion: bool = False
 
-    # Tiedtke convective precipitation efficiency [0,1] (Tiedtke 1989 in-
-    # updraft precipitation).  >0 diverts that fraction of convective
-    # condensate to rain (sediments via microphysics, invisible to radiation)
-    # instead of detraining it all as suspended cloud.  0 = off (legacy).
-    # Observed deep-convective CPE ~0.5-0.9.  Tiedtke-only (guarded in
-    # _resolve_convection).
-    convective_precip_efficiency: float = 0.0
+    # Convective in-updraft precipitation efficiency [0,1] (Tiedtke 1989 in-
+    # updraft precipitation).  A value >0 diverts that fraction of the
+    # convective condensate to rain (sediments via microphysics, invisible to
+    # radiation) instead of detraining it all as suspended cloud.  Observed
+    # deep-convective CPE ~0.5-0.9.  Supported by Tiedtke and Bechtold (threaded
+    # in _resolve_convection).  SENTINEL: ``None`` (default) = use each scheme's
+    # OWN default (Tiedtke 0.0 = legacy no-split; Bechtold 0.7 = ON, the #929
+    # anvil-drain fix); an EXPLICIT value overrides it (0.0 forces the legacy
+    # detrain-all path, dq_r None).  ``None`` distinguishes "unset" from an
+    # explicit 0.0 so Bechtold's ON-by-default is not silently disabled.
+    convective_precip_efficiency: float | None = None
 
     # Tiedtke plume buoyancy-death memory: when True the entraining plume,
     # once it exhausts its cumulative buoyancy budget, stays dead instead of

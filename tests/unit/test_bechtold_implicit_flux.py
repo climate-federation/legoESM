@@ -194,9 +194,16 @@ def test_bechtold_implicit_mse_conservation_within_tolerance():
             ),
             moisture_convergence=jnp.zeros_like(T),
         )
+        # The latent-heat sink C is the FULL detrained condensate: with the
+        # default #929 rain split (precip_efficiency=0.7) precip_efficiency of
+        # it moves from dq_c_conv_dt into dq_r_conv_dt, but the latent heat of
+        # ALL of it is already booked in dT_dt (H), so the enthalpy budget must
+        # sum dq_c + dq_r (the split re-partitions water downstream; it does
+        # not change the scheme's internal energy balance).
+        _dqr = out.dq_r_conv_dt if out.dq_r_conv_dt is not None else 0.0
         H = float(jnp.sum(out.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
         Q = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
-        C = float(jnp.sum(out.dq_c_conv_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+        C = float(jnp.sum((out.dq_c_conv_dt + _dqr) * dp / constants.g, axis=1).mean()) * constants.L_v
         return abs(H + Q + C) / (abs(H) + abs(Q) + abs(C) + 1e-10)
 
     rel_impl = _rel("implicit_flux")

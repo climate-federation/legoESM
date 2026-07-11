@@ -707,21 +707,25 @@ def test_bechtold_rain_split_conserves_total_condensate():
     """Split re-partitions the detrained condensate; column total water is
     unchanged.  PE=0 returns the legacy suspended-cloud source
     ``max(dq_c_raw, 0)``; at PE=0.7 the anvil remainder + the rain fraction
-    reconstruct that legacy source.
+    are EXACT fractions of that legacy source, so together they hold all of it.
 
-    The split is ``a*(1-pe) + a*pe`` (the spec / tiedtke form), which rounds
-    to ~1 ULP — NOT literally bit-identical — so total-condensate
-    conservation is asserted at MACHINE PRECISION (a real water leak from a
-    wrong split fraction would be O(pe), orders of magnitude larger)."""
+    Asserted via the two PIECES separately (each is a bit-exact fraction of the
+    legacy total — same op on the same operand as the scheme), NOT via the
+    ``a*(1-pe)+a*pe`` reconstruction SUM, which rounds to ~1 ULP and would fail
+    an fp32 rtol.  A real water leak from a wrong split fraction would move a
+    piece by O(pe), far outside any rounding."""
+    pe = jnp.clip(jnp.asarray(0.7), 0.0, 1.0)
     legacy = _run_pe(0.0).dq_c_conv_dt  # == jnp.maximum(dq_c_raw, 0.0)
     assert float(jnp.max(legacy)) > 0.0, "fixture must fire convection (dq_c>0)"
     out = _run_pe(0.7)
-    recon = out.dq_c_conv_dt + out.dq_r_conv_dt
-    max_rel = float(
-        jnp.max(jnp.abs(recon - legacy) / jnp.where(legacy > 0.0, legacy, 1.0))
+    # dq_r is EXACTLY pe*legacy and the anvil remainder EXACTLY (1-pe)*legacy;
+    # their fractions sum to 1, so total condensate is conserved with no water
+    # created or destroyed (precision-independent — holds in fp32 and fp64).
+    assert jnp.array_equal(out.dq_r_conv_dt, legacy * pe), (
+        "rain fraction != PE * legacy condensate (water not conserved)"
     )
-    assert jnp.allclose(recon, legacy, rtol=1e-13, atol=1e-30), (
-        f"rain split changed column total condensate: max rel err {max_rel:.2e}"
+    assert jnp.array_equal(out.dq_c_conv_dt, legacy * (1.0 - pe)), (
+        "anvil remainder != (1-PE) * legacy condensate (water not conserved)"
     )
 
 
