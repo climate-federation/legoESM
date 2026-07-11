@@ -22,6 +22,14 @@ PRODUCTION artifact; the record carries ``segment_mode=true`` +
 ``per_block_ms`` and the per-device geometry bytes (replicated vs
 band-sharded) computed from the real band-grid shapes.
 
+Receipt honesty: a segment whose in-graph finite scalar reports a non-finite
+state STOPS the timed loop and stamps the record ``finite_ok=false`` +
+``valid=false`` (with ``completed_blocks`` saying how far it got, a
+``diverged: ...`` entry under ``metadata._incomplete``, and nulled
+``sypd``/``mcells_per_s``) — a diverging trajectory is never serialized as
+valid scaling data.  The default fused lane has no in-graph finite check, so
+its rows carry ``finite_ok=null``.
+
 Device count is fixed at process start, so each n_devices runs as a SEPARATE
 process (one sbatch step per count); this script benches ONE n_devices and
 appends a JSON line. JAX_PLATFORMS=cpu with --xla_force_host_platform_device_count
@@ -222,6 +230,8 @@ def main() -> int:
                                             physics_fn=physics_fn)
 
     per_block_ms = None
+    completed_blocks = None
+    finite_ok = None   # default fused lane: no in-graph finite check -> null
     timing = None   # metadata.timed_scan_blocks metrics (default lane only)
     if seg_n > 0:
         # Multi-controller: align every process before the timed loop so
@@ -235,20 +245,36 @@ def main() -> int:
         # steps; the host sync per block is the production pattern — read the
         # in-graph finite SCALAR, then block on the state for honest timing.
         per_block_ms = []
+        finite_ok = True
         for i in range(args.steps):
             t0 = time.perf_counter()
             c, ok = seg_fn(c, args.dt)
-            finite_ok = bool(ok)
+            ok_b = bool(ok)
             _block(c)
             per_block_ms.append((time.perf_counter() - t0) * 1e3)
+            if not ok_b:
+                # A non-finite state poisons every later block: stop timing
+                # and mark the whole record invalid — a warning alone let a
+                # diverging trajectory serialize as valid scaling data, and
+                # an early false was even forgotten by later true blocks
+                # (codex batch4).
+                finite_ok = False
+                print(f"[warn] segment finite scalar FALSE after block {i} "
+                      f"(step {(i + 1) * seg_n}) — stopping the timed loop; "
+                      "the record is marked INVALID (finite_ok=false, "
+                      "valid=false) and its throughput fields are nulled")
+                break
+        completed_blocks = len(per_block_ms)
         per_step_ms = [b / seg_n for b in per_block_ms]
-        if not finite_ok:
-            print("[warn] segment finite scalar reported a non-finite state "
-                  "— per-step numbers describe a diverging run")
         if jax.process_count() > 1:
             from jax.experimental import multihost_utils
             multihost_utils.sync_global_devices("atm_latlon_spmd_bench_end")
         steady = per_step_ms[args.warmup:]
+        if not steady:
+            # Divergence stopped the run inside the warmup window — fall back
+            # to every completed unit (the record is already marked invalid;
+            # this only keeps the diagnostic median well-defined).
+            steady = per_step_ms
         med = float(np.median(steady))
     else:
         # Measurement contract (scaling audit gaps #1/#2): fused ``lax.scan``
@@ -267,6 +293,12 @@ def main() -> int:
         # kept for the aggregators.
         med = float(timing["fused_step_ms"])
 
+    # valid=false ONLY on an observed non-finite state; the default fused
+    # lane (finite_ok=None: unchecked) stays valid.
+    valid = finite_ok is not False
+    # A diverging segment run's med is not a measurement: feed the bound
+    # honest nulls (its flat throughput twins are nulled after assembly).
+    _measured_med = med if valid else None
     # Honest per-device geometry residency (from the real band-grid shapes):
     # the default lane replicates all-band stacks; the segment lane shards.
     geom_bytes = (atm_latlon_geometry_bytes(model.grid, nd) if nd > 1
@@ -297,9 +329,13 @@ def main() -> int:
         bytes_are_lower_bound=_bytes_lower,
     )
     bound_rec = calibrated_bound(
-        measured_fused_step_ms=med,
-        single_device_fused_step_ms=(med if nd == 1
-                                     else args.single_dev_fused_ms),
+        measured_fused_step_ms=_measured_med,
+        # Invalid rows feed the bound NOTHING: even the CLI-provided nd=1
+        # baseline is withheld so bound_ingredients.compute_ms cannot dress
+        # a diverging row up as a modelled one (codex).
+        single_device_fused_step_ms=(
+            _measured_med if nd == 1
+            else (args.single_dev_fused_ms if valid else None)),
         halo_messages_per_step=comm_rec["halo_messages_per_step"],
         halo_bytes_per_step=comm_rec["halo_bytes_per_step"],
         n_reductions_per_step=_nred,
@@ -319,6 +355,13 @@ def main() -> int:
         multicontroller=bool(args.multicontroller),
         segment_mode=(seg_n > 0),
         segment_steps=(seg_n if seg_n > 0 else None),
+        # Measurement validity (codex batch4): finite_ok is the ACCUMULATED
+        # in-graph finite verdict (null in the unchecked default fused lane);
+        # valid=false marks the row as NOT scaling data; completed_blocks
+        # says where a diverging segment run stopped.
+        finite_ok=finite_ok,
+        valid=valid,
+        completed_blocks=completed_blocks,
         steady_median_ms=round(med, 4),
         cells=n_lat * args.n_lon * args.nlev,
     )
@@ -352,6 +395,18 @@ def main() -> int:
     )
     # Increment-2 accounting fields (audit items 4/8), flat for aggregators.
     rec.update(**comm_rec, **bound_rec)
+    if not valid:
+        # Throughput derived from a diverging trajectory is not a
+        # measurement: null it explicitly so aggregators cannot ingest it
+        # even if they miss the valid flag (codex batch4) — including the
+        # M1 fused/per-step-time keys plotters fall back to
+        # (time_per_step_ms, steady_min_ms) and the med-derived bound
+        # diagnostics (already null via the _measured_med feed above).
+        for _k in ("sypd", "mcells_per_s", "time_per_step_ms",
+                   "steady_min_ms", "fused_step_ms", "step_latency_ms",
+                   "t_bound_ms", "measured_over_bound"):
+            if _k in rec:
+                rec[_k] = None
     from legoesm.parallel.early_init import nccl_transport_report
     _nccl_report = nccl_transport_report()
     rec["metadata"] = annotate_incomplete(scaling_metadata(
@@ -375,10 +430,14 @@ def main() -> int:
             "warmup": args.warmup,
             "multicontroller": bool(args.multicontroller),
             # M2b compiled-segment lane facts: a segment row is falsifiable
-            # from the record alone (block timings + geometry residency).
+            # from the record alone (block timings + geometry residency +
+            # the finite/validity verdict — codex batch4).
             "segment_mode": seg_n > 0,
             "segment_steps": (seg_n if seg_n > 0 else None),
             "geometry_bytes_per_device": geom_bytes,
+            "finite_ok": finite_ok,
+            "valid": valid,
+            "completed_blocks": completed_blocks,
             # Route-B transport facts (socket-fallback flag): a
             # multi-node row without an NCCL net plugin is
             # falsifiable from the record alone.
@@ -387,6 +446,13 @@ def main() -> int:
             "cells_per_device": (n_lat // nd) * args.n_lon * args.nlev,
         },
     ))
+    if not valid:
+        # Divergence reason on the aggregator-facing incomplete list (the
+        # same channel annotate_incomplete uses for missing metadata).
+        rec["metadata"].setdefault("_incomplete", []).append(
+            f"diverged: segment finite scalar false after block "
+            f"{completed_blocks - 1} of {args.steps} — timings describe a "
+            "non-finite trajectory, not valid scaling data")
     # Multi-controller: every process times the same program; process 0 owns
     # the JSONL + stdout (others would duplicate/corrupt the append).
     if jax.process_index() == 0:
@@ -395,8 +461,10 @@ def main() -> int:
             f.write(json.dumps(rec) + "\n")
         print(json.dumps(rec))
         seg_note = (f" segment[{seg_n}-step blocks]" if seg_n > 0 else "")
+        invalid_note = ("" if valid
+                        else " INVALID[diverged: finite_ok=false]")
         head = (f"[nd={nd} {args.mode} {n_lat}x{args.n_lon}x{args.nlev}"
-                f"{seg_note}] ")
+                f"{seg_note}]{invalid_note} ")
         if seg_n > 0:
             print(head +
                   f"compile={rec['compile_ms']}ms "
