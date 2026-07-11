@@ -1019,6 +1019,23 @@ def _make_nonhydrostatic_convection(
         # previous instant-fall assumption (Option C). Models with
         # ``n_tracers < 2`` (dry or vapor-only runs) silently omit the
         # ``q_c`` write — there is no slot to receive it.
+        # #929: a mass-flux rain-SPLITTING scheme (bechtold/tiedtke with
+        # precip_efficiency>0) emits a separate in-updraft RAIN source
+        # ``dq_r_conv_dt`` that MUST be booked — bechtold's dq_v is NOT
+        # -(dq_c+dq_r) pointwise (separate compensating-subsidence + rain-evap
+        # terms), so silently dropping dq_r here would leak column water.  A
+        # condensate-less state (n_tracers < 2) has no q_c/q_r slot to receive
+        # it -> unsupported config; raise LOUDLY (static Python on n_tracers +
+        # dq_r-is-None; no silent coerce, no invented re-evaporation).  Only
+        # fires when dq_r is present (sbm/dca/kuo emit None -> no raise).
+        if conv_out.dq_r_conv_dt is not None and n_tracers < 2:
+            raise ValueError(
+                "convection emitted a rain-split source (dq_r_conv_dt) but the "
+                f"non-hydro state has no condensate tracer (n_tracers={n_tracers} < 2) "
+                "to receive it; a mass-flux rain-splitting scheme "
+                "(bechtold/tiedtke, precip_efficiency>0) needs at least a q_c "
+                "tracer. Set precip_efficiency=0 or add a condensate tracer."
+            )
         dtracers = jnp.zeros_like(tracers)
         if n_tracers > 0:
             dq_v_dt = conv_out.dq_v_dt.reshape(shape_3d)
@@ -1425,6 +1442,20 @@ def _make_spectral_pe_convection(
                         )
                     else:
                         tt["q_c"] = _qc_t + _dq_r_grid.astype(_qc_t.dtype)
+                else:
+                    # #929: neither a q_r nor a q_c tracer to hold the convective
+                    # rain split; bechtold's dq_v is NOT -(dq_c+dq_r) pointwise,
+                    # so dropping dq_r would leak column water.  Unsupported
+                    # config -> raise LOUDLY (static Python on the tracer keys +
+                    # dq_r-is-None; no silent coerce, no invented re-evaporation).
+                    raise ValueError(
+                        "convection emitted a rain-split source (dq_r_conv_dt) "
+                        "but the spectral state has neither a q_r nor a q_c "
+                        "tracer to receive the convective rain split; a "
+                        "mass-flux rain-splitting scheme (bechtold/tiedtke, "
+                        "precip_efficiency>0) needs at least a q_c tracer. Set "
+                        "precip_efficiency=0 or add a condensate tracer."
+                    )
             # Mirror untouched tracers as zeros so the dycore RHS sees a
             # complete tracer pytree (the orchestrator's accumulation
             # also requires matching keys across modules).

@@ -631,7 +631,19 @@ class TestSpectralPECMT:
 def profile_scheme_config(request):
     """Yield a (name, ConvectionConfig) pair for each new scheme."""
     name, scheme_field, scheme_cls = request.param
-    kwargs = {scheme_field: scheme_cls()}
+    # #929: this dispatch / finite-output regression shares one condensate-less
+    # (``q_v``-only) spectral state across all five schemes.  Default Bechtold
+    # now emits an in-updraft rain split (``precip_efficiency=0.7``) that the
+    # spectral bridge REQUIRES a ``q_c``/``q_r`` tracer to receive — otherwise
+    # it raises loudly rather than silently leaking the un-booked rain water.
+    # Pin ``precip_efficiency=0.0`` here so Bechtold exercises its pre-#929
+    # no-split dispatch path on this condensate-less state; the rain-split
+    # routing and the raise are covered by
+    # ``test_convection_rain_split_bridges.py``.
+    if scheme_cls is BechtoldConfig:
+        kwargs = {scheme_field: scheme_cls(precip_efficiency=0.0)}
+    else:
+        kwargs = {scheme_field: scheme_cls()}
     return name, ConvectionConfig(scheme=name, **kwargs)
 
 

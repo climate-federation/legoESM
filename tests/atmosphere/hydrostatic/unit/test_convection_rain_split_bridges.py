@@ -29,6 +29,7 @@ exactly.
 """
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -82,9 +83,17 @@ def _fp64_policy():
     state builders honour ``get_policy().storage``, so pin fp64 for the state
     construction, then restore the prior policy."""
     prev = get_policy()
+    prev_x64 = jax.config.jax_enable_x64
     set_policy(PrecisionPolicy.fp64())
-    yield
-    set_policy(prev)
+    try:
+        yield
+    finally:
+        set_policy(prev)
+        # set_policy restores the policy OBJECT but NOT the global
+        # jax_enable_x64 flag it flipped to run fp64, so x64 would leak into
+        # later fp32 tests in the same process (codex #956/#929).  Restore the
+        # flag explicitly.
+        jax.config.update("jax_enable_x64", prev_x64)
 
 
 def _firing_T_qv(sigma_full, horiz_shape):
@@ -194,7 +203,9 @@ def test_hydrostatic_bridge_routes_rain_to_qr_only_when_split_on():
 # Non-hydrostatic bridge (tracers = array; slot 0=q_v, 1=q_c, 2=q_r)
 # ---------------------------------------------------------------------------
 
-def _run_nonhydrostatic(pe, n_tracers):
+def _build_nonhydrostatic_firing_state(n_tracers):
+    """Conditionally-unstable firing non-hydro state with ``n_tracers`` tracer
+    slots (slot 0=q_v; slot 1=q_c and slot 2=q_r when present)."""
     n, nlev = _N_CUBE, _N_LEV
     grid = create_cubed_sphere(n)
     hc = create_height_coordinate(nlev, _NH_DOMAIN_TOP_M)
@@ -241,6 +252,11 @@ def _run_nonhydrostatic(pe, n_tracers):
         tracers=Field(data=tracers_arr, name="tracers", dims=dims_tr,
                       units="kg/kg"),
     )
+    return state, grid, hc, terrain_metric
+
+
+def _run_nonhydrostatic(pe, n_tracers):
+    state, grid, hc, terrain_metric = _build_nonhydrostatic_firing_state(n_tracers)
     tend, _ = _bechtold_bridge(pe, "nonhydrostatic")(
         state, grid, hc, terrain_metric,
     )
@@ -274,7 +290,9 @@ def test_nonhydrostatic_bridge_conserves_condensate_qr_slot():
 # Spectral-PE bridge (tracers = name-keyed dict; q_c emitted iff "q_c" present)
 # ---------------------------------------------------------------------------
 
-def _run_spectral(pe, with_qr):
+def _build_spectral_firing_state(include_qc, include_qr):
+    """Conditionally-unstable firing spectral state; the ``q_c`` / ``q_r``
+    tracers are included per the flags (``q_v`` is always present)."""
     grid = create_gaussian_grid(n_max=_GAUSSIAN_NMAX)
     sigma = create_sigma_coordinate(_N_LEV)
     rest = isothermal_rest_state_spectral(grid, sigma, perturbation_amplitude=0.0)
@@ -284,15 +302,20 @@ def _run_spectral(pe, with_qr):
     t_hat = sh_analysis_3d(grid, t_grid)
     dims = ("lat", "lon", "level")
     zeros = jnp.zeros((n_lat, n_lon, nlev), dtype=_DTYPE)
-    tracers = {
-        "q_v": Field(data=q_v_grid, name="q_v", dims=dims, units="kg/kg"),
-        "q_c": Field(data=zeros, name="q_c", dims=dims, units="kg/kg"),
-    }
-    if with_qr:
+    tracers = {"q_v": Field(data=q_v_grid, name="q_v", dims=dims, units="kg/kg")}
+    if include_qc:
+        tracers["q_c"] = Field(data=zeros, name="q_c", dims=dims, units="kg/kg")
+    if include_qr:
         tracers["q_r"] = Field(data=zeros, name="q_r", dims=dims, units="kg/kg")
     state = rest._replace(
         T_hat=rest.T_hat.replace(data=t_hat), tracers=tracers,
     )
+    return state, grid, sigma
+
+
+def _run_spectral(pe, with_qr):
+    state, grid, sigma = _build_spectral_firing_state(
+        include_qc=True, include_qr=with_qr)
     tend, _ = _bechtold_bridge(pe, "spectral_pe")(state, grid, sigma)
     return tend.tracers
 
@@ -321,3 +344,36 @@ def test_spectral_bridge_conserves_condensate_qr_tracer():
     s7 = _spectral_total(_run_spectral(0.7, with_qr=True))
     assert s0 > 0.0, "spectral state did not fire Bechtold (vacuous test)"
     assert s7 == pytest.approx(s0, rel=_RTOL)
+
+
+# ---------------------------------------------------------------------------
+# #929: a rain-splitting scheme (bechtold/tiedtke, pe>0) needs a condensate
+# tracer to hold the diverted rain — a condensate-less state is an UNSUPPORTED
+# config and the bridge must raise LOUDLY (no silent water drop; bechtold's dq_v
+# is NOT -(dq_c+dq_r) pointwise, so dropping dq_r leaks column water).
+# ---------------------------------------------------------------------------
+
+def test_nonhydrostatic_bridge_raises_without_condensate_tracer():
+    """pe=0.7 emits dq_r but a vapor-only non-hydro state (n_tracers=1) has no
+    q_c/q_r slot to receive it -> loud ValueError."""
+    state, grid, hc, tm = _build_nonhydrostatic_firing_state(n_tracers=1)
+    with pytest.raises(ValueError, match="condensate"):
+        _bechtold_bridge(0.7, "nonhydrostatic")(state, grid, hc, tm)
+
+
+def test_nonhydrostatic_bridge_no_raise_when_split_off():
+    """Non-vacuity control: the guard is dq_r-GATED, not n_tracers-gated.  At
+    pe=0.0 Bechtold emits dq_r=None, so the SAME vapor-only state (n_tracers=1)
+    does NOT raise (byte-identical to the pre-#929 sbm/dca/kuo path)."""
+    state, grid, hc, tm = _build_nonhydrostatic_firing_state(n_tracers=1)
+    tend, _ = _bechtold_bridge(0.0, "nonhydrostatic")(state, grid, hc, tm)
+    assert tend is not None  # reached — no raise
+
+
+def test_spectral_bridge_raises_without_condensate_tracer():
+    """pe=0.7 emits dq_r but a q_v-only spectral state has neither a q_c nor a
+    q_r tracer to receive the convective rain split -> loud ValueError."""
+    state, grid, sigma = _build_spectral_firing_state(
+        include_qc=False, include_qr=False)
+    with pytest.raises(ValueError):
+        _bechtold_bridge(0.7, "spectral_pe")(state, grid, sigma)
