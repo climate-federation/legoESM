@@ -2577,6 +2577,8 @@ def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
     Phase 1: c_sw (C-grid half). Phase 2: p_grad_c. Phase 3: _d_sw_native (FV3 PPM + KE/vort transport).
     div_damp here is LEGACY/UNUSED (FB chain uses d_sw5 d2_bg/dddmp/d4_bg/nord instead).
     DUOGRID-ONLY: raises ValueError on non-duogrid grids (see _require_duogrid_fb).
+    d_sw5 ``cross_face_halo`` deliberately NOT plumbed here — see the
+    fv3_fb_sw_step docstring NOTE (destabilizes the 120d modon; research-only).
     """
     _require_duogrid_fb(cdgrid, "fv3_forward_backward_step")
 
@@ -3271,6 +3273,15 @@ def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
     Phase 1: c_sw (dt/2). Phase 2: p_grad_c (dt/2). Phase 3: _d_sw_native d_sw1-6 chain.
     div_damp LEGACY/UNUSED (FB uses d_sw5 d2_bg/dddmp/d4_bg/nord); damp_v / nord_v for vorticity damping.
     DUOGRID-ONLY: raises ValueError on non-duogrid grids (see _require_duogrid_fb).
+
+    NOTE (codex 2026-07-10 F5): the d_sw5 ``cross_face_halo`` option
+    (Fortran's attenuated cross-face divergence ghost, dyn_core.F90:651)
+    is deliberately NOT plumbed to this entry point or any model config:
+    the faithful attenuated ghost measurably DESTABILIZES the 120-day
+    colliding-modon run, while the default zero-ring ghost runs clean —
+    truth tier over oracle tier.  ``cross_face_halo=True`` is
+    research-only via a direct ``d_sw5_corner_divergence`` call (nord=1
+    only; raises on nord>=2).
     """
     _require_duogrid_fb(cdgrid, "fv3_fb_sw_step")
     dt2 = 0.5 * dt
