@@ -287,12 +287,16 @@ def si_correction(
     div_hat_explicit = state_explicit.div_hat.data  # (n_sh, nlev)
     div_hat_old = state_old.div_hat.data            # (n_sh, nlev)
 
-    # The Hoskins-Simmons SI correction solves:
-    # (I + alpha^2*dt^2*eigenvalue[n]*Gamma) * D_new = D_explicit + alpha^2*dt^2*eigenvalue[n]*Gamma * D_old
+    # The Hoskins-Simmons SI correction solves the trapezoidal (theta-method)
+    # Helmholtz system for the linearized gravity-wave subsystem:
     #
-    # This ensures only the TENDENCY is implicitly modified, not the full state:
-    # D_new = D_old + (I + M)^{-1} * dt * F(X_old)
-    # where M = alpha^2 * dt^2 * eigenvalue * Gamma.
+    #   (I + M) * D_new = D_explicit - ((1-alpha)/alpha) * M * D_old
+    #
+    # where M = alpha^2 * dt^2 * eigenvalue[n] * Gamma and D_explicit is the
+    # forward-Euler predictor D_old + dt*F(X_old). This is the theta-method:
+    # alpha=0.5 is Crank-Nicolson (neutral, |lambda|=1); alpha>0.5 damps.
+    # (The earlier "+ M*D_old" RHS was a forward-Euler-amplifying increment,
+    # unconditionally unstable for the gravity wave -- see issue #920.)
 
     # Map each SH coefficient to its total wavenumber n
     ns = grid.ls  # (n_sh,) -- total wavenumber for each coefficient
@@ -301,20 +305,23 @@ def si_correction(
     # si_matrices: (n_max+1, nlev, nlev), ns: (n_sh,)
     matrices = si_data.si_matrices[ns]  # (n_sh, nlev, nlev)
 
-    # Build RHS: D_explicit + M * D_old
+    # Build RHS: D_explicit - ((1-alpha)/alpha) * M * D_old   (theta-method)
     # M * D_old = (matrices - I) * D_old
     I_nlev = jnp.eye(matrices.shape[-1], dtype=matrices.dtype)
     M_times_D_old = jnp.einsum('...ij,...j->...i', matrices - I_nlev, div_hat_old)
-    rhs = div_hat_explicit + M_times_D_old
+    rhs = div_hat_explicit - ((1.0 - alpha) / alpha) * M_times_D_old
 
     # Solve: matrices @ div_corrected = rhs (per coefficient)
     div_hat_corrected = solve(matrices, rhs[..., None]).squeeze(-1)
 
-    # Divergence correction
-    delta_div = div_hat_corrected - div_hat_explicit  # (n_sh, nlev)
+    # Divergence correction (measured off the OLD stage state, not the explicit
+    # predictor: the trapezoidal correction is the full implicit increment
+    # D_corrected - D_old; measuring off D_explicit double-counts the explicit
+    # gravity-wave increment already in D_explicit -- see issue #920.)
+    delta_div = div_hat_corrected - div_hat_old  # (n_sh, nlev)
 
     # Temperature correction:
-    # T_corrected = T_explicit - alpha*dt*T_ref*(D_corrected - D_explicit)
+    # T_corrected = T_explicit - alpha*dt*T_ref*(D_corrected - D_old)
     T_hat_corrected = state_explicit.T_hat.data - alpha * dt * T_ref * delta_div
 
     # Surface pressure (lnps) correction:
