@@ -3858,9 +3858,15 @@ def main() -> int:
     # GLOBAL state UNCHANGED.  n_lat is already SPMD-divisible (build_tripole
     # south-padded it; the latlon branch errored on a non-divisible --latlon-res).
     # ------------------------------------------------------------------
-    _ocean_step = (lambda st, sf, fw, t_sec=None:
-                   model.step(st, dt, surface_forcing=sf, freshwater=fw,
-                              t_seconds=t_sec))
+    if app_grid_type == "mpas":
+        # MPASOceanModel.step has no t_seconds (dm2dc, its only consumer, is
+        # arg-gated to tripole/latlon) -- passing it TypeErrors at step 1.
+        _ocean_step = (lambda st, sf, fw, t_sec=None:
+                       model.step(st, dt, surface_forcing=sf, freshwater=fw))
+    else:
+        _ocean_step = (lambda st, sf, fw, t_sec=None:
+                       model.step(st, dt, surface_forcing=sf, freshwater=fw,
+                                  t_seconds=t_sec))
     if args.n_gpus > 1:
         if app_grid_type not in ("tripole", "latlon"):
             raise SystemExit(
