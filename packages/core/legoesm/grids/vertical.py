@@ -2236,6 +2236,60 @@ def vertical_advection_hybrid(
     return -F_full * grad
 
 
+def vertical_advection_theta_hybrid(
+    T: jax.Array,
+    mass_flux: jax.Array,
+    p_s: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+) -> jax.Array:
+    """Combined vertical advection + adiabatic mass-flux term for T (hybrid).
+
+    Hybrid-coordinate mirror of :func:`vertical_advection_theta`.  Instead of
+    computing  -F·∂T/∂p  and  κ·T·F/p  separately (which involves catastrophic
+    cancellation at upper levels where 1/p → ∞), this advects potential
+    temperature θ and converts back:
+
+        -F·∂T/∂p + κ·T·F/p  =  -(p/p₀)^κ · F·∂θ/∂p
+
+    with θ = T·(p₀/p)^κ.  This is the *same continuous operator* — no sign
+    flip — but it cancels the two large, near-equal terms **before**
+    discretization, so it eliminates the 1/p amplification of the mismatched-
+    stencil 2Δz residual at the stretched top levels (#930).  The σ-convention
+    (index 0 = model top, F > 0 downward) is inherited verbatim from the reused
+    :func:`vertical_advection_hybrid`.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature, shape (..., nlev).
+    mass_flux : jax.Array
+        Mass flux at half-levels from :func:`compute_mass_flux_hybrid`,
+        shape (..., nlev+1).
+    p_s : jax.Array
+        Surface pressure, shape (...,).
+    coord : HybridSigmaPressureCoordinate
+
+    Returns
+    -------
+    jax.Array
+        Combined tendency: -F·∂T/∂p + κ·T·F/p, shape (..., nlev).
+    """
+    kappa = constants.kappa
+    P_0 = constants.p_ref
+
+    # Pressure at full levels; single exner used both directions so the
+    # θ round-trip is exact even where p_full < 1 Pa (matches the sigma
+    # sibling's ``jnp.maximum(p_full, 1.0)`` floor).
+    p_full = pressure_from_hybrid(coord, p_s, full=True)  # (..., nlev)
+    exner = (jnp.maximum(p_full, 1.0) / P_0) ** kappa  # (p/p₀)^κ
+
+    # Potential temperature θ = T / exner = T·(p₀/p)^κ
+    theta = T / exner
+
+    # Advect θ with the SAME upwind operator, then convert back: -exner·F·∂θ/∂p
+    return exner * vertical_advection_hybrid(theta, mass_flux, p_s, coord)
+
+
 def compute_omega_hybrid(
     mass_flux: jax.Array,
     p_s: jax.Array,
