@@ -2518,13 +2518,10 @@ def _record_final_state_digest(manifest_path, state) -> None:
         print(f"[warn] state_digest not recorded: {type(exc).__name__}: {exc}")
 
 
-def main() -> int:
-    # allow_abbrev=False: the module-level x64 toggle is decided by an EXACT
-    # "--fp32" argv match (``_FP32``), so the real parser must NOT accept an
-    # abbreviation (e.g. "--fp") of --fp32 — that would set args.fp32=True
-    # while x64 was already enabled, tripping the consistency guard below.
-    # All sbatch wrappers already use full flag names, so this is behaviour-
-    # preserving for existing callers.
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """CLI parser for run_omip_core2, extracted from ``main`` so the
+    argument set is unit-testable (e.g. the #939 ``--polar-filter``
+    tri-state disable). ``main`` calls this then ``parse_args``."""
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter,
                                 allow_abbrev=False)
@@ -3170,6 +3167,17 @@ def main() -> int:
     p.add_argument("--spinup-drag-days", type=float, default=0.0,
                    help="Duration [days] of the spin-up velocity-damping phase "
                         "(drag removed afterwards -> free run).")
+    return p
+
+
+def main() -> int:
+    # allow_abbrev=False: the module-level x64 toggle is decided by an EXACT
+    # "--fp32" argv match (``_FP32``), so the real parser must NOT accept an
+    # abbreviation (e.g. "--fp") of --fp32 — that would set args.fp32=True
+    # while x64 was already enabled, tripping the consistency guard below.
+    # All sbatch wrappers already use full flag names, so this is behaviour-
+    # preserving for existing callers.
+    p = _build_arg_parser()
     args = p.parse_args()
 
     # KPP MLD-deepening sensitivity flags are mpas-only (fail loud, never silent).

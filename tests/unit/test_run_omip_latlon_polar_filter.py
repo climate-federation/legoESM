@@ -16,6 +16,8 @@ reachable in a unit test -- covered instead by the non-bathy assertion below
 
 from __future__ import annotations
 
+import argparse
+
 from scripts.run.run_omip import _create_setup
 
 _RES = "18x36"  # coarse: the polar-filter default is resolution-independent
@@ -54,3 +56,21 @@ def test_latlon_bathy_polar_filter_stays_overridable_off():
     (change ONLY the filter, per the issue's own validation plan) impossible."""
     cfg = _latlon_config(use_bathymetry=True).replace_flat(use_polar_filter=False)
     assert cfg.polar_filter.use_polar_filter is False
+
+
+def test_polar_filter_flag_is_tristate_can_disable():
+    """The REAL run_omip_core2 --polar-filter arg must be tri-state so an
+    operator can force the filter OFF.  store_true (the codex #939 finding)
+    could only force ON, so with the new bathy default there was no disable.
+    Assert the actual parser action + parse results (this FAILS against the old
+    store_true; the config-level test above cannot catch that regression)."""
+    from scripts.run.run_omip_core2 import _build_arg_parser
+
+    p = _build_arg_parser()
+    action = next(a for a in p._actions
+                  if "--polar-filter" in getattr(a, "option_strings", []))
+    assert isinstance(action, argparse.BooleanOptionalAction)
+    assert action.default is None                                  # -> config default (bathy ON)
+    assert p.parse_args(["--no-polar-filter"]).polar_filter is False   # #939 A/B disable
+    assert p.parse_args(["--polar-filter"]).polar_filter is True
+    assert p.parse_args([]).polar_filter is None
