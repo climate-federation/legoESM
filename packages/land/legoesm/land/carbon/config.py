@@ -18,7 +18,7 @@ __param_spec__ = {
             "C_som_init": "initial condition: carbon pool [gC/m2]",
             "C_wood_init": "initial condition: carbon pool [gC/m2]",
             "T_ref": "heterotrophic (soil-decomposition) reference temperature [K]",
-            "T_ref_ra": "autotrophic maintenance-respiration reference temperature [K] (measurement convention, 25 degC; not trained)",
+            "T_ref_ra": "autotrophic maintenance-respiration reference temperature [K]; fixed normalization confounded with the bulk r_maint_* amplitudes (25 degC; not trained)",
             "som_freeze_width_K": "numerics: SOM freeze-suppression curve half-width [K]",
         },
         "params": {
@@ -98,9 +98,9 @@ class CarbonConfig(NamedTuple):
     K_CO2: float = 400.0          # CO2 half-saturation constant [ppmv]
 
     # --- Autotrophic respiration ---
-    # BULK EFFECTIVE maintenance-respiration coefficients [day^-1] referenced to
-    # ``T_ref_ra`` (25 degC), RECALIBRATED (not tissue-measured) so the coupled
-    # equilibrium carbon-use efficiency CUE = NPP/GPP matches the observed
+    # BULK EFFECTIVE maintenance-respiration coefficients [day^-1] referenced to the
+    # ``T_ref_ra`` normalization, RECALIBRATED (not tissue-measured) so the coupled
+    # equilibrium carbon-use efficiency CUE = NPP/GPP TARGETS the observed
     # cross-biome ~0.40-0.50 (He et al. 2018; Collalti & Prentice 2019) instead of
     # the former unphysical ~0.11.  In the SimpleSEB / archetype path GPP is GROSS
     # (leaf dark respiration NOT subtracted), so ``r_maint_fol`` represents the
@@ -108,7 +108,7 @@ class CarbonConfig(NamedTuple):
     # NON-IDENTIFIABLE together, so the reference is FIXED (excluded) and these
     # magnitudes carry the calibration (tunable, tier 2).  The prior values (0.005
     # / 0.002 / 5e-5) left maintenance ~76% of GPP even in healthy forests, driving
-    # CUE to ~0.11 and 49/187 archetypes to negative NPP.
+    # CUE to ~0.11 (with dozens of archetypes at negative NPP).
     f_auto: float = 0.28          # Growth respiration fraction of net assimilation
     r_maint_fol: float = 0.002    # Foliage maintenance respiration rate [day^-1]
     r_maint_root: float = 0.0008  # Root maintenance respiration rate [day^-1]
@@ -196,30 +196,30 @@ class CarbonConfig(NamedTuple):
     Q10_het_exp: float = 0.09
     moisture_factor: float = 0.5  # Moisture scaling strength
     T_ref: float = 283.15         # HETEROTROPHIC (soil-decomposition) reference T [K]
-    # Autotrophic maintenance-respiration reference temperature [K], STRUCTURALLY
-    # DECOUPLED from the heterotrophic ``T_ref`` above.  Autotrophic and
-    # heterotrophic respiration have DIFFERENT temperature references, so a single
-    # shared reference is a modelling error: the former code shared the 10 degC
-    # (283.15 K) heterotrophic CENTURY reference for the AUTOTROPHIC term, which
-    # inflated warm-land maintenance respiration by exp(Q10_exp*(T-283.15)) ~
-    # 1.8-2.2x in the tropics -- a SPURIOUS spatial pattern.  Fixed here at 25 degC,
-    # the standard leaf/tissue dark-respiration normalization (leaf R_d; Ryan 1991;
-    # Atkin & Tjoelker 2003); maintenance-respiration DALEC variants use a 20-25
-    # degC leaf reference (e.g. Famiglietti et al. 2021 use 20 degC), so 25 degC is
-    # within the literature range for the dominant foliar term.
-    #
-    # HONEST provenance note: raising the reference 10->25 degC is mathematically a
-    # UNIFORM exp(-Q10_exp*15)=0.549 rescaling of the whole maintenance curve (NOT a
-    # warm-only correction).  The reference and the bulk ``r_maint_*`` magnitudes
-    # are NON-IDENTIFIABLE, so the reference is FIXED (excluded from training) and
-    # the effective magnitudes carry the calibration (see ``r_maint_*``, recalibrated
-    # to observed CUE).  The root/wood maintenance is driven by top-soil T
-    # (multilayer_land) and is treated as a bulk effective coefficient at this
-    # reference, not a literal 25 degC tissue measurement.  Net effect (reference
-    # decoupling + magnitude recalibration): CUE ~0.11 -> ~0.4, negative NPP
-    # eliminated, and soil carbon rises via the higher litter input -- the
-    # heterotrophic decomposition RATES are unchanged, though the COUPLED equilibrium
-    # SOC still shifts (cold > warm preserved).
+    # Autotrophic maintenance-respiration reference temperature [K].  This is a
+    # FIXED NORMALIZATION of the temperature response exp(Q10_exp*(T-T_ref_ra)): it
+    # sets ONLY the overall magnitude (a uniform exp(-Q10_exp*dref) factor at every
+    # T) and is EXACTLY CONFOUNDED with the bulk ``r_maint_*`` amplitudes, so it does
+    # NOT change the temperature-response SHAPE or the warm/cold spatial pattern
+    # (that pattern is set by ``Q10_exp``, which is unchanged).  It is given its OWN
+    # constant -- separate from the heterotrophic ``T_ref`` -- so the autotrophic
+    # calibration stays INDEPENDENT of the heterotrophic configuration (retuning soil
+    # decomposition must not perturb ``R_maint``); the previous code reused the
+    # 10 degC (283.15 K) heterotrophic CENTURY reference here, coupling the two.
+    # FIXED (not trained; see __param_spec__ excluded) precisely BECAUSE it is
+    # non-identifiable with the rate amplitudes -- the amplitudes carry the
+    # calibration.  25 degC is the standard leaf/tissue dark-respiration
+    # normalization (leaf R_d; Ryan 1991; Atkin & Tjoelker 2003; maintenance-resp
+    # DALEC variants use a 20-25 degC leaf reference, e.g. Famiglietti et al. 2021 at
+    # 20 degC), a physically recognizable choice for the dominant foliar term;
+    # root/wood are driven by top-soil T (multilayer_land) and are bulk effective
+    # coefficients at this reference, not literal 25 degC tissue measurements.
+    # Net effect (this fixed normalization together with the recalibrated
+    # ``r_maint_*``): a uniform ~0.22x reduction of the maintenance-respiration
+    # MAGNITUDE, so the coupled-equilibrium CUE TARGETS the observed ~0.45 (it was
+    # ~0.11 with maintenance ~76% of GPP).  Soil carbon rises via the higher litter
+    # input while the heterotrophic decomposition RATES stay unchanged (the coupled
+    # equilibrium SOC still shifts, cold > warm preserved).
     T_ref_ra: float = 298.15
     precip_ref: float = 3e-5      # Reference precipitation rate [kg/m2/s]
     moist_modifier_min: float = 0.1  # Lower clip on moisture modifier
