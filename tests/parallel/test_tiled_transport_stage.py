@@ -422,3 +422,23 @@ def test_u3d_real_courant_in_shardmap(sweep):
     np.testing.assert_allclose(
         reassembled, global_f, atol=1e-12, rtol=1e-12,
         err_msg=f"U3d real-Courant {sweep}-sweep in shard_map != global")
+
+
+def test_stage_factory_rejects_d_sw3_boundary_fix():
+    """codex 2026-07-11 F3: `make_tiled_transport_sweep_stage_2d` must
+    REFUSE the d_sw3 boundary-fix args (per-tile edge masks not yet
+    ported to the shard-map stage) — a silent no-forward would reproduce
+    the pre-fix numerics under shard_map.  Host-side tiled helpers
+    (`transport_sweep_tile_2d`/`transport_jsweep_tile_2d`) remain the
+    supported route (they take per-tile `boundary_fix_edges`)."""
+    n, kt = 8, 2
+    dummy_dx = jnp.ones((6, n, n))
+    with pytest.raises(NotImplementedError, match="edge masks"):
+        make_tiled_transport_sweep_stage_2d(
+            None, n, kt, apply_d_sw3_boundary_fix=True)
+    with pytest.raises(NotImplementedError, match="edge masks"):
+        make_tiled_transport_sweep_stage_2d(
+            None, n, kt, boundary_fix_dx_field=dummy_dx)
+    with pytest.raises(NotImplementedError, match="edge masks"):
+        make_tiled_transport_sweep_stage_2d(
+            None, n, kt, boundary_fix_edges=(True, False, False, False))

@@ -208,6 +208,9 @@ def transport_jsweep_tile_2d(vp_g, courant, rd_g, a_i, a_j, nl: int, h3: int = 4
 def make_tiled_transport_sweep_stage_2d(
     mesh, n: int, kt: int, h3: int = 4, sweep: str = "i",
     cross_nl: int | None = None,
+    apply_d_sw3_boundary_fix: bool = False,
+    boundary_fix_dx_field=None,
+    boundary_fix_edges=None,
 ):
     """Build a sharded PPM transport stage on a ``(6, kt, kt)`` mesh with axis
     names ``("face", "tile_i", "tile_j")``.
@@ -220,7 +223,25 @@ def make_tiled_transport_sweep_stage_2d(
     / ``(6, kt*nl, kt*(nl+1))`` for ``j``.  ``cross_nl=nl+1`` (the REAL
     _bgrid_ke_transport case, cross axis = the ``n+1`` CORNER axis, U3d) →
     gathered ``(6, kt*(nl+1), kt*(nl+1))``; both axes reassemble
-    lower-tile-owns-shared to ``(6, n+1, n+1)``."""
+    lower-tile-owns-shared to ``(6, n+1, n+1)``.
+
+    d_sw3 boundary fix (codex 2026-07-11 F3): the always-on one-sided edge
+    PPM overrides need PER-TILE ``boundary_fix_edges`` masks derived from
+    each tile's ``axis_index`` (only tiles touching a global face edge may
+    fire the override) — not yet ported to this shard-map stage.  Raises
+    ``NotImplementedError`` if requested, so a shard-map composition can
+    never silently reproduce the pre-fix numerics; use the host-side tiled
+    helpers (:func:`transport_sweep_tile_2d` /
+    :func:`transport_jsweep_tile_2d`), which accept the fix args per tile.
+    """
+    if (apply_d_sw3_boundary_fix or boundary_fix_dx_field is not None
+            or boundary_fix_edges is not None):
+        raise NotImplementedError(
+            "make_tiled_transport_sweep_stage_2d: shard-map per-tile edge "
+            "masks for the d_sw3 boundary fix are not yet ported — use the "
+            "host-side tiled helpers (transport_sweep_tile_2d / "
+            "transport_jsweep_tile_2d) which take per-tile "
+            "boundary_fix_edges.")
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
     if sweep not in ("i", "j"):
