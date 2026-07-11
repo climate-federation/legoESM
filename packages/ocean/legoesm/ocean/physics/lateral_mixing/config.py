@@ -380,6 +380,20 @@ class GMRediConfig(NamedTuple):
     # as ``f_res -> 0`` the scheme reduces to pure Redi.  Shared by the lat-lon
     # C-grid, MPAS and cubed-sphere GM/Redi paths.  Default False => the
     # kappa_GM object is returned untouched => BYTE-IDENTICAL.
+    #
+    # EKE-BUDGET COUPLING (lat-lon prognostic closures; codex MED-3 r2): when
+    # an EKE / GEOMETRIC closure is active, the model step scales the
+    # GM-DERIVED eddy-energy production by the SAME f_res — parameterized
+    # ``kappa*sigma^2`` via ``eke_apply_local_source(production_scale=...)``,
+    # the GEOMETRIC baroclinic conversion B_C, and the realized skew
+    # conversions (via the scaled kappa handed to the conversion builders) —
+    # so the E budget receives exactly the APE->EKE conversion the APPLIED
+    # (tapered) coefficient performs; an unscaled production would
+    # over-energise E (and hence kappa = c_k*L*sqrt(E)) relative to the
+    # realized GM work.  Redi-side terms (kappa_redi_override, -P_diss_iso,
+    # GEOMETRIC kappa_n) and the barotropic B_T (kappa_u) stay UNSCALED.
+    # See ``gm_resolution_factor`` (the single f_res definition) and
+    # ``ocean_model_latlon_cgrid`` step / ``_eke_3d_step``.
     resfn_gamma: float = 2.0
     # ^ Resolution-function width gamma (Hallberg 2013): grid points per
     # deformation radius at which GM is half-suppressed (~1-2 typical).

@@ -96,6 +96,13 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_isoneutral_K33_latlon,
 )
 from legoesm.ocean.physics.lateral_mixing.eke import eke_apply_local_source
+# Public symbol from the blessed shared "_gm_redi_common" module pattern (see
+# tests/test_no_private_cross_imports.py): the SAME Hallberg f_res definition
+# the GM/Redi tracer tendencies apply to kappa_GM, reused for the EKE-budget
+# production coupling (codex MED-3 r2) — never re-derived.
+from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+    gm_resolution_factor,
+)
 from legoesm.ocean.advection_som import som_advect_tracers
 from legoesm.ocean.conservation import ocean_conservation_fixer
 
@@ -2481,6 +2488,26 @@ class LatLonCGridOceanModel:
             if gm_cfg.eke is not None:
                 eke_cfg = gm_cfg.eke
                 lm = state.land_mask.data
+                # --- Hallberg resolution-function EKE-budget coupling (codex
+                # MED-3 r2). The tracer path applies kappa_eff = f_res*kappa
+                # (inside gm_redi_tracer_tendency_latlon); the SAME f_res must
+                # scale the GM-DERIVED eddy-energy production so the E budget
+                # receives exactly the APE->EKE conversion the APPLIED
+                # coefficient performs (MOM6 MEKE precedent). An unscaled
+                # production would over-energise E — and hence the prognostic
+                # kappa = c_k*L*sqrt(E) — relative to the realized GM work.
+                # Redi-side terms (kappa_redi_override, -P_diss_iso, GEOMETRIC
+                # kappa_n) and the barotropic B_T (kappa_u) stay UNSCALED (the
+                # taper is GM-only). Same inputs as the tendency's scaling site
+                # (broadcast grid.f, sqrt(cell area)) => bit-identical factor.
+                # Static Python gate; None (default off) => byte-identical.
+                _resfn_scale = None
+                if getattr(gm_cfg, "resolution_function", False):
+                    _resfn_scale = gm_resolution_factor(
+                        jnp.broadcast_to(_grid.f, lm.shape),
+                        jnp.sqrt(_grid.area),
+                        gm_cfg.resfn_gamma, gm_cfg.resfn_cbcl_ms,
+                    )
                 if eke_cfg.eke_3d:
                     # 3-D (depth-resolved) prognostic-EKE path: E lives on the
                     # interior interfaces (W-grid, nlev-1), the GM/Redi override
@@ -2493,6 +2520,7 @@ class LatLonCGridOceanModel:
                         Ah_visc_u=tend.Ah_visc_u, Ah_visc_v=tend.Ah_visc_v,
                         Ah_kediss_cell=tend.Ah_kediss_cell,
                         grid=_grid,
+                        resfn_scale=_resfn_scale,
                     )
                 elif eke_cfg.closure == "geometric":
                     # GEOMETRIC closure (Torres et al. 2025, JAMES,
@@ -2543,9 +2571,15 @@ class LatLonCGridOceanModel:
                     # B_C + B_T explicit (both ≥ 0), D_e implicit — E ≥ 0 by
                     # construction (the paper instead zeroes D_e where E < 0,
                     # p. 5; the fold is strictly stronger — documented).
+                    # Resolution-function coupling: B_C = kappa_gm·∫M⁴/N² dz
+                    # is linear in the GM coefficient, so scale it by the SAME
+                    # f_res the tracer flux applies to kappa_gm. B_T (kappa_u,
+                    # a separate un-tapered coefficient) is NOT scaled.
+                    _prod_bc_eff = (prod_bc if _resfn_scale is None
+                                    else prod_bc * _resfn_scale)
                     E_new = eke_apply_local_source(
                         E_t, jnp.zeros_like(E_t), L_eff, shim_cfg, dt,
-                        production_override=prod_bc + prod_bt,
+                        production_override=_prod_bc_eff + prod_bt,
                     )
                     eke_new = Field(data=E_new * lm, name="eke",
                                     dims=("lat", "lon"), units="m^3/s^2")
@@ -2575,7 +2609,11 @@ class LatLonCGridOceanModel:
                         E, U_bar, V_bar, _grid, eke_cfg,
                         lm, state.u_mask.data, state.v_mask.data,
                     )
-                    E_new = eke_apply_local_source(E_t, sigma_bar, L, eke_cfg, dt)
+                    # Resolution-function coupling: scale the parameterized
+                    # production kappa_GM·sigma² by the SAME f_res the tracer
+                    # flux applies to kappa_GM (None => bit-identical).
+                    E_new = eke_apply_local_source(E_t, sigma_bar, L, eke_cfg, dt,
+                                                   production_scale=_resfn_scale)
                     eke_new = Field(data=E_new * lm, name="eke",
                                     dims=("lat", "lon"), units="m^2/s^2")
                 # K_iso = K_gm (Veros enable_eke_isopycnal_diffusion): drive the
@@ -3252,12 +3290,25 @@ class LatLonCGridOceanModel:
         Ah_visc_v=None,
         Ah_kediss_cell=None,
         grid=None,
+        resfn_scale=None,
     ) -> tuple:
         """One step of the 3-D (depth-resolved) prognostic-EKE closure.
 
         ``grid`` (optional, SPMD): default ``None`` → ``self.grid``
         (bit-identical single-device path); a band-local grid is injected
         by a future ``shard_map`` wrapper.
+
+        ``resfn_scale`` (optional, codex MED-3 r2): the 2-D Hallberg
+        resolution factor ``f_res`` the step computed when
+        ``gm_cfg.resolution_function`` is on.  The GM/Redi tracer tendency
+        applies ``kappa_eff = f_res·kappa`` itself, so the RETURNED
+        ``kappa_gm_override`` stays RAW here; ``f_res`` scales only the
+        GM-DERIVED EKE production (parameterized ``kappa·sigma²`` via
+        ``production_scale``; realized skew conversions via the scaled kappa
+        handed to the conversion builders) so the eddy-energy budget matches
+        the applied coefficient.  The Redi-side ``kappa_redi_w`` (and hence
+        ``-P_diss_iso``) stays raw — the taper is GM-only.  ``None``
+        (default off) ⇒ bit-identical.
 
         The eddy-energy field ``E`` lives on the ``nlev-1`` interior interfaces
         (the W-grid), matching Veros's 3-D ``vs.eke``.  Returns
@@ -3413,10 +3464,19 @@ class LatLonCGridOceanModel:
         production_override = None
         signed_source = None
         clamp_production = True
+        # Resolution-function coupling: broadcast the 2-D f_res over the
+        # W-grid level axis; the realized conversions are LINEAR in the kappa
+        # they are handed, so passing the scaled kappa yields exactly the
+        # conversion of the f_res-scaled flux the tracer path applies. The
+        # returned kappa_gm_override stays RAW (see docstring).
+        _scale_w = (None if resfn_scale is None
+                    else resfn_scale[..., jnp.newaxis])
+        _kappa_gm_src = (kappa_gm_override if _scale_w is None
+                         else kappa_gm_override * _scale_w)
         if eke_cfg.gm_source_mode == "realized":
             production_override = compute_realized_gm_skew_conversion(
                 T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
-                _grid, self.z_coord, gm_cfg, kappa_gm_override,
+                _grid, self.z_coord, gm_cfg, _kappa_gm_src,
                 eos=self.config.eos, eos_linear=self.config.eos_linear,
                 mask=lm,
                 rho_0=self.config.constants.rho_0, g=self.config.constants.g,
@@ -3429,17 +3489,51 @@ class LatLonCGridOceanModel:
             # negative part folds into the implicit factor, keeping E ≥ e_min).
             # K_iso = K_gm coupling (enable_eke_isopycnal_diffusion): the Redi
             # diffusivity follows the prognostic kappa_GM(z).
+            # kappa_redi_w stays the RAW kappa: the K_iso=K_gm Redi override
+            # the tracer path consumes is UNSCALED (GM-only taper), so its
+            # realized -P_diss_iso must be built from the same raw kappa.
             kappa_redi_w = (kappa_gm_override
                             if eke_cfg.isopycnal_diffusion else None)
-            neg_skew, neg_iso = compute_realized_signed_conversions(
-                T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
-                _grid, self.z_coord, gm_cfg, kappa_gm_override,
-                want_skew=True, want_iso=eke_cfg.source_p_diss_iso,
-                kappa_redi_w=kappa_redi_w,
+            _signed_kwargs = dict(
                 eos=self.config.eos, eos_linear=self.config.eos_linear,
                 mask=lm, u_mask=state.u_mask.data, v_mask=state.v_mask.data,
                 rho_0=self.config.constants.rho_0, g=self.config.constants.g,
             )
+            if (_scale_w is not None and eke_cfg.source_p_diss_iso
+                    and kappa_redi_w is None):
+                # Codex MED-3 r2 finding 1: with the UNCOUPLED iso sink
+                # (isopycnal_diffusion=False), the callee's kappa_redi_w=None
+                # fallback ALIASES its kappa_gm_w argument — which is now the
+                # f_res-SCALED kappa — silently scaling the Redi-side
+                # -P_diss_iso the GM-only taper must not touch. Split the
+                # call: the skew conversion from the SCALED kappa, the iso
+                # conversion from the RAW kappa (the exact VALUE the legacy
+                # fallback used). Passing kappa_redi_w=raw in ONE call would
+                # instead flip the _skew_ddk double_redi_diagonal fallback
+                # (gm_redi_latlon_cgrid) off cfg.kappa_Redi — wrong there.
+                # Cost: the shared EOS/enthalpy preamble runs twice, only in
+                # this opt-in corner. Byte-identical when the resolution
+                # function is off (single legacy call below).
+                neg_skew, _ = compute_realized_signed_conversions(
+                    T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+                    _grid, self.z_coord, gm_cfg, _kappa_gm_src,
+                    want_skew=True, want_iso=False, kappa_redi_w=None,
+                    **_signed_kwargs,
+                )
+                _, neg_iso = compute_realized_signed_conversions(
+                    T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+                    _grid, self.z_coord, gm_cfg, kappa_gm_override,
+                    want_skew=False, want_iso=True, kappa_redi_w=None,
+                    **_signed_kwargs,
+                )
+            else:
+                neg_skew, neg_iso = compute_realized_signed_conversions(
+                    T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+                    _grid, self.z_coord, gm_cfg, _kappa_gm_src,
+                    want_skew=True, want_iso=eke_cfg.source_p_diss_iso,
+                    kappa_redi_w=kappa_redi_w,
+                    **_signed_kwargs,
+                )
             production_override = neg_skew
             clamp_production = False
             if eke_cfg.source_p_diss_iso:
@@ -3464,6 +3558,7 @@ class LatLonCGridOceanModel:
             production_override=production_override, extra_source=extra_source,
             signed_source=signed_source, clamp_production=clamp_production,
             return_dissipation=True,
+            production_scale=_scale_w,
         )
 
         # Floor at e_min on wet columns, zero on land (kappa_gm_override is

@@ -1706,6 +1706,11 @@ def gm_redi_tracer_tendency_latlon(
     # exception; no traced branching). Scales whatever the closure produced
     # (override / Treguier / Visbeck / constant); the Redi diffusivity
     # (kappa_Redi_eff below) is intentionally left unscaled -- GM-only.
+    # BUDGET COUPLING: when a prognostic EKE/GEOMETRIC closure supplies the
+    # override, the model step scales the GM-derived EKE production by the
+    # SAME f_res (gm_resolution_factor -- one definition), so the eddy-energy
+    # budget sees the conversion this scaled kappa actually performs (codex
+    # MED-3 r2; see the resolution_function note in config.py).
     if getattr(cfg, "resolution_function", False):
         if f_coriolis is None:
             f_coriolis = jnp.broadcast_to(grid.f, mask.shape)
