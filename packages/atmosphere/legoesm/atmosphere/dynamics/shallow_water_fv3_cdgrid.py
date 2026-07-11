@@ -76,6 +76,7 @@ from legoesm.core.fv3_sw_core import (
     d2a2c_vect,
     d_sw5_corner_divergence,
     fb_v_d_to_covariant,
+    fb_v_d_to_orthogonal,
     fv3_csw_tendencies,
 )
 from legoesm.core.fv_tp_2d import transport_step
@@ -1707,11 +1708,15 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             # update structure, not a continuous RK3 tendency."
             if self.config.use_fv3_dsw5_corner_damping:
                 _EPS = 1e-30
-                # Convention (2026-07-10 review): d_sw5_corner_divergence +
-                # d2a2c_vect are COVARIANT-convention (FV3 Fortran verbatim);
-                # the state winds are the model's ORTHOGONAL pair — convert v
-                # at entry (u identical in both).  The hook only consumes the
-                # scalar ke_damping, so no exit conversion is needed.
+                # Convention (2026-07-10 review, codex F2 follow-up):
+                # d_sw5_corner_divergence + d2a2c_vect and the d_sw6
+                # KE-gradient wind update are COVARIANT-convention (FV3
+                # Fortran verbatim); the state winds are the model's
+                # ORTHOGONAL pair.  Convert v at entry (u identical in
+                # both), apply the whole d_sw6-style update IN COVARIANT
+                # SPACE, and convert v back at exit — the covariant
+                # v-increment may NOT be added to orthogonal v_d directly
+                # (O(cosa)·|dv| error, up to 50 % at cube vertices).
                 v_cov = fb_v_d_to_covariant(
                     state_new.u_d, state_new.v_d, self.cdgrid)
                 ua, va, _, _, _, _ = d2a2c_vect(
@@ -1735,9 +1740,14 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                              - ke_damping[:, 1:, :])    # (6, n, n+1)
                 ke_diff_v = (ke_damping[:, :, :-1]
                              - ke_damping[:, :, 1:])    # (6, n+1, n)
+                # Covariant-space update, then convert v back to the
+                # model's orthogonal convention (uses the UPDATED u —
+                # the inverse metric couples u and v at the seams).
+                u_new = state_new.u_d + ke_diff_u / jnp.maximum(dx_u, _EPS)
+                v_cov_new = v_cov + ke_diff_v / jnp.maximum(dy_v, _EPS)
                 state_new = state_new._replace(
-                    u_d=state_new.u_d + ke_diff_u / jnp.maximum(dx_u, _EPS),
-                    v_d=state_new.v_d + ke_diff_v / jnp.maximum(dy_v, _EPS),
+                    u_d=u_new,
+                    v_d=fb_v_d_to_orthogonal(u_new, v_cov_new, self.cdgrid),
                 )
 
         # Conservation fixer
