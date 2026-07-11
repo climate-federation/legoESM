@@ -368,7 +368,7 @@ def rollout_hours(cfg, yml):
     return float(hrs[0]) if hrs else 6.0     # first lead = the base rollout horizon
 
 
-def _era5_time_to_forcing_calendar(time_ns, year):
+def era5_time_to_forcing_calendar(time_ns, year):
     """(day_of_year 1-based INTEGER, seconds_of_day) for spectral_rollout.
 
     Calendar convention of ``spectral_rollout._forcing_at`` (codex #817
@@ -425,7 +425,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma):
             sst_src = load_era5_slice(era5_cfg, i_ic)
             sst = jnp.asarray(regrid_2d_to_gaussian(
                 sst_src.sst, sst_src.lat, sst_src.lon, grid)).reshape(-1)
-            doy_1based, sod = _era5_time_to_forcing_calendar(times[i_ic], year)
+            doy_1based, sod = era5_time_to_forcing_calendar(times[i_ic], year)
             forcing = {
                 "T_sfc": sst,
                 "sic": jnp.zeros_like(sst),
@@ -496,17 +496,32 @@ def _driver_for_ctx(config):
 
 
 def evaluate_wb2(cfg, yml, model, params, make_run_seg, grid, sigma):
-    """WB2 scorecard of the trained model on the eval year (rank-0 only).
+    """Pointer to the standalone WB2 checkpoint eval driver (issue #919).
 
-    Rolls the trained physics_fn from ERA5 ICs and scores headline fields with
-    the merged WB2 scorer. Deferred detail: this is the winner-eval hook; the
-    scorer (evaluations/wb_orchestrator) is validated separately.
+    The scorecard is produced by ``scripts/validate/run_weatherbench_eval.py``,
+    which reuses :func:`build_mode_components` + ``make_run_seg`` + the
+    ``evaluations.wb_orchestrator`` scorer against the ``epoch_NNNN.eqx``
+    checkpoint this run wrote. The driver is NOT imported here on purpose: the
+    dependency direction is ``evaluations -> legoesm`` only (importing
+    ``evaluations`` from this package would invert it), and the PBS job's
+    ``PYTHONPATH`` (``scripts/cluster/wb_forecast/env.sh``) does not put the repo
+    root on the path, so an import here would fail inside the job. Rank-0 logs
+    the ready-to-run command; run it as a separate login-node/eval step.
     """
     import logging
-    logging.getLogger("wb_scale").info(
-        "WB2 eval hook: mode=%s eval_years=%s — run evaluations.wb_orchestrator "
-        "against the trained checkpoint (spectral scorer path).", cfg.mode, yml["eval_years"])
-    # The lat-lon->WB2 scoring reuses evaluations.wb_forecast.diagnose_and_regrid on a
-    # rolled-out state; wired to the spectral scorer in a follow-up (the trained
-    # checkpoint from this run is the input).
+    log = logging.getLogger("wb_scale")
+    core = getattr(cfg, "training_core", "latlon")
+    # v1 of the WB2 driver is spectral-only; flag a non-spectral core so a
+    # default-core (latlon) run doesn't copy-paste a command the CLI rejects.
+    note = ("" if core == "spectral" else
+            f"\n  NOTE: --training-core {core!r} checkpoints are NOT WB2-evaluable "
+            "in v1 (the driver is spectral-only); retrain/score with a spectral core.")
+    log.info(
+        "WB2 eval is a separate driver (issue #919); this run's checkpoints are "
+        "under %s. Score them with:\n"
+        "  python scripts/validate/run_weatherbench_eval.py --config %s --mode %s "
+        "--training-core %s --checkpoint %s/epoch_NNNN.eqx --eval-year %s "
+        "--out %s/wb2_scorecard.json%s",
+        cfg.out_dir, cfg.config_path, cfg.mode, core, cfg.out_dir,
+        yml["eval_years"][0], cfg.out_dir, note)
     return None
