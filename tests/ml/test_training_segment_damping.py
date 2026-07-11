@@ -60,9 +60,9 @@ def test_build_training_segment_threads_fric_decay(monkeypatch):
     assert bool(jnp.all(recorded["fric_decay"] == 1.0))
 
 
-def test_wb_modes_receive_driver_friction(monkeypatch):
-    """build_mode_components hands the DRIVER's boundary-layer friction
-    profile (non-trivial: < 1 near the surface) to the training segment."""
+def _record_threaded_fric(monkeypatch, turbulence):
+    """Return the ``fric_decay`` ``build_mode_components`` threads to the
+    training segment for a physics-mode run at the given turbulence scheme."""
     from legoesm.training import training_driver as td
     from legoesm.training.scale_build import build_mode_components
 
@@ -75,13 +75,35 @@ def test_wb_modes_receive_driver_friction(monkeypatch):
     monkeypatch.setattr(td, "build_training_segment", _recorder)
 
     cfg = _mod.build_scale_config_from_args(["--mode", "physics", "--smoke"])
-    yml = dict(_SMOKE_YML)
+    yml = dict(_SMOKE_YML, turbulence=turbulence)
     _, _, _, params, make_run_seg, _, _ = build_mode_components(cfg, yml)
     make_run_seg(params)
 
     fric = recorded.get("fric_decay")
     assert fric is not None, "fric_decay not threaded to the training segment"
-    fric = jnp.asarray(fric)
-    # BL Rayleigh friction: decay < 1 at the lowest level, ~free atmosphere aloft
-    assert float(fric[-1]) < 1.0
-    assert bool(jnp.all(fric > 0.0)) and bool(jnp.all(fric <= 1.0))
+    return jnp.asarray(fric)
+
+
+def test_wb_modes_receive_driver_friction(monkeypatch):
+    """build_mode_components hands the DRIVER's friction profile to the
+    training segment, correctly GATED by whether a real BL scheme owns
+    surface momentum (#931).
+
+    - turbulence="louis": the rollout applies the physical Louis surface
+      stress, so the Held-Suarez Rayleigh surrogate is gated to an exact no-op
+      (decay == 1 at the surface) -- keeping it would double-count surface drag
+      (#931).  Physics-mode adjoint stability comes from Louis, not this term.
+    - turbulence="none": no BL scheme owns momentum, so the driver keeps the
+      Rayleigh dissipation profile (decay < 1 near the surface) that the
+      pure-dycore adjoint needs (#797 bug 11).  This is the profile the
+      neural_gcm/sfno pure-dycore rollouts rely on.
+    """
+    # Louis owns surface momentum -> Rayleigh drag gated off (no-op).
+    fric_louis = _record_threaded_fric(monkeypatch, "louis")
+    assert float(fric_louis[-1]) == 1.0
+    assert bool(jnp.all(fric_louis > 0.0)) and bool(jnp.all(fric_louis <= 1.0))
+
+    # No BL scheme -> the Rayleigh dissipation profile is retained and threaded.
+    fric_none = _record_threaded_fric(monkeypatch, "none")
+    assert float(fric_none[-1]) < 1.0
+    assert bool(jnp.all(fric_none > 0.0)) and bool(jnp.all(fric_none <= 1.0))

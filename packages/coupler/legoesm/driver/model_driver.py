@@ -2333,9 +2333,27 @@ class ModelDriver:
 
         k_f_max = cfg.k_BL_max_per_day / 86400.0
         k_free = cfg.k_free_per_day / 86400.0
-        k_f = k_free + k_f_max * jnp.maximum(
-            0.0, (sigma_full - cfg.sigma_b) / (1.0 - cfg.sigma_b)
-        )
+        # Sign/units: k_f >= 0 [1/s], DT [s] -> fric_decay = exp(-k_f*DT) in
+        # (0, 1]; this Rayleigh term is a NON-CONSERVATIVE momentum SINK relaxing
+        # u, v toward rest (never amplifies).  The BL/free-tropo drag is the
+        # Held-Suarez DRY-CORE surrogate for surface friction.  A real turbulence
+        # scheme already applies the PHYSICAL surface stress as the boundary-layer
+        # bottom BC (louis.py implicit diffusion of u, v with sflx_u = tau_x, i.e.
+        # momentum handed to the ocean/land), so keeping k_f here DOUBLE-COUNTS
+        # surface drag -- a spurious second, momentum-to-nowhere sink that
+        # ~halves the low-level trades (#931).  Gate it to an exact no-op
+        # (k_f = 0 -> decay = 1.0) whenever a real BL scheme owns surface
+        # momentum; keep it only for the dry HS core or turbulence="none".  Both
+        # cfg.held_suarez_forcing and cfg.turbulence are STATIC Python config
+        # fields -> compile-time feature gate (NOT jnp.where), constant-folds,
+        # no retrace/AD impact.  Deleting the spurious sink IMPROVES the global
+        # momentum budget; the conservative Louis surface exchange remains.
+        if cfg.held_suarez_forcing or cfg.turbulence == "none":
+            k_f = k_free + k_f_max * jnp.maximum(
+                0.0, (sigma_full - cfg.sigma_b) / (1.0 - cfg.sigma_b)
+            )
+        else:
+            k_f = jnp.zeros_like(sigma_full)  # decay = 1.0, exact no-op
         # Top-of-atmosphere sponge (#836): a Rayleigh damping increasing toward
         # the model lid (sigma -> 0), ADDED to the surface-drag k_f so the
         # existing fric_decay tail (applied to u, v every step) absorbs
