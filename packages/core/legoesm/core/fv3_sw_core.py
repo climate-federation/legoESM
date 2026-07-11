@@ -1923,12 +1923,15 @@ def _pad_corner_scalar_cross_face(field, n):
     extension points.  The ghost ring therefore holds the NEIGHBOUR's
     divgd — including its divergence_corner_duo panel-edge zeroing and
     0.25x attenuation — interpolated to the extension positions.  This
-    helper approximates the cube_rmp interpolation by a nearest-row value
+    helper APPROXIMATES the cube_rmp interpolation by a nearest-row value
     copy (measured: max tangential position error ~1 dx at cube vertices,
-    ~0.1 dx at mid-edge).  A ghost ring built from the RAW (un-attenuated)
-    divergence instead was measured to destabilise the colliding-modon
-    C48 FB run (NaN at day 8 vs stable decay through day 20+ with the
-    attenuated ghost).
+    ~0.1 dx at mid-edge; codex 2026-07-10: near strip ends the nominal
+    remap targets fall between neighbour indices, so with the zero/0.25
+    boundary profile the copied endpoint reads 0 where cube_rmp would give
+    ~0.0625q — the tests lock THIS approximation, not oracle semantics).
+    A ghost ring built from the RAW (un-attenuated) divergence instead was
+    measured to destabilise the colliding-modon C48 FB run (NaN at day 8
+    vs stable decay through day 20+ with the attenuated ghost).
 
     Pad corners (vertex-diagonal points) are never read by the d_sw5
     gradient stencil; they keep the edge-copy base pad.
@@ -2168,27 +2171,48 @@ def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
         dy = cdgrid.dy_edge_x   # (6, n+1, n)
         divg_u_met = sina_v * dyc / jnp.maximum(dx, _EPS)  # (6, n, n+1)
         divg_v_met = sina_u * dxc / jnp.maximum(dy, _EPS)  # (6, n+1, n)
-        # Metric halo: mode='edge' == mirror copy for half-offset staggered
-        # metrics across a panel edge (face at -1/2 mirrors face at +1/2),
-        # which is the symmetric extended-grid value. Loop-invariant, hoisted.
+        # Metric halo: mode='edge' copies the half-offset staggered metric
+        # nearest the edge into the ghost face.  This is consistent with the
+        # nearest-row ghost surrogate below (codex 2026-07-10: the true
+        # extended-grid metric differs by ~3-4% at C48, ~15% at C12 — NOT an
+        # exact mirror).  On the default zero-ring path the outer scalar
+        # difference is identically zero, so the ghost metric is inert there.
         divg_u_pad = jnp.pad(divg_u_met, [(0, 0), (1, 1), (0, 0)],
                              mode='edge')  # (6, n+2, n+1)
         divg_v_pad = jnp.pad(divg_v_met, [(0, 0), (0, 0), (1, 1)],
                              mode='edge')  # (6, n+1, n+2)
 
+        # codex 2026-07-10 (HIGH): the opt-in one-ring re-copy is NOT
+        # equivalent to Fortran's shrinking wider-halo in-place evolution for
+        # nord>=2 (interpolation and the Laplacian do not commute, and early
+        # nt>0 iterations consume corner-region halo data a one-ring pad
+        # never represents).  Restrict the opt-in to nord==1.
+        if use_cross_face_halo and nord > 1:
+            raise ValueError(
+                "d_sw5_corner_divergence: cross_face_halo=True supports "
+                "nord=1 only (one-ring ghost re-copy is not faithful to the "
+                "Fortran wider-halo evolution for nord>=2); use the default "
+                "zero-ring for nord>=2.")
+
         for _it in range(nord):
             if use_cross_face_halo:
-                # 2026-07-10 port (dyn_core.F90:652 ext_scalar B-grid ghost
-                # exchange + sw_core.F90:1737-1787 duogrid nord loop): the
-                # ghost ring holds the neighbour's ATTENUATED divg_d; the
-                # in-loop fill_corners is `.not. duogrid` → no corner fills.
-                # nord>=2: later iterations re-copy the updated field (the
-                # Fortran ghost is updated in-place by the wider halo loop;
-                # same-order approximation).
+                # 2026-07-10 opt-in port (dyn_core.F90:652 ext_scalar B-grid
+                # ghost exchange + sw_core.F90:1737-1787 duogrid nord loop):
+                # the ghost ring holds the neighbour's ATTENUATED divg_d via
+                # a nearest-row copy (cube_rmp tangential remap NOT applied;
+                # see _pad_corner_scalar_cross_face).  The in-loop
+                # fill_corners is `.not. duogrid` → no corner fills.
+                # NOTE: `cross_face_halo`/`nord` must be static Python values
+                # under jit (Python branching).
                 divg_d_pad = _pad_corner_scalar_cross_face(divg_d, n)
             else:
-                # iter-132: mode='edge' O(1) approx at cube vertices vs
-                # Fortran MPI fill_corners halo (non-duogrid, unported).
+                # Default zero-ring: divg_d panel-edge rows are zeroed by
+                # _divergence_corner_duo, so this edge-pad yields a ZERO
+                # ghost ring on the first iteration; for nord>=2 later
+                # iterations it imposes a zero-normal-gradient ghost of the
+                # updated (generally nonzero) boundary rows.  Non-duogrid:
+                # iter-132 O(1) approx vs Fortran MPI fill_corners halo
+                # (unported).
                 divg_d_pad = jnp.pad(divg_d, [(0, 0), (1, 1), (1, 1)],
                                      mode='edge')
 
@@ -3165,12 +3189,19 @@ def fb_v_d_to_orthogonal(u_d, v_cov, cdgrid):
     """Inverse of :func:`fb_v_d_to_covariant` for the FB exit.
 
     Fixed-point: the cross-face u halo needs the orthogonal pair, so pass 1
-    inverts with an edge-pad ū (exact in the interior), later passes rebuild
-    ū with the proper orthogonal halo using the previous v estimate.
-    Interior: exact inverse (same ū); seams: the residual contracts by
-    ≤~0.15 per pass (halo-u sensitivity × previous seam error).  Three
-    passes (2026-07-10 review follow-up) push the dt-independent per-step
-    seam kick from ~7e-4 to ~1e-4 m/s (W2 C36).
+    inverts with an edge-pad ū (exact in the interior), pass 2 rebuilds ū
+    with the proper orthogonal halo.  Interior: exact inverse (same ū);
+    seams: residual is 2nd order (halo-u sensitivity × pass-1 seam error),
+    ~7e-4 m/s dt-independent per-step kick (W2 C36).
+
+    2026-07-10 MEASURED trade-off (do NOT add a 3rd pass): one more pass
+    contracts the roundtrip seam residual ~10x (7e-4 → 7e-5), but WORSENS
+    the W2 C36 2-day FB drift — max|dv| 6.2 → 9.6 m/s, max|u| 41.6 → 42.3
+    (scripts/tmp/_fb_edge_repro.py, single-variable pass-count probe; 6h
+    unchanged at 38.9).  The 2-pass seam residual evidently damps the seam
+    mode the covariant chain pumps; truth tier (measured long-run drift)
+    outranks the roundtrip-identity metric — same doctrine as the d_sw5
+    cross_face_halo default-OFF.
     """
     sina_u, _ = _sina_u_v_from_sin_sg(cdgrid)
     rs = 1.0 / jnp.maximum(sina_u, _EPS)
@@ -3182,10 +3213,8 @@ def fb_v_d_to_orthogonal(u_d, v_cov, cdgrid):
     dg = cdgrid.base.duogrid
     if dg is None or dg.ng < 2:
         return v
-    for _ in range(2):
-        ubar = _u_orth_at_v_points(u_d, v, cdgrid)
-        v = (v_cov - cdgrid.cosa_u * ubar) * rs
-    return v
+    ubar = _u_orth_at_v_points(u_d, v, cdgrid)
+    return (v_cov - cdgrid.cosa_u * ubar) * rs
 
 
 def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
