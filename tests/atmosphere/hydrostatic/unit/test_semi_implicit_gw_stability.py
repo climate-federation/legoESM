@@ -210,8 +210,10 @@ def _mode_indices(grid, n_max):
 @pytest.mark.parametrize("n_max", [21, 42, 85, 106])
 def test_ssp_rk3_step_si_stable_across_truncation(n_max):
     """|lambda| <= 1 for a representative sweep of resolved GW modes at alpha=0.5
-    (neutral CN) and strictly < 1 at alpha=0.55 (damping), across T21..T106; and
-    the amplification block matches the analytic theta-method scheme exactly.
+    (Crank-Nicolson SI centering; the composed RK3-SI step is mildly dissipative,
+    so <= 1, not == 1) and strictly < 1 at alpha=0.55 (added damping), across
+    T21..T106; and the amplification block matches the analytic theta-method
+    scheme exactly.
 
     The fastest-resolved mode ``n=n_max`` (largest ``kappa``) is the one whose
     amplification the #920 bug blew up (|lambda| ~ 1.8e4 at T85); it must now sit
@@ -255,7 +257,7 @@ def test_gravity_wave_amplification_blows_up_without_the_fix_signature():
     *fixed* scheme keeps that same mode neutral -- the companion parametrized
     test is the actual gate; this pins the physical scale so a future regression
     reads clearly (pre-fix this mode had |lambda| ~ 1.8e4)."""
-    step_fn, grid, si_data, eps = _gw_oscillator_step(85, alpha=0.5)
+    step_fn, grid, si_data, _eps = _gw_oscillator_step(85, alpha=0.5)
     ls = np.asarray(grid.ls)
     ms = np.asarray(grid.ms)
     j = int(np.where((ls == 85) & (ms == 0))[0][0])
