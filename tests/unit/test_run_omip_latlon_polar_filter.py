@@ -43,3 +43,14 @@ def test_plain_latlon_config_leaves_polar_filter_at_default_off():
     # The #939 force-on is scoped to the bathy branch; it must not leak into the
     # plain latlon config (guards against flipping the PolarFilterConfig default).
     assert _latlon_config(use_bathymetry=False).polar_filter.use_polar_filter is False
+
+
+def test_latlon_bathy_polar_filter_stays_overridable_off():
+    """#939 A/B / emergency disable: the forced-ON bathy default must remain
+    overridable to OFF.  run_omip_core2 now exposes ``--no-polar-filter``
+    (argparse.BooleanOptionalAction, tri-state), which forwards
+    ``use_polar_filter=False`` into build_latlon_bathy's ``_ovr`` ->
+    ``config.replace_flat``.  A one-way default would make the controlled A/B
+    (change ONLY the filter, per the issue's own validation plan) impossible."""
+    cfg = _latlon_config(use_bathymetry=True).replace_flat(use_polar_filter=False)
+    assert cfg.polar_filter.use_polar_filter is False
