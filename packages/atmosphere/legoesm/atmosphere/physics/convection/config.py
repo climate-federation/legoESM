@@ -78,6 +78,7 @@ __param_spec__ = {
             "downdraft_evap_efficiency": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Tiedtke (1989) downdraft", "shape": None},
             "mc_normalize_scale": {"units": "kg/m^2/s", "bounds": (0.005, 0.2), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "Bechtold et al. (2008) Fig. 2", "shape": None},
             "parcel_dq": {"units": "kg/kg", "bounds": (0.0, 0.003), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Bechtold et al. (2008) scheme default", "shape": None},
+            "precip_efficiency": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "none", "category": "precipitation_efficiency", "reference": "Tiedtke (1989) in-updraft precipitation (c0)", "shape": None},
             "stochastic_amplitude": {"units": "1", "bounds": (0.0, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Bechtold et al. (2014) AR1 perturbation", "shape": None},
             "stochastic_decorrelation": {"units": "s", "bounds": (1800.0, 21600.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Bechtold et al. (2014) AR1 perturbation", "shape": None},
             "tau_M_u_relax": {"units": "s", "bounds": (600.0, 5400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Tiedtke (1989) profile relaxation", "shape": None},
@@ -1372,6 +1373,15 @@ class BechtoldConfig(NamedTuple):
     # [0.5, 1.0] (θ ≥ 0.5 removes the explicit-side amplification).  Unused
     # when subsidence_solve == "advective".
     theta_implicit: float = 1.0
+    # In-updraft convective precipitation efficiency [dimensionless]: the
+    # fraction of detrained plume condensate diverted to RAIN (dq_r_conv_dt,
+    # sediments via microphysics, radiatively invisible) instead of suspended
+    # anvil cloud (dq_c_conv_dt).  Default 0.7 = ON (unlike Tiedtke's 0.0):
+    # without the split, undrained anvil cloud radiatively loads the
+    # polar-night column and runs the equilibrium away (#929).  0.0 restores
+    # the legacy no-split behaviour (dq_r_conv_dt=None) byte-for-byte.  See
+    # bechtold.py in-updraft precipitation block; mirrors TiedtkeConfig.
+    precip_efficiency: float = 0.7
 
 
 class ConvectiveEDMFConfig(NamedTuple):

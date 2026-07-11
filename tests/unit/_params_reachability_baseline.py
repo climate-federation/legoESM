@@ -16,7 +16,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.AhmedNeelinDCAConfig.tau_adjust_s',
     'atm.conv.AhmedNeelinDCAConfig.w_b',
     'atm.conv.AhmedNeelinDCAConfig.w_l',
-    # atm: BechtoldConfig (13)
+    # atm: BechtoldConfig (14)
     'atm.conv.BechtoldConfig.M_b_max',
     'atm.conv.BechtoldConfig.cape_pbl_depth',
     'atm.conv.BechtoldConfig.cloud_depth_deep',
@@ -26,6 +26,7 @@ UNREACHABLE_PARAMS = frozenset({
     'atm.conv.BechtoldConfig.delta_shallow',
     'atm.conv.BechtoldConfig.downdraft_alpha',
     'atm.conv.BechtoldConfig.downdraft_evap_efficiency',
+    'atm.conv.BechtoldConfig.precip_efficiency',
     'atm.conv.BechtoldConfig.stochastic_amplitude',
     'atm.conv.BechtoldConfig.stochastic_decorrelation',
     'atm.conv.BechtoldConfig.tau_M_u_relax',
