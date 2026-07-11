@@ -3426,6 +3426,15 @@ class LatLonCGridOceanModel:
         dz_half_w = build_dz_half(dz_w)                            # (..., nlev-2) = M-1
         # A_v at the M-1 interior W-interfaces for the EKE vertical diffusion --
         # handles A_v_phys cell-centred (nlev) / at T-interfaces (nlev-1) / None.
+        # KNOWN LIMITATION (codex MED-2 r2): whenever the physics does NOT
+        # surface A_v on the tendencies (post-mixing TKE, lat-dependent
+        # constant background), this EKE-energy smoothing falls back to the
+        # UNIFORM config.A_v — not the scheme's K profile, which is only
+        # assembled later inside _apply_implicit_vertical_mixing.  A
+        # second-order eddy-ENERGY diffusion coefficient, not the momentum/
+        # tracer mixing itself; threading the authoritative fallback profile
+        # here needs a step-order change (follow-up if EKE is ever combined
+        # with a fallback-only vmix scheme in production).
         A_v_w = _eke_av_at_interior_wfaces(
             A_v_phys, jnp.asarray(self.config.A_v, dtype=dtype), nlev,
             dz_cell.shape[:-1],
@@ -3654,10 +3663,14 @@ class LatLonCGridOceanModel:
 
         # MED-2 (codex batch2 BLOCKER): the latitude-dependent constant
         # background must come from the fallback recompute below.  A surfaced
-        # K/A (e.g. from enhanced_diffusion convection, whose profile the
-        # fallback recomputes bit-identically) would otherwise take the fast
-        # path, which ADDS the model floors and DROPS the Gregg field
-        # entirely.  Static config gate (pure Python bool) — no traced branch.
+        # K/A (e.g. from enhanced_diffusion convection) would otherwise take
+        # the fast path, which ADDS the model floors and DROPS the Gregg
+        # field entirely.  The fallback SUPERSEDES (does not double-count)
+        # any surfaced convection profile: it re-diagnoses convection on the
+        # CURRENT (post-advection) state with the model EOS — the same
+        # convention every fallback-path scheme uses; the pre-step surfaced
+        # diagnosis is simply discarded.  Static config gate (pure Python
+        # bool) — no traced branch.
         if self._lat_dependent_constant_vmix():
             K_v_phys = None
             A_v_phys = None
