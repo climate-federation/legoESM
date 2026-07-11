@@ -219,7 +219,7 @@ DEFAULT_CACHE_MIN_COMPILE_SECS = 1.0
 # a change with UNCHANGED table+spin inputs would otherwise serve a STALE precompute;
 # the version bump forces a MISS (recompute).  Mirrors the XLA compilation cache's
 # HLO-in-key safety (see configure_jax_compilation_cache).
-_PRECOMPUTE_CACHE_VERSION = "v5"  # v5: decoupled autotrophic maint-resp reference T_ref_ra=298.15K (25 degC) -> R_maint down, NPP/CUE up (CUE 0.11->~0.4); recorded default-parameter equilibrium changes
+_PRECOMPUTE_CACHE_VERSION = "v6"  # v6: + recalibrated bulk r_maint_* (fol/root/wood 0.002/0.0008/2e-5) at the decoupled T_ref_ra=298.15K to match observed CUE ~0.45; default-parameter equilibrium changes (v5 was the T_ref_ra decoupling alone)
 DEFAULT_PRECOMPUTE_CACHE_DIR = (
     os.environ.get("CARBON_PRECOMPUTE_CACHE_DIR", "")
     or str(REPO_ROOT / ".cache" / "carbon_precompute"))

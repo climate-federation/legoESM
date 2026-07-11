@@ -26,7 +26,7 @@ __param_spec__ = {
             "Fday": {"units": "1", "bounds": (92.4, 840.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "K_CO2": {"units": "1", "bounds": (132.0, 1200.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "LCMA": {"units": "1", "bounds": (16.5, 150.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
-            "Q10_exp": {"units": "1", "bounds": (0.0132, 0.12), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
+            "Q10_exp": {"units": "K^-1", "bounds": (0.0132, 0.12), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "Q10_het_exp": {"units": "1", "bounds": (0.023, 0.14), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "soil-respiration Q10 2-3 (Bond-Lamberty & Thomson 2010)", "shape": None},
             "T_opt_C": {"units": "degC", "bounds": (8.25, 75.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None, "legacy_name": "T_opt"},
             "T_width_C": {"units": "degC", "bounds": (4.95, 45.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None, "legacy_name": "T_width"},
@@ -48,9 +48,9 @@ __param_spec__ = {
             "nee_amplitude": {"units": "1", "bounds": (1.65e-08, 1.5e-07), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "nee_peak_day": {"units": "1", "bounds": (66.0, 600.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "precip_ref": {"units": "1", "bounds": (9.9e-06, 9e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
-            "r_maint_fol": {"units": "1", "bounds": (0.00165, 0.015), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
-            "r_maint_root": {"units": "1", "bounds": (0.00066, 0.006), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
-            "r_maint_wood": {"units": "1", "bounds": (1.65e-05, 0.00015), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
+            "r_maint_fol": {"units": "day^-1", "bounds": (0.00066, 0.006), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "recalibrated to observed cross-biome CUE ~0.45 (He et al. 2018; Collalti & Prentice 2019); DifferLand bulk maintenance closure", "shape": None},
+            "r_maint_root": {"units": "day^-1", "bounds": (0.000264, 0.0024), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "recalibrated to observed cross-biome CUE ~0.45 (He et al. 2018; Collalti & Prentice 2019); DifferLand bulk maintenance closure", "shape": None},
+            "r_maint_wood": {"units": "day^-1", "bounds": (6.6e-06, 6e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "recalibrated to observed cross-biome CUE ~0.45 (He et al. 2018; Collalti & Prentice 2019); DifferLand bulk maintenance closure", "shape": None},
             "tor_litter": {"units": "1", "bounds": (0.00066, 0.006), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "tor_root": {"units": "1", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
             "tor_som_active": {"units": "1/day", "bounds": (3e-04, 3e-03), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CENTURY/CLM4.5 active-SOM MRT ~1-5 yr (Parton et al. 1987; Koven et al. 2013)", "shape": None},
@@ -98,10 +98,21 @@ class CarbonConfig(NamedTuple):
     K_CO2: float = 400.0          # CO2 half-saturation constant [ppmv]
 
     # --- Autotrophic respiration ---
+    # BULK EFFECTIVE maintenance-respiration coefficients [day^-1] referenced to
+    # ``T_ref_ra`` (25 degC), RECALIBRATED (not tissue-measured) so the coupled
+    # equilibrium carbon-use efficiency CUE = NPP/GPP matches the observed
+    # cross-biome ~0.40-0.50 (He et al. 2018; Collalti & Prentice 2019) instead of
+    # the former unphysical ~0.11.  In the SimpleSEB / archetype path GPP is GROSS
+    # (leaf dark respiration NOT subtracted), so ``r_maint_fol`` represents the
+    # WHOLE foliar respiration.  The reference (T_ref_ra) and these magnitudes are
+    # NON-IDENTIFIABLE together, so the reference is FIXED (excluded) and these
+    # magnitudes carry the calibration (tunable, tier 2).  The prior values (0.005
+    # / 0.002 / 5e-5) left maintenance ~76% of GPP even in healthy forests, driving
+    # CUE to ~0.11 and 49/187 archetypes to negative NPP.
     f_auto: float = 0.28          # Growth respiration fraction of net assimilation
-    r_maint_fol: float = 0.005    # Foliage maintenance respiration rate [day^-1]
-    r_maint_root: float = 0.002   # Root maintenance respiration rate [day^-1]
-    r_maint_wood: float = 5e-5    # Wood maintenance respiration rate [day^-1]
+    r_maint_fol: float = 0.002    # Foliage maintenance respiration rate [day^-1]
+    r_maint_root: float = 0.0008  # Root maintenance respiration rate [day^-1]
+    r_maint_wood: float = 2e-5    # Wood maintenance respiration rate [day^-1]
 
     # --- NPP allocation (sequential partition) ---
     f_fol: float = 0.15           # Fraction NPP -> foliage
@@ -185,20 +196,30 @@ class CarbonConfig(NamedTuple):
     Q10_het_exp: float = 0.09
     moisture_factor: float = 0.5  # Moisture scaling strength
     T_ref: float = 283.15         # HETEROTROPHIC (soil-decomposition) reference T [K]
-    # Autotrophic maintenance-respiration reference temperature [K], DECOUPLED
-    # from the heterotrophic ``T_ref`` above.  Set to the canonical 25 degC at
-    # which plant tissue maintenance / dark respiration coefficients (leaf R_d,
-    # and the DALEC990 ``r_maint_*`` base rates) are conventionally reported
-    # (Ryan 1991; Atkin & Tjoelker 2003).  Sharing the 10 degC (283.15 K)
-    # heterotrophic CENTURY reference for the AUTOTROPHIC term inflated warm-land
-    # maintenance respiration by exp(Q10_exp*(T-283.15)) ~ 1.8-2.2x in the
-    # tropics, over-consuming GPP: carbon-use efficiency (NPP/GPP) collapsed to an
-    # unphysical ~0.11 (obs ~0.45) with 49/187 archetypes at NEGATIVE NPP.
-    # Referencing ``r_maint_*`` at 25 degC removes that warm-land amplification,
-    # RAISING NPP (and, through the litter input, soil carbon) without touching
-    # the calibrated heterotrophic SOC gradient (which keeps ``T_ref``).  A fixed
-    # measurement-convention reference (NOT trained; see __param_spec__ excluded),
-    # mirroring the heterotrophic ``T_ref``.
+    # Autotrophic maintenance-respiration reference temperature [K], STRUCTURALLY
+    # DECOUPLED from the heterotrophic ``T_ref`` above.  Autotrophic and
+    # heterotrophic respiration have DIFFERENT temperature references, so a single
+    # shared reference is a modelling error: the former code shared the 10 degC
+    # (283.15 K) heterotrophic CENTURY reference for the AUTOTROPHIC term, which
+    # inflated warm-land maintenance respiration by exp(Q10_exp*(T-283.15)) ~
+    # 1.8-2.2x in the tropics -- a SPURIOUS spatial pattern.  Fixed here at 25 degC,
+    # the standard leaf/tissue dark-respiration normalization (leaf R_d; Ryan 1991;
+    # Atkin & Tjoelker 2003); maintenance-respiration DALEC variants use a 20-25
+    # degC leaf reference (e.g. Famiglietti et al. 2021 use 20 degC), so 25 degC is
+    # within the literature range for the dominant foliar term.
+    #
+    # HONEST provenance note: raising the reference 10->25 degC is mathematically a
+    # UNIFORM exp(-Q10_exp*15)=0.549 rescaling of the whole maintenance curve (NOT a
+    # warm-only correction).  The reference and the bulk ``r_maint_*`` magnitudes
+    # are NON-IDENTIFIABLE, so the reference is FIXED (excluded from training) and
+    # the effective magnitudes carry the calibration (see ``r_maint_*``, recalibrated
+    # to observed CUE).  The root/wood maintenance is driven by top-soil T
+    # (multilayer_land) and is treated as a bulk effective coefficient at this
+    # reference, not a literal 25 degC tissue measurement.  Net effect (reference
+    # decoupling + magnitude recalibration): CUE ~0.11 -> ~0.4, negative NPP
+    # eliminated, and soil carbon rises via the higher litter input -- the
+    # heterotrophic decomposition RATES are unchanged, though the COUPLED equilibrium
+    # SOC still shifts (cold > warm preserved).
     T_ref_ra: float = 298.15
     precip_ref: float = 3e-5      # Reference precipitation rate [kg/m2/s]
     moist_modifier_min: float = 0.1  # Lower clip on moisture modifier

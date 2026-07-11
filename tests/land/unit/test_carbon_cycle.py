@@ -632,6 +632,95 @@ class TestColdWarmSocRealism(unittest.TestCase):
 
 
 # ===================================================================
+# Autotrophic / heterotrophic reference-temperature decoupling (CUE fix)
+# ===================================================================
+
+class TestReferenceTemperatureDecoupling(unittest.TestCase):
+    """The autotrophic maintenance-respiration reference ``T_ref_ra`` and the
+    heterotrophic (soil-decomposition) reference ``T_ref`` are ORTHOGONAL:
+    ``T_ref_ra`` drives ONLY autotrophic ``R_maint``; ``T_ref`` drives ONLY
+    heterotrophic decomposition.  Guards the decoupling introduced by the CUE fix
+    (maintenance respiration was over-consuming GPP through the shared 10 degC
+    reference, collapsing CUE = NPP/GPP to ~0.11 with negative NPP)."""
+
+    def _diag(self, cfg, T_val=298.0):
+        ncol = 3
+        state = _make_carbon_state(shape=(ncol,))
+        _s, _f, diag = step_carbon_differland(
+            state, jnp.full(ncol, 350.0), jnp.full(ncol, T_val),
+            jnp.full(ncol, 400.0), jnp.full(ncol, 0.8), jnp.full(ncol, 0.7),
+            160.0, jnp.full(ncol, 3e-5), cfg, 1800.0, return_diagnostics=True)
+        return diag
+
+    def test_heterotrophic_modifier_invariant_to_T_ref_ra(self):
+        """Changing T_ref_ra must NOT change the heterotrophic modifiers
+        (``_temperate_modifier`` / ``_som_decomp_modifier`` use ``T_ref``, and
+        ``analytic_som_soc`` is built from ``_som_decomp_modifier``)."""
+        precip = jnp.array([3e-5, 3e-5])
+        T = jnp.array([300.0, 270.0])
+        lo = _default_config(scheme="differland", T_ref_ra=298.15)
+        hi = _default_config(scheme="differland", T_ref_ra=350.0)
+        npt.assert_allclose(_temperate_modifier(T, precip, lo),
+                            _temperate_modifier(T, precip, hi), rtol=0, atol=0)
+        npt.assert_allclose(_som_decomp_modifier(T, precip, lo),
+                            _som_decomp_modifier(T, precip, hi), rtol=0, atol=0)
+
+    def test_autotrophic_R_maint_invariant_to_T_ref(self):
+        """Changing the heterotrophic ``T_ref`` must NOT change autotrophic
+        ``R_maint`` (which uses ``T_ref_ra`` + ``Q10_exp`` only)."""
+        base = self._diag(_default_config(scheme="differland", T_ref=283.15))
+        alt = self._diag(_default_config(scheme="differland", T_ref=250.0))
+        npt.assert_allclose(base.r_maint, alt.r_maint, rtol=1e-12, atol=0)
+
+    def test_R_maint_exact_ratio_from_T_ref_ra(self):
+        """+15 K in ``T_ref_ra`` scales ``R_maint`` by exactly
+        ``exp(-Q10_exp*15) = 0.5488116`` at every temperature (a UNIFORM rescaling
+        of the maintenance curve, not a warm-only correction)."""
+        cfg_lo = _default_config(scheme="differland", T_ref_ra=283.15)
+        cfg_hi = _default_config(scheme="differland", T_ref_ra=298.15)
+        ratio = self._diag(cfg_hi).r_maint / self._diag(cfg_lo).r_maint
+        expected = math.exp(-cfg_lo.Q10_exp * 15.0)  # 0.5488116...
+        npt.assert_allclose(ratio, expected, rtol=1e-6, atol=0)
+
+    def test_higher_T_ref_ra_lowers_rauto_raises_npp(self):
+        """Raising ``T_ref_ra`` lowers ``R_maint`` and ``R_auto`` and RAISES NPP
+        (the fix direction: less maintenance loss => more net production).
+        ``R_auto = f_auto*GPP + (1-f_auto)*R_maint`` is strictly increasing in
+        ``R_maint``, and ``NPP = GPP - R_auto``."""
+        d_lo = self._diag(_default_config(scheme="differland", T_ref_ra=283.15))
+        d_hi = self._diag(_default_config(scheme="differland", T_ref_ra=298.15))
+        self.assertTrue(bool(jnp.all(d_hi.r_maint < d_lo.r_maint)))
+        self.assertTrue(bool(jnp.all(d_hi.r_auto < d_lo.r_auto)))
+        self.assertTrue(bool(jnp.all(d_hi.npp > d_lo.npp)))
+
+    def test_jit_and_grad_smoke(self):
+        """``step_carbon_differland`` stays JIT-able and differentiable through the
+        new reference (``T_ref_ra`` is a static float leaf; no new control flow)."""
+        cfg = _default_config(scheme="differland")
+        ncol = 2
+        state = _make_carbon_state(shape=(ncol,))
+        sw = jnp.full(ncol, 320.0)
+        co2 = jnp.full(ncol, 400.0)
+        beta = jnp.full(ncol, 0.8)
+        lat = jnp.full(ncol, 0.7)
+        precip = jnp.full(ncol, 3e-5)
+        jitted = jax.jit(lambda st, Tair: step_carbon_differland(
+            st, sw, Tair, co2, beta, lat, 150.0, precip, cfg, 1800.0))
+        s2, f2 = jitted(state, jnp.full(ncol, 295.0))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(f2))))
+        for name in s2._fields:
+            self.assertTrue(bool(jnp.all(jnp.isfinite(getattr(s2, name)))))
+
+        def loss(Tair):
+            _s, _f, diag = step_carbon_differland(
+                state, sw, Tair, co2, beta, lat, 150.0, precip, cfg, 1800.0,
+                return_diagnostics=True)
+            return jnp.sum(diag.npp)
+        g = jax.grad(loss)(jnp.full(ncol, 295.0))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(g))))
+
+
+# ===================================================================
 # DifferLand step
 # ===================================================================
 

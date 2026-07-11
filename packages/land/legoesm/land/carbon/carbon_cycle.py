@@ -488,14 +488,15 @@ def step_carbon_differland(
     # Maintenance respiration: biomass-proportional, temperature-dependent,
     # always active (including nighttime and dormant seasons).
     # Autotrophic maintenance-respiration temperature factor.  Reference is the
-    # DECOUPLED 25 degC maintenance-respiration reference (config.T_ref_ra), NOT
-    # the 10 degC heterotrophic CENTURY reference (config.T_ref, used for soil
-    # decomposition in _temperate_modifier above): the r_maint_* base rates are
-    # reported at 25 degC, so sharing the 10 degC reference over-inflated
-    # warm-land Ra and collapsed CUE to ~0.11.  Sign convention (carbon, Ra is a
-    # LOSS to the atmosphere; NPP = GPP - R_auto): Q10_exp > 0, so T warmer than
-    # the reference => factor > 1 (more maintenance loss); raising the reference
-    # lowers the factor for T < ref, lowering R_maint and RAISING NPP.
+    # DECOUPLED autotrophic reference (config.T_ref_ra = 25 degC), NOT the 10 degC
+    # heterotrophic CENTURY reference (config.T_ref, used for soil decomposition in
+    # _temperate_modifier above): sharing the 10 degC reference for the autotrophic
+    # term inflated warm-land Ra ~1.8-2.2x in the tropics and collapsed CUE to ~0.11
+    # (the bulk r_maint_* magnitudes are recalibrated at this reference; see config).
+    # Sign convention (carbon, Ra is a LOSS to the atmosphere; NPP = GPP - R_auto):
+    # Q10_exp > 0, so T warmer than the reference => factor > 1 (more maintenance
+    # loss).  Raising the reference multiplies temp_factor_ra by exp(-Q10_exp*dref)
+    # at EVERY fixed temperature, lowering R_maint and RAISING NPP.
     temp_factor_ra = jnp.exp(config.Q10_exp * (T - config.T_ref_ra))
     R_maint_day = (
         config.r_maint_fol * state.C_fol
