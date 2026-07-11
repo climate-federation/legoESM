@@ -283,7 +283,16 @@ def test_gross_assimilation_differentiable():
     g_mix = jax.grad(mix_gross)(jnp.array(0.5))
     assert jnp.isfinite(g_c3) and float(g_c3) > 0.0   # more Vcmax -> more gross
     assert jnp.isfinite(g_c4) and float(g_c4) > 0.0
-    assert jnp.isfinite(g_mix)   # d(gross)/d(fC4) = Agross_C4 - Agross_C3; finite
+    # d(A_gross_blend)/d(fC4) is EXACTLY Agross_C4 - Agross_C3, and must be
+    # NONZERO (a stopped/zero gradient would slip through a mere isfinite check).
+    _, Ag_c3 = c3_photosynthesis(
+        jnp.array(300.0), jnp.array(250.0), jnp.array(1200.0),
+        jnp.array(60.0), jnp.array(101325.0), jnp.array(0.3), jnp.array(20.0))
+    _, Ag_c4 = c4_photosynthesis(
+        jnp.array(300.0), jnp.array(250.0), jnp.array(1200.0), jnp.array(40.0))
+    assert jnp.isfinite(g_mix)
+    assert jnp.allclose(g_mix, Ag_c4 - Ag_c3, rtol=1e-6, atol=1e-6)
+    assert abs(float(g_mix)) > 1e-6                    # NONZERO (not stopped)
 
 
 def test_gross_and_net_zero_in_dark_c4_and_mixed():
@@ -300,3 +309,28 @@ def test_gross_and_net_zero_in_dark_c4_and_mixed():
             jnp.array(101325.0), jnp.array(0.3), jnp.array(20.0))
         assert float(An_m) == 0.0
         assert float(Ag_m) == 0.0
+
+
+def test_c3_sub_compensation_twilight_gap_is_gross_not_rd():
+    """Twilight sub-compensation band (0 < A < Rd): NET An floors to 0 while
+    GROSS A_gross > 0, so the gross-minus-net gap == A_gross (NOT Rd, NOT 0).
+
+    This is the THIRD flooring regime the mixed contract must describe (codex
+    finding): at very low light the light-limited rate is positive but below
+    dark respiration, so ``A_gross - An = min(A_gross, Rd) = A_gross`` here."""
+    Tf = jnp.array(298.15)
+    Vcmax25 = jnp.array(60.0)
+    An, A_gross = c3_photosynthesis(
+        Tf, jnp.array(280.0), jnp.array(5.0),   # APAR=5: light-limited, tiny A
+        Vcmax25, jnp.array(101325.0), jnp.array(0.3), jnp.array(20.0))
+    Rd = _rd_atkin(Tf, jnp.clip(jnp.array(20.0), photo._TGC_LO, photo._TGC_HI),
+                   Vcmax25)
+    # Sub-compensation: 0 < gross A < Rd, so net floors to 0.
+    assert 0.0 < float(A_gross) < float(Rd)
+    assert float(An) == 0.0
+    # Gap == A_gross (== the twilight A), which is NEITHER Rd NOR 0.
+    assert jnp.allclose(A_gross - An, A_gross, rtol=1e-6, atol=1e-6)
+    assert not jnp.allclose(A_gross - An, Rd, rtol=1e-3, atol=1e-3)
+    # Unified identity across all regimes: gap == min(A_gross, Rd).
+    assert jnp.allclose(A_gross - An, jnp.minimum(A_gross, Rd),
+                        rtol=1e-6, atol=1e-6)

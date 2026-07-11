@@ -292,11 +292,13 @@ def c3_photosynthesis(
     # NET assimilation (floored >= 0) drives stomatal / leaf-flux coupling.
     An = jnp.where((A - Rd) < 0.0, 0.0, A - Rd)
     # GROSS assimilation is the carbon-model GPP (uptake BEFORE Rd), floored
-    # >= 0.  NOTE the flooring subtlety: ``A_gross - An == Rd`` holds ONLY
-    # where An > 0 (in the light).  In the dark APAR->0 forces Aj->0, the
-    # co-limitation drives A->0, so A_gross->0 while Rd > 0 — hence GPP is
-    # ``max(A, 0)``, NOT ``An + Rd`` (which would report a phantom +Rd uptake
-    # at night).
+    # >= 0.  The gross-minus-net gap has THREE regimes (flooring subtlety):
+    #   A_gross - An = max(A,0) - max(A-Rd,0) = min(A_gross, Rd):
+    #     * full light          (A > Rd,  An > 0):  gap == Rd
+    #     * sub-compensation    (0 < A < Rd, An=0):  gap == A_gross  (0 < gap < Rd)
+    #     * dark                (A <= 0,   An = 0):  gap == 0
+    # so GPP is ``max(A, 0)``, NOT ``An + Rd`` (which would report a phantom
+    # +Rd uptake at night AND in the twilight sub-compensation band).
     A_gross = jnp.maximum(A, 0.0)
     return An, A_gross
 
@@ -432,12 +434,13 @@ __physics_contract__ = {
         "respiration (r_maint_fol*C_fol; a distinct bulk closure, not the "
         "numeric leaf Rd) — so exporting net as GPP would double-count leaf "
         "respiration. Light- (Aj), Rubisco- (Ac) and product- (Ap) limited "
-        "rates are each >= 0. For the COMPONENT routines (c3/c4), "
-        "A_gross - An == Rd where that component's An > 0 (in the light) and "
-        "both -> 0 in the dark. The MIXED routine blends net and gross by fC4 "
-        "identically, so its A_gross - An is the fC4-weighted sum of the "
-        "component Rd terms (each active only where that component's net > 0), "
-        "not a single Rd."
+        "rates are each >= 0. For the COMPONENT routines (c3/c4) the "
+        "gross-minus-net gap has three regimes: "
+        "A_gross - An = min(A_gross, Rd) = Rd in full light (A>Rd, net>0), "
+        "= A_gross in the sub-compensation twilight band (0<A<Rd, net floored "
+        "to 0), and = 0 in the dark. The MIXED routine blends net and gross by "
+        "fC4 identically, so its A_gross - An is the fC4-weighted sum of the "
+        "component min(A_gross_c, Rd_c) gaps, not a single Rd."
     ),
     "conserves": [],  # leaf-level rate, not a conservation law
     "differentiable": True,
@@ -451,10 +454,13 @@ __physics_contract__ = {
     "idealized_test": (
         "tests/land/unit/test_canopy_photosynthesis.py: An > 0 at light- and "
         "CO2-saturated 25 degC; An == 0 in the dark; A_gross >= An always; "
-        "A_gross - An == Rd in the light and both == 0 in the dark (gross-GPP "
-        "vs net double-count fix); Vcmax response peaks near 25-30 degC; "
-        "Rd0 == 0.015*Vcmax25 at 25 degC (no double count); Jmax25/Vcmax25 "
-        "acclimation ratio; CLM5 C4 constants; high-APAR saturation (Jmax "
-        "bound); finite grad wrt Vcmax25."
+        "A_gross - An == Rd in full light and both == 0 in the dark; "
+        "sub-compensation twilight band (0<A<Rd) gap == A_gross (not Rd, not 0); "
+        "gross-branch + mixed-fC4 grad (d/dfC4 == Agross_C4 - Agross_C3, "
+        "nonzero); Vcmax response peaks near 25-30 degC; Rd0 == 0.015*Vcmax25 "
+        "at 25 degC; Jmax25/Vcmax25 acclimation; CLM5 C4 constants; high-APAR "
+        "saturation. Public export boundary: "
+        "tests/land/unit/test_canopy_solver_grad.py asserts "
+        "compute_two_leaf_canopy_fluxes().gpp == GROSS aggregate (not net)."
     ),
 }

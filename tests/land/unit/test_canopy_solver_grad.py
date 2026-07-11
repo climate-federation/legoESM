@@ -171,3 +171,140 @@ def test_canopy_forward_reports_gross_and_net():
     gpp_gross   = (Ag_Sun + Ag_Sh) * _G_C_PER_UMOL_CO2
     gpp_net_old = (An_Sun + An_Sh) * _G_C_PER_UMOL_CO2
     assert gpp_gross > gpp_net_old
+
+
+def test_two_leaf_public_export_gpp_is_gross():
+    """PUBLIC-boundary lock: ``compute_two_leaf_canopy_fluxes().gpp`` is the
+    GROSS aggregation ``(Agross_Sun+Agross_Sh)*conv``, NOT the net
+    ``(An_Sun+An_Sh)*conv``.  Reverting the two_leaf_canopy GPP line to net
+    makes THIS test fail (the prior canopy_forward test does not, because it
+    never exercises the public surface-scheme entry point).
+
+    ``SurfaceFluxOutput`` does not expose the per-leaf An/Agross, so we
+    reproduce the canopy's forward assembly with the SAME public helpers the
+    source uses and a FROZEN soil callback (``soil_thermal_fn`` returns
+    ``T_soil_top`` so every Picard pass keeps ``Ts_bc == T_soil_top`` and the
+    converged state is a single deterministic solve).  Pure C3 (fC4=0), no soil
+    stress (w_frac_rz=1) so the reconstructed bundle matches the internal one
+    bit-for-bit, giving ``out.gpp == gross_sum`` to fp precision.
+    """
+    import jax.numpy as jnp
+
+    from legoesm import constants
+    from legoesm.core.coupling_fields import AtmToSurface
+    from legoesm.land.canopy import CanopyLandParams
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.canopy.radiative_transfer import (
+        split_sw_components, canopy_shortwave_rt)
+    from legoesm.land.canopy.stability import (
+        compute_aerodynamics, sat_specific_humidity)
+    from legoesm.land.canopy.solver import (
+        CanopyForcingBundle, solve_canopy_closure, canopy_forward)
+    from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+    from legoesm.land.surface_scheme import two_leaf_canopy as tlc
+
+    ncol = 1
+    cc = TwoLeafCanopyConfig(max_iters=60)
+    land_config = MultiLayerLandConfig(surface_scheme=cc)
+    conv = tlc._G_C_PER_UMOL_CO2
+
+    forcing = AtmToSurface(
+        sw_down=jnp.full(ncol, 700.0), lw_down=jnp.full(ncol, 380.0),
+        precip_total=jnp.zeros(ncol), precip_snow=jnp.zeros(ncol),
+        T_lowest=jnp.full(ncol, 298.0), q_lowest=jnp.full(ncol, 0.012),
+        u_lowest=jnp.full(ncol, 3.0), v_lowest=jnp.full(ncol, 0.5),
+        p_lowest=jnp.full(ncol, 98000.0), p_surface=jnp.full(ncol, 101325.0),
+        rho_lowest=jnp.full(ncol, 1.18), cos_zenith=jnp.full(ncol, 0.8),
+        co2_ppmv=jnp.full(ncol, 420.0),
+        has_radiation=True, has_precipitation=False)
+    params = CanopyLandParams(
+        LAI=jnp.full(ncol, 3.0), hc=jnp.full(ncol, 5.0),
+        fC4=jnp.zeros(ncol), FNonVeg=jnp.zeros(ncol),
+        CI=jnp.full(ncol, 0.75), kn=jnp.full(ncol, 0.3),
+        Vcmax25_C3_leaf=jnp.full(ncol, 60.0), Vcmax25_C4_leaf=jnp.full(ncol, 40.0),
+        m_C3=jnp.full(ncol, 9.0), m_C4=jnp.full(ncol, 4.0),
+        b0_C3=jnp.full(ncol, 0.01), b0_C4=jnp.full(ncol, 0.04),
+        alf=jnp.full(ncol, 0.3), TgC=jnp.full(ncol, 20.0),
+        ALB_VIS=jnp.full(ncol, 0.1), ALB_NIR=jnp.full(ncol, 0.2),
+        emissivity=jnp.full(ncol, 0.97), rz0m=jnp.full(ncol, 0.055),
+        rd=jnp.full(ncol, 0.67))
+    T_soil_top = jnp.full(ncol, 296.0)
+    wind = jnp.sqrt(jnp.full(ncol, 3.0) ** 2 + jnp.full(ncol, 0.5) ** 2)
+    wdir_x = jnp.full(ncol, 3.0) / wind
+    wdir_y = jnp.full(ncol, 0.5) / wind
+    dt = 1800.0
+
+    def _frozen_soil(G, dt_):     # keeps Ts_bc == T_soil_top every Picard pass
+        return T_soil_top
+
+    def _public(p):
+        return tlc.compute_two_leaf_canopy_fluxes(
+            T_soil_top=T_soil_top, forcing=forcing, canopy_config=cc,
+            land_config=land_config, canopy_params=p,
+            w_frac_rz=jnp.ones(ncol), wind_speed=wind,
+            wind_dir_x=wdir_x, wind_dir_y=wdir_y,
+            soil_thermal_fn=_frozen_soil, dt=dt)
+
+    out = _public(params)
+    assert out.gpp is not None
+    assert bool(jnp.all(jnp.isfinite(out.gpp)))
+    assert float(out.gpp[0]) > 0.0                         # lit canopy assimilates
+
+    # ---- Reconstruct the converged state with the SAME public helpers ----
+    LAI = params.LAI
+    z0m, displa = compute_aerodynamics(params.hc, LAI, params.rz0m, params.rd)
+    z_ref = jnp.maximum(jnp.full(ncol, land_config.z_ref),
+                        displa + 10.0 * z0m + 2.0)
+    SZA = jnp.degrees(jnp.arccos(jnp.clip(forcing.cos_zenith, 0.0, 1.0)))
+    PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV = split_sw_components(
+        forcing.sw_down, forcing.cos_zenith)
+    sw = canopy_shortwave_rt(
+        PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV, SZA, LAI, params.CI,
+        params.ALB_VIS, params.ALB_NIR, params.Vcmax25_C3_leaf,
+        params.Vcmax25_C4_leaf, params.kn, params.FNonVeg)
+    Ta = forcing.T_lowest
+    Ps = forcing.p_surface
+    q_atm = forcing.q_lowest
+    Ca = forcing.co2_ppmv
+    q_c_init = 0.5 * (sat_specific_humidity(T_soil_top, Ps) + q_atm)
+    Ci_init = Ca * tlc._CI_CA_C3          # chi = _CI_CA_C3 - _..._MINUS_C4*fC4, fC4=0
+    x0 = jnp.stack([Ta, Ta, Ci_init, Ci_init, Ta, q_c_init], axis=-1)  # (ncol, 6)
+    bundle = CanopyForcingBundle(
+        LAI=LAI, SZA=SZA, La=forcing.lw_down,
+        epsf=jnp.full(ncol, cc.epsf), epss=jnp.full(ncol, cc.epss),
+        fSun=sw.fSun, APAR_Sun=sw.APAR_Sun, APAR_Sh=sw.APAR_Sh,
+        Vcmax25_Sun=sw.Vcmax25_C3Sun, Vcmax25_Sh=sw.Vcmax25_C3Sh,
+        Vcmax25_C4Sun=sw.Vcmax25_C4Sun, Vcmax25_C4Sh=sw.Vcmax25_C4Sh,
+        ASW_Sun=sw.ASW_Sun, ASW_Sh=sw.ASW_Sh, ASW_Soil=sw.ASW_Soil,
+        Ts_bc=T_soil_top, Ca=Ca, Ps=Ps, Ta=Ta,
+        lam=jnp.full(ncol, constants.L_v), Cp=jnp.full(ncol, constants.c_pd),
+        rhoa=forcing.rho_lowest, Tv_atm=Ta * (1.0 + tlc._VIRT_T_COEF * q_atm),
+        q_atm=q_atm,
+        m=params.m_C3, b0=params.b0_C3, alf=params.alf, TgC=params.TgC,
+        fC4=params.fC4, fStress_soil=jnp.ones(ncol),
+        ur=wind, CI=params.CI, z0m=z0m, displa=displa, z0=z_ref,
+        cv=jnp.full(ncol, cc.cv), d_leaf=jnp.full(ncol, tlc._DEFAULT_D_LEAF),
+        r_soil_surface=jnp.zeros(ncol))
+    x_star, _ = jax.vmap(lambda x, b: solve_canopy_closure(x, b, cc))(x0, bundle)
+    d = jax.vmap(lambda x, b: canopy_forward(
+        x, b, cc.LE_module, cc.stomatal_model, cc.le_cap_mode,
+        cc.use_ta_for_photosynthesis))(x_star, bundle)
+
+    gross_sum = (d["Agross_Sun"] + d["Agross_Sh"]) * conv
+    net_sum = (d["An_Sun"] + d["An_Sh"]) * conv
+
+    # (a) public gpp == GROSS aggregate (bit-faithful reconstruction).
+    assert jnp.allclose(out.gpp, gross_sum, rtol=1e-4, atol=1e-12)
+    # (b) GROSS strictly exceeds NET in the light, and the public gpp is NOT
+    #     the net aggregate (would fail on a reverted gpp line).
+    assert float(gross_sum[0]) > float(net_sum[0])
+    assert not bool(jnp.allclose(out.gpp, net_sum, rtol=1e-4, atol=1e-12))
+
+    # (c) a finite, NONZERO gradient flows through the exported gpp path.
+    def _sum_gpp(vc):
+        p = params._replace(Vcmax25_C3_leaf=jnp.full(ncol, vc))
+        return jnp.sum(_public(p).gpp)
+
+    g = jax.grad(_sum_gpp)(60.0)
+    assert jnp.isfinite(g)
+    assert abs(float(g)) > 0.0
