@@ -593,7 +593,12 @@ def test_pad_corner_scalar_cross_face_ghost_is_attenuated_neighbour_row():
     inside its shared edge (Fortran ext_scalar exchanges divgd AFTER
     divergence_corner_duo applied the panel-edge zero/0.25 conditions), so
     for a constant-1 pre-attenuation divergence the ghost strip reads
-    [0, 0.0625, 0.25, ..., 0.25, 0.0625, 0]."""
+    [0, 0.0625, 0.25, ..., 0.25, 0.0625, 0].
+
+    NOTE (codex 2026-07-10): this locks the helper's NEAREST-ROW-COPY
+    approximation, not full cube_rmp oracle semantics — near strip ends
+    the Fortran remap would interpolate between neighbour indices
+    (endpoint ~0.0625q instead of the copied 0)."""
     from legoesm.core.fv3_sw_core import _pad_corner_scalar_cross_face
 
     n = 8
@@ -650,3 +655,20 @@ def test_d_sw5_cross_face_halo_gating_and_interior_invariance():
     assert d.max() > 0.0, "cross-face halo had no effect on seam corners"
     assert d[:, 2:-2, 2:-2].max() == 0.0, (
         "cross-face halo changed interior corners (must be seam-local)")
+
+
+def test_d_sw5_cross_face_halo_rejects_nord_ge_2():
+    """codex 2026-07-10 (HIGH): the opt-in one-ring ghost re-copy is not
+    faithful to Fortran's shrinking wider-halo evolution for nord>=2 —
+    the opt-in must raise on nord>=2 (dispatch-hardening: loud, not a
+    silent different scheme)."""
+    n = 12
+    cdgrid = _duogrid_cdgrid(n)
+    u_d, v_d, ua, va = _make_inputs(n, seed=5)
+    with pytest.raises(ValueError, match="nord=1 only"):
+        d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, 300.0,
+                                d4_bg=0.16, nord=2, cross_face_halo=True)
+    # default zero-ring still supports nord=2
+    out = d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, 300.0,
+                                  d4_bg=0.16, nord=2)
+    assert np.all(np.isfinite(np.asarray(out)))
