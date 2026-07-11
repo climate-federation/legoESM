@@ -3213,22 +3213,38 @@ def fb_v_d_to_covariant(u_d, v_d, cdgrid):
 
 
 def fb_v_d_to_orthogonal(u_d, v_cov, cdgrid):
-    """Inverse of :func:`fb_v_d_to_covariant` for the FB exit.
+    """Approximate inverse of :func:`fb_v_d_to_covariant` for the FB exit —
+    a DELIBERATE seam-filtering approximation, NOT an exact coordinate
+    inverse (codex 2026-07-10 F4 reframe).
 
-    Fixed-point: the cross-face u halo needs the orthogonal pair, so pass 1
-    inverts with an edge-pad ū (exact in the interior), pass 2 rebuilds ū
-    with the proper orthogonal halo.  Interior: exact inverse (same ū);
-    seams: residual is 2nd order (halo-u sensitivity × pass-1 seam error),
-    ~7e-4 m/s dt-independent per-step kick (W2 C36).
+    Two fixed-point passes: the cross-face u halo needs the orthogonal
+    pair, so pass 1 inverts with an edge-pad ū (exact in the interior),
+    pass 2 rebuilds ū with the proper orthogonal halo.  Interior: exact
+    inverse (same ū).  Seams: the 2-pass truncation leaves a residual that
+    is 2nd order (halo-u sensitivity × pass-1 seam error) — a
+    dt-INDEPENDENT ~7e-4 m/s per-step kick at seam rows (W2 C36).  That
+    residual is kept ON PURPOSE: it acts as a weak seam filter that damps
+    the seam mode the covariant chain pumps.
 
-    2026-07-10 MEASURED trade-off (do NOT add a 3rd pass): one more pass
-    contracts the roundtrip seam residual ~10x (7e-4 → 7e-5), but WORSENS
-    the W2 C36 2-day FB drift — max|dv| 6.2 → 9.6 m/s, max|u| 41.6 → 42.3
-    (scripts/tmp/_fb_edge_repro.py, single-variable pass-count probe; 6h
-    unchanged at 38.9).  The 2-pass seam residual evidently damps the seam
-    mode the covariant chain pumps; truth tier (measured long-run drift)
-    outranks the roundtrip-identity metric — same doctrine as the d_sw5
-    cross_face_halo default-OFF.
+    2026-07-10 MEASURED (do NOT "fix" by adding a 3rd pass / exact
+    inverse; commit 59a89ae12 reverted exactly that, 3da499f27): one more
+    pass contracts the roundtrip seam residual ~10x (7e-4 → 7e-5 m/s) but
+    WORSENS the W2 C36 2-day FB drift — max|dv| 6.2 → 9.6 m/s, max|u|
+    41.6 → 42.3 (scripts/tmp/_fb_edge_repro.py, single-variable
+    pass-count probe; 6h unchanged at 38.9).  Truth tier (measured
+    long-run drift) outranks the roundtrip-identity metric — same
+    doctrine as the d_sw5 cross_face_halo default-OFF.
+
+    jax.grad implication: because the 2-pass inverse is not the exact
+    inverse of :func:`fb_v_d_to_covariant`, the FB roundtrip is not an
+    identity map at seams — gradients through an FB step differentiate
+    the APPROXIMATE (filtered) map, including its dt-independent seam
+    residual, not an idealised exact-roundtrip step.  The map is smooth
+    (jnp.maximum floor only guards sina_u≈0, which does not occur on the
+    cubed sphere), so grads stay finite/well-defined; but loss terms that
+    probe seam-row winds at ~1e-3 m/s precision will see the residual and
+    its gradient.  Changing the pass count changes BOTH the primal and
+    the gradient — keep primal/adjoint consistent (2 passes).
     """
     sina_u, _ = _sina_u_v_from_sin_sg(cdgrid)
     rs = 1.0 / jnp.maximum(sina_u, _EPS)
