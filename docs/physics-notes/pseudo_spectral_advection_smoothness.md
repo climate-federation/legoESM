@@ -60,18 +60,37 @@ Non-dissipative sharpness trades numerical stability:
   order=8` gives **ww 0.28–0.30, hi-k 0.008–0.03 — matching spectral (0.32) and clean**
   (vs raw central 0.47/0.59). This is the FD analogue of the spectral core's
   non-dissipative-advection + sharp-filter recipe. Use in f64.
-- **`weno7`/`weno9`** are sharper than weno5 and self-stabilizing in **f64**, but their
-  reduced dissipation makes them **f32-fragile** (they can NaN on marginal cases where
-  weno5 holds). Use f64.
+- **`weno7`/`weno9`** are sharper than weno5 and self-stabilizing; f32 needs the Poisson
+  fix below.
+
+## float32 / GPU (`f32` is ~4–8× faster on consumer GPUs)
+
+f32 had two distinct failure modes, now addressed:
+
+1. **BiCGSTAB Poisson breakdown (fixed in the core).** The default `poisson_atol=1e-10` is
+   below the achievable ~O(eps≈1.2e-7) f32 residual, so the solver iterated past
+   convergence and its ρ/ω recurrences underflowed → NaN (fatal for non-dissipative
+   `central`). `project()` now **floors the tolerances at ~O(eps)** (f64 unchanged /
+   bit-identical). This makes the **non-buoyant** cases (neutral-uniform, ekman) f32-robust
+   for `weno5` / `weno7` / `weno9` / `central`+de-noiser — verified turbulent over 2600+ steps.
+2. **Stable-BL 2Δ θ-noise (config).** The buoyant/stratified cases (gabls1, wangara, a
+   capped "neutral") still NaN in f32 from the stable-layer 2Δ θ-mode; the scalar
+   `--shapiro` θ de-noiser suppresses it, but needs a **stronger coeff in f32**
+   (`--shapiro 0.2–0.3`, vs 0.1 that holds in f64). The driver warns on `--f32` + a buoyant
+   case.
+
+So: **f32 works** — non-buoyant with the Poisson fix alone; buoyant with `--shapiro 0.2–0.3`.
+f64 remains the zero-config choice for fine-resolution stratified runs.
 
 ## Recommendation
 
-- **Closest match to spectral (f64):** `momentum_scheme="central"` +
-  `momentum_shapiro_coeff≈0.4`, `momentum_shapiro_order=8` — non-dissipative advection +
-  the CFL-unlimited velocity de-noiser reproduces the spectral core's recipe and lands on
-  its resolved energy (ww ≈ 0.29 vs 0.32).
-- **Simpler, self-stabilizing (f64):** `momentum_scheme="weno7"` (or `weno9`) — sharper
-  than weno5 with no de-noiser to tune (but f32-fragile).
+- **Closest match to spectral:** `momentum_scheme="central"` + `momentum_shapiro_coeff≈0.4`,
+  `momentum_shapiro_order=8` — non-dissipative advection + the CFL-unlimited velocity
+  de-noiser reproduces the spectral core's recipe and lands on its resolved energy
+  (ww ≈ 0.29 vs 0.32). Runs in **f32** (non-buoyant) or **f32 + `--shapiro 0.2–0.3`**
+  (buoyant), thanks to the precision-aware Poisson tol; f64 for fine-res stratified.
+- **Simpler, self-stabilizing:** `momentum_scheme="weno7"` (or `weno9`) — sharper than
+  weno5 with no de-noiser to tune; f32-robust for non-buoyant with the Poisson fix.
 - The cores already agree at **matched SGS + resolution** with the default `weno5` —
   reproduce the spectral result by using the same SGS (e.g. both LASD) and grid, not by
   comparing mismatched configs (the original "too smooth" artifact).
