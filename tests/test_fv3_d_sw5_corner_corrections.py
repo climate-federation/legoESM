@@ -714,7 +714,12 @@ def test_post_rk3_corner_damping_hook_applies_v_update_in_covariant_space():
 
     n = 12
     dt = 600.0
-    grid = create_cubed_sphere(n)  # production default (non-duogrid)
+    # Codex 2026-07-11 re-review: the hook is duogrid-only (its covariant
+    # conversion routes through d2a2c_vect, whose NON-duogrid cross-face
+    # halo falls back to an orthogonal rotation — the very seam defect the
+    # FB guard blocks).  The reference below must therefore be computed on
+    # the same duogrid path the hook actually supports.
+    grid = create_cubed_sphere(n, use_duogrid=True)
     cdgrid = create_cubed_sphere_cdgrid(grid)
 
     # Geostrophically-balanced Williamson-2 state on the edge stagger.
@@ -803,3 +808,31 @@ def test_fb_entry_points_require_duogrid():
     cdgrid_dg = _duogrid_cdgrid(n)
     h1, u1, v1 = fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid_dg, 300.0)
     assert bool(jnp.all(jnp.isfinite(h1)))
+
+
+def test_dsw5_post_rk3_hook_requires_duogrid():
+    """codex 2026-07-11 re-review (HIGH): the use_fv3_dsw5_corner_damping
+    post-RK3 hook shares the FB covariant conversion, whose non-duogrid
+    d2a2c_vect halo falls back to an orthogonal rotation — silently wrong
+    at seams.  The hook must raise on non-duogrid grids, same contract as
+    the FB entry points."""
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
+        CDGridShallowWaterConfig,
+    )
+
+    n = 8
+    grid = create_cubed_sphere(n)  # non-duogrid
+    model = FV3EdgeShallowWaterModel(
+        grid, CDGridShallowWaterConfig(
+            use_fv3_dsw5_corner_damping=True, d2_bg=0.2))
+    rng = np.random.default_rng(7)
+    state = FV3EdgeShallowWaterState(
+        h=jnp.asarray(rng.standard_normal((6, n, n)) + 1000.0),
+        u_d=jnp.asarray(rng.standard_normal((6, n, n + 1))),
+        v_d=jnp.asarray(rng.standard_normal((6, n + 1, n))),
+        h_s=jnp.zeros((6, n, n)),
+    )
+    with pytest.raises(ValueError, match="duogrid"):
+        model.step(state, 300.0)

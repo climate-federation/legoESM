@@ -78,6 +78,7 @@ from legoesm.core.fv3_sw_core import (
     fb_v_d_to_covariant,
     fb_v_d_to_orthogonal,
     fv3_csw_tendencies,
+    require_duogrid_fb,
 )
 from legoesm.core.fv_tp_2d import transport_step
 from legoesm.core.fv3_del6_vt_flux import fv3_del6_vorticity_damping
@@ -1708,6 +1709,15 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             # update structure, not a continuous RK3 tendency."
             if self.config.use_fv3_dsw5_corner_damping:
                 _EPS = 1e-30
+                # Codex 2026-07-11 re-review (HIGH): the covariant
+                # conversion below routes through d2a2c_vect, whose
+                # non-duogrid cross-face halo falls back to an
+                # orthogonal rotation — silently wrong at seams for
+                # covariant inputs.  Same duogrid-only contract as the
+                # FB entry points; raise loudly.
+                require_duogrid_fb(
+                    self.cdgrid,
+                    "use_fv3_dsw5_corner_damping post-RK3 hook")
                 # Convention (2026-07-10 review, codex F2 follow-up):
                 # d_sw5_corner_divergence + d2a2c_vect and the d_sw6
                 # KE-gradient wind update are COVARIANT-convention (FV3

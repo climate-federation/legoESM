@@ -1729,14 +1729,19 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         correctness guard — its only job is to make removal of the
         fidelity note visible in a code review.
 
-        For correctness: the gap only affects the experimental FB
-        chain (fv3_forward_backward_step, fv3_fb_sw_step), which is
-        unstable at C36 for independent reasons.  Production (A-L +
-        RK3 in operators_cdgrid.py:fv3_sw_tendencies) does not call
-        `d_sw5_corner_divergence` and is unaffected.  A future port
-        of proper cubed-sphere corner-staggered halo exchange for
-        the Laplacian iteration should update both the source note
-        AND this test together.
+        For correctness: the gap affects the FB chain
+        (fv3_forward_backward_step, fv3_fb_sw_step; stabilized by the
+        2026-07-10 covariant-convention fix, duogrid-only) and the
+        default-OFF `use_fv3_dsw5_corner_damping` post-RK3 hook in
+        FV3EdgeShallowWaterModel.step — both call
+        `d_sw5_corner_divergence` (2026-07-11: an OPT-IN attenuated
+        cross-face ghost exists for nord==1; the zero-ring default was
+        measured stabler on the 120d modon).  The default production
+        tendency (A-L + RK3 in operators_cdgrid.py:fv3_sw_tendencies)
+        does not call it and is unaffected.  A future port of proper
+        cubed-sphere corner-staggered halo exchange for the Laplacian
+        iteration should update both the source note AND this test
+        together.
         """
         import inspect
         from legoesm.core.fv3_sw_core import d_sw5_corner_divergence
