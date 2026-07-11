@@ -87,6 +87,7 @@ def build(case, args, dtype):
         nu_floor=(args.nu_floor if args.nu_floor is not None else c["nu_floor"]),
         hyperdiff_coeff=getattr(args, "hyperdiff", 0.0),
         shapiro_coeff=getattr(args, "shapiro", 0.0),
+        shapiro_order=getattr(args, "shapiro_order", 1),
         momentum_shapiro_coeff=getattr(args, "momentum_shapiro", 0.0),
         momentum_shapiro_order=getattr(args, "momentum_shapiro_order", 1),
         f_cor=c["fcor"], ug=c["Ug"], vg=0.0,
@@ -234,6 +235,9 @@ def main():
     p.add_argument("--shapiro", type=float, default=0.0,
                    help="per-step [1,2,1] low-pass strength s in [0,1] on theta+tracers "
                    "— CFL-unlimited de-noiser; unlocks f32 gabls1 (try 0.05-0.2)")
+    p.add_argument("--shapiro-order", type=int, default=1,
+                   help="Shapiro order for the scalar θ de-noiser (flat passband); "
+                   "8-16 lets a stronger --shapiro suppress fine-res 2Δ θ-noise in f32")
     p.add_argument("--momentum-shapiro", type=float, default=0.0,
                    help="per-step Shapiro low-pass strength s in [0,1] on VELOCITY — "
                    "CFL-unlimited 2Δ de-noiser that makes --momentum-scheme central clean "
@@ -267,8 +271,8 @@ def main():
     # f64 runs them finite + turbulent, matching validate_bl_new_vs_spectral.py.
     if args.f32 and (c["cooling_rate"] > 0 or c["Q0"] != 0.0) and args.shapiro == 0.0:
         print(f"  WARNING: case '{args.case}' has active buoyancy forcing; the "
-              f"pseudo core's buoyant path is f32-fragile (NaN-prone). Use f64 "
-              f"(omit --f32), or add --shapiro 0.1 (CFL-unlimited de-noiser).",
+              f"pseudo core's stable-BL 2Δ θ-mode is f32-fragile (NaN-prone). Add "
+              f"--shapiro 0.2-0.3 (CFL-unlimited θ de-noiser), or use f64 (omit --f32).",
               file=sys.stderr)
 
     print(f"[pseudo-LES] case={args.case} grid={args.nx}x{args.ny}x{args.nz} "

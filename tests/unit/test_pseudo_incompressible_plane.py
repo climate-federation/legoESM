@@ -119,6 +119,26 @@ def test_velocity_shapiro_commutes_with_divergence():
         pip.make_grid(_cfg(momentum_shapiro_coeff=2.0))
 
 
+def test_poisson_tol_floored_keeps_f32_finite():
+    """A float32 BiCGSTAB targeting an atol below the achievable ~O(eps≈1.2e-7)
+    residual iterates past convergence and its ρ/ω recurrences underflow → NaN.
+    project() floors tol/atol at ~O(eps), so even an absurdly tight requested atol
+    stays finite in f32; f64 (floor far below its defaults) is unaffected."""
+    cfg = pip.PseudoIncompressibleConfig(
+        nx=16, ny=8, nz=12, Lx=1600.0, Ly=800.0, Lz=2400.0, theta_ref0=300.0,
+        poisson_atol=1e-30, poisson_tol=1e-30)          # unreachable target
+    for dtype in (jnp.float32, jnp.float64):
+        g = pip.make_grid(cfg, dtype=dtype)
+        sh = (8, 16, 12)
+        ku, kv, kw = jax.random.split(jax.random.PRNGKey(3), 3)
+        u = jax.random.normal(ku, sh, dtype); v = jax.random.normal(kv, sh, dtype)
+        w = jax.random.normal(kw, (8, 16, 13), dtype).at[..., 0].set(0.0).at[..., -1].set(0.0)
+        th = jnp.broadcast_to(g.theta0[None, None, :], sh).astype(dtype)
+        un, vn, wn, pi = pip.project(u, v, w, th, None, jnp.zeros(sh, dtype), 1.0, g)
+        assert bool(jnp.all(jnp.isfinite(un))), f"{dtype}: non-finite velocity"
+        assert bool(jnp.all(jnp.isfinite(pi))), f"{dtype}: non-finite pressure"
+
+
 def test_high_order_shapiro_flat_passband():
     """The Shapiro ORDER controls passband flatness: a well-resolved mode is barely
     touched at high order (response ≈1) but damped by the order-1 [1,2,1]. Per-step

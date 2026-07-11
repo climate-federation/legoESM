@@ -110,6 +110,12 @@ class PseudoIncompressibleConfig(NamedTuple):
     #                                  f32 within its stability window). Scalars only ⇒ the
     #                                  projection is untouched (velocity stays div-free).
     #                                  0 ⇒ off (bit-identical). s≈0.05–0.5 typical.
+    shapiro_order: int = 1           # Shapiro ORDER for the scalar θ/tracer de-noiser
+    #                                  (as momentum_shapiro_order): order 1 = [1,2,1]; a HIGH
+    #                                  order (8–16) is flat in the passband so a stronger
+    #                                  coeff suppresses the fine-res stable-BL 2Δ θ-mode
+    #                                  (needed for f32 at fine resolution) without eroding
+    #                                  the resolved θ eddies.
     momentum_shapiro_coeff: float = 0.0  # OPT-IN per-step [1,2,1] horizontal low-pass on
     #                                  VELOCITY (u,v,w), blend s∈[0,1] — the CFL-unlimited
     #                                  2Δ de-noiser that makes NON-dissipative momentum
@@ -190,6 +196,8 @@ def make_grid(cfg: PseudoIncompressibleConfig, dtype=jnp.float64
     if not isinstance(cfg.momentum_shapiro_order, int) or cfg.momentum_shapiro_order < 1:
         raise ValueError(f"momentum_shapiro_order must be an int >= 1, "
                          f"got {cfg.momentum_shapiro_order!r}.")
+    if not isinstance(cfg.shapiro_order, int) or cfg.shapiro_order < 1:
+        raise ValueError(f"shapiro_order must be an int >= 1, got {cfg.shapiro_order!r}.")
     nz = cfg.nz
     dx, dy, dz = cfg.Lx / cfg.nx, cfg.Ly / cfg.ny, cfg.Lz / nz
     z_c = (jnp.arange(nz, dtype=dtype) + 0.5) * dz
@@ -261,9 +269,18 @@ def project(u, v, w, theta, tracers, pi_prev, dt, g: PseudoIncompressibleGrid):
     cp = constants.c_pd
     c = _rtt(theta, tracers, g)                           # rtt at centres
     rhs = _rho_weighted_divergence(u, v, w, g) / dt
+    # Precision-aware BiCGSTAB tolerances: in float32 an atol=1e-10 target is BELOW
+    # the achievable ~O(eps≈1.2e-7) residual, so the solver iterates past convergence
+    # and its ρ/ω recurrences underflow → breakdown → NaN (fatal for the non-dissipative
+    # `central` momentum, which has no numerical dissipation to damp the residual-driven
+    # divergence). Floor tol/atol at ~O(eps) so f32 stops before breakdown; the f64
+    # floors (~1e-13) sit below the tight defaults ⇒ f64 is unchanged (bit-identical).
+    eps = float(jnp.finfo(rhs.dtype).eps)
+    tol = max(cfg.poisson_tol, 8.0e2 * eps)
+    atol = max(cfg.poisson_atol, 8.0e1 * eps)
     pi, _info = _poisson.solve_pressure(
         rhs, c, g.dx, g.dy, g.dz, x0=pi_prev,
-        tol=cfg.poisson_tol, atol=cfg.poisson_atol, maxiter=cfg.poisson_maxiter)
+        tol=tol, atol=atol, maxiter=cfg.poisson_maxiter)
     th_rho = _theta_rho(theta, tracers, cfg)
     # horizontal: gradient + θ_ρ both at the i+½ / j+½ faces (C-grid).
     thr_xf = 0.5 * (th_rho + jnp.roll(th_rho, -1, axis=_AX))
@@ -647,8 +664,9 @@ def step(state: PseudoIncompressibleState, g: PseudoIncompressibleGrid, dt,
     # (no re-projection needed). Static gate ⇒ default (s=0) is bit-identical.
     s = g.cfg.shapiro_coeff
     if s > 0.0:
-        th3 = th3 + s * (_shapiro_h(th3) - th3)
+        so = g.cfg.shapiro_order
+        th3 = th3 + s * (_shapiro_h(th3, so) - th3)
         if tr3 is not None:
-            tr3 = tr3 + s * (_shapiro_h(tr3) - tr3)
+            tr3 = tr3 + s * (_shapiro_h(tr3, so) - tr3)
     return PseudoIncompressibleState(u=u3, v=v3, w=w3, theta=th3, pi_prev=pi3,
                                      tracers=tr3)
