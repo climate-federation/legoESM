@@ -450,7 +450,7 @@ def annotate_incomplete(md: dict[str, Any], *, warn: bool = True) -> dict[str, A
 def tidy_throughput_fields(
     *,
     dt_seconds: float,
-    time_per_step_ms: float,
+    time_per_step_ms: float | None,
     total_cells: int,
 ) -> dict[str, Any]:
     """Flat SYPD/throughput metrics for a bench record, aggregator-ready.
@@ -470,7 +470,19 @@ def tidy_throughput_fields(
 
         sypd         = (dt / t_step) / (365.25 * 86400) * 86400
         mcells_per_s = total_cells / t_step / 1e6
+
+    ``time_per_step_ms=None`` (a run with no per-step time, e.g. the
+    zero-length ``block_steps=0`` parity path) emits honest nulls for
+    every derived metric — a throughput is never fabricated.
     """
+    if time_per_step_ms is None:
+        return {
+            "dt_seconds": float(dt_seconds),
+            "time_per_step_ms": None,
+            "total_cells": int(total_cells),
+            "sypd": None,
+            "mcells_per_s": None,
+        }
     t_step = float(time_per_step_ms) * 1e-3
     if t_step > 0.0:
         sypd = (float(dt_seconds) / t_step) / (365.25 * 86400.0) * 86400.0
@@ -508,6 +520,7 @@ def comm_accounting(
     bytes_per_message: int | None = None,
     full_state_gathers_per_step: int = 0,
     scope_note: str | None = None,
+    bytes_are_lower_bound: bool | None = None,
 ) -> dict[str, Any]:
     """Per-step communication VOLUME fields for a scaling record (audit item 4).
 
@@ -524,10 +537,15 @@ def comm_accounting(
     full state every step (e.g. run_omip-style host loops: 2 gathers) can
     report it; a fused-scan bench reports 0.  ``scope_note`` should say
     what the census covers (e.g. "barotropic solver only") so a partial
-    count is never mistaken for total traffic.
+    count is never mistaken for total traffic; ``bytes_are_lower_bound``
+    states the same fact MACHINE-READABLY (``halo_bytes_is_lower_bound``:
+    ``True`` = partial census/undercount, ``False`` = exact,
+    ``None`` = unknown) so aggregators cannot lose it with the prose
+    (codex batch4).
     """
     out: dict[str, Any] = {
         "full_state_gathers_per_step": int(full_state_gathers_per_step),
+        "halo_bytes_is_lower_bound": bytes_are_lower_bound,
     }
     if halo_messages_per_step is None:
         out.update(
@@ -621,9 +639,16 @@ def calibrated_bound(
     bandwidth_GBs: float | None = None,
     launch_host_ms: float = 0.0,
 ) -> dict[str, Any]:
-    """Calibrated per-fused-step time bound (audit item 8).
+    """Calibrated per-fused-step time MODEL (audit item 8).
 
-        T_bound = max(compute, comm) + reduction + launch_host + imbalance
+        T_bound = max(compute, comm) + reduction + launch_host
+
+    A heuristic roofline-STYLE model, NOT a guaranteed lower bound (codex
+    batch4): the comm term serializes the per-message latency sum
+    (overlapping/pipelined messages beat it), while a partial halo census
+    (e.g. barotropic-only) UNDERcounts bytes — the two biases pull in
+    opposite directions.  Use ``measured_over_bound`` as a consistency
+    diagnostic, not as proven headroom.
 
     Ingredients (all MEASURABLE, none fabricated):
 
@@ -632,26 +657,31 @@ def calibrated_bound(
       bound is emitted null and flagged incomplete).
     - ``comm``      = ``messages x latency + bytes / bandwidth`` — halo
       traffic, modeled as overlappable with compute, hence the ``max``.
-      A census that omits traffic (e.g. barotropic-only) UNDERestimates
-      comm; the bound stays a valid LOWER bound on the step time.
     - ``reduction`` = ``n_reductions x latency`` — sequentially DEPENDENT
       allreduce-type collectives (CG dot products); latency-bound at
       bench scales, so bytes are neglected (small-message model).
-    - ``imbalance`` = ``(rank_imbalance - 1) x compute`` from the
-      MEASURED max/median block ratio.
     - ``launch_host`` — per-step dispatch overhead; ~0 inside a fused
       ``lax.scan`` block (amortized), so benches pass the default 0.0;
       drivers stepping one-at-a-time should pass their measured
       ``step_latency_ms - fused_step_ms``.
 
+    ``rank_imbalance`` is reported as a DIAGNOSTIC ingredient
+    (``imbalance_ms = (rank_imbalance - 1) x compute``) and deliberately
+    NOT added to ``T_bound``: the measured max/median ratio already
+    contains communication/reduction jitter, so adding it would
+    double-count terms already modeled (codex batch4).
+
     ``latency_us`` / ``bandwidth_GBs`` default to the
     MACHINE-CALIBRATED-REQUIRED placeholders
     (:data:`DEFAULT_COMM_LATENCY_US` / :data:`DEFAULT_COMM_BANDWIDTH_GBS`);
     whenever either default is used the result carries
-    ``bound_calibrated=False`` and must not be quoted as a machine
-    roofline.  Any missing ingredient -> ``t_bound_ms=None`` +
-    ``bound_incomplete_reason`` naming it — an incomplete bound is
-    reported as incomplete, never invented.
+    ``bound_calibrated=False``.  Placeholders may only ever MULTIPLY ZERO
+    work: with a nonzero communication/reduction census an uncalibrated
+    fabric would fabricate a number, so the missing calibration is treated
+    as a missing ingredient and the bound is emitted null (named in
+    ``bound_incomplete_reason``).  Any missing ingredient ->
+    ``t_bound_ms=None`` + ``bound_incomplete_reason`` naming it — an
+    incomplete bound is reported as incomplete, never invented.
     """
     calibrated = latency_us is not None and bandwidth_GBs is not None
     lat_us = (DEFAULT_COMM_LATENCY_US if latency_us is None
@@ -670,8 +700,20 @@ def calibrated_bound(
         ("halo_messages_per_step", halo_messages_per_step),
         ("halo_bytes_per_step", halo_bytes_per_step),
         ("n_reductions_per_step", n_reductions_per_step),
-        ("rank_imbalance", rank_imbalance),
     ) if v is None]
+    # Placeholder fabric numbers + nonzero comm/reduction work would put a
+    # fabricated latency/bandwidth INTO the bound: honest null instead.
+    # (Zero work is fabric-independent — nd=1 rows keep their trivial
+    # compute-only bound.)
+    has_comm_work = any(
+        v is not None and float(v) > 0.0
+        for v in (halo_messages_per_step, halo_bytes_per_step,
+                  n_reductions_per_step))
+    if has_comm_work and not calibrated:
+        if latency_us is None:
+            missing.append("latency_us(placeholder with nonzero comm)")
+        if bandwidth_GBs is None:
+            missing.append("bandwidth_GBs(placeholder with nonzero comm)")
 
     compute_ms = (None if single_device_fused_step_ms is None
                   else float(single_device_fused_step_ms))
@@ -681,6 +723,7 @@ def calibrated_bound(
                    + float(halo_bytes_per_step) / (bw_gbs * 1e9) * 1e3)
     reduction_ms = (None if n_reductions_per_step is None
                     else float(n_reductions_per_step) * lat_us * 1e-3)
+    # Diagnostic ONLY — not a T_bound term (see the docstring).
     imbalance_ms = None
     if rank_imbalance is not None and compute_ms is not None:
         imbalance_ms = max(float(rank_imbalance) - 1.0, 0.0) * compute_ms
@@ -690,7 +733,7 @@ def calibrated_bound(
         measured_over_bound = None
     else:
         t_bound_ms = (max(compute_ms, comm_ms) + reduction_ms
-                      + float(launch_host_ms) + imbalance_ms)
+                      + float(launch_host_ms))
         measured_over_bound = (
             float(measured_fused_step_ms) / t_bound_ms
             if measured_fused_step_ms is not None and t_bound_ms > 0.0
@@ -739,10 +782,11 @@ def timed_scan_blocks(
     it), so it is measured SEPARATELY by a short individually-synced probe and
     reported as ``step_latency_ms`` — never mixed into the fused number.
 
-    Multi-controller runs additionally record the SLOWEST-process block time
-    and the imbalance ratio (max/median across processes): with a single
-    process's clock a straggler band is invisible and the reported time
-    understates the true parallel step time.
+    Multi-controller runs additionally allgather EVERY process's full
+    per-block vector and reduce per block: the parallel time of block ``b``
+    is the SLOWEST process in that block.  A per-process median gathered
+    alone would hide an alternating straggler (every rank's median can be
+    fast even though every block has a slow rank — codex batch4).
 
     Parameters
     ----------
@@ -750,17 +794,31 @@ def timed_scan_blocks(
         ``advance(state) -> state`` — ONE production step with all static
         knobs (dt, forcing, ...) closed over.  May itself be jitted; it is
         re-traced INTO the fused scan (same graph, no double-jit penalty).
+        MUST NOT donate its input buffers (``donate_argnums``): the scan
+        pre-compile below runs on a SHALLOW pytree copy whose leaves ALIAS
+        the live seed state — donation would invalidate the seed's buffers
+        mid-benchmark.
     state
         Initial (already sharded, post-seed) model state pytree.
     block_steps
         Steps per fused ``lax.scan`` block (the amortizing window).
+        ``>= 0``; ``0`` is the documented ZERO-LENGTH parity path (the
+        block advances nothing and ``fused_step_ms`` is ``None`` — a
+        zero-step block has no per-step time).
     n_blocks
-        Timed blocks; per-block times expose block-to-block drift.
+        Timed blocks (``>= 1``); per-block times expose drift.
     probe_steps
-        Individually host-synced steps for the separate dispatch-latency
-        probe (small: each one costs a full device round-trip).
+        Individually host-synced steps (``>= 0``) for the separate
+        dispatch-latency probe (each one costs a device round-trip).
     sync_label
         Base label for the multi-controller ``sync_global_devices`` fences.
+
+    Invalid schedule values raise ``ValueError`` — never silently clamped,
+    so the recorded schedule is ALWAYS the executed schedule.  Multi-process
+    runs first allgather-verify the schedule tuple itself: processes that
+    disagree on ``(block_steps, n_blocks, probe_steps)`` would enter
+    DIFFERENT named-fence schedules and deadlock; the verification is the
+    one collective every process reaches, so a mismatch raises everywhere.
 
     Returns
     -------
@@ -770,21 +828,53 @@ def timed_scan_blocks(
       ``scan_compile_ms``      first-call cost of the fused scan itself
       ``step_latency_ms``      median individually-synced per-step wall time
       ``block_ms``             per-block wall times, THIS process (list)
-      ``fused_step_ms``        median(block_ms)/block_steps — the headline
-      ``block_ms_max``/``block_ms_median``  slowest/median across processes
-                               (equal to this process's for 1 process)
-      ``rank_imbalance``       block_ms_max / block_ms_median  (>= 1.0)
-      ``block_steps``/``n_blocks``/``probe_steps``  the schedule itself
+      ``parallel_block_ms``    per-block wall times of the PARALLEL step:
+                               max over processes, per block (== ``block_ms``
+                               for a single process)
+      ``fused_step_ms``        median(parallel_block_ms)/block_steps — the
+                               headline (``None`` when ``block_steps == 0``)
+      ``rank_imbalance``       median over blocks of the per-block
+                               max/median-across-processes ratio (>= 1.0;
+                               exactly 1.0 for a single process)
+      ``rank_imbalance_per_block``  the per-block ratios themselves
+      ``block_steps``/``n_blocks``/``probe_steps``  the EXECUTED schedule
     """
     import time
 
     import jax
     import numpy as np
 
+    multi = jax.process_count() > 1
+    if multi:
+        # Collectively verify the schedule BEFORE compilation or any
+        # schedule-dependent fence: this allgather is the single collective
+        # every process reaches first, so on a mismatch EVERY process sees
+        # the same gathered table and raises together instead of hanging in
+        # mismatched named fences (codex batch4 deadlock hazard).
+        from jax.experimental import multihost_utils
+        _sched = np.asarray(multihost_utils.process_allgather(
+            np.array([block_steps, n_blocks, probe_steps], dtype=np.int64)))
+        if not bool((_sched == _sched[0]).all()):
+            raise ValueError(
+                "timed_scan_blocks: processes disagree on the schedule "
+                f"(block_steps, n_blocks, probe_steps) = {_sched.tolist()} "
+                "per process — a mismatched schedule deadlocks in the "
+                "named fences.")
+    # No silent rewrites: invalid values raise; the recorded schedule IS
+    # the executed schedule.  block_steps == 0 stays legal (the documented
+    # zero-length parity path).
+    if block_steps < 0:
+        raise ValueError(
+            f"timed_scan_blocks: block_steps must be >= 0, got {block_steps}")
+    if n_blocks < 1:
+        raise ValueError(
+            f"timed_scan_blocks: n_blocks must be >= 1, got {n_blocks}")
+    if probe_steps < 0:
+        raise ValueError(
+            f"timed_scan_blocks: probe_steps must be >= 0, got {probe_steps}")
+
     def _block(tree):
         jax.block_until_ready(jax.tree_util.tree_leaves(tree))
-
-    multi = jax.process_count() > 1
 
     def _fence(tag: str):
         if multi:
@@ -801,7 +891,7 @@ def timed_scan_blocks(
     # --- 2. dispatch-latency probe: individually synced steps, reported
     # separately (NEVER mixed into the fused number) ---
     probe_ms = []
-    for _ in range(max(0, probe_steps)):
+    for _ in range(probe_steps):
         t0 = time.perf_counter()
         state = advance(state)
         _block(state)
@@ -823,8 +913,13 @@ def timed_scan_blocks(
             return new, None
         return jax.lax.scan(_body, st, None, length=block_steps)[0]
 
-    # Pre-compile the scan on cloned leaves (seed state untouched; every
-    # process executes the same collective schedule — counts stay matched).
+    # Pre-compile the scan on a SHALLOW pytree copy: the leaves ALIAS the
+    # seed state's arrays (no data copy) — sufficient AND safe because the
+    # pre-call only needs matching shapes/dtypes/shardings to warm the
+    # compile cache, jitted execution is pure, and ``advance`` is
+    # contract-bound not to donate buffers (see the docstring).  The seed
+    # value itself is untouched; every process executes the same collective
+    # schedule — counts stay matched.
     _pre = jax.tree_util.tree_map(lambda x: x, state)
     t0 = time.perf_counter()
     _pre_out = _scan_run(_pre)
@@ -833,7 +928,7 @@ def timed_scan_blocks(
     del _pre, _pre_out
 
     block_ms = []
-    for b in range(max(1, n_blocks)):
+    for b in range(n_blocks):
         _fence(f"block{b}_start")
         t0 = time.perf_counter()
         state = _scan_run(state)
@@ -841,28 +936,42 @@ def timed_scan_blocks(
         block_ms.append((time.perf_counter() - t0) * 1e3)
     _fence("blocks_end")
 
-    my_median = float(np.median(block_ms))
+    # Slowest-rank statistics from the FULL per-block vectors (equal length
+    # everywhere — the schedule was collectively verified above).  The
+    # parallel time of block b is the slowest process IN that block; a
+    # gather of per-process medians would let alternating stragglers make
+    # every rank median look fast (codex batch4).
+    my_blocks = np.asarray(block_ms, dtype=np.float64)
     if multi:
         from jax.experimental import multihost_utils
-        all_medians = np.asarray(
-            multihost_utils.process_allgather(np.float64(my_median)))
-        block_ms_max = float(np.max(all_medians))
-        block_ms_median = float(np.median(all_medians))
+        all_blocks = np.asarray(
+            multihost_utils.process_allgather(my_blocks))
     else:
-        block_ms_max = my_median
-        block_ms_median = my_median
-    rank_imbalance = (block_ms_max / block_ms_median
-                      if block_ms_median > 0 else float("nan"))
+        all_blocks = my_blocks[None, :]
+    parallel_block_ms = np.max(all_blocks, axis=0)        # (n_blocks,)
+    rank_median_ms = np.median(all_blocks, axis=0)        # (n_blocks,)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        imb_per_block = np.where(rank_median_ms > 0.0,
+                                 parallel_block_ms / rank_median_ms,
+                                 np.nan)
+    rank_imbalance = (float(np.nanmedian(imb_per_block))
+                      if np.isfinite(imb_per_block).any() else float("nan"))
+    # Headline: median over blocks of the per-block PARALLEL time, per step.
+    # A zero-length (parity) block has no per-step time — honest null.
+    fused_step_ms = (
+        round(float(np.median(parallel_block_ms)) / block_steps, 4)
+        if block_steps >= 1 else None)
 
     metrics = {
         "compile_ms": round(compile_ms, 1),
         "scan_compile_ms": round(scan_compile_ms, 1),
         "step_latency_ms": round(step_latency_ms, 3),
         "block_ms": [round(b, 2) for b in block_ms],
-        "fused_step_ms": round(block_ms_max / max(1, block_steps), 4),
-        "block_ms_max": round(block_ms_max, 2),
-        "block_ms_median": round(block_ms_median, 2),
+        "parallel_block_ms": [round(float(b), 2) for b in parallel_block_ms],
+        "fused_step_ms": fused_step_ms,
         "rank_imbalance": round(rank_imbalance, 4),
+        "rank_imbalance_per_block": [round(float(r), 4)
+                                     for r in imb_per_block],
         "block_steps": int(block_steps),
         "n_blocks": int(n_blocks),
         "probe_steps": int(probe_steps),

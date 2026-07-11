@@ -5,8 +5,9 @@ mirrors flag-for-flag), closing the "no automated ocean full-step strong/weak
 harness" gap: ``bench_ocean_mpi_scaling.py`` is the route-A (mpi4jax) phase-
 split bench and ``bench_ocean_latlon_spmd_pcg.py`` times the barotropic PCG
 KERNEL only — neither times the composed production step
-(``make_sharded_ocean_step``: baroclinic + split-explicit barotropic +
-implicit vmix + tracers) under the lat-band SPMD backend.
+(``make_sharded_ocean_step``: baroclinic + barotropic [implicit-CN
+free-surface by default, split-explicit via ``--baro-solver``] + implicit
+vmix + tracers) under the lat-band SPMD backend.
 
   strong: fixed (n_lat, n_lon, nlev), vary n_devices -> speedup = t(1)/t(n).
   weak:   n_lat = nlat_per_dev * n_devices (fixed per-device rows) -> ideal flat.
@@ -83,9 +84,11 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
     """Ocean model + gently perturbed rest state (flat 4000 m bottom).
 
     The perturbation (small u/v/eta/T noise on the rest stratification)
-    exercises every term of the composed step — advection, Coriolis, PGF, the
-    split-explicit barotropic and implicit vmix — instead of the trivial rest
-    fixed point, mirroring the SPMD equivalence gate's IC recipe.
+    exercises every term of the composed step — advection, Coriolis, PGF,
+    the barotropic solve (implicit-CN by default; split-explicit when
+    ``baro_solver="explicit_substep"``) and implicit vmix — instead of the
+    trivial rest fixed point, mirroring the SPMD equivalence gate's IC
+    recipe.
     """
     import jax.numpy as jnp
     from legoesm.grids.latlon import create_latlon_grid
@@ -252,15 +255,12 @@ def main() -> int:
                         "from OMPI_COMM_WORLD_SIZE/RANK.")
     args = p.parse_args()
 
-    # Validate the timing window BEFORE any model/device work: an empty steady
-    # slice would make np.median NaN / np.min raise only AFTER the (expensive)
-    # benchmark already ran (codex).
+    # Validate the block length BEFORE any model/device work.  (--warmup is
+    # retained for CLI compat only and IGNORED by the fused-block timing —
+    # the old `warmup < steps` check would spuriously reject valid runs,
+    # e.g. a one-step parity smoke with the default --warmup=2; codex.)
     if args.steps < 1:
         raise SystemExit(f"--steps must be >= 1, got {args.steps}")
-    if not (0 <= args.warmup < args.steps):
-        raise SystemExit(
-            f"--warmup must satisfy 0 <= warmup < steps "
-            f"(got warmup={args.warmup}, steps={args.steps})")
 
     # Align the legoESM precision POLICY with the jax x64 flag: the ocean
     # state dtype comes from get_policy().storage (default fp32), so an
@@ -386,9 +386,9 @@ def main() -> int:
         block_steps=_blk, n_blocks=_nblk, probe_steps=_probe,
         sync_label="ocean_latlon_spmd_bench")
 
-    # Post-run solver-residual probe eligibility (audit item 6): needs the
-    # gathered global final state on ONE process; multicontroller runs skip
-    # it (recorded as residual_measured=False, never faked).
+    # Post-run ZERO-FORCING residual probe eligibility (audit item 6):
+    # needs the gathered global final state on ONE process; multicontroller
+    # runs skip it (zero_forcing_probe_measured=False, never faked).
     _probe_residual = (args.baro_solver == "implicit_cn"
                        and jax.process_count() == 1)
 
@@ -466,8 +466,15 @@ def main() -> int:
         solver_iters = None
         solver_iters_mode = "explicit_substep (no iterative solve)"
 
-    solver_residual = None
-    residual_measured = False
+    # The probe below solves the free surface at the final state with ZERO
+    # slow-forcing (F_slow defaults), which is a DIFFERENT right-hand side
+    # from any solve inside the timed step — so it is solver-HEALTH
+    # evidence (does the configured PCG converge on this operator/state?),
+    # NOT the benchmarked solve's residual.  Canonical ``solver_residual``
+    # therefore stays null; the probe value is reported honestly as
+    # ``zero_forcing_probe_residual`` (codex batch4).
+    zero_forcing_probe_residual = None
+    zero_forcing_probe_measured = False
     residual_reason = None
     if args.baro_solver != "implicit_cn":
         residual_reason = ("explicit_substep barotropic has no iterative "
@@ -477,15 +484,20 @@ def main() -> int:
                            "the gathered global state on one process; "
                            "skipped (not faked)")
     else:
+        residual_reason = (
+            "the timed step's in-loop residual is not captured (fixed-"
+            "iteration PCG exposes no residual in the hot path); a "
+            "standalone zero-slow-forcing solve at the final state is "
+            "reported as zero_forcing_probe_residual — solver-health "
+            "evidence, not the benchmarked solve's residual")
         # ONE extra implicit free-surface solve on the gathered FINAL state,
         # OUTSIDE the timing loop, using the solver's return_residual
         # diagnostic mode — the GLOBAL relative Helmholtz residual of the
         # returned eta.  At nd>1 the timed run took the fixed-iteration PCG
         # path (SPMD), so the probe forces the SAME fixed-M PCG body
-        # (force_pcg; its global dots reduce locally single-process) — the
-        # residual measured is that of the solver configuration actually
-        # benchmarked.  Probe state is discarded; F_slow terms are zero
-        # (standalone solve at the final state, not a step replay).
+        # (force_pcg; its global dots reduce locally single-process).
+        # Probe state is discarded; F_slow terms are zero (standalone solve
+        # at the final state, not a step replay — hence the field name).
         from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
             barotropic_implicit_latlon_cgrid,
         )
@@ -497,27 +509,36 @@ def main() -> int:
         _probe_out = barotropic_implicit_latlon_cgrid(
             final_global, args.dt, model.grid, model.z_coord, _probe_cfg,
             return_residual=True)
-        solver_residual = float(jax.block_until_ready(_probe_out[2]))
-        residual_measured = True
+        zero_forcing_probe_residual = float(
+            jax.block_until_ready(_probe_out[2]))
+        zero_forcing_probe_measured = True
 
     # --- Communication accounting (audit item 4) + calibrated bound (8) ----
     # Analytic INTER-DEVICE census, barotropic-solver scope ONLY (the
-    # baroclinic 3-D pads are not counted -> bytes/comm are a LOWER bound;
-    # T_bound below therefore stays a valid lower bound on the step time).
+    # baroclinic 3-D pads are not counted -> bytes/comm are a LOWER census,
+    # flagged machine-readably via halo_bytes_is_lower_bound; T_bound is a
+    # heuristic model, see calibrated_bound's docstring).
     # implicit_cn PCG: each Helmholtz apply pads eta N+S (gradient stencil)
     # + the v-face flux row (divergence) ~= 2 exchanges/apply, applied
     # iters + 1 times (incl. the initial residual); reductions = the dot
     # batches (2/iter standard, 1/iter single_reduce) + the initial batch
     # + the mass-projection psum + the eta-floor clamp psum.
-    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-        estimate_barotropic_halo_messages,
-    )
-    _halo_est = estimate_barotropic_halo_messages(
-        model.config, model.config.barotropic.n_barotropic_substeps)
+    # The split-explicit substep-pad ESTIMATOR is only meaningful for
+    # explicit_substep — implicit_cn has no substep loop, so publishing its
+    # numbers on implicit rows would mislabel their traffic (codex batch4).
+    if args.baro_solver == "explicit_substep":
+        from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+            estimate_barotropic_halo_messages,
+        )
+        _halo_est = estimate_barotropic_halo_messages(
+            model.config, model.config.barotropic.n_barotropic_substeps)
+    else:
+        _halo_est = None
     _dtype_bytes = 8 if jax.config.jax_enable_x64 else 4
     _n_reductions = None
     if nd <= 1:
         _msgs, _n_reductions = 0, 0
+        _bytes_lower = False   # zero traffic is exact, not an undercount
         _comm_note = ("single device: no inter-device halo/reduction "
                       "traffic")
     elif _pcg_fixed_path:
@@ -525,12 +546,14 @@ def main() -> int:
         _per_iter = (1 if _baro_cfg.barotropic_implicit_pcg_variant
                      == "single_reduce" else 2)
         _n_reductions = _per_iter * solver_iters + 3
+        _bytes_lower = True
         _comm_note = ("analytic, barotropic implicit-CN PCG scope only; "
                       "2-D eta row slabs (nlev=1), one row per direction "
                       "(rows_per_message=2); baroclinic 3-D pads NOT "
-                      "counted — bytes are a lower bound")
+                      "counted — bytes are a lower census")
     elif args.wide_halo:
         _msgs = None
+        _bytes_lower = None
         _comm_note = ("wide-halo arm: per-chunk exchange count depends on "
                       "the auto chunk size; census in "
                       "extra.barotropic_halo_messages — bytes not derived "
@@ -539,6 +562,7 @@ def main() -> int:
         # explicit_substep standard path: the analytic per-substep pad
         # census (also recorded verbatim in extra.barotropic_halo_messages).
         _msgs = int(_halo_est["standard_messages"])
+        _bytes_lower = True
         _comm_note = ("analytic, explicit-substep barotropic scope only "
                       "(2-D slabs, one row per direction); reduction census "
                       "not derived for this path; baroclinic 3-D pads NOT "
@@ -549,13 +573,17 @@ def main() -> int:
         rows_per_message=2,   # a pad exchange moves one row N + one row S
         full_state_gathers_per_step=0,   # fused scan: no per-step gather
         scope_note=_comm_note,
+        bytes_are_lower_bound=_bytes_lower,
     )
 
-    # Headline number = the fused-scan per-step time from the SLOWEST process
-    # (measurement contract).  ``steady_median_ms`` keeps its aggregator-facing
-    # name but now carries the fused number; the individually-synced dispatch
-    # latency is reported separately as ``step_latency_ms``.
-    med = float(timing["fused_step_ms"])
+    # Headline number = the fused-scan per-step time of the PARALLEL step
+    # (median over blocks of the per-block max across processes —
+    # measurement contract).  ``steady_median_ms`` keeps its aggregator-
+    # facing name but now carries the fused number; the individually-synced
+    # dispatch latency is reported separately as ``step_latency_ms``.
+    # None on the zero-length parity path (--parity-gate --steps 1): a
+    # zero-step block has no per-step time — nulls propagate honestly.
+    med = timing["fused_step_ms"]
 
     # Calibrated T_bound (audit item 8): nd=1 rows ARE their own compute
     # ingredient; nd>1 rows need the nd=1 fused number passed in (else the
@@ -580,7 +608,7 @@ def main() -> int:
         platform=jax.default_backend(),
         n_processes=jax.process_count(),
         multicontroller=bool(args.multicontroller),
-        steady_median_ms=round(med, 4),
+        steady_median_ms=(round(med, 4) if med is not None else None),
         cells=n_lat * args.n_lon * args.nlev,
         **timing,
     )
@@ -603,9 +631,13 @@ def main() -> int:
     rec.update(
         solver_iters=solver_iters,
         solver_iters_mode=solver_iters_mode,
-        solver_residual=solver_residual,
-        residual_measured=residual_measured,
+        # Canonical residual of the TIMED solve: never captured (the fixed-
+        # iteration PCG hot path exposes none) — honest null, never the
+        # zero-forcing probe in disguise (codex batch4).
+        solver_residual=None,
         residual_reason=residual_reason,
+        zero_forcing_probe_residual=zero_forcing_probe_residual,
+        zero_forcing_probe_measured=zero_forcing_probe_measured,
         **wet_rec,
         **comm_rec,
         **bound_rec,
@@ -625,9 +657,10 @@ def main() -> int:
         # with the per-substep-pad baseline.
         solver_variant=(model.config.barotropic.barotropic_solver
                         + ("+wide_halo" if args.wide_halo else "")),
-        # MEASURED post-run relative Helmholtz residual (audit item 6);
-        # None when not measurable — see rec.residual_reason.
-        solver_residual=solver_residual,
+        # Canonical residual of the TIMED solve: not captured — null (see
+        # rec.residual_reason); the zero-forcing probe lives in
+        # rec.zero_forcing_probe_residual + extra below (codex batch4).
+        solver_residual=None,
         # cells_per_rank is per PROCESS (n_ranks semantics); the per-device
         # share lives in extra.cells_per_device — a single-process 4-device
         # SPMD run has 1 rank owning ALL cells (codex finding 3).
@@ -648,14 +681,17 @@ def main() -> int:
             "parity_gate": bool(args.parity_gate),
             "check_conservation": bool(args.check_conservation),
             "cells_per_device": (n_lat // nd) * args.n_lon * args.nlev,
-            # Analytic barotropic lat-halo message census (the wide-halo
+            # Analytic split-explicit substep-pad census (the wide-halo
             # audit item's halo-count metric): standard per-substep pads
-            # vs the wide path's fused per-chunk exchanges.
+            # vs the wide path's fused per-chunk exchanges.  None on
+            # implicit_cn rows — the estimator describes a substep loop
+            # implicit-CN does not run (codex batch4); PCG traffic is the
+            # flat halo_messages_per_step census.
             "barotropic_halo_messages": _halo_est,
-            # Solver-iteration facts next to the residual (audit item 6).
+            # Solver-iteration facts next to the probe (audit item 6).
             "solver_iters": solver_iters,
             "solver_iters_mode": solver_iters_mode,
-            "residual_measured": residual_measured,
+            "zero_forcing_probe_measured": zero_forcing_probe_measured,
         },
     ))
     # Multi-controller: every process times the same program; process 0 owns
@@ -665,14 +701,18 @@ def main() -> int:
         with open(args.out, "a") as f:
             f.write(json.dumps(rec) + "\n")
         print(json.dumps(rec))
+        _fused_txt = (f"{med:.3f}ms/step" if med is not None
+                      else "n/a (zero-length parity block)")
         print(f"[ocean nd={nd} {args.mode} {n_lat}x{args.n_lon}x{args.nlev}] "
-              f"compile={rec['compile_ms']}ms fused={med:.3f}ms/step "
+              f"compile={rec['compile_ms']}ms fused={_fused_txt} "
               f"latency={rec['step_latency_ms']}ms/step "
               f"imbalance={rec['rank_imbalance']} blocks={rec['block_ms']}")
-        _res_txt = (f"{solver_residual:.3e}" if solver_residual is not None
+        _res_txt = (f"{zero_forcing_probe_residual:.3e}"
+                    if zero_forcing_probe_residual is not None
                     else f"n/a ({residual_reason})")
         print(f"[solver] {args.baro_solver} iters={solver_iters} "
-              f"({solver_iters_mode}) post-run rel_residual={_res_txt}")
+              f"({solver_iters_mode}) zero-forcing probe "
+              f"rel_residual={_res_txt}")
         print(f"[bound] t_bound_ms={rec['t_bound_ms']} "
               f"measured_over_bound={rec['measured_over_bound']} "
               f"calibrated={rec['bound_calibrated']}"

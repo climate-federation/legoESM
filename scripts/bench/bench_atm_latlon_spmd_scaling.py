@@ -139,6 +139,12 @@ def main() -> int:
                         "from OMPI_COMM_WORLD_SIZE/RANK.")
     args = p.parse_args()
 
+    # Validate the fused-block length BEFORE any model/device work: a
+    # zero/negative block would otherwise surface only as timed_scan_blocks'
+    # None headline after the expensive build (the ocean twin's guard).
+    if args.steps < 1:
+        raise SystemExit(f"--steps must be >= 1, got {args.steps}")
+
     if args.multicontroller:
         # MUST run before any other JAX use (backend init).  The SHARED
         # helper owns the launcher-env contract (SLURM/OMPI auto-detect,
@@ -211,9 +217,11 @@ def main() -> int:
     # emitted incomplete rather than fabricated.
     if nd <= 1:
         _msgs, _bytes_msg, _nred = 0, 0, 0
+        _bytes_lower = False   # zero traffic is exact, not an undercount
         _comm_note = "single device: no inter-device halo/reduction traffic"
     else:
         _msgs, _bytes_msg, _nred = None, None, None
+        _bytes_lower = None
         _comm_note = ("no analytic halo-message census for the atm latlon "
                       "step yet (audit item 4 follow-up) — comm fields null, "
                       "not fabricated")
@@ -222,6 +230,7 @@ def main() -> int:
         bytes_per_message=_bytes_msg,
         full_state_gathers_per_step=0,   # fused scan: no per-step gather
         scope_note=_comm_note,
+        bytes_are_lower_bound=_bytes_lower,
     )
     bound_rec = calibrated_bound(
         measured_fused_step_ms=med,

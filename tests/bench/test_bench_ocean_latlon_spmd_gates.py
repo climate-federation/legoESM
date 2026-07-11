@@ -86,25 +86,39 @@ def test_single_process_two_virtual_devices_with_gates(tmp_path):
     assert "parity" in proc.stdout and "MISMATCH" not in proc.stdout
 
     # --- increment-2 fields (M1 audit items 4/6/8/9) present + HONEST ---
-    # item 6: default implicit_cn at nd=2 runs the fixed-iteration PCG;
-    # the post-run residual probe must have MEASURED a converged residual.
-    assert rec["residual_measured"] is True
+    # item 6: default implicit_cn at nd=2 runs the fixed-iteration PCG.
+    # The canonical solver_residual is an honest NULL (the timed solve's
+    # residual is never captured); the standalone zero-slow-forcing probe
+    # must have MEASURED a converged residual under its own name (codex
+    # batch4: the probe solves a different RHS from the timed step).
     assert rec["solver_iters"] >= 1
     assert rec["solver_iters_mode"].startswith("fixed_pcg")
-    assert rec["solver_residual"] is not None
-    assert rec["solver_residual"] < 1e-6
-    assert rec["metadata"]["solver_residual"] == rec["solver_residual"]
-    # item 4: bytes arithmetic consistent; fused scan never gathers.
+    assert rec["solver_residual"] is None
+    assert rec["residual_reason"]
+    assert rec["zero_forcing_probe_measured"] is True
+    assert rec["zero_forcing_probe_residual"] is not None
+    assert rec["zero_forcing_probe_residual"] < 1e-6
+    assert rec["metadata"]["solver_residual"] is None
+    assert (rec["metadata"]["extra"]["zero_forcing_probe_measured"]
+            is True)
+    # item 4: bytes arithmetic consistent; fused scan never gathers; the
+    # partial (barotropic-only) census is flagged machine-readably; the
+    # split-explicit substep estimator must NOT be published on an
+    # implicit-CN row (codex batch4).
     assert rec["full_state_gathers_per_step"] == 0
     assert rec["halo_messages_per_step"] > 0
     assert (rec["halo_bytes_per_step"]
             == rec["halo_messages_per_step"] * rec["halo_bytes_per_message"])
-    # item 8: nd=2 without --single-dev-fused-ms -> the bound must be NULL
-    # + named-incomplete + uncalibrated, never fabricated.
+    assert rec["halo_bytes_is_lower_bound"] is True
+    assert rec["metadata"]["extra"]["barotropic_halo_messages"] is None
+    # item 8: nd=2 without --single-dev-fused-ms AND with the placeholder
+    # (uncalibrated) fabric -> the bound must be NULL + named-incomplete
+    # + uncalibrated, never fabricated.
     assert rec["t_bound_ms"] is None
     assert rec["measured_over_bound"] is None
     assert rec["bound_calibrated"] is False
     assert "single_device_fused_step_ms" in rec["bound_incomplete_reason"]
+    assert any("latency_us" in r for r in rec["bound_incomplete_reason"])
     # item 9: IC-agnostic invariants (the default latlon rest state is
     # flat-bottom but NOT all-wet — the polar land-cap rows are masked, so
     # wet_fraction < 1 here; measured 0.875 on 16 lat rows = 2 cap rows).
