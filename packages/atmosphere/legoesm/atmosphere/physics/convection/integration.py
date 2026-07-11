@@ -1393,6 +1393,24 @@ def _make_spectral_pe_convection(
         # missing the relevant key) we drop the tendency — there is
         # no carry to write into.
         tracers_tend = None
+        # #929: a mass-flux rain split with no tracer carry to receive it must
+        # NOT be silently dropped. The routing+raise below is nested under
+        # ``state.tracers is not None``; a tracer-less spectral state
+        # (``state.tracers is None``) would skip it and lose the rain. Guard
+        # here, consistent with the hydro/nonhydro condensate-less raises.
+        # Static Python — fires only when a scheme actually emits a split
+        # (``dq_r_conv_dt is not None`` => bechtold/tiedtke precip_efficiency>0);
+        # the ``conv_fn is not None`` clause short-circuits before ``conv_out``
+        # is read, so a physics-free spectral step is unaffected.
+        if (conv_fn is not None and state.tracers is None
+                and conv_out.dq_r_conv_dt is not None):
+            raise ValueError(
+                "convection emitted a rain-split source (dq_r_conv_dt) but the "
+                "spectral state has no tracers (state.tracers is None) to "
+                "receive it; a mass-flux rain-splitting scheme (bechtold/"
+                "tiedtke, precip_efficiency>0) needs at least a q_c or q_r "
+                "tracer. Set precip_efficiency=0 or add a condensate tracer."
+            )
         if conv_fn is not None and state.tracers is not None:
             _state_tracers = state.tracers
             tt = {}

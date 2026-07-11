@@ -377,3 +377,28 @@ def test_spectral_bridge_raises_without_condensate_tracer():
         include_qc=False, include_qr=False)
     with pytest.raises(ValueError):
         _bechtold_bridge(0.7, "spectral_pe")(state, grid, sigma)
+
+
+def test_spectral_bridge_raises_when_tracers_is_none():
+    """#929 / codex round-3: the spectral routing+raise is nested under
+    ``state.tracers is not None``.  A tracer-less spectral state
+    (``state.tracers is None`` -- a VALID spectral-PE state) would SKIP the
+    whole block and silently drop the split.  With pe=0.7 Bechtold emits a
+    (non-None) dq_r source, so even ``tracers is None`` must raise LOUDLY,
+    consistent with the q_v-only case above."""
+    state, grid, sigma = _build_spectral_firing_state(
+        include_qc=False, include_qr=False)
+    state = state._replace(tracers=None)
+    with pytest.raises(ValueError, match="tracers"):
+        _bechtold_bridge(0.7, "spectral_pe")(state, grid, sigma)
+
+
+def test_spectral_bridge_tracers_none_no_raise_when_split_off():
+    """Non-vacuity control: the ``tracers is None`` guard is dq_r-GATED, not
+    tracers-gated.  At pe=0.0 Bechtold emits dq_r=None, so a tracer-less state
+    does NOT raise (byte-identical to the pre-#929 drop-the-tendency path)."""
+    state, grid, sigma = _build_spectral_firing_state(
+        include_qc=False, include_qr=False)
+    state = state._replace(tracers=None)
+    tend, _ = _bechtold_bridge(0.0, "spectral_pe")(state, grid, sigma)
+    assert tend is not None  # reached — no raise
