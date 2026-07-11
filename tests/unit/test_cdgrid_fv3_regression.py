@@ -11059,16 +11059,22 @@ class TestCosineBellGoldFileIter712(unittest.TestCase):
             (h_np[3, 26 - 3:26 + 4, 27 - 3:27 + 4]
              * area_np[3, 26 - 3:26 + 4, 27 - 3:27 + 4]).sum())
         # Iter-914 rebaseline values (post-iter-878 limiter).
-        # 2026-07-10 REBASELINE (commit f3031be24 + follow-ups): the FB
-        # covariant-convention change shifted the box mass by 2.7e8 on
-        # 2.3e15 = 1.2e-7 RELATIVE — the exact drift predicted for this
-        # intentional edge-treatment change; all shape/peak fingerprints
-        # above are unchanged at places=2.
+        # 2026-07-10 REBASELINE — ENVIRONMENT drift, NOT a code change.
+        # Causality established 2026-07-11: this test's path
+        # (non-duogrid d2a2c_vect + fv_tp_2d.transport_step, which has
+        # its own _ppm_1d and never calls fv3_sw_core.ppm_transport_1d)
+        # is BIT-IDENTICAL between 3fe4b41e5 (pre-FB-covariant base) and
+        # the FB covariant-convention branch, in both x64 modes; the
+        # OLD iter-914 gold already failed AT the base commit.  The
+        # 1.2e-7 relative drift is the jax-0.10 float32
+        # FP-reduction-order change (same mechanism as the 2026-06-04
+        # face4_mass note below), from gold values recorded pre-upgrade.
         self.assertAlmostEqual(box_mass, 2303295397822464.0, places=-8,
             msg=f"7x7 box MASS around peak drifted: {box_mass:.3e}")
         # Face 3 mass (bell-carrying face, area-weighted).
-        # 2026-07-10 REBASELINE: 1.9e-7 relative drift (same intentional
-        # FB covariant-convention edge-treatment change as box_mass above).
+        # 2026-07-10 REBASELINE: 1.9e-7 relative drift (same PRE-EXISTING
+        # jax-0.10 FP-reduction-order environment drift as box_mass above;
+        # bit-identical across the FB covariant-convention branch).
         face3_mass = float((h_np[3] * area_np[3]).sum())
         self.assertAlmostEqual(face3_mass, 4191834125369344.0,
             places=-8,
