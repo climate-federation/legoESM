@@ -49,6 +49,30 @@ from legoesm.thermo import saturation_vapor_pressure
 from legoesm.ocean.bulk_flux_omip import air_sea_fluxes
 from legoesm.ocean.eos import VALID_FREEZE_SCHEMES, freezing_point
 
+# --- per-step host-transfer ledger (scaling-M2 honest-cost accounting) ------
+# The forcing builders below each pull ONE 2-D surface-T slice of the ocean
+# state to the host per call (device-side slice FIRST, so only the surface
+# layer crosses — never the full 3-D, possibly lat-band-sharded, leaf; codex
+# batch4 HIGH: ``np.asarray(full leaf)[..., 0]`` assembled the whole field).
+# Each pull is recorded here so the persistent-sharded OMIP driver
+# (``run_omip_core2 --spmd-persistent-state``) can report the TRUE per-step
+# leaf-transfer cost next to its full-state gather counter instead of
+# implying zero transfer cost.  Counters are process-global and MONOTONIC:
+# consumers snapshot :func:`host_pull_ledger` and take deltas.  Pure Python
+# int side effect at host level — the builders are host-loop functions and
+# are never jitted/traced, so this cannot leak into a trace.
+_HOST_PULL_LEDGER = {"surface_slice_pulls": 0}
+
+
+def host_pull_ledger() -> dict:
+    """Copy of the module's monotonic host-transfer counters (accessor per
+    the mutable-singleton rule — never import the dict itself)."""
+    return dict(_HOST_PULL_LEDGER)
+
+
+def _record_surface_slice_pull() -> None:
+    _HOST_PULL_LEDGER["surface_slice_pulls"] += 1
+
 
 def _bolton_q_sat(T_K, p_hpa: float = constants.p_atm_std / 100.0):
     """Saturation specific humidity [kg/kg] at temperature T_K [K], pressure p_hpa [hPa].
@@ -612,7 +636,13 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
 
     forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type)
     # MPAS state is (nCells,) at the surface; cube/latlon/tripole are (..., 0).
-    T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + float(constants.T_freeze)
+    # Slice FIRST (device-side), THEN convert: np.asarray on the full leaf
+    # would assemble the entire 3-D (possibly lat-band-sharded) T field on
+    # the host every step (codex batch4 HIGH); the [..., 0] child moves only
+    # the 2-D surface layer.  Value-identical — slicing commutes with the
+    # elementwise f64 upcast.  Counted in the module host-pull ledger.
+    _record_surface_slice_pull()
+    T_sfc_K = np.asarray(state.T.data[..., 0], dtype=np.float64) + float(constants.T_freeze)
     slp = forc.get("slp")
     # NCAR algo (NEMO-faithful): q_sfc = 0.98*q_sat_goff(SST, slp) computed
     # internally; evap returned directly (= -lh / L_vap(SST), consistent with
@@ -859,8 +889,13 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
         forc = dict(forc)
         forc["sw_down"] = np.asarray(forc["sw_down"], dtype=np.float64) * _fac
 
-    # Top-cell ocean temperature (state stored in degC) -> K.
-    T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + T_freeze
+    # Top-cell ocean temperature (state stored in degC) -> K.  Slice FIRST
+    # (device-side), THEN convert — np.asarray on the full leaf would
+    # assemble the entire 3-D (possibly lat-band-sharded) T field on the
+    # host every step (codex batch4 HIGH); only the 2-D surface layer
+    # crosses.  Value-identical.  Counted in the module host-pull ledger.
+    _record_surface_slice_pull()
+    T_sfc_K = np.asarray(state.T.data[..., 0], dtype=np.float64) + T_freeze
     slp = forc.get("slp")
     tau_x, tau_y, sh, lh, evap = air_sea_fluxes(
         u10=jnp.asarray(forc["u10"]),

@@ -100,6 +100,42 @@ def test_residency_disabled_is_pure_identity():
     assert res.ensure_global(st) is st
     assert res.ensure_sharded(res.ensure_global(res.ensure_sharded(st))) is st
     assert (res.sharded, res.gathers, res.shards) == (False, 0, 0)
+    # leaf-transfer counters start at zero too (honest-cost companion)
+    assert (res.leaf_slice_pulls, res.leaf_slice_writes,
+            res.leaf_full_gathers, res.leaf_full_uploads) == (0, 0, 0, 0)
+
+
+def test_leaf_transfer_counters_are_unconditional_and_independent():
+    """The LEAF host-transfer counters (codex batch4 HIGH: the per-step
+    surface-slice pulls / full-3-D leaf round trips that REMAIN in the
+    persistent lane) accumulate regardless of the residency flag and never
+    touch the full-STATE flip bookkeeping — leaf transfers happen on every
+    lane; the full-state counters track layout flips only."""
+    # disabled lane: leaf counting still records (transfers happen anyway)
+    res = _PersistentStateResidency(False)
+    res.count_leaf_slice(pulls=2, writes=1)
+    res.count_leaf_full(gathers=2, uploads=2)
+    assert (res.leaf_slice_pulls, res.leaf_slice_writes) == (2, 1)
+    assert (res.leaf_full_gathers, res.leaf_full_uploads) == (2, 2)
+    assert (res.sharded, res.gathers, res.shards) == (False, 0, 0)
+
+    # enabled lane: leaf counts accumulate across residency flips without
+    # perturbing them (and vice versa)
+    res = _tracked_residency()
+    st = res.ensure_sharded("ic")
+    res.count_leaf_slice(pulls=1)                  # forcing-builder pull
+    res.count_leaf_slice(pulls=1, writes=1)        # SSS-restore pull+write
+    st = res.ensure_global(st)
+    res.count_leaf_full(gathers=2, uploads=2)      # WOA-nudge T,S round trip
+    st = res.ensure_sharded(st)
+    assert (res.shards, res.gathers) == (2, 1)     # flips unaffected by leaves
+    assert (res.leaf_slice_pulls, res.leaf_slice_writes) == (2, 1)
+    assert (res.leaf_full_gathers, res.leaf_full_uploads) == (2, 2)
+    # keyword-only signature: positional use is a bug, refuse it
+    with pytest.raises(TypeError):
+        res.count_leaf_slice(1)
+    with pytest.raises(TypeError):
+        res.count_leaf_full(1)
 
 
 def test_residency_enabled_requires_flip_fns():

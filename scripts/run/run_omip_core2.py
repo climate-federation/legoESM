@@ -1753,8 +1753,12 @@ def _diag(state, lat2d=None, lon2d=None) -> dict:
     boundaries vs the bipolar cap/fold vs at depth), the key pin-point for
     the dynamics instability seed.
     """
-    T = np.asarray(state.T.data)[..., 0]
-    S = np.asarray(state.S.data)[..., 0]
+    # T/S: slice FIRST (device-side), THEN convert — only the 2-D surface
+    # layer crosses to host (converting the full leaf would assemble the
+    # whole 3-D sharded field; codex batch4 HIGH).  u/v genuinely need every
+    # level (3-D max|u| + its location), so those are full-leaf pulls.
+    T = np.asarray(state.T.data[..., 0])
+    S = np.asarray(state.S.data[..., 0])
     u = np.asarray(state.u.data)            # (nlat, nlon+1, nlev)
     # MPAS has no separate v field (u is edge-normal on (nEdges, nlev)).
     has_v = getattr(state, "v", None) is not None
@@ -2426,6 +2430,16 @@ class _PersistentStateResidency:
     off, the default) makes both methods exact identity no-ops, so the
     default driver path is byte-identical.
 
+    The full-STATE counters track LAYOUT FLIPS ONLY — they are NOT the total
+    host-transfer cost.  Per-step LEAF host transfers (the forcing builders'
+    surface-T slice pulls, the SSS-restore / ice-thermo surface pull+write-
+    backs, the WOA-nudge / spin-up-drag FULL-3-D leaf round trips, the
+    diag-cadence reads) remain in the persistent lane and are counted
+    SEPARATELY via :meth:`count_leaf_slice` / :meth:`count_leaf_full`
+    (codex batch4 HIGH: ``full_state_gathers_per_step=0`` must never read as
+    "zero transfer cost").  Leaf counting is unconditional — the transfers
+    happen on every lane; only the persistent lane REPORTS the totals.
+
     The flag cannot desync from the state: it flips only here, both methods
     are no-ops unless the flag is in the opposite residency, and every loop
     reassignment of ``state`` either preserves residency (the sharded inner
@@ -2445,8 +2459,27 @@ class _PersistentStateResidency:
         self._shard_fn = shard_fn
         self._gather_fn = gather_fn
         self.sharded = False           # current residency of the loop state
-        self.gathers = 0               # full-state sharded->global transfers
-        self.shards = 0                # full-state global->sharded transfers
+        self.gathers = 0               # full-STATE sharded->global transfers
+        self.shards = 0                # full-STATE global->sharded transfers
+        # -- per-step LEAF host-transfer counters (honest cost, codex HIGH) --
+        self.leaf_slice_pulls = 0      # 2-D (surface/mask) leaf host READS
+        self.leaf_slice_writes = 0     # 2-D surface-layer device WRITE-backs
+        self.leaf_full_gathers = 0     # FULL-3-D single-leaf host reads
+        self.leaf_full_uploads = 0     # FULL-3-D single-leaf device uploads
+
+    def count_leaf_slice(self, *, pulls: int = 0, writes: int = 0) -> None:
+        """Record 2-D leaf host transfers: surface-layer / 2-D-mask host
+        READS (``pulls``) and surface-layer device WRITE-backs (``writes``).
+        Bookkeeping only — never moves data itself."""
+        self.leaf_slice_pulls += int(pulls)
+        self.leaf_slice_writes += int(writes)
+
+    def count_leaf_full(self, *, gathers: int = 0, uploads: int = 0) -> None:
+        """Record FULL-3-D single-leaf host transfers: host reads of an
+        entire leaf (``gathers``) and full-leaf device uploads (``uploads``).
+        Bookkeeping only — never moves data itself."""
+        self.leaf_full_gathers += int(gathers)
+        self.leaf_full_uploads += int(uploads)
 
     def ensure_sharded(self, st):
         """Lay ``st`` out lat-band sharded (identity when disabled or
@@ -4167,6 +4200,12 @@ def main() -> int:
         _spmd_persistent, _pers_shard_fn, _pers_gather_fn)
     _ensure_sharded_state = _pers_res.ensure_sharded
     _ensure_global_state = _pers_res.ensure_global
+    # Snapshot the applicator's monotonic host-pull ledger so the done line
+    # can report THIS run's forcing-builder surface-slice pulls (the builders
+    # record each 2-D surface-T pull; codex batch4 HIGH — those transfers
+    # must appear next to the full-state gather count, never implied zero).
+    from legoesm.ocean.coupler.omip2_applicator import host_pull_ledger
+    _ledger0 = host_pull_ledger()
 
     t_wall = time.time()
 
@@ -4331,10 +4370,35 @@ def main() -> int:
                 "--relative-winds/--wind-vfac (geographic surface currents "
                 "read staggered global v)")
         print(f"[spmd-persistent] full_state_gathers_per_step="
-              f"{1 if _pers_forced else 0}"
+              f"{1 if _pers_forced else 0} (full-STATE layout flips ONLY — "
+              f"NOT the total transfer cost)"
               + (f" — forced by: {'; '.join(_pers_forced)}" if _pers_forced
-                 else " (full-state gathers only at snapshot/abort/final "
-                      "boundaries)"), flush=True)
+                 else "; otherwise full-state gathers only at snapshot/abort/"
+                      "final boundaries"), flush=True)
+        # Honest-cost companion (codex batch4 HIGH): enumerate the per-step
+        # LEAF host transfers that REMAIN in the persistent lane, so a
+        # "0 full-state gathers" line is never read as "0 transfer cost".
+        # Measured totals are printed in the [spmd-persistent] done lines.
+        _leaf_srcs = ["surface-T 2-D slice per surface-forcing build"]
+        if args.emp_freshwater or runoff_monthly is not None:
+            _leaf_srcs.append("surface-T 2-D slice per freshwater build")
+        if sss_restore_cfg is not None:
+            _leaf_srcs.append("SSS-restore S-surface pull + write-back")
+        if args.ice_thermo:
+            _leaf_srcs.append(
+                "ice-thermo T-surface pull + write-back"
+                + (" (+ per-cell liquidus S-surface pull, --freeze-scheme)"
+                   if args.freeze_scheme != "constant" else ""))
+        if nudge_tau_s > 0:
+            _leaf_srcs.append(
+                "WOA-nudge FULL-3D T,S gather + re-upload (while active)")
+        if drag_tau_s > 0:
+            _leaf_srcs.append(
+                "spin-up-drag FULL-3D u,v gather + re-upload (while active)")
+        print(f"[spmd-persistent] per-step LEAF host transfers remain "
+              f"(counted separately, totals at [done]): "
+              f"{'; '.join(_leaf_srcs)}; plus T,S surface + FULL-3D u,v "
+              f"reads at diag cadence.", flush=True)
         if args.diag_momentum_step >= 0:
             print(f"[spmd-persistent] --diag-momentum-step "
                   f"{args.diag_momentum_step}: additionally gathers each of "
@@ -4570,6 +4634,10 @@ def main() -> int:
             # runoff so restoring is OFF at river mouths and does not fight
             # the plume toward coarse WOA (Amazon artifact). Gated by flag.
             _R_gate = _R if args.river_mouth_restoring_gate else None
+            # sss_apply pulls ONE 2-D S-surface slice to host and scatters
+            # the updated layer back device-side (slice-before-convert
+            # contract, locked by tests/unit/test_sss_apply.py) — counted.
+            _pers_res.count_leaf_slice(pulls=1, writes=1)
             if app_grid_type == "mpas":
                 from legoesm.ocean.coupler.sss_apply import apply_sss_restoring_step_mpas
                 state = apply_sss_restoring_step_mpas(
@@ -4591,17 +4659,32 @@ def main() -> int:
             # (>45S warm bias) + holds the Arctic near freezing.  Grid-agnostic
             # top-cell update (same host-state pattern as the SSS restoring).
             from legoesm.ocean.coupler.omip2_applicator import under_ice_freeze_relax
-            Tn = np.asarray(state.T.data).copy()   # copy: device arrays alias / are read-only
+            # Surface-only op: pull ONLY the 2-D top layer to host (converting
+            # the full leaf would assemble the whole 3-D sharded T — codex
+            # batch4 HIGH), relax it, scatter it back DEVICE-SIDE.  The
+            # in-place [...] assign reproduces the old full-array numpy cast
+            # semantics exactly (f64 relax result -> leaf dtype), and the
+            # untouched deep layers keep the original device buffer —
+            # bit-identical to the old full round trip.  Counted — including
+            # the extra S-surface liquidus pull when --freeze-scheme is
+            # per-cell (MED-1).
+            _pers_res.count_leaf_slice(
+                pulls=(2 if args.freeze_scheme != "constant" else 1),
+                writes=1)
+            T0 = np.asarray(state.T.data[..., 0]).copy()   # copy: device arrays alias
             # --freeze-scheme != constant: per-cell liquidus target from the
             # LOCAL surface salinity (MED-1); constant keeps the fixed -1.8 C
-            # scalar byte-identical (S_top=None short-circuits inside).
-            Tn[..., 0] = under_ice_freeze_relax(
-                Tn[..., 0], _sic, dt, tau_ice_days=args.ice_thermo_tau_days,
-                S_top=(np.asarray(state.S.data)[..., 0]
+            # scalar byte-identical (S_top=None short-circuits inside).  The
+            # S pull slices FIRST too (device-side) — only the 2-D surface
+            # layer crosses to host.
+            T0[...] = under_ice_freeze_relax(
+                T0, _sic, dt, tau_ice_days=args.ice_thermo_tau_days,
+                S_top=(np.asarray(state.S.data[..., 0])
                        if args.freeze_scheme != "constant" else None),
                 freeze_scheme=args.freeze_scheme)
             state = state._replace(
-                T=Field(jnp.asarray(Tn), name=state.T.name,
+                T=Field(jnp.asarray(state.T.data).at[..., 0].set(jnp.asarray(T0)),
+                        name=state.T.name,
                         dims=state.T.dims, units=state.T.units))
         if args.geothermal:
             # Geothermal bottom heat-flux BC (NEMO ln_trabbc): warm the deepest
@@ -4668,6 +4751,12 @@ def main() -> int:
                 nlev=int(args.nlev))
         if nudge_tau_s > 0 and (nudge_release_s <= 0 or step * dt < nudge_release_s):
             a = dt / nudge_tau_s
+            # WOA nudging is genuinely FULL-3-D (every level relaxes toward
+            # the climatology), so this is an honest full-leaf host round
+            # trip: T and S gathered + re-uploaded every nudging step —
+            # counted, never hidden behind full_state_gathers=0 (codex
+            # batch4 HIGH).  Device-side nudging is scaling-M2 increment 2.
+            _pers_res.count_leaf_full(gathers=2, uploads=2)
             Tn = np.asarray(state.T.data)
             Sn = np.asarray(state.S.data)
             Tn = Tn + a * (nudge_T - Tn) * nudge_m3
@@ -4688,9 +4777,20 @@ def main() -> int:
                 _upd["v"] = Field(jnp.asarray(np.asarray(state.v.data) * df),
                                   name=state.v.name, dims=state.v.dims,
                                   units=state.v.units)
+            # Full-3-D leaf round trips (host scalar multiply of u and v) —
+            # counted while the spin-up drag is active (codex batch4 HIGH:
+            # honest accounting; device-side drag is scaling-M2 increment 2).
+            _pers_res.count_leaf_full(gathers=len(_upd), uploads=len(_upd))
             state = state._replace(**_upd)
         if step % diag_every == 0 or step == n_steps:
             state = jax.block_until_ready(state)
+            # _diag pulls the 2-D T,S surface slices + the 2-D land mask and
+            # the FULL 3-D u(,v) leaves (max|u| + its location need every
+            # level) — diag-cadence host reads, counted for the honest-cost
+            # done line.
+            _pers_res.count_leaf_slice(pulls=3)
+            _pers_res.count_leaf_full(
+                gathers=1 + int(getattr(state, "v", None) is not None))
             d = _diag(state, lat2d, lon2d)
             rate = step / (time.time() - t_wall)
             day = step * dt / _SEC_PER_DAY
@@ -4742,14 +4842,30 @@ def main() -> int:
     _close_csv()
     rate = n_steps / (time.time() - t_wall)
     if _spmd_persistent:
-        # The honest cost line: how many FULL-STATE transfers the persistent
-        # lane actually performed (the old wrapper does 2 per step: scatter +
-        # gather).  Includes the snapshot/abort/final cadence gathers and any
-        # forced per-step ones announced at setup.
-        print(f"[spmd-persistent] full-state gathers={_pers_res.gathers} "
+        # The honest cost lines (codex batch4 HIGH): (1) FULL-STATE layout
+        # flips the persistent lane actually performed (the old wrapper does
+        # 2 per step: scatter + gather) — includes the snapshot/abort/final
+        # cadence gathers and any forced per-step ones announced at setup;
+        # (2) the per-step LEAF host transfers that REMAIN (forcing-builder
+        # surface-T pulls, SSS/ice-thermo surface pull+write-backs, nudge/
+        # drag full-3-D round trips, diag-cadence reads) — the persistent
+        # lane eliminates full-STATE round trips, NOT these, and they are
+        # never reported as zero cost.
+        _builder_pulls = (host_pull_ledger()["surface_slice_pulls"]
+                          - _ledger0["surface_slice_pulls"])
+        _slice_pulls = _pers_res.leaf_slice_pulls + _builder_pulls
+        print(f"[spmd-persistent] full-STATE gathers={_pers_res.gathers} "
               f"shards={_pers_res.shards} over {n_steps} steps "
               f"({_pers_res.gathers / max(1, n_steps):.4f} gathers/step; "
               f"wrapper lane would be {n_steps} + {n_steps})", flush=True)
+        print(f"[spmd-persistent] LEAF host transfers (NOT in the full-STATE "
+              f"count above): 2-D surface-slice pulls={_slice_pulls} "
+              f"({_slice_pulls / max(1, n_steps):.2f}/step; {_builder_pulls} "
+              f"from the forcing builders), surface-slice "
+              f"write-backs={_pers_res.leaf_slice_writes}, FULL-3D leaf "
+              f"gathers={_pers_res.leaf_full_gathers} "
+              f"uploads={_pers_res.leaf_full_uploads} (WOA nudge / spin-up "
+              f"drag while active + diag-cadence u,v).", flush=True)
     print(f"[done] {n_steps} steps @ {rate:.2f} steps/s; final: {_diag(state, lat2d, lon2d)}")
     if args.smoke:
         yr_est = steps_per_year / rate / 3600.0

@@ -662,3 +662,122 @@ def test_qnet_slp_channel_changes_density_and_qsat():
         grid=grid, grid_type="latlon")
     assert not np.allclose(np.asarray(sf_std.q_net),
                            np.asarray(sf_low.q_net), rtol=0, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# scaling-M2 honest-cost contract (codex batch4 HIGH): the per-step forcing
+# builders must (a) slice the state leaf BEFORE host conversion — only the
+# 2-D surface layer may cross to host, never the full 3-D (possibly lat-band-
+# sharded) field — and (b) record each pull in the module host-pull ledger so
+# run_omip_core2's persistent lane reports the true leaf-transfer cost.
+# ---------------------------------------------------------------------------
+
+class _NoFullHostConvertLeaf:
+    """State-leaf stand-in whose FULL-array host conversion raises.
+
+    Encodes the slice-before-convert contract mechanically: ``np.asarray`` on
+    the whole leaf (the codex batch4 HIGH pattern
+    ``np.asarray(state.T.data)[..., 0]``) fails loudly, while the
+    ``[..., 0]`` surface child is a plain numpy slice and converts fine.
+    """
+
+    def __init__(self, arr):
+        self._arr = np.asarray(arr)
+
+    def __getitem__(self, idx):
+        return self._arr[idx]
+
+    def __array__(self, dtype=None, copy=None):
+        raise AssertionError(
+            "full-3-D host conversion of a state leaf in the per-step "
+            "forcing path (slice-before-convert contract violated)")
+
+    @property
+    def ndim(self):
+        return self._arr.ndim
+
+    @property
+    def shape(self):
+        return self._arr.shape
+
+    @property
+    def dtype(self):
+        return self._arr.dtype
+
+
+def _duck_state_with_guarded_temp(t3d):
+    """Minimal duck state: the builders read ONLY ``state.T.data``."""
+    from types import SimpleNamespace
+    return SimpleNamespace(T=SimpleNamespace(data=_NoFullHostConvertLeaf(t3d)))
+
+
+def test_forcing_builders_count_surface_slice_pulls():
+    """Each forcing-builder call records exactly ONE surface-slice host pull
+    in the module ledger (the persistent-sharded driver reads the delta for
+    its honest-cost done line)."""
+    from legoesm.ocean.coupler import (
+        compute_omip2_freshwater_forcing,
+        compute_omip2_surface_forcing,
+    )
+    from legoesm.ocean.coupler.omip2_applicator import host_pull_ledger
+    state, grid, z, _ = _rest_state_latlon()
+    forcing = _uniform_wind_forcing(u_east=8.0)
+
+    n0 = host_pull_ledger()["surface_slice_pulls"]
+    compute_omip2_surface_forcing(
+        state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon")
+    n1 = host_pull_ledger()["surface_slice_pulls"]
+    assert n1 - n0 == 1, "surface-forcing build must record ONE surface pull"
+
+    compute_omip2_freshwater_forcing(
+        state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon")
+    n2 = host_pull_ledger()["surface_slice_pulls"]
+    assert n2 - n1 == 1, "freshwater build must record ONE surface pull"
+    # accessor returns a COPY: mutating it must not corrupt the ledger
+    snap = host_pull_ledger()
+    snap["surface_slice_pulls"] = -999
+    assert host_pull_ledger()["surface_slice_pulls"] == n2
+
+
+def test_forcing_builders_slice_before_convert():
+    """The builders must never host-convert the FULL 3-D T leaf: with a leaf
+    whose full-array conversion raises, both builders still run — and produce
+    bit-identical fields to the plain-state call (the slice path is the same
+    data)."""
+    from legoesm.ocean.coupler import (
+        compute_omip2_freshwater_forcing,
+        compute_omip2_surface_forcing,
+    )
+    state, grid, z, _ = _rest_state_latlon()
+    forcing = _uniform_wind_forcing(u_east=8.0)
+    t3d = np.asarray(state.T.data)
+    guarded = _duck_state_with_guarded_temp(t3d)
+
+    sf_ref = compute_omip2_surface_forcing(
+        state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon")
+    sf_g = compute_omip2_surface_forcing(
+        guarded, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon")
+    for name in ("tau_x", "tau_y", "q_net", "sw_down"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(sf_g, name)), np.asarray(getattr(sf_ref, name)),
+            err_msg=f"guarded-leaf surface forcing diverged on {name}")
+
+    fw_ref = compute_omip2_freshwater_forcing(
+        state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon")
+    fw_g = compute_omip2_freshwater_forcing(
+        guarded, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon")
+    for name in ("precip", "evap", "runoff"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(fw_g, name)), np.asarray(getattr(fw_ref, name)),
+            err_msg=f"guarded-leaf freshwater forcing diverged on {name}")
+
+
+def test_no_full_host_convert_guard_is_not_vacuous():
+    """Tripwire self-test: the guard leaf really does refuse a full-array
+    conversion (so the contract test above cannot silently pass vacuously)."""
+    guard = _NoFullHostConvertLeaf(np.zeros((4, 5, 3)))
+    with pytest.raises(AssertionError, match="slice-before-convert"):
+        np.asarray(guard)
+    # ... while the sliced surface child converts fine and is the right slab.
+    child = np.asarray(guard[..., 0])
+    assert child.shape == (4, 5)
