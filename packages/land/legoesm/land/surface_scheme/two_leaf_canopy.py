@@ -445,8 +445,10 @@ def compute_two_leaf_canopy_fluxes(
     H_Sun   = fluxes_per_col["H_Sun"]
     H_Sh    = fluxes_per_col["H_Sh"]
     H_Soil  = fluxes_per_col["H_Soil"]
-    An_Sun  = fluxes_per_col["An_Sun"]
+    An_Sun  = fluxes_per_col["An_Sun"]        # NET (drives SIF + leaf coupling)
     An_Sh   = fluxes_per_col["An_Sh"]
+    Agross_Sun = fluxes_per_col["Agross_Sun"]  # GROSS (carbon-model GPP)
+    Agross_Sh  = fluxes_per_col["Agross_Sh"]
     G       = fluxes_per_col["G"]
     gs_Sun  = fluxes_per_col["gs_Sun"]
     gs_Sh   = fluxes_per_col["gs_Sh"]
@@ -457,7 +459,15 @@ def compute_two_leaf_canopy_fluxes(
 
     LE_tot = LE_Sun + LE_Sh + LE_Soil
     H_tot  = H_Sun  + H_Sh  + H_Soil
-    GPP    = (An_Sun + An_Sh) * _G_C_PER_UMOL_CO2    # gC m-2 s-1
+    # GPP is GROSS carbon uptake (BEFORE leaf dark respiration).  The carbon
+    # model (carbon_cycle.step_carbon) re-charges foliar MAINTENANCE
+    # respiration r_maint_fol*C_fol separately, so exporting NET An here would
+    # double-count leaf respiration (once as Rd folded into An, once as
+    # r_maint_fol) and bias carbon-use efficiency (NPP/GPP) low.  This matches
+    # the SimpleSEB path (carbon/stomata.py: gpp = max(A_gross, 0)*_MC).  NET
+    # An_Sun/An_Sh still drive stomatal coupling, the leaf energy/CO2 flux, and
+    # SIF (below); only the carbon-facing GPP is gross.
+    GPP    = (Agross_Sun + Agross_Sh) * _G_C_PER_UMOL_CO2    # gC m-2 s-1 (GROSS)
 
     # ---- Optional solar-induced fluorescence (passive TOC diagnostic) ----
     # cc.sif is a static config leaf, so this Python gate does not double-trace.

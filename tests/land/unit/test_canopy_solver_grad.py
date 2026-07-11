@@ -125,3 +125,49 @@ def test_cold_calm_forcing_stays_finite():
     x0 = jnp.array([235.0, 235.0, 233.0, 233.0, 235.0, 1.0e-4])
     out, _n_iters = solve_canopy_closure(x0, stressed, _CFG)
     assert bool(jnp.all(jnp.isfinite(out)))
+
+
+def test_canopy_forward_reports_gross_and_net():
+    """DECISIVE gross/net split at the boundary two_leaf_canopy consumes.
+
+    ``canopy_forward`` must return BOTH the NET ``An_*`` (which drives the leaf
+    energy/CO2 flux + SIF) and the GROSS ``Agross_*`` (the carbon-model GPP).
+    For the lit sunlit leaf the gross-minus-net gap is exactly the dark
+    respiration Rd, and the GROSS GPP aggregation that ``two_leaf_canopy``
+    exports is STRICTLY LARGER than the pre-fix NET aggregation — the
+    foliar-respiration double-count fix.  Fails on the pre-fix code: the flux
+    dict had no ``Agross_*`` keys and GPP used net ``An``.
+    """
+    from legoesm.land.canopy.solver import canopy_forward
+    from legoesm.land.canopy.photosynthesis import _rd_atkin, _TGC_LO, _TGC_HI
+    from legoesm.land.surface_scheme.two_leaf_canopy import _G_C_PER_UMOL_CO2
+
+    bundle = _bundle()          # pure-C3 midday column (fC4 = 0)
+    x_star, _ = solve_canopy_closure(_X0, bundle, _CFG)
+    fluxes = canopy_forward(
+        x_star, bundle, _CFG.LE_module, _CFG.stomatal_model,
+        _CFG.le_cap_mode, _CFG.use_ta_for_photosynthesis)
+
+    for k in ("An_Sun", "An_Sh", "Agross_Sun", "Agross_Sh"):
+        assert k in fluxes, f"canopy_forward dict missing {k}"
+
+    An_Sun = float(fluxes["An_Sun"]);  Ag_Sun = float(fluxes["Agross_Sun"])
+    An_Sh  = float(fluxes["An_Sh"]);   Ag_Sh  = float(fluxes["Agross_Sh"])
+
+    # Gross >= net for both leaf classes.
+    assert Ag_Sun >= An_Sun
+    assert Ag_Sh >= An_Sh
+
+    # In the light (An_Sun > 0), gross - net == Rd exactly.  Pure C3, and
+    # use_ta_for_photosynthesis defaults False so T_phot is the leaf T (x_star).
+    assert An_Sun > 0.0
+    Tf_Sun = x_star[0]
+    Rd_sun = _rd_atkin(Tf_Sun, jnp.clip(bundle.TgC, _TGC_LO, _TGC_HI),
+                       bundle.Vcmax25_Sun)
+    assert jnp.allclose(Ag_Sun - An_Sun, Rd_sun, rtol=1e-6, atol=1e-6)
+
+    # DECISIVE: the GROSS GPP two_leaf_canopy exports strictly exceeds the NET
+    # aggregation the pre-fix code exported (both in gC/m2/s).
+    gpp_gross   = (Ag_Sun + Ag_Sh) * _G_C_PER_UMOL_CO2
+    gpp_net_old = (An_Sun + An_Sh) * _G_C_PER_UMOL_CO2
+    assert gpp_gross > gpp_net_old
