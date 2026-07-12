@@ -41,8 +41,13 @@ def _daytime_forcing(ncol=1, dtype=jnp.float64) -> AtmToSurface:
 
 
 def _le_soil(exp: float) -> float:
+    # ``soil_evap_series_resistance`` defaults to True, which is mutually
+    # exclusive with the beta-efficiency S_top**exp path and would leave the
+    # exponent inert (Kelvin-h_r only).  Opt into the legacy beta path so the
+    # exponent this test varies actually reaches the soil energy balance.
     cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(max_iters=40),
-                               soil_evap_resistance_exp=exp)
+                               soil_evap_resistance_exp=exp,
+                               soil_evap_series_resistance=False)
     # Sub-saturated top layer (S_top ~ 0.5) so the crust throttle bites.
     s0 = init_multilayer_land_state(
         1, cfg, T_init=298.0,
