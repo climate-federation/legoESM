@@ -201,14 +201,39 @@ class SFNOPrimitiveEquationModel:
             # hybrid config — ``(y - x)/dt_sfno`` would then divide raw
             # decoder output with undefined scale (mirrors the U-Cast
             # bridge guard).
-            if sfno_model.config != self.config.sfno_config:
+            net_cfg = getattr(sfno_model, "config", None)
+            if net_cfg is None:
+                raise ValueError(
+                    "Supplied sfno_model exposes no .config attribute; the "
+                    "SFNO PE bridge needs it to validate the architecture "
+                    "contract (residual_prediction, channels). Pass a "
+                    "legoesm.ml.sfno.SFNO (or a module carrying an "
+                    "SFNOConfig as .config)."
+                )
+            if net_cfg != self.config.sfno_config:
                 raise ValueError(
                     "Supplied sfno_model.config does not match "
                     "config.sfno_config; the architecture/contract guards "
                     "(residual_prediction, channels) would not apply to "
-                    f"the actual network.\n  model:  {sfno_model.config}\n"
+                    f"the actual network.\n  model:  {net_cfg}\n"
                     f"  config: {self.config.sfno_config}"
                 )
+            # Equal configs do NOT prove grid compatibility: the spectral
+            # conv weights are sized (n_sh, ...) by the CONSTRUCTION grid.
+            # A T5-trained net under a T8 wrapper passes the config check
+            # and then fails deep in sh_analysis — check n_sh up front.
+            _blocks = getattr(sfno_model, "blocks", None)
+            if _blocks:
+                _net_n_sh = getattr(
+                    getattr(_blocks[0], "spectral_conv", None), "n_sh", None,
+                )
+                if _net_n_sh is not None and _net_n_sh != grid.n_sh:
+                    raise ValueError(
+                        f"Supplied sfno_model was built for n_sh="
+                        f"{_net_n_sh} but this wrapper's grid has n_sh="
+                        f"{grid.n_sh} (different spectral truncation). "
+                        f"Rebuild or load the network on the same grid."
+                    )
             self.sfno = sfno_model
         else:
             if key is None:

@@ -803,8 +803,9 @@ class SpectralCompressibleEulerModel:
             col_mass.astype(acc) * self.grid.grid_area.astype(acc),
         )
 
-    def _apply_mass_fixer(self, state):
-        """Anchor ``∫ J · (rho_ref + rho') · dz · dA`` to ``_target_mass``.
+    def _apply_mass_fixer(self, state, target_mass=None):
+        """Anchor ``∫ J · (rho_ref + rho') · dz · dA`` to ``target_mass``
+        (falls back to ``self._target_mass`` for the eager call sites).
 
         Uniform additive correction in physical space (matches the
         cubed-sphere / MPAS ``fix_mass_nonhydrostatic`` convention):
@@ -820,11 +821,13 @@ class SpectralCompressibleEulerModel:
         col_mass = jnp.sum(
             J[..., None] * rho_total * dz[None, None, :], axis=-1,
         )
+        if target_mass is None:
+            target_mass = self._target_mass
         acc = jnp.float64
         area_acc = self.grid.grid_area.astype(acc)
         current_mass = jnp.sum(col_mass.astype(acc) * area_acc)
         total_vol = jnp.sum(J.astype(acc) * area_acc) * jnp.sum(dz.astype(acc))
-        delta_rho = (self._target_mass - current_mass) / total_vol
+        delta_rho = (target_mass - current_mass) / total_vol
         sqrt_4pi = jnp.sqrt(jnp.asarray(4.0 * jnp.pi, dtype=acc))
         rho_hat = state.rho_prime_hat.data
         rho_hat_new = rho_hat.at[0, :].add(
@@ -945,12 +948,16 @@ class SpectralCompressibleEulerModel:
         return state_new
 
     @partial(jax.jit, static_argnums=(0,))
-    def _step_on_cpu(self, state: SpectralNHState, dt: float) -> SpectralNHState:
+    def _step_on_cpu(self, state: SpectralNHState, dt: float,
+                     target_mass=None) -> SpectralNHState:
         """Step without device transfers (for batched CPU integration on Metal).
 
         Applies the same anchored-mass fixer as :meth:`_step_jit` — the
         batched path previously skipped it entirely, so long batched-Metal
         integrations silently ran unanchored (codex 2026-07-12).
+        ``target_mass`` is a TRACED argument (codex round 2): reading
+        ``self._target_mass`` here would freeze the first target into the
+        compiled closure, ignoring a later ``set_target_mass``.
         ``_integrate_on_cpu`` takes the snapshot before the loop.
         """
         se_config = SplitExplicitConfig(
@@ -962,8 +969,8 @@ class SpectralCompressibleEulerModel:
         )
         if (self.config.fix_mass
                 and self.config.anchor_mass_to_initial
-                and self._target_mass is not None):
-            state_new = self._apply_mass_fixer(state_new)
+                and target_mass is not None):
+            state_new = self._apply_mass_fixer(state_new, target_mass)
         return state_new
 
     def integrate(
@@ -1006,7 +1013,7 @@ class SpectralCompressibleEulerModel:
             self._target_mass = self.compute_dry_mass(state_cpu)
 
         for i in range(n_steps):
-            state_cpu = self._step_on_cpu(state_cpu, dt)
+            state_cpu = self._step_on_cpu(state_cpu, dt, self._target_mass)
             if (i + 1) % save_every == 0:
                 trajectory_cpu.append(state_cpu)
 

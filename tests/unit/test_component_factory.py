@@ -917,6 +917,39 @@ class TestFixMassForwarding:
         assert model.config.fix_mass is False
         assert model.config.anchor_mass_to_initial is False
 
+    # codex round 2: the MPAS hydrostatic PE and plane NH branches
+    # pre-dated the audit but had the same ungated forwarding.
+    def test_mpas_pe_conservation_fixer_false_overrides(self):
+        from legoesm.grids.factory import create_grid
+        grid = create_grid("mpas", 1, lloyd_iterations=2)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="mpas", resolution=1, nlev=2),
+            dycore=DycoreConfig(
+                model_type="hydrostatic", discretization="mpas",
+                dt=300.0, fix_mass=True, conservation_fixer=False,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, _make_sigma(2))
+        assert model.config.fix_mass is False
+
+    def test_plane_conservation_fixer_false_overrides(self):
+        from legoesm.grids.plane import create_plane_grid
+        from legoesm.grids.vertical import create_height_coordinate
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="plane", resolution=8, nlev=6),
+            dycore=DycoreConfig(
+                model_type="nonhydrostatic", discretization="plane",
+                dt=1.0, fix_mass=True, conservation_fixer=False,
+            ),
+        )
+        grid = create_plane_grid(
+            nx=8, ny=8, nlev=6, dx=10.0e3, dy=10.0e3, dtype=jnp.float64,
+        )
+        sigma = create_height_coordinate(6, H=30.0e3)
+        model = create_atmosphere_dycore(config, grid, sigma)
+        assert model.config.fix_mass is False
+        assert model.config.anchor_mass_to_initial is False
+
 
 # =========================================================================
 # 12. Lat-lon SW polar-filter passthrough

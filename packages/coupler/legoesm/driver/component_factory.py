@@ -470,7 +470,10 @@ def create_atmosphere_dycore(
             nu_del4=diff.hyperdiff,
             nu_del4_ps=diff.hyperdiff,
             K_h=diff.A_h,
-            fix_mass=dc.fix_mass,
+            # conservation_fixer=False overrides fix_mass=True (lat-lon
+            # contract; codex 2026-07-12 round 2 — this branch predates
+            # the audit but had the same gap).
+            fix_mass=dc.fix_mass and dc.conservation_fixer,
             time_integrator=_ti,
             # #930 cure: vertical biharmonic damping of the 2Δσ T checkerboard.
             nu_vert4_T=dc.mpas_nu_vert4_T,
@@ -545,8 +548,10 @@ def create_atmosphere_dycore(
             hyperdiff_w_coeff=0.0,
             semi_implicit_acoustic=False,
             use_coriolis=False,
-            fix_mass=dc.fix_mass,
-            anchor_mass_to_initial=dc.fix_mass,
+            # conservation_fixer=False overrides fix_mass=True (lat-lon
+            # contract; codex 2026-07-12 round 2).
+            fix_mass=dc.fix_mass and dc.conservation_fixer,
+            anchor_mass_to_initial=dc.fix_mass and dc.conservation_fixer,
         )
         return PlaneCompressibleEulerModel(grid, height_coord, terrain_metric, cfg)
 

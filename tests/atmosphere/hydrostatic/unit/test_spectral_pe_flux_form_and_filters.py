@@ -258,3 +258,48 @@ def test_set_target_mass_is_honored_by_compiled_step():
     assert abs(m2 - 2.0 * m0) / m0 < 1e-9, (
         f"set_target_mass ignored by compiled step: mass {m2} vs {2*m0}"
     )
+
+
+def test_batched_cpu_leapfrog_refused():
+    """codex round 2: the batched-CPU loop has no leapfrog state machine —
+    it must refuse rather than silently run a different scheme."""
+    grid = create_gaussian_grid(21)
+    sigma_coord = create_sigma_coordinate(5)
+    cfg = SpectralPEConfig(time_integrator="leapfrog_si", fix_mass=False)
+    model = SpectralPrimitiveEquationModel(
+        grid=grid, sigma_coord=sigma_coord, config=cfg,
+    )
+    state = isothermal_rest_state_spectral(
+        grid, sigma_coord, perturbation_amplitude=0.0,
+    )
+    with pytest.raises(NotImplementedError, match="leapfrog"):
+        model._integrate_on_cpu(state, 2, 300.0, 1)
+
+
+def test_anchor_snapshot_refuses_tracer_state():
+    """codex round 2: snapshotting the anchored-mass target during an
+    outer trace would store a Tracer on the model (later
+    UnexpectedTracerError) — must refuse with a usable message."""
+    grid = create_gaussian_grid(21)
+    sigma_coord = create_sigma_coordinate(5)
+    cfg = SpectralPEConfig(
+        fix_mass=True, anchor_mass_to_initial=True,
+        time_integrator="ssp_rk3",
+    )
+    model = SpectralPrimitiveEquationModel(
+        grid=grid, sigma_coord=sigma_coord, config=cfg,
+    )
+    state = isothermal_rest_state_spectral(
+        grid, sigma_coord, perturbation_amplitude=0.0,
+    )
+
+    @jax.jit
+    def outer(s):
+        return model.step(s, 300.0)
+
+    with pytest.raises(ValueError, match="set_target_mass"):
+        outer(state)
+    # After an explicit concrete target the same jitted call works.
+    model.set_target_mass(model._compute_initial_mass(state))
+    out = outer(state)
+    assert bool(jnp.all(jnp.isfinite(out.lnps_hat.data.real)))

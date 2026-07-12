@@ -1604,6 +1604,16 @@ class SpectralPrimitiveEquationModel:
         if (self.config.fix_mass
                 and self.config.anchor_mass_to_initial
                 and self._target_mass is None):
+            # Snapshotting during an outer jit/grad trace would store a
+            # Tracer on ``self`` (leaks; next eager step raises
+            # UnexpectedTracerError).  Refuse with a usable remedy.
+            if isinstance(state.lnps_hat.data, jax.core.Tracer):
+                raise ValueError(
+                    "anchor_mass_to_initial cannot take its first-mass "
+                    "snapshot inside a jit/grad trace (it would store a "
+                    "tracer on the model). Call set_target_mass(<concrete "
+                    "fp64 mass>) or take one eager step() first."
+                )
             self._target_mass = self._compute_initial_mass(state)
 
         integrator = self.config.time_integrator.lower()
@@ -1920,6 +1930,18 @@ class SpectralPrimitiveEquationModel:
 
     def _integrate_on_cpu(self, state, n_steps, dt, save_every, physics_fn=None):
         """Batch integration on CPU: transfer once, not per step."""
+        # The batch loop drives the generic SSP/SI ``_step_on_cpu`` only;
+        # it has no two-time-level leapfrog state machine (``_state_prev``,
+        # RA filter, Euler startup).  Silently stepping a leapfrog config
+        # through it produces a DIFFERENT scheme than ``step()`` (measured
+        # 1.2e-4 T_hat divergence in one step) — refuse loudly instead
+        # (codex 2026-07-12 round 2; pre-existing gap).
+        if self.config.time_integrator.lower() in ("leapfrog", "leapfrog_si"):
+            raise NotImplementedError(
+                "Batched-CPU (Metal) integrate() does not implement the "
+                "leapfrog integrators; use per-step step() (which runs the "
+                "leapfrog state machine) or an SSP/SI time_integrator."
+            )
         state_cpu = jax.device_put(state, self._cpu_device)
         trajectory_cpu = [state_cpu]
 
