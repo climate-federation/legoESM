@@ -37,6 +37,55 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_convective_precip_efficiency_cli_wiring_929():
+    """#929: the shared --convective-precip-efficiency knob reaches the config
+    for BOTH Tiedtke and Bechtold; UNSET is the ``None`` sentinel (each scheme
+    keeps its own default) — never a silent 0.0 that would disable Bechtold's
+    ON-by-default rain split."""
+    parser = build_arg_parser()
+
+    # Unset -> None sentinel (NOT 0.0): Bechtold keeps its own 0.7 default.
+    cfg_unset = build_config_from_args(_postprocess_args(
+        parser.parse_args(
+            ["--dataset", "analytical", "--convection", "bechtold"]),
+        parser))
+    assert cfg_unset.convective_precip_efficiency is None
+
+    # Bechtold + explicit PE now ALLOWED (the guard was Tiedtke-only) and
+    # reaches the config.
+    cfg_bech = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--convective-precip-efficiency", "0.7",
+    ]), parser))
+    assert cfg_bech.convective_precip_efficiency == 0.7
+
+    # Explicit 0.0 for Bechtold (legacy no-split) is accepted and threaded.
+    cfg_bech0 = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--convective-precip-efficiency", "0.0",
+    ]), parser))
+    assert cfg_bech0.convective_precip_efficiency == 0.0
+
+    # Tiedtke still reaches the config.
+    cfg_tied = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "tiedtke",
+        "--convective-precip-efficiency", "0.5",
+    ]), parser))
+    assert cfg_tied.convective_precip_efficiency == 0.5
+
+
+def test_convective_precip_efficiency_rejected_for_non_massflux_929():
+    """#929: --convective-precip-efficiency>0 requires a mass-flux scheme
+    (tiedtke or bechtold); other schemes ignore the knob, so the run-guard
+    rejects it rather than silently no-op.  (0.0 / unset are fine everywhere.)"""
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--convection", "sbm",
+            "--convective-precip-efficiency", "0.7",
+        ]), parser)
+
+
 def test_no_use_multilayer_land_overrides_yaml_default():
     """--no-use-multilayer-land flips a set_defaults(True) (i.e. a --config YAML
     that enables the multilayer land) back off — needed to run a production
@@ -1937,4 +1986,6 @@ def test_latlon24_production_variant_pins_polar_filter():
     # and lifts hfls 40->70 (#847).  The cube lane keeps bechtold.
     cfg = build_config_from_args(args)
     assert cfg.convection == "sbm" and cfg.gravity_wave_drag == "mcfarlane"
-    assert cfg.convective_precip_efficiency == 0.0  # sbm rejects the bechtold knob
+    # sbm lane leaves the knob unset -> None sentinel (each scheme uses its own
+    # default; sbm ignores it anyway).
+    assert cfg.convective_precip_efficiency is None

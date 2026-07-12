@@ -33,5 +33,8 @@ dt: 600.0
 convection: sbm
 # The base pins convective_precip_efficiency: 0.5 for bechtold; sbm has its own
 # rain-split (sbm_precip_efficiency) and rejects the bechtold/tiedtke knob, so
-# clear it here to avoid the "requires --convection tiedtke" guard.
-convective_precip_efficiency: 0.0
+# clear it here.  null = UNSET -> each scheme uses its own default (the #929
+# sentinel: an explicit 0.0 would now mean "force legacy no-split", NOT "unset");
+# sbm ignores the bechtold/tiedtke knob, so null just avoids the
+# "requires --convection tiedtke/bechtold" guard without pinning an explicit 0.
+convective_precip_efficiency: null
