@@ -469,7 +469,8 @@ class TestFv3ForwardBackwardSmoke(unittest.TestCase):
         from legoesm.core.fv3_sw_core import fv3_forward_backward_step
 
         n = 8
-        grid = create_cubed_sphere(n)
+        # 2026-07-11 codex F1: FB entry points are duogrid-only (guarded).
+        grid = create_cubed_sphere(n, use_duogrid=True)
         cdgrid = create_cubed_sphere_cdgrid(grid)
 
         h, u_d, v_d, h_s = _make_tc2_state_edge(cdgrid)
@@ -492,7 +493,8 @@ class TestFv3ForwardBackwardSmoke(unittest.TestCase):
         from legoesm.core.fv3_sw_core import fv3_forward_backward_step
 
         n = 8
-        grid = create_cubed_sphere(n)
+        # 2026-07-11 codex F1: FB entry points are duogrid-only (guarded).
+        grid = create_cubed_sphere(n, use_duogrid=True)
         cdgrid = create_cubed_sphere_cdgrid(grid)
 
         h, u_d, v_d, h_s = _make_tc2_state_edge(cdgrid)
@@ -1679,7 +1681,10 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         )
 
         # Path 2: FV3FBShallowWaterModel (forward-backward experimental model)
-        fb_model = FV3FBShallowWaterModel(grid)
+        # 2026-07-11 codex F1: FB entry points are duogrid-only (guarded),
+        # so the FB model needs its own duogrid grid.
+        fb_grid = create_cubed_sphere(n, use_duogrid=True)
+        fb_model = FV3FBShallowWaterModel(fb_grid)
         fb_model.set_initial_mass(state)
         fb_hits = {"n": 0}
 
@@ -1699,9 +1704,16 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         )
 
     def test_d_sw5_iterated_laplacian_halo_gap_documentation_marker(self):
-        """Iter-132 / iter-133 (FB-path fidelity gap, simplified):
-        document the `d_sw5_corner_divergence` halo-mode='edge' gap
-        as a Fortran-fidelity marker.
+        """Iter-132 / iter-133 documentation marker, UPDATED 2026-07-10:
+        the duogrid iterated-Laplacian cross-face ghost ring is PORTED
+        as an OPT-IN (`cross_face_halo=True`, via
+        `_pad_corner_scalar_cross_face`, mirroring the Fortran
+        dyn_core.F90:651-652 ext_scalar B-grid exchange of the
+        attenuated divgd).  The DEFAULT remains the zero ghost ring:
+        measured 2026-07-10, the faithful ghost destabilises the C48
+        colliding-modon FB run at day ~60-65 while the zero-ring runs
+        120 days clean.  This marker guards the PORT note (same oracle
+        citation).
 
         Earlier iterations attempted to bind the source code structure
         (loop identity, `mode='edge'` pad count, absence of proper
@@ -1717,14 +1729,19 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         correctness guard — its only job is to make removal of the
         fidelity note visible in a code review.
 
-        For correctness: the gap only affects the experimental FB
-        chain (fv3_forward_backward_step, fv3_fb_sw_step), which is
-        unstable at C36 for independent reasons.  Production (A-L +
-        RK3 in operators_cdgrid.py:fv3_sw_tendencies) does not call
-        `d_sw5_corner_divergence` and is unaffected.  A future port
-        of proper cubed-sphere corner-staggered halo exchange for
-        the Laplacian iteration should update both the source note
-        AND this test together.
+        For correctness: the gap affects the FB chain
+        (fv3_forward_backward_step, fv3_fb_sw_step; stabilized by the
+        2026-07-10 covariant-convention fix, duogrid-only) and the
+        default-OFF `use_fv3_dsw5_corner_damping` post-RK3 hook in
+        FV3EdgeShallowWaterModel.step — both call
+        `d_sw5_corner_divergence` (2026-07-11: an OPT-IN attenuated
+        cross-face ghost exists for nord==1; the zero-ring default was
+        measured stabler on the 120d modon).  The default production
+        tendency (A-L + RK3 in operators_cdgrid.py:fv3_sw_tendencies)
+        does not call it and is unaffected.  A future port of proper
+        cubed-sphere corner-staggered halo exchange for the Laplacian
+        iteration should update both the source note AND this test
+        together.
         """
         import inspect
         from legoesm.core.fv3_sw_core import d_sw5_corner_divergence
@@ -1736,13 +1753,14 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         self.assertIn(
             "sw_core.F90:1737-1785", src,
             "The `d_sw5_corner_divergence` iterated-Laplacian halo "
-            "gap note was removed without updating this test.  The "
-            "note cited Fortran `sw_core.F90:1737-1785` as the "
-            "oracle for proper corner-staggered halo exchange.  If "
-            "the gap has been closed (proper halo ported), update "
-            "this test to reflect the new state.  If not, restore "
-            "the note.  See docs/fv3_fortran_fidelity_review.md for "
-            "the iter-132 context.",
+            "PORT note was removed without updating this test.  The "
+            "note cites Fortran `sw_core.F90:1737-1785` as the "
+            "oracle for the duogrid corner-staggered ghost ring "
+            "(ported 2026-07-10 via _pad_corner_scalar_cross_face). "
+            "If the implementation changes again, update the source "
+            "note and this test together.  See "
+            "docs/fv3_fortran_fidelity_review.md for the iter-132 "
+            "context.",
         )
 
     def test_corner_vorticity_zero_flow_yields_f_corner(self):
@@ -2899,8 +2917,12 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         After the iter-79 fix, they must route through the duogrid
         remap when duogrid is active on the grid.
 
-        `_c_sw` re-imports `pad_halo` from `legoesm.grids.halo` locally,
-        so we patch the source module rather than a module-level symbol.
+        2026-07-10: patch BOTH the fv3_sw_core module-level `pad_halo`
+        binding (the one the sin_sg pads actually use) and the halo module
+        (function-scope re-imports).  The previous halo-module-only patch
+        never intercepted the sin_sg pads; it was accidentally counting
+        `_corner_vorticity`'s internal `pad_halo_vector` halo=1 calls,
+        which the FB covariant corner-vorticity halo fix removed.
         """
         from unittest import mock
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -2932,7 +2954,8 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                                  interp_offsets=interp_offsets,
                                  duogrid=duogrid, **kwargs)
 
-        with mock.patch.object(halo_mod, 'pad_halo', recording):
+        with mock.patch.object(halo_mod, 'pad_halo', recording), \
+                mock.patch.object(fv3_sw_core_mod, 'pad_halo', recording):
             fv3_sw_core_mod._c_sw(h, u_d, v_d, h_s, cdgrid_dg, dt=300.0, g=constants.g)
 
         # Expect at least the 4 sin_sg E/W/N/S halos that iter-79 fixed.
@@ -10442,22 +10465,32 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
         # vertex preservation 1e-7).  The INTERIOR ke[0,4,4] is UNCHANGED
         # bit-for-bit (sync is identity off the seams) — guards against an
         # interior regression.  ke[3,2,6] shifted ~1e-9 (FP-order, near-seam).
+        # 2026-07-10 REBASELINE (commit f3031be24 + follow-ups): the FB
+        # covariant-convention change made the d_sw3 one-sided edge PPM
+        # overrides + cube-vertex bl=br=0 zeroing always-on and switched
+        # the uc/vc pad to the neighbor-delta cross-face halo — an
+        # INTENTIONAL numerics change of edge/vertex corners.  The
+        # VERTEX pins (ke[0,0,0], ke[5,8,8]) and the near-seam pin
+        # (ke[3,2,6], row 2 = inside the d_sw3 override reach, Δ~2e-10)
+        # shifted; the INTERIOR pin ke[0,4,4] is UNCHANGED BIT-FOR-BIT,
+        # proving the change is edge/vertex-scoped.
         self.assertEqual(ke.shape, (6, n + 1, n + 1))
-        self.assertAlmostEqual(float(ke[0, 0, 0]), -0.09303437519154842,
+        self.assertAlmostEqual(float(ke[0, 0, 0]), 0.11092502374782362,
             places=10, msg="ke[0,0,0] gold fingerprint changed.")
         self.assertAlmostEqual(float(ke[0, 4, 4]), -0.049255759396560087,
             places=10, msg="ke[0,4,4] INTERIOR fingerprint changed (should be "
-                           "corner-sync-invariant — a shift here is a real bug).")
-        self.assertAlmostEqual(float(ke[3, 2, 6]), -0.10461388079530494,
+                           "edge/vertex-treatment-invariant — a shift here is "
+                           "a real bug).")
+        self.assertAlmostEqual(float(ke[3, 2, 6]), -0.10461388058171352,
             places=10, msg="ke[3,2,6] gold fingerprint changed.")
-        self.assertAlmostEqual(float(ke[5, 8, 8]), -0.03480824827396059,
+        self.assertAlmostEqual(float(ke[5, 8, 8]), -0.019580517691310993,
             places=10, msg="ke[5,8,8] gold fingerprint changed.")
         # Global reductions (catch bugs that average out pointwise).
-        self.assertAlmostEqual(float(ke.sum()), 1.7479846058190205,
-            places=10, msg="ke.sum() gold fingerprint changed (2026-06-04 "
-                           "rebaseline: exact non-orthogonal corner-sync fix "
-                           "shifts the cube-vertex KE).")
-        self.assertAlmostEqual(float((ke ** 2).sum()), 4.779474897706146,
+        self.assertAlmostEqual(float(ke.sum()), 2.130029968514436,
+            places=10, msg="ke.sum() gold fingerprint changed (2026-07-10 "
+                           "rebaseline: FB covariant-convention + d_sw3 edge "
+                           "overrides shift edge/vertex KE).")
+        self.assertAlmostEqual(float((ke ** 2).sum()), 4.421875130553118,
             places=10, msg="ke L2² gold fingerprint changed.")
 
 
@@ -11036,11 +11069,24 @@ class TestCosineBellGoldFileIter712(unittest.TestCase):
             (h_np[3, 26 - 3:26 + 4, 27 - 3:27 + 4]
              * area_np[3, 26 - 3:26 + 4, 27 - 3:27 + 4]).sum())
         # Iter-914 rebaseline values (post-iter-878 limiter).
-        self.assertAlmostEqual(box_mass, 2303295666257920.0, places=-8,
+        # 2026-07-10 REBASELINE — ENVIRONMENT drift, NOT a code change.
+        # Causality established 2026-07-11: this test's path
+        # (non-duogrid d2a2c_vect + fv_tp_2d.transport_step, which has
+        # its own _ppm_1d and never calls fv3_sw_core.ppm_transport_1d)
+        # is BIT-IDENTICAL between 3fe4b41e5 (pre-FB-covariant base) and
+        # the FB covariant-convention branch, in both x64 modes; the
+        # OLD iter-914 gold already failed AT the base commit.  The
+        # 1.2e-7 relative drift is the jax-0.10 float32
+        # FP-reduction-order change (same mechanism as the 2026-06-04
+        # face4_mass note below), from gold values recorded pre-upgrade.
+        self.assertAlmostEqual(box_mass, 2303295397822464.0, places=-8,
             msg=f"7x7 box MASS around peak drifted: {box_mass:.3e}")
         # Face 3 mass (bell-carrying face, area-weighted).
+        # 2026-07-10 REBASELINE: 1.9e-7 relative drift (same PRE-EXISTING
+        # jax-0.10 FP-reduction-order environment drift as box_mass above;
+        # bit-identical across the FB covariant-convention branch).
         face3_mass = float((h_np[3] * area_np[3]).sum())
-        self.assertAlmostEqual(face3_mass, 4191834930675712.0,
+        self.assertAlmostEqual(face3_mass, 4191834125369344.0,
             places=-8,
             msg=f"face-3 area-weighted mass drifted: {face3_mass:.3e}")
         # Face 4 mass (tail only, area-weighted).  Iter-914 also
@@ -11259,6 +11305,20 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
         # 2026-06-04 exact non-orthogonal BGRID_NE corner-sync fix, which only
         # perturbs face-boundary cells by ~7e-5 — interior u_new[0,4,4] is
         # identical with the old orthogonal sync.)
+        # 2026-07-10 REBASELINE (f3031be24, FB covariant-convention fix):
+        # the d_sw3 one-sided edge PPM overrides + cube-vertex bl=br=0
+        # zeroing are now ALWAYS-ON in _bgrid_ke_transport (Fortran
+        # hardcodes bounded_domain=.false. for d_sw3), and the uc/vc
+        # cross-face halo moved to _pad_halo_uc_vc_new_via_neighbor_delta
+        # (faithful ext_vector semantics, dyn_core.F90:655) — an
+        # INTENTIONAL numerics change.  Sanity-checked vs the parent
+        # commit (3fe4b41e5): |new−old| is seam-concentrated and decays
+        # away from face edges (h: exactly 0 in interior[2:-2]; winds:
+        # ~5e-3 at boundary rows → ~1e-4 one row in → 2.4e-5 deep
+        # interior), i.e. O(seam-adjacent stencil reach), NOT face-wide.
+        # h_new[0,4,4], u_new[0,4,4] and h_new.sum() are bit-unchanged;
+        # v_new[3,2,6] (1-2 cells from edges at n=8), the wind sums and
+        # KE shift accordingly.
         with self.subTest("interior cell fingerprints"):
             self.assertAlmostEqual(float(h_new[0, 4, 4]),
                 998.8888029113577, places=6,
@@ -11268,8 +11328,9 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
                 0.6053432751353012, places=8,
                 msg="u_new[0,4,4] fingerprint changed.")
             self.assertAlmostEqual(float(v_new[3, 2, 6]),
-                -0.15150722361555094, places=8,
-                msg="v_new[3,2,6] fingerprint changed.")
+                -0.15149887167688317, places=8,
+                msg="v_new[3,2,6] fingerprint changed (2026-07-10 f3031be24 "
+                    "rebaseline — seam-adjacent cell).")
         # iter-866: h_new.sum rebaselined to the post-iter-808 value
         # after bisect identified iter-807/808 as the root cause of
         # the prior ~1.4 drift from the original iter-710 fingerprint.
@@ -11293,20 +11354,20 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
         # after step 1.  Both sums and KE shift by ~5e-2 / ~4e-1
         # respectively.  Interior point fingerprints are unchanged
         # (sync only touches cube-edge cells).
-        with self.subTest("u/v wind sum fingerprints (2026-06-04 rebaseline)"):
+        with self.subTest("u/v wind sum fingerprints (2026-07-10 rebaseline)"):
             self.assertAlmostEqual(float(u_new.sum()),
-                -14.940765830794964, places=6,
-                msg="u_new.sum() fingerprint changed (2026-06-04 wind "
-                    "rebaseline — see interior-cell note for the bisect).")
+                -14.911488137049478, places=6,
+                msg="u_new.sum() fingerprint changed (2026-07-10 f3031be24 "
+                    "rebaseline — see interior-cell note).")
             self.assertAlmostEqual(float(v_new.sum()),
-                18.174770242658717, places=6,
-                msg="v_new.sum() fingerprint changed (2026-06-04 wind rebaseline).")
-        with self.subTest("kinetic energy fingerprint (2026-06-04 rebaseline)"):
+                18.171990202952124, places=6,
+                msg="v_new.sum() fingerprint changed (2026-07-10 f3031be24 rebaseline).")
+        with self.subTest("kinetic energy fingerprint (2026-07-10 rebaseline)"):
             self.assertAlmostEqual(
                 float((u_new ** 2).sum() + (v_new ** 2).sum()),
-                828.6212067527553, places=4,
-                msg="u/v kinetic energy fingerprint changed (2026-06-04 "
-                    "wind rebaseline — see interior-cell note for the bisect).")
+                828.5756039833157, places=4,
+                msg="u/v kinetic energy fingerprint changed (2026-07-10 "
+                    "f3031be24 rebaseline — see interior-cell note).")
 
     def test_d_sw_native_gold_file_damp_v_iter727(self):
         """Iter-727 lock: ``_d_sw_native`` with ``damp_v=0.06,
@@ -11384,9 +11445,15 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
             self.assertAlmostEqual(float(u_new[0, 4, 4]),
                 0.5728457957142952, places=8,
                 msg="iter-727: u_new[0,4,4] fingerprint changed.")
+            # 2026-07-10 f3031be24 rebaseline (always-on d_sw3 edge
+            # overrides + neighbor-delta uc/vc halo; seam-decay
+            # sanity-checked — see the nord1 sibling's note).  [3,2,6]
+            # is 1-2 cells from face edges at n=8; h/h.sum/u[0,4,4]
+            # bit-unchanged.
             self.assertAlmostEqual(float(v_new[3, 2, 6]),
-                -0.13133050999681445, places=8,
-                msg="iter-727: v_new[3,2,6] fingerprint changed.")
+                -0.13132215805814668, places=8,
+                msg="iter-727: v_new[3,2,6] fingerprint changed "
+                    "(2026-07-10 f3031be24 rebaseline).")
         # iter-866: same rationale as nord1 sibling — h_new.sum
         # rebaselined to the post-iter-808 value 383993.7414 after
         # bisect identified iter-807/808's sign-aware DUOGRID flux
@@ -11405,12 +11472,12 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
         # at step 7 and `(ut, vt)` at step 1.  Interior point
         # fingerprints at [0,4,4] and [3,2,6] unchanged (sync only
         # touches cube-edge cells).
-        with self.subTest("kinetic energy fingerprint (iter-944 vortflux)"):
+        with self.subTest("kinetic energy fingerprint (2026-07-10 rebaseline)"):
             self.assertAlmostEqual(
                 float((u_new ** 2).sum() + (v_new ** 2).sum()),
-                803.0334094645063, places=4,
+                802.9881441925331, places=4,
                 msg="iter-727: u/v kinetic energy fingerprint changed "
-                    "(2026-06-04 wind rebaseline).")
+                    "(2026-07-10 f3031be24 rebaseline).")
 
         # Delta check: assert this result DIFFERS from the damp_v=0
         # baseline at `test_d_sw_native_gold_file_nord1` above.  A
