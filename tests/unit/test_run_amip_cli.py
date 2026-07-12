@@ -1504,10 +1504,10 @@ def test_config_yaml_round_trips_authoritative_values():
     args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
     # grid geometry (resolution/nlev/discretization are CLI dests baked into
     # cfg.grid, so assert them at the args level the YAML controls).  The
-    # production YAML is C12/L20 (drive-by fix: these asserts were stale at
-    # 48/40 from a pre-#746 C48->C12 downsizing of amip_production.yaml).
-    assert args.resolution == 12
-    assert args.nlev == 20
+    # production YAML is the C48/L40 publication lane (#899 restored it from
+    # the C12/L20 land-switch screen; dt=150, fp64 — see the YAML header).
+    assert args.resolution == 48
+    assert args.nlev == 40
     assert args.discretization == "cdgrid"
     assert args.grid_type == "cubed_sphere"
     cfg = build_config_from_args(args)
@@ -1526,7 +1526,12 @@ def test_config_yaml_round_trips_authoritative_values():
     assert cfg.convective_cloud is True
     # the run_coupled-mirrored (#647) tuned knobs round-trip from the YAML
     assert cfg.surface_gustiness_zi == 300.0
-    assert cfg.cloud_q_c_diagnostic == pytest.approx(3e-4)
+    # PROVISIONAL cloud tuning (#899): rh_crit 0.85 / q_c 1e-4 (was 0.77/3e-4)
+    assert cfg.cloud_rh_crit == pytest.approx(0.85)
+    assert cfg.cloud_q_c_diagnostic == pytest.approx(1e-4)
+    # 0.0 until the bechtold rain-split lands (#932/#929): 0.5 with a
+    # non-tiedtke scheme trips run_amip's hard guard at argparse.
+    assert cfg.convective_precip_efficiency == 0.0
 
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
