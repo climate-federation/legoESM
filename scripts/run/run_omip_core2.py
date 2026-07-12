@@ -2518,13 +2518,10 @@ def _record_final_state_digest(manifest_path, state) -> None:
         print(f"[warn] state_digest not recorded: {type(exc).__name__}: {exc}")
 
 
-def main() -> int:
-    # allow_abbrev=False: the module-level x64 toggle is decided by an EXACT
-    # "--fp32" argv match (``_FP32``), so the real parser must NOT accept an
-    # abbreviation (e.g. "--fp") of --fp32 — that would set args.fp32=True
-    # while x64 was already enabled, tripping the consistency guard below.
-    # All sbatch wrappers already use full flag names, so this is behaviour-
-    # preserving for existing callers.
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """CLI parser for run_omip_core2, extracted from ``main`` so the
+    argument set is unit-testable (e.g. the #939 ``--polar-filter``
+    tri-state disable). ``main`` calls this then ``parse_args``."""
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter,
                                 allow_abbrev=False)
@@ -2921,8 +2918,12 @@ def main() -> int:
                         "col[nx-1]<-col1) + overlap-fills the mask/bathy/IC. "
                         "ORCA-overlap-specific; do NOT use on a regular lat-lon grid. "
                         "Off = bit-exact legacy.")
-    p.add_argument("--polar-filter", action="store_true",
-                   help="Enable the mask-aware Fourier polar filter (lat-lon grid only): "
+    p.add_argument("--polar-filter", action=argparse.BooleanOptionalAction,
+                   default=None,
+                   help="Enable/disable the mask-aware Fourier polar filter (lat-lon "
+                        "grid only). Omitted -> the config default applies (the global "
+                        "bathy path forces it ON, #939); --no-polar-filter forces it "
+                        "OFF (for the #939 A/B or an emergency disable). "
                         "truncate the zonal modes exceeding the per-latitude CFL near the "
                         "converging-meridian poles, where a global lat-lon ocean otherwise "
                         "blows up ~day 0.25. Mask-aware (land filled with ocean zonal mean "
@@ -3166,6 +3167,17 @@ def main() -> int:
     p.add_argument("--spinup-drag-days", type=float, default=0.0,
                    help="Duration [days] of the spin-up velocity-damping phase "
                         "(drag removed afterwards -> free run).")
+    return p
+
+
+def main() -> int:
+    # allow_abbrev=False: the module-level x64 toggle is decided by an EXACT
+    # "--fp32" argv match (``_FP32``), so the real parser must NOT accept an
+    # abbreviation (e.g. "--fp") of --fp32 — that would set args.fp32=True
+    # while x64 was already enabled, tripping the consistency guard below.
+    # All sbatch wrappers already use full flag names, so this is behaviour-
+    # preserving for existing callers.
+    p = _build_arg_parser()
     args = p.parse_args()
 
     # KPP MLD-deepening sensitivity flags are mpas-only (fail loud, never silent).
@@ -3542,7 +3554,9 @@ def main() -> int:
             min_levels=args.min_levels,
             div_damp_2=args.div_damp_2, div_damp_4=args.div_damp_4,
             smag_cfl_safety=args.smag_cfl_safety,
-            use_polar_filter=(True if args.polar_filter else None),
+            # tri-state: None -> keep the config default (bathy forces ON, #939);
+            # True/False -> explicit override via build_latlon_bathy's _ovr.
+            use_polar_filter=args.polar_filter,
             polar_filter_cutoff_lat_deg=args.polar_filter_cutoff_lat,
             polar_filter_max_wave_speed=args.polar_filter_max_wave_speed,
             polar_filter_safety_factor=args.polar_filter_safety,
