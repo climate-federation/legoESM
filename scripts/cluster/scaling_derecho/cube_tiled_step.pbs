@@ -73,14 +73,34 @@ echo "== Stage B: 24-GPU multicontroller timed runs =="
 export JAX_PLATFORMS=cuda
 export NCCL_DEBUG=INFO
 export NCCL_SOCKET_IFNAME=hsn
-mpiexec -n $((6 * KT * KT)) --ppn 4 \
+# #921: the closed-loop generation adds ONE extra collective the single-shot
+# lane lacks — the dry-mass fixer's GLOBAL all-reduce
+# (tiled_production_cdgrid._tile_fix_ps_mass_delta:
+# psum over ("face","tile_i","tile_j")) layered on top of the halo
+# collective-permutes (cubesphere_exchange ppermute over the SAME axes). Under
+# XLA GPU defaults (latency-hiding scheduler ON, async collectives ON,
+# nccl_comm_splitting ON) the all-reduce clique and the permute cliques init
+# CONCURRENTLY and the background NCCL init thread can establish them in a
+# different relative order per rank -> cyclic wait / comm-init deadlock (ranks
+# reach channel/P2P setup but log ZERO "Init COMPLETE"). Force independent,
+# program-order-serial comm init. Bisect afterward: re-enable
+# latency_hiding_scheduler alone (keep nccl_comm_splitting=false) to recover
+# overlap perf if the split flag alone suffices. Confirm the mechanism first
+# with NCCL_DEBUG_SUBSYS=INIT,COLL (see issue #921).
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_nccl_comm_splitting=false --xla_gpu_enable_latency_hiding_scheduler=false"
+# timeout + markers (#921 repro plan): stop wasting the 24-GPU allocation on a
+# hang and pinpoint WHICH lane stalls (single-shot is known-good; the
+# closed-loop mass-fixer lane is the suspect).
+timeout 1800 mpiexec -n $((6 * KT * KT)) --ppn 4 \
     sh -c 'export CUDA_VISIBLE_DEVICES=$PALS_LOCAL_RANKID; exec "$@"' -- \
     "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
     --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
     --steps 12 --warmup 2 --multicontroller --out "${OUT}"
+echo "== single-shot done"
 # Closed-loop production lane: the np>6 number that matters (real
 # multi-step integration, state resident tile-sharded across steps).
-mpiexec -n $((6 * KT * KT)) --ppn 4 \
+echo "== closed-loop start"
+timeout 1800 mpiexec -n $((6 * KT * KT)) --ppn 4 \
     sh -c 'export CUDA_VISIBLE_DEVICES=$PALS_LOCAL_RANKID; exec "$@"' -- \
     "$PY" scripts/bench/bench_cube_tiled_step_scaling.py \
     --kt "${KT}" --resolution "${RES}" --nlev "${NLEV}" \
