@@ -52,6 +52,9 @@ from legoesm.atmosphere.dynamics.compressible_euler_plane import (
     make_flat_plane_terrain_metric,
     make_rest_state,
 )
+from legoesm.atmosphere.dynamics.tracer_positivity import (
+    apply_positive_filter_state,
+)
 from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
     make_wing2018_theta_ref_fn,
     wing2018_qv_profile,
@@ -1853,6 +1856,25 @@ def main():
                     state, cached_rad_tend, args.dt,
                 )
             state = model.step(state, dt=args.dt, physics_fn=physics_fn)
+        # POSITIVITY GUARD (CRM-dycore campaign, codex-reviewed): keep the water
+        # tracers >=0 in the STATE after each step, matching run_rce_mpi_long.
+        # The advective-form tracer advection under strong div(u) — e.g. a
+        # weno5-θ' convective overshoot driving noisy w — can leave q<0 in the
+        # stored state; the microphysics-read clip (PR #966) alone does not
+        # repair it.
+        #
+        # mode="clip" (local max(q,0)) is used over mode="compensated" ON PURPOSE:
+        # codex recommended compensated for exact water-mass conservation, but the
+        # GLOBAL redistribution overreacts in the noisy weno5-θ' regime — when
+        # many cells go slightly negative the compensated scale collapses toward
+        # 0 and zeros positive water, amplifying grid-scale noise (empirically
+        # max|w| 7.1 vs 0.35 m/s for weno5 f64 at 1 day). clip is local + robust;
+        # its water-creation bias is negligible: the negatives are ~1e-4 and only
+        # fire under pathological noisy convection, and the reference van_leer
+        # config leaves machine-zero negatives so clip is a no-op there.
+        # ponytail: local clip, revisit a mass-conserving *local* limiter (per-
+        # column borrow) if a long equilibrium run shows CWV drift.
+        state = apply_positive_filter_state(state, mode="clip")
         if (i + 1) % args.print_every == 0 or i == 0:
             t = (i + 1) * args.dt
             max_w = float(jnp.max(jnp.abs(state.w.data)))
