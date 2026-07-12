@@ -130,6 +130,29 @@ def test_adapter_refuses_inner_mass_fixer():
         make_tiled_cc_step(model, mesh, kt=KT, dt=DT)
 
 
+def test_single_shot_step_refuses_tracers():
+    """The single-shot cc step is dynamics-only: a tracer-carrying state
+    must refuse LOUDLY — silently re-attaching the tracers unchanged would
+    freeze them while serial advances/floors them (divergence-by-omission,
+    mirroring make_tiled_cc_loop's dry refusal).  An EMPTY tracer dict is
+    equivalent to no tracers and must still step."""
+    mesh = _mesh()
+    model, state = _model_and_state()
+    step = make_tiled_cc_step(model, mesh, kt=KT, dt=DT)
+
+    moist = state._replace(tracers={
+        "q_v": state.T.replace(data=jnp.zeros_like(state.T.data),
+                               name="q_v"),
+    })
+    with pytest.raises(ValueError, match="dynamics-only"):
+        step(moist)
+
+    # No-tracer states step fine (the full-parity gate above exercises
+    # tracers=None end-to-end); pin the empty-dict case explicitly.
+    out = step(state._replace(tracers={}))
+    assert np.all(np.isfinite(np.asarray(out.T.data)))
+
+
 def test_dedup_tiled_corners_synthetic():
     """Block-concatenated tiled corners (with the duplicated shared face)
     reassemble to the exact global corner array."""

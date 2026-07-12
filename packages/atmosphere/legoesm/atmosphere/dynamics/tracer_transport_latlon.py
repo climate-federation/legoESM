@@ -33,7 +33,6 @@ import jax.numpy as jnp
 
 from legoesm.core.state import TracerState
 from legoesm.core.operators_fv_latlon_3d import cgrid_fv_scalar_advection_latlon_3d
-from legoesm.core.operators_fv_latlon import lat_v_interfaces
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.grids.vertical import SigmaCoordinate, vertical_advection
 from legoesm.timestepping.dispatch import dispatch_integrator
@@ -90,7 +89,10 @@ def _vface_coords(grid: LatLonGrid):
     V-faces sit at latitude interfaces between cell centers.
     Shape: (n_lat+1, n_lon).
     """
-    lat_v = lat_v_interfaces(grid)  # (n_lat+1,)
+    # Band-correct v-face latitudes carried by the grid (pre-sliced under
+    # MPI band decomposition; a hard-coded ±π/2 pad would mislabel interior
+    # band cuts as poles when evaluating the prescribed wind).
+    lat_v = grid.lat_v  # (n_lat+1,)
     lon_v = grid.lon  # (n_lon,) — same longitudes as cell centers
     return jnp.broadcast_to(lon_v[None, :], (grid.n_lat + 1, grid.n_lon)), \
            jnp.broadcast_to(lat_v[:, None], (grid.n_lat + 1, grid.n_lon))
