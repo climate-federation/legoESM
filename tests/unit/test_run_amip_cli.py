@@ -1897,6 +1897,26 @@ def test_moisture_flux_form_flag_flows_to_dycore_config():
     assert cfg_off.dycore.moisture_flux_form is False
 
 
+def test_mpas_nu_vert4_t_flag_flows_to_dycore_config():
+    """#930: --mpas-nu-vert4-t must reach the DycoreConfig (which the component
+    factory threads into MPASPrimitiveEquationConfig.nu_vert4_T — the vertical
+    2Δσ-checkerboard cure).  Production default is ON (nonzero); 0 disables."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.dycore.mpas_nu_vert4_T > 0.0   # cure on by default
+
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-nu-vert4-t", "0",
+    ]), parser))
+    assert cfg_off.dycore.mpas_nu_vert4_T == 0.0
+
+    cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-nu-vert4-t", "5e-6",
+    ]), parser))
+    assert cfg_set.dycore.mpas_nu_vert4_T == pytest.approx(5e-6)
+
+
 def test_multicontroller_coordinator_flags_parse():
     """Route-B flags round-trip through the parser (they are RUN args consumed
     in main() for the jax.distributed bootstrap, not ExperimentConfig fields)."""

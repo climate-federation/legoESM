@@ -118,12 +118,79 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # that blowup at no stability cost.  Use ``ssp_rk54`` for a bit-exact
     # reference run.  See ``timestepping/ssp_rk54.py``.
     time_integrator: str = "ssp_rk54_scan"
-    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p). Last field to preserve positional ABI.
+    p_ceil: float = 2.0e6          # Surface-pressure ceiling [Pa] (~20-bar overflow guard for omega/p).
+    # Vertical biharmonic (∂⁴/∂σ⁴) hyperdiffusion RATE for T [1/s] — an
+    # index-space fourth-difference filter (NOT a physical hyperdiffusivity;
+    # cf. the horizontal ``nu_del4`` [m⁴/s]).  Scale-selective damping of the
+    # grid-scale 2Δσ vertical mode.  Cures the #930 vertical checkerboard: the
+    # thermodynamic equation's adiabatic term κ·T·ω/p amplifies vertical T
+    # structure in subsidence (1/p explodes at the low-pressure top levels),
+    # and NOTHING else in this dycore damps a 2Δσ mode in T (vertical advection
+    # is upwind but vanishes where the mass flux is weak; ω is smoothed by the
+    # ½ half→full average).  A 2Δσ mode grows until the silent ``T_min`` floor
+    # pins its cold levels and rectifies it into an even/odd checkerboard (#915
+    # autopsy: even levels pinned at 50 K, odd exploding to 8e8 K).  Damping
+    # rate is 16·ν interior / 8·ν at the top+bottom boundary (τ = 1/(16ν),
+    # 1/(8ν); e.g. ν=2e-6 ⇒ ~8.7 h interior, ~17 h boundary — fast vs the
+    # day-20 blowup).  del4 damps 2Δσ ~47× faster than an 8Δσ resolved wave, so
+    # resolved vertical structure is essentially untouched, and it conserves
+    # column-integrated T to machine precision (flux form).  0.0 (default)
+    # reproduces the pre-fix dycore bit-for-bit (matches the ``nu_del2``/
+    # ``nu_del4`` "off by default, set in production" convention); the
+    # coupled/AMIP path sets a small value.  Last field to preserve positional ABI.
+    nu_vert4_T: float = 0.0
 
 
 # ============================================================================
 # Tendency computation
 # ============================================================================
+
+def vertical_del4_T_tendency(T_3d: jax.Array, nu_vert4_T: float) -> jax.Array:
+    """Scale-selective vertical biharmonic damping of the grid-scale T mode.
+
+    Returns the tendency ``-nu · ∂⁴T/∂σ⁴`` (a discrete fourth-difference on the
+    level INDEX — so ``nu_vert4_T`` is a filter RATE [1/s], NOT a physical
+    hyperdiffusivity like the horizontal ``nu_del4`` [m⁴/s]).  It damps the 2Δσ
+    (Nyquist) vertical mode while leaving resolved vertical structure
+    essentially untouched — the vertical analogue of the dycore's horizontal
+    ``nu_del4`` biharmonic hyperdiffusion.
+
+    Implemented as del2∘del2 (Laplacian of the Laplacian).  Boundary treatment:
+    the INNER Laplacian is ``reflect``-padded (so a 2Δσ mode keeps its full
+    ``-4`` Laplacian at the top/bottom levels — where the #930 checkerboard is
+    worst, at the low-pressure top), while the OUTER Laplacian is ``edge``
+    (zero-gradient) padded (a no-flux boundary → the column-integrated tendency
+    is ZERO to machine precision for ANY profile, so the filter dissipates
+    grid-scale variance WITHOUT spurious column heating/cooling).  Discrete 2Δσ
+    ``(-1)^k`` response: ``-16·nu`` in the interior, ``-8·nu`` at the top/bottom
+    (½ the interior rate — a boundary no-flux constraint of any conservative
+    biharmonic; still strong).  An 8Δσ resolved wave sees ``≈-0.34·nu``
+    (≈47× weaker than 2Δσ), so the filter is grid-scale-selective.
+
+    Parameters
+    ----------
+    T_3d : jax.Array
+        Temperature, shape ``(..., nlev)``.
+    nu_vert4_T : float
+        Biharmonic filter rate [1/s].  ``0.0`` ⇒ exact zero tendency.
+
+    Returns
+    -------
+    jax.Array
+        Vertical-hyperdiffusion tendency of T, same shape as ``T_3d``.
+    """
+    pad_axes = ((0, 0),) * (T_3d.ndim - 1)
+    # Inner Laplacian: reflect BC keeps the FULL 2Δσ response at the boundary
+    # levels (a plain edge/no-flux inner BC halves it again and leaves a slowly
+    # decaying top boundary mode).
+    Tp = jnp.pad(T_3d, (*pad_axes, (1, 1)), mode="reflect")
+    lap = Tp[..., :-2] - 2.0 * Tp[..., 1:-1] + Tp[..., 2:]      # ∂²/∂σ²
+    # Outer Laplacian: edge (zero-gradient / no-flux) BC ⇒ Σ_k tendency = 0
+    # exactly (flux form), so the filter conserves column-integrated T.
+    lap_p = jnp.pad(lap, (*pad_axes, (1, 1)), mode="edge")
+    bih = lap_p[..., :-2] - 2.0 * lap_p[..., 1:-1] + lap_p[..., 2:]  # ∂⁴/∂σ⁴ (>0 at 2Δσ)
+    return -nu_vert4_T * bih
+
 
 def mpas_hydrostatic_tendencies(
     state: MPASHydrostaticState,
@@ -453,6 +520,12 @@ def mpas_hydrostatic_tendencies(
 
     dT_dt_3d = horiz_adv_T_3d + vert_thermo_T + adiabatic
 
+    # Vertical biharmonic hyperdiffusion of T (#930 cure): damp the grid-scale
+    # 2Δσ vertical mode that the adiabatic κ·T·ω/p term amplifies but no other
+    # vertical operator in this dycore opposes.  Zero when nu_vert4_T == 0.
+    if config.nu_vert4_T > 0.0 and T_3d.shape[-1] > 2:
+        dT_dt_3d = dT_dt_3d + vertical_del4_T_tendency(T_3d, config.nu_vert4_T)
+
     # --- 6. Add physics tendencies ---
     if physics_tendency is not None:
         du_dt_3d = du_dt_3d + physics_tendency.du_dt.data
@@ -745,6 +818,12 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 })
 
         # --- 3. Floors ---
+        # Last-resort NaN-safety guard, now BEHIND the #930 cure (``nu_vert4_T``
+        # damps the 2Δσ mode so this floor is dead in normal operation — the
+        # integration test asserts T_min never binds once the cure is on).  It
+        # is no longer the SILENT masker it was: #915's daily ``T < 100`` bounds
+        # guard aborts the run on ANY floor activation, so a clamp to 50 K can
+        # never again hide a runaway (#871/#912/#915).
         if self.config.T_min > 0:
             state_new = state_new._replace(
                 T=state_new.T.replace(
