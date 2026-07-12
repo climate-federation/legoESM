@@ -1058,6 +1058,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
               "band-local. Single-process by default; add --multicontroller for "
               "the multi-node route-B lane. Distinct from --distributed (MPI)."))
     parser.add_argument(
+        "--latlon-spmd-compiled-segments", action="store_true", default=False,
+        help=("M2b: run each lat-lon SPMD segment as ONE compiled lax.scan "
+              "(band-sharded geometry, one host dispatch per segment) instead "
+              "of the per-step Python loop. Requires --enable-latlon-spmd; "
+              "stateless lane only (dynamics-only / --held-suarez) — the "
+              "operator-split unified-physics lane refuses it loudly. "
+              "Default off = byte-identical per-step path."))
+    parser.add_argument(
         "--multicontroller", action="store_true", default=False,
         help=("Promote --enable-latlon-spmd to ROUTE-B (jax.distributed, "
               "cross-process NCCL): the lat-band operator-split atm step runs "
@@ -1306,6 +1314,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_cape_threshold=args.bechtold_cape_threshold,
         held_suarez_forcing=args.held_suarez_forcing,
         enable_latlon_spmd=args.enable_latlon_spmd,
+        latlon_spmd_compiled_segments=args.latlon_spmd_compiled_segments,
         physics_parameterization=args.physics_parameterization,
         physics_parameterization_checkpoint=args.physics_parameterization_checkpoint,
         physics_parameterization_stats=args.physics_parameterization_stats,

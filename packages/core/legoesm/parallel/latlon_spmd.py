@@ -143,6 +143,68 @@ def to_vface_lower(v_full):
     return v_full[:-1]
 
 
+def reconstruct_vface_lower_multi(v_lowers, axis: str, perm_north):
+    """FUSED multi-field twin of :func:`reconstruct_vface_lower` (message
+    aggregation, scaling-M4): ONE ``ppermute`` per DTYPE GROUP for the whole
+    staggered field group instead of one per field.
+
+    Each field's single boundary row (``v_lower[0:1]``) is flattened on its
+    trailing axes, concatenated into one ``(1, sum_flat)`` buffer per dtype
+    group, exchanged once, then split and reshaped back — value-identical to
+    the per-field reconstruction (the exchange is a bit-copy; flatten/concat/
+    split are layout ops), including the north band's ppermute non-target
+    zeros.  Mirrors :func:`make_latlon_band_wall_multi_pad_body`'s "per dtype
+    group" packing contract; gated by
+    ``tests/parallel/test_latlon_spmd_fused_halo.py``.
+
+    Parameters
+    ----------
+    v_lowers : sequence of arrays ``(n_lat_band, n_lon[, ...])`` — the
+        ``v_lower`` carriers to reconstruct (e.g. the ocean state's ``v`` and
+        ``v_mask``).  Trailing shapes may differ; dtypes group internally.
+    axis : the ``shard_map`` mesh axis name (``"lat"``).
+    perm_north : the ``(src, dst)`` pairs from :func:`latlon_band_perms`.
+
+    Returns
+    -------
+    tuple of arrays ``(n_lat_band + 1, ...)`` — full band v-faces, input order.
+    """
+    fields = tuple(v_lowers)
+    if not fields:
+        return ()
+
+    # Group by dtype (static: dtypes are trace-time facts of the args).
+    groups: dict = {}
+    for i, f in enumerate(fields):
+        groups.setdefault(str(f.dtype), []).append(i)
+
+    boundaries: list = [None] * len(fields)
+    for _, idxs in sorted(groups.items()):
+        flats = []
+        widths = []
+        for i in idxs:
+            row = fields[i][0:1]
+            w = 1
+            for s in row.shape[1:]:
+                w *= int(s)
+            widths.append(w)
+            flats.append(row.reshape(1, w))
+        buf = jnp.concatenate(flats, axis=1)
+        # ONE ppermute for the whole dtype group (north band receives 0).
+        recv = jax.lax.ppermute(buf, axis, perm_north)
+        off = 0
+        for k, i in enumerate(idxs):
+            w = widths[k]
+            tail = fields[i].shape[1:]
+            boundaries[i] = recv[:, off:off + w].reshape((1,) + tail)
+            off += w
+
+    return tuple(
+        jnp.concatenate([fields[i], boundaries[i]], axis=0)
+        for i in range(len(fields))
+    )
+
+
 def reconstruct_uface_left(u_left, axis: str, p_lon: int):
     """Rebuild the ``n_lon_local+1`` staggered u-faces from the
     ``n_lon_local``-column ``u_left`` representation, INSIDE a ``shard_map``

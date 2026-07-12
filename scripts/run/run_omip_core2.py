@@ -1864,6 +1864,32 @@ def _ice_state_spatial_shape(grid, app_grid_type):
         "ice-state spatial shape (supported: mpas, tripole, latlon).")
 
 
+def _surface_uv_faces(state):
+    """Top-level (2-D) staggered u/v faces of a lat-lon C-grid family state,
+    read DEVICE-SIDE — slice-before-convert (M2 batch4 contract: the ``[..., 0]``
+    child never assembles the full, possibly lat-band-sharded, 3-D leaf).
+
+    Layout-polymorphic (scaling-M2 leftover): the ``--spmd-persistent-state``
+    lane carries ``v`` as the ``n_lat``-row ``v_lower`` (the staggered top row
+    dropped), detected here by ``v`` sharing ``u``'s leading dim (the GLOBAL
+    layout's v always has ``n_lat+1`` rows).  The missing top row is the
+    pole/cap WALL — identically zero under the v-carrier contract asserted in
+    ``shard_state_latlon`` — appended via the SAME shared reconstruction the
+    full-state gather uses (``append_vface_wall_row``), so the sharded-state
+    read is BIT-identical to reading the gathered state WITHOUT forcing the
+    per-step full-state gather (gated by
+    tests/parallel/test_persistent_sharded_ocean_loop.py).
+    """
+    u_face = jnp.asarray(state.u.data)[..., 0]       # (n_lat, n_lon+1)
+    v_face = jnp.asarray(state.v.data)[..., 0]       # (n_lat[+1], n_lon)
+    if v_face.shape[0] == u_face.shape[0]:           # v_lower carrier layout
+        from legoesm.ocean.dynamics.sharded_ocean_step import (
+            append_vface_wall_row,
+        )
+        v_face = append_vface_wall_row(v_face)       # -> (n_lat+1, n_lon)
+    return u_face, v_face
+
+
 def _surface_currents(state, grid, app_grid_type):
     """Top-level ocean currents (u_east, v_north) at T points / cells [m/s].
 
@@ -1874,18 +1900,15 @@ def _surface_currents(state, grid, app_grid_type):
     surface level directly on the T-shape they already carry — the ice model only
     needs an O(0.1 m/s) drift reference for the ocean-ice drag, so the face value
     at the matching index is an adequate cell-centre proxy (and avoids a bespoke
-    face->centre average)."""
+    face->centre average).  Reads via ``_surface_uv_faces`` (device-side,
+    persistent-sharded-layout aware — no full-state gather)."""
     if app_grid_type == "mpas":
         from legoesm.ocean.init_mpas import reconstruct_cell_velocity
         u_sfc, v_sfc = reconstruct_cell_velocity(state.u.data[:, 0], grid)
         return u_sfc, v_sfc
     # latlon / tripole C-grid: u on EW faces (n_lat, n_lon+1), v on NS faces
     # (n_lat+1, n_lon); crop to the T shape (n_lat, n_lon) at the surface level.
-    n_lat = int(np.asarray(grid.lat_T if app_grid_type == "tripole"
-                           else grid.lat).shape[0]) if app_grid_type != "latlon" \
-        else int(np.asarray(grid.lat).shape[0])
-    u_face = state.u.data[..., 0]
-    v_face = state.v.data[..., 0]
+    u_face, v_face = _surface_uv_faces(state)
     u_sfc = u_face[:, :-1]                      # drop the periodic wrap column
     v_sfc = 0.5 * (v_face[:-1, :] + v_face[1:, :])
     return u_sfc, v_sfc
@@ -1920,8 +1943,10 @@ def _surface_currents_geographic(state, grid, app_grid_type):
         raise NotImplementedError(
             f"--relative-winds (ln_crt_dwn) is wired for the lat-lon C-grid "
             f"family + mpas; got app_grid_type={app_grid_type!r}.")
-    u_face = jnp.asarray(state.u.data)[..., 0]      # (n_lat, n_lon+1), grid-i
-    v_face = jnp.asarray(state.v.data)[..., 0]      # (n_lat+1, n_lon), grid-j
+    # Device-side staggered read (persistent-sharded-layout aware — no
+    # full-state gather; see _surface_uv_faces).
+    u_face, v_face = _surface_uv_faces(state)        # (n_lat, n_lon+1) grid-i,
+    #                                                  (n_lat+1, n_lon) grid-j
     u_c = 0.5 * (u_face[:, :-1] + u_face[:, 1:])     # -> (n_lat, n_lon) T-centre
     v_c = 0.5 * (v_face[:-1, :] + v_face[1:, :])     # -> (n_lat, n_lon) T-centre
     cos_a_u = getattr(grid, "cos_alpha_u", None)
@@ -4200,11 +4225,16 @@ def main() -> int:
     # (b) global reductions: none on the host loop itself (the in-step
     #     reductions run through the SPMD-safe psum paths inside shard_map).
     # (c) host-global consumers needing the FULL (n_lat+1)-v global layout:
-    #     prognostic sea ice + relative winds (_surface_currents* averages
-    #     staggered v rows), the momentum-term debug dump, and the real I/O
-    #     boundaries (snapshot / blowup abort / final diags+digest) — these
-    #     gather via _ensure_global_state below (counted; snapshot-cadence
-    #     ones re-shard lazily at the next step).
+    #     the momentum-term debug dump (runs model internals on the host
+    #     state) and the real I/O boundaries (snapshot / blowup abort /
+    #     final diags+digest) — these gather via _ensure_global_state below
+    #     (counted; snapshot-cadence ones re-shard lazily at the next step).
+    #     Prognostic sea ice + relative winds are NOT in this class any more
+    #     (scaling-M2 leftover): _surface_currents* read 2-D surface u/v
+    #     slices DEVICE-SIDE and reconstruct the one dropped staggered top
+    #     row as the wall zero (_surface_uv_faces -> append_vface_wall_row,
+    #     exact under the v-carrier contract), so they operate on the
+    #     sharded state directly — class (a), no forced full-state gather.
     # The residency STATE MACHINE itself is the module-level, unit-tested
     # ``_PersistentStateResidency`` (flag/counter interleavings gated in
     # tests/unit/test_run_omip_core2_spmd_persistent_cli.py); main() only
@@ -4373,22 +4403,24 @@ def main() -> int:
     # --spmd-persistent-state: static classification of the per-step
     # host-global consumers (class (c) above).  Forced per-step gathers are
     # KEPT + COUNTED + logged up front — never a silent degradation.
+    # Prognostic ice / relative winds no longer force one (scaling-M2
+    # leftover): their surface-current reads are device-side on the sharded
+    # layout (_surface_uv_faces), bit-identical to the gathered read — the
+    # list stays as the wiring point for any future host-global consumer.
     _pers_forced = []
     if _spmd_persistent:
-        if ice_config is not None:
-            _pers_forced.append(
-                "--prognostic-sea-ice (host ice model reads staggered "
-                "global v surface currents)")
-        if _wind_vfac != 0.0:
-            _pers_forced.append(
-                "--relative-winds/--wind-vfac (geographic surface currents "
-                "read staggered global v)")
         print(f"[spmd-persistent] full_state_gathers_per_step="
               f"{1 if _pers_forced else 0} (full-STATE layout flips ONLY — "
               f"NOT the total transfer cost)"
               + (f" — forced by: {'; '.join(_pers_forced)}" if _pers_forced
                  else "; otherwise full-state gathers only at snapshot/abort/"
                       "final boundaries"), flush=True)
+        if ice_config is not None or _wind_vfac != 0.0:
+            print("[spmd-persistent] prognostic-ice / relative-winds surface "
+                  "currents read the SHARDED state device-side (2-D surface "
+                  "u/v slices; the dropped staggered top row is reconstructed "
+                  "as the wall zero — no forced per-step full-state gather).",
+                  flush=True)
         # Honest-cost companion (codex batch4 HIGH): enumerate the per-step
         # LEAF host transfers that REMAIN in the persistent lane, so a
         # "0 full-state gathers" line is never read as "0 transfer cost".
@@ -4449,10 +4481,12 @@ def main() -> int:
                       flush=True)
                 visc_seg_idx += 1
         # --spmd-persistent-state: consumers below that need the FULL global
-        # layout every step (prognostic ice / relative winds average the
-        # staggered (n_lat+1) v; the momentum dump runs model internals on the
-        # host state) force a per-step gather — kept + counted (see the
-        # [spmd-persistent] setup log line), never silent.
+        # layout every step force a per-step gather — kept + counted (see the
+        # [spmd-persistent] setup log line), never silent.  Since the
+        # scaling-M2 leftover this is ONLY the momentum-term debug dump
+        # (model internals on the host state) + any future _pers_forced
+        # entry; prognostic ice / relative winds read the sharded state
+        # device-side (_surface_uv_faces reconstructs the staggered top row).
         if _spmd_persistent and (_pers_needs_prestep_global
                                  or (args.diag_momentum_step >= 0
                                      and step <= args.diag_momentum_step)):

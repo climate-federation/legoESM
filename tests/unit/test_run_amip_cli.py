@@ -435,6 +435,34 @@ def test_enable_latlon_spmd_flag_flows_to_config():
     assert cfg_on.enable_latlon_spmd is True
 
 
+def test_latlon_spmd_compiled_segments_flag_flows_to_config():
+    """--latlon-spmd-compiled-segments (M2b) round-trips into
+    ExperimentConfig (default off), and validate_strict rejects it without
+    --enable-latlon-spmd (silent-no-op hardening) while accepting the pair."""
+    import pytest
+
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--time-var", "month",
+            "--lat-var", "ylat", "--lon-var", "xlon"]
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(base), parser))
+    assert cfg_off.latlon_spmd_compiled_segments is False
+
+    cfg_on = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--enable-latlon-spmd", "--grid-type",
+                                  "latlon", "--latlon-spmd-compiled-segments"]),
+        parser))
+    assert cfg_on.latlon_spmd_compiled_segments is True
+    assert cfg_on.enable_latlon_spmd is True
+    cfg_on.validate_strict()                       # valid pair passes
+
+    cfg_orphan = build_config_from_args(_postprocess_args(
+        parser.parse_args(base + ["--latlon-spmd-compiled-segments"]), parser))
+    assert cfg_orphan.latlon_spmd_compiled_segments is True
+    with pytest.raises(ValueError, match="requires\\s+enable_latlon_spmd"):
+        cfg_orphan.validate_strict()
+
+
 def test_convection_cli_choices_match_config_single_source():
     """--convection CLI choices MUST equal the driver config's authoritative
     VALID_CONVECTION_SCHEMES.  Regression guard: a stale hardcoded CLI choices
