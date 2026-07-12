@@ -192,11 +192,12 @@ def build_band_grids_atm(grid, n_devices: int):
     ]
 
 
-def state_finite_scalar(state, axis: str | None = None):
+def state_finite_scalar(state, axis: str | tuple | None = None):
     """Traced SCALAR bool: True iff EVERY array leaf of ``state`` is finite.
 
     The M2b in-graph blowup guard: inside a ``shard_map`` pass ``axis`` (the
-    mesh axis name) so the per-band non-finite presence is ``psum``-reduced —
+    mesh axis name, or a TUPLE of axis names for the 2-D ``("lat", "lon")``
+    tile mesh) so the per-band non-finite presence is ``psum``-reduced —
     every device then returns the SAME replicated scalar (safe for
     ``out_specs=P()``), and the host reads ONE scalar per segment instead of
     gathering + host-syncing the full state.  Covers ALL state leaves (u,
@@ -890,3 +891,431 @@ def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
         if on_segment is not None:
             on_segment(hs_out, done)
     return gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh), status
+
+
+# ==============================================================================
+# M3a — native 2-D ("lat", "lon") tiling for the atmosphere SPMD step
+# ==============================================================================
+# The 1-D lat-band decomposition's halo perimeter is the CONSTANT n_lon per
+# cut (independent of the device count) — the term that caps band scaling.
+# The 2-D tiling shards latitude AND longitude: lat stays the pole-terminated
+# line (ppermute at cuts, the serial 180-deg fold at the pole tiles), lon
+# becomes a periodic ring (cyclic ppermute — the wrap IS the roll
+# permutation).  Staggered ownership mirrors the 1-D v convention:
+#
+#   * v (n_lat+1 rows)   -> v_lower = v[:n_lat]; each tile's north boundary
+#     face is the lat-neighbour's v_lower[0] (reconstruct_vface_lower).
+#   * u (n_lon+1 columns) -> u_left = u[:, :n_lon]; each tile's east seam
+#     face is the lon-neighbour's u_left[:, 0] (reconstruct_uface_left) —
+#     the +1 seam column is OWNED by the tile whose slice starts there and
+#     reconstructed on the periodic wrap (u[:, n_lon] == u[:, 0] identity).
+#
+# The step body is the SAME un-jitted ``model._step_cgrid_impl`` the band
+# path runs: all lon-direction neighbour access inside the operators already
+# routes through the backend-dispatched ``pad_lon_cgrid`` / ``pad_halo_latlon*``
+# (which this lane arms with the 2-D mesh), so no operator numerics are
+# duplicated here.  Corner (diagonal) dependencies compose through the
+# sequential lat-then-lon exchanges inside ``make_latlon_2d_pad_body``; the
+# C-grid chain has no explicit-diagonal stencil (vertex circulations combine
+# lat-padded u with lon-padded v).
+#
+# The 1-D band lane above is UNTOUCHED and remains the default production
+# path (choose_latlon_2d_topology returns (N, 1) in the latency-dominated
+# low-rank regime; the (N, 1) 2-D mesh degenerates bit-identically anyway).
+
+
+def tile_spec(arr) -> P:
+    """``P("lat", "lon", None, ...)`` for an array tiled on its two leading
+    (lat, lon) axes — the 2-D twin of :func:`lat_spec`."""
+    return P("lat", "lon", *((None,) * (arr.ndim - 2)))
+
+
+def shard_state_atm_latlon_2d(
+    state: CGridLatLonHydrostaticState, mesh,
+) -> CGridLatLonHydrostaticState:
+    """Lay out a C-grid hydrostatic atm state for the 2-D ("lat", "lon")
+    tile shard_map.
+
+    Cell leaves (``T, p_s, phis`` + every tracer) tile ``P("lat", "lon",
+    ...)`` directly.  The staggered ``v`` (leading dim ``n_lat+1``) drops its
+    north pole-wall face -> ``v_lower = v[:n_lat]`` exactly as the 1-D layout
+    (:func:`shard_state_atm_latlon`).  The staggered ``u`` (lon dim
+    ``n_lon+1``) drops its east periodic-seam column -> ``u_left =
+    u[:, :n_lon]``; the dropped column is the periodic closure
+    (``u[:, n_lon] == u[:, 0]`` — the identity ``interp_cell_to_uface``
+    constructs and every C-grid tendency preserves) and is reconstructed
+    inside the body from the east neighbour via the lon ring.
+    """
+    def _put(arr):
+        return jax.device_put(arr, NamedSharding(mesh, tile_spec(arr)))
+
+    n_lat, n_lon = state.T.shape[0], state.T.shape[1]
+    return state._replace(
+        u=_put(state.u[:, :n_lon]),
+        v=_put(state.v[:n_lat]),
+        T=_put(state.T),
+        p_s=_put(state.p_s),
+        phis=_put(state.phis),
+        tracers={k: _put(val) for k, val in state.tracers.items()},
+    )
+
+
+def gather_state_atm_latlon_2d(
+    state: CGridLatLonHydrostaticState, mesh,
+) -> CGridLatLonHydrostaticState:
+    """Inverse of :func:`shard_state_atm_latlon_2d`: replicate every leaf,
+    re-append the zero north pole-wall v face and the periodic u seam column
+    (``u[:, n_lon] = u[:, 0]``).  Bit-comparable to the single-device state,
+    whose top v-face is the pole wall (== 0) and whose last u column is the
+    periodic closure (== column 0)."""
+    from legoesm.parallel.latlon_spmd import replicate_leaf
+
+    rep = NamedSharding(mesh, P())
+    _mp = jax.process_count() > 1
+
+    def _get(arr):
+        return replicate_leaf(arr, rep, multiprocess=_mp)
+
+    v_lower = _get(state.v)
+    v_full = jnp.concatenate([v_lower, jnp.zeros_like(v_lower[:1])], axis=0)
+    u_left = _get(state.u)
+    u_full = jnp.concatenate([u_left, u_left[:, 0:1]], axis=1)
+    return state._replace(
+        u=u_full,
+        v=v_full,
+        T=_get(state.T),
+        p_s=_get(state.p_s),
+        phis=_get(state.phis),
+        tracers={k: _get(val) for k, val in state.tracers.items()},
+    )
+
+
+def build_tile_grids_atm_2d(grid, p_lat: int, p_lon: int):
+    """Build the ``p_lat x p_lon`` UNIFORM tile ``LatLonGrid`` geometries via
+    the tested 2-D MPI slicer (no bespoke metric re-derivation) — the 2-D
+    twin of :func:`build_band_grids_atm`.
+
+    Returns a ``[p_lat][p_lon]`` nested list (row r = lat band, col c = lon
+    sector).  ``skip_total_area_reduce=True`` keeps ``total_area`` the GLOBAL
+    full-sphere sum on EVERY tile (the mass-fixer denominator stays global).
+    Requires ``n_lat % p_lat == 0`` and ``n_lon % p_lon == 0`` (uniform tiles
+    -> one shard_map program) and at least 2 cells per SPLIT dimension per
+    tile (the widest production halo — the PPM ``halo=2`` exchange — moves
+    edge blocks of that depth in one ppermute hop).
+    """
+    from legoesm.parallel.latlon_mpi import (
+        make_latlon_2d_layout, slice_latlon_grid_to_block_2d)
+    n_lat, n_lon = int(grid.n_lat), int(grid.n_lon)
+    if p_lat < 1 or p_lon < 1:
+        raise ValueError(
+            f"p_lat/p_lon must be >= 1, got ({p_lat}, {p_lon})")
+    if n_lat % p_lat != 0 or n_lon % p_lon != 0:
+        raise ValueError(
+            f"atm 2-D SPMD tiling requires n_lat ({n_lat}) % p_lat "
+            f"({p_lat}) == 0 and n_lon ({n_lon}) % p_lon ({p_lon}) == 0 so "
+            f"every tile is uniform (one shard_map program).")
+    nl, w = n_lat // p_lat, n_lon // p_lon
+    if (p_lat > 1 and nl < 2) or (p_lon > 1 and w < 2):
+        raise ValueError(
+            f"atm 2-D SPMD tiling: tiles must keep >= 2 cells per split "
+            f"dimension (PPM halo=2 single-hop exchange); got "
+            f"{nl}x{w} tiles from ({p_lat}, {p_lon}) on {n_lat}x{n_lon}.")
+    fold = getattr(grid, "fold", None)
+    return [
+        [
+            slice_latlon_grid_to_block_2d(
+                grid,
+                make_latlon_2d_layout(
+                    r * p_lon + c, p_lat, p_lon, n_lat, n_lon, fold),
+                skip_total_area_reduce=True)
+            for c in range(p_lon)
+        ]
+        for r in range(p_lat)
+    ]
+
+
+def _build_geometry_stacks_2d(model, mesh, p_lat: int, p_lon: int,
+                              shard_geometry: bool):
+    """Stack every tile's ``LatLonGrid`` array fields (+ the optional
+    polar-filter masks at ``p_lon == 1``) over LEADING ``(p_lat, p_lon)``
+    tile axes and lay them out on ``mesh`` — the 2-D twin of
+    :func:`_build_geometry_stacks`.
+
+    ``shard_geometry=True``: stacks are sharded ``P("lat", "lon", ...)`` on
+    the tile axes — each device holds ONLY its own tile's slice (leading
+    extents ``(1, 1)`` inside the body, static index ``[0, 0]``).
+    ``shard_geometry=False``: replicated (``P()``) stacks, indexed at
+    ``(axis_index("lat"), axis_index("lon"))``.  Same tile VALUES either way.
+
+    Returns ``(template, array_field_names, stacks, stacks_spec)``.
+    """
+    grid = model.grid
+    tile_grids = build_tile_grids_atm_2d(grid, p_lat, p_lon)
+    template = tile_grids[0][0]
+    array_field_names = atm_grid_array_field_names(template)
+    raw = {
+        name: jnp.stack([
+            jnp.stack([jnp.asarray(getattr(tile_grids[r][c], name))
+                       for c in range(p_lon)], axis=0)
+            for r in range(p_lat)
+        ], axis=0)
+        for name in array_field_names
+    }
+    # Per-tile polar-filter masks: p_lon > 1 is refused by the factories
+    # (the filter rfft's the full lon circle); at p_lon == 1 the stacks
+    # mirror the band layout with a singleton lon-tile axis.
+    nl = int(grid.n_lat) // p_lat
+    if model._polar_mask is not None:
+        if p_lon > 1:
+            raise NotImplementedError(
+                "atm 2-D SPMD tiling: use_polar_filter=True with p_lon > 1 "
+                "is not wired — the polar filter FFTs the full longitude "
+                "circle (needs a lon-gather FFT).  Use p_lon == 1 or "
+                "disable the filter.")
+        raw["__polar_mask"] = jnp.stack(
+            [model._polar_mask[r * nl:(r + 1) * nl] for r in range(p_lat)],
+            axis=0)[:, None]
+        raw["__polar_mask_v"] = jnp.stack(
+            [model._polar_mask_v[r * nl:r * nl + nl + 1]
+             for r in range(p_lat)],
+            axis=0)[:, None]
+    spec_of = tile_spec if shard_geometry else (lambda _arr: P())
+    stacks = {
+        name: jax.device_put(arr, NamedSharding(mesh, spec_of(arr)))
+        for name, arr in raw.items()
+    }
+    stacks_spec = {name: spec_of(arr) for name, arr in raw.items()}
+    return template, array_field_names, stacks, stacks_spec
+
+
+def _make_tile_step_body_2d(model, template, array_field_names,
+                            perm_north, p_lon: int, physics_fn,
+                            shard_geometry: bool):
+    """One tile's un-jitted C-grid step body — the 2-D twin of
+    :func:`_make_band_step_body`, shared by the per-step and segment 2-D
+    factories so the tile numerics are written ONCE.
+
+    Returns ``tile_step(state_local, stacks_local, dt, ps_local) ->
+    (state_out_local, ps_out)`` operating on the tile-local
+    ``(u_left, v_lower)`` layout: reconstruct the tile's ``nl+1`` v-faces
+    (lat ppermute) AND ``w+1`` u-faces (lon ring ppermute), run the un-jitted
+    band/tile step on the tile geometry, convert both staggers back.
+    """
+    from legoesm.parallel.latlon_spmd import (
+        reconstruct_uface_left, reconstruct_vface_lower,
+        spmd_pole_end_masks, to_uface_left, to_vface_lower)
+
+    def tile_step(state_local, stacks_local, dt, ps_local):
+        if shard_geometry:
+            gi, gj = 0, 0
+        else:
+            gi = jax.lax.axis_index("lat")
+            gj = jax.lax.axis_index("lon")
+        tile_geom = template._replace(
+            **{name: stacks_local[name][gi, gj]
+               for name in array_field_names})
+        pmask = (stacks_local["__polar_mask"][gi, gj]
+                 if "__polar_mask" in stacks_local else None)
+        pmaskv = (stacks_local["__polar_mask_v"][gi, gj]
+                  if "__polar_mask_v" in stacks_local else None)
+        # Reconstruct the tile's nl+1 v-faces (shared interface row via the
+        # lat ppermute) and w+1 u-faces (periodic seam column via the lon
+        # ring), run the un-jitted step, convert both staggers back.
+        v_full = reconstruct_vface_lower(state_local.v, "lat", perm_north)
+        u_full = reconstruct_uface_left(state_local.u, "lon", p_lon)
+        state_tile = state_local._replace(u=u_full, v=v_full)
+        out, ps_out = model._step_cgrid_impl(
+            state_tile, dt,
+            physics_fn=physics_fn, phys_state=ps_local,
+            grid=tile_geom, sigma_coord=model.sigma_coord,
+            polar_mask=pmask, polar_mask_v=pmaskv,
+            pole_v_bc_masks=spmd_pole_end_masks(),
+        )
+        return (out._replace(u=to_uface_left(out.u),
+                             v=to_vface_lower(out.v)), ps_out)
+
+    return tile_step
+
+
+def _check_2d_mesh(mesh) -> tuple[int, int]:
+    """Validate the 2-D tile mesh axes and return ``(p_lat, p_lon)``."""
+    names = tuple(mesh.axis_names)
+    if names != ("lat", "lon"):
+        raise ValueError(
+            f"atm 2-D SPMD tiling: mesh axes must be ('lat', 'lon'); got "
+            f"{names}.  Build it as Mesh(devices.reshape(p_lat, p_lon), "
+            f"axis_names=('lat', 'lon')) — choose_latlon_2d_topology picks "
+            f"(p_lat, p_lon).")
+    return int(mesh.shape["lat"]), int(mesh.shape["lon"])
+
+
+def _refuse_unsupported_spmd_config_2d(model, p_lon: int) -> None:
+    """2-D-specific dispatch-hardening on top of the shared band refusals."""
+    _refuse_unsupported_spmd_config(model)
+    if p_lon > 1 and bool(getattr(model.config, "use_polar_filter", False)):
+        raise NotImplementedError(
+            "atm 2-D SPMD tiling: use_polar_filter=True with p_lon > 1 is "
+            "not wired — the polar filter FFTs the full longitude circle "
+            "(needs a lon-gather FFT, mirroring the make_latlon_2d_mpi_step "
+            "refusal).  Use p_lon == 1 or disable the filter.")
+
+
+def make_sharded_atm_latlon_step_2d(model, mesh, physics_fn=None, *,
+                                    shard_geometry: bool = True):
+    """Return ``step(c_state, dt) -> c_state`` running the C-grid hydrostatic
+    atm step 2-D-tile-SPMD over a ``("lat", "lon")`` mesh — the M3a native
+    2-D tiling twin of :func:`make_sharded_atm_latlon_step`.
+
+    ``c_state`` is a ``CGridLatLonHydrostaticState`` laid out with
+    :func:`shard_state_atm_latlon_2d` (``v`` as ``v_lower``, ``u`` as
+    ``u_left``).  The body reconstructs each tile's staggered faces (v via
+    the lat ppermute, u via the periodic lon ring), runs the UN-jitted
+    ``model._step_cgrid_impl`` on the tile geometry + per-tile pole masks,
+    and converts both staggers back.  Halos: the armed 2-D SPMD backend
+    routes ``pad_halo_latlon*`` through ``make_latlon_2d_pad_body`` (lat
+    ppermute + lon ring + the EXACT serial 180-deg pole fold via a lon-ring
+    all_gather at the pole tiles), ``pad_with_pole_bc_lat`` through the
+    lat-only wall body, and ``pad_lon_cgrid`` through the lon ring — all
+    shared machinery, no operator numerics duplicated.  Global reductions
+    (the mass fixer's ``batch_global_area_sums``) psum over BOTH mesh axes.
+
+    A degenerate ``(N, 1)`` mesh is bit-identical to the 1-D band step
+    (every lon-ring op takes its static local branch; gated by
+    ``tests/parallel/test_atm_latlon_2d_tiling.py``).  The 1-D band factory
+    remains the default production lane.
+
+    ``physics_fn``: STATELESS column-local closures only (Held-Suarez etc.),
+    evaluated per RK stage on the TILE geometry — decomposition-invariant
+    with no collectives.  A stateful ``PhysicsState`` carry is REFUSED: its
+    ``(ncol, ...)`` leaves flatten lat-major over the GLOBAL grid, so a
+    contiguous dim-0 shard is a lat BAND's columns, not a 2-D tile's —
+    thread carries through the 1-D :func:`make_sharded_atm_latlon_step`.
+
+    ``shard_geometry=True`` (default — new API, no historical layout):
+    per-device tile geometry slices (``P("lat", "lon")`` stacks);
+    ``False`` replicates the all-tile stacks (indexed at the axis indices).
+    Same tile values either way (bit-identical numerics).
+    """
+    from legoesm.parallel.latlon_spmd import latlon_band_perms
+    from legoesm.parallel.shard_map_compat import shard_map
+    from legoesm.timestepping.integration import (
+        refuse_unthreaded_stateful_physics)
+
+    if mesh is None:                       # single-device: plain C-grid step
+        return make_sharded_atm_latlon_step(model, None,
+                                            physics_fn=physics_fn)
+
+    p_lat, p_lon = _check_2d_mesh(mesh)
+    _refuse_unsupported_spmd_config_2d(model, p_lon)
+
+    template, array_field_names, stacks, stacks_spec = (
+        _build_geometry_stacks_2d(model, mesh, p_lat, p_lon, shard_geometry))
+    perm_north, _perm_south = latlon_band_perms(p_lat)
+    tile_step = _make_tile_step_body_2d(
+        model, template, array_field_names, perm_north, p_lon, physics_fn,
+        shard_geometry)
+
+    def _body(state_local, stacks_local, dt):
+        out, _ = tile_step(state_local, stacks_local, dt, None)
+        return out
+
+    _cache = {}
+
+    def sharded_step(c_state, dt, phys_state=None):
+        refuse_unthreaded_stateful_physics(
+            physics_fn, phys_state, where="atm lat-lon 2-D SPMD step")
+        if phys_state is not None:
+            raise NotImplementedError(
+                "make_sharded_atm_latlon_step_2d: a stateful PhysicsState "
+                "carry is not 2-D-tile-routed (its (ncol, ...) leaves "
+                "flatten lat-major over the GLOBAL grid — a contiguous "
+                "dim-0 shard is a lat band, not a 2-D tile).  Thread the "
+                "carry through the 1-D make_sharded_atm_latlon_step.")
+        key = jax.tree.structure(c_state)
+        fn = _cache.get(key)
+        if fn is None:
+            in_spec = jax.tree.map(tile_spec, c_state)
+            fn = jax.jit(shard_map(
+                _body, mesh=mesh, in_specs=(in_spec, stacks_spec, P()),
+                out_specs=in_spec, check_vma=False))
+            _cache[key] = fn
+        with _latlon_spmd_armed(mesh):
+            return fn(c_state, stacks, jnp.asarray(dt))
+
+    sharded_step._geom_stacks = stacks   # test/introspection only
+    return sharded_step
+
+
+def make_sharded_atm_latlon_segment_2d(model, mesh, n_steps: int,
+                                       physics_fn=None, *,
+                                       shard_geometry: bool = True):
+    """Return ``segment(c_state, dt) -> (c_state, all_finite)`` advancing
+    ``n_steps`` C-grid steps in ONE compiled ``lax.scan`` over the 2-D
+    ``("lat", "lon")`` tile mesh — the M3a twin of
+    :func:`make_sharded_atm_latlon_segment` (same contract: static
+    ``n_steps``, replicated in-graph finite scalar psum'd over BOTH mesh
+    axes, leading steps unrolled to the scan-carry dtype fixed point via
+    :func:`_unroll_to_dtype_fixed_point`, STATELESS physics only,
+    ``mesh=None`` -> the single-device compiled twin)."""
+    from legoesm.parallel.latlon_spmd import latlon_band_perms
+    from legoesm.parallel.shard_map_compat import shard_map
+    from legoesm.timestepping.integration import (
+        refuse_unthreaded_stateful_physics)
+
+    if int(n_steps) < 1:
+        raise ValueError(f"n_steps must be >= 1, got {n_steps}")
+    n_steps = int(n_steps)
+
+    if mesh is None:                       # single-device compiled segment
+        return make_sharded_atm_latlon_segment(model, None, n_steps,
+                                               physics_fn=physics_fn)
+
+    p_lat, p_lon = _check_2d_mesh(mesh)
+    _refuse_unsupported_spmd_config_2d(model, p_lon)
+
+    def _refuse_carry(phys_state):
+        refuse_unthreaded_stateful_physics(
+            physics_fn, phys_state, where="atm lat-lon 2-D compiled segment")
+        if phys_state is not None:
+            raise NotImplementedError(
+                "make_sharded_atm_latlon_segment_2d: a stateful PhysicsState "
+                "carry is not 2-D-tile-routed — use the 1-D per-step "
+                "make_sharded_atm_latlon_step(phys_state=...) path.")
+
+    template, array_field_names, stacks, stacks_spec = (
+        _build_geometry_stacks_2d(model, mesh, p_lat, p_lon, shard_geometry))
+    perm_north, _perm_south = latlon_band_perms(p_lat)
+    tile_step = _make_tile_step_body_2d(
+        model, template, array_field_names, perm_north, p_lon, physics_fn,
+        shard_geometry)
+
+    def _seg_body(state_local, stacks_local, dt):
+        def _step1(s):
+            out, _ps = tile_step(s, stacks_local, dt, None)
+            return out
+        # Unroll to the scan-carry dtype fixed point (helper docstring).
+        out, n_left = _unroll_to_dtype_fixed_point(
+            _step1, state_local, n_steps)
+        if n_left > 0:
+            out, _ = jax.lax.scan(lambda s, _x: (_step1(s), None),
+                                  out, xs=None, length=n_left)
+        return out, state_finite_scalar(out, axis=("lat", "lon"))
+
+    _cache = {}
+
+    def segment(c_state, dt, phys_state=None):
+        _refuse_carry(phys_state)
+        key = jax.tree.structure(c_state)
+        fn = _cache.get(key)
+        if fn is None:
+            in_spec = jax.tree.map(tile_spec, c_state)
+            fn = jax.jit(shard_map(
+                _seg_body, mesh=mesh,
+                in_specs=(in_spec, stacks_spec, P()),
+                out_specs=(in_spec, P()), check_vma=False))
+            _cache[key] = fn
+        with _latlon_spmd_armed(mesh):
+            return fn(c_state, stacks, jnp.asarray(dt))
+
+    segment._geom_stacks = stacks   # test/introspection only
+    return segment
