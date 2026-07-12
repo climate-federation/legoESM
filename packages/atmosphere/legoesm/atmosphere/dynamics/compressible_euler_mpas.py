@@ -242,8 +242,15 @@ def mpas_compressible_euler_slow_tendencies(
     # ``divergence_cell_3d`` call per RHS evaluation.  Same exploit as
     # Loop 156 for the prescribed-wind tracer transport.
     n_edges_d, nlev_d = u_3d.shape
+    # Terrain-following z* (J = dz/dz*, horizontally varying): continuity
+    # is conservative in the pseudo-density J·ρ (docstring eq:
+    # dρ'/dt = -(1/J)[div_h(J ρ v_h) + ∂(ρ w)/∂z*]).  J is averaged
+    # cell→edge exactly like ρ (2-pt cellsOnEdge mean, mirroring
+    # ``cell_to_edge_avg_3d``); J ≡ 1 (flat terrain) is bit-identical.
+    J_edge = 0.5 * (J[c1] + J[c2])  # (nEdges,)
     _div_inputs = jnp.stack(
-        [rho_e_3d * u_3d, u_3d * theta_e_3d, u_3d, u_3d * w_e_3d], axis=-1,
+        [J_edge[:, None] * rho_e_3d * u_3d, u_3d * theta_e_3d, u_3d,
+         u_3d * w_e_3d], axis=-1,
     )  # (nEdges, nlev, 4)
     _div_inputs_flat = _div_inputs.reshape(n_edges_d, nlev_d * 4)
     if config.K_h > 0:
@@ -268,13 +275,17 @@ def mpas_compressible_euler_slow_tendencies(
     # Horizontal theta advection (advective form): -(div(u·θ) - θ · div(u)).
     dtheta_p_dt = -(div_u_theta_3d - theta_total * div_u_3d)
 
-    # Horizontal continuity: drho'/dt = -div_h(rho * v)
-    drho_p_dt = -div_rho_v_3d
+    # Horizontal continuity in z*: drho'/dt = -(1/J) div_h(J rho v).
+    # The vertical leg carries its 1/J in ``mpas_acoustic_substeps``;
+    # both legs now apply the metric consistently (net outflow of the
+    # J-weighted flux lowers rho — sign per divergence_cell_3d > 0 for
+    # outflow).
+    drho_p_dt = -div_rho_v_3d / J[:, None]
 
     # --- 2. Vertical advection of u ---
     # Interpolate w from cells to edges, then apply vertical advection
+    # (``J_edge`` hoisted above the continuity flux batch).
     w_edge = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1)
-    J_edge = 0.5 * (J[c1] + J[c2])  # (nEdges,)
     du_dt_3d = du_dt_3d + _vertical_advection_height_1d(
         u_3d, w_edge, dz, dz_half, J_edge,
     )
