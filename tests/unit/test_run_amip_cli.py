@@ -2008,8 +2008,8 @@ def test_diagnostic_condensate_scheme_validate_strict():
     rejects the adiabatic opt-in on a backend that would silently ignore it."""
     from legoesm.driver.config import DycoreConfig, ExperimentConfig
     for ok in ("constant", "adiabatic"):
-        # default dycore is cd-grid (the wired FV radiation path) => OK
-        ExperimentConfig(cloud_scheme="sundqvist",
+        # default dycore is cd-grid + rrtmgp cloud-path radiation => OK
+        ExperimentConfig(cloud_scheme="sundqvist", radiation="rrtmgp",
                          cloud_diagnostic_condensate_scheme=ok).validate_strict()
     with pytest.raises(ValueError, match="cloud_diagnostic_condensate_scheme"):
         ExperimentConfig(
@@ -2020,9 +2020,9 @@ def test_diagnostic_condensate_scheme_validate_strict():
     # constant floor there (codex dispatch-hardening).  (validate_strict joins
     # all errors, so the match just needs our substring.)
     for bad_disc in ("spectral", "mpas"):
-        with pytest.raises(ValueError, match="cd-grid physics pipeline"):
+        with pytest.raises(ValueError, match="bypassing the shared cloud pipeline"):
             ExperimentConfig(
-                cloud_scheme="sundqvist",
+                cloud_scheme="sundqvist", radiation="rrtmgp",
                 cloud_diagnostic_condensate_scheme="adiabatic",
                 dycore=DycoreConfig(discretization=bad_disc)).validate_strict()
     # A cd-grid ALIAS ('centered' / 'finite_volume') DOES thread the floor via
@@ -2031,9 +2031,20 @@ def test_diagnostic_condensate_scheme_validate_strict():
     for ok_disc in ("centered", "finite_volume"):
         try:
             ExperimentConfig(
-                cloud_scheme="sundqvist",
+                cloud_scheme="sundqvist", radiation="rrtmgp",
                 cloud_diagnostic_condensate_scheme="adiabatic",
                 dycore=DycoreConfig(discretization=ok_disc)).validate_strict()
         except ValueError as exc:  # unrelated dycore validation may still raise
-            assert "cd-grid physics pipeline" not in str(exc), (
+            assert "bypassing the shared cloud pipeline" not in str(exc), (
                 f"adiabatic must not be guard-blocked on cd-grid alias {ok_disc!r}")
+    # Cross-field: adiabatic is a silent no-op without a diagnostic-fraction
+    # cloud scheme (sundqvist/xu_randall) AND cloud-path radiation (rrtmgp/rrtmg),
+    # so those combinations are HARD errors (codex dispatch-hardening).
+    with pytest.raises(ValueError, match="would ignore it"):
+        ExperimentConfig(
+            cloud_scheme="none",
+            cloud_diagnostic_condensate_scheme="adiabatic").validate_strict()
+    with pytest.raises(ValueError, match="cloud-path radiation"):
+        ExperimentConfig(
+            cloud_scheme="sundqvist", radiation="gray",
+            cloud_diagnostic_condensate_scheme="adiabatic").validate_strict()

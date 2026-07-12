@@ -1111,14 +1111,15 @@ class ExperimentConfig(NamedTuple):
                 f"{_valid_diag_condensate}, "
                 f"got {self.cloud_diagnostic_condensate_scheme!r}"
             )
-        # The adiabatic in-cloud floor reaches radiation ONLY through the FV
-        # cd-grid physics pipeline (build_physics_pipeline -> build_cloud_config).
-        # The cd-grid family (cdgrid / its aliases 'centered', 'finite_volume')
-        # and latlon_cgrid all go through that pipeline and DO thread it; MPAS and
-        # spectral build RadiationConfig directly and would SILENTLY fall back to
-        # the constant floor.  Reject the opt-in on ONLY the genuinely-bypassing
-        # backends (dispatch-hardening — a silent no-op is a hard error), so a
-        # cd-grid alias is not a false-positive block (codex/review).
+        # The adiabatic in-cloud floor reaches radiation through the SHARED
+        # physics pipeline (build_physics_pipeline -> build_cloud_config), which
+        # serves the cd-grid family (cdgrid + aliases 'centered'/'finite_volume'),
+        # latlon_cgrid, and the ML backends — all of which DO thread it.  Only
+        # MPAS and spectral build RadiationConfig directly, bypassing the pipeline,
+        # and would SILENTLY fall back to the constant floor.  Reject the opt-in on
+        # ONLY those genuinely-bypassing backends (dispatch-hardening — a silent
+        # no-op is a hard error), so a cd-grid alias is not falsely blocked
+        # (codex/review).
         _NO_CLOUD_THREAD_DISCRETIZATIONS = ("mpas", "spectral")
         if (self.cloud_diagnostic_condensate_scheme != "constant"
                 and self.dycore.discretization
@@ -1126,10 +1127,32 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "cloud_diagnostic_condensate_scheme="
                 f"{self.cloud_diagnostic_condensate_scheme!r} is not wired into "
-                f"the {self.dycore.discretization!r} radiation path (only the FV "
-                "cd-grid physics pipeline threads it); it would silently run "
-                "'constant'.  Use a cd-grid discretization or scheme='constant'."
+                f"the {self.dycore.discretization!r} radiation path (that backend "
+                "builds RadiationConfig directly, bypassing the shared cloud "
+                "pipeline); it would silently run 'constant'.  Use a "
+                "pipeline backend (cd-grid / latlon) or scheme='constant'."
             )
+        # Cross-field: the diagnostic-condensate FLOOR exists only for the
+        # sub-grid diagnostic-fraction schemes (sundqvist / xu_randall); 'none'
+        # skips clouds and 'resolved' (CRM) excludes the floor.  It is radiatively
+        # active only when radiation consumes cloud paths (rrtmgp / rrtmg); 'none'
+        # and 'gray' ignore them.  Reject 'adiabatic' in combinations where it
+        # would be a silent no-op (dispatch-hardening).
+        if self.cloud_diagnostic_condensate_scheme != "constant":
+            if self.cloud_scheme not in ("sundqvist", "xu_randall"):
+                errors.append(
+                    "cloud_diagnostic_condensate_scheme="
+                    f"{self.cloud_diagnostic_condensate_scheme!r} only affects the "
+                    f"sundqvist/xu_randall diagnostic floor; cloud_scheme="
+                    f"{self.cloud_scheme!r} would ignore it."
+                )
+            if self.radiation not in ("rrtmgp", "rrtmg"):
+                errors.append(
+                    "cloud_diagnostic_condensate_scheme="
+                    f"{self.cloud_diagnostic_condensate_scheme!r} needs a "
+                    f"cloud-path radiation (rrtmgp/rrtmg); radiation="
+                    f"{self.radiation!r} ignores cloud paths."
+                )
         if self.microphysics not in VALID_MICROPHYSICS:
             errors.append(
                 f"microphysics must be one of {VALID_MICROPHYSICS}, "

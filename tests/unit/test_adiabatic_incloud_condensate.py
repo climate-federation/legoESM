@@ -102,34 +102,39 @@ def test_helper_monotone_in_cloudy_depth():
     assert float(q_ad[-1]) == pytest.approx(expect_base, rel=1e-6)
 
 
-def test_adiabatic_gated_to_warm_clouds():
-    """Cold (ice / mixed-phase) cells keep the CONSTANT floor, not the liquid
-    adiabatic gradient — so cirrus is not dimmed with a marine-Sc liquid rate and
-    then repartitioned to ice (codex review)."""
-    cfg = CloudConfig(scheme="sundqvist", diagnostic_condensate_scheme="adiabatic")
-    cf, dp, T_warm, p_full = _column([1.0] * NLEV)
-    T_cold = jnp.full_like(T_warm, 250.0)  # below T_freeze => ice regime
-    q_cold = _adiabatic_incloud_condensate(cf, dp, T_cold, p_full, cfg)
-    # Every cold cloudy cell reverts EXACTLY to the calibrated constant floor.
-    assert float(jnp.max(jnp.abs(q_cold - cfg.q_c_diagnostic))) == 0.0
-    # Sanity: the SAME column when warm is dimmed somewhere (gate is doing work).
-    q_warm = _adiabatic_incloud_condensate(cf, dp, T_warm, p_full, cfg)
-    assert float(jnp.min(q_warm)) < cfg.q_c_diagnostic
+def test_adiabatic_phase_aware_ice_keeps_constant_floor():
+    """PHASE applied exactly ONCE (codex High): the adiabatic floor dims LIQUID
+    cloud but ICE keeps the calibrated constant floor — the liquid gradient never
+    leaks into IWP.  Verified at the compute_cloud_properties level (where phase
+    is applied), since the helper now returns the liquid value only."""
+    mask = [False] * (NLEV - 6) + [True] * 6   # a low-ish deck
+    # COLD (T < T_ice_only => f_ice = 1): adiabatic IWP must EQUAL constant IWP
+    # (ice unaffected by the liquid gradient) and no spurious liquid appears.
+    ad_cold, _ = _sundqvist_column_props("adiabatic", mask, T_val=220.0)
+    c_cold, _ = _sundqvist_column_props("constant", mask, T_val=220.0)
+    assert float(jnp.max(jnp.abs(ad_cold.iwp - c_cold.iwp))) == 0.0
+    assert float(jnp.max(jnp.abs(ad_cold.lwp - c_cold.lwp))) == 0.0
+    # WARM (f_ice = 0): adiabatic DIMS the liquid path vs constant; ice stays 0.
+    ad_warm, _ = _sundqvist_column_props("adiabatic", mask, T_val=285.0)
+    c_warm, _ = _sundqvist_column_props("constant", mask, T_val=285.0)
+    assert float(jnp.sum(ad_warm.lwp)) < float(jnp.sum(c_warm.lwp))
+    assert float(jnp.max(ad_warm.iwp)) == 0.0
 
 
-def _sundqvist_column_props(scheme, mask_high_rh):
+def _sundqvist_column_props(scheme, mask_high_rh, T_val=285.0):
     """Run compute_cloud_properties on a column with a prescribed cloudy layer.
 
     Builds q_v to make the requested levels near-saturated (cf>0 via Sundqvist)
     and the rest dry, then returns the CloudProperties for the given diagnostic
-    condensate scheme.
+    condensate scheme.  ``T_val`` sets the (uniform) column temperature so the
+    phase split can be exercised (285 K = liquid, 220 K = ice).
     """
     from legoesm.thermo import saturation_mixing_ratio
 
     p_half = jnp.linspace(2.0e3, 1.0e5, NLEV + 1)
     p_full = 0.5 * (p_half[:-1] + p_half[1:])[None, :]
     dp = (p_half[1:] - p_half[:-1])[None, :]
-    T = jnp.full((1, NLEV), 285.0)
+    T = jnp.full((1, NLEV), T_val)
     q_sat = saturation_mixing_ratio(T, p_full)
     rh = jnp.where(jnp.asarray(mask_high_rh)[None, :], 0.995, 0.2)
     q_v = rh * q_sat
@@ -153,6 +158,16 @@ def test_constant_scheme_byte_identical_to_legacy_floor():
                                       CloudConfig(scheme="sundqvist"))
     assert float(jnp.max(jnp.abs(const.lwp - legacy.lwp))) == 0.0
     assert float(jnp.max(jnp.abs(const.iwp - legacy.iwp))) == 0.0
+    # Non-circular CLOSED-FORM check (independent of the diagnostic-condensate
+    # branch): for this warm (f_ice=0) column with no convective cloud the
+    # constant floor's LWP is EXACTLY cf * q_c_diagnostic * dp/g, cf the Sundqvist
+    # fraction — so a future change to the floor ARITHMETIC would be caught.
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+        sundqvist_cloud_fraction)
+    cf_ref = sundqvist_cloud_fraction(
+        q_v / jnp.maximum(q_sat, 1.0e-10), CloudConfig(scheme="sundqvist"))
+    ref_lwp = cf_ref * CloudConfig().q_c_diagnostic * dp / constants.g
+    assert jnp.allclose(const.lwp, ref_lwp, rtol=1e-6, atol=1e-12)
 
 
 def test_adiabatic_dims_thin_low_cloud_not_deep():
@@ -181,6 +196,87 @@ def test_adiabatic_dims_thin_low_cloud_not_deep():
     assert deep_lwp_a > 0.9 * deep_lwp_c
     # The dimming is RELATIVELY stronger for the thin cloud than the deep one.
     assert (thin_lwp_a / thin_lwp_c) < (deep_lwp_a / deep_lwp_c)
+
+
+def test_helper_jit_grad_and_fp32_safe():
+    """The helper compiles under jit, matches eager, is finite in fp32, and is
+    differentiable wrt the tunable rate (forward radiation + future training)."""
+    cfg = CloudConfig(scheme="sundqvist", diagnostic_condensate_scheme="adiabatic")
+    cf, dp, T, p_full = _column([0.0] * (NLEV - 4) + [1.0, 1.0, 0.0, 1.0])
+    eager = _adiabatic_incloud_condensate(cf, dp, T, p_full, cfg)
+    jitted = jax.jit(
+        lambda a, b, c, d: _adiabatic_incloud_condensate(a, b, c, d, cfg)
+    )(cf, dp, T, p_full)
+    assert jnp.allclose(eager, jitted)
+    assert bool(jnp.all(jnp.isfinite(jitted)))
+    # fp32 under JIT (not just eager): finite, no dtype blowup.
+    j32 = jax.jit(
+        lambda a, b, c, d: _adiabatic_incloud_condensate(a, b, c, d, cfg)
+    )(cf.astype(jnp.float32), dp.astype(jnp.float32),
+      T.astype(jnp.float32), p_full.astype(jnp.float32))
+    assert bool(jnp.all(jnp.isfinite(j32)))
+    # Differentiable wrt the tunable rate AND wrt the inputs — the gradient must
+    # traverse sigmoid -> reverse -> cumsum -> minimum, not just the linear rate.
+    def _loss_rate(rate):
+        return jnp.sum(_adiabatic_incloud_condensate(
+            cf, dp, T, p_full, cfg._replace(adiabatic_lwc_rate=rate)))
+    assert bool(jnp.isfinite(jax.grad(_loss_rate)(1.5e-6)))
+    for i, x in enumerate((cf, T, p_full)):
+        def _loss_x(v, _i=i):
+            args = [cf, dp, T, p_full]
+            args[[0, 2, 3][_i]] = v
+            return jnp.sum(_adiabatic_incloud_condensate(*args, cfg))
+        assert bool(jnp.all(jnp.isfinite(jax.grad(_loss_x)(x))))
+
+
+def test_reset_isolates_stacked_decks():
+    """Hard reset at clear gaps: an upper deck gets its OWN base->top depth, NOT
+    the lower deck's inherited depth (codex: stacked decks must not inherit)."""
+    cfg = CloudConfig(scheme="sundqvist", diagnostic_condensate_scheme="adiabatic")
+    # Surface-last: high deck (idx 8-10), clear gap, low deck (idx NLEV-4..NLEV-2).
+    mask = [0.0] * NLEV
+    for i in (8, 9, 10):
+        mask[i] = 1.0
+    for i in (NLEV - 4, NLEV - 3, NLEV - 2):
+        mask[i] = 1.0
+    cf = jnp.asarray(mask)[None, :]
+    _, dp, T, p_full = _column(mask)
+    q = _adiabatic_incloud_condensate(cf, dp, T, p_full, cfg)[0]
+    # The high deck's BASE (its lowest cloudy level, idx 10) must be ~its own
+    # half-layer, clearly BELOW the cap — not the lower deck's accumulated (capped)
+    # depth.  If the reset failed it would inherit ~1400 m and hit the cap exactly;
+    # isolated it is ~half a (thick upper-tropo) layer, well under the cap.
+    assert float(q[10]) < 0.9 * cfg.q_c_diagnostic
+    # And the high deck grows base->top (idx 10 -> 8), still isolated.
+    assert float(q[8]) >= float(q[9]) >= float(q[10])
+
+
+def test_constant_deficit_path_byte_identical_incl_fp32():
+    """With EXPLICIT condensate (the deficit path — the production sundqvist +
+    microphysics route) the constant scheme is byte-identical to the legacy floor
+    in BOTH fp64 and fp32 (codex High: the phase restructure must not add division
+    rounding to the default)."""
+    from legoesm.thermo import saturation_mixing_ratio
+    mask = [False] * (NLEV - 4) + [True, True, True, True]
+    p_half = jnp.linspace(2.0e3, 1.0e5, NLEV + 1)
+    p_full = 0.5 * (p_half[:-1] + p_half[1:])[None, :]
+    dp = (p_half[1:] - p_half[:-1])[None, :]
+    T = jnp.full((1, NLEV), 285.0)
+    q_sat = saturation_mixing_ratio(T, p_full)
+    q_v = jnp.where(jnp.asarray(mask)[None, :], 0.995, 0.2) * q_sat
+    # Small explicit condensate below the floor => deficit path is exercised.
+    q_cld = jnp.full((1, NLEV), 1.0e-5)
+    q_ice = jnp.full((1, NLEV), 1.0e-5)
+    for dt in (jnp.float64, jnp.float32):
+        a = [T.astype(dt), p_full.astype(dt), q_v.astype(dt), dp.astype(dt)]
+        kw = dict(q_cloud=q_cld.astype(dt), q_ice=q_ice.astype(dt))
+        const = compute_cloud_properties(
+            *a, CloudConfig(scheme="sundqvist",
+                            diagnostic_condensate_scheme="constant"), **kw)
+        legacy = compute_cloud_properties(
+            *a, CloudConfig(scheme="sundqvist"), **kw)
+        assert float(jnp.max(jnp.abs(const.lwp - legacy.lwp))) == 0.0
+        assert float(jnp.max(jnp.abs(const.iwp - legacy.iwp))) == 0.0
 
 
 def test_unknown_diagnostic_condensate_scheme_raises():

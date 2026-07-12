@@ -30,7 +30,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import jax.numpy as jnp
-from jax import lax
+from jax import lax, nn
 
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
 from legoesm.thermo import saturation_mixing_ratio
@@ -293,80 +293,81 @@ def convective_cloud_fraction(
     return cf_col[:, None] * deck
 
 
-# Cloud-fraction above which a layer counts as (fully) part of a cloudy DECK for
-# the geometric-depth integral in ``_adiabatic_incloud_condensate``.  This is a
-# deck-ISOLATION scale, not a tunable closure: it turns cf into a saturating
-# 0/1-ish indicator so ``D`` is the true GEOMETRIC cloudy depth and cloud
-# COVERAGE enters exactly ONCE (via the outer ``cf_strat`` in ``q_total_diag``).
-# Weighting the depth by cf itself would make the grid-mean floor scale as cf^2
-# (double-counting coverage) and detach ``adiabatic_lwc_rate`` from the physical
-# adiabatic gradient.  0.05 => any layer with cf >= 5% contributes its full dz.
-_ADIAB_DECK_CF_FLOOR = 0.05
+# Smooth cloudy-DECK membership gate for the geometric-depth integral in
+# ``_adiabatic_incloud_condensate``.  A sigmoid in cf (centred at
+# ``_ADIAB_DECK_CF0``, width ~1/``_ADIAB_DECK_SHARPNESS``) turns cf into a smooth
+# 0->1 STEP that is NOT proportional to cf, so the accumulated depth ``D`` is the
+# GEOMETRIC cloudy depth and cloud COVERAGE enters exactly ONCE (the outer
+# ``cf_strat``) rather than as cf^2.  Deck-MEMBERSHIP numerics, not a tunable.
+_ADIAB_DECK_CF0 = 0.05          # cf at which a layer is a HALF deck member
+_ADIAB_DECK_SHARPNESS = 200.0   # inverse membership-transition width [1/cf]
 
 
 def _adiabatic_incloud_condensate(cf, dp, T, p_full, config):
-    """Capped adiabatic IN-CLOUD liquid-water content [kg/kg] for the stratiform
-    radiative floor of WARM (liquid) clouds.
+    """Capped adiabatic IN-CLOUD LIQUID water content [kg/kg] for the stratiform
+    radiative floor.
 
     Real in-cloud LWC grows ~linearly with height above cloud base (adiabatic
     ascent), so a THIN low cloud holds far less water than a deep one.  The flat
     ``q_c_diagnostic`` floor ignores this and over-brightens shallow marine
     stratocumulus (measured: the floor is the radiative q_c there, ~11x the
-    prognostic).  Returns, for warm cells, ``q_ad = min(adiabatic_lwc_rate * D,
-    q_c_diagnostic)`` where ``D`` is the LAYER-MEAN cloudy geometric depth above
-    cloud base.  This is the IN-CLOUD value; cloud COVERAGE is applied once by
-    the caller (``q_total_diag = cf_strat * q_ad``), so ``adiabatic_lwc_rate`` is
-    the physical adiabatic LWC gradient, not a coverage-entangled effective rate.
+    prognostic).  Returns ``q_ad = min(adiabatic_lwc_rate * D, q_c_diagnostic)``,
+    ``D`` the LAYER-MEAN cloudy geometric depth above cloud base.
+
+    This is the LIQUID in-cloud value ONLY.  PHASE and COVERAGE are applied by the
+    caller (``compute_cloud_properties``): it weights this by cloud fraction and by
+    the LIQUID fraction ``(1 - f_ice)`` and floors the ICE part SEPARATELY with
+    ``q_c_diagnostic`` — so the liquid adiabatic gradient never leaks into IWP,
+    ``adiabatic_lwc_rate`` stays the physical gradient (coverage is not squared),
+    and phase is applied EXACTLY once.
 
     Depth integral (surface-last: index 0 = model top, -1 = surface; height
-    increases toward index 0):
+    increases toward index 0 — reverse to surface->up, cumulative-sum, reverse
+    back = a within-column suffix sum that grows base->top):
 
-    * a SATURATING indicator ``clip(cf/_ADIAB_DECK_CF_FLOOR, 0, 1)`` (not cf, so
-      coverage is not double-counted) marks cloudy layers;
-    * a RESET cumulative sum over the reversed (surface->up) axis accumulates the
-      cloudy geometric depth but RESTARTS at every clear gap (``cr`` minus the
-      running-max of ``cr`` sampled at clear layers), so a stacked upper deck
-      does NOT inherit a lower deck's depth (codex review: the inherited
-      condensate would be phase-partitioned to ice and perturb IWP/OLR);
-    * the value is taken at the layer MIDPOINT (``- 0.5*dz`` of the current
-      layer): a linear base->top profile has its layer-average at the midpoint,
-      so the layer top would over-count a 1-layer cloud by 2x (codex review).
+    * a SMOOTH deck-membership gate ``sigmoid(_ADIAB_DECK_SHARPNESS*(cf -
+      _ADIAB_DECK_CF0))`` (a step in cf, not proportional to cf) weights each
+      layer's geometric thickness ``dz = dp/(rho g)``;
+    * the value is taken at the layer MIDPOINT (``- 0.5*dz``): a linear base->top
+      profile averages to the midpoint, so the layer top over-counts a 1-layer
+      cloud by 2x;
+    * ``q_ad`` is capped at ``q_c_diagnostic`` so it can only DIM, never exceed the
+      validated floor — deep clouds are ~unchanged above the cap depth
+      (``q_c_diagnostic/rate`` ~ 667 m); only near-base layers dim.
 
-    A WARM/liquid gate (``T > T_freeze``) restricts the liquid adiabatic gradient
-    to warm boundary-layer cloud; ice / mixed-phase cells keep the calibrated
-    constant floor (do not dim cirrus with a liquid gradient and repartition to
-    ice).  ``q_ad`` is capped at ``q_c_diagnostic`` so it can only DIM, never
-    exceed the validated floor — deep warm clouds are ~unchanged above the cap
-    depth (``q_c_diagnostic/rate`` ~ 667 m); only near-base layers dim.
+    STACKED decks are ISOLATED by a hard reset at clear gaps (``gate < 0.5``): an
+    upper deck gets its OWN base->top depth, not the lower deck's.  The caller also
+    floors ICE separately at ``q_c_diagnostic``, so no liquid gradient reaches
+    IWP/OLR even for a stacked cold deck.
 
-    Subdifferentiable / transform-compatible (cumsum, clip, cummax, minimum are
-    kinked and JAX supplies subgradients); no Python control flow on traced
+    Mostly subdifferentiable (sigmoid, cumsum, cummax, minimum, maximum); the only
+    kink is the gap boolean at cf~0.05 (a subgradient there, forward-exact, and
+    negligible for genuinely cloudy cells).  No Python control flow on traced
     values.
     """
     # Layer geometric thickness dz = dp / (rho g), with rho = p / (R_d T) [m].
     rho = p_full / (constants.R_d * T)
     dz = dp / jnp.maximum(rho * constants.g, 1.0e-12)
-    # Saturating cloudy-deck indicator so D is the GEOMETRIC cloudy depth and
-    # coverage (cf) is applied exactly once downstream (not squared).
-    cloud_indicator = jnp.clip(cf / _ADIAB_DECK_CF_FLOOR, 0.0, 1.0)
-    cloudy_dz = cloud_indicator * dz
-    # Reset cumulative sum over the reversed (surface -> up) axis: restart the
-    # depth integral at every clear gap so decks are isolated.  ``cr`` is
-    # non-decreasing (cloudy_dz >= 0), so the most-recent clear-gap depth is the
-    # running MAX of ``cr`` sampled at clear layers.
+    # Smooth deck-membership gate (sigmoid step in cf): coverage stays single.
+    gate = nn.sigmoid(_ADIAB_DECK_SHARPNESS * (cf - _ADIAB_DECK_CF0))
+    cloudy_dz = gate * dz
+    # Cloudy geometric depth from cloud base to the layer MIDPOINT, RESET at clear
+    # gaps so a stacked upper deck does NOT inherit a lower deck's depth.  Work on
+    # the reversed (surface->up) axis: ``cr`` is the running cloudy depth (non-
+    # decreasing), and ``cr`` minus the running-MAX of ``cr`` sampled at gap
+    # layers (``gate < 0.5``) is the depth SINCE the last gap — a valid segmented
+    # sum.  Then subtract half the current layer (midpoint).  The gap boolean is a
+    # subgradient KINK at the deck threshold cf~0.05 (negligible for cloudy cells,
+    # forward-exact); everything else is smooth.
     xr = cloudy_dz[..., ::-1]
-    clear = cloud_indicator[..., ::-1] < 0.5
-    _vax = xr.ndim - 1  # vertical axis (last); lax.cummax rejects a negative axis
+    _vax = xr.ndim - 1
     cr = jnp.cumsum(xr, axis=_vax)
-    last_gap = lax.cummax(jnp.where(clear, cr, 0.0), axis=_vax)
-    depth_top = cr - last_gap                       # depth above base at layer TOP
-    depth_mid = jnp.maximum(depth_top - 0.5 * xr, 0.0)  # layer-MEAN (midpoint)
-    depth_from_base = depth_mid[..., ::-1]          # back to surface-last
-    q_ad = jnp.minimum(config.adiabatic_lwc_rate * depth_from_base,
+    is_gap = gate[..., ::-1] < 0.5
+    last_gap = lax.cummax(jnp.where(is_gap, cr, 0.0), axis=_vax)
+    depth_top = jnp.maximum(cr - last_gap, 0.0)
+    depth_mid = jnp.maximum(depth_top - 0.5 * xr, 0.0)[..., ::-1]  # surface-last
+    return jnp.minimum(config.adiabatic_lwc_rate * depth_mid,
                        config.q_c_diagnostic)
-    # Warm/liquid gate: ice & mixed-phase cells keep the constant floor.
-    warm = T > constants.T_freeze
-    return jnp.where(warm, q_ad, config.q_c_diagnostic)
 
 
 def compute_cloud_properties(
@@ -486,9 +487,10 @@ def compute_cloud_properties(
     # cap (see ``_adiabatic_incloud_condensate`` / CloudConfig docstring).  The
     # convective EXCESS keeps the thin anvil condensate regardless.
     if config.diagnostic_condensate_scheme == "constant":
-        q_c_incloud = config.q_c_diagnostic
+        q_liq_incloud = config.q_c_diagnostic
     elif config.diagnostic_condensate_scheme == "adiabatic":
-        q_c_incloud = _adiabatic_incloud_condensate(
+        # LIQUID in-cloud value only; the ICE floor stays q_c_diagnostic below.
+        q_liq_incloud = _adiabatic_incloud_condensate(
             cf_strat, dp, T, p_full, config
         )
     else:
@@ -501,10 +503,17 @@ def compute_cloud_properties(
             f"(flat q_c_diagnostic floor) or 'adiabatic' (depth-scaled "
             f"adiabatic in-cloud LWC)."
         )
-    q_total_diag = (
-        cf_strat * q_c_incloud
-        + _conv_excess * config.conv_cloud_condensate
-    )
+    # PHASE-AWARE stratiform + convective-anvil floor (grid-mean), with ice
+    # fraction applied EXACTLY ONCE: the LIQUID part carries the (adiabatic or
+    # constant) in-cloud value, the ICE part ALWAYS the calibrated q_c_diagnostic
+    # — so the liquid adiabatic gradient never contaminates IWP.  For
+    # scheme='constant' both use q_c_diagnostic, so these reduce EXACTLY to the
+    # legacy ``q_total_diag`` split by ice fraction (byte-identical).
+    f_ice_diag = _ice_fraction(T, config)
+    _conv_floor = _conv_excess * config.conv_cloud_condensate
+    q_floor_liq = (cf_strat * q_liq_incloud + _conv_floor) * (1.0 - f_ice_diag)
+    q_floor_ice = (cf_strat * config.q_c_diagnostic + _conv_floor) * f_ice_diag
+    q_floor_total = q_floor_liq + q_floor_ice
 
     # --- Cloud condensate ---
     has_explicit_condensate = q_cloud is not None or q_ice is not None
@@ -531,23 +540,33 @@ def compute_cloud_properties(
         # NOT applied to 'resolved' (CRM: q_c IS the truth; a floor would inject
         # spurious cloud water).
         if config.scheme in ("sundqvist", "xu_randall"):
-            # Floor on TOTAL condensate, then add only the DEFICIT, partitioned
-            # by temperature.  Per-phase maxima would over-floor a layer whose
-            # explicit condensate already meets the floor but sits in one phase
-            # (e.g. all-ice: the liquid max would still inject liquid),
-            # inflating total condensate (codex review).  The deficit form adds
-            # nothing when the prognostic TOTAL already meets the floor, so the
-            # explicit phase split is preserved EXACTLY there.
-            deficit = jnp.maximum(q_total_diag - (q_c + q_i), 0.0)
-            f_ice_diag = _ice_fraction(T, config)
-            q_c = q_c + deficit * (1.0 - f_ice_diag)
-            q_i = q_i + deficit * f_ice_diag
+            if config.diagnostic_condensate_scheme == "constant":
+                # EXACT legacy: ONE total floor F = cf*q_c_diagnostic + conv split
+                # by ice fraction — no reconstruction, no division, so BYTE-
+                # IDENTICAL (incl fp32) to the pre-feature path.  (Static branch on
+                # the compile-time scheme string, not a traced value.)
+                _F = cf_strat * config.q_c_diagnostic + _conv_floor
+                deficit = jnp.maximum(_F - (q_c + q_i), 0.0)
+                q_c = q_c + deficit * (1.0 - f_ice_diag)
+                q_i = q_i + deficit * f_ice_diag
+            else:
+                # Adiabatic: deficit on the TOTAL (adds nothing when the prognostic
+                # TOTAL already meets the floor — preserves the explicit phase
+                # split there), apportioned by the floor's OWN phase ratio so ICE
+                # gets the constant-floor share and LIQUID the dimmed share.  NB
+                # for MIXED-PHASE explicit-condensate cells the ice deficit weakly
+                # depends on the dimmed liquid TOTAL (a bounded coupling inherent
+                # to the total-deficit form); the marine-BL target is warm-liquid,
+                # where it is exact.
+                deficit = jnp.maximum(q_floor_total - (q_c + q_i), 0.0)
+                _liq_frac = q_floor_liq / jnp.maximum(q_floor_total, 1.0e-30)
+                q_c = q_c + deficit * _liq_frac
+                q_i = q_i + deficit * (1.0 - _liq_frac)
     else:
-        # Diagnose condensate from cloud fraction and a typical in-cloud value
-        # (stratiform thick + convective-excess thin), partitioned by temperature.
-        f_ice = _ice_fraction(T, config)
-        q_c = q_total_diag * (1.0 - f_ice)
-        q_i = q_total_diag * f_ice
+        # Diagnose condensate directly from the phase-aware floor (liquid part
+        # carries the adiabatic/constant value, ice part the constant floor).
+        q_c = q_floor_liq
+        q_i = q_floor_ice
 
     # --- Cloud water/ice paths [kg/m^2] ---
     # Grid-mean water/ice paths: q * dp / g
