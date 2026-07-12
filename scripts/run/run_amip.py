@@ -520,6 +520,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             "none", "smagorinsky", "louis", "tke",
                             "clubb_lite", "clubb", "holtslag_boville", "ysu", "edmf",
                         ])
+    parser.add_argument("--cloudtop-entrainment-efficiency",
+                        dest="louis_cloudtop_entrainment_efficiency", type=float,
+                        default=0.0,
+                        help="Marine-Sc cloud-top entrainment efficiency A in "
+                             "[0,1] for the Louis PBL (K_ent = A*W_REF*dz*gates, "
+                             "W_REF=0.02 m/s): vents trapped BL-top moisture into "
+                             "the dry free troposphere to thin excess stratocumulus "
+                             "liquid cloud (the AMIP albedo bias) WITHOUT a "
+                             "surface-evaporation trade.  0 = off (default); "
+                             "warm-start/ramp only (cold-start caveat).")
     parser.add_argument("--gravity-wave-drag", type=str, default="mcfarlane",
                         help="GWD scheme: none, rayleigh, lindzen, mcfarlane, "
                              "hines, prognostic_spectral, ml_emulator, or a "
@@ -1245,6 +1255,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         # Tuned air-sea + cloud calibration (mirror run_coupled).
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        louis_cloudtop_entrainment_efficiency=args.louis_cloudtop_entrainment_efficiency,
         surface_thermo_convention=args.bulk_thermo_convention,
         cloud_q_c_diagnostic=args.cloud_q_c_diagnostic,
         cloud_rh_crit=args.cloud_rh_crit,

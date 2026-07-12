@@ -2791,7 +2791,23 @@ def turbulence_config_for(config):
 
     override = getattr(config, "turbulence_override", None)
     if override is None:
-        return TurbulenceConfig(scheme=getattr(config, "turbulence", "none"))
+        tc = TurbulenceConfig(scheme=getattr(config, "turbulence", "none"))
+        # Thread the experiment-level marine-Sc cloud-top entrainment flag into
+        # the ACTIVE scheme's nested config HERE — the single source of truth all
+        # dycores consume (FV via _resolve_turbulence, MPAS + spectral directly),
+        # so the knob is not silently inert on MPAS/spectral (the l_mix lesson).
+        # Only for a scheme that carries the field (louis).  Default off (flag
+        # False) => byte-identical (no _replace).  An explicit turbulence_override
+        # (below) is authoritative and is never touched here.
+        eff = getattr(config, "louis_cloudtop_entrainment_efficiency", 0.0)
+        if eff > 0.0:
+            scheme = tc.scheme
+            nested = getattr(tc, scheme, None)
+            if (nested is not None
+                    and "cloudtop_entrainment_efficiency" in getattr(nested, "_fields", ())):
+                tc = tc._replace(**{scheme: nested._replace(
+                    cloudtop_entrainment_efficiency=eff)})
+        return tc
     # Under MPI a GLOBAL per-column override must be sliced to the rank's columns
     # (else broadcast_column_param mismatches the rank-local l_mix). Deferred so the
     # parallel layout machinery is only touched when an override is actually set;

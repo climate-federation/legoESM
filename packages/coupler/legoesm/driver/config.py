@@ -749,6 +749,11 @@ class ExperimentConfig(NamedTuple):
     sundqvist_sigmoid_sharpness: float = 20.0   # SundqvistConfig.sigmoid_sharpness
     sbm_T_min_convect: float = 200.0            # SBMConfig.T_min_convect [K]
     louis_l_mix_max: float = 100.0              # LouisConfig.l_mix_max [m]
+    # Marine-Sc cloud-top entrainment (Louis BL): vents trapped BL-top moisture
+    # into the dry free troposphere to thin excess stratocumulus liquid cloud
+    # (the AMIP albedo bias) without a surface-evaporation trade.  SINGLE knob:
+    # 0.0 = off (default => byte-identical), > 0 = on.  Deploy warm-start/ramp.
+    louis_cloudtop_entrainment_efficiency: float = 0.0  # LouisConfig.cloudtop_entrainment_efficiency [0,1]; 0=off
     louis_Ck: float = 0.4                       # LouisConfig.Ck
     louis_Ri_crit: float = 0.25                 # LouisConfig.Ri_crit
     louis_b_louis: float = 5.0                  # LouisConfig.b_louis
@@ -1230,6 +1235,14 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"land_gs_max (max stomatal conductance [mol/m2/s]) must be "
                 f"finite and in (0, 2]; got {self.land_gs_max!r}."
+            )
+        # Marine-Sc cloud-top entrainment efficiency: finite, in [0, 1] (matches
+        # LouisConfig.__param_spec__; the not(lo<=x<=hi) form also rejects NaN/Inf).
+        if not (0.0 <= self.louis_cloudtop_entrainment_efficiency <= 1.0):
+            errors.append(
+                f"louis_cloudtop_entrainment_efficiency (marine-Sc cloud-top "
+                f"entrainment A) must be finite and in [0, 1]; got "
+                f"{self.louis_cloudtop_entrainment_efficiency!r}."
             )
         # Soil-moisture init fraction of saturation: finite, in (0, 1].
         if not (0.0 < self.land_soil_moisture_init_frac <= 1.0):

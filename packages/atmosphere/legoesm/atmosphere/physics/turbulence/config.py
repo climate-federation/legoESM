@@ -112,6 +112,7 @@ __param_spec__ = {
             "c_louis": {"units": "1", "bounds": (5.0, 49.8), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1979) unstable-branch coefficient c (Holtslag & De Bruin 1988)", "shape": None},
             "d_louis": {"units": "1", "bounds": (1.5, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1979) stable-branch sqrt coefficient d", "shape": None},
             "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length", "shape": None},
+            "cloudtop_entrainment_efficiency": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "marine-Sc cloud-top entrainment efficiency A (flux-matched K_ent = A·W_REF·dz·(drying·inverted·cloudy_below), W_REF=0.02 m/s); 0 = off", "shape": None},
         },
     },
     "MYNN25Config": {
@@ -326,6 +327,19 @@ class LouisConfig(NamedTuple):
     b_heat_ratio: float = 1.5  # b_h/b_m (LTG82: 3b heat vs 2b momentum)
     blend_ri_sharpness: float = 100.0  # sigmoid sharpness [1/Ri] for stable/unstable blend
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
+    # --- Cloud-top entrainment (marine-Sc BL-top ventilation) ---
+    # Louis is a LOCAL down-gradient K scheme: at a stratocumulus inversion
+    # Ri>>0 => f_h->0 => Kh~0 => the BL is capped and moisture is trapped
+    # (marine-Sc liquid cloud accumulates, supply-limited).  When enabled, add
+    # a flux-matched entrainment diffusivity K_ent localized at h_pbl that vents
+    # BL-top moisture into the dry free troposphere (dries the cloud layer
+    # WITHOUT touching the surface layer => no evaporation trade).  Interior K
+    # with surface_flux unchanged => the implicit solver conserves the column
+    # integral (redistributes BL<->FT only).  SINGLE knob: efficiency 0.0 = OFF
+    # (default => byte-identical, no K_ent), > 0 = on; static Python gate on the
+    # constant float, so --params can both SET and ACTIVATE it (no separate bool
+    # that --params could not reach).
+    cloudtop_entrainment_efficiency: float = 0.0   # A: K_ent = A·W_REF·dz·(drying·inverted·cloudy); 0 = off
 
 
 class TKEConfig(NamedTuple):

@@ -1924,3 +1924,47 @@ def test_cloud_inhomogeneity_validate_bounds():
     with pytest.raises(ValueError, match="cloud_inhomogeneity_factor"):
         ExperimentConfig(cloud_inhomogeneity_factor=1.5).validate_strict()  # > 1.0
     ExperimentConfig(cloud_inhomogeneity_factor=0.7).validate_strict()
+
+
+def test_louis_cloudtop_entrainment_efficiency_flows_to_config():
+    """--cloudtop-entrainment-efficiency round-trips (marine-Sc BL-top
+    ventilation: thins excess Sc liquid cloud without an evap trade; the
+    structural AMIP albedo fix). Single knob: default 0.0 = off."""
+    parser = build_arg_parser()
+    cfg0 = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg0.louis_cloudtop_entrainment_efficiency == 0.0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--cloudtop-entrainment-efficiency", "0.35",
+    ]), parser))
+    assert cfg.louis_cloudtop_entrainment_efficiency == 0.35
+
+
+def test_louis_cloudtop_entrainment_threads_into_louis_config():
+    """The efficiency MUST reach LouisConfig via turbulence_config_for (the
+    single source of truth for all dycores) — else it is an inert dead field
+    (l_mix lesson). Default 0.0 stays byte-identical (no _replace)."""
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "louis",
+        "--cloudtop-entrainment-efficiency", "0.4",
+    ]), parser))
+    assert turbulence_config_for(cfg).louis.cloudtop_entrainment_efficiency == 0.4
+
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "louis",
+    ]), parser))
+    assert turbulence_config_for(cfg0).louis.cloudtop_entrainment_efficiency == 0.0
+
+
+def test_louis_cloudtop_entrainment_efficiency_validate_strict():
+    """validate_strict rejects an efficiency outside [0, 1] (and NaN/Inf)."""
+    from legoesm.driver.config import ExperimentConfig
+    for bad in (-0.1, 1.5, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="louis_cloudtop_entrainment_efficiency"):
+            ExperimentConfig(
+                louis_cloudtop_entrainment_efficiency=bad).validate_strict()
+    for ok in (0.0, 0.2, 1.0):
+        ExperimentConfig(louis_cloudtop_entrainment_efficiency=ok).validate_strict()
