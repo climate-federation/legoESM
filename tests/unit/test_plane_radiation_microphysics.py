@@ -380,16 +380,15 @@ class TestRCEMIPCompose:
         """Codex review 2026-05-24: ``_sum_plane_tendencies()`` with no
         inputs has no canonical empty tendency to return — must raise
         rather than IndexError on ``tendencies[0]`` inside the helper."""
-        from scripts.run.run_rcemip_plane import _sum_plane_tendencies
+        from legoesm.atmosphere.idealized.land_rce import sum_plane_tendencies
         with pytest.raises(ValueError, match="at least one tendency"):
-            _sum_plane_tendencies()
+            sum_plane_tendencies()
 
     def test_sum_plane_tendencies_field_wise_correctness(self, plane_setup):
         """Summing surface_flux + radiation tendencies must equal the
         element-wise sum on every field's ``.data`` array."""
-        from scripts.run.run_rcemip_plane import (
-            _make_surface_flux_physics, _sum_plane_tendencies,
-        )
+        from scripts.run.run_rcemip_plane import _make_surface_flux_physics
+        from legoesm.atmosphere.idealized.land_rce import sum_plane_tendencies
         rad_cfg = RadiationConfig(
             scheme="gray", gray=GrayRadiationConfig(),
         )
@@ -406,7 +405,7 @@ class TestRCEMIPCompose:
             plane_setup["state"], plane_setup["grid"],
             plane_setup["hc"], plane_setup["tm"],
         )
-        t_sum = _sum_plane_tendencies(t_sfc, t_rad)
+        t_sum = sum_plane_tendencies(t_sfc, t_rad)
         # dtheta_prime_dt: radiation cools/warms aloft; surface heats
         # the lowest level. Sum must equal element-wise.
         assert jnp.allclose(

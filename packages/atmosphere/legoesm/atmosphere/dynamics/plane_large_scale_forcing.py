@@ -17,7 +17,7 @@ and the SAM background):
 
 The forcing is returned as a :class:`PlaneNonHydrostaticTendencies` so the
 RCEMIP/GATE/LBA driver simply appends it to the physics-tendency sum
-(:func:`run_rcemip_plane._sum_plane_tendencies`).
+(:func:`legoesm.atmosphere.idealized.land_rce.sum_plane_tendencies`).
 
 Profiles are captured as static ``(nlev,)`` arrays in the returned closure —
 correct for the constant / steady forcing used by RCE and the early GATE/LBA
