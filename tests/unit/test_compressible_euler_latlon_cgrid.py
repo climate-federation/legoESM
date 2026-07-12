@@ -43,6 +43,23 @@ REST_STATE_DRIFT_TOL = 1.0e-6
 # relative to the analytical buoyancy frequency on this 30 km column.
 WARM_BUBBLE_W_MIN_M_S = 1.0e-6
 
+# --- Slow-tendency application + mass-conservation regressions -------
+# Uniform zonal wind for the slow-advection application check [m/s].
+SLOW_ADV_U_M_S = 10.0
+# Outer step used by the bug-fix regression tests [s]; well inside both
+# the acoustic (dt/6 substeps on 3.75 km layers) and advective CFL.
+REGRESSION_DT_S = 2.0
+# Interior half-level w seeded inside the default 10 km top sponge [m/s].
+SPONGE_TEST_W_M_S = 0.1
+# Divergent-wind mass-conservation test parameters.
+MASS_TEST_U_M_S = 10.0
+MASS_TEST_RHO_FRAC = 0.02      # rho' patch amplitude as fraction of rho_ref
+MASS_TEST_N_STEPS = 10
+MASS_TEST_REL_TOL = 1.0e-12
+# Threshold for "the compression term actually acted" at a column far
+# from the seeded rho' patch (analytic scale: rho_ref*div(v)*t ~ 3e-5).
+MASS_TEST_FAR_RHO_MIN = 1.0e-8
+
 
 # ----------------------------------------------------------------------
 # Fixtures: small lat-lon grid + height-coord + state
@@ -291,4 +308,212 @@ def test_warm_bubble_drives_upward_motion(small_setup):
     assert w_above > WARM_BUBBLE_W_MIN_M_S, (
         f"warm bubble did not lift: w_above={w_above:.3e} m/s "
         f"(threshold {WARM_BUBBLE_W_MIN_M_S:.1e})"
+    )
+
+
+# ----------------------------------------------------------------------
+# Bug-fix regressions: slow tendencies must reach the prognostic state,
+# and horizontal continuity must conserve dry mass (flux form).
+# ----------------------------------------------------------------------
+
+
+def _zero_fields(grid, height):
+    """Zero C-grid field set (u, v, w, cell, 2d) for building test states."""
+    n_lat, n_lon, nlev = grid.n_lat, grid.n_lon, height.n_levels
+    return (
+        jnp.zeros((n_lat, n_lon + 1, nlev)),
+        jnp.zeros((n_lat + 1, n_lon, nlev)),
+        jnp.zeros((n_lat, n_lon, nlev + 1)),
+        jnp.zeros((n_lat, n_lon, nlev)),
+        jnp.zeros((n_lat, n_lon)),
+    )
+
+
+def test_step_applies_slow_theta_advection(small_setup):
+    """Slow theta' advection must reach the prognostic state.
+
+    Regression for the v1 defect where ``cgrid_latlon_nh_step`` advanced
+    only u and v by the slow tendency before the acoustic loop (which by
+    contract ignores ``slow_tend``), silently discarding the slow w /
+    theta' / rho' tendencies: stepping a theta' blob with a uniform
+    zonal wind produced BIT-IDENTICAL theta' to stepping it with u = 0.
+    With the fix, the advective displacement ``dt * dtheta'/dt|_slow``
+    shows up in the stepped state (plus an O(few %) acoustic-response
+    difference, hence the 0.25 safety factor on the expected scale).
+    """
+    from legoesm.atmosphere.dynamics.compressible_euler_latlon_cgrid import (
+        CGridLatLonNonHydrostaticState,
+        cgrid_latlon_nh_slow_tendencies,
+        cgrid_latlon_nh_step,
+    )
+    grid, height, terrain = small_setup
+    n_lat, n_lon, nlev = grid.n_lat, grid.n_lon, height.n_levels
+    zero_u, zero_v, zero_w, zero_cell, zero_2d = _zero_fields(grid, height)
+
+    i_lat, i_lon, k = n_lat // 2, n_lon // 2, nlev // 2
+    theta_blob = zero_cell.at[i_lat, i_lon, k].set(WARM_BUBBLE_DTHETA_K)
+
+    state_u0 = CGridLatLonNonHydrostaticState(
+        u=zero_u, v=zero_v, w=zero_w,
+        theta_prime=theta_blob, rho_prime=zero_cell,
+        phis=zero_2d, tracers={},
+    )
+    state_adv = state_u0._replace(u=jnp.full_like(zero_u, SLOW_ADV_U_M_S))
+
+    stepped_adv = cgrid_latlon_nh_step(
+        state_adv, grid, height, terrain, dt=REGRESSION_DT_S,
+    )
+    stepped_u0 = cgrid_latlon_nh_step(
+        state_u0, grid, height, terrain, dt=REGRESSION_DT_S,
+    )
+
+    diff = float(jnp.max(jnp.abs(
+        stepped_adv.theta_prime - stepped_u0.theta_prime
+    )))
+    slow_adv = cgrid_latlon_nh_slow_tendencies(
+        state_adv, grid, height, terrain,
+    )
+    expected = REGRESSION_DT_S * float(
+        jnp.max(jnp.abs(slow_adv.dtheta_prime_dt.data))
+    )
+    assert expected > 0.0, "advective slow tendency vanished unexpectedly"
+    assert diff > 0.25 * expected, (
+        f"slow theta' advection not applied by the step: "
+        f"max|theta'(u={SLOW_ADV_U_M_S}) - theta'(u=0)|={diff:.3e} K, "
+        f"expected O(dt*tend)={expected:.3e} K"
+    )
+
+
+def test_step_applies_w_sponge(small_setup):
+    """The Rayleigh sponge on w must damp w inside the top sponge layer.
+
+    Horizontally-uniform w seeded at half-level k=1 (z_half[1] = 26.25 km,
+    inside the default 10 km top sponge on the 30 km column) with
+    u = v = theta' = rho' = 0: the slow dw/dt reduces to the sponge term
+    ``-sponge(z) * w`` alone (advection and hyperdiff vanish).
+    Controlled comparison -- the ONLY variable is ``sponge_coeff`` (on
+    vs 0); pre-fix both runs were bit-identical because the slow dw/dt
+    was discarded by the outer step.
+    """
+    from legoesm.atmosphere.dynamics.compressible_euler import (
+        CompressibleEulerConfig,
+    )
+    from legoesm.atmosphere.dynamics.compressible_euler_latlon_cgrid import (
+        CGridLatLonCompressibleEulerConfig,
+        CGridLatLonNonHydrostaticState,
+        cgrid_latlon_nh_step,
+    )
+    grid, height, terrain = small_setup
+    zero_u, zero_v, zero_w, zero_cell, zero_2d = _zero_fields(grid, height)
+
+    # Rigid lid: only interior half-levels may carry w.
+    w_seed = zero_w.at[:, :, 1].set(SPONGE_TEST_W_M_S)
+    state = CGridLatLonNonHydrostaticState(
+        u=zero_u, v=zero_v, w=w_seed,
+        theta_prime=zero_cell, rho_prime=zero_cell,
+        phis=zero_2d, tracers={},
+    )
+    cfg_on = CGridLatLonCompressibleEulerConfig()          # default sponge
+    cfg_off = CGridLatLonCompressibleEulerConfig(
+        euler=CompressibleEulerConfig(sponge_coeff=0.0),
+    )
+
+    stepped_on = cgrid_latlon_nh_step(
+        state, grid, height, terrain, dt=REGRESSION_DT_S, config=cfg_on,
+    )
+    stepped_off = cgrid_latlon_nh_step(
+        state, grid, height, terrain, dt=REGRESSION_DT_S, config=cfg_off,
+    )
+
+    w_on = stepped_on.w[:, :, 1]
+    w_off = stepped_off.w[:, :, 1]
+    assert not bool(jnp.allclose(w_on, w_off)), (
+        "sponge had no effect on w: slow dw/dt is being discarded"
+    )
+    # Rayleigh damping (-sponge*w) must REDUCE |w| relative to no-sponge.
+    assert float(jnp.max(jnp.abs(w_on))) < float(jnp.max(jnp.abs(w_off))), (
+        f"sponge did not damp w: max|w_on|={float(jnp.max(jnp.abs(w_on))):.4e}"
+        f" >= max|w_off|={float(jnp.max(jnp.abs(w_off))):.4e}"
+    )
+
+
+def test_dry_mass_conserved_under_divergent_wind(small_setup):
+    """Global dry mass must be conserved under divergent horizontal flow.
+
+    Budget: M = sum((rho_ref + rho') * J * dz * area).  The horizontal
+    continuity leg is conservative flux form on TOTAL density
+    (-div_h(rho_total v_h)), which telescopes exactly (periodic lon,
+    v = 0 pole walls), and the acoustic vertical leg telescopes per
+    column (rho_total*w flux, w = 0 at the rigid lid/bottom), so
+    in - out - dStorage = 0 and M drifts only at round-off.
+
+    The v1 ADVECTIVE form (-v . grad rho') violated this: its global
+    integral contains sum(rho' * div v) != 0 under divergent flow, a
+    measured leak of ~3e-8 relative over these 10 steps (and it dropped
+    the -rho_total*div(v) compression physics entirely -- checked below
+    via a column far from the seeded rho' patch, which only the
+    compression term can reach on this timescale).
+    """
+    from legoesm.atmosphere.dynamics.compressible_euler_latlon_cgrid import (
+        CGridLatLonNonHydrostaticState,
+        cgrid_latlon_nh_step,
+    )
+    grid, height, terrain = small_setup
+    n_lat, n_lon, nlev = grid.n_lat, grid.n_lon, height.n_levels
+    zero_u, zero_v, zero_w, zero_cell, zero_2d = _zero_fields(grid, height)
+
+    # Divergent, lon-periodic zonal wind on u faces: u = U0 sin(lon_face)
+    # (sin(0) = sin(2*pi) -> face 0 and face n_lon agree).
+    lon_face = jnp.arange(n_lon + 1) * grid.dlon
+    u_div = (
+        MASS_TEST_U_M_S * jnp.sin(lon_face)[None, :, None]
+        * jnp.ones((n_lat, n_lon + 1, nlev))
+    )
+    # rho' patch (fraction of rho_ref so the perturbation is mild at
+    # every level) centred on the grid -- gives the advective form a
+    # nonzero sum(rho' * div v) leak to regress against.
+    i_lat, i_lon = n_lat // 2, n_lon // 2
+    rho_patch = zero_cell.at[
+        i_lat - 1:i_lat + 2, i_lon - 1:i_lon + 2, :
+    ].set(MASS_TEST_RHO_FRAC * height.rho_ref[None, None, :])
+
+    state = CGridLatLonNonHydrostaticState(
+        u=u_div, v=zero_v, w=zero_w,
+        theta_prime=zero_cell, rho_prime=rho_patch,
+        phis=zero_2d, tracers={},
+    )
+
+    # Dry-mass functional: rho_ref is static, so all drift lives in rho'.
+    area = grid.area[:, :, None]
+    dz = height.dz[None, None, :]
+    jac = terrain.jacobian[..., None]
+
+    def dry_mass(s):
+        rho_total = height.rho_ref[None, None, :] + s.rho_prime
+        return float(jnp.sum(rho_total * jac * dz * area))
+
+    m0 = dry_mass(state)
+    s = state
+    for _ in range(MASS_TEST_N_STEPS):
+        s = cgrid_latlon_nh_step(
+            s, grid, height, terrain, dt=REGRESSION_DT_S,
+        )
+        assert bool(jnp.all(jnp.isfinite(s.rho_prime)))
+    m1 = dry_mass(s)
+
+    rel_drift = abs(m1 - m0) / abs(m0)
+    assert rel_drift < MASS_TEST_REL_TOL, (
+        f"dry mass drifted under divergent wind: "
+        f"|dM|/M = {rel_drift:.3e} (tol {MASS_TEST_REL_TOL:.1e})"
+    )
+
+    # Compression term must actually act: a column far from the rho'
+    # patch (blob advection ~ U0 * t ~ 200 m << cell) develops rho'
+    # from -rho_ref * div(v) alone.  Pre-fix this column stayed
+    # EXACTLY zero (slow drho'/dt discarded; acoustic loop is columnar).
+    far_lat, far_lon = n_lat // 4, 0
+    far_rho = float(jnp.max(jnp.abs(s.rho_prime[far_lat, far_lon, :])))
+    assert far_rho > MASS_TEST_FAR_RHO_MIN, (
+        f"horizontal compression term missing: |rho'| at far column = "
+        f"{far_rho:.3e} (threshold {MASS_TEST_FAR_RHO_MIN:.1e})"
     )
