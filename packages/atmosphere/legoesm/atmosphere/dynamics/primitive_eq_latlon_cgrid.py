@@ -78,6 +78,7 @@ from legoesm.grids.vertical import (
     vertical_advection_hybrid,
     compute_pressure_velocity,
     compute_mass_flux_from_cumsum,
+    compute_sigma_dot_from_cumsum,
     compute_omega_hybrid,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
@@ -514,15 +515,14 @@ def cgrid_latlon_hydrostatic_tendencies(
     else:
         # Flux-form sigma_dot consistent with mass-flux continuity:
         # σ̇_{k+1/2} = [frac_k · D_total_p - cumsum_k(div(dp·v))] / p_s
-        _frac = sigma_coord.fractional_sigma  # (nlev,)
         # Iter-54: reuse the cumsum precomputed for D_total_p above.
-        sigma_dot_inner = (
-            _frac * D_total_p[..., jnp.newaxis] - _cumsum_dp
-        ) / (p_s[..., jnp.newaxis] + 1e-10)
-        # Pad with zero on the top boundary; one HLO Pad op vs zeros
-        # buffer + concatenate.
-        _pad_axes_sd = ((0, 0),) * (sigma_dot_inner.ndim - 1) + ((1, 0),)
-        sigma_dot = jnp.pad(sigma_dot_inner, _pad_axes_sd)
+        # Single-sourced closure (shared with the cube + MPAS PE dycores);
+        # bit-identical to the previous inline form — the surface element
+        # was exact cancellation D_total_p − D_total_p (frac[-1] = 1), which
+        # the shared drop-last + (1,1)-pad closure replaces with literal 0.
+        sigma_dot = compute_sigma_dot_from_cumsum(
+            _cumsum_dp, D_total_p[..., jnp.newaxis], p_s, sigma_coord,
+        )
         sd_u = interp_cell_to_uface(sigma_dot)
         sd_v = interp_cell_to_vface_halo(sigma_dot)
         du_dt = du_dt + vertical_advection(u, sd_u, sigma_coord)

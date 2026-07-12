@@ -25,6 +25,9 @@ from legoesm.core.operators_cdgrid import (
     dgrid_to_center_vector,
     center_to_dgrid_vector,
     cgrid_divergence,
+    cgrid_flux_divergence_sync,
+    cgrid_interp_cc_to_faces_local,
+    pad_halo_auto,
     dgrid_vorticity,
     arakawa_lamb_gradient,
     interp_center_to_corner,
@@ -61,8 +64,8 @@ from legoesm.grids.vertical import (
     dp_from_hybrid,
     compute_geopotential,
     compute_geopotential_hybrid,
-    compute_sigma_dot_and_total,
-    compute_mass_flux_hybrid,
+    compute_sigma_dot_from_cumsum,
+    compute_mass_flux_from_cumsum,
     vertical_advection,
     vertical_advection_hybrid,
     compute_pressure_velocity,
@@ -321,12 +324,14 @@ def fv3_hydrostatic_tendencies(
     # Cell-centre velocities from D-grid (orthogonal basis, for KE)
     u_cell, v_cell = dgrid_to_center_vector(u_d, v_d)
 
-    # --- 2. Pressure at full levels ---
+    # --- 2. Pressure at full levels + layer thickness dp (continuity) ---
     if _hybrid:
         p_full = pressure_from_hybrid(sigma_coord, p_s)
-        dp_from_hybrid(sigma_coord, p_s)
+        dp = dp_from_hybrid(sigma_coord, p_s)  # (6, n, n, nlev)
     else:
         p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
+        # astype: keep dp in the state dtype when the σ arrays are f32.
+        dp = p_s[..., jnp.newaxis] * sigma_coord.dsigma.astype(p_s.dtype)
 
     # --- 3. Geopotential via hydrostatic integration ---
     if _hybrid:
@@ -354,11 +359,12 @@ def fv3_hydrostatic_tendencies(
     else:
         _hybrid_factor = None
     # iter-61: precompute div_v for div_damp so A-L gradient skips standalone halo
+    # (continuity is flux-form div(dp·v) — div_v is ONLY needed for div damping)
     _need_div_pad = config.div_damp_coeff > 0
     if _need_div_pad:
         div_v = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
     else:
-        div_v = None  # computed lazily below if not div-damped
+        div_v = None
     from legoesm.grids.halo import get_halo_backend
     _halo_backend = get_halo_backend()
     _needs_uv_pad = config.A_h > 0 or config.hyperdiff_coeff > 0
@@ -382,7 +388,10 @@ def fv3_hydrostatic_tendencies(
         # were dead because the slots were never filled (the comment at the
         # ln_ps_3d definition said it "rides the pack" but it did not).  Mirrors
         # the NH sibling compressible_euler_cdgrid.py:320 {K, pi_prime} pack.
-        _pe_pack = [zeta, B, inv_T, ln_ps_3d]
+        # dp rides the pack too: the flux-form continuity (sec 10b) needs
+        # dp at the C-grid faces — same fused-entry-exchange trick as the
+        # lat-lon PE's _dp_lat_pad.
+        _pe_pack = [zeta, B, inv_T, ln_ps_3d, dp]
         _pe_opt = []                       # names of optional trailing fields
         if _hybrid:
             _pe_pack.append(_hybrid_factor); _pe_opt.append("hf")
@@ -392,8 +401,8 @@ def fv3_hydrostatic_tendencies(
             *_pe_pack, mesh=_spmd_mesh, duogrid=_pe_dg,
             interp_offsets=_pe_offs_zeta,
         )
-        _zeta_pad, _B_pad, _invT_pad, _lnps_pad = _pe_pieces[:4]
-        _opt = dict(zip(_pe_opt, _pe_pieces[4:]))
+        _zeta_pad, _B_pad, _invT_pad, _lnps_pad, _dp_pad = _pe_pieces[:5]
+        _opt = dict(zip(_pe_opt, _pe_pieces[5:]))
         _hf_pad = _opt.get("hf")
         _div_v_pad = _opt.get("div")
     elif _halo_backend == "mpi":
@@ -405,7 +414,8 @@ def fv3_hydrostatic_tendencies(
         _pe_offs_zeta = None if _pe_dg is not None else grid.halo_interp_offsets
         # iter-58/60/61: ride ln_ps_3d (+ hybrid_factor + div_v) on this pack —
         # see SPMD note.
-        _pe_pack = [zeta, B, inv_T, ln_ps_3d]
+        # dp rides the pack (flux-form continuity) — see SPMD note.
+        _pe_pack = [zeta, B, inv_T, ln_ps_3d, dp]
         _pe_opt = []
         if _hybrid:
             _pe_pack.append(_hybrid_factor); _pe_opt.append("hf")
@@ -415,14 +425,15 @@ def fv3_hydrostatic_tendencies(
             *_pe_pack, topology=get_mpi_topology(), duogrid=_pe_dg,
             interp_offsets=_pe_offs_zeta,
         )
-        _zeta_pad, _B_pad, _invT_pad, _lnps_pad = _pe_pieces[:4]
-        _opt = dict(zip(_pe_opt, _pe_pieces[4:]))
+        _zeta_pad, _B_pad, _invT_pad, _lnps_pad, _dp_pad = _pe_pieces[:5]
+        _opt = dict(zip(_pe_opt, _pe_pieces[5:]))
         _hf_pad = _opt.get("hf")
         _div_v_pad = _opt.get("div")
     else:
         # operators do own exchange (single-device); no merged stage halo.
         _zeta_pad = _B_pad = _invT_pad = _lnps_pad = _hf_pad = None
         _div_v_pad = None
+        _dp_pad = None
 
     # _lnps_pad/_hf_pad/_div_v_pad are now filled by the stage pack above
     # (SPMD/MPI) or None (single-device → per-op halo).
@@ -488,11 +499,9 @@ def fv3_hydrostatic_tendencies(
     du_d_dt = zeta_corner * v_d - dB_dx - pg_corr_x
     dv_d_dt = -zeta_corner * u_d - dB_dy_perp - pg_corr_y_perp
 
-    # --- 10a. C-grid divergence for continuity + (optional) damping ---
-    if div_v is None:
-        div_v = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
-
-    # Divergence damping at D-grid
+    # --- 10a. C-grid divergence damping ---
+    # div_v was precomputed at the stage pack iff div_damp_coeff > 0 (the
+    # flux-form continuity in 10b no longer consumes it).
     if config.div_damp_coeff > 0:
         if config.use_async_halo and _halo_backend == "mpi":
             ddiv_dx, ddiv_dy_perp = overlapped_arakawa_lamb_gradient(
@@ -750,14 +759,36 @@ def fv3_hydrostatic_tendencies(
         and not (config.use_conservation_fixer and config.fix_mass)
     )
 
+    # Flux-form continuity (both branches): interpolate dp to the C-grid
+    # faces (2-point average, halo-consistent cross-face pad — the cube
+    # analogue of the lat-lon PE's interp_cell_to_uface/vface) and take the
+    # exact flux-form divergence div(dp_k·v).  The previous advective
+    # closure div(v)·dp_k differs wherever ∇p_s ≠ 0 and leaves an
+    # O(v·∇p_s) residual in the GLOBAL ∫dp_s/dt·dA budget that only the
+    # mass fixer masked; the flux form telescopes (face fluxes cancel in
+    # pairs), so ∫dp_s/dt·dA vanishes to seam-halo precision (exactly,
+    # with duogrid seam-flux sync).  Sign convention: the divergence is
+    # +div; positive divergence (mass export) ⇒ dp_s/dt < 0 below.
+    if _dp_pad is None:  # single-device: per-op halo (MPI/SPMD: stage pack)
+        _dp_pad = pad_halo_auto(dp, cdgrid)  # (6, n+2, n+2, nlev)
+    dp_u, dp_v = cgrid_interp_cc_to_faces_local(_dp_pad)
+    div_dp = cgrid_flux_divergence_sync(
+        dp_u, dp_v, u_c, v_c, cdgrid)  # (6, n, n, nlev)
+    # cumsum reused for BOTH dp_s_dt (last entry) and the σ̇/mass-flux
+    # integration below (iter-52/54 pattern: one cross-level collective).
+    _cumsum_dp = jnp.cumsum(div_dp, axis=-1)  # (6, n, n, nlev)
+    _D_total_p = _cumsum_dp[..., -1:]         # (6, n, n, 1)  [Pa/s]
+
     if _hybrid:
-        # Reuse column-sum from compute_mass_flux_hybrid (saves cross-level reduction)
-        mass_flux, _D_total_p_full = compute_mass_flux_hybrid(
-            div_v, p_s, sigma_coord,
-        )
-        dp_s_dt_data = -_D_total_p_full[..., 0] / sigma_coord.B_range
+        # Hybrid closure: B_range · dp_s/dt = -Σ_k div(dp_k·v).
+        dp_s_dt_data = -_D_total_p[..., 0] / sigma_coord.B_range
         if _apply_zero_mean_per_stage:
             dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
+
+        # Flux-form mass flux from the SAME cumsum (shared boundary closure).
+        mass_flux = compute_mass_flux_from_cumsum(
+            _cumsum_dp, _D_total_p, sigma_coord,
+        )
 
         # Loop 113/114: batch (u_d, v_d) corner→centre and back
         n_face_uv, n_i_uv, n_j_uv, nlev_uv = u_d.shape[0], u_d.shape[1] - 1, u_d.shape[2] - 1, u_d.shape[3]
@@ -788,13 +819,17 @@ def fv3_hydrostatic_tendencies(
         sigma_top = sigma_coord.sigma_half[0]
         sigma_range = 1.0 - sigma_top
 
-        # iter-52: compute_sigma_dot_and_total runs cumsum once (saves cross-level collective)
-        sigma_dot, _D_total_full = compute_sigma_dot_and_total(
-            div_v, sigma_coord,
-        )
-        dp_s_dt_data = -p_s * _D_total_full[..., 0] / sigma_range
+        # σ closure: (1 - σ_top) · dp_s/dt = -Σ_k div(dp_k·v), dp_k = p_s·Δσ_k
+        # (div_dp already carries the p_s factor — no extra p_s multiply).
+        dp_s_dt_data = -_D_total_p[..., 0] / sigma_range
         if _apply_zero_mean_per_stage:
             dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
+
+        # Flux-form σ̇ from the SAME cumsum (shared closure; mirrors the
+        # lat-lon C-grid reference implementation).
+        sigma_dot = compute_sigma_dot_from_cumsum(
+            _cumsum_dp, _D_total_p, p_s, sigma_coord,
+        )
 
         n_face_uv, n_i_uv, n_j_uv, nlev_uv = u_d.shape[0], u_d.shape[1] - 1, u_d.shape[2] - 1, u_d.shape[3]
         _uv_d = jnp.stack([u_d, v_d], axis=-1)

@@ -645,6 +645,55 @@ def cgrid_gradient_2d(eta, cdgrid):
     return cgrid_gradient_2d_local(eta_pad, cdgrid.rdxc, cdgrid.rdyc)
 
 
+def cgrid_flux_divergence_sync(h_u, h_v, u_c, v_c, cdgrid):
+    """Flux-form divergence div(h·v) from face-interpolated ``h``, seam-exact.
+
+    Non-duogrid: identical to ``cgrid_divergence(h_u*u_c, h_v*v_c, cdgrid)``
+    (each panel's seam flux uses its own interpolated halo — the seam
+    mismatch is the cross-face interpolation error).  Duogrid (ng>=2): the
+    boundary fluxes of adjacent panels are averaged to a SINGLE shared value
+    via ``synchronize_cgrid_fluxes`` (same gating as
+    :func:`cgrid_mass_flux_divergence`), so the global area integral of the
+    divergence telescopes to machine zero — the PE flux-form continuity
+    relies on this for exact dry-mass conservation.  Returns +div (positive
+    = mass export).
+    """
+    dg = cdgrid.base.duogrid
+    if dg is None or dg.ng < 2:
+        return cgrid_divergence(h_u * u_c, h_v * v_c, cdgrid)
+    # Duogrid: build the raw face fluxes, average the shared panel-boundary
+    # fluxes, then difference — mirrors cgrid_mass_flux_divergence's PPM path.
+    dy = _broadcast_metric(cdgrid.dy_edge_x, u_c)
+    dx = _broadcast_metric(cdgrid.dx_edge_y, v_c)
+    flux_x = (h_u * u_c) * dy
+    flux_y = (h_v * v_c) * dx
+    flux_x, flux_y = synchronize_cgrid_fluxes(flux_x, flux_y, cdgrid.n)
+    net_x = flux_x[:, 1:] - flux_x[:, :-1]
+    net_y = flux_y[:, :, 1:] - flux_y[:, :, :-1]
+    return (net_x + net_y) / _broadcast_metric(cdgrid.base.area, net_x)
+
+
+def cgrid_interp_cc_to_faces_local(f_pad):
+    """Cell-centre → C-grid face 2-point average — leading-axis-agnostic CORE.
+
+    Takes an ALREADY-halo-padded cc field ``f_pad`` (..., A+2, B+2[, nlev])
+    and averages adjacent cells onto the C-grid faces (the same face/index
+    convention as :func:`cgrid_gradient_2d_local`, with the difference
+    replaced by the mean).  Cube analogue of the lat-lon C-grid
+    ``interp_cell_to_uface`` / ``interp_cell_to_vface_halo`` pair — used by
+    the PE flux-form continuity to put the layer thickness dp on the faces
+    the divergence operator consumes.  Shared by the global dycore (padded
+    via ``pad_halo_auto`` / the packed stage halo) and the tiled shard_map
+    stage (padded via the in-stage ``make_tiled_pad_body``), so the stencil
+    lives in ONE place.
+
+    Returns ``(f_u (..., A+1, B[, nlev]), f_v (..., A, B+1[, nlev]))``.
+    """
+    f_u = 0.5 * (f_pad[:, 1:, 1:-1] + f_pad[:, :-1, 1:-1])
+    f_v = 0.5 * (f_pad[:, 1:-1, 1:] + f_pad[:, 1:-1, :-1])
+    return f_u, f_v
+
+
 # ==============================================================================
 # C-grid mass flux with PPM transport
 # ==============================================================================
