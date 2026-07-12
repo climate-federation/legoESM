@@ -1539,6 +1539,27 @@ class SpectralPrimitiveEquationModel:
             lnps_hat=state.lnps_hat.replace(data=lnps_hat_new),
         )
 
+    def _maybe_snapshot_target_mass(self, state) -> None:
+        """First-call anchored-mass snapshot, shared by step()/integrate().
+
+        Snapshotting during an outer jit/grad trace would store a Tracer
+        on ``self`` (leaks; the next eager step raises
+        UnexpectedTracerError) — refuse with a usable remedy instead
+        (codex 2026-07-12 rounds 2-3: BOTH entry points need this guard).
+        """
+        if not (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is None):
+            return
+        if isinstance(state.lnps_hat.data, jax.core.Tracer):
+            raise ValueError(
+                "anchor_mass_to_initial cannot take its first-mass "
+                "snapshot inside a jit/grad trace (it would store a "
+                "tracer on the model). Call set_target_mass(<concrete "
+                "fp64 mass>) or take one eager step() first."
+            )
+        self._target_mass = self._compute_initial_mass(state)
+
     def _compute_initial_mass(self, state):
         """Compute total dry mass ``∫ p_s dA`` in fp64 from a spectral state."""
         lnps_grid = sh_synthesis(self.grid, state.lnps_hat.data)
@@ -1601,20 +1622,7 @@ class SpectralPrimitiveEquationModel:
         # Iter-3: anchor mass on first call (outside JIT; the fp64 scalar
         # is then THREADED into the jitted step as a traced arg so a
         # later reset/set_target_mass is honored — codex 2026-07-12).
-        if (self.config.fix_mass
-                and self.config.anchor_mass_to_initial
-                and self._target_mass is None):
-            # Snapshotting during an outer jit/grad trace would store a
-            # Tracer on ``self`` (leaks; next eager step raises
-            # UnexpectedTracerError).  Refuse with a usable remedy.
-            if isinstance(state.lnps_hat.data, jax.core.Tracer):
-                raise ValueError(
-                    "anchor_mass_to_initial cannot take its first-mass "
-                    "snapshot inside a jit/grad trace (it would store a "
-                    "tracer on the model). Call set_target_mass(<concrete "
-                    "fp64 mass>) or take one eager step() first."
-                )
-            self._target_mass = self._compute_initial_mass(state)
+        self._maybe_snapshot_target_mass(state)
 
         integrator = self.config.time_integrator.lower()
         if integrator in ("leapfrog", "leapfrog_si"):
@@ -1913,10 +1921,7 @@ class SpectralPrimitiveEquationModel:
         # path, but the batched-CPU path calls _step_on_cpu directly —
         # snapshot here so BOTH paths anchor on the true initial state
         # (codex 2026-07-12: the batched path previously never anchored).
-        if (self.config.fix_mass
-                and self.config.anchor_mass_to_initial
-                and self._target_mass is None):
-            self._target_mass = self._compute_initial_mass(state)
+        self._maybe_snapshot_target_mass(state)
 
         if self._use_cpu_for_spectral:
             return self._integrate_on_cpu(state, n_steps, dt, save_every, physics_fn)
