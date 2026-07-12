@@ -403,8 +403,32 @@ def create_atmosphere_dycore(
         )
 
     if solver_name == "spectral_compressible_euler":
-        from legoesm.atmosphere.dynamics.spectral_nh import SpectralCompressibleEulerModel
-        return SpectralCompressibleEulerModel(grid=grid, sigma_coord=sigma)
+        from legoesm.atmosphere.dynamics.spectral_nh import (
+            SpectralCompressibleEulerModel, SpectralNHConfig,
+        )
+        # Non-hydrostatic uses a height (z-star) coordinate, not sigma:
+        # build the flat-topography defaults exactly like the CDGrid-NH
+        # branch above.  z_s must be (n_lat, n_lon) on the Gaussian grid
+        # (grid.lat is 1-D), hence zeros_like(lat2d).
+        height_coord = getattr(grid, "height_coord", None)
+        terrain_metric = getattr(grid, "terrain_metric", None)
+        if height_coord is None or terrain_metric is None:
+            from legoesm.grids.vertical import (
+                create_height_coordinate, compute_terrain_metric,
+            )
+            if height_coord is None:
+                nlev = sigma.sigma_full.shape[0] if hasattr(sigma, "sigma_full") else 40
+                height_coord = create_height_coordinate(nlev, 30_000.0)
+            if terrain_metric is None:
+                z_s = jnp.zeros_like(grid.lat2d)
+                terrain_metric = compute_terrain_metric(z_s, height_coord)
+        nh_cfg = SpectralNHConfig(
+            fix_mass=dc.fix_mass,
+            anchor_mass_to_initial=dc.fix_mass,
+        )
+        return SpectralCompressibleEulerModel(
+            grid, height_coord, terrain_metric, nh_cfg,
+        )
 
     # ----- MPAS icosahedral -----
     if solver_name == "mpas_primitive_equations":
@@ -438,8 +462,32 @@ def create_atmosphere_dycore(
         return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)
 
     if solver_name == "mpas_compressible_euler":
-        from legoesm.atmosphere.dynamics.compressible_euler_mpas import MPASCompressibleEulerModel
-        return MPASCompressibleEulerModel(mesh=grid, sigma_coord=sigma)
+        from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+            MPASCompressibleEulerModel, MPASCompressibleEulerConfig,
+        )
+        # Non-hydrostatic uses a height (z-star) coordinate, not sigma:
+        # flat-topography defaults as in the CDGrid-NH branch; the MPAS
+        # surface field is 1-D over cells.
+        height_coord = getattr(grid, "height_coord", None)
+        terrain_metric = getattr(grid, "terrain_metric", None)
+        if height_coord is None or terrain_metric is None:
+            from legoesm.grids.vertical import (
+                create_height_coordinate, compute_terrain_metric,
+            )
+            if height_coord is None:
+                nlev = sigma.sigma_full.shape[0] if hasattr(sigma, "sigma_full") else 40
+                height_coord = create_height_coordinate(nlev, 30_000.0)
+            if terrain_metric is None:
+                z_s = jnp.zeros_like(grid.latCell)
+                terrain_metric = compute_terrain_metric(z_s, height_coord)
+        nh_cfg = MPASCompressibleEulerConfig(
+            nu_del2=diff.A_h,
+            nu_del4=diff.hyperdiff,
+            K_h=diff.A_h,
+            fix_mass=dc.fix_mass,
+            anchor_mass_to_initial=dc.fix_mass,
+        )
+        return MPASCompressibleEulerModel(grid, height_coord, terrain_metric, nh_cfg)
 
     # ----- Doubly-periodic plane -----
     if solver_name == "plane_compressible_euler":

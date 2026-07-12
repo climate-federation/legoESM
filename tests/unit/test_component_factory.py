@@ -292,6 +292,19 @@ class TestAtmosphereOnEveryGlobalGrid:
             # the TRiSK mesh is held on the model as `.mesh`, not `.grid`.
             ("mpas", 1, "hydrostatic", "mpas", {"lloyd_iterations": 2},
              "MPASPrimitiveEquationModel", "mesh"),
+            # Non-hydrostatic branches take (grid, height_coord, terrain_metric),
+            # not sigma_coord — these two rows caught the factory passing
+            # sigma_coord= to constructors that do not accept it.
+            pytest.param(
+                "gaussian", 21, "nonhydrostatic", "spectral", {},
+                "SpectralCompressibleEulerModel", "grid",
+                marks=pytest.mark.skipif(
+                    not jax.config.read("jax_enable_x64"),
+                    reason="spectral/Gaussian needs JAX_ENABLE_X64=1",
+                ),
+            ),
+            ("mpas", 1, "nonhydrostatic", "mpas", {"lloyd_iterations": 2},
+             "MPASCompressibleEulerModel", "mesh"),
         ],
     )
     def test_dycore_builds_on_factory_grid(
