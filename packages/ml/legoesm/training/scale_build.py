@@ -39,6 +39,22 @@ def _load_run_amip():
 def build_latlon_config(cfg, yml):
     """ExperimentConfig for a lat-lon C-grid PE run, via run_amip's parser."""
     ra = _load_run_amip()
+    # Pure-dycore WB modes (neural_gcm / sfno) replace the physics pipeline with
+    # a neural net -- their rollout runs NO boundary-layer scheme, so the
+    # turbulence field feeds ONLY _create_friction (fric_decay), nothing else
+    # (dt/grid/sigma/dycore are turbulence-independent; physics_pipeline is
+    # unused for these modes).  Declare turbulence="none" for them so the #931
+    # double-count gate KEEPS the Held-Suarez Rayleigh drag ON -- that
+    # fric_decay is their SOLE #797 adjoint dissipation of the otherwise
+    # undamped dycore (the epoch-0 zero-init rollout is the bare dycore).  A
+    # "louis" label would gate it to a no-op and reintroduce the NaN-gradient
+    # blow-up (#797 bug 11).  Verified byte-identical to the pre-#931 always-on
+    # drag: turbulence="none" reproduces the exact HS Rayleigh fric_decay while
+    # leaving dt/grid/sigma unchanged.  Physics mode genuinely runs louis and
+    # keeps it (louis owns BOTH the surface stress and the adjoint damping).
+    _mode = getattr(cfg, "mode", None)
+    _turbulence = ("none" if _mode in ("neural_gcm", "sfno")
+                   else yml.get("turbulence", "louis"))
     argv = [
         "--grid-type", "latlon",
         "--discretization", "latlon_cgrid",
@@ -48,7 +64,7 @@ def build_latlon_config(cfg, yml):
         "--dt", str(float(yml["dt"])),
         "--radiation", str(yml.get("radiation", "rrtmgp")),
         "--convection", str(yml.get("convection", "sbm")),
-        "--turbulence", str(yml.get("turbulence", "louis")),
+        "--turbulence", str(_turbulence),
         "--microphysics", str(yml.get("microphysics", "kessler")),
         "--gravity-wave-drag", str(yml.get("gravity_wave_drag", "hines")),
         # run_amip's --rad-update-steps defaults to None (its main() auto-sets
