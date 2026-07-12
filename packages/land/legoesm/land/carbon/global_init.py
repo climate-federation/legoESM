@@ -285,6 +285,7 @@ class ArchetypeBatch(NamedTuple):
     g_idx: np.ndarray       # (ncol_g,) archetype indices in table order
     steps_per_year: int     # round(seconds_per_year / dt)
     t_init: object          # (ncol_g,) land-state initial temperature [K]
+    soil_frozen_fraction: object  # (ncol_g,) annual frozen fraction [-] (perennial-frost index)
 
 
 def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
@@ -348,6 +349,7 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
         CLM5_PFT_NAMES, PARAM_NAMES, array_to_params, clm5_pft_table,
         is_evergreen, is_woody,
     )
+    from legoesm.land.carbon.carbon_cycle import annual_frozen_fraction
     from legoesm.land.carbon.config import CarbonConfig
     from legoesm.land.carbon.stomata import StomataConfig
     from legoesm.land.climate_forcing import make_climatological_forcing
@@ -440,15 +442,26 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
         sw_g = jnp.asarray(sw_mean[g_idx])
         precip_g = jnp.asarray(map_yr[g_idx] / _SECONDS_PER_YEAR)
         forcing_fn = _build_forcing_fn(mat_g, tamp_g, sw_g, precip_g)
+        # Per-column perennial-frost index: the annual frozen fraction of THIS
+        # group's climatological temperature cycle (mat + seasonal amplitude),
+        # the same climate the forcing drives the spin-up with.  Computed here
+        # (a priori, param-independent) and threaded into the coupled carbon
+        # step so perennially-frozen high-latitude columns accumulate permafrost
+        # SOC.  ``carbon_cfg`` supplies the (default, never-trained)
+        # ``som_freeze_width_K`` -- IDENTICAL to the width
+        # ``precompute_fast_analytic_inputs`` uses, so the closed-form surrogate
+        # and this spin-up apply a byte-identical ``phi``.
+        phi_g = annual_frozen_fraction(mat_g, tamp_g, carbon_cfg)
         # Archetypes carry no hemisphere; the land-state initial temperature is
         # the group mean-annual temperature (matches the NH-phased forcing).
         batches.append(ArchetypeBatch(
             config=config, land_params=land_params, forcing_fn=forcing_fn,
-            g_idx=g_idx, steps_per_year=steps_per_year, t_init=mat_g))
+            g_idx=g_idx, steps_per_year=steps_per_year, t_init=mat_g,
+            soil_frozen_fraction=phi_g))
     return batches
 
 
-def make_archetype_step_fn(config, land_params, *, dt):
+def make_archetype_step_fn(config, land_params, *, dt, soil_frozen_fraction=None):
     """Build the coupled land+carbon step for one archetype batch.
 
     Returns ``step_fn(state, carbon, forcing, doy) -> (new_state, new_carbon,
@@ -488,14 +501,20 @@ def make_archetype_step_fn(config, land_params, *, dt):
     def step_fn(state, carbon, forcing, doy):
         new_state, _response, carbon_new = step_multilayer_land(
             state, forcing, config, _U_MIN, dt,
-            lat=lat_g, carbon_state=carbon, doy=doy, land_params=land_params)
+            lat=lat_g, carbon_state=carbon, doy=doy, land_params=land_params,
+            soil_frozen_fraction=soil_frozen_fraction)
         # Reconstruct the flux breakdown consistently with the model: pass
         # land_params so the GPP override uses the SAME per-archetype
-        # Vc_max25/g1/LCMA the coupled step used.
+        # Vc_max25/g1/LCMA the coupled step used, AND the SAME per-column
+        # soil_frozen_fraction so the reconstructed SOM decomposition losses
+        # carry the SAME perennial-frost protection -- the analytic slow-pool
+        # reset reads these losses to infer k_X, so they MUST be protected too
+        # (else the reset would undo the protected spun-up SOM).
         diag = reconstruct_carbon_diagnostics(
             new_state, forcing, carbon, config, root_frac_g,
             theta_wp_g, theta_fc_g, beta_min, lat_g, doy, dt,
-            spatial=True, land_params=land_params)
+            spatial=True, land_params=land_params,
+            soil_frozen_fraction=soil_frozen_fraction)
         return new_state, carbon_new, diag
 
     return step_fn
@@ -539,7 +558,9 @@ def _spinup_batch(batch: ArchetypeBatch, *, n_spinup, n_verify, dt,
     from legoesm.land.multilayer_land import init_multilayer_land_state
 
     ncol_g = int(np.asarray(batch.g_idx).shape[0])
-    step_fn = make_archetype_step_fn(batch.config, batch.land_params, dt=dt)
+    step_fn = make_archetype_step_fn(
+        batch.config, batch.land_params, dt=dt,
+        soil_frozen_fraction=batch.soil_frozen_fraction)
     state0 = init_multilayer_land_state(ncol_g, batch.config, T_init=batch.t_init)
     carbon0 = init_carbon_state((ncol_g,), batch.config.carbon)
     _final_state, final_carbon, annual, _reset_fluxes = run_semi_analytic_spinup(
@@ -851,6 +872,11 @@ def precompute_fast_analytic_inputs(
     lit_to_som_annual = np.zeros(n_arch)
     a_wood_annual = np.zeros(n_arch)
     soil_T_traj = np.zeros((n_arch, steps_per_year))
+    # Perennial-frost index (annual frozen fraction) -- the SAME per-column
+    # value iter_archetype_batches threads into the coupled step (both derived
+    # from the archetype climate via annual_frozen_fraction), so the closed form
+    # and the spin-up apply a byte-identical f_perma.
+    soil_frozen_fraction = np.zeros(n_arch)
     real_som = np.zeros(n_arch)
     # Live-pool (biomass/LAI) forward inputs + reference (all param-independent):
     #   npp_pos_annual -- the model's own annual ALLOCATABLE NPP driving the pools;
@@ -869,7 +895,9 @@ def precompute_fast_analytic_inputs(
     for batch in batches:
         g_idx = np.asarray(batch.g_idx, int)
         ncol_g = g_idx.shape[0]
-        step_fn = make_archetype_step_fn(batch.config, batch.land_params, dt=dt)
+        step_fn = make_archetype_step_fn(
+            batch.config, batch.land_params, dt=dt,
+            soil_frozen_fraction=batch.soil_frozen_fraction)
         state0 = init_multilayer_land_state(
             ncol_g, batch.config, T_init=batch.t_init)
         carbon0 = init_carbon_state((ncol_g,), batch.config.carbon)
@@ -929,6 +957,7 @@ def precompute_fast_analytic_inputs(
         lit_to_som_annual[g_idx] = np.asarray(reset_fluxes.lit_to_som)
         a_wood_annual[g_idx] = np.asarray(reset_fluxes.a_wood)
         soil_T_traj[g_idx, :] = np.asarray(t_seq).T          # (ncol_g, steps_per_year)
+        soil_frozen_fraction[g_idx] = np.asarray(batch.soil_frozen_fraction)
         real_som[g_idx] = np.asarray(som_total(final_carbon))
         npp_pos_annual[g_idx] = np.asarray(npp_ann)
         is_woody[g_idx] = float(bool(batch.config.carbon.woody))
@@ -944,6 +973,7 @@ def precompute_fast_analytic_inputs(
         lit_to_som_annual=jnp.asarray(lit_to_som_annual),
         a_wood_annual=jnp.asarray(a_wood_annual),
         soil_T_traj=jnp.asarray(soil_T_traj),
+        soil_frozen_fraction=jnp.asarray(soil_frozen_fraction),
         precip=jnp.asarray(precip),
         dt_days=float(dt_days),
         npp_pos_annual=jnp.asarray(npp_pos_annual),

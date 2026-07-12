@@ -149,6 +149,19 @@ class FastAnalyticInputs(NamedTuple):
         Top-soil-layer temperature the SOM decomposition modifier sees, sampled
         every sub-daily step over ONE stationary year (the full seasonal +
         diurnal cycle).  SOM-parameter-independent (no SOM -> energy feedback).
+    soil_frozen_fraction : (n_arch,) [-]
+        Per-archetype ANNUAL frozen fraction in [0, 1] -- the perennial-frost
+        index driving the permafrost/anaerobic SOM protection
+        (:func:`legoesm.land.carbon.carbon_cycle.perennial_frost_protection`).
+        Computed by :func:`~legoesm.land.carbon.global_init.
+        precompute_fast_analytic_inputs` from the climatological annual
+        temperature cycle (:func:`~legoesm.land.carbon.carbon_cycle.
+        annual_frozen_fraction` on the archetype ``mat_k`` /
+        ``t_seasonal_amp_k``) -- the SAME per-column value the coupled spin-up's
+        ``step_carbon_differland`` applies, so the closed form and the spin-up
+        rescale each pool's turnover by a BYTE-IDENTICAL ``f_perma`` (the
+        surrogate-vs-spin-up fidelity gate stays ratio-invariant).  Climate-only,
+        so param-independent and frozen like ``soil_T_traj``.
     precip : (n_arch,) [kg/m2/s]
         Per-archetype precipitation rate (constant over the year in the archetype
         forcing) driving the moisture modifier ``f_moist``.
@@ -187,6 +200,7 @@ class FastAnalyticInputs(NamedTuple):
     lit_to_som_annual: jax.Array
     a_wood_annual: jax.Array
     soil_T_traj: jax.Array
+    soil_frozen_fraction: jax.Array
     precip: jax.Array
     dt_days: float
     npp_pos_annual: jax.Array
@@ -247,7 +261,8 @@ def analytic_som_soc(
     (:func:`legoesm.land.carbon.carbon_cycle.som_decomposition_rate`) on the
     recorded stationary soil-temperature trajectory:
 
-        r_X(t)  = _effective_rate(_som_decomp_modifier(T(t), precip, config) * tor_X, dt)
+        r_X(t)  = _effective_rate(
+                      _som_decomp_modifier(T(t), precip, config, phi_frozen) * tor_X, dt)
         k_X     = sum_t r_X(t) * dt_days                        [1/yr] annual turnover
         i_active = lit_to_som_annual + cwd_humification_eff * a_wood_annual
         (C_active, C_slow, C_passive) = _forward_substitute_cascade(i_active, k_X..., f...)
@@ -308,11 +323,18 @@ def analytic_som_soc(
     dt_days = precomputed.dt_days
     temp = precomputed.soil_T_traj                    # (n_arch, n_samples) [K]
     precip = precomputed.precip[:, None]              # (n_arch, 1) -> broadcasts over samples
+    # Per-column perennial-frost index (annual frozen fraction) -> the SAME
+    # per-column protection factor ``f_perma`` the coupled ``step_carbon_differland``
+    # applies (byte-identical, so the fidelity gate is ratio-invariant).  Broadcast
+    # over the sample axis; ``f_perma`` scales the modifier inside every r_X(t).
+    frozen_fraction = precomputed.soil_frozen_fraction[:, None]   # (n_arch, 1)
 
     # Realised annual turnover per pool [1/yr] = sum_t r_X(t) * dt_days, using the
     # model's EXACT modifier + finite-dt kinetics on the recorded trajectory.
     def _annual_turnover(tor_som: jax.Array) -> jax.Array:
-        r = som_decomposition_rate(temp, precip, tor_som, config, dt_days)
+        r = som_decomposition_rate(
+            temp, precip, tor_som, config, dt_days,
+            frozen_fraction=frozen_fraction)
         return jnp.sum(r, axis=1) * dt_days           # (n_arch,)
 
     k_active = _annual_turnover(config.tor_som_active)

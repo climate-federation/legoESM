@@ -110,10 +110,19 @@ _VAN_BEMMELEN_OC_PER_OM = 0.58
 # SEPARATELY as a_wood_annual -- the NPP-to-wood allocation, independent of
 # every SOM param, no approximation at all -- with the cwd_humification_eff
 # multiply applied LIVE in analytic_som_soc, so its gradient is exact too.)
+# ``permafrost_protection_min`` / ``permafrost_frozen_fraction_threshold`` (the
+# perennial-frost / anaerobic SOM protection knobs) are FULLY fast-valid: the
+# closed form scales each pool's turnover by f_perma(phi, config) with phi (the
+# annual frozen fraction) FROZEN/param-independent, so f_perma is EXACT in these
+# two leaves (no litter-input approximation like Q10_het_exp's) -- jax.grad flows
+# the full gradient (verified: test_carbon_cycle.TestPerennialFrostProtection.
+# test_f_perma_differentiable_in_perma_params).  They are THE direct high-latitude
+# SOC levers, so they belong in the default fast SOC-calibration set.
 SOM_FIELDS: tuple[str, ...] = (
     "tor_som_active", "tor_som_slow", "tor_som_passive",
     "f_active_to_slow", "f_slow_to_passive", "som_freeze_floor",
     "cwd_humification_eff",
+    "permafrost_protection_min", "permafrost_frozen_fraction_threshold",
 )
 
 # The LIVE-pool (foliage/root/wood) fields the biomass/LAI streams (--with-biomass/
@@ -219,7 +228,7 @@ DEFAULT_CACHE_MIN_COMPILE_SECS = 1.0
 # a change with UNCHANGED table+spin inputs would otherwise serve a STALE precompute;
 # the version bump forces a MISS (recompute).  Mirrors the XLA compilation cache's
 # HLO-in-key safety (see configure_jax_compilation_cache).
-_PRECOMPUTE_CACHE_VERSION = "v6"  # v6: + recalibrated bulk r_maint_* (fol/root/wood 0.002/0.0008/2e-5) at the decoupled T_ref_ra=298.15K to match observed CUE ~0.45; default-parameter equilibrium changes (v5 was the T_ref_ra decoupling alone)
+_PRECOMPUTE_CACHE_VERSION = "v7"  # v7: + perennial-frost/anaerobic SOM protection (f_perma on the SOM modifier, keyed on the annual frozen fraction) -- coupled spin-up equilibrium changes for cold archetypes + new soil_frozen_fraction field in FastAnalyticInputs (v6 was the r_maint_* CUE recalibration)
 DEFAULT_PRECOMPUTE_CACHE_DIR = (
     os.environ.get("CARBON_PRECOMPUTE_CACHE_DIR", "")
     or str(REPO_ROOT / ".cache" / "carbon_precompute"))
@@ -1474,6 +1483,7 @@ def _load_or_precompute(table, spin: dict, *, cache_dir: str, rebuild: bool):
                     lit_to_som_annual=jnp.asarray(z["lit_to_som_annual"]),
                     a_wood_annual=jnp.asarray(z["a_wood_annual"]),
                     soil_T_traj=jnp.asarray(z["soil_T_traj"]),
+                    soil_frozen_fraction=jnp.asarray(z["soil_frozen_fraction"]),
                     precip=jnp.asarray(z["precip"]),
                     dt_days=float(z["dt_days"]),
                     npp_pos_annual=jnp.asarray(z["npp_pos_annual"]),
@@ -1524,6 +1534,7 @@ def _load_or_precompute(table, spin: dict, *, cache_dir: str, rebuild: bool):
                 lit_to_som_annual=np.asarray(precomputed.lit_to_som_annual),
                 a_wood_annual=np.asarray(precomputed.a_wood_annual),
                 soil_T_traj=np.asarray(precomputed.soil_T_traj),
+                soil_frozen_fraction=np.asarray(precomputed.soil_frozen_fraction),
                 precip=np.asarray(precomputed.precip),
                 dt_days=np.asarray(precomputed.dt_days, dtype=np.float64),
                 real_som=np.asarray(real_som),

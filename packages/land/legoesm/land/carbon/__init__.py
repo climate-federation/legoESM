@@ -15,9 +15,11 @@ Set ``CarbonConfig(scheme="none")`` (the default) to disable.
 
 from legoesm.land.carbon.config import CarbonConfig, CarbonState
 from legoesm.land.carbon.carbon_cycle import (
+    annual_frozen_fraction,
     compute_gpp,
     compute_phenology,
     init_carbon_state,
+    perennial_frost_protection,
     seasonal_co2_flux,
     step_carbon,
     step_carbon_differland,
@@ -39,9 +41,11 @@ from legoesm.land.carbon.stomata import (
 __all__ = [
     "CarbonConfig",
     "CarbonState",
+    "annual_frozen_fraction",
     "compute_gpp",
     "compute_phenology",
     "init_carbon_state",
+    "perennial_frost_protection",
     "seasonal_co2_flux",
     "step_carbon",
     "step_carbon_differland",

@@ -247,7 +247,13 @@ def assess_ic_map(archetypes_npz_path, *, n_years, dt=None, n_layers=None,
     for batch in batches:
         g_idx = batch.g_idx
         ncol_g = int(g_idx.shape[0])
-        step_fn = make_archetype_step_fn(batch.config, batch.land_params, dt=dt)
+        # Pass the batch's perennial-frost index so the drift-validator step
+        # applies the SAME permafrost/anaerobic SOM protection the equilibrium
+        # IC was built with (else the mapped IC would spuriously "drift" as an
+        # unprotected step decomposed its protected permafrost SOC).
+        step_fn = make_archetype_step_fn(
+            batch.config, batch.land_params, dt=dt,
+            soil_frozen_fraction=batch.soil_frozen_fraction)
         state0 = init_multilayer_land_state(
             ncol_g, batch.config, T_init=batch.t_init)
         # (a) MAPPED IC: this group's archetype equilibria from the finidat.

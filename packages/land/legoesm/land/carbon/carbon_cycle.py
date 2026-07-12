@@ -30,6 +30,11 @@ _PAR_FRACTION_OF_SW = 0.48     # photosynthetically-active fraction of shortwave
 _DAYS_PER_YEAR = 365.25        # Julian year length [days]
 _HALF_YEAR_OFFSET_DAYS = 182.5  # half-year phenology phase offset [days]
 _SEASONAL_YEAR_DAYS = 365.0    # year length for the NEE seasonal phase [days]
+# Number of within-year samples for the annual-frozen-fraction integral
+# (:func:`annual_frozen_fraction`); daily resolution is ample for a smooth
+# seasonal cosine.  A NUMERICS sample count (never trained), fixed so the
+# coupled spin-up and the closed-form surrogate integrate an IDENTICAL index.
+_FROST_INDEX_SAMPLES = 365
 
 # ---------------------------------------------------------------------------
 # Unit conversions
@@ -307,10 +312,133 @@ def _freeze_modifier(
     return floor + (1.0 - floor) * jax.nn.sigmoid((T - constants.T_freeze) / w)
 
 
+def perennial_frost_protection(
+    frozen_fraction: jnp.ndarray,
+    config: CarbonConfig,
+) -> jnp.ndarray:
+    """Perennial-frost / anaerobic SOM protection factor ``f_perma`` in
+    ``[permafrost_protection_min, 1]``, driven by the ANNUAL frozen fraction.
+
+    Permafrost carbon protection (Koven et al. 2013; CLM4.5 cold-soil
+    biogeochemistry; Hugelius et al. 2014 NCSCD stocks).  ``_freeze_modifier``
+    already suppresses decomposition per-timestep whenever the soil is frozen,
+    flooring it at the AEROBIC ``som_freeze_floor`` -- but the ANNUAL turnover of
+    a cold column is dominated by its brief unfrozen (thaw-season) window, so
+    that instantaneous floor alone leaves high-latitude SOC capped far below the
+    observed 100-300 kgC/m2 permafrost/peat stocks.  A PERENNIALLY-frozen,
+    waterlogged column protects its SOM ALL YEAR -- anaerobic (O2-limited)
+    decomposition in the meltwater-saturated active layer + cryoturbation
+    burying carbon into the perennially-frozen, decomposition-shielded permafrost
+    -- so this is a SEPARATE, whole-column suppression keyed on the PERENNIAL-
+    frost STATE (an annual statistic), not the instantaneous temperature.
+
+    SIGN / UNITS (carbon RETAINED, never created; see ``step_carbon_differland``
+    SOM cascade).  ``frozen_fraction`` in ``[0, 1]`` (dimensionless annual frozen
+    fraction).  Returns a dimensionless suppression factor.  Direction, walked
+    at the term: MORE frost (``frozen_fraction`` UP) -> ``sigmoid`` UP ->
+    ``f_perma`` DOWN -> the SOM decomposition modifier ``m`` DOWN -> per-step
+    respiration/humification loss ``D_X = C_X*eff_rate(m*k_X)`` DOWN -> the pool
+    RETAINS more carbon -> equilibrium ``C_X = I_X/(m*k_X)`` UP.  No carbon is
+    created: the suppressed loss simply stays as pool storage, and the SOM
+    sub-column budget ``d(sum C_som) = (input - R_het_som)*dt`` still closes
+    exactly (``f_perma`` only rescales ``m``, a factor already inside the loss).
+    ``frozen_fraction = 0`` (temperate/tropical, never frozen) ->
+    ``f_perma`` ~ 1 (UNCHANGED, since the threshold sits well above 0), so the
+    already-correct warm-soil SOC is preserved.  ``frozen_fraction -> 1``
+    (perennial permafrost) -> ``f_perma -> permafrost_protection_min``, which
+    (multiplying through ``_freeze_modifier``'s ``som_freeze_floor``) drives the
+    effective rate BELOW the aerobic floor -- the coherent reconciliation of the
+    two: ``som_freeze_floor`` is the unfrozen-season aerobic minimum, ``f_perma``
+    the perennial-frost/anaerobic protection.
+
+        f_perma = 1 - (1 - permafrost_protection_min)
+                      * sigmoid((frozen_fraction - threshold) / width)
+
+    -> monotonically DECREASING in ``frozen_fraction``, bounded in
+    ``[permafrost_protection_min, 1]`` (``permafrost_protection_min`` in ``(0, 1]``
+    keeps the millennial ``I/(m*k)`` equilibrium FINITE and the factor a pure
+    SUPPRESSION, never an amplification).  Validated on the STATIC config values
+    (concrete host scalars / concrete arrays only; a sigmoid-CONSTRAINED traced
+    calibration leaf is guaranteed in-bounds by its transform -- see
+    ``_freeze_modifier``).
+    """
+    p_min = config.permafrost_protection_min
+    thr = config.permafrost_frozen_fraction_threshold
+    w = config.permafrost_frozen_fraction_width
+    if not w > 0.0:
+        raise ValueError(
+            f"permafrost_frozen_fraction_width must be > 0, got {w!r}.")
+    if is_concrete(p_min) and not 0.0 < p_min <= 1.0:
+        raise ValueError(
+            f"permafrost_protection_min must be in (0, 1], got {p_min!r}.")
+    if is_concrete(thr) and not 0.0 < thr < 1.0:
+        raise ValueError(
+            f"permafrost_frozen_fraction_threshold must be in (0, 1), "
+            f"got {thr!r}.")
+    return 1.0 - (1.0 - p_min) * jax.nn.sigmoid((frozen_fraction - thr) / w)
+
+
+def annual_frozen_fraction(
+    mat_k: jnp.ndarray,
+    t_seasonal_amp_k: jnp.ndarray,
+    config: CarbonConfig,
+) -> jnp.ndarray:
+    """Annual frozen fraction ``phi`` in ``[0, 1]`` of the climatological
+    near-surface temperature cycle -- the perennial-frost INDEX driving
+    :func:`perennial_frost_protection`.
+
+    Physical choice (documented per requirement).  The perennial-frost state
+    (permafrost vs seasonally-frozen) is an ANNUAL property that a single
+    timestep cannot resolve, so the protection is keyed on the FRACTION OF THE
+    YEAR the soil is frozen -- the standard climatological permafrost predictor
+    (mean-annual air temperature / freezing index; Gruber 2012 permafrost
+    zonation index).  It is computed here from the climatological annual
+    temperature cycle ``T(doy) = mat_k + t_seasonal_amp_k * cos(2*pi*doy/year)``
+    (the same seasonal cycle :func:`legoesm.land.climate_forcing.
+    make_climatological_forcing` drives the archetype spin-up with, and that the
+    recorded ``fast_analytic.FastAnalyticInputs.soil_T_traj`` top-soil
+    temperature tracks) rather than the spin-up ``soil_T_traj`` itself for ONE
+    decisive reason: the coupled spin-up applies the protection per-timestep
+    (it cannot see the whole year) while the closed-form surrogate applies it to
+    the annual turnover, and BOTH must use a BYTE-IDENTICAL per-column ``phi`` or
+    the surrogate-vs-spin-up fidelity gate breaks (``f_perma`` would rescale the
+    two forwards by different factors).  Deriving ``phi`` from the deterministic
+    climatological cycle -- available a priori to both paths from the SAME
+    per-archetype ``(mat_k, t_seasonal_amp_k)`` -- guarantees that identity, and
+    is robust to spin-up-transient / snow-insulation contamination that a
+    ``soil_T_traj`` estimate would carry.  The fraction is invariant to the
+    seasonal PHASE (a full-year integral), so the peak-day offset is irrelevant.
+
+    Smooth / differentiable: the hard ``T < T_freeze`` indicator is the freeze
+    sigmoid ``sigmoid((T_freeze - T)/som_freeze_width_K)`` (reusing the SOM
+    freeze-curve half-width -- no new curve), averaged over the year::
+
+        phi = mean_doy[ sigmoid((T_freeze - T(doy)) / som_freeze_width_K) ]
+
+    ``mat_k`` / ``t_seasonal_amp_k`` broadcast together; returns a per-column
+    ``phi`` (same shape).  ``phi`` is SOM-parameter-independent (climate only),
+    so it is precomputed ONCE and frozen (like ``soil_T_traj``); the trainable
+    perennial-frost parameters enter only through
+    :func:`perennial_frost_protection`.
+    """
+    w = config.som_freeze_width_K
+    if not w > 0.0:
+        raise ValueError(f"som_freeze_width_K must be > 0, got {w!r}.")
+    mat = jnp.asarray(mat_k)[..., None]
+    amp = jnp.asarray(t_seasonal_amp_k)[..., None]
+    # Uniform within-year samples of the seasonal cosine (phase-invariant for a
+    # full-year mean).  ``2*pi``: math; ``_FROST_INDEX_SAMPLES``: numerics count.
+    theta = jnp.linspace(0.0, 2.0 * jnp.pi, _FROST_INDEX_SAMPLES, endpoint=False)
+    T_cycle = mat + amp * jnp.cos(theta)                # (..., n_samples) [K]
+    frozen_indicator = jax.nn.sigmoid((constants.T_freeze - T_cycle) / w)
+    return jnp.mean(frozen_indicator, axis=-1)          # (...,) in [0, 1]
+
+
 def _som_decomp_modifier(
     T: jnp.ndarray,
     precip: jnp.ndarray,
     config: CarbonConfig,
+    frozen_fraction: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """SOM decomposition-rate modifier ``m = f_temp * f_moist * f_freeze``.
 
@@ -339,8 +467,22 @@ def _som_decomp_modifier(
     DECOMPOSED FRACTION of a pool lost per step is always in ``[0, 1)``
     regardless of how large ``m`` grows -- a modifier > 1 can never overdraw
     a pool.
+
+    ``frozen_fraction`` (optional, per-column annual frozen fraction from
+    :func:`annual_frozen_fraction`): when provided, ``m`` is additionally scaled
+    by the perennial-frost / anaerobic protection ``f_perma in
+    [permafrost_protection_min, 1]`` (:func:`perennial_frost_protection`), a
+    SECOND bounded SUPPRESSION (like ``f_freeze``) so cold PERENNIALLY-frozen
+    columns turn SOM over even more slowly (permafrost carbon; Koven et al.
+    2013).  ``None`` (default) -> no protection (``f_perma == 1``), so every
+    existing caller is byte-identical.  A per-column suppression <= 1 keeps ``m``
+    upper-bound-free reasoning unchanged (``_effective_rate`` still guards
+    safety).
     """
-    return _temperate_modifier(T, precip, config) * _freeze_modifier(T, config)
+    m = _temperate_modifier(T, precip, config) * _freeze_modifier(T, config)
+    if frozen_fraction is not None:
+        m = m * perennial_frost_protection(frozen_fraction, config)
+    return m
 
 
 # ===================================================================
@@ -363,6 +505,7 @@ def som_decomposition_rate(
     tor_som: jnp.ndarray,
     config: CarbonConfig,
     dt_days: jnp.ndarray,
+    frozen_fraction: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Effective per-day SOM decomposition FRACTION for a pool whose base
     (reference-T, unfrozen) turnover is *tor_som* under conditions ``(T, precip)``.
@@ -370,18 +513,25 @@ def som_decomposition_rate(
     Public wrapper reusing the EXACT kinetics the prognostic step applies to each
     SOM pool (see :func:`step_carbon_differland`)::
 
-        r = _effective_rate(_som_decomp_modifier(T, precip, config) * tor_som, dt_days)
+        r = _effective_rate(
+                _som_decomp_modifier(T, precip, config, frozen_fraction) * tor_som,
+                dt_days)
 
-    i.e. the shared ``f_temp * f_moist * f_freeze`` environmental modifier
-    (:func:`_som_decomp_modifier`) scales the base rate, then
+    i.e. the shared ``f_temp * f_moist * f_freeze [* f_perma]`` environmental
+    modifier (:func:`_som_decomp_modifier`) scales the base rate, then
     :func:`_effective_rate` maps it through the exact finite-dt exponential-decay
     handling.  Exposed so the offline differentiable fast-analytic SOC calibration
     (:mod:`legoesm.land.carbon.fast_analytic`) computes the per-pool turnover from
     the SAME modifier + finite-dt convention as the model, rather than importing
     the private helpers or re-deriving the numerics.  ``T``/``precip`` broadcast
     together; ``tor_som`` is a scalar (or broadcastable) base turnover [1/day].
+    ``frozen_fraction`` (optional, per-column annual frozen fraction) threads the
+    perennial-frost protection ``f_perma`` through so the surrogate applies the
+    IDENTICAL suppression the coupled step does.
     """
-    return _effective_rate(_som_decomp_modifier(T, precip, config) * tor_som, dt_days)
+    return _effective_rate(
+        _som_decomp_modifier(T, precip, config, frozen_fraction) * tor_som,
+        dt_days)
 
 
 def sequential_allocation(
@@ -437,6 +587,7 @@ def step_carbon_differland(
     dt: float,
     gpp_override: jnp.ndarray | None = None,
     return_diagnostics: bool = False,
+    soil_frozen_fraction: jnp.ndarray | None = None,
 ) -> (
     tuple[CarbonState, jnp.ndarray]
     | tuple[CarbonState, jnp.ndarray, CarbonDiagnostics]
@@ -459,6 +610,15 @@ def step_carbon_differland(
         with the full GPP / NPP / respiration / allocation / turnover
         breakdown (per-day rates [gC/m2/day]).  Purely diagnostic — the
         state update is byte-identical either way.
+    soil_frozen_fraction : Optional per-column annual frozen fraction
+        (:func:`annual_frozen_fraction`) enabling the perennial-frost /
+        anaerobic SOM protection (:func:`perennial_frost_protection`) on the
+        three SOM cascade pools.  ``None`` (default) -> no protection, so every
+        existing caller (production coupled ESM, tests) is byte-identical; the
+        archetype spin-up passes it so perennially-frozen high-latitude columns
+        accumulate the observed deep permafrost SOC.  NOT applied to the surface
+        litter path (fresh litter is not the deep freeze/frost-protected
+        reservoir), matching the freeze-modifier treatment.
 
     Returns
     -------
@@ -674,8 +834,14 @@ def step_carbon_differland(
     # Frozen/cold soils have a SMALL ``som_mod`` (freeze suppression) -> small
     # decomposition -> carbon accumulates, chiefly in the millennial passive pool
     # = the high-latitude / grassland SOC fix
-    # (docs/land/multipool_som_phenology_plan.md).
-    som_mod = _som_decomp_modifier(T, precip, config)
+    # (docs/land/multipool_som_phenology_plan.md).  ``soil_frozen_fraction``
+    # (per-column annual frozen fraction, when supplied) additionally scales
+    # ``som_mod`` by the perennial-frost/anaerobic protection ``f_perma`` <= 1
+    # (permafrost carbon), so a PERENNIALLY-frozen column's effective rate drops
+    # BELOW the aerobic ``som_freeze_floor`` and its deep permafrost SOM
+    # accumulates -- carbon RETAINED (a smaller loss term), not created.
+    som_mod = _som_decomp_modifier(
+        T, precip, config, frozen_fraction=soil_frozen_fraction)
     D_active = state.C_som_active * _effective_rate(
         som_mod * config.tor_som_active, dt_days)    # gC/m2/day (active out)
     D_slow = state.C_som_slow * _effective_rate(
@@ -834,6 +1000,7 @@ def step_carbon(
     dt: float,
     gpp_override: jnp.ndarray | None = None,
     return_diagnostics: bool = False,
+    soil_frozen_fraction: jnp.ndarray | None = None,
 ) -> tuple[CarbonState | None, jnp.ndarray] | tuple[
     CarbonState | None, jnp.ndarray, CarbonDiagnostics
 ]:
@@ -849,6 +1016,10 @@ def step_carbon(
         the ``differland`` scheme produces diagnostics; requesting them for
         another scheme raises ``ValueError`` (there is no NPP/allocation
         breakdown for a prescribed or disabled carbon cycle).
+    soil_frozen_fraction : jnp.ndarray, optional
+        Per-column annual frozen fraction enabling the perennial-frost / anaerobic
+        SOM protection in the ``differland`` step (see
+        :func:`step_carbon_differland`).  ``None`` (default) -> no protection.
 
     Returns
     -------
@@ -863,6 +1034,7 @@ def step_carbon(
             carbon_state, sw_down, T, co2_ppmv, beta, lat, doy,
             precip, config, dt, gpp_override=gpp_override,
             return_diagnostics=return_diagnostics,
+            soil_frozen_fraction=soil_frozen_fraction,
         )
     if return_diagnostics:
         raise ValueError(

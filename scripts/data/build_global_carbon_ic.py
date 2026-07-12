@@ -160,7 +160,19 @@ _CACHE_MIN_COMPILE_SECS_DEFAULT = 1.0   # only cache XLA compiles slower than th
 # subdir), so a CPU-built cache never serves a GPU run or vice versa.  A jaxlib
 # upgrade that alters bits on the SAME backend is the user's responsibility (bump
 # the version), mirroring the trainer's documented same-code/backend assumption.
-_EQUILIBRIUM_CACHE_VERSION = "v3"  # v3: + recalibrated bulk r_maint_* (fol/root/wood 0.002/0.0008/2e-5) at the decoupled T_ref_ra=298.15K to match observed CUE ~0.45; default-parameter equilibrium changes (v2 was the T_ref_ra decoupling alone)
+_EQUILIBRIUM_CACHE_VERSION = "v4"  # v4: + perennial-frost/anaerobic SOM protection (f_perma on the SOM modifier, keyed on the annual frozen fraction) -- coupled-spin-up equilibrium rises for perennially-frozen high-latitude archetypes (permafrost carbon; v3 was the r_maint_* CUE recalibration)
+# FOLLOW-UP (coupled-run maintenance, OUT OF THIS IC-BUILD SCOPE): this map is
+# built WITH the perennial-frost/anaerobic SOM protection (annual_frozen_fraction
+# -> soil_frozen_fraction threaded into the archetype spin-up), and the drift
+# validator applies the SAME protection.  A PRODUCTION coupled run
+# (coupler._step_land_tile -> step_multilayer_land) currently passes
+# soil_frozen_fraction=None (unprotected), so it would slowly decompose the deep
+# permafrost SOC this IC seeds.  To make the running ESM maintain it, wire a
+# per-cell annual frozen fraction (from carbon_cycle.annual_frozen_fraction on the
+# run's climate, or a running annual-min/frozen-fraction accumulator) into the
+# coupler's step_multilayer_land call.  Deferred: it is a cross-package
+# (coupler) production-run change needing a running-model phi source, beyond this
+# IC-build task.
 # The QC bundle equilibrate_archetypes returns, in CANONICAL order.  The result
 # cache requires EXACTLY these members on load (a file missing one is treated as
 # corrupt and recomputed, never served as a partial hit); keep in sync with

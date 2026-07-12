@@ -164,7 +164,8 @@ def test_build_live_pool_forward_matches_compute():
     npp, woody, ever = _npp_flags()
     pre = FastAnalyticInputs(
         lit_to_som_annual=np.zeros(3), a_wood_annual=np.zeros(3),
-        soil_T_traj=np.full((3, 2), 285.0), precip=np.full(3, 3e-5), dt_days=0.0417,
+        soil_T_traj=np.full((3, 2), 285.0), soil_frozen_fraction=np.zeros(3),
+        precip=np.full(3, 3e-5), dt_days=0.0417,
         npp_pos_annual=npp, is_woody=woody, is_evergreen=ever,
         live_ref_C_fol=np.zeros(3), live_ref_C_root=np.zeros(3), live_ref_C_wood=np.zeros(3))
     fn = build_live_pool_forward(pre)

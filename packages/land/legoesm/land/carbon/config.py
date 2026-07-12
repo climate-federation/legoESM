@@ -20,6 +20,7 @@ __param_spec__ = {
             "T_ref": "heterotrophic (soil-decomposition) reference temperature [K]",
             "T_ref_ra": "autotrophic maintenance-respiration reference temperature [K]; fixed normalization confounded with the bulk r_maint_* amplitudes (25 degC; not trained)",
             "som_freeze_width_K": "numerics: SOM freeze-suppression curve half-width [K]",
+            "permafrost_frozen_fraction_width": "numerics: perennial-frost protection sigmoid half-width in frozen-fraction space [-]",
         },
         "params": {
             "Bday": {"units": "1", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
@@ -59,6 +60,8 @@ __param_spec__ = {
             "f_active_to_slow": {"units": "1", "bounds": (0.1, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CENTURY inter-pool humification fraction ~0.1-0.5 (Parton et al. 1987)", "shape": None},
             "f_slow_to_passive": {"units": "1", "bounds": (0.1, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CENTURY inter-pool humification fraction ~0.1-0.5 (Parton et al. 1987)", "shape": None},
             "som_freeze_floor": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CLM4.5/CENTURY nonzero cold-soil decomposition floor (microbial activity in unfrozen liquid films + cryoturbation; Koven et al. 2013, Parton et al. 1987)", "shape": None},
+            "permafrost_protection_min": {"units": "1", "bounds": (0.1, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "perennial-frost/anaerobic SOM protection floor: anaerobic C mineralisation ~2-10x slower than aerobic + cryoturbation burial (Schadel et al. 2016 Nature Clim. Change; Koven et al. 2013; Hugelius et al. 2014)", "shape": None},
+            "permafrost_frozen_fraction_threshold": {"units": "1", "bounds": (0.4, 0.75), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "seasonal->perennial-frost (permafrost) climate boundary annual frozen fraction ~0.55-0.7 at MAAT -2 to -8 degC (Gruber 2012 permafrost zonation index; Brown et al. 1997 IPA map)", "shape": None},
             "tor_wood": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "DifferLand/DALEC990", "shape": None},
         },
     },
@@ -176,6 +179,48 @@ class CarbonConfig(NamedTuple):
     # KEEPING the cold-retains-more-SOC direction.  A tunable closure knob (tier
     # 2), not a numerics-only constant.
     som_freeze_floor: float = 0.05
+    # --- Perennial-frost / anaerobic SOM protection (permafrost carbon) ---
+    # ``som_freeze_floor`` above is the INSTANTANEOUS per-timestep aerobic
+    # decomposition floor (microbial activity in unfrozen liquid films) that a
+    # soil retains whenever it is frozen -- but the ANNUAL turnover of a cold
+    # column is dominated by its brief unfrozen (thaw-season) window, so that
+    # floor alone caps high-latitude SOC at ~74 kgC/m2 (tundra), far below the
+    # observed 100-300 kgC/m2 permafrost/peat stocks (Hugelius et al. 2014
+    # NCSCD).  A PERENNIALLY-frozen, waterlogged column additionally protects
+    # its SOM year-round -- anaerobic (O2-limited) decomposition in the
+    # meltwater-saturated active layer plus cryoturbation burying carbon into
+    # the perennially-frozen, decomposition-shielded permafrost (Koven et al.
+    # 2013; CLM4.5 cold-soil biogeochemistry).  This is a SEPARATE, whole-column
+    # suppression keyed on the PERENNIAL-frost state (the annual frozen
+    # fraction, an annual statistic), NOT the instantaneous temperature: it
+    # multiplies the SOM decomposition modifier by ``f_perma`` in
+    # ``[permafrost_protection_min, 1]`` so the effective rate of a truly
+    # perennially-frozen column can drop BELOW the aerobic ``som_freeze_floor``
+    # (the seasonally-frozen-but-thawing soils are left essentially unchanged;
+    # temperate/tropical soils, annual frozen fraction ~0, get ``f_perma``~1).
+    # Smallest fraction of the aerobic decomposition rate a fully perennially-
+    # frozen / anaerobic column retains (the deep-frost analogue of
+    # ``som_freeze_floor``, applied to the WHOLE-year rate).  <1 so it can only
+    # RETAIN carbon (never amplify); >0 so the millennial slow/passive
+    # equilibrium ``I/(m*k)`` stays finite.  Anaerobic C mineralisation runs
+    # ~2-10x slower than aerobic (Schadel et al. 2016, Nature Clim. Change) and
+    # cryoturbation removes carbon from the active decomposition zone, so the
+    # effective whole-column rate is ~0.1-0.6 of the aerobic-equivalent.
+    # Tunable closure knob (tier 2).
+    permafrost_protection_min: float = 0.3
+    # Annual frozen fraction at which the perennial-frost protection is
+    # HALF-engaged -- the seasonal-frost -> perennial-frost (permafrost) climate
+    # boundary.  Permafrost onset is ~MAAT -2 to -8 degC, whose climatological
+    # annual frozen fraction is ~0.55-0.7 (Gruber 2012 permafrost zonation
+    # index; Brown et al. 1997 IPA map).  Kept comfortably >0 so temperate /
+    # tropical columns (frozen fraction ~0) sit deep in the unprotected tail
+    # (``f_perma``~1).  Tunable closure knob (tier 2).
+    permafrost_frozen_fraction_threshold: float = 0.6
+    # Smoothing half-width [frozen-fraction units] of the perennial-frost
+    # protection sigmoid in frozen-fraction space (spans the
+    # sporadic->discontinuous->continuous permafrost transition).  A fixed
+    # NUMERICS smoothing width (never trained; sibling of ``som_freeze_width_K``).
+    permafrost_frozen_fraction_width: float = 0.06
     decomp_rate: float = 5e-4     # Litter -> SOM transfer [day^-1]
     # Coarse-woody-debris humification efficiency: the fraction of wood
     # turnover that becomes stable SOM.  The remainder respires to the

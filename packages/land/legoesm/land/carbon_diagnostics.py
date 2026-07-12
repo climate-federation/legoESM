@@ -47,6 +47,7 @@ def reconstruct_carbon_diagnostics(
     dt: float,
     spatial: bool = False,
     land_params=None,
+    soil_frozen_fraction: jnp.ndarray | None = None,
 ):
     """Return the :class:`CarbonDiagnostics` for one coupled land step.
 
@@ -77,6 +78,15 @@ def reconstruct_carbon_diagnostics(
         in-step carbon config (``config.carbon``) is passed unchanged, matching
         the model's own ``step_carbon`` call (which reads ``config.carbon``, not
         ``land_params.LCMA``).
+    soil_frozen_fraction : jnp.ndarray or None
+        Per-column annual frozen fraction (perennial-frost index).  MUST match
+        the value the coupled step used so the reconstructed SOM decomposition
+        losses (``som_active_loss``/``som_slow_loss``/``som_passive_loss``)
+        carry the SAME ``f_perma`` protection -- the semi-analytic slow-pool
+        reset infers each pool's turnover ``k_X = D_X/C_X`` from these diagnostic
+        losses, so an UNPROTECTED loss here would reset the protected spun-up
+        SOM back down (and the verification segment would then drift).  ``None``
+        (default) -> no protection, matching an unprotected coupled step.
     """
     T_sfc_new = new_state.T_soil[:, 0]
     beta_soil_new, _ = root_zone_beta_soil(
@@ -88,5 +98,6 @@ def reconstruct_carbon_diagnostics(
     _, _, diag = step_carbon_differland(
         carbon_state, forcing.sw_down, T_sfc_new, forcing.co2_ppmv,
         beta_soil_new, lat, doy, forcing.precip_total, config.carbon, dt,
-        gpp_override=gpp_override, return_diagnostics=True)
+        gpp_override=gpp_override, return_diagnostics=True,
+        soil_frozen_fraction=soil_frozen_fraction)
     return diag

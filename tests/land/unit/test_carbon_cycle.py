@@ -19,6 +19,7 @@ import unittest
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import numpy.testing as npt
 
 from legoesm.land.carbon.config import (
@@ -41,6 +42,8 @@ from legoesm.land.carbon.carbon_cycle import (
     _freeze_modifier,
     _som_decomp_modifier,
     _effective_rate,
+    annual_frozen_fraction,
+    perennial_frost_protection,
 )
 from legoesm import constants
 
@@ -394,6 +397,158 @@ class TestFreezeModifier(unittest.TestCase):
         g = jax.grad(loss)(jnp.array([274.0]))
         self.assertTrue(jnp.all(jnp.isfinite(g)))
         self.assertFalse(jnp.allclose(g, 0.0))
+
+
+class TestPerennialFrostProtection(unittest.TestCase):
+    """Permafrost / anaerobic SOM protection: f_perma(frozen_fraction) and the
+    annual frozen-fraction index (Koven et al. 2013; Hugelius et al. 2014)."""
+
+    def test_f_perma_bounds_and_direction(self):
+        """f_perma in [permafrost_protection_min, 1]; ->1 for never-frozen
+        (frozen_fraction=0), -> permafrost_protection_min for perennial frost
+        (frozen_fraction=1); monotonically DECREASING in frozen_fraction (more
+        frost -> less decomposition -> more retained SOC)."""
+        cfg = _default_config()
+        p_min = cfg.permafrost_protection_min
+        phi = jnp.linspace(0.0, 1.0, 60)
+        fp = perennial_frost_protection(phi, cfg)
+        self.assertTrue(jnp.all(fp >= p_min - 1e-9))
+        self.assertTrue(jnp.all(fp <= 1.0 + 1e-9))
+        # Never-frozen -> ~1 (temperate/tropical UNCHANGED); the threshold sits
+        # well above 0 so the warm tail is untouched.
+        self.assertGreater(
+            float(perennial_frost_protection(jnp.array([0.0]), cfg)[0]), 0.999)
+        # Perennial frost -> approaches the protection floor.
+        npt.assert_allclose(
+            float(perennial_frost_protection(jnp.array([1.0]), cfg)[0]),
+            p_min, atol=5e-3)
+        # Monotonically decreasing (MORE frost -> SMALLER f_perma).
+        self.assertTrue(jnp.all(jnp.diff(fp) < 0.0))
+
+    def test_f_perma_validation_raises(self):
+        with self.assertRaises(ValueError):
+            perennial_frost_protection(
+                jnp.array([0.5]),
+                _default_config(permafrost_protection_min=0.0))  # must be >0
+        with self.assertRaises(ValueError):
+            perennial_frost_protection(
+                jnp.array([0.5]),
+                _default_config(permafrost_protection_min=1.5))  # <=1
+        with self.assertRaises(ValueError):
+            perennial_frost_protection(
+                jnp.array([0.5]),
+                _default_config(permafrost_frozen_fraction_threshold=1.0))
+        with self.assertRaises(ValueError):
+            perennial_frost_protection(
+                jnp.array([0.5]),
+                _default_config(permafrost_frozen_fraction_width=0.0))
+
+    def test_f_perma_differentiable_in_perma_params(self):
+        """grad of f_perma w.r.t. the two tunable perennial-frost params is
+        finite and non-zero (calibration lever)."""
+        phi = jnp.array([0.6])
+
+        def loss(vec):
+            cfg = _default_config(
+                permafrost_protection_min=vec[0],
+                permafrost_frozen_fraction_threshold=vec[1])
+            return jnp.sum(perennial_frost_protection(phi, cfg))
+
+        g = jax.grad(loss)(jnp.array([0.3, 0.6]))
+        self.assertTrue(jnp.all(jnp.isfinite(g)))
+        self.assertTrue(jnp.all(jnp.abs(g) > 0.0))
+
+    def test_annual_frozen_fraction_warm_cold(self):
+        """phi in [0,1]; ~0 for a warm never-frozen climate, high for a cold
+        climate, and monotonically DECREASING in mean-annual temperature."""
+        cfg = _default_config()
+        warm = float(annual_frozen_fraction(
+            jnp.array(298.0), jnp.array(5.0), cfg))
+        cold = float(annual_frozen_fraction(
+            jnp.array(260.0), jnp.array(15.0), cfg))
+        self.assertLess(warm, 0.02)      # tropical/warm-temperate: ~never frozen
+        self.assertGreater(cold, 0.7)    # boreal/tundra: frozen most of the year
+        # Monotone decreasing in MAT at fixed amplitude.
+        mats = jnp.linspace(255.0, 295.0, 40)
+        phi = annual_frozen_fraction(mats, jnp.full_like(mats, 12.0), cfg)
+        self.assertTrue(jnp.all(phi >= 0.0))
+        self.assertTrue(jnp.all(phi <= 1.0))
+        self.assertTrue(jnp.all(jnp.diff(phi) <= 1e-9))
+        # A freezing-mean climate is roughly half frozen.
+        half = float(annual_frozen_fraction(
+            jnp.array(constants.T_freeze), jnp.array(10.0), cfg))
+        npt.assert_allclose(half, 0.5, atol=0.05)
+
+    def test_som_modifier_frozen_fraction_suppresses(self):
+        """Passing a high frozen_fraction scales the SOM modifier down by
+        f_perma; frozen_fraction=None is byte-identical to the unprotected
+        modifier; frozen_fraction=0 is ~unchanged (warm-soil regression)."""
+        cfg = _default_config()
+        T = jnp.array([268.0])           # cold column
+        precip = jnp.array([cfg.precip_ref])
+        m_none = _som_decomp_modifier(T, precip, cfg)
+        m_zero = _som_decomp_modifier(T, precip, cfg, frozen_fraction=jnp.array([0.0]))
+        m_frozen = _som_decomp_modifier(T, precip, cfg, frozen_fraction=jnp.array([0.8]))
+        # None == unprotected (exactly).
+        npt.assert_allclose(np.asarray(m_none), np.asarray(m_zero), rtol=2e-3)
+        # High frozen fraction suppresses decomposition (< unprotected).
+        self.assertLess(float(m_frozen[0]), float(m_none[0]))
+        expect = float(m_none[0]) * float(
+            perennial_frost_protection(jnp.array([0.8]), cfg)[0])
+        npt.assert_allclose(float(m_frozen[0]), expect, rtol=1e-6)
+
+    def test_step_perennial_frost_retains_som_cold_and_warm_unchanged(self):
+        """IDEALIZED column: a perennially-frozen cold column RETAINS more SOM
+        (less decomposed, LOWER heterotrophic SOM respiration) WITH the
+        protection than without -- carbon RETAINED, not created (the extra pool
+        carbon exactly equals the un-respired flux; mass closes).  A warm column
+        (frozen_fraction=0) is UNCHANGED."""
+        cfg = _default_config(scheme="differland")
+        st = _make_carbon_state(shape=(1,))
+        common = dict(
+            sw_down=jnp.array([200.0]), co2_ppmv=jnp.array([400.0]),
+            beta=jnp.array([0.6]), lat=jnp.array([1.0]), doy=15.0,
+            precip=jnp.array([2e-5]), config=cfg, dt=7200.0)
+
+        # --- cold column: with vs without perennial-frost protection ----------
+        T_cold = jnp.array([266.0])
+        _s_prot, _f_prot, d_prot = step_carbon_differland(
+            st, T=T_cold, return_diagnostics=True,
+            soil_frozen_fraction=jnp.array([0.8]), **common)
+        s_prot, f_prot = step_carbon_differland(
+            st, T=T_cold, soil_frozen_fraction=jnp.array([0.8]), **common)
+        _s_un, _f_un, d_un = step_carbon_differland(
+            st, T=T_cold, return_diagnostics=True, **common)
+        s_un, f_un = step_carbon_differland(st, T=T_cold, **common)
+        som_prot = float((s_prot.C_som_active + s_prot.C_som_slow
+                          + s_prot.C_som_passive)[0])
+        som_un = float((s_un.C_som_active + s_un.C_som_slow
+                        + s_un.C_som_passive)[0])
+        # Protection RETAINS SOM (higher pool) and LOWERS SOM respiration.
+        self.assertGreater(som_prot, som_un)
+        self.assertLess(float(d_prot.r_het_som[0]), float(d_un.r_het_som[0]))
+        # Carbon RETAINED, not created: the extra SOM carbon == the reduction in
+        # SOM heterotrophic respiration over the step (mass closes to ~machine
+        # precision; the SOM input is identical between the two runs).
+        dt_days = 7200.0 / 86400.0
+        retained = som_prot - som_un
+        un_respired = (float(d_un.r_het_som[0])
+                       - float(d_prot.r_het_som[0])) * dt_days
+        npt.assert_allclose(retained, un_respired, rtol=1e-6, atol=1e-9)
+        # ... and the reduced respiration shows up as a LOWER (less-positive) NEE.
+        self.assertLess(float(f_prot[0]), float(f_un[0]))
+
+        # --- warm column: frozen_fraction=0 leaves the step UNCHANGED ----------
+        T_warm = jnp.array([300.0])
+        sw0, fw0 = step_carbon_differland(st, T=T_warm, **common)
+        sw1, fw1 = step_carbon_differland(
+            st, T=T_warm, soil_frozen_fraction=jnp.array([0.0]), **common)
+        # co2_flux is O(1e-8) kgCO2/m2/s and may straddle zero, so use atol.
+        npt.assert_allclose(float(fw0[0]), float(fw1[0]), rtol=1e-3, atol=1e-11)
+        npt.assert_allclose(
+            float((sw0.C_som_active + sw0.C_som_slow + sw0.C_som_passive)[0]),
+            float((sw1.C_som_active + sw1.C_som_slow + sw1.C_som_passive)[0]),
+            rtol=1e-4)
 
 
 # ===================================================================

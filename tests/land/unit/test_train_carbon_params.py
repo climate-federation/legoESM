@@ -97,9 +97,12 @@ def test_som_only_filter_selects_exactly_seven_and_excludes_q10():
     ``--slow-spinup-grad``)."""
     params = tcp.build_carbon_trainables(som_only=True)
     names = {c.field for c in params.constraints}
-    assert len(params.constraints) == len(tcp.SOM_FIELDS) == 7
+    assert len(params.constraints) == len(tcp.SOM_FIELDS) == 9
     assert "Q10_het_exp" not in tcp.SOM_FIELDS
     assert "Q10_het_exp" not in names
+    # the two perennial-frost / anaerobic SOM protection knobs ARE fast-valid.
+    assert "permafrost_protection_min" in names
+    assert "permafrost_frozen_fraction_threshold" in names
 
 
 def test_quick_dry_run_writes_wellformed_json(tmp_path):
@@ -278,6 +281,7 @@ def _stub_precompute_result(n_arch: int = 3):
         lit_to_som_annual=np.linspace(1.0, 3.0, n_arch),
         a_wood_annual=np.linspace(0.5, 1.5, n_arch),
         soil_T_traj=np.full((n_arch, 4), 285.0),
+        soil_frozen_fraction=np.zeros(n_arch),
         precip=np.full(n_arch, 3.0e-5),
         dt_days=0.0833333333,
         npp_pos_annual=np.linspace(300.0, 900.0, n_arch),

@@ -35,20 +35,23 @@ SOM_FIELDS = (
 )
 
 
-def _synthetic_inputs(*, n_arch, temp, precip, lit, a_wood, n_samples, dt_days):
+def _synthetic_inputs(*, n_arch, temp, precip, lit, a_wood, n_samples, dt_days,
+                      frozen_fraction=0.0):
     """Build a FastAnalyticInputs with a CONSTANT (isothermal) T trajectory so the
-    cascade can be hand-verified."""
+    cascade can be hand-verified.  ``frozen_fraction`` (default 0 -> f_perma~1, no
+    perennial-frost protection) sets the annual frozen fraction driving f_perma."""
     import jax.numpy as jnp
     from legoesm.land.carbon.fast_analytic import FastAnalyticInputs
 
     T = jnp.full((n_arch, n_samples), float(temp))
     # The live-pool fields are irrelevant to analytic_som_soc; fill placeholders so the
-    # (now 10-field) NamedTuple constructs.
+    # (now 11-field) NamedTuple constructs.
     z = jnp.zeros((n_arch,))
     return FastAnalyticInputs(
         lit_to_som_annual=jnp.full((n_arch,), float(lit)),
         a_wood_annual=jnp.full((n_arch,), float(a_wood)),
         soil_T_traj=T,
+        soil_frozen_fraction=jnp.full((n_arch,), float(frozen_fraction)),
         precip=jnp.full((n_arch,), float(precip)),
         dt_days=float(dt_days),
         npp_pos_annual=z, is_woody=jnp.ones((n_arch,)), is_evergreen=z,
@@ -95,7 +98,9 @@ def test_analytic_som_soc_isothermal_matches_hand():
     """At a CONSTANT T with dt_days=1 (so _effective_rate(r,1)==r), the closed-form
     SOC equals the hand cascade using the model's own modifier m."""
     import jax.numpy as jnp
-    from legoesm.land.carbon.carbon_cycle import _som_decomp_modifier
+    from legoesm.land.carbon.carbon_cycle import (
+        _som_decomp_modifier, perennial_frost_protection,
+    )
     from legoesm.land.carbon.config import CarbonConfig
     from legoesm.land.carbon.fast_analytic import analytic_som_soc
 
@@ -103,11 +108,16 @@ def test_analytic_som_soc_isothermal_matches_hand():
     temp, precip = 293.15, float(cfg.precip_ref)       # warm, reference moisture
     n_samples, dt_days = 365, 1.0                      # eff_rate(r, 1) == r; 365-day year
     lit, a_wood = 250.0, 300.0
+    frozen_fraction = 0.4                               # some frost -> f_perma < 1 exercised
     pre = _synthetic_inputs(n_arch=1, temp=temp, precip=precip, lit=lit,
-                            a_wood=a_wood, n_samples=n_samples, dt_days=dt_days)
+                            a_wood=a_wood, n_samples=n_samples, dt_days=dt_days,
+                            frozen_fraction=frozen_fraction)
 
+    # The surrogate scales every SOM turnover by the SAME per-column f_perma
+    # (perennial-frost protection), so the hand cascade must too.
+    fperma = float(perennial_frost_protection(jnp.asarray(frozen_fraction), cfg))
     m = float(_som_decomp_modifier(
-        jnp.asarray([[temp]]), jnp.asarray([[precip]]), cfg)[0, 0])
+        jnp.asarray([[temp]]), jnp.asarray([[precip]]), cfg)[0, 0]) * fperma
     days = n_samples * dt_days                          # 365
     k_a = days * m * cfg.tor_som_active
     k_s = days * m * cfg.tor_som_slow
@@ -141,6 +151,7 @@ def test_analytic_som_soc_grad_finite_nonzero():
         lit_to_som_annual=jnp.full((n_arch,), 250.0),
         a_wood_annual=jnp.full((n_arch,), 300.0),
         soil_T_traj=jnp.asarray(np.tile(temp, (n_arch, 1))),
+        soil_frozen_fraction=jnp.full((n_arch,), 0.5),   # perennially-frozen-ish
         precip=jnp.full((n_arch,), 3e-5),
         dt_days=1.0 / 24.0,
         npp_pos_annual=_z, is_woody=jnp.ones((n_arch,)), is_evergreen=_z,
@@ -177,6 +188,7 @@ def test_som_freeze_floor_lowers_cold_soc():
         lit_to_som_annual=jnp.asarray([250.0]),
         a_wood_annual=jnp.asarray([300.0]),
         soil_T_traj=jnp.asarray(temp[None, :]),
+        soil_frozen_fraction=jnp.asarray([0.6]),         # cold, frozen much of year
         precip=jnp.asarray([3e-5]),
         dt_days=1.0 / 24.0,
         npp_pos_annual=_z, is_woody=jnp.ones((1,)), is_evergreen=_z,
@@ -185,6 +197,41 @@ def test_som_freeze_floor_lowers_cold_soc():
     soc_lo = float(np.asarray(analytic_som_soc(pre, base._replace(som_freeze_floor=0.02)))[0])
     soc_hi = float(np.asarray(analytic_som_soc(pre, base._replace(som_freeze_floor=0.25)))[0])
     assert soc_hi < soc_lo, (soc_hi, soc_lo)
+
+
+def test_perennial_frost_protection_raises_cold_soc_warm_unchanged():
+    """IDEALIZED equilibrium: a perennially-frozen cold-wet column accumulates
+    MORE SOC WITH the permafrost/anaerobic protection than without, while a warm
+    column (frozen_fraction=0) is UNCHANGED -- so the mechanism raises
+    high-latitude SOC without perturbing the already-correct temperate/tropical
+    stocks (corr structure preserved)."""
+    import numpy as np
+    from legoesm.land.carbon.config import CarbonConfig
+    from legoesm.land.carbon.fast_analytic import analytic_som_soc
+
+    base = CarbonConfig(scheme="differland")
+    # Protection DISABLED: permafrost_protection_min=1 -> f_perma == 1 for any
+    # frozen_fraction (the clean before/after control).
+    off = base._replace(permafrost_protection_min=1.0)
+
+    # Cold, perennially-frozen column (high annual frozen fraction).
+    cold = _synthetic_inputs(n_arch=1, temp=266.0, precip=2.0e-5, lit=200.0,
+                             a_wood=250.0, n_samples=240, dt_days=1.0 / 24.0,
+                             frozen_fraction=0.8)
+    soc_cold_on = float(np.asarray(analytic_som_soc(cold, base))[0])
+    soc_cold_off = float(np.asarray(analytic_som_soc(cold, off))[0])
+    assert soc_cold_on > soc_cold_off, (soc_cold_on, soc_cold_off)
+    # Substantial accumulation for true permafrost (f_perma ~0.34 at phi=0.8 ->
+    # ~3x turnover reduction), not a marginal nudge.
+    assert soc_cold_on > 1.5 * soc_cold_off, (soc_cold_on, soc_cold_off)
+
+    # Warm column (never frozen): the protection is inert.
+    warm = _synthetic_inputs(n_arch=1, temp=298.0, precip=4.0e-5, lit=200.0,
+                             a_wood=250.0, n_samples=240, dt_days=1.0 / 24.0,
+                             frozen_fraction=0.0)
+    soc_warm_on = float(np.asarray(analytic_som_soc(warm, base))[0])
+    soc_warm_off = float(np.asarray(analytic_som_soc(warm, off))[0])
+    npt.assert_allclose(soc_warm_on, soc_warm_off, rtol=2e-3)
 
 
 # ---------------------------------------------------------------------------

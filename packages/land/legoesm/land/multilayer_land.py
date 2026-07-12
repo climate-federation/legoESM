@@ -161,6 +161,7 @@ def step_multilayer_land_with_diagnostics(
     carbon_state: CarbonState | None = None,
     doy: float = 0.0,
     land_params=None,
+    soil_frozen_fraction: jnp.ndarray | None = None,
 ):
     """Like :func:`step_multilayer_land` but also returns the ``SurfaceFluxOutput``.
 
@@ -173,7 +174,8 @@ def step_multilayer_land_with_diagnostics(
     """
     return _step_multilayer_land_impl(
         state, forcing, config, U_min, dt,
-        lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params)
+        lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params,
+        soil_frozen_fraction=soil_frozen_fraction)
 
 
 def root_zone_beta_soil(
@@ -244,6 +246,7 @@ def step_multilayer_land(
     carbon_state: CarbonState | None = None,
     doy: float = 0.0,
     land_params=None,
+    soil_frozen_fraction: jnp.ndarray | None = None,
 ) -> tuple[MultiLayerLandState, TileResponse, CarbonState | None]:
     """Step the multi-layer land model forward by ``dt`` seconds.
 
@@ -256,7 +259,8 @@ def step_multilayer_land(
     """
     new_state, response, carbon_new, _surface_out = _step_multilayer_land_impl(
         state, forcing, config, U_min, dt,
-        lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params)
+        lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params,
+        soil_frozen_fraction=soil_frozen_fraction)
     return new_state, response, carbon_new
 
 
@@ -270,6 +274,7 @@ def _step_multilayer_land_impl(
     carbon_state: CarbonState | None = None,
     doy: float = 0.0,
     land_params=None,
+    soil_frozen_fraction: jnp.ndarray | None = None,
 ):
     """Internal 4-tuple (new_state, TileResponse, carbon, SurfaceFluxOutput).
 
@@ -919,6 +924,7 @@ def _step_multilayer_land_impl(
             carbon_state, forcing.sw_down, T_surface_new, forcing.co2_ppmv,
             beta_soil_new, lat_arr, doy, forcing.precip_total, config.carbon,
             dt, gpp_override=gpp_override,
+            soil_frozen_fraction=soil_frozen_fraction,
         )
     else:
         carbon_state_new = carbon_state
