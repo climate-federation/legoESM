@@ -211,6 +211,17 @@ def test_advection_production_default(driver_defaults):
     assert driver_defaults["--advection"] == "van_leer"
 
 
+def test_vertical_tracer_advection_default_van_leer(driver_defaults):
+    """codex CRM-dycore review: --vertical-tracer-advection defaults to
+    van_leer, matching the serial run_rcemip_plane default so serial and MPI
+    RCE use the SAME (positive-definite) vertical tracer scheme. Now that the
+    MPI halo path HONORS the config (previously it silently used centered), a
+    flip to 'centered' would re-introduce non-monotone vertical tracer
+    transport (negative q at sharp convective gradients) and re-diverge the
+    MPI RCE driver from serial."""
+    assert driver_defaults["--vertical-tracer-advection"] == "van_leer"
+
+
 def test_sponge_production_defaults(driver_defaults):
     """iter-1 sponge layer config."""
     assert driver_defaults["--sponge-coeff"] == 0.05

@@ -685,7 +685,11 @@ def _centered_advection_y(
 
 
 # --------------------------------------------------------------------- #
-# WENO5-Z flux-form upwind advection (5th-order, monotone).             #
+# WENO5-Z flux-form upwind advection (5th-order; NOT monotone /         #
+# NOT positivity-preserving — a positive 6-cell stencil can still       #
+# reconstruct a negative face value. Safe for signed fields (θ′,        #
+# momentum); positive-definite tracers are guarded onto van_leer at     #
+# the dispatch below).                                                  #
 # Drop-in replacements for _upwind_advection_x/y with the same          #
 # co-located (field, velocity) convention. Periodic in both axes        #
 # via jnp.roll. Stencil width 6; needs only single-rank periodic        #
@@ -1635,7 +1639,7 @@ def _vertical_advection_plane(
     return -w_full / J[:, :, None] * df_dz
 
 
-def _vertical_advection_van_leer_plane(
+def vertical_advection_van_leer_plane(
     field_yxz: jax.Array,
     w_yxz_half: jax.Array,
     height_coord: HeightCoordinate,
@@ -2015,6 +2019,19 @@ def plane_compressible_euler_slow_tendencies(
             f"Expected one of {sorted(HORIZONTAL_ADVECTION_HALO_REQUIREMENT)}."
         )
     adv_x, adv_y = _ADV_PAIRS[scheme]
+    # POSITIVITY GUARD (codex CRM-dycore review): the CRM tracers
+    # (q_v, q_c, q_r, q_i, q_s, q_g, N_c, N_r, N_i, …) are all
+    # positive-definite. WENO5-Z is 5th-order but NOT positivity-
+    # preserving, so it drives q<0 that then feeds microphysics as a
+    # spurious source. Advect TRACERS with the monotone van_leer
+    # limiter when weno5 is selected; θ′ (signed) keeps weno5 for its
+    # low tropopause dispersion. van_leer's 2-cell halo ⊆ weno5's
+    # 3-cell halo ⇒ never under-halos. Mirrors SAM (monotone scalars,
+    # non-diffusive θ/momentum) and the ADV-SPLIT momentum path below.
+    if scheme == "weno5":
+        tadv_x, tadv_y = _van_leer_advection_x, _van_leer_advection_y
+    else:
+        tadv_x, tadv_y = adv_x, adv_y
     # ADV-SPLIT (#86): MOMENTUM legs (u/v/w) may use a separate scheme (e.g.
     # "centered" = SAM-faithful non-diffusive advect2_mom) while scalars keep the
     # monotone van_leer. None ⇒ momentum = scalar scheme (legacy, both same).
@@ -2332,7 +2349,7 @@ def plane_compressible_euler_slow_tendencies(
     vert_tracer_scheme = getattr(
         config, "vertical_tracer_advection", "centered")
     if vert_tracer_scheme == "van_leer":
-        _vertical_tracer_adv = _vertical_advection_van_leer_plane
+        _vertical_tracer_adv = vertical_advection_van_leer_plane
     elif vert_tracer_scheme == "centered":
         _vertical_tracer_adv = _vertical_advection_plane
     else:
@@ -2343,9 +2360,11 @@ def plane_compressible_euler_slow_tendencies(
     tracers = state.tracers.data
     if tracers.shape[-1] > 0:
         def _tracer_tend_one(q):
+            # tadv_* = van_leer under weno5 (positivity guard above);
+            # == adv_* for every monotone scheme.
             return (
-                adv_x(q, u_center, grid.dx)
-                + adv_y(q, v_center, grid.dy)
+                tadv_x(q, u_center, grid.dx)
+                + tadv_y(q, v_center, grid.dy)
                 + _vertical_tracer_adv(q, w, height_coord, J)
             )
         dtracers_dt = jax.vmap(_tracer_tend_one, in_axes=-1, out_axes=-1)(
