@@ -20,6 +20,9 @@ from legoesm.ocean.physics.lateral_mixing.backscatter import (
     backscatter_tendency_mpas,
     backscatter_power_density_cgrid,
     update_eddy_energy,
+    diagnostic_eddy_energy,
+    cfl_cap_eddy_energy,
+    diagnostic_backscatter_cgrid,
 )
 
 __all__ = [
@@ -36,4 +39,7 @@ __all__ = [
     "backscatter_tendency_mpas",
     "backscatter_power_density_cgrid",
     "update_eddy_energy",
+    "diagnostic_eddy_energy",
+    "cfl_cap_eddy_energy",
+    "diagnostic_backscatter_cgrid",
 ]

@@ -18,7 +18,9 @@ contribution is taken on top of the others), bounded above by
 scheme's config are already included in their respective ``K_v`` /
 ``A_v`` output, so a separate ``A_v_floor`` is added by the caller only
 to enforce ``LatLonCGridOceanConfig.A_v`` and ``K_v`` as additional
-floors.
+floors.  Exception: with the ``constant`` scheme in ``lat_dependent``
+mode the Gregg (2003) latitude background REPLACES the constant
+background, so those caller floors are suppressed (not double-added).
 """
 
 from __future__ import annotations
@@ -36,7 +38,13 @@ from legoesm.ocean.vertical import (
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 from legoesm.ocean.physics.vertical_mixing._shared import (
     surface_buoyancy_flux,
+    compute_N2,
+    latitude_background_diffusivity,
 )
+
+# Floor on the constant diffusivity K_v when deriving the background Prandtl
+# ratio A_v/K_v for the latitude-dependent viscosity (avoids /0 if K_v -> 0).
+_KV_PRANDTL_FLOOR = 1e-30
 
 __physics_contract__ = {
     "summary": (
@@ -110,7 +118,12 @@ def compute_vertical_K_profiles(
         ``OceanPhysicsConfig`` controlling which schemes contribute.
     A_v_background, K_v_background
         Optional additional floors added uniformly to all interfaces
-        (typically ``LatLonCGridOceanConfig.A_v`` / ``K_v``).
+        (typically ``LatLonCGridOceanConfig.A_v`` / ``K_v``).  IGNORED
+        (treated as zero) when the ``constant`` scheme runs with
+        ``lat_dependent=True``: the Gregg (2003) latitude background
+        REPLACES the constant background, so adding the model-level floor
+        on top would shift the documented range ``[K_bg_eq, K_bg_pole]``
+        and break the configured Prandtl ratio ``A_v/K_v``.
     eos_fn
         Optional EOS ``fn(T, S, p) -> rho`` (e.g. the recipe's
         ``veros_nonlin2``). When None, the schemes' density (and the TKE
@@ -179,11 +192,28 @@ def compute_vertical_K_profiles(
 
     # Start with the configured background floors.  These are scalar
     # floats; broadcast to interface shape.
+    #
+    # EXCEPTION (MED-2, codex batch2): when the ``constant`` scheme runs with
+    # ``lat_dependent=True`` the Gregg (2003) latitude background REPLACES the
+    # constant background ENTIRELY — the scheme branch already substitutes
+    # ``cfg.K_v``/``cfg.A_v``, and the model-level caller floors
+    # (``LatLonCGridOceanConfig.K_v``/``A_v``) must be suppressed here too.
+    # Adding them on top would (a) shift the documented final range
+    # ``[K_bg_eq, K_bg_pole]`` to ``[K_bg_eq + K_v_background, K_bg_pole +
+    # K_v_background]`` (defaults: [1.1e-4, 2e-4] instead of [1e-5, 1e-4])
+    # and (b) break the configured Prandtl ratio ``A_v/K_v`` whenever the
+    # caller's fallback ratio differs.  Static config bool -> Python gate
+    # (feature-gating doctrine, not jnp.where); every other scheme and
+    # ``lat_dependent=False`` keep the additive floors BIT-IDENTICALLY.
+    vmix = physics_config.vertical_mixing
+    if (vmix.scheme == "constant"
+            and getattr(vmix.constant, "lat_dependent", False)):
+        K_v_background = 0.0
+        A_v_background = 0.0
     K_v_total = jnp.full(interface_shape, K_v_background, dtype=dtype)
     A_v_total = jnp.full(interface_shape, A_v_background, dtype=dtype)
 
     tke_new = None
-    vmix = physics_config.vertical_mixing
     if vmix.scheme != "none":
         K_vmix, A_vmix, tke_new = _vmix_K_profiles(
             state, z_coord, surface_forcing, vmix, physics_config.constants,
@@ -347,6 +377,30 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         nlev = state.T.data.shape[-1]
         shape = state.T.data.shape[:-1] + (nlev - 1,)
         dtype = state.T.data.dtype
+        if getattr(cfg, "lat_dependent", False):
+            # Latitude-dependent internal-wave background (Gregg 2003 / CVMix
+            # bkgnd): REPLACE the spatially-constant K_v/A_v floor with the
+            # latitude/stratification-scaled field.  Needs the column latitude
+            # and N^2, so compute rho + N^2 here (the constant branch otherwise
+            # skips the EOS).  K_v, A_v >= 0; z positive up.
+            if lat_deg is None:
+                raise ValueError(
+                    "ConstantVerticalMixingConfig.lat_dependent=True requires "
+                    "lat_deg (column latitudes in degrees) to be threaded to "
+                    "compute_vertical_K_profiles; got None.")
+            rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
+            dz_half = z_coord.dz_half_ref * J[..., jnp.newaxis]
+            N2 = compute_N2(
+                rho, dz_half, constants_config.rho_0,
+                g=constants_config.g, n2_mode="insitu")
+            K_v = latitude_background_diffusivity(lat_deg, N2, cfg)
+            # Momentum viscosity carries the SAME latitude scaling, preserving
+            # the configured background Prandtl ratio A_v/K_v (trace-safe floor
+            # on K_v so the ratio is finite even if K_v -> 0).
+            prandtl = cfg.A_v / jnp.maximum(
+                jnp.asarray(cfg.K_v, dtype), _KV_PRANDTL_FLOOR)
+            A_v = K_v * prandtl
+            return K_v, A_v, None
         K_v = jnp.full(shape, cfg.K_v, dtype=dtype)
         A_v = jnp.full(shape, cfg.A_v, dtype=dtype)
         return K_v, A_v, None

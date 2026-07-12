@@ -2,14 +2,33 @@
 atm step (make_sharded_atm_latlon_step / run_atm_latlon_spmd, the A1 work).
 
 Times the SHARDED step across an N-device ("lat",) mesh and reports per-step
-wall time + speedup vs 1 device. Per-step granularity exposes whether the
-shard_map is being RE-TRACED every call (the make_sharded_atm_latlon_step
-sharded_step rebuilds shard_map per call): if steps 1.. are as slow as step 0,
-the cost is host tracing, not device compute, and the scaling number is
-meaningless until the shard_map is built once.
+wall time + speedup vs 1 device.  The DEFAULT lane follows the M1 measurement
+contract (``metadata.timed_scan_blocks``): fused ``lax.scan`` blocks of
+``--steps`` steps with device sync only AROUND each block (``fused_step_ms``,
+slowest process across controllers) plus a SEPARATE individually-synced
+dispatch-latency probe (``step_latency_ms``) — never mixed.  The
+jit(shard_map) step is built once and cached by make_sharded_atm_latlon_step;
+re-tracing would show up as every block paying the scan-compile cost again.
 
   strong: fixed (n_lat, n_lon, nlev), vary n_devices -> speedup = t(1)/t(n).
   weak:   n_lat = nlat_per_dev * n_devices (fixed per-device rows) -> ideal flat.
+
+``--segment-steps N`` (M2b): times the COMPILED-SEGMENT lane instead — ONE
+jitted lax.scan of N sharded steps per block (make_sharded_atm_latlon_segment,
+band-SHARDED geometry, in-graph finite scalar), so --steps counts BLOCKS of N
+steps and the per-step numbers derive from whole-block wall times.  Unlike the
+default lane (which scans the bench-local step fn), the segment is the
+PRODUCTION artifact; the record carries ``segment_mode=true`` +
+``per_block_ms`` and the per-device geometry bytes (replicated vs
+band-sharded) computed from the real band-grid shapes.
+
+Receipt honesty: a segment whose in-graph finite scalar reports a non-finite
+state STOPS the timed loop and stamps the record ``finite_ok=false`` +
+``valid=false`` (with ``completed_blocks`` saying how far it got, a
+``diverged: ...`` entry under ``metadata._incomplete``, and nulled
+``sypd``/``mcells_per_s``) — a diverging trajectory is never serialized as
+valid scaling data.  The default fused lane has no in-graph finite check, so
+its rows carry ``finite_ok=null``.
 
 Device count is fixed at process start, so each n_devices runs as a SEPARATE
 process (one sbatch step per count); this script benches ONE n_devices and
@@ -57,7 +76,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # under rec["metadata"] so a virtual-CPU-device proxy, a gloo/TCP fabric run,
 # or an f32 ablation is falsifiable from the JSONL row alone.  metadata.py
 # imports JAX lazily, so this is safe before jax.distributed.initialize.
-from metadata import annotate_incomplete, scaling_metadata, tidy_throughput_fields  # noqa: E402
+from metadata import (  # noqa: E402
+    annotate_incomplete,
+    calibrated_bound,
+    comm_accounting,
+    scaling_metadata,
+    tidy_throughput_fields,
+)
 
 
 def _build(n_lat, n_lon, nlev):
@@ -95,10 +120,41 @@ def main() -> int:
     p.add_argument("--mode", choices=["strong", "weak"], default="strong")
     p.add_argument("--nlat-per-dev", type=int, default=32,
                    help="weak mode: lat rows per device")
-    p.add_argument("--steps", type=int, default=12)
-    p.add_argument("--warmup", type=int, default=2)
+    p.add_argument("--steps", type=int, default=12,
+                   help="Default lane: steps per fused lax.scan timing "
+                        "block. Segment mode: number of timed BLOCKS of "
+                        "--segment-steps steps each.")
+    p.add_argument("--warmup", type=int, default=2,
+                   help="Segment mode: timed blocks dropped from steady "
+                        "stats (block 0 includes the scan compile). Default "
+                        "lane: retained for CLI compat (fused-block timing "
+                        "separates compile/probe/blocks explicitly).")
+    p.add_argument("--blocks", type=int, default=2,
+                   help="Default lane: timed fused blocks (per-block times "
+                        "expose drift).")
+    p.add_argument("--probe-steps", type=int, default=3,
+                   help="Default lane: individually-synced steps for the "
+                        "SEPARATE dispatch-latency probe (step_latency_ms).")
+    p.add_argument("--segment-steps", type=int, default=0,
+                   help="M2b: >0 compiles ONE lax.scan segment of this many "
+                        "steps (built once, reused; band-sharded geometry) "
+                        "and times BLOCKS of segment calls instead of "
+                        "per-step host dispatch. 0 = default fused lane.")
     p.add_argument("--physics", choices=["none", "held_suarez"], default="none")
     p.add_argument("--dt", type=float, default=60.0)
+    p.add_argument("--single-dev-fused-ms", type=float, default=None,
+                   help="fused_step_ms of the nd=1 row at the SAME per-device "
+                        "size (compute ingredient of the calibrated T_bound, "
+                        "audit item 8). Omitted at nd>1 -> bound emitted null "
+                        "+ flagged incomplete; nd=1 uses its own measurement.")
+    p.add_argument("--comm-latency-us", type=float, default=None,
+                   help="MEASURED per-message latency [us] of THIS machine's "
+                        "fabric. Default: MACHINE-CALIBRATED-REQUIRED "
+                        "placeholder in metadata.py -> bound_calibrated=false.")
+    p.add_argument("--comm-bandwidth-gbs", type=float, default=None,
+                   help="MEASURED link bandwidth [GB/s] of THIS machine's "
+                        "fabric. Default: MACHINE-CALIBRATED-REQUIRED "
+                        "placeholder in metadata.py -> bound_calibrated=false.")
     p.add_argument("--out", type=str, default="results/a1/spmd_scaling.jsonl")
     p.add_argument("--multicontroller", action="store_true",
                    help="Route-B multi-controller: jax.distributed.initialize "
@@ -112,6 +168,13 @@ def main() -> int:
                         "from OMPI_COMM_WORLD_SIZE/RANK.")
     args = p.parse_args()
 
+    # Validate the schedule BEFORE any model/device work: a zero/negative
+    # --steps would otherwise surface only as timed_scan_blocks' None
+    # headline (default lane) or an empty timed loop (segment mode) after
+    # the expensive build (the ocean twin's guard).
+    if args.steps < 1:
+        raise SystemExit(f"--steps must be >= 1, got {args.steps}")
+
     if args.multicontroller:
         # MUST run before any other JAX use (backend init).  The SHARED
         # helper owns the launcher-env contract (SLURM/OMPI auto-detect,
@@ -124,7 +187,11 @@ def main() -> int:
         init_multicontroller_distributed(args.coordinator)
 
     from legoesm.atmosphere.dynamics.sharded_atm_latlon_step import (
+        atm_latlon_geometry_bytes, make_sharded_atm_latlon_segment,
         make_sharded_atm_latlon_step, shard_state_atm_latlon)
+    seg_n = int(args.segment_steps)
+    if seg_n < 0:
+        raise SystemExit(f"--segment-steps must be >= 0, got {seg_n}")
     physics_fn = None
     if args.physics == "held_suarez":
         from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
@@ -150,48 +217,168 @@ def main() -> int:
 
     if nd == 1:
         mesh = None
-        step = make_sharded_atm_latlon_step(model, None, physics_fn=physics_fn)
         c = c0
     else:
         mesh = jax.sharding.Mesh(np.array(jax.devices()[:nd]),
                                  axis_names=("lat",))
-        step = make_sharded_atm_latlon_step(model, mesh, physics_fn=physics_fn)
         c = shard_state_atm_latlon(c0, mesh)
+    if seg_n > 0:
+        seg_fn = make_sharded_atm_latlon_segment(
+            model, mesh, seg_n, physics_fn=physics_fn)
+    else:
+        step = make_sharded_atm_latlon_step(model, mesh,
+                                            physics_fn=physics_fn)
 
-    # Multi-controller: align every process before the timed loop so per-step
-    # wall times aren't skewed by startup jitter (and once after, so no
-    # process exits while peers still hold collectives in flight).
-    if jax.process_count() > 1:
-        from jax.experimental import multihost_utils
-        multihost_utils.sync_global_devices("atm_latlon_spmd_bench_start")
+    per_block_ms = None
+    completed_blocks = None
+    finite_ok = None   # default fused lane: no in-graph finite check -> null
+    timing = None   # metadata.timed_scan_blocks metrics (default lane only)
+    if seg_n > 0:
+        # Multi-controller: align every process before the timed loop so
+        # block wall times aren't skewed by startup jitter (and once after,
+        # so no process exits while peers still hold collectives in flight).
+        # (The default lane's fences live inside timed_scan_blocks.)
+        if jax.process_count() > 1:
+            from jax.experimental import multihost_utils
+            multihost_utils.sync_global_devices("atm_latlon_spmd_bench_start")
+        # Segment mode: each timed BLOCK is one compiled lax.scan of seg_n
+        # steps; the host sync per block is the production pattern — read the
+        # in-graph finite SCALAR, then block on the state for honest timing.
+        per_block_ms = []
+        finite_ok = True
+        for i in range(args.steps):
+            t0 = time.perf_counter()
+            c, ok = seg_fn(c, args.dt)
+            ok_b = bool(ok)
+            _block(c)
+            per_block_ms.append((time.perf_counter() - t0) * 1e3)
+            if not ok_b:
+                # A non-finite state poisons every later block: stop timing
+                # and mark the whole record invalid — a warning alone let a
+                # diverging trajectory serialize as valid scaling data, and
+                # an early false was even forgotten by later true blocks
+                # (codex batch4).
+                finite_ok = False
+                print(f"[warn] segment finite scalar FALSE after block {i} "
+                      f"(step {(i + 1) * seg_n}) — stopping the timed loop; "
+                      "the record is marked INVALID (finite_ok=false, "
+                      "valid=false) and its throughput fields are nulled")
+                break
+        completed_blocks = len(per_block_ms)
+        per_step_ms = [b / seg_n for b in per_block_ms]
+        if jax.process_count() > 1:
+            from jax.experimental import multihost_utils
+            multihost_utils.sync_global_devices("atm_latlon_spmd_bench_end")
+        steady = per_step_ms[args.warmup:]
+        if not steady:
+            # Divergence stopped the run inside the warmup window — fall back
+            # to every completed unit (the record is already marked invalid;
+            # this only keeps the diagnostic median well-defined).
+            steady = per_step_ms
+        med = float(np.median(steady))
+    else:
+        # Measurement contract (scaling audit gaps #1/#2): fused ``lax.scan``
+        # blocks with sync only AROUND the block — the previous per-step
+        # host-synced loop measured dispatch+sync latency, not fused device
+        # throughput.  Dispatch latency stays measured SEPARATELY
+        # (``step_latency_ms``); multi-controller runs record the
+        # slowest-process block time + imbalance ratio.
+        from metadata import timed_scan_blocks
+        c, timing = timed_scan_blocks(
+            lambda st: step(st, args.dt), c,
+            block_steps=args.steps, n_blocks=args.blocks,
+            probe_steps=args.probe_steps,
+            sync_label="atm_latlon_spmd_bench")
+        # Headline = fused per-step time from the SLOWEST process; key name
+        # kept for the aggregators.
+        med = float(timing["fused_step_ms"])
 
-    # Per-step timing: step 0 includes compile; record each step so re-trace
-    # (every step slow) is visible vs steady-state (steps 1.. fast).
-    per_step_ms = []
-    for i in range(args.steps):
-        t0 = time.perf_counter()
-        c = step(c, args.dt)
-        _block(c)
-        per_step_ms.append((time.perf_counter() - t0) * 1e3)
+    # valid=false ONLY on an observed non-finite state; the default fused
+    # lane (finite_ok=None: unchecked) stays valid.
+    valid = finite_ok is not False
+    # A diverging segment run's med is not a measurement: feed the bound
+    # honest nulls (its flat throughput twins are nulled after assembly).
+    _measured_med = med if valid else None
+    # Honest per-device geometry residency (from the real band-grid shapes):
+    # the default lane replicates all-band stacks; the segment lane shards.
+    geom_bytes = (atm_latlon_geometry_bytes(model.grid, nd) if nd > 1
+                  else None)
 
-    if jax.process_count() > 1:
-        from jax.experimental import multihost_utils
-        multihost_utils.sync_global_devices("atm_latlon_spmd_bench_end")
+    # Communication accounting (audit item 4) + calibrated T_bound (item 8).
+    # nd=1: zero inter-device traffic is a FACT (recorded as 0), so the
+    # bound is complete and trivially equals the measured compute.  nd>1:
+    # there is no analytic halo-message census for the atm latlon step yet
+    # (the ocean twin derives one from its barotropic solver) — the comm
+    # ingredients are recorded null with this reason and the bound is
+    # emitted incomplete rather than fabricated.
+    if nd <= 1:
+        _msgs, _bytes_msg, _nred = 0, 0, 0
+        _bytes_lower = False   # zero traffic is exact, not an undercount
+        _comm_note = "single device: no inter-device halo/reduction traffic"
+    else:
+        _msgs, _bytes_msg, _nred = None, None, None
+        _bytes_lower = None
+        _comm_note = ("no analytic halo-message census for the atm latlon "
+                      "step yet (audit item 4 follow-up) — comm fields null, "
+                      "not fabricated")
+    comm_rec = comm_accounting(
+        halo_messages_per_step=_msgs,
+        bytes_per_message=_bytes_msg,
+        full_state_gathers_per_step=0,   # fused scan/segment: no per-step gather
+        scope_note=_comm_note,
+        bytes_are_lower_bound=_bytes_lower,
+    )
+    bound_rec = calibrated_bound(
+        measured_fused_step_ms=_measured_med,
+        # Invalid rows feed the bound NOTHING: even the CLI-provided nd=1
+        # baseline is withheld so bound_ingredients.compute_ms cannot dress
+        # a diverging row up as a modelled one (codex).
+        single_device_fused_step_ms=(
+            _measured_med if nd == 1
+            else (args.single_dev_fused_ms if valid else None)),
+        halo_messages_per_step=comm_rec["halo_messages_per_step"],
+        halo_bytes_per_step=comm_rec["halo_bytes_per_step"],
+        n_reductions_per_step=_nred,
+        # rank imbalance is measured by timed_scan_blocks (default lane);
+        # the segment lane records no cross-process block gather -> null.
+        rank_imbalance=(float(timing["rank_imbalance"])
+                        if timing is not None else None),
+        latency_us=args.comm_latency_us,
+        bandwidth_GBs=args.comm_bandwidth_gbs,
+    )
 
-    steady = per_step_ms[args.warmup:]
-    med = float(np.median(steady))
     rec = dict(
         mode=args.mode, n_devices=nd, n_lat=n_lat, n_lon=args.n_lon,
         nlev=args.nlev, physics=args.physics, steps=args.steps,
         platform=jax.default_backend(),
         n_processes=jax.process_count(),
         multicontroller=bool(args.multicontroller),
-        compile_ms=round(per_step_ms[0], 1),
-        steady_median_ms=round(med, 2),
-        steady_min_ms=round(float(np.min(steady)), 2),
-        per_step_ms=[round(x, 1) for x in per_step_ms],
+        segment_mode=(seg_n > 0),
+        segment_steps=(seg_n if seg_n > 0 else None),
+        # Measurement validity (codex batch4): finite_ok is the ACCUMULATED
+        # in-graph finite verdict (null in the unchecked default fused lane);
+        # valid=false marks the row as NOT scaling data; completed_blocks
+        # says where a diverging segment run stopped.
+        finite_ok=finite_ok,
+        valid=valid,
+        completed_blocks=completed_blocks,
+        steady_median_ms=round(med, 4),
         cells=n_lat * args.n_lon * args.nlev,
     )
+    if seg_n > 0:
+        # Segment lane: unit 0 = the first BLOCK (includes the scan
+        # compile); per-step numbers derive from whole blocks.
+        rec.update(
+            compile_ms=round(per_block_ms[0], 1),
+            steady_min_ms=round(float(np.min(steady)), 2),
+            per_step_ms=[round(x, 2) for x in per_step_ms],
+            per_block_ms=[round(x, 2) for x in per_block_ms],
+        )
+    else:
+        # Default lane: the timed_scan_blocks metrics (fused_step_ms,
+        # step_latency_ms, block_ms, parallel_block_ms, rank_imbalance, ...
+        # — the M1 measurement contract).
+        rec.update(**timing)
     # Flat aggregator-compatible identity + metric fields: without a
     # top-level ``sypd``/``grid_type`` this lane's rows are invisible to
     # aggregate_bcw_scaling.py → empty SYPD panels in the CPU-vs-GPU plots.
@@ -206,6 +393,20 @@ def main() -> int:
             dt_seconds=args.dt, time_per_step_ms=med,
             total_cells=n_lat * args.n_lon * args.nlev),
     )
+    # Increment-2 accounting fields (audit items 4/8), flat for aggregators.
+    rec.update(**comm_rec, **bound_rec)
+    if not valid:
+        # Throughput derived from a diverging trajectory is not a
+        # measurement: null it explicitly so aggregators cannot ingest it
+        # even if they miss the valid flag (codex batch4) — including the
+        # M1 fused/per-step-time keys plotters fall back to
+        # (time_per_step_ms, steady_min_ms) and the med-derived bound
+        # diagnostics (already null via the _measured_med feed above).
+        for _k in ("sypd", "mcells_per_s", "time_per_step_ms",
+                   "steady_min_ms", "fused_step_ms", "step_latency_ms",
+                   "t_bound_ms", "measured_over_bound"):
+            if _k in rec:
+                rec[_k] = None
     from legoesm.parallel.early_init import nccl_transport_report
     _nccl_report = nccl_transport_report()
     rec["metadata"] = annotate_incomplete(scaling_metadata(
@@ -228,6 +429,15 @@ def main() -> int:
             "steps": args.steps,
             "warmup": args.warmup,
             "multicontroller": bool(args.multicontroller),
+            # M2b compiled-segment lane facts: a segment row is falsifiable
+            # from the record alone (block timings + geometry residency +
+            # the finite/validity verdict — codex batch4).
+            "segment_mode": seg_n > 0,
+            "segment_steps": (seg_n if seg_n > 0 else None),
+            "geometry_bytes_per_device": geom_bytes,
+            "finite_ok": finite_ok,
+            "valid": valid,
+            "completed_blocks": completed_blocks,
             # Route-B transport facts (socket-fallback flag): a
             # multi-node row without an NCCL net plugin is
             # falsifiable from the record alone.
@@ -236,6 +446,13 @@ def main() -> int:
             "cells_per_device": (n_lat // nd) * args.n_lon * args.nlev,
         },
     ))
+    if not valid:
+        # Divergence reason on the aggregator-facing incomplete list (the
+        # same channel annotate_incomplete uses for missing metadata).
+        rec["metadata"].setdefault("_incomplete", []).append(
+            f"diverged: segment finite scalar false after block "
+            f"{completed_blocks - 1} of {args.steps} — timings describe a "
+            "non-finite trajectory, not valid scaling data")
     # Multi-controller: every process times the same program; process 0 owns
     # the JSONL + stdout (others would duplicate/corrupt the append).
     if jax.process_index() == 0:
@@ -243,9 +460,22 @@ def main() -> int:
         with open(args.out, "a") as f:
             f.write(json.dumps(rec) + "\n")
         print(json.dumps(rec))
-        print(f"[nd={nd} {args.mode} {n_lat}x{args.n_lon}x{args.nlev}] "
-              f"compile={rec['compile_ms']}ms steady_median={med:.2f}ms/step "
-              f"(per-step: {rec['per_step_ms']})")
+        seg_note = (f" segment[{seg_n}-step blocks]" if seg_n > 0 else "")
+        invalid_note = ("" if valid
+                        else " INVALID[diverged: finite_ok=false]")
+        head = (f"[nd={nd} {args.mode} {n_lat}x{args.n_lon}x{args.nlev}"
+                f"{seg_note}]{invalid_note} ")
+        if seg_n > 0:
+            print(head +
+                  f"compile={rec['compile_ms']}ms "
+                  f"steady_median={med:.2f}ms/step "
+                  f"(per-step: {rec['per_step_ms']})")
+        else:
+            print(head +
+                  f"compile={rec['compile_ms']}ms fused={med:.3f}ms/step "
+                  f"latency={rec['step_latency_ms']}ms/step "
+                  f"imbalance={rec['rank_imbalance']} "
+                  f"blocks={rec['block_ms']}")
         if rec["metadata"]["virtual_cpu_devices"]:
             print("[virtual-cpu] forced host-platform CPU devices: this row "
                   "is a communication-overhead / correctness proxy, NOT "

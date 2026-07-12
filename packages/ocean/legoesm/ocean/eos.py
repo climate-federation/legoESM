@@ -2031,3 +2031,162 @@ def nemo_eos_fzp(S_psu, depth_m=None):
     if depth_m is not None:
         tf = tf + _NEMO_FZP_DEP * jnp.asarray(depth_m)
     return tf
+
+
+# ==============================================================================
+# Seawater freezing point (liquidus)  T_f(S, p)  ->  KELVIN   (MED-1)
+# ==============================================================================
+# Gap this closes: the freeze checks that cap SST / trigger ice formation
+# otherwise use a single FIXED constant ``constants.T_freeze_ocean`` (271.35 K,
+# ~-1.8 C).  Real seawater freezes along a LIQUIDUS that DECREASES with salinity
+# (and, weakly, with pressure): at S = 35 PSU, p = 0 the true value is ~-1.92 C
+# (271.23 K), NOT -1.8 C.  NEMO (``eos_fzp``) and MOM6 (``TFREEZE_FORM``) both
+# carry such a liquidus; this exposes it as a selectable scheme.
+#
+# CONVENTION (stated explicitly per the sign-convention gate):
+#   * S in PSU / (g/kg); p is SEA PRESSURE in Pa (the eos.py API convention),
+#     converted to dbar via ``p_dbar = p / 1e4`` (dbar >= 0, increasing downward).
+#   * The polynomials below give the freezing-point DEPRESSION in degC (a
+#     temperature DIFFERENCE, so its numeric value is the same in K); it is ADDED
+#     to the pure-water freezing point ``T0 = constants.T_freeze`` to return an
+#     ABSOLUTE freezing temperature in KELVIN.  Pure water (S=0, p=0) -> T0 (0 C).
+#   * SIGN: the p-term is negative; the S-terms are MIXED-sign (the S^{3/2}
+#     coefficient +1.710523e-3 is POSITIVE), but the NET slope
+#         dT_f/dS = -0.0575 + 1.5*1.710523e-3*sqrt(S) - 2*2.154996e-4*S
+#     is strictly negative for ALL S >= 0: the two curvature terms together
+#     peak at +3.82e-3 degC/PSU (at S ~ 8.9 PSU), so
+#     dT_f/dS <= -0.0575 + 0.0038 = -0.0537 degC/PSU everywhere (at S=35:
+#     -0.0575 + 0.01518 - 0.01508 = -0.0574).  T_f therefore DECREASES with
+#     both salinity and depth (more saline / deeper water freezes colder).
+#     Enforced by tests/ocean/unit/test_freezing_point.py (monotone-in-S +
+#     pressure-lowers).
+#
+# Distinct from ``nemo_eos_fzp`` above: that is NEMO's TEOS-10 branch
+# (``ln_teos10=.true.``, a polynomial in sqrt(S/S0), returns degC).  The
+# ``"unesco"`` scheme here is NEMO's EOS-80 branch (``ln_teos10=.false.``), which
+# equals MOM6 ``TFREEZE_FORM="MILLERO_78"``; both branches are kept because
+# different oracle recipes select different ones.
+#
+# Provenance of the coefficients: UNESCO 1983 / Millero (1978) freezing-point-of-
+# seawater fit, as coded in NEMO ``eosbn2.F90`` (``eos_fzp``, EOS-80 branch) and
+# MOM6 ``MOM_EOS.F90`` (``calculate_TFreeze_Millero``):
+#       T_f[degC] = a*S + b*S^1.5 + c*S^2 + d*p_dbar
+# The leading slope a = -0.0575 degC/PSU is ALSO the MOM6 linear-liquidus slope
+# (``TFREEZE_FORM="LINEAR"``), so the ``"linear_S"`` scheme REUSES it rather than
+# re-declaring the literal.
+# --- Millero / UNESCO 1983 liquidus coefficients ---
+_TFRZ_S_LINEAR = -0.0575        # [degC/PSU]     linear salinity term (= MOM6 linear slope)
+_TFRZ_S_ONEHALF = 1.710523e-3   # [degC/PSU^1.5] S^{3/2} term
+_TFRZ_S_SQUARE = -2.154996e-4   # [degC/PSU^2]   S^2 term
+_TFRZ_P_DBAR = -7.53e-4         # [degC/dbar]    sea-pressure (depth) lowering
+_PA_PER_DBAR = 1.0e4            # exact unit conversion (1 dbar = 1e4 Pa)
+
+# Single source of truth for the dispatchable liquidus schemes; referenced by
+# both ``freezing_point`` (unknown-scheme ValueError) and the consumer configs.
+VALID_FREEZE_SCHEMES = frozenset({"constant", "linear_S", "unesco"})
+
+
+class FreezingPointConfig(NamedTuple):
+    """Selects the seawater freezing-point (liquidus) scheme for freeze checks.
+
+    ``scheme``
+        * ``"constant"`` (default) — fixed ``constants.T_freeze_ocean``
+          (271.35 K); byte-identical to the historical behaviour, NO S/p
+          dependence.
+        * ``"linear_S"`` — MOM6 linear liquidus ``T_f = T0 - 0.0575*S`` [K]
+          (``T0 = constants.T_freeze``); pressure-independent.
+        * ``"unesco"`` — UNESCO 1983 / Millero 1978 fit (NEMO ``eos_fzp`` EOS-80
+          branch): salinity- AND pressure-dependent.
+
+    This config carries NO float fields — ``scheme`` is a discrete selector, not
+    a tunable coefficient — so it is intentionally not a ``__param_spec__``
+    module and is not registered in ``param_collector.SPEC_MODULES``.
+    """
+    scheme: str = "constant"
+
+
+def freezing_point(S, p=0.0, *, scheme="constant"):
+    """Seawater freezing point ``T_f`` [KELVIN] vs salinity (and pressure).
+
+    Parameters
+    ----------
+    S : array or float
+        Practical salinity [PSU] / (g/kg).  Floored at 0 (a negative-salinity
+        advection overshoot would otherwise put ``sqrt(S)`` in the complex
+        plane); the floor sits at the physical wet-domain edge and leaves
+        gradients intact for the physical ``S > 0`` range.
+    p : array or float, optional
+        Sea pressure [Pa] (default ``0.0`` = surface), converted to dbar via
+        ``p / 1e4``.  Used ONLY by ``"unesco"``; ``"constant"``/``"linear_S"``
+        ignore it (the surface liquidus, matching MOM6's linear form).
+    scheme : {"constant", "linear_S", "unesco"}, keyword-only
+        Liquidus scheme (see :class:`FreezingPointConfig`).
+
+    Returns
+    -------
+    array
+        Freezing temperature [K].  Pure JAX — differentiable and jit/vmap-safe.
+
+    Raises
+    ------
+    ValueError
+        Unknown ``scheme`` (fail-fast dispatch hardening; validated at function
+        entry on the static Python selector, never inside a traced branch).
+    """
+    # Dispatch hardening: reject typos loudly on the static selector rather than
+    # silently running the wrong (or default) physics.
+    if scheme not in VALID_FREEZE_SCHEMES:
+        raise ValueError(
+            f"Unknown freezing-point scheme: {scheme!r}. "
+            f"Valid schemes: {sorted(VALID_FREEZE_SCHEMES)}."
+        )
+
+    S_arr = jnp.asarray(S)
+    if scheme == "constant":
+        # Byte-identical to the historical fixed constant; broadcast so array
+        # callers get a per-cell field and scalar callers get a scalar.
+        return jnp.broadcast_to(jnp.asarray(constants.T_freeze_ocean), S_arr.shape)
+
+    # S >= 0 guard (shared by linear_S and unesco).
+    S_safe = jnp.maximum(S_arr, 0.0)
+
+    if scheme == "linear_S":
+        # MOM6 linear liquidus: T_f[K] = T0 + a*S, a < 0 => T_f decreases with S.
+        depression_c = _TFRZ_S_LINEAR * S_safe
+        return constants.T_freeze + depression_c
+
+    # scheme == "unesco": UNESCO 1983 / Millero 1978 (NEMO eos_fzp EOS-80 branch).
+    # ``S_safe ** 1.5`` (analytic pow-JVP 1.5*S**0.5) is grad-safe at S=0, unlike
+    # ``S_safe * sqrt(S_safe)`` whose sqrt node yields a 0*inf NaN gradient there.
+    p_dbar = jnp.asarray(p) / _PA_PER_DBAR
+    depression_c = (
+        _TFRZ_S_LINEAR * S_safe
+        + _TFRZ_S_ONEHALF * (S_safe ** 1.5)     # S^{3/2}
+        + _TFRZ_S_SQUARE * (S_safe * S_safe)    # S^2
+        + _TFRZ_P_DBAR * p_dbar                 # pressure lowering (<= 0)
+    )
+    return constants.T_freeze + depression_c
+
+
+def slab_freeze_point_K(T_freeze_const, scheme: str = "constant"):
+    """Effective seawater freezing point [K] for slab-ocean freeze clamps.
+
+    The slab / two-layer mixed-layer oceans (``simple_ocean.py`` on the
+    structured grid, ``simple_ocean_mpas.py`` on the Voronoi mesh) carry no
+    prognostic salinity, so a liquidus scheme is evaluated at the fixed
+    reference ocean salinity ``constants.S_ocean_ref`` (an environmental
+    reference, NOT a tunable).  ``"constant"`` (default) returns the caller's
+    ``T_freeze_const`` unchanged -- byte-identical to the historical clamp.
+    A typo'd scheme can never silently fall back to the constant: anything
+    other than ``"constant"`` is dispatched to :func:`freezing_point`, which
+    raises ``ValueError`` on an unknown scheme.
+
+    SINGLE OWNER (MED-1 follow-up): both slab modules call THIS helper for
+    both the ``jnp.maximum`` clamp and the ``Q_freeze`` diagnostic -- do not
+    re-derive the constant-vs-liquidus branch in a consumer.  ``scheme`` is a
+    static config field in every caller, so the Python ``if`` is
+    feature-gating, not a data-dependent traced select.
+    """
+    if scheme == "constant":
+        return T_freeze_const
+    return freezing_point(constants.S_ocean_ref, 0.0, scheme=scheme)

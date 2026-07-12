@@ -2348,9 +2348,38 @@ class ModelDriver:
 
         k_f_max = cfg.k_BL_max_per_day / 86400.0
         k_free = cfg.k_free_per_day / 86400.0
-        k_f = k_free + k_f_max * jnp.maximum(
-            0.0, (sigma_full - cfg.sigma_b) / (1.0 - cfg.sigma_b)
-        )
+        # Sign/units: k_f >= 0 [1/s], DT [s] -> fric_decay = exp(-k_f*DT) in
+        # (0, 1]; this Rayleigh term is a NON-CONSERVATIVE momentum SINK relaxing
+        # u, v toward rest (never amplifies).  The BL/free-tropo drag is the
+        # Held-Suarez DRY-CORE surrogate for surface friction.  A real turbulence
+        # scheme already applies the PHYSICAL surface stress as the boundary-layer
+        # bottom BC (louis.py implicit diffusion of u, v with sflx_u = tau_x, i.e.
+        # momentum handed to the ocean/land), so keeping k_f here DOUBLE-COUNTS
+        # surface drag -- a spurious second, momentum-to-nowhere sink that
+        # ~halves the low-level trades (#931).  Gate it to an exact no-op
+        # (k_f = 0 -> decay = 1.0) whenever a real BL scheme owns surface
+        # momentum; keep it only when NO BL scheme does -- i.e.
+        # turbulence == "none".  That single condition is sufficient: a pure
+        # Held-Suarez dry core runs turbulence="none" (the config default, and
+        # the HS test matrix sets it explicitly), so it still gets its defining
+        # Rayleigh friction here.  We must NOT additionally keep k_f on
+        # held_suarez_forcing: HS is ADDITIVE to the physics pipeline, so a
+        # held_suarez_forcing + louis config would apply BOTH the Louis surface
+        # stress AND this Rayleigh drag -- the very double-count this fix removes
+        # (codex #931).  The HS *thermal* Newtonian relaxation is applied
+        # separately below and is unaffected.  cfg.turbulence is a STATIC Python
+        # config field -> compile-time feature gate (NOT jnp.where),
+        # constant-folds, no retrace/AD impact.  NOTE: turbulence != "none" is
+        # the proxy for "a BL scheme owns surface momentum" -- correct for all
+        # stock schemes (nonzero drag); a degenerate Cd_neutral=0 override would
+        # give zero surface stress yet still gate k_f off (an undamped BL), a
+        # user misconfiguration outside this fix's scope.
+        if cfg.turbulence == "none":
+            k_f = k_free + k_f_max * jnp.maximum(
+                0.0, (sigma_full - cfg.sigma_b) / (1.0 - cfg.sigma_b)
+            )
+        else:
+            k_f = jnp.zeros_like(sigma_full)  # decay = 1.0, exact no-op
         # Top-of-atmosphere sponge (#836): a Rayleigh damping increasing toward
         # the model lid (sigma -> 0), ADDED to the surface-drag k_f so the
         # existing fric_decay tail (applied to u, v every step) absorbs
@@ -5355,11 +5384,19 @@ class ModelDriver:
                 # finiteness-only guard; the T_min floor masked its low side).
                 from legoesm.driver.diagnostics import (
                     physical_state_blowup_reason,
+                    t_min_floor_blowup_reason,
                 )
                 _bounds_reason = physical_state_blowup_reason(
                     elapsed_day, T_min, T_max)
-                if (not T_finite) or _bounds_reason is not None:
-                    run_status = (_bounds_reason
+                # LOUD T_min-floor guard (#930): a column pinned at the dycore
+                # floor is a masked runaway.  Label it specifically and PREFER
+                # it over the generic bounds message.  MPAS-only, eager path —
+                # no SegmentCarry / _step_jit signature change.
+                _floor_reason = t_min_floor_blowup_reason(
+                    elapsed_day, T_min, float(self.model.config.T_min))
+                _reason = _floor_reason or _bounds_reason
+                if (not T_finite) or _reason is not None:
+                    run_status = (_reason
                                   or f"BLOWUP at day {elapsed_day:.1f}")
                     logger.error(run_status)
                     self._write_blowup_state(

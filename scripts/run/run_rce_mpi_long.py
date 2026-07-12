@@ -327,6 +327,16 @@ def parse_args():
                         "dt=20 actually runs SLOWER than upwind1 at dt=10 "
                         "(2x fewer steps but 2.4x cost per step). Use only "
                         "for sharp-front problems where dispersion matters.")
+    p.add_argument("--vertical-tracer-advection",
+                   choices=["centered", "van_leer"],
+                   default="van_leer",
+                   help="VERTICAL tracer advection. van_leer (default) = "
+                        "monotone TVD, positive-definite (matches the serial "
+                        "run_rcemip_plane default + SAM's monotone scalar "
+                        "transport); centered = 2nd-order, can overshoot into "
+                        "negative tracer at sharp convective gradients. Now "
+                        "honored on the MPI halo path (codex CRM-dycore "
+                        "review) — previously the halo silently used centered.")
     p.add_argument("--adaptive-dt", action="store_true", default=False,
                    help="iter-228 F11 fix-path-4 STUB: opt-in flag "
                         "for runtime CFL monitoring + dt shrinkage. "
@@ -1021,6 +1031,7 @@ def main():
         n_acoustic_substeps=args.n_acoustic_substeps,
         vertical_theta_diffusion=args.vertical_theta_diffusion,
         horizontal_advection_scheme=args.advection,
+        vertical_tracer_advection=args.vertical_tracer_advection,
         implicit_buoyancy=args.implicit_buoyancy,
     )
     # Save the GLOBAL state for snapshot dumping (needed on every rank

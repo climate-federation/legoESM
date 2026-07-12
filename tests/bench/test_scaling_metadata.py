@@ -348,3 +348,15 @@ def test_tidy_throughput_fields_zero_time_is_flagged_not_inf():
         dt_seconds=600.0, time_per_step_ms=0.0, total_cells=10)
     assert out["sypd"] == 0.0
     assert out["mcells_per_s"] == 0.0
+
+
+def test_tidy_throughput_fields_none_time_emits_honest_nulls():
+    """A run with NO per-step time (the zero-length block_steps=0 parity
+    path) must propagate nulls — a throughput is never fabricated."""
+    out = md.tidy_throughput_fields(
+        dt_seconds=600.0, time_per_step_ms=None, total_cells=10)
+    assert out["time_per_step_ms"] is None
+    assert out["sypd"] is None
+    assert out["mcells_per_s"] is None
+    assert out["dt_seconds"] == 600.0
+    assert out["total_cells"] == 10

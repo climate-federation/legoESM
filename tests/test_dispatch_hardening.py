@@ -227,6 +227,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ml/legoesm/training/aimip_params.py", "make_aimip_classical_spectral_physics"),
         ("packages/ocean/legoesm/ocean/biogeochemistry/config.py", "init_biogeo_state"),
         ("packages/ocean/legoesm/ocean/config.py", "to_ocean_config"),
+        # MED-1 follow-up: under-ice relaxation validates freeze_scheme at fn
+        # entry against eos.VALID_FREEZE_SCHEMES (per-cell liquidus target).
+        ("packages/ocean/legoesm/ocean/coupler/omip2_applicator.py", "under_ice_freeze_relax"),
         ("packages/ocean/legoesm/ocean/dynamics/_flux_limiters.py", "resolve_tvd_limiter"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model.py", "__init__"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_compute_advection_flux_div"),
@@ -239,6 +242,7 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # scanner-shaped; the canonical unknown-scheme guard is the validator.)
         ("packages/ocean/legoesm/ocean/dynamics/ocean_tendency_common.py", "validate_bottom_drag_scheme"),
         ("packages/ocean/legoesm/ocean/eos.py", "make_eos_fn"),
+        ("packages/ocean/legoesm/ocean/eos.py", "freezing_point"),
         ("packages/ocean/legoesm/ocean/experiments/dino.py", "create_forcings"),
         ("packages/ocean/legoesm/ocean/experiments/dino.py", "create_initial_conditions"),
         ("packages/ocean/legoesm/ocean/physics/bottom_drag/integration.py", "make_bottom_drag_physics"),
@@ -246,6 +250,11 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py", "gm_redi_tracer_tendency_latlon"),
         ("packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_mpas.py", "gm_redi_tracer_tendency_mpas"),
         ("packages/ocean/legoesm/ocean/physics/lateral_mixing/integration.py", "make_lateral_mixing_physics"),
+        # MPAS ocean vmix/surface/convection factory: catke rejected, richardson
+        # rejected (K-profile would be silently dropped), tke gated implicit-only
+        # (hardened 2026-07 with the MPAS-TKE bridge). Grow-only lock so these
+        # unknown-scheme raises can't be silently deleted.
+        ("packages/ocean/legoesm/ocean/physics/mpas_physics.py", "make_mpas_ocean_physics"),
         ("packages/ocean/legoesm/ocean/physics/surface_forcing/bulk_formulas.py", "bulk_formula_surface_forcing"),
         ("packages/ocean/legoesm/ocean/physics/surface_forcing/integration.py", "make_surface_forcing_physics"),
         ("packages/ocean/legoesm/ocean/physics/vertical_mixing/integration.py", "make_vertical_mixing_physics"),

@@ -33,10 +33,16 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.core.flux_limiters import van_leer_face_values
-from legoesm.core.weno import weno5_z
+from legoesm.core.weno import weno5_z, weno7_z, weno9_z
 
 _AY, _AX, _AZ = 0, 1, 2
-_SCHEMES = ("upwind", "van_leer", "weno5")
+# "central" = 2nd-order central (non-dissipative); the others are upwind-biased.
+# Central is for LES MOMENTUM, where WENO5's inherent upwind k⁶ diffusion
+# over-smooths the resolved eddies (cf. the spectral core's energy-conserving
+# advection). It carries no numerical dissipation, so it relies on the SGS (and
+# optionally hyperdiff/shapiro) for 2Δ control — do NOT use it for scalars that
+# need monotonicity (θ/moisture).
+_SCHEMES = ("upwind", "van_leer", "weno5", "weno7", "weno9", "central")
 
 
 def _upwind_face(fm1, f0, vel_pos):
@@ -52,6 +58,10 @@ def _face_values_x(phi, scheme):
     if scheme == "van_leer":
         # one call returns (phi_pos, phi_neg) = (left-biased, right-biased) at i+½
         return van_leer_face_values(r(1), r(0), r(-1), r(-2))
+    if scheme == "weno7":   # [f_{i-3..i+4}] — less upwind dissipation than weno5
+        return weno7_z([r(3), r(2), r(1), r(0), r(-1), r(-2), r(-3), r(-4)])
+    if scheme == "weno9":   # [f_{i-4..i+5}]
+        return weno9_z([r(4), r(3), r(2), r(1), r(0), r(-1), r(-2), r(-3), r(-4), r(-5)])
     # weno5: stencil [f_{i-2..i+3}] for face i+½
     stencil = [r(2), r(1), r(0), r(-1), r(-2), r(-3)]
     return weno5_z(stencil)
@@ -63,6 +73,10 @@ def _face_values_y(phi, scheme):
         return r(0), r(-1)
     if scheme == "van_leer":
         return van_leer_face_values(r(1), r(0), r(-1), r(-2))
+    if scheme == "weno7":
+        return weno7_z([r(3), r(2), r(1), r(0), r(-1), r(-2), r(-3), r(-4)])
+    if scheme == "weno9":
+        return weno9_z([r(4), r(3), r(2), r(1), r(0), r(-1), r(-2), r(-3), r(-4), r(-5)])
     stencil = [r(2), r(1), r(0), r(-1), r(-2), r(-3)]
     return weno5_z(stencil)
 
@@ -75,10 +89,14 @@ def _upwind_flux_h(phi, vel, axis, dx, scheme, vel_at_faces=False):
     (``vel_at_faces=True``, the C-grid case — ``vel[...,i]`` is the velocity at face
     i+½). The upwind reconstruction side is chosen by the sign of the face velocity.
     """
-    fv = _face_values_x if axis == _AX else _face_values_y
-    f_left, f_right = fv(phi, scheme)
     vface = vel if vel_at_faces else 0.5 * (vel + jnp.roll(vel, -1, axis=axis))
-    phi_face = jnp.where(vface >= 0.0, f_left, f_right)
+    if scheme == "central":
+        # 2nd-order central i+½ interpolation — NON-dissipative (no upwind pick).
+        phi_face = 0.5 * (phi + jnp.roll(phi, -1, axis=axis))
+    else:
+        fv = _face_values_x if axis == _AX else _face_values_y
+        f_left, f_right = fv(phi, scheme)
+        phi_face = jnp.where(vface >= 0.0, f_left, f_right)
     flux = vface * phi_face                                 # flux at i+½
     # divergence: (F_{i+½} − F_{i−½})/Δ
     return (flux - jnp.roll(flux, 1, axis=axis)) / dx
@@ -92,21 +110,33 @@ def _flux_div_z(phi, w, dz, scheme):
     through ground/lid). Upwind side from the sign of the interior face ``w``.
     """
     wf = w[..., 1:-1]                                       # interior faces (…,nz-1)
-    # reconstruct phi at interior faces from the two adjacent centres (upwind-biased)
-    if scheme == "weno5":
-        # 6-cell vertical stencil [k-2..k+3] at interior faces; clamp walls by edge-repeat.
-        pp = jnp.pad(phi, [(0, 0), (0, 0), (2, 3)], mode="edge")
-        st = [pp[..., j:j + (phi.shape[-1] - 1)] for j in range(6)]
-        f_left, f_right = weno5_z(st)
-    elif scheme == "van_leer":
-        # face k+½ stencil [φ_{k-1},φ_k,φ_{k+1},φ_{k+2}]; pad(2,2) ⇒ pp[2+k]=φ_k.
-        pp = jnp.pad(phi, [(0, 0), (0, 0), (2, 2)], mode="edge")
-        n = phi.shape[-1] - 1                               # number of interior faces
-        f_left, f_right = van_leer_face_values(
-            pp[..., 1:n + 1], pp[..., 2:n + 2], pp[..., 3:n + 3], pp[..., 4:n + 4])
-    else:  # upwind
-        f_left, f_right = phi[..., :-1], phi[..., 1:]
-    phi_face = jnp.where(wf >= 0.0, f_left, f_right)
+    if scheme == "central":
+        # 2nd-order central at interior faces — NON-dissipative (no upwind pick).
+        phi_face = 0.5 * (phi[..., :-1] + phi[..., 1:])
+    else:
+        # reconstruct phi at interior faces from the two adjacent centres (upwind-biased)
+        if scheme == "weno5":
+            # 6-cell vertical stencil [k-2..k+3] at interior faces; clamp walls by edge-repeat.
+            pp = jnp.pad(phi, [(0, 0), (0, 0), (2, 3)], mode="edge")
+            st = [pp[..., j:j + (phi.shape[-1] - 1)] for j in range(6)]
+            f_left, f_right = weno5_z(st)
+        elif scheme == "weno7":               # 8-cell [k-3..k+4]
+            pp = jnp.pad(phi, [(0, 0), (0, 0), (3, 4)], mode="edge")
+            st = [pp[..., j:j + (phi.shape[-1] - 1)] for j in range(8)]
+            f_left, f_right = weno7_z(st)
+        elif scheme == "weno9":               # 10-cell [k-4..k+5]
+            pp = jnp.pad(phi, [(0, 0), (0, 0), (4, 5)], mode="edge")
+            st = [pp[..., j:j + (phi.shape[-1] - 1)] for j in range(10)]
+            f_left, f_right = weno9_z(st)
+        elif scheme == "van_leer":
+            # face k+½ stencil [φ_{k-1},φ_k,φ_{k+1},φ_{k+2}]; pad(2,2) ⇒ pp[2+k]=φ_k.
+            pp = jnp.pad(phi, [(0, 0), (0, 0), (2, 2)], mode="edge")
+            n = phi.shape[-1] - 1                           # number of interior faces
+            f_left, f_right = van_leer_face_values(
+                pp[..., 1:n + 1], pp[..., 2:n + 2], pp[..., 3:n + 3], pp[..., 4:n + 4])
+        else:  # upwind
+            f_left, f_right = phi[..., :-1], phi[..., 1:]
+        phi_face = jnp.where(wf >= 0.0, f_left, f_right)
     flux_int = wf * phi_face                                # (…,nz-1)
     flux = jnp.pad(flux_int, [(0, 0), (0, 0), (1, 1)])     # 0 at walls → (…,nz+1)
     return (flux[..., 1:] - flux[..., :-1]) / dz           # (…,nz)

@@ -1078,6 +1078,23 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 gm_redi=None if no_gm_redi else bathy_gm_redi,
                 barotropic_solver="implicit_cn",
                 pgf_scheme=pgf_scheme if pgf_scheme is not None else "smc03",
+                # Fourier polar filter ON by default for the GLOBAL regular
+                # lat-lon bathy path.  A global lat-lon ocean has converging
+                # meridians: dx = R*dlon*cos(lat) -> 0 at the N-pole, so the
+                # explicit advection/metric terms violate CFL poleward and the
+                # WOA cold-start blows up (~day 0.25) regardless of the time
+                # integrator (implicit_cn barotropic / implicit vmix do NOT
+                # cure it -- see PolarFilterConfig docstring, #939).  Force it
+                # on structurally, mirroring implicit_vertical_mixing=True
+                # above, so a recipe that omits --polar-filter can't silently
+                # reintroduce the pole blowup.  60.0 is the cutoff LATITUDE
+                # [deg] (a filter config value, not a physical constant) and
+                # matches the documented stable latlon config.  Safe for the
+                # tripole: it is built via the separate _create_setup("tripole")
+                # branch (dlon>0), so this default never reaches a dlon==0 grid
+                # (which _apply_polar_filter rejects).
+                use_polar_filter=True,
+                polar_filter_cutoff_lat_deg=60.0,
                 # MOM6 MAXVEL: clip barotropic velocities to prevent
                 # blowup from WBC intensification at coarse resolution.
                 # MOM6 default is 6.0 m/s; we use 3.0 since realistic

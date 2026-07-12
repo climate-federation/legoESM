@@ -142,6 +142,9 @@ _T_BLOWUP_MIN_K = 100.0
 _T_BLOWUP_MAX_K = 400.0
 _PS_BLOWUP_MIN_PA = 40000.0
 _PS_BLOWUP_MAX_PA = 115000.0
+# Tolerance for "global T_min sits AT the dycore floor": the clip is an exact
+# jnp.maximum, so a pinned column reports T_min == floor up to fp rounding.
+_T_FLOOR_TOL_K = 1e-3
 
 
 def physical_state_blowup_reason(elapsed_day, T_min, T_max,
@@ -163,6 +166,32 @@ def physical_state_blowup_reason(elapsed_day, T_min, T_max,
                 f"bounds (min={ps_min:.0f}Pa, max={ps_max:.0f}Pa). "
                 "Check dt and dynamics configuration."
             )
+    return None
+
+
+def t_min_floor_blowup_reason(elapsed_day, T_min, T_floor):
+    """BLOWUP reason string when the global minimum temperature is pinned at
+    the ``T_min`` dycore floor, else ``None``.
+
+    The eager MPAS path silently clips T to ``config.T_min`` each step
+    (``primitive_eq_mpas`` step "Floors").  A column pinned at the floor is an
+    unbudgeted energy source that MASKS a runaway (#930): the clip holds the
+    reported minimum steady even as the instability grows, so a diverging run
+    can look "successful".  This LOUD guard labels that specific failure.
+
+    Pure/scalar and gated on ``T_floor > 0`` (floor disabled ⇒ never fires, to
+    match the ``config.T_min > 0`` gate on the clip itself), so it *composes
+    with* — and is deliberately MORE specific than —
+    :func:`physical_state_blowup_reason`: when a floor of, say, 150 K sits
+    above the 100 K generic lower bound, this catches a masked runaway the
+    generic bounds check would miss entirely.
+    """
+    if T_floor > 0.0 and T_min <= T_floor + _T_FLOOR_TOL_K:
+        return (
+            f"BLOWUP at day {elapsed_day:.0f}: T_min floor activated "
+            f"(min T={T_min:.2f}K pinned at the {T_floor:.0f}K dycore floor "
+            "— masked runaway; see #930)."
+        )
     return None
 
 
