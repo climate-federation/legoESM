@@ -310,22 +310,32 @@ def cgrid_latlon_nh_slow_tendencies(
     )
     # --- Horizontal continuity for rho': conservative FLUX form ---
     # Sign convention: tendency = d(rho')/dt, applied as rho' += dt*tend.
-    # Continuity is d(rho)/dt = -div(rho v); the reference rho_ref(z) is
-    # static, so d(rho')/dt = d(rho)/dt, and the horizontal leg is
-    #   d(rho')/dt|_h = -div_h(rho_total * v_h)
-    # on TOTAL density -- matching the vertical leg inside the acoustic
-    # kernel, which is flux form on rho_total (-d(rho_total w)/dz).
+    # Continuity in the terrain-following coordinate is
+    #   d(J rho)/dt = -div_h(J rho v_h) - (vertical flux term),
+    # and the static reference rho_ref(z) gives d(rho')/dt = d(rho)/dt,
+    # so the horizontal leg is
+    #   d(rho')/dt|_h = -(1/J) div_h(J * rho_total * v_h)
+    # on TOTAL density with the metric Jacobian J = (H - z_s)/H inside
+    # the flux -- the same metric treatment as the vertical leg in the
+    # acoustic kernel (flux form on rho_total, divided by J).  For flat
+    # terrain J = 1 exactly and this reduces bit-identically to
+    # -div_h(rho_total v_h).
     # ``cgrid_fv_flux_divergence_latlon_3d`` returns -div_h(q v) (the
     # minus sign is inside the operator), so it is added with a + sign.
-    # Budget closure: the operator telescopes (periodic lon; v = 0 at the
-    # polar faces via _apply_pole_wall above), so the global integral
-    # sum(tend * area) vanishes per level and dry mass is conserved.
+    # Budget closure: the J-weighted global integral sum(tend * J * area)
+    # telescopes for ANY J (periodic lon; v = 0 at the polar faces via
+    # _apply_pole_wall above), so dry mass
+    # sum(rho_total * J * dz * area) is conserved.
     # The v1 code used the ADVECTIVE form on rho' (-v . grad rho'),
     # which dropped the -rho_total*div_h(v) compression term and leaked
     # mass under divergent flow.
+    # NOTE: J here closes the MASS budget under a sloped metric; the
+    # rest of the v1 slow dynamics (PGF metric term, surface kinematic
+    # w BC, theta/w advection metrics) remains flat-terrain only.
+    jac_h = terrain_metric.jacobian[..., None]   # (n_lat, n_lon, 1)
     horiz_cont_rho_p = cgrid_fv_flux_divergence_latlon_3d(
-        rho_total, u, v, grid,
-    )
+        jac_h * rho_total, u, v, grid,
+    ) / jac_h
 
     # --- Horizontal advection of w on its native half-level grid ---
     # The PPM helper is shape-generic in the trailing axis, so we can
@@ -390,6 +400,7 @@ def cgrid_latlon_nh_slow_tendencies(
     sponge_half = sponge_profile(
         height_coord.z_half, height_coord.H,
         cfg.sponge_width, cfg.sponge_coeff,
+        shape=cfg.sponge_profile_shape,
     )  # (nlev+1,)
     horiz_adv_w = horiz_adv_w - sponge_half * w
 
