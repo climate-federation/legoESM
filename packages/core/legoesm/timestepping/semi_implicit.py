@@ -59,6 +59,11 @@ class SemiImplicitData(NamedTuple):
         Vertical coupling matrix (Hoskins & Simmons 1975).
         Gamma[k, k'] is the contribution of D at level k' to the
         geopotential + R_d*T_ref*lnps tendency at level k.
+    tau : jax.Array, shape (nlev, nlev)
+        Reference thermodynamic coupling matrix: dT'/dt = -tau @ D
+        (linearized adiabatic heating, see compute_tau_matrix).  Used for
+        the temperature correction; consistent with Gamma = R_d*(S @ tau +
+        T_ref*1*b^T).
     eigenvalues : jax.Array, shape (n_max+1,)
         n(n+1)/a^2 for each total wavenumber n.
     si_matrices : jax.Array, shape (n_max+1, nlev, nlev)
@@ -76,6 +81,7 @@ class SemiImplicitData(NamedTuple):
         1 - sigma_top (for lnps correction).
     """
     Gamma: jax.Array
+    tau: jax.Array
     eigenvalues: jax.Array
     si_matrices: jax.Array
     T_ref: float
@@ -85,38 +91,127 @@ class SemiImplicitData(NamedTuple):
     sigma_range: jax.Array
 
 
+def compute_tau_matrix(
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
+    T_ref: float,
+) -> jax.Array:
+    """Reference thermodynamic coupling matrix ``tau``: ``dT'/dt = -tau @ D``.
+
+    ``tau`` is the linearization of the dycore's adiabatic heating term
+    ``kappa*T*omega/p`` about the isothermal (``T = T_ref``) resting
+    reference state.  For an isothermal reference the vertical advection of
+    ``T`` vanishes (``dT_ref/dsigma = 0``), so the ENTIRE temperature-from-
+    divergence coupling is the adiabatic term:
+
+        dT'_k/dt = kappa * T_ref * (omega/p)_k,
+        (omega/p)_k = d(ln p_s)/dt + sigma_dot_k / sigma_k,
+
+    where ``d(ln p_s)/dt`` and ``sigma_dot`` are diagnosed from the
+    divergence ``D`` by the SAME shared operators the model integrates with
+    (continuity + :func:`compute_sigma_dot` + :func:`compute_pressure_velocity`).
+    Note the surface pressure ``p_s`` cancels in ``omega/p``, so ``tau`` is
+    independent of the reference pressure.  Because this ``tau`` is the exact
+    linearization of the model's own thermodynamics, the gravity-wave
+    structure matrix ``Gamma = R_d*(S @ tau + T_ref*1*b^T)`` is symmetrizable
+    with REAL, POSITIVE eigenvalues — the vertical normal-mode "equivalent
+    depths" ``H = lambda/g`` (external/Lamb mode ~10 km down to tiny internal
+    modes).
+
+    This replaces the earlier diagonal approximation ``tau = T_ref*I``, which
+    dropped both the factor ``kappa`` and the vertical non-locality of
+    ``omega/p`` and therefore made ``Gamma`` non-normal, with complex
+    eigenvalues at ``nlev >= 4`` (issue #960 — the 2nd contributor to the
+    T85 NaN).
+
+    Parameters
+    ----------
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
+        Vertical coordinate.  Hybrid coordinates are linearized at
+        ``p_s = p_ref`` via their sigma-compatibility views (``sigma_full``,
+        ``dsigma``, ``fractional_sigma``).
+    T_ref : float
+        Reference temperature [K].
+
+    Returns
+    -------
+    tau : jax.Array, shape (nlev, nlev)
+    """
+    # Reuse the model's shared vertical operators — never re-derive sigma_dot
+    # or omega here (CLAUDE.md: reuse shared numerics).  Function-scope import
+    # avoids a core->grids top-level cycle.
+    from legoesm.grids.vertical import compute_sigma_dot, compute_pressure_velocity
+
+    kappa = constants.kappa
+    nlev = sigma_coord.n_levels
+    _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+
+    if _hybrid:
+        dsigma = jnp.asarray(sigma_coord.dsigma_eff, dtype=jnp.float64)
+        sigma_range = jnp.asarray(sigma_coord.B_range, dtype=jnp.float64)
+    else:
+        dsigma = jnp.asarray(sigma_coord.dsigma, dtype=jnp.float64)
+        sigma_top = jnp.asarray(sigma_coord.sigma_half[0], dtype=jnp.float64)
+        sigma_range = 1.0 - sigma_top
+
+    sigma_full = jnp.asarray(sigma_coord.sigma_full, dtype=jnp.float64)
+    p_ref = jnp.asarray(constants.p_ref, dtype=jnp.float64)
+    p_full = sigma_full * p_ref  # reference full-level pressure (p_ref cancels)
+
+    def adiabatic_of_D(D: jax.Array) -> jax.Array:
+        # Continuity: d(ln p_s)/dt = -D_total / sigma_range.
+        D_total = jnp.sum(D * dsigma)
+        dlnps_dt = -D_total / sigma_range
+        dp_s_dt = p_ref * dlnps_dt
+        # sigma_dot and omega from the shared discrete operators.
+        sigma_dot = compute_sigma_dot(D, sigma_coord)
+        omega = compute_pressure_velocity(sigma_dot, p_ref, dp_s_dt, sigma_coord)
+        return kappa * T_ref * omega / p_full  # = adiabatic dT'/dt
+
+    # ``adiabatic_of_D`` is EXACTLY linear in D, so its Jacobian is the
+    # operator matrix; dT'/dt = -tau @ D  =>  tau = -d(adiabatic)/dD.
+    dadiab_dD = jax.jacfwd(adiabatic_of_D)(jnp.zeros(nlev, dtype=jnp.float64))
+    return -dadiab_dD
+
+
 def compute_Gamma_matrix(
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     T_ref: float,
+    tau: jax.Array | None = None,
 ) -> jax.Array:
     """Compute the Hoskins-Simmons vertical coupling matrix Gamma.
 
     Gamma encodes the vertical coupling of divergence to pressure
-    gradient through the hydrostatic relation and the equation of state.
+    gradient through the hydrostatic relation and the equation of state,
+    substituting the linearized thermodynamic and continuity equations:
+
+        d^2 D/dt^2 = nabla^2 * Gamma * D,
+        Gamma = R_d * (S @ tau + T_ref * 1 * b^T).
 
     The coupling has two pathways:
 
-    1. **Geopotential (hydrostatic integral)**: D at level k' changes T
-       at k' by -alpha*dt*T_ref*D_{k'} (compression heating). This T
-       change propagates into the geopotential Phi at level k through
-       the Simmons-Burridge hydrostatic integral:
+    1. **Geopotential (hydrostatic integral)**: divergence heats/cools each
+       level adiabatically via ``tau`` (``dT'/dt = -tau @ D``, see
+       :func:`compute_tau_matrix`); the temperature change propagates into
+       the geopotential ``Phi`` at level k through the Simmons-Burridge
+       hydrostatic integral:
 
            Phi_k = phis + sum_{k''>k} R_d*T_{k''}*ln_ratio[k'']
                    + R_d*T_k*alpha_SB[k]
 
-       So dPhi_k/dT_{k'} = R_d*ln_ratio[k'] for k'>k (below level k),
-                          = R_d*alpha_SB[k]   for k'=k (self-coupling),
-                          = 0                  for k'<k (above level k).
+       So ``dPhi_k/dT_{k'} = R_d * S[k, k']`` with
+           S[k, k'] = ln_ratio[k']  for k'>k (below level k),
+                    = alpha_SB[k]    for k'=k (Simmons-Burridge self-coupling),
+                    = 0              for k'<k (above level k).
 
     2. **Surface pressure**: D at all levels changes lnps via the
        continuity equation: d(lnps)/dt = -sum_k D_k*dsigma_k/sigma_range.
-       This enters the PGF as R_d*T_ref*lnps.
+       This enters the PGF as R_d*T_ref*lnps, giving the rank-1 term
+       ``T_ref * 1 * b^T`` with ``b[k'] = dsigma[k']/sigma_range``.
 
-    The combined matrix is:
-
-        Gamma[k,k'] = R_d*T_ref * (S[k,k'] + dsigma[k']/sigma_range)
-
-    where S is an upper-triangular geopotential coupling matrix.
+    Using the CONSISTENT ``tau`` (the linearization of the model's own
+    adiabatic term) — rather than the diagonal ``tau = T_ref*I`` — is what
+    makes Gamma symmetrizable with real, positive eigenvalues at all nlev
+    (issue #960).
 
     For hybrid coordinates, the reference ln_ratio and alpha are
     precomputed at p_s = p_ref (standard linearization). The effective
@@ -128,6 +223,9 @@ def compute_Gamma_matrix(
         Vertical coordinate.
     T_ref : float
         Reference temperature [K].
+    tau : jax.Array, optional
+        Precomputed thermodynamic coupling matrix (shape (nlev, nlev)).
+        If None, computed via :func:`compute_tau_matrix`.
 
     Returns
     -------
@@ -150,6 +248,9 @@ def compute_Gamma_matrix(
         sigma_top = jnp.asarray(sigma_coord.sigma_half[0], dtype=jnp.float64)
         sigma_range = 1.0 - sigma_top
 
+    if tau is None:
+        tau = compute_tau_matrix(sigma_coord, T_ref)
+
     # --- Geopotential coupling matrix S[k, k'] ---
     # S[k, k'] = ln_ratio[k']  if k' > k  (k' is below level k in the
     #                                        hydrostatic integral)
@@ -169,14 +270,17 @@ def compute_Gamma_matrix(
         ),
     )
 
-    # --- Surface pressure coupling ---
+    # --- Surface pressure coupling (rank-1: 1 * b^T) ---
     # Each k' contributes dsigma[k']/sigma_range to all rows k
     lnps_coupling = dsigma[None, :] / sigma_range  # (1, nlev) -> broadcast
 
-    # --- Combined Gamma ---
-    # NOTE: No E-variable diagonal (lnps_ref * I) — the correct PGF form
-    # does not include the R_d*lnps_0*∇²(T') same-level coupling.
-    Gamma = R_d * T_ref * (S + lnps_coupling)
+    # --- Combined Gamma = R_d * (S @ tau + T_ref * 1 * b^T) ---
+    # Geopotential response to the adiabatic heating (S @ tau) plus the
+    # surface-pressure PGF (rank-1).  Consistent ``tau`` => real, positive
+    # eigenvalues (equivalent depths).  NOTE: No E-variable diagonal
+    # (lnps_ref * I) — the correct PGF form does not include the
+    # R_d*lnps_0*∇²(T') same-level coupling.
+    Gamma = R_d * (S @ tau + T_ref * lnps_coupling)
 
     return Gamma
 
@@ -225,8 +329,11 @@ def precompute_si_matrices(
     n_max = grid.n_max
     nlev = sigma_coord.n_levels
 
-    # Compute vertical coupling matrix
-    Gamma = compute_Gamma_matrix(sigma_coord, T_ref)
+    # Compute vertical coupling matrices.  ``tau`` is the linearized adiabatic
+    # heating (dT'/dt = -tau @ D); ``Gamma`` reuses it so the reference matrix
+    # and the temperature correction stay consistent (issue #960).
+    tau = compute_tau_matrix(sigma_coord, T_ref)
+    Gamma = compute_Gamma_matrix(sigma_coord, T_ref, tau=tau)
 
     # Eigenvalues of -nabla^2: n(n+1)/a^2
     ns = jnp.arange(n_max + 1, dtype=jnp.float64)
@@ -250,6 +357,7 @@ def precompute_si_matrices(
 
     return SemiImplicitData(
         Gamma=Gamma,
+        tau=tau,
         eigenvalues=eigenvalues,
         si_matrices=si_matrices,
         T_ref=T_ref,
@@ -334,7 +442,7 @@ def si_correction(
         )
 
     alpha = si_data.alpha
-    T_ref = si_data.T_ref
+    tau = si_data.tau  # (nlev, nlev) reference thermodynamic coupling
 
     # Explicit divergence (predictor output) and the reference-level divergence
     # (forward: stage-start X_old; leapfrog: center X^n).
@@ -373,9 +481,14 @@ def si_correction(
     else:  # "leapfrog"
         delta_div = div_hat_corrected - div_hat_explicit   # (n_sh, nlev)
 
-    # Temperature correction:
-    # T_corrected = T_explicit - alpha*dt*T_ref*delta_div
-    T_hat_corrected = state_explicit.T_hat.data - alpha * dt * T_ref * delta_div
+    # Temperature correction (consistent with Gamma's linearized adiabatic
+    # coupling): dT'/dt = -tau @ D  =>
+    #   T_corrected = T_explicit - alpha*dt * (tau @ delta_div)
+    # delta_div is (n_sh, nlev); (tau @ delta_div)[n,k] = sum_j tau[k,j]*delta_div[n,j]
+    # = (delta_div @ tau^T)[n,k].  Reduces to the old -alpha*dt*T_ref*delta_div
+    # only when tau = T_ref*I (the previous diagonal approximation, #960).
+    tau_delta_div = delta_div @ tau.T  # (n_sh, nlev)
+    T_hat_corrected = state_explicit.T_hat.data - alpha * dt * tau_delta_div
 
     # Surface pressure (lnps) correction:
     # lnps_corrected = lnps_explicit - alpha*dt * sum_k(delta_D_k * dsigma_k) / sigma_range

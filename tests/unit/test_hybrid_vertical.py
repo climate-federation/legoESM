@@ -424,6 +424,83 @@ class TestHybridSemiImplicit:
         assert si_data.si_matrices.shape[1:] == (NLEV, NLEV)
 
 
+class TestSemiImplicitReferenceMatrixWellPosed:
+    """Issue #960: the semi-implicit ``Gamma`` reference matrix must be a
+    well-posed vertical structure operator — diagonalizable with REAL,
+    POSITIVE eigenvalues (the gravity-wave "equivalent depths" H = lambda/g).
+
+    Complex eigenvalues mean ``Gamma`` is non-normal, which amplifies the
+    resolved modes independently of the RHS/increment formulation and is the
+    2nd contributor to the T85 NaN.  The fix is a CONSISTENT reference
+    thermodynamic coupling ``tau`` (the linearization of the model's own
+    adiabatic term, ``dT'/dt = -tau @ D``) instead of the diagonal
+    ``tau = T_ref*I`` approximation.
+    """
+
+    @staticmethod
+    def _eig(Gamma):
+        w = np.linalg.eigvals(np.asarray(Gamma, dtype=np.float64))
+        rel_imag = np.max(np.abs(w.imag)) / (np.max(np.abs(w.real)) + 1e-300)
+        return w, rel_imag
+
+    @pytest.mark.parametrize("nlev", [4, 8, 20, 32, 40])
+    def test_sigma_gamma_eigenvalues_real_positive(self, nlev):
+        from legoesm.timestepping.semi_implicit import compute_Gamma_matrix
+        coord = create_sigma_coordinate(nlev, sigma_top=0.01)
+        w, rel_imag = self._eig(compute_Gamma_matrix(coord, T_ref=300.0))
+        assert rel_imag < 1e-8, f"sigma L{nlev}: complex eigenvalues rel|Im|={rel_imag:.2e}"
+        assert w.real.min() > 0.0, f"sigma L{nlev}: non-positive eigenvalue {w.real.min():.3e}"
+
+    @pytest.mark.parametrize("nlev", [4, 8, 20, 32])
+    def test_hybrid_gamma_eigenvalues_real_positive(self, nlev):
+        from legoesm.timestepping.semi_implicit import compute_Gamma_matrix
+        coord = standard_hybrid_levels(nlev)
+        w, rel_imag = self._eig(compute_Gamma_matrix(coord, T_ref=300.0))
+        assert rel_imag < 1e-8, f"hybrid L{nlev}: complex eigenvalues rel|Im|={rel_imag:.2e}"
+        assert w.real.min() > 0.0, f"hybrid L{nlev}: non-positive eigenvalue {w.real.min():.3e}"
+
+    def test_external_mode_equivalent_depth_physical(self):
+        """Largest eigenvalue = external (Lamb) mode; H = lambda/g ~ 10 km."""
+        from legoesm import constants
+        from legoesm.timestepping.semi_implicit import compute_Gamma_matrix
+        coord = standard_hybrid_levels(32)
+        w, _ = self._eig(compute_Gamma_matrix(coord, T_ref=300.0))
+        H_max = w.real.max() / constants.g
+        assert 8_000.0 < H_max < 15_000.0, f"external-mode equiv depth {H_max:.0f} m unphysical"
+
+    @pytest.mark.parametrize("nlev", [4, 8, 20, 40])
+    def test_diagonal_tau_is_non_normal_selftest(self, nlev):
+        """NON-VACUOUS GUARD: feeding the *old* diagonal reference
+        ``tau = T_ref*I`` reproduces the buggy ``Gamma = R_d*T_ref*(S + 1*b^T)``,
+        which IS non-normal with complex eigenvalues at nlev >= 4.  This proves
+        the real-eigenvalue gate above actually discriminates the fix from the
+        regression (it fails on the old form)."""
+        from legoesm.timestepping.semi_implicit import compute_Gamma_matrix
+        coord = create_sigma_coordinate(nlev, sigma_top=0.01)
+        tau_diag = jnp.asarray(300.0 * np.eye(nlev), dtype=jnp.float64)
+        _, rel_imag = self._eig(compute_Gamma_matrix(coord, T_ref=300.0, tau=tau_diag))
+        assert rel_imag > 1e-3, (
+            f"diagonal-tau Gamma should be non-normal at nlev={nlev}, "
+            f"got rel|Im|={rel_imag:.2e}"
+        )
+
+    def test_stored_tau_matches_gamma(self):
+        """The temperature correction and the implicit reference must share the
+        SAME linearization: si_data.Gamma == R_d*(S @ si_data.tau + T_ref*1*b^T)."""
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.timestepping.semi_implicit import (
+            precompute_si_matrices, compute_Gamma_matrix,
+        )
+        grid = create_gaussian_grid(21)
+        coord = standard_hybrid_levels(20)
+        si = precompute_si_matrices(grid, coord, T_ref=300.0, dt=1800.0)
+        assert si.tau.shape == (20, 20)
+        G = compute_Gamma_matrix(coord, T_ref=300.0, tau=si.tau)
+        np.testing.assert_allclose(
+            np.asarray(si.Gamma), np.asarray(G), rtol=1e-12, atol=0.0,
+        )
+
+
 class TestHybridDifferentiability:
     """Test JAX differentiability of hybrid coordinate functions."""
 
