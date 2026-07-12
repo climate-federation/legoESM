@@ -297,6 +297,21 @@ class SpectralShallowWaterModel:
         else:
             self._spectral_filter = None
 
+        # State-truncation mask for the Orszag 2/3 rule.  The TENDENCY is
+        # masked inside ``spectral_sw_tendencies``, which holds masked
+        # modes constant — it cannot remove upper-third power already in
+        # the state (e.g. Williamson-5's conical mountain imprinted on
+        # the prognostic phi via phi = g(h - h_s), or arbitrary user
+        # ICs).  Truncating the STATE after each step enforces the
+        # band-limit the Orszag rule assumes; for band-limited states
+        # this multiply by a 0/1 mask is an exact no-op.
+        if self.config.dealiasing_fraction > 0.0:
+            self._dealias_state = dealiasing_mask(
+                self.grid, self.config.dealiasing_fraction,
+            )
+        else:
+            self._dealias_state = None
+
         # Warn if de-aliasing is off — the SW nonlinear tendencies are
         # quadratic and alias without the Orszag 2/3 truncation.
         if self.config.dealiasing_fraction == 0.0:
@@ -349,10 +364,19 @@ class SpectralShallowWaterModel:
         return self._apply_filter(result)
 
     def _apply_filter(self, state: SpectralSWState) -> SpectralSWState:
-        """Apply exponential spectral filter to all prognostic fields."""
-        if self._spectral_filter is None:
-            return state
+        """Apply the 2/3-rule state truncation + optional exponential filter.
+
+        The truncation keeps the prognostic state inside the de-aliased
+        band (masked tendencies alone would FREEZE, not damp, any
+        pre-existing upper-third modes).  Topography ``phis_hat`` is
+        static forcing and is never touched here.
+        """
         sf = self._spectral_filter
+        if self._dealias_state is not None:
+            sf = (self._dealias_state if sf is None
+                  else sf * self._dealias_state)
+        if sf is None:
+            return state
         return SpectralSWState(
             vor_hat=state.vor_hat.replace(data=state.vor_hat.data * sf),
             div_hat=state.div_hat.replace(data=state.div_hat.data * sf),
@@ -383,10 +407,16 @@ class SpectralShallowWaterModel:
 
     @partial(jax.jit, static_argnums=(0,))
     def _step_on_cpu(self, state: SpectralSWState, dt: float) -> SpectralSWState:
-        """Step without device transfers (for batched CPU integration on Metal)."""
+        """Step without device transfers (for batched CPU integration on Metal).
+
+        Applies the same post-step filter/truncation as :meth:`step` —
+        this path previously skipped ``_apply_filter`` entirely, so the
+        batched-Metal integration silently ran unfiltered.
+        """
         def tendency_fn(s):
             return spectral_sw_tendencies(s, self.grid, self.config)
-        return dispatch_integrator(state, tendency_fn, dt, self.config.time_integrator)
+        result = dispatch_integrator(state, tendency_fn, dt, self.config.time_integrator)
+        return self._apply_filter(result)
 
     def integrate(
         self,

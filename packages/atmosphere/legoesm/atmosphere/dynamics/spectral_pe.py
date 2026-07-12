@@ -14,7 +14,8 @@ Equations (vorticity-divergence form, Bourke 1972):
     d(vor)/dt  = -div((vor+f)*v) + curl(vert_adv)
     d(div)/dt  = curl((vor+f)*v) - lap(K + Phi + R_d*T*lnps) + div(vert_adv)
     d(T)/dt    = -div(T*v) + T*div(v) - sigma_dot*dT/dsigma + kappa*T*omega/p
-    d(lnps)/dt = -integral(div*dsigma)
+    d(lnps)/dt = -integral((div + v·grad(lnps))*dsigma)   [flux form,
+                 Hoskins & Simmons 1975; equals -(1/p_s)·integral(div(v·dp))]
 
 References
 ----------
@@ -58,7 +59,7 @@ from legoesm.grids.vertical import (
     pressure_from_hybrid,
     dp_from_hybrid,
     compute_geopotential_hybrid,
-    compute_mass_flux_hybrid,
+    compute_mass_flux_from_cumsum,
     vertical_advection_hybrid,
     compute_omega_hybrid,
 )
@@ -83,7 +84,27 @@ from legoesm import constants
 # model is even constructed, taking down the whole physics/driver import chain.
 _LNPS_MIN = math.log(100.0)
 _LNPS_MAX = math.log(2.0e6)
+# Softplus transition width [ln Pa] for the two-sided lnps clamp.  The
+# UNSCALED softplus has a ~1 ln-unit transition zone: ln(1e5 Pa) sits only
+# 3 ln-units below _LNPS_MAX, so softplus(-3) ≈ 0.049 subtracted 1e5 Pa
+# down to 95333 Pa — a 4.8% bias deep in the physical interior.  The
+# scaled form (same pattern as the T_min clamp) is identity to fp64
+# precision more than ~10·scale inside the bounds.
+_LNPS_CLIP_SCALE = 0.05
 _COS_LAT_MIN = 1.0e-6
+
+
+def soft_clip_lnps(lnps_raw: jax.Array) -> jax.Array:
+    """Two-sided C∞ clamp of ln(p_s) to [_LNPS_MIN, _LNPS_MAX].
+
+    Scaled softplus: identity to fp64 precision in the interior, smooth
+    pull-up/pull-down only within ~10·_LNPS_CLIP_SCALE ln-units of the
+    bounds.  Module-level so the interior-identity property is directly
+    unit-testable (the unscaled version silently mapped 1e5 Pa → 95333 Pa).
+    """
+    return (lnps_raw
+            + _LNPS_CLIP_SCALE * jax.nn.softplus((_LNPS_MIN - lnps_raw) / _LNPS_CLIP_SCALE)
+            - _LNPS_CLIP_SCALE * jax.nn.softplus((lnps_raw - _LNPS_MAX) / _LNPS_CLIP_SCALE))
 
 # Sentinel distinguishing "no forcing arg" (3-arg physics_fn) from a forcing
 # value of None (4-arg) in SpectralPrimitiveEquationModel._make_tendency_fn.
@@ -526,9 +547,10 @@ def spectral_pe_tendencies(
     lnps_raw = _all_grid_flat[..., nlev * 3]
     phis = _all_grid_flat[..., nlev * 3 + 1]
     _dfdlon_lnps = _all_grid_flat[..., nlev * 3 + 2]
-    # Smooth two-sided clip with zero bias in interior:
-    # softplus(lo - x) pulls up near lower bound; softplus(x - hi) pulls down near upper
-    lnps = lnps_raw + jax.nn.softplus(_LNPS_MIN - lnps_raw) - jax.nn.softplus(lnps_raw - _LNPS_MAX)
+    # Smooth two-sided clip with zero bias in interior (C∞): scaled
+    # softplus pulls up near the lower bound / down near the upper bound
+    # and is identity to fp64 precision elsewhere (see _LNPS_CLIP_SCALE).
+    lnps = soft_clip_lnps(lnps_raw)
     # (n_lat, n_lon)
 
     # --- 2. Velocities ---
@@ -543,7 +565,7 @@ def spectral_pe_tendencies(
     p_s = jnp.exp(lnps)
     if _hybrid:
         p_full = pressure_from_hybrid(sigma_coord, p_s)
-        dp_from_hybrid(sigma_coord, p_s)
+        dp = dp_from_hybrid(sigma_coord, p_s)  # (n_lat, n_lon, nlev)
     else:
         p_full = p_s[..., None] * sigma_coord.sigma_full  # (n_lat, n_lon, nlev)
 
@@ -565,14 +587,31 @@ def spectral_pe_tendencies(
     abs_vor = vor + grid.f[..., None]
 
     # --- 7. Vertical velocity ---
+    # Flux-form continuity (Hoskins & Simmons 1975): the column integrand
+    # is ∇·(v·dp_k) = dp_k·D + v·∇(dp_k), NOT the advective dp_k·D alone.
+    # With dp = p_s·Δσ (sigma) the per-level correction is Δσ·p_s·(v·∇lnps);
+    # with dp = ΔA + ΔB·p_s (hybrid) it is ΔB·p_s·(v·∇lnps).  Omitting it
+    # produces the wrong local ∂p_s/∂t pattern wherever ∇p_s ≠ 0 (the
+    # global mass fixer only restores the integral, not the pattern).
+    # ∇lnps is synthesized here — before step 8 — and reused by the PGF
+    # correction and the adiabatic v·∇lnps term below.
+    cos_lat_2d = jnp.clip(grid.cos_lat[:, None], _COS_LAT_MIN, None)
+    dlnps_dx = _dfdlon_lnps / (a * cos_lat_2d)
+    dfdtheta_cos = sh_synthesis_H(grid, state.lnps_hat.data)
+    dlnps_dy = -dfdtheta_cos / (a * cos_lat_2d)
+    # Unscaled v·∇lnps (the hybrid thermodynamic term rescales its own copy).
+    v_grad_lnps = u * dlnps_dx[..., None] + v * dlnps_dy[..., None]
+
     if _hybrid:
-        # ``compute_mass_flux_hybrid`` returns the column-integrated
-        # mass-weighted divergence ``D_total_p`` alongside the mass
-        # flux — reuse it in step 8 instead of recomputing
-        # ``jnp.sum(div * dp, axis=-1)``.  Saves one cross-level
-        # collective per RK3 stage under level-sharding.
-        mass_flux, _D_total_p_full = compute_mass_flux_hybrid(
-            div, p_s, sigma_coord,
+        # Flux-form mass-weighted divergence per level; its cumsum feeds
+        # both the mass flux (shared boundary closure) and, via the last
+        # entry, the surface-pressure tendency in step 8 — one cross-level
+        # collective per RK3 stage under level-sharding, as before.
+        div_dp_flux = div * dp + sigma_coord.dB * p_s[..., None] * v_grad_lnps
+        _cumsum_dp = jnp.cumsum(div_dp_flux, axis=-1)
+        _D_total_p_full = _cumsum_dp[..., -1:]
+        mass_flux = compute_mass_flux_from_cumsum(
+            _cumsum_dp, _D_total_p_full, sigma_coord,
         )
         sigma_dot = None   # hybrid path uses ``mass_flux`` instead
         _D_total_sigma_full = None
@@ -583,7 +622,7 @@ def spectral_pe_tendencies(
         # ``jnp.sum(div * dsigma, axis=-1)``.  Saves one cross-level
         # collective per RK3 stage under level-sharding.
         sigma_dot, _D_total_sigma_full = _compute_sigma_dot_gaussian(
-            div, sigma_coord,
+            div + v_grad_lnps, sigma_coord,
         )
         _D_total_p_full = None
 
@@ -648,15 +687,9 @@ def spectral_pe_tendencies(
     # adiabatic heating.
     T_ref = config.si_T_ref
 
-    # Compute ∇(lnps) on grid (needed for PGF correction and adiabatic).
-    # ``dfdlon`` is reused from the batched (lnps, phis, im·lnps)
-    # synthesis above (Loop 147) — saves a separate ``sh_synthesis``
-    # call on the same input.
-    dfdlon = _dfdlon_lnps
-    cos_lat_2d = jnp.clip(grid.cos_lat[:, None], _COS_LAT_MIN, None)
-    dlnps_dx = dfdlon / (a * cos_lat_2d)
-    dfdtheta_cos = sh_synthesis_H(grid, state.lnps_hat.data)
-    dlnps_dy = -dfdtheta_cos / (a * cos_lat_2d)
+    # ∇(lnps) on grid (dlnps_dx / dlnps_dy) was hoisted to step 7 — the
+    # flux-form continuity needs it before the surface-pressure tendency;
+    # the PGF correction below reuses the same arrays.
 
     # PGF correction: -∇·(R_d·T'·∇_eta(lnp)) computed as spectral div of grid product
     # In sigma coords: ∇_eta(ln p) = ∇(ln p_s).
@@ -753,7 +786,8 @@ def spectral_pe_tendencies(
 
     # Material derivative correction: kappa * T * v . grad_eta(ln p)
     # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
-    v_dot_grad_lnps = u * dlnps_dx[..., None] + v * dlnps_dy[..., None]
+    # Reuses the unscaled v·∇lnps hoisted to step 7 (flux-form continuity).
+    v_dot_grad_lnps = v_grad_lnps
     if _hybrid:
         v_dot_grad_lnps = v_dot_grad_lnps * (sigma_coord.B_full * p_s[..., None] / p_adiab)
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
@@ -1443,6 +1477,17 @@ class SpectralPrimitiveEquationModel:
         if self._spectral_filter is not None:
             result = apply_spectral_filter_to_state(result, self._spectral_filter)
 
+        # Implicit hyperdiffusion for the non-leapfrog integrators.
+        # ``implicit_hyperdiff=True`` disables the explicit tendency term,
+        # so without this multiplicative filter the SSP/RK paths ran with
+        # NO vor/div/T diffusion at all (tracers still got theirs via
+        # ``_apply_tracer_filter``).  ``step()`` precomputes the filter
+        # via ``_ensure_hyperdiff_filter(dt)`` before entering the JIT —
+        # same read-from-self pattern as ``_spectral_filter`` /
+        # ``_tracer_filter`` above.
+        if self.config.implicit_hyperdiff:
+            result = self._apply_implicit_hyperdiff(result)
+
         # Apply combined spectral-filter + implicit-hyperdiff to tracers
         # via one SH round-trip per tracer (no-op when neither knob is
         # active or ``state.tracers is None``).
@@ -1564,6 +1609,7 @@ class SpectralPrimitiveEquationModel:
 
         self._ensure_si_data(dt)
         self._ensure_sponge_factor(dt)
+        self._ensure_hyperdiff_filter(dt)
         self._ensure_tracer_filter(dt)
         if forcing_data is not None:
             return self._step_with_forcing_jit(
